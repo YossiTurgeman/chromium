@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,34 +8,33 @@
 #include "third_party/blink/renderer/modules/webgpu/gpu_buffer.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_compute_pipeline.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_device.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu_query_set.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu_supported_features.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
 GPUComputePassEncoder::GPUComputePassEncoder(
     GPUDevice* device,
-    WGPUComputePassEncoder compute_pass_encoder)
-    : DawnObject<WGPUComputePassEncoder>(device, compute_pass_encoder) {}
-
-GPUComputePassEncoder::~GPUComputePassEncoder() {
-  if (IsDawnControlClientDestroyed()) {
-    return;
-  }
-  GetProcs().computePassEncoderRelease(GetHandle());
-}
+    wgpu::ComputePassEncoder compute_pass_encoder,
+    const String& label)
+    : DawnObject<wgpu::ComputePassEncoder>(device,
+                                           compute_pass_encoder,
+                                           label) {}
 
 void GPUComputePassEncoder::setBindGroup(
     uint32_t index,
     GPUBindGroup* bindGroup,
     const Vector<uint32_t>& dynamicOffsets) {
-  GetProcs().computePassEncoderSetBindGroup(
-      GetHandle(), index, bindGroup->GetHandle(), dynamicOffsets.size(),
-      dynamicOffsets.data());
+  GetHandle().SetBindGroup(
+      index, bindGroup ? bindGroup->GetHandle() : wgpu::BindGroup(nullptr),
+      dynamicOffsets.size(), dynamicOffsets.data());
 }
 
 void GPUComputePassEncoder::setBindGroup(
     uint32_t index,
     GPUBindGroup* bind_group,
-    const FlexibleUint32Array& dynamic_offsets_data,
+    base::span<const uint32_t> dynamic_offsets_data,
     uint64_t dynamic_offsets_data_start,
     uint32_t dynamic_offsets_data_length,
     ExceptionState& exception_state) {
@@ -45,44 +44,89 @@ void GPUComputePassEncoder::setBindGroup(
     return;
   }
 
-  const uint32_t* data =
-      dynamic_offsets_data.DataMaybeOnStack() + dynamic_offsets_data_start;
+  const base::span<const uint32_t> data_span = dynamic_offsets_data.subspan(
+      base::checked_cast<size_t>(dynamic_offsets_data_start),
+      dynamic_offsets_data_length);
 
-  GetProcs().computePassEncoderSetBindGroup(GetHandle(), index,
-                                            bind_group->GetHandle(),
-                                            dynamic_offsets_data_length, data);
+  GetHandle().SetBindGroup(
+      index, bind_group ? bind_group->GetHandle() : wgpu::BindGroup(nullptr),
+      data_span.size(), data_span.data());
 }
 
-void GPUComputePassEncoder::pushDebugGroup(String groupLabel) {
-  std::string label = groupLabel.Utf8();
-  GetProcs().computePassEncoderPushDebugGroup(GetHandle(), label.c_str());
+void GPUComputePassEncoder::setImmediates(uint32_t range_offset,
+                                          const DOMArrayBufferBase* data,
+                                          uint64_t data_offset,
+                                          ExceptionState& exception_state) {
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), 1, data_offset)) {
+    return;
+  }
+
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPUComputePassEncoder::popDebugGroup() {
-  GetProcs().computePassEncoderPopDebugGroup(GetHandle());
+void GPUComputePassEncoder::setImmediates(uint32_t range_offset,
+                                          const DOMArrayBufferBase* data,
+                                          uint64_t data_offset,
+                                          uint64_t size,
+                                          ExceptionState& exception_state) {
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), 1, data_offset, size)) {
+    return;
+  }
+
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPUComputePassEncoder::insertDebugMarker(String markerLabel) {
-  std::string label = markerLabel.Utf8();
-  GetProcs().computePassEncoderInsertDebugMarker(GetHandle(), label.c_str());
+void GPUComputePassEncoder::setImmediates(
+    uint32_t range_offset,
+    const MaybeShared<DOMArrayBufferView>& data,
+    uint64_t data_offset,
+    ExceptionState& exception_state) {
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), data->TypeSize(), data_offset)) {
+    return;
+  }
+
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPUComputePassEncoder::setPipeline(GPUComputePipeline* pipeline) {
-  GetProcs().computePassEncoderSetPipeline(GetHandle(), pipeline->GetHandle());
+void GPUComputePassEncoder::setImmediates(
+    uint32_t range_offset,
+    const MaybeShared<DOMArrayBufferView>& data,
+    uint64_t data_offset,
+    uint64_t size,
+    ExceptionState& exception_state) {
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), data->TypeSize(), data_offset, size)) {
+    return;
+  }
+
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPUComputePassEncoder::dispatch(uint32_t x, uint32_t y, uint32_t z) {
-  GetProcs().computePassEncoderDispatch(GetHandle(), x, y, z);
-}
-
-void GPUComputePassEncoder::dispatchIndirect(GPUBuffer* indirectBuffer,
-                                             uint64_t indirectOffset) {
-  GetProcs().computePassEncoderDispatchIndirect(
-      GetHandle(), indirectBuffer->GetHandle(), indirectOffset);
-}
-
-void GPUComputePassEncoder::endPass() {
-  GetProcs().computePassEncoderEndPass(GetHandle());
+void GPUComputePassEncoder::writeTimestamp(
+    const DawnObject<wgpu::QuerySet>* querySet,
+    uint32_t queryIndex,
+    ExceptionState& exception_state) {
+  constexpr auto kRequiredFeatureEnum =
+      V8GPUFeatureName::Enum::kChromiumExperimentalTimestampQueryInsidePasses;
+  if (!device_->features()->Has(kRequiredFeatureEnum)) {
+    exception_state.ThrowTypeError(StrCat(
+        {"Use of the writeTimestamp() method on compute pass requires the '",
+         V8GPUFeatureName(kRequiredFeatureEnum).AsStringView(),
+         "' feature to be enabled on ", device_->GetFormattedLabel(), "."}));
+    return;
+  }
+  GetHandle().WriteTimestamp(querySet->GetHandle(), queryIndex);
 }
 
 }  // namespace blink

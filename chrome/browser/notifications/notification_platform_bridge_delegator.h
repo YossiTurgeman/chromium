@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,8 @@
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/memory/ref_counted.h"
-#include "base/optional.h"
-#include "base/scoped_observer.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/notifications/displayed_notifications_dispatch_callback.h"
 #include "chrome/browser/notifications/notification_common.h"
 #include "chrome/browser/notifications/notification_handler.h"
@@ -22,11 +20,11 @@
 class Profile;
 
 // This class is responsible for delegating notification events to either the
-// native NotificationPlatformBridge or fall back to Chrome's own message
-// center implementation. This can happen if there is no native support for
+// system NotificationPlatformBridge or fall back to Chrome's own message
+// center implementation. This can happen if there is no system support for
 // notifications on this platform (or it has been disabled via flags). We also
 // delegate to the message center if the given notification type is not
-// supported on the native bridge.
+// supported on the system bridge.
 class NotificationPlatformBridgeDelegator {
  public:
   NotificationPlatformBridgeDelegator(Profile* profile,
@@ -35,33 +33,36 @@ class NotificationPlatformBridgeDelegator {
       const NotificationPlatformBridgeDelegator&) = delete;
   NotificationPlatformBridgeDelegator& operator=(
       const NotificationPlatformBridgeDelegator&) = delete;
-  ~NotificationPlatformBridgeDelegator();
+  virtual ~NotificationPlatformBridgeDelegator();
 
-  void Display(NotificationHandler::Type notification_type,
-               const message_center::Notification& notification,
-               std::unique_ptr<NotificationCommon::Metadata> metadata);
+  virtual void Display(NotificationHandler::Type notification_type,
+                       const message_center::Notification& notification,
+                       std::unique_ptr<NotificationCommon::Metadata> metadata);
 
-  void Close(NotificationHandler::Type notification_type,
-             const std::string& notification_id);
+  virtual void Close(NotificationHandler::Type notification_type,
+                     const std::string& notification_id);
 
-  void GetDisplayed(GetDisplayedNotificationsCallback callback) const;
+  virtual void GetDisplayed(GetDisplayedNotificationsCallback callback) const;
+  virtual void GetDisplayedForOrigin(
+      const GURL& origin,
+      GetDisplayedNotificationsCallback callback) const;
 
-  void DisplayServiceShutDown();
+  virtual void DisplayServiceShutDown();
 
  private:
   // Returns the NotificationPlatformBridge to use for |type|. This method is
-  // expected to return a valid bridge, either the native or message center one.
+  // expected to return a valid bridge, either the system or message center one.
   NotificationPlatformBridge* GetBridgeForType(NotificationHandler::Type type);
 
-  // Called when the |native_bridge_| may have been initialized.
-  void OnNativeNotificationPlatformBridgeReady(bool success);
+  // Called when the |system_bridge_| may have been initialized.
+  void OnSystemNotificationPlatformBridgeReady(bool success);
 
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
 
   // Bridge responsible for displaying notifications on the platform. The
   // message center's bridge is maintained for platforms where it is available.
-  std::unique_ptr<NotificationPlatformBridge> message_center_bridge_;
-  NotificationPlatformBridge* native_bridge_;
+  raw_ptr<NotificationPlatformBridge> message_center_bridge_;
+  raw_ptr<NotificationPlatformBridge> system_bridge_;
   base::OnceClosure ready_callback_;
 
   base::WeakPtrFactory<NotificationPlatformBridgeDelegator> weak_factory_{this};

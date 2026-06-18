@@ -1,9 +1,9 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef IOS_WEB_VIEW_PUBLIC_CWV_TRANSLATION_CONTROLLER_DELEGATE_H
-#define IOS_WEB_VIEW_PUBLIC_CWV_TRANSLATION_CONTROLLER_DELEGATE_H
+#ifndef IOS_WEB_VIEW_PUBLIC_CWV_TRANSLATION_CONTROLLER_DELEGATE_H_
+#define IOS_WEB_VIEW_PUBLIC_CWV_TRANSLATION_CONTROLLER_DELEGATE_H_
 
 #import <Foundation/Foundation.h>
 
@@ -11,9 +11,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class CWVTranslationController;
 @class CWVTranslationLanguage;
+@class CWVTranslationLanguageDetectionDetails;
 
 // Updates delegate on translation progress.
-@protocol CWVTranslationControllerDelegate<NSObject>
+@protocol CWVTranslationControllerDelegate <NSObject>
 
 @optional
 
@@ -42,8 +43,14 @@ NS_ASSUME_NONNULL_BEGIN
                           toLanguage:(CWVTranslationLanguage*)targetLanguage
                                error:(nullable NSError*)error;
 
+// Called when the current page's language detection details have been
+// determined.
+- (void)translationController:(CWVTranslationController*)controller
+    didDeterminePageLanguageDetectionDetails:
+        (CWVTranslationLanguageDetectionDetails*)pageLanguageDetectionDetails;
+
 @end
 
 NS_ASSUME_NONNULL_END
 
-#endif  // IOS_WEB_VIEW_PUBLIC_CWV_TRANSLATION_CONTROLLER_DELEGATE_H
+#endif  // IOS_WEB_VIEW_PUBLIC_CWV_TRANSLATION_CONTROLLER_DELEGATE_H_

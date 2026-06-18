@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,19 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "base/base64.h"
-#include "base/bind.h"
 #include "base/command_line.h"
 #include "base/debug/profiler.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "build/build_config.h"
@@ -37,56 +40,123 @@
 #include "content/public/renderer/chrome_object_extensions_utils.h"
 #include "content/public/renderer/render_thread.h"
 #include "content/public/renderer/v8_value_converter.h"
+#include "content/renderer/render_frame_impl.h"
 #include "content/renderer/render_thread_impl.h"
-#include "content/renderer/render_view_impl.h"
 #include "content/renderer/skia_benchmarking_extension.h"
 #include "gin/arguments.h"
-#include "gin/handle.h"
 #include "gin/object_template_builder.h"
+#include "gin/public/wrappable_pointer_tags.h"
 #include "gpu/config/gpu_driver_bug_workaround_type.h"
-#include "gpu/ipc/common/gpu_messages.h"
 #include "mojo/public/cpp/bindings/remote.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "skia/ext/codec_utils.h"
+#include "third_party/blink/public/common/input/web_coalesced_input_event.h"
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/mojom/page/page_visibility_state.mojom.h"
-#include "third_party/blink/public/web/blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
+#include "third_party/blink/public/web/modules/canvas/canvas_test_utils.h"
 #include "third_party/blink/public/web/web_frame_widget.h"
 #include "third_party/blink/public/web/web_image_cache.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_print_params.h"
 #include "third_party/blink/public/web/web_settings.h"
 #include "third_party/blink/public/web/web_view.h"
-#include "third_party/skia/include/core/SkData.h"
-#include "third_party/skia/include/core/SkGraphics.h"
+#include "third_party/skia/include/core/SkDocument.h"
 #include "third_party/skia/include/core/SkPicture.h"
 #include "third_party/skia/include/core/SkPictureRecorder.h"
+#include "third_party/skia/include/core/SkRefCnt.h"
+#include "third_party/skia/include/core/SkSerialProcs.h"
+#include "third_party/skia/include/core/SkStream.h"
+#include "third_party/skia/include/docs/SkMultiPictureDocument.h"
 #include "third_party/skia/include/docs/SkXPSDocument.h"
-// Note that headers in third_party/skia/src are fragile.  This is
-// an experimental, fragile, and diagnostic-only document type.
-#include "third_party/skia/src/utils/SkMultiPictureDocument.h"
+#include "third_party/skia/include/encode/SkPngRustEncoder.h"
 #include "ui/events/base_event_utils.h"
-#include "v8/include/v8.h"
+#include "ui/gfx/ca_layer_result.h"
+#include "ui/gfx/geometry/size_f.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-context.h"
+#include "v8/include/v8-cppgc.h"
+#include "v8/include/v8-exception.h"
+#include "v8/include/v8-function.h"
+#include "v8/include/v8-isolate.h"
+#include "v8/include/v8-object.h"
+#include "v8/include/v8-persistent-handle.h"
+#include "v8/include/v8-primitive.h"
 
-#if defined(OS_WIN) && !defined(NDEBUG)
-// XpsObjectModel.h indirectly includes <wincrypt.h> which is
-// incompatible with Chromium's OpenSSL. By including wincrypt_shim.h
-// first, problems are avoided.
-#include "base/win/wincrypt_shim.h"
+#if defined(ENABLE_PRINTING)
+#include "printing/metafile_skia.h"   // nogncheck
+#include "printing/print_settings.h"  // nogncheck
+#endif
+
+#if BUILDFLAG(IS_WIN) && !defined(NDEBUG)
+#include <objbase.h>
 
 #include <XpsObjectModel.h>
-#include <objbase.h>
 #include <wrl/client.h>
 #endif
 
+namespace blink {
+
+// This class allows us to access the LayerTreeHost on WebFrameWidget. It is
+// hidden from the public interface. It also extracts some commonly
+// used objects from RenderFrameImpl.
+class GpuBenchmarkingContext {
+ public:
+  explicit GpuBenchmarkingContext(content::RenderFrameImpl* frame)
+      : web_frame_(frame->GetWebFrame()),
+        web_view_(web_frame_->View()),
+        frame_widget_(frame->GetLocalRootWebFrameWidget()),
+        layer_tree_host_(frame_widget_->LayerTreeHost()) {}
+
+  GpuBenchmarkingContext(const GpuBenchmarkingContext&) = delete;
+  GpuBenchmarkingContext& operator=(const GpuBenchmarkingContext&) = delete;
+
+  WebLocalFrame* web_frame() const {
+    DCHECK(web_frame_ != nullptr);
+    return web_frame_;
+  }
+  WebView* web_view() const {
+    DCHECK(web_view_ != nullptr);
+    return web_view_;
+  }
+  WebFrameWidget* frame_widget() const { return frame_widget_; }
+  cc::LayerTreeHost* layer_tree_host() const {
+    DCHECK(layer_tree_host_ != nullptr);
+    return layer_tree_host_;
+  }
+
+ private:
+  raw_ptr<WebLocalFrame> web_frame_;
+  raw_ptr<WebView> web_view_;
+  raw_ptr<WebFrameWidget> frame_widget_;
+  raw_ptr<cc::LayerTreeHost> layer_tree_host_;
+};
+
+}  // namespace blink
+
+using blink::GpuBenchmarkingContext;
 using blink::WebImageCache;
 using blink::WebLocalFrame;
-using blink::WebPrivatePtr;
-using blink::WebSize;
 using blink::WebView;
 
 namespace content {
 
 namespace {
+
+int GestureSourceTypeAsInt(content::mojom::GestureSourceType type) {
+  switch (type) {
+    case content::mojom::GestureSourceType::kDefaultInput:
+      return 0;
+    case content::mojom::GestureSourceType::kTouchInput:
+      return 1;
+    case content::mojom::GestureSourceType::kMouseInput:
+      return 2;
+    case content::mojom::GestureSourceType::kPenInput:
+      return 3;
+  }
+  NOTREACHED();
+}
+
 class SkPictureSerializer {
  public:
   explicit SkPictureSerializer(const base::FilePath& dirpath)
@@ -101,7 +171,7 @@ class SkPictureSerializer {
   // in the given directory.
   void Serialize(const cc::Layer* root_layer) {
     for (auto* layer : *root_layer->layer_tree_host()) {
-      sk_sp<SkPicture> picture = layer->GetPicture();
+      sk_sp<const SkPicture> picture = layer->GetPicture();
       if (!picture)
         continue;
 
@@ -117,7 +187,14 @@ class SkPictureSerializer {
       SkFILEWStream file(filepath.c_str());
       DCHECK(file.isValid());
 
-      auto data = picture->serialize();
+      SkSerialProcs procs{
+          .fImageProc = [](SkImage* img, void*) -> SkSerialReturnType {
+            // Note: if the picture contains texture-backed (gpu) images, they
+            // will fail to be read-back and therefore fail to be encoded unless
+            // we can thread the correct GrDirectContext through to here.
+            return skia::EncodePngAsSkData(nullptr, img);
+          }};
+      auto data = picture->serialize(&procs);
       file.write(data->data(), data->size());
       file.fsync();
     }
@@ -166,6 +243,9 @@ class CallbackAndContext : public base::RefCounted<CallbackAndContext> {
     context_.Reset(isolate_, context);
   }
 
+  CallbackAndContext(const CallbackAndContext&) = delete;
+  CallbackAndContext& operator=(const CallbackAndContext&) = delete;
+
   v8::Isolate* isolate() { return isolate_; }
 
   v8::Local<v8::Function> GetCallback() {
@@ -184,85 +264,58 @@ class CallbackAndContext : public base::RefCounted<CallbackAndContext> {
     context_.Reset();
   }
 
-  v8::Isolate* isolate_;
+  raw_ptr<v8::Isolate> isolate_;
   v8::Persistent<v8::Function> callback_;
   v8::Persistent<v8::Context> context_;
-  DISALLOW_COPY_AND_ASSIGN(CallbackAndContext);
 };
 
-// This class is a mostly unnecessary helper class. It extracts some commonly
-// used objects from RenderFrameImpl.
-class GpuBenchmarkingContext {
- public:
-  explicit GpuBenchmarkingContext(RenderFrameImpl* frame) {
-    web_frame_ = frame->GetWebFrame();
-    web_view_ = web_frame_->View();
-    render_widget_ = frame->GetLocalRootRenderWidget();
-    layer_tree_host_ = render_widget_->layer_tree_host();
-  }
-
-  WebLocalFrame* web_frame() const {
-    DCHECK(web_frame_ != nullptr);
-    return web_frame_;
-  }
-  WebView* web_view() const {
-    DCHECK(web_view_ != nullptr);
-    return web_view_;
-  }
-  RenderWidget* render_widget() const { return render_widget_; }
-  cc::LayerTreeHost* layer_tree_host() const {
-    DCHECK(layer_tree_host_ != nullptr);
-    return layer_tree_host_;
-  }
-
- private:
-  WebLocalFrame* web_frame_ = nullptr;
-  WebView* web_view_ = nullptr;
-  RenderWidget* render_widget_ = nullptr;
-  cc::LayerTreeHost* layer_tree_host_ = nullptr;
-
-  DISALLOW_COPY_AND_ASSIGN(GpuBenchmarkingContext);
-};
-
-void OnMicroBenchmarkCompleted(CallbackAndContext* callback_and_context,
-                               std::unique_ptr<base::Value> result) {
-  v8::Isolate* isolate = callback_and_context->isolate();
-  v8::HandleScope scope(isolate);
-  v8::Local<v8::Context> context = callback_and_context->GetContext();
-  v8::Context::Scope context_scope(context);
-  WebLocalFrame* frame = WebLocalFrame::FrameForContext(context);
-  if (frame) {
-    v8::Local<v8::Value> value =
-        V8ValueConverter::Create()->ToV8Value(result.get(), context);
-    v8::Local<v8::Value> argv[] = {value};
-
-    frame->CallFunctionEvenIfScriptDisabled(callback_and_context->GetCallback(),
-                                            v8::Object::New(isolate), 1, argv);
-  }
-}
-
-void RunCallbackHelper(CallbackAndContext* callback_and_context) {
+void RunCallbackHelper(CallbackAndContext* callback_and_context,
+                       std::optional<base::Value> value) {
   v8::Isolate* isolate = callback_and_context->isolate();
   v8::HandleScope scope(isolate);
   v8::Local<v8::Context> context = callback_and_context->GetContext();
   v8::Context::Scope context_scope(context);
   v8::Local<v8::Function> callback = callback_and_context->GetCallback();
   WebLocalFrame* frame = WebLocalFrame::FrameForContext(context);
+
   if (frame && !callback.IsEmpty()) {
-    frame->CallFunctionEvenIfScriptDisabled(callback, v8::Object::New(isolate),
-                                            0, nullptr);
+    if (value.has_value()) {
+      v8::Local<v8::Value> v8_value =
+          V8ValueConverter::Create()->ToV8Value(*value, context);
+      v8::Local<v8::Value> argv[] = {v8_value};
+      frame->CallFunctionEvenIfScriptDisabled(
+          callback, v8::Object::New(isolate), /*argc=*/1, argv);
+    } else {
+      frame->CallFunctionEvenIfScriptDisabled(
+          callback, v8::Object::New(isolate), 0, nullptr);
+    }
   }
 }
 
+void OnMicroBenchmarkCompleted(CallbackAndContext* callback_and_context,
+                               base::DictValue result) {
+  RunCallbackHelper(callback_and_context,
+                    std::optional<base::Value>(std::move(result)));
+}
+
+#if BUILDFLAG(IS_MAC)
+void OnSwapCompletedWithCoreAnimationErrorCode(
+    CallbackAndContext* callback_and_context,
+    gfx::CALayerResult error_code) {
+  RunCallbackHelper(callback_and_context,
+                    std::optional<base::Value>(base::Value(error_code)));
+}
+#endif
+
 void OnSyntheticGestureCompleted(CallbackAndContext* callback_and_context) {
-  RunCallbackHelper(callback_and_context);
+  RunCallbackHelper(callback_and_context, /*value=*/{});
 }
 
 bool ThrowIfPointOutOfBounds(GpuBenchmarkingContext* context,
                              gin::Arguments* args,
                              const gfx::Point& point,
                              const std::string& message) {
-  gfx::Rect rect = context->render_widget()->GetWebWidget()->ViewRect();
+  gfx::Rect rect = context->frame_widget()->ViewRect();
   rect -= rect.OffsetFromOrigin();
 
   // If the bounds are not available here, as is the case with an OOPIF,
@@ -278,8 +331,8 @@ bool ThrowIfPointOutOfBounds(GpuBenchmarkingContext* context,
   return false;
 }
 
-base::Optional<gfx::Vector2dF> ToVector(const std::string& direction,
-                                        float distance) {
+std::optional<gfx::Vector2dF> ToVector(const std::string& direction,
+                                       float distance) {
   if (direction == "down") {
     return gfx::Vector2dF(0, distance);
   } else if (direction == "up") {
@@ -297,10 +350,10 @@ base::Optional<gfx::Vector2dF> ToVector(const std::string& direction,
   } else if (direction == "downright") {
     return gfx::Vector2dF(distance, distance);
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
-int ToKeyModifiers(const base::StringPiece& key) {
+int ToKeyModifiers(std::string_view key) {
   if (key == "Alt")
     return blink::WebInputEvent::kAltKey;
   if (key == "Control")
@@ -316,10 +369,9 @@ int ToKeyModifiers(const base::StringPiece& key) {
   if (key == "AltGraph")
     return blink::WebInputEvent::kAltGrKey;
   NOTREACHED() << "invalid key modifier";
-  return 0;
 }
 
-int ToButtonModifiers(const base::StringPiece& button) {
+int ToButtonModifiers(std::string_view button) {
   if (button == "Left")
     return blink::WebMouseEvent::kLeftButtonDown;
   if (button == "Middle")
@@ -331,7 +383,6 @@ int ToButtonModifiers(const base::StringPiece& button) {
   if (button == "Forward")
     return blink::WebMouseEvent::kForwardButtonDown;
   NOTREACHED() << "invalid button modifier";
-  return 0;
 }
 
 // BeginSmoothScroll takes pixels_to_scroll_x and pixels_to_scroll_y, positive
@@ -351,17 +402,17 @@ bool BeginSmoothScroll(GpuBenchmarkingContext* context,
                        bool precise_scrolling_deltas,
                        bool scroll_by_page,
                        bool cursor_visible,
-                       bool scroll_by_percentage,
-                       int modifiers) {
+                       int modifiers,
+                       float vsync_offset_ms,
+                       int input_event_pattern) {
   DCHECK(!(precise_scrolling_deltas && scroll_by_page));
-  DCHECK(!(precise_scrolling_deltas && scroll_by_percentage));
-  DCHECK(!(scroll_by_page && scroll_by_percentage));
   if (ThrowIfPointOutOfBounds(context, args, gfx::Point(start_x, start_y),
                               "Start point not in bounds")) {
     return false;
   }
 
-  if (gesture_source_type == SyntheticGestureParams::MOUSE_INPUT) {
+  if (gesture_source_type ==
+      GestureSourceTypeAsInt(content::mojom::GestureSourceType::kMouseInput)) {
     // Ensure the mouse is visible and move to start position, in case it will
     // trigger any hover or mousemove effects.
     context->web_view()->SetIsActive(true);
@@ -382,28 +433,32 @@ bool BeginSmoothScroll(GpuBenchmarkingContext* context,
   SyntheticSmoothScrollGestureParams gesture_params;
 
   if (gesture_source_type < 0 ||
-      gesture_source_type > SyntheticGestureParams::GESTURE_SOURCE_TYPE_MAX) {
+      gesture_source_type >
+          GestureSourceTypeAsInt(
+              content::mojom::GestureSourceType::kGestureSourceTypeMax)) {
     return false;
   }
   gesture_params.gesture_source_type =
-      static_cast<SyntheticGestureParams::GestureSourceType>(
-          gesture_source_type);
+      static_cast<content::mojom::GestureSourceType>(gesture_source_type);
 
   gesture_params.speed_in_pixels_s = speed_in_pixels_s;
+  gesture_params.vsync_offset_ms = vsync_offset_ms;
+  gesture_params.input_event_pattern =
+      static_cast<content::mojom::InputEventPattern>(input_event_pattern);
   gesture_params.prevent_fling = prevent_fling;
 
-  if (scroll_by_page)
+  if (scroll_by_page) {
     gesture_params.granularity = ui::ScrollGranularity::kScrollByPage;
-  else if (precise_scrolling_deltas)
+  } else if (precise_scrolling_deltas) {
     gesture_params.granularity = ui::ScrollGranularity::kScrollByPrecisePixel;
-  else if (scroll_by_percentage)
-    gesture_params.granularity = ui::ScrollGranularity::kScrollByPercentage;
-  else
+  } else {
     gesture_params.granularity = ui::ScrollGranularity::kScrollByPixel;
-
+  }
   gesture_params.anchor.SetPoint(start_x, start_y);
 
-  DCHECK(gesture_source_type != SyntheticGestureParams::TOUCH_INPUT ||
+  DCHECK(gesture_source_type !=
+             GestureSourceTypeAsInt(
+                 content::mojom::GestureSourceType::kTouchInput) ||
          fling_velocity.IsZero());
   // Positive pixels_to_scroll_y means scroll down, positive pixels_to_scroll_x
   // means scroll right, but SyntheticSmoothScrollGestureParams requests
@@ -432,7 +487,9 @@ bool BeginSmoothDrag(GpuBenchmarkingContext* context,
                      float end_y,
                      v8::Local<v8::Function> callback,
                      int gesture_source_type,
-                     float speed_in_pixels_s) {
+                     float speed_in_pixels_s,
+                     float vsync_offset_ms,
+                     int input_event_pattern) {
   if (ThrowIfPointOutOfBounds(context, args, gfx::Point(start_x, start_y),
                               "Start point not in bounds")) {
     return false;
@@ -449,9 +506,11 @@ bool BeginSmoothDrag(GpuBenchmarkingContext* context,
   gfx::Vector2dF distance = end_point - gesture_params.start_point;
   gesture_params.distances.push_back(distance);
   gesture_params.speed_in_pixels_s = speed_in_pixels_s;
+  gesture_params.vsync_offset_ms = vsync_offset_ms;
+  gesture_params.input_event_pattern =
+      static_cast<content::mojom::InputEventPattern>(input_event_pattern);
   gesture_params.gesture_source_type =
-      static_cast<SyntheticGestureParams::GestureSourceType>(
-          gesture_source_type);
+      static_cast<content::mojom::GestureSourceType>(gesture_source_type);
 
   injector->QueueSyntheticSmoothDrag(
       gesture_params, base::BindOnce(&OnSyntheticGestureCompleted,
@@ -461,30 +520,28 @@ bool BeginSmoothDrag(GpuBenchmarkingContext* context,
 }
 
 static void PrintDocument(blink::WebLocalFrame* frame, SkDocument* doc) {
+#if defined(ENABLE_PRINTING)
   const float kPageWidth = 612.0f;   // 8.5 inch
   const float kPageHeight = 792.0f;  // 11 inch
   const float kMarginTop = 29.0f;    // 0.40 inch
   const float kMarginLeft = 29.0f;   // 0.40 inch
   const int kContentWidth = 555;     // 7.71 inch
   const int kContentHeight = 735;    // 10.21 inch
-  blink::WebPrintParams params(blink::WebSize(kContentWidth, kContentHeight));
+  blink::WebPrintParams params(gfx::SizeF(kContentWidth, kContentHeight));
   params.printer_dpi = 300;
-  uint32_t page_count = frame->PrintBegin(params);
+  uint32_t page_count = frame->PrintBegin(params, blink::WebNode());
+  printing::MetafileSkia metafile(printing::mojom::SkiaDocumentType::kMSKP,
+                                  printing::PrintSettings::NewCookie());
   for (uint32_t i = 0; i < page_count; ++i) {
     SkCanvas* sk_canvas = doc->beginPage(kPageWidth, kPageHeight);
     cc::SkiaPaintCanvas canvas(sk_canvas);
+    canvas.SetPrintingMetafile(&metafile);
     cc::PaintCanvasAutoRestore auto_restore(&canvas, true);
     canvas.translate(kMarginLeft, kMarginTop);
-
-#if defined(OS_WIN) || defined(OS_MAC)
-    float page_shrink = frame->GetPrintPageShrink(i);
-    DCHECK_GT(page_shrink, 0);
-    canvas.scale(page_shrink, page_shrink);
-#endif
-
     frame->PrintPage(i, &canvas);
   }
   frame->PrintEnd();
+#endif
 }
 
 static void PrintDocumentTofile(v8::Isolate* isolate,
@@ -513,20 +570,19 @@ static void PrintDocumentTofile(v8::Isolate* isolate,
 }
 
 void OnSwapCompletedHelper(CallbackAndContext* callback_and_context,
-                           blink::WebSwapResult,
-                           base::TimeTicks) {
-  RunCallbackHelper(callback_and_context);
+                           const viz::FrameTimingDetails&) {
+  RunCallbackHelper(callback_and_context, /*value=*/{});
 }
 
 // This function is only used for correctness testing of this experimental
 // feature; no need for it in release builds.
 // Also note:  You must execute Chrome with `--no-sandbox` and
 // `--enable-gpu-benchmarking` for this to work.
-#if defined(OS_WIN) && !defined(NDEBUG)
+#if BUILDFLAG(IS_WIN) && !defined(NDEBUG)
 static sk_sp<SkDocument> MakeXPSDocument(SkWStream* s) {
   // I am not sure why this hasn't been initialized yet.
-  (void)CoInitializeEx(nullptr,
-                       COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  std::ignore = CoInitializeEx(
+      nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   // In non-sandboxed mode, we will need to create and hold on to the
   // factory before entering the sandbox.
   Microsoft::WRL::ComPtr<IXpsOMObjectFactory> factory;
@@ -536,16 +592,20 @@ static sk_sp<SkDocument> MakeXPSDocument(SkWStream* s) {
     LOG(ERROR) << "CoCreateInstance(CLSID_XpsOMObjectFactory, ...) failed:"
                << logging::SystemErrorCodeToString(hr);
   }
-  return SkXPS::MakeDocument(s, factory.Get());
+
+  SkXPS::Options opts;
+  opts.pngEncoder = [](SkWStream* dst, const SkPixmap& src) {
+    return SkPngRustEncoder::Encode(dst, src, {});
+  };
+  return SkXPS::MakeDocument(s, factory.Get(), opts);
 }
 #endif
 }  // namespace
 
-gin::WrapperInfo GpuBenchmarking::kWrapperInfo = {gin::kEmbedderNativeGin};
-
 // static
 void GpuBenchmarking::Install(base::WeakPtr<RenderFrameImpl> frame) {
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  v8::Isolate* isolate =
+      frame->GetWebFrame()->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context =
       frame->GetWebFrame()->MainWorldScriptContext();
@@ -554,26 +614,24 @@ void GpuBenchmarking::Install(base::WeakPtr<RenderFrameImpl> frame) {
 
   v8::Context::Scope context_scope(context);
 
-  gin::Handle<GpuBenchmarking> controller =
-      gin::CreateHandle(isolate, new GpuBenchmarking(frame));
-  if (controller.IsEmpty())
-    return;
+  auto* controller = cppgc::MakeGarbageCollected<GpuBenchmarking>(
+      isolate->GetCppHeap()->GetAllocationHandle(), frame);
+  v8::Local<v8::Object> wrapper =
+      controller->GetWrapper(isolate).ToLocalChecked();
 
   v8::Local<v8::Object> chrome = GetOrCreateChromeObject(isolate, context);
-  chrome
-      ->Set(context, gin::StringToV8(isolate, "gpuBenchmarking"),
-            controller.ToV8())
+  chrome->Set(context, gin::StringToV8(isolate, "gpuBenchmarking"), wrapper)
       .Check();
 }
 
 GpuBenchmarking::GpuBenchmarking(base::WeakPtr<RenderFrameImpl> frame)
     : render_frame_(std::move(frame)) {}
 
-GpuBenchmarking::~GpuBenchmarking() {}
+GpuBenchmarking::~GpuBenchmarking() = default;
 
 void GpuBenchmarking::EnsureRemoteInterface() {
   if (!input_injector_) {
-    render_frame_->GetBrowserInterfaceBroker()->GetInterface(
+    render_frame_->GetBrowserInterfaceBroker().GetInterface(
         input_injector_.BindNewPipeAndPassReceiver(
             render_frame_->GetTaskRunner(blink::TaskType::kInternalDefault)));
   }
@@ -591,15 +649,31 @@ gin::ObjectTemplateBuilder GpuBenchmarking::GetObjectTemplateBuilder(
                  &GpuBenchmarking::PrintPagesToSkPictures)
       .SetMethod("printPagesToXPS", &GpuBenchmarking::PrintPagesToXPS)
       .SetValue("DEFAULT_INPUT",
-                static_cast<int>(SyntheticGestureParams::DEFAULT_INPUT))
+                GestureSourceTypeAsInt(
+                    content::mojom::GestureSourceType::kDefaultInput))
       .SetValue("TOUCH_INPUT",
-                static_cast<int>(SyntheticGestureParams::TOUCH_INPUT))
+                GestureSourceTypeAsInt(
+                    content::mojom::GestureSourceType::kTouchInput))
       .SetValue("MOUSE_INPUT",
-                static_cast<int>(SyntheticGestureParams::MOUSE_INPUT))
+                GestureSourceTypeAsInt(
+                    content::mojom::GestureSourceType::kMouseInput))
       .SetValue("TOUCHPAD_INPUT",
-                static_cast<int>(SyntheticGestureParams::TOUCHPAD_INPUT))
-      .SetValue("PEN_INPUT",
-                static_cast<int>(SyntheticGestureParams::PEN_INPUT))
+                GestureSourceTypeAsInt(
+                    content::mojom::GestureSourceType::kTouchpadInput))
+      .SetValue("PEN_INPUT", GestureSourceTypeAsInt(
+                                 content::mojom::GestureSourceType::kPenInput))
+      .SetValue(
+          "DEFAULT_INPUT_PATTERN",
+          static_cast<int>(content::mojom::InputEventPattern::kDefaultPattern))
+      .SetValue(
+          "ONE_PER_VSYNC_INPUT_PATTERN",
+          static_cast<int>(content::mojom::InputEventPattern::kOnePerVsync))
+      .SetValue(
+          "TWO_PER_VSYNC_INPUT_PATTERN",
+          static_cast<int>(content::mojom::InputEventPattern::kTwoPerVsync))
+      .SetValue(
+          "EVERY_OTHER_VSYNC_INPUT_PATTERN",
+          static_cast<int>(content::mojom::InputEventPattern::kEveryOtherVsync))
       .SetMethod("gestureSourceTypeSupported",
                  &GpuBenchmarking::GestureSourceTypeSupported)
       .SetMethod("smoothScrollBy", &GpuBenchmarking::SmoothScrollBy)
@@ -633,8 +707,14 @@ gin::ObjectTemplateBuilder GpuBenchmarking::GetObjectTemplateBuilder(
       .SetMethod("startProfiling", &GpuBenchmarking::StartProfiling)
       .SetMethod("stopProfiling", &GpuBenchmarking::StopProfiling)
       .SetMethod("freeze", &GpuBenchmarking::Freeze)
+#if BUILDFLAG(IS_MAC)
+      .SetMethod("addCoreAnimationStatusEventListener",
+                 &GpuBenchmarking::AddCoreAnimationStatusEventListener)
+#endif
       .SetMethod("addSwapCompletionEventListener",
-                 &GpuBenchmarking::AddSwapCompletionEventListener);
+                 &GpuBenchmarking::AddSwapCompletionEventListener)
+      .SetMethod("isAcceleratedCanvasImageSource",
+                 &GpuBenchmarking::IsAcceleratedCanvasImageSource);
 }
 
 void GpuBenchmarking::SetNeedsDisplayOnAllLayers() {
@@ -649,9 +729,13 @@ void GpuBenchmarking::SetRasterizeOnlyVisibleContent() {
   context.layer_tree_host()->SetDebugState(current);
 }
 
+const gin::WrapperInfo* GpuBenchmarking::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
 namespace {
 sk_sp<SkDocument> make_multipicturedocument(SkWStream* stream) {
-  return SkMakeMultiPictureDocument(stream);
+  return SkMultiPictureDocument::Make(stream);
 }
 }  // namespace
 void GpuBenchmarking::PrintPagesToSkPictures(v8::Isolate* isolate,
@@ -662,7 +746,7 @@ void GpuBenchmarking::PrintPagesToSkPictures(v8::Isolate* isolate,
 
 void GpuBenchmarking::PrintPagesToXPS(v8::Isolate* isolate,
                                       const std::string& filename) {
-#if defined(OS_WIN) && !defined(NDEBUG)
+#if BUILDFLAG(IS_WIN) && !defined(NDEBUG)
   PrintDocumentTofile(isolate, filename, &MakeXPSDocument, render_frame_.get());
 #else
   std::string msg("PrintPagesToXPS is unsupported.");
@@ -698,26 +782,28 @@ void GpuBenchmarking::PrintToSkPicture(v8::Isolate* isolate,
 
 bool GpuBenchmarking::GestureSourceTypeSupported(int gesture_source_type) {
   if (gesture_source_type < 0 ||
-      gesture_source_type > SyntheticGestureParams::GESTURE_SOURCE_TYPE_MAX) {
+      gesture_source_type >
+          GestureSourceTypeAsInt(
+              content::mojom::GestureSourceType::kGestureSourceTypeMax)) {
     return false;
   }
 
   return SyntheticGestureParams::IsGestureSourceTypeSupported(
-      static_cast<SyntheticGestureParams::GestureSourceType>(
-          gesture_source_type));
+      static_cast<content::mojom::GestureSourceType>(gesture_source_type));
 }
 
 // TODO(lanwei): this is will be removed after this is replaced by
 // SmoothScrollByXY in telemetry/internal/actions/scroll.js.
 bool GpuBenchmarking::SmoothScrollBy(gin::Arguments* args) {
   GpuBenchmarkingContext context(render_frame_.get());
-  blink::WebRect rect = context.render_widget()->GetWebWidget()->ViewRect();
+  gfx::Rect rect = context.frame_widget()->ViewRect();
 
   float pixels_to_scroll = 0;
   v8::Local<v8::Function> callback;
-  float start_x = rect.width / 2;
-  float start_y = rect.height / 2;
-  int gesture_source_type = SyntheticGestureParams::DEFAULT_INPUT;
+  float start_x = rect.width() / 2;
+  float start_y = rect.height() / 2;
+  int gesture_source_type =
+      GestureSourceTypeAsInt(content::mojom::GestureSourceType::kDefaultInput);
   std::string direction = "down";
   float speed_in_pixels_s = 800;
   bool precise_scrolling_deltas = true;
@@ -725,6 +811,9 @@ bool GpuBenchmarking::SmoothScrollBy(gin::Arguments* args) {
   bool cursor_visible = true;
   bool scroll_by_percentage = false;
   std::string keys_value;
+  float vsync_offset_ms = 0.0f;
+  int input_event_pattern =
+      static_cast<int>(content::mojom::InputEventPattern::kDefaultPattern);
 
   if (!GetOptionalArg(args, &pixels_to_scroll) ||
       !GetOptionalArg(args, &callback) || !GetOptionalArg(args, &start_x) ||
@@ -736,31 +825,38 @@ bool GpuBenchmarking::SmoothScrollBy(gin::Arguments* args) {
       !GetOptionalArg(args, &scroll_by_page) ||
       !GetOptionalArg(args, &cursor_visible) ||
       !GetOptionalArg(args, &scroll_by_percentage) ||
-      !GetOptionalArg(args, &keys_value)) {
+      !GetOptionalArg(args, &keys_value) ||
+      !GetOptionalArg(args, &vsync_offset_ms) ||
+      !GetOptionalArg(args, &input_event_pattern)) {
     return false;
   }
 
   // For all touch inputs, always scroll by precise deltas.
-  DCHECK(gesture_source_type != SyntheticGestureParams::TOUCH_INPUT ||
+  DCHECK(gesture_source_type !=
+             GestureSourceTypeAsInt(
+                 content::mojom::GestureSourceType::kTouchInput) ||
          precise_scrolling_deltas);
   // Scroll by page only for mouse inputs.
   DCHECK(!scroll_by_page ||
-         gesture_source_type == SyntheticGestureParams::MOUSE_INPUT);
-  // Scroll by percentage only for mouse inputs.
-  DCHECK(!scroll_by_percentage ||
-         gesture_source_type == SyntheticGestureParams::MOUSE_INPUT);
-  // Scroll by percentage does not require speed in pixels
-  DCHECK(!scroll_by_percentage || (speed_in_pixels_s == 800));
+         gesture_source_type ==
+             GestureSourceTypeAsInt(
+                 content::mojom::GestureSourceType::kMouseInput));
+  // The percent-based scrolling feature is deprecated. Passing
+  // scroll_by_percentage doesn't do anything. Code deletion is tracked in
+  // crbug.com/359747082. Since the catapult/ is using the parameter when
+  // calling chrome.gpuBenchmarking.smoothScrollBy(), it will be removed in a
+  // separate CL.
+  DCHECK(!scroll_by_percentage);
 
-  base::Optional<gfx::Vector2dF> pixels_to_scrol_vector =
+  std::optional<gfx::Vector2dF> pixels_to_scrol_vector =
       ToVector(direction, pixels_to_scroll);
   if (!pixels_to_scrol_vector.has_value())
     return false;
   gfx::Vector2dF fling_velocity(0, 0);
   int modifiers = 0;
-  std::vector<base::StringPiece> key_list = base::SplitStringPiece(
+  std::vector<std::string_view> key_list = base::SplitStringPiece(
       keys_value, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
-  for (const base::StringPiece& key : key_list) {
+  for (std::string_view key : key_list) {
     int key_modifier = ToKeyModifiers(key);
     if (key_modifier == 0) {
       return false;
@@ -773,7 +869,7 @@ bool GpuBenchmarking::SmoothScrollBy(gin::Arguments* args) {
       &context, args, input_injector_, pixels_to_scrol_vector.value(), callback,
       gesture_source_type, speed_in_pixels_s, true /* prevent_fling */, start_x,
       start_y, fling_velocity, precise_scrolling_deltas, scroll_by_page,
-      cursor_visible, scroll_by_percentage, modifiers);
+      cursor_visible, modifiers, vsync_offset_ms, input_event_pattern);
 }
 
 // SmoothScrollByXY does not take direction as one of the arguments, and
@@ -783,19 +879,19 @@ bool GpuBenchmarking::SmoothScrollBy(gin::Arguments* args) {
 // scroll left.
 bool GpuBenchmarking::SmoothScrollByXY(gin::Arguments* args) {
   GpuBenchmarkingContext context(render_frame_.get());
-  blink::WebRect rect = context.render_widget()->GetWebWidget()->ViewRect();
+  gfx::Rect rect = context.frame_widget()->ViewRect();
 
   float pixels_to_scroll_x = 0;
   float pixels_to_scroll_y = 0;
   v8::Local<v8::Function> callback;
-  float start_x = rect.width / 2;
-  float start_y = rect.height / 2;
-  int gesture_source_type = SyntheticGestureParams::DEFAULT_INPUT;
+  float start_x = rect.width() / 2;
+  float start_y = rect.height() / 2;
+  int gesture_source_type =
+      GestureSourceTypeAsInt(content::mojom::GestureSourceType::kDefaultInput);
   float speed_in_pixels_s = 800;
   bool precise_scrolling_deltas = true;
   bool scroll_by_page = false;
   bool cursor_visible = true;
-  bool scroll_by_percentage = false;
   // It should be one or multiple values in the |Modifiers| in the function
   // ToKeyModifiers, multiple values are expressed as a string
   // separated by comma.
@@ -804,6 +900,9 @@ bool GpuBenchmarking::SmoothScrollByXY(gin::Arguments* args) {
   // ToButtonModifiers, multiple values are expressed as a string separated by
   // comma.
   std::string buttons_value;
+  float vsync_offset_ms = 0.0f;
+  int input_event_pattern =
+      static_cast<int>(content::mojom::InputEventPattern::kDefaultPattern);
 
   if (!GetOptionalArg(args, &pixels_to_scroll_x) ||
       !GetOptionalArg(args, &pixels_to_scroll_y) ||
@@ -814,28 +913,30 @@ bool GpuBenchmarking::SmoothScrollByXY(gin::Arguments* args) {
       !GetOptionalArg(args, &precise_scrolling_deltas) ||
       !GetOptionalArg(args, &scroll_by_page) ||
       !GetOptionalArg(args, &cursor_visible) ||
-      !GetOptionalArg(args, &scroll_by_percentage) ||
       !GetOptionalArg(args, &keys_value) ||
-      !GetOptionalArg(args, &buttons_value)) {
+      !GetOptionalArg(args, &buttons_value) ||
+      !GetOptionalArg(args, &vsync_offset_ms) ||
+      !GetOptionalArg(args, &input_event_pattern)) {
     return false;
   }
 
   // For all touch inputs, always scroll by precise deltas.
-  DCHECK(gesture_source_type != SyntheticGestureParams::TOUCH_INPUT ||
+  DCHECK(gesture_source_type !=
+             GestureSourceTypeAsInt(
+                 content::mojom::GestureSourceType::kTouchInput) ||
          precise_scrolling_deltas);
   // Scroll by page only for mouse inputs.
   DCHECK(!scroll_by_page ||
-         gesture_source_type == SyntheticGestureParams::MOUSE_INPUT);
-  // Scroll by percentage only for mouse inputs.
-  DCHECK(!scroll_by_percentage ||
-         gesture_source_type == SyntheticGestureParams::MOUSE_INPUT);
+         gesture_source_type ==
+             GestureSourceTypeAsInt(
+                 content::mojom::GestureSourceType::kMouseInput));
 
   gfx::Vector2dF distances(pixels_to_scroll_x, pixels_to_scroll_y);
   gfx::Vector2dF fling_velocity(0, 0);
   int modifiers = 0;
-  std::vector<base::StringPiece> key_list = base::SplitStringPiece(
+  std::vector<std::string_view> key_list = base::SplitStringPiece(
       keys_value, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
-  for (const base::StringPiece& key : key_list) {
+  for (std::string_view key : key_list) {
     int key_modifier = ToKeyModifiers(key);
     if (key_modifier == 0) {
       return false;
@@ -843,9 +944,9 @@ bool GpuBenchmarking::SmoothScrollByXY(gin::Arguments* args) {
     modifiers |= key_modifier;
   }
 
-  std::vector<base::StringPiece> button_list = base::SplitStringPiece(
+  std::vector<std::string_view> button_list = base::SplitStringPiece(
       buttons_value, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
-  for (const base::StringPiece& button : button_list) {
+  for (std::string_view button : button_list) {
     int button_modifier = ToButtonModifiers(button);
     if (button_modifier == 0) {
       return false;
@@ -858,7 +959,7 @@ bool GpuBenchmarking::SmoothScrollByXY(gin::Arguments* args) {
       &context, args, input_injector_, distances, callback, gesture_source_type,
       speed_in_pixels_s, true /* prevent_fling */, start_x, start_y,
       fling_velocity, precise_scrolling_deltas, scroll_by_page, cursor_visible,
-      scroll_by_percentage, modifiers);
+      modifiers, vsync_offset_ms, input_event_pattern);
 }
 
 bool GpuBenchmarking::SmoothDrag(gin::Arguments* args) {
@@ -868,21 +969,28 @@ bool GpuBenchmarking::SmoothDrag(gin::Arguments* args) {
   float end_x;
   float end_y;
   v8::Local<v8::Function> callback;
-  int gesture_source_type = SyntheticGestureParams::DEFAULT_INPUT;
+  int gesture_source_type =
+      GestureSourceTypeAsInt(content::mojom::GestureSourceType::kDefaultInput);
   float speed_in_pixels_s = 800;
+  float vsync_offset_ms = 0.0f;
+  int input_event_pattern =
+      static_cast<int>(content::mojom::InputEventPattern::kDefaultPattern);
 
   if (!GetArg(args, &start_x) || !GetArg(args, &start_y) ||
       !GetArg(args, &end_x) || !GetArg(args, &end_y) ||
       !GetOptionalArg(args, &callback) ||
       !GetOptionalArg(args, &gesture_source_type) ||
-      !GetOptionalArg(args, &speed_in_pixels_s)) {
+      !GetOptionalArg(args, &speed_in_pixels_s) ||
+      !GetOptionalArg(args, &vsync_offset_ms) ||
+      !GetOptionalArg(args, &input_event_pattern)) {
     return false;
   }
 
   EnsureRemoteInterface();
   return BeginSmoothDrag(&context, args, input_injector_, start_x, start_y,
                          end_x, end_y, callback, gesture_source_type,
-                         speed_in_pixels_s);
+                         speed_in_pixels_s, vsync_offset_ms,
+                         input_event_pattern);
 }
 
 // TODO(lanwei): Swipe takes pixels_to_scroll and direction. When the
@@ -891,16 +999,20 @@ bool GpuBenchmarking::SmoothDrag(gin::Arguments* args) {
 // should change this to match with SmoothScrollBy or SmoothScrollByXY.
 bool GpuBenchmarking::Swipe(gin::Arguments* args) {
   GpuBenchmarkingContext context(render_frame_.get());
-  blink::WebRect rect = context.render_widget()->GetWebWidget()->ViewRect();
+  gfx::Rect rect = context.frame_widget()->ViewRect();
 
   std::string direction = "up";
   float pixels_to_scroll = 0;
   v8::Local<v8::Function> callback;
-  float start_x = rect.width / 2;
-  float start_y = rect.height / 2;
+  float start_x = rect.width() / 2;
+  float start_y = rect.height() / 2;
   float speed_in_pixels_s = 800;
   float fling_velocity = 0;
-  int gesture_source_type = SyntheticGestureParams::TOUCH_INPUT;
+  int gesture_source_type =
+      GestureSourceTypeAsInt(content::mojom::GestureSourceType::kTouchInput);
+  float vsync_offset_ms = 0.0f;
+  int input_event_pattern =
+      static_cast<int>(content::mojom::InputEventPattern::kDefaultPattern);
 
   if (!GetOptionalArg(args, &direction) ||
       !GetOptionalArg(args, &pixels_to_scroll) ||
@@ -908,21 +1020,25 @@ bool GpuBenchmarking::Swipe(gin::Arguments* args) {
       !GetOptionalArg(args, &start_y) ||
       !GetOptionalArg(args, &speed_in_pixels_s) ||
       !GetOptionalArg(args, &fling_velocity) ||
-      !GetOptionalArg(args, &gesture_source_type)) {
+      !GetOptionalArg(args, &gesture_source_type) ||
+      !GetOptionalArg(args, &vsync_offset_ms) ||
+      !GetOptionalArg(args, &input_event_pattern)) {
     return false;
   }
 
   // For touchpad swipe, we should be given a fling velocity, but it is not
   // needed for touchscreen swipe, because we will calculate the velocity in
   // our code.
-  if (gesture_source_type == SyntheticGestureParams::TOUCHPAD_INPUT &&
+  if (gesture_source_type ==
+          GestureSourceTypeAsInt(
+              content::mojom::GestureSourceType::kTouchpadInput) &&
       fling_velocity == 0) {
     fling_velocity = 1000;
   }
 
-  base::Optional<gfx::Vector2dF> pixels_to_scrol_vector =
+  std::optional<gfx::Vector2dF> pixels_to_scrol_vector =
       ToVector(direction, pixels_to_scroll);
-  base::Optional<gfx::Vector2dF> fling_velocity_vector =
+  std::optional<gfx::Vector2dF> fling_velocity_vector =
       ToVector(direction, fling_velocity);
   if (!pixels_to_scrol_vector.has_value() ||
       !fling_velocity_vector.has_value()) {
@@ -935,23 +1051,25 @@ bool GpuBenchmarking::Swipe(gin::Arguments* args) {
       callback, gesture_source_type, speed_in_pixels_s,
       false /* prevent_fling */, start_x, start_y,
       fling_velocity_vector.value(), true /* precise_scrolling_deltas */,
-      false /* scroll_by_page */, true /* cursor_visible */,
-      false /* scroll_by_percentage */, 0 /* modifiers */);
+      false /* scroll_by_page */, true /* cursor_visible */, 0 /* modifiers */,
+      vsync_offset_ms, input_event_pattern);
 }
 
 bool GpuBenchmarking::ScrollBounce(gin::Arguments* args) {
   GpuBenchmarkingContext context(render_frame_.get());
-  blink::WebRect content_rect =
-      context.render_widget()->GetWebWidget()->ViewRect();
+  gfx::Rect content_rect = context.frame_widget()->ViewRect();
 
   std::string direction = "down";
   float distance_length = 0;
   float overscroll_length = 0;
   int repeat_count = 1;
   v8::Local<v8::Function> callback;
-  float start_x = content_rect.width / 2;
-  float start_y = content_rect.height / 2;
+  float start_x = content_rect.width() / 2;
+  float start_y = content_rect.height() / 2;
   float speed_in_pixels_s = 800;
+  float vsync_offset_ms = 0.0f;
+  int input_event_pattern =
+      static_cast<int>(content::mojom::InputEventPattern::kDefaultPattern);
 
   if (!GetOptionalArg(args, &direction) ||
       !GetOptionalArg(args, &distance_length) ||
@@ -959,7 +1077,9 @@ bool GpuBenchmarking::ScrollBounce(gin::Arguments* args) {
       !GetOptionalArg(args, &repeat_count) ||
       !GetOptionalArg(args, &callback) || !GetOptionalArg(args, &start_x) ||
       !GetOptionalArg(args, &start_y) ||
-      !GetOptionalArg(args, &speed_in_pixels_s)) {
+      !GetOptionalArg(args, &speed_in_pixels_s) ||
+      !GetOptionalArg(args, &vsync_offset_ms) ||
+      !GetOptionalArg(args, &input_event_pattern)) {
     return false;
   }
 
@@ -975,6 +1095,9 @@ bool GpuBenchmarking::ScrollBounce(gin::Arguments* args) {
   SyntheticSmoothScrollGestureParams gesture_params;
 
   gesture_params.speed_in_pixels_s = speed_in_pixels_s;
+  gesture_params.vsync_offset_ms = vsync_offset_ms;
+  gesture_params.input_event_pattern =
+      static_cast<content::mojom::InputEventPattern>(input_event_pattern);
 
   gesture_params.anchor.SetPoint(start_x, start_y);
 
@@ -1016,12 +1139,18 @@ bool GpuBenchmarking::PinchBy(gin::Arguments* args) {
   float anchor_y;
   v8::Local<v8::Function> callback;
   float relative_pointer_speed_in_pixels_s = 800;
-  int gesture_source_type = SyntheticGestureParams::DEFAULT_INPUT;
+  int gesture_source_type =
+      GestureSourceTypeAsInt(content::mojom::GestureSourceType::kDefaultInput);
+  float vsync_offset_ms = 0.0f;
+  int input_event_pattern =
+      static_cast<int>(content::mojom::InputEventPattern::kDefaultPattern);
 
   if (!GetArg(args, &scale_factor) || !GetArg(args, &anchor_x) ||
       !GetArg(args, &anchor_y) || !GetOptionalArg(args, &callback) ||
       !GetOptionalArg(args, &relative_pointer_speed_in_pixels_s) ||
-      !GetOptionalArg(args, &gesture_source_type)) {
+      !GetOptionalArg(args, &gesture_source_type) ||
+      !GetOptionalArg(args, &vsync_offset_ms) ||
+      !GetOptionalArg(args, &input_event_pattern)) {
     return false;
   }
 
@@ -1038,21 +1167,25 @@ bool GpuBenchmarking::PinchBy(gin::Arguments* args) {
       relative_pointer_speed_in_pixels_s;
 
   if (gesture_source_type < 0 ||
-      gesture_source_type > SyntheticGestureParams::GESTURE_SOURCE_TYPE_MAX) {
+      gesture_source_type >
+          GestureSourceTypeAsInt(
+              content::mojom::GestureSourceType::kGestureSourceTypeMax)) {
     args->ThrowTypeError("Unknown gesture source type");
     return false;
   }
 
   gesture_params.gesture_source_type =
-      static_cast<SyntheticGestureParams::GestureSourceType>(
-          gesture_source_type);
+      static_cast<content::mojom::GestureSourceType>(gesture_source_type);
+  gesture_params.vsync_offset_ms = vsync_offset_ms;
+  gesture_params.input_event_pattern =
+      static_cast<content::mojom::InputEventPattern>(input_event_pattern);
 
   switch (gesture_params.gesture_source_type) {
-    case SyntheticGestureParams::DEFAULT_INPUT:
-    case SyntheticGestureParams::TOUCH_INPUT:
-    case SyntheticGestureParams::MOUSE_INPUT:
+    case content::mojom::GestureSourceType::kDefaultInput:
+    case content::mojom::GestureSourceType::kTouchInput:
+    case content::mojom::GestureSourceType::kMouseInput:
       break;
-    case SyntheticGestureParams::PEN_INPUT:
+    case content::mojom::GestureSourceType::kPenInput:
       args->ThrowTypeError(
           "Gesture is not implemented for the given source type");
       return false;
@@ -1085,39 +1218,39 @@ void GpuBenchmarking::SetBrowserControlsShown(bool show) {
       cc::BrowserControlsState::kBoth,
       show ? cc::BrowserControlsState::kShown
            : cc::BrowserControlsState::kHidden,
-      false);
+      false, std::nullopt);
 }
 
 float GpuBenchmarking::VisualViewportY() {
   GpuBenchmarkingContext context(render_frame_.get());
   float y = context.web_view()->VisualViewportOffset().y();
-  blink::WebRect rect(0, y, 0, 0);
-  context.render_widget()->ConvertViewportToWindow(&rect);
-  return rect.y;
+  gfx::RectF rect_in_dips =
+      context.frame_widget()->BlinkSpaceToDIPs(gfx::RectF(0, y, 0, 0));
+  return rect_in_dips.y();
 }
 
 float GpuBenchmarking::VisualViewportX() {
   GpuBenchmarkingContext context(render_frame_.get());
   float x = context.web_view()->VisualViewportOffset().x();
-  blink::WebRect rect(x, 0, 0, 0);
-  context.render_widget()->ConvertViewportToWindow(&rect);
-  return rect.x;
+  gfx::RectF rect_in_dips =
+      context.frame_widget()->BlinkSpaceToDIPs(gfx::RectF(x, 0, 0, 0));
+  return rect_in_dips.x();
 }
 
 float GpuBenchmarking::VisualViewportHeight() {
   GpuBenchmarkingContext context(render_frame_.get());
   float height = context.web_view()->VisualViewportSize().height();
-  blink::WebRect rect(0, 0, 0, height);
-  context.render_widget()->ConvertViewportToWindow(&rect);
-  return rect.height;
+  gfx::RectF rect_in_dips =
+      context.frame_widget()->BlinkSpaceToDIPs(gfx::RectF(0, 0, 0, height));
+  return rect_in_dips.height();
 }
 
 float GpuBenchmarking::VisualViewportWidth() {
   GpuBenchmarkingContext context(render_frame_.get());
   float width = context.web_view()->VisualViewportSize().width();
-  blink::WebRect rect(0, 0, width, 0);
-  context.render_widget()->ConvertViewportToWindow(&rect);
-  return rect.width;
+  gfx::RectF rect_in_dips =
+      context.frame_widget()->BlinkSpaceToDIPs(gfx::RectF(0, 0, width, 0));
+  return rect_in_dips.width();
 }
 
 bool GpuBenchmarking::Tap(gin::Arguments* args) {
@@ -1127,7 +1260,8 @@ bool GpuBenchmarking::Tap(gin::Arguments* args) {
   float position_y;
   v8::Local<v8::Function> callback;
   int duration_ms = 50;
-  int gesture_source_type = SyntheticGestureParams::DEFAULT_INPUT;
+  int gesture_source_type =
+      GestureSourceTypeAsInt(content::mojom::GestureSourceType::kDefaultInput);
 
   if (!GetArg(args, &position_x) || !GetArg(args, &position_y) ||
       !GetOptionalArg(args, &callback) || !GetOptionalArg(args, &duration_ms) ||
@@ -1147,12 +1281,13 @@ bool GpuBenchmarking::Tap(gin::Arguments* args) {
   gesture_params.duration_ms = duration_ms;
 
   if (gesture_source_type < 0 ||
-      gesture_source_type > SyntheticGestureParams::GESTURE_SOURCE_TYPE_MAX) {
+      gesture_source_type >
+          GestureSourceTypeAsInt(
+              content::mojom::GestureSourceType::kGestureSourceTypeMax)) {
     return false;
   }
   gesture_params.gesture_source_type =
-      static_cast<SyntheticGestureParams::GestureSourceType>(
-          gesture_source_type);
+      static_cast<content::mojom::GestureSourceType>(gesture_source_type);
 
   scoped_refptr<CallbackAndContext> callback_and_context =
       new CallbackAndContext(args->isolate(), callback,
@@ -1181,9 +1316,7 @@ bool GpuBenchmarking::PointerActionSequence(gin::Arguments* args) {
   std::unique_ptr<base::Value> value =
       V8ValueConverter::Create()->FromV8Value(obj, v8_context);
   if (!value.get()) {
-    // TODO(dtapuska): Throw an error here, some web tests start
-    // failing when this is done though.
-    // args->ThrowTypeError(actions_parser.error_message());
+    args->ThrowError();
     return false;
   }
 
@@ -1191,10 +1324,8 @@ bool GpuBenchmarking::PointerActionSequence(gin::Arguments* args) {
   // SyntheticPointerActionListParams object.
   ActionsParser actions_parser(
       base::Value::FromUniquePtrValue(std::move(value)));
-  if (!actions_parser.ParsePointerActionSequence()) {
-    // TODO(dtapuska): Throw an error here, some web tests start
-    // failing when this is done though.
-    // args->ThrowTypeError(actions_parser.error_message());
+  if (!actions_parser.Parse()) {
+    args->ThrowTypeError(actions_parser.error_message());
     return false;
   }
 
@@ -1208,10 +1339,20 @@ bool GpuBenchmarking::PointerActionSequence(gin::Arguments* args) {
       new CallbackAndContext(args->isolate(), callback,
                              context.web_frame()->MainWorldScriptContext());
   EnsureRemoteInterface();
-  input_injector_->QueueSyntheticPointerAction(
-      actions_parser.gesture_params(),
-      base::BindOnce(&OnSyntheticGestureCompleted,
-                     base::RetainedRef(callback_and_context)));
+  if (actions_parser.parsed_gesture_type() ==
+      SyntheticGestureParams::SMOOTH_SCROLL_GESTURE) {
+    input_injector_->QueueSyntheticSmoothScroll(
+        actions_parser.smooth_scroll_params(),
+        base::BindOnce(&OnSyntheticGestureCompleted,
+                       base::RetainedRef(callback_and_context)));
+  } else {
+    CHECK_EQ(actions_parser.parsed_gesture_type(),
+             SyntheticGestureParams::POINTER_ACTION_LIST);
+    input_injector_->QueueSyntheticPointerAction(
+        actions_parser.pointer_action_params(),
+        base::BindOnce(&OnSyntheticGestureCompleted,
+                       base::RetainedRef(callback_and_context)));
+  }
   return true;
 }
 
@@ -1238,9 +1379,13 @@ int GpuBenchmarking::RunMicroBenchmark(gin::Arguments* args) {
   v8::Local<v8::Context> v8_context = callback_and_context->GetContext();
   std::unique_ptr<base::Value> value =
       V8ValueConverter::Create()->FromV8Value(arguments, v8_context);
+  DCHECK(value);
+  if (!value->is_dict()) {
+    return 0;
+  }
 
   return context.layer_tree_host()->ScheduleMicroBenchmark(
-      name, std::move(value),
+      name, std::move(*value).TakeDict(),
       base::BindOnce(&OnMicroBenchmarkCompleted,
                      base::RetainedRef(callback_and_context)));
 }
@@ -1254,9 +1399,13 @@ bool GpuBenchmarking::SendMessageToMicroBenchmark(
       context.web_frame()->MainWorldScriptContext();
   std::unique_ptr<base::Value> value =
       V8ValueConverter::Create()->FromV8Value(message, v8_context);
+  DCHECK(value);
+  if (!value->is_dict()) {
+    return false;
+  }
 
   return context.layer_tree_host()->SendMessageToMicroBenchmark(
-      id, std::move(value));
+      id, std::move(*value).TakeDict());
 }
 
 bool GpuBenchmarking::HasGpuChannel() {
@@ -1267,7 +1416,7 @@ bool GpuBenchmarking::HasGpuChannel() {
 
 bool GpuBenchmarking::HasGpuProcess() {
   bool has_gpu_process = false;
-  if (!RenderThreadImpl::current()->render_message_filter()->HasGpuProcess(
+  if (!RenderThreadImpl::current()->GetRendererHost()->HasGpuProcess(
           &has_gpu_process)) {
     return false;
   }
@@ -1345,8 +1494,9 @@ void GpuBenchmarking::Freeze() {
   GpuBenchmarkingContext context(render_frame_.get());
   // TODO(fmeawad): Instead of forcing a visibility change, only allow
   // freezing a page if it was already hidden.
-  context.web_view()->SetVisibilityState(PageVisibilityState::kHidden,
-                                         /*is_initial_state=*/false);
+  context.web_view()->SetVisibilityState(
+      blink::mojom::PageVisibilityState::kHidden,
+      /*is_initial_state=*/false);
   context.web_view()->SetPageFrozen(true);
 }
 
@@ -1358,14 +1508,43 @@ bool GpuBenchmarking::AddSwapCompletionEventListener(gin::Arguments* args) {
 
   auto callback_and_context = base::MakeRefCounted<CallbackAndContext>(
       args->isolate(), callback, context.web_frame()->MainWorldScriptContext());
-  context.web_frame()->FrameWidget()->NotifySwapAndPresentationTime(
-      base::NullCallback(),
-      base::BindOnce(&OnSwapCompletedHelper,
-                     base::RetainedRef(callback_and_context)));
+  context.frame_widget()->NotifyPresentationTime(base::BindOnce(
+      &OnSwapCompletedHelper, base::RetainedRef(callback_and_context)));
   // Request a begin frame explicitly, as the test-api expects a 'swap' to
   // happen for the above queued swap promise even if there is no actual update.
   context.layer_tree_host()->SetNeedsAnimateIfNotInsideMainFrame();
   return true;
+}
+
+#if BUILDFLAG(IS_MAC)
+int GpuBenchmarking::AddCoreAnimationStatusEventListener(gin::Arguments* args) {
+  v8::Local<v8::Function> callback;
+  if (!GetArg(args, &callback))
+    return false;
+  GpuBenchmarkingContext context(render_frame_.get());
+
+  auto callback_and_context = base::MakeRefCounted<CallbackAndContext>(
+      args->isolate(), callback, context.web_frame()->MainWorldScriptContext());
+  context.frame_widget()->NotifyCoreAnimationErrorCode(
+      base::BindOnce(&OnSwapCompletedWithCoreAnimationErrorCode,
+                     base::RetainedRef(callback_and_context)));
+  // Request a begin frame explicitly, as the test-api expects a 'swap' to
+  // happen for the above queued swap promise even if there is no actual update.
+  context.layer_tree_host()->SetNeedsAnimateIfNotInsideMainFrame();
+
+  return true;
+}
+#endif
+
+bool GpuBenchmarking::IsAcceleratedCanvasImageSource(gin::Arguments* args) {
+  GpuBenchmarkingContext context(render_frame_.get());
+
+  v8::Local<v8::Value> value;
+  if (!args->GetNext(&value)) {
+    args->ThrowError();
+    return false;
+  }
+  return blink::IsAcceleratedCanvasImageSource(args->isolate(), value);
 }
 
 }  // namespace content

@@ -26,13 +26,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_CONTEXT_MENU_CONTROLLER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_CONTEXT_MENU_CONTROLLER_H_
 
-#include <memory>
-#include "base/macros.h"
-#include "base/memory/scoped_refptr.h"
-#include "third_party/blink/public/common/input/web_menu_source_type.h"
+#include "third_party/blink/public/mojom/context_menu/context_menu.mojom-blink.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/layout/hit_test_result.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/mojo/heap_mojo_associated_receiver.h"
+#include "ui/base/mojom/menu_source_type.mojom-blink-forward.h"
 
 namespace blink {
 
@@ -41,13 +40,18 @@ class Document;
 class LocalFrame;
 class MouseEvent;
 class Page;
-struct WebContextMenuData;
+struct ContextMenuData;
+struct Impression;
 
-class CORE_EXPORT ContextMenuController final
-    : public GarbageCollected<ContextMenuController> {
+// This class is not final to allow customization by embedders
+class CORE_EXPORT ContextMenuController
+    : public GarbageCollected<ContextMenuController>,
+      public mojom::blink::ContextMenuClient {
  public:
   explicit ContextMenuController(Page*);
-  ~ContextMenuController();
+  ContextMenuController(const ContextMenuController&) = delete;
+  ContextMenuController operator=(const ContextMenuController&) = delete;
+  ~ContextMenuController() override;
   void Trace(Visitor*) const;
 
   void ClearContextMenu();
@@ -62,24 +66,83 @@ class CORE_EXPORT ContextMenuController final
 
   void CustomContextMenuItemSelected(unsigned action);
 
+  Node* ContextMenuImageNodeForFrame(LocalFrame*);
   Node* ContextMenuNodeForFrame(LocalFrame*);
+
+  // mojom::blink::ContextMenuClient methods.
+  void CustomContextMenuAction(uint32_t action) override;
+  void ContextMenuClosed(const KURL& link_followed,
+                         const std::optional<Impression>&) override;
+
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.  Keep in sync with enum in
+  // tools/metrics/histograms/enums.xml
+  enum class ImageSelectionOutcome : uint8_t {
+    // An image node was found to be the topmost node.
+    kImageFoundStandard = 0,
+
+    // An image node was found below the topmost node.
+    kImageFoundPenetrating = 1,
+
+    // An opaque node was found when penetrating to attempt to find an image
+    // nnode.
+    kBlockedByOpaqueNode = 2,
+
+    // A context menu listener was found to be on one of the penetrated nodes
+    // or on one of those nodes' ancestors.
+    kFoundContextMenuListener = 3,
+
+    // A cross frame node was found while penetrating, which is not yet
+    // supported.
+    kBlockedByCrossFrameNode = 4,
+
+    kMaxValue = kBlockedByCrossFrameNode,
+  };
+
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.  Keep in sync with enum in
+  // tools/metrics/histograms/enums.xml
+  enum class ImageSelectionRetrievalOutcome : uint8_t {
+    // The cached image was successfully retrieved.
+    kImageFound = 0,
+
+    // The cached image was not found, possibly because an initial image
+    // selection hit test was not made, a subsequent non-image hit test was
+    // made before retrieval, or the image has become unfetchable.
+    kImageNotFound = 1,
+
+    // The retrieval was made from a different frame than the origuinal hit
+    // test, which is unexpected.
+    kCrossFrameRetrieval = 2,
+
+    kMaxValue = kCrossFrameRetrieval,
+  };
 
  private:
   friend class ContextMenuControllerTest;
 
-  // Returns whether a Context Menu was actually shown.
+  // Returns whether a Context Menu was actually shown. Changing this is not
+  // recommended.
   bool ShowContextMenu(LocalFrame*,
                        const PhysicalOffset&,
-                       WebMenuSourceType,
-                       const MouseEvent* mouse_event = nullptr);
-  bool ShouldShowContextMenuFromTouch(const WebContextMenuData&);
+                       ui::mojom::blink::MenuSourceType);
+  virtual bool ShowContextMenu(LocalFrame*,
+                               const PhysicalOffset&,
+                               ui::mojom::blink::MenuSourceType,
+                               const MouseEvent* mouse_event);
 
-  void UpdateTextFragmentSelectorGenerator(LocalFrame*);
+  bool ShouldShowContextMenuFromTouch(const ContextMenuData&);
+
+  Node* GetContextMenuNodeWithImageContents();
+
+  HeapMojoAssociatedReceiver<mojom::blink::ContextMenuClient,
+                             ContextMenuController>
+      context_menu_client_receiver_{this, nullptr};
 
   Member<Page> page_;
   Member<ContextMenuProvider> menu_provider_;
   HitTestResult hit_test_result_;
-  DISALLOW_COPY_AND_ASSIGN(ContextMenuController);
+  Member<Node> image_selection_cached_result_;
 };
 
 }  // namespace blink

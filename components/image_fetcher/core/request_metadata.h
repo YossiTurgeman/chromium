@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,13 +17,13 @@ struct RequestMetadata {
 
   RequestMetadata();
 
+  friend bool operator==(const RequestMetadata&,
+                         const RequestMetadata&) = default;
+
   std::string mime_type;
   int http_response_code;
   std::string content_location_header;
 };
-
-bool operator==(const RequestMetadata& lhs, const RequestMetadata& rhs);
-bool operator!=(const RequestMetadata& lhs, const RequestMetadata& rhs);
 
 }  // namespace image_fetcher
 

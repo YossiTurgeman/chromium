@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,11 @@
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/check_op.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/lazy_instance.h"
 #include "base/location.h"
-#include "base/macros.h"
-#include "base/stl_util.h"
-#include "base/task/post_task.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/scoped_blocking_call.h"
@@ -44,14 +41,16 @@ class SupportedAudioVideoExtensions {
     }
   }
 
+  SupportedAudioVideoExtensions(const SupportedAudioVideoExtensions&) = delete;
+  SupportedAudioVideoExtensions& operator=(
+      const SupportedAudioVideoExtensions&) = delete;
+
   bool HasSupportedAudioVideoExtension(const base::FilePath& file) {
-    return base::Contains(audio_video_extensions_, file.Extension());
+    return audio_video_extensions_.contains(file.Extension());
   }
 
  private:
   std::set<base::FilePath::StringType> audio_video_extensions_;
-
-  DISALLOW_COPY_AND_ASSIGN(SupportedAudioVideoExtensions);
 };
 
 base::LazyInstance<SupportedAudioVideoExtensions>::DestructorAtExit
@@ -65,7 +64,7 @@ base::File OpenBlocking(const base::FilePath& path) {
 
 }  // namespace
 
-SupportedAudioVideoChecker::~SupportedAudioVideoChecker() {}
+SupportedAudioVideoChecker::~SupportedAudioVideoChecker() = default;
 
 // static
 bool SupportedAudioVideoChecker::SupportsFileType(const base::FilePath& path) {
@@ -83,6 +82,16 @@ void SupportedAudioVideoChecker::StartPreWriteValidation(
       base::BindOnce(&OpenBlocking, path_),
       base::BindOnce(&SupportedAudioVideoChecker::OnFileOpen,
                      weak_factory_.GetWeakPtr()));
+}
+
+void SupportedAudioVideoChecker::StartPostWriteValidation(
+    const base::FilePath& dest_platform_path,
+    ResultCallback result_callback) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+
+  // StartPostWriteValidation() implementation is required. So effectively do
+  // nothing here.
+  std::move(result_callback).Run(base::File::FILE_OK);
 }
 
 SupportedAudioVideoChecker::SupportedAudioVideoChecker(

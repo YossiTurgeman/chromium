@@ -31,6 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_WINDOW_FEATURES_H_
 #define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_WINDOW_FEATURES_H_
 
+#include <optional>
+#include <vector>
+
+#include "third_party/blink/public/platform/web_string.h"
+
 namespace blink {
 
 struct WebWindowFeatures {
@@ -43,12 +48,7 @@ struct WebWindowFeatures {
   int height = 0;
   bool height_set = false;
 
-  bool menu_bar_visible = true;
-  bool status_bar_visible = true;
-  // This can be set based on "locationbar" or "toolbar" in a window features
-  // string, we don't distinguish between the two.
-  bool tool_bar_visible = true;
-  bool scrollbars_visible = true;
+  bool is_popup = false;
 
   // The members above this line are transferred through mojo
   // in the form of |struct WindowFeatures| defined in window_features.mojom,
@@ -57,11 +57,21 @@ struct WebWindowFeatures {
   bool resizable = true;
 
   bool noopener = false;
+  bool explicit_opener = false;
   bool noreferrer = false;
   bool background = false;
   bool persistent = false;
+
+  // If `std::nullopt`, no impression should be set on the navigation.
+  // If `std::vector::empty()`, an impression should be set but no background
+  // request should be made. Otherwise, an impression should be set and a
+  // background request should be made to the contained relative URL.
+  //
+  // TODO(apaseltiner): Investigate moving this field to a non-public struct
+  // since it is only needed within //third_party/blink.
+  std::optional<std::vector<WebString>> attribution_srcs;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_WINDOW_FEATURES_H_

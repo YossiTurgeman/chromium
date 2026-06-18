@@ -1,29 +1,34 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/test/test_browser_dialog.h"
 
-#include "base/bind.h"
+#include <set>
+
+#include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
+#include "base/notimplemented.h"
 #include "base/run_loop.h"
 #include "base/stl_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/views/test/views_test_utils.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/shell.h"
 #endif
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 #include "chrome/browser/ui/test/test_browser_dialog_mac.h"
 #endif
 
 #if defined(TOOLKIT_VIEWS)
-#include "base/callback_helpers.h"
 #include "base/strings/strcat.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/views/test/widget_test.h"
@@ -36,24 +41,26 @@ namespace {
 class WidgetCloser {
  public:
   WidgetCloser(views::Widget* widget, bool async) : widget_(widget) {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&WidgetCloser::CloseWidget,
                                   weak_ptr_factory_.GetWeakPtr(), async));
   }
 
+  WidgetCloser(const WidgetCloser&) = delete;
+  WidgetCloser& operator=(const WidgetCloser&) = delete;
+
  private:
   void CloseWidget(bool async) {
-    if (async)
+    if (async) {
       widget_->Close();
-    else
+    } else {
       widget_->CloseNow();
+    }
   }
 
-  views::Widget* widget_;
+  raw_ptr<views::Widget, AcrossTasksDanglingUntriaged> widget_;
 
   base::WeakPtrFactory<WidgetCloser> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(WidgetCloser);
 };
 
 #endif  // defined(TOOLKIT_VIEWS)
@@ -83,8 +90,9 @@ bool TestBrowserDialog::VerifyUi() {
 
   // Force pending layouts of all existing widgets. This ensures any
   // anchor Views are in the correct position.
-  for (views::Widget* widget : widgets_)
+  for (views::Widget* widget : widgets_) {
     widget->LayoutRootViewIfNecessary();
+  }
 
   // Get the list of added dialog widgets. Ignore non-dialog widgets, including
   // those added by tests to anchor dialogs and the browser's status bubble.
@@ -92,51 +100,54 @@ bool TestBrowserDialog::VerifyUi() {
   auto added =
       base::STLSetDifference<views::Widget::Widgets>(widgets_, widgets_before);
   std::string name = GetNonDialogName();
-  base::EraseIf(added, [&](views::Widget* widget) {
+  std::erase_if(added, [&](views::Widget* widget) {
     return !widget->widget_delegate()->AsDialogDelegate() &&
            (name.empty() || widget->GetName() != name);
   });
   widgets_ = added;
 
   if (added.size() != 1) {
-    DLOG(INFO) << "VerifyUi(): Expected 1 added widget; got " << added.size();
+    LOG(INFO) << "VerifyUi(): Expected 1 added widget; got " << added.size();
     if (added.size() > 1) {
-      base::string16 widget_title_log =
-          base::ASCIIToUTF16("Added Widgets are: ");
+      std::u16string widget_title_log = u"Added Widgets are: ";
       for (views::Widget* widget : added) {
-        widget_title_log += widget->widget_delegate()->GetWindowTitle() +
-                            base::ASCIIToUTF16(" ");
+        widget_title_log += widget->widget_delegate()->GetWindowTitle() + u" ";
       }
-      DLOG(INFO) << widget_title_log;
+      LOG(INFO) << widget_title_log;
     }
     return false;
   }
 
   views::Widget* dialog_widget = *(added.begin());
-// TODO(https://crbug.com/958242) support Mac for pixel tests.
-#if defined(OS_WIN) || (defined(OS_LINUX) && !defined(OS_CHROMEOS))
   dialog_widget->SetBlockCloseForTesting(true);
   // Deactivate before taking screenshot. Deactivated dialog pixel outputs
   // is more predictable than activated dialog.
   bool is_active = dialog_widget->IsActive();
   dialog_widget->Deactivate();
-  base::ScopedClosureRunner unblock_close(
-      base::BindOnce(&views::Widget::SetBlockCloseForTesting,
-                     base::Unretained(dialog_widget), false));
+  dialog_widget->GetFocusManager()->ClearFocus();
+  absl::Cleanup unblock_close = [dialog_widget] {
+    dialog_widget->SetBlockCloseForTesting(false);
+  };
 
   auto* test_info = testing::UnitTest::GetInstance()->current_test_info();
   const std::string screenshot_name = base::StrCat(
-      {test_info->test_case_name(), "_", test_info->name(), "_", baseline_});
-  if (!VerifyPixelUi(dialog_widget, "BrowserUiDialog", screenshot_name)) {
-    DLOG(INFO) << "VerifyUi(): Pixel compare failed.";
+      {test_info->test_suite_name(), "_", test_info->name(), "_", baseline_});
+
+  if (VerifyPixelUi(dialog_widget, "BrowserUiDialog", screenshot_name) ==
+      ui::test::ActionResult::kFailed) {
+    LOG(INFO) << "VerifyUi(): Pixel compare failed.";
     return false;
   }
-  if (is_active)
+  if (is_active) {
     dialog_widget->Activate();
-#endif  // OS_MAC
+  }
 
-  if (!should_verify_dialog_bounds_)
+  if (!should_verify_dialog_bounds_) {
     return true;
+  }
+
+  // RunScheduledLayout() is needed due to widget auto-resize.
+  views::test::RunScheduledLayout(dialog_widget);
 
   // Verify that the dialog's dimensions do not exceed the display's work area
   // bounds, which may be smaller than its bounds(), e.g. in the case of the
@@ -144,12 +155,12 @@ bool TestBrowserDialog::VerifyUi() {
   const gfx::Rect dialog_bounds = dialog_widget->GetWindowBoundsInScreen();
   gfx::NativeWindow native_window = dialog_widget->GetNativeWindow();
   DCHECK(native_window);
-  display::Screen* screen = display::Screen::GetScreen();
+  display::Screen* screen = display::Screen::Get();
   const gfx::Rect display_work_area =
       screen->GetDisplayNearestWindow(native_window).work_area();
 
   const bool dialog_in_bounds = display_work_area.Contains(dialog_bounds);
-  DLOG_IF(INFO, !dialog_in_bounds)
+  LOG_IF(INFO, !dialog_in_bounds)
       << "VerifyUi(): Dialog bounds " << dialog_bounds.ToString()
       << " outside of display work area " << display_work_area.ToString();
   return dialog_in_bounds;
@@ -160,7 +171,7 @@ bool TestBrowserDialog::VerifyUi() {
 }
 
 void TestBrowserDialog::WaitForUserDismissal() {
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   internal::TestBrowserDialogInteractiveSetUp();
 #endif
 
@@ -195,9 +206,10 @@ std::string TestBrowserDialog::GetNonDialogName() {
 
 void TestBrowserDialog::UpdateWidgets() {
   widgets_.clear();
-#if defined(OS_CHROMEOS)
-  for (aura::Window* root_window : ash::Shell::GetAllRootWindows())
-    views::Widget::GetAllChildWidgets(root_window, &widgets_);
+#if BUILDFLAG(IS_CHROMEOS)
+  for (aura::Window* root_window : ash::Shell::GetAllRootWindows()) {
+    widgets_.merge(views::Widget::GetAllChildWidgets(root_window));
+  }
 #elif defined(TOOLKIT_VIEWS)
   widgets_ = views::test::WidgetTest::GetAllWidgets();
 #else

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@ package org.chromium.components.browser_ui.media;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNotNull;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -19,22 +18,23 @@ import android.graphics.Bitmap;
 import android.graphics.Rect;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
-import org.robolectric.shadows.ShadowLog;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.services.media_session.MediaImage;
+import org.chromium.url.GURL;
+import org.chromium.url.JUnitTestGURLs;
 
 import java.util.ArrayList;
 
-/**
- * Robolectric tests for MediaImageManager.
- */
+/** Robolectric tests for MediaImageManager. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class MediaImageManagerTest {
@@ -43,13 +43,12 @@ public class MediaImageManagerTest {
     private static final int IDEAL_IMAGE_SIZE_PX = 200;
     private static final int REQUEST_ID_1 = 1;
     private static final int REQUEST_ID_2 = 2;
-    private static final String IMAGE_URL_1 = "http://example.com/foo.png";
-    private static final String IMAGE_URL_2 = "http://example.com/bar.png";
+    private static final GURL IMAGE_URL_1 = JUnitTestGURLs.URL_1;
+    private static final GURL IMAGE_URL_2 = JUnitTestGURLs.URL_2;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Mock
-    private WebContents mWebContents;
-    @Mock
-    private MediaImageCallback mCallback;
+    @Mock private WebContents mWebContents;
+    @Mock private MediaImageCallback mCallback;
 
     private MediaImageManager mMediaImageManager;
 
@@ -60,23 +59,22 @@ public class MediaImageManagerTest {
 
     @Before
     public void setUp() {
-        ShadowLog.stream = System.out;
-        MockitoAnnotations.initMocks(this);
         doReturn(REQUEST_ID_1)
                 .when(mWebContents)
-                .downloadImage(anyString(), anyBoolean(), anyInt(), anyBoolean(),
-                        any(MediaImageManager.class));
+                .downloadImage(
+                        any(), anyBoolean(), anyInt(), anyBoolean(), any(MediaImageManager.class));
         mMediaImageManager = new MediaImageManager(MIN_IMAGE_SIZE_PX, IDEAL_IMAGE_SIZE_PX);
         mMediaImageManager.setWebContents(mWebContents);
 
-        mImages = new ArrayList<MediaImage>();
-        mImages.add(new MediaImage(IMAGE_URL_1, "", new ArrayList<Rect>()));
+        mImages = new ArrayList<>();
+        mImages.add(new MediaImage(IMAGE_URL_1, "", new ArrayList<>()));
 
-        mBitmaps = new ArrayList<Bitmap>();
-        mBitmaps.add(Bitmap.createBitmap(
-                IDEAL_IMAGE_SIZE_PX, IDEAL_IMAGE_SIZE_PX, Bitmap.Config.ARGB_8888));
+        mBitmaps = new ArrayList<>();
+        mBitmaps.add(
+                Bitmap.createBitmap(
+                        IDEAL_IMAGE_SIZE_PX, IDEAL_IMAGE_SIZE_PX, Bitmap.Config.ARGB_8888));
 
-        mOriginalImageSizes = new ArrayList<Rect>();
+        mOriginalImageSizes = new ArrayList<>();
         mOriginalImageSizes.add(new Rect(0, 0, IDEAL_IMAGE_SIZE_PX, IDEAL_IMAGE_SIZE_PX));
     }
 
@@ -84,8 +82,11 @@ public class MediaImageManagerTest {
     public void testDownloadImage() {
         mMediaImageManager.downloadImage(mImages, mCallback);
         verify(mWebContents)
-                .downloadImage(eq(IMAGE_URL_1), eq(false),
-                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD), eq(false),
+                .downloadImage(
+                        eq(IMAGE_URL_1),
+                        eq(false),
+                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD),
+                        eq(false),
                         eq(mMediaImageManager));
         mMediaImageManager.onFinishDownloadImage(
                 REQUEST_ID_1, 200, IMAGE_URL_1, mBitmaps, mOriginalImageSizes);
@@ -104,15 +105,18 @@ public class MediaImageManagerTest {
         // Second download.
         doReturn(REQUEST_ID_2)
                 .when(mWebContents)
-                .downloadImage(anyString(), anyBoolean(), anyInt(), anyBoolean(),
-                        any(MediaImageManager.class));
+                .downloadImage(
+                        any(), anyBoolean(), anyInt(), anyBoolean(), any(MediaImageManager.class));
         mMediaImageManager.downloadImage(mImages, mCallback);
         mMediaImageManager.onFinishDownloadImage(
                 REQUEST_ID_2, 200, IMAGE_URL_1, mBitmaps, mOriginalImageSizes);
 
         verify(mWebContents, times(1))
-                .downloadImage(eq(IMAGE_URL_1), eq(false),
-                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD), eq(false),
+                .downloadImage(
+                        eq(IMAGE_URL_1),
+                        eq(false),
+                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD),
+                        eq(false),
                         eq(mMediaImageManager));
         verify(mCallback, times(1)).onImageDownloaded((Bitmap) isNotNull());
         verify(mCallback, times(0)).onImageDownloaded((Bitmap) isNull());
@@ -136,8 +140,11 @@ public class MediaImageManagerTest {
                 REQUEST_ID_1, 200, IMAGE_URL_1, mBitmaps, mOriginalImageSizes);
 
         verify(mWebContents, times(1))
-                .downloadImage(eq(IMAGE_URL_1), eq(false),
-                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD), eq(false),
+                .downloadImage(
+                        eq(IMAGE_URL_1),
+                        eq(false),
+                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD),
+                        eq(false),
                         eq(mMediaImageManager));
         verify(mCallback, times(1)).onImageDownloaded((Bitmap) isNull());
     }
@@ -152,22 +159,28 @@ public class MediaImageManagerTest {
         // Second download.
         doReturn(REQUEST_ID_2)
                 .when(mWebContents)
-                .downloadImage(anyString(), anyBoolean(), anyInt(), anyBoolean(),
-                        any(MediaImageManager.class));
+                .downloadImage(
+                        any(), anyBoolean(), anyInt(), anyBoolean(), any(MediaImageManager.class));
         mImages.clear();
-        mImages.add(new MediaImage(IMAGE_URL_2, "", new ArrayList<Rect>()));
+        mImages.add(new MediaImage(IMAGE_URL_2, "", new ArrayList<>()));
 
         mMediaImageManager.downloadImage(mImages, mCallback);
         mMediaImageManager.onFinishDownloadImage(
                 REQUEST_ID_2, 200, IMAGE_URL_2, mBitmaps, mOriginalImageSizes);
 
         verify(mWebContents, times(1))
-                .downloadImage(eq(IMAGE_URL_1), eq(false),
-                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD), eq(false),
+                .downloadImage(
+                        eq(IMAGE_URL_1),
+                        eq(false),
+                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD),
+                        eq(false),
                         eq(mMediaImageManager));
         verify(mWebContents, times(1))
-                .downloadImage(eq(IMAGE_URL_2), eq(false),
-                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD), eq(false),
+                .downloadImage(
+                        eq(IMAGE_URL_2),
+                        eq(false),
+                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD),
+                        eq(false),
                         eq(mMediaImageManager));
         verify(mCallback, times(2)).onImageDownloaded((Bitmap) isNotNull());
         verify(mCallback, times(0)).onImageDownloaded((Bitmap) isNull());
@@ -181,10 +194,10 @@ public class MediaImageManagerTest {
         // Second download.
         doReturn(REQUEST_ID_2)
                 .when(mWebContents)
-                .downloadImage(anyString(), anyBoolean(), anyInt(), anyBoolean(),
-                        any(MediaImageManager.class));
+                .downloadImage(
+                        any(), anyBoolean(), anyInt(), anyBoolean(), any(MediaImageManager.class));
         mImages.clear();
-        mImages.add(new MediaImage(IMAGE_URL_2, "", new ArrayList<Rect>()));
+        mImages.add(new MediaImage(IMAGE_URL_2, "", new ArrayList<>()));
 
         mMediaImageManager.downloadImage(mImages, mCallback);
 
@@ -196,12 +209,18 @@ public class MediaImageManagerTest {
                 REQUEST_ID_1, 200, IMAGE_URL_1, mBitmaps, mOriginalImageSizes);
 
         verify(mWebContents, times(1))
-                .downloadImage(eq(IMAGE_URL_1), eq(false),
-                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD), eq(false),
+                .downloadImage(
+                        eq(IMAGE_URL_1),
+                        eq(false),
+                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD),
+                        eq(false),
                         eq(mMediaImageManager));
         verify(mWebContents, times(1))
-                .downloadImage(eq(IMAGE_URL_2), eq(false),
-                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD), eq(false),
+                .downloadImage(
+                        eq(IMAGE_URL_2),
+                        eq(false),
+                        eq(MediaImageManager.MAX_BITMAP_SIZE_FOR_DOWNLOAD),
+                        eq(false),
                         eq(mMediaImageManager));
 
         verify(mCallback, times(1)).onImageDownloaded((Bitmap) isNotNull());
@@ -233,14 +252,14 @@ public class MediaImageManagerTest {
     @Test
     public void testTinyImagesRemovedBeforeDownloading() {
         mImages.clear();
-        ArrayList<Rect> sizes = new ArrayList<Rect>();
+        ArrayList<Rect> sizes = new ArrayList<>();
         sizes.add(new Rect(0, 0, TINY_IMAGE_SIZE_PX, TINY_IMAGE_SIZE_PX));
         mImages.add(new MediaImage(IMAGE_URL_1, "", sizes));
         mMediaImageManager.downloadImage(mImages, mCallback);
 
         verify(mWebContents, times(0))
-                .downloadImage(anyString(), anyBoolean(), anyInt(), anyBoolean(),
-                        any(MediaImageManager.class));
+                .downloadImage(
+                        any(), anyBoolean(), anyInt(), anyBoolean(), any(MediaImageManager.class));
         verify(mCallback).onImageDownloaded((Bitmap) isNull());
         verify(mCallback, times(0)).onImageDownloaded((Bitmap) isNotNull());
     }
@@ -251,8 +270,9 @@ public class MediaImageManagerTest {
 
         // Reset the data for feeding.
         mBitmaps.clear();
-        mBitmaps.add(Bitmap.createBitmap(
-                TINY_IMAGE_SIZE_PX, TINY_IMAGE_SIZE_PX, Bitmap.Config.ARGB_8888));
+        mBitmaps.add(
+                Bitmap.createBitmap(
+                        TINY_IMAGE_SIZE_PX, TINY_IMAGE_SIZE_PX, Bitmap.Config.ARGB_8888));
         mOriginalImageSizes.clear();
         mOriginalImageSizes.add(new Rect(0, 0, TINY_IMAGE_SIZE_PX, TINY_IMAGE_SIZE_PX));
 
@@ -267,7 +287,7 @@ public class MediaImageManagerTest {
     public void testDownloadImageFails() {
         mMediaImageManager.downloadImage(mImages, mCallback);
         mMediaImageManager.onFinishDownloadImage(
-                REQUEST_ID_1, 404, IMAGE_URL_1, new ArrayList<Bitmap>(), new ArrayList<Rect>());
+                REQUEST_ID_1, 404, IMAGE_URL_1, new ArrayList<>(), new ArrayList<>());
 
         verify(mCallback).onImageDownloaded((Bitmap) isNull());
         verify(mCallback, times(0)).onImageDownloaded((Bitmap) isNotNull());
@@ -279,8 +299,8 @@ public class MediaImageManagerTest {
         mMediaImageManager.downloadImage(mImages, mCallback);
 
         verify(mWebContents, times(0))
-                .downloadImage(anyString(), anyBoolean(), anyInt(), anyBoolean(),
-                        any(MediaImageManager.class));
+                .downloadImage(
+                        any(), anyBoolean(), anyInt(), anyBoolean(), any(MediaImageManager.class));
         verify(mCallback).onImageDownloaded((Bitmap) isNull());
         verify(mCallback, times(0)).onImageDownloaded((Bitmap) isNotNull());
     }
@@ -290,8 +310,8 @@ public class MediaImageManagerTest {
         mMediaImageManager.downloadImage(null, mCallback);
 
         verify(mWebContents, times(0))
-                .downloadImage(anyString(), anyBoolean(), anyInt(), anyBoolean(),
-                        any(MediaImageManager.class));
+                .downloadImage(
+                        any(), anyBoolean(), anyInt(), anyBoolean(), any(MediaImageManager.class));
         verify(mCallback).onImageDownloaded((Bitmap) isNull());
         verify(mCallback, times(0)).onImageDownloaded((Bitmap) isNotNull());
     }

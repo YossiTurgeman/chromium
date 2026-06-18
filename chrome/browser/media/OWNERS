@@ -3,21 +3,18 @@ sergeyu@chromium.org
 tommi@chromium.org
 
 # For Cast-related changes.
-per-file cast_*=miu@chromium.org
-per-file cast_*=mfoltz@chromium.org
+per-file cast_*=file://media/cast/OWNERS
+per-file mirroring_service*=file://media/cast/OWNERS
 
-# For Media Engagement
-per-file media_engagement*=beccahughes@chromium.org
-per-file media_engagement*=mlamouri@chromium.org
+# For EME changes.
+per-file *cdm*=file://media/cdm/OWNERS
+per-file *encrypted*=file://media/cdm/OWNERS
 
-# For Unified Autoplay
-per-file unified_autoplay*=beccahughes@chromium.org
-per-file unified_autoplay*=mlamouri@chromium.org
+# For Media Engagement changes.
+per-file *media_engagement*=evliu@google.com
 
 # For IPC security review
 per-file *.mojom=set noparent
 per-file *.mojom=file://ipc/SECURITY_OWNERS
 
 per-file *permission_context*=file://components/permissions/PERMISSIONS_OWNERS
-
-# COMPONENT: Blink>Media

@@ -1,29 +1,36 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 #include <string>
 
-#include "base/bind.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "remoting/base/constants.h"
 #include "remoting/host/linux/x_server_clipboard.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/x/connection.h"
-#include "ui/gfx/x/x11.h"
 
 namespace remoting {
 
 namespace {
 
-class ClipboardTestClient : public x11::Connection::Delegate {
+class ClipboardTestClient : public x11::EventObserver {
  public:
   ClipboardTestClient() = default;
-  ~ClipboardTestClient() override = default;
+
+  ClipboardTestClient(const ClipboardTestClient&) = delete;
+  ClipboardTestClient& operator=(const ClipboardTestClient&) = delete;
+
+  ~ClipboardTestClient() override {
+    DCHECK(connection_);
+    connection_->RemoveEventObserver(this);
+  }
 
   void Init(x11::Connection* connection) {
     connection_ = connection;
+    connection_->AddEventObserver(this);
     clipboard_.Init(connection, base::BindRepeating(
                                     &ClipboardTestClient::OnClipboardChanged,
                                     base::Unretained(this)));
@@ -44,15 +51,13 @@ class ClipboardTestClient : public x11::Connection::Delegate {
   bool PumpXEvents() {
     dispatched_event_ = false;
     connection_->Sync();
-    connection_->Dispatch(this);
+    connection_->DispatchAll();
     return dispatched_event_;
   }
 
-  bool ShouldContinueStream() const override { return true; }
-
-  void DispatchXEvent(x11::Event* event) override {
+  void OnEvent(const x11::Event& event) override {
     dispatched_event_ = true;
-    clipboard_.ProcessXEvent(*event);
+    clipboard_.ProcessXEvent(event);
   }
 
   const std::string& clipboard_data() const { return clipboard_data_; }
@@ -61,10 +66,8 @@ class ClipboardTestClient : public x11::Connection::Delegate {
  private:
   std::string clipboard_data_;
   XServerClipboard clipboard_;
-  x11::Connection* connection_ = nullptr;
+  raw_ptr<x11::Connection> connection_ = nullptr;
   bool dispatched_event_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(ClipboardTestClient);
 };
 
 }  // namespace
@@ -89,8 +92,9 @@ class XServerClipboardTest : public testing::Test {
 
   void PumpXEvents() {
     while (true) {
-      if (!client1_.PumpXEvents() && !client2_.PumpXEvents())
+      if (!client1_.PumpXEvents() && !client2_.PumpXEvents()) {
         break;
+      }
     }
   }
 
@@ -107,19 +111,19 @@ TEST_F(XServerClipboardTest, DISABLED_CopyPaste) {
   // send then receive, and client2_ will receive then send).
   client1_.SetClipboardData("Text1");
   PumpXEvents();
-  EXPECT_EQ("Text1", client2_.clipboard_data());
+  EXPECT_EQ(client2_.clipboard_data(), "Text1");
 
   client1_.SetClipboardData("Text2");
   PumpXEvents();
-  EXPECT_EQ("Text2", client2_.clipboard_data());
+  EXPECT_EQ(client2_.clipboard_data(), "Text2");
 
   client2_.SetClipboardData("Text3");
   PumpXEvents();
-  EXPECT_EQ("Text3", client1_.clipboard_data());
+  EXPECT_EQ(client1_.clipboard_data(), "Text3");
 
   client2_.SetClipboardData("Text4");
   PumpXEvents();
-  EXPECT_EQ("Text4", client1_.clipboard_data());
+  EXPECT_EQ(client1_.clipboard_data(), "Text4");
 }
 
 }  // namespace remoting

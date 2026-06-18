@@ -1,8 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/net/secure_dns_config.h"
+
+#include <string_view>
+
+#include "net/base/ip_endpoint.h"
 
 // static
 constexpr char SecureDnsConfig::kModeOff[];
@@ -10,37 +14,39 @@ constexpr char SecureDnsConfig::kModeAutomatic[];
 constexpr char SecureDnsConfig::kModeSecure[];
 
 SecureDnsConfig::SecureDnsConfig(
-    net::DnsConfig::SecureDnsMode mode,
-    std::vector<net::DnsOverHttpsServerConfig> servers,
-    ManagementMode management_mode)
+    net::SecureDnsMode mode,
+    net::DnsOverHttpsConfig doh_servers,
+    ManagementMode management_mode,
+    std::vector<net::IPEndPoint> fallback_doh_nameservers)
     : mode_(mode),
-      servers_(std::move(servers)),
-      management_mode_(management_mode) {}
+      doh_servers_(std::move(doh_servers)),
+      management_mode_(management_mode),
+      fallback_doh_nameservers_(std::move(fallback_doh_nameservers)) {}
 SecureDnsConfig::SecureDnsConfig(SecureDnsConfig&& other) = default;
 SecureDnsConfig& SecureDnsConfig::operator=(SecureDnsConfig&& other) = default;
 SecureDnsConfig::~SecureDnsConfig() = default;
 
 // static
-base::Optional<net::DnsConfig::SecureDnsMode> SecureDnsConfig::ParseMode(
-    base::StringPiece name) {
+std::optional<net::SecureDnsMode> SecureDnsConfig::ParseMode(
+    std::string_view name) {
   if (name == kModeSecure) {
-    return net::DnsConfig::SecureDnsMode::SECURE;
+    return net::SecureDnsMode::kSecure;
   } else if (name == kModeAutomatic) {
-    return net::DnsConfig::SecureDnsMode::AUTOMATIC;
+    return net::SecureDnsMode::kAutomatic;
   } else if (name == kModeOff) {
-    return net::DnsConfig::SecureDnsMode::OFF;
+    return net::SecureDnsMode::kOff;
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
 // static
-const char* SecureDnsConfig::ModeToString(net::DnsConfig::SecureDnsMode mode) {
+const char* SecureDnsConfig::ModeToString(net::SecureDnsMode mode) {
   switch (mode) {
-    case net::DnsConfig::SecureDnsMode::SECURE:
+    case net::SecureDnsMode::kSecure:
       return kModeSecure;
-    case net::DnsConfig::SecureDnsMode::AUTOMATIC:
+    case net::SecureDnsMode::kAutomatic:
       return kModeAutomatic;
-    case net::DnsConfig::SecureDnsMode::OFF:
+    case net::SecureDnsMode::kOff:
       return kModeOff;
   }
 }

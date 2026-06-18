@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 #include <set>
 #include <string>
@@ -14,19 +15,17 @@
 #include "base/i18n/case_conversion.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/stl_util.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/win/registry.h"
+#include "base/win/win_util.h"
 #include "chrome/browser/install_verification/win/module_info.h"
 #include "chrome/browser/install_verification/win/module_verification_common.h"
 #include "chrome/browser/net/service_providers_win.h"
 #include "chrome/browser/safe_browsing/download_protection/path_sanitizer.h"
 #include "chrome/browser/safe_browsing/incident_reporting/module_integrity_verifier_win.h"
 #include "chrome/common/safe_browsing/binary_feature_extractor.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
 #include "components/variations/variations_associated_data.h"
 
 namespace safe_browsing {
@@ -36,40 +35,19 @@ namespace {
 const REGSAM kKeyReadNoNotify = (KEY_READ) & ~(KEY_NOTIFY);
 
 // The modules on which we will run VerifyModule.
-const wchar_t* const kModulesToVerify[] = {
+constexpr std::array<const wchar_t*, 3> kModulesToVerify = {{
     L"chrome.dll",
     L"chrome_elf.dll",
     L"ntdll.dll",
-};
+}};
 
 // The registry keys to collect data from.
-const RegistryKeyInfo kRegKeysToCollect[] = {
+const std::array<RegistryKeyInfo, 1> kRegKeysToCollect = {{
     {HKEY_CURRENT_USER, L"Software\\CSAStats"},
-};
-
-// Helper function for expanding all environment variables in |path|.
-std::wstring ExpandEnvironmentVariables(const std::wstring& path) {
-  static const DWORD kMaxBuffer = 32 * 1024;  // Max according to MSDN.
-  std::wstring path_expanded;
-  DWORD path_len = MAX_PATH;
-  do {
-    DWORD result = ExpandEnvironmentStrings(
-        path.c_str(), base::WriteInto(&path_expanded, path_len), path_len);
-    if (!result) {
-      // Failed to expand variables. Return the original string.
-      DPLOG(ERROR) << path;
-      break;
-    }
-    if (result <= path_len)
-      return path_expanded.substr(0, result - 1);
-    path_len = result;
-  } while (path_len < kMaxBuffer);
-
-  return path;
-}
+}};
 
 // Helper function to convert HKEYs to strings.
-base::string16 HKEYToString(HKEY key) {
+std::wstring HKEYToString(HKEY key) {
   DCHECK_EQ(HKEY_CURRENT_USER, key);
   return L"HKEY_CURRENT_USER";
 }
@@ -196,7 +174,7 @@ bool CollectDlls(ClientIncidentReport_EnvironmentData_Process* process) {
 
     ClientIncidentReport_EnvironmentData_Process_Dll* dll = process->add_dll();
     dll->set_path(
-        base::WideToUTF8(base::i18n::ToLower(sanitized_path.value())));
+        base::UTF16ToUTF8(base::i18n::ToLower(sanitized_path.AsUTF16Unsafe())));
     dll->set_base_address(module.base_address);
     dll->set_length(module.size);
     // TODO(grt): Consider skipping this for valid system modules.
@@ -220,9 +198,12 @@ void RecordLspFeature(ClientIncidentReport_EnvironmentData_Process* process) {
   PathSanitizer path_sanitizer;
   std::set<std::wstring> lsp_paths;
   for (size_t i = 0; i < lsp_list.size(); ++i) {
-    base::FilePath lsp_path(ExpandEnvironmentVariables(lsp_list[i].path));
+    auto expanded_path =
+        base::win::ExpandEnvironmentVariables(lsp_list[i].path);
+    base::FilePath lsp_path(expanded_path.value_or(lsp_list[i].path));
     path_sanitizer.StripHomeDirectory(&lsp_path);
-    lsp_paths.insert(base::i18n::ToLower(lsp_path.value()));
+    lsp_paths.insert(
+        base::UTF16ToWide(base::i18n::ToLower(lsp_path.AsUTF16Unsafe())));
   }
 
   // Look for a match between LSPs and loaded dlls.
@@ -235,34 +216,19 @@ void RecordLspFeature(ClientIncidentReport_EnvironmentData_Process* process) {
 }
 
 void CollectModuleVerificationData(
-    const wchar_t* const modules_to_verify[],
-    size_t num_modules_to_verify,
+    base::span<const wchar_t* const> modules_to_verify,
     ClientIncidentReport_EnvironmentData_Process* process) {
 #if !defined(_WIN64)
   using ModuleState = ClientIncidentReport_EnvironmentData_Process_ModuleState;
 
-  for (size_t i = 0; i < num_modules_to_verify; ++i) {
-    std::unique_ptr<ModuleState> module_state(new ModuleState());
+  for (const wchar_t* const module_name : modules_to_verify) {
+    auto module_state = std::make_unique<ModuleState>();
 
     int num_bytes_different = 0;
-    bool scan_complete = VerifyModule(modules_to_verify[i],
-                                      module_state.get(),
-                                      &num_bytes_different);
+    VerifyModule(module_name, module_state.get(), &num_bytes_different);
 
     if (module_state->modified_state() == ModuleState::MODULE_STATE_UNMODIFIED)
       continue;
-
-    if (module_state->modified_state() == ModuleState::MODULE_STATE_MODIFIED) {
-      UMA_HISTOGRAM_COUNTS_10000(
-          "ModuleIntegrityVerification.BytesModified.WithoutByteSet",
-          num_bytes_different);
-    }
-
-    if (!scan_complete) {
-      UMA_HISTOGRAM_EXACT_LINEAR(
-          "ModuleIntegrityVerification.RelocationsUnordered", i,
-          num_modules_to_verify);
-    }
 
     process->mutable_module_state()->AddAllocated(module_state.release());
   }
@@ -270,13 +236,11 @@ void CollectModuleVerificationData(
 }
 
 void CollectRegistryData(
-    const RegistryKeyInfo* keys_to_collect,
-    size_t num_keys_to_collect,
+    base::span<const RegistryKeyInfo> keys_to_collect,
     google::protobuf::RepeatedPtrField<
         ClientIncidentReport_EnvironmentData_OS_RegistryKey>* key_data) {
   using RegistryKeyProto = ClientIncidentReport_EnvironmentData_OS_RegistryKey;
-  for (size_t i = 0; i < num_keys_to_collect; ++i) {
-    const RegistryKeyInfo& key_info = keys_to_collect[i];
+  for (const RegistryKeyInfo& key_info : keys_to_collect) {
     base::win::RegKey reg_key(key_info.rootkey, key_info.subkey,
                               kKeyReadNoNotify);
     if (reg_key.Valid()) {
@@ -292,20 +256,18 @@ void CollectRegistryData(
 
 void CollectDomainEnrollmentData(
     ClientIncidentReport_EnvironmentData_OS* os_data) {
-  os_data->set_is_enrolled_to_domain(base::IsMachineExternallyManaged());
+  os_data->set_is_enrolled_to_domain(base::IsEnterpriseDevice());
 }
 
 void CollectPlatformProcessData(
     ClientIncidentReport_EnvironmentData_Process* process) {
   CollectDlls(process);
   RecordLspFeature(process);
-  CollectModuleVerificationData(kModulesToVerify, base::size(kModulesToVerify),
-                                process);
+  CollectModuleVerificationData(kModulesToVerify, process);
 }
 
 void CollectPlatformOSData(ClientIncidentReport_EnvironmentData_OS* os_data) {
-  CollectRegistryData(kRegKeysToCollect, base::size(kRegKeysToCollect),
-                      os_data->mutable_registry_key());
+  CollectRegistryData(kRegKeysToCollect, os_data->mutable_registry_key());
   CollectDomainEnrollmentData(os_data);
 }
 }  // namespace safe_browsing

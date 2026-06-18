@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,6 +16,7 @@ const char kMemlogModeMinimal[] = "minimal";
 const char kMemlogModeRendererSampling[] = "renderer-sampling";
 const char kMemlogModeUtilityAndBrowser[] = "utility-and-browser";
 const char kMemlogModeUtilitySampling[] = "utility-sampling";
+const char kMemlogModeAllUtilities[] = "all-utilities";
 
 const char kMemlogSamplingRate[] = "memlog-sampling-rate";
 const char kMemlogSamplingRate10KB[] = "10000";

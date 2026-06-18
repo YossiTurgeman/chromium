@@ -1,11 +1,12 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_HTTPS_STATE_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_HTTPS_STATE_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/platform/platform_export.h"
 
 namespace blink {
@@ -28,7 +29,7 @@ enum class HttpsState {
 // spec-conformant way.
 PLATFORM_EXPORT HttpsState CalculateHttpsState(
     const SecurityOrigin*,
-    base::Optional<HttpsState> parent_https_state = base::nullopt);
+    std::optional<HttpsState> parent_https_state = std::nullopt);
 
 }  // namespace blink
 

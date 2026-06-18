@@ -1,43 +1,53 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "mojo/core/broker_host.h"
 
+#include <algorithm>
+#include <array>
+#include <string_view>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/memory/platform_shared_memory_region.h"
 #include "base/memory/ref_counted.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
+#include "mojo/buildflags.h"
 #include "mojo/core/broker_messages.h"
+#include "mojo/core/ipcz_driver/envelope.h"
 #include "mojo/core/platform_handle_utils.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include <windows.h>
 #endif
 
 namespace mojo {
 namespace core {
 
-BrokerHost::BrokerHost(base::ProcessHandle client_process,
+BrokerHost::BrokerHost(base::Process client_process,
                        ConnectionParams connection_params,
                        const ProcessErrorCallback& process_error_callback)
     : process_error_callback_(process_error_callback)
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
       ,
-      client_process_(ScopedProcessHandle::CloneFrom(client_process))
+      client_process_(std::move(client_process))
 #endif
 {
-  CHECK(connection_params.endpoint().is_valid() ||
-        connection_params.server_endpoint().is_valid());
-
   base::CurrentThread::Get()->AddDestructionObserver(this);
-
+  CHECK(connection_params.endpoint().is_valid());
   channel_ = Channel::Create(this, std::move(connection_params),
-                             Channel::HandlePolicy::kAcceptHandles,
-                             base::ThreadTaskRunnerHandle::Get());
+#if BUILDFLAG(IS_WIN)
+                             client_process_
+#else
+                             client_process
+#endif
+                                     .IsValid()
+                                 ? Channel::HandlePolicy::kAcceptHandles
+                                 : Channel::HandlePolicy::kRejectHandles,
+                             base::SingleThreadTaskRunner::GetCurrentDefault());
   channel_->Start();
 }
 
@@ -45,17 +55,22 @@ BrokerHost::~BrokerHost() {
   // We're always destroyed on the creation thread, which is the IO thread.
   base::CurrentThread::Get()->RemoveDestructionObserver(this);
 
-  if (channel_)
+  if (channel_) {
     channel_->ShutDown();
+  }
 }
 
 bool BrokerHost::PrepareHandlesForClient(
     std::vector<PlatformHandleInTransit>* handles) {
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
+  if (!client_process_.IsValid()) {
+    return false;
+  }
   bool handles_ok = true;
   for (auto& handle : *handles) {
-    if (!handle.TransferToProcess(client_process_.Clone()))
+    if (!handle.TransferToProcess(client_process_.Duplicate())) {
       handles_ok = false;
+    }
   }
   return handles_ok;
 #else
@@ -67,7 +82,7 @@ bool BrokerHost::SendChannel(PlatformHandle handle) {
   CHECK(handle.is_valid());
   CHECK(channel_);
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   InitData* data;
   Channel::MessagePtr message =
       CreateBrokerMessage(BrokerMessageType::INIT, 1, 0, &data);
@@ -81,28 +96,29 @@ bool BrokerHost::SendChannel(PlatformHandle handle) {
 
   // This may legitimately fail on Windows if the client process is in another
   // session, e.g., is an elevated process.
-  if (!PrepareHandlesForClient(&handles))
+  if (!PrepareHandlesForClient(&handles)) {
     return false;
+  }
 
   message->SetHandles(std::move(handles));
   channel_->Write(std::move(message));
   return true;
 }
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 
-void BrokerHost::SendNamedChannel(const base::StringPiece16& pipe_name) {
+void BrokerHost::SendNamedChannel(std::wstring_view pipe_name) {
   InitData* data;
-  base::char16* name_data;
+  wchar_t* name_data;
   Channel::MessagePtr message = CreateBrokerMessage(
       BrokerMessageType::INIT, 0, sizeof(*name_data) * pipe_name.length(),
       &data, reinterpret_cast<void**>(&name_data));
   data->pipe_name_length = static_cast<uint32_t>(pipe_name.length());
-  std::copy(pipe_name.begin(), pipe_name.end(), name_data);
+  std::ranges::copy(pipe_name, name_data);
   channel_->Write(std::move(message));
 }
 
-#endif  // defined(OS_WIN)
+#endif  // BUILDFLAG(IS_WIN)
 
 void BrokerHost::OnBufferRequest(uint32_t num_bytes) {
   base::subtle::PlatformSharedMemoryRegion region =
@@ -111,11 +127,12 @@ void BrokerHost::OnBufferRequest(uint32_t num_bytes) {
   std::vector<PlatformHandleInTransit> handles;
   handles.reserve(2);
   if (region.IsValid()) {
-    PlatformHandle h[2];
+    std::array<PlatformHandle, 2> h;
     ExtractPlatformHandlesFromSharedMemoryRegionHandle(
         region.PassPlatformHandle(), &h[0], &h[1]);
     handles.emplace_back(std::move(h[0]));
-#if !defined(OS_POSIX) || defined(OS_ANDROID) || defined(OS_MAC)
+#if !BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_ANDROID) || \
+    BUILDFLAG(MOJO_USE_APPLE_CHANNEL)
     // Non-POSIX systems, as well as Android and Mac, only use a single handle
     // to represent a writable region.
     DCHECK(!h[1].is_valid());
@@ -142,11 +159,14 @@ void BrokerHost::OnBufferRequest(uint32_t num_bytes) {
   channel_->Write(std::move(message));
 }
 
-void BrokerHost::OnChannelMessage(const void* payload,
-                                  size_t payload_size,
-                                  std::vector<PlatformHandle> handles) {
-  if (payload_size < sizeof(BrokerMessageHeader))
+void BrokerHost::OnChannelMessage(
+    const void* payload,
+    size_t payload_size,
+    std::vector<PlatformHandle> handles,
+    scoped_refptr<ipcz_driver::Envelope> envelope) {
+  if (payload_size < sizeof(BrokerMessageHeader)) {
     return;
+  }
 
   const BrokerMessageHeader* header =
       static_cast<const BrokerMessageHeader*>(payload);
@@ -155,7 +175,7 @@ void BrokerHost::OnChannelMessage(const void* payload,
       if (payload_size ==
           sizeof(BrokerMessageHeader) + sizeof(BufferRequestData)) {
         const BufferRequestData* request =
-            reinterpret_cast<const BufferRequestData*>(header + 1);
+            reinterpret_cast<const BufferRequestData*>(UNSAFE_TODO(header + 1));
         OnBufferRequest(request->size);
       }
       break;

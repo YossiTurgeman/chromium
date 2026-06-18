@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,7 +7,7 @@ from writers import gpo_editor_writer
 import re
 
 NEWLINE = '\r\n'
-POLICY_LIST_URL = '''https://cloud.google.com/docs/chrome-enterprise/policies/?policy='''
+POLICY_LIST_URL = '''https://chromeenterprise.google/policies/?policy='''
 
 
 def GetWriter(config):

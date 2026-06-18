@@ -1,13 +1,18 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.android_webview.test;
 
-import android.support.test.InstrumentationRegistry;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.MatcherAssert.assertThat;
+
 import android.util.Pair;
+import android.webkit.JavascriptInterface;
 
 import androidx.annotation.IntDef;
+import androidx.test.InstrumentationRegistry;
 import androidx.test.filters.MediumTest;
 import androidx.test.filters.SmallTest;
 
@@ -19,17 +24,23 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.UseParametersRunnerFactory;
 
 import org.chromium.android_webview.AwContents;
 import org.chromium.android_webview.AwCookieManager;
 import org.chromium.android_webview.AwSettings;
+import org.chromium.android_webview.common.AwSwitches;
 import org.chromium.android_webview.test.util.CookieUtils;
 import org.chromium.android_webview.test.util.CookieUtils.TestCallback;
 import org.chromium.android_webview.test.util.JSUtils;
+import org.chromium.base.ApkInfo;
 import org.chromium.base.Callback;
-import org.chromium.base.metrics.RecordHistogram;
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.DisabledTest;
+import org.chromium.base.test.util.DoNotBatch;
 import org.chromium.base.test.util.Feature;
+import org.chromium.base.test.util.HistogramWatcher;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.content_public.browser.test.util.JavaScriptUtils;
 import org.chromium.net.test.EmbeddedTestServer;
@@ -37,36 +48,43 @@ import org.chromium.net.test.util.TestWebServer;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TimeZone;
+import java.util.concurrent.LinkedBlockingQueue;
 
-/**
- * Tests for the CookieManager.
- */
-@RunWith(AwJUnit4ClassRunner.class)
-public class CookieManagerTest {
-    @Rule
-    public AwActivityTestRule mActivityTestRule = new AwActivityTestRule();
+/** Tests for the CookieManager. */
+@DoNotBatch(reason = "CookieManager is global state, so we use a fresh process out of caution.")
+@RunWith(Parameterized.class)
+@UseParametersRunnerFactory(AwJUnit4ClassRunnerWithParameters.Factory.class)
+public class CookieManagerTest extends AwParameterizedTest {
+    @Rule public AwActivityTestRule mActivityTestRule;
 
-    @IntDef({CookieLifetime.OUTLIVE_THE_TEST_SEC, CookieLifetime.EXPIRE_DURING_TEST_SEC,
-            CookieLifetime.ALREADY_EXPIRED_SEC})
+    @IntDef({
+        CookieLifetime.OUTLIVE_THE_TEST_SEC,
+        CookieLifetime.EXPIRE_DURING_TEST_SEC,
+        CookieLifetime.ALREADY_EXPIRED_SEC
+    })
     @Retention(RetentionPolicy.SOURCE)
     @interface CookieLifetime {
         /** Longer than the limit of tests, so cookies will not expire during the test. */
-        final int OUTLIVE_THE_TEST_SEC = 10 * 60; // 10 minutes
+        int OUTLIVE_THE_TEST_SEC = 10 * 60; // 10 minutes
 
         /**
          * Shorter than the limit of tests, so cookies may expire during the test. Be sure to wait
          * at least this duration after <b>setting</b> the cookie (ex. via {@link
          * AwCookieManager#setCookie(String)}).
          */
-        final int EXPIRE_DURING_TEST_SEC = 1;
+        int EXPIRE_DURING_TEST_SEC = 1;
 
         /** Guarantees the cookie is expired, immediately when set. */
-        final int ALREADY_EXPIRED_SEC = -1;
+        int ALREADY_EXPIRED_SEC = -1;
     }
 
     private AwCookieManager mCookieManager;
@@ -74,6 +92,10 @@ public class CookieManagerTest {
     private AwContents mAwContents;
 
     private static final String SECURE_COOKIE_HISTOGRAM_NAME = "Android.WebView.SecureCookieAction";
+
+    public CookieManagerTest(AwSettingsMutation param) {
+        this.mActivityTestRule = new AwActivityTestRule(param.getMutation());
+    }
 
     @Before
     public void setUp() {
@@ -88,10 +110,12 @@ public class CookieManagerTest {
 
     @After
     public void tearDown() {
+        // Even though we use a fresh process, we still need to clear cookie state off of disk so
+        // that it's not read in for the next test case.
         try {
             clearCookies();
         } catch (Throwable e) {
-            throw new RuntimeException("Could not clear cookies.");
+            throw new RuntimeException("Could not clear cookies.", e);
         }
     }
 
@@ -99,7 +123,8 @@ public class CookieManagerTest {
     @SmallTest
     @Feature({"AndroidWebView", "Privacy"})
     public void testAcceptCookie_default() {
-        Assert.assertTrue("Expected CookieManager to accept cookies by default",
+        Assert.assertTrue(
+                "Expected CookieManager to accept cookies by default",
                 mCookieManager.acceptCookie());
     }
 
@@ -108,10 +133,12 @@ public class CookieManagerTest {
     @Feature({"AndroidWebView", "Privacy"})
     public void testAcceptCookie_setterGetterFunctionality() {
         mCookieManager.setAcceptCookie(false);
-        Assert.assertFalse("Expected #acceptCookie() to return false after setAcceptCookie(false)",
+        Assert.assertFalse(
+                "Expected #acceptCookie() to return false after setAcceptCookie(false)",
                 mCookieManager.acceptCookie());
         mCookieManager.setAcceptCookie(true);
-        Assert.assertTrue("Expected #acceptCookie() to return true after setAcceptCookie(true)",
+        Assert.assertTrue(
+                "Expected #acceptCookie() to return true after setAcceptCookie(true)",
                 mCookieManager.acceptCookie());
     }
 
@@ -176,8 +203,6 @@ public class CookieManagerTest {
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
-    @CommandLineFlags.Add({"enable-blink-features=CookieStoreDocument"})
-    // TODO(https://crbug.com/968649) Remove switch when CookieStore launched.
     public void testAcceptCookie_falseWontSetCookies() throws Throwable {
         testAcceptCookieHelper(false, "-disabled");
     }
@@ -185,8 +210,6 @@ public class CookieManagerTest {
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
-    @CommandLineFlags.Add({"enable-blink-features=CookieStoreDocument"})
-    // TODO(https://crbug.com/968649) Remove switch when CookieStore launched.
     public void testAcceptCookie_trueWillSetCookies() throws Throwable {
         testAcceptCookieHelper(true, "-enabled");
     }
@@ -198,32 +221,26 @@ public class CookieManagerTest {
         blockAllCookies();
         AwActivityTestRule.enableJavaScriptOnUiThread(mAwContents);
 
-        EmbeddedTestServer embeddedTestServer = EmbeddedTestServer.createAndStartServer(
-                InstrumentationRegistry.getInstrumentation().getContext());
-        try {
-            final String url = embeddedTestServer.getURL("/echoheader?Cookie");
-            String cookieName = "java-test";
-            mCookieManager.setCookie(url, cookieName + "=should-not-work");
-
-            // Setting cookies should still affect the CookieManager itself
-            assertHasCookies(url);
-
-            mActivityTestRule.loadUrlSync(
-                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
-            String jsValue = getCookieWithJavaScript(cookieName);
-            String message =
-                    "WebView should not expose cookies to JavaScript (with setAcceptCookie "
-                    + "disabled)";
-            Assert.assertEquals(message, "\"\"", jsValue);
-
-            final String cookieHeader = mActivityTestRule.getJavaScriptResultBodyTextContent(
-                    mAwContents, mContentsClient);
-            message = "WebView should not expose cookies via the Cookie header (with "
-                    + "setAcceptCookie disabled)";
-            Assert.assertEquals(message, "None", cookieHeader);
-        } finally {
-            embeddedTestServer.stopAndDestroyServer();
-        }
+        EmbeddedTestServer embeddedTestServer =
+                EmbeddedTestServer.createAndStartServer(
+                        InstrumentationRegistry.getInstrumentation().getContext());
+        final String url = embeddedTestServer.getURL("/echoheader?Cookie");
+        String cookieName = "java-test";
+        mCookieManager.setCookie(url, cookieName + "=should-not-work");
+        // Setting cookies should still affect the CookieManager itself
+        assertHasCookies(url);
+        mActivityTestRule.loadUrlSync(mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+        String jsValue = getCookieWithJavaScript(cookieName);
+        String message =
+                "WebView should not expose cookies to JavaScript (with setAcceptCookie "
+                        + "disabled)";
+        Assert.assertEquals(message, "\"\"", jsValue);
+        final String cookieHeader =
+                mActivityTestRule.getJavaScriptResultBodyTextContent(mAwContents, mContentsClient);
+        message =
+                "WebView should not expose cookies via the Cookie header (with "
+                        + "setAcceptCookie disabled)";
+        Assert.assertEquals(message, "None", cookieHeader);
     }
 
     @Test
@@ -234,8 +251,11 @@ public class CookieManagerTest {
         try {
             // Set a cookie with the httponly flag, one with samesite=Strict, and one with
             // samesite=Lax, to ensure that they are all visible to CookieManager in the app.
-            String cookies[] = {"httponly=foo1; HttpOnly", "strictsamesite=foo2; SameSite=Strict",
-                    "laxsamesite=foo3; SameSite=Lax"};
+            String[] cookies = {
+                "httponly=foo1; HttpOnly",
+                "strictsamesite=foo2; SameSite=Strict",
+                "laxsamesite=foo3; SameSite=Lax"
+            };
             List<Pair<String, String>> responseHeaders = new ArrayList<Pair<String, String>>();
             for (String cookie : cookies) {
                 responseHeaders.add(Pair.create("Set-Cookie", cookie));
@@ -251,21 +271,78 @@ public class CookieManagerTest {
         }
     }
 
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView"})
+    public void testEmbedderCanSeePartitionedCookies() throws Throwable {
+        TestWebServer webServer = TestWebServer.start();
+        try {
+            // Set a partitioned cookie and an unpartitioned cookie to ensure that they are all
+            // visible to CookieManager in the app.
+            String[] cookies = {
+                "partitioned_cookie=foo; SameSite=None; Secure; Partitioned",
+                "unpartitioned_cookie=bar; SameSite=None; Secure"
+            };
+            List<Pair<String, String>> responseHeaders = new ArrayList<Pair<String, String>>();
+            for (String cookie : cookies) {
+                responseHeaders.add(Pair.create("Set-Cookie", cookie));
+            }
+            String url = webServer.setResponse("/", "test", responseHeaders);
+            mActivityTestRule.loadUrlSync(
+                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+            waitForCookie(url);
+            assertHasCookies(url);
+            validateCookies(url, "partitioned_cookie", "unpartitioned_cookie");
+        } finally {
+            webServer.shutdown();
+        }
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView"})
+    public void setPartitionedCookieWithCookieManager() throws Throwable {
+        TestWebServer webServer = TestWebServer.start();
+        try {
+            final String url = "https://www.example.com";
+            mCookieManager.setCookie(
+                    url, "partitioned=foo;Path=/;Secure;Partitioned;SameSite=None");
+
+            final String expected =
+                    "partitioned=foo; domain=www.example.com; path=/; "
+                            + "secure; partitioned; samesite=none";
+            List<String> cookieInfo = mCookieManager.getCookieInfo(url);
+            Assert.assertNotNull(cookieInfo);
+            Assert.assertFalse("cookieInfo should not be empty", cookieInfo.isEmpty());
+            Assert.assertEquals(expected, cookieInfo.get(0));
+        } finally {
+            webServer.shutdown();
+        }
+    }
+
     private void setCookieWithDocumentCookieAPI(final String name, final String value)
             throws Throwable {
-        JSUtils.executeJavaScriptAndWaitForResult(InstrumentationRegistry.getInstrumentation(),
-                mAwContents, mContentsClient.getOnEvaluateJavaScriptResultHelper(),
+        JSUtils.executeJavaScriptAndWaitForResult(
+                InstrumentationRegistry.getInstrumentation(),
+                mAwContents,
+                mContentsClient.getOnEvaluateJavaScriptResultHelper(),
                 "var expirationDate = new Date();"
                         + "expirationDate.setDate(expirationDate.getDate() + 5);"
-                        + "document.cookie='" + name + "=" + value
+                        + "document.cookie='"
+                        + name
+                        + "="
+                        + value
                         + "; expires=' + expirationDate.toUTCString();");
     }
 
     private void setCookieWithCookieStoreAPI(final String name, final String value)
             throws Throwable {
-        JavaScriptUtils.runJavascriptWithAsyncResult(mAwContents.getWebContents(),
+        JavaScriptUtils.runJavascriptWithAsyncResult(
+                mAwContents.getWebContents(),
                 "async function doSet() {"
-                        + makeCookieStoreSetFragment("'" + name + "'", "'" + value + "'",
+                        + makeCookieStoreSetFragment(
+                                "'" + name + "'",
+                                "'" + value + "'",
                                 "window.domAutomationController.send(true);")
                         + "}\n"
                         + "doSet()");
@@ -273,8 +350,10 @@ public class CookieManagerTest {
 
     private String getCookieWithJavaScript(final String name) throws Throwable {
         return JSUtils.executeJavaScriptAndWaitForResult(
-                InstrumentationRegistry.getInstrumentation(), mAwContents,
-                mContentsClient.getOnEvaluateJavaScriptResultHelper(), "document.cookie");
+                InstrumentationRegistry.getInstrumentation(),
+                mAwContents,
+                mContentsClient.getOnEvaluateJavaScriptResultHelper(),
+                "document.cookie");
     }
 
     @Test
@@ -286,6 +365,17 @@ public class CookieManagerTest {
         assertHasCookies(cookieUrl);
         mCookieManager.removeAllCookies();
         assertNoCookies();
+    }
+
+    @Test
+    @SmallTest
+    @Feature({"AndroidWebView", "Privacy"})
+    @CommandLineFlags.Add({AwSwitches.WEBVIEW_FORCE_DISABLE3PCS})
+    public void testForceDisable3pcs() {
+        mAwContents.getSettings().setAcceptThirdPartyCookies(true);
+        Assert.assertFalse(
+                "Third party cookies should stay disabled if they were forced disabled",
+                mAwContents.getSettings().getAcceptThirdPartyCookies());
     }
 
     @Test
@@ -310,18 +400,80 @@ public class CookieManagerTest {
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
+    public void testGetCookieInfo_singleCookie() {
+        final String url = "http://www.example.com";
+        final String formattedDate = getHttpCookieExpiryDate();
+
+        final String cookieString =
+                "cookie=test; Domain=.example.com; Path=/; Expires=" + formattedDate;
+        final String expected =
+                "cookie=test; domain=.example.com; path=/; expires=" + formattedDate;
+
+        allowThirdPartyCookies(mAwContents);
+        mCookieManager.setCookie(url, cookieString);
+        List<String> cookieInfo = mCookieManager.getCookieInfo(url);
+
+        Assert.assertNotNull(cookieInfo);
+        Assert.assertEquals(expected, cookieInfo.get(0));
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testGetCookieInfo_twoCookies() {
+        final String url = "http://www.example.com";
+        final String formattedDate = getHttpCookieExpiryDate();
+
+        final String cookie1String =
+                "cookie1=test1; Domain=example.com; Path=/; Expires=" + formattedDate;
+        final String cookie2String =
+                "cookie2=test2; SameSite=Lax; HttpOnly; Expires=" + formattedDate;
+        final String expected1 =
+                "cookie1=test1; domain=.example.com; path=/; expires=" + formattedDate;
+        final String expected2 =
+                "cookie2=test2; domain=www.example.com; path=/; expires="
+                        + formattedDate
+                        + "; httponly; samesite=lax";
+
+        allowThirdPartyCookies(mAwContents);
+        mCookieManager.setCookie(url, cookie1String);
+        mCookieManager.setCookie(url, cookie2String);
+        List<String> cookieInfo = mCookieManager.getCookieInfo(url);
+
+        Assert.assertNotNull(cookieInfo);
+        Assert.assertEquals(expected1, cookieInfo.get(0));
+        Assert.assertEquals(expected2, cookieInfo.get(1));
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testGetCookieInfo_emptyCookie() {
+        final String url = "http://www.example.com";
+
+        final String cookieString = "cookie1=test1";
+        final String expected = "cookie1=test1; domain=www.example.com; path=/";
+
+        allowThirdPartyCookies(mAwContents);
+        mCookieManager.setCookie(url, cookieString);
+        List<String> cookieInfo = mCookieManager.getCookieInfo(url);
+
+        Assert.assertNotNull(cookieInfo);
+        Assert.assertEquals(expected, cookieInfo.get(0));
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
     public void testSetCookie() {
-        Assert.assertEquals(
-                0, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
+        HistogramWatcher histogramExpectation =
+                HistogramWatcher.newSingleRecordWatcher(
+                        SECURE_COOKIE_HISTOGRAM_NAME, /* value= */ 3);
         String url = "http://www.example.com";
         String cookie = "name=test";
         mCookieManager.setCookie(url, cookie);
         assertCookieEquals(cookie, url);
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramValueCountForTesting(
-                        SECURE_COOKIE_HISTOGRAM_NAME, 3 /* kNotASecureCookie */));
+        histogramExpectation.assertExpected();
     }
 
     @Test
@@ -337,14 +489,12 @@ public class CookieManagerTest {
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
-    public void testSetCookieWithDomainForUrl() {
-        // If the app passes ".www.example.com" or "http://.www.example.com", the glue layer "fixes"
-        // this to "http:///.www.example.com"
-        String url = "http:///.www.example.com";
+    public void testSetCookieWithDomainForUrl() throws Throwable {
+        String url = ".www.example.com";
         String sameSubdomainUrl = "http://a.www.example.com";
         String differentSubdomainUrl = "http://different.sub.example.com";
         String cookie = "name=test";
-        mCookieManager.setCookie(url, cookie);
+        mCookieManager.setCookieWithUrlFixup(url, cookie);
         assertCookieEquals(cookie, sameSubdomainUrl);
         assertNoCookies(differentSubdomainUrl);
     }
@@ -352,24 +502,25 @@ public class CookieManagerTest {
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
-    public void testSetCookieWithDomainForUrlAndExistingDomainAttribute() {
-        String url = "http:///.www.example.com";
+    public void testSetCookieWithDomainForUrlAndExistingDomainAttribute() throws Throwable {
+        String url = ".www.example.com";
+        String sameSubdomainUrl = "http://a.www.example.com";
         String differentSubdomainUrl = "http://different.sub.example.com";
         String cookie = "name=test";
-        mCookieManager.setCookie(url, cookie + "; doMaIN \t  =.example.com");
-        assertCookieEquals(cookie, url);
+        mCookieManager.setCookieWithUrlFixup(url, cookie + "; doMaIN \t  =.example.com");
+        assertCookieEquals(cookie, sameSubdomainUrl);
         assertCookieEquals(cookie, differentSubdomainUrl);
     }
 
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
-    public void testSetCookieWithDomainForUrlWithTrailingSemicolonInCookie() {
-        String url = "http:///.www.example.com";
+    public void testSetCookieWithDomainForUrlWithTrailingSemicolonInCookie() throws Throwable {
+        String url = ".www.example.com";
         String sameSubdomainUrl = "http://a.www.example.com";
         String differentSubdomainUrl = "http://different.sub.example.com";
         String cookie = "name=test";
-        mCookieManager.setCookie(url, cookie + ";");
+        mCookieManager.setCookieWithUrlFixup(url, cookie + ";");
         assertCookieEquals(cookie, sameSubdomainUrl);
         assertNoCookies(differentSubdomainUrl);
     }
@@ -378,9 +529,11 @@ public class CookieManagerTest {
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
     public void testSetSecureCookieForHttpUrlNotTargetingAndroidR() {
+        HistogramWatcher histogramExpectation =
+                HistogramWatcher.newSingleRecordWatcher(
+                        SECURE_COOKIE_HISTOGRAM_NAME, /* value= */ 4);
+
         mCookieManager.setWorkaroundHttpSecureCookiesForTesting(true);
-        Assert.assertEquals(
-                0, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
         String url = "http://www.example.com";
         String secureUrl = "https://www.example.com";
         String cookie = "name=test";
@@ -388,20 +541,18 @@ public class CookieManagerTest {
 
         Assert.assertTrue("Setting the cookie should succeed", success);
         assertCookieEquals(cookie, secureUrl);
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramValueCountForTesting(
-                        SECURE_COOKIE_HISTOGRAM_NAME, 4 /* kFixedUp */));
+        histogramExpectation.assertExpected();
     }
 
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
     public void testSetSecureCookieForHttpUrlTargetingAndroidR() {
+        HistogramWatcher histogramExpectation =
+                HistogramWatcher.newSingleRecordWatcher(
+                        SECURE_COOKIE_HISTOGRAM_NAME, /* value= */ 5);
+
         mCookieManager.setWorkaroundHttpSecureCookiesForTesting(false);
-        Assert.assertEquals(
-                0, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
         String url = "http://www.example.com";
         String secureUrl = "https://www.example.com";
         String cookie = "name=test";
@@ -410,29 +561,22 @@ public class CookieManagerTest {
         Assert.assertFalse("Setting the cookie should fail", success);
         assertNoCookies(url);
         assertNoCookies(secureUrl);
-
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramValueCountForTesting(
-                        SECURE_COOKIE_HISTOGRAM_NAME, 5 /* kDisallowedAndroidR */));
+        histogramExpectation.assertExpected();
     }
 
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
     public void testSetSecureCookieForHttpsUrl() {
-        Assert.assertEquals(
-                0, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
+        HistogramWatcher histogramExpectation =
+                HistogramWatcher.newSingleRecordWatcher(
+                        SECURE_COOKIE_HISTOGRAM_NAME, /* value= */ 1);
+
         String secureUrl = "https://www.example.com";
         String cookie = "name=test";
         mCookieManager.setCookie(secureUrl, cookie + ";secure");
         assertCookieEquals(cookie, secureUrl);
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramValueCountForTesting(
-                        SECURE_COOKIE_HISTOGRAM_NAME, 1 /* kAlreadySecureScheme */));
+        histogramExpectation.assertExpected();
     }
 
     @Test
@@ -464,6 +608,9 @@ public class CookieManagerTest {
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
     public void testSetCookieCallback_badUrl() throws Throwable {
+        HistogramWatcher histogramExpectation =
+                HistogramWatcher.newSingleRecordWatcher(
+                        SECURE_COOKIE_HISTOGRAM_NAME, /* value= */ 0);
         final String cookie = "name=test";
         final String brokenUrl = "foo";
 
@@ -474,11 +621,7 @@ public class CookieManagerTest {
         callback.getOnResultHelper().waitForCallback(callCount);
         Assert.assertFalse("Cookie should not be set for bad URLs", callback.getValue());
         assertNoCookies(brokenUrl);
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting(SECURE_COOKIE_HISTOGRAM_NAME));
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramValueCountForTesting(
-                        SECURE_COOKIE_HISTOGRAM_NAME, 0 /* kInvalidUrl */));
+        histogramExpectation.assertExpected();
     }
 
     @Test
@@ -580,10 +723,11 @@ public class CookieManagerTest {
         mCookieManager.removeSessionCookies(null);
 
         // Eventually the session cookie is removed.
-        AwActivityTestRule.pollInstrumentationThread(() -> {
-            String c = mCookieManager.getCookie(url);
-            return !c.contains(sessionCookie) && c.contains(normalCookie);
-        });
+        AwActivityTestRule.pollInstrumentationThread(
+                () -> {
+                    String c = mCookieManager.getCookie(url);
+                    return !c.contains(sessionCookie) && c.contains(normalCookie);
+                });
     }
 
     @Test
@@ -658,8 +802,8 @@ public class CookieManagerTest {
 
             // We can't set third party cookies.
             // First on the third party server we create a url which tries to set a cookie.
-            String cookieUrl = toThirdPartyUrl(
-                    makeCookieUrl(webServer, "/cookie_1.js", "test1", "value1"));
+            String cookieUrl =
+                    toThirdPartyUrl(makeCookieUrl(webServer, "/cookie_1.js", "test1", "value1"));
             // Then we create a url on the first party server which links to the first url.
             String url = makeScriptLinkUrl(webServer, "/content_1.html", cookieUrl);
             mActivityTestRule.loadUrlSync(
@@ -669,8 +813,8 @@ public class CookieManagerTest {
             allowThirdPartyCookies(mAwContents);
 
             // We can set third party cookies.
-            cookieUrl = toThirdPartyUrl(
-                    makeCookieUrl(webServer, "/cookie_2.js", "test2", "value2"));
+            cookieUrl =
+                    toThirdPartyUrl(makeCookieUrl(webServer, "/cookie_2.js", "test2", "value2"));
             url = makeScriptLinkUrl(webServer, "/content_2.html", cookieUrl);
             mActivityTestRule.loadUrlSync(
                     mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
@@ -684,9 +828,8 @@ public class CookieManagerTest {
 
     @Test
     @MediumTest
+    @DisabledTest(message = "https://crbug.com/1323719")
     @Feature({"AndroidWebView", "Privacy"})
-    @CommandLineFlags.Add({"enable-blink-features=CookieStoreDocument"})
-    // TODO(https://crbug.com/968649) Remove switch when CookieStore launched.
     public void testCookieStoreListener() throws Throwable {
         TestWebServer webServer = TestWebServer.startSsl();
         try {
@@ -697,8 +840,10 @@ public class CookieManagerTest {
                     mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
 
             // Add a listener...
-            JSUtils.executeJavaScriptAndWaitForResult(InstrumentationRegistry.getInstrumentation(),
-                    mAwContents, mContentsClient.getOnEvaluateJavaScriptResultHelper(),
+            JSUtils.executeJavaScriptAndWaitForResult(
+                    InstrumentationRegistry.getInstrumentation(),
+                    mAwContents,
+                    mContentsClient.getOnEvaluateJavaScriptResultHelper(),
                     "window.events = [];"
                             + "cookieStore.addEventListener('change', (event) => {"
                             + "  for (let d of event.deleted)"
@@ -718,9 +863,12 @@ public class CookieManagerTest {
             // Look up the result. Should see the second set, but not the
             // delete, based on whether cookie access was permitted or not
             // at the time.
-            String reported = JSUtils.executeJavaScriptAndWaitForResult(
-                    InstrumentationRegistry.getInstrumentation(), mAwContents,
-                    mContentsClient.getOnEvaluateJavaScriptResultHelper(), "window.events");
+            String reported =
+                    JSUtils.executeJavaScriptAndWaitForResult(
+                            InstrumentationRegistry.getInstrumentation(),
+                            mAwContents,
+                            mContentsClient.getOnEvaluateJavaScriptResultHelper(),
+                            "window.events");
             Assert.assertEquals("[{\"change\":\"test2\"}]", reported);
         } finally {
             webServer.shutdown();
@@ -741,8 +889,9 @@ public class CookieManagerTest {
             // successfully set its cookies (because it's first-party).
             String resourcePath = "/cookie_1.js";
             String firstPartyCookieUrl = makeCookieUrl(webServer, resourcePath, "test1", "value1");
-            String thirdPartyRedirectUrl = toThirdPartyUrl(
-                    webServer.setRedirect("/redirect_cookie_1.js", firstPartyCookieUrl));
+            String thirdPartyRedirectUrl =
+                    toThirdPartyUrl(
+                            webServer.setRedirect("/redirect_cookie_1.js", firstPartyCookieUrl));
             String contentUrl =
                     makeScriptLinkUrl(webServer, "/content_1.html", thirdPartyRedirectUrl);
             mActivityTestRule.loadUrlSync(
@@ -800,10 +949,12 @@ public class CookieManagerTest {
             String readyState = connecting;
             WebContents webContents = mAwContents.getWebContents();
             while (!readyState.equals(closed)) {
-                readyState = JavaScriptUtils.executeJavaScriptAndWaitForResult(
-                        webContents, "ws.readyState");
+                readyState =
+                        JavaScriptUtils.executeJavaScriptAndWaitForResult(
+                                webContents, "ws.readyState");
             }
-            Assert.assertEquals("true",
+            Assert.assertEquals(
+                    "true",
                     JavaScriptUtils.executeJavaScriptAndWaitForResult(webContents, "hasOpened"));
             return mCookieManager.getCookie(cookieUrl);
         } finally {
@@ -819,8 +970,9 @@ public class CookieManagerTest {
         allowThirdPartyCookies(mAwContents);
         String cookieKey = "test1";
         String cookieValue = "value1";
-        Assert.assertEquals(cookieKey + "=" + cookieValue,
-                webSocketCookieHelper(true /* shouldUseThirdPartyUrl */, cookieKey, cookieValue));
+        Assert.assertEquals(
+                cookieKey + "=" + cookieValue,
+                webSocketCookieHelper(/* shouldUseThirdPartyUrl= */ true, cookieKey, cookieValue));
     }
 
     @Test
@@ -831,8 +983,9 @@ public class CookieManagerTest {
         blockThirdPartyCookies(mAwContents);
         String cookieKey = "test1";
         String cookieValue = "value1";
-        Assert.assertNull("Should not set 3P cookie when 3P cookie settings are disabled",
-                webSocketCookieHelper(true /* shouldUseThirdPartyUrl */, cookieKey, cookieValue));
+        Assert.assertNull(
+                "Should not set 3P cookie when 3P cookie settings are disabled",
+                webSocketCookieHelper(/* shouldUseThirdPartyUrl= */ true, cookieKey, cookieValue));
     }
 
     @Test
@@ -843,8 +996,9 @@ public class CookieManagerTest {
         allowThirdPartyCookies(mAwContents);
         String cookieKey = "test1";
         String cookieValue = "value1";
-        Assert.assertEquals(cookieKey + "=" + cookieValue,
-                webSocketCookieHelper(false /* shouldUseThirdPartyUrl */, cookieKey, cookieValue));
+        Assert.assertEquals(
+                cookieKey + "=" + cookieValue,
+                webSocketCookieHelper(/* shouldUseThirdPartyUrl= */ false, cookieKey, cookieValue));
     }
 
     @Test
@@ -854,8 +1008,9 @@ public class CookieManagerTest {
         blockAllCookies();
         String cookieKey = "test1";
         String cookieValue = "value1";
-        Assert.assertNull("Should not set 1P cookie when 1P cookie settings are disabled",
-                webSocketCookieHelper(false /* shouldUseThirdPartyUrl */, cookieKey, cookieValue));
+        Assert.assertNull(
+                "Should not set 1P cookie when 1P cookie settings are disabled",
+                webSocketCookieHelper(/* shouldUseThirdPartyUrl= */ false, cookieKey, cookieValue));
     }
 
     // Tests websockets inside third party frame --- the socket is first party to the frame,
@@ -865,13 +1020,16 @@ public class CookieManagerTest {
         TestWebServer webServer = TestWebServer.startSsl();
         try {
             // |cookieUrl| sets a cookie on response.
-            String cookieUrl = toThirdPartyUrl(
-                    makeCookieWebSocketUrl(webServer, "/cookie_1", cookieKey, cookieValue));
+            String cookieUrl =
+                    toThirdPartyUrl(
+                            makeCookieWebSocketUrl(webServer, "/cookie_1", cookieKey, cookieValue));
 
             // This html file includes a script establishing a WebSocket connection to |cookieUrl|,
             // with wrappers to talk to parent frame.
-            String childFrameUrl = toThirdPartyUrl(makeFrameableWebSocketScriptUrl(
-                    webServer, "/frame_with_websocket.html", cookieUrl));
+            String childFrameUrl =
+                    toThirdPartyUrl(
+                            makeFrameableWebSocketScriptUrl(
+                                    webServer, "/frame_with_websocket.html", cookieUrl));
 
             // Wrap that in an iframe on the default domain to make it be third-party, and load it.
             String url = makeIframeUrl(webServer, "/parent.html", childFrameUrl);
@@ -899,7 +1057,8 @@ public class CookieManagerTest {
         String cookieKey = "test3PFrame";
         String cookieValue = "value3PFrame";
 
-        Assert.assertNull("Should not set cookie in 3P frame when 3P cookies are disabled",
+        Assert.assertNull(
+                "Should not set cookie in 3P frame when 3P cookies are disabled",
                 webSocketThirdPartyFrameCookieHelper(cookieKey, cookieValue));
     }
 
@@ -914,7 +1073,8 @@ public class CookieManagerTest {
         String cookieKey = "test3PFrame";
         String cookieValue = "value3PFrame";
 
-        Assert.assertEquals(cookieKey + "=" + cookieValue,
+        Assert.assertEquals(
+                cookieKey + "=" + cookieValue,
                 webSocketThirdPartyFrameCookieHelper(cookieKey, cookieValue));
     }
 
@@ -929,8 +1089,7 @@ public class CookieManagerTest {
     private String makeCookieUrl(TestWebServer webServer, String path, String key, String value) {
         String response = "";
         List<Pair<String, String>> responseHeaders = new ArrayList<Pair<String, String>>();
-        responseHeaders.add(
-                Pair.create("Set-Cookie", key + "=" + value + "; path=" + path));
+        responseHeaders.add(Pair.create("Set-Cookie", key + "=" + value + "; path=" + path));
         return webServer.setResponse(path, response, responseHeaders);
     }
 
@@ -958,8 +1117,11 @@ public class CookieManagerTest {
      * @return  the url which gets the response
      */
     private String makeScriptLinkUrl(TestWebServer webServer, String path, String url) {
-        String responseStr = "<html><head><title>Content!</title></head>"
-                + "<body><script src=" + url + "></script></body></html>";
+        String responseStr =
+                "<html><head><title>Content!</title></head>"
+                        + "<body><script src="
+                        + url
+                        + "></script></body></html>";
         return webServer.setResponse(path, responseStr, null);
     }
 
@@ -972,12 +1134,15 @@ public class CookieManagerTest {
      * @return  the url which gets the response
      */
     private String makeWebSocketScriptUrl(TestWebServer webServer, String path, String url) {
-        String responseStr = "<html><head><title>Content!</title></head>"
-                + "<body><script>\n"
-                + "let ws = new WebSocket('" + url.replaceAll("^http", "ws") + "');\n"
-                + "let hasOpened = false;\n"
-                + "ws.onopen = () => hasOpened = true;\n"
-                + "</script></body></html>";
+        String responseStr =
+                "<html><head><title>Content!</title></head>"
+                        + "<body><script>\n"
+                        + "let ws = new WebSocket('"
+                        + url.replaceAll("^http", "ws")
+                        + "');\n"
+                        + "let hasOpened = false;\n"
+                        + "ws.onopen = () => hasOpened = true;\n"
+                        + "</script></body></html>";
         return webServer.setResponse(path, responseStr, null);
     }
 
@@ -991,28 +1156,28 @@ public class CookieManagerTest {
      */
     private String makeFrameableWebSocketScriptUrl(
             TestWebServer webServer, String path, String url) {
-        String responseStr = "<html><head><title>Content!</title></head>"
-                + "<body><script>\n"
-                + "window.onmessage = function(ev) {"
-                + "  let ws = new WebSocket('" + url.replaceAll("^http", "ws") + "');\n"
-                + "  ws.onopen = () => ev.source.postMessage(true, '*');\n"
-                + "}\n"
-                + "</script></body></html>";
+        String responseStr =
+                "<html><head><title>Content!</title></head>"
+                        + "<body><script>\n"
+                        + "window.onmessage = function(ev) {"
+                        + "  let ws = new WebSocket('"
+                        + url.replaceAll("^http", "ws")
+                        + "');\n"
+                        + "  ws.onopen = () => ev.source.postMessage(true, '*');\n"
+                        + "}\n"
+                        + "</script></body></html>";
         return webServer.setResponse(path, responseStr, null);
     }
 
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
-    @CommandLineFlags.Add({"enable-blink-features=CookieStoreDocument"})
-    // TODO(https://crbug.com/968649) Remove switch when CookieStore launched.
     public void testThirdPartyJavascriptCookie() throws Throwable {
         // Using SSL server here since CookieStore API requires a secure schema.
         TestWebServer webServer = TestWebServer.startSsl();
         try {
             // This test again uses 127.0.0.1/localhost trick to simulate a third party.
-            ThirdPartyCookiesTestHelper thirdParty =
-                    new ThirdPartyCookiesTestHelper(webServer);
+            ThirdPartyCookiesTestHelper thirdParty = new ThirdPartyCookiesTestHelper(webServer);
 
             allowFirstPartyCookies();
             blockThirdPartyCookies(thirdParty.getAwContents());
@@ -1032,8 +1197,6 @@ public class CookieManagerTest {
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
-    @CommandLineFlags.Add({"enable-blink-features=CookieStoreDocument"})
-    // TODO(https://crbug.com/968649) Remove switch when CookieStore launched.
     public void testThirdPartyCookiesArePerWebview() throws Throwable {
         // Using SSL server here since CookieStore API requires a secure schema.
         TestWebServer webServer = TestWebServer.startSsl();
@@ -1051,19 +1214,22 @@ public class CookieManagerTest {
             helperTwo.assertThirdPartyIFrameCookieResult("2", false);
 
             allowThirdPartyCookies(helperTwo.getAwContents());
-            Assert.assertFalse("helperOne's third-party cookie setting should be unaffected",
+            Assert.assertFalse(
+                    "helperOne's third-party cookie setting should be unaffected",
                     helperOne.getSettings().getAcceptThirdPartyCookies());
             helperOne.assertThirdPartyIFrameCookieResult("3", false);
             helperTwo.assertThirdPartyIFrameCookieResult("4", true);
 
             allowThirdPartyCookies(helperOne.getAwContents());
-            Assert.assertTrue("helperTwo's third-party cookie setting shoudl be unaffected",
+            Assert.assertTrue(
+                    "helperTwo's third-party cookie setting shoudl be unaffected",
                     helperTwo.getSettings().getAcceptThirdPartyCookies());
             helperOne.assertThirdPartyIFrameCookieResult("5", true);
             helperTwo.assertThirdPartyIFrameCookieResult("6", true);
 
             blockThirdPartyCookies(helperTwo.getAwContents());
-            Assert.assertTrue("helperOne's third-party cookie setting should be unaffected",
+            Assert.assertTrue(
+                    "helperOne's third-party cookie setting should be unaffected",
                     helperOne.getSettings().getAcceptThirdPartyCookies());
             helperOne.assertThirdPartyIFrameCookieResult("7", true);
             helperTwo.assertThirdPartyIFrameCookieResult("8", false);
@@ -1075,9 +1241,232 @@ public class CookieManagerTest {
     @Test
     @MediumTest
     @Feature({"AndroidWebView", "Privacy"})
+    public void testPartitionedNetCookies() throws Throwable {
+        mActivityTestRule.getAwSettingsOnUiThread(mAwContents).setIncludeCookiesOnIntercept(true);
+        TestAwContentsClient.ShouldInterceptRequestHelper shouldInterceptRequestHelper =
+                mContentsClient.getShouldInterceptRequestHelper();
+
+        TestWebServer webServer = TestWebServer.startSsl();
+
+        // This test suite relies on an image to force a network request that has cookies attached.
+        // The AwParameterizedTest will disable this setting so force enabling it again so that
+        // we can still test the rest of the parameterized test settings.
+        mAwContents.getSettings().setImagesEnabled(true);
+
+        try {
+            String[] cookies = {
+                "partitioned_cookie=foo; SameSite=None; Secure; Partitioned",
+                "unpartitioned_cookie=bar; SameSite=None; Secure"
+            };
+            List<Pair<String, String>> responseHeaders = new ArrayList<Pair<String, String>>();
+            for (String cookie : cookies) {
+                responseHeaders.add(Pair.create("Set-Cookie", cookie));
+            }
+
+            String iframeWithNetRequest =
+                    """
+                    <html>
+                    <body>
+                    <!-- Force a network request to happen from the iframe with a navigation so -->
+                    <!-- that we can intercept it and see which cookies were attached -->
+                    <img src="/path_to_intercept" >
+                    </body>
+                    </html>
+                    """;
+            String iframeUrl = webServer.setResponse("/", iframeWithNetRequest, responseHeaders);
+            // We don't need this to do anything fancy, we just need the path to exist
+            webServer.setResponse("/path_to_intercept", "hello", responseHeaders);
+
+            String url = toThirdPartyUrl(makeIframeUrl(webServer, "/parent.html", iframeUrl));
+
+            allowFirstPartyCookies();
+            allowThirdPartyCookies(mAwContents);
+
+            String expectedCookies = "partitioned_cookie=foo; unpartitioned_cookie=bar";
+            String failureMessage = "All cookies should be returned when 3PCs are enabled";
+            mActivityTestRule.loadUrlSync(
+                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+            Assert.assertEquals(
+                    failureMessage,
+                    expectedCookies,
+                    webServer.getLastRequest("/path_to_intercept").headerValue("Cookie"));
+
+            var interceptedRequest =
+                    shouldInterceptRequestHelper.getRequestsForUrl(iframeUrl + "path_to_intercept");
+            Assert.assertEquals(
+                    failureMessage,
+                    expectedCookies,
+                    interceptedRequest.getRequestHeaders().get("Cookie"));
+
+            expectedCookies = "partitioned_cookie=foo";
+            failureMessage = "Partitioned cookies should be returned when 3PCs are disabled";
+            blockThirdPartyCookies(mAwContents);
+            mActivityTestRule.loadUrlSync(
+                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+            Assert.assertEquals(
+                    failureMessage,
+                    expectedCookies,
+                    webServer.getLastRequest("/path_to_intercept").headerValue("Cookie"));
+
+            interceptedRequest =
+                    shouldInterceptRequestHelper.getRequestsForUrl(iframeUrl + "path_to_intercept");
+            Assert.assertEquals(
+                    failureMessage,
+                    expectedCookies,
+                    interceptedRequest.getRequestHeaders().get("Cookie"));
+
+            failureMessage = "No cookies should be returned when all cookies are disabled";
+            blockAllCookies();
+            mActivityTestRule.loadUrlSync(
+                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+            Assert.assertEquals(
+                    failureMessage,
+                    "",
+                    webServer.getLastRequest("/path_to_intercept").headerValue("Cookie"));
+
+            interceptedRequest =
+                    shouldInterceptRequestHelper.getRequestsForUrl(iframeUrl + "path_to_intercept");
+            Assert.assertEquals(
+                    failureMessage,
+                    false,
+                    interceptedRequest.getRequestHeaders().containsKey("Cookie"));
+
+        } finally {
+            webServer.shutdown();
+        }
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testPartitionedJSCookies() throws Throwable {
+        String partitionedCookie = "partitioned-cookie=123";
+        String unpartitionedCookie = "regular-cookie=456";
+
+        TestWebServer webServer = TestWebServer.start();
+        addServerAssetLinks(webServer);
+
+        try {
+            // TODO(crbug.com/41496912): The WebView cookie manager API does not currently
+            // provide access to
+            // third party partitioned urls so we need to retrieve these cookies from the iframe
+            // itself to validate this
+            // behavior. We should refactor this test once support has been added to just use the
+            // CookieManager.
+            final LinkedBlockingQueue<String> javascriptInterfaceQueue =
+                    new LinkedBlockingQueue<>();
+            AwActivityTestRule.addJavascriptInterfaceOnUiThread(
+                    mAwContents,
+                    new Object() {
+                        @JavascriptInterface
+                        public void report(String cookies) {
+                            javascriptInterfaceQueue.add(cookies);
+                        }
+                    },
+                    "cookieResults");
+
+            IframeCookieSupplier iframeCookiesSupplier =
+                    () -> {
+                        String iframeUrl =
+                                toThirdPartyUrl(
+                                        makeCookieScriptResultsUrl(
+                                                webServer,
+                                                "/iframe.html",
+                                                partitionedCookie
+                                                        + "; Secure; Path=/; SameSite=None;"
+                                                        + " Partitioned;",
+                                                unpartitionedCookie
+                                                        + "; Secure; Path=/; SameSite=None;"));
+
+                        String url = makeIframeUrl(webServer, "/parent.html", iframeUrl);
+
+                        try {
+                            mActivityTestRule.loadUrlSync(
+                                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+
+                            return AwActivityTestRule.waitForNextQueueElement(
+                                    javascriptInterfaceQueue);
+                        } catch (Exception e) {
+                            // Failed to retrieve so we can treat this as "no-data" - this in turn
+                            // will fail equality checks
+                            return "Failed to retrieve data";
+                        }
+                    };
+
+            allowFirstPartyCookies();
+            blockThirdPartyCookies(mAwContents);
+            Assert.assertEquals(
+                    "Only partitioned cookies should be returned when 3PCs are disabled",
+                    partitionedCookie,
+                    iframeCookiesSupplier.get());
+
+            allowThirdPartyCookies(mAwContents);
+            Assert.assertEquals(
+                    "All cookies should be returned when 3PCs are enabled",
+                    partitionedCookie + "; " + unpartitionedCookie,
+                    iframeCookiesSupplier.get());
+
+            blockAllCookies();
+            Assert.assertEquals(
+                    "No cookies should ever be returned if all cookies are disabled",
+                    "",
+                    iframeCookiesSupplier.get());
+        } finally {
+            webServer.shutdown();
+        }
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testModernCookieSameSite_Disabled() throws Throwable {
+        // Tests that the legacy behavior is active when "modern" SameSite behavior is not specified
+        // via command-line flag.
+        TestWebServer httpWebServer = TestWebServer.start();
+        TestWebServer httpsWebServer = TestWebServer.startSsl();
+        try {
+            ModernCookieSameSiteTestHelper httpHelper =
+                    new ModernCookieSameSiteTestHelper(httpWebServer, httpsWebServer);
+            ModernCookieSameSiteTestHelper httpsHelper =
+                    new ModernCookieSameSiteTestHelper(httpsWebServer, httpWebServer);
+
+            httpHelper.assertModernCookieSameSiteResult("-disabled-http", false);
+            httpsHelper.assertModernCookieSameSiteResult("-disabled-https", false);
+        } finally {
+            httpWebServer.shutdown();
+            httpsWebServer.shutdown();
+        }
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    @CommandLineFlags.Add(AwSwitches.WEBVIEW_ENABLE_MODERN_COOKIE_SAME_SITE)
+    public void testModernCookieSameSite_Enabled() throws Throwable {
+        TestWebServer httpWebServer = TestWebServer.start();
+        TestWebServer httpsWebServer = TestWebServer.startSsl();
+        try {
+            ModernCookieSameSiteTestHelper httpHelper =
+                    new ModernCookieSameSiteTestHelper(httpWebServer, httpsWebServer);
+            ModernCookieSameSiteTestHelper httpsHelper =
+                    new ModernCookieSameSiteTestHelper(httpsWebServer, httpWebServer);
+
+            httpHelper.assertModernCookieSameSiteResult("-enabled-http", true);
+            httpsHelper.assertModernCookieSameSiteResult("-enabled-https", true);
+        } finally {
+            httpWebServer.shutdown();
+            httpsWebServer.shutdown();
+        }
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    @DisabledTest(message = "crbug.com/410745515")
     public void testAcceptFileSchemeCookies() throws Throwable {
         mCookieManager.setAcceptFileSchemeCookies(true);
-        Assert.assertTrue("allowFileSchemeCookies() should return true after "
+        Assert.assertTrue(
+                "allowFileSchemeCookies() should return true after "
                         + "setAcceptFileSchemeCookies(true)",
                 mCookieManager.allowFileSchemeCookies());
         mAwContents.getSettings().setAllowFileAccess(true);
@@ -1093,7 +1482,8 @@ public class CookieManagerTest {
     @Feature({"AndroidWebView", "Privacy"})
     public void testRejectFileSchemeCookies() throws Throwable {
         mCookieManager.setAcceptFileSchemeCookies(false);
-        Assert.assertFalse("allowFileSchemeCookies() should return false after "
+        Assert.assertFalse(
+                "allowFileSchemeCookies() should return false after "
                         + "setAcceptFileSchemeCookies(false)",
                 mCookieManager.allowFileSchemeCookies());
         mAwContents.getSettings().setAllowFileAccess(true);
@@ -1109,15 +1499,16 @@ public class CookieManagerTest {
     @Feature({"AndroidWebView", "Privacy"})
     public void testInvokeAcceptFileSchemeCookiesTooLate() throws Throwable {
         // AwCookieManager only respects calls to setAcceptFileSchemeCookies() which happen *before*
-        // the underlying cookie store is first used. Here we call into the cookie store with dummy
-        // values to trigger this case, so we can test the CookieManager's observable state
-        // (mainly, that allowFileSchemeCookies() is consistent with the actual behavior of
+        // the underlying cookie store is first used. Here we call into the cookie store with
+        // placeholder values to trigger this case, so we can test the CookieManager's observable
+        // state (mainly, that allowFileSchemeCookies() is consistent with the actual behavior of
         // rejecting/accepting file scheme cookies).
         mCookieManager.setCookie("https://www.any.url.will.work/", "any-key=any-value");
 
         // Now try to enable file scheme cookies.
         mCookieManager.setAcceptFileSchemeCookies(true);
-        Assert.assertFalse("allowFileSchemeCookies() should return false if "
+        Assert.assertFalse(
+                "allowFileSchemeCookies() should return false if "
                         + "setAcceptFileSchemeCookies was called too late",
                 mCookieManager.allowFileSchemeCookies());
         mAwContents.getSettings().setAllowFileAccess(true);
@@ -1133,12 +1524,59 @@ public class CookieManagerTest {
     @Feature({"AndroidWebView", "Privacy"})
     public void testAcceptFileSchemeCookiesExplicitSameSite() throws Throwable {
         mCookieManager.setAcceptFileSchemeCookies(true);
-        Assert.assertTrue("allowFileSchemeCookies() should return true after "
+        Assert.assertTrue(
+                "allowFileSchemeCookies() should return true after "
                         + "setAcceptFileSchemeCookies(true)",
                 mCookieManager.allowFileSchemeCookies());
         mAwContents.getSettings().setAllowFileAccess(true);
         mAwContents.getSettings().setAcceptThirdPartyCookies(false);
         Assert.assertTrue(fileURLCanSetCookie("7", ";SameSite=Lax"));
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testFileSchemeCookies_treatedAsSameSite() throws Throwable {
+        mCookieManager.setAcceptFileSchemeCookies(true);
+        mCookieManager.setCookie("file:///android_asset/first_url.html", "testCookie=value");
+        String cookie = mCookieManager.getCookie("file:///android_asset/second_url.html");
+        assertThat(cookie, containsString("testCookie"));
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testFileSchemeCookies_canBeAccessedFromChildPath() throws Throwable {
+        mCookieManager.setAcceptFileSchemeCookies(true);
+        mCookieManager.setCookie(
+                "file:///android_asset/first_url.html",
+                "testCookie=value;path=file:///android_asset/");
+        String cookie = mCookieManager.getCookie("file:///android_asset/child/second_url.html");
+        assertThat(cookie, containsString("testCookie"));
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testFileSchemeCookies_cannotBeAccessedFromParentPath() throws Throwable {
+        mCookieManager.setAcceptFileSchemeCookies(true);
+        mCookieManager.setCookie(
+                "file:///android_asset/child/first_url.html",
+                "testCookie=value;path=file:///android_asset/child/");
+        String cookie = mCookieManager.getCookie("file:///android_asset/second_url.html");
+        assertThat(cookie, not(containsString("testCookie")));
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"AndroidWebView", "Privacy"})
+    public void testFileSchemeCookies_cannotBeAccessedFromDifferentPath() throws Throwable {
+        mCookieManager.setAcceptFileSchemeCookies(true);
+        mCookieManager.setCookie(
+                "file:///android_asset/first/first_url.html",
+                "testCookie=value;path=file:///android_asset/first/");
+        String cookie = mCookieManager.getCookie("file:///android_asset/second/second_url.html");
+        assertThat(cookie, not(containsString("testCookie")));
     }
 
     private boolean fileURLCanSetCookie(String valueSuffix, String settings) throws Throwable {
@@ -1184,8 +1622,8 @@ public class CookieManagerTest {
             String pagePath = "/content_" + suffix + ".html";
 
             // We create a script which tries to set a cookie on a third party.
-            String cookieUrl = toThirdPartyUrl(
-                    makeCookieScriptUrl(getWebServer(), iframePath, key, value));
+            String cookieUrl =
+                    toThirdPartyUrl(makeCookieScriptUrl(getWebServer(), iframePath, key, value));
 
             // Then we load it as an iframe.
             String url = makeIframeUrl(getWebServer(), pagePath, cookieUrl);
@@ -1216,86 +1654,269 @@ public class CookieManagerTest {
         }
     }
 
+    class ModernCookieSameSiteTestHelper {
+        protected final AwContents mAwContents;
+        protected final TestWebServer mWebServer;
+        protected final TestWebServer mCrossSchemeWebServer;
+
+        ModernCookieSameSiteTestHelper(
+                TestWebServer webServer, TestWebServer crossSchemeWebServer) {
+            mWebServer = webServer;
+            mCrossSchemeWebServer = crossSchemeWebServer;
+            final AwTestContainerView containerView =
+                    mActivityTestRule.createAwTestContainerViewOnMainSync(mContentsClient);
+            mAwContents = containerView.getAwContents();
+            mAwContents.getSettings().setJavaScriptEnabled(true);
+
+            allowFirstPartyCookies();
+            allowThirdPartyCookies(mAwContents);
+        }
+
+        void assertModernCookieSameSiteResult(
+                String suffix, boolean expectedIsSameSiteBehaviorModern) throws Throwable {
+            assertSameSiteLaxByDefaultResult(suffix, expectedIsSameSiteBehaviorModern);
+            assertSameSiteNoneRequiresSecureResult(suffix, expectedIsSameSiteBehaviorModern);
+            assertSchemefulSameSiteResult(suffix, expectedIsSameSiteBehaviorModern);
+        }
+
+        private void assertSameSiteLaxByDefaultResult(String suffix, boolean expectedIsLaxByDefault)
+                throws Throwable {
+            final String key = "test-lax-by-default" + suffix;
+            final String value = "value" + suffix;
+            final String iframePath = "/iframe_" + suffix + ".html";
+            final String pagePath = "/content_" + suffix + ".html";
+
+            // We create a script which tries to set a cookie on a cross-site URL. The cookie does
+            // not specify a SameSite attribute, so its SameSite mode is whatever the default is.
+            final String cookieUrl =
+                    toThirdPartyUrl(makeCookieScriptUrl(mWebServer, iframePath, key, value));
+
+            // Then we load it as an iframe, to attempt to set a default cookie in a cross-site
+            // context. It should be rejected if SameSite=Lax by Default is active.
+            final String url = makeIframeUrl(mWebServer, pagePath, cookieUrl);
+            mActivityTestRule.loadUrlSync(
+                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+
+            if (expectedIsLaxByDefault) {
+                assertNoCookies(cookieUrl);
+            } else {
+                assertHasCookies(cookieUrl);
+                validateCookies(cookieUrl, key);
+            }
+
+            // Clear the cookies.
+            clearCookies();
+            Assert.assertFalse(mCookieManager.hasCookies());
+        }
+
+        private void assertSameSiteNoneRequiresSecureResult(
+                String suffix, boolean expectedDoesNoneRequireSecure) throws Throwable {
+            final String path = "/cookie_test.html";
+            final String responseStr =
+                    "<html><head><title>TEST!</title></head><body>HELLO!</body></html>";
+            final List<Pair<String, String>> responseHeaders =
+                    new ArrayList<Pair<String, String>>();
+            final String headerCookieName = "test-none-requires-secure" + suffix;
+            final String headerCookieValue = "value" + suffix;
+
+            // Attempt to set a SameSite=None cookie without Secure. It should be rejected if
+            // SameSite=None Requires Secure is active.
+            responseHeaders.add(
+                    Pair.create(
+                            "Set-Cookie",
+                            headerCookieName + "=" + headerCookieValue + "; SameSite=None"));
+            String url = mWebServer.setResponse(path, responseStr, responseHeaders);
+            mActivityTestRule.loadUrlSync(
+                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+
+            if (expectedDoesNoneRequireSecure) {
+                assertNoCookies(url);
+            } else {
+                waitForCookie(url);
+                assertHasCookies(url);
+                validateCookies(url, headerCookieName);
+            }
+
+            // Clear the cookies.
+            clearCookies();
+            Assert.assertFalse(mCookieManager.hasCookies());
+        }
+
+        private void assertSchemefulSameSiteResult(
+                String suffix, boolean expectedIsSameSiteSchemeful) throws Throwable {
+            final String key = "test-schemeful-same-site" + suffix;
+            final String value = "value" + suffix;
+            final String iframePath = "/iframe_" + suffix + ".html";
+            final String pagePath = "/content_" + suffix + ".html";
+
+            // We create a script which tries to set a Lax cookie on a cross-scheme URL.
+            final String cookieUrl =
+                    makeSameSiteLaxCookieScriptUrl(mCrossSchemeWebServer, iframePath, key, value);
+
+            // Then we load it as an iframe, to attempt to set a Lax cookie in a cross-scheme
+            // context. It should be rejected if same-site includes scheme.
+            final String url = makeIframeUrl(mWebServer, pagePath, cookieUrl);
+            mActivityTestRule.loadUrlSync(
+                    mAwContents, mContentsClient.getOnPageFinishedHelper(), url);
+
+            if (expectedIsSameSiteSchemeful) {
+                assertNoCookies(cookieUrl);
+            } else {
+                assertHasCookies(cookieUrl);
+                validateCookies(cookieUrl, key);
+            }
+
+            // Clear the cookies.
+            clearCookies();
+            Assert.assertFalse(mCookieManager.hasCookies());
+        }
+    }
+
     /**
-     * Creates a response on the TestWebServer which load a given URL in an iframe,
-     * and provides helpers for forwarding JavaScript calls to that iframe via postMessage.
-     * @param  webServer  the webServer on which to create the response
-     * @param  path the path component of the url (e.g "/my_thing_with_iframe.html")
-     * @param  url the url which which should appear as the src of the iframe.
-     * @return  the url which gets the response
+     * Creates a response on the TestWebServer which load a given URL in an iframe, and provides
+     * helpers for forwarding JavaScript calls to that iframe via postMessage.
+     *
+     * @param webServer the webServer on which to create the response
+     * @param path the path component of the url (e.g "/my_thing_with_iframe.html")
+     * @param url the url which which should appear as the src of the iframe.
+     * @return the url which gets the response
      */
-    private String makeIframeUrl(TestWebServer webServer, String path, String url) {
-        String responseStr = "<html><head><title>Content!</title>"
-                + "<script>"
-                + "window.onmessage = function(ev) { "
-                + "  window.domAutomationController.send(ev.data); "
-                + "}\n"
-                + "function callIframe(data) { "
-                + "  document.getElementById('if').contentWindow.postMessage("
-                + "      data, '*'); "
-                + "}"
-                + "</script>"
-                + "</head><body><iframe id=if src=" + url + "></iframe></body></html>";
+    public static String makeIframeUrl(TestWebServer webServer, String path, String url) {
+        String responseStr =
+                "<html><head><title>Content!</title>"
+                        + "<script>"
+                        + "window.onmessage = function(ev) { "
+                        + "  window.domAutomationController.send(ev.data); "
+                        + "}\n"
+                        + "function callIframe(data) { "
+                        + "  document.getElementById('if').contentWindow.postMessage("
+                        + "      data, '*'); "
+                        + "}"
+                        + "</script>"
+                        + "</head><body><iframe id=if src="
+                        + url
+                        + "></iframe></body></html>";
         return webServer.setResponse(path, responseStr, null);
     }
 
     /**
      * Creates a response on the TestWebServer with a script that attempts to set a cookie.
+     *
+     * @param webServer the webServer on which to create the response
+     * @param path the path component of the url (e.g "/cookie_test.html")
+     * @param key the key of the cookie
+     * @param value the value of the cookie
+     * @return the url which gets the response
+     */
+    public static String makeCookieScriptUrl(
+            TestWebServer webServer, String path, String key, String value) {
+        String response =
+                "<html><head></head><body>"
+                        + "<script>document.cookie = \""
+                        + key
+                        + "="
+                        + value
+                        + "\";"
+                        + "window.onmessage = async function(ev) {"
+                        + makeCookieStoreSetFragment(
+                                "ev.data", "'" + value + "'", "ev.source.postMessage(true, '*');")
+                        + "}"
+                        + "</script></body></html>";
+        return webServer.setResponse(path, response, null);
+    }
+
+    /**
+     * Creates a response on the TestWebServer with a script that attempts to set a SameSite=Lax
+     * cookie.
      * @param  webServer  the webServer on which to create the response
      * @param  path the path component of the url (e.g "/cookie_test.html")
      * @param  key the key of the cookie
      * @param  value the value of the cookie
      * @return  the url which gets the response
      */
-    private String makeCookieScriptUrl(TestWebServer webServer, String path, String key,
-            String value) {
-        String response = "<html><head></head><body>"
-                + "<script>document.cookie = \"" + key + "=" + value + "\";"
-                + "window.onmessage = async function(ev) {"
-                + makeCookieStoreSetFragment(
-                        "ev.data", "'" + value + "'", "ev.source.postMessage(true, '*');")
-                + "}"
-                + "</script></body></html>";
+    private String makeSameSiteLaxCookieScriptUrl(
+            TestWebServer webServer, String path, String key, String value) {
+        String response =
+                "<html><head></head><body>"
+                        + "<script>document.cookie = \""
+                        + key
+                        + "="
+                        + value
+                        + "; SameSite=Lax\";"
+                        + "</script></body></html>";
         return webServer.setResponse(path, response, null);
     }
 
     /**
      * Returns code fragment to be embedded into an async function to set a cookie with CookieStore
      * API
+     *
      * @param name name of cookie to set
      * @param value value to set the cookie to
      * @param finallyAction code to run once set finishes, regardless of success or failure
      */
-    private String makeCookieStoreSetFragment(String name, String value, String finallyAction) {
+    private static String makeCookieStoreSetFragment(
+            String name, String value, String finallyAction) {
         return "try {"
                 + "  await window.cookieStore.set("
-                + "      { name: " + name + ","
-                + "        value: " + value + ","
+                + "      { name: "
+                + name
+                + ","
+                + "        value: "
+                + value
+                + ","
                 + "        expires: Date.now() + 3600*1000,"
                 + "        sameSite: 'none' });"
                 + "} finally {"
-                + "  " + finallyAction + "}\n";
+                + "  "
+                + finallyAction
+                + "}\n";
+    }
+
+    /**
+     * Creates a response on the TestWebServer with a script that attempts to set a list of cookies
+     * and then reports them back to a java bridge.
+     *
+     * @param webServer the webServer on which to create the response
+     * @param path the path component of the url (e.g "/cookie_test.html")
+     * @param cookies A list of cookies to set
+     * @return the url which gets the response
+     */
+    public static String makeCookieScriptResultsUrl(
+            TestWebServer webServer, String path, String... cookies) {
+        String response = "<html><body><script>";
+
+        for (String cookie : cookies) {
+            response += String.format("document.cookie='%s';", cookie);
+        }
+
+        response += "cookieResults.report(document.cookie);";
+        response += "</script></body></html>";
+
+        return webServer.setResponse(path, response, null);
     }
 
     /**
      * Makes a url look as if it comes from a different host.
-     * @param  url the url to fake.
-     * @return  the resulting url after faking.
+     *
+     * @param url the url to fake.
+     * @return the resulting url after faking.
      */
-    private String toThirdPartyUrl(String url) {
+    public static String toThirdPartyUrl(String url) {
         return url.replace("localhost", "127.0.0.1");
     }
 
     private void setCookieOnUiThread(
             final String url, final String cookie, final Callback<Boolean> callback) {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(
-                () -> mCookieManager.setCookie(url, cookie, callback));
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(() -> mCookieManager.setCookie(url, cookie, callback));
     }
 
     private boolean setCookieOnUiThreadSync(final String url, final String cookie) {
         final SettableFuture<Boolean> cookieResultFuture = SettableFuture.create();
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(
-                () -> mCookieManager.setCookie(url, cookie, cookieResultFuture::set));
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(
+                        () -> mCookieManager.setCookie(url, cookie, cookieResultFuture::set));
         Boolean success = AwActivityTestRule.waitForFuture(cookieResultFuture);
         if (success == null) {
             throw new RuntimeException("setCookie() should never return null in its callback");
@@ -1304,18 +1925,16 @@ public class CookieManagerTest {
     }
 
     private void removeSessionCookiesOnUiThread(final Callback<Boolean> callback) {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(
-                () -> mCookieManager.removeSessionCookies(callback));
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(() -> mCookieManager.removeSessionCookies(callback));
     }
 
     private void removeAllCookiesOnUiThread(final Callback<Boolean> callback) {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(
-                () -> mCookieManager.removeAllCookies(callback));
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(() -> mCookieManager.removeAllCookies(callback));
     }
 
-    /**
-     * Clears all cookies synchronously.
-     */
+    /** Clears all cookies synchronously. */
     private void clearCookies() throws Throwable {
         CookieUtils.clearCookies(InstrumentationRegistry.getInstrumentation(), mCookieManager);
     }
@@ -1334,7 +1953,9 @@ public class CookieManagerTest {
         }
         Set<String> expectedCookieNamesSet =
                 new HashSet<String>(Arrays.asList(expectedCookieNames));
-        Assert.assertEquals("Found cookies list differs from expected list", expectedCookieNamesSet,
+        Assert.assertEquals(
+                "Found cookies list differs from expected list",
+                expectedCookieNamesSet,
                 foundCookieNamesSet);
     }
 
@@ -1352,6 +1973,24 @@ public class CookieManagerTest {
     }
 
     /**
+     * @return an expiry date in the standard IMF-fixdate format defined by RFC 7231. The expiry
+     * date will outlive the test so that it can be read during the test.
+     */
+    private String getHttpCookieExpiryDate() {
+        final DateFormat format = new SimpleDateFormat("E, dd MMM yyyy HH:mm:ss z");
+        format.setTimeZone(TimeZone.getTimeZone("GMT"));
+        Date expiry = new Date();
+        expiry.setTime(expiry.getTime() + CookieLifetime.OUTLIVE_THE_TEST_SEC * 1000);
+        String formattedDate = format.format(expiry);
+        // On some platforms, getting the date string includes '+00:00' at the end but the cookie
+        // API does not return this so we want to remove it if it is present.
+        if (formattedDate.endsWith("+00:00")) {
+            formattedDate = formattedDate.substring(0, formattedDate.length() - 6);
+        }
+        return formattedDate;
+    }
+
+    /**
      * Asserts there are no cookies set for the given URL. This makes no assertions about other
      * URLs.
      *
@@ -1362,9 +2001,7 @@ public class CookieManagerTest {
         Assert.assertNull(msg, mCookieManager.getCookie(cookieUrl));
     }
 
-    /**
-     * Asserts there are no cookies set at all.
-     */
+    /** Asserts there are no cookies set at all. */
     private void assertNoCookies() {
         String msg = "Expected to CookieManager to have no cookies";
         Assert.assertFalse(msg, mCookieManager.hasCookies());
@@ -1376,8 +2013,10 @@ public class CookieManagerTest {
      * @param cookieUrl the URL for which to check for cookies.
      */
     private void assertHasCookies(final String cookieUrl) {
-        String msg = "Expected CookieManager to have cookies for '" + cookieUrl
-                + "' but it has no cookies";
+        String msg =
+                "Expected CookieManager to have cookies for '"
+                        + cookieUrl
+                        + "' but it has no cookies";
         Assert.assertTrue(msg, mCookieManager.hasCookies());
         msg = "Expected getCookie to return non-null for '" + cookieUrl + "'";
         Assert.assertNotNull(msg, mCookieManager.getCookie(cookieUrl));
@@ -1407,12 +2046,14 @@ public class CookieManagerTest {
      */
     private void allowThirdPartyCookies(AwContents awContents) {
         if (!mCookieManager.acceptCookie()) {
-            throw new IllegalStateException("It doesn't make sense to allow third-party cookies if "
-                    + "cookies have already been globally blocked.");
+            throw new IllegalStateException(
+                    "It doesn't make sense to allow third-party cookies if "
+                            + "cookies have already been globally blocked.");
         }
         awContents.getSettings().setAcceptThirdPartyCookies(true);
-        String msg = "getAcceptThirdPartyCookies() should return true after "
-                + "setAcceptThirdPartyCookies(true)";
+        String msg =
+                "getAcceptThirdPartyCookies() should return true after "
+                        + "setAcceptThirdPartyCookies(true)";
         Assert.assertTrue(msg, awContents.getSettings().getAcceptThirdPartyCookies());
     }
 
@@ -1424,8 +2065,9 @@ public class CookieManagerTest {
      */
     private void blockThirdPartyCookies(AwContents awContents) {
         awContents.getSettings().setAcceptThirdPartyCookies(false);
-        String msg = "getAcceptThirdPartyCookies() should return false after "
-                + "setAcceptThirdPartyCookies(false)";
+        String msg =
+                "getAcceptThirdPartyCookies() should return false after "
+                        + "setAcceptThirdPartyCookies(false)";
         Assert.assertFalse(msg, awContents.getSettings().getAcceptThirdPartyCookies());
     }
 
@@ -1448,5 +2090,28 @@ public class CookieManagerTest {
         mCookieManager.setAcceptCookie(false);
         String msg = "acceptCookie() should return false after setAcceptCookie(false)";
         Assert.assertFalse(msg, mCookieManager.acceptCookie());
+    }
+
+    /** Adds an asset links json to allow SAA auto grants. */
+    public static void addServerAssetLinks(TestWebServer webServer) {
+        webServer.setResponse(
+                "/.well-known/assetlinks.json",
+                String.format(
+                        """
+                                [{
+                                        "relation": ["delegate_permission/common.handle_all_urls"],
+                                        "target": {
+                                                "namespace": "android_app",
+                                                "package_name": "%s",
+                                                "sha256_cert_fingerprints": ["%s"]
+                                        }
+                                }]
+                        """,
+                        ApkInfo.getHostPackageName(), ApkInfo.getHostSigningCertSha256()),
+                null);
+    }
+
+    interface IframeCookieSupplier {
+        String get();
     }
 }

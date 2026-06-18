@@ -1,14 +1,14 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/installer/setup/user_hive_visitor.h"
 
+#include <string>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/win/registry.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -19,6 +19,9 @@ namespace {
 class UserHiveVisitor {
  public:
   UserHiveVisitor() = default;
+
+  UserHiveVisitor(const UserHiveVisitor&) = delete;
+  UserHiveVisitor& operator=(const UserHiveVisitor&) = delete;
 
   bool OnUserHive(const wchar_t* sid, base::win::RegKey* key) {
     EXPECT_NE(nullptr, sid);
@@ -31,15 +34,11 @@ class UserHiveVisitor {
 
   void set_early_exit(bool early_exit) { early_exit_ = early_exit; }
 
-  const std::vector<base::string16> sids_visited() const {
-    return sids_visited_;
-  }
+  const std::vector<std::wstring> sids_visited() const { return sids_visited_; }
 
  private:
-  std::vector<base::string16> sids_visited_;
+  std::vector<std::wstring> sids_visited_;
   bool early_exit_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(UserHiveVisitor);
 };
 
 }  // namespace

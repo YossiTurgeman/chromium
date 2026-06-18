@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,6 +18,10 @@ bool StructTraits<
   }
   out->set_trace_config(std::move(config));
   out->set_privacy_filtering_enabled(data.privacy_filtering_enabled());
+  out->set_convert_to_legacy_json(data.convert_to_legacy_json());
+  out->set_event_package_name_filter_enabled(
+      data.event_package_name_filter_enabled());
+
   return true;
 }
 }  // namespace mojo

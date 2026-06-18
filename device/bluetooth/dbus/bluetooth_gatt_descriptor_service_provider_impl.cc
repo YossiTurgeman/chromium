@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,13 @@
 
 #include <cstddef>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
+#include "base/compiler_specific.h"
+#include "base/containers/to_vector.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/strings/string_util.h"
+#include "device/bluetooth/bluetooth_gatt_service.h"
 #include "device/bluetooth/dbus/bluetooth_gatt_attribute_helpers.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 
@@ -122,7 +125,7 @@ void BluetoothGattDescriptorServiceProviderImpl::SendValueChanged(
   array_writer.OpenDictEntry(&dict_entry_writer);
   dict_entry_writer.AppendString(bluetooth_gatt_descriptor::kValueProperty);
   dict_entry_writer.OpenVariant("ay", &variant_writer);
-  variant_writer.AppendArrayOfBytes(value.data(), value.size());
+  variant_writer.AppendArrayOfBytes(value);
   dict_entry_writer.CloseContainer(&variant_writer);
   array_writer.CloseContainer(&dict_entry_writer);
   writer.CloseContainer(&array_writer);
@@ -268,19 +271,12 @@ void BluetoothGattDescriptorServiceProviderImpl::ReadValue(
     // the delegate, which should know how to handle it.
   }
 
-  // GetValue() promises to only call either the success or error callback.
-  auto response_sender_adapted =
-      base::AdaptCallbackForRepeating(std::move(response_sender));
-
   DCHECK(delegate_);
   delegate_->GetValue(
       device_path,
       base::BindOnce(&BluetoothGattDescriptorServiceProviderImpl::OnReadValue,
                      weak_ptr_factory_.GetWeakPtr(), method_call,
-                     response_sender_adapted),
-      base::BindOnce(&BluetoothGattDescriptorServiceProviderImpl::OnFailure,
-                     weak_ptr_factory_.GetWeakPtr(), method_call,
-                     response_sender_adapted));
+                     std::move(response_sender)));
 }
 
 void BluetoothGattDescriptorServiceProviderImpl::WriteValue(
@@ -291,17 +287,12 @@ void BluetoothGattDescriptorServiceProviderImpl::WriteValue(
   DCHECK(OnOriginThread());
 
   dbus::MessageReader reader(method_call);
-  const uint8_t* bytes = NULL;
-  size_t length = 0;
-
-  std::vector<uint8_t> value;
-  if (!reader.PopArrayOfBytes(&bytes, &length)) {
+  base::span<const uint8_t> bytes;
+  if (!reader.PopArrayOfBytes(&bytes)) {
     LOG(WARNING) << "Error reading value parameter. WriteValue called with "
                     "incorrect parameters: "
                  << method_call->ToString();
   }
-  if (bytes)
-    value.assign(bytes, bytes + length);
 
   std::map<std::string, dbus::MessageReader> options;
   dbus::ObjectPath device_path;
@@ -318,18 +309,19 @@ void BluetoothGattDescriptorServiceProviderImpl::WriteValue(
   }
 
   // SetValue() promises to only call either the success or error callback.
-  auto response_sender_adapted =
-      base::AdaptCallbackForRepeating(std::move(response_sender));
+  auto split_response_sender =
+      base::SplitOnceCallback(std::move(response_sender));
 
   DCHECK(delegate_);
   delegate_->SetValue(
-      device_path, value,
+      device_path, base::ToVector(bytes),
       base::BindOnce(&BluetoothGattDescriptorServiceProviderImpl::OnWriteValue,
                      weak_ptr_factory_.GetWeakPtr(), method_call,
-                     response_sender_adapted),
-      base::BindOnce(&BluetoothGattDescriptorServiceProviderImpl::OnFailure,
-                     weak_ptr_factory_.GetWeakPtr(), method_call,
-                     response_sender_adapted));
+                     std::move(split_response_sender.first)),
+      base::BindOnce(
+          &BluetoothGattDescriptorServiceProviderImpl::OnWriteFailure,
+          weak_ptr_factory_.GetWeakPtr(), method_call,
+          std::move(split_response_sender.second)));
 }
 
 void BluetoothGattDescriptorServiceProviderImpl::OnExported(
@@ -343,14 +335,24 @@ void BluetoothGattDescriptorServiceProviderImpl::OnExported(
 void BluetoothGattDescriptorServiceProviderImpl::OnReadValue(
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender,
+    std::optional<device::BluetoothGattService::GattErrorCode> error_code,
     const std::vector<uint8_t>& value) {
+  if (error_code.has_value()) {
+    DVLOG(2) << "Failed to get descriptor value. Report error.";
+    std::unique_ptr<dbus::ErrorResponse> error_response =
+        dbus::ErrorResponse::FromMethodCall(method_call, kErrorFailed,
+                                            "Failed to get descriptor value.");
+    std::move(response_sender).Run(std::move(error_response));
+    return;
+  }
+
   DVLOG(3) << "Descriptor value obtained from delegate. Responding to "
               "ReadValue.";
 
   std::unique_ptr<dbus::Response> response =
       dbus::Response::FromMethodCall(method_call);
   dbus::MessageWriter writer(response.get());
-  writer.AppendArrayOfBytes(value.data(), value.size());
+  writer.AppendArrayOfBytes(value);
   std::move(response_sender).Run(std::move(response));
 }
 
@@ -396,13 +398,13 @@ void BluetoothGattDescriptorServiceProviderImpl::WriteProperties(
   writer->CloseContainer(&array_writer);
 }
 
-void BluetoothGattDescriptorServiceProviderImpl::OnFailure(
+void BluetoothGattDescriptorServiceProviderImpl::OnWriteFailure(
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender) {
-  DVLOG(2) << "Failed to get/set descriptor value. Report error.";
+  DVLOG(2) << "Failed to set descriptor value. Report error.";
   std::unique_ptr<dbus::ErrorResponse> error_response =
-      dbus::ErrorResponse::FromMethodCall(
-          method_call, kErrorFailed, "Failed to get/set descriptor value.");
+      dbus::ErrorResponse::FromMethodCall(method_call, kErrorFailed,
+                                          "Failed to set descriptor value.");
   std::move(response_sender).Run(std::move(error_response));
 }
 

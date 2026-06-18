@@ -1,36 +1,41 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.page_info;
 
-import android.content.Intent;
+import android.app.Activity;
 import android.graphics.drawable.Drawable;
+import android.view.ViewGroup;
 
 import androidx.annotation.IntDef;
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import androidx.fragment.app.FragmentManager;
 
 import org.chromium.base.Callback;
-import org.chromium.base.Consumer;
-import org.chromium.base.supplier.Supplier;
-import org.chromium.components.browser_ui.site_settings.SiteSettingsClient;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.components.browser_ui.site_settings.SiteSettingsDelegate;
+import org.chromium.components.browser_ui.site_settings.Website;
 import org.chromium.components.content_settings.CookieControlsBridge;
 import org.chromium.components.content_settings.CookieControlsObserver;
-import org.chromium.components.embedder_support.browser_context.BrowserContextHandle;
 import org.chromium.components.omnibox.AutocompleteSchemeClassifier;
-import org.chromium.components.page_info.PageInfoView.PageInfoViewParams;
+import org.chromium.content_public.browser.BrowserContextHandle;
 import org.chromium.ui.modaldialog.ModalDialogManager;
+import org.chromium.url.GURL;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.Collection;
+import java.util.function.Consumer;
 
-/**
- *  Provides embedder-level information to PageInfoController.
- */
+/** Provides embedder-level information to PageInfoController. */
+@NullMarked
 public abstract class PageInfoControllerDelegate {
-    @IntDef({OfflinePageState.NOT_OFFLINE_PAGE, OfflinePageState.TRUSTED_OFFLINE_PAGE,
-            OfflinePageState.UNTRUSTED_OFFLINE_PAGE})
+    @IntDef({
+        OfflinePageState.NOT_OFFLINE_PAGE,
+        OfflinePageState.TRUSTED_OFFLINE_PAGE,
+        OfflinePageState.UNTRUSTED_OFFLINE_PAGE
+    })
     @Retention(RetentionPolicy.SOURCE)
     public @interface OfflinePageState {
         int NOT_OFFLINE_PAGE = 1;
@@ -38,198 +43,173 @@ public abstract class PageInfoControllerDelegate {
         int UNTRUSTED_OFFLINE_PAGE = 3;
     }
 
-    @IntDef({PreviewPageState.NOT_PREVIEW, PreviewPageState.SECURE_PAGE_PREVIEW,
-            PreviewPageState.INSECURE_PAGE_PREVIEW})
-    @Retention(RetentionPolicy.SOURCE)
-    public @interface PreviewPageState {
-        int NOT_PREVIEW = 1;
-        int SECURE_PAGE_PREVIEW = 2;
-        int INSECURE_PAGE_PREVIEW = 3;
-    }
-
-    private final Supplier<ModalDialogManager> mModalDialogManager;
     private final AutocompleteSchemeClassifier mAutocompleteSchemeClassifier;
-    private final VrHandler mVrHandler;
     private final boolean mIsSiteSettingsAvailable;
     private final boolean mCookieControlsShown;
-    protected @PreviewPageState int mPreviewPageState;
     protected @OfflinePageState int mOfflinePageState;
     protected boolean mIsHttpsImageCompressionApplied;
-    protected String mOfflinePageUrl;
+    protected @Nullable String mOfflinePageUrl;
 
-    public PageInfoControllerDelegate(Supplier<ModalDialogManager> modalDialogManager,
-            AutocompleteSchemeClassifier autocompleteSchemeClassifier, VrHandler vrHandler,
-            boolean isSiteSettingsAvailable, boolean cookieControlsShown) {
-        mModalDialogManager = modalDialogManager;
+    public PageInfoControllerDelegate(
+            AutocompleteSchemeClassifier autocompleteSchemeClassifier,
+            boolean isSiteSettingsAvailable,
+            boolean cookieControlsShown) {
         mAutocompleteSchemeClassifier = autocompleteSchemeClassifier;
-        mVrHandler = vrHandler;
         mIsSiteSettingsAvailable = isSiteSettingsAvailable;
         mCookieControlsShown = cookieControlsShown;
         mIsHttpsImageCompressionApplied = false;
 
         // These sometimes get overwritten by derived classes.
-        mPreviewPageState = PreviewPageState.NOT_PREVIEW;
         mOfflinePageState = OfflinePageState.NOT_OFFLINE_PAGE;
         mOfflinePageUrl = null;
     }
-    /**
-     * Creates an AutoCompleteClassifier.
-     */
+
+    /** Creates an AutoCompleteClassifier. */
     public AutocompleteSchemeClassifier createAutocompleteSchemeClassifier() {
         return mAutocompleteSchemeClassifier;
     }
 
-    /**
-     * Whether cookie controls should be shown in Page Info UI.
-     */
+    /** Whether cookie controls should be shown in Page Info UI. */
     public boolean cookieControlsShown() {
         return mCookieControlsShown;
     }
 
-    /**
-     * Return the ModalDialogManager to be used.
-     */
-    public ModalDialogManager getModalDialogManager() {
-        return mModalDialogManager.get();
-    }
+    /** Return the ModalDialogManager to be used. */
+    public abstract ModalDialogManager getModalDialogManager();
 
-    /**
-     * Initialize viewParams with Preview UI info, if any.
-     * @param viewParams The params to be initialized with Preview UI info.
-     * @param runAfterDismiss Used to set "show original" callback on Previews UI.
-     */
-    public void initPreviewUiParams(
-            PageInfoViewParams viewParams, Consumer<Runnable> runAfterDismiss) {
-        // Don't support Preview UI by default.
-        viewParams.previewUIShown = false;
-        viewParams.previewSeparatorShown = false;
-    }
-
-    /**
-     * Whether website dialog is displayed for a preview.
-     */
-    public boolean isShowingPreview() {
-        return mPreviewPageState != PreviewPageState.NOT_PREVIEW;
-    }
-
-    /**
-     * Whether Preview page state is INSECURE.
-     */
-    public boolean isPreviewPageInsecure() {
-        return mPreviewPageState == PreviewPageState.INSECURE_PAGE_PREVIEW;
-    }
-
-    /**
-     * Returns whether or not an instant app is available for |url|.
-     */
-    public boolean isInstantAppAvailable(String url) {
-        return false;
-    }
-
-    /**
-     * Returns whether LiteMode https image compression was applied on this page
-     */
+    /** Returns whether LiteMode https image compression was applied on this page */
     public boolean isHttpsImageCompressionApplied() {
         return mIsHttpsImageCompressionApplied;
     }
 
-    /**
-     * Gets the instant app intent for the given URL if one exists.
-     */
-    public Intent getInstantAppIntentForUrl(String url) {
-        return null;
-    }
-
-    /**
-     * Returns a VrHandler for Page Info UI.
-     */
-    public VrHandler getVrHandler() {
-        return mVrHandler;
-    }
-
-    /**
-     * Gets the Url of the offline page being shown if any. Returns null otherwise.
-     */
-    @Nullable
-    public String getOfflinePageUrl() {
+    /** Gets the Url of the offline page being shown if any. Returns null otherwise. */
+    public @Nullable String getOfflinePageUrl() {
         return mOfflinePageUrl;
     }
 
-    /**
-     * Whether the page being shown is an offline page.
-     */
+    /** Whether the page being shown is an offline page. */
     public boolean isShowingOfflinePage() {
-        return mOfflinePageState != OfflinePageState.NOT_OFFLINE_PAGE && !isShowingPreview();
+        return mOfflinePageState != OfflinePageState.NOT_OFFLINE_PAGE;
+    }
+
+    /** Whether the page being shown is a paint preview. */
+    public boolean isShowingPaintPreviewPage() {
+        return false;
+    }
+
+    /** Return the type of the pdf page. Return 0 if not a pdf page. */
+    public int getPdfPageType() {
+        return 0;
     }
 
     /**
      * Initialize viewParams with Offline Page UI info, if any.
-     * @param viewParams The PageInfoViewParams to set state on.
+     *
+     * @param viewParams The PageInfoView.Params to set state on.
      * @param runAfterDismiss Used to set "open Online" button callback for offline page.
      */
     public void initOfflinePageUiParams(
-            PageInfoViewParams viewParams, Consumer<Runnable> runAfterDismiss) {
+            PageInfoView.Params viewParams, Consumer<Runnable> runAfterDismiss) {
         viewParams.openOnlineButtonShown = false;
     }
 
     /**
-     * Return the connection message shown for an offline page, if appropriate.
-     * Returns null if there's no offline page.
+     * Return the connection message shown for an offline page, if appropriate. Returns null if
+     * there's no offline page.
      */
-    @Nullable
-    public String getOfflinePageConnectionMessage() {
+    public @Nullable String getOfflinePageConnectionMessage() {
         return null;
     }
 
     /**
-     * Returns whether or not the performance badge should be shown for |url|.
+     * Return the connection message shown for a paint preview page, if appropriate. Returns null if
+     * there's no paint preview page.
      */
-    public boolean shouldShowPerformanceBadge(String url) {
-        return false;
+    public @Nullable String getPaintPreviewPageConnectionMessage() {
+        return null;
     }
 
     /**
-     * Whether Site settings are available.
+     * Return the connection message shown for a pdf page, if appropriate. Returns null if there's
+     * no pdf page.
      */
+    public @Nullable String getPdfPageConnectionMessage() {
+        return null;
+    }
+
+    /** Whether Site settings are available. */
     public boolean isSiteSettingsAvailable() {
         return mIsSiteSettingsAvailable;
     }
 
-    /**
-     * Show site settings for the URL passed in.
-     * @param url The URL to show site settings for.
-     */
-    public abstract void showSiteSettings(String url);
-
-    /**
-     * Show cookie settings.
-     */
+    /** Show cookie settings. */
     public abstract void showCookieSettings();
 
     /**
+     * Show site settings for the current page.
+     *
+     * @param currentSite Website containing data about the site the PageInfo bubble is shown for.
+     */
+    public abstract void showSiteSettings(Website currentSite);
+
+    /**
+     * Shows cookie feedback UI.
+     *
+     * @param activity The Activity where the feedback is shown.
+     */
+    public abstract void showCookieFeedback(Activity activity);
+
+    /** Show ad personalization settings. */
+    public abstract void showAdPersonalizationSettings();
+
+    /**
      * Creates Cookie Controls Bridge.
+     *
      * @param observer The CookieControlsObserver to create the bridge with.
      * @return the object that facilitates interfacing with native code.
      */
-    @NonNull
     public abstract CookieControlsBridge createCookieControlsBridge(
             CookieControlsObserver observer);
 
     /**
+     * Allows the delegate to insert additional {@link PageInfoRowView} views.
+     *
+     * @return a collection of controllers corresponding to these views.
+     */
+    public abstract Collection<PageInfoSubpageController> createAdditionalRowViews(
+            PageInfoMainController mainController, ViewGroup rowWrapper);
+
+    /**
      * @return Returns the browser context associated with this dialog.
      */
-    @NonNull
     public abstract BrowserContextHandle getBrowserContext();
 
     /**
-     * @return Returns the SiteSettingsClient for this page info.
+     * @return Returns the SiteSettingsDelegate for this page info.
      */
-    @NonNull
-    public abstract SiteSettingsClient getSiteSettingsClient();
+    public abstract SiteSettingsDelegate getSiteSettingsDelegate();
 
     /**
      * Fetches a favicon for the current page and passes it to callback.
      * The UI will use a fallback icon if null is supplied.
      */
-    public abstract void getFavicon(String url, Callback<Drawable> callback);
+    public abstract void getFavicon(GURL url, Callback<@Nullable Drawable> callback);
+
+    /**
+     * Checks to see that touch exploration or an accessibility service that can perform gestures
+     * is enabled.
+     * @return Whether or not accessibility and touch exploration are enabled.
+     */
+    public abstract boolean isAccessibilityEnabled();
+
+    public abstract @Nullable FragmentManager getFragmentManager();
+
+    public abstract boolean isIncognito();
+
+    /**
+     * @return Whether the HttpsFirstDialogUi feature is enabled.
+     */
+    public boolean isHttpsFirstDialogUiEnabled() {
+        return false;
+    }
 }

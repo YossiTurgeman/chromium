@@ -1,31 +1,35 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 
-#include "base/bind.h"
 #include "base/command_line.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/test/bind.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
-#include "chrome/browser/chromeos/arc/arc_util.h"
-#include "chrome/browser/chromeos/arc/session/arc_session_manager.h"
+#include "chrome/browser/ash/app_list/arc/arc_app_icon.h"
+#include "chrome/browser/ash/app_list/arc/arc_app_list_prefs.h"
+#include "chrome/browser/ash/app_list/arc/arc_app_utils.h"
+#include "chrome/browser/ash/arc/arc_util.h"
+#include "chrome/browser/ash/arc/session/arc_session_manager.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/app_list/arc/arc_app_icon.h"
-#include "chrome/browser/ui/app_list/arc/arc_app_list_prefs.h"
-#include "chrome/browser/ui/app_list/arc/arc_app_utils.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
 #include "chrome/browser/ui/views/apps/app_dialog/app_block_dialog_view.h"
+#include "chrome/browser/ui/views/apps/app_dialog/app_local_block_dialog_view.h"
 #include "chrome/browser/ui/views/apps/app_dialog/app_pause_dialog_view.h"
 #include "chrome/test/base/in_process_browser_test.h"
-#include "components/arc/arc_util.h"
-#include "components/arc/mojom/app.mojom.h"
-#include "components/arc/test/connection_holder_util.h"
-#include "components/arc/test/fake_app_instance.h"
+#include "chromeos/ash/experiences/arc/mojom/app.mojom.h"
+#include "chromeos/ash/experiences/arc/test/arc_util_test_support.h"
+#include "chromeos/ash/experiences/arc/test/connection_holder_util.h"
+#include "chromeos/ash/experiences/arc/test/fake_app_instance.h"
+#include "components/services/app_service/public/cpp/app_types.h"
 #include "content/public/test/browser_test.h"
-#include "ui/display/types/display_constants.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/views/accessibility/view_accessibility.h"
 
 class AppDialogViewBrowserTest : public DialogBrowserTest {
  public:
@@ -63,8 +67,13 @@ class AppDialogViewBrowserTest : public DialogBrowserTest {
   }
 
   AppDialogView* ActiveView(const std::string& name) {
-    if (name == "block")
+    if (name == "block") {
       return AppBlockDialogView::GetActiveViewForTesting();
+    }
+
+    if (name == "localblock") {
+      return AppLocalBlockDialogView::GetActiveViewForTesting();
+    }
 
     return AppPauseDialogView::GetActiveViewForTesting();
   }
@@ -73,13 +82,21 @@ class AppDialogViewBrowserTest : public DialogBrowserTest {
 
   apps::AppServiceProxy* app_service_proxy() { return app_service_proxy_; }
 
+  bool IsAppPaused() {
+    bool is_app_paused = false;
+    app_service_proxy()->AppRegistryCache().ForOneApp(
+        app_id(), [&is_app_paused](const apps::AppUpdate& update) {
+          is_app_paused = (update.Paused().value_or(false));
+        });
+    return is_app_paused;
+  }
+
   void ShowUi(const std::string& name) override {
-    arc::mojom::AppInfo app;
-    app.name = "Fake App 0";
-    app.package_name = "fake.package.0";
-    app.activity = "fake.app.0.activity";
-    app.sticky = false;
-    app_instance_->SendRefreshAppList(std::vector<arc::mojom::AppInfo>(1, app));
+    std::vector<arc::mojom::AppInfoPtr> apps;
+    apps.emplace_back(arc::mojom::AppInfo::New("Fake App 0", "fake.package.0",
+                                               "fake.app.0.activity",
+                                               false /* sticky */));
+    app_instance_->SendRefreshAppList(apps);
     base::RunLoop().RunUntilIdle();
 
     EXPECT_EQ(1u, arc_app_list_pref_->GetAppIds().size());
@@ -90,17 +107,22 @@ class AppDialogViewBrowserTest : public DialogBrowserTest {
     ASSERT_TRUE(app_service_proxy_);
 
     base::RunLoop run_loop;
-    app_id_ = arc_app_list_pref_->GetAppId(app.package_name, app.activity);
+    app_id_ =
+        arc_app_list_pref_->GetAppId(apps[0]->package_name, apps[0]->activity);
     if (name == "block") {
-      app.suspended = true;
+      apps[0]->suspended = true;
       app_service_proxy_->SetDialogCreatedCallbackForTesting(
           run_loop.QuitClosure());
-      app_instance_->SendRefreshAppList(
-          std::vector<arc::mojom::AppInfo>(1, app));
-      app_service_proxy_->FlushMojoCallsForTesting();
-      app_service_proxy_->Launch(app_id_, ui::EventFlags::EF_NONE,
-                                 apps::mojom::LaunchSource::kFromChromeInternal,
-                                 display::kInvalidDisplayId);
+      app_instance_->SendRefreshAppList(apps);
+      app_service_proxy_->Launch(app_id_, ui::EF_NONE,
+                                 apps::LaunchSource::kFromChromeInternal);
+    } else if (name == "localblock") {
+      app_service_proxy_->BlockApps({app_id_});
+      app_service_proxy_->SetDialogCreatedCallbackForTesting(
+          run_loop.QuitClosure());
+      app_service_proxy_->Launch(app_id_, ui::EF_NONE,
+                                 apps::LaunchSource::kFromChromeInternal);
+
     } else {
       std::map<std::string, apps::PauseData> pause_data;
       pause_data[app_id_].hours = 3;
@@ -113,27 +135,54 @@ class AppDialogViewBrowserTest : public DialogBrowserTest {
     run_loop.Run();
 
     ASSERT_NE(nullptr, ActiveView(name));
-    EXPECT_EQ(ui::DIALOG_BUTTON_OK, ActiveView(name)->GetDialogButtons());
+    EXPECT_EQ(static_cast<int>(ui::mojom::DialogButton::kOk),
+              ActiveView(name)->buttons());
 
     if (name == "block") {
-      app_service_proxy_->FlushMojoCallsForTesting();
+      bool state_is_set = false;
+      app_service_proxy_->AppRegistryCache().ForOneApp(
+          app_id_, [&state_is_set](const apps::AppUpdate& update) {
+            state_is_set =
+                (update.Readiness() == apps::Readiness::kDisabledByPolicy);
+          });
+
+      EXPECT_TRUE(state_is_set);
+      VerifyAccessibilityProperties();
+    } else if (name == "localblock") {
       bool state_is_set = false;
       app_service_proxy_->AppRegistryCache().ForOneApp(
           app_id_, [&state_is_set](const apps::AppUpdate& update) {
             state_is_set = (update.Readiness() ==
-                            apps::mojom::Readiness::kDisabledByPolicy);
+                            apps::Readiness::kDisabledByLocalSettings);
           });
 
       EXPECT_TRUE(state_is_set);
+
     } else {
-      ActiveView(name)->AcceptDialog();
+      if (name == "pause_close") {
+        ActiveView(name)->Close();
+      } else {
+        ActiveView(name)->AcceptDialog();
+      }
     }
   }
 
  private:
+  void VerifyAccessibilityProperties() {
+    ui::AXNodeData root_view_data;
+    ActiveView("block")
+        ->GetWidget()
+        ->GetRootView()
+        ->GetViewAccessibility()
+        .GetAccessibleNodeData(&root_view_data);
+    EXPECT_EQ(
+        root_view_data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+        ActiveView("block")->GetAccessibleWindowTitle());
+  }
   std::string app_id_;
-  apps::AppServiceProxy* app_service_proxy_ = nullptr;
-  ArcAppListPrefs* arc_app_list_pref_ = nullptr;
+  raw_ptr<apps::AppServiceProxy, DanglingUntriaged> app_service_proxy_ =
+      nullptr;
+  raw_ptr<ArcAppListPrefs, DanglingUntriaged> arc_app_list_pref_ = nullptr;
   std::unique_ptr<arc::FakeAppInstance> app_instance_;
 };
 
@@ -141,16 +190,16 @@ IN_PROC_BROWSER_TEST_F(AppDialogViewBrowserTest, InvokeUi_block) {
   ShowAndVerifyUi();
 }
 
+IN_PROC_BROWSER_TEST_F(AppDialogViewBrowserTest, InvokeUi_localblock) {
+  ShowAndVerifyUi();
+}
+
 IN_PROC_BROWSER_TEST_F(AppDialogViewBrowserTest, InvokeUi_pause) {
   ShowAndVerifyUi();
+  EXPECT_TRUE(IsAppPaused());
+}
 
-  app_service_proxy()->FlushMojoCallsForTesting();
-
-  bool state_is_set = false;
-  app_service_proxy()->AppRegistryCache().ForOneApp(
-      app_id(), [&state_is_set](const apps::AppUpdate& update) {
-        state_is_set = (update.Paused() == apps::mojom::OptionalBool::kTrue);
-      });
-
-  EXPECT_TRUE(state_is_set);
+IN_PROC_BROWSER_TEST_F(AppDialogViewBrowserTest, InvokeUi_pause_close) {
+  ShowAndVerifyUi();
+  EXPECT_TRUE(IsAppPaused());
 }

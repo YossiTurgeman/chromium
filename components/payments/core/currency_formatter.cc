@@ -1,8 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/payments/core/currency_formatter.h"
+
+#include <memory>
+#include <string_view>
 
 #include "base/logging.h"
 #include "base/numerics/safe_conversions.h"
@@ -53,39 +56,43 @@ CurrencyFormatter::CurrencyFormatter(const std::string& currency_code,
   icu_formatter_.reset(
       icu::NumberFormat::createCurrencyInstance(locale_, error_code));
   if (U_FAILURE(error_code)) {
-    LOG(ERROR) << "Failed to initialize the currency formatter for "
-               << locale_name;
+    DVLOG(1) << "Failed to initialize the currency formatter for "
+             << locale_name;
     return;
   }
 
   if (ShouldUseCurrencyCode(currency_code)) {
-    currency_code_.reset(new icu::UnicodeString(
+    currency_code_ = std::make_unique<icu::UnicodeString>(
         currency_code.c_str(),
-        base::checked_cast<int32_t>(currency_code.size())));
+        base::checked_cast<int32_t>(currency_code.size()));
   } else {
     // For non-ISO4217 currency system/code, we use a dummy code which is not
     // going to appear in the output (stripped in Format()). This is because ICU
     // NumberFormat will not accept an empty currency code. Under these
     // circumstances, the number amount will be formatted according to locale,
     // which is desirable (e.g. "55.00" -> "55,00" in fr_FR).
-    currency_code_.reset(new icu::UnicodeString("DUM", 3));
+    currency_code_ = std::make_unique<icu::UnicodeString>("DUM", 3);
   }
 
   icu_formatter_->setCurrency(currency_code_->getBuffer(), error_code);
   if (U_FAILURE(error_code)) {
     std::string currency_code_str;
     currency_code_->toUTF8String(currency_code_str);
-    LOG(ERROR) << "Could not set currency code on currency formatter: "
-               << currency_code_str;
+    DVLOG(1) << "Could not set currency code on currency formatter: "
+             << currency_code_str;
     return;
   }
 
   icu_formatter_->setMaximumFractionDigits(kMaximumNumFractionalDigits);
 }
 
-CurrencyFormatter::~CurrencyFormatter() {}
+CurrencyFormatter::~CurrencyFormatter() = default;
 
-base::string16 CurrencyFormatter::Format(const std::string& amount) {
+void CurrencyFormatter::SetMaxFractionalDigits(int max_fractional_digits) {
+  icu_formatter_->setMaximumFractionDigits(max_fractional_digits);
+}
+
+std::u16string CurrencyFormatter::Format(const std::string& amount) {
   // It's possible that the ICU formatter didn't initialize properly.
   if (!icu_formatter_ || !icu_formatter_->getCurrency())
     return base::UTF8ToUTF16(amount);

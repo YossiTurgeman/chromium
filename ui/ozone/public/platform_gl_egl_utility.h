@@ -1,15 +1,15 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_OZONE_PUBLIC_PLATFORM_GL_EGL_UTILITY_H_
 #define UI_OZONE_PUBLIC_PLATFORM_GL_EGL_UTILITY_H_
 
-#include <string>
-#include <unordered_map>
+#include <optional>
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/scoped_environment_variable_override.h"
 #include "third_party/khronos/EGL/egl.h"
 
 namespace ui {
@@ -17,7 +17,8 @@ namespace ui {
 // Provides platform specific EGL attributes/configs.
 class COMPONENT_EXPORT(OZONE_BASE) PlatformGLEGLUtility {
  public:
-  virtual ~PlatformGLEGLUtility() = default;
+  PlatformGLEGLUtility();
+  virtual ~PlatformGLEGLUtility();
 
   // Gets additional display attributes based on |platform_type|.
   virtual void GetAdditionalEGLAttributes(
@@ -28,9 +29,13 @@ class COMPONENT_EXPORT(OZONE_BASE) PlatformGLEGLUtility {
   virtual void ChooseEGLAlphaAndBufferSize(EGLint* alpha_size,
                                            EGLint* buffer_size) = 0;
 
-  // Returns whether the platform supports setting transparent background for
-  // windows.
-  virtual bool IsTransparentBackgroundSupported() const = 0;
+  // X11 specific; returns whether the platform supports visuals.
+  virtual bool HasVisualManager();
+
+  // X11 specific; returns scoped unset display env variable if vulkan surface
+  // is not supported.
+  virtual std::optional<base::ScopedEnvironmentVariableOverride>
+  MaybeGetScopedDisplayUnsetForVulkan();
 };
 
 }  // namespace ui

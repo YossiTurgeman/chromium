@@ -27,9 +27,12 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import collections
+import contextlib
+import io
 import logging
 import os
-import StringIO
+from unittest.mock import Mock
+from unittest.mock import patch
 
 from blinkpy.common.system.executive import ScriptError
 
@@ -37,25 +40,36 @@ _log = logging.getLogger(__name__)
 
 
 class MockProcess(object):
-    def __init__(self, stdout='MOCK STDOUT\n', stderr='', returncode=0):
+
+    def __init__(self, args, stdout='MOCK STDOUT\n', stderr='', returncode=0):
+        self.args = args
         self.pid = 42
-        self.stdout = StringIO.StringIO(stdout)
-        self.stderr = StringIO.StringIO(stderr)
-        self.stdin = StringIO.StringIO()
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self.stdin = io.StringIO()
         self.returncode = returncode
 
-    def wait(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        pass
+
+    def wait(self, timeout=None):
         return
 
     def poll(self):
         # Consider the process completed when all the stdout and stderr has been read.
-        if (self.stdout.len != self.stdout.tell()
-                or self.stderr.len != self.stderr.tell()):
+        if (len(self.stdout.getvalue()) != self.stdout.tell()
+                or len(self.stderr.getvalue()) != self.stderr.tell()):
             return None
         return self.returncode
 
-    def communicate(self, *_):
+    def communicate(self, input=None, timeout=None):
         return (self.stdout.getvalue(), self.stderr.getvalue())
+
+    def send_signal(self, signal):
+        pass
 
     def kill(self):
         return
@@ -101,11 +115,11 @@ class MockExecutive(object):
         self.full_calls.append(MockCall(args=args, kwargs=kwargs))
 
     def check_running_pid(self, pid):
-        return pid in self._running_pids.values()
+        return pid in list(self._running_pids.values())
 
     def running_pids(self, process_name_filter):
         running_pids = []
-        for process_name, process_pid in self._running_pids.iteritems():
+        for process_name, process_pid in self._running_pids.items():
             if process_name_filter(process_name):
                 running_pids.append(process_pid)
 
@@ -113,7 +127,7 @@ class MockExecutive(object):
         return running_pids
 
     def command_for_printing(self, args):
-        string_args = map(unicode, args)
+        string_args = list(map(str, args))
         return ' '.join(string_args)
 
     # The argument list should match Executive.run_command, even if
@@ -127,8 +141,7 @@ class MockExecutive(object):
             timeout_seconds=None,
             error_handler=None,
             return_exit_code=False,
-            return_stderr=True,
-            ignore_stderr=False,
+            stderr=STDOUT,
             decode_output=True,
             debug_logging=True):
         self._append_call(args, cwd=cwd, input=input, env=env)
@@ -148,7 +161,9 @@ class MockExecutive(object):
         if self._exception:
             raise self._exception  # pylint: disable=raising-bad-type
         if self._should_throw:
-            raise ScriptError('MOCK ScriptError', output=self._output)
+            raise ScriptError('MOCK ScriptError',
+                              output=self._output,
+                              exit_code=self._exit_code)
 
         if self._run_command_fn:
             return self._run_command_fn(args)
@@ -157,18 +172,16 @@ class MockExecutive(object):
             return self._exit_code
 
         if self._exit_code and error_handler:
-            script_error = ScriptError(
-                script_args=args,
-                exit_code=self._exit_code,
-                output=self._output)
+            script_error = ScriptError(script_args=args,
+                                       exit_code=self._exit_code,
+                                       output=self._output)
             error_handler(script_error)
 
         output = self._output
-        if return_stderr:
+        if stderr == self.STDOUT:
             output += self._stderr
-        if decode_output and not isinstance(output, unicode):
-            output = output.decode('utf-8')
-
+        if decode_output and isinstance(output, bytes):
+            output = output.decode()
         return output
 
     def cpu_count(self):
@@ -181,7 +194,7 @@ class MockExecutive(object):
         pass
 
     def popen(self, args, cwd=None, env=None, **_):
-        assert all(isinstance(arg, basestring) for arg in args)
+        assert all(isinstance(arg, str) for arg in args)
         self._append_call(args, cwd=cwd, env=env)
         if self._should_log:
             cwd_string = ''
@@ -192,14 +205,14 @@ class MockExecutive(object):
                 env_string = ', env=%s' % env
             _log.info('MOCK popen: %s%s%s', args, cwd_string, env_string)
         if not self._proc:
-            self._proc = MockProcess(
-                stdout=self._output,
-                stderr=self._stderr,
-                returncode=self._exit_code)
+            self._proc = MockProcess(args,
+                                     stdout=self._output,
+                                     stderr=self._stderr,
+                                     returncode=self._exit_code)
         return self._proc
 
     def call(self, args, **_):
-        assert all(isinstance(arg, basestring) for arg in args)
+        assert all(isinstance(arg, str) for arg in args)
         self._append_call(args)
         _log.info('Mock call: %s', args)
 
@@ -209,7 +222,7 @@ class MockExecutive(object):
         num_previous_calls = len(self.full_calls)
         command_outputs = []
         for cmd_line, cwd in commands:
-            assert all(isinstance(arg, basestring) for arg in cmd_line)
+            assert all(isinstance(arg, str) for arg in cmd_line)
             command_outputs.append(
                 [0, self.run_command(cmd_line, cwd=cwd), ''])
 
@@ -232,10 +245,32 @@ class MockExecutive(object):
             elif isinstance(v, MockCall):
                 return v.args
             else:
-                return TypeError(
-                    'Unknown full_calls type: %s' % (type(v).__name__, ))
+                return TypeError('Unknown full_calls type: %s' %
+                                 (type(v).__name__, ))
 
         return get_args(self.full_calls)
+
+    def _run_mock(self, args, **_options):
+        self._append_call(args)
+        completed_process = Mock()
+        completed_process.args = ['echo']
+        completed_process.returncode = 0
+        completed_process.stdout = completed_process.stderr = b''
+        return completed_process
+
+    @contextlib.contextmanager
+    def patch_builtins(self):
+        # `mozprocess` subclasses `subprocess.Popen`, so patch in a real type,
+        # not just a callable.
+        class MockPopen:
+
+            def __new__(cls, *args, **kwargs):
+                return self.popen(*args, **kwargs)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch('subprocess.run', self._run_mock))
+            stack.enter_context(patch('subprocess.Popen', MockPopen))
+            yield
 
 
 def mock_git_commands(vals, strict=False):

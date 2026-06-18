@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,8 @@
 
 #include "ash/ash_export.h"
 #include "ash/public/cpp/media_controller.h"
-#include "base/macros.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "components/account_id/account_id.h"
 #include "mojo/public/cpp/bindings/receiver.h"
@@ -25,7 +26,14 @@ class MediaCaptureObserver {
  public:
   // Called when media capture state has changed.
   virtual void OnMediaCaptureChanged(
-      const base::flat_map<AccountId, MediaCaptureState>& capture_states) = 0;
+      const base::flat_map<AccountId, MediaCaptureState>& capture_states) {}
+  // Called when VMs' media capture notifications change. Each VM can have 0 or
+  // 1 media notification. It can either be a "camera", "mic", or "camera and
+  // mic" notification. Each of the argument is true if a notification of the
+  // corresponding type is active.
+  virtual void OnVmMediaNotificationChanged(bool camera,
+                                            bool mic,
+                                            bool camera_and_mic) {}
 
  protected:
   virtual ~MediaCaptureObserver() {}
@@ -39,9 +47,17 @@ class ASH_EXPORT MediaControllerImpl
       public media_session::mojom::MediaControllerObserver {
  public:
   MediaControllerImpl();
+
+  MediaControllerImpl(const MediaControllerImpl&) = delete;
+  MediaControllerImpl& operator=(const MediaControllerImpl&) = delete;
+
   ~MediaControllerImpl() override;
 
   static void RegisterProfilePrefs(PrefRegistrySimple* registry);
+
+  media_session::mojom::MediaSessionInfoPtr GetMediaSessionInfo() const {
+    return media_session_info_ ? media_session_info_->Clone() : nullptr;
+  }
 
   // Determine if lock screen media keys are enabled.
   bool AreLockScreenMediaKeysEnabled() const;
@@ -55,6 +71,9 @@ class ASH_EXPORT MediaControllerImpl
   void SetForceMediaClientKeyHandling(bool enabled) override;
   void NotifyCaptureState(const base::flat_map<AccountId, MediaCaptureState>&
                               capture_states) override;
+  void NotifyVmMediaNotificationState(bool camera,
+                                      bool mic,
+                                      bool camera_and_mic) override;
 
   // If media session accelerators are enabled then these methods will use the
   // media session service to control playback. Otherwise it will forward to
@@ -76,14 +95,14 @@ class ASH_EXPORT MediaControllerImpl
   void MediaSessionInfoChanged(
       media_session::mojom::MediaSessionInfoPtr session_info) override;
   void MediaSessionMetadataChanged(
-      const base::Optional<media_session::MediaMetadata>& metadata) override {}
+      const std::optional<media_session::MediaMetadata>& metadata) override {}
   void MediaSessionActionsChanged(
       const std::vector<media_session::mojom::MediaSessionAction>& actions)
       override;
   void MediaSessionChanged(
-      const base::Optional<base::UnguessableToken>& request_id) override {}
+      const std::optional<base::UnguessableToken>& request_id) override {}
   void MediaSessionPositionChanged(
-      const base::Optional<media_session::MediaPosition>& position) override {}
+      const std::optional<media_session::MediaPosition>& position) override {}
 
  private:
   friend class MediaControllerTest;
@@ -143,11 +162,9 @@ class ASH_EXPORT MediaControllerImpl
   mojo::Receiver<media_session::mojom::MediaControllerObserver>
       media_controller_observer_receiver_{this};
 
-  MediaClient* client_ = nullptr;
+  raw_ptr<MediaClient> client_ = nullptr;
 
   base::ObserverList<MediaCaptureObserver>::Unchecked observers_;
-
-  DISALLOW_COPY_AND_ASSIGN(MediaControllerImpl);
 };
 
 }  // namespace ash

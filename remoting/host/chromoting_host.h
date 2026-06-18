@@ -1,30 +1,45 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef REMOTING_HOST_CHROMOTING_HOST_H_
 #define REMOTING_HOST_CHROMOTING_HOST_H_
 
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/observer_list.h"
+#include "base/process/process_handle.h"
 #include "base/sequence_checker.h"
 #include "base/threading/thread.h"
+#include "base/time/time.h"
+#include "build/build_config.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/receiver_set.h"
 #include "net/base/backoff_entry.h"
+#include "remoting/base/errors.h"
+#include "remoting/base/local_session_policies_provider.h"
+#include "remoting/host/base/desktop_environment_options.h"
 #include "remoting/host/client_session.h"
-#include "remoting/host/desktop_environment_options.h"
 #include "remoting/host/host_extension.h"
 #include "remoting/host/host_status_monitor.h"
 #include "remoting/host/host_status_observer.h"
+#include "remoting/host/mojom/chromoting_host_services.mojom.h"
 #include "remoting/protocol/authenticator.h"
 #include "remoting/protocol/connection_to_client.h"
 #include "remoting/protocol/pairing_registry.h"
 #include "remoting/protocol/session_manager.h"
+#include "remoting/protocol/transport_context.h"
+
+#if BUILDFLAG(IS_LINUX)
+#include "remoting/host/chromoting_host_services_server.h"
+#endif
 
 namespace base {
 class SingleThreadTaskRunner;
@@ -34,7 +49,6 @@ namespace remoting {
 
 namespace protocol {
 class InputStub;
-class TransportContext;
 }  // namespace protocol
 
 class DesktopEnvironmentFactory;
@@ -62,18 +76,51 @@ class DesktopEnvironmentFactory;
 //    all pending tasks to complete. After all of that has completed, we
 //    return to the idle state. We then go to step (2) to wait for a new
 //    incoming connection.
-class ChromotingHost : public ClientSession::EventHandler {
- public:
-  typedef std::vector<std::unique_ptr<ClientSession>> ClientSessions;
+class ChromotingHost :
+// The ChromotingHostServices inheritance is currently needed by the Mac host
+// and the single-process Linux host. For the Windows host and the Linux
+// multi-process host, ChromotingHostServices is implemented by the daemon
+// process and the ChromotingSessionServices receiver is passed through
+// DesktopSessionConnectionEvents.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+    public mojom::ChromotingHostServices,
 
+#endif
+    public ClientSession::EventHandler {
+ public:
+  // This is a multimap to allow for multiple unauthenticated sessions. For each
+  // client ID, there can be up to one authenticated session and multiple
+  // unauthenticated sessions. Once an unauthenticated session becomes
+  // authenticated, any existing authenticated session will be disconnected.
+  // There can be concurrent authenticated sessions as long as they have
+  // different client IDs.
+  // TODO: yuweih - Limit the number of unauthenticated sessions per client ID.
+  using ClientSessions =
+      std::multimap<std::string /*client_id*/, std::unique_ptr<ClientSession>>;
+
+  // Callback for validating session policies. The return value will be nullopt
+  // if the session policies are valid; otherwise the session will be closed
+  // and an error code will be reported to the client.
+  using SessionPoliciesValidator =
+      base::RepeatingCallback<std::optional<ErrorCode>(const SessionPolicies&)>;
+
+  // |per_session_policies_validator|: Extra SessionPolicies validator in
+  //   addition to the ones in ClientSession. Pass base::NullCallback() if there
+  //   is no extra validator.
   // |desktop_environment_factory| must outlive this object.
   ChromotingHost(
       DesktopEnvironmentFactory* desktop_environment_factory,
       std::unique_ptr<protocol::SessionManager> session_manager,
+      std::unique_ptr<protocol::SessionManager> secondary_session_manager,
       scoped_refptr<protocol::TransportContext> transport_context,
       scoped_refptr<base::SingleThreadTaskRunner> audio_task_runner,
-      scoped_refptr<base::SingleThreadTaskRunner> video_encode_task_runner,
-      const DesktopEnvironmentOptions& options);
+      const DesktopEnvironmentOptions& options,
+      const SessionPoliciesValidator& per_session_policies_validator,
+      const LocalSessionPoliciesProvider* local_session_policies_provider);
+
+  ChromotingHost(const ChromotingHost&) = delete;
+  ChromotingHost& operator=(const ChromotingHost&) = delete;
+
   ~ChromotingHost() override;
 
   // Asynchronously starts the host.
@@ -82,6 +129,23 @@ class ChromotingHost : public ClientSession::EventHandler {
   //
   // This method can only be called once during the lifetime of this object.
   void Start(const std::string& host_owner);
+
+#if BUILDFLAG(IS_LINUX)
+  // Starts running the ChromotingHostServices server and listening for incoming
+  // IPC binding requests.
+  // Currently only the single-process Linux host runs the
+  // ChromotingHostServices server on the host process.
+  void StartChromotingHostServices();
+
+  void BindChromotingHostServicesForServer(
+      mojo::PendingReceiver<mojom::ChromotingHostServices> receiver,
+      std::unique_ptr<named_mojo_ipc_server::ConnectionInfo> connection_info);
+#endif
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  void BindChromotingHostServices(
+      mojo::PendingReceiver<mojom::ChromotingHostServices> receiver);
+#endif
 
   scoped_refptr<HostStatusMonitor> status_monitor() { return status_monitor_; }
   const DesktopEnvironmentOptions& desktop_environment_options() const {
@@ -100,10 +164,6 @@ class ChromotingHost : public ClientSession::EventHandler {
   void SetAuthenticatorFactory(
       std::unique_ptr<protocol::AuthenticatorFactory> authenticator_factory);
 
-  // Sets the maximum duration of any session. By default, a session has no
-  // maximum duration.
-  void SetMaximumSessionDuration(const base::TimeDelta& max_session_duration);
-
   ////////////////////////////////////////////////////////////////////////////
   // ClientSession::EventHandler implementation.
   void OnSessionAuthenticating(ClientSession* client) override;
@@ -114,11 +174,22 @@ class ChromotingHost : public ClientSession::EventHandler {
   void OnSessionRouteChange(ClientSession* session,
                             const std::string& channel_name,
                             const protocol::TransportRoute& route) override;
+  std::optional<ErrorCode> OnSessionPoliciesReceived(
+      const SessionPolicies& policies) override;
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  // mojom::ChromotingHostServices implementation.
+  void BindSessionServices(
+      mojo::PendingReceiver<mojom::ChromotingSessionServices> receiver)
+      override;
+#endif
 
   // Callback for SessionManager to accept incoming sessions.
   void OnIncomingSession(
       protocol::Session* session,
-      protocol::SessionManager::IncomingSessionResponse* response);
+      protocol::SessionManager::IncomingSessionResponse* response,
+      std::string* rejection_reason,
+      base::Location* rejection_location);
 
   // The host uses a pairing registry to generate and store pairing information
   // for clients for PIN-less authentication.
@@ -136,18 +207,26 @@ class ChromotingHost : public ClientSession::EventHandler {
     return transport_context_;
   }
 
+  const DesktopEnvironmentOptions& desktop_environment_options_for_tests()
+      const {
+    return desktop_environment_options_;
+  }
+
  private:
+  // Returns the currently connected client session, or nullptr if not found.
+  ClientSession* GetConnectedClientSession() const;
+
   friend class ChromotingHostTest;
 
   // Unless specified otherwise, all members of this class must be
   // used on the network thread only.
 
   // Parameters specified when the host was created.
-  DesktopEnvironmentFactory* desktop_environment_factory_;
+  raw_ptr<DesktopEnvironmentFactory> desktop_environment_factory_;
   std::unique_ptr<protocol::SessionManager> session_manager_;
+  std::unique_ptr<protocol::SessionManager> secondary_session_manager_;
   scoped_refptr<protocol::TransportContext> transport_context_;
   scoped_refptr<base::SingleThreadTaskRunner> audio_task_runner_;
-  scoped_refptr<base::SingleThreadTaskRunner> video_encode_task_runner_;
 
   scoped_refptr<HostStatusMonitor> status_monitor_;
 
@@ -163,8 +242,9 @@ class ChromotingHost : public ClientSession::EventHandler {
   // Options to initialize a DesktopEnvironment.
   const DesktopEnvironmentOptions desktop_environment_options_;
 
-  // The maximum duration of any session.
-  base::TimeDelta max_session_duration_;
+  raw_ptr<const LocalSessionPoliciesProvider> local_session_policies_provider_;
+
+  SessionPoliciesValidator per_session_policies_validator_;
 
   // The pairing registry for PIN-less authentication.
   scoped_refptr<protocol::PairingRegistry> pairing_registry_;
@@ -172,11 +252,21 @@ class ChromotingHost : public ClientSession::EventHandler {
   // List of host extensions.
   std::vector<std::unique_ptr<HostExtension>> extensions_;
 
+#if BUILDFLAG(IS_LINUX)
+  // IPC server that runs the CRD host service API. Non-null if the server name
+  // is set and the host is started.
+  // Currently only Linux runs the ChromotingHostServices server on the host
+  // process.
+  std::unique_ptr<ChromotingHostServicesServer> ipc_server_;
+#endif
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  mojo::ReceiverSet<mojom::ChromotingHostServices> receivers_;
+#endif
+
   SEQUENCE_CHECKER(sequence_checker_);
 
   base::WeakPtrFactory<ChromotingHost> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ChromotingHost);
 };
 
 }  // namespace remoting

@@ -1,11 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+
+import * as SourcesModule from 'devtools/panels/sources/sources.js';
+
 (async function() {
   TestRunner.addResult('Check that return value can be changed.');
-  await TestRunner.loadModule('console_test_runner');
-  await TestRunner.loadModule('sources_test_runner');
   await TestRunner.showPanel('sources');
   await TestRunner.evaluateInPagePromise(`
     function testFunction() {
@@ -14,32 +18,36 @@
     //# sourceURL=test.js
   `);
   await SourcesTestRunner.startDebuggerTestPromise();
-  await TestRunner.DebuggerAgent.invoke_setBreakpointByUrl({lineNumber: 11, url: 'test.js', columnNumber: 37});
+  await TestRunner.DebuggerAgent.invoke_setBreakpointByUrl({lineNumber: 15, url: 'test.js', columnNumber: 37});
   let sidebarUpdated = TestRunner.addSnifferPromise(
-        Sources.ScopeChainSidebarPane.prototype, '_sidebarPaneUpdatedForTest');
+        SourcesModule.ScopeChainSidebarPane.ScopeChainSidebarPane.prototype, 'sidebarPaneUpdatedForTest');
   await Promise.all([SourcesTestRunner.runTestFunctionAndWaitUntilPausedPromise(), sidebarUpdated]);
   let localScope = SourcesTestRunner.scopeChainSections()[0];
 
   TestRunner.addResult('Dump current');
   await new Promise(resolve => SourcesTestRunner.expandProperties([localScope, ['Return value']], resolve));
+  await new Promise(requestAnimationFrame);
   SourcesTestRunner.dumpScopeVariablesSidebarPane();
 
   TestRunner.addResult('Set return value to {a:1}');
   let returnValueElement = localScope.children().find(x => x.property.name === 'Return value');
-  await returnValueElement._applyExpression('{a:1}');
+  await returnValueElement.applyExpression('{a:1}');
   await new Promise(resolve => SourcesTestRunner.expandProperties([localScope, ['Return value']], resolve));
+  await new Promise(requestAnimationFrame);
   SourcesTestRunner.dumpScopeVariablesSidebarPane();
 
   TestRunner.addResult('Try to remove return value');
   returnValueElement = localScope.children().find(x => x.property.name === 'Return value');
-  await returnValueElement._applyExpression('');
+  await returnValueElement.applyExpression('');
   await new Promise(resolve => SourcesTestRunner.expandProperties([localScope, ['Return value']], resolve));
+  await new Promise(requestAnimationFrame);
   SourcesTestRunner.dumpScopeVariablesSidebarPane();
 
   TestRunner.addResult('Set return value to 239');
   returnValueElement = localScope.children().find(x => x.property.name === 'Return value');
-  await returnValueElement._applyExpression('239');
+  await returnValueElement.applyExpression('239');
   await new Promise(resolve => SourcesTestRunner.expandProperties([localScope, ['Return value']], resolve));
+  await new Promise(requestAnimationFrame);
   SourcesTestRunner.dumpScopeVariablesSidebarPane();
 
   SourcesTestRunner.resumeExecution();

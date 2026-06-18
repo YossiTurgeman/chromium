@@ -26,6 +26,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <meta name='mobile-web-app-capable' content='yes'>
     <meta name='apple-mobile-web-app-capable' content='yes'>
 
+    <meta http-equiv="origin-trial" content="As0BE09FBB6viNVrwWICektFyN2QlX8TMaTNjvpcGH4Jf7cmI3J4UYvtZQZvScykvRwtGkO4cacWZ3EvIiRUbgUAAABaeyJvcmlnaW4iOiJodHRwczovL3N0b3JhZ2UuZ29vZ2xlYXBpcy5jb206NDQzIiwiZmVhdHVyZSI6IldlYlhSRGVwdGgiLCJleHBpcnkiOjE2MTE3NzIwMTl9">
+
     <title>AR Depth API</title>
 
     <link href='../css/common.css' rel='stylesheet'></link>
@@ -37,6 +39,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <script src='../js/webxr-polyfill.js'></script>
 
     <script src='../js/webxr-button.js'></script>
+    <style>
+      #text-info {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: large;
+        color: red;
+      }
+    </style>
   </head>
   <body>
     <header>
@@ -46,9 +58,30 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           This sample demonstrates use of a depth API in immersive-ar session.
           The data will be uploaded to the GPU & accessed from a shader.
           <a class="back" href="./index.html">Back</a>
+
+          <br/>
+          <hr/>
+
+          <input id="useFrontFacing" type="checkbox">
+          <label for="useFrontFacing">Enable front-facing camera</label>
+          <br/>
+          <input id="requestRawDepth" type="checkbox">
+          <label for="requestRawDepth">Request raw depth buffer</label>
+          <br/>
+          <input id="requestSmoothDepth" type="checkbox">
+          <label for="requestSmoothDepth">Request smooth depth buffer (will be requested after raw if both are requested)</label>
+          <br/>
+          <input id="matchDepthView" type="checkbox" checked>
+          <label for="matchDepthView">Align Depth and XRViews</label>
+          <br/>
         </p>
       </details>
     </header>
+    <div id="text-overlay">
+      <br/>
+      <br/>
+      <div id="text-info"></div>
+    </div>
     <script id="vertexShader" type="x-shader/x-vertex">
       precision mediump float;
 
@@ -67,9 +100,15 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <script type="module">
       import {mat4, vec3, mat3, vec2} from '../js/cottontail/src/math/gl-matrix.js';
 
+      const useFrontFacing = document.getElementById('useFrontFacing');
+      const requestRawDepth = document.getElementById('requestRawDepth');
+      const requestSmoothDepth = document.getElementById('requestSmoothDepth');
+
       // XR globals.
       let xrButton = null;
       let xrRefSpace = null;
+      let toggleDepthButton = null;
+      let requestToggleDepthActive = false;
 
       // WebGL scene globals.
       let gl = null;
@@ -82,6 +121,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       let vertexShaderSource = null;
       let fragmentShaderSource = null;
 
+      const textOverlayElement = document.querySelector("#text-overlay");
+      if(!textOverlayElement) {
+        console.error("#text-overlay element not found!");
+        throw new Error("#text-overlay element not found!");
+      }
+
+      const textInfoElement = document.querySelector("#text-info");
+      if(!textInfoElement) {
+        console.error("#text-info element not found!");
+        throw new Error("#text-info element not found!");
+      }
+
       function initXR() {
         xrButton = new XRDeviceButton({
           onRequestSession: onRequestSession,
@@ -92,14 +143,49 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           supportedSessionTypes: ['immersive-ar']
         });
         document.querySelector('header').appendChild(xrButton.domElement);
+
+        toggleDepthButton = new XRDeviceButton({
+          onRequestSession: ()=>{}, // Invoked when we have no session, no-op.
+          onEndSession: (session)=>{
+            requestToggleDepthActive = true;
+          },
+          textEnterXRTitle: "No Active Session",
+          textXRNotFoundTitle: "AR NOT FOUND",
+          textExitXRTitle: "Tap to toggle depth active",
+          supportedSessionTypes: ['immersive-ar']
+        });
+        document.querySelector('#text-overlay').appendChild(toggleDepthButton.domElement);
       }
 
       function onRequestSession() {
         // Requests an immersive session with environment integration.
 
         let options = {
-          requiredFeatures: ['depth'],
+          requiredFeatures: ['depth-sensing'],
+          optionalFeatures: ['dom-overlay'],
+          domOverlay: { root: textOverlayElement },
+          depthSensing: {
+            usagePreference: ["cpu-optimized"],
+            dataFormatPreference: ["luminance-alpha"],
+          }
         };
+
+        if (useFrontFacing.checked) {
+          options.optionalFeatures.push('front-facing');
+        }
+
+        options.depthSensing.matchDepthView = matchDepthView.checked;
+
+        if (requestRawDepth.checked || requestSmoothDepth.checked) {
+          options.depthSensing.depthTypeRequest = [];
+          if (requestRawDepth.checked) {
+            options.depthSensing.depthTypeRequest.push("raw");
+          }
+
+          if (requestSmoothDepth.checked) {
+            options.depthSensing.depthTypeRequest.push("smooth");
+          }
+        }
 
         navigator.xr.requestSession('immersive-ar', options).then((session) => {
             session.mode = 'immersive-ar';
@@ -112,7 +198,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
 
       function onSessionStarted(session) {
+        toggleDepthButton.setSession(session);
+        useFrontFacing.disabled = true;
+
         session.addEventListener('end', onSessionEnded);
+        session.addEventListener('selectstart', onSelectStart);
 
         let canvas = document.createElement('canvas');
         gl = canvas.getContext('webgl', {
@@ -126,6 +216,14 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           xrRefSpace = refSpace;
           session.requestAnimationFrame(onXRFrame);
         });
+
+        if(session.depthUsage != "cpu-optimized") {
+          throw new Error("Unsupported depth API usage!");
+        }
+
+        if(session.depthDataFormat != "luminance-alpha") {
+          throw new Error("Unsupported depth data format!");
+        }
       }
 
       function onEndSession(session) {
@@ -133,7 +231,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       }
 
       function onSessionEnded(event) {
+        useFrontFacing.disabled = false;
         xrButton.setSession(null);
+        toggleDepthButton.setSession(null);
+      }
+
+      function onSelectStart(event) {
+        requestToggleDepthActive = true;
       }
 
       // Helper, fetches shader source code based on the passed in ID of the <script> element.
@@ -155,6 +259,17 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
       }
 
+      // Creates new GL buffer and uploads contents of |vertices| to it:
+      function uploadVertexData(vertices) {
+        const result = gl.createBuffer();
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, result);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        return result;
+      }
+
       function initializeGL() {
         shaderProgram = initShaderProgram(vertexShaderSource, fragmentShaderSource);
 
@@ -167,22 +282,22 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             uniformLocations: {
               depthTexture: gl.getUniformLocation(shaderProgram, 'uDepthTexture'),
               uvTransform: gl.getUniformLocation(shaderProgram, 'uUvTransform'),
+              rawValueToMeters: gl.getUniformLocation(shaderProgram, 'uRawValueToMeters'),
+              alpha: gl.getUniformLocation(shaderProgram, 'uAlpha'),
             },
         };
 
-        vertexBuffer = gl.createBuffer();
-
         // clip space coordinates + texture space coordinates
+        // our depth buffer has an origin in top-left corner of the screen -
+        // we need to adjust the texture coordinates to account for that
         const vertices_data = [
-          -1, -1,    0, 0,  // bottom left
-           1, -1,    1, 0,  // bottom right
-          -1,  1,    0, 1,  // top left
-           1,  1,    1, 1,  // top right
+          -1, -1,    0, 1,  // bottom left
+           1, -1,    1, 1,  // bottom right
+          -1,  1,    0, 0,  // top left
+           1,  1,    1, 0,  // top right
         ];
 
-        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices_data), gl.STATIC_DRAW);
-        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        vertexBuffer = uploadVertexData(vertices_data);
 
         depthTexture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, depthTexture);
@@ -241,27 +356,40 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         const session = frame.session;
         session.requestAnimationFrame(onXRFrame);
 
+        if (requestToggleDepthActive) {
+          session.depthActive ? session.pauseDepthSensing() : session.resumeDepthSensing();
+          requestToggleDepthActive = false;
+        }
+
         const baseLayer = session.renderState.baseLayer;
 
         const pose = frame.getViewerPose(xrRefSpace);
 
-        if(pose) {
+        if (pose) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
 
           // Clear the framebuffer
           gl.clearColor(0, 0, 0, 0);
           gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-          for(const view of pose.views) {
+          for (const view of pose.views) {
             const viewport = baseLayer.getViewport(view);
             gl.viewport(viewport.x, viewport.y,
                         viewport.width, viewport.height);
 
             const depthData = frame.getDepthInformation(view);
-            if(depthData){
+            if (depthData) {
+              textInfoElement.innerHTML = "";
+
               renderDepthInformationGPU(depthData, view, viewport);
+            } else {
+              console.error("Depth data unavailable in the current frame!");
+              textInfoElement.innerHTML = "Depth data unavailable in the current frame!";
             }
           }
+        } else {
+              console.error("Pose unavailable in the current frame!");
+          textInfoElement.innerHTML = "Pose unavailable in the current frame!";
         }
       }
 
@@ -297,22 +425,25 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           programInfo.attribLocations.texCoord
         );
 
-        const dataBuffer = depthData.data;
-
         gl.bindTexture(gl.TEXTURE_2D, depthTexture);
 
         // Supply the data buffer after converting it to Uint8Array - the
-        // dataBuffer.buffer is an Uint16Array, but the gl.texImage2D expects Uint8Array
-        // when using gl.UNSIGNED_BYTE type.
+        // gl.texImage2D expects Uint8Array when using gl.UNSIGNED_BYTE type.
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, depthData.width,
                       depthData.height, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE,
-                      new Uint8Array(dataBuffer.buffer, dataBuffer.byteOffset, dataBuffer.byteLength));
+                      new Uint8Array(depthData.data));
 
         gl.activeTexture(gl.TEXTURE0);
         gl.uniform1i(programInfo.uniformLocations.depthTexture, 0);
 
         gl.uniformMatrix4fv(programInfo.uniformLocations.uvTransform, false,
-                            depthData.normTextureFromNormView.matrix);
+                            depthData.normDepthBufferFromNormView.matrix);
+
+        gl.uniform1f(programInfo.uniformLocations.rawValueToMeters,
+                     depthData.rawValueToMeters);
+
+        gl.uniform1f(programInfo.uniformLocations.alpha,
+                     0.75);
 
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }

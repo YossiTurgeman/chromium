@@ -1,48 +1,45 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var testSetStorage = function(storageArea, key, value) {
-  var options = {};
+const testSetStorage = function(storageArea, key, value) {
+  const options = {};
   options[key] = value;
   try {
     storageArea.set(options, function() {
       chrome.test.assertNoLastError();
       chrome.test.succeed();
     });
-  }
-  catch (e) {
+  } catch (e) {
     chrome.test.fail(e);
   }
 };
 
-var testGetStorage = function(storageArea, key, expectedValue) {
+const testGetStorage = function(storageArea, key, expectedValue) {
   try {
     storageArea.get([key], function(result) {
       chrome.test.assertNoLastError();
       chrome.test.assertEq(expectedValue, result[key]);
       chrome.test.succeed();
     });
-  }
-  catch (e) {
+  } catch (e) {
     chrome.test.fail(e);
   }
 };
 
-var testGetStorageBytesInUse = function(storageArea, key) {
+const testGetStorageBytesInUse = function(storageArea, key) {
   try {
     storageArea.getBytesInUse([key], function(bytes) {
       chrome.test.assertNoLastError();
-      chrome.test.assertFalse(bytes == 0);
+      chrome.test.assertNe(0, bytes);
       chrome.test.succeed();
     });
-  }
-  catch (e) {
+  } catch (e) {
     chrome.test.fail(e);
   }
 };
 
-var testRemoveStorage = function(storageArea, key) {
+const testRemoveStorage = function(storageArea, key) {
   try {
     storageArea.remove([key], function(result) {
       chrome.test.assertNoLastError();
@@ -52,13 +49,12 @@ var testRemoveStorage = function(storageArea, key) {
         chrome.test.succeed();
       });
     });
-  }
-  catch (e) {
+  } catch (e) {
     chrome.test.fail(e);
   }
 };
 
-var testClearStorage = function(storageArea, key) {
+const testClearStorage = function(storageArea, key) {
   try {
     storageArea.clear(function() {
       chrome.test.assertNoLastError();
@@ -68,77 +64,71 @@ var testClearStorage = function(storageArea, key) {
         chrome.test.succeed();
       });
     });
-  }
-  catch (e) {
+  } catch (e) {
     chrome.test.fail(e);
   }
 };
 
-var testOnStorageChanged = function(storageArea) {
+const testOnStorageChanged = function(storageArea) {
   try {
-    var changedKey = '_changed_key';
-    var changedValue = 'changed_value';
+    const changedKey = '_changed_key';
+    const changedValue = 'changed_value';
     storageArea.onChanged.addListener(function callback(changes) {
       storageArea.onChanged.removeListener(callback);
       chrome.test.assertNoLastError();
       chrome.test.assertEq(changes[changedKey].newValue, changedValue);
       chrome.test.succeed();
     });
-    var options = {};
+    const options = {};
     options[changedKey] = changedValue;
     storageArea.set(options);
-  }
-  catch (e) {
+  } catch (e) {
     chrome.test.fail(e);
   }
 };
 
-var localKey = '_local_key';
-var localValue = 'this is a local value';
-var syncKey = '_sync_key';
-var syncValue = 'this is a sync value';
+const namespaces = [
+  {
+    storageArea: chrome.storage.local,
+    key: '_local_key',
+    value: 'this is a local value',
+  },
+  {
+    storageArea: chrome.storage.sync,
+    key: '_sync_key',
+    value: 'this is a sync value',
+  },
+  {
+    storageArea: chrome.storage.session,
+    key: '_session_key',
+    value: 'this is a session value',
+  },
+];
 
-chrome.test.runTests([
-  function testLocalSet() {
-    testSetStorage(chrome.storage.local, localKey, localValue);
-  },
-  function testLocalGet() {
-    testGetStorage(chrome.storage.local, localKey, localValue);
-  },
-  function testLocalGetBytesInUse() {
-    testGetStorageBytesInUse(chrome.storage.local, localKey);
-  },
-  function testLocalRemove() {
-    testRemoveStorage(chrome.storage.local, localKey);
-  },
-  function testLocalClearSetup() {
-    testSetStorage(chrome.storage.local, localKey, localValue);
-  },
-  function testLocalClear() {
-    testClearStorage(chrome.storage.local, localKey);
-  },
-  function testLocalOnStorageChanged() {
-    testOnStorageChanged(chrome.storage.local);
-  },
-  function testSyncSet() {
-    testSetStorage(chrome.storage.sync, syncKey, syncValue);
-  },
-  function testSyncGet() {
-    testGetStorage(chrome.storage.sync, syncKey, syncValue);
-  },
-  function testSyncGetBytesInUse() {
-    testGetStorageBytesInUse(chrome.storage.sync, syncKey);
-  },
-  function testSyncRemove() {
-    testRemoveStorage(chrome.storage.sync, syncKey);
-  },
-  function testSyncClearSetup() {
-    testSetStorage(chrome.storage.sync, syncKey, syncValue);
-  },
-  function testSyncClear() {
-    testClearStorage(chrome.storage.sync, syncKey);
-  },
-  function testSyncOnStorageChanged() {
-    testOnStorageChanged(chrome.storage.sync);
-  },
-]);
+const tests = [];
+for (const namespace of namespaces) {
+  tests.push(
+      function testSet() {
+        testSetStorage(namespace.storageArea, namespace.key, namespace.value);
+      },
+      function testGet() {
+        testGetStorage(namespace.storageArea, namespace.key, namespace.value);
+      },
+      function testGetBytesInUse() {
+        testGetStorageBytesInUse(namespace.storageArea, namespace.key);
+      },
+      function testRemove() {
+        testRemoveStorage(namespace.storageArea, namespace.key);
+      },
+      function testClearSetup() {
+        testSetStorage(namespace.storageArea, namespace.key, namespace.value);
+      },
+      function testClear() {
+        testClearStorage(namespace.storageArea, namespace.key);
+      },
+      function testChanges() {
+        testOnStorageChanged(namespace.storageArea);
+      });
+}
+
+chrome.test.runTests(tests);

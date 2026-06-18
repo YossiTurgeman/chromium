@@ -1,4 +1,4 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,9 @@
 #include <stddef.h>
 
 #include "components/sessions/core/session_command.h"
+#include "components/split_tabs/split_tab_id.h"
 #include "components/tab_groups/tab_group_id.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 
 namespace sessions {
 
@@ -27,17 +29,24 @@ SessionTab::~SessionTab() {
 
 SessionTabGroup::SessionTabGroup(const tab_groups::TabGroupId& id) : id(id) {}
 
-SessionTabGroup::~SessionTabGroup() {}
+SessionTabGroup::~SessionTabGroup() = default;
+
+// SessionSplitTab -------------------------------------------------------------
+
+SessionSplitTab::SessionSplitTab(const split_tabs::SplitTabId& id) : id_(id) {}
+
+SessionSplitTab::~SessionSplitTab() = default;
 
 // SessionWindow ---------------------------------------------------------------
 
 SessionWindow::SessionWindow()
     : window_id(SessionID::NewUnique()),
+      visible_on_all_workspaces(false),
       selected_tab_index(-1),
       type(TYPE_NORMAL),
       is_constrained(true),
-      show_state(ui::SHOW_STATE_DEFAULT) {}
+      show_state(ui::mojom::WindowShowState::kDefault) {}
 
-SessionWindow::~SessionWindow() {}
+SessionWindow::~SessionWindow() = default;
 
 }  // namespace sessions

@@ -30,9 +30,12 @@
 
 #include "third_party/blink/renderer/core/loader/base_fetch_context.h"
 
-#include "base/optional.h"
+#include <optional>
+
+#include "base/test/scoped_command_line.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/switches.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/platform/websocket_handshake_throttle.h"
 #include "third_party/blink/renderer/core/script/fetch_client_settings_object_impl.h"
@@ -43,6 +46,7 @@
 #include "third_party/blink/renderer/platform/loader/testing/test_resource_fetcher_properties.h"
 #include "third_party/blink/renderer/platform/scheduler/test/fake_task_runner.h"
 #include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
 
@@ -50,7 +54,10 @@ class MockBaseFetchContext final : public BaseFetchContext {
  public:
   MockBaseFetchContext(const DetachableResourceFetcherProperties& properties,
                        ExecutionContext* execution_context)
-      : BaseFetchContext(properties), execution_context_(execution_context) {}
+      : BaseFetchContext(
+            properties,
+            MakeGarbageCollected<DetachableConsoleLogger>(execution_context_)),
+        execution_context_(execution_context) {}
   ~MockBaseFetchContext() override = default;
 
   // BaseFetchContext overrides:
@@ -61,24 +68,20 @@ class MockBaseFetchContext final : public BaseFetchContext {
       const override {
     return SecurityOrigin::CreateUniqueOpaque();
   }
-  bool AllowScriptFromSource(const KURL&) const override { return false; }
+  bool AllowScript() const override { return false; }
   SubresourceFilter* GetSubresourceFilter() const override { return nullptr; }
-  PreviewsResourceLoadingHints* GetPreviewsResourceLoadingHints()
-      const override {
-    return nullptr;
-  }
   bool ShouldBlockRequestByInspector(const KURL&) const override {
     return false;
   }
   void DispatchDidBlockRequest(const ResourceRequest&,
-                               const FetchInitiatorInfo&,
+                               const ResourceLoaderOptions&,
                                ResourceRequestBlockedReason,
                                ResourceType) const override {}
-  const ContentSecurityPolicy* GetContentSecurityPolicyForWorld(
+  ContentSecurityPolicy* GetContentSecurityPolicyForWorld(
       const DOMWrapperWorld* world) const override {
     return GetContentSecurityPolicy();
   }
-  bool IsSVGImageChromeClient() const override { return false; }
+  bool IsIsolatedSVGChromeClient() const override { return false; }
   void CountUsage(WebFeature) const override {}
   void CountDeprecation(WebFeature) const override {}
   bool ShouldBlockWebSocketByMixedContentCheck(const KURL&) const override {
@@ -89,11 +92,12 @@ class MockBaseFetchContext final : public BaseFetchContext {
     return nullptr;
   }
   bool ShouldBlockFetchByMixedContentCheck(
-      mojom::RequestContextType,
-      const base::Optional<ResourceRequest::RedirectInfo>&,
+      mojom::blink::RequestContextType,
+      network::mojom::blink::IPAddressSpace,
+      base::optional_ref<const ResourceRequest::RedirectInfo>,
       const KURL&,
       ReportingDisposition,
-      const base::Optional<String>&) const override {
+      const String&) const override {
     return false;
   }
   bool ShouldBlockFetchAsCredentialedSubresource(const ResourceRequest&,
@@ -102,13 +106,9 @@ class MockBaseFetchContext final : public BaseFetchContext {
   }
   const KURL& Url() const override { return execution_context_->Url(); }
 
-  const SecurityOrigin* GetParentSecurityOrigin() const override {
-    return nullptr;
-  }
-  const ContentSecurityPolicy* GetContentSecurityPolicy() const override {
+  ContentSecurityPolicy* GetContentSecurityPolicy() const override {
     return execution_context_->GetContentSecurityPolicy();
   }
-  void AddConsoleMessage(ConsoleMessage*) const override {}
 
   void Trace(Visitor* visitor) const override {
     visitor->Trace(execution_context_);
@@ -116,13 +116,24 @@ class MockBaseFetchContext final : public BaseFetchContext {
     BaseFetchContext::Trace(visitor);
   }
 
+  ExecutionContext* GetExecutionContext() const override {
+    return execution_context_.Get();
+  }
+
  private:
   Member<ExecutionContext> execution_context_;
   Member<const FetchClientSettingsObjectImpl> fetch_client_settings_object_;
 };
 
-class BaseFetchContextTest : public testing::Test {
+class BaseFetchContextTest : public testing::Test,
+                             public testing::WithParamInterface<bool> {
  protected:
+  BaseFetchContextTest()
+      : preload_link_rel_data_urls_(PreloadLinkRelDataUrlsForTestEnabled()) {}
+  ~BaseFetchContextTest() override {
+    execution_context_->NotifyContextDestroyed();
+  }
+
   void SetUp() override {
     execution_context_ = MakeGarbageCollected<NullExecutionContext>();
     static_cast<NullExecutionContext*>(execution_context_.Get())
@@ -138,7 +149,9 @@ class BaseFetchContextTest : public testing::Test {
         MakeGarbageCollected<ResourceFetcher>(ResourceFetcherInit(
             properties, fetch_context_,
             base::MakeRefCounted<scheduler::FakeTaskRunner>(),
-            MakeGarbageCollected<TestLoaderFactory>(), execution_context_));
+            base::MakeRefCounted<scheduler::FakeTaskRunner>(),
+            MakeGarbageCollected<TestLoaderFactory>(), execution_context_,
+            nullptr /* back_forward_cache_loader_helper */));
   }
 
   const FetchClientSettingsObject& GetFetchClientSettingsObject() const {
@@ -148,92 +161,114 @@ class BaseFetchContextTest : public testing::Test {
     return GetFetchClientSettingsObject().GetSecurityOrigin();
   }
 
+  bool PreloadLinkRelDataUrlsForTestEnabled() { return GetParam(); }
+
+  test::TaskEnvironment task_environment_;
   Persistent<ExecutionContext> execution_context_;
   Persistent<MockBaseFetchContext> fetch_context_;
   Persistent<ResourceFetcher> resource_fetcher_;
   Persistent<TestResourceFetcherProperties> resource_fetcher_properties_;
+
+ private:
+  ScopedPreloadLinkRelDataUrlsForTest preload_link_rel_data_urls_;
 };
 
+INSTANTIATE_TEST_SUITE_P(BaseFetchContextTest,
+                         BaseFetchContextTest,
+                         testing::Bool());
+
 // Tests that CanRequest() checks the enforced CSP headers.
-TEST_F(BaseFetchContextTest, CanRequest) {
+// We use non-script resource types to make sure we are actually getting CSP
+// as the blocked reason because of a CSP policy, instead of having disallowed
+// scripts. See https://crbug.com/600795.
+TEST_P(BaseFetchContextTest, CanRequest) {
   ContentSecurityPolicy* policy =
       execution_context_->GetContentSecurityPolicy();
-  policy->DidReceiveHeader("script-src https://foo.test",
-                           network::mojom::ContentSecurityPolicyType::kEnforce,
-                           network::mojom::ContentSecurityPolicySource::kHTTP);
-  policy->DidReceiveHeader("script-src https://bar.test",
-                           network::mojom::ContentSecurityPolicyType::kReport,
-                           network::mojom::ContentSecurityPolicySource::kHTTP);
+  policy->AddPolicies(ParseContentSecurityPolicies(
+      "img-src https://foo.test",
+      network::mojom::ContentSecurityPolicyType::kEnforce,
+      network::mojom::ContentSecurityPolicySource::kHTTP,
+      *(execution_context_->GetSecurityOrigin())));
+  policy->AddPolicies(ParseContentSecurityPolicies(
+      "img-src https://bar.test",
+      network::mojom::ContentSecurityPolicyType::kReport,
+      network::mojom::ContentSecurityPolicySource::kHTTP,
+      *(execution_context_->GetSecurityOrigin())));
 
-  KURL url(NullURL(), "http://baz.test");
+  KURL url(NullUrl(), "http://baz.test");
   ResourceRequest resource_request(url);
-  resource_request.SetRequestContext(mojom::RequestContextType::SCRIPT);
+  resource_request.SetRequestContext(mojom::blink::RequestContextType::IMAGE);
   resource_request.SetRequestorOrigin(GetSecurityOrigin());
 
   ResourceLoaderOptions options(nullptr /* world */);
 
   EXPECT_EQ(ResourceRequestBlockedReason::kCSP,
             fetch_context_->CanRequest(
-                ResourceType::kScript, resource_request, url, options,
-                ReportingDisposition::kReport, base::nullopt));
+                ResourceType::kImage, resource_request, url, options,
+                ReportingDisposition::kReport, std::nullopt));
   EXPECT_EQ(1u, policy->violation_reports_sent_.size());
 }
 
 // Tests that CheckCSPForRequest() checks the report-only CSP headers.
-TEST_F(BaseFetchContextTest, CheckCSPForRequest) {
+TEST_P(BaseFetchContextTest, CheckCSPForRequest) {
   ContentSecurityPolicy* policy =
       execution_context_->GetContentSecurityPolicy();
-  policy->DidReceiveHeader("script-src https://foo.test",
-                           network::mojom::ContentSecurityPolicyType::kEnforce,
-                           network::mojom::ContentSecurityPolicySource::kHTTP);
-  policy->DidReceiveHeader("script-src https://bar.test",
-                           network::mojom::ContentSecurityPolicyType::kReport,
-                           network::mojom::ContentSecurityPolicySource::kHTTP);
+  policy->AddPolicies(ParseContentSecurityPolicies(
+      "script-src https://foo.test",
+      network::mojom::ContentSecurityPolicyType::kEnforce,
+      network::mojom::ContentSecurityPolicySource::kHTTP,
+      *(execution_context_->GetSecurityOrigin())));
+  policy->AddPolicies(ParseContentSecurityPolicies(
+      "script-src https://bar.test",
+      network::mojom::ContentSecurityPolicyType::kReport,
+      network::mojom::ContentSecurityPolicySource::kHTTP,
+      *(execution_context_->GetSecurityOrigin())));
 
-  KURL url(NullURL(), "http://baz.test");
+  KURL url(NullUrl(), "http://baz.test");
 
   ResourceLoaderOptions options(nullptr /* world */);
 
-  EXPECT_EQ(base::nullopt,
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CheckCSPForRequest(
-                mojom::RequestContextType::SCRIPT,
-                network::mojom::RequestDestination::kScript, url, options,
+                mojom::blink::RequestContextType::SCRIPT,
+                network::mojom::RequestDestination::kScript,
+                network::mojom::RequestMode::kCors, url, options,
                 ReportingDisposition::kReport,
-                KURL(NullURL(), "http://www.redirecting.com/"),
+                KURL(NullUrl(), "http://www.redirecting.com/"),
                 ResourceRequest::RedirectStatus::kFollowedRedirect));
   EXPECT_EQ(1u, policy->violation_reports_sent_.size());
 }
 
-TEST_F(BaseFetchContextTest, CanRequestWhenDetached) {
-  KURL url(NullURL(), "http://www.example.com/");
+TEST_P(BaseFetchContextTest, CanRequestWhenDetached) {
+  KURL url(NullUrl(), "http://www.example.com/");
   ResourceRequest request(url);
   request.SetRequestorOrigin(GetSecurityOrigin());
   ResourceRequest keepalive_request(url);
   keepalive_request.SetRequestorOrigin(GetSecurityOrigin());
   keepalive_request.SetKeepalive(true);
 
-  EXPECT_EQ(base::nullopt,
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CanRequest(
                 ResourceType::kRaw, request, url,
                 ResourceLoaderOptions(nullptr /* world */),
-                ReportingDisposition::kSuppressReporting, base::nullopt));
+                ReportingDisposition::kSuppressReporting, std::nullopt));
 
-  EXPECT_EQ(base::nullopt,
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CanRequest(
                 ResourceType::kRaw, keepalive_request, url,
                 ResourceLoaderOptions(nullptr /* world */),
-                ReportingDisposition::kSuppressReporting, base::nullopt));
+                ReportingDisposition::kSuppressReporting, std::nullopt));
 
   ResourceRequest::RedirectInfo redirect_info(
-      KURL(NullURL(), "http://www.redirecting.com/"),
-      KURL(NullURL(), "http://www.redirecting.com/"));
-  EXPECT_EQ(base::nullopt,
+      KURL(NullUrl(), "http://www.redirecting.com/"),
+      KURL(NullUrl(), "http://www.redirecting.com/"));
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CanRequest(
                 ResourceType::kRaw, request, url,
                 ResourceLoaderOptions(nullptr /* world */),
                 ReportingDisposition::kSuppressReporting, redirect_info));
 
-  EXPECT_EQ(base::nullopt,
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CanRequest(
                 ResourceType::kRaw, keepalive_request, url,
                 ResourceLoaderOptions(nullptr /* world */),
@@ -245,13 +280,13 @@ TEST_F(BaseFetchContextTest, CanRequestWhenDetached) {
             fetch_context_->CanRequest(
                 ResourceType::kRaw, request, url,
                 ResourceLoaderOptions(nullptr /* world */),
-                ReportingDisposition::kSuppressReporting, base::nullopt));
+                ReportingDisposition::kSuppressReporting, std::nullopt));
 
   EXPECT_EQ(ResourceRequestBlockedReason::kOther,
             fetch_context_->CanRequest(
                 ResourceType::kRaw, keepalive_request, url,
                 ResourceLoaderOptions(nullptr /* world */),
-                ReportingDisposition::kSuppressReporting, base::nullopt));
+                ReportingDisposition::kSuppressReporting, std::nullopt));
 
   EXPECT_EQ(ResourceRequestBlockedReason::kOther,
             fetch_context_->CanRequest(
@@ -259,7 +294,7 @@ TEST_F(BaseFetchContextTest, CanRequestWhenDetached) {
                 ResourceLoaderOptions(nullptr /* world */),
                 ReportingDisposition::kSuppressReporting, redirect_info));
 
-  EXPECT_EQ(base::nullopt,
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CanRequest(
                 ResourceType::kRaw, keepalive_request, url,
                 ResourceLoaderOptions(nullptr /* world */),
@@ -267,7 +302,7 @@ TEST_F(BaseFetchContextTest, CanRequestWhenDetached) {
 }
 
 // Test that User Agent CSS can only load images with data urls.
-TEST_F(BaseFetchContextTest, UACSSTest) {
+TEST_P(BaseFetchContextTest, UACSSTest) {
   KURL test_url("https://example.com");
   KURL data_url("data:image/png;base64,test");
 
@@ -277,8 +312,8 @@ TEST_F(BaseFetchContextTest, UACSSTest) {
   options.initiator_info.name = fetch_initiator_type_names::kUacss;
 
   ResourceRequest::RedirectInfo redirect_info(
-      KURL(NullURL(), "http://www.redirecting.com/"),
-      KURL(NullURL(), "http://www.redirecting.com/"));
+      KURL(NullUrl(), "http://www.redirecting.com/"),
+      KURL(NullUrl(), "http://www.redirecting.com/"));
   EXPECT_EQ(ResourceRequestBlockedReason::kOther,
             fetch_context_->CanRequest(
                 ResourceType::kScript, resource_request, test_url, options,
@@ -289,19 +324,20 @@ TEST_F(BaseFetchContextTest, UACSSTest) {
                 ResourceType::kImage, resource_request, test_url, options,
                 ReportingDisposition::kReport, redirect_info));
 
-  EXPECT_EQ(base::nullopt,
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CanRequest(
                 ResourceType::kImage, resource_request, data_url, options,
                 ReportingDisposition::kReport, redirect_info));
 }
 
 // Test that User Agent CSS can bypass CSP to load embedded images.
-TEST_F(BaseFetchContextTest, UACSSTest_BypassCSP) {
+TEST_P(BaseFetchContextTest, UACSSTest_BypassCSP) {
   ContentSecurityPolicy* policy =
       execution_context_->GetContentSecurityPolicy();
-  policy->DidReceiveHeader("default-src 'self'",
-                           network::mojom::ContentSecurityPolicyType::kEnforce,
-                           network::mojom::ContentSecurityPolicySource::kHTTP);
+  policy->AddPolicies(ParseContentSecurityPolicies(
+      "default-src 'self'", network::mojom::ContentSecurityPolicyType::kEnforce,
+      network::mojom::ContentSecurityPolicySource::kHTTP,
+      *(execution_context_->GetSecurityOrigin())));
 
   KURL data_url("data:image/png;base64,test");
 
@@ -311,12 +347,41 @@ TEST_F(BaseFetchContextTest, UACSSTest_BypassCSP) {
   options.initiator_info.name = fetch_initiator_type_names::kUacss;
 
   ResourceRequest::RedirectInfo redirect_info(
-      KURL(NullURL(), "http://www.redirecting.com/"),
-      KURL(NullURL(), "http://www.redirecting.com/"));
-  EXPECT_EQ(base::nullopt,
+      KURL(NullUrl(), "http://www.redirecting.com/"),
+      KURL(NullUrl(), "http://www.redirecting.com/"));
+  EXPECT_EQ(std::nullopt,
             fetch_context_->CanRequest(
                 ResourceType::kImage, resource_request, data_url, options,
                 ReportingDisposition::kReport, redirect_info));
+}
+
+// Tests that CanRequest() checks for data: URL in SVGUseElement.
+TEST_P(BaseFetchContextTest, CanRequestSVGImage) {
+  base::test::ScopedCommandLine scoped_command_line;
+  ScopedRemoveDataUrlInSvgUseForTest runtime_flag(true);
+
+  KURL url(NullUrl(), "data:image/svg+xml,blah");
+  ResourceRequest resource_request(url);
+  resource_request.SetRequestContext(mojom::blink::RequestContextType::IMAGE);
+  resource_request.SetRequestorOrigin(GetSecurityOrigin());
+  resource_request.SetRequestDestination(
+      network::mojom::RequestDestination::kImage);
+  resource_request.SetMode(network::mojom::blink::RequestMode::kSameOrigin);
+
+  ResourceLoaderOptions options(nullptr /* world */);
+  options.initiator_info.name = fetch_initiator_type_names::kUse;
+
+  EXPECT_EQ(ResourceRequestBlockedReason::kOrigin,
+            fetch_context_->CanRequest(
+                ResourceType::kImage, resource_request, url, options,
+                ReportingDisposition::kReport, std::nullopt));
+
+  scoped_command_line.GetProcessCommandLine()->AppendSwitch(
+      blink::switches::kDataUrlInSvgUseEnabled);
+  EXPECT_EQ(std::nullopt,
+            fetch_context_->CanRequest(
+                ResourceType::kImage, resource_request, url, options,
+                ReportingDisposition::kReport, std::nullopt));
 }
 
 }  // namespace blink

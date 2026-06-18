@@ -1,14 +1,16 @@
-// Copyright (c) 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <chrome/browser/android/locale/locale_template_url_loader.h>
+#include "chrome/browser/android/locale/locale_template_url_loader.h"
+
 #include <stddef.h>
+
+#include <memory>
 
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/search_engines/template_url_service_test_util.h"
-#include "components/search_engines/prepopulated_engines.h"
 #include "components/search_engines/template_url.h"
 #include "components/search_engines/template_url_data_util.h"
 #include "components/search_engines/template_url_prepopulate_data.h"
@@ -16,13 +18,18 @@
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/search_engines_data/resources/definitions/prepopulated_engines.h"
+
+const char kTestCountryCode[] = "JP";
 
 class MockLocaleTemplateUrlLoader : public LocaleTemplateUrlLoader {
  public:
-  MockLocaleTemplateUrlLoader(std::string locale, TemplateURLService* service)
-      : LocaleTemplateUrlLoader(locale, service) {}
+  MockLocaleTemplateUrlLoader(std::string locale,
+                              TemplateURLService* service,
+                              Profile* profile)
+      : LocaleTemplateUrlLoader(locale, service, profile) {}
 
-  ~MockLocaleTemplateUrlLoader() override {}
+  ~MockLocaleTemplateUrlLoader() override = default;
 
  protected:
   std::vector<std::unique_ptr<TemplateURLData>> GetLocalPrepopulatedEngines()
@@ -44,7 +51,11 @@ class MockLocaleTemplateUrlLoader : public LocaleTemplateUrlLoader {
 
 class LocaleTemplateUrlLoaderTest : public testing::Test {
  public:
-  LocaleTemplateUrlLoaderTest() {}
+  LocaleTemplateUrlLoaderTest() = default;
+
+  LocaleTemplateUrlLoaderTest(const LocaleTemplateUrlLoaderTest&) = delete;
+  LocaleTemplateUrlLoaderTest& operator=(const LocaleTemplateUrlLoaderTest&) =
+      delete;
 
   void SetUp() override;
   void TearDown() override;
@@ -57,13 +68,12 @@ class LocaleTemplateUrlLoaderTest : public testing::Test {
       task_environment_;  // To set up BrowserThreads.
   std::unique_ptr<LocaleTemplateUrlLoader> loader_;
   std::unique_ptr<TemplateURLServiceTestUtil> test_util_;
-
-  DISALLOW_COPY_AND_ASSIGN(LocaleTemplateUrlLoaderTest);
 };
 
 void LocaleTemplateUrlLoaderTest::SetUp() {
-  test_util_.reset(new TemplateURLServiceTestUtil);
-  loader_.reset(new MockLocaleTemplateUrlLoader("jp", model()));
+  test_util_ = std::make_unique<TemplateURLServiceTestUtil>();
+  loader_ = std::make_unique<MockLocaleTemplateUrlLoader>(
+      kTestCountryCode, model(), test_util()->profile());
 }
 
 void LocaleTemplateUrlLoaderTest::TearDown() {
@@ -73,8 +83,8 @@ void LocaleTemplateUrlLoaderTest::TearDown() {
 
 TEST_F(LocaleTemplateUrlLoaderTest, AddLocalSearchEngines) {
   test_util()->VerifyLoad();
-  auto naver = base::ASCIIToUTF16("naver.com");
-  auto keyword_so = base::ASCIIToUTF16("so.com");
+  std::u16string naver = u"naver.com";
+  std::u16string keyword_so = u"so.com";
   ASSERT_EQ(nullptr, model()->GetTemplateURLForKeyword(naver));
   ASSERT_EQ(nullptr, model()->GetTemplateURLForKeyword(keyword_so));
 
@@ -95,8 +105,8 @@ TEST_F(LocaleTemplateUrlLoaderTest, RemoveLocalSearchEngines) {
   test_util()->VerifyLoad();
   ASSERT_TRUE(loader()->LoadTemplateUrls(nullptr));
   // Make sure locale engines are loaded.
-  auto keyword_naver = base::ASCIIToUTF16("naver.com");
-  auto keyword_so = base::ASCIIToUTF16("so.com");
+  std::u16string keyword_naver = u"naver.com";
+  std::u16string keyword_so = u"so.com";
   ASSERT_EQ(TemplateURLPrepopulateData::naver.id,
             model()->GetTemplateURLForKeyword(keyword_naver)->prepopulate_id());
   ASSERT_EQ(TemplateURLPrepopulateData::so_360.id,
@@ -127,4 +137,38 @@ TEST_F(LocaleTemplateUrlLoaderTest, OverrideDefaultSearch) {
   loader()->SetGoogleAsDefaultSearch(nullptr);
   ASSERT_EQ(TemplateURLPrepopulateData::google.id,
             model()->GetDefaultSearchProvider()->prepopulate_id());
+}
+
+TEST_F(LocaleTemplateUrlLoaderTest, GetLocalPrepopulatedEngines) {
+  auto expected_engines =
+      TemplateURLPrepopulateData::GetLocalPrepopulatedEngines(
+          kTestCountryCode, *test_util()->profile()->GetPrefs());
+
+  // Creating a prod class instance to call the real implementation for
+  // `GetLocalPrepopulatedEngines()`.
+  auto loader = std::make_unique<LocaleTemplateUrlLoader>(
+      kTestCountryCode, model(), test_util()->profile());
+  auto actual_engines = loader->GetLocalPrepopulatedEngines();
+
+  ASSERT_EQ(actual_engines.size(), expected_engines.size());
+  for (size_t i = 0; i < actual_engines.size(); ++i) {
+    EXPECT_EQ(actual_engines[i]->keyword(), expected_engines[i]->keyword());
+  }
+}
+
+TEST_F(LocaleTemplateUrlLoaderTest, OnProfileWillBeDestroyed) {
+  auto loader = std::make_unique<LocaleTemplateUrlLoader>(
+      kTestCountryCode, model(), test_util()->profile());
+
+  loader->OnProfileWillBeDestroyed(test_util()->profile());
+
+  // For coverage of the fallbacks from b/317335096, the following calls should
+  // not crash and return "harmless" values after we report that the profile is
+  // destroying.
+  loader->LoadTemplateUrls(/*env=*/nullptr);
+  loader->RemoveTemplateUrls(/*env=*/nullptr);
+  loader->OverrideDefaultSearchProvider(/*env=*/nullptr);
+  loader->SetGoogleAsDefaultSearch(/*env=*/nullptr);
+  EXPECT_TRUE(loader->GetLocalPrepopulatedEngines().empty());
+  EXPECT_GT(loader->GetDesignatedSearchEngineForChina(), 0);
 }

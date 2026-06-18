@@ -1,36 +1,41 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/passwords/well_known_change_password_navigation_throttle.h"
 
 #include <map>
+#include <optional>
 #include <utility>
 
-#include "base/optional.h"
+#include "base/callback_list.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
-#include "base/test/scoped_feature_list.h"
+#include "base/strings/string_util.h"
+#include "base/test/bind.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/time/time.h"
-#include "chrome/browser/password_manager/affiliation_service_factory.h"
-#include "chrome/browser/password_manager/change_password_url_service_factory.h"
+#include "chrome/browser/affiliations/affiliation_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ssl/cert_verifier_browser_test.h"
 #include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_navigator.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/common/url_constants.h"
-#include "components/password_manager/core/browser/android_affiliation/affiliation_api.pb.h"
-#include "components/password_manager/core/browser/android_affiliation/affiliation_fetcher.h"
-#include "components/password_manager/core/browser/change_password_url_service_impl.h"
-#include "components/password_manager/core/browser/site_affiliation/affiliation_service_impl.h"
-#include "components/password_manager/core/browser/well_known_change_password_util.h"
+#include "components/affiliations/core/browser/affiliation_service_impl.h"
+#include "components/affiliations/core/browser/hash_affiliation_fetcher.h"
+#include "components/affiliations/core/browser/mock_affiliation_service.h"
+#include "components/keyed_service/content/browser_context_dependency_manager.h"
+#include "components/password_manager/core/browser/well_known_change_password/well_known_change_password_util.h"
 #include "components/password_manager/core/common/password_manager_features.h"
-#include "components/sync/driver/test_sync_service.h"
+#include "components/sync/test/test_sync_service.h"
 #include "components/ukm/test_ukm_recorder.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/mock_navigation_handle.h"
+#include "content/public/test/prerender_test_util.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "content/public/test/test_utils.h"
+#include "content/public/test/url_loader_interceptor.h"
 #include "net/cert/x509_certificate.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/http/http_status_code.h"
@@ -46,8 +51,12 @@
 #include "url/origin.h"
 
 namespace {
+using affiliations::FacetURI;
+using affiliations::MockAffiliationService;
 using content::NavigationThrottle;
+using content::RenderFrameHost;
 using content::TestNavigationObserver;
+using content::URLLoaderInterceptor;
 using net::test_server::BasicHttpResponse;
 using net::test_server::DelayedHttpResponse;
 using net::test_server::EmbeddedTestServer;
@@ -57,6 +66,8 @@ using net::test_server::HttpResponse;
 using password_manager::kWellKnownChangePasswordPath;
 using password_manager::kWellKnownNotExistingResourcePath;
 using password_manager::WellKnownChangePasswordResult;
+using testing::_;
+using testing::Return;
 
 constexpr char kMockChangePasswordPath[] = "/change-password-override";
 
@@ -77,76 +88,102 @@ struct ResponseDelayParams {
 
 }  // namespace
 
-class TestChangePasswordUrlService
-    : public password_manager::ChangePasswordUrlService {
- public:
-  void PrefetchURLs() override {}
-
-  GURL GetChangePasswordUrl(const GURL& url) override {
-    if (override_available_) {
-      GURL::Replacements replacement;
-      replacement.SetPathStr(kMockChangePasswordPath);
-      return url.ReplaceComponents(replacement);
-    }
-    return GURL();
-  }
-
-  void SetOverrideAvailable(bool available) { override_available_ = available; }
-
- private:
-  bool override_available_ = false;
-};
-
-class ChangePasswordNavigationThrottleBrowserTestBase
+// Browser Test that checks navigation to /.well-known/change-password path and
+// redirection to change password URL returned by Change Password Service.
+class WellKnownChangePasswordNavigationThrottleBrowserTest
     : public CertVerifierBrowserTest,
       public testing::WithParamInterface<
           std::tuple<ui::PageTransition, ResponseDelayParams>> {
  public:
   using UkmBuilder =
       ukm::builders::PasswordManager_WellKnownChangePasswordResult;
-  ChangePasswordNavigationThrottleBrowserTestBase() {
+  WellKnownChangePasswordNavigationThrottleBrowserTest() {
     test_server_->RegisterRequestHandler(base::BindRepeating(
-        &ChangePasswordNavigationThrottleBrowserTestBase::HandleRequest,
+        &WellKnownChangePasswordNavigationThrottleBrowserTest::HandleRequest,
         base::Unretained(this)));
   }
 
-  void Initialize() {
-    ASSERT_TRUE(test_server_->InitializeAndListen());
-    test_server_->StartAcceptingConnections();
-    test_recorder_ = std::make_unique<ukm::TestAutoSetUkmRecorder>();
+  void SetUpInProcessBrowserTestFixture() override {
+    CertVerifierBrowserTest::SetUpInProcessBrowserTestFixture();
+    create_services_subscription_ =
+        BrowserContextDependencyManager::GetInstance()
+            ->RegisterCreateServicesCallbackForTesting(base::BindRepeating(
+                &WellKnownChangePasswordNavigationThrottleBrowserTest::
+                    OnWillCreateBrowserContextServices,
+                base::Unretained(this)));
   }
 
-  void ExpectUkmMetric(WellKnownChangePasswordResult expected) {
+  void OnWillCreateBrowserContextServices(content::BrowserContext* context) {
+    AffiliationServiceFactory::GetInstance()->SetTestingFactoryAndUse(
+        Profile::FromBrowserContext(context),
+        base::BindRepeating([](content::BrowserContext*)
+                                -> std::unique_ptr<KeyedService> {
+          return std::make_unique<testing::NiceMock<MockAffiliationService>>();
+        }));
+  }
+
+  void SetUpOnMainThread() override {
+    host_resolver()->AddRule("*", "127.0.0.1");
+    ASSERT_TRUE(test_server_->Start());
+    test_recorder_ = std::make_unique<ukm::TestAutoSetUkmRecorder>();
+    histogram_tester_ = std::make_unique<base::HistogramTester>();
+  }
+
+ protected:
+  void ExpectUmaAndUkmMetric(WellKnownChangePasswordResult expected) {
+    histogram_tester_->ExpectUniqueSample(
+        "PasswordManager.WellKnownChangePasswordResult", expected, 1u);
+
     auto entries = test_recorder_->GetEntriesByName(UkmBuilder::kEntryName);
     // Expect one recorded metric.
-    ASSERT_EQ(1, static_cast<int>(entries.size()));
+    ASSERT_EQ(1u, entries.size());
     test_recorder_->ExpectEntryMetric(
         entries[0], UkmBuilder::kWellKnownChangePasswordResultName,
         static_cast<int64_t>(expected));
   }
 
-  ukm::TestAutoSetUkmRecorder* test_recorder() { return test_recorder_.get(); }
-
-  ui::PageTransition page_transition() const { return std::get<0>(GetParam()); }
-  ResponseDelayParams response_delays() const {
-    return std::get<1>(GetParam());
+  void ExpectNeitherUmaNorUkmMetric() {
+    histogram_tester_->ExpectTotalCount(
+        "PasswordManager.WellKnownChangePasswordResult", 0u);
+    EXPECT_TRUE(
+        test_recorder_->GetEntriesByName(UkmBuilder::kEntryName).empty());
   }
 
- protected:
-  // Navigates to |navigate_url| from the mock server using |transition|. It
-  // waits until the navigation to |expected_url| happened.
+  // Navigates to `navigate_url` from the mock server using `transition`. It
+  // waits until the navigation to `expected_url` happened.
   void TestNavigationThrottle(
       const GURL& navigate_url,
       const GURL& expected_url,
-      base::Optional<url::Origin> initiator_origin = base::nullopt);
+      std::optional<url::Origin> initiator_origin = std::nullopt) {
+    AddHttpsCertificate();
 
-  // Whitelist all https certs for the |test_server_|.
-  void AddHttpsCertificate() {
-    auto cert = test_server_->GetCertificate();
-    net::CertVerifyResult verify_result;
-    verify_result.cert_status = 0;
-    verify_result.verified_cert = cert;
-    mock_cert_verifier()->AddResultForCert(cert.get(), verify_result, net::OK);
+    NavigateParams params(browser(), navigate_url, page_transition());
+    params.initiator_origin = std::move(initiator_origin);
+    TestNavigationObserver observer(expected_url);
+    observer.WatchExistingWebContents();
+    Navigate(&params);
+    observer.Wait();
+
+    EXPECT_EQ(observer.last_navigation_url(), expected_url);
+  }
+
+  void TestNavigationThrottleForLocalhost(const std::string& expected_path) {
+    GURL navigate_url = test_server_->GetURL(kWellKnownChangePasswordPath);
+    GURL expected_url = test_server_->GetURL(expected_path);
+
+    TestNavigationThrottle(navigate_url, expected_url);
+  }
+
+  ui::PageTransition page_transition() const { return std::get<0>(GetParam()); }
+
+  MockAffiliationService* url_service() {
+    return static_cast<MockAffiliationService*>(
+        AffiliationServiceFactory::GetInstance()->GetForProfile(
+            browser()->profile()));
+  }
+
+  ResponseDelayParams response_delays() const {
+    return std::get<1>(GetParam());
   }
 
   // Maps a path to a ServerResponse config object.
@@ -155,86 +192,40 @@ class ChangePasswordNavigationThrottleBrowserTestBase
       std::make_unique<EmbeddedTestServer>(EmbeddedTestServer::TYPE_HTTPS);
 
  private:
-  // Returns a response for the given request. Uses |path_response_map_| to
+  // Whitelists all https certs for the `test_server_`.
+  void AddHttpsCertificate() {
+    auto cert = test_server_->GetCertificate();
+    net::CertVerifyResult verify_result;
+    verify_result.cert_status = 0;
+    verify_result.verified_cert = cert;
+    mock_cert_verifier()->AddResultForCert(cert.get(), verify_result, net::OK);
+  }
+
+  // Returns a response for the given request. Uses `path_response_map_` to
   // construct the response. Returns nullptr when the path is not defined in
-  // |path_response_map_|.
-  std::unique_ptr<HttpResponse> HandleRequest(const HttpRequest& request);
+  // `path_response_map_`.
+  std::unique_ptr<HttpResponse> HandleRequest(const HttpRequest& request) {
+    GURL absolute_url = test_server_->GetURL(request.relative_url);
+    std::string path = absolute_url.GetPath();
+    auto it = path_response_map_.find(absolute_url.path());
+    if (it == path_response_map_.end()) {
+      return nullptr;
+    }
+    const ServerResponse& config = it->second;
+    auto http_response = std::make_unique<DelayedHttpResponse>(
+        base::Milliseconds(config.resolve_time_in_milliseconds));
+    http_response->set_code(config.status_code);
+    http_response->set_content_type("text/plain");
+    for (auto header_pair : config.headers) {
+      http_response->AddCustomHeader(header_pair.first, header_pair.second);
+    }
+    return http_response;
+  }
+
+  base::CallbackListSubscription create_services_subscription_;
   std::unique_ptr<ukm::TestAutoSetUkmRecorder> test_recorder_;
+  std::unique_ptr<base::HistogramTester> histogram_tester_;
 };
-
-std::unique_ptr<HttpResponse>
-ChangePasswordNavigationThrottleBrowserTestBase::HandleRequest(
-    const HttpRequest& request) {
-  GURL absolute_url = test_server_->GetURL(request.relative_url);
-  std::string path = absolute_url.path();
-  auto it = path_response_map_.find(absolute_url.path_piece());
-  if (it == path_response_map_.end())
-    return nullptr;
-  const ServerResponse& config = it->second;
-  auto http_response = std::make_unique<DelayedHttpResponse>(
-      base::TimeDelta::FromMilliseconds(config.resolve_time_in_milliseconds));
-  http_response->set_code(config.status_code);
-  http_response->set_content_type("text/plain");
-  for (auto header_pair : config.headers) {
-    http_response->AddCustomHeader(header_pair.first, header_pair.second);
-  }
-  return http_response;
-}
-
-void ChangePasswordNavigationThrottleBrowserTestBase::TestNavigationThrottle(
-    const GURL& navigate_url,
-    const GURL& expected_url,
-    base::Optional<url::Origin> initiator_origin) {
-  AddHttpsCertificate();
-
-  NavigateParams params(browser(), navigate_url, page_transition());
-  params.initiator_origin = std::move(initiator_origin);
-  TestNavigationObserver observer(expected_url);
-  observer.WatchExistingWebContents();
-  Navigate(&params);
-  observer.Wait();
-
-  EXPECT_EQ(observer.last_navigation_url(), expected_url);
-}
-
-// Browser Test that checks navigation to /.well-known/change-password path and
-// redirection to change password URL returned by Change Password Service.
-// Enables kWellKnownChangePassword feature.
-class WellKnownChangePasswordNavigationThrottleBrowserTest
-    : public ChangePasswordNavigationThrottleBrowserTestBase {
- public:
-  WellKnownChangePasswordNavigationThrottleBrowserTest() {
-    feature_list_.InitAndEnableFeature(
-        password_manager::features::kWellKnownChangePassword);
-  }
-
-  void SetUpOnMainThread() override;
-  void TestNavigationThrottleForLocalhost(const std::string& expected_path);
-
-  TestChangePasswordUrlService* url_service_ = nullptr;
-
- private:
-  base::test::ScopedFeatureList feature_list_;
-};
-
-void WellKnownChangePasswordNavigationThrottleBrowserTest::SetUpOnMainThread() {
-  Initialize();
-  url_service_ =
-      ChangePasswordUrlServiceFactory::GetInstance()
-          ->SetTestingSubclassFactoryAndUse(
-              browser()->profile(),
-              base::BindRepeating([](content::BrowserContext*) {
-                return std::make_unique<TestChangePasswordUrlService>();
-              }));
-}
-
-void WellKnownChangePasswordNavigationThrottleBrowserTest::
-    TestNavigationThrottleForLocalhost(const std::string& expected_path) {
-  GURL navigate_url = test_server_->GetURL(kWellKnownChangePasswordPath);
-  GURL expected_url = test_server_->GetURL(expected_path);
-
-  TestNavigationThrottle(navigate_url, expected_url);
-}
 
 IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
                        SupportForChangePassword) {
@@ -246,11 +237,10 @@ IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
   TestNavigationThrottleForLocalhost(
       /*expected_path=*/kWellKnownChangePasswordPath);
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
-    ExpectUkmMetric(
+    ExpectUmaAndUkmMetric(
         WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
   } else {
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
@@ -266,11 +256,10 @@ IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
 
   TestNavigationThrottleForLocalhost(/*expected_path=*/"/change-password");
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
-    ExpectUkmMetric(
+    ExpectUmaAndUkmMetric(
         WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
   } else {
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
@@ -289,11 +278,13 @@ IN_PROC_BROWSER_TEST_P(
 
   GURL navigate_url = test_server_->GetURL(kWellKnownChangePasswordPath);
   GURL expected_url = test_server_->GetURL("/change-password");
+
   TestNavigationThrottle(
       navigate_url, expected_url,
       url::Origin::Create(GURL("chrome://settings/passwords/check")));
 
-  ExpectUkmMetric(WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
+  ExpectUmaAndUkmMetric(
+      WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
 }
 
 // Tests that the throttle behaves correctly for all types of page transitions
@@ -311,11 +302,13 @@ IN_PROC_BROWSER_TEST_P(
 
   GURL navigate_url = test_server_->GetURL(kWellKnownChangePasswordPath);
   GURL expected_url = test_server_->GetURL("/change-password");
+
   TestNavigationThrottle(
       navigate_url, expected_url,
       url::Origin::Create(GURL("https://passwords.google.com/checkup")));
 
-  ExpectUkmMetric(WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
+  ExpectUmaAndUkmMetric(
+      WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
 }
 
 IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
@@ -328,19 +321,21 @@ IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
   TestNavigationThrottleForLocalhost(
       /*expected_path=*/kWellKnownChangePasswordPath);
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
-    ExpectUkmMetric(
+    ExpectUmaAndUkmMetric(
         WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
   } else {
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
-IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
-                       SupportForChangePassword_WithRedirectToNotFoundPage) {
+IN_PROC_BROWSER_TEST_P(
+    WellKnownChangePasswordNavigationThrottleBrowserTest,
+    SupportForChangePassword_WithXOriginRedirectToNotFoundPage) {
+  GURL change_password_url =
+      test_server_->GetURL("example.com", "/change-password");
   path_response_map_[kWellKnownChangePasswordPath] = {
       net::HTTP_PERMANENT_REDIRECT,
-      {std::make_pair("Location", "/change-password")},
+      {std::make_pair("Location", change_password_url.spec())},
       response_delays().change_password_delay};
   path_response_map_[kWellKnownNotExistingResourcePath] = {
       net::HTTP_PERMANENT_REDIRECT,
@@ -349,13 +344,13 @@ IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
   path_response_map_["/change-password"] = {net::HTTP_OK, {}, 0};
   path_response_map_["/not-found"] = {net::HTTP_NOT_FOUND, {}, 0};
 
-  TestNavigationThrottleForLocalhost(/*expected_path=*/"/change-password");
+  TestNavigationThrottle(test_server_->GetURL(kWellKnownChangePasswordPath),
+                         change_password_url);
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
-    ExpectUkmMetric(
+    ExpectUmaAndUkmMetric(
         WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
   } else {
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
@@ -367,33 +362,37 @@ IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
       net::HTTP_NOT_FOUND, {}, response_delays().not_exist_delay};
 
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
+    EXPECT_CALL(*url_service(), GetChangePasswordURL(test_server_->GetURL(
+                                    kWellKnownChangePasswordPath)))
+        .WillRepeatedly(Return(GURL()));
     TestNavigationThrottleForLocalhost(/*expected_path=*/"/");
-    ExpectUkmMetric(WellKnownChangePasswordResult::kFallbackToOriginUrl);
+    ExpectUmaAndUkmMetric(WellKnownChangePasswordResult::kFallbackToOriginUrl);
   } else {
     TestNavigationThrottleForLocalhost(
         /*expected_path=*/kWellKnownChangePasswordPath);
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
 IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
                        NoSupportForChangePassword_WithUrlOverride) {
-  url_service_->SetOverrideAvailable(true);
   path_response_map_[kWellKnownChangePasswordPath] = {
       net::HTTP_NOT_FOUND, {}, response_delays().change_password_delay};
   path_response_map_[kWellKnownNotExistingResourcePath] = {
       net::HTTP_NOT_FOUND, {}, response_delays().not_exist_delay};
 
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
+    EXPECT_CALL(*url_service(), GetChangePasswordURL(test_server_->GetURL(
+                                    kWellKnownChangePasswordPath)))
+        .WillRepeatedly(Return(test_server_->GetURL(kMockChangePasswordPath)));
     TestNavigationThrottleForLocalhost(
         /*expected_path=*/kMockChangePasswordPath);
-    ExpectUkmMetric(WellKnownChangePasswordResult::kFallbackToOverrideUrl);
+    ExpectUmaAndUkmMetric(
+        WellKnownChangePasswordResult::kFallbackToOverrideUrl);
   } else {
     TestNavigationThrottleForLocalhost(
         /*expected_path=*/kWellKnownChangePasswordPath);
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
@@ -406,35 +405,44 @@ IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
       net::HTTP_OK, {}, response_delays().not_exist_delay};
 
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
+    EXPECT_CALL(*url_service(), GetChangePasswordURL(test_server_->GetURL(
+                                    kWellKnownChangePasswordPath)))
+        .WillRepeatedly(Return(GURL()));
     TestNavigationThrottleForLocalhost(/*expected_path=*/"/");
-    ExpectUkmMetric(WellKnownChangePasswordResult::kFallbackToOriginUrl);
+    ExpectUmaAndUkmMetric(WellKnownChangePasswordResult::kFallbackToOriginUrl);
   } else {
     TestNavigationThrottleForLocalhost(
         /*expected_path=*/kWellKnownChangePasswordPath);
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
-IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
-                       NoSupportForChangePassword_WithRedirectToNotFoundPage) {
+IN_PROC_BROWSER_TEST_P(
+    WellKnownChangePasswordNavigationThrottleBrowserTest,
+    NoSupportForChangePassword_WithXOriginRedirectToNotFoundPage) {
+  // Test a cross-origin redirect to a 404 page. Ensure that we try to obtain
+  // the ChangePasswordUrl for the original origin.
+  GURL not_found_url = test_server_->GetURL("example.com", "/not-found");
   path_response_map_[kWellKnownChangePasswordPath] = {
       net::HTTP_PERMANENT_REDIRECT,
-      {std::make_pair("Location", "/not-found")},
+      {std::make_pair("Location", not_found_url.spec())},
       response_delays().change_password_delay};
   path_response_map_[kWellKnownNotExistingResourcePath] = {
       net::HTTP_PERMANENT_REDIRECT,
-      {std::make_pair("Location", "/not-found")},
+      {std::make_pair("Location", not_found_url.spec())},
       response_delays().not_exist_delay};
   path_response_map_["/not-found"] = {net::HTTP_NOT_FOUND, {}, 0};
 
   if (page_transition() & ui::PAGE_TRANSITION_FROM_API) {
+    EXPECT_CALL(*url_service(), GetChangePasswordURL(test_server_->GetURL(
+                                    kWellKnownChangePasswordPath)))
+        .WillRepeatedly(Return(GURL()));
     TestNavigationThrottleForLocalhost(/*expected_path=*/"/");
-    ExpectUkmMetric(WellKnownChangePasswordResult::kFallbackToOriginUrl);
+    ExpectUmaAndUkmMetric(WellKnownChangePasswordResult::kFallbackToOriginUrl);
   } else {
-    TestNavigationThrottleForLocalhost(/*expected_path=*/"/not-found");
-    EXPECT_TRUE(
-        test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+    TestNavigationThrottle(test_server_->GetURL(kWellKnownChangePasswordPath),
+                           not_found_url);
+    ExpectNeitherUmaNorUkmMetric();
   }
 }
 
@@ -463,135 +471,140 @@ IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
 
   EXPECT_EQ(observer.last_navigation_url(), url);
   // Expect no UKMs saved.
-  EXPECT_TRUE(
-      test_recorder()->GetEntriesByName(UkmBuilder::kEntryName).empty());
+  ExpectNeitherUmaNorUkmMetric();
 }
 
-constexpr char kExample1Hostname[] = "example1.com";
-constexpr char kExample1ChangePasswordRelativeUrl[] = "/settings/password";
-constexpr char kExample2Hostname[] = "example2.com";
-constexpr char kExample2ChangePasswordRelativeUrl[] = "/change-pwd";
+IN_PROC_BROWSER_TEST_P(WellKnownChangePasswordNavigationThrottleBrowserTest,
+                       AffiliationServiceReturnsWellKnownChangePasswordPath) {
+  path_response_map_[kWellKnownChangePasswordPath] = {
+      net::HTTP_PERMANENT_REDIRECT,
+      {std::make_pair("Location", "/change-password")},
+      response_delays().change_password_delay};
+  path_response_map_[kWellKnownNotExistingResourcePath] = {
+      net::HTTP_OK, {}, response_delays().not_exist_delay};
+  path_response_map_["/change-password"] = {net::HTTP_OK, {}, 0};
 
-// Browser Test that checks redirection to change password URL returned by
-// Affiliation Service. Enables kWellKnownChangePassword and
-// kChangePasswordAffiliationInfo features.
-class AffiliationChangePasswordNavigationThrottleBrowserTest
-    : public ChangePasswordNavigationThrottleBrowserTestBase {
+  EXPECT_CALL(
+      *url_service(),
+      GetChangePasswordURL(test_server_->GetURL(kWellKnownChangePasswordPath)))
+      .WillRepeatedly(
+          Return(test_server_->GetURL(kWellKnownChangePasswordPath)));
+
+  GURL navigate_url = test_server_->GetURL(kWellKnownChangePasswordPath);
+  GURL expected_url = test_server_->GetURL("/change-password");
+  TestNavigationThrottle(
+      navigate_url, expected_url,
+      url::Origin::Create(GURL("https://passwords.google.com/checkup")));
+
+  ExpectUmaAndUkmMetric(
+      WellKnownChangePasswordResult::kUsedWellKnownChangePassword);
+}
+
+// Harness for testing the throttle with prerendering involved.
+class PrerenderingChangePasswordNavigationThrottleBrowserTest
+    : public WellKnownChangePasswordNavigationThrottleBrowserTest {
  public:
-  AffiliationChangePasswordNavigationThrottleBrowserTest() {
-    feature_list_.InitWithFeatures(
-        {password_manager::features::kWellKnownChangePassword,
-         password_manager::features::kChangePasswordAffiliationInfo},
-        {});
-    sync_service_.SetFirstSetupComplete(true);
-    sync_service_.SetIsUsingSecondaryPassphrase(false);
+  PrerenderingChangePasswordNavigationThrottleBrowserTest()
+      : prerender_helper_(base::BindRepeating(
+            &PrerenderingChangePasswordNavigationThrottleBrowserTest::
+                web_contents,
+            base::Unretained(this))) {}
+
+  content::WebContents* web_contents() {
+    return browser()->tab_strip_model()->GetActiveWebContents();
   }
 
-  void SetUpOnMainThread() override;
-  // The facet's |url| and corresponding |change_password_url| cannot be
-  // hardcoded in the method as the the ports are randomly generated and the
-  // response would no longer match requested or expected url.
-  std::string CreateResponse(const GURL& requested_url,
-                             const GURL& requested_change_password_url,
-                             const GURL& other_url,
-                             const GURL& other_change_password_url);
+  void SetUp() override {
+    prerender_helper_.RegisterServerRequestMonitor(test_server_.get());
+    WellKnownChangePasswordNavigationThrottleBrowserTest::SetUp();
+  }
 
-  syncer::TestSyncService sync_service_;
-  network::TestURLLoaderFactory test_url_loader_factory_;
-
- private:
-  base::test::ScopedFeatureList feature_list_;
+ protected:
+  content::test::PrerenderTestHelper prerender_helper_;
 };
 
-void AffiliationChangePasswordNavigationThrottleBrowserTest::
-    SetUpOnMainThread() {
-  Initialize();
-  host_resolver()->AddRule("*", "127.0.0.1");
+// Test the behavior of the throttle when navigated from a prerendering
+// context. This is a fairly narrow use case since, of prerendering-capable
+// navigations, the throttle only runs when initiated by passwords.google.com.
+// However, if that origin did prerendering the well known password change URL,
+// make sure we don't run the throttle as it doesn't currently support
+// Prerender2. This test just ensures we don't run the throttle in this case so
+// we don't get side-effects in the primary frame while prerendering the
+// .well-known URL.
+IN_PROC_BROWSER_TEST_P(PrerenderingChangePasswordNavigationThrottleBrowserTest,
+                       EnsurePrerenderCanceled) {
+  // The URL we simulate a real user navigation to.
+  const GURL kNavigateUrl = GURL("https://passwords.google.com/checkup");
 
-  scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory =
-      base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
-          &test_url_loader_factory_);
+  // The well known password change URL. The above URL will request a prerender
+  // of this page via the <script type="speculationrules"> script in the
+  // response.
+  // TODO(bokan): Normally the change-password URL would lead to a different
+  // origin (e.g. example.com) but prerender2 doesn't yet support cross-origin
+  // prerendering. Using passwords.google.com here is a bit unrealistic but
+  // ensures we trigger prerendering. Once prerender2 supports cross-origin
+  // prerendering this should be updated to 'example.com'.
+  const GURL kWellKnownUrl =
+      GURL("https://passwords.google.com/.well-known/change-password");
 
-  auto* affiliation_service =
-      static_cast<password_manager::AffiliationServiceImpl*>(
-          AffiliationServiceFactory::GetForProfile(browser()->profile()));
-  affiliation_service->SetSyncServiceForTesting(&sync_service_);
-  affiliation_service->SetURLLoaderFactoryForTesting(shared_url_loader_factory);
-}
+  URLLoaderInterceptor interceptor(base::BindLambdaForTesting(
+      [&](URLLoaderInterceptor::RequestParams* params) {
+        // If prerender triggers prefetch ahead of prerender, the prefetch sends
+        // a request and the prerender is throttled.
+        //
+        // We only check request counts if prefetch ahead of prerender is not
+        // triggered.
+        if (!content::test::PrerenderTestHelper::
+                IsPrerender2FallbackPrefetchSpecRulesEnabled()) {
+          // We should cancel the prerender in WillStartRequest so we should
+          // never receive this request.
+          EXPECT_NE(params->url_request.url, kWellKnownUrl);
 
-std::string
-AffiliationChangePasswordNavigationThrottleBrowserTest::CreateResponse(
-    const GURL& requested_url,
-    const GURL& requested_change_password_url,
-    const GURL& other_url,
-    const GURL& other_change_password_url) {
-  affiliation_pb::LookupAffiliationResponse response;
-  affiliation_pb::FacetGroup* facet_group = response.add_group();
+          // If the non-existing-resource path is requested it means the
+          // throttle is running so fail the test.
+          EXPECT_NE(params->url_request.url.GetPath(),
+                    kWellKnownNotExistingResourcePath);
+        }
 
-  affiliation_pb::Facet* requested_facet = facet_group->add_facet();
-  requested_facet->set_id(requested_url.spec());
-  requested_facet->mutable_change_password_info()->set_change_password_url(
-      requested_change_password_url.spec());
+        std::string speculation_script = base::ReplaceStringPlaceholders(
+            R"(
+                <script type="speculationrules">
+                {
+                  "prerender":[
+                    {"source": "list",
+                    "urls": ["$1"]}
+                  ]
+                }
+                </script>
+              )",
+            {kWellKnownUrl.spec()}, nullptr);
 
-  affiliation_pb::Facet* other_facet = facet_group->add_facet();
-  other_facet->set_id(other_url.spec());
-  other_facet->mutable_change_password_info()->set_change_password_url(
-      other_change_password_url.spec());
+        if (params->url_request.url == kNavigateUrl) {
+          URLLoaderInterceptor::WriteResponse(
+              "HTTP/1.1 200 OK\n"
+              "Content-Type: text/html\n\n",
+              speculation_script, params->client.get());
+          return true;
+        }
 
-  return response.SerializeAsString();
-}
+        return false;
+      }));
 
-IN_PROC_BROWSER_TEST_P(AffiliationChangePasswordNavigationThrottleBrowserTest,
-                       NavigatesToChangePasswordURLOfRequestedURL) {
-  GURL requested_origin = test_server_->GetURL(kExample1Hostname, "/");
-  GURL requested_change_password_url = test_server_->GetURL(
-      kExample1Hostname, kExample1ChangePasswordRelativeUrl);
+  // Navigate to the passwords.google.com/checkup page. Wait until it triggers
+  // a prerender from the <link> tag for the .well-known URL.
+  content::test::PrerenderHostObserver observer(*web_contents(), kWellKnownUrl);
+  NavigateParams params(browser(), kNavigateUrl, page_transition());
+  Navigate(&params);
 
-  GURL other_origin = test_server_->GetURL(kExample2Hostname, "/");
-  GURL other_change_password_url = test_server_->GetURL(
-      kExample2Hostname, kExample2ChangePasswordRelativeUrl);
+  // The throttle must cancel the prerendering so wait until we see the
+  // prerender destroyed.
+  observer.WaitForDestroyed();
 
-  std::string fake_response =
-      CreateResponse(requested_origin, requested_change_password_url,
-                     other_origin, other_change_password_url);
-  test_url_loader_factory_.AddResponse(
-      password_manager::AffiliationFetcher::BuildQueryURL().spec(),
-      fake_response);
+  // Ensure we didn't run the throttle.
+  ExpectNeitherUmaNorUkmMetric();
 
-  path_response_map_[kWellKnownChangePasswordPath] = {
-      net::HTTP_NOT_FOUND, {}, response_delays().change_password_delay};
-  path_response_map_[kWellKnownNotExistingResourcePath] = {
-      net::HTTP_NOT_FOUND, {}, response_delays().not_exist_delay};
-
-  TestNavigationThrottle(/*navigate_url=*/test_server_->GetURL(
-                             kExample1Hostname, kWellKnownChangePasswordPath),
-                         /*expected_url=*/requested_change_password_url);
-  ExpectUkmMetric(WellKnownChangePasswordResult::kFallbackToOverrideUrl);
-}
-
-IN_PROC_BROWSER_TEST_P(AffiliationChangePasswordNavigationThrottleBrowserTest,
-                       NavigatesToChangePasswordURLOfOtherURLIfEmpty) {
-  GURL requested_origin = test_server_->GetURL(kExample1Hostname, "/");
-
-  GURL other_origin = test_server_->GetURL(kExample2Hostname, "/");
-  GURL other_change_password_url = test_server_->GetURL(
-      kExample2Hostname, kExample2ChangePasswordRelativeUrl);
-
-  std::string fake_response = CreateResponse(
-      requested_origin, GURL(), other_origin, other_change_password_url);
-  test_url_loader_factory_.AddResponse(
-      password_manager::AffiliationFetcher::BuildQueryURL().spec(),
-      fake_response);
-
-  path_response_map_[kWellKnownChangePasswordPath] = {
-      net::HTTP_NOT_FOUND, {}, response_delays().change_password_delay};
-  path_response_map_[kWellKnownNotExistingResourcePath] = {
-      net::HTTP_NOT_FOUND, {}, response_delays().not_exist_delay};
-
-  TestNavigationThrottle(/*navigate_url=*/test_server_->GetURL(
-                             kExample1Hostname, kWellKnownChangePasswordPath),
-                         /*expected_url=*/other_change_password_url);
-  ExpectUkmMetric(WellKnownChangePasswordResult::kFallbackToOverrideUrl);
+  // Ensure we canceled the prerender.
+  EXPECT_TRUE(prerender_helper_.GetHostForUrl(kWellKnownUrl).is_null());
 }
 
 constexpr ResponseDelayParams kDelayParams[] = {{0, 1}, {1, 0}};
@@ -605,6 +618,6 @@ INSTANTIATE_TEST_SUITE_P(
 
 INSTANTIATE_TEST_SUITE_P(
     All,
-    AffiliationChangePasswordNavigationThrottleBrowserTest,
+    PrerenderingChangePasswordNavigationThrottleBrowserTest,
     ::testing::Combine(::testing::Values(ui::PAGE_TRANSITION_FROM_API),
                        ::testing::ValuesIn(kDelayParams)));

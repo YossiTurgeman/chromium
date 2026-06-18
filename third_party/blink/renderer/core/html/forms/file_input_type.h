@@ -32,13 +32,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_FORMS_FILE_INPUT_TYPE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_FORMS_FILE_INPUT_TYPE_H_
 
-#include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/html/forms/file_chooser.h"
 #include "third_party/blink/renderer/core/html/forms/input_type.h"
 #include "third_party/blink/renderer/core/html/forms/keyboard_clickable_input_type_view.h"
 #include "third_party/blink/renderer/core/page/popup_opening_observer.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -54,26 +53,27 @@ class CORE_EXPORT FileInputType final : public InputType,
   void Trace(Visitor*) const override;
   using InputType::GetElement;
   static Vector<String> FilesFromFormControlState(const FormControlState&);
-  static FileList* CreateFileList(const FileChooserFileInfoList& files,
+  static FileList* CreateFileList(ExecutionContext& context,
+                                  const FileChooserFileInfoList& files,
                                   const base::FilePath& base_dir);
 
   void CountUsage() override;
 
   void SetFilesFromPaths(const Vector<String>&) override;
+  bool CanSetStringValue() const;
+  bool ValueMissing(const String&) const;
 
  private:
   InputTypeView* CreateView() override;
-  const AtomicString& FormControlType() const override;
   FormControlState SaveFormControlState() const override;
   void RestoreFormControlState(const FormControlState&) override;
   void AppendToFormData(FormData&) const override;
-  bool ValueMissing(const String&) const override;
   String ValueMissingText() const override;
   void HandleDOMActivateEvent(Event&) override;
-  void CustomStyleForLayoutObject(ComputedStyle& style) override;
-  LayoutObject* CreateLayoutObject(const ComputedStyle&,
-                                   LegacyLayout) const override;
-  bool CanSetStringValue() const override;
+  void OpenPopupView() override;
+  bool IsPickerVisible() const override;
+  void AdjustStyle(ComputedStyleBuilder&) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) const override;
   FileList* Files() override;
   bool SetFiles(FileList*) override;
   void SetFilesAndDispatchEvents(FileList*) override;
@@ -102,6 +102,7 @@ class CORE_EXPORT FileInputType final : public InputType,
   // FileChooserClient implementation.
   void FilesChosen(FileChooserFileInfoList files,
                    const base::FilePath& base_dir) override;
+  void FileChooserCanceled() override;
   LocalFrame* FrameOrNull() const override;
 
   // PopupOpeningObserver implementation.
@@ -112,6 +113,18 @@ class CORE_EXPORT FileInputType final : public InputType,
 
   Member<FileList> file_list_;
   String dropped_file_system_id_;
+  // True if we should force a 'change' event to be dispatched even if the
+  // file list has not changed. This is set when the user explicitly chooses
+  // files via a file chooser, to ensure that choosing the same file again
+  // still fires a 'change' event rather than a 'cancel' event.
+  bool force_change_event_ = false;
+};
+
+template <>
+struct DowncastTraits<FileInputType> {
+  static bool AllowFrom(const InputType& type) {
+    return type.IsFileInputType();
+  }
 };
 
 }  // namespace blink

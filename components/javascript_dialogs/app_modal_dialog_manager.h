@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,26 +7,36 @@
 
 #include <memory>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "components/javascript_dialogs/app_modal_dialog_controller.h"
+#include "components/javascript_dialogs/app_modal_dialog_manager_delegate.h"
 #include "content/public/browser/javascript_dialog_manager.h"
+
+class GURL;
+
+namespace url {
+class Origin;
+}
 
 namespace javascript_dialogs {
 
 class ExtensionsClient;
 class AppModalViewFactory;
+class AppModalDialogManagerDelegate;
 
 class AppModalDialogManager : public content::JavaScriptDialogManager {
  public:
   // A factory method to create and returns a platform-specific dialog class.
   // The returned object should own itself.
-  using AppModalViewFactory =
-      base::RepeatingCallback<AppModalDialogView*(AppModalDialogController*)>;
+  using AppModalViewFactory = base::RepeatingCallback<AppModalDialogView*(
+      std::unique_ptr<AppModalDialogController>)>;
 
   static AppModalDialogManager* GetInstance();
+
+  AppModalDialogManager(const AppModalDialogManager&) = delete;
+  AppModalDialogManager& operator=(const AppModalDialogManager&) = delete;
 
   // Sets the AppModalViewFactory used to create platform specific
   // dialog window instances.
@@ -39,9 +49,11 @@ class AppModalDialogManager : public content::JavaScriptDialogManager {
   // access //extensions.
   void SetExtensionsClient(std::unique_ptr<ExtensionsClient> extensions_client);
 
+  void SetDelegate(std::unique_ptr<AppModalDialogManagerDelegate> delegate);
+
   // Gets the title for a dialog.
-  base::string16 GetTitle(content::WebContents* web_contents,
-                          const GURL& alerting_frame_url);
+  std::u16string GetTitle(content::WebContents* web_contents,
+                          const url::Origin& alerting_frame_origin);
 
   // Displays a dialog asking the user if they want to leave a page. Displays
   // a different message if the site is in an app window.
@@ -56,8 +68,8 @@ class AppModalDialogManager : public content::JavaScriptDialogManager {
   void RunJavaScriptDialog(content::WebContents* web_contents,
                            content::RenderFrameHost* render_frame_host,
                            content::JavaScriptDialogType dialog_type,
-                           const base::string16& message_text,
-                           const base::string16& default_prompt_text,
+                           const std::u16string& message_text,
+                           const std::u16string& default_prompt_text,
                            DialogClosedCallback callback,
                            bool* did_suppress_message) override;
   void RunBeforeUnloadDialog(content::WebContents* web_contents,
@@ -66,41 +78,38 @@ class AppModalDialogManager : public content::JavaScriptDialogManager {
                              DialogClosedCallback callback) override;
   bool HandleJavaScriptDialog(content::WebContents* web_contents,
                               bool accept,
-                              const base::string16* prompt_override) override;
+                              const std::u16string* prompt_override) override;
   void CancelDialogs(content::WebContents* web_contents,
                      bool reset_state) override;
 
+  static std::u16string GetSiteFrameTitle(
+      const GURL& main_frame_url,
+      const url::Origin& main_frame_origin,
+      const url::Origin& alerting_frame_origin);
+
  private:
   FRIEND_TEST_ALL_PREFIXES(AppModalDialogManagerTest, GetTitle);
-  friend struct base::DefaultSingletonTraits<AppModalDialogManager>;
+  friend class base::NoDestructor<AppModalDialogManager>;
 
   AppModalDialogManager();
   ~AppModalDialogManager() override;
-
-  // Wrapper around OnDialogClosed; logs UMA stats before continuing on.
-  void OnBeforeUnloadDialogClosed(content::WebContents* web_contents,
-                                  DialogClosedCallback callback,
-                                  bool success,
-                                  const base::string16& user_input);
 
   // Wrapper around a DialogClosedCallback so that we can intercept it before
   // passing it onto the original callback.
   void OnDialogClosed(content::WebContents* web_contents,
                       DialogClosedCallback callback,
                       bool success,
-                      const base::string16& user_input);
-
-  static base::string16 GetTitleImpl(const GURL& parent_frame_url,
-                                     const GURL& alerting_frame_url);
+                      const std::u16string& user_input);
 
   // Mapping between the WebContents and their extra data. The key
   // is a void* because the pointer is just a cookie and is never dereferenced.
   AppModalDialogController::ExtraDataMap javascript_dialog_extra_data_;
 
   AppModalViewFactory view_factory_;
+
   std::unique_ptr<ExtensionsClient> extensions_client_;
 
-  DISALLOW_COPY_AND_ASSIGN(AppModalDialogManager);
+  std::unique_ptr<AppModalDialogManagerDelegate> delegate_;
 };
 
 }  // namespace javascript_dialogs

@@ -1,12 +1,15 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/subresource_filter/tools/ruleset_converter/rule_stream.h"
 
+#include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "base/check_op.h"
+#include "base/logging.h"
 #include "components/subresource_filter/core/common/unindexed_ruleset.h"
 #include "components/subresource_filter/tools/rule_parser/rule.h"
 #include "components/subresource_filter/tools/rule_parser/rule_parser.h"
@@ -34,18 +37,20 @@ class ProtobufRuleInputStreamImpl {
       : rules_(rules) {}
 
   url_pattern_index::proto::RuleType FetchNextRule() {
-    if (not_first_rule_)
+    if (not_first_rule_) {
       ++rule_index_;
+    }
     not_first_rule_ = true;
 
     if (is_reading_url_rules_ && rule_index_ >= rules_.url_rules_size()) {
       is_reading_url_rules_ = false;
       rule_index_ = 0;
     }
-    if (!is_reading_url_rules_ && rule_index_ >= rules_.css_rules_size())
+    if (!is_reading_url_rules_ && rule_index_ >= rules_.style_rules_size()) {
       return url_pattern_index::proto::RULE_TYPE_UNSPECIFIED;
+    }
     return is_reading_url_rules_ ? url_pattern_index::proto::RULE_TYPE_URL
-                                 : url_pattern_index::proto::RULE_TYPE_CSS;
+                                 : url_pattern_index::proto::RULE_TYPE_STYLE;
   }
 
   const url_pattern_index::proto::UrlRule& GetUrlRule() {
@@ -53,9 +58,9 @@ class ProtobufRuleInputStreamImpl {
     return rules_.url_rules(rule_index_);
   }
 
-  const url_pattern_index::proto::CssRule& GetCssRule() {
-    CHECK(!is_reading_url_rules_ && rule_index_ < rules_.css_rules_size());
-    return rules_.css_rules(rule_index_);
+  const url_pattern_index::proto::StyleRule& GetStyleRule() {
+    CHECK(!is_reading_url_rules_ && rule_index_ < rules_.style_rules_size());
+    return rules_.style_rules(rule_index_);
   }
 
  private:
@@ -80,10 +85,11 @@ class FilterListRuleInputStream : public RuleInputStream {
     std::string line;
     while (std::getline(*input_, line)) {
       auto rule_type = parser_.Parse(line);
-      if (rule_type != url_pattern_index::proto::RULE_TYPE_UNSPECIFIED)
+      if (rule_type != url_pattern_index::proto::RULE_TYPE_UNSPECIFIED) {
         return rule_type;
+      }
       if (!IsTrivialParseError(parser_.parse_error())) {
-        std::cerr << parser_.parse_error() << std::endl;
+        LOG(ERROR) << parser_.parse_error();
       }
       // TODO(pkalinnikov): Export the number of processed/skipped rules.
     }
@@ -95,9 +101,9 @@ class FilterListRuleInputStream : public RuleInputStream {
     return parser_.url_rule().ToProtobuf();
   }
 
-  url_pattern_index::proto::CssRule GetCssRule() override {
-    CHECK_EQ(url_pattern_index::proto::RULE_TYPE_CSS, parser_.rule_type());
-    return parser_.css_rule().ToProtobuf();
+  url_pattern_index::proto::StyleRule GetStyleRule() override {
+    CHECK_EQ(url_pattern_index::proto::RULE_TYPE_STYLE, parser_.rule_type());
+    return parser_.style_rule().ToProtobuf();
   }
 
  private:
@@ -120,7 +126,7 @@ class FilterListRuleOutputStream : public RuleOutputStream {
     return !output_->bad();
   }
 
-  bool PutCssRule(const url_pattern_index::proto::CssRule& rule) override {
+  bool PutStyleRule(const url_pattern_index::proto::StyleRule& rule) override {
     std::string line = ToString(rule) + '\n';
     output_->write(line.data(), line.size());
     return !output_->bad();
@@ -146,7 +152,7 @@ class ProtobufRuleInputStream : public RuleInputStream {
   explicit ProtobufRuleInputStream(std::unique_ptr<std::istream> input) {
     std::string buffer = ReadStreamToString(input.get());
     CHECK(rules_.ParseFromString(buffer));
-    impl_.reset(new ProtobufRuleInputStreamImpl(rules_));
+    impl_ = std::make_unique<ProtobufRuleInputStreamImpl>(rules_);
   }
 
   url_pattern_index::proto::RuleType FetchNextRule() override {
@@ -155,8 +161,8 @@ class ProtobufRuleInputStream : public RuleInputStream {
   url_pattern_index::proto::UrlRule GetUrlRule() override {
     return impl_->GetUrlRule();
   }
-  url_pattern_index::proto::CssRule GetCssRule() override {
-    return impl_->GetCssRule();
+  url_pattern_index::proto::StyleRule GetStyleRule() override {
+    return impl_->GetStyleRule();
   }
 
  private:
@@ -179,15 +185,27 @@ class ProtobufRuleOutputStream : public RuleOutputStream {
     return true;
   }
 
-  bool PutCssRule(const url_pattern_index::proto::CssRule& rule) override {
-    *all_rules_.add_css_rules() = rule;
+  bool PutStyleRule(const url_pattern_index::proto::StyleRule& rule) override {
+    *all_rules_.add_style_rules() = rule;
     return true;
   }
 
   bool Finish() override {
+    // Move site-specific rules (rules that apply to specific domains) to the
+    // front. This ensures that rules that must have explicit selectors have
+    // them so that generic rules utilize them too. Otherwise we could have
+    // situations where global rules are implicit but site-specific exclusion
+    // rules are explicit, and they don't share a selector.
+    auto* style_rules = all_rules_.mutable_style_rules();
+    std::stable_partition(style_rules->begin(), style_rules->end(),
+                          [](const url_pattern_index::proto::StyleRule& rule) {
+                            return !rule.domains().empty();
+                          });
+
     std::string buffer;
-    if (!all_rules_.SerializeToString(&buffer))
+    if (!all_rules_.SerializeToString(&buffer)) {
       return false;
+    }
     output_->write(buffer.data(), buffer.size());
     output_->flush();
     return !output_->bad();
@@ -209,14 +227,16 @@ class UnindexedRulesetRuleInputStream : public RuleInputStream {
   explicit UnindexedRulesetRuleInputStream(
       std::unique_ptr<std::istream> input) {
     ruleset_ = ReadStreamToString(input.get());
-    ruleset_input_.reset(new google::protobuf::io::ArrayInputStream(
-        ruleset_.data(), ruleset_.size()));
-    ruleset_reader_.reset(new UnindexedRulesetReader(ruleset_input_.get()));
+    ruleset_input_ = std::make_unique<google::protobuf::io::ArrayInputStream>(
+        ruleset_.data(), ruleset_.size());
+    ruleset_reader_ =
+        std::make_unique<UnindexedRulesetReader>(ruleset_input_.get());
   }
 
   url_pattern_index::proto::RuleType FetchNextRule() override {
-    if (!impl_ && !ReadNextChunk())
+    if (!impl_ && !ReadNextChunk()) {
       return url_pattern_index::proto::RULE_TYPE_UNSPECIFIED;
+    }
     url_pattern_index::proto::RuleType rule_type = impl_->FetchNextRule();
     while (rule_type == url_pattern_index::proto::RULE_TYPE_UNSPECIFIED &&
            ReadNextChunk()) {
@@ -228,8 +248,8 @@ class UnindexedRulesetRuleInputStream : public RuleInputStream {
   url_pattern_index::proto::UrlRule GetUrlRule() override {
     return impl_->GetUrlRule();
   }
-  url_pattern_index::proto::CssRule GetCssRule() override {
-    return impl_->GetCssRule();
+  url_pattern_index::proto::StyleRule GetStyleRule() override {
+    return impl_->GetStyleRule();
   }
 
  private:
@@ -239,7 +259,7 @@ class UnindexedRulesetRuleInputStream : public RuleInputStream {
 
   bool ReadNextChunk() {
     if (ruleset_reader_->ReadNextChunk(&rules_chunk_)) {
-      impl_.reset(new ProtobufRuleInputStreamImpl(rules_chunk_));
+      impl_ = std::make_unique<ProtobufRuleInputStreamImpl>(rules_chunk_);
       return true;
     }
     impl_.reset();
@@ -267,13 +287,14 @@ class UnindexedRulesetRuleOutputStream : public RuleOutputStream {
     return ruleset_writer_.AddUrlRule(rule);
   }
 
-  bool PutCssRule(const url_pattern_index::proto::CssRule& rule) override {
-    return true;
+  bool PutStyleRule(const url_pattern_index::proto::StyleRule& rule) override {
+    return ruleset_writer_.AddStyleRule(rule);
   }
 
   bool Finish() override {
-    if (!ruleset_writer_.Finish())
+    if (!ruleset_writer_.Finish()) {
       return false;
+    }
     output_->write(ruleset_.data(), ruleset_.size());
     output_->flush();
     return !output_->bad();
@@ -357,6 +378,12 @@ static_assert(!(kChrome54To58ElementTypes &
                 url_pattern_index::proto::ELEMENT_TYPE_WEBSOCKET),
               "Wrong M54 element types.");
 static_assert(!(kChrome54To58ElementTypes &
+                url_pattern_index::proto::ELEMENT_TYPE_WEBTRANSPORT),
+              "Wrong M54 element types.");
+static_assert(!(kChrome54To58ElementTypes &
+                url_pattern_index::proto::ELEMENT_TYPE_WEBBUNDLE),
+              "Wrong M54 element types.");
+static_assert(!(kChrome54To58ElementTypes &
                 url_pattern_index::proto::ELEMENT_TYPE_POPUP),
               "Wrong M54 element types.");
 
@@ -364,25 +391,34 @@ static_assert(!(kChrome54To58ElementTypes &
 
 bool TransferRules(RuleInputStream* input,
                    RuleOutputStream* url_rules_output,
-                   RuleOutputStream* css_rules_output,
+                   RuleOutputStream* style_rules_output,
                    int chrome_version) {
   while (true) {
     auto rule_type = input->FetchNextRule();
-    if (rule_type == url_pattern_index::proto::RULE_TYPE_UNSPECIFIED)
+    if (rule_type == url_pattern_index::proto::RULE_TYPE_UNSPECIFIED) {
       break;
+    }
     switch (rule_type) {
       case url_pattern_index::proto::RULE_TYPE_URL: {
-        if (!url_rules_output)
+        if (!url_rules_output) {
           break;
+        }
         url_pattern_index::proto::UrlRule url_rule = input->GetUrlRule();
-        if (!DeleteUrlRuleOrAmend(&url_rule, chrome_version))
+        if (!DeleteUrlRuleOrAmend(&url_rule, chrome_version)) {
           url_rules_output->PutUrlRule(url_rule);
+        }
         break;
       }
-      case url_pattern_index::proto::RULE_TYPE_CSS:
-        if (css_rules_output)
-          css_rules_output->PutCssRule(input->GetCssRule());
+      case url_pattern_index::proto::RULE_TYPE_STYLE: {
+        if (!style_rules_output) {
+          break;
+        }
+        url_pattern_index::proto::StyleRule style_rule = input->GetStyleRule();
+        if (!DeleteStyleRuleOrAmend(&style_rule)) {
+          style_rules_output->PutStyleRule(style_rule);
+        }
         break;
+      }
       case url_pattern_index::proto::RULE_TYPE_COMMENT:
         // Ignore comments.
         break;
@@ -395,15 +431,17 @@ bool TransferRules(RuleInputStream* input,
 
 bool DeleteUrlRuleOrAmend(url_pattern_index::proto::UrlRule* rule,
                           int lowest_chrome_version) {
-  if (!lowest_chrome_version)
+  if (!lowest_chrome_version) {
     return false;
+  }
 
   CHECK(rule->has_element_types() || rule->element_types() == 0);
 
   // REGEXP rules are not supported in Chrome's subresource_filter.
   if (rule->url_pattern_type() ==
-      url_pattern_index::proto::URL_PATTERN_TYPE_REGEXP)
+      url_pattern_index::proto::URL_PATTERN_TYPE_REGEXP) {
     return true;
+  }
 
   // POPUP type is deprecated because popup blocking is activated by default
   // in Chrome.
@@ -415,19 +453,50 @@ bool DeleteUrlRuleOrAmend(url_pattern_index::proto::UrlRule* rule,
       rule->activation_types() &
       (url_pattern_index::proto::ACTIVATION_TYPE_DOCUMENT |
        url_pattern_index::proto::ACTIVATION_TYPE_GENERICBLOCK));
-  if (!rule->activation_types())
+  if (!rule->activation_types()) {
     rule->clear_activation_types();
+  }
 
   // Chrome 54-58 ignores rules with unknown element types (like websocket).
   if (lowest_chrome_version == 54) {
     // Remove unknown types to prevent the |rule| from being ignored.
     rule->set_element_types(rule->element_types() & kChrome54To58ElementTypes);
   }
-  if (!rule->element_types())
+  if (!rule->element_types()) {
     rule->clear_element_types();
+  }
 
   // The rule should have at least 1 type bit, otherwise it targets nothing.
   return !rule->element_types() && !rule->activation_types();
+}
+
+bool DeleteStyleRuleOrAmend(url_pattern_index::proto::StyleRule* rule) {
+  bool is_site_specific = false;
+  for (const auto& domain : rule->domains()) {
+    if (!domain.exclude()) {
+      is_site_specific = true;
+      break;
+    }
+  }
+
+  std::vector<std::string> classes;
+  std::vector<std::string> ids;
+  if (!GetAnchorsIfSupported(rule->selector(), is_site_specific, classes,
+                             ids)) {
+    return true;
+  }
+
+  // Populate anchors if not already there.
+  if (rule->classes_size() == 0 && rule->ids_size() == 0) {
+    for (const auto& class_name : classes) {
+      rule->add_classes(class_name);
+    }
+    for (const auto& id_name : ids) {
+      rule->add_ids(id_name);
+    }
+  }
+
+  return false;
 }
 
 }  // namespace subresource_filter

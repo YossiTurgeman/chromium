@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,14 @@
 
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback_forward.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/location.h"
-#include "base/run_loop.h"
-#include "base/test/bind_test_util.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/test/bind.h"
 #include "base/test/simple_test_clock.h"
 #include "base/test/task_environment.h"
-#include "base/threading/sequenced_task_runner_handle.h"
+#include "base/test/test_future.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
 #include "net/http/http_status_code.h"
@@ -52,7 +52,7 @@ const char kKnownBadResourceURL[] =
     "known-bad";
 
 // Defines an arbitrary time increment by which we advance the Clock.
-constexpr base::TimeDelta kTestingIncrement = base::TimeDelta::FromSeconds(1LL);
+constexpr base::TimeDelta kTestingIncrement = base::Seconds(1LL);
 
 // Defines a time of fetch used to construct FetchResult instances that
 // you'll use with the TimeInsensitiveFetchResultEquals matcher.
@@ -83,7 +83,8 @@ class PrinterConfigCacheTest : public ::testing::Test {
             base::BindLambdaForTesting([&]() {
               return reinterpret_cast<network::mojom::URLLoaderFactory*>(
                   &loader_factory_);
-            }))) {}
+            }),
+            /*use_localhost_as_root=*/false)) {}
 
   // Sets up the default responses to dispense.
   void SetUp() override {
@@ -99,17 +100,8 @@ class PrinterConfigCacheTest : public ::testing::Test {
 
   // Method passed as a FetchCallback (partially bound) to
   // cache_.Fetch(). Saves the |result| in the |fetched_results_|.
-  // Invokes the |quit_closure| to signal the enclosing RunLoop that
-  // this method has been called.
-  void CaptureFetchResult(base::RepeatingClosure quit_closure,
-                          const PrinterConfigCache::FetchResult& result) {
+  void CaptureFetchResult(const PrinterConfigCache::FetchResult& result) {
     fetched_results_.push_back(result);
-
-    // The caller may elect to pass a default-constructed
-    // RepeatingClosure, indicating that they don't want anything run.
-    if (quit_closure) {
-      quit_closure.Run();
-    }
   }
 
   void AdvanceClock(base::TimeDelta amount = kTestingIncrement) {
@@ -135,41 +127,31 @@ class PrinterConfigCacheTest : public ::testing::Test {
 
 // Tests that we can succeed in Fetch()ing anything at all.
 TEST_F(PrinterConfigCacheTest, SucceedAtSingleFetch) {
-  base::RunLoop run_loop;
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&> test_future;
 
   // Fetches the "known-good" resource.
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE,
-      base::BindOnce(
-          &PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-          "known-good", base::TimeDelta::FromSeconds(0LL),
-          base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                         base::Unretained(this), run_loop.QuitClosure())));
-  run_loop.Run();
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(&PrinterConfigCache::Fetch,
+                                base::Unretained(cache_.get()), "known-good",
+                                base::Seconds(0LL), test_future.GetCallback()));
 
-  ASSERT_EQ(fetched_results_.size(), 1ULL);
   EXPECT_THAT(
-      fetched_results_.front(),
+      test_future.Get(),
       TimeInsensitiveFetchResultEquals(PrinterConfigCache::FetchResult::Success(
           "known-good", "yakisaba", kUnusedTimeOfFetch)));
 }
 
 // Tests that we fail to Fetch() the "known-bad" resource.
 TEST_F(PrinterConfigCacheTest, FailAtSingleFetch) {
-  base::RunLoop run_loop;
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&> test_future;
 
   // Fetches the "known-bad" resource.
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE,
-      base::BindOnce(
-          &PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-          "known-bad", base::TimeDelta::FromSeconds(0LL),
-          base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                         base::Unretained(this), run_loop.QuitClosure())));
-  run_loop.Run();
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(&PrinterConfigCache::Fetch,
+                                base::Unretained(cache_.get()), "known-bad",
+                                base::Seconds(0LL), test_future.GetCallback()));
 
-  ASSERT_EQ(fetched_results_.size(), 1ULL);
-  EXPECT_THAT(fetched_results_.front(),
+  EXPECT_THAT(test_future.Get(),
               TimeInsensitiveFetchResultEquals(
                   PrinterConfigCache::FetchResult::Failure("known-bad")));
 }
@@ -178,17 +160,14 @@ TEST_F(PrinterConfigCacheTest, FailAtSingleFetch) {
 // fresh content.
 TEST_F(PrinterConfigCacheTest, RefreshSubsequentFetch) {
   // Fetches the "known-good" resource with its stock contents.
-  base::RunLoop first_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      first_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-                     "known-good", base::TimeDelta::FromSeconds(0LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    first_run_loop.QuitClosure())));
-  first_run_loop.Run();
-
-  ASSERT_EQ(fetched_results_.size(), 1ULL);
+                     "known-good", base::Seconds(0LL),
+                     first_test_future.GetCallback()));
+  fetched_results_.push_back(first_test_future.Get());
 
   // To detect a networked fetch, we'll change the served content
   // and check that the subsequent Fetch() recovers the new content.
@@ -196,17 +175,14 @@ TEST_F(PrinterConfigCacheTest, RefreshSubsequentFetch) {
 
   // We've mutated the content; now, this fetches the "known-good"
   // resource with its new contents.
-  base::RunLoop second_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      second_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-                     "known-good", base::TimeDelta::FromSeconds(0LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    second_run_loop.QuitClosure())));
-  second_run_loop.Run();
-
-  ASSERT_EQ(fetched_results_.size(), 2ULL);
+                     "known-good", base::Seconds(0LL),
+                     second_test_future.GetCallback()));
+  fetched_results_.push_back(second_test_future.Get());
 
   EXPECT_THAT(
       fetched_results_,
@@ -223,17 +199,14 @@ TEST_F(PrinterConfigCacheTest, RefreshSubsequentFetch) {
 // wide age limit.
 TEST_F(PrinterConfigCacheTest, LocallyPerformSubsequentFetch) {
   // Fetches the "known-good" resource with its stock contents.
-  base::RunLoop first_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      first_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-                     "known-good", base::TimeDelta::FromSeconds(0LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    first_run_loop.QuitClosure())));
-  first_run_loop.Run();
-
-  ASSERT_EQ(fetched_results_.size(), 1ULL);
+                     "known-good", base::Seconds(0LL),
+                     first_test_future.GetCallback()));
+  fetched_results_.push_back(first_test_future.Get());
 
   // As in the RefreshSubsequentFetch test, we'll change the served
   // content to detect networked fetch requests made.
@@ -242,8 +215,9 @@ TEST_F(PrinterConfigCacheTest, LocallyPerformSubsequentFetch) {
   // The "live" content in the serving root has changed; now, we perform
   // some local fetches without hitting the network. These Fetch()es
   // will return the stock content.
-  base::RunLoop second_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      second_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
                      "known-good",
@@ -251,40 +225,32 @@ TEST_F(PrinterConfigCacheTest, LocallyPerformSubsequentFetch) {
                      // timeout. Bear in mind that this test controls
                      // the passage of time, so nonzero timeout is
                      // "long" here...
-                     base::TimeDelta::FromSeconds(1LL),
+                     base::Seconds(1LL),
                      base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    // Avoids quitting this RunLoop.
-                                    base::RepeatingClosure())));
+                                    base::Unretained(this))));
 
   // Performs a local Fetch() a few more times for no particular reason.
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
-      base::BindOnce(
-          &PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-          "known-good", base::TimeDelta::FromSeconds(3600LL),
-          base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                         base::Unretained(this), base::RepeatingClosure())));
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+      base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
+                     "known-good", base::Seconds(3600LL),
+                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
+                                    base::Unretained(this))));
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
-      base::BindOnce(
-          &PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-          "known-good", base::TimeDelta::FromSeconds(86400LL),
-          base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                         base::Unretained(this), base::RepeatingClosure())));
+      base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
+                     "known-good", base::Seconds(86400LL),
+                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
+                                    base::Unretained(this))));
 
   // Performs a live Fetch(), returning the live (mutated) contents.
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
                      "known-good",
                      // Forces the networked fetch.
-                     base::TimeDelta::FromSeconds(0LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    // Ends our RunLoop.
-                                    second_run_loop.QuitClosure())));
-  second_run_loop.Run();
+                     base::Seconds(0LL), second_test_future.GetCallback()));
+  fetched_results_.push_back(second_test_future.Get());
 
   ASSERT_EQ(fetched_results_.size(), 5ULL);
   EXPECT_THAT(
@@ -314,56 +280,49 @@ TEST_F(PrinterConfigCacheTest, FetchExpirationIsRespected) {
   // This Fetch() is given a useful |expiration|, but it won't matter
   // here since there are no locally resident cache entries at this
   // time; it'll have to be a networked fetch.
-  base::RunLoop first_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      first_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-                     "known-good", base::TimeDelta::FromSeconds(32LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    first_run_loop.QuitClosure())));
-  first_run_loop.Run();
-  ASSERT_EQ(fetched_results_.size(), 1ULL);
+                     "known-good", base::Seconds(32LL),
+                     first_test_future.GetCallback()));
+  fetched_results_.push_back(first_test_future.Get());
   const base::Time time_zero = clock_.Now();
 
   // Advance clock to T+31.
-  AdvanceClock(base::TimeDelta::FromSeconds(31LL));
+  AdvanceClock(base::Seconds(31LL));
 
   // This Fetch() is given the same useful |expiration|; it only matters
   // in that the clock does not yet indicate that the locally resident
   // cache entry has expired.
-  base::RunLoop second_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      second_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-                     "known-good", base::TimeDelta::FromSeconds(32LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    second_run_loop.QuitClosure())));
-  second_run_loop.Run();
-  ASSERT_EQ(fetched_results_.size(), 2ULL);
+                     "known-good", base::Seconds(32LL),
+                     second_test_future.GetCallback()));
+  fetched_results_.push_back(second_test_future.Get());
   // We don't capture the time right Now() because the above Fetch()
   // should have replied with local contents, fetched at time_zero.
 
   // Advance clock to T+32.
-  AdvanceClock(base::TimeDelta::FromSeconds(1));
+  AdvanceClock(base::Seconds(1));
 
   // This third Fetch() will be given the same |expiration| as ever.
   // The two previous calls to AdvanceClock() will have moved the time
   // beyond the staleness threshold, though, so this Fetch() will be
   // networked.
-  base::RunLoop third_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      third_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
                      "known-good",
                      // Entry fetched at T+0 is now stale at T+32.
-                     base::TimeDelta::FromSeconds(32LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    third_run_loop.QuitClosure())));
-  third_run_loop.Run();
-  ASSERT_EQ(fetched_results_.size(), 3ULL);
+                     base::Seconds(32LL), third_test_future.GetCallback()));
+  fetched_results_.push_back(third_test_future.Get());
   const base::Time time_of_third_fetch = clock_.Now();
 
   EXPECT_THAT(fetched_results_,
@@ -378,21 +337,20 @@ TEST_F(PrinterConfigCacheTest, FetchExpirationIsRespected) {
 
 // Tests that we can Drop() locally cached contents.
 TEST_F(PrinterConfigCacheTest, DropLocalContents) {
-  base::RunLoop first_run_loop;
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      first_test_future;
 
   // Fetches the "known-good" resource with its stock contents.
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-                     "known-good", base::TimeDelta::FromSeconds(604800LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    first_run_loop.QuitClosure())));
-  first_run_loop.Run();
+                     "known-good", base::Seconds(604800LL),
+                     first_test_future.GetCallback()));
+  fetched_results_.push_back(first_test_future.Get());
 
   // Drops that which we just fetched. This isn't immediately externally
   // visible, but its effects will soon be made apparent.
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&PrinterConfigCache::Drop,
                                 base::Unretained(cache_.get()), "known-good"));
 
@@ -403,15 +361,14 @@ TEST_F(PrinterConfigCacheTest, DropLocalContents) {
   // This is where the side effect of the prior Drop() call manifests:
   // the "known-good" resource is no longer cached, so not even a wide
   // timeout will spare us a networked fetch.
-  base::RunLoop second_run_loop;
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::test::TestFuture<const PrinterConfigCache::FetchResult&>
+      second_test_future;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&PrinterConfigCache::Fetch, base::Unretained(cache_.get()),
-                     "known-good", base::TimeDelta::FromSeconds(18748800LL),
-                     base::BindOnce(&PrinterConfigCacheTest::CaptureFetchResult,
-                                    base::Unretained(this),
-                                    second_run_loop.QuitClosure())));
-  second_run_loop.Run();
+                     "known-good", base::Seconds(18748800LL),
+                     second_test_future.GetCallback()));
+  fetched_results_.push_back(second_test_future.Get());
 
   // We detect the networked fetch to by observing mutated
   // contents.

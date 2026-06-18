@@ -34,10 +34,10 @@ information, etc.
 
 ## Redaction
 
-Beware that certain on certain platforms (e.g. Android Webview) we
+Beware that certain on certain platforms (e.g. Android WebView) we
 [sanitize the stack in the dump](https://cs.chromium.org/chromium/src/third_party/crashpad/crashpad/snapshot/sanitized/memory_snapshot_sanitized.h)
-and only crash keys on a
-[whitelist](https://cs.chromium.org/chromium/src/android_webview/common/crash_reporter/crash_keys.cc)
+and only crash keys on an
+[allowlist](https://cs.chromium.org/chromium/src/android_webview/common/crash_reporter/crash_keys.cc)
 will be captured.
 
 ## Getting Started with a Single Key-Value Pair
@@ -70,6 +70,9 @@ cannot have embedded NULs. The constructor argument is the name of the
 crash key, and it is what you will use to identify your data in uploaded
 crash reports.
 
+Note that crash key names are global and must not conflict with the
+name of any other crash key in Chrome.
+
 If you need to declare an array of crash keys (e.g., for recording N values
 of an array), you can use a constructor tag to avoid warnings about `explicit`:
 
@@ -88,7 +91,7 @@ the dependency will resolve them.
 
 #### 2. Set the Crash Key
 
-After a key has been allocated, its `Set(base::StringPiece)` and
+After a key has been allocated, its `Set(std::string_view)` and
 `Clear()` methods can be used to record and clear a value. In addition,
 crash_key.h provides a `ScopedCrashKeyString` class to set the value for the
 duration of a scope and clear it upon exiting.
@@ -146,7 +149,8 @@ To set a stack trace to a crash key, use the `SetCrashKeyStringToStackTrace()`
 function in crash_logging.h:
 
     Usemeafterfree::~Usemeafterfree() {
-      static crash_reporter::CrashKeyString<1024> trace_key("uaf-dtor-trace");
+      static crash_reporter::CrashKeyString<1024> trace_key(
+          "useme-after-free-uaf-dtor-trace");
       crash_reporter::SetCrashKeyStringToStackTrace(&trace_key,
                                                     base::debug::StackTrace());
     }

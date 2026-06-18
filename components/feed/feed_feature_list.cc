@@ -1,40 +1,64 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/feed/feed_feature_list.h"
 
+#include <algorithm>
+
+#include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
+#include "base/time/time.h"
+#include "build/build_config.h"
+#include "components/country_codes/country_codes.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "components/sync/base/features.h"
+#endif  // BUILDFLAG(IS_ANDROID)
+
 namespace feed {
 
-const base::Feature kInterestFeedContentSuggestions{
-    "InterestFeedContentSuggestions", base::FEATURE_ENABLED_BY_DEFAULT};
 // InterestFeedV2 takes precedence over InterestFeedContentSuggestions.
 // InterestFeedV2 is cached in ChromeCachedFlags. If the default value here is
 // changed, please update the cached one's default value in CachedFeatureFlags.
-const base::Feature kInterestFeedV2{"InterestFeedV2",
-                                    base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kInterestFeedV2, base::FEATURE_ENABLED_BY_DEFAULT);
 
-const base::FeatureParam<std::string> kDisableTriggerTypes{
-    &kInterestFeedContentSuggestions, "disable_trigger_types", ""};
-const base::FeatureParam<int> kSuppressRefreshDurationMinutes{
-    &kInterestFeedContentSuggestions, "suppress_refresh_duration_minutes", 30};
-const base::FeatureParam<int> kTimeoutDurationSeconds{
-    &kInterestFeedContentSuggestions, "timeout_duration_seconds", 30};
-const base::FeatureParam<bool> kThrottleBackgroundFetches{
-    &kInterestFeedContentSuggestions, "throttle_background_fetches", true};
-const base::FeatureParam<bool> kOnlySetLastRefreshAttemptOnSuccess{
-    &kInterestFeedContentSuggestions,
-    "only_set_last_refresh_attempt_on_success", true};
+BASE_FEATURE(kDiscoFeedEndpoint, base::FEATURE_ENABLED_BY_DEFAULT);
+BASE_FEATURE(kXsurfaceMetricsReporting, base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kFeedLoadingPlaceholder, base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kFeedImageMemoryCacheSizePercentage,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
-const base::Feature kInterestFeedNotifications{
-    "InterestFeedNotifications", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kPersonalizeFeedUnsignedUsers, base::FEATURE_DISABLED_BY_DEFAULT);
 
-const base::Feature kInterestFeedFeedback{"InterestFeedFeedback",
-                                          base::FEATURE_DISABLED_BY_DEFAULT};
+// TODO(crbug.com/40764861): Remove this helper, directly use kSignin instead.
+signin::ConsentLevel GetConsentLevelNeededForPersonalizedFeed() {
+  return signin::ConsentLevel::kSignin;
+}
 
-const base::Feature kReportFeedUserActions{"ReportFeedUserActions",
-                                           base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kFeedNoViewCache, base::FEATURE_ENABLED_BY_DEFAULT);
 
+BASE_FEATURE(kFeedPerformanceStudy, base::FEATURE_DISABLED_BY_DEFAULT);
 
+BASE_FEATURE(kSyntheticCapabilities,
+             "FeedSyntheticCapabilities",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kFeedSignedOutViewDemotion, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kRefreshFeedOnRestart, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kFeedContainment, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kFeedRecyclerBinderUnmountOnDetach,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kFeedStreaming, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kFeedAudioOverviews, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kAndroidOpenIncognitoAsWindow, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kWideScreenFeedForFoldables, base::FEATURE_DISABLED_BY_DEFAULT);
 
 }  // namespace feed

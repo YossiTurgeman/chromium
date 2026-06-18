@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,8 +15,11 @@
 #include "base/observer_list.h"
 #include "base/process/process.h"
 #include "base/threading/thread_checker.h"
+#include "base/timer/timer.h"
 #include "base/values.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/global_routing_id.h"
+#include "content/public/browser/peer_connection_tracker_host_observer.h"
 #include "content/public/browser/render_process_host_observer.h"
 #include "media/media_buildflags.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -37,7 +40,8 @@ class WebRTCInternalsUIObserver;
 // It collects peer connection infomation from the renderers,
 // forwards the data to WebRTCInternalsUIObserver and
 // sends data collecting commands to the renderers.
-class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
+class CONTENT_EXPORT WebRTCInternals : public PeerConnectionTrackerHostObserver,
+                                       public RenderProcessHostObserver,
                                        public ui::SelectFileDialog::Listener {
  public:
   // * CreateSingletonInstance() ensures that no previous instantiation of the
@@ -54,56 +58,58 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
 
   ~WebRTCInternals() override;
 
-  // This method is called when a PeerConnection is created.
-  // |render_process_id| is the id of the render process (not OS pid), which is
-  // needed because we might not be able to get the OS process id when the
-  // render process terminates and we want to clean up.
-  // |pid| is the renderer process id, |lid| is the renderer local id used to
-  // identify a PeerConnection, |url| is the url of the tab owning the
-  // PeerConnection, |rtc_configuration| is the serialized RTCConfiguration,
-  // |constraints| is the media constraints used to initialize the
-  // PeerConnection.
-  void OnAddPeerConnection(int render_process_id,
-                           base::ProcessId pid,
-                           int lid,
-                           const std::string& url,
-                           const std::string& rtc_configuration,
-                           const std::string& constraints);
-
-  // This method is called when PeerConnection is destroyed.
-  // |pid| is the renderer process id, |lid| is the renderer local id.
-  void OnRemovePeerConnection(base::ProcessId pid, int lid);
-
-  // This method is called when a PeerConnection is updated.
-  // |pid| is the renderer process id, |lid| is the renderer local id,
-  // |type| is the update type, |value| is the detail of the update.
-  void OnUpdatePeerConnection(base::ProcessId pid,
-                              int lid,
-                              const std::string& type,
-                              const std::string& value);
-
-  // These methods are called when results from
-  // PeerConnectionInterface::GetStats (legacy or standard API) are available.
-  // |pid| is the renderer process id, |lid| is the renderer local id, |value|
-  // is the list of stats reports.
-  void OnAddStandardStats(base::ProcessId pid, int lid, base::Value value);
-  void OnAddLegacyStats(base::ProcessId pid, int lid, base::Value value);
-
-  // This method is called when getUserMedia is called. |render_process_id| is
-  // the id of the render process (not OS pid), which is needed because we might
-  // not be able to get the OS process id when the render process terminates and
-  // we want to clean up. |pid| is the renderer OS process id, |origin| is the
-  // security origin of the getUserMedia call, |audio| is true if audio stream
-  // is requested, |video| is true if the video stream is requested,
-  // |audio_constraints| is the constraints for the audio, |video_constraints|
-  // is the constraints for the video.
-  void OnGetUserMedia(int render_process_id,
+  // PeerConnectionTrackerHostObserver implementation.
+  void OnPeerConnectionAdded(GlobalRenderFrameHostId frame_id,
+                             int lid,
+                             base::ProcessId pid,
+                             const std::string& url,
+                             const std::string& rtc_configuration) override;
+  void OnPeerConnectionRemoved(GlobalRenderFrameHostId frame_id,
+                               int lid) override;
+  void OnPeerConnectionUpdated(GlobalRenderFrameHostId frame_id,
+                               int lid,
+                               const std::string& type,
+                               const std::string& value) override;
+  void OnAddStandardStats(GlobalRenderFrameHostId frame_id,
+                          int lid,
+                          base::ListValue value) override;
+  void OnGetUserMedia(GlobalRenderFrameHostId frame_id,
                       base::ProcessId pid,
-                      const std::string& origin,
+                      int request_id,
                       bool audio,
                       bool video,
                       const std::string& audio_constraints,
-                      const std::string& video_constraints);
+                      const std::string& video_constraints) override;
+  void OnGetUserMediaSuccess(GlobalRenderFrameHostId frame_id,
+                             base::ProcessId pid,
+                             int request_id,
+                             const std::string& stream_id,
+                             const std::string& audio_track_info,
+                             const std::string& video_track_info) override;
+  void OnGetUserMediaFailure(GlobalRenderFrameHostId frame_id,
+                             base::ProcessId pid,
+                             int request_id,
+                             const std::string& error,
+                             const std::string& error_message) override;
+
+  void OnGetDisplayMedia(GlobalRenderFrameHostId frame_id,
+                         base::ProcessId pid,
+                         int request_id,
+                         bool audio,
+                         bool video,
+                         const std::string& audio_constraints,
+                         const std::string& video_constraints) override;
+  void OnGetDisplayMediaSuccess(GlobalRenderFrameHostId frame_id,
+                                base::ProcessId pid,
+                                int request_id,
+                                const std::string& stream_id,
+                                const std::string& audio_track_info,
+                                const std::string& video_track_info) override;
+  void OnGetDisplayMediaFailure(GlobalRenderFrameHostId frame_id,
+                                base::ProcessId pid,
+                                int request_id,
+                                const std::string& error,
+                                const std::string& error_message) override;
 
   // Methods for adding or removing WebRTCInternalsUIObserver.
   void AddObserver(WebRTCInternalsUIObserver* observer);
@@ -129,8 +135,13 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
   void EnableLocalEventLogRecordings(content::WebContents* web_contents);
   void DisableLocalEventLogRecordings();
 
+  void EnableDataChannelRecordings(content::WebContents* web_contents);
+  void DisableDataChannelRecordings();
+
   bool IsEventLogRecordingsEnabled() const;
   bool CanToggleEventLogRecordings() const;
+
+  bool IsDataChannelRecordingsEnabled() const;
 
   int num_connected_connections() const { return num_connected_connections_; }
 
@@ -156,18 +167,26 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
 
   static WebRTCInternals* g_webrtc_internals;
 
-  void SendUpdate(const char* command,
-                  std::unique_ptr<base::Value> value);
+  enum class SelectionType {
+    kRtcEventLogs,
+    kAudioDebugRecordings,
+    kDataChannelRecordings,
+  };
+
+  void UpdateStatsTimer();
+
+  void SendUpdate(const std::string& event_name, base::Value event_data);
+  void SendUpdate(const std::string& event_name, base::DictValue event_data);
 
   // RenderProcessHostObserver implementation.
   void RenderProcessExited(RenderProcessHost* host,
                            const ChildProcessTerminationInfo& info) override;
 
+  void MaybeShowSelectFileDialog(content::WebContents* web_contents,
+                                 SelectionType log_type);
   // ui::SelectFileDialog::Listener implementation.
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* unused_params) override;
-  void FileSelectionCanceled(void* params) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
+  void FileSelectionCanceled() override;
 
   // Called when a renderer exits (including crashes).
   void OnRendererExit(int render_process_id);
@@ -176,17 +195,24 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
   // |audio_debug_recordings_file_path_|.
   void EnableAudioDebugRecordingsOnAllRenderProcessHosts();
 
+  void EnableDataChannelRecordingsOnAllRenderProcessHosts();
+
   // Updates the number of open PeerConnections. Called when a PeerConnection
   // is stopped or removed.
-  void MaybeClosePeerConnection(base::DictionaryValue* record);
+  void MaybeClosePeerConnection(base::Value& record);
 
-  void MaybeMarkPeerConnectionAsConnected(base::DictionaryValue* record);
-  void MaybeMarkPeerConnectionAsNotConnected(base::DictionaryValue* record);
+  void MaybeMarkPeerConnectionAsConnected(base::Value& record);
+  void MaybeMarkPeerConnectionAsNotConnected(base::Value& record);
 
   // Called whenever a PeerConnection is created or stopped in order to
   // request/cancel a wake lock on suspending the current application for power
   // saving.
   void UpdateWakeLock();
+
+  // Convenient method to access `peer_connection_data_` as a base::ListValue.
+  base::ListValue& peer_connection_data() {
+    return peer_connection_data_.GetList();
+  }
 
   device::mojom::WakeLock* GetWakeLock();
 
@@ -196,45 +222,57 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
   // notifications.
   void ProcessPendingUpdates();
 
-  base::DictionaryValue* FindRecord(base::ProcessId pid,
-                                    int lid,
-                                    size_t* index = nullptr);
+  // Sends a request to the browser to get peer connection statistics from the
+  // standard getStats() API (promise-based).
+  void RequestStandardStats();
+
+  // Returns an iterator for peer_connection_data_.GetList (an end() iterator
+  // if not found).
+  base::ListValue::iterator FindRecord(GlobalRenderFrameHostId frame_id,
+                                       int lid);
 
   base::ObserverList<WebRTCInternalsUIObserver>::Unchecked observers_;
 
   base::ObserverList<WebRtcInternalsConnectionsObserver> connections_observers_;
 
+  base::RepeatingTimer stats_timer_;
+
   // |peer_connection_data_| is a list containing all the PeerConnection
-  // updates.
+  // updates. Stored as a Value rather than as a List::Value so it can be passed
+  // as a Value without having to copy it.
+  //
   // Each item of the list represents the data for one PeerConnection, which
   // contains these fields:
   // "rid" -- the renderer id.
   // "pid" -- OS process id of the renderer that creates the PeerConnection.
   // "lid" -- local Id assigned to the PeerConnection.
   // "url" -- url of the web page that created the PeerConnection.
-  // "servers" and "constraints" -- server configuration and media constraints
+  // "rtcConfiguration" -- serialized rtcConfiguration object.
+  // "constraints" -- serialized legacy peerconnection constraints.
   // used to initialize the PeerConnection respectively.
-  // "log" -- a ListValue contains all the updates for the PeerConnection. Each
+  // "log" -- a List contains all the updates for the PeerConnection. Each
   // list item is a DictionaryValue containing "time", which is the number of
   // milliseconds since epoch as a string, and "type" and "value", both of which
   // are strings representing the event.
-  base::ListValue peer_connection_data_;
+  base::Value peer_connection_data_;
 
-  // A list of getUserMedia requests. Each item is a DictionaryValue that
-  // contains these fields:
+  // A list of getUserMedia requests or updates.
+  // Each item is a DictionaryValue that contains some of these fields
+  // depending on the type:
   // "rid" -- the renderer id.
-  // "pid" -- proceddId of the renderer.
+  // "pid" -- OS process id of the renderer that creates the PeerConnection.
   // "origin" -- the security origin of the request.
   // "audio" -- the serialized audio constraints if audio is requested.
   // "video" -- the serialized video constraints if video is requested.
+  // "timestamp" -- time of the request
+  // "stream_id" -- the resulting stream id.
+  // "audio_track_info" -- the serialized audio track (track id and label).
+  // "video_track_info" -- the serialized video track (track id and label).
   base::ListValue get_user_media_requests_;
 
   // For managing select file dialog.
   scoped_refptr<ui::SelectFileDialog> select_file_dialog_;
-  enum class SelectionType {
-    kRtcEventLogs,
-    kAudioDebugRecordings
-  } selection_type_;
+  SelectionType selection_type_;
 
   // Diagnostic audio recording state.
   base::FilePath audio_debug_recordings_file_path_;
@@ -250,6 +288,13 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
   bool event_log_recordings_;
   base::FilePath event_log_recordings_file_path_;
 
+  bool data_channel_recording_active_ = false;
+  // If `data_channel_recording_active_` is `true`, the following path indicates
+  // where logs are stored. If `data_channel_recording_active_` is `false`, then
+  // should it ever be turned on, a path picker will be shown to the user, and
+  // the following path indicates the initial path suggested by that picker.
+  base::FilePath data_channel_recordings_file_path_;
+
   // While |num_connected_connections_| is greater than zero, request a wake
   // lock service. This prevents the application from being suspended while
   // remoting.
@@ -257,7 +302,7 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
   const bool should_block_power_saving_;
 
   // Set of render process hosts that |this| is registered as an observer on.
-  std::unordered_set<int> render_process_id_set_;
+  std::unordered_set<ChildProcessId> render_process_id_set_;
 
   // Used to bulk up updates that we send to javascript.
   // The class owns the value/dictionary and command name of an update.
@@ -269,19 +314,21 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
   // thread.
   class PendingUpdate {
    public:
-    PendingUpdate(const char* command,
-                  std::unique_ptr<base::Value> value);
+    PendingUpdate(const std::string& event_name, base::Value event_data);
     PendingUpdate(PendingUpdate&& other);
+
+    PendingUpdate(const PendingUpdate&) = delete;
+    PendingUpdate& operator=(const PendingUpdate&) = delete;
+
     ~PendingUpdate();
 
-    const char* command() const;
-    const base::Value* value() const;
+    const std::string& event_name() const;
+    const base::Value* event_data() const;
 
    private:
     base::ThreadChecker thread_checker_;
-    const char* command_;
-    std::unique_ptr<base::Value> value_;
-    DISALLOW_COPY_AND_ASSIGN(PendingUpdate);
+    const std::string event_name_;
+    base::Value event_data_;
   };
 
   base::queue<PendingUpdate> pending_updates_;
@@ -289,6 +336,29 @@ class CONTENT_EXPORT WebRTCInternals : public RenderProcessHostObserver,
 
   // Weak factory for this object that we use for bulking up updates.
   base::WeakPtrFactory<WebRTCInternals> weak_factory_{this};
+
+  // Helper functions for getUserMedia/getDisplayMedia.
+  void OnGetMedia(const std::string& request_type,
+                  GlobalRenderFrameHostId frame_id,
+                  base::ProcessId pid,
+                  int request_id,
+                  bool audio,
+                  bool video,
+                  const std::string& audio_constraints,
+                  const std::string& video_constraints);
+  void OnGetMediaSuccess(const std::string& request_type,
+                         GlobalRenderFrameHostId frame_id,
+                         base::ProcessId pid,
+                         int request_id,
+                         const std::string& stream_id,
+                         const std::string& audio_track_info,
+                         const std::string& video_track_info);
+  void OnGetMediaFailure(const std::string& request_type,
+                         GlobalRenderFrameHostId frame_id,
+                         base::ProcessId pid,
+                         int request_id,
+                         const std::string& error,
+                         const std::string& error_message);
 };
 
 }  // namespace content

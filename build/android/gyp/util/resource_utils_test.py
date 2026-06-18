@@ -1,10 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # coding: utf-8
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import collections
 import os
 import sys
 import unittest
@@ -19,7 +18,7 @@ _BUILD_ANDROID_GYP_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(1, _BUILD_ANDROID_GYP_ROOT)
 
-import resource_utils  # pylint: disable=relative-import
+import resource_utils
 
 # pylint: disable=line-too-long
 
@@ -104,7 +103,7 @@ _TEST_R_TXT_STRING_RESOURCE_NAMES = sorted([
 
 def _CreateTestFile(tmp_dir, file_name, file_data):
   file_path = os.path.join(tmp_dir, file_name)
-  with open(file_path, 'wt') as f:
+  with open(file_path, 'wt', encoding='utf-8') as f:
     f.write(file_data)
   return file_path
 
@@ -171,7 +170,7 @@ class ResourceUtilsTest(unittest.TestCase):
         'yi': 'ji'
     }
     for chromium_locale, android_locale in \
-        _TEST_CHROMIUM_TO_ANDROID_LOCALE_MAP.iteritems():
+        _TEST_CHROMIUM_TO_ANDROID_LOCALE_MAP.items():
       result = resource_utils.ToAndroidLocaleName(chromium_locale)
       self.assertEqual(result, android_locale)
 
@@ -209,7 +208,7 @@ class ResourceUtilsTest(unittest.TestCase):
         'no': 'nb',  # http://crbug.com/920960
     }
     for android_locale, chromium_locale in \
-        _TEST_ANDROID_TO_CHROMIUM_LOCALE_MAP.iteritems():
+        _TEST_ANDROID_TO_CHROMIUM_LOCALE_MAP.items():
       result = resource_utils.ToChromiumLocaleName(android_locale)
       self.assertEqual(result, chromium_locale)
 
@@ -251,14 +250,14 @@ class ResourceUtilsTest(unittest.TestCase):
     values_dir = os.path.join(output_dir, 'values-' + locale)
     build_utils.MakeDirectory(values_dir)
     file_path = os.path.join(values_dir, 'strings.xml')
-    with open(file_path, 'w') as f:
-      file_data = resource_utils.GenerateAndroidResourceStringsXml(
-          string_map, namespaces)
+    file_data = resource_utils.GenerateAndroidResourceStringsXml(
+        string_map, namespaces)
+    with open(file_path, 'w', encoding='utf-8') as f:
       f.write(file_data)
     return file_path
 
   def _CheckTestResourceFile(self, file_path, expected_data):
-    with open(file_path) as f:
+    with open(file_path, encoding='utf-8') as f:
       file_data = f.read()
     self.assertEqual(file_data, expected_data)
 

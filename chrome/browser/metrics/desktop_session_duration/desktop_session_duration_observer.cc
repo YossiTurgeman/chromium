@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,11 +13,14 @@ namespace metrics {
 DesktopSessionDurationObserver::DesktopSessionDurationObserver(
     content::WebContents* web_contents,
     DesktopSessionDurationTracker* service)
-    : content::WebContentsObserver(web_contents), service_(service) {
-  RegisterInputEventObserver(web_contents->GetRenderViewHost());
+    : content::WebContentsObserver(web_contents),
+      content::WebContentsUserData<DesktopSessionDurationObserver>(
+          *web_contents),
+      service_(service) {
+  RegisterInputEventObserver(web_contents->GetPrimaryMainFrame());
 }
 
-DesktopSessionDurationObserver::~DesktopSessionDurationObserver() {}
+DesktopSessionDurationObserver::~DesktopSessionDurationObserver() = default;
 
 // static
 DesktopSessionDurationObserver*
@@ -38,29 +41,34 @@ DesktopSessionDurationObserver::CreateForWebContents(
 }
 
 void DesktopSessionDurationObserver::RegisterInputEventObserver(
-    content::RenderViewHost* host) {
+    content::RenderFrameHost* host) {
   if (host != nullptr)
-    host->GetWidget()->AddInputEventObserver(this);
+    host->GetRenderWidgetHost()->AddInputEventObserver(this);
 }
 
 void DesktopSessionDurationObserver::UnregisterInputEventObserver(
-    content::RenderViewHost* host) {
+    content::RenderFrameHost* host) {
   if (host != nullptr)
-    host->GetWidget()->RemoveInputEventObserver(this);
+    host->GetRenderWidgetHost()->RemoveInputEventObserver(this);
 }
 
 void DesktopSessionDurationObserver::OnInputEvent(
-    const blink::WebInputEvent& event) {
-  service_->OnUserEvent();
+    const content::RenderWidgetHost& widget,
+    const blink::WebInputEvent& event,
+    input::InputEventSource source) {
+  service_->OnUserEvent(event.GetTypeAsUiEventType());
 }
 
-void DesktopSessionDurationObserver::RenderViewHostChanged(
-    content::RenderViewHost* old_host,
-    content::RenderViewHost* new_host) {
+void DesktopSessionDurationObserver::RenderFrameHostChanged(
+    content::RenderFrameHost* old_host,
+    content::RenderFrameHost* new_host) {
+  if (!new_host->IsInPrimaryMainFrame())
+    return;
+
   UnregisterInputEventObserver(old_host);
   RegisterInputEventObserver(new_host);
 }
 
-WEB_CONTENTS_USER_DATA_KEY_IMPL(DesktopSessionDurationObserver)
+WEB_CONTENTS_USER_DATA_KEY_IMPL(DesktopSessionDurationObserver);
 
 }  // namespace metrics

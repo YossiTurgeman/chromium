@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,20 @@
 #define UI_BASE_X_X11_DRAG_CONTEXT_H_
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
+#include "build/build_config.h"
 #include "ui/base/x/selection_utils.h"
-#include "ui/events/platform/x11/x11_event_source.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/x/event.h"
-#include "ui/gfx/x/x11.h"
 #include "ui/gfx/x/xproto.h"
+
+#if BUILDFLAG(IS_LINUX)
+#include "base/memory/weak_ptr.h"
+#endif
 
 namespace ui {
 
@@ -24,7 +29,6 @@ class COMPONENT_EXPORT(UI_BASE_X) XDragContext {
  public:
   XDragContext(x11::Window local_window,
                const x11::ClientMessageEvent& event,
-               XDragDropClient* source_client,
                const SelectionFormatMap& data);
   ~XDragContext();
 
@@ -32,7 +36,6 @@ class COMPONENT_EXPORT(UI_BASE_X) XDragContext {
   XDragContext& operator=(const XDragContext&) = delete;
 
   x11::Window source_window() const { return source_window_; }
-  XDragDropClient* source_client() { return source_client_; }
   const SelectionFormatMap& fetched_targets() const { return fetched_targets_; }
 
   // When we receive an XdndPosition message, we need to have all the data
@@ -64,6 +67,14 @@ class COMPONENT_EXPORT(UI_BASE_X) XDragContext {
   // the source window.
   void RequestNextTarget();
 
+  // Requests the next target from `unfetched_targets_` or completes the
+  // position handling if all targets have been fetched.
+  void RequestNextTargetOrComplete();
+
+#if BUILDFLAG(IS_LINUX)
+  void OnPortalPathsExtracted(std::vector<std::string> paths);
+#endif
+
   // Masks the X11 atom |xdnd_operation|'s views representation onto
   // |drag_operation|.
   void MaskOperation(x11::Atom xdnd_operation, int* drag_operation) const;
@@ -74,12 +85,8 @@ class COMPONENT_EXPORT(UI_BASE_X) XDragContext {
   // The x11::Window of the window that initiated the drag.
   x11::Window source_window_;
 
-  // The DesktopDragDropClientAuraX11 for |source_window_| if |source_window_|
-  // belongs to a Chrome window.
-  XDragDropClient* source_client_;
-
   // The client we inform once we're done with requesting data.
-  XDragDropClient* drag_drop_client_ = nullptr;
+  raw_ptr<XDragDropClient> drag_drop_client_ = nullptr;
 
   // Whether we're blocking the handling of an XdndPosition message by waiting
   // for |unfetched_targets_| to be fetched.
@@ -106,6 +113,10 @@ class COMPONENT_EXPORT(UI_BASE_X) XDragContext {
 
   // Possible actions.
   std::vector<x11::Atom> actions_;
+
+#if BUILDFLAG(IS_LINUX)
+  base::WeakPtrFactory<XDragContext> weak_factory_{this};
+#endif
 };
 
 }  // namespace ui

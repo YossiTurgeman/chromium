@@ -1,29 +1,42 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/payments/test_secure_payment_confirmation_payment_request_delegate.h"
 
+#include "base/functional/callback_helpers.h"
+#include "components/payments/content/secure_payment_confirmation_model.h"
+#include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/render_process_host.h"
+#include "content/public/browser/web_contents.h"
+
 namespace payments {
 
 TestSecurePaymentConfirmationPaymentRequestDelegate::
     TestSecurePaymentConfirmationPaymentRequestDelegate(
-        content::WebContents* web_contents,
+        content::RenderFrameHost* render_frame_host,
         base::WeakPtr<SecurePaymentConfirmationModel> model,
-        SecurePaymentConfirmationDialogView::ObserverForTest* observer)
-    : ChromePaymentRequestDelegate(web_contents),
-      web_contents_(web_contents),
+        base::WeakPtr<SecurePaymentConfirmationDialogView::ObserverForTest>
+            observer)
+    : ChromePaymentRequestDelegate(render_frame_host),
       model_(model),
-      dialog_view_(
-          (new SecurePaymentConfirmationDialogView(observer))->GetWeakPtr()) {}
+      dialog_view_((new SecurePaymentConfirmationDialogView(
+                        observer,
+                        /*ui_observer_for_test=*/nullptr))
+                       ->GetWeakPtr()) {}
 
 TestSecurePaymentConfirmationPaymentRequestDelegate::
     ~TestSecurePaymentConfirmationPaymentRequestDelegate() = default;
 
 void TestSecurePaymentConfirmationPaymentRequestDelegate::ShowDialog(
-    PaymentRequest* request) {
-  dialog_view_->ShowDialog(web_contents_, model_->GetWeakPtr(),
-                           base::DoNothing(), base::DoNothing());
+    base::WeakPtr<PaymentRequest> request) {
+  content::RenderFrameHost* rfh = GetRenderFrameHost();
+  if (rfh && rfh->IsActive()) {
+    dialog_view_->ShowDialog(content::WebContents::FromRenderFrameHost(rfh),
+                             model_->GetWeakPtr(), base::DoNothing(),
+                             base::DoNothing(), base::DoNothing(),
+                             base::DoNothing());
+  }
 }
 
 void TestSecurePaymentConfirmationPaymentRequestDelegate::CloseDialog() {

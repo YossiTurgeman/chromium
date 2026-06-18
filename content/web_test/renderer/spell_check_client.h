@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,12 @@
 
 #include <stdint.h>
 
-#include "base/macros.h"
+#include <vector>
+
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "content/web_test/renderer/web_test_spell_checker.h"
 #include "third_party/blink/public/platform/web_string.h"
-#include "third_party/blink/public/platform/web_vector.h"
 #include "third_party/blink/public/web/web_text_check_client.h"
 #include "v8/include/v8.h"
 
@@ -25,6 +26,10 @@ namespace content {
 class SpellCheckClient : public blink::WebTextCheckClient {
  public:
   explicit SpellCheckClient(blink::WebLocalFrame* frame);
+
+  SpellCheckClient(const SpellCheckClient&) = delete;
+  SpellCheckClient& operator=(const SpellCheckClient&) = delete;
+
   ~SpellCheckClient() override;
 
   void SetEnabled(bool enabled);
@@ -43,9 +48,12 @@ class SpellCheckClient : public blink::WebTextCheckClient {
       const blink::WebString& text,
       size_t& offset,
       size_t& length,
-      blink::WebVector<blink::WebString>* optional_suggestions) override;
+      std::vector<blink::WebString>* optional_suggestions) override;
   void RequestCheckingOfText(
       const blink::WebString& text,
+      const std::vector<blink::WebSpellingMarker>& spelling_markers,
+      blink::WebTextCheckClient::ShouldForceRefreshTextCheckService
+          should_force_refresh,
       std::unique_ptr<blink::WebTextCheckingCompletion> completion) override;
 
  private:
@@ -53,7 +61,7 @@ class SpellCheckClient : public blink::WebTextCheckClient {
 
   void RequestResolved();
 
-  blink::WebLocalFrame* const frame_;
+  const raw_ptr<blink::WebLocalFrame> frame_;
 
   // Do not perform any checking when |enabled_ == false|.
   // Tests related to spell checking should enable it manually.
@@ -69,8 +77,6 @@ class SpellCheckClient : public blink::WebTextCheckClient {
   v8::Persistent<v8::Function> resolved_callback_;
 
   base::WeakPtrFactory<SpellCheckClient> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(SpellCheckClient);
 };
 
 }  // namespace content

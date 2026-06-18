@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,8 @@
 #include "base/no_destructor.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
-#include "base/task_runner_util.h"
 #include "content/browser/webui/url_data_manager.h"
-#include "content/browser/webui/url_data_manager_backend.h"
-#include "content/browser/webui/url_data_source_impl.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "content/public/browser/browser_thread.h"
 #include "content/public/common/url_constants.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
 
@@ -79,7 +74,9 @@ std::string URLDataSource::GetContentSecurityPolicy(
     case network::mojom::CSPDirectiveName::ScriptSrc:
       // Note: Do not add 'unsafe-eval' here. Instead override CSP for the
       // specific pages that need it, see context http://crbug.com/525224.
-      return "script-src chrome://resources 'self';";
+      return IsChromeUntrustedDataSource(this)
+                 ? "script-src chrome-untrusted://resources 'self';"
+                 : "script-src chrome://resources 'self';";
     case network::mojom::CSPDirectiveName::FrameAncestors:
       return "frame-ancestors 'none';";
     case network::mojom::CSPDirectiveName::RequireTrustedTypesFor:
@@ -87,20 +84,24 @@ std::string URLDataSource::GetContentSecurityPolicy(
     case network::mojom::CSPDirectiveName::TrustedTypes:
       return "trusted-types;";
     case network::mojom::CSPDirectiveName::BaseURI:
+      return IsChromeUntrustedDataSource(this) ? "base-uri 'none';"
+                                               : std::string();
+    case network::mojom::CSPDirectiveName::FormAction:
+      return IsChromeUntrustedDataSource(this) ? "form-action 'none';"
+                                               : std::string();
     case network::mojom::CSPDirectiveName::BlockAllMixedContent:
     case network::mojom::CSPDirectiveName::ConnectSrc:
+    case network::mojom::CSPDirectiveName::FencedFrameSrc:
     case network::mojom::CSPDirectiveName::FrameSrc:
     case network::mojom::CSPDirectiveName::FontSrc:
-    case network::mojom::CSPDirectiveName::FormAction:
     case network::mojom::CSPDirectiveName::ImgSrc:
     case network::mojom::CSPDirectiveName::ManifestSrc:
     case network::mojom::CSPDirectiveName::MediaSrc:
-    case network::mojom::CSPDirectiveName::PluginTypes:
-    case network::mojom::CSPDirectiveName::PrefetchSrc:
     case network::mojom::CSPDirectiveName::ReportURI:
     case network::mojom::CSPDirectiveName::Sandbox:
     case network::mojom::CSPDirectiveName::ScriptSrcAttr:
     case network::mojom::CSPDirectiveName::ScriptSrcElem:
+    case network::mojom::CSPDirectiveName::ScriptSrcV2:
     case network::mojom::CSPDirectiveName::StyleSrc:
     case network::mojom::CSPDirectiveName::StyleSrcAttr:
     case network::mojom::CSPDirectiveName::StyleSrcElem:
@@ -108,10 +109,21 @@ std::string URLDataSource::GetContentSecurityPolicy(
     case network::mojom::CSPDirectiveName::TreatAsPublicAddress:
     case network::mojom::CSPDirectiveName::WorkerSrc:
     case network::mojom::CSPDirectiveName::ReportTo:
-    case network::mojom::CSPDirectiveName::NavigateTo:
     case network::mojom::CSPDirectiveName::Unknown:
       return std::string();
   }
+}
+
+std::string URLDataSource::GetCrossOriginOpenerPolicy() {
+  return std::string();
+}
+
+std::string URLDataSource::GetCrossOriginEmbedderPolicy() {
+  return std::string();
+}
+
+std::string URLDataSource::GetCrossOriginResourcePolicy() {
+  return std::string();
 }
 
 bool URLDataSource::ShouldDenyXFrameOptions() {
@@ -132,10 +144,6 @@ bool URLDataSource::ShouldServeMimeTypeAsContentTypeHeader() {
 std::string URLDataSource::GetAccessControlAllowOriginForOrigin(
     const std::string& origin) {
   return std::string();
-}
-
-const ui::TemplateReplacements* URLDataSource::GetReplacements() {
-  return nullptr;
 }
 
 bool URLDataSource::ShouldReplaceI18nInJS() {

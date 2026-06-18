@@ -1,36 +1,44 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.firstrun;
 
-import androidx.fragment.app.FragmentActivity;
+import android.app.Activity;
 
-/**
- * This interface is implemented by FRE fragments.
- */
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+
+/** This interface is implemented by FRE fragments. */
+@NullMarked
 public interface FirstRunFragment {
     /**
-     * Notifies this fragment that native has been initialized.
+     * @see androidx.fragment.app.Fragment#getActivity().
      */
-    default void onNativeInitialized() {}
+    @Nullable Activity getActivity();
 
     /**
-     * @return Whether the back button press was handled by this page.
+     * Set the a11y focus when the fragment is shown on the screen.
+     *
+     * <p>Android ViewPager cannot always assign the correct a11y focus automatically when switching
+     * between pages. See https://crbug.com/40699257 for more detail.
+     *
+     * <p>Note that this function can be called before views for the fragment is created. To avoid
+     * NPE, it is suggested to add null checker inside this function implementation. See
+     * https://crbug.com/40153698 for more detail.
      */
-    default boolean interceptBackPressed() {
-        return false;
-    }
+    void setInitialA11yFocus();
 
     /**
-     * @see Fragment#getActivity().
+     * Convenience method to get {@link FirstRunPageDelegate}. Be carefully calling this in response
+     * to async events, as once this fragment is detached, this will return null.
      */
-    FragmentActivity getActivity();
-
-    /**
-     * Convenience method to get {@link FirstRunPageDelegate}.
-     */
-    default FirstRunPageDelegate getPageDelegate() {
+    default @Nullable FirstRunPageDelegate getPageDelegate() {
         return (FirstRunPageDelegate) getActivity();
     }
+
+    /**
+     * Reset the fragment state. This can be used when the fragment is revisited with back button.
+     */
+    default void reset() {}
 }

@@ -1,12 +1,6 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-
-# Reset sources_assignment_filter for the BUILD.gn file to prevent
-# regression during the migration of Chromium away from the feature.
-# See docs/no_sources_assignment_filter.md for more information.
-# TODO(crbug.com/1018739): remove this when migration is done.
-set_sources_assignment_filter([])
 
 static_library("rlz") {
   sources = [
@@ -36,12 +30,25 @@ static_library("rlz") {
     "//components/google/core/common",
     "//net",
     "//rlz:rlz_lib",
-    "//services/network/public/cpp:cpp",
+    "//services/network/public/cpp",
   ]
 
   if (is_ios) {
     deps += [ "//ui/base" ]
   }
+}
+
+source_set("test_support") {
+  testonly = true
+  sources = [
+    "mock_rlz_tracker_delegate.cc",
+    "mock_rlz_tracker_delegate.h",
+  ]
+  public_deps = [ "//testing/gmock" ]
+  deps = [
+    ":rlz",
+    "//services/network/public/cpp",
+  ]
 }
 
 source_set("unit_tests") {
@@ -52,11 +59,11 @@ source_set("unit_tests") {
     ":rlz",
     "//net:test_support",
     "//rlz:test_support",
-    "//services/network/public/cpp:cpp",
+    "//services/network/public/cpp",
     "//ui/base",
   ]
 
   if (is_chromeos) {
-    deps += [ "//chromeos/system" ]
+    deps += [ "//chromeos/ash/components/system" ]
   }
 }

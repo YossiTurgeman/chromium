@@ -1,4 +1,4 @@
-// Copyright (c) 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,14 +21,14 @@ MockOverscrollControllerDelegateAura::MockOverscrollControllerDelegateAura(
 MockOverscrollControllerDelegateAura::~MockOverscrollControllerDelegateAura() {}
 
 gfx::Size MockOverscrollControllerDelegateAura::GetDisplaySize() const {
-  return display::Screen::GetScreen()
+  return display::Screen::Get()
       ->GetDisplayNearestView(rwhva_->GetNativeView())
       .size();
 }
 
-base::Optional<float>
+std::optional<float>
 MockOverscrollControllerDelegateAura::GetMaxOverscrollDelta() const {
-  return base::nullopt;
+  return std::nullopt;
 }
 
 bool MockOverscrollControllerDelegateAura::OnOverscrollUpdate(float, float) {

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,22 +6,22 @@
 
 #include <stddef.h>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
-#include "base/stl_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/extensions/api/declarative_content/content_predicate_evaluator.h"
 #include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/navigation_handle.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_source.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/browser/web_contents.h"
+#include "extensions/browser/bad_message.h"
+#include "extensions/browser/renderer_startup_helper.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/api/declarative/declarative_constants.h"
-#include "extensions/common/extension_messages.h"
-#include "ipc/ipc_message.h"
-#include "ipc/ipc_message_macros.h"
+#include "extensions/common/mojom/renderer.mojom.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -35,8 +35,7 @@ const char kCssInvalidTypeOfParameter[] = "Attribute '%s' has an invalid type";
 // DeclarativeContentCssPredicate
 //
 
-DeclarativeContentCssPredicate::~DeclarativeContentCssPredicate() {
-}
+DeclarativeContentCssPredicate::~DeclarativeContentCssPredicate() = default;
 
 // static
 std::unique_ptr<DeclarativeContentCssPredicate>
@@ -44,21 +43,19 @@ DeclarativeContentCssPredicate::Create(ContentPredicateEvaluator* evaluator,
                                        const base::Value& value,
                                        std::string* error) {
   std::vector<std::string> css_rules;
-  const base::ListValue* css_rules_value = nullptr;
-  if (value.GetAsList(&css_rules_value)) {
-    for (size_t i = 0; i < css_rules_value->GetSize(); ++i) {
-      std::string css_rule;
-      if (!css_rules_value->GetString(i, &css_rule)) {
+  if (value.is_list()) {
+    for (const base::Value& css_rule_value : value.GetList()) {
+      if (!css_rule_value.is_string()) {
         *error = base::StringPrintf(kCssInvalidTypeOfParameter,
                                     declarative_content_constants::kCss);
-        return std::unique_ptr<DeclarativeContentCssPredicate>();
+        return nullptr;
       }
-      css_rules.push_back(css_rule);
+      css_rules.push_back(css_rule_value.GetString());
     }
   } else {
     *error = base::StringPrintf(kCssInvalidTypeOfParameter,
                                 declarative_content_constants::kCss);
-    return std::unique_ptr<DeclarativeContentCssPredicate>();
+    return nullptr;
   }
 
   return !css_rules.empty()
@@ -85,18 +82,15 @@ DeclarativeContentCssPredicate::DeclarativeContentCssPredicate(
 //
 
 DeclarativeContentCssConditionTracker::PerWebContentsTracker::
-PerWebContentsTracker(
-    content::WebContents* contents,
-    const RequestEvaluationCallback& request_evaluation,
-    const WebContentsDestroyedCallback& web_contents_destroyed)
+    PerWebContentsTracker(content::WebContents* contents,
+                          RequestEvaluationCallback request_evaluation,
+                          WebContentsDestroyedCallback web_contents_destroyed)
     : WebContentsObserver(contents),
-      request_evaluation_(request_evaluation),
-      web_contents_destroyed_(web_contents_destroyed) {
-}
+      request_evaluation_(std::move(request_evaluation)),
+      web_contents_destroyed_(std::move(web_contents_destroyed)) {}
 
 DeclarativeContentCssConditionTracker::PerWebContentsTracker::
-~PerWebContentsTracker() {
-}
+    ~PerWebContentsTracker() = default;
 
 void DeclarativeContentCssConditionTracker::PerWebContentsTracker::
 OnWebContentsNavigation(content::NavigationHandle* navigation_handle) {
@@ -108,38 +102,23 @@ OnWebContentsNavigation(content::NavigationHandle* navigation_handle) {
   }
 
   // Top-level navigation produces a new document. Initially, the
-  // document's empty, so no CSS rules match.  The renderer will send
-  // an ExtensionHostMsg_OnWatchedPageChange later if any CSS rules
-  // match.
+  // document's empty, so no CSS rules match.  The renderer will call
+  // 'extensions::mojom::LocalFrameHost::WatchedPageChange()' later if any CSS
+  // rules match.
   matching_css_selectors_.clear();
   request_evaluation_.Run(web_contents());
 }
 
-bool
-DeclarativeContentCssConditionTracker::PerWebContentsTracker::
-OnMessageReceived(
-    const IPC::Message& message) {
-  bool handled = true;
-  IPC_BEGIN_MESSAGE_MAP(PerWebContentsTracker, message)
-    IPC_MESSAGE_HANDLER(ExtensionHostMsg_OnWatchedPageChange,
-                        OnWatchedPageChange)
-    IPC_MESSAGE_UNHANDLED(handled = false)
-  IPC_END_MESSAGE_MAP()
-  return handled;
+void DeclarativeContentCssConditionTracker::PerWebContentsTracker::
+    OnWatchedPageChanged(const std::vector<std::string>& css_selectors) {
+  matching_css_selectors_.clear();
+  matching_css_selectors_.insert(css_selectors.begin(), css_selectors.end());
+  request_evaluation_.Run(web_contents());
 }
 
 void DeclarativeContentCssConditionTracker::PerWebContentsTracker::
 WebContentsDestroyed() {
-  web_contents_destroyed_.Run(web_contents());
-}
-
-void
-DeclarativeContentCssConditionTracker::PerWebContentsTracker::
-OnWatchedPageChange(
-    const std::vector<std::string>& css_selectors) {
-  matching_css_selectors_.clear();
-  matching_css_selectors_.insert(css_selectors.begin(), css_selectors.end());
-  request_evaluation_.Run(web_contents());
+  std::move(web_contents_destroyed_).Run(web_contents());
 }
 
 //
@@ -148,14 +127,10 @@ OnWatchedPageChange(
 
 DeclarativeContentCssConditionTracker::DeclarativeContentCssConditionTracker(
     Delegate* delegate)
-    : delegate_(delegate) {
-  registrar_.Add(this,
-                 content::NOTIFICATION_RENDERER_PROCESS_CREATED,
-                 content::NotificationService::AllBrowserContextsAndSources());
-}
+    : delegate_(delegate) {}
 
 DeclarativeContentCssConditionTracker::
-~DeclarativeContentCssConditionTracker() {}
+    ~DeclarativeContentCssConditionTracker() = default;
 
 std::string DeclarativeContentCssConditionTracker::
 GetPredicateApiAttributeName() const {
@@ -182,27 +157,30 @@ void DeclarativeContentCssConditionTracker::TrackPredicates(
       tracked_predicates_[group_predicates_pair.first].push_back(
           typed_predicate);
       for (const std::string& selector : typed_predicate->css_selectors()) {
-        if (watched_css_selector_predicate_count_[selector]++ == 0)
+        if (watched_css_selector_predicate_count_[selector]++ == 0) {
           watched_selectors_updated = true;
+        }
       }
     }
   }
 
-  if (watched_selectors_updated)
+  if (watched_selectors_updated) {
     UpdateRenderersWatchedCssSelectors(GetWatchedCssSelectors());
+  }
 }
 
 void DeclarativeContentCssConditionTracker::StopTrackingPredicates(
     const std::vector<const void*>& predicate_groups) {
   bool watched_selectors_updated = false;
   for (const void* group : predicate_groups) {
-    auto loc = tracked_predicates_.find(group);
-    if (loc == tracked_predicates_.end())
+    auto it = tracked_predicates_.find(group);
+    if (it == tracked_predicates_.end()) {
       continue;
-    for (const DeclarativeContentCssPredicate* predicate : loc->second) {
+    }
+    for (const DeclarativeContentCssPredicate* predicate : it->second) {
       for (const std::string& selector : predicate->css_selectors()) {
         auto loc = watched_css_selector_predicate_count_.find(selector);
-        DCHECK(loc != watched_css_selector_predicate_count_.end());
+        CHECK(loc != watched_css_selector_predicate_count_.end());
         if (--loc->second == 0) {
           watched_css_selector_predicate_count_.erase(loc);
           watched_selectors_updated = true;
@@ -212,16 +190,18 @@ void DeclarativeContentCssConditionTracker::StopTrackingPredicates(
     tracked_predicates_.erase(group);
   }
 
-  if (watched_selectors_updated)
+  if (watched_selectors_updated) {
     UpdateRenderersWatchedCssSelectors(GetWatchedCssSelectors());
+  }
 }
 
 void DeclarativeContentCssConditionTracker::TrackForWebContents(
     content::WebContents* contents) {
   per_web_contents_tracker_[contents] = std::make_unique<PerWebContentsTracker>(
       contents,
-      base::Bind(&Delegate::RequestEvaluation, base::Unretained(delegate_)),
-      base::Bind(
+      base::BindRepeating(&Delegate::NotifyPredicateStateUpdated,
+                          base::Unretained(delegate_)),
+      base::BindOnce(
           &DeclarativeContentCssConditionTracker::DeletePerWebContentsTracker,
           base::Unretained(this)));
   // Note: the condition is always false until we receive OnWatchedPageChange,
@@ -231,9 +211,27 @@ void DeclarativeContentCssConditionTracker::TrackForWebContents(
 void DeclarativeContentCssConditionTracker::OnWebContentsNavigation(
     content::WebContents* contents,
     content::NavigationHandle* navigation_handle) {
-  DCHECK(base::Contains(per_web_contents_tracker_, contents));
+  DCHECK(per_web_contents_tracker_.contains(contents));
   per_web_contents_tracker_[contents]->OnWebContentsNavigation(
       navigation_handle);
+}
+
+void DeclarativeContentCssConditionTracker::OnWatchedPageChanged(
+    content::WebContents* contents,
+    const std::vector<std::string>& css_selectors) {
+  DCHECK(per_web_contents_tracker_.contains(contents));
+
+  std::vector<std::string> valid_selectors;
+  for (const std::string& selector : css_selectors) {
+    // A compromised renderer might send selectors that were not requested.
+    // We ignore unrecognized selectors to avoid race conditions where a
+    // legitimate message arrives after the browser stopped watching a selector.
+    if (watched_css_selector_predicate_count_.contains(selector)) {
+      valid_selectors.push_back(selector);
+    }
+  }
+
+  per_web_contents_tracker_[contents]->OnWatchedPageChanged(valid_selectors);
 }
 
 bool DeclarativeContentCssConditionTracker::EvaluatePredicate(
@@ -243,28 +241,22 @@ bool DeclarativeContentCssConditionTracker::EvaluatePredicate(
   const DeclarativeContentCssPredicate* typed_predicate =
       static_cast<const DeclarativeContentCssPredicate*>(predicate);
   auto loc = per_web_contents_tracker_.find(tab);
-  DCHECK(loc != per_web_contents_tracker_.end());
+  CHECK(loc != per_web_contents_tracker_.end());
   const std::unordered_set<std::string>& matching_css_selectors =
       loc->second->matching_css_selectors();
   for (const std::string& predicate_css_selector :
            typed_predicate->css_selectors()) {
-    if (!base::Contains(matching_css_selectors, predicate_css_selector))
+    if (!matching_css_selectors.contains(predicate_css_selector)) {
       return false;
+    }
   }
 
   return true;
 }
 
-void DeclarativeContentCssConditionTracker::Observe(
-    int type,
-    const content::NotificationSource& source,
-    const content::NotificationDetails& details) {
-  DCHECK_EQ(content::NOTIFICATION_RENDERER_PROCESS_CREATED, type);
-
-  content::RenderProcessHost* process =
-      content::Source<content::RenderProcessHost>(source).ptr();
-  InstructRenderProcessIfManagingBrowserContext(process,
-                                                GetWatchedCssSelectors());
+void DeclarativeContentCssConditionTracker::OnRenderProcessHostCreated(
+    content::RenderProcessHost* host) {
+  InstructRenderProcessIfManagingBrowserContext(host, GetWatchedCssSelectors());
 }
 
 void DeclarativeContentCssConditionTracker::
@@ -294,15 +286,20 @@ void DeclarativeContentCssConditionTracker::
 InstructRenderProcessIfManagingBrowserContext(
     content::RenderProcessHost* process,
     std::vector<std::string> watched_css_selectors) {
-  if (delegate_->ShouldManageConditionsForBrowserContext(
-          process->GetBrowserContext())) {
-    process->Send(new ExtensionMsg_WatchPages(watched_css_selectors));
+  content::BrowserContext* browser_context = process->GetBrowserContext();
+  if (delegate_->ShouldManagePredicatesForBrowserContext(browser_context)) {
+    mojom::Renderer* renderer =
+        RendererStartupHelperFactory::GetForBrowserContext(browser_context)
+            ->GetRenderer(process);
+    if (renderer) {
+      renderer->WatchPages(watched_css_selectors);
+    }
   }
 }
 
 void DeclarativeContentCssConditionTracker::DeletePerWebContentsTracker(
     content::WebContents* contents) {
-  DCHECK(base::Contains(per_web_contents_tracker_, contents));
+  DCHECK(per_web_contents_tracker_.contains(contents));
   per_web_contents_tracker_.erase(contents);
 }
 

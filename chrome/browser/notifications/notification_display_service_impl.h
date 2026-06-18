@@ -1,22 +1,26 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_NOTIFICATIONS_NOTIFICATION_DISPLAY_SERVICE_IMPL_H_
 #define CHROME_BROWSER_NOTIFICATIONS_NOTIFICATION_DISPLAY_SERVICE_IMPL_H_
 
+#include <map>
 #include <memory>
+#include <optional>
+#include <string>
 
-#include "base/callback.h"
 #include "base/containers/queue.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
-#include "base/optional.h"
-#include "base/strings/string16.h"
 #include "chrome/browser/notifications/notification_common.h"
+#include "chrome/browser/notifications/notification_display_queue.h"
 #include "chrome/browser/notifications/notification_display_service.h"
 #include "chrome/browser/notifications/notification_handler.h"
 #include "chrome/browser/notifications/notification_platform_bridge_delegator.h"
+#include "chrome/common/notifications/notification_operation.h"
 
 class GURL;
 class Profile;
@@ -54,13 +58,15 @@ class NotificationDisplayServiceImpl : public NotificationDisplayService {
   //
   // TODO(peter): Remove this in favor of multiple targeted methods.
   virtual void ProcessNotificationOperation(
-      NotificationCommon::Operation operation,
+      NotificationOperation operation,
       NotificationHandler::Type notification_type,
       const GURL& origin,
       const std::string& notification_id,
-      const base::Optional<int>& action_index,
-      const base::Optional<base::string16>& reply,
-      const base::Optional<bool>& by_user);
+      const std::optional<int>& action_index,
+      const std::optional<std::u16string>& reply,
+      const std::optional<bool>& by_user,
+      const std::optional<bool>& is_suspicious,
+      base::OnceClosure on_completed_cb);
 
   // Registers an implementation object to handle notification operations
   // for |notification_type|.
@@ -80,23 +86,50 @@ class NotificationDisplayServiceImpl : public NotificationDisplayService {
   void Close(NotificationHandler::Type notification_type,
              const std::string& notification_id) override;
   void GetDisplayed(DisplayedNotificationsCallback callback) override;
+  void GetDisplayedForOrigin(const GURL& origin,
+                             DisplayedNotificationsCallback callback) override;
   void AddObserver(Observer* observer) override;
   void RemoveObserver(Observer* observer) override;
 
-  static void ProfileLoadedCallback(NotificationCommon::Operation operation,
+  static void ProfileLoadedCallback(NotificationOperation operation,
                                     NotificationHandler::Type notification_type,
                                     const GURL& origin,
                                     const std::string& notification_id,
-                                    const base::Optional<int>& action_index,
-                                    const base::Optional<base::string16>& reply,
-                                    const base::Optional<bool>& by_user,
+                                    const std::optional<int>& action_index,
+                                    const std::optional<std::u16string>& reply,
+                                    const std::optional<bool>& by_user,
+                                    const std::optional<bool>& is_suspicious,
+                                    base::OnceClosure on_completed_cb,
                                     Profile* profile);
+
+  // Sets the list of |blockers| to be used by the |notification_queue_|. Only
+  // used in tests.
+  void SetBlockersForTesting(
+      NotificationDisplayQueue::NotificationBlockers blockers);
+
+  // Sets the platform bridge delegator for tests.
+  void SetNotificationPlatformBridgeDelegatorForTesting(
+      std::unique_ptr<NotificationPlatformBridgeDelegator> bridge_delegator);
+
+  // Sets an implementation object to handle notification operations for
+  // |notification_type| and overrides any existing ones.
+  void OverrideNotificationHandlerForTesting(
+      NotificationHandler::Type notification_type,
+      std::unique_ptr<NotificationHandler> handler);
 
  private:
   // Called when the NotificationPlatformBridgeDelegator has been initialized.
   void OnNotificationPlatformBridgeReady();
 
-  Profile* profile_;
+  // Called after getting displayed notifications from the bridge so we can add
+  // any currently queued notification ids. If `origin` is set, we only want to
+  // get the notifications associated with that origin.
+  void OnGetDisplayed(std::optional<GURL> origin,
+                      DisplayedNotificationsCallback callback,
+                      std::set<std::string> notification_ids,
+                      bool supports_synchronization);
+
+  raw_ptr<Profile> profile_;
 
   // This NotificationPlatformBridgeDelegator delegates to either the native
   // bridge or to the MessageCenter if there is no native bridge or it does not
@@ -108,6 +141,10 @@ class NotificationDisplayServiceImpl : public NotificationDisplayService {
 
   // Boolean tracking whether the |bridge_delegator_| has been initialized.
   bool bridge_delegator_initialized_ = false;
+
+  // Notification queue that holds on to notifications instead of displaying
+  // them if certain blockers are temporarily active.
+  NotificationDisplayQueue notification_queue_{this};
 
   // Map containing the notification handlers responsible for processing events.
   std::map<NotificationHandler::Type, std::unique_ptr<NotificationHandler>>

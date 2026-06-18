@@ -1,41 +1,56 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ash/public/cpp/default_frame_header.h"
+#include "chromeos/ui/frame/default_frame_header.h"
 
 #include <memory>
 
-#include "ash/frame/non_client_frame_view_ash.h"
-#include "ash/public/cpp/caption_buttons/frame_back_button.h"
-#include "ash/public/cpp/caption_buttons/frame_caption_button_container_view.h"
+#include "ash/frame/frame_view_ash.h"
 #include "ash/public/cpp/shell_window_ids.h"
-#include "ash/public/cpp/window_properties.h"
 #include "ash/test/ash_test_base.h"
 #include "ash/wm/desks/desks_util.h"
 #include "base/i18n/rtl.h"
-#include "base/stl_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/icu_test_util.h"
+#include "chromeos/ui/base/window_properties.h"
+#include "chromeos/ui/frame/caption_buttons/frame_back_button.h"
+#include "chromeos/ui/frame/caption_buttons/frame_caption_button_container_view.h"
+#include "chromeos/ui/frame/frame_header.h"
 #include "ui/aura/window.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
+#include "ui/aura/window_tree_host.h"
+#include "ui/compositor/layer.h"
+#include "ui/compositor/layer_animator.h"
+#include "ui/compositor/test/test_utils.h"
 #include "ui/gfx/animation/animation_test_api.h"
 #include "ui/gfx/color_utils.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 #include "ui/views/test/test_views.h"
+#include "ui/views/view_utils.h"
 #include "ui/views/widget/widget.h"
-#include "ui/views/window/non_client_view.h"
+#include "ui/views/window/frame_view.h"
 #include "ui/wm/core/window_util.h"
 
-using views::NonClientFrameView;
+using chromeos::DefaultFrameHeader;
+using chromeos::FrameBackButton;
+using chromeos::FrameCaptionButtonContainerView;
+using chromeos::FrameHeader;
+using chromeos::kFrameActiveColorKey;
+using chromeos::kFrameInactiveColorKey;
+using views::FrameView;
 using views::Widget;
 
 namespace ash {
+
+using chromeos::AppType;
 
 using DefaultFrameHeaderTest = AshTestBase;
 
 // Ensure the title text is vertically aligned with the window icon.
 TEST_F(DefaultFrameHeaderTest, TitleIconAlignment) {
   std::unique_ptr<Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect(1, 2, 3, 4));
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect(1, 2, 3, 4));
   FrameCaptionButtonContainerView container(widget.get());
   views::StaticSizedView window_icon(gfx::Size(16, 16));
   window_icon.SetBounds(0, 0, 16, 16);
@@ -52,8 +67,9 @@ TEST_F(DefaultFrameHeaderTest, TitleIconAlignment) {
 }
 
 TEST_F(DefaultFrameHeaderTest, BackButtonAlignment) {
-  std::unique_ptr<Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect(1, 2, 3, 4));
+  std::unique_ptr<views::Widget> widget = CreateTestWidget(
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect(1, 2, 3, 4));
   FrameCaptionButtonContainerView container(widget.get());
   FrameBackButton back;
 
@@ -71,7 +87,8 @@ TEST_F(DefaultFrameHeaderTest, BackButtonAlignment) {
 TEST_F(DefaultFrameHeaderTest, MinimumHeaderWidthRTL) {
   base::test::ScopedRestoreICUDefaultLocale restore_locale;
   std::unique_ptr<Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect(1, 2, 3, 4));
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect(1, 2, 3, 4));
   FrameCaptionButtonContainerView container(widget.get());
 
   DefaultFrameHeader frame_header(
@@ -87,7 +104,7 @@ TEST_F(DefaultFrameHeaderTest, MinimumHeaderWidthRTL) {
 // Ensure the right frame colors are used.
 TEST_F(DefaultFrameHeaderTest, FrameColors) {
   const auto win0_bounds = gfx::Rect{1, 2, 3, 4};
-  auto win0 = CreateAppWindow(win0_bounds, AppType::BROWSER);
+  auto win0 = CreateWindowWithAppType(AppType::BROWSER, win0_bounds);
   Widget* widget = Widget::GetWidgetForNativeWindow(win0.get());
   DefaultFrameHeader* frame_header =
       static_cast<DefaultFrameHeader*>(FrameHeader::Get(widget));
@@ -101,7 +118,7 @@ TEST_F(DefaultFrameHeaderTest, FrameColors) {
   EXPECT_EQ(active, frame_header->GetCurrentFrameColor());
   frame_header->mode_ = FrameHeader::MODE_INACTIVE;
   EXPECT_EQ(inactive, frame_header->GetCurrentFrameColor());
-  EXPECT_EQ(active, frame_header->GetActiveFrameColorForPaintForTest());
+  EXPECT_EQ(active, frame_header->active_frame_color_);
 
   // Update to the new value which has no blue, which should animate.
   frame_header->mode_ = FrameHeader::MODE_ACTIVE;
@@ -163,39 +180,37 @@ class FramePaintWaiter : public ui::CompositorObserver {
 
  private:
   base::RunLoop run_loop_;
-  FrameHeader* frame_header_ = nullptr;
+  raw_ptr<FrameHeader> frame_header_ = nullptr;
 };
 
 TEST_F(DefaultFrameHeaderTest, DeleteDuringAnimation) {
   const auto bounds = gfx::Rect(100, 100);
-  auto win0 = CreateAppWindow(bounds, AppType::BROWSER);
-  auto win1 = CreateAppWindow(bounds, AppType::BROWSER);
+  auto win0 = CreateWindowWithAppType(AppType::BROWSER, bounds);
+  auto win1 = CreateWindowWithAppType(AppType::BROWSER, bounds);
 
   Widget* widget = Widget::GetWidgetForNativeWindow(win0.get());
   EXPECT_TRUE(FrameHeader::Get(widget));
 
   EXPECT_TRUE(wm::IsActiveWindow(win1.get()));
 
-  // A frame will not animate until it is painted first.
-  FramePaintWaiter(win0.get()).Wait();
-  FramePaintWaiter(win1.get()).Wait();
+  // Waits until `FrameHeader` gets painted.
+  EXPECT_TRUE(ui::WaitForNextFrameToBePresented(win0->GetHost()->compositor()));
 
-  ui::ScopedAnimationDurationScaleMode non_zero_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode non_zero_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
   wm::ActivateWindow(win0.get());
 
-  auto* header_view = NonClientFrameViewAsh::Get(win0.get())->GetHeaderView();
-  ASSERT_TRUE(header_view);
-  auto* animating_layer_holding_view = header_view->children()[0];
-  EXPECT_TRUE(!std::strcmp(animating_layer_holding_view->GetClassName(),
-                           "FrameAnimatorView"));
+  auto* frame_view = FrameViewAsh::Get(win0.get());
+  auto* animating_layer_holding_view = frame_view->children()[0].get();
+  EXPECT_TRUE(views::IsViewClass<chromeos::FrameHeader::FrameAnimatorView>(
+      animating_layer_holding_view));
   ASSERT_TRUE(animating_layer_holding_view->layer());
   ASSERT_GT(animating_layer_holding_view->layer()->parent()->children().size(),
             2u);
   auto* animating_layer =
-      animating_layer_holding_view->layer()->parent()->children()[0];
+      animating_layer_holding_view->layer()->parent()->children()[0].get();
   EXPECT_EQ(ui::LAYER_TEXTURED, animating_layer->type());
-  EXPECT_NE(std::string::npos, animating_layer->name().find(":Old", 0));
+  EXPECT_TRUE(animating_layer->name().contains(":Old"));
   EXPECT_TRUE(animating_layer->GetAnimator()->is_animating());
 
   LayerDestroyedChecker checker(animating_layer);
@@ -208,31 +223,32 @@ TEST_F(DefaultFrameHeaderTest, DeleteDuringAnimation) {
 // Make sure that the animation is canceled when resized.
 TEST_F(DefaultFrameHeaderTest, ResizeAndReorderDuringAnimation) {
   const auto bounds = gfx::Rect(100, 100);
-  auto win_0 = CreateAppWindow(bounds, AppType::BROWSER);
-  auto win_1 = CreateAppWindow(bounds, AppType::BROWSER);
+  auto win_0 = CreateWindowWithAppType(AppType::BROWSER, bounds);
+  auto win_1 = CreateWindowWithAppType(AppType::BROWSER, bounds);
 
   EXPECT_TRUE(wm::IsActiveWindow(win_1.get()));
 
-  // A frame will not animate until it is painted first.
-  FramePaintWaiter(win_0.get()).Wait();
-  FramePaintWaiter(win_1.get()).Wait();
+  // Waits until `FrameHeader` gets painted.
+  EXPECT_TRUE(
+      ui::WaitForNextFrameToBePresented(win_0->GetHost()->compositor()));
 
-  ui::ScopedAnimationDurationScaleMode non_zero_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode non_zero_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
 
-  auto* header_view_0 =
-      NonClientFrameViewAsh::Get(win_0.get())->GetHeaderView();
-  auto* animating_layer_holding_view_0 = header_view_0->children()[0];
-  EXPECT_TRUE(!std::strcmp(animating_layer_holding_view_0->GetClassName(),
-                           "FrameAnimatorView"));
+  auto* frame_view_0 = FrameViewAsh::Get(win_0.get());
+  auto* animating_layer_holding_view_0 = frame_view_0->children()[0].get();
+  EXPECT_TRUE(views::IsViewClass<chromeos::FrameHeader::FrameAnimatorView>(
+      animating_layer_holding_view_0));
   size_t original_layers_count_0 =
       animating_layer_holding_view_0->layer()->parent()->children().size();
 
-  auto* header_view_1 =
-      NonClientFrameViewAsh::Get(win_1.get())->GetHeaderView();
-  auto* animating_layer_holding_view_1 = header_view_1->children()[0];
-  EXPECT_TRUE(!std::strcmp(animating_layer_holding_view_1->GetClassName(),
-                           "FrameAnimatorView"));
+  auto* frame_view_1 = FrameViewAsh::Get(win_1.get());
+  auto* extra_view_1 =
+      frame_view_1->AddChildView(std::make_unique<views::View>());
+
+  auto* animating_layer_holding_view_1 = frame_view_1->children()[0].get();
+  EXPECT_TRUE(views::IsViewClass<chromeos::FrameHeader::FrameAnimatorView>(
+      animating_layer_holding_view_1));
   size_t original_layers_count_1 =
       animating_layer_holding_view_1->layer()->parent()->children().size();
 
@@ -244,7 +260,7 @@ TEST_F(DefaultFrameHeaderTest, ResizeAndReorderDuringAnimation) {
         animating_layer_holding_view_0->layer()->parent()->children().size(),
         original_layers_count_0 + 1);
     auto* animating_layer =
-        animating_layer_holding_view_0->layer()->parent()->children()[0];
+        animating_layer_holding_view_0->layer()->parent()->children()[0].get();
     EXPECT_TRUE(animating_layer->GetAnimator()->is_animating());
 
     LayerDestroyedChecker checker(animating_layer);
@@ -259,24 +275,51 @@ TEST_F(DefaultFrameHeaderTest, ResizeAndReorderDuringAnimation) {
   }
 
   {
-    // wind_1 should still be animating.
+    // win_1 should still be animating.
     EXPECT_EQ(
         animating_layer_holding_view_1->layer()->parent()->children().size(),
         original_layers_count_1 + 1);
     auto* animating_layer =
-        animating_layer_holding_view_1->layer()->parent()->children()[0];
+        animating_layer_holding_view_1->layer()->parent()->children()[0].get();
     EXPECT_TRUE(animating_layer->GetAnimator()->is_animating());
     LayerDestroyedChecker checker(animating_layer);
 
     // Change the view's stacking order should stop the animation.
-    ASSERT_EQ(3u, header_view_1->children().size());
-    header_view_1->ReorderChildView(header_view_1->children()[2], 0);
+    ASSERT_EQ(3u, frame_view_1->children().size());
+    frame_view_1->ReorderChildView(extra_view_1, 0);
 
     EXPECT_EQ(
         animating_layer_holding_view_1->layer()->parent()->children().size(),
         original_layers_count_1);
     EXPECT_TRUE(checker.destroyed());
   }
+}
+
+// Make sure that the animation request while animating will not
+// create another animation.
+TEST_F(DefaultFrameHeaderTest, AnimateDuringAnimation) {
+  const auto bounds = gfx::Rect(100, 100);
+  auto win_0 = CreateWindowWithAppType(AppType::BROWSER, bounds);
+  // A frame will not animate until it is painted first.
+  FramePaintWaiter(win_0.get()).Wait();
+
+  auto* widget = Widget::GetWidgetForNativeWindow(win_0.get());
+
+  auto lock = widget->LockPaintAsActive();
+  auto win_1 = CreateWindowWithAppType(AppType::BROWSER, bounds);
+  FramePaintWaiter(win_1.get()).Wait();
+
+  EXPECT_TRUE(wm::IsActiveWindow(win_1.get()));
+
+  gfx::ScopedAnimationDurationScaleMode non_zero_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+
+  auto layer_bounds = win_0->layer()->bounds();
+  lock.reset();
+  win_1.reset();
+  EXPECT_TRUE(wm::IsActiveWindow(win_0.get()));
+  // Makes sure that the layer has full damaged bounds.
+  EXPECT_TRUE(win_0->layer()->damaged_region().Contains(layer_bounds));
 }
 
 }  // namespace ash

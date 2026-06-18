@@ -1,12 +1,14 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from parameterized import parameterized
+from parameterized import parameterized  # type: ignore
 import unittest
 import xml.dom.minidom
 
-import actions_model
+import setup_modules  # pylint: disable=unused-import
+
+import chromium_src.tools.metrics.actions.actions_model as actions_model
 
 PRETTY_XML = """
 <actions>

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,11 +9,10 @@
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/callback_forward.h"
 #include "base/cancelable_callback.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/weak_ptr.h"
-#include "base/time/time.h"
 #include "content/public/browser/browser_thread.h"
 #include "extensions/browser/api/api_resource.h"
 #include "extensions/browser/api/api_resource_manager.h"
@@ -31,6 +30,10 @@ using content::BrowserThread;
 
 namespace extensions {
 
+namespace api {
+class SerialPortManager;
+}
+
 // Encapsulates an mojo interface ptr of device::mojom::SerialPort, which
 // corresponds with an open serial port in remote side(Device Service). NOTE:
 // Instances of this object should only be constructed on the IO thread, and all
@@ -38,13 +41,13 @@ namespace extensions {
 class SerialConnection : public ApiResource,
                          public device::mojom::SerialPortClient {
  public:
-  using OpenCompleteCallback = device::mojom::SerialPort::OpenCallback;
+  using OpenCompleteCallback = base::OnceCallback<void(bool)>;
   using GetInfoCompleteCallback =
       base::OnceCallback<void(bool,
                               std::unique_ptr<api::serial::ConnectionInfo>)>;
 
   // This is the callback type expected by Receive. Note that an error result
-  // does not necessarily imply an empty |data| string, since a receive may
+  // does not necessarily imply an empty `data` string, since a receive may
   // complete partially before being interrupted by an error condition.
   using ReceiveEventCallback =
       base::RepeatingCallback<void(std::vector<uint8_t> data,
@@ -67,8 +70,7 @@ class SerialConnection : public ApiResource,
   using SetControlSignalsCompleteCallback =
       device::mojom::SerialPort::SetControlSignalsCallback;
 
-  SerialConnection(const std::string& owner_extension_id,
-                   mojo::PendingRemote<device::mojom::SerialPort> serial_port);
+  explicit SerialConnection(const std::string& owner_extension_id);
   ~SerialConnection() override;
 
   // ApiResource override.
@@ -96,17 +98,18 @@ class SerialConnection : public ApiResource,
 
   // Initiates an asynchronous Open of the device. It is the caller's
   // responsibility to ensure that this SerialConnection stays alive
-  // until |callback| is run.
-  virtual void Open(const api::serial::ConnectionOptions& options,
+  // until `callback` is run.
+  virtual void Open(api::SerialPortManager* port_manager,
+                    const std::string& path,
+                    const api::serial::ConnectionOptions& options,
                     OpenCompleteCallback callback);
 
   // Begins an asynchronous send operation. Calling this while a Send
-  // is already pending is a no-op and returns |false| without calling
-  // |callback|.
-  virtual bool Send(const std::vector<uint8_t>& data,
+  // is already pending will result in a serial::SEND_ERROR_PENDING error.
+  virtual void Send(const std::vector<uint8_t>& data,
                     SendCompleteCallback callback);
 
-  // Start to the polling process from |receive_pipe_|.
+  // Start to the polling process from `receive_pipe_`.
   virtual void StartPolling(const ReceiveEventCallback& callback);
 
   // Flushes input and output buffers.
@@ -119,17 +122,17 @@ class SerialConnection : public ApiResource,
                  ConfigureCompleteCallback callback);
 
   // Connection configuration query. Returns retrieved ConnectionInfo value via
-  // |callback|, and indicates whether it's complete info. Some ConnectionInfo
-  // fields are filled with local info from |this|, while some other fields must
+  // `callback`, and indicates whether it's complete info. Some ConnectionInfo
+  // fields are filled with local info from `this`, while some other fields must
   // be retrieved from remote SerialPort interface, which may fail.
   void GetInfo(GetInfoCompleteCallback callback) const;
 
-  // Reads current control signals (DCD, CTS, etc.) and returns via |callback|.
+  // Reads current control signals (DCD, CTS, etc.) and returns via `callback`.
   // Returns nullptr if we failed in getting values.
   void GetControlSignals(GetControlSignalsCompleteCallback callback) const;
 
   // Sets one or more control signals (DTR, RTS, Break). Returns result success
-  // or not via |callback|.
+  // or not via `callback`.
   void SetControlSignals(device::mojom::SerialHostControlSignalsPtr signals,
                          SetControlSignalsCompleteCallback callback);
 
@@ -137,6 +140,11 @@ class SerialConnection : public ApiResource,
   void Close(base::OnceClosure callback);
 
   static const BrowserThread::ID kThreadId = BrowserThread::UI;
+
+ protected:
+  // Initializes `serial_port_` with a disconnected Mojo pipe for testing
+  // purposes.
+  void InitSerialPortForTesting();
 
  private:
   friend class ApiResourceManager<SerialConnection>;
@@ -149,9 +157,9 @@ class SerialConnection : public ApiResource,
   void OnOpen(
       mojo::PendingReceiver<device::mojom::SerialPortClient> client_receiver,
       OpenCompleteCallback callback,
-      bool success);
+      mojo::PendingRemote<device::mojom::SerialPort> serial_port);
 
-  // Read data from |receive_pipe_| when the data is ready or dispatch error
+  // Read data from `receive_pipe_` when the data is ready or dispatch error
   // events in error cases.
   void OnReadPipeReadableOrClosed(MojoResult result,
                                   const mojo::HandleSignalsState& state);
@@ -174,10 +182,10 @@ class SerialConnection : public ApiResource,
                                   const mojo::HandleSignalsState& state);
   void OnSendPipeClosed();
 
-  // Handles |serial_port_| connection error.
+  // Handles `serial_port_` connection error.
   void OnConnectionError();
 
-  // Handles |client_receiver_| connection error.
+  // Handles `client_receiver_` connection error.
   void OnClientReceiverClosed();
 
   // Flag indicating whether or not the connection should persist when
@@ -204,7 +212,7 @@ class SerialConnection : public ApiResource,
 
   // Callback to handle the completion of a pending Receive() request.
   ReceiveEventCallback receive_event_cb_;
-  base::Optional<device::mojom::SerialReceiveError> read_error_;
+  std::optional<device::mojom::SerialReceiveError> read_error_;
 
   // Callback to handle the completion of a pending Send() request.
   SendCompleteCallback send_complete_;
@@ -215,11 +223,11 @@ class SerialConnection : public ApiResource,
 
   // Closure which will trigger a receive timeout unless cancelled. Reset on
   // initialization and after every successful Receive().
-  base::CancelableClosure receive_timeout_task_;
+  base::CancelableOnceClosure receive_timeout_task_;
 
   // Write timeout closure. Reset on initialization and after every successful
   // Send().
-  base::CancelableClosure send_timeout_task_;
+  base::CancelableOnceClosure send_timeout_task_;
 
   // Mojo interface remote corresponding with remote asynchronous I/O handler.
   mojo::Remote<device::mojom::SerialPort> serial_port_;
@@ -234,7 +242,7 @@ class SerialConnection : public ApiResource,
 
   mojo::Receiver<device::mojom::SerialPortClient> client_receiver_{this};
 
-  // Closure which is set by client and will be called when |serial_port_|
+  // Closure which is set by client and will be called when `serial_port_`
   // connection encountered an error.
   base::OnceClosure connection_error_handler_;
 

@@ -1,11 +1,10 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/media_galleries/fileapi/media_file_validator_factory.h"
 
 #include "base/files/file_path.h"
-#include "base/macros.h"
 #include "chrome/browser/media_galleries/fileapi/supported_audio_video_checker.h"
 #include "chrome/browser/media_galleries/fileapi/supported_image_type_validator.h"
 #include "storage/browser/file_system/copy_or_move_file_validator.h"
@@ -15,7 +14,10 @@ namespace {
 
 class InvalidFileValidator : public storage::CopyOrMoveFileValidator {
  public:
-  ~InvalidFileValidator() override {}
+  InvalidFileValidator(const InvalidFileValidator&) = delete;
+  InvalidFileValidator& operator=(const InvalidFileValidator&) = delete;
+
+  ~InvalidFileValidator() override = default;
   void StartPreWriteValidation(storage::CopyOrMoveFileValidator::ResultCallback
                                    result_callback) override {
     std::move(result_callback).Run(base::File::FILE_ERROR_SECURITY);
@@ -30,15 +32,13 @@ class InvalidFileValidator : public storage::CopyOrMoveFileValidator {
  private:
   friend class ::MediaFileValidatorFactory;
 
-  InvalidFileValidator() {}
-
-  DISALLOW_COPY_AND_ASSIGN(InvalidFileValidator);
+  InvalidFileValidator() = default;
 };
 
 }  // namespace
 
-MediaFileValidatorFactory::MediaFileValidatorFactory() {}
-MediaFileValidatorFactory::~MediaFileValidatorFactory() {}
+MediaFileValidatorFactory::MediaFileValidatorFactory() = default;
+MediaFileValidatorFactory::~MediaFileValidatorFactory() = default;
 
 storage::CopyOrMoveFileValidator*
 MediaFileValidatorFactory::CreateCopyOrMoveFileValidator(

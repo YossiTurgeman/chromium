@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,18 +12,24 @@ namespace blink {
 class ExceptionState;
 class GPUBindGroupDescriptor;
 
-class GPUBindGroup : public DawnObject<WGPUBindGroup> {
+class GPUBindGroup : public DawnObject<wgpu::BindGroup> {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   static GPUBindGroup* Create(GPUDevice* device,
                               const GPUBindGroupDescriptor* webgpu_desc,
                               ExceptionState& exception_state);
-  explicit GPUBindGroup(GPUDevice* device, WGPUBindGroup bind_group);
-  ~GPUBindGroup() override;
+  explicit GPUBindGroup(GPUDevice* device,
+                        wgpu::BindGroup bind_group,
+                        const String& label);
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(GPUBindGroup);
+  GPUBindGroup(const GPUBindGroup&) = delete;
+  GPUBindGroup& operator=(const GPUBindGroup&) = delete;
+
+  void SetLabelImpl(const String& value) override {
+    std::string utf8_label = value.Utf8();
+    GetHandle().SetLabel(utf8_label.c_str());
+  }
 };
 
 }  // namespace blink

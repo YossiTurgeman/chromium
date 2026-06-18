@@ -31,21 +31,31 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_BINDINGS_CORE_V8_SERIALIZATION_SERIALIZED_SCRIPT_VALUE_H_
 #define THIRD_PARTY_BLINK_RENDERER_BINDINGS_CORE_V8_SERIALIZATION_SERIALIZED_SCRIPT_VALUE_H_
 
+#include <algorithm>
 #include <memory>
+#include <utility>
 
+#include "base/containers/heap_array.h"
 #include "base/containers/span.h"
-#include "base/optional.h"
+#include "base/dcheck_is_on.h"
+#include "base/functional/callback.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "third_party/blink/public/common/messaging/message_port_channel.h"
-#include "third_party/blink/public/mojom/native_file_system/native_file_system_transfer_token.mojom-blink-forward.h"
+#include "third_party/blink/public/common/messaging/message_port_descriptor.h"
+#include "third_party/blink/public/mojom/file_system_access/file_system_access_transfer_token.mojom-blink-forward.h"
 #include "third_party/blink/renderer/bindings/core/v8/native_value_traits.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/transferables.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/mojo/mojo_handle.h"
+#include "third_party/blink/renderer/core/streams/readable_stream_transferring_optimizer.h"
+#include "third_party/blink/renderer/core/streams/writable_stream_transferring_optimizer.h"
 #include "third_party/blink/renderer/core/typed_arrays/array_buffer/array_buffer_contents.h"
+#include "third_party/blink/renderer/platform/bindings/v8_external_memory_accounter.h"
+#include "third_party/blink/renderer/platform/graphics/canvas_child_paint_record.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/partitions.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/thread_safe_ref_counted.h"
 #include "v8/include/v8.h"
@@ -57,7 +67,7 @@ class DOMSharedArrayBuffer;
 class ExceptionState;
 class ExecutionContext;
 class MessagePort;
-class ScriptValue;
+class ScriptObject;
 class StaticBitmapImage;
 class Transferables;
 class UnpackedSerializedScriptValue;
@@ -73,13 +83,35 @@ class CORE_EXPORT SerializedScriptValue
   USING_FAST_MALLOC(SerializedScriptValue);
 
  public:
+  class Stream final {
+    DISALLOW_NEW();
+
+   public:
+    explicit Stream(MessagePortDescriptor descriptor)
+        : channel(std::move(descriptor)) {}
+    Stream(MessagePortDescriptor descriptor,
+           std::unique_ptr<ReadableStreamTransferringOptimizer> optimizer)
+        : channel(std::move(descriptor)),
+          readable_optimizer(std::move(optimizer)) {}
+    Stream(MessagePortDescriptor descriptor,
+           std::unique_ptr<WritableStreamTransferringOptimizer> optimizer)
+        : channel(std::move(descriptor)),
+          writable_optimizer(std::move(optimizer)) {}
+
+    MessagePortChannel channel;
+    std::unique_ptr<ReadableStreamTransferringOptimizer> readable_optimizer;
+    std::unique_ptr<WritableStreamTransferringOptimizer> writable_optimizer;
+  };
+
   using ArrayBufferContentsArray = Vector<ArrayBufferContents, 1>;
   using SharedArrayBufferContentsArray = Vector<ArrayBufferContents, 1>;
   using ImageBitmapContentsArray = Vector<scoped_refptr<StaticBitmapImage>, 1>;
-  using TransferredWasmModulesArray = WTF::Vector<v8::CompiledWasmModule>;
+  using ElementImageContentsArray = Vector<CanvasChildPaintRecord, 1>;
+  using TransferredWasmModulesArray = Vector<v8::CompiledWasmModule>;
   using MessagePortChannelArray = Vector<MessagePortChannel>;
-  using NativeFileSystemTokensArray =
-      Vector<mojo::PendingRemote<mojom::blink::NativeFileSystemTransferToken>>;
+  using StreamArray = Vector<Stream>;
+  using FileSystemAccessTokensArray =
+      Vector<mojo::PendingRemote<mojom::blink::FileSystemAccessTransferToken>>;
 
   // Increment this for each incompatible change to the wire format.
   // Version 2: Added StringUCharTag for UChar v8 strings.
@@ -98,6 +130,8 @@ class CORE_EXPORT SerializedScriptValue
   //             support color space information, compression, etc.
   // Version 19: Add DetectedBarcode, DetectedFace, and DetectedText support.
   // Version 20: Remove DetectedBarcode, DetectedFace, and DetectedText support.
+  // Version 21: Add support for trailer data which marks required exposed
+  //             interfaces.
   //
   // The following versions cannot be used, in order to be able to
   // deserialize version 0 SSVs. The class implementation has details.
@@ -110,7 +144,11 @@ class CORE_EXPORT SerializedScriptValue
   //
   // Recent changes are routinely reverted in preparation for branch, and this
   // has been the cause of at least one bug in the past.
-  static constexpr uint32_t kWireFormatVersion = 20;
+  //
+  // WARNING: if you're changing this from version 21, your change will interact
+  // with the fix to https://crbug.com/1341844. Consult bug owner before
+  // proceeding. (After that is settled, remove this paragraph.)
+  static constexpr uint32_t kWireFormatVersion = 21;
 
   // This enumeration specifies whether we're serializing a value for storage;
   // e.g. when writing to IndexedDB. This corresponds to the forStorage flag of
@@ -135,6 +173,12 @@ class CORE_EXPORT SerializedScriptValue
       kBlockedInNonSecureContext  // Block transfer or serialization.
     };
 
+    // Whether to serialize or skip a ScriptWrappable if the object is a
+    // wrapper.
+    enum ScriptWrappablePolicy {
+      kSerializeWrappedObjects,
+      kOmitWrappedObjects,
+    };
     SerializeOptions() = default;
     explicit SerializeOptions(StoragePolicy for_storage)
         : for_storage(for_storage) {}
@@ -143,6 +187,7 @@ class CORE_EXPORT SerializedScriptValue
     WebBlobInfoArray* blob_info = nullptr;
     WasmSerializationPolicy wasm_policy = kTransfer;
     StoragePolicy for_storage = kNotForStorage;
+    ScriptWrappablePolicy script_wrappable_policy = kSerializeWrappedObjects;
   };
   static scoped_refptr<SerializedScriptValue> Serialize(v8::Isolate*,
                                                         v8::Local<v8::Value>,
@@ -154,10 +199,7 @@ class CORE_EXPORT SerializedScriptValue
 
   static scoped_refptr<SerializedScriptValue> Create();
   static scoped_refptr<SerializedScriptValue> Create(const String&);
-  static scoped_refptr<SerializedScriptValue> Create(
-      scoped_refptr<const SharedBuffer>);
-  static scoped_refptr<SerializedScriptValue> Create(const char* data,
-                                                     size_t length);
+  static scoped_refptr<SerializedScriptValue> Create(base::span<const uint8_t>);
 
   ~SerializedScriptValue();
 
@@ -167,8 +209,11 @@ class CORE_EXPORT SerializedScriptValue
   String ToWireString() const;
 
   base::span<const uint8_t> GetWireData() const {
-    return {data_buffer_.get(), data_buffer_size_};
+    return data_buffer_.as_span();
   }
+
+  bool HasDeserializationError() const { return deserialization_error_; }
+  void SetDeserializationError(bool error) { deserialization_error_ = error; }
 
   // Deserializes the value (in the current context). Returns a null value in
   // case of failure.
@@ -178,6 +223,9 @@ class CORE_EXPORT SerializedScriptValue
    public:
     MessagePortArray* message_ports = nullptr;
     const WebBlobInfoArray* blob_info = nullptr;
+    // Slow mode is intended to mitigate possible timing attacks on v8 string
+    // table.
+    bool slow_mode = false;
   };
   v8::Local<v8::Value> Deserialize(v8::Isolate* isolate) {
     return Deserialize(isolate, DeserializeOptions());
@@ -204,12 +252,7 @@ class CORE_EXPORT SerializedScriptValue
   // Returns true if the array was filled, or false if the passed value was not
   // of an appropriate type.
   static bool ExtractTransferables(v8::Isolate*,
-                                   v8::Local<v8::Value>,
-                                   int,
-                                   Transferables&,
-                                   ExceptionState&);
-  static bool ExtractTransferables(v8::Isolate*,
-                                   const HeapVector<ScriptValue>&,
+                                   const HeapVector<ScriptObject>&,
                                    Transferables&,
                                    ExceptionState&);
 
@@ -228,6 +271,11 @@ class CORE_EXPORT SerializedScriptValue
       const ImageBitmapArray&,
       ExceptionState&);
 
+  static ElementImageContentsArray TransferElementImageContents(
+      v8::Isolate*,
+      const ElementImageArray&,
+      ExceptionState&);
+
   // Informs V8 about external memory allocated and owned by this object.
   // Large values should contribute to GC counters to eventually trigger a GC,
   // otherwise flood of postMessage() can cause OOM.
@@ -243,16 +291,16 @@ class CORE_EXPORT SerializedScriptValue
   // hence subsequent calls will be no-ops.
   void UnregisterMemoryAllocatedWithCurrentScriptContext();
 
-  const uint8_t* Data() const { return data_buffer_.get(); }
-  size_t DataLengthInBytes() const { return data_buffer_size_; }
+  const uint8_t* Data() const { return data_buffer_.data(); }
+  size_t DataLengthInBytes() const { return data_buffer_.size(); }
 
   TransferredWasmModulesArray& WasmModules() { return wasm_modules_; }
   SharedArrayBufferContentsArray& SharedArrayBuffersContents() {
     return shared_array_buffers_contents_;
   }
   BlobDataHandleMap& BlobDataHandles() { return blob_data_handles_; }
-  NativeFileSystemTokensArray& NativeFileSystemTokens() {
-    return native_file_system_tokens_;
+  FileSystemAccessTokensArray& FileSystemAccessTokens() {
+    return file_system_access_tokens_;
   }
   MojoScopedHandleArray& MojoHandles() { return mojo_handles_; }
   ArrayBufferContentsArray& GetArrayBufferContentsArray() {
@@ -266,20 +314,43 @@ class CORE_EXPORT SerializedScriptValue
   }
   void SetImageBitmapContentsArray(ImageBitmapContentsArray contents);
 
-  MessagePortChannelArray& GetStreamChannels() { return stream_channels_; }
-
-  bool IsLockedToAgentCluster() const {
-    return !wasm_modules_.IsEmpty() ||
-           !shared_array_buffers_contents_.IsEmpty() ||
-           std::any_of(attachments_.begin(), attachments_.end(),
-                       [](const auto& entry) {
-                         return entry.value->IsLockedToAgentCluster();
-                       });
+  ElementImageContentsArray& GetElementImageContentsArray() {
+    return element_image_contents_array_;
   }
+  void SetElementImageContentsArray(ElementImageContentsArray contents);
+
+  StreamArray& GetStreams() { return streams_; }
+
+  const v8::SharedValueConveyor* MaybeGetSharedValueConveyor() const;
+
+  bool IsLockedToAgentCluster() const;
 
   // Returns true after serializing script values that remote origins cannot
   // access.
   bool IsOriginCheckRequired() const;
+
+  // Returns true if it is expected to be possible to deserialize this value in
+  // the provided context. It might not be if, for instance, the value contains
+  // interfaces not exposed in all realms.
+  bool CanDeserializeIn(ExecutionContext*);
+
+  // Testing hook to allow overriding whether a value can be deserialized in a
+  // particular execution context. Callers are responsible for assuring thread
+  // safety, and resetting this after the test.
+  using CanDeserializeInCallback =
+      base::RepeatingCallback<bool(const SerializedScriptValue&,
+                                   ExecutionContext*,
+                                   bool can_deserialize)>;
+  static void OverrideCanDeserializeInForTesting(CanDeserializeInCallback);
+  struct ScopedOverrideCanDeserializeInForTesting {
+    explicit ScopedOverrideCanDeserializeInForTesting(
+        CanDeserializeInCallback callback) {
+      OverrideCanDeserializeInForTesting(std::move(callback));
+    }
+    ~ScopedOverrideCanDeserializeInForTesting() {
+      OverrideCanDeserializeInForTesting({});
+    }
+  };
 
   // Derive from Attachments to define collections of objects to serialize in
   // modules. They can be registered using GetOrCreateAttachment().
@@ -305,25 +376,30 @@ class CORE_EXPORT SerializedScriptValue
     return static_cast<T*>(it->value.get());
   }
 
+  struct BufferDeleter {
+    void operator()(uint8_t* buffer) { Partitions::BufferFree(buffer); }
+  };
+  using DataBufferPtr = base::HeapArray<uint8_t, BufferDeleter>;
+
+  // Takes ownership rather than copying.
+  static scoped_refptr<SerializedScriptValue> Create(
+      DataBufferPtr&& data_buffer);
+
+  static DataBufferPtr AllocateBuffer(size_t);
+
+  // Called to take ownership of `data_buffer_` and destroy `this`.
+  // This enforces that there are no other references to `this`.
+  DataBufferPtr ConsumeAndTakeBuffer() &&;
+
  private:
   friend class ScriptValueSerializer;
   friend class V8ScriptValueSerializer;
   friend class UnpackedSerializedScriptValue;
 
-  struct BufferDeleter {
-    void operator()(uint8_t* buffer) { WTF::Partitions::BufferFree(buffer); }
-  };
-  using DataBufferPtr = std::unique_ptr<uint8_t[], BufferDeleter>;
-
   SerializedScriptValue();
-  SerializedScriptValue(DataBufferPtr, size_t data_size);
+  explicit SerializedScriptValue(DataBufferPtr);
 
-  static DataBufferPtr AllocateBuffer(size_t);
-
-  void SetData(DataBufferPtr data, size_t size) {
-    data_buffer_ = std::move(data);
-    data_buffer_size_ = size;
-  }
+  void SetData(DataBufferPtr data) { data_buffer_ = std::move(data); }
 
   void TransferArrayBuffers(v8::Isolate*,
                             const ArrayBufferArray&,
@@ -331,6 +407,9 @@ class CORE_EXPORT SerializedScriptValue
   void TransferImageBitmaps(v8::Isolate*,
                             const ImageBitmapArray&,
                             ExceptionState&);
+  void TransferElementImages(v8::Isolate*,
+                             const ElementImageArray&,
+                             ExceptionState&);
   void TransferOffscreenCanvas(v8::Isolate*,
                                const OffscreenCanvasArray&,
                                ExceptionState&);
@@ -362,23 +441,28 @@ class CORE_EXPORT SerializedScriptValue
   // UnpackedSerializedScriptValue thereafter.
   ArrayBufferContentsArray array_buffer_contents_array_;
   ImageBitmapContentsArray image_bitmap_contents_array_;
+  ElementImageContentsArray element_image_contents_array_;
 
-  // |stream_channels_| is also single-use but is special-cased because it works
+  // |streams_| is also single-use but is special-cased because it works
   // with ServiceWorkers.
-  MessagePortChannelArray stream_channels_;
+  StreamArray streams_;
 
   // These do not have one-use transferred contents, like the above.
   TransferredWasmModulesArray wasm_modules_;
   BlobDataHandleMap blob_data_handles_;
   MojoScopedHandleArray mojo_handles_;
   SharedArrayBufferContentsArray shared_array_buffers_contents_;
-  NativeFileSystemTokensArray native_file_system_tokens_;
+  FileSystemAccessTokensArray file_system_access_tokens_;
   HashMap<const void* const*, std::unique_ptr<Attachment>> attachments_;
 
+  std::optional<v8::SharedValueConveyor> shared_value_conveyor_;
+  raw_ptr<v8::Isolate> isolate_;
   bool has_registered_external_allocation_;
+  bool deserialization_error_ = false;
 #if DCHECK_IS_ON()
   bool was_unpacked_ = false;
 #endif
+  NO_UNIQUE_ADDRESS V8ExternalMemoryAccounterBase external_memory_accounter_;
 };
 
 }  // namespace blink

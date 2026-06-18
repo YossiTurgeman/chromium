@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,17 @@
 #include <map>
 #include <set>
 
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/observer_list_types.h"
-#include "components/safe_browsing/core/db/v4_protocol_manager_util.h"
+#include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
+#include "components/security_interstitials/core/unsafe_resource.h"
 #import "ios/web/public/web_state_user_data.h"
 #include "url/gurl.h"
 
-// SafeBrowsingUrlAllowList tracks the whitelist decisions for URLs for a given
+// SafeBrowsingUrlAllowList tracks the allowlist decisions for URLs for a given
 // threat type, as well as decisions that are pending.  Decisions are stored for
-// URLs with empty paths, meaning that whitelisted threats are allowed for the
+// URLs with empty paths, meaning that allowlisted threats are allowed for the
 // entire domain.
 class SafeBrowsingUrlAllowList
     : public web::WebStateUserData<SafeBrowsingUrlAllowList> {
@@ -49,6 +51,11 @@ class SafeBrowsingUrlAllowList
   };
 
   ~SafeBrowsingUrlAllowList() override;
+
+  // Returns the URL under which allow list decisions should be stored for
+  // |resource|.
+  static GURL GetDecisionUrl(
+      const security_interstitials::UnsafeResource& resource);
 
   // Adds and removes observers.
   void AddObserver(Observer* observer);
@@ -87,7 +94,6 @@ class SafeBrowsingUrlAllowList
  private:
   explicit SafeBrowsingUrlAllowList(web::WebState* web_state);
   friend class web::WebStateUserData<SafeBrowsingUrlAllowList>;
-  WEB_STATE_USER_DATA_KEY_DECL();
 
   // Struct storing the threat types that have been allowed and those for
   // which the user has not made a decision yet.
@@ -122,8 +128,8 @@ class SafeBrowsingUrlAllowList
   void RevertPolicy(const GURL& url, Policy policy);
 
   // The WebState whose allowed navigations are recorded by this list.
-  web::WebState* web_state_ = nullptr;
-  // Map storing the whitelist decisions for each URL.
+  raw_ptr<web::WebState> web_state_ = nullptr;
+  // Map storing the allowlist decisions for each URL.
   std::map<GURL, UnsafeNavigationDecisions> decisions_;
   base::ObserverList<Observer, /*check_empty=*/true> observers_;
 };

@@ -31,10 +31,20 @@ goog.provide('{{module.namespace}}.{{interface.name}}PendingReceiver');
  * @export
  */
 {{module.namespace}}.{{interface.name}}PendingReceiver = class {
-  /** @param {!MojoHandle} handle */
+  /**
+   * @param {!MojoHandle|!mojo.internal.interfaceSupport.Endpoint} handle
+   */
   constructor(handle) {
-    /** @public {!MojoHandle} */
-    this.handle = handle;
+    /** @public {!mojo.internal.interfaceSupport.Endpoint} */
+    this.handle = mojo.internal.interfaceSupport.getEndpointForReceiver(handle);
+  }
+
+  /** @param {string=} scope */
+  bindInBrowser(scope = 'context') {
+    mojo.internal.interfaceSupport.bind(
+        this.handle,
+        {{module.namespace}}.{{interface.name}}.$interfaceName,
+        scope);
   }
 };
 
@@ -57,15 +67,15 @@ goog.provide('{{module.namespace}}.{{interface.name}}PendingReceiver');
  * @implements { {{module.namespace}}.{{interface.name}}Interface }
  */
 {{module.namespace}}.{{interface.name}}Remote = class {
-  /** @param {MojoHandle=} opt_handle */
-  constructor(opt_handle) {
+  /** @param {MojoHandle|mojo.internal.interfaceSupport.Endpoint=} handle */
+  constructor(handle = undefined) {
     /**
      * @private {!mojo.internal.interfaceSupport.InterfaceRemoteBase<!{{module.namespace}}.{{interface.name}}PendingReceiver>}
      */
     this.proxy =
         new mojo.internal.interfaceSupport.InterfaceRemoteBase(
           {{module.namespace}}.{{interface.name}}PendingReceiver,
-          opt_handle);
+          handle);
 
     /**
      * @public {!mojo.internal.interfaceSupport.InterfaceRemoteBaseWrapper<!{{module.namespace}}.{{interface.name}}PendingReceiver>}
@@ -83,25 +93,26 @@ goog.provide('{{module.namespace}}.{{interface.name}}PendingReceiver');
   {{generateMethodAnnotation(method)}}
   {{method.name}}(
 {%- for param in method.parameters %}
-      {{param.name}}{%- if not loop.last %},{% endif %}
+      {{param.name|sanitize_identifier}}{%- if not loop.last %},{% endif %}
 {%- endfor -%}) {
-{%- if method.response_parameters != None %}
+{%- if method.response_parameters != None or method.result_response != None %}
     return this.proxy.sendMessage(
 {%- else %}
     this.proxy.sendMessage(
 {%- endif %}
         {{method.ordinal}},
         {{module.namespace}}.{{interface_message_id}}_ParamsSpec.$,
-{%-   if method.response_parameters != None %}
+{%-   if method.response_parameters != None or method.result_response != None %}
         {{module.namespace}}.{{interface_message_id}}_ResponseParamsSpec.$,
 {%-   else %}
         null,
 {%-   endif %}
         [
 {%- for param in method.parameters %}
-          {{param.name}}{%- if not loop.last %},{% endif %}
+          {{param.name|sanitize_identifier}}{%- if not loop.last %},{% endif %}
 {%- endfor %}
-        ]);
+        ],
+        {{'true' if method.result_response != None else 'false'}});
   }
 {%-  endfor %}
 };
@@ -133,12 +144,13 @@ goog.provide('{{module.namespace}}.{{interface.name}}PendingReceiver');
     this.helper_internal_.registerHandler(
         {{method.ordinal}},
         {{module.namespace}}.{{interface_message_id}}_ParamsSpec.$,
-{%-   if method.response_parameters != None %}
+{%-   if method.response_parameters != None or method.result_response != None %}
         {{module.namespace}}.{{interface_message_id}}_ResponseParamsSpec.$,
 {%-   else %}
         null,
 {%-   endif %}
-        impl.{{method.name}}.bind(impl));
+        impl.{{method.name}}.bind(impl),
+        {{'true' if method.result_response != None else 'false'}});
 {%- endfor %}
     /** @public {!mojo.internal.interfaceSupport.ConnectionErrorEventRouter} */
     this.onConnectionError = this.helper_internal_.getConnectionErrorEventRouter();
@@ -166,8 +178,7 @@ goog.provide('{{module.namespace}}.{{interface.name}}PendingReceiver');
    */
   static getRemote() {
     let remote = new {{module.namespace}}.{{interface.name}}Remote;
-    Mojo.bindInterface(this.$interfaceName,
-                       remote.$.bindNewPipeAndPassReceiver().handle);
+    remote.$.bindNewPipeAndPassReceiver().bindInBrowser();
     return remote;
   }
 };
@@ -212,12 +223,14 @@ goog.provide('{{module.namespace}}.{{interface.name}}PendingReceiver');
     this.helper_internal_.registerHandler(
         {{method.ordinal}},
         {{module.namespace}}.{{interface_message_id}}_ParamsSpec.$,
-{%-   if method.response_parameters != None %}
+{%-   if method.response_parameters != None or method.result_response != None %}
         {{module.namespace}}.{{interface_message_id}}_ResponseParamsSpec.$,
-        this.{{method.name}}.createReceiverHandler(true /* expectsResponse */));
+        this.{{method.name}}.createReceiverHandler(true /* expectsResponse */),
+        {{'true' if method.result_response != None else 'false'}});
 {%-   else %}
         null,
-        this.{{method.name}}.createReceiverHandler(false /* expectsResponse */));
+        this.{{method.name}}.createReceiverHandler(false /* expectsResponse */),
+        false);
 {%-   endif %}
 {%- endfor %}
     /** @public {!mojo.internal.interfaceSupport.ConnectionErrorEventRouter} */

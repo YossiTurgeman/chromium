@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,15 @@ import static androidx.test.espresso.assertion.ViewAssertions.matches;
 import static androidx.test.espresso.matcher.ViewMatchers.withId;
 import static androidx.test.espresso.matcher.ViewMatchers.withText;
 
+import static org.hamcrest.core.AnyOf.anyOf;
+import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.StringContains.containsString;
-import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doReturn;
 
-import android.support.test.InstrumentationRegistry;
+import static org.chromium.ui.test.util.ViewUtils.onViewWaiting;
+
+import android.os.Build;
 
 import androidx.test.espresso.Espresso;
 import androidx.test.espresso.NoMatchingViewException;
@@ -25,33 +30,42 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.params.ParameterAnnotations.UseMethodParameter;
 import org.chromium.base.test.params.ParameterAnnotations.UseRunnerDelegate;
 import org.chromium.base.test.params.ParameterProvider;
 import org.chromium.base.test.params.ParameterSet;
 import org.chromium.base.test.params.ParameterizedRunner;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CommandLineFlags;
-import org.chromium.base.test.util.FlakyTest;
+import org.chromium.base.test.util.Criteria;
+import org.chromium.base.test.util.CriteriaHelper;
+import org.chromium.base.test.util.DisableIf;
+import org.chromium.base.test.util.DisabledTest;
+import org.chromium.base.test.util.Features.DisableFeatures;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.ChromeTabbedActivity;
-import org.chromium.chrome.browser.customtabs.CustomTabActivityTestRule;
+import org.chromium.chrome.browser.customtabs.IncognitoCustomTabActivityTestRule;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.incognito.IncognitoDataTestUtils.ActivityType;
 import org.chromium.chrome.browser.incognito.IncognitoDataTestUtils.TestParams;
 import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.test.ChromeActivityTestRule;
+import org.chromium.chrome.browser.ui.hats.SurveyClient;
+import org.chromium.chrome.browser.ui.hats.SurveyClientFactory;
 import org.chromium.chrome.test.ChromeJUnit4RunnerDelegate;
-import org.chromium.chrome.test.util.browser.Features.EnableFeatures;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.FreshCtaTransitTestRule;
 import org.chromium.chrome.test.util.browser.LocationSettingsTestUtil;
-import org.chromium.content_public.browser.test.util.Criteria;
-import org.chromium.content_public.browser.test.util.CriteriaHelper;
+import org.chromium.components.browser_ui.modaldialog.ModalDialogView;
 import org.chromium.content_public.browser.test.util.JavaScriptUtils;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
 import org.chromium.device.geolocation.LocationProviderOverrider;
 import org.chromium.device.geolocation.MockLocationProvider;
 import org.chromium.net.test.EmbeddedTestServer;
+import org.chromium.ui.base.DeviceFormFactor;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -59,52 +73,59 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
 /**
- * This test class checks permission leakage between all different
- * pairs of Activity types with a constraint that one of the
- * interacting activity must be either Incognito Tab or Incognito CCT.
+ * This test class checks permission leakage between all different pairs of Activity types with a
+ * constraint that one of the interacting activity must be either Incognito Tab or Incognito CCT.
  */
 @RunWith(ParameterizedRunner.class)
 @UseRunnerDelegate(ChromeJUnit4RunnerDelegate.class)
-@EnableFeatures({ChromeFeatureList.CCT_INCOGNITO})
-@CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
+@CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE, ChromeSwitches.DISABLE_ALL_IPH})
+// TODO(http://crbug.com/495529795): Enable side panel and fix this test.
+@DisableFeatures({ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL})
+@Batch(Batch.PER_CLASS)
+@DisableIf.Device(DeviceFormFactor.DESKTOP) // https://crbug.com/479863847
 public class IncognitoPermissionLeakageTest {
-    private String mPermissionTestPage;
-    private EmbeddedTestServer mTestServer;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+
+    @Mock SurveyClient mSurveyClient;
+    @Mock SurveyClientFactory mSurveyClientFactory;
 
     private static final String PERMISSION_HTML_PATH =
             "/content/test/data/android/geolocation.html";
 
-    @Rule
-    public ChromeActivityTestRule<ChromeTabbedActivity> mChromeActivityTestRule =
-            new ChromeActivityTestRule<>(ChromeTabbedActivity.class);
+    private String mPermissionTestPage;
+    private EmbeddedTestServer mTestServer;
 
     @Rule
-    public CustomTabActivityTestRule mCustomTabActivityTestRule = new CustomTabActivityTestRule();
+    public FreshCtaTransitTestRule mChromeActivityTestRule =
+            ChromeTransitTestRules.freshChromeTabbedActivityRule();
+
+    @Rule
+    public IncognitoCustomTabActivityTestRule mCustomTabActivityTestRule =
+            new IncognitoCustomTabActivityTestRule();
 
     @Before
     public void setUp() throws TimeoutException {
-        mTestServer = EmbeddedTestServer.createAndStartServer(InstrumentationRegistry.getContext());
+        SurveyClientFactory.setInstanceForTesting(mSurveyClientFactory);
+        doReturn(mSurveyClient).when(mSurveyClientFactory).createClient(any(), any(), any(), any());
+
+        mTestServer = mChromeActivityTestRule.getTestServer();
         mPermissionTestPage = mTestServer.getURL(PERMISSION_HTML_PATH);
 
         // Permission related settings.
         LocationSettingsTestUtil.setSystemLocationSettingEnabled(true);
         LocationProviderOverrider.setLocationProviderImpl(new MockLocationProvider());
 
-        // Ensuring native is initialized before we access the CCT_INCOGNITO feature flag.
-        IncognitoDataTestUtils.fireAndWaitForCctWarmup();
-        assertTrue(ChromeFeatureList.isEnabled(ChromeFeatureList.CCT_INCOGNITO));
+        ModalDialogView.disableButtonTapProtectionForTesting();
     }
 
     @After
     public void tearDown() {
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> IncognitoDataTestUtils.closeTabs(mChromeActivityTestRule));
-        mTestServer.stopAndDestroyServer();
+        mChromeActivityTestRule.closeAllWindowsAndDeleteInstanceAndTabState();
     }
 
     private void requestLocationPermission(Tab tab) throws TimeoutException, ExecutionException {
         // If tab is frozen then getWebContents may return null
-        TestThreadUtils.runOnUiThreadBlocking(() -> tab.loadIfNeeded());
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.loadIfNeeded(/* forceBackingSize= */ false));
         CriteriaHelper.pollUiThread(
                 () -> Criteria.checkThat(tab.getWebContents(), Matchers.notNullValue()));
         JavaScriptUtils.executeJavaScriptAndWaitForResult(
@@ -112,7 +133,7 @@ public class IncognitoPermissionLeakageTest {
     }
 
     private void assertDialogIsShown() throws NoMatchingViewException {
-        Espresso.onView(withId(R.id.text)).check(matches(withText(containsString("location"))));
+        onViewWaiting(withId(R.id.text)).check(matches(withText(containsString("location"))));
     }
 
     private void assertDialogIsNotShown() throws NoMatchingViewException {
@@ -120,13 +141,18 @@ public class IncognitoPermissionLeakageTest {
     }
 
     private void grantPermission() {
-        Espresso.onView(withText(containsString("Allow"))).perform(click());
+        Espresso.onView(withText(anyOf(is("Allow"), is("Allow this time")))).perform(click());
     }
 
     private void blockPermission() {
-        Espresso.onView(withText(containsString("Block"))).perform(click());
+        Espresso.onView(withText(anyOf(containsString("Block"), containsString("Never allow"))))
+                .perform(click());
     }
 
+    /**
+     * A class providing test parameters encapsulating different Activity type pairs spliced on
+     * Regular and Incognito mode.
+     */
     public static class RegularAndIncognito implements ParameterProvider {
         @Override
         public List<ParameterSet> getParameters() {
@@ -140,22 +166,24 @@ public class IncognitoPermissionLeakageTest {
     @Test
     @LargeTest
     @UseMethodParameter(RegularAndIncognito.class)
-    @FlakyTest(message = "https://crbug.com/1103488")
+    @DisableIf.Build(sdk_equals = Build.VERSION_CODES.S_V2, message = "crbug.com/40704641")
     public void testAllowPermissionDoNotLeakBetweenRegularAndIncognito(
             String activityType1, String activityType2) throws Exception {
         ActivityType activity1 = ActivityType.valueOf(activityType1);
         ActivityType activity2 = ActivityType.valueOf(activityType2);
 
-        Tab tab1 = activity1.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab1 =
+                activity1.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in activity1's tab and accept it.
         requestLocationPermission(tab1);
         assertDialogIsShown();
         grantPermission();
 
-        Tab tab2 = activity2.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab2 =
+                activity2.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in activity2's tab.
         requestLocationPermission(tab2);
@@ -163,25 +191,29 @@ public class IncognitoPermissionLeakageTest {
         assertDialogIsShown();
     }
 
+    // Disabled on android.emulator_12l_landscape - crbug.com/442769979.
     @Test
     @LargeTest
     @UseMethodParameter(TestParams.IncognitoToIncognito.class)
+    @DisableIf.Build(sdk_equals = Build.VERSION_CODES.S_V2, message = "crbug.com/40704641")
     public void testAllowPermissionDoNotLeakFromIncognitoToIncognito(
             String incognitoActivityType1, String incognitoActivityType2) throws Exception {
         // At least one of the incognitoActivity is an incognito CCT.
         ActivityType incognitoActivity1 = ActivityType.valueOf(incognitoActivityType1);
         ActivityType incognitoActivity2 = ActivityType.valueOf(incognitoActivityType2);
 
-        Tab tab1 = incognitoActivity1.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab1 =
+                incognitoActivity1.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in incognitoActivity1's tab and accept it.
         requestLocationPermission(tab1);
         assertDialogIsShown();
         grantPermission();
 
-        Tab tab2 = incognitoActivity2.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab2 =
+                incognitoActivity2.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in incognitoActivity2's tab.
         requestLocationPermission(tab2);
@@ -199,16 +231,18 @@ public class IncognitoPermissionLeakageTest {
         ActivityType incognitoActivity1 = ActivityType.valueOf(incognitoActivityType1);
         ActivityType incognitoActivity2 = ActivityType.valueOf(incognitoActivityType2);
 
-        Tab tab1 = incognitoActivity1.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab1 =
+                incognitoActivity1.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in incognitoActivity1's tab and block it.
         requestLocationPermission(tab1);
         assertDialogIsShown();
         blockPermission();
 
-        Tab tab2 = incognitoActivity2.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab2 =
+                incognitoActivity2.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission now in incognitoActivity2's tab.
         requestLocationPermission(tab2);
@@ -221,21 +255,24 @@ public class IncognitoPermissionLeakageTest {
     @Test
     @LargeTest
     @UseMethodParameter(TestParams.RegularToIncognito.class)
+    @DisabledTest(message = "crbug.com/390130917, crbug.com/479863847")
     public void testBlockPermissionLeakFromRegularToIncognito(
             String regularActivityType, String incognitoActivityType) throws Exception {
         ActivityType regularActivity = ActivityType.valueOf(regularActivityType);
         ActivityType incognitoActivity = ActivityType.valueOf(incognitoActivityType);
 
-        Tab tab1 = regularActivity.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab1 =
+                regularActivity.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in regularActivity's tab and block it.
         requestLocationPermission(tab1);
         assertDialogIsShown();
         blockPermission();
 
-        Tab tab2 = incognitoActivity.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab2 =
+                incognitoActivity.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in incognitoActivity's tab.
         requestLocationPermission(tab2);
@@ -248,14 +285,14 @@ public class IncognitoPermissionLeakageTest {
     @Test
     @LargeTest
     @UseMethodParameter(TestParams.IncognitoToRegular.class)
-    @FlakyTest(message = "https://crbug.com/1103488")
     public void testBlockPermissionDoNotLeakFromIncognitoToRegular(
             String incognitoActivityType, String regularActivityType) throws Exception {
         ActivityType incognitoActivity = ActivityType.valueOf(incognitoActivityType);
         ActivityType regularActivity = ActivityType.valueOf(regularActivityType);
 
-        Tab tab1 = incognitoActivity.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab1 =
+                incognitoActivity.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in incognitoActivity's tab and accept it.
         requestLocationPermission(tab1);
@@ -263,8 +300,9 @@ public class IncognitoPermissionLeakageTest {
         assertDialogIsShown();
         blockPermission();
 
-        Tab tab2 = regularActivity.launchUrl(
-                mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
+        Tab tab2 =
+                regularActivity.launchUrl(
+                        mChromeActivityTestRule, mCustomTabActivityTestRule, mPermissionTestPage);
 
         // Request permission in regularActivity's tab.
         requestLocationPermission(tab2);

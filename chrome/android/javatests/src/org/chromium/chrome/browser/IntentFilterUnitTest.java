@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,14 +19,15 @@ import org.junit.runner.RunWith;
 import org.chromium.base.ContextUtils;
 import org.chromium.base.test.BaseJUnit4ClassRunner;
 import org.chromium.base.test.util.Batch;
+import org.chromium.chrome.browser.media.MediaViewerUtils;
 
-/**
- * Unit tests for Intent Filters in chrome/android/java/AndroidManifest.xml
- */
+/** Unit tests for Intent Filters in chrome/android/java/AndroidManifest.xml */
 @RunWith(BaseJUnit4ClassRunner.class)
 @Batch(Batch.UNIT_TESTS)
 public class IntentFilterUnitTest {
     private static final Uri HTTPS_URI = Uri.parse("https://www.example.com/index.html");
+    private static final Uri ABOUT_URI = Uri.parse("about:blank");
+    private static final Uri JAVASCRIPT_URI = Uri.parse("javascript:alert('hello')");
     private static final Uri CONTENT_URI = Uri.parse("content://package/path/id");
     private static final Uri HTML_URI = Uri.parse("file:///path/filename.html");
     private static final Uri MHTML_URI = Uri.parse("file:///path/to/.file/site.mhtml");
@@ -42,8 +43,11 @@ public class IntentFilterUnitTest {
     @Before
     public void setUp() {
         mPm = ContextUtils.getApplicationContext().getPackageManager();
-        mIntent = new Intent();
+        mIntent = new Intent(Intent.ACTION_VIEW);
         mIntent.setPackage(ContextUtils.getApplicationContext().getPackageName());
+
+        // MediaLauncherActivity is disabled by default, so we must enable it to test its filters.
+        MediaViewerUtils.forceEnableMediaLauncherActivityForTest();
     }
 
     private void verifyIntent(boolean supported) {
@@ -75,10 +79,70 @@ public class IntentFilterUnitTest {
 
     @Test
     @SmallTest
+    public void testHttpsUriWithMime() {
+        mIntent.setDataAndType(HTTPS_URI, "text/html");
+        verifyIntent(true);
+        mIntent.setDataAndType(HTTPS_URI, "text/plain");
+        verifyIntent(true);
+        mIntent.setDataAndType(HTTPS_URI, "application/xhtml+xml");
+        verifyIntent(true);
+        mIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+        verifyIntent(true);
+    }
+
+    @Test
+    @SmallTest
+    public void testAboutUri() {
+        mIntent.setData(ABOUT_URI);
+        verifyIntent(true);
+        mIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+        verifyIntent(true);
+    }
+
+    @Test
+    @SmallTest
+    public void testAboutUriWithMime() {
+        mIntent.setDataAndType(ABOUT_URI, "text/html");
+        verifyIntent(true);
+        mIntent.setDataAndType(ABOUT_URI, "text/plain");
+        verifyIntent(true);
+        mIntent.setDataAndType(ABOUT_URI, "application/xhtml+xml");
+        verifyIntent(true);
+        mIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+        verifyIntent(true);
+    }
+
+    // We don't support javascript URI intents.
+    @Test
+    @SmallTest
+    public void testJavascriptUri() {
+        mIntent.setData(JAVASCRIPT_URI);
+        verifyIntent(false);
+        mIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+        verifyIntent(false);
+    }
+
+    @Test
+    @SmallTest
+    public void testJavascriptUriWithMime() {
+        mIntent.setDataAndType(JAVASCRIPT_URI, "text/javascript");
+        verifyIntent(false);
+        mIntent.setDataAndType(JAVASCRIPT_URI, "text/html");
+        verifyIntent(false);
+        mIntent.setDataAndType(JAVASCRIPT_URI, "text/plain");
+        verifyIntent(false);
+        mIntent.setDataAndType(JAVASCRIPT_URI, "application/xhtml+xml");
+        verifyIntent(false);
+        mIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+        verifyIntent(false);
+    }
+
+    @Test
+    @SmallTest
     public void testHtmlFileUri() {
         mIntent.setData(HTML_URI);
         verifyIntent(false);
-        mIntent.setType("text/html");
+        mIntent.setDataAndType(HTML_URI, "text/html");
         verifyIntent(false);
         mIntent.addCategory(Intent.CATEGORY_BROWSABLE);
         verifyIntent(false);
@@ -133,5 +197,67 @@ public class IntentFilterUnitTest {
         verifyIntent(true);
         mIntent.addCategory(Intent.CATEGORY_BROWSABLE);
         verifyIntent(false);
+    }
+
+    @Test
+    @SmallTest
+    public void testShareIntent() {
+        mIntent.setType("text/plain");
+        verifyIntent(false);
+        mIntent.setAction(Intent.ACTION_SEND);
+        verifyIntent(true);
+    }
+
+    @Test
+    @SmallTest
+    public void testMediaIntents() {
+        String[] supportedMimeTypes = {
+            "image/webp",
+            "image/apng",
+            "image/svg+xml",
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/x-icon",
+            "image/bmp",
+            "image/x-xbitmap",
+            "image/vnd.microsoft.icon",
+            "image/pjpeg",
+            "image/jpg",
+            "image/x-png",
+            "video/webm",
+            "video/ogg",
+            "video/mp4",
+            "video/matroska",
+            "video/x-matroska",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/webm",
+            "audio/ogg",
+            "audio/flac",
+            "audio/mpeg",
+            "audio/mp3",
+            "audio/x-mp3",
+            "audio/mp4",
+            "audio/matroska",
+            "audio/x-matroska",
+            "application/ogg"
+        };
+
+        for (String mimeType : supportedMimeTypes) {
+            mIntent.setDataAndType(CONTENT_URI, mimeType);
+            verifyIntent(true);
+            mIntent.setDataAndType(HTML_URI, mimeType);
+            verifyIntent(true);
+        }
+
+        String[] unsupportedMimeTypes = {"audio/midi", "image/tiff", "image/psd"};
+
+        for (String mimeType : unsupportedMimeTypes) {
+            mIntent.setDataAndType(CONTENT_URI, mimeType);
+            verifyIntent(false);
+            mIntent.setDataAndType(HTML_URI, mimeType);
+            verifyIntent(false);
+        }
     }
 }

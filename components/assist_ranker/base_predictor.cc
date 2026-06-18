@@ -1,10 +1,12 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/assist_ranker/base_predictor.h"
 
+#include "base/check.h"
 #include "base/feature_list.h"
+#include "base/logging.h"
 #include "components/assist_ranker/proto/ranker_example.pb.h"
 #include "components/assist_ranker/proto/ranker_model.pb.h"
 #include "components/assist_ranker/ranker_example_util.h"
@@ -24,7 +26,7 @@ BasePredictor::BasePredictor(const PredictorConfig& config) : config_(config) {
   }
 }
 
-BasePredictor::~BasePredictor() {}
+BasePredictor::~BasePredictor() = default;
 
 void BasePredictor::LoadModel(std::unique_ptr<RankerModelLoader> model_loader) {
   if (!is_query_enabled_)
@@ -58,8 +60,8 @@ void BasePredictor::LogFeatureToUkm(const std::string& feature_name,
                                     ukm::UkmEntryBuilder* ukm_builder) {
   DCHECK(ukm_builder);
 
-  if (!base::Contains(*config_.feature_whitelist, feature_name)) {
-    DVLOG(1) << "Feature not whitelisted: " << feature_name;
+  if (!config_.feature_allowlist->contains(feature_name)) {
+    DVLOG(1) << "Feature not allowed: " << feature_name;
     return;
   }
 
@@ -95,12 +97,12 @@ void BasePredictor::LogExampleToUkm(const RankerExample& example,
     return;
   }
 
-  if (!config_.feature_whitelist) {
-    DVLOG(0) << "No whitelist specified.";
+  if (!config_.feature_allowlist) {
+    DVLOG(0) << "No allowlist specified.";
     return;
   }
-  if (config_.feature_whitelist->empty()) {
-    DVLOG(0) << "Empty whitelist, examples will not be logged.";
+  if (config_.feature_allowlist->empty()) {
+    DVLOG(0) << "Empty allowlist, examples will not be logged.";
     return;
   }
 

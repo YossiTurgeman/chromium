@@ -1,10 +1,11 @@
-// Copyright (c) 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/perf/perf_result_reporter.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
 #include "third_party/blink/renderer/platform/heap/heap_test_utilities.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 
@@ -46,15 +47,15 @@ base::TimeDelta TimedRun(base::RepeatingCallback<void()> callback) {
 TEST_F(WriteBarrierPerfTest, MemberWritePerformance) {
   // Setup.
   constexpr wtf_size_t kNumElements = 100000;
-  Persistent<HeapVector<Member<PerfDummyObject>>> holder(
-      MakeGarbageCollected<HeapVector<Member<PerfDummyObject>>>());
+  Persistent<GCedHeapVector<Member<PerfDummyObject>>> holder(
+      MakeGarbageCollected<GCedHeapVector<Member<PerfDummyObject>>>());
   for (wtf_size_t i = 0; i < kNumElements; ++i) {
     holder->push_back(MakeGarbageCollected<PerfDummyObject>());
   }
   PreciselyCollectGarbage();
   // Benchmark.
   base::RepeatingCallback<void()> benchmark = base::BindRepeating(
-      [](const Persistent<HeapVector<Member<PerfDummyObject>>>& holder) {
+      [](const Persistent<GCedHeapVector<Member<PerfDummyObject>>>& holder) {
         for (wtf_size_t i = 0; i < kNumElements / 2; ++i) {
           (*holder)[i].Swap((*holder)[kNumElements / 2 + i]);
         }
@@ -63,9 +64,9 @@ TEST_F(WriteBarrierPerfTest, MemberWritePerformance) {
 
   // During GC.
   IncrementalMarkingTestDriver driver(ThreadState::Current());
-  driver.Start();
+  driver.StartGC();
   base::TimeDelta during_gc_duration = TimedRun(benchmark);
-  driver.FinishSteps();
+  driver.TriggerMarkingSteps();
   PreciselyCollectGarbage();
 
   // Outside GC.

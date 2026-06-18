@@ -1,4 +1,4 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -27,6 +27,8 @@ static_library("core") {
     "large_icon_service.h",
     "large_icon_service_impl.cc",
     "large_icon_service_impl.h",
+    "large_icon_worker.cc",
+    "large_icon_worker.h",
   ]
 
   deps = [
@@ -35,7 +37,8 @@ static_library("core") {
     "//components/favicon_base",
     "//components/image_fetcher/core",
     "//components/keyed_service/core",
-    "//net:net",
+    "//components/url_formatter",
+    "//net",
     "//skia",
     "//ui/base",
     "//ui/gfx",
@@ -59,7 +62,6 @@ static_library("database") {
     "//components/database_utils",
     "//components/favicon_base",
     "//sql",
-    "//third_party/sqlite",
     "//ui/gfx",
     "//url",
   ]
@@ -104,8 +106,8 @@ source_set("unit_tests") {
     "//base/test:test_support",
     "//components/favicon/core/test:test_support",
     "//components/favicon_base",
-    "//components/history/core/browser:browser",
-    "//components/history/core/test:test",
+    "//components/history/core/browser",
+    "//components/history/core/test",
     "//components/image_fetcher/core",
     "//components/image_fetcher/core:test_support",
     "//components/variations:test_support",
@@ -115,7 +117,6 @@ source_set("unit_tests") {
     "//sql:test_support",
     "//testing/gmock",
     "//testing/gtest",
-    "//third_party/sqlite",
     "//ui/base",
     "//ui/gfx",
     "//ui/gfx:test_support",

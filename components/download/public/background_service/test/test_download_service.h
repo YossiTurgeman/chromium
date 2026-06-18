@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,14 @@
 
 #include <list>
 #include <memory>
+#include <optional>
 #include <string>
 
-#include "base/optional.h"
+#include "base/files/file_path.h"
+#include "base/memory/raw_ptr.h"
+#include "components/download/public/background_service/background_download_service.h"
 #include "components/download/public/background_service/client.h"
 #include "components/download/public/background_service/download_params.h"
-#include "components/download/public/background_service/download_service.h"
 
 namespace download {
 
@@ -20,10 +22,14 @@ struct CompletionInfo;
 
 namespace test {
 
-// Implementation of DownloadService used for testing.
-class TestDownloadService : public DownloadService {
+// Implementation of BackgroundDownloadService used for testing.
+class TestDownloadService : public BackgroundDownloadService {
  public:
   TestDownloadService();
+
+  TestDownloadService(const TestDownloadService&) = delete;
+  TestDownloadService& operator=(const TestDownloadService&) = delete;
+
   ~TestDownloadService() override;
 
   // DownloadService implementation.
@@ -31,8 +37,8 @@ class TestDownloadService : public DownloadService {
   void OnStartScheduledTask(DownloadTaskType task_type,
                             TaskFinishedCallback callback) override;
   bool OnStopScheduledTask(DownloadTaskType task_type) override;
-  DownloadService::ServiceStatus GetStatus() override;
-  void StartDownload(const DownloadParams& download_params) override;
+  BackgroundDownloadService::ServiceStatus GetStatus() override;
+  void StartDownload(DownloadParams download_params) override;
   void PauseDownload(const std::string& guid) override;
   void ResumeDownload(const std::string& guid) override;
   void CancelDownload(const std::string& guid) override;
@@ -40,7 +46,8 @@ class TestDownloadService : public DownloadService {
                               const SchedulingParams& params) override;
   Logger* GetLogger() override;
 
-  base::Optional<DownloadParams> GetDownload(const std::string& guid) const;
+  const std::optional<DownloadParams>& GetDownload(
+      const std::string& guid) const;
 
   // Set failed_download_id and fail_at_start.
   void SetFailedDownload(const std::string& failed_download_id,
@@ -49,6 +56,8 @@ class TestDownloadService : public DownloadService {
   void SetIsReady(bool is_ready);
 
   void SetHash256(const std::string& hash256);
+
+  void SetFilePath(base::FilePath path);
 
   void set_client(Client* client) { client_ = client; }
 
@@ -68,17 +77,16 @@ class TestDownloadService : public DownloadService {
   std::unique_ptr<ServiceConfig> service_config_;
   std::unique_ptr<Logger> logger_;
 
-  bool is_ready_;
+  bool is_ready_ = false;
   std::string hash256_;
   std::string failed_download_id_;
-  bool fail_at_start_;
-  uint64_t file_size_;
+  bool fail_at_start_ = false;
+  uint64_t file_size_ = 123456789u;
+  base::FilePath path_;
 
-  Client* client_;
+  raw_ptr<Client> client_ = nullptr;
 
-  std::list<DownloadParams> downloads_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestDownloadService);
+  std::list<std::optional<DownloadParams>> downloads_;
 };
 
 }  // namespace test

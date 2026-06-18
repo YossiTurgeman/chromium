@@ -1,12 +1,19 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/390223051): Remove C-library calls to fix the errors.
+#pragma allow_unsafe_libc_calls
+#endif
+
 #include "chrome/chrome_elf/chrome_elf_main.h"
 
-#include <assert.h>
 #include <windows.h>
 
+#include <assert.h>
+
+#include "chrome/chrome_elf/chrome_elf_security.h"
 #include "chrome/chrome_elf/crash/crash_helper.h"
 #include "chrome/chrome_elf/third_party_dlls/beacon.h"
 #include "chrome/chrome_elf/third_party_dlls/main.h"
@@ -48,6 +55,10 @@ bool GetUserDataDirectoryThunk(wchar_t* user_data_dir,
   return true;
 }
 
+bool IsTemporaryUserDataDirectoryCreatedForHeadless() {
+  return install_static::IsTemporaryUserDataDirectoryCreatedForHeadless();
+}
+
 // DllMain
 // -------
 // Warning: The OS loader lock is held during DllMain.  Be careful.
@@ -56,14 +67,17 @@ bool GetUserDataDirectoryThunk(wchar_t* user_data_dir,
 // - Note: Do not use install_static::GetUserDataDir from inside DllMain.
 //         This can result in path expansion that triggers secondary DLL loads,
 //         that will blow up with the loader lock held.
-//         https://bugs.chromium.org/p/chromium/issues/detail?id=748949#c18
+//         https://crbug.com/41335819#comment19
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
   if (reason == DLL_PROCESS_ATTACH) {
     install_static::InitializeProductDetailsForPrimaryModule();
     install_static::InitializeProcessType();
 
-    if (!install_static::IsNonBrowserProcess()) {
+    if (install_static::IsBrowserProcess()) {
       __try {
+        // Disable third party extension points.
+        elf_security::EarlyBrowserSecurity();
+
         // Initialize the blocking of third-party DLLs if the initialization of
         // the safety beacon succeeds.
         if (third_party_dlls::LeaveSetupBeacon())
@@ -89,4 +103,12 @@ void DumpProcessWithoutCrash() {
 
 void SetMetricsClientId(const char* client_id) {
   elf_crash::SetMetricsClientIdImpl(client_id);
+}
+
+bool IsBrowserProcess() {
+  return install_static::IsBrowserProcess();
+}
+
+bool IsExtensionPointDisableSet() {
+  return elf_security::IsExtensionPointDisableSet();
 }

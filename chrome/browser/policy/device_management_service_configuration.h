@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,6 @@
 
 #include <string>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
 #include "components/policy/core/common/cloud/device_management_service.h"
 
 namespace policy {
@@ -18,21 +16,26 @@ namespace policy {
 class DeviceManagementServiceConfiguration
     : public DeviceManagementService::Configuration {
  public:
-  DeviceManagementServiceConfiguration(const std::string& server_url,
-                                       const std::string& reporting_server_url);
+  DeviceManagementServiceConfiguration(
+      const std::string& dm_server_url,
+      const std::string& realtime_reporting_server_url,
+      const std::string& encrypted_reporting_server_url);
+  DeviceManagementServiceConfiguration(
+      const DeviceManagementServiceConfiguration&) = delete;
+  DeviceManagementServiceConfiguration& operator=(
+      const DeviceManagementServiceConfiguration&) = delete;
   ~DeviceManagementServiceConfiguration() override;
 
-  std::string GetDMServerUrl() override;
-  std::string GetAgentParameter() override;
-  std::string GetPlatformParameter() override;
-  std::string GetReportingServerUrl() override;
-  std::string GetReportingConnectorServerUrl() override;
+  std::string GetDMServerUrl() const override;
+  std::string GetAgentParameter() const override;
+  std::string GetPlatformParameter() const override;
+  std::string GetRealtimeReportingServerUrl() const override;
+  std::string GetEncryptedReportingServerUrl() const override;
 
  private:
-  const std::string server_url_;
-  const std::string reporting_server_url_;
-
-  DISALLOW_COPY_AND_ASSIGN(DeviceManagementServiceConfiguration);
+  const std::string dm_server_url_;
+  const std::string realtime_reporting_server_url_;
+  const std::string encrypted_reporting_server_url_;
 };
 
 }  // namespace policy

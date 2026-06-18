@@ -1,14 +1,15 @@
+set noparent
 boliu@chromium.org
-changwan@chromium.org
-michaelbai@chromium.org
-tobiasjs@chromium.org
+ntfschr@chromium.org
+peconn@chromium.org
+peter@chromium.org
 torne@chromium.org
 
 # Documentation changes:
-per-file *.md=ntfschr@chromium.org
-
-# Build file refactoring:
-per-file *.gn=ntfschr@chromium.org
+per-file *.md=file://android_webview/docs/OWNERS
 
 # Translation artifacts:
-per-file *.xtb=file://tools/translation/TRANSLATION_OWNERS
+per-file ....xtb=file://tools/translation/TRANSLATION_OWNERS
+
+# Cookie manager owners:
+per-file java/src/org/chromium/android_webview/AwCookieManager.java=bewise@chromium.org

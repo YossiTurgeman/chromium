@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,6 +30,8 @@ import org.chromium.base.CommandLine;
 import org.chromium.base.ContextUtils;
 import org.chromium.base.library_loader.LibraryLoader;
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.Criteria;
+import org.chromium.base.test.util.CriteriaHelper;
 import org.chromium.chrome.browser.customtabs.CustomTabActivityTestRule;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.tab.Tab;
@@ -37,8 +39,6 @@ import org.chromium.chrome.browser.tab.TabTestUtils;
 import org.chromium.chrome.browser.tab.TabWebContentsDelegateAndroid;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 import org.chromium.chrome.test.util.FullscreenTestUtils;
-import org.chromium.content_public.browser.test.util.Criteria;
-import org.chromium.content_public.browser.test.util.CriteriaHelper;
 import org.chromium.content_public.browser.test.util.JavaScriptUtils;
 import org.chromium.content_public.common.ContentSwitches;
 import org.chromium.net.test.EmbeddedTestServerRule;
@@ -46,9 +46,9 @@ import org.chromium.net.test.EmbeddedTestServerRule;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Instrumentation tests for launching
- * {@link org.chromium.chrome.browser.customtabs.CustomTabActivity} in Trusted Web Activity Mode
- * with default orientation set.
+ * Instrumentation tests for launching {@link
+ * org.chromium.chrome.browser.customtabs.CustomTabActivity} in Trusted Web Activity Mode with
+ * default orientation set.
  */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
@@ -57,9 +57,10 @@ public class TrustedWebActivityOrientationTest {
     public EmbeddedTestServerRule mEmbeddedTestServerRule = new EmbeddedTestServerRule();
 
     @Rule
-    public RuleChain mRuleChain = RuleChain.emptyRuleChain()
-                                          .around(mCustomTabActivityTestRule)
-                                          .around(mEmbeddedTestServerRule);
+    public RuleChain mRuleChain =
+            RuleChain.emptyRuleChain()
+                    .around(mCustomTabActivityTestRule)
+                    .around(mEmbeddedTestServerRule);
 
     private static final String PACKAGE_NAME =
             ContextUtils.getApplicationContext().getPackageName();
@@ -74,18 +75,20 @@ public class TrustedWebActivityOrientationTest {
         // Map non-localhost-URLs to localhost. Navigations to non-localhost URLs will throw a
         // certificate error.
         Uri mapToUri = Uri.parse(mEmbeddedTestServerRule.getServer().getURL("/"));
-        CommandLine.getInstance().appendSwitchWithValue(
-                ContentSwitches.HOST_RESOLVER_RULES, "MAP * " + mapToUri.getAuthority());
+        CommandLine.getInstance()
+                .appendSwitchWithValue(
+                        ContentSwitches.HOST_RESOLVER_RULES, "MAP * " + mapToUri.getAuthority());
     }
 
     @Test
     @MediumTest
     public void defaultOrientationIsSet() throws TimeoutException {
-        final String mTestPage =
+        final String testPage =
                 mEmbeddedTestServerRule.getServer().getURL("/chrome/test/data/android/simple.html");
 
-        Intent intent = createTrustedWebActivityIntent(mTestPage);
-        intent.putExtra(TrustedWebActivityIntentBuilder.EXTRA_SCREEN_ORIENTATION,
+        Intent intent = createTrustedWebActivityIntent(testPage);
+        intent.putExtra(
+                TrustedWebActivityIntentBuilder.EXTRA_SCREEN_ORIENTATION,
                 ScreenOrientation.LANDSCAPE);
         launchCustomTabActivity(intent);
 
@@ -103,16 +106,20 @@ public class TrustedWebActivityOrientationTest {
 
         JavaScriptUtils.executeJavaScript(
                 tab.getWebContents(), "screen.orientation.lock('portrait');");
-        CriteriaHelper.pollUiThread(() -> {
-            Criteria.checkThat(mCustomTabActivityTestRule.getActivity().getRequestedOrientation(),
-                    Matchers.is(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT));
-        });
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    Criteria.checkThat(
+                            mCustomTabActivityTestRule.getActivity().getRequestedOrientation(),
+                            Matchers.is(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT));
+                });
 
         JavaScriptUtils.executeJavaScript(tab.getWebContents(), "screen.orientation.unlock();");
-        CriteriaHelper.pollUiThread(() -> {
-            Criteria.checkThat(mCustomTabActivityTestRule.getActivity().getRequestedOrientation(),
-                    Matchers.is(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE));
-        });
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    Criteria.checkThat(
+                            mCustomTabActivityTestRule.getActivity().getRequestedOrientation(),
+                            Matchers.is(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE));
+                });
     }
 
     public void launchCustomTabActivity(Intent intent) throws TimeoutException {

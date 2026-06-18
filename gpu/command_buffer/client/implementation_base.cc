@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,8 @@
 
 #include <algorithm>
 
-#include "base/bind.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/strings/stringprintf.h"
 #include "base/trace_event/memory_dump_manager.h"
@@ -20,10 +21,8 @@
 
 namespace gpu {
 
-#if !defined(_MSC_VER)
 const uint32_t ImplementationBase::kMaxSizeOfSimpleResult;
 const uint32_t ImplementationBase::kStartingOffset;
-#endif
 
 ImplementationBase::ImplementationBase(CommandBufferHelper* helper,
                                        TransferBufferInterface* transfer_buffer,
@@ -89,8 +88,8 @@ void ImplementationBase::GenSyncToken(GLbyte* sync_token) {
     return;
   }
 
-  uint64_t fence_sync = gpu_control_->GenerateFenceSyncRelease();
-  helper_->InsertFenceSync(fence_sync);
+  uint64_t fence_sync = helper_->InsertFenceSync(
+      [this]() { return gpu_control_->GenerateFenceSyncRelease(); });
   helper_->CommandBufferHelper::OrderingBarrier();
   gpu_control_->EnsureWorkVisible();
 
@@ -98,7 +97,11 @@ void ImplementationBase::GenSyncToken(GLbyte* sync_token) {
   SyncToken sync_token_data(gpu_control_->GetNamespaceID(),
                             gpu_control_->GetCommandBufferID(), fence_sync);
   sync_token_data.SetVerifyFlush();
-  memcpy(sync_token, &sync_token_data, sizeof(sync_token_data));
+  // SAFETY: The caller must ensure `sync_token` points to
+  // `sizeof(sync_token_data)` bytes.
+  UNSAFE_TODO(base::span(sync_token, sizeof(sync_token_data))
+                  .copy_from(base::span(sync_token_data.GetConstData(),
+                                        sizeof(sync_token_data))));
 }
 
 void ImplementationBase::GenUnverifiedSyncToken(GLbyte* sync_token) {
@@ -108,22 +111,32 @@ void ImplementationBase::GenUnverifiedSyncToken(GLbyte* sync_token) {
     return;
   }
 
-  uint64_t fence_sync = gpu_control_->GenerateFenceSyncRelease();
-  helper_->InsertFenceSync(fence_sync);
+  uint64_t fence_sync = helper_->InsertFenceSync(
+      [this]() { return gpu_control_->GenerateFenceSyncRelease(); });
   helper_->CommandBufferHelper::OrderingBarrier();
 
   // Copy the data over after setting the data to ensure alignment.
   SyncToken sync_token_data(gpu_control_->GetNamespaceID(),
                             gpu_control_->GetCommandBufferID(), fence_sync);
-  memcpy(sync_token, &sync_token_data, sizeof(sync_token_data));
+  // SAFETY: The caller must ensure `sync_token` points to
+  // `sizeof(sync_token_data)` bytes.
+  UNSAFE_TODO(base::span(sync_token, sizeof(sync_token_data))
+                  .copy_from(base::span(sync_token_data.GetConstData(),
+                                        sizeof(sync_token_data))));
 }
 
 void ImplementationBase::VerifySyncTokens(GLbyte** sync_tokens, GLsizei count) {
   bool requires_synchronization = false;
   for (GLsizei i = 0; i < count; ++i) {
-    if (sync_tokens[i]) {
+    if (UNSAFE_TODO(sync_tokens[i])) {
       SyncToken sync_token;
-      memcpy(&sync_token, sync_tokens[i], sizeof(sync_token));
+      // SAFETY: The API passes an array of sync-token pointers; this branch
+      // handles only non-null entries. Each entry points to one sync-token
+      // blob, and SyncToken is guaranteed to fit (see sync_token.h
+      // static_assert), so this fixed-size copy is bounded.
+      UNSAFE_TODO(
+          base::span(sync_token.GetData(), sizeof(sync_token))
+              .copy_from(base::span(sync_tokens[i], sizeof(sync_token))));
 
       if (sync_token.HasData() && !sync_token.verified_flush()) {
         if (!GetVerifiedSyncTokenForIPC(sync_token, &sync_token)) {
@@ -137,8 +150,11 @@ void ImplementationBase::VerifySyncTokens(GLbyte** sync_tokens, GLsizei count) {
 
       // Set verify bit on empty sync tokens too.
       sync_token.SetVerifyFlush();
-
-      memcpy(sync_tokens[i], &sync_token, sizeof(sync_token));
+      // SAFETY: Same reasoning as above; writing back exactly sizeof(SyncToken)
+      // bytes to the same non-null sync-token blob.
+      UNSAFE_TODO(base::span(sync_tokens[i], sizeof(sync_token))
+                      .copy_from(base::span(sync_token.GetConstData(),
+                                            sizeof(sync_token))));
     }
   }
 
@@ -153,7 +169,10 @@ void ImplementationBase::WaitSyncToken(const GLbyte* sync_token_data) {
 
   // Copy the data over before data access to ensure alignment.
   SyncToken sync_token, verified_sync_token;
-  memcpy(&sync_token, sync_token_data, sizeof(SyncToken));
+  // SAFETY: The caller must ensure `sync_token_data` points to
+  // `sizeof(sync_token)` bytes.
+  UNSAFE_TODO(base::span(sync_token.GetData(), sizeof(SyncToken))
+                  .copy_from(base::span(sync_token_data, sizeof(SyncToken))));
 
   if (!sync_token.HasData())
     return;
@@ -206,12 +225,12 @@ bool ImplementationBase::OnMemoryDump(
           ->GetTracingProcessId();
 
   MemoryAllocatorDump* dump = pmd->CreateAllocatorDump(base::StringPrintf(
-      "gpu/transfer_buffer_memory/buffer_%d", transfer_buffer_->GetShmId()));
+      "gpu/transfer_buffer_memory/buffer_0x%x", transfer_buffer_->GetShmId()));
   dump->AddScalar(MemoryAllocatorDump::kNameSize,
                   MemoryAllocatorDump::kUnitsBytes,
                   transfer_buffer_->GetSize());
 
-  if (args.level_of_detail != MemoryDumpLevelOfDetail::BACKGROUND) {
+  if (args.level_of_detail != MemoryDumpLevelOfDetail::kBackground) {
     dump->AddScalar("free_size", MemoryAllocatorDump::kUnitsBytes,
                     transfer_buffer_->GetFragmentedFreeSize());
     auto shared_memory_guid = transfer_buffer_->shared_memory_guid();
@@ -258,9 +277,9 @@ gpu::ContextResult ImplementationBase::Initialize(
   return gpu::ContextResult::kSuccess;
 }
 
-void ImplementationBase::WaitForCmd() {
+bool ImplementationBase::WaitForCmd() {
   TRACE_EVENT0("gpu", "ImplementationBase::WaitForCmd");
-  helper_->Finish();
+  return helper_->Finish();
 }
 
 int32_t ImplementationBase::GetResultShmId() {
@@ -303,10 +322,17 @@ bool ImplementationBase::GetBucketContents(uint32_t bucket_id,
         }
         helper_->GetBucketData(bucket_id, offset, buffer.size(),
                                buffer.shm_id(), buffer.offset());
-        WaitForCmd();
+        if (!WaitForCmd()) {
+          data->clear();
+          return false;
+        }
       }
       uint32_t size_to_copy = std::min(size, buffer.size());
-      memcpy(&(*data)[offset], buffer.address(), size_to_copy);
+      // SAFETY: `size_to_copy` is bounded by both remaining destination bytes
+      // (`size`) and available source bytes (`buffer.size()`), and `offset`
+      // tracks bytes already copied into `data`.
+      base::as_writable_bytes(base::span(*data).subspan(offset, size_to_copy))
+          .copy_from(buffer.as_byte_span().first(size_to_copy));
       offset += size_to_copy;
       size -= size_to_copy;
       buffer.Release();
@@ -331,8 +357,9 @@ void ImplementationBase::SetBucketContents(uint32_t bucket_id,
       if (!buffer.valid()) {
         return;
       }
-      memcpy(buffer.address(), static_cast<const int8_t*>(data) + offset,
-             buffer.size());
+      auto span = UNSAFE_TODO(base::span(
+          static_cast<const uint8_t*>(data) + offset, buffer.size()));
+      buffer.as_byte_span().copy_from(span);
       helper_->SetBucketData(bucket_id, offset, buffer.size(), buffer.shm_id(),
                              buffer.offset());
       offset += buffer.size();
@@ -366,7 +393,7 @@ bool ImplementationBase::GetBucketAsString(uint32_t bucket_id,
   if (data.empty()) {
     return false;
   }
-  str->assign(&data[0], &data[0] + data.size() - 1);
+  str->assign(data.begin(), data.end() - 1);
   return true;
 }
 
@@ -398,32 +425,6 @@ void ImplementationBase::RunIfContextNotLost(base::OnceClosure callback) {
   if (!lost_context_callback_run_) {
     std::move(callback).Run();
   }
-}
-
-void ImplementationBase::SetGrContext(GrDirectContext* gr) {}
-
-bool ImplementationBase::HasGrContextSupport() const {
-  return false;
-}
-
-void ImplementationBase::WillCallGLFromSkia() {
-  // Should only be called on subclasses that have GrContextSupport
-  NOTREACHED();
-}
-
-void ImplementationBase::DidCallGLFromSkia() {
-  // Should only be called on subclasses that have GrContextSupport
-  NOTREACHED();
-}
-
-void ImplementationBase::SetDisplayTransform(gfx::OverlayTransform transform) {
-  helper_->Flush();
-  gpu_control_->SetDisplayTransform(transform);
-}
-
-void ImplementationBase::SetFrameRate(float frame_rate) {
-  helper_->Flush();
-  gpu_control_->SetFrameRate(frame_rate);
 }
 
 }  // namespace gpu

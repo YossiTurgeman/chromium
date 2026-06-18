@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,20 +6,18 @@
 
 #include <memory>
 
+#import "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/values.h"
-#import "components/translate/ios/browser/js_translate_manager.h"
+#import "components/translate/ios/browser/translate_java_script_feature.h"
+#include "ios/web/public/test/fakes/fake_browser_state.h"
 #include "ios/web/public/test/fakes/fake_web_frame.h"
-#include "ios/web/public/test/fakes/test_browser_state.h"
-#import "ios/web/public/test/fakes/test_web_state.h"
+#import "ios/web/public/test/fakes/fake_web_frames_manager.h"
+#import "ios/web/public/test/fakes/fake_web_state.h"
 #include "ios/web/public/test/web_task_environment.h"
 #include "net/http/http_status_code.h"
 #include "testing/platform_test.h"
-#import "third_party/ocmock/OCMock/OCMock.h"
-#include "url/gurl.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#include "url/origin.h"
 
 namespace translate {
 
@@ -27,26 +25,33 @@ class TranslateControllerTest : public PlatformTest,
                                 public TranslateController::Observer {
  protected:
   TranslateControllerTest()
-      : test_web_state_(std::make_unique<web::TestWebState>()),
-        test_browser_state_(std::make_unique<web::TestBrowserState>()),
-        fake_main_frame_(/*frame_id=*/"", /*is_main_frame=*/true, GURL()),
-        fake_iframe_(/*frame_id=*/"", /*is_main_frame=*/false, GURL()),
-        error_type_(TranslateErrors::Type::NONE),
+      : fake_web_state_(std::make_unique<web::FakeWebState>()),
+        fake_browser_state_(std::make_unique<web::FakeBrowserState>()),
+        error_type_(TranslateErrors::NONE),
         ready_time_(0),
         load_time_(0),
         translation_time_(0),
         on_script_ready_called_(false),
         on_translate_complete_called_(false) {
-    test_web_state_->SetBrowserState(test_browser_state_.get());
-    mock_js_translate_manager_ =
-        [OCMockObject niceMockForClass:[JsTranslateManager class]];
-    translate_controller_ = std::make_unique<TranslateController>(
-        test_web_state_.get(), mock_js_translate_manager_);
-    translate_controller_->set_observer(this);
+    fake_web_state_->SetBrowserState(fake_browser_state_.get());
+    auto frames_manager = std::make_unique<web::FakeWebFramesManager>();
+    frames_manager->AddWebFrame(web::FakeWebFrame::CreateMainWebFrame());
+    web_frames_manager_ = frames_manager.get();
+    web::ContentWorld content_world =
+        TranslateJavaScriptFeature::GetInstance()->GetSupportedContentWorld();
+    fake_web_state_->SetWebFramesManager(content_world,
+                                         std::move(frames_manager));
+    TranslateController::CreateForWebState(fake_web_state_.get());
+    translate_controller_observation_.Observe(translate_controller());
+  }
+
+  void SetUp() override {
+    translate_controller()->translate_script_injected_frame_id_ =
+        web::kMainFakeFrameId;
   }
 
   // TranslateController::Observer methods.
-  void OnTranslateScriptReady(TranslateErrors::Type error_type,
+  void OnTranslateScriptReady(TranslateErrors error_type,
                               double load_time,
                               double ready_time) override {
     on_script_ready_called_ = true;
@@ -55,82 +60,70 @@ class TranslateControllerTest : public PlatformTest,
     ready_time_ = ready_time;
   }
 
-  void OnTranslateComplete(TranslateErrors::Type error_type,
-                           const std::string& original_language,
+  void OnTranslateComplete(TranslateErrors error_type,
+                           const std::string& source_language,
                            double translation_time) override {
     on_translate_complete_called_ = true;
     error_type_ = error_type;
-    original_language_ = original_language;
+    source_language_ = source_language;
     translation_time_ = translation_time;
   }
 
-  web::WebTaskEnvironment task_environment_;
-  std::unique_ptr<web::TestWebState> test_web_state_;
-  std::unique_ptr<web::TestBrowserState> test_browser_state_;
-  web::FakeWebFrame fake_main_frame_;
-  web::FakeWebFrame fake_iframe_;
-  id mock_js_translate_manager_;
-  std::unique_ptr<TranslateController> translate_controller_;
-  TranslateErrors::Type error_type_;
+  void TranslateControllerWasDestroyed(
+      TranslateController* translate_controller) override {
+    translate_controller_observation_.Reset();
+  }
+
+  TranslateController* translate_controller() {
+    return TranslateController::FromWebState(fake_web_state_.get());
+  }
+
+  web::WebTaskEnvironment task_environment_{
+      web::WebTaskEnvironment::MainThreadType::IO};
+  std::unique_ptr<web::FakeWebState> fake_web_state_;
+  std::unique_ptr<web::FakeBrowserState> fake_browser_state_;
+  raw_ptr<web::FakeWebFramesManager> web_frames_manager_;
+  TranslateErrors error_type_;
   double ready_time_;
   double load_time_;
-  std::string original_language_;
+  std::string source_language_;
   double translation_time_;
   bool on_script_ready_called_;
   bool on_translate_complete_called_;
+  base::ScopedObservation<TranslateController, TranslateController::Observer>
+      translate_controller_observation_{this};
 };
-
-// Tests that OnJavascriptCommandReceived() returns false to malformed commands.
-TEST_F(TranslateControllerTest, OnJavascriptCommandReceived) {
-  base::DictionaryValue malformed_command;
-  EXPECT_FALSE(translate_controller_->OnJavascriptCommandReceived(
-      malformed_command, GURL("http://google.com"), /*interacting*/ false,
-      &fake_main_frame_));
-}
-
-// Tests that OnJavascriptCommandReceived() returns false to iframe commands.
-TEST_F(TranslateControllerTest, OnIFrameJavascriptCommandReceived) {
-  base::DictionaryValue command;
-  command.SetString("command", "translate.ready");
-  command.SetDouble("errorCode", TranslateErrors::TRANSLATION_TIMEOUT);
-  command.SetDouble("loadTime", .0);
-  command.SetDouble("readyTime", .0);
-  EXPECT_FALSE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting*/ false,
-      &fake_iframe_));
-}
 
 // Tests that OnTranslateScriptReady() is called when a timeout message is
 // received from the JS side.
 TEST_F(TranslateControllerTest, OnTranslateScriptReadyTimeoutCalled) {
-  base::DictionaryValue command;
-  command.SetString("command", "translate.ready");
-  command.SetDouble("errorCode", TranslateErrors::TRANSLATION_TIMEOUT);
-  command.SetDouble("loadTime", .0);
-  command.SetDouble("readyTime", .0);
-  EXPECT_TRUE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting*/ false,
-      &fake_main_frame_));
+  base::DictValue command;
+  command.Set("command", "ready");
+  command.Set("errorCode",
+              static_cast<double>(TranslateErrors::TRANSLATION_TIMEOUT));
+  command.Set("loadTime", .0);
+  command.Set("readyTime", .0);
+  translate_controller()->OnJavascriptCommandReceived(
+      url::Origin(), base::DictValue(std::move(command)));
   EXPECT_TRUE(on_script_ready_called_);
   EXPECT_FALSE(on_translate_complete_called_);
   EXPECT_FALSE(error_type_ == TranslateErrors::NONE);
 }
 
 // Tests that OnTranslateScriptReady() is called with the right parameters when
-// a |translate.ready| message is received from the JS side.
+// a `ready` message is received from the JS side.
 TEST_F(TranslateControllerTest, OnTranslateScriptReadyCalled) {
   // Arbitrary values.
   double some_load_time = 23.1;
   double some_ready_time = 12.2;
 
-  base::DictionaryValue command;
-  command.SetString("command", "translate.ready");
-  command.SetDouble("errorCode", TranslateErrors::NONE);
-  command.SetDouble("loadTime", some_load_time);
-  command.SetDouble("readyTime", some_ready_time);
-  EXPECT_TRUE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting*/ false,
-      &fake_main_frame_));
+  base::DictValue command;
+  command.Set("command", "ready");
+  command.Set("errorCode", static_cast<double>(TranslateErrors::NONE));
+  command.Set("loadTime", some_load_time);
+  command.Set("readyTime", some_ready_time);
+  translate_controller()->OnJavascriptCommandReceived(
+      url::Origin(), base::DictValue(std::move(command)));
   EXPECT_TRUE(on_script_ready_called_);
   EXPECT_FALSE(on_translate_complete_called_);
   EXPECT_TRUE(error_type_ == TranslateErrors::NONE);
@@ -139,110 +132,38 @@ TEST_F(TranslateControllerTest, OnTranslateScriptReadyCalled) {
 }
 
 // Tests that OnTranslateComplete() is called with the right parameters when a
-// |translate.status| message is received from the JS side.
+// `status` message is received from the JS side.
 TEST_F(TranslateControllerTest, TranslationSuccess) {
   // Arbitrary values.
-  std::string some_original_language("en");
+  std::string some_source_language("en");
   double some_translation_time = 12.9;
 
-  base::DictionaryValue command;
-  command.SetString("command", "translate.status");
-  command.SetDouble("errorCode", TranslateErrors::NONE);
-  command.SetString("originalPageLanguage", some_original_language);
-  command.SetDouble("translationTime", some_translation_time);
-  EXPECT_TRUE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting*/ false,
-      &fake_main_frame_));
+  base::DictValue command;
+  command.Set("command", "status");
+  command.Set("errorCode", static_cast<double>(TranslateErrors::NONE));
+  command.Set("pageSourceLanguage", some_source_language);
+  command.Set("translationTime", some_translation_time);
+  translate_controller()->OnJavascriptCommandReceived(
+      url::Origin(), base::DictValue(std::move(command)));
   EXPECT_FALSE(on_script_ready_called_);
   EXPECT_TRUE(on_translate_complete_called_);
   EXPECT_TRUE(error_type_ == TranslateErrors::NONE);
-  EXPECT_EQ(some_original_language, original_language_);
+  EXPECT_EQ(some_source_language, source_language_);
   EXPECT_EQ(some_translation_time, translation_time_);
 }
 
 // Tests that OnTranslateComplete() is called with the right parameters when a
-// |translate.status| message is received from the JS side.
+// `status` message is received from the JS side.
 TEST_F(TranslateControllerTest, TranslationFailure) {
-  base::DictionaryValue command;
-  command.SetString("command", "translate.status");
-  command.SetDouble("errorCode", TranslateErrors::INITIALIZATION_ERROR);
-  EXPECT_TRUE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting*/ false,
-      &fake_main_frame_));
+  base::DictValue command;
+  command.Set("command", "status");
+  command.Set("errorCode",
+              static_cast<double>(TranslateErrors::INITIALIZATION_ERROR));
+  translate_controller()->OnJavascriptCommandReceived(
+      url::Origin(), base::DictValue(std::move(command)));
   EXPECT_FALSE(on_script_ready_called_);
   EXPECT_TRUE(on_translate_complete_called_);
   EXPECT_FALSE(error_type_ == TranslateErrors::NONE);
-}
-
-// Tests that OnTranslateLoadJavaScript() is called with the right parameters
-// when a |translate.loadjavascript| message is received from the JS side.
-TEST_F(TranslateControllerTest, OnTranslateLoadJavascript) {
-  base::DictionaryValue command;
-  command.SetString("command", "translate.loadjavascript");
-  command.SetString("url", "https://translate.googleapis.com/javascript.js");
-  EXPECT_TRUE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting=*/false,
-      &fake_main_frame_));
-}
-
-// Tests that OnTranslateSendRequest() is called with the right parameters
-// when a |translate.sendrequest| message is received from the JS side.
-TEST_F(TranslateControllerTest, OnTranslateSendRequestWithValidCommand) {
-  base::DictionaryValue command;
-  command.SetString("command", "translate.sendrequest");
-  command.SetString("method", "POST");
-  command.SetString("url",
-                    "https://translate.googleapis.com/translate?key=abcd");
-  command.SetString("body", "helloworld");
-  command.SetDouble("requestID", 0);
-  EXPECT_TRUE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting=*/false,
-      &fake_main_frame_));
-}
-
-// Tests that OnTranslateSendRequest() rejects a bad url contained in the
-// |translate.sendrequest| message received from Javascript.
-TEST_F(TranslateControllerTest, OnTranslateSendRequestWithBadURL) {
-  base::DictionaryValue command;
-  command.SetString("command", "translate.sendrequest");
-  command.SetString("method", "POST");
-  command.SetString("url", "https://badurl.example.com");
-  command.SetString("body", "helloworld");
-  command.SetDouble("requestID", 0);
-  EXPECT_FALSE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting=*/false,
-      &fake_main_frame_));
-}
-
-// Tests that OnTranslateSendRequest() called with a bad method will eventually
-// cause the request to fail.
-TEST_F(TranslateControllerTest, OnTranslateSendRequestWithBadMethod) {
-  base::DictionaryValue command;
-  command.SetString("command", "translate.sendrequest");
-  command.SetString("method", "POST\r\nHost: other.example.com");
-  command.SetString("url",
-                    "https://translate.googleapis.com/translate?key=abcd");
-  command.SetString("body", "helloworld");
-  command.SetDouble("requestID", 0);
-
-  [[mock_js_translate_manager_ expect]
-      handleTranslateResponseWithURL:
-          @"https://translate.googleapis.com/translate?key=abcd"
-                           requestID:0
-                        responseCode:net::HttpStatusCode::HTTP_BAD_REQUEST
-                          statusText:@""
-                         responseURL:@"https://translate.googleapis.com/"
-                                     @"translate?key=abcd"
-                        responseText:@""];
-
-  // The command will be accepted, but a bad method should cause the request to
-  // fail shortly thereafter.
-  EXPECT_TRUE(translate_controller_->OnJavascriptCommandReceived(
-      command, GURL("http://google.com"), /*interacting=*/false,
-      &fake_main_frame_));
-  task_environment_.RunUntilIdle();
-
-  [mock_js_translate_manager_ verify];
 }
 
 }  // namespace translate

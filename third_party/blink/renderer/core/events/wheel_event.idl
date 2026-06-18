@@ -32,7 +32,8 @@
     readonly attribute double deltaX;
     readonly attribute double deltaY;
     readonly attribute double deltaZ;
-    readonly attribute unsigned long deltaMode;
+    [Measure] readonly attribute unsigned long deltaMode;
+    [RuntimeEnabled=WheelEventMomentum] readonly attribute boolean momentum;
 
     // Non-standard APIs
     [MeasureAs=WheelEventWheelDeltaX] readonly attribute long wheelDeltaX;

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,14 +10,8 @@
 using ExpandableContainerViewTest = ChromeViewsTestBase;
 
 TEST_F(ExpandableContainerViewTest, DetailLevelVisibility) {
-  std::vector<base::string16> details;
-  details.push_back(base::ASCIIToUTF16("Detail 1"));
-  details.push_back(base::ASCIIToUTF16("Detail 2"));
-  details.push_back(base::ASCIIToUTF16("Detail 2"));
-
-  int content_width = 100;
-  auto container =
-      std::make_unique<ExpandableContainerView>(details, content_width);
+  std::u16string details = u"- Detail #1 \n - Detail #2 \n - Detail #3";
+  auto container = std::make_unique<ExpandableContainerView>(details);
 
   // Initially the details view should not be expanded or visible.
   EXPECT_FALSE(container->details_view()->GetVisible());

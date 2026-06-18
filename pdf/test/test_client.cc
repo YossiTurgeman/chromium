@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,18 @@
 
 #include <memory>
 
+#include "base/time/time.h"
+#include "pdf/buildflags.h"
 #include "pdf/document_layout.h"
-#include "pdf/ppapi_migration/url_loader.h"
+#include "pdf/loader/url_loader.h"
+#include "pdf/pdfium/pdfium_engine.h"
+#include "pdf/test/test_helpers.h"
+#include "third_party/skia/include/core/SkColor.h"
 
 namespace chrome_pdf {
 
-TestClient::TestClient() = default;
+TestClient::TestClient(bool use_skia_renderer)
+    : use_skia_renderer_(use_skia_renderer) {}
 
 TestClient::~TestClient() = default;
 
@@ -21,6 +27,11 @@ void TestClient::ProposeDocumentLayout(const DocumentLayout& layout) {
   // complexity without much gain. Instead, we can override this behavior just
   // where it matters (like PDFiumEngineTest.ProposeDocumentLayoutWithOverlap).
   engine()->ApplyDocumentLayout(layout.options());
+}
+
+bool TestClient::UseSkiaPremultipliedAlpha() {
+  // In tests, always use premultiplied alpha in skia mode
+  return use_skia_renderer_;
 }
 
 bool TestClient::Confirm(const std::string& message) {
@@ -40,27 +51,47 @@ std::unique_ptr<UrlLoader> TestClient::CreateUrlLoader() {
   return nullptr;
 }
 
-std::vector<PDFEngine::Client::SearchStringResult> TestClient::SearchString(
-    const base::char16* string,
-    const base::char16* term,
+v8::Isolate* TestClient::GetIsolate() {
+  return GetBlinkIsolate();
+}
+
+std::vector<PDFiumEngineClient::SearchStringResult> TestClient::SearchString(
+    const std::u16string& needle,
+    const std::u16string& haystack,
     bool case_sensitive) {
   return std::vector<SearchStringResult>();
 }
 
-pp::Instance* TestClient::GetPluginInstance() {
-  return nullptr;
-}
-
-bool TestClient::IsPrintPreview() {
+bool TestClient::IsPrintPreview() const {
   return false;
 }
 
-uint32_t TestClient::GetBackgroundColor() {
-  return 0;
+SkColor TestClient::GetBackgroundColor() const {
+  return SK_ColorTRANSPARENT;
 }
 
-float TestClient::GetToolbarHeightInScreenCoords() {
-  return 0;
+void TestClient::SetSelectedText(const std::string& selected_text) {}
+
+void TestClient::SetLinkUnderCursor(const std::string& link_under_cursor) {}
+
+bool TestClient::IsValidLink(const std::string& url) {
+  return !url.empty();
 }
+
+void TestClient::OnNewTextFragmentsSearchStarted() {}
+
+#if BUILDFLAG(ENABLE_PDF_INK2)
+bool TestClient::IsInAnnotationMode() const {
+  return false;
+}
+#endif  // BUILDFLAG(ENABLE_PDF_INK2)
+
+#if BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)
+void TestClient::OnSearchifyStateChange(bool busy) {}
+
+void TestClient::OnHasSearchifyText() {}
+
+void TestClient::MaybeShowSearchifyInProgress() {}
+#endif
 
 }  // namespace chrome_pdf

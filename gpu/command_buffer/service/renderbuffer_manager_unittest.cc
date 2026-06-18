@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,9 @@
 
 #include <stdint.h>
 
+#include <memory>
 #include <set>
+
 #include "gpu/command_buffer/common/gles2_cmd_utils.h"
 #include "gpu/command_buffer/service/feature_info.h"
 #include "gpu/command_buffer/service/gpu_service_test.h"
@@ -27,20 +29,16 @@ class RenderbufferManagerTestBase : public GpuServiceTest {
   static const GLint kMaxSamples = 4;
 
  protected:
-  void SetUpBase(MemoryTracker* memory_tracker,
-                 bool depth24_supported,
-                 bool use_gles) {
+  void SetUpBase(scoped_refptr<MemoryTracker> memory_tracker,
+                 bool depth24_supported) {
     GpuServiceTest::SetUp();
     feature_info_ = new FeatureInfo();
     TestHelper::SetupFeatureInfoInitExpectationsWithGLVersion(
-        gl_.get(),
-        depth24_supported ? "GL_OES_depth24" : "",
-        "",
-        use_gles ? "OpenGL ES 2.0" : "2.1",
-        feature_info_->context_type());
+        gl_.get(), depth24_supported ? "GL_OES_depth24" : "", "",
+        "OpenGL ES 3.0", feature_info_->context_type());
     feature_info_->InitializeForTesting();
-    manager_.reset(new RenderbufferManager(
-        memory_tracker, kMaxSize, kMaxSamples, feature_info_.get()));
+    manager_ = std::make_unique<RenderbufferManager>(
+        std::move(memory_tracker), kMaxSize, kMaxSamples, feature_info_.get());
   }
 
   void TearDown() override {
@@ -57,8 +55,7 @@ class RenderbufferManagerTest : public RenderbufferManagerTestBase {
  protected:
   void SetUp() override {
     bool depth24_supported = false;
-    bool use_gles = false;
-    SetUpBase(nullptr, depth24_supported, use_gles);
+    SetUpBase(nullptr, depth24_supported);
   }
 };
 
@@ -67,15 +64,16 @@ class RenderbufferManagerMemoryTrackerTest
  protected:
   void SetUp() override {
     bool depth24_supported = false;
-    bool use_gles = false;
-    SetUpBase(&mock_memory_tracker_, depth24_supported, use_gles);
+    mock_memory_tracker_ =
+        base::MakeRefCounted<StrictMock<MockMemoryTracker>>();
+    SetUpBase(mock_memory_tracker_, depth24_supported);
   }
 
-  StrictMock<MockMemoryTracker> mock_memory_tracker_;
+  scoped_refptr<StrictMock<MockMemoryTracker>> mock_memory_tracker_;
 };
 
 #define EXPECT_MEMORY_ALLOCATION_CHANGE(old_size, new_size)                \
-  EXPECT_CALL(mock_memory_tracker_,                                        \
+  EXPECT_CALL(*mock_memory_tracker_,                                       \
               TrackMemoryAllocatedChange(static_cast<uint64_t>(new_size) - \
                                          static_cast<uint64_t>(old_size))) \
       .Times(1)                                                            \
@@ -154,6 +152,7 @@ TEST_F(RenderbufferManagerTest, Renderbuffer) {
   // Check if we set the info it gets marked as not cleared.
   const GLsizei kSamples = 4;
   const GLenum kFormat = GL_RGBA4;
+  const size_t kNumOfBytesPerPixel = 2;
   const GLsizei kWidth = 128;
   const GLsizei kHeight = 64;
   manager_->SetInfoAndInvalidate(renderbuffer1, kSamples, kFormat, kWidth,
@@ -165,7 +164,8 @@ TEST_F(RenderbufferManagerTest, Renderbuffer) {
   EXPECT_FALSE(renderbuffer1->cleared());
   EXPECT_FALSE(renderbuffer1->IsDeleted());
   EXPECT_TRUE(manager_->HaveUnclearedRenderbuffers());
-  EXPECT_EQ(kWidth * kHeight * 4u * 4u, renderbuffer1->EstimatedSize());
+  EXPECT_EQ(kWidth * kHeight * kSamples * kNumOfBytesPerPixel,
+            renderbuffer1->EstimatedSize());
 
   manager_->SetCleared(renderbuffer1, true);
   EXPECT_TRUE(renderbuffer1->cleared());
@@ -315,8 +315,7 @@ class RenderbufferManagerFormatGLESTest : public RenderbufferManagerTestBase {
  protected:
   void SetUp() override {
     bool depth24_supported = true;
-    bool use_gles = true;
-    SetUpBase(nullptr, depth24_supported, use_gles);
+    SetUpBase(nullptr, depth24_supported);
   }
 };
 
@@ -326,23 +325,5 @@ TEST_F(RenderbufferManagerFormatGLESTest, UpgradeDepthFormatOnGLES) {
   EXPECT_EQ(static_cast<GLenum>(GL_DEPTH_COMPONENT24), impl_format);
 }
 
-class RenderbufferManagerFormatNonGLESTest :
-      public RenderbufferManagerTestBase {
- protected:
-  void SetUp() override {
-    bool depth24_supported = true;
-    bool use_gles = false;
-    SetUpBase(nullptr, depth24_supported, use_gles);
-  }
-};
-
-TEST_F(RenderbufferManagerFormatNonGLESTest, UseUnsizedDepthFormatOnNonGLES) {
-  GLenum impl_format =
-      manager_->InternalRenderbufferFormatToImplFormat(GL_DEPTH_COMPONENT16);
-  EXPECT_EQ(static_cast<GLenum>(GL_DEPTH_COMPONENT), impl_format);
-}
-
 }  // namespace gles2
 }  // namespace gpu
-
-

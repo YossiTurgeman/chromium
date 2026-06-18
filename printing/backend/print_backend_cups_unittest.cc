@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,22 +7,29 @@
 #include <cups/cups.h>
 
 #include "base/strings/string_number_conversions.h"
-#include "build/build_config.h"
+#include "printing/backend/cups_deleters.h"
 #include "printing/backend/print_backend.h"
 #include "printing/backend/print_backend_consts.h"
+#include "printing/mojom/print.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace printing {
 
 namespace {
 
-bool IsDestTypeEligible(int dest_type) {
+ScopedDestination AddDest(const char* name) {
   cups_dest_t* dest = nullptr;
-  int num_dests = 0;
-  num_dests =
-      cupsAddDest(/*name=*/"test_dest", /*instance=*/nullptr, num_dests, &dest);
-  if (num_dests != 1)
+  if (cupsAddDest(name, /*instance=*/nullptr, /*num_dests=*/0, &dest) != 1) {
+    return nullptr;
+  }
+  return ScopedDestination(dest);
+}
+
+bool IsDestTypeEligible(int dest_type) {
+  ScopedDestination dest = AddDest(/*name=*/"test_dest");
+  if (!dest) {
     return false;
+  }
 
   cups_option_t* options = nullptr;
   int num_options = 0;
@@ -33,47 +40,75 @@ bool IsDestTypeEligible(int dest_type) {
   dest->options = options;
 
   PrinterBasicInfo printer_info;
-  const bool eligible =
+  const mojom::ResultCode result_code =
       PrintBackendCUPS::PrinterBasicInfoFromCUPS(*dest, &printer_info);
 
-  cupsFreeDests(num_dests, dest);
-  return eligible;
+  return result_code == mojom::ResultCode::kSuccess;
 }
 
 }  // namespace
 
 TEST(PrintBackendCupsTest, PrinterBasicInfoFromCUPS) {
   constexpr char kName[] = "printer";
-  cups_dest_t* printer = nullptr;
-  ASSERT_EQ(
-      1, cupsAddDest(kName, /*instance=*/nullptr, /*num_dests=*/0, &printer));
+  constexpr char kDescription[] = "description";
+  ScopedDestination printer = AddDest(kName);
+  ASSERT_TRUE(printer);
 
   int num_options = 0;
   cups_option_t* options = nullptr;
-#if defined(OS_MAC)
   num_options =
-      cupsAddOption(kCUPSOptPrinterInfo, "info", num_options, &options);
-  num_options = cupsAddOption(kCUPSOptPrinterMakeAndModel, "description",
-                              num_options, &options);
-#else
-  num_options =
-      cupsAddOption(kCUPSOptPrinterInfo, "description", num_options, &options);
-#endif
+      cupsAddOption(kCUPSOptPrinterInfo, kDescription, num_options, &options);
+  ASSERT_EQ(1, num_options);
+  ASSERT_TRUE(options);
   printer->num_options = num_options;
   printer->options = options;
 
   PrinterBasicInfo printer_info;
-  EXPECT_TRUE(
-      PrintBackendCUPS::PrinterBasicInfoFromCUPS(*printer, &printer_info));
-  cupsFreeDests(/*num_dests=*/1, printer);
+  EXPECT_EQ(PrintBackendCUPS::PrinterBasicInfoFromCUPS(*printer, &printer_info),
+            mojom::ResultCode::kSuccess);
 
   EXPECT_EQ(kName, printer_info.printer_name);
-#if defined(OS_MAC)
-  EXPECT_EQ("info", printer_info.display_name);
-#else
   EXPECT_EQ(kName, printer_info.display_name);
-#endif
-  EXPECT_EQ("description", printer_info.printer_description);
+  EXPECT_EQ(kDescription, printer_info.printer_description);
+
+  // Check that `kDriverInfoTagName` did not get set. This was Mac-only
+  // behavior.
+  EXPECT_EQ(printer_info.options.find(kDriverInfoTagName),
+            printer_info.options.end());
+}
+
+TEST(PrintBackendCupsTest, PrinterBasicInfoFromCUPSNoOptionsDisplayName) {
+  constexpr char kName[] = "printer";
+  ScopedDestination printer = AddDest(kName);
+  ASSERT_TRUE(printer);
+
+  PrinterBasicInfo printer_info;
+  EXPECT_EQ(PrintBackendCUPS::PrinterBasicInfoFromCUPS(*printer, &printer_info),
+            mojom::ResultCode::kSuccess);
+
+  // Ensure that even if no options are specified that the display name is still
+  // set.
+  EXPECT_EQ(kName, printer_info.printer_name);
+  EXPECT_EQ(kName, printer_info.display_name);
+}
+
+TEST(PrintBackendCupsTest, PrinterDriverInfoFromCUPS) {
+  constexpr char kName[] = "test-printer-name";
+  constexpr char kDescription[] = "A test printer";
+  ScopedDestination printer = AddDest(kName);
+  ASSERT_TRUE(printer);
+
+  int num_options = 0;
+  cups_option_t* options = nullptr;
+  num_options = cupsAddOption(kCUPSOptPrinterMakeAndModel, kDescription,
+                              num_options, &options);
+  ASSERT_EQ(1, num_options);
+  ASSERT_TRUE(options);
+  printer->num_options = num_options;
+  printer->options = options;
+
+  EXPECT_EQ(kDescription,
+            PrintBackendCUPS::PrinterDriverInfoFromCUPS(*printer));
 }
 
 TEST(PrintBackendCupsTest, EligibleDestTypes) {
@@ -82,7 +117,7 @@ TEST(PrintBackendCupsTest, EligibleDestTypes) {
   EXPECT_FALSE(IsDestTypeEligible(CUPS_PRINTER_DISCOVERED));
   EXPECT_TRUE(IsDestTypeEligible(CUPS_PRINTER_LOCAL));
 
-  // Try combos. |CUPS_PRINTER_LOCAL| has a value of 0, but keep these test
+  // Try combos. `CUPS_PRINTER_LOCAL` has a value of 0, but keep these test
   // cases in the event that the constant values change in CUPS.
   EXPECT_FALSE(IsDestTypeEligible(CUPS_PRINTER_LOCAL | CUPS_PRINTER_FAX));
   EXPECT_FALSE(IsDestTypeEligible(CUPS_PRINTER_LOCAL | CUPS_PRINTER_SCANNER));

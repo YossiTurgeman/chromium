@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,22 @@
 
 #include <stdint.h>
 
+#include <string>
 #include <vector>
 
-#include "base/strings/string16.h"
 #include "base/win/scoped_handle.h"
-#include "components/crx_file/crx_verifier.h"
 
 namespace base {
 
 class CommandLine;
 class FilePath;
+class Version;
 
 }  // namespace base
+
+namespace crx_file {
+enum class VerifierFormat;
+}
 
 namespace elevation_service {
 
@@ -32,9 +36,8 @@ HRESULT CleanupChromeRecoveryDirectory();
 // |caller_proc_id| is 0. Please read the doc comment in
 // elevation_service_idl.idl for the other parameters.
 HRESULT RunChromeRecoveryCRX(const base::FilePath& crx_path,
-                             const base::string16& browser_appid,
-                             const base::string16& browser_version,
-                             const base::string16& session_id,
+                             const std::wstring& browser_version,
+                             const std::wstring& session_id,
                              uint32_t caller_proc_id,
                              base::win::ScopedHandle* proc_handle);
 
@@ -42,8 +45,11 @@ HRESULT RunChromeRecoveryCRX(const base::FilePath& crx_path,
 // |crx_path|. The returned |proc_handle| is a process handle that is valid for
 // the |caller_proc_id| process, or the current process if |caller_proc_id| is
 // 0. |unpacked_under_path| is expected to be eventually deleted by the caller.
+// |min_crx_version| represents the minimum version of the CRX manifest allowed,
+// to prevent version rollback attacks.
 HRESULT RunCRX(const base::FilePath& crx_path,
                const base::CommandLine& args,
+               const base::Version& min_crx_version,
                const crx_file::VerifierFormat& crx_format,
                const std::vector<uint8_t>& crx_hash,
                const base::FilePath& unpack_under_path,

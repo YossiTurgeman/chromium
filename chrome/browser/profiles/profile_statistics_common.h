@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "base/callback_forward.h"
+#include "base/functional/callback_forward.h"
 
 namespace profiles {
 // Constants for the categories in ProfileCategoryStats.
@@ -33,7 +33,8 @@ using ProfileCategoryStats = std::vector<ProfileCategoryStat>;
 
 // Definition of the callback function. Note that a copy of
 // |ProfileCategoryStats| is made each time the callback is called.
-using ProfileStatisticsCallback = base::Callback<void(ProfileCategoryStats)>;
+using ProfileStatisticsCallback =
+    base::RepeatingCallback<void(ProfileCategoryStats)>;
 }  // namespace profiles
 
 #endif  // CHROME_BROWSER_PROFILES_PROFILE_STATISTICS_COMMON_H_

@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,9 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/check_op.h"
+#include "base/functional/bind.h"
+#include "base/types/pass_key.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
@@ -51,8 +52,7 @@ SyncFileSystemBackend::SyncFileSystemBackend(Profile* profile)
 
 SyncFileSystemBackend::~SyncFileSystemBackend() {
   if (change_tracker_) {
-    GetDelegate()->file_task_runner()->DeleteSoon(
-        FROM_HERE, change_tracker_.release());
+    change_tracker_->Disable();
   }
 }
 
@@ -83,22 +83,23 @@ void SyncFileSystemBackend::Initialize(storage::FileSystemContext* context) {
 
 void SyncFileSystemBackend::ResolveURL(const storage::FileSystemURL& url,
                                        storage::OpenFileSystemMode mode,
-                                       OpenFileSystemCallback callback) {
+                                       ResolveURLCallback callback) {
   DCHECK(CanHandleType(url.type()));
 
   if (skip_initialize_syncfs_service_for_testing_) {
     GetDelegate()->OpenFileSystem(
-        url.origin(), url.type(), mode, std::move(callback),
+        url.GetBucket(), url.type(), mode, std::move(callback),
         GetSyncableFileSystemRootURI(url.origin().GetURL()));
     return;
   }
 
   // It is safe to pass Unretained(this) since |context_| owns it.
-  SyncStatusCallback initialize_callback = base::Bind(
+  SyncStatusCallback initialize_callback = base::BindOnce(
       &SyncFileSystemBackend::DidInitializeSyncFileSystemService,
-      base::Unretained(this), base::RetainedRef(context_),
-      url.origin().GetURL(), url.type(), mode, base::Passed(&callback));
-  InitializeSyncFileSystemService(url.origin().GetURL(), initialize_callback);
+      base::Unretained(this), base::RetainedRef(context_.get()),
+      url.origin().GetURL(), url.type(), mode, std::move(callback));
+  InitializeSyncFileSystemService(url.origin().GetURL(),
+                                  std::move(initialize_callback));
 }
 
 storage::AsyncFileUtil* SyncFileSystemBackend::GetAsyncFileUtil(
@@ -120,7 +121,9 @@ SyncFileSystemBackend::GetCopyOrMoveFileValidatorFactory(
   return nullptr;
 }
 
-storage::FileSystemOperation* SyncFileSystemBackend::CreateFileSystemOperation(
+std::unique_ptr<storage::FileSystemOperation>
+SyncFileSystemBackend::CreateFileSystemOperation(
+    storage::OperationType type,
     const storage::FileSystemURL& url,
     storage::FileSystemContext* context,
     base::File::Error* error_code) const {
@@ -134,12 +137,13 @@ storage::FileSystemOperation* SyncFileSystemBackend::CreateFileSystemOperation(
     return nullptr;
 
   if (url.type() == storage::kFileSystemTypeSyncableForInternalSync) {
-    return storage::FileSystemOperation::Create(url, context,
+    return storage::FileSystemOperation::Create(type, url, context,
                                                 std::move(operation_context));
   }
 
-  return new SyncableFileSystemOperation(url, context,
-                                         std::move(operation_context));
+  return std::make_unique<SyncableFileSystemOperation>(
+      type, url, context, std::move(operation_context),
+      base::PassKey<SyncFileSystemBackend>());
 }
 
 bool SyncFileSystemBackend::SupportsStreaming(
@@ -158,7 +162,9 @@ SyncFileSystemBackend::CreateFileStreamReader(
     int64_t offset,
     int64_t max_bytes_to_read,
     const base::Time& expected_modification_time,
-    storage::FileSystemContext* context) const {
+    storage::FileSystemContext* context,
+    file_access::ScopedFileAccessDelegate::
+        RequestFilesAccessIOCallback /*file_access*/) const {
   DCHECK(CanHandleType(url.type()));
   return GetDelegate()->CreateFileStreamReader(
       url, offset, expected_modification_time, context);
@@ -203,7 +209,7 @@ SyncFileSystemBackend* SyncFileSystemBackend::GetBackend(
 }
 
 void SyncFileSystemBackend::SetLocalFileChangeTracker(
-    std::unique_ptr<LocalFileChangeTracker> tracker) {
+    scoped_refptr<LocalFileChangeTracker> tracker) {
   DCHECK(!change_tracker_);
   DCHECK(tracker);
   change_tracker_ = std::move(tracker);
@@ -232,7 +238,7 @@ storage::SandboxFileSystemBackendDelegate* SyncFileSystemBackend::GetDelegate()
 
 void SyncFileSystemBackend::InitializeSyncFileSystemService(
     const GURL& origin_url,
-    const SyncStatusCallback& callback) {
+    SyncStatusCallback callback) {
   // Repost to switch from IO thread to UI thread.
   if (!BrowserThread::CurrentlyOn(BrowserThread::UI)) {
     DCHECK_CURRENTLY_ON(BrowserThread::IO);
@@ -240,20 +246,21 @@ void SyncFileSystemBackend::InitializeSyncFileSystemService(
     content::GetUIThreadTaskRunner({})->PostTask(
         FROM_HERE,
         base::BindOnce(&SyncFileSystemBackend::InitializeSyncFileSystemService,
-                       base::Unretained(this), origin_url, callback));
+                       base::Unretained(this), origin_url,
+                       std::move(callback)));
     return;
   }
 
   if (!g_browser_process->profile_manager()->IsValidProfile(profile_)) {
     // Profile was destroyed.
-    callback.Run(SYNC_FILE_ERROR_FAILED);
+    std::move(callback).Run(SYNC_FILE_ERROR_FAILED);
     return;
   }
 
   SyncFileSystemService* service =
       SyncFileSystemServiceFactory::GetForProfile(profile_);
   DCHECK(service);
-  service->InitializeForApp(context_, origin_url, callback);
+  service->InitializeForApp(context_, origin_url, std::move(callback));
 }
 
 void SyncFileSystemBackend::DidInitializeSyncFileSystemService(
@@ -261,7 +268,7 @@ void SyncFileSystemBackend::DidInitializeSyncFileSystemService(
     const GURL& origin_url,
     storage::FileSystemType type,
     storage::OpenFileSystemMode mode,
-    OpenFileSystemCallback callback,
+    ResolveURLCallback callback,
     SyncStatusCode status) {
   // Repost to switch from UI thread to IO thread.
   if (!BrowserThread::CurrentlyOn(BrowserThread::IO)) {

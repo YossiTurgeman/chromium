@@ -1,11 +1,12 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_WORKER_BACKING_THREAD_STARTUP_DATA_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_WORKER_BACKING_THREAD_STARTUP_DATA_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/platform/wtf/cross_thread_copier.h"
 
 namespace blink {
@@ -32,16 +33,5 @@ struct WorkerBackingThreadStartupData {
 };
 
 }  // namespace blink
-
-namespace WTF {
-
-// This allows to pass base::Optional<WorkerBackingThreadStartupData> across
-// threads by PostTask().
-template <>
-struct CrossThreadCopier<base::Optional<blink::WorkerBackingThreadStartupData>>
-    : public CrossThreadCopierPassThrough<
-          base::Optional<blink::WorkerBackingThreadStartupData>> {};
-
-}  // namespace WTF
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_WORKER_BACKING_THREAD_STARTUP_DATA_H_

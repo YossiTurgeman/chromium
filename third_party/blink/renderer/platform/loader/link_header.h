@@ -1,11 +1,12 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_LINK_HEADER_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_LINK_HEADER_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
@@ -29,11 +30,13 @@ class LinkHeader {
   const String& HeaderIntegrity() const { return header_integrity_; }
   const String& Variants() const { return variants_; }
   const String& VariantKey() const { return variant_key_; }
-  const base::Optional<String>& Anchor() const { return anchor_; }
+  const String& Blocking() const { return blocking_; }
+  const String& ReferrerPolicy() const { return referrer_policy_; }
+  const String& FetchPriority() const { return fetch_priority_; }
+  const std::optional<String>& Anchor() const { return anchor_; }
   bool Valid() const { return is_valid_; }
   bool IsViewportDependent() const {
-    return !Media().IsEmpty() || !ImageSrcset().IsEmpty() ||
-           !ImageSizes().IsEmpty();
+    return !Media().empty() || !ImageSrcset().empty() || !ImageSizes().empty();
   }
 
   enum LinkParameterName {
@@ -55,6 +58,9 @@ class LinkHeader {
     kLinkParameterHeaderIntegrity,
     kLinkParameterVariants,
     kLinkParameterVariantKey,
+    kLinkParameterBlocking,
+    kLinkParameterReferrerPolicy,
+    kLinkParameterFetchPriority,
   };
 
  private:
@@ -77,7 +83,10 @@ class LinkHeader {
   String header_integrity_;
   String variants_;
   String variant_key_;
-  base::Optional<String> anchor_;
+  String blocking_;
+  String referrer_policy_;
+  String fetch_priority_;
+  std::optional<String> anchor_;
   bool is_valid_;
 };
 
@@ -100,4 +109,4 @@ class PLATFORM_EXPORT LinkHeaderSet {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_LINK_HEADER_H_

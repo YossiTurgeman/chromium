@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 #include <memory>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "net/base/net_export.h"
 #include "net/base/upload_data_stream.h"
@@ -36,16 +35,18 @@ class NET_EXPORT ChunkedUploadDataStream : public UploadDataStream {
   // The writer may only be used on the ChunkedUploadDataStream's thread.
   class NET_EXPORT Writer {
    public:
+    Writer(const Writer&) = delete;
+    Writer& operator=(const Writer&) = delete;
     ~Writer();
 
     // Adds data to the stream. |is_done| should be true if this is the last
-    // data to be appended. |data_len| must not be 0 unless |is_done| is true.
+    // data to be appended. |data| must not be empty unless |is_done| is true.
     // Once called with |is_done| being true, must never be called again.
     // Returns true if write was passed successfully on to the next layer,
     // though the data may not actually have been written to the underlying
     // URLRequest.  Returns false if unable to write the data failed because the
     // underlying ChunkedUploadDataStream was destroyed.
-    bool AppendData(const char* data, int data_len, bool is_done);
+    bool AppendData(base::span<const uint8_t> data, bool is_done);
 
    private:
     friend class ChunkedUploadDataStream;
@@ -53,12 +54,13 @@ class NET_EXPORT ChunkedUploadDataStream : public UploadDataStream {
     explicit Writer(base::WeakPtr<ChunkedUploadDataStream> upload_data_stream);
 
     const base::WeakPtr<ChunkedUploadDataStream> upload_data_stream_;
-
-    DISALLOW_COPY_AND_ASSIGN(Writer);
   };
 
-  explicit ChunkedUploadDataStream(int64_t identifier);
+  explicit ChunkedUploadDataStream(int64_t identifier,
+                                   bool has_null_source = false);
 
+  ChunkedUploadDataStream(const ChunkedUploadDataStream&) = delete;
+  ChunkedUploadDataStream& operator=(const ChunkedUploadDataStream&) = delete;
   ~ChunkedUploadDataStream() override;
 
   // Creates a Writer for appending data to |this|.  It's generally expected
@@ -69,12 +71,12 @@ class NET_EXPORT ChunkedUploadDataStream : public UploadDataStream {
   std::unique_ptr<Writer> CreateWriter();
 
   // Adds data to the stream. |is_done| should be true if this is the last
-  // data to be appended. |data_len| must not be 0 unless |is_done| is true.
+  // data to be appended. |data| must not be empty unless |is_done| is true.
   // Once called with |is_done| being true, must never be called again.
   // TODO(mmenke):  Consider using IOBuffers instead, to reduce data copies.
   // TODO(mmenke):  Consider making private, and having all consumers use
   //     Writers.
-  void AppendData(const char* data, int data_len, bool is_done);
+  void AppendData(base::span<const uint8_t> data, bool is_done);
 
  private:
   // UploadDataStream implementation.
@@ -85,22 +87,22 @@ class NET_EXPORT ChunkedUploadDataStream : public UploadDataStream {
   int ReadChunk(IOBuffer* buf, int buf_len);
 
   // Index and offset of next element of |upload_data_| to be read.
-  size_t read_index_;
-  size_t read_offset_;
+  size_t read_index_ = 0;
+  size_t read_offset_ = 0;
 
   // True once all data has been appended to the stream.
-  bool all_data_appended_;
+  bool all_data_appended_ = false;
 
-  std::vector<std::unique_ptr<std::vector<char>>> upload_data_;
+  // As data arrives, it is added here. Nothing depends on stability of these
+  // pointers, as data is copied from here directly to the caller's IOBuffer.
+  std::vector<std::vector<uint8_t>> upload_data_;
 
   // Buffer to write the next read's data to. Only set when a call to
   // ReadInternal reads no data.
   scoped_refptr<IOBuffer> read_buffer_;
-  int read_buffer_len_;
+  int read_buffer_len_ = 0;
 
   base::WeakPtrFactory<ChunkedUploadDataStream> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ChunkedUploadDataStream);
 };
 
 }  // namespace net

@@ -1,11 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "mojo/public/c/system/quota.h"
+
 #include <string>
 
+#include "mojo/core/embedder/embedder.h"
 #include "mojo/core/test/mojo_test_base.h"
-#include "mojo/public/c/system/quota.h"
 
 namespace mojo {
 namespace core {
@@ -15,11 +17,16 @@ using QuotaTest = test::MojoTestBase;
 
 void QuotaExceededEventHandler(const MojoTrapEvent* event) {
   // Always treat trigger context as the address of a bool to set to |true|.
-  if (event->result == MOJO_RESULT_OK)
+  if (event->result == MOJO_RESULT_OK) {
     *reinterpret_cast<bool*>(event->trigger_context) = true;
+  }
 }
 
 TEST_F(QuotaTest, InvalidArguments) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   EXPECT_EQ(MOJO_RESULT_INVALID_ARGUMENT,
             MojoSetQuota(MOJO_HANDLE_INVALID,
                          MOJO_QUOTA_TYPE_RECEIVE_QUEUE_LENGTH, 2, nullptr));
@@ -68,6 +75,10 @@ TEST_F(QuotaTest, InvalidArguments) {
 }
 
 TEST_F(QuotaTest, BasicReceiveQueueLength) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   MojoHandle a, b;
   CreateMessagePipe(&a, &b);
 
@@ -99,9 +110,15 @@ TEST_F(QuotaTest, BasicReceiveQueueLength) {
                            &limit, &usage));
   EXPECT_EQ(kTestLimit, limit);
   EXPECT_EQ(1u, usage);
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
 }
 
 TEST_F(QuotaTest, BasicReceiveQueueMemorySize) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   MojoHandle a, b;
   CreateMessagePipe(&a, &b);
 
@@ -139,6 +156,10 @@ TEST_F(QuotaTest, BasicReceiveQueueMemorySize) {
 }
 
 TEST_F(QuotaTest, ReceiveQueueLengthLimitExceeded) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   MojoHandle a, b;
   CreateMessagePipe(&a, &b);
 
@@ -198,6 +219,10 @@ TEST_F(QuotaTest, ReceiveQueueLengthLimitExceeded) {
 }
 
 TEST_F(QuotaTest, ReceiveQueueMemorySizeLimitExceeded) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   MojoHandle a, b;
   CreateMessagePipe(&a, &b);
 
@@ -257,6 +282,10 @@ TEST_F(QuotaTest, ReceiveQueueMemorySizeLimitExceeded) {
 }
 
 TEST_F(QuotaTest, BasicUnreadMessageCount) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   MojoHandle a, b;
   CreateMessagePipe(&a, &b);
 
@@ -293,6 +322,10 @@ TEST_F(QuotaTest, BasicUnreadMessageCount) {
 }
 
 TEST_F(QuotaTest, UnreadMessageCountLimitExceeded) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   MojoHandle a, b;
   CreateMessagePipe(&a, &b);
 
@@ -359,6 +392,10 @@ TEST_F(QuotaTest, UnreadMessageCountLimitExceeded) {
 }
 
 TEST_F(QuotaTest, TrapQuotaExceeded) {
+  if (IsMojoIpczEnabled()) {
+    GTEST_SKIP() << "Mojo quota APIs are not supported by MojoIpcz.";
+  }
+
   // Simple sanity check to verify that QUOTA_EXCEEDED signals can be trapped
   // like any other signals.
 
@@ -382,8 +419,9 @@ TEST_F(QuotaTest, TrapQuotaExceeded) {
   EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(quota_trap, nullptr, nullptr, nullptr));
 
   const std::string kTestMessage("sup");
-  for (uint64_t i = 0; i < kMaxMessages; ++i)
+  for (uint64_t i = 0; i < kMaxMessages; ++i) {
     WriteMessage(a, kTestMessage);
+  }
 
   // We're at quota but not yet over.
   MojoHandleSignalsState signals;

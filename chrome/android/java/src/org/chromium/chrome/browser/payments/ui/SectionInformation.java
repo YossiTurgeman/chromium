@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@ package org.chromium.chrome.browser.payments.ui;
 
 import android.text.TextUtils;
 
-import androidx.annotation.Nullable;
-
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.components.autofill.EditableOption;
 
@@ -17,32 +17,28 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * The data to show in a single section where the user can select something, e.g., their
- * shipping address or payment method.
+ * The data to show in a single section where the user can select something, e.g., their shipping
+ * address or payment method.
  */
+@NullMarked
 public class SectionInformation {
-    /**
-     * This value indicates that the user has not made a selection in this section.
-     */
+    /** This value indicates that the user has not made a selection in this section. */
     public static final int NO_SELECTION = -1;
 
-    /**
-     * This value indicates that user selection is invalid in this section.
-     */
+    /** This value indicates that user selection is invalid in this section. */
     public static final int INVALID_SELECTION = -2;
 
-    @PaymentRequestUI.DataType private final int mDataType;
-    protected ArrayList<EditableOption> mItems;
+    protected final ArrayList<EditableOption> mItems = new ArrayList<>();
+
+    @PaymentRequestUi.DataType private final int mDataType;
+
     private int mSelectedItem;
     private boolean mDisplayInSingleLineInNormalMode = true;
-    public String mErrorMessage;
-    @Nullable
-    public String mAddditionalText;
+    public @Nullable String mErrorMessage;
+    public @Nullable String mAddditionalText;
 
-    /**
-     * Builds an empty section without selection.
-     */
-    public SectionInformation(@PaymentRequestUI.DataType int sectionType) {
+    /** Builds an empty section without selection. */
+    public SectionInformation(@PaymentRequestUi.DataType int sectionType) {
         this(sectionType, null);
     }
 
@@ -52,19 +48,21 @@ public class SectionInformation {
      * @param defaultItem The only item. It is selected by default.
      */
     public SectionInformation(
-            @PaymentRequestUI.DataType int sectionType, @Nullable EditableOption defaultItem) {
+            @PaymentRequestUi.DataType int sectionType, @Nullable EditableOption defaultItem) {
         this(sectionType, 0, defaultItem == null ? null : Arrays.asList(defaultItem));
     }
 
     /**
      * Builds a section.
      *
-     * @param sectionType    Type of data being stored.
-     * @param selection      The index of the currently selected item.
+     * @param sectionType Type of data being stored.
+     * @param selection The index of the currently selected item.
      * @param itemCollection The items in the section.
      */
-    public SectionInformation(@PaymentRequestUI.DataType int sectionType, int selection,
-            Collection<? extends EditableOption> itemCollection) {
+    public SectionInformation(
+            @PaymentRequestUi.DataType int sectionType,
+            int selection,
+            @Nullable Collection<? extends EditableOption> itemCollection) {
         mDataType = sectionType;
         updateItemsWithCollection(selection, itemCollection);
     }
@@ -84,7 +82,7 @@ public class SectionInformation {
      * @return Whether the section is empty.
      */
     public boolean isEmpty() {
-        return mItems == null || mItems.isEmpty();
+        return mItems.isEmpty();
     }
 
     /**
@@ -94,7 +92,7 @@ public class SectionInformation {
      * @return The number of items in this section.
      */
     public int getSize() {
-        return mItems == null ? 0 : mItems.size();
+        return mItems.size();
     }
 
     /**
@@ -103,9 +101,8 @@ public class SectionInformation {
      * @param position The index of the item to return.
      * @return The item in the given position or null.
      */
-    @Nullable
-    public EditableOption getItem(int position) {
-        if (mItems == null || mItems.isEmpty() || position < 0 || position >= mItems.size()) {
+    public @Nullable EditableOption getItem(int position) {
+        if (mItems.isEmpty() || position < 0 || position >= mItems.size()) {
             return null;
         }
 
@@ -129,7 +126,6 @@ public class SectionInformation {
      *                     made.
      */
     public void setSelectedItem(EditableOption selectedItem) {
-        if (mItems == null) return;
         for (int i = 0; i < mItems.size(); i++) {
             if (mItems.get(i) == selectedItem) {
                 mSelectedItem = i;
@@ -153,8 +149,7 @@ public class SectionInformation {
      *
      * @return The selected item or null if none selected.
      */
-    @Nullable
-    public EditableOption getSelectedItem() {
+    public @Nullable EditableOption getSelectedItem() {
         return getItem(getSelectedItemIndex());
     }
 
@@ -164,7 +159,6 @@ public class SectionInformation {
      * @param item The item to add.
      */
     public void addAndSelectItem(EditableOption item) {
-        if (mItems == null) mItems = new ArrayList<>();
         mItems.add(0, item);
         mSelectedItem = 0;
     }
@@ -176,7 +170,6 @@ public class SectionInformation {
      * @param item The item to add or update.
      */
     public void addAndSelectOrUpdateItem(EditableOption item) {
-        if (mItems == null) mItems = new ArrayList<>();
         int i = 0;
         for (; i < mItems.size(); i++) {
             if (TextUtils.equals(mItems.get(i).getIdentifier(), item.getIdentifier())) {
@@ -225,11 +218,11 @@ public class SectionInformation {
      * @return ID if the user can add a new option, or 0 if they can't.
      */
     public int getAddStringId() {
-        if (mDataType == PaymentRequestUI.DataType.SHIPPING_ADDRESSES) {
+        if (mDataType == PaymentRequestUi.DataType.SHIPPING_ADDRESSES) {
             return R.string.payments_add_address;
-        } else if (mDataType == PaymentRequestUI.DataType.CONTACT_DETAILS) {
+        } else if (mDataType == PaymentRequestUi.DataType.CONTACT_DETAILS) {
             return R.string.payments_add_contact;
-        } else if (mDataType == PaymentRequestUI.DataType.PAYMENT_METHODS) {
+        } else if (mDataType == PaymentRequestUi.DataType.PAYMENT_METHODS) {
             return R.string.payments_add_card;
         }
         return 0;
@@ -242,13 +235,13 @@ public class SectionInformation {
      */
     public int getPreviewStringResourceId() {
         switch (mDataType) {
-            case PaymentRequestUI.DataType.SHIPPING_ADDRESSES:
+            case PaymentRequestUi.DataType.SHIPPING_ADDRESSES:
                 return R.plurals.payment_request_shipping_addresses_preview;
-            case PaymentRequestUI.DataType.SHIPPING_OPTIONS:
+            case PaymentRequestUi.DataType.SHIPPING_OPTIONS:
                 return R.plurals.payment_request_shipping_options_preview;
-            case PaymentRequestUI.DataType.PAYMENT_METHODS:
+            case PaymentRequestUi.DataType.PAYMENT_METHODS:
                 return R.plurals.payment_request_payment_methods_preview;
-            case PaymentRequestUI.DataType.CONTACT_DETAILS:
+            case PaymentRequestUi.DataType.CONTACT_DETAILS:
                 return R.plurals.payment_request_contacts_preview;
             default:
                 assert false : "unknown data type";
@@ -256,13 +249,17 @@ public class SectionInformation {
         }
     }
 
-    /** @param msg The optional error message to display when the selection is invalid. */
-    public void setErrorMessage(String msg) {
+    /**
+     * @param msg The optional error message to display when the selection is invalid.
+     */
+    public void setErrorMessage(@Nullable String msg) {
         mErrorMessage = msg;
     }
 
-    /** @return The optional error message to display when the selection is invalid. */
-    public String getErrorMessage() {
+    /**
+     * @return The optional error message to display when the selection is invalid.
+     */
+    public @Nullable String getErrorMessage() {
         return mErrorMessage;
     }
 
@@ -272,13 +269,11 @@ public class SectionInformation {
     }
 
     /** @return The optional additional text to display in this section. */
-    @Nullable
-    public String getAdditionalText() {
+    public @Nullable String getAdditionalText() {
         return mAddditionalText;
     }
 
-    /** @return List of items in the section. Can be null. */
-    @Nullable
+    /** @return List of items in the section. */
     public List<EditableOption> getItems() {
         return mItems;
     }
@@ -291,12 +286,12 @@ public class SectionInformation {
      */
     protected void updateItemsWithCollection(
             int selection, @Nullable Collection<? extends EditableOption> itemCollection) {
+        mItems.clear();
         if (itemCollection == null || itemCollection.isEmpty()) {
             mSelectedItem = NO_SELECTION;
-            mItems = null;
         } else {
             mSelectedItem = selection;
-            mItems = new ArrayList<>(itemCollection);
+            mItems.addAll(itemCollection);
         }
     }
 

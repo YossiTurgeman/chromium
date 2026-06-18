@@ -1,15 +1,16 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/history/core/browser/in_memory_history_backend.h"
 
+#include <memory>
 #include <set>
-#include <vector>
 
 #include "base/command_line.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
+#include "components/history/core/browser/history_types.h"
 #include "components/history/core/browser/in_memory_database.h"
 #include "components/history/core/browser/url_database.h"
 
@@ -19,7 +20,7 @@ InMemoryHistoryBackend::InMemoryHistoryBackend() = default;
 InMemoryHistoryBackend::~InMemoryHistoryBackend() = default;
 
 bool InMemoryHistoryBackend::Init(const base::FilePath& history_filename) {
-  db_.reset(new InMemoryDatabase);
+  db_ = std::make_unique<InMemoryDatabase>();
   return db_->InitFromDisk(history_filename);
 }
 
@@ -27,7 +28,7 @@ void InMemoryHistoryBackend::AttachToHistoryService(
     HistoryService* history_service) {
   DCHECK(db_);
   DCHECK(history_service);
-  history_service_observer_.Add(history_service);
+  history_service_observation_.Observe(history_service);
 }
 
 void InMemoryHistoryBackend::DeleteAllSearchTermsForKeyword(
@@ -37,12 +38,16 @@ void InMemoryHistoryBackend::DeleteAllSearchTermsForKeyword(
   db_->DeleteAllSearchTermsForKeyword(keyword_id);
 }
 
-void InMemoryHistoryBackend::OnURLVisited(HistoryService* history_service,
-                                          ui::PageTransition transition,
-                                          const URLRow& row,
-                                          const RedirectList& redirects,
-                                          base::Time visit_time) {
-  OnURLVisitedOrModified(row);
+void InMemoryHistoryBackend::OnURLVisited(
+    history::HistoryService* history_service,
+    const VisitedURLInfo& visited_url_info) {
+  // Filter out 404 visits to prevent them from impacting user
+  // journeys on search.
+  if (visited_url_info.response_code_category ==
+      history::VisitResponseCodeCategory::k404) {
+    return;
+  }
+  OnURLVisitedOrModified(visited_url_info.url_row);
 }
 
 void InMemoryHistoryBackend::OnURLsModified(HistoryService* history_service,
@@ -52,14 +57,15 @@ void InMemoryHistoryBackend::OnURLsModified(HistoryService* history_service,
   }
 }
 
-void InMemoryHistoryBackend::OnURLsDeleted(HistoryService* history_service,
-                                           const DeletionInfo& deletion_info) {
+void InMemoryHistoryBackend::OnHistoryDeletions(
+    HistoryService* history_service,
+    const DeletionInfo& deletion_info) {
   DCHECK(db_);
 
   if (deletion_info.IsAllHistory()) {
     // When all history is deleted, the individual URLs won't be listed. Just
     // create a new database to quickly clear everything out.
-    db_.reset(new InMemoryDatabase);
+    db_ = std::make_unique<InMemoryDatabase>();
     if (!db_->InitFromScratch())
       db_.reset();
     return;
@@ -77,7 +83,7 @@ void InMemoryHistoryBackend::OnKeywordSearchTermUpdated(
     HistoryService* history_service,
     const URLRow& row,
     KeywordID keyword_id,
-    const base::string16& term) {
+    const std::u16string& term) {
   DCHECK(row.id());
   db_->InsertOrUpdateURLRowByID(row);
   db_->SetKeywordSearchTermsForURL(row.id(), keyword_id, term);

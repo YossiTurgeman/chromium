@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 '''Unit tests for writers.json_writer'''
@@ -348,10 +348,9 @@ class JsonWriterUnittest(writer_unittest_common.WriterUnittestCommon):
         }''' % MESSAGES
     output = self.GetOutput(policy_json, {'_chromium': '1'}, 'json')
     expected_output = (
-        TEMPLATE_HEADER + '  // Example Dictionary Policy\n' + HEADER_DELIMETER
-        + '  // Example Dictionary Policy See '
-        'https://cloud.google.com/docs/chrome-\n'
-        '  // enterprise/policies/?policy=DictionaryPolicy\n\n'
+        TEMPLATE_HEADER + '  // Example Dictionary Policy\n' +
+        HEADER_DELIMETER + '  // Example Dictionary Policy See\n'
+        '  // https://chromeenterprise.google/policies/?policy=DictionaryPolicy\n\n'
         '  //"DictionaryPolicy": {"bool": true, "dict": {"a": 1, '
         '"b": 2}, "int": 10, "list": [1, 2, 3], "string": "abc"}\n\n'
         '}')
@@ -382,9 +381,8 @@ class JsonWriterUnittest(writer_unittest_common.WriterUnittestCommon):
     output = self.GetOutput(policy_json, {'_chromium': '1'}, 'json')
     expected_output = (
         TEMPLATE_HEADER + '  // Example External Policy\n' + HEADER_DELIMETER +
-        '  // Example External Policy See '
-        'https://cloud.google.com/docs/chrome-\n'
-        '  // enterprise/policies/?policy=ExternalPolicy\n\n'
+        '  // Example External Policy See\n'
+        '  // https://chromeenterprise.google/policies/?policy=ExternalPolicy\n\n'
         '  //"ExternalPolicy": {"hash": "deadbeef", "url": "https://example.com/avatar.jpg"}\n\n'
         '}')
     self.CompareOutputs(output, expected_output)

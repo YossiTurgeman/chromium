@@ -1,17 +1,17 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/events/blink/web_input_event.h"
 
-#include <stddef.h>
-#include <stdint.h>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 
-#include "base/stl_util.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "ui/base/ui_base_features.h"
+#include "third_party/blink/public/common/features.h"
 #include "ui/events/base_event_utils.h"
 #include "ui/events/blink/blink_event_util.h"
 #include "ui/events/event.h"
@@ -20,17 +20,6 @@
 #include "ui/events/keycodes/dom/dom_key.h"
 #include "ui/events/keycodes/dom/keycode_converter.h"
 #include "ui/events/test/keyboard_layout.h"
-
-#if defined(USE_X11)
-#include "ui/base/x/x11_util.h"                    // nogncheck
-#include "ui/events/test/events_test_utils_x11.h"  // nogncheck
-#include "ui/events/x/x11_event_translation.h"     // nogncheck
-#include "ui/gfx/x/event.h"                        // nogncheck
-#include "ui/gfx/x/keysyms/keysyms.h"              // nogncheck
-#include "ui/gfx/x/x11.h"                          // nogncheck
-#include "ui/gfx/x/x11_types.h"                    // nogncheck
-#include "ui/gfx/x/xproto.h"                       // nogncheck
-#endif
 
 namespace ui {
 
@@ -41,28 +30,28 @@ TEST(WebInputEventTest, TestMakeWebKeyboardEvent) {
 
   {
     // Press left Ctrl.
-    KeyEvent event(ET_KEY_PRESSED, VKEY_CONTROL, DomCode::CONTROL_LEFT,
+    KeyEvent event(EventType::kKeyPressed, VKEY_CONTROL, DomCode::CONTROL_LEFT,
                    EF_CONTROL_DOWN);
     blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
     // However, modifier bit for Control in |webkit_event| should be set.
     EXPECT_EQ(blink::WebInputEvent::kControlKey | blink::WebInputEvent::kIsLeft,
               webkit_event.GetModifiers());
     EXPECT_EQ(static_cast<int>(DomCode::CONTROL_LEFT), webkit_event.dom_code);
-    EXPECT_EQ(static_cast<int>(DomKey::CONTROL), webkit_event.dom_key);
+    EXPECT_EQ(DomKey::CONTROL, webkit_event.dom_key);
   }
   {
     // Release left Ctrl.
-    KeyEvent event(ET_KEY_RELEASED, VKEY_CONTROL, DomCode::CONTROL_LEFT,
+    KeyEvent event(EventType::kKeyReleased, VKEY_CONTROL, DomCode::CONTROL_LEFT,
                    EF_NONE);
     blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
     // However, modifier bit for Control in |webkit_event| shouldn't be set.
     EXPECT_EQ(blink::WebInputEvent::kIsLeft, webkit_event.GetModifiers());
     EXPECT_EQ(static_cast<int>(DomCode::CONTROL_LEFT), webkit_event.dom_code);
-    EXPECT_EQ(static_cast<int>(DomKey::CONTROL), webkit_event.dom_key);
+    EXPECT_EQ(DomKey::CONTROL, webkit_event.dom_key);
   }
   {
     // Press right Ctrl.
-    KeyEvent event(ET_KEY_PRESSED, VKEY_CONTROL, DomCode::CONTROL_RIGHT,
+    KeyEvent event(EventType::kKeyPressed, VKEY_CONTROL, DomCode::CONTROL_RIGHT,
                    EF_CONTROL_DOWN);
     blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
     // However, modifier bit for Control in |webkit_event| should be set.
@@ -73,145 +62,91 @@ TEST(WebInputEventTest, TestMakeWebKeyboardEvent) {
   }
   {
     // Release right Ctrl.
-    KeyEvent event(ET_KEY_RELEASED, VKEY_CONTROL, DomCode::CONTROL_RIGHT,
-                   EF_NONE);
+    KeyEvent event(EventType::kKeyReleased, VKEY_CONTROL,
+                   DomCode::CONTROL_RIGHT, EF_NONE);
     blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
     // However, modifier bit for Control in |webkit_event| shouldn't be set.
     EXPECT_EQ(blink::WebInputEvent::kIsRight, webkit_event.GetModifiers());
     EXPECT_EQ(static_cast<int>(DomCode::CONTROL_RIGHT), webkit_event.dom_code);
-    EXPECT_EQ(static_cast<int>(DomKey::CONTROL), webkit_event.dom_key);
+    EXPECT_EQ(DomKey::CONTROL, webkit_event.dom_key);
   }
-#if defined(USE_X11)
-  // https://crbug.com/1109112): fix this.
-  if (features::IsUsingOzonePlatform())
-    return;
-  const int kLocationModifiers =
-      blink::WebInputEvent::kIsLeft | blink::WebInputEvent::kIsRight;
-  ScopedXI2Event xev;
-  {
-    // Press Ctrl.
-    xev.InitKeyEvent(ET_KEY_PRESSED, VKEY_CONTROL, 0);
-    auto event = ui::BuildKeyEventFromXEvent(*xev);
-    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(*event);
-    // However, modifier bit for Control in |webkit_event| should be set.
-    EXPECT_EQ(blink::WebInputEvent::kControlKey,
-              webkit_event.GetModifiers() & ~kLocationModifiers);
-  }
-  {
-    // Release Ctrl.
-    xev.InitKeyEvent(ET_KEY_RELEASED, VKEY_CONTROL, ControlMask);
-    auto event = ui::BuildKeyEventFromXEvent(*xev);
-    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(*event);
-    // However, modifier bit for Control in |webkit_event| shouldn't be set.
-    EXPECT_EQ(0, webkit_event.GetModifiers() & ~kLocationModifiers);
-  }
-#endif
 }
 
 TEST(WebInputEventTest, TestMakeWebKeyboardEventWindowsKeyCode) {
-#if defined(USE_X11)
-  // https://crbug.com/1109112): enable this.
-  if (features::IsUsingOzonePlatform())
-    return;
-  ScopedXI2Event xev;
+  ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
   {
     // Press left Ctrl.
-    xev.InitKeyEvent(ET_KEY_PRESSED, VKEY_CONTROL, 0);
-    x11::Event* x11_event = xev;
-    x11_event->As<x11::KeyEvent>()->detail = static_cast<x11::KeyCode>(
-        KeycodeConverter::DomCodeToNativeKeycode(DomCode::CONTROL_LEFT));
-    auto event = ui::BuildKeyEventFromXEvent(*xev);
-    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(*event);
+    KeyEvent event(EventType::kKeyPressed, VKEY_CONTROL, DomCode::CONTROL_LEFT,
+                   EF_CONTROL_DOWN, DomKey::CONTROL, EventTimeForNow());
+    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
     EXPECT_EQ(VKEY_CONTROL, webkit_event.windows_key_code);
   }
   {
     // Press right Ctrl.
-    xev.InitKeyEvent(ET_KEY_PRESSED, VKEY_CONTROL, 0);
-    x11::Event* x11_event = xev;
-    x11_event->As<x11::KeyEvent>()->detail = static_cast<x11::KeyCode>(
-        KeycodeConverter::DomCodeToNativeKeycode(DomCode::CONTROL_RIGHT));
-    auto event = ui::BuildKeyEventFromXEvent(*xev);
-    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(*event);
+    KeyEvent event(EventType::kKeyPressed, VKEY_CONTROL, DomCode::CONTROL_RIGHT,
+                   EF_CONTROL_DOWN, DomKey::CONTROL, EventTimeForNow());
+    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
     EXPECT_EQ(VKEY_CONTROL, webkit_event.windows_key_code);
   }
-#elif defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 // TODO(yusukes): Add tests for win_aura once keyboardEvent() in
 // third_party/WebKit/Source/web/win/WebInputEventFactory.cpp is modified
 // to return VKEY_[LR]XXX instead of VKEY_XXX.
 // https://bugs.webkit.org/show_bug.cgi?id=86694
 #endif
-  {
-    // Press left Ctrl.
-    KeyEvent event(ET_KEY_PRESSED, VKEY_CONTROL, DomCode::CONTROL_LEFT,
-                   EF_CONTROL_DOWN, DomKey::CONTROL, EventTimeForNow());
-    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
-    EXPECT_EQ(VKEY_CONTROL, webkit_event.windows_key_code);
-  }
-  {
-    // Press right Ctrl.
-    KeyEvent event(ET_KEY_PRESSED, VKEY_CONTROL, DomCode::CONTROL_RIGHT,
-                   EF_CONTROL_DOWN, DomKey::CONTROL, EventTimeForNow());
-    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
-    EXPECT_EQ(VKEY_CONTROL, webkit_event.windows_key_code);
-  }
 }
 
 // Checks that MakeWebKeyboardEvent fills a correct keypad modifier.
 TEST(WebInputEventTest, TestMakeWebKeyboardEventKeyPadKeyCode) {
-#if defined(USE_X11)
-#define XK(x) XK_##x
-#else
-#define XK(x) 0
-#endif
   ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
   struct TestCase {
     DomCode dom_code;         // The physical key (location).
     KeyboardCode ui_keycode;  // The virtual key code.
-    uint32_t x_keysym;        // The X11 keysym.
     bool expected_result;     // true if the event has "isKeyPad" modifier.
   } kTesCases[] = {
-      {DomCode::DIGIT0, VKEY_0, XK(0), false},
-      {DomCode::DIGIT1, VKEY_1, XK(1), false},
-      {DomCode::DIGIT2, VKEY_2, XK(2), false},
-      {DomCode::DIGIT3, VKEY_3, XK(3), false},
-      {DomCode::DIGIT4, VKEY_4, XK(4), false},
-      {DomCode::DIGIT5, VKEY_5, XK(5), false},
-      {DomCode::DIGIT6, VKEY_6, XK(6), false},
-      {DomCode::DIGIT7, VKEY_7, XK(7), false},
-      {DomCode::DIGIT8, VKEY_8, XK(8), false},
-      {DomCode::DIGIT9, VKEY_9, XK(9), false},
+      {DomCode::DIGIT0, VKEY_0, false},
+      {DomCode::DIGIT1, VKEY_1, false},
+      {DomCode::DIGIT2, VKEY_2, false},
+      {DomCode::DIGIT3, VKEY_3, false},
+      {DomCode::DIGIT4, VKEY_4, false},
+      {DomCode::DIGIT5, VKEY_5, false},
+      {DomCode::DIGIT6, VKEY_6, false},
+      {DomCode::DIGIT7, VKEY_7, false},
+      {DomCode::DIGIT8, VKEY_8, false},
+      {DomCode::DIGIT9, VKEY_9, false},
 
-      {DomCode::NUMPAD0, VKEY_NUMPAD0, XK(KP_0), true},
-      {DomCode::NUMPAD1, VKEY_NUMPAD1, XK(KP_1), true},
-      {DomCode::NUMPAD2, VKEY_NUMPAD2, XK(KP_2), true},
-      {DomCode::NUMPAD3, VKEY_NUMPAD3, XK(KP_3), true},
-      {DomCode::NUMPAD4, VKEY_NUMPAD4, XK(KP_4), true},
-      {DomCode::NUMPAD5, VKEY_NUMPAD5, XK(KP_5), true},
-      {DomCode::NUMPAD6, VKEY_NUMPAD6, XK(KP_6), true},
-      {DomCode::NUMPAD7, VKEY_NUMPAD7, XK(KP_7), true},
-      {DomCode::NUMPAD8, VKEY_NUMPAD8, XK(KP_8), true},
-      {DomCode::NUMPAD9, VKEY_NUMPAD9, XK(KP_9), true},
+      {DomCode::NUMPAD0, VKEY_NUMPAD0, true},
+      {DomCode::NUMPAD1, VKEY_NUMPAD1, true},
+      {DomCode::NUMPAD2, VKEY_NUMPAD2, true},
+      {DomCode::NUMPAD3, VKEY_NUMPAD3, true},
+      {DomCode::NUMPAD4, VKEY_NUMPAD4, true},
+      {DomCode::NUMPAD5, VKEY_NUMPAD5, true},
+      {DomCode::NUMPAD6, VKEY_NUMPAD6, true},
+      {DomCode::NUMPAD7, VKEY_NUMPAD7, true},
+      {DomCode::NUMPAD8, VKEY_NUMPAD8, true},
+      {DomCode::NUMPAD9, VKEY_NUMPAD9, true},
 
-      {DomCode::NUMPAD_MULTIPLY, VKEY_MULTIPLY, XK(KP_Multiply), true},
-      {DomCode::NUMPAD_SUBTRACT, VKEY_SUBTRACT, XK(KP_Subtract), true},
-      {DomCode::NUMPAD_ADD, VKEY_ADD, XK(KP_Add), true},
-      {DomCode::NUMPAD_DIVIDE, VKEY_DIVIDE, XK(KP_Divide), true},
-      {DomCode::NUMPAD_DECIMAL, VKEY_DECIMAL, XK(KP_Decimal), true},
-      {DomCode::NUMPAD_DECIMAL, VKEY_DELETE, XK(KP_Delete), true},
-      {DomCode::NUMPAD0, VKEY_INSERT, XK(KP_Insert), true},
-      {DomCode::NUMPAD1, VKEY_END, XK(KP_End), true},
-      {DomCode::NUMPAD2, VKEY_DOWN, XK(KP_Down), true},
-      {DomCode::NUMPAD3, VKEY_NEXT, XK(KP_Page_Down), true},
-      {DomCode::NUMPAD4, VKEY_LEFT, XK(KP_Left), true},
-      {DomCode::NUMPAD5, VKEY_CLEAR, XK(KP_Begin), true},
-      {DomCode::NUMPAD6, VKEY_RIGHT, XK(KP_Right), true},
-      {DomCode::NUMPAD7, VKEY_HOME, XK(KP_Home), true},
-      {DomCode::NUMPAD8, VKEY_UP, XK(KP_Up), true},
-      {DomCode::NUMPAD9, VKEY_PRIOR, XK(KP_Page_Up), true},
+      {DomCode::NUMPAD_MULTIPLY, VKEY_MULTIPLY, true},
+      {DomCode::NUMPAD_SUBTRACT, VKEY_SUBTRACT, true},
+      {DomCode::NUMPAD_ADD, VKEY_ADD, true},
+      {DomCode::NUMPAD_DIVIDE, VKEY_DIVIDE, true},
+      {DomCode::NUMPAD_DECIMAL, VKEY_DECIMAL, true},
+      {DomCode::NUMPAD_DECIMAL, VKEY_DELETE, true},
+      {DomCode::NUMPAD0, VKEY_INSERT, true},
+      {DomCode::NUMPAD1, VKEY_END, true},
+      {DomCode::NUMPAD2, VKEY_DOWN, true},
+      {DomCode::NUMPAD3, VKEY_NEXT, true},
+      {DomCode::NUMPAD4, VKEY_LEFT, true},
+      {DomCode::NUMPAD5, VKEY_CLEAR, true},
+      {DomCode::NUMPAD6, VKEY_RIGHT, true},
+      {DomCode::NUMPAD7, VKEY_HOME, true},
+      {DomCode::NUMPAD8, VKEY_UP, true},
+      {DomCode::NUMPAD9, VKEY_PRIOR, true},
   };
+
   for (const auto& test_case : kTesCases) {
-    KeyEvent event(ET_KEY_PRESSED, test_case.ui_keycode, test_case.dom_code,
-                   EF_NONE);
+    KeyEvent event(EventType::kKeyPressed, test_case.ui_keycode,
+                   test_case.dom_code, EF_NONE);
     blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(event);
     EXPECT_EQ(test_case.expected_result, (webkit_event.GetModifiers() &
                                           blink::WebInputEvent::kIsKeyPad) != 0)
@@ -221,46 +156,13 @@ TEST(WebInputEventTest, TestMakeWebKeyboardEventKeyPadKeyCode) {
         << ", ui_keycode:" << test_case.ui_keycode
         << "}, expect: " << test_case.expected_result;
   }
-#if defined(USE_X11)
-  // https://crbug.com/1109112): fix this.
-  if (features::IsUsingOzonePlatform())
-    return;
-  ScopedXI2Event xev;
-  for (size_t i = 0; i < base::size(kTesCases); ++i) {
-    const TestCase& test_case = kTesCases[i];
-
-    // TODO: re-enable the two cases excluded here once all trybots
-    // are sufficiently up to date to round-trip the associated keys.
-    if ((test_case.x_keysym == XK_KP_Divide) ||
-        (test_case.x_keysym == XK_KP_Decimal))
-      continue;
-
-    xev.InitKeyEvent(ET_KEY_PRESSED, test_case.ui_keycode, EF_NONE);
-    x11::Event* x11_event = xev;
-    auto keycode = x11::Connection::Get()->KeysymToKeycode(
-        static_cast<x11::KeySym>(test_case.x_keysym));
-    if (keycode == x11::KeyCode{})
-      continue;
-    x11_event->As<x11::KeyEvent>()->detail = keycode;
-    auto event = ui::BuildKeyEventFromXEvent(*xev);
-    blink::WebKeyboardEvent webkit_event = MakeWebKeyboardEvent(*event);
-    EXPECT_EQ(test_case.expected_result, (webkit_event.GetModifiers() &
-                                          blink::WebInputEvent::kIsKeyPad) != 0)
-        << "Failed in " << i << "th test case: "
-        << "{dom_code:"
-        << KeycodeConverter::DomCodeToCodeString(test_case.dom_code)
-        << ", ui_keycode:" << test_case.ui_keycode
-        << ", x_keysym:" << test_case.x_keysym
-        << "}, expect: " << test_case.expected_result;
-  }
-#endif
 }
 
 TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Left pressed.
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_PRESSED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, EF_LEFT_MOUSE_BUTTON,
                         EF_LEFT_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -276,7 +178,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Left released.
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_RELEASED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMouseReleased, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, 0,
                         EF_LEFT_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -292,7 +194,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Middle pressed.
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_PRESSED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, EF_MIDDLE_MOUSE_BUTTON,
                         EF_MIDDLE_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -308,7 +210,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Middle released.
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_RELEASED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMouseReleased, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, 0,
                         EF_MIDDLE_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -324,7 +226,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Right pressed.
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_PRESSED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, EF_RIGHT_MOUSE_BUTTON,
                         EF_RIGHT_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -340,7 +242,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Right released.
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_RELEASED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMouseReleased, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, 0,
                         EF_RIGHT_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -356,7 +258,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Moved
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_MOVED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMouseMoved, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, 0, 0);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
     EXPECT_EQ(EventFlagsToWebEventModifiers(ui_event.flags()),
@@ -371,7 +273,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Moved with left down
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_MOVED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMouseMoved, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, EF_LEFT_MOUSE_BUTTON,
                         0);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -388,8 +290,8 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
     // Left with shift pressed.
     base::TimeTicks timestamp = EventTimeForNow();
     MouseEvent ui_event(
-        ET_MOUSE_PRESSED, gfx::Point(123, 321), gfx::Point(123, 321), timestamp,
-        EF_LEFT_MOUSE_BUTTON | EF_SHIFT_DOWN, EF_LEFT_MOUSE_BUTTON);
+        EventType::kMousePressed, gfx::Point(123, 321), gfx::Point(123, 321),
+        timestamp, EF_LEFT_MOUSE_BUTTON | EF_SHIFT_DOWN, EF_LEFT_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
     EXPECT_EQ(EventFlagsToWebEventModifiers(ui_event.flags()),
               webkit_event.GetModifiers());
@@ -403,7 +305,7 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
   {
     // Default values for PointerDetails.
     base::TimeTicks timestamp = EventTimeForNow();
-    MouseEvent ui_event(ET_MOUSE_PRESSED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, EF_LEFT_MOUSE_BUTTON,
                         EF_LEFT_MOUSE_BUTTON);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
@@ -430,21 +332,180 @@ TEST(WebInputEventTest, TestMakeWebMouseEvent) {
                                    /* tilt_x */ 89.5f,
                                    /* tilt_y */ -89.5f,
                                    /* tangential_pressure */ 0.6f);
-    MouseEvent ui_event(ET_MOUSE_PRESSED, gfx::Point(123, 321),
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(123, 321),
                         gfx::Point(123, 321), timestamp, EF_LEFT_MOUSE_BUTTON,
                         EF_LEFT_MOUSE_BUTTON, pointer_details);
     blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
 
     EXPECT_EQ(blink::WebPointerProperties::PointerType::kPen,
               webkit_event.pointer_type);
-    EXPECT_EQ(90, webkit_event.tilt_x);
-    EXPECT_EQ(-90, webkit_event.tilt_y);
+    EXPECT_EQ(89.5, webkit_event.tilt_x);
+    EXPECT_EQ(-89.5, webkit_event.tilt_y);
     EXPECT_FLOAT_EQ(0.8f, webkit_event.force);
     EXPECT_FLOAT_EQ(0.6f, webkit_event.tangential_pressure);
     EXPECT_EQ(269, webkit_event.twist);
     EXPECT_EQ(63, webkit_event.id);
     EXPECT_EQ(123, webkit_event.PositionInWidget().x());
     EXPECT_EQ(321, webkit_event.PositionInWidget().y());
+  }
+}
+
+TEST(WebInputEventTest, TestMakeWebMouseEventWithMultiButtons) {
+  {
+    // Left pressed while middle depressed.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(123, 321),
+                        gfx::Point(123, 321), timestamp,
+                        EF_LEFT_MOUSE_BUTTON | EF_MIDDLE_MOUSE_BUTTON,
+                        EF_LEFT_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(EventFlagsToWebEventModifiers(ui_event.flags()),
+              webkit_event.GetModifiers());
+    EXPECT_EQ(timestamp, webkit_event.TimeStamp());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kLeft, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseDown, webkit_event.GetType());
+    EXPECT_EQ(ui_event.GetClickCount(), webkit_event.click_count);
+    EXPECT_EQ(123, webkit_event.PositionInWidget().x());
+    EXPECT_EQ(321, webkit_event.PositionInWidget().y());
+  }
+  {
+    // Left released while middle depressed.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(EventType::kMouseReleased, gfx::Point(123, 321),
+                        gfx::Point(123, 321), timestamp, EF_MIDDLE_MOUSE_BUTTON,
+                        EF_LEFT_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(EventFlagsToWebEventModifiers(ui_event.flags()),
+              webkit_event.GetModifiers());
+    EXPECT_EQ(timestamp, webkit_event.TimeStamp());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kLeft, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseUp, webkit_event.GetType());
+    EXPECT_EQ(ui_event.GetClickCount(), webkit_event.click_count);
+    EXPECT_EQ(123, webkit_event.PositionInWidget().x());
+    EXPECT_EQ(321, webkit_event.PositionInWidget().y());
+  }
+  {
+    // Middle pressed while left and right depressed.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(
+        EventType::kMousePressed, gfx::Point(123, 321), gfx::Point(123, 321),
+        timestamp,
+        EF_LEFT_MOUSE_BUTTON | EF_MIDDLE_MOUSE_BUTTON | EF_RIGHT_MOUSE_BUTTON,
+        EF_MIDDLE_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(EventFlagsToWebEventModifiers(ui_event.flags()),
+              webkit_event.GetModifiers());
+    EXPECT_EQ(timestamp, webkit_event.TimeStamp());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kMiddle, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseDown, webkit_event.GetType());
+    EXPECT_EQ(ui_event.GetClickCount(), webkit_event.click_count);
+    EXPECT_EQ(123, webkit_event.PositionInWidget().x());
+    EXPECT_EQ(321, webkit_event.PositionInWidget().y());
+  }
+  {
+    // Right released while left and middle depressed.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(EventType::kMouseReleased, gfx::Point(123, 321),
+                        gfx::Point(123, 321), timestamp,
+                        EF_LEFT_MOUSE_BUTTON | EF_MIDDLE_MOUSE_BUTTON,
+                        EF_RIGHT_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(EventFlagsToWebEventModifiers(ui_event.flags()),
+              webkit_event.GetModifiers());
+    EXPECT_EQ(timestamp, webkit_event.TimeStamp());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kRight, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseUp, webkit_event.GetType());
+    EXPECT_EQ(ui_event.GetClickCount(), webkit_event.click_count);
+    EXPECT_EQ(123, webkit_event.PositionInWidget().x());
+    EXPECT_EQ(321, webkit_event.PositionInWidget().y());
+  }
+}
+
+TEST(WebInputEventTest, TestMakeWebMouseEventNoisyButtonState) {
+  base::test::ScopedFeatureList scoped_feature_list;
+
+  {
+    // Left pressed but the modifier doesn't reflect it.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(1, 1),
+                        gfx::Point(1, 1), timestamp, 0, EF_LEFT_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(blink::WebInputEvent::kLeftButtonDown,
+              webkit_event.GetModifiers());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kLeft, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseDown, webkit_event.GetType());
+  }
+  {
+    // Left released but the modifier doesn't reflect it.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(EventType::kMouseReleased, gfx::Point(1, 1),
+                        gfx::Point(1, 1), timestamp, EF_LEFT_MOUSE_BUTTON,
+                        EF_LEFT_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(0, webkit_event.GetModifiers());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kLeft, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseUp, webkit_event.GetType());
+  }
+  {
+    // Middle pressed while left and right depressed but the modifier doesn't
+    // reflect middle press.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(
+        EventType::kMousePressed, gfx::Point(1, 1), gfx::Point(1, 1), timestamp,
+        EF_LEFT_MOUSE_BUTTON | EF_RIGHT_MOUSE_BUTTON, EF_MIDDLE_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(blink::WebInputEvent::kLeftButtonDown +
+                  blink::WebInputEvent::kMiddleButtonDown +
+                  blink::WebInputEvent::kRightButtonDown,
+              webkit_event.GetModifiers());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kMiddle, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseDown, webkit_event.GetType());
+  }
+  {
+    // Middle released while left and right depressed but the modifier doesn't
+    // reflect middle release.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(
+        EventType::kMouseReleased, gfx::Point(1, 1), gfx::Point(1, 1),
+        timestamp,
+        EF_LEFT_MOUSE_BUTTON | EF_MIDDLE_MOUSE_BUTTON | EF_RIGHT_MOUSE_BUTTON,
+        EF_MIDDLE_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(blink::WebInputEvent::kLeftButtonDown +
+                  blink::WebInputEvent::kRightButtonDown,
+              webkit_event.GetModifiers());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kMiddle, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseUp, webkit_event.GetType());
+  }
+  {
+    // Right pressed while shift and control keys are depressed but the modifier
+    // doesn't reflect it.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(EventType::kMousePressed, gfx::Point(1, 1),
+                        gfx::Point(1, 1), timestamp,
+                        EF_SHIFT_DOWN | EF_CONTROL_DOWN, EF_RIGHT_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(blink::WebInputEvent::kRightButtonDown +
+                  blink::WebInputEvent::kShiftKey +
+                  blink::WebInputEvent::kControlKey,
+              webkit_event.GetModifiers());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kRight, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseDown, webkit_event.GetType());
+  }
+  {
+    // Right released while shift and control keys are depressed but the
+    // modifier doesn't reflect it.
+    base::TimeTicks timestamp = EventTimeForNow();
+    MouseEvent ui_event(EventType::kMouseReleased, gfx::Point(1, 1),
+                        gfx::Point(1, 1), timestamp,
+                        EF_RIGHT_MOUSE_BUTTON | EF_SHIFT_DOWN | EF_CONTROL_DOWN,
+                        EF_RIGHT_MOUSE_BUTTON);
+    blink::WebMouseEvent webkit_event = MakeWebMouseEvent(ui_event);
+    EXPECT_EQ(
+        blink::WebInputEvent::kShiftKey + blink::WebInputEvent::kControlKey,
+        webkit_event.GetModifiers());
+    EXPECT_EQ(blink::WebMouseEvent::Button::kRight, webkit_event.button);
+    EXPECT_EQ(blink::WebInputEvent::Type::kMouseUp, webkit_event.GetType());
   }
 }
 
@@ -478,44 +539,26 @@ TEST(WebInputEventTest, TestMakeWebMouseWheelEvent) {
   }
 }
 
-#if !defined(OS_MAC)
-TEST(WebInputEventTest, TestPercentMouseWheelScroll) {
-  base::test::ScopedFeatureList scoped_feature_list;
-  scoped_feature_list.InitAndEnableFeature(features::kPercentBasedScrolling);
-
-  base::TimeTicks timestamp = EventTimeForNow();
-  MouseWheelEvent ui_event(gfx::Vector2d(0, -MouseWheelEvent::kWheelDelta),
-                           gfx::Point(123, 321), gfx::Point(123, 321),
-                           timestamp, 0, 0);
-  blink::WebMouseWheelEvent webkit_event = MakeWebMouseWheelEvent(ui_event);
-
-  EXPECT_EQ(ui::ScrollGranularity::kScrollByPercentage,
-            webkit_event.delta_units);
-  EXPECT_FLOAT_EQ(0.f, webkit_event.delta_x);
-  EXPECT_FLOAT_EQ(-0.05, webkit_event.delta_y);
-  EXPECT_FLOAT_EQ(0.f, webkit_event.wheel_ticks_x);
-  EXPECT_FLOAT_EQ(-1.f, webkit_event.wheel_ticks_y);
-}
-#endif
-
 TEST(WebInputEventTest, KeyEvent) {
   ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
 
-  struct {
+  struct Tests {
     ui::KeyEvent event;
     blink::WebInputEvent::Type web_type;
     int web_modifiers;
-  } tests[] = {
-      {ui::KeyEvent(ui::ET_KEY_PRESSED, ui::VKEY_A, ui::EF_NONE),
+  };
+  auto tests = std::to_array<Tests>({
+      {ui::KeyEvent(ui::EventType::kKeyPressed, ui::VKEY_A, ui::EF_NONE),
        blink::WebInputEvent::Type::kRawKeyDown, 0x0},
-      {ui::KeyEvent(L'B', ui::VKEY_B, ui::DomCode::NONE,
-                    ui::EF_CONTROL_DOWN | ui::EF_SHIFT_DOWN),
+      {ui::KeyEvent::FromCharacter(L'B', ui::VKEY_B, ui::DomCode::NONE,
+                                   ui::EF_CONTROL_DOWN | ui::EF_SHIFT_DOWN),
        blink::WebInputEvent::Type::kChar,
        blink::WebInputEvent::kShiftKey | blink::WebInputEvent::kControlKey},
-      {ui::KeyEvent(ui::ET_KEY_RELEASED, ui::VKEY_C, ui::EF_ALT_DOWN),
-       blink::WebInputEvent::Type::kKeyUp, blink::WebInputEvent::kAltKey}};
+      {ui::KeyEvent(ui::EventType::kKeyReleased, ui::VKEY_C, ui::EF_ALT_DOWN),
+       blink::WebInputEvent::Type::kKeyUp, blink::WebInputEvent::kAltKey},
+  });
 
-  for (size_t i = 0; i < base::size(tests); i++) {
+  for (size_t i = 0; i < std::size(tests); i++) {
     blink::WebKeyboardEvent web_event = MakeWebKeyboardEvent(tests[i].event);
     ASSERT_TRUE(blink::WebInputEvent::IsKeyboardEventType(web_event.GetType()));
     ASSERT_EQ(tests[i].web_type, web_event.GetType());
@@ -529,7 +572,7 @@ TEST(WebInputEventTest, WheelEvent) {
   const int kDeltaX = 14;
   const int kDeltaY = -3;
   ui::MouseWheelEvent ui_event(
-      ui::MouseEvent(ui::ET_UNKNOWN, gfx::Point(), gfx::Point(),
+      ui::MouseEvent(ui::EventType::kUnknown, gfx::Point(), gfx::Point(),
                      base::TimeTicks(), 0, 0),
       kDeltaX, kDeltaY);
   blink::WebMouseWheelEvent web_event = MakeWebMouseWheelEvent(ui_event);
@@ -540,27 +583,28 @@ TEST(WebInputEventTest, WheelEvent) {
 }
 
 TEST(WebInputEventTest, MousePointerEvent) {
-  struct {
+  struct Tests {
     ui::EventType ui_type;
     blink::WebInputEvent::Type web_type;
     int ui_modifiers;
     int web_modifiers;
     gfx::Point location;
     gfx::Point screen_location;
-  } tests[] = {
-      {ui::ET_MOUSE_PRESSED, blink::WebInputEvent::Type::kMouseDown, 0x0, 0x0,
-       gfx::Point(3, 5), gfx::Point(113, 125)},
-      {ui::ET_MOUSE_RELEASED, blink::WebInputEvent::Type::kMouseUp,
+  };
+  auto tests = std::to_array<Tests>({
+      {ui::EventType::kMousePressed, blink::WebInputEvent::Type::kMouseDown,
        ui::EF_LEFT_MOUSE_BUTTON, blink::WebInputEvent::kLeftButtonDown,
-       gfx::Point(100, 1), gfx::Point(50, 1)},
-      {ui::ET_MOUSE_MOVED, blink::WebInputEvent::Type::kMouseMove,
+       gfx::Point(3, 5), gfx::Point(113, 125)},
+      {ui::EventType::kMouseReleased, blink::WebInputEvent::Type::kMouseUp, 0,
+       0, gfx::Point(100, 1), gfx::Point(50, 1)},
+      {ui::EventType::kMouseMoved, blink::WebInputEvent::Type::kMouseMove,
        ui::EF_MIDDLE_MOUSE_BUTTON | ui::EF_RIGHT_MOUSE_BUTTON,
        blink::WebInputEvent::kMiddleButtonDown |
            blink::WebInputEvent::kRightButtonDown,
        gfx::Point(13, 3), gfx::Point(53, 3)},
-  };
+  });
 
-  for (size_t i = 0; i < base::size(tests); i++) {
+  for (size_t i = 0; i < std::size(tests); i++) {
     ui::MouseEvent ui_event(tests[i].ui_type, tests[i].location,
                             tests[i].screen_location, base::TimeTicks(),
                             tests[i].ui_modifiers, 0);
@@ -575,9 +619,9 @@ TEST(WebInputEventTest, MousePointerEvent) {
   }
 }
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 TEST(WebInputEventTest, MouseLeaveScreenCoordinate) {
-  MSG msg_event = {nullptr, WM_MOUSELEAVE, 0, MAKELPARAM(300, 200)};
+  CHROME_MSG msg_event = {nullptr, WM_MOUSELEAVE, 0, MAKELPARAM(300, 200)};
   ::SetCursorPos(250, 350);
   ui::MouseEvent ui_event(msg_event);
 
@@ -596,7 +640,7 @@ TEST(WebInputEventTest, MouseLeaveScreenCoordinate) {
 TEST(WebInputEventTest, MouseMoveUnadjustedMovement) {
   gfx::PointF cursor_pos(123, 456);
   gfx::Vector2dF movement(-12, 34);
-  ui::MouseEvent event(ET_MOUSE_MOVED, cursor_pos, cursor_pos,
+  ui::MouseEvent event(EventType::kMouseMoved, cursor_pos, cursor_pos,
                        base::TimeTicks(), 0, 0);
   MouseEvent::DispatcherApi(&event).set_movement(movement);
 

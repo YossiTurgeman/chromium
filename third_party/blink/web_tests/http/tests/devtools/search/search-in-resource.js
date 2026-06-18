@@ -1,11 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ApplicationTestRunner} from 'application_test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+
+import * as SDK from 'devtools/core/sdk/sdk.js';
+
 (async function() {
   TestRunner.addResult(`Tests single resource search in inspector page agent.\n`);
-  await TestRunner.loadModule('application_test_runner');
-  await TestRunner.loadModule('sources_test_runner');
   await TestRunner.showPanel('sources');
 
   await TestRunner.addIframe('resources/search.html');
@@ -14,7 +18,7 @@
   var resource;
 
   async function step2() {
-    resource = Bindings.resourceForURL('http://127.0.0.1:8000/devtools/search/resources/search.js');
+    resource = SDK.ResourceTreeModel.ResourceTreeModel.resourceForURL('http://127.0.0.1:8000/devtools/search/resources/search.js');
     TestRunner.addResult(resource.url);
 
     // This file should not match search query.

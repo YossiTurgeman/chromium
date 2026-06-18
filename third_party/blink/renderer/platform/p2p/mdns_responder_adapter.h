@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,12 @@
 #include "mojo/public/cpp/bindings/shared_remote.h"
 #include "services/network/public/mojom/mdns_responder.mojom-blink-forward.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
+#include "third_party/webrtc/rtc_base/ip_address.h"
 #include "third_party/webrtc/rtc_base/mdns_responder_interface.h"
 
-namespace rtc {
-class IPAddress;
-}  // namespace rtc
-
 namespace blink {
+
+class MojoBindingContext;
 
 // This class is created on the main thread but is used only on the WebRTC
 // worker threads. The MdnsResponderAdapter implements the WebRTC mDNS responder
@@ -25,20 +24,20 @@ class PLATFORM_EXPORT MdnsResponderAdapter
  public:
   // The adapter should be created on the main thread to have access to the
   // connector to the service manager.
-  MdnsResponderAdapter();
+  explicit MdnsResponderAdapter(MojoBindingContext& context);
+  MdnsResponderAdapter(const MdnsResponderAdapter&) = delete;
+  MdnsResponderAdapter& operator=(const MdnsResponderAdapter&) = delete;
   ~MdnsResponderAdapter() override;
 
   // webrtc::MdnsResponderInterface implementation.
-  void CreateNameForAddress(const rtc::IPAddress& addr,
+  void CreateNameForAddress(const webrtc::IPAddress& addr,
                             NameCreatedCallback callback) override;
-  void RemoveNameForAddress(const rtc::IPAddress& addr,
+  void RemoveNameForAddress(const webrtc::IPAddress& addr,
                             NameRemovedCallback callback) override;
 
  private:
   mojo::SharedRemote<network::mojom::blink::MdnsResponder>
       shared_remote_client_;
-
-  DISALLOW_COPY_AND_ASSIGN(MdnsResponderAdapter);
 };
 
 }  // namespace blink

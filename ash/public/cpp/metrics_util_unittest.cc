@@ -1,11 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/public/cpp/metrics_util.h"
 
-#include "base/optional.h"
-#include "base/test/bind_test_util.h"
+#include <optional>
+
+#include "base/test/bind.h"
 #include "cc/metrics/frame_sequence_metrics.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -13,12 +14,12 @@ namespace ash {
 namespace metrics_util {
 
 TEST(MetricsUtilTest, ReportSmoothness) {
-  cc::FrameSequenceMetrics::ThroughputData throughput_data;
-  throughput_data.frames_produced = 30;
-  throughput_data.frames_expected = 60;
+  cc::FrameSequenceMetrics::CustomReportData report_data;
+  report_data.frames_dropped_v3 = 30;
+  report_data.frames_expected_v3 = 60;
   constexpr int kExpectedSmoothes = 50;
 
-  base::Optional<int> reported_smoothness;
+  std::optional<int> reported_smoothness;
   SmoothnessCallback smoothness_callback = base::BindLambdaForTesting(
       [&](int smoothess) { reported_smoothness = smoothess; });
 
@@ -47,8 +48,8 @@ TEST(MetricsUtilTest, ReportSmoothness) {
 
     reported_smoothness.reset();
     ReportCallback report_callback =
-        ForSmoothness(smoothness_callback, test.exclude_from_collection);
-    report_callback.Run(throughput_data);
+        ForSmoothnessV3(smoothness_callback, test.exclude_from_collection);
+    report_callback.Run(report_data);
     ASSERT_TRUE(reported_smoothness.has_value());
     EXPECT_EQ(kExpectedSmoothes, reported_smoothness.value());
 

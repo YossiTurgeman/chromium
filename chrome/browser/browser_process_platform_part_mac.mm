@@ -1,25 +1,23 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/browser_process_platform_part_mac.h"
 
-#include "base/feature_list.h"
-#include "base/mac/foundation_util.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/apple/foundation_util.h"
 #include "base/time/time.h"
 #import "chrome/browser/app_controller_mac.h"
 #include "chrome/browser/apps/app_shim/app_shim_manager_mac.h"
 #include "chrome/browser/apps/app_shim/web_app_shim_manager_delegate_mac.h"
 #include "chrome/browser/apps/platform_apps/extension_app_shim_manager_delegate_mac.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/chrome_browser_application_mac.h"
-#include "chrome/common/chrome_features.h"
+#include "chrome/browser/lifetime/application_lifetime_desktop.h"
+#include "services/device/public/cpp/geolocation/system_geolocation_source_apple.h"
 
-BrowserProcessPlatformPart::BrowserProcessPlatformPart() {
-}
+BrowserProcessPlatformPart::BrowserProcessPlatformPart() = default;
 
-BrowserProcessPlatformPart::~BrowserProcessPlatformPart() {
-}
+BrowserProcessPlatformPart::~BrowserProcessPlatformPart() = default;
 
 void BrowserProcessPlatformPart::StartTearDown() {
   app_shim_listener_ = nullptr;
@@ -39,10 +37,11 @@ void BrowserProcessPlatformPart::AttemptExit(bool try_to_quit_application) {
 
   if (!try_to_quit_application) {
     // A keyboard menu invocation.
-    AppController* app_controller =
-        base::mac::ObjCCastStrict<AppController>([NSApp delegate]);
-    if (![app_controller runConfirmQuitPanel])
+    if ([AppController.sharedController confirmQuitIfNeeded] ==
+        ConfirmQuitResultAborted) {
+      chrome::OnClosingAllBrowsers(false);
       return;
+    }
   }
 
   chrome_browser_application_mac::Terminate();
@@ -50,18 +49,16 @@ void BrowserProcessPlatformPart::AttemptExit(bool try_to_quit_application) {
 
 void BrowserProcessPlatformPart::PreMainMessageLoopRun() {
   // Create two AppShimManager::Delegates -- one for extensions-based apps
-  // (which will be deprecatedin 2020), and one for web apps (PWAs and
+  // (which will be deprecated in 2020), and one for web apps (PWAs and
   // bookmark apps). The WebAppShimManagerDelegate will defer to the
   // ExtensionAppShimManagerDelegate passed to it for extension-based apps.
   // When extension-based apps are deprecated, the
   // ExtensionAppShimManagerDelegate may be changed to nullptr here.
   std::unique_ptr<apps::AppShimManager::Delegate> app_shim_manager_delegate =
       std::make_unique<apps::ExtensionAppShimManagerDelegate>();
-  if (base::FeatureList::IsEnabled(features::kDesktopPWAsWithoutExtensions)) {
-    app_shim_manager_delegate =
-        std::make_unique<web_app::WebAppShimManagerDelegate>(
-            std::move(app_shim_manager_delegate));
-  }
+  app_shim_manager_delegate =
+      std::make_unique<web_app::WebAppShimManagerDelegate>(
+          std::move(app_shim_manager_delegate));
   app_shim_manager_ = std::make_unique<apps::AppShimManager>(
       std::move(app_shim_manager_delegate));
 
@@ -69,6 +66,18 @@ void BrowserProcessPlatformPart::PreMainMessageLoopRun() {
   // domain socket will cause the just-created socket to be unlinked.
   DCHECK(!app_shim_listener_.get());
   app_shim_listener_ = new AppShimListener;
+
+  // Workaround for https://crbug.com/40155239: This needs to be created at
+  // browser startup.
+  if (!device::GeolocationSystemPermissionManager::GetInstance()) {
+    device::GeolocationSystemPermissionManager::SetInstance(
+        device::SystemGeolocationSourceApple::
+            CreateGeolocationSystemPermissionManager());
+  }
+}
+
+void BrowserProcessPlatformPart::PostDestroyThreads() {
+  app_shim_manager_.reset();
 }
 
 apps::AppShimManager* BrowserProcessPlatformPart::app_shim_manager() {
@@ -77,12 +86,4 @@ apps::AppShimManager* BrowserProcessPlatformPart::app_shim_manager() {
 
 AppShimListener* BrowserProcessPlatformPart::app_shim_listener() {
   return app_shim_listener_.get();
-}
-
-GeolocationSystemPermissionManager*
-BrowserProcessPlatformPart::location_permission_manager() {
-  if (!location_permission_manager_)
-    location_permission_manager_ = GeolocationSystemPermissionManager::Create();
-
-  return location_permission_manager_.get();
 }

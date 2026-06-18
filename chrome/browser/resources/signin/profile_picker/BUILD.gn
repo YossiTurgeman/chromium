@@ -1,110 +1,76 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//third_party/closure_compiler/compile_js.gni")
-import("//tools/polymer/html_to_js.gni")
+import("//ui/webui/resources/tools/build_webui.gni")
+import("//ui/webui/webui_features.gni")
 
-group("closure_compile") {
-  deps = [
-    ":profile_picker_files",
-    "profile_creation_flow:closure_compile",
+assert(!is_chromeos)
+
+build_webui("build") {
+  grd_prefix = "profile_picker"
+
+  static_files = [ "profile_picker.html" ]
+
+  ts_files = [
+    "drag_drop_reorder_tile_list_delegate.ts",
+    "ensure_lazy_loaded.ts",
+    "lazy_load.ts",
+    "manage_profiles_browser_proxy.ts",
+    "navigation_mixin.ts",
+    "profile_card.html.ts",
+    "profile_card.ts",
+    "profile_card_menu.html.ts",
+    "profile_card_menu.ts",
+    "profile_creation_flow/profile_type_choice.html.ts",
+    "profile_creation_flow/profile_type_choice.ts",
+    "profile_picker.ts",
+    "profile_picker_app.html.ts",
+    "profile_picker_app.ts",
+    "profile_picker_flags.ts",
+    "profile_picker_main_view.html.ts",
+    "profile_picker_main_view.ts",
+    "profile_picker_util.ts",
+    "profile_switch.html.ts",
+    "profile_switch.ts",
+    "signin_error_dialog.html.ts",
+    "signin_error_dialog.ts",
   ]
-}
 
-js_type_check("profile_picker_files") {
-  is_polymer3 = true
-  closure_flags =
-      default_closure_args + [
-        "js_module_root=../../chrome/browser/resources/signin/profile_picker/",
-        "js_module_root=./gen/chrome/browser/resources/signin/profile_picker/",
-      ]
-  deps = [
-    ":profile_picker_app",
-    ":profile_picker_main_view",
+  icons_html_files = [ "icons.html" ]
+
+  css_files = [
+    "profile_card.css",
+    "profile_card_menu.css",
+    "profile_creation_flow/profile_type_choice.css",
+    "profile_picker_app.css",
+    "profile_picker_main_view.css",
+    "profile_picker_shared.css",
+    "profile_switch.css",
+    "signin_error_dialog.css",
   ]
-}
 
-js_library("profile_picker_main_view") {
-  deps = [
-    ":manage_profiles_browser_proxy",
-    ":navigation_behavior",
-    ":profile_card",
-    "//third_party/polymer/v3_0/components-chromium/iron-icon",
-    "//third_party/polymer/v3_0/components-chromium/polymer:polymer_bundled",
-    "//ui/webui/resources/cr_elements/cr_checkbox:cr_checkbox.m",
-    "//ui/webui/resources/cr_elements/cr_icon_button:cr_icon_button.m",
-    "//ui/webui/resources/js:load_time_data.m",
-    "//ui/webui/resources/js:web_ui_listener_behavior.m",
+  ts_composite = true
+  ts_definitions = [
+    "//tools/typescript/definitions/chrome_send.d.ts",
+    "//tools/typescript/definitions/metrics_private.d.ts",
   ]
-  externs_list = [ "$externs_path/metrics_private.js" ]
-}
-
-js_library("navigation_behavior") {
-  deps = [
-    "//third_party/polymer/v3_0/components-chromium/polymer:polymer_bundled",
-    "//ui/webui/resources/js:assert.m",
+  ts_deps = [
+    "//third_party/lit/v3_0:build_ts",
+    "//ui/webui/resources/cr_components/help_bubble:build_ts",
+    "//ui/webui/resources/cr_elements:build_ts",
+    "//ui/webui/resources/js:build_ts",
   ]
-  externs_list = [ "$externs_path/metrics_private.js" ]
-}
 
-js_library("profile_picker_app") {
-  deps = [
-    ":navigation_behavior",
-    "//third_party/polymer/v3_0/components-chromium/polymer:polymer_bundled",
-    "//ui/webui/resources/cr_elements/cr_lazy_render:cr_lazy_render.m",
-    "//ui/webui/resources/cr_elements/cr_view_manager:cr_view_manager.m",
-  ]
-}
-
-js_library("profile_card") {
-  deps = [
-    ":manage_profiles_browser_proxy",
-    ":profile_card_menu",
-    "//third_party/polymer/v3_0/components-chromium/polymer:polymer_bundled",
-    "//ui/webui/resources/cr_elements/cr_button:cr_button.m",
-  ]
-}
-
-js_library("profile_card_menu") {
-  deps = [
-    ":manage_profiles_browser_proxy",
-    "//third_party/polymer/v3_0/components-chromium/polymer:polymer_bundled",
-    "//ui/webui/resources/cr_elements/cr_action_menu:cr_action_menu.m",
-    "//ui/webui/resources/cr_elements/cr_icon_button:cr_icon_button.m",
-    "//ui/webui/resources/js:assert.m",
-    "//ui/webui/resources/js:i18n_behavior.m",
-    "//ui/webui/resources/js:load_time_data.m",
-    "//ui/webui/resources/js:web_ui_listener_behavior.m",
-  ]
-  externs_list = [ "$externs_path/metrics_private.js" ]
-}
-
-js_library("manage_profiles_browser_proxy") {
-  deps = [ "//ui/webui/resources/js:cr.m" ]
-  externs_list = [ "$externs_path/chrome_send.js" ]
-}
-
-js_library("policy_helper") {
-  deps = [
-    "//ui/webui/resources/js:assert.m",
-    "//ui/webui/resources/js:load_time_data.m",
-  ]
-}
-
-group("web_components") {
-  public_deps = [
-    ":web_components_local",
-    "profile_creation_flow:web_components",
-  ]
-}
-
-html_to_js("web_components_local") {
-  js_files = [
-    "profile_picker_app.js",
-    "profile_picker_main_view.js",
-    "profile_card.js",
-    "profile_card_menu.js",
-    "profile_picker_shared_css.js",
-  ]
+  webui_context_type = "trusted"
+  optimize = optimize_webui
+  if (optimize) {
+    optimize_webui_host = "profile-picker"
+    optimize_webui_in_files = [
+      "profile_picker.js",
+      "lazy_load.js",
+    ]
+    optimize_webui_excludes =
+        [ "chrome://resources/mojo/skia/public/mojom/skcolor.mojom-webui.js" ]
+  }
 }

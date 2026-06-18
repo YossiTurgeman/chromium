@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,43 +6,39 @@
 
 #include <utility>
 
+#include "base/byte_count.h"
+#include "net/base/load_timing_info.h"
+
 namespace page_load_metrics {
 
 ExtraRequestCompleteInfo::ExtraRequestCompleteInfo(
-    const url::Origin& origin_of_final_url,
+    const url::SchemeHostPort& final_url,
     const net::IPEndPoint& remote_endpoint,
-    int frame_tree_node_id,
+    content::FrameTreeNodeId frame_tree_node_id,
     bool was_cached,
-    int64_t raw_body_bytes,
-    int64_t original_network_content_length,
-    std::unique_ptr<data_reduction_proxy::DataReductionProxyData>
-        data_reduction_proxy_data,
+    base::ByteCount raw_body_bytes,
+    base::ByteCount original_network_content_length,
     network::mojom::RequestDestination request_destination,
     int net_error,
     std::unique_ptr<net::LoadTimingInfo> load_timing_info)
-    : origin_of_final_url(origin_of_final_url),
+    : final_url(final_url),
       remote_endpoint(remote_endpoint),
       frame_tree_node_id(frame_tree_node_id),
       was_cached(was_cached),
       raw_body_bytes(raw_body_bytes),
       original_network_content_length(original_network_content_length),
-      data_reduction_proxy_data(std::move(data_reduction_proxy_data)),
       request_destination(request_destination),
       net_error(net_error),
       load_timing_info(std::move(load_timing_info)) {}
 
 ExtraRequestCompleteInfo::ExtraRequestCompleteInfo(
     const ExtraRequestCompleteInfo& other)
-    : origin_of_final_url(other.origin_of_final_url),
+    : final_url(other.final_url),
       remote_endpoint(other.remote_endpoint),
       frame_tree_node_id(other.frame_tree_node_id),
       was_cached(other.was_cached),
       raw_body_bytes(other.raw_body_bytes),
       original_network_content_length(other.original_network_content_length),
-      data_reduction_proxy_data(
-          other.data_reduction_proxy_data == nullptr
-              ? nullptr
-              : other.data_reduction_proxy_data->DeepCopy()),
       request_destination(other.request_destination),
       net_error(other.net_error),
       load_timing_info(other.load_timing_info == nullptr
@@ -50,18 +46,42 @@ ExtraRequestCompleteInfo::ExtraRequestCompleteInfo(
                            : std::make_unique<net::LoadTimingInfo>(
                                  *other.load_timing_info)) {}
 
-ExtraRequestCompleteInfo::~ExtraRequestCompleteInfo() {}
+ExtraRequestCompleteInfo::~ExtraRequestCompleteInfo() = default;
 
-FailedProvisionalLoadInfo::FailedProvisionalLoadInfo(base::TimeDelta interval,
-                                                     net::Error error)
-    : time_to_failed_provisional_load(interval), error(error) {}
+FailedProvisionalLoadInfo::FailedProvisionalLoadInfo(
+    base::TimeDelta interval,
+    net::Error error,
+    int net_extended_error_code,
+    std::optional<content::ErrorNavigationTrigger> error_navigation_trigger,
+    content::NavigationDiscardReason discard_reason)
+    : time_to_failed_provisional_load(interval),
+      error(error),
+      net_extended_error_code(net_extended_error_code),
+      error_navigation_trigger(error_navigation_trigger),
+      discard_reason(discard_reason) {}
 
-FailedProvisionalLoadInfo::~FailedProvisionalLoadInfo() {}
+FailedProvisionalLoadInfo::~FailedProvisionalLoadInfo() = default;
+
+const char* PageLoadMetricsObserver::GetObserverName() const {
+  return nullptr;
+}
 
 PageLoadMetricsObserver::ObservePolicy PageLoadMetricsObserver::OnStart(
     content::NavigationHandle* navigation_handle,
     const GURL& currently_committed_url,
     bool started_in_foreground) {
+  return CONTINUE_OBSERVING;
+}
+
+PageLoadMetricsObserver::ObservePolicy PageLoadMetricsObserver::OnPreviewStart(
+    content::NavigationHandle* navigation_handle,
+    const GURL& currently_committed_url) {
+  return STOP_OBSERVING;
+}
+
+PageLoadMetricsObserver::ObservePolicy
+PageLoadMetricsObserver::OnNavigationHandleTimingUpdated(
+    content::NavigationHandle* navigation_handle) {
   return CONTINUE_OBSERVING;
 }
 
@@ -71,8 +91,7 @@ PageLoadMetricsObserver::ObservePolicy PageLoadMetricsObserver::OnRedirect(
 }
 
 PageLoadMetricsObserver::ObservePolicy PageLoadMetricsObserver::OnCommit(
-    content::NavigationHandle* navigation_handle,
-    ukm::SourceId source_id) {
+    content::NavigationHandle* navigation_handle) {
   return CONTINUE_OBSERVING;
 }
 
@@ -106,16 +125,26 @@ PageLoadMetricsObserver::ShouldObserveMimeType(
                                               : STOP_OBSERVING;
 }
 
+PageLoadMetricsObserver::ObservePolicy
+PageLoadMetricsObserver::ShouldObserveScheme(const GURL& url) const {
+  bool should_observe_scheme = url.SchemeIsHTTPOrHTTPS() ||
+                               delegate_->ShouldObserveScheme(url.GetScheme());
+  return should_observe_scheme ? CONTINUE_OBSERVING : STOP_OBSERVING;
+}
+
 // static
 bool PageLoadMetricsObserver::IsStandardWebPageMimeType(
     const std::string& mime_type) {
   return mime_type == "text/html" || mime_type == "application/xhtml+xml";
 }
 
+PageLoadMetricsObserver::PageLoadMetricsObserver() = default;
+PageLoadMetricsObserver::~PageLoadMetricsObserver() = default;
+
 const PageLoadMetricsObserverDelegate& PageLoadMetricsObserver::GetDelegate()
     const {
   // The delegate must exist and outlive the page load metrics observer.
-  DCHECK(delegate_);
+  CHECK(delegate_);
   return *delegate_;
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,26 +6,28 @@ package org.chromium.chrome.browser.suggestions;
 
 import androidx.annotation.VisibleForTesting;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.ui.favicon.LargeIconBridge;
+import org.chromium.components.favicon.LargeIconBridge;
+import org.chromium.url.GURL;
 
 /**
- * Class responsible for fetching images for the views in the NewTabPage and Chrome Home.
- * The images fetched by this class include:
- *   - large icons for URLs (used by the tiles in the NTP/Chrome Home)
+ * Class responsible for fetching images for the views in the NewTabPage and Chrome Home. The images
+ * fetched by this class include: - large icons for URLs (used by the tiles in the NTP/Chrome Home)
  *
- * To fetch an image, the caller should create a request which is done in the following way:
- *   - for large icons: {@link #makeLargeIconRequest(String, int,
- * LargeIconBridge.LargeIconCallback)}
+ * <p>To fetch an image, the caller should create a request which is done in the following way: -
+ * for large icons: {@link #makeLargeIconRequest(String, int, LargeIconBridge.LargeIconCallback)}
  *
- * If there are no errors is the image fetching process, the corresponding bitmap will be returned
- * in the callback. Otherwise, the callback will not be called.
+ * <p>If there are no errors is the image fetching process, the corresponding bitmap will be
+ * returned in the callback. Otherwise, the callback will not be called.
  */
+@NullMarked
 public class ImageFetcher {
     private boolean mIsDestroyed;
 
     private final Profile mProfile;
-    private LargeIconBridge mLargeIconBridge;
+    private @Nullable LargeIconBridge mLargeIconBridge;
 
     public ImageFetcher(Profile profile) {
         mProfile = profile;
@@ -41,10 +43,10 @@ public class ImageFetcher {
      * @param callback The callback to be notified when the icon is available.
      */
     public void makeLargeIconRequest(
-            String url, int size, LargeIconBridge.LargeIconCallback callback) {
+            GURL url, int size, LargeIconBridge.LargeIconCallback callback) {
         assert !mIsDestroyed;
 
-        getLargeIconBridge().getLargeIconForStringUrl(url, size, callback);
+        getLargeIconBridge().getLargeIconForUrl(url, size, callback);
     }
 
     public void onDestroy() {

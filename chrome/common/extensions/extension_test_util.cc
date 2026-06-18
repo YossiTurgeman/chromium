@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include "base/files/file_path.h"
 #include "base/json/json_file_value_serializer.h"
 #include "base/path_service.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
@@ -21,12 +22,15 @@
 
 using extensions::Extension;
 using extensions::Manifest;
+using extensions::mojom::ManifestLocation;
 
 namespace extension_test_util {
 
+// TODO(crbug.com/41317803): Continue removing std::string error and
+// replacing with std::u16string.
 scoped_refptr<Extension> LoadManifestUnchecked(const std::string& dir,
                                                const std::string& test_file,
-                                               Manifest::Location location,
+                                               ManifestLocation location,
                                                int extra_flags,
                                                const std::string& id,
                                                std::string* error) {
@@ -41,17 +45,19 @@ scoped_refptr<Extension> LoadManifestUnchecked(const std::string& dir,
       deserializer.Deserialize(nullptr, error);
   if (!result)
     return nullptr;
-  const base::DictionaryValue* dict;
-  CHECK(result->GetAsDictionary(&dict));
+  const base::DictValue* dict = result->GetIfDict();
+  CHECK(dict);
 
+  std::u16string utf16_error;
   scoped_refptr<Extension> extension = Extension::Create(
-      path.DirName(), location, *dict, extra_flags, id, error);
+      path.DirName(), location, *dict, extra_flags, id, &utf16_error);
+  *error = base::UTF16ToUTF8(utf16_error);
   return extension;
 }
 
 scoped_refptr<Extension> LoadManifestUnchecked(const std::string& dir,
                                                const std::string& test_file,
-                                               Manifest::Location location,
+                                               ManifestLocation location,
                                                int extra_flags,
                                                std::string* error) {
   return LoadManifestUnchecked(
@@ -60,7 +66,7 @@ scoped_refptr<Extension> LoadManifestUnchecked(const std::string& dir,
 
 scoped_refptr<Extension> LoadManifest(const std::string& dir,
                                       const std::string& test_file,
-                                      Manifest::Location location,
+                                      ManifestLocation location,
                                       int extra_flags) {
   std::string error;
   scoped_refptr<Extension> extension =
@@ -73,7 +79,8 @@ scoped_refptr<Extension> LoadManifest(const std::string& dir,
 scoped_refptr<Extension> LoadManifest(const std::string& dir,
                                       const std::string& test_file,
                                       int extra_flags) {
-  return LoadManifest(dir, test_file, Manifest::INVALID_LOCATION, extra_flags);
+  return LoadManifest(dir, test_file, ManifestLocation::kInvalidLocation,
+                      extra_flags);
 }
 
 scoped_refptr<Extension> LoadManifestStrict(const std::string& dir,
@@ -91,6 +98,35 @@ void SetGalleryUpdateURL(const GURL& new_url) {
   command_line->AppendSwitchASCII(switches::kAppsGalleryUpdateURL,
                                   new_url.spec());
   extensions::ExtensionsClient::Get()->InitializeWebStoreUrls(command_line);
+}
+
+// Note: This list should be kept in sync with the set of all features which
+// have delegated availability checks. This includes controlled_frame,
+// webstore_override, user_scripts_availability, and mimeHandler.
+std::vector<const char*> GetExpectedDelegatedFeaturesForTest() {
+  return {
+      // Controlled frame:
+      // LINT.IfChange
+      "chromeWebViewInternal",
+      "controlledFrameInternal",
+      "guestViewInternal",
+      "webRequestInternal",
+      "webViewInternal",
+      // LINT.ThenChange(chrome/common/controlled_frame/controlled_frame.cc)
+
+      // mimeHandler availability:
+      "mimeHandler",
+
+      // Webstore override:
+      "management",
+      "webstorePrivate",
+
+      // userScripts availability:
+      "userScripts",
+      "userScripts.execute",
+      "userScripts.getWorldConfigurations",
+      "userScripts.resetWorldConfiguration",
+  };
 }
 
 }  // namespace extension_test_util

@@ -1,24 +1,26 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ui/views/webauthn/authenticator_request_dialog_view.h"
-
 #include <memory>
+#include <string>
 #include <utility>
 
-#include "base/strings/utf_string_conversions.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/scoped_refptr.h"
+#include "build/build_config.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
+#include "chrome/browser/ui/views/webauthn/authenticator_request_dialog_view.h"
+#include "chrome/browser/ui/views/webauthn/authenticator_request_dialog_view_controller_views.h"
 #include "chrome/browser/ui/views/webauthn/authenticator_request_dialog_view_test_api.h"
 #include "chrome/browser/ui/views/webauthn/authenticator_request_sheet_view.h"
-#include "chrome/browser/ui/webauthn/authenticator_request_dialog.h"
 #include "chrome/browser/ui/webauthn/authenticator_request_sheet_model.h"
 #include "chrome/browser/webauthn/authenticator_request_dialog_model.h"
 #include "content/public/test/browser_test.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "testing/gtest/include/gtest/gtest.h"
 #include "ui/views/controls/label.h"
 
 namespace {
@@ -26,58 +28,42 @@ namespace {
 class TestSheetModel : public AuthenticatorRequestSheetModel {
  public:
   TestSheetModel() = default;
+
+  TestSheetModel(const TestSheetModel&) = delete;
+  TestSheetModel& operator=(const TestSheetModel&) = delete;
+
   ~TestSheetModel() override = default;
 
   // Getters for data on step specific content:
-  base::string16 GetStepSpecificLabelText() {
-    return base::ASCIIToUTF16("Test Label");
-  }
+  std::u16string GetStepSpecificLabelText() { return u"Test Label"; }
 
  private:
   // AuthenticatorRequestSheetModel:
   bool IsActivityIndicatorVisible() const override { return true; }
-  bool IsBackButtonVisible() const override { return true; }
   bool IsCancelButtonVisible() const override { return true; }
-  base::string16 GetCancelButtonLabel() const override {
-    return base::ASCIIToUTF16("Test Cancel");
+  std::u16string GetCancelButtonLabel() const override {
+    return u"Test Cancel";
   }
 
-  bool IsAcceptButtonVisible() const override { return true; }
-  bool IsAcceptButtonEnabled() const override { return true; }
-  base::string16 GetAcceptButtonLabel() const override {
-    return base::ASCIIToUTF16("Test OK");
+  AcceptButtonState GetAcceptButtonState() const override {
+    return AcceptButtonState::kEnabled;
+  }
+  std::u16string GetAcceptButtonLabel() const override { return u"Test OK"; }
+
+  std::u16string GetStepTitle() const override { return u"Test Title"; }
+
+  std::u16string GetStepDescription() const override {
+    return u"Test Description That Is Super Long So That It No Longer Fits On "
+           u"One Line Because Life Would Be Just Too Simple That Way";
   }
 
-  const gfx::VectorIcon& GetStepIllustration(
-      ImageColorScheme color_scheme) const override {
-    return gfx::kNoneIcon;
+  std::u16string GetError() const override {
+    return u"You must construct additional pylons.";
   }
-
-  base::string16 GetStepTitle() const override {
-    return base::ASCIIToUTF16("Test Title");
-  }
-
-  base::string16 GetStepDescription() const override {
-    return base::ASCIIToUTF16(
-        "Test Description That Is Super Long So That It No Longer Fits On One "
-        "Line Because Life Would Be Just Too Simple That Way");
-  }
-
-  base::string16 GetAdditionalDescription() const override {
-    return base::ASCIIToUTF16("More description text.");
-  }
-
-  base::string16 GetError() const override {
-    return base::ASCIIToUTF16("You must construct additional pylons.");
-  }
-
-  ui::MenuModel* GetOtherTransportsMenuModel() override { return nullptr; }
 
   void OnBack() override {}
   void OnAccept() override {}
   void OnCancel() override {}
-
-  DISALLOW_COPY_AND_ASSIGN(TestSheetModel);
 };
 
 class TestSheetView : public AuthenticatorRequestSheetView {
@@ -87,6 +73,9 @@ class TestSheetView : public AuthenticatorRequestSheetView {
     ReInitChildViews();
   }
 
+  TestSheetView(const TestSheetView&) = delete;
+  TestSheetView& operator=(const TestSheetView&) = delete;
+
   ~TestSheetView() override = default;
 
  private:
@@ -95,42 +84,82 @@ class TestSheetView : public AuthenticatorRequestSheetView {
   }
 
   // AuthenticatorRequestSheetView:
-  std::unique_ptr<views::View> BuildStepSpecificContent() override {
-    return std::make_unique<views::Label>(
-        test_sheet_model()->GetStepSpecificLabelText());
+  std::pair<std::unique_ptr<views::View>, AutoFocus> BuildStepSpecificContent()
+      override {
+    return std::make_pair(std::make_unique<views::Label>(
+                              test_sheet_model()->GetStepSpecificLabelText()),
+                          AutoFocus::kNo);
   }
-
-  DISALLOW_COPY_AND_ASSIGN(TestSheetView);
 };
 
 }  // namespace
 
+class StepTransitionObserver
+    : public AuthenticatorRequestDialogModel::Observer {
+ public:
+  StepTransitionObserver() = default;
+  int step_transition_count() { return step_transition_count_; }
+
+  // AuthenticatorRequestDialogModel::Observer:
+  void OnStepTransition() override { step_transition_count_++; }
+
+ private:
+  int step_transition_count_ = 0;
+};
+
 class AuthenticatorDialogViewTest : public DialogBrowserTest {
  public:
-  AuthenticatorDialogViewTest() = default;
-
   // DialogBrowserTest:
+  void TearDownOnMainThread() override {
+    view_controller_.reset();
+    DialogBrowserTest::TearDownOnMainThread();
+  }
+
   void ShowUi(const std::string& name) override {
     content::WebContents* const web_contents =
         browser()->tab_strip_model()->GetActiveWebContents();
+    CHECK(web_contents);
 
-    auto dialog_model = std::make_unique<AuthenticatorRequestDialogModel>(
-        /*relying_party_id=*/"example.com");
-    dialog_model->SetCurrentStep(
-        AuthenticatorRequestDialogModel::Step::kTimedOut);
-    AuthenticatorRequestDialogView* dialog =
-        test::AuthenticatorRequestDialogViewTestApi::CreateDialogView(
-            std::move(dialog_model), web_contents);
-    test::AuthenticatorRequestDialogViewTestApi::ShowWithSheet(
-        dialog,
-        std::make_unique<TestSheetView>(std::make_unique<TestSheetModel>()));
+    dialog_model_->relying_party_id = "example.com";
+    // Set the step to a view that is capable of displaying a dialog:
+    dialog_model_->SetStep(AuthenticatorRequestDialogModel::Step::kTimedOut);
+    StepTransitionObserver step_transition_observer;
+    dialog_model_->AddObserver(&step_transition_observer);
+
+    view_controller_ =
+        std::make_unique<AuthenticatorRequestDialogViewControllerViews>(
+            web_contents, dialog_model_.get());
+
+    if (name == "default") {
+      test::AuthenticatorRequestDialogViewTestApi::SetSheetTo(
+          view_controller_.get(),
+          std::make_unique<TestSheetView>(std::make_unique<TestSheetModel>()));
+      EXPECT_EQ(step_transition_observer.step_transition_count(), 0);
+    } else if (name == "ReplaceSheet") {
+      test::AuthenticatorRequestDialogViewTestApi::SetSheetTo(
+          view_controller_.get(),
+          std::make_unique<TestSheetView>(std::make_unique<TestSheetModel>()));
+      // Replace it immediately to trigger the dangling pointer scenario
+      test::AuthenticatorRequestDialogViewTestApi::SetSheetTo(
+          view_controller_.get(),
+          std::make_unique<TestSheetView>(std::make_unique<TestSheetModel>()));
+    }
+
+    dialog_model_->RemoveObserver(&step_transition_observer);
   }
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(AuthenticatorDialogViewTest);
+  scoped_refptr<AuthenticatorRequestDialogModel> dialog_model_ =
+      base::MakeRefCounted<AuthenticatorRequestDialogModel>(nullptr);
+  std::unique_ptr<AuthenticatorRequestDialogViewControllerViews>
+      view_controller_;
 };
 
 // Test the dialog with a custom delegate.
 IN_PROC_BROWSER_TEST_F(AuthenticatorDialogViewTest, InvokeUi_default) {
+  ShowAndVerifyUi();
+}
+
+IN_PROC_BROWSER_TEST_F(AuthenticatorDialogViewTest, InvokeUi_ReplaceSheet) {
   ShowAndVerifyUi();
 }

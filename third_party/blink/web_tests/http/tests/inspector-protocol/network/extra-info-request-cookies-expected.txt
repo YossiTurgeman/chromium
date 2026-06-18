@@ -1,6 +1,6 @@
 Verifies that Network.RequestWillBeSentExtraInfo events report structured request cookies.
 
-requestWillBeSentExtraInfo request cookies on same domain:[
+requestWillBeSentExtraInfo request cookies on same domain: [
     [0] : {
         blockedReasons : [
         ]
@@ -15,8 +15,11 @@ requestWillBeSentExtraInfo request cookies on same domain:[
             secure : true
             session : true
             size : 11
+            sourcePort : 8443
+            sourceScheme : Secure
             value : value1
         }
+        exemptionReason : None
     }
     [1] : {
         blockedReasons : [
@@ -31,11 +34,14 @@ requestWillBeSentExtraInfo request cookies on same domain:[
             secure : false
             session : true
             size : 11
+            sourcePort : 8443
+            sourceScheme : Secure
             value : value2
         }
+        exemptionReason : None
     }
 ]
-requestWillBeSentExtraInfo request cookies on subdomain[
+requestWillBeSentExtraInfo request cookies on subdomain [
     [0] : {
         blockedReasons : [
             [0] : DomainMismatch
@@ -50,8 +56,11 @@ requestWillBeSentExtraInfo request cookies on subdomain[
             secure : false
             session : true
             size : 11
+            sourcePort : 8443
+            sourceScheme : Secure
             value : value2
         }
+        exemptionReason : None
     }
     [1] : {
         blockedReasons : [
@@ -67,8 +76,11 @@ requestWillBeSentExtraInfo request cookies on subdomain[
             secure : true
             session : true
             size : 11
+            sourcePort : 8443
+            sourceScheme : Secure
             value : value1
         }
+        exemptionReason : None
     }
 ]
 

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,19 @@
 #define DEVICE_FIDO_HID_FIDO_HID_DEVICE_H_
 
 #include <list>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/callback.h"
 #include "base/cancelable_callback.h"
 #include "base/component_export.h"
 #include "base/containers/queue.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/optional.h"
 #include "components/apdu/apdu_command.h"
 #include "components/apdu/apdu_response.h"
 #include "device/fido/fido_device.h"
@@ -29,10 +30,12 @@ namespace device {
 
 class FidoHidMessage;
 
-class COMPONENT_EXPORT(DEVICE_FIDO) FidoHidDevice : public FidoDevice {
+class COMPONENT_EXPORT(DEVICE_FIDO) FidoHidDevice final : public FidoDevice {
  public:
   FidoHidDevice(device::mojom::HidDeviceInfoPtr device_info,
                 device::mojom::HidManager* hid_manager);
+  FidoHidDevice(FidoHidDevice&) = delete;
+  FidoHidDevice& operator=(FidoHidDevice&) = delete;
   ~FidoHidDevice() final;
 
   // Returns FidoDevice::GetId() for a given HidDeviceInfo.
@@ -44,6 +47,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoHidDevice : public FidoDevice {
                              DeviceCallback callback) final;
   void TryWink(base::OnceClosure callback) final;
   void Cancel(CancelToken token) final;
+  std::string GetDisplayName() const final;
   std::string GetId() const final;
   FidoTransportProtocol DeviceTransport() const final;
   void DiscoverSupportedProtocolAndDeviceInfo(base::OnceClosure done) override;
@@ -97,7 +101,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoHidDevice : public FidoDevice {
   using RefCountedHidConnection =
       base::RefCountedData<mojo::Remote<mojom::HidConnection>>;
 
-  void Transition(base::Optional<State> next_state = base::nullopt);
+  void Transition(std::optional<State> next_state = std::nullopt);
 
   // Open a connection to this device.
   void Connect(device::mojom::HidManager::ConnectCallback callback);
@@ -105,13 +109,13 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoHidDevice : public FidoDevice {
   void OnInitWriteComplete(std::vector<uint8_t> nonce, bool success);
   // Ask device to allocate a unique channel id for this connection.
   void OnAllocateChannel(std::vector<uint8_t> nonce,
-                         base::Optional<FidoHidMessage> message);
-  base::Optional<uint32_t> ParseInitReply(const std::vector<uint8_t>& nonce,
-                                          const std::vector<uint8_t>& buf);
+                         std::optional<FidoHidMessage> message);
+  std::optional<uint32_t> ParseInitReply(const std::vector<uint8_t>& nonce,
+                                         const std::vector<uint8_t>& buf);
   void OnPotentialInitReply(std::vector<uint8_t> nonce,
                             bool success,
                             uint8_t report_id,
-                            const base::Optional<std::vector<uint8_t>>& buf);
+                            const std::optional<std::vector<uint8_t>>& buf);
   // Write all message packets to device, and read response if expected.
   void WriteMessage(FidoHidMessage message);
   void PacketWritten(FidoHidMessage message, bool success);
@@ -119,12 +123,13 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoHidDevice : public FidoDevice {
   void ReadMessage();
   void OnRead(bool success,
               uint8_t report_id,
-              const base::Optional<std::vector<uint8_t>>& buf);
+              const std::optional<std::vector<uint8_t>>& buf);
   void OnReadContinuation(FidoHidMessage message,
                           bool success,
                           uint8_t report_id,
-                          const base::Optional<std::vector<uint8_t>>& buf);
+                          const std::optional<std::vector<uint8_t>>& buf);
   void MessageReceived(FidoHidMessage message);
+  void RetryAfterChannelBusy();
   void ArmTimeout();
   void OnTimeout();
   static void WriteCancelComplete(
@@ -155,12 +160,10 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoHidDevice : public FidoDevice {
   // All the FidoHidDevice instances are owned by U2fRequest. So it is safe to
   // let the FidoHidDevice share the device::mojo::HidManager raw pointer from
   // U2fRequest.
-  device::mojom::HidManager* hid_manager_;
+  raw_ptr<device::mojom::HidManager, DanglingUntriaged> hid_manager_;
   device::mojom::HidDeviceInfoPtr device_info_;
   scoped_refptr<FidoHidDevice::RefCountedHidConnection> connection_;
   base::WeakPtrFactory<FidoHidDevice> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(FidoHidDevice);
 };
 
 }  // namespace device

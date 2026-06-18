@@ -30,76 +30,38 @@
 
 #include "third_party/blink/renderer/core/animation/element_animations.h"
 
+#include "base/debug/dump_without_crashing.h"
 #include "third_party/blink/renderer/core/css/css_property_equality.h"
 #include "third_party/blink/renderer/core/css/properties/css_property.h"
+#include "third_party/blink/renderer/core/css/properties/longhands.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
 
 namespace blink {
 
 namespace {
 
-void UpdateAnimationFlagsForEffect(const KeyframeEffect& effect,
-                                   ComputedStyle& style) {
-  if (effect.Affects(PropertyHandle(GetCSSPropertyOpacity())))
-    style.SetHasCurrentOpacityAnimation(true);
-  if (effect.Affects(PropertyHandle(GetCSSPropertyTransform())) ||
-      effect.Affects(PropertyHandle(GetCSSPropertyRotate())) ||
-      effect.Affects(PropertyHandle(GetCSSPropertyScale())) ||
-      effect.Affects(PropertyHandle(GetCSSPropertyTranslate())))
-    style.SetHasCurrentTransformAnimation(true);
-  if (effect.Affects(PropertyHandle(GetCSSPropertyFilter())))
-    style.SetHasCurrentFilterAnimation(true);
-  if (effect.Affects(PropertyHandle(GetCSSPropertyBackdropFilter())))
-    style.SetHasCurrentBackdropFilterAnimation(true);
+ElementAnimations::CompositedPaintStatus CalculateStatusFromNativePaintReasons(
+    Animation::NativePaintWorkletReasons animation_type,
+    Animation::NativePaintWorkletReasons aggregated_reasons,
+    Animation::NativePaintWorkletReasons overlapping_reasons) {
+  if (animation_type & aggregated_reasons) {
+    return animation_type & overlapping_reasons
+               ? ElementAnimations::CompositedPaintStatus::kNotComposited
+               : ElementAnimations::CompositedPaintStatus::kNeedsRepaint;
+  }
+  return ElementAnimations::CompositedPaintStatus::kNoAnimation;
 }
 
 }  // namespace
 
-ElementAnimations::ElementAnimations() : animation_style_change_(false) {}
+ElementAnimations::ElementAnimations()
+    : animation_style_change_(false),
+      composited_background_color_status_(static_cast<unsigned>(
+          CompositedPaintStatus::kNoAnimation)),
+      composited_clip_path_status_(static_cast<unsigned>(
+          CompositedPaintStatus::kNoAnimation)) {}
 
 ElementAnimations::~ElementAnimations() = default;
-
-void ElementAnimations::UpdateAnimationFlags(ComputedStyle& style) {
-  for (const auto& entry : animations_) {
-    const Animation& animation = *entry.key;
-    DCHECK(animation.effect());
-    // FIXME: Needs to consider AnimationGroup once added.
-    DCHECK(IsA<KeyframeEffect>(animation.effect()));
-    const auto& effect = *To<KeyframeEffect>(animation.effect());
-    if (!effect.IsCurrent())
-      continue;
-    UpdateAnimationFlagsForEffect(effect, style);
-  }
-
-  for (const auto& entry : worklet_animations_) {
-    const KeyframeEffect& effect = *entry->GetEffect();
-    // TODO(majidvp): we should check the effect's phase before updating the
-    // style once the timing of effect is ready to use.
-    // https://crbug.com/814851.
-    UpdateAnimationFlagsForEffect(effect, style);
-  }
-
-  if (style.HasCurrentOpacityAnimation()) {
-    style.SetIsRunningOpacityAnimationOnCompositor(
-        effect_stack_.HasActiveAnimationsOnCompositor(
-            PropertyHandle(GetCSSPropertyOpacity())));
-  }
-  if (style.HasCurrentTransformAnimation()) {
-    style.SetIsRunningTransformAnimationOnCompositor(
-        effect_stack_.HasActiveAnimationsOnCompositor(
-            PropertyHandle(GetCSSPropertyTransform())));
-  }
-  if (style.HasCurrentFilterAnimation()) {
-    style.SetIsRunningFilterAnimationOnCompositor(
-        effect_stack_.HasActiveAnimationsOnCompositor(
-            PropertyHandle(GetCSSPropertyFilter())));
-  }
-  if (style.HasCurrentBackdropFilterAnimation()) {
-    style.SetIsRunningBackdropFilterAnimationOnCompositor(
-        effect_stack_.HasActiveAnimationsOnCompositor(
-            PropertyHandle(GetCSSPropertyBackdropFilter())));
-  }
-}
 
 void ElementAnimations::RestartAnimationOnCompositor() {
   for (const auto& entry : animations_)
@@ -108,43 +70,202 @@ void ElementAnimations::RestartAnimationOnCompositor() {
 
 void ElementAnimations::Trace(Visitor* visitor) const {
   visitor->Trace(css_animations_);
+  visitor->Trace(css_image_animations_);
   visitor->Trace(effect_stack_);
   visitor->Trace(animations_);
   visitor->Trace(worklet_animations_);
+  visitor->Trace(clip_path_paint_worklet_candidate_);
+  NodeRareDataField::Trace(visitor);
 }
 
-const ComputedStyle* ElementAnimations::BaseComputedStyle() const {
-  return base_computed_style_.get();
+bool ElementAnimations::UpdateBoxSizeAndCheckTransformAxisAlignment(
+    const gfx::SizeF& box_size) {
+  bool preserves_axis_alignment = true;
+  for (auto& entry : animations_) {
+    Animation& animation = *entry.key;
+    if (auto* effect = DynamicTo<KeyframeEffect>(animation.effect())) {
+      if (!effect->IsCurrent() && !effect->IsInEffect())
+        continue;
+      if (!effect->UpdateBoxSizeAndCheckTransformAxisAlignment(box_size))
+        preserves_axis_alignment = false;
+    }
+  }
+  return preserves_axis_alignment;
 }
 
-const CSSBitset* ElementAnimations::BaseImportantSet() const {
-  if (IsAnimationStyleChange())
-    return base_important_set_.get();
-  return nullptr;
-}
-
-void ElementAnimations::UpdateBaseComputedStyle(
-    const ComputedStyle* computed_style,
-    std::unique_ptr<CSSBitset> base_important_set) {
-  DCHECK(computed_style);
-  base_computed_style_ = ComputedStyle::Clone(*computed_style);
-  base_important_set_ = std::move(base_important_set);
-}
-
-void ElementAnimations::ClearBaseComputedStyle() {
-  base_computed_style_ = nullptr;
-  base_important_set_ = nullptr;
-}
-
-bool ElementAnimations::AnimationsPreserveAxisAlignment() const {
-  for (const auto& entry : animations_) {
-    const Animation& animation = *entry.key;
-    if (const auto* effect = DynamicTo<KeyframeEffect>(animation.effect())) {
-      if (!effect->AnimationsPreserveAxisAlignment())
+bool ElementAnimations::IsIdentityOrTranslation() const {
+  for (auto& entry : animations_) {
+    if (auto* effect = DynamicTo<KeyframeEffect>(entry.key->effect())) {
+      if (!effect->IsCurrent() && !effect->IsInEffect())
+        continue;
+      if (!effect->IsIdentityOrTranslation())
         return false;
     }
   }
   return true;
+}
+
+bool ElementAnimations::HasCompositedPaintWorkletAnimation() {
+  return CompositedBackgroundColorStatus() ==
+             ElementAnimations::CompositedPaintStatus::kComposited ||
+         CompositedClipPathStatus() ==
+             ElementAnimations::CompositedPaintStatus::kComposited;
+}
+
+void ElementAnimations::RecalcCompositedStatusForKeyframeChange(
+    Element& element,
+    Animation::NativePaintWorkletReasons properties) {
+  // Usually kInStyleRecalc or kInLayout, but sometimes SMIL can cause updates
+  // post-style/layout. See crbug.com/523313381.
+  if ((element.GetDocument().Lifecycle().GetState() <
+       DocumentLifecycle::kInStyleRecalc) ||
+      (element.GetDocument().Lifecycle().GetState() >
+       DocumentLifecycle::kLayoutClean)) {
+    DCHECK(false) << "RecalcCompositedStatusForKeyframeChange must not be "
+                  << "called outside of style/layout.";
+    base::debug::DumpWithoutCrashing();
+  }
+  if (!element.GetLayoutObject()) {
+    return;
+  }
+  if ((CompositedBackgroundColorStatus() ==
+       ElementAnimations::CompositedPaintStatus::kComposited) &&
+      (properties &
+       Animation::NativePaintWorkletProperties::kBackgroundColorPaintWorklet)) {
+    SetCompositedBackgroundColorStatus(
+        ElementAnimations::CompositedPaintStatus::kNeedsRepaint);
+    element.GetLayoutObject()->SetShouldDoFullPaintInvalidation();
+  }
+  if ((CompositedClipPathStatus() ==
+       ElementAnimations::CompositedPaintStatus::kComposited) &&
+      (properties &
+       Animation::NativePaintWorkletProperties::kClipPathPaintWorklet)) {
+    SetCompositedClipPathStatus(
+        ElementAnimations::CompositedPaintStatus::kNeedsRepaint);
+    element.GetLayoutObject()->SetShouldDoFullPaintInvalidation();
+    // For clip paths, we also need to update the paint properties to switch
+    // from path based to mask based clip.
+    element.GetLayoutObject()->SetNeedsPaintPropertyUpdate();
+  }
+}
+
+void ElementAnimations::RecalcCompositedStatus(Element* element) {
+  clip_path_paint_worklet_candidate_ = nullptr;
+  Animation::NativePaintWorkletReasons reasons = Animation::kNoPaintWorklet;
+  // Multiple animations targeting the same property cannot be compsoited as
+  // the compositor does not support composite-ordering.
+  Animation::NativePaintWorkletReasons overlapping_reasons =
+      Animation::kNoPaintWorklet;
+  for (auto& entry : Animations()) {
+    if (entry.key->CalculateAnimationPlayState() ==
+        V8AnimationPlayState::Enum::kIdle) {
+      continue;
+    }
+
+    overlapping_reasons |= reasons & entry.key->GetNativePaintWorkletReasons();
+    reasons |= entry.key->GetNativePaintWorkletReasons();
+
+    if (entry.key->GetNativePaintWorkletReasons() &
+        Animation::kClipPathPaintWorklet) {
+      clip_path_paint_worklet_candidate_ = entry.key;
+    }
+  }
+
+  if (RuntimeEnabledFeatures::CompositeBGColorAnimationEnabled()) {
+    ElementAnimations::CompositedPaintStatus status =
+        CalculateStatusFromNativePaintReasons(
+            Animation::kBackgroundColorPaintWorklet, reasons,
+            overlapping_reasons);
+    if (SetCompositedBackgroundColorStatus(status) &&
+        element->GetLayoutObject()) {
+      element->GetLayoutObject()->SetShouldDoFullPaintInvalidation();
+    }
+  }
+  if (RuntimeEnabledFeatures::CompositeClipPathAnimationEnabled()) {
+    ElementAnimations::CompositedPaintStatus status =
+        CalculateStatusFromNativePaintReasons(Animation::kClipPathPaintWorklet,
+                                              reasons, overlapping_reasons);
+    // Must not run during paint or pre-paint. Can be run post-paint via JS,
+    // during stop due to detach, and post-layout from the post style animation
+    // update.
+    if ((element->GetDocument().Lifecycle().GetState() ==
+         DocumentLifecycle::kInPaint) ||
+        (((composited_clip_path_status_ ==
+           static_cast<unsigned>(
+               ElementAnimations::CompositedPaintStatus::kComposited)) ||
+          (composited_clip_path_status_ ==
+           static_cast<unsigned>(
+               ElementAnimations::CompositedPaintStatus::kNotComposited))) &&
+         (element->GetDocument().Lifecycle().GetState() ==
+          DocumentLifecycle::kInPrePaint))) {
+      DCHECK(false) << "Composited clip path status must not be reset "
+                    << "once it has been resolved in pre-paint.";
+      base::debug::DumpWithoutCrashing();
+    }
+    if (SetCompositedClipPathStatus(status) && element->GetLayoutObject()) {
+      element->GetLayoutObject()->SetShouldDoFullPaintInvalidation();
+      // For clip paths, we also need to update the paint properties to switch
+      // from path based to mask based clip.
+      element->GetLayoutObject()->SetNeedsPaintPropertyUpdate();
+    }
+  }
+}
+
+bool ElementAnimations::SetCompositedClipPathStatus(
+    CompositedPaintStatus status) {
+  if (status == ElementAnimations::CompositedPaintStatus::kNotComposited ||
+      status == ElementAnimations::CompositedPaintStatus::kNoAnimation) {
+    if (clip_path_paint_worklet_candidate_ &&
+        clip_path_paint_worklet_candidate_->HasActiveAnimationsOnCompositor()) {
+      // This can some times be called during pre-paint, we need to ensure the
+      // animation is kept in sync!
+      clip_path_paint_worklet_candidate_->SetCompositorPending(
+          Animation::CompositorPendingReason::kPendingDowngrade);
+    }
+
+    clip_path_paint_worklet_candidate_ = nullptr;
+  }
+
+  if (static_cast<unsigned>(status) != composited_clip_path_status_) {
+    composited_clip_path_status_ = static_cast<unsigned>(status);
+    return true;
+  }
+  return false;
+}
+
+bool ElementAnimations::SetCompositedBackgroundColorStatus(
+    CompositedPaintStatus status) {
+  if (static_cast<unsigned>(status) != composited_background_color_status_) {
+    composited_background_color_status_ = static_cast<unsigned>(status);
+    return true;
+  }
+  return false;
+}
+
+void ElementAnimations::CancelCompositedAnimationsAffectingProperties(
+    const CSSBitset& property_bitset) {
+  for (auto& entry : animations_) {
+    if (!entry.key->HasActiveAnimationsOnCompositor()) {
+      continue;
+    }
+    KeyframeEffect* effect = DynamicTo<KeyframeEffect>(entry.key->effect());
+    if (!effect) {
+      continue;
+    }
+
+    for (const auto& property : effect->Model()->DynamicProperties()) {
+      if (!property.IsCSSProperty()) {
+        continue;
+      }
+      if (property_bitset.Has(property.GetCSSProperty().PropertyID())) {
+        entry.key->SetCompositorPending(
+            Animation::CompositorPendingReason::kPendingCancel);
+        // No need to check the remaining properties once we have forced the
+        // fallback to a main-thread animation.
+        break;
+      }
+    }
+  }
 }
 
 }  // namespace blink

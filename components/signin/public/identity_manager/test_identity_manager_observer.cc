@@ -1,12 +1,12 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/signin/public/identity_manager/test_identity_manager_observer.h"
 
-#include "testing/gtest/include/gtest/gtest.h"
-
 #include <utility>
+
+#include "testing/gtest/include/gtest/gtest.h"
 
 namespace signin {
 
@@ -20,34 +20,14 @@ TestIdentityManagerObserver::~TestIdentityManagerObserver() {
   identity_manager_->RemoveObserver(this);
 }
 
-void TestIdentityManagerObserver::SetOnPrimaryAccountSetCallback(
-    base::OnceClosure callback) {
-  on_primary_account_set_callback_ = std::move(callback);
+void TestIdentityManagerObserver::SetOnPrimaryAccountChangedCallback(
+    PrimaryAccountChangedCallback callback) {
+  on_primary_account_changed_callback_ = std::move(callback);
 }
 
-const CoreAccountInfo&
-TestIdentityManagerObserver::PrimaryAccountFromSetCallback() {
-  return primary_account_from_set_callback_;
-}
-
-void TestIdentityManagerObserver::SetOnPrimaryAccountClearedCallback(
-    base::OnceClosure callback) {
-  on_primary_account_cleared_callback_ = std::move(callback);
-}
-
-const CoreAccountInfo&
-TestIdentityManagerObserver::PrimaryAccountFromClearedCallback() {
-  return primary_account_from_cleared_callback_;
-}
-
-void TestIdentityManagerObserver::SetOnUnconsentedPrimaryAccountChangedCallback(
-    base::OnceClosure callback) {
-  on_unconsented_primary_account_callback_ = std::move(callback);
-}
-
-const CoreAccountInfo&
-TestIdentityManagerObserver::UnconsentedPrimaryAccountFromCallback() {
-  return unconsented_primary_account_from_callback_;
+const PrimaryAccountChangeEvent&
+TestIdentityManagerObserver::GetPrimaryAccountChangedEvent() {
+  return on_primary_account_changed_event_;
 }
 
 void TestIdentityManagerObserver::SetOnRefreshTokenUpdatedCallback(
@@ -74,6 +54,11 @@ const GoogleServiceAuthError&
 TestIdentityManagerObserver::ErrorFromErrorStateOfRefreshTokenUpdatedCallback()
     const {
   return error_from_error_state_of_refresh_token_updated_callback_;
+}
+
+signin_metrics::SourceForRefreshTokenOperation TestIdentityManagerObserver::
+    TokenOperationSourceFromErrorStateOfRefreshTokenUpdatedCallback() const {
+  return token_operation_source_from_error_state_of_refresh_token_updated_callback_;
 }
 
 void TestIdentityManagerObserver::SetOnRefreshTokenRemovedCallback(
@@ -132,62 +117,66 @@ TestIdentityManagerObserver::BatchChangeRecords() const {
   return batch_change_records_;
 }
 
+#if BUILDFLAG(IS_IOS)
+size_t
+TestIdentityManagerObserver::GetOnEndBatchOfPrimaryAccountChangesCalledCount()
+    const {
+  return on_end_batch_of_primary_account_changes_called_count_;
+}
+#endif  // BUILDFLAG(IS_IOS)
+
 // IdentityManager::Observer:
-void TestIdentityManagerObserver::OnPrimaryAccountSet(
-    const CoreAccountInfo& primary_account_info) {
-  primary_account_from_set_callback_ = primary_account_info;
-  if (on_primary_account_set_callback_)
-    std::move(on_primary_account_set_callback_).Run();
-}
-
-void TestIdentityManagerObserver::OnPrimaryAccountCleared(
-    const CoreAccountInfo& previous_primary_account_info) {
-  primary_account_from_cleared_callback_ = previous_primary_account_info;
-  if (on_primary_account_cleared_callback_)
-    std::move(on_primary_account_cleared_callback_).Run();
-}
-
-void TestIdentityManagerObserver::OnUnconsentedPrimaryAccountChanged(
-    const CoreAccountInfo& unconsented_primary_account_info) {
-  unconsented_primary_account_from_callback_ = unconsented_primary_account_info;
-  if (on_unconsented_primary_account_callback_)
-    std::move(on_unconsented_primary_account_callback_).Run();
+void TestIdentityManagerObserver::OnPrimaryAccountChanged(
+    const PrimaryAccountChangeEvent& event) {
+  on_primary_account_changed_event_ = event;
+  if (on_primary_account_changed_callback_) {
+    std::move(on_primary_account_changed_callback_).Run(event);
+  }
 }
 
 void TestIdentityManagerObserver::OnRefreshTokenUpdatedForAccount(
     const CoreAccountInfo& account_info) {
-  if (!is_inside_batch_)
+  if (!is_inside_batch_) {
     StartBatchOfRefreshTokenStateChanges();
+  }
 
   batch_change_records_.rbegin()->emplace_back(account_info.account_id);
   account_from_refresh_token_updated_callback_ = account_info;
-  if (on_refresh_token_updated_callback_)
+  if (on_refresh_token_updated_callback_) {
     std::move(on_refresh_token_updated_callback_).Run();
+  }
 }
 
 void TestIdentityManagerObserver::OnRefreshTokenRemovedForAccount(
     const CoreAccountId& account_id) {
-  if (!is_inside_batch_)
+  if (!is_inside_batch_) {
     StartBatchOfRefreshTokenStateChanges();
+  }
 
   batch_change_records_.rbegin()->emplace_back(account_id);
   account_from_refresh_token_removed_callback_ = account_id;
-  if (on_refresh_token_removed_callback_)
+  if (on_refresh_token_removed_callback_) {
     std::move(on_refresh_token_removed_callback_).Run();
+  }
 }
 
 void TestIdentityManagerObserver::OnErrorStateOfRefreshTokenUpdatedForAccount(
     const CoreAccountInfo& account_info,
-    const GoogleServiceAuthError& error) {
+    const GoogleServiceAuthError& error,
+    signin_metrics::SourceForRefreshTokenOperation token_operation_source) {
   account_from_error_state_of_refresh_token_updated_callback_ = account_info;
   error_from_error_state_of_refresh_token_updated_callback_ = error;
-  if (on_error_state_of_refresh_token_updated_callback_)
+  token_operation_source_from_error_state_of_refresh_token_updated_callback_ =
+      token_operation_source;
+  if (on_error_state_of_refresh_token_updated_callback_) {
     std::move(on_error_state_of_refresh_token_updated_callback_).Run();
+  }
 }
 
 void TestIdentityManagerObserver::OnRefreshTokensLoaded() {
-  if (on_refresh_tokens_loaded_callback_)
+  if (on_refresh_tokens_loaded_callback_) {
     std::move(on_refresh_tokens_loaded_callback_).Run();
+  }
 }
 
 void TestIdentityManagerObserver::OnAccountsInCookieUpdated(
@@ -195,8 +184,9 @@ void TestIdentityManagerObserver::OnAccountsInCookieUpdated(
     const GoogleServiceAuthError& error) {
   accounts_info_from_cookie_change_callback_ = accounts_in_cookie_jar_info;
   error_from_cookie_change_callback_ = error;
-  if (on_accounts_in_cookie_updated_callback_)
+  if (on_accounts_in_cookie_updated_callback_) {
     std::move(on_accounts_in_cookie_updated_callback_).Run();
+  }
 }
 
 void TestIdentityManagerObserver::OnAccountsCookieDeletedByUserAction() {
@@ -213,6 +203,12 @@ void TestIdentityManagerObserver::OnExtendedAccountInfoRemoved(
   was_called_account_removed_with_info_callback_ = true;
   account_from_account_removed_with_info_callback_ = info;
 }
+
+#if BUILDFLAG(IS_IOS)
+void TestIdentityManagerObserver::OnEndBatchOfPrimaryAccountChanges() {
+  ++on_end_batch_of_primary_account_changes_called_count_;
+}
+#endif  // BUILDFLAG(IS_IOS)
 
 void TestIdentityManagerObserver::StartBatchOfRefreshTokenStateChanges() {
   EXPECT_FALSE(is_inside_batch_);

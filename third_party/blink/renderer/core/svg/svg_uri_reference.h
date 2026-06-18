@@ -21,10 +21,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_URI_REFERENCE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_URI_REFERENCE_H_
 
-#include <memory>
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 
 namespace blink {
@@ -37,6 +37,7 @@ class SVGAnimatedHref;
 class SVGAnimatedString;
 class SVGElement;
 class TreeScope;
+class SVGAnimatedPropertyBase;
 
 class CORE_EXPORT SVGURIReference : public GarbageCollectedMixin {
  public:
@@ -48,10 +49,6 @@ class CORE_EXPORT SVGURIReference : public GarbageCollectedMixin {
   // elements where both are allowed and don't necessarily inherit from
   // SVGURIReference.
   static const AtomicString& LegacyHrefString(const SVGElement&);
-
-  // Like above, but for elements that inherit from SVGURIReference. Resolves
-  // against the base URL of the passed Document.
-  KURL LegacyHrefURL(const Document&) const;
 
   static AtomicString FragmentIdentifierFromIRIString(const String&,
                                                       const TreeScope&);
@@ -87,6 +84,10 @@ class CORE_EXPORT SVGURIReference : public GarbageCollectedMixin {
 
  protected:
   explicit SVGURIReference(SVGElement*);
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const;
+  void SynchronizeAllSVGAttributes() const;
 
  private:
   Member<SVGAnimatedHref> href_;

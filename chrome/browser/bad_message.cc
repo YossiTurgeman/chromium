@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,8 @@
 
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
-#include "content/public/browser/browser_message_filter.h"
+#include "base/trace_event/trace_event.h"
+#include "base/tracing/protos/chrome_track_event.pbzero.h"
 #include "content/public/browser/render_process_host.h"
 
 namespace bad_message {
@@ -22,15 +23,11 @@ void LogBadMessage(BadMessageReason reason) {
 
 void ReceivedBadMessage(content::RenderProcessHost* host,
                         BadMessageReason reason) {
+  TRACE_EVENT_INSTANT("ipc,security", "chrome::ReceivedBadMessage", "reason",
+                      reason, "render_process_host", host);
   LogBadMessage(reason);
   host->ShutdownForBadMessage(
       content::RenderProcessHost::CrashReportMode::GENERATE_CRASH_DUMP);
-}
-
-void ReceivedBadMessage(content::BrowserMessageFilter* filter,
-                        BadMessageReason reason) {
-  LogBadMessage(reason);
-  filter->ShutdownForBadMessage();
 }
 
 }  // namespace bad_message

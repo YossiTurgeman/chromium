@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <stdint.h>
 
 #include "base/android/jni_weak_ref.h"
-#include "base/macros.h"
 
 namespace offline_pages {
 namespace android {
@@ -21,17 +20,20 @@ namespace android {
 class OfflinePageDownloadBridge {
  public:
   OfflinePageDownloadBridge(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>& obj);
+                            const base::android::JavaRef<jobject>& obj);
+
+  OfflinePageDownloadBridge(const OfflinePageDownloadBridge&) = delete;
+  OfflinePageDownloadBridge& operator=(const OfflinePageDownloadBridge&) =
+      delete;
+
   ~OfflinePageDownloadBridge();
 
-  void Destroy(JNIEnv* env, const base::android::JavaParamRef<jobject>& obj);
+  void Destroy(JNIEnv* env);
 
   static void ShowDownloadingToast();
 
  private:
   JavaObjectWeakGlobalRef weak_java_ref_;
-
-  DISALLOW_COPY_AND_ASSIGN(OfflinePageDownloadBridge);
 };
 
 }  // namespace android

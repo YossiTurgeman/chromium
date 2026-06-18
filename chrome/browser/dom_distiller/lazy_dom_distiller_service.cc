@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -38,6 +38,14 @@ std::unique_ptr<ViewerHandle> LazyDomDistillerService::ViewUrl(
     std::unique_ptr<DistillerPage> distiller_page,
     const GURL& url) {
   return GetImpl()->ViewUrl(delegate, std::move(distiller_page), url);
+}
+
+std::unique_ptr<ViewerHandle> LazyDomDistillerService::ViewUrlIgnoreCache(
+    ViewRequestDelegate* delegate,
+    std::unique_ptr<DistillerPage> distiller_page,
+    const GURL& url) {
+  return GetImpl()->ViewUrlIgnoreCache(delegate, std::move(distiller_page),
+                                       url);
 }
 
 std::unique_ptr<DistillerPage>

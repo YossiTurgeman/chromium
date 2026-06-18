@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,9 +21,10 @@ class CSSOMKeywords {
   STATIC_ONLY(CSSOMKeywords);
 
  public:
-  static bool ValidKeywordForProperty(CSSPropertyID, const CSSKeywordValue&);
+  static CORE_EXPORT bool ValidKeywordForProperty(CSSPropertyID,
+                                                  const CSSKeywordValue&);
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSSOM_CSSOM_KEYWORDS_H_

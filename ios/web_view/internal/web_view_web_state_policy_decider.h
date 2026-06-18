@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,21 +18,28 @@ class WebState;
 namespace ios_web_view {
 
 // An implementation of web::WebStatePolicyDecider which delegates to:
+// DEPRECATED:
 //   [web_view.navigationDelegate webView:shouldStartLoadWithRequest:]
 //   [web_view.navigationDelegate webView:shouldContinueLoadWithResponse:]
+//
+// RECOMMENDED:
+//   [web_view.navigationDelegate
+//   webView:decidePolicyForNavigationAction:decisionHandler:]
+//   [web_view.navigationDelegate
+//   webView:decidePolicyForNavigationResponse:decisionHandler:]
 class WebViewWebStatePolicyDecider : public web::WebStatePolicyDecider {
  public:
   WebViewWebStatePolicyDecider(web::WebState* web_state, CWVWebView* web_view);
 
   // web::WebStatePolicyDecider overrides:
-  web::WebStatePolicyDecider::PolicyDecision ShouldAllowRequest(
+  void ShouldAllowRequest(
       NSURLRequest* request,
-      const web::WebStatePolicyDecider::RequestInfo& request_info) override;
+      web::WebStatePolicyDecider::RequestInfo request_info,
+      web::WebStatePolicyDecider::PolicyDecisionCallback callback) override;
   void ShouldAllowResponse(
       NSURLResponse* response,
-      bool for_main_frame,
-      base::OnceCallback<void(WebStatePolicyDecider::PolicyDecision)> callback)
-      override;
+      web::WebStatePolicyDecider::ResponseInfo response_info,
+      web::WebStatePolicyDecider::PolicyDecisionCallback callback) override;
 
  private:
   // Delegates to |delegate| property of this web view.

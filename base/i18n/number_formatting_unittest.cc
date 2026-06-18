@@ -1,17 +1,21 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "base/i18n/number_formatting.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #include <limits>
+#include <vector>
 
-#include "base/i18n/number_formatting.h"
 #include "base/i18n/rtl.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/synchronization/waitable_event.h"
 #include "base/test/icu_test_util.h"
+#include "base/threading/simple_thread.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/icu/source/i18n/unicode/usearch.h"
@@ -19,19 +23,42 @@
 namespace base {
 namespace {
 
+class NumberFormatWorkerThread : public base::SimpleThread {
+ public:
+  NumberFormatWorkerThread(base::WaitableEvent* event,
+                           int digits,
+                           int iterations)
+      : SimpleThread("NumberFormatWorkerThread"),
+        event_(event),
+        digits_(digits),
+        iterations_(iterations) {}
+
+  void Run() override {
+    event_->Wait();
+    for (int i = 0; i < iterations_; ++i) {
+      FormatDouble(1.2345678, digits_);
+    }
+  }
+
+ private:
+  const raw_ptr<base::WaitableEvent> event_;
+  const int digits_;
+  const int iterations_;
+};
+
 TEST(NumberFormattingTest, FormatNumber) {
   static const struct {
     int64_t number;
     const char* expected_english;
     const char* expected_german;
   } cases[] = {
-    {0, "0", "0"},
-    {1024, "1,024", "1.024"},
-    {std::numeric_limits<int64_t>::max(),
-        "9,223,372,036,854,775,807", "9.223.372.036.854.775.807"},
-    {std::numeric_limits<int64_t>::min(),
-        "-9,223,372,036,854,775,808", "-9.223.372.036.854.775.808"},
-    {-42, "-42", "-42"},
+      {0, "0", "0"},
+      {1024, "1,024", "1.024"},
+      {std::numeric_limits<int64_t>::max(), "9,223,372,036,854,775,807",
+       "9.223.372.036.854.775.807"},
+      {std::numeric_limits<int64_t>::min(), "-9,223,372,036,854,775,808",
+       "-9.223.372.036.854.775.808"},
+      {-42, "-42", "-42"},
   };
 
   test::ScopedRestoreICUDefaultLocale restore_locale;
@@ -46,37 +73,37 @@ TEST(NumberFormattingTest, FormatNumber) {
   }
 }
 
-TEST(NumberFormattingTest, FormatDouble) {
+TEST(NumberFormattingTest, FormatDoubleWithFixedFractionalDigits) {
   static const struct {
     double number;
     int frac_digits;
     const char* expected_english;
     const char* expected_german;
   } cases[] = {
-    {0.0, 0, "0", "0"},
-#if !defined(OS_ANDROID)
-    // Bionic can't printf negative zero correctly.
-    {-0.0, 4, "-0.0000", "-0,0000"},
+      {0.0, 0, "0", "0"},
+#if !BUILDFLAG(IS_ANDROID)
+      // Bionic can't printf negative zero correctly.
+      {-0.0, 4, "-0.0000", "-0,0000"},
 #endif
-    {1024.2, 0, "1,024", "1.024"},
-    {-1024.223, 2, "-1,024.22", "-1.024,22"},
-    {std::numeric_limits<double>::max(), 6,
-     "179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,"
-     "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
-     "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
-     "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
-     "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
-     "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
-     "000.000000",
-     "179.769.313.486.231.570.000.000.000.000.000.000.000.000.000.000.000."
-     "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
-     "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
-     "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
-     "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
-     "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
-     "000,000000"},
-    {std::numeric_limits<double>::min(), 2, "0.00", "0,00"},
-    {-42.7, 3, "-42.700", "-42,700"},
+      {1024.2, 0, "1,024", "1.024"},
+      {-1024.223, 2, "-1,024.22", "-1.024,22"},
+      {std::numeric_limits<double>::max(), 6,
+       "179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000.000000",
+       "179.769.313.486.231.570.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000,000000"},
+      {std::numeric_limits<double>::min(), 2, "0.00", "0,00"},
+      {-42.7, 3, "-42.700", "-42,700"},
   };
 
   test::ScopedRestoreICUDefaultLocale restore_locale;
@@ -89,6 +116,55 @@ TEST(NumberFormattingTest, FormatDouble) {
     ResetFormattersForTesting();
     EXPECT_EQ(i.expected_german,
               UTF16ToUTF8(FormatDouble(i.number, i.frac_digits)));
+  }
+}
+
+TEST(NumberFormattingTest, FormatDoubleWithFractionalDigitRange) {
+  static const struct {
+    double number;
+    int min_frac_digits;
+    int max_frac_digits;
+    const char* expected_english;
+    const char* expected_german;
+  } cases[] = {
+      {0.0, 0, 0, "0", "0"},
+#if !BUILDFLAG(IS_ANDROID)
+      // Bionic can't printf negative zero correctly.
+      {-0.0, 0, 4, "-0", "-0"},
+#endif
+      {1024.2, 0, 0, "1,024", "1.024"},
+      {-1024.223, 0, 2, "-1,024.22", "-1.024,22"},
+      {std::numeric_limits<double>::max(), 0, 6,
+       "179,769,313,486,231,570,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,"
+       "000",
+       "179.769.313.486.231.570.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000."
+       "000"},
+      {std::numeric_limits<double>::min(), 2, 2, "0.00", "0,00"},
+      {-42.7, 0, 3, "-42.7", "-42,7"},
+  };
+
+  test::ScopedRestoreICUDefaultLocale restore_locale;
+  for (const auto& i : cases) {
+    i18n::SetICUDefaultLocale("en");
+    ResetFormattersForTesting();
+    EXPECT_EQ(i.expected_english,
+              UTF16ToUTF8(FormatDouble(i.number, i.min_frac_digits,
+                                       i.max_frac_digits)));
+    i18n::SetICUDefaultLocale("de");
+    ResetFormattersForTesting();
+    EXPECT_EQ(i.expected_german,
+              UTF16ToUTF8(FormatDouble(i.number, i.min_frac_digits,
+                                       i.max_frac_digits)));
   }
 }
 
@@ -108,11 +184,11 @@ TEST(NumberFormattingTest, FormatPercent) {
     const char* expected_arabic;
     const char* expected_arabic_egypt;
   } cases[] = {
-      {0, "0%", u8"0\u00a0%", u8"\u06f0\u066a", u8"0\u200e%\u200e",
-       u8"\u0660\u066a\u061c"},
-      {42, "42%", "42\u00a0%", u8"\u06f4\u06f2\u066a", u8"42\u200e%\u200e",
+      {0, "0%", "0\u00a0%", "\u06f0\u066a", "0\u200e%\u200e",
+       "\u0660\u066a\u061c"},
+      {42, "42%", "42\u00a0%", "\u06f4\u06f2\u066a", "42\u200e%\u200e",
        "\u0664\u0662\u066a\u061c"},
-      {1024, "1,024%", "1.024\u00a0%", u8"\u06f1\u066c\u06f0\u06f2\u06f4\u066a",
+      {1024, "1,024%", "1.024\u00a0%", "\u06f1\u066c\u06f0\u06f2\u06f4\u066a",
        "1,024\u200e%\u200e", "\u0661\u066c\u0660\u0662\u0664\u066a\u061c"},
   };
 
@@ -128,6 +204,28 @@ TEST(NumberFormattingTest, FormatPercent) {
     EXPECT_EQ(UTF8ToUTF16(i.expected_arabic), FormatPercent(i.number));
     i18n::SetICUDefaultLocale("ar-EG");
     EXPECT_EQ(UTF8ToUTF16(i.expected_arabic_egypt), FormatPercent(i.number));
+  }
+}
+
+// Regression test for crbug.com/506477192. Ensure that concurrent calls to
+// FormatDouble with different fractional digits don't cause a data race in
+// the shared ICU number formatter.
+TEST(NumberFormattingTest, FormatDoubleRace) {
+  base::WaitableEvent event(base::WaitableEvent::ResetPolicy::MANUAL,
+                            base::WaitableEvent::InitialState::NOT_SIGNALED);
+  std::vector<std::unique_ptr<NumberFormatWorkerThread>> threads;
+
+  for (int i = 0; i < 20; ++i) {
+    threads
+        .emplace_back(
+            std::make_unique<NumberFormatWorkerThread>(&event, i % 5, 1000))
+        ->Start();
+  }
+
+  event.Signal();
+
+  for (auto& t : threads) {
+    t->Join();
   }
 }
 

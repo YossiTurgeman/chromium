@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,12 @@
 #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
 #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/inspector/inspector_audits_issue.h"
 #include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
+#include "third_party/blink/renderer/platform/bindings/source_location.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
@@ -26,6 +27,8 @@ namespace blink {
 
 namespace {
 
+enum class CSPType { kEmpty, kNonEmpty };
+
 class IsolatedWorldCSPDelegate final
     : public GarbageCollected<IsolatedWorldCSPDelegate>,
       public ContentSecurityPolicyDelegate {
@@ -34,11 +37,11 @@ class IsolatedWorldCSPDelegate final
   IsolatedWorldCSPDelegate(LocalDOMWindow& window,
                            scoped_refptr<SecurityOrigin> security_origin,
                            int32_t world_id,
-                           bool apply_policy)
+                           CSPType type)
       : window_(&window),
         security_origin_(std::move(security_origin)),
         world_id_(world_id),
-        apply_policy_(apply_policy) {
+        csp_type_(type) {
     DCHECK(security_origin_);
   }
 
@@ -50,6 +53,8 @@ class IsolatedWorldCSPDelegate final
   const SecurityOrigin* GetSecurityOrigin() override {
     return security_origin_.get();
   }
+
+  bool ScriptSrcExtendedHashesEnabled() override { return false; }
 
   const KURL& Url() const override {
     // This is used to populate violation data's violation url. See
@@ -72,21 +77,21 @@ class IsolatedWorldCSPDelegate final
 
   // TODO(crbug.com/916885): Figure out if we want to support violation
   // reporting for isolated world CSPs.
-  std::unique_ptr<SourceLocation> GetSourceLocation() override {
-    return nullptr;
-  }
-  base::Optional<uint16_t> GetStatusCode() override { return base::nullopt; }
+  SourceLocation* GetSourceLocation() override { return nullptr; }
+  std::optional<uint16_t> GetStatusCode() override { return std::nullopt; }
   String GetDocumentReferrer() override { return g_empty_string; }
   void DispatchViolationEvent(const SecurityPolicyViolationEventInit&,
                               Element*) override {
-    DCHECK(apply_policy_);
+    // Sanity check that an empty CSP doesn't lead to a violation.
+    DCHECK(csp_type_ == CSPType::kNonEmpty);
   }
   void PostViolationReport(const SecurityPolicyViolationEventInit&,
                            const String& stringified_report,
                            bool is_frame_ancestors_violation,
                            const Vector<String>& report_endpoints,
                            bool use_reporting_api) override {
-    DCHECK(apply_policy_);
+    // Sanity check that an empty CSP doesn't lead to a violation.
+    DCHECK(csp_type_ == CSPType::kNonEmpty);
   }
 
   void Count(WebFeature feature) override {
@@ -99,14 +104,17 @@ class IsolatedWorldCSPDelegate final
     window_->AddConsoleMessage(console_message);
   }
 
-  void AddInspectorIssue(mojom::blink::InspectorIssueInfoPtr info) override {
-    window_->AddInspectorIssue(std::move(info));
+  void AddInspectorIssue(AuditsIssue issue) override {
+    window_->AddInspectorIssue(std::move(issue));
   }
 
   void DisableEval(const String& error_message) override {
-    if (!window_->GetFrame())
-      return;
-    window_->GetFrame()->GetScriptController().DisableEvalForIsolatedWorld(
+    window_->GetScriptController().DisableEvalForIsolatedWorld(world_id_,
+                                                               error_message);
+  }
+
+  void SetWasmEvalErrorMessage(const String& error_message) override {
+    window_->GetScriptController().SetWasmEvalErrorMessageForIsolatedWorld(
         world_id_, error_message);
   }
 
@@ -118,16 +126,13 @@ class IsolatedWorldCSPDelegate final
   }
 
   void DidAddContentSecurityPolicies(
-      WTF::Vector<network::mojom::blink::ContentSecurityPolicyPtr>) override {}
+      Vector<network::mojom::blink::ContentSecurityPolicyPtr>) override {}
 
  private:
   const Member<LocalDOMWindow> window_;
   const scoped_refptr<SecurityOrigin> security_origin_;
   const int32_t world_id_;
-
-  // Whether the 'IsolatedWorldCSP' feature is enabled, and we are applying the
-  // CSP provided by the isolated world.
-  const bool apply_policy_;
+  const CSPType csp_type_;
 };
 
 }  // namespace
@@ -179,20 +184,17 @@ ContentSecurityPolicy* IsolatedWorldCSP::CreateIsolatedWorldCSP(
   const String& policy = it->value.policy;
   scoped_refptr<SecurityOrigin> self_origin = it->value.self_origin;
 
-  const bool apply_policy = RuntimeEnabledFeatures::IsolatedWorldCSPEnabled();
-
   auto* csp = MakeGarbageCollected<ContentSecurityPolicy>();
 
   IsolatedWorldCSPDelegate* delegate =
       MakeGarbageCollected<IsolatedWorldCSPDelegate>(
-          window, std::move(self_origin), world_id, apply_policy);
+          window, self_origin, world_id,
+          policy.empty() ? CSPType::kEmpty : CSPType::kNonEmpty);
   csp->BindToDelegate(*delegate);
-
-  if (apply_policy) {
-    csp->AddPolicyFromHeaderValue(
-        policy, network::mojom::ContentSecurityPolicyType::kEnforce,
-        network::mojom::ContentSecurityPolicySource::kHTTP);
-  }
+  csp->AddPolicies(ParseContentSecurityPolicies(
+      policy, network::mojom::blink::ContentSecurityPolicyType::kEnforce,
+      network::mojom::blink::ContentSecurityPolicySource::kHTTP,
+      *(self_origin)));
 
   return csp;
 }

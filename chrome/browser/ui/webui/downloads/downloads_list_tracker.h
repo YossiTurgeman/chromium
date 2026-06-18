@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,15 +9,16 @@
 
 #include <memory>
 #include <set>
+#include <string>
 
-#include "base/callback_forward.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
-#include "base/time/time.h"
-#include "base/values.h"
+#include "base/functional/callback_forward.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
+#include "build/buildflag.h"
 #include "chrome/browser/ui/webui/downloads/downloads.mojom.h"
 #include "components/download/content/public/all_download_item_notifier.h"
 #include "components/download/public/common/download_item.h"
+#include "components/safe_browsing/buildflags.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/remote.h"
 
@@ -32,6 +33,10 @@ class DownloadsListTracker
  public:
   DownloadsListTracker(content::DownloadManager* download_manager,
                        mojo::PendingRemote<downloads::mojom::Page> page);
+
+  DownloadsListTracker(const DownloadsListTracker&) = delete;
+  DownloadsListTracker& operator=(const DownloadsListTracker&) = delete;
+
   ~DownloadsListTracker() override;
 
   // Clears all downloads on the page if currently sending updates and resets
@@ -50,6 +55,18 @@ class DownloadsListTracker
   // Stops sending updates to the page.
   void Stop();
 
+  // Returns the number of dangerous download items that have been sent to the
+  // page. Does not count those which we know about but are not yet displayed
+  // on the page, e.g. due to not having scrolled far enough yet.
+  // Note this includes items that have been cancelled; they still display a
+  // warning in grayed out text.
+  int NumDangerousItemsSent() const;
+
+  // Returns the first dangerous item that is not cancelled, i.e. it is the
+  // first (topmost) item to be shown on the page with an active warning.
+  // Returns nullptr if none are found.
+  download::DownloadItem* GetFirstActiveWarningItem();
+
   content::DownloadManager* GetMainNotifierManager() const;
   content::DownloadManager* GetOriginalNotifierManager() const;
 
@@ -63,9 +80,10 @@ class DownloadsListTracker
 
  protected:
   // Testing constructor.
-  DownloadsListTracker(content::DownloadManager* download_manager,
-                       mojo::PendingRemote<downloads::mojom::Page> page,
-                       base::Callback<bool(const download::DownloadItem&)>);
+  DownloadsListTracker(
+      content::DownloadManager* download_manager,
+      mojo::PendingRemote<downloads::mojom::Page> page,
+      base::RepeatingCallback<bool(const download::DownloadItem&)>);
 
   // Creates a dictionary value that's sent to the page as JSON.
   virtual downloads::mojom::DataPtr CreateDownloadData(
@@ -79,11 +97,37 @@ class DownloadsListTracker
   void SetChunkSizeForTesting(size_t chunk_size);
 
  private:
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest,
+                           CreateDownloadData_UrlFormatting_VeryLong);
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest,
+                           CreateDownloadData_InitiatorOriginPresent);
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest,
+                           CreateDownloadData_InitiatorOriginNotPresent);
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest,
+                           CreateDownloadData_InitiatorOriginOpaque);
+  FRIEND_TEST_ALL_PREFIXES(
+      DownloadsListTrackerTest,
+      CreateDownloadData_InitiatorOriginRequiresUserGesture);
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest,
+                           CreateDownloadData_InitiatorOriginFormatting_Idn);
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest,
+                           CreateDownloadData_InitiatorOriginFormatting_Long);
+  FRIEND_TEST_ALL_PREFIXES(
+      DownloadsListTrackerTest,
+      CreateDownloadData_InitiatorOriginFormatting_VeryLong);
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest, RenamingProgress);
+
+#if BUILDFLAG(SAFE_BROWSING_DOWNLOAD_PROTECTION)
+  FRIEND_TEST_ALL_PREFIXES(DownloadsListTrackerTest,
+                           CreateDownloadData_SafeBrowsing);
+#endif  // BUILDFLAG(SAFE_BROWSING_DOWNLOAD_PROTECTION)
+
   struct StartTimeComparator {
     bool operator()(const download::DownloadItem* a,
                     const download::DownloadItem* b) const;
   };
-  using SortedSet = std::set<download::DownloadItem*, StartTimeComparator>;
+  using SortedSet = std::set<raw_ptr<download::DownloadItem, SetExperimental>,
+                             StartTimeComparator>;
 
   // Called by both constructors to initialize common state.
   void Init();
@@ -107,6 +151,9 @@ class DownloadsListTracker
   // if sending updates.
   void RemoveItem(const SortedSet::iterator& remove);
 
+  // Calculates and returns the percent complete of |download_item|.
+  int GetPercentComplete(download::DownloadItem* download_item) const;
+
   download::AllDownloadItemNotifier main_notifier_;
   std::unique_ptr<download::AllDownloadItemNotifier> original_notifier_;
 
@@ -114,7 +161,7 @@ class DownloadsListTracker
 
   // Callback used to determine if an item should show on the page. Set to
   // |ShouldShow()| in default constructor, passed in while testing.
-  base::Callback<bool(const download::DownloadItem&)> should_show_;
+  base::RepeatingCallback<bool(const download::DownloadItem&)> should_show_;
 
   // When this is true, all changes to downloads that affect the page are sent
   // via JavaScript.
@@ -129,9 +176,7 @@ class DownloadsListTracker
   size_t chunk_size_ = 20u;
 
   // Current search terms.
-  std::vector<base::string16> search_terms_;
-
-  DISALLOW_COPY_AND_ASSIGN(DownloadsListTracker);
+  std::vector<std::u16string> search_terms_;
 };
 
 #endif  // CHROME_BROWSER_UI_WEBUI_DOWNLOADS_DOWNLOADS_LIST_TRACKER_H_

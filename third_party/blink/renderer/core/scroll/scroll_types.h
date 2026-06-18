@@ -26,13 +26,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SCROLL_SCROLL_TYPES_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SCROLL_SCROLL_TYPES_H_
 
-#include "third_party/blink/public/common/input/web_gesture_event.h"
+#include "base/notreached.h"
 #include "third_party/blink/public/mojom/input/scroll_direction.mojom-blink.h"
 #include "third_party/blink/public/mojom/scroll/scroll_enums.mojom-blink.h"
-#include "third_party/blink/public/mojom/scroll/scroll_into_view_params.mojom-blink.h"
-#include "third_party/blink/renderer/platform/geometry/float_point.h"
-#include "third_party/blink/renderer/platform/geometry/float_size.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
+#include "ui/gfx/geometry/vector2d_conversions.h"
+#include "ui/gfx/geometry/vector2d_f.h"
 
 namespace blink {
 
@@ -41,17 +39,7 @@ namespace blink {
 // concept of "location", nor is it necessarily coincident with the top/left of
 // the ScrollableArea's overflow rect.  See core/layout/README.md for more
 // information.
-typedef FloatSize ScrollOffset;
-
-inline ScrollOffset ToScrollOffset(const FloatPoint& p) {
-  return ScrollOffset(p.X(), p.Y());
-}
-
-inline ScrollOffset ToScrollOffset(const gfx::PointF& p) {
-  return ScrollOffset(p.x(), p.y());
-}
-
-using ui::ScrollGranularity;
+using ScrollOffset = gfx::Vector2dF;
 
 enum ScrollDirectionPhysical {
   kScrollUp,
@@ -65,8 +53,7 @@ enum ScrollDirectionPhysical {
 inline bool IsExplicitScrollType(mojom::blink::ScrollType scroll_type) {
   return scroll_type == mojom::blink::ScrollType::kUser ||
          scroll_type == mojom::blink::ScrollType::kProgrammatic ||
-         scroll_type == mojom::blink::ScrollType::kCompositor ||
-         scroll_type == mojom::blink::ScrollType::kSequenced;
+         scroll_type == mojom::blink::ScrollType::kCompositor;
 }
 
 // Convert logical scroll direction to physical. Physical scroll directions are
@@ -127,7 +114,6 @@ inline ScrollDirectionPhysical ToPhysicalDirection(
       return kScrollRight;
     default:
       NOTREACHED();
-      break;
   }
   return kScrollUp;
 }
@@ -145,7 +131,6 @@ inline mojom::blink::ScrollDirection ToScrollDirection(
       return mojom::blink::ScrollDirection::kScrollRightIgnoringWritingMode;
     default:
       NOTREACHED();
-      break;
   }
   return mojom::blink::ScrollDirection::kScrollUpIgnoringWritingMode;
 }
@@ -182,27 +167,22 @@ enum ScrollbarPart {
   kAllParts = 0xffffffff
 };
 
-enum ScrollbarOverlayColorTheme {
-  kScrollbarOverlayColorThemeDark,
-  kScrollbarOverlayColorThemeLight
-};
-
 // The result of an attempt to scroll. If didScroll is true, then
 // unusedScrollDelta gives the amount of the scroll delta that was not consumed
 // by scrolling.
-struct ScrollResult {
+struct ScrollConsumption {
   STACK_ALLOCATED();
 
  public:
-  explicit ScrollResult()
+  explicit ScrollConsumption()
       : did_scroll_x(false),
         did_scroll_y(false),
         unused_scroll_delta_x(0),
         unused_scroll_delta_y(0) {}
-  ScrollResult(bool did_scroll_x,
-               bool did_scroll_y,
-               float unused_scroll_delta_x,
-               float unused_scroll_delta_y)
+  ScrollConsumption(bool did_scroll_x,
+                    bool did_scroll_y,
+                    float unused_scroll_delta_x,
+                    float unused_scroll_delta_y)
       : did_scroll_x(did_scroll_x),
         did_scroll_y(did_scroll_y),
         unused_scroll_delta_x(unused_scroll_delta_x),
@@ -230,6 +210,14 @@ inline ScrollOffset ToScrollDelta(ScrollDirectionPhysical dir, float delta) {
 
   return (dir == kScrollLeft || dir == kScrollRight) ? ScrollOffset(delta, 0)
                                                      : ScrollOffset(0, delta);
+}
+
+// ScrollableArea supports storing scroll offsets with subpixel precision;
+// however, the web has historically only allowed scroll offsets matching
+// physical pixels.
+inline gfx::Vector2d SnapScrollOffsetToPhysicalPixels(
+    const gfx::Vector2dF& offset) {
+  return gfx::ToRoundedVector2d(offset);
 }
 
 }  // namespace blink

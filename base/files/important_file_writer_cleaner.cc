@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,35 @@
 #include <iterator>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
-#include "base/metrics/histogram_functions.h"
+#include "base/functional/bind.h"
+#include "base/no_destructor.h"
 #include "base/process/process.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
-#include "base/threading/sequenced_task_runner_handle.h"
+#include "base/time/time.h"
+#include "build/build_config.h"
 
 namespace base {
+
+namespace {
+
+base::Time GetUpperBoundTime() {
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_FUCHSIA)
+  // If process creation time is not available then use instance creation
+  // time as the upper-bound for old files. Modification times may be
+  // rounded-down to coarse-grained increments, e.g. FAT has 2s granularity,
+  // so it is necessary to set the upper-bound earlier than Now() by at least
+  // that margin to account for modification times being rounded-down.
+  return Time::Now() - Seconds(2);
+#else
+  return Process::Current().CreationTime() - Seconds(2);
+#endif
+}
+
+}  // namespace
 
 // static
 ImportantFileWriterCleaner& ImportantFileWriterCleaner::GetInstance() {
@@ -34,8 +53,9 @@ void ImportantFileWriterCleaner::AddDirectory(const FilePath& directory) {
     AutoLock scoped_lock(instance.task_runner_lock_);
     task_runner = instance.task_runner_;
   }
-  if (!task_runner)
+  if (!task_runner) {
     return;
+  }
   if (task_runner->RunsTasksInCurrentSequence()) {
     instance.AddDirectoryImpl(directory);
   } else {
@@ -49,8 +69,9 @@ void ImportantFileWriterCleaner::AddDirectory(const FilePath& directory) {
 void ImportantFileWriterCleaner::Initialize() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   AutoLock scoped_lock(task_runner_lock_);
-  DCHECK(!task_runner_ || task_runner_ == SequencedTaskRunnerHandle::Get());
-  task_runner_ = SequencedTaskRunnerHandle::Get();
+  DCHECK(!task_runner_ ||
+         task_runner_ == SequencedTaskRunner::GetCurrentDefault());
+  task_runner_ = SequencedTaskRunner::GetCurrentDefault();
 }
 
 void ImportantFileWriterCleaner::Start() {
@@ -62,25 +83,29 @@ void ImportantFileWriterCleaner::Start() {
 #endif
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (is_started())
+  if (is_started()) {
     return;
+  }
 
   started_ = true;
 
-  if (!pending_directories_.empty())
+  if (!pending_directories_.empty()) {
     ScheduleTask();
+  }
 }
 
 void ImportantFileWriterCleaner::Stop() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!is_started())
+  if (!is_started()) {
     return;
+  }
 
-  if (is_running())
+  if (is_running()) {
     stop_flag_.store(true, std::memory_order_relaxed);
-  else
+  } else {
     DoStop();
+  }
 }
 
 void ImportantFileWriterCleaner::UninitializeForTesting() {
@@ -97,28 +122,35 @@ void ImportantFileWriterCleaner::UninitializeForTesting() {
   DETACH_FROM_SEQUENCE(sequence_checker_);
 }
 
+base::Time ImportantFileWriterCleaner::GetUpperBoundTimeForTest() const {
+  return upper_bound_time_;
+}
+
 ImportantFileWriterCleaner::ImportantFileWriterCleaner()
-    : upper_bound_time_(Process::Current().CreationTime()) {
+    : upper_bound_time_(GetUpperBoundTime()) {
   DETACH_FROM_SEQUENCE(sequence_checker_);
 }
 
 void ImportantFileWriterCleaner::AddDirectoryImpl(const FilePath& directory) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!important_directories_.insert(directory).second)
+  if (!important_directories_.insert(directory).second) {
     return;  // This directory has already been seen.
+  }
 
   pending_directories_.push_back(directory);
 
-  if (!is_started())
+  if (!is_started()) {
     return;  // Nothing more to do if Start() has not been called.
+  }
 
   // Start the background task if it's not already running. If it is running, a
   // new task will be posted on completion of the current one by
   // OnBackgroundTaskFinished to handle all directories added while it was
   // running.
-  if (!is_running())
+  if (!is_running()) {
     ScheduleTask();
+  }
 }
 
 void ImportantFileWriterCleaner::ScheduleTask() {
@@ -147,36 +179,25 @@ bool ImportantFileWriterCleaner::CleanInBackground(
     std::vector<FilePath> directories,
     std::atomic_bool& stop_flag) {
   DCHECK(!directories.empty());
-  bool stop = false;
-  for (auto scan = directories.begin(), end = directories.end(); scan != end;
-       ++scan) {
-    const auto& directory = *scan;
-    ClampedNumeric<int> successes;
-    ClampedNumeric<int> fails;
-    FileEnumerator file_enum(directory, /*recursive=*/false,
-                             FileEnumerator::FILES, FILE_PATH_LITERAL("*.tmp"));
+  for (auto& directory : directories) {
+    FileEnumerator file_enum(
+        directory, /*recursive=*/false, FileEnumerator::FILES,
+        FormatTemporaryFileName(FILE_PATH_LITERAL("*"), true).value());
     for (FilePath path = file_enum.Next(); !path.empty();
          path = file_enum.Next()) {
       const FileEnumerator::FileInfo info = file_enum.GetInfo();
-      if (info.GetLastModifiedTime() >= upper_bound_time)
+      if (info.GetLastModifiedTime() >= upper_bound_time) {
         continue;
-      if (DeleteFile(path))
-        ++successes;
-      else
-        ++fails;
+      }
+      // Cleanup is a best-effort process, so ignore any failures here and
+      // continue to clean as much as possible. Metrics tell us that ~98.4% of
+      // directories are cleaned with no failures.
+      DeleteFile(path);
       // Break out without checking for the next file if a stop is requested.
-      stop = stop_flag.load(std::memory_order_relaxed);
-      if (stop)
-        break;
+      if (stop_flag.load(std::memory_order_relaxed)) {
+        return false;
+      }
     }
-    // Record metrics for this directory regardless of whether it was fully
-    // processed or if the cleaner is being stopped.
-    if (successes != 0 || fails != 0) {
-      UmaHistogramCounts1M("Windows.TmpFileDeleter.SuccessCount", successes);
-      UmaHistogramCounts1M("Windows.TmpFileDeleter.FailCount", fails);
-    }
-    if (stop)
-      return false;
   }
   return true;
 }

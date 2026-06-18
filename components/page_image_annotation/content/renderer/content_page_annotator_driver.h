@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,6 @@
 #include <map>
 #include <utility>
 
-#include "base/gtest_prod_util.h"
-#include "base/macros.h"
 #include "components/page_image_annotation/core/page_annotator.h"
 #include "content/public/renderer/render_frame_observer.h"
 #include "content/public/renderer/render_frame_observer_tracker.h"
@@ -27,6 +25,10 @@ class ContentPageAnnotatorDriver
     : public content::RenderFrameObserver,
       public content::RenderFrameObserverTracker<ContentPageAnnotatorDriver> {
  public:
+  ContentPageAnnotatorDriver(const ContentPageAnnotatorDriver&) = delete;
+  ContentPageAnnotatorDriver& operator=(const ContentPageAnnotatorDriver&) =
+      delete;
+
   ~ContentPageAnnotatorDriver() override;
 
   static ContentPageAnnotatorDriver* GetOrCreate(
@@ -55,7 +57,7 @@ class ContentPageAnnotatorDriver
   ContentPageAnnotatorDriver(content::RenderFrame* render_frame);
 
   // content::RenderFrameObserver:
-  void DidFinishDocumentLoad() override;
+  void DidDispatchDOMContentLoadedEvent() override;
   void OnDestruct() override;
 
   // Traverse the DOM starting at the given node, and add all elements with
@@ -79,8 +81,6 @@ class ContentPageAnnotatorDriver
   PageAnnotator page_annotator_;
 
   base::WeakPtrFactory<ContentPageAnnotatorDriver> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ContentPageAnnotatorDriver);
 };
 
 }  // namespace page_image_annotation

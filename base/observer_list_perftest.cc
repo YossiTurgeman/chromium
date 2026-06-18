@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #include <memory>
 
 #include "base/check_op.h"
-#include "base/observer_list.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -34,12 +33,13 @@ perf_test::PerfResultReporter SetUpReporter(const std::string& story_name) {
 
 class ObserverInterface {
  public:
-  ObserverInterface() {}
-  virtual ~ObserverInterface() {}
-  virtual void Observe() const { ++g_observer_list_perf_test_counter; }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ObserverInterface);
+  ObserverInterface() = default;
+  ObserverInterface(const ObserverInterface&) = delete;
+  ObserverInterface& operator=(const ObserverInterface&) = delete;
+  virtual ~ObserverInterface() = default;
+  virtual void Observe() const {
+    g_observer_list_perf_test_counter = g_observer_list_perf_test_counter + 1;
+  }
 };
 
 class UnsafeObserver : public ObserverInterface {};
@@ -64,10 +64,9 @@ class ObserverListPerfTest : public ::testing::Test {
  public:
   using ObserverListType = typename Pick<ObserverType>::ObserverListType;
 
-  ObserverListPerfTest() {}
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ObserverListPerfTest);
+  ObserverListPerfTest() = default;
+  ObserverListPerfTest(const ObserverListPerfTest&) = delete;
+  ObserverListPerfTest& operator=(const ObserverListPerfTest&) = delete;
 };
 
 typedef ::testing::Types<UnsafeObserver, TestCheckedObserver> ObserverTypes;
@@ -88,31 +87,42 @@ TYPED_TEST(ObserverListPerfTest, NotifyPerformance) {
 
   for (int observer_count = 0; observer_count <= kMaxObservers;
        observer_count = observer_count ? observer_count * 2 : 1) {
-    typename TestFixture::ObserverListType list;
-    for (int i = 0; i < observer_count; ++i)
-      observers.push_back(std::make_unique<TypeParam>());
-    for (auto& o : observers)
-      list.AddObserver(o.get());
-
-    for (int i = 0; i < kWarmupLaps; ++i) {
-      for (auto& o : list)
-        o.Observe();
-    }
-    g_observer_list_perf_test_counter = 0;
     const int weighted_laps = kLaps / (observer_count + 1);
+    TimeDelta duration;
+    {
+      TimeTicks start;
+      typename TestFixture::ObserverListType list;
+      for (int i = 0; i < observer_count; ++i) {
+        observers.push_back(std::make_unique<TypeParam>());
+      }
+      for (auto& o : observers) {
+        list.AddObserver(o.get());
+      }
 
-    TimeTicks start = TimeTicks::Now();
-    for (int i = 0; i < weighted_laps; ++i) {
-      for (auto& o : list)
-        o.Observe();
+      for (int i = 0; i < kWarmupLaps; ++i) {
+        for (auto& o : list) {
+          o.Observe();
+        }
+      }
+      g_observer_list_perf_test_counter = 0;
+
+      start = TimeTicks::Now();
+      for (int i = 0; i < weighted_laps; ++i) {
+        for (auto& o : list) {
+          o.Observe();
+        }
+      }
+      duration = TimeTicks::Now() - start;
     }
-    TimeDelta duration = TimeTicks::Now() - start;
 
+    // The observers are no longer needed in this iteration, so reset the list
+    // to get ready for the next iteration. Be careful. We cannot invoke
+    // `observers.clear()` before destructing the `list`. Otherwise, we will
+    // see crashes caused by dangling pointers.
     observers.clear();
 
     EXPECT_EQ(observer_count * weighted_laps,
               g_observer_list_perf_test_counter);
-    EXPECT_TRUE(observer_count == 0 || list.might_have_observers());
 
     std::string story_name =
         base::StringPrintf("%s_%d", Pick<TypeParam>::GetName(), observer_count);

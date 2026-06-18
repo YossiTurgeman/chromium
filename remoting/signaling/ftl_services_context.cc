@@ -1,13 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/signaling/ftl_services_context.h"
 
-#include <utility>
-
-#include "base/guid.h"
-#include "base/no_destructor.h"
+#include "base/uuid.h"
 #include "build/build_config.h"
 #include "google_apis/google_api_keys.h"
 #include "remoting/base/service_urls.h"
@@ -18,32 +15,6 @@ namespace {
 
 constexpr char kChromotingAppIdentifier[] = "CRD";
 
-const net::BackoffEntry::Policy kBackoffPolicy = {
-    // Number of initial errors (in sequence) to ignore before applying
-    // exponential back-off rules.
-    0,
-
-    // Initial delay for exponential back-off in ms.
-    FtlServicesContext::kBackoffInitialDelay.InMilliseconds(),
-
-    // Factor by which the waiting time will be multiplied.
-    2,
-
-    // Fuzzing percentage. ex: 10% will spread requests randomly
-    // between 90%-100% of the calculated time.
-    0.5,
-
-    // Maximum amount of time we are willing to delay our request in ms.
-    FtlServicesContext::kBackoffMaxDelay.InMilliseconds(),
-
-    // Time to keep an entry from being discarded even when it
-    // has no significant state, -1 to never discard.
-    -1,
-
-    // Starts with initial delay.
-    false,
-};
-
 }  // namespace
 
 constexpr base::TimeDelta FtlServicesContext::kBackoffInitialDelay;
@@ -51,6 +22,32 @@ constexpr base::TimeDelta FtlServicesContext::kBackoffMaxDelay;
 
 // static
 const net::BackoffEntry::Policy& FtlServicesContext::GetBackoffPolicy() {
+  static const net::BackoffEntry::Policy kBackoffPolicy = {
+      // Number of initial errors (in sequence) to ignore before applying
+      // exponential back-off rules.
+      0,
+
+      // Initial delay for exponential back-off in ms.
+      static_cast<int>(kBackoffInitialDelay.InMilliseconds()),
+
+      // Factor by which the waiting time will be multiplied.
+      2,
+
+      // Fuzzing percentage. ex: 10% will spread requests randomly
+      // between 90%-100% of the calculated time.
+      0.5,
+
+      // Maximum amount of time we are willing to delay our request in ms.
+      kBackoffMaxDelay.InMilliseconds(),
+
+      // Time to keep an entry from being discarded even when it
+      // has no significant state, -1 to never discard.
+      -1,
+
+      // Starts with initial delay.
+      false,
+  };
+
   return kBackoffPolicy;
 }
 
@@ -78,7 +75,7 @@ ftl::Id FtlServicesContext::CreateIdFromString(const std::string& ftl_id) {
 ftl::RequestHeader FtlServicesContext::CreateRequestHeader(
     const std::string& ftl_auth_token) {
   ftl::RequestHeader header;
-  header.set_request_id(base::GenerateGUID());
+  header.set_request_id(base::Uuid::GenerateRandomV4().AsLowercaseString());
   header.set_app(kChromotingAppIdentifier);
   if (!ftl_auth_token.empty()) {
     header.set_auth_token_payload(ftl_auth_token);
@@ -92,9 +89,9 @@ ftl::RequestHeader FtlServicesContext::CreateRequestHeader(
   client_info->set_version_minor(VERSION_BUILD);
   client_info->set_version_point(VERSION_PATCH);
   ftl::Platform_Type platform_type;
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   platform_type = ftl::Platform_Type_FTL_ANDROID;
-#elif defined(OS_IOS)
+#elif BUILDFLAG(IS_IOS)
   platform_type = ftl::Platform_Type_FTL_IOS;
 #else
   platform_type = ftl::Platform_Type_FTL_DESKTOP;

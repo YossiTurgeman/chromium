@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define COMPONENTS_OMNIBOX_BROWSER_AUTOCOMPLETE_MATCH_TYPE_H_
 
 #include <string>
-
-#include "base/strings/string16.h"
 
 struct AutocompleteMatch;
 
@@ -19,14 +17,16 @@ struct AutocompleteMatchType {
   // and cannot be renumbered.
   //
   // Automatically generate a corresponding Java enum:
-  // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.chrome.browser.omnibox
+  // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.components.omnibox
   // GENERATED_JAVA_CLASS_NAME_OVERRIDE: OmniboxSuggestionType
   // clang-format off
   //
-  // These values are persisted to logs. Entries should not be renumbered and
-  // numeric values should never be reused. The values should remain
-  // synchronized with the enum AutocompleteMatchType in
-  // //tools/metrics/histograms/enums.xml.
+  // Any changes to this enum also requires an update to:
+  //  - `AutocompleteMatch::GetOmniboxEventResultType()`
+  //  - `AutocompleteMatch::GetVectorIcon()`
+  //  - `GetClientSummarizedResultType()`
+  //  - `AutocompleteMatchType::ToString()`
+  //  - `AutocompleteMatchType::GetAccessibilityBaseLabel()`
   enum Type {
     URL_WHAT_YOU_TYPED    = 0,  // The input as a URL.
     HISTORY_URL           = 1,  // A past page whose URL contains the input.
@@ -69,16 +69,44 @@ struct AutocompleteMatchType {
     TAB_SEARCH_DEPRECATED       = 23,  // A suggested open tab, based on its
                                        // URL or title, via HQP (deprecated).
     DOCUMENT_SUGGESTION         = 24,  // A suggested document.
-    PEDAL                       = 25,  // An omnibox pedal suggestion.
+    PEDAL                       = 25,  // An omnibox pedal match.
     CLIPBOARD_TEXT              = 26,  // Text based on the clipboard.
     CLIPBOARD_IMAGE             = 27,  // An image based on the clipboard.
     TILE_SUGGESTION             = 28,  // A suggestion containing query tiles.
+    TILE_NAVSUGGEST             = 29,  // A suggestion with navigation tiles.
+    OPEN_TAB                    = 30,  // A URL match amongst the currently open
+                                       // tabs.
+    HISTORY_CLUSTER             = 31,  // A history cluster suggestion.
+    NULL_RESULT_MESSAGE         = 32,  // A suggestion whose purpose is only to
+                                       // deliver a message. This suggestion
+                                       // cannot be opened or acted upon.
+    STARTER_PACK                = 33,  // A URL suggestion that a starter pack
+                                       // keyword mode chip attaches to.
+    TILE_MOST_VISITED_SITE      = 34,  // Most Visited Site, shown in a
+                                       // Horizontal Render Group.
+                                       // Different from TILE_NAVSUGGEST which
+                                       // is an aggregate type by itself.
+    TILE_REPEATABLE_QUERY       = 35,  // Organic Repeatable Query, shown in a
+                                       // Horizontal Render Group.
+    HISTORY_EMBEDDINGS          = 36,  // A past page whose contents have
+                                       // similar embeddings to the query.
+    FEATURED_ENTERPRISE_SEARCH  = 37,  // Site search engines featured by
+                                       // Enterprise policy.
+    HISTORY_EMBEDDINGS_ANSWER   = 38,
+    TAB_GROUP                   = 39,  // A tab group match.
+    CROSS_DEVICE_TAB            = 40,  // A tab opened on another device.
     NUM_TYPES,
   };
   // clang-format on
 
   // Converts |type| to a string representation. Used in logging.
   static std::string ToString(AutocompleteMatchType::Type type);
+
+  // Use this function to convert integers to AutocompleteMatchType enum values.
+  // If you're sure it will be valid, you can call CHECK on the return value.
+  // Returns true if |value| was successfully converted to a valid enum value.
+  // The valid enum value will be written into |result|.
+  static bool FromInteger(int value, Type* result);
 
   // Returns the accessibility label for an AutocompleteMatch |match|
   // whose text is |match_text| The accessibility label describes the
@@ -97,12 +125,13 @@ struct AutocompleteMatchType {
   // TODO(tommycli): It seems odd that we are passing in both |match| and
   // |match_text|. Using just |match.contents| or |match.fill_into_edit| seems
   // like it could replace |match_text|. Investigate this.
-  static base::string16 ToAccessibilityLabel(
+  static std::u16string ToAccessibilityLabel(
       const AutocompleteMatch& match,
-      const base::string16& match_text,
+      const std::u16string& header_text,
+      const std::u16string& match_text,
       size_t match_index = 0,
       size_t total_matches = 0,
-      int additional_message_id = 0,
+      const std::u16string& additional_message_format = std::u16string(),
       int* label_prefix_length = nullptr);
 };
 

@@ -1,35 +1,43 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_IMPORTER_PROFILE_WRITER_H_
 #define CHROME_BROWSER_IMPORTER_PROFILE_WRITER_H_
 
+#include <string>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
-#include "base/strings/string16.h"
-#include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/favicon_base/favicon_usage_data.h"
 #include "components/history/core/browser/history_types.h"
 #include "components/search_engines/template_url_service.h"
 #include "url/gurl.h"
 
-struct ImportedBookmarkEntry;
 class Profile;
 
 namespace autofill {
-struct PasswordForm;
-class AutofillEntry;
+class AutocompleteEntry;
 }
+
+namespace password_manager {
+struct PasswordForm;
+}  // namespace password_manager
+
+namespace user_data_importer {
+struct ImportedBookmarkEntry;
+}  // namespace user_data_importer
 
 // ProfileWriter encapsulates profile for writing entries into it.
 // This object must be invoked on UI thread.
 class ProfileWriter : public base::RefCountedThreadSafe<ProfileWriter> {
  public:
   explicit ProfileWriter(Profile* profile);
+
+  ProfileWriter(const ProfileWriter&) = delete;
+  ProfileWriter& operator=(const ProfileWriter&) = delete;
 
   // These functions return true if the corresponding model has been loaded.
   // If the models haven't been loaded, the importer waits to run until they've
@@ -38,7 +46,7 @@ class ProfileWriter : public base::RefCountedThreadSafe<ProfileWriter> {
   virtual bool TemplateURLServiceIsLoaded() const;
 
   // Helper methods for adding data to local stores.
-  virtual void AddPasswordForm(const autofill::PasswordForm& form);
+  virtual void AddPasswordForm(const password_manager::PasswordForm& form);
 
   virtual void AddHistoryPage(const history::URLRows& page,
                               history::VisitSource visit_source);
@@ -64,8 +72,8 @@ class ProfileWriter : public base::RefCountedThreadSafe<ProfileWriter> {
   // the name 'Imported from IE' already exists in the bookmarks toolbar, then
   // we will instead create a subfolder named 'Imported from IE (1)'.
   virtual void AddBookmarks(
-      const std::vector<ImportedBookmarkEntry>& bookmarks,
-      const base::string16& top_level_folder_name);
+      const std::vector<user_data_importer::ImportedBookmarkEntry>& bookmarks,
+      const std::u16string& top_level_folder_name);
 
   virtual void AddFavicons(const favicon_base::FaviconUsageDataList& favicons);
 
@@ -80,9 +88,9 @@ class ProfileWriter : public base::RefCountedThreadSafe<ProfileWriter> {
       TemplateURLService::OwnedTemplateURLVector template_urls,
       bool unique_on_host_and_path);
 
-  // Adds the imported autofill entries to the autofill database.
-  virtual void AddAutofillFormDataEntries(
-      const std::vector<autofill::AutofillEntry>& autofill_entries);
+  // Adds the imported autocomplete entries to the autofill database.
+  virtual void AddAutocompleteFormDataEntries(
+      const std::vector<autofill::AutocompleteEntry>& autocomplete_entries);
 
  protected:
   friend class base::RefCountedThreadSafe<ProfileWriter>;
@@ -90,9 +98,7 @@ class ProfileWriter : public base::RefCountedThreadSafe<ProfileWriter> {
   virtual ~ProfileWriter();
 
  private:
-  Profile* const profile_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProfileWriter);
+  const raw_ptr<Profile> profile_;
 };
 
 #endif  // CHROME_BROWSER_IMPORTER_PROFILE_WRITER_H_

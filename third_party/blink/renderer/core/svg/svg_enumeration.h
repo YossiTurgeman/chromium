@@ -31,9 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_ENUMERATION_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_ENUMERATION_H_
 
+#include "base/check_op.h"
 #include "third_party/blink/renderer/core/svg/properties/svg_property.h"
 #include "third_party/blink/renderer/core/svg/svg_parsing_error.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/wtf/casting.h"
 
 namespace blink {
 
@@ -75,12 +77,11 @@ class SVGEnumeration : public SVGPropertyBase {
   SVGEnumeration* Clone() const {
     return MakeGarbageCollected<SVGEnumeration>(value_, map_);
   }
-  SVGPropertyBase* CloneForAnimation(const String&) const override;
 
   String ValueAsString() const override;
   SVGParsingError SetValueAsString(const String&);
 
-  void Add(const SVGPropertyBase*, const SVGElement*) override;
+  bool Add(const SVGPropertyBase*, const SVGElement*) override;
   void CalculateAnimatedValue(
       const SMILAnimationEffectParameters&,
       float percentage,
@@ -112,6 +113,13 @@ class SVGEnumeration : public SVGPropertyBase {
 
   uint16_t value_;
   const SVGEnumerationMap& map_;
+};
+
+template <>
+struct DowncastTraits<SVGEnumeration> {
+  static bool AllowFrom(const SVGPropertyBase& value) {
+    return value.GetType() == SVGEnumeration::ClassType();
+  }
 };
 
 #define DECLARE_SVG_ENUM_MAP(cpp_enum_type) \

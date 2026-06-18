@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,14 @@
 // NOTE: The format of types has changed. 'FooType' is now
 //   'chrome.bluetooth.FooType'.
 // Please run the closure compiler before committing changes.
-// See https://chromium.googlesource.com/chromium/src/+/master/docs/closure_compilation.md
-
-/** @fileoverview Externs generated from namespace: bluetooth */
+// See https://chromium.googlesource.com/chromium/src/+/main/docs/closure_compilation.md
 
 /**
- * @const
+ * @fileoverview Externs generated from namespace: bluetooth
+ * @externs
  */
+
+/** @const */
 chrome.bluetooth = {};
 
 /**
@@ -112,7 +113,7 @@ chrome.bluetooth.BluetoothFilter;
 
 /**
  * Get information about the Bluetooth adapter.
- * @param {function(!chrome.bluetooth.AdapterState): void} callback Called with
+ * @param {function(!chrome.bluetooth.AdapterState): void=} callback Called with
  *     an AdapterState object describing the adapter state.
  * @see https://developer.chrome.com/extensions/bluetooth#method-getAdapterState
  */
@@ -121,7 +122,7 @@ chrome.bluetooth.getAdapterState = function(callback) {};
 /**
  * Get information about a Bluetooth device known to the system.
  * @param {string} deviceAddress Address of device to get.
- * @param {function(!chrome.bluetooth.Device): void} callback Called with the
+ * @param {function(!chrome.bluetooth.Device): void=} callback Called with the
  *     Device object describing the device.
  * @see https://developer.chrome.com/extensions/bluetooth#method-getDevice
  */
@@ -135,8 +136,8 @@ chrome.bluetooth.getDevice = function(deviceAddress, callback) {};
  *     to <code>{}</code>, returned device list will contain all bluetooth
  *     devices. Right now this is only supported in ChromeOS, for other
  *     platforms, a full list is returned.
- * @param {function(!Array<!chrome.bluetooth.Device>): void=} callback Called when
- *     the search is completed.
+ * @param {function(!Array<!chrome.bluetooth.Device>): void=} callback Called
+ *     when the search is completed.
  * @see https://developer.chrome.com/extensions/bluetooth#method-getDevices
  */
 chrome.bluetooth.getDevices = function(filter, callback) {};

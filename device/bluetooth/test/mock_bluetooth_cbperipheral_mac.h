@@ -1,9 +1,9 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef DEVICE_BLUETOOTH_MOCK_BLUETOOTH_CBPERIPHERAL_MAC_H_
-#define DEVICE_BLUETOOTH_MOCK_BLUETOOTH_CBPERIPHERAL_MAC_H_
+#ifndef DEVICE_BLUETOOTH_TEST_MOCK_BLUETOOTH_CBPERIPHERAL_MAC_H_
+#define DEVICE_BLUETOOTH_TEST_MOCK_BLUETOOTH_CBPERIPHERAL_MAC_H_
 
 #include "build/build_config.h"
 
@@ -20,11 +20,11 @@ class BluetoothTestMac;
 @interface MockCBPeripheral : NSObject
 
 @property(nonatomic, readonly) CBPeripheralState state;
-@property(nonatomic, readonly) NSUUID* identifier;
+@property(nonatomic, strong, readonly) NSUUID* identifier;
 @property(nonatomic, readonly) NSString* name;
-@property(nonatomic, assign) id<CBPeripheralDelegate> delegate;
+@property(nonatomic, weak) id<CBPeripheralDelegate> delegate;
 @property(nonatomic, readonly) CBPeripheral* peripheral;
-@property(retain, readonly) NSArray* services;
+@property(strong, readonly) NSArray* services;
 @property(nonatomic, assign) device::BluetoothTestMac* bluetoothTestMac;
 
 - (instancetype)init NS_UNAVAILABLE;
@@ -56,4 +56,4 @@ class BluetoothTestMac;
 
 @end
 
-#endif  // DEVICE_BLUETOOTH_MOCK_BLUETOOTH_CBPERIPHERAL_MAC_H_
+#endif  // DEVICE_BLUETOOTH_TEST_MOCK_BLUETOOTH_CBPERIPHERAL_MAC_H_

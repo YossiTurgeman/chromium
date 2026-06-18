@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,11 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/launcher/test_result.h"
 #include "base/threading/thread_checker.h"
 
@@ -32,11 +33,15 @@ class FilePath;
 class TestResultsTracker {
  public:
   TestResultsTracker();
+
+  TestResultsTracker(const TestResultsTracker&) = delete;
+  TestResultsTracker& operator=(const TestResultsTracker&) = delete;
+
   ~TestResultsTracker();
 
   // Initialize the result tracker. Must be called exactly once before
   // calling any other methods. Returns true on success.
-  bool Init(const CommandLine& command_line) WARN_UNUSED_RESULT;
+  [[nodiscard]] bool Init(const CommandLine& command_line);
 
   // Called when a test iteration is starting.
   void OnTestIterationStarting();
@@ -84,13 +89,13 @@ class TestResultsTracker {
   // Saves a JSON summary of all test iterations results to |path|. Adds
   // |additional_tags| to the summary (just for this invocation). Returns
   // true on success.
-  bool SaveSummaryAsJSON(
+  [[nodiscard]] bool SaveSummaryAsJSON(
       const FilePath& path,
-      const std::vector<std::string>& additional_tags) const WARN_UNUSED_RESULT;
+      const std::vector<std::string>& additional_tags) const;
 
   // Map where keys are test result statuses, and values are sets of tests
   // which finished with that status.
-  typedef std::map<TestResult::Status, std::set<std::string> > TestStatusMap;
+  typedef std::map<TestResult::Status, std::set<std::string>> TestStatusMap;
 
   // Returns a test status map (see above) for current test iteration.
   TestStatusMap GetTestStatusMapForCurrentIteration() const;
@@ -101,9 +106,23 @@ class TestResultsTracker {
  private:
   FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
                            SaveSummaryAsJSONWithLinkInResult);
+  FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
+                           SaveSummaryAsJSONWithTagInResult);
+  FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
+                           SaveSummaryAsJSONWithMultiTagsInResult);
+  FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
+                           SaveSummaryAsJSONWithMultiTagsSameNameInResult);
+  FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
+                           SaveSummaryAsJSONWithPropertyInResult);
+  FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
+                           SaveSummaryAsJSONWithOutTimestampInResult);
+  FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
+                           SaveSummaryAsJSONWithTimestampInResult);
+  FRIEND_TEST_ALL_PREFIXES(TestResultsTrackerTest,
+                           SaveSummaryAsJSONWithSubTestResult);
   void GetTestStatusForIteration(int iteration, TestStatusMap* map) const;
 
-  template<typename InputIterator>
+  template <typename InputIterator>
   void PrintTests(InputIterator first,
                   InputIterator last,
                   const std::string& description) const;
@@ -131,8 +150,7 @@ class TestResultsTracker {
   };
 
   struct CodeLocation {
-    CodeLocation(const std::string& f, int l) : file(f), line(l) {
-    }
+    CodeLocation(const std::string& f, int l) : file(f), line(l) {}
 
     std::string file;
     int line;
@@ -167,9 +185,7 @@ class TestResultsTracker {
   int iteration_;
 
   // File handle of output file (can be NULL if no file).
-  FILE* out_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestResultsTracker);
+  raw_ptr<FILE> out_;
 };
 
 }  // namespace base

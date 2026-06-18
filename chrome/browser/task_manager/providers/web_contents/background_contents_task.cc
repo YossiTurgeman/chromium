@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 
 #include "base/i18n/rtl.h"
 #include "base/strings/utf_string_conversions.h"
+#include "chrome/browser/background/background_contents.h"
 #include "chrome/browser/background/background_contents_service.h"
 #include "chrome/browser/background/background_contents_service_factory.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/grit/theme_resources.h"
 #include "extensions/browser/extension_registry.h"
@@ -24,9 +24,9 @@ namespace task_manager {
 
 namespace {
 
-base::string16 AdjustAndLocalizeTitle(const base::string16& title,
+std::u16string AdjustAndLocalizeTitle(const std::u16string& title,
                                       const std::string& url_spec) {
-  base::string16 localized_title(title);
+  std::u16string localized_title(title);
   if (localized_title.empty()) {
     // No title (can't locate the parent app for some reason) so just display
     // the URL (properly forced to be LTR).
@@ -45,15 +45,14 @@ base::string16 AdjustAndLocalizeTitle(const base::string16& title,
 gfx::ImageSkia* BackgroundContentsTask::s_icon_ = nullptr;
 
 BackgroundContentsTask::BackgroundContentsTask(
-    const base::string16& title,
+    const std::u16string& title,
     BackgroundContents* background_contents)
     : RendererTask(
           AdjustAndLocalizeTitle(title, background_contents->GetURL().spec()),
           FetchIcon(IDR_PLUGINS_FAVICON, &s_icon_),
           background_contents->web_contents()) {}
 
-BackgroundContentsTask::~BackgroundContentsTask() {
-}
+BackgroundContentsTask::~BackgroundContentsTask() = default;
 
 void BackgroundContentsTask::UpdateTitle() {
   // TODO(afakhry): At the time of integration testing figure out whether we

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,12 +22,13 @@ bool AllProfilesHaveSameArcPackageDetails() {
 
 class TwoClientArcPackageSyncTest : public SyncTest {
  public:
-  TwoClientArcPackageSyncTest() : SyncTest(TWO_CLIENT) { DisableVerifier(); }
+  TwoClientArcPackageSyncTest() : SyncTest(TWO_CLIENT) {}
+  ~TwoClientArcPackageSyncTest() override = default;
 
-  ~TwoClientArcPackageSyncTest() override {}
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(TwoClientArcPackageSyncTest);
+  // This test suite is ChromeOS specific, where there's only Sync-the-feature.
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return SetupSyncMode::kSyncTheFeature;
+  }
 };
 
 IN_PROC_BROWSER_TEST_F(TwoClientArcPackageSyncTest, StartWithNoPackages) {
@@ -64,7 +65,6 @@ IN_PROC_BROWSER_TEST_F(TwoClientArcPackageSyncTest,
   ASSERT_FALSE(AllProfilesHaveSameArcPackageDetails());
 
   ASSERT_TRUE(SetupSync());
-  ASSERT_TRUE(AwaitQuiescence());
   ASSERT_TRUE(AllProfilesHaveSameArcPackageDetails());
 }
 
@@ -87,7 +87,6 @@ IN_PROC_BROWSER_TEST_F(TwoClientArcPackageSyncTest,
   ASSERT_FALSE(AllProfilesHaveSameArcPackageDetails());
 
   ASSERT_TRUE(SetupSync());
-  ASSERT_TRUE(AwaitQuiescence());
   EXPECT_TRUE(AllProfilesHaveSameArcPackageDetails());
 }
 
@@ -108,7 +107,6 @@ IN_PROC_BROWSER_TEST_F(TwoClientArcPackageSyncTest,
   EXPECT_FALSE(AllProfilesHaveSameArcPackageDetails());
 
   ASSERT_TRUE(SetupSync());
-  ASSERT_TRUE(AwaitQuiescence());
   EXPECT_TRUE(AllProfilesHaveSameArcPackageDetails());
 }
 

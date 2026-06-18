@@ -1,4 +1,4 @@
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,7 @@ import os
 from pylib.base import output_manager
 from pylib.output import noop_output_manager
 from pylib.utils import logdog_helper
-from pylib.utils import google_storage_helper
+from lib.common import google_storage_helper
 
 
 class RemoteOutputManager(output_manager.OutputManager):
@@ -22,15 +22,15 @@ class RemoteOutputManager(output_manager.OutputManager):
     Args
       bucket: Bucket to use when saving to Google Storage.
     """
-    super(RemoteOutputManager, self).__init__()
+    super().__init__()
     self._bucket = bucket
 
   #override
-  def _CreateArchivedFile(self, out_filename, out_subdir, datatype):
+  def _CreateArchivedFile(self, out_filename, out_subdir, datatype, package):
     if datatype == output_manager.Datatype.TEXT:
       try:
         logdog_helper.get_logdog_client()
-        return LogdogArchivedFile(out_filename, out_subdir, datatype)
+        return LogdogArchivedFile(out_filename, out_subdir, datatype, package)
       except RuntimeError:
         return noop_output_manager.NoopArchivedFile()
     else:
@@ -42,12 +42,16 @@ class RemoteOutputManager(output_manager.OutputManager):
 
 class LogdogArchivedFile(output_manager.ArchivedFile):
 
-  def __init__(self, out_filename, out_subdir, datatype):
-    super(LogdogArchivedFile, self).__init__(out_filename, out_subdir, datatype)
+  def __init__(self, out_filename, out_subdir, datatype, package):
+    super().__init__(out_filename, out_subdir, datatype)
     self._stream_name = '%s_%s' % (out_subdir, out_filename)
+    self._package = package
 
   def _Link(self):
-    return logdog_helper.get_viewer_url(self._stream_name)
+    if self._package is None:
+      return logdog_helper.get_viewer_url(self._stream_name)
+    return logdog_helper.get_viewer_url(
+        self._stream_name) + '&format=logcat&package=' + self._package
 
   def _Archive(self):
     with open(self.name, 'r') as f:
@@ -57,8 +61,7 @@ class LogdogArchivedFile(output_manager.ArchivedFile):
 class GoogleStorageArchivedFile(output_manager.ArchivedFile):
 
   def __init__(self, out_filename, out_subdir, datatype, bucket):
-    super(GoogleStorageArchivedFile, self).__init__(
-        out_filename, out_subdir, datatype)
+    super().__init__(out_filename, out_subdir, datatype)
     self._bucket = bucket
     self._upload_path = None
     self._content_addressed = None

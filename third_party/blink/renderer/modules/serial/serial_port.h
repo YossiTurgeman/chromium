@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,21 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_SERIAL_SERIAL_PORT_H_
 
 #include "mojo/public/cpp/bindings/pending_receiver.h"
-#include "services/device/public/mojom/serial.mojom-blink-forward.h"
+#include "services/device/public/mojom/serial.mojom-blink.h"
 #include "third_party/blink/public/mojom/serial/serial.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+#include "third_party/blink/renderer/core/dom/events/event_target.h"
+#include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
-#include "third_party/blink/renderer/platform/heap/heap_allocator.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_set.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_receiver.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_wrapper_mode.h"
+#include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
 
 namespace base {
 class UnguessableToken;
@@ -24,9 +29,9 @@ class UnguessableToken;
 namespace blink {
 
 class ReadableStream;
-class ScriptPromiseResolver;
 class ScriptState;
 class Serial;
+class SerialInputSignals;
 class SerialOptions;
 class SerialOutputSignals;
 class SerialPortInfo;
@@ -34,9 +39,10 @@ class SerialPortUnderlyingSink;
 class SerialPortUnderlyingSource;
 class WritableStream;
 
-class SerialPort final : public ScriptWrappable,
-                         public ActiveScriptWrappable<SerialPort>,
-                         public device::mojom::blink::SerialPortClient {
+class MODULES_EXPORT SerialPort final
+    : public EventTarget,
+      public ActiveScriptWrappable<SerialPort>,
+      public device::mojom::blink::SerialPortClient {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
@@ -44,22 +50,29 @@ class SerialPort final : public ScriptWrappable,
   ~SerialPort() override;
 
   // Web-exposed functions
+  DEFINE_ATTRIBUTE_EVENT_LISTENER(connect, kConnect)
+  DEFINE_ATTRIBUTE_EVENT_LISTENER(disconnect, kDisconnect)
   SerialPortInfo* getInfo();
-  ScriptPromise open(ScriptState*,
-                     const SerialOptions* options,
-                     ExceptionState&);
+  ScriptPromise<IDLUndefined> open(ScriptState*,
+                                   const SerialOptions* options,
+                                   ExceptionState&);
+  bool connected() { return connected_; }
   ReadableStream* readable(ScriptState*, ExceptionState&);
   WritableStream* writable(ScriptState*, ExceptionState&);
-  ScriptPromise getSignals(ScriptState*, ExceptionState&);
-  ScriptPromise setSignals(ScriptState*,
-                           const SerialOutputSignals*,
-                           ExceptionState&);
-  ScriptPromise close(ScriptState*, ExceptionState&);
+  ScriptPromise<SerialInputSignals> getSignals(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLUndefined> setSignals(ScriptState*,
+                                         const SerialOutputSignals*,
+                                         ExceptionState&);
+  ScriptPromise<IDLUndefined> close(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLUndefined> forget(ScriptState*, ExceptionState&);
 
   const base::UnguessableToken& token() const { return info_->token; }
 
-  ScriptPromise ContinueClose(ScriptState*);
+  void set_connected(bool connected) { connected_ = connected; }
+  ScriptPromise<IDLUndefined> ContinueClose(ScriptState*);
   void AbortClose();
+  void StreamsClosed();
+  bool IsClosing() const { return close_resolver_ != nullptr; }
 
   void Flush(device::mojom::blink::SerialPortFlushMode mode,
              device::mojom::blink::SerialPort::FlushCallback callback);
@@ -71,8 +84,12 @@ class SerialPort final : public ScriptWrappable,
   void Trace(Visitor*) const override;
 
   // ActiveScriptWrappable
-  ExecutionContext* GetExecutionContext() const;
   bool HasPendingActivity() const override;
+
+  // EventTarget
+  ExecutionContext* GetExecutionContext() const override;
+  const AtomicString& InterfaceName() const override;
+  DispatchEventResult DispatchEventInternal(Event& event) override;
 
   // SerialPortClient
   void OnReadError(device::mojom::blink::SerialReceiveError) override;
@@ -83,20 +100,19 @@ class SerialPort final : public ScriptWrappable,
                       mojo::ScopedDataPipeConsumerHandle* consumer);
   void OnConnectionError();
   void OnOpen(mojo::PendingReceiver<device::mojom::blink::SerialPortClient>,
-              bool success);
-  void OnGetSignals(ScriptPromiseResolver*,
+              mojo::PendingRemote<device::mojom::blink::SerialPort>);
+  void OnGetSignals(ScriptPromiseResolver<SerialInputSignals>*,
                     device::mojom::blink::SerialPortControlSignalsPtr);
-  void OnSetSignals(ScriptPromiseResolver*, bool success);
+  void OnSetSignals(ScriptPromiseResolver<IDLUndefined>*, bool success);
   void OnClose();
 
   const mojom::blink::SerialPortInfoPtr info_;
+  bool connected_;
   const Member<Serial> parent_;
 
   uint32_t buffer_size_ = 0;
   HeapMojoRemote<device::mojom::blink::SerialPort> port_;
-  HeapMojoReceiver<device::mojom::blink::SerialPortClient,
-                   SerialPort,
-                   HeapMojoWrapperMode::kWithoutContextObserver>
+  HeapMojoReceiver<device::mojom::blink::SerialPortClient, SerialPort>
       client_receiver_;
 
   Member<ReadableStream> readable_;
@@ -109,17 +125,19 @@ class SerialPort final : public ScriptWrappable,
   bool read_fatal_ = false;
   bool write_fatal_ = false;
 
-  // Indicates that the port is being closed and so the streams should not be
-  // reopened on demand.
-  bool closing_ = false;
+  // The port was opened with { flowControl: "hardware" }.
+  bool hardware_flow_control_ = false;
 
   // Resolver for the Promise returned by open().
-  Member<ScriptPromiseResolver> open_resolver_;
+  Member<ScriptPromiseResolver<IDLUndefined>> open_resolver_;
   // Resolvers for the Promises returned by getSignals() and setSignals() to
   // reject them on Mojo connection failure.
-  HeapHashSet<Member<ScriptPromiseResolver>> signal_resolvers_;
-  // Resolver for the Promise returned by ClosePort().
-  Member<ScriptPromiseResolver> close_resolver_;
+  HeapHashSet<Member<ScriptPromiseResolverBase>> signal_resolvers_;
+  // Resolver for the Promise returned by close().
+  Member<ScriptPromiseResolver<IDLUndefined>> close_resolver_;
+
+  FrameScheduler::SchedulingAffectingFeatureHandle
+      feature_handle_for_scheduler_;
 };
 
 }  // namespace blink

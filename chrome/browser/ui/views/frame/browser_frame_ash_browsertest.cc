@@ -1,14 +1,17 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ui/views/frame/browser_frame_ash.h"
-
+#include "ash/wm/window_state.h"
+#include "ash/wm/wm_event.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/views/frame/browser_native_widget_ash.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/views/widget/widget.h"
@@ -20,12 +23,13 @@ class BrowserTestParam : public InProcessBrowserTest,
                          public testing::WithParamInterface<bool> {
  public:
   BrowserTestParam() = default;
+
+  BrowserTestParam(const BrowserTestParam&) = delete;
+  BrowserTestParam& operator=(const BrowserTestParam&) = delete;
+
   ~BrowserTestParam() override = default;
 
   bool CreateV1App() { return GetParam(); }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(BrowserTestParam);
 };
 
 }  // namespace
@@ -35,7 +39,7 @@ class BrowserTestParam : public InProcessBrowserTest,
 IN_PROC_BROWSER_TEST_P(BrowserTestParam,
                        TabbedOrAppBrowserWindowAutoManagementTest) {
   // Default |browser()| is not used by this test.
-  browser()->window()->Close();
+  browser()->GetWindow()->Close();
 
   // Open a new browser window (app or tabbed depending on a parameter).
   bool is_test_app = CreateV1App();
@@ -45,37 +49,67 @@ IN_PROC_BROWSER_TEST_P(BrowserTestParam,
                         gfx::Rect(), browser()->profile(), true)
                   : Browser::CreateParams(browser()->profile(), true);
   gfx::Rect original_bounds(gfx::Rect(150, 250, 510, 150));
-  params.initial_show_state = ui::SHOW_STATE_NORMAL;
+  params.initial_show_state = ui::mojom::WindowShowState::kNormal;
   params.initial_bounds = original_bounds;
-  Browser* browser = new Browser(params);
-  browser->window()->Show();
+  Browser* browser = Browser::Create(params);
+  browser->GetWindow()->Show();
 
   // The bounds passed via |initial_bounds| should be respected regardless of
   // the window type.
-  EXPECT_EQ(original_bounds, browser->window()->GetBounds());
+  EXPECT_EQ(original_bounds, browser->GetWindow()->GetBounds());
 
   // Close the browser and re-create the browser window with the same app name.
   // Don't provide initial bounds. The bounds should have been saved, but for
   // tabbed windows, the position should be auto-managed.
-  browser->window()->Close();
+  browser->GetWindow()->Close();
   params.initial_bounds = gfx::Rect();
-  browser = new Browser(params);
-  browser->window()->Show();
+  browser = Browser::Create(params);
+  browser->GetWindow()->Show();
 
   // For tabbed browser window, it will be centered to work area by auto window
   // management logic; for app browser window, it will remain the given bounds.
   gfx::Rect expectation = original_bounds;
   if (!is_test_app) {
     expectation =
-        display::Screen::GetScreen()
-            ->GetDisplayNearestPoint(browser->window()->GetBounds().origin())
+        display::Screen::Get()
+            ->GetDisplayNearestPoint(browser->GetWindow()->GetBounds().origin())
             .work_area();
     expectation.ClampToCenteredSize(original_bounds.size());
     expectation.set_y(original_bounds.y());
   }
 
-  EXPECT_EQ(expectation, browser->window()->GetBounds())
+  EXPECT_EQ(expectation, browser->GetWindow()->GetBounds())
       << (is_test_app ? "for app window" : "for tabbed browser window");
+}
+
+using BrowserFrameAshTest = InProcessBrowserTest;
+
+// Tests that the correct bounds are being saved when a snapped window is
+// closed.
+IN_PROC_BROWSER_TEST_F(BrowserFrameAshTest, SnappedWindowSaveBounds) {
+  auto* profile = browser()->profile();
+
+  // Get the params using the same profile.
+  Browser* browser = CreateBrowser(profile);
+  aura::Window* window = browser->GetWindow()->GetNativeWindow();
+  const gfx::Rect restored_bounds(600, 600);
+  window->SetBounds(restored_bounds);
+
+  // Snap the window to the left.
+  const ash::WindowSnapWMEvent left_snap_event(ash::WM_EVENT_SNAP_PRIMARY);
+  ash::WindowState::Get(window)->OnWMEvent(&left_snap_event);
+  const gfx::Size snapped_size = window->GetBoundsInScreen().size();
+
+  ui_test_utils::BrowserDestroyedObserver observer(browser);
+  browser->GetWindow()->Close();
+  observer.Wait();
+
+  // Recreate the browser window. Test that the bounds are the same as the
+  // snapped size (position has been shifted by the ash auto window positioner).
+  Browser* new_browser = CreateBrowser(profile);
+  new_browser->GetWindow()->Show();
+  aura::Window* new_window = new_browser->GetWindow()->GetNativeWindow();
+  EXPECT_EQ(snapped_size, new_window->GetBoundsInScreen().size());
 }
 
 INSTANTIATE_TEST_SUITE_P(BrowserTestTabbedOrApp,

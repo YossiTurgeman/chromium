@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,13 @@
 
 namespace ui_test_utils {
 
-FindResultWaiter::FindResultWaiter(content::WebContents* parent_tab) {
+FindResultWaiter::FindResultWaiter(content::WebContents* parent_tab,
+                                   int request_offset) {
   find_in_page::FindTabHelper* find_tab_helper =
       find_in_page::FindTabHelper::FromWebContents(parent_tab);
-  current_find_request_id_ = find_tab_helper->current_find_request_id();
-  observer_.Add(find_tab_helper);
+  current_find_request_id_ = find_tab_helper->current_find_request_id() +
+      request_offset;
+  observation_.Observe(find_tab_helper);
 }
 
 FindResultWaiter::~FindResultWaiter() = default;

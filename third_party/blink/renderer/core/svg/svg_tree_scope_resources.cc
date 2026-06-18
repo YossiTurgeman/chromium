@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,19 +15,28 @@ SVGTreeScopeResources::SVGTreeScopeResources(TreeScope* tree_scope)
     : tree_scope_(tree_scope) {}
 
 LocalSVGResource* SVGTreeScopeResources::ResourceForId(const AtomicString& id) {
-  if (id.IsEmpty())
+  if (id.empty()) {
     return nullptr;
-  auto& entry = resources_.insert(id, nullptr).stored_value->value;
-  if (!entry)
-    entry = MakeGarbageCollected<LocalSVGResource>(*tree_scope_, id);
-  return entry;
+  }
+  auto it = resources_.find(id);
+  if (it != resources_.end()) {
+    return it->value;
+  }
+  // Use explicit Set() (rather than insert()) to avoid garbage collection
+  // shrinking the `resources_` map.
+  auto* new_entry = MakeGarbageCollected<LocalSVGResource>(*tree_scope_, id);
+  resources_.Set(id, new_entry);
+  return new_entry;
 }
 
 LocalSVGResource* SVGTreeScopeResources::ExistingResourceForId(
     const AtomicString& id) const {
-  if (id.IsEmpty())
+  if (id.empty())
     return nullptr;
-  return resources_.at(id);
+  auto it = resources_.find(id);
+  if (it == resources_.end())
+    return nullptr;
+  return it->value.Get();
 }
 
 void SVGTreeScopeResources::ProcessCustomWeakness(const LivenessBroker& info) {
@@ -46,7 +55,6 @@ void SVGTreeScopeResources::Trace(Visitor* visitor) const {
   visitor->template RegisterWeakCallbackMethod<
       SVGTreeScopeResources, &SVGTreeScopeResources::ProcessCustomWeakness>(
       this);
-  visitor->Trace(resources_);
   visitor->Trace(tree_scope_);
 }
 

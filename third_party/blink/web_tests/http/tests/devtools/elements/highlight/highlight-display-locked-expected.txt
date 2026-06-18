@@ -92,7 +92,8 @@ container{
     "isKeyboardFocusable": false,
     "accessibleName": "",
     "accessibleRole": "generic",
-    "layoutObjectName": "LayoutNGBlockFlow",
+    "layoutObjectName": "LayoutBlockFlow",
+    "isLocked": true,
     "showAccessibilityInfo": true
   }
 }
@@ -188,8 +189,8 @@ child{
     "isKeyboardFocusable": false,
     "accessibleName": "",
     "accessibleRole": "generic",
-    "layoutObjectName": "LayoutNGBlockFlow",
-    "isLockedAncestor": "true",
+    "layoutObjectName": "LayoutBlockFlow",
+    "isLockedAncestor": true,
     "showAccessibilityInfo": true
   }
 }

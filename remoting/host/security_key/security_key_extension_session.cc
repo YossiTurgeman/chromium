@@ -1,17 +1,17 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/host/security_key/security_key_extension_session.h"
 
+#include <string>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
-#include "base/macros.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/values.h"
 #include "remoting/base/logging.h"
 #include "remoting/host/client_session_details.h"
@@ -42,18 +42,18 @@ unsigned int GetCommandCode(const std::string& data) {
 
 // Creates a string of byte data from a ListValue of numbers. Returns true if
 // all of the list elements are numbers.
-bool ConvertListValueToString(base::ListValue* bytes, std::string* out) {
+bool ConvertListToString(const base::ListValue& bytes, std::string* out) {
   out->clear();
 
-  unsigned int byte_count = bytes->GetSize();
+  unsigned int byte_count = bytes.size();
   if (byte_count != 0) {
     out->reserve(byte_count);
     for (unsigned int i = 0; i < byte_count; i++) {
-      int value;
-      if (!bytes->GetInteger(i, &value)) {
+      auto value = bytes[i].GetIfInt();
+      if (!value.has_value()) {
         return false;
       }
-      out->push_back(static_cast<char>(value));
+      out->push_back(static_cast<char>(*value));
     }
   }
   return true;
@@ -95,26 +95,25 @@ bool SecurityKeyExtensionSession::OnExtensionMessage(
     return false;
   }
 
-  std::unique_ptr<base::Value> value =
-      base::JSONReader::ReadDeprecated(message.data());
-  base::DictionaryValue* client_message;
-  if (!value || !value->GetAsDictionary(&client_message)) {
+  std::optional<base::DictValue> value = base::JSONReader::ReadDict(
+      message.data(), base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (!value) {
     LOG(WARNING) << "Failed to retrieve data from gnubby-auth message.";
     return true;
   }
 
-  std::string type;
-  if (!client_message->GetString(kMessageType, &type)) {
+  const std::string* type = value->FindString(kMessageType);
+  if (!type) {
     LOG(WARNING) << "Invalid gnubby-auth message format.";
     return true;
   }
 
-  if (type == kControlMessage) {
-    ProcessControlMessage(client_message);
-  } else if (type == kDataMessage) {
-    ProcessDataMessage(client_message);
-  } else if (type == kErrorMessage) {
-    ProcessErrorMessage(client_message);
+  if (*type == kControlMessage) {
+    ProcessControlMessage(*value);
+  } else if (*type == kDataMessage) {
+    ProcessDataMessage(*value);
+  } else if (*type == kErrorMessage) {
+    ProcessErrorMessage(*value);
   } else {
     VLOG(2) << "Unknown gnubby-auth message type: " << type;
   }
@@ -122,28 +121,34 @@ bool SecurityKeyExtensionSession::OnExtensionMessage(
   return true;
 }
 
+void SecurityKeyExtensionSession::BindSecurityKeyForwarder(
+    mojo::PendingReceiver<mojom::SecurityKeyForwarder> receiver) {
+  security_key_auth_handler_->BindSecurityKeyForwarder(std::move(receiver));
+}
+
 void SecurityKeyExtensionSession::ProcessControlMessage(
-    base::DictionaryValue* message_data) const {
-  std::string option;
-  if (!message_data->GetString(kControlOption, &option)) {
+    const base::DictValue& message_data) const {
+  const std::string* option = message_data.FindString(kControlOption);
+  if (!option) {
     LOG(WARNING) << "Could not extract control option from message.";
     return;
   }
 
-  if (option == kSecurityKeyAuthV1) {
+  if (*option == kSecurityKeyAuthV1) {
     security_key_auth_handler_->CreateSecurityKeyConnection();
   } else {
-    VLOG(2) << "Invalid gnubby-auth control option: " << option;
+    VLOG(2) << "Invalid gnubby-auth control option: " << *option;
   }
 }
 
 void SecurityKeyExtensionSession::ProcessDataMessage(
-    base::DictionaryValue* message_data) const {
-  int connection_id;
-  if (!message_data->GetInteger(kConnectionId, &connection_id)) {
+    const base::DictValue& message_data) const {
+  std::optional<int> connection_id_opt = message_data.FindInt(kConnectionId);
+  if (!connection_id_opt.has_value()) {
     LOG(WARNING) << "Could not extract connection id from message.";
     return;
   }
+  auto connection_id = *connection_id_opt;
 
   if (!security_key_auth_handler_->IsValidConnectionId(connection_id)) {
     LOG(WARNING) << "Unknown gnubby-auth data connection: '" << connection_id
@@ -151,11 +156,11 @@ void SecurityKeyExtensionSession::ProcessDataMessage(
     return;
   }
 
-  base::ListValue* bytes;
   std::string response;
-  if (message_data->GetList(kDataPayload, &bytes) &&
-      ConvertListValueToString(bytes, &response)) {
-    HOST_LOG << "Sending security key response: " << GetCommandCode(response);
+  const base::ListValue* bytes_list = message_data.FindList(kDataPayload);
+  if (bytes_list && ConvertListToString(*bytes_list, &response)) {
+    HOST_LOG << "Processing security key response: "
+             << GetCommandCode(response);
     security_key_auth_handler_->SendClientResponse(connection_id, response);
   } else {
     LOG(WARNING) << "Could not extract response data from message.";
@@ -165,12 +170,13 @@ void SecurityKeyExtensionSession::ProcessDataMessage(
 }
 
 void SecurityKeyExtensionSession::ProcessErrorMessage(
-    base::DictionaryValue* message_data) const {
-  int connection_id;
-  if (!message_data->GetInteger(kConnectionId, &connection_id)) {
+    const base::DictValue& message_data) const {
+  std::optional<int> connection_id_opt = message_data.FindInt(kConnectionId);
+  if (!connection_id_opt.has_value()) {
     LOG(WARNING) << "Could not extract connection id from message.";
     return;
   }
+  auto connection_id = *connection_id_opt;
 
   if (security_key_auth_handler_->IsValidConnectionId(connection_id)) {
     HOST_LOG << "Sending security key error";
@@ -186,22 +192,21 @@ void SecurityKeyExtensionSession::SendMessageToClient(
   DCHECK(thread_checker_.CalledOnValidThread());
   DCHECK(client_stub_);
 
-  base::DictionaryValue request;
-  request.SetString(kMessageType, kDataMessage);
-  request.SetInteger(kConnectionId, connection_id);
+  HOST_LOG << "Sending security key request: " << GetCommandCode(data);
 
-  auto bytes = std::make_unique<base::ListValue>();
-  for (std::string::const_iterator i = data.begin(); i != data.end(); ++i) {
-    bytes->AppendInteger(static_cast<unsigned char>(*i));
+  base::DictValue request_dict;
+  request_dict.Set(kMessageType, kDataMessage);
+  request_dict.Set(kConnectionId, connection_id);
+
+  base::ListValue bytes;
+  for (auto& byte : data) {
+    bytes.Append(static_cast<unsigned char>(byte));
   }
-  request.Set(kDataPayload, std::move(bytes));
-
-  std::string request_json;
-  CHECK(base::JSONWriter::Write(request, &request_json));
+  request_dict.Set(kDataPayload, std::move(bytes));
 
   protocol::ExtensionMessage message;
   message.set_type(kExtensionMessageType);
-  message.set_data(request_json);
+  message.set_data(base::WriteJson(request_dict).value());
 
   client_stub_->DeliverHostMessage(message);
 }

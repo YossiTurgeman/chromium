@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,50 +9,52 @@ UNDEFINED_INTERVAL_DELAY = -1;
 /** Test fixture for auto scan manager. */
 SwitchAccessAutoScanManagerTest = class extends SwitchAccessE2ETest {
   /** @override */
-  setUp() {
+  async setUpDeferred() {
+    await super.setUpDeferred();
     AutoScanManager.instance.primaryScanTime_ = 1000;
     // Use intervalCount and intervalDelay to check how many intervals are
     // currently running (should be no more than 1) and the current delay.
-    window.intervalCount = 0;
-    window.intervalDelay = UNDEFINED_INTERVAL_DELAY;
-    window.defaultSetInterval = window.setInterval;
-    window.defaultClearInterval = window.clearInterval;
-    NavigationManager.defaultMoveForward = NavigationManager.moveForward;
-    NavigationManager.moveForwardCount = 0;
+    globalThis.intervalCount = 0;
+    globalThis.intervalDelay = UNDEFINED_INTERVAL_DELAY;
+    globalThis.defaultSetInterval = setInterval;
+    globalThis.defaultClearInterval = clearInterval;
+    this.defaultMoveForward =
+        Navigator.byItem.moveForward.bind(Navigator.byItem);
+    this.moveForwardCount = 0;
 
-
-    window.setInterval = function(func, delay) {
-      window.intervalCount++;
-      window.intervalDelay = delay;
+    globalThis.setInterval = function(func, delay) {
+      globalThis.intervalCount++;
+      globalThis.intervalDelay = delay;
 
       // Override the delay for testing.
-      return window.defaultSetInterval(func, 0);
+      return globalThis.defaultSetInterval(func, 0);
     };
 
-    window.clearInterval = function(intervalId) {
+    globalThis.clearInterval = function(intervalId) {
       if (intervalId) {
-        window.intervalCount--;
+        globalThis.intervalCount--;
       }
-      window.defaultClearInterval(intervalId);
+      globalThis.defaultClearInterval(intervalId);
     };
 
-    NavigationManager.moveForward = () => {
-      NavigationManager.moveForwardCount++;
+    Navigator.byItem.moveForward = () => {
+      this.moveForwardCount++;
       this.onMoveForward_ && this.onMoveForward_();
-      NavigationManager.defaultMoveForward();
+      this.defaultMoveForward();
     };
 
     this.onMoveForward_ = null;
   }
 };
 
-TEST_F('SwitchAccessAutoScanManagerTest', 'SetEnabled', function() {
-  this.runWithLoadedTree('', (desktop) => {
+// https://crbug.com/40916090: Flaky on linux-chromeos-rel/linux-chromeos-dbg
+TEST_F('SwitchAccessAutoScanManagerTest', 'DISABLED_SetEnabled', function() {
+  this.runWithLoadedDesktop(() => {
     assertFalse(
         AutoScanManager.instance.isRunning_(),
         'Auto scan manager is running prematurely');
     assertEquals(
-        0, NavigationManager.moveForwardCount,
+        0, this.moveForwardCount,
         'Incorrect initialization of moveForwardCount');
     assertEquals(0, intervalCount, 'Incorrect initialization of intervalCount');
 
@@ -60,9 +62,7 @@ TEST_F('SwitchAccessAutoScanManagerTest', 'SetEnabled', function() {
       assertTrue(
           AutoScanManager.instance.isRunning_(),
           'Auto scan manager has stopped running');
-      assertGT(
-          NavigationManager.moveForwardCount, 0,
-          'Switch Access has not moved forward');
+      assertGT(this.moveForwardCount, 0, 'Switch Access has not moved forward');
       assertEquals(
           1, intervalCount, 'The number of intervals is no longer exactly 1');
     });
@@ -75,53 +75,72 @@ TEST_F('SwitchAccessAutoScanManagerTest', 'SetEnabled', function() {
   });
 });
 
-TEST_F('SwitchAccessAutoScanManagerTest', 'SetEnabledMultiple', function() {
-  this.runWithLoadedTree('', (desktop) => {
-    assertFalse(
-        AutoScanManager.instance.isRunning_(),
-        'Auto scan manager is running prematurely');
-    assertEquals(0, intervalCount, 'Incorrect initialization of intervalCount');
-
-    AutoScanManager.setEnabled(true);
-    AutoScanManager.setEnabled(true);
-    AutoScanManager.setEnabled(true);
-
-    assertTrue(
-        AutoScanManager.instance.isRunning_(),
-        'Auto scan manager is not running');
-    assertEquals(1, intervalCount, 'There is not exactly 1 interval');
-  });
-});
-
-TEST_F('SwitchAccessAutoScanManagerTest', 'EnableAndDisable', function() {
-  this.runWithLoadedTree('', (desktop) => {
-    assertFalse(
-        AutoScanManager.instance.isRunning_(),
-        'Auto scan manager is running prematurely');
-    assertEquals(0, intervalCount, 'Incorrect initialization of intervalCount');
-
-    AutoScanManager.setEnabled(true);
-    assertTrue(
-        AutoScanManager.instance.isRunning_(),
-        'Auto scan manager is not running');
-    assertEquals(1, intervalCount, 'There is not exactly 1 interval');
-
-    AutoScanManager.setEnabled(false);
-    assertFalse(
-        AutoScanManager.instance.isRunning_(),
-        'Auto scan manager did not stop running');
-    assertEquals(0, intervalCount, 'Interval was not removed');
-  });
-});
-
+// https://crbug.com/40888769: Flaky on linux-chromeos-dbg
+GEN('#ifndef NDEBUG');
+GEN('#define MAYBE_SetEnabledMultiple DISABLED_SetEnabledMultiple');
+GEN('#else');
+GEN('#define MAYBE_SetEnabledMultiple SetEnabledMultiple');
+GEN('#endif');
 TEST_F(
-    'SwitchAccessAutoScanManagerTest', 'RestartIfRunningMultiple', function() {
-      this.runWithLoadedTree('', (desktop) => {
+    'SwitchAccessAutoScanManagerTest', 'MAYBE_SetEnabledMultiple', function() {
+      this.runWithLoadedDesktop(() => {
         assertFalse(
             AutoScanManager.instance.isRunning_(),
             'Auto scan manager is running prematurely');
         assertEquals(
-            0, NavigationManager.moveForwardCount,
+            0, intervalCount, 'Incorrect initialization of intervalCount');
+
+        AutoScanManager.setEnabled(true);
+        AutoScanManager.setEnabled(true);
+        AutoScanManager.setEnabled(true);
+
+        assertTrue(
+            AutoScanManager.instance.isRunning_(),
+            'Auto scan manager is not running');
+        assertEquals(1, intervalCount, 'There is not exactly 1 interval');
+      });
+    });
+
+// TODO(crbug.com/40888769): Test is flaky.
+TEST_F(
+    'SwitchAccessAutoScanManagerTest', 'DISABLED_EnableAndDisable', function() {
+      this.runWithLoadedDesktop(() => {
+        assertFalse(
+            AutoScanManager.instance.isRunning_(),
+            'Auto scan manager is running prematurely');
+        assertEquals(
+            0, intervalCount, 'Incorrect initialization of intervalCount');
+
+        AutoScanManager.setEnabled(true);
+        assertTrue(
+            AutoScanManager.instance.isRunning_(),
+            'Auto scan manager is not running');
+        assertEquals(1, intervalCount, 'There is not exactly 1 interval');
+
+        AutoScanManager.setEnabled(false);
+        assertFalse(
+            AutoScanManager.instance.isRunning_(),
+            'Auto scan manager did not stop running');
+        assertEquals(0, intervalCount, 'Interval was not removed');
+      });
+    });
+
+// https://crbug.com/40888769: Flaky on linux-chromeos-dbg
+GEN('#ifndef NDEBUG');
+GEN('#define MAYBE_RestartIfRunningMultiple DISABLED_RestartIfRunningMultiple');
+GEN('#else');
+GEN('#define MAYBE_RestartIfRunningMultiple RestartIfRunningMultiple');
+GEN('#endif');
+
+TEST_F(
+    'SwitchAccessAutoScanManagerTest', 'MAYBE_RestartIfRunningMultiple',
+    function() {
+      this.runWithLoadedDesktop(() => {
+        assertFalse(
+            AutoScanManager.instance.isRunning_(),
+            'Auto scan manager is running prematurely');
+        assertEquals(
+            0, this.moveForwardCount,
             'Incorrect initialization of moveForwardCount');
         assertEquals(
             0, intervalCount, 'Incorrect initialization of intervalCount');
@@ -138,9 +157,17 @@ TEST_F(
       });
     });
 
+// https://crbug.com/40888769: Flaky on linux-chromeos-dbg
+GEN('#ifndef NDEBUG');
+GEN('#define MAYBE_RestartIfRunningWhenOff DISABLED_RestartIfRunningWhenOff');
+GEN('#else');
+GEN('#define MAYBE_RestartIfRunningWhenOff RestartIfRunningWhenOff');
+GEN('#endif');
+
 TEST_F(
-    'SwitchAccessAutoScanManagerTest', 'RestartIfRunningWhenOff', function() {
-      this.runWithLoadedTree('', (desktop) => {
+    'SwitchAccessAutoScanManagerTest', 'MAYBE_RestartIfRunningWhenOff',
+    function() {
+      this.runWithLoadedDesktop(() => {
         assertFalse(
             AutoScanManager.instance.isRunning_(),
             'Auto scan manager is running at start.');
@@ -151,8 +178,15 @@ TEST_F(
       });
     });
 
+// https://crbug.com/40888769: Flaky on linux-chromeos-dbg
+GEN('#ifndef NDEBUG');
+GEN('#define MAYBE_SetPrimaryScanTime DISABLED_SetPrimaryScanTime');
+GEN('#else');
+GEN('#define MAYBE_SetPrimaryScanTime SetPrimaryScanTime');
+GEN('#endif');
+
 TEST_F('SwitchAccessAutoScanManagerTest', 'SetPrimaryScanTime', function() {
-  this.runWithLoadedTree('', (desktop) => {
+  this.runWithLoadedDesktop(() => {
     assertFalse(
         AutoScanManager.instance.isRunning_(),
         'Auto scan manager is running prematurely');

@@ -1,24 +1,29 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <fuzzer/FuzzedDataProvider.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "base/test/bind_test_util.h"
+
+#include "base/memory/raw_ptr.h"
+#include "base/test/bind.h"
 #include "base/time/default_tick_clock.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
 #include "third_party/blink/renderer/platform/testing/blink_fuzzer_test_support.h"
-#include "third_party/blink/renderer/platform/testing/testing_platform_support_with_mock_scheduler.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
+#include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 
 namespace blink {
 
 class PageHelper {
  public:
-  PageHelper() = default;
+  explicit PageHelper(test::TaskEnvironment* task_environment)
+      : task_environment_(task_environment) {}
   ~PageHelper() = default;
 
   void SetUp() {
@@ -28,8 +33,9 @@ class PageHelper {
         settings.SetAcceleratedCompositingEnabled(true);
     });
     EnablePlatform();
-    dummy_page_holder_ = std::make_unique<DummyPageHolder>(
-        IntSize(800, 600), nullptr, nullptr, std::move(setter), GetTickClock());
+    dummy_page_holder_ =
+        std::make_unique<DummyPageHolder>(gfx::Size(800, 600), nullptr, nullptr,
+                                          std::move(setter), GetTickClock());
 
     // Use no-quirks (ake "strict") mode by default.
     GetDocument().SetCompatibilityMode(Document::kNoQuirksMode);
@@ -45,8 +51,8 @@ class PageHelper {
   void SetBodyContentFromFuzzer(const uint8_t* data, size_t size) {
     FuzzedDataProvider provider(data, size);
     std::string body_content = provider.ConsumeBytesAsString(size);
-    GetDocument().documentElement()->setInnerHTML(
-        String::FromUTF8(body_content));
+    GetDocument().documentElement()->SetInnerHTMLWithoutTrustedTypes(
+        String::FromUtf8(body_content));
     UpdateAllLifecyclePhasesForTest();
   }
 
@@ -57,23 +63,18 @@ class PageHelper {
 
   void EnablePlatform() {
     DCHECK(!platform_);
-    platform_ = std::make_unique<ScopedTestingPlatformSupport<
-        TestingPlatformSupportWithMockScheduler>>();
+    platform_ = std::make_unique<
+        ScopedTestingPlatformSupport<TestingPlatformSupport>>();
   }
   const base::TickClock* GetTickClock() {
-    return platform_ ? platform()->test_task_runner()->GetMockTickClock()
-                     : base::DefaultTickClock::GetInstance();
+    return task_environment_->GetMockTickClock();
   }
 
  private:
-  ScopedTestingPlatformSupport<TestingPlatformSupportWithMockScheduler>&
-  platform() {
-    return *platform_;
-  }
+  raw_ptr<test::TaskEnvironment> task_environment_;
   // The order is important: |platform_| must be destroyed after
   // |dummy_page_holder_| is destroyed.
-  std::unique_ptr<
-      ScopedTestingPlatformSupport<TestingPlatformSupportWithMockScheduler>>
+  std::unique_ptr<ScopedTestingPlatformSupport<TestingPlatformSupport>>
       platform_;
   std::unique_ptr<DummyPageHolder> dummy_page_holder_;
   bool enable_compositing_ = true;
@@ -87,8 +88,9 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     return 0;
 
   static BlinkFuzzerTestSupport test_support = BlinkFuzzerTestSupport();
+  test::TaskEnvironment task_environment;
 
-  PageHelper page;
+  PageHelper page(&task_environment);
   page.SetUp();
   page.SetBodyContentFromFuzzer(data, size);
   page.UpdateAllLifecyclePhasesForTest();

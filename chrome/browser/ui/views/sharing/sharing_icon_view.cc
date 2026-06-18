@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,15 @@
 
 #include "chrome/app/vector_icons/vector_icons.h"
 #include "components/vector_icons/vector_icons.h"
+#include "ui/accessibility/ax_enums.mojom.h"
+#include "ui/accessibility/ax_node_data.h"
 #include "ui/base/l10n/l10n_util.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/compositor/layer.h"
 #include "ui/gfx/scoped_canvas.h"
+#include "ui/gfx/vector_icon_types.h"
 #include "ui/strings/grit/ui_strings.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/animation/ink_drop.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 
@@ -26,11 +31,15 @@ SharingIconView::SharingIconView(
     : PageActionIconView(/*command_updater=*/nullptr,
                          /*command_id=*/0,
                          icon_label_bubble_delegate,
-                         page_action_icon_delegate),
+                         page_action_icon_delegate,
+                         "ClickToCall"),  // Naming corresponds to
+                                          // PageActionIconType.
       get_controller_callback_(std::move(get_controller_callback)),
       get_bubble_callback_(std::move(get_bubble_callback)) {
   SetVisible(false);
   SetUpForInOutAnimation();
+
+  SetAccessibleIsIgnoredIfNeeded();
 }
 
 SharingIconView::~SharingIconView() = default;
@@ -41,8 +50,9 @@ SharingUiController* SharingIconView::GetController() const {
 }
 
 void SharingIconView::StartLoadingAnimation() {
-  if (loading_animation_)
+  if (loading_animation_) {
     return;
+  }
 
   loading_animation_ = true;
   AnimateIn(IDS_BROWSER_SHARING_OMNIBOX_SENDING_LABEL);
@@ -50,21 +60,23 @@ void SharingIconView::StartLoadingAnimation() {
 }
 
 void SharingIconView::StopLoadingAnimation() {
-  if (!loading_animation_)
+  if (!loading_animation_) {
     return;
+  }
 
   loading_animation_ = false;
   UnpauseAnimation();
   SchedulePaint();
 }
 
-// TODO(knollr): Introduce IconState / ControllerState {eg, Hidden, Success,
-// Sending} to define the various cases instead of a number of if else
-// statements.
 void SharingIconView::UpdateImpl() {
   auto* controller = GetController();
-  if (!controller)
+  if (!controller) {
     return;
+  }
+
+  GetViewAccessibility().SetName(
+      controller->GetTextForTooltipAndAccessibleName());
 
   // To ensure that we reset error icon badge.
   if (!GetVisible()) {
@@ -72,10 +84,11 @@ void SharingIconView::UpdateImpl() {
     UpdateIconImage();
   }
 
-  if (controller->is_loading())
+  if (controller->is_loading()) {
     StartLoadingAnimation();
-  else
+  } else {
     StopLoadingAnimation();
+  }
 
   if (last_controller_ != controller) {
     ResetSlideAnimation(/*show=*/false);
@@ -85,7 +98,7 @@ void SharingIconView::UpdateImpl() {
 
   const bool is_bubble_showing = IsBubbleShowing();
   const bool is_visible =
-      is_bubble_showing || IsLoadingAnimationVisible() || label()->GetVisible();
+      is_bubble_showing || loading_animation_ || label()->GetVisible();
 
   SetVisible(is_visible);
   UpdateInkDrop(is_bubble_showing);
@@ -135,8 +148,10 @@ void SharingIconView::UpdateOpacity() {
 void SharingIconView::UpdateInkDrop(bool activate) {
   auto target_state =
       activate ? views::InkDropState::ACTIVATED : views::InkDropState::HIDDEN;
-  if (GetInkDrop()->GetTargetInkDropState() != target_state)
-    AnimateInkDrop(target_state, /*event=*/nullptr);
+  if (views::InkDrop::Get(this)->GetInkDrop()->GetTargetInkDropState() !=
+      target_state) {
+    views::InkDrop::Get(this)->AnimateToState(target_state, /*event=*/nullptr);
+  }
 }
 
 bool SharingIconView::IsTriggerableEvent(const ui::Event& event) {
@@ -145,15 +160,12 @@ bool SharingIconView::IsTriggerableEvent(const ui::Event& event) {
 }
 
 const gfx::VectorIcon& SharingIconView::GetVectorIconBadge() const {
-  return should_show_error_ ? vector_icons::kBlockedBadgeIcon : gfx::kNoneIcon;
+  return should_show_error_ ? vector_icons::kBlockedBadgeCustomIcon
+                            : gfx::VectorIcon::EmptyIcon();
 }
 
 void SharingIconView::OnExecuting(
     PageActionIconView::ExecuteSource execute_source) {}
-
-bool SharingIconView::IsLoadingAnimationVisible() {
-  return loading_animation_;
-}
 
 views::BubbleDialogDelegate* SharingIconView::GetBubble() const {
   auto* controller = GetController();
@@ -162,15 +174,22 @@ views::BubbleDialogDelegate* SharingIconView::GetBubble() const {
 
 const gfx::VectorIcon& SharingIconView::GetVectorIcon() const {
   auto* controller = GetController();
-  return controller ? controller->GetVectorIcon() : gfx::kNoneIcon;
+  return controller ? controller->GetVectorIcon()
+                    : gfx::VectorIcon::EmptyIcon();
 }
 
-base::string16 SharingIconView::GetTextForTooltipAndAccessibleName() const {
+void SharingIconView::SetAccessibleIsIgnoredIfNeeded() {
   auto* controller = GetController();
-  return controller ? controller->GetTextForTooltipAndAccessibleName()
-                    : base::string16();
+  if (controller && !controller->HasAccessibleUi()) {
+    // This should rarely be true. One example where it is true is the
+    // SmsRemoteFetcherUiController: crrev.com/c/2964059 stopped all UI
+    // from being shown and removed the accessible name. Setting the state
+    // to ignored is needed to stop the UI from being shown to assistive
+    // technologies.
+    GetViewAccessibility().SetIsIgnored(true);
+    return;
+  }
 }
 
-const char* SharingIconView::GetClassName() const {
-  return "SharingIconView";
-}
+BEGIN_METADATA(SharingIconView)
+END_METADATA

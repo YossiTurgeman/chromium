@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,59 +7,76 @@
 
 #include <stdint.h>
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "remoting/protocol/connection_to_client.h"
-#include "remoting/protocol/video_feedback_stub.h"
+#include "remoting/protocol/desktop_capturer.h"
+#include "remoting/protocol/network_settings.h"
 #include "remoting/protocol/video_stream.h"
 #include "remoting/protocol/video_stub.h"
 
-namespace remoting {
-namespace protocol {
+namespace remoting::protocol {
 
 class FakeVideoStream : public protocol::VideoStream {
  public:
   FakeVideoStream();
+
+  FakeVideoStream(const FakeVideoStream&) = delete;
+  FakeVideoStream& operator=(const FakeVideoStream&) = delete;
+
   ~FakeVideoStream() override;
 
   // protocol::VideoStream interface.
   void SetEventTimestampsSource(scoped_refptr<InputEventTimestampsSource>
                                     event_timestamps_source) override;
   void Pause(bool pause) override;
-  void SetLosslessEncode(bool want_lossless) override;
-  void SetLosslessColor(bool want_lossless) override;
   void SetObserver(Observer* observer) override;
-  void SelectSource(int id) override;
+  void SelectSource(webrtc::ScreenId id) override;
+  void SetComposeEnabled(bool enabled) override;
+  void SetMouseCursor(
+      std::unique_ptr<webrtc::MouseCursor> mouse_cursor) override;
+  void SetMouseCursorPosition(const webrtc::DesktopVector& position) override;
+  void SetTargetFramerate(int framerate) override;
+
+  webrtc::ScreenId selected_source() const;
 
   Observer* observer() { return observer_; }
 
   base::WeakPtr<FakeVideoStream> GetWeakPtr();
 
  private:
-  Observer* observer_ = nullptr;
+  raw_ptr<Observer> observer_ = nullptr;
+
+  webrtc::ScreenId selected_source_ = -200;
 
   base::WeakPtrFactory<FakeVideoStream> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(FakeVideoStream);
 };
 
 class FakeConnectionToClient : public ConnectionToClient {
  public:
-  FakeConnectionToClient(std::unique_ptr<Session> session);
+  explicit FakeConnectionToClient(std::unique_ptr<Session> session);
+
+  FakeConnectionToClient(const FakeConnectionToClient&) = delete;
+  FakeConnectionToClient& operator=(const FakeConnectionToClient&) = delete;
+
   ~FakeConnectionToClient() override;
 
   void SetEventHandler(EventHandler* event_handler) override;
+  void ApplyNetworkSettings(const NetworkSettings& settings) override;
 
   std::unique_ptr<VideoStream> StartVideoStream(
-      std::unique_ptr<webrtc::DesktopCapturer> desktop_capturer) override;
+      webrtc::ScreenId screen_id,
+      std::unique_ptr<DesktopCapturer> desktop_capturer) override;
   std::unique_ptr<AudioStream> StartAudioStream(
       std::unique_ptr<AudioSource> audio_source) override;
+  void SetAudioWriter(std::unique_ptr<FifoBufferWriter> writer) override;
 
   ClientStub* client_stub() override;
-  void Disconnect(ErrorCode disconnect_error) override;
+  void Disconnect(ErrorCode error,
+                  std::string_view error_details,
+                  const SourceLocation& error_location) override;
 
   Session* session() override;
 
@@ -68,6 +85,7 @@ class FakeConnectionToClient : public ConnectionToClient {
   void set_input_stub(InputStub* input_stub) override;
 
   PeerConnectionControls* peer_connection_controls() override;
+  WebrtcEventLogData* rtc_event_log() override;
 
   base::WeakPtr<FakeVideoStream> last_video_stream() {
     return last_video_stream_;
@@ -75,48 +93,40 @@ class FakeConnectionToClient : public ConnectionToClient {
 
   void set_client_stub(ClientStub* client_stub) { client_stub_ = client_stub; }
   void set_video_stub(VideoStub* video_stub) { video_stub_ = video_stub; }
-  void set_video_encode_task_runner(
-      scoped_refptr<base::SingleThreadTaskRunner> runner) {
-    video_encode_task_runner_ = runner;
-  }
 
   EventHandler* event_handler() { return event_handler_; }
   ClipboardStub* clipboard_stub() { return clipboard_stub_; }
   HostStub* host_stub() { return host_stub_; }
   InputStub* input_stub() { return input_stub_; }
   VideoStub* video_stub() { return video_stub_; }
-  VideoFeedbackStub* video_feedback_stub() { return video_feedback_stub_; }
 
   bool is_connected() { return is_connected_; }
   ErrorCode disconnect_error() { return disconnect_error_; }
+  const NetworkSettings& network_settings() const { return network_settings_; }
 
  private:
-  // TODO(crbug.com/1043325): Remove the requirement that ConnectionToClient
+  // TODO(crbug.com/40115219): Remove the requirement that ConnectionToClient
   // retains a pointer to the capturer if the relative pointer experiment is
   // a success.
-  std::unique_ptr<webrtc::DesktopCapturer> desktop_capturer_;
+  std::unique_ptr<DesktopCapturer> desktop_capturer_;
   std::unique_ptr<Session> session_;
-  EventHandler* event_handler_ = nullptr;
+  raw_ptr<EventHandler> event_handler_ = nullptr;
 
   base::WeakPtr<FakeVideoStream> last_video_stream_;
 
-  ClientStub* client_stub_ = nullptr;
+  raw_ptr<ClientStub> client_stub_ = nullptr;
 
-  ClipboardStub* clipboard_stub_ = nullptr;
-  HostStub* host_stub_ = nullptr;
-  InputStub* input_stub_ = nullptr;
-  VideoStub* video_stub_ = nullptr;
-  VideoFeedbackStub* video_feedback_stub_ = nullptr;
-
-  scoped_refptr<base::SingleThreadTaskRunner> video_encode_task_runner_;
+  raw_ptr<ClipboardStub> clipboard_stub_ = nullptr;
+  raw_ptr<HostStub> host_stub_ = nullptr;
+  raw_ptr<InputStub> input_stub_ = nullptr;
+  raw_ptr<VideoStub> video_stub_ = nullptr;
 
   bool is_connected_ = true;
-  ErrorCode disconnect_error_ = OK;
-
-  DISALLOW_COPY_AND_ASSIGN(FakeConnectionToClient);
+  ErrorCode disconnect_error_ = ErrorCode::OK;
+  NetworkSettings network_settings_;
+  std::unique_ptr<FifoBufferWriter> audio_writer_;
 };
 
-}  // namespace protocol
-}  // namespace remoting
+}  // namespace remoting::protocol
 
 #endif  // REMOTING_PROTOCOL_FAKE_CONNECTION_TO_CLIENT_H_

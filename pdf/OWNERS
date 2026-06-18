@@ -1,9 +1,14 @@
-dsinclair@chromium.org
-hnakashima@chromium.org
-jochen@chromium.org
+set noparent
+andyphan@chromium.org
 thestig@chromium.org
 
-# Pepper-related questions/reviews only.
-raymes@chromium.org
+per-file ..._ink_*=file://pdf/INK_OWNERS
 
-# COMPONENT: Internals>Plugins>PDF
+# Secondary
+dhoss@chromium.org
+
+# Security/XFA-related questions/reviews only.
+tsepez@chromium.org
+
+# V8/gin-related questions/reviews only.
+mlippautz@chromium.org

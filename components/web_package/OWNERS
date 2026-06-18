@@ -1,6 +1,5 @@
-horo@chromium.org
-kinuko@chromium.org
-ksakamoto@chromium.org
+# Primary
+hayato@chromium.org
 
-# COMPONENT: Blink>Loader>WebPackaging
-# TEAM: webpackage-dev@chromium.org
+# Secondary
+file://components/webapps/isolated_web_apps/PLATFORM_OWNERS

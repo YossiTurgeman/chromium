@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -84,18 +84,6 @@ CWV_EXPORT
        expirationYear:(nullable NSString*)expirationYear
              riskData:(NSString*)riskData
     completionHandler:(void (^)(NSError* _Nullable error))completionHandler;
-
-// Same method as above, but with an extra parameter |storeLocally|.
-// |storeLocally| Whether or not to save |creditCard| locally. If YES, user will
-// not be asked again to verify this card. Deprecated parameter.
-// This variant is deprecated because storeLocally is no longer supported.
-- (void)verifyWithCVC:(NSString*)CVC
-      expirationMonth:(nullable NSString*)expirationMonth
-       expirationYear:(nullable NSString*)expirationYear
-         storeLocally:(BOOL)storeLocally
-             riskData:(NSString*)riskData
-    completionHandler:(void (^)(NSError* _Nullable error))completionHandler
-    DEPRECATED_ATTRIBUTE;
 
 // Returns YES if |CVC| is all digits and matches |expectedCVCLength|.
 - (BOOL)isCVCValid:(NSString*)CVC;

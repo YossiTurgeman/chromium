@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,9 @@
 #include <memory>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chromecast/device/bluetooth/le/remote_characteristic.h"
 
 namespace chromecast {
@@ -26,6 +27,9 @@ class RemoteDeviceImpl;
 // specified, all callbacks are run on the caller's thread.
 class RemoteCharacteristicImpl : public RemoteCharacteristic {
  public:
+  RemoteCharacteristicImpl(const RemoteCharacteristicImpl&) = delete;
+  RemoteCharacteristicImpl& operator=(const RemoteCharacteristicImpl&) = delete;
+
   // RemoteCharacteristic impl:
   std::vector<scoped_refptr<RemoteDescriptor>> GetDescriptors() override;
   scoped_refptr<RemoteDescriptor> GetDescriptorByUuid(
@@ -76,9 +80,9 @@ class RemoteCharacteristicImpl : public RemoteCharacteristic {
                                                    StatusCallback cb);
 
   // Weak reference to avoid refcount loop.
-  RemoteDeviceImpl* const device_;
+  const raw_ptr<RemoteDeviceImpl> device_;
   base::WeakPtr<GattClientManagerImpl> gatt_client_manager_;
-  const bluetooth_v2_shlib::Gatt::Characteristic* const characteristic_;
+  const raw_ptr<const bluetooth_v2_shlib::Gatt::Characteristic> characteristic_;
 
   // All bluetooth_v2_shlib calls are run on this task_runner. All members must
   // be accessed on this task_runner.
@@ -92,8 +96,6 @@ class RemoteCharacteristicImpl : public RemoteCharacteristic {
       uuid_to_descriptor_;
 
   std::atomic<bool> notification_enabled_{false};
-
-  DISALLOW_COPY_AND_ASSIGN(RemoteCharacteristicImpl);
 };
 
 }  // namespace bluetooth

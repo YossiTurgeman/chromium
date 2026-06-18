@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,10 +18,12 @@ namespace content {
 ServiceWorkerContentSettingsProxyImpl::ServiceWorkerContentSettingsProxyImpl(
     const GURL& script_url,
     scoped_refptr<ServiceWorkerContextWrapper> context_wrapper,
-    mojo::PendingReceiver<blink::mojom::WorkerContentSettingsProxy> receiver)
+    mojo::PendingReceiver<blink::mojom::WorkerContentSettingsProxy> receiver,
+    blink::StorageKey storage_key)
     : origin_(url::Origin::Create(script_url)),
       context_wrapper_(context_wrapper),
-      receiver_(this, std::move(receiver)) {
+      receiver_(this, std::move(receiver)),
+      storage_key_(std::move(storage_key)) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 }
 
@@ -44,9 +46,10 @@ void ServiceWorkerContentSettingsProxyImpl::AllowIndexedDB(
   // content setting. However, service worker is not necessarily associated
   // with frames or making the request on behalf of frames,
   // so just pass an empty |render_frames|.
-  std::vector<GlobalFrameRoutingId> render_frames;
+  std::vector<GlobalRenderFrameHostId> render_frames;
   std::move(callback).Run(GetContentClient()->browser()->AllowWorkerIndexedDB(
-      origin_.GetURL(), context_wrapper_->browser_context(), render_frames));
+      origin_.GetURL(), context_wrapper_->browser_context(), render_frames,
+      storage_key_));
 }
 
 void ServiceWorkerContentSettingsProxyImpl::AllowCacheStorage(
@@ -65,11 +68,11 @@ void ServiceWorkerContentSettingsProxyImpl::AllowCacheStorage(
   // content setting. However, service worker is not necessarily associated
   // with frames or making the request on behalf of frames,
   // so just pass an empty |render_frames|.
-  std::vector<GlobalFrameRoutingId> render_frames;
+  std::vector<GlobalRenderFrameHostId> render_frames;
   std::move(callback).Run(
       GetContentClient()->browser()->AllowWorkerCacheStorage(
-          origin_.GetURL(), context_wrapper_->browser_context(),
-          render_frames));
+          origin_.GetURL(), context_wrapper_->browser_context(), render_frames,
+          storage_key_));
 }
 
 void ServiceWorkerContentSettingsProxyImpl::AllowWebLocks(
@@ -88,9 +91,10 @@ void ServiceWorkerContentSettingsProxyImpl::AllowWebLocks(
   // content setting. However, service worker is not necessarily associated
   // with frames or making the request on behalf of frames,
   // so just pass an empty |render_frames|.
-  std::vector<GlobalFrameRoutingId> render_frames;
+  std::vector<GlobalRenderFrameHostId> render_frames;
   std::move(callback).Run(GetContentClient()->browser()->AllowWorkerWebLocks(
-      origin_.GetURL(), context_wrapper_->browser_context(), render_frames));
+      origin_.GetURL(), context_wrapper_->browser_context(), render_frames,
+      storage_key_));
 }
 
 void ServiceWorkerContentSettingsProxyImpl::RequestFileSystemAccessSync(

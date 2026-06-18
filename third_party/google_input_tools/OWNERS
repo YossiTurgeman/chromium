@@ -1,8 +1,1 @@
-bshe@chromium.org
-rsadam@chromium.org
-shuchen@chromium.org
-
-# Use the following owner only when the above owners are not available.
-kevers@chromium.org
-
-# COMPONENT: UI>Input>Text>IME
+file://chromeos/ash/components/input_method/OWNERS

@@ -1,15 +1,15 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef WebProcessMemoryDump_h
-#define WebProcessMemoryDump_h
+#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_INSTRUMENTATION_TRACING_WEB_PROCESS_MEMORY_DUMP_H_
+#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_INSTRUMENTATION_TRACING_WEB_PROCESS_MEMORY_DUMP_H_
 
 #include <memory>
 #include <unordered_map>
 
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/trace_event/heap_profiler_allocation_context.h"
 #include "base/trace_event/memory_dump_request_args.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/web_memory_allocator_dump.h"
@@ -25,7 +25,6 @@ class DiscardableMemory;
 namespace trace_event {
 class MemoryAllocatorDump;
 class ProcessMemoryDump;
-class TraceEventMemoryOverhead;
 }  // namespace base
 }  // namespace trace_event
 
@@ -51,6 +50,8 @@ class PLATFORM_EXPORT WebProcessMemoryDump final {
   // Creates a standalone WebProcessMemoryDump, which owns the underlying
   // ProcessMemoryDump.
   WebProcessMemoryDump();
+  WebProcessMemoryDump(const WebProcessMemoryDump&) = delete;
+  WebProcessMemoryDump& operator=(const WebProcessMemoryDump&) = delete;
 
   // Wraps (without owning) an existing ProcessMemoryDump.
   explicit WebProcessMemoryDump(
@@ -125,15 +126,6 @@ class PLATFORM_EXPORT WebProcessMemoryDump final {
       const std::string& name,
       base::DiscardableMemory* discardable);
 
-  // Dumps heap memory usage. |allocatorName| is used as an absolute name for
-  // base::trace_event::ProcessMemoryDump::DumpHeapUsage().
-  void DumpHeapUsage(
-      const std::unordered_map<base::trace_event::AllocationContext,
-                               base::trace_event::AllocationMetrics>&
-          metrics_by_context,
-      base::trace_event::TraceEventMemoryOverhead& overhead,
-      const char* allocator_name);
-
  private:
   FRIEND_TEST_ALL_PREFIXES(WebProcessMemoryDumpTest, IntegrationTest);
 
@@ -146,7 +138,8 @@ class PLATFORM_EXPORT WebProcessMemoryDump final {
 
   // The underlying ProcessMemoryDump instance to which the
   // createMemoryAllocatorDump() calls will be proxied to.
-  base::trace_event::ProcessMemoryDump* process_memory_dump_;  // Not owned.
+  raw_ptr<base::trace_event::ProcessMemoryDump>
+      process_memory_dump_;  // Not owned.
 
   // TODO(ssid): Remove it once this information is added to ProcessMemoryDump.
   base::trace_event::MemoryDumpLevelOfDetail level_of_detail_;
@@ -162,10 +155,8 @@ class PLATFORM_EXPORT WebProcessMemoryDump final {
 
   // Stores SkTraceMemoryDump for the current ProcessMemoryDump.
   Vector<std::unique_ptr<skia::SkiaTraceMemoryDumpImpl>> sk_trace_dump_list_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebProcessMemoryDump);
 };
 
 }  // namespace blink
 
-#endif  // WebProcessMemoryDump_h
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_INSTRUMENTATION_TRACING_WEB_PROCESS_MEMORY_DUMP_H_

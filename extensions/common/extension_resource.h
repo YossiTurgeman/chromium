@@ -1,13 +1,12 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef EXTENSIONS_COMMON_EXTENSION_RESOURCE_H_
 #define EXTENSIONS_COMMON_EXTENSION_RESOURCE_H_
 
-#include <string>
-
 #include "base/files/file_path.h"
+#include "extensions/common/extension_id.h"
 
 namespace extensions {
 
@@ -26,18 +25,18 @@ class ExtensionResource {
   };
 
   ExtensionResource();
-
-  ExtensionResource(const std::string& extension_id,
+  ExtensionResource(const ExtensionId& extension_id,
                     const base::FilePath& extension_root,
                     const base::FilePath& relative_path);
-
   ExtensionResource(const ExtensionResource& other);
+  ExtensionResource(ExtensionResource&& other);
+  ExtensionResource& operator=(ExtensionResource&& other);
 
   ~ExtensionResource();
 
   // set_follow_symlinks_anywhere allows the resource to be a symlink to
   // anywhere in the filesystem. By default, resources have to be within
-  // |extension_root| after resolving symlinks.
+  // `extension_root` after resolving symlinks.
   void set_follow_symlinks_anywhere();
 
   // Returns actual path to the resource (default or locale specific). In the
@@ -51,14 +50,14 @@ class ExtensionResource {
   // ImageLoader.
   //
   // The relative path must not resolve to a location outside of
-  // |extension_root|. Iff |file_can_symlink_outside_root| is true, then the
-  // file can be a symlink that links outside of |extension_root|.
+  // `extension_root`. Iff `file_can_symlink_outside_root` is true, then the
+  // file can be a symlink that links outside of `extension_root`.
   static base::FilePath GetFilePath(const base::FilePath& extension_root,
                                     const base::FilePath& relative_path,
                                     SymlinkPolicy symlink_policy);
 
   // Getters
-  const std::string& extension_id() const { return extension_id_; }
+  const ExtensionId& extension_id() const { return extension_id_; }
 
   // Note that this might be empty for a valid ExtensionResource since dummy
   // Extension objects may be created with an empty extension root path in code.
@@ -66,16 +65,11 @@ class ExtensionResource {
 
   const base::FilePath& relative_path() const { return relative_path_; }
 
-  bool empty() const { return relative_path().empty(); }
-
-  // Unit test helpers.
-  base::FilePath::StringType NormalizeSeperators(
-      const base::FilePath::StringType& path) const;
-  bool ComparePathWithDefault(const base::FilePath& path) const;
+  bool empty() const { return relative_path_.empty(); }
 
  private:
   // The id of the extension that this resource is associated with.
-  std::string extension_id_;
+  ExtensionId extension_id_;
 
   // Extension root.
   base::FilePath extension_root_;
@@ -83,8 +77,8 @@ class ExtensionResource {
   // Relative path to resource.
   base::FilePath relative_path_;
 
-  // If |follow_symlinks_anywhere_| is true then the resource itself must be
-  // within |extension_root|, but it can be a symlink to a file that is not.
+  // If `follow_symlinks_anywhere_` is true then the resource itself must be
+  // within `extension_root`, but it can be a symlink to a file that is not.
   bool follow_symlinks_anywhere_;
 
   // Full path to extension resource. Starts empty.

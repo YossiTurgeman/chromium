@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,14 @@
 #define REMOTING_HOST_WIN_HOST_SERVICE_H_
 
 #include <windows.h>
+
 #include <stdint.h>
 
 #include <list>
 #include <memory>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/singleton.h"
 #include "base/memory/weak_ptr.h"
 #include "base/synchronization/waitable_event.h"
@@ -33,6 +34,9 @@ class HostService : public WtsTerminalMonitor {
  public:
   static HostService* GetInstance();
 
+  HostService(const HostService&) = delete;
+  HostService& operator=(const HostService&) = delete;
+
   // This function parses the command line and selects the action routine.
   bool InitWithCommandLine(const base::CommandLine* command_line);
 
@@ -41,9 +45,8 @@ class HostService : public WtsTerminalMonitor {
 
   // WtsTerminalMonitor implementation
   bool AddWtsTerminalObserver(const std::string& terminal_id,
-                                      WtsTerminalObserver* observer) override;
-  void RemoveWtsTerminalObserver(
-      WtsTerminalObserver* observer) override;
+                              WtsTerminalObserver* observer) override;
+  void RemoveWtsTerminalObserver(WtsTerminalObserver* observer) override;
 
  private:
   HostService();
@@ -69,7 +72,7 @@ class HostService : public WtsTerminalMonitor {
   int RunInConsole();
 
   // Stops and deletes |daemon_process_|.
-  void StopDaemonProcess();
+  void StopDaemonProcess(int exit_code);
 
   // Handles WM_WTSSESSION_CHANGE messages.
   bool HandleMessage(UINT message,
@@ -98,7 +101,7 @@ class HostService : public WtsTerminalMonitor {
 
     // Points to the observer receiving notifications about the WTS terminal
     // identified by |terminal_id|.
-    WtsTerminalObserver* observer;
+    raw_ptr<WtsTerminalObserver> observer;
   };
 
   // The list of observers receiving session notifications.
@@ -126,8 +129,6 @@ class HostService : public WtsTerminalMonitor {
 
   // Singleton.
   friend struct base::DefaultSingletonTraits<HostService>;
-
-  DISALLOW_COPY_AND_ASSIGN(HostService);
 };
 
 }  // namespace remoting

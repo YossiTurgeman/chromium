@@ -1,17 +1,20 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef COMPONENTS_GCM_DRIVER_GCM_DRIVER_ANDROID_H
-#define COMPONENTS_GCM_DRIVER_GCM_DRIVER_ANDROID_H
+#ifndef COMPONENTS_GCM_DRIVER_GCM_DRIVER_ANDROID_H_
+#define COMPONENTS_GCM_DRIVER_GCM_DRIVER_ANDROID_H_
 
 #include <jni.h>
 
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "base/android/scoped_java_ref.h"
-#include "base/bind.h"
 #include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/bind.h"
+#include "base/memory/scoped_refptr.h"
 #include "components/gcm_driver/gcm_driver.h"
 #include "components/gcm_driver/gcm_stats_recorder_android.h"
 
@@ -29,36 +32,34 @@ class GCMDriverAndroid : public GCMDriver,
   GCMDriverAndroid(
       const base::FilePath& store_path,
       const scoped_refptr<base::SequencedTaskRunner>& blocking_task_runner);
+
+  GCMDriverAndroid(const GCMDriverAndroid&) = delete;
+  GCMDriverAndroid& operator=(const GCMDriverAndroid&) = delete;
+
   ~GCMDriverAndroid() override;
 
   // Methods called from Java via JNI:
-  void OnRegisterFinished(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jstring>& app_id,
-      const base::android::JavaParamRef<jstring>& registration_id,
-      jboolean success);
+  void OnRegisterFinished(JNIEnv* env,
+                          const std::string& app_id,
+                          const std::string& registration_id,
+                          bool success);
   void OnUnregisterFinished(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>& obj,
-                            const base::android::JavaParamRef<jstring>& app_id,
-                            jboolean success);
+                            const std::string& app_id,
+                            bool success);
   void OnMessageReceived(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jstring>& app_id,
-      const base::android::JavaParamRef<jstring>& sender_id,
-      const base::android::JavaParamRef<jstring>& j_message_id,
-      const base::android::JavaParamRef<jstring>& collapse_key,
-      const base::android::JavaParamRef<jbyteArray>& raw_data,
-      const base::android::JavaParamRef<jobjectArray>& data_keys_and_values);
+      const std::string& app_id,
+      const std::string& sender_id,
+      const std::optional<std::string>& message_id,
+      const std::optional<std::string>& collapse_key,
+      const std::optional<std::vector<uint8_t>>& raw_data,
+      const std::optional<std::vector<std::string>>& data_keys_and_values);
 
   // GCMDriver implementation:
   void ValidateRegistration(const std::string& app_id,
                             const std::vector<std::string>& sender_ids,
                             const std::string& registration_id,
                             ValidateRegistrationCallback callback) override;
-  void OnSignedIn() override;
-  void OnSignedOut() override;
   void AddConnectionObserver(GCMConnectionObserver* observer) override;
   void RemoveConnectionObserver(GCMConnectionObserver* observer) override;
   GCMClient* GetGCMClientForTesting() const override;
@@ -74,7 +75,6 @@ class GCMDriverAndroid : public GCMDriver,
   void RemoveAccountMapping(const CoreAccountId& account_id) override;
   base::Time GetLastTokenFetchTime() override;
   void SetLastTokenFetchTime(const base::Time& time) override;
-  void WakeFromSuspendForHeartbeat(bool wake) override;
   InstanceIDHandler* GetInstanceIDHandlerInternal() override;
   void AddHeartbeatInterval(const std::string& scope, int interval_ms) override;
   void RemoveHeartbeatInterval(const std::string& scope) override;
@@ -106,10 +106,8 @@ class GCMDriverAndroid : public GCMDriver,
 
   // Recorder that logs GCM activities.
   GCMStatsRecorderAndroid recorder_;
-
-  DISALLOW_COPY_AND_ASSIGN(GCMDriverAndroid);
 };
 
 }  // namespace gcm
 
-#endif  // COMPONENTS_GCM_DRIVER_GCM_DRIVER_ANDROID_H
+#endif  // COMPONENTS_GCM_DRIVER_GCM_DRIVER_ANDROID_H_

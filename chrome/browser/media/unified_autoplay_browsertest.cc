@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,13 @@
 #include "chrome/browser/chrome_content_browser_client.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/speech/extension_api/tts_engine_extension_api.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
 #include "components/content_settings/core/common/content_settings_pattern.h"
+#include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_view_host.h"
@@ -18,6 +20,7 @@
 #include "content/public/common/content_client.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "content/public/test/prerender_test_util.h"
 #include "content/public/test/test_frame_navigation_observer.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "media/base/media_switches.h"
@@ -40,10 +43,12 @@ class ChromeContentBrowserClientOverrideWebAppScope
   ChromeContentBrowserClientOverrideWebAppScope() = default;
   ~ChromeContentBrowserClientOverrideWebAppScope() override = default;
 
-  void OverrideWebkitPrefs(
-      content::RenderViewHost* rvh,
+  void OverrideWebPreferences(
+      content::WebContents* web_contents,
+      content::SiteInstance& main_frame_site,
       blink::web_pref::WebPreferences* web_prefs) override {
-    ChromeContentBrowserClient::OverrideWebkitPrefs(rvh, web_prefs);
+    ChromeContentBrowserClient::OverrideWebPreferences(
+        web_contents, main_frame_site, web_prefs);
 
     web_prefs->web_app_scope = web_app_scope_;
   }
@@ -96,29 +101,27 @@ class UnifiedAutoplayBrowserTest : public InProcessBrowserTest {
   }
 
   bool AttemptPlay(content::WebContents* web_contents) {
-    bool played = false;
-    EXPECT_TRUE(content::ExecuteScriptWithoutUserGestureAndExtractBool(
-        web_contents, "attemptPlay();", &played));
-    return played;
+    return content::EvalJs(web_contents, "attemptPlay();",
+                           content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+        .ExtractBool();
   }
 
   bool NavigateInRenderer(content::WebContents* web_contents, const GURL& url) {
     content::TestNavigationObserver observer(web_contents);
 
-    bool result = content::ExecuteScriptWithoutUserGesture(
-        web_contents, "window.location = '" + url.spec() + "';");
+    bool result =
+        content::ExecJs(web_contents, "window.location = '" + url.spec() + "';",
+                        content::EXECUTE_SCRIPT_NO_USER_GESTURE);
 
     if (result)
       observer.Wait();
     return result;
   }
 
-  void SetAutoplayForceAllowFlag(const GURL& url) {
+  void SetAutoplayForceAllowFlag(content::RenderFrameHost* rfh,
+                                 const GURL& url) {
     mojo::AssociatedRemote<blink::mojom::AutoplayConfigurationClient> client;
-    GetWebContents()
-        ->GetMainFrame()
-        ->GetRemoteAssociatedInterfaces()
-        ->GetInterface(&client);
+    rfh->GetRemoteAssociatedInterfaces()->GetInterface(&client);
     client->AddAutoplayFlags(url::Origin::Create(url),
                              blink::mojom::kAutoplayFlagForceAllow);
   }
@@ -144,14 +147,15 @@ class UnifiedAutoplayBrowserTest : public InProcessBrowserTest {
         is_renderer_initiated, from_context_menu);
 
     open_url_params.initiator_origin =
-        url::Origin::Create(active_contents->GetLastCommittedURL());
+        active_contents->GetPrimaryMainFrame()->GetLastCommittedOrigin();
     open_url_params.source_render_process_id =
-        active_contents->GetMainFrame()->GetProcess()->GetID();
+        active_contents->GetPrimaryMainFrame()->GetProcess()->GetDeprecatedID();
     open_url_params.source_render_frame_id =
-        active_contents->GetMainFrame()->GetRoutingID();
+        active_contents->GetPrimaryMainFrame()->GetRoutingID();
     open_url_params.user_gesture = user_gesture;
 
-    return active_contents->OpenURL(open_url_params);
+    return active_contents->OpenURL(open_url_params,
+                                    /*navigation_handle_callback=*/{});
   }
 
   base::test::ScopedFeatureList scoped_feature_list_;
@@ -160,7 +164,7 @@ class UnifiedAutoplayBrowserTest : public InProcessBrowserTest {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenSameOriginOutsideMenu) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
 
   content::WebContents* new_contents = OpenNewTab(kTestPageUrl, false);
   EXPECT_TRUE(content::WaitForLoadStop(new_contents));
@@ -171,7 +175,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenSameOriginOutsideMenu) {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenSameOriginFromMenu) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
 
   content::WebContents* new_contents = OpenNewTab(kTestPageUrl, true);
   EXPECT_TRUE(content::WaitForLoadStop(new_contents));
@@ -180,9 +184,9 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenSameOriginFromMenu) {
 }
 
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenCrossOriginFromMenu) {
-  ui_test_utils::NavigateToURL(
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(),
-      embedded_test_server()->GetURL("foo.example.com", kTestPagePath));
+      embedded_test_server()->GetURL("foo.example.com", kTestPagePath)));
 
   content::WebContents* new_contents = OpenNewTab(
       embedded_test_server()->GetURL("bar.example.com", kTestPagePath), true);
@@ -192,8 +196,8 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenCrossOriginFromMenu) {
 }
 
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenCrossDomainFromMenu) {
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL(kTestPagePath));
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL(kTestPagePath)));
 
   content::WebContents* new_contents = OpenNewTab(
       embedded_test_server()->GetURL("example.com", kTestPagePath), true);
@@ -205,7 +209,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenCrossDomainFromMenu) {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenWindowFromContextMenu) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
 
   content::WebContents* new_contents = OpenNewTab(kTestPageUrl, true);
   EXPECT_TRUE(content::WaitForLoadStop(new_contents));
@@ -216,7 +220,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenWindowFromContextMenu) {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenWindowNotContextMenu) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
 
   content::WebContents* new_contents = OpenNewTab(kTestPageUrl, false);
   EXPECT_TRUE(content::WaitForLoadStop(new_contents));
@@ -227,7 +231,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenWindowNotContextMenu) {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenFromRendererGesture) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
 
   content::WebContents* new_contents = OpenFromRenderer(kTestPageUrl, true);
   EXPECT_TRUE(content::WaitForLoadStop(new_contents));
@@ -238,7 +242,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenFromRendererGesture) {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenFromRendererNoGesture) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
 
   content::WebContents* new_contents = OpenFromRenderer(kTestPageUrl, false);
   EXPECT_EQ(nullptr, new_contents);
@@ -247,7 +251,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, OpenFromRendererNoGesture) {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, NoBypassUsingAutoplayFlag) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
 
   EXPECT_FALSE(AttemptPlay(GetWebContents()));
 }
@@ -255,8 +259,23 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, NoBypassUsingAutoplayFlag) {
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, BypassUsingAutoplayFlag) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  SetAutoplayForceAllowFlag(kTestPageUrl);
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  content::TestNavigationManager navigation_manager(GetWebContents(),
+                                                    kTestPageUrl);
+  content::NavigationController::LoadURLParams params(kTestPageUrl);
+  params.transition_type = ui::PAGE_TRANSITION_LINK;
+  params.frame_tree_node_id =
+      GetWebContents()->GetPrimaryMainFrame()->GetFrameTreeNodeId();
+  GetWebContents()->GetController().LoadURLWithParams(params);
+  EXPECT_TRUE(navigation_manager.WaitForResponse());
+
+  // Set the flag on the RenderFrameHost we're navigating to as well, in case
+  // we commit in a different RenderFrameHsot.
+  SetAutoplayForceAllowFlag(
+      navigation_manager.GetNavigationHandle()->GetRenderFrameHost(),
+      kTestPageUrl);
+  navigation_manager.ResumeNavigation();
+  EXPECT_TRUE(navigation_manager.WaitForNavigationFinished());
+  EXPECT_TRUE(content::WaitForLoadStop(GetWebContents()));
 
   EXPECT_TRUE(AttemptPlay(GetWebContents()));
 }
@@ -265,14 +284,15 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest,
                        BypassUsingAutoplayFlag_SameDocument) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
-  SetAutoplayForceAllowFlag(kTestPageUrl);
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
+  SetAutoplayForceAllowFlag(GetWebContents()->GetPrimaryMainFrame(),
+                            kTestPageUrl);
 
   // Simulate a same document navigation by navigating to #test.
   GURL::Replacements replace_ref;
   replace_ref.SetRefStr("test");
-  ui_test_utils::NavigateToURL(browser(),
-                               kTestPageUrl.ReplaceComponents(replace_ref));
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), kTestPageUrl.ReplaceComponents(replace_ref)));
 
   EXPECT_TRUE(AttemptPlay(GetWebContents()));
 }
@@ -290,7 +310,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest, ForceWasActivated_Yes) {
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
   NavigateParams params(browser(), kTestPageUrl, ui::PAGE_TRANSITION_LINK);
-  params.was_activated = content::mojom::WasActivatedOption::kYes;
+  params.was_activated = blink::mojom::WasActivatedOption::kYes;
   ui_test_utils::NavigateToURL(&params);
 
   EXPECT_TRUE(AttemptPlay(GetWebContents()));
@@ -303,7 +323,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest,
   const GURL kTestPageUrl = embedded_test_server()->GetURL(kTestPagePath);
 
   NavigateParams params(browser(), kRedirectPageUrl, ui::PAGE_TRANSITION_LINK);
-  params.was_activated = content::mojom::WasActivatedOption::kYes;
+  params.was_activated = blink::mojom::WasActivatedOption::kYes;
   ui_test_utils::NavigateToURL(&params);
 
   EXPECT_TRUE(NavigateInRenderer(GetWebContents(), kTestPageUrl));
@@ -333,7 +353,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest,
       embedded_test_server()->GetURL("foo.example.com", kTestPagePath);
 
   NavigateParams params(browser(), kRedirectPageUrl, ui::PAGE_TRANSITION_LINK);
-  params.was_activated = content::mojom::WasActivatedOption::kYes;
+  params.was_activated = blink::mojom::WasActivatedOption::kYes;
   ui_test_utils::NavigateToURL(&params);
 
   EXPECT_TRUE(NavigateInRenderer(GetWebContents(), kTestPageUrl));
@@ -362,14 +382,14 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest,
       embedded_test_server()->GetURL("example.com", kTestPagePath));
 
   ChromeContentBrowserClientOverrideWebAppScope browser_client;
-  browser_client.set_web_app_scope(kTestPageUrl.GetOrigin());
+  browser_client.set_web_app_scope(kTestPageUrl.DeprecatedGetOriginAsURL());
 
   content::ContentBrowserClient* old_browser_client =
       content::SetBrowserClientForTesting(&browser_client);
 
   GetWebContents()->OnWebPreferencesChanged();
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
   EXPECT_TRUE(content::WaitForLoadStop(GetWebContents()));
 
   EXPECT_TRUE(AttemptPlay(GetWebContents()));
@@ -390,7 +410,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest,
 
   GetWebContents()->OnWebPreferencesChanged();
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
   EXPECT_TRUE(content::WaitForLoadStop(GetWebContents()));
 
   EXPECT_TRUE(AttemptPlay(GetWebContents()));
@@ -411,7 +431,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest,
 
   GetWebContents()->OnWebPreferencesChanged();
 
-  ui_test_utils::NavigateToURL(browser(), kTestPageUrl);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestPageUrl));
   EXPECT_TRUE(content::WaitForLoadStop(GetWebContents()));
 
   EXPECT_FALSE(AttemptPlay(GetWebContents()));
@@ -424,22 +444,21 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplayBrowserTest,
 class UnifiedAutoplaySettingBrowserTest : public UnifiedAutoplayBrowserTest {
  public:
   UnifiedAutoplaySettingBrowserTest() {
-    scoped_feature_list_.InitWithFeatures(
-        {media::kAutoplayDisableSettings, media::kAutoplayWhitelistSettings},
-        {});
+    scoped_feature_list_.InitWithFeatures({media::kAutoplayDisableSettings},
+                                          {});
   }
 
   ~UnifiedAutoplaySettingBrowserTest() override = default;
 
   void SetUpOnMainThread() override {
     UnifiedAutoplayBrowserTest::SetUpOnMainThread();
+    TtsExtensionEngine::GetInstance()->DisableBuiltInTTSEngineForTesting();
   }
 
   bool AutoplayAllowed(const content::ToRenderFrameHost& adapter) {
-    bool played = false;
-    EXPECT_TRUE(content::ExecuteScriptWithoutUserGestureAndExtractBool(
-        adapter, "tryPlayback();", &played));
-    return played;
+    return content::EvalJs(adapter, "tryPlayback();",
+                           content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+        .ExtractBool();
   }
 
   void NavigateFrameAndWait(content::RenderFrameHost* rfh, const GURL& url) {
@@ -459,11 +478,11 @@ class UnifiedAutoplaySettingBrowserTest : public UnifiedAutoplayBrowserTest {
   }
 
   content::RenderFrameHost* main_frame() const {
-    return web_contents()->GetAllFrames()[0];
+    return web_contents()->GetPrimaryMainFrame();
   }
 
   content::RenderFrameHost* first_child() const {
-    return web_contents()->GetAllFrames()[1];
+    return ChildFrameAt(main_frame(), 0);
   }
 
  private:
@@ -474,15 +493,14 @@ class UnifiedAutoplaySettingBrowserTest : public UnifiedAutoplayBrowserTest {
   base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-// Flaky. See https://crbug.com/1101524.
+// Flaky. See https://crbug.com/40703621.
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, DISABLED_Allow) {
   GURL main_url(
       embedded_test_server()->GetURL("example.com", kFramedTestPagePath));
   GURL foo_url(embedded_test_server()->GetURL("foo.com", kFramedTestPagePath));
 
   GetSettingsMap()->SetContentSettingDefaultScope(
-      main_url, main_url, ContentSettingsType::SOUND, std::string(),
-      CONTENT_SETTING_ALLOW);
+      main_url, main_url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
 
   NavigateFrameAndWait(main_frame(), main_url);
   NavigateFrameAndWait(first_child(), foo_url);
@@ -493,11 +511,71 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, DISABLED_Allow) {
   // Simulate a same document navigation by navigating to #test.
   GURL::Replacements replace_ref;
   replace_ref.SetRefStr("test");
-  ui_test_utils::NavigateToURL(browser(),
-                               main_url.ReplaceComponents(replace_ref));
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), main_url.ReplaceComponents(replace_ref)));
 
   EXPECT_TRUE(AutoplayAllowed(main_frame()));
   EXPECT_TRUE(AutoplayAllowed(first_child()));
+}
+
+IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, Allow_Audio) {
+  GURL main_url(embedded_test_server()->GetURL("example.com",
+                                               "/media/audio_autoplay.html"));
+
+  GetSettingsMap()->SetContentSettingDefaultScope(
+      main_url, main_url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
+
+  NavigateFrameAndWait(main_frame(), main_url);
+
+  EXPECT_TRUE(AutoplayAllowed(main_frame()));
+}
+
+IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest,
+                       Allow_SpeechSynthesis) {
+  GURL main_url(embedded_test_server()->GetURL(
+      "example.com", "/media/speech_synthesis_autoplay.html"));
+
+  GetSettingsMap()->SetContentSettingDefaultScope(
+      main_url, main_url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
+
+  NavigateFrameAndWait(main_frame(), main_url);
+
+  EXPECT_TRUE(content::EvalJs(main_frame(), "tryPlayback();",
+                              content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+                  .ExtractBool());
+}
+
+IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, Allow_WebAudio) {
+  GURL main_url(embedded_test_server()->GetURL(
+      "example.com", "/media/webaudio_autoplay.html"));
+
+  GetSettingsMap()->SetContentSettingDefaultScope(
+      main_url, main_url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
+
+  NavigateFrameAndWait(main_frame(), main_url);
+
+  EXPECT_TRUE(content::EvalJs(main_frame(), "isPlaybackRunning();",
+                              content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+                  .ExtractBool());
+}
+
+IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest,
+                       Allow_Sound_DefersMutedVideo) {
+  GURL main_url(embedded_test_server()->GetURL(
+      "example.com", "/media/muted_video_autoplay.html"));
+
+  GetSettingsMap()->SetContentSettingDefaultScope(
+      main_url, main_url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
+
+  NavigateFrameAndWait(main_frame(), main_url);
+
+  // Muted video should be deferred until visible. It should be paused.
+  EXPECT_EQ(false, content::EvalJs(main_frame(), "isPlaying();").ExtractBool());
+
+  // Scroll the video into view and wait for it to start playing.
+  EXPECT_TRUE(
+      content::EvalJs(main_frame(), "scrollToVideo(); waitUntilPlaying();")
+          .ExtractBool());
 }
 
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, Allow_Wildcard) {
@@ -510,7 +588,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, Allow_Wildcard) {
   ContentSettingsPattern pattern(ContentSettingsPattern::FromString("[*.]com"));
   GetSettingsMap()->SetWebsiteSettingCustomScope(
       pattern, ContentSettingsPattern::Wildcard(), ContentSettingsType::SOUND,
-      std::string(), std::make_unique<base::Value>(CONTENT_SETTING_ALLOW));
+      base::Value(CONTENT_SETTING_ALLOW));
 
   NavigateFrameAndWait(main_frame(), main_url);
   EXPECT_TRUE(AutoplayAllowed(main_frame()));
@@ -522,15 +600,14 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, Allow_Wildcard) {
   EXPECT_TRUE(AutoplayAllowed(main_frame()));
 }
 
-// Flaky. See https://crbug.com/1106521.
+// Flaky. See https://crbug.com/40706381.
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, DISABLED_Block) {
   GURL main_url(
       embedded_test_server()->GetURL("example.com", kFramedTestPagePath));
   GURL foo_url(embedded_test_server()->GetURL("foo.com", kFramedTestPagePath));
 
   GetSettingsMap()->SetContentSettingDefaultScope(
-      main_url, main_url, ContentSettingsType::SOUND, std::string(),
-      CONTENT_SETTING_BLOCK);
+      main_url, main_url, ContentSettingsType::SOUND, CONTENT_SETTING_BLOCK);
 
   NavigateFrameAndWait(main_frame(), main_url);
   NavigateFrameAndWait(first_child(), foo_url);
@@ -549,11 +626,10 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, Block_Wildcard) {
   ContentSettingsPattern pattern(ContentSettingsPattern::FromString("[*.]com"));
   GetSettingsMap()->SetWebsiteSettingCustomScope(
       pattern, ContentSettingsPattern::Wildcard(), ContentSettingsType::SOUND,
-      std::string(), std::make_unique<base::Value>(CONTENT_SETTING_BLOCK));
+      base::Value(CONTENT_SETTING_BLOCK));
 
   GetSettingsMap()->SetContentSettingDefaultScope(
-      foo_url, foo_url, ContentSettingsType::SOUND, std::string(),
-      CONTENT_SETTING_ALLOW);
+      foo_url, foo_url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
 
   NavigateFrameAndWait(main_frame(), main_url);
   EXPECT_FALSE(AutoplayAllowed(main_frame()));
@@ -565,7 +641,7 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest, Block_Wildcard) {
   EXPECT_FALSE(AutoplayAllowed(main_frame()));
 }
 
-// Flaky. See https://crbug.com/1101524.
+// Flaky. See https://crbug.com/40703621.
 IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest,
                        DISABLED_DefaultAllow) {
   GURL main_url(
@@ -573,12 +649,100 @@ IN_PROC_BROWSER_TEST_F(UnifiedAutoplaySettingBrowserTest,
   GURL foo_url(embedded_test_server()->GetURL("foo.com", kFramedTestPagePath));
 
   EXPECT_EQ(CONTENT_SETTING_ALLOW,
-            GetSettingsMap()->GetContentSetting(
-                main_url, main_url, ContentSettingsType::SOUND, std::string()));
+            GetSettingsMap()->GetContentSetting(main_url, main_url,
+                                                ContentSettingsType::SOUND));
 
   NavigateFrameAndWait(main_frame(), main_url);
   NavigateFrameAndWait(first_child(), foo_url);
 
   EXPECT_FALSE(AutoplayAllowed(main_frame()));
   EXPECT_FALSE(AutoplayAllowed(first_child()));
+}
+
+class UnifiedAutoplayPrerenderBrowserTest
+    : public UnifiedAutoplaySettingBrowserTest {
+ public:
+  UnifiedAutoplayPrerenderBrowserTest()
+      : prerender_helper_(base::BindRepeating(
+            &UnifiedAutoplayPrerenderBrowserTest::GetWebContents,
+            base::Unretained(this))) {}
+
+  void SetUp() override {
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
+    UnifiedAutoplaySettingBrowserTest::SetUp();
+  }
+
+  content::test::PrerenderTestHelper& prerender_helper() {
+    return prerender_helper_;
+  }
+
+  content::WebContents* GetWebContents() {
+    return browser()->tab_strip_model()->GetActiveWebContents();
+  }
+
+ private:
+  content::test::PrerenderTestHelper prerender_helper_;
+};
+
+IN_PROC_BROWSER_TEST_F(UnifiedAutoplayPrerenderBrowserTest,
+                       Allow_WebAudio_Prerendering) {
+  GURL initial_url =
+      embedded_test_server()->GetURL("example.com", "/title1.html");
+  NavigateFrameAndWait(main_frame(), initial_url);
+
+  GURL prerender_url(embedded_test_server()->GetURL(
+      "example.com", "/media/webaudio_autoplay.html"));
+
+  GetSettingsMap()->SetContentSettingDefaultScope(prerender_url, prerender_url,
+                                                  ContentSettingsType::SOUND,
+                                                  CONTENT_SETTING_ALLOW);
+
+  content::PrerenderHostId host_id =
+      prerender_helper().AddPrerender(prerender_url);
+  content::RenderFrameHost* prerender_rfh =
+      prerender_helper().GetPrerenderedMainFrameHost(host_id);
+
+  // The WebAudio context should be suspended while prerendering.
+  EXPECT_FALSE(content::EvalJs(prerender_rfh, "isPlaybackRunning();",
+                               content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+                   .ExtractBool());
+
+  // Activate the prerender.
+  prerender_helper().NavigatePrimaryPage(prerender_url);
+
+  // After activation, the WebAudio context should automatically resume.
+  EXPECT_TRUE(content::EvalJs(main_frame(), "isPlaybackRunning();",
+                              content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+                  .ExtractBool());
+}
+
+IN_PROC_BROWSER_TEST_F(UnifiedAutoplayPrerenderBrowserTest,
+                       Block_WebAudio_Prerendering) {
+  GURL initial_url =
+      embedded_test_server()->GetURL("example.com", "/title1.html");
+  NavigateFrameAndWait(main_frame(), initial_url);
+
+  GURL prerender_url(embedded_test_server()->GetURL(
+      "example.com", "/media/webaudio_autoplay.html"));
+
+  // Make sure we DON'T set the allow setting.
+
+  content::PrerenderHostId host_id =
+      prerender_helper().AddPrerender(prerender_url);
+  content::RenderFrameHost* prerender_rfh =
+      prerender_helper().GetPrerenderedMainFrameHost(host_id);
+
+  // The WebAudio context should be suspended while prerendering.
+  EXPECT_TRUE(content::EvalJs(prerender_rfh, "verifyBlocked();",
+                              content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+                  .ExtractBool());
+
+  // Activate the prerender.
+  prerender_helper().NavigatePrimaryPage(prerender_url);
+
+  // After activation, the WebAudio context should REMAIN suspended because it
+  // lacks user gesture!
+  EXPECT_FALSE(content::EvalJs(main_frame(), "isPlaybackRunning();",
+                               content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+                   .ExtractBool());
 }

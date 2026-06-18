@@ -1,109 +1,130 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.customtabs.content;
 
+import static org.chromium.build.NullUtil.assertNonNull;
+import static org.chromium.build.NullUtil.assumeNonNull;
+
+import android.app.Activity;
+import android.content.Intent;
 import android.text.TextUtils;
 
+import org.chromium.base.IntentUtils;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.IntentHandler;
-import org.chromium.chrome.browser.browserservices.BrowserServicesIntentDataProvider;
-import org.chromium.chrome.browser.customtabs.CustomTabNavigationEventObserver;
+import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider;
+import org.chromium.chrome.browser.browserservices.ui.controller.CurrentPageVerifier;
+import org.chromium.chrome.browser.browserservices.ui.controller.Verifier;
+import org.chromium.chrome.browser.customtabs.CustomTabAuthUrlHeuristics;
 import org.chromium.chrome.browser.customtabs.CustomTabObserver;
-import org.chromium.chrome.browser.dependency_injection.ActivityScope;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.components.embedder_support.util.UrlUtilities;
 import org.chromium.content_public.browser.LoadUrlParams;
-
-import javax.inject.Inject;
-
-import dagger.Lazy;
+import org.chromium.content_public.browser.WebContents;
 
 /**
- * Default implementation of {@link CustomTabIntentHandlingStrategy}.
- * Navigates the Custom Tab to urls provided in intents.
+ * Default implementation of {@link CustomTabIntentHandlingStrategy}. Navigates the Custom Tab to
+ * urls provided in intents.
  */
-@ActivityScope
+@NullMarked
 public class DefaultCustomTabIntentHandlingStrategy implements CustomTabIntentHandlingStrategy {
     private final CustomTabActivityTabProvider mTabProvider;
     private final CustomTabActivityNavigationController mNavigationController;
-    private final CustomTabNavigationEventObserver mNavigationEventObserver;
-    private final Lazy<CustomTabObserver> mCustomTabObserver;
+    private final CustomTabObserver mCustomTabObserver;
+    private final Verifier mVerifier;
+    private final CurrentPageVerifier mCurrentPageVerifier;
+    private final Activity mActivity;
 
-    @Inject
-    public DefaultCustomTabIntentHandlingStrategy(CustomTabActivityTabProvider tabProvider,
+    public DefaultCustomTabIntentHandlingStrategy(
+            CustomTabActivityTabProvider tabProvider,
             CustomTabActivityNavigationController navigationController,
-            CustomTabNavigationEventObserver navigationEventObserver,
-            Lazy<CustomTabObserver> customTabObserver) {
+            CustomTabObserver customTabObserver,
+            Verifier verifier,
+            CurrentPageVerifier currentPageVerifier,
+            Activity activity) {
         mTabProvider = tabProvider;
         mNavigationController = navigationController;
-        mNavigationEventObserver = navigationEventObserver;
         mCustomTabObserver = customTabObserver;
+        mVerifier = verifier;
+        mCurrentPageVerifier = currentPageVerifier;
+        mActivity = activity;
     }
 
     @Override
     public void handleInitialIntent(BrowserServicesIntentDataProvider intentDataProvider) {
-        @TabCreationMode
-        int initialTabCreationMode = mTabProvider.getInitialTabCreationMode();
-        if (initialTabCreationMode == TabCreationMode.HIDDEN
-                || initialTabCreationMode == TabCreationMode.FROM_STARTUP_TAB_PRELOADER) {
-            handleInitialLoadForHiddedTab(initialTabCreationMode, intentDataProvider);
-        } else {
-            LoadUrlParams params = new LoadUrlParams(intentDataProvider.getUrlToLoad());
-            mNavigationController.navigate(params, getTimestamp(intentDataProvider));
+        Intent intent = intentDataProvider.getIntent();
+        assertNonNull(intent);
+        if (IntentUtils.safeGetBooleanExtra(
+                intent, IntentHandler.EXTRA_SKIP_LOAD_ON_REPARENTING, false)) {
+            return;
         }
+
+        @TabCreationMode int initialTabCreationMode = mTabProvider.getInitialTabCreationMode();
+        Tab tab = mTabProvider.getTab();
+        if (tab == null) return;
+
+        CustomTabAuthUrlHeuristics.setFirstCctPageLoadForMetrics(tab);
+
+        if (intentDataProvider.isTrustedWebActivity()) {
+            WebContents webContents = tab.getWebContents();
+            assumeNonNull(webContents);
+            WebAppLaunchHandler launchHandler =
+                    WebAppLaunchHandler.create(
+                            mVerifier,
+                            mCurrentPageVerifier,
+                            mNavigationController,
+                            webContents,
+                            mActivity);
+            launchHandler.handleInitialIntent(intentDataProvider);
+        }
+
+        if (initialTabCreationMode == TabCreationMode.HIDDEN) {
+            handleInitialLoadForHiddenTab(intentDataProvider);
+        } else {
+            assumeNonNull(intentDataProvider.getUrlToLoad());
+            LoadUrlParams params = new LoadUrlParams(intentDataProvider.getUrlToLoad());
+            mNavigationController.navigate(params, assumeNonNull(intentDataProvider.getIntent()));
+        }
+
+        CustomTabAuthUrlHeuristics.recordUrlParamsHistogram(intentDataProvider.getUrlToLoad());
     }
 
     // The hidden tab case needs a bit of special treatment.
-    private void handleInitialLoadForHiddedTab(@TabCreationMode int initialTabCreationMode,
+    private void handleInitialLoadForHiddenTab(
             BrowserServicesIntentDataProvider intentDataProvider) {
         Tab tab = mTabProvider.getTab();
         if (tab == null) {
             throw new IllegalStateException("handleInitialIntent called before Tab created");
         }
-        String url = intentDataProvider.getUrlToLoad();
-
-        // Manually generating metrics in case the hidden tab has completely finished loading.
-        if (!tab.isLoading() && !tab.isShowingErrorPage()) {
-            mCustomTabObserver.get().onPageLoadStarted(tab, url);
-            mCustomTabObserver.get().onPageLoadFinished(tab, url);
-            mNavigationEventObserver.onPageLoadStarted(tab, url);
-            mNavigationEventObserver.onPageLoadFinished(tab, url);
-        }
+        String url = assertNonNull(intentDataProvider.getUrlToLoad());
 
         // No actual load to do if the hidden tab already has the exact correct url.
         String speculatedUrl = mTabProvider.getSpeculatedUrl();
-        if (TextUtils.equals(speculatedUrl, url)
-                || initialTabCreationMode == TabCreationMode.FROM_STARTUP_TAB_PRELOADER) {
-            // In the TabCreationMode.FROM_STARTUP_TAB_PRELOADER case:
-            // - CustomActivityTabProvider#getSpeculatedUrl() is not set.
-            // - The tab creation mode is only set in CustomTabActivityTabController if the URL
-            // being loaded is the one we want.
 
-            if (tab.isLoading()) {
-                // CustomTabObserver and CustomTabActivityNavigationObserver are attached
-                // as observers in CustomTabActivityTabController, not when the navigation is
-                // initiated in HiddenTabHolder or StartupTabPreloader.
-                mCustomTabObserver.get().onPageLoadStarted(tab, url);
-                mNavigationEventObserver.onPageLoadStarted(tab, url);
-            }
-            return;
-        }
+        boolean useSpeculation = TextUtils.equals(speculatedUrl, url);
+        boolean hasCommitted = !assumeNonNull(tab.getWebContents()).getLastCommittedUrl().isEmpty();
+        mCustomTabObserver.trackNextPageLoadForHiddenTab(
+                tab.getWebContents(),
+                useSpeculation,
+                hasCommitted,
+                assumeNonNull(intentDataProvider.getIntent()));
+
+        if (useSpeculation) return;
 
         LoadUrlParams params = new LoadUrlParams(url);
 
         // The following block is a hack that deals with urls preloaded with
         // the wrong fragment. Does an extra pageload and replaces history.
-        if (speculatedUrl != null
-                && UrlUtilities.urlsFragmentsDiffer(speculatedUrl, url)) {
+        if (speculatedUrl != null && UrlUtilities.urlsFragmentsDiffer(speculatedUrl, url)) {
             params.setShouldReplaceCurrentEntry(true);
         }
 
-        mNavigationController.navigate(params, getTimestamp(intentDataProvider));
+        mNavigationController.navigate(params, intentDataProvider.getIntent());
     }
 
-    @Override
-    public void handleNewIntent(BrowserServicesIntentDataProvider intentDataProvider) {
+    private void loadUrl(BrowserServicesIntentDataProvider intentDataProvider) {
         String url = intentDataProvider.getUrlToLoad();
         if (TextUtils.isEmpty(url)) return;
         LoadUrlParams params = new LoadUrlParams(url);
@@ -116,10 +137,26 @@ public class DefaultCustomTabIntentHandlingStrategy implements CustomTabIntentHa
             params.setShouldClearHistoryList(true);
         }
 
-        mNavigationController.navigate(params, getTimestamp(intentDataProvider));
+        mNavigationController.navigate(params, assumeNonNull(intentDataProvider.getIntent()));
     }
 
-    private long getTimestamp(BrowserServicesIntentDataProvider intentDataProvider) {
-        return IntentHandler.getTimestampFromIntent(intentDataProvider.getIntent());
+    @Override
+    public void handleNewIntent(BrowserServicesIntentDataProvider intentDataProvider) {
+        if (intentDataProvider.isTrustedWebActivity()) {
+            Tab tab = mTabProvider.getTab();
+            assumeNonNull(tab);
+            WebContents webContents = tab.getWebContents();
+            assumeNonNull(webContents);
+            WebAppLaunchHandler launchHandler =
+                    WebAppLaunchHandler.create(
+                            mVerifier,
+                            mCurrentPageVerifier,
+                            mNavigationController,
+                            webContents,
+                            mActivity);
+            launchHandler.handleNewIntent(intentDataProvider);
+        } else {
+            loadUrl(intentDataProvider);
+        }
     }
 }

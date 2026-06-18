@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,35 +9,38 @@
 #include <dlfcn.h>
 #include <netdb.h>
 #include <unistd.h>
+
 #include <cstddef>
 #include <memory>
 #include <string>
 
-#include "android_webview/browser_jni_headers/AwPacProcessor_jni.h"
 #include "base/android/jni_android.h"
 #include "base/android/jni_array.h"
 #include "base/android/jni_string.h"
-#include "base/bind.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
-#include "base/no_destructor.h"
-#include "base/task/post_task.h"
+#include "base/memory/raw_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/threading/thread_restrictions.h"
 #include "net/base/address_list.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/net_errors.h"
+#include "net/base/network_anonymization_key.h"
 #include "net/base/network_isolation_key.h"
 #include "net/proxy_resolution/pac_file_data.h"
 #include "net/proxy_resolution/proxy_info.h"
 
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/browser_jni_headers/AwPacProcessor_jni.h"
+
 using base::android::AttachCurrentThread;
 using base::android::ConvertJavaStringToUTF8;
 using base::android::ConvertUTF8ToJavaString;
-using base::android::JavaParamRef;
 using base::android::JavaRef;
 using base::android::ScopedJavaGlobalRef;
 using base::android::ScopedJavaLocalRef;
-class NetworkIsolationKey;
 
 namespace android_webview {
 
@@ -72,14 +75,6 @@ int AndroidGetAddrInfoForNetwork(net_handle_t network,
   return getaddrinfofornetwork(network, node, service, hints, res);
 }
 
-net::IPAddress StringToIPAddress(const std::string& address) {
-  net::IPAddress ip_address;
-  if (!ip_address.AssignFromIPLiteral(std::string(address))) {
-    LOG(ERROR) << "Not a supported IP literal: " << std::string(address);
-  }
-  return ip_address;
-}
-
 scoped_refptr<base::SingleThreadTaskRunner> GetTaskRunner() {
   struct ThreadHolder {
     base::Thread thread_;
@@ -108,20 +103,19 @@ proxy_resolver::ProxyResolverV8TracingFactory* GetProxyResolverFactory() {
 // blocking DNS queries, to get better performance.
 class HostResolver : public proxy_resolver::ProxyHostResolver {
  public:
-  HostResolver(net_handle_t net_handle) : net_handle_(net_handle) {}
-  ~HostResolver() override {}
-
   std::unique_ptr<proxy_resolver::ProxyHostResolver::Request> CreateRequest(
       const std::string& hostname,
       net::ProxyResolveDnsOperation operation,
-      const net::NetworkIsolationKey&) override {
+      const net::NetworkAnonymizationKey&) override {
     return std::make_unique<RequestImpl>(hostname, operation, net_handle_,
                                          link_addresses_);
   }
 
-  void SetNetworkLinkAddresses(
+  void SetNetworkAndLinkAddresses(
+      const net_handle_t net_handle,
       const std::vector<net::IPAddress>& link_addresses) {
     link_addresses_ = link_addresses;
+    net_handle_ = net_handle;
   }
 
  private:
@@ -169,7 +163,7 @@ class HostResolver : public proxy_resolver::ProxyHostResolver {
     bool MyIpAddressImpl() {
       // For network-aware queries the results are set from Java on
       // NetworkCallback#onLinkPropertiesChanged.
-      // See SetNetworkLinkAddresses.
+      // See SetNetworkAndLinkAddresses.
       if (IsNetworkSpecified()) {
         results_.push_back(link_addresses_.front());
         return true;
@@ -194,8 +188,7 @@ class HostResolver : public proxy_resolver::ProxyHostResolver {
     }
 
     bool DnsResolveImpl(const std::string& host) {
-      struct addrinfo hints;
-      memset(&hints, 0, sizeof hints);
+      struct addrinfo hints = {};
       hints.ai_family = AF_INET;
 
       struct addrinfo* res = nullptr;
@@ -263,9 +256,9 @@ class Bindings : public proxy_resolver::ProxyResolverV8Tracing::Bindings {
  public:
   Bindings(HostResolver* host_resolver) : host_resolver_(host_resolver) {}
 
-  void Alert(const base::string16& message) override {}
+  void Alert(const std::u16string& message) override {}
 
-  void OnError(int line_number, const base::string16& message) override {}
+  void OnError(int line_number, const std::u16string& message) override {}
 
   proxy_resolver::ProxyHostResolver* GetHostResolver() override {
     return host_resolver_;
@@ -276,7 +269,7 @@ class Bindings : public proxy_resolver::ProxyResolverV8Tracing::Bindings {
   }
 
  private:
-  HostResolver* host_resolver_;
+  raw_ptr<HostResolver> host_resolver_;
 };
 
 
@@ -334,7 +327,7 @@ class Job {
   base::OnceClosure task_;
   int net_error_ = net::ERR_ABORTED;
   base::WaitableEvent event_;
-  AwPacProcessor* processor_;
+  raw_ptr<AwPacProcessor> processor_;
 };
 
 class SetProxyScriptJob : public Job {
@@ -380,9 +373,8 @@ class MakeProxyRequestJob : public Job {
   std::unique_ptr<net::ProxyResolver::Request> request_;
 };
 
-AwPacProcessor::AwPacProcessor(net_handle_t net_handle)
-    : net_handle_(net_handle) {
-  host_resolver_ = std::make_unique<HostResolver>(net_handle_);
+AwPacProcessor::AwPacProcessor() {
+  host_resolver_ = std::make_unique<HostResolver>();
 }
 
 AwPacProcessor::~AwPacProcessor() {
@@ -397,7 +389,7 @@ AwPacProcessor::~AwPacProcessor() {
 
 void AwPacProcessor::Destroy(base::WaitableEvent* event) {
   // Cancel all unfinished jobs to unblock calling thread.
-  for (auto* job : jobs_) {
+  for (Job* job : jobs_) {
     job->Cancel();
   }
 
@@ -405,9 +397,7 @@ void AwPacProcessor::Destroy(base::WaitableEvent* event) {
   event->Signal();
 }
 
-void AwPacProcessor::DestroyNative(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& obj) {
+void AwPacProcessor::DestroyNative(JNIEnv* env) {
   delete this;
 }
 
@@ -431,8 +421,9 @@ void AwPacProcessor::MakeProxyRequestNative(
 
   if (proxy_resolver_) {
     proxy_resolver_->GetProxyForURL(
-        GURL(url), net::NetworkIsolationKey(), proxy_info, std::move(complete),
-        request, std::make_unique<Bindings>(host_resolver_.get()));
+        GURL(url), net::NetworkAnonymizationKey(), proxy_info,
+        std::move(complete), request,
+        std::make_unique<Bindings>(host_resolver_.get()));
   } else {
     std::move(complete).Run(net::ERR_FAILED);
   }
@@ -440,57 +431,61 @@ void AwPacProcessor::MakeProxyRequestNative(
 
 bool AwPacProcessor::SetProxyScript(std::string script) {
   SetProxyScriptJob job(this, script);
-  bool success = job.ExecSync();
-
-  DCHECK(proxy_resolver_);
-  return success;
+  return job.ExecSync();
 }
 
-jboolean AwPacProcessor::SetProxyScript(JNIEnv* env,
-                                        const JavaParamRef<jobject>& obj,
-                                        const JavaParamRef<jstring>& jscript) {
-  std::string script = ConvertJavaStringToUTF8(env, jscript);
+bool AwPacProcessor::SetProxyScript(JNIEnv* env, const std::string& script) {
   return SetProxyScript(script);
 }
 
-std::string AwPacProcessor::MakeProxyRequest(std::string url) {
+bool AwPacProcessor::MakeProxyRequest(std::string url, std::string* result) {
   MakeProxyRequestJob job(this, url);
-  bool success = job.ExecSync();
-  return success ? job.proxy_info().ToPacString() : nullptr;
+  if (job.ExecSync()) {
+    if (job.proxy_info().ContainsMultiProxyChain()) {
+      // Multi-proxy chains cannot be represented as a PAC string.
+      return false;
+    }
+    *result = job.proxy_info().ToPacString();
+    return true;
+  } else {
+    return false;
+  }
 }
 
 ScopedJavaLocalRef<jstring> AwPacProcessor::MakeProxyRequest(
     JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    const JavaParamRef<jstring>& jurl) {
+    const JavaRef<jstring>& jurl) {
   std::string url = ConvertJavaStringToUTF8(env, jurl);
-  return ConvertUTF8ToJavaString(env, MakeProxyRequest(url));
+  std::string result;
+  if (MakeProxyRequest(url, &result)) {
+    return ConvertUTF8ToJavaString(env, result);
+  } else {
+    return nullptr;
+  }
 }
 
-// ProxyResolverV8Tracing posts DNS resolution queries back to the thread
-// it is called from. Post update of link addresses to the same thread to
-// prevent concurrent access and modification of the same vector.
-void AwPacProcessor::SetNetworkLinkAddresses(
+void AwPacProcessor::SetNetworkAndLinkAddresses(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobjectArray>& jlink_addresses) {
-  std::vector<std::string> string_link_addresses;
-  base::android::AppendJavaStringArrayToStringVector(env, jlink_addresses,
-                                                     &string_link_addresses);
-
+    net_handle_t net_handle,
+    const std::vector<std::string>& string_link_addresses) {
   std::vector<net::IPAddress> link_addresses;
-  for (std::string const& address : string_link_addresses) {
-    link_addresses.push_back(StringToIPAddress(address));
+  for (const std::string& address : string_link_addresses) {
+    net::IPAddress ip_address;
+    if (ip_address.AssignFromIPLiteral(address)) {
+      link_addresses.push_back(ip_address);
+    } else {
+      LOG(ERROR) << "Not a supported IP literal: " << address;
+    }
   }
 
   GetTaskRunner()->PostTask(
-      FROM_HERE, base::BindOnce(&HostResolver::SetNetworkLinkAddresses,
+      FROM_HERE, base::BindOnce(&HostResolver::SetNetworkAndLinkAddresses,
                                 base::Unretained(host_resolver_.get()),
-                                std::move(link_addresses)));
+                                net_handle, std::move(link_addresses)));
 }
 
-static jlong JNI_AwPacProcessor_CreateNativePacProcessor(JNIEnv* env,
-                                                         jlong net_handle) {
-  AwPacProcessor* processor = new AwPacProcessor(net_handle);
+static int64_t JNI_AwPacProcessor_CreateNativePacProcessor(JNIEnv* env) {
+  AwPacProcessor* processor = new AwPacProcessor();
   return reinterpret_cast<intptr_t>(processor);
 }
 
@@ -499,3 +494,5 @@ static void JNI_AwPacProcessor_InitializeEnvironment(JNIEnv* env) {
 }
 
 }  // namespace android_webview
+
+DEFINE_JNI(AwPacProcessor)

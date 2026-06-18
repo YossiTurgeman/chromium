@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,16 @@
 #include <sstream>
 #include <type_traits>
 #include "base/json/string_escape.h"
+#include "components/feed/core/proto/v2/wire/action_diagnostic_info.pb.h"
+#include "components/feed/core/proto/v2/wire/action_payload.pb.h"
 #include "components/feed/core/proto/v2/wire/client_info.pb.h"
+#include "components/feed/core/proto/v2/wire/client_user_profiles.pb.h"
+#include "components/feed/core/proto/v2/wire/consistency_token.pb.h"
 #include "components/feed/core/proto/v2/wire/content_id.pb.h"
+#include "components/feed/core/proto/v2/wire/feed_action.pb.h"
+#include "components/feed/core/proto/v2/wire/upload_actions_request.pb.h"
+#include "components/feed/core/proto/v2/wire/upload_actions_response.pb.h"
+#include "components/feed/core/proto/v2/xsurface.pb.h"
 #include "components/feed/core/v2/protocol_translator.h"
 
 namespace feed {
@@ -20,7 +28,8 @@ struct IsFieldSetHelper {
   static bool IsSet(const T& v) { return true; }
 };
 template <typename T>
-struct IsFieldSetHelper<T, std::enable_if_t<std::is_scalar<T>::value>> {
+  requires(std::is_scalar_v<T>)
+struct IsFieldSetHelper<T> {
   static bool IsSet(const T& v) { return !!v; }
 };
 template <>
@@ -30,6 +39,12 @@ struct IsFieldSetHelper<std::string> {
 template <typename T>
 struct IsFieldSetHelper<google::protobuf::RepeatedPtrField<T>> {
   static bool IsSet(const google::protobuf::RepeatedPtrField<T>& v) {
+    return !v.empty();
+  }
+};
+template <typename T>
+struct IsFieldSetHelper<google::protobuf::RepeatedField<T>> {
+  static bool IsSet(const google::protobuf::RepeatedField<T>& v) {
     return !v.empty();
   }
 };
@@ -73,6 +88,16 @@ class TextProtoPrinter {
     }
   };
   template <typename T>
+  struct FieldPrintHelper<google::protobuf::RepeatedField<T>> {
+    static void Run(const std::string& name,
+                    const google::protobuf::RepeatedField<T>& v,
+                    TextProtoPrinter* pp) {
+      for (int i = 0; i < v.size(); ++i) {
+        pp->Field(name, v[i]);
+      }
+    }
+  };
+  template <typename T>
   struct FieldPrintHelper<
       T,
       std::enable_if_t<
@@ -89,6 +114,8 @@ class TextProtoPrinter {
   };
 
 #define PRINT_FIELD(name) Field(#name, v.name())
+
+// Required only for proto2 oneof fields.
 #define PRINT_ONEOF(name)   \
   if (v.has_##name()) {     \
     Field(#name, v.name()); \
@@ -103,7 +130,6 @@ class TextProtoPrinter {
     ss_ << base::GetQuotedJSONString(v);
     return *this;
   }
-
   TextProtoPrinter& operator<<(const feedwire::ContentId& v) {
     BeginMessage();
     PRINT_FIELD(content_domain);
@@ -122,7 +148,12 @@ class TextProtoPrinter {
     PRINT_FIELD(display_info);
     PRINT_FIELD(client_instance_id);
     PRINT_FIELD(advertising_id);
-    PRINT_FIELD(device_country);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::ActionPayload& v) {
+    BeginMessage();
+    PRINT_FIELD(batched_action_payload_data);
     EndMessage();
     return *this;
   }
@@ -146,6 +177,7 @@ class TextProtoPrinter {
     EndMessage();
     return *this;
   }
+
   TextProtoPrinter& operator<<(const feedstore::Record& v) {
     BeginMessage();
     PRINT_ONEOF(stream_data);
@@ -153,15 +185,25 @@ class TextProtoPrinter {
     PRINT_ONEOF(content);
     PRINT_ONEOF(local_action);
     PRINT_ONEOF(shared_state);
+    PRINT_ONEOF(doc_view);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedstore::StreamContentHashList& v) {
+    BeginMessage();
+    PRINT_FIELD(hashes);
     EndMessage();
     return *this;
   }
   TextProtoPrinter& operator<<(const feedstore::StreamData& v) {
     BeginMessage();
     PRINT_FIELD(content_id);
+    PRINT_FIELD(root_event_id);
     PRINT_FIELD(next_page_token);
     PRINT_FIELD(last_added_time_millis);
-    PRINT_FIELD(shared_state_id);
+    PRINT_FIELD(shared_state_ids);
+    PRINT_FIELD(stream_key);
+    PRINT_FIELD(content_hashes);
     EndMessage();
     return *this;
   }
@@ -169,12 +211,13 @@ class TextProtoPrinter {
     BeginMessage();
     PRINT_FIELD(consistency_token);
     PRINT_FIELD(next_action_id);
+    PRINT_FIELD(stream_schema_version);
     EndMessage();
     return *this;
   }
   TextProtoPrinter& operator<<(const feedstore::StreamStructureSet& v) {
     BeginMessage();
-    PRINT_FIELD(stream_id);
+    PRINT_FIELD(stream_key);
     PRINT_FIELD(sequence_number);
     PRINT_FIELD(structures);
     EndMessage();
@@ -213,6 +256,7 @@ class TextProtoPrinter {
     BeginMessage();
     PRINT_FIELD(content_id);
     PRINT_FIELD(frame);
+    PRINT_FIELD(stream_key);
     EndMessage();
     return *this;
   }
@@ -220,6 +264,7 @@ class TextProtoPrinter {
     BeginMessage();
     PRINT_FIELD(content_id);
     PRINT_FIELD(shared_state_data);
+    PRINT_FIELD(stream_key);
     EndMessage();
     return *this;
   }
@@ -228,6 +273,13 @@ class TextProtoPrinter {
     PRINT_FIELD(id);
     PRINT_FIELD(upload_attempt_count);
     // PRINT_FIELD(action);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedstore::DocView& v) {
+    BeginMessage();
+    PRINT_FIELD(docid);
+    PRINT_FIELD(view_time_millis);
     EndMessage();
     return *this;
   }
@@ -278,6 +330,98 @@ class TextProtoPrinter {
     EndMessage();
     return *this;
   }
+  TextProtoPrinter& operator<<(const feedwire::ConsistencyToken& v) {
+    BeginMessage();
+    PRINT_FIELD(token);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::FeedAction::ClientData& v) {
+    BeginMessage();
+    PRINT_FIELD(timestamp_seconds);
+    PRINT_FIELD(sequence_number);
+    PRINT_FIELD(duration_ms);
+    PRINT_FIELD(action_origin);
+    PRINT_FIELD(action_surface);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::FeedAction& v) {
+    BeginMessage();
+    PRINT_FIELD(action_payload);
+    PRINT_FIELD(client_data);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::ActionDiagnosticInfo& v) {
+    BeginMessage();
+    PRINT_FIELD(actions_remaining);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::UploadActionsRequest& v) {
+    BeginMessage();
+    PRINT_FIELD(feed_actions);
+    PRINT_FIELD(consistency_token);
+    PRINT_FIELD(action_diagnostic_info);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::UploadActionsResponse& v) {
+    BeginMessage();
+    PRINT_FIELD(consistency_token);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(
+      const feedwire::ViewDemotionProfileExtension& v) {
+    BeginMessage();
+    PRINT_FIELD(tables);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::Table& v) {
+    BeginMessage();
+    PRINT_FIELD(name);
+    PRINT_FIELD(num_rows);
+    PRINT_FIELD(columns);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::Table::Column& v) {
+    BeginMessage();
+    PRINT_FIELD(type);
+    PRINT_FIELD(name);
+    PRINT_FIELD(int64_values);
+    PRINT_FIELD(uint64_values);
+    EndMessage();
+    return *this;
+  }
+  TextProtoPrinter& operator<<(const feedwire::ClientUserProfiles& v) {
+    BeginMessage();
+    PRINT_FIELD(view_demotion_profile);
+    EndMessage();
+    return *this;
+  }
+
+  TextProtoPrinter& operator<<(const feedwire::ViewDemotionProfile& v) {
+    BeginMessage();
+    PRINT_FIELD(view_demotion_profile);
+    EndMessage();
+    return *this;
+  }
+
+  TextProtoPrinter& operator<<(const feedwire::InfoCardTrackingState& v) {
+    BeginMessage();
+    PRINT_FIELD(type);
+    PRINT_FIELD(explicitly_dismissed_count);
+    PRINT_FIELD(view_count);
+    PRINT_FIELD(click_count);
+    PRINT_FIELD(first_view_timestamp);
+    PRINT_FIELD(last_view_timestamp);
+    EndMessage();
+    return *this;
+  }
 
   template <typename T>
   void Field(const std::string& name, const T& value) {
@@ -303,48 +447,38 @@ class TextProtoPrinter {
   std::stringstream ss_;
 };  // namespace feed
 
-std::string ToTextProto(const feedwire::ContentId& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedwire::DisplayInfo& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedwire::Version& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedwire::ClientInfo& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::StreamData& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::Metadata& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::StreamStructureSet& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::StreamStructure& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::Content& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::StreamSharedState& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::StoredAction& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::Record& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedstore::DataOperation& v) {
-  return TextProtoPrinter::ToString(v);
-}
-std::string ToTextProto(const feedui::StreamUpdate& v) {
-  return TextProtoPrinter::ToString(v);
-}
+#define DECLARE_PRINTER(NS, PROTO_TYPE)              \
+  std::string ToTextProto(const NS::PROTO_TYPE& v) { \
+    return TextProtoPrinter::ToString(v);            \
+  }
+
+DECLARE_PRINTER(feedstore, Content)
+DECLARE_PRINTER(feedstore, DataOperation)
+DECLARE_PRINTER(feedstore, Metadata)
+DECLARE_PRINTER(feedstore, Record)
+DECLARE_PRINTER(feedstore, StoredAction)
+DECLARE_PRINTER(feedstore, StreamContentHashList)
+DECLARE_PRINTER(feedstore, StreamData)
+DECLARE_PRINTER(feedstore, StreamSharedState)
+DECLARE_PRINTER(feedstore, StreamStructure)
+DECLARE_PRINTER(feedstore, StreamStructureSet)
+DECLARE_PRINTER(feedstore, DocView)
+DECLARE_PRINTER(feedui, StreamUpdate)
+DECLARE_PRINTER(feedwire, ActionPayload)
+DECLARE_PRINTER(feedwire, ClientInfo)
+DECLARE_PRINTER(feedwire, ContentId)
+DECLARE_PRINTER(feedwire, DisplayInfo)
+DECLARE_PRINTER(feedwire, InfoCardTrackingState)
+DECLARE_PRINTER(feedwire, UploadActionsRequest)
+DECLARE_PRINTER(feedwire, UploadActionsResponse)
+DECLARE_PRINTER(feedwire, ViewDemotionProfileExtension)
+DECLARE_PRINTER(feedwire, ViewDemotionProfile)
+DECLARE_PRINTER(feedwire, Table)
+DECLARE_PRINTER(feedwire, Table::Column)
+DECLARE_PRINTER(feedwire, Version)
+DECLARE_PRINTER(feedwire, ClientUserProfiles)
+
+#undef DECLARE_PRINTER
 
 std::ostream& operator<<(std::ostream& os, const StreamModelUpdateRequest& v) {
   os << "source: " << static_cast<int>(v.source) << '\n';

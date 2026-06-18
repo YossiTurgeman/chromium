@@ -1,13 +1,13 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "android_webview/browser/android_protocol_handler.h"
 
 #include <memory>
+#include <string>
 #include <utility>
 
-#include "android_webview/browser_jni_headers/AndroidProtocolHandler_jni.h"
 #include "android_webview/common/url_constants.h"
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
@@ -18,14 +18,17 @@
 #include "net/base/mime_util.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_util.h"
-#include "net/url_request/url_request.h"
+#include "url/android/gurl_android.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/browser_jni_headers/AndroidProtocolHandler_jni.h"
 
 using base::android::AttachCurrentThread;
 using base::android::ClearException;
 using base::android::ConvertUTF8ToJavaString;
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 using base::android::ScopedJavaGlobalRef;
 using base::android::ScopedJavaLocalRef;
 using embedder_support::InputStream;
@@ -38,9 +41,9 @@ std::unique_ptr<InputStream> CreateInputStream(JNIEnv* env, const GURL& url) {
   DCHECK(env);
 
   // Open the input stream.
-  ScopedJavaLocalRef<jstring> jurl = ConvertUTF8ToJavaString(env, url.spec());
   ScopedJavaLocalRef<jobject> stream =
-      android_webview::Java_AndroidProtocolHandler_open(env, jurl);
+      android_webview::Java_AndroidProtocolHandler_open(
+          env, url::GURLAndroid::FromNativeGURL(env, url));
 
   if (!stream) {
     DLOG(ERROR) << "Unable to open input stream for Android URL";
@@ -55,26 +58,39 @@ bool GetInputStreamMimeType(JNIEnv* env,
                             std::string* mime_type) {
   // Query the mime type from the Java side. It is possible for the query to
   // fail, as the mime type cannot be determined for all supported schemes.
-  ScopedJavaLocalRef<jstring> java_url =
-      ConvertUTF8ToJavaString(env, url.spec());
-  ScopedJavaLocalRef<jstring> returned_type =
+  std::string returned_type =
       android_webview::Java_AndroidProtocolHandler_getMimeType(
-          env, stream->jobj(), java_url);
-  if (!returned_type)
+          env, stream->jobj(), url::GURLAndroid::FromNativeGURL(env, url));
+  if (returned_type.empty()) {
     return false;
+  }
 
-  *mime_type = base::android::ConvertJavaStringToUTF8(returned_type);
+  *mime_type = returned_type;
   return true;
 }
 
-static ScopedJavaLocalRef<jstring>
-JNI_AndroidProtocolHandler_GetAndroidAssetPath(JNIEnv* env) {
-  return ConvertUTF8ToJavaString(env, android_webview::kAndroidAssetPath);
+static std::string JNI_AndroidProtocolHandler_GetAndroidAssetPath(JNIEnv* env) {
+  return android_webview::kAndroidAssetPath;
 }
 
-static ScopedJavaLocalRef<jstring>
-JNI_AndroidProtocolHandler_GetAndroidResourcePath(JNIEnv* env) {
-  return ConvertUTF8ToJavaString(env, android_webview::kAndroidResourcePath);
+static std::string JNI_AndroidProtocolHandler_GetAndroidResourcePath(
+    JNIEnv* env) {
+  return android_webview::kAndroidResourcePath;
+}
+
+// Returns the mime type, or returns empty string if a mime type was not found.
+static std::string JNI_AndroidProtocolHandler_GetWellKnownMimeType(
+    JNIEnv* env,
+    const std::string& path) {
+  std::string mime_type;
+
+  if (net::GetWellKnownMimeTypeFromFile(base::FilePath(path), &mime_type)) {
+    return mime_type;
+  }
+
+  return "";
 }
 
 }  // namespace android_webview
+
+DEFINE_JNI(AndroidProtocolHandler)

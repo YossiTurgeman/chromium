@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,16 @@
 
 #include <memory>
 
-#include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/sequence_manager/task_queue.h"
+#include "base/time/time.h"
 #include "content/browser/scheduler/browser_task_queues.h"
 #include "content/common/content_export.h"
+#include "content/common/scheduler_loop_quarantine_task_observer.h"
 
 namespace base {
 namespace sequence_manager {
 class SequenceManager;
-class TimeDomain;
 }  // namespace sequence_manager
 }  // namespace base
 
@@ -29,26 +30,47 @@ class CONTENT_EXPORT BrowserUIThreadScheduler {
   using Handle = BrowserTaskQueues::Handle;
 
   BrowserUIThreadScheduler();
+
+  BrowserUIThreadScheduler(const BrowserUIThreadScheduler&) = delete;
+  BrowserUIThreadScheduler& operator=(const BrowserUIThreadScheduler&) = delete;
+
   ~BrowserUIThreadScheduler();
 
+  static BrowserUIThreadScheduler* Get();
+
+  // Unlike the default constructor, this assumes a feature list is ready to be
+  // used. `InstallPartitionAllocSchedulerLoopQuarantineTaskObserver()` is
+  // called automatically.
+  static std::unique_ptr<BrowserUIThreadScheduler> CreateForTesting();
   // Setting the DefaultTaskRunner is up to the caller.
   static std::unique_ptr<BrowserUIThreadScheduler> CreateForTesting(
-      base::sequence_manager::SequenceManager* sequence_manager,
-      base::sequence_manager::TimeDomain* time_domain);
+      base::sequence_manager::SequenceManager* sequence_manager);
 
   using QueueType = BrowserTaskQueues::QueueType;
 
   scoped_refptr<Handle> GetHandle() const { return handle_; }
 
+  base::sequence_manager::TaskQueue* GetDefaultTaskQueue() const;
+
  private:
   friend class BrowserTaskExecutor;
 
-  BrowserUIThreadScheduler(
-      base::sequence_manager::SequenceManager* sequence_manager,
-      base::sequence_manager::TimeDomain* time_domain);
+  using QueueEnabledVoter =
+      base::sequence_manager::TaskQueue::QueueEnabledVoter;
+
+  explicit BrowserUIThreadScheduler(
+      base::sequence_manager::SequenceManager* sequence_manager);
 
   void CommonSequenceManagerSetup(
       base::sequence_manager::SequenceManager* sequence_manager);
+
+  // Reads a feature list; need to be called after its initialization.
+  void InstallPartitionAllocSchedulerLoopQuarantineTaskObserver();
+
+  void OnTaskCompleted(
+      const base::sequence_manager::Task& task,
+      base::sequence_manager::TaskQueue::TaskTiming* task_timing,
+      base::LazyNow* lazy_now);
 
   // In production the BrowserUIThreadScheduler will own its SequenceManager,
   // but in tests it may not.
@@ -56,9 +78,9 @@ class CONTENT_EXPORT BrowserUIThreadScheduler {
       owned_sequence_manager_;
 
   BrowserTaskQueues task_queues_;
-  scoped_refptr<Handle> handle_;
+  SchedulerLoopQuarantineTaskObserver scheduler_loop_quarantine_task_observer_;
 
-  DISALLOW_COPY_AND_ASSIGN(BrowserUIThreadScheduler);
+  scoped_refptr<Handle> handle_;
 };
 
 }  // namespace content

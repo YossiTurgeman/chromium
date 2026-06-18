@@ -1,19 +1,21 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/workers/worklet_pending_tasks.h"
 
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
 #include "third_party/blink/renderer/core/workers/worklet.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/wtf.h"
 
 namespace blink {
 
-WorkletPendingTasks::WorkletPendingTasks(Worklet* worklet,
-                                         ScriptPromiseResolver* resolver)
+WorkletPendingTasks::WorkletPendingTasks(
+    Worklet* worklet,
+    ScriptPromiseResolver<IDLUndefined>* resolver)
     : resolver_(resolver), worklet_(worklet) {
   DCHECK(IsMainThread());
 }
@@ -49,8 +51,8 @@ void WorkletPendingTasks::Abort(
       resolver_->Reject(error_to_rethrow->Deserialize(
           resolver_->GetScriptState()->GetIsolate()));
     } else {
-      resolver_->Reject(
-          MakeGarbageCollected<DOMException>(DOMExceptionCode::kAbortError));
+      resolver_->Reject(MakeGarbageCollected<DOMException>(
+          DOMExceptionCode::kAbortError, "Unable to load a worklet's module."));
     }
   }
 }

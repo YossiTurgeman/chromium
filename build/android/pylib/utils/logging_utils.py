@@ -1,4 +1,4 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -19,20 +19,31 @@ FORE = colorama.Fore
 STYLE = colorama.Style
 
 
+def InitColorama():
+  # NO_COLOR is a common way of disabling colors in terminal apps.
+  strip = True if bool(os.environ.get('NO_COLOR')) else None
+  colorama.init(strip=strip)
+
+
+def Colorize(text, style=''):
+  return style + text + colorama.Style.RESET_ALL
+
+
 class _ColorFormatter(logging.Formatter):
   # pylint does not see members added dynamically in the constructor.
   # pylint: disable=no-member
-  color_map = {
-    logging.DEBUG: (FORE.CYAN),
-    logging.WARNING: (FORE.YELLOW),
-    logging.ERROR: (FORE.RED),
-    logging.CRITICAL: (BACK.RED),
-  }
 
-  def __init__(self, wrapped_formatter=None):
+  def __init__(self, wrapped_formatter=None, color_warnings=False):
     """Wraps a |logging.Formatter| and adds color."""
-    super(_ColorFormatter, self).__init__(self)
+    super().__init__()
     self._wrapped_formatter = wrapped_formatter or logging.Formatter()
+    self.color_map = {
+        logging.DEBUG: (),  # Default style.
+        logging.INFO: (),
+        logging.WARNING: FORE.YELLOW if color_warnings else (),
+        logging.ERROR: FORE.RED,
+        logging.CRITICAL: (BACK.RED, FORE.WHITE),
+    }
 
   #override
   def format(self, record):
@@ -41,8 +52,11 @@ class _ColorFormatter(logging.Formatter):
 
   def Colorize(self, message, log_level):
     try:
-      return (''.join(self.color_map[log_level]) + message +
-              colorama.Style.RESET_ALL)
+      colors = ''.join(self.color_map[log_level])
+      if not colors or not message:
+        return message
+      # Color only the log level char.
+      return Colorize(message[0], colors) + message[1:]
     except KeyError:
       return message
 
@@ -62,25 +76,30 @@ class ColorStreamHandler(logging.StreamHandler):
     logging.info('message')
 
   """
-  def __init__(self, force_color=False):
-    super(ColorStreamHandler, self).__init__()
+
+  def __init__(self, force_color=False, color_warnings=False):
+    super().__init__()
     self.force_color = force_color
+    self.color_warnings = color_warnings
     self.setFormatter(logging.Formatter())
 
   @property
   def is_tty(self):
-    isatty = getattr(self.stream, 'isatty', None)
-    return isatty and isatty()
+    try:
+      isatty = getattr(self.stream, 'isatty')
+    except AttributeError:
+      return False
+    return isatty()
 
   #override
-  def setFormatter(self, formatter):
+  def setFormatter(self, fmt):
     if self.force_color or self.is_tty:
-      formatter = _ColorFormatter(formatter)
-    super(ColorStreamHandler, self).setFormatter(formatter)
+      fmt = _ColorFormatter(fmt, color_warnings=self.color_warnings)
+    super().setFormatter(fmt)
 
   @staticmethod
   def MakeDefault(force_color=False):
-     """
+    """
      Replaces the default logging handlers with a coloring handler. To use
      a colorizing handler at the same time as others, either register them
      after this call, or add the ColorStreamHandler on the logger using
@@ -89,9 +108,9 @@ class ColorStreamHandler(logging.StreamHandler):
      Args:
        force_color: Set to True to bypass the tty check and always colorize.
      """
-     # If the existing handlers aren't removed, messages are duplicated
-     logging.getLogger().handlers = []
-     logging.getLogger().addHandler(ColorStreamHandler(force_color))
+    # If the existing handlers aren't removed, messages are duplicated
+    logging.getLogger().handlers = []
+    logging.getLogger().addHandler(ColorStreamHandler(force_color))
 
 
 @contextlib.contextmanager
@@ -110,7 +129,7 @@ def OverrideColor(level, color):
   try:
     yield
   finally:
-    for formatter, prev_color in prev_colors.iteritems():
+    for formatter, prev_color in prev_colors.items():
       formatter.color_map[level] = prev_color
 
 

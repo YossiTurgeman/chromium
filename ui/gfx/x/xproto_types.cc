@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,10 @@
 
 #include <xcb/xcbext.h>
 
+#include "base/compiler_specific.h"
 #include "base/memory/scoped_refptr.h"
 #include "ui/gfx/x/connection.h"
 #include "ui/gfx/x/xproto_internal.h"
-#include "ui/gfx/x/xproto_util.h"
 
 namespace x11 {
 
@@ -26,9 +26,43 @@ struct ReplyHeader {
 
 }  // namespace
 
-ReadBuffer::ReadBuffer(scoped_refptr<base::RefCountedMemory> data)
+ThrowAwaySizeRefCountedMemory::ThrowAwaySizeRefCountedMemory(
+    std::vector<uint8_t> data)
+    : data_(std::move(data)) {}
+
+ThrowAwaySizeRefCountedMemory::~ThrowAwaySizeRefCountedMemory() = default;
+
+void* ThrowAwaySizeRefCountedMemory::data() {
+  return data_.data();
+}
+
+const void* ThrowAwaySizeRefCountedMemory::data() const {
+  return data_.data();
+}
+
+SizedRefCountedMemory::SizedRefCountedMemory(
+    scoped_refptr<UnsizedRefCountedMemory> mem,
+    size_t size)
+    : mem_(std::move(mem)), size_(size) {}
+
+SizedRefCountedMemory::~SizedRefCountedMemory() = default;
+
+base::span<const uint8_t> SizedRefCountedMemory::AsSpan() const {
+  // SAFETY: This relies on the constructor being called with a valid buffer
+  // and size pair.
+  return UNSAFE_BUFFERS(base::span(mem_->bytes(), size_));
+}
+
+ReadBuffer::ReadBuffer(scoped_refptr<UnsizedRefCountedMemory> data,
+                       bool setup_message)
     : data(data) {
-  const auto* reply_header = reinterpret_cast<const ReplyHeader*>(data->data());
+  // X connection setup uses a special reply without the standard header, see:
+  // https://www.x.org/releases/X11R7.6/doc/xproto/x11protocol.html#server_response
+  // Don't try to parse it like a normal reply.
+  if (setup_message)
+    return;
+
+  const ReplyHeader* reply_header = data->cast_to<const ReplyHeader>();
 
   // Only replies can have FDs, not events or errors.
   if (reply_header->response_type == kResponseTypeReply) {
@@ -37,7 +71,8 @@ ReadBuffer::ReadBuffer(scoped_refptr<base::RefCountedMemory> data)
     size_t reply_length = 32 + 4 * reply_header->length;
 
     // libxcb stores the fds after the reply data.
-    fds = reinterpret_cast<const int*>(data->data() + reply_length);
+    fds =
+        reinterpret_cast<const int*>(UNSAFE_TODO(data->bytes() + reply_length));
   }
 }
 
@@ -45,7 +80,7 @@ ReadBuffer::ReadBuffer(ReadBuffer&&) = default;
 
 ReadBuffer::~ReadBuffer() = default;
 
-scoped_refptr<base::RefCountedMemory> ReadBuffer::ReadAndAdvance(
+scoped_refptr<UnsizedRefCountedMemory> ReadBuffer::ReadAndAdvance(
     size_t length) {
   auto buf = base::MakeRefCounted<OffsetRefCountedMemory>(data, offset, length);
   offset += length;
@@ -53,7 +88,7 @@ scoped_refptr<base::RefCountedMemory> ReadBuffer::ReadAndAdvance(
 }
 
 int ReadBuffer::TakeFd() {
-  return *fds++;
+  return UNSAFE_TODO(*fds++);
 }
 
 WriteBuffer::WriteBuffer() = default;
@@ -62,82 +97,42 @@ WriteBuffer::WriteBuffer(WriteBuffer&&) = default;
 
 WriteBuffer::~WriteBuffer() = default;
 
-void WriteBuffer::AppendBuffer(scoped_refptr<base::RefCountedMemory> buffer,
+void WriteBuffer::AppendBuffer(scoped_refptr<UnsizedRefCountedMemory> buffer,
                                size_t size) {
   AppendCurrentBuffer();
-  buffers_.push_back(buffer);
+  sized_buffers_.push_back(
+      // SAFETY: This relies on the caller to pass a correct size, as enforced
+      // by UNSAFE_BUFFER_USAGE in header.
+      UNSAFE_BUFFERS(base::span(buffer->bytes(), size)));
+  owned_buffers_.push_back(buffer);
   offset_ += size;
 }
 
-std::vector<scoped_refptr<base::RefCountedMemory>>& WriteBuffer::GetBuffers() {
+void WriteBuffer::AppendSizedBuffer(
+    scoped_refptr<base::RefCountedMemory> buffer) {
+  AppendCurrentBuffer();
+  std::vector<uint8_t> v(buffer->size());
+  base::span(v).copy_from(*buffer);
+  sized_buffers_.push_back(v);
+  owned_buffers_.push_back(ThrowAwaySizeRefCountedMemory::From(std::move(v)));
+  offset_ += buffer->size();
+}
+
+base::span<base::span<uint8_t>> WriteBuffer::GetBuffers() {
   if (!current_buffer_.empty())
     AppendCurrentBuffer();
-  return buffers_;
+  return sized_buffers_;
+}
+
+void WriteBuffer::OffsetFirstBuffer(size_t offset) {
+  sized_buffers_[0u] = sized_buffers_[0u].subspan(offset);
 }
 
 void WriteBuffer::AppendCurrentBuffer() {
-  buffers_.push_back(base::RefCountedBytes::TakeVector(&current_buffer_));
-}
-
-FutureBase::FutureBase(Connection* connection,
-                       base::Optional<unsigned int> sequence)
-    : connection_(connection), sequence_(sequence) {}
-
-// If a user-defined response-handler is not installed before this object goes
-// out of scope, a default response handler will be installed.  The default
-// handler throws away the reply and prints the error if there is one.
-FutureBase::~FutureBase() {
-  if (!sequence_)
-    return;
-
-  OnResponseImpl(base::BindOnce(
-      [](Connection* connection, RawReply reply, RawError error) {
-        if (!error)
-          return;
-
-        x11::LogErrorEventDescription(error->full_sequence, error->error_code,
-                                      error->major_code, error->minor_code);
-      },
-      connection_));
-}
-
-FutureBase::FutureBase(FutureBase&& future)
-    : connection_(future.connection_), sequence_(future.sequence_) {
-  future.connection_ = nullptr;
-  future.sequence_ = base::nullopt;
-}
-
-FutureBase& FutureBase::operator=(FutureBase&& future) {
-  connection_ = future.connection_;
-  sequence_ = future.sequence_;
-  future.connection_ = nullptr;
-  future.sequence_ = base::nullopt;
-  return *this;
-}
-
-void FutureBase::SyncImpl(Error** raw_error,
-                          scoped_refptr<base::RefCountedMemory>* raw_reply) {
-  if (!sequence_)
-    return;
-  auto* reply = reinterpret_cast<uint8_t*>(
-      xcb_wait_for_reply(connection_->XcbConnection(), *sequence_, raw_error));
-  if (reply)
-    *raw_reply = base::MakeRefCounted<MallocedRefCountedMemory>(reply);
-  sequence_ = base::nullopt;
-}
-
-void FutureBase::SyncImpl(Error** raw_error) {
-  if (!sequence_)
-    return;
-  *raw_error = xcb_request_check(connection_->XcbConnection(), {*sequence_});
-  sequence_ = base::nullopt;
-}
-
-void FutureBase::OnResponseImpl(ResponseCallback callback) {
-  if (!sequence_)
-    return;
-  connection_->AddRequest(*sequence_, std::move(callback));
-  sequence_ = base::nullopt;
+  sized_buffers_.push_back(base::span(current_buffer_));
+  owned_buffers_.push_back(
+      ThrowAwaySizeRefCountedMemory::From(std::move(current_buffer_)));
+  current_buffer_.clear();
 }
 
 }  // namespace x11

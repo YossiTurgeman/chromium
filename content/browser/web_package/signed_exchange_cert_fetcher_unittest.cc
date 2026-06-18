@@ -1,14 +1,16 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/web_package/signed_exchange_cert_fetcher.h"
 
+#include <optional>
+#include <string_view>
+
 #include "base/base64.h"
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/optional.h"
-#include "base/strings/string_piece.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/test/task_environment.h"
 #include "components/cbor/values.h"
 #include "components/cbor/writer.h"
@@ -22,13 +24,15 @@
 #include "net/test/cert_test_util.h"
 #include "net/test/test_data_directory.h"
 #include "services/network/public/cpp/features.h"
+#include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
+#include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/loader/url_loader_throttle.h"
-#include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
+#include "url/origin.h"
 
 namespace content {
 
@@ -37,6 +41,11 @@ namespace {
 class DeferringURLLoaderThrottle final : public blink::URLLoaderThrottle {
  public:
   DeferringURLLoaderThrottle() = default;
+
+  DeferringURLLoaderThrottle(const DeferringURLLoaderThrottle&) = delete;
+  DeferringURLLoaderThrottle& operator=(const DeferringURLLoaderThrottle&) =
+      delete;
+
   ~DeferringURLLoaderThrottle() override = default;
 
   void WillStartRequest(network::ResourceRequest* request,
@@ -49,9 +58,7 @@ class DeferringURLLoaderThrottle final : public blink::URLLoaderThrottle {
       net::RedirectInfo* redirect_info,
       const network::mojom::URLResponseHead& /* response_head */,
       bool* defer,
-      std::vector<std::string>* /* to_be_removed_headers */,
-      net::HttpRequestHeaders* /* modified_headers */,
-      net::HttpRequestHeaders* /* modified_cors_exempt_headers */) override {
+      network::HttpRequestHeadersUpdateParams* headers_update_params) override {
     will_redirect_request_called_ = true;
     *defer = true;
   }
@@ -77,8 +84,6 @@ class DeferringURLLoaderThrottle final : public blink::URLLoaderThrottle {
   bool will_start_request_called_ = false;
   bool will_redirect_request_called_ = false;
   bool will_process_response_called_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(DeferringURLLoaderThrottle);
 };
 
 class MockURLLoader final : public network::mojom::URLLoader {
@@ -86,35 +91,37 @@ class MockURLLoader final : public network::mojom::URLLoader {
   MockURLLoader(
       mojo::PendingReceiver<network::mojom::URLLoader> url_loader_receiver)
       : receiver_(this, std::move(url_loader_receiver)) {}
+
+  MockURLLoader(const MockURLLoader&) = delete;
+  MockURLLoader& operator=(const MockURLLoader&) = delete;
+
   ~MockURLLoader() override = default;
 
-  MOCK_METHOD4(FollowRedirect,
-               void(const std::vector<std::string>&,
-                    const net::HttpRequestHeaders&,
-                    const net::HttpRequestHeaders&,
-                    const base::Optional<GURL>&));
+  MOCK_METHOD2(FollowRedirect,
+               void(network::HttpRequestHeadersUpdateParams,
+                    const std::optional<GURL>&));
   MOCK_METHOD2(SetPriority,
                void(net::RequestPriority priority,
                     int32_t intra_priority_value));
-  MOCK_METHOD0(PauseReadingBodyFromNet, void());
-  MOCK_METHOD0(ResumeReadingBodyFromNet, void());
 
  private:
   mojo::Receiver<network::mojom::URLLoader> receiver_;
-
-  DISALLOW_COPY_AND_ASSIGN(MockURLLoader);
 };
 
 class URLLoaderFactoryForMockLoader final
     : public network::mojom::URLLoaderFactory {
  public:
   URLLoaderFactoryForMockLoader() = default;
+
+  URLLoaderFactoryForMockLoader(const URLLoaderFactoryForMockLoader&) = delete;
+  URLLoaderFactoryForMockLoader& operator=(
+      const URLLoaderFactoryForMockLoader&) = delete;
+
   ~URLLoaderFactoryForMockLoader() override = default;
 
   // network::mojom::URLLoaderFactory implementation.
   void CreateLoaderAndStart(
       mojo::PendingReceiver<network::mojom::URLLoader> url_loader_receiver,
-      int32_t routing_id,
       int32_t request_id,
       uint32_t options,
       const network::ResourceRequest& url_request,
@@ -136,16 +143,14 @@ class URLLoaderFactoryForMockLoader final
   }
   void CloseClientPipe() { client_remote_.reset(); }
 
-  base::Optional<network::ResourceRequest> url_request() const {
+  const std::optional<network::ResourceRequest>& url_request() const {
     return url_request_;
   }
 
  private:
   std::unique_ptr<MockURLLoader> loader_;
   mojo::Remote<network::mojom::URLLoaderClient> client_remote_;
-  base::Optional<network::ResourceRequest> url_request_;
-
-  DISALLOW_COPY_AND_ASSIGN(URLLoaderFactoryForMockLoader);
+  std::optional<network::ResourceRequest> url_request_;
 };
 
 void ForwardCertificateCallback(
@@ -163,7 +168,13 @@ void ForwardCertificateCallback(
 class SignedExchangeCertFetcherTest : public testing::Test {
  public:
   SignedExchangeCertFetcherTest()
-      : url_(GURL("https://www.example.com/cert")) {}
+      : url_(GURL("https://www.example.com/cert")),
+        origin_(url::Origin::Create(GURL("https://www.example.com/"))) {}
+
+  SignedExchangeCertFetcherTest(const SignedExchangeCertFetcherTest&) = delete;
+  SignedExchangeCertFetcherTest& operator=(
+      const SignedExchangeCertFetcherTest&) = delete;
+
   ~SignedExchangeCertFetcherTest() override {}
 
  protected:
@@ -171,7 +182,7 @@ class SignedExchangeCertFetcherTest : public testing::Test {
     return net::ImportCertFromFile(net::GetTestCertsDirectory(), "ok_cert.pem");
   }
 
-  static std::string CreateCertMessage(const base::StringPiece& cert_data) {
+  static std::string CreateCertMessage(std::string_view cert_data) {
     cbor::Value::MapValue cbor_map;
     cbor_map[cbor::Value("sct")] =
         cbor::Value("SCT", cbor::Value::Type::BYTE_STRING);
@@ -181,10 +192,10 @@ class SignedExchangeCertFetcherTest : public testing::Test {
         cbor::Value("OCSP", cbor::Value::Type::BYTE_STRING);
 
     cbor::Value::ArrayValue cbor_array;
-    cbor_array.push_back(cbor::Value(u8"\U0001F4DC\u26D3"));
+    cbor_array.push_back(cbor::Value("\U0001F4DC\u26D3"));
     cbor_array.push_back(cbor::Value(std::move(cbor_map)));
 
-    base::Optional<std::vector<uint8_t>> serialized =
+    std::optional<std::vector<uint8_t>> serialized =
         cbor::Writer::Write(cbor::Value(std::move(cbor_array)));
     if (!serialized)
       return std::string();
@@ -192,7 +203,7 @@ class SignedExchangeCertFetcherTest : public testing::Test {
                        serialized->size());
   }
 
-  static base::StringPiece CreateCertMessageFromCert(
+  static std::string_view CreateCertMessageFromCert(
       const net::X509Certificate& cert) {
     return net::x509_util::CryptoBufferAsStringPiece(cert.cert_buffer());
   }
@@ -204,9 +215,13 @@ class SignedExchangeCertFetcherTest : public testing::Test {
 
   static mojo::ScopedDataPipeConsumerHandle CreateTestDataFilledDataPipe() {
     auto message = CreateTestData();
-    mojo::DataPipe data_pipe(message.size());
-    CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-    return std::move(data_pipe.consumer_handle);
+    mojo::ScopedDataPipeProducerHandle producer_handle;
+    mojo::ScopedDataPipeConsumerHandle consumer_handle;
+    EXPECT_EQ(
+        mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+        MOJO_RESULT_OK);
+    CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+    return consumer_handle;
   }
 
   static net::SHA256HashValue GetTestDataCertFingerprint256() {
@@ -222,15 +237,20 @@ class SignedExchangeCertFetcherTest : public testing::Test {
         &ForwardCertificateCallback, base::Unretained(&callback_called_),
         base::Unretained(&result_), base::Unretained(&cert_result_));
 
+    auto isolation_info = net::IsolationInfo::Create(
+        net::IsolationInfo::RequestType::kOther, origin_, origin_,
+        net::SiteForCookies::FromOrigin(origin_));
+
     return SignedExchangeCertFetcher::CreateAndStart(
         base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
             &mock_loader_factory_),
         std::move(throttles_), url, force_fetch, std::move(callback),
-        nullptr /* devtools_proxy */, base::nullopt /* throttling_profile_id */,
-        net::IsolationInfo());
+        /*devtools_proxy=*/nullptr, /*throttling_profile_id=*/std::nullopt,
+        isolation_info, origin_);
   }
 
-  void CallOnReceiveResponse() {
+  void CallOnReceiveResponse(
+      mojo::ScopedDataPipeConsumerHandle consumer_handle) {
     auto response_head = network::mojom::URLResponseHead::New();
     response_head->headers =
         base::MakeRefCounted<net::HttpResponseHeaders>("HTTP/1.1 200 OK");
@@ -238,7 +258,7 @@ class SignedExchangeCertFetcherTest : public testing::Test {
                                       "application/cert-chain+cbor");
     response_head->mime_type = "application/cert-chain+cbor";
     mock_loader_factory_.client_remote()->OnReceiveResponse(
-        std::move(response_head));
+        std::move(response_head), std::move(consumer_handle), std::nullopt);
   }
 
   DeferringURLLoaderThrottle* InitializeDeferringURLLoaderThrottle() {
@@ -252,6 +272,7 @@ class SignedExchangeCertFetcherTest : public testing::Test {
   void CloseClientPipe() { mock_loader_factory_.CloseClientPipe(); }
 
   const GURL url_;
+  const url::Origin origin_;
   bool callback_called_ = false;
   SignedExchangeLoadResult result_;
   std::unique_ptr<SignedExchangeCertificateChain> cert_result_;
@@ -259,33 +280,26 @@ class SignedExchangeCertFetcherTest : public testing::Test {
   std::vector<std::unique_ptr<blink::URLLoaderThrottle>> throttles_;
 
   base::test::TaskEnvironment task_environment_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SignedExchangeCertFetcherTest);
 };
 
 }  // namespace
 
 TEST_F(SignedExchangeCertFetcherTest, Simple) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
-      CreateFetcherAndStart(url_, false /* force_fetch */);
+      CreateFetcherAndStart(url_, /*force_fetch=*/false);
 
   ASSERT_TRUE(mock_loader_factory_.client_remote());
   ASSERT_TRUE(mock_loader_factory_.url_request());
   EXPECT_EQ(url_, mock_loader_factory_.url_request()->url);
-  EXPECT_EQ(static_cast<int>(blink::mojom::ResourceType::kSubResource),
-            mock_loader_factory_.url_request()->resource_type);
+  EXPECT_EQ(network::mojom::RequestDestination::kEmpty,
+            mock_loader_factory_.url_request()->destination);
   EXPECT_EQ(mock_loader_factory_.url_request()->credentials_mode,
             network::mojom::CredentialsMode::kOmit);
-  EXPECT_TRUE(mock_loader_factory_.url_request()->request_initiator->opaque());
-  std::string accept;
-  EXPECT_TRUE(
-      mock_loader_factory_.url_request()->headers.GetHeader("Accept", &accept));
-  EXPECT_EQ("application/cert-chain+cbor", accept);
+  EXPECT_EQ(*mock_loader_factory_.url_request()->request_initiator, origin_);
+  EXPECT_THAT(mock_loader_factory_.url_request()->headers.GetHeader("Accept"),
+              testing::Optional(std::string("application/cert-chain+cbor")));
 
-  CallOnReceiveResponse();
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      CreateTestDataFilledDataPipe());
+  CallOnReceiveResponse(CreateTestDataFilledDataPipe());
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
   RunUntilIdle();
@@ -299,19 +313,21 @@ TEST_F(SignedExchangeCertFetcherTest, Simple) {
 TEST_F(SignedExchangeCertFetcherTest, MultipleChunked) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
   scoped_refptr<net::X509Certificate> certificate = ImportTestCert();
   const std::string message =
       CreateCertMessage(CreateCertMessageFromCert(*certificate));
-  mojo::DataPipe data_pipe(message.size() / 2 + 1);
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(message.size() / 2 + 1, producer_handle,
+                                 consumer_handle),
+            MOJO_RESULT_OK);
   ASSERT_TRUE(mojo::BlockingCopyFromString(
-      message.substr(0, message.size() / 2), data_pipe.producer_handle));
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+      message.substr(0, message.size() / 2), producer_handle));
+  CallOnReceiveResponse(std::move(consumer_handle));
   RunUntilIdle();
   ASSERT_TRUE(mojo::BlockingCopyFromString(message.substr(message.size() / 2),
-                                           data_pipe.producer_handle));
-  data_pipe.producer_handle.reset();
+                                           producer_handle));
+  producer_handle.reset();
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
   RunUntilIdle();
@@ -326,12 +342,10 @@ TEST_F(SignedExchangeCertFetcherTest, MultipleChunked) {
 TEST_F(SignedExchangeCertFetcherTest, ForceFetchAndFail) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, true /* force_fetch */);
-  CallOnReceiveResponse();
-
   ASSERT_TRUE(mock_loader_factory_.url_request());
   EXPECT_EQ(url_, mock_loader_factory_.url_request()->url);
-  EXPECT_EQ(static_cast<int>(blink::mojom::ResourceType::kSubResource),
-            mock_loader_factory_.url_request()->resource_type);
+  EXPECT_EQ(network::mojom::RequestDestination::kEmpty,
+            mock_loader_factory_.url_request()->destination);
   EXPECT_EQ(net::LOAD_DISABLE_CACHE | net::LOAD_BYPASS_CACHE,
             mock_loader_factory_.url_request()->load_flags);
   EXPECT_EQ(mock_loader_factory_.url_request()->credentials_mode,
@@ -355,12 +369,14 @@ TEST_F(SignedExchangeCertFetcherTest, MaxCertSize_Exceeds) {
 
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
-  mojo::DataPipe data_pipe(message.size());
-  CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-  data_pipe.producer_handle.reset();
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(
+      mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+      MOJO_RESULT_OK);
+  CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+  producer_handle.reset();
+  CallOnReceiveResponse(std::move(consumer_handle));
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
   RunUntilIdle();
@@ -379,12 +395,14 @@ TEST_F(SignedExchangeCertFetcherTest, MaxCertSize_SameSize) {
 
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
-  mojo::DataPipe data_pipe(message.size());
-  CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-  data_pipe.producer_handle.reset();
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(
+      mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+      MOJO_RESULT_OK);
+  CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+  producer_handle.reset();
+  CallOnReceiveResponse(std::move(consumer_handle));
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
   RunUntilIdle();
@@ -403,16 +421,18 @@ TEST_F(SignedExchangeCertFetcherTest, MaxCertSize_MultipleChunked) {
 
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
-  mojo::DataPipe data_pipe(message.size() / 2 + 1);
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(message.size() / 2 + 1, producer_handle,
+                                 consumer_handle),
+            MOJO_RESULT_OK);
   ASSERT_TRUE(mojo::BlockingCopyFromString(
-      message.substr(0, message.size() / 2), data_pipe.producer_handle));
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+      message.substr(0, message.size() / 2), producer_handle));
+  CallOnReceiveResponse(std::move(consumer_handle));
   RunUntilIdle();
   ASSERT_TRUE(mojo::BlockingCopyFromString(message.substr(message.size() / 2),
-                                           data_pipe.producer_handle));
-  data_pipe.producer_handle.reset();
+                                           producer_handle));
+  producer_handle.reset();
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
   RunUntilIdle();
@@ -435,13 +455,15 @@ TEST_F(SignedExchangeCertFetcherTest, MaxCertSize_ContentLengthCheck) {
   response_head->headers =
       base::MakeRefCounted<net::HttpResponseHeaders>("HTTP/1.1 200 OK");
   response_head->content_length = message.size();
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(
+      mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+      MOJO_RESULT_OK);
+  CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+  producer_handle.reset();
   mock_loader_factory_.client_remote()->OnReceiveResponse(
-      std::move(response_head));
-  mojo::DataPipe data_pipe(message.size());
-  CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-  data_pipe.producer_handle.reset();
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+      std::move(response_head), std::move(consumer_handle), std::nullopt);
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
   RunUntilIdle();
@@ -471,7 +493,8 @@ TEST_F(SignedExchangeCertFetcherTest, Abort_404) {
   response_head->headers =
       base::MakeRefCounted<net::HttpResponseHeaders>("HTTP/1.1 404 Not Found");
   mock_loader_factory_.client_remote()->OnReceiveResponse(
-      std::move(response_head));
+      std::move(response_head), mojo::ScopedDataPipeConsumerHandle(),
+      std::nullopt);
   RunUntilIdle();
 
   EXPECT_TRUE(callback_called_);
@@ -488,7 +511,8 @@ TEST_F(SignedExchangeCertFetcherTest, WrongMimeType) {
   response_head->headers->SetHeader("Content-Type", "application/octet-stream");
   response_head->mime_type = "application/octet-stream";
   mock_loader_factory_.client_remote()->OnReceiveResponse(
-      std::move(response_head));
+      std::move(response_head), mojo::ScopedDataPipeConsumerHandle(),
+      std::nullopt);
   RunUntilIdle();
 
   EXPECT_TRUE(callback_called_);
@@ -499,13 +523,15 @@ TEST_F(SignedExchangeCertFetcherTest, WrongMimeType) {
 TEST_F(SignedExchangeCertFetcherTest, Invalid_CertData) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
   const std::string message = CreateCertMessage("Invalid Cert Data");
-  mojo::DataPipe data_pipe(message.size());
-  CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-  data_pipe.producer_handle.reset();
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(
+      mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+      MOJO_RESULT_OK);
+  CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+  producer_handle.reset();
+  CallOnReceiveResponse(std::move(consumer_handle));
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
   RunUntilIdle();
@@ -518,15 +544,16 @@ TEST_F(SignedExchangeCertFetcherTest, Invalid_CertData) {
 TEST_F(SignedExchangeCertFetcherTest, Invalid_CertMessage) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
-
   const std::string message = "Invalid cert message";
 
-  mojo::DataPipe data_pipe(message.size());
-  CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-  data_pipe.producer_handle.reset();
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(
+      mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+      MOJO_RESULT_OK);
+  CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+  producer_handle.reset();
+  CallOnReceiveResponse(std::move(consumer_handle));
 
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
@@ -551,13 +578,11 @@ TEST_F(SignedExchangeCertFetcherTest, Throttle_Simple) {
 
   RunUntilIdle();
 
-  CallOnReceiveResponse();
+  CallOnReceiveResponse(CreateTestDataFilledDataPipe());
 
   RunUntilIdle();
 
   EXPECT_TRUE(throttle->will_process_response_called());
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      CreateTestDataFilledDataPipe());
 
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
@@ -626,14 +651,11 @@ TEST_F(SignedExchangeCertFetcherTest, Throttle_AbortsOnResponse) {
 
   RunUntilIdle();
 
-  CallOnReceiveResponse();
+  CallOnReceiveResponse(CreateTestDataFilledDataPipe());
 
   RunUntilIdle();
 
   EXPECT_TRUE(throttle->will_process_response_called());
-
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      CreateTestDataFilledDataPipe());
 
   mock_loader_factory_.client_remote()->OnComplete(
       network::URLLoaderCompletionStatus(net::OK));
@@ -663,8 +685,6 @@ TEST_F(SignedExchangeCertFetcherTest, DeleteFetcher_BeforeReceiveResponse) {
 TEST_F(SignedExchangeCertFetcherTest, DeleteFetcher_BeforeResponseBody) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
-  RunUntilIdle();
   fetcher.reset();
   RunUntilIdle();
 
@@ -675,20 +695,22 @@ TEST_F(SignedExchangeCertFetcherTest, DeleteFetcher_BeforeResponseBody) {
 TEST_F(SignedExchangeCertFetcherTest, DeleteFetcher_WhileReceivingBody) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
   scoped_refptr<net::X509Certificate> certificate = ImportTestCert();
   const std::string message =
       CreateCertMessage(CreateCertMessageFromCert(*certificate));
-  mojo::DataPipe data_pipe(message.size() / 2 + 1);
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(message.size() / 2 + 1, producer_handle,
+                                 consumer_handle),
+            MOJO_RESULT_OK);
   ASSERT_TRUE(mojo::BlockingCopyFromString(
-      message.substr(0, message.size() / 2), data_pipe.producer_handle));
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+      message.substr(0, message.size() / 2), producer_handle));
+  CallOnReceiveResponse(std::move(consumer_handle));
   RunUntilIdle();
   fetcher.reset();
   RunUntilIdle();
   ASSERT_TRUE(mojo::BlockingCopyFromString(message.substr(message.size() / 2),
-                                           data_pipe.producer_handle));
+                                           producer_handle));
   RunUntilIdle();
 
   EXPECT_FALSE(callback_called_);
@@ -698,18 +720,20 @@ TEST_F(SignedExchangeCertFetcherTest, DeleteFetcher_WhileReceivingBody) {
 TEST_F(SignedExchangeCertFetcherTest, DeleteFetcher_AfterReceivingBody) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
   scoped_refptr<net::X509Certificate> certificate = ImportTestCert();
   const std::string message =
       CreateCertMessage(CreateCertMessageFromCert(*certificate));
-  mojo::DataPipe data_pipe(message.size());
-  CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(
+      mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+      MOJO_RESULT_OK);
+  CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+  CallOnReceiveResponse(std::move(consumer_handle));
   RunUntilIdle();
   CloseClientPipe();
   RunUntilIdle();
-  data_pipe.producer_handle.reset();
+  producer_handle.reset();
   fetcher.reset();
   RunUntilIdle();
 
@@ -732,8 +756,6 @@ TEST_F(SignedExchangeCertFetcherTest, CloseClientPipe_BeforeReceiveResponse) {
 TEST_F(SignedExchangeCertFetcherTest, CloseClientPipe_BeforeResponseBody) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
-  RunUntilIdle();
   CloseClientPipe();
   RunUntilIdle();
 
@@ -745,19 +767,21 @@ TEST_F(SignedExchangeCertFetcherTest, CloseClientPipe_BeforeResponseBody) {
 TEST_F(SignedExchangeCertFetcherTest, CloseClientPipe_WhileReceivingBody) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
   scoped_refptr<net::X509Certificate> certificate = ImportTestCert();
   const std::string message =
       CreateCertMessage(CreateCertMessageFromCert(*certificate));
-  mojo::DataPipe data_pipe(message.size() / 2 + 1);
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(message.size() / 2 + 1, producer_handle,
+                                 consumer_handle),
+            MOJO_RESULT_OK);
   ASSERT_TRUE(mojo::BlockingCopyFromString(
-      message.substr(0, message.size() / 2), data_pipe.producer_handle));
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+      message.substr(0, message.size() / 2), producer_handle));
+  CallOnReceiveResponse(std::move(consumer_handle));
   RunUntilIdle();
   CloseClientPipe();
   RunUntilIdle();
-  data_pipe.producer_handle.reset();
+  producer_handle.reset();
   RunUntilIdle();
   EXPECT_TRUE(callback_called_);
   // SignedExchangeCertFetcher receives a truncated cert cbor.
@@ -768,18 +792,20 @@ TEST_F(SignedExchangeCertFetcherTest, CloseClientPipe_WhileReceivingBody) {
 TEST_F(SignedExchangeCertFetcherTest, CloseClientPipe_AfterReceivingBody) {
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =
       CreateFetcherAndStart(url_, false /* force_fetch */);
-  CallOnReceiveResponse();
   scoped_refptr<net::X509Certificate> certificate = ImportTestCert();
   const std::string message =
       CreateCertMessage(CreateCertMessageFromCert(*certificate));
-  mojo::DataPipe data_pipe(message.size());
-  CHECK(mojo::BlockingCopyFromString(message, data_pipe.producer_handle));
-  mock_loader_factory_.client_remote()->OnStartLoadingResponseBody(
-      std::move(data_pipe.consumer_handle));
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(
+      mojo::CreateDataPipe(message.size(), producer_handle, consumer_handle),
+      MOJO_RESULT_OK);
+  CHECK(mojo::BlockingCopyFromString(message, producer_handle));
+  CallOnReceiveResponse(std::move(consumer_handle));
   RunUntilIdle();
   CloseClientPipe();
   RunUntilIdle();
-  data_pipe.producer_handle.reset();
+  producer_handle.reset();
   RunUntilIdle();
 
   EXPECT_TRUE(callback_called_);
@@ -791,8 +817,7 @@ TEST_F(SignedExchangeCertFetcherTest, CloseClientPipe_AfterReceivingBody) {
 
 TEST_F(SignedExchangeCertFetcherTest, DataURL) {
   std::string data_url_string = "data:application/cert-chain+cbor";
-  std::string output;
-  base::Base64Encode(CreateTestData(), &output);
+  std::string output = base::Base64Encode(CreateTestData());
   data_url_string += ";base64," + output;
   const GURL data_url = GURL(data_url_string);
   std::unique_ptr<SignedExchangeCertFetcher> fetcher =

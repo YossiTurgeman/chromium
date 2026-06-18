@@ -1,21 +1,23 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/system/locale/locale_update_controller_impl.h"
 
 #include <memory>
+#include <string>
 #include <utility>
 
+#include "ash/constants/notifier_catalogs.h"
 #include "ash/public/cpp/notification_utils.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/system/tray/system_tray_notifier.h"
-#include "base/strings/string16.h"
 #include "components/session_manager/session_manager_types.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_delegate.h"
@@ -35,18 +37,20 @@ class LocaleNotificationDelegate : public message_center::NotificationDelegate {
   explicit LocaleNotificationDelegate(
       base::OnceCallback<void(LocaleNotificationResult)> callback);
 
+  LocaleNotificationDelegate(const LocaleNotificationDelegate&) = delete;
+  LocaleNotificationDelegate& operator=(const LocaleNotificationDelegate&) =
+      delete;
+
  protected:
   ~LocaleNotificationDelegate() override;
 
   // message_center::NotificationDelegate overrides:
   void Close(bool by_user) override;
-  void Click(const base::Optional<int>& button_index,
-             const base::Optional<base::string16>& reply) override;
+  void Click(const std::optional<int>& button_index,
+             const std::optional<std::u16string>& reply) override;
 
  private:
   base::OnceCallback<void(LocaleNotificationResult)> callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(LocaleNotificationDelegate);
 };
 
 LocaleNotificationDelegate::LocaleNotificationDelegate(
@@ -68,8 +72,8 @@ void LocaleNotificationDelegate::Close(bool by_user) {
 }
 
 void LocaleNotificationDelegate::Click(
-    const base::Optional<int>& button_index,
-    const base::Optional<base::string16>& reply) {
+    const std::optional<int>& button_index,
+    const std::optional<std::u16string>& reply) {
   if (!callback_)
     return;
 
@@ -97,9 +101,9 @@ void LocaleUpdateControllerImpl::ConfirmLocaleChange(
     const std::string& to_locale,
     LocaleChangeConfirmationCallback callback) {
   DCHECK(Shell::Get()->session_controller()->IsActiveUserSessionStarted());
-  base::string16 from_locale_name =
+  std::u16string from_locale_name =
       l10n_util::GetDisplayNameForLocale(from_locale, current_locale, true);
-  base::string16 to_locale_name =
+  std::u16string to_locale_name =
       l10n_util::GetDisplayNameForLocale(to_locale, current_locale, true);
 
   message_center::RichNotificationData optional;
@@ -111,16 +115,18 @@ void LocaleUpdateControllerImpl::ConfirmLocaleChange(
   for (auto& observer : observers_)
     observer.OnLocaleChanged();
 
-  std::unique_ptr<Notification> notification = CreateSystemNotification(
+  std::unique_ptr<Notification> notification = CreateSystemNotificationPtr(
       message_center::NOTIFICATION_TYPE_SIMPLE, kLocaleChangeNotificationId,
       l10n_util::GetStringUTF16(IDS_ASH_STATUS_TRAY_LOCALE_CHANGE_TITLE),
       l10n_util::GetStringFUTF16(IDS_ASH_STATUS_TRAY_LOCALE_CHANGE_MESSAGE,
                                  from_locale_name, to_locale_name),
-      base::string16() /* display_source */, GURL(),
+      std::u16string() /* display_source */, GURL(),
       message_center::NotifierId(message_center::NotifierType::SYSTEM_COMPONENT,
-                                 kNotifierLocale),
+                                 kNotifierLocale,
+                                 NotificationCatalogName::kLocaleUpdate),
       optional, new LocaleNotificationDelegate(std::move(callback)),
-      vector_icons::kSettingsIcon,
+      ::features::IsRoundedIconsEnabled() ? vector_icons::kSettingsFilledIcon
+                                          : vector_icons::kSettingsOldIcon,
       message_center::SystemNotificationWarningLevel::NORMAL);
   message_center::MessageCenter::Get()->AddNotification(
       std::move(notification));

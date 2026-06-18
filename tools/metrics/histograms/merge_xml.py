@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,14 +7,15 @@
 
 import argparse
 import os
-import sys
 import xml.dom.minidom
 
-import expand_owners
-import extract_histograms
-import histogram_configuration_model
-import histogram_paths
-import populate_enums
+import setup_modules  # pylint: disable=unused-import
+
+import chromium_src.tools.metrics.common.xml_utils as xml_utils
+import chromium_src.tools.metrics.histograms.expand_owners as expand_owners
+import chromium_src.tools.metrics.histograms.histogram_configuration_model as histogram_configuration_model
+import chromium_src.tools.metrics.histograms.histogram_paths as histogram_paths
+import chromium_src.tools.metrics.histograms.populate_enums as populate_enums
 
 
 def GetElementsByTagName(trees, tag, depth=2):
@@ -28,34 +29,34 @@ def GetElementsByTagName(trees, tag, depth=2):
   Returns:
     A list of DOM nodes with the specified tag.
   """
-  iterator = extract_histograms.IterElementsWithTag
+  iterator = xml_utils.IterElementsWithTag
   return list(e for t in trees for e in iterator(t, tag, depth))
 
 
-def GetEnumsNodes(doc, trees):
-  """Gets all enums from a set of DOM trees.
+def CombineEnumsSections(doc, trees):
+  """Combines multiple <enums> from the passed in DOM trees into one.
 
   If trees contain ukm events, populates a list of ints to the
   "UkmEventNameHash" enum where each value is a ukm event name hash truncated
   to 31 bits and each label is the corresponding event name.
 
   Args:
-    doc: The document to create the node in.
+    doc: The document where the new single <enums> section will be created.
     trees: A list of DOM trees.
+
   Returns:
-    A list of enums DOM nodes.
+    A single <enums> DOM node.
   """
-  enums_list = GetElementsByTagName(trees, 'enums')
+  enums_node = doc.createElement('enums')
+  # Pass depth=3 as default depth=2 won't find enum tags that are 3 levels deep.
+  for enum in GetElementsByTagName(trees, 'enum', depth=3):
+    xml.dom.minidom._append_child(enums_node, enum)
+
   ukm_events = GetElementsByTagName(
       GetElementsByTagName(trees, 'ukm-configuration'), 'event')
-  # Early return if there are no ukm events provided. MergeFiles have callers
-  # that do not pass ukm events so, in that case, we don't need to iterate
-  # through the enum list.
-  if not ukm_events:
-    return enums_list
-  for enums in enums_list:
-    populate_enums.PopulateEnumsWithUkmEvents(doc, enums, ukm_events)
-  return enums_list
+  if ukm_events:
+    populate_enums.PopulateEnumsWithUkmEvents(doc, enums_node, ukm_events)
+  return enums_node
 
 
 def CombineHistogramsSorted(doc, trees):
@@ -123,22 +124,23 @@ def MakeNodeWithChildren(doc, tag, children):
     doc: The document to create the node in.
     tag: The tag to create the node with.
     children: A list of DOM nodes to add as children.
+
   Returns:
     A DOM node.
   """
   node = doc.createElement(tag)
   for child in children:
-    if child.tagName == 'histograms':
-      expand_owners.ExpandHistogramsOWNERS(child)
     node.appendChild(child)
   return node
 
 
-def MergeTrees(trees):
+def MergeTrees(trees, should_expand_owners):
   """Merges a list of histograms.xml DOM trees.
 
   Args:
     trees: A list of histograms.xml DOM trees.
+    should_expand_owners: Whether we want to expand owners for histograms.
+
   Returns:
     A merged DOM tree.
   """
@@ -147,46 +149,98 @@ def MergeTrees(trees):
       MakeNodeWithChildren(
           doc,
           'histogram-configuration',
-          # This can result in the merged document having multiple <enums> and
-          # similar sections, but scripts ignore these anyway.
-          GetEnumsNodes(doc, trees) +
+          [CombineEnumsSections(doc, trees)] +
           # Sort the <histogram> and <histogram_suffixes> nodes by name and
           # return the combined nodes.
           CombineHistogramsSorted(doc, trees)))
-  # After using the unsafe version of appendChild, we see a regression when
-  # pretty-printing the merged |doc|. This might because the unsafe appendChild
-  # doesn't build indexes for later lookup. And thus, we need to convert the
-  # merged |doc| to a xml string and convert it back to force it to build
-  # indexes for the merged |doc|.
-  return xml.dom.minidom.parseString(doc.toxml())
+  # Only perform fancy operations after |doc| becomes stable. This helps improve
+  # the runtime performance.
+  if should_expand_owners:
+    for histograms in doc.getElementsByTagName('histograms'):
+      expand_owners.ExpandHistogramsOWNERS(histograms)
+  return doc
 
 
-def MergeFiles(filenames=[], files=[]):
+def _AddComponentFromMetadataFile(tree, filename):
+  """Adds the component from the metadata file to the DOM tree.
+
+  Args:
+    tree: A histogram.xml DOM tree.
+    filename: The name of the metadata file.
+
+  Returns:
+    The updated tree with the component (optionally) added.
+  """
+  component = expand_owners.ExtractComponentViaDirmd(os.path.dirname(filename))
+  if component:
+    histograms = tree.getElementsByTagName('histograms')
+    if histograms:
+      iter_matches = xml_utils.IterElementsWithTag
+      for histogram in iter_matches(histograms[0], 'histogram'):
+        expand_owners.AddHistogramComponent(histogram, component)
+  return tree
+
+
+def _BuildDOMTreeWithComponentMetadata(filename_or_file):
+  """Builds the DOM tree for the given file.
+
+  Args:
+    filename_or_file: The string filename or the file handle for histograms.xml.
+
+  Returns:
+    The histograms.xml DOM tree with (optional) component metadata.
+  """
+  tree = xml.dom.minidom.parse(filename_or_file)
+  if isinstance(filename_or_file, str):
+    # If we can find a metadata file in the same directory, we try to extract
+    # a component from it.
+    metadata_filename = os.path.join(os.path.dirname(filename_or_file),
+                                     'DIR_METADATA')
+    if os.path.exists(metadata_filename):
+      return _AddComponentFromMetadataFile(tree, metadata_filename)
+  return tree
+
+
+def MergeFiles(filenames=[],
+               files=[],
+               expand_owners_and_extract_components=False):
   """Merges a list of histograms.xml files.
 
   Args:
     filenames: A list of histograms.xml filenames.
     files: A list of histograms.xml file-like objects.
+    expand_owners_and_extract_components: Whether we want to expand owners and
+      extract components. By default, it's false because most of the callers
+      don't care about the owners or components for each metadata.
+
   Returns:
     A merged DOM tree.
   """
-  all_files = files + [open(f) for f in filenames]
-  trees = [xml.dom.minidom.parse(f) for f in all_files]
-  return MergeTrees(trees)
+  # minidom.parse() takes both files and filenames:
+  all_files = files + filenames
+  trees = [
+      _BuildDOMTreeWithComponentMetadata(f)
+      if expand_owners_and_extract_components else xml.dom.minidom.parse(f)
+      for f in all_files
+  ]
+  return MergeTrees(trees,
+                    should_expand_owners=expand_owners_and_extract_components)
 
 
 def PrettyPrintMergedFiles(filenames=[], files=[]):
   return histogram_configuration_model.PrettifyTree(
-      MergeFiles(filenames=filenames, files=files))
+      MergeFiles(filenames=filenames,
+                 files=files,
+                 expand_owners_and_extract_components=True))
 
 
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument('--output', required=True)
   args = parser.parse_args()
-  with open(args.output, 'w') as f:
+  with open(args.output, 'w', encoding='utf-8', newline='\n') as f:
     # This is run by
-    # https://source.chromium.org/chromium/chromium/src/+/master:tools/metrics/BUILD.gn;drc=573e48309695102dec2da1e8f806c18c3200d414;l=5
+    # https://source.chromium.org/chromium/chromium/src/+/main:tools/metrics/BUILD.gn;drc=573e48309695102dec2da1e8f806c18c3200d414;l=5
     # to send the merged histograms.xml to the server side. Providing |UKM_XML|
     # here is not to merge ukm.xml but to populate `UkmEventNameHash` enum
     # values.

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,16 @@
 
 #include <windows.h>
 
+#include <memory>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/notimplemented.h"
 #include "base/sequence_checker.h"
 #include "base/task/current_thread.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
+#include "components/device_event_log/device_event_log.h"
 
 namespace device {
 
@@ -149,16 +154,31 @@ bool SerialIoHandlerWin::PostOpen() {
   DCHECK(!read_context_);
   DCHECK(!write_context_);
 
-  base::CurrentIOThread::Get()->RegisterIOHandler(file().GetPlatformFile(),
-                                                  this);
+  if (!base::CurrentIOThread::Get()->RegisterIOHandler(file().GetPlatformFile(),
+                                                       this)) {
+    return false;
+  }
 
-  read_context_.reset(new base::MessagePumpForIO::IOContext());
-  write_context_.reset(new base::MessagePumpForIO::IOContext());
+  read_context_ = std::make_unique<base::MessagePumpForIO::IOContext>();
+  write_context_ = std::make_unique<base::MessagePumpForIO::IOContext>();
 
+  // Based on the MSDN documentation setting both ReadIntervalTimeout and
+  // ReadTotalTimeoutMultiplier to MAXDWORD should cause ReadFile() to return
+  // immediately if there is data in the buffer or when a byte arrives while
+  // waiting.
+  //
+  // ReadTotalTimeoutConstant is set to a value low enough to ensure that the
+  // timeout case is exercised frequently but high enough to avoid unnecessary
+  // wakeups as it is not possible to have ReadFile() return immediately when a
+  // byte is received without specifying a timeout.
+  //
+  // https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#remarks
   COMMTIMEOUTS timeouts = {0};
-  timeouts.ReadIntervalTimeout = 1;
+  timeouts.ReadIntervalTimeout = MAXDWORD;
+  timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
+  timeouts.ReadTotalTimeoutConstant = base::Minutes(5).InMilliseconds();
   if (!::SetCommTimeouts(file().GetPlatformFile(), &timeouts)) {
-    VPLOG(1) << "Failed to set serial timeouts";
+    SERIAL_PLOG(DEBUG) << "Failed to set serial timeouts";
     return false;
   }
 
@@ -167,20 +187,15 @@ bool SerialIoHandlerWin::PostOpen() {
 
 void SerialIoHandlerWin::ReadImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(pending_read_buffer());
-
-  if (!file().IsValid()) {
-    QueueReadCompleted(0, mojom::SerialReceiveError::DISCONNECTED);
-    return;
-  }
+  DCHECK(IsReadPending());
 
   ClearPendingError();
   if (!IsReadPending())
     return;
 
-  if (!ReadFile(file().GetPlatformFile(), pending_read_buffer(),
-                pending_read_buffer_len(), nullptr,
-                &read_context_->overlapped) &&
+  if (!ReadFile(file().GetPlatformFile(), pending_read_buffer().data(),
+                pending_read_buffer().size(), nullptr,
+                read_context_->GetOverlapped()) &&
       GetLastError() != ERROR_IO_PENDING) {
     OnIOCompleted(read_context_.get(), 0, GetLastError());
   }
@@ -188,16 +203,11 @@ void SerialIoHandlerWin::ReadImpl() {
 
 void SerialIoHandlerWin::WriteImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(pending_write_buffer());
+  DCHECK(IsWritePending());
 
-  if (!file().IsValid()) {
-    QueueWriteCompleted(0, mojom::SerialSendError::DISCONNECTED);
-    return;
-  }
-
-  if (!WriteFile(file().GetPlatformFile(), pending_write_buffer(),
-                 pending_write_buffer_len(), nullptr,
-                 &write_context_->overlapped) &&
+  if (!WriteFile(file().GetPlatformFile(), pending_write_buffer().data(),
+                 pending_write_buffer().size(), nullptr,
+                 write_context_->GetOverlapped()) &&
       GetLastError() != ERROR_IO_PENDING) {
     OnIOCompleted(write_context_.get(), 0, GetLastError());
   }
@@ -208,21 +218,21 @@ void SerialIoHandlerWin::CancelReadImpl() {
   DCHECK(file().IsValid());
 
   if (!PurgeComm(file().GetPlatformFile(), PURGE_RXABORT))
-    VPLOG(1) << "RX abort failed";
+    SERIAL_PLOG(DEBUG) << "RX abort failed";
 }
 
 void SerialIoHandlerWin::CancelWriteImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(file().IsValid());
   if (!PurgeComm(file().GetPlatformFile(), PURGE_TXABORT))
-    VPLOG(1) << "TX abort failed";
+    SERIAL_PLOG(DEBUG) << "TX abort failed";
 }
 
 bool SerialIoHandlerWin::ConfigurePortImpl() {
   DCB config = {0};
   config.DCBlength = sizeof(config);
   if (!GetCommState(file().GetPlatformFile(), &config)) {
-    VPLOG(1) << "Failed to get serial port info";
+    SERIAL_PLOG(DEBUG) << "Failed to get serial port info";
     return false;
   }
 
@@ -258,7 +268,7 @@ bool SerialIoHandlerWin::ConfigurePortImpl() {
   }
 
   if (!SetCommState(file().GetPlatformFile(), &config)) {
-    VPLOG(1) << "Failed to set serial port info";
+    SERIAL_PLOG(DEBUG) << "Failed to set serial port info";
     return false;
   }
   return true;
@@ -286,11 +296,12 @@ void SerialIoHandlerWin::OnIOCompleted(
                error == ERROR_DEVICE_REMOVED) {
       ReadCompleted(0, mojom::SerialReceiveError::DEVICE_LOST);
     } else {
-      VLOG(1) << "Read failed: " << logging::SystemErrorCodeToString(error);
+      SERIAL_LOG(DEBUG) << "Read failed: "
+                        << logging::SystemErrorCodeToString(error);
       ReadCompleted(0, mojom::SerialReceiveError::SYSTEM_ERROR);
     }
   } else if (context == write_context_.get()) {
-    DCHECK(pending_write_buffer());
+    DCHECK(IsWritePending());
     if (write_canceled()) {
       WriteCompleted(0, write_cancel_reason());
     } else if (error == ERROR_SUCCESS || error == ERROR_OPERATION_ABORTED) {
@@ -298,8 +309,8 @@ void SerialIoHandlerWin::OnIOCompleted(
     } else if (error == ERROR_GEN_FAILURE) {
       WriteCompleted(0, mojom::SerialSendError::DISCONNECTED);
     } else {
-      VLOG(1) << "Write failed: " << logging::SystemErrorCodeToString(error);
-      WriteCompleted(0, mojom::SerialSendError::SYSTEM_ERROR);
+      SERIAL_LOG(DEBUG) << "Write failed: "
+                        << logging::SystemErrorCodeToString(error);
       if (error == ERROR_GEN_FAILURE && IsReadPending()) {
         // For devices using drivers such as FTDI, CP2xxx, when device is
         // disconnected, the context is |read_context_| and the error is
@@ -312,6 +323,7 @@ void SerialIoHandlerWin::OnIOCompleted(
         // disconnection.
         CancelRead(mojom::SerialReceiveError::SYSTEM_ERROR);
       }
+      WriteCompleted(0, mojom::SerialSendError::SYSTEM_ERROR);
     }
   } else {
     NOTREACHED() << "Invalid IOContext";
@@ -321,7 +333,7 @@ void SerialIoHandlerWin::OnIOCompleted(
 void SerialIoHandlerWin::ClearPendingError() {
   DWORD errors;
   if (!ClearCommError(file().GetPlatformFile(), &errors, nullptr)) {
-    VPLOG(1) << "Failed to clear communication error";
+    SERIAL_PLOG(DEBUG) << "Failed to clear communication error";
     return;
   }
 
@@ -357,19 +369,19 @@ void SerialIoHandlerWin::Flush(mojom::SerialPortFlushMode mode) const {
   }
 
   if (!PurgeComm(file().GetPlatformFile(), flags))
-    VPLOG(1) << "Failed to flush serial port";
+    SERIAL_PLOG(DEBUG) << "Failed to flush serial port";
 }
 
 void SerialIoHandlerWin::Drain() {
   if (!FlushFileBuffers(file().GetPlatformFile()))
-    VPLOG(1) << "Failed to drain serial port";
+    SERIAL_PLOG(DEBUG) << "Failed to drain serial port";
 }
 
 mojom::SerialPortControlSignalsPtr SerialIoHandlerWin::GetControlSignals()
     const {
   DWORD status;
   if (!GetCommModemStatus(file().GetPlatformFile(), &status)) {
-    VPLOG(1) << "Failed to get port control signals";
+    SERIAL_PLOG(DEBUG) << "Failed to get port control signals";
     return mojom::SerialPortControlSignalsPtr();
   }
 
@@ -385,18 +397,18 @@ bool SerialIoHandlerWin::SetControlSignals(
     const mojom::SerialHostControlSignals& signals) {
   if (signals.has_dtr && !EscapeCommFunction(file().GetPlatformFile(),
                                              signals.dtr ? SETDTR : CLRDTR)) {
-    VPLOG(1) << "Failed to configure DTR signal";
+    SERIAL_PLOG(DEBUG) << "Failed to configure data-terminal-ready signal";
     return false;
   }
   if (signals.has_rts && !EscapeCommFunction(file().GetPlatformFile(),
                                              signals.rts ? SETRTS : CLRRTS)) {
-    VPLOG(1) << "Failed to configure RTS signal";
+    SERIAL_PLOG(DEBUG) << "Failed to configure request-to-send signal";
     return false;
   }
   if (signals.has_brk &&
       !EscapeCommFunction(file().GetPlatformFile(),
                           signals.brk ? SETBREAK : CLRBREAK)) {
-    VPLOG(1) << "Failed to configure break signal";
+    SERIAL_PLOG(DEBUG) << "Failed to configure break signal";
     return false;
   }
 
@@ -407,7 +419,7 @@ mojom::SerialConnectionInfoPtr SerialIoHandlerWin::GetPortInfo() const {
   DCB config = {0};
   config.DCBlength = sizeof(config);
   if (!GetCommState(file().GetPlatformFile(), &config)) {
-    VPLOG(1) << "Failed to get serial port info";
+    SERIAL_PLOG(DEBUG) << "Failed to get serial port info";
     return mojom::SerialConnectionInfoPtr();
   }
   auto info = mojom::SerialConnectionInfo::New();

@@ -1,57 +1,27 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/system/media/media_tray.h"
 
-#include "ash/public/cpp/media_notification_provider.h"
+#include "ash/constants/tray_background_view_catalog.h"
+#include "ash/shell.h"
+#include "ash/strings/grit/ash_strings.h"
+#include "ash/system/media/media_notification_provider.h"
+#include "ash/system/media/mock_media_notification_provider.h"
 #include "ash/system/status_area_widget.h"
 #include "ash/system/status_area_widget_test_helper.h"
+#include "ash/system/tray/tray_bubble_wrapper.h"
 #include "ash/test/ash_test_base.h"
-#include "base/test/scoped_feature_list.h"
-#include "media/base/media_switches.h"
+#include "base/memory/raw_ptr.h"
 #include "testing/gmock/include/gmock/gmock.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "ui/events/event.h"
+#include "ui/views/accessibility/view_accessibility.h"
 
 using ::testing::_;
 
 namespace ash {
-namespace {
-
-class MockMediaNotificationProvider : public MediaNotificationProvider {
- public:
-  MockMediaNotificationProvider() {
-    MediaNotificationProvider::Set(this);
-
-    ON_CALL(*this, GetMediaNotificationListView(_, _))
-        .WillByDefault(
-            [](auto, auto) { return std::make_unique<views::View>(); });
-  }
-
-  // Medianotificationprovider implementations.
-  MOCK_METHOD2(GetMediaNotificationListView,
-               std::unique_ptr<views::View>(SkColor, int));
-  MOCK_METHOD0(GetActiveMediaNotificationView, std::unique_ptr<views::View>());
-  MOCK_METHOD0(OnBubbleClosing, void());
-  void AddObserver(MediaNotificationProviderObserver* observer) override {}
-  void RemoveObserver(MediaNotificationProviderObserver* observer) override {}
-  bool HasActiveNotifications() override { return has_active_notifications_; }
-  bool HasFrozenNotifications() override { return has_frozen_notifications_; }
-
-  void SetHasActiveNotifications(bool has_active_notifications) {
-    has_active_notifications_ = has_active_notifications;
-  }
-
-  void SetHasFrozenNotifications(bool has_frozen_notifications) {
-    has_frozen_notifications_ = has_frozen_notifications;
-  }
-
- private:
-  bool has_active_notifications_ = false;
-  bool has_frozen_notifications_ = false;
-};
-
-}  // namespace
 
 class MediaTrayTest : public AshTestBase {
  public:
@@ -59,37 +29,52 @@ class MediaTrayTest : public AshTestBase {
   ~MediaTrayTest() override = default;
 
   void SetUp() override {
-    feature_list_.InitAndEnableFeature(media::kGlobalMediaControlsForChromeOS);
-    provider_ = std::make_unique<MockMediaNotificationProvider>();
     AshTestBase::SetUp();
+    provider_ = std::make_unique<MockMediaNotificationProvider>();
+    media_tray_ = status_area_widget()->media_tray();
+    ASSERT_TRUE(MediaTray::IsPinnedToShelf());
+  }
 
-    media_tray_ =
-        StatusAreaWidgetTestHelper::GetStatusAreaWidget()->media_tray();
+  void TearDown() override {
+    media_tray_ = nullptr;
+    provider_.reset();
+    AshTestBase::TearDown();
   }
 
   void SimulateNotificationListChanged() {
     media_tray_->OnNotificationListChanged();
   }
 
-  void SimulateTapOnMediaTray() {
-    ui::GestureEvent tap(0, 0, 0, base::TimeTicks(),
-                         ui::GestureEventDetails(ui::ET_GESTURE_TAP));
-    media_tray_->PerformAction(tap);
+  void SimulateTapOnPinButton() {
+    ASSERT_TRUE(media_tray_->pin_button_for_testing());
+    ui::test::EventGenerator* generator = GetEventGenerator();
+    generator->MoveMouseTo(media_tray_->pin_button_for_testing()
+                               ->GetBoundsInScreen()
+                               .CenterPoint());
+    generator->ClickLeftButton();
   }
 
   TrayBubbleWrapper* GetBubbleWrapper() {
     return media_tray_->tray_bubble_wrapper_for_testing();
   }
 
+  std::u16string GetAccessibleNameForBubble() {
+    return media_tray_->GetAccessibleNameForBubble();
+  }
+
+  StatusAreaWidget* status_area_widget() {
+    return StatusAreaWidgetTestHelper::GetStatusAreaWidget();
+  }
+
   MockMediaNotificationProvider* provider() { return provider_.get(); }
 
   MediaTray* media_tray() { return media_tray_; }
 
+  views::View* empty_state_view() { return media_tray_->empty_state_view_; }
+
  private:
   std::unique_ptr<MockMediaNotificationProvider> provider_;
-  MediaTray* media_tray_;
-
-  base::test::ScopedFeatureList feature_list_;
+  raw_ptr<MediaTray> media_tray_;
 };
 
 TEST_F(MediaTrayTest, MediaTrayVisibilityTest) {
@@ -111,6 +96,20 @@ TEST_F(MediaTrayTest, MediaTrayVisibilityTest) {
   provider()->SetHasFrozenNotifications(true);
   SimulateNotificationListChanged();
   EXPECT_TRUE(media_tray()->GetVisible());
+
+  // Media tray should be hidden when screen is locked.
+  GetSessionControllerClient()->LockScreen();
+  GetSessionControllerClient()->FlushForTest();
+  EXPECT_FALSE(media_tray()->GetVisible());
+
+  // Media tray should be visible again when we unlock the screen.
+  GetSessionControllerClient()->UnlockScreen();
+  EXPECT_TRUE(media_tray()->GetVisible());
+
+  // Media tray should not be visible if global media controls is
+  // not pinned to shelf.
+  MediaTray::SetPinnedToShelf(false);
+  EXPECT_FALSE(media_tray()->GetVisible());
 }
 
 TEST_F(MediaTrayTest, ShowAndHideBubbleTest) {
@@ -127,20 +126,37 @@ TEST_F(MediaTrayTest, ShowAndHideBubbleTest) {
   // Tap the media tray should show the bubble, and media tray should
   // be active. GetMediaNotificationlistview also should be called for
   // getting active notifications.
-  EXPECT_CALL(*provider(), GetMediaNotificationListView(_, _));
-  SimulateTapOnMediaTray();
+  EXPECT_CALL(*provider(), GetMediaNotificationListView(
+                               _, /*should_clip_height=*/true, _, _));
+  GestureTapOn(media_tray());
   EXPECT_NE(GetBubbleWrapper(), nullptr);
   EXPECT_TRUE(media_tray()->is_active());
 
   // Tap again should close the bubble and MediaNotificationProvider should
   // be notified.
   EXPECT_CALL(*provider(), OnBubbleClosing());
-  SimulateTapOnMediaTray();
+  GestureTapOn(media_tray());
   EXPECT_EQ(GetBubbleWrapper(), nullptr);
   EXPECT_FALSE(media_tray()->is_active());
 }
 
-TEST_F(MediaTrayTest, DialogCloseWhenNoActiveNotificationTest) {
+// Tests that the shelf is forced to show when the bubble is visible (this is so
+// that the shelf doesn't hide when shelf auto-hide is enabled).
+TEST_F(MediaTrayTest, OpenBubbleForcesShelfToShow) {
+  provider()->SetHasActiveNotifications(true);
+  SimulateNotificationListChanged();
+  ASSERT_TRUE(media_tray()->GetVisible());
+
+  // The shelf should not be forced to show initially.
+  EXPECT_FALSE(status_area_widget()->ShouldShowShelf());
+
+  // Open the media tray bubble and verify that the shelf is forced to show.
+  GestureTapOn(media_tray());
+  ;
+  EXPECT_TRUE(status_area_widget()->ShouldShowShelf());
+}
+
+TEST_F(MediaTrayTest, ShowEmptyStateWhenNoActiveNotification) {
   // Media tray should be visible when there is active notification.
   provider()->SetHasActiveNotifications(true);
   SimulateNotificationListChanged();
@@ -152,16 +168,118 @@ TEST_F(MediaTrayTest, DialogCloseWhenNoActiveNotificationTest) {
   EXPECT_FALSE(media_tray()->is_active());
 
   // Tap and show bubble.
-  SimulateTapOnMediaTray();
+  GestureTapOn(media_tray());
   EXPECT_NE(GetBubbleWrapper(), nullptr);
   EXPECT_TRUE(media_tray()->is_active());
 
-  // Bubble should close if there's no active sessions.
-  EXPECT_CALL(*provider(), OnBubbleClosing());
+  // We should display empty state if no media is playing.
   provider()->SetHasActiveNotifications(false);
   SimulateNotificationListChanged();
-  EXPECT_EQ(GetBubbleWrapper(), nullptr);
+  EXPECT_NE(GetBubbleWrapper(), nullptr);
+  EXPECT_TRUE(media_tray()->GetVisible());
+  EXPECT_NE(empty_state_view(), nullptr);
+  EXPECT_TRUE(empty_state_view()->GetVisible());
+
+  // Empty state should be hidden if a new media starts playing.
+  provider()->SetHasActiveNotifications(true);
+  SimulateNotificationListChanged();
+  EXPECT_FALSE(empty_state_view()->GetVisible());
+}
+
+TEST_F(MediaTrayTest, PinButtonTest) {
+  // Media tray should be invisible initially.
+  ASSERT_TRUE(media_tray());
   EXPECT_FALSE(media_tray()->GetVisible());
+
+  // Open global media controls dialog.
+  provider()->SetHasActiveNotifications(true);
+  SimulateNotificationListChanged();
+  EXPECT_TRUE(media_tray()->GetVisible());
+  GestureTapOn(media_tray());
+  EXPECT_NE(GetBubbleWrapper(), nullptr);
+
+  // Tapping the pin button while the media controls dialog is opened should not
+  // hide the media tray.
+  SimulateTapOnPinButton();
+  EXPECT_NE(GetBubbleWrapper(), nullptr);
+  EXPECT_TRUE(media_tray()->GetVisible());
+  EXPECT_FALSE(MediaTray::IsPinnedToShelf());
+
+  // Tap the pin button again and the media tray should still be visible.
+  SimulateTapOnPinButton();
+  EXPECT_TRUE(media_tray()->GetVisible());
+  EXPECT_TRUE(MediaTray::IsPinnedToShelf());
+}
+
+TEST_F(MediaTrayTest, PinToShelfDefaultBehavior) {
+  // Media controls should be pinned on shelf by default on a
+  // 10 inch display.
+  UpdateDisplay("800x530");
+  EXPECT_FALSE(MediaTray::IsPinnedToShelf());
+
+  // Media controls should be pinned on shelf by default on a
+  // display larger than 10 inches.
+  UpdateDisplay("800x600");
+  EXPECT_TRUE(MediaTray::IsPinnedToShelf());
+}
+
+TEST_F(MediaTrayTest, BubbleGetsFocusWhenOpenWithKeyboard) {
+  media_tray()->ShowBubble();
+
+  // Generate a tab key press.
+  ui::test::EventGenerator generator(Shell::GetPrimaryRootWindow());
+  generator.PressKey(ui::KeyboardCode::VKEY_TAB, ui::EF_NONE);
+
+  EXPECT_TRUE(GetBubbleWrapper()->GetBubbleWidget()->IsActive());
+}
+
+TEST_F(MediaTrayTest, ShowBubble) {
+  // We start with no bubble view.
+  EXPECT_EQ(nullptr, media_tray()->GetBubbleView());
+
+  EXPECT_CALL(*provider(), GetMediaNotificationListView(_, _, _, ""));
+  media_tray()->ShowBubble();
+  EXPECT_NE(nullptr, media_tray()->GetBubbleView());
+}
+
+TEST_F(MediaTrayTest, ShowBubbleWithItem) {
+  // We start with no bubble view.
+  EXPECT_EQ(nullptr, media_tray()->GetBubbleView());
+
+  const std::string item_id = "my-item-id";
+  EXPECT_CALL(*provider(), GetMediaNotificationListView(_, _, _, item_id));
+  media_tray()->ShowBubbleWithItem(item_id);
+  EXPECT_NE(nullptr, media_tray()->GetBubbleView());
+}
+
+TEST_F(MediaTrayTest, CloseBubbleIsNoopWhenNoBubble) {
+  // Start out with no bubble.
+  ASSERT_EQ(nullptr, media_tray()->GetBubbleView());
+
+  // `OnBubbleClosing()` should not be called when there is no bubble to close.
+  EXPECT_CALL(*provider(), OnBubbleClosing).Times(0);
+  media_tray()->CloseBubble();
+}
+
+TEST_F(MediaTrayTest, AccessibleNames) {
+  {
+    ui::AXNodeData node_data;
+    media_tray()->GetViewAccessibility().GetAccessibleNodeData(&node_data);
+    EXPECT_EQ(node_data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+              l10n_util::GetStringUTF16(
+                  IDS_ASH_GLOBAL_MEDIA_CONTROLS_BUTTON_TOOLTIP_TEXT));
+  }
+
+  media_tray()->ShowBubble();
+  ASSERT_TRUE(media_tray()->GetBubbleView());
+
+  {
+    ui::AXNodeData node_data;
+    media_tray()->GetBubbleView()->GetViewAccessibility().GetAccessibleNodeData(
+        &node_data);
+    EXPECT_EQ(node_data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+              GetAccessibleNameForBubble());
+  }
 }
 
 }  // namespace ash

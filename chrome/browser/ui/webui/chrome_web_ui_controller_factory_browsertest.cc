@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/webui/chrome_web_ui_controller_factory.h"
 
 #include "base/strings/strcat.h"
+#include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
@@ -28,15 +29,42 @@ IN_PROC_BROWSER_TEST_F(ChromeWebUIControllerFactoryBrowserTest,
       GURL(base::StrCat({"chrome-untrusted://", chrome::kChromeUIVersionHost,
                          "/title2.html"}))));
   auto* web_contents = browser()->tab_strip_model()->GetActiveWebContents();
-  EXPECT_EQ(base::ASCIIToUTF16("Title Of Awesomeness"),
-            web_contents->GetTitle());
+  EXPECT_EQ(u"Title Of Awesomeness", web_contents->GetTitle());
   EXPECT_FALSE(web_contents->GetWebUI());
 
   // Check that we can navigate to chrome://version and that it serves the right
   // resources and has a WebUI.
   EXPECT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GURL(base::StrCat({"chrome://", chrome::kChromeUIVersionHost,
-                                    "/title2.html"}))));
-  EXPECT_EQ(base::ASCIIToUTF16("About Version"), web_contents->GetTitle());
+      browser(),
+      GURL(base::StrCat({"chrome://", chrome::kChromeUIVersionHost}))));
+  EXPECT_EQ(u"About Version", web_contents->GetTitle());
+  EXPECT_TRUE(web_contents->GetWebUI());
+}
+
+IN_PROC_BROWSER_TEST_F(ChromeWebUIControllerFactoryBrowserTest,
+                       NoWebUiNtpInIncognitoProfile) {
+  auto* incognito_browser = CreateIncognitoBrowser();
+  auto* web_contents =
+      incognito_browser->tab_strip_model()->GetActiveWebContents();
+
+  EXPECT_TRUE(ui_test_utils::NavigateToURL(
+      incognito_browser, chrome::ChromeUINewTabPageURLAsGURL()));
+  EXPECT_FALSE(web_contents->GetWebUI());
+
+  EXPECT_TRUE(ui_test_utils::NavigateToURL(
+      incognito_browser, GURL(chrome::kChromeUINewTabPageThirdPartyURL)));
+  EXPECT_FALSE(web_contents->GetWebUI());
+}
+
+IN_PROC_BROWSER_TEST_F(ChromeWebUIControllerFactoryBrowserTest,
+                       WebUiNtpInNormalProfile) {
+  auto* web_contents = browser()->tab_strip_model()->GetActiveWebContents();
+
+  EXPECT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), chrome::ChromeUINewTabPageURLAsGURL()));
+  EXPECT_TRUE(web_contents->GetWebUI());
+
+  EXPECT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL(chrome::kChromeUINewTabPageThirdPartyURL)));
   EXPECT_TRUE(web_contents->GetWebUI());
 }

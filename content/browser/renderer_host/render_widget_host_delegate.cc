@@ -1,26 +1,21 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/renderer_host/render_widget_host_delegate.h"
 
 #include "build/build_config.h"
-#include "components/rappor/public/sample.h"
 #include "content/browser/renderer_host/render_view_host_delegate_view.h"
 #include "content/public/browser/keyboard_event_processing_result.h"
 #include "services/metrics/public/cpp/ukm_source_id.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/gfx/geometry/rect.h"
 
 namespace content {
 
 KeyboardEventProcessingResult RenderWidgetHostDelegate::PreHandleKeyboardEvent(
-    const NativeWebKeyboardEvent& event) {
+    const input::NativeWebKeyboardEvent& event) {
   return KeyboardEventProcessingResult::NOT_HANDLED;
-}
-
-bool RenderWidgetHostDelegate::PreHandleMouseEvent(
-    const blink::WebMouseEvent& event) {
-  return false;
 }
 
 bool RenderWidgetHostDelegate::HandleMouseEvent(
@@ -34,7 +29,12 @@ bool RenderWidgetHostDelegate::HandleWheelEvent(
 }
 
 bool RenderWidgetHostDelegate::HandleKeyboardEvent(
-    const NativeWebKeyboardEvent& event) {
+    const input::NativeWebKeyboardEvent& event) {
+  return false;
+}
+
+bool RenderWidgetHostDelegate::ShouldIgnoreWebInputEvents(
+    const blink::WebInputEvent& event) {
   return false;
 }
 
@@ -47,23 +47,29 @@ bool RenderWidgetHostDelegate::PreHandleGestureEvent(
   return false;
 }
 
-double RenderWidgetHostDelegate::GetPendingPageZoomLevel() {
+double RenderWidgetHostDelegate::GetPendingZoomLevel(
+    RenderWidgetHostImpl* rwh) {
   return 0.0;
 }
 
-BrowserAccessibilityManager*
-    RenderWidgetHostDelegate::GetRootBrowserAccessibilityManager() {
+ui::BrowserAccessibilityManager*
+RenderWidgetHostDelegate::GetRootBrowserAccessibilityManager() {
   return nullptr;
 }
 
-BrowserAccessibilityManager*
-    RenderWidgetHostDelegate::GetOrCreateRootBrowserAccessibilityManager() {
+ui::BrowserAccessibilityManager*
+RenderWidgetHostDelegate::GetOrCreateRootBrowserAccessibilityManager() {
   return nullptr;
+}
+
+base::UnguessableToken
+RenderWidgetHostDelegate::GetCompositorFrameSinkGroupingId() const {
+  NOTREACHED();  // Not implemented.
 }
 
 // If a delegate does not override this, the RenderWidgetHostView will
 // assume it is the sole platform event consumer.
-RenderWidgetHostInputEventRouter*
+input::RenderWidgetHostInputEventRouter*
 RenderWidgetHostDelegate::GetInputEventRouter() {
   return nullptr;
 }
@@ -92,13 +98,44 @@ blink::mojom::DisplayMode RenderWidgetHostDelegate::GetDisplayMode() const {
   return blink::mojom::DisplayMode::kBrowser;
 }
 
-bool RenderWidgetHostDelegate::HasMouseLock(
+ui::mojom::WindowShowState RenderWidgetHostDelegate::GetWindowShowState() {
+  return ui::mojom::WindowShowState::kDefault;
+}
+
+DevicePostureProviderImpl*
+RenderWidgetHostDelegate::GetDevicePostureProvider() {
+  return nullptr;
+}
+
+bool RenderWidgetHostDelegate::GetResizable() {
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+  return false;
+#else
+  return true;
+#endif
+}
+
+gfx::Rect RenderWidgetHostDelegate::GetWindowsControlsOverlayRect() const {
+  return gfx::Rect();
+}
+
+bool RenderWidgetHostDelegate::HasPointerLock(
     RenderWidgetHostImpl* render_widget_host) {
   return false;
 }
 
-RenderWidgetHostImpl* RenderWidgetHostDelegate::GetMouseLockWidget() {
+RenderWidgetHostImpl* RenderWidgetHostDelegate::GetPointerLockWidget() {
   return nullptr;
+}
+
+bool RenderWidgetHostDelegate::IsWaitingForPointerLockPrompt(
+    RenderWidgetHostImpl* render_widget_host) {
+  return false;
+}
+
+bool RenderWidgetHostDelegate::IsPointerLockSandboxedForWidget(
+    RenderWidgetHostImpl* render_widget_host) {
+  return false;
 }
 
 bool RenderWidgetHostDelegate::RequestKeyboardLock(RenderWidgetHostImpl* host,
@@ -110,60 +147,50 @@ RenderWidgetHostImpl* RenderWidgetHostDelegate::GetKeyboardLockWidget() {
   return nullptr;
 }
 
-TextInputManager* RenderWidgetHostDelegate::GetTextInputManager() {
-  return nullptr;
+bool RenderWidgetHostDelegate::OnRenderFrameProxyVisibilityChanged(
+    RenderFrameProxyHost* render_frame_proxy_host,
+    blink::mojom::FrameVisibility visibility) {
+  return false;
 }
 
-bool RenderWidgetHostDelegate::IsHidden() {
-  return false;
+TextInputManager* RenderWidgetHostDelegate::GetTextInputManager() {
+  return nullptr;
 }
 
 RenderViewHostDelegateView* RenderWidgetHostDelegate::GetDelegateView() {
   return nullptr;
 }
 
-RenderWidgetHostImpl* RenderWidgetHostDelegate::GetFullscreenRenderWidgetHost()
-    const {
+bool RenderWidgetHostDelegate::IsWidgetForPrimaryMainFrame(
+    RenderWidgetHostImpl*) {
+  return false;
+}
+
+gfx::mojom::DelegatedInkPointRenderer*
+RenderWidgetHostDelegate::GetDelegatedInkRenderer(ui::Compositor* compositor) {
   return nullptr;
-}
-
-bool RenderWidgetHostDelegate::OnUpdateDragCursor() {
-  return false;
-}
-
-bool RenderWidgetHostDelegate::IsWidgetForMainFrame(RenderWidgetHostImpl*) {
-  return false;
-}
-
-bool RenderWidgetHostDelegate::AddDomainInfoToRapporSample(
-    rappor::Sample* sample) {
-  sample->SetStringField("Domain", "Unknown");
-  return false;
 }
 
 ukm::SourceId RenderWidgetHostDelegate::GetCurrentPageUkmSourceId() {
   return ukm::kInvalidSourceId;
 }
 
-WebContents* RenderWidgetHostDelegate::GetAsWebContents() {
-  return nullptr;
-}
-
 bool RenderWidgetHostDelegate::IsShowingContextMenuOnPage() const {
   return false;
 }
 
-RenderFrameHostImpl*
-RenderWidgetHostDelegate::GetFocusedFrameFromFocusedDelegate() {
-  return nullptr;
+int RenderWidgetHostDelegate::GetVirtualKeyboardResizeHeight() {
+  return 0;
 }
 
-bool RenderWidgetHostDelegate::IsPortal() {
-  return false;
+bool RenderWidgetHostDelegate::ShouldDoLearning() {
+  return true;
 }
 
-FrameTree* RenderWidgetHostDelegate::GetFrameTree() {
-  return nullptr;
+#if BUILDFLAG(IS_ANDROID)
+gfx::PointF RenderWidgetHostDelegate::GetCurrentTouchSequenceOffset() {
+  return gfx::PointF();
 }
+#endif
 
 }  // namespace content

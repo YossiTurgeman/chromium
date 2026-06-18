@@ -1,29 +1,34 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "extensions/common/csp_validator.h"
+
 #include <stddef.h>
+
+#include <string_view>
 
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "extensions/common/csp_validator.h"
+#include "extensions/common/constants.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/install_warning.h"
 #include "extensions/common/manifest_constants.h"
+#include "extensions/common/mojom/manifest.mojom-shared.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-using extensions::csp_validator::ContentSecurityPolicyIsLegal;
-using extensions::csp_validator::GetEffectiveSandoxedPageCSP;
-using extensions::csp_validator::SanitizeContentSecurityPolicy;
-using extensions::csp_validator::ContentSecurityPolicyIsSandboxed;
-using extensions::csp_validator::OPTIONS_NONE;
-using extensions::csp_validator::OPTIONS_ALLOW_UNSAFE_EVAL;
-using extensions::csp_validator::OPTIONS_ALLOW_INSECURE_OBJECT_SRC;
 using extensions::ErrorUtils;
 using extensions::InstallWarning;
 using extensions::Manifest;
+using extensions::csp_validator::ContentSecurityPolicyIsLegal;
+using extensions::csp_validator::ContentSecurityPolicyIsSandboxed;
+using extensions::csp_validator::GetSandboxedPageCSPDisallowingRemoteSources;
+using extensions::csp_validator::OPTIONS_ALLOW_INSECURE_OBJECT_SRC;
+using extensions::csp_validator::OPTIONS_ALLOW_UNSAFE_EVAL;
+using extensions::csp_validator::OPTIONS_NONE;
+using extensions::csp_validator::SanitizeContentSecurityPolicy;
 
 namespace {
 
@@ -69,7 +74,7 @@ SanitizedCSPResult SanitizeCSP(const std::string& policy, int options) {
 
 SanitizedCSPResult SanitizeSandboxPageCSP(const std::string& policy) {
   SanitizedCSPResult result;
-  result.csp = GetEffectiveSandoxedPageCSP(
+  result.csp = GetSandboxedPageCSPDisallowingRemoteSources(
       policy, extensions::manifest_keys::kSandboxedPagesCSP, &result.warnings);
   return result;
 }
@@ -153,6 +158,12 @@ TEST(ExtensionCSPValidator, IsLegal) {
       "default-src 'self';\rscript-src http://www.google.com"));
   EXPECT_FALSE(ContentSecurityPolicyIsLegal(
       "default-src 'self';,script-src http://www.google.com"));
+  EXPECT_TRUE(ContentSecurityPolicyIsLegal(
+      "default-src 'self';\vscript-src http://www.google.com"));
+  EXPECT_TRUE(ContentSecurityPolicyIsLegal(
+      "default-src 'self';\tscript-src http://www.google.com"));
+  EXPECT_TRUE(ContentSecurityPolicyIsLegal(
+      "default-src 'self';\fscript-src http://www.google.com"));
 }
 
 TEST(ExtensionCSPValidator, IsSecure) {
@@ -393,41 +404,20 @@ TEST(ExtensionCSPValidator, IsSecure) {
                InsecureValueWarning("object-src", "*")));
   EXPECT_TRUE(CheckCSP(SanitizeCSP("script-src 'self'; object-src *",
                                    OPTIONS_ALLOW_INSECURE_OBJECT_SRC),
-                       "script-src 'self'; object-src;",
-                       InsecureValueWarning("object-src", "*")));
-  EXPECT_TRUE(CheckCSP(SanitizeCSP(
-      "script-src 'self'; object-src *; plugin-types application/pdf;",
-      OPTIONS_ALLOW_INSECURE_OBJECT_SRC)));
-  EXPECT_TRUE(CheckCSP(SanitizeCSP("script-src 'self'; object-src *; "
-                                   "plugin-types application/x-shockwave-flash",
+                       "script-src 'self'; object-src *;"));
+  EXPECT_TRUE(CheckCSP(
+      SanitizeCSP("script-src 'self'; object-src http://www.example.com",
+                  OPTIONS_ALLOW_INSECURE_OBJECT_SRC)));
+  EXPECT_TRUE(CheckCSP(
+      SanitizeCSP("object-src http://www.example.com blob:; script-src 'self'",
+                  OPTIONS_ALLOW_INSECURE_OBJECT_SRC)));
+  EXPECT_TRUE(
+      CheckCSP(SanitizeCSP("script-src 'self'; object-src http://*.example.com",
+                           OPTIONS_ALLOW_INSECURE_OBJECT_SRC)));
+  EXPECT_TRUE(CheckCSP(SanitizeCSP("script-src *; object-src *",
                                    OPTIONS_ALLOW_INSECURE_OBJECT_SRC),
-                       "script-src 'self'; object-src; "
-                       "plugin-types application/x-shockwave-flash;",
-                       InsecureValueWarning("object-src", "*")));
-  EXPECT_TRUE(CheckCSP(
-      SanitizeCSP("script-src 'self'; object-src *; "
-                  "plugin-types application/x-shockwave-flash application/pdf;",
-                  OPTIONS_ALLOW_INSECURE_OBJECT_SRC),
-      "script-src 'self'; object-src; "
-      "plugin-types application/x-shockwave-flash application/pdf;",
-      InsecureValueWarning("object-src", "*")));
-  EXPECT_TRUE(CheckCSP(SanitizeCSP(
-      "script-src 'self'; object-src http://www.example.com; "
-      "plugin-types application/pdf;",
-      OPTIONS_ALLOW_INSECURE_OBJECT_SRC)));
-  EXPECT_TRUE(CheckCSP(SanitizeCSP(
-      "object-src http://www.example.com blob:; script-src 'self'; "
-      "plugin-types application/pdf;",
-      OPTIONS_ALLOW_INSECURE_OBJECT_SRC)));
-  EXPECT_TRUE(CheckCSP(SanitizeCSP(
-      "script-src 'self'; object-src http://*.example.com; "
-      "plugin-types application/pdf;",
-      OPTIONS_ALLOW_INSECURE_OBJECT_SRC)));
-  EXPECT_TRUE(CheckCSP(
-      SanitizeCSP("script-src *; object-src *; plugin-types application/pdf;",
-                  OPTIONS_ALLOW_INSECURE_OBJECT_SRC),
-      "script-src; object-src *; plugin-types application/pdf;",
-      InsecureValueWarning("script-src", "*")));
+                       "script-src; object-src *",
+                       InsecureValueWarning("script-src", "*")));
 
   EXPECT_TRUE(CheckCSP(SanitizeCSP(
       "default-src; script-src"
@@ -447,6 +437,33 @@ TEST(ExtensionCSPValidator, IsSecure) {
       InsecureValueWarning("script-src",
                            "'sha1-eYyYGmKWdhpUewohaXk9o8IaLSw='")));
 
+  // Verify that CSP Level 3 directives are sanitized. They are grouped with
+  // script-src, so only the first one seen will emit warnings.
+  // See crbug.com/500528267.
+  EXPECT_TRUE(
+      CheckCSP(SanitizeCSP("script-src-elem 'unsafe-inline' http://evil.com; "
+                           "script-src-attr 'unsafe-inline'",
+                           OPTIONS_ALLOW_UNSAFE_EVAL),
+               "script-src-elem; script-src-attr; object-src 'self';",
+               std::vector<std::string>{
+                   InsecureValueWarning("script-src-elem", "'unsafe-inline'"),
+                   InsecureValueWarning("script-src-elem", "http://evil.com"),
+                   missing_secure_src_warning("object-src")}));
+
+  EXPECT_TRUE(CheckCSP(
+      SanitizeCSP("worker-src http://evil.com", OPTIONS_ALLOW_UNSAFE_EVAL),
+      "worker-src; object-src 'self';",
+      std::vector<std::string>{
+          InsecureValueWarning("worker-src", "http://evil.com"),
+          missing_secure_src_warning("object-src")}));
+
+  EXPECT_TRUE(CheckCSP(
+      SanitizeCSP("child-src http://evil.com", OPTIONS_ALLOW_UNSAFE_EVAL),
+      "child-src; object-src 'self';",
+      std::vector<std::string>{
+          InsecureValueWarning("child-src", "http://evil.com"),
+          missing_secure_src_warning("object-src")}));
+
   EXPECT_TRUE(CheckCSP(
       SanitizeCSP("default-src; script-src "
                   "'sha256-hndjYvzUzy2Ykuad81Cwsl1FOXX/qYs/aDVyUyNZ"
@@ -462,36 +479,46 @@ TEST(ExtensionCSPValidator, IsSecure) {
 
 TEST(ExtensionCSPValidator, IsSandboxed) {
   EXPECT_FALSE(ContentSecurityPolicyIsSandboxed(std::string(),
-                                                Manifest::TYPE_EXTENSION));
+                                                Manifest::Type::kExtension));
   EXPECT_FALSE(ContentSecurityPolicyIsSandboxed("img-src https://google.com",
-                                                Manifest::TYPE_EXTENSION));
+                                                Manifest::Type::kExtension));
 
   // Sandbox directive is required.
-  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed(
-      "sandbox", Manifest::TYPE_EXTENSION));
+  EXPECT_TRUE(
+      ContentSecurityPolicyIsSandboxed("sandbox", Manifest::Type::kExtension));
 
   // Additional sandbox tokens are OK.
-  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed(
-      "sandbox allow-scripts", Manifest::TYPE_EXTENSION));
-  // Except for allow-same-origin.
-  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed(
-      "sandbox allow-same-origin", Manifest::TYPE_EXTENSION));
+  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed("sandbox allow-scripts",
+                                               Manifest::Type::kExtension));
+  // Except for allow-same-origin...
+  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed("sandbox allow-same-origin",
+                                                Manifest::Type::kExtension));
+
+  // ... even if obscured.
+  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed("sandbox allow-same-origin\fa",
+                                                Manifest::Type::kExtension));
+  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed("sandbox \fallow-same-origin",
+                                                Manifest::Type::kExtension));
+  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed("sandbox allow-same-origin\f",
+                                                Manifest::Type::kExtension));
+  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed("sandbox \fallow-same-origin\f",
+                                                Manifest::Type::kExtension));
 
   // Additional directives are OK.
   EXPECT_TRUE(ContentSecurityPolicyIsSandboxed(
-      "sandbox; img-src https://google.com", Manifest::TYPE_EXTENSION));
+      "sandbox; img-src https://google.com", Manifest::Type::kExtension));
 
   // Extensions allow navigation, platform apps don't.
-  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed(
-      "sandbox allow-top-navigation", Manifest::TYPE_EXTENSION));
-  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed(
-      "sandbox allow-top-navigation", Manifest::TYPE_PLATFORM_APP));
+  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed("sandbox allow-top-navigation",
+                                               Manifest::Type::kExtension));
+  EXPECT_FALSE(ContentSecurityPolicyIsSandboxed("sandbox allow-top-navigation",
+                                                Manifest::Type::kPlatformApp));
 
   // Popups are OK.
-  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed(
-      "sandbox allow-popups", Manifest::TYPE_EXTENSION));
-  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed(
-      "sandbox allow-popups", Manifest::TYPE_PLATFORM_APP));
+  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed("sandbox allow-popups",
+                                               Manifest::Type::kExtension));
+  EXPECT_TRUE(ContentSecurityPolicyIsSandboxed("sandbox allow-popups",
+                                               Manifest::Type::kPlatformApp));
 }
 
 TEST(ExtensionCSPValidator, EffectiveSandboxedPageCSP) {
@@ -558,6 +585,29 @@ TEST(ExtensionCSPValidator, EffectiveSandboxedPageCSP) {
       "child-src 'self'; script-src 'none';",
       insecure_value_warning("child-src", "http://bar.com"),
       insecure_value_warning("child-src", "http://foo.com")));
+
+  // Verify that CSP Level 3 directives are sanitized for sandboxed pages.
+  // See crbug.com/500528267.
+  EXPECT_TRUE(
+      CheckCSP(SanitizeSandboxPageCSP("script-src-elem 'unsafe-inline' "
+                                      "http://evil.com"),
+               "script-src-elem 'unsafe-inline' 'self'; child-src 'self';",
+               insecure_value_warning("script-src-elem", "http://evil.com")));
+
+  EXPECT_TRUE(
+      CheckCSP(SanitizeSandboxPageCSP("script-src-attr 'unsafe-inline' "
+                                      "http://evil.com"),
+               "script-src-attr 'unsafe-inline' 'self'; child-src 'self';",
+               insecure_value_warning("script-src-attr", "http://evil.com")));
+
+  EXPECT_TRUE(
+      CheckCSP(SanitizeSandboxPageCSP("worker-src http://evil.com"),
+               "worker-src 'self'; child-src 'self';",
+               insecure_value_warning("worker-src", "http://evil.com")));
+
+  EXPECT_TRUE(
+      CheckCSP(SanitizeSandboxPageCSP("worker-src 'self' blob: filesystem:"),
+               "worker-src 'self' blob: filesystem:; child-src 'self';"));
 }
 
 namespace extensions {
@@ -565,7 +615,7 @@ namespace csp_validator {
 
 void PrintTo(const CSPParser::Directive& directive, ::std::ostream* os) {
   *os << base::StringPrintf(
-      "[[%s] [%s] [%s]]", directive.directive_string.as_string().c_str(),
+      "[[%s] [%s] [%s]]", std::string(directive.directive_string).c_str(),
       directive.directive_name.c_str(),
       base::JoinString(directive.directive_values, ",").c_str());
 }
@@ -586,8 +636,8 @@ TEST(ExtensionCSPValidator, ParseCSP) {
 
   std::vector<TestCase> cases;
 
-  cases.emplace_back("   \n \r \t ", DirectiveList());
-  cases.emplace_back("  ; \n ;\r \t ;;", DirectiveList());
+  cases.emplace_back("   \n \r \t \v \f ", DirectiveList());
+  cases.emplace_back("  ; \n ;\r \t \v \f ;;", DirectiveList());
 
   const char* policy = R"(  deFAULt-src   'self' ;
   img-src * ; media-src media1.com MEDIA2.com;
@@ -595,15 +645,29 @@ TEST(ExtensionCSPValidator, ParseCSP) {
   )";
   DirectiveList expected_directives;
   expected_directives.emplace_back("deFAULt-src   'self'", "default-src",
-                                   std::vector<base::StringPiece>({"'self'"}));
+                                   std::vector<std::string_view>({"'self'"}));
   expected_directives.emplace_back("img-src *", "img-src",
-                                   std::vector<base::StringPiece>({"*"}));
+                                   std::vector<std::string_view>({"*"}));
   expected_directives.emplace_back(
       "media-src media1.com MEDIA2.com", "media-src",
-      std::vector<base::StringPiece>({"media1.com", "MEDIA2.com"}));
+      std::vector<std::string_view>({"media1.com", "MEDIA2.com"}));
   expected_directives.emplace_back("img-src 'self'", "img-src",
-                                   std::vector<base::StringPiece>({"'self'"}));
+                                   std::vector<std::string_view>({"'self'"}));
   cases.emplace_back(policy, std::move(expected_directives));
+
+  const char* whitespace_policy =
+      "default-src\v'self';\tscript-src\fhttp://www.google.com";
+  DirectiveList whitespace_directives;
+  whitespace_directives.emplace_back(
+      /*directive_string=*/"default-src\v'self'",
+      /*directive_name=*/"default-src",
+      /*directive_values=*/std::vector<std::string_view>({"'self'"}));
+  whitespace_directives.emplace_back(
+      /*directive_string=*/"script-src\fhttp://www.google.com",
+      /*directive_name=*/"script-src",
+      /*directive_values=*/
+      std::vector<std::string_view>({"http://www.google.com"}));
+  cases.emplace_back(whitespace_policy, std::move(whitespace_directives));
 
   for (const auto& test_case : cases) {
     SCOPED_TRACE(test_case.policy);
@@ -636,28 +700,53 @@ TEST(ExtensionCSPValidator, DoesCSPDisallowRemoteCode) {
       {"frame-src google.com; default-src yahoo.com; script-src 'self'; "
        "worker-src; object-src http://localhost:80 'none'",
        ""},
+      {"script-src; worker-src 'self';", ""},
+      {"frame-src 'self'", missing_secure_src_error("script-src")},
       {"worker-src http://localhost google.com; script-src; object-src 'self'",
        insecure_value_error("worker-src", "google.com")},
-      {"script-src; worker-src 'self';",
-       missing_secure_src_error("object-src")},
+      {"script-src 'self'; object-src https://google.com",
+       insecure_value_error("object-src", "https://google.com")},
       // Duplicate directives are ignored.
       {"script-src; worker-src 'self'; default-src 'self'; script-src "
        "google.com",
        ""},
-      // "object-src" falls back to "default-src".
-      {"script-src; worker-src 'self'; default-src google.com",
-       insecure_value_error("object-src", "google.com")},
       // "worker-src" falls back to "script-src".
       {"script-src 'self'; object-src 'none'; default-src google.com", ""},
       {"script-src 'unsafe-eval'; worker-src; default-src;",
        insecure_value_error("script-src", "'unsafe-eval'")}};
 
+  std::string mock_extension_id = "abcd";
+  auto mock_location = extensions::mojom::ManifestLocation::kInternal;
   for (const auto& test_case : test_cases) {
     SCOPED_TRACE(test_case.policy);
-    base::string16 error;
+    std::u16string error;
     bool result = extensions::csp_validator::DoesCSPDisallowRemoteCode(
-        test_case.policy, kManifestKey, &error);
+        mock_extension_id, mock_location, test_case.policy, kManifestKey,
+        &error);
     EXPECT_EQ(test_case.expected_error.empty(), result);
     EXPECT_EQ(base::ASCIIToUTF16(test_case.expected_error), error);
   }
+}
+
+TEST(ExtensionCSPValidator, DoesCSPDisallowRemoteCodeChromeResources) {
+  const char* kManifestKey = "mock_key";
+  auto location = extensions::mojom::ManifestLocation::kComponent;
+  const char* policy =
+      "default-src 'none'; script-src 'self' chrome://resources "
+      "'wasm-unsafe-eval';";
+  std::u16string error;
+
+  // ChromeVox is allowed to access scripts from chrome://resources.
+  EXPECT_TRUE(extensions::csp_validator::DoesCSPDisallowRemoteCode(
+      extension_misc::kChromeVoxExtensionId, location, policy, kManifestKey,
+      &error));
+  EXPECT_EQ(u"", error);
+
+  // Other component extensions do not get the same privilege.
+  std::string expected_error = ErrorUtils::FormatErrorMessage(
+      extensions::manifest_errors::kInvalidCSPInsecureValueError, kManifestKey,
+      "chrome://resources", "script-src");
+  EXPECT_FALSE(extensions::csp_validator::DoesCSPDisallowRemoteCode(
+      extension_misc::kPdfExtensionId, location, policy, kManifestKey, &error));
+  EXPECT_EQ(base::ASCIIToUTF16(expected_error), error);
 }

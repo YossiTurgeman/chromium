@@ -1,9 +1,11 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/notifications/notification_data.h"
 
+#include "base/notreached.h"
+#include "base/numerics/safe_conversions.h"
 #include "third_party/blink/public/common/notifications/notification_constants.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value_factory.h"
@@ -12,27 +14,39 @@
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/modules/notifications/notification.h"
+#include "third_party/blink/renderer/modules/notifications/notification_metrics.h"
 #include "third_party/blink/renderer/modules/notifications/timestamp_trigger.h"
 #include "third_party/blink/renderer/modules/vibration/vibration_controller.h"
 #include "third_party/blink/renderer/platform/bindings/enumeration_base.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
-#include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_view.h"
 
 namespace blink {
 namespace {
 
 mojom::blink::NotificationDirection ToDirectionEnumValue(
-    const String& direction) {
-  if (direction == "ltr")
-    return mojom::blink::NotificationDirection::LEFT_TO_RIGHT;
-  if (direction == "rtl")
-    return mojom::blink::NotificationDirection::RIGHT_TO_LEFT;
-  if (direction == "auto")
-    return mojom::blink::NotificationDirection::AUTO;
-  NOTREACHED() << "Unknown direction: " << direction;
-  return mojom::blink::NotificationDirection::AUTO;
+    const V8NotificationDirection& direction) {
+  switch (direction.AsEnum()) {
+    case V8NotificationDirection::Enum::kLtr:
+      return mojom::blink::NotificationDirection::LEFT_TO_RIGHT;
+    case V8NotificationDirection::Enum::kRtl:
+      return mojom::blink::NotificationDirection::RIGHT_TO_LEFT;
+    case V8NotificationDirection::Enum::kAuto:
+      return mojom::blink::NotificationDirection::AUTO;
+  }
+  NOTREACHED();
+}
+
+mojom::blink::NotificationScenario ToScenarioEnumValue(
+    const V8NotificationScenario& scenario) {
+  switch (scenario.AsEnum()) {
+    case V8NotificationScenario::Enum::kDefault:
+      return mojom::blink::NotificationScenario::DEFAULT;
+    case V8NotificationScenario::Enum::kIncomingCall:
+      return mojom::blink::NotificationScenario::INCOMING_CALL;
+  }
+  NOTREACHED();
 }
 
 KURL CompleteURL(ExecutionContext* context, const String& string_url) {
@@ -51,13 +65,17 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
     ExceptionState& exception_state) {
   // If silent is true, the notification must not have a vibration pattern.
   if (options->hasVibrate() && options->silent()) {
+    RecordPersistentNotificationDisplayResult(
+        PersistentNotificationDisplayResult::kSilentWithVibrate);
     exception_state.ThrowTypeError(
         "Silent notifications must not specify vibration patterns.");
     return nullptr;
   }
 
   // If renotify is true, the notification must have a tag.
-  if (options->renotify() && options->tag().IsEmpty()) {
+  if (options->renotify() && options->tag().empty()) {
+    RecordPersistentNotificationDisplayResult(
+        PersistentNotificationDisplayResult::kRenotifyWithoutTag);
     exception_state.ThrowTypeError(
         "Notifications which set the renotify flag must specify a non-empty "
         "tag.");
@@ -72,13 +90,13 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
   notification_data->body = options->body();
   notification_data->tag = options->tag();
 
-  if (options->hasImage() && !options->image().IsEmpty())
+  if (options->hasImage() && !options->image().empty())
     notification_data->image = CompleteURL(context, options->image());
 
-  if (options->hasIcon() && !options->icon().IsEmpty())
+  if (options->hasIcon() && !options->icon().empty())
     notification_data->icon = CompleteURL(context, options->icon());
 
-  if (options->hasBadge() && !options->badge().IsEmpty())
+  if (options->hasBadge() && !options->badge().empty())
     notification_data->badge = CompleteURL(context, options->badge());
 
   VibrationController::VibrationPattern vibration_pattern;
@@ -87,12 +105,12 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
         VibrationController::SanitizeVibrationPattern(options->vibrate());
   }
   notification_data->vibration_pattern = Vector<int32_t>();
-  notification_data->vibration_pattern->Append(vibration_pattern.data(),
-                                               vibration_pattern.size());
+  notification_data->vibration_pattern->append_range(vibration_pattern);
 
-  notification_data->timestamp = options->hasTimestamp()
-                                     ? static_cast<double>(options->timestamp())
-                                     : base::Time::Now().ToDoubleT() * 1000.0;
+  notification_data->timestamp =
+      options->hasTimestamp()
+          ? static_cast<double>(options->timestamp())
+          : base::Time::Now().InMillisecondsFSinceUnixEpoch();
   notification_data->renotify = options->renotify();
   notification_data->silent = options->silent();
   notification_data->require_interaction = options->requireInteraction();
@@ -108,13 +126,15 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
     scoped_refptr<SerializedScriptValue> serialized_script_value =
         SerializedScriptValue::Serialize(isolate, data.V8Value(),
                                          serialize_options, exception_state);
-    if (exception_state.HadException())
+    if (exception_state.HadException()) {
+      RecordPersistentNotificationDisplayResult(
+          PersistentNotificationDisplayResult::kFailedToSerializeData);
       return nullptr;
+    }
 
     notification_data->data = Vector<uint8_t>();
-    notification_data->data->Append(
-        serialized_script_value->Data(),
-        SafeCast<wtf_size_t>(serialized_script_value->DataLengthInBytes()));
+    notification_data->data->append_range(
+        serialized_script_value->GetWireData());
   }
 
   Vector<mojom::blink::NotificationActionPtr> actions;
@@ -128,18 +148,21 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
     notification_action->action = action->action();
     notification_action->title = action->title();
 
-    if (action->type() == "button") {
-      notification_action->type = mojom::blink::NotificationActionType::BUTTON;
-    } else if (action->type() == "text") {
-      notification_action->type = mojom::blink::NotificationActionType::TEXT;
-    } else {
-      NOTREACHED() << "Unknown action type: "
-                   << IDLEnumAsString(action->type());
+    switch (action->type().AsEnum()) {
+      case V8NotificationActionType::Enum::kButton:
+        notification_action->type =
+            mojom::blink::NotificationActionType::BUTTON;
+        break;
+      case V8NotificationActionType::Enum::kText:
+        notification_action->type = mojom::blink::NotificationActionType::TEXT;
+        break;
     }
 
     if (!action->placeholder().IsNull() &&
         notification_action->type ==
             mojom::blink::NotificationActionType::BUTTON) {
+      RecordPersistentNotificationDisplayResult(
+          PersistentNotificationDisplayResult::kButtonActionWithPlaceholder);
       exception_state.ThrowTypeError(
           "Notifications of type \"button\" cannot specify a placeholder.");
       return nullptr;
@@ -147,7 +170,7 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
 
     notification_action->placeholder = action->placeholder();
 
-    if (action->hasIcon() && !action->icon().IsEmpty())
+    if (action->hasIcon() && !action->icon().empty())
       notification_action->icon = CompleteURL(context, action->icon());
 
     actions.push_back(std::move(notification_action));
@@ -159,9 +182,12 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
     UseCounter::Count(context, WebFeature::kNotificationShowTrigger);
 
     auto* timestamp_trigger = options->showTrigger();
-    auto timestamp = base::Time::FromJsTime(timestamp_trigger->timestamp());
+    auto timestamp = base::Time::FromMillisecondsSinceUnixEpoch(
+        base::checked_cast<int64_t>(timestamp_trigger->timestamp()));
 
     if (timestamp - base::Time::Now() > kMaxNotificationShowTriggerDelay) {
+      RecordPersistentNotificationDisplayResult(
+          PersistentNotificationDisplayResult::kShowTriggerDelayTooFarAhead);
       exception_state.ThrowTypeError(
           "Notification trigger timestamp too far ahead in the future.");
       return nullptr;
@@ -169,6 +195,8 @@ mojom::blink::NotificationDataPtr CreateNotificationData(
 
     notification_data->show_trigger_timestamp = timestamp;
   }
+
+  notification_data->scenario = ToScenarioEnumValue(options->scenario());
 
   return notification_data;
 }

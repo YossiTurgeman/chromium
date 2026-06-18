@@ -5,7 +5,7 @@
 As WebView is an Android system component (rather than just an app), WebView
 imposes additional requirements on the developer workflow. In particular,
 WebView requires a physical device or emulator with a `userdebug` or `eng`
-Android image.
+Android image. WebView doesn't support development on `user` builds.
 
 To build WebView, or [run WebView's automated tests](./test-instructions.md),
 you'll need to set up either an emulator or a physical device.
@@ -24,6 +24,10 @@ $ source build/android/envsetup.sh
 # following this guide.
 $ adb shell getprop ro.build.type
 userdebug
+
+# The API level needs to be 29 or higher:
+$ adb shell getprop ro.build.version.sdk
+29
 ```
 
 ## Emulator (easy way)
@@ -37,8 +41,11 @@ easier to setup.
 You can generally follow chromium's [Android
 emulator](/docs/android_emulator.md) instructions. You should choose a **Google
 APIs** image. The AOSP-based image will also work, but imposes additional
-developer hurdles.
+developer hurdles. Note that you shouldn't use a **Google Play** image for
+development purposes because they are `user` builds, see [Why won't a user
+image work](#why-won_t-a-user-image-work) below.
 
+Choose an emulator image which is Android 10 (SDK 29) or higher.
 
 ## Physical device
 
@@ -47,11 +54,13 @@ developer hurdles.
 Googlers can consult internal instructions
 [here](http://go/clank-webview/device_setup.md).
 
-External contributors can flash a prebuilt userdebug image (based off
-aosp-master) onto a Pixel device with [Android Flash
+External contributors can flash a prebuilt `userdebug` image (based off
+aosp-main) onto a Pixel device with [Android Flash
 Tool](https://flash.android.com/welcome?continue=%2Fcustom). This requires a
 browser capable of WebUSB (we recommend the latest Google Chrome stable
 release).
+
+Choose an build image which is Android 10 (SDK 29) or higher.
 
 ### Building AOSP yourself (hard way)
 
@@ -61,15 +70,15 @@ strongly consider one of the above first.
 ***
 
 **Prerequisite:** a machine capable of [building
-Android](http://source.android.com/source/building.html).
+Android](https://source.android.com/source/building.html).
 
 Clone an AOSP checkout, picking a branch supported for your device (you'll need
-a branch above 5.0.0) from the [list of
+a branch above 10.0.0) from the [list of
 branches](https://source.android.com/setup/start/build-numbers.html#source-code-tags-and-builds):
 
 ```shell
 mkdir aosp/ && cd aosp/ && \
-  repo init -u https://android.googlesource.com/platform/manifest -b android-9.0.0_r33 && \
+  repo init -u 'https://android.googlesource.com/platform/manifest' -b android-<VERSION> && \
   repo sync -c -j<number>
 ```
 
@@ -107,15 +116,12 @@ be disabled). In particular, you won't be able to install a locally built
 WebView:
 
 * Most `user` images are `release-keys` signed, which means local WebView builds
-  can't install over the preinstalled standalone WebView. This blocks
-  development on L-M, since this is the only WebView provider.
-* On N+, although you _can install_ a locally compiled
-  `monochrome_{public_}apk`, this is not a valid WebView provider. Unlike on
-  `userdebug`/`eng` images, the WebView update service performs additional
-  signature checks on `user` images, only loading code that has been signed by
-  one of the expected signatures&mdash;as above, these keys are not available
-  for local builds.
+  can't install over the preinstalled standalone WebView.
+* `user` images have extra validity checks for the WebView provider package
+  which pose as an obstacle when loading your own locally compiled WebView for
+  debugging purposes.
 
 Both of the above are important security features: these protect users from
 running malware in the context of WebView (which runs inside the context of
-apps).
+apps). Unfortunately, these features break debugging and development so the
+features are disabled for engineering OS images.

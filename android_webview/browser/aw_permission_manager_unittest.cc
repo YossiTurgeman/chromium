@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,24 +8,27 @@
 #include <memory>
 
 #include "android_webview/browser/aw_browser_permission_request_delegate.h"
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "android_webview/browser/aw_context_permissions_delegate.h"
+#include "android_webview/browser/permission/permission_callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "content/public/browser/permission_controller.h"
-#include "content/public/browser/permission_type.h"
+#include "content/public/browser/permission_descriptor_util.h"
+#include "content/public/browser/permission_result.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/permissions/permission_utils.h"
 #include "url/gurl.h"
 
+using blink::PermissionType;
 using blink::mojom::PermissionStatus;
-using content::PermissionType;
 
 namespace android_webview {
 
 namespace {
 
-int kNoPendingOperation = -1;
-
-int kRenderProcessIDForTesting = 8;
-int kRenderFrameIDForTesting = 19;
+constexpr int kRenderProcessIDForTesting = 8;
+constexpr int kRenderFrameIDForTesting = 19;
 const char kEmbeddingOrigin[] = "https://www.google.com/";
 const char kRequestingOrigin1[] = "https://www.google.com/";
 const char kRequestingOrigin2[] = "https://www.chromium.org/";
@@ -37,9 +40,10 @@ class AwBrowserPermissionRequestDelegateForTesting final
                        PermissionType type,
                        bool grant) {
     for (auto it = request_.begin(); it != request_.end(); ++it) {
-      if ((*it)->type != type || (*it)->origin != origin)
+      if ((*it)->type != type || (*it)->origin != origin) {
         continue;
-      base::OnceCallback<void(bool)> callback = std::move((*it)->callback);
+      }
+      PermissionCallback callback = std::move((*it)->callback);
       request_.erase(it);
       std::move(callback).Run(grant);
       return;
@@ -50,14 +54,13 @@ class AwBrowserPermissionRequestDelegateForTesting final
   // AwBrowserPermissionRequestDelegate:
   void RequestProtectedMediaIdentifierPermission(
       const GURL& origin,
-      base::OnceCallback<void(bool)> callback) override {}
+      PermissionCallback callback) override {}
 
   void CancelProtectedMediaIdentifierPermissionRequests(
       const GURL& origin) override {}
 
-  void RequestGeolocationPermission(
-      const GURL& origin,
-      base::OnceCallback<void(bool)> callback) override {
+  void RequestGeolocationPermission(const GURL& origin,
+                                    PermissionCallback callback) override {
     RequestPermission(origin, PermissionType::GEOLOCATION, std::move(callback));
   }
 
@@ -65,9 +68,8 @@ class AwBrowserPermissionRequestDelegateForTesting final
     CancelPermission(origin, PermissionType::GEOLOCATION);
   }
 
-  void RequestMIDISysexPermission(
-      const GURL& origin,
-      base::OnceCallback<void(bool)> callback) override {
+  void RequestMIDISysexPermission(const GURL& origin,
+                                  PermissionCallback callback) override {
     RequestPermission(origin, PermissionType::MIDI_SYSEX, std::move(callback));
   }
 
@@ -78,7 +80,7 @@ class AwBrowserPermissionRequestDelegateForTesting final
  private:
   void RequestPermission(const GURL& origin,
                          PermissionType type,
-                         base::OnceCallback<void(bool)> callback) {
+                         PermissionCallback callback) {
     for (auto it = response_.begin(); it != response_.end(); ++it) {
       if ((*it)->type != type || (*it)->origin != origin)
         continue;
@@ -105,11 +107,11 @@ class AwBrowserPermissionRequestDelegateForTesting final
   struct Request {
     GURL origin;
     PermissionType type;
-    base::OnceCallback<void(bool)> callback;
+    PermissionCallback callback;
 
     Request(const GURL& origin,
             PermissionType type,
-            base::OnceCallback<void(bool)> callback)
+            PermissionCallback callback)
         : origin(origin), type(type), callback(std::move(callback)) {}
   };
 
@@ -127,8 +129,18 @@ class AwBrowserPermissionRequestDelegateForTesting final
   std::list<std::unique_ptr<Request>> request_;
 };
 
+class MockContextPermissionDelegate : public AwContextPermissionsDelegate {
+ public:
+  MockContextPermissionDelegate() = default;
+  PermissionStatus GetGeolocationPermission(
+      const GURL& requesting_origin) const override {
+    return PermissionStatus::ASK;
+  }
+};
+
 class AwPermissionManagerForTesting : public AwPermissionManager {
  public:
+  AwPermissionManagerForTesting() : AwPermissionManager(context_delegate_) {}
   ~AwPermissionManagerForTesting() override {
     // Call CancelPermissionRequests() from here so that it calls virtual
     // methods correctly.
@@ -143,8 +155,10 @@ class AwPermissionManagerForTesting : public AwPermissionManager {
 
  private:
   AwBrowserPermissionRequestDelegateForTesting* delegate() {
-    if (!delegate_)
-      delegate_.reset(new AwBrowserPermissionRequestDelegateForTesting);
+    if (!delegate_) {
+      delegate_ =
+          std::make_unique<AwBrowserPermissionRequestDelegateForTesting>();
+    }
     return delegate_.get();
   }
 
@@ -157,7 +171,7 @@ class AwPermissionManagerForTesting : public AwPermissionManager {
     return kRenderFrameIDForTesting;
   }
 
-  GURL LastCommittedOrigin(
+  GURL LastCommittedMainOrigin(
       content::RenderFrameHost* render_frame_host) override {
     return GURL(kEmbeddingOrigin);
   }
@@ -171,6 +185,7 @@ class AwPermissionManagerForTesting : public AwPermissionManager {
   }
 
   std::unique_ptr<AwBrowserPermissionRequestDelegateForTesting> delegate_;
+  MockContextPermissionDelegate context_delegate_;
 };
 
 class AwPermissionManagerTest : public testing::Test {
@@ -178,21 +193,27 @@ class AwPermissionManagerTest : public testing::Test {
   AwPermissionManagerTest()
       : render_frame_host(nullptr) {}
 
-  void PermissionRequestResponse(int id, const PermissionStatus status) {
-    resolved_permission_status.push_back(status);
+  void PermissionRequestResponse(
+      int id,
+      const std::vector<content::PermissionResult>& permission_result) {
+    ASSERT_EQ(permission_result.size(), 1u);
+    resolved_permission_status.push_back(permission_result[0].status);
     resolved_permission_request_id.push_back(id);
   }
 
-  void PermissionsRequestResponse(int id,
-                                  const std::vector<PermissionStatus>& status) {
-    resolved_permission_status.insert(resolved_permission_status.end(),
-                                      status.begin(), status.end());
-    for (size_t i = 0; i < status.size(); ++i)
+  void PermissionsRequestResponse(
+      int id,
+      const std::vector<content::PermissionResult>& permission_result) {
+    for (const auto& result : permission_result) {
+      resolved_permission_status.push_back(result.status);
       resolved_permission_request_id.push_back(id);
+    }
   }
 
  protected:
-  void SetUp() override { manager.reset(new AwPermissionManagerForTesting); }
+  void SetUp() override {
+    manager = std::make_unique<AwPermissionManagerForTesting>();
+  }
   void TearDown() override { manager.reset(); }
 
   void EnqueuePermissionResponse(const std::string& origin,
@@ -202,11 +223,28 @@ class AwPermissionManagerTest : public testing::Test {
     manager->EnqueuePermissionResponse(origin, type, grant);
   }
 
+  void RequestPermissions(
+      const std::vector<blink::PermissionType>& permissions,
+      content::RenderFrameHost* rfh,
+      const GURL& requesting_origin,
+      bool user_gesture,
+      base::OnceCallback<void(
+          const std::vector<content::PermissionResult>& status)> callback) {
+    CHECK(manager);
+    manager->RequestPermissionsFromCurrentDocument(
+        rfh,
+        content::PermissionRequestDescription(
+            content::PermissionDescriptorUtil::
+                CreatePermissionDescriptorForPermissionTypes(permissions),
+            user_gesture, requesting_origin),
+        std::move(callback));
+  }
+
   std::unique_ptr<AwPermissionManagerForTesting> manager;
 
   // Use nullptr for testing. AwPermissionManagerForTesting override all methods
   // that touch RenderFrameHost to work with nullptr.
-  content::RenderFrameHost* render_frame_host;
+  raw_ptr<content::RenderFrameHost> render_frame_host;
 
   std::vector<PermissionStatus> resolved_permission_status;
   std::vector<int> resolved_permission_request_id;
@@ -214,11 +252,52 @@ class AwPermissionManagerTest : public testing::Test {
 
 // The most simple test, PermissionType::MIDI is hard-coded to be granted.
 TEST_F(AwPermissionManagerTest, MIDIPermissionIsGrantedSynchronously) {
-  int request_id = manager->RequestPermission(
-      PermissionType::MIDI, render_frame_host, GURL(kRequestingOrigin1), true,
+  RequestPermissions(
+      {PermissionType::MIDI}, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 0));
-  EXPECT_EQ(kNoPendingOperation, request_id);
+  ASSERT_EQ(1u, resolved_permission_status.size());
+  EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
+}
+
+TEST_F(AwPermissionManagerTest, ClipboardPermissionIsGrantedSynchronously) {
+  RequestPermissions(
+      {PermissionType::CLIPBOARD_SANITIZED_WRITE}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
+      base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
+                     base::Unretained(this), 0));
+  ASSERT_EQ(1u, resolved_permission_status.size());
+  EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
+}
+
+TEST_F(AwPermissionManagerTest,
+       LocalNetworkAccessPermissionIsGrantedSynchronously) {
+  RequestPermissions(
+      {PermissionType::LOCAL_NETWORK_ACCESS}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
+      base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
+                     base::Unretained(this), 0));
+  ASSERT_EQ(1u, resolved_permission_status.size());
+  EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
+}
+
+TEST_F(AwPermissionManagerTest, LocalAccessPermissionIsGrantedSynchronously) {
+  RequestPermissions(
+      {PermissionType::LOCAL_NETWORK}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
+      base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
+                     base::Unretained(this), 0));
+  ASSERT_EQ(1u, resolved_permission_status.size());
+  EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
+}
+
+TEST_F(AwPermissionManagerTest,
+       LoopbackAccessPermissionIsGrantedSynchronously) {
+  RequestPermissions(
+      {PermissionType::LOOPBACK_NETWORK}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
+      base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
+                     base::Unretained(this), 0));
   ASSERT_EQ(1u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
 }
@@ -229,24 +308,22 @@ TEST_F(AwPermissionManagerTest, SinglePermissionRequestIsGrantedSynchronously) {
   // Permission should be granted in this scenario.
   manager->EnqueuePermissionResponse(kRequestingOrigin1,
                                      PermissionType::GEOLOCATION, true);
-  int request_id = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 0));
-  EXPECT_EQ(kNoPendingOperation, request_id);
   ASSERT_EQ(1u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
 
   // Permission should not be granted in this scenario.
   manager->EnqueuePermissionResponse(kRequestingOrigin1,
                                      PermissionType::GEOLOCATION, false);
-  request_id = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 0));
-  EXPECT_EQ(kNoPendingOperation, request_id);
   ASSERT_EQ(2u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::DENIED, resolved_permission_status[1]);
 }
@@ -255,12 +332,11 @@ TEST_F(AwPermissionManagerTest, SinglePermissionRequestIsGrantedSynchronously) {
 // asynchronously.
 TEST_F(AwPermissionManagerTest,
        SinglePermissionRequestIsGrantedAsynchronously) {
-  int request_id = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 0));
-  EXPECT_NE(kNoPendingOperation, request_id);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
   // This will resolve the permission.
@@ -274,13 +350,11 @@ TEST_F(AwPermissionManagerTest,
 // Test the case a delegate is called, and the manager is deleted before the
 // delegate callback is invoked.
 TEST_F(AwPermissionManagerTest, ManagerIsDeletedWhileDelegateProcesses) {
-  int request_id = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 0));
-
-  EXPECT_NE(kNoPendingOperation, request_id);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
   // Delete the manager.
@@ -294,21 +368,18 @@ TEST_F(AwPermissionManagerTest, ManagerIsDeletedWhileDelegateProcesses) {
 // second permission is also resolved when the first permission is resolved.
 TEST_F(AwPermissionManagerTest,
        MultiplePermissionRequestsAreGrantedTogether) {
-  int request_1 = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 1));
-  EXPECT_NE(kNoPendingOperation, request_1);
 
-  int request_2 = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 2));
-  EXPECT_NE(kNoPendingOperation, request_2);
 
-  EXPECT_NE(request_1, request_2);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
   // This will resolve the permission.
@@ -324,21 +395,18 @@ TEST_F(AwPermissionManagerTest,
 // each permission is resolved respectively in the requested order.
 TEST_F(AwPermissionManagerTest,
        MultiplePermissionRequestsAreGrantedRespectively) {
-  int request_1 = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 1));
-  EXPECT_NE(kNoPendingOperation, request_1);
 
-  int request_2 = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin2),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin2), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 2));
-  EXPECT_NE(kNoPendingOperation, request_2);
 
-  EXPECT_NE(request_1, request_2);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
   // This will resolve the first request.
@@ -366,11 +434,10 @@ TEST_F(AwPermissionManagerTest,
   std::vector<PermissionType> permissions = {PermissionType::MIDI,
                                              PermissionType::MIDI_SYSEX};
 
-  int request_id = manager->RequestPermissions(
+  RequestPermissions(
       permissions, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 0));
-  EXPECT_EQ(kNoPendingOperation, request_id);
 
   ASSERT_EQ(2u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
@@ -385,11 +452,10 @@ TEST_F(AwPermissionManagerTest,
   std::vector<PermissionType> permissions = {PermissionType::MIDI,
                                              PermissionType::MIDI_SYSEX};
 
-  int request_id = manager->RequestPermissions(
+  RequestPermissions(
       permissions, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 0));
-  EXPECT_NE(kNoPendingOperation, request_id);
 
   // PermissionType::MIDI is resolved synchronously, but all permissions result
   // are notified together when all permissions are resolved.
@@ -413,18 +479,16 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario1) {
   std::vector<PermissionType> permissions_1 = {PermissionType::MIDI,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_1 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_1, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 1));
-  EXPECT_NE(kNoPendingOperation, request_1);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
-  int request_2 = manager->RequestPermission(
-      PermissionType::MIDI, render_frame_host, GURL(kRequestingOrigin1), true,
+  RequestPermissions(
+      {PermissionType::MIDI}, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 2));
-  EXPECT_EQ(kNoPendingOperation, request_2);
   ASSERT_EQ(1u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
   EXPECT_EQ(2, resolved_permission_request_id[0]);
@@ -443,11 +507,10 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario1) {
   std::vector<PermissionType> permissions_2 = {PermissionType::GEOLOCATION,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_3 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_2, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 3));
-  EXPECT_NE(kNoPendingOperation, request_3);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
   // The permission A is resolved, but the first request isn't finished.
@@ -455,14 +518,13 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario1) {
                                      PermissionType::GEOLOCATION, false);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
-  int request_4 = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin1),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 4));
   // The second request is finished first by using the resolved result for the
   // first request.
-  EXPECT_EQ(kNoPendingOperation, request_4);
   ASSERT_EQ(4u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::DENIED, resolved_permission_status[3]);
   EXPECT_EQ(4, resolved_permission_request_id[3]);
@@ -489,18 +551,16 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario2) {
   std::vector<PermissionType> permissions_1 = {PermissionType::MIDI,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_1 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_1, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 1));
-  EXPECT_NE(kNoPendingOperation, request_1);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
-  int request_2 = manager->RequestPermission(
-      PermissionType::MIDI, render_frame_host, GURL(kRequestingOrigin2), true,
+  RequestPermissions(
+      {PermissionType::MIDI}, render_frame_host, GURL(kRequestingOrigin2), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 2));
-  EXPECT_EQ(kNoPendingOperation, request_2);
   ASSERT_EQ(1u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[0]);
   EXPECT_EQ(2, resolved_permission_request_id[0]);
@@ -519,11 +579,10 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario2) {
   std::vector<PermissionType> permissions_2 = {PermissionType::GEOLOCATION,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_3 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_2, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 3));
-  EXPECT_NE(kNoPendingOperation, request_3);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
   // The permission A is resolved, but the first request isn't finished.
@@ -535,12 +594,11 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario2) {
   // request isn't finished.
   manager->EnqueuePermissionResponse(kRequestingOrigin2,
                                      PermissionType::GEOLOCATION, true);
-  int request_4 = manager->RequestPermission(
-      PermissionType::GEOLOCATION, render_frame_host, GURL(kRequestingOrigin2),
-      true,
+  RequestPermissions(
+      {PermissionType::GEOLOCATION}, render_frame_host,
+      GURL(kRequestingOrigin2), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 4));
-  EXPECT_EQ(kNoPendingOperation, request_4);
   ASSERT_EQ(4u, resolved_permission_status.size());
   EXPECT_EQ(PermissionStatus::GRANTED, resolved_permission_status[3]);
   EXPECT_EQ(4, resolved_permission_request_id[3]);
@@ -566,19 +624,17 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario3) {
   std::vector<PermissionType> permissions_1 = {PermissionType::MIDI,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_1 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_1, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 1));
-  EXPECT_NE(kNoPendingOperation, request_1);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
-  int request_2 = manager->RequestPermission(
-      PermissionType::MIDI_SYSEX, render_frame_host, GURL(kRequestingOrigin1),
+  RequestPermissions(
+      {PermissionType::MIDI_SYSEX}, render_frame_host, GURL(kRequestingOrigin1),
       true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 2));
-  EXPECT_NE(kNoPendingOperation, request_2);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
   // Resolving the first request results in both requests finished.
@@ -600,11 +656,10 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario3) {
   std::vector<PermissionType> permissions_2 = {PermissionType::GEOLOCATION,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_3 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_2, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 3));
-  EXPECT_NE(kNoPendingOperation, request_3);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
   // The permission B is resolved, but the first request isn't finished.
@@ -612,12 +667,11 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario3) {
                                      PermissionType::GEOLOCATION, false);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
-  int request_4 = manager->RequestPermission(
-      PermissionType::MIDI_SYSEX, render_frame_host, GURL(kRequestingOrigin1),
+  RequestPermissions(
+      {PermissionType::MIDI_SYSEX}, render_frame_host, GURL(kRequestingOrigin1),
       true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 4));
-  EXPECT_NE(kNoPendingOperation, request_4);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
   // Resolving the first request results in both requests finished.
@@ -644,19 +698,17 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario4) {
   std::vector<PermissionType> permissions_1 = {PermissionType::MIDI,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_1 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_1, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 1));
-  EXPECT_NE(kNoPendingOperation, request_1);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
-  int request_2 = manager->RequestPermission(
-      PermissionType::MIDI_SYSEX, render_frame_host, GURL(kRequestingOrigin2),
+  RequestPermissions(
+      {PermissionType::MIDI_SYSEX}, render_frame_host, GURL(kRequestingOrigin2),
       true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 2));
-  EXPECT_NE(kNoPendingOperation, request_2);
   EXPECT_EQ(0u, resolved_permission_status.size());
 
   // The second request could be resolved synchronously even if the first
@@ -681,11 +733,10 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario4) {
   std::vector<PermissionType> permissions_2 = {PermissionType::GEOLOCATION,
                                                PermissionType::MIDI_SYSEX};
 
-  int request_3 = manager->RequestPermissions(
+  RequestPermissions(
       permissions_2, render_frame_host, GURL(kRequestingOrigin1), true,
       base::BindOnce(&AwPermissionManagerTest::PermissionsRequestResponse,
                      base::Unretained(this), 3));
-  EXPECT_NE(kNoPendingOperation, request_3);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
   // The permission B is resolved, but the first request isn't finished.
@@ -693,12 +744,11 @@ TEST_F(AwPermissionManagerTest, ComplicatedRequestScenario4) {
                                      PermissionType::GEOLOCATION, false);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
-  int request_4 = manager->RequestPermission(
-      PermissionType::MIDI_SYSEX, render_frame_host, GURL(kRequestingOrigin2),
+  RequestPermissions(
+      {PermissionType::MIDI_SYSEX}, render_frame_host, GURL(kRequestingOrigin2),
       true,
       base::BindOnce(&AwPermissionManagerTest::PermissionRequestResponse,
                      base::Unretained(this), 4));
-  EXPECT_NE(kNoPendingOperation, request_4);
   ASSERT_EQ(3u, resolved_permission_status.size());
 
   // The second request could be resolved synchronously even if the first

@@ -2,10 +2,9 @@
 niklase@chromium.org
 
 # The following OWNER refer to libwebm content.
-tomfinegan@chromium.org
+jzern@chromium.org
+jzern@google.com
 
 # Original (legacy) owner.
 emircan@chromium.org
 mcasas@chromium.org
-
-# COMPONENT: Blink>MediaRecording

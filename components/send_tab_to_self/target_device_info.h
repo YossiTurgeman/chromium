@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <string>
 
 #include "base/time/time.h"
-#include "components/sync/protocol/sync.pb.h"
+#include "components/sync_device_info/device_info.h"
 
 namespace syncer {
 class DeviceInfo;
@@ -16,40 +16,38 @@ class DeviceInfo;
 
 namespace send_tab_to_self {
 
-struct SharingDeviceNames {
-  std::string full_name;
-  std::string short_name;
-};
-
 // Device information for generating send tab to self UI.
 struct TargetDeviceInfo {
  public:
-  TargetDeviceInfo(const std::string& full_name,
-                   const std::string& short_name,
-                   const std::string& cache_guid,
-                   const sync_pb::SyncEnums::DeviceType device_type,
-                   base::Time last_updated_timestamp);
+  TargetDeviceInfo(std::string device_name,
+                   std::string cache_guid,
+                   const syncer::DeviceInfo::FormFactor form_factor,
+                   base::Time last_updated_timestamp,
+                   bool has_high_precision_timestamp = false);
   TargetDeviceInfo(const TargetDeviceInfo& other);
   ~TargetDeviceInfo();
 
   bool operator==(const TargetDeviceInfo& rhs) const;
 
-  // Device full name.
-  std::string full_name;
-  // Device short name.
-  std::string short_name;
-  // Device name
+  // Returns a localized string representing the time since the device was last
+  // updated.
+  // The string is formatted as follows:
+  // - "< 1 minute": "Active now"
+  // - ">= 1 minute": "Active X minutes/hours/days ago"
+  std::u16string GetLastActiveTimeForDisplay() const;
+
+  // Device display name.
   std::string device_name;
   // Device guid.
   std::string cache_guid;
-  // Device type.
-  sync_pb::SyncEnums::DeviceType device_type;
+  // Device Form Factor.
+  syncer::DeviceInfo::FormFactor form_factor;
   // Last updated timestamp.
   base::Time last_updated_timestamp;
+  // Whether the device timestamp is highly precise (e.g. from sessions sync)
+  // rather than just day-granularity.
+  bool has_high_precision_timestamp;
 };
-
-// Returns full and short names for |device|.
-SharingDeviceNames GetSharingDeviceNames(const syncer::DeviceInfo* device);
 
 }  // namespace send_tab_to_self
 

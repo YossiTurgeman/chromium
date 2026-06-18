@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,7 @@ constexpr char kAnchorAlreadyDeleted[] =
 
 namespace blink {
 
-XRAnchor::XRAnchor(uint64_t id,
+XRAnchor::XRAnchor(device::AnchorId id,
                    XRSession* session,
                    const device::mojom::blink::XRAnchorData& anchor_data)
     : id_(id),
@@ -41,7 +41,7 @@ void XRAnchor::Update(const device::mojom::blink::XRAnchorData& anchor_data) {
   mojo_from_anchor_ = anchor_data.mojo_from_anchor;
 }
 
-uint64_t XRAnchor::id() const {
+device::AnchorId XRAnchor::id() const {
   return id_;
 }
 
@@ -60,18 +60,24 @@ XRSpace* XRAnchor::anchorSpace(ExceptionState& exception_state) const {
         MakeGarbageCollected<XRObjectSpace<XRAnchor>>(session_, this);
   }
 
-  return anchor_space_;
+  return anchor_space_.Get();
 }
 
-base::Optional<TransformationMatrix> XRAnchor::MojoFromObject() const {
+device::mojom::blink::XRNativeOriginInformationPtr XRAnchor::NativeOrigin()
+    const {
+  return device::mojom::blink::XRNativeOriginInformation::NewAnchorId(
+      this->id());
+}
+
+std::optional<gfx::Transform> XRAnchor::MojoFromObject() const {
   DVLOG(3) << __func__ << ": id_=" << id_;
 
   if (!mojo_from_anchor_) {
     DVLOG(3) << __func__ << ": id_=" << id_ << ", mojo_from_anchor_ is not set";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  return mojo_from_anchor_->ToTransform().matrix();
+  return mojo_from_anchor_->ToTransform();
 }
 
 void XRAnchor::Delete() {
@@ -79,7 +85,7 @@ void XRAnchor::Delete() {
 
   if (!is_deleted_) {
     session_->xr()->xrEnvironmentProviderRemote()->DetachAnchor(id_);
-    mojo_from_anchor_ = base::nullopt;
+    mojo_from_anchor_ = std::nullopt;
     anchor_space_ = nullptr;
   }
 

@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,12 +10,13 @@
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
-#include "chrome/browser/extensions/extension_apitest.h"
+#include "base/auto_reset.h"
+#include "build/build_config.h"
+#include "chrome/browser/extensions/mixin_based_extension_apitest.h"
 #include "extensions/browser/app_window/app_window.h"
 
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/media/router/test/mock_media_router.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "components/media_router/browser/test/mock_media_router.h"
 #endif
 
 namespace base {
@@ -33,9 +34,11 @@ class ExtensionTestMessageListener;
 namespace extensions {
 class Extension;
 
-class PlatformAppBrowserTest : public ExtensionApiTest {
+class PlatformAppBrowserTest : public MixinBasedExtensionApiTest {
  public:
   PlatformAppBrowserTest();
+  PlatformAppBrowserTest(const PlatformAppBrowserTest&) = delete;
+  PlatformAppBrowserTest& operator=(const PlatformAppBrowserTest&) = delete;
   ~PlatformAppBrowserTest() override;
 
   void SetUpCommandLine(base::CommandLine* command_line) override;
@@ -120,6 +123,9 @@ class PlatformAppBrowserTest : public ExtensionApiTest {
       const gfx::Size& minimum_size,
       gfx::Rect* bounds);
 
+  // Call SetNativeWindowFullscreen of |window|.
+  void SetNativeWindowFullscreenForTesting(AppWindow* window);
+
   // Load a simple test app and create a window. The window must be closed by
   // the caller in order to terminate the test - use CloseAppWindow().
   // |window_create_options| are the options that will be passed to
@@ -130,11 +136,10 @@ class PlatformAppBrowserTest : public ExtensionApiTest {
   NativeAppWindow* GetNativeAppWindowForAppWindow(AppWindow* window);
 
  private:
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<media_router::MockMediaRouter> media_router_;
 #endif
-
-  DISALLOW_COPY_AND_ASSIGN(PlatformAppBrowserTest);
+  base::AutoReset<bool> enable_chrome_apps_;
 };
 
 class ExperimentalPlatformAppBrowserTest : public PlatformAppBrowserTest {

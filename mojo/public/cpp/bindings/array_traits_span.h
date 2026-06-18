@@ -1,12 +1,13 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef MOJO_PUBLIC_CPP_BINDINGS_ARRAY_TRAITS_CARRAY_H_
-#define MOJO_PUBLIC_CPP_BINDINGS_ARRAY_TRAITS_CARRAY_H_
+#ifndef MOJO_PUBLIC_CPP_BINDINGS_ARRAY_TRAITS_SPAN_H_
+#define MOJO_PUBLIC_CPP_BINDINGS_ARRAY_TRAITS_SPAN_H_
 
 #include <cstddef>
 
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "mojo/public/cpp/bindings/array_traits.h"
 
@@ -23,21 +24,22 @@ struct ArrayTraits<base::span<T, Extent>> {
   static const T* GetData(const base::span<T>& input) { return input.data(); }
 
   static T& GetAt(base::span<T>& input, size_t index) {
-    return input.data()[index];
+    return UNSAFE_TODO(input.data()[index]);
   }
 
   static const T& GetAt(const base::span<T>& input, size_t index) {
-    return input.data()[index];
+    return UNSAFE_TODO(input.data()[index]);
   }
 
   static bool Resize(base::span<T>& input, size_t size) {
-    if (size > input.size())
+    if (size > input.size()) {
       return false;
-    input = input.subspan(0, size);
+    }
+    input = input.first(size);
     return true;
   }
 };
 
 }  // namespace mojo
 
-#endif  // MOJO_PUBLIC_CPP_BINDINGS_ARRAY_TRAITS_CARRAY_H_
+#endif  // MOJO_PUBLIC_CPP_BINDINGS_ARRAY_TRAITS_SPAN_H_

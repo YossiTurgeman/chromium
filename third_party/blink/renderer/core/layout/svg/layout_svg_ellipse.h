@@ -28,6 +28,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_ELLIPSE_H_
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_shape.h"
+#include "ui/gfx/geometry/point_f.h"
 
 namespace blink {
 
@@ -36,30 +37,31 @@ class LayoutSVGEllipse final : public LayoutSVGShape {
   explicit LayoutSVGEllipse(SVGGeometryElement*);
   ~LayoutSVGEllipse() override;
 
-  ShapeGeometryCodePath GeometryCodePath() const override {
-    return use_path_fallback_ ? kPathGeometry : kEllipseGeometryFastPath;
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutSVGEllipse";
   }
-
-  const char* GetName() const override { return "LayoutSVGEllipse"; }
 
  private:
-  void UpdateShapeFromElement() override;
-  bool IsShapeEmpty() const override {
-    return use_path_fallback_ ? LayoutSVGShape::IsShapeEmpty()
-                              : fill_bounding_box_.IsEmpty();
-  }
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const StyleChangeContext&) override;
+
+  gfx::RectF UpdateShapeFromElement() override;
   bool ShapeDependentStrokeContains(const HitTestLocation&) override;
   bool ShapeDependentFillContains(const HitTestLocation&,
                                   const WindRule) const override;
+  bool CalculateGeometryDependsOnViewport() const;
   void CalculateRadiiAndCenter();
+  bool CanUseStrokeHitTestFastPath() const;
   bool HasContinuousStroke() const;
 
  private:
-  FloatPoint center_;
-  FloatSize radii_;
-  bool use_path_fallback_;
+  gfx::PointF center_;
+  float radius_x_ = 0;
+  float radius_y_ = 0;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_ELLIPSE_H_

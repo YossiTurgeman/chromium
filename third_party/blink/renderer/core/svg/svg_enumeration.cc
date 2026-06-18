@@ -30,15 +30,10 @@
 
 #include "third_party/blink/renderer/core/svg/svg_enumeration.h"
 
+#include "base/notreached.h"
 #include "third_party/blink/renderer/core/svg/svg_enumeration_map.h"
 
 namespace blink {
-
-SVGPropertyBase* SVGEnumeration::CloneForAnimation(const String& value) const {
-  SVGEnumeration* svg_enumeration = Clone();
-  svg_enumeration->SetValueAsString(value);
-  return svg_enumeration;
-}
 
 String SVGEnumeration::ValueAsString() const {
   if (const char* enum_name = map_.NameFromValue(value_))
@@ -71,7 +66,7 @@ uint16_t SVGEnumeration::MaxInternalEnumValue() const {
   return map_.ValueOfLast();
 }
 
-void SVGEnumeration::Add(const SVGPropertyBase*, const SVGElement*) {
+bool SVGEnumeration::Add(const SVGPropertyBase*, const SVGElement*) {
   NOTREACHED();
 }
 

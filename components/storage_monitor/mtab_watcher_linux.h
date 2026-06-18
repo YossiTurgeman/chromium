@@ -1,22 +1,21 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_STORAGE_MONITOR_MTAB_WATCHER_LINUX_H_
 #define COMPONENTS_STORAGE_MONITOR_MTAB_WATCHER_LINUX_H_
 
-#if defined(OS_CHROMEOS)
-#error "ChromeOS does not use MtabWatcherLinux."
-#endif
-
 #include <map>
 
 #include "base/files/file_path.h"
 #include "base/files/file_path_watcher.h"
-#include "base/macros.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "build/build_config.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#error "ChromeOS does not use MtabWatcherLinux."
+#endif
 
 namespace storage_monitor {
 
@@ -37,6 +36,10 @@ class MtabWatcherLinux {
   // Caller is responsible for bouncing to the correct sequence.
   MtabWatcherLinux(const base::FilePath& mtab_path,
                    const UpdateMtabCallback& callback);
+
+  MtabWatcherLinux(const MtabWatcherLinux&) = delete;
+  MtabWatcherLinux& operator=(const MtabWatcherLinux&) = delete;
+
   ~MtabWatcherLinux();
 
  private:
@@ -57,8 +60,6 @@ class MtabWatcherLinux {
   SEQUENCE_CHECKER(sequence_checker_);
 
   base::WeakPtrFactory<MtabWatcherLinux> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(MtabWatcherLinux);
 };
 
 }  // namespace storage_monitor

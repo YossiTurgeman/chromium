@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,7 @@ PerformanceObserverEntryList::~PerformanceObserverEntryList() = default;
 PerformanceEntryVector PerformanceObserverEntryList::getEntries() const {
   PerformanceEntryVector entries;
 
-  entries.AppendVector(performance_entries_);
+  entries.append_range(performance_entries_);
 
   std::sort(entries.begin(), entries.end(),
             PerformanceEntry::StartTimeCompareLessThan);

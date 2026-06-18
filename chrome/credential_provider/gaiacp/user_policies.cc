@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,22 +7,22 @@
 #include <limits>
 
 #include "base/strings/utf_string_conversions.h"
+#include "base/values.h"
 #include "chrome/credential_provider/common/gcp_strings.h"
 #include "chrome/credential_provider/gaiacp/device_policies.h"
 #include "chrome/credential_provider/gaiacp/gcp_utils.h"
 #include "chrome/credential_provider/gaiacp/gcpw_strings.h"
-#include "chrome/credential_provider/gaiacp/mdm_utils.h"
 #include "chrome/credential_provider/gaiacp/reg_utils.h"
 
 namespace credential_provider {
 namespace {
 
 // Parameter names that are used in the JSON payload of the response.
-const char kGcpwPolicyDmEnrollmentParameterName[] = "enable_dm_enrollment";
-const char kGcpwPolicyAutoUpdateParameterName[] = "enable_gcpw_auto_update";
-const char kGcpwPolicyPinnerVersionParameterName[] = "gcpw_pinned_version";
-const char kGcpwPolicMultiUserLoginParameterName[] = "enable_multi_user_login";
-const char kGcpwPolicyValidityPeriodParameterName[] = "validity_period_days";
+const char kGcpwPolicyDmEnrollmentParameterName[] = "enableDmEnrollment";
+const char kGcpwPolicyAutoUpdateParameterName[] = "enableGcpwAutoUpdate";
+const char kGcpwPolicyPinnerVersionParameterName[] = "gcpwPinnedVersion";
+const char kGcpwPolicMultiUserLoginParameterName[] = "enableMultiUserLogin";
+const char kGcpwPolicyValidityPeriodParameterName[] = "validityPeriodDays";
 
 // Default value of each user policy.
 constexpr bool kUserPolicyDefaultDeviceEnrollment = true;
@@ -46,7 +46,7 @@ UserPolicies::UserPolicies()
 
   // Override with existing registry entry if any.
   DWORD reg_validity_period_days;
-  HRESULT hr = GetGlobalFlag(base::UTF8ToUTF16(kKeyValidityPeriodInDays),
+  HRESULT hr = GetGlobalFlag(base::UTF8ToWide(kKeyValidityPeriodInDays),
                              &reg_validity_period_days);
   if (SUCCEEDED(hr)) {
     validity_period_days = reg_validity_period_days;
@@ -54,37 +54,35 @@ UserPolicies::UserPolicies()
 }
 
 // static
-UserPolicies UserPolicies::FromValue(const base::Value& dict) {
-  DCHECK(dict.is_dict());
-
+UserPolicies UserPolicies::FromValue(const base::DictValue& dict) {
   UserPolicies user_policies;
 
-  base::Optional<bool> dm_enrollment =
-      dict.FindBoolKey(kGcpwPolicyDmEnrollmentParameterName);
+  std::optional<bool> dm_enrollment =
+      dict.FindBool(kGcpwPolicyDmEnrollmentParameterName);
   if (dm_enrollment) {
     user_policies.enable_dm_enrollment = *dm_enrollment;
   }
 
-  base::Optional<bool> gcpw_auto_update =
-      dict.FindBoolKey(kGcpwPolicyAutoUpdateParameterName);
+  std::optional<bool> gcpw_auto_update =
+      dict.FindBool(kGcpwPolicyAutoUpdateParameterName);
   if (gcpw_auto_update) {
     user_policies.enable_gcpw_auto_update = *gcpw_auto_update;
   }
 
   const std::string* pin_version =
-      dict.FindStringKey(kGcpwPolicyPinnerVersionParameterName);
+      dict.FindString(kGcpwPolicyPinnerVersionParameterName);
   if (pin_version) {
     user_policies.gcpw_pinned_version = GcpwVersion(*pin_version);
   }
 
-  base::Optional<bool> multi_user_login =
-      dict.FindBoolKey(kGcpwPolicMultiUserLoginParameterName);
+  std::optional<bool> multi_user_login =
+      dict.FindBool(kGcpwPolicMultiUserLoginParameterName);
   if (multi_user_login) {
     user_policies.enable_multi_user_login = *multi_user_login;
   }
 
-  base::Optional<int> validity_period_days =
-      dict.FindIntKey(kGcpwPolicyValidityPeriodParameterName);
+  std::optional<int> validity_period_days =
+      dict.FindInt(kGcpwPolicyValidityPeriodParameterName);
   if (validity_period_days) {
     user_policies.validity_period_days = *validity_period_days;
   }
@@ -93,15 +91,14 @@ UserPolicies UserPolicies::FromValue(const base::Value& dict) {
 }
 
 base::Value UserPolicies::ToValue() const {
-  base::Value dict(base::Value::Type::DICTIONARY);
-  dict.SetBoolKey(kGcpwPolicyDmEnrollmentParameterName, enable_dm_enrollment);
-  dict.SetBoolKey(kGcpwPolicyAutoUpdateParameterName, enable_gcpw_auto_update);
-  dict.SetStringKey(kGcpwPolicyPinnerVersionParameterName,
-                    gcpw_pinned_version.ToString());
-  dict.SetBoolKey(kGcpwPolicMultiUserLoginParameterName,
-                  enable_multi_user_login);
-  dict.SetIntKey(kGcpwPolicyValidityPeriodParameterName, validity_period_days);
-  return dict;
+  base::DictValue dict;
+  dict.Set(kGcpwPolicyDmEnrollmentParameterName, enable_dm_enrollment);
+  dict.Set(kGcpwPolicyAutoUpdateParameterName, enable_gcpw_auto_update);
+  dict.Set(kGcpwPolicyPinnerVersionParameterName,
+           gcpw_pinned_version.ToString());
+  dict.Set(kGcpwPolicMultiUserLoginParameterName, enable_multi_user_login);
+  dict.Set(kGcpwPolicyValidityPeriodParameterName, (int)validity_period_days);
+  return base::Value(std::move(dict));
 }
 
 bool UserPolicies::operator==(const UserPolicies& other) const {

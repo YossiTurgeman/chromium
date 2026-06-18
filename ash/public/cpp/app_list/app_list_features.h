@@ -1,122 +1,62 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_PUBLIC_CPP_APP_LIST_APP_LIST_FEATURES_H_
 #define ASH_PUBLIC_CPP_APP_LIST_APP_LIST_FEATURES_H_
 
-#include <string>
-
 #include "ash/public/cpp/ash_public_export.h"
-
-namespace base {
-struct Feature;
-}
+#include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
+#include "base/time/time.h"
 
 namespace app_list_features {
 
 // Please keep these features sorted.
 // TODO(newcomer|weidongg): Sort these features.
 
-// Enables the answer card in the app list.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAnswerCard;
-
-// Enables the Play Store app search.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnablePlayStoreAppSearch;
-
-// Enables in-app data search.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAppDataSearch;
-
-// Enables the Settings shortcut search.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableSettingsShortcutSearch;
-
-// Enables the feature to display zero state suggestions.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableZeroStateSuggestions;
-
-// Enables the feature to autocomplete text typed in the AppList search box.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAppListSearchAutocomplete;
-
-// Enable app ranking models.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAppRanker;
-
-// Enable a model that ranks zero-state apps search result.
-// TODO(crbug.com/989350): This flag can be removed once the
-// AppSearchResultRanker is removed. Same with the
-// AppSearchResultRankerPredictorName.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableZeroStateAppsRanker;
-
-// Enable a model that ranks query based non-apps result.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableQueryBasedMixedTypesRanker;
-
-// Enable a model that ranks zero-state files and recent queries.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableZeroStateMixedTypesRanker;
-
-// Enables the feature to include a single reinstallation candidate in
-// zero-state.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAppReinstallZeroState;
-
-// Enables file suggestions in the suggestion chips.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableSuggestedFiles;
-
-// Enables the Assistant search redirection in the app list.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAssistantSearch;
-
-// Enables ghosting in any AppsGridView (folder or root) when dragging an item.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAppGridGhost;
-
 // Enables hashed recording of a app list launches.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAppListLaunchRecording;
-
-// Enables using the aggregated Ml model to rank suggested apps.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAggregatedMlAppRanking;
-
-// Enables using the fuzzy search algorithm for app search provider.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableFuzzyAppSearch;
+ASH_PUBLIC_EXPORT BASE_DECLARE_FEATURE(kEnableAppListLaunchRecording);
 
 // Enables using exact string search for non latin locales.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableExactMatchForNonLatinLocale;
+ASH_PUBLIC_EXPORT BASE_DECLARE_FEATURE(kEnableExactMatchForNonLatinLocale);
 
-// Enables launcher search results for OS settings.
-ASH_PUBLIC_EXPORT extern const base::Feature kLauncherSettingsSearch;
+// Forces the launcher to show the continue section even if there are no file
+// suggestions.
+ASH_PUBLIC_EXPORT BASE_DECLARE_FEATURE(kForceShowContinueSection);
 
-// Enables using aggregated model in ranking non-app results for
-// non empty queries.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableAggregatedMlSearchRanking;
+// Enable shortened search result update animations when in progress animations
+// are interrupted by search model updates.
+ASH_PUBLIC_EXPORT BASE_DECLARE_FEATURE(kDynamicSearchUpdateAnimation);
 
-// Enables the new app dragging in the launcher. When the users drags an app
-// within the launcher, this flag will enable the new cardified state, where
-// apps grid pages are scaled down and shown a background card.
-ASH_PUBLIC_EXPORT extern const base::Feature kNewDragSpecInLauncher;
+// Enables Play Store search in the launcher.
+ASH_PUBLIC_EXPORT BASE_DECLARE_FEATURE(kLauncherPlayStoreSearch);
 
-// Enables rich entity formatting for Omnibox results in the launcher.
-ASH_PUBLIC_EXPORT extern const base::Feature kEnableOmniboxRichEntities;
+// Enables the Launcher Apps Collection UI in ChromeOS - a modular view with
+// different categories filled with predefined apps.
+ASH_PUBLIC_EXPORT BASE_DECLARE_FEATURE(kAppsCollections);
 
-bool ASH_PUBLIC_EXPORT IsAnswerCardEnabled();
-bool ASH_PUBLIC_EXPORT IsPlayStoreAppSearchEnabled();
-bool ASH_PUBLIC_EXPORT IsAppDataSearchEnabled();
-bool ASH_PUBLIC_EXPORT IsSettingsShortcutSearchEnabled();
-bool ASH_PUBLIC_EXPORT IsZeroStateSuggestionsEnabled();
-bool ASH_PUBLIC_EXPORT IsAppListSearchAutocompleteEnabled();
-bool ASH_PUBLIC_EXPORT IsAppRankerEnabled();
-bool ASH_PUBLIC_EXPORT IsZeroStateAppsRankerEnabled();
-bool ASH_PUBLIC_EXPORT IsQueryBasedMixedTypesRankerEnabled();
-bool ASH_PUBLIC_EXPORT IsZeroStateMixedTypesRankerEnabled();
-bool ASH_PUBLIC_EXPORT IsAppReinstallZeroStateEnabled();
-bool ASH_PUBLIC_EXPORT IsSuggestedFilesEnabled();
-bool ASH_PUBLIC_EXPORT IsAssistantSearchEnabled();
-bool ASH_PUBLIC_EXPORT IsAppGridGhostEnabled();
-bool ASH_PUBLIC_EXPORT IsAppListLaunchRecordingEnabled();
-bool ASH_PUBLIC_EXPORT IsAggregatedMlAppRankingEnabled();
-bool ASH_PUBLIC_EXPORT IsFuzzyAppSearchEnabled();
-bool ASH_PUBLIC_EXPORT IsExactMatchForNonLatinLocaleEnabled();
-bool ASH_PUBLIC_EXPORT IsLauncherSettingsSearchEnabled();
-bool ASH_PUBLIC_EXPORT IsAggregatedMlSearchRankingEnabled();
-bool ASH_PUBLIC_EXPORT IsNewDragSpecInLauncherEnabled();
-bool ASH_PUBLIC_EXPORT IsOmniboxRichEntitiesEnabled();
+// Whether the Apps Collections is enabled counterfactually as part of an
+// experiment arm.
+const base::FeatureParam<bool> kAppsCollectionsEnabledCounterfactually{
+    &kAppsCollections, "is-counterfactual", false};
 
-std::string ASH_PUBLIC_EXPORT AnswerServerUrl();
-std::string ASH_PUBLIC_EXPORT AnswerServerQuerySuffix();
-std::string ASH_PUBLIC_EXPORT AppSearchResultRankerPredictorName();
+// Whether the Apps Collections is enabled counterfactually as part of an
+// experiment arm.
+const base::FeatureParam<bool> kAppsCollectionsEnabledWithModifiedOrder{
+    &kAppsCollections, "is-modified-order", false};
+
+ASH_PUBLIC_EXPORT bool IsAppListLaunchRecordingEnabled();
+ASH_PUBLIC_EXPORT bool IsExactMatchForNonLatinLocaleEnabled();
+ASH_PUBLIC_EXPORT bool IsForceShowContinueSectionEnabled();
+ASH_PUBLIC_EXPORT bool IsAggregatedMlSearchRankingEnabled();
+ASH_PUBLIC_EXPORT bool IsLauncherSearchNormalizationEnabled();
+ASH_PUBLIC_EXPORT bool IsDynamicSearchUpdateAnimationEnabled();
+ASH_PUBLIC_EXPORT base::TimeDelta DynamicSearchUpdateAnimationDuration();
+ASH_PUBLIC_EXPORT bool IsLauncherPlayStoreSearchEnabled();
+ASH_PUBLIC_EXPORT bool IsAppsCollectionsEnabled();
+ASH_PUBLIC_EXPORT bool IsAppsCollectionsEnabledCounterfactually();
+ASH_PUBLIC_EXPORT bool IsAppsCollectionsEnabledWithModifiedOrder();
 
 }  // namespace app_list_features
 

@@ -1,14 +1,15 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEVICE_FIDO_CBOR_EXTRACT_H_
 #define DEVICE_FIDO_CBOR_EXTRACT_H_
 
-#include "base/callback_forward.h"
+#include "base/compiler_specific.h"
 #include "base/component_export.h"
 #include "base/containers/span.h"
-#include "base/memory/checked_ptr.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "components/cbor/values.h"
 
 namespace device {
@@ -71,8 +72,6 @@ namespace cbor_extract {
 //        StringKey<MyObj>(), 'k', 'e', 'y', '\0',
 //      Stop<MyObj>(),
 //   };
-//
-// A map cannot be optional at this time, although that can be fixed later.
 //
 // The target structure names gets repeated a lot. That's C++ templates for you.
 //
@@ -162,9 +161,10 @@ constexpr StepOrByte<S> StringKey() {
 }
 
 template <typename S>
-constexpr StepOrByte<S> Map() {
+constexpr StepOrByte<S> Map(const Is required = Is::kRequired) {
   return StepOrByte<S>(
-      internal::Step(true, static_cast<uint8_t>(internal::Type::kMap), -1));
+      internal::Step(required == Is::kRequired,
+                     static_cast<uint8_t>(internal::Type::kMap), -1));
 }
 
 template <typename S>
@@ -217,23 +217,8 @@ constexpr StepOrByte<S> Element(const Is required,
 }
 
 template <typename S>
-constexpr StepOrByte<S> Element(
-    const Is required,
-    CheckedPtr<const std::vector<uint8_t>> S::*member,
-    uintptr_t offset) {
-  return ElementImpl<S>(required, offset, internal::Type::kBytestring);
-}
-
-template <typename S>
 constexpr StepOrByte<S> Element(const Is required,
                                 const std::string* S::*member,
-                                uintptr_t offset) {
-  return ElementImpl<S>(required, offset, internal::Type::kString);
-}
-
-template <typename S>
-constexpr StepOrByte<S> Element(const Is required,
-                                CheckedPtr<const std::string> S::*member,
                                 uintptr_t offset) {
   return ElementImpl<S>(required, offset, internal::Type::kString);
 }
@@ -247,23 +232,8 @@ constexpr StepOrByte<S> Element(const Is required,
 
 template <typename S>
 constexpr StepOrByte<S> Element(const Is required,
-                                CheckedPtr<const int64_t> S::*member,
-                                uintptr_t offset) {
-  return ElementImpl<S>(required, offset, internal::Type::kInt);
-}
-
-template <typename S>
-constexpr StepOrByte<S> Element(const Is required,
                                 const std::vector<cbor::Value>* S::*member,
                                 uintptr_t offset) {
-  return ElementImpl<S>(required, offset, internal::Type::kArray);
-}
-
-template <typename S>
-constexpr StepOrByte<S> Element(
-    const Is required,
-    CheckedPtr<const std::vector<cbor::Value>> S::*member,
-    uintptr_t offset) {
   return ElementImpl<S>(required, offset, internal::Type::kArray);
 }
 
@@ -276,21 +246,7 @@ constexpr StepOrByte<S> Element(const Is required,
 
 template <typename S>
 constexpr StepOrByte<S> Element(const Is required,
-                                CheckedPtr<const cbor::Value> S::*member,
-                                uintptr_t offset) {
-  return ElementImpl<S>(required, offset, internal::Type::kValue);
-}
-
-template <typename S>
-constexpr StepOrByte<S> Element(const Is required,
                                 const bool* S::*member,
-                                uintptr_t offset) {
-  return ElementImpl<S>(required, offset, internal::Type::kBoolean);
-}
-
-template <typename S>
-constexpr StepOrByte<S> Element(const Is required,
-                                CheckedPtr<const bool> S::*member,
                                 uintptr_t offset) {
   return ElementImpl<S>(required, offset, internal::Type::kBoolean);
 }
@@ -315,10 +271,10 @@ bool Extract(S* output,
                 "empty output structures are invalid, even if you just want to "
                 "check that maps exist, because the code unconditionally "
                 "indexes offset zero.");
-  base::span<const void*> outputs(reinterpret_cast<const void**>(output),
-                                  sizeof(S) / sizeof(void*));
-  base::span<const StepOrByte<void>> steps_void(
-      reinterpret_cast<const StepOrByte<void>*>(steps.data()), steps.size());
+  auto outputs = UNSAFE_TODO(base::span<const void*>(
+      reinterpret_cast<const void**>(output), sizeof(S) / sizeof(void*)));
+  auto steps_void = UNSAFE_TODO(base::span<const StepOrByte<void>>(
+      reinterpret_cast<const StepOrByte<void>*>(steps.data()), steps.size()));
   return internal::Extract(outputs, steps_void, map);
 }
 

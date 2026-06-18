@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,10 @@
 #define COMPONENTS_ASSIST_RANKER_RANKER_URL_FETCHER_H_
 
 #include <memory>
+#include <optional>
+#include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "url/gurl.h"
 
 namespace network {
@@ -35,6 +36,10 @@ class RankerURLFetcher {
   };
 
   RankerURLFetcher();
+
+  RankerURLFetcher(const RankerURLFetcher&) = delete;
+  RankerURLFetcher& operator=(const RankerURLFetcher&) = delete;
+
   ~RankerURLFetcher();
 
   int max_retry_on_5xx() { return max_retry_on_5xx_; }
@@ -52,7 +57,7 @@ class RankerURLFetcher {
   State state() { return state_; }
 
  private:
-  void OnSimpleLoaderComplete(std::unique_ptr<std::string> response_body);
+  void OnSimpleLoaderComplete(std::optional<std::string> response_body);
 
   // URL to send the request.
   GURL url_;
@@ -72,8 +77,6 @@ class RankerURLFetcher {
 
   // Max number how many times to retry on the server error
   int max_retry_on_5xx_;
-
-  DISALLOW_COPY_AND_ASSIGN(RankerURLFetcher);
 };
 
 }  // namespace assist_ranker

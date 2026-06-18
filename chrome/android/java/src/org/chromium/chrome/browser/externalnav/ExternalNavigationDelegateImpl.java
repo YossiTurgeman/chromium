@@ -1,8 +1,11 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.externalnav;
+
+import static org.chromium.build.NullUtil.assertNonNull;
+import static org.chromium.build.NullUtil.assumeNonNull;
 
 import android.app.Activity;
 import android.content.Context;
@@ -10,64 +13,80 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
-import android.provider.Browser;
-import android.text.TextUtils;
+import android.os.Build;
 
-import androidx.annotation.Nullable;
-
+import org.chromium.base.ApkInfo;
 import org.chromium.base.ApplicationState;
 import org.chromium.base.ApplicationStatus;
+import org.chromium.base.Callback;
 import org.chromium.base.ContextUtils;
+import org.chromium.base.DeviceInfo;
+import org.chromium.base.IntentUtils;
 import org.chromium.base.PackageManagerUtils;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.ChromeTabbedActivity2;
 import org.chromium.chrome.browser.IntentHandler;
-import org.chromium.chrome.browser.LaunchIntentDispatcher;
-import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.autofill_assistant.AutofillAssistantFacade;
+import org.chromium.chrome.browser.actor.ActorKeyedServiceFactory;
+import org.chromium.chrome.browser.browserservices.intents.WebappConstants;
 import org.chromium.chrome.browser.document.ChromeLauncherActivity;
-import org.chromium.chrome.browser.instantapps.AuthenticatedProxyActivity;
-import org.chromium.chrome.browser.instantapps.InstantAppsHandler;
+import org.chromium.chrome.browser.glic.GlicEnabling;
+import org.chromium.chrome.browser.open_in_app.OpenInAppDelegate;
+import org.chromium.chrome.browser.open_in_app.OpenInAppUtils;
+import org.chromium.chrome.browser.password_manager.CctPasswordSavingMetricsRecorderBridge;
+import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.chrome.browser.safe_browsing.SafeBrowsingBridge;
 import org.chromium.chrome.browser.tab.EmptyTabObserver;
-import org.chromium.chrome.browser.tab.RedirectHandlerTabHelper;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.TabLaunchType;
 import org.chromium.chrome.browser.tab.TabObserver;
-import org.chromium.chrome.browser.tab.TabUtils;
+import org.chromium.chrome.browser.tabmodel.TabClosureParams;
+import org.chromium.chrome.browser.tabmodel.TabModelSelector;
+import org.chromium.chrome.browser.tabmodel.TabModelSelectorSupplier;
+import org.chromium.components.embedder_support.util.UrlConstants;
+import org.chromium.components.embedder_support.util.UrlUtilities;
 import org.chromium.components.external_intents.ExternalNavigationDelegate;
-import org.chromium.components.external_intents.ExternalNavigationDelegate.StartActivityIfNeededResult;
-import org.chromium.components.external_intents.ExternalNavigationHandler;
-import org.chromium.components.external_intents.ExternalNavigationHandler.OverrideUrlLoadingResult;
+import org.chromium.components.external_intents.ExternalNavigationHelper;
 import org.chromium.components.external_intents.ExternalNavigationParams;
-import org.chromium.components.external_intents.RedirectHandler;
-import org.chromium.content_public.browser.LoadUrlParams;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.ui.base.WindowAndroid;
-import org.chromium.url.Origin;
+import org.chromium.url.GURL;
 
 import java.util.List;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 
-/**
- * The main implementation of the {@link ExternalNavigationDelegate}.
- */
+/** The main implementation of the {@link ExternalNavigationDelegate}. */
+@NullMarked
 public class ExternalNavigationDelegateImpl implements ExternalNavigationDelegate {
     protected final Context mApplicationContext;
     private final Tab mTab;
     private final TabObserver mTabObserver;
+    private final @Nullable Supplier<@Nullable TabModelSelector> mTabModelSelectorSupplier;
+
     private boolean mIsTabDestroyed;
+    private @TabLaunchType int mTabLaunchType;
+
+    private static @Nullable Predicate<Intent> sWillChromeHandleIntentHookForTesting;
 
     public ExternalNavigationDelegateImpl(Tab tab) {
         mTab = tab;
+        mTabModelSelectorSupplier = TabModelSelectorSupplier.from(tab.getWindowAndroid());
         mApplicationContext = ContextUtils.getApplicationContext();
-        mTabObserver = new EmptyTabObserver() {
-            @Override
-            public void onDestroyed(Tab tab) {
-                mIsTabDestroyed = true;
-            }
-        };
+        mTabObserver =
+                new EmptyTabObserver() {
+                    @Override
+                    public void onDestroyed(Tab tab) {
+                        mIsTabDestroyed = true;
+                    }
+                };
         mTab.addObserver(mTabObserver);
+        mTabLaunchType = tab.getLaunchType();
     }
 
     @Override
-    public Context getContext() {
+    public @Nullable Context getContext() {
         if (mTab.getWindowAndroid() == null) return null;
         return mTab.getWindowAndroid().getContext().get();
     }
@@ -84,28 +103,35 @@ public class ExternalNavigationDelegateImpl implements ExternalNavigationDelegat
         return activityContext;
     }
 
+    public static void setWillChromeHandleIntentHookForTesting(Predicate<Intent> hook) {
+        sWillChromeHandleIntentHookForTesting = hook;
+        ResettersForTesting.register(() -> sWillChromeHandleIntentHookForTesting = null);
+    }
+
     /**
-     * Determines whether Chrome will be handling the given Intent.
+     * Determines whether Chrome would handle this Intent if fired immediately. Note that this does
+     * not guarantee that Chrome actually will handle the intent, as another app may be installed,
+     * or components may be enabled that provide alternative handlers for this intent before it gets
+     * fired.
      *
-     * @param intent            Intent that will be fired.
-     * @param matchDefaultOnly  See {@link PackageManager#MATCH_DEFAULT_ONLY}.
-     * @return                  True if Chrome will definitely handle the intent, false otherwise.
+     * @param intent Intent that will be fired.
+     * @param matchDefaultOnly See {@link PackageManager#MATCH_DEFAULT_ONLY}.
+     * @return True if Chrome will definitely handle the intent, false otherwise.
      */
     public static boolean willChromeHandleIntent(Intent intent, boolean matchDefaultOnly) {
-        Context context = ContextUtils.getApplicationContext();
-        // Early-out if the intent targets Chrome.
-        if (context.getPackageName().equals(intent.getPackage())
-                || (intent.getComponent() != null
-                        && context.getPackageName().equals(
-                                intent.getComponent().getPackageName()))) {
-            return true;
+        if (sWillChromeHandleIntentHookForTesting != null) {
+            return sWillChromeHandleIntentHookForTesting.test(intent);
         }
+        // Early-out if the intent targets Chrome.
+        if (IntentUtils.intentTargetsSelf(intent)) return true;
 
         // Fall back to the more expensive querying of Android when the intent doesn't target
         // Chrome.
-        ResolveInfo info = PackageManagerUtils.resolveActivity(
-                intent, matchDefaultOnly ? PackageManager.MATCH_DEFAULT_ONLY : 0);
-        return info != null && info.activityInfo.packageName.equals(context.getPackageName());
+        ResolveInfo info =
+                PackageManagerUtils.resolveActivity(
+                        intent, matchDefaultOnly ? PackageManager.MATCH_DEFAULT_ONLY : 0);
+        if (info == null) return false;
+        return info.activityInfo.packageName.equals(ApkInfo.getHostPackageName());
     }
 
     @Override
@@ -114,77 +140,9 @@ public class ExternalNavigationDelegateImpl implements ExternalNavigationDelegat
     }
 
     @Override
-    public boolean shouldDisableExternalIntentRequestsForUrl(String url) {
+    public boolean shouldDisableExternalIntentRequestsForUrl(
+            ExternalNavigationParams params, Intent intent) {
         return false;
-    }
-
-    @Override
-    public boolean handlesInstantAppLaunchingInternally() {
-        return true;
-    }
-
-    /**
-     * Check whether the given package is a specialized handler for the given intent
-     *
-     * @param packageName Package name to check against. Can be null or empty.
-     * @param intent The intent to resolve for.
-     * @return Whether the given package is a specialized handler for the given intent. If there is
-     *         no package name given checks whether there is any specialized handler.
-     */
-    public static boolean isPackageSpecializedHandler(String packageName, Intent intent) {
-        List<ResolveInfo> handlers = PackageManagerUtils.queryIntentActivities(
-                intent, PackageManager.GET_RESOLVED_FILTER);
-        return !ExternalNavigationHandler
-                        .getSpecializedHandlersWithFilter(handlers, packageName, true)
-                        .isEmpty();
-    }
-
-    @Override
-    public void didStartActivity(Intent intent) {}
-
-    @Override
-    public @StartActivityIfNeededResult int maybeHandleStartActivityIfNeeded(
-            Intent intent, boolean proxy) {
-        return StartActivityIfNeededResult.DID_NOT_HANDLE;
-    }
-
-    @Override
-    public @OverrideUrlLoadingResult int handleIncognitoIntentTargetingSelf(
-            final Intent intent, final String referrerUrl, final String fallbackUrl) {
-        String primaryUrl = intent.getDataString();
-        boolean isUrlLoadedInTheSameTab = ExternalNavigationHandler.loadUrlFromIntent(
-                referrerUrl, primaryUrl, fallbackUrl, this, false, true);
-        return (isUrlLoadedInTheSameTab) ? OverrideUrlLoadingResult.OVERRIDE_WITH_CLOBBERING_TAB
-                                         : OverrideUrlLoadingResult.OVERRIDE_WITH_EXTERNAL_INTENT;
-    }
-
-    @Override
-    public boolean supportsCreatingNewTabs() {
-        return true;
-    }
-
-    @Override
-    public void loadUrlInNewTab(final String url, final boolean launchIncognito) {
-        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-        String packageName = ContextUtils.getApplicationContext().getPackageName();
-        intent.putExtra(Browser.EXTRA_APPLICATION_ID, packageName);
-        if (launchIncognito) intent.putExtra(IntentHandler.EXTRA_OPEN_NEW_INCOGNITO_TAB, true);
-        intent.addCategory(Intent.CATEGORY_BROWSABLE);
-        intent.setClassName(packageName, ChromeLauncherActivity.class.getName());
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        IntentHandler.addTrustedIntentExtras(intent);
-        ExternalNavigationHandler.startActivity(intent, false, this);
-    }
-
-    @Override
-    public boolean canLoadUrlInCurrentTab() {
-        return !(mTab == null || mTab.isClosing() || !mTab.isInitialized());
-    }
-
-    @Override
-    public void loadUrlIfPossible(LoadUrlParams loadUrlParams) {
-        if (!hasValidTab()) return;
-        mTab.loadUrl(loadUrlParams);
     }
 
     @Override
@@ -203,10 +161,11 @@ public class ExternalNavigationDelegateImpl implements ExternalNavigationDelegat
     @Override
     public void closeTab() {
         if (!hasValidTab()) return;
-        Context context = mTab.getWindowAndroid().getContext().get();
-        if (context instanceof ChromeActivity) {
-            ((ChromeActivity) context).getTabModelSelector().closeTab(mTab);
-        }
+        if (mTabModelSelectorSupplier == null) return;
+        TabModelSelector tabModelSelector = mTabModelSelectorSupplier.get();
+        if (tabModelSelector == null) return;
+        tabModelSelector.tryCloseTab(
+                TabClosureParams.closeTab(mTab).allowUndo(false).build(), /* allowDialog= */ false);
     }
 
     @Override
@@ -215,31 +174,33 @@ public class ExternalNavigationDelegateImpl implements ExternalNavigationDelegat
     }
 
     @Override
-    public void maybeAdjustInstantAppExtras(Intent intent, boolean isIntentToInstantApp) {
-        if (isIntentToInstantApp) {
-            intent.putExtra(InstantAppsHandler.IS_GOOGLE_SEARCH_REFERRER, true);
-        } else {
-            // Make sure this extra is not sent unless we've done the verification.
-            intent.removeExtra(InstantAppsHandler.IS_GOOGLE_SEARCH_REFERRER);
-        }
+    public boolean hasCustomLeavingIncognitoDialog() {
+        return false;
     }
 
     @Override
-    public void maybeSetRequestMetadata(Intent intent, boolean hasUserGesture,
-            boolean isRendererInitiated, @Nullable Origin initiatorOrigin) {
-        if (!hasUserGesture && !isRendererInitiated && initiatorOrigin == null) return;
+    public void presentLeavingIncognitoModalDialog(Callback<Boolean> onUserDecision) {
+        // This should never be called due to returning false in
+        // hasCustomLeavingIncognitoDialog().
+        assert false;
+    }
+
+    @Override
+    public void maybeSetRequestMetadata(
+            Intent intent, boolean hasUserGesture, boolean isRendererInitiated) {
+        if (!hasUserGesture && !isRendererInitiated) return;
         // The intent can be used to launch Chrome itself, record the user
         // gesture, whether request is renderer initiated and initiator origin here so that it can
         // be used later.
         IntentWithRequestMetadataHandler.RequestMetadata metadata =
                 new IntentWithRequestMetadataHandler.RequestMetadata(
-                        hasUserGesture, isRendererInitiated, initiatorOrigin);
-        IntentWithRequestMetadataHandler.getInstance().onNewIntentWithRequestMetadata(
-                intent, metadata);
+                        hasUserGesture, isRendererInitiated);
+        IntentWithRequestMetadataHandler.getInstance()
+                .onNewIntentWithRequestMetadata(intent, metadata);
     }
 
     @Override
-    public void maybeSetPendingReferrer(Intent intent, String referrerUrl) {
+    public void maybeSetPendingReferrer(Intent intent, GURL referrerUrl) {
         IntentHandler.setPendingReferrer(intent, referrerUrl);
     }
 
@@ -249,59 +210,15 @@ public class ExternalNavigationDelegateImpl implements ExternalNavigationDelegat
     }
 
     @Override
-    public boolean maybeLaunchInstantApp(
-            String url, String referrerUrl, boolean isIncomingRedirect, boolean isSerpReferrer) {
-        if (!hasValidTab() || mTab.getWebContents() == null) return false;
-
-        InstantAppsHandler handler = InstantAppsHandler.getInstance();
-        RedirectHandler redirect = RedirectHandlerTabHelper.getHandlerFor(mTab);
-        Intent intent = redirect != null ? redirect.getInitialIntent() : null;
-        // TODO(mariakhomenko): consider also handling NDEF_DISCOVER action redirects.
-        if (isIncomingRedirect && intent != null && Intent.ACTION_VIEW.equals(intent.getAction())) {
-            // Set the URL the redirect was resolved to for checking the existence of the
-            // instant app inside handleIncomingIntent().
-            Intent resolvedIntent = new Intent(intent);
-            resolvedIntent.setData(Uri.parse(url));
-            return handler.handleIncomingIntent(getAvailableContext(), resolvedIntent,
-                    LaunchIntentDispatcher.isCustomTabIntent(resolvedIntent), true);
-        } else if (!isIncomingRedirect) {
-            // Check if the navigation is coming from SERP and skip instant app handling.
-            if (isSerpReferrer) return false;
-            return handler.handleNavigation(getAvailableContext(), url,
-                    TextUtils.isEmpty(referrerUrl) ? null : Uri.parse(referrerUrl), mTab);
-        }
-        return false;
-    }
-
-    @Override
-    public WindowAndroid getWindowAndroid() {
+    public @Nullable WindowAndroid getWindowAndroid() {
         if (mTab == null) return null;
         return mTab.getWindowAndroid();
     }
 
     @Override
-    public WebContents getWebContents() {
+    public @Nullable WebContents getWebContents() {
         if (mTab == null) return null;
         return mTab.getWebContents();
-    }
-
-    @Override
-    public void dispatchAuthenticatedIntent(Intent intent) {
-        Intent proxyIntent = new Intent(Intent.ACTION_MAIN);
-        proxyIntent.setClass(getAvailableContext(), AuthenticatedProxyActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        proxyIntent.putExtra(AuthenticatedProxyActivity.AUTHENTICATED_INTENT_EXTRA, intent);
-        getAvailableContext().startActivity(proxyIntent);
-    }
-
-    /**
-     * Starts the autofill assistant with the given intent. Exists to allow tests to stub out this
-     * functionality.
-     */
-    protected void startAutofillAssistantWithIntent(
-            Intent targetIntent, String browserFallbackUrl) {
-        AutofillAssistantFacade.start((ChromeActivity) TabUtils.getActivity(mTab),
-                targetIntent.getExtras(), browserFallbackUrl);
     }
 
     /**
@@ -313,37 +230,134 @@ public class ExternalNavigationDelegateImpl implements ExternalNavigationDelegat
     }
 
     @Override
-    public boolean canCloseTabOnIncognitoIntentLaunch() {
+    public boolean canCloseTabOnIntentLaunch() {
         return (mTab != null && !mTab.isClosing() && mTab.isInitialized());
     }
 
     @Override
-    public boolean isIntentForTrustedCallingApp(Intent intent) {
+    public boolean isForTrustedCallingApp(Supplier<List<ResolveInfo>> resolveInfoSupplier) {
         return false;
     }
 
     @Override
-    public boolean isIntentToInstantApp(Intent intent) {
-        return InstantAppsHandler.isIntentToInstantApp(intent);
+    public boolean shouldLaunchWebApksOnInitialIntent() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S;
     }
 
     @Override
-    public boolean isIntentToAutofillAssistant(Intent intent) {
-        return AutofillAssistantFacade.isAutofillAssistantByIntentTriggeringEnabled(intent);
+    public void setPackageForTrustedCallingApp(Intent intent) {
+        assert false;
     }
 
     @Override
-    public boolean handleWithAutofillAssistant(ExternalNavigationParams params, Intent targetIntent,
-            String browserFallbackUrl, boolean isGoogleReferrer) {
-        if (browserFallbackUrl != null && !params.isIncognito()
-                && AutofillAssistantFacade.isAutofillAssistantByIntentTriggeringEnabled(
-                        targetIntent)
-                && isGoogleReferrer) {
-            if (mTab != null) {
-                startAutofillAssistantWithIntent(targetIntent, browserFallbackUrl);
-            }
-            return true;
+    public boolean shouldAvoidDisambiguationDialog(GURL intentDataUrl) {
+        return false;
+    }
+
+    @Override
+    public String getSelfScheme() {
+        return IntentHandler.GOOGLECHROME_SCHEME;
+    }
+
+    @Override
+    public boolean shouldDisableAllExternalIntents() {
+        Profile profile = mTab.getProfile();
+        if (profile == null || !GlicEnabling.isEnabledForProfile(profile)) {
+            return false;
         }
+
+        var actorService = ActorKeyedServiceFactory.getForProfile(profile);
+        if (actorService == null) {
+            return false;
+        }
+
+        var activeTaskId = actorService.getActiveTaskIdOnTab(mTab.getId());
+        return activeTaskId != null;
+    }
+
+    @Override
+    public boolean shouldReturnAsActivityResult(GURL url) {
         return false;
+    }
+
+    @Override
+    public void returnAsActivityResult(GURL url) {
+        throw new UnsupportedOperationException("Returning as activity result is not supported.");
+    }
+
+    @Override
+    public void notifyCctPasswordSavingRecorderOfExternalNavigation() {
+        WindowAndroid windowAndroid = assumeNonNull(getWindowAndroid());
+        CctPasswordSavingMetricsRecorderBridge cctSavingMetricsRecorder =
+                CctPasswordSavingMetricsRecorderBridge.KEY.retrieveDataFromHost(
+                        windowAndroid.getUnownedUserDataHost());
+        if (cctSavingMetricsRecorder != null) {
+            cctSavingMetricsRecorder.onExternalNavigation();
+        }
+    }
+
+    @Override
+    public void reportIntentToSafeBrowsing(Intent intent) {
+        SafeBrowsingBridge.reportIntent(assertNonNull(mTab.getWebContents()), intent);
+    }
+
+    @Override
+    public @Nullable Intent createIntentToPreventIncognitoAccess(GURL url) {
+        if (!url.getSpec().startsWith(UrlConstants.CHROME_EXTENSIONS_URL)) {
+            return null;
+        }
+        Intent intent = new Intent(getContext(), ChromeLauncherActivity.class);
+        intent.setAction(Intent.ACTION_VIEW);
+        intent.setData(Uri.parse(url.getSpec()));
+        intent.putExtra(WebappConstants.REUSE_URL_MATCHING_TAB_ELSE_NEW_TAB, true);
+
+        return intent;
+    }
+
+    @Override
+    public boolean wasTabLaunchedFromLinkCreatingNewForegroundTab() {
+        return mTabLaunchType == TabLaunchType.FROM_LONGPRESS_FOREGROUND
+                || mTabLaunchType == TabLaunchType.FROM_LONGPRESS_FOREGROUND_IN_GROUP;
+    }
+
+    @Override
+    public boolean wasTabLaunchedFromLinkCreatingNewWindow() {
+        return mTabLaunchType == TabLaunchType.FROM_LINK_CREATING_NEW_WINDOW;
+    }
+
+    @Override
+    public boolean shouldLaunchNewWindow(ExternalNavigationParams params) {
+        return wasTabLaunchedFromLinkCreatingNewWindow()
+                && params.isInitialNavigationInFrame()
+                // TODO(crbug.com/452537438): Figure out a better way to check whether we are in
+                // desktop windowing mode or if the device can enter desktop windowing mode.
+                && (DeviceInfo.isDesktop() || params.isInDesktopWindowingMode());
+    }
+
+    @Override
+    public boolean shouldSelfNavigationLaunchAsMultipleTask(ExternalNavigationParams params) {
+        return false;
+    }
+
+    @Override
+    public void setExternalNavigationHelper(ExternalNavigationHelper delegate) {
+        OpenInAppDelegate.from(mTab).setExternalNavigationHelper(delegate);
+    }
+
+    @Override
+    public boolean allowExternalNavigationForHttpProtocols(GURL url) {
+        return OpenInAppUtils.isOpenInAppAvailable() && UrlUtilities.isHttpOrHttps(url);
+    }
+
+    /**
+     * Sets the {@link TabLaunchType} for this delegate for testing purposes. This has no effect on
+     * the related Tab launch type.
+     *
+     * @param launchType The {@link TabLaunchType} to set for this delegate.
+     */
+    public void setTabLaunchTypeForTesting(@TabLaunchType int launchType) {
+        @TabLaunchType int originalTabLaunchType = mTabLaunchType;
+        mTabLaunchType = launchType;
+        ResettersForTesting.register(() -> mTabLaunchType = originalTabLaunchType);
     }
 }

@@ -1,24 +1,28 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "build/build_config.h"
-
 #include "third_party/blink/renderer/platform/wtf/stack_util.h"
 
+#include "build/build_config.h"
 #include "base/notreached.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 #include "third_party/blink/renderer/platform/wtf/threading.h"
 
-#if defined(OS_WIN)
-#include <stddef.h>
+#if BUILDFLAG(IS_WIN)
 #include <windows.h>
+
+#include <intrin.h>
+#include <stddef.h>
 #include <winnt.h>
 #elif defined(__GLIBC__)
 extern "C" void* __libc_stack_end;  // NOLINT
 #endif
 
-namespace WTF {
+#if defined(ADDRESS_SANITIZER)
+#include <sanitizer/asan_interface.h>
+#endif
+
+namespace blink {
 
 size_t GetUnderestimatedStackSize() {
 // FIXME: ASAN bot uses a fake stack as a thread stack frame,
@@ -29,15 +33,15 @@ size_t GetUnderestimatedStackSize() {
 // FIXME: On Mac OSX and Linux, this method cannot estimate stack size
 // correctly for the main thread.
 
-#elif defined(__GLIBC__) || defined(OS_ANDROID) || defined(OS_FREEBSD) || \
-    defined(OS_FUCHSIA)
+#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
+    BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FREEBSD) || BUILDFLAG(IS_FUCHSIA)
   // pthread_getattr_np() can fail if the thread is not invoked by
   // pthread_create() (e.g., the main thread of blink_unittests).
   // If so, a conservative size estimate is returned.
 
   pthread_attr_t attr;
   int error;
-#if defined(OS_FREEBSD)
+#if BUILDFLAG(IS_FREEBSD)
   pthread_attr_init(&attr);
   error = pthread_attr_get_np(pthread_self(), &attr);
 #else
@@ -51,7 +55,7 @@ size_t GetUnderestimatedStackSize() {
     pthread_attr_destroy(&attr);
     return size;
   }
-#if defined(OS_FREEBSD)
+#if BUILDFLAG(IS_FREEBSD)
   pthread_attr_destroy(&attr);
 #endif
 
@@ -62,7 +66,7 @@ size_t GetUnderestimatedStackSize() {
   //    low as 512k.
   //
   return 512 * 1024;
-#elif defined(OS_MAC)
+#elif BUILDFLAG(IS_APPLE)
   // pthread_get_stacksize_np() returns too low a value for the main thread on
   // OSX 10.9,
   // http://mail.openjdk.java.net/pipermail/hotspot-dev/2013-October/011369.html
@@ -73,7 +77,7 @@ size_t GetUnderestimatedStackSize() {
   // https://developer.apple.com/library/mac/documentation/Cocoa/Conceptual/Multithreading/CreatingThreads/CreatingThreads.html
   // on why hardcoding sizes is reasonable.)
   if (pthread_main_np()) {
-#if defined(IOS)
+#if BUILDFLAG(IS_IOS)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     size_t guardSize = 0;
@@ -88,20 +92,25 @@ size_t GetUnderestimatedStackSize() {
 #endif
   }
   return pthread_get_stacksize_np(pthread_self());
-#elif defined(OS_WIN) && defined(COMPILER_MSVC)
-return Threading::ThreadStackSize();
+#elif BUILDFLAG(IS_WIN) && defined(COMPILER_MSVC)
+  return Threading::ThreadStackSize();
 #else
 #error "Stack frame size estimation not supported on this platform."
   return 0;
 #endif
 }
 
-void* GetStackStart() {
-#if defined(__GLIBC__) || defined(OS_ANDROID) || defined(OS_FREEBSD) || \
-    defined(OS_FUCHSIA)
+namespace {
+
+// A pointer to current thread's stack beginning.
+thread_local void* thread_stack_start = nullptr;
+
+void* GetStackStartImpl() {
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
+    BUILDFLAG(IS_FREEBSD) || BUILDFLAG(IS_FUCHSIA)
   pthread_attr_t attr;
   int error;
-#if defined(OS_FREEBSD)
+#if BUILDFLAG(IS_FREEBSD)
   pthread_attr_init(&attr);
   error = pthread_attr_get_np(pthread_self(), &attr);
 #else
@@ -113,9 +122,10 @@ void* GetStackStart() {
     error = pthread_attr_getstack(&attr, &base, &size);
     CHECK(!error);
     pthread_attr_destroy(&attr);
-    return reinterpret_cast<uint8_t*>(base) + size;
+    // SAFETY: Computation on the results of pthread_attr_getstack().
+    return UNSAFE_BUFFERS(reinterpret_cast<uint8_t*>(base) + size);
   }
-#if defined(OS_FREEBSD)
+#if BUILDFLAG(IS_FREEBSD)
   pthread_attr_destroy(&attr);
 #endif
 #if defined(__GLIBC__)
@@ -125,12 +135,12 @@ void* GetStackStart() {
   // See https://code.google.com/p/nativeclient/issues/detail?id=3431.
   return __libc_stack_end;
 #else
-  NOTREACHED();
-  return nullptr;
+  NOTREACHED() << "pthread_getattr_np() failed for stack end and no "
+                  "glibc __libc_stack_end is present.";
 #endif
-#elif defined(OS_MAC)
+#elif BUILDFLAG(IS_APPLE)
   return pthread_get_stackaddr_np(pthread_self());
-#elif defined(OS_WIN) && defined(COMPILER_MSVC)
+#elif BUILDFLAG(IS_WIN) && defined(COMPILER_MSVC)
 // On Windows stack limits for the current thread are available in
 // the thread information block (TIB).
 // On Windows ARM64, stack limits could be retrieved by calling
@@ -150,6 +160,35 @@ void* GetStackStart() {
 #else
 #error Unsupported getStackStart on this platform.
 #endif
+}
+
+}  // namespace
+
+void* GetStackStart() {
+  if (!thread_stack_start) {
+    thread_stack_start = GetStackStartImpl();
+  }
+  return thread_stack_start;
+}
+
+bool IsOnStack(void* address) {
+#if defined(ADDRESS_SANITIZER)
+  // If the address is part of a fake frame, then it is definitely on the stack.
+  if (__asan_addr_is_in_fake_stack(__asan_get_current_fake_stack(), address,
+                                   nullptr, nullptr)) {
+    return true;
+  }
+  // Fall through as there is still a regular stack present even when running
+  // with ASAN fake stacks.
+#endif  // defined(ADDRESS_SANITIZER)
+#if __has_feature(safe_stack)
+  if (__builtin___get_unsafe_stack_ptr() <= address &&
+      address <= __builtin___get_unsafe_stack_top()) {
+    return true;
+  }
+#endif  // __has_feature(safe_stack)
+  return (GetCurrentStackPosition() <= reinterpret_cast<uintptr_t>(address)) &&
+         (address <= GetStackStart());
 }
 
 uintptr_t GetCurrentStackPosition() {
@@ -179,19 +218,18 @@ void InitializeMainThreadStackEstimate() {
   g_main_thread_underestimated_stack_size = underestimated_stack_size;
 }
 
-#if defined(OS_WIN) && defined(COMPILER_MSVC)
+#if BUILDFLAG(IS_WIN) && defined(COMPILER_MSVC)
 size_t ThreadStackSize() {
   // Notice that we cannot use the TIB's StackLimit for the stack end, as i
   // tracks the end of the committed range. We're after the end of the reserved
   // stack area (most of which will be uncommitted, most times.)
-  MEMORY_BASIC_INFORMATION stack_info;
-  memset(&stack_info, 0, sizeof(MEMORY_BASIC_INFORMATION));
+  MEMORY_BASIC_INFORMATION stack_info = {};
   size_t result_size =
       VirtualQuery(&stack_info, &stack_info, sizeof(MEMORY_BASIC_INFORMATION));
   DCHECK_GE(result_size, sizeof(MEMORY_BASIC_INFORMATION));
   uint8_t* stack_end = reinterpret_cast<uint8_t*>(stack_info.AllocationBase);
 
-  uint8_t* stack_start = reinterpret_cast<uint8_t*>(WTF::GetStackStart());
+  uint8_t* stack_start = reinterpret_cast<uint8_t*>(GetStackStart());
   CHECK(stack_start);
   CHECK_GT(stack_start, stack_end);
   size_t thread_stack_size = static_cast<size_t>(stack_start - stack_end);
@@ -214,4 +252,4 @@ size_t ThreadStackSize() {
 
 }  // namespace internal
 
-}  // namespace WTF
+}  // namespace blink

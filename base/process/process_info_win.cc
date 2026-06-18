@@ -1,87 +1,83 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/process/process_info.h"
 
 #include <windows.h>
-#include <memory>
+
+#include <optional>
 
 #include "base/logging.h"
-#include "base/memory/ptr_util.h"
 #include "base/notreached.h"
-#include "base/time/time.h"
-#include "base/win/scoped_handle.h"
+#include "base/process/process.h"
+#include "base/win/access_token.h"
 
 namespace base {
 
 namespace {
 
-HANDLE GetCurrentProcessToken() {
-  HANDLE process_token;
-  OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token);
-  DCHECK(process_token != NULL && process_token != INVALID_HANDLE_VALUE);
-  return process_token;
+IntegrityLevel GetProcessIntegrityLevelInternal(
+    std::optional<win::AccessToken> token) {
+  if (!token) {
+    PLOG(ERROR) << "AccessToken `token` is invalid";
+    return INTEGRITY_UNKNOWN;
+  }
+  DWORD integrity_level = token->IntegrityLevel();
+
+  if (integrity_level < SECURITY_MANDATORY_LOW_RID) {
+    return UNTRUSTED_INTEGRITY;
+  }
+
+  if (integrity_level < SECURITY_MANDATORY_MEDIUM_RID) {
+    return LOW_INTEGRITY;
+  }
+
+  if (integrity_level < SECURITY_MANDATORY_HIGH_RID) {
+    return MEDIUM_INTEGRITY;
+  }
+
+  if (integrity_level >= SECURITY_MANDATORY_HIGH_RID) {
+    return HIGH_INTEGRITY;
+  }
+
+  NOTREACHED();
 }
 
 }  // namespace
 
+IntegrityLevel GetProcessIntegrityLevel(ProcessId process_id) {
+  auto process = Process::OpenWithAccess(process_id, PROCESS_QUERY_INFORMATION);
+  return process.IsValid()
+             ? GetProcessIntegrityLevelInternal(win::AccessToken::FromProcess(
+                   process.Handle(),
+                   /*impersonation=*/false, TOKEN_QUERY_SOURCE))
+             : INTEGRITY_UNKNOWN;
+}
+
 IntegrityLevel GetCurrentProcessIntegrityLevel() {
-  HANDLE process_token(GetCurrentProcessToken());
-
-  DWORD token_info_length = 0;
-  if (::GetTokenInformation(process_token, TokenIntegrityLevel, nullptr, 0,
-                            &token_info_length) ||
-      ::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-    NOTREACHED();
-    return INTEGRITY_UNKNOWN;
-  }
-
-  auto token_label_bytes = std::make_unique<char[]>(token_info_length);
-  TOKEN_MANDATORY_LABEL* token_label =
-      reinterpret_cast<TOKEN_MANDATORY_LABEL*>(token_label_bytes.get());
-  if (!::GetTokenInformation(process_token, TokenIntegrityLevel, token_label,
-                             token_info_length, &token_info_length)) {
-    NOTREACHED();
-    return INTEGRITY_UNKNOWN;
-  }
-
-  DWORD integrity_level = *::GetSidSubAuthority(
-      token_label->Label.Sid,
-      static_cast<DWORD>(*::GetSidSubAuthorityCount(token_label->Label.Sid) -
-                         1));
-
-  if (integrity_level < SECURITY_MANDATORY_LOW_RID)
-    return UNTRUSTED_INTEGRITY;
-
-  if (integrity_level < SECURITY_MANDATORY_MEDIUM_RID)
-    return LOW_INTEGRITY;
-
-  if (integrity_level >= SECURITY_MANDATORY_MEDIUM_RID &&
-      integrity_level < SECURITY_MANDATORY_HIGH_RID) {
-    return MEDIUM_INTEGRITY;
-  }
-
-  if (integrity_level >= SECURITY_MANDATORY_HIGH_RID)
-    return HIGH_INTEGRITY;
-
-  NOTREACHED();
-  return INTEGRITY_UNKNOWN;
+  return GetProcessIntegrityLevelInternal(
+      win::AccessToken::FromCurrentProcess());
 }
 
 bool IsCurrentProcessElevated() {
-  HANDLE process_token(GetCurrentProcessToken());
-
-  // Unlike TOKEN_ELEVATION_TYPE which returns TokenElevationTypeDefault when
-  // UAC is turned off, TOKEN_ELEVATION returns whether the process is elevated.
-  DWORD size;
-  TOKEN_ELEVATION elevation;
-  if (!GetTokenInformation(process_token, TokenElevation, &elevation,
-                           sizeof(elevation), &size)) {
-    PLOG(ERROR) << "GetTokenInformation() failed";
+  std::optional<win::AccessToken> token =
+      win::AccessToken::FromCurrentProcess();
+  if (!token) {
+    PLOG(ERROR) << "AccessToken::FromCurrentProcess() failed";
     return false;
   }
-  return !!elevation.TokenIsElevated;
+  return token->IsElevated();
+}
+
+bool IsCurrentProcessInAppContainer() {
+  std::optional<win::AccessToken> token =
+      win::AccessToken::FromCurrentProcess();
+  if (!token) {
+    PLOG(ERROR) << "AccessToken::FromCurrentProcess() failed";
+    return false;
+  }
+  return token->IsAppContainer();
 }
 
 }  // namespace base

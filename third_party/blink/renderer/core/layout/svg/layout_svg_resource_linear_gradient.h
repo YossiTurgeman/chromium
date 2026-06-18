@@ -32,36 +32,28 @@ class LayoutSVGResourceLinearGradient final : public LayoutSVGResourceGradient {
  public:
   explicit LayoutSVGResourceLinearGradient(SVGLinearGradientElement*);
   ~LayoutSVGResourceLinearGradient() override;
+  void Trace(Visitor*) const override;
 
   const char* GetName() const override {
+    NOT_DESTROYED();
     return "LayoutSVGResourceLinearGradient";
   }
 
   static const LayoutSVGResourceType kResourceType =
       kLinearGradientResourceType;
-  LayoutSVGResourceType ResourceType() const override { return kResourceType; }
-
-  SVGUnitTypes::SVGUnitType GradientUnits() const override {
-    return Attributes().GradientUnits();
+  LayoutSVGResourceType ResourceType() const override {
+    NOT_DESTROYED();
+    return kResourceType;
   }
-  AffineTransform CalculateGradientTransform() const override {
-    return Attributes().GradientTransform();
-  }
-  void CollectGradientAttributes() override;
-  scoped_refptr<Gradient> BuildGradient() const override;
 
-  FloatPoint StartPoint(const LinearGradientAttributes&) const;
-  FloatPoint EndPoint(const LinearGradientAttributes&) const;
+  gfx::PointF StartPoint(const LinearGradientAttributes&) const;
+  gfx::PointF EndPoint(const LinearGradientAttributes&) const;
 
  private:
-  Persistent<LinearGradientAttributesWrapper> attributes_wrapper_;
+  const GradientAttributes& EnsureAttributes() const override;
+  std::unique_ptr<Gradient> BuildGradient() const override;
 
-  LinearGradientAttributes& MutableAttributes() {
-    return attributes_wrapper_->Attributes();
-  }
-  const LinearGradientAttributes& Attributes() const {
-    return attributes_wrapper_->Attributes();
-  }
+  mutable LinearGradientAttributes attributes_;
 };
 
 }  // namespace blink

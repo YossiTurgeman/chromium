@@ -1,19 +1,27 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   var {page, session, dp} = await testRunner.startBlank(
       `Tests that Page.lifecycleEvent is issued for important events.`);
 
   await dp.Page.enable();
   await dp.Page.setLifecycleEventsEnabled({ enabled: true });
 
-  var events = [];
+  const expectedEvents = new Set([
+    'init',
+    'load',
+    'DOMContentLoaded',
+    'networkAlmostIdle',
+    'networkIdle',
+    'InteractiveTime',
+  ]);
+
   dp.Page.onLifecycleEvent(event => {
     // Filter out firstMeaningfulPaint and friends.
     if (event.params.name.startsWith('first'))
       return;
-    events.push(event);
-    if (event.params.name === 'networkIdle') {
-      var names = events.map(event => event.params.name);
-      testRunner.log(names);
+    if (!expectedEvents.delete(event.params.name)) {
+      testRunner.log(`FAIL: unexpected event name: ${event.params.name}`);
+    }
+    if (expectedEvents.size === 0) {
       testRunner.completeTest();
     }
   });

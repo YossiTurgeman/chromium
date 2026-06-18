@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,27 +6,30 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
+#include "base/check.h"
 #include "base/containers/circular_deque.h"
-#include "base/macros.h"
-#include "base/memory/ptr_util.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/strings/string_view_util.h"
 #include "base/test/mock_callback.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
+#include "net/log/net_log_with_source.h"
 #include "net/test/gtest_util.h"
 #include "net/websockets/websocket_deflate_parameters.h"
 #include "net/websockets/websocket_deflate_predictor.h"
 #include "net/websockets/websocket_deflater.h"
 #include "net/websockets/websocket_frame.h"
-#include "net/websockets/websocket_inflater.h"
 #include "net/websockets/websocket_stream.h"
 #include "net/websockets/websocket_test_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -44,15 +47,10 @@ using ::testing::Invoke;
 using ::testing::Return;
 
 typedef uint32_t FrameFlag;
-const FrameFlag kNoFlag = 0;
-const FrameFlag kFinal = 1;
-const FrameFlag kReserved1 = 2;
+constexpr FrameFlag kNoFlag = 0;
+constexpr FrameFlag kFinal = 1;
+constexpr FrameFlag kReserved1 = 2;
 // We don't define values for other flags because we don't need them.
-
-// The value must equal to the value of the corresponding
-// constant in websocket_deflate_stream.cc
-const size_t kChunkSize = 4 * 1024;
-const int kWindowBits = 15;
 
 std::string ToString(IOBufferWithSize* buffer) {
   return std::string(buffer->data(), buffer->size());
@@ -63,9 +61,7 @@ std::string ToString(const scoped_refptr<IOBufferWithSize>& buffer) {
 }
 
 std::string ToString(const WebSocketFrame* frame) {
-  return frame->payload
-             ? std::string(frame->payload, frame->header.payload_length)
-             : "";
+  return std::string(base::as_string_view(frame->payload));
 }
 
 std::string ToString(const std::unique_ptr<WebSocketFrame>& frame) {
@@ -74,32 +70,17 @@ std::string ToString(const std::unique_ptr<WebSocketFrame>& frame) {
 
 class MockWebSocketStream : public WebSocketStream {
  public:
-  // GMock cannot save or forward move-only types like CompletionOnceCallback,
-  // therefore they have to be converted into a copyable type like
-  // CompletionRepeatingCallback.
-  int ReadFrames(std::vector<std::unique_ptr<WebSocketFrame>>* frames,
-                 CompletionOnceCallback callback) {
-    return ReadFramesInternal(
-        frames, callback ? base::AdaptCallbackForRepeating(std::move(callback))
-                         : CompletionRepeatingCallback());
-  }
-  int WriteFrames(std::vector<std::unique_ptr<WebSocketFrame>>* frames,
-                  CompletionOnceCallback callback) {
-    return WriteFramesInternal(
-        frames, callback ? base::AdaptCallbackForRepeating(std::move(callback))
-                         : CompletionRepeatingCallback());
-  }
-
-  MOCK_METHOD2(ReadFramesInternal,
+  MOCK_METHOD2(ReadFrames,
                int(std::vector<std::unique_ptr<WebSocketFrame>>*,
-                   const CompletionRepeatingCallback&));
-  MOCK_METHOD2(WriteFramesInternal,
+                   CompletionOnceCallback));
+  MOCK_METHOD2(WriteFrames,
                int(std::vector<std::unique_ptr<WebSocketFrame>>*,
-                   const CompletionRepeatingCallback&));
+                   CompletionOnceCallback));
 
   MOCK_METHOD0(Close, void());
   MOCK_CONST_METHOD0(GetSubProtocol, std::string());
   MOCK_CONST_METHOD0(GetExtensions, std::string());
+  MOCK_CONST_METHOD0(GetNetLogWithSource, NetLogWithSource&());
 };
 
 // This mock class relies on some assumptions.
@@ -108,7 +89,12 @@ class MockWebSocketStream : public WebSocketStream {
 //  - RecordWrittenDataFrame is called before writing the frame.
 class WebSocketDeflatePredictorMock : public WebSocketDeflatePredictor {
  public:
-  WebSocketDeflatePredictorMock() : result_(DEFLATE) {}
+  WebSocketDeflatePredictorMock() = default;
+
+  WebSocketDeflatePredictorMock(const WebSocketDeflatePredictorMock&) = delete;
+  WebSocketDeflatePredictorMock& operator=(
+      const WebSocketDeflatePredictorMock&) = delete;
+
   ~WebSocketDeflatePredictorMock() override {
     // Verify whether all expectaions are consumed.
     if (!frames_to_be_input_.empty()) {
@@ -178,13 +164,13 @@ class WebSocketDeflatePredictorMock : public WebSocketDeflatePredictor {
   }
   void AddFramesToBeInput(
       const std::vector<std::unique_ptr<WebSocketFrame>>& frames) {
-    for (size_t i = 0; i < frames.size(); ++i)
-      AddFrameToBeInput(frames[i].get());
+    for (const auto& frame : frames)
+      AddFrameToBeInput(frame.get());
   }
   void VerifySentFrames(
       const std::vector<std::unique_ptr<WebSocketFrame>>& frames) {
-    for (size_t i = 0; i < frames.size(); ++i)
-      VerifySentFrame(frames[i].get());
+    for (const auto& frame : frames)
+      VerifySentFrame(frame.get());
   }
   // Call this method in order to disable checks in the destructor when
   // WriteFrames fails.
@@ -194,7 +180,7 @@ class WebSocketDeflatePredictorMock : public WebSocketDeflatePredictor {
   }
 
  private:
-  Result result_;
+  Result result_ = DEFLATE;
   // Data frames which will be recorded by |RecordInputFrames|.
   // Pushed by |AddFrameToBeInput| and popped and verified by
   // |RecordInputFrames|.
@@ -203,17 +189,16 @@ class WebSocketDeflatePredictorMock : public WebSocketDeflatePredictor {
   // Pushed by |RecordWrittenFrames| and popped and verified by
   // |VerifySentFrame|.
   base::circular_deque<const WebSocketFrame*> frames_written_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebSocketDeflatePredictorMock);
 };
 
 class WebSocketDeflateStreamTest : public ::testing::Test {
  public:
-  WebSocketDeflateStreamTest() : mock_stream_(nullptr), predictor_(nullptr) {}
+  WebSocketDeflateStreamTest() = default;
   ~WebSocketDeflateStreamTest() override = default;
 
   void SetUp() override {
-    Initialize(WebSocketDeflater::TAKE_OVER_CONTEXT, kWindowBits);
+    Initialize(WebSocketDeflater::TAKE_OVER_CONTEXT,
+               WebSocketDeflateStream::kWindowBits);
   }
 
  protected:
@@ -225,11 +210,13 @@ class WebSocketDeflateStreamTest : public ::testing::Test {
       parameters.SetClientNoContextTakeOver();
     }
     parameters.SetClientMaxWindowBits(window_bits);
-    mock_stream_ = new testing::StrictMock<MockWebSocketStream>;
-    predictor_ = new WebSocketDeflatePredictorMock;
+    auto mock_stream =
+        std::make_unique<testing::StrictMock<MockWebSocketStream>>();
+    auto predictor = std::make_unique<WebSocketDeflatePredictorMock>();
+    mock_stream_ = mock_stream.get();
+    predictor_ = predictor.get();
     deflate_stream_ = std::make_unique<WebSocketDeflateStream>(
-        base::WrapUnique(mock_stream_), parameters,
-        base::WrapUnique(predictor_));
+        std::move(mock_stream), parameters, std::move(predictor));
   }
 
   void AppendTo(std::vector<std::unique_ptr<WebSocketFrame>>* frames,
@@ -248,9 +235,9 @@ class WebSocketDeflateStreamTest : public ::testing::Test {
     auto frame = std::make_unique<WebSocketFrame>(opcode);
     frame->header.final = (flag & kFinal);
     frame->header.reserved1 = (flag & kReserved1);
-    auto buffer = std::make_unique<char[]>(data.size());
-    memcpy(buffer.get(), data.c_str(), data.size());
-    frame->payload = buffer.get();
+    auto buffer =
+        base::HeapArray<uint8_t>::CopiedFrom(base::as_byte_span(data));
+    frame->payload = buffer.as_span();
     data_buffers.push_back(std::move(buffer));
     frame->header.payload_length = data.size();
     frames->push_back(std::move(frame));
@@ -258,12 +245,11 @@ class WebSocketDeflateStreamTest : public ::testing::Test {
 
   std::unique_ptr<WebSocketDeflateStream> deflate_stream_;
   // Owned by |deflate_stream_|.
-  MockWebSocketStream* mock_stream_;
+  raw_ptr<MockWebSocketStream> mock_stream_ = nullptr;
   // Owned by |deflate_stream_|.
-  WebSocketDeflatePredictorMock* predictor_;
+  raw_ptr<WebSocketDeflatePredictorMock> predictor_ = nullptr;
 
-  // TODO(yoichio): Make this type std::vector<std::string>.
-  std::vector<std::unique_ptr<const char[]>> data_buffers;
+  std::vector<base::HeapArray<uint8_t>> data_buffers;
 };
 
 // Since WebSocketDeflater with DoNotTakeOverContext is well tested at
@@ -276,7 +262,8 @@ class WebSocketDeflateStreamWithDoNotTakeOverContextTest
   ~WebSocketDeflateStreamWithDoNotTakeOverContextTest() override = default;
 
   void SetUp() override {
-    Initialize(WebSocketDeflater::DO_NOT_TAKE_OVER_CONTEXT, kWindowBits);
+    Initialize(WebSocketDeflater::DO_NOT_TAKE_OVER_CONTEXT,
+               WebSocketDeflateStream::kWindowBits);
   }
 };
 
@@ -321,25 +308,25 @@ class ReadFramesStub {
   }
 
   int Call(std::vector<std::unique_ptr<WebSocketFrame>>* frames,
-           const CompletionRepeatingCallback& callback) {
+           CompletionOnceCallback callback) {
     DCHECK(frames->empty());
     frames_passed_ = frames;
-    callback_ = callback;
+    callback_ = std::move(callback);
     frames->swap(frames_to_output_);
     return result_;
   }
 
   int result() const { return result_; }
-  const CompletionRepeatingCallback& callback() const { return callback_; }
+  CompletionOnceCallback& callback() { return callback_; }
   std::vector<std::unique_ptr<WebSocketFrame>>* frames_passed() {
     return frames_passed_;
   }
 
  private:
   int result_;
-  CompletionRepeatingCallback callback_;
+  CompletionOnceCallback callback_;
   std::vector<std::unique_ptr<WebSocketFrame>> frames_to_output_;
-  std::vector<std::unique_ptr<WebSocketFrame>>* frames_passed_;
+  raw_ptr<std::vector<std::unique_ptr<WebSocketFrame>>> frames_passed_;
 };
 
 // WriteFramesStub is a stub for WebSocketStream::WriteFrames.
@@ -352,31 +339,31 @@ class WriteFramesStub {
       : result_(result), predictor_(predictor) {}
 
   int Call(std::vector<std::unique_ptr<WebSocketFrame>>* frames,
-           const CompletionRepeatingCallback& callback) {
+           CompletionOnceCallback callback) {
     frames_.insert(frames_.end(), std::make_move_iterator(frames->begin()),
                    std::make_move_iterator(frames->end()));
     frames->clear();
-    callback_ = callback;
+    callback_ = std::move(callback);
     predictor_->VerifySentFrames(frames_);
     return result_;
   }
 
   int result() const { return result_; }
-  const CompletionRepeatingCallback& callback() const { return callback_; }
+  CompletionOnceCallback& callback() { return callback_; }
   std::vector<std::unique_ptr<WebSocketFrame>>* frames() { return &frames_; }
 
  private:
   int result_;
-  CompletionRepeatingCallback callback_;
+  CompletionOnceCallback callback_;
   std::vector<std::unique_ptr<WebSocketFrame>> frames_;
-  WebSocketDeflatePredictorMock* predictor_;
+  raw_ptr<WebSocketDeflatePredictorMock> predictor_;
 };
 
 TEST_F(WebSocketDeflateStreamTest, ReadFailedImmediately) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Return(ERR_FAILED));
   }
   EXPECT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -394,7 +381,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadUncompressedFrameImmediately) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -414,7 +401,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadUncompressedFrameAsync) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
     EXPECT_CALL(checkpoint, Run());
     EXPECT_CALL(mock_callback, Run(OK));
@@ -429,7 +416,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadUncompressedFrameAsync) {
            WebSocketFrameHeader::kOpCodeText,
            kFinal,
            "hello");
-  stub.callback().Run(OK);
+  std::move(stub.callback()).Run(OK);
   ASSERT_EQ(1u, frames.size());
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeText, frames[0]->header.opcode);
   EXPECT_TRUE(frames[0]->header.final);
@@ -445,7 +432,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadFailedAsync) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
     EXPECT_CALL(checkpoint, Run());
     EXPECT_CALL(mock_callback, Run(ERR_FAILED));
@@ -460,7 +447,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadFailedAsync) {
            WebSocketFrameHeader::kOpCodeText,
            kFinal,
            "hello");
-  stub.callback().Run(ERR_FAILED);
+  std::move(stub.callback()).Run(ERR_FAILED);
   ASSERT_EQ(0u, frames.size());
 }
 
@@ -474,7 +461,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadCompressedFrameImmediately) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -494,7 +481,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadCompressedFrameAsync) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
     EXPECT_CALL(checkpoint, Run());
     EXPECT_CALL(mock_callback, Run(OK));
@@ -508,7 +495,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadCompressedFrameAsync) {
            WebSocketFrameHeader::kOpCodeText,
            kFinal | kReserved1,
            std::string("\xf2\x48\xcd\xc9\xc9\x07\x00", 7));
-  stub.callback().Run(OK);
+  std::move(stub.callback()).Run(OK);
 
   ASSERT_EQ(1u, frames.size());
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeText, frames[0]->header.opcode);
@@ -533,7 +520,7 @@ TEST_F(WebSocketDeflateStreamTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub1, &ReadFramesStub::Call))
         .WillOnce(Invoke(&stub2, &ReadFramesStub::Call));
     EXPECT_CALL(checkpoint, Run());
@@ -549,7 +536,7 @@ TEST_F(WebSocketDeflateStreamTest,
            data2);
 
   checkpoint.Run();
-  stub2.callback().Run(OK);
+  std::move(stub2.callback()).Run(OK);
 
   ASSERT_EQ(1u, frames.size());
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeText, frames[0]->header.opcode);
@@ -570,7 +557,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadInvalidCompressedPayload) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_EQ(ERR_WS_PROTOCOL_ERROR,
@@ -595,7 +582,7 @@ TEST_F(WebSocketDeflateStreamTest, MergeMultipleFramesInReadFrames) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -620,7 +607,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadUncompressedEmptyFrames) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -651,7 +638,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadCompressedEmptyFrames) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -679,7 +666,7 @@ TEST_F(WebSocketDeflateStreamTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -706,7 +693,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadControlFrameBetweenDataFrames) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -723,10 +710,10 @@ TEST_F(WebSocketDeflateStreamTest, ReadControlFrameBetweenDataFrames) {
 
 TEST_F(WebSocketDeflateStreamTest, SplitToMultipleFramesInReadFrames) {
   WebSocketDeflater deflater(WebSocketDeflater::TAKE_OVER_CONTEXT);
-  deflater.Initialize(kWindowBits);
-  const size_t kSize = kChunkSize * 3;
+  deflater.Initialize(WebSocketDeflateStream::kWindowBits);
+  constexpr size_t kSize = WebSocketDeflateStream::kChunkSize * 3;
   const std::string original_data(kSize, 'a');
-  deflater.AddBytes(original_data.data(), original_data.size());
+  deflater.AddBytes(base::as_byte_span(original_data));
   deflater.Finish();
 
   std::vector<std::unique_ptr<WebSocketFrame>> frames_to_output;
@@ -739,7 +726,7 @@ TEST_F(WebSocketDeflateStreamTest, SplitToMultipleFramesInReadFrames) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
 
@@ -749,26 +736,29 @@ TEST_F(WebSocketDeflateStreamTest, SplitToMultipleFramesInReadFrames) {
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeBinary, frames[0]->header.opcode);
   EXPECT_FALSE(frames[0]->header.final);
   EXPECT_FALSE(frames[0]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[0]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[0]->header.payload_length));
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeContinuation,
             frames[1]->header.opcode);
   EXPECT_FALSE(frames[1]->header.final);
   EXPECT_FALSE(frames[1]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[1]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[1]->header.payload_length));
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeContinuation,
             frames[2]->header.opcode);
   EXPECT_TRUE(frames[2]->header.final);
   EXPECT_FALSE(frames[2]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[2]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[2]->header.payload_length));
   EXPECT_EQ(original_data,
             ToString(frames[0]) + ToString(frames[1]) + ToString(frames[2]));
 }
 
 TEST_F(WebSocketDeflateStreamTest, InflaterInternalDataCanBeEmpty) {
   WebSocketDeflater deflater(WebSocketDeflater::TAKE_OVER_CONTEXT);
-  deflater.Initialize(kWindowBits);
-  const std::string original_data(kChunkSize, 'a');
-  deflater.AddBytes(original_data.data(), original_data.size());
+  deflater.Initialize(WebSocketDeflateStream::kWindowBits);
+  const std::string original_data(WebSocketDeflateStream::kChunkSize, 'a');
+  deflater.AddBytes(base::as_byte_span(original_data));
   deflater.Finish();
 
   std::vector<std::unique_ptr<WebSocketFrame>> frames_to_output;
@@ -785,7 +775,7 @@ TEST_F(WebSocketDeflateStreamTest, InflaterInternalDataCanBeEmpty) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
 
@@ -795,7 +785,8 @@ TEST_F(WebSocketDeflateStreamTest, InflaterInternalDataCanBeEmpty) {
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeBinary, frames[0]->header.opcode);
   EXPECT_FALSE(frames[0]->header.final);
   EXPECT_FALSE(frames[0]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[0]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[0]->header.payload_length));
 
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeContinuation,
             frames[1]->header.opcode);
@@ -823,7 +814,7 @@ TEST_F(WebSocketDeflateStreamTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_EQ(ERR_WS_PROTOCOL_ERROR,
@@ -846,7 +837,7 @@ TEST_F(WebSocketDeflateStreamTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_EQ(ERR_WS_PROTOCOL_ERROR,
@@ -869,7 +860,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadCompressedMessages) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -900,7 +891,7 @@ TEST_F(WebSocketDeflateStreamTest, ReadUncompressedMessages) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -933,7 +924,7 @@ TEST_F(WebSocketDeflateStreamTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -966,7 +957,7 @@ TEST_F(WebSocketDeflateStreamTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(&stub, &ReadFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->ReadFrames(&frames, CompletionOnceCallback()),
@@ -992,10 +983,10 @@ TEST_F(WebSocketDeflateStreamTest, ReadEmptyAsyncFrame) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(stub_vector[0].get(), &ReadFramesStub::Call));
 
-    EXPECT_CALL(*mock_stream_, ReadFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, ReadFrames(&frames, _))
         .WillOnce(Invoke(stub_vector[1].get(), &ReadFramesStub::Call));
 
     EXPECT_CALL(mock_callback, Run(OK));
@@ -1007,12 +998,12 @@ TEST_F(WebSocketDeflateStreamTest, ReadEmptyAsyncFrame) {
            WebSocketFrameHeader::kOpCodeText,
            kReserved1,
            std::string());
-  stub_vector[0]->callback().Run(OK);
+  std::move(stub_vector[0]->callback()).Run(OK);
   AppendTo(stub_vector[1]->frames_passed(),
            WebSocketFrameHeader::kOpCodeContinuation,
            kFinal,
            std::string("\x02\x00"));
-  stub_vector[1]->callback().Run(OK);
+  std::move(stub_vector[1]->callback()).Run(OK);
   ASSERT_EQ(1u, frames.size());
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeText, frames[0]->header.opcode);
   EXPECT_EQ("", ToString(frames[0]));
@@ -1022,7 +1013,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteEmpty) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _)).Times(0);
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _)).Times(0);
   }
   EXPECT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
               IsOk());
@@ -1032,7 +1023,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteFailedImmediately) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Return(ERR_FAILED));
   }
 
@@ -1050,7 +1041,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteFrameImmediately) {
   predictor_->AddFramesToBeInput(frames);
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(_, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(_, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
@@ -1072,7 +1063,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteFrameAsync) {
   std::vector<std::unique_ptr<WebSocketFrame>> frames;
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
     EXPECT_CALL(checkpoint, Run());
     EXPECT_CALL(mock_callback, Run(OK));
@@ -1083,7 +1074,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteFrameAsync) {
               IsError(ERR_IO_PENDING));
 
   checkpoint.Run();
-  stub.callback().Run(OK);
+  std::move(stub.callback()).Run(OK);
 
   const std::vector<std::unique_ptr<WebSocketFrame>>& frames_passed =
       *stub.frames();
@@ -1105,7 +1096,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteControlFrameBetweenDataFrames) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
@@ -1131,7 +1122,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteEmptyMessage) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
@@ -1156,7 +1147,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteUncompressedMessage) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
@@ -1175,37 +1166,58 @@ TEST_F(WebSocketDeflateStreamTest, WriteUncompressedMessage) {
   EXPECT_EQ("AAA", ToString(frames_passed[1]));
 }
 
+TEST_F(WebSocketDeflateStreamTest,
+       LargeMessageShouldNotBeSplitIfSmallerThan32KB) {
+  WriteFramesStub stub(predictor_, OK);
+  const std::string payload(WebSocketDeflateStream::kChunkSize - 1, 'a');
+  std::vector<std::unique_ptr<WebSocketFrame>> frames;
+  AppendTo(&frames, WebSocketFrameHeader::kOpCodeText, kFinal, payload);
+  predictor_->AddFramesToBeInput(frames);
+
+  {
+    InSequence s;
+    EXPECT_CALL(*mock_stream_, WriteFrames(_, _))
+        .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
+  }
+
+  ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
+              IsOk());
+  // The message is slightly smaller than kChunkSize, so it should not be split.
+  ASSERT_EQ(1u, stub.frames()->size());
+}
+
 TEST_F(WebSocketDeflateStreamTest, LargeDeflatedFramesShouldBeSplit) {
   WebSocketDeflater deflater(WebSocketDeflater::TAKE_OVER_CONTEXT);
   LinearCongruentialGenerator lcg(133);
   WriteFramesStub stub(predictor_, OK);
-  const size_t size = 1024;
+  constexpr size_t kSize = WebSocketDeflateStream::kChunkSize / 4;
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(_, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(_, _))
         .WillRepeatedly(Invoke(&stub, &WriteFramesStub::Call));
   }
   std::vector<std::unique_ptr<WebSocketFrame>> total_compressed_frames;
   std::vector<std::string> buffers;
 
-  deflater.Initialize(kWindowBits);
+  deflater.Initialize(WebSocketDeflateStream::kWindowBits);
   while (true) {
     bool is_final = (total_compressed_frames.size() >= 2);
     std::vector<std::unique_ptr<WebSocketFrame>> frames;
     std::string data;
-    for (size_t i = 0; i < size; ++i)
+    data.reserve(kSize);
+    for (size_t i = 0; i < kSize; ++i) {
       data += static_cast<char>(lcg.Generate());
-    deflater.AddBytes(data.data(), data.size());
+    }
+    deflater.AddBytes(base::as_byte_span(data));
     FrameFlag flag = is_final ? kFinal : kNoFlag;
     AppendTo(&frames, WebSocketFrameHeader::kOpCodeBinary, flag, data);
     predictor_->AddFramesToBeInput(frames);
     ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
                 IsOk());
     for (auto& frame : *stub.frames()) {
-      buffers.push_back(
-          std::string(frame->payload, frame->header.payload_length));
-      frame->payload = (buffers.end() - 1)->data();
+      buffers.emplace_back(base::as_string_view(frame->payload));
+      frame->payload = base::as_byte_span(buffers.back());
     }
     total_compressed_frames.insert(
         total_compressed_frames.end(),
@@ -1246,7 +1258,7 @@ TEST_F(WebSocketDeflateStreamTest, WriteMultipleMessages) {
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
@@ -1275,7 +1287,7 @@ TEST_F(WebSocketDeflateStreamWithDoNotTakeOverContextTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
@@ -1312,7 +1324,7 @@ TEST_F(WebSocketDeflateStreamWithDoNotTakeOverContextTest,
 
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(&frames, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(&frames, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
@@ -1355,7 +1367,7 @@ TEST_F(WebSocketDeflateStreamWithClientWindowBitsTest, WindowBits8) {
   WriteFramesStub stub(predictor_, OK);
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(_, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(_, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames_, CompletionOnceCallback()),
@@ -1375,7 +1387,7 @@ TEST_F(WebSocketDeflateStreamWithClientWindowBitsTest, WindowBits10) {
   WriteFramesStub stub(predictor_, OK);
   {
     InSequence s;
-    EXPECT_CALL(*mock_stream_, WriteFramesInternal(_, _))
+    EXPECT_CALL(*mock_stream_, WriteFrames(_, _))
         .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
   }
   ASSERT_THAT(deflate_stream_->WriteFrames(&frames_, CompletionOnceCallback()),

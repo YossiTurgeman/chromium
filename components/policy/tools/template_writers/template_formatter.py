@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 '''Takes translated policy_template.json files as input, applies template
@@ -7,7 +7,6 @@ writers and emits various template and doc files (admx, html, json etc.).
 '''
 
 import argparse
-import codecs
 import collections
 import json
 import os
@@ -18,7 +17,6 @@ import writer_configuration
 import policy_template_generator
 
 from writers import adm_writer, adml_writer, admx_writer, \
-                    chromeos_admx_writer, chromeos_adml_writer, \
                     google_admx_writer, google_adml_writer, \
                     android_policy_writer, reg_writer, doc_writer, \
                     doc_atomic_groups_writer , json_writer, plist_writer, \
@@ -56,8 +54,6 @@ _WRITER_DESCS = [
     WriterDesc('admx', False, 'utf-16', None, True),
     WriterDesc('google_adml', True, 'utf-8', None, True),
     WriterDesc('google_admx', False, 'utf-8', None, True),
-    WriterDesc('chromeos_adml', True, 'utf-8', None, True),
-    WriterDesc('chromeos_admx', False, 'utf-8', None, True),
     WriterDesc('android_policy', False, 'utf-8', None, False),
     WriterDesc('reg', False, 'utf-16', None, False),
     WriterDesc('doc', True, 'utf-8', None, False),
@@ -118,20 +114,17 @@ def _ParseVersionFile(version_path):
       elif key.strip() == 'PATCH':
         version['patch'] = value.strip()
 
-    version_found = version.has_key('major') and version.has_key(
-        'minor') and version.has_key('build') and version.has_key('patch')
+    version_found = len(version) == 4
   return version if version_found else None
 
 
 def _JsonToUtf8Encoding(data, ignore_dicts=False):
-  if isinstance(data, unicode):
-    return data.encode('utf-8')
-  elif isinstance(data, list):
+  if isinstance(data, list):
     return [_JsonToUtf8Encoding(item, False) for item in data]
   elif isinstance(data, dict):
     return {
         _JsonToUtf8Encoding(key): _JsonToUtf8Encoding(value)
-        for key, value in data.iteritems()
+        for key, value in data.items()
     }
   return data
 
@@ -177,11 +170,10 @@ def main():
   parser.add_argument('--doc', action='append', dest='doc')
   parser.add_argument(
       '--doc_atomic_groups', action='append', dest='doc_atomic_groups')
-  parser.add_argument(
-      '--local',
-      action='store_true',
-      help='If set, the documentation will be built so \
-            that links work locally in the generated path.')
+  parser.add_argument('--local',
+                      action='store_true',
+                      help='If set, the documentation will be built so '
+                      'that links work locally in the generated path.')
   parser.add_argument('--json', action='append', dest='json')
   parser.add_argument('--plist', action='append', dest='plist')
   parser.add_argument('--plist_strings', action='append', dest='plist_strings')
@@ -198,7 +190,7 @@ def main():
   _LANG_PLACEHOLDER = "${lang}"
   assert _LANG_PLACEHOLDER in args.translations
 
-  languages = filter(bool, args.languages.split(','))
+  languages = list(filter(bool, args.languages.split(',')))
   assert _DEFAULT_LANGUAGE in languages
 
   config = _GetWriterConfiguration(args.grit_defines)
@@ -218,7 +210,7 @@ def main():
         _LANG_PLACEHOLDER, lang)
     # Loads the localized policy json file which must be a valid json file
     # encoded in utf-8.
-    with codecs.open(policy_templates_json_path, 'r', 'utf-8') as policy_file:
+    with open(policy_templates_json_path, 'r', encoding='utf-8') as policy_file:
       policy_data = json.loads(
           policy_file.read(), object_hook=_JsonToUtf8Encoding)
 
@@ -261,7 +253,10 @@ def main():
           os.makedirs(output_dir)
 
         # Write output file.
-        with codecs.open(output_path, 'w', writer_desc.encoding) as output_file:
+        with open(output_path,
+                  'w',
+                  encoding=writer_desc.encoding,
+                  newline='\n') as output_file:
           output_file.write(output_data)
 
 

@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -12,6 +12,19 @@ This file checks for the following:
   - XML namspace "app" is used for "http://schemas.android.com/apk/res-auto"
   - Android text attributes are only defined in text appearance styles
   - Warning on adding new text appearance styles
+  - Encourages using TextViewWithLeading rather than android:lineSpacingExtra
+    and android:lineSpacingMultiplier
+  - Encourages using ButtonCompat rather than Button, AppButtonCompat
+  - Checks whether inappropriate quotes are used in string resources
+  - Checks whether inappropriate ellipsis are used in string resources
+  - Encourages android:importantForAccessibility="no" rather than
+    tools:ignore="ContentDescription" for images that don't need content
+    descriptions
+  - Checks whether style attribute reference could work
+  - Checks whether direct theme color attributes are used in xml files in
+    layout, encouraging the usage of Chrome's semantically named colors
+  - Checks if new preference XML files are added and encourages search indexing
+    and registration.
 """
 
 from collections import defaultdict
@@ -39,6 +52,29 @@ def IncludedFiles(input_api, allow_list=helpers.INCLUDED_PATHS):
   return input_api.AffectedFiles(include_deletes=False, file_filter=files)
 
 
+class LazyColorStateListSet:
+  """
+  This class has two jobs. It allows us to delay searching directories for color
+  state list files unless we actually find a color reference to check against.
+  And additionally it's a convenient mock point for tests to specify files in a
+  slightly more robust way than relying on real color state list file names.
+  """
+  _color_set_or_none = None
+
+  def get(self):
+    if self._color_set_or_none != None:
+      return self._color_set_or_none
+
+    self._color_set_or_none = set()
+    for color_dir in helpers.COLOR_STATE_LIST_DIRS:
+      if not os.path.isdir(color_dir):
+        continue
+      for color_file in os.listdir(color_dir):
+        if '.' in color_file:
+          self._color_set_or_none.add(color_file[:color_file.index('.')])
+    return self._color_set_or_none
+
+
 def _CommonChecks(input_api, output_api):
   """Checks common to both upload and commit."""
   result = []
@@ -47,13 +83,22 @@ def _CommonChecks(input_api, output_api):
   result.extend(_CheckDuplicateColors(input_api, output_api))
   result.extend(_CheckSemanticColorsReferences(input_api, output_api))
   result.extend(_CheckColorPaletteReferences(input_api, output_api))
+  result.extend(_CheckNonDynamicColorReference(input_api, output_api))
   result.extend(_CheckXmlNamespacePrefixes(input_api, output_api))
   result.extend(_CheckTextAppearance(input_api, output_api))
   result.extend(_CheckLineSpacingAttribute(input_api, output_api))
   result.extend(_CheckButtonCompatWidgetUsage(input_api, output_api))
-  result.extend(_CheckStringResourcePunctuations(input_api, output_api))
+  result.extend(_CheckStringResourceQuotesPunctuations(input_api, output_api))
+  result.extend(_CheckStringResourceEllipsisPunctuations(input_api, output_api))
+  result.extend(_CheckImportantForAccessibility(input_api, output_api))
+  result.extend(_CheckBadStyleReference(input_api, output_api))
+  result.extend(_CheckThemeColorAttributes(input_api, output_api))
+  result.extend(_CheckAttrFileChanges(input_api, output_api))
+  result.extend(_CheckAttrReferenceInUi(input_api, output_api))
+  result.extend(_CheckSettingsXml(input_api, output_api))
   # Add more checks here
   return result
+
 
 ### color resources below ###
 def _CheckColorFormat(input_api, output_api):
@@ -117,14 +162,17 @@ def _CheckColorReferences(input_api, output_api):
         output_api.PresubmitError(
             '''
   Android Color Reference Check failed:
-    Your new code added new color references that are not color resources from
-    ui/android/java/res/values/color_palette.xml, listed below.
+    Your new code contains hard coded hex color values in a resource file. You
+    likely should be using a @macro or color state list to support dynamic
+    colors, see
+    https://chromium.googlesource.com/chromium/src/+/main/docs/ui/android/dynamic_colors.md
 
-    This is banned, please use the existing color resources or create a new
-    color resource in color_palette.xml, and reference the color by @color/....
+    In the cases where you purposefully want fixed colors (like incognito), at
+    the very least @color references to color_palette.xml or one_off_colors.xml
+    will be necessary.
 
     If the new added color is a one-off color, please contact UX for approval
-    and then add it to ui/android/java/res/values/one_off_colors.xml.
+    and then add it to ui/android/java/res/values/one_off_colors.xml
 
     See https://crbug.com/775198 for more information.
   ''', errors)
@@ -134,11 +182,14 @@ def _CheckColorReferences(input_api, output_api):
         output_api.PresubmitPromptWarning(
             '''
   Android Color Reference Check warning:
-    Your new code added new color references that are not color resources from
-    ui/android/java/res/values/color_palette.xml, listed below.
+    Your new code contains hard coded hex color values in a resource file. You
+    likely should be using a @macro or color state list to support dynamic
+    colors, see
+    https://chromium.googlesource.com/chromium/src/+/main/docs/ui/android/dynamic_colors.md
 
-    This is typically not needed even in vector/shape drawables. Please consider
-    using an existing color resources if possible.
+    In the cases where you purposefully want fixed colors (like incognito), at
+    the very least @color references to color_palette.xml or one_off_colors.xml
+    will be necessary.
 
     Only bypass this check if you are confident that you should be using a HEX
     reference, e.g. you are adding an illustration or a shadow using XML rather
@@ -148,7 +199,6 @@ def _CheckColorReferences(input_api, output_api):
   ''', warnings)
     ]
   return result
-
 
 def _CheckDuplicateColors(input_api, output_api):
   """
@@ -185,7 +235,7 @@ def _CheckDuplicateColors(input_api, output_api):
 
     This is banned, please reference the existing color resource from
     color_palette.xml or one_off_colors.xml using @color/... and if needed,
-    give the existing color resource a more general name (e.g. modern_grey_100).
+    give the existing color resource a more general name (e.g. baseline_neutral_90).
 
     See https://crbug.com/775198 for more information.
   ''', errors)
@@ -236,24 +286,26 @@ def _CheckColorPaletteReferences(input_api, output_api):
 def _CheckSemanticColorsReferences(input_api, output_api):
   """
   Checks colors defined in semantic_colors_non_adaptive.xml only referencing
-  resources in color_palette.xml.
+  resources in self or color_palette.xml.
   """
   errors = []
-  color_palette = None
+  usable_colors = None
 
   for f in IncludedFiles(input_api):
     if not f.LocalPath().endswith('/semantic_colors_non_adaptive.xml'):
       continue
 
-    if color_palette is None:
+    if usable_colors is None:
       color_palette = _colorXml2Dict(
         input_api.ReadFile(helpers.COLOR_PALETTE_PATH))
+      self_palette = _colorXml2Dict(input_api.ReadFile(f.AbsoluteLocalPath()))
+      usable_colors = {**color_palette, **self_palette}
     for line_number, line in f.ChangedContents():
       r = helpers.COLOR_REFERENCE_PATTERN.search(line)
       if not r:
         continue
-      color = r.group()
-      if _removePrefix(color) not in color_palette:
+      color_ref = r.group()
+      if _removePrefix(color_ref) not in usable_colors:
         errors.append(
             '  %s:%d\n    \t%s' % (f.LocalPath(), line_number, line.strip()))
 
@@ -271,6 +323,41 @@ def _CheckSemanticColorsReferences(input_api, output_api):
     See https://crbug.com/775198 for more information.
   ''', errors)
     ]
+  return []
+
+
+def _CheckNonDynamicColorReference(
+    input_api, output_api, lazy_color_state_list_set=LazyColorStateListSet()):
+  """
+  Checks for @color references that will not work with dynamic colors.
+  """
+
+  warnings = []
+  for f in IncludedFiles(input_api,
+                         allow_list=helpers.DYNAMIC_COLOR_INCLUDED_PATHS):
+    for line_number, line in f.ChangedContents():
+      r = helpers.COLOR_REFERENCE_PATTERN.search(line)
+      if not r:
+        continue
+
+      color_name = r.group(1)
+      if color_name not in lazy_color_state_list_set.get():
+        issue = '  %s:%d\n    \t%s' % (f.LocalPath(), line_number, line.strip())
+        warnings.append(issue)
+
+  if warnings:
+    return [
+        output_api.PresubmitPromptWarning(
+            '''
+Dynamic Color Reference Check warning:
+  Your new code is using @color references. These will not correctly support
+  dynamic colors. Instead you should use a @macro that routes into an ?attr.
+  Note using color references is currently okay for incognito code, as it should
+  not be dynamically colored. See
+  https://chromium.googlesource.com/chromium/src/+/main/docs/ui/android/dynamic_colors.md.
+          ''', warnings)
+    ]
+
   return []
 
 
@@ -308,8 +395,15 @@ def _CheckTextAppearance(input_api, output_api):
       'android:fontFamily', 'android:textAllCaps']
   namespace = {'android': 'http://schemas.android.com/apk/res/android'}
   errors = []
+  differences = False
   for f in IncludedFiles(input_api):
-    root = ET.fromstring(input_api.ReadFile(f))
+    try:
+      root = ET.fromstring(input_api.ReadFile(f))
+    except ET.ParseError:
+      print('*' * 80)
+      print('Parse error processing file:', f)
+      print('*' * 80)
+      raise
     # Check if there are text attributes defined outside text appearances.
     for attribute in text_attributes:
       # Get style name that contains text attributes but is not text appearance.
@@ -332,23 +426,25 @@ def _CheckTextAppearance(input_api, output_api):
           errors.append('  %s:%d contains attribute %s\n    \t%s' % (
               f.LocalPath(), line_number+1, attribute, line.strip()))
           style_count += 1
+          if f.ChangedContents():
+            differences = True
         # Error for text attributes in layout.
         if widget_count > 0 and attribute in line:
           errors.append('  %s:%d contains attribute %s\n    \t%s' % (
               f.LocalPath(), line_number+1, attribute, line.strip()))
           widget_count -= 1
+          if f.ChangedContents():
+            differences = True
   # TODO(huayinz): Change the path on the error message to the corresponding
   # styles.xml when this check applies to all resource directories.
   if errors:
-    return [
-        output_api.PresubmitError(
-            '''
+    message = ('''
   Android Text Appearance Check failed:
     Your modified files contain Android text attributes defined outside
     text appearance styles, listed below.
 
     It is recommended to use the pre-defined text appearance styles in
-      src/ui/android/java/res/values-v17/styles.xml
+      src/ui/android/java/res/values/styles.xml
 
     And to use
       android:textAppearance="@style/SomeTextAppearance"
@@ -359,7 +455,7 @@ def _CheckTextAppearance(input_api, output_api):
     new text appearance style.
 
     If your approved text appearance style is a common text appreance style,
-    please define it in src/ui/android/java/res/values-v17/styles.xml.
+    please define it in src/ui/android/java/res/values/styles.xml.
 
     Otherwise, if your approved text appearance is feature-specific, in
     chrome/android/java/res/values*/styles.xml, please define
@@ -369,11 +465,16 @@ def _CheckTextAppearance(input_api, output_api):
         ...
       </style>
 
-    Please contact arminaforoughi@chromium.org for UX approval, and
+    Please contact clank-ux@google.com for UX approval, and
     src/chrome/android/java/res/OWNERS for questions.
     See https://crbug.com/775198 for more information.
-  ''', errors)
-    ]
+  ''')
+    if differences:
+      return [output_api.PresubmitError(message, errors)]
+    else:
+      # Report a warning instead of an error when running "presubmit --all" or
+      # "presubmit --files" so that these can run error free.
+      return [output_api.PresubmitPromptWarning(message, errors)]
   return []
 
 
@@ -394,7 +495,7 @@ def _CheckNewTextAppearance(input_api, output_api):
     If you are removing or editing an existing text appearance style, or your
     new text appearance style is approved by UX, please bypass this check.
 
-    Otherwise, please contact arminaforoughi@chromium.org for UX approval, and
+    Otherwise, please contact clank-ux@google.com for UX approval, and
     src/chrome/android/java/res/OWNERS for questions.
     See https://crbug.com/775198 for more information.
   ''', errors)
@@ -420,7 +521,7 @@ def _CheckLineSpacingAttribute(input_api, output_api):
     return [
       output_api.PresubmitPromptWarning(
           '''
-  Android Widget Check warning:
+  Android XML Widget Check warning:
     Your new code is using android:lineSpacingExtra
     or android:lineSpacingMultiplier, listed below.
 
@@ -433,6 +534,62 @@ def _CheckLineSpacingAttribute(input_api, output_api):
   ''', warnings)
     ]
 
+  return []
+
+### important for accessibility below ###
+def _CheckImportantForAccessibility(input_api, output_api):
+  """
+  Encourage android:importantForAccessibility="no" rather than
+  tools:ignore="ContentDescription" for images that don't need content
+  descriptions.
+  """
+  warnings = []
+  attributes = ['tools:ignore="ContentDescription"']
+  for f in IncludedFiles(input_api):
+    for line_number, line in f.ChangedContents():
+      for attribute in attributes:
+        if attribute in line:
+          warnings.append(
+            '  %s:%d\n    \t%s' % (f.LocalPath(), line_number, line.strip()))
+
+  if warnings:
+    return [
+      output_api.PresubmitPromptWarning(
+          '''
+  Android XML Widget Check warning:
+    Your new code is using tools:ignore="ContentDescription", listed below.
+
+    Use android:importantForAccessibility="no" instead of tools:ignore="ContentDescription"
+    in your ImageView unless it is important for accessibility and a content description is set
+    in Java.
+
+    See https://crbug.com/1245341 for more information.
+  ''', warnings)
+    ]
+
+  return []
+
+
+### bad style reference below ###
+def _CheckBadStyleReference(input_api, output_api):
+  """Checks whether style attribute reference could work."""
+  errors = []
+  for f in IncludedFiles(input_api):
+    for line_number, line in f.ChangedContents():
+      match = helpers.KNOWN_STYLE_ATTRIBUTE.search(line)
+      if match and not helpers.STYLE_REF_PREFIX.search(match.group(2)):
+        errors.append('  %s:%d\n    \t%s' %
+                      (f.LocalPath(), line_number, line.strip()))
+  if errors:
+    return [
+        output_api.PresubmitPromptWarning(
+            '''
+  Style Reference Check failed:
+    Your modified resource file has declared a style attribute, but does not
+    prefix the style reference with a ? (for attributes) or @ (for styles). It's
+    very likely this style is not being resolved correctly at runtime.
+  ''', errors)
+    ]
   return []
 
 
@@ -470,14 +627,67 @@ def _CheckButtonCompatWidgetUsage(input_api, output_api):
 
 
 ### String resource check ###
-def _CheckStringResourcePunctuations(input_api, output_api):
+def _CheckStringResourceQuotesPunctuations(input_api, output_api):
+  """Check whether inappropriate quotes are used"""
+  warning = '''
+  Android String Resources Check failed:
+    Your new string is using one or more of generic quotes (\u0022 \\u0022, \u0027 \\u0027,
+    \u0060 \\u0060, \u00B4 \\u00B4), which is not encouraged. Instead, quotations marks
+    (\u201C \\u201C, \u201D \\u201D, \u2018 \\u2018, \u2019 \\u2019) are usually preferred (see
+    https://material.io/archive/guidelines/style/writing.html#writing-capitalization-punctuation).
+
+    Use prime (\u2032 \\u2032) only in abbreviations for feet, arcminutes, and minutes.
+    Use double-prime (\u2033 \\u2033) only in abbreviations for inches, arcseconds, and seconds.
+    Use the right single quotation mark (\u2019 \\u2019) for apostrophes.
+
+    Please reach out to the UX designer/writer in your team to double check
+    which punctuation should be correctly used. Ignore this warning if UX has confirmed.
+
+    Reach out to writing-strings@chromium.org if you have any question about writing strings.
+  '''
+  return _checkStringResourcePunctuations(
+      re.compile(u'[\u0022\u0027\u0060\u00B4]'), warning, input_api, output_api)
+
+
+def _CheckStringResourceEllipsisPunctuations(input_api, output_api):
+  """Check whether inappropriate ellipsis are used"""
+  warning = '''
+  Android String Resources Check failed:
+    Your new string appears to use three periods(\u002E \\u002E) to represent
+    an ellipsis, which is not encouraged. Instead, an ellipsis mark
+    (\u2026 \\u2026) is usually preferred.
+
+    Please reach out to the UX designer/writer in your team to double check
+    which punctuation should be correctly used. Ignore this warning if UX has confirmed.
+
+    Reach out to writing-strings@chromium.org if you have any question about writing strings.
+  '''
+  return _checkStringResourcePunctuations(re.compile(u'[\u002E]{3}'), warning,
+                                          input_api, output_api)
+
+
+### helpers ###
+def _colorXml2Dict(content):
+  dct = dict()
+  tree = ET.fromstring(content)
+  for child in tree:
+    dct[child.attrib['name']] = child.text
+  return dct
+
+
+def _removePrefix(color, prefix='@color/'):
+  if color.startswith(prefix):
+    return color[len(prefix):]
+  return color
+
+
+def _checkStringResourcePunctuations(regex, warning, input_api, output_api):
   """Check whether inappropriate punctuations are used"""
   warnings = []
   result = []
   # Removing placeholders for parsing purpose:
   # placeholders will be parsed as children of the parent node.
   ph = re.compile(r'<ph>.*</ph>')
-  quote_re = re.compile(u'[\u0022\u0027\u0060\u00B4]')
   for f in IncludedFiles(input_api, helpers.INCLUDED_GRD_PATHS):
     contents = input_api.ReadFile(f)
 
@@ -496,7 +706,7 @@ def _CheckStringResourcePunctuations(input_api, output_api):
     for child in messages:
       if child.tag == 'message':
         lines = child.text.split('\n')
-        quotes.update(l for l in lines if quote_re.search(l))
+        quotes.update(l for l in lines if regex.search(l))
 
     # Only report the lines in the changed contents of the current workspace
     for line_number, line in f.ChangedContents():
@@ -506,36 +716,137 @@ def _CheckStringResourcePunctuations(input_api, output_api):
                         (f.LocalPath(), line_number, line))
 
   if warnings:
-    result += [
-        output_api.PresubmitPromptWarning(
-            u'''
-  Android String Resources Check failed:
-    Your new string is using one or more of generic quotes(\u0022 \\u0022, \u0027 \\u0027,
-    \u0060 \\u0060, \u00B4 \\u00B4), which is not encouraged. Instead, quotations marks
-    (\u201C \\u201C, \u201D \\u201D, \u2018 \\u2018, \u2019 \\u2019) are usually preferred.
-
-    Use prime (\u2032 \\u2032) only in abbreviations for feet, arcminutes, and minutes.
-    Use Double-prime (\u2033 \\u2033) only in abbreviations for inches, arcminutes, and minutes.
-
-    Please reach out to the UX designer/writer in your team to double check
-    which punctuation should be correctly used. Ignore this warning if UX has confirmed.
-
-    Reach out to writing-strings@chromium.org if you have any question about writing strings.
-  '''.encode('utf-8'), warnings)
-    ]
+    result += [output_api.PresubmitPromptWarning(warning, warnings)]
   return result
 
 
-### helpers ###
-def _colorXml2Dict(content):
-  dct = dict()
-  tree = ET.fromstring(content)
-  for child in tree:
-    dct[child.attrib['name']] = child.text
-  return dct
+def _CheckThemeColorAttributes(input_api, output_api):
+  """
+  Checks whether direct theme color attributes are used in xml files in layout.
+  Encourages the usage of Chrome's semantically named colors.
+  """
+  warnings = []
+
+  # Find the attributes whose value is a theme reference that contains the
+  # word "color" or "Color".
+  color_theme_attr_pattern = re.compile(
+      r'\b(android|app):(\S*)\s*=\s*"\?attr\/.*([Cc]olor)')
+
+  # Split the file path into a list of strings and check whether that list
+  # contains the string "layout".
+  def is_layout_file(f):
+    # Split path string (on either a forward or backslash) into a list of strings
+    # and check whether that list contains the string "layout".
+    path_components = re.split(r'[\\/]', f.LocalPath())
+    return 'layout' in path_components
+
+  for f in IncludedFiles(input_api):
+    if not is_layout_file(f):
+      continue
+    for line_number, line in f.ChangedContents():
+      if color_theme_attr_pattern.search(line):
+        warnings.append('  %s:%d\n    \t%s' %
+                        (f.LocalPath(), line_number, line.strip()))
+
+  if warnings:
+    return [
+      output_api.PresubmitPromptWarning(
+      '''
+      Android Direct Theme Color Attribute Usage:
+      Your new code is using a direct theme attribute (?attr/...) for a color
+      in a layout file.
+
+      Please use a semantic color macro (e.g., "@macro/default_bg_color")
+      to ensure that colors are consistent and support all themes correctly.
+
+      If a suitable semantic color does not exist, you may need to define one.
+      ''', warnings)
+    ]
+  return []
 
 
-def _removePrefix(color, prefix='@color/'):
-  if color.startswith(prefix):
-    return color[len(prefix):]
-  return color
+### attr resources below ###
+def _CheckAttrFileChanges(input_api, output_api):
+  """
+  Checks if any attr.xml file is changed and fires a warning.
+  """
+  warnings = []
+
+  for f in IncludedFiles(input_api, helpers.UI_PATHS):
+    if f.LocalPath().endswith('attr.xml'):
+      warnings.append('  %s\n' % (f.LocalPath()))
+  if warnings:
+    return [
+        output_api.PresubmitPromptWarning(
+            '''
+  Attr File Change in //ui Warning:
+    Changes to attr.xml files were detected. It is uncommon and risky
+    to use "?attr/" in UI resource files as the code is shared with webview.
+    Please refer to //docs/ui/android/overview.md for guidelines on using attributes.
+  ''', warnings)
+    ]
+  return []
+
+
+def _CheckAttrReferenceInUi(input_api, output_api):
+  """
+  Checks for new usage of "?attr/" in any of the resource files under //ui.
+  """
+  warnings = []
+  attr_pattern = re.compile(r'\?attr/')
+
+  for f in IncludedFiles(input_api, helpers.UI_PATHS):
+    for line_number, line in f.ChangedContents():
+      if attr_pattern.search(line):
+        warnings.append('  %s:%d\n    \t%s' %
+                        (f.LocalPath(), line_number, line.strip()))
+  if warnings:
+    return [
+        output_api.PresubmitPromptWarning(
+            '''
+  New ?attr/ Usage in UI Resources Warning:
+    New usage of "?attr/" was detected in UI resource files. It is risky
+    to use "?attr/" in UI resource files as the code is shared with webview.
+    Please refer to //docs/ui/android/overview.md for guidelines on using attributes.
+  ''', warnings)
+    ]
+  return []
+
+
+def _CheckSettingsXml(input_api, output_api):
+  """Checks if Preference XML files are modified and warns about indexing."""
+  cc_list = ['jinsukkim@chromium.org', 'adelm@google.com']
+  relevant_files = []
+
+  for f in IncludedFiles(input_api):
+    if f.Action() != 'A':
+      continue
+
+    if not f.LocalPath().endswith('.xml') or not '/java/' in f.LocalPath():
+      continue
+
+    content = input_api.ReadFile(f)
+    try:
+      root = ET.fromstring(content)
+      if root.tag == 'PreferenceScreen':
+        relevant_files.append(f'  {f.LocalPath()}')
+    except ET.ParseError:
+      pass
+
+  if not relevant_files:
+    return []
+
+  for cc in cc_list:
+    output_api.AppendCC(cc)
+
+  return [
+      output_api.PresubmitPromptWarning(
+          'New preference XML file(s) added. If this fragment wants to be , '
+          'searchable and appears in Settings, the corresponding Fragment '
+          'should be registered in SearchIndexProviderRegistry.java and '
+          'implemented using BaseSearchIndexProvider. If this preference '
+          'requires any bundle arguments, then they must be set using '
+          '#getExtras. Otherwise, it will crash the browser when launched '
+          'through search.',
+          relevant_files)
+  ]

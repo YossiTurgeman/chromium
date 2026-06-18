@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,8 +32,10 @@ class MediaGalleriesPermissionData {
   // Populate |this| from a base::Value.
   bool FromValue(const base::Value* value);
 
-  bool operator<(const MediaGalleriesPermissionData& rhs) const;
-  bool operator==(const MediaGalleriesPermissionData& rhs) const;
+  friend auto operator<=>(const MediaGalleriesPermissionData&,
+                          const MediaGalleriesPermissionData&) = default;
+  friend bool operator==(const MediaGalleriesPermissionData&,
+                         const MediaGalleriesPermissionData&) = default;
 
   std::string permission() const { return permission_; }
 

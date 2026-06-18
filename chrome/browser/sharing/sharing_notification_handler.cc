@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,8 @@
 #include "chrome/browser/notifications/notification_display_service.h"
 #include "chrome/browser/notifications/notification_display_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/sharing/sharing_service.h"
 #include "chrome/browser/sharing/sharing_service_factory.h"
+#include "components/sharing_message/sharing_service.h"
 
 SharingNotificationHandler::SharingNotificationHandler() = default;
 SharingNotificationHandler::~SharingNotificationHandler() = default;
@@ -19,8 +19,8 @@ void SharingNotificationHandler::OnClick(
     Profile* profile,
     const GURL& origin,
     const std::string& notification_id,
-    const base::Optional<int>& action_index,
-    const base::Optional<base::string16>& reply,
+    const std::optional<int>& action_index,
+    const std::optional<std::u16string>& reply,
     base::OnceClosure completed_closure) {
   auto handler = SharingServiceFactory::GetForBrowserContext(profile)
                      ->GetNotificationActionHandler(notification_id);
@@ -42,7 +42,7 @@ void SharingNotificationHandler::OnClose(Profile* profile,
   auto handler = SharingServiceFactory::GetForBrowserContext(profile)
                      ->GetNotificationActionHandler(notification_id);
   if (handler)
-    handler.Run(/*button=*/base::nullopt, /*closed=*/true);
+    handler.Run(/*button=*/std::nullopt, /*closed=*/true);
   std::move(completed_closure).Run();
 }
 

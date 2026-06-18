@@ -1,16 +1,19 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/sync_file_system/drive_backend/drive_service_on_worker.h"
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
-#include "base/bind.h"
 #include "base/check.h"
+#include "base/functional/bind.h"
 #include "base/notreached.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/sync_file_system/drive_backend/callback_helper.h"
 #include "chrome/browser/sync_file_system/drive_backend/drive_service_wrapper.h"
 #include "google_apis/drive/drive_api_parser.h"
@@ -25,17 +28,17 @@ DriveServiceOnWorker::DriveServiceOnWorker(
     : wrapper_(wrapper),
       ui_task_runner_(ui_task_runner),
       worker_task_runner_(worker_task_runner) {
-  sequence_checker_.DetachFromSequence();
+  DETACH_FROM_SEQUENCE(sequence_checker_);
 }
 
-DriveServiceOnWorker::~DriveServiceOnWorker() {}
+DriveServiceOnWorker::~DriveServiceOnWorker() = default;
 
 google_apis::CancelCallbackOnce DriveServiceOnWorker::AddNewDirectory(
     const std::string& parent_resource_id,
     const std::string& directory_title,
     const drive::AddNewDirectoryOptions& options,
     google_apis::FileResourceCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE, base::BindOnce(&DriveServiceWrapper::AddNewDirectory, wrapper_,
@@ -47,11 +50,11 @@ google_apis::CancelCallbackOnce DriveServiceOnWorker::AddNewDirectory(
   return google_apis::CancelCallbackOnce();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::DeleteResource(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::DeleteResource(
     const std::string& resource_id,
     const std::string& etag,
     google_apis::EntryActionCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -60,16 +63,16 @@ google_apis::CancelCallback DriveServiceOnWorker::DeleteResource(
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
                                     std::move(callback))));
 
-  return google_apis::CancelCallback();
+  return google_apis::CancelCallbackOnce();
 }
 
 google_apis::CancelCallbackOnce DriveServiceOnWorker::DownloadFile(
     const base::FilePath& local_cache_path,
     const std::string& resource_id,
-    const google_apis::DownloadActionCallback& download_action_callback,
+    google_apis::DownloadActionCallback download_action_callback,
     const google_apis::GetContentCallback& get_content_callback,
     google_apis::ProgressCallback progress_callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -77,7 +80,7 @@ google_apis::CancelCallbackOnce DriveServiceOnWorker::DownloadFile(
           &DriveServiceWrapper::DownloadFile, wrapper_, local_cache_path,
           resource_id,
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
-                                    download_action_callback),
+                                    std::move(download_action_callback)),
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
                                     get_content_callback),
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
@@ -86,9 +89,9 @@ google_apis::CancelCallbackOnce DriveServiceOnWorker::DownloadFile(
   return google_apis::CancelCallbackOnce();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::GetAboutResource(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::GetAboutResource(
     google_apis::AboutResourceCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -97,13 +100,13 @@ google_apis::CancelCallback DriveServiceOnWorker::GetAboutResource(
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
                                     std::move(callback))));
 
-  return google_apis::CancelCallback();
+  return google_apis::CancelCallbackOnce();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::GetStartPageToken(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::GetStartPageToken(
     const std::string& team_drive_id,
     google_apis::StartPageTokenCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -112,13 +115,13 @@ google_apis::CancelCallback DriveServiceOnWorker::GetStartPageToken(
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
                                     std::move(callback))));
 
-  return google_apis::CancelCallback();
+  return google_apis::CancelCallbackOnce();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::GetChangeList(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::GetChangeList(
     int64_t start_changestamp,
     google_apis::ChangeListCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -127,14 +130,14 @@ google_apis::CancelCallback DriveServiceOnWorker::GetChangeList(
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
                                     std::move(callback))));
 
-  return google_apis::CancelCallback();
+  return google_apis::CancelCallbackOnce();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::GetChangeListByToken(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::GetChangeListByToken(
     const std::string& team_drive_id,
     const std::string& start_page_token,
     google_apis::ChangeListCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE, base::BindOnce(&DriveServiceWrapper::GetChangeListByToken,
@@ -143,13 +146,13 @@ google_apis::CancelCallback DriveServiceOnWorker::GetChangeListByToken(
                                     worker_task_runner_.get(), FROM_HERE,
                                     std::move(callback))));
 
-  return google_apis::CancelCallback();
+  return google_apis::CancelCallbackOnce();
 }
 
 google_apis::CancelCallbackOnce DriveServiceOnWorker::GetRemainingChangeList(
     const GURL& next_link,
     google_apis::ChangeListCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -163,14 +166,12 @@ google_apis::CancelCallbackOnce DriveServiceOnWorker::GetRemainingChangeList(
 
 std::string DriveServiceOnWorker::GetRootResourceId() const {
   NOTREACHED();
-  // This method is expected to be called only on unit tests.
-  return "root";
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::GetRemainingTeamDriveList(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::GetRemainingTeamDriveList(
     const std::string& page_token,
     google_apis::TeamDriveListCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -179,28 +180,28 @@ google_apis::CancelCallback DriveServiceOnWorker::GetRemainingTeamDriveList(
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
                                     std::move(callback))));
 
-  return google_apis::CancelCallback();
+  return google_apis::CancelCallbackOnce();
 }
 
 google_apis::CancelCallbackOnce DriveServiceOnWorker::GetRemainingFileList(
     const GURL& next_link,
-    const google_apis::FileListCallback& callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+    google_apis::FileListCallback callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
-      base::BindOnce(&DriveServiceWrapper::GetRemainingFileList, wrapper_,
-                     next_link,
-                     RelayCallbackToTaskRunner(worker_task_runner_.get(),
-                                               FROM_HERE, callback)));
+      base::BindOnce(
+          &DriveServiceWrapper::GetRemainingFileList, wrapper_, next_link,
+          RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
+                                    std::move(callback))));
 
   return google_apis::CancelCallbackOnce();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::GetFileResource(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::GetFileResource(
     const std::string& resource_id,
     google_apis::FileResourceCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -209,20 +210,20 @@ google_apis::CancelCallback DriveServiceOnWorker::GetFileResource(
           RelayCallbackToTaskRunner(worker_task_runner_.get(), FROM_HERE,
                                     std::move(callback))));
 
-  return google_apis::CancelCallback();
+  return google_apis::CancelCallbackOnce();
 }
 
 google_apis::CancelCallbackOnce DriveServiceOnWorker::GetFileListInDirectory(
     const std::string& directory_resource_id,
-    const google_apis::FileListCallback& callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+    google_apis::FileListCallback callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(&DriveServiceWrapper::GetFileListInDirectory, wrapper_,
-                     directory_resource_id,
-                     RelayCallbackToTaskRunner(worker_task_runner_.get(),
-                                               FROM_HERE, callback)));
+      FROM_HERE, base::BindOnce(&DriveServiceWrapper::GetFileListInDirectory,
+                                wrapper_, directory_resource_id,
+                                RelayCallbackToTaskRunner(
+                                    worker_task_runner_.get(), FROM_HERE,
+                                    std::move(callback))));
 
   return google_apis::CancelCallbackOnce();
 }
@@ -232,7 +233,7 @@ DriveServiceOnWorker::RemoveResourceFromDirectory(
     const std::string& parent_resource_id,
     const std::string& resource_id,
     google_apis::EntryActionCallback callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
       FROM_HERE,
@@ -248,22 +249,21 @@ DriveServiceOnWorker::RemoveResourceFromDirectory(
 google_apis::CancelCallbackOnce DriveServiceOnWorker::SearchByTitle(
     const std::string& title,
     const std::string& directory_resource_id,
-    const google_apis::FileListCallback& callback) {
-  DCHECK(sequence_checker_.CalledOnValidSequence());
+    google_apis::FileListCallback callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   ui_task_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(&DriveServiceWrapper::SearchByTitle, wrapper_, title,
-                     directory_resource_id,
-                     RelayCallbackToTaskRunner(worker_task_runner_.get(),
-                                               FROM_HERE, callback)));
+      FROM_HERE, base::BindOnce(&DriveServiceWrapper::SearchByTitle, wrapper_,
+                                title, directory_resource_id,
+                                RelayCallbackToTaskRunner(
+                                    worker_task_runner_.get(), FROM_HERE,
+                                    std::move(callback))));
 
   return google_apis::CancelCallbackOnce();
 }
 
 bool DriveServiceOnWorker::HasRefreshToken() const {
   NOTREACHED();
-  return false;
 }
 
 void DriveServiceOnWorker::Initialize(const CoreAccountId& account_id) {
@@ -281,12 +281,10 @@ void DriveServiceOnWorker::RemoveObserver(
 
 bool DriveServiceOnWorker::CanSendRequest() const {
   NOTREACHED();
-  return false;
 }
 
 bool DriveServiceOnWorker::HasAccessToken() const {
   NOTREACHED();
-  return false;
 }
 
 void DriveServiceOnWorker::RequestAccessToken(
@@ -305,41 +303,36 @@ void DriveServiceOnWorker::ClearRefreshToken() {
 google_apis::CancelCallbackOnce DriveServiceOnWorker::GetAllTeamDriveList(
     google_apis::TeamDriveListCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallbackOnce();
 }
 
 google_apis::CancelCallbackOnce DriveServiceOnWorker::GetAllFileList(
     const std::string& team_drive_id,
-    const google_apis::FileListCallback& callback) {
+    google_apis::FileListCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallbackOnce();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::Search(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::Search(
     const std::string& search_query,
-    const google_apis::FileListCallback& callback) {
+    google_apis::FileListCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::TrashResource(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::TrashResource(
     const std::string& resource_id,
     google_apis::EntryActionCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::CopyResource(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::CopyResource(
     const std::string& resource_id,
     const std::string& parent_resource_id,
     const std::string& new_title,
     const base::Time& last_modified,
     google_apis::FileResourceCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::UpdateResource(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::UpdateResource(
     const std::string& resource_id,
     const std::string& parent_resource_id,
     const std::string& new_title,
@@ -348,39 +341,36 @@ google_apis::CancelCallback DriveServiceOnWorker::UpdateResource(
     const google_apis::drive::Properties& properties,
     google_apis::FileResourceCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::AddResourceToDirectory(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::AddResourceToDirectory(
     const std::string& parent_resource_id,
     const std::string& resource_id,
     google_apis::EntryActionCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::InitiateUploadNewFile(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::InitiateUploadNewFile(
     const std::string& content_type,
     int64_t content_length,
     const std::string& parent_resource_id,
     const std::string& title,
     const drive::UploadNewFileOptions& options,
-    const google_apis::InitiateUploadCallback& callback) {
+    google_apis::InitiateUploadCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::InitiateUploadExistingFile(
+google_apis::CancelCallbackOnce
+DriveServiceOnWorker::InitiateUploadExistingFile(
     const std::string& content_type,
     int64_t content_length,
     const std::string& resource_id,
     const drive::UploadExistingFileOptions& options,
-    const google_apis::InitiateUploadCallback& callback) {
+    google_apis::InitiateUploadCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::ResumeUpload(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::ResumeUpload(
     const GURL& upload_url,
     int64_t start_position,
     int64_t end_position,
@@ -390,20 +380,18 @@ google_apis::CancelCallback DriveServiceOnWorker::ResumeUpload(
     google_apis::drive::UploadRangeCallback callback,
     google_apis::ProgressCallback progress_callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::GetUploadStatus(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::GetUploadStatus(
     const GURL& upload_url,
     int64_t content_length,
     google_apis::drive::UploadRangeCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
-google_apis::CancelCallbackRepeating
-DriveServiceOnWorker::MultipartUploadNewFile(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::MultipartUploadNewFile(
     const std::string& content_type,
+    std::optional<std::string_view> converted_mime_type,
     int64_t content_length,
     const std::string& parent_resource_id,
     const std::string& title,
@@ -412,10 +400,10 @@ DriveServiceOnWorker::MultipartUploadNewFile(
     google_apis::FileResourceCallback callback,
     google_apis::ProgressCallback progress_callback) {
   NOTREACHED();
-  return google_apis::CancelCallbackRepeating();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::MultipartUploadExistingFile(
+google_apis::CancelCallbackOnce
+DriveServiceOnWorker::MultipartUploadExistingFile(
     const std::string& content_type,
     int64_t content_length,
     const std::string& parent_resource_id,
@@ -424,22 +412,19 @@ google_apis::CancelCallback DriveServiceOnWorker::MultipartUploadExistingFile(
     google_apis::FileResourceCallback callback,
     google_apis::ProgressCallback progress_callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
 std::unique_ptr<drive::BatchRequestConfiguratorInterface>
 DriveServiceOnWorker::StartBatchRequest() {
   NOTREACHED();
-  return std::unique_ptr<drive::BatchRequestConfiguratorInterface>();
 }
 
-google_apis::CancelCallback DriveServiceOnWorker::AddPermission(
+google_apis::CancelCallbackOnce DriveServiceOnWorker::AddPermission(
     const std::string& resource_id,
     const std::string& email,
     google_apis::drive::PermissionRole role,
     google_apis::EntryActionCallback callback) {
   NOTREACHED();
-  return google_apis::CancelCallback();
 }
 
 }  // namespace drive_backend

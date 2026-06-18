@@ -1,28 +1,31 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_VARIATIONS_VARIATIONS_MURMUR_HASH_H_
 #define COMPONENTS_VARIATIONS_VARIATIONS_MURMUR_HASH_H_
 
+#include <stddef.h>
+
 #include <cstdint>
-#include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/compiler_specific.h"
+#include "base/component_export.h"
 
 namespace variations {
 namespace internal {
 
 // Hash utilities for NormalizedMurmurHashEntropyProvider. For more info, see:
 // https://docs.google.com/document/d/1cPF5PruriWNP2Z5gSkq4MBTm0wSZqLyIJkUO9ekibeo
-class VariationsMurmurHash {
+class COMPONENT_EXPORT(VARIATIONS) VariationsMurmurHash {
  public:
   // Prepares data to be hashed by VariationsMurmurHash: align and zero-pad to a
   // multiple of 4 bytes, and produce the same uint32_t values regardless of
   // platform endianness. ("abcd" will always become 0x64636261). Any padding
   // will appear in the more-significant bytes of the last uint32_t.
-  static std::vector<uint32_t> StringToLE32(const std::string& data);
+  static std::vector<uint32_t> StringToLE32(std::string_view data);
 
   // Hash is a reimplementation of MurmurHash3_x86_32 from third_party/smhasher/
   // which works on all architectures. MurmurHash3_x86_32 does unaligned reads

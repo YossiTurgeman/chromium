@@ -1,4 +1,3 @@
 file://chrome/browser/web_applications/OWNERS
 
-# COMPONENT: UI>Browser>WebAppInstalls
-# TEAM: web-apps-platform-team@chromium.org
+per-file protocol_handler_picker*=file://components/webapps/isolated_web_apps/PLATFORM_OWNERS

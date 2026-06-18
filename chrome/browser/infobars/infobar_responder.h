@@ -1,19 +1,20 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_INFOBARS_INFOBAR_RESPONDER_H_
 #define CHROME_BROWSER_INFOBARS_INFOBAR_RESPONDER_H_
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "components/infobars/core/infobar_manager.h"
 
 namespace infobars {
+class ContentInfoBarManager;
 class InfoBar;
-}
+}  // namespace infobars
 
 class ConfirmInfoBarDelegate;
-class InfoBarService;
 
 // Used by test code to asynchronously respond to the first infobar shown, which
 // must have a ConfirmInfoBarDelegate. This can be used to ensure various
@@ -22,14 +23,15 @@ class InfoBarService;
 // The asynchronous response matches how real users will use the infobar.
 class InfoBarResponder : public infobars::InfoBarManager::Observer {
  public:
-  enum AutoResponseType {
-    ACCEPT,
-    DENY,
-    DISMISS
-  };
+  enum AutoResponseType { ACCEPT, DENY, DISMISS };
 
   // The responder will asynchronously perform the requested |response|.
-  InfoBarResponder(InfoBarService* infobar_service, AutoResponseType response);
+  InfoBarResponder(infobars::ContentInfoBarManager* infobar_manager,
+                   AutoResponseType response);
+
+  InfoBarResponder(const InfoBarResponder&) = delete;
+  InfoBarResponder& operator=(const InfoBarResponder&) = delete;
+
   ~InfoBarResponder() override;
 
   // infobars::InfoBarManager::Observer:
@@ -40,10 +42,12 @@ class InfoBarResponder : public infobars::InfoBarManager::Observer {
  private:
   void Respond(ConfirmInfoBarDelegate* delegate);
 
-  InfoBarService* infobar_service_;
-  AutoResponseType response_;
+  // Scoped observer that facilitates observing an InfoBarManager.
+  base::ScopedObservation<infobars::InfoBarManager,
+                          infobars::InfoBarManager::Observer>
+      infobar_scoped_observation_{this};
 
-  DISALLOW_COPY_AND_ASSIGN(InfoBarResponder);
+  AutoResponseType response_;
 };
 
 #endif  // CHROME_BROWSER_INFOBARS_INFOBAR_RESPONDER_H_

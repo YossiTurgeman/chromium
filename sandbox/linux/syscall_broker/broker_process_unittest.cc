@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stddef.h>
+#include <sys/inotify.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -15,20 +16,25 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/compiler_specific.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
+#include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/posix/unix_domain_socket.h"
-#include "base/stl_util.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "build/build_config.h"
 #include "sandbox/linux/syscall_broker/broker_client.h"
@@ -41,14 +47,11 @@
 namespace sandbox {
 namespace syscall_broker {
 
+using BrokerType = BrokerProcess::BrokerType;
+
 class BrokerProcessTestHelper {
  public:
   static void CloseChannel(BrokerProcess* broker) { broker->CloseChannel(); }
-  // Get the client's IPC descriptor to send IPC requests directly.
-  // TODO(jln): refator tests to get rid of this.
-  static int GetIPCDescriptor(const BrokerProcess* broker) {
-    return broker->broker_client_->GetIPCDescriptor();
-  }
 };
 
 namespace {
@@ -58,7 +61,7 @@ namespace {
 // and musl up to 4096.
 constexpr int kFakeErrnoSentinel = 254;
 
-bool NoOpCallback() {
+bool NoOpCallback(const BrokerSandboxConfig&) {
   return true;
 }
 
@@ -68,9 +71,11 @@ TEST(BrokerProcess, CreateAndDestroy) {
   {
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly("/proc/cpuinfo")};
-    BrokerProcess open_broker(kFakeErrnoSentinel, BrokerCommandSet(),
-                              permissions);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     ASSERT_TRUE(TestUtils::CurrentProcessHasChildren());
   }
   // Destroy the broker and check it has exited properly.
@@ -82,13 +87,16 @@ TEST(BrokerProcess, TestOpenAccessNull) {
       MakeBrokerCommandSet({COMMAND_ACCESS, COMMAND_OPEN});
 
   std::vector<BrokerFilePermission> empty;
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, empty);
-  ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+  auto policy = std::make_optional<BrokerSandboxConfig>(command_set, empty,
+                                                        kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED);
 
-  int fd = open_broker.Open(NULL, O_RDONLY);
+  ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+  int fd = open_broker.GetBrokerClientSignalBased()->Open(nullptr, O_RDONLY);
   ASSERT_EQ(fd, -EFAULT);
 
-  int ret = open_broker.Access(NULL, F_OK);
+  int ret = open_broker.GetBrokerClientSignalBased()->Access(nullptr, F_OK);
   ASSERT_EQ(ret, -EFAULT);
 }
 
@@ -99,7 +107,7 @@ void TestOpenFilePerms(bool fast_check_in_client, int denied_errno) {
   const char kR_AllowListedButDenied[] = "/proc/1/auxv";
   const char kW_AllowListed[] = "/proc/DOESNOTEXIST2";
   const char kRW_AllowListed[] = "/proc/DOESNOTEXIST3";
-  const char k_NotAllowlisted[] = "/proc/DOESNOTEXIST4";
+  const char k_NotAllowListed[] = "/proc/DOESNOTEXIST4";
 
   BrokerCommandSet command_set =
       MakeBrokerCommandSet({COMMAND_ACCESS, COMMAND_OPEN});
@@ -109,122 +117,152 @@ void TestOpenFilePerms(bool fast_check_in_client, int denied_errno) {
       BrokerFilePermission::ReadOnly(kR_AllowListedButDenied),
       BrokerFilePermission::WriteOnly(kW_AllowListed),
       BrokerFilePermission::ReadWrite(kRW_AllowListed)};
-  BrokerProcess open_broker(denied_errno, command_set, permissions,
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, denied_errno);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                             fast_check_in_client);
-  ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+  ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
 
   int fd = -1;
-  fd = open_broker.Open(kR_AllowListed, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kR_AllowListed, O_RDONLY);
   ASSERT_EQ(fd, -ENOENT);
-  fd = open_broker.Open(kR_AllowListed, O_WRONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kR_AllowListed, O_WRONLY);
   ASSERT_EQ(fd, -denied_errno);
-  fd = open_broker.Open(kR_AllowListed, O_RDWR);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kR_AllowListed, O_RDWR);
   ASSERT_EQ(fd, -denied_errno);
   int ret = -1;
-  ret = open_broker.Access(kR_AllowListed, F_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kR_AllowListed, F_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kR_AllowListed, R_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kR_AllowListed, R_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kR_AllowListed, W_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kR_AllowListed, W_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(kR_AllowListed, R_OK | W_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kR_AllowListed,
+                                                         R_OK | W_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(kR_AllowListed, X_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kR_AllowListed, X_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(kR_AllowListed, R_OK | X_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kR_AllowListed,
+                                                         R_OK | X_OK);
   ASSERT_EQ(ret, -denied_errno);
 
   // Android sometimes runs tests as root.
   // This part of the test requires a process that doesn't have
   // CAP_DAC_OVERRIDE. We check against a root euid as a proxy for that.
   if (geteuid()) {
-    fd = open_broker.Open(kR_AllowListedButDenied, O_RDONLY);
+    fd = open_broker.GetBrokerClientSignalBased()->Open(kR_AllowListedButDenied,
+                                                        O_RDONLY);
     // The broker process will allow this, but the normal permission system
     // won't.
     ASSERT_EQ(fd, -EACCES);
-    fd = open_broker.Open(kR_AllowListedButDenied, O_WRONLY);
+    fd = open_broker.GetBrokerClientSignalBased()->Open(kR_AllowListedButDenied,
+                                                        O_WRONLY);
     ASSERT_EQ(fd, -denied_errno);
-    fd = open_broker.Open(kR_AllowListedButDenied, O_RDWR);
+    fd = open_broker.GetBrokerClientSignalBased()->Open(kR_AllowListedButDenied,
+                                                        O_RDWR);
     ASSERT_EQ(fd, -denied_errno);
-    ret = open_broker.Access(kR_AllowListedButDenied, F_OK);
+    ret = open_broker.GetBrokerClientSignalBased()->Access(
+        kR_AllowListedButDenied, F_OK);
     // The normal permission system will let us check that the file exists.
     ASSERT_EQ(ret, 0);
-    ret = open_broker.Access(kR_AllowListedButDenied, R_OK);
+    ret = open_broker.GetBrokerClientSignalBased()->Access(
+        kR_AllowListedButDenied, R_OK);
     ASSERT_EQ(ret, -EACCES);
-    ret = open_broker.Access(kR_AllowListedButDenied, W_OK);
+    ret = open_broker.GetBrokerClientSignalBased()->Access(
+        kR_AllowListedButDenied, W_OK);
     ASSERT_EQ(ret, -denied_errno);
-    ret = open_broker.Access(kR_AllowListedButDenied, R_OK | W_OK);
+    ret = open_broker.GetBrokerClientSignalBased()->Access(
+        kR_AllowListedButDenied, R_OK | W_OK);
     ASSERT_EQ(ret, -denied_errno);
-    ret = open_broker.Access(kR_AllowListedButDenied, X_OK);
+    ret = open_broker.GetBrokerClientSignalBased()->Access(
+        kR_AllowListedButDenied, X_OK);
     ASSERT_EQ(ret, -denied_errno);
-    ret = open_broker.Access(kR_AllowListedButDenied, R_OK | X_OK);
+    ret = open_broker.GetBrokerClientSignalBased()->Access(
+        kR_AllowListedButDenied, R_OK | X_OK);
     ASSERT_EQ(ret, -denied_errno);
   }
 
-  fd = open_broker.Open(kW_AllowListed, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kW_AllowListed, O_RDONLY);
   ASSERT_EQ(fd, -denied_errno);
-  fd = open_broker.Open(kW_AllowListed, O_WRONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kW_AllowListed, O_WRONLY);
   ASSERT_EQ(fd, -ENOENT);
-  fd = open_broker.Open(kW_AllowListed, O_RDWR);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kW_AllowListed, O_RDWR);
   ASSERT_EQ(fd, -denied_errno);
-  ret = open_broker.Access(kW_AllowListed, F_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kW_AllowListed, F_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kW_AllowListed, R_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kW_AllowListed, R_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(kW_AllowListed, W_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kW_AllowListed, W_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kW_AllowListed, R_OK | W_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kW_AllowListed,
+                                                         R_OK | W_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(kW_AllowListed, X_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kW_AllowListed, X_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(kW_AllowListed, R_OK | X_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kW_AllowListed,
+                                                         R_OK | X_OK);
   ASSERT_EQ(ret, -denied_errno);
 
-  fd = open_broker.Open(kRW_AllowListed, O_RDONLY);
+  fd =
+      open_broker.GetBrokerClientSignalBased()->Open(kRW_AllowListed, O_RDONLY);
   ASSERT_EQ(fd, -ENOENT);
-  fd = open_broker.Open(kRW_AllowListed, O_WRONLY);
+  fd =
+      open_broker.GetBrokerClientSignalBased()->Open(kRW_AllowListed, O_WRONLY);
   ASSERT_EQ(fd, -ENOENT);
-  fd = open_broker.Open(kRW_AllowListed, O_RDWR);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kRW_AllowListed, O_RDWR);
   ASSERT_EQ(fd, -ENOENT);
-  ret = open_broker.Access(kRW_AllowListed, F_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kRW_AllowListed, F_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kRW_AllowListed, R_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kRW_AllowListed, R_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kRW_AllowListed, W_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kRW_AllowListed, W_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kRW_AllowListed, R_OK | W_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kRW_AllowListed,
+                                                         R_OK | W_OK);
   ASSERT_EQ(ret, -ENOENT);
-  ret = open_broker.Access(kRW_AllowListed, X_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kRW_AllowListed, X_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(kRW_AllowListed, R_OK | X_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(kRW_AllowListed,
+                                                         R_OK | X_OK);
   ASSERT_EQ(ret, -denied_errno);
 
-  fd = open_broker.Open(k_NotAllowlisted, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(k_NotAllowListed,
+                                                      O_RDONLY);
   ASSERT_EQ(fd, -denied_errno);
-  fd = open_broker.Open(k_NotAllowlisted, O_WRONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(k_NotAllowListed,
+                                                      O_WRONLY);
   ASSERT_EQ(fd, -denied_errno);
-  fd = open_broker.Open(k_NotAllowlisted, O_RDWR);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(k_NotAllowListed, O_RDWR);
   ASSERT_EQ(fd, -denied_errno);
-  ret = open_broker.Access(k_NotAllowlisted, F_OK);
+  ret =
+      open_broker.GetBrokerClientSignalBased()->Access(k_NotAllowListed, F_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(k_NotAllowlisted, R_OK);
+  ret =
+      open_broker.GetBrokerClientSignalBased()->Access(k_NotAllowListed, R_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(k_NotAllowlisted, W_OK);
+  ret =
+      open_broker.GetBrokerClientSignalBased()->Access(k_NotAllowListed, W_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(k_NotAllowlisted, R_OK | W_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(k_NotAllowListed,
+                                                         R_OK | W_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(k_NotAllowlisted, X_OK);
+  ret =
+      open_broker.GetBrokerClientSignalBased()->Access(k_NotAllowListed, X_OK);
   ASSERT_EQ(ret, -denied_errno);
-  ret = open_broker.Access(k_NotAllowlisted, R_OK | X_OK);
+  ret = open_broker.GetBrokerClientSignalBased()->Access(k_NotAllowListed,
+                                                         R_OK | X_OK);
   ASSERT_EQ(ret, -denied_errno);
 
   // We have some extra sanity check for clearly wrong values.
-  fd = open_broker.Open(kRW_AllowListed, O_RDONLY | O_WRONLY | O_RDWR);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(
+      kRW_AllowListed, O_RDONLY | O_WRONLY | O_RDWR);
   ASSERT_EQ(fd, -denied_errno);
 
   // It makes no sense to allow O_CREAT in a 2-parameters open. Ensure this
   // is denied.
-  fd = open_broker.Open(kRW_AllowListed, O_RDWR | O_CREAT);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kRW_AllowListed,
+                                                      O_RDWR | O_CREAT);
   ASSERT_EQ(fd, -denied_errno);
 }
 
@@ -268,41 +306,50 @@ void TestBadPaths(bool fast_check_in_client) {
 
   std::vector<BrokerFilePermission> permissions = {
       BrokerFilePermission::ReadOnlyRecursive("/proc/")};
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                             fast_check_in_client);
-  ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+  ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
 
   // Open cpuinfo via the broker.
-  int cpuinfo_fd = open_broker.Open(kFileCpuInfo, O_RDONLY);
+  int cpuinfo_fd =
+      open_broker.GetBrokerClientSignalBased()->Open(kFileCpuInfo, O_RDONLY);
   base::ScopedFD cpuinfo_fd_closer(cpuinfo_fd);
   ASSERT_GE(cpuinfo_fd, 0);
 
   int fd = -1;
   int can_access;
 
-  can_access = open_broker.Access(kNotAbsPath, R_OK);
+  can_access =
+      open_broker.GetBrokerClientSignalBased()->Access(kNotAbsPath, R_OK);
   ASSERT_EQ(can_access, -kFakeErrnoSentinel);
-  fd = open_broker.Open(kNotAbsPath, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kNotAbsPath, O_RDONLY);
   ASSERT_EQ(fd, -kFakeErrnoSentinel);
 
-  can_access = open_broker.Access(kDotDotStart, R_OK);
+  can_access =
+      open_broker.GetBrokerClientSignalBased()->Access(kDotDotStart, R_OK);
   ASSERT_EQ(can_access, -kFakeErrnoSentinel);
-  fd = open_broker.Open(kDotDotStart, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kDotDotStart, O_RDONLY);
   ASSERT_EQ(fd, -kFakeErrnoSentinel);
 
-  can_access = open_broker.Access(kDotDotMiddle, R_OK);
+  can_access =
+      open_broker.GetBrokerClientSignalBased()->Access(kDotDotMiddle, R_OK);
   ASSERT_EQ(can_access, -kFakeErrnoSentinel);
-  fd = open_broker.Open(kDotDotMiddle, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kDotDotMiddle, O_RDONLY);
   ASSERT_EQ(fd, -kFakeErrnoSentinel);
 
-  can_access = open_broker.Access(kDotDotEnd, R_OK);
+  can_access =
+      open_broker.GetBrokerClientSignalBased()->Access(kDotDotEnd, R_OK);
   ASSERT_EQ(can_access, -kFakeErrnoSentinel);
-  fd = open_broker.Open(kDotDotEnd, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kDotDotEnd, O_RDONLY);
   ASSERT_EQ(fd, -kFakeErrnoSentinel);
 
-  can_access = open_broker.Access(kTrailingSlash, R_OK);
+  can_access =
+      open_broker.GetBrokerClientSignalBased()->Access(kTrailingSlash, R_OK);
   ASSERT_EQ(can_access, -kFakeErrnoSentinel);
-  fd = open_broker.Open(kTrailingSlash, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kTrailingSlash, O_RDONLY);
   ASSERT_EQ(fd, -kFakeErrnoSentinel);
 }
 
@@ -331,26 +378,33 @@ void TestOpenCpuinfo(bool fast_check_in_client, bool recursive) {
         recursive ? BrokerFilePermission::ReadOnlyRecursive(kDirProc)
                   : BrokerFilePermission::ReadOnly(kFileCpuInfo));
 
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
 
-    int fd = open_broker.Open(kFileCpuInfo, O_RDWR);
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    int fd =
+        open_broker.GetBrokerClientSignalBased()->Open(kFileCpuInfo, O_RDWR);
     ASSERT_EQ(fd, -kFakeErrnoSentinel);
 
     // Check we can read /proc/cpuinfo.
-    int can_access = open_broker.Access(kFileCpuInfo, R_OK);
+    int can_access =
+        open_broker.GetBrokerClientSignalBased()->Access(kFileCpuInfo, R_OK);
     EXPECT_EQ(can_access, 0);
-    can_access = open_broker.Access(kFileCpuInfo, W_OK);
+    can_access =
+        open_broker.GetBrokerClientSignalBased()->Access(kFileCpuInfo, W_OK);
     EXPECT_EQ(can_access, -kFakeErrnoSentinel);
     // Check we can not write /proc/cpuinfo.
 
     // Open cpuinfo via the broker.
-    int cpuinfo_fd = open_broker.Open(kFileCpuInfo, O_RDONLY);
+    int cpuinfo_fd =
+        open_broker.GetBrokerClientSignalBased()->Open(kFileCpuInfo, O_RDONLY);
     base::ScopedFD cpuinfo_fd_closer(cpuinfo_fd);
     EXPECT_GE(cpuinfo_fd, 0);
     char buf[3];
-    memset(buf, 0, sizeof(buf));
+    UNSAFE_TODO(memset(buf, 0, sizeof(buf)));
     int read_len1 = read(cpuinfo_fd, buf, sizeof(buf));
     EXPECT_GT(read_len1, 0);
 
@@ -359,7 +413,7 @@ void TestOpenCpuinfo(bool fast_check_in_client, bool recursive) {
     base::ScopedFD cpuinfo_fd2_closer(cpuinfo_fd2);
     EXPECT_GE(cpuinfo_fd2, 0);
     char buf2[3];
-    memset(buf2, 1, sizeof(buf2));
+    UNSAFE_TODO(memset(buf2, 1, sizeof(buf2)));
     int read_len2 = read(cpuinfo_fd2, buf2, sizeof(buf2));
     EXPECT_GT(read_len1, 0);
 
@@ -367,7 +421,7 @@ void TestOpenCpuinfo(bool fast_check_in_client, bool recursive) {
     EXPECT_EQ(read_len1, read_len2);
     // Compare the cpuinfo as returned by the broker with the one we opened
     // ourselves.
-    EXPECT_EQ(memcmp(buf, buf2, read_len1), 0);
+    UNSAFE_TODO(EXPECT_EQ(memcmp(buf, buf2, read_len1), 0));
 
     ASSERT_TRUE(TestUtils::CurrentProcessHasChildren());
   }
@@ -410,15 +464,20 @@ TEST(BrokerProcess, OpenFileRW) {
 
   std::vector<BrokerFilePermission> permissions = {
       BrokerFilePermission::ReadWrite(tempfile_name)};
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions);
-  ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED);
+
+  ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
 
   // Check we can access that file with read or write.
-  int can_access = open_broker.Access(tempfile_name, R_OK | W_OK);
+  int can_access = open_broker.GetBrokerClientSignalBased()->Access(
+      tempfile_name, R_OK | W_OK);
   ASSERT_EQ(can_access, 0);
 
   int tempfile2 = -1;
-  tempfile2 = open_broker.Open(tempfile_name, O_RDWR);
+  tempfile2 =
+      open_broker.GetBrokerClientSignalBased()->Open(tempfile_name, O_RDWR);
   ASSERT_GE(tempfile2, 0);
 
   // Write to the descriptor opened by the broker.
@@ -432,7 +491,7 @@ TEST(BrokerProcess, OpenFileRW) {
   len = read(tempfile.fd(), buf, sizeof(buf));
 
   ASSERT_EQ(len, static_cast<ssize_t>(sizeof(test_text)));
-  ASSERT_EQ(memcmp(test_text, buf, sizeof(test_text)), 0);
+  UNSAFE_TODO(ASSERT_EQ(memcmp(test_text, buf, sizeof(test_text)), 0));
 
   ASSERT_EQ(close(tempfile2), 0);
 }
@@ -447,25 +506,29 @@ SANDBOX_TEST(BrokerProcess, BrokerDied) {
 
   std::vector<BrokerFilePermission> permissions = {
       BrokerFilePermission::ReadOnly(kCpuInfo)};
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                             true /* fast_check_in_client */,
                             true /* quiet_failures_for_tests */);
-  SANDBOX_ASSERT(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+  SANDBOX_ASSERT(open_broker.Fork(base::BindOnce(&NoOpCallback)));
   const pid_t broker_pid = open_broker.broker_pid();
   SANDBOX_ASSERT(kill(broker_pid, SIGKILL) == 0);
 
   // Now we check that the broker has been signaled, but do not reap it.
   siginfo_t process_info;
-  SANDBOX_ASSERT(HANDLE_EINTR(waitid(
-                     P_PID, broker_pid, &process_info, WEXITED | WNOWAIT)) ==
-                 0);
+  SANDBOX_ASSERT(HANDLE_EINTR(waitid(P_PID, broker_pid, &process_info,
+                                     WEXITED | WNOWAIT)) == 0);
   SANDBOX_ASSERT(broker_pid == process_info.si_pid);
   SANDBOX_ASSERT(CLD_KILLED == process_info.si_code);
   SANDBOX_ASSERT(SIGKILL == process_info.si_status);
 
   // Check that doing Open with a dead broker won't SIGPIPE us.
-  SANDBOX_ASSERT(open_broker.Open(kCpuInfo, O_RDONLY) == -ENOMEM);
-  SANDBOX_ASSERT(open_broker.Access(kCpuInfo, O_RDONLY) == -ENOMEM);
+  SANDBOX_ASSERT(open_broker.GetBrokerClientSignalBased()->Open(
+                     kCpuInfo, O_RDONLY) == -ENOMEM);
+  SANDBOX_ASSERT(open_broker.GetBrokerClientSignalBased()->Access(
+                     kCpuInfo, O_RDONLY) == -ENOMEM);
 }
 
 void TestOpenComplexFlags(bool fast_check_in_client) {
@@ -476,14 +539,17 @@ void TestOpenComplexFlags(bool fast_check_in_client) {
 
   std::vector<BrokerFilePermission> permissions = {
       BrokerFilePermission::ReadOnly(kCpuInfo)};
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                             fast_check_in_client);
-  ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+  ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
 
   // Test that we do the right thing for O_CLOEXEC and O_NONBLOCK.
   int fd = -1;
   int ret = 0;
-  fd = open_broker.Open(kCpuInfo, O_RDONLY);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kCpuInfo, O_RDONLY);
   ASSERT_GE(fd, 0);
   ret = fcntl(fd, F_GETFL);
   ASSERT_NE(-1, ret) << errno;
@@ -495,7 +561,8 @@ void TestOpenComplexFlags(bool fast_check_in_client) {
   ASSERT_EQ(FD_CLOEXEC & ret, 0);
   ASSERT_EQ(0, close(fd));
 
-  fd = open_broker.Open(kCpuInfo, O_RDONLY | O_CLOEXEC);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kCpuInfo,
+                                                      O_RDONLY | O_CLOEXEC);
   ASSERT_GE(fd, 0);
   ret = fcntl(fd, F_GETFD);
   ASSERT_NE(-1, ret);
@@ -504,7 +571,8 @@ void TestOpenComplexFlags(bool fast_check_in_client) {
   ASSERT_TRUE(FD_CLOEXEC & ret);
   ASSERT_EQ(0, close(fd));
 
-  fd = open_broker.Open(kCpuInfo, O_RDONLY | O_NONBLOCK);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(kCpuInfo,
+                                                      O_RDONLY | O_NONBLOCK);
   ASSERT_GE(fd, 0);
   ret = fcntl(fd, F_GETFL);
   ASSERT_NE(-1, ret);
@@ -524,7 +592,7 @@ TEST(BrokerProcess, OpenComplexFlagsNoClientCheck) {
   // expected.
 }
 
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 // Flaky on Linux NG bots: https://crbug.com/595199.
 #define MAYBE_RecvMsgDescriptorLeak DISABLED_RecvMsgDescriptorLeak
 #else
@@ -540,13 +608,13 @@ SANDBOX_TEST_ALLOW_NOISE(BrokerProcess, MAYBE_RecvMsgDescriptorLeak) {
   LOG(INFO) << "Ensure Android LOG socket is allocated";
 
   // Find the four lowest available file descriptors.
-  int available_fds[4];
-  SANDBOX_ASSERT(0 == pipe(available_fds));
-  SANDBOX_ASSERT(0 == pipe(available_fds + 2));
+  std::array<int, 4> available_fds;
+  SANDBOX_ASSERT(0 == pipe(available_fds.data()));
+  SANDBOX_ASSERT(0 == pipe(base::span(available_fds).subspan(2u).data()));
 
   // Save one FD to send to the broker later, and close the others.
   base::ScopedFD message_fd(available_fds[0]);
-  for (size_t i = 1; i < base::size(available_fds); i++) {
+  for (size_t i = 1; i < std::size(available_fds); i++) {
     SANDBOX_ASSERT(0 == IGNORE_EINTR(close(available_fds[i])));
   }
 
@@ -555,8 +623,10 @@ SANDBOX_TEST_ALLOW_NOISE(BrokerProcess, MAYBE_RecvMsgDescriptorLeak) {
   // descriptors a process can have: it only limits the highest value that can
   // be assigned to newly-created descriptors allocated by the process.)
   const rlim_t fd_limit =
-      1 + *std::max_element(available_fds,
-                            available_fds + base::size(available_fds));
+      1 + *std::max_element(available_fds.data(),
+                            base::span<int>(available_fds)
+                                .subspan(std::size(available_fds))
+                                .data());
 
   struct rlimit rlim;
   SANDBOX_ASSERT(0 == getrlimit(RLIMIT_NOFILE, &rlim));
@@ -571,10 +641,14 @@ SANDBOX_TEST_ALLOW_NOISE(BrokerProcess, MAYBE_RecvMsgDescriptorLeak) {
 
   std::vector<BrokerFilePermission> permissions = {
       BrokerFilePermission::ReadOnly(kCpuInfo)};
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions);
-  SANDBOX_ASSERT(open_broker.Init(base::BindOnce(&NoOpCallback)));
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED);
 
-  const int ipc_fd = BrokerProcessTestHelper::GetIPCDescriptor(&open_broker);
+  SANDBOX_ASSERT(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+  const int ipc_fd =
+      open_broker.GetBrokerClientSignalBased()->GetIPCDescriptorForTesting();
   SANDBOX_ASSERT(ipc_fd >= 0);
 
   static const char kBogus[] = "not a pickle";
@@ -584,16 +658,17 @@ SANDBOX_TEST_ALLOW_NOISE(BrokerProcess, MAYBE_RecvMsgDescriptorLeak) {
   // The broker process should only have a couple spare file descriptors
   // available, but for good measure we send it fd_limit bogus IPCs anyway.
   for (rlim_t i = 0; i < fd_limit; ++i) {
-    SANDBOX_ASSERT(
-        base::UnixDomainSocket::SendMsg(ipc_fd, kBogus, sizeof(kBogus), fds));
+    SANDBOX_ASSERT(base::UnixDomainSocket::SendMsg(
+        ipc_fd, base::as_byte_span(kBogus), fds));
   }
 
-  const int fd = open_broker.Open(kCpuInfo, O_RDONLY);
+  const int fd =
+      open_broker.GetBrokerClientSignalBased()->Open(kCpuInfo, O_RDONLY);
   SANDBOX_ASSERT(fd >= 0);
   SANDBOX_ASSERT(0 == IGNORE_EINTR(close(fd)));
 }
 
-bool CloseFD(int fd) {
+bool CloseFD(int fd, const syscall_broker::BrokerSandboxConfig&) {
   PCHECK(0 == IGNORE_EINTR(close(fd)));
   return true;
 }
@@ -622,13 +697,16 @@ TEST(BrokerProcess, BrokerDiesOnClosedChannel) {
 
   std::vector<BrokerFilePermission> permissions = {
       BrokerFilePermission::ReadOnly("/proc/cpuinfo")};
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                             true /* fast_check_in_client */,
                             false /* quiet_failures_for_tests */);
-  ASSERT_TRUE(open_broker.Init(base::BindOnce(&CloseFD, lifeline_fds[0])));
+
+  ASSERT_TRUE(open_broker.Fork(base::BindOnce(&CloseFD, lifeline_fds[0])));
 
   // Make sure the writing end only exists in the broker process.
-  CloseFD(lifeline_fds[1]);
+  close(lifeline_fds[1]);
   base::ScopedFD reader(lifeline_fds[0]);
 
   const pid_t broker_pid = open_broker.broker_pid();
@@ -650,7 +728,67 @@ TEST(BrokerProcess, BrokerDiesOnClosedChannel) {
   EXPECT_EQ(1, process_info.si_status);
 }
 
+void TestRewriteProcSelfHelper(bool fast_check_in_client) {
+  std::vector<BrokerFilePermission> proc_status_permissions = {
+      BrokerFilePermission::ReadOnly("/proc/self/status")};
+
+  BrokerCommandSet command_set = MakeBrokerCommandSet({COMMAND_OPEN});
+
+  {
+    // Nonexistent file with no permissions to see file.
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, proc_status_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    int fd = open_broker.GetBrokerClientSignalBased()->Open(
+        "/proc/self/status", O_RDONLY | O_NONBLOCK);
+    // This should open /proc/[pid]/status even though it wasn't the exact
+    // string that Open() requested.
+    ASSERT_GE(fd, 0);
+
+    // Reading /proc/self/status should return the same PID as the current
+    // process's PID, not the broker's.
+    std::array<char, 4096> buf;
+
+    ssize_t num_read = HANDLE_EINTR(
+        read(fd, buf.data(), (buf.size() * sizeof(decltype(buf)::value_type))));
+    ASSERT_GE(IGNORE_EINTR(close(fd)), 0);
+
+    ASSERT_GT(num_read, 0);
+
+    std::string_view status(buf.data(), static_cast<size_t>(num_read));
+    std::string_view tracer("Pid:\t");
+
+    std::string_view::size_type pid_index = status.find(tracer);
+    ASSERT_NE(pid_index, std::string_view::npos);
+    pid_index += tracer.size();
+    std::string_view::size_type pid_end_index = status.find('\n', pid_index);
+    ASSERT_NE(pid_end_index, std::string_view::npos);
+
+    std::string_view pid_str(base::span<char>(buf).subspan(pid_index).data(),
+                             pid_end_index - pid_index);
+    int pid = 0;
+    ASSERT_TRUE(base::StringToInt(pid_str, &pid));
+
+    ASSERT_EQ(pid, getpid());
+
+    // TODO(mpdenton): maybe also test in a different pid namespace?
+  }
+}
+
+TEST(BrokerProcess, RewriteProcSelfClient) {
+  TestRewriteProcSelfHelper(true);
+}
+
+TEST(BrokerProcess, RewriteProcSelfHost) {
+  TestRewriteProcSelfHelper(false);
+}
+
 TEST(BrokerProcess, CreateFile) {
+  // Create two temporary files, grab their file names, and then delete the
+  // files themselves.
   std::string temp_str;
   std::string perm_str;
   {
@@ -670,24 +808,29 @@ TEST(BrokerProcess, CreateFile) {
       BrokerFilePermission::ReadWriteCreate(permfile_name),
   };
 
-  BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions);
-  ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+  auto policy = std::make_optional<BrokerSandboxConfig>(
+      command_set, permissions, kFakeErrnoSentinel);
+  BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED);
+
+  ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
 
   int fd = -1;
 
   // Opening a temp file using O_CREAT but not O_EXCL must not be allowed
   // by the broker so as to prevent spying on any pre-existing files.
-  fd = open_broker.Open(tempfile_name, O_RDWR | O_CREAT);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(tempfile_name,
+                                                      O_RDWR | O_CREAT);
   ASSERT_EQ(fd, -kFakeErrnoSentinel);
 
   // Opening a temp file in a normal way must not be allowed by the broker,
   // either.
-  fd = open_broker.Open(tempfile_name, O_RDWR);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(tempfile_name, O_RDWR);
   ASSERT_EQ(fd, -kFakeErrnoSentinel);
 
   // Opening a temp file with both O_CREAT and O_EXCL is allowed since the
   // file is known not to exist outside the scope of ScopedTemporaryFile.
-  fd = open_broker.Open(tempfile_name, O_RDWR | O_CREAT | O_EXCL);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(
+      tempfile_name, O_RDWR | O_CREAT | O_EXCL);
   ASSERT_GE(fd, 0);
   close(fd);
 
@@ -698,26 +841,30 @@ TEST(BrokerProcess, CreateFile) {
 
   // Opening a temp file with both O_CREAT and O_EXCL is allowed but fails
   // per the OS when there is a conflict with a pre-existing file.
-  fd = open_broker.Open(tempfile_name, O_RDWR | O_CREAT | O_EXCL);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(
+      tempfile_name, O_RDWR | O_CREAT | O_EXCL);
   ASSERT_EQ(fd, -EEXIST);
 
   // Opening a new permanent file without specifying O_EXCL is allowed.
-  fd = open_broker.Open(permfile_name, O_RDWR | O_CREAT);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(permfile_name,
+                                                      O_RDWR | O_CREAT);
   ASSERT_GE(fd, 0);
   close(fd);
 
   // Opening an existing permanent file without specifying O_EXCL is allowed.
-  fd = open_broker.Open(permfile_name, O_RDWR | O_CREAT);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(permfile_name,
+                                                      O_RDWR | O_CREAT);
   ASSERT_GE(fd, 0);
   close(fd);
 
   // Opening an existing file with O_EXCL is allowed but fails per the OS.
-  fd = open_broker.Open(permfile_name, O_RDWR | O_CREAT | O_EXCL);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(
+      permfile_name, O_RDWR | O_CREAT | O_EXCL);
   ASSERT_EQ(fd, -EEXIST);
 
   const char kTestText[] = "TESTTESTTEST";
 
-  fd = open_broker.Open(permfile_name, O_RDWR);
+  fd = open_broker.GetBrokerClientSignalBased()->Open(permfile_name, O_RDWR);
   ASSERT_GE(fd, 0);
   {
     // Write to the descriptor opened by the broker and close.
@@ -733,7 +880,7 @@ TEST(BrokerProcess, CreateFile) {
     char buf[1024];
     ssize_t len = HANDLE_EINTR(read(fd_check, buf, sizeof(buf)));
     ASSERT_EQ(len, static_cast<ssize_t>(sizeof(kTestText)));
-    ASSERT_EQ(memcmp(kTestText, buf, sizeof(kTestText)), 0);
+    UNSAFE_TODO(ASSERT_EQ(memcmp(kTestText, buf, sizeof(kTestText)), 0));
   }
 
   // Cleanup.
@@ -758,19 +905,23 @@ void TestStatHelper(bool fast_check_in_client, bool follow_links) {
   const char* bad_leading_path5 = "/mbogo/fictitioux";
   const char* bad_leading_path6 = "/mbogo/fictitiousa";
 
-  struct stat sb;
+  default_stat_struct sb;
 
   {
     // Actual file with permissions to see file but command not allowed.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(tempfile_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, BrokerCommandSet(),
-                              permissions, fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
 
-    memset(&sb, 0, sizeof(sb));
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    UNSAFE_TODO(memset(&sb, 0, sizeof(sb)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(tempfile_name, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  tempfile_name, follow_links, &sb));
   }
 
   BrokerCommandSet command_set;
@@ -779,100 +930,144 @@ void TestStatHelper(bool fast_check_in_client, bool follow_links) {
   {
     // Nonexistent file with no permissions to see file.
     std::vector<BrokerFilePermission> permissions;
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
 
-    memset(&sb, 0, sizeof(sb));
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    UNSAFE_TODO(memset(&sb, 0, sizeof(sb)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(nonesuch_name, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  nonesuch_name, follow_links, &sb));
   }
   {
     // Actual file with no permission to see file.
     std::vector<BrokerFilePermission> permissions;
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
 
-    memset(&sb, 0, sizeof(sb));
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    UNSAFE_TODO(memset(&sb, 0, sizeof(sb)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(tempfile_name, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  tempfile_name, follow_links, &sb));
   }
   {
     // Nonexistent file with permissions to see file.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(nonesuch_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
 
-    memset(&sb, 0, sizeof(sb));
-    EXPECT_EQ(-ENOENT, open_broker.Stat(nonesuch_name, follow_links, &sb));
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    UNSAFE_TODO(memset(&sb, 0, sizeof(sb)));
+    EXPECT_EQ(-ENOENT,
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  nonesuch_name, follow_links, &sb));
 
     // Gets denied all the way back to root since no create permission.
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(leading_path1, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  leading_path1, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(leading_path2, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  leading_path2, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(leading_path3, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  leading_path3, follow_links, &sb));
 
     // Not fooled by substrings.
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path1, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path1, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path2, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path2, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path3, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path3, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path4, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path4, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path5, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path5, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path6, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path6, follow_links, &sb));
   }
   {
     // Nonexistent file with permissions to create file.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadWriteCreate(nonesuch_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
 
-    memset(&sb, 0, sizeof(sb));
-    EXPECT_EQ(-ENOENT, open_broker.Stat(nonesuch_name, follow_links, &sb));
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    UNSAFE_TODO(memset(&sb, 0, sizeof(sb)));
+    EXPECT_EQ(-ENOENT,
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  nonesuch_name, follow_links, &sb));
 
     // Gets ENOENT all the way back to root since it has create permission.
-    EXPECT_EQ(-ENOENT, open_broker.Stat(leading_path1, follow_links, &sb));
-    EXPECT_EQ(-ENOENT, open_broker.Stat(leading_path2, follow_links, &sb));
+    EXPECT_EQ(-ENOENT,
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  leading_path1, follow_links, &sb));
+    EXPECT_EQ(-ENOENT,
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  leading_path2, follow_links, &sb));
 
     // But can always get the root.
-    EXPECT_EQ(0, open_broker.Stat(leading_path3, follow_links, &sb));
+    EXPECT_EQ(0,
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  leading_path3, follow_links, &sb));
 
     // Not fooled by substrings.
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path1, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path1, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path2, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path2, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path3, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path3, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path4, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path4, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path5, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path5, follow_links, &sb));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Stat(bad_leading_path6, follow_links, &sb));
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  bad_leading_path6, follow_links, &sb));
   }
   {
     // Actual file with permissions to see file.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(tempfile_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
 
-    memset(&sb, 0, sizeof(sb));
-    EXPECT_EQ(0, open_broker.Stat(tempfile_name, follow_links, &sb));
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    UNSAFE_TODO(memset(&sb, 0, sizeof(sb)));
+    EXPECT_EQ(0,
+              open_broker.GetBrokerClientSignalBased()->DefaultStatForTesting(
+                  tempfile_name, follow_links, &sb));
 
     // Following fields may never be consistent but should be non-zero.
     // Don't trust the platform to define fields with any particular sign.
@@ -890,9 +1085,9 @@ void TestStatHelper(bool fast_check_in_client, bool follow_links) {
     EXPECT_EQ(12, sb.st_size);
 
     // Can't go backwards in time, 1500000000 was some time ago.
-    EXPECT_LT(1500000000u, static_cast<unsigned int>(sb.st_atime));
-    EXPECT_LT(1500000000u, static_cast<unsigned int>(sb.st_mtime));
-    EXPECT_LT(1500000000u, static_cast<unsigned int>(sb.st_ctime));
+    EXPECT_LT(1500000000u, static_cast<unsigned int>(sb.st_atime_));
+    EXPECT_LT(1500000000u, static_cast<unsigned int>(sb.st_mtime_));
+    EXPECT_LT(1500000000u, static_cast<unsigned int>(sb.st_ctime_));
   }
 }
 
@@ -932,11 +1127,15 @@ void TestRenameHelper(bool fast_check_in_client) {
   {
     // Check rename fails with write permissions to both files but command
     // itself is not allowed.
-    BrokerProcess open_broker(kFakeErrnoSentinel, BrokerCommandSet(),
-                              rwc_permissions, fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Rename(oldpath.c_str(), newpath.c_str()));
+              open_broker.GetBrokerClientSignalBased()->Rename(
+                  oldpath.c_str(), newpath.c_str()));
 
     // ... and no files moved around.
     EXPECT_TRUE(access(oldpath.c_str(), F_OK) == 0);
@@ -949,11 +1148,15 @@ void TestRenameHelper(bool fast_check_in_client) {
     // Check rename fails when no permission to new file.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadWriteCreate(oldpath)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Rename(oldpath.c_str(), newpath.c_str()));
+              open_broker.GetBrokerClientSignalBased()->Rename(
+                  oldpath.c_str(), newpath.c_str()));
 
     // ... and no files moved around.
     EXPECT_TRUE(access(oldpath.c_str(), F_OK) == 0);
@@ -963,11 +1166,15 @@ void TestRenameHelper(bool fast_check_in_client) {
     // Check rename fails when no permission to old file.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadWriteCreate(newpath)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Rename(oldpath.c_str(), newpath.c_str()));
+              open_broker.GetBrokerClientSignalBased()->Rename(
+                  oldpath.c_str(), newpath.c_str()));
 
     // ... and no files moved around.
     EXPECT_TRUE(access(oldpath.c_str(), F_OK) == 0);
@@ -978,11 +1185,15 @@ void TestRenameHelper(bool fast_check_in_client) {
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(oldpath),
         BrokerFilePermission::ReadWriteCreate(newpath)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Rename(oldpath.c_str(), newpath.c_str()));
+              open_broker.GetBrokerClientSignalBased()->Rename(
+                  oldpath.c_str(), newpath.c_str()));
 
     // ... and no files moved around.
     EXPECT_TRUE(access(oldpath.c_str(), F_OK) == 0);
@@ -993,11 +1204,15 @@ void TestRenameHelper(bool fast_check_in_client) {
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadWriteCreate(oldpath),
         BrokerFilePermission::ReadOnly(newpath)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Rename(oldpath.c_str(), newpath.c_str()));
+              open_broker.GetBrokerClientSignalBased()->Rename(
+                  oldpath.c_str(), newpath.c_str()));
 
     // ... and no files moved around.
     EXPECT_TRUE(access(oldpath.c_str(), F_OK) == 0);
@@ -1005,10 +1220,14 @@ void TestRenameHelper(bool fast_check_in_client) {
   }
   {
     // Check rename passes with write permissions to both files.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rwc_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(0, open_broker.Rename(oldpath.c_str(), newpath.c_str()));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(0, open_broker.GetBrokerClientSignalBased()->Rename(
+                     oldpath.c_str(), newpath.c_str()));
 
     // ... and files were moved around.
     EXPECT_TRUE(access(oldpath.c_str(), F_OK) < 0);
@@ -1049,11 +1268,15 @@ void TestReadlinkHelper(bool fast_check_in_client) {
     // Actual file with permissions to see file but command itself not allowed.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(newpath_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, BrokerCommandSet(),
-                              permissions, fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Readlink(newpath_name, buf, sizeof(buf)));
+              open_broker.GetBrokerClientSignalBased()->Readlink(
+                  newpath_name, buf, sizeof(buf)));
   }
 
   BrokerCommandSet command_set;
@@ -1062,49 +1285,69 @@ void TestReadlinkHelper(bool fast_check_in_client) {
   {
     // Nonexistent file with no permissions to see file.
     std::vector<BrokerFilePermission> permissions;
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Readlink(nonesuch_name, buf, sizeof(buf)));
+              open_broker.GetBrokerClientSignalBased()->Readlink(
+                  nonesuch_name, buf, sizeof(buf)));
   }
   {
     // Actual file with no permissions to see file.
     std::vector<BrokerFilePermission> permissions;
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
     EXPECT_EQ(-kFakeErrnoSentinel,
-              open_broker.Readlink(newpath_name, buf, sizeof(buf)));
+              open_broker.GetBrokerClientSignalBased()->Readlink(
+                  newpath_name, buf, sizeof(buf)));
   }
   {
     // Nonexistent file with permissions to see file.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(nonesuch_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-ENOENT, open_broker.Readlink(nonesuch_name, buf, sizeof(buf)));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-ENOENT, open_broker.GetBrokerClientSignalBased()->Readlink(
+                           nonesuch_name, buf, sizeof(buf)));
   }
   {
     // Actual file with permissions to see file.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(newpath_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    ssize_t retlen = open_broker.Readlink(newpath_name, buf, sizeof(buf));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    ssize_t retlen = open_broker.GetBrokerClientSignalBased()->Readlink(
+        newpath_name, buf, sizeof(buf));
     EXPECT_TRUE(retlen == static_cast<ssize_t>(strlen(oldpath_name)));
-    EXPECT_EQ(0, memcmp(oldpath_name, buf, retlen));
+    UNSAFE_TODO(EXPECT_EQ(0, memcmp(oldpath_name, buf, retlen)));
   }
   {
     // Actual file with permissions to see file, but too small a buffer.
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly(newpath_name)};
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(4, open_broker.Readlink(newpath_name, buf, 4));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(4, open_broker.GetBrokerClientSignalBased()->Readlink(
+                     newpath_name, buf, 4));
   }
 
   // Cleanup both paths.
@@ -1145,69 +1388,108 @@ void TestMkdirHelper(bool fast_check_in_client) {
 
   {
     // Actual file with permissions to use but command itself not allowed.
-    BrokerProcess open_broker(kFakeErrnoSentinel, BrokerCommandSet(),
-                              rw_permissions, fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Mkdir(path_name, 0600));
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Mkdir(path_name, 0600));
   }
 
   BrokerCommandSet command_set = MakeBrokerCommandSet({COMMAND_MKDIR});
 
   {
     // Nonexistent file with no permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, no_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, no_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Mkdir(nonesuch_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(
+        -kFakeErrnoSentinel,
+        open_broker.GetBrokerClientSignalBased()->Mkdir(nonesuch_name, 0600));
   }
   {
     // Actual file with no permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, no_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, no_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Mkdir(path_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Mkdir(path_name, 0600));
   }
   {
     // Nonexistent file with insufficient permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, ro_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, ro_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Mkdir(nonesuch_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(
+        -kFakeErrnoSentinel,
+        open_broker.GetBrokerClientSignalBased()->Mkdir(nonesuch_name, 0600));
   }
   {
     // Actual file with insufficient permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, ro_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, ro_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Mkdir(path_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Mkdir(path_name, 0600));
   }
   {
     // Nonexistent file with insufficient permissions to see file, case 2.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rw_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Mkdir(nonesuch_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(
+        -kFakeErrnoSentinel,
+        open_broker.GetBrokerClientSignalBased()->Mkdir(nonesuch_name, 0600));
   }
   {
     // Actual file with insufficient permissions to see file, case 2.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rw_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Mkdir(path_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Mkdir(path_name, 0600));
   }
   {
     // Nonexistent file with permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rwc_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-ENOENT, open_broker.Mkdir(nonesuch_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-ENOENT, open_broker.GetBrokerClientSignalBased()->Mkdir(
+                           nonesuch_name, 0600));
   }
   {
     // Actual file with permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rwc_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(0, open_broker.Mkdir(path_name, 0600));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(0,
+              open_broker.GetBrokerClientSignalBased()->Mkdir(path_name, 0600));
   }
 
   // Cleanup.
@@ -1250,10 +1532,14 @@ void TestRmdirHelper(bool fast_check_in_client) {
 
   {
     // Actual dir with permissions to use but command itself not allowed.
-    BrokerProcess open_broker(kFakeErrnoSentinel, BrokerCommandSet(),
-                              rw_permissions, fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Rmdir(path_name));
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Rmdir(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
@@ -1261,73 +1547,104 @@ void TestRmdirHelper(bool fast_check_in_client) {
 
   {
     // Nonexistent dir with no permissions to see dir.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, no_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, no_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Rmdir(nonesuch_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Rmdir(nonesuch_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual dir with no permissions to see dir.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, no_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, no_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Rmdir(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Rmdir(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Nonexistent dir with insufficient permissions to see dir.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, ro_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, ro_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Rmdir(nonesuch_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Rmdir(nonesuch_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual dir with insufficient permissions to see dir.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, ro_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, ro_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Rmdir(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Rmdir(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Nonexistent dir with insufficient permissions to see dir, case 2.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rw_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Rmdir(nonesuch_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Rmdir(nonesuch_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual dir with insufficient permissions to see dir, case 2.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rw_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Rmdir(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Rmdir(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Nonexistent dir with permissions to see dir.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rwc_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_TRUE(open_broker.Rmdir(nonesuch_name) < 0);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_TRUE(open_broker.GetBrokerClientSignalBased()->Rmdir(nonesuch_name) <
+                0);
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual dir with permissions to see dir.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rwc_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(0, open_broker.Rmdir(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(0, open_broker.GetBrokerClientSignalBased()->Rmdir(path_name));
   }
   // Confirm it was erased.
   EXPECT_EQ(-1, access(path_name, F_OK));
@@ -1341,6 +1658,7 @@ TEST(BrokerProcess, RmdirHost) {
   TestRmdirHelper(false);
 }
 
+// Will have to split this into many tests, and the "cleanup" will have ASSERTs.
 void TestUnlinkHelper(bool fast_check_in_client) {
   std::string path;
   {
@@ -1371,10 +1689,14 @@ void TestUnlinkHelper(bool fast_check_in_client) {
 
   {
     // Actual file with permissions to use but command itself not allowed.
-    BrokerProcess open_broker(kFakeErrnoSentinel, BrokerCommandSet(),
-                              rwc_permissions, fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Unlink(path_name));
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Unlink(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
@@ -1382,73 +1704,104 @@ void TestUnlinkHelper(bool fast_check_in_client) {
 
   {
     // Nonexistent file with no permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, no_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, no_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Unlink(nonesuch_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Unlink(nonesuch_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual file with no permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, no_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, no_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Unlink(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Unlink(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Nonexistent file with insufficient permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, ro_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, ro_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Unlink(nonesuch_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Unlink(nonesuch_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual file with insufficient permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, ro_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, ro_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Unlink(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Unlink(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Nonexistent file with insufficient permissions to see file, case 2.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rw_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Unlink(nonesuch_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Unlink(nonesuch_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual file with insufficient permissions to see file, case 2.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rw_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rw_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(-kFakeErrnoSentinel, open_broker.Unlink(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->Unlink(path_name));
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Nonexistent file with permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rwc_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_TRUE(open_broker.Unlink(nonesuch_name) < 0);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_TRUE(
+        open_broker.GetBrokerClientSignalBased()->Unlink(nonesuch_name) < 0);
   }
   EXPECT_EQ(0, access(path_name, F_OK));
 
   {
     // Actual file with permissions to see file.
-    BrokerProcess open_broker(kFakeErrnoSentinel, command_set, rwc_permissions,
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, rwc_permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
                               fast_check_in_client);
-    ASSERT_TRUE(open_broker.Init(base::BindOnce(&NoOpCallback)));
-    EXPECT_EQ(0, open_broker.Unlink(path_name));
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+    EXPECT_EQ(0, open_broker.GetBrokerClientSignalBased()->Unlink(path_name));
   }
   // Confirm it was erased.
   EXPECT_EQ(-1, access(path_name, F_OK));
@@ -1462,56 +1815,219 @@ TEST(BrokerProcess, UnlinkHost) {
   TestUnlinkHelper(false);
 }
 
+void TestInotifyAddWatchHelper(bool fast_check_in_client) {
+  const uint32_t kBadMask =
+      IN_CREATE | IN_DELETE | IN_CLOSE_WRITE | IN_MOVE | IN_ONLYDIR;
+  const uint32_t kGoodMask = kBadMask | IN_ATTRIB;
+
+  // Create two nested temp dirs.
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(
+      temp_dir.CreateUniqueTempDirUnderPath(base::FilePath(kTempDirForTests)));
+  std::string temp_dir_str = temp_dir.GetPath().MaybeAsASCII();
+  ASSERT_FALSE(temp_dir_str.empty());
+
+  base::ScopedTempDir nested_temp_dir;
+  ASSERT_TRUE(
+      nested_temp_dir.Set(temp_dir.GetPath().AppendASCII("nested_temp_dir")));
+  std::string nested_temp_dir_str = nested_temp_dir.GetPath().MaybeAsASCII();
+  ASSERT_FALSE(nested_temp_dir_str.empty());
+
+  base::FilePath bad_prefix = temp_dir.GetPath().AppendASCII("nested_t");
+  std::string bad_prefix_str = bad_prefix.MaybeAsASCII();
+  ASSERT_FALSE(bad_prefix_str.empty());
+
+  {
+    // Try to watch a directory without COMMAND_INOTIFY_ADD_WATCH
+    std::vector<BrokerFilePermission> permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            nested_temp_dir_str)};
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        BrokerCommandSet(), permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    base::ScopedFD inotify_instance(inotify_init());
+    ASSERT_TRUE(inotify_instance.is_valid());
+    EXPECT_EQ(
+        -kFakeErrnoSentinel,
+        open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+            inotify_instance.get(), nested_temp_dir_str.c_str(), kGoodMask));
+  }
+
+  BrokerCommandSet command_set;
+  command_set.set(COMMAND_INOTIFY_ADD_WATCH);
+
+  {
+    // Try to watch a directory with no permission.
+    std::vector<BrokerFilePermission> permissions;
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    base::ScopedFD inotify_instance(inotify_init());
+    ASSERT_TRUE(inotify_instance.is_valid());
+    EXPECT_EQ(
+        -kFakeErrnoSentinel,
+        open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+            inotify_instance.get(), nested_temp_dir_str.c_str(), kGoodMask));
+  }
+  {
+    // Try to watch a directory with permission, but bad flags.
+    std::vector<BrokerFilePermission> permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            nested_temp_dir_str)};
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    base::ScopedFD inotify_instance(inotify_init());
+    ASSERT_TRUE(inotify_instance.is_valid());
+    EXPECT_EQ(
+        -kFakeErrnoSentinel,
+        open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+            inotify_instance.get(), nested_temp_dir_str.c_str(), kBadMask));
+  }
+  {
+    // Add a directory with permissions and make sure it does not give watch
+    // permission to uintended directories or files.
+    std::vector<BrokerFilePermission> permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            nested_temp_dir_str)};
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    base::ScopedTempDir other_directory;
+    ASSERT_TRUE(
+        other_directory.CreateUniqueTempDirUnderPath(temp_dir.GetPath()));
+    std::string other_directory_str = other_directory.GetPath().MaybeAsASCII();
+    ASSERT_FALSE(other_directory_str.empty());
+
+    base::ScopedFD inotify_instance(inotify_init());
+    ASSERT_TRUE(inotify_instance.is_valid());
+
+    // Try to watch an unintended directory, should fail.
+    ASSERT_EQ(
+        -kFakeErrnoSentinel,
+        open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+            inotify_instance.get(), other_directory_str.c_str(), kGoodMask));
+
+    // Try to access a prefix that isn't a full directory.
+    ASSERT_EQ(-kFakeErrnoSentinel,
+              open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+                  inotify_instance.get(), bad_prefix_str.c_str(), kGoodMask));
+  }
+  {
+    // Try to watch a directory with permission, and good flags.
+    std::vector<BrokerFilePermission> permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            nested_temp_dir_str)};
+    auto policy = std::make_optional<BrokerSandboxConfig>(
+        command_set, permissions, kFakeErrnoSentinel);
+    BrokerProcess open_broker(std::move(policy), BrokerType::SIGNAL_BASED,
+                              fast_check_in_client);
+
+    ASSERT_TRUE(open_broker.Fork(base::BindOnce(&NoOpCallback)));
+
+    base::ScopedFD inotify_instance(inotify_init());
+    ASSERT_TRUE(inotify_instance.is_valid());
+
+    // Try to watch the directory, which should succeed.
+    int wd = open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+        inotify_instance.get(), nested_temp_dir_str.c_str(), kGoodMask);
+    // The returned watch descriptor should be valid.
+    ASSERT_LE(0, wd);
+    // Removing the watch should succeed.
+    ASSERT_EQ(0, inotify_rm_watch(inotify_instance.get(), wd));
+
+    // Now try watching a leading directory, which should succeed.
+    wd = open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+        inotify_instance.get(), temp_dir_str.c_str(), kGoodMask);
+    // The returned watch descriptor should be valid.
+    ASSERT_LE(0, wd);
+    // Removing the watch should succeed.
+    ASSERT_EQ(0, inotify_rm_watch(inotify_instance.get(), wd));
+
+    // Watching root should succeed with any valid permission.
+    wd = open_broker.GetBrokerClientSignalBased()->InotifyAddWatch(
+        inotify_instance.get(), "/", kGoodMask);
+    // The returned watch descriptor should be valid.
+    ASSERT_LE(0, wd);
+    // Removing the watch should succeed.
+    ASSERT_EQ(0, inotify_rm_watch(inotify_instance.get(), wd));
+  }
+}
+
+TEST(BrokerProcess, InotifyAddWatchClient) {
+  TestInotifyAddWatchHelper(true);
+}
+
+TEST(BrokerProcess, InotifyAddWatchHost) {
+  TestInotifyAddWatchHelper(false);
+}
+
 TEST(BrokerProcess, IsSyscallAllowed) {
   const base::flat_map<BrokerCommand, base::flat_set<int>> kSysnosForCommand = {
       {COMMAND_ACCESS,
-       {__NR_faccessat,
-#if defined(__NR_access)
+       {__NR_faccessat, __NR_faccessat2,
+#if defined(__NR_access) && !BUILDFLAG(IS_ANDROID)
         __NR_access
 #endif
        }},
       {COMMAND_MKDIR,
        {__NR_mkdirat,
-#if defined(__NR_mkdir)
+#if defined(__NR_mkdir) && !BUILDFLAG(IS_ANDROID)
         __NR_mkdir
 #endif
        }},
       {COMMAND_OPEN,
        {__NR_openat,
-#if defined(__NR_open)
+#if defined(__NR_open) && !BUILDFLAG(IS_ANDROID)
         __NR_open
 #endif
        }},
       {COMMAND_READLINK,
        {__NR_readlinkat,
-#if defined(__NR_readlink)
+#if defined(__NR_readlink) && !BUILDFLAG(IS_ANDROID)
         __NR_readlink
 #endif
        }},
       {COMMAND_RENAME,
        {__NR_renameat,
-#if defined(__NR_rename)
+#if defined(__NR_rename) && !BUILDFLAG(IS_ANDROID)
         __NR_rename
 #endif
        }},
       {COMMAND_UNLINK,
        {__NR_unlinkat,
-#if defined(__NR_unlink)
+#if defined(__NR_unlink) && !BUILDFLAG(IS_ANDROID)
         __NR_unlink
 #endif
        }},
       {COMMAND_RMDIR,
        {__NR_unlinkat,
-#if defined(__NR_rmdir)
+#if defined(__NR_rmdir) && !BUILDFLAG(IS_ANDROID)
         __NR_rmdir
 #endif
        }},
       {COMMAND_STAT,
        {
-#if defined(__NR_stat)
+#if defined(__NR_stat) && !BUILDFLAG(IS_ANDROID)
            __NR_stat,
 #endif
-#if defined(__NR_lstat)
+#if defined(__NR_lstat) && !BUILDFLAG(IS_ANDROID)
            __NR_lstat,
 #endif
 #if defined(__NR_fstatat)
@@ -1529,6 +2045,12 @@ TEST(BrokerProcess, IsSyscallAllowed) {
 #if defined(__NR_lstat64)
            __NR_lstat64,
 #endif
+       }},
+      {COMMAND_INOTIFY_ADD_WATCH,
+       {
+#if defined(__NR_inotify_add_watch)
+           __NR_inotify_add_watch
+#endif
        }}};
 
   // First gather up all the syscalls numbers we want to test.
@@ -1544,7 +2066,10 @@ TEST(BrokerProcess, IsSyscallAllowed) {
       BrokerCommand command = test.first;
       const base::flat_set<int>& sysnos = test.second;
       SCOPED_TRACE(base::StringPrintf("fast check, command=%d", command));
-      BrokerProcess process(ENOSYS, MakeBrokerCommandSet({command}), {},
+      auto policy = std::make_optional<BrokerSandboxConfig>(
+          MakeBrokerCommandSet({command}), std::vector<BrokerFilePermission>(),
+          ENOSYS);
+      BrokerProcess process(std::move(policy), BrokerType::SIGNAL_BASED,
                             /*fast_check_in_client=*/true,
                             /*quiet_failures_for_tests=*/true);
       // Check that only the correct system calls are allowed.
@@ -1558,7 +2083,10 @@ TEST(BrokerProcess, IsSyscallAllowed) {
     {
       BrokerCommand command = test.first;
       SCOPED_TRACE(base::StringPrintf("no fast check, command=%d", command));
-      BrokerProcess process(ENOSYS, MakeBrokerCommandSet({command}), {},
+      auto policy = std::make_optional<BrokerSandboxConfig>(
+          MakeBrokerCommandSet({command}), std::vector<BrokerFilePermission>(),
+          ENOSYS);
+      BrokerProcess process(std::move(policy), BrokerType::SIGNAL_BASED,
                             /*fast_check_in_client=*/false,
                             /*quiet_failures_for_tests=*/true);
       // Check that all system calls are allowed.

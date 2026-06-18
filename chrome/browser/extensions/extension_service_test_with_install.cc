@@ -1,22 +1,40 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/extensions/extension_service_test_with_install.h"
 
-#include "base/bind.h"
+#include <algorithm>
+
+#include "base/check.h"
+#include "base/check_op.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
+#include "base/notreached.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/bind.h"
+#include "base/test/task_environment.h"
 #include "chrome/browser/extensions/chrome_test_extension_loader.h"
-#include "chrome/browser/extensions/crx_installer.h"
-#include "chrome/browser/extensions/load_error_reporter.h"
+#include "chrome/browser/extensions/extension_service.h"
+#include "chrome/browser/extensions/extension_service_test_base.h"
+#include "chrome/browser/extensions/sync/extension_sync_data.h"
+#include "chrome/browser/extensions/updater/extension_updater.h"
 #include "chrome/browser/profiles/profile.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/test/test_utils.h"
+#include "components/sync/model/sync_change.h"
+#include "components/sync/test/sync_change_processor_wrapper_for_test.h"
+#include "content/public/test/browser_task_environment.h"
+#include "extensions/browser/crx_installer.h"
 #include "extensions/browser/extension_creator.h"
-#include "extensions/browser/notification_types.h"
+#include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/load_error_reporter.h"
+#include "extensions/browser/unloaded_extension_reason.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/verifier_formats.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+using extensions::mojom::ManifestLocation;
 
 namespace extensions {
 
@@ -29,19 +47,17 @@ struct ExtensionsOrder {
   }
 };
 
-// Helper method to set up a WindowedNotificationObserver to wait for a
-// specific CrxInstaller to finish if we don't know the value of the
-// |installer| yet.
-bool IsCrxInstallerDone(extensions::CrxInstaller** installer,
-                        const content::NotificationSource& source,
-                        const content::NotificationDetails& details) {
-  return content::Source<extensions::CrxInstaller>(source).ptr() == *installer;
-}
-
 }  // namespace
 
 ExtensionServiceTestWithInstall::ExtensionServiceTestWithInstall()
-    : installed_(nullptr),
+    : ExtensionServiceTestWithInstall(
+          std::make_unique<content::BrowserTaskEnvironment>(
+              base::test::TaskEnvironment::MainThreadType::IO)) {}
+
+ExtensionServiceTestWithInstall::ExtensionServiceTestWithInstall(
+    std::unique_ptr<content::BrowserTaskEnvironment> task_environment)
+    : ExtensionServiceUserTestBase(std::move(task_environment)),
+      installed_extension_(nullptr),
       was_update_(false),
       unloaded_reason_(UnloadedExtensionReason::UNDEFINED),
       expected_extensions_count_(0),
@@ -49,22 +65,27 @@ ExtensionServiceTestWithInstall::ExtensionServiceTestWithInstall()
           FeatureSwitch::prompt_for_external_extensions(),
           false) {}
 
-ExtensionServiceTestWithInstall::~ExtensionServiceTestWithInstall() {}
+ExtensionServiceTestWithInstall::~ExtensionServiceTestWithInstall() = default;
+
+void ExtensionServiceTestWithInstall::TearDown() {
+  registry_observation_.Reset();
+  ExtensionServiceUserTestBase::TearDown();
+}
 
 void ExtensionServiceTestWithInstall::InitializeExtensionService(
-    const ExtensionServiceInitParams& params) {
-  ExtensionServiceTestBase::InitializeExtensionService(params);
+    ExtensionServiceInitParams params) {
+  ExtensionServiceTestBase::InitializeExtensionService(std::move(params));
 
-  registry_observer_.Add(registry());
+  registry_observation_.Observe(registry());
 }
 
 // static
-std::vector<base::string16> ExtensionServiceTestWithInstall::GetErrors() {
-  const std::vector<base::string16>* errors =
+std::vector<std::u16string> ExtensionServiceTestWithInstall::GetErrors() {
+  const std::vector<std::u16string>* errors =
       LoadErrorReporter::GetInstance()->GetErrors();
-  std::vector<base::string16> ret_val;
+  std::vector<std::u16string> ret_val;
 
-  for (const base::string16& error : *errors) {
+  for (const std::u16string& error : *errors) {
     std::string utf8_error = base::UTF16ToUTF8(error);
     if (utf8_error.find(".svn") == std::string::npos) {
       ret_val.push_back(error);
@@ -106,7 +127,7 @@ const Extension* ExtensionServiceTestWithInstall::PackAndInstallCRX(
     const base::FilePath& pem_path,
     InstallState install_state,
     int creation_flags,
-    Manifest::Location install_location) {
+    ManifestLocation install_location) {
   base::FilePath crx_path;
   base::ScopedTempDir temp_dir;
   EXPECT_TRUE(temp_dir.CreateUniqueTempDir());
@@ -121,19 +142,19 @@ const Extension* ExtensionServiceTestWithInstall::PackAndInstallCRX(
     const base::FilePath& pem_path,
     InstallState install_state) {
   return PackAndInstallCRX(dir_path, pem_path, install_state,
-                           Extension::NO_FLAGS, Manifest::Location::INTERNAL);
+                           Extension::NO_FLAGS, ManifestLocation::kInternal);
 }
 
 const Extension* ExtensionServiceTestWithInstall::PackAndInstallCRX(
     const base::FilePath& dir_path,
     InstallState install_state) {
   return PackAndInstallCRX(dir_path, base::FilePath(), install_state,
-                           Extension::NO_FLAGS, Manifest::Location::INTERNAL);
+                           Extension::NO_FLAGS, ManifestLocation::kInternal);
 }
 
 const Extension* ExtensionServiceTestWithInstall::PackAndInstallCRX(
     const base::FilePath& dir_path,
-    Manifest::Location install_location,
+    ManifestLocation install_location,
     InstallState install_state) {
   return PackAndInstallCRX(dir_path, base::FilePath(), install_state,
                            Extension::NO_FLAGS, install_location);
@@ -149,14 +170,14 @@ const Extension* ExtensionServiceTestWithInstall::InstallCRX(
     InstallState install_state,
     int creation_flags,
     const std::string& expected_old_name) {
-  InstallCRXInternal(path, Manifest::Location::INTERNAL, install_state,
+  InstallCRXInternal(path, ManifestLocation::kInternal, install_state,
                      creation_flags);
   return VerifyCrxInstall(path, install_state);
 }
 
 const Extension* ExtensionServiceTestWithInstall::InstallCRX(
     const base::FilePath& path,
-    Manifest::Location install_location,
+    ManifestLocation install_location,
     InstallState install_state,
     int creation_flags) {
   InstallCRXInternal(path, install_location, install_state, creation_flags);
@@ -183,7 +204,7 @@ const Extension* ExtensionServiceTestWithInstall::InstallCRX(
 const Extension* ExtensionServiceTestWithInstall::InstallCRXFromWebStore(
     const base::FilePath& path,
     InstallState install_state) {
-  InstallCRXInternal(path, Manifest::Location::INTERNAL, install_state,
+  InstallCRXInternal(path, ManifestLocation::kInternal, install_state,
                      Extension::FROM_WEBSTORE);
   return VerifyCrxInstall(path, install_state);
 }
@@ -198,13 +219,13 @@ const Extension* ExtensionServiceTestWithInstall::VerifyCrxInstall(
     const base::FilePath& path,
     InstallState install_state,
     const std::string& expected_old_name) {
-  std::vector<base::string16> errors = GetErrors();
+  std::vector<std::u16string> errors = GetErrors();
   const Extension* extension = nullptr;
   if (install_state != INSTALL_FAILED) {
     if (install_state == INSTALL_NEW || install_state == INSTALL_WITHOUT_LOAD)
       ++expected_extensions_count_;
 
-    EXPECT_TRUE(installed_) << path.value();
+    EXPECT_TRUE(installed_extension_) << path.value();
     // If and only if INSTALL_UPDATED, it should have the is_update flag.
     EXPECT_EQ(install_state == INSTALL_UPDATED, was_update_)
         << path.value();
@@ -214,18 +235,17 @@ const Extension* ExtensionServiceTestWithInstall::VerifyCrxInstall(
     EXPECT_EQ(0u, errors.size()) << path.value();
 
     if (install_state == INSTALL_WITHOUT_LOAD) {
-      EXPECT_EQ(0u, loaded_.size()) << path.value();
-      extension = installed_;
+      EXPECT_EQ(0u, loaded_extensions_.size()) << path.value();
+      extension = installed_extension_;
     } else {
-      EXPECT_EQ(1u, loaded_.size()) << path.value();
+      EXPECT_EQ(1u, loaded_extensions_.size()) << path.value();
       size_t actual_extension_count =
           registry()->enabled_extensions().size() +
           registry()->disabled_extensions().size();
       EXPECT_EQ(expected_extensions_count_, actual_extension_count) <<
           path.value();
-      extension = loaded_[0].get();
-      EXPECT_TRUE(registry()->GetExtensionById(extension->id(),
-                                               ExtensionRegistry::ENABLED))
+      extension = loaded_extensions_[0].get();
+      EXPECT_TRUE(registry()->enabled_extensions().GetByID(extension->id()))
           << path.value();
     }
 
@@ -233,15 +253,15 @@ const Extension* ExtensionServiceTestWithInstall::VerifyCrxInstall(
       LOG(ERROR) << *err;
     }
   } else {
-    EXPECT_FALSE(installed_) << path.value();
-    EXPECT_EQ(0u, loaded_.size()) << path.value();
+    EXPECT_FALSE(installed_extension_) << path.value();
+    EXPECT_EQ(0u, loaded_extensions_.size()) << path.value();
     EXPECT_EQ(1u, errors.size()) << path.value();
   }
 
-  installed_ = nullptr;
+  installed_extension_ = nullptr;
   was_update_ = false;
   old_name_ = "";
-  loaded_.clear();
+  ClearLoadedExtensions();
   LoadErrorReporter::GetInstance()->ClearErrors();
   return extension;
 }
@@ -277,20 +297,29 @@ void ExtensionServiceTestWithInstall::UpdateExtension(
       previous_enabled_extension_count +
       registry()->disabled_extensions().size();
 
-  extensions::CrxInstaller* installer = nullptr;
-  content::WindowedNotificationObserver observer(
-      extensions::NOTIFICATION_CRX_INSTALLER_DONE,
-      base::Bind(&IsCrxInstallerDone, &installer));
   CRXFileInfo crx_info(path, GetTestVerifierFormat());
   crx_info.extension_id = id;
-  service()->UpdateExtension(crx_info, true, &installer);
 
-  if (installer)
-    observer.Wait();
-  else
+  // Create an ExtensionUpdater and use it to create a CrxInstaller.
+  ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
+  ExtensionUpdater updater(profile());
+  updater.InitAndEnable(prefs, prefs->pref_service(), base::Minutes(10),
+                        /*cache=*/nullptr, ExtensionDownloader::Factory());
+  auto installer = updater.CreateUpdateInstaller(crx_info, true);
+
+  if (installer) {
+    base::RunLoop run_loop;
+    installer->AddInstallerCallback(base::BindLambdaForTesting(
+        [&run_loop](const std::optional<CrxInstallError>& error) {
+          run_loop.Quit();
+        }));
+    installer->InstallCrxFile(crx_info);
+    run_loop.Run();
+  } else {
     content::RunAllTasksUntilIdle();
+  }
 
-  std::vector<base::string16> errors = GetErrors();
+  std::vector<std::u16string> errors = GetErrors();
   int error_count = errors.size();
   int enabled_extension_count = registry()->enabled_extensions().size();
   int installed_extension_count =
@@ -322,10 +351,14 @@ void ExtensionServiceTestWithInstall::UpdateExtension(
 }
 
 void ExtensionServiceTestWithInstall::UninstallExtension(
-    const std::string& id) {
+    const std::string& id,
+    UninstallExtensionFileDeleteType delete_type,
+    extensions::UninstallReason reason) {
   // Verify that the extension is installed.
-  ASSERT_TRUE(registry()->GetExtensionById(id, ExtensionRegistry::EVERYTHING));
-  base::FilePath extension_path = extensions_install_dir().AppendASCII(id);
+  const Extension* extension =
+      registry()->GetExtensionById(id, ExtensionRegistry::EVERYTHING);
+  ASSERT_TRUE(extension);
+  base::FilePath extension_path = base::FilePath(extension->path());
   EXPECT_TRUE(base::PathExists(extension_path));
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
   EXPECT_TRUE(prefs->GetInstalledExtensionInfo(id));
@@ -334,8 +367,7 @@ void ExtensionServiceTestWithInstall::UninstallExtension(
   // once it's uninstalled.
   std::string extension_id = id;
   // Uninstall it.
-  EXPECT_TRUE(service()->UninstallExtension(
-      id, extensions::UNINSTALL_REASON_FOR_TESTING, nullptr));
+  EXPECT_TRUE(registrar()->UninstallExtension(id, reason, nullptr));
   --expected_extensions_count_;
 
   // We should get an unload notification.
@@ -345,10 +377,20 @@ void ExtensionServiceTestWithInstall::UninstallExtension(
   // The extension should not be in the service anymore.
   EXPECT_FALSE(registry()->GetInstalledExtension(extension_id));
   EXPECT_FALSE(prefs->GetInstalledExtensionInfo(extension_id));
-  content::RunAllTasksUntilIdle();
+  task_environment()->RunUntilIdle();
 
-  // The directory should be gone.
-  EXPECT_FALSE(base::PathExists(extension_path));
+  switch (delete_type) {
+    case kDeleteAllVersions:
+      EXPECT_FALSE(base::PathExists(extension_path.DirName()))
+          << extension_path.value();
+      break;
+    case kDeletePath:
+      EXPECT_FALSE(base::PathExists(extension_path)) << extension_path.value();
+      break;
+    case kDoNotDelete:
+      EXPECT_TRUE(base::PathExists(extension_path)) << extension_path.value();
+      break;
+  }
 }
 
 void ExtensionServiceTestWithInstall::TerminateExtension(
@@ -357,16 +399,25 @@ void ExtensionServiceTestWithInstall::TerminateExtension(
     ADD_FAILURE();
     return;
   }
-  service()->TerminateExtension(id);
+  registrar()->TerminateExtension(id);
+}
+
+void ExtensionServiceTestWithInstall::BlockAllExtensions() {
+  registrar()->BlockAllExtensions();
+}
+
+void ExtensionServiceTestWithInstall::ClearLoadedExtensions() {
+  loaded_extensions_.clear();
 }
 
 void ExtensionServiceTestWithInstall::OnExtensionLoaded(
     content::BrowserContext* browser_context,
     const Extension* extension) {
-  loaded_.push_back(base::WrapRefCounted(extension));
+  loaded_extensions_.push_back(base::WrapRefCounted(extension));
   // The tests rely on the errors being in a certain order, which can vary
   // depending on how filesystem iteration works.
-  std::stable_sort(loaded_.begin(), loaded_.end(), ExtensionsOrder());
+  std::stable_sort(loaded_extensions_.begin(), loaded_extensions_.end(),
+                   ExtensionsOrder());
 }
 
 void ExtensionServiceTestWithInstall::OnExtensionUnloaded(
@@ -375,12 +426,13 @@ void ExtensionServiceTestWithInstall::OnExtensionUnloaded(
     UnloadedExtensionReason reason) {
   unloaded_id_ = extension->id();
   unloaded_reason_ = reason;
-  auto i = std::find(loaded_.begin(), loaded_.end(), extension);
+  auto i = std::ranges::find(loaded_extensions_, extension);
   // TODO(erikkay) fix so this can be an assert.  Right now the tests
-  // are manually calling clear() on loaded_, so this isn't doable.
-  if (i == loaded_.end())
+  // are manually calling `ClearLoadedExtensions` since this method is not
+  // called by reloads, so this isn't doable.
+  if (i == loaded_extensions_.end())
     return;
-  loaded_.erase(i);
+  loaded_extensions_.erase(i);
 }
 
 void ExtensionServiceTestWithInstall::OnExtensionWillBeInstalled(
@@ -388,7 +440,7 @@ void ExtensionServiceTestWithInstall::OnExtensionWillBeInstalled(
     const Extension* extension,
     bool is_update,
     const std::string& old_name) {
-  installed_ = extension;
+  installed_extension_ = extension;
   was_update_ = is_update;
   old_name_ = old_name;
 }
@@ -398,7 +450,7 @@ void ExtensionServiceTestWithInstall::OnExtensionWillBeInstalled(
 // error checking.
 void ExtensionServiceTestWithInstall::InstallCRXInternal(
     const base::FilePath& crx_path,
-    Manifest::Location install_location,
+    ManifestLocation install_location,
     InstallState install_state,
     int creation_flags) {
   ChromeTestExtensionLoader extension_loader(profile());
@@ -412,7 +464,55 @@ void ExtensionServiceTestWithInstall::InstallCRXInternal(
   // TODO(devlin): We shouldn't ignore manifest warnings here, but we always
   // did so a bunch of stuff fails. Migrate this over.
   extension_loader.set_ignore_manifest_warnings(true);
+  extension_loader.set_wait_for_renderers(false);
   extension_loader.LoadExtension(crx_path);
+}
+
+// StatefulChangeProcessor --------------------------------------------
+
+StatefulChangeProcessor::StatefulChangeProcessor(syncer::DataType expected_type)
+    : expected_type_(expected_type) {
+  DCHECK(expected_type == syncer::DataType::EXTENSIONS ||
+         expected_type == syncer::DataType::APPS);
+}
+
+StatefulChangeProcessor::~StatefulChangeProcessor() = default;
+
+std::optional<syncer::ModelError> StatefulChangeProcessor::ProcessSyncChanges(
+    const base::Location& from_here,
+    const syncer::SyncChangeList& change_list) {
+  syncer::FakeSyncChangeProcessor::ProcessSyncChanges(from_here, change_list);
+  for (const auto& change : change_list) {
+    syncer::SyncData sync_data = change.sync_data();
+    DCHECK_EQ(expected_type_, sync_data.GetDataType());
+
+    std::unique_ptr<ExtensionSyncData> modified =
+        ExtensionSyncData::CreateFromSyncData(sync_data);
+
+    // Start by removing any existing entry for this extension id.
+    for (auto iter = data_.begin(); iter != data_.end(); ++iter) {
+      std::unique_ptr<ExtensionSyncData> existing =
+          ExtensionSyncData::CreateFromSyncData(*iter);
+      if (existing->id() == modified->id()) {
+        data_.erase(iter);
+        break;
+      }
+    }
+
+    // Now add in the new data for this id, if appropriate.
+    if (change.change_type() == syncer::SyncChange::ACTION_ADD ||
+        change.change_type() == syncer::SyncChange::ACTION_UPDATE) {
+      data_.push_back(sync_data);
+    } else if (change.change_type() != syncer::SyncChange::ACTION_DELETE) {
+      NOTREACHED() << "Unexpected change type " << change.change_type();
+    }
+  }
+  return std::nullopt;
+}
+
+std::unique_ptr<syncer::SyncChangeProcessor>
+StatefulChangeProcessor::GetWrapped() {
+  return std::make_unique<syncer::SyncChangeProcessorWrapperForTest>(this);
 }
 
 }  // namespace extensions

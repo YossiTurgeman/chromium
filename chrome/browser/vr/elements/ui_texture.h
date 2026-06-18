@@ -1,15 +1,13 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_VR_ELEMENTS_UI_TEXTURE_H_
 #define CHROME_BROWSER_VR_ELEMENTS_UI_TEXTURE_H_
 
-#include <memory>
-#include <vector>
+#include <optional>
 
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/memory/raw_ptr.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
@@ -28,6 +26,10 @@ namespace vr {
 class UiTexture {
  public:
   UiTexture();
+
+  UiTexture(const UiTexture&) = delete;
+  UiTexture& operator=(const UiTexture&) = delete;
+
   virtual ~UiTexture();
 
   void DrawTexture(SkCanvas* canvas, const gfx::Size& texture_size);
@@ -53,8 +55,17 @@ class UiTexture {
  protected:
   template <typename T>
   void SetAndDirty(T* target, const T& value) {
-    if (*target != value)
+    if (*target != value) {
       set_dirty();
+    }
+    *target = value;
+  }
+
+  template <typename T>
+  void SetAndDirty(raw_ptr<const T>* target, const T* value) {
+    if (*target != value) {
+      set_dirty();
+    }
     *target = value;
   }
 
@@ -73,10 +84,8 @@ class UiTexture {
  private:
   bool measured_ = false;
   bool dirty_ = true;
-  base::Optional<SkColor> foreground_color_;
-  base::Optional<SkColor> background_color_;
-
-  DISALLOW_COPY_AND_ASSIGN(UiTexture);
+  std::optional<SkColor> foreground_color_;
+  std::optional<SkColor> background_color_;
 };
 
 }  // namespace vr

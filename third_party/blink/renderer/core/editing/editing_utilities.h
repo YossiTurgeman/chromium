@@ -30,10 +30,11 @@
 #include "third_party/blink/renderer/core/editing/editing_boundary.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
 #include "third_party/blink/renderer/core/events/input_event.h"
-#include "third_party/blink/renderer/platform/geometry/float_quad.h"
+#include "third_party/blink/renderer/core/html/html_br_element.h"
 #include "third_party/blink/renderer/platform/text/text_direction.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
+#include "ui/gfx/geometry/quad_f.h"
 
 namespace blink {
 
@@ -53,6 +54,7 @@ enum class PositionMoveType {
 class Document;
 class Element;
 class HTMLElement;
+class HTMLImageElement;
 class HTMLSpanElement;
 struct LocalCaretRect;
 class Node;
@@ -69,13 +71,14 @@ CORE_EXPORT bool NeedsLayoutTreeUpdate(const PositionInFlatTree&);
 // -------------------------------------------------------------------------
 
 // Returns true if |node| has "user-select:contain".
-bool IsUserSelectContain(const Node& /* node */);
+CORE_EXPORT bool IsUserSelectContain(const Node& /* node */);
 
 // Returns true if element is input element or has editable style.
 CORE_EXPORT bool IsEditableElement(const Node&);
 
-CORE_EXPORT bool HasEditableStyle(const Node&);
-CORE_EXPORT bool HasRichlyEditableStyle(const Node&);
+CORE_EXPORT bool IsEditable(const Node&);
+CORE_EXPORT bool IsRichlyEditable(const Node&);
+
 CORE_EXPORT bool IsRootEditableElement(const Node&);
 CORE_EXPORT Element* RootEditableElement(const Node&);
 Element* RootEditableElementOf(const Position&);
@@ -139,23 +142,23 @@ inline ContainerNode* ParentCrossingShadowBoundaries<EditingInFlatTreeStrategy>(
   return FlatTreeTraversal::Parent(node);
 }
 
+void WriteImageToClipboard(SystemClipboard& system_clipboard,
+                           const scoped_refptr<Image>& image,
+                           const KURL& url_string,
+                           const String& title);
 void WriteImageNodeToClipboard(SystemClipboard&, const Node&, const String&);
-
-// boolean functions on Node
-
-// FIXME: editingIgnoresContent, canHaveChildrenForEditing, and isAtomicNode
-// should be renamed to reflect its usage.
 
 // Returns true for nodes that either have no content, or have content that is
 // ignored (skipped over) while editing. There are no VisiblePositions inside
 // these nodes.
-bool EditingIgnoresContent(const Node&);
+CORE_EXPORT bool EditingIgnoresContent(const Node&);
 
 inline bool CanHaveChildrenForEditing(const Node* node) {
   return !node->IsTextNode() && node->CanContainRangeEndPoint();
 }
 
 bool IsAtomicNode(const Node*);
+bool IsAtomicNodeInFlatTree(const Node*);
 CORE_EXPORT bool IsEnclosingBlock(const Node*);
 CORE_EXPORT bool IsTabHTMLSpanElement(const Node*);
 bool IsTabHTMLSpanElementTextNode(const Node*);
@@ -164,10 +167,13 @@ bool IsMailHTMLBlockquoteElement(const Node*);
 // invalid nodes to <table> elements.
 bool IsDisplayInsideTable(const Node*);
 bool IsTableCell(const Node*);
+bool IsTablePartElement(const Node*);
 bool IsHTMLListElement(const Node*);
 bool IsListItem(const Node*);
+bool IsListItemTag(const Node*);
+bool IsListElementTag(const Node*);
 bool IsPresentationalHTMLElement(const Node*);
-bool IsRenderedAsNonInlineTableImageOrHR(const Node*);
+CORE_EXPORT bool IsRenderedAsNonInlineTableImageOrHR(const Node*);
 bool IsNonTableCellHTMLBlockElement(const Node*);
 bool IsBlockFlowElement(const Node&);
 bool IsInPasswordField(const Position&);
@@ -175,6 +181,10 @@ CORE_EXPORT TextDirection DirectionOfEnclosingBlockOf(const Position&);
 CORE_EXPORT TextDirection
 DirectionOfEnclosingBlockOf(const PositionInFlatTree&);
 CORE_EXPORT TextDirection PrimaryDirectionOf(const Node&);
+
+// If the passed in Node is an Element, return Element::GetComputedStyle, if the
+// Node has a LayoutObject, return LayoutObject::Style(), otherwise nullptr.
+const ComputedStyle* GetComputedStyleForElementOrLayoutObject(const Node&);
 
 // -------------------------------------------------------------------------
 // Position
@@ -187,11 +197,18 @@ PositionInFlatTree NextCandidate(const PositionInFlatTree&);
 Position PreviousCandidate(const Position&);
 PositionInFlatTree PreviousCandidate(const PositionInFlatTree&);
 
-CORE_EXPORT Position NextVisuallyDistinctCandidate(const Position&);
-CORE_EXPORT PositionInFlatTree
-NextVisuallyDistinctCandidate(const PositionInFlatTree&);
-Position PreviousVisuallyDistinctCandidate(const Position&);
-PositionInFlatTree PreviousVisuallyDistinctCandidate(const PositionInFlatTree&);
+CORE_EXPORT Position NextVisuallyDistinctCandidate(
+    const Position&,
+    EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
+CORE_EXPORT PositionInFlatTree NextVisuallyDistinctCandidate(
+    const PositionInFlatTree&,
+    EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
+Position PreviousVisuallyDistinctCandidate(
+    const Position&,
+    EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
+PositionInFlatTree PreviousVisuallyDistinctCandidate(
+    const PositionInFlatTree&,
+    EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
 
 // This is a |const Node&| versions of two deprecated functions above.
 inline Position FirstPositionInOrBeforeNode(const Node& node) {
@@ -227,11 +244,13 @@ CORE_EXPORT PositionInFlatTree NextPositionOf(const PositionInFlatTree&,
 CORE_EXPORT int PreviousGraphemeBoundaryOf(const Node&, int current);
 CORE_EXPORT int NextGraphemeBoundaryOf(const Node&, int current);
 
-// comparision functions on Position
+// Comparison functions on Position
+// Note: These functions reside in "compare_positions.cc" instead of
+// "editing_utilities.cc".
 
 // |disconnected| is optional output parameter having true if specified
 // positions don't have common ancestor.
-int16_t ComparePositionsInDOMTree(const Node* container_a,
+int16_t ComparePositionsInDomTree(const Node* container_a,
                                   int offset_a,
                                   const Node* container_b,
                                   int offset_b,
@@ -241,12 +260,19 @@ int16_t ComparePositionsInFlatTree(const Node* container_a,
                                    const Node* container_b,
                                    int offset_b,
                                    bool* disconnected = nullptr);
-// TODO(yosin): We replace |comparePositions()| by |Position::opeator<()| to
-// utilize |DCHECK_XX()|.
+// TODO(yosin): We should replace `ComparePositions()` by `Position::
+// operator<()` to utilize `DCHECK_XX()`.
 int16_t ComparePositions(const Position&, const Position&);
 int16_t ComparePositions(const PositionWithAffinity&,
                          const PositionWithAffinity&);
-bool IsNodeFullyContained(const EphemeralRange&, const Node&);
+int16_t ComparePositions(const PositionInFlatTree&, const PositionInFlatTree&);
+
+// Returns true if `node` in `range`, otherwise false.
+// Note: This function resides in "editing_utilities.cc".
+bool IsNodeFullyContained(const EphemeralRange& range, const Node& node);
+// Returns true if the element's visibility or display
+// style is changed to visible or inline, respectively.
+bool EnsureNodeVisibility(HTMLElement*);
 
 // boolean functions on Position
 
@@ -257,11 +283,23 @@ CORE_EXPORT bool IsEditablePosition(const Position&);
 bool IsEditablePosition(const PositionInFlatTree&);
 bool IsRichlyEditablePosition(const Position&);
 
-PositionWithAffinity PositionRespectingEditingBoundary(
-    const Position&,
-    const PhysicalOffset& local_point,
-    Node* target_node);
-Position ComputePositionForNodeRemoval(const Position&, const Node&);
+CORE_EXPORT PositionWithAffinity
+PositionRespectingEditingBoundary(const Position&, const HitTestResult&);
+
+// Move specified position to start/end of non-editable region.
+// If it can be found, we prefer a visually equivalent position that is
+// editable.
+// See also LayoutObject::CreatePositionWithAffinity()
+// Example:
+//  <editable><non-editable>|abc</non-editable></editable>
+//  =>
+//  <editable>|<non-editable>abc</non-editable></editable>
+PositionWithAffinity AdjustForEditingBoundary(const PositionWithAffinity&);
+PositionWithAffinity AdjustForEditingBoundary(const Position&);
+
+CORE_EXPORT Position ComputePositionForNodeRemoval(const Position&,
+                                                   const Node&);
+Position ComputePlaceholderToCollapseAt(const Position&);
 
 // TODO(editing-dev): These two functions should be eliminated.
 CORE_EXPORT Position PositionBeforeNode(const Node&);
@@ -280,6 +318,13 @@ EphemeralRange NormalizeRange(const EphemeralRange&);
 EphemeralRangeInFlatTree NormalizeRange(const EphemeralRangeInFlatTree&);
 CORE_EXPORT VisiblePosition VisiblePositionForIndex(int index,
                                                     ContainerNode* scope);
+
+bool AreSameRanges(Node* node,
+                   const Position& start_position,
+                   const Position& end_position);
+bool AreSameRanges(Node* node,
+                   const PositionInFlatTree& start_position,
+                   const PositionInFlatTree& end_position);
 
 // -------------------------------------------------------------------------
 // HTMLElement
@@ -314,7 +359,7 @@ CORE_EXPORT bool ElementCannotHaveEndTag(const Node&);
 
 // Miscellaneous functions on Text
 inline bool IsWhitespace(UChar c) {
-  return c == kNoBreakSpaceCharacter || c == ' ' || c == '\n' || c == '\t';
+  return c == uchar::kNoBreakSpace || c == ' ' || c == '\n' || c == '\t';
 }
 
 // FIXME: Can't really answer this question correctly without knowing the
@@ -323,7 +368,7 @@ inline bool IsCollapsibleWhitespace(UChar c) {
   return c == ' ' || c == '\n';
 }
 
-String StringWithRebalancedWhitespace(const String&,
+String StringWithRebalancedWhitespace(const StringView&,
                                       bool start_is_start_of_paragraph,
                                       bool should_emit_nbs_pbefore_end);
 
@@ -345,25 +390,33 @@ wtf_size_t ComputeDistanceToRightGraphemeBoundary(const Position&);
 // LocalCaretRect conversions
 // -------------------------------------------------------------------------
 
-FloatQuad LocalToAbsoluteQuadOf(const LocalCaretRect&);
+gfx::QuadF LocalToAbsoluteQuadOf(const LocalCaretRect&);
 
 // -------------------------------------------------------------------------
 // Events
 // -------------------------------------------------------------------------
 
 // Functions dispatch InputEvent
-const StaticRangeVector* TargetRangesForInputEvent(const Node&);
+const GCedStaticRangeVector* TargetRangesForInputEvent(const Node&);
 DispatchEventResult DispatchBeforeInputInsertText(
     Node*,
     const String& data,
     InputEvent::InputType = InputEvent::InputType::kInsertText,
-    const StaticRangeVector* = nullptr);
-DispatchEventResult DispatchBeforeInputEditorCommand(Node*,
-                                                     InputEvent::InputType,
-                                                     const StaticRangeVector*);
+    const GCedStaticRangeVector* = nullptr);
+DispatchEventResult DispatchBeforeInputEditorCommand(
+    Node*,
+    InputEvent::InputType,
+    const GCedStaticRangeVector*);
 DispatchEventResult DispatchBeforeInputDataTransfer(Node*,
                                                     InputEvent::InputType,
                                                     DataTransfer*);
+
+// Helper function to dispatch beforeinput and input events whose inputType is
+// insertReplacementText.
+CORE_EXPORT void InsertTextAndSendInputEventsOfTypeInsertReplacementText(
+    LocalFrame&,
+    const String&,
+    bool allow_edit_context = false);
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_EDITING_UTILITIES_H_

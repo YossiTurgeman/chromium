@@ -1,29 +1,31 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//mojo/public/tools/bindings/mojom.gni")
 
+assert(is_chromeos)
+
 mojom_component("mojom") {
   sources = [
+    "browser_cdm_factory.mojom",
     "cdm_factory_daemon.mojom",
     "cdm_storage.mojom",
     "content_decryption_module.mojom",
+    "output_protection.mojom",
   ]
 
   public_deps = [
-    "//components/arc/mojom:media",
-    "//components/arc/mojom:oemcrypto",
+    "//chromeos/ash/experiences/arc/mojom:oemcrypto",
+    "//chromeos/ash/experiences/arc/mojom:protected_buffer_manager",
     "//mojo/public/mojom/base",
+    "//sandbox/policy/mojom",
+    "//ui/gfx/geometry/mojom",
   ]
 
   cpp_typemaps = [
     {
       types = [
-        {
-          mojom = "chromeos.cdm.mojom.CdmKeyStatus"
-          cpp = "::media::CdmKeyInformation::KeyStatus"
-        },
         {
           mojom = "chromeos.cdm.mojom.CdmMessageType"
           cpp = "::media::CdmMessageType"
@@ -46,7 +48,10 @@ mojom_component("mojom") {
         },
       ]
       traits_headers = [ "cdm_types_enum_mojom_traits.h" ]
-      traits_public_deps = [ "//media" ]
+      traits_public_deps = [
+        "//media",
+        "//ui/display/types",
+      ]
     },
     {
       types = [
@@ -67,6 +72,12 @@ mojom_component("mojom") {
     {
       types = [
         {
+          mojom = "chromeos.cdm.mojom.DecryptConfig"
+          cpp = "::std::unique_ptr<::media::DecryptConfig>"
+          move_only = true
+          nullable_is_same_type = true
+        },
+        {
           mojom = "chromeos.cdm.mojom.DecryptStatus"
           cpp = "::media::Decryptor::Status"
         },
@@ -77,6 +88,10 @@ mojom_component("mojom") {
         {
           mojom = "chromeos.cdm.mojom.EncryptionScheme"
           cpp = "::media::EncryptionScheme"
+        },
+        {
+          mojom = "chromeos.cdm.mojom.SubsampleEntry"
+          cpp = "::media::SubsampleEntry"
         },
       ]
       traits_headers = [ "decrypt_config_mojom_traits.h" ]
@@ -100,6 +115,7 @@ source_set("unit_tests") {
   deps = [
     ":mojom",
     "//base",
+    "//testing/gmock",
     "//testing/gtest",
   ]
 }

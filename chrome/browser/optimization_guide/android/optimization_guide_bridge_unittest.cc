@@ -1,13 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/optimization_guide/android/optimization_guide_bridge.h"
 
 #include "base/android/jni_android.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/gmock_callback_support.h"
-#include "chrome/browser/optimization_guide/android/native_j_unittests_jni_headers/OptimizationGuideBridgeNativeUnitTest_jni.h"
-#include "chrome/browser/optimization_guide/optimization_guide_hints_manager.h"
+#include "chrome/browser/optimization_guide/chrome_hints_manager.h"
+#include "chrome/browser/optimization_guide/mock_optimization_guide_keyed_service.h"
 #include "chrome/browser/optimization_guide/optimization_guide_keyed_service.h"
 #include "chrome/browser/optimization_guide/optimization_guide_keyed_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
@@ -15,68 +16,36 @@
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
-#include "components/leveldb_proto/public/proto_database_provider.h"
-#include "components/optimization_guide/optimization_guide_prefs.h"
-#include "components/optimization_guide/optimization_guide_service.h"
+#include "components/optimization_guide/core/optimization_guide_prefs.h"
+#include "components/optimization_guide/core/optimization_guide_proto_util.h"
+#include "components/optimization_guide/proto/string_value.pb.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/testing_pref_service.h"
+#include "content/public/browser/network_service_instance.h"
 #include "content/public/test/browser_task_environment.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/browser/optimization_guide/android/native_j_unittests_jni_headers/OptimizationGuideBridgeNativeUnitTest_jni.h"
+
+using ::testing::_;
+using ::testing::An;
 using ::testing::ByRef;
+using ::testing::DoAll;
 using ::testing::Eq;
+using ::testing::NotNull;
 using ::testing::Return;
+using ::testing::SetArgPointee;
 using ::testing::UnorderedElementsAre;
 
 namespace optimization_guide {
 namespace android {
 
-class MockOptimizationGuideHintsManager : public OptimizationGuideHintsManager {
- public:
-  MockOptimizationGuideHintsManager(
-      optimization_guide::OptimizationGuideService* optimization_guide_service,
-      Profile* profile,
-      base::FilePath file_path,
-      leveldb_proto::ProtoDatabaseProvider* db_provider,
-      PrefService* pref_service)
-      : OptimizationGuideHintsManager({},
-                                      optimization_guide_service,
-                                      profile,
-                                      file_path,
-                                      pref_service,
-                                      db_provider,
-                                      /*top_host_provider=*/nullptr,
-                                      /*url_loader_factory=*/nullptr) {}
-  ~MockOptimizationGuideHintsManager() override = default;
-  MOCK_METHOD4(CanApplyOptimizationAsync,
-               void(const GURL&,
-                    const base::Optional<int64_t>&,
-                    optimization_guide::proto::OptimizationType,
-                    optimization_guide::OptimizationGuideDecisionCallback));
-};
-
-class MockOptimizationGuideKeyedService : public OptimizationGuideKeyedService {
- public:
-  explicit MockOptimizationGuideKeyedService(
-      content::BrowserContext* browser_context)
-      : OptimizationGuideKeyedService(browser_context) {}
-  ~MockOptimizationGuideKeyedService() override = default;
-
-  MOCK_METHOD0(GetHintsManager, OptimizationGuideHintsManager*());
-  MOCK_METHOD1(
-      RegisterOptimizationTypes,
-      void(const std::vector<optimization_guide::proto::OptimizationType>&));
-};
-
 class OptimizationGuideBridgeTest : public testing::Test {
  public:
-  OptimizationGuideBridgeTest()
-      : j_test_(Java_OptimizationGuideBridgeNativeUnitTest_Constructor(
-            base::android::AttachCurrentThread())),
-        env_(base::android::AttachCurrentThread()),
-        profile_manager_(TestingBrowserProcess::GetGlobal()) {}
+  OptimizationGuideBridgeTest() = default;
   ~OptimizationGuideBridgeTest() override = default;
 
   void SetUp() override {
@@ -86,54 +55,36 @@ class OptimizationGuideBridgeTest : public testing::Test {
     pref_service_ = std::make_unique<TestingPrefServiceSimple>();
     optimization_guide::prefs::RegisterProfilePrefs(pref_service_->registry());
 
-    optimization_guide_keyed_service_ =
-        static_cast<MockOptimizationGuideKeyedService*>(
-            OptimizationGuideKeyedServiceFactory::GetInstance()
-                ->SetTestingFactoryAndUse(
-                    profile_,
-                    base::BindRepeating([](content::BrowserContext* context)
-                                            -> std::unique_ptr<KeyedService> {
-                      return std::make_unique<
-                          MockOptimizationGuideKeyedService>(context);
-                    })));
-    optimization_guide_service_ =
-        std::make_unique<optimization_guide::OptimizationGuideService>(
-            task_environment_.GetMainThreadTaskRunner());
-    db_provider_ = std::make_unique<leveldb_proto::ProtoDatabaseProvider>(
-        temp_dir_.GetPath());
-    optimization_guide_hints_manager_ =
-        std::make_unique<MockOptimizationGuideHintsManager>(
-            optimization_guide_service_.get(), profile_, temp_dir_.GetPath(),
-            db_provider_.get(), pref_service_.get());
-  }
-
-  void TearDown() override {
-    optimization_guide_hints_manager_.reset();
-    db_provider_.reset();
-    optimization_guide_service_.reset();
+    optimization_guide_keyed_service_ = static_cast<
+        MockOptimizationGuideKeyedService*>(
+        OptimizationGuideKeyedServiceFactory::GetInstance()
+            ->SetTestingFactoryAndUse(
+                profile_,
+                base::BindRepeating([](content::BrowserContext* context)
+                                        -> std::unique_ptr<KeyedService> {
+                  return std::make_unique<MockOptimizationGuideKeyedService>();
+                })));
+    j_test_ = OptimizationGuideBridgeNativeUnitTestJni::New(
+        env_, optimization_guide_keyed_service_->GetJavaObject());
   }
 
   void RegisterOptimizationTypes() {
     optimization_guide_keyed_service_->RegisterOptimizationTypes(
         {optimization_guide::proto::DEFER_ALL_SCRIPT,
-         optimization_guide::proto::PERFORMANCE_HINTS});
+         optimization_guide::proto::LOADING_PREDICTOR});
   }
 
  protected:
-  base::android::ScopedJavaGlobalRef<jobject> j_test_;
-  JNIEnv* env_;
-  MockOptimizationGuideKeyedService* optimization_guide_keyed_service_;
-  std::unique_ptr<MockOptimizationGuideHintsManager>
-      optimization_guide_hints_manager_;
+  base::android::ScopedJavaGlobalRef<JOptimizationGuideBridgeNativeUnitTest>
+      j_test_;
+  raw_ptr<JNIEnv> env_ = base::android::AttachCurrentThread();
+  raw_ptr<MockOptimizationGuideKeyedService> optimization_guide_keyed_service_;
 
  private:
   content::BrowserTaskEnvironment task_environment_{
       base::test::TaskEnvironment::MainThreadType::UI};
-  TestingProfileManager profile_manager_;
-  TestingProfile* profile_;
-  std::unique_ptr<optimization_guide::OptimizationGuideService>
-      optimization_guide_service_;
-  std::unique_ptr<leveldb_proto::ProtoDatabaseProvider> db_provider_;
+  TestingProfileManager profile_manager_{TestingBrowserProcess::GetGlobal()};
+  raw_ptr<TestingProfile> profile_;
   base::ScopedTempDir temp_dir_;
   std::unique_ptr<TestingPrefServiceSimple> pref_service_;
 };
@@ -141,45 +92,92 @@ class OptimizationGuideBridgeTest : public testing::Test {
 TEST_F(OptimizationGuideBridgeTest, RegisterOptimizationTypes) {
   EXPECT_CALL(*optimization_guide_keyed_service_,
               RegisterOptimizationTypes(UnorderedElementsAre(
-                  optimization_guide::proto::PERFORMANCE_HINTS,
+                  optimization_guide::proto::LOADING_PREDICTOR,
                   optimization_guide::proto::DEFER_ALL_SCRIPT)));
 
-  Java_OptimizationGuideBridgeNativeUnitTest_testRegisterOptimizationTypes(
-      env_, j_test_);
-}
-
-TEST_F(OptimizationGuideBridgeTest, CanApplyOptimizationPreInit) {
-  EXPECT_CALL(*optimization_guide_keyed_service_, GetHintsManager())
-      .WillOnce(Return(nullptr));
-
-  RegisterOptimizationTypes();
-  Java_OptimizationGuideBridgeNativeUnitTest_testCanApplyOptimizationPreInit(
-      env_, j_test_);
+  j_test_->testRegisterOptimizationTypes(env_);
 }
 
 TEST_F(OptimizationGuideBridgeTest, CanApplyOptimizationHasHint) {
   RegisterOptimizationTypes();
-  EXPECT_CALL(*optimization_guide_keyed_service_, GetHintsManager())
-      .Times(2)
-      .WillRepeatedly(Return(optimization_guide_hints_manager_.get()));
-  optimization_guide::proto::PerformanceHintsMetadata hints_metadata;
-  auto* hint = hints_metadata.add_performance_hints();
-  hint->set_wildcard_pattern("test.com");
-  hint->set_performance_class(optimization_guide::proto::PERFORMANCE_SLOW);
+  optimization_guide::proto::LoadingPredictorMetadata hints_metadata;
   optimization_guide::OptimizationMetadata metadata;
-  metadata.set_performance_hints_metadata(hints_metadata);
-  EXPECT_CALL(
-      *optimization_guide_hints_manager_,
-      CanApplyOptimizationAsync(GURL("https://example.com/"), Eq(base::nullopt),
-                                optimization_guide::proto::PERFORMANCE_HINTS,
-                                base::test::IsNotNullCallback()))
-      .WillOnce(base::test::RunOnceCallback<3>(
+  metadata.set_any_metadata(optimization_guide::AnyWrapProto(hints_metadata));
+  EXPECT_CALL(*optimization_guide_keyed_service_,
+              CanApplyOptimization(
+                  GURL("https://example.com/"),
+                  optimization_guide::proto::LOADING_PREDICTOR,
+                  An<optimization_guide::OptimizationGuideDecisionCallback>()))
+      .WillOnce(base::test::RunOnceCallback<2>(
           optimization_guide::OptimizationGuideDecision::kTrue,
           ByRef(metadata)));
 
-  Java_OptimizationGuideBridgeNativeUnitTest_testCanApplyOptimizationHasHint(
-      env_, j_test_);
+  j_test_->testCanApplyOptimizationHasHint(env_);
+}
+
+TEST_F(OptimizationGuideBridgeTest, SyncCanApplyOptimizationHasHint) {
+  RegisterOptimizationTypes();
+  optimization_guide::proto::LoadingPredictorMetadata hints_metadata;
+  optimization_guide::OptimizationMetadata metadata;
+  metadata.set_any_metadata(optimization_guide::AnyWrapProto(hints_metadata));
+  EXPECT_CALL(
+      *optimization_guide_keyed_service_,
+      CanApplyOptimization(GURL("https://example.com/"),
+                           optimization_guide::proto::LOADING_PREDICTOR,
+                           An<optimization_guide::OptimizationMetadata*>()))
+      .WillOnce(
+          DoAll(SetArgPointee<2>(metadata),
+                Return(optimization_guide::OptimizationGuideDecision::kTrue)));
+
+  j_test_->testSyncCanApplyOptimizationHasHint(env_);
+}
+
+TEST_F(OptimizationGuideBridgeTest, CanApplyOptimizationOnDemand) {
+  optimization_guide::proto::LoadingPredictorMetadata lp_metadata;
+  optimization_guide::OptimizationMetadata metadata;
+  metadata.set_any_metadata(optimization_guide::AnyWrapProto(lp_metadata));
+
+  optimization_guide::proto::StringValue ds_metadata;
+  optimization_guide::OptimizationMetadata metadata2;
+  metadata2.set_any_metadata(optimization_guide::AnyWrapProto(ds_metadata));
+
+  base::flat_map<optimization_guide::proto::OptimizationType,
+                 optimization_guide::OptimizationGuideDecisionWithMetadata>
+      url1_decisions = {
+          {optimization_guide::proto::LOADING_PREDICTOR,
+           {optimization_guide::OptimizationGuideDecision::kTrue, metadata}},
+          {optimization_guide::proto::DEFER_ALL_SCRIPT,
+           {optimization_guide::OptimizationGuideDecision::kFalse}},
+      };
+  base::flat_map<optimization_guide::proto::OptimizationType,
+                 optimization_guide::OptimizationGuideDecisionWithMetadata>
+      url2_decisions = {
+          {optimization_guide::proto::LOADING_PREDICTOR,
+           {optimization_guide::OptimizationGuideDecision::kFalse}},
+          {optimization_guide::proto::DEFER_ALL_SCRIPT,
+           {optimization_guide::OptimizationGuideDecision::kTrue, metadata2}},
+      };
+
+  EXPECT_CALL(
+      *optimization_guide_keyed_service_,
+      CanApplyOptimizationOnDemand(
+          UnorderedElementsAre(GURL("https://example.com/"),
+                               GURL("https://example2.com/")),
+          UnorderedElementsAre(optimization_guide::proto::LOADING_PREDICTOR,
+                               optimization_guide::proto::DEFER_ALL_SCRIPT),
+          optimization_guide::proto::CONTEXT_PAGE_INSIGHTS_HUB,
+          base::test::IsNotNullCallback(),
+          An<std::optional<
+              optimization_guide::proto::RequestContextMetadata>>()))
+      .WillOnce(DoAll(base::test::RunCallback<3>(GURL("https://example.com/"),
+                                                 ByRef(url1_decisions)),
+                      base::test::RunCallback<3>(GURL("https://example2.com/"),
+                                                 ByRef(url2_decisions))));
+
+  j_test_->testCanApplyOptimizationOnDemand(env_);
 }
 
 }  // namespace android
 }  // namespace optimization_guide
+
+DEFINE_JNI(OptimizationGuideBridgeNativeUnitTest)

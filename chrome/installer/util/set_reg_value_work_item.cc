@@ -1,15 +1,14 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/installer/util/set_reg_value_work_item.h"
 
-#include "base/debug/alias.h"
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/win/registry.h"
-#include "chrome/installer/util/logging_installer.h"
 
 namespace {
 
@@ -19,7 +18,8 @@ void StringToBinaryData(const std::wstring& str_value,
                         std::vector<uint8_t>* binary_data) {
   DCHECK(binary_data);
   const uint8_t* data = reinterpret_cast<const uint8_t*>(str_value.c_str());
-  binary_data->assign(data, data + (str_value.length() + 1) * sizeof(wchar_t));
+  binary_data->assign(
+      data, UNSAFE_TODO(data + (str_value.length() + 1) * sizeof(wchar_t)));
 }
 
 // Transforms |binary_data| into its wstring representation (assuming
@@ -45,7 +45,7 @@ void BinaryDataToString(const std::vector<uint8_t>& binary_data,
 
 }  // namespace
 
-SetRegValueWorkItem::~SetRegValueWorkItem() {}
+SetRegValueWorkItem::~SetRegValueWorkItem() = default;
 
 SetRegValueWorkItem::SetRegValueWorkItem(HKEY predefined_root,
                                          const std::wstring& key_path,
@@ -83,7 +83,7 @@ SetRegValueWorkItem::SetRegValueWorkItem(HKEY predefined_root,
   DCHECK(wow64_access == 0 || wow64_access == KEY_WOW64_32KEY ||
          wow64_access == KEY_WOW64_64KEY);
   const uint8_t* data = reinterpret_cast<const uint8_t*>(&value_data);
-  value_.assign(data, data + sizeof(value_data));
+  value_.assign(data, UNSAFE_TODO(data + sizeof(value_data)));
 }
 
 SetRegValueWorkItem::SetRegValueWorkItem(HKEY predefined_root,
@@ -103,7 +103,7 @@ SetRegValueWorkItem::SetRegValueWorkItem(HKEY predefined_root,
   DCHECK(wow64_access == 0 || wow64_access == KEY_WOW64_32KEY ||
          wow64_access == KEY_WOW64_64KEY);
   const uint8_t* data = reinterpret_cast<const uint8_t*>(&value_data);
-  value_.assign(data, data + sizeof(value_data));
+  value_.assign(data, UNSAFE_TODO(data + sizeof(value_data)));
 }
 
 SetRegValueWorkItem::SetRegValueWorkItem(
@@ -149,17 +149,10 @@ bool SetRegValueWorkItem::DoImpl() {
   }
 
   // If there's something to be saved, save it.
-  if (result == ERROR_SUCCESS) {
+  if (result == ERROR_SUCCESS && (rollback_enabled() || get_value_callback_)) {
     if (!size) {
       previous_type_ = type;
     } else {
-      // TODO(crbug.com/1106328): Remove after bug is resolved.
-      DEBUG_ALIAS_FOR_CSTR(key_path_copy, base::WideToUTF8(key_path_).c_str(),
-                           255);
-      DEBUG_ALIAS_FOR_CSTR(value_name_copy,
-                           base::WideToUTF8(value_name_).c_str(), 200);
-      base::debug::Alias(&size);
-      base::debug::Alias(&type);
       previous_value_.resize(size);
       result = key.ReadValue(value_name_.c_str(), &previous_value_[0], &size,
                              &previous_type_);
@@ -191,6 +184,18 @@ bool SetRegValueWorkItem::DoImpl() {
   if (result != ERROR_SUCCESS) {
     VLOG(1) << "Failed to write value " << key_path_ << " error: " << result;
     return false;
+  }
+
+  if (VLOG_IS_ON(1)) {
+    if (type_ == REG_SZ) {
+      std::wstring value_str;
+      BinaryDataToString(value_, &value_str);
+      VLOG(1) << "Successfully wrote value " << value_str << " into "
+              << key_path_;
+
+    } else {
+      VLOG(1) << "Successfully wrote into " << key_path_;
+    }
   }
 
   status_ = previous_type_ ? VALUE_OVERWRITTEN : NEW_VALUE_CREATED;

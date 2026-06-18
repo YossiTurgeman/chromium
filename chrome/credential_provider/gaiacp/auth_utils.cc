@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,22 @@
 // to create the authentication packages used to sign the user into a Windows
 // system.
 
-#include <vector>
-
 #include "chrome/credential_provider/gaiacp/auth_utils.h"
 
-#include "base/callback.h"
-#include "base/callback_helpers.h"
-#include "base/stl_util.h"
+#include <atlconv.h>
+#include <security.h>
+
+#include <vector>
+
+#include "base/compiler_specific.h"
+#include "base/functional/callback.h"
 #include "base/strings/string_util.h"
+#include "base/win/ntsecapi_shim.h"
+#include "base/win/wincred_shim.h"
 #include "chrome/credential_provider/gaiacp/gcp_utils.h"
 #include "chrome/credential_provider/gaiacp/logging.h"
 #include "chrome/credential_provider/gaiacp/os_user_manager.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 
 namespace credential_provider {
 
@@ -56,7 +61,8 @@ HRESULT ProtectIfNecessaryAndCopyPassword(
   if ((!::CredIsProtectedW(password, &protection_type) ||
        CredUnprotected != protection_type)) {
     protected_password->resize(password_length + 1);
-    wcscpy_s(&(*protected_password)[0], password_length + 1, password);
+    UNSAFE_TODO(
+        wcscpy_s(&(*protected_password)[0], password_length + 1, password));
     return S_OK;
   }
 
@@ -100,7 +106,7 @@ void UnicodeStringPackedUnicodeStringCopy(const UNICODE_STRING& rus,
   pus->MaximumLength = rus.Length;
   pus->Buffer = buffer;
 
-  CopyMemory(pus->Buffer, rus.Buffer, pus->Length);
+  UNSAFE_TODO(CopyMemory(pus->Buffer, rus.Buffer, pus->Length));
 }
 
 // Initialize the members of a KERB_INTERACTIVE_UNLOCK_LOGON with weak
@@ -121,7 +127,7 @@ void KerbInteractiveUnlockLogonInit(wchar_t* domain,
   DCHECK(password);
   DCHECK(pkiul);
 
-  ZeroMemory(pkiul, sizeof(KERB_INTERACTIVE_UNLOCK_LOGON));
+  UNSAFE_TODO(ZeroMemory(pkiul, sizeof(KERB_INTERACTIVE_UNLOCK_LOGON)));
 
   KERB_INTERACTIVE_LOGON* pkil = &pkiul->Logon;
 
@@ -149,7 +155,6 @@ void KerbInteractiveUnlockLogonInit(wchar_t* domain,
       break;
     default:
       NOTREACHED();
-      return;
   }
 
   // Initialize the UNICODE_STRINGS to share domain, username and password
@@ -199,8 +204,9 @@ HRESULT KerbInteractiveUnlockLogonPack(
                      sizeof(output_unlock_logon->LogonId));
 
   // Point output_buffer at the beginning of the extra space.
-  BYTE* output_buffer = reinterpret_cast<BYTE*>(output_unlock_logon) +
-                        sizeof(*output_unlock_logon);
+  BYTE* output_buffer =
+      UNSAFE_TODO(reinterpret_cast<BYTE*>(output_unlock_logon) +
+                  sizeof(*output_unlock_logon));
 
   // Set up the Logon structure within the KERB_INTERACTIVE_UNLOCK_LOGON.
   KERB_INTERACTIVE_LOGON* output_logon = &output_unlock_logon->Logon;
@@ -214,14 +220,14 @@ HRESULT KerbInteractiveUnlockLogonPack(
                                        &output_logon->LogonDomainName);
   output_logon->LogonDomainName.Buffer =
       reinterpret_cast<wchar_t*>(output_buffer - (BYTE*)output_unlock_logon);
-  output_buffer += output_logon->LogonDomainName.Length;
+  UNSAFE_TODO(output_buffer += output_logon->LogonDomainName.Length);
 
   UnicodeStringPackedUnicodeStringCopy(
       input_logon->UserName, reinterpret_cast<wchar_t*>(output_buffer),
       &output_logon->UserName);
   output_logon->UserName.Buffer =
       reinterpret_cast<wchar_t*>(output_buffer - (BYTE*)output_unlock_logon);
-  output_buffer += output_logon->UserName.Length;
+  UNSAFE_TODO(output_buffer += output_logon->UserName.Length);
 
   UnicodeStringPackedUnicodeStringCopy(
       input_logon->Password, reinterpret_cast<wchar_t*>(output_buffer),
@@ -237,8 +243,8 @@ HRESULT KerbInteractiveUnlockLogonPack(
 
 HRESULT UnpackUserInfoFromAuthenticationBuffer(
     const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* cpcs,
-    base::string16* domain,
-    base::string16* username) {
+    std::wstring* domain,
+    std::wstring* username) {
   DCHECK(cpcs);
   DCHECK(domain);
   DCHECK(username);
@@ -249,8 +255,8 @@ HRESULT UnpackUserInfoFromAuthenticationBuffer(
   ULONG buffer_size = cpcs->cbSerialization;
   KERB_INTERACTIVE_LOGON* pkil = &pkiul->Logon;
 
-  base::string16 serialization_domain;
-  base::string16 serialization_username;
+  std::wstring serialization_domain;
+  std::wstring serialization_username;
   // Check to see if the buffer is packed:
   // 1. Ensure that the buffer can possibly contain the serialization.
   // 2. Also if the range described by each (Buffer + MaximumSize) falls
@@ -279,12 +285,12 @@ HRESULT UnpackUserInfoFromAuthenticationBuffer(
       const wchar_t* username_buffer_pos = reinterpret_cast<wchar_t*>(
           (reinterpret_cast<ptrdiff_t>(pkiul) +
            reinterpret_cast<ptrdiff_t>(pkil->UserName.Buffer)));
-      serialization_domain = base::string16(
-          domain_buffer_pos,
-          pkil->LogonDomainName.MaximumLength / sizeof(domain_buffer_pos[0]));
-      serialization_username = base::string16(
-          username_buffer_pos,
-          pkil->UserName.MaximumLength / sizeof(username_buffer_pos[0]));
+      serialization_domain =
+          std::wstring(domain_buffer_pos, pkil->LogonDomainName.MaximumLength /
+                                              sizeof(domain_buffer_pos[0]));
+      serialization_username =
+          std::wstring(username_buffer_pos, pkil->UserName.MaximumLength /
+                                                sizeof(username_buffer_pos[0]));
     }
   } else {
     // If the authentication package is not packed, assume that the buffer
@@ -329,13 +335,13 @@ HRESULT GetAuthenticationPackageId(ULONG* id) {
 
 HRESULT DetermineUserSidFromAuthenticationBuffer(
     const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* cpcs,
-    base::string16* sid) {
+    std::wstring* sid) {
   DCHECK(sid);
 
   sid->clear();
 
-  base::string16 serialization_domain;
-  base::string16 serialization_username;
+  std::wstring serialization_domain;
+  std::wstring serialization_username;
   HRESULT hr = UnpackUserInfoFromAuthenticationBuffer(
       cpcs, &serialization_domain, &serialization_username);
 
@@ -351,7 +357,7 @@ HRESULT DetermineUserSidFromAuthenticationBuffer(
     // user on the local domain we could possibly signin and return the SID for
     // that user if it exists.
     if (FAILED(hr)) {
-      base::string16 local_domain = OSUserManager::GetLocalDomain();
+      std::wstring local_domain = OSUserManager::GetLocalDomain();
       if (!base::EqualsCaseInsensitiveASCII(local_domain,
                                             serialization_domain)) {
         hr = OSUserManager::Get()->GetUserSID(
@@ -390,8 +396,8 @@ HRESULT BuildCredPackAuthenticationBuffer(
   // Copy the password and pass the copied buffer into
   // ProtectIfNecessaryAndCopyPassword since it expects a non-const input
   // buffer.
-  std::vector<wchar_t> copy_password(OLE2W(password),
-                                     OLE2W(password) + wcslen(password) + 1);
+  std::vector<wchar_t> copy_password(
+      OLE2W(password), UNSAFE_TODO(OLE2W(password) + wcslen(password) + 1));
   hr = ProtectIfNecessaryAndCopyPassword(&copy_password[0], cpus,
                                          &protected_password);
 
@@ -403,9 +409,9 @@ HRESULT BuildCredPackAuthenticationBuffer(
   }
 
   // Protected password may still be insecure so make sure to zero it out.
-  base::ScopedClosureRunner zero_buffer_on_exit(
-      base::BindOnce(base::IgnoreResult(&SecurelyClearBuffer),
-                     &protected_password[0], protected_password.size()));
+  absl::Cleanup zero_buffer_on_exit = [&protected_password] {
+    SecurelyClearBuffer(protected_password.data(), protected_password.size());
+  };
 
   wchar_t* logon_domain = domain;
 

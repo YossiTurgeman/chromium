@@ -1,18 +1,23 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #ifndef MEDIA_GPU_TEST_VIDEO_ENCODER_DECODER_BUFFER_VALIDATOR_H_
 #define MEDIA_GPU_TEST_VIDEO_ENCODER_DECODER_BUFFER_VALIDATOR_H_
 
 #include <stdint.h>
 
+#include <array>
+#include <optional>
+
 #include "base/memory/scoped_refptr.h"
-#include "media/filters/vp9_parser.h"
 #include "media/gpu/h264_dpb.h"
 #include "media/gpu/test/bitstream_helpers.h"
+#include "media/parsers/h264_parser.h"
 #include "media/parsers/vp8_parser.h"
-#include "media/video/h264_parser.h"
+#include "media/parsers/vp9_parser.h"
+#include "third_party/libgav1/src/src/obu_parser.h"
 #include "ui/gfx/geometry/rect.h"
 
 namespace media {
@@ -20,9 +25,15 @@ namespace media {
 class DecoderBuffer;
 
 namespace test {
+
 class DecoderBufferValidator : public BitstreamProcessor {
  public:
-  explicit DecoderBufferValidator(const gfx::Rect& visible_rect);
+  static std::unique_ptr<DecoderBufferValidator> Create(
+      VideoCodecProfile profile,
+      const gfx::Rect& visible_rect,
+      size_t num_spatial_layers,
+      size_t num_temporal_layers,
+      SVCInterLayerPredMode inter_layer_pred);
   ~DecoderBufferValidator() override;
 
   // BitstreamProcessor implementation.
@@ -30,46 +41,46 @@ class DecoderBufferValidator : public BitstreamProcessor {
                         size_t frame_index) override;
   bool WaitUntilDone() override;
 
+  const std::vector<int>& GetQPValues(size_t spatial_idx,
+                                      size_t temporal_idx) const {
+    return qp_values_[spatial_idx][temporal_idx];
+  }
+
  protected:
+  static constexpr size_t kMaxTemporalLayers = 3;
+  static constexpr size_t kMaxSpatialLayers = 3;
+
+  DecoderBufferValidator(const gfx::Rect& visible_rect,
+                         size_t num_temporal_layers);
+
   // Returns true if decoder_buffer is valid and expected, otherwise false.
-  virtual bool Validate(const DecoderBuffer& decoder_buffer,
+  virtual bool Validate(const DecoderBuffer* buffer,
                         const BitstreamBufferMetadata& metadata) = 0;
 
   // The expected visible rectangle that |decoder_buffer| has.
   const gfx::Rect visible_rect_;
+  // The number of temporal layers.
+  const size_t num_temporal_layers_;
+
+  std::array<std::array<std::vector<int>, kMaxTemporalLayers>,
+             kMaxSpatialLayers>
+      qp_values_;
 
  private:
   // The number of detected errors by Validate().
   size_t num_errors_ = 0;
 };
 
-// TemporalLayerValidator checks whether the stream is valid on each temporal
-// layer.
-class TemporalLayerValidator {
- public:
-  TemporalLayerValidator(size_t num_temporal_layers);
-  ~TemporalLayerValidator();
-
-  bool ValidateAndUpdate(bool keyframe,
-                         uint8_t temporal_index,
-                         uint8_t reference_index,
-                         uint8_t refresh_frame_index);
-
- private:
-  static constexpr size_t kReferenceFramePoolSize = 8;
-  const size_t num_temporal_layers_ = 3;
-  std::array<uint8_t, kReferenceFramePoolSize> reference_frames_;
-};
-
 class H264Validator : public DecoderBufferValidator {
  public:
   H264Validator(VideoCodecProfile profile,
                 const gfx::Rect& visible_rect,
-                base::Optional<uint8_t> level = base::nullopt);
+                const size_t num_temporal_layers,
+                std::optional<uint8_t> level = std::nullopt);
   ~H264Validator() override;
 
  private:
-  bool Validate(const DecoderBuffer& decoder_buffer,
+  bool Validate(const DecoderBuffer* buffer,
                 const BitstreamBufferMetadata& metadata) override;
 
   // Returns whether the |slice_hdr| is the first slice of a new frame.
@@ -95,17 +106,17 @@ class H264Validator : public DecoderBufferValidator {
   // The expected h264 profile of |decoder_buffer|.
   const int profile_;
   // The expected h264 level of |decoder_buffer|. Check if it is not
-  // base::nullopt.
-  base::Optional<uint8_t> level_;
+  // std::nullopt.
+  std::optional<uint8_t> level_;
 };
 
 class VP8Validator : public DecoderBufferValidator {
  public:
-  explicit VP8Validator(const gfx::Rect& visible_rect);
+  VP8Validator(const gfx::Rect& visible_rect, size_t num_temporal_layers);
   ~VP8Validator() override;
 
  private:
-  bool Validate(const DecoderBuffer& decoder_buffer,
+  bool Validate(const DecoderBuffer* buffer,
                 const BitstreamBufferMetadata& metadata) override;
 
   Vp8Parser parser_;
@@ -117,22 +128,77 @@ class VP9Validator : public DecoderBufferValidator {
  public:
   VP9Validator(VideoCodecProfile profile,
                const gfx::Rect& visible_rect,
-               size_t num_temporal_layers);
+               size_t max_num_spatial_layers,
+               size_t num_temporal_layers,
+               SVCInterLayerPredMode inter_layer_pred);
   ~VP9Validator() override;
 
  private:
-  bool Validate(const DecoderBuffer& decoder_buffer,
+  // Struct representing the expected state of a reference buffer.
+  struct BufferState {
+    int picture_id = 0;
+    uint8_t spatial_id = 0;
+    uint8_t temporal_id = 0;
+  };
+
+  bool Validate(const DecoderBuffer* buffer,
                 const BitstreamBufferMetadata& metadata) override;
 
-  Vp9Parser parser_;
+  // Validate DecoderBuffer for a vanilla stream.
+  bool ValidateVanillaStream(const DecoderBuffer& decoder_buffer,
+                             const BitstreamBufferMetadata& metadata,
+                             const Vp9FrameHeader& header);
+  // Validate DecoderBuffer for a temporal or spatial layer stream.
+  bool ValidateSVCStream(const DecoderBuffer& decoder_buffer,
+                         const BitstreamBufferMetadata& metadata,
+                         const Vp9FrameHeader& header);
+  // Validate DecoderBuffer for S-mode stream.
+  bool ValidateSmodeStream(const DecoderBuffer& decoder_buffer,
+                           const BitstreamBufferMetadata& metadata,
+                           const Vp9FrameHeader& header);
 
-  // Whether key frame has been input.
-  bool seen_keyframe_ = false;
-
-  // The expected h264 profile of |decoder_buffer|.
+  // The expected VP9 profile of |decoder_buffer|.
   const int profile_;
+  const size_t max_num_spatial_layers_;
+  const bool s_mode_;
 
-  const std::unique_ptr<TemporalLayerValidator> temporal_layer_validator_;
+  std::vector<std::unique_ptr<Vp9Parser>> parsers_;
+
+  size_t cur_num_spatial_layers_;
+  std::vector<gfx::Size> spatial_layer_resolutions_;
+  int next_picture_id_;
+
+  uint8_t begin_active_spatial_layer_index_ = 0;
+
+  // An optional state for each specified VP9 reference buffer.
+  // A nullopt indicates either keyframe not yet seen, or that a
+  // buffer has been invalidated (e.g. due to sync points).
+  std::vector<std::array<std::optional<BufferState>, kVp9NumRefFrames>>
+      reference_buffers_;
+
+  std::optional<base::TimeDelta> dropped_superframe_timestamp_;
+};
+
+class AV1Validator : public DecoderBufferValidator {
+ public:
+  // TODO(greenjustin): Add support for more than 1 spatial layer if we need it.
+  explicit AV1Validator(const gfx::Rect& visible_rect,
+                        size_t num_temporal_layers);
+  ~AV1Validator() override = default;
+
+ private:
+  bool Validate(const DecoderBuffer* buffer,
+                const BitstreamBufferMetadata& metadata) override;
+  // Validate DecoderBuffer for a temporal layer stream.
+  bool ValidateTemporalSVCStream(const DecoderBuffer& buffer,
+                                 const BitstreamBufferMetadata& metadata,
+                                 const libgav1::ObuFrameHeader& header);
+
+  libgav1::InternalFrameBufferList buffer_list_;
+  libgav1::BufferPool buffer_pool_;
+  libgav1::DecoderState decoder_state_;
+  std::optional<libgav1::ObuSequenceHeader> sequence_header_ = std::nullopt;
+  uint64_t frame_num_ = 0;
 };
 }  // namespace test
 }  // namespace media

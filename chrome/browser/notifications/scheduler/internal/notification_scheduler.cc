@@ -1,29 +1,30 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/notifications/scheduler/internal/notification_scheduler.h"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/notifications/scheduler/internal/background_task_coordinator.h"
 #include "chrome/browser/notifications/scheduler/internal/display_decider.h"
 #include "chrome/browser/notifications/scheduler/internal/impression_history_tracker.h"
-#include "chrome/browser/notifications/scheduler/internal/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/internal/notification_scheduler_context.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduled_notification_manager.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduler_utils.h"
 #include "chrome/browser/notifications/scheduler/internal/stats.h"
 #include "chrome/browser/notifications/scheduler/public/display_agent.h"
 #include "chrome/browser/notifications/scheduler/public/notification_background_task_scheduler.h"
+#include "chrome/browser/notifications/scheduler/public/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/public/notification_params.h"
 #include "chrome/browser/notifications/scheduler/public/notification_scheduler_client.h"
 #include "chrome/browser/notifications/scheduler/public/notification_scheduler_client_registrar.h"
@@ -52,7 +53,7 @@ class InitHelper {
             InitCallback callback) {
     // TODO(xingliu): Initialize the databases in parallel, we currently
     // initialize one by one to work around a shared db issue. See
-    // https://crbug.com/978680.
+    // https://crbug.com/41467860.
     context_ = context;
     callback_ = std::move(callback);
 
@@ -77,7 +78,7 @@ class InitHelper {
     std::move(callback_).Run(success);
   }
 
-  NotificationSchedulerContext* context_;
+  raw_ptr<NotificationSchedulerContext> context_;
   InitCallback callback_;
 
   base::WeakPtrFactory<InitHelper> weak_ptr_factory_{this};
@@ -123,7 +124,7 @@ class DisplayHelper {
     }
 
     // Inform the client to update notification data.
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(&DisplayHelper::NotifyClientBeforeDisplay,
                        weak_ptr_factory_.GetWeakPtr(), std::move(entry)));
@@ -170,13 +171,17 @@ class DisplayHelper {
     context_->display_agent()->ShowNotification(
         std::move(updated_notification_data), std::move(system_data));
 
+    auto* client = context_->client_registrar()->GetClient(entry->type);
+    DCHECK(client);
+    client->OnShowNotification(std::move(updated_notification_data));
+
     MaybeFinish(entry->guid, true /*shown*/);
   }
 
   // Called when notification display flow is finished. Invokes
   // |finish_callback_| when all display flows are done.
   void MaybeFinish(const std::string& guid, bool shown) {
-    if (base::Contains(guids_, guid) && shown) {
+    if (guids_.contains(guid) && shown) {
       shown_count_++;
     }
     guids_.erase(guid);
@@ -186,7 +191,7 @@ class DisplayHelper {
   }
 
   std::set<std::string> guids_;
-  NotificationSchedulerContext* context_;
+  raw_ptr<NotificationSchedulerContext> context_;
   FinishCallback finish_callback_;
   int shown_count_;
   base::WeakPtrFactory<DisplayHelper> weak_ptr_factory_{this};
@@ -248,7 +253,8 @@ class NotificationSchedulerImpl : public NotificationScheduler,
       ImpressionDetail impression_detail) {
     std::vector<const NotificationEntry*> notifications;
     context_->notification_manager()->GetNotifications(type, &notifications);
-    ClientOverview result(std::move(impression_detail), notifications.size());
+    ClientOverview result(std::move(impression_detail),
+                          std::move(notifications));
     std::move(callback).Run(std::move(result));
   }
 
@@ -263,7 +269,7 @@ class NotificationSchedulerImpl : public NotificationScheduler,
     std::vector<SchedulerClientType> clients;
     context_->client_registrar()->GetRegisteredClients(&clients);
     for (auto type : clients) {
-      base::ThreadTaskRunnerHandle::Get()->PostTask(
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
           FROM_HERE,
           base::BindOnce(&NotificationSchedulerImpl::NotifyClientAfterInit,
                          weak_ptr_factory_.GetWeakPtr(), type, success));
@@ -286,8 +292,6 @@ class NotificationSchedulerImpl : public NotificationScheduler,
 
   // NotificationBackgroundTaskScheduler::Handler implementation.
   void OnStartTask(TaskFinishedCallback callback) override {
-    stats::LogBackgroundTaskEvent(stats::BackgroundTaskEvent::kStart);
-
     // Updates the impression data to compute daily notification shown budget.
     context_->impression_tracker()->AnalyzeImpressionHistory();
 
@@ -295,10 +299,7 @@ class NotificationSchedulerImpl : public NotificationScheduler,
     FindNotificationToShow(std::move(callback));
   }
 
-  void OnStopTask() override {
-    stats::LogBackgroundTaskEvent(stats::BackgroundTaskEvent::kStopByOS);
-    ScheduleBackgroundTask();
-  }
+  void OnStopTask() override { ScheduleBackgroundTask(); }
 
   void FindNotificationToShow(TaskFinishedCallback task_finish_callback) {
     DisplayDecider::Results results;
@@ -328,7 +329,6 @@ class NotificationSchedulerImpl : public NotificationScheduler,
     // Schedule the next background task based on scheduled notifications.
     ScheduleBackgroundTask();
 
-    stats::LogBackgroundTaskEvent(stats::BackgroundTaskEvent::kFinish);
     std::move(task_finish_callback).Run(false /*need_reschedule*/);
   }
 
@@ -345,7 +345,7 @@ class NotificationSchedulerImpl : public NotificationScheduler,
   void OnUserAction(const UserActionData& action_data) override {
     context_->impression_tracker()->OnUserAction(action_data);
     ScheduleBackgroundTask();
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(&NotificationSchedulerImpl::NotifyClientAfterUserAction,
                        weak_ptr_factory_.GetWeakPtr(), action_data));
@@ -360,8 +360,8 @@ class NotificationSchedulerImpl : public NotificationScheduler,
     auto client_action_data = action_data;
 
     // Attach custom data if the impression is not expired.
-    const auto* impression =
-        context_->impression_tracker()->GetImpression(action_data.guid);
+    const auto* impression = context_->impression_tracker()->GetImpression(
+        action_data.client_type, action_data.guid);
     if (impression) {
       client_action_data.custom_data = impression->custom_data;
     }

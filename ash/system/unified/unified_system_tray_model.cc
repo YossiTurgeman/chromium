@@ -1,14 +1,29 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/system/unified/unified_system_tray_model.h"
 
-#include "ash/accessibility/accessibility_controller_impl.h"
+#include "ash/accessibility/accessibility_controller.h"
+#include "ash/shelf/shelf_widget.h"
 #include "ash/shell.h"
+#include "ash/shell_observer.h"
 #include "ash/system/brightness_control_delegate.h"
-#include "base/bind.h"
+#include "ash/system/status_area_widget.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "chromeos/dbus/power_manager/backlight.pb.h"
+
+namespace {
+
+// The minimum width for system tray with size of kMedium.
+constexpr int kMinWidthMediumSystemTray = 768;
+
+// The maximum width for system tray with size of kMedium.
+constexpr int kMaxWidthMediumSystemTray = 1280;
+
+}  // namespace
 
 namespace ash {
 
@@ -16,39 +31,53 @@ class UnifiedSystemTrayModel::DBusObserver
     : public chromeos::PowerManagerClient::Observer {
  public:
   explicit DBusObserver(UnifiedSystemTrayModel* owner);
+
+  DBusObserver(const DBusObserver&) = delete;
+  DBusObserver& operator=(const DBusObserver&) = delete;
+
   ~DBusObserver() override;
 
  private:
-  void HandleInitialBrightness(base::Optional<double> percent);
+  void HandleInitialBrightness(std::optional<double> percent);
+
+  // Get the initial lid state.
+  void HandleInitialLidState(
+      std::optional<chromeos::PowerManagerClient::SwitchStates> switch_states);
 
   // chromeos::PowerManagerClient::Observer:
   void ScreenBrightnessChanged(
       const power_manager::BacklightBrightnessChange& change) override;
   void KeyboardBrightnessChanged(
       const power_manager::BacklightBrightnessChange& change) override;
+  void LidEventReceived(chromeos::PowerManagerClient::LidState state,
+                        base::TimeTicks timestamp) override;
 
-  UnifiedSystemTrayModel* const owner_;
+  const raw_ptr<UnifiedSystemTrayModel> owner_;
+
+  base::ScopedObservation<chromeos::PowerManagerClient,
+                          chromeos::PowerManagerClient::Observer>
+      power_manager_client_observation_{this};
 
   base::WeakPtrFactory<DBusObserver> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(DBusObserver);
 };
 
 UnifiedSystemTrayModel::DBusObserver::DBusObserver(
     UnifiedSystemTrayModel* owner)
     : owner_(owner) {
-  chromeos::PowerManagerClient::Get()->AddObserver(this);
+  chromeos::PowerManagerClient* power_manager_client =
+      chromeos::PowerManagerClient::Get();
+  power_manager_client_observation_.Observe(power_manager_client);
   Shell::Get()->brightness_control_delegate()->GetBrightnessPercent(
       base::BindOnce(&DBusObserver::HandleInitialBrightness,
                      weak_ptr_factory_.GetWeakPtr()));
+  power_manager_client->GetSwitchStates(base::BindOnce(
+      &DBusObserver::HandleInitialLidState, weak_ptr_factory_.GetWeakPtr()));
 }
 
-UnifiedSystemTrayModel::DBusObserver::~DBusObserver() {
-  chromeos::PowerManagerClient::Get()->RemoveObserver(this);
-}
+UnifiedSystemTrayModel::DBusObserver::~DBusObserver() = default;
 
 void UnifiedSystemTrayModel::DBusObserver::HandleInitialBrightness(
-    base::Optional<double> percent) {
+    std::optional<double> percent) {
   if (percent.has_value())
     owner_->DisplayBrightnessChanged(percent.value() / 100.,
                                      false /* by_user */);
@@ -56,25 +85,36 @@ void UnifiedSystemTrayModel::DBusObserver::HandleInitialBrightness(
 
 void UnifiedSystemTrayModel::DBusObserver::ScreenBrightnessChanged(
     const power_manager::BacklightBrightnessChange& change) {
-  Shell::Get()->metrics()->RecordUserMetricsAction(
-      UMA_STATUS_AREA_BRIGHTNESS_CHANGED);
   owner_->DisplayBrightnessChanged(
       change.percent() / 100.,
       change.cause() ==
           power_manager::BacklightBrightnessChange_Cause_USER_REQUEST);
 }
 
-void UnifiedSystemTrayModel::DBusObserver::KeyboardBrightnessChanged(
-    const power_manager::BacklightBrightnessChange& change) {
-  owner_->KeyboardBrightnessChanged(
-      change.percent() / 100.,
-      change.cause() ==
-          power_manager::BacklightBrightnessChange_Cause_USER_REQUEST);
+void UnifiedSystemTrayModel::DBusObserver::HandleInitialLidState(
+    std::optional<chromeos::PowerManagerClient::SwitchStates> switch_states) {
+  if (switch_states.has_value()) {
+    owner_->LidStateChanged(switch_states->lid_state);
+  }
 }
 
-UnifiedSystemTrayModel::UnifiedSystemTrayModel(views::View* owner_view)
-    : dbus_observer_(std::make_unique<DBusObserver>(this)),
-      pagination_model_(std::make_unique<PaginationModel>(owner_view)) {}
+void UnifiedSystemTrayModel::DBusObserver::LidEventReceived(
+    chromeos::PowerManagerClient::LidState state,
+    base::TimeTicks timestamp) {
+  owner_->LidStateChanged(state);
+}
+
+void UnifiedSystemTrayModel::DBusObserver::KeyboardBrightnessChanged(
+    const power_manager::BacklightBrightnessChange& change) {
+  owner_->KeyboardBrightnessChanged(change.percent() / 100., change.cause());
+}
+
+UnifiedSystemTrayModel::UnifiedSystemTrayModel(Shelf* shelf)
+    : shelf_(shelf), dbus_observer_(std::make_unique<DBusObserver>(this)) {
+  // |shelf_| might be null in unit tests.
+  pagination_model_ = std::make_unique<PaginationModel>(
+      shelf_ ? shelf_->GetStatusAreaWidget()->GetRootView() : nullptr);
+}
 
 UnifiedSystemTrayModel::~UnifiedSystemTrayModel() = default;
 
@@ -86,20 +126,11 @@ void UnifiedSystemTrayModel::RemoveObserver(Observer* observer) {
   observers_.RemoveObserver(observer);
 }
 
-bool UnifiedSystemTrayModel::IsExpandedOnOpen() const {
-  return expanded_on_open_ != StateOnOpen::COLLAPSED ||
-         Shell::Get()->accessibility_controller()->spoken_feedback().enabled();
-}
-
-bool UnifiedSystemTrayModel::IsExplicitlyExpanded() const {
-  return expanded_on_open_ == StateOnOpen::EXPANDED;
-}
-
-base::Optional<bool> UnifiedSystemTrayModel::GetNotificationExpanded(
+std::optional<bool> UnifiedSystemTrayModel::GetNotificationExpanded(
     const std::string& notification_id) const {
   auto it = notification_changes_.find(notification_id);
-  return it == notification_changes_.end() ? base::Optional<bool>()
-                                           : base::Optional<bool>(it->second);
+  return it == notification_changes_.end() ? std::optional<bool>()
+                                           : std::optional<bool>(it->second);
 }
 
 void UnifiedSystemTrayModel::SetTargetNotification(
@@ -124,6 +155,24 @@ void UnifiedSystemTrayModel::ClearNotificationChanges() {
   notification_changes_.clear();
 }
 
+UnifiedSystemTrayModel::SystemTrayButtonSize
+UnifiedSystemTrayModel::GetSystemTrayButtonSize() const {
+  // |shelf_| might be null in unit tests, returns medium size as default.
+  if (!shelf_)
+    return SystemTrayButtonSize::kMedium;
+
+  // Handles the cases: the shelf is placed horizontally or vertically, or the
+  // screen is rotated.
+  const int display_size =
+      std::max(GetDisplay().size().width(), GetDisplay().size().height());
+
+  if (display_size < kMinWidthMediumSystemTray)
+    return SystemTrayButtonSize::kSmall;
+  if (display_size <= kMaxWidthMediumSystemTray)
+    return SystemTrayButtonSize::kMedium;
+  return SystemTrayButtonSize::kLarge;
+}
+
 void UnifiedSystemTrayModel::DisplayBrightnessChanged(float brightness,
                                                       bool by_user) {
   display_brightness_ = brightness;
@@ -131,11 +180,32 @@ void UnifiedSystemTrayModel::DisplayBrightnessChanged(float brightness,
     observer.OnDisplayBrightnessChanged(by_user);
 }
 
-void UnifiedSystemTrayModel::KeyboardBrightnessChanged(float brightness,
-                                                       bool by_user) {
+void UnifiedSystemTrayModel::LidStateChanged(
+    chromeos::PowerManagerClient::LidState state) {
+  lid_state_ = state;
+  for (auto& observer : observers_) {
+    observer.OnLidStateChanged();
+  }
+}
+
+void UnifiedSystemTrayModel::KeyboardBrightnessChanged(
+    float brightness,
+    power_manager::BacklightBrightnessChange_Cause cause) {
   keyboard_brightness_ = brightness;
   for (auto& observer : observers_)
-    observer.OnKeyboardBrightnessChanged(by_user);
+    observer.OnKeyboardBrightnessChanged(cause);
+}
+
+const display::Display UnifiedSystemTrayModel::GetDisplay() const {
+  // |shelf_| might be null in unit tests, returns primary display as default.
+  if (!shelf_)
+    return display::Screen::Get()->GetPrimaryDisplay();
+
+  return display::Screen::Get()->GetDisplayNearestWindow(
+      shelf_->GetStatusAreaWidget()
+          ->GetRootView()
+          ->GetWidget()
+          ->GetNativeWindow());
 }
 
 }  // namespace ash

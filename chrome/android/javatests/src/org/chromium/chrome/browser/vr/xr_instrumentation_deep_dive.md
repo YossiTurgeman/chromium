@@ -59,8 +59,8 @@ varying inputs.
 When used in XR tests, the `List` of `ParameterSet`s annotated with
 `@ClassParameter` is what will be iterated over. Specifically,
 `XrTestRuleUtils.generateDefaultTestRuleParameters` or
-`VrTestRuleUtils.generateDefaultTestRuleParameters` will generate a `List` of
-`ParamaterSet`s each containing a single `Callable` whose `call()` returns a
+`GvrTestRuleUtils.generateDefaultTestRuleParameters` will generate a `List` of
+`ParameterSet`s each containing a single `Callable` whose `call()` returns a
 `ChromeActivityTestRule`. Each `ParameterSet` corresponds to one of the activity
 types that XR features are supported in. This is why constructors of
 parameterized test classes must accept a `Callable<ChromeActivityTestRule>` -
@@ -147,9 +147,9 @@ the end result would be a noticeable increase in test run time.
 There are currently two ways of injecting Daydream controller input into tests,
 each with their own pros and cons.
 
-### EmulatedVrController
+### EmulatedGvrController
 
-The `EmulatedVrController` class is the older of the two approaches and works by
+The `EmulatedGvrController` class is the older of the two approaches and works by
 setting VrCore to accept Android `Intent`s as controller input instead of using
 an actual controller.
 
@@ -177,8 +177,8 @@ Additionally, it allows interaction with specific UI elements by name, which is
 both easier and less prone to breaking than specifying a position in space.
 
 
-[readme]: https://chromium.googlesource.com/chromium/src/+/master/chrome/android/javatests/src/org/chromium/chrome/browser/vr/README.md
-[adding_new_tests]: https://chromium.googlesource.com/chromium/src/+/master/chrome/android/javatests/src/org/chromium/chrome/browser/vr/adding_new_tests.md
+[readme]: https://chromium.googlesource.com/chromium/src/+/main/chrome/android/javatests/src/org/chromium/chrome/browser/vr/README.md
+[adding_new_tests]: https://chromium.googlesource.com/chromium/src/+/main/chrome/android/javatests/src/org/chromium/chrome/browser/vr/adding_new_tests.md
 [junit4_wiki_parameterization]: https://github.com/junit-team/junit4/wiki/parameterized-tests
-[parameter_set_source]: https://chromium.googlesource.com/chromium/src/+/master/base/test/android/javatests/src/org/chromium/base/test/params/ParameterSet.java
+[parameter_set_source]: https://chromium.googlesource.com/chromium/src/+/main/base/test/android/javatests/src/org/chromium/base/test/params/ParameterSet.java
 [junit4_wiki_rules]: https://github.com/junit-team/junit4/wiki/rules

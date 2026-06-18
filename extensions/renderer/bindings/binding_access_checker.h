@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "v8/include/v8.h"
 
 namespace extensions {
@@ -16,29 +15,31 @@ namespace extensions {
 // A helper class to handle access-checking API features.
 class BindingAccessChecker {
  public:
-  // The callback for determining if a given API feature (specified by |name|)
+  // The callback for determining if a given API feature (specified by `name`)
   // is available in the given context.
-  using AvailabilityCallback =
+  using APIAvailabilityCallback =
       base::RepeatingCallback<bool(v8::Local<v8::Context>,
                                    const std::string& name)>;
 
-  BindingAccessChecker(AvailabilityCallback is_available);
+  explicit BindingAccessChecker(APIAvailabilityCallback api_available);
+
+  BindingAccessChecker(const BindingAccessChecker&) = delete;
+  BindingAccessChecker& operator=(const BindingAccessChecker&) = delete;
+
   ~BindingAccessChecker();
 
-  // Returns true if the feature specified by |full_name| is available to the
-  // given |context|.
+  // Returns true if the feature specified by `full_name` is available to the
+  // given `context`.
   bool HasAccess(v8::Local<v8::Context> context,
                  const std::string& full_name) const;
 
-  // Same as HasAccess(), but throws an exception in the |context| if it doesn't
+  // Same as HasAccess(), but throws an exception in the `context` if it doesn't
   // have access.
   bool HasAccessOrThrowError(v8::Local<v8::Context> context,
                              const std::string& full_name) const;
 
  private:
-  AvailabilityCallback is_available_;
-
-  DISALLOW_COPY_AND_ASSIGN(BindingAccessChecker);
+  APIAvailabilityCallback api_available_;
 };
 
 }  // namespace extensions

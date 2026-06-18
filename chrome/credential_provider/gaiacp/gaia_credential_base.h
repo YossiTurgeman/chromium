@@ -1,23 +1,24 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_CREDENTIAL_PROVIDER_GAIACP_GAIA_CREDENTIAL_BASE_H_
 #define CHROME_CREDENTIAL_PROVIDER_GAIACP_GAIA_CREDENTIAL_BASE_H_
 
-#include "chrome/credential_provider/gaiacp/stdafx.h"
-
 #include <wrl/client.h>
 
 #include <memory>
+#include <string>
 
-#include "base/strings/string16.h"
+#include "base/threading/thread.h"
 #include "base/values.h"
+#include "base/win/atl.h"
 #include "base/win/scoped_handle.h"
 #include "base/win/scoped_process_information.h"
 #include "chrome/credential_provider/gaiacp/associated_user_validator.h"
 #include "chrome/credential_provider/gaiacp/gaia_credential_provider_i.h"
 #include "chrome/credential_provider/gaiacp/gcp_utils.h"
+#include "chrome/credential_provider/gaiacp/os_device_manager.h"
 #include "chrome/credential_provider/gaiacp/scoped_handle.h"
 
 namespace base {
@@ -51,7 +52,7 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   static HRESULT OnDllUnregisterServer();
 
   // Perform non-critical post-sign operations after everything is setup here.
-  static HRESULT PerformPostSigninActions(const base::Value& properties,
+  static HRESULT PerformPostSigninActions(const base::DictValue& properties,
                                           bool com_initialized);
 
   // Allocates a BSTR from a DLL string resource given by |id|.
@@ -60,7 +61,7 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   // Allocates a BSTR from a DLL string resource given by |id| replacing the
   // placeholders in the string by the provided replacements.
   static BSTR AllocErrorString(UINT id,
-                               const std::vector<base::string16>& replacements);
+                               const std::vector<std::wstring>& replacements);
 
   // Gets the directory where the credential provider is installed.
   static HRESULT GetInstallDirectory(base::FilePath* path);
@@ -79,6 +80,9 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   // Returns true if "enable_cloud_association" registry key is set to 1.
   static bool IsCloudAssociationEnabled();
 
+  // Returns true if "enable_security_key_support" registry key is set to 1.
+  static bool IsSecurityKeySupportEnabled();
+
  protected:
   CGaiaCredentialBase();
   ~CGaiaCredentialBase();
@@ -93,13 +97,13 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   const CComBSTR& get_current_windows_password() const {
     return current_windows_password_;
   }
-  const base::Optional<base::Value>& get_authentication_results() const {
+  const std::optional<base::DictValue>& get_authentication_results() const {
     return authentication_results_;
   }
 
   // Saves account association and user profile information. Makes various HTTP
   // calls regarding device provisioning and password management.
-  static HRESULT PerformActions(const base::Value& properties);
+  static HRESULT PerformActions(const base::DictValue& properties);
 
   // Returns true if the current credentials stored in |username_| and
   // |password_| are valid and should succeed a local Windows logon. This
@@ -161,7 +165,7 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   virtual void DisplayErrorInUI(LONG status, LONG substatus, BSTR status_text);
 
   // Forks a stub process to perform all post sign-in actions for a user.
-  virtual HRESULT ForkPerformPostSigninActionsStub(const base::Value& dict,
+  virtual HRESULT ForkPerformPostSigninActionsStub(const base::DictValue& dict,
                                                    BSTR* status_text);
 
   // Forks the logon stub process and waits for it to start.
@@ -172,6 +176,8 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   // Gets the full command line to run the Gaia Logon stub (GLS). This
   // function calls GetBaseGlsCommandline.
   HRESULT GetGlsCommandline(base::CommandLine* command_line);
+
+  HRESULT InitializeThreadForNamedPipe(base::win::ScopedHandle hid_read_handle);
 
  private:
   // Called from GetSerialization() to handle auto-logon.  If the credential
@@ -263,9 +269,9 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   // |sid| matches the domain\username and sid stored in the credential. If
   // these verifications fail then the function should return an error code
   // which will cause sign in to fail.
-  virtual HRESULT ValidateExistingUser(const base::string16& username,
-                                       const base::string16& domain,
-                                       const base::string16& sid,
+  virtual HRESULT ValidateExistingUser(const std::wstring& username,
+                                       const std::wstring& domain,
+                                       const std::wstring& sid,
                                        BSTR* error_text);
 
   // Checks the information given in |result| to determine if a user can be
@@ -275,13 +281,15 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   // The caller must take ownership of this memory.
   // On failure |error_text| will be allocated and filled with an error message.
   // The caller must take ownership of this memory.
-  HRESULT ValidateOrCreateUser(const base::Value& result,
+  HRESULT ValidateOrCreateUser(const base::DictValue& result,
                                BSTR* domain,
                                BSTR* username,
                                BSTR* sid,
                                BSTR* error_text);
 
-  HRESULT RecoverWindowsPasswordIfPossible(base::string16* recovered_password);
+  HRESULT RecoverWindowsPasswordIfPossible(std::wstring* recovered_password);
+
+  void HandleOpenDeviceRequests(base::win::ScopedHandle hid_read_handle);
 
   // Sets the error message in the password field based on the HRESULT returned
   // by NetUserChangePassword win32 function.
@@ -325,7 +333,7 @@ class ATL_NO_VTABLE CGaiaCredentialBase
 
   // Contains the information about the Gaia account that signed in.  See the
   // kKeyXXX constants for the data that is stored here.
-  base::Optional<base::Value> authentication_results_;
+  std::optional<base::DictValue> authentication_results_;
 
   // Holds information about the success or failure of the sign in.
   NTSTATUS result_status_ = STATUS_SUCCESS;
@@ -336,6 +344,9 @@ class ATL_NO_VTABLE CGaiaCredentialBase
   // sign in.
   std::unique_ptr<AssociatedUserValidator::ScopedBlockDenyAccessUpdate>
       token_update_locker_;
+
+  // Thread for handling IPC with the HID client.
+  std::unique_ptr<base::Thread> ipc_thread_;
 };
 
 }  // namespace credential_provider

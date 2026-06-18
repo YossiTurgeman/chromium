@@ -1,71 +1,53 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/public/browser/tracing_controller.h"
 
 #include <stdint.h>
+
+#include <optional>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/run_loop.h"
 #include "base/strings/pattern.h"
 #include "base/task/task_traits.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/threading/thread_restrictions.h"
+#include "base/trace_event/trace_config.h"
 #include "base/values.h"
 #include "build/build_config.h"
 #include "build/chromecast_buildflags.h"
 #include "content/browser/tracing/tracing_controller_impl.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/trace_uploader.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
+#include "content/public/test/test_content_browser_client.h"
 #include "content/shell/browser/shell.h"
-#include "content/test/test_content_browser_client.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
-#include "services/tracing/public/cpp/trace_event_agent.h"
 #include "services/tracing/public/cpp/tracing_features.h"
 
-#if defined(OS_CHROMEOS)
-#include "chromeos/system/fake_statistics_provider.h"
-#include "chromeos/system/statistics_provider.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chromeos/ash/components/dbus/debug_daemon/debug_daemon_client.h"
+#include "chromeos/ash/components/system/fake_statistics_provider.h"
+#include "chromeos/ash/components/system/statistics_provider.h"
+#include "content/browser/tracing/cros_tracing_agent.h"
 #endif
 
-using base::trace_event::RECORD_CONTINUOUSLY;
-using base::trace_event::RECORD_UNTIL_FULL;
+#if BUILDFLAG(IS_CASTOS)
+#include "content/browser/tracing/cast_tracing_agent.h"
+#endif
+
 using base::trace_event::TraceConfig;
 
 namespace content {
-
-namespace {
-
-bool KeyEquals(const base::Value* value,
-               const char* key_name,
-               const char* expected) {
-  const base::Value* content =
-      value->FindKeyOfType(key_name, base::Value::Type::STRING);
-  if (!content)
-    return false;
-  return content->GetString() == expected;
-}
-
-bool KeyNotEquals(const base::Value* value,
-                  const char* key_name,
-                  const char* expected) {
-  const base::Value* content =
-      value->FindKeyOfType(key_name, base::Value::Type::STRING);
-  if (!content)
-    return false;
-  return content->GetString() != expected;
-}
-
-}  // namespace
 
 class TracingControllerTestEndpoint
     : public TracingController::TraceDataEndpoint {
@@ -93,39 +75,35 @@ class TracingControllerTestEndpoint
   TracingController::CompletionCallback done_callback_;
 };
 
-class TestTracingDelegate : public TracingDelegate {
- public:
-  std::unique_ptr<TraceUploader> GetTraceUploader(
-      scoped_refptr<network::SharedURLLoaderFactory>) override {
-    return nullptr;
-  }
-};
-
 class TracingControllerTest : public ContentBrowserTest {
  public:
-  TracingControllerTest() {}
+  TracingControllerTest() = default;
 
   void SetUp() override {
     get_categories_done_callback_count_ = 0;
     enable_recording_done_callback_count_ = 0;
     disable_recording_done_callback_count_ = 0;
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
+    ash::DebugDaemonClient::InitializeFake();
     // Set statistic provider for hardware class tests.
-    chromeos::system::StatisticsProvider::SetTestProvider(
+    ash::system::StatisticsProvider::SetTestProvider(
         &fake_statistics_provider_);
     fake_statistics_provider_.SetMachineStatistic(
-        chromeos::system::kHardwareClassKey, "test-hardware-class");
+        ash::system::kHardwareClassKey, "test-hardware-class");
 #endif
     ContentBrowserTest::SetUp();
   }
 
-  void Navigate(Shell* shell) {
-    EXPECT_TRUE(NavigateToURL(shell, GetTestUrl("", "title1.html")));
+  void TearDown() override {
+    ContentBrowserTest::TearDown();
+#if BUILDFLAG(IS_CHROMEOS)
+    ash::DebugDaemonClient::Shutdown();
+#endif
   }
 
-  std::unique_ptr<base::DictionaryValue> GenerateMetadataDict() {
-    return std::move(metadata_);
+  void Navigate(Shell* shell) {
+    EXPECT_TRUE(NavigateToURL(shell, GetTestUrl("", "title1.html")));
   }
 
   void GetCategoriesDoneCallbackTest(base::OnceClosure quit_callback,
@@ -154,9 +132,9 @@ class TracingControllerTest : public ContentBrowserTest {
     {
       base::ScopedAllowBlockingForTesting allow_blocking;
       EXPECT_TRUE(PathExists(file_path));
-      int64_t file_size;
-      base::GetFileSize(file_path, &file_size);
-      EXPECT_GT(file_size, 0);
+      std::optional<int64_t> file_size = base::GetFileSize(file_path);
+      ASSERT_TRUE(file_size.has_value());
+      EXPECT_GT(file_size.value(), 0);
     }
     std::move(quit_callback).Run();
     last_actual_recording_file_path_ = file_path;
@@ -213,8 +191,6 @@ class TracingControllerTest : public ContentBrowserTest {
   }
 
   void TestStartAndStopTracingStringWithFilter() {
-    TracingControllerImpl::GetInstance()->SetTracingDelegateForTesting(
-        std::make_unique<TestTracingDelegate>());
 
     Navigate(shell());
 
@@ -227,7 +203,8 @@ class TracingControllerTest : public ContentBrowserTest {
                          base::Unretained(this), run_loop.QuitClosure());
 
       bool result =
-          controller->StartTracing(TraceConfig(), std::move(callback));
+          controller->StartTracing(TraceConfig(), std::move(callback),
+                                   /*privacy_filtering_enabled=*/true);
       ASSERT_TRUE(result);
       run_loop.Run();
       EXPECT_EQ(enable_recording_done_callback_count(), 1);
@@ -242,21 +219,12 @@ class TracingControllerTest : public ContentBrowserTest {
       scoped_refptr<TracingController::TraceDataEndpoint> trace_data_endpoint =
           TracingController::CreateStringEndpoint(std::move(callback));
 
-      metadata_ = std::make_unique<base::DictionaryValue>();
-      metadata_->SetString("not-whitelisted", "this_not_found");
-      tracing::TraceEventAgent::GetInstance()->AddMetadataGeneratorFunction(
-          base::BindRepeating(&TracingControllerTest::GenerateMetadataDict,
-                              base::Unretained(this)));
-
       bool result =
-          controller->StopTracing(trace_data_endpoint, /*agent_label=*/"",
-                                  /*privacy_filtering_enabled=*/true);
+          controller->StopTracing(trace_data_endpoint, /*agent_label=*/"");
       ASSERT_TRUE(result);
       run_loop.Run();
       EXPECT_EQ(disable_recording_done_callback_count(), 1);
     }
-
-    TracingControllerImpl::GetInstance()->SetTracingDelegateForTesting(nullptr);
   }
 
   void TestStartAndStopTracingCompressed() {
@@ -324,9 +292,9 @@ class TracingControllerTest : public ContentBrowserTest {
     }
   }
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
  protected:
-  chromeos::system::ScopedFakeStatisticsProvider fake_statistics_provider_;
+  ash::system::ScopedFakeStatisticsProvider fake_statistics_provider_;
 #endif
 
  private:
@@ -334,17 +302,12 @@ class TracingControllerTest : public ContentBrowserTest {
   int enable_recording_done_callback_count_;
   int disable_recording_done_callback_count_;
   base::FilePath last_actual_recording_file_path_;
-  std::unique_ptr<base::DictionaryValue> metadata_;
   std::unique_ptr<std::string> last_data_;
 };
 
 // Consistent failures on Android Asan https://crbug.com/1045519
-#if defined(OS_ANDROID) && defined(ADDRESS_SANITIZER)
+#if BUILDFLAG(IS_ANDROID) && defined(ADDRESS_SANITIZER)
 #define MAYBE_EnableAndStopTracing DISABLED_EnableAndStopTracing
-#define MAYBE_DisableRecordingStoresMetadata \
-  DISABLED_DisableRecordingStoresMetadata
-#define MAYBE_NotWhitelistedMetadataStripped \
-  DISABLED_NotWhitelistedMetadataStripped
 #define MAYBE_EnableAndStopTracingWithFilePath \
   DISABLED_EnableAndStopTracingWithFilePath
 #define MAYBE_EnableAndStopTracingWithCompression \
@@ -355,8 +318,6 @@ class TracingControllerTest : public ContentBrowserTest {
 #define MAYBE_ProcessesPresentInTrace DISABLED_ProcessesPresentInTrace
 #else
 #define MAYBE_EnableAndStopTracing EnableAndStopTracing
-#define MAYBE_DisableRecordingStoresMetadata DisableRecordingStoresMetadata
-#define MAYBE_NotWhitelistedMetadataStripped NotWhitelistedMetadataStripped
 #define MAYBE_EnableAndStopTracingWithFilePath EnableAndStopTracingWithFilePath
 #define MAYBE_EnableAndStopTracingWithCompression \
   EnableAndStopTracingWithCompression
@@ -382,61 +343,6 @@ IN_PROC_BROWSER_TEST_F(TracingControllerTest, GetCategories) {
 
 IN_PROC_BROWSER_TEST_F(TracingControllerTest, MAYBE_EnableAndStopTracing) {
   TestStartAndStopTracingString();
-}
-
-IN_PROC_BROWSER_TEST_F(TracingControllerTest,
-                       MAYBE_DisableRecordingStoresMetadata) {
-  TestStartAndStopTracingString();
-  // Check that a number of important keys exist in the metadata dictionary. The
-  // values are not checked to ensure the test is robust.
-  base::Optional<base::Value> trace_json = base::JSONReader::Read(last_data());
-  ASSERT_TRUE(trace_json);
-  auto* metadata_json = static_cast<base::DictionaryValue*>(
-      trace_json->FindKeyOfType("metadata", base::Value::Type::DICTIONARY));
-  ASSERT_TRUE(metadata_json);
-
-  std::string network_type;
-  metadata_json->GetString("network-type", &network_type);
-  EXPECT_FALSE(network_type.empty());
-  std::string user_agent;
-  metadata_json->GetString("user-agent", &user_agent);
-  EXPECT_FALSE(user_agent.empty());
-  std::string os_name;
-  metadata_json->GetString("os-name", &os_name);
-  EXPECT_FALSE(os_name.empty());
-  std::string command_line;
-  metadata_json->GetString("command_line", &command_line);
-  EXPECT_FALSE(command_line.empty());
-  std::string trace_config;
-  metadata_json->GetString("trace-config", &trace_config);
-  EXPECT_EQ(TraceConfig().ToString(), trace_config);
-#if defined(OS_CHROMEOS)
-  std::string hardware_class;
-  metadata_json->GetString("hardware-class", &hardware_class);
-  EXPECT_EQ(hardware_class, "test-hardware-class");
-#endif
-}
-
-IN_PROC_BROWSER_TEST_F(TracingControllerTest,
-                       MAYBE_NotWhitelistedMetadataStripped) {
-  TestStartAndStopTracingStringWithFilter();
-  // Check that a number of important keys exist in the metadata dictionary.
-  base::Optional<base::Value> trace_json = base::JSONReader::Read(last_data());
-  ASSERT_TRUE(trace_json);
-  const base::Value* metadata_json =
-      trace_json->FindKeyOfType("metadata", base::Value::Type::DICTIONARY);
-  ASSERT_TRUE(metadata_json);
-
-  EXPECT_TRUE(KeyNotEquals(metadata_json, "cpu-brand", "__stripped__"));
-  EXPECT_TRUE(KeyNotEquals(metadata_json, "network-type", "__stripped__"));
-  EXPECT_TRUE(KeyNotEquals(metadata_json, "os-name", "__stripped__"));
-  EXPECT_TRUE(KeyNotEquals(metadata_json, "user-agent", "__stripped__"));
-#if defined(OS_CHROMEOS)
-  EXPECT_TRUE(KeyNotEquals(metadata_json, "hardware-class", "__stripped__"));
-#endif
-
-  // The following field is not whitelisted and is supposed to be stripped.
-  EXPECT_TRUE(KeyEquals(metadata_json, "v8-version", "__stripped__"));
 }
 
 IN_PROC_BROWSER_TEST_F(TracingControllerTest,
@@ -493,12 +399,27 @@ IN_PROC_BROWSER_TEST_F(TracingControllerTest, MAYBE_DoubleStopTracing) {
 }
 
 // Only CrOS and Cast support system tracing.
-#if defined(OS_CHROMEOS) || (BUILDFLAG(IS_CHROMECAST) && defined(OS_LINUX))
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_CASTOS)
 #define MAYBE_SystemTraceEvents SystemTraceEvents
 #else
 #define MAYBE_SystemTraceEvents DISABLED_SystemTraceEvents
 #endif
-IN_PROC_BROWSER_TEST_F(TracingControllerTest, MAYBE_SystemTraceEvents) {
+class SystemTraceTracingControllerTest : public TracingControllerTest {
+ public:
+  SystemTraceTracingControllerTest() {
+#if BUILDFLAG(IS_CHROMEOS)
+    feature_list_.InitAndEnableFeature(kCrOSTracingDataSource);
+#elif BUILDFLAG(IS_CASTOS)
+    feature_list_.InitAndEnableFeature(kCastTracingDataSource);
+#endif
+  }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(SystemTraceTracingControllerTest,
+                       MAYBE_SystemTraceEvents) {
   TestStartAndStopTracingString(true /* enable_systrace */);
   EXPECT_TRUE(last_data().find("systemTraceEvents") != std::string::npos);
 }

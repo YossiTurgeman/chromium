@@ -1,24 +1,25 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 
 #include "base/command_line.h"
-#include "build/build_config.h"
 #include "chrome/browser/extensions/api/mdns/mdns_api.h"
 #include "chrome/browser/extensions/extension_apitest.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/media/router/test/mock_dns_sd_registry.h"
-#include "chrome/common/extensions/api/mdns.h"
+#include "chrome/browser/profiles/profile.h"
 #include "content/public/test/browser_test.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/switches.h"
 #include "extensions/test/result_catcher.h"
-#include "testing/gmock/include/gmock/gmock.h"
 
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+using media_router::DnsSdRegistry;
 using ::testing::_;
 using ::testing::A;
-using media_router::DnsSdRegistry;
 
 namespace api = extensions::api;
 
@@ -26,7 +27,7 @@ namespace {
 
 class MDnsAPITest : public extensions::ExtensionApiTest {
  public:
-  MDnsAPITest() {}
+  MDnsAPITest() = default;
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
     extensions::ExtensionApiTest::SetUpCommandLine(command_line);
@@ -36,11 +37,23 @@ class MDnsAPITest : public extensions::ExtensionApiTest {
   }
 
   void SetUpTestDnsSdRegistry() {
-    extensions::MDnsAPI* api = extensions::MDnsAPI::Get(profile());
+    auto* api = extensions::MDnsAPI::Get(profile());
     dns_sd_registry_ = std::make_unique<media_router::MockDnsSdRegistry>(api);
-    EXPECT_CALL(*dns_sd_registry_, AddObserver(api))
-        .Times(1);
+    EXPECT_CALL(*dns_sd_registry_, AddObserver(api)).Times(1);
     api->SetDnsSdRegistryForTesting(dns_sd_registry_.get());
+  }
+
+  void TearDownTestDnsSdRegistry() {
+#if BUILDFLAG(IS_ANDROID)
+    // Android skips profile teardown during test shutdown, so we must manually
+    // shut down the KeyedService. Otherwise we can't EXPECT_CALL for functions
+    // called during cleanup. This can't be done in TearDownOnMainThread() as
+    // that occurs too late.
+    // TODO(crbug.com/431730098): Move this somewhere more centralized.
+    extensions::MDnsAPI::Get(profile())->Shutdown();
+#endif
+    // Don't delete `dns_sd_registry_` yet because the tests expect calls that
+    // happen during the profile destruction phase.
   }
 
  protected:
@@ -54,15 +67,15 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, RegisterListener) {
   const std::string& service_type = "_googlecast._tcp.local";
   SetUpTestDnsSdRegistry();
 
-  EXPECT_CALL(*dns_sd_registry_, RegisterDnsSdListener(service_type))
-      .Times(1);
+  EXPECT_CALL(*dns_sd_registry_, RegisterDnsSdListener(service_type)).Times(1);
   EXPECT_CALL(*dns_sd_registry_, UnregisterDnsSdListener(service_type))
       .Times(1);
   EXPECT_CALL(*dns_sd_registry_,
               RemoveObserver(A<DnsSdRegistry::DnsSdObserver*>()))
       .Times(1);
 
-  EXPECT_TRUE(RunExtensionSubtest("mdns/api", "register_listener.html"))
+  EXPECT_TRUE(
+      RunExtensionTest("mdns/api", {.extension_url = "register_listener.html"}))
       << message_;
 
   extensions::ResultCatcher catcher;
@@ -77,6 +90,8 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, RegisterListener) {
   dns_sd_registry_->DispatchMDnsEvent("_uninteresting._tcp.local", services);
   dns_sd_registry_->DispatchMDnsEvent(service_type, services);
   EXPECT_TRUE(catcher.GetNextResult()) << catcher.message();
+
+  TearDownTestDnsSdRegistry();
 }
 
 // Test loading extension, registering an MDNS listener and dispatching events.
@@ -92,7 +107,8 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, ForceDiscovery) {
               RemoveObserver(A<DnsSdRegistry::DnsSdObserver*>()))
       .Times(1);
 
-  EXPECT_TRUE(RunExtensionSubtest("mdns/api", "force_discovery.html"))
+  EXPECT_TRUE(
+      RunExtensionTest("mdns/api", {.extension_url = "force_discovery.html"}))
       << message_;
 
   extensions::ResultCatcher catcher;
@@ -104,6 +120,8 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, ForceDiscovery) {
 
   dns_sd_registry_->DispatchMDnsEvent(service_type, services);
   EXPECT_TRUE(catcher.GetNextResult()) << catcher.message();
+
+  TearDownTestDnsSdRegistry();
 }
 
 // Test loading extension and registering multiple listeners.
@@ -112,8 +130,7 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, RegisterMultipleListeners) {
   const std::string& test_service_type = "_testing._tcp.local";
   SetUpTestDnsSdRegistry();
 
-  EXPECT_CALL(*dns_sd_registry_, RegisterDnsSdListener(service_type))
-      .Times(1);
+  EXPECT_CALL(*dns_sd_registry_, RegisterDnsSdListener(service_type)).Times(1);
   EXPECT_CALL(*dns_sd_registry_, UnregisterDnsSdListener(service_type))
       .Times(1);
   EXPECT_CALL(*dns_sd_registry_, RegisterDnsSdListener(test_service_type))
@@ -124,8 +141,8 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, RegisterMultipleListeners) {
               RemoveObserver(A<DnsSdRegistry::DnsSdObserver*>()))
       .Times(1);
 
-  EXPECT_TRUE(RunExtensionSubtest("mdns/api",
-                                  "register_multiple_listeners.html"))
+  EXPECT_TRUE(RunExtensionTest(
+      "mdns/api", {.extension_url = "register_multiple_listeners.html"}))
       << message_;
 
   extensions::ResultCatcher catcher;
@@ -138,6 +155,8 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, RegisterMultipleListeners) {
   dns_sd_registry_->DispatchMDnsEvent(service_type, services);
   dns_sd_registry_->DispatchMDnsEvent(test_service_type, services);
   EXPECT_TRUE(catcher.GetNextResult()) << catcher.message();
+
+  TearDownTestDnsSdRegistry();
 }
 
 // Test loading extension and registering multiple listeners.
@@ -150,12 +169,13 @@ IN_PROC_BROWSER_TEST_F(MDnsAPITest, RegisterTooManyListeners) {
               RemoveObserver(A<DnsSdRegistry::DnsSdObserver*>()))
       .Times(1);
 
-  EXPECT_TRUE(RunPlatformAppTest("mdns/api-packaged-apps"))
-      << message_;
+  EXPECT_TRUE(RunExtensionTest("mdns/too_many_listeners")) << message_;
+
+  TearDownTestDnsSdRegistry();
 }
 
 // Test loading extension and registering multiple listeners.
 IN_PROC_BROWSER_TEST_F(MDnsAPITest, MaxServiceInstancesPerEventConst) {
-  EXPECT_TRUE(RunExtensionSubtest("mdns/api",
-                                  "get_max_service_instances.html"));
+  EXPECT_TRUE(RunExtensionTest(
+      "mdns/api", {.extension_url = "get_max_service_instances.html"}));
 }

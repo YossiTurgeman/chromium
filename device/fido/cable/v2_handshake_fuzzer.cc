@@ -1,6 +1,8 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "device/fido/cable/v2_handshake.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -8,7 +10,7 @@
 #include <array>
 
 #include "base/containers/span.h"
-#include "device/fido/cable/v2_handshake.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 #include "third_party/boringssl/src/include/openssl/ec.h"
 #include "third_party/boringssl/src/include/openssl/ec_key.h"
 #include "third_party/boringssl/src/include/openssl/obj.h"
@@ -22,8 +24,6 @@ constexpr std::array<uint8_t, 32> kTestPSK = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 };
-constexpr std::array<uint8_t, 16> kTestEphemeralID = {
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 constexpr std::array<uint8_t, 65> kTestPeerIdentity = {
     0x04, 0x67, 0x80, 0xc5, 0xfc, 0x70, 0x27, 0x5e, 0x2c, 0x70, 0x61,
     0xa0, 0xe7, 0x87, 0x7b, 0xb1, 0x74, 0xde, 0xad, 0xeb, 0x98, 0x87,
@@ -37,21 +37,19 @@ constexpr std::array<uint8_t, 32> kTestLocalSeed = {
     0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05,
     0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05,
 };
-constexpr std::array<uint8_t, 5> kTestGetInfoBytes = {1, 2, 3, 4, 5};
 
 }  // namespace
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* raw_data, size_t size) {
-  auto input = base::make_span(raw_data, size);
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(base::span<const uint8_t> input) {
   if (input.empty()) {
     return 0;
   }
   const bool initiate = input[0] & 1;
   const bool have_local_key = input[0] & 2;
-  input = input.subspan(1);
+  input = input.subspan<1>();
 
-  base::Optional<base::span<const uint8_t, 65>> peer_identity;
-  base::Optional<base::span<const uint8_t, 32>> local_seed;
+  std::optional<base::span<const uint8_t, 65>> peer_identity;
+  std::optional<base::span<const uint8_t, 32>> local_seed;
   bssl::UniquePtr<EC_KEY> local_key;
   if (have_local_key) {
     local_seed = kTestLocalSeed;
@@ -64,14 +62,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* raw_data, size_t size) {
   }
 
   if (initiate) {
-    cablev2::HandshakeInitiator handshaker(kTestPSK, peer_identity,
-                                           std::move(local_key));
-    handshaker.BuildInitialMessage(kTestEphemeralID, kTestGetInfoBytes);
+    cablev2::HandshakeInitiator handshaker(kTestPSK, peer_identity, local_seed);
+    handshaker.BuildInitialMessage();
     handshaker.ProcessResponse(input);
   } else {
     std::vector<uint8_t> response;
-    cablev2::RespondToHandshake(kTestPSK, kTestEphemeralID, local_seed,
-                                peer_identity, input, &response);
+    cablev2::RespondToHandshake(kTestPSK, std::move(local_key), peer_identity,
+                                input, &response);
   }
 
   return 0;

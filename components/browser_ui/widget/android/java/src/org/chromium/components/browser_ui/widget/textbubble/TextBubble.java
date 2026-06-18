@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,31 +6,42 @@ package org.chromium.components.browser_ui.widget.textbubble;
 
 import android.content.Context;
 import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.View.OnTouchListener;
 import android.view.ViewGroup.LayoutParams;
+import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.PopupWindow;
 import android.widget.PopupWindow.OnDismissListener;
 import android.widget.TextView;
 
+import androidx.annotation.DrawableRes;
 import androidx.annotation.StringRes;
+import androidx.appcompat.content.res.AppCompatResources;
 
-import org.chromium.base.ApiCompatibilityUtils;
 import org.chromium.base.MathUtils;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.base.supplier.NonNullObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.base.supplier.SettableNonNullObservableSupplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.components.browser_ui.styles.SemanticColorUtils;
 import org.chromium.components.browser_ui.widget.R;
+import org.chromium.ui.accessibility.AccessibilityState;
 import org.chromium.ui.widget.AnchoredPopupWindow;
 import org.chromium.ui.widget.RectProvider;
-import org.chromium.ui.widget.ViewRectProvider;
 
 import java.util.HashSet;
 import java.util.Set;
 
-/**
- * UI component that handles showing a text callout bubble.
- */
+/** UI component that handles showing a text callout bubble. */
+@NullMarked
 public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
     /**
      * Specifies no limit to the popup duration.
@@ -44,34 +55,58 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
      */
     private static final Set<TextBubble> sBubbles = new HashSet<>();
 
+    /** A supplier which notifies of changes of text bubbles count. */
+    private static final SettableNonNullObservableSupplier<Integer> sCountSupplier =
+            ObservableSuppliers.createNonNull(0);
+
+    /** Disable assert error if it fails to be displayed. */
+    private static boolean sSkipShowCheckForTesting;
+
     protected final Context mContext;
     private final Handler mHandler;
+    private final boolean mInverseColor;
 
     /** The actual {@link PopupWindow}.  Internalized to prevent API leakage. */
     private final AnchoredPopupWindow mPopupWindow;
 
     /** The {@link Drawable} that is responsible for drawing the bubble and the arrow. */
-    private final ArrowBubbleDrawable mDrawable;
+    private @Nullable ArrowBubbleDrawable mBubbleDrawable;
 
-    private final Runnable mDismissRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (mPopupWindow.isShowing()) dismiss();
-        }
-    };
+    /** The {@link Drawable} that precedes the text in the bubble. */
+    protected final @Nullable Drawable mImageDrawable;
 
-    private final OnDismissListener mDismissListener = new OnDismissListener() {
-        @Override
-        public void onDismiss() {
-            sBubbles.remove(TextBubble.this);
-        }
-    };
+    /** Runnables for snoozable text bubble option. */
+    private final @Nullable Runnable mSnoozeRunnable;
+
+    private final @Nullable Runnable mSnoozeDismissRunnable;
+
+    /** Time tracking for histograms. */
+    private long mBubbleShowStartTime;
+
+    private final Runnable mDismissRunnable =
+            new Runnable() {
+                @Override
+                public void run() {
+                    if (mPopupWindow.isShowing()) dismiss();
+                }
+            };
+
+    private final OnDismissListener mDismissListener =
+            new OnDismissListener() {
+                @Override
+                public void onDismiss() {
+                    sBubbles.remove(TextBubble.this);
+                    sCountSupplier.set(sBubbles.size());
+                }
+            };
 
     /**
-     * How long to wait before automatically dismissing the bubble.  {@link #NO_TIMEOUT} is the
+     * How long to wait before automatically dismissing the bubble. {@link #NO_TIMEOUT} is the
      * default and means the bubble will stay visible indefinitely.
      */
     private long mAutoDismissTimeoutMs = NO_TIMEOUT;
+
+    private boolean mDismissOnTouchInteraction;
 
     // Content specific variables.
     /** The string to show in the bubble. */
@@ -80,119 +115,50 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
     /** The accessibility string associated with the bubble. */
     private final String mAccessibilityString;
 
-    private final boolean mIsAccessibilityEnabled;
-
     /** The content view shown in the popup window. */
     protected View mContentView;
 
     /**
-     * Constructs a {@link TextBubble} instance using the default arrow drawable background. Creates
-     * a {@link ViewRectProvider} using the provided {@code anchorView}.
-     * @param context  Context to draw resources from.
-     * @param rootView The {@link View} to use for size calculations and for display.
-     * @param stringId The id of the string resource for the text that should be shown.
-     * @param accessibilityStringId The id of the string resource of the accessibility text.
-     * @param anchorView The {@link View} used to anchor the bubble.
-     * @param isAccessibilityEnabled Whether accessibility mode is enabled. Used to determine bubble
-     *         text and dismiss UX.
-     */
-    public TextBubble(Context context, View rootView, @StringRes int stringId,
-            @StringRes int accessibilityStringId, View anchorView, boolean isAccessibilityEnabled) {
-        this(context, rootView, stringId, accessibilityStringId, true,
-                new ViewRectProvider(anchorView), isAccessibilityEnabled);
-    }
-
-    /**
-     * Constructs a {@link TextBubble} instance using the default arrow drawable background. Creates
-     * a {@link RectProvider} using the provided {@code anchorRect}.
-     * @param context  Context to draw resources from.
-     * @param rootView The {@link View} to use for size calculations and for display.
-     * @param stringId The id of the string resource for the text that should be shown.
-     * @param accessibilityStringId The id of the string resource of the accessibility text.
-     * @param anchorRect The {@link Rect} used to anchor the text bubble.
-     * @param isAccessibilityEnabled Whether accessibility mode is enabled. Used to determine bubble
-     *         text and dismiss UX.
-     */
-    public TextBubble(Context context, View rootView, @StringRes int stringId,
-            @StringRes int accessibilityStringId, Rect anchorRect, boolean isAccessibilityEnabled) {
-        this(context, rootView, stringId, accessibilityStringId, true, new RectProvider(anchorRect),
-                isAccessibilityEnabled);
-    }
-
-    /**
-     * Constructs a {@link TextBubble} instance. Creates a {@link RectProvider} using the provided
-     * {@code anchorRect}.
-     * @param context  Context to draw resources from.
-     * @param rootView The {@link View} to use for size calculations and for display.
-     * @param stringId The id of the string resource for the text that should be shown.
-     * @param accessibilityStringId The id of the string resource of the accessibility text.
-     * @param showArrow Whether the bubble should have an arrow.
-     * @param anchorRect The {@link Rect} used to anchor the text bubble.
-     * @param isAccessibilityEnabled Whether accessibility mode is enabled. Used to determine bubble
-     *         text and dismiss UX.
-     */
-    public TextBubble(Context context, View rootView, @StringRes int stringId,
-            @StringRes int accessibilityStringId, boolean showArrow, Rect anchorRect,
-            boolean isAccessibilityEnabled) {
-        this(context, rootView, stringId, accessibilityStringId, showArrow,
-                new RectProvider(anchorRect), isAccessibilityEnabled);
-    }
-
-    /**
-     * Constructs a {@link TextBubble} instance using the default arrow drawable background.
-     * @param context  Context to draw resources from.
-     * @param rootView The {@link View} to use for size calculations and for display.
-     * @param stringId The id of the string resource for the text that should be shown.
-     * @param accessibilityStringId The id of the string resource of the accessibility text.
-     * @param anchorRectProvider The {@link RectProvider} used to anchor the text bubble.
-     */
-    public TextBubble(Context context, View rootView, @StringRes int stringId,
-            @StringRes int accessibilityStringId, RectProvider anchorRectProvider,
-            boolean isAccessibilityEnabled) {
-        this(context, rootView, stringId, accessibilityStringId, true, anchorRectProvider,
-                isAccessibilityEnabled);
-    }
-
-    /**
      * Constructs a {@link TextBubble} instance.
-     * @param context  Context to draw resources from.
-     * @param rootView The {@link View} to use for size calculations and for display.
-     * @param stringId The id of the string resource for the text that should be shown.
-     * @param accessibilityStringId The id of the string resource of the accessibility text.
-     * @param showArrow Whether the bubble should have an arrow.
-     * @param anchorRectProvider The {@link RectProvider} used to anchor the text bubble.
-     * @param isAccessibilityEnabled Whether accessibility mode is enabled. Used to determine bubble
-     *         text and dismiss UX.
-     */
-    public TextBubble(Context context, View rootView, @StringRes int stringId,
-            @StringRes int accessibilityStringId, boolean showArrow,
-            RectProvider anchorRectProvider, boolean isAccessibilityEnabled) {
-        this(context, rootView, context.getString(stringId),
-                context.getString(accessibilityStringId), showArrow, anchorRectProvider,
-                isAccessibilityEnabled);
-    }
-
-    /**
-     * Constructs a {@link TextBubble} instance.
-     * @param context  Context to draw resources from.
+     *
+     * @param context Context to draw resources from.
      * @param rootView The {@link View} to use for size calculations and for display.
      * @param contentString The string for the text that should be shown.
      * @param accessibilityString The string shown in the bubble when accessibility is enabled.
-     * @param showArrow Whether the bubble should have an arrow.
+     * @param showArrow Whether the bubble should have an arrow. Should be false if {@code
+     *     isRoundBubble} is true.
      * @param anchorRectProvider The {@link RectProvider} used to anchor the text bubble.
-     * @param isAccessibilityEnabled Whether accessibility mode is enabled. Used to determine bubble
-     *         text and dismiss UX.
+     * @param imageDrawable The image to show at the start of the text bubble, or null if there
+     *     should be no image.
+     * @param isRoundBubble Whether the bubble should be round.
+     * @param inverseColor Whether the background and icon/text colors should be inverted.
+     * @param snoozeRunnable The callback for when snooze button is clicked.
+     * @param snoozeDismissRunnable The callback to be invoked when dismiss button is clicked.
      */
-    public TextBubble(Context context, View rootView, String contentString,
-            String accessibilityString, boolean showArrow, RectProvider anchorRectProvider,
-            boolean isAccessibilityEnabled) {
+    private TextBubble(
+            Context context,
+            View rootView,
+            String contentString,
+            String accessibilityString,
+            boolean showArrow,
+            RectProvider anchorRectProvider,
+            @Nullable Drawable imageDrawable,
+            boolean isRoundBubble,
+            boolean inverseColor,
+            @Nullable Runnable snoozeRunnable,
+            @Nullable Runnable snoozeDismissRunnable) {
+        assert snoozeRunnable == null || snoozeDismissRunnable == null;
         mContext = context;
         mString = contentString;
         mAccessibilityString = accessibilityString;
-        mIsAccessibilityEnabled = isAccessibilityEnabled;
+        mImageDrawable = imageDrawable;
+        mInverseColor = inverseColor;
+        mSnoozeRunnable = snoozeRunnable;
+        mSnoozeDismissRunnable = snoozeDismissRunnable;
 
-        mDrawable = new ArrowBubbleDrawable(context);
-        mDrawable.setShowArrow(showArrow);
+        // For round, arrowless bubbles, we use a specialized background instead of the
+        // ArrowBubbleDrawable.
+        Drawable backgroundDrawable = getBackground(mContext, showArrow, isRoundBubble);
 
         mContentView = createContentView();
         // On some versions of Android, the LayoutParams aren't set until after the popup window
@@ -201,8 +167,9 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
         mContentView.setLayoutParams(
                 new FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
 
-        mPopupWindow = new AnchoredPopupWindow(
-                context, rootView, mDrawable, mContentView, anchorRectProvider);
+        mPopupWindow =
+                new AnchoredPopupWindow(
+                        context, rootView, backgroundDrawable, mContentView, anchorRectProvider);
         mPopupWindow.setMargin(
                 context.getResources().getDimensionPixelSize(R.dimen.text_bubble_margin));
         mPopupWindow.setPreferredHorizontalOrientation(
@@ -214,11 +181,21 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
         mPopupWindow.setAnimationStyle(R.style.TextBubbleAnimation);
 
         addOnDismissListener(mDismissListener);
-        if (mIsAccessibilityEnabled) setDismissOnTouchInteraction(true);
+        if (AccessibilityState.isTouchExplorationEnabled()) setDismissOnTouchInteraction(true);
+    }
 
+    /** Get the background to use. May be overridden by subclasses. */
+    protected Drawable getBackground(Context context, boolean showArrow, boolean isRoundBubble) {
+        mBubbleDrawable = new ArrowBubbleDrawable(mContext, isRoundBubble);
+        mBubbleDrawable.setShowArrow(showArrow);
         // Set predefined styles for the TextBubble.
-        mDrawable.setBubbleColor(ApiCompatibilityUtils.getColor(
-                mContext.getResources(), R.color.default_control_color_active));
+        if (mInverseColor) {
+            mBubbleDrawable.setBubbleColor(SemanticColorUtils.getDefaultBgColor(mContext));
+        } else {
+            mBubbleDrawable.setBubbleColor(
+                    SemanticColorUtils.getDefaultControlColorActive(mContext));
+        }
+        return mBubbleDrawable;
     }
 
     /** Shows the bubble. Will have no effect if the bubble is already showing. */
@@ -230,7 +207,15 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
         }
 
         mPopupWindow.show();
+
+        boolean popupShowing = sSkipShowCheckForTesting || mPopupWindow.isShowing();
+        assert popupShowing : "TextBubble is not presented: " + mString;
+
+        if (!popupShowing) return;
+
         sBubbles.add(this);
+        sCountSupplier.set(sBubbles.size());
+        mBubbleShowStartTime = System.currentTimeMillis();
     }
 
     /**
@@ -238,7 +223,19 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
      * @see PopupWindow#dismiss()
      */
     public void dismiss() {
+        if (mPopupWindow.isShowing() && mBubbleShowStartTime != 0) {
+            RecordHistogram.recordTimesHistogram(
+                    "InProductHelp.TextBubble.ShownTime",
+                    System.currentTimeMillis() - mBubbleShowStartTime);
+            mBubbleShowStartTime = 0;
+        }
+
         mPopupWindow.dismiss();
+    }
+
+    /** Used for testing only. Explicitly trigger dismiss listeners. */
+    public void onDismissForTesting(boolean byInsideTouch) {
+        mPopupWindow.onDismissForTesting(byInsideTouch);
     }
 
     /**
@@ -248,9 +245,7 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
         return mPopupWindow.isShowing();
     }
 
-    /**
-     * Dismisses all the currently showing bubbles.
-     */
+    /** Dismisses all the currently showing bubbles. */
     public static void dismissBubbles() {
         Set<TextBubble> bubbles = new HashSet<>(sBubbles);
         for (TextBubble bubble : bubbles) {
@@ -259,10 +254,17 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
     }
 
     /**
+     * @return A supplier which notifies of changes of text bubbles count.
+     */
+    public static NonNullObservableSupplier<Integer> getCountSupplier() {
+        return sCountSupplier;
+    }
+
+    /**
      * @param onTouchListener A callback for all touch events being dispatched to the bubble.
      * @see PopupWindow#setTouchInterceptor(OnTouchListener)
      */
-    public void setTouchInterceptor(OnTouchListener onTouchListener) {
+    public void setTouchInterceptor(@Nullable OnTouchListener onTouchListener) {
         mPopupWindow.setTouchInterceptor(onTouchListener);
     }
 
@@ -283,14 +285,24 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
     }
 
     /**
-     * Updates the timeout that is used to determine when to automatically dismiss the bubble.  If
-     * the bubble is already showing, the timeout will start from the time of this call.  Any
-     * previous timeouts will be canceled.  {@link #NO_TIMEOUT} is the default value.
-     * @param timeoutMs The time (in milliseconds) the bubble should be dismissed after.  Use
-     *                  {@link #NO_TIMEOUT} for no timeout.
+     * Changes the focusability of the bubble. If you are considering using this method, see
+     * crbug.com/1240841 for additional context on UX considerations and possible risks in testing.
+     * @param focusable True if the bubble is focusable, false otherwise.
+     */
+    public void setFocusable(boolean focusable) {
+        mPopupWindow.setFocusable(focusable);
+    }
+
+    /**
+     * Updates the timeout that is used to determine when to automatically dismiss the bubble. If
+     * the bubble is already showing, the timeout will start from the time of this call. Any
+     * previous timeouts will be canceled. {@link #NO_TIMEOUT} is the default value.
+     *
+     * @param timeoutMs The time (in milliseconds) the bubble should be dismissed after. Use {@link
+     *     #NO_TIMEOUT} for no timeout.
      */
     public void setAutoDismissTimeout(long timeoutMs) {
-        if (mIsAccessibilityEnabled) return;
+        if (AccessibilityState.isTouchExplorationEnabled()) return;
 
         mAutoDismissTimeoutMs = timeoutMs;
         mHandler.removeCallbacks(mDismissRunnable);
@@ -301,13 +313,18 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
 
     /**
      * @param dismiss Whether or not to dismiss this bubble when the screen is tapped.  This will
-     *                happen for both taps inside and outside the popup.  The default is
-     *                {@code false}.
+     *                happen for both taps inside and outside the popup except when a tap is handled
+     *                by child views. The default is {@code false}.
      */
     public void setDismissOnTouchInteraction(boolean dismiss) {
         // For accessibility mode, since there is no timeout value, the bubble can be dismissed
         // only on touch interaction.
-        mPopupWindow.setDismissOnTouchInteraction(mIsAccessibilityEnabled || dismiss);
+        mDismissOnTouchInteraction = AccessibilityState.isTouchExplorationEnabled() || dismiss;
+        mPopupWindow.setDismissOnTouchInteraction(mDismissOnTouchInteraction);
+    }
+
+    public boolean getDismissOnTouchInteractionForTesting() {
+        return mDismissOnTouchInteraction;
     }
 
     /**
@@ -320,38 +337,234 @@ public class TextBubble implements AnchoredPopupWindow.LayoutObserver {
         mPopupWindow.setPreferredVerticalOrientation(orientation);
     }
 
+    /**
+     * Changes the preferred horizontal orientation of the text bubble.
+     *
+     * @param orientation The horizontal orientation preferred.
+     */
+    public void setHorizontalOverlapAnchor(boolean overlap) {
+        mPopupWindow.setHorizontalOverlapAnchor(overlap);
+    }
+
+    /**
+     * Sets whether the popup should horizontally overlap the anchor.
+     *
+     * @param overlap Whether the popup should horizontally overlap the anchor.
+     */
+    public void setPreferredHorizontalOrientation(
+            @AnchoredPopupWindow.HorizontalOrientation int orientation) {
+        mPopupWindow.setPreferredHorizontalOrientation(orientation);
+    }
+
+    /**
+     * Return if the popup was dismissed by inside touch last time. It shouldn't be called when the
+     * popup is showing
+     */
+    public boolean wasDismissedByInsideTouch() {
+        assert !isShowing();
+        return mPopupWindow.wasDismissedByInsideTouch();
+    }
+
     @Override
     public void onPreLayoutChange(
             boolean positionBelow, int x, int y, int width, int height, Rect anchorRect) {
+        // mBubbleDrawable might not be in use if a subclass replaces the drawable.
+        if (mBubbleDrawable == null) return;
+
         int arrowXOffset = 0;
-        if (mDrawable.isShowingArrow()) {
+        if (mBubbleDrawable.isShowingArrow()) {
             arrowXOffset = anchorRect.centerX() - x;
 
             // Force the anchor to be in a reasonable spot w.r.t. the bubble (not over the corners).
-            int minArrowOffset = mDrawable.getArrowLeftSpacing();
-            int maxArrowOffset = width - mDrawable.getArrowRightSpacing();
+            int minArrowOffset = mBubbleDrawable.getArrowLeftSpacing();
+            int maxArrowOffset = width - mBubbleDrawable.getArrowRightSpacing();
             arrowXOffset = MathUtils.clamp(arrowXOffset, minArrowOffset, maxArrowOffset);
         }
 
         // TODO(dtrainor): Figure out how to move the arrow and bubble to make things look
         // better.
 
-        mDrawable.setPositionProperties(arrowXOffset, positionBelow);
+        mBubbleDrawable.setPositionProperties(arrowXOffset, positionBelow);
     }
 
-    /**
-     * @return The content view to show in the TextBubble.
-     */
-    protected View createContentView() {
-        View view = LayoutInflater.from(mContext).inflate(R.layout.textbubble_text, null);
-        setText((TextView) view);
+    /** @return The content view to show in the TextBubble. */
+    private View createContentView() {
+        if (mImageDrawable == null) {
+            View view = LayoutInflater.from(mContext).inflate(R.layout.textbubble_text, null);
+            setText(view.findViewById(R.id.message));
+
+            // Set different paddings for when snooze feature is present.
+            if (mSnoozeRunnable != null || mSnoozeDismissRunnable != null) {
+                int paddingStart =
+                        mContext.getResources()
+                                .getDimensionPixelSize(
+                                        R.dimen.text_bubble_with_snooze_padding_horizontal);
+                int paddingEnd =
+                        mContext.getResources()
+                                .getDimensionPixelSize(R.dimen.text_bubble_with_snooze_padding_end);
+                TextView text = view.findViewById(R.id.message);
+                text.setPadding(
+                        paddingStart, text.getPaddingTop(), paddingEnd, text.getPaddingBottom());
+            }
+
+            if (mSnoozeRunnable != null) {
+                Button snoozeButton = view.findViewById(R.id.button_snooze);
+                snoozeButton.setVisibility(View.VISIBLE);
+                snoozeButton.setOnClickListener(
+                        v -> {
+                            mSnoozeRunnable.run();
+                            mDismissRunnable.run();
+                        });
+            } else if (mSnoozeDismissRunnable != null) {
+                Button dismissButton = view.findViewById(R.id.button_dismiss);
+                dismissButton.setVisibility(View.VISIBLE);
+                dismissButton.setOnClickListener(
+                        v -> {
+                            mSnoozeDismissRunnable.run();
+                            mDismissRunnable.run();
+                        });
+            }
+            return view;
+        }
+        View view =
+                LayoutInflater.from(mContext).inflate(R.layout.textbubble_text_with_image, null);
+        ImageView imageView = view.findViewById(R.id.image);
+        imageView.setImageDrawable(mImageDrawable);
+        if (mInverseColor) {
+            imageView.setColorFilter(SemanticColorUtils.getDefaultControlColorActive(mContext));
+        }
+        setText(view.findViewById(R.id.message));
         return view;
     }
 
     /**
      * @param view The {@link TextView} to set text on.
      */
-    protected void setText(TextView view) {
-        view.setText(mIsAccessibilityEnabled ? mAccessibilityString : mString);
+    private void setText(TextView view) {
+        view.setText(
+                AccessibilityState.isTouchExplorationEnabled() ? mAccessibilityString : mString);
+        updateTextStyle(view, mInverseColor);
+    }
+
+    /**
+     * @param isInverse Whether the color scheme is inversed or not.
+     * @param view The {@link TextView} to update the style for.
+     */
+    protected void updateTextStyle(TextView view, boolean isInverse) {
+        if (isInverse) {
+            view.setTextAppearance(R.style.TextAppearance_TextMediumThick_Accent1);
+        }
+    }
+
+    /** For testing only, get the list of active text bubbles. */
+    public static Set<TextBubble> getTextBubbleSetForTesting() {
+        return sBubbles;
+    }
+
+    /** For testing only, get the content view of a TextBubble. */
+    public View getTextBubbleContentViewForTesting() {
+        return mContentView;
+    }
+
+    public static void setSkipShowCheckForTesting(boolean skip) {
+        boolean previousSkip = sSkipShowCheckForTesting;
+        sSkipShowCheckForTesting = skip;
+        ResettersForTesting.register(() -> sSkipShowCheckForTesting = previousSkip);
+    }
+
+    /** Builder for {@link TextBubble} instances. */
+    public static class Builder {
+        private final Context mContext;
+        private final View mRootView;
+        private final RectProvider mAnchorRectProvider;
+        private final String mString;
+        private final String mAccessibilityString;
+
+        private boolean mShowArrow = true;
+        private @Nullable Drawable mImageDrawable;
+        private boolean mIsRoundBubble;
+        private boolean mInverseColor;
+        private @Nullable Runnable mSnoozeRunnable;
+        private @Nullable Runnable mSnoozeDismissRunnable;
+
+        public Builder(
+                Context context,
+                View rootView,
+                RectProvider anchorRectProvider,
+                String string,
+                String accessibilityString) {
+            mContext = context;
+            mRootView = rootView;
+            mAnchorRectProvider = anchorRectProvider;
+            mString = string != null ? string : "";
+            mAccessibilityString =
+                    (accessibilityString != null && !accessibilityString.isEmpty())
+                            ? accessibilityString
+                            : mString;
+        }
+
+        public Builder(
+                Context context,
+                View rootView,
+                RectProvider anchorRectProvider,
+                @StringRes int stringId,
+                @StringRes int accessibilityStringId) {
+            mContext = context;
+            mRootView = rootView;
+            mAnchorRectProvider = anchorRectProvider;
+            mString = mContext.getString(stringId);
+            String a11yString = mContext.getString(accessibilityStringId);
+            mAccessibilityString = a11yString.isEmpty() ? mString : a11yString;
+        }
+
+        public Builder setShowArrow(boolean showArrow) {
+            mShowArrow = showArrow;
+            return this;
+        }
+
+        public Builder setImageDrawable(@Nullable Drawable imageDrawable) {
+            mImageDrawable = imageDrawable;
+            return this;
+        }
+
+        public Builder setImageDrawable(@DrawableRes int imageDrawableId) {
+            mImageDrawable = AppCompatResources.getDrawable(mContext, imageDrawableId);
+            return this;
+        }
+
+        public Builder setIsRoundBubble(boolean isRoundBubble) {
+            mIsRoundBubble = isRoundBubble;
+            return this;
+        }
+
+        public Builder setInverseColor(boolean inverseColor) {
+            mInverseColor = inverseColor;
+            return this;
+        }
+
+        public Builder setSnoozeRunnable(@Nullable Runnable snoozeRunnable) {
+            mSnoozeRunnable = snoozeRunnable;
+            return this;
+        }
+
+        public Builder setSnoozeDismissRunnable(@Nullable Runnable snoozeDismissRunnable) {
+            mSnoozeDismissRunnable = snoozeDismissRunnable;
+            return this;
+        }
+
+        public TextBubble build() {
+            return new TextBubble(
+                    mContext,
+                    mRootView,
+                    mString,
+                    mAccessibilityString,
+                    mShowArrow,
+                    mAnchorRectProvider,
+                    mImageDrawable,
+                    mIsRoundBubble,
+                    mInverseColor,
+                    mSnoozeRunnable,
+                    mSnoozeDismissRunnable);
+        }
     }
 }

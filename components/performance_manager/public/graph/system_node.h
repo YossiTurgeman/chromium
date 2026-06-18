@@ -1,70 +1,47 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PERFORMANCE_MANAGER_PUBLIC_GRAPH_SYSTEM_NODE_H_
 #define COMPONENTS_PERFORMANCE_MANAGER_PUBLIC_GRAPH_SYSTEM_NODE_H_
 
-#include "base/macros.h"
+#include "base/observer_list_types.h"
 #include "components/performance_manager/public/graph/node.h"
 
 namespace performance_manager {
 
 class SystemNodeObserver;
 
-// The SystemNode represents system-wide state. There is at most one system node
-// in a graph.
-class SystemNode : public Node {
+// The SystemNode represents system-wide state. Each graph owns exactly one
+// system node. This node has the same lifetime has the graph that owns it.
+class SystemNode : public TypedNode<SystemNode> {
  public:
-  using Observer = SystemNodeObserver;
-  class ObserverDefaultImpl;
+  static constexpr NodeTypeEnum Type() { return NodeTypeEnum::kSystem; }
 
   SystemNode();
-  ~SystemNode() override;
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(SystemNode);
+  SystemNode(const SystemNode&) = delete;
+  SystemNode& operator=(const SystemNode&) = delete;
+
+  ~SystemNode() override;
 };
 
-// Pure virtual observer interface. Derive from this if you want to be forced to
-// implement the entire interface.
-class SystemNodeObserver {
+// Observer interface for the system node.
+class SystemNodeObserver : public base::CheckedObserver {
  public:
   SystemNodeObserver();
-  virtual ~SystemNodeObserver();
 
-  // Node lifetime notifications.
+  SystemNodeObserver(const SystemNodeObserver&) = delete;
+  SystemNodeObserver& operator=(const SystemNodeObserver&) = delete;
 
-  // Called when the |system_node| is added to the graph.
-  virtual void OnSystemNodeAdded(const SystemNode* system_node) = 0;
-
-  // Called before the |system_node| is removed from the graph.
-  virtual void OnBeforeSystemNodeRemoved(const SystemNode* system_node) = 0;
+  ~SystemNodeObserver() override;
 
   // Called when a new set of process memory metrics is available.
-  virtual void OnProcessMemoryMetricsAvailable(
-      const SystemNode* system_node) = 0;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SystemNodeObserver);
-};
-
-// Default implementation of observer that provides dummy versions of each
-// function. Derive from this if you only need to implement a few of the
-// functions.
-class SystemNode::ObserverDefaultImpl : public SystemNodeObserver {
- public:
-  ObserverDefaultImpl();
-  ~ObserverDefaultImpl() override;
-
-  // SystemNodeObserver implementation:
-  void OnSystemNodeAdded(const SystemNode* system_node) override {}
-  void OnBeforeSystemNodeRemoved(const SystemNode* system_node) override {}
-  void OnProcessMemoryMetricsAvailable(const SystemNode* system_node) override {
-  }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ObserverDefaultImpl);
+  //
+  // Note: This is only valid if at least one component has expressed interest
+  // for process memory metrics by calling
+  // ProcessMetricsDecorator::RegisterInterestForProcessMetrics.
+  virtual void OnProcessMemoryMetricsAvailable(const SystemNode* system_node) {}
 };
 
 }  // namespace performance_manager

@@ -1,3 +1,4 @@
-file://chrome/browser/password_manager/OWNERS
+friedrichh@chromium.org
+ioanap@chromium.org
 
-# COMPONENT: UI>Browser>Passwords
+file://chrome/browser/password_manager/OWNERS

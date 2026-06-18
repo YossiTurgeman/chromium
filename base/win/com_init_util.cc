@@ -1,23 +1,25 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/win/com_init_util.h"
 
 #include <windows.h>
-
 #include <winternl.h>
+
+#include <stdint.h>
+
 #include "base/logging.h"
 #include "base/notreached.h"
 
 namespace base {
 namespace win {
 
-#if DCHECK_IS_ON()
-
 namespace {
 
+#if DCHECK_IS_ON()
 const char kComNotInitialized[] = "COM is not initialized on this thread.";
+#endif  // DCHECK_IS_ON()
 
 // Derived from combase.dll.
 struct OleTlsData {
@@ -27,8 +29,8 @@ struct OleTlsData {
     MTA = 0x140,
   };
 
-  void* thread_base;
-  void* sm_allocator;
+  uintptr_t thread_base;
+  uintptr_t sm_allocator;
   DWORD apartment_id;
   DWORD apartment_flags;
   // There are many more fields than this, but for our purposes, we only care
@@ -37,17 +39,21 @@ struct OleTlsData {
 };
 
 OleTlsData* GetOleTlsData() {
-  TEB* teb = NtCurrentTeb();
+  ::TEB* teb = NtCurrentTeb();
   return reinterpret_cast<OleTlsData*>(teb->ReservedForOle);
 }
 
+}  // namespace
+
 ComApartmentType GetComApartmentTypeForThread() {
   OleTlsData* ole_tls_data = GetOleTlsData();
-  if (!ole_tls_data)
+  if (!ole_tls_data) {
     return ComApartmentType::NONE;
+  }
 
-  if (ole_tls_data->apartment_flags & OleTlsData::ApartmentFlags::STA)
+  if (ole_tls_data->apartment_flags & OleTlsData::ApartmentFlags::STA) {
     return ComApartmentType::STA;
+  }
 
   if ((ole_tls_data->apartment_flags & OleTlsData::ApartmentFlags::MTA) ==
       OleTlsData::ApartmentFlags::MTA) {
@@ -57,11 +63,12 @@ ComApartmentType GetComApartmentTypeForThread() {
   return ComApartmentType::NONE;
 }
 
-}  // namespace
+#if DCHECK_IS_ON()
 
 void AssertComInitialized(const char* message) {
-  if (GetComApartmentTypeForThread() != ComApartmentType::NONE)
+  if (GetComApartmentTypeForThread() != ComApartmentType::NONE) {
     return;
+  }
 
   // COM worker threads don't always set up the apartment, but they do perform
   // some thread registration, so we allow those.

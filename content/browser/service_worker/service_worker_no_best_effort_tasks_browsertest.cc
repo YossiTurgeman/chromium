@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,12 @@ namespace content {
 class ServiceWorkerNoBestEffortTasksTest : public ContentBrowserTest {
  public:
   ServiceWorkerNoBestEffortTasksTest() = default;
+
+  ServiceWorkerNoBestEffortTasksTest(
+      const ServiceWorkerNoBestEffortTasksTest&) = delete;
+  ServiceWorkerNoBestEffortTasksTest& operator=(
+      const ServiceWorkerNoBestEffortTasksTest&) = delete;
+
   ~ServiceWorkerNoBestEffortTasksTest() override = default;
 
   void SetUp() override {
@@ -27,15 +33,12 @@ class ServiceWorkerNoBestEffortTasksTest : public ContentBrowserTest {
  private:
   void SetUpCommandLine(base::CommandLine* command_line) override {
     command_line->AppendSwitch(switches::kDisableBestEffortTasks);
-    ContentBrowserTest::SetUpCommandLine(command_line);
   }
 
   void SetUpOnMainThread() override {
     host_resolver()->AddRule("*", "127.0.0.1");
     embedded_test_server()->StartAcceptingConnections();
   }
-
-  DISALLOW_COPY_AND_ASSIGN(ServiceWorkerNoBestEffortTasksTest);
 };
 
 // Verify that the promise returned by navigator.serviceWorker.register()

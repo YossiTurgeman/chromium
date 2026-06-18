@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,9 @@
 #define UI_VIEWS_CONTROLS_BUTTON_MENU_BUTTON_CONTROLLER_H_
 
 #include <memory>
+#include <utility>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "ui/views/controls/button/button_controller.h"
@@ -15,7 +16,6 @@
 namespace views {
 class ButtonControllerDelegate;
 class MenuButton;
-class ButtonListener;
 
 // A controller that contains the logic for showing a menu when the left mouse
 // is pushed.
@@ -32,17 +32,22 @@ class VIEWS_EXPORT MenuButtonController : public ButtonController {
                 bool is_sibling_menu_show,
                 const ui::LocatedEvent* event);
 
+    PressedLock(const PressedLock&) = delete;
+    PressedLock& operator=(const PressedLock&) = delete;
+
     ~PressedLock();
 
    private:
     base::WeakPtr<MenuButtonController> menu_button_controller_;
-
-    DISALLOW_COPY_AND_ASSIGN(PressedLock);
   };
 
   MenuButtonController(Button* button,
-                       ButtonListener* listener,
+                       Button::PressedCallback callback,
                        std::unique_ptr<ButtonControllerDelegate> delegate);
+
+  MenuButtonController(const MenuButtonController&) = delete;
+  MenuButtonController& operator=(const MenuButtonController&) = delete;
+
   ~MenuButtonController() override;
 
   // view::ButtonController
@@ -54,8 +59,9 @@ class VIEWS_EXPORT MenuButtonController : public ButtonController {
   bool OnKeyPressed(const ui::KeyEvent& event) override;
   bool OnKeyReleased(const ui::KeyEvent& event) override;
   void OnGestureEvent(ui::GestureEvent* event) override;
-  void UpdateAccessibleNodeData(ui::AXNodeData* node_data) override;
+  void UpdateButtonAccessibleDefaultActionVerb() override;
   bool IsTriggerableEvent(const ui::Event& event) override;
+  void NotifyClick() override;
 
   // Calls TakeLock with is_sibling_menu_show as false and a nullptr to the
   // event.
@@ -76,6 +82,10 @@ class VIEWS_EXPORT MenuButtonController : public ButtonController {
   // menu, this is distinct from IsTriggerableEvent().
   bool IsTriggerableEventType(const ui::Event& event);
 
+  void SetCallback(Button::PressedCallback callback) {
+    callback_ = std::move(callback);
+  }
+
  private:
   // Increment/decrement the number of "pressed" locks this button has, and
   // set the state accordingly. The ink drop is snapped to the final ACTIVATED
@@ -90,8 +100,8 @@ class VIEWS_EXPORT MenuButtonController : public ButtonController {
   // Called if the button state changes while pressed lock is engaged.
   void OnButtonStateChangedWhilePressedLocked();
 
-  // Our listener. Not owned.
-  ButtonListener* const listener_;
+  // Our callback.
+  Button::PressedCallback callback_;
 
   // We use a time object in order to keep track of when the menu was closed.
   // The time is used for simulating menu behavior for the menu button; that
@@ -108,7 +118,7 @@ class VIEWS_EXPORT MenuButtonController : public ButtonController {
   int pressed_lock_count_ = 0;
 
   // Used to let Activate() know if IncrementPressedLocked() was called.
-  bool* increment_pressed_lock_called_ = nullptr;
+  raw_ptr<bool> increment_pressed_lock_called_ = nullptr;
 
   // True if the button was in a disabled state when a menu was run, and
   // should return to it once the press is complete. This can happen if, e.g.,
@@ -116,11 +126,9 @@ class VIEWS_EXPORT MenuButtonController : public ButtonController {
   bool should_disable_after_press_ = false;
 
   // Subscribes to state changes on the button while pressed lock is engaged.
-  views::PropertyChangedSubscription state_changed_subscription_;
+  base::CallbackListSubscription state_changed_subscription_;
 
   base::WeakPtrFactory<MenuButtonController> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(MenuButtonController);
 };
 
 }  // namespace views

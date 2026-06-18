@@ -1,12 +1,13 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ui/javascript_dialogs/chrome_javascript_app_modal_dialog_view_factory.h"
+#include <memory>
 
-#include "base/macros.h"
 #include "build/build_config.h"
 #include "chrome/browser/ui/blocked_content/popunder_preventer.h"
+#include "chrome/browser/ui/javascript_dialogs/chrome_app_modal_dialog_manager_delegate.h"
+#include "chrome/browser/ui/javascript_dialogs/chrome_javascript_app_modal_dialog_view_factory.h"
 #include "chrome/browser/ui/views/javascript_app_modal_event_blocker.h"
 #include "components/constrained_window/constrained_window_views.h"
 #include "components/javascript_dialogs/app_modal_dialog_controller.h"
@@ -14,8 +15,11 @@
 #include "components/javascript_dialogs/views/app_modal_dialog_view_views.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_delegate.h"
+#include "ui/display/screen.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/views/widget/widget.h"
 
-#if defined(USE_OZONE)
+#if BUILDFLAG(IS_OZONE)
 #include "ui/base/ui_base_features.h"
 #include "ui/ozone/public/ozone_platform.h"
 #endif
@@ -27,15 +31,10 @@
 namespace {
 
 bool UseEventBlocker() {
-#if defined(USE_OZONE)
-  if (features::IsUsingOzonePlatform()) {
-    return ui::OzonePlatform::GetInstance()
-        ->GetPlatformProperties()
-        .app_modal_dialogs_use_event_blocker;
-  }
-#endif
-#if defined(USE_X11)
-  return true;
+#if BUILDFLAG(IS_OZONE)
+  return ui::OzonePlatform::GetInstance()
+      ->GetPlatformProperties()
+      .app_modal_dialogs_use_event_blocker;
 #else
   return false;
 #endif
@@ -45,9 +44,15 @@ class ChromeJavaScriptAppModalDialogViews
     : public javascript_dialogs::AppModalDialogViewViews {
  public:
   explicit ChromeJavaScriptAppModalDialogViews(
-      javascript_dialogs::AppModalDialogController* parent)
-      : javascript_dialogs::AppModalDialogViewViews(parent),
-        popunder_preventer_(parent->web_contents()) {}
+      std::unique_ptr<javascript_dialogs::AppModalDialogController> controller)
+      : javascript_dialogs::AppModalDialogViewViews(std::move(controller)) {
+    popunder_preventer_ =
+        std::make_unique<PopunderPreventer>(this->controller()->web_contents());
+  }
+  ChromeJavaScriptAppModalDialogViews(
+      const ChromeJavaScriptAppModalDialogViews&) = delete;
+  ChromeJavaScriptAppModalDialogViews& operator=(
+      const ChromeJavaScriptAppModalDialogViews&) = delete;
   ~ChromeJavaScriptAppModalDialogViews() override = default;
 
   // JavaScriptAppModalDialogViews:
@@ -59,7 +64,7 @@ class ChromeJavaScriptAppModalDialogViews
     // TODO(pkotwicz): Find a better way of doing this and remove this hack.
     if (UseEventBlocker() && !event_blocker_.get()) {
       event_blocker_ = std::make_unique<JavascriptAppModalEventBlocker>(
-          GetWidget()->GetNativeView());
+          GetWidget()->GetNativeWindow());
     }
     AppModalDialogViewViews::ShowAppModalDialog();
   }
@@ -71,19 +76,29 @@ class ChromeJavaScriptAppModalDialogViews
   // Blocks events to other browser windows while the dialog is open.
   std::unique_ptr<JavascriptAppModalEventBlocker> event_blocker_;
 
-  PopunderPreventer popunder_preventer_;
-
-  DISALLOW_COPY_AND_ASSIGN(ChromeJavaScriptAppModalDialogViews);
+  std::unique_ptr<PopunderPreventer> popunder_preventer_;
 };
 
-javascript_dialogs::AppModalDialogView* CreateNativeJavaScriptDialog(
-    javascript_dialogs::AppModalDialogController* dialog) {
-  javascript_dialogs::AppModalDialogViewViews* d =
-      new ChromeJavaScriptAppModalDialogViews(dialog);
-  dialog->web_contents()->GetDelegate()->ActivateContents(
-      dialog->web_contents());
-  gfx::NativeWindow parent_window =
-      dialog->web_contents()->GetTopLevelNativeWindow();
+void AdjustWidgetBoundsIfOffscreen(views::Widget* widget) {
+  gfx::Rect widget_bounds = widget->GetWindowBoundsInScreen();
+  gfx::Rect screen_rect =
+      display::Screen::Get()
+          ->GetDisplayNearestPoint(widget_bounds.CenterPoint())
+          .work_area();
+
+  if (!screen_rect.Contains(widget_bounds)) {
+    widget_bounds.AdjustToFit(screen_rect);
+    widget->SetBounds(widget_bounds);
+  }
+}
+
+javascript_dialogs::AppModalDialogView* CreateViewsJavaScriptDialog(
+    std::unique_ptr<javascript_dialogs::AppModalDialogController> controller) {
+  content::WebContents* web_contents = controller->web_contents();
+  javascript_dialogs::AppModalDialogViewViews* dialog =
+      new ChromeJavaScriptAppModalDialogViews(std::move(controller));
+  web_contents->GetDelegate()->ActivateContents(web_contents);
+  gfx::NativeWindow parent_window = web_contents->GetTopLevelNativeWindow();
 #if defined(USE_AURA)
   if (!parent_window->GetRootWindow()) {
     // When we are part of a WebContents that isn't actually being displayed
@@ -91,8 +106,10 @@ javascript_dialogs::AppModalDialogView* CreateNativeJavaScriptDialog(
     parent_window = nullptr;
   }
 #endif
-  constrained_window::CreateBrowserModalDialogViews(d, parent_window);
-  return d;
+  views::Widget* widget =
+      constrained_window::CreateBrowserModalDialogViews(dialog, parent_window);
+  AdjustWidgetBoundsIfOffscreen(widget);
+  return dialog;
 }
 
 }  // namespace
@@ -100,5 +117,10 @@ javascript_dialogs::AppModalDialogView* CreateNativeJavaScriptDialog(
 void InstallChromeJavaScriptAppModalDialogViewFactory() {
   javascript_dialogs::AppModalDialogManager::GetInstance()
       ->SetNativeDialogFactory(
-          base::BindRepeating(&CreateNativeJavaScriptDialog));
+          base::BindRepeating(&CreateViewsJavaScriptDialog));
+}
+
+void SetChromeAppModalDialogManagerDelegate() {
+  javascript_dialogs::AppModalDialogManager::GetInstance()->SetDelegate(
+      std::make_unique<ChromeAppModalDialogManagerDelegate>());
 }

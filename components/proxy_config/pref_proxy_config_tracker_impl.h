@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,10 @@
 
 #include <memory>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/feature_list.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/threading/thread_checker.h"
 #include "components/prefs/pref_change_registrar.h"
@@ -24,17 +26,24 @@ namespace base {
 class SingleThreadTaskRunner;
 }
 
+// Killswitch for the rules set by the "ProxyOverrideRules" policy.
+PROXY_CONFIG_EXPORT BASE_DECLARE_FEATURE(kEnableProxyOverrideRules);
+
 // A net::ProxyConfigService implementation that applies preference proxy
 // settings (pushed from PrefProxyConfigTrackerImpl) as overrides to the proxy
 // configuration determined by a baseline delegate ProxyConfigService on
 // non-ChromeOS platforms. ChromeOS has its own implementation of overrides in
-// chromeos::ProxyConfigServiceImpl.
+// ash::ProxyConfigServiceImpl.
 class ProxyConfigServiceImpl : public net::ProxyConfigService,
                                public net::ProxyConfigService::Observer {
  public:
   ProxyConfigServiceImpl(std::unique_ptr<net::ProxyConfigService> base_service,
                          ProxyPrefs::ConfigState initial_config_state,
                          const net::ProxyConfigWithAnnotation& initial_config);
+
+  ProxyConfigServiceImpl(const ProxyConfigServiceImpl&) = delete;
+  ProxyConfigServiceImpl& operator=(const ProxyConfigServiceImpl&) = delete;
+
   ~ProxyConfigServiceImpl() override;
 
   // ProxyConfigService implementation:
@@ -43,11 +52,14 @@ class ProxyConfigServiceImpl : public net::ProxyConfigService,
   ConfigAvailability GetLatestProxyConfig(
       net::ProxyConfigWithAnnotation* config) override;
   void OnLazyPoll() override;
+  bool UsesPolling() override;
 
   // Method on IO thread that receives the preference proxy settings pushed from
   // PrefProxyConfigTrackerImpl.
   void UpdateProxyConfig(ProxyPrefs::ConfigState config_state,
                          const net::ProxyConfigWithAnnotation& config);
+
+  base::WeakPtr<ProxyConfigServiceImpl> AsWeakPtr();
 
  private:
   // ProxyConfigService::Observer implementation:
@@ -73,7 +85,7 @@ class ProxyConfigServiceImpl : public net::ProxyConfigService,
 
   base::ThreadChecker thread_checker_;
 
-  DISALLOW_COPY_AND_ASSIGN(ProxyConfigServiceImpl);
+  base::WeakPtrFactory<ProxyConfigServiceImpl> weak_ptr_factory_{this};
 };
 
 // A class that tracks proxy preferences. It translates the configuration
@@ -87,6 +99,11 @@ class PROXY_CONFIG_EXPORT PrefProxyConfigTrackerImpl
   PrefProxyConfigTrackerImpl(PrefService* pref_service,
                              scoped_refptr<base::SingleThreadTaskRunner>
                                  proxy_config_service_task_runner);
+
+  PrefProxyConfigTrackerImpl(const PrefProxyConfigTrackerImpl&) = delete;
+  PrefProxyConfigTrackerImpl& operator=(const PrefProxyConfigTrackerImpl&) =
+      delete;
+
   ~PrefProxyConfigTrackerImpl() override;
 
   // PrefProxyConfigTracker implementation:
@@ -163,8 +180,8 @@ class PROXY_CONFIG_EXPORT PrefProxyConfigTrackerImpl
   // Configuration as defined by prefs.
   net::ProxyConfigWithAnnotation pref_config_;
 
-  PrefService* pref_service_;
-  ProxyConfigServiceImpl* proxy_config_service_impl_;  // Weak ptr.
+  raw_ptr<PrefService> pref_service_;
+  base::WeakPtr<ProxyConfigServiceImpl> proxy_config_service_impl_;
   PrefChangeRegistrar proxy_prefs_;
 
   // State of |active_config_|.  |active_config_| is only valid if
@@ -177,8 +194,6 @@ class PROXY_CONFIG_EXPORT PrefProxyConfigTrackerImpl
   scoped_refptr<base::SingleThreadTaskRunner> proxy_config_service_task_runner_;
 
   base::ThreadChecker thread_checker_;
-
-  DISALLOW_COPY_AND_ASSIGN(PrefProxyConfigTrackerImpl);
 };
 
 #endif  // COMPONENTS_PROXY_CONFIG_PREF_PROXY_CONFIG_TRACKER_IMPL_H_

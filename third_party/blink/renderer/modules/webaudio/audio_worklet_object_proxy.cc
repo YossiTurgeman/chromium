@@ -1,14 +1,17 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_object_proxy.h"
+
+#include <utility>
 
 #include "third_party/blink/renderer/core/workers/threaded_worklet_messaging_proxy.h"
 #include "third_party/blink/renderer/core/workers/worker_thread.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_global_scope.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_messaging_proxy.h"
 #include "third_party/blink/renderer/modules/webaudio/cross_thread_audio_worklet_processor_info.h"
+#include "third_party/blink/renderer/platform/wtf/cross_thread_copier_std.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 
 namespace blink {
@@ -16,42 +19,52 @@ namespace blink {
 AudioWorkletObjectProxy::AudioWorkletObjectProxy(
     AudioWorkletMessagingProxy* messaging_proxy_weak_ptr,
     ParentExecutionContextTaskRunners* parent_execution_context_task_runners,
-    float context_sample_rate)
+    float context_sample_rate,
+    uint64_t context_sample_frame_at_construction,
+    uint32_t context_render_quantum_size_at_construction)
     : ThreadedWorkletObjectProxy(
           static_cast<ThreadedWorkletMessagingProxy*>(messaging_proxy_weak_ptr),
-          parent_execution_context_task_runners),
-      context_sample_rate_(context_sample_rate) {}
+          parent_execution_context_task_runners,
+          /*parent_agent_group_task_runner=*/nullptr),
+      context_sample_rate_at_construction_(context_sample_rate),
+      context_sample_frame_at_construction_(
+          context_sample_frame_at_construction),
+      context_render_quantum_size_at_construction_(
+          context_render_quantum_size_at_construction) {}
 
 void AudioWorkletObjectProxy::DidCreateWorkerGlobalScope(
     WorkerOrWorkletGlobalScope* global_scope) {
   global_scope_ = To<AudioWorkletGlobalScope>(global_scope);
-  global_scope_->SetSampleRate(context_sample_rate_);
+  global_scope_->SetRenderQuantumSize(
+      context_render_quantum_size_at_construction_);
+  global_scope_->SetSampleRate(context_sample_rate_at_construction_);
+  global_scope_->SetCurrentFrame(
+      base::checked_cast<size_t>(context_sample_frame_at_construction_));
+  global_scope_->SetObjectProxy(*this);
 }
 
-void AudioWorkletObjectProxy::DidEvaluateTopLevelScript(bool success) {
+void AudioWorkletObjectProxy::SynchronizeProcessorInfoList() {
   DCHECK(global_scope_);
 
-  if (!success || global_scope_->NumberOfRegisteredDefinitions() == 0)
+  if (global_scope_->NumberOfRegisteredDefinitions() == 0) {
     return;
+  }
 
   std::unique_ptr<Vector<CrossThreadAudioWorkletProcessorInfo>>
       processor_info_list =
           global_scope_->WorkletProcessorInfoListForSynchronization();
 
-  if (processor_info_list->size() == 0)
+  if (processor_info_list->empty()) {
     return;
+  }
 
-  // This method is called by a loading task which calls
-  // WorkletModuleTreeClient::NotifyModuleTreeLoadFinished and
-  // SynchronizeWorkletProcessorInfoList needs to run in FIFO order with other
-  // loading tasks.
   PostCrossThreadTask(
       *GetParentExecutionContextTaskRunners()->Get(TaskType::kInternalLoading),
       FROM_HERE,
       CrossThreadBindOnce(
           &AudioWorkletMessagingProxy::SynchronizeWorkletProcessorInfoList,
           GetAudioWorkletMessagingProxyWeakPtr(),
-          WTF::Passed(std::move(processor_info_list))));
+          std::move(processor_info_list)));
 }
 
 void AudioWorkletObjectProxy::WillDestroyWorkerGlobalScope() {
@@ -60,8 +73,7 @@ void AudioWorkletObjectProxy::WillDestroyWorkerGlobalScope() {
 
 CrossThreadWeakPersistent<AudioWorkletMessagingProxy>
 AudioWorkletObjectProxy::GetAudioWorkletMessagingProxyWeakPtr() {
-  return CrossThreadWeakPersistent<AudioWorkletMessagingProxy>(
-      MessagingProxyWeakPtr());
+  return DownCast<AudioWorkletMessagingProxy>(MessagingProxyWeakPtr());
 }
 
 }  // namespace blink

@@ -1,20 +1,19 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_UI_DEVTOOLS_VIEWS_OVERLAY_AGENT_VIEWS_H_
 #define COMPONENTS_UI_DEVTOOLS_VIEWS_OVERLAY_AGENT_VIEWS_H_
 
-#include <vector>
-
-#include "components/ui_devtools/Overlay.h"
+#include "base/gtest_prod_util.h"
+#include "components/ui_devtools/overlay.h"
 #include "components/ui_devtools/overlay_agent.h"
 #include "components/ui_devtools/views/dom_agent_views.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/layer_delegate.h"
 #include "ui/events/event.h"
 #include "ui/events/event_handler.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace gfx {
 class RenderText;
@@ -39,6 +38,9 @@ class OverlayAgentViews : public OverlayAgent,
                           public ui::EventHandler,
                           public ui::LayerDelegate {
  public:
+  OverlayAgentViews(const OverlayAgentViews&) = delete;
+  OverlayAgentViews& operator=(const OverlayAgentViews&) = delete;
+
   ~OverlayAgentViews() override;
 
   // Creates a platform-specific instance.
@@ -50,11 +52,11 @@ class OverlayAgentViews : public OverlayAgent,
   // Overlay::Backend:
   protocol::Response setInspectMode(
       const protocol::String& in_mode,
-      protocol::Maybe<protocol::Overlay::HighlightConfig> in_highlightConfig)
+      std::unique_ptr<protocol::Overlay::HighlightConfig> in_highlightConfig)
       override;
   protocol::Response highlightNode(
       std::unique_ptr<protocol::Overlay::HighlightConfig> highlight_config,
-      protocol::Maybe<int> node_id) override;
+      std::optional<int> node_id) override;
   protocol::Response hideHighlight() override;
 
   HighlightRectsConfiguration highlight_rect_config() const {
@@ -120,8 +122,6 @@ class OverlayAgentViews : public OverlayAgent,
   gfx::Rect pinned_rect_;
 
   int pinned_id_ = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(OverlayAgentViews);
 };
 
 }  // namespace ui_devtools

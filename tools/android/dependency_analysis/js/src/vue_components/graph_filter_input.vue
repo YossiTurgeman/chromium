@@ -1,4 +1,4 @@
-<!-- Copyright 2020 The Chromium Authors. All rights reserved.
+<!-- Copyright 2020 The Chromium Authors
      Use of this source code is governed by a BSD-style license that can be
      found in the LICENSE file. -->
 
@@ -58,11 +58,54 @@ const GraphFilterInput = {
     },
 
     search: function(searchTerm) {
+      const RESULT_LIMIT = 20;
+
+      if (!searchTerm) {
+        return [];
+      }
+
+      // Best matches are ones that start with class name starting with the
+      // same letters as the search term.
+      const bestMatches = [];
+
+      // Other matches contain the search term, but either in the middle of the
+      // class name or in the package name.
+      const otherMatches = [];
+
       const searchTermLower = searchTerm.toLowerCase();
-      return this.nodeIdsSortedByShortNames.filter(name => {
-        return !this.nodesAlreadyInFilterSet.has(name) &&
-          name.toLowerCase().includes(searchTermLower);
-      });
+      for (const name of this.nodeIdsSortedByShortNames) {
+        const nameLower = name.toLowerCase();
+
+        // Match only nodes not already shown and that contain the search term.
+        if (this.nodesAlreadyInFilterSet.has(name) ||
+            !nameLower.includes(searchTermLower)) {
+          continue;
+        }
+
+        const lastPeriodIndex = nameLower.lastIndexOf('.');
+        let classNameLower;
+        if (lastPeriodIndex == -1) {
+          // Class has no package.
+          classNameLower = nameLower;
+        } else {
+          classNameLower = nameLower.substring(lastPeriodIndex + 1);
+        }
+
+        if (classNameLower.startsWith(searchTermLower)) {
+          bestMatches.push(name);
+          if (bestMatches.length >= RESULT_LIMIT) {
+            break;
+          }
+        } else {
+          if (otherMatches.length >= RESULT_LIMIT) {
+            continue;
+          }
+          otherMatches.push(name);
+        }
+      }
+
+      // Prefer best matches and return no more than 20 results.
+      return bestMatches.concat(otherMatches).slice(0, RESULT_LIMIT);
     },
 
     onSelectOption(nodeNameToAdd) {

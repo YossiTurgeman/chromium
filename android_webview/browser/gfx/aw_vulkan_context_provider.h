@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,17 @@
 #define ANDROID_WEBVIEW_BROWSER_GFX_AW_VULKAN_CONTEXT_PROVIDER_H_
 
 #include <memory>
+#include <optional>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "components/viz/common/gpu/vulkan_context_provider.h"
 #include "gpu/vulkan/vulkan_device_queue.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
-#include "third_party/skia/include/gpu/GrBackendSemaphore.h"
-#include "third_party/skia/src/gpu/vk/GrVkSecondaryCBDrawContext.h"
+#include "third_party/skia/include/gpu/ganesh/GrBackendSemaphore.h"
+#include "third_party/skia/include/private/chromium/GrVkSecondaryCBDrawContext.h"
 
 struct AwDrawFn_InitVkParams;
 class GrDirectContext;
-class GrVkSecondaryCBDrawContext;
 
 namespace gpu {
 class VulkanImplementation;
@@ -25,8 +25,10 @@ class VulkanDeviceQueue;
 
 namespace android_webview {
 
+// Lifetime: WebView
 class AwVulkanContextProvider final : public viz::VulkanContextProvider {
  public:
+  // Short-lived. Created and destroyed for each (Vulkan) draw.
   class ScopedSecondaryCBDraw {
    public:
     ScopedSecondaryCBDraw(AwVulkanContextProvider* provider,
@@ -34,18 +36,24 @@ class AwVulkanContextProvider final : public viz::VulkanContextProvider {
         : provider_(provider) {
       provider_->SecondaryCBDrawBegin(std::move(draw_context));
     }
+
+    ScopedSecondaryCBDraw(const ScopedSecondaryCBDraw&) = delete;
+    ScopedSecondaryCBDraw& operator=(const ScopedSecondaryCBDraw&) = delete;
+
     ~ScopedSecondaryCBDraw() { provider_->SecondaryCMBDrawSubmitted(); }
 
    private:
-    AwVulkanContextProvider* const provider_;
-
-    DISALLOW_COPY_AND_ASSIGN(ScopedSecondaryCBDraw);
+    raw_ptr<AwVulkanContextProvider> const provider_;
   };
 
-  static scoped_refptr<AwVulkanContextProvider> GetOrCreateInstance(
-      AwDrawFn_InitVkParams* params = nullptr);
+  AwVulkanContextProvider(const AwVulkanContextProvider&) = delete;
+  AwVulkanContextProvider& operator=(const AwVulkanContextProvider&) = delete;
+
+  static scoped_refptr<AwVulkanContextProvider> Create(
+      AwDrawFn_InitVkParams* params);
 
   // viz::VulkanContextProvider implementation:
+  bool InitializeGrContext(const GrContextOptions& context_options) override;
   gpu::VulkanImplementation* GetVulkanImplementation() override;
   gpu::VulkanDeviceQueue* GetDeviceQueue() override;
   GrDirectContext* GetGrContext() override;
@@ -53,14 +61,10 @@ class AwVulkanContextProvider final : public viz::VulkanContextProvider {
   void EnqueueSecondaryCBSemaphores(
       std::vector<VkSemaphore> semaphores) override;
   void EnqueueSecondaryCBPostSubmitTask(base::OnceClosure closure) override;
+  std::optional<uint32_t> GetSyncCpuMemoryLimit() const override;
 
-  VkPhysicalDevice physical_device() {
-    return device_queue_->GetVulkanPhysicalDevice();
-  }
-  VkDevice device() { return device_queue_->GetVulkanDevice(); }
-  VkQueue queue() { return device_queue_->GetVulkanQueue(); }
-  gpu::VulkanImplementation* implementation() { return implementation_.get(); }
-  GrDirectContext* gr_context() { return gr_context_.get(); }
+  VkDevice device() { return globals_->device_queue->GetVulkanDevice(); }
+  VkQueue queue() { return globals_->device_queue->GetVulkanQueue(); }
 
  private:
   friend class base::RefCounted<AwVulkanContextProvider>;
@@ -72,14 +76,32 @@ class AwVulkanContextProvider final : public viz::VulkanContextProvider {
   void SecondaryCBDrawBegin(sk_sp<GrVkSecondaryCBDrawContext> draw_context);
   void SecondaryCMBDrawSubmitted();
 
-  std::unique_ptr<gpu::VulkanImplementation> implementation_;
-  std::unique_ptr<gpu::VulkanDeviceQueue> device_queue_;
-  sk_sp<GrDirectContext> gr_context_;
+  // Lifetime: Singleton
+  //
+  // This counts its number of active users and will spin up and tear down
+  // according to demand. As such, it may not be the same singleton throughout
+  // the process's lifetime.
+  struct Globals : base::RefCountedThreadSafe<Globals> {
+    static scoped_refptr<Globals> GetOrCreateInstance(
+        AwDrawFn_InitVkParams* params);
+
+    Globals();
+    bool Initialize(AwDrawFn_InitVkParams* params);
+
+    std::unique_ptr<gpu::VulkanImplementation> implementation;
+    std::unique_ptr<gpu::VulkanDeviceQueue> device_queue;
+    sk_sp<GrDirectContext> gr_context;
+
+   private:
+    friend base::RefCountedThreadSafe<Globals>;
+    ~Globals();
+  };
+  static Globals* g_globals;
+
+  scoped_refptr<Globals> globals_;
   sk_sp<GrVkSecondaryCBDrawContext> draw_context_;
   std::vector<base::OnceClosure> post_submit_tasks_;
   std::vector<VkSemaphore> post_submit_semaphores_;
-
-  DISALLOW_COPY_AND_ASSIGN(AwVulkanContextProvider);
 };
 
 }  // namespace android_webview

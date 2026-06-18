@@ -1,105 +1,83 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/webauthn/transport_hover_list_model.h"
 
+#include <cstddef>
+#include <string>
 #include <utility>
+#include <vector>
 
-#include "chrome/app/vector_icons/vector_icons.h"
-#include "chrome/browser/ui/webauthn/transport_utils.h"
-#include "chrome/grit/generated_resources.h"
-#include "ui/base/l10n/l10n_util.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "base/containers/span.h"
+#include "chrome/browser/ui/webauthn/user_actions.h"
+#include "chrome/browser/webauthn/authenticator_request_dialog_model.h"
+#include "ui/base/models/image_model.h"
+#include "ui/color/color_id.h"
 
 namespace {
-// The tag ID space consists of the union of |AuthenticatorTransport| values
-// with the extra values defined below. These extra values must not overlap with
-// any values of |AuthenticatorTransport|.
 
-constexpr int kTagExtraBase = 1 << 16;
-constexpr int kNativeWinApiTag = kTagExtraBase;
+std::vector<int> GetMechanismIndices(
+    base::span<const AuthenticatorRequestDialogModel::Mechanism> mechanisms) {
+  std::vector<int> tag_list(mechanisms.size());
+  for (size_t i = 0; i < mechanisms.size(); i++) {
+    tag_list[i] = static_cast<int>(i);
+  }
+  return tag_list;
+}
 
 }  // namespace
 
 TransportHoverListModel::TransportHoverListModel(
-    base::flat_set<AuthenticatorTransport> transport_list,
-    bool show_win_native_api_item,
-    Delegate* delegate)
-    : transport_list_(std::move(transport_list)),
-      show_win_native_api_item_(show_win_native_api_item),
-      delegate_(delegate) {}
+    AuthenticatorRequestDialogModel* dialog_model)
+    : TransportHoverListModel(dialog_model,
+                              GetMechanismIndices(dialog_model->mechanisms)) {}
+
+TransportHoverListModel::TransportHoverListModel(
+    AuthenticatorRequestDialogModel* dialog_model,
+    std::vector<int> mechanism_indices_to_display)
+    : mechanism_indices_to_display_(std::move(mechanism_indices_to_display)) {
+  dialog_model_observation_.Observe(dialog_model);
+}
 
 TransportHoverListModel::~TransportHoverListModel() = default;
 
-bool TransportHoverListModel::ShouldShowPlaceholderForEmptyList() const {
-  return false;
-}
-
-base::string16 TransportHoverListModel::GetPlaceholderText() const {
-  return base::string16();
-}
-
-const gfx::VectorIcon* TransportHoverListModel::GetPlaceholderIcon() const {
-  return &gfx::kNoneIcon;
-}
-
-std::vector<int> TransportHoverListModel::GetThrobberTags() const {
-  return {};
-}
-
 std::vector<int> TransportHoverListModel::GetButtonTags() const {
-  std::vector<int> tag_list(transport_list_.size());
-  std::transform(
-      transport_list_.begin(), transport_list_.end(), tag_list.begin(),
-      [](const auto& transport) { return base::strict_cast<int>(transport); });
-  if (show_win_native_api_item_) {
-    tag_list.push_back(kNativeWinApiTag);
-  }
-
-  return tag_list;
+  return mechanism_indices_to_display_;
 }
 
-base::string16 TransportHoverListModel::GetItemText(int item_tag) const {
-  if (item_tag == kNativeWinApiTag) {
-    return l10n_util::GetStringUTF16(
-        IDS_WEBAUTHN_TRANSPORT_POPUP_DIFFERENT_AUTHENTICATOR_WIN);
-  }
-  return GetTransportHumanReadableName(
-      static_cast<AuthenticatorTransport>(item_tag),
-      TransportSelectionContext::kTransportSelectionSheet);
+std::u16string TransportHoverListModel::GetItemText(int item_tag) const {
+  return dialog_model_observation_.GetSource()->mechanisms[item_tag].name;
 }
 
-base::string16 TransportHoverListModel::GetDescriptionText(int item_tag) const {
-  return base::string16();
+std::u16string TransportHoverListModel::GetDescriptionText(int item_tag) const {
+  return dialog_model_observation_.GetSource()
+      ->mechanisms[item_tag]
+      .description;
 }
 
-const gfx::VectorIcon* TransportHoverListModel::GetItemIcon(
-    int item_tag) const {
-  if (item_tag == kNativeWinApiTag) {
-    return GetTransportVectorIcon(
-        AuthenticatorTransport::kUsbHumanInterfaceDevice);
-  }
+ui::ImageModel TransportHoverListModel::GetItemIcon(int item_tag) const {
+  return ui::ImageModel::FromVectorIcon(
+      *dialog_model_observation_.GetSource()->mechanisms[item_tag].icon,
+      IsButtonEnabled(item_tag) ? ui::kColorIcon : ui::kColorIconDisabled, 20);
+}
 
-  return GetTransportVectorIcon(static_cast<AuthenticatorTransport>(item_tag));
+bool TransportHoverListModel::IsButtonEnabled(int item_tag) const {
+  return !dialog_model_observation_.GetSource()->ui_disabled_;
 }
 
 void TransportHoverListModel::OnListItemSelected(int item_tag) {
-  if (!delegate_) {
-    return;
-  }
-
-  if (item_tag == kNativeWinApiTag) {
-    delegate_->StartWinNativeApi();
-    return;
-  }
-  delegate_->OnTransportSelected(static_cast<AuthenticatorTransport>(item_tag));
+  const auto& mech =
+      dialog_model_observation_.GetSource()->mechanisms[item_tag];
+  webauthn::user_actions::RecordMechanismClick(mech);
+  mech.callback.Run();
 }
 
 size_t TransportHoverListModel::GetPreferredItemCount() const {
-  return transport_list_.size() + static_cast<int>(show_win_native_api_item_);
+  return mechanism_indices_to_display_.size();
 }
 
-bool TransportHoverListModel::StyleForTwoLines() const {
-  return false;
+void TransportHoverListModel::OnModelDestroyed(
+    AuthenticatorRequestDialogModel* model) {
+  dialog_model_observation_.Reset();
 }

@@ -34,7 +34,7 @@
 #include "third_party/blink/renderer/core/svg/properties/svg_animated_property.h"
 #include "third_party/blink/renderer/core/svg/svg_transform_list_tear_off.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -55,6 +55,11 @@ class SVGAnimatedTransformList final
             MakeGarbageCollected<SVGTransformList>(),
             css_property_id) {}
 
+  const CSSValue* CssValue() const override {
+    DCHECK(HasPresentationAttributeMapping());
+    return CurrentValue()->CssValue();
+  }
+
   void Trace(Visitor* visitor) const override {
     SVGAnimatedProperty<SVGTransformList>::Trace(visitor);
     ScriptWrappable::Trace(visitor);
@@ -63,4 +68,4 @@ class SVGAnimatedTransformList final
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_ANIMATED_TRANSFORM_LIST_H_

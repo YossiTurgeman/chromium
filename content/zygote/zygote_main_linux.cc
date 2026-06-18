@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,10 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/command_line.h"
 #include "base/compiler_specific.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/posix/unix_domain_socket.h"
@@ -29,6 +31,7 @@
 #include "base/system/sys_info.h"
 #include "build/build_config.h"
 #include "content/common/zygote/zygote_commands_linux.h"
+#include "content/public/common/content_descriptors.h"
 #include "content/public/common/zygote/sandbox_support_linux.h"
 #include "content/public/common/zygote/zygote_fork_delegate_linux.h"
 #include "content/zygote/zygote_linux.h"
@@ -42,8 +45,6 @@
 #include "sandbox/policy/linux/sandbox_linux.h"
 #include "sandbox/policy/sandbox.h"
 #include "sandbox/policy/switches.h"
-#include "services/service_manager/embedder/descriptors.h"
-#include "services/service_manager/embedder/switches.h"
 #include "third_party/icu/source/i18n/unicode/timezone.h"
 
 namespace content {
@@ -70,21 +71,6 @@ base::OnceClosure ClosureFromTwoClosures(base::OnceClosure one,
 
 }  // namespace
 
-// This function triggers the static and lazy construction of objects that need
-// to be created before imposing the sandbox.
-static void ZygotePreSandboxInit() {
-  base::RandUint64();
-
-  base::SysInfo::AmountOfPhysicalMemory();
-  base::SysInfo::NumberOfProcessors();
-
-  // ICU DateFormat class (used in base/time_format.cc) needs to get the
-  // Olson timezone ID by accessing the zoneinfo files on disk. After
-  // TimeZone::createDefault is called once here, the timezone ID is
-  // cached and there's no more need to access the file system.
-  std::unique_ptr<icu::TimeZone> zone(icu::TimeZone::createDefault());
-}
-
 static bool CreateInitProcessReaper(
     base::OnceClosure post_fork_parent_callback) {
   // The current process becomes init(1), this function returns from a
@@ -109,7 +95,7 @@ static bool EnterSuidSandbox(sandbox::SetuidSandboxClient* setuid_sandbox,
   if (!setuid_sandbox->IsSuidSandboxUpToDate()) {
     LOG(WARNING) << "You are using a wrong version of the setuid binary!\n"
                     "Please read "
-                    "https://chromium.googlesource.com/chromium/src/+/master/"
+                    "https://chromium.googlesource.com/chromium/src/+/main/"
                     "docs/linux/suid_sandbox_development.md."
                     "\n\n";
   }
@@ -152,8 +138,6 @@ static void EnterLayerOneSandbox(sandbox::policy::SandboxLinux* linux_sandbox,
                                  const bool using_layer1_sandbox,
                                  base::OnceClosure post_fork_parent_callback) {
   DCHECK(linux_sandbox);
-
-  ZygotePreSandboxInit();
 
 // Check that the pre-sandbox initialization didn't spawn threads.
 // It's not just our code which may do so - some system-installed libraries
@@ -204,9 +188,9 @@ bool ZygoteMain(
 
   if (using_layer1_sandbox) {
     // Let the ZygoteHost know we're booting up.
-    if (!base::UnixDomainSocket::SendMsg(
-            kZygoteSocketPairFd, kZygoteBootMessage, sizeof(kZygoteBootMessage),
-            std::vector<int>())) {
+    if (!base::UnixDomainSocket::SendMsg(kZygoteSocketPairFd,
+                                         base::as_byte_span(kZygoteBootMessage),
+                                         std::vector<int>())) {
       // This is not a CHECK failure because the browser process could either
       // crash or quickly exit while the zygote is starting. In either case a
       // zygote crash is not useful. https://crbug.com/692227
@@ -237,8 +221,7 @@ bool ZygoteMain(
 
   Zygote zygote(sandbox_flags, std::move(fork_delegates),
                 base::GlobalDescriptors::Descriptor(
-                    static_cast<uint32_t>(service_manager::kSandboxIPCChannel),
-                    GetSandboxFD()));
+                    static_cast<uint32_t>(kSandboxIPCChannel), GetSandboxFD()));
 
   // This function call can return multiple times, once per fork().
   return zygote.ProcessRequests();

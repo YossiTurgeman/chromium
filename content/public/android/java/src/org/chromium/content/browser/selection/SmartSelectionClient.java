@@ -1,8 +1,10 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.content.browser.selection;
+
+import static org.chromium.build.NullUtil.assumeNonNull;
 
 import android.content.Context;
 import android.os.Build;
@@ -12,11 +14,19 @@ import android.view.textclassifier.TextClassifier;
 
 import androidx.annotation.IntDef;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.base.ObserverList;
+import org.chromium.base.UserData;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.content_public.browser.SelectAroundCaretResult;
 import org.chromium.content_public.browser.SelectionClient;
-import org.chromium.content_public.browser.SelectionMetricsLogger;
+import org.chromium.content_public.browser.SelectionEventProcessor;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.ui.base.WindowAndroid;
 import org.chromium.ui.touch_selection.SelectionEventType;
@@ -26,12 +36,13 @@ import java.lang.annotation.RetentionPolicy;
 
 /**
  * A class that controls Smart Text selection. Smart Text selection automatically augments the
- * selected boundaries and classifies the selected text based on the context.
- * This class requests the selection together with its surrounding text from the focused frame and
- * sends it to SmartSelectionProvider which does the classification itself.
+ * selected boundaries and classifies the selected text based on the context. This class requests
+ * the selection together with its surrounding text from the focused frame and sends it to
+ * SmartSelectionProvider which does the classification itself.
  */
 @JNINamespace("content")
-public class SmartSelectionClient implements SelectionClient {
+@NullMarked
+public class SmartSelectionClient implements SelectionClient, UserData {
     @IntDef({RequestType.CLASSIFY, RequestType.SUGGEST_AND_CLASSIFY})
     @Retention(RetentionPolicy.SOURCE)
     private @interface RequestType {
@@ -49,35 +60,47 @@ public class SmartSelectionClient implements SelectionClient {
     private static final int NUM_EXTRA_CHARS = 240;
 
     private long mNativeSmartSelectionClient;
+
     private SmartSelectionProvider mProvider;
+
     private ResultCallback mCallback;
-    private SmartSelectionMetricsLogger mSmartSelectionMetricsLogger;
+
+    private @Nullable SmartSelectionEventProcessor mSmartSelectionEventProcessor;
+
+    /** Observer list for surrounding text received. */
+    private final ObserverList<SurroundingTextCallback> mSurroundingTextReceivedListeners =
+            new ObserverList<>();
 
     /**
-     * Creates the SmartSelectionClient. Returns null in case SmartSelectionProvider does not exist
-     * in the system.
+     * Creates the SmartSelectionClient if not present. Returns null in case SmartSelectionProvider
+     * does not exist in the system.
      */
-    public static SmartSelectionClient create(ResultCallback callback, WebContents webContents) {
-        WindowAndroid windowAndroid = webContents.getTopLevelNativeWindow();
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || windowAndroid == null) return null;
-
-        // Don't do Smart Selection when device is not provisioned or in incognito mode.
-        if (!isDeviceProvisioned(windowAndroid.getContext().get()) || webContents.isIncognito()) {
+    public static @Nullable SmartSelectionClient fromWebContents(
+            ResultCallback callback, WebContents webContents) {
+        if (skipForWebContents(webContents)) {
             return null;
         }
 
-        return new SmartSelectionClient(callback, webContents);
+        SmartSelectionClient client =
+                assumeNonNull(
+                        webContents.getOrSetUserData(
+                                SmartSelectionClient.class, SmartSelectionClient::new));
+        client.setCallback(callback, webContents);
+        return client;
     }
 
-    private SmartSelectionClient(ResultCallback callback, WebContents webContents) {
-        assert Build.VERSION.SDK_INT >= Build.VERSION_CODES.O;
-        mProvider = new SmartSelectionProvider(callback, webContents);
-        mCallback = callback;
+    private SmartSelectionClient(WebContents webContents) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            mSmartSelectionMetricsLogger = SmartSelectionMetricsLogger.create(webContents);
+            mSmartSelectionEventProcessor = SmartSelectionEventProcessor.create(webContents);
         }
-        mNativeSmartSelectionClient =
-                SmartSelectionClientJni.get().init(SmartSelectionClient.this, webContents);
+        mNativeSmartSelectionClient = SmartSelectionClientJni.get().init(webContents);
+    }
+
+    @Initializer
+    private void setCallback(ResultCallback callback, WebContents webContents) {
+        mCallback = callback;
+        mProvider =
+                new SmartSelectionProvider(callback, webContents, mSmartSelectionEventProcessor);
     }
 
     @CalledByNative
@@ -95,7 +118,7 @@ public class SmartSelectionClient implements SelectionClient {
     public void onSelectionEvent(@SelectionEventType int eventType, float posXPix, float posYPix) {}
 
     @Override
-    public void selectWordAroundCaretAck(boolean didSelect, int startAdjust, int endAdjust) {}
+    public void selectAroundCaretAck(@Nullable SelectAroundCaretResult result) {}
 
     @Override
     public boolean requestSelectionPopupUpdates(boolean shouldSuggest) {
@@ -107,16 +130,15 @@ public class SmartSelectionClient implements SelectionClient {
     @Override
     public void cancelAllRequests() {
         if (mNativeSmartSelectionClient != 0) {
-            SmartSelectionClientJni.get().cancelAllRequests(
-                    mNativeSmartSelectionClient, SmartSelectionClient.this);
+            SmartSelectionClientJni.get().cancelAllRequests(mNativeSmartSelectionClient);
         }
 
         mProvider.cancelAllRequests();
     }
 
     @Override
-    public SelectionMetricsLogger getSelectionMetricsLogger() {
-        return mSmartSelectionMetricsLogger;
+    public @Nullable SelectionEventProcessor getSelectionEventProcessor() {
+        return mSmartSelectionEventProcessor;
     }
 
     @Override
@@ -125,12 +147,12 @@ public class SmartSelectionClient implements SelectionClient {
     }
 
     @Override
-    public TextClassifier getTextClassifier() {
+    public @Nullable TextClassifier getTextClassifier() {
         return mProvider.getTextClassifier();
     }
 
     @Override
-    public TextClassifier getCustomTextClassifier() {
+    public @Nullable TextClassifier getCustomTextClassifier() {
         return mProvider.getCustomTextClassifier();
     }
 
@@ -140,13 +162,27 @@ public class SmartSelectionClient implements SelectionClient {
             return;
         }
 
-        SmartSelectionClientJni.get().requestSurroundingText(mNativeSmartSelectionClient,
-                SmartSelectionClient.this, NUM_EXTRA_CHARS, callbackData);
+        SmartSelectionClientJni.get()
+                .requestSurroundingText(mNativeSmartSelectionClient, NUM_EXTRA_CHARS, callbackData);
+    }
+
+    @Override
+    public void addSurroundingTextReceivedListeners(SurroundingTextCallback observer) {
+        mSurroundingTextReceivedListeners.addObserver(observer);
+    }
+
+    @Override
+    public void removeSurroundingTextReceivedListeners(SurroundingTextCallback observer) {
+        mSurroundingTextReceivedListeners.removeObserver(observer);
     }
 
     @CalledByNative
     private void onSurroundingTextReceived(
             @RequestType int callbackData, String text, int start, int end) {
+        for (SurroundingTextCallback observer : mSurroundingTextReceivedListeners) {
+            observer.onSurroundingTextReceived(text, start, end);
+        }
+
         if (!textHasValidSelection(text, start, end)) {
             mCallback.onClassified(new Result());
             return;
@@ -167,12 +203,12 @@ public class SmartSelectionClient implements SelectionClient {
         }
     }
 
-    private static boolean isDeviceProvisioned(Context context) {
+    private static boolean isDeviceProvisioned(@Nullable Context context) {
         if (context == null || context.getContentResolver() == null) return true;
         // Returns false when device is not provisioned, i.e. before a new device went through
         // signup process.
         return Settings.Global.getInt(
-                       context.getContentResolver(), Settings.Global.DEVICE_PROVISIONED, 0)
+                        context.getContentResolver(), Settings.Global.DEVICE_PROVISIONED, 0)
                 != 0;
     }
 
@@ -180,11 +216,34 @@ public class SmartSelectionClient implements SelectionClient {
         return !TextUtils.isEmpty(text) && 0 <= start && start < end && end <= text.length();
     }
 
+    private static boolean skipForWebContents(WebContents webContents) {
+        WindowAndroid windowAndroid = webContents.getTopLevelNativeWindow();
+        if (windowAndroid == null) return true;
+
+        // Smart selection is not supported if the device is unprovisioned or if the WebContents is
+        // in incognito mode.
+        return !isDeviceProvisioned(windowAndroid.getContext().get()) || webContents.isIncognito();
+    }
+
+    /**
+     * Called only by native so there is no need to check {@link #skipForWebContents(WebContents)}
+     * as it has historically always had access to the Java object after creation. If this is ever
+     * invoked elsewhere or as part of the public C++ API, then a check should be added.
+     */
+    @CalledByNative
+    private static @Nullable SmartSelectionClient getFromWebContents(
+            @JniType("content::WebContents*") WebContents webContents) {
+        return webContents.getOrSetUserData(
+                SmartSelectionClient.class, /* userDataFactory= */ null);
+    }
+
     @NativeMethods
     interface Natives {
-        long init(SmartSelectionClient caller, WebContents webContents);
-        void requestSurroundingText(long nativeSmartSelectionClient, SmartSelectionClient caller,
-                int numExtraCharacters, int callbackData);
-        void cancelAllRequests(long nativeSmartSelectionClient, SmartSelectionClient caller);
+        long init(@JniType("content::WebContents*") WebContents webContents);
+
+        void requestSurroundingText(
+                long nativeSmartSelectionClient, int numExtraCharacters, int callbackData);
+
+        void cancelAllRequests(long nativeSmartSelectionClient);
     }
 }

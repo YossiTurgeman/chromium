@@ -1,43 +1,45 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/css/css_syntax_string_parser.h"
+
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/core/css/css_syntax_component.h"
-#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
 
 class CSSSyntaxStringParserTest : public testing::Test {
  public:
-  base::Optional<CSSSyntaxComponent> ParseSingleComponent(
-      const String& syntax) {
+  std::optional<CSSSyntaxComponent> ParseSingleComponent(const String& syntax) {
     auto definition = CSSSyntaxStringParser(syntax).Parse();
-    if (!definition)
-      return base::nullopt;
-    if (definition->Components().size() != 1)
-      return base::nullopt;
+    if (!definition) {
+      return std::nullopt;
+    }
+    if (definition->Components().size() != 1) {
+      return std::nullopt;
+    }
     return definition->Components()[0];
   }
 
-  base::Optional<CSSSyntaxType> ParseSingleType(const String& syntax) {
+  std::optional<CSSSyntaxType> ParseSingleType(const String& syntax) {
     auto component = ParseSingleComponent(syntax);
-    return component ? base::make_optional(component->GetType())
-                     : base::nullopt;
+    return component ? std::make_optional(component->GetType()) : std::nullopt;
   }
 
   String ParseSingleIdent(const String& syntax) {
     auto component = ParseSingleComponent(syntax);
-    if (!component || component->GetType() != CSSSyntaxType::kIdent)
+    if (!component || component->GetType() != CSSSyntaxType::kIdent) {
       return g_empty_string;
+    }
     return component->GetString();
   }
 
   size_t ParseNumberOfComponents(const String& syntax) {
     auto definition = CSSSyntaxStringParser(syntax).Parse();
-    if (!definition)
+    if (!definition) {
       return 0;
+    }
     return definition->Components().size();
   }
 
@@ -122,13 +124,6 @@ TEST_F(CSSSyntaxStringParserTest, InvalidIdents) {
   EXPECT_FALSE(CSSSyntaxStringParser("unset").Parse());
   EXPECT_FALSE(CSSSyntaxStringParser("default").Parse());
   EXPECT_FALSE(CSSSyntaxStringParser("revert").Parse());
-
-  // 'revert' is forbidden also with CSSRevert toggled.
-  {
-    ScopedCSSRevertForTest scoped_revert(
-        !RuntimeEnabledFeatures::CSSRevertEnabled());
-    EXPECT_FALSE(CSSSyntaxStringParser("revert").Parse());
-  }
 }
 
 TEST_F(CSSSyntaxStringParserTest, Combinator) {

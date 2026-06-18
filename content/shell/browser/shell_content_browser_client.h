@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,19 +8,29 @@
 #include <memory>
 #include <string>
 
-#include "base/callback.h"
-#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "content/public/browser/content_browser_client.h"
 #include "content/shell/browser/shell_speech_recognition_manager_delegate.h"
+#include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
+#include "third_party/blink/public/mojom/navigation/navigation_params.mojom.h"
+
+class PrefService;
+
+#if BUILDFLAG(IS_IOS)
+namespace permissions {
+class BluetoothDelegateImpl;
+}
+#endif
 
 namespace content {
+class NavigationThrottleRegistry;
 class ShellBrowserContext;
 class ShellBrowserMainParts;
 
-std::string GetShellUserAgent();
 std::string GetShellLanguage();
 blink::UserAgentMetadata GetShellUserAgentMetadata();
 
@@ -32,44 +42,65 @@ class ShellContentBrowserClient : public ContentBrowserClient {
   ShellContentBrowserClient();
   ~ShellContentBrowserClient() override;
 
-  // The value supplied here is set when creating the NetworkContext.
-  // Specifically
-  // network::mojom::NetworkContext::allow_any_cors_exempt_header_for_browser.
-  static void set_allow_any_cors_exempt_header_for_browser(bool value) {
-    allow_any_cors_exempt_header_for_browser_ = value;
-  }
-
   // ContentBrowserClient overrides.
   std::unique_ptr<BrowserMainParts> CreateBrowserMainParts(
-      const MainFunctionParams& parameters) override;
+      bool is_integration_test) override;
   bool IsHandledURL(const GURL& url) override;
-  bool ShouldTerminateOnServiceQuit(
-      const service_manager::Identity& id) override;
+  bool HasCustomSchemeHandler(content::BrowserContext* browser_context,
+                              const std::string& scheme) override;
+  std::vector<std::unique_ptr<blink::URLLoaderThrottle>>
+  CreateURLLoaderThrottles(
+      const network::ResourceRequest& request,
+      BrowserContext* browser_context,
+      const base::RepeatingCallback<WebContents*()>& wc_getter,
+      NavigationUIData* navigation_ui_data,
+      FrameTreeNodeId frame_tree_node_id,
+      std::optional<int64_t> navigation_id) override;
+  bool AreIsolatedWebAppsEnabled(BrowserContext* browser_context) override;
   void AppendExtraCommandLineSwitches(base::CommandLine* command_line,
                                       int child_process_id) override;
   std::string GetAcceptLangs(BrowserContext* context) override;
   std::string GetDefaultDownloadName() override;
-  WebContentsViewDelegate* GetWebContentsViewDelegate(
+  std::unique_ptr<WebContentsViewDelegate> GetWebContentsViewDelegate(
       WebContents* web_contents) override;
-  scoped_refptr<content::QuotaPermissionContext> CreateQuotaPermissionContext()
-      override;
+  bool ShouldUrlUseApplicationIsolationLevel(BrowserContext* browser_context,
+                                             const GURL& url) override;
+  bool IsSharedStorageAllowed(
+      content::BrowserContext* browser_context,
+      content::RenderFrameHost* rfh,
+      const url::Origin& top_frame_origin,
+      const url::Origin& accessing_origin,
+      std::string* out_debug_message,
+      bool* out_block_is_site_setting_specific) override;
+  bool IsSharedStorageSelectURLAllowed(
+      content::BrowserContext* browser_context,
+      const url::Origin& top_frame_origin,
+      const url::Origin& accessing_origin,
+      std::string* out_debug_message,
+      bool* out_block_is_site_setting_specific) override;
   GeneratedCodeCacheSettings GetGeneratedCodeCacheSettings(
       content::BrowserContext* context) override;
   base::OnceClosure SelectClientCertificate(
+      BrowserContext* browser_context,
+      int process_id,
       WebContents* web_contents,
       net::SSLCertRequestInfo* cert_request_info,
       net::ClientCertIdentityList client_certs,
       std::unique_ptr<ClientCertificateDelegate> delegate) override;
   SpeechRecognitionManagerDelegate* CreateSpeechRecognitionManagerDelegate()
       override;
-  void OverrideWebkitPrefs(RenderViewHost* render_view_host,
-                           blink::web_pref::WebPreferences* prefs) override;
-  base::FilePath GetFontLookupTableCacheDir() override;
-  DevToolsManagerDelegate* GetDevToolsManagerDelegate() override;
+  void OverrideWebPreferences(WebContents* web_contents,
+                              SiteInstance& main_frame_site,
+                              blink::web_pref::WebPreferences* prefs) override;
+  std::unique_ptr<content::DevToolsManagerDelegate>
+  CreateDevToolsManagerDelegate() override;
   void ExposeInterfacesToRenderer(
       service_manager::BinderRegistry* registry,
       blink::AssociatedInterfaceRegistry* associated_registry,
       RenderProcessHost* render_process_host) override;
+  void ExposeInterfacesToChild(
+      mojo::BinderMapWithContext<content::BrowserChildProcessHost*>* map)
+      override;
   mojo::Remote<::media::mojom::MediaService> RunSecondaryMediaService()
       override;
   void RegisterBrowserInterfaceBindersForFrame(
@@ -78,155 +109,155 @@ class ShellContentBrowserClient : public ContentBrowserClient {
   void OpenURL(SiteInstance* site_instance,
                const OpenURLParams& params,
                base::OnceCallback<void(WebContents*)> callback) override;
-  std::vector<std::unique_ptr<NavigationThrottle>> CreateThrottlesForNavigation(
-      NavigationHandle* navigation_handle) override;
+  void CreateThrottlesForNavigation(
+      NavigationThrottleRegistry& registry) override;
   std::unique_ptr<LoginDelegate> CreateLoginDelegate(
       const net::AuthChallengeInfo& auth_info,
       content::WebContents* web_contents,
+      content::BrowserContext* browser_context,
       const content::GlobalRequestID& request_id,
-      bool is_main_frame,
+      bool is_request_for_primary_main_frame_navigation,
+      bool is_request_for_navigation,
       const GURL& url,
       scoped_refptr<net::HttpResponseHeaders> response_headers,
       bool first_auth_attempt,
-      LoginAuthRequiredCallback auth_required_callback) override;
-  base::DictionaryValue GetNetLogConstants() override;
+      GuestPageHolder* guest,
+      LoginDelegate::LoginAuthRequiredCallback auth_required_callback) override;
+  base::DictValue GetNetLogConstants() override;
   base::FilePath GetSandboxedStorageServiceDataDirectory() override;
+  base::FilePath GetFirstPartySetsDirectory() override;
+  std::optional<base::FilePath> GetLocalTracesDirectory() override;
   std::string GetUserAgent() override;
   blink::UserAgentMetadata GetUserAgentMetadata() override;
   void OverrideURLLoaderFactoryParams(
       BrowserContext* browser_context,
       const url::Origin& origin,
       bool is_for_isolated_world,
+      bool is_for_service_worker,
       network::mojom::URLLoaderFactoryParams* factory_params) override;
-#if defined(OS_LINUX) || defined(OS_CHROMEOS) || defined(OS_ANDROID)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
   void GetAdditionalMappedFilesForChildProcess(
       const base::CommandLine& command_line,
       int child_process_id,
       content::PosixFileDescriptorInfo* mappings) override;
-#endif  // defined(OS_LINUX) || defined(OS_CHROMEOS) || defined(OS_ANDROID)
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+        // BUILDFLAG(IS_ANDROID)
+  device::GeolocationSystemPermissionManager*
+  GetGeolocationSystemPermissionManager() override;
+  void OnNetworkServiceCreated(
+      network::mojom::NetworkService* network_service) override;
   void ConfigureNetworkContextParams(
       BrowserContext* context,
       bool in_memory,
       const base::FilePath& relative_partition_path,
       network::mojom::NetworkContextParams* network_context_params,
-      network::mojom::CertVerifierCreationParams* cert_verifier_creation_params)
-      override;
+      cert_verifier::mojom::CertVerifierCreationParams*
+          cert_verifier_creation_params) override;
   std::vector<base::FilePath> GetNetworkContextsParentDirectory() override;
+#if BUILDFLAG(IS_IOS)
+  BluetoothDelegate* GetBluetoothDelegate() override;
+#endif
   void BindBrowserControlInterface(mojo::ScopedMessagePipeHandle pipe) override;
+  void GetHyphenationDictionary(
+      base::OnceCallback<void(const base::FilePath&)>) override;
+  bool HasErrorPage(int http_status_code) override;
+  void OnWebContentsCreated(WebContents* web_contents) override;
+
+  void CreateFeatureListAndFieldTrials();
 
   ShellBrowserContext* browser_context();
   ShellBrowserContext* off_the_record_browser_context();
-  ShellBrowserMainParts* shell_browser_main_parts() {
-    return shell_browser_main_parts_;
-  }
+  ShellBrowserMainParts* shell_browser_main_parts();
 
   // Used for content_browsertests.
-  void set_web_contents_view_delegate_callback(
-      base::RepeatingCallback<WebContentsViewDelegate*(WebContents*)>
-          web_contents_view_delegate_callback) {
-    web_contents_view_delegate_callback_ =
-        std::move(web_contents_view_delegate_callback);
-  }
+  using SelectClientCertificateCallback = base::OnceCallback<base::OnceClosure(
+      content::WebContents* web_contents,
+      net::SSLCertRequestInfo* cert_request_info,
+      net::ClientCertIdentityList client_certs,
+      std::unique_ptr<content::ClientCertificateDelegate> delegate)>;
+
   void set_select_client_certificate_callback(
-      base::OnceClosure select_client_certificate_callback) {
+      SelectClientCertificateCallback select_client_certificate_callback) {
     select_client_certificate_callback_ =
         std::move(select_client_certificate_callback);
   }
-  void set_should_terminate_on_service_quit_callback(
-      base::OnceCallback<bool(const service_manager::Identity&)> callback) {
-    should_terminate_on_service_quit_callback_ = std::move(callback);
-  }
   void set_login_request_callback(
-      base::OnceCallback<void(bool is_main_frame)> login_request_callback) {
+      base::OnceCallback<void(bool is_primary_main_frame_navigation,
+                              bool is_navigation)> login_request_callback) {
     login_request_callback_ = std::move(login_request_callback);
   }
   void set_url_loader_factory_params_callback(
       base::RepeatingCallback<void(
           const network::mojom::URLLoaderFactoryParams*,
           const url::Origin&,
-          bool is_for_isolated_world)> url_loader_factory_params_callback) {
+          bool is_for_isolated_world,
+          bool is_for_service_worker)> url_loader_factory_params_callback) {
     url_loader_factory_params_callback_ =
         std::move(url_loader_factory_params_callback);
   }
-  void set_expose_interfaces_to_renderer_callback(
-      base::RepeatingCallback<
-          void(service_manager::BinderRegistry* registry,
-               blink::AssociatedInterfaceRegistry* associated_registry,
-               RenderProcessHost* render_process_host)>
-          expose_interfaces_to_renderer_callback) {
-    expose_interfaces_to_renderer_callback_ =
-        expose_interfaces_to_renderer_callback;
-  }
-  void set_register_browser_interface_binders_for_frame_callback(
-      base::RepeatingCallback<
-          void(RenderFrameHost* render_frame_host,
-               mojo::BinderMapWithContext<RenderFrameHost*>* map)>
-          register_browser_interface_binders_for_frame_callback) {
-    register_browser_interface_binders_for_frame_callback_ =
-        register_browser_interface_binders_for_frame_callback;
-  }
   void set_create_throttles_for_navigation_callback(
-      base::RepeatingCallback<std::vector<std::unique_ptr<NavigationThrottle>>(
-          NavigationHandle*)> create_throttles_for_navigation_callback) {
+      base::RepeatingCallback<void(NavigationThrottleRegistry&)>
+          create_throttles_for_navigation_callback) {
     create_throttles_for_navigation_callback_ =
         create_throttles_for_navigation_callback;
   }
 
-  void set_override_web_preferences_callback(
-      base::RepeatingCallback<void(blink::web_pref::WebPreferences*)>
-          callback) {
-    override_web_preferences_callback_ = std::move(callback);
-  }
+#if BUILDFLAG(IS_IOS)
+  bool IsJITEnabled();
+  void SetJITEnabled(bool value);
+#endif
 
  protected:
   // Call this if CreateBrowserMainParts() is overridden in a subclass.
-  void set_browser_main_parts(ShellBrowserMainParts* parts) {
-    shell_browser_main_parts_ = parts;
-  }
+  void set_browser_main_parts(ShellBrowserMainParts* parts);
 
   // Used by ConfigureNetworkContextParams(), and can be overridden to change
   // the parameters used there.
   virtual void ConfigureNetworkContextParamsForShell(
       BrowserContext* context,
       network::mojom::NetworkContextParams* context_params,
-      network::mojom::CertVerifierCreationParams*
+      cert_verifier::mojom::CertVerifierCreationParams*
           cert_verifier_creation_params);
 
  private:
+  // For GetShellContentBrowserClientInstances().
+  friend class ContentBrowserTestContentBrowserClient;
+
+  // Returns the list of ShellContentBrowserClients ordered by time created.
+  // If a test overrides ContentBrowserClient, this list will have more than
+  // one item.
+  static const std::vector<ShellContentBrowserClient*>&
+  GetShellContentBrowserClientInstances();
+
   static bool allow_any_cors_exempt_header_for_browser_;
 
-  base::RepeatingCallback<WebContentsViewDelegate*(WebContents*)>
-      web_contents_view_delegate_callback_;
-  base::OnceClosure select_client_certificate_callback_;
-  base::OnceCallback<bool(const service_manager::Identity&)>
-      should_terminate_on_service_quit_callback_;
-  base::OnceCallback<void(bool is_main_frame)> login_request_callback_;
+  SelectClientCertificateCallback select_client_certificate_callback_;
+  base::OnceCallback<void(bool is_primary_main_frame_navigation,
+                          bool is_navigation)>
+      login_request_callback_;
   base::RepeatingCallback<void(const network::mojom::URLLoaderFactoryParams*,
                                const url::Origin&,
-                               bool is_for_isolated_world)>
+                               bool is_for_isolated_world,
+                               bool is_for_service_worker)>
       url_loader_factory_params_callback_;
-  base::RepeatingCallback<void(
-      service_manager::BinderRegistry* registry,
-      blink::AssociatedInterfaceRegistry* associated_registry,
-      RenderProcessHost* render_process_host)>
-      expose_interfaces_to_renderer_callback_;
-  base::RepeatingCallback<void(
-      RenderFrameHost* render_frame_host,
-      mojo::BinderMapWithContext<RenderFrameHost*>* map)>
-      register_browser_interface_binders_for_frame_callback_;
-  base::RepeatingCallback<std::vector<std::unique_ptr<NavigationThrottle>>(
-      NavigationHandle*)>
+  base::RepeatingCallback<void(NavigationThrottleRegistry&)>
       create_throttles_for_navigation_callback_;
-  base::RepeatingCallback<void(blink::web_pref::WebPreferences*)>
-      override_web_preferences_callback_;
+#if BUILDFLAG(IS_IOS)
+  std::unique_ptr<permissions::BluetoothDelegateImpl> bluetooth_delegate_;
+#endif
 
-  // Owned by content::BrowserMainLoop.
-  ShellBrowserMainParts* shell_browser_main_parts_ = nullptr;
+  // NOTE: Tests may install a second ShellContentBrowserClient that becomes
+  // the ContentBrowserClient used by content. This has subtle implications
+  // for any state (variables) that are needed by ShellContentBrowserClient.
+  // Any state that needs to be the same across all ShellContentBrowserClients
+  // should be placed in SharedState (declared in
+  // shell_content_browser_client.cc). Any state that is specific to a
+  // particular instance should be placed here.
 };
 
 // The delay for sending reports when running with --run-web-tests
 constexpr base::TimeDelta kReportingDeliveryIntervalTimeForWebTests =
-    base::TimeDelta::FromMilliseconds(100);
+    base::Milliseconds(100);
 
 }  // namespace content
 

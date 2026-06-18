@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <memory>
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/core/css/resolver/style_resolver.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/html/html_object_element.h"
@@ -48,9 +49,12 @@ TEST_F(HTMLEmbedElementTest, FallbackState) {
 
   UpdateAllLifecyclePhasesForTest();
 
+  const ComputedStyle* initial_style =
+      GetDocument().GetStyleResolver().InitialStyleForElement();
+
   // We should get |true| as a result and don't trigger a DCHECK.
-  EXPECT_TRUE(static_cast<Element*>(embed)->LayoutObjectIsNeeded(
-      ComputedStyle::InitialStyle()));
+  EXPECT_TRUE(
+      static_cast<Element*>(embed)->LayoutObjectIsNeeded(*initial_style));
 
   // This call will update fallback state of the object.
   object->UpdatePlugin();
@@ -60,8 +64,40 @@ TEST_F(HTMLEmbedElementTest, FallbackState) {
   EXPECT_TRUE(object->WillUseFallbackContentAtLayout());
 
   UpdateAllLifecyclePhasesForTest();
-  EXPECT_TRUE(static_cast<Element*>(embed)->LayoutObjectIsNeeded(
-      ComputedStyle::InitialStyle()));
+  EXPECT_TRUE(
+      static_cast<Element*>(embed)->LayoutObjectIsNeeded(*initial_style));
+}
+
+TEST_F(HTMLEmbedElementTest, NotEnforceLayoutImageType) {
+  SetHtmlInnerHTML(R"HTML(
+    <object type="text/plain" id="object">
+      <embed id="embed" type="image/png">
+    </object>)HTML");
+  auto* object_element = GetElementById("object");
+  auto* object = To<HTMLObjectElement>(object_element);
+  auto* embed_element = GetElementById("embed");
+  auto* embed = To<HTMLEmbedElement>(embed_element);
+
+  EXPECT_TRUE(object->HasFallbackContent());
+  EXPECT_FALSE(object->UseFallbackContent());
+  EXPECT_FALSE(object->WillUseFallbackContentAtLayout());
+
+  UpdateAllLifecyclePhasesForTest();
+
+  const ComputedStyle* initial_style =
+      GetDocument().GetStyleResolver().InitialStyleForElement();
+
+  EXPECT_FALSE(
+      static_cast<Element*>(embed)->LayoutObjectIsNeeded(*initial_style));
+
+  object->UpdatePlugin();
+
+  EXPECT_TRUE(object->HasFallbackContent());
+  EXPECT_TRUE(object->UseFallbackContent());
+  EXPECT_FALSE(object->WillUseFallbackContentAtLayout());
+
+  EXPECT_TRUE(
+      static_cast<Element*>(embed)->LayoutObjectIsNeeded(*initial_style));
 }
 
 }  // namespace blink

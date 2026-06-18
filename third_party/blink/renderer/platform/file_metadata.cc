@@ -31,31 +31,20 @@
 #include "third_party/blink/renderer/platform/file_metadata.h"
 
 #include <limits>
+#include <optional>
 #include <string>
 
-#include "base/optional.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/filename_util.h"
-#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
 #include "third_party/blink/public/mojom/file/file_utilities.mojom-blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/file_path_conversion.h"
-#include "third_party/blink/public/platform/platform.h"
+#include "third_party/blink/public/platform/web_string.h"
+#include "third_party/blink/renderer/platform/mojo/mojo_binding_context.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
-#include "third_party/blink/renderer/platform/wtf/thread_specific.h"
 #include "url/gurl.h"
 
 namespace blink {
-
-namespace {
-
-mojo::Remote<mojom::blink::FileUtilitiesHost>& GetFileUtilitiesHost() {
-  DEFINE_THREAD_SAFE_STATIC_LOCAL(
-      ThreadSpecific<mojo::Remote<mojom::blink::FileUtilitiesHost>>,
-      thread_specific_host, ());
-  return *thread_specific_host;
-}
-
-}  // namespace
 
 // static
 FileMetadata FileMetadata::From(const base::File::Info& file_info) {
@@ -70,42 +59,27 @@ FileMetadata FileMetadata::From(const base::File::Info& file_info) {
   return file_metadata;
 }
 
-bool GetFileSize(const String& path, int64_t& result) {
+bool GetFileSize(const String& path,
+                 const MojoBindingContext& context,
+                 int64_t& result) {
   FileMetadata metadata;
-  if (!GetFileMetadata(path, metadata))
+  if (!GetFileMetadata(path, context, metadata))
     return false;
   result = metadata.length;
   return true;
 }
 
-bool GetFileModificationTime(const String& path,
-                             base::Optional<base::Time>& result) {
-  FileMetadata metadata;
-  if (!GetFileMetadata(path, metadata))
-    return false;
-  result = metadata.modification_time;
-  return true;
-}
-
-void RebindFileUtilitiesForTesting() {
-  auto& host = GetFileUtilitiesHost();
-  if (host) {
-    host.Unbind().reset();
-  }
-  Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
+bool GetFileMetadata(const String& path,
+                     const MojoBindingContext& context,
+                     FileMetadata& metadata) {
+  mojo::Remote<mojom::blink::FileUtilitiesHost> host;
+  context.GetBrowserInterfaceBroker().GetInterface(
       host.BindNewPipeAndPassReceiver());
-}
 
-bool GetFileMetadata(const String& path, FileMetadata& metadata) {
-  auto& host = GetFileUtilitiesHost();
-  if (!host) {
-    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
-        host.BindNewPipeAndPassReceiver());
-  }
-
-  base::Optional<base::File::Info> file_info;
-  if (!host->GetFileInfo(WebStringToFilePath(path), &file_info) || !file_info)
+  std::optional<base::File::Info> file_info;
+  if (!host->GetFileInfo(StringToFilePath(path), &file_info) || !file_info) {
     return false;
+  }
 
   metadata.modification_time =
       NullableTimeToOptionalTime(file_info->last_modified);
@@ -116,9 +90,15 @@ bool GetFileMetadata(const String& path, FileMetadata& metadata) {
 }
 
 KURL FilePathToURL(const String& path) {
-  GURL gurl = net::FilePathToFileURL(WebStringToFilePath(path));
+  base::FilePath file_path = StringToFilePath(path);
+#if BUILDFLAG(IS_ANDROID)
+  GURL gurl = file_path.IsContentUri() ? GURL(file_path.value())
+                                       : net::FilePathToFileURL(file_path);
+#else
+  GURL gurl = net::FilePathToFileURL(file_path);
+#endif
   const std::string& url_spec = gurl.possibly_invalid_spec();
-  return KURL(AtomicString::FromUTF8(url_spec.data(), url_spec.length()),
+  return KURL(AtomicString::FromUtf8(url_spec),
               gurl.parsed_for_possibly_invalid_spec(), gurl.is_valid());
 }
 

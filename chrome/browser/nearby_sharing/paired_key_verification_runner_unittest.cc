@@ -1,27 +1,27 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/nearby_sharing/paired_key_verification_runner.h"
 
 #include <stdint.h>
+
+#include <optional>
 #include <vector>
 
-#include "base/bind_helpers.h"
-#include "base/callback.h"
-#include "base/optional.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "base/time/time.h"
 #include "chrome/browser/nearby_sharing/certificates/fake_nearby_share_certificate_manager.h"
 #include "chrome/browser/nearby_sharing/certificates/nearby_share_decrypted_public_certificate.h"
 #include "chrome/browser/nearby_sharing/certificates/test_util.h"
-#include "chrome/browser/nearby_sharing/fake_nearby_connection.h"
 #include "chrome/browser/nearby_sharing/incoming_frames_reader.h"
-#include "chrome/browser/nearby_sharing/mock_nearby_process_manager.h"
 #include "chrome/browser/nearby_sharing/share_target.h"
 #include "chrome/services/sharing/public/proto/wire_format.pb.h"
-#include "chrome/test/base/testing_profile.h"
+#include "chromeos/ash/components/nearby/common/connections_manager/fake_nearby_connection.h"
+#include "chromeos/ash/services/nearby/public/cpp/mock_nearby_process_manager.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -40,27 +40,33 @@ const std::vector<uint8_t> kIncomingConnectionSignedData = {
     0x02, 0x21, 0x00, 0xd4, 0xe1, 0x1d, 0x14, 0xcb, 0x58, 0xf7, 0x02, 0xd5,
     0xab, 0x48, 0xe2, 0x2f, 0xcb, 0xc0, 0x53, 0x41, 0x06, 0x50, 0x65, 0x95,
     0x19, 0xa9, 0x22, 0x92, 0x00, 0x42, 0x01, 0x26, 0x25, 0xcb, 0x8c};
+const std::vector<uint8_t> kIncomingConnectionInvalidSignedData = {
+    0x72, 0xe5, 0x40, 0xa6, 0xdd, 0x1d, 0xfd, 0x44, 0xf2, 0x55, 0xd5, 0x15,
+    0x61, 0xe1, 0xe6, 0x15, 0x93, 0xa5, 0xf9, 0x94, 0x16, 0xcd, 0x8b, 0x0a,
+    0xb3, 0xca, 0xe6, 0x10, 0x6d, 0x22, 0x3e, 0x1e, 0x3f, 0x34, 0x23, 0x4f,
+    0xc2, 0x07, 0xae, 0xcc, 0xb0, 0xb2, 0x5e, 0x26, 0xca, 0x01, 0xd8, 0xe2,
+    0x3e, 0xc4, 0x54, 0x0b, 0xfd, 0xc4, 0xf1, 0xa7, 0xf5, 0xa8, 0x63, 0x10,
+    0x46, 0x48, 0xdc, 0x98, 0x0b, 0x8f, 0xc3, 0xee, 0xb4, 0x99, 0xb6};
 
-const base::TimeDelta kTimeout = base::TimeDelta::FromSeconds(1);
+const base::TimeDelta kTimeout = base::Seconds(1);
 
 class MockIncomingFramesReader : public IncomingFramesReader {
  public:
-  MockIncomingFramesReader(NearbyProcessManager* process_manager,
-                           Profile* profile,
+  MockIncomingFramesReader(ash::nearby::NearbyProcessManager* process_manager,
                            NearbyConnection* connection)
-      : IncomingFramesReader(process_manager, profile, connection) {}
+      : IncomingFramesReader(process_manager, connection) {}
 
   MOCK_METHOD(void,
               ReadFrame,
               (base::OnceCallback<
-                  void(base::Optional<sharing::mojom::V1FramePtr>)> callback),
+                  void(std::optional<sharing::mojom::V1FramePtr>)> callback),
               (override));
 
   MOCK_METHOD(
       void,
       ReadFrame,
       (sharing::mojom::V1Frame::Tag frame_type,
-       base::OnceCallback<void(base::Optional<sharing::mojom::V1FramePtr>)>
+       base::OnceCallback<void(std::optional<sharing::mojom::V1FramePtr>)>
            callback,
        base::TimeDelta timeout),
       (override));
@@ -89,17 +95,22 @@ PairedKeyVerificationRunner::PairedKeyVerificationResult Merge(
 class PairedKeyVerificationRunnerTest : public testing::Test {
  public:
   enum class ReturnFrameType {
-    // Return base::nullopt for the frame.
+    // Return std::nullopt for the frame.
     kNull,
     // Return an empty frame.
     kEmpty,
     // Return a valid frame.
     kValid,
+    // Return a valid frame where |signed_data| is invalid, but
+    // |optional_signed_data| is valid.
+    kOptionalSignedDataValid,
+    // Return an invalid frame where both |signed_data| and
+    // |optional_signed_data| are invalid.
+    kOptionalSignedDataInvalid,
   };
 
   PairedKeyVerificationRunnerTest()
-      : frames_reader_(&mock_nearby_process_manager_, &profile_, &connection_) {
-  }
+      : frames_reader_(&process_manager_, &connection_) {}
 
   void SetUp() override { share_target_.is_incoming = true; }
 
@@ -107,11 +118,11 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
                        bool restricted_to_contacts,
                        PairedKeyVerificationRunner::PairedKeyVerificationResult
                            expected_result) {
-    base::Optional<NearbyShareDecryptedPublicCertificate> public_certificate =
+    std::optional<NearbyShareDecryptedPublicCertificate> public_certificate =
         use_valid_public_certificate
-            ? base::make_optional<NearbyShareDecryptedPublicCertificate>(
+            ? std::make_optional<NearbyShareDecryptedPublicCertificate>(
                   GetNearbyShareTestDecryptedPublicCertificate())
-            : base::nullopt;
+            : std::nullopt;
 
     PairedKeyVerificationRunner runner(
         share_target_, kEndpointId, kAuthToken, &connection_,
@@ -132,32 +143,45 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
     EXPECT_CALL(
         frames_reader_,
         ReadFrame(
-            testing::Eq(sharing::mojom::V1Frame::Tag::PAIRED_KEY_ENCRYPTION),
+            testing::Eq(sharing::mojom::V1Frame::Tag::kPairedKeyEncryption),
             testing::_, testing::Eq(kTimeout)))
-        .WillOnce(testing::WithArg<1>(testing::Invoke(
+        .WillOnce(testing::WithArg<1>(
             [frame_type](
                 base::OnceCallback<void(
-                    base::Optional<sharing::mojom::V1FramePtr>)> callback) {
+                    std::optional<sharing::mojom::V1FramePtr>)> callback) {
               if (frame_type == ReturnFrameType::kNull) {
-                std::move(callback).Run(base::nullopt);
+                std::move(callback).Run(std::nullopt);
                 return;
               }
 
-              sharing::mojom::V1FramePtr mojo_v1frame =
-                  sharing::mojom::V1Frame::New();
+              sharing::mojom::V1FramePtr mojo_v1frame;
 
               if (frame_type == ReturnFrameType::kValid) {
-                mojo_v1frame->set_paired_key_encryption(
+                mojo_v1frame = sharing::mojom::V1Frame::NewPairedKeyEncryption(
                     sharing::mojom::PairedKeyEncryptionFrame::New(
                         kIncomingConnectionSignedData,
-                        kPrivateCertificateHashAuthToken));
+                        kPrivateCertificateHashAuthToken, std::nullopt));
+              } else if (frame_type ==
+                         ReturnFrameType::kOptionalSignedDataValid) {
+                mojo_v1frame = sharing::mojom::V1Frame::NewPairedKeyEncryption(
+                    sharing::mojom::PairedKeyEncryptionFrame::New(
+                        kIncomingConnectionInvalidSignedData,
+                        kPrivateCertificateHashAuthToken,
+                        kIncomingConnectionSignedData));
+              } else if (frame_type ==
+                         ReturnFrameType::kOptionalSignedDataInvalid) {
+                mojo_v1frame = sharing::mojom::V1Frame::NewPairedKeyEncryption(
+                    sharing::mojom::PairedKeyEncryptionFrame::New(
+                        kIncomingConnectionInvalidSignedData,
+                        kPrivateCertificateHashAuthToken,
+                        kIncomingConnectionInvalidSignedData));
               } else {
-                mojo_v1frame->set_paired_key_encryption(
+                mojo_v1frame = sharing::mojom::V1Frame::NewPairedKeyEncryption(
                     sharing::mojom::PairedKeyEncryptionFrame::New());
               }
 
               std::move(callback).Run(std::move(mojo_v1frame));
-            })));
+            }));
   }
 
   void SetUpPairedKeyResultFrame(
@@ -166,23 +190,22 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
           sharing::mojom::PairedKeyResultFrame_Status::kUnknown) {
     EXPECT_CALL(
         frames_reader_,
-        ReadFrame(testing::Eq(sharing::mojom::V1Frame::Tag::PAIRED_KEY_RESULT),
+        ReadFrame(testing::Eq(sharing::mojom::V1Frame::Tag::kPairedKeyResult),
                   testing::_, testing::Eq(kTimeout)))
-        .WillOnce(testing::WithArg<1>(testing::Invoke(
+        .WillOnce(testing::WithArg<1>(
             [=](base::OnceCallback<void(
-                    base::Optional<sharing::mojom::V1FramePtr>)> callback) {
+                    std::optional<sharing::mojom::V1FramePtr>)> callback) {
               if (frame_type == ReturnFrameType::kNull) {
-                std::move(callback).Run(base::nullopt);
+                std::move(callback).Run(std::nullopt);
                 return;
               }
 
               sharing::mojom::V1FramePtr mojo_v1frame =
-                  sharing::mojom::V1Frame::New();
-              mojo_v1frame->set_paired_key_result(
-                  sharing::mojom::PairedKeyResultFrame::New(status));
+                  sharing::mojom::V1Frame::NewPairedKeyResult(
+                      sharing::mojom::PairedKeyResultFrame::New(status));
 
               std::move(callback).Run(std::move(mojo_v1frame));
-            })));
+            }));
   }
 
   sharing::nearby::Frame GetWrittenFrame() {
@@ -215,10 +238,9 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
 
  protected:
   content::BrowserTaskEnvironment task_environment_;
-  testing::NiceMock<MockNearbyProcessManager> mock_nearby_process_manager_;
-  TestingProfile profile_;
   FakeNearbyConnection connection_;
   FakeNearbyShareCertificateManager certificate_manager_;
+  testing::NiceMock<ash::nearby::MockNearbyProcessManager> process_manager_;
   testing::NiceMock<MockIncomingFramesReader> frames_reader_;
   ShareTarget share_target_;
 };
@@ -262,6 +284,13 @@ struct TestParameters {
 } kParameters[] = {
     {true, true, PairedKeyVerificationRunnerTest::ReturnFrameType::kValid,
      PairedKeyVerificationRunner::PairedKeyVerificationResult::kSuccess},
+    {true, true,
+     PairedKeyVerificationRunnerTest::ReturnFrameType::kOptionalSignedDataValid,
+     PairedKeyVerificationRunner::PairedKeyVerificationResult::kSuccess},
+    {true, true,
+     PairedKeyVerificationRunnerTest::ReturnFrameType::
+         kOptionalSignedDataInvalid,
+     PairedKeyVerificationRunner::PairedKeyVerificationResult::kFail},
     {true, true, PairedKeyVerificationRunnerTest::ReturnFrameType::kEmpty,
      PairedKeyVerificationRunner::PairedKeyVerificationResult::kFail},
     {true, false, PairedKeyVerificationRunnerTest::ReturnFrameType::kValid,
@@ -298,8 +327,9 @@ TEST_P(ParameterisedPairedKeyVerificationRunnerTest,
 
   ExpectPairedKeyEncryptionFrameSent();
   if (params.encryption_frame_type ==
-      PairedKeyVerificationRunnerTest::ReturnFrameType::kValid)
+      PairedKeyVerificationRunnerTest::ReturnFrameType::kValid) {
     ExpectCertificateInfoSent();
+  }
 
   // Check for result frame sent.
   if (!params.is_valid_certificate) {
@@ -309,7 +339,10 @@ TEST_P(ParameterisedPairedKeyVerificationRunnerTest,
   }
 
   if (params.encryption_frame_type ==
-      PairedKeyVerificationRunnerTest::ReturnFrameType::kEmpty) {
+          PairedKeyVerificationRunnerTest::ReturnFrameType::kEmpty ||
+      params.encryption_frame_type ==
+          PairedKeyVerificationRunnerTest::ReturnFrameType::
+              kOptionalSignedDataInvalid) {
     ExpectPairedKeyResultFrameSent(sharing::nearby::PairedKeyResultFrame::FAIL);
     return;
   }

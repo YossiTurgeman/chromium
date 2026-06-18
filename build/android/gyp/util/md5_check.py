@@ -1,20 +1,17 @@
-# Copyright 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import print_function
 
 import difflib
 import hashlib
 import itertools
 import json
 import os
-import sys
 import zipfile
 
-from util import build_utils
-
-sys.path.insert(1, os.path.join(build_utils.DIR_SOURCE_ROOT, 'build'))
+from util import build_utils  # pylint: disable=unused-import
+import action_helpers  # build_utils adds //build to sys.path.
 import print_python_deps
 
 # When set and a difference is detected, a diff of what changed is printed.
@@ -67,7 +64,7 @@ def CallAndWriteDepfileIfStale(on_stale_md5,
   # on bots that build with & without patch, and the patch changes the depfile
   # location.
   if hasattr(options, 'depfile') and options.depfile:
-    build_utils.WriteDepfile(options.depfile, output_paths[0], depfile_deps)
+    action_helpers.write_depfile(options.depfile, output_paths[0], depfile_deps)
 
 
 def CallAndRecordIfStale(function,
@@ -116,6 +113,8 @@ def CallAndRecordIfStale(function,
 
   zip_allowlist = set(track_subpaths_allowlist or [])
   for path in input_paths:
+    if os.path.isabs(path):
+      path = os.path.relpath(path)
     # It's faster to md5 an entire zip file than it is to just locate & hash
     # its central directory (which is what this used to do).
     if path in zip_allowlist:
@@ -124,24 +123,18 @@ def CallAndRecordIfStale(function,
     else:
       new_metadata.AddFile(path, _ComputeTagForPath(path))
 
-  old_metadata = None
   force = force or _FORCE_REBUILD
   missing_outputs = [x for x in output_paths if force or not os.path.exists(x)]
-  too_new = []
-  # When outputs are missing, don't bother gathering change information.
-  if not missing_outputs and os.path.exists(record_path):
-    record_mtime = os.path.getmtime(record_path)
-    # Outputs newer than the change information must have been modified outside
-    # of the build, and should be considered stale.
-    too_new = [x for x in output_paths if os.path.getmtime(x) > record_mtime]
-    if not too_new:
-      with open(record_path, 'r') as jsonfile:
-        try:
-          old_metadata = _Metadata.FromFile(jsonfile)
-        except:  # pylint: disable=bare-except
-          pass  # Not yet using new file format.
+  old_metadata = None
 
-  changes = Changes(old_metadata, new_metadata, force, missing_outputs, too_new)
+  if not missing_outputs and os.path.exists(record_path):
+    with open(record_path, 'r', encoding='utf-8') as jsonfile:
+      try:
+        old_metadata = _Metadata.FromFile(jsonfile)
+      except:  # pylint: disable=bare-except
+        pass  # Not yet using new file format.
+
+  changes = Changes(old_metadata, new_metadata, force, missing_outputs)
   if not changes.HasChanges():
     return
 
@@ -154,20 +147,18 @@ def CallAndRecordIfStale(function,
   args = (changes,) if pass_changes else ()
   function(*args)
 
-  with open(record_path, 'w') as f:
+  with open(record_path, 'w', encoding='utf-8') as f:
     new_metadata.ToFile(f)
 
 
-class Changes(object):
+class Changes:
   """Provides and API for querying what changed between runs."""
 
-  def __init__(self, old_metadata, new_metadata, force, missing_outputs,
-               too_new):
+  def __init__(self, old_metadata, new_metadata, force, missing_outputs):
     self.old_metadata = old_metadata
     self.new_metadata = new_metadata
     self.force = force
     self.missing_outputs = missing_outputs
-    self.too_new = too_new
 
   def _GetOldTag(self, path, subpath=None):
     return self.old_metadata and self.old_metadata.GetTag(path, subpath)
@@ -198,11 +189,11 @@ class Changes(object):
 
   def IterAllPaths(self):
     """Generator for paths."""
-    return self.new_metadata.IterPaths();
+    return self.new_metadata.IterPaths()
 
   def IterAllSubpaths(self, path):
     """Generator for subpaths."""
-    return self.new_metadata.IterSubpaths(path);
+    return self.new_metadata.IterSubpaths(path)
 
   def IterAddedPaths(self):
     """Generator for paths that were added."""
@@ -262,11 +253,9 @@ class Changes(object):
     """Returns a human-readable description of what changed."""
     if self.force:
       return 'force=True'
-    elif self.missing_outputs:
+    if self.missing_outputs:
       return 'Outputs do not exist:\n  ' + '\n  '.join(self.missing_outputs)
-    elif self.too_new:
-      return 'Outputs newer than stamp file:\n  ' + '\n  '.join(self.too_new)
-    elif self.old_metadata is None:
+    if self.old_metadata is None:
       return 'Previous stamp file not found.'
 
     if self.old_metadata.StringsMd5() != self.new_metadata.StringsMd5():
@@ -294,7 +283,7 @@ class Changes(object):
     return 'I have no idea what changed (there is a bug).'
 
 
-class _Metadata(object):
+class _Metadata:
   """Data model for tracking change metadata.
 
   Args:
@@ -440,11 +429,11 @@ class _Metadata(object):
 
 
 def _ComputeTagForPath(path):
-  stat = os.stat(path)
-  if stat.st_size > 1 * 1024 * 1024:
+  stat_result = os.stat(path)
+  if stat_result.st_size > 1 * 1024 * 1024:
     # Fallback to mtime for large files so that md5_check does not take too long
     # to run.
-    return stat.st_mtime
+    return int(stat_result.st_mtime)
   md5 = hashlib.md5()
   with open(path, 'rb') as f:
     md5.update(f.read())
@@ -455,7 +444,7 @@ def _ComputeInlineMd5(iterable):
   """Computes the md5 of the concatenated parameters."""
   md5 = hashlib.md5()
   for item in iterable:
-    md5.update(str(item))
+    md5.update(str(item).encode('ascii'))
   return md5.hexdigest()
 
 

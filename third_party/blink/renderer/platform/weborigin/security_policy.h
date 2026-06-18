@@ -50,10 +50,6 @@ class PLATFORM_EXPORT SecurityPolicy {
   STATIC_ONLY(SecurityPolicy);
 
  public:
-  // This must be called during initialization (before we create
-  // other threads).
-  static void Init();
-
   // True if the referrer should be omitted according to the
   // ReferrerPolicyNoReferrerWhenDowngrade. If you intend to send a
   // referrer header, you should use generateReferrer instead.
@@ -91,13 +87,10 @@ class PLATFORM_EXPORT SecurityPolicy {
   static bool IsOriginAccessToURLAllowed(const SecurityOrigin* active_origin,
                                          const KURL&);
 
-  static void AddOriginToTrustworthySafelist(const String&);
-  static bool IsOriginTrustworthySafelisted(const SecurityOrigin&);
-  static bool IsUrlTrustworthySafelisted(const KURL&);
-
-  static bool ReferrerPolicyFromString(const String& policy,
+  static bool ReferrerPolicyFromString(const StringView& policy,
                                        ReferrerPolicyLegacyKeywordsSupport,
                                        network::mojom::ReferrerPolicy* result);
+  static String ReferrerPolicyAsString(network::mojom::ReferrerPolicy policy);
 
   static bool ReferrerPolicyFromHeaderValue(
       const String& header_value,

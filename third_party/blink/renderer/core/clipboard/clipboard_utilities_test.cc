@@ -1,12 +1,19 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/clipboard/clipboard_utilities.h"
 
+#include <string>
+
+#include "base/containers/span.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/platform/image-encoders/image_encoder.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/encode/SkPngRustEncoder.h"
 
 namespace blink {
 
@@ -15,7 +22,7 @@ TEST(ClipboardUtilitiesTest, URLToImageMarkupNonASCII) {
   // It has the UTF-8 encoding 0xC3 0xA7, but Blink interprets 8-bit string
   // literals as Latin-1 in most cases.
   String markup_with_non_ascii =
-      URLToImageMarkup(KURL(NullURL(),
+      URLToImageMarkup(KURL(NullUrl(),
                             "http://test.example/fran\xe7"
                             "ais.png"),
                        "Fran\xe7"
@@ -36,24 +43,37 @@ TEST(ClipboardUtilitiesTest, URLToImageMarkupEmbeddedNull) {
   const char kTitleWithNull[] = "\0";
   const char kExpectedOutputWithNull[] =
       "<img src=\"http://test.example/%00.png\" alt=\"\0\"/>";
-  EXPECT_EQ(
-      String(kExpectedOutputWithNull, sizeof(kExpectedOutputWithNull) - 1),
-      URLToImageMarkup(
-          KURL(NullURL(), String(kURLWithNull, sizeof(kURLWithNull) - 1)),
-          String(kTitleWithNull, sizeof(kTitleWithNull) - 1)));
+  EXPECT_EQ(String(base::span_from_cstring(kExpectedOutputWithNull)),
+            URLToImageMarkup(
+                KURL(NullUrl(), String(base::span_from_cstring(kURLWithNull))),
+                String(base::span_from_cstring(kTitleWithNull))));
 }
 
-TEST(ClipboardUtilitiesTest, BitmapToImageMarkupEmpty) {
-  SkBitmap bitmap;
-  EXPECT_TRUE(BitmapToImageMarkup(bitmap).IsNull());
+TEST(ClipboardUtilitiesTest, PNGToImageMarkupEmpty) {
+  EXPECT_TRUE(PNGToImageMarkup({}).IsNull());
 }
 
-TEST(ClipboardUtilitiesTest, BitmapToImageMarkup) {
+TEST(ClipboardUtilitiesTest, PNGToImageMarkup) {
   SkBitmap bitmap;
   bitmap.allocPixels(SkImageInfo::MakeN32Premul(10, 5));
-  EXPECT_EQ(
-      R"HTML(<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAFCAYAAAB8ZH1oAAAADElEQVQYGWNgGEYAAADNAAGVVebMAAAAAElFTkSuQmCC" alt=""/>)HTML",
-      BitmapToImageMarkup(bitmap));
+  SkPixmap pixmap;
+  bitmap.peekPixels(&pixmap);
+
+  // Set encoding options to favor speed over size.
+  Vector<uint8_t> png_data;
+  EXPECT_TRUE(ImageEncoder::Encode(&png_data, pixmap,
+                                   SkPngRustEncoder::CompressionLevel::kLow));
+
+  std::string markup = PNGToImageMarkup(png_data).Utf8();
+
+  // The first 16 of a PNG file are always the same, so the
+  // `StartsWith`/`EndsWith`-based assertions below are expected to succeed
+  // regardless of the exact encoding settings or the encoding library used.
+  EXPECT_THAT(
+      markup,
+      testing::StartsWith(
+          R"HTML(<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhE)HTML"));
+  EXPECT_THAT(markup, testing::EndsWith(R"HTML(" alt=""/>)HTML"));
 }
 
 }  // namespace blink

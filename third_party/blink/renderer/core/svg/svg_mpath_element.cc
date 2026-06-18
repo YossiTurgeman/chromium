@@ -38,6 +38,22 @@ void SVGMPathElement::Trace(Visitor* visitor) const {
 
 SVGMPathElement::~SVGMPathElement() = default;
 
+SVGAnimatedPropertyBase* SVGMPathElement::PropertyFromAttribute(
+    const QualifiedName& attribute_name) const {
+  SVGAnimatedPropertyBase* ret =
+      SVGURIReference::PropertyFromAttribute(attribute_name);
+  if (ret) {
+    return ret;
+  } else {
+    return SVGElement::PropertyFromAttribute(attribute_name);
+  }
+}
+
+void SVGMPathElement::SynchronizeAllSVGAttributes() const {
+  SVGURIReference::SynchronizeAllSVGAttributes();
+  SVGElement::SynchronizeAllSVGAttributes();
+}
+
 void SVGMPathElement::BuildPendingResource() {
   ClearResourceReferences();
   if (!isConnected())
@@ -72,14 +88,14 @@ void SVGMPathElement::RemovedFrom(ContainerNode& root_parent) {
     ClearResourceReferences();
 }
 
-void SVGMPathElement::SvgAttributeChanged(const QualifiedName& attr_name) {
-  if (SVGURIReference::IsKnownAttribute(attr_name)) {
-    SVGElement::InvalidationGuard invalidation_guard(this);
+void SVGMPathElement::SvgAttributeChanged(
+    const SvgAttributeChangedParams& params) {
+  if (SVGURIReference::IsKnownAttribute(params.name)) {
     BuildPendingResource();
     return;
   }
 
-  SVGElement::SvgAttributeChanged(attr_name);
+  SVGElement::SvgAttributeChanged(params);
 }
 
 SVGPathElement* SVGMPathElement::PathElement() {
@@ -92,8 +108,9 @@ void SVGMPathElement::TargetPathChanged() {
 }
 
 void SVGMPathElement::NotifyParentOfPathChange(ContainerNode* parent) {
-  if (auto* motion = DynamicTo<SVGAnimateMotionElement>(parent))
-    motion->UpdateAnimationPath();
+  if (auto* motion = DynamicTo<SVGAnimateMotionElement>(parent)) {
+    motion->ChildMPathChanged();
+  }
 }
 
 }  // namespace blink

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,15 @@
 #define CHROME_TEST_PAYMENTS_PAYMENT_REQUEST_TEST_CONTROLLER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
 
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 namespace sync_preferences {
 class TestingPrefServiceSyncable;
 }
@@ -41,11 +43,13 @@ class PaymentRequestTestObserver {
   virtual void OnHasEnrolledInstrumentCalled() {}
   virtual void OnHasEnrolledInstrumentReturned() {}
   virtual void OnAppListReady() {}
+  virtual void OnErrorDisplayed() {}
   virtual void OnNotSupportedError() {}
   virtual void OnConnectionTerminated() {}
   virtual void OnAbortCalled() {}
   virtual void OnCompleteCalled() {}
-  virtual void OnMinimalUIReady() {}
+  virtual void OnInternalError() {}
+  virtual void OnUIDisplayed() {}
 
  protected:
   virtual ~PaymentRequestTestObserver() = default;
@@ -73,33 +77,32 @@ class PaymentRequestTestController {
   void SetTwaPaymentApp(const std::string& method_name,
                         const std::string& response);
 
-  // Get the WebContents of the Payment Handler for testing purpose, or null if
+  // Gets the WebContents of the Payment Handler for testing purpose, or null if
   // nonexistent. To guarantee a non-null return, this function should be called
-  // only if: 1) PaymentRequest UI is opening. 2) ScrollToExpandPaymentHandler
-  // feature is enabled (on Android). 3) PaymentHandler is opening.
+  // only if: 1) PaymentRequest UI is opening. 2) PaymentHandler is opening.
   content::WebContents* GetPaymentHandlerWebContents();
 
-#if defined(OS_ANDROID)
-  // Click the security icon on the Expandable Payment Handler toolbar for
-  // testing purpose. return whether it's succeeded.
+#if BUILDFLAG(IS_ANDROID)
+  // Clicks the security icon on the Expandable Payment Handler toolbar for
+  // testing purpose. Return whether it's succeeded.
   bool ClickPaymentHandlerSecurityIcon();
 #endif
+
+  // Clicks the close button on the Payment Handler toolbar for testing purpose.
+  // Return whether it's succeeded.
+  bool ClickPaymentHandlerCloseButton();
+
+  // Closes the dialog.
+  bool CloseDialog();
 
   // Confirms payment in a browser payment sheet, be it either PAYMENT_REQUEST
   // or SECURE_PAYMENT_CONFIRMATION type. Returns true if the dialog was
   // available.
   bool ConfirmPayment();
 
-  // Confirms payment in minimal UI. Returns true on success or if the minimal
-  // UI is not implemented on the current platform.
-  bool ConfirmMinimalUI();
-
-  // Dismisses payment in minimal UI. Returns true on success or if the minimal
-  // UI is not implemented on the current platform.
-  bool DismissMinimalUI();
-
-  // Returns true when running on Android M or L.
-  bool IsAndroidMarshmallowOrLollipop();
+  // Clicks opt-out on the dialog, if available. Returns true if the opt-out
+  // link was available, false if not.
+  bool ClickOptOut();
 
   // Sets the list of apps available for the current payment request.
   void set_app_descriptions(
@@ -112,6 +115,24 @@ class PaymentRequestTestController {
     return app_descriptions_;
   }
 
+  // Whether the browser payment sheet is displaying a section for selecting a
+  // shipping address.
+  std::optional<bool> is_shipping_section_visible() const {
+    return is_shipping_section_visible_;
+  }
+  void set_shipping_section_visible(bool is_shipping_section_visible) {
+    is_shipping_section_visible_ = is_shipping_section_visible;
+  }
+
+  // Whether the browser payment sheet is displaying a section for selecting
+  // contact info.
+  std::optional<bool> is_contact_section_visible() const {
+    return is_contact_section_visible_;
+  }
+  void set_contact_section_visible(bool is_contact_section_visible) {
+    is_contact_section_visible_ = is_contact_section_visible;
+  }
+
  private:
   // Observers that forward through to the PaymentRequestTestObserver.
   void OnCanMakePaymentCalled();
@@ -119,13 +140,15 @@ class PaymentRequestTestController {
   void OnHasEnrolledInstrumentCalled();
   void OnHasEnrolledInstrumentReturned();
   void OnAppListReady();
+  void OnErrorDisplayed();
   void OnNotSupportedError();
   void OnConnectionTerminated();
   void OnAbortCalled();
   void OnCompleteCalled();
-  void OnMinimalUIReady();
+  void OnInternalError();
+  void OnUIDisplayed();
 
-  PaymentRequestTestObserver* observer_ = nullptr;
+  raw_ptr<PaymentRequestTestObserver> observer_ = nullptr;
 
   bool is_off_the_record_ = false;
   bool valid_ssl_ = true;
@@ -135,8 +158,10 @@ class PaymentRequestTestController {
   std::string twa_payment_app_method_name_;
   std::string twa_payment_app_response_;
   std::vector<AppDescription> app_descriptions_;
+  std::optional<bool> is_shipping_section_visible_;
+  std::optional<bool> is_contact_section_visible_;
 
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   void UpdateDelegateFactory();
 
   std::unique_ptr<sync_preferences::TestingPrefServiceSyncable> prefs_;
@@ -146,6 +171,8 @@ class PaymentRequestTestController {
 
   base::WeakPtr<ContentPaymentRequestDelegate> delegate_;
 #endif
+
+  base::WeakPtrFactory<PaymentRequestTestController> weak_ptr_factory_{this};
 };
 
 }  // namespace payments

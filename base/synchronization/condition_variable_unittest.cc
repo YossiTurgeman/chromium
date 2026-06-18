@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,12 @@
 #include <memory>
 #include <vector>
 
-#include "base/bind.h"
+#include "base/containers/heap_array.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/single_thread_task_runner.h"
 #include "base/synchronization/lock.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/spin_wait.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread.h"
@@ -43,13 +44,12 @@ class ConditionVariableTest : public PlatformTest {
   const TimeDelta kOneHundredMs;
 
   ConditionVariableTest()
-      : kZeroMs(TimeDelta::FromMilliseconds(0)),
-        kTenMs(TimeDelta::FromMilliseconds(10)),
-        kThirtyMs(TimeDelta::FromMilliseconds(30)),
-        kFortyFiveMs(TimeDelta::FromMilliseconds(45)),
-        kSixtyMs(TimeDelta::FromMilliseconds(60)),
-        kOneHundredMs(TimeDelta::FromMilliseconds(100)) {
-  }
+      : kZeroMs(Milliseconds(0)),
+        kTenMs(Milliseconds(10)),
+        kThirtyMs(Milliseconds(30)),
+        kFortyFiveMs(Milliseconds(45)),
+        kSixtyMs(Milliseconds(60)),
+        kOneHundredMs(Milliseconds(100)) {}
 };
 
 //------------------------------------------------------------------------------
@@ -77,17 +77,16 @@ class WorkQueue : public PlatformThread::Delegate {
   //----------------------------------------------------------------------------
   // Worker threads only call the following methods.
   // They should use the lock to get exclusive access.
-  int GetThreadId();  // Get an ID assigned to a thread..
+  int GetThreadId();                 // Get an ID assigned to a thread..
   bool EveryIdWasAllocated() const;  // Indicates that all IDs were handed out.
   TimeDelta GetAnAssignment(int thread_id);  // Get a work task duration.
   void WorkIsCompleted(int thread_id);
 
   int task_count() const;
   bool allow_help_requests() const;  // Workers can signal more workers.
-  bool shutdown() const;  // Check if shutdown has been requested.
+  bool shutdown() const;             // Check if shutdown has been requested.
 
   void thread_shutting_down();
-
 
   //----------------------------------------------------------------------------
   // Worker threads can call them but not needed to acquire a lock.
@@ -131,19 +130,20 @@ class WorkQueue : public PlatformThread::Delegate {
 
   // Conditions to notify the controlling process (if it is interested).
   ConditionVariable all_threads_have_ids_;  // All threads are running.
-  ConditionVariable no_more_tasks_;  // Task count is zero.
+  ConditionVariable no_more_tasks_;         // Task count is zero.
 
   const int thread_count_;
-  int waiting_thread_count_;
-  std::unique_ptr<PlatformThreadHandle[]> thread_handles_;
+  int waiting_thread_count_ = 0;
+  base::HeapArray<PlatformThreadHandle> thread_handles_;
   std::vector<int> assignment_history_;  // Number of assignment per worker.
   std::vector<int> completion_history_;  // Number of completions per worker.
-  int thread_started_counter_;  // Used to issue unique id to workers.
-  int shutdown_task_count_;  // Number of tasks told to shutdown
-  int task_count_;  // Number of assignment tasks waiting to be processed.
-  TimeDelta worker_delay_;  // Time each task takes to complete.
-  bool allow_help_requests_;  // Workers can signal more workers.
-  bool shutdown_;  // Set when threads need to terminate.
+  int thread_started_counter_ = 0;       // Used to issue unique id to workers.
+  int shutdown_task_count_ = 0;          // Number of tasks told to shutdown
+  int task_count_ = 0;                   // Number of assignment tasks waiting
+                                         // to be processed.
+  TimeDelta worker_delay_;               // Time each task takes to complete.
+  bool allow_help_requests_ = false;     // Workers can signal more workers.
+  bool shutdown_ = false;                // Set when threads need to terminate.
 
   DFAKE_MUTEX(locked_methods_);
 };
@@ -181,9 +181,9 @@ TEST_F(ConditionVariableTest, TimeoutTest) {
   lock.Acquire();
 
   TimeTicks start = TimeTicks::Now();
-  const TimeDelta WAIT_TIME = TimeDelta::FromMilliseconds(300);
+  const TimeDelta WAIT_TIME = Milliseconds(300);
   // Allow for clocking rate granularity.
-  const TimeDelta FUDGE_TIME = TimeDelta::FromMilliseconds(50);
+  const TimeDelta FUDGE_TIME = Milliseconds(50);
 
   cv.TimedWait(WAIT_TIME + FUDGE_TIME);
   TimeDelta duration = TimeTicks::Now() - start;
@@ -194,7 +194,7 @@ TEST_F(ConditionVariableTest, TimeoutTest) {
   lock.Release();
 }
 
-#if defined(OS_POSIX)
+#if BUILDFLAG(IS_POSIX)
 const int kDiscontinuitySeconds = 2;
 
 void BackInTime(Lock* lock) {
@@ -228,9 +228,9 @@ TEST_F(ConditionVariableTest, DISABLED_TimeoutAcrossSetTimeOfDay) {
   thread.task_runner()->PostTask(FROM_HERE, base::BindOnce(&BackInTime, &lock));
 
   TimeTicks start = TimeTicks::Now();
-  const TimeDelta kWaitTime = TimeDelta::FromMilliseconds(300);
+  const TimeDelta kWaitTime = Milliseconds(300);
   // Allow for clocking rate granularity.
-  const TimeDelta kFudgeTime = TimeDelta::FromMilliseconds(50);
+  const TimeDelta kFudgeTime = Milliseconds(50);
 
   cv.TimedWait(kWaitTime + kFudgeTime);
   TimeDelta duration = TimeTicks::Now() - start;
@@ -239,22 +239,14 @@ TEST_F(ConditionVariableTest, DISABLED_TimeoutAcrossSetTimeOfDay) {
   // We can't use EXPECT_GE here as the TimeDelta class does not support the
   // required stream conversion.
   EXPECT_TRUE(duration >= kWaitTime);
-  EXPECT_TRUE(duration <= TimeDelta::FromSeconds(kDiscontinuitySeconds));
+  EXPECT_TRUE(duration <= Seconds(kDiscontinuitySeconds));
 
   lock.Release();
 }
 #endif
 
-// Suddenly got flaky on Win, see http://crbug.com/10607 (starting at
-// comment #15).
-// This is also flaky on Fuchsia, see http://crbug.com/738275.
-#if defined(OS_WIN) || defined(OS_FUCHSIA)
-#define MAYBE_MultiThreadConsumerTest DISABLED_MultiThreadConsumerTest
-#else
-#define MAYBE_MultiThreadConsumerTest MultiThreadConsumerTest
-#endif
 // Test serial task servicing, as well as two parallel task servicing methods.
-TEST_F(ConditionVariableTest, MAYBE_MultiThreadConsumerTest) {
+TEST_F(ConditionVariableTest, MultiThreadConsumerTest) {
   const int kThreadCount = 10;
   WorkQueue queue(kThreadCount);  // Start the threads.
 
@@ -264,8 +256,9 @@ TEST_F(ConditionVariableTest, MAYBE_MultiThreadConsumerTest) {
 
   {
     base::AutoLock auto_lock(*queue.lock());
-    while (!queue.EveryIdWasAllocated())
+    while (!queue.EveryIdWasAllocated()) {
       queue.all_threads_have_ids()->Wait();
+    }
   }
 
   // If threads aren't in a wait state, they may start to gobble up tasks in
@@ -283,7 +276,7 @@ TEST_F(ConditionVariableTest, MAYBE_MultiThreadConsumerTest) {
     EXPECT_EQ(0, queue.GetNumberOfCompletedTasks());
 
     // Set up to make each task include getting help from another worker, so
-    // so that the work gets done in paralell.
+    // that the work gets done in parallel.
     queue.ResetHistory();
     queue.SetTaskCount(kTaskCount);
     queue.SetWorkTime(kThirtyMs);
@@ -301,8 +294,9 @@ TEST_F(ConditionVariableTest, MAYBE_MultiThreadConsumerTest) {
   {
     // Wait until all work tasks have at least been assigned.
     base::AutoLock auto_lock(*queue.lock());
-    while (queue.task_count())
+    while (queue.task_count()) {
       queue.no_more_tasks()->Wait();
+    }
 
     // To avoid racy assumptions, we'll just assert that at least 2 threads
     // did work.  We know that the first worker should have gone to sleep, and
@@ -394,17 +388,11 @@ TEST_F(ConditionVariableTest, MAYBE_MultiThreadConsumerTest) {
   }
   queue.work_is_available()->Broadcast();  // Force check for shutdown.
 
-  SPIN_FOR_TIMEDELTA_OR_UNTIL_TRUE(TimeDelta::FromMinutes(1),
+  SPIN_FOR_TIMEDELTA_OR_UNTIL_TRUE(Minutes(1),
                                    queue.ThreadSafeCheckShutdown(kThreadCount));
 }
 
-#if defined(OS_FUCHSIA)
-// TODO(crbug.com/751894): This flakily times out on Fuchsia.
-#define MAYBE_LargeFastTaskTest DISABLED_LargeFastTaskTest
-#else
-#define MAYBE_LargeFastTaskTest LargeFastTaskTest
-#endif
-TEST_F(ConditionVariableTest, MAYBE_LargeFastTaskTest) {
+TEST_F(ConditionVariableTest, LargeFastTaskTest) {
   const int kThreadCount = 200;
   WorkQueue queue(kThreadCount);  // Start the threads.
 
@@ -414,8 +402,9 @@ TEST_F(ConditionVariableTest, MAYBE_LargeFastTaskTest) {
 
   {
     base::AutoLock auto_lock(*queue.lock());
-    while (!queue.EveryIdWasAllocated())
+    while (!queue.EveryIdWasAllocated()) {
       queue.all_threads_have_ids()->Wait();
+    }
   }
 
   // Wait a bit more to allow threads to reach their wait state.
@@ -441,8 +430,9 @@ TEST_F(ConditionVariableTest, MAYBE_LargeFastTaskTest) {
   // Wait until we've handed out all tasks.
   {
     base::AutoLock auto_lock(*queue.lock());
-    while (queue.task_count() != 0)
+    while (queue.task_count() != 0) {
       queue.no_more_tasks()->Wait();
+    }
   }
 
   // Wait till the last of the tasks complete.
@@ -469,8 +459,9 @@ TEST_F(ConditionVariableTest, MAYBE_LargeFastTaskTest) {
   // Wait until we've handed out all tasks
   {
     base::AutoLock auto_lock(*queue.lock());
-    while (queue.task_count() != 0)
+    while (queue.task_count() != 0) {
       queue.no_more_tasks()->Wait();
+    }
   }
 
   // Wait till the last of the tasks complete.
@@ -491,7 +482,7 @@ TEST_F(ConditionVariableTest, MAYBE_LargeFastTaskTest) {
   queue.work_is_available()->Broadcast();  // Force check for shutdown.
 
   // Wait for shutdowns to complete.
-  SPIN_FOR_TIMEDELTA_OR_UNTIL_TRUE(TimeDelta::FromMinutes(1),
+  SPIN_FOR_TIMEDELTA_OR_UNTIL_TRUE(Minutes(1),
                                    queue.ThreadSafeCheckShutdown(kThreadCount));
 }
 
@@ -500,24 +491,18 @@ TEST_F(ConditionVariableTest, MAYBE_LargeFastTaskTest) {
 //------------------------------------------------------------------------------
 
 WorkQueue::WorkQueue(int thread_count)
-  : lock_(),
-    work_is_available_(&lock_),
-    all_threads_have_ids_(&lock_),
-    no_more_tasks_(&lock_),
-    thread_count_(thread_count),
-    waiting_thread_count_(0),
-    thread_handles_(new PlatformThreadHandle[thread_count]),
-    assignment_history_(thread_count),
-    completion_history_(thread_count),
-    thread_started_counter_(0),
-    shutdown_task_count_(0),
-    task_count_(0),
-    allow_help_requests_(false),
-    shutdown_(false) {
+    : work_is_available_(&lock_),
+      all_threads_have_ids_(&lock_),
+      no_more_tasks_(&lock_),
+      thread_count_(thread_count),
+      thread_handles_(
+          base::HeapArray<PlatformThreadHandle>::WithSize(thread_count)),
+      assignment_history_(thread_count),
+      completion_history_(thread_count) {
   EXPECT_GE(thread_count_, 1);
   ResetHistory();
   SetTaskCount(0);
-  SetWorkTime(TimeDelta::FromMilliseconds(30));
+  SetWorkTime(Milliseconds(30));
 
   for (int i = 0; i < thread_count_; ++i) {
     PlatformThreadHandle pth;
@@ -626,38 +611,45 @@ void WorkQueue::ResetHistory() {
 
 int WorkQueue::GetMinCompletionsByWorkerThread() const {
   int minumum = completion_history_[0];
-  for (int i = 0; i < thread_count_; ++i)
+  for (int i = 0; i < thread_count_; ++i) {
     minumum = std::min(minumum, completion_history_[i]);
+  }
   return minumum;
 }
 
 int WorkQueue::GetMaxCompletionsByWorkerThread() const {
   int maximum = completion_history_[0];
-  for (int i = 0; i < thread_count_; ++i)
+  for (int i = 0; i < thread_count_; ++i) {
     maximum = std::max(maximum, completion_history_[i]);
+  }
   return maximum;
 }
 
 int WorkQueue::GetNumThreadsTakingAssignments() const {
   int count = 0;
-  for (int i = 0; i < thread_count_; ++i)
-    if (assignment_history_[i])
+  for (int i = 0; i < thread_count_; ++i) {
+    if (assignment_history_[i]) {
       count++;
+    }
+  }
   return count;
 }
 
 int WorkQueue::GetNumThreadsCompletingTasks() const {
   int count = 0;
-  for (int i = 0; i < thread_count_; ++i)
-    if (completion_history_[i])
+  for (int i = 0; i < thread_count_; ++i) {
+    if (completion_history_[i]) {
       count++;
+    }
+  }
   return count;
 }
 
 int WorkQueue::GetNumberOfCompletedTasks() const {
   int total = 0;
-  for (int i = 0; i < thread_count_; ++i)
+  for (int i = 0; i < thread_count_; ++i) {
     total += completion_history_[i];
+  }
   return total;
 }
 
@@ -682,10 +674,11 @@ void WorkQueue::SpinUntilAllThreadsAreWaiting() {
   while (true) {
     {
       base::AutoLock auto_lock(lock_);
-      if (waiting_thread_count_ == thread_count_)
+      if (waiting_thread_count_ == thread_count_) {
         break;
+      }
     }
-    PlatformThread::Sleep(TimeDelta::FromMilliseconds(30));
+    PlatformThread::Sleep(Milliseconds(30));
   }
 }
 
@@ -693,13 +686,13 @@ void WorkQueue::SpinUntilTaskCountLessThan(int task_count) {
   while (true) {
     {
       base::AutoLock auto_lock(lock_);
-      if (task_count_ < task_count)
+      if (task_count_ < task_count) {
         break;
+      }
     }
-    PlatformThread::Sleep(TimeDelta::FromMilliseconds(30));
+    PlatformThread::Sleep(Milliseconds(30));
   }
 }
-
 
 //------------------------------------------------------------------------------
 // Define the standard worker task. Several tests will spin out many of these
@@ -724,12 +717,13 @@ void WorkQueue::ThreadMain() {
   {
     base::AutoLock auto_lock(lock_);
     thread_id = GetThreadId();
-    if (EveryIdWasAllocated())
+    if (EveryIdWasAllocated()) {
       all_threads_have_ids()->Signal();  // Tell creator we're ready.
+    }
   }
 
   Lock private_lock;  // Used to waste time on "our work".
-  while (1) {  // This is the main consumer loop.
+  while (true) {      // This is the main consumer loop.
     TimeDelta work_time;
     bool could_use_help;
     {
@@ -750,10 +744,11 @@ void WorkQueue::ThreadMain() {
     }  // Release lock
 
     // Do work (outside of locked region.
-    if (could_use_help)
+    if (could_use_help) {
       work_is_available()->Signal();  // Get help from other threads.
+    }
 
-    if (work_time > TimeDelta::FromMilliseconds(0)) {
+    if (work_time > Milliseconds(0)) {
       // We could just sleep(), but we'll instead further exercise the
       // condition variable class, and do a timed wait.
       base::AutoLock auto_lock(private_lock);

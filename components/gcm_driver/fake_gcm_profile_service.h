@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include "base/macros.h"
 #include "components/gcm_driver/common/gcm_message.h"
 #include "components/gcm_driver/gcm_client.h"
 #include "components/gcm_driver/gcm_profile_service.h"
@@ -18,6 +17,10 @@
 namespace content {
 class BrowserContext;
 }  // namespace content
+
+namespace instance_id {
+class FakeGCMDriverForInstanceID;
+}  // namespace instance_id
 
 namespace gcm {
 
@@ -27,13 +30,20 @@ class FakeGCMProfileService : public GCMProfileService {
   // Helper function to be used with KeyedServiceFactory::SetTestingFactory().
   static std::unique_ptr<KeyedService> Build(content::BrowserContext* context);
 
-  FakeGCMProfileService();
+  explicit FakeGCMProfileService(
+      std::unique_ptr<instance_id::FakeGCMDriverForInstanceID> fake_gcm_driver);
+
+  FakeGCMProfileService(const FakeGCMProfileService&) = delete;
+  FakeGCMProfileService& operator=(const FakeGCMProfileService&) = delete;
+
   ~FakeGCMProfileService() override;
 
   void AddExpectedUnregisterResponse(GCMClient::Result result);
 
   void DispatchMessage(const std::string& app_id,
                        const IncomingMessage& message);
+
+  instance_id::FakeGCMDriverForInstanceID* GetFakeGCMDriver();
 
   const OutgoingMessage& last_sent_message() const {
     return last_sent_message_;
@@ -69,8 +79,6 @@ class FakeGCMProfileService : public GCMProfileService {
   std::list<GCMClient::Result> unregister_responses_;
   OutgoingMessage last_sent_message_;
   std::string last_receiver_id_;
-
-  DISALLOW_COPY_AND_ASSIGN(FakeGCMProfileService);
 };
 
 }  // namespace gcm

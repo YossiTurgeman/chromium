@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,26 +11,23 @@
 #include "ash/test/ash_test_base.h"
 #include "ash/test/toplevel_window.h"
 #include "ash/test_shell_delegate.h"
-#include "ash/wm/window_positioner.h"
 #include "ash/wm/window_state.h"
 #include "base/strings/string_number_conversions.h"
+#include "ui/aura/client/aura_constants.h"
+#include "ui/aura/client/window_types.h"
+#include "ui/aura/window.h"
 #include "ui/display/scoped_display_for_new_windows.h"
 #include "ui/display/screen.h"
 #include "ui/views/widget/widget.h"
 
 namespace ash {
 
-class WindowPositionerTest : public AshTestBase {
- public:
-  WindowPositionerTest() = default;
-  ~WindowPositionerTest() override = default;
+using chromeos::AppType;
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(WindowPositionerTest);
-};
+using WindowPositionerTest = AshTestBase;
 
 TEST_F(WindowPositionerTest, OpenDefaultWindowOnSecondDisplay) {
-  UpdateDisplay("400x400,1400x900");
+  UpdateDisplay("500x400,1400x900");
   aura::Window* second_root_window = Shell::GetAllRootWindows()[1];
   display::ScopedDisplayForNewWindows display_for_new_windows(
       second_root_window);
@@ -42,7 +39,7 @@ TEST_F(WindowPositionerTest, OpenDefaultWindowOnSecondDisplay) {
 
   // The window should be in the 2nd display with the default size.
   EXPECT_EQ("300x300", bounds.size().ToString());
-  EXPECT_TRUE(display::Screen::GetScreen()
+  EXPECT_TRUE(display::Screen::Get()
                   ->GetDisplayNearestWindow(second_root_window)
                   .bounds()
                   .Contains(bounds));
@@ -113,6 +110,27 @@ TEST_F(WindowPositionerTest, IgnoreFullscreenInAutoRearrange) {
   // widget should stay in the current size.
   widget2->CloseNow();
   ASSERT_EQ("300x300", widget1->GetWindowBoundsInScreen().size().ToString());
+}
+
+// Tests auto managed windows do not auto-position if there are other windows
+// opened.
+TEST_F(WindowPositionerTest, AutoRearrangeOnHideOrRemove) {
+  // Create 2 browser windows.
+  std::unique_ptr<aura::Window> window1 =
+      CreateWindowWithAppType(AppType::BROWSER, {200, 200, 330, 230});
+  std::unique_ptr<aura::Window> window2 =
+      CreateWindowWithAppType(AppType::BROWSER, {400, 600, 330, 230});
+  // Create 1 app window.
+  std::unique_ptr<aura::Window> window3 =
+      CreateWindowWithAppType(AppType::SYSTEM_APP, {300, 200, 330, 230});
+
+  WindowState::Get(window1.get())->SetWindowPositionManaged(true);
+  WindowState::Get(window2.get())->SetWindowPositionManaged(true);
+
+  // Closing 2nd browser window triggers the rearrange logic but the 1st
+  // browser window should stay in the current place.
+  window2.reset();
+  EXPECT_EQ(gfx::Rect(200, 200, 330, 230), window1->GetBoundsInScreen());
 }
 
 }  // namespace ash

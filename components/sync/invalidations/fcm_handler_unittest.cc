@@ -1,19 +1,19 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/sync/invalidations/fcm_handler.h"
 
-#include <map>
 #include <set>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include "base/files/file_path.h"
+#include "base/test/gmock_callback_support.h"
 #include "base/test/task_environment.h"
 #include "components/gcm_driver/fake_gcm_driver.h"
 #include "components/gcm_driver/gcm_driver.h"
+#include "components/gcm_driver/instance_id/instance_id.h"
 #include "components/gcm_driver/instance_id/instance_id_driver.h"
 #include "components/sync/invalidations/fcm_registration_token_observer.h"
 #include "components/sync/invalidations/invalidations_listener.h"
@@ -21,10 +21,12 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
+using base::test::RunOnceCallback;
+using base::test::RunOnceCallbackRepeatedly;
 using instance_id::InstanceID;
 using testing::_;
-using testing::Invoke;
 using testing::NiceMock;
+using testing::Return;
 using testing::WithArg;
 
 namespace syncer {
@@ -32,7 +34,6 @@ namespace {
 
 const char kDefaultSenderId[] = "fake_sender_id";
 const char kSyncInvalidationsAppId[] = "com.google.chrome.sync.invalidations";
-const char kPayloadKey[] = "payload";
 
 const int kTokenValidationPeriodMinutesDefault = 60 * 24;
 
@@ -40,48 +41,63 @@ class MockInstanceID : public InstanceID {
  public:
   MockInstanceID() : InstanceID("app_id", /*gcm_driver=*/nullptr) {}
   ~MockInstanceID() override = default;
-
-  MOCK_METHOD1(GetID, void(GetIDCallback callback));
-  MOCK_METHOD1(GetCreationTime, void(GetCreationTimeCallback callback));
-  MOCK_METHOD6(GetToken,
-               void(const std::string& authorized_entity,
-                    const std::string& scope,
-                    base::TimeDelta time_to_live,
-                    const std::map<std::string, std::string>& options,
-                    std::set<Flags> flags,
-                    GetTokenCallback callback));
-  MOCK_METHOD4(ValidateToken,
-               void(const std::string& authorized_entity,
-                    const std::string& scope,
-                    const std::string& token,
-                    ValidateTokenCallback callback));
+  MOCK_METHOD(void, GetID, (GetIDCallback callback), (override));
+  MOCK_METHOD(void,
+              GetCreationTime,
+              (GetCreationTimeCallback callback),
+              (override));
+  MOCK_METHOD(void,
+              GetToken,
+              (const std::string& authorized_entity,
+               const std::string& scope,
+               base::TimeDelta time_to_live,
+               std::set<Flags> flags,
+               GetTokenCallback callback),
+              (override));
+  MOCK_METHOD(void,
+              ValidateToken,
+              (const std::string& authorized_entity,
+               const std::string& scope,
+               const std::string& token,
+               ValidateTokenCallback callback),
+              (override));
+  MOCK_METHOD(void, DeleteIDImpl, (DeleteIDCallback callback), (override));
 
  protected:
-  MOCK_METHOD3(DeleteTokenImpl,
-               void(const std::string& authorized_entity,
-                    const std::string& scope,
-                    DeleteTokenCallback callback));
-  MOCK_METHOD1(DeleteIDImpl, void(DeleteIDCallback callback));
+  MOCK_METHOD(void,
+              DeleteTokenImpl,
+              (const std::string& authorized_entity,
+               const std::string& scope,
+               DeleteTokenCallback callback),
+              (override));
 };
 
 class MockInstanceIDDriver : public instance_id::InstanceIDDriver {
  public:
   MockInstanceIDDriver() : InstanceIDDriver(/*gcm_driver=*/nullptr) {}
   ~MockInstanceIDDriver() override = default;
-
-  MOCK_METHOD1(GetInstanceID, InstanceID*(const std::string& app_id));
-  MOCK_METHOD1(RemoveInstanceID, void(const std::string& app_id));
-  MOCK_CONST_METHOD1(ExistsInstanceID, bool(const std::string& app_id));
+  MOCK_METHOD(InstanceID*,
+              GetInstanceID,
+              (const std::string& app_id),
+              (override));
+  MOCK_METHOD(void, RemoveInstanceID, (const std::string& app_id), (override));
+  MOCK_METHOD(bool,
+              ExistsInstanceID,
+              (const std::string& app_id),
+              (const override));
 };
 
 class MockListener : public InvalidationsListener {
  public:
-  MOCK_METHOD1(OnInvalidationReceived, void(const std::string& payload));
+  MOCK_METHOD(void,
+              OnInvalidationReceived,
+              (const std::string& payload),
+              (override));
 };
 
 class MockTokenObserver : public FCMRegistrationTokenObserver {
  public:
-  MOCK_METHOD0(OnFCMRegistrationTokenChanged, void());
+  MOCK_METHOD(void, OnFCMRegistrationTokenChanged, (), (override));
 };
 
 class FCMHandlerTest : public testing::Test {
@@ -98,7 +114,7 @@ class FCMHandlerTest : public testing::Test {
 
  protected:
   base::test::SingleThreadTaskEnvironment task_environment_{
-      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+      base::test::SingleThreadTaskEnvironment::TimeSource::MOCK_TIME};
 
   gcm::FakeGCMDriver fake_gcm_driver_;
   NiceMock<MockInstanceIDDriver> mock_instance_id_driver_;
@@ -109,10 +125,8 @@ class FCMHandlerTest : public testing::Test {
 
 TEST_F(FCMHandlerTest, ShouldReturnValidToken) {
   // Check that the handler gets the token through GetToken.
-  EXPECT_CALL(mock_instance_id_, GetToken(_, _, _, _, _, _))
-      .WillOnce(WithArg<5>(Invoke([](InstanceID::GetTokenCallback callback) {
-        std::move(callback).Run("token", InstanceID::Result::SUCCESS);
-      })));
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillOnce(RunOnceCallback<4>("token", InstanceID::Result::SUCCESS));
 
   fcm_handler_.StartListening();
 
@@ -125,7 +139,7 @@ TEST_F(FCMHandlerTest, ShouldPropagatePayloadToListener) {
   fcm_handler_.AddListener(&mock_listener);
 
   gcm::IncomingMessage gcm_message;
-  gcm_message.data[kPayloadKey] = kPayloadValue;
+  gcm_message.raw_data = kPayloadValue;
 
   EXPECT_CALL(mock_listener, OnInvalidationReceived(kPayloadValue));
   fcm_handler_.OnMessage(kSyncInvalidationsAppId, gcm_message);
@@ -137,11 +151,9 @@ TEST_F(FCMHandlerTest, ShouldNotifyOnTokenChange) {
   fcm_handler_.AddTokenObserver(&mock_token_observer);
 
   // Check that the handler gets the token through GetToken.
-  ON_CALL(mock_instance_id_, GetToken(_, _, _, _, _, _))
+  ON_CALL(mock_instance_id_, GetToken)
       .WillByDefault(
-          WithArg<5>(Invoke([](InstanceID::GetTokenCallback callback) {
-            std::move(callback).Run("token", InstanceID::Result::SUCCESS);
-          })));
+          RunOnceCallbackRepeatedly<4>("token", InstanceID::Result::SUCCESS));
 
   EXPECT_CALL(mock_token_observer, OnFCMRegistrationTokenChanged());
   fcm_handler_.StartListening();
@@ -155,25 +167,20 @@ TEST_F(FCMHandlerTest, ShouldScheduleTokenValidationAndActOnNewToken) {
 
   // Check that the handler gets the token through GetToken and notifies the
   // observer.
-  EXPECT_CALL(mock_instance_id_, GetToken(_, _, _, _, _, _))
-      .WillOnce(WithArg<5>(Invoke([](InstanceID::GetTokenCallback callback) {
-        std::move(callback).Run("token", InstanceID::Result::SUCCESS);
-      })));
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillOnce(RunOnceCallback<4>("token", InstanceID::Result::SUCCESS));
   EXPECT_CALL(mock_token_observer, OnFCMRegistrationTokenChanged()).Times(1);
   fcm_handler_.StartListening();
 
   // Adjust the time and check that validation will happen in time.
   // The old token is invalid, so token observer should be informed.
   task_environment_.FastForwardBy(
-      base::TimeDelta::FromMinutes(kTokenValidationPeriodMinutesDefault) -
-      base::TimeDelta::FromSeconds(1));
+      base::Minutes(kTokenValidationPeriodMinutesDefault) - base::Seconds(1));
   // When it is time, validation happens.
-  EXPECT_CALL(mock_instance_id_, GetToken(_, _, _, _, _, _))
-      .WillOnce(WithArg<5>(Invoke([](InstanceID::GetTokenCallback callback) {
-        std::move(callback).Run("new token", InstanceID::Result::SUCCESS);
-      })));
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillOnce(RunOnceCallback<4>("new token", InstanceID::Result::SUCCESS));
   EXPECT_CALL(mock_token_observer, OnFCMRegistrationTokenChanged()).Times(1);
-  task_environment_.FastForwardBy(base::TimeDelta::FromSeconds(1));
+  task_environment_.FastForwardBy(base::Seconds(1));
 
   fcm_handler_.RemoveTokenObserver(&mock_token_observer);
 }
@@ -184,27 +191,121 @@ TEST_F(FCMHandlerTest, ShouldScheduleTokenValidationAndNotActOnSameToken) {
 
   // Check that the handler gets the token through GetToken and notifies the
   // observer.
-  EXPECT_CALL(mock_instance_id_, GetToken(_, _, _, _, _, _))
-      .WillOnce(WithArg<5>(Invoke([](InstanceID::GetTokenCallback callback) {
-        std::move(callback).Run("token", InstanceID::Result::SUCCESS);
-      })));
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillOnce(RunOnceCallback<4>("token", InstanceID::Result::SUCCESS));
   EXPECT_CALL(mock_token_observer, OnFCMRegistrationTokenChanged()).Times(1);
   fcm_handler_.StartListening();
 
   // Adjust the time and check that validation will happen in time.
   // The old token is valid, so token observer should not be informed.
   task_environment_.FastForwardBy(
-      base::TimeDelta::FromMinutes(kTokenValidationPeriodMinutesDefault) -
-      base::TimeDelta::FromSeconds(1));
+      base::Minutes(kTokenValidationPeriodMinutesDefault) - base::Seconds(1));
   // When it is time, validation happens.
-  EXPECT_CALL(mock_instance_id_, GetToken(_, _, _, _, _, _))
-      .WillOnce(WithArg<5>(Invoke([](InstanceID::GetTokenCallback callback) {
-        std::move(callback).Run("token", InstanceID::Result::SUCCESS);
-      })));
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillOnce(RunOnceCallback<4>("token", InstanceID::Result::SUCCESS));
   EXPECT_CALL(mock_token_observer, OnFCMRegistrationTokenChanged()).Times(0);
-  task_environment_.FastForwardBy(base::TimeDelta::FromSeconds(1));
+  task_environment_.FastForwardBy(base::Seconds(1));
 
   fcm_handler_.RemoveTokenObserver(&mock_token_observer);
+}
+
+TEST_F(FCMHandlerTest, ShouldClearTokenOnStopListeningPermanently) {
+  // Check that the handler gets the token through GetToken.
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillOnce(RunOnceCallback<4>("token", InstanceID::Result::SUCCESS));
+  fcm_handler_.StartListening();
+  ASSERT_TRUE(fcm_handler_.GetFCMRegistrationToken().has_value());
+
+  NiceMock<MockTokenObserver> mock_token_observer;
+  fcm_handler_.AddTokenObserver(&mock_token_observer);
+
+  EXPECT_CALL(mock_instance_id_driver_,
+              ExistsInstanceID(kSyncInvalidationsAppId))
+      .WillOnce(Return(true));
+  EXPECT_CALL(mock_instance_id_, DeleteIDImpl);
+  // Token should be cleared when StopListeningPermanently() is called.
+  EXPECT_CALL(mock_token_observer, OnFCMRegistrationTokenChanged());
+  fcm_handler_.StopListeningPermanently();
+  EXPECT_EQ(std::nullopt, fcm_handler_.GetFCMRegistrationToken());
+
+  fcm_handler_.RemoveTokenObserver(&mock_token_observer);
+}
+
+TEST_F(FCMHandlerTest,
+       ShouldClearTokenOnStopListeningPermanentlyWithoutInstanceID) {
+  // Check that the handler gets the token through GetToken.
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillOnce(RunOnceCallback<4>("token", InstanceID::Result::SUCCESS));
+  fcm_handler_.StartListening();
+  ASSERT_TRUE(fcm_handler_.GetFCMRegistrationToken().has_value());
+
+  NiceMock<MockTokenObserver> mock_token_observer;
+  fcm_handler_.AddTokenObserver(&mock_token_observer);
+
+  EXPECT_CALL(mock_instance_id_driver_,
+              ExistsInstanceID(kSyncInvalidationsAppId))
+      .WillOnce(Return(false));
+  // Token should be cleared when StopListeningPermanently() is called, and
+  // observers should be notified.
+  EXPECT_CALL(mock_token_observer, OnFCMRegistrationTokenChanged());
+  fcm_handler_.StopListeningPermanently();
+  EXPECT_EQ(std::nullopt, fcm_handler_.GetFCMRegistrationToken());
+
+  fcm_handler_.RemoveTokenObserver(&mock_token_observer);
+}
+
+TEST_F(FCMHandlerTest, ShouldReplayIncomingMessagesOnAddingListener) {
+  const std::string kPayloadValue1 = "payload_1";
+  const std::string kPayloadValue2 = "payload_2";
+
+  gcm::IncomingMessage gcm_message;
+  gcm_message.raw_data = kPayloadValue1;
+  fcm_handler_.OnMessage(kSyncInvalidationsAppId, gcm_message);
+
+  gcm_message.raw_data = kPayloadValue2;
+  fcm_handler_.OnMessage(kSyncInvalidationsAppId, gcm_message);
+
+  NiceMock<MockListener> mock_listener;
+  EXPECT_CALL(mock_listener, OnInvalidationReceived(kPayloadValue1));
+  EXPECT_CALL(mock_listener, OnInvalidationReceived(kPayloadValue2));
+  fcm_handler_.AddListener(&mock_listener);
+
+  // Adding the same listener twice should have no effect.
+  fcm_handler_.AddListener(&mock_listener);
+  fcm_handler_.RemoveListener(&mock_listener);
+}
+
+TEST_F(FCMHandlerTest, ShouldLimitIncomingMessagesForReplay) {
+  gcm::IncomingMessage gcm_message;
+  gcm_message.raw_data = "payload";
+  for (size_t i = 0; i < 100; ++i) {
+    fcm_handler_.OnMessage(kSyncInvalidationsAppId, gcm_message);
+  }
+
+  NiceMock<MockListener> mock_listener;
+  // Same as kMaxBufferedLastFcmMessages in fcm_handler.cc.
+  EXPECT_CALL(mock_listener, OnInvalidationReceived).Times(20);
+  fcm_handler_.AddListener(&mock_listener);
+  fcm_handler_.RemoveListener(&mock_listener);
+}
+
+TEST_F(FCMHandlerTest, ShouldClearLastIncomingMessagesOnStopListening) {
+  EXPECT_CALL(mock_instance_id_, GetToken)
+      .WillRepeatedly(
+          RunOnceCallbackRepeatedly<4>("token", InstanceID::Result::SUCCESS));
+  fcm_handler_.StartListening();
+
+  gcm::IncomingMessage gcm_message;
+  gcm_message.raw_data = "payload";
+  fcm_handler_.OnMessage(kSyncInvalidationsAppId, gcm_message);
+
+  fcm_handler_.StopListening();
+  fcm_handler_.StartListening();
+
+  NiceMock<MockListener> mock_listener;
+  EXPECT_CALL(mock_listener, OnInvalidationReceived).Times(0);
+  fcm_handler_.AddListener(&mock_listener);
+  fcm_handler_.RemoveListener(&mock_listener);
 }
 
 }  // namespace

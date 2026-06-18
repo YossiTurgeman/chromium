@@ -1,106 +1,123 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/public/browser/authenticator_request_client_delegate.h"
 
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
-#include "base/callback.h"
-#include "base/strings/string_piece.h"
+#include "base/check.h"
+#include "base/containers/span.h"
+#include "base/functional/callback.h"
+#include "base/notreached.h"
 #include "build/build_config.h"
-#include "device/fido/features.h"
+#include "content/browser/webauth/authenticator_environment.h"
+#include "device/fido/authenticator_get_assertion_response.h"
+#include "device/fido/fido_discovery_base.h"
 #include "device/fido/fido_discovery_factory.h"
-
-#if defined(OS_WIN)
-#include "device/fido/win/webauthn_api.h"
-#endif  // defined(OS_WIN)
+#include "device/fido/fido_request_handler_base.h"
+#include "device/fido/public/fido_constants.h"
+#include "device/fido/public/fido_types.h"
+#include "device/fido/public/public_key_credential_descriptor.h"
+#include "device/fido/public/public_key_credential_user_entity.h"
+#include "url/origin.h"
 
 namespace content {
 
 AuthenticatorRequestClientDelegate::AuthenticatorRequestClientDelegate() =
     default;
+
 AuthenticatorRequestClientDelegate::~AuthenticatorRequestClientDelegate() =
     default;
 
-base::Optional<std::string>
-AuthenticatorRequestClientDelegate::MaybeGetRelyingPartyIdOverride(
-    const std::string& claimed_relying_party_id,
-    const url::Origin& caller_origin) {
-  return base::nullopt;
-}
-
 void AuthenticatorRequestClientDelegate::SetRelyingPartyId(const std::string&) {
 }
+
+void AuthenticatorRequestClientDelegate::SetUIPresentation(
+    UIPresentation ui_presentation) {}
 
 bool AuthenticatorRequestClientDelegate::DoesBlockRequestOnFailure(
     InterestingFailureReason reason) {
   return false;
 }
 
+void AuthenticatorRequestClientDelegate::OnTransactionSuccessful(
+    RequestSource request_source,
+    device::FidoRequestType request_type,
+    device::AuthenticatorType authenticator_type) {}
+
 void AuthenticatorRequestClientDelegate::RegisterActionCallbacks(
     base::OnceClosure cancel_callback,
+    base::OnceClosure immediate_not_found_callback,
     base::RepeatingClosure start_over_callback,
+    AccountPreselectedCallback account_preselected_callback,
+    PasswordSelectedCallback password_selected_callback,
     device::FidoRequestHandlerBase::RequestCallback request_callback,
-    base::RepeatingClosure bluetooth_adapter_power_on_callback) {}
+    base::OnceClosure cancel_ui_timeout_callback,
+    base::RepeatingClosure bluetooth_adapter_power_on_callback,
+    base::RepeatingCallback<
+        void(device::FidoRequestHandlerBase::BlePermissionCallback)>
+        request_ble_permission_callback) {}
 
-bool AuthenticatorRequestClientDelegate::ShouldPermitIndividualAttestation(
-    const std::string& relying_party_id) {
-  return false;
-}
-
-void AuthenticatorRequestClientDelegate::ShouldReturnAttestation(
-    const std::string& relying_party_id,
-    const device::FidoAuthenticator* authenticator,
-    bool is_enterprise_attestation,
-    base::OnceCallback<void(bool)> callback) {
-  std::move(callback).Run(!is_enterprise_attestation);
-}
-
-bool AuthenticatorRequestClientDelegate::SupportsResidentKeys() {
-  return false;
-}
-
-void AuthenticatorRequestClientDelegate::SetMightCreateResidentCredential(
-    bool v) {}
-
-void AuthenticatorRequestClientDelegate::ConfigureCable(
+void AuthenticatorRequestClientDelegate::ConfigureDiscoveries(
     const url::Origin& origin,
-    base::span<const device::CableDiscoveryData> pairings_from_extension,
+    const std::string& rp_id,
+    RequestSource request_source,
+    device::FidoRequestType request_type,
+    std::optional<device::ResidentKeyRequirement> resident_key_requirement,
+    device::UserVerificationRequirement user_verification_requirement,
+    std::optional<std::string_view> user_name,
+    bool is_enclave_authenticator_available,
     device::FidoDiscoveryFactory* fido_discovery_factory) {}
+
+void AuthenticatorRequestClientDelegate::SetHints(const Hints& hints) {}
 
 void AuthenticatorRequestClientDelegate::SelectAccount(
     std::vector<device::AuthenticatorGetAssertionResponse> responses,
     base::OnceCallback<void(device::AuthenticatorGetAssertionResponse)>
         callback) {
-  // SupportsResidentKeys returned false so this should never be called.
-  NOTREACHED();
+  // Automatically choose the first account to allow resident keys for virtual
+  // authenticators without a browser implementation, e.g. on content shell.
+  // TODO(crbug.com/40639383): Provide a way to determine which account gets
+  // picked.
+  DCHECK(virtual_environment_);
+  std::move(callback).Run(std::move(responses.at(0)));
 }
 
-bool AuthenticatorRequestClientDelegate::IsFocused() {
-  return true;
+void AuthenticatorRequestClientDelegate::SetVirtualEnvironment(
+    bool virtual_environment) {
+  virtual_environment_ = virtual_environment;
 }
 
-#if defined(OS_MAC)
-base::Optional<AuthenticatorRequestClientDelegate::TouchIdAuthenticatorConfig>
-AuthenticatorRequestClientDelegate::GetTouchIdAuthenticatorConfig() {
-  return base::nullopt;
-}
-#endif  // defined(OS_MAC)
-
-base::Optional<bool> AuthenticatorRequestClientDelegate::
-    IsUserVerifyingPlatformAuthenticatorAvailableOverride() {
-  return base::nullopt;
+bool AuthenticatorRequestClientDelegate::IsVirtualEnvironmentEnabled() {
+  return virtual_environment_;
 }
 
-void AuthenticatorRequestClientDelegate::UpdateLastTransportUsed(
-    device::FidoTransportProtocol transport) {}
+void AuthenticatorRequestClientDelegate::SetCredentialTypes(
+    int credential_type_flags) {}
 
-void AuthenticatorRequestClientDelegate::DisableUI() {}
+void AuthenticatorRequestClientDelegate::SetCredentialIdFilter(
+    std::vector<device::PublicKeyCredentialDescriptor>) {}
 
-bool AuthenticatorRequestClientDelegate::IsWebAuthnUIEnabled() {
-  return false;
+void AuthenticatorRequestClientDelegate::SetUserEntityForMakeCredentialRequest(
+    const device::PublicKeyCredentialUserEntity&) {}
+
+std::vector<std::unique_ptr<device::FidoDiscoveryBase>>
+AuthenticatorRequestClientDelegate::CreatePlatformDiscoveries() {
+  return {};
 }
+
+void AuthenticatorRequestClientDelegate::StartObserving(
+    device::FidoRequestHandlerBase* request_handler) {}
+
+void AuthenticatorRequestClientDelegate::StopObserving(
+    device::FidoRequestHandlerBase* request_handler) {}
 
 void AuthenticatorRequestClientDelegate::OnTransportAvailabilityEnumerated(
     device::FidoRequestHandlerBase::TransportAvailabilityInfo data) {}
@@ -110,22 +127,22 @@ bool AuthenticatorRequestClientDelegate::EmbedderControlsAuthenticatorDispatch(
   return false;
 }
 
-void AuthenticatorRequestClientDelegate::BluetoothAdapterPowerChanged(
-    bool is_powered_on) {}
+void AuthenticatorRequestClientDelegate::BluetoothAdapterStatusChanged(
+    device::FidoRequestHandlerBase::BleStatus ble_status) {}
 
 void AuthenticatorRequestClientDelegate::FidoAuthenticatorAdded(
     const device::FidoAuthenticator& authenticator) {}
 
 void AuthenticatorRequestClientDelegate::FidoAuthenticatorRemoved(
-    base::StringPiece device_id) {}
+    std::string_view device_id) {}
 
 bool AuthenticatorRequestClientDelegate::SupportsPIN() const {
   return false;
 }
 
 void AuthenticatorRequestClientDelegate::CollectPIN(
-    base::Optional<int> attempts,
-    base::OnceCallback<void(std::string)> provide_pin_cb) {
+    CollectPINOptions options,
+    base::OnceCallback<void(std::u16string)> provide_pin_cb) {
   NOTREACHED();
 }
 
@@ -135,13 +152,9 @@ void AuthenticatorRequestClientDelegate::StartBioEnrollment(
 void AuthenticatorRequestClientDelegate::OnSampleCollected(
     int bio_samples_remaining) {}
 
-void AuthenticatorRequestClientDelegate::FinishCollectToken() {
-  NOTREACHED();
-}
+void AuthenticatorRequestClientDelegate::FinishCollectToken() {}
 
 void AuthenticatorRequestClientDelegate::OnRetryUserVerification(int attempts) {
 }
-
-void AuthenticatorRequestClientDelegate::OnInternalUserVerificationLocked() {}
 
 }  // namespace content

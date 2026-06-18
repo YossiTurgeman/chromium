@@ -31,6 +31,7 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_PATH_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_PATH_H_
 
+#include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/css_path_value.h"
 #include "third_party/blink/renderer/core/svg/properties/svg_property.h"
 #include "third_party/blink/renderer/core/svg/svg_parsing_error.h"
@@ -39,27 +40,26 @@
 
 namespace blink {
 
-class SVGPath final : public SVGPropertyBase {
+class CORE_EXPORT SVGPath final : public SVGPropertyBase {
  public:
   typedef void TearOffType;
 
   SVGPath();
-  explicit SVGPath(cssvalue::CSSPathValue*);
+  explicit SVGPath(const cssvalue::CSSPathValue&);
   ~SVGPath() override;
 
   const SVGPathByteStream& ByteStream() const {
     return path_value_->ByteStream();
   }
   StylePath* GetStylePath() const { return path_value_->GetStylePath(); }
-  cssvalue::CSSPathValue* PathValue() const { return path_value_.Get(); }
+  const cssvalue::CSSPathValue& PathValue() const { return *path_value_; }
 
   // SVGPropertyBase:
   SVGPath* Clone() const;
-  SVGPropertyBase* CloneForAnimation(const String&) const override;
   String ValueAsString() const override;
   SVGParsingError SetValueAsString(const String&);
 
-  void Add(const SVGPropertyBase*, const SVGElement*) override;
+  bool Add(const SVGPropertyBase*, const SVGElement*) override;
   void CalculateAnimatedValue(
       const SMILAnimationEffectParameters&,
       float percentage,
@@ -77,7 +77,7 @@ class SVGPath final : public SVGPropertyBase {
   void Trace(Visitor*) const override;
 
  private:
-  Member<cssvalue::CSSPathValue> path_value_;
+  Member<const cssvalue::CSSPathValue> path_value_;
 };
 
 template <>
@@ -89,4 +89,4 @@ struct DowncastTraits<SVGPath> {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_PATH_H_

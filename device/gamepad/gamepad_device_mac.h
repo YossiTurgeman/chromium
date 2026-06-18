@@ -1,4 +1,4 @@
-// Copyright (c) 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,8 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <ForceFeedback/ForceFeedback.h>
 #include <IOKit/hid/IOHIDManager.h>
+
+#include <string_view>
 
 #include "base/memory/weak_ptr.h"
 #include "device/gamepad/abstract_haptic_gamepad.h"
@@ -32,7 +34,7 @@ class GamepadDeviceMac final : public AbstractHapticGamepad {
  public:
   GamepadDeviceMac(int location_id,
                    IOHIDDeviceRef device_ref,
-                   base::StringPiece product_name,
+                   std::string_view product_name,
                    int vendor_id,
                    int product_id);
   ~GamepadDeviceMac() override;
@@ -48,6 +50,9 @@ class GamepadDeviceMac final : public AbstractHapticGamepad {
   // Return the OS-assigned ID for this device.
   int GetLocationId() { return location_id_; }
 
+  // Return the product name for this device.
+  std::string_view GetProductName() const { return product_name_; }
+
   // Return true if |device| refers to this device.
   bool IsSameDevice(IOHIDDeviceRef device) { return device == device_ref_; }
 
@@ -56,7 +61,7 @@ class GamepadDeviceMac final : public AbstractHapticGamepad {
   bool SupportsVibration();
 
   // AbstractHapticGamepad public implementation.
-  void SetVibration(double strong_magnitude, double weak_magnitude) override;
+  void SetVibration(mojom::GamepadEffectParametersPtr params) override;
   void SetZeroVibration() override;
   base::WeakPtr<AbstractHapticGamepad> GetWeakPtr() override;
 
@@ -94,6 +99,7 @@ class GamepadDeviceMac final : public AbstractHapticGamepad {
   int location_id_;
   IOHIDDeviceRef device_ref_;
   GamepadBusType bus_type_;
+  std::string product_name_;
 
   IOHIDElementRef button_elements_[Gamepad::kButtonsLengthCap];
   IOHIDElementRef axis_elements_[Gamepad::kAxesLengthCap];
@@ -104,8 +110,8 @@ class GamepadDeviceMac final : public AbstractHapticGamepad {
   // Force feedback
   FFDeviceObjectReference ff_device_ref_;
   FFEffectObjectReference ff_effect_ref_;
-  FFEFFECT ff_effect_;
-  FFCUSTOMFORCE ff_custom_force_;
+  FFEFFECT ff_effect_{};
+  FFCUSTOMFORCE ff_custom_force_{};
   LONG force_data_[2];
   DWORD axes_data_[2];
   LONG direction_data_[2];

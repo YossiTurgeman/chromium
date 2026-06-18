@@ -1,13 +1,22 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_SHELF_SHELF_VIEW_TEST_API_H_
 #define ASH_SHELF_SHELF_VIEW_TEST_API_H_
 
+#include <optional>
+#include <string>
+
 #include "ash/public/cpp/shelf_item.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/base/ui_base_types.h"
+#include "ui/compositor/layer_tree_owner.h"
+
+namespace base {
+class TimeDelta;
+}
 
 namespace gfx {
 class Point;
@@ -30,10 +39,14 @@ class ShelfView;
 class ShelfViewTestAPI {
  public:
   explicit ShelfViewTestAPI(ShelfView* shelf_view);
+
+  ShelfViewTestAPI(const ShelfViewTestAPI&) = delete;
+  ShelfViewTestAPI& operator=(const ShelfViewTestAPI&) = delete;
+
   ~ShelfViewTestAPI();
 
   // Number of icons displayed.
-  int GetButtonCount();
+  size_t GetButtonCount();
 
   // Retrieve the button at |index|, doesn't support the home button,
   // because the home button is not a ShelfAppButton.
@@ -41,6 +54,9 @@ class ShelfViewTestAPI {
 
   // Adds a new item of the given type to the view.
   ShelfID AddItem(ShelfItemType type);
+
+  // Removes the item at the specified |index| from the view.
+  void RemoveItemAt(int index);
 
   // Retrieve the view at |index|.
   views::View* GetViewAt(int index);
@@ -114,16 +130,16 @@ class ShelfViewTestAPI {
   void SetShelfContextMenuCallback(base::RepeatingClosure closure);
 
   // Returns |separator_index_|.
-  int GetSeparatorIndex() const;
+  std::optional<size_t> GetSeparatorIndex() const;
 
   // Checks whether the separator is visible or not.
   bool IsSeparatorVisible() const;
 
- private:
-  ShelfView* shelf_view_;
-  int id_ = 0;
+  bool HasPendingPromiseAppRemoval(const std::string& promise_app_id) const;
 
-  DISALLOW_COPY_AND_ASSIGN(ShelfViewTestAPI);
+ private:
+  raw_ptr<ShelfView, DanglingUntriaged> shelf_view_;
+  int id_ = 0;
 };
 
 }  // namespace ash

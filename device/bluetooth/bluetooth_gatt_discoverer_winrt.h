@@ -1,24 +1,22 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEVICE_BLUETOOTH_BLUETOOTH_GATT_DISCOVERER_WINRT_H_
 #define DEVICE_BLUETOOTH_BLUETOOTH_GATT_DISCOVERER_WINRT_H_
 
+#include <stdint.h>
 #include <windows.devices.bluetooth.genericattributeprofile.h>
 #include <windows.devices.bluetooth.h>
 #include <wrl/client.h>
 
-#include <stdint.h>
-
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include "base/callback.h"
 #include "base/containers/flat_map.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/threading/thread_checker.h"
 #include "device/bluetooth/bluetooth_device.h"
 #include "device/bluetooth/bluetooth_export.h"
@@ -47,13 +45,20 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothGattDiscovererWinrt {
   BluetoothGattDiscovererWinrt(
       Microsoft::WRL::ComPtr<
           ABI::Windows::Devices::Bluetooth::IBluetoothLEDevice> ble_device,
-      base::Optional<BluetoothUUID> service_uuid);
+      std::optional<BluetoothUUID> service_uuid);
+
+  BluetoothGattDiscovererWinrt(const BluetoothGattDiscovererWinrt&) = delete;
+  BluetoothGattDiscovererWinrt& operator=(const BluetoothGattDiscovererWinrt&) =
+      delete;
+
   ~BluetoothGattDiscovererWinrt();
 
   // Note: In order to avoid running |callback| multiple times on errors,
   // clients are expected to synchronously destroy the GattDiscoverer after
   // |callback| has been invoked for the first time.
-  void StartGattDiscovery(GattDiscoveryCallback callback);
+  // When |allow_cache| set to true, it allows a discovery result from the
+  // system cache without connecting to the BLE device.
+  void StartGattDiscovery(bool allow_cache, GattDiscoveryCallback callback);
   const GattServiceList& GetGattServices() const;
   const GattCharacteristicList* GetCharacteristics(
       uint16_t service_attribute_handle) const;
@@ -97,7 +102,7 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothGattDiscovererWinrt {
       service_to_characteristics_map_;
   base::flat_map<uint16_t, GattDescriptorList>
       characteristic_to_descriptors_map_;
-  base::Optional<BluetoothUUID> service_uuid_;
+  std::optional<BluetoothUUID> service_uuid_;
   size_t num_services_ = 0;
   size_t num_characteristics_ = 0;
 
@@ -106,8 +111,6 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothGattDiscovererWinrt {
   // Note: This should remain the last member so it'll be destroyed and
   // invalidate its weak pointers before any other members are destroyed.
   base::WeakPtrFactory<BluetoothGattDiscovererWinrt> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(BluetoothGattDiscovererWinrt);
 };
 
 }  // namespace device

@@ -1,4 +1,4 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -12,13 +12,17 @@ component("chromeos") {
   sources = [
     "devicetype_utils.cc",
     "devicetype_utils.h",
+    "shill_error.cc",
+    "shill_error.h",
     "user_activity_power_manager_notifier.cc",
     "user_activity_power_manager_notifier.h",
   ]
   defines = [ "UI_CHROMEOS_IMPLEMENTATION" ]
   deps = [
+    "//ash/constants",
     "//base",
-    "//base/third_party/dynamic_annotations",
+    "//build:chromeos_buildflags",
+    "//chromeos/ash/components/network",
     "//chromeos/constants",
     "//chromeos/dbus/power",
     "//chromeos/dbus/power:power_manager_proto",
@@ -30,7 +34,7 @@ component("chromeos") {
     "//ui/chromeos/strings",
     "//ui/events",
     "//ui/events:gesture_detection",
-    "//ui/events/devices:devices",
+    "//ui/events/devices",
   ]
 }
 

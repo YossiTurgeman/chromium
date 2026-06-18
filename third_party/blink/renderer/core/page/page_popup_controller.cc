@@ -31,12 +31,13 @@
 #include "third_party/blink/renderer/core/page/page_popup_controller.h"
 
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/public/strings/grit/blink_strings.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/geometry/dom_rect.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/page/page_popup.h"
 #include "third_party/blink/renderer/core/page/page_popup_client.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
+#include "ui/strings/grit/ax_strings.h"
 
 namespace blink {
 
@@ -49,15 +50,18 @@ PagePopupController* PagePopupController::From(Page& page) {
 PagePopupController::PagePopupController(Page& page,
                                          PagePopup& popup,
                                          PagePopupClient* client)
-    : popup_(popup), popup_client_(client) {
+    : Supplement(page), popup_(popup), popup_client_(client) {
   DCHECK(client);
   ProvideTo(page, this);
 }
 
 void PagePopupController::setValueAndClosePopup(int num_value,
-                                                const String& string_value) {
-  if (popup_client_)
-    popup_client_->SetValueAndClosePopup(num_value, string_value);
+                                                const String& string_value,
+                                                bool is_keyboard_event) {
+  if (popup_client_) {
+    popup_client_->SetValueAndClosePopup(num_value, string_value,
+                                         is_keyboard_event);
+  }
 }
 
 void PagePopupController::setValue(const String& value) {
@@ -109,15 +113,45 @@ String PagePopupController::formatWeek(int year,
 
 void PagePopupController::ClearPagePopupClient() {
   popup_client_ = nullptr;
+  popup_origin_.reset();
 }
 
 void PagePopupController::setWindowRect(int x, int y, int width, int height) {
-  popup_.SetWindowRect(IntRect(x, y, width, height));
+  if (!popup_client_) {
+    return;
+  }
+
+  popup_.SetWindowRect(gfx::Rect(x, y, width, height));
+
+  popup_origin_ = gfx::Point(x, y);
+  popup_client_->SetMenuListOptionsBoundsInAXTree(options_bounds_,
+                                                  *popup_origin_);
 }
 
 void PagePopupController::Trace(Visitor* visitor) const {
   ScriptWrappable::Trace(visitor);
   Supplement<Page>::Trace(visitor);
+  visitor->Trace(popup_client_);
+}
+
+void PagePopupController::setMenuListOptionsBoundsInAXTree(
+    const HeapVector<Member<DOMRect>>& options_bounds,
+    bool children_updated) {
+  options_bounds_.clear();
+  for (const auto& option_bounds : options_bounds) {
+    options_bounds_.emplace_back(
+        gfx::Rect(option_bounds->x(), option_bounds->y(),
+                  option_bounds->width(), option_bounds->height()));
+  }
+
+  // On the first layout, setWindowRect handles the first call to set the bounds
+  // in the tree. If there is a second layout (this happens when there are too
+  // many children to process in one layout), the updated bounds are sent to the
+  // tree here.
+  if (popup_origin_ && children_updated) {
+    popup_client_->SetMenuListOptionsBoundsInAXTree(options_bounds_,
+                                                    *popup_origin_);
+  }
 }
 
 // static
@@ -131,6 +165,10 @@ CSSFontSelector* PagePopupController::CreateCSSFontSelector(
 
   DCHECK(controller->popup_client_);
   return controller->popup_client_->CreateCSSFontSelector(popup_document);
+}
+
+void PagePopupController::debugLog(const String& message) {
+  LOG(ERROR) << message;
 }
 
 }  // namespace blink

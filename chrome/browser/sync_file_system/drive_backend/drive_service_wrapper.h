@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 
 #include <string>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "components/drive/service/drive_service_interface.h"
@@ -21,9 +21,13 @@ namespace drive_backend {
 // pointer.  Each method wraps corresponding name method of
 // DriveServiceInterface.  See comments in drive_service_interface.h
 // for details.
-class DriveServiceWrapper : public base::SupportsWeakPtr<DriveServiceWrapper> {
+class DriveServiceWrapper {
  public:
   explicit DriveServiceWrapper(drive::DriveServiceInterface* drive_service);
+  ~DriveServiceWrapper();
+
+  DriveServiceWrapper(const DriveServiceWrapper&) = delete;
+  DriveServiceWrapper& operator=(const DriveServiceWrapper&) = delete;
 
   void AddNewDirectory(const std::string& parent_resource_id,
                        const std::string& directory_title,
@@ -37,7 +41,7 @@ class DriveServiceWrapper : public base::SupportsWeakPtr<DriveServiceWrapper> {
   void DownloadFile(
       const base::FilePath& local_cache_path,
       const std::string& resource_id,
-      const google_apis::DownloadActionCallback& download_action_callback,
+      google_apis::DownloadActionCallback download_action_callback,
       const google_apis::GetContentCallback& get_content_callback,
       google_apis::ProgressCallback progress_callback);
 
@@ -59,31 +63,31 @@ class DriveServiceWrapper : public base::SupportsWeakPtr<DriveServiceWrapper> {
   void GetRemainingTeamDriveList(const std::string& page_token,
                                  google_apis::TeamDriveListCallback callback);
 
-  void GetRemainingFileList(
-      const GURL& next_link,
-      const google_apis::FileListCallback& callback);
+  void GetRemainingFileList(const GURL& next_link,
+                            google_apis::FileListCallback callback);
 
   void GetFileResource(const std::string& resource_id,
                        google_apis::FileResourceCallback callback);
 
-  void GetFileListInDirectory(
-      const std::string& directory_resource_id,
-      const google_apis::FileListCallback& callback);
+  void GetFileListInDirectory(const std::string& directory_resource_id,
+                              google_apis::FileListCallback callback);
 
   void RemoveResourceFromDirectory(const std::string& parent_resource_id,
                                    const std::string& resource_id,
                                    google_apis::EntryActionCallback callback);
 
-  void SearchByTitle(
-      const std::string& title,
-      const std::string& directory_resource_id,
-      const google_apis::FileListCallback& callback);
+  void SearchByTitle(const std::string& title,
+                     const std::string& directory_resource_id,
+                     google_apis::FileListCallback callback);
+
+  base::WeakPtr<DriveServiceWrapper> AsWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
  private:
-  drive::DriveServiceInterface* drive_service_;
+  raw_ptr<drive::DriveServiceInterface> drive_service_;
   SEQUENCE_CHECKER(sequence_checker_);
-
-  DISALLOW_COPY_AND_ASSIGN(DriveServiceWrapper);
+  base::WeakPtrFactory<DriveServiceWrapper> weak_ptr_factory_{this};
 };
 
 }  // namespace drive_backend

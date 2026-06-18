@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,20 +7,21 @@
 
 #include <memory>
 
-#include "base/macros.h"
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/observer_list.h"
 #include "chrome/browser/ui/layout_constants.h"
-#include "chrome/browser/ui/omnibox/omnibox_theme.h"
 #include "chrome/browser/ui/views/location_bar/icon_label_bubble_view.h"
+#include "chrome/browser/ui/views/page_action/page_action_view_interface.h"
 #include "third_party/skia/include/core/SkColor.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/gfx/color_palette.h"
-#include "ui/gfx/image/image_skia.h"
-#include "ui/views/animation/ink_drop_host_view.h"
+#include "ui/views/animation/ink_drop_host.h"
 #include "ui/views/controls/image_view.h"
 
+class Browser;
 class CommandUpdater;
-class OmniboxView;
 class PageActionIconLoadingIndicatorView;
+class PageActionIconViewObserver;
 
 namespace content {
 class WebContents;
@@ -34,9 +35,31 @@ namespace views {
 class BubbleDialogDelegate;
 }
 
+// Used for histograms, do not reorder.
+enum class PageActionCTREvent {
+  kShown = 0,
+  kClicked,
+  kMaxValue = kClicked,
+};
+
+// Used for histograms, do not reorder.
+enum class PageActionPageEvent {
+  kPageShown = 0,
+  kActionShown,
+  kMultipleActionsShown,
+  kMaxValue = kMultipleActionsShown,
+};
+
+// WARNING WARNING WARNING WARNING
+// This class is deprecated in favor of `PageActionView`. Please see
+// the `README.md` for details on integrating with the new page actions
+// framework. Reach out to alsan@ for help.
 // Represents an inbuilt (as opposed to an extension) page action icon that
 // shows a bubble when clicked.
-class PageActionIconView : public IconLabelBubbleView {
+class PageActionIconView : public IconLabelBubbleView,
+                           public page_actions::PageActionViewInterface {
+  METADATA_HEADER(PageActionIconView, IconLabelBubbleView)
+
  public:
   class Delegate {
    public:
@@ -54,18 +77,35 @@ class PageActionIconView : public IconLabelBubbleView {
     // Delegate should return true if the page action icons should be hidden.
     virtual bool ShouldHidePageActionIcons() const;
 
-    virtual const OmniboxView* GetOmniboxView() const;
+    // Returns whether or not the given page action icon should be hidden.
+    virtual bool ShouldHidePageActionIcon(
+        const PageActionIconView* icon_view) const;
   };
 
+  PageActionIconView(const PageActionIconView&) = delete;
+  PageActionIconView& operator=(const PageActionIconView&) = delete;
   ~PageActionIconView() override;
 
+  // page_actions::PageActionViewInterface:
+  views::BubbleAnchor GetBubbleAnchor() override;
+  std::u16string GetTooltipText() const override;
+  std::u16string GetAccessibleName() const override;
+  // This class already overrides IconLabelBubbleView SetVisible() below.
+  IconLabelBubbleView* GetIconLabelBubbleViewNotMigrated() override;
+
+  void AddPageIconViewObserver(PageActionIconViewObserver* observer);
+  void RemovePageIconViewObserver(PageActionIconViewObserver* observer);
+
   // Updates the color of the icon, this must be set before the icon is drawn.
+  // TODO(crbug.com/352245808): Color overrides should be moved into the
+  // IconLabelBubbleView superclass.
   void SetIconColor(SkColor icon_color);
+  SkColor GetIconColor() const;
 
   // Sets the active state of the icon. An active icon will be displayed in a
   // "call to action" color.
   void SetActive(bool active);
-  bool active() const { return active_; }
+  bool GetActive() const;
 
   // Hide the icon on user input in progress and invokes UpdateImpl().
   void Update();
@@ -74,11 +114,26 @@ class PageActionIconView : public IconLabelBubbleView {
   virtual views::BubbleDialogDelegate* GetBubble() const = 0;
 
   // Retrieve the text to be used for a tooltip or accessible name.
-  virtual base::string16 GetTextForTooltipAndAccessibleName() const = 0;
+  // If this string never changes, subclasses should use `SetAccessibleName`
+  // in the constructor instead of overriding this function.
+  virtual std::u16string GetTextForTooltipAndAccessibleName() const;
 
   SkColor GetLabelColorForTesting() const;
 
+  std::optional<actions::ActionId> action_id() const { return action_id_; }
+  const char* name_for_histograms() const { return name_for_histograms_; }
+  bool ephemeral() const { return ephemeral_; }
+
   void ExecuteForTesting();
+
+  // Creates and updates the loading indicator.
+  // TODO(crbug.com/40627870): Ideally this should be lazily initialized in
+  // SetIsLoading(), but local card migration icon has a weird behavior that
+  // doing so will cause the indicator being invisible. Investigate and fix.
+  void InstallLoadingIndicatorForTesting();
+
+  // IconLabelBubbleView:
+  void SetVisible(bool visible) override;
 
   PageActionIconLoadingIndicatorView* loading_indicator_for_testing() {
     return loading_indicator_;
@@ -95,6 +150,10 @@ class PageActionIconView : public IconLabelBubbleView {
                      int command_id,
                      IconLabelBubbleView::Delegate* parent_delegate,
                      Delegate* delegate,
+                     const char* name_for_histograms,
+                     std::optional<actions::ActionId> action_id = std::nullopt,
+                     Browser* browser = nullptr,
+                     bool ephemeral = true,
                      const gfx::FontList& = gfx::FontList());
 
   // Returns true if a related bubble is showing.
@@ -104,18 +163,20 @@ class PageActionIconView : public IconLabelBubbleView {
   // Returns true if the command is enabled.
   bool SetCommandEnabled(bool enabled) const;
 
-  // Sets the tooltip text.
-  void SetTooltipText(const base::string16& tooltip);
-
   // Invoked prior to executing the command.
   virtual void OnExecuting(ExecuteSource execute_source) = 0;
+
+  // Invoked after executing the command.
+  virtual void DidExecute(ExecuteSource execute_source) {}
 
   // Invoked after the icon is pressed.
   virtual void OnPressed(bool activated) {}
 
-  // views::IconLabelBubbleView:
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override;
-  base::string16 GetTooltipText(const gfx::Point& p) const override;
+  // Invoked if setting the active state in |SetActive|
+  // changed the active state.
+  virtual void OnActiveStateChanged() {}
+
+  // IconLabelBubbleView:
   void ViewHierarchyChanged(
       const views::ViewHierarchyChangedDetails& details) override;
   void OnThemeChanged() override;
@@ -123,6 +184,9 @@ class PageActionIconView : public IconLabelBubbleView {
   void NotifyClick(const ui::Event& event) override;
   bool IsTriggerableEvent(const ui::Event& event) override;
   bool ShouldUpdateInkDropOnClickCanceled() const override;
+  void UpdateBorder() override;
+
+  virtual void UpdateTooltipText();
 
  protected:
   // Calls OnExecuting and runs |command_id_| with a valid |command_updater_|.
@@ -134,18 +198,16 @@ class PageActionIconView : public IconLabelBubbleView {
   // Provides the badge to be shown on top of the vector icon, if any.
   virtual const gfx::VectorIcon& GetVectorIconBadge() const;
 
+  // Gives subclasses the opportunity to supply a non-vector icon for the page
+  // action icon view. If this returns an empty image the implementation will
+  // fall-back to using the vector icon.
+  virtual ui::ImageModel GetSizedIconImage(int size) const;
+
   // IconLabelBubbleView:
   void OnTouchUiChanged() override;
-  const char* GetClassName() const override;
 
   // Updates the icon image after some state has changed.
   virtual void UpdateIconImage();
-
-  // Creates and updates the loading indicator.
-  // TODO(crbug.com/964127): Ideally this should be lazily initialized in
-  // SetIsLoading(), but local card migration icon has a weird behavior that
-  // doing so will cause the indicator being invisible. Investigate and fix.
-  void InstallLoadingIndicator();
 
   // Set if the page action icon is in the loading state.
   void SetIsLoading(bool is_loading);
@@ -160,30 +222,50 @@ class PageActionIconView : public IconLabelBubbleView {
   // state.
   virtual void UpdateImpl() = 0;
 
+  Browser* browser() { return browser_; }
+
  private:
-  void UpdateBorder();
+  void InstallLoadingIndicator();
+
+  void OnAXNameChanged(ax::mojom::StringAttribute attribute,
+                       const std::optional<std::string>& name);
 
   // What color to paint the icon with.
   SkColor icon_color_ = gfx::kPlaceholderColor;
 
   // The CommandUpdater for the Browser object that owns the location bar.
-  CommandUpdater* const command_updater_;
+  const raw_ptr<CommandUpdater, DanglingUntriaged> command_updater_;
 
   // Delegate for access to associated state.
-  Delegate* const delegate_;
+  const raw_ptr<Delegate> delegate_;
 
   // The command ID executed when the user clicks this icon.
   const int command_id_;
+
+  // The ID for the associated ActionItem for this icon.
+  // This should eventually replace the above |command_id_|.
+  std::optional<actions::ActionId> action_id_;
+
+  // String that represents the page action type for metrics purposes.
+  const char* const name_for_histograms_;
+
+  // Should be true if this page action should only sometimes be displayed.
+  const bool ephemeral_;
 
   // The active node_data. The precise definition of "active" is unique to each
   // subclass, but generally indicates that the associated feature is acting on
   // the web page.
   bool active_ = false;
 
-  // The loading indicator, showing a throbber animation on top of the icon.
-  PageActionIconLoadingIndicatorView* loading_indicator_ = nullptr;
+  raw_ptr<Browser> browser_;
 
-  DISALLOW_COPY_AND_ASSIGN(PageActionIconView);
+  // The loading indicator, showing a throbber animation on top of the icon.
+  raw_ptr<PageActionIconLoadingIndicatorView> loading_indicator_ = nullptr;
+
+  base::ObserverList<PageActionIconViewObserver>::UncheckedAndDanglingUntriaged
+      observer_list_;
+
+  base::CallbackListSubscription name_changed_subscription_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_PAGE_ACTION_PAGE_ACTION_ICON_VIEW_H_

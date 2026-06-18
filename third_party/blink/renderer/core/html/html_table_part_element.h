@@ -42,11 +42,11 @@ class CORE_EXPORT HTMLTablePartElement : public HTMLElement {
   void CollectStyleForPresentationAttribute(
       const QualifiedName&,
       const AtomicString&,
-      MutableCSSPropertyValueSet*) override;
+      HeapVector<CSSPropertyValue, 8>&) override;
 
   HTMLTableElement* FindParentTable() const;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_TABLE_PART_ELEMENT_H_

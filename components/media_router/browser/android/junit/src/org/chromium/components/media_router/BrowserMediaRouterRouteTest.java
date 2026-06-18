@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,53 +9,47 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.verify;
 
-import android.content.Intent;
-
+import org.junit.After;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.base.test.util.Feature;
-import org.chromium.components.browser_ui.media.MediaNotificationInfo;
 import org.chromium.content_public.browser.WebContents;
 
-/**
- * Route tests for BrowserMediaRouter.
- */
+/** Route tests for BrowserMediaRouter. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class BrowserMediaRouterRouteTest extends BrowserMediaRouterTestBase {
-    @Mock
-    WebContents mWebContents1;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock WebContents mWebContents1;
 
-    @Mock
-    WebContents mWebContents2;
+    @Mock WebContents mWebContents2;
 
     @Override
     public void setUp() {
         super.setUp();
-        MockitoAnnotations.initMocks(this);
         doReturn(false).when(mWebContents1).isIncognito();
         doReturn(false).when(mWebContents2).isIncognito();
 
-        MediaRouterClient.setInstance(new MediaRouterClient() {
-            @Override
-            public int getTabId(WebContents webContents) {
-                if (webContents == mWebContents1) return TAB_ID1;
-                return TAB_ID2;
-            }
+        MediaRouterClient.setInstance(
+                new TestMediaRouterClient() {
+                    @Override
+                    public int getTabId(WebContents webContents) {
+                        if (webContents == mWebContents1) return TAB_ID1;
+                        return TAB_ID2;
+                    }
+                });
+    }
 
-            @Override
-            public Intent createBringTabToFrontIntent(int tabId) {
-                return null;
-            }
-
-            @Override
-            public void showNotification(MediaNotificationInfo notificationInfo) {}
-        });
+    @After
+    public void tearDown() {
+        MediaRouterClient.setInstance(null);
     }
 
     @Test
@@ -66,7 +60,13 @@ public class BrowserMediaRouterRouteTest extends BrowserMediaRouterTestBase {
         mBrowserMediaRouter.createRoute(
                 SOURCE_ID1, SINK_ID1, PRESENTATION_ID1, ORIGIN1, mWebContents1, REQUEST_ID1);
         verify(mRouteProvider)
-                .createRoute(SOURCE_ID1, SINK_ID1, PRESENTATION_ID1, ORIGIN1, TAB_ID1, false,
+                .createRoute(
+                        SOURCE_ID1,
+                        SINK_ID1,
+                        PRESENTATION_ID1,
+                        ORIGIN1,
+                        TAB_ID1,
+                        false,
                         REQUEST_ID1);
 
         String routeId1 = new MediaRoute(SINK_ID1, SOURCE_ID1, PRESENTATION_ID1).id;
@@ -89,7 +89,13 @@ public class BrowserMediaRouterRouteTest extends BrowserMediaRouterTestBase {
                 SOURCE_ID2, SINK_ID2, PRESENTATION_ID2, ORIGIN2, mWebContents2, REQUEST_ID2);
 
         verify(mRouteProvider)
-                .createRoute(SOURCE_ID2, SINK_ID2, PRESENTATION_ID2, ORIGIN2, TAB_ID2, false,
+                .createRoute(
+                        SOURCE_ID2,
+                        SINK_ID2,
+                        PRESENTATION_ID2,
+                        ORIGIN2,
+                        TAB_ID2,
+                        false,
                         REQUEST_ID2);
         String routeId2 = new MediaRoute(SINK_ID2, SOURCE_ID2, PRESENTATION_ID2).id;
         mBrowserMediaRouter.onRouteCreated(routeId2, SINK_ID2, REQUEST_ID2, mRouteProvider, true);
@@ -105,9 +111,15 @@ public class BrowserMediaRouterRouteTest extends BrowserMediaRouterTestBase {
                 SOURCE_ID1, SINK_ID1, PRESENTATION_ID1, ORIGIN1, mWebContents1, REQUEST_ID1);
 
         verify(mRouteProvider)
-                .createRoute(SOURCE_ID1, SINK_ID1, PRESENTATION_ID1, ORIGIN1, TAB_ID1, false,
+                .createRoute(
+                        SOURCE_ID1,
+                        SINK_ID1,
+                        PRESENTATION_ID1,
+                        ORIGIN1,
+                        TAB_ID1,
+                        false,
                         REQUEST_ID1);
-        mBrowserMediaRouter.onRouteRequestError("ERROR", REQUEST_ID1);
+        mBrowserMediaRouter.onCreateRouteRequestError("ERROR", REQUEST_ID1);
 
         assertEquals(0, mBrowserMediaRouter.getRouteIdsToProvidersForTest().size());
     }
@@ -147,7 +159,7 @@ public class BrowserMediaRouterRouteTest extends BrowserMediaRouterTestBase {
         verify(mRouteProvider)
                 .joinRoute(SOURCE_ID2, PRESENTATION_ID1, ORIGIN1, TAB_ID2, REQUEST_ID2);
 
-        mBrowserMediaRouter.onRouteRequestError("error", REQUEST_ID2);
+        mBrowserMediaRouter.onJoinRouteRequestError("error", REQUEST_ID2);
 
         assertEquals(1, mBrowserMediaRouter.getRouteIdsToProvidersForTest().size());
     }

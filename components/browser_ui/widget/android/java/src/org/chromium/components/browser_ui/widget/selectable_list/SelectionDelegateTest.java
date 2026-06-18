@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,9 +13,7 @@ import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
-/**
- * Tests for the {@link SelectionDelegate} class.
- */
+/** Tests for the {@link SelectionDelegate} class. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class SelectionDelegateTest {
@@ -24,7 +22,7 @@ public class SelectionDelegateTest {
 
     @Test
     public void testSelectionDelegateSingle() {
-        SelectionDelegate<Object> delegate = new SelectionDelegate<Object>();
+        SelectionDelegate<Object> delegate = new SelectionDelegate<>();
         delegate.setSingleSelectionMode();
 
         // Starting state, nothing is selected.
@@ -56,7 +54,7 @@ public class SelectionDelegateTest {
 
     @Test
     public void testSelectionDelegateMulti() {
-        SelectionDelegate<Object> delegate = new SelectionDelegate<Object>();
+        SelectionDelegate<Object> delegate = new SelectionDelegate<>();
 
         // Starting state, nothing is selected.
         assertFalse(delegate.isItemSelected(mData1));

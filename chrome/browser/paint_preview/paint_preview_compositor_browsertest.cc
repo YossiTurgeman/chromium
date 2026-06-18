@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
 #include "base/test/gtest_util.h"
 #include "base/unguessable_token.h"
@@ -39,14 +39,14 @@ std::unique_ptr<PaintPreviewCompositorServiceImpl> ToCompositorServiceImpl(
     std::unique_ptr<PaintPreviewCompositorService, base::OnTaskRunnerDeleter>
         service) {
   return std::unique_ptr<PaintPreviewCompositorServiceImpl>(
-      reinterpret_cast<PaintPreviewCompositorServiceImpl*>(service.release()));
+      static_cast<PaintPreviewCompositorServiceImpl*>(service.release()));
 }
 
 std::unique_ptr<PaintPreviewCompositorClientImpl> ToCompositorClientImpl(
     std::unique_ptr<PaintPreviewCompositorClient, base::OnTaskRunnerDeleter>
         client) {
   return std::unique_ptr<PaintPreviewCompositorClientImpl>(
-      reinterpret_cast<PaintPreviewCompositorClientImpl*>(client.release()));
+      static_cast<PaintPreviewCompositorClientImpl*>(client.release()));
 }
 
 bool IsBoundAndConnected(PaintPreviewCompositorClientImpl* compositor) {
@@ -89,7 +89,7 @@ class PaintPreviewCompositorBrowserTest : public InProcessBrowserTest {
   }
 
  private:
-  std::unique_ptr<SimpleFactoryKey> key_ = nullptr;
+  std::unique_ptr<SimpleFactoryKey> key_;
 };
 
 // Test that a "true" initialization works and doesn't crash.
@@ -124,8 +124,8 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest, CompositorCreate) {
       compositor_service->CreateCompositor(loop.QuitClosure()));
   loop.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor->Token()));
   EXPECT_TRUE(IsBoundAndConnected(compositor.get()));
   compositor.reset();
 
@@ -146,8 +146,8 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest,
   loop_0.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
   EXPECT_EQ(1U, compositor_service->ActiveClientsForTesting().size());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor_0->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor_0->Token()));
 
   EXPECT_TRUE(IsBoundAndConnected(compositor_0.get()));
 
@@ -157,16 +157,16 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest,
   loop_1.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
   EXPECT_EQ(2U, compositor_service->ActiveClientsForTesting().size());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor_1->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor_1->Token()));
   EXPECT_TRUE(IsBoundAndConnected(compositor_1.get()));
   EXPECT_NE(compositor_0->Token(), compositor_1->Token());
 
   compositor_0.reset();
   EXPECT_TRUE(compositor_service->HasActiveClients());
   EXPECT_EQ(1U, compositor_service->ActiveClientsForTesting().size());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor_1->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor_1->Token()));
 
   compositor_1.reset();
   EXPECT_FALSE(compositor_service->HasActiveClients());
@@ -186,8 +186,8 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest,
       compositor_service->CreateCompositor(loop.QuitClosure()));
   loop.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor->Token()));
   EXPECT_TRUE(IsBoundAndConnected(compositor.get()));
 
   base::RunLoop disconnect_loop;

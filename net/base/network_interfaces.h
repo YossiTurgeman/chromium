@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,12 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/macros.h"
 #include "net/base/ip_address.h"
 #include "net/base/net_export.h"
 #include "net/base/network_change_notifier.h"
@@ -48,6 +49,8 @@ enum IPAddressAttributes {
   IP_ADDRESS_ATTRIBUTE_DETACHED = 1 << 5,
 };
 
+using Eui48MacAddress = std::array<uint8_t, 6>;
+
 // struct that is used by GetNetworkList() to represent a network
 // interface.
 struct NET_EXPORT NetworkInterface {
@@ -58,9 +61,12 @@ struct NET_EXPORT NetworkInterface {
                    NetworkChangeNotifier::ConnectionType type,
                    const IPAddress& address,
                    uint32_t prefix_length,
-                   int ip_address_attributes);
+                   int ip_address_attributes,
+                   std::optional<Eui48MacAddress> mac_address = std::nullopt);
   NetworkInterface(const NetworkInterface& other);
   ~NetworkInterface();
+
+  bool operator==(const NetworkInterface& that) const = default;
 
   std::string name;
   std::string friendly_name;  // Same as |name| on non-Windows.
@@ -69,6 +75,7 @@ struct NET_EXPORT NetworkInterface {
   IPAddress address;
   uint32_t prefix_length;
   int ip_address_attributes;  // Combination of |IPAddressAttributes|.
+  std::optional<Eui48MacAddress> mac_address;
 };
 
 typedef std::vector<NetworkInterface> NetworkInterfaceList;
@@ -94,28 +101,6 @@ NET_EXPORT bool GetNetworkList(NetworkInterfaceList* networks,
 // Currently only implemented on Linux, ChromeOS, Android and Windows.
 NET_EXPORT std::string GetWifiSSID();
 
-// General category of the IEEE 802.11 (wifi) physical layer operating mode.
-enum WifiPHYLayerProtocol {
-  // No wifi support or no associated AP.
-  WIFI_PHY_LAYER_PROTOCOL_NONE,
-  // An obsolete modes introduced by the original 802.11, e.g. IR, FHSS.
-  WIFI_PHY_LAYER_PROTOCOL_ANCIENT,
-  // 802.11a, OFDM-based rates.
-  WIFI_PHY_LAYER_PROTOCOL_A,
-  // 802.11b, DSSS or HR DSSS.
-  WIFI_PHY_LAYER_PROTOCOL_B,
-  // 802.11g, same rates as 802.11a but compatible with 802.11b.
-  WIFI_PHY_LAYER_PROTOCOL_G,
-  // 802.11n, HT rates.
-  WIFI_PHY_LAYER_PROTOCOL_N,
-  // Unclassified mode or failure to identify.
-  WIFI_PHY_LAYER_PROTOCOL_UNKNOWN
-};
-
-// Characterize the PHY mode of the currently associated access point.
-// Currently only available on Windows.
-NET_EXPORT WifiPHYLayerProtocol GetWifiPHYLayerProtocol();
-
 enum WifiOptions {
   // Disables background SSID scans.
   WIFI_OPTIONS_DISABLE_SCAN =  1 << 0,
@@ -125,11 +110,10 @@ enum WifiOptions {
 
 class NET_EXPORT ScopedWifiOptions {
  public:
-  ScopedWifiOptions() {}
+  ScopedWifiOptions() = default;
+  ScopedWifiOptions(const ScopedWifiOptions&) = delete;
+  ScopedWifiOptions& operator=(const ScopedWifiOptions&) = delete;
   virtual ~ScopedWifiOptions();
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ScopedWifiOptions);
 };
 
 // Set temporary options on all wifi interfaces.

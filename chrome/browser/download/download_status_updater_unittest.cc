@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,24 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
+#include "base/strings/stringprintf.h"
+#include "base/test/scoped_feature_list.h"
+#include "chrome/browser/browser_features.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/download/chrome_download_manager_delegate.h"
+#include "chrome/browser/download/download_core_service.h"
+#include "chrome/browser/download/download_core_service_factory.h"
+#include "chrome/browser/download/download_core_service_impl.h"
+#include "chrome/browser/download/download_prefs.h"
 #include "chrome/browser/download/download_status_updater.h"
+#include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+#include "chrome/browser/profiles/profile_manager.h"
+#include "chrome/test/base/testing_browser_process.h"
+#include "chrome/test/base/testing_profile.h"
+#include "chrome/test/base/testing_profile_manager.h"
 #include "components/download/public/common/mock_download_item.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/mock_download_manager.h"
@@ -43,20 +58,22 @@ class TestDownloadStatusUpdater : public DownloadStatusUpdater {
   }
  private:
   size_t notification_count_;
-  download::DownloadItem* acceptable_notification_item_;
+  raw_ptr<download::DownloadItem> acceptable_notification_item_;
 };
 
 class DownloadStatusUpdaterTest : public testing::Test {
  public:
-  DownloadStatusUpdaterTest() : updater_(new TestDownloadStatusUpdater()) {}
+  DownloadStatusUpdaterTest()
+      : updater_(new TestDownloadStatusUpdater()),
+        profile_manager_(TestingBrowserProcess::GetGlobal()) {}
 
   ~DownloadStatusUpdaterTest() override {
     for (size_t mgr_idx = 0; mgr_idx < managers_.size(); ++mgr_idx) {
       EXPECT_CALL(*Manager(mgr_idx), RemoveObserver(_));
     }
 
-    delete updater_;
-    updater_ = nullptr;
+    manager_observers_.clear();
+    delete updater_.ExtractAsDangling();
     VerifyAndClearExpectations();
 
     managers_.clear();
@@ -65,6 +82,8 @@ class DownloadStatusUpdaterTest : public testing::Test {
 
     base::RunLoop().RunUntilIdle();  // Allow DownloadManager destruction.
   }
+
+  void SetUp() override { ASSERT_TRUE(profile_manager_.SetUp()); }
 
  protected:
   // Attach some number of DownloadManagers to the updater.
@@ -91,6 +110,13 @@ class DownloadStatusUpdaterTest : public testing::Test {
     EXPECT_CALL(*mgr, AddObserver(_))
         .WillOnce(WithArg<0>(Invoke(
             this, &DownloadStatusUpdaterTest::SetObserver)));
+    TestingProfile* profile = profile_manager_.CreateTestingProfile(
+        base::StringPrintf("Profile %d", i + 1));
+    testing_profiles_.push_back(profile);
+    EXPECT_CALL(*mgr, GetBrowserContext()).WillRepeatedly(Return(profile));
+    auto delegate = std::make_unique<ChromeDownloadManagerDelegate>(profile);
+    DownloadCoreServiceFactory::GetForBrowserContext(profile)
+        ->SetDownloadManagerDelegateForTesting(std::move(delegate));
     updater_->AddManager(mgr);
   }
 
@@ -109,6 +135,7 @@ class DownloadStatusUpdaterTest : public testing::Test {
       download::DownloadItem::DownloadState state =
           i < in_progress_count ? download::DownloadItem::IN_PROGRESS
                                 : download::DownloadItem::CANCELLED;
+      EXPECT_CALL(*item, IsTransient()).WillRepeatedly(Return(false));
       EXPECT_CALL(*item, GetState()).WillRepeatedly(Return(state));
       manager_items_[manager_index].push_back(item.get());
       all_owned_items_.push_back(std::move(item));
@@ -169,22 +196,27 @@ class DownloadStatusUpdaterTest : public testing::Test {
   // top-level vector is the manager index, and the inner vector is the list of
   // items of that manager. The inner vector is a vector<DownloadItem*> for
   // compatibility with the return value of DownloadManager::GetAllDownloads().
-  std::vector<std::vector<download::DownloadItem*>> manager_items_;
+  std::vector<std::vector<raw_ptr<download::DownloadItem, VectorExperimental>>>
+      manager_items_;
   // An owning container for items in |manager_items_|.
   std::vector<std::unique_ptr<download::DownloadItem>> all_owned_items_;
   int manager_observer_index_;
 
-  std::vector<content::DownloadManager::Observer*> manager_observers_;
+  std::vector<raw_ptr<content::DownloadManager::Observer, VectorExperimental>>
+      manager_observers_;
 
   // Pointer so we can verify that destruction triggers appropriate
   // changes.
-  TestDownloadStatusUpdater* updater_;
+  raw_ptr<TestDownloadStatusUpdater> updater_;
 
   // Thread so that the DownloadManager (which is a DeleteOnUIThread
   // object) can be deleted.
-  // TODO(rdsmith): This can be removed when the DownloadManager
-  // is no longer required to be deleted on the UI thread.
-  content::BrowserTaskEnvironment task_environment_;
+  content::BrowserTaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+
+  // To test ScopedProfileKeepAlive behavior.
+  TestingProfileManager profile_manager_;
+  std::vector<raw_ptr<TestingProfile, VectorExperimental>> testing_profiles_;
 };
 
 // Test null updater.
@@ -341,4 +373,62 @@ TEST_F(DownloadStatusUpdaterTest, ManyManagersMixedItems) {
   EXPECT_TRUE(updater_->GetProgress(&progress, &download_count));
   EXPECT_FLOAT_EQ((10+50+80)/(20.0f+60+90), progress);
   EXPECT_EQ(3, download_count);
+}
+
+// Test that it prevents Profile deletion.
+TEST_F(DownloadStatusUpdaterTest, HoldsKeepAlive) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kDestroyProfileOnBrowserClose);
+
+  ProfileManager* profile_manager = g_browser_process->profile_manager();
+  ASSERT_NE(nullptr, profile_manager);
+
+  SetupManagers(2);
+  AddItems(0, 2, 1);
+  LinkManager(0);
+  AddItems(1, 2, 0);
+  LinkManager(1);
+
+  // Profile 1 has a download in progress.
+  Profile* profile1 = testing_profiles_[0];
+  SetItemValues(0, 0, 10, 20, true);
+  base::RunLoop().RunUntilIdle();
+  EXPECT_TRUE(profile_manager->HasKeepAliveForTesting(
+      profile1, ProfileKeepAliveOrigin::kDownloadInProgress));
+
+  // Profile 2 doesn't have a download in progress.
+  Profile* profile2 = testing_profiles_[1];
+  base::RunLoop().RunUntilIdle();
+  EXPECT_FALSE(profile_manager->HasKeepAliveForTesting(
+      profile2, ProfileKeepAliveOrigin::kDownloadInProgress));
+
+  // Complete Profile 1's download. It should release its keepalive.
+  CompleteItem(0, 0);
+  base::RunLoop().RunUntilIdle();
+  EXPECT_FALSE(profile_manager->HasKeepAliveForTesting(
+      profile1, ProfileKeepAliveOrigin::kDownloadInProgress));
+}
+
+// Tests that transient download will not trigger any updates.
+TEST_F(DownloadStatusUpdaterTest, TransientDownload) {
+  SetupManagers(/*manager_count=*/1);
+  AddItems(/*manager_index=*/0, /*item_count=*/2, /*in_progress_count=*/0);
+  LinkManager(0);
+
+  std::unique_ptr<download::MockDownloadItem> item =
+      std::make_unique<StrictMock<download::MockDownloadItem>>();
+
+  EXPECT_CALL(*item, GetState())
+      .WillRepeatedly(Return(download::DownloadItem::IN_PROGRESS));
+  EXPECT_CALL(*item, IsTransient()).WillRepeatedly(Return(true));
+  manager_items_[0].push_back(item.get());
+  all_owned_items_.push_back(std::move(item));
+  manager_observers_[0]->OnDownloadCreated(
+      managers_[0].get(), manager_items_[0][manager_items_[0].size() - 1]);
+
+  float progress = -1;
+  int download_count = -1;
+  EXPECT_TRUE(updater_->GetProgress(&progress, &download_count));
+  EXPECT_FLOAT_EQ(0.0f, progress);
+  EXPECT_EQ(0, download_count);
 }

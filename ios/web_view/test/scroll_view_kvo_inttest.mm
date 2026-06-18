@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,19 +9,15 @@
 #import "ios/web_view/test/observer.h"
 #import "ios/web_view/test/web_view_inttest_base.h"
 #import "ios/web_view/test/web_view_test_util.h"
-#include "testing/gtest_mac.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "testing/gtest_mac.h"
 
 namespace ios_web_view {
 
-// Tests that the KVO compliant properties of CWVScrollView correctly report
+// Tests that the KVO compliant properties of UIScrollView correctly report
 // changes.
 typedef ios_web_view::WebViewInttestBase ScrollViewKvoTest;
 
-// Tests that CWVScrollView correctly reports |contentOffset| state.
+// Tests that UIScrollView correctly reports |contentOffset| state.
 TEST_F(ScrollViewKvoTest, contentOffset) {
   Observer* offset_observer = [[Observer alloc] init];
   [offset_observer setObservedObject:web_view_.scrollView

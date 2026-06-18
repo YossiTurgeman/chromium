@@ -1,12 +1,17 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {ApplicationTestRunner} from 'application_test_runner';
+import {NetworkTestRunner} from 'network_test_runner';
+
+import * as Network from 'devtools/panels/network/network.js';
+import * as SDK from 'devtools/core/sdk/sdk.js';
 
 (async function() {
     'use strict';
     TestRunner.addResult(`Tests that serviceworker timings are displayed correctly.\n`);
-    await TestRunner.loadModule('application_test_runner');
-    await TestRunner.loadModule('network_test_runner');
     await TestRunner.showPanel('network');
 
     await TestRunner.reloadPagePromise();
@@ -56,14 +61,16 @@
       url: 'http://example.com/inspector-test.js',
       lineNumber: 117
     };
-    var testRequest = new SDK.NetworkRequest(
-        'testRequest', 'http://example.com/inspector-test.js', 'http://example.com/fake-document-url', 1, 1, fakeInitiator);
+    var testRequest = SDK.NetworkRequest.NetworkRequest.create(
+        'testRequest', 'http://example.com/inspector-test.js',
+        'http://example.com/fake-document-url', 1, 1, fakeInitiator);
     setRequestValues(testRequest);
 
-    const calculator = UI.panels.network._calculator;
-    const tableElement = Network.RequestTimingView.createTimingTable(testRequest, calculator);
+    const calculator = Network.NetworkPanel.NetworkPanel.instance().calculator;
+    const tableElement = Network.RequestTimingView.RequestTimingView.create(testRequest, calculator);
+    await tableElement.updateComplete;
 
-    for (const element of tableElement.getElementsByTagName('td')) {
+    for (const element of tableElement.contentElement.getElementsByTagName('td')) {
       const content = element.textContent;
       // Exclude timings that depend on runtime calculations
       if (!content.includes('Queued at') && !content.includes('Started at')) {

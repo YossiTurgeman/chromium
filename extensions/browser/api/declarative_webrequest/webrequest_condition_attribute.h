@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include "base/macros.h"
 #include "base/memory/ref_counted.h"
 #include "extensions/browser/api/declarative_webrequest/request_stage.h"
 #include "extensions/common/api/events.h"
@@ -31,25 +30,24 @@ struct WebRequestData;
 class WebRequestConditionAttribute
     : public base::RefCounted<WebRequestConditionAttribute> {
  public:
-  // These values are used in the
-  // Extensions.DeclarativeWebRequest.ConditionAttributeType histogram, so when
-  // adding/removing values, the numbering of existing values should not change.
   enum Type {
     CONDITION_RESOURCE_TYPE = 0,
     CONDITION_CONTENT_TYPE = 1,
     CONDITION_RESPONSE_HEADERS = 2,
-    CONDITION_THIRD_PARTY = 3,
-    CONDITION_REQUEST_HEADERS = 4,
-    CONDITION_STAGES = 5,
-    CONDITION_MAX = CONDITION_STAGES,
+    CONDITION_REQUEST_HEADERS = 3,
+    CONDITION_STAGES = 4,
   };
 
   WebRequestConditionAttribute();
 
+  WebRequestConditionAttribute(const WebRequestConditionAttribute&) = delete;
+  WebRequestConditionAttribute& operator=(const WebRequestConditionAttribute&) =
+      delete;
+
   // Factory method that creates a WebRequestConditionAttribute for the JSON
-  // dictionary {|name|: |value|} passed by the extension API. Sets |error| and
+  // dictionary {`name`: `value`} passed by the extension API. Sets `error` and
   // returns NULL if something fails.
-  // The ownership of |value| remains at the caller.
+  // The ownership of `value` remains at the caller.
   static scoped_refptr<const WebRequestConditionAttribute> Create(
       const std::string& name,
       const base::Value* value,
@@ -74,9 +72,6 @@ class WebRequestConditionAttribute
  protected:
   friend class base::RefCounted<WebRequestConditionAttribute>;
   virtual ~WebRequestConditionAttribute();
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(WebRequestConditionAttribute);
 };
 
 typedef std::vector<scoped_refptr<const WebRequestConditionAttribute> >
@@ -90,6 +85,11 @@ typedef std::vector<scoped_refptr<const WebRequestConditionAttribute> >
 class WebRequestConditionAttributeResourceType
     : public WebRequestConditionAttribute {
  public:
+  WebRequestConditionAttributeResourceType(
+      const WebRequestConditionAttributeResourceType&) = delete;
+  WebRequestConditionAttributeResourceType& operator=(
+      const WebRequestConditionAttributeResourceType&) = delete;
+
   // Factory method, see WebRequestConditionAttribute::Create.
   static scoped_refptr<const WebRequestConditionAttribute> Create(
       const std::string& instance_type,
@@ -111,8 +111,6 @@ class WebRequestConditionAttributeResourceType
 
   // TODO(pkalinnikov): Make this a bitmask.
   const std::vector<WebRequestResourceType> types_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebRequestConditionAttributeResourceType);
 };
 
 // Condition that checks whether a response's Content-Type header has a
@@ -120,6 +118,11 @@ class WebRequestConditionAttributeResourceType
 class WebRequestConditionAttributeContentType
     : public WebRequestConditionAttribute {
  public:
+  WebRequestConditionAttributeContentType(
+      const WebRequestConditionAttributeContentType&) = delete;
+  WebRequestConditionAttributeContentType& operator=(
+      const WebRequestConditionAttributeContentType&) = delete;
+
   // Factory method, see WebRequestConditionAttribute::Create.
   static scoped_refptr<const WebRequestConditionAttribute> Create(
       const std::string& name,
@@ -142,18 +145,21 @@ class WebRequestConditionAttributeContentType
 
   const std::vector<std::string> content_types_;
   const bool inclusive_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebRequestConditionAttributeContentType);
 };
 
 // Condition attribute for matching against request headers. Uses HeaderMatcher
 // to handle the actual tests, in connection with a boolean positiveness
 // flag. If that flag is set to true, then IsFulfilled() returns true iff
-// |header_matcher_| matches at least one header. Otherwise IsFulfilled()
-// returns true iff the |header_matcher_| matches no header.
+// `header_matcher_` matches at least one header. Otherwise IsFulfilled()
+// returns true iff the `header_matcher_` matches no header.
 class WebRequestConditionAttributeRequestHeaders
     : public WebRequestConditionAttribute {
  public:
+  WebRequestConditionAttributeRequestHeaders(
+      const WebRequestConditionAttributeRequestHeaders&) = delete;
+  WebRequestConditionAttributeRequestHeaders& operator=(
+      const WebRequestConditionAttributeRequestHeaders&) = delete;
+
   // Factory method, see WebRequestConditionAttribute::Create.
   static scoped_refptr<const WebRequestConditionAttribute> Create(
       const std::string& name,
@@ -176,18 +182,21 @@ class WebRequestConditionAttributeRequestHeaders
 
   const std::unique_ptr<const HeaderMatcher> header_matcher_;
   const bool positive_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebRequestConditionAttributeRequestHeaders);
 };
 
 // Condition attribute for matching against response headers. Uses HeaderMatcher
 // to handle the actual tests, in connection with a boolean positiveness
 // flag. If that flag is set to true, then IsFulfilled() returns true iff
-// |header_matcher_| matches at least one header. Otherwise IsFulfilled()
-// returns true iff the |header_matcher_| matches no header.
+// `header_matcher_` matches at least one header. Otherwise IsFulfilled()
+// returns true iff the `header_matcher_` matches no header.
 class WebRequestConditionAttributeResponseHeaders
     : public WebRequestConditionAttribute {
  public:
+  WebRequestConditionAttributeResponseHeaders(
+      const WebRequestConditionAttributeResponseHeaders&) = delete;
+  WebRequestConditionAttributeResponseHeaders& operator=(
+      const WebRequestConditionAttributeResponseHeaders&) = delete;
+
   // Factory method, see WebRequestConditionAttribute::Create.
   static scoped_refptr<const WebRequestConditionAttribute> Create(
       const std::string& name,
@@ -210,35 +219,6 @@ class WebRequestConditionAttributeResponseHeaders
 
   const std::unique_ptr<const HeaderMatcher> header_matcher_;
   const bool positive_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebRequestConditionAttributeResponseHeaders);
-};
-
-// This condition tests whether the request origin is third-party.
-class WebRequestConditionAttributeThirdParty
-    : public WebRequestConditionAttribute {
- public:
-  // Factory method, see WebRequestConditionAttribute::Create.
-  static scoped_refptr<const WebRequestConditionAttribute> Create(
-      const std::string& name,
-      const base::Value* value,
-      std::string* error,
-      bool* bad_message);
-
-  // Implementation of WebRequestConditionAttribute:
-  int GetStages() const override;
-  bool IsFulfilled(const WebRequestData& request_data) const override;
-  Type GetType() const override;
-  std::string GetName() const override;
-  bool Equals(const WebRequestConditionAttribute* other) const override;
-
- private:
-  explicit WebRequestConditionAttributeThirdParty(bool match_third_party);
-  ~WebRequestConditionAttributeThirdParty() override;
-
-  const bool match_third_party_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebRequestConditionAttributeThirdParty);
 };
 
 // This condition is used as a filter for request stages. It is true exactly in
@@ -246,6 +226,11 @@ class WebRequestConditionAttributeThirdParty
 class WebRequestConditionAttributeStages
     : public WebRequestConditionAttribute {
  public:
+  WebRequestConditionAttributeStages(
+      const WebRequestConditionAttributeStages&) = delete;
+  WebRequestConditionAttributeStages& operator=(
+      const WebRequestConditionAttributeStages&) = delete;
+
   // Factory method, see WebRequestConditionAttribute::Create.
   static scoped_refptr<const WebRequestConditionAttribute> Create(
       const std::string& name,
@@ -265,8 +250,6 @@ class WebRequestConditionAttributeStages
   ~WebRequestConditionAttributeStages() override;
 
   const int allowed_stages_;  // Composition of RequestStage values.
-
-  DISALLOW_COPY_AND_ASSIGN(WebRequestConditionAttributeStages);
 };
 
 }  // namespace extensions

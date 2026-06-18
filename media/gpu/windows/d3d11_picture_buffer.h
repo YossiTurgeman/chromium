@@ -1,34 +1,35 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_GPU_WINDOWS_D3D11_PICTURE_BUFFER_H_
 #define MEDIA_GPU_WINDOWS_D3D11_PICTURE_BUFFER_H_
 
-#include <d3d11.h>
-#include <wrl/client.h>
-
 #include <memory>
 #include <vector>
 
+#include "base/memory/ref_counted.h"
 #include "base/memory/ref_counted_delete_on_sequence.h"
-#include "gpu/command_buffer/service/mailbox_manager.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/task/thread_pool.h"
+#include "base/time/time.h"
 #include "gpu/command_buffer/service/texture_manager.h"
 #include "gpu/ipc/service/command_buffer_stub.h"
 #include "media/base/media_log.h"
-#include "media/base/status.h"
 #include "media/base/video_frame.h"
 #include "media/gpu/command_buffer_helper.h"
 #include "media/gpu/media_gpu_export.h"
+#include "media/gpu/windows/d3d11_status.h"
 #include "media/gpu/windows/d3d11_texture_wrapper.h"
-#include "media/video/picture.h"
-#include "third_party/angle/include/EGL/egl.h"
-#include "third_party/angle/include/EGL/eglext.h"
-#include "ui/gl/gl_image.h"
+#include "media/gpu/windows/d3d12_fence.h"
+#include "media/gpu/windows/d3d_com_defs.h"
 
 namespace media {
 
 class Texture2DWrapper;
+using PictureBufferGPUResourceInitDoneCB =
+    base::OnceCallback<void(scoped_refptr<media::D3D11PictureBuffer>)>;
 
 // PictureBuffer that owns Chrome Textures to display it, and keep a reference
 // to the D3D texture that backs the image.
@@ -61,36 +62,50 @@ class MEDIA_GPU_EXPORT D3D11PictureBuffer
       gfx::Size size,
       size_t picture_index);
 
-  Status Init(scoped_refptr<base::SingleThreadTaskRunner> gpu_task_runner,
-              GetCommandBufferHelperCB get_helper_cb,
-              ComD3D11VideoDevice video_device,
-              const GUID& decoder_guid,
-              std::unique_ptr<MediaLog> media_log);
+  D3D11Status Init(scoped_refptr<base::SingleThreadTaskRunner> gpu_task_runner,
+                   GetCommandBufferHelperCB get_helper_cb,
+                   ComD3D11VideoDevice video_device,
+                   const GUID& decoder_guid,
+                   std::unique_ptr<MediaLog> media_log,
+                   PictureBufferGPUResourceInitDoneCB
+                       picture_buffer_gpu_resource_init_done_cb);
 
-  // Set the contents of a mailbox holder array, return true if successful.
-  // |input_color_space| is the color space of our input texture, and
-  // |output_color_space| will be set, on success, to the color space that the
-  // processed texture has.
-  Status ProcessTexture(const gfx::ColorSpace& input_color_space,
-                        MailboxHolderArray* mailbox_dest,
-                        gfx::ColorSpace* output_color_space);
+  D3D11PictureBuffer(const D3D11PictureBuffer&) = delete;
+  D3D11PictureBuffer& operator=(const D3D11PictureBuffer&) = delete;
+
+  // Initialize |shared_image_dest|; return true if successful.
+  // |input_color_space| is the color space of our input texture.
+  D3D11Status ProcessTexture(
+      scoped_refptr<gpu::ClientSharedImage>& shared_image_dest);
   ComD3D11Texture2D Texture() const;
+  D3D11Status::Or<ID3D11VideoDecoderOutputView*> AcquireOutputView() const;
+
+  // Get the D3D12Resource by device->OpenSharedHandle or return the opened one.
+  D3D11Status::Or<ID3D12Resource*> ToD3D12Resource(ID3D12Device* device);
+
+  void SetFenceAndValue(scoped_refptr<D3D12Fence> fence, uint64_t value);
+  D3D11Status WaitForDecodeCompleteGPU(ID3D11DeviceContext* context);
 
   const gfx::Size& size() const { return size_; }
   size_t picture_index() const { return picture_index_; }
 
   // Is this PictureBuffer backing a VideoFrame right now?
-  bool in_client_use() const { return in_client_use_; }
+  bool in_client_use() const { return in_client_use_ > 0; }
 
   // Is this PictureBuffer holding an image that's in use by the decoder?
   bool in_picture_use() const { return in_picture_use_; }
 
-  void set_in_client_use(bool use) { in_client_use_ = use; }
+  void add_client_use() {
+    in_client_use_++;
+    DCHECK_GT(in_client_use_, 0);
+  }
+  void remove_client_use() {
+    DCHECK_GT(in_client_use_, 0);
+    in_client_use_--;
+  }
   void set_in_picture_use(bool use) { in_picture_use_ = use; }
 
-  const ComD3D11VideoDecoderOutputView& output_view() const {
-    return output_view_;
-  }
+  uint32_t array_slice() const { return array_slice_; }
 
   Texture2DWrapper* texture_wrapper() const { return texture_wrapper_.get(); }
 
@@ -105,15 +120,19 @@ class MEDIA_GPU_EXPORT D3D11PictureBuffer
   ComD3D11Texture2D texture_;
   uint32_t array_slice_;
 
+  std::unique_ptr<MediaLog> media_log_;
   std::unique_ptr<Texture2DWrapper> texture_wrapper_;
   gfx::Size size_;
   bool in_picture_use_ = false;
-  bool in_client_use_ = false;
+  int in_client_use_ = 0;
   size_t picture_index_;
 
   ComD3D11VideoDecoderOutputView output_view_;
 
-  DISALLOW_COPY_AND_ASSIGN(D3D11PictureBuffer);
+  // The cached pointer of D3D12 version of texture, if ToD3D12Resource() has
+  // been called.
+  ComD3D12Resource d3d12_resource_;
+  std::pair<scoped_refptr<D3D12Fence>, uint64_t> fence_and_value_;
 };
 
 }  // namespace media

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,9 @@
 
 #include <vector>
 
-#include "ui/display/types/gamma_ramp_rgb_entry.h"
+#include "ui/display/types/display_color_management.h"
 
 namespace chromecast {
-
-class CastWindowManager;
 
 namespace shell {
 class CastDisplayConfigurator;
@@ -19,8 +17,8 @@ class CastDisplayConfigurator;
 
 class GammaConfigurator {
  public:
-  GammaConfigurator(CastWindowManager* window_manager,
-                    shell::CastDisplayConfigurator* display_configurator);
+  explicit GammaConfigurator(
+      shell::CastDisplayConfigurator* display_configurator);
   GammaConfigurator(const GammaConfigurator&) = delete;
   GammaConfigurator& operator=(const GammaConfigurator&) = delete;
   ~GammaConfigurator();
@@ -33,7 +31,6 @@ class GammaConfigurator {
  private:
   void ApplyGammaLut();
 
-  CastWindowManager* const window_manager_;
   shell::CastDisplayConfigurator* display_configurator_;
 
   bool is_initialized_ = false;

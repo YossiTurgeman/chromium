@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,20 +9,26 @@
 
 #include <string>
 
-#include "remoting/base/session_options.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/weak_ptr.h"
+#include "remoting/base/source_location.h"
 #include "remoting/protocol/message_pipe.h"
+#include "remoting/protocol/network_settings.h"
 #include "remoting/protocol/transport.h"
-
-namespace webrtc {
-class DesktopCapturer;
-}  // namespace webrtc
+#include "third_party/webrtc/modules/desktop_capture/desktop_capture_types.h"
 
 namespace remoting {
+class DesktopCapturer;
+class FifoBufferWriter;
+class SessionOptions;
+struct SessionPolicies;
+}  // namespace remoting
 
-namespace protocol {
+namespace remoting::protocol {
 
 class AudioSource;
 class AudioStream;
+struct AudioSampleInfo;
 class ClientStub;
 class ClipboardStub;
 class HostStub;
@@ -30,6 +36,7 @@ class InputStub;
 class PeerConnectionControls;
 class Session;
 class VideoStream;
+class WebrtcEventLogData;
 
 // This interface represents a remote viewer connection to the chromoting host.
 // It sets up all protocol channels and connects them to the stubs.
@@ -40,8 +47,11 @@ class ConnectionToClient {
     // Called when the network connection is authenticating
     virtual void OnConnectionAuthenticating() = 0;
 
-    // Called when the network connection is authenticated.
-    virtual void OnConnectionAuthenticated() = 0;
+    // Called when the network connection is authenticated. `session_policies`
+    // is nullptr if no session policies are specified, in which case local
+    // policies should be used.
+    virtual void OnConnectionAuthenticated(
+        const SessionPolicies* session_policies) = 0;
 
     // Called to request creation of video streams. May be called before or
     // after OnConnectionChannelsConnected().
@@ -67,6 +77,11 @@ class ConnectionToClient {
     virtual void OnIncomingDataChannel(const std::string& channel_name,
                                        std::unique_ptr<MessagePipe> pipe) = 0;
 
+    // Called when the format of the incoming audio stream changes.
+    virtual void OnIncomingAudioFormatChanged(
+        const AudioSampleInfo& info,
+        base::OnceCallback<void(bool)> done) = 0;
+
    protected:
     virtual ~EventHandler() = default;
   };
@@ -83,17 +98,24 @@ class ConnectionToClient {
   virtual Session* session() = 0;
 
   // Disconnect the client connection.
-  virtual void Disconnect(ErrorCode error) = 0;
+  virtual void Disconnect(ErrorCode error,
+                          std::string_view error_details,
+                          const SourceLocation& error_location) = 0;
 
   // Start video stream that sends screen content from |desktop_capturer| to the
-  // client.
+  // client. |screen_id| should be webrtc::kFullDesktopScreenId for
+  // single-stream mode, or the screen being captured for multi-stream mode.
   virtual std::unique_ptr<VideoStream> StartVideoStream(
-      std::unique_ptr<webrtc::DesktopCapturer> desktop_capturer) = 0;
+      webrtc::ScreenId screen_id,
+      std::unique_ptr<DesktopCapturer> desktop_capturer) = 0;
 
   // Starts an audio stream. Returns nullptr if audio is not supported by the
   // client.
   virtual std::unique_ptr<AudioStream> StartAudioStream(
       std::unique_ptr<AudioSource> audio_source) = 0;
+
+  // Sets the SPSC audio writer to inject low-latency playout PCM audio.
+  virtual void SetAudioWriter(std::unique_ptr<FifoBufferWriter> writer) = 0;
 
   // The client stubs used by the host to send control messages to the client.
   // The stub must not be accessed before OnConnectionAuthenticated(), or
@@ -111,13 +133,20 @@ class ConnectionToClient {
   // control logic can be applied.
   virtual void ApplySessionOptions(const SessionOptions& options) {}
 
+  // Applies network settings. The connection may be blocked until this method
+  // is called.
+  virtual void ApplyNetworkSettings(const NetworkSettings& settings) = 0;
+
   // Returns an interface for changing connection parameters after the
   // connection is established. nullptr will be returned if the connection does
   // not support changing parameters on the fly.
   virtual PeerConnectionControls* peer_connection_controls() = 0;
+
+  // Returns an object holding the RTC event logs if supported by this
+  // connection type, or nullptr otherwise.
+  virtual WebrtcEventLogData* rtc_event_log() = 0;
 };
 
-}  // namespace protocol
-}  // namespace remoting
+}  // namespace remoting::protocol
 
 #endif  // REMOTING_PROTOCOL_CONNECTION_TO_CLIENT_H_

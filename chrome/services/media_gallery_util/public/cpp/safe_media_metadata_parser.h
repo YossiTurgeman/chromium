@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "base/callback_forward.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/common/media_galleries/metadata_types.h"
 #include "chrome/services/media_gallery_util/public/cpp/media_parser_provider.h"
@@ -35,16 +34,15 @@ class SafeMediaMetadataParser : public MediaParserProvider {
   // may read from different kinds of storage.
   class MediaDataSourceFactory {
    public:
-    typedef base::RepeatingCallback<void(
+    using MediaDataCallback = base::RepeatingCallback<void(
         chrome::mojom::MediaDataSource::ReadCallback callback,
-        std::unique_ptr<std::string> data)>
-        MediaDataCallback;
+        std::string data)>;
 
     virtual std::unique_ptr<chrome::mojom::MediaDataSource>
     CreateMediaDataSource(
         mojo::PendingReceiver<chrome::mojom::MediaDataSource> receiver,
         MediaDataCallback media_data_callback) = 0;
-    virtual ~MediaDataSourceFactory() {}
+    virtual ~MediaDataSourceFactory() = default;
   };
 
   SafeMediaMetadataParser(
@@ -52,6 +50,10 @@ class SafeMediaMetadataParser : public MediaParserProvider {
       const std::string& mime_type,
       bool get_attached_images,
       std::unique_ptr<MediaDataSourceFactory> media_source_factory);
+
+  SafeMediaMetadataParser(const SafeMediaMetadataParser&) = delete;
+  SafeMediaMetadataParser& operator=(const SafeMediaMetadataParser&) = delete;
+
   ~SafeMediaMetadataParser() override;
 
   // Initiates parsing. |callback| is invoked on the same sequence that calls
@@ -72,7 +74,7 @@ class SafeMediaMetadataParser : public MediaParserProvider {
   // Invoked when the media data has been read, which will be sent back to
   // utility process soon. |data| might be partial content of the media data.
   void OnMediaDataReady(chrome::mojom::MediaDataSource::ReadCallback callback,
-                        std::unique_ptr<std::string> data);
+                        std::string data);
 
   const int64_t size_;
   const std::string mime_type_;
@@ -84,8 +86,6 @@ class SafeMediaMetadataParser : public MediaParserProvider {
   std::unique_ptr<MediaDataSourceFactory> media_source_factory_;
 
   base::WeakPtrFactory<SafeMediaMetadataParser> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(SafeMediaMetadataParser);
 };
 
 #endif  // CHROME_SERVICES_MEDIA_GALLERY_UTIL_PUBLIC_CPP_SAFE_MEDIA_METADATA_PARSER_H_

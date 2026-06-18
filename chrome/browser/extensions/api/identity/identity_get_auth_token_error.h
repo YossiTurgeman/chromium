@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,11 @@
 #define CHROME_BROWSER_EXTENSIONS_API_IDENTITY_IDENTITY_GET_AUTH_TOKEN_ERROR_H_
 
 #include <string>
+#include <string_view>
 
-#include "base/strings/string_piece_forward.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -15,20 +18,21 @@ class IdentityGetAuthTokenError {
  public:
   // These values are persisted to logs. Entries should not be renumbered and
   // numeric values should never be reused.
+  // LINT.IfChange(GetAuthTokenResult)
   enum class State {
     kNone = 0,
     kInvalidClientId = 1,
     kEmptyScopes = 2,
-    kOAuth2InvalidScopes = 3,
-    kGaiaFlowAuthFailure = 4,
+    // kOAuth2InvalidScopes = 3,  // Deprecated
+    // kGaiaFlowAuthFailure = 4,  // Deprecated
     kMintTokenAuthFailure = 5,
     kGetAccessTokenAuthFailure = 6,
-    kOAuth2Failure = 7,
+    // kOAuth2Failure = 7,  // Deprecated
     kNoGrant = 8,
     kGaiaConsentInteractionRequired = 9,
     kGaiaConsentInteractionAlreadyRunning = 10,
-    kOAuth2AccessDenied = 11,
-    kGaiaFlowRejected = 12,
+    // kOAuth2AccessDenied = 11,  // Deprecated
+    // kGaiaFlowRejected = 12,  // Deprecated
     kRemoteConsentFlowRejected = 13,
     kUserNotSignedIn = 14,
     kNotAllowlistedInPublicSession = 15,
@@ -37,38 +41,35 @@ class IdentityGetAuthTokenError {
     kUserNonPrimary = 18,
     kRemoteConsentUserNonPrimary = 19,
     kBrowserSigninNotAllowed = 20,
-    kInvalidRedirect = 21,
+    // kInvalidRedirect = 21,  // Deprecated
     kOffTheRecord = 22,
-    kPageLoadFailure = 23,
+    // kPageLoadFailure = 23,  // Deprecated
     kRemoteConsentPageLoadFailure = 24,
-    kSetAccountsInCookieFailure = 25,
+    // kSetAccountsInCookieFailure = 25, // Deprecated
     kInvalidConsentResult = 26,
-    kCanceled = 27,
-    kMaxValue = kCanceled,
+    // kCanceled = 27, // Deprecated
+    kInteractivityDenied = 28,
+    kCannotCreateWindow = 29,
+    kBrowserContextShutDown = 30,
+    kSetRemoteConsentResolutionCookiesFailed = 31,
+    kMaxValue = kSetRemoteConsentResolutionCookiesFailed,
   };
-
-  // Constructs a |State::kGaiaFlowAuthFailure| error with an |error_message|.
-  static IdentityGetAuthTokenError FromGaiaFlowAuthError(
-      base::StringPiece error_message);
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/signin/enums.xml:GetAuthTokenResult)
 
   // Constructs a |State::kMintTokenAuthFailure| error with an
-  // |error_message|.
+  // `error_message`.
   static IdentityGetAuthTokenError FromMintTokenAuthError(
-      base::StringPiece error_message);
+      std::string_view error_message);
 
   // Constructs a |State::kGetAccessTokenAuthFailure| error with an
-  // |error_message|.
+  // `error_message`.
   static IdentityGetAuthTokenError FromGetAccessTokenAuthError(
-      base::StringPiece error_message);
-
-  // Constructs an IdentityGetAuthTokenError from |oauth2_error|.
-  static IdentityGetAuthTokenError FromOAuth2Error(
-      base::StringPiece oauth2_error);
+      std::string_view error_message);
 
   // Constructs a |State::kNone| error.
   IdentityGetAuthTokenError();
 
-  // Constructs an IdentityGetAuthTokenError from |state| with no additional
+  // Constructs an IdentityGetAuthTokenError from `state` with no additional
   // data.
   explicit IdentityGetAuthTokenError(State state);
 
@@ -79,7 +80,7 @@ class IdentityGetAuthTokenError {
   std::string ToString() const;
 
  private:
-  IdentityGetAuthTokenError(State state, base::StringPiece error);
+  IdentityGetAuthTokenError(State state, std::string_view error);
 
   State state_;
   std::string error_message_;

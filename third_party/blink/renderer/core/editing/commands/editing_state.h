@@ -1,14 +1,13 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_EDITING_STATE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_EDITING_STATE_H_
 
-#include "base/macros.h"
+#include "base/dcheck_is_on.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 
 namespace blink {
 
@@ -18,7 +17,7 @@ namespace blink {
 // Example usage:
 //  EditingState editingState;
 //  ...
-//  functionMutatesDOMTree(..., &editingState);
+//  functionMutatesDomTree(..., &editingState);
 //  if (editingState.isAborted())
 //      return;
 //
@@ -70,7 +69,8 @@ class NoEditingAbortChecker final {
   STACK_ALLOCATED();
 
  public:
-  NoEditingAbortChecker(const char* file, int line);
+  explicit NoEditingAbortChecker(
+      const base::Location& location = base::Location::Current());
   NoEditingAbortChecker(const NoEditingAbortChecker&) = delete;
   NoEditingAbortChecker& operator=(const NoEditingAbortChecker&) = delete;
   ~NoEditingAbortChecker();
@@ -79,8 +79,7 @@ class NoEditingAbortChecker final {
 
  private:
   EditingState editing_state_;
-  const char* const file_;
-  int const line_;
+  const base::Location location_;
 };
 
 // If a function with EditingState* argument should not be aborted,
@@ -88,8 +87,7 @@ class NoEditingAbortChecker final {
 //    fooFunc(...., ASSERT_NO_EDITING_ABORT);
 // It causes an assertion failure If DCHECK_IS_ON() and the function was aborted
 // unexpectedly.
-#define ASSERT_NO_EDITING_ABORT \
-  (NoEditingAbortChecker(__FILE__, __LINE__).GetEditingState())
+#define ASSERT_NO_EDITING_ABORT (NoEditingAbortChecker().GetEditingState())
 #else
 #define ASSERT_NO_EDITING_ABORT (IgnorableEditingAbortState().GetEditingState())
 #endif

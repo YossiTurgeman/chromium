@@ -1,4 +1,2 @@
-oshima@chromium.org
-dcastagna@chromium.org
-
-# COMPONENT: Internal>Exosphere
+file://components/exo/OWNERS
+file://ui/ozone/platform/wayland/OWNERS

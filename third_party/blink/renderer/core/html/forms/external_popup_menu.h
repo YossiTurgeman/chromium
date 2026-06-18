@@ -42,6 +42,7 @@
 
 namespace blink {
 
+class Element;
 class HTMLSelectElement;
 class LocalFrame;
 class WebMouseEvent;
@@ -60,7 +61,6 @@ class CORE_EXPORT ExternalPopupMenu final
   // FIXME: public only for test access. Need to revert once gtest
   // helpers from chromium are available for blink.
   static void GetPopupMenuInfo(HTMLSelectElement&,
-                               int32_t* item_height,
                                double* font_size,
                                int32_t* selected_item,
                                Vector<mojom::blink::MenuItemPtr>* menu_items,
@@ -68,12 +68,13 @@ class CORE_EXPORT ExternalPopupMenu final
                                bool* allow_multiple_selection);
   static int ToPopupMenuItemIndex(int index, HTMLSelectElement&);
   static int ToExternalPopupMenuItemIndex(int index, HTMLSelectElement&);
+  static float GetDprForSizeAdjustment(const Element& owner_element);
 
   void Trace(Visitor*) const override;
 
  private:
   // PopupMenu methods:
-  void Show() override;
+  void Show(ShowEventType type) override;
   void Hide() override;
   void UpdateFromElement(UpdateReason) override;
   void DisconnectClient() override;
@@ -90,12 +91,9 @@ class CORE_EXPORT ExternalPopupMenu final
   Member<HTMLSelectElement> owner_element_;
   Member<LocalFrame> local_frame_;
   std::unique_ptr<WebMouseEvent> synthetic_event_;
-  TaskRunnerTimer<ExternalPopupMenu> dispatch_event_timer_;
+  HeapTaskRunnerTimer<ExternalPopupMenu> dispatch_event_timer_;
   // The actual implementor of the show menu.
-  HeapMojoReceiver<mojom::blink::PopupMenuClient,
-                   ExternalPopupMenu,
-                   HeapMojoWrapperMode::kWithoutContextObserver>
-      receiver_;
+  HeapMojoReceiver<mojom::blink::PopupMenuClient, ExternalPopupMenu> receiver_;
   bool needs_update_ = false;
 };
 

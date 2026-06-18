@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,30 +16,27 @@ class VIZ_SERVICE_EXPORT OverlayProcessorStub
     : public OverlayProcessorInterface {
  public:
   OverlayProcessorStub() : OverlayProcessorInterface() {}
-  ~OverlayProcessorStub() override {}
+
+  OverlayProcessorStub(const OverlayProcessorStub&) = delete;
+  OverlayProcessorStub& operator=(const OverlayProcessorStub&) = delete;
+
+  ~OverlayProcessorStub() override = default;
 
   // Overrides OverlayProcessorInterface's pure virtual functions.
   bool IsOverlaySupported() const final;
-  gfx::Rect GetPreviousFrameOverlaysBoundingRect() const final;
   gfx::Rect GetAndResetOverlayDamage() final;
-  bool NeedsSurfaceOccludingDamageRect() const final;
+  bool NeedsSurfaceDamageRectList() const final;
   void ProcessForOverlays(
       DisplayResourceProvider* resource_provider,
       AggregatedRenderPassList* render_passes,
-      const SkMatrix44& output_color_matrix,
-      const FilterOperationsMap& render_pass_filters,
-      const FilterOperationsMap& render_pass_backdrop_filters,
-      OutputSurfaceOverlayPlane* output_surface_plane,
+      const SkM44& output_color_matrix,
+      SurfaceDamageRectList surface_damage_rect_list,
+      const PrimaryPlaneParams& primary_plane_params,
       CandidateList* overlay_candidates,
-      gfx::Rect* damage_rect,
-      std::vector<gfx::Rect>* content_bounds) final {}
-  void AdjustOutputSurfaceOverlay(
-      base::Optional<OutputSurfaceOverlayPlane>* output_surface_plane) final {}
+      gfx::Rect* damage_rect) final {}
   void SetDisplayTransformHint(gfx::OverlayTransform transform) final {}
   void SetViewportSize(const gfx::Size& size) final {}
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(OverlayProcessorStub);
+  gfx::CALayerResult GetCALayerErrorCode() const final;
 };
 
 }  // namespace viz

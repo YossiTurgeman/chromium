@@ -1,55 +1,61 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import <TestLib/EarlGreyImpl/EarlGrey.h>
 #import <UIKit/UIKit.h>
 #import <XCTest/XCTest.h>
 
-#include "base/logging.h"
-#include "base/strings/sys_string_conversions.h"
+#import "base/logging.h"
+#import "base/strings/sys_string_conversions.h"
 #import "ios/chrome/test/wpt/cwt_request_handler.h"
-#import "ios/testing/earl_grey/base_earl_grey_test_case.h"
-#include "net/base/port_util.h"
-#include "net/test/embedded_test_server/embedded_test_server.h"
-#include "url/url_constants.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "net/base/port_util.h"
+#import "net/test/embedded_test_server/embedded_test_server.h"
+#import "url/url_constants.h"
 
 namespace {
 
 // The port that CWTChromeDriver's HTTP server listens on.
 const int kDefaultPort = 8123;
 
-}
+}  // namespace
 
 // Dummy test case that hosts CWTChromeDriver. CWTChromeDriver implements a
 // minimal subset of the WebDriver protocol needed to run most Web Platform
 // Tests. CWTChromeDriverTestCase launches a test server that listens for
-// WebDriver commands, and then uses EarlGrey2's eDistantObject protocol to pass
-// on corresponding messages to the app process. Each CWTChromeDriver launches a
-// single instance of Chrome, but mulitple instances of CWTChromeDriver can be
+// WebDriver commands, and then uses the eDistantObject protocol to pass on
+// corresponding messages to the app process. Each CWTChromeDriver launches a
+// single instance of Chrome, but multiple instances of CWTChromeDriver can be
 // run in parallel in order to use multiple instances of Chrome.
-@interface CWTChromeDriverTestCase : BaseEarlGreyTestCase
+@interface CWTChromeDriverTestCase : XCTestCase
 @end
 
 @implementation CWTChromeDriverTestCase
 
 // Dummy test that keeps the test app alive.
 - (void)testRunCWTChromeDriver {
+  // xcodebuild_runner.LaunchCommand kills the app if it doesn't produce any
+  // output for 180 seconds. CWTChromeDriver doesn't naturally produce output,
+  // since all communication happens over http. To avoid getting killed, print a
+  // heartbeat message every 30 seconds.
+  [NSTimer scheduledTimerWithTimeInterval:30
+                                  repeats:YES
+                                    block:^(NSTimer* timer) {
+                                      LOG(INFO)
+                                          << "CWTChromeDriver is running.";
+                                    }];
+
   int port = kDefaultPort;
 
   NSArray* arguments = NSProcessInfo.processInfo.arguments;
   NSUInteger index = [arguments indexOfObject:@"--port"];
   if (index != NSNotFound && arguments.count > index + 1) {
     NSString* portString = [arguments objectAtIndex:index + 1];
-    if (net::IsPortAllowedForScheme(portString.intValue, url::kHttpScheme))
+    if (net::IsPortAllowedForScheme(portString.intValue, url::kHttpScheme)) {
       port = portString.intValue;
-    else
+    } else {
       LOG(ERROR) << base::SysNSStringToUTF8(portString)
                  << " is not a valid port for http";
+    }
   }
 
   XCTestExpectation* dummyExpectation =
@@ -62,8 +68,9 @@ const int kDefaultPort = 8123;
   server.RegisterRequestHandler(base::BindRepeating(
       &CWTRequestHandler::HandleRequest, base::Unretained(&requestHandler)));
   bool started = server.Start(port);
-  if (!started)
+  if (!started) {
     XCTFail("Unable to start web server");
+  }
   LOG(INFO) << "CWTChromeDriver listening on port " << server.port();
 
   // The dummy expectation will only be fulfilled once all the tests using this
@@ -72,8 +79,9 @@ const int kDefaultPort = 8123;
   [self waitForExpectationsWithTimeout:kTimeoutInSeconds handler:nil];
 
   bool stopped = server.ShutdownAndWaitUntilComplete();
-  if (!stopped)
+  if (!stopped) {
     XCTFail("Unable to stop web server");
+  }
 }
 
 @end

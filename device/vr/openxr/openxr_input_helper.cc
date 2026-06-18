@@ -1,133 +1,77 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "device/vr/openxr/openxr_input_helper.h"
 
-#include "base/stl_util.h"
+#include "base/trace_event/trace_event.h"
 #include "device/gamepad/public/cpp/gamepad.h"
+#include "device/vr/openxr/openxr_api_wrapper.h"
+#include "device/vr/openxr/openxr_extension_helper.h"
+#include "device/vr/openxr/openxr_hand_utils.h"
 #include "device/vr/openxr/openxr_util.h"
-#include "device/vr/util/xr_standard_gamepad_builder.h"
+#include "device/vr/public/mojom/openxr_interaction_profile_type.mojom.h"
+#include "device/vr/public/mojom/vr_service.mojom.h"
+#include "third_party/openxr/src/include/openxr/openxr.h"
+#include "ui/gfx/geometry/transform.h"
+#include "ui/gfx/geometry/transform_util.h"
 
 namespace device {
 
-namespace {
-base::Optional<GamepadBuilder::ButtonData> GetAxisButtonData(
-    OpenXrAxisType openxr_button_type,
-    base::Optional<GamepadButton> button_data,
-    std::vector<double> axis) {
-  GamepadBuilder::ButtonData data;
-  if (!button_data || axis.size() != 2) {
-    return base::nullopt;
-  }
-
-  switch (openxr_button_type) {
-    case OpenXrAxisType::kThumbstick:
-      data.type = GamepadBuilder::ButtonData::Type::kThumbstick;
-      break;
-    case OpenXrAxisType::kTrackpad:
-      data.type = GamepadBuilder::ButtonData::Type::kTouchpad;
-      break;
-  }
-  data.touched = button_data->touched;
-  data.pressed = button_data->pressed;
-  data.value = button_data->value;
-  // Invert the y axis because -1 is up in the Gamepad API, but down in
-  // OpenXR.
-  data.x_axis = axis.at(0);
-  data.y_axis = -axis.at(1);
-  return data;
-}
-
-base::Optional<Gamepad> GetXrStandardGamepad(
-    const OpenXrController& controller) {
-  XRStandardGamepadBuilder builder(controller.GetHandness());
-
-  base::Optional<GamepadButton> trigger_button =
-      controller.GetButton(OpenXrButtonType::kTrigger);
-  if (!trigger_button)
-    return base::nullopt;
-  builder.SetPrimaryButton(trigger_button.value());
-
-  base::Optional<GamepadButton> squeeze_button =
-      controller.GetButton(OpenXrButtonType::kSqueeze);
-  if (squeeze_button)
-    builder.SetSecondaryButton(squeeze_button.value());
-
-  base::Optional<GamepadButton> trackpad_button =
-      controller.GetButton(OpenXrButtonType::kTrackpad);
-  std::vector<double> trackpad_axis =
-      controller.GetAxis(OpenXrAxisType::kTrackpad);
-  base::Optional<GamepadBuilder::ButtonData> trackpad_button_data =
-      GetAxisButtonData(OpenXrAxisType::kTrackpad, trackpad_button,
-                        trackpad_axis);
-  if (trackpad_button_data)
-    builder.SetTouchpadData(trackpad_button_data.value());
-
-  base::Optional<GamepadButton> thumbstick_button =
-      controller.GetButton(OpenXrButtonType::kThumbstick);
-  std::vector<double> thumbstick_axis =
-      controller.GetAxis(OpenXrAxisType::kThumbstick);
-  base::Optional<GamepadBuilder::ButtonData> thumbstick_button_data =
-      GetAxisButtonData(OpenXrAxisType::kThumbstick, thumbstick_button,
-                        thumbstick_axis);
-  if (thumbstick_button_data)
-    builder.SetThumbstickData(thumbstick_button_data.value());
-
-  base::Optional<GamepadButton> x_button =
-      controller.GetButton(OpenXrButtonType::kButton1);
-  if (x_button)
-    builder.AddOptionalButtonData(x_button.value());
-
-  base::Optional<GamepadButton> y_button =
-      controller.GetButton(OpenXrButtonType::kButton2);
-  if (y_button)
-    builder.AddOptionalButtonData(y_button.value());
-
-  base::Optional<GamepadButton> thumbrest_button =
-      controller.GetButton(OpenXrButtonType::kThumbrest);
-  if (thumbrest_button)
-    builder.AddOptionalButtonData(thumbrest_button.value());
-
-  return builder.GetGamepad();
-}
-
-}  // namespace
-
 XrResult OpenXRInputHelper::CreateOpenXRInputHelper(
     XrInstance instance,
+    const std::string& system_name,
+    const OpenXrExtensionHelper& extension_helper,
     XrSession session,
     XrSpace local_space,
+    bool hand_input_enabled,
     std::unique_ptr<OpenXRInputHelper>* helper) {
   std::unique_ptr<OpenXRInputHelper> new_helper =
-      std::make_unique<OpenXRInputHelper>(session, local_space);
+      std::make_unique<OpenXRInputHelper>(session, local_space,
+                                          hand_input_enabled);
 
-  RETURN_IF_XR_FAILED(new_helper->Initialize(instance));
+  RETURN_IF_XR_FAILED(
+      new_helper->Initialize(instance, system_name, extension_helper));
   *helper = std::move(new_helper);
   return XR_SUCCESS;
 }
 
-OpenXRInputHelper::OpenXRInputHelper(XrSession session, XrSpace local_space)
+OpenXRInputHelper::OpenXRInputHelper(XrSession session,
+                                     XrSpace local_space,
+                                     bool hand_input_enabled)
     : session_(session),
       local_space_(local_space),
-      path_helper_(std::make_unique<OpenXRPathHelper>()) {}
+      path_helper_(std::make_unique<OpenXRPathHelper>()),
+      hand_input_enabled_(hand_input_enabled) {}
 
 OpenXRInputHelper::~OpenXRInputHelper() = default;
 
-XrResult OpenXRInputHelper::Initialize(XrInstance instance) {
-  RETURN_IF_XR_FAILED(path_helper_->Initialize(instance));
+bool OpenXRInputHelper::IsHandTrackingEnabled() const {
+  // As long as we have at least one controller that can supply hand tracking
+  // data, then hand tracking is enabled.
+  return std::ranges::any_of(controller_states_,
+                             [](const OpenXrControllerState& state) {
+                               return state.controller.IsHandTrackingEnabled();
+                             });
+}
+
+XrResult OpenXRInputHelper::Initialize(
+    XrInstance instance,
+    const std::string& system_name,
+    const OpenXrExtensionHelper& extension_helper) {
+  RETURN_IF_XR_FAILED(path_helper_->Initialize(instance, system_name));
 
   // This map is used to store bindings for different kinds of interaction
   // profiles. This allows the runtime to choose a different input sources based
   // on availability.
   std::map<XrPath, std::vector<XrActionSuggestedBinding>> bindings;
 
-  OpenXrExtensionHelper extension_helper;
   for (size_t i = 0; i < controller_states_.size(); i++) {
     RETURN_IF_XR_FAILED(controller_states_[i].controller.Initialize(
         static_cast<OpenXrHandednessType>(i), instance, session_,
-        path_helper_.get(), extension_helper, &bindings));
+        path_helper_.get(), extension_helper, hand_input_enabled_, &bindings));
     controller_states_[i].primary_button_pressed = false;
+    controller_states_[i].squeeze_button_pressed = false;
   }
 
   for (auto it = bindings.begin(); it != bindings.end(); it++) {
@@ -155,21 +99,45 @@ XrResult OpenXRInputHelper::Initialize(XrInstance instance) {
   return XR_SUCCESS;
 }
 
+void OpenXRInputHelper::OnHideInputSources() {
+  // Clear any "pressed" buttons for the time being. This prevents us from
+  // sending up any clicks when we resume sending input state to the page.
+  ResetControllerButtonState();
+}
+
+void OpenXRInputHelper::ResetControllerButtonState() {
+  for (OpenXrControllerState& state : controller_states_) {
+    state.primary_button_pressed = false;
+    state.squeeze_button_pressed = false;
+  }
+}
+
 std::vector<mojom::XRInputSourceStatePtr> OpenXRInputHelper::GetInputState(
     XrTime predicted_display_time) {
+  TRACE_EVENT0("xr", "GetInputState");
   std::vector<mojom::XRInputSourceStatePtr> input_states;
   if (XR_FAILED(SyncActions(predicted_display_time))) {
-    for (OpenXrControllerState& state : controller_states_) {
-      state.primary_button_pressed = false;
-    }
+    ResetControllerButtonState();
     return input_states;
   }
 
   for (uint32_t i = 0; i < controller_states_.size(); i++) {
     device::OpenXrController* controller = &controller_states_[i].controller;
+    TRACE_EVENT1("xr", "ParseController", "Handedness",
+                 controller->GetHandness());
 
-    base::Optional<GamepadButton> primary_button =
+    std::optional<GamepadButton> menu_button =
+        controller->GetButton(OpenXrButtonType::kMenu);
+
+    // Pressing a menu buttons is treated as a signal to exit the WebXR session.
+    if (menu_button && menu_button.value().pressed) {
+      OnExitGesture();
+    }
+
+    std::optional<GamepadButton> primary_button =
         controller->GetButton(OpenXrButtonType::kTrigger);
+    std::optional<GamepadButton> squeeze_button =
+        controller->GetButton(OpenXrButtonType::kSqueeze);
 
     // Having a trigger button is the minimum for an webxr input.
     // No trigger button indicates input is not connected.
@@ -196,41 +164,31 @@ std::vector<mojom::XRInputSourceStatePtr> OpenXRInputHelper::GetInputState(
         controller_states_[i].primary_button_pressed &&
         !state->primary_input_pressed;
     controller_states_[i].primary_button_pressed = state->primary_input_pressed;
-    state->gamepad = GetWebXRGamepad(*controller);
+    if (squeeze_button) {
+      state->primary_squeeze_pressed = squeeze_button.value().pressed;
+      state->primary_squeeze_clicked =
+          controller_states_[i].squeeze_button_pressed &&
+          !state->primary_squeeze_pressed;
+      controller_states_[i].squeeze_button_pressed =
+          state->primary_squeeze_pressed;
+    }
+
+    state->gamepad = controller->GetWebXRGamepad();
+
+    // This will return null if hand tracking isn't possible/enabled.
+    state->hand_tracking_data = controller->GetHandTrackingData();
+
     input_states.push_back(std::move(state));
   }
 
   return input_states;
 }
 
-void OpenXRInputHelper::OnInteractionProfileChanged(XrResult* xr_result) {
+XrResult OpenXRInputHelper::OnInteractionProfileChanged() {
   for (OpenXrControllerState& controller_state : controller_states_) {
-    *xr_result = controller_state.controller.UpdateInteractionProfile();
-    if (XR_FAILED(*xr_result)) {
-      return;
-    }
+    RETURN_IF_XR_FAILED(controller_state.controller.UpdateInteractionProfile());
   }
-}
-
-base::WeakPtr<OpenXRInputHelper> OpenXRInputHelper::GetWeakPtr() {
-  return weak_ptr_factory_.GetWeakPtr();
-}
-
-base::Optional<Gamepad> OpenXRInputHelper ::GetWebXRGamepad(
-    const OpenXrController& controller) {
-  OpenXrInteractionProfileType cur_type = controller.interaction_profile();
-  for (auto& it : kOpenXrControllerInteractionProfiles) {
-    if (it.type == cur_type) {
-      if (it.mapping == GamepadMapping::kXrStandard) {
-        return GetXrStandardGamepad(controller);
-      } else {
-        // if mapping is kNone
-        return base::nullopt;
-      }
-    }
-  }
-
-  return base::nullopt;
+  return XR_SUCCESS;
 }
 
 XrResult OpenXRInputHelper::SyncActions(XrTime predicted_display_time) {
@@ -245,7 +203,54 @@ XrResult OpenXRInputHelper::SyncActions(XrTime predicted_display_time) {
   XrActionsSyncInfo sync_info = {XR_TYPE_ACTIONS_SYNC_INFO};
   sync_info.countActiveActionSets = active_action_sets.size();
   sync_info.activeActionSets = active_action_sets.data();
-  return xrSyncActions(session_, &sync_info);
+  RETURN_IF_XR_FAILED(xrSyncActions(session_, &sync_info));
+
+  for (auto& controller_state : controller_states_) {
+    controller_state.controller.Update(local_space_, predicted_display_time);
+  }
+
+  return XR_SUCCESS;
+}
+
+std::optional<XrLocation> OpenXRInputHelper::GetXrLocationFromHandJoint(
+    XrSpace mojo_space,
+    const mojom::XRHandJointSpaceInfo& hand_joint_space_info,
+    const gfx::Transform& joint_from_object) const {
+  for (auto& controller_state : controller_states_) {
+    if (controller_state.controller.IsHandTrackingEnabled() &&
+        controller_state.controller.GetHandness() ==
+            hand_joint_space_info.handedness) {
+      auto mojo_from_joint = controller_state.controller.GetMojoFromJoint(
+          MojomJointToOpenXRJoint(hand_joint_space_info.joint));
+      if (mojo_from_joint) {
+        return XrLocation{
+            GfxTransformToXrPose(*mojo_from_joint * joint_from_object),
+            mojo_space};
+      }
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::optional<XrLocation> OpenXRInputHelper::GetXrLocationFromInputSource(
+    const mojom::XRInputSourceSpaceInfo& space_info,
+    const gfx::Transform& input_space_from_object) const {
+  if (space_info.input_source_id >= controller_states_.size()) {
+    return std::nullopt;
+  }
+
+  const auto& controller =
+      controller_states_[space_info.input_source_id].controller;
+  if (XrSpace input_space =
+          controller.GetInputSpace(space_info.input_source_space_type);
+      input_space != XR_NULL_HANDLE) {
+    return XrLocation{GfxTransformToXrPose(input_space_from_object),
+                      input_space};
+  }
+
+  // There is no corresponding controller or space.
+  return std::nullopt;
 }
 
 }  // namespace device

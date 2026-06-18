@@ -46,7 +46,7 @@ constexpr char kThrottledErrorDescription[] =
 }  // namespace
 
 ResourceError ResourceError::CancelledError(const KURL& url) {
-  return ResourceError(net::ERR_ABORTED, url, base::nullopt);
+  return ResourceError(net::ERR_ABORTED, url, std::nullopt);
 }
 
 ResourceError ResourceError::CancelledDueToAccessCheckError(
@@ -54,7 +54,7 @@ ResourceError ResourceError::CancelledDueToAccessCheckError(
     ResourceRequestBlockedReason blocked_reason) {
   ResourceError error = CancelledError(url);
   error.is_access_check_ = true;
-  error.blocked_by_subresource_filter_ =
+  error.should_collapse_inititator_ =
       blocked_reason == ResourceRequestBlockedReason::kSubresourceFilter;
   return error;
 }
@@ -71,27 +71,33 @@ ResourceError ResourceError::CancelledDueToAccessCheckError(
 ResourceError ResourceError::BlockedByResponse(
     const KURL& url,
     network::mojom::BlockedByResponseReason blocked_by_response_reason) {
-  ResourceError error(net::ERR_BLOCKED_BY_RESPONSE, url, base::nullopt);
+  ResourceError error(net::ERR_BLOCKED_BY_RESPONSE, url, std::nullopt);
   error.blocked_by_response_reason_ = blocked_by_response_reason;
   return error;
 }
 
 ResourceError ResourceError::CacheMissError(const KURL& url) {
-  return ResourceError(net::ERR_CACHE_MISS, url, base::nullopt);
+  return ResourceError(net::ERR_CACHE_MISS, url, std::nullopt);
 }
 
 ResourceError ResourceError::TimeoutError(const KURL& url) {
-  return ResourceError(net::ERR_TIMED_OUT, url, base::nullopt);
+  return ResourceError(net::ERR_TIMED_OUT, url, std::nullopt);
 }
 
 ResourceError ResourceError::Failure(const KURL& url) {
-  return ResourceError(net::ERR_FAILED, url, base::nullopt);
+  return ResourceError(net::ERR_FAILED, url, std::nullopt);
+}
+
+ResourceError ResourceError::HttpError(const KURL& url) {
+  ResourceError error = CancelledError(url);
+  error.is_cancelled_from_http_error_ = true;
+  return error;
 }
 
 ResourceError::ResourceError(
     int error_code,
     const KURL& url,
-    base::Optional<network::CorsErrorStatus> cors_error_status)
+    std::optional<network::CorsErrorStatus> cors_error_status)
     : error_code_(error_code),
       failing_url_(url),
       is_access_check_(cors_error_status.has_value()),
@@ -112,6 +118,7 @@ ResourceError::ResourceError(const WebURLError& error)
       is_access_check_(error.is_web_security_violation()),
       has_copy_in_cache_(error.has_copy_in_cache()),
       cors_error_status_(error.cors_error_status()),
+      should_collapse_inititator_(error.should_collapse_initiator()),
       blocked_by_response_reason_(error.blocked_by_response_reason()),
       trust_token_operation_error_(error.trust_token_operation_error()) {
   DCHECK_NE(error_code_, 0);
@@ -137,7 +144,10 @@ ResourceError::operator WebURLError() const {
       error_code_, extended_error_code_, resolve_error_info_, has_copy_in_cache,
       is_access_check_ ? WebURLError::IsWebSecurityViolation::kTrue
                        : WebURLError::IsWebSecurityViolation::kFalse,
-      failing_url_);
+      failing_url_,
+      should_collapse_inititator_
+          ? WebURLError::ShouldCollapseInitiator::kTrue
+          : WebURLError::ShouldCollapseInitiator::kFalse);
 }
 
 bool ResourceError::Compare(const ResourceError& a, const ResourceError& b) {
@@ -168,6 +178,9 @@ bool ResourceError::Compare(const ResourceError& a, const ResourceError& b) {
   if (a.trust_token_operation_error_ != b.trust_token_operation_error_)
     return false;
 
+  if (a.should_collapse_inititator_ != b.should_collapse_inititator_)
+    return false;
+
   return true;
 }
 
@@ -179,11 +192,16 @@ bool ResourceError::IsCancellation() const {
   return error_code_ == net::ERR_ABORTED;
 }
 
+bool ResourceError::IsTrustTokenCacheHit() const {
+  return error_code_ ==
+         net::ERR_TRUST_TOKEN_OPERATION_SUCCESS_WITHOUT_SENDING_REQUEST;
+}
+
 bool ResourceError::IsUnactionableTrustTokensStatus() const {
-  return error_code_ == net::ERR_TRUST_TOKEN_OPERATION_CACHE_HIT ||
+  return IsTrustTokenCacheHit() ||
          (error_code_ == net::ERR_TRUST_TOKEN_OPERATION_FAILED &&
           trust_token_operation_error_ ==
-              network::mojom::TrustTokenOperationStatus::kUnavailable);
+              network::mojom::TrustTokenOperationStatus::kUnauthorized);
 }
 
 bool ResourceError::IsCacheMiss() const {
@@ -194,10 +212,8 @@ bool ResourceError::WasBlockedByResponse() const {
   return error_code_ == net::ERR_BLOCKED_BY_RESPONSE;
 }
 
-bool ResourceError::ShouldCollapseInitiator() const {
-  return blocked_by_subresource_filter_ ||
-         GetResourceRequestBlockedReason() ==
-             ResourceRequestBlockedReason::kCollapsedByClient;
+bool ResourceError::WasBlockedByORB() const {
+  return error_code_ == net::ERR_BLOCKED_BY_ORB;
 }
 
 namespace {
@@ -219,45 +235,61 @@ BlockedByResponseReasonToResourceRequestBlockedReason(
         kCorpNotSameOriginAfterDefaultedToSameOriginByCoep:
       return blink::ResourceRequestBlockedReason::
           kCorpNotSameOriginAfterDefaultedToSameOriginByCoep;
+    case network::mojom::BlockedByResponseReason::
+        kCorpNotSameOriginAfterDefaultedToSameOriginByDip:
+      return blink::ResourceRequestBlockedReason::
+          kCorpNotSameOriginAfterDefaultedToSameOriginByDip;
+    case network::mojom::BlockedByResponseReason::
+        kCorpNotSameOriginAfterDefaultedToSameOriginByCoepAndDip:
+      return blink::ResourceRequestBlockedReason::
+          kCorpNotSameOriginAfterDefaultedToSameOriginByCoepAndDip;
     case network::mojom::BlockedByResponseReason::kCorpNotSameSite:
       return blink::ResourceRequestBlockedReason::kCorpNotSameSite;
+    case network::mojom::BlockedByResponseReason::kSRIMessageSignatureMismatch:
+      return blink::ResourceRequestBlockedReason::kSRIMessageSignatureMismatch;
   }
   NOTREACHED();
-  return blink::ResourceRequestBlockedReason::kOther;
 }
 }  // namespace
 
-base::Optional<ResourceRequestBlockedReason>
+std::optional<ResourceRequestBlockedReason>
 ResourceError::GetResourceRequestBlockedReason() const {
   if (error_code_ != net::ERR_BLOCKED_BY_CLIENT &&
       error_code_ != net::ERR_BLOCKED_BY_RESPONSE) {
-    return base::nullopt;
+    return std::nullopt;
   }
   if (blocked_by_response_reason_) {
     return BlockedByResponseReasonToResourceRequestBlockedReason(
         *blocked_by_response_reason_);
   }
-  return static_cast<ResourceRequestBlockedReason>(extended_error_code_);
+
+  if (extended_error_code_ <=
+      static_cast<int>(ResourceRequestBlockedReason::kMax)) {
+    return static_cast<ResourceRequestBlockedReason>(extended_error_code_);
+  }
+
+  return std::nullopt;
 }
 
-base::Optional<network::mojom::BlockedByResponseReason>
+std::optional<network::mojom::BlockedByResponseReason>
 ResourceError::GetBlockedByResponseReason() const {
   if (error_code_ != net::ERR_BLOCKED_BY_CLIENT &&
       error_code_ != net::ERR_BLOCKED_BY_RESPONSE) {
-    return base::nullopt;
+    return std::nullopt;
   }
   return blocked_by_response_reason_;
 }
 
 namespace {
-String DescriptionForBlockedByClientOrResponse(int error, int extended_error) {
-  if (extended_error == 0)
-    return WebString::FromASCII(net::ErrorToString(error));
+String DescriptionForBlockedByClientOrResponse(
+    int error,
+    const std::optional<blink::ResourceRequestBlockedReason>& reason) {
+  if (!reason || *reason == ResourceRequestBlockedReason::kOther)
+    return WebString::FromAscii(net::ErrorToString(error));
   std::string detail;
-  switch (static_cast<ResourceRequestBlockedReason>(extended_error)) {
+  switch (*reason) {
     case ResourceRequestBlockedReason::kOther:
-      NOTREACHED();  // extended_error == 0, handled above
-      break;
+      NOTREACHED();  // handled above
     case ResourceRequestBlockedReason::kCSP:
       detail = "CSP";
       break;
@@ -270,14 +302,14 @@ String DescriptionForBlockedByClientOrResponse(int error, int extended_error) {
     case ResourceRequestBlockedReason::kInspector:
       detail = "Inspector";
       break;
+    case ResourceRequestBlockedReason::kIntegrity:
+      detail = "Integrity";
+      break;
     case ResourceRequestBlockedReason::kSubresourceFilter:
       detail = "SubresourceFilter";
       break;
     case ResourceRequestBlockedReason::kContentType:
       detail = "ContentType";
-      break;
-    case ResourceRequestBlockedReason::kCollapsedByClient:
-      detail = "Collapsed";
       break;
     case ResourceRequestBlockedReason::kCoepFrameResourceNeedsCoepHeader:
       detail = "ResponseNeedsCrossOriginEmbedderPolicy";
@@ -293,23 +325,38 @@ String DescriptionForBlockedByClientOrResponse(int error, int extended_error) {
         kCorpNotSameOriginAfterDefaultedToSameOriginByCoep:
       detail = "NotSameOriginAfterDefaultedToSameOriginByCoep";
       break;
+    case ResourceRequestBlockedReason::
+        kCorpNotSameOriginAfterDefaultedToSameOriginByDip:
+      detail = "NotSameOriginAfterDefaultedToSameOriginByDip";
+      break;
+    case ResourceRequestBlockedReason::
+        kCorpNotSameOriginAfterDefaultedToSameOriginByCoepAndDip:
+      detail = "NotSameOriginAfterDefaultedToSameOriginByCoepAndDip";
+      break;
     case ResourceRequestBlockedReason::kCorpNotSameSite:
       detail = "NotSameSite";
       break;
+    case ResourceRequestBlockedReason::kConversionRequest:
+      detail = "ConversionRequest";
+      break;
+    case ResourceRequestBlockedReason::kSRIMessageSignatureMismatch:
+      detail = "SRIMessageSignatureMismatch";
   }
-  return WebString::FromASCII(net::ErrorToString(error) + "." + detail);
+  return WebString::FromAscii(net::ErrorToString(error) + "." + detail);
 }
 }  // namespace
 
 void ResourceError::InitializeDescription() {
   if (error_code_ == net::ERR_TEMPORARILY_THROTTLED) {
-    localized_description_ = WebString::FromASCII(kThrottledErrorDescription);
+    localized_description_ = WebString::FromAscii(kThrottledErrorDescription);
   } else if (error_code_ == net::ERR_BLOCKED_BY_CLIENT ||
              error_code_ == net::ERR_BLOCKED_BY_RESPONSE) {
-    localized_description_ = DescriptionForBlockedByClientOrResponse(
-        error_code_, extended_error_code_);
+    std::optional<ResourceRequestBlockedReason> reason =
+        GetResourceRequestBlockedReason();
+    localized_description_ =
+        DescriptionForBlockedByClientOrResponse(error_code_, reason);
   } else {
-    localized_description_ = WebString::FromASCII(
+    localized_description_ = WebString::FromAscii(
         net::ExtendedErrorToString(error_code_, extended_error_code_));
   }
 }
@@ -324,8 +371,7 @@ std::ostream& operator<<(std::ostream& os, const ResourceError& error) {
             << ", HasCopyInCache = " << error.HasCopyInCache()
             << ", IsCacheMiss = " << error.IsCacheMiss()
             << ", TrustTokenOperationError = "
-            << String::FromUTF8(base::NumberToString(
-                   static_cast<int32_t>(error.TrustTokenOperationError())));
+            << static_cast<int32_t>(error.TrustTokenOperationError());
 }
 
 }  // namespace blink

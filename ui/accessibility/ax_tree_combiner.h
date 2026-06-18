@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 
 #include <vector>
 
+#include "ui/accessibility/ax_action_handler_registry.h"
 #include "ui/accessibility/ax_export.h"
-#include "ui/accessibility/ax_tree_id_registry.h"
 #include "ui/accessibility/ax_tree_update.h"
 
 namespace ui {
@@ -28,22 +28,23 @@ class AX_EXPORT AXTreeCombiner {
   AXTreeCombiner();
   ~AXTreeCombiner();
 
-  void AddTree(const AXTreeUpdate& tree, bool is_root);
+  void AddTree(AXTreeUpdate& tree, bool is_root);
   bool Combine();
 
-  const AXTreeUpdate& combined() { return combined_; }
+  std::optional<AXTreeUpdate>& combined() { return combined_; }
+  const std::optional<AXTreeUpdate>& combined() const { return combined_; }
 
  private:
-  int32_t MapId(AXTreeID tree_id, int32_t node_id);
+  AXNodeID MapId(AXTreeID tree_id, AXNodeID node_id);
 
-  void ProcessTree(const AXTreeUpdate* tree);
+  void ProcessTree(AXTreeUpdate* tree,
+                   const std::map<AXTreeID, AXTreeUpdate*>& tree_id_map);
 
-  std::vector<ui::AXTreeUpdate> trees_;
+  std::vector<AXTreeUpdate> trees_;
   AXTreeID root_tree_id_;
-  int32_t next_id_ = 1;
-  std::map<AXTreeID, const AXTreeUpdate*> tree_id_map_;
-  std::map<std::pair<AXTreeID, int32_t>, int32_t> tree_id_node_id_map_;
-  AXTreeUpdate combined_;
+  AXNodeID next_id_ = 1;
+  std::map<std::pair<AXTreeID, AXNodeID>, AXNodeID> tree_id_node_id_map_;
+  std::optional<AXTreeUpdate> combined_;
 };
 
 

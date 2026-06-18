@@ -55,10 +55,10 @@ class FakeWebPlugin : public WebPlugin {
   void Destroy() override;
   bool CanProcessDrag() const override { return false; }
   void UpdateAllLifecyclePhases(blink::DocumentUpdateReason) override {}
-  void Paint(cc::PaintCanvas*, const WebRect&) override {}
-  void UpdateGeometry(const WebRect& client_rect,
-                      const WebRect& clip_rect,
-                      const WebRect& window_clip_rect,
+  void Paint(cc::PaintCanvas*, const gfx::Rect&) override {}
+  void UpdateGeometry(const gfx::Rect& client_rect,
+                      const gfx::Rect& clip_rect,
+                      const gfx::Rect& window_clip_rect,
                       bool is_visible) override {}
   void UpdateFocus(bool, mojom::blink::FocusType) override {}
   void UpdateVisibility(bool) override {}
@@ -68,16 +68,15 @@ class FakeWebPlugin : public WebPlugin {
   }
   bool HandleDragStatusUpdate(WebDragStatus,
                               const WebDragData&,
-                              WebDragOperationsMask,
+                              DragOperationsMask,
                               const gfx::PointF& position,
                               const gfx::PointF& screen_position) override {
     return false;
   }
   void DidReceiveResponse(const WebURLResponse&) override {}
-  void DidReceiveData(const char* data, size_t data_length) override {}
+  void DidReceiveData(base::span<const char> data) override {}
   void DidFinishLoading() override {}
   void DidFailLoading(const WebURLError&) override {}
-  bool IsPlaceholder() override { return false; }
 
  protected:
   ~FakeWebPlugin() override;

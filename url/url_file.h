@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,45 +13,58 @@
 
 namespace url {
 
-#ifdef WIN32
-
 // We allow both "c:" and "c|" as drive identifiers.
-inline bool IsWindowsDriveSeparator(base::char16 ch) {
+inline bool IsWindowsDriveSeparator(char16_t ch) {
   return ch == ':' || ch == '|';
 }
-
-#endif  // WIN32
-
-// Returns the index of the next slash in the input after the given index, or
-// spec_len if the end of the input is reached.
-template<typename CHAR>
-inline int FindNextSlash(const CHAR* spec, int begin_index, int spec_len) {
-  int idx = begin_index;
-  while (idx < spec_len && !IsURLSlash(spec[idx]))
-    idx++;
-  return idx;
+inline bool IsWindowsDriveSeparator(char ch) {
+  return IsWindowsDriveSeparator(static_cast<char16_t>(ch));
 }
 
-#ifdef WIN32
+// DoesContainWindowsDriveSpecUntil returns the least number between
+// start_offset and max_offset such that the spec has a valid drive
+// specification starting at that offset. Otherwise it returns `npos`. This
+// function gracefully handles, by returning `npos`, start_offset values that
+// are equal to or larger than the spec.length(), and caps max_offset
+// appropriately to simplify callers. max_offset must be at least start_offset.
+template <typename CHAR>
+inline size_t DoesContainWindowsDriveSpecUntil(
+    std::basic_string_view<CHAR> spec,
+    size_t start_offset,
+    size_t max_offset) {
+  CHECK_LE(start_offset, max_offset);
+  size_t spec_len = spec.length();
+  if (spec_len < 2 || start_offset > spec_len - 2) {
+    return std::basic_string_view<CHAR>::npos;  // Not enough room.
+  }
+  if (max_offset > spec_len - 2)
+    max_offset = spec_len - 2;
+  for (size_t offset = start_offset; offset <= max_offset; ++offset) {
+    if (!base::IsAsciiAlpha(spec[offset])) {
+      continue;  // Doesn't contain a valid drive letter.
+    }
+    if (!IsWindowsDriveSeparator(spec[offset + 1])) {
+      continue;  // Isn't followed with a drive separator.
+    }
+    return offset;
+  }
+  return std::basic_string_view<CHAR>::npos;
+}
 
 // Returns true if the start_offset in the given spec looks like it begins a
 // drive spec, for example "c:". This function explicitly handles start_offset
 // values that are equal to or larger than the spec_len to simplify callers.
 //
 // If this returns true, the spec is guaranteed to have a valid drive letter
-// plus a colon starting at |start_offset|.
-template<typename CHAR>
-inline bool DoesBeginWindowsDriveSpec(const CHAR* spec, int start_offset,
-                                      int spec_len) {
-  int remaining_len = spec_len - start_offset;
-  if (remaining_len < 2)
-    return false;  // Not enough room.
-  if (!base::IsAsciiAlpha(spec[start_offset]))
-    return false;  // Doesn't start with a valid drive letter.
-  if (!IsWindowsDriveSeparator(spec[start_offset + 1]))
-    return false;  // Isn't followed with a drive separator.
-  return true;
+// plus a drive letter separator (a colon or a pipe) starting at |start_offset|.
+template <typename CHAR>
+inline bool DoesBeginWindowsDriveSpec(std::basic_string_view<CHAR> spec,
+                                      size_t start_offset) {
+  return DoesContainWindowsDriveSpecUntil(spec, start_offset, start_offset) ==
+         start_offset;
 }
+
+#ifdef WIN32
 
 // Returns true if the start_offset in the given text looks like it begins a
 // UNC path, for example "\\". This function explicitly handles start_offset
@@ -60,18 +73,20 @@ inline bool DoesBeginWindowsDriveSpec(const CHAR* spec, int start_offset,
 // When strict_slashes is set, this function will only accept backslashes as is
 // standard for Windows. Otherwise, it will accept forward slashes as well
 // which we use for a lot of URL handling.
-template<typename CHAR>
-inline bool DoesBeginUNCPath(const CHAR* text,
-                             int start_offset,
-                             int len,
+template <typename CHAR>
+inline bool DoesBeginUncPath(std::basic_string_view<CHAR> text,
+                             size_t start_offset,
                              bool strict_slashes) {
-  int remaining_len = len - start_offset;
-  if (remaining_len < 2)
+  if (start_offset >= text.length() || text.length() - start_offset < 2) {
     return false;
+  }
 
-  if (strict_slashes)
-    return text[start_offset] == '\\' && text[start_offset + 1] == '\\';
-  return IsURLSlash(text[start_offset]) && IsURLSlash(text[start_offset + 1]);
+  CHAR ch0 = text[start_offset];
+  CHAR ch1 = text[++start_offset];
+  if (strict_slashes) {
+    return ch0 == '\\' && ch1 == '\\';
+  }
+  return IsSlashOrBackslash(ch0) && IsSlashOrBackslash(ch1);
 }
 
 #endif  // WIN32

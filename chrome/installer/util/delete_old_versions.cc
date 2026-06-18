@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,6 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
 #include "base/version.h"
 #include "chrome/installer/util/util_constants.h"
 
@@ -33,13 +32,15 @@ base::FilePath GetExecutableVersionDirName(const base::FilePath& exe_path) {
       FileVersionInfo::CreateFileVersionInfo(exe_path));
   if (!file_version_info.get())
     return base::FilePath();
-  return base::FilePath(file_version_info->file_version());
+  return base::FilePath::FromUTF16Unsafe(file_version_info->file_version());
 }
 
 // Returns the names of the old version directories found in |install_dir|. The
 // directories named after the version of chrome.exe or new_chrome.exe are
 // excluded.
 DirectorySet GetOldVersionDirectories(const base::FilePath& install_dir) {
+  // TODO(crbug.com/40171016): Delete old version directory from all known
+  // locations.
   const base::FilePath new_chrome_exe_version_dir_name =
       GetExecutableVersionDirName(install_dir.Append(kChromeNewExe));
   const base::FilePath chrome_exe_version_dir_name =
@@ -87,7 +88,7 @@ bool DeleteDirectoriesWithoutMatchingExecutable(
   bool success = true;
   for (const base::FilePath& directory_name : directories) {
     // Delete the directory if it doesn't have a matching executable.
-    if (!base::Contains(executables, directory_name)) {
+    if (!executables.contains(directory_name)) {
       const base::FilePath directory_path = install_dir.Append(directory_name);
       LOG(WARNING) << "Attempting to delete stray directory "
                    << directory_path.value();
@@ -113,8 +114,9 @@ bool DeleteExecutablesWithoutMatchingDirectory(
     const auto& executables_for_version = version_and_executables.second;
 
     // Don't delete the executables if they have a matching directory.
-    if (base::Contains(directories, version_dir_name))
+    if (directories.contains(version_dir_name)) {
       continue;
+    }
 
     // Delete executables for version |version_dir_name|.
     for (const auto& executable_path : executables_for_version) {
@@ -136,9 +138,9 @@ bool DeleteExecutablesWithoutMatchingDirectory(
 // that |path| isn't in use. It can however be deleted.
 base::File GetFileLock(const base::FilePath& path) {
   return base::File(path, base::File::FLAG_OPEN | base::File::FLAG_READ |
-                              base::File::FLAG_EXCLUSIVE_READ |
-                              base::File::FLAG_EXCLUSIVE_WRITE |
-                              base::File::FLAG_SHARE_DELETE);
+                              base::File::FLAG_WIN_EXCLUSIVE_READ |
+                              base::File::FLAG_WIN_EXCLUSIVE_WRITE |
+                              base::File::FLAG_WIN_SHARE_DELETE);
 }
 
 // Deletes |version_directory| and all executables in |version_executables| if

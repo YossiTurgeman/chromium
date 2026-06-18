@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind_helpers.h"
-#include "base/macros.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/ref_counted.h"
 #include "base/task/task_traits.h"
@@ -19,8 +18,7 @@
 #include "base/time/time.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
 namespace {
 
@@ -29,29 +27,30 @@ class PriorityQueueWithSequencesTest : public testing::Test {
   void ExpectNumSequences(size_t num_best_effort,
                           size_t num_user_visible,
                           size_t num_user_blocking) {
-    EXPECT_EQ(pq.GetNumTaskSourcesWithPriority(TaskPriority::BEST_EFFORT),
-              num_best_effort);
-    EXPECT_EQ(pq.GetNumTaskSourcesWithPriority(TaskPriority::USER_VISIBLE),
-              num_user_visible);
-    EXPECT_EQ(pq.GetNumTaskSourcesWithPriority(TaskPriority::USER_BLOCKING),
-              num_user_blocking);
+    EXPECT_EQ(pq.GetNumBackgroundTaskSources(), num_best_effort);
+    EXPECT_EQ(pq.GetNumForegroundTaskSources(),
+              num_user_visible + num_user_blocking);
   }
 
   scoped_refptr<TaskSource> MakeSequenceWithTraitsAndTask(
       const TaskTraits& traits) {
     // FastForward time to ensure that queue order between task sources is well
     // defined.
-    task_environment.FastForwardBy(TimeDelta::FromMicroseconds(1));
+    task_environment.FastForwardBy(Microseconds(1));
     scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
-        traits, nullptr, TaskSourceExecutionMode::kParallel);
-    sequence->BeginTransaction().PushTask(
-        Task(FROM_HERE, DoNothing(), TimeDelta()));
+        traits, nullptr, TaskSourceExecutionMode::kParallel,
+        ThreadType::kDefault);
+    auto transaction = sequence->BeginTransaction();
+    transaction.WillPushImmediateTask();
+    transaction.PushImmediateTask(
+        Task(FROM_HERE, DoNothing(), TimeTicks::Now(), TimeDelta()));
     return sequence;
   }
 
   void Push(scoped_refptr<TaskSource> task_source) {
-    pq.Push(TransactionWithRegisteredTaskSource::FromTaskSource(
-        RegisteredTaskSource::CreateForTesting(std::move(task_source))));
+    auto sort_key = task_source->GetSortKey();
+    pq.Push(RegisteredTaskSource::CreateForTesting(std::move(task_source)),
+            sort_key);
   }
 
   test::TaskEnvironment task_environment{
@@ -251,5 +250,4 @@ TEST_F(PriorityQueueWithSequencesTest, UpdateSortKey) {
   }
 }
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal

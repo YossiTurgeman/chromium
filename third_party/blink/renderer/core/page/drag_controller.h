@@ -26,15 +26,23 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_DRAG_CONTROLLER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_DRAG_CONTROLLER_H_
 
-#include "base/macros.h"
+#include <optional>
+
+#include "third_party/blink/public/common/input/pointer_id.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
 #include "third_party/blink/renderer/core/page/drag_actions.h"
-#include "third_party/blink/renderer/platform/geometry/int_point.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
+#include "ui/base/dragdrop/mojom/drag_drop_types.mojom-blink.h"
+#include "ui/gfx/geometry/point.h"
+#include "ui/gfx/geometry/rect.h"
+
+namespace gfx {
+class RectF;
+}
 
 namespace blink {
 
@@ -44,7 +52,6 @@ class DragData;
 class DragImage;
 class DragState;
 class LocalFrame;
-class FloatRect;
 class FrameSelection;
 class HTMLInputElement;
 class Node;
@@ -56,10 +63,30 @@ class CORE_EXPORT DragController final
       public ExecutionContextLifecycleObserver {
  public:
   explicit DragController(Page*);
+  DragController(const DragController&) = delete;
+  DragController& operator=(const DragController&) = delete;
 
-  DragOperation DragEnteredOrUpdated(DragData*, LocalFrame& local_root);
+  // Holds the drag operation and whether the document is handling it.  Also see
+  // DragTargetDragEnter() in widget.mojom for further details.
+  struct Operation {
+    // The current drag operation as negotiated by the source and destination.
+    // When not equal to DragOperationNone, the drag data can be dropped onto
+    // the current drop target in this WebView (the drop target can accept the
+    // drop).
+    ui::mojom::blink::DragOperation operation =
+        ui::mojom::blink::DragOperation::kNone;
+
+    // True if the document intends to handle the drag.  This means the drag
+    // controller will pass the data to the document, but the document might
+    // still decide not to handle it by not calling preventDefault().
+    bool document_is_handling_drag = false;
+  };
+
+  Operation DragEnteredOrUpdated(DragData*, LocalFrame& local_root);
   void DragExited(DragData*, LocalFrame& local_root);
-  void PerformDrag(DragData*, LocalFrame& local_root);
+  void PerformDrop(DragData*,
+                   LocalFrame& local_root,
+                   const Operation& browser_drag_operation);
 
   enum SelectionDragPolicy {
     kImmediateSelectionDragResolution,
@@ -67,18 +94,24 @@ class CORE_EXPORT DragController final
   };
   Node* DraggableNode(const LocalFrame*,
                       Node*,
-                      const IntPoint&,
+                      const gfx::Point&,
                       SelectionDragPolicy,
                       DragSourceAction&) const;
   void DragEnded();
 
   bool PopulateDragDataTransfer(LocalFrame* src,
                                 const DragState&,
-                                const IntPoint& drag_origin);
-  bool StartDrag(LocalFrame* src,
+                                const gfx::Point& drag_origin);
+
+  // The parameter `drag_event` is the event that triggered the drag operation,
+  // and `drag_initiation_location` is the where the drag originated.  The
+  // event's location does NOT match the initiation location for a mouse-drag:
+  // the drag is triggered by a mouse-move event but the initiation location is
+  // that of a mouse-down event.
+  bool StartDrag(LocalFrame*,
                  const DragState&,
                  const WebMouseEvent& drag_event,
-                 const IntPoint& drag_origin);
+                 const gfx::Point& drag_initiation_location);
 
   DragState& GetDragState();
 
@@ -86,24 +119,30 @@ class CORE_EXPORT DragController final
 
   // Return the selection bounds in absolute coordinates for the frame, clipped
   // to the visual viewport.
-  static FloatRect ClippedSelection(const LocalFrame&);
+  static gfx::RectF ClippedSelection(const LocalFrame&);
 
   // ExecutionContextLifecycleObserver.
   void ContextDestroyed() final;
 
   void Trace(Visitor*) const final;
 
+  std::optional<PointerId> drag_pointer_id() const { return drag_pointer_id_; }
+  bool did_initiate_drag() const { return did_initiate_drag_; }
+
  private:
   DispatchEventResult DispatchTextInputEventFor(LocalFrame*, DragData*);
   bool CanProcessDrag(DragData*, LocalFrame& local_root);
   bool ConcludeEditDrag(DragData*);
-  DragOperation OperationForLoad(DragData*, LocalFrame& local_root);
+  ui::mojom::blink::DragOperation OperationForLoad(DragData*,
+                                                   LocalFrame& local_root);
   bool TryDocumentDrag(DragData*,
                        DragDestinationAction,
-                       DragOperation&,
+                       ui::mojom::blink::DragOperation&,
                        LocalFrame& local_root);
-  bool TryDHTMLDrag(DragData*, DragOperation&, LocalFrame& local_root);
-  DragOperation GetDragOperation(DragData*);
+  bool TryDHTMLDrag(DragData*,
+                    ui::mojom::blink::DragOperation&,
+                    LocalFrame& local_root);
+  ui::mojom::blink::DragOperation GetDragOperation(DragData*);
   // Clear the selection from the document this drag is exiting.
   void ClearDragCaret();
   bool DragIsMove(FrameSelection&, DragData*);
@@ -111,14 +150,11 @@ class CORE_EXPORT DragController final
 
   void MouseMovedIntoDocument(Document*);
 
-  // drag_location and drag_origin should be in the coordinate space of the
-  // LocalFrame's contents.
   void DoSystemDrag(DragImage*,
-                    const IntPoint& drag_location,
-                    const IntPoint& drag_origin,
+                    const gfx::Rect& drag_obj_rect,
+                    const gfx::Point& drag_initiation_location,
                     DataTransfer*,
-                    LocalFrame*,
-                    bool for_link);
+                    LocalFrame*);
 
   Member<Page> page_;
 
@@ -134,7 +170,9 @@ class CORE_EXPORT DragController final
 
   DragDestinationAction drag_destination_action_;
   bool did_initiate_drag_;
-  DISALLOW_COPY_AND_ASSIGN(DragController);
+  // Used to set the correct pointer id to synthetic events. Principally added
+  // to track touch drag and drop when `TouchDragEndContextMenu` is enabled.
+  std::optional<PointerId> drag_pointer_id_;
 };
 
 }  // namespace blink

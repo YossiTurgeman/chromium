@@ -1,11 +1,17 @@
-connily@chromium.org
-cyan@chromium.org
+agale@chromium.org
+dljames@chromium.org
+dpenning@chromium.org
 kylixrd@chromium.org
-pkasting@chromium.org
-sky@chromium.org
-tbergquist@chromium.org
 
-# For changes related to the tab alert indicator/button.
-miu@chromium.org
+per-file tab_search_button*=tluk@chromium.org
 
-# COMPONENT: UI>Browser>TabStrip
+# For changes related to fallback (system-DnD-based) tab dragging.
+per-file tab_drag_controller*=max@igalia.com
+
+# For changes related to vertical tabs.
+per-file vertical/*=alsan@chromium.org
+
+# For changes related to the glic/actor tab alert indicator/button.
+per-file tab_strip_action_container*=mfoltz@chromium.org
+per-file tab_alert_indicator_button*=mfoltz@chromium.org
+

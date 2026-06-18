@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,6 @@
 
 #import "ios/web/public/web_state.h"
 #import "ios/web/web_state/web_state_impl.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace web {
 
@@ -64,16 +60,17 @@ WebStatePolicyDecider::~WebStatePolicyDecider() {
   }
 }
 
-WebStatePolicyDecider::PolicyDecision WebStatePolicyDecider::ShouldAllowRequest(
+void WebStatePolicyDecider::ShouldAllowRequest(
     NSURLRequest* request,
-    const WebStatePolicyDecider::RequestInfo& request_info) {
-  return WebStatePolicyDecider::PolicyDecision::Allow();
+    RequestInfo request_info,
+    PolicyDecisionCallback callback) {
+  std::move(callback).Run(PolicyDecision::Allow());
 }
 
 void WebStatePolicyDecider::ShouldAllowResponse(
     NSURLResponse* response,
-    bool for_main_frame,
-    base::OnceCallback<void(PolicyDecision)> callback) {
+    ResponseInfo response_info,
+    PolicyDecisionCallback callback) {
   std::move(callback).Run(PolicyDecision::Allow());
 }
 

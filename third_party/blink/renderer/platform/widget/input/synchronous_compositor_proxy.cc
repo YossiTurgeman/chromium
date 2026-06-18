@@ -1,22 +1,34 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/widget/input/synchronous_compositor_proxy.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "components/viz/common/features.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
 #include "third_party/skia/include/core/SkRegion.h"
-#include "ui/gfx/skia_util.h"
+#include "ui/gfx/geometry/skia_conversions.h"
 
 namespace blink {
 
+struct SynchronousCompositorProxy::SharedMemoryWithSize {
+  base::WritableSharedMemoryMapping shared_memory;
+  const size_t buffer_size;
+  bool zeroed;
+
+  SharedMemoryWithSize(base::WritableSharedMemoryMapping shm_mapping,
+                       size_t buffer_size)
+      : shared_memory(std::move(shm_mapping)),
+        buffer_size(buffer_size),
+        zeroed(true) {}
+};
+
 SynchronousCompositorProxy::SynchronousCompositorProxy(
-    blink::SynchronousInputHandlerProxy* input_handler_proxy)
+    InputHandlerProxy* input_handler_proxy)
     : input_handler_proxy_(input_handler_proxy),
       viz_frame_submission_enabled_(
           features::IsUsingVizFrameSubmissionForWebView()),
@@ -32,7 +44,7 @@ SynchronousCompositorProxy::SynchronousCompositorProxy(
 SynchronousCompositorProxy::~SynchronousCompositorProxy() {
   // The LayerTreeFrameSink is destroyed/removed by the compositor before
   // shutting down everything.
-  DCHECK_EQ(layer_tree_frame_sink_, nullptr);
+  CHECK_EQ(layer_tree_frame_sink_, nullptr);
   input_handler_proxy_->SetSynchronousInputHandler(nullptr);
 }
 
@@ -57,8 +69,8 @@ void SynchronousCompositorProxy::SetLayerTreeFrameSink(
 }
 
 void SynchronousCompositorProxy::UpdateRootLayerState(
-    const gfx::ScrollOffset& total_scroll_offset,
-    const gfx::ScrollOffset& max_scroll_offset,
+    const gfx::PointF& total_scroll_offset,
+    const gfx::PointF& max_scroll_offset,
     const gfx::SizeF& scrollable_size,
     float page_scale_factor,
     float min_page_scale_factor,
@@ -125,7 +137,7 @@ void SynchronousCompositorProxy::DemandDrawHw(
   if (layer_tree_frame_sink_) {
     layer_tree_frame_sink_->DemandDrawHw(
         params->viewport_size, params->viewport_rect_for_tile_priority,
-        params->transform_for_tile_priority);
+        params->transform_for_tile_priority, params->need_new_local_surface_id);
   }
 
   // Ensure that a response is always sent even if the reply hasn't
@@ -133,7 +145,8 @@ void SynchronousCompositorProxy::DemandDrawHw(
   if (hardware_draw_reply_) {
     // Did not swap.
     std::move(hardware_draw_reply_)
-        .Run(PopulateNewCommonParams(), 0u, 0u, base::nullopt, base::nullopt);
+        .Run(PopulateNewCommonParams(), 0u, 0u, std::nullopt, std::nullopt,
+             std::nullopt);
   }
 }
 
@@ -143,18 +156,6 @@ void SynchronousCompositorProxy::WillSkipDraw() {
   }
 }
 
-struct SynchronousCompositorProxy::SharedMemoryWithSize {
-  base::WritableSharedMemoryMapping shared_memory;
-  const size_t buffer_size;
-  bool zeroed;
-
-  SharedMemoryWithSize(base::WritableSharedMemoryMapping shm_mapping,
-                       size_t buffer_size)
-      : shared_memory(std::move(shm_mapping)),
-        buffer_size(buffer_size),
-        zeroed(true) {}
-};
-
 void SynchronousCompositorProxy::ZeroSharedMemory() {
   // It is possible for this to get called twice, eg. if draw is called before
   // the LayerTreeFrameSink is ready. Just ignore duplicated calls rather than
@@ -162,8 +163,8 @@ void SynchronousCompositorProxy::ZeroSharedMemory() {
   if (software_draw_shm_->zeroed)
     return;
 
-  memset(software_draw_shm_->shared_memory.memory(), 0,
-         software_draw_shm_->buffer_size);
+  base::span<uint8_t> mem(software_draw_shm_->shared_memory);
+  std::ranges::fill(mem.first(software_draw_shm_->buffer_size), 0u);
   software_draw_shm_->zeroed = true;
 }
 
@@ -171,6 +172,7 @@ void SynchronousCompositorProxy::DemandDrawSw(
     mojom::blink::SyncCompositorDemandDrawSwParamsPtr params,
     DemandDrawSwCallback callback) {
   invalidate_needs_draw_ = false;
+
   software_draw_reply_ = std::move(callback);
   if (layer_tree_frame_sink_) {
     if (use_in_process_zero_copy_software_draw_) {
@@ -185,7 +187,7 @@ void SynchronousCompositorProxy::DemandDrawSw(
   if (software_draw_reply_) {
     // Did not swap.
     std::move(software_draw_reply_)
-        .Run(PopulateNewCommonParams(), 0u, base::nullopt);
+        .Run(PopulateNewCommonParams(), 0u, std::nullopt);
   }
 }
 
@@ -201,22 +203,24 @@ void SynchronousCompositorProxy::DoDemandDrawSw(
   size_t buffer_size = info.computeByteSize(stride);
   DCHECK_EQ(software_draw_shm_->buffer_size, buffer_size);
 
+  base::span<uint8_t> mem(software_draw_shm_->shared_memory);
+  CHECK_GE(mem.size(), buffer_size);
   SkBitmap bitmap;
-  if (!bitmap.installPixels(info, software_draw_shm_->shared_memory.memory(),
-                            stride)) {
+  if (!bitmap.installPixels(info, mem.data(), stride)) {
     return;
   }
   SkCanvas canvas(bitmap);
   canvas.clipRect(gfx::RectToSkRect(params->clip));
-  canvas.concat(SkMatrix(params->transform.matrix()));
+  canvas.concat(gfx::TransformToFlattenedSkMatrix(params->transform));
 
   layer_tree_frame_sink_->DemandDrawSw(&canvas);
 }
 
 void SynchronousCompositorProxy::SubmitCompositorFrame(
     uint32_t layer_tree_frame_sink_id,
-    base::Optional<viz::CompositorFrame> frame,
-    base::Optional<viz::HitTestRegionList> hit_test_region_list) {
+    const viz::LocalSurfaceId& local_surface_id,
+    std::optional<viz::CompositorFrame> frame,
+    std::optional<viz::HitTestRegionList> hit_test_region_list) {
   // Verify that exactly one of these is true.
   DCHECK(hardware_draw_reply_.is_null() ^ software_draw_reply_.is_null());
   mojom::blink::SyncCompositorCommonRendererParamsPtr common_renderer_params =
@@ -225,9 +229,10 @@ void SynchronousCompositorProxy::SubmitCompositorFrame(
   if (hardware_draw_reply_) {
     // For viz the CF was submitted directly via CompositorFrameSink
     DCHECK(frame || viz_frame_submission_enabled_);
+    DCHECK(local_surface_id.is_valid());
     std::move(hardware_draw_reply_)
         .Run(std::move(common_renderer_params), layer_tree_frame_sink_id,
-             NextMetadataVersion(), std::move(frame),
+             NextMetadataVersion(), local_surface_id, std::move(frame),
              std::move(hit_test_region_list));
   } else if (software_draw_reply_) {
     DCHECK(frame);
@@ -249,6 +254,17 @@ void SynchronousCompositorProxy::SetNeedsBeginFrames(bool needs_begin_frames) {
 
 void SynchronousCompositorProxy::SinkDestroyed() {
   layer_tree_frame_sink_ = nullptr;
+}
+
+void SynchronousCompositorProxy::SetThreads(
+    const Vector<viz::Thread>& threads) {
+  if (threads_ == threads) {
+    return;
+  }
+  threads_ = threads;
+  if (host_) {
+    host_->SetThreads(threads_);
+  }
 }
 
 void SynchronousCompositorProxy::SetBeginFrameSourcePaused(bool paused) {
@@ -274,7 +290,7 @@ void SynchronousCompositorProxy::BeginFrame(
 }
 
 void SynchronousCompositorProxy::SetScroll(
-    const gfx::ScrollOffset& new_total_scroll_offset) {
+    const gfx::PointF& new_total_scroll_offset) {
   if (total_scroll_offset_ == new_total_scroll_offset)
     return;
   total_scroll_offset_ = new_total_scroll_offset;
@@ -289,12 +305,20 @@ void SynchronousCompositorProxy::SetMemoryPolicy(uint32_t bytes_limit) {
 
 void SynchronousCompositorProxy::ReclaimResources(
     uint32_t layer_tree_frame_sink_id,
-    const Vector<viz::ReturnedResource>& resources) {
+    Vector<viz::ReturnedResource> resources) {
   if (!layer_tree_frame_sink_)
     return;
-  layer_tree_frame_sink_->ReclaimResources(
-      layer_tree_frame_sink_id,
-      std::vector<viz::ReturnedResource>(resources.begin(), resources.end()));
+  layer_tree_frame_sink_->ReclaimResources(layer_tree_frame_sink_id,
+                                           std::move(resources));
+}
+
+void SynchronousCompositorProxy::OnCompositorFrameTransitionDirectiveProcessed(
+    uint32_t layer_tree_frame_sink_id,
+    uint32_t sequence_id) {
+  if (!layer_tree_frame_sink_)
+    return;
+  layer_tree_frame_sink_->OnCompositorFrameTransitionDirectiveProcessed(
+      layer_tree_frame_sink_id, sequence_id);
 }
 
 void SynchronousCompositorProxy::SetSharedMemory(
@@ -334,10 +358,12 @@ void SynchronousCompositorProxy::SendDemandDrawHwAsyncReply(
     mojom::blink::SyncCompositorCommonRendererParamsPtr,
     uint32_t layer_tree_frame_sink_id,
     uint32_t metadata_version,
-    base::Optional<viz::CompositorFrame> frame,
-    base::Optional<viz::HitTestRegionList> hit_test_region_list) {
+    const std::optional<viz::LocalSurfaceId>& local_surface_id,
+    std::optional<viz::CompositorFrame> frame,
+    std::optional<viz::HitTestRegionList> hit_test_region_list) {
   control_host_->ReturnFrame(layer_tree_frame_sink_id, metadata_version,
-                             std::move(frame), std::move(hit_test_region_list));
+                             local_surface_id, std::move(frame),
+                             std::move(hit_test_region_list));
 }
 
 void SynchronousCompositorProxy::SendBeginFrameResponse(
@@ -380,6 +406,9 @@ void SynchronousCompositorProxy::BindChannel(
 
   if (needs_begin_frames_)
     host_->SetNeedsBeginFrames(true);
+  if (!threads_.empty()) {
+    host_->SetThreads(threads_);
+  }
 }
 
 void SynchronousCompositorProxy::HostDisconnected() {

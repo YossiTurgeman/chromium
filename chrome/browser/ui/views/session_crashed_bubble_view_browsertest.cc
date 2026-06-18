@@ -1,98 +1,73 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/session_crashed_bubble_view.h"
 
-#include <string>
-
-#include "build/build_config.h"
-#include "build/buildflag.h"
+#include "base/memory/raw_ptr.h"
+#include "base/test/bind.h"
+#include "base/test/test_future.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
-#include "chrome/browser/ui/views/frame/browser_view.h"
-#include "chrome/browser/ui/views/toolbar/browser_app_menu_button.h"
-#include "chrome/browser/ui/views/toolbar/toolbar_view.h"
-#include "chrome/test/base/in_process_browser_test.h"
+#include "components/metrics/metrics_reporting_level.h"
 #include "content/public/test/browser_test.h"
-#include "ui/base/buildflags.h"
-#include "ui/views/focus/focus_manager.h"
-#include "ui/views/test/ax_event_counter.h"
-#include "ui/views/view.h"
+#include "ui/base/models/dialog_model_field.h"
+#include "ui/views/bubble/bubble_dialog_model_host.h"
+#include "ui/views/test/dialog_test.h"
+#include "ui/views/widget/widget.h"
 
-class SessionCrashedBubbleViewTest : public DialogBrowserTest {
+namespace {
+
+class TestApi : public ui::DialogModelFieldHost {
  public:
-  SessionCrashedBubbleViewTest() {}
-  ~SessionCrashedBubbleViewTest() override {}
+  explicit TestApi(ui::DialogModel* model) : model_(model) {}
 
-  void ShowUi(const std::string& name) override {
-    // TODO(pbos): Set up UMA opt-in conditions instead of providing this bool.
-    crash_bubble_ = SessionCrashedBubbleView::ShowBubble(
-        browser(), false, name == "SessionCrashedBubbleOfferUma");
+  void SetUmaConsentCheckboxChecked(bool checked) {
+    model_
+        ->GetCheckboxByUniqueId(
+            SessionCrashedBubbleView::GetUmaConsentCheckboxIdForTesting())
+        ->OnChecked(GetPassKey(), checked);
   }
 
- protected:
-  views::BubbleDialogDelegateView* crash_bubble_;
+  void SetChangeMetricsReportingStateCallbackForTesting(
+      SessionCrashedBubbleView::ChangeMetricsReportingStateCallback callback) {
+    SessionCrashedBubbleView::SetChangeMetricsReportingStateCallbackForTesting(
+        model_, std::move(callback));
+  }
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(SessionCrashedBubbleViewTest);
+  const raw_ptr<ui::DialogModel> model_;
 };
 
-IN_PROC_BROWSER_TEST_F(SessionCrashedBubbleViewTest,
-                       InvokeUi_SessionCrashedBubble) {
-  ShowAndVerifyUi();
-}
+}  // namespace
 
-IN_PROC_BROWSER_TEST_F(SessionCrashedBubbleViewTest,
-                       InvokeUi_SessionCrashedBubbleOfferUma) {
-  ShowAndVerifyUi();
-}
+class SessionCrashedBubbleViewRestructureTest : public DialogBrowserTest {
+ public:
+  SessionCrashedBubbleViewRestructureTest() = default;
 
-// Regression test for https://crbug.com/1042010, it should be possible to focus
-// the bubble with the "focus dialog" hotkey combination (Alt+Shift+A).
-IN_PROC_BROWSER_TEST_F(SessionCrashedBubbleViewTest,
-                       CanFocusBubbleWithFocusDialogHotkey) {
-  ShowUi("SessionCrashedBubble");
+  // DialogBrowserTest:
+  void ShowUi(const std::string& name) override {
+    SessionCrashedBubbleView::ShowBubble(
+        browser(), /*uma_opted_in_already=*/false, /*offer_uma_optin=*/true);
+  }
+};
 
-  views::FocusManager* focus_manager = crash_bubble_->GetFocusManager();
-  BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser());
-  views::View* bubble_focused_view = crash_bubble_->GetInitiallyFocusedView();
+IN_PROC_BROWSER_TEST_F(SessionCrashedBubbleViewRestructureTest,
+                       AcceptSetsBasicLevel) {
+  ShowUi("AcceptSetsBasicLevel");
+  views::BubbleDialogModelHost* model_host =
+      SessionCrashedBubbleView::GetModelHostForTesting();
+  ASSERT_NE(model_host, nullptr);
+  views::Widget* dialog_widget = model_host->GetWidget();
+  ASSERT_NE(dialog_widget, nullptr);
 
-  focus_manager->ClearFocus();
-  EXPECT_FALSE(bubble_focused_view->HasFocus());
+  base::test::TestFuture<metrics::MetricsReportingLevel> future;
+  {
+    TestApi test_api(model_host->GetModelForTesting());
+    test_api.SetUmaConsentCheckboxChecked(true);
+    test_api.SetChangeMetricsReportingStateCallbackForTesting(
+        future.GetRepeatingCallback());
+  }
 
-  browser_view->FocusInactivePopupForAccessibility();
-  EXPECT_TRUE(bubble_focused_view->HasFocus());
-}
-
-// Regression test for https://crbug.com/1042010, it should be possible to focus
-// the bubble with the "rotate pane focus" (F6) hotkey.
-IN_PROC_BROWSER_TEST_F(SessionCrashedBubbleViewTest,
-                       CanFocusBubbleWithRotatePaneFocusHotkey) {
-  ShowUi("SessionCrashedBubble");
-  views::FocusManager* focus_manager = crash_bubble_->GetFocusManager();
-  BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser());
-  views::View* bubble_focused_view = crash_bubble_->GetInitiallyFocusedView();
-
-  focus_manager->ClearFocus();
-  EXPECT_FALSE(bubble_focused_view->HasFocus());
-
-  browser_view->RotatePaneFocus(true);
-  // Rotate pane focus is expected to keep the bubble focused until the user
-  // deals with it, so a second call should have no effect.
-  browser_view->RotatePaneFocus(true);
-  EXPECT_TRUE(bubble_focused_view->HasFocus());
-}
-
-IN_PROC_BROWSER_TEST_F(SessionCrashedBubbleViewTest, AlertAccessibleEvent) {
-  views::test::AXEventCounter counter(views::AXEventManager::Get());
-  EXPECT_EQ(0, counter.GetCount(ax::mojom::Event::kAlert));
-  ShowUi("SessionCrashedBubble");
-  // TODO(crbug.com/1082217): This should only produce one event
-  EXPECT_LT(0, counter.GetCount(ax::mojom::Event::kAlert));
-}
-
-// Regression test for https://crbug.com/1081393.
-IN_PROC_BROWSER_TEST_F(SessionCrashedBubbleViewTest, HasCloseButton) {
-  ShowUi("SessionCrashedBubble");
-  EXPECT_TRUE(crash_bubble_->ShouldShowCloseButton());
+  views::test::AcceptDialog(dialog_widget);
+  EXPECT_EQ(metrics::MetricsReportingLevel::kBasic, future.Get<0>());
 }

@@ -1,12 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 
 #include "base/android/jni_android.h"
-#include "base/bind.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
@@ -81,12 +80,12 @@ class MojoAndroidOverlayTest : public ::testing::Test {
   void SetUp() override {
     // Set up default config.
     config_.rect = gfx::Rect(100, 200, 300, 400);
-    config_.ready_cb = base::Bind(&MockClientCallbacks::OnReady,
-                                  base::Unretained(&callbacks_));
-    config_.failed_cb = base::Bind(&MockClientCallbacks::OnFailed,
-                                   base::Unretained(&callbacks_));
-    config_.power_cb = base::Bind(&MockClientCallbacks::OnPowerEfficient,
-                                  base::Unretained(&callbacks_));
+    config_.ready_cb = base::BindOnce(&MockClientCallbacks::OnReady,
+                                      base::Unretained(&callbacks_));
+    config_.failed_cb = base::BindOnce(&MockClientCallbacks::OnFailed,
+                                       base::Unretained(&callbacks_));
+    config_.power_cb = base::BindRepeating(
+        &MockClientCallbacks::OnPowerEfficient, base::Unretained(&callbacks_));
 
     // Make sure that we have an implementation of GpuSurfaceLookup.
     gpu::GpuSurfaceTracker::Get();
@@ -112,9 +111,9 @@ class MojoAndroidOverlayTest : public ::testing::Test {
 
     base::UnguessableToken routing_token = base::UnguessableToken::Create();
 
-    overlay_client_.reset(
-        new MojoAndroidOverlay(provider_receiver_.BindNewPipeAndPassRemote(),
-                               std::move(config_), routing_token));
+    overlay_client_ = std::make_unique<MojoAndroidOverlay>(
+        provider_receiver_.BindNewPipeAndPassRemote(), std::move(config_),
+        routing_token);
     overlay_client_->AddSurfaceDestroyedCallback(base::BindOnce(
         &MockClientCallbacks::OnDestroyed, base::Unretained(&callbacks_)));
     base::RunLoop().RunUntilIdle();
@@ -138,9 +137,8 @@ class MojoAndroidOverlayTest : public ::testing::Test {
     surface_texture_ = gl::SurfaceTexture::Create(0);
     surface_ = gl::ScopedJavaSurface(surface_texture_.get());
     surface_key_ = gpu::GpuSurfaceTracker::Get()->AddSurfaceForNativeWidget(
-        gpu::GpuSurfaceTracker::SurfaceRecord(
-            gfx::kNullAcceleratedWidget, surface_.j_surface().obj(),
-            false /* can_be_used_with_surface_control */));
+        gpu::SurfaceRecord(surface_.CopyRetainOwnership(),
+                           false /* can_be_used_with_surface_control */));
 
     mock_provider_.client_->OnSurfaceReady(surface_key_);
     base::RunLoop().RunUntilIdle();
@@ -182,7 +180,7 @@ class MojoAndroidOverlayTest : public ::testing::Test {
   gl::ScopedJavaSurface surface_;
   int surface_key_ = 0;
 
-  // Inital config for |CreateOverlay|.
+  // Initial config for |CreateOverlay|.
   // Set to sane values, but feel free to modify before CreateOverlay().
   AndroidOverlayConfig config_;
   MockClientCallbacks callbacks_;

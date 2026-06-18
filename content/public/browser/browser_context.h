@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,29 +8,31 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
-#include "base/callback_forward.h"
+#include "base/functional/function_ref.h"
+#include "base/memory/advanced_memory_safety_checks.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/supports_user_data.h"
+#include "base/unguessable_token.h"
 #include "content/common/content_export.h"
-#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "content/public/browser/k_anonymity_service_delegate.h"
+#include "content/public/browser/pre_prefetch_handle.h"
+#include "content/public/browser/prefetch_handle.h"
+#include "content/public/browser/prefetch_priority.h"
+#include "content/public/browser/prefetch_request_status_listener.h"
+#include "content/public/browser/preload_pipeline_info.h"
+#include "content/public/browser/zoom_level_delegate.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "services/content/public/mojom/navigable_contents_factory.mojom-forward.h"
-#include "services/network/public/mojom/cors_origin_pattern.mojom-forward.h"
-#include "services/network/public/mojom/network_context.mojom-forward.h"
+#include "net/http/http_request_headers.h"
 #include "third_party/blink/public/mojom/blob/blob.mojom-forward.h"
 #include "third_party/blink/public/mojom/push_messaging/push_messaging.mojom-forward.h"
 #include "third_party/blink/public/mojom/push_messaging/push_messaging_status.mojom-forward.h"
-
-#if !defined(OS_ANDROID)
-#include "content/public/browser/zoom_level_delegate.h"
-#endif
+#include "third_party/perfetto/include/perfetto/tracing/traced_value_forward.h"
 
 class GURL;
 
@@ -46,16 +48,22 @@ namespace storage {
 class ExternalMountPoints;
 }
 
-namespace url {
-class Origin;
+namespace leveldb_proto {
+class ProtoDatabaseProvider;
 }
 
 namespace media {
 class VideoDecodePerfHistory;
-namespace learning {
-class LearningSession;
-}
+class WebrtcVideoPerfHistory;
 }  // namespace media
+
+namespace net {
+class HttpNoVarySearchData;
+}  // namespace net
+
+namespace network {
+class SharedURLLoaderFactory;
+}  // namespace network
 
 namespace storage {
 class BlobStorageContext;
@@ -66,96 +74,189 @@ namespace variations {
 class VariationsClient;
 }  // namespace variations
 
+namespace perfetto {
+template <typename>
+class TracedProto;
+
+namespace protos::pbzero {
+class ChromeBrowserContext;
+}  // namespace protos::pbzero
+
+}  // namespace perfetto
+
 namespace content {
 
 class BackgroundFetchDelegate;
 class BackgroundSyncController;
 class BlobHandle;
+class BrowserContextImpl;
 class BrowserPluginGuestManager;
 class BrowsingDataRemover;
 class BrowsingDataRemoverDelegate;
-class DownloadManager;
 class ClientHintsControllerDelegate;
 class ContentIndexProvider;
+class DownloadManager;
 class DownloadManagerDelegate;
-class NativeFileSystemPermissionContext;
+class FederatedIdentityPermissionContextDelegate;
+class FederatedIdentityApiPermissionContextDelegate;
+class FederatedIdentityAutoReauthnPermissionContextDelegate;
+class FileSystemAccessPermissionContext;
+class OriginTrialsControllerDelegate;
 class PermissionController;
 class PermissionControllerDelegate;
+class PlatformNotificationService;
 class PushMessagingService;
+class ReduceAcceptLanguageControllerDelegate;
 class ResourceContext;
+class SSLHostStateDelegate;
 class SharedCorsOriginAccessList;
 class SiteInstance;
 class StorageNotificationService;
 class StoragePartition;
 class StoragePartitionConfig;
-class SSLHostStateDelegate;
 
 // This class holds the context needed for a browsing session.
 // It lives on the UI thread. All these methods must only be called on the UI
 // thread.
 class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
+  // Do not remove this macro!
+  // The macro is maintained by the memory safety team.
+  ADVANCED_MEMORY_SAFETY_CHECKS();
+
  public:
-  static DownloadManager* GetDownloadManager(BrowserContext* browser_context);
+  //////////////////////////////////////////////////////////////////////////////
+  // The BrowserContext methods below are provided/implemented by the //content
+  // layer (e.g. there is no need to override these methods in layers above
+  // //content).
+  //
+  // The currently recommended practice is to make the methods in this section
+  // non-virtual instance methods.
+  //
+  // TODO(crbug.com/40169693): Consider moving these methods to
+  // BrowserContextImpl.
+
+  BrowserContext();
+  ~BrowserContext() override;
+
+  DownloadManager* GetDownloadManager();
 
   // Returns BrowserContext specific external mount points. It may return
   // nullptr if the context doesn't have any BrowserContext specific external
-  // mount points. Currenty, non-nullptr value is returned only on ChromeOS.
-  static storage::ExternalMountPoints* GetMountPoints(BrowserContext* context);
+  // mount points. Currently, non-nullptr value is returned only on ChromeOS.
+  storage::ExternalMountPoints* GetMountPoints();
 
   // Returns a BrowsingDataRemover that can schedule data deletion tasks
   // for this |context|.
-  static BrowsingDataRemover* GetBrowsingDataRemover(BrowserContext* context);
+  BrowsingDataRemover* GetBrowsingDataRemover();
 
   // Returns the PermissionController associated with this context. There's
   // always a PermissionController instance for each BrowserContext.
-  static PermissionController* GetPermissionController(BrowserContext* context);
+  PermissionController* GetPermissionController();
 
   // Returns a StoragePartition for the given SiteInstance. By default this will
   // create a new StoragePartition if it doesn't exist, unless |can_create| is
   // false.
-  static StoragePartition* GetStoragePartition(BrowserContext* browser_context,
-                                               SiteInstance* site_instance,
-                                               bool can_create = true);
+  StoragePartition* GetStoragePartition(SiteInstance* site_instance,
+                                        bool can_create = true);
 
   // Returns a StoragePartition for the given StoragePartitionConfig. By
   // default this will create a new StoragePartition if it doesn't exist,
   // unless |can_create| is false.
-  static StoragePartition* GetStoragePartition(
-      BrowserContext* browser_context,
+  StoragePartition* GetStoragePartition(
       const StoragePartitionConfig& storage_partition_config,
       bool can_create = true);
 
   // Deprecated. Do not add new callers. Use the SiteInstance or
   // StoragePartitionConfig methods above instead.
-  // Returns a StoragePartition for the given site URL. By default this will
+  // Returns a StoragePartition for the given URL. By default this will
   // create a new StoragePartition if it doesn't exist, unless |can_create| is
   // false.
-  static StoragePartition* GetStoragePartitionForSite(
-      BrowserContext* browser_context,
-      const GURL& site,
-      bool can_create = true);
+  StoragePartition* GetStoragePartitionForUrl(const GURL& url,
+                                              bool can_create = true);
 
-  using StoragePartitionCallback =
-      base::RepeatingCallback<void(StoragePartition*)>;
-  static void ForEachStoragePartition(BrowserContext* browser_context,
-                                      StoragePartitionCallback callback);
-  // Returns the number of StoragePartitions that exist for the given
-  // |browser_context|.
-  static size_t GetStoragePartitionCount(BrowserContext* browser_context);
-  static void AsyncObliterateStoragePartition(
-      BrowserContext* browser_context,
-      const std::string& partition_domain,
-      base::OnceClosure on_gc_required);
+  // Synchronously invokes `fn` for each loaded StoragePartition.
+  // Persisted StoragePartitions (not in-memory) are loaded lazily on first
+  // use, at which point a StoragePartition object will be created that's
+  // backed by the on-disk storage. StoragePartitions will not be unloaded for
+  // the remainder of the BrowserContext's lifetime.
+  void ForEachLoadedStoragePartition(
+      base::FunctionRef<void(StoragePartition*)> fn);
 
-  // This function clears the contents of |active_paths| but does not take
-  // ownership of the pointer.
-  static void GarbageCollectStoragePartitions(
-      BrowserContext* browser_context,
-      std::unique_ptr<std::unordered_set<base::FilePath>> active_paths,
+  // Returns the number of loaded StoragePartitions that exist for `this`
+  // BrowserContext.
+  // See |ForEachLoadedStoragePartition| for details about loaded
+  // StoragePartitions.
+  size_t GetLoadedStoragePartitionCount();
+
+  // Starts an asynchronous best-effort attempt to delete all on-disk storage
+  // related to |partition_domain| and synchronously invokes |done_callback|
+  // once all deletable on-disk storage is deleted. |on_gc_required| will be
+  // invoked if |partition_domain| corresponds to any StoragePartitions that
+  // are loaded and can't safely be deleted. In this case the caller should
+  // attempt to delete the StoragePartition again at next browser launch.
+  void AsyncObliterateStoragePartition(const std::string& partition_domain,
+                                       base::OnceClosure on_gc_required,
+                                       base::OnceClosure done_callback);
+
+  // Examines all on-disk StoragePartitions and removes any entries that are
+  // not loaded or listed in `active_paths`.
+  //
+  // The `done` closure is executed on the calling thread when garbage
+  // collection is complete.
+  void GarbageCollectStoragePartitions(
+      std::unordered_set<base::FilePath> active_paths,
       base::OnceClosure done);
 
-  static StoragePartition* GetDefaultStoragePartition(
-      BrowserContext* browser_context);
+  StoragePartition* GetDefaultStoragePartition();
+
+  // Returns the main URLLoaderFactory.
+  virtual scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory();
+
+  // Starts a prefetch network request for the given `url`.
+  // `embedder_histogram_suffix` is used for generating internal histogram names
+  // recorded per trigger. `priority` is an optimization hint of how quickly
+  // this prefetch should be available. `ttl` (Time-To-Live) specifies how long
+  // prefetched data remains valid in the cache. After this period, the data is
+  // reset. `should_disable_block_until_head_timeout` specifies whether we
+  // should have a timeout when this prefetch blocks the navigation until its
+  // head is determined. Returns `PrefetchHandle` to control prefetch resources.
+  // This can be null when it can't add `PrefetchContainer` to
+  // `PrefetchService`.
+  [[nodiscard]] std::unique_ptr<content::PrefetchHandle>
+  StartBrowserPrefetchRequest(
+      const GURL& url,
+      const std::string& embedder_histogram_suffix,
+      bool javascript_enabled,
+      std::optional<net::HttpNoVarySearchData> no_vary_search_hint,
+      std::optional<PrefetchPriority> priority,
+      scoped_refptr<PreloadPipelineInfo> preload_pipeline_info,
+      const net::HttpRequestHeaders& additional_headers,
+      std::unique_ptr<PrefetchRequestStatusListener> request_status_listener,
+      base::TimeDelta ttl,
+      bool should_append_variations_header,
+      bool should_disable_block_until_head_timeout,
+      bool should_bypass_http_cache);
+
+  // Adds a `PrefetchContainer` from a `PrePrefetchHandle` and starts prefetch.
+  [[nodiscard]] std::unique_ptr<content::PrefetchHandle>
+  StartPrefetchFromPrePrefetch(
+      std::unique_ptr<content::PrePrefetchHandle> pre_prefetch_handle);
+
+  // Updates the "Accept Language" header that the prefetch service delegate
+  // will use.
+  void UpdatePrefetchServiceDelegateAcceptLanguageHeader(
+      std::string accept_language_header);
+
+  // Returns `true` if a new prefetch request with `url` and
+  // `no_vary_search_hint` has a duplicate in the prefetch cache and thus the
+  // caller can choose not to start the prefetch request.
+  //
+  // Note: This is currently used for WebView initiated prefetches
+  // so consideration should be taken if updating the
+  // underlying implementation (or its dependencies).
+  bool IsPrefetchDuplicate(
+      const GURL& url,
+      const std::optional<net::HttpNoVarySearchData>& no_vary_search_hint);
 
   using BlobCallback = base::OnceCallback<void(std::unique_ptr<BlobHandle>)>;
   using BlobContextGetter =
@@ -164,14 +265,12 @@ class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
   // This method should be called on UI thread and calls back on UI thread
   // as well. Note that retrieving a blob ptr out of BlobHandle can only be
   // done on IO. |callback| returns a nullptr on failure.
-  static void CreateMemoryBackedBlob(BrowserContext* browser_context,
-                                     base::span<const uint8_t> data,
-                                     const std::string& content_type,
-                                     BlobCallback callback);
+  void CreateMemoryBackedBlob(base::span<const uint8_t> data,
+                              const std::string& content_type,
+                              BlobCallback callback);
 
   // Get a BlobStorageContext getter that needs to run on IO thread.
-  static BlobContextGetter GetBlobStorageContext(
-      BrowserContext* browser_context);
+  BlobContextGetter GetBlobStorageContext();
 
   // Returns a mojom::mojo::PendingRemote<blink::mojom::Blob> for a specific
   // blob. If no blob exists with the given UUID, the
@@ -180,55 +279,56 @@ class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
   // TODO(mek): Blob UUIDs should be entirely internal to the blob system, so
   // eliminate this method in favor of just passing around the
   // mojo::PendingRemote<blink::mojom::Blob> directly.
-  static mojo::PendingRemote<blink::mojom::Blob> GetBlobRemote(
-      BrowserContext* browser_context,
+  mojo::PendingRemote<blink::mojom::Blob> GetBlobRemote(
       const std::string& uuid);
 
   // Delivers a push message with |data| to the Service Worker identified by
-  // |origin| and |service_worker_registration_id|.
-  static void DeliverPushMessage(
-      BrowserContext* browser_context,
+  // |origin| and |service_worker_registration_id|. |record_network_requests|
+  // indicates whether network request urls should be recorded during the push
+  // event.
+  void DeliverPushMessage(
       const GURL& origin,
       int64_t service_worker_registration_id,
       const std::string& message_id,
-      base::Optional<std::string> payload,
+      std::optional<std::string> payload,
+      bool record_network_requests,
       base::OnceCallback<void(blink::mojom::PushEventStatus)> callback);
 
   // Fires a push subscription change event to the Service Worker identified by
   // |origin| and |service_worker_registration_id| with |new_subscription| and
   // |old_subscription| as event information.
-  static void FirePushSubscriptionChangeEvent(
-      BrowserContext* browser_context,
+  void FirePushSubscriptionChangeEvent(
       const GURL& origin,
       int64_t service_worker_registration_id,
       blink::mojom::PushSubscriptionPtr new_subscription,
       blink::mojom::PushSubscriptionPtr old_subscription,
       base::OnceCallback<void(blink::mojom::PushEventStatus)> callback);
 
-  static void NotifyWillBeDestroyed(BrowserContext* browser_context);
+  void NotifyWillBeDestroyed();
 
   // Ensures that the corresponding ResourceContext is initialized. Normally the
   // BrowserContext initializs the corresponding getters when its objects are
   // created, but if the embedder wants to pass the ResourceContext to another
   // thread before they use BrowserContext, they should call this to make sure
   // that the ResourceContext is ready.
-  static void EnsureResourceContextInitialized(BrowserContext* browser_context);
+  void EnsureResourceContextInitialized();
 
   // Tells the HTML5 objects on this context to persist their session state
   // across the next restart.
-  static void SaveSessionState(BrowserContext* browser_context);
+  void SaveSessionState();
 
-  static void SetDownloadManagerForTesting(
-      BrowserContext* browser_context,
-      std::unique_ptr<content::DownloadManager> download_manager);
+  void SetDownloadManagerForTesting(
+      std::unique_ptr<DownloadManager> download_manager);
 
-  static void SetPermissionControllerForTesting(
-      BrowserContext* browser_context,
+  void SetPermissionControllerForTesting(
       std::unique_ptr<PermissionController> permission_controller);
 
-  BrowserContext();
-
-  ~BrowserContext() override;
+  // The list of CORS exemptions.  This list needs to be 1) replicated when
+  // creating or re-creating new network::mojom::NetworkContexts (see
+  // network::mojom::NetworkContextParams::cors_origin_access_list) and 2)
+  // consulted by CORS-aware factories (e.g. passed when constructing
+  // FileURLLoaderFactory).
+  SharedCorsOriginAccessList* GetSharedCorsOriginAccessList();
 
   // Shuts down the storage partitions associated to this browser context.
   // This must be called before the browser context is actually destroyed
@@ -240,25 +340,63 @@ class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
   // Returns true if shutdown has been initiated via a
   // NotifyWillBeDestroyed() call. This is a signal that the object will be
   // destroyed soon and no new references to this object should be created.
-  bool ShutdownStarted() { return was_notify_will_be_destroyed_called_; }
+  bool ShutdownStarted();
 
-#if !defined(OS_ANDROID)
+  // Returns a unique string associated with this browser context.
+  // DEPRECATED: Use UniqueToken() instead. See crbug.com/466132514.
+  virtual const std::string& UniqueId() const;
+
+  // Returns a unique unguessable token associated with this browser context.
+  const base::UnguessableToken& UniqueToken() const;
+
+  // Gets media service for storing/retrieving video decoding performance stats.
+  // Exposed here rather than StoragePartition because all SiteInstances should
+  // have similar decode performance and stats are not exposed to the web
+  // directly, so privacy is not compromised.
+  media::VideoDecodePerfHistory* GetVideoDecodePerfHistory();
+
+  // Gets media service for storing/retrieving WebRTC video performance stats.
+  // Exposed here rather than StoragePartition because all SiteInstances should
+  // have similar encode/decode performance and stats are not exposed to the web
+  // directly, so privacy is not compromised.
+  media::WebrtcVideoPerfHistory* GetWebrtcVideoPerfHistory();
+
+  // Retrieves the InProgressDownloadManager associated with this object if
+  // available
+  virtual std::unique_ptr<download::InProgressDownloadManager>
+  RetrieveInProgressDownloadManager();
+
+  using TraceProto = perfetto::protos::pbzero::ChromeBrowserContext;
+  // Write a representation of this object into tracing proto.
+  // rvalue ensure that the this method can be called without having access
+  // to the declaration of ChromeBrowserContext proto.
+  void WriteIntoTrace(perfetto::TracedProto<TraceProto> context) const;
+
+  base::WeakPtr<BrowserContext> GetWeakPtr();
+
+  //////////////////////////////////////////////////////////////////////////////
+  // The //content embedder can override the methods below to change or extend
+  // how the //content layer interacts with a BrowserContext.
+  //
+  // All the methods below should be virtual.  Most of the methods should be
+  // pure (i.e. `= 0`) although it may make sense to provide a default
+  // implementation for some of the methods.
+  //
+  // TODO(crbug.com/40169693): Migrate method declarations from this
+  // section into a separate BrowserContextDelegate class.
+
   // Creates a delegate to initialize a HostZoomMap and persist its information.
   // This is called during creation of each StoragePartition.
   virtual std::unique_ptr<ZoomLevelDelegate> CreateZoomLevelDelegate(
       const base::FilePath& partition_path) = 0;
-#endif
 
   // Returns the path of the directory where this context's data is stored.
-  virtual base::FilePath GetPath() = 0;
+  virtual base::FilePath GetPath() const = 0;
 
   // Return whether this context is off the record. Default is false.
   // Note that for Chrome this does not imply Incognito as Guest sessions are
   // also off the record.
   virtual bool IsOffTheRecord() = 0;
-
-  // Returns the resource context.
-  virtual ResourceContext* GetResourceContext() = 0;
 
   // Returns the DownloadManagerDelegate for this context. This will be called
   // once per context. The embedder owns the delegate and is responsible for
@@ -273,6 +411,11 @@ class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
 
   // Returns a special storage policy implementation, or nullptr.
   virtual storage::SpecialStoragePolicy* GetSpecialStoragePolicy() = 0;
+
+  // Returns the platform notification service, capable of displaying Web
+  // Notifications to the user. The embedder can return a nullptr if they don't
+  // support this functionality. Must be called on the UI thread.
+  virtual PlatformNotificationService* GetPlatformNotificationService() = 0;
 
   // Returns a push messaging service. The embedder owns the service, and is
   // responsible for ensuring that it outlives RenderProcessHost. It's valid to
@@ -296,6 +439,11 @@ class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
   // BrowserContext::GetPermissionController() instead.
   virtual PermissionControllerDelegate* GetPermissionControllerDelegate() = 0;
 
+  // Returns the ReduceAcceptLanguageControllerDelegate associated with that
+  // context if any, nullptr otherwise.
+  virtual ReduceAcceptLanguageControllerDelegate*
+  GetReduceAcceptLanguageControllerDelegate() = 0;
+
   // Returns the ClientHintsControllerDelegate associated with that context if
   // any, nullptr otherwise.
   virtual ClientHintsControllerDelegate* GetClientHintsControllerDelegate() = 0;
@@ -312,56 +460,10 @@ class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
   // called once per context. It's valid to return nullptr.
   virtual BrowsingDataRemoverDelegate* GetBrowsingDataRemoverDelegate() = 0;
 
-  // Sets CORS origin access lists.
-  virtual void SetCorsOriginAccessListForOrigin(
-      const url::Origin& source_origin,
-      std::vector<network::mojom::CorsOriginPatternPtr> allow_patterns,
-      std::vector<network::mojom::CorsOriginPatternPtr> block_patterns,
-      base::OnceClosure closure);
-
-  // Returns a SharedCorsOriginAccessList instance.
-  virtual SharedCorsOriginAccessList* GetSharedCorsOriginAccessList();
-
-  // Binds a NavigableContentsFactory interface receiver to this browser
-  // context.
-  virtual void BindNavigableContentsFactory(
-      mojo::PendingReceiver<content::mojom::NavigableContentsFactory> receiver);
-
-  // Returns a unique string associated with this browser context.
-  virtual const std::string& UniqueId();
-
-  // Returns a random salt string that is used for creating media device IDs.
-  // Returns a random string by default.
-  virtual std::string GetMediaDeviceIDSalt();
-
-  // Utility function useful for embedders. Only needs to be called if
-  // 1) The embedder needs to use a new salt, and
-  // 2) The embedder saves its salt across restarts.
-  static std::string CreateRandomMediaDeviceIDSalt();
-
-  // Media service for storing/retrieving video decoding performance stats.
-  // Exposed here rather than StoragePartition because all SiteInstances should
-  // have similar decode performance and stats are not exposed to the web
-  // directly, so privacy is not compromised.
-  virtual media::VideoDecodePerfHistory* GetVideoDecodePerfHistory();
-
-  // Returns a LearningSession associated with |this|. Used as the central
-  // source from which to retrieve LearningTaskControllers for media machine
-  // learning.
-  // Exposed here rather than StoragePartition because learnings will cover
-  // general media trends rather than SiteInstance specific behavior. The
-  // learnings are not exposed to the web.
-  virtual media::learning::LearningSession* GetLearningSession();
-
-  // Retrieves the InProgressDownloadManager associated with this object if
-  // available
-  virtual download::InProgressDownloadManager*
-  RetriveInProgressDownloadManager();
-
-  // Returns the NativeFileSystemPermissionContext associated with this context
+  // Returns the FileSystemAccessPermissionContext associated with this context
   // if any, nullptr otherwise.
-  virtual NativeFileSystemPermissionContext*
-  GetNativeFileSystemPermissionContext();
+  virtual FileSystemAccessPermissionContext*
+  GetFileSystemAccessPermissionContext();
 
   // Returns the ContentIndexProvider associated with that context if any,
   // nullptr otherwise.
@@ -376,13 +478,72 @@ class CONTENT_EXPORT BrowserContext : public base::SupportsUserData {
   // implementation.
   virtual bool CanUseDiskWhenOffTheRecord();
 
+  // Returns true if the session storage database should be cleared on startup
+  // instead of preserving data from the previous session.
+  // The default implementation returns false.
+  virtual bool ShouldClearSessionStorageOnStartup();
+
   // Returns the VariationsClient associated with the context if any, or
   // nullptr if there isn't one.
   virtual variations::VariationsClient* GetVariationsClient();
 
+  // Creates the media service for storing/retrieving video decoding performance
+  // stats.  Exposed here rather than StoragePartition because all SiteInstances
+  // should have similar decode performance and stats are not exposed to the web
+  // directly, so privacy is not compromised.
+  virtual std::unique_ptr<media::VideoDecodePerfHistory>
+  CreateVideoDecodePerfHistory();
+
+  // Gets the permission context for determining whether the FedCM API is
+  // enabled in site settings.
+  virtual FederatedIdentityApiPermissionContextDelegate*
+  GetFederatedIdentityApiPermissionContext();
+  // Gets the permission context for determining whether the FedCM API's auto
+  // re-authentication feature is enabled in site settings.
+  virtual FederatedIdentityAutoReauthnPermissionContextDelegate*
+  GetFederatedIdentityAutoReauthnPermissionContext();
+  // Gets the permission context for allowing session management capabilities
+  // between an identity provider and a relying party if one exists, or
+  // nullptr otherwise.
+  virtual FederatedIdentityPermissionContextDelegate*
+  GetFederatedIdentityPermissionContext();
+
+  // Gets the KAnonymityServiceDelegate if supported. Returns nullptr if
+  // unavailable.
+  virtual KAnonymityServiceDelegate* GetKAnonymityServiceDelegate();
+
+  // Returns the OriginTrialsControllerDelegate associated with the context if
+  // any, nullptr otherwise.
+  virtual OriginTrialsControllerDelegate* GetOriginTrialsControllerDelegate();
+
+  // Takes the ProtoDatabaseProvider, if any, for the default storage partition.
+  // Embedders may choose to create a ProtoDatabaseProvider early, so this
+  // provides a way to reuse it.
+  virtual std::unique_ptr<leveldb_proto::ProtoDatabaseProvider>
+  TakeDefaultProtoDatabaseProvider();
+
+#if BUILDFLAG(IS_ANDROID)
+  // Returns extra request headers to be set when navigation happens for `url`.
+  // This function is designed for the headers provided by WebView.loadUrl().
+  virtual std::string GetExtraHeadersForUrl(const GURL& url);
+#endif  // BUILDFLAG(IS_ANDROID)
+
  private:
-  const std::string unique_id_;
-  bool was_notify_will_be_destroyed_called_ = false;
+  // Please don't add more fields to BrowserContext.
+  //
+  // Ideally, BrowserContext would be a pure interface (only pure-virtual
+  // methods and no fields), but currently BrowserContext and BrowserContextImpl
+  // and BrowserContextDelegate are kind of mixed together in a single class.
+  //
+  // TODO(crbug.com/40169693): Make BrowserContextImpl to implement
+  // BrowserContext instead (Removing afterwards the BrowserContextImpl,
+  // fwd-declaration, `impl_` field, `friend` declaration and `impl` accessor
+  // below).
+  friend class BrowserContextImpl;
+  std::unique_ptr<BrowserContextImpl> impl_;
+  BrowserContextImpl* impl() { return impl_.get(); }
+  const BrowserContextImpl* impl() const { return impl_.get(); }
+  base::WeakPtrFactory<BrowserContext> weak_factory_{this};
 };
 
 }  // namespace content

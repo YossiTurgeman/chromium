@@ -1,13 +1,13 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/shelf/home_to_overview_nudge_controller.h"
 
+#include "ash/controls/contextual_nudge.h"
+#include "ash/controls/contextual_tooltip.h"
 #include "ash/public/cpp/shell_window_ids.h"
 #include "ash/session/session_controller_impl.h"
-#include "ash/shelf/contextual_nudge.h"
-#include "ash/shelf/contextual_tooltip.h"
 #include "ash/shelf/hotseat_widget.h"
 #include "ash/shelf/scrollable_shelf_view.h"
 #include "ash/shelf/shelf.h"
@@ -15,8 +15,9 @@
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/style/ash_color_provider.h"
 #include "ash/wm/mru_window_tracker.h"
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/aura/window.h"
@@ -26,29 +27,27 @@
 #include "ui/compositor/layer_animator.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
 #include "ui/gfx/animation/tween.h"
-#include "ui/gfx/transform.h"
+#include "ui/gfx/geometry/transform.h"
 
 namespace ash {
 
 namespace {
 
 // The amount of time after home shelf is shown before showing the nudge.
-constexpr base::TimeDelta kShowDelay = base::TimeDelta::FromSeconds(2);
+constexpr base::TimeDelta kShowDelay = base::Seconds(2);
 
 // The duration of nudge opacity animations.
-constexpr base::TimeDelta kNudgeFadeDuration =
-    base::TimeDelta::FromMilliseconds(300);
+constexpr base::TimeDelta kNudgeFadeDuration = base::Milliseconds(300);
 
 // The duration of the nudge opacity and transform animations when the nudge
 // gets hidden on user tap.
-constexpr base::TimeDelta kNudgeHideOnTapDuration =
-    base::TimeDelta::FromMilliseconds(150);
+constexpr base::TimeDelta kNudgeHideOnTapDuration = base::Milliseconds(150);
 
 // The duration of a single component of the nudge position animation - the
 // nudge is transformed vertically up and down for a preset number of
 // iterations.
 constexpr base::TimeDelta kNudgeTransformComponentDuration =
-    base::TimeDelta::FromMilliseconds(600);
+    base::Milliseconds(600);
 
 // The baseline vertical offset from default kShown state bounds added to
 // hotseat position when the nudge is shown - this is the offset that the
@@ -116,29 +115,8 @@ class ObserverToCloseWidget : public ui::ImplicitAnimationObserver {
   }
 
  private:
-  views::Widget* const widget_;
+  const raw_ptr<views::Widget> widget_;
 };
-
-void RecordNudgeMetrics(
-    HomeToOverviewNudgeController::HideTransition transition) {
-  switch (transition) {
-    case (HomeToOverviewNudgeController::HideTransition::kUserTap):
-      MaybeLogNudgeDismissedMetrics(
-          contextual_tooltip::TooltipType::kHomeToOverview,
-          contextual_tooltip::DismissNudgeReason::kTap);
-      break;
-    case (HomeToOverviewNudgeController::HideTransition::kNudgeTimeout):
-      MaybeLogNudgeDismissedMetrics(
-          contextual_tooltip::TooltipType::kHomeToOverview,
-          contextual_tooltip::DismissNudgeReason::kTimeout);
-      break;
-    case (HomeToOverviewNudgeController::HideTransition::kShelfStateChange):
-      MaybeLogNudgeDismissedMetrics(
-          contextual_tooltip::TooltipType::kHomeToOverview,
-          contextual_tooltip::DismissNudgeReason::kOther);
-      break;
-  }
-}
 
 }  // namespace
 
@@ -187,7 +165,7 @@ void HomeToOverviewNudgeController::SetNudgeAllowedForCurrentShelf(
 
 void HomeToOverviewNudgeController::OnWidgetDestroying(views::Widget* widget) {
   nudge_ = nullptr;
-  widget_observer_.RemoveAll();
+  widget_observations_.RemoveAllObservations();
 }
 
 void HomeToOverviewNudgeController::OnWidgetBoundsChanged(
@@ -226,21 +204,19 @@ void HomeToOverviewNudgeController::ShowNudge() {
       nullptr, hotseat_widget_->GetNativeWindow()->parent(),
       ContextualNudge::Position::kBottom, gfx::Insets(kNudgeMargins),
       l10n_util::GetStringUTF16(IDS_ASH_HOME_TO_OVERVIEW_CONTEXTUAL_NUDGE),
-      AshColorProvider::Get()->GetContentLayerColor(
-          AshColorProvider::ContentLayerType::kTextColorPrimary),
       base::BindRepeating(&HomeToOverviewNudgeController::HandleNudgeTap,
                           weak_factory_.GetWeakPtr()));
 
   UpdateNudgeAnchorBounds();
 
-  widget_observer_.Add(nudge_->GetWidget());
-  widget_observer_.Add(hotseat_widget_);
+  widget_observations_.AddObservation(nudge_->GetWidget());
+  widget_observations_.AddObservation(hotseat_widget_.get());
 
   nudge_->GetWidget()->Show();
   nudge_->GetWidget()->GetLayer()->SetTransform(gfx::Transform());
   nudge_->label()->layer()->SetOpacity(0.0f);
 
-  hotseat_widget_->GetLayer()->SetTransform(gfx::Transform());
+  hotseat_widget_->GetLayerForNudgeAnimation()->SetTransform(gfx::Transform());
 
   base::TimeDelta total_animation_duration;
 
@@ -260,7 +236,7 @@ void HomeToOverviewNudgeController::ShowNudge() {
   };
 
   total_animation_duration +=
-      animate_initial_transform(hotseat_widget_->GetLayer());
+      animate_initial_transform(hotseat_widget_->GetLayerForNudgeAnimation());
   animate_initial_transform(nudge_->GetWidget()->GetLayer());
 
   // Additionally the nudge label should fade in.
@@ -296,12 +272,12 @@ void HomeToOverviewNudgeController::ShowNudge() {
   // The final position should match the position after the initial animated
   // transform.
   for (int i = 0; i < kNudgeShowThrobIterations; ++i) {
-    total_animation_duration +=
-        enqueue_loop_transform(hotseat_widget_->GetLayer(), false /*up*/);
+    total_animation_duration += enqueue_loop_transform(
+        hotseat_widget_->GetLayerForNudgeAnimation(), false /*up*/);
     enqueue_loop_transform(nudge_->GetWidget()->GetLayer(), false /*up*/);
 
-    total_animation_duration +=
-        enqueue_loop_transform(hotseat_widget_->GetLayer(), true /*up*/);
+    total_animation_duration += enqueue_loop_transform(
+        hotseat_widget_->GetLayerForNudgeAnimation(), true /*up*/);
     enqueue_loop_transform(nudge_->GetWidget()->GetLayer(), true /*up*/);
   }
 
@@ -326,8 +302,6 @@ void HomeToOverviewNudgeController::HideNudge(HideTransition transition) {
   if (!nudge_)
     return;
 
-  RecordNudgeMetrics(transition);
-
   auto animate_hide_transform = [](HideTransition transition,
                                    ui::Layer* layer) {
     ui::ScopedLayerAnimationSettings settings(layer->GetAnimator());
@@ -339,7 +313,8 @@ void HomeToOverviewNudgeController::HideNudge(HideTransition transition) {
     layer->SetTransform(gfx::Transform());
   };
 
-  animate_hide_transform(transition, hotseat_widget_->GetLayer());
+  animate_hide_transform(transition,
+                         hotseat_widget_->GetLayerForNudgeAnimation());
   animate_hide_transform(transition, nudge_->GetWidget()->GetLayer());
 
   {
@@ -354,7 +329,7 @@ void HomeToOverviewNudgeController::HideNudge(HideTransition transition) {
     nudge_->label()->layer()->SetOpacity(0.0f);
   }
 
-  widget_observer_.RemoveAll();
+  widget_observations_.RemoveAllObservations();
   nudge_ = nullptr;
 
   // Invalidated nudge tap handler callbacks.

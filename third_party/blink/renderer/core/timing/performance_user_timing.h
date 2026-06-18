@@ -26,18 +26,21 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_TIMING_PERFORMANCE_USER_TIMING_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_TIMING_PERFORMANCE_USER_TIMING_H_
 
+#include <optional>
+
 #include "third_party/blink/renderer/core/timing/performance.h"
 #include "third_party/blink/renderer/core/timing/performance_timing.h"
-#include "third_party/blink/renderer/platform/heap/heap_allocator.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string_hash.h"
 
 namespace blink {
 
 class ExceptionState;
 class Performance;
+class V8UnionDoubleOrString;
 
-using PerformanceEntryMap =
-    HeapHashMap<AtomicString, Member<PerformanceEntryVector>>;
+using PerformanceEntryMap = HeapHashMap<AtomicString, PerformanceEntryVector>;
 
 class UserTiming final : public GarbageCollected<UserTiming> {
  public:
@@ -47,16 +50,19 @@ class UserTiming final : public GarbageCollected<UserTiming> {
 
   PerformanceMeasure* Measure(ScriptState*,
                               const AtomicString& measure_name,
-                              const base::Optional<StringOrDouble>& start,
-                              const base::Optional<double>& duration,
-                              const base::Optional<StringOrDouble>& end,
+                              const V8UnionDoubleOrString* start,
+                              const std::optional<double>& duration,
+                              const V8UnionDoubleOrString* end,
                               const ScriptValue& detail,
-                              ExceptionState&);
+                              ExceptionState&,
+                              DOMWindow* source,
+                              uint32_t navigation_id);
   void ClearMeasures(const AtomicString& measure_name);
 
   PerformanceEntryVector GetMarks() const;
   PerformanceEntryVector GetMeasures() const;
-  void AddMarkToPerformanceTimeline(PerformanceMark&);
+  String GetSerializedDetail(const ScriptValue&);
+  void AddMarkToPerformanceTimeline(PerformanceMark&, PerformanceMarkOptions*);
 
   PerformanceEntryVector GetMarks(const AtomicString& name) const;
   PerformanceEntryVector GetMeasures(const AtomicString& name) const;
@@ -64,15 +70,32 @@ class UserTiming final : public GarbageCollected<UserTiming> {
   void Trace(Visitor*) const;
 
  private:
+  const PerformanceMark* FindExistingMark(const AtomicString& mark_name);
+  base::TimeTicks GetPerformanceMarkUnsafeTimeForTraces(
+      double start_time,
+      const V8UnionDoubleOrString* maybe_mark_name);
   double FindExistingMarkStartTime(const AtomicString& mark_name,
                                    ExceptionState&);
   double GetTimeOrFindMarkTime(const AtomicString& measure_name,
-                               const StringOrDouble& mark_or_time,
+                               const V8UnionDoubleOrString* mark_or_time,
                                ExceptionState&);
+
+  void InsertPerformanceEntry(PerformanceEntryMap& performance_entry_map,
+                              PerformanceEntryVector& performance_entry_buffer,
+                              PerformanceEntry& entry);
+
+  void ClearPerformanceEntries(PerformanceEntryMap& performance_entry_map,
+                               PerformanceEntryVector& performance_entry_buffer,
+                               const AtomicString& name);
 
   Member<Performance> performance_;
   PerformanceEntryMap marks_map_;
   PerformanceEntryMap measures_map_;
+
+  // Maintain vectors to improve fetch time for marks/measures in exchange for
+  // memory.
+  PerformanceEntryVector marks_buffer_;
+  PerformanceEntryVector measures_buffer_;
 };
 
 }  // namespace blink

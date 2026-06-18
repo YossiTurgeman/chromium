@@ -1,44 +1,47 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/history/core/browser/url_database.h"
 
-#include <limits>
 #include <string>
 #include <vector>
 
 #include "base/i18n/case_conversion.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
+#include "base/memory/ptr_util.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
+#include "components/crash/core/common/crash_key.h"
+#include "components/database_utils/upper_bound_string.h"
 #include "components/database_utils/url_converter.h"
 #include "components/history/core/browser/keyword_search_term.h"
+#include "components/history/core/browser/keyword_search_term_util.h"
 #include "components/url_formatter/url_formatter.h"
 #include "sql/statement.h"
 #include "url/gurl.h"
 
 namespace history {
 
-const char URLDatabase::kURLRowFields[] = HISTORY_URL_ROW_FIELDS;
 const int URLDatabase::kNumURLRowFields = 9;
 
 URLDatabase::URLEnumeratorBase::URLEnumeratorBase()
     : initialized_(false) {
 }
 
-URLDatabase::URLEnumeratorBase::~URLEnumeratorBase() {
-}
+URLDatabase::URLEnumeratorBase::~URLEnumeratorBase() = default;
 
-URLDatabase::URLEnumerator::URLEnumerator() {
-}
+URLDatabase::URLEnumerator::URLEnumerator() = default;
 
 bool URLDatabase::URLEnumerator::GetNextURL(URLRow* r) {
-  if (statement_.Step()) {
-    FillURLRow(statement_, r);
-    return true;
+  CHECK(r);
+  while (statement_.Step()) {
+    if (FillURLRow(statement_, r)) {
+      CHECK(r->url().is_valid());
+      return true;
+    }
   }
   return false;
 }
@@ -47,20 +50,24 @@ URLDatabase::URLDatabase()
     : has_keyword_search_terms_(false) {
 }
 
-URLDatabase::~URLDatabase() {
-}
+URLDatabase::~URLDatabase() = default;
 
-// Convenience to fill a URLRow. Must be in sync with the fields in
-// kURLRowFields.
-void URLDatabase::FillURLRow(const sql::Statement& s, URLRow* i) {
+bool URLDatabase::FillURLRow(sql::Statement& s, URLRow* i) {
   DCHECK(i);
+
+  GURL url(s.ColumnStringView(1));
+  if (!url.is_valid()) {
+    return false;
+  }
+
   i->set_id(s.ColumnInt64(0));
-  i->set_url(GURL(s.ColumnString(1)));
+  i->set_url(url);
   i->set_title(s.ColumnString16(2));
   i->set_visit_count(s.ColumnInt(3));
   i->set_typed_count(s.ColumnInt(4));
-  i->set_last_visit(base::Time::FromInternalValue(s.ColumnInt64(5)));
+  i->set_last_visit(s.ColumnTime(5));
   i->set_hidden(s.ColumnInt(6) != 0);
+  return true;
 }
 
 bool URLDatabase::MigrateKeywordsSearchTermsLowerTermColumn() {
@@ -122,8 +129,7 @@ bool URLDatabase::GetURLRow(URLID url_id, URLRow* info) {
   statement.BindInt64(0, url_id);
 
   if (statement.Step()) {
-    FillURLRow(statement, info);
-    return true;
+    return FillURLRow(statement, info);
   }
   return false;
 }
@@ -134,11 +140,14 @@ URLID URLDatabase::GetRowForURL(const GURL& url, URLRow* info) {
   std::string url_string = database_utils::GurlToDatabaseUrl(url);
   statement.BindString(0, url_string);
 
-  if (!statement.Step())
-    return 0;  // no data
+  if (!statement.Step()) {
+    return 0;  // No data.
+  }
 
-  if (info)
-    FillURLRow(statement, info);
+  if (info && !FillURLRow(statement, info)) {
+    return 0;  // Invalid URL row.
+  }
+
   return statement.ColumnInt64(0);
 }
 
@@ -150,7 +159,7 @@ bool URLDatabase::UpdateURLRow(URLID url_id, const URLRow& info) {
   statement.BindString16(0, info.title());
   statement.BindInt(1, info.visit_count());
   statement.BindInt(2, info.typed_count());
-  statement.BindInt64(3, info.last_visit().ToInternalValue());
+  statement.BindTime(3, info.last_visit());
   statement.BindInt(4, info.hidden() ? 1 : 0);
   statement.BindInt64(5, url_id);
 
@@ -159,31 +168,28 @@ bool URLDatabase::UpdateURLRow(URLID url_id, const URLRow& info) {
 
 URLID URLDatabase::AddURLInternal(const URLRow& info, bool is_temporary) {
   // This function is used to insert into two different tables, so we have to
-  // do some shuffling. Unfortinately, we can't use the macro
+  // do some shuffling. Unfortunately, we can't use the macro
   // HISTORY_URL_ROW_FIELDS because that specifies the table name which is
   // invalid in the insert syntax.
   #define ADDURL_COMMON_SUFFIX \
       " (url, title, visit_count, typed_count, "\
       "last_visit_time, hidden) "\
       "VALUES (?,?,?,?,?,?)"
-  size_t statement_line;
-  const char* statement_sql;
+  sql::Statement statement;
   if (is_temporary) {
-    statement_line = __LINE__;
-    statement_sql = "INSERT INTO temp_urls" ADDURL_COMMON_SUFFIX;
+    statement.Assign(GetDB().GetCachedStatement(
+        SQL_FROM_HERE, "INSERT INTO temp_urls" ADDURL_COMMON_SUFFIX));
   } else {
-    statement_line = __LINE__;
-    statement_sql = "INSERT INTO urls" ADDURL_COMMON_SUFFIX;
+    statement.Assign(GetDB().GetCachedStatement(
+        SQL_FROM_HERE, "INSERT INTO urls" ADDURL_COMMON_SUFFIX));
   }
   #undef ADDURL_COMMON_SUFFIX
 
-  sql::Statement statement(GetDB().GetCachedStatement(
-      sql::StatementID(__FILE__, statement_line), statement_sql));
   statement.BindString(0, database_utils::GurlToDatabaseUrl(info.url()));
   statement.BindString16(1, info.title());
   statement.BindInt(2, info.visit_count());
   statement.BindInt(3, info.typed_count());
-  statement.BindInt64(4, info.last_visit().ToInternalValue());
+  statement.BindTime(4, info.last_visit());
   statement.BindInt(5, info.hidden() ? 1 : 0);
 
   if (!statement.Run()) {
@@ -195,23 +201,23 @@ URLID URLDatabase::AddURLInternal(const URLRow& info, bool is_temporary) {
 }
 
 bool URLDatabase::URLTableContainsAutoincrement() {
-  // sqlite_master has columns:
+  // sqlite_schema has columns:
   //   type - "index" or "table".
   //   name - name of created element.
   //   tbl_name - name of element, or target table in case of index.
   //   rootpage - root page of the element in database file.
   //   sql - SQL to create the element.
   sql::Statement statement(GetDB().GetUniqueStatement(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'urls'"));
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'urls'"));
 
   // urls table does not exist.
   if (!statement.Step())
     return false;
 
-  std::string urls_schema = statement.ColumnString(0);
+  std::string_view urls_schema = statement.ColumnStringView(0);
   // We check if the whole schema contains "AUTOINCREMENT", since
   // "AUTOINCREMENT" only can be used for "INTEGER PRIMARY KEY", so we assume no
-  // other columns could cantain "AUTOINCREMENT".
+  // other columns could contain "AUTOINCREMENT".
   return urls_schema.find("AUTOINCREMENT") != std::string::npos;
 }
 
@@ -238,7 +244,7 @@ bool URLDatabase::InsertOrUpdateURLRowByID(const URLRow& info) {
   statement.BindString16(2, info.title());
   statement.BindInt(3, info.visit_count());
   statement.BindInt(4, info.typed_count());
-  statement.BindInt64(5, info.last_visit().ToInternalValue());
+  statement.BindTime(5, info.last_visit());
   statement.BindInt(6, info.hidden() ? 1 : 0);
 
   return statement.Run();
@@ -267,12 +273,11 @@ bool URLDatabase::CommitTemporaryURLTable() {
 
   // Swap the url table out and replace it with the temporary one.
   if (!GetDB().Execute("DROP TABLE urls")) {
-    NOTREACHED() << GetDB().GetErrorMessage();
+    DUMP_WILL_BE_NOTREACHED() << GetDB().GetErrorMessage();
     return false;
   }
   if (!GetDB().Execute("ALTER TABLE temp_urls RENAME TO urls")) {
     NOTREACHED() << GetDB().GetErrorMessage();
-    return false;
   }
 
   // Re-create the index over the now permanent URLs table -- this was not there
@@ -282,27 +287,21 @@ bool URLDatabase::CommitTemporaryURLTable() {
 
 bool URLDatabase::InitURLEnumeratorForEverything(URLEnumerator* enumerator) {
   DCHECK(!enumerator->initialized_);
-  std::string sql("SELECT ");
-  sql.append(kURLRowFields);
-  sql.append(" FROM urls");
-  enumerator->statement_.Assign(GetDB().GetUniqueStatement(sql.c_str()));
+  enumerator->statement_.Assign(GetDB().GetCachedStatement(
+      SQL_FROM_HERE, "SELECT " HISTORY_URL_ROW_FIELDS " FROM urls"));
   enumerator->initialized_ = enumerator->statement_.is_valid();
   return enumerator->statement_.is_valid();
 }
 
 bool URLDatabase::InitURLEnumeratorForSignificant(URLEnumerator* enumerator) {
   DCHECK(!enumerator->initialized_);
-  std::string sql("SELECT ");
-  sql.append(kURLRowFields);
-  sql.append(
-      " FROM urls WHERE hidden = 0 AND "
-      "(last_visit_time >= ? OR visit_count >= ? OR typed_count >= ?)");
-  sql.append(
-      " ORDER BY typed_count DESC, last_visit_time DESC, visit_count "
-      "DESC");
-  enumerator->statement_.Assign(GetDB().GetUniqueStatement(sql.c_str()));
-  enumerator->statement_.BindInt64(
-      0, AutocompleteAgeThreshold().ToInternalValue());
+  static constexpr char kSql[] =
+      "SELECT" HISTORY_URL_ROW_FIELDS
+      "FROM urls WHERE hidden = 0 AND "
+      "(last_visit_time >= ? OR visit_count >= ? OR typed_count >= ?)"
+      " ORDER BY typed_count DESC, last_visit_time DESC, visit_count DESC";
+  enumerator->statement_.Assign(GetDB().GetUniqueStatement(kSql));
+  enumerator->statement_.BindTime(0, AutocompleteAgeThreshold());
   enumerator->statement_.BindInt(1, kLowQualityMatchVisitLimit);
   enumerator->statement_.BindInt(2, kLowQualityMatchTypedLimit);
   enumerator->initialized_ = enumerator->statement_.is_valid();
@@ -318,30 +317,30 @@ bool URLDatabase::AutocompleteForPrefix(const std::string& prefix,
   // by clause.
   results->clear();
 
-  const char* sql;
-  size_t line;
+  sql::Statement statement;
   if (typed_only) {
-    sql = "SELECT" HISTORY_URL_ROW_FIELDS "FROM urls "
+    statement.Assign(GetDB().GetCachedStatement(
+        SQL_FROM_HERE,
+        "SELECT" HISTORY_URL_ROW_FIELDS
+        "FROM urls "
         "WHERE url >= ? AND url < ? AND hidden = 0 AND typed_count > 0 "
         "ORDER BY typed_count DESC, visit_count DESC, last_visit_time DESC "
-        "LIMIT ?";
-    line = __LINE__;
+        "LIMIT ?"));
   } else {
-    sql = "SELECT" HISTORY_URL_ROW_FIELDS "FROM urls "
+    statement.Assign(GetDB().GetCachedStatement(
+        SQL_FROM_HERE,
+        "SELECT" HISTORY_URL_ROW_FIELDS
+        "FROM urls "
         "WHERE url >= ? AND url < ? AND hidden = 0 "
         "ORDER BY typed_count DESC, visit_count DESC, last_visit_time DESC "
-        "LIMIT ?";
-    line = __LINE__;
+        "LIMIT ?"));
   }
-  sql::Statement statement(
-      GetDB().GetCachedStatement(sql::StatementID(__FILE__, line), sql));
 
   // We will find all strings between "prefix" and this string, which is prefix
   // followed by the maximum character size. Use 8-bit strings for everything
   // so we can be sure sqlite is comparing everything in 8-bit mode. Otherwise,
   // it will have to convert strings either to UTF-8 or UTF-16 for comparison.
-  std::string end_query(prefix);
-  end_query.push_back(std::numeric_limits<unsigned char>::max());
+  std::string end_query = database_utils::UpperBoundString(prefix);
 
   statement.BindString(0, prefix);
   statement.BindString(1, end_query);
@@ -349,9 +348,9 @@ bool URLDatabase::AutocompleteForPrefix(const std::string& prefix,
 
   while (statement.Step()) {
     URLRow info;
-    FillURLRow(statement, &info);
-    if (info.url().is_valid())
+    if (FillURLRow(statement, &info)) {
       results->push_back(info);
+    }
   }
   return !results->empty();
 }
@@ -363,13 +362,13 @@ bool URLDatabase::IsTypedHost(const std::string& host, std::string* scheme) {
     url::kFtpScheme
   };
   URLRows dummy;
-  for (size_t i = 0; i < base::size(schemes); ++i) {
-    std::string scheme_and_host(schemes[i]);
+  for (const char* known_scheme : schemes) {
+    std::string scheme_and_host(known_scheme);
     scheme_and_host += url::kStandardSchemeSeparator + host;
     if (AutocompleteForPrefix(scheme_and_host + '/', 1, true, &dummy) ||
         AutocompleteForPrefix(scheme_and_host + ':', 1, true, &dummy)) {
       if (scheme != nullptr)
-        *scheme = schemes[i];
+        *scheme = known_scheme;
       return true;
     }
   }
@@ -382,72 +381,75 @@ bool URLDatabase::FindShortestURLFromBase(const std::string& base,
                                           int min_typed,
                                           bool allow_base,
                                           URLRow* info) {
-  // Select URLs that start with |base| and are prefixes of |url|.  All parts
+  DCHECK(info);
+
+  // Select URLs that start with `base` and are prefixes of `url`.  All parts
   // of this query except the substr() call can be done using the index.  We
   // could do this query with a couple of LIKE or GLOB statements as well, but
   // those wouldn't use the index, and would run into problems with "wildcard"
   // characters that appear in URLs (% for LIKE, or *, ? for GLOB).
-  std::string sql("SELECT ");
-  sql.append(kURLRowFields);
-  sql.append(" FROM urls WHERE url ");
-  sql.append(allow_base ? ">=" : ">");
-  sql.append(" ? AND url < :end AND url = substr(:end, 1, length(url)) "
-             "AND hidden = 0 AND visit_count >= ? AND typed_count >= ? "
-             "ORDER BY url LIMIT 1");
-  sql::Statement statement(GetDB().GetUniqueStatement(sql.c_str()));
+  std::string sql =
+      base::StrCat({"SELECT" HISTORY_URL_ROW_FIELDS "FROM urls WHERE url ",
+                    allow_base ? ">=" : ">",
+                    // Avoid limiting to 1 read to guard against the
+                    // hypothetical case that a URL stored in the database is
+                    // invalid, which requires moving on to the next best.
+                    " ? AND url < :end AND url = substr(:end, 1, length(url)) "
+                    "AND hidden = 0 AND visit_count >= ? AND typed_count >= ? "
+                    "ORDER BY url"});
+  sql::Statement statement(GetDB().GetUniqueStatement(sql));
   statement.BindString(0, base);
   statement.BindString(1, url);   // :end
   statement.BindInt(2, min_visits);
   statement.BindInt(3, min_typed);
 
-  if (!statement.Step())
-    return false;
+  while (statement.Step()) {
+    if (FillURLRow(statement, info)) {
+      return true;
+    }
+  }
 
-  DCHECK(info);
-  FillURLRow(statement, info);
-  return true;
+  return false;
 }
 
-bool URLDatabase::GetTextMatches(const base::string16& query,
-                                 URLRows* results) {
-  return GetTextMatchesWithAlgorithm(
-      query, query_parser::MatchingAlgorithm::DEFAULT, results);
+URLRows URLDatabase::GetTextMatches(const std::u16string& query) {
+  return GetTextMatchesWithAlgorithm(query,
+                                     query_parser::MatchingAlgorithm::DEFAULT);
 }
 
-bool URLDatabase::GetTextMatchesWithAlgorithm(
-    const base::string16& query,
-    query_parser::MatchingAlgorithm algorithm,
-    URLRows* results) {
+URLRows URLDatabase::GetTextMatchesWithAlgorithm(
+    const std::u16string& query,
+    query_parser::MatchingAlgorithm algorithm) {
   query_parser::QueryNodeVector query_nodes;
-  query_parser_.ParseQueryNodes(query, algorithm, &query_nodes);
+  query_parser::QueryParser::ParseQueryNodes(query, algorithm, &query_nodes);
 
-  results->clear();
+  URLRows results;
   sql::Statement statement(GetDB().GetCachedStatement(SQL_FROM_HERE,
       "SELECT" HISTORY_URL_ROW_FIELDS "FROM urls WHERE hidden = 0"));
 
   while (statement.Step()) {
     query_parser::QueryWordVector query_words;
-    base::string16 url = base::i18n::ToLower(statement.ColumnString16(1));
-    query_parser_.ExtractQueryWords(url, &query_words);
+    std::u16string url = base::i18n::ToLower(statement.ColumnString16(1));
+    query_parser::QueryParser::ExtractQueryWords(url, &query_words);
     GURL gurl(url);
     if (gurl.is_valid()) {
       // Decode punycode to match IDN.
-      base::string16 ascii = base::ASCIIToUTF16(gurl.host());
-      base::string16 utf = url_formatter::IDNToUnicode(gurl.host());
+      std::u16string ascii = base::ASCIIToUTF16(gurl.GetHost());
+      std::u16string utf = url_formatter::IDNToUnicode(gurl.GetHost());
       if (ascii != utf)
-        query_parser_.ExtractQueryWords(utf, &query_words);
+        query_parser::QueryParser::ExtractQueryWords(utf, &query_words);
     }
-    base::string16 title = base::i18n::ToLower(statement.ColumnString16(2));
-    query_parser_.ExtractQueryWords(title, &query_words);
+    std::u16string title = base::i18n::ToLower(statement.ColumnString16(2));
+    query_parser::QueryParser::ExtractQueryWords(title, &query_words);
 
-    if (query_parser_.DoesQueryMatch(query_words, query_nodes)) {
+    if (query_parser::QueryParser::DoesQueryMatch(query_words, query_nodes)) {
       URLResult info;
-      FillURLRow(statement, &info);
-      if (info.url().is_valid())
-        results->push_back(info);
+      if (FillURLRow(statement, &info)) {
+        results.push_back(info);
+      }
     }
   }
-  return !results->empty();
+  return results;
 }
 
 bool URLDatabase::InitKeywordSearchTermsTable() {
@@ -498,7 +500,7 @@ bool URLDatabase::DropKeywordSearchTermsTable() {
 
 bool URLDatabase::SetKeywordSearchTermsForURL(URLID url_id,
                                               KeywordID keyword_id,
-                                              const base::string16& term) {
+                                              const std::u16string& term) {
   DCHECK(url_id && keyword_id && !term.empty());
 
   sql::Statement exist_statement(GetDB().GetCachedStatement(SQL_FROM_HERE,
@@ -520,9 +522,30 @@ bool URLDatabase::SetKeywordSearchTermsForURL(URLID url_id,
   statement.BindInt64(0, keyword_id);
   statement.BindInt64(1, url_id);
   statement.BindString16(2, term);
-  statement.BindString16(
-      3, base::i18n::ToLower(base::CollapseWhitespace(term, false)));
+  statement.BindString16(3, NormalizeTerm(term));
   return statement.Run();
+}
+
+bool URLDatabase::GetAggregateURLDataForKeywordSearchTerm(
+    const std::u16string& term,
+    URLRow* url_info) {
+  sql::Statement statement(GetDB().GetCachedStatement(
+      SQL_FROM_HERE,
+      "SELECT SUM(u.visit_count), SUM(u.typed_count), MAX(u.last_visit_time) "
+      "FROM keyword_search_terms kst JOIN urls u ON kst.url_id = u.id "
+      "WHERE kst.normalized_term=? GROUP BY kst.normalized_term"));
+  statement.BindString16(0, NormalizeTerm(term));
+
+  if (!statement.Step()) {
+    return false;
+  }
+
+  if (url_info) {
+    url_info->set_visit_count(statement.ColumnInt(0));
+    url_info->set_typed_count(statement.ColumnInt(1));
+    url_info->set_last_visit(statement.ColumnTime(2));
+  }
+  return true;
 }
 
 bool URLDatabase::GetKeywordSearchTermRow(URLID url_id,
@@ -547,7 +570,7 @@ bool URLDatabase::GetKeywordSearchTermRow(URLID url_id,
 }
 
 bool URLDatabase::GetKeywordSearchTermRows(
-    const base::string16& term,
+    const std::u16string& term,
     std::vector<KeywordSearchTermRow>* rows) {
   sql::Statement statement(
       GetDB().GetCachedStatement(SQL_FROM_HERE,
@@ -563,8 +586,8 @@ bool URLDatabase::GetKeywordSearchTermRows(
     row.url_id = statement.ColumnInt64(1);
     row.keyword_id = statement.ColumnInt64(0);
     row.term = term;
-    row.normalized_term = statement.ColumnInt64(2);
-    rows->push_back(row);
+    row.normalized_term = statement.ColumnString16(2);
+    rows->push_back(std::move(row));
   }
   return true;
 }
@@ -579,112 +602,76 @@ void URLDatabase::DeleteAllSearchTermsForKeyword(
   statement.Run();
 }
 
-void URLDatabase::GetMostRecentKeywordSearchTerms(
+std::unique_ptr<KeywordSearchTermVisitEnumerator>
+URLDatabase::CreateKeywordSearchTermVisitEnumerator(
     KeywordID keyword_id,
-    const base::string16& prefix,
-    int max_count,
-    std::vector<KeywordSearchTermVisit>* matches) {
+    const std::u16string& prefix) {
   // NOTE: the keyword_id can be zero if on first run the user does a query
   // before the TemplateURLService has finished loading. As the chances of this
   // occurring are small, we ignore it.
   if (!keyword_id)
-    return;
+    return nullptr;
 
-  DCHECK(!prefix.empty());
-  sql::Statement statement(GetDB().GetCachedStatement(
-      SQL_FROM_HERE,
-      "SELECT DISTINCT kv.term, u.visit_count, u.last_visit_time "
-      "FROM keyword_search_terms kv "
-      "JOIN urls u ON kv.url_id = u.id "
-      "WHERE kv.keyword_id = ? AND kv.normalized_term >= ? AND "
-      "kv.normalized_term < ? "
-      "ORDER BY u.last_visit_time DESC LIMIT ?"));
-
-  // NOTE: Keep these CollapseWhitespace() and ToLower() calls in sync with
-  // search_provider.cc.
-  base::string16 normalized_prefix =
+  auto enumerator = base::WrapUnique<KeywordSearchTermVisitEnumerator>(
+      new KeywordSearchTermVisitEnumerator());
+  enumerator->statement_.Assign(GetDB().GetCachedStatement(SQL_FROM_HERE,
+                                                           R"(
+      SELECT
+        kst.term,
+        kst.normalized_term,
+        u.visit_count,
+        u.last_visit_time
+      FROM
+        keyword_search_terms kst JOIN urls u ON kst.url_id = u.id
+      WHERE
+        kst.keyword_id = ? AND
+        kst.normalized_term >= ? AND
+        kst.normalized_term < ?
+      ORDER BY kst.normalized_term, u.last_visit_time
+      )"));
+  // Keep CollapseWhitespace() and ToLower() in sync with search_provider.cc.
+  std::u16string normalized_prefix =
       base::CollapseWhitespace(base::i18n::ToLower(prefix), false);
   // This magic gives us a prefix search.
-  base::string16 next_prefix = normalized_prefix;
+  std::u16string next_prefix = normalized_prefix;
   next_prefix.back() = next_prefix.back() + 1;
-  statement.BindInt64(0, keyword_id);
-  statement.BindString16(1, normalized_prefix);
-  statement.BindString16(2, next_prefix);
-  statement.BindInt(3, max_count);
-
-  KeywordSearchTermVisit visit;
-  while (statement.Step()) {
-    visit.term = statement.ColumnString16(0);
-    visit.visits = statement.ColumnInt(1);
-    visit.time = base::Time::FromInternalValue(statement.ColumnInt64(2));
-    matches->push_back(visit);
-  }
+  enumerator->statement_.BindInt64(0, keyword_id);
+  enumerator->statement_.BindString16(1, normalized_prefix);
+  enumerator->statement_.BindString16(2, next_prefix);
+  enumerator->initialized_ = enumerator->statement_.is_valid();
+  return enumerator;
 }
 
-std::vector<NormalizedKeywordSearchTermVisit>
-URLDatabase::GetMostRecentNormalizedKeywordSearchTerms(
-    KeywordID keyword_id,
-    base::Time age_threshold) {
+std::unique_ptr<KeywordSearchTermVisitEnumerator>
+URLDatabase::CreateKeywordSearchTermVisitEnumerator(KeywordID keyword_id) {
   // NOTE: the keyword_id can be zero if on first run the user does a query
   // before the TemplateURLService has finished loading. As the chances of this
   // occurring are small, we ignore it.
   if (!keyword_id)
-    return {};
+    return nullptr;
 
-  // Extracts the most recent normalized search terms from the
-  // keyword_search_terms table joined with the urls table. For a given search
-  // term, those search query URLs that are visited too closely to the original
-  // search query URL are ignored in order to avoid erroneously boosting the
-  // term when frecency ranking is used. This is done by rounding down the URLs'
-  // last_visit_time to the largest ? ms interval and picking the oldest URL out
-  // of all the URLs with the same rounded last visit time. The average of visit
-  // counts for those URLs is then used as the visit count of this emerging
-  // deduplicated URL This way no bare column (chosen at random) is returned by
-  // the aggregate query.
-  sql::Statement statement(GetDB().GetCachedStatement(SQL_FROM_HERE,
-                                                      R"(
+  auto enumerator = base::WrapUnique<KeywordSearchTermVisitEnumerator>(
+      new KeywordSearchTermVisitEnumerator());
+  enumerator->statement_.Assign(GetDB().GetCachedStatement(SQL_FROM_HERE,
+                                                           R"(
       SELECT
-        normalized_term,
-        SUM(visit_count) AS visit_count,
-        MAX(last_visit_time) AS last_visit_time
+        kst.term,
+        kst.normalized_term,
+        u.visit_count,
+        u.last_visit_time
       FROM
-        (
-          SELECT
-            normalized_term,
-            AVG(visit_count) AS visit_count,
-            MIN(u.last_visit_time) AS last_visit_time,
-            u.last_visit_time - (u.last_visit_time % ?) as rnd_last_visit_time
-          FROM
-            keyword_search_terms kv JOIN urls u ON kv.url_id = u.id
-          WHERE
-            kv.keyword_id = ?
-            AND u.last_visit_time > ?
-            AND kv.normalized_term IS NOT NULL
-            AND kv.normalized_term != ""
-          GROUP BY normalized_term, rnd_last_visit_time
-        )
-      GROUP BY normalized_term
-      ORDER BY last_visit_time DESC
+        keyword_search_terms kst JOIN urls u ON kst.url_id = u.id
+      WHERE
+        kst.keyword_id = ? AND
+        kst.normalized_term <> ''
+      ORDER BY kst.normalized_term, u.last_visit_time
       )"));
-
-  statement.BindInt64(
-      0, kAutocompleteDuplicateVisitIntervalThreshold.ToInternalValue());
-  statement.BindInt64(1, keyword_id);
-  statement.BindInt64(2, age_threshold.ToInternalValue());
-
-  std::vector<NormalizedKeywordSearchTermVisit> visits;
-  while (statement.Step()) {
-    NormalizedKeywordSearchTermVisit visit;
-    visit.normalized_term = statement.ColumnString16(0);
-    visit.visits = statement.ColumnInt(1);
-    visit.most_recent_visit_time =
-        base::Time::FromInternalValue(statement.ColumnInt64(2));
-    visits.push_back(visit);
-  }
-  return visits;
+  enumerator->statement_.BindInt64(0, keyword_id);
+  enumerator->initialized_ = enumerator->statement_.is_valid();
+  return enumerator;
 }
 
-bool URLDatabase::DeleteKeywordSearchTerm(const base::string16& term) {
+bool URLDatabase::DeleteKeywordSearchTerm(const std::u16string& term) {
   sql::Statement statement(GetDB().GetCachedStatement(SQL_FROM_HERE,
       "DELETE FROM keyword_search_terms WHERE term=?"));
   statement.BindString16(0, term);
@@ -694,7 +681,7 @@ bool URLDatabase::DeleteKeywordSearchTerm(const base::string16& term) {
 
 bool URLDatabase::DeleteKeywordSearchTermForNormalizedTerm(
     KeywordID keyword_id,
-    const base::string16& normalized_term) {
+    const std::u16string& normalized_term) {
   sql::Statement statement(
       GetDB().GetCachedStatement(SQL_FROM_HERE,
                                  "DELETE FROM keyword_search_terms WHERE "
@@ -721,44 +708,36 @@ bool URLDatabase::DropStarredIDFromURLs() {
 
 bool URLDatabase::CreateURLTable(bool is_temporary) {
   const char* name = is_temporary ? "temp_urls" : "urls";
-  if (GetDB().DoesTableExist(name))
-    return true;
+  if (GetDB().DoesTableExist(name)) {
+    if (!is_temporary) {
+      return true;
+    }
+    if (!GetDB().Execute("DROP TABLE temp_urls")) {
+      NOTREACHED() << GetDB().GetErrorMessage();
+    }
+  }
 
   // Note: revise implementation for InsertOrUpdateURLRowByID() if you add any
   // new constraints to the schema.
-  std::string sql;
-  sql.append("CREATE TABLE ");
-  sql.append(name);
-  sql.append(
-      "("
-      // The id uses AUTOINCREMENT is for sync propose. Sync uses this |id| as
-      // an unique key to identify the URLs. If here did not use AUTOINCREMENT,
-      // and Sync was not working somehow, a ROWID could be deleted and re-used
-      // during this period. Once Sync come back, Sync would use ROWIDs and
-      // timestamps to see if there are any updates need to be synced. And sync
-      // will only see the new URL, but missed the deleted URL.
-      //
-      // IMPORTANT NOTE: Currently new tables are created with AUTOINCREMENT
-      // but the migration code is disabled. This means that you will not
-      // be able to count on AUTOINCREMENT behavior without adding
-      // additional migration steps.
-      //
-      // Along with this, an unused favicon_id column will exist for tables
-      // without AUTOINCREMENT. This should be removed everywhere.
-      //
-      // TODO(https://crbug.com/736136) figure out how to update users to use
-      // AUTOINCREMENT and remove the favicon_id column consistently.
-      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-      "url LONGVARCHAR,"
-      "title LONGVARCHAR,"
-      "visit_count INTEGER DEFAULT 0 NOT NULL,"
-      "typed_count INTEGER DEFAULT 0 NOT NULL,"
-      "last_visit_time INTEGER NOT NULL,"
-      "hidden INTEGER DEFAULT 0 NOT NULL)");
-  // IMPORTANT: If you change the colums, also update in_memory_database.cc
+  std::string sql = base::StrCat(
+      {"CREATE TABLE ", name,
+       // The id uses AUTOINCREMENT is for sync propose. Sync uses this `id` as
+       // an unique key to identify the URLs. If here did not use AUTOINCREMENT,
+       // and Sync was not working somehow, a ROWID could be deleted and re-used
+       // during this period. Once Sync come back, Sync would use ROWIDs and
+       // timestamps to see if there are any updates need to be synced. And sync
+       // will only see the new URL, but missed the deleted URL.
+       "(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+       "url LONGVARCHAR,"
+       "title LONGVARCHAR,"
+       "visit_count INTEGER DEFAULT 0 NOT NULL,"
+       "typed_count INTEGER DEFAULT 0 NOT NULL,"
+       "last_visit_time INTEGER NOT NULL,"
+       "hidden INTEGER DEFAULT 0 NOT NULL)"});
+  // IMPORTANT: If you change the columns, also update in_memory_database.cc
   // where the values are copied (InitFromDisk).
 
-  return GetDB().Execute(sql.c_str());
+  return GetDB().Execute(sql);
 }
 
 bool URLDatabase::CreateMainURLIndex() {
@@ -770,7 +749,6 @@ bool URLDatabase::RecreateURLTableWithAllContents() {
   // Create a temporary table to contain the new URLs table.
   if (!CreateTemporaryURLTable()) {
     NOTREACHED();
-    return false;
   }
 
   // Copy the contents.
@@ -779,7 +757,15 @@ bool URLDatabase::RecreateURLTableWithAllContents() {
           "last_visit_time, hidden) "
           "SELECT id, url, title, visit_count, typed_count, last_visit_time, "
           "hidden FROM urls")) {
-    NOTREACHED() << GetDB().GetErrorMessage();
+    const char* error_message = GetDB().GetErrorMessage();
+    if (error_message) {
+      // TODO(crbug.com/40901889): used in understanding why this is happening.
+      // Remove once bug is fixed.
+      static crash_reporter::CrashKeyString<256> error_message_crash_key(
+          "recreate_url_table_description");
+      error_message_crash_key.Set(error_message);
+    }
+    DUMP_WILL_BE_NOTREACHED() << error_message;
     return false;
   }
 
@@ -791,12 +777,8 @@ const int kLowQualityMatchTypedLimit = 1;
 const int kLowQualityMatchVisitLimit = 4;
 const int kLowQualityMatchAgeLimitInDays = 3;
 
-const base::TimeDelta kAutocompleteDuplicateVisitIntervalThreshold =
-    base::TimeDelta::FromMinutes(5);
-
 base::Time AutocompleteAgeThreshold() {
-  return (base::Time::Now() -
-          base::TimeDelta::FromDays(kLowQualityMatchAgeLimitInDays));
+  return (base::Time::Now() - base::Days(kLowQualityMatchAgeLimitInDays));
 }
 
 bool RowQualifiesAsSignificant(const URLRow& row,

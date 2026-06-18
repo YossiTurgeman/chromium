@@ -1,10 +1,10 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/sync/base/weak_handle.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
 #include "base/threading/thread.h"
@@ -19,27 +19,31 @@ using ::testing::StrictMock;
 
 class Base {
  public:
-  Base() {}
+  Base() = default;
 
   WeakHandle<Base> AsWeakHandle() {
     return MakeWeakHandle(weak_ptr_factory_.GetWeakPtr());
   }
 
   void Kill() { weak_ptr_factory_.InvalidateWeakPtrs(); }
-
-  MOCK_METHOD0(Test, void());
-  MOCK_METHOD1(Test1, void(const int&));
-  MOCK_METHOD2(Test2, void(const int&, Base*));
-  MOCK_METHOD3(Test3, void(const int&, Base*, float));
-  MOCK_METHOD4(Test4, void(const int&, Base*, float, const char*));
-
-  MOCK_METHOD1(TestWithSelf, void(const WeakHandle<Base>&));
+  MOCK_METHOD(void, Test, (), ());
+  MOCK_METHOD(void, Test1, (const int&), ());
+  MOCK_METHOD(void, Test2, (const int&, Base*), ());
+  MOCK_METHOD(void, Test3, (const int&, Base*, float), ());
+  MOCK_METHOD(void, Test4, (const int&, Base*, float, const char*), ());
+  MOCK_METHOD(void, TestWithSelf, (const WeakHandle<Base>&), ());
 
  private:
   base::WeakPtrFactory<Base> weak_ptr_factory_{this};
 };
 
-class Derived : public Base, public base::SupportsWeakPtr<Derived> {};
+class Derived : public Base {
+ public:
+  base::WeakPtr<Derived> AsWeakPtr() { return weak_ptr_factory_.GetWeakPtr(); }
+
+ private:
+  base::WeakPtrFactory<Derived> weak_ptr_factory_{this};
+};
 
 class WeakHandleTest : public ::testing::Test {
  protected:
@@ -207,7 +211,7 @@ void CallTestWithSelf(const WeakHandle<Base>& b1) {
 TEST_F(WeakHandleTest, WithDestroyedThread) {
   StrictMock<Base> b1;
   WeakHandle<Base> b2;
-  EXPECT_CALL(b1, TestWithSelf(_)).WillOnce(SaveArg<0>(&b2));
+  EXPECT_CALL(b1, TestWithSelf).WillOnce(SaveArg<0>(&b2));
 
   {
     base::Thread t("Test thread");
@@ -222,7 +226,7 @@ TEST_F(WeakHandleTest, WithDestroyedThread) {
   // Shouldn't do anything, since the thread is gone.
   b2.Call(FROM_HERE, &Base::Test);
 
-  // |b2| shouldn't leak when it's destroyed, even if the original
+  // `b2` shouldn't leak when it's destroyed, even if the original
   // thread is gone.
 }
 
@@ -268,7 +272,7 @@ TEST_F(WeakHandleTest, TypeConversionConstructor) {
   base_weak_handle.Call(FROM_HERE, &Base::Test);
 
   EXPECT_TRUE(derived_weak_handle.IsInitialized());
-  // Copy constructor shouldn't construct a new |core_|.
+  // Copy constructor shouldn't construct a new `core_`.
   EXPECT_EQ(weak_handle.core_.get(), derived_weak_handle.core_.get());
   derived_weak_handle.Call(FROM_HERE, &Base::Test);
 
@@ -299,7 +303,7 @@ TEST_F(WeakHandleTest, TypeConversionConstructorAssignment) {
 
   EXPECT_TRUE(base_weak_handle.IsInitialized());
   EXPECT_TRUE(derived_weak_handle.IsInitialized());
-  // Copy constructor shouldn't construct a new |core_|.
+  // Copy constructor shouldn't construct a new `core_`.
   EXPECT_EQ(weak_handle.core_.get(), derived_weak_handle.core_.get());
 }
 

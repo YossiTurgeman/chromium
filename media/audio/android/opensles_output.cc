@@ -1,17 +1,19 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/audio/android/opensles_output.h"
 
-#include "base/android/build_info.h"
+#include <algorithm>
+
+#include "base/containers/span.h"
 #include "base/feature_list.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "media/audio/android/audio_manager_android.h"
+#include "media/base/audio_bus.h"
 #include "media/base/audio_sample_types.h"
 #include "media/base/audio_timestamp_helper.h"
 #include "media/base/media_switches.h"
@@ -27,76 +29,38 @@
 
 namespace media {
 
-static bool IsFloatAudioSupported() {
-  const auto* build_info = base::android::BuildInfo::GetInstance();
-  if (build_info->sdk_int() < base::android::SDK_VERSION_LOLLIPOP)
-    return false;
-
-  // Vivo devices up until Lollipop used their own Audio Mixer which does not
-  // support float audio output. https://crbug.com/737188.
-  if (build_info->sdk_int() == base::android::SDK_VERSION_LOLLIPOP &&
-      base::EqualsCaseInsensitiveASCII(build_info->manufacturer(), "vivo")) {
-    return false;
-  }
-
-  return true;
-}
+static constexpr SampleFormat kSampleFormat = kSampleFormatF32;
 
 OpenSLESOutputStream::OpenSLESOutputStream(AudioManagerAndroid* manager,
                                            const AudioParameters& params,
                                            SLint32 stream_type)
     : audio_manager_(manager),
       stream_type_(stream_type),
-      callback_(nullptr),
-      player_(nullptr),
-      simple_buffer_queue_(nullptr),
-      audio_data_(),
-      active_buffer_index_(0),
-      started_(false),
-      muted_(false),
-      volume_(1.0),
       samples_per_second_(params.sample_rate()),
-      sample_format_(IsFloatAudioSupported() ? kSampleFormatF32
-                                             : kSampleFormatS16),
-      bytes_per_frame_(params.GetBytesPerFrame(sample_format_)),
-      buffer_size_bytes_(params.GetBytesPerBuffer(sample_format_)),
+      bytes_per_frame_(params.GetBytesPerFrame(kSampleFormat)),
+      buffer_size_bytes_(params.GetBytesPerBuffer(kSampleFormat)),
       performance_mode_(SL_ANDROID_PERFORMANCE_NONE),
       delay_calculator_(samples_per_second_) {
   DVLOG(2) << "OpenSLESOutputStream::OpenSLESOutputStream("
            << "stream_type=" << stream_type << ")";
 
-  if (AudioManagerAndroid::SupportsPerformanceModeForOutput()) {
-    if (params.latency_tag() == AudioLatency::LATENCY_PLAYBACK)
-      performance_mode_ = SL_ANDROID_PERFORMANCE_POWER_SAVING;
-    else if (params.latency_tag() == AudioLatency::LATENCY_RTC)
-      performance_mode_ = SL_ANDROID_PERFORMANCE_LATENCY_EFFECTS;
+  if (params.latency_tag() == AudioLatency::Type::kPlayback) {
+    performance_mode_ = SL_ANDROID_PERFORMANCE_POWER_SAVING;
+  } else if (params.latency_tag() == AudioLatency::Type::kRtc) {
+    performance_mode_ = SL_ANDROID_PERFORMANCE_LATENCY_EFFECTS;
   }
 
   audio_bus_ = AudioBus::Create(params);
 
-  if (sample_format_ == kSampleFormatF32) {
-    float_format_.formatType = SL_ANDROID_DATAFORMAT_PCM_EX;
-    float_format_.numChannels = static_cast<SLuint32>(params.channels());
-    // Despite the name, this field is actually the sampling rate in millihertz.
-    float_format_.sampleRate =
-        static_cast<SLuint32>(samples_per_second_ * 1000);
-    float_format_.bitsPerSample = float_format_.containerSize =
-        SampleFormatToBitsPerChannel(sample_format_);
-    float_format_.endianness = SL_BYTEORDER_LITTLEENDIAN;
-    float_format_.channelMask =
-        ChannelCountToSLESChannelMask(params.channels());
-    float_format_.representation = SL_ANDROID_PCM_REPRESENTATION_FLOAT;
-    return;
-  }
-
-  format_.formatType = SL_DATAFORMAT_PCM;
-  format_.numChannels = static_cast<SLuint32>(params.channels());
-  // Despite the name, this field is actually the sampling rate in millihertz :|
-  format_.samplesPerSec = static_cast<SLuint32>(samples_per_second_ * 1000);
-  format_.bitsPerSample = format_.containerSize =
-      SampleFormatToBitsPerChannel(sample_format_);
-  format_.endianness = SL_BYTEORDER_LITTLEENDIAN;
-  format_.channelMask = ChannelCountToSLESChannelMask(params.channels());
+  float_format_.formatType = SL_ANDROID_DATAFORMAT_PCM_EX;
+  float_format_.numChannels = static_cast<SLuint32>(params.channels());
+  // Despite the name, this field is actually the sampling rate in millihertz.
+  float_format_.sampleRate = static_cast<SLuint32>(samples_per_second_ * 1000);
+  float_format_.bitsPerSample = float_format_.containerSize =
+      SampleFormatToBitsPerChannel(kSampleFormat);
+  float_format_.endianness = SL_BYTEORDER_LITTLEENDIAN;
+  float_format_.channelMask = ChannelCountToSLESChannelMask(params.channels());
+  float_format_.representation = SL_ANDROID_PCM_REPRESENTATION_FLOAT;
 }
 
 OpenSLESOutputStream::~OpenSLESOutputStream() {
@@ -107,7 +71,6 @@ OpenSLESOutputStream::~OpenSLESOutputStream() {
   DCHECK(!output_mixer_.Get());
   DCHECK(!player_);
   DCHECK(!simple_buffer_queue_);
-  DCHECK(!audio_data_[0]);
 }
 
 bool OpenSLESOutputStream::Open() {
@@ -143,11 +106,12 @@ void OpenSLESOutputStream::Start(AudioSourceCallback* callback) {
   // Fill audio data with silence to avoid start-up glitches. Don't use
   // FillBufferQueueNoLock() since it can trigger recursive entry if an error
   // occurs while writing into the stream. See http://crbug.com/624877.
-  memset(audio_data_[active_buffer_index_], 0, buffer_size_bytes_);
-  LOG_ON_FAILURE_AND_RETURN((*simple_buffer_queue_)
-                                ->Enqueue(simple_buffer_queue_,
-                                          audio_data_[active_buffer_index_],
-                                          buffer_size_bytes_));
+  std::ranges::fill(audio_data_[active_buffer_index_], 0);
+  LOG_ON_FAILURE_AND_RETURN(
+      (*simple_buffer_queue_)
+          ->Enqueue(simple_buffer_queue_,
+                    audio_data_[active_buffer_index_].data(),
+                    buffer_size_bytes_));
   active_buffer_index_ = (active_buffer_index_ + 1) % kMaxNumOfBuffersInQueue;
 
   // Start streaming data by setting the play state to SL_PLAYSTATE_PLAYING.
@@ -161,8 +125,7 @@ void OpenSLESOutputStream::Start(AudioSourceCallback* callback) {
   // we're continuing on from this previous position.
   uint32_t position_in_ms = 0;
   LOG_ON_FAILURE_AND_RETURN((*player_)->GetPosition(player_, &position_in_ms));
-  delay_calculator_.SetBaseTimestamp(
-      base::TimeDelta::FromMilliseconds(position_in_ms));
+  delay_calculator_.SetBaseTimestamp(base::Milliseconds(position_in_ms));
   delay_calculator_.AddFrames(audio_bus_->frames());
 
   started_ = true;
@@ -218,7 +181,6 @@ void OpenSLESOutputStream::Close() {
     // Destroy the engine object. We don't store any associated interface for
     // this object.
     engine_object_.Reset();
-    ReleaseAudioBuffer();
   }
 
   audio_manager_->ReleaseOutputStream(this);
@@ -296,10 +258,7 @@ bool OpenSLESOutputStream::CreatePlayer() {
       SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE,
       static_cast<SLuint32>(kMaxNumOfBuffersInQueue)};
   SLDataSource audio_source;
-  if (sample_format_ == kSampleFormatF32)
-    audio_source = {&simple_buffer_queue, &float_format_};
-  else
-    audio_source = {&simple_buffer_queue, &format_};
+  audio_source = {&simple_buffer_queue, &float_format_};
 
   // Audio sink configuration.
   SLDataLocator_OutputMix locator_output_mix = {SL_DATALOCATOR_OUTPUTMIX,
@@ -314,7 +273,7 @@ bool OpenSLESOutputStream::CreatePlayer() {
   LOG_ON_FAILURE_AND_RETURN(
       (*engine)->CreateAudioPlayer(
           engine, player_object_.Receive(), &audio_source, &audio_sink,
-          base::size(interface_id), interface_id, interface_required),
+          std::size(interface_id), interface_id, interface_required),
       false);
 
   // Create AudioPlayer and specify SL_IID_ANDROIDCONFIGURATION.
@@ -425,38 +384,36 @@ void OpenSLESOutputStream::FillBufferQueueNoLock() {
       AudioTimestampHelper::FramesToTime(delay_frames, samples_per_second_);
 
   // Read data from the registered client source.
-  const int frames_filled =
-      callback_->OnMoreData(delay, base::TimeTicks::Now(), 0, audio_bus_.get());
+  const int frames_filled = callback_->OnMoreData(delay, base::TimeTicks::Now(),
+                                                  {}, audio_bus_.get());
   if (frames_filled <= 0) {
     // Audio source is shutting down, or halted on error.
     return;
   }
 
+  const size_t num_filled_bytes = frames_filled * bytes_per_frame_;
+
+  auto [interleaved_dest, samples_to_zero] =
+      base::span(audio_data_[active_buffer_index_]).split_at(num_filled_bytes);
+
+  std::ranges::fill(samples_to_zero, 0);
+
   // Note: If the internal representation ever changes from 16-bit PCM to
   // raw float, the data must be clipped and sanitized since it may come
   // from an untrusted source such as NaCl.
   audio_bus_->Scale(muted_ ? 0.0f : volume_);
-  if (sample_format_ == kSampleFormatS16) {
-    audio_bus_->ToInterleaved<SignedInt16SampleTypeTraits>(
-        frames_filled,
-        reinterpret_cast<int16_t*>(audio_data_[active_buffer_index_]));
-  } else {
-    DCHECK_EQ(sample_format_, kSampleFormatF32);
-
-    // We skip clipping since that occurs at the shared memory boundary.
-    audio_bus_->ToInterleaved<Float32SampleTypeTraitsNoClip>(
-        frames_filled,
-        reinterpret_cast<float*>(audio_data_[active_buffer_index_]));
-  }
+  // We skip clipping since that occurs at the shared memory boundary.
+  audio_bus_->ToInterleavedBytes<Float32SampleTypeTraitsNoClip>(
+      interleaved_dest);
 
   delay_calculator_.AddFrames(frames_filled);
-  const int num_filled_bytes = frames_filled * bytes_per_frame_;
   DCHECK_LE(static_cast<size_t>(num_filled_bytes), buffer_size_bytes_);
 
   // Enqueue the buffer for playback.
-  err = (*simple_buffer_queue_)
-            ->Enqueue(simple_buffer_queue_, audio_data_[active_buffer_index_],
-                      num_filled_bytes);
+  err =
+      (*simple_buffer_queue_)
+          ->Enqueue(simple_buffer_queue_,
+                    audio_data_[active_buffer_index_].data(), num_filled_bytes);
   if (SL_RESULT_SUCCESS != err)
     HandleError(err);
 
@@ -465,19 +422,11 @@ void OpenSLESOutputStream::FillBufferQueueNoLock() {
 
 void OpenSLESOutputStream::SetupAudioBuffer() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  DCHECK(!audio_data_[0]);
-  for (int i = 0; i < kMaxNumOfBuffersInQueue; ++i)
-    audio_data_[i] = new uint8_t[buffer_size_bytes_];
-}
-
-void OpenSLESOutputStream::ReleaseAudioBuffer() {
-  DCHECK(thread_checker_.CalledOnValidThread());
-  if (audio_data_[0]) {
-    for (int i = 0; i < kMaxNumOfBuffersInQueue; ++i) {
-      delete[] audio_data_[i];
-      audio_data_[i] = nullptr;
-    }
-  }
+  DCHECK(audio_data_[0].empty());
+  std::ranges::generate(
+      audio_data_, [buffer_size_bytes = buffer_size_bytes_]() {
+        return base::HeapArray<uint8_t>::Uninit(buffer_size_bytes);
+      });
 }
 
 void OpenSLESOutputStream::HandleError(SLresult error) {
@@ -498,10 +447,10 @@ void OpenSLESOutputStream::CacheHardwareLatencyIfNeeded() {
 
 base::TimeDelta OpenSLESOutputStream::AdjustPositionForHardwareLatency(
     uint32_t position_in_ms) {
-  base::TimeDelta position = base::TimeDelta::FromMilliseconds(position_in_ms);
+  base::TimeDelta position = base::Milliseconds(position_in_ms);
 
   if (position <= hardware_latency_)
-    return base::TimeDelta::FromMilliseconds(0);
+    return base::Milliseconds(0);
 
   return position - hardware_latency_;
 }

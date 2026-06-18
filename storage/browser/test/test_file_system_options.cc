@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,7 @@ namespace storage {
 
 FileSystemOptions CreateIncognitoFileSystemOptions() {
   std::vector<std::string> additional_allowed_schemes;
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   additional_allowed_schemes.push_back("chrome-extension");
 #endif
   return FileSystemOptions(FileSystemOptions::PROFILE_MODE_INCOGNITO,
@@ -24,7 +24,7 @@ FileSystemOptions CreateIncognitoFileSystemOptions() {
 FileSystemOptions CreateAllowFileAccessOptions() {
   std::vector<std::string> additional_allowed_schemes;
   additional_allowed_schemes.push_back("file");
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   additional_allowed_schemes.push_back("chrome-extension");
 #endif
   return FileSystemOptions(FileSystemOptions::PROFILE_MODE_NORMAL,
@@ -34,7 +34,7 @@ FileSystemOptions CreateAllowFileAccessOptions() {
 
 FileSystemOptions CreateDisallowFileAccessOptions() {
   std::vector<std::string> additional_allowed_schemes;
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   additional_allowed_schemes.push_back("chrome-extension");
 #endif
   return FileSystemOptions(FileSystemOptions::PROFILE_MODE_NORMAL,

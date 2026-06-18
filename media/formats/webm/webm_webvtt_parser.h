@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,16 @@
 
 #include <string>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "media/base/media_export.h"
 
 namespace media {
 
 class MEDIA_EXPORT WebMWebVTTParser {
  public:
+  WebMWebVTTParser(const WebMWebVTTParser&) = delete;
+  WebMWebVTTParser& operator=(const WebMWebVTTParser&) = delete;
+
   // Utility function to parse the WebVTT cue from a byte stream.
   static void Parse(const uint8_t* payload,
                     int payload_size,
@@ -41,10 +44,8 @@ class MEDIA_EXPORT WebMWebVTTParser {
   void ParseLine(std::string* line);
 
   // Represents the portion of the stream that has not been consumed yet.
-  const uint8_t* ptr_;
-  const uint8_t* const ptr_end_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebMWebVTTParser);
+  raw_ptr<const uint8_t, AllowPtrArithmetic> ptr_;
+  const raw_ptr<const uint8_t> ptr_end_;
 };
 
 }  // namespace media

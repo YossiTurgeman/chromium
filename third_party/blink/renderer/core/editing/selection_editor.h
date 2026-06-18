@@ -27,9 +27,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_SELECTION_EDITOR_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_SELECTION_EDITOR_H_
 
-#include "base/macros.h"
+#include "base/dcheck_is_on.h"
 #include "third_party/blink/renderer/core/dom/events/event_dispatch_result.h"
-#include "third_party/blink/renderer/core/dom/synchronous_mutation_observer.h"
 #include "third_party/blink/renderer/core/editing/frame_selection.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
 #include "third_party/blink/renderer/core/editing/visible_selection.h"
@@ -39,19 +38,24 @@ namespace blink {
 // TODO(yosin): We will rename |SelectionEditor| to appropriate name since
 // it is no longer have a changing selection functionality, it was moved to
 // |SelectionModifier| class.
-class SelectionEditor final : public GarbageCollected<SelectionEditor>,
-                              public SynchronousMutationObserver {
+class SelectionEditor final : public GarbageCollected<SelectionEditor> {
  public:
   explicit SelectionEditor(LocalFrame&);
-  virtual ~SelectionEditor();
+  SelectionEditor(const SelectionEditor&) = delete;
+  SelectionEditor& operator=(const SelectionEditor&) = delete;
   void Dispose();
 
-  SelectionInDOMTree GetSelectionInDOMTree() const;
+  const SelectionInDomTree& GetSelectionInDomTree() const;
 
-  VisibleSelection ComputeVisibleSelectionInDOMTree() const;
+  VisibleSelection ComputeVisibleSelectionInDomTree() const;
   VisibleSelectionInFlatTree ComputeVisibleSelectionInFlatTree() const;
-  bool ComputeAbsoluteBounds(IntRect& anchor, IntRect& focus) const;
-  void SetSelectionAndEndTyping(const SelectionInDOMTree&);
+  bool ComputeAbsoluteBounds(gfx::Rect& anchor, gfx::Rect& focus) const;
+  void SetSelectionAndEndTyping(const SelectionInDomTree&);
+
+  // Sets the ContainsSelectionFocus flag on the style-owning layout object
+  // and triggers layout invalidation if needed for text-overflow.
+  static void SetContainsSelectionFocusFlag(LayoutObject* style_owner,
+                                            bool value);
 
   void DidAttachDocument(Document*);
 
@@ -62,7 +66,21 @@ class SelectionEditor final : public GarbageCollected<SelectionEditor>,
 
   void MarkCacheDirty();
 
-  void Trace(Visitor*) const override;
+  // Notifications from the Document.
+  void ContextDestroyed();
+  void DidChangeChildren(const ContainerNode::ChildrenChange& change);
+  void DidMergeTextNodes(const Text& merged_node,
+                         const NodeWithIndex& node_to_be_removed_with_index,
+                         unsigned old_length);
+  void DidSplitTextNode(const Text&);
+  void DidUpdateCharacterData(CharacterData*,
+                              unsigned offset,
+                              unsigned old_length,
+                              unsigned new_length);
+  void NodeChildrenWillBeRemoved(ContainerNode&);
+  void NodeWillBeRemoved(Node&);
+
+  void Trace(Visitor*) const;
 
  private:
   Document& GetDocument() const;
@@ -82,26 +100,14 @@ class SelectionEditor final : public GarbageCollected<SelectionEditor>,
   bool NeedsUpdateAbsoluteBounds() const;
   void UpdateCachedAbsoluteBoundsIfNeeded() const;
 
-  void DidFinishTextChange(const Position& base, const Position& extent);
-  void DidFinishDOMMutation();
+  void DidFinishTextChange(const Position& anchor, const Position& focus);
+  void DidFinishDomMutation();
+  void DidInsertNode(const Node&);
 
-  // Implementation of |SynchronousMutationObsderver| member functions.
-  void ContextDestroyed() final;
-  void DidChangeChildren(const ContainerNode&) final;
-  void DidMergeTextNodes(const Text& merged_node,
-                         const NodeWithIndex& node_to_be_removed_with_index,
-                         unsigned old_length) final;
-  void DidSplitTextNode(const Text&) final;
-  void DidUpdateCharacterData(CharacterData*,
-                              unsigned offset,
-                              unsigned old_length,
-                              unsigned new_length) final;
-  void NodeChildrenWillBeRemoved(ContainerNode&) final;
-  void NodeWillBeRemoved(Node&) final;
-
+  WeakMember<Document> document_;
   Member<LocalFrame> frame_;
 
-  SelectionInDOMTree selection_;
+  SelectionInDomTree selection_;
 
   // If document is root, document.getSelection().addRange(range) is cached on
   // this.
@@ -112,8 +118,8 @@ class SelectionEditor final : public GarbageCollected<SelectionEditor>,
   mutable bool cached_visible_selection_in_dom_tree_is_dirty_ = true;
   mutable bool cached_visible_selection_in_flat_tree_is_dirty_ = true;
 
-  mutable IntRect cached_anchor_bounds_;
-  mutable IntRect cached_focus_bounds_;
+  mutable gfx::Rect cached_anchor_bounds_;
+  mutable gfx::Rect cached_focus_bounds_;
   mutable bool cached_absolute_bounds_are_dirty_ = true;
   mutable bool has_selection_bounds_ = false;
 
@@ -125,8 +131,6 @@ class SelectionEditor final : public GarbageCollected<SelectionEditor>,
   mutable uint64_t style_version_for_absolute_bounds_ =
       static_cast<uint64_t>(-1);
 #endif
-
-  DISALLOW_COPY_AND_ASSIGN(SelectionEditor);
 };
 
 }  // namespace blink

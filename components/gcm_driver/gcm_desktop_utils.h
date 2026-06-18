@@ -1,15 +1,15 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef COMPONENTS_GCM_DRIVER_GCM_GCM_DESKTOP_UTILS_H_
-#define COMPONENTS_GCM_DRIVER_GCM_GCM_DESKTOP_UTILS_H_
+#ifndef COMPONENTS_GCM_DRIVER_GCM_DESKTOP_UTILS_H_
+#define COMPONENTS_GCM_DRIVER_GCM_DESKTOP_UTILS_H_
 
 #include <memory>
 
-#include "base/memory/ref_counted.h"
-#include "base/sequenced_task_runner.h"
-#include "components/version_info/version_info.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/task/sequenced_task_runner.h"
+#include "components/version_info/channel.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "services/network/public/mojom/proxy_resolving_socket.mojom-forward.h"
 
@@ -23,6 +23,10 @@ class NetworkConnectionTracker;
 class SharedURLLoaderFactory;
 }
 
+namespace os_crypt_async {
+class OSCryptAsync;
+}
+
 namespace gcm {
 
 class GCMDriver;
@@ -32,7 +36,6 @@ std::unique_ptr<GCMDriver> CreateGCMDriverDesktop(
     std::unique_ptr<GCMClientFactory> gcm_client_factory,
     PrefService* prefs,
     const base::FilePath& store_path,
-    bool remove_account_mappings_with_email_key,
     base::RepeatingCallback<void(
         mojo::PendingReceiver<network::mojom::ProxyResolvingSocketFactory>)>
         get_socket_factory_callback,
@@ -42,8 +45,9 @@ std::unique_ptr<GCMDriver> CreateGCMDriverDesktop(
     const std::string& product_category_for_subtypes,
     const scoped_refptr<base::SequencedTaskRunner>& ui_task_runner,
     const scoped_refptr<base::SequencedTaskRunner>& io_task_runner,
-    const scoped_refptr<base::SequencedTaskRunner>& blocking_task_runner);
+    const scoped_refptr<base::SequencedTaskRunner>& blocking_task_runner,
+    os_crypt_async::OSCryptAsync* os_crypt_async);
 
 }  // namespace gcm
 
-#endif  // COMPONENTS_GCM_DRIVER_GCM_GCM_DESKTOP_UTILS_H_
+#endif  // COMPONENTS_GCM_DRIVER_GCM_DESKTOP_UTILS_H_

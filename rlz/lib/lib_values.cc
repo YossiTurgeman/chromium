@@ -1,12 +1,16 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-//
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/390223051): Remove C-library calls to fix the errors.
+#pragma allow_unsafe_libc_calls
+#endif
+
 // Key and value names of the location of the RLZ shared state.
 
 #include "rlz/lib/lib_values.h"
 
-#include "base/strings/stringprintf.h"
 #include "rlz/lib/assert.h"
 
 namespace rlz_lib {
@@ -155,13 +159,17 @@ bool GetAccessPointFromName(const char* name, AccessPoint* point) {
 
 const char* GetEventName(Event event) {
   switch (event) {
-  case INVALID_EVENT: return "";
-  case INSTALL:       return "I";
-  case SET_TO_GOOGLE: return "S";
-  case FIRST_SEARCH:  return "F";
-  case REPORT_RLS:    return "R";
-  case ACTIVATE:      return "A";
-  case LAST_EVENT:    ;  // Fall through.
+  case INVALID_EVENT:                    return "";
+  case INSTALL:                          return "I";
+  case SET_TO_GOOGLE:                    return "S";
+  case FIRST_SEARCH:                     return "F";
+  case REPORT_RLS:                       return "R";
+  case ACTIVATE:                         return "A";
+  case ENTERPRISE_ENROLLMENT:            return "X";
+  case ENTERPRISE_UNENROLLMENT:          return "Y";
+  case ENTERPRISE_ENROLLED_ACTIVATE:     return "Z";
+  case ENTERPRISE_ENROLLED_FIRST_SEARCH: return "W";
+  case LAST_EVENT:                       ;  // Fall through.
   }
 
   ASSERT_STRING("GetPointName: Unknown Event");

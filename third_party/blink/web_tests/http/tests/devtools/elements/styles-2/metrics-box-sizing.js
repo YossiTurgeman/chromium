@@ -1,11 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as Elements from 'devtools/panels/elements/elements.js';
 
 (async function() {
   TestRunner.addResult(
       `Tests that content-box and border-box content area dimensions are handled property by the Metrics pane.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <style>
@@ -73,7 +77,7 @@
         'padding: ' + getChildTextByClassName(paddingElement, 'top') + ' ' +
         getChildTextByClassName(paddingElement, 'right') + ' ' + getChildTextByClassName(paddingElement, 'bottom') +
         ' ' + getChildTextByClassName(paddingElement, 'left'));
-    TestRunner.addResult('content: ' + contentDimensions[0].textContent + ' x ' + contentDimensions[1].textContent);
+    TestRunner.addResult('content: ' + contentDimensions[0].textContent + ' x ' + contentDimensions[2].textContent);
   }
 
   function createDoubleClickEvent() {
@@ -82,7 +86,7 @@
     return event;
   }
 
-  var section = UI.panels.elements._metricsWidget;
+  var section = Elements.ElementsPanel.ElementsPanel.instance().metricsWidget;
 
   TestRunner.runTestSuite([
     function testBorderBoxInit1(next) {
@@ -90,7 +94,7 @@
     },
 
     async function testInitialBorderBoxMetrics(next) {
-      await section.doUpdate();
+      await section.performUpdate();
       var spanElements = section.contentElement.getElementsByClassName('content')[0].getElementsByTagName('span');
       contentWidthElement = spanElements[0];
       contentHeightElement = spanElements[1];
@@ -113,7 +117,7 @@
     },
 
     async function testInitialContentBoxMetrics(next) {
-      await section.doUpdate();
+      await section.performUpdate();
       var spanElements = section.contentElement.getElementsByClassName('content')[0].getElementsByTagName('span');
       contentWidthElement = spanElements[0];
       contentHeightElement = spanElements[1];

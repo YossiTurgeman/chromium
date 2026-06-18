@@ -1,10 +1,10 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/network/url_request_context_builder_mojo.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
 #include "base/test/task_environment.h"
@@ -24,9 +24,9 @@
 #include "testing/platform_test.h"
 #include "url/gurl.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "services/network/mock_mojo_dhcp_wpad_url_client.h"
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace network {
 
@@ -76,10 +76,10 @@ TEST_F(URLRequestContextBuilderMojoTest, MojoProxyResolver) {
   builder_.SetMojoProxyResolverFactory(
       test_mojo_proxy_resolver_factory_.CreateFactoryRemote());
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   builder_.SetDhcpWpadUrlClient(
       MockMojoDhcpWpadUrlClient::CreateWithSelfOwnedReceiver(std::string()));
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
   std::unique_ptr<net::URLRequestContext> context(builder_.Build());
   net::TestDelegate delegate;
@@ -88,7 +88,7 @@ TEST_F(URLRequestContextBuilderMojoTest, MojoProxyResolver) {
       &delegate, TRAFFIC_ANNOTATION_FOR_TESTS));
   request->SetExtraRequestHeaderByName("Foo", "Bar", false);
   request->Start();
-  base::RunLoop().Run();
+  delegate.RunUntilComplete();
   EXPECT_EQ("Bar", delegate.data_received());
 
   // Make sure that the Mojo factory was used.
@@ -112,10 +112,10 @@ TEST_F(URLRequestContextBuilderMojoTest, ShutdownWithHungRequest) {
   builder_.SetMojoProxyResolverFactory(
       test_mojo_proxy_resolver_factory_.CreateFactoryRemote());
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   builder_.SetDhcpWpadUrlClient(
       MockMojoDhcpWpadUrlClient::CreateWithSelfOwnedReceiver(std::string()));
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
   std::unique_ptr<net::URLRequestContext> context(builder_.Build());
   net::TestDelegate delegate;

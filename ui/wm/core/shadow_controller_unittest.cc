@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,17 @@
 #include <memory>
 #include <vector>
 
-#include "base/macros.h"
 #include "ui/aura/client/aura_constants.h"
 #include "ui/aura/client/window_parenting_client.h"
 #include "ui/aura/test/aura_test_base.h"
+#include "ui/aura/test/test_windows.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_event_dispatcher.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
+#include "ui/color/color_id.h"
+#include "ui/color/color_mixer.h"
+#include "ui/color/color_provider.h"
+#include "ui/color/color_recipe.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor_extra/shadow.h"
 #include "ui/wm/core/shadow_controller_delegate.h"
@@ -26,6 +31,10 @@ namespace wm {
 class ShadowControllerTest : public aura::test::AuraTestBase {
  public:
   ShadowControllerTest() {}
+
+  ShadowControllerTest(const ShadowControllerTest&) = delete;
+  ShadowControllerTest& operator=(const ShadowControllerTest&) = delete;
+
   ~ShadowControllerTest() override {}
 
   void SetUp() override {
@@ -54,8 +63,6 @@ class ShadowControllerTest : public aura::test::AuraTestBase {
 
  private:
   std::unique_ptr<ShadowController> shadow_controller_;
-
-  DISALLOW_COPY_AND_ASSIGN(ShadowControllerTest);
 };
 
 // Tests that various methods in Window update the Shadow object as expected.
@@ -115,6 +122,30 @@ TEST_F(ShadowControllerTest, ShadowBounds) {
             shadow->content_bounds().ToString());
 }
 
+// Tests that the window's shadow's bounds are not updated if not following
+// the window bounds.
+TEST_F(ShadowControllerTest, ShadowBoundsDetached) {
+  const gfx::Rect kInitialBounds(20, 30, 400, 300);
+  std::unique_ptr<aura::Window> window = aura::test::CreateTestWindow(
+      {.parent = root_window(), .bounds = kInitialBounds});
+  window->Show();
+  const ui::Shadow* shadow = ShadowController::GetShadowForWindow(window.get());
+  ASSERT_TRUE(shadow);
+  EXPECT_EQ(gfx::Rect(kInitialBounds.size()), shadow->content_bounds());
+
+  // When we change the window's bounds, the shadow's should be updated too.
+  const gfx::Rect kBounds1(30, 40, 100, 200);
+  window->SetBounds(kBounds1);
+  EXPECT_EQ(gfx::Rect(kBounds1.size()), shadow->content_bounds());
+
+  // Once |kUseWindowBoundsForShadow| is false, the shadow's bounds should no
+  // longer follow the window bounds.
+  window->SetProperty(aura::client::kUseWindowBoundsForShadow, false);
+  gfx::Rect kBounds2(50, 60, 500, 400);
+  window->SetBounds(kBounds2);
+  EXPECT_EQ(gfx::Rect(kBounds1.size()), shadow->content_bounds());
+}
+
 // Tests that activating a window changes the shadow style.
 TEST_F(ShadowControllerTest, ShadowStyle) {
   std::unique_ptr<aura::Window> window1(new aura::Window(NULL));
@@ -158,13 +189,16 @@ TEST_F(ShadowControllerTest, ShowState) {
   ASSERT_TRUE(shadow != NULL);
   EXPECT_EQ(kShadowElevationInactiveWindow, shadow->desired_elevation());
 
-  window->SetProperty(aura::client::kShowStateKey, ui::SHOW_STATE_MAXIMIZED);
+  window->SetProperty(aura::client::kShowStateKey,
+                      ui::mojom::WindowShowState::kMaximized);
   EXPECT_FALSE(shadow->layer()->visible());
 
-  window->SetProperty(aura::client::kShowStateKey, ui::SHOW_STATE_NORMAL);
+  window->SetProperty(aura::client::kShowStateKey,
+                      ui::mojom::WindowShowState::kNormal);
   EXPECT_TRUE(shadow->layer()->visible());
 
-  window->SetProperty(aura::client::kShowStateKey, ui::SHOW_STATE_FULLSCREEN);
+  window->SetProperty(aura::client::kShowStateKey,
+                      ui::mojom::WindowShowState::kFullscreen);
   EXPECT_FALSE(shadow->layer()->visible());
 }
 
@@ -228,37 +262,113 @@ TEST_F(ShadowControllerTest, TransientParentKeepsActiveShadow) {
   EXPECT_EQ(kShadowElevationActiveWindow, shadow1->desired_elevation());
 }
 
+// Tests that the shadow color will be updated by setting the shadow colors map.
+TEST_F(ShadowControllerTest, SetColorsMapToShadow) {
+  std::unique_ptr<aura::Window> window(new aura::Window(nullptr));
+  window->SetType(aura::client::WINDOW_TYPE_NORMAL);
+  window->Init(ui::LAYER_TEXTURED);
+  ParentWindow(window.get());
+  window->SetBounds(gfx::Rect(10, 20, 300, 400));
+  window->Show();
+
+  ui::Shadow* shadow = ShadowController::GetShadowForWindow(window.get());
+  // Before setting color map, the shadow should has default colors.
+  const auto* default_details = shadow->details_for_testing();
+  SkColor default_key_color = SkColorSetA(SK_ColorBLACK, 0x3d);
+  SkColor default_ambient_color = SkColorSetA(SK_ColorBLACK, 0x1f);
+#if BUILDFLAG(IS_CHROMEOS)
+  default_ambient_color = SkColorSetA(SK_ColorBLACK, 0x1a);
+#endif
+  EXPECT_EQ(default_details->values[0].color(), default_key_color);
+  EXPECT_EQ(default_details->values[1].color(), default_ambient_color);
+
+  // Change shadow colors map.
+  ui::ColorProvider color_provider;
+  ui::ColorMixer& mixer = color_provider.AddMixer();
+  mixer[ui::kColorShadowValueKeyShadowElevationTwelve] = {SK_ColorYELLOW};
+  mixer[ui::kColorShadowValueAmbientShadowElevationTwelve] = {SK_ColorRED};
+  mixer[ui::kColorShadowValueKeyShadowElevationTwentyFour] = {SK_ColorGREEN};
+  mixer[ui::kColorShadowValueAmbientShadowElevationTwentyFour] = {SK_ColorBLUE};
+
+  shadow->SetElevationToColorsMap(
+      ShadowController::GenerateShadowColorsMap(&color_provider));
+
+  // After setting color map, the shadow colors will be updated.
+  const auto* inactive_details = shadow->details_for_testing();
+  EXPECT_EQ(inactive_details->values[0].color(), SK_ColorYELLOW);
+  EXPECT_EQ(inactive_details->values[1].color(), SK_ColorRED);
+
+  // Activate window will change shadow colors.
+  ActivateWindow(window.get());
+  const auto* active_details = shadow->details_for_testing();
+  EXPECT_EQ(active_details->values[0].color(), SK_ColorGREEN);
+  EXPECT_EQ(active_details->values[1].color(), SK_ColorBLUE);
+}
+
 namespace {
 
 class TestShadowControllerDelegate : public wm::ShadowControllerDelegate {
  public:
-  TestShadowControllerDelegate() {}
-  ~TestShadowControllerDelegate() override {}
+  TestShadowControllerDelegate() = default;
+
+  TestShadowControllerDelegate(const TestShadowControllerDelegate&) = delete;
+  TestShadowControllerDelegate& operator=(const TestShadowControllerDelegate&) =
+      delete;
+
+  ~TestShadowControllerDelegate() override = default;
+
+  bool ShouldObserveWindow(const aura::Window* window) override {
+    return window->GetType() != aura::client::WINDOW_TYPE_CONTROL;
+  }
 
   bool ShouldShowShadowForWindow(const aura::Window* window) override {
     return window->parent();
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(TestShadowControllerDelegate);
+  bool ShouldUpdateShadowOnWindowPropertyChange(const aura::Window* window,
+                                                const void* key,
+                                                intptr_t old) override {
+    return false;
+  }
+
+  void ApplyColorThemeToWindowShadow(aura::Window* window) override {}
+
+  bool ShouldRoundShadowForWindow(const aura::Window* window) override {
+    return true;
+  }
 };
 
 }  // namespace
 
 TEST_F(ShadowControllerTest, UpdateShadowWhenAddedToParent) {
   InstallShadowController(std::make_unique<TestShadowControllerDelegate>());
-  std::unique_ptr<aura::Window> window1(new aura::Window(NULL));
-  window1->SetType(aura::client::WINDOW_TYPE_NORMAL);
-  window1->Init(ui::LAYER_TEXTURED);
-  window1->SetBounds(gfx::Rect(10, 20, 300, 400));
-  window1->Show();
-  EXPECT_FALSE(ShadowController::GetShadowForWindow(window1.get()));
+  {
+    std::unique_ptr<aura::Window> window(new aura::Window(nullptr));
+    window->SetType(aura::client::WINDOW_TYPE_NORMAL);
+    window->Init(ui::LAYER_TEXTURED);
+    window->SetBounds(gfx::Rect(10, 20, 300, 400));
+    window->Show();
+    EXPECT_FALSE(ShadowController::GetShadowForWindow(window.get()));
 
-  ParentWindow(window1.get());
+    ParentWindow(window.get());
 
-  ASSERT_TRUE(ShadowController::GetShadowForWindow(window1.get()));
-  EXPECT_TRUE(
-      ShadowController::GetShadowForWindow(window1.get())->layer()->visible());
+    ASSERT_TRUE(ShadowController::GetShadowForWindow(window.get()));
+    EXPECT_TRUE(
+        ShadowController::GetShadowForWindow(window.get())->layer()->visible());
+  }
+  {
+    // The creation of shadow for TYPE_CONTROL is blocked by the delegate.
+    std::unique_ptr<aura::Window> embedded(new aura::Window(nullptr));
+    embedded->SetType(aura::client::WINDOW_TYPE_CONTROL);
+    embedded->Init(ui::LAYER_TEXTURED);
+    embedded->SetBounds(gfx::Rect(10, 20, 300, 400));
+    embedded->Show();
+    EXPECT_FALSE(ShadowController::GetShadowForWindow(embedded.get()));
+
+    ParentWindow(embedded.get());
+
+    ASSERT_FALSE(ShadowController::GetShadowForWindow(embedded.get()));
+  }
 }
 
 }  // namespace wm

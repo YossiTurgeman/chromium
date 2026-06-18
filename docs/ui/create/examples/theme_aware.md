@@ -38,7 +38,7 @@ such as how to lay out UI elements and how to customize them.
 ## Run the example
 
 The example code is in the file
-[`ui/views/examples/colored_dialog_example.cc`](https://source.chromium.org/chromium/chromium/src/+/master:ui/views/examples/colored_dialog_example.cc)
+[`ui/views/examples/colored_dialog_example.cc`](https://source.chromium.org/chromium/chromium/src/+/main:ui/views/examples/colored_dialog_example.cc)
 and its corresponding header file. You can run it on Windows or Linux via
 the `views_examples` application. Change the path accordingly based on your
 platform and building environment:
@@ -68,18 +68,18 @@ is necessary.
 
   SetLayoutManager(std::make_unique<views::FillLayout>());
   set_margins(views::LayoutProvider::Get()->GetDialogInsetsForContentType(
-      views::CONTROL, views::CONTROL));
+      views::DialogContentType::kControl, views::DialogContentType::kControl));
 
   textfield_ = AddChildView(std::make_unique<views::Textfield>());
   textfield_->SetPlaceholderText(
       l10n_util::GetStringUTF16(IDS_COLORED_DIALOG_TEXTFIELD_PLACEHOLDER));
-  textfield_->SetAccessibleName(
+  textfield_->GetViewAccessibility().SetName(
       l10n_util::GetStringUTF16(IDS_COLORED_DIALOG_TEXTFIELD_AX_LABEL));
   textfield_->set_controller(this);
 
-  SetButtonLabel(ui::DIALOG_BUTTON_OK,
+  SetButtonLabel(ui::mojom::DialogButton::kOk,
                  l10n_util::GetStringUTF16(IDS_COLORED_DIALOG_SUBMIT_BUTTON));
-  SetButtonEnabled(ui::DIALOG_BUTTON_OK, false);
+  SetButtonEnabled(ui::mojom::DialogButton::kOk, false);
 ```
 
 
@@ -92,10 +92,9 @@ theme changes, including when a `View` is first shown.
 
 
 ``` cpp
-class ThemeTrackingCheckbox : public views::Checkbox,
-                              public views::ButtonListener {
+class ThemeTrackingCheckbox : public views::Checkbox {
  public:
-  explicit ThemeTrackingCheckbox(const base::string16& label)
+  explicit ThemeTrackingCheckbox(const std::u16string& label)
       : Checkbox(label, this) {}
   ThemeTrackingCheckbox(const ThemeTrackingCheckbox&) = delete;
   ThemeTrackingCheckbox& operator=(const ThemeTrackingCheckbox&) = delete;
@@ -107,15 +106,16 @@ class ThemeTrackingCheckbox : public views::Checkbox,
 
     // Without this, the checkbox would not update for external (e.g. OS-driven)
     // theme changes.
-    SetChecked(GetNativeTheme()->ShouldUseDarkColors());
+    SetChecked(GetNativeTheme()->preferred_color_scheme() ==
+               ui::NativeTheme::PreferredColorScheme::kDark);
   }
 
-  // views::ButtonListener:
-  void ButtonPressed(views::Button* sender, const ui::Event& event) override {
-    GetNativeTheme()->set_use_dark_colors(GetChecked());
-
+  void ButtonPressed() {
+    GetNativeTheme()->set_preferred_color_scheme(
+        GetChecked() ? ui::NativeTheme::PreferredColorScheme::kDark
+                     : ui::NativeTheme::PreferredColorScheme::kLight);
     // An OS or Chrome theme change would do this automatically.
-    GetWidget()->ThemeChanged();
+    GetNativeTheme()->NotifyOnNativeThemeUpdated();
   }
 };
 ```
@@ -138,7 +138,9 @@ theme changes.
 
 ``` cpp
 AddChildView(std::make_unique<TextVectorImageButton>(
-      this, l10n_util::GetStringUTF16(IDS_COLORED_DIALOG_CHOOSER_BUTTON),
+      base::BindRepeating(&ColoredDialogChooser::ButtonPressed,
+                          base::Unretained(this)),
+      l10n_util::GetStringUTF16(IDS_COLORED_DIALOG_CHOOSER_BUTTON),
       views::kInfoIcon));
 ```
 
@@ -153,10 +155,10 @@ change.
 ``` cpp
 class TextVectorImageButton : public views::MdTextButton {
 public:
- TextVectorImageButton(ButtonListener* listener,
-                       const base::string16& text,
+ TextVectorImageButton(PressedCallback callback,
+                       const std::u16string& text,
                        const gfx::VectorIcon& icon)
-     : MdTextButton(listener, text), icon_(icon) {}
+     : MdTextButton(std::move(callback), text), icon_(icon) {}
  TextVectorImageButton(const TextVectorImageButton&) = delete;
  TextVectorImageButton& operator=(const TextVectorImageButton&) = delete;
  ~TextVectorImageButton() override = default;

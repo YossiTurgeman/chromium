@@ -77,7 +77,7 @@ def never_ending_command():
     because all instances will be killed.
     """
     if sys.platform == 'win32':
-        return ['wmic']
+        return ['cmd', '/C', 'more']
     return ['yes']
 
 
@@ -100,7 +100,7 @@ class ExecutiveTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             executive.run_command('echo')
         with self.assertRaises(AssertionError):
-            executive.run_command(u'echo')
+            executive.run_command('echo')
         executive.run_command(command_line('echo', 'foo'))
         executive.run_command(tuple(command_line('echo', 'foo')))
 
@@ -110,29 +110,29 @@ class ExecutiveTest(unittest.TestCase):
         executive.popen(command_line('echo', 1), stdout=executive.PIPE).wait()
         self.assertEqual('echo 1', executive.command_for_printing(['echo', 1]))
 
+    def test_print_command_unicode(self):
+        executive = Executive()
+        expected_result = 'echo 1 a\\xac'
+        self.assertEqual(expected_result,
+                         executive.command_for_printing(['echo', 1, 'a\xac']))
+
     def test_popen_args(self):
         executive = Executive()
         # Explicitly naming the 'args' argument should not throw an exception.
         executive.popen(
             args=command_line('echo', 1), stdout=executive.PIPE).wait()
 
+    @unittest.skipIf(sys.platform == 'win32', 'crbug.com/40218265')
     def test_run_command_with_unicode(self):
         """Validate that it is safe to pass unicode() objects
         to Executive.run* methods, and they will return unicode()
         objects by default unless decode_output=False
         """
-        unicode_tor_input = u"WebKit \u2661 Tor Arne Vestb\u00F8!"
-        if sys.platform == 'win32':
-            encoding = 'mbcs'
-        else:
-            encoding = 'utf-8'
+        unicode_tor_input = "WebKit \u2661 Tor Arne Vestb\u00F8!"
+        encoding = 'utf-8'
         encoded_tor = unicode_tor_input.encode(encoding)
-        # On Windows, we expect the unicode->mbcs->unicode roundtrip to be
-        # lossy. On other platforms, we expect a lossless roundtrip.
-        if sys.platform == 'win32':
-            unicode_tor_output = encoded_tor.decode(encoding)
-        else:
-            unicode_tor_output = unicode_tor_input
+        # We expect a lossless roundtrip.
+        unicode_tor_output = unicode_tor_input
 
         executive = Executive()
 
@@ -169,6 +169,7 @@ class ExecutiveTest(unittest.TestCase):
         # Killing again should fail silently.
         executive.kill_process(process.pid)
 
+    @unittest.skip('Flaky. See crbug.com/1242429.')
     def test_timeout_exceeded(self):
         executive = Executive()
 
@@ -179,6 +180,7 @@ class ExecutiveTest(unittest.TestCase):
         with self.assertRaises(ScriptError):
             timeout()
 
+    @unittest.skip('Flaky. See crbug.com/1242429.')
     def test_timeout_exceeded_exit_code(self):
         executive = Executive()
         exit_code = executive.run_command(

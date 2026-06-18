@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,12 @@
 
 #include "build/build_config.h"
 
-class Profile;
-
 namespace base {
 class FilePath;
 }
 
 namespace installer {
-class MasterPreferences;
-using InitialPreferences = MasterPreferences;
+class InitialPreferences;
 }
 
 namespace first_run {
@@ -23,6 +20,25 @@ namespace first_run {
 struct MasterPrefs;
 
 namespace internal {
+
+// UMA enum for tracking import bookmarks from Initial Preferences on First
+// Run results.
+// These values are persisted to logs. Entries should not be
+// renumbered and numeric values should never be reused.
+//
+// LINT.IfChange(FirstRunImportBookmarksResult)
+enum class FirstRunImportBookmarksResult {
+  // Bookmarks imported successfully.
+  kSuccess = 0,
+
+  // Import failed due to missing/malformed data.
+  kInvalidDict = 1,
+
+  // Import failed due to profile not supporting BookmarkModel.
+  kInvalidProfile = 2,
+  kMaxValue = kInvalidProfile,
+};
+// LINT.ThenChange(//tools/metrics/histograms/enums.xml:FirstRunImportBookmarksResult)
 
 enum FirstRunState {
   FIRST_RUN_UNKNOWN,  // The state is not tested or set yet.
@@ -35,18 +51,9 @@ void SetupInitialPrefsFromInstallPrefs(
     const installer::InitialPreferences& install_prefs,
     MasterPrefs* out_prefs);
 
-// Get the file path of the first run sentinel; returns false on failure.
-bool GetFirstRunSentinelFilePath(base::FilePath* path);
-
-// Create the first run sentinel file; returns false on failure.
-bool CreateSentinel();
-
 // -- Platform-specific functions --
 
-void DoPostImportPlatformSpecificTasks(Profile* profile);
-
-// Returns true if the sentinel file exists (or the path cannot be obtained).
-bool IsFirstRunSentinelPresent();
+void DoPostImportPlatformSpecificTasks();
 
 // This function has a common implementationin for all non-linux platforms, and
 // a linux specific implementation.
@@ -65,13 +72,19 @@ FirstRunState DetermineFirstRunState(bool has_sentinel,
                                      bool force_first_run,
                                      bool no_first_run);
 
-#if defined(OS_MAC) || (defined(OS_LINUX) && !defined(OS_CHROMEOS))
+#if BUILDFLAG(IS_LINUX)
+// Shows the EULA dialog if required. Returns true if the EULA is accepted
+// or not required. Returns false if the EULA has not been accepted.
+bool ShowEulaDialog();
+#endif
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 // For testing, forces the first run dialog to either be shown or not. If not
 // called, the decision to show the dialog or not will be made by Chrome based
 // on a number of factors (such as install type, whether it's a Chrome-branded
 // build, etc).
 void ForceFirstRunDialogShownForTesting(bool shown);
-#endif  // defined(OS_MAC) || (defined(OS_LINUX) && !defined(OS_CHROMEOS))
+#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 
 }  // namespace internal
 }  // namespace first_run

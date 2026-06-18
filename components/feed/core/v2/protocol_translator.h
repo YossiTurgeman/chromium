@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,17 @@
 #define COMPONENTS_FEED_CORE_V2_PROTOCOL_TRANSLATOR_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include "base/optional.h"
 #include "base/time/time.h"
 #include "components/feed/core/proto/v2/packing.pb.h"
 #include "components/feed/core/proto/v2/store.pb.h"
 #include "components/feed/core/proto/v2/wire/data_operation.pb.h"
 #include "components/feed/core/proto/v2/wire/response.pb.h"
+#include "components/feed/core/v2/public/types.h"
 #include "components/feed/core/v2/scheduling.h"
+#include "components/feed/core/v2/types.h"
 
 namespace feed {
 
@@ -63,17 +65,41 @@ struct RefreshResponseData {
   std::unique_ptr<StreamModelUpdateRequest> model_update_request;
 
   // Server-defined request schedule, if provided.
-  base::Optional<RequestSchedule> request_schedule;
+  std::optional<RequestSchedule> request_schedule;
+
+  // Server-defined content lifetime, if provided.
+  std::optional<feedstore::Metadata::StreamMetadata::ContentLifetime>
+      content_lifetime;
+
+  // Server-defined session id token, if provided.
+  std::optional<std::string> session_id;
+
+  // List of experiments from the server, if provided.
+  std::optional<Experiments> experiments;
+
+  // Serialized server-provided feed launch CUI metadata.
+  std::optional<std::string> feed_launch_cui_metadata;
+
+  // Server-reported network timestamps. They can be compared to
+  // each other but not to client timestamps.
+  base::Time server_request_received_timestamp;
+  base::Time server_response_sent_timestamp;
+
+  // The client-side timestamp that the response is fetched.
+  base::Time last_fetch_timestamp;
+
+  bool web_and_app_activity_enabled = false;
+  bool discover_personalization_enabled = false;
 };
 
-base::Optional<feedstore::DataOperation> TranslateDataOperation(
+std::optional<feedstore::DataOperation> TranslateDataOperation(
     base::Time current_time,
     feedwire::DataOperation wire_operation);
 
 RefreshResponseData TranslateWireResponse(
     feedwire::Response response,
     StreamModelUpdateRequest::Source source,
-    bool was_signed_in_request,
+    const AccountInfo& account_info,
     base::Time current_time);
 
 std::vector<feedstore::DataOperation> TranslateDismissData(

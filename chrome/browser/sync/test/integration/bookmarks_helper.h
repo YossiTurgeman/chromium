@@ -1,29 +1,34 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_SYNC_TEST_INTEGRATION_BOOKMARKS_HELPER_H_
 #define CHROME_BROWSER_SYNC_TEST_INTEGRATION_BOOKMARKS_HELPER_H_
 
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/callback_forward.h"
-#include "base/compiler_specific.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
+#include "base/strings/utf_string_conversions.h"
+#include "base/uuid.h"
 #include "chrome/browser/sync/test/integration/await_match_status_change_checker.h"
+#include "chrome/browser/sync/test/integration/fake_server_match_status_checker.h"
 #include "chrome/browser/sync/test/integration/multi_client_status_change_checker.h"
 #include "chrome/browser/sync/test/integration/single_client_status_change_checker.h"
-#include "components/bookmarks/browser/bookmark_model_observer.h"
+#include "components/bookmarks/browser/base_bookmark_model_observer.h"
 #include "components/bookmarks/browser/bookmark_node.h"
 #include "components/bookmarks/browser/bookmark_test_util.h"
-#include "components/sync/engine_impl/loopback_server/loopback_server_entity.h"
-#include "components/sync/nigori/cryptographer.h"
-#include "components/sync/test/fake_server/fake_server.h"
+#include "components/sync/engine/cryptographer.h"
+#include "components/sync/engine/loopback_server/loopback_server_entity.h"
+#include "components/sync/test/fake_server.h"
+#include "components/sync_bookmarks/bookmark_model_view.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "url/gurl.h"
@@ -41,46 +46,52 @@ class Image;
 
 namespace bookmarks_helper {
 
-MATCHER_P(HasGuid, expected_guid, "") {
-  const bookmarks::BookmarkNode* actual_node = arg;
-  return actual_node->guid() == expected_guid;
-}
+// Represents the two underlying instances of Bookmarks, one for
+// the profile store (used when sync-the-feature is enabled) and the other one
+// for the account store (used otherwise).
+enum class StoreType {
+  kLocalOrSyncableStore,
+  kAccountStore,
+};
 
 // Used to access the bookmark undo service within a particular sync profile.
-BookmarkUndoService* GetBookmarkUndoService(int index) WARN_UNUSED_RESULT;
+[[nodiscard]] BookmarkUndoService* GetBookmarkUndoService(int index);
 
 // Used to access the bookmark model within a particular sync profile.
-bookmarks::BookmarkModel* GetBookmarkModel(int index) WARN_UNUSED_RESULT;
+[[nodiscard]] bookmarks::BookmarkModel* GetBookmarkModel(int index);
 
 // Used to access the bookmark bar within a particular sync profile.
-const bookmarks::BookmarkNode* GetBookmarkBarNode(int index) WARN_UNUSED_RESULT;
+[[nodiscard]] const bookmarks::BookmarkNode* GetBookmarkBarNode(
+    int index,
+    StoreType store_type);
 
 // Used to access the "other bookmarks" node within a particular sync profile.
-const bookmarks::BookmarkNode* GetOtherNode(int index) WARN_UNUSED_RESULT;
+[[nodiscard]] const bookmarks::BookmarkNode* GetOtherNode(int index,
+                                                          StoreType store_type);
 
 // Used to access the "Synced Bookmarks" node within a particular sync profile.
-const bookmarks::BookmarkNode* GetSyncedBookmarksNode(int index)
-    WARN_UNUSED_RESULT;
+[[nodiscard]] const bookmarks::BookmarkNode* GetSyncedBookmarksNode(
+    int index,
+    StoreType store_type);
 
 // Used to access the "Managed Bookmarks" node for the given profile.
-const bookmarks::BookmarkNode* GetManagedNode(int index) WARN_UNUSED_RESULT;
-
-// Used to access the bookmarks within the verifier sync profile.
-bookmarks::BookmarkModel* GetVerifierBookmarkModel() WARN_UNUSED_RESULT;
+[[nodiscard]] const bookmarks::BookmarkNode* GetManagedNode(int index);
 
 // Adds a URL with address |url| and title |title| to the bookmark bar of
 // profile |profile|. Returns a pointer to the node that was added.
 const bookmarks::BookmarkNode* AddURL(int profile,
-                                      const std::string& title,
-                                      const GURL& url) WARN_UNUSED_RESULT;
+                                      const std::u16string& title,
+                                      const GURL& url,
+                                      StoreType store_type);
 
 // Adds a URL with address |url| and title |title| to the bookmark bar of
 // profile |profile| at position |index|. Returns a pointer to the node that
 // was added.
 const bookmarks::BookmarkNode* AddURL(int profile,
                                       size_t index,
-                                      const std::string& title,
-                                      const GURL& url) WARN_UNUSED_RESULT;
+                                      const std::u16string& title,
+                                      const GURL& url,
+                                      StoreType store_type);
 
 // Adds a URL with address |url| and title |title| under the node |parent| of
 // profile |profile| at position |index|. Returns a pointer to the node that
@@ -88,20 +99,21 @@ const bookmarks::BookmarkNode* AddURL(int profile,
 const bookmarks::BookmarkNode* AddURL(int profile,
                                       const bookmarks::BookmarkNode* parent,
                                       size_t index,
-                                      const std::string& title,
-                                      const GURL& url) WARN_UNUSED_RESULT;
+                                      const std::u16string& title,
+                                      const GURL& url);
 
 // Adds a folder named |title| to the bookmark bar of profile |profile|.
 // Returns a pointer to the folder that was added.
-const bookmarks::BookmarkNode* AddFolder(int profile, const std::string& title)
-    WARN_UNUSED_RESULT;
+const bookmarks::BookmarkNode* AddFolder(int profile,
+                                         const std::u16string& title,
+                                         StoreType store_type);
 
 // Adds a folder named |title| to the bookmark bar of profile |profile| at
 // position |index|. Returns a pointer to the folder that was added.
 const bookmarks::BookmarkNode* AddFolder(int profile,
                                          size_t index,
-                                         const std::string& title)
-    WARN_UNUSED_RESULT;
+                                         const std::u16string& title,
+                                         StoreType store_type);
 
 // Adds a folder named |title| to the node |parent| in the bookmark model of
 // profile |profile| at position |index|. Returns a pointer to the node that
@@ -109,23 +121,21 @@ const bookmarks::BookmarkNode* AddFolder(int profile,
 const bookmarks::BookmarkNode* AddFolder(int profile,
                                          const bookmarks::BookmarkNode* parent,
                                          size_t index,
-                                         const std::string& title)
-    WARN_UNUSED_RESULT;
+                                         const std::u16string& title);
 
 // Changes the title of the node |node| in the bookmark model of profile
 // |profile| to |new_title|.
 void SetTitle(int profile,
               const bookmarks::BookmarkNode* node,
-              const std::string& new_title);
+              const std::u16string& new_title);
 
 // The source of the favicon.
-enum FaviconSource {
-  FROM_UI,
-  FROM_SYNC
-};
+enum FaviconSource { FROM_UI, FROM_SYNC };
 
 // Sets the |icon_url| and |image| data for the favicon for |node| in the
-// bookmark model for |profile|.
+// bookmark model for |profile|. Waits until the favicon is loaded, but does so
+// comparing the icon URL and hence is unreliable if the same icon URL has been
+// used before.
 void SetFavicon(int profile,
                 const bookmarks::BookmarkNode* node,
                 const GURL& icon_url,
@@ -150,7 +160,7 @@ void CheckHasNoFavicon(int profile, const GURL& page_url);
 // |profile| to |new_url|. Returns a pointer to the node with the changed url.
 const bookmarks::BookmarkNode* SetURL(int profile,
                                       const bookmarks::BookmarkNode* node,
-                                      const GURL& new_url) WARN_UNUSED_RESULT;
+                                      const GURL& new_url);
 
 // Moves the node |node| in the bookmark model of profile |profile| so it ends
 // up under the node |new_parent| at position |index|.
@@ -163,9 +173,6 @@ void Move(int profile,
 // |parent| at position |index|.
 void Remove(int profile, const bookmarks::BookmarkNode* parent, size_t index);
 
-// Removes all non-permanent nodes in the bookmark model of profile |profile|.
-void RemoveAll(int profile);
-
 // Sorts the children of the node |parent| in the bookmark model of profile
 // |profile|.
 void SortChildren(int profile, const bookmarks::BookmarkNode* parent);
@@ -174,22 +181,14 @@ void SortChildren(int profile, const bookmarks::BookmarkNode* parent);
 // model of profile |profile|.
 void ReverseChildOrder(int profile, const bookmarks::BookmarkNode* parent);
 
-// Checks if the bookmark model of profile |profile| matches the verifier
-// bookmark model. Returns true if they match.
-bool ModelMatchesVerifier(int profile) WARN_UNUSED_RESULT;
-
-// Checks if the bookmark models of all sync profiles match the verifier
-// bookmark model. Returns true if they match.
-bool AllModelsMatchVerifier() WARN_UNUSED_RESULT;
-
 // Checks if the bookmark models of |profile_a| and |profile_b| match each
 // other. Returns true if they match.
-bool ModelsMatch(int profile_a, int profile_b) WARN_UNUSED_RESULT;
+[[nodiscard]] bool ModelsMatch(int profile_a, int profile_b);
 
 // Checks if the bookmark models of all sync profiles match each other. Does
 // not compare them with the verifier bookmark model. Returns true if they
 // match.
-bool AllModelsMatch() WARN_UNUSED_RESULT;
+[[nodiscard]] bool AllModelsMatch();
 
 // Checks if the bookmark model of profile |profile| contains any instances of
 // two bookmarks with the same URL under the same parent folder. Returns true
@@ -201,30 +200,33 @@ bool HasNodeWithURL(int profile, const GURL& url);
 
 // Gets the node in the bookmark model of profile |profile| that has the url
 // |url|. Note: Only one instance of |url| is assumed to be present.
-const bookmarks::BookmarkNode* GetUniqueNodeByURL(int profile, const GURL& url)
-    WARN_UNUSED_RESULT;
+[[nodiscard]] const bookmarks::BookmarkNode* GetUniqueNodeByURL(
+    int profile,
+    const GURL& url);
 
 // Returns the number of bookmarks in bookmark model of profile |profile|.
-size_t CountAllBookmarks(int profile) WARN_UNUSED_RESULT;
+[[nodiscard]] size_t CountAllBookmarks(int profile);
 
 // Returns the number of bookmarks in bookmark model of profile |profile|
 // whose titles match the string |title|.
-size_t CountBookmarksWithTitlesMatching(int profile, const std::string& title)
-    WARN_UNUSED_RESULT;
+[[nodiscard]] size_t CountBookmarksWithTitlesMatching(
+    int profile,
+    const std::u16string& title);
 
 // Returns the number of bookmarks in bookmark model of profile |profile|
 // whose URLs match the |url|.
-size_t CountBookmarksWithUrlsMatching(int profile,
-                                      const GURL& url) WARN_UNUSED_RESULT;
+[[nodiscard]] size_t CountBookmarksWithUrlsMatching(int profile,
+                                                    const GURL& url);
 
 // Returns the number of bookmark folders in the bookmark model of profile
 // |profile| whose titles contain the query string |title|.
-size_t CountFoldersWithTitlesMatching(int profile, const std::string& title)
-    WARN_UNUSED_RESULT;
+[[nodiscard]] size_t CountFoldersWithTitlesMatching(
+    int profile,
+    const std::u16string& title);
 
 // Returns whether there exists a BookmarkNode in the bookmark model of
-// profile |profile| whose GUID matches the string |guid|.
-bool ContainsBookmarkNodeWithGUID(int profile, const std::string& guid);
+// profile |profile| whose UUID matches `uuid`.
+bool ContainsBookmarkNodeWithUuid(int profile, const base::Uuid& uuid);
 
 // Creates a favicon of |color| with image reps of the platform's supported
 // scale factors (eg MacOS) in addition to 1x.
@@ -237,26 +239,26 @@ gfx::Image Create1xFaviconFromPNGFile(const std::string& path);
 std::string IndexedURL(size_t i);
 
 // Returns a URL title identifiable by |i|.
-std::string IndexedURLTitle(size_t i);
+std::u16string IndexedURLTitle(size_t i);
 
 // Returns a folder name identifiable by |i|.
-std::string IndexedFolderName(size_t i);
+std::u16string IndexedFolderName(size_t i);
 
 // Returns a subfolder name identifiable by |i|.
-std::string IndexedSubfolderName(size_t i);
+std::u16string IndexedSubfolderName(size_t i);
 
 // Returns a subsubfolder name identifiable by |i|.
-std::string IndexedSubsubfolderName(size_t i);
+std::u16string IndexedSubsubfolderName(size_t i);
 
 // Creates a server-side entity representing a bookmark with the given title and
 // URL.
 std::unique_ptr<syncer::LoopbackServerEntity> CreateBookmarkServerEntity(
-    const std::string& title,
+    const std::u16string& title,
     const GURL& url);
 
 // Helper class that reacts to any BookmarkModelObserver event by running a
 // callback provided in the constructor.
-class AnyBookmarkChangeObserver : public bookmarks::BookmarkModelObserver {
+class AnyBookmarkChangeObserver : public bookmarks::BaseBookmarkModelObserver {
  public:
   explicit AnyBookmarkChangeObserver(const base::RepeatingClosure& cb);
   ~AnyBookmarkChangeObserver() override;
@@ -265,52 +267,9 @@ class AnyBookmarkChangeObserver : public bookmarks::BookmarkModelObserver {
   AnyBookmarkChangeObserver& operator=(const AnyBookmarkChangeObserver&) =
       delete;
 
-  // BookmarkModelObserver overrides.
-  void BookmarkModelLoaded(bookmarks::BookmarkModel* model,
-                           bool ids_reassigned) override;
-  void BookmarkModelBeingDeleted(bookmarks::BookmarkModel* model) override;
-  void BookmarkNodeMoved(bookmarks::BookmarkModel* model,
-                         const bookmarks::BookmarkNode* old_parent,
-                         size_t old_index,
-                         const bookmarks::BookmarkNode* new_parent,
-                         size_t new_index) override;
-  void BookmarkNodeAdded(bookmarks::BookmarkModel* model,
-                         const bookmarks::BookmarkNode* parent,
-                         size_t index) override;
-  void OnWillRemoveBookmarks(bookmarks::BookmarkModel* model,
-                             const bookmarks::BookmarkNode* parent,
-                             size_t old_index,
-                             const bookmarks::BookmarkNode* node) override;
-  void BookmarkNodeRemoved(bookmarks::BookmarkModel* model,
-                           const bookmarks::BookmarkNode* parent,
-                           size_t old_index,
-                           const bookmarks::BookmarkNode* node,
-                           const std::set<GURL>& no_longer_bookmarked) override;
-  void OnWillChangeBookmarkNode(bookmarks::BookmarkModel* model,
-                                const bookmarks::BookmarkNode* node) override;
-  void BookmarkNodeChanged(bookmarks::BookmarkModel* model,
-                           const bookmarks::BookmarkNode* node) override;
-  void OnWillChangeBookmarkMetaInfo(
-      bookmarks::BookmarkModel* model,
-      const bookmarks::BookmarkNode* node) override;
-  void BookmarkMetaInfoChanged(bookmarks::BookmarkModel* model,
-                               const bookmarks::BookmarkNode* node) override;
-  void BookmarkNodeFaviconChanged(bookmarks::BookmarkModel* model,
-                                  const bookmarks::BookmarkNode* node) override;
-  void OnWillReorderBookmarkNode(bookmarks::BookmarkModel* model,
-                                 const bookmarks::BookmarkNode* node) override;
-  void BookmarkNodeChildrenReordered(
-      bookmarks::BookmarkModel* model,
-      const bookmarks::BookmarkNode* node) override;
-  void ExtensiveBookmarkChangesBeginning(
-      bookmarks::BookmarkModel* model) override;
-  void ExtensiveBookmarkChangesEnded(bookmarks::BookmarkModel* model) override;
-  void OnWillRemoveAllUserBookmarks(bookmarks::BookmarkModel* model) override;
-  void BookmarkAllUserNodesRemoved(bookmarks::BookmarkModel* model,
-                                   const std::set<GURL>& removed_urls) override;
-  void GroupedBookmarkChangesBeginning(
-      bookmarks::BookmarkModel* model) override;
-  void GroupedBookmarkChangesEnded(bookmarks::BookmarkModel* model) override;
+  // BaseBookmarkModelObserver overrides.
+  void BookmarkModelChanged() override;
+  void BookmarkNodeFaviconChanged(const bookmarks::BookmarkNode* node) override;
 
  private:
   const base::RepeatingClosure cb_;
@@ -357,7 +316,9 @@ class BookmarksMatchChecker : public BookmarkModelStatusChangeChecker {
 
   // StatusChangeChecker implementation.
   bool IsExitConditionSatisfied(std::ostream* os) override;
-  bool Wait() override;
+
+ protected:
+  void WillStartWaiting() override;
 };
 
 // Base class used for checkers that verify the state of a single BookmarkModel
@@ -379,17 +340,7 @@ class SingleBookmarkModelStatusChangeChecker
 
  private:
   const int profile_index_;
-  bookmarks::BookmarkModel* bookmark_model_;
-};
-
-// Checker used to block until bookmarks match the verifier bookmark model.
-class BookmarksMatchVerifierChecker : public BookmarkModelStatusChangeChecker {
- public:
-  BookmarksMatchVerifierChecker();
-
-  // StatusChangeChecker implementation.
-  bool IsExitConditionSatisfied(std::ostream* os) override;
-  bool Wait() override;
+  const raw_ptr<bookmarks::BookmarkModel> bookmark_model_;
 };
 
 // Generic status change checker that waits until a predicate as defined by
@@ -400,7 +351,7 @@ class SingleBookmarksModelMatcherChecker
   using Matcher = testing::Matcher<std::vector<const bookmarks::BookmarkNode*>>;
 
   SingleBookmarksModelMatcherChecker(int profile_index, const Matcher& matcher);
-  ~SingleBookmarksModelMatcherChecker();
+  ~SingleBookmarksModelMatcherChecker() override;
 
   // StatusChangeChecker implementation.
   bool IsExitConditionSatisfied(std::ostream* os) final;
@@ -414,7 +365,7 @@ class SingleBookmarksModelMatcherChecker
 class BookmarksTitleChecker : public SingleBookmarkModelStatusChangeChecker {
  public:
   BookmarksTitleChecker(int profile_index,
-                        const std::string& title,
+                        const std::u16string& title,
                         int expected_count);
 
   // StatusChangeChecker implementation.
@@ -422,7 +373,7 @@ class BookmarksTitleChecker : public SingleBookmarkModelStatusChangeChecker {
 
  private:
   const int profile_index_;
-  const std::string title_;
+  const std::u16string title_;
   const int expected_count_;
 };
 
@@ -439,37 +390,40 @@ class BookmarkFaviconLoadedChecker
   bool IsExitConditionSatisfied(std::ostream* os) override;
 
  private:
-  const bookmarks::BookmarkNode* const bookmark_node_;
+  const raw_ptr<const bookmarks::BookmarkNode> bookmark_node_;
 };
 
 // Checker used to block until the bookmarks on the server match a given set of
-// expected bookmarks.
-class ServerBookmarksEqualityChecker : public SingleClientStatusChangeChecker {
+// expected bookmarks. The |title| is comapred to both legacy and full titles.
+class ServerBookmarksEqualityChecker
+    : public fake_server::FakeServerMatchStatusChecker {
  public:
   struct ExpectedBookmark {
-    std::string title;
+    // Used to check both legacy and full titles in specifics.
+    std::u16string title;
     GURL url;
   };
 
   // If a |cryptographer| is provided (i.e. is not nullptr), it is assumed that
   // the server-side data should be encrypted, and the provided cryptographer
   // will be used to decrypt the data prior to checking for equality.
+  // |fake_server| must not be nullptr and must outlive this object.
   ServerBookmarksEqualityChecker(
-      syncer::ProfileSyncService* service,
-      fake_server::FakeServer* fake_server,
-      const std::vector<ExpectedBookmark>& expected_bookmarks,
+      std::vector<ExpectedBookmark> expected_bookmarks,
       syncer::Cryptographer* cryptographer);
 
   bool IsExitConditionSatisfied(std::ostream* os) override;
 
+  ServerBookmarksEqualityChecker(const ServerBookmarksEqualityChecker&) =
+      delete;
+  ServerBookmarksEqualityChecker& operator=(
+      const ServerBookmarksEqualityChecker&) = delete;
+
   ~ServerBookmarksEqualityChecker() override;
 
  private:
-  fake_server::FakeServer* fake_server_;
-  syncer::Cryptographer* cryptographer_;
+  raw_ptr<syncer::Cryptographer> cryptographer_;
   const std::vector<ExpectedBookmark> expected_bookmarks_;
-
-  DISALLOW_COPY_AND_ASSIGN(ServerBookmarksEqualityChecker);
 };
 
 // Checker used to block until the actual number of bookmarks with the given url
@@ -486,11 +440,62 @@ class BookmarksUrlChecker : public SingleBookmarkModelStatusChangeChecker {
   const int expected_count_;
 };
 
-// Checker used to block until there exists a bookmark with the given GUID.
-class BookmarksGUIDChecker : public SingleBookmarksModelMatcherChecker {
+// Checker used to block until there exists a bookmark with the given UUID.
+class BookmarksUuidChecker : public SingleBookmarksModelMatcherChecker {
  public:
-  BookmarksGUIDChecker(int profile, const std::string& guid);
-  ~BookmarksGUIDChecker() override;
+  BookmarksUuidChecker(int profile, const base::Uuid& uuid);
+  ~BookmarksUuidChecker() override;
+};
+
+// Waits until the fake server has the similar structure of bookmarks like the
+// bookmark model. The checker verifies that all nodes have the same UUID,
+// title, URL, parent and order. It doesn't check favicons and any other fields.
+// Note that this class is not enough to verify test's result as it only waits
+// for the state when the bookmark model has the same structure on the server.
+// It doesn't check their content and the expected number of bookmarks. The fake
+// server must have entities with unique UUIDs.
+class BookmarkModelMatchesFakeServerChecker
+    : public SingleClientStatusChangeChecker {
+ public:
+  BookmarkModelMatchesFakeServerChecker(bookmarks::BookmarkModel* model,
+                                        syncer::SyncServiceImpl* service,
+                                        fake_server::FakeServer* fake_server,
+                                        StoreType store_type);
+  ~BookmarkModelMatchesFakeServerChecker() override;
+
+  bool IsExitConditionSatisfied(std::ostream* os) override;
+
+ private:
+  std::map<std::string, sync_pb::SyncEntity>
+  GetServerPermanentBookmarksGroupedBySyncId() const;
+
+  // Fills in |server_bookmarks_by_uuid| with all non-permanent entities stored
+  // on the server. All entities must have unique UUID in specifics. Returns
+  // false if there are duplicate entities on the server.
+  bool GetServerBookmarksByUniqueUuid(std::map<base::Uuid, sync_pb::SyncEntity>*
+                                          server_bookmarks_by_uuid) const;
+
+  // Check that a permanent parent node of given |node| is the same as for the
+  // matching |server_entity|.
+  bool CheckPermanentParentNode(const bookmarks::BookmarkNode* node,
+                                const sync_pb::SyncEntity& server_entity,
+                                std::ostream* os) const;
+
+  // Check that a regular parent node of given |node| matches to the parent of
+  // matching server entity.
+  bool CheckParentNode(
+      const bookmarks::BookmarkNode* node,
+      const std::map<base::Uuid, sync_pb::SyncEntity>& server_bookmarks_by_uuid,
+      std::ostream* os) const;
+
+  // Return ordered UUIDs of server entities grouped by their parents.
+  std::map<std::string, std::vector<base::Uuid>>
+  GetServerUuidsGroupedByParentSyncId(
+      const std::map<base::Uuid, sync_pb::SyncEntity>& server_bookmarks_by_uuid)
+      const;
+
+  const raw_ptr<fake_server::FakeServer> fake_server_;
+  const std::unique_ptr<sync_bookmarks::BookmarkModelView> model_view_;
 };
 
 }  // namespace bookmarks_helper

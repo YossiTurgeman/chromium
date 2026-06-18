@@ -1,20 +1,24 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #include "remoting/host/security_key/security_key_extension_session.h"
 
 #include <stddef.h>
 
+#include <array>
+#include <memory>
+
 #include "base/files/file_path.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/json/json_writer.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/task_environment.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "base/timer/mock_timer.h"
 #include "base/values.h"
 #include "net/base/io_buffer.h"
@@ -34,7 +38,7 @@ namespace remoting {
 namespace {
 
 // Test security key request data.
-const unsigned char kRequestData[] = {
+constexpr auto kRequestData = std::to_array<unsigned char>({
     0x00, 0x00, 0x00, 0x9a, 0x65, 0x1e, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
     0x00, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x60, 0x90,
     0x24, 0x71, 0xf8, 0xf2, 0xe5, 0xdf, 0x7f, 0x81, 0xc7, 0x49, 0xc4, 0xa3,
@@ -48,13 +52,18 @@ const unsigned char kRequestData[] = {
     0x20, 0x3c, 0x00, 0xc6, 0xe1, 0x73, 0x34, 0xe2, 0x23, 0x99, 0xc4, 0xfa,
     0x91, 0xc2, 0xd5, 0x97, 0xc1, 0x8b, 0xd0, 0x3c, 0x13, 0xba, 0xf0, 0xd7,
     0x5e, 0xa3, 0xbc, 0x02, 0x5b, 0xec, 0xe4, 0x4b, 0xae, 0x0e, 0xf2, 0xbd,
-    0xc8, 0xaa};
+    0xc8, 0xaa,
+});
 
 }  // namespace
 
 class TestClientStub : public protocol::ClientStub {
  public:
   TestClientStub();
+
+  TestClientStub(const TestClientStub&) = delete;
+  TestClientStub& operator=(const TestClientStub&) = delete;
+
   ~TestClientStub() override;
 
   // protocol::ClientStub implementation.
@@ -64,12 +73,16 @@ class TestClientStub : public protocol::ClientStub {
   void DeliverHostMessage(const protocol::ExtensionMessage& message) override;
   void SetVideoLayout(const protocol::VideoLayout& layout) override;
   void SetTransportInfo(const protocol::TransportInfo& transport_info) override;
+  void SetActiveDisplay(const protocol::ActiveDisplay& active_display) override;
+  void ControlMicrophone(const protocol::MicrophoneControl& control) override;
 
   // protocol::ClipboardStub implementation.
   void InjectClipboardEvent(const protocol::ClipboardEvent& event) override;
 
   // protocol::CursorShapeStub implementation.
   void SetCursorShape(const protocol::CursorShapeInfo& cursor_shape) override;
+  void SetHostCursorPosition(
+      const protocol::HostCursorPosition& position) override;
 
   // protocol::KeyboardLayoutStub implementation.
   void SetKeyboardLayout(const protocol::KeyboardLayout& layout) override;
@@ -81,8 +94,6 @@ class TestClientStub : public protocol::ClientStub {
  private:
   protocol::ExtensionMessage message_;
   std::unique_ptr<base::RunLoop> run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestClientStub);
 };
 
 TestClientStub::TestClientStub() : run_loop_(new base::RunLoop) {}
@@ -106,20 +117,29 @@ void TestClientStub::SetVideoLayout(const protocol::VideoLayout& layout) {}
 void TestClientStub::SetTransportInfo(
     const protocol::TransportInfo& transport_info) {}
 
+void TestClientStub::SetActiveDisplay(
+    const protocol::ActiveDisplay& active_display) {}
+
+void TestClientStub::ControlMicrophone(
+    const protocol::MicrophoneControl& control) {}
+
 void TestClientStub::InjectClipboardEvent(
     const protocol::ClipboardEvent& event) {}
 
 void TestClientStub::SetCursorShape(
     const protocol::CursorShapeInfo& cursor_shape) {}
 
+void TestClientStub::SetHostCursorPosition(
+    const protocol::HostCursorPosition& position) {}
+
 void TestClientStub::SetKeyboardLayout(const protocol::KeyboardLayout& layout) {
 }
 
 void TestClientStub::WaitForDeliverHostMessage(base::TimeDelta max_timeout) {
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, run_loop_->QuitClosure(), max_timeout);
   run_loop_->Run();
-  run_loop_.reset(new base::RunLoop);
+  run_loop_ = std::make_unique<base::RunLoop>();
 }
 
 void TestClientStub::CheckHostDataMessage(int id, const std::string& data) {
@@ -135,18 +155,16 @@ void TestClientStub::CheckHostDataMessage(int id, const std::string& data) {
 class TestClientSessionDetails : public ClientSessionDetails {
  public:
   TestClientSessionDetails();
+
+  TestClientSessionDetails(const TestClientSessionDetails&) = delete;
+  TestClientSessionDetails& operator=(const TestClientSessionDetails&) = delete;
+
   ~TestClientSessionDetails() override;
 
   // ClientSessionDetails interface.
-  uint32_t desktop_session_id() const override { return desktop_session_id_; }
   ClientSessionControl* session_control() override { return nullptr; }
 
-  void set_desktop_session_id(uint32_t new_id) { desktop_session_id_ = new_id; }
-
  private:
-  uint32_t desktop_session_id_ = UINT32_MAX;
-
-  DISALLOW_COPY_AND_ASSIGN(TestClientSessionDetails);
 };
 
 TestClientSessionDetails::TestClientSessionDetails() = default;
@@ -156,6 +174,12 @@ TestClientSessionDetails::~TestClientSessionDetails() = default;
 class SecurityKeyExtensionSessionTest : public testing::Test {
  public:
   SecurityKeyExtensionSessionTest();
+
+  SecurityKeyExtensionSessionTest(const SecurityKeyExtensionSessionTest&) =
+      delete;
+  SecurityKeyExtensionSessionTest& operator=(
+      const SecurityKeyExtensionSessionTest&) = delete;
+
   ~SecurityKeyExtensionSessionTest() override;
 
   void WaitForAndVerifyHostMessage();
@@ -169,13 +193,10 @@ class SecurityKeyExtensionSessionTest : public testing::Test {
   // Object under test.
   std::unique_ptr<SecurityKeyExtensionSession> security_key_extension_session_;
 
-  MockSecurityKeyAuthHandler* mock_security_key_auth_handler_ = nullptr;
+  raw_ptr<MockSecurityKeyAuthHandler> mock_security_key_auth_handler_ = nullptr;
 
   TestClientStub client_stub_;
   TestClientSessionDetails client_details_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SecurityKeyExtensionSessionTest);
 };
 
 SecurityKeyExtensionSessionTest::SecurityKeyExtensionSessionTest()
@@ -188,24 +209,22 @@ SecurityKeyExtensionSessionTest::SecurityKeyExtensionSessionTest()
   // once |security_key_extension_session_| is destroyed.
   mock_security_key_auth_handler_ = new MockSecurityKeyAuthHandler();
   security_key_extension_session_->SetSecurityKeyAuthHandlerForTesting(
-      base::WrapUnique(mock_security_key_auth_handler_));
+      base::WrapUnique(mock_security_key_auth_handler_.get()));
 }
 
 SecurityKeyExtensionSessionTest::~SecurityKeyExtensionSessionTest() = default;
 
 void SecurityKeyExtensionSessionTest::WaitForAndVerifyHostMessage() {
-  client_stub_.WaitForDeliverHostMessage(
-      base::TimeDelta::FromMilliseconds(500));
+  client_stub_.WaitForDeliverHostMessage(base::Milliseconds(500));
   base::ListValue expected_data;
 
   // Skip first four bytes.
-  for (size_t i = 4; i < sizeof(kRequestData); ++i) {
-    expected_data.AppendInteger(kRequestData[i]);
+  for (size_t i = 4; i < kRequestData.size(); ++i) {
+    expected_data.Append(kRequestData[i]);
   }
 
-  std::string expected_data_json;
-  base::JSONWriter::Write(expected_data, &expected_data_json);
-  client_stub_.CheckHostDataMessage(1, expected_data_json);
+  client_stub_.CheckHostDataMessage(
+      1, base::WriteJson(expected_data).value_or(""));
 }
 
 void SecurityKeyExtensionSessionTest::CreateSecurityKeyConnection() {
@@ -453,8 +472,7 @@ TEST_F(SecurityKeyExtensionSessionTest, SendMessageToClient_ValidData) {
   // Inject data into SendMessageCallback to simulate a security key request.
   mock_security_key_auth_handler_->GetSendMessageCallback().Run(42, "test_msg");
 
-  client_stub_.WaitForDeliverHostMessage(
-      base::TimeDelta::FromMilliseconds(500));
+  client_stub_.WaitForDeliverHostMessage(base::Milliseconds(500));
 
   // Expects a JSON array of the ASCII character codes for "test_msg".
   client_stub_.CheckHostDataMessage(42, "[116,101,115,116,95,109,115,103]");

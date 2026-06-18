@@ -1,6 +1,7 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #include "media/renderers/audio_renderer_impl.h"
 
@@ -8,32 +9,38 @@
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
 #include "base/format_macros.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/stringprintf.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/simple_test_tick_clock.h"
 #include "base/test/task_environment.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/time/time.h"
+#include "build/build_config.h"
 #include "media/base/audio_buffer_converter.h"
+#include "media/base/audio_bus.h"
 #include "media/base/fake_audio_renderer_sink.h"
 #include "media/base/media_client.h"
 #include "media/base/media_switches.h"
 #include "media/base/media_util.h"
 #include "media/base/mock_audio_renderer_sink.h"
 #include "media/base/mock_filters.h"
+#include "media/base/mock_media_log.h"
+#include "media/base/speech_recognition_client.h"
 #include "media/base/test_helpers.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 using ::base::TimeDelta;
 using ::base::test::RunCallback;
 using ::base::test::RunOnceCallback;
 using ::testing::_;
+using ::testing::DoAll;
 using ::testing::Return;
 using ::testing::SaveArg;
 
@@ -56,7 +63,7 @@ struct OutputFrames {
 }  // namespace
 
 // Constants to specify the type of audio data used.
-constexpr AudioCodec kCodec = kCodecVorbis;
+constexpr AudioCodec kCodec = AudioCodec::kVorbis;
 constexpr SampleFormat kSampleFormat = kSampleFormatPlanarF32;
 constexpr ChannelLayout kChannelLayout = CHANNEL_LAYOUT_STEREO;
 constexpr int kChannels = 2;
@@ -83,17 +90,19 @@ ACTION_P(AssertNotYetEnded, test) {
   ASSERT_FALSE(test->ended());
 }
 
-class AudioRendererImplTest : public ::testing::Test, public RendererClient {
+class AudioRendererImplTest : public ::testing::Test,
+                              public RendererClient,
+                              public SpeechRecognitionClient {
  public:
   std::vector<std::unique_ptr<AudioDecoder>> CreateAudioDecoderForTest() {
     auto decoder = std::make_unique<MockAudioDecoder>();
     if (!enter_pending_decoder_init_) {
       EXPECT_CALL(*decoder, Initialize_(_, _, _, _, _))
-          .WillOnce(DoAll(SaveArg<3>(&output_cb_),
-                          RunOnceCallback<2>(
-                              expected_init_result_
-                                  ? OkStatus()
-                                  : Status(StatusCode::kCodeOnlyForTesting))));
+          .WillOnce(
+              DoAll(SaveArg<3>(&output_cb_),
+                    RunOnceCallback<2>(expected_init_result_
+                                           ? DecoderStatus::Codes::kOk
+                                           : DecoderStatus::Codes::kFailed)));
     } else {
       EXPECT_CALL(*decoder, Initialize_(_, _, _, _, _))
           .WillOnce(EnterPendingDecoderInitStateAction(this));
@@ -110,32 +119,40 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
   // Give the decoder some non-garbage media properties.
   AudioRendererImplTest()
       : hardware_params_(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                         kChannelLayout,
+                         ChannelLayoutConfig::FromLayout<kChannelLayout>(),
                          kOutputSamplesPerSecond,
                          512),
-        main_thread_task_runner_(base::ThreadTaskRunnerHandle::Get()),
-        sink_(new FakeAudioRendererSink(hardware_params_)),
+        main_thread_task_runner_(
+            base::SingleThreadTaskRunner::GetCurrentDefault()),
+        sink_(base::MakeRefCounted<FakeAudioRendererSink>(hardware_params_)),
         demuxer_stream_(DemuxerStream::AUDIO),
         expected_init_result_(true),
         enter_pending_decoder_init_(false),
         ended_(false) {
-    AudioDecoderConfig audio_config(kCodec, kSampleFormat, kChannelLayout,
-                                    kInputSamplesPerSecond, EmptyExtraData(),
-                                    EncryptionScheme::kUnencrypted);
+    AudioDecoderConfig audio_config(
+        kCodec, kSampleFormat,
+        ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+        kInputSamplesPerSecond, EmptyExtraData(),
+        EncryptionScheme::kUnencrypted);
     demuxer_stream_.set_audio_decoder_config(audio_config);
 
     ConfigureDemuxerStream(true);
 
-    AudioParameters out_params(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                               kChannelLayout, kOutputSamplesPerSecond, 512);
+    AudioParameters out_params(
+        AudioParameters::AUDIO_PCM_LOW_LATENCY,
+        ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+        kOutputSamplesPerSecond, 512);
     renderer_ = std::make_unique<AudioRendererImpl>(
-        main_thread_task_runner_, sink_.get(),
+        main_thread_task_runner_, sink_,
         base::BindRepeating(&AudioRendererImplTest::CreateAudioDecoderForTest,
                             base::Unretained(this)),
-        &media_log_, nullptr);
+        &media_log_, MediaPlayerLoggingID(0), this);
     renderer_->tick_clock_ = &tick_clock_;
-    tick_clock_.Advance(base::TimeDelta::FromSeconds(1));
+    tick_clock_.Advance(base::Seconds(1));
   }
+
+  AudioRendererImplTest(const AudioRendererImplTest&) = delete;
+  AudioRendererImplTest& operator=(const AudioRendererImplTest&) = delete;
 
   ~AudioRendererImplTest() override {
     SCOPED_TRACE("~AudioRendererImplTest()");
@@ -155,8 +172,8 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
       stalled_demixer_read_cb_ = std::move(read_cb);
       return;
     }
-    scoped_refptr<DecoderBuffer> decoder_buffer(new DecoderBuffer(0));
-    std::move(read_cb).Run(DemuxerStream::kOk, decoder_buffer);
+    auto decoder_buffer = base::MakeRefCounted<DecoderBuffer>(0);
+    std::move(read_cb).Run(DemuxerStream::kOk, {std::move(decoder_buffer)});
   }
 
   bool IsDemuxerStalled() { return !!stalled_demixer_read_cb_; }
@@ -171,10 +188,10 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
     hardware_params_ = params;
     sink_ = base::MakeRefCounted<FakeAudioRendererSink>(hardware_params_);
     renderer_ = std::make_unique<AudioRendererImpl>(
-        main_thread_task_runner_, sink_.get(),
+        main_thread_task_runner_, sink_,
         base::BindRepeating(&AudioRendererImplTest::CreateAudioDecoderForTest,
                             base::Unretained(this)),
-        &media_log_, nullptr);
+        &media_log_, MediaPlayerLoggingID(0), nullptr);
     testing::Mock::VerifyAndClearExpectations(&demuxer_stream_);
     ConfigureDemuxerStream(false);
   }
@@ -185,10 +202,10 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
     hardware_params_ = hardware_params;
     sink_ = base::MakeRefCounted<FakeAudioRendererSink>(hardware_params_);
     renderer_ = std::make_unique<AudioRendererImpl>(
-        main_thread_task_runner_, sink_.get(),
+        main_thread_task_runner_, sink_,
         base::BindRepeating(&AudioRendererImplTest::CreateAudioDecoderForTest,
                             base::Unretained(this)),
-        &media_log_, nullptr);
+        &media_log_, MediaPlayerLoggingID(0), nullptr);
     testing::Mock::VerifyAndClearExpectations(&demuxer_stream_);
     ConfigureDemuxerStream(true);
   }
@@ -196,16 +213,30 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
   void ConfigureWithMockSink(const AudioParameters& params) {
     mock_sink_ = base::MakeRefCounted<MockAudioRendererSink>();
     renderer_ = std::make_unique<AudioRendererImpl>(
-        main_thread_task_runner_, mock_sink_.get(),
+        main_thread_task_runner_, mock_sink_,
         base::BindRepeating(&AudioRendererImplTest::CreateAudioDecoderForTest,
                             base::Unretained(this)),
-        &media_log_, nullptr);
+        &media_log_, MediaPlayerLoggingID(0), nullptr);
     testing::Mock::VerifyAndClearExpectations(&demuxer_stream_);
     ConfigureDemuxerStream(true);
   }
 
+  void ConfigureWithMockMediaLog() {
+    sink_ = base::MakeRefCounted<FakeAudioRendererSink>(hardware_params_);
+    renderer_ = std::make_unique<AudioRendererImpl>(
+        main_thread_task_runner_, sink_,
+        base::BindRepeating(&AudioRendererImplTest::CreateAudioDecoderForTest,
+                            base::Unretained(this)),
+        &mock_media_log_, MediaPlayerLoggingID(0), nullptr);
+    testing::Mock::VerifyAndClearExpectations(&demuxer_stream_);
+    ConfigureDemuxerStream(true);
+  }
+
+  void EnableSpeechRecognition() { renderer_->EnableSpeechRecognition(); }
+
   // RendererClient implementation.
   MOCK_METHOD1(OnError, void(PipelineStatus));
+  void OnFallback(PipelineStatus status) override { NOTREACHED(); }
   void OnEnded() override {
     CHECK(!ended_);
     ended_ = true;
@@ -220,10 +251,21 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
   MOCK_METHOD1(OnVideoConfigChange, void(const VideoDecoderConfig&));
   MOCK_METHOD1(OnVideoNaturalSizeChange, void(const gfx::Size&));
   MOCK_METHOD1(OnVideoOpacityChange, void(bool));
-  MOCK_METHOD1(OnVideoFrameRateChange, void(base::Optional<int>));
+  MOCK_METHOD1(OnVideoFrameRateChange, void(std::optional<int>));
   MOCK_METHOD1(OnDurationChange, void(base::TimeDelta));
   MOCK_METHOD1(OnRemotePlayStateChange, void(MediaStatus::State state));
-  MOCK_METHOD1(TranscribeAudioCallback, void(scoped_refptr<AudioBuffer>));
+  MOCK_METHOD1(TranscribeAudio, void(scoped_refptr<AudioBuffer>));
+
+  // SpeechRecognitionClient implementation.
+  MOCK_METHOD2(AddAudio,
+               void(scoped_refptr<AudioBuffer>,
+                    std::optional<base::TimeDelta>));
+  MOCK_METHOD3(AddAudioBusOnMainSequence,
+               void(std::unique_ptr<AudioBus>, int, ChannelLayout));
+  MOCK_METHOD0(IsSpeechRecognitionAvailable, bool());
+  MOCK_METHOD1(SetOnReadyCallback, void(OnReadyCallback));
+  MOCK_METHOD1(AddAudio, void(const media::AudioBus&));
+  MOCK_METHOD1(Reconfigure, void(const media::AudioParameters&));
 
   void InitializeRenderer(DemuxerStream* demuxer_stream,
                           PipelineStatusCallback pipeline_status_cb) {
@@ -247,26 +289,30 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
     SetMediaClient(&media_client_);
 
     hardware_params_.Reset(AudioParameters::AUDIO_BITSTREAM_EAC3,
-                           kChannelLayout, kOutputSamplesPerSecond, 512);
+                           ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+                           kOutputSamplesPerSecond, 512);
     sink_ = base::MakeRefCounted<FakeAudioRendererSink>(hardware_params_);
     AudioDecoderConfig audio_config(
-        kCodecAC3, kSampleFormatEac3, kChannelLayout, kInputSamplesPerSecond,
-        EmptyExtraData(), EncryptionScheme::kUnencrypted);
+        AudioCodec::kAC3, kSampleFormatEac3,
+        ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+        kInputSamplesPerSecond, EmptyExtraData(),
+        EncryptionScheme::kUnencrypted);
     demuxer_stream_.set_audio_decoder_config(audio_config);
 
     ConfigureDemuxerStream(true);
 
     renderer_ = std::make_unique<AudioRendererImpl>(
-        main_thread_task_runner_, sink_.get(),
+        main_thread_task_runner_, sink_,
         base::BindRepeating(&AudioRendererImplTest::CreateAudioDecoderForTest,
                             base::Unretained(this)),
-        &media_log_, nullptr);
+        &media_log_, MediaPlayerLoggingID(0), this);
 
     Initialize();
   }
 
   void InitializeWithStatus(PipelineStatus expected) {
-    SCOPED_TRACE(base::StringPrintf("InitializeWithStatus(%d)", expected));
+    SCOPED_TRACE(
+        base::StringPrintf("InitializeWithStatus(%d)", expected.code()));
 
     WaitableMessageLoopEvent event;
     InitializeRenderer(&demuxer_stream_, event.GetPipelineStatusCB());
@@ -320,7 +366,7 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
                PipelineStatus expected) {
     SCOPED_TRACE(base::StringPrintf("Preroll(%" PRId64 ", %d)",
                                     first_timestamp.InMilliseconds(),
-                                    expected));
+                                    expected.code()));
     next_timestamp_->SetBaseTimestamp(first_timestamp);
 
     // Fill entire buffer to complete prerolling.
@@ -374,25 +420,28 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
     }
     next_timestamp_->AddFrames(frames.value);
 
-    DeliverBuffer(DecodeStatus::OK, std::move(buffer));
+    DeliverBuffer(DecoderStatus::Codes::kOk, std::move(buffer));
   }
 
   void DeliverEndOfStream() {
     DCHECK(decode_cb_);
 
     // Return EOS buffer to trigger EOS frame.
+    DemuxerStream::DecoderBufferVector buffers;
+    buffers.emplace_back(DecoderBuffer::CreateEOSBuffer());
     EXPECT_CALL(demuxer_stream_, OnRead(_))
-        .WillOnce(RunOnceCallback<0>(DemuxerStream::kOk,
-                                     DecoderBuffer::CreateEOSBuffer()));
+        .WillOnce(RunOnceCallback<0>(DemuxerStream::kOk, buffers));
 
-    // Satify pending |decode_cb_| to trigger a new DemuxerStream::Read().
+    // Satisfy pending |decode_cb_| to trigger a new DemuxerStream::Read().
     main_thread_task_runner_->PostTask(
-        FROM_HERE, base::BindOnce(std::move(decode_cb_), DecodeStatus::OK));
+        FROM_HERE,
+        base::BindOnce(std::move(decode_cb_), DecoderStatus::Codes::kOk));
 
     WaitForPendingRead();
 
     main_thread_task_runner_->PostTask(
-        FROM_HERE, base::BindOnce(std::move(decode_cb_), DecodeStatus::OK));
+        FROM_HERE,
+        base::BindOnce(std::move(decode_cb_), DecoderStatus::Codes::kOk));
 
     base::RunLoop().RunUntilIdle();
     EXPECT_EQ(last_statistics_.audio_memory_usage,
@@ -414,7 +463,7 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
 
   // Consumes data from the buffer until what remains drops below the buffer's
   // capacity. Note that the buffer is often over-filled, such that consuming
-  // a fixed amount of data cannot guarantee we fall bellow the full line.
+  // a fixed amount of data cannot guarantee we fall below the full line.
   // Precondition: the buffer must be full when called.
   bool ConsumeBufferedDataUntilNotFull() {
     int buffered = frames_buffered().value;
@@ -547,7 +596,7 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
     main_thread_task_runner_->PostTask(FROM_HERE, std::move(reset_cb));
   }
 
-  void DeliverBuffer(DecodeStatus status, scoped_refptr<AudioBuffer> buffer) {
+  void DeliverBuffer(DecoderStatus status, scoped_refptr<AudioBuffer> buffer) {
     CHECK(decode_cb_);
 
     if (buffer.get() && !buffer->end_of_stream())
@@ -560,11 +609,16 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
     base::RunLoop().RunUntilIdle();
   }
 
+  base::TimeDelta CalculateClockAndAlgorithmDrift() {
+    return renderer_->CalculateClockAndAlgorithmDrift();
+  }
+
   // Fixture members.
   AudioParameters hardware_params_;
   base::test::TaskEnvironment task_environment_;
   const scoped_refptr<base::SingleThreadTaskRunner> main_thread_task_runner_;
   NullMediaLog media_log_;
+  MockMediaLog mock_media_log_;
   std::unique_ptr<AudioRendererImpl> renderer_;
   scoped_refptr<FakeAudioRendererSink> sink_;
   scoped_refptr<MockAudioRendererSink> mock_sink_;
@@ -592,8 +646,6 @@ class AudioRendererImplTest : public ::testing::Test, public RendererClient {
   bool expected_init_result_;
   bool enter_pending_decoder_init_;
   bool ended_;
-
-  DISALLOW_COPY_AND_ASSIGN(AudioRendererImplTest);
 };
 
 TEST_F(AudioRendererImplTest, Initialize_Successful) {
@@ -622,10 +674,11 @@ TEST_F(AudioRendererImplTest, ReinitializeForDifferentStream) {
 
   // Prepare a new demuxer stream.
   MockDemuxerStream new_stream(DemuxerStream::AUDIO);
-  EXPECT_CALL(new_stream, SupportsConfigChanges()).WillOnce(Return(false));
-  AudioDecoderConfig audio_config(kCodec, kSampleFormat, kChannelLayout,
-                                  kInputSamplesPerSecond, EmptyExtraData(),
-                                  EncryptionScheme::kUnencrypted);
+  EXPECT_CALL(new_stream, SupportsConfigChanges())
+      .WillRepeatedly(Return(false));
+  AudioDecoderConfig audio_config(
+      kCodec, kSampleFormat, ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+      kInputSamplesPerSecond, EmptyExtraData(), EncryptionScheme::kUnencrypted);
   new_stream.set_audio_decoder_config(audio_config);
 
   // The renderer is now in the flushed state and can be reinitialized.
@@ -647,8 +700,9 @@ TEST_F(AudioRendererImplTest, SignalConfigChange) {
   // Force config change to simulate detected change from decoder stream. Expect
   // that RendererClient to be signaled with the new config.
   const AudioDecoderConfig kValidAudioConfig(
-      kCodecVorbis, kSampleFormatPlanarF32, CHANNEL_LAYOUT_STEREO, 44100,
-      EmptyExtraData(), EncryptionScheme::kUnencrypted);
+      AudioCodec::kVorbis, kSampleFormatPlanarF32,
+      ChannelLayoutConfig::Stereo(), 44100, EmptyExtraData(),
+      EncryptionScheme::kUnencrypted);
   EXPECT_TRUE(kValidAudioConfig.IsValidConfig());
   EXPECT_CALL(*this, OnAudioConfigChange(DecoderConfigEq(kValidAudioConfig)));
   force_config_change(kValidAudioConfig);
@@ -677,14 +731,6 @@ TEST_F(AudioRendererImplTest, StartTicking) {
   // Drain internal buffer, we should have a pending read.
   EXPECT_TRUE(ConsumeBufferedData(frames_buffered()));
   WaitForPendingRead();
-}
-
-TEST_F(AudioRendererImplTest, TranscribeAudioCallback) {
-  Initialize();
-  EXPECT_CALL(*this, TranscribeAudioCallback(_)).Times(0);
-
-  Preroll();
-  StartTicking();
 }
 
 TEST_F(AudioRendererImplTest, EndOfStream) {
@@ -877,14 +923,59 @@ TEST_F(AudioRendererImplTest, Underflow_OneCapacityIncreasePerUnderflow) {
   testing::Mock::VerifyAndClearExpectations(this);
 }
 
+// Verify that the sink is reinitialized properly when an AudioBuffer
+// with a different channel count to the previous one is delivered.
+TEST_F(AudioRendererImplTest, SinkReconfiguredOnChannelCountChange) {
+  base::test::ScopedFeatureList scoped_feature_list_;
+  scoped_feature_list_.InitAndEnableFeature(kMatchSourceAudioChannelLayout);
+
+  Initialize();
+  Preroll();
+  StartTicking();
+
+  const auto check_channel_mask = [](const std::vector<bool>& mask,
+                                     int total_channels) {
+    EXPECT_FALSE(mask.empty());
+    ASSERT_EQ(mask.size(), static_cast<size_t>(total_channels));
+    for (int ch = 0; ch < total_channels; ++ch) {
+      ASSERT_TRUE(mask[ch]);
+    }
+  };
+
+  // Verify that channel count prior to sink
+  // reinitialization is as expected.
+  check_channel_mask(std::move(channel_mask()), kChannels);
+
+  // Drain internal buffer, we should have a pending read.
+  EXPECT_TRUE(ConsumeBufferedData(frames_buffered()));
+  WaitForPendingRead();
+
+  // Deliver a buffer with a different channel count and layout.
+  const int new_channels = 6;
+  const ChannelLayout new_channel_layout = CHANNEL_LAYOUT_5_1;
+  scoped_refptr<AudioBuffer> buffer = MakeAudioBuffer<float>(
+      kSampleFormat, new_channel_layout, new_channels, kInputSamplesPerSecond,
+      1.0f, 0.0f, kInputFramesChunk, base::TimeDelta());
+  DeliverBuffer(DecoderStatus::Codes::kOk, std::move(buffer));
+
+  // Verify that sink was reinitialized with the new channel count.
+  check_channel_mask(std::move(channel_mask()), new_channels);
+
+  // Verify sink is in playing state after sink reinitialization.
+  EXPECT_EQ(FakeAudioRendererSink::kPlaying, sink_->state());
+}
+
 // Verify that the proper reduced search space is configured for playback rate
 // changes when upmixing is applied to the input.
 TEST_F(AudioRendererImplTest, ChannelMask) {
-  AudioParameters hw_params(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                            CHANNEL_LAYOUT_7_1, kOutputSamplesPerSecond, 1024);
+  AudioParameters hw_params(
+      AudioParameters::AUDIO_PCM_LOW_LATENCY,
+      ChannelLayoutConfig::FromLayout<CHANNEL_LAYOUT_7_1>(),
+      kOutputSamplesPerSecond, 1024);
   ConfigureConfigChangeRenderer(
       AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                      CHANNEL_LAYOUT_STEREO, kOutputSamplesPerSecond, 1024),
+                      ChannelLayoutConfig::Stereo(), kOutputSamplesPerSecond,
+                      1024),
       hw_params);
   Initialize();
   std::vector<bool> mask = channel_mask();
@@ -905,7 +996,7 @@ TEST_F(AudioRendererImplTest, ChannelMask) {
   scoped_refptr<AudioBuffer> buffer = MakeAudioBuffer<float>(
       kSampleFormat, hw_params.channel_layout(), hw_params.channels(),
       kInputSamplesPerSecond, 1.0f, 0.0f, kInputFramesChunk, base::TimeDelta());
-  DeliverBuffer(DecodeStatus::OK, std::move(buffer));
+  DeliverBuffer(DecoderStatus::Codes::kOk, std::move(buffer));
 
   // All channels should now be enabled.
   mask = channel_mask();
@@ -921,9 +1012,9 @@ TEST_F(AudioRendererImplTest, ChannelMask_DownmixDiscreteLayout) {
   int audio_channels = 9;
 
   AudioDecoderConfig audio_config(
-      kCodecOpus, kSampleFormat, CHANNEL_LAYOUT_DISCRETE,
+      AudioCodec::kOpus, kSampleFormat,
+      ChannelLayoutConfig(CHANNEL_LAYOUT_DISCRETE, audio_channels),
       kInputSamplesPerSecond, EmptyExtraData(), EncryptionScheme::kUnencrypted);
-  audio_config.SetChannelsForDiscrete(audio_channels);
   demuxer_stream_.set_audio_decoder_config(audio_config);
   ConfigureDemuxerStream(true);
 
@@ -974,8 +1065,7 @@ TEST_F(AudioRendererImplTest, PendingRead_Flush) {
   FlushDuringPendingRead();
 
   // Preroll again to a different timestamp and verify it completed normally.
-  const base::TimeDelta seek_timestamp =
-      base::TimeDelta::FromMilliseconds(1000);
+  const base::TimeDelta seek_timestamp = base::Milliseconds(1000);
   Preroll(seek_timestamp, seek_timestamp, PIPELINE_OK);
 }
 
@@ -1070,7 +1160,7 @@ TEST_F(AudioRendererImplTest, CurrentMediaTimeBehavior) {
   EXPECT_EQ(timestamp_helper.GetTimestamp(), CurrentMediaTime());
 
   // Advance current time well past all played audio to simulate an irregular or
-  // delayed OS callback. The value should be clamped to whats been rendered.
+  // delayed OS callback. The value should be clamped to what's been rendered.
   timestamp_helper.AddFrames(frames_to_consume.value);
   tick_clock_.Advance(kConsumptionDuration * 2);
   EXPECT_EQ(timestamp_helper.GetTimestamp(), CurrentMediaTime());
@@ -1093,8 +1183,8 @@ TEST_F(AudioRendererImplTest, RenderingDelayedForEarlyStartTime) {
   // through the desired output buffer; this allows for maximum test coverage.
   const double kBuffers = 4.5;
   const base::TimeDelta first_timestamp =
-      base::TimeDelta::FromSecondsD(hardware_params_.frames_per_buffer() *
-                                    kBuffers / hardware_params_.sample_rate());
+      base::Seconds(hardware_params_.frames_per_buffer() * kBuffers /
+                    hardware_params_.sample_rate());
 
   Preroll(base::TimeDelta(), first_timestamp, PIPELINE_OK);
   StartTicking();
@@ -1105,8 +1195,9 @@ TEST_F(AudioRendererImplTest, RenderingDelayedForEarlyStartTime) {
   for (int i = 0; i < std::floor(kBuffers); ++i) {
     EXPECT_TRUE(sink_->Render(bus.get(), base::TimeDelta(), &frames_read));
     EXPECT_EQ(frames_read, bus->frames());
-    for (int j = 0; j < bus->frames(); ++j)
-      ASSERT_FLOAT_EQ(0.0f, bus->channel(0)[j]);
+    for (auto sample : bus->channel(0)) {
+      ASSERT_FLOAT_EQ(0.0f, sample);
+    }
 
     // Buffer may have been previously over-filled. Only expect new reads when
     // we drop below "full".
@@ -1119,13 +1210,15 @@ TEST_F(AudioRendererImplTest, RenderingDelayedForEarlyStartTime) {
   // Verify the last buffer is half silence and half real data.
   EXPECT_TRUE(sink_->Render(bus.get(), base::TimeDelta(), &frames_read));
   EXPECT_EQ(frames_read, bus->frames());
-  const int zero_frames =
+  const size_t zero_frames =
       bus->frames() * (kBuffers - static_cast<int>(kBuffers));
 
-  for (int i = 0; i < zero_frames; ++i)
-    ASSERT_FLOAT_EQ(0.0f, bus->channel(0)[i]);
-  for (int i = zero_frames; i < bus->frames(); ++i)
-    ASSERT_NE(0.0f, bus->channel(0)[i]);
+  for (float zeroed_sample : bus->channel(0).first(zero_frames)) {
+    ASSERT_FLOAT_EQ(0.0f, zeroed_sample);
+  }
+  for (float non_zero_sample : bus->channel(0).subspan(zero_frames)) {
+    ASSERT_NE(0.0f, non_zero_sample);
+  }
 }
 
 TEST_F(AudioRendererImplTest, RenderingDelayedForSuspend) {
@@ -1138,8 +1231,9 @@ TEST_F(AudioRendererImplTest, RenderingDelayedForSuspend) {
   std::unique_ptr<AudioBus> bus = AudioBus::Create(hardware_params_);
   EXPECT_TRUE(sink_->Render(bus.get(), base::TimeDelta(), &frames_read));
   EXPECT_NE(0, frames_read);
-  for (int i = 0; i < bus->frames(); ++i)
-    ASSERT_NE(0.0f, bus->channel(0)[i]);
+  for (auto sample : bus->channel(0)) {
+    ASSERT_NE(0.0f, sample);
+  }
 
   // Verify after suspend we get silence.
   renderer_->OnSuspend();
@@ -1151,8 +1245,24 @@ TEST_F(AudioRendererImplTest, RenderingDelayedForSuspend) {
   renderer_->OnResume();
   EXPECT_TRUE(sink_->Render(bus.get(), base::TimeDelta(), &frames_read));
   EXPECT_NE(0, frames_read);
-  for (int i = 0; i < bus->frames(); ++i)
-    ASSERT_NE(0.0f, bus->channel(0)[i]);
+  for (auto sample : bus->channel(0)) {
+    ASSERT_NE(0.0f, sample);
+  }
+}
+
+TEST_F(AudioRendererImplTest, AbsurdRenderingDelayLog) {
+  ConfigureWithMockMediaLog();
+  Initialize();
+  Preroll(base::TimeDelta(), base::TimeDelta(), PIPELINE_OK);
+  StartTicking();
+
+  // Verify the first buffer is real data.
+  int frames_read = 0;
+  std::unique_ptr<AudioBus> bus = AudioBus::Create(hardware_params_);
+
+  EXPECT_MEDIA_LOG_ON(mock_media_log_,
+                      testing::HasSubstr("Large rendering delay"));
+  EXPECT_TRUE(sink_->Render(bus.get(), base::Seconds(5), &frames_read));
 }
 
 TEST_F(AudioRendererImplTest, RenderingDelayDoesNotOverflow) {
@@ -1186,7 +1296,7 @@ TEST_F(AudioRendererImplTest, OnRenderErrorCausesDecodeError) {
   Preroll();
   StartTicking();
 
-  EXPECT_CALL(*this, OnError(AUDIO_RENDERER_ERROR));
+  EXPECT_CALL(*this, OnError(HasStatusCode(AUDIO_RENDERER_ERROR)));
   sink_->OnRenderError();
   base::RunLoop().RunUntilIdle();
 }
@@ -1276,8 +1386,7 @@ TEST_F(AudioRendererImplTest, TimeSourceBehavior) {
 
   // Consume some more audio data.
   frames_to_consume = frames_buffered();
-  tick_clock_.Advance(
-      base::TimeDelta::FromSecondsD(1.0 / kOutputSamplesPerSecond));
+  tick_clock_.Advance(base::Seconds(1.0 / kOutputSamplesPerSecond));
   EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
 
   // Time should change now that the audio hardware has called back.
@@ -1312,7 +1421,7 @@ TEST_F(AudioRendererImplTest, TimeSourceBehavior) {
 
   // Advancing once more will exceed the amount of played out frames finally.
   const base::TimeDelta kOneSample =
-      base::TimeDelta::FromSecondsD(1.0 / kOutputSamplesPerSecond);
+      base::Seconds(1.0 / kOutputSamplesPerSecond);
   base::TimeTicks current_time = tick_clock_.NowTicks();
   tick_clock_.Advance(kOneSample);
   EXPECT_EQ(current_time, CurrentMediaWallClockTime(&is_time_moving));
@@ -1322,7 +1431,7 @@ TEST_F(AudioRendererImplTest, TimeSourceBehavior) {
   DeliverRemainingAudio();
 
   // Elapse a lot of time between StopTicking() and the next Render() call.
-  const base::TimeDelta kOneSecond = base::TimeDelta::FromSeconds(1);
+  const base::TimeDelta kOneSecond = base::Seconds(1);
   tick_clock_.Advance(kOneSecond);
   StartTicking();
 
@@ -1332,8 +1441,8 @@ TEST_F(AudioRendererImplTest, TimeSourceBehavior) {
 
   // Consume some buffered data with a small delay.
   uint32_t delay_frames = 500;
-  base::TimeDelta delay_time = base::TimeDelta::FromMicroseconds(
-      std::round(delay_frames * kOutputMicrosPerFrame));
+  base::TimeDelta delay_time =
+      base::Microseconds(std::round(delay_frames * kOutputMicrosPerFrame));
 
   frames_to_consume.value = frames_buffered().value / 16;
   EXPECT_TRUE(ConsumeBufferedData(frames_to_consume, delay_time));
@@ -1361,6 +1470,64 @@ TEST_F(AudioRendererImplTest, TimeSourceBehavior) {
       current_time + timestamp_helper.GetFrameDuration(frames_to_consume.value),
       CurrentMediaWallClockTime(&is_time_moving));
   EXPECT_TRUE(is_time_moving);
+}
+
+TEST_F(AudioRendererImplTest, MultipleRateChangesKeepSync) {
+  Initialize();
+  Preroll();
+
+  AudioTimestampHelper timestamp_helper(kOutputSamplesPerSecond);
+  timestamp_helper.SetBaseTimestamp(base::TimeDelta());
+
+  // Start ticking, but use a zero playback rate, time should still be stopped
+  // until a positive playback rate is set and the first Render() is called.
+  renderer_->SetPlaybackRate(1.0);
+  StartTicking();
+
+  // Issue the first render call to start time moving.
+  OutputFrames frames_to_consume(frames_buffered().value / 10);
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+
+  // Time shouldn't change just yet because we've only sent the initial audio
+  // data to the hardware.
+  bool is_time_moving;
+  EXPECT_EQ(tick_clock_.NowTicks(),
+            ConvertMediaTime(base::TimeDelta(), &is_time_moving));
+  EXPECT_TRUE(is_time_moving);
+
+  // Issue reads w/ multiple playback rate changes from above to below and back.
+  // The drift should remain zero throughout.
+  renderer_->SetPlaybackRate(2.0);
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
+
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
+
+  renderer_->SetPlaybackRate(3.0);
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
+
+  WaitForPendingRead();
+  DeliverRemainingAudio();
+
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
+
+  renderer_->SetPlaybackRate(0.5);
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
+
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
+
+  renderer_->SetPlaybackRate(1.0);
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
+
+  renderer_->SetPlaybackRate(1.5);
+  EXPECT_TRUE(ConsumeBufferedData(frames_to_consume));
+  EXPECT_EQ(CalculateClockAndAlgorithmDrift(), base::TimeDelta());
 }
 
 TEST_F(AudioRendererImplTest, BitstreamEndOfStream) {
@@ -1402,17 +1569,14 @@ TEST_F(AudioRendererImplTest, BitstreamEndOfStream) {
 }
 
 TEST_F(AudioRendererImplTest, MutedPlaybackBadDeviceInfo) {
-  base::test::ScopedFeatureList scoped_feature_list_;
-  scoped_feature_list_.InitAndEnableFeature(kSuspendMutedAudio);
-
   mock_sink_ = base::MakeRefCounted<MockAudioRendererSink>(
       std::string(), OUTPUT_DEVICE_STATUS_ERROR_NOT_AUTHORIZED,
       AudioParameters());
   renderer_ = std::make_unique<AudioRendererImpl>(
-      main_thread_task_runner_, mock_sink_.get(),
+      main_thread_task_runner_, mock_sink_,
       base::BindRepeating(&AudioRendererImplTest::CreateAudioDecoderForTest,
                           base::Unretained(this)),
-      &media_log_, nullptr);
+      &media_log_, MediaPlayerLoggingID(0), nullptr);
   testing::Mock::VerifyAndClearExpectations(&demuxer_stream_);
   ConfigureDemuxerStream(true);
 
@@ -1443,8 +1607,6 @@ TEST_F(AudioRendererImplTest, MutedPlaybackBadDeviceInfo) {
 }
 
 TEST_F(AudioRendererImplTest, BasicMutedPlayback) {
-  base::test::ScopedFeatureList scoped_feature_list_;
-  scoped_feature_list_.InitAndEnableFeature(kSuspendMutedAudio);
   ConfigureWithMockSink(hardware_params_);
 
   EXPECT_CALL(*mock_sink_, SetVolume(0));
@@ -1493,10 +1655,81 @@ TEST_F(AudioRendererImplTest, BasicMutedPlayback) {
   EXPECT_CALL(*mock_sink_, Stop());
 }
 
+TEST_F(AudioRendererImplTest, RenderMutedAudio) {
+  ConfigureWithMockSink(hardware_params_);
+  EXPECT_CALL(*mock_sink_, SetVolume(0));
+  renderer_->SetVolume(0);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+
+  EXPECT_CALL(*mock_sink_, Start());
+  EXPECT_CALL(*mock_sink_, Play());
+  Initialize();
+  Preroll();
+  StartTicking();
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+
+  EXPECT_CALL(*mock_sink_, SetVolume(1));
+  renderer_->SetVolume(1);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 1);
+
+  // Muting should not pause the sink.
+  renderer_->SetRenderMutedAudio(true);
+  EXPECT_CALL(*mock_sink_, SetVolume(0));
+  EXPECT_CALL(*mock_sink_, Pause()).Times(0);
+  renderer_->SetVolume(0);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 1);
+  testing::Mock::VerifyAndClearExpectations(mock_sink_.get());
+
+  // Setting render muted audio to false should pause the sink.
+  EXPECT_CALL(*mock_sink_, Pause());
+  renderer_->SetRenderMutedAudio(false);
+  testing::Mock::VerifyAndClearExpectations(mock_sink_.get());
+
+  // Setting render muted audio to true should restart the sink.
+  EXPECT_CALL(*mock_sink_, Play());
+  renderer_->SetRenderMutedAudio(true);
+  testing::Mock::VerifyAndClearExpectations(mock_sink_.get());
+
+  // Setting render muted audio to false should pause the sink.
+  EXPECT_CALL(*mock_sink_, Pause());
+  renderer_->SetRenderMutedAudio(false);
+  testing::Mock::VerifyAndClearExpectations(mock_sink_.get());
+
+  // Unmuting should restart the sink.
+  EXPECT_CALL(*mock_sink_, Play());
+  EXPECT_CALL(*mock_sink_, SetVolume(1));
+  renderer_->SetVolume(1);
+  testing::Mock::VerifyAndClearExpectations(mock_sink_.get());
+
+  StopTicking();
+  EXPECT_CALL(*mock_sink_, Stop());
+}
+
+TEST_F(AudioRendererImplTest,
+       SetRenderMutedAudioImmediatelyAfterInitialization) {
+  ConfigureWithMockSink(hardware_params_);
+  EXPECT_CALL(*mock_sink_, SetVolume(0));
+  renderer_->SetVolume(0);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+
+  EXPECT_CALL(*mock_sink_, Start());
+  EXPECT_CALL(*mock_sink_, Play());
+
+  // Verify that setting the render muted audio flag immediately after
+  // initializing doesn't cause any crashes.
+  Initialize();
+  renderer_->SetRenderMutedAudio(true);
+  Preroll();
+  StartTicking();
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+  testing::Mock::VerifyAndClearExpectations(mock_sink_.get());
+}
+
 TEST_F(AudioRendererImplTest, SinkIsFlushed) {
-  ConfigureWithMockSink(AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                                        kChannelLayout, kOutputSamplesPerSecond,
-                                        1024 * 15));
+  ConfigureWithMockSink(
+      AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
+                      ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+                      kOutputSamplesPerSecond, 1024 * 15));
   Initialize();
   Preroll();
   StartTicking();
@@ -1517,9 +1750,10 @@ TEST_F(AudioRendererImplTest, LowLatencyHint) {
   // Use a basic setup that avoids buffer conversion and sample rate mismatch.
   // This simplifies passing frames to the algorithm and verification of
   // frames-to-time logic.
-  ConfigureBasicRenderer(AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                                         kChannelLayout, kInputSamplesPerSecond,
-                                         kFramesPerBuffer));
+  ConfigureBasicRenderer(
+      AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
+                      ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+                      kInputSamplesPerSecond, kFramesPerBuffer));
   Initialize();
 
   // Setup renderer for playback.
@@ -1605,9 +1839,10 @@ TEST_F(AudioRendererImplTest, HighLatencyHint) {
   // Use a basic setup that avoids buffer conversion and sample rate mismatch.
   // This simplifies passing frames to the algorithm and verification of
   // frames-to-time logic.
-  ConfigureBasicRenderer(AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                                         kChannelLayout, kInputSamplesPerSecond,
-                                         kFramesPerBuffer));
+  ConfigureBasicRenderer(
+      AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
+                      ChannelLayoutConfig::FromLayout<kChannelLayout>(),
+                      kInputSamplesPerSecond, kFramesPerBuffer));
   Initialize();
 
   // Setup renderer for playback.
@@ -1683,5 +1918,177 @@ TEST_F(AudioRendererImplTest, HighLatencyHint) {
   EXPECT_EQ(buffer_capacity().value, high_latency_playback_threshold);
   EXPECT_EQ(buffer_playback_threshold().value, high_latency_playback_threshold);
 }
+
+TEST_F(AudioRendererImplTest, PlayUnmuted) {
+  // Setting the volume to a non-zero value does not count as unmuted until the
+  // audio is played.
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+  renderer_->SetVolume(1);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+
+  Initialize();
+  Preroll();
+  StartTicking();
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 1);
+}
+
+TEST_F(AudioRendererImplTest, UnmuteWhilePlaying) {
+  ConfigureWithMockSink(hardware_params_);
+  EXPECT_CALL(*mock_sink_, SetVolume(0));
+  renderer_->SetVolume(0);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+
+  EXPECT_CALL(*mock_sink_, Start());
+  EXPECT_CALL(*mock_sink_, Play());
+  Initialize();
+  Preroll();
+  StartTicking();
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 0);
+
+  EXPECT_CALL(*mock_sink_, SetVolume(1));
+  renderer_->SetVolume(1);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 1);
+
+  // Muting should pause the sink.
+  EXPECT_CALL(*mock_sink_, SetVolume(0));
+  EXPECT_CALL(*mock_sink_, Pause());
+  renderer_->SetVolume(0);
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 1);
+
+  StopTicking();
+  EXPECT_CALL(*mock_sink_, Stop());
+}
+
+TEST_F(AudioRendererImplTest, DecodeAudioReadyPreemptsFlush) {
+  Initialize();
+
+  Preroll();
+  StartTicking();
+  EXPECT_TRUE(ConsumeBufferedDataUntilNotFull());
+  WaitForPendingRead();
+  EXPECT_CALL(*this, OnError(HasStatusCode(PIPELINE_ERROR_DECODE)));
+  StopTicking();
+  EXPECT_TRUE(IsDecodePending());
+
+  // Imitate the behavior of a pending seek as flush_cb_;
+  renderer_->Flush(base::BindOnce(&AudioRendererImpl::StartPlaying,
+                                  base::Unretained(renderer_.get())));
+
+  // This shouldn't cause a deadlock.
+  renderer_->decoded_audio_ready_for_testing();
+}
+
+#if !BUILDFLAG(IS_ANDROID)
+TEST_F(AudioRendererImplTest,
+       TranscribeAudioCallback_SpeechRecognitionDisabled) {
+  EXPECT_CALL(*this, SetOnReadyCallback(_));
+  Initialize();
+
+  EXPECT_CALL(*this, AddAudio(_, _)).Times(0);
+  Preroll();
+
+  StartTicking();
+}
+
+TEST_F(AudioRendererImplTest,
+       TranscribeAudioCallback_Muted_WithoutUserActivation) {
+  EnableSpeechRecognition();
+  EXPECT_CALL(*this, SetOnReadyCallback(_));
+  Initialize();
+
+  EXPECT_CALL(*this, AddAudio(_, _)).Times(0);
+  Preroll();
+
+  StartTicking();
+}
+
+TEST_F(AudioRendererImplTest,
+       TranscribeAudioCallback_Unmuted_WithoutUserActivation) {
+  EnableSpeechRecognition();
+
+  EXPECT_CALL(*this, SetOnReadyCallback(_));
+  Initialize();
+
+  EXPECT_CALL(*this, AddAudio(_, _)).Times(3);
+  next_timestamp_->SetBaseTimestamp(base::TimeDelta());
+  renderer_->SetMediaTime(base::TimeDelta());
+  renderer_->StartPlaying();
+  renderer_->SetVolume(1);
+  WaitForPendingRead();
+
+  EXPECT_CALL(*this, OnBufferingStateChange(BUFFERING_HAVE_ENOUGH,
+                                            BUFFERING_CHANGE_REASON_UNKNOWN));
+  DeliverRemainingAudio();
+  StartTicking();
+
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 1);
+}
+
+TEST_F(AudioRendererImplTest,
+       TranscribeAudioCallback_Muted_WithUserActivation) {
+  EnableSpeechRecognition();
+  renderer_->SetWasPlayedWithUserActivationAndHighMediaEngagement(true);
+
+  EXPECT_CALL(*this, SetOnReadyCallback(_));
+  Initialize();
+
+  EXPECT_CALL(*this, AddAudio(_, _)).Times(3);
+  Preroll();
+
+  StartTicking();
+  EXPECT_EQ(renderer_->was_unmuted_for_testing(), 1);
+}
+
+TEST_F(AudioRendererImplTest,
+       TranscribeAudioCallback_SinkNotOptimizedForHardwareParameters) {
+  EnableSpeechRecognition();
+  renderer_->SetWasPlayedWithUserActivationAndHighMediaEngagement(true);
+  sink_->SetIsOptimizedForHardwareParameters(false);
+
+  EXPECT_CALL(*this, SetOnReadyCallback(_));
+  Initialize();
+
+  EXPECT_CALL(*this, AddAudio(_, _)).Times(0);
+  Preroll();
+
+  StartTicking();
+}
+
+TEST_F(AudioRendererImplTest, TranscribeAudioCallback_SendsTimestamp) {
+  EnableSpeechRecognition();
+  renderer_->SetWasPlayedWithUserActivationAndHighMediaEngagement(true);
+  Initialize();
+
+  constexpr base::TimeDelta kStartTimestamp = base::Seconds(1);
+  {
+    testing::InSequence in_sequence;
+    EXPECT_CALL(*this, AddAudio(_, std::optional(kStartTimestamp)));
+    EXPECT_CALL(*this, AddAudio(_, std::optional<base::TimeDelta>())).Times(2);
+  }
+
+  // Start playing from `kStartTimestamp`.
+  Preroll(kStartTimestamp, kStartTimestamp, PIPELINE_OK);
+  StartTicking();
+
+  testing::Mock::VerifyAndClearExpectations(this);
+
+  // Seek the rendeer, by flushing and then setting a new start timestamp.
+  ConsumeBufferedDataUntilNotFull();
+  WaitForPendingRead();
+  StopTicking();
+  FlushDuringPendingRead();
+
+  testing::Mock::VerifyAndClearExpectations(this);
+
+  constexpr base::TimeDelta kSeekTimestamp = base::Seconds(5);
+  {
+    testing::InSequence in_sequence;
+    EXPECT_CALL(*this, AddAudio(_, std::optional(kSeekTimestamp)));
+    EXPECT_CALL(*this, AddAudio(_, std::optional<base::TimeDelta>())).Times(2);
+  }
+
+  Preroll(kSeekTimestamp, kSeekTimestamp, PIPELINE_OK);
+}
+#endif
 
 }  // namespace media

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,11 @@
 
 #include <stddef.h>
 
-#include <string>
-#include <vector>
+#include <optional>
 
 #include "base/containers/span.h"
-#include "base/optional.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_span.h"
 #include "components/cbor/cbor_export.h"
 #include "components/cbor/values.h"
 
@@ -26,7 +26,7 @@
 //  - 3: UTF-8 strings.
 //  - 4: Definite-length arrays.
 //  - 5: Definite-length maps.
-//  - 7: Simple values.
+//  - 7: Simple values or floating point values.
 //
 //  * Note: For simplicity, this implementation represents both signed and
 //    unsigned integers with signed int64_t. This reduces the effective range
@@ -35,7 +35,7 @@
 // Requirements for canonical CBOR representation:
 //  - Duplicate keys in maps are not allowed.
 //  - Keys for maps must be sorted first by length and then by byte-wise
-//    lexical order.
+//    lexical order, as defined in Section 3.9.
 //
 // Known limitations and interpretations of the RFC (and the reasons):
 //  - Does not support indefinite-length data streams or semantic tags (major
@@ -73,6 +73,7 @@ class CBOR_EXPORT Reader {
     UNSUPPORTED_SIMPLE_VALUE,
     UNSUPPORTED_FLOATING_POINT_VALUE,
     OUT_OF_RANGE_INTEGER_VALUE,
+    DUPLICATE_KEY,
     UNKNOWN_ERROR,
   };
 
@@ -82,15 +83,19 @@ class CBOR_EXPORT Reader {
   // Config contains configuration for a CBOR parsing operation.
   struct CBOR_EXPORT Config {
     Config();
+
+    Config(const Config&) = delete;
+    Config& operator=(const Config&) = delete;
+
     ~Config();
 
     // Used to report the number of bytes of input consumed. This suppresses the
     // |EXTRANEOUS_DATA| error case. May be nullptr.
-    size_t* num_bytes_consumed = nullptr;
+    raw_ptr<size_t> num_bytes_consumed = nullptr;
 
     // Used to report the specific error in the case that parsing fails. May be
     // nullptr;
-    DecoderError* error_code_out = nullptr;
+    raw_ptr<DecoderError, DanglingUntriaged> error_code_out = nullptr;
 
     // Controls the maximum depth of CBOR nesting that will be permitted. This
     // exists to control stack consumption during parsing.
@@ -107,9 +112,16 @@ class CBOR_EXPORT Reader {
     // correctly.)
     bool allow_invalid_utf8 = false;
 
-   private:
-    DISALLOW_COPY_AND_ASSIGN(Config);
+    // Causes floating point in CBOR to be decoded. This is an option as
+    // several users of this library do not want to accept floats in CBOR. When
+    // this option is set to `false` any floating point values encountered
+    // during decoding will set raise the `UNSUPPORTED_FLOATING_POINT_VALUE`
+    // error.
+    bool allow_floating_point = false;
   };
+
+  Reader(const Reader&) = delete;
+  Reader& operator=(const Reader&) = delete;
 
   ~Reader();
 
@@ -125,21 +137,21 @@ class CBOR_EXPORT Reader {
   //
   // Returns an empty Optional if not all the data was consumed, and sets
   // |error_code_out| to EXTRANEOUS_DATA in this case.
-  static base::Optional<Value> Read(base::span<const uint8_t> input_data,
-                                    DecoderError* error_code_out = nullptr,
-                                    int max_nesting_level = kCBORMaxDepth);
+  static std::optional<Value> Read(base::span<const uint8_t> input_data,
+                                   DecoderError* error_code_out = nullptr,
+                                   int max_nesting_level = kCBORMaxDepth);
 
   // A version of |Read|, above, that takes a |Config| structure to allow
   // additional controls.
-  static base::Optional<Value> Read(base::span<const uint8_t> input_data,
-                                    const Config& config);
+  static std::optional<Value> Read(base::span<const uint8_t> input_data,
+                                   const Config& config);
 
   // A version of |Read| that takes some fields of |Config| as parameters to
   // avoid having to construct a |Config| object explicitly.
-  static base::Optional<Value> Read(base::span<const uint8_t> input_data,
-                                    size_t* num_bytes_consumed,
-                                    DecoderError* error_code_out = nullptr,
-                                    int max_nesting_level = kCBORMaxDepth);
+  static std::optional<Value> Read(base::span<const uint8_t> input_data,
+                                   size_t* num_bytes_consumed,
+                                   DecoderError* error_code_out = nullptr,
+                                   int max_nesting_level = kCBORMaxDepth);
 
   // Translates errors to human-readable error messages.
   static const char* ErrorCodeToString(DecoderError error_code);
@@ -162,35 +174,34 @@ class CBOR_EXPORT Reader {
     uint64_t value;
   };
 
-  base::Optional<DataItemHeader> DecodeDataItemHeader();
-  base::Optional<Value> DecodeCompleteDataItem(const Config& config,
-                                               int max_nesting_level);
-  base::Optional<Value> DecodeValueToNegative(uint64_t value);
-  base::Optional<Value> DecodeValueToUnsigned(uint64_t value);
-  base::Optional<Value> DecodeToSimpleValue(const DataItemHeader& header);
-  base::Optional<uint64_t> ReadVariadicLengthInteger(uint8_t additional_info);
-  base::Optional<Value> ReadByteStringContent(const DataItemHeader& header);
-  base::Optional<Value> ReadStringContent(const DataItemHeader& header,
-                                          const Config& config);
-  base::Optional<Value> ReadArrayContent(const DataItemHeader& header,
-                                         const Config& config,
-                                         int max_nesting_level);
-  base::Optional<Value> ReadMapContent(const DataItemHeader& header,
-                                       const Config& config,
-                                       int max_nesting_level);
-  base::Optional<uint8_t> ReadByte();
-  base::Optional<base::span<const uint8_t>> ReadBytes(uint64_t num_bytes);
-  bool IsKeyInOrder(const Value& new_key, Value::MapValue* map);
+  std::optional<DataItemHeader> DecodeDataItemHeader();
+  std::optional<Value> DecodeCompleteDataItem(const Config& config,
+                                              int max_nesting_level);
+  std::optional<Value> DecodeValueToNegative(uint64_t value);
+  std::optional<Value> DecodeValueToUnsigned(uint64_t value);
+  std::optional<Value> DecodeToSimpleValueOrFloat(const DataItemHeader& header,
+                                                  const Config& config);
+  std::optional<uint64_t> ReadVariadicLengthInteger(Value::Type type,
+                                                    uint8_t additional_info);
+  std::optional<Value> ReadByteStringContent(const DataItemHeader& header);
+  std::optional<Value> ReadStringContent(const DataItemHeader& header,
+                                         const Config& config);
+  std::optional<Value> ReadArrayContent(const DataItemHeader& header,
+                                        const Config& config,
+                                        int max_nesting_level);
+  std::optional<Value> ReadMapContent(const DataItemHeader& header,
+                                      const Config& config,
+                                      int max_nesting_level);
+  std::optional<uint8_t> ReadByte();
+  std::optional<base::span<const uint8_t>> ReadBytes(uint64_t num_bytes);
   bool IsEncodingMinimal(uint8_t additional_bytes, uint64_t uint_data);
 
   DecoderError GetErrorCode() { return error_code_; }
 
   size_t num_bytes_remaining() const { return rest_.size(); }
 
-  base::span<const uint8_t> rest_;
+  base::raw_span<const uint8_t> rest_;
   DecoderError error_code_;
-
-  DISALLOW_COPY_AND_ASSIGN(Reader);
 };
 
 }  // namespace cbor

@@ -1,7 +1,4 @@
 file://components/page_info/OWNERS
 
-# Additional owners from EMEA.
-dullweber@chromium.org
-eokoyomon@chromium.org
-
-# COMPONENT: UI>Browser>Bubbles>PageInfo
+per-file ...PageInfoCookies*=file://components/privacy_sandbox/OWNERS
+per-file ...*cookie*=file://components/privacy_sandbox/OWNERS

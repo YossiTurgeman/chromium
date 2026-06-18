@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,9 +12,8 @@ namespace blink {
 namespace test {
 
 TEST(BlinkAXEventIntentTest, Equality) {
-  BlinkAXEventIntent intent1(ax::mojom::blink::Command::kCut,
-                             ax::mojom::blink::TextBoundary::kWordEnd,
-                             ax::mojom::blink::MoveDirection::kForward);
+  BlinkAXEventIntent intent1(ax::mojom::blink::Command::kInsert,
+                             ax::mojom::blink::InputEventType::kInsertText);
   BlinkAXEventIntent intent2(ax::mojom::blink::Command::kSetSelection,
                              ax::mojom::blink::TextBoundary::kWordEnd,
                              ax::mojom::blink::MoveDirection::kForward);
@@ -22,49 +21,47 @@ TEST(BlinkAXEventIntentTest, Equality) {
                              ax::mojom::blink::TextBoundary::kWordEnd,
                              ax::mojom::blink::MoveDirection::kForward);
 
-  EXPECT_NE(BlinkAXEventIntentHash::GetHash(intent1),
-            BlinkAXEventIntentHash::GetHash(intent2));
-  EXPECT_NE(BlinkAXEventIntentHash::GetHash(intent1),
-            BlinkAXEventIntentHash::GetHash(intent3));
-  EXPECT_EQ(BlinkAXEventIntentHash::GetHash(intent2),
-            BlinkAXEventIntentHash::GetHash(intent3));
+  EXPECT_NE(BlinkAXEventIntentHashTraits::GetHash(intent1),
+            BlinkAXEventIntentHashTraits::GetHash(intent2));
+  EXPECT_NE(BlinkAXEventIntentHashTraits::GetHash(intent1),
+            BlinkAXEventIntentHashTraits::GetHash(intent3));
+  EXPECT_EQ(BlinkAXEventIntentHashTraits::GetHash(intent2),
+            BlinkAXEventIntentHashTraits::GetHash(intent3));
 
-  EXPECT_FALSE(BlinkAXEventIntentHash::Equal(intent1, intent2));
-  EXPECT_FALSE(BlinkAXEventIntentHash::Equal(intent1, intent3));
-  EXPECT_TRUE(BlinkAXEventIntentHash::Equal(intent2, intent3));
+  EXPECT_FALSE(BlinkAXEventIntentHashTraits::Equal(intent1, intent2));
+  EXPECT_FALSE(BlinkAXEventIntentHashTraits::Equal(intent1, intent3));
+  EXPECT_TRUE(BlinkAXEventIntentHashTraits::Equal(intent2, intent3));
 }
 
 TEST(BlinkAXEventIntentTest, EqualityWithEmptyValue) {
-  BlinkAXEventIntent intent1(ax::mojom::blink::Command::kCut,
-                             ax::mojom::blink::TextBoundary::kWordEnd,
-                             ax::mojom::blink::MoveDirection::kForward);
+  BlinkAXEventIntent intent1(ax::mojom::blink::Command::kInsert,
+                             ax::mojom::blink::InputEventType::kInsertText);
   // Empty values.
   BlinkAXEventIntent intent2;
   BlinkAXEventIntent intent3;
 
-  EXPECT_NE(BlinkAXEventIntentHash::GetHash(intent1),
-            BlinkAXEventIntentHash::GetHash(intent2));
-  EXPECT_FALSE(BlinkAXEventIntentHash::Equal(intent1, intent2));
+  EXPECT_NE(BlinkAXEventIntentHashTraits::GetHash(intent1),
+            BlinkAXEventIntentHashTraits::GetHash(intent2));
+  EXPECT_FALSE(BlinkAXEventIntentHashTraits::Equal(intent1, intent2));
 
-  EXPECT_EQ(BlinkAXEventIntentHash::GetHash(intent2),
-            BlinkAXEventIntentHash::GetHash(intent3));
-  EXPECT_TRUE(BlinkAXEventIntentHash::Equal(intent2, intent3));
+  EXPECT_EQ(BlinkAXEventIntentHashTraits::GetHash(intent2),
+            BlinkAXEventIntentHashTraits::GetHash(intent3));
+  EXPECT_TRUE(BlinkAXEventIntentHashTraits::Equal(intent2, intent3));
 }
 
 TEST(BlinkAXEventIntentTest, EqualityWithDeletedValue) {
-  BlinkAXEventIntent intent1(ax::mojom::blink::Command::kCut,
-                             ax::mojom::blink::TextBoundary::kWordEnd,
-                             ax::mojom::blink::MoveDirection::kForward);
-  BlinkAXEventIntent intent2(WTF::kHashTableDeletedValue);
-  BlinkAXEventIntent intent3(WTF::kHashTableDeletedValue);
+  BlinkAXEventIntent intent1(ax::mojom::blink::Command::kInsert,
+                             ax::mojom::blink::InputEventType::kInsertText);
+  BlinkAXEventIntent intent2(kHashTableDeletedValue);
+  BlinkAXEventIntent intent3(kHashTableDeletedValue);
 
-  EXPECT_NE(BlinkAXEventIntentHash::GetHash(intent1),
-            BlinkAXEventIntentHash::GetHash(intent2));
-  EXPECT_FALSE(BlinkAXEventIntentHash::Equal(intent1, intent2));
+  EXPECT_NE(BlinkAXEventIntentHashTraits::GetHash(intent1),
+            BlinkAXEventIntentHashTraits::GetHash(intent2));
+  EXPECT_FALSE(BlinkAXEventIntentHashTraits::Equal(intent1, intent2));
 
-  EXPECT_EQ(BlinkAXEventIntentHash::GetHash(intent2),
-            BlinkAXEventIntentHash::GetHash(intent3));
-  EXPECT_TRUE(BlinkAXEventIntentHash::Equal(intent2, intent3));
+  EXPECT_EQ(BlinkAXEventIntentHashTraits::GetHash(intent2),
+            BlinkAXEventIntentHashTraits::GetHash(intent3));
+  EXPECT_TRUE(BlinkAXEventIntentHashTraits::Equal(intent2, intent3));
 }
 
 }  // namespace test

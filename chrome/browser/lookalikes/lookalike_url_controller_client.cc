@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,11 @@
 #include <utility>
 
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/lookalikes/lookalike_url_tab_storage.h"
+#include "chrome/browser/lookalikes/lookalike_url_service.h"
+#include "chrome/browser/lookalikes/lookalike_url_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/url_constants.h"
+#include "components/security_interstitials/content/settings_page_helper.h"
 #include "components/security_interstitials/core/metrics_helper.h"
 #include "content/public/browser/page_navigator.h"
 #include "content/public/browser/web_contents.h"
@@ -36,11 +38,12 @@ LookalikeUrlControllerClient::LookalikeUrlControllerClient(
           Profile::FromBrowserContext(web_contents->GetBrowserContext())
               ->GetPrefs(),
           g_browser_process->GetApplicationLocale(),
-          GURL(chrome::kChromeUINewTabURL)),
+          chrome::ChromeUINewTabURLAsGURL(),
+          /*settings_page_helper=*/nullptr),
       request_url_(request_url),
       safe_url_(safe_url) {}
 
-LookalikeUrlControllerClient::~LookalikeUrlControllerClient() {}
+LookalikeUrlControllerClient::~LookalikeUrlControllerClient() = default;
 
 void LookalikeUrlControllerClient::GoBack() {
   // We don't offer 'go back', but rather redirect to the legitimate site.
@@ -50,11 +53,12 @@ void LookalikeUrlControllerClient::GoBack() {
 
   // Prevent the back button from returning to the bad site.
   params.should_replace_current_entry = true;
-  web_contents_->OpenURL(params);
+  web_contents()->OpenURL(params, /*navigation_handle_callback=*/{});
 }
 
 void LookalikeUrlControllerClient::Proceed() {
-  LookalikeUrlTabStorage::GetOrCreate(web_contents_)
-      ->AllowDomain(request_url_.host());
+  LookalikeUrlServiceFactory::GetForProfile(
+      Profile::FromBrowserContext(web_contents()->GetBrowserContext()))
+      ->SetUserIgnore(request_url_);
   Reload();
 }

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,21 +10,19 @@
 #include <string>
 #include <vector>
 
-#include "base/optional.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/nearby_sharing/contacts/nearby_share_contact_manager.h"
 #include "chrome/browser/nearby_sharing/contacts/nearby_share_contact_manager_impl.h"
-#include "chrome/browser/nearby_sharing/proto/rpc_resources.pb.h"
+#include "third_party/nearby/sharing/proto/rpc_resources.pb.h"
 
 class NearbyShareClientFactory;
 class NearbyShareLocalDeviceDataManager;
-class PrefService;
 
 // A fake implementation of NearbyShareContactManager, along with a fake
 // factory, to be used in tests. Stores parameters input into
 // NearbyShareContactManager method calls. Use the notification methods from the
-// base class--NotifyAllowlistChanged(), NotifyContactsDownloaded(),
-// NotifyContactsUploaded()--to alert observers of changes; these methods are
-// made public in this fake class.
+// base class--NotifyContactsDownloaded() and NotifyContactsUploaded()--to alert
+// observers of changes; these methods are made public in this fake class.
 class FakeNearbyShareContactManager : public NearbyShareContactManager {
  public:
   // Factory that creates FakeNearbyShareContactManager instances. Use in
@@ -37,11 +35,10 @@ class FakeNearbyShareContactManager : public NearbyShareContactManager {
 
     // Returns all FakeNearbyShareContactManager instances created by
     // CreateInstance().
-    std::vector<FakeNearbyShareContactManager*>& instances() {
+    std::vector<raw_ptr<FakeNearbyShareContactManager, VectorExperimental>>&
+    instances() {
       return instances_;
     }
-
-    PrefService* latest_pref_service() const { return latest_pref_service_; }
 
     NearbyShareClientFactory* latest_http_client_factory() const {
       return latest_http_client_factory_;
@@ -55,23 +52,30 @@ class FakeNearbyShareContactManager : public NearbyShareContactManager {
    private:
     // NearbyShareContactManagerImpl::Factory:
     std::unique_ptr<NearbyShareContactManager> CreateInstance(
+        std::string user_email,
         PrefService* pref_service,
         NearbyShareClientFactory* http_client_factory,
         NearbyShareLocalDeviceDataManager* local_device_data_manager) override;
 
-    std::vector<FakeNearbyShareContactManager*> instances_;
-    PrefService* latest_pref_service_ = nullptr;
-    NearbyShareClientFactory* latest_http_client_factory_ = nullptr;
-    NearbyShareLocalDeviceDataManager* latest_local_device_data_manager_ =
-        nullptr;
+    std::vector<raw_ptr<FakeNearbyShareContactManager, VectorExperimental>>
+        instances_;
+    raw_ptr<NearbyShareClientFactory, DanglingUntriaged>
+        latest_http_client_factory_ = nullptr;
+    raw_ptr<NearbyShareLocalDeviceDataManager, DanglingUntriaged>
+        latest_local_device_data_manager_ = nullptr;
   };
 
   FakeNearbyShareContactManager();
   ~FakeNearbyShareContactManager() override;
 
-  // Returns inputs of all DownloadContacts() calls.
-  const std::vector<bool>& download_contacts_calls() const {
-    return download_contacts_calls_;
+  // NearbyShareContactsManager:
+  void DownloadContacts() override;
+  void SetAllowedContacts(
+      const std::set<std::string>& allowed_contact_ids) override;
+  std::set<std::string> GetAllowedContacts() const override;
+
+  size_t num_download_contacts_calls() const {
+    return num_download_contacts_calls_;
   }
 
   // Returns inputs of all SetAllowedContacts() calls.
@@ -80,15 +84,11 @@ class FakeNearbyShareContactManager : public NearbyShareContactManager {
   }
 
   // Make protected methods from base class public in this fake class.
-  using NearbyShareContactManager::NotifyAllowlistChanged;
   using NearbyShareContactManager::NotifyContactsDownloaded;
   using NearbyShareContactManager::NotifyContactsUploaded;
 
  private:
   // NearbyShareContactsManager:
-  void DownloadContacts(bool only_download_if_changed) override;
-  void SetAllowedContacts(
-      const std::set<std::string>& allowed_contact_ids) override;
   void OnStart() override;
   void OnStop() override;
   void Bind(mojo::PendingReceiver<nearby_share::mojom::ContactManager> receiver)
@@ -98,9 +98,8 @@ class FakeNearbyShareContactManager : public NearbyShareContactManager {
   void AddDownloadContactsObserver(
       ::mojo::PendingRemote<nearby_share::mojom::DownloadContactsObserver>
           observer) override;
-  void DownloadContacts() override;
 
-  std::vector<bool> download_contacts_calls_;
+  size_t num_download_contacts_calls_ = 0;
   std::vector<std::set<std::string>> set_allowed_contacts_calls_;
 };
 

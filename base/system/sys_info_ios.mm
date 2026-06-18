@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,32 +11,30 @@
 #include <sys/sysctl.h>
 #include <sys/types.h>
 
+#include "base/apple/scoped_mach_port.h"
+#include "base/byte_size.h"
 #include "base/check_op.h"
-#include "base/mac/scoped_mach_port.h"
+#include "base/no_destructor.h"
 #include "base/notreached.h"
+#include "base/numerics/safe_conversions.h"
+#include "base/posix/sysctl.h"
 #include "base/process/process_metrics.h"
-#include "base/stl_util.h"
 #include "base/strings/string_util.h"
+#include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
+#include "build/build_config.h"
 
 namespace base {
 
+#if BUILDFLAG(IS_IOS)
 namespace {
-
-// Queries sysctlbyname() for the given key and returns the value from the
-// system or the empty string on failure.
-std::string GetSysctlValue(const char* key_name) {
-  char value[256];
-  size_t len = base::size(value);
-  if (sysctlbyname(key_name, &value, &len, nullptr, 0) == 0) {
-    DCHECK_GE(len, 1u);
-    DCHECK_EQ('\0', value[len - 1]);
-    return std::string(value, len - 1);
-  }
-  return std::string();
+// Accessor for storage of overridden HardwareModelName.
+std::string& GetHardwareModelNameStorage() {
+  static base::NoDestructor<std::string> instance;
+  return *instance;
 }
-
 }  // namespace
+#endif
 
 // static
 std::string SysInfo::OperatingSystemName() {
@@ -44,8 +42,8 @@ std::string SysInfo::OperatingSystemName() {
   static std::string* system_name;
   dispatch_once(&get_system_name_once, ^{
     @autoreleasepool {
-      system_name = new std::string(
-          SysNSStringToUTF8([[UIDevice currentDevice] systemName]));
+      system_name =
+          new std::string(SysNSStringToUTF8(UIDevice.currentDevice.systemName));
     }
   });
   // Examples of returned value: 'iPhone OS' on iPad 5.1.1
@@ -60,7 +58,7 @@ std::string SysInfo::OperatingSystemVersion() {
   dispatch_once(&get_system_version_once, ^{
     @autoreleasepool {
       system_version = new std::string(
-          SysNSStringToUTF8([[UIDevice currentDevice] systemVersion]));
+          SysNSStringToUTF8(UIDevice.currentDevice.systemVersion));
     }
   });
   return *system_version;
@@ -70,62 +68,58 @@ std::string SysInfo::OperatingSystemVersion() {
 void SysInfo::OperatingSystemVersionNumbers(int32_t* major_version,
                                             int32_t* minor_version,
                                             int32_t* bugfix_version) {
-  @autoreleasepool {
-    std::string system_version = OperatingSystemVersion();
-    if (!system_version.empty()) {
-      // Try to parse out the version numbers from the string.
-      int num_read = sscanf(system_version.c_str(), "%d.%d.%d", major_version,
-                            minor_version, bugfix_version);
-      if (num_read < 1)
-        *major_version = 0;
-      if (num_read < 2)
-        *minor_version = 0;
-      if (num_read < 3)
-        *bugfix_version = 0;
-    }
-  }
+  NSOperatingSystemVersion version =
+      NSProcessInfo.processInfo.operatingSystemVersion;
+  *major_version = saturated_cast<int32_t>(version.majorVersion);
+  *minor_version = saturated_cast<int32_t>(version.minorVersion);
+  *bugfix_version = saturated_cast<int32_t>(version.patchVersion);
+}
+
+// static
+std::string SysInfo::OperatingSystemArchitecture() {
+#if defined(ARCH_CPU_X86)
+  return "x86";
+#elif defined(ARCH_CPU_X86_64)
+  return "x86_64";
+#elif defined(ARCH_CPU_ARMEL)
+  return "arm";
+#elif defined(ARCH_CPU_ARM64)
+  return "arm64";
+#else
+#error Unsupported CPU architecture
+#endif
 }
 
 // static
 std::string SysInfo::GetIOSBuildNumber() {
-  int mib[2] = {CTL_KERN, KERN_OSVERSION};
-  unsigned int namelen = sizeof(mib) / sizeof(mib[0]);
-  size_t buffer_size = 0;
-  sysctl(mib, namelen, nullptr, &buffer_size, nullptr, 0);
-  char build_number[buffer_size];
-  int result = sysctl(mib, namelen, build_number, &buffer_size, nullptr, 0);
-  DCHECK(result == 0);
-  return build_number;
+  std::optional<std::string> build_number =
+      StringSysctl({CTL_KERN, KERN_OSVERSION});
+  return build_number.value();
 }
 
 // static
-int64_t SysInfo::AmountOfPhysicalMemoryImpl() {
-  struct host_basic_info hostinfo;
-  mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
-  base::mac::ScopedMachSendRight host(mach_host_self());
-  int result = host_info(host.get(), HOST_BASIC_INFO,
-                         reinterpret_cast<host_info_t>(&hostinfo), &count);
-  if (result != KERN_SUCCESS) {
-    NOTREACHED();
-    return 0;
+void SysInfo::OverrideHardwareModelName(std::string name) {
+  // Normally, HardwareModelName() should not be called before overriding the
+  // value, but StartCrashController(), which eventually calls
+  // HardwareModelName(), is called before overriding the name.
+  CHECK(!name.empty());
+  GetHardwareModelNameStorage() = std::move(name);
+}
+
+// static
+ByteSize SysInfo::AmountOfAvailablePhysicalMemoryImpl() {
+  SystemMemoryInfo info;
+  if (!GetSystemMemoryInfo(&info)) {
+    return ByteSize(0);
   }
-  DCHECK_EQ(HOST_BASIC_INFO_COUNT, count);
-  return static_cast<int64_t>(hostinfo.max_mem);
-}
-
-// static
-int64_t SysInfo::AmountOfAvailablePhysicalMemoryImpl() {
-  SystemMemoryInfoKB info;
-  if (!GetSystemMemoryInfo(&info))
-    return 0;
   // We should add inactive file-backed memory also but there is no such
   // information from iOS unfortunately.
-  return static_cast<int64_t>(info.free + info.speculative) * 1024;
+  return info.free + info.speculative;
 }
 
 // static
 std::string SysInfo::CPUModelName() {
-  return GetSysctlValue("machdep.cpu.brand_string");
+  return StringSysctlByName("machdep.cpu.brand_string").value_or(std::string{});
 }
 
 // static
@@ -133,11 +127,29 @@ std::string SysInfo::HardwareModelName() {
 #if TARGET_OS_SIMULATOR
   // On the simulator, "hw.machine" returns "i386" or "x86_64" which doesn't
   // match the expected format, so supply a fake string here.
-  return "Simulator1,1";
+  const char* model = getenv("SIMULATOR_MODEL_IDENTIFIER");
+  if (model == nullptr) {
+    switch (UIDevice.currentDevice.userInterfaceIdiom) {
+      case UIUserInterfaceIdiomPhone:
+        model = "iPhone";
+        break;
+      case UIUserInterfaceIdiomPad:
+        model = "iPad";
+        break;
+      default:
+        model = "Unknown";
+        break;
+    }
+  }
+  return base::StringPrintf("iOS Simulator (%s)", model);
 #else
+  const std::string& override = GetHardwareModelNameStorage();
+  if (!override.empty()) {
+    return override;
+  }
   // Note: This uses "hw.machine" instead of "hw.model" like the Mac code,
   // because "hw.model" doesn't always return the right string on some devices.
-  return GetSysctlValue("hw.machine");
+  return StringSysctl({CTL_HW, HW_MACHINE}).value_or(std::string{});
 #endif
 }
 

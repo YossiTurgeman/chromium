@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -56,10 +56,10 @@ const Display* FindDisplayWithBiggestIntersection(const Displays& displays,
 Displays::const_iterator FindDisplayContainingPoint(
     const Displays& displays,
     const gfx::Point& point_in_screen) {
-  return std::find_if(displays.begin(), displays.end(),
-                      [point_in_screen](const Display& display) {
-                        return display.bounds().Contains(point_in_screen);
-                      });
+  return std::ranges::find_if(
+      displays, [point_in_screen](const Display& display) {
+        return display.bounds().Contains(point_in_screen);
+      });
 }
 
 }  // namespace display

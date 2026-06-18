@@ -1,36 +1,35 @@
-// Copyright (c) 2010 The Chromium Authors. All rights reserved.
+// Copyright 2010 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_NET_SERVICE_PROVIDERS_WIN_H_
 #define CHROME_BROWSER_NET_SERVICE_PROVIDERS_WIN_H_
 
+#include <string>
 #include <vector>
 
-#include "base/strings/string16.h"
-
 struct WinsockNamespaceProvider {
-  base::string16 name;
+  std::wstring name;
   int version;
   bool active;
   int type;
 };
-typedef std::vector<WinsockNamespaceProvider> WinsockNamespaceProviderList;
+using WinsockNamespaceProviderList = std::vector<WinsockNamespaceProvider>;
 
 struct WinsockLayeredServiceProvider {
   WinsockLayeredServiceProvider();
   WinsockLayeredServiceProvider(const WinsockLayeredServiceProvider& other);
   ~WinsockLayeredServiceProvider();
 
-  base::string16 name;
-  base::string16 path;
+  std::wstring name;
+  std::wstring path;
   int version;
   int chain_length;
   int socket_type;
   int socket_protocol;
 };
-typedef std::vector<WinsockLayeredServiceProvider>
-    WinsockLayeredServiceProviderList;
+using WinsockLayeredServiceProviderList =
+    std::vector<WinsockLayeredServiceProvider>;
 
 // Returns all the Winsock namespace providers.
 void GetWinsockNamespaceProviders(WinsockNamespaceProviderList* namespace_list);

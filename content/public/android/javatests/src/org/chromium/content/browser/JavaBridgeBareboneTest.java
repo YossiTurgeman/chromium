@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,59 +7,34 @@ package org.chromium.content.browser;
 import androidx.test.filters.SmallTest;
 
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-import org.chromium.base.test.params.BaseJUnit4RunnerDelegate;
-import org.chromium.base.test.params.ParameterAnnotations.UseMethodParameter;
-import org.chromium.base.test.params.ParameterAnnotations.UseMethodParameterBefore;
-import org.chromium.base.test.params.ParameterAnnotations.UseRunnerDelegate;
-import org.chromium.base.test.params.ParameterizedRunner;
-import org.chromium.base.test.util.DisabledTest;
+import org.chromium.base.test.BaseJUnit4ClassRunner;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.Feature;
-import org.chromium.base.test.util.UrlUtils;
 import org.chromium.content_public.browser.test.util.TestCallbackHelperContainer;
 import org.chromium.content_public.browser.test.util.TestCallbackHelperContainer.OnEvaluateJavaScriptResultHelper;
-import org.chromium.content_public.browser.test.util.TestCallbackHelperContainer.OnPageFinishedHelper;
 
-/**
- * Common functionality for testing the Java Bridge.
- */
-@RunWith(ParameterizedRunner.class)
-@UseRunnerDelegate(BaseJUnit4RunnerDelegate.class)
+/** Common functionality for testing the Java Bridge. */
+@RunWith(BaseJUnit4ClassRunner.class)
+@Batch(JavaBridgeActivityTestRule.BATCH)
 public class JavaBridgeBareboneTest {
-    @Rule
-    public JavaBridgeActivityTestRule mActivityTestRule =
-            new JavaBridgeActivityTestRule().shouldSetUp(false);
+    @Rule public JavaBridgeActivityTestRule mActivityTestRule = new JavaBridgeActivityTestRule();
 
     private TestCallbackHelperContainer mTestCallbackHelperContainer;
-    private boolean mUseMojo;
-
-    @UseMethodParameterBefore(JavaBridgeActivityTestRule.MojoTestParams.class)
-    public void setupMojoTest(boolean useMojo) {
-        mUseMojo = useMojo;
-        mActivityTestRule.setupMojoTest(useMojo);
-    }
-
-    @Before
-    public void setUp() {
-        mActivityTestRule.launchContentShellWithUrl(
-                UrlUtils.encodeHtmlDataUri("<html><head></head><body>test</body></html>"));
-        mActivityTestRule.waitForActiveShellToBeDoneLoading();
-        mTestCallbackHelperContainer =
-                new TestCallbackHelperContainer(mActivityTestRule.getWebContents());
-    }
 
     private void injectDummyObject(final String name) throws Throwable {
-        mActivityTestRule.runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                mActivityTestRule.getJavascriptInjector(mUseMojo).addPossiblyUnsafeInterface(
-                        new Object(), name, null);
-            }
-        });
+        mActivityTestRule.runOnUiThread(
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        mActivityTestRule
+                                .getJavascriptInjector()
+                                .addPossiblyUnsafeInterface(new Object(), name, null);
+                    }
+                });
     }
 
     private String evaluateJsSync(String jsCode) throws Exception {
@@ -67,19 +42,6 @@ public class JavaBridgeBareboneTest {
         javascriptHelper.evaluateJavaScriptForTests(mActivityTestRule.getWebContents(), jsCode);
         javascriptHelper.waitUntilHasValue();
         return javascriptHelper.getJsonResultAndClear();
-    }
-
-    private void reloadSync() throws Throwable {
-        OnPageFinishedHelper pageFinishedHelper =
-                mTestCallbackHelperContainer.getOnPageFinishedHelper();
-        int currentCallCount = pageFinishedHelper.getCallCount();
-        mActivityTestRule.runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                mActivityTestRule.getWebContents().getNavigationController().reload(true);
-            }
-        });
-        pageFinishedHelper.waitForCallback(currentCallCount);
     }
 
     // If inection happens before evaluating any JS code, then the first evaluation
@@ -96,9 +58,7 @@ public class JavaBridgeBareboneTest {
     @Test
     @SmallTest
     @Feature({"AndroidWebView", "Android-JavaBridge"})
-    @UseMethodParameter(JavaBridgeActivityTestRule.MojoTestParams.class)
-    @DisabledTest(message = "Flaky - https://crbug.com/1116744")
-    public void testImmediateAddition(boolean useMojo) throws Throwable {
+    public void testImmediateAddition() throws Throwable {
         injectDummyObject("testObject");
         Assert.assertEquals("\"object\"", evaluateJsSync("typeof testObject"));
     }
@@ -108,8 +68,7 @@ public class JavaBridgeBareboneTest {
     @Test
     @SmallTest
     @Feature({"AndroidWebView", "Android-JavaBridge"})
-    @UseMethodParameter(JavaBridgeActivityTestRule.MojoTestParams.class)
-    public void testNoImmediateAdditionAfterJSEvaluation(boolean useMojo) throws Throwable {
+    public void testNoImmediateAdditionAfterJSEvaluation() throws Throwable {
         evaluateJsSync("true");
         injectDummyObject("testObject");
         Assert.assertEquals("\"undefined\"", evaluateJsSync("typeof testObject"));
@@ -118,10 +77,8 @@ public class JavaBridgeBareboneTest {
     @Test
     @SmallTest
     @Feature({"AndroidWebView", "Android-JavaBridge"})
-    @UseMethodParameter(JavaBridgeActivityTestRule.MojoTestParams.class)
-    @DisabledTest(message = "Flaky - https://crbug.com/1117003")
-    public void testImmediateAdditionAfterReload(boolean useMojo) throws Throwable {
-        reloadSync();
+    public void testImmediateAdditionAfterReload() throws Throwable {
+        mActivityTestRule.synchronousPageReload();
         injectDummyObject("testObject");
         Assert.assertEquals("\"object\"", evaluateJsSync("typeof testObject"));
     }
@@ -129,10 +86,9 @@ public class JavaBridgeBareboneTest {
     @Test
     @SmallTest
     @Feature({"AndroidWebView", "Android-JavaBridge"})
-    @UseMethodParameter(JavaBridgeActivityTestRule.MojoTestParams.class)
-    public void testReloadAfterAddition(boolean useMojo) throws Throwable {
+    public void testReloadAfterAddition() throws Throwable {
         injectDummyObject("testObject");
-        reloadSync();
+        mActivityTestRule.synchronousPageReload();
         Assert.assertEquals("\"object\"", evaluateJsSync("typeof testObject"));
     }
 }

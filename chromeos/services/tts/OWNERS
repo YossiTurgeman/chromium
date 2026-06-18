@@ -1,4 +1,4 @@
 file://ui/accessibility/OWNERS
 
-# TEAM: chromium-accessibility@chromium.org
-# COMPONENT: Internals>SpeechSynthesis
+per-file tts_sandbox_hook.*=set noparent
+per-file tts_sandbox_hook.*=file://sandbox/linux/OWNERS

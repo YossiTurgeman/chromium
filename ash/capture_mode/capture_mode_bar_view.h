@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,71 +7,64 @@
 
 #include "ash/ash_export.h"
 #include "ash/capture_mode/capture_mode_types.h"
-#include "ui/views/controls/button/button.h"
-
-namespace views {
-class Separator;
-}  // namespace views
+#include "base/memory/raw_ptr.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/strings/grit/ui_strings.h"
+#include "ui/views/view.h"
 
 namespace ash {
 
-class CaptureModeCloseButton;
 class CaptureModeSourceView;
 class CaptureModeTypeView;
+class PillButton;
+class IconButton;
+class SystemShadow;
 
-// A view that acts as the content view of the capture mode bar widget.
-// It has a set of buttons to toggle between image and video capture, and
-// another set of buttons to toggle between fullscreen, region, and window
-// capture sources. The structure looks like this:
-//
-//   +--------------------------------------------------------+
-//   |  +----------------+  |                       |         |
-//   |  |  +---+  +---+  |  |  +---+  +---+  +---+  |  +---+  |
-//   |  |  |   |  |   |  |  |  |   |  |   |  |   |  |  |   |  |
-//   |  |  +---+  +---+  |  |  +---+  +---+  +---+  |  +---+  |
-//   |  +----------------+  |  ^                 ^  |  ^      |
-//   +--^----------------------|-----------------|-----|------+
-//   ^  |                      +-----------------+     |
-//   |  |                      |                       CaptureModeCloseButton
-//   |  |                      CaptureModeSourceView
-//   |  CaptureModeTypeView
-//   |
-//   CaptureModeBarView
-//
-class ASH_EXPORT CaptureModeBarView : public views::View,
-                                      public views::ButtonListener {
+// The contents of the capture bar can change based on the session initiation
+// type. Different clients of capture mode require different capture mode bar.
+// See `CaptureModeBehavior`.
+class ASH_EXPORT CaptureModeBarView : public views::View {
+  METADATA_HEADER(CaptureModeBarView, views::View)
+
  public:
-  CaptureModeBarView();
-  CaptureModeBarView(const CaptureModeBarView&) = delete;
-  CaptureModeBarView& operator=(const CaptureModeBarView&) = delete;
   ~CaptureModeBarView() override;
 
-  CaptureModeTypeView* capture_type_view() const { return capture_type_view_; }
-  CaptureModeSourceView* capture_source_view() const {
-    return capture_source_view_;
-  }
-  CaptureModeCloseButton* close_button() const { return close_button_; }
+  IconButton* settings_button() const { return settings_button_; }
+  IconButton* close_button() const { return close_button_; }
 
-  // Gets the ideal bounds of the bar of widget on the given |root| window.
-  static gfx::Rect GetBounds(aura::Window* root);
+  // These functions may return `nullptr` depending on the actual type of the
+  // bar.
+  virtual CaptureModeTypeView* GetCaptureTypeView() const;
+  virtual CaptureModeSourceView* GetCaptureSourceView() const;
+  virtual PillButton* GetStartRecordingButton() const;
 
   // Called when either the capture mode source or type changes.
-  void OnCaptureSourceChanged(CaptureModeSource new_source);
-  void OnCaptureTypeChanged(CaptureModeType new_type);
+  virtual void OnCaptureSourceChanged(CaptureModeSource new_source);
+  virtual void OnCaptureTypeChanged(CaptureModeType new_type);
+
+  // Called when settings is toggled on or off.
+  virtual void SetSettingsMenuShown(bool shown);
+
+  bool IsEventOnSettingsButton(gfx::Point screen_location) const;
 
   // views::View:
-  const char* GetClassName() const override;
+  void AddedToWidget() override;
+  void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
 
-  // views::ButtonListener:
-  void ButtonPressed(views::Button* sender, const ui::Event& event) override;
+ protected:
+  CaptureModeBarView();
+
+  // Adds the common elements of different capture bars to the bar view.
+  void AppendSettingsButton();
+  void AppendCloseButton(int accessible_name_id = IDS_APP_ACCNAME_CLOSE);
 
  private:
-  // Owned by the views hierarchy.
-  CaptureModeTypeView* capture_type_view_;
-  views::Separator* separator_1_;
-  CaptureModeSourceView* capture_source_view_;
-  views::Separator* separator_2_;
-  CaptureModeCloseButton* close_button_;
+  void OnSettingsButtonPressed(const ui::Event& event);
+  void OnCloseButtonPressed();
+
+  raw_ptr<IconButton> settings_button_ = nullptr;
+  raw_ptr<IconButton> close_button_ = nullptr;
+  std::unique_ptr<SystemShadow> shadow_;
 };
 
 }  // namespace ash

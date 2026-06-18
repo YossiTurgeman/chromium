@@ -1,9 +1,9 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef STORAGE_BROWSER_BLOB_BLOB_BUILDER_FROM_STREAM_H
-#define STORAGE_BROWSER_BLOB_BLOB_BUILDER_FROM_STREAM_H
+#ifndef STORAGE_BROWSER_BLOB_BLOB_BUILDER_FROM_STREAM_H_
+#define STORAGE_BROWSER_BLOB_BLOB_BUILDER_FROM_STREAM_H_
 
 #include "base/component_export.h"
 #include "base/containers/queue.h"
@@ -126,6 +126,7 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobBuilderFromStream {
 
   // These values are persisted to logs. Entries should not be renumbered and
   // numeric values should never be reused.
+  // LINT.IfChange(BlobBuildFromStreamResult)
   enum class Result {
     kSuccess = 0,
     kAborted = 1,
@@ -134,6 +135,7 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobBuilderFromStream {
     kFileWriteFailed = 4,
     kMaxValue = kFileWriteFailed
   };
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/storage/enums.xml:BlobBuildFromStreamResult)
 
   void OnError(Result result);
   void OnSuccess();
@@ -168,4 +170,4 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobBuilderFromStream {
 
 }  // namespace storage
 
-#endif  // STORAGE_BROWSER_BLOB_BLOB_BUILDER_FROM_STREAM_H
+#endif  // STORAGE_BROWSER_BLOB_BLOB_BUILDER_FROM_STREAM_H_

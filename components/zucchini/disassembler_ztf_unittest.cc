@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,10 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "base/stl_util.h"
-#include "base/strings/string_piece.h"
 #include "components/zucchini/buffer_view.h"
 #include "components/zucchini/element_detection.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -30,7 +29,7 @@ And {-01,+05} is an example of a relative ref
 txTZ
 TRAILING DATA)";
 // -1 to exclude null byte.
-constexpr size_t kNormalTextExtraBytes = base::size("TRAILING DATA") - 1;
+constexpr size_t kNormalTextExtraBytes = std::size("TRAILING DATA") - 1;
 
 constexpr char kOutOfBoundsText[] = R"(ZTxt<1,1>
 Hello World!
@@ -42,7 +41,7 @@ but [+00,+10] is valid at least. As is (1,5).
 )";
 
 // Converts a raw string into data.
-std::vector<uint8_t> StrToData(base::StringPiece s) {
+std::vector<uint8_t> StrToData(std::string_view s) {
   return std::vector<uint8_t>(s.begin(), s.end());
 }
 
@@ -373,7 +372,8 @@ TEST(DisassemblerZtfTest, WriteOutOfBoundsRefs) {
       {{DisassemblerZtf::kAngles, DisassemblerZtf::kAnglesAbs3},
        {Reference({4, 50})}},  // This should fail to write.
       {{DisassemblerZtf::kBrackets, DisassemblerZtf::kBracketsRel2},
-       {Reference({139, mutable_text.size()})}},  // This should fail.
+       {Reference({139, static_cast<offset_t>(
+                            mutable_text.size())})}},  // This should fail.
       {{DisassemblerZtf::kParentheses, DisassemblerZtf::kParenthesesAbs1},
        {Reference({174, 21})}},  // This should fail.
       {{DisassemblerZtf::kBraces, DisassemblerZtf::kBracesAbs1},
@@ -390,8 +390,8 @@ TEST(DisassemblerZtfTest, WriteOutOfBoundsRefs) {
   change_map.at({DisassemblerZtf::kAngles, DisassemblerZtf::kAnglesAbs1})
       .emplace(Reference{4, 0});
   update_map({DisassemblerZtf::kBrackets, DisassemblerZtf::kBracketsRel2},
-             Reference({139, mutable_text.size()}), Reference({139, 149}),
-             &change_map);
+             Reference({139, static_cast<offset_t>(mutable_text.size())}),
+             Reference({139, 149}), &change_map);
   update_map({DisassemblerZtf::kParentheses, DisassemblerZtf::kParenthesesAbs1},
              Reference({174, 21}), Reference({174, 4}), &change_map);
   ConstBufferView const_image(image);

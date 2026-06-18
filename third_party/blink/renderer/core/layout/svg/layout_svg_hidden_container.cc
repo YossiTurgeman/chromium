@@ -19,34 +19,33 @@
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_hidden_container.h"
 
-#include "third_party/blink/renderer/core/layout/layout_analyzer.h"
-#include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
+#include "third_party/blink/renderer/core/layout/svg/svg_layout_info.h"
 
 namespace blink {
 
 LayoutSVGHiddenContainer::LayoutSVGHiddenContainer(SVGElement* element)
     : LayoutSVGContainer(element) {}
 
-void LayoutSVGHiddenContainer::UpdateLayout() {
+SVGLayoutResult LayoutSVGHiddenContainer::UpdateSVGLayout(
+    const SVGLayoutInfo& layout_info) {
+  NOT_DESTROYED();
   DCHECK(NeedsLayout());
-  LayoutAnalyzer::Scope analyzer(*this);
 
-  // When hasRelativeLengths() is false, no descendants have relative lengths
-  // (hence no one is interested in viewport size changes).
-  bool layout_size_changed =
-      GetElement()->HasRelativeLengths() &&
-      SVGLayoutSupport::LayoutSizeOfNearestViewportChanged(this);
+  SVGLayoutInfo child_layout_info = layout_info;
+  child_layout_info.force_layout = SelfNeedsFullLayout();
 
-  SVGLayoutSupport::LayoutChildren(FirstChild(), SelfNeedsLayout(), false,
-                                   layout_size_changed);
-  UpdateCachedBoundaries();
+  const SVGLayoutResult content_result = Content().Layout(child_layout_info);
+  const bool has_viewport_dependence = content_result.has_viewport_dependence ||
+                                       GetElement()->SelfHasRelativeLengths();
   ClearNeedsLayout();
+  return SVGLayoutResult(/*bounds_changed=*/false, has_viewport_dependence);
 }
 
 bool LayoutSVGHiddenContainer::NodeAtPoint(HitTestResult&,
                                            const HitTestLocation&,
                                            const PhysicalOffset&,
-                                           HitTestAction) {
+                                           HitTestPhase) {
+  NOT_DESTROYED();
   return false;
 }
 

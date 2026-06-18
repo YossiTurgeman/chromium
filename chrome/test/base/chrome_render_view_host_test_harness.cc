@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,12 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/signin/signin_error_controller_factory.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/shell.h"
 #endif
 
@@ -26,7 +26,7 @@ TestingProfile* ChromeRenderViewHostTestHarness::profile() {
 
 void ChromeRenderViewHostTestHarness::TearDown() {
   RenderViewHostTestHarness::TearDown();
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   ash::Shell::DeleteInstance();
 #endif
 }
@@ -38,24 +38,8 @@ ChromeRenderViewHostTestHarness::GetTestingFactories() const {
 
 std::unique_ptr<TestingProfile>
 ChromeRenderViewHostTestHarness::CreateTestingProfile() {
-  // Maintain the profile directory ourselves so that it isn't deleted along
-  // with TestingProfile.  RenderViewHostTestHarness::TearDown() will destroy
-  // the profile and also destroy the thread bundle to ensure that any tasks
-  // posted throughout the test run to completion.  By postponing the deletion
-  // of the profile directory until ~ChromeRenderViewHostTestHarness() we
-  // guarantee that no tasks will try to access the profile directory when it's
-  // (being) deleted.
-  auto temp_dir = std::make_unique<base::ScopedTempDir>();
-  CHECK(temp_dir->CreateUniqueTempDir());
-
   TestingProfile::Builder builder;
-  builder.SetPath(temp_dir->GetPath());
-
-  for (auto& pair : GetTestingFactories())
-    builder.AddTestingFactory(pair.first, pair.second);
-
-  temp_dirs_.push_back(std::move(temp_dir));
-
+  builder.AddTestingFactories(GetTestingFactories());
   return builder.Build();
 }
 

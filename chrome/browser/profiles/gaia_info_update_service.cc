@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,51 +6,97 @@
 
 #include <stddef.h>
 
+#include "base/containers/flat_set.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chrome_notification_types.h"
-#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_attributes_entry.h"
 #include "chrome/browser/profiles/profile_attributes_storage.h"
-#include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/profiles/profile_metrics.h"
 #include "chrome/browser/profiles/profiles_state.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
 #include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/signin/public/base/avatar_icon_util.h"
+#include "components/signin/public/base/consent_level.h"
 #include "components/signin/public/base/signin_pref_names.h"
+#include "components/signin/public/base/signin_prefs.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/signin/public/identity_manager/accounts_in_cookie_jar_info.h"
-#include "components/signin/public/identity_manager/consent_level.h"
-#include "content/public/browser/notification_details.h"
+#include "components/signin/public/identity_manager/identity_manager.h"
+#include "components/signin/public/identity_manager/identity_utils.h"
+#include "components/signin/public/identity_manager/signin_constants.h"
 #include "content/public/browser/storage_partition.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/gfx/image/image.h"
 
-#if defined(OS_CHROMEOS)
-#include "chromeos/constants/chromeos_features.h"
-#endif
+namespace {
+
+void UpdateAccountsPrefs(
+    PrefService& pref_service,
+    const signin::IdentityManager& identity_manager,
+    const signin::AccountsInCookieJarInfo& accounts_in_cookie_jar_info) {
+  if (!accounts_in_cookie_jar_info.AreAccountsFresh()) {
+    return;
+  }
+
+  const base::flat_set<GaiaId> account_ids_in_chrome =
+      signin::GetAllGaiaIdsForKeyedPreferences(&identity_manager,
+                                               accounts_in_cookie_jar_info);
+
+  // TODO(b/331767195): In case the prefs are needed for ChromeOS and Android
+  // (platforms where the account is tied to the OS) in the future, we would
+  // also need to keep the accounts that have an AccountInfo that is still
+  // present in Chrome (accounts that have refresh tokens) in addition to the
+  // above checks on cookies and primary account.
+
+  SigninPrefs signin_prefs(pref_service);
+  size_t removed_count =
+      signin_prefs.RemoveAllAccountPrefsExcept(account_ids_in_chrome);
+
+  if (removed_count > 0) {
+    // There is a maximum of 10 Gaia accounts on the web. If we add the Chrome
+    // primary account, the theoretical maximum count of accounts in the pref is
+    // 11. The histogram function expects the "exclusive maximum" of 11 + 1.
+    constexpr int kExclusiveMaxRemovedCount = 12;
+    constexpr char kAccountsRemovedHistogramName[] =
+        "Signin.AccountPref.RemovedCount";
+    base::UmaHistogramExactLinear(kAccountsRemovedHistogramName, removed_count,
+                                  kExclusiveMaxRemovedCount);
+    std::string variant_histogram_name =
+        identity_manager.HasPrimaryAccount(signin::ConsentLevel::kSignin)
+            ? base::StrCat({kAccountsRemovedHistogramName, ".SignedIn"})
+            : base::StrCat({kAccountsRemovedHistogramName, ".SignedOut"});
+    base::UmaHistogramExactLinear(variant_histogram_name, removed_count,
+                                  kExclusiveMaxRemovedCount);
+  }
+}
+
+}  // namespace
 
 GAIAInfoUpdateService::GAIAInfoUpdateService(
+    Profile* profile,
     signin::IdentityManager* identity_manager,
     ProfileAttributesStorage* profile_attributes_storage,
-    const base::FilePath& profile_path,
-    PrefService* profile_prefs)
-    : identity_manager_(identity_manager),
+    PrefService& pref_service,
+    const base::FilePath& profile_path)
+    : profile_(profile),
+      identity_manager_(identity_manager),
       profile_attributes_storage_(profile_attributes_storage),
-      profile_path_(profile_path),
-      profile_prefs_(profile_prefs) {
+      pref_service_(pref_service),
+      profile_path_(profile_path) {
   identity_manager_->AddObserver(this);
 
   if (!ShouldUpdatePrimaryAccount()) {
     ClearProfileEntry();
     return;
   }
-  ProfileAttributesEntry* entry;
-  if (!profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_,
-                                                                 &entry)) {
+  ProfileAttributesEntry* entry =
+      profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_);
+  if (!entry) {
     return;
   }
 
@@ -64,8 +110,7 @@ void GAIAInfoUpdateService::UpdatePrimaryAccount() {
     return;
 
   auto unconsented_primary_account_info =
-      identity_manager_->GetPrimaryAccountInfo(
-          signin::ConsentLevel::kNotRequired);
+      identity_manager_->GetPrimaryAccountInfo(signin::ConsentLevel::kSignin);
 
   if (!gaia_id_of_profile_attribute_entry_.empty() &&
       unconsented_primary_account_info.gaia !=
@@ -73,105 +118,82 @@ void GAIAInfoUpdateService::UpdatePrimaryAccount() {
     ClearProfileEntry();
   }
 
-  auto maybe_account_info =
-      identity_manager_
-          ->FindExtendedAccountInfoForAccountWithRefreshTokenByAccountId(
-              unconsented_primary_account_info.account_id);
-  if (maybe_account_info.has_value())
-    UpdatePrimaryAccount(maybe_account_info.value());
+  UpdatePrimaryAccount(identity_manager_->FindExtendedAccountInfoByAccountId(
+      unconsented_primary_account_info.account_id));
 }
 
 void GAIAInfoUpdateService::UpdatePrimaryAccount(const AccountInfo& info) {
-  if (!info.IsValid())
-    return;
-
-  ProfileAttributesEntry* entry;
-  if (!profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_,
-                                                                 &entry)) {
+  if (!info.IsValid()) {
     return;
   }
-  gaia_id_of_profile_attribute_entry_ = info.gaia;
-  entry->SetGAIAGivenName(base::UTF8ToUTF16(info.given_name));
-  entry->SetGAIAName(base::UTF8ToUTF16(info.full_name));
 
-  entry->SetHostedDomain(info.hosted_domain);
-  const base::string16 hosted_domain = base::UTF8ToUTF16(info.hosted_domain);
-  profile_prefs_->SetString(prefs::kGoogleServicesHostedDomain,
-                            base::UTF16ToUTF8(hosted_domain));
+  ProfileAttributesEntry* entry =
+      profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_);
+  if (!entry) {
+    return;
+  }
+  gaia_id_of_profile_attribute_entry_ = info.GetGaiaId();
+  entry->SetGAIAGivenName(base::UTF8ToUTF16(info.GetGivenName().value_or("")));
+  entry->SetGAIAName(base::UTF8ToUTF16(info.GetFullName().value_or("")));
+  entry->SetHostedDomain(info.GetHostedDomain());
+  entry->SetIsManaged(info.IsManaged());
 
-  if (info.picture_url == kNoPictureURLFound) {
+  if (info.GetAvatarUrl().has_value() && info.GetAvatarUrl()->empty()) {
     entry->SetGAIAPicture(std::string(), gfx::Image());
-  } else if (!info.account_image.IsEmpty()) {
+  } else if (info.GetAvatarImage().has_value()) {
     // Only set the image if it is not empty, to avoid clearing the image if we
     // fail to download it on one of the 24 hours interval to refresh the data.
-    entry->SetGAIAPicture(info.last_downloaded_image_url_with_size,
-                          info.account_image);
+    entry->SetGAIAPicture(
+        std::string(info.GetLastDownloadedAvatarUrlWithSize().value_or("")),
+        *info.GetAvatarImage());
   }
-}
-
-// static
-bool GAIAInfoUpdateService::ShouldUseGAIAProfileInfo(Profile* profile) {
-#if defined(OS_CHROMEOS)
-  return base::FeatureList::IsEnabled(chromeos::features::kAvatarToolbarButton);
-#endif
-  return true;
-}
-
-void GAIAInfoUpdateService::UpdateAnyAccount(const AccountInfo& info) {
-  if (!info.IsValid())
-    return;
-
-  ProfileAttributesEntry* entry;
-  if (!profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_,
-                                                                 &entry)) {
-    return;
-  }
-
-  // These are idempotent, i.e. the second and any further call for the same
-  // account info has no further impact.
-  entry->AddAccountName(info.full_name);
-  entry->AddAccountCategory(info.hosted_domain == kNoHostedDomainFound
-                                ? AccountCategory::kConsumer
-                                : AccountCategory::kEnterprise);
 }
 
 void GAIAInfoUpdateService::ClearProfileEntry() {
-  ProfileAttributesEntry* entry;
-  if (!profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_,
-                                                                 &entry)) {
+  ProfileAttributesEntry* entry =
+      profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_);
+  if (!entry) {
     return;
   }
-  gaia_id_of_profile_attribute_entry_ = "";
-  entry->SetGAIAName(base::string16());
-  entry->SetGAIAGivenName(base::string16());
+  gaia_id_of_profile_attribute_entry_ = GaiaId();
+  entry->SetGAIAName(std::u16string());
+  entry->SetGAIAGivenName(std::u16string());
   entry->SetGAIAPicture(std::string(), gfx::Image());
-  entry->SetHostedDomain(std::string());
-  // Unset the cached URL.
-  profile_prefs_->ClearPref(prefs::kGoogleServicesHostedDomain);
+  entry->SetHostedDomain(std::nullopt);
+  entry->SetIsManaged(signin::Tribool::kFalse);
+  entry->SetIsGlicEligible(false);
 }
 
 void GAIAInfoUpdateService::Shutdown() {
   identity_manager_->RemoveObserver(this);
 }
 
-void GAIAInfoUpdateService::OnUnconsentedPrimaryAccountChanged(
-    const CoreAccountInfo& unconsented_primary_account_info) {
-  if (unconsented_primary_account_info.gaia.empty()) {
-    ClearProfileEntry();
-  } else {
-    UpdatePrimaryAccount();
+void GAIAInfoUpdateService::OnPrimaryAccountChanged(
+    const signin::PrimaryAccountChangeEvent& event) {
+  switch (event.GetEventTypeFor(signin::ConsentLevel::kSignin)) {
+    case signin::PrimaryAccountChangeEvent::Type::kSet:
+      UpdatePrimaryAccount();
+      break;
+    case signin::PrimaryAccountChangeEvent::Type::kCleared:
+      ClearProfileEntry();
+
+      // When clearing the primary account, if the account is already removed
+      // from the cookie jar, we should remove the prefs as well.
+      UpdateAccountsPrefs(pref_service_.get(), *identity_manager_,
+                          identity_manager_->GetAccountsInCookieJar());
+      break;
+    case signin::PrimaryAccountChangeEvent::Type::kNone:
+      break;
   }
 }
 
 void GAIAInfoUpdateService::OnExtendedAccountInfoUpdated(
     const AccountInfo& info) {
-  UpdateAnyAccount(info);
-
   if (!ShouldUpdatePrimaryAccount())
     return;
 
-  CoreAccountInfo account_info = identity_manager_->GetPrimaryAccountInfo(
-      signin::ConsentLevel::kNotRequired);
+  CoreAccountInfo account_info =
+      identity_manager_->GetPrimaryAccountInfo(signin::ConsentLevel::kSignin);
 
   if (info.account_id != account_info.account_id)
     return;
@@ -182,35 +204,10 @@ void GAIAInfoUpdateService::OnExtendedAccountInfoUpdated(
 void GAIAInfoUpdateService::OnAccountsInCookieUpdated(
     const signin::AccountsInCookieJarInfo& accounts_in_cookie_jar_info,
     const GoogleServiceAuthError& error) {
-  ProfileAttributesEntry* entry;
-  if (!profile_attributes_storage_->GetProfileAttributesWithPath(profile_path_,
-                                                                 &entry)) {
-    return;
-  }
-
-  // We can fully regenerate the info about all accounts only when there are no
-  // signed-out accounts. This means that for instance clearing cookies will
-  // reset the info.
-  if (accounts_in_cookie_jar_info.signed_out_accounts.empty()) {
-    entry->ClearAccountNames();
-    entry->ClearAccountCategories();
-
-    // Regenerate based on the info from signed-in accounts (if not available
-    // now, it will be regenerated soon via OnExtendedAccountInfoUpdated() once
-    // downloaded).
-    for (gaia::ListedAccount account :
-         accounts_in_cookie_jar_info.signed_in_accounts) {
-      auto maybe_account_info =
-          identity_manager_
-              ->FindExtendedAccountInfoForAccountWithRefreshTokenByAccountId(
-                  account.id);
-      if (maybe_account_info.has_value())
-        UpdateAnyAccount(*maybe_account_info);
-    }
-  }
+  UpdateAccountsPrefs(pref_service_.get(), *identity_manager_,
+                      accounts_in_cookie_jar_info);
 }
 
 bool GAIAInfoUpdateService::ShouldUpdatePrimaryAccount() {
-  return identity_manager_->HasPrimaryAccount(
-      signin::ConsentLevel::kNotRequired);
+  return identity_manager_->HasPrimaryAccount(signin::ConsentLevel::kSignin);
 }

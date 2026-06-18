@@ -1,19 +1,23 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/find_bar_view.h"
 
 #include <algorithm>
+#include <string_view>
 #include <utility>
 
 #include "base/feature_list.h"
 #include "base/i18n/number_formatting.h"
-#include "base/macros.h"
 #include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "chrome/app/vector_icons/vector_icons.h"
+#include "chrome/browser/enterprise/data_protection/data_protection_clipboard_utils.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/themes/theme_properties.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/color/chrome_color_id.h"
 #include "chrome/browser/ui/find_bar/find_bar_controller.h"
 #include "chrome/browser/ui/find_bar/find_bar_state.h"
 #include "chrome/browser/ui/find_bar/find_bar_state_factory.h"
@@ -21,31 +25,39 @@
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/browser/ui/views/find_bar_host.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
+#include "chrome/browser/user_education/user_education_service.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/find_in_page/find_notification_details.h"
 #include "components/find_in_page/find_tab_helper.h"
 #include "components/find_in_page/find_types.h"
 #include "components/strings/grit/components_strings.h"
-#include "components/vector_icons/vector_icons.h"
+#include "content/public/browser/clipboard_types.h"
 #include "ui/accessibility/ax_enums.mojom.h"
+#include "ui/accessibility/ax_node_data.h"
+#include "ui/base/data_transfer_policy/data_transfer_endpoint.h"
 #include "ui/base/ime/input_method.h"
 #include "ui/base/ime/text_input_flags.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/theme_provider.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/color/color_id.h"
+#include "ui/color/color_provider.h"
 #include "ui/events/event.h"
-#include "ui/gfx/color_palette.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/paint_vector_icon.h"
-#include "ui/native_theme/native_theme.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/background.h"
 #include "ui/views/border.h"
 #include "ui/views/bubble/bubble_border.h"
 #include "ui/views/controls/button/image_button_factory.h"
+#include "ui/views/controls/button/md_text_button.h"
 #include "ui/views/controls/highlight_path_generator.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/controls/separator.h"
 #include "ui/views/layout/box_layout.h"
 #include "ui/views/layout/layout_provider.h"
+#include "ui/views/metadata/view_factory.h"
 #include "ui/views/painter.h"
 #include "ui/views/view_class_properties.h"
 #include "ui/views/views_features.h"
@@ -55,117 +67,96 @@ namespace {
 void SetCommonButtonAttributes(views::ImageButton* button) {
   views::ConfigureVectorImageButton(button);
   views::InstallCircleHighlightPathGenerator(button);
-  button->SetFocusForPlatform();
 }
 }  // namespace
 
-class FindBarView::MatchCountLabel : public views::Label {
- public:
-  MatchCountLabel() {}
-  ~MatchCountLabel() override {}
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(FindBarView, kElementId);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(FindBarView, kTextField);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(FindBarView, kPreviousButtonElementId);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(FindBarView, kNextButtonElementId);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(FindBarView, kCloseButtonElementId);
 
-  gfx::Size CalculatePreferredSize() const override {
+class FindBarMatchCountLabel : public views::Label {
+  METADATA_HEADER(FindBarMatchCountLabel, views::Label)
+
+ public:
+  FindBarMatchCountLabel() {
+    GetViewAccessibility().SetRole(ax::mojom::Role::kStatus);
+    UpdateAccessibleName();
+  }
+
+  FindBarMatchCountLabel(const FindBarMatchCountLabel&) = delete;
+  FindBarMatchCountLabel& operator=(const FindBarMatchCountLabel&) = delete;
+
+  ~FindBarMatchCountLabel() override = default;
+
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& available_size) const override {
     // We need to return at least 1dip so that box layout adds padding on either
     // side (otherwise there will be a jump when our size changes between empty
     // and non-empty).
-    gfx::Size size = views::Label::CalculatePreferredSize();
+    gfx::Size size = views::Label::CalculatePreferredSize(available_size);
     size.set_width(std::max(1, size.width()));
     return size;
   }
 
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override {
+  void UpdateAccessibleName() {
     if (!last_result_) {
-      node_data->SetNameExplicitlyEmpty();
+      GetViewAccessibility().SetName(
+          std::string(), ax::mojom::NameFrom::kAttributeExplicitlyEmpty);
     } else if (last_result_->number_of_matches() < 1) {
-      node_data->SetName(
+      GetViewAccessibility().SetName(
           l10n_util::GetStringUTF16(IDS_ACCESSIBLE_FIND_IN_PAGE_NO_RESULTS));
     } else {
-      node_data->SetName(l10n_util::GetStringFUTF16(
+      GetViewAccessibility().SetName(l10n_util::GetStringFUTF16(
           IDS_ACCESSIBLE_FIND_IN_PAGE_COUNT,
           base::FormatNumber(last_result_->active_match_ordinal()),
           base::FormatNumber(last_result_->number_of_matches())));
     }
-    node_data->role = ax::mojom::Role::kStatus;
   }
 
   void SetResult(const find_in_page::FindNotificationDetails& result) {
-    if (last_result_ && result == *last_result_)
+    if (last_result_ && result == *last_result_) {
       return;
+    }
 
     last_result_ = result;
+    // TODO(crbug.com/40939931): Get NO_RESULTS to be announced under Orca and
+    // ChromeVox.
     SetText(l10n_util::GetStringFUTF16(
         IDS_FIND_IN_PAGE_COUNT,
         base::FormatNumber(last_result_->active_match_ordinal()),
         base::FormatNumber(last_result_->number_of_matches())));
+    UpdateAccessibleName();
 
     if (last_result_->final_update()) {
-      NotifyAccessibilityEvent(ax::mojom::Event::kLiveRegionChanged,
-                               /* send_native_event = */ true);
+      GetViewAccessibility().AnnouncePolitely(
+          GetViewAccessibility().GetCachedName());
     }
   }
 
   void ClearResult() {
     last_result_.reset();
-    SetText(base::string16());
+    SetText(std::u16string());
+    UpdateAccessibleName();
   }
 
  private:
-  base::Optional<find_in_page::FindNotificationDetails> last_result_;
-
-  DISALLOW_COPY_AND_ASSIGN(MatchCountLabel);
+  std::optional<find_in_page::FindNotificationDetails> last_result_;
 };
+
+BEGIN_VIEW_BUILDER(/* No Export */, FindBarMatchCountLabel, views::Label)
+END_VIEW_BUILDER
+
+DEFINE_VIEW_BUILDER(/* No Export */, FindBarMatchCountLabel)
+
+BEGIN_METADATA(FindBarMatchCountLabel)
+END_METADATA
 
 ////////////////////////////////////////////////////////////////////////////////
 // FindBarView, public:
 
-FindBarView::FindBarView(FindBarHost* host) : find_bar_host_(host) {
-  auto find_text = std::make_unique<views::Textfield>();
-  find_text->SetID(VIEW_ID_FIND_IN_PAGE_TEXT_FIELD);
-  find_text->SetDefaultWidthInChars(30);
-  find_text->SetMinimumWidthInChars(1);
-  find_text->set_controller(this);
-  find_text->SetAccessibleName(l10n_util::GetStringUTF16(IDS_ACCNAME_FIND));
-  find_text->SetTextInputFlags(ui::TEXT_INPUT_FLAG_AUTOCORRECT_OFF);
-  find_text->SetShouldDoLearning(
-      !host->browser_view()->GetProfile()->IsOffTheRecord());
-  find_text_ = AddChildView(std::move(find_text));
-
-  auto match_count_text = std::make_unique<MatchCountLabel>();
-  match_count_text->set_can_process_events_within_subtree(false);
-  match_count_text_ = AddChildView(std::move(match_count_text));
-
-  auto separator = std::make_unique<views::Separator>();
-  separator->set_can_process_events_within_subtree(false);
-  separator_ = AddChildView(std::move(separator));
-
-  auto find_previous_button = std::make_unique<views::ImageButton>(this);
-  SetCommonButtonAttributes(find_previous_button.get());
-  find_previous_button->SetID(VIEW_ID_FIND_IN_PAGE_PREVIOUS_BUTTON);
-  find_previous_button->SetTooltipText(
-      l10n_util::GetStringUTF16(IDS_FIND_IN_PAGE_PREVIOUS_TOOLTIP));
-  find_previous_button->SetAccessibleName(
-      l10n_util::GetStringUTF16(IDS_ACCNAME_PREVIOUS));
-  find_previous_button_ = AddChildView(std::move(find_previous_button));
-
-  auto find_next_button = std::make_unique<views::ImageButton>(this);
-  SetCommonButtonAttributes(find_next_button.get());
-  find_next_button->SetID(VIEW_ID_FIND_IN_PAGE_NEXT_BUTTON);
-  find_next_button->SetTooltipText(
-      l10n_util::GetStringUTF16(IDS_FIND_IN_PAGE_NEXT_TOOLTIP));
-  find_next_button->SetAccessibleName(
-      l10n_util::GetStringUTF16(IDS_ACCNAME_NEXT));
-  find_next_button_ = AddChildView(std::move(find_next_button));
-
-  auto close_button = std::make_unique<views::ImageButton>(this);
-  SetCommonButtonAttributes(close_button.get());
-  close_button->SetID(VIEW_ID_FIND_IN_PAGE_CLOSE_BUTTON);
-  close_button->SetTooltipText(
-      l10n_util::GetStringUTF16(IDS_FIND_IN_PAGE_CLOSE_TOOLTIP));
-  close_button->SetAnimationDuration(base::TimeDelta());
-  close_button_ = AddChildView(std::move(close_button));
-
-  EnableCanvasFlippingForRTLUI(true);
-
+FindBarView::FindBarView(FindBarHost* host) {
   // Normally we could space objects horizontally by simply passing a constant
   // value to BoxLayout for between-child spacing.  But for the vector image
   // buttons, we want the spacing to apply between the inner "glyph" portions
@@ -174,60 +165,216 @@ FindBarView::FindBarView(FindBarHost* host) : find_bar_host_(host) {
   // we place views directly adjacent, with horizontal margins on each view
   // that will add up to the right spacing amounts.
 
-  ChromeLayoutProvider* provider = ChromeLayoutProvider::Get();
-  const gfx::Insets horizontal_margin(
-      0,
-      provider->GetDistanceMetric(DISTANCE_UNRELATED_CONTROL_HORIZONTAL) / 2);
+  ChromeLayoutProvider* layout_provider = ChromeLayoutProvider::Get();
+  const auto horizontal_margin =
+      gfx::Insets::VH(0, layout_provider->GetDistanceMetric(
+                             views::DISTANCE_UNRELATED_CONTROL_HORIZONTAL) /
+                             2);
   const gfx::Insets vector_button =
-      provider->GetInsetsMetric(views::INSETS_VECTOR_IMAGE_BUTTON);
-  const gfx::Insets vector_button_horizontal_margin(
-      0, horizontal_margin.left() - vector_button.left(), 0,
-      horizontal_margin.right() - vector_button.right());
-  const gfx::Insets toast_control_vertical_margin(
-      provider->GetDistanceMetric(DISTANCE_TOAST_CONTROL_VERTICAL), 0);
-  const gfx::Insets toast_label_vertical_margin(
-      provider->GetDistanceMetric(DISTANCE_TOAST_LABEL_VERTICAL), 0);
-  find_previous_button_->SetProperty(
-      views::kMarginsKey, gfx::Insets(toast_control_vertical_margin +
-                                      vector_button_horizontal_margin));
-  find_next_button_->SetProperty(views::kMarginsKey,
-                                 gfx::Insets(toast_control_vertical_margin +
-                                             vector_button_horizontal_margin));
-  close_button_->SetProperty(views::kMarginsKey,
-                             gfx::Insets(toast_control_vertical_margin +
-                                         vector_button_horizontal_margin));
-  separator_->SetProperty(
-      views::kMarginsKey,
-      gfx::Insets(toast_control_vertical_margin + horizontal_margin));
-  find_text_->SetProperty(
-      views::kMarginsKey,
-      gfx::Insets(toast_control_vertical_margin + horizontal_margin));
-  match_count_text_->SetProperty(
-      views::kMarginsKey,
-      gfx::Insets(toast_label_vertical_margin + horizontal_margin));
+      layout_provider->GetInsetsMetric(views::INSETS_VECTOR_IMAGE_BUTTON);
+  const auto vector_button_horizontal_margin =
+      gfx::Insets::TLBR(0, horizontal_margin.left() - vector_button.left(), 0,
+                        horizontal_margin.right() - vector_button.right());
+  const auto toast_control_vertical_margin = gfx::Insets::VH(
+      layout_provider->GetDistanceMetric(DISTANCE_TOAST_CONTROL_VERTICAL), 0);
+  const auto toast_label_vertical_margin = gfx::Insets::VH(
+      layout_provider->GetDistanceMetric(DISTANCE_TOAST_LABEL_VERTICAL), 0);
+  const auto image_button_margins =
+      toast_control_vertical_margin + vector_button_horizontal_margin;
 
-  find_text_->SetBorder(views::NullBorder());
+  // Align separator with textbox.
+  const auto chrome_refresh_separator_vertical_margin =
+      gfx::Insets::VH(layout_provider->GetDistanceMetric(
+                          views::DISTANCE_CONTROL_VERTICAL_TEXT_PADDING),
+                      0);
+  // In ChromeRefresh we have a hover state for Textfield. We will
+  // match the horizontal hover insets to that of the vector button
+  // and take this into account when calculating the margins and Textfield
+  // border. This gives us symmetry between the left margin of the FindBarView
+  // which is lined up with the Textfield and the right margin of
+  // the FindBarView which is lined up with the close button.
+  gfx::Insets textfield_hover_padding = vector_button;
+  textfield_hover_padding.set_top_bottom(0, 0);
 
-  auto* manager = SetLayoutManager(std::make_unique<views::BoxLayout>(
-      views::BoxLayout::Orientation::kHorizontal,
-      gfx::Insets(provider->GetInsetsMetric(INSETS_TOAST) - horizontal_margin),
-      0));
+  auto main_container =
+      views::Builder<views::BoxLayoutView>()
+          .SetOrientation(views::BoxLayout::Orientation::kHorizontal)
+          .SetInsideBorderInsets(
+              gfx::Insets(layout_provider->GetInsetsMetric(INSETS_TOAST) -
+                          horizontal_margin))
+          .AddChildren(
+              views::Builder<views::Textfield>()
+                  .CopyAddressTo(&find_text_)
+                  .SetAccessibleName(
+                      l10n_util::GetStringUTF16(IDS_ACCNAME_FIND))
+                  .SetBorder(views::CreateEmptyBorder(textfield_hover_padding))
+                  .SetDefaultWidthInChars(30)
+                  .SetID(VIEW_ID_FIND_IN_PAGE_TEXT_FIELD)
+                  .SetMinimumWidthInChars(1)
+                  .SetTextInputFlags(ui::TEXT_INPUT_FLAG_AUTOCORRECT_OFF)
+                  .SetProperty(views::kElementIdentifierKey, kTextField)
+                  .SetProperty(views::kMarginsKey,
+                               toast_control_vertical_margin +
+                                   horizontal_margin - textfield_hover_padding)
+                  .SetController(this),
+              views::Builder<FindBarMatchCountLabel>()
+                  .CopyAddressTo(&match_count_text_)
+                  .SetBackgroundColor(kColorFindBarBackground)
+                  .SetEnabledColor(kColorFindBarMatchCount)
+                  .SetCanProcessEventsWithinSubtree(false)
+                  .SetProperty(views::kMarginsKey,
+                               gfx::Insets(toast_label_vertical_margin +
+                                           horizontal_margin)),
+              views::Builder<views::Separator>()
+                  .CopyAddressTo(&separator_)
+                  .SetCanProcessEventsWithinSubtree(false)
+                  .SetColorId(ui::kColorSeparator)
+                  .SetProperty(
+                      views::kMarginsKey,
+                      gfx::Insets(horizontal_margin +
+                                  chrome_refresh_separator_vertical_margin)),
+              views::Builder<views::ImageButton>()
+                  .CopyAddressTo(&find_previous_button_)
+                  .SetAccessibleName(
+                      l10n_util::GetStringUTF16(IDS_ACCNAME_PREVIOUS))
+                  .SetID(VIEW_ID_FIND_IN_PAGE_PREVIOUS_BUTTON)
+                  .SetProperty(views::kElementIdentifierKey,
+                               kPreviousButtonElementId)
+                  .SetTooltipText(l10n_util::GetStringUTF16(
+                      IDS_FIND_IN_PAGE_PREVIOUS_TOOLTIP))
+                  .SetCallback(base::BindRepeating(
+                      &FindBarView::FindNext, base::Unretained(this), true))
+                  .SetProperty(views::kMarginsKey, image_button_margins),
+              views::Builder<views::ImageButton>()
+                  .CopyAddressTo(&find_next_button_)
+                  .SetAccessibleName(
+                      l10n_util::GetStringUTF16(IDS_ACCNAME_NEXT))
+                  .SetID(VIEW_ID_FIND_IN_PAGE_NEXT_BUTTON)
+                  .SetProperty(views::kElementIdentifierKey,
+                               kNextButtonElementId)
+                  .SetTooltipText(
+                      l10n_util::GetStringUTF16(IDS_FIND_IN_PAGE_NEXT_TOOLTIP))
+                  .SetCallback(base::BindRepeating(
+                      &FindBarView::FindNext, base::Unretained(this), false))
+                  .SetProperty(views::kMarginsKey, image_button_margins),
+              views::Builder<views::ImageButton>()
+                  .CopyAddressTo(&close_button_)
+                  .SetID(VIEW_ID_FIND_IN_PAGE_CLOSE_BUTTON)
+                  .SetProperty(views::kElementIdentifierKey,
+                               kCloseButtonElementId)
+                  .SetTooltipText(
+                      l10n_util::GetStringUTF16(IDS_FIND_IN_PAGE_CLOSE_TOOLTIP))
+                  .SetAnimationDuration(base::TimeDelta())
+                  .SetCallback(base::BindRepeating(&FindBarView::EndFindSession,
+                                                   base::Unretained(this)))
+                  .SetProperty(views::kMarginsKey, image_button_margins))
+          .Build();
 
-  manager->SetFlexForView(find_text_, 1, true);
+  main_container->SetFlexForView(find_text_, 1, true);
+
+  // Theme-aware image models.
+  views::SetImageFromVectorIconWithColor(
+      find_previous_button_,
+      features::IsRoundedIconsEnabled() ? kKeyboardArrowUpIcon
+                                        : kKeyboardArrowUpChromeRefreshOldIcon,
+      {kColorFindBarButtonIcon, kColorFindBarButtonIconDisabled});
+  find_previous_button_->SetImageModel(
+      views::Button::STATE_HOVERED,
+      ui::ImageModel::FromVectorIcon(features::IsRoundedIconsEnabled()
+                                         ? kKeyboardArrowUpIcon
+                                         : kKeyboardArrowUpChromeRefreshOldIcon,
+                                     kColorFindBarButtonIconHovered));
+  find_previous_button_->SetImageModel(
+      views::Button::STATE_PRESSED,
+      ui::ImageModel::FromVectorIcon(features::IsRoundedIconsEnabled()
+                                         ? kKeyboardArrowUpIcon
+                                         : kKeyboardArrowUpChromeRefreshOldIcon,
+                                     kColorFindBarButtonIconHovered));
+
+  views::SetImageFromVectorIconWithColor(
+      find_next_button_,
+      features::IsRoundedIconsEnabled()
+          ? kKeyboardArrowDownIcon
+          : kKeyboardArrowDownChromeRefreshOldIcon,
+      {kColorFindBarButtonIcon, kColorFindBarButtonIconDisabled});
+  find_next_button_->SetImageModel(
+      views::Button::STATE_HOVERED,
+      ui::ImageModel::FromVectorIcon(
+          features::IsRoundedIconsEnabled()
+              ? kKeyboardArrowDownIcon
+              : kKeyboardArrowDownChromeRefreshOldIcon,
+          kColorFindBarButtonIconHovered));
+  find_next_button_->SetImageModel(
+      views::Button::STATE_PRESSED,
+      ui::ImageModel::FromVectorIcon(
+          features::IsRoundedIconsEnabled()
+              ? kKeyboardArrowDownIcon
+              : kKeyboardArrowDownChromeRefreshOldIcon,
+          kColorFindBarButtonIconHovered));
+
+  views::SetImageFromVectorIconWithColor(
+      close_button_,
+      features::IsRoundedIconsEnabled() ? kCloseSmallIcon
+                                        : kCloseChromeRefreshOldIcon,
+      {kColorFindBarButtonIcon, kColorFindBarButtonIconDisabled});
+  close_button_->SetImageModel(
+      views::Button::STATE_HOVERED,
+      ui::ImageModel::FromVectorIcon(features::IsRoundedIconsEnabled()
+                                         ? kCloseSmallIcon
+                                         : kCloseChromeRefreshOldIcon,
+                                     kColorFindBarButtonIconHovered));
+  close_button_->SetImageModel(
+      views::Button::STATE_PRESSED,
+      ui::ImageModel::FromVectorIcon(features::IsRoundedIconsEnabled()
+                                         ? kCloseSmallIcon
+                                         : kCloseChromeRefreshOldIcon,
+                                     kColorFindBarButtonIconHovered));
+
+  SetOrientation(views::BoxLayout::Orientation::kVertical);
+  SetHost(host);
+  SetFlipCanvasOnPaintForRTLUI(true);
+  SetProperty(views::kElementIdentifierKey, kElementId);
+  AddChildView(std::move(main_container));
+
+  const float corner_radius = layout_provider->GetCornerRadiusMetric(
+      views::ShapeContextTokens::kFindBarViewRadius);
+  {
+    auto border = std::make_unique<views::BubbleBorder>(
+        views::BubbleBorder::NONE, views::BubbleBorder::STANDARD_SHADOW);
+    border->SetColor(kColorFindBarBackground);
+    border->set_md_shadow_elevation(
+        layout_provider->GetCornerRadiusMetric(views::Emphasis::kHigh));
+    border->set_rounded_corners(gfx::RoundedCornersF(corner_radius));
+
+    SetBackground(std::make_unique<views::BubbleBackground>(border.get()));
+    SetBorder(std::move(border));
+  }
+
+  find_text_->SetFontList(
+      views::Textfield::GetDefaultFontList().DeriveWithWeight(
+          gfx::Font::Weight::MEDIUM));
+  SetCommonButtonAttributes(find_previous_button_);
+  SetCommonButtonAttributes(find_next_button_);
+  SetCommonButtonAttributes(close_button_);
 }
 
-FindBarView::~FindBarView() {
+FindBarView::~FindBarView() = default;
+
+void FindBarView::SetHost(FindBarHost* host) {
+  find_bar_host_ = host;
+  find_text_->SetShouldDoLearning(host &&
+                                  !host->find_bar_owner()->IsOffTheRecord());
 }
 
 void FindBarView::SetFindTextAndSelectedRange(
-    const base::string16& find_text,
+    const std::u16string& find_text,
     const gfx::Range& selected_range) {
   find_text_->SetText(find_text);
   find_text_->SetSelectedRange(selected_range);
   last_searched_text_ = find_text;
 }
 
-base::string16 FindBarView::GetFindText() const {
+std::u16string_view FindBarView::GetFindText() const {
   return find_text_->GetText();
 }
 
@@ -235,21 +382,21 @@ gfx::Range FindBarView::GetSelectedRange() const {
   return find_text_->GetSelectedRange();
 }
 
-base::string16 FindBarView::GetFindSelectedText() const {
+std::u16string_view FindBarView::GetFindSelectedText() const {
   return find_text_->GetSelectedText();
 }
 
-base::string16 FindBarView::GetMatchCountText() const {
+std::u16string_view FindBarView::GetMatchCountText() const {
   return match_count_text_->GetText();
 }
 
 void FindBarView::UpdateForResult(
     const find_in_page::FindNotificationDetails& result,
-    const base::string16& find_text) {
+    const std::u16string& find_text) {
   bool have_valid_range =
       result.number_of_matches() != -1 && result.active_match_ordinal() != -1;
 
-  // http://crbug.com/34970: some IMEs get confused if we change the text
+  // http://crbug.com/41093231: some IMEs get confused if we change the text
   // composed by them. To avoid this problem, we should check the IME status and
   // update the text only when the IME is not composing text.
   //
@@ -257,7 +404,8 @@ void FindBarView::UpdateForResult(
   // find text contents after clearing the find results as the normal
   // prepopulation code does not run.
   if (find_text_->GetText() != find_text && !find_text_->IsIMEComposing() &&
-      (!find_bar_host_->HasGlobalFindPasteboard() || !find_text.empty())) {
+      (!find_bar_host_ || !find_bar_host_->HasGlobalFindPasteboard() ||
+       !find_text.empty())) {
     find_text_->SetText(find_text);
     find_text_->SelectAll(true);
   }
@@ -277,15 +425,20 @@ void FindBarView::UpdateForResult(
   // The match_count label may have increased/decreased in size so we need to
   // do a layout and repaint the dialog so that the find text field doesn't
   // partially overlap the match-count label when it increases on no matches.
-  Layout();
+  DeprecatedLayoutImmediately();
   SchedulePaint();
 }
 
 void FindBarView::ClearMatchCount() {
   match_count_text_->ClearResult();
   UpdateMatchCountAppearance(false);
-  Layout();
+  DeprecatedLayoutImmediately();
   SchedulePaint();
+}
+
+bool FindBarView::ContainsFocus() const {
+  return find_text_->HasFocus() || find_previous_button_->HasFocus() ||
+         find_next_button_->HasFocus() || close_button_->HasFocus();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -301,14 +454,21 @@ bool FindBarView::OnMousePressed(const ui::MouseEvent& event) {
   const gfx::Rect focus_area(find_text_edge, find_previous_button_->y(),
                              find_previous_button_->x() - find_text_edge,
                              find_previous_button_->height());
-  if (!GetMirroredRect(focus_area).Contains(event.location()))
+  if (!GetMirroredRect(focus_area).Contains(event.location())) {
     return false;
+  }
   find_text_->RequestFocus();
   return true;
 }
 
-gfx::Size FindBarView::CalculatePreferredSize() const {
-  gfx::Size size = views::View::CalculatePreferredSize();
+const views::ViewAccessibility&
+FindBarView::GetFindBarMatchCountLabelViewAccessibilityForTesting() {
+  return match_count_text_->GetViewAccessibility();
+}
+
+gfx::Size FindBarView::CalculatePreferredSize(
+    const views::SizeBounds& available_size) const {
+  gfx::Size size = views::View::CalculatePreferredSize(available_size);
   // Ignore the preferred size for the match count label, and just let it take
   // up part of the space for the input textfield. This prevents the overall
   // width from changing every time the match count text changes.
@@ -321,41 +481,11 @@ gfx::Size FindBarView::CalculatePreferredSize() const {
 
 void FindBarView::FocusAndSelectAll() {
   find_text_->RequestFocus();
-#if !defined(OS_WIN)
-  GetWidget()->GetInputMethod()->ShowVirtualKeyboardIfEnabled();
+#if !BUILDFLAG(IS_WIN)
+  GetWidget()->GetInputMethod()->SetVirtualKeyboardVisibilityIfEnabled(true);
 #endif
-  if (!find_text_->GetText().empty())
+  if (!find_text_->GetText().empty()) {
     find_text_->SelectAll(true);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// FindBarView, views::ButtonListener implementation:
-
-void FindBarView::ButtonPressed(
-    views::Button* sender, const ui::Event& event) {
-  switch (sender->GetID()) {
-    case VIEW_ID_FIND_IN_PAGE_PREVIOUS_BUTTON:
-    case VIEW_ID_FIND_IN_PAGE_NEXT_BUTTON:
-      if (!find_text_->GetText().empty()) {
-        find_in_page::FindTabHelper* find_tab_helper =
-            find_in_page::FindTabHelper::FromWebContents(
-                find_bar_host_->GetFindBarController()->web_contents());
-        find_tab_helper->StartFinding(
-            find_text_->GetText(),
-            sender->GetID() ==
-                VIEW_ID_FIND_IN_PAGE_NEXT_BUTTON, /* forward_direction */
-            false /* case_sensitive */,
-            true /* find_match */);
-      }
-      break;
-    case VIEW_ID_FIND_IN_PAGE_CLOSE_BUTTON:
-      find_bar_host_->GetFindBarController()->EndFindSession(
-          find_in_page::SelectionAction::kKeep,
-          find_in_page::ResultAction::kKeep);
-      break;
-    default:
-      NOTREACHED() << "Unknown button";
-      break;
   }
 }
 
@@ -365,16 +495,18 @@ void FindBarView::ButtonPressed(
 bool FindBarView::HandleKeyEvent(views::Textfield* sender,
                                  const ui::KeyEvent& key_event) {
   // If the dialog is not visible, there is no reason to process keyboard input.
-  if (!find_bar_host_->IsVisible())
+  if (!find_bar_host_ || !find_bar_host_->IsVisible()) {
     return false;
+  }
 
-  if (find_bar_host_->MaybeForwardKeyEventToWebpage(key_event))
+  if (find_bar_host_->MaybeForwardKeyEventToWebpage(key_event)) {
     return true;  // Handled, we are done!
+  }
 
   if (key_event.key_code() == ui::VKEY_RETURN &&
-      key_event.type() == ui::ET_KEY_PRESSED) {
+      key_event.type() == ui::EventType::kKeyPressed) {
     // Pressing Return/Enter starts the search (unless text box is empty).
-    base::string16 find_string = find_text_->GetText();
+    std::u16string find_string(find_text_->GetText());
     if (!find_string.empty()) {
       FindBarController* controller = find_bar_host_->GetFindBarController();
       find_in_page::FindTabHelper* find_tab_helper =
@@ -383,8 +515,7 @@ bool FindBarView::HandleKeyEvent(views::Textfield* sender,
       // Search forwards for enter, backwards for shift-enter.
       find_tab_helper->StartFinding(
           find_string, !key_event.IsShiftDown() /* forward_direction */,
-          false /* case_sensitive */,
-          true /* find_match */);
+          false /* case_sensitive */, true /* find_match */);
     }
     return true;
   }
@@ -392,57 +523,121 @@ bool FindBarView::HandleKeyEvent(views::Textfield* sender,
   return false;
 }
 
+bool FindBarView::HandleMouseEvent(views::Textfield* sender,
+                                   const ui::MouseEvent& key_event) {
+#if BUILDFLAG(IS_MAC)
+  if (key_event.type() == ui::EventType::kMousePressed) {
+    // On macOS, clicking on the find text field should also activate the owner
+    // widget (if it isn't already), so that the user can interact with the text
+    // field.
+    DCHECK(find_bar_host_);
+    find_bar_host_->ActivateOwnerWidgetIfNecessary();
+  }
+#endif  // BUILDFLAG(IS_MAC)
+
+  return false;
+}
+
 void FindBarView::OnAfterUserAction(views::Textfield* sender) {
   // The composition text wouldn't be what the user is really looking for.
   // We delay the search until the user commits the composition text.
-  if (!sender->IsIMEComposing() && sender->GetText() != last_searched_text_)
+  if (!sender->IsIMEComposing() && sender->GetText() != last_searched_text_) {
     Find(sender->GetText());
+  }
 }
 
 void FindBarView::OnAfterPaste() {
   // Clear the last search text so we always search for the user input after
   // a paste operation, even if the pasted text is the same as before.
-  // See http://crbug.com/79002
+  // See http://crbug.com/40552385
   last_searched_text_.clear();
 }
 
-void FindBarView::Find(const base::string16& search_text) {
+bool FindBarView::OnBeforeCutOrCopy(views::Textfield* sender,
+                                    std::u16string* copy_contents) {
+  CHECK(copy_contents);
+  CHECK(copy_contents->empty());
+
+  return enterprise_data_protection::ReplaceCopyFromFindBar(
+      sender->GetSelectedText(),
+      find_bar_host_->GetFindBarController()->web_contents(), copy_contents);
+}
+
+void FindBarView::OnBeforePaste(
+    views::Textfield* sender,
+    base::OnceCallback<void(std::optional<std::u16string>)> callback) {
+  enterprise_data_protection::ReplacePasteToFindBar(
+      find_bar_host_->GetFindBarController()->web_contents(),
+      std::move(callback));
+}
+
+std::unique_ptr<ui::ScopedClipboardWriter>
+FindBarView::CreateClipboardWriter() {
+  content::WebContents* web_contents =
+      find_bar_host_->GetFindBarController()->web_contents();
+  std::unique_ptr<ui::DataTransferEndpoint> dte;
+  if (web_contents->GetLastCommittedURL().is_valid()) {
+    dte = std::make_unique<ui::DataTransferEndpoint>(
+        web_contents->GetLastCommittedURL(),
+        ui::DataTransferEndpointOptions{
+            .off_the_record =
+                web_contents->GetBrowserContext()->IsOffTheRecord(),
+        });
+  }
+  auto clipboard_writer = std::make_unique<ui::ScopedClipboardWriter>(
+      ui::ClipboardBuffer::kCopyPaste, std::move(dte));
+  content::AddSourceDataToClipboardWriter(*clipboard_writer,
+                                          *web_contents->GetPrimaryMainFrame());
+
+  return clipboard_writer;
+}
+
+void FindBarView::Find(std::u16string_view search_text) {
+  DCHECK(find_bar_host_);
   FindBarController* controller = find_bar_host_->GetFindBarController();
   DCHECK(controller);
   content::WebContents* web_contents = controller->web_contents();
   // We must guard against a NULL web_contents, which can happen if the text
   // in the Find box is changed right after the tab is destroyed. Otherwise, it
   // can lead to crashes, as exposed by automation testing in issue 8048.
-  if (!web_contents)
+  if (!web_contents) {
     return;
+  }
+
   find_in_page::FindTabHelper* find_tab_helper =
       find_in_page::FindTabHelper::FromWebContents(web_contents);
 
-  last_searched_text_ = search_text;
+  last_searched_text_ = std::u16string(search_text);
 
   controller->OnUserChangedFindText(search_text);
 
-  // When the user changes something in the text box we check the contents and
-  // if the textbox contains something we set it as the new search string and
-  // initiate search (even though old searches might be in progress).
-  if (!search_text.empty()) {
-    find_tab_helper->StartFinding(search_text, true /* forward_direction */,
-                                  false /* case_sensitive */,
-                                  true /* find_match */);
-  } else {
-    find_tab_helper->StopFinding(find_in_page::SelectionAction::kClear);
-    UpdateForResult(find_tab_helper->find_result(), base::string16());
-    find_bar_host_->MoveWindowIfNecessary();
+  // Initiate a search (even though old searches might be in progress).
+  find_tab_helper->StartFinding(
+      last_searched_text_, true /* forward_direction */,
+      false /* case_sensitive */, true /* find_match */);
+}
 
-    // Clearing the text box should clear the prepopulate state so that when
-    // we close and reopen the Find box it doesn't show the search we just
-    // deleted. We can't do this on ChromeOS yet because we get ContentsChanged
-    // sent for a lot more things than just the user nulling out the search
-    // terms. See http://crbug.com/45372.
-    FindBarState* find_bar_state = FindBarStateFactory::GetForBrowserContext(
-        web_contents->GetBrowserContext());
-    find_bar_state->SetLastSearchText(base::string16());
+void FindBarView::FindNext(bool reverse) {
+  if (!find_bar_host_) {
+    return;
   }
+  if (!find_text_->GetText().empty()) {
+    find_in_page::FindTabHelper* find_tab_helper =
+        find_in_page::FindTabHelper::FromWebContents(
+            find_bar_host_->GetFindBarController()->web_contents());
+    find_tab_helper->StartFinding(std::u16string(find_text_->GetText()),
+                                  !reverse, /* forward_direction */
+                                  false,    /* case_sensitive */
+                                  true /* find_match */);
+  }
+}
+
+void FindBarView::EndFindSession() {
+  if (!find_bar_host_) {
+    return;
+  }
+  find_bar_host_->GetFindBarController()->EndFindSession(
+      find_in_page::SelectionAction::kKeep, find_in_page::ResultAction::kKeep);
 }
 
 void FindBarView::UpdateMatchCountAppearance(bool no_match) {
@@ -451,43 +646,5 @@ void FindBarView::UpdateMatchCountAppearance(bool no_match) {
   find_next_button_->SetEnabled(enable_buttons);
 }
 
-const char* FindBarView::GetClassName() const {
-  return "FindBarView";
-}
-
-void FindBarView::OnThemeChanged() {
-  views::View::OnThemeChanged();
-  ui::NativeTheme* theme = GetNativeTheme();
-  SkColor bg_color =
-      SkColorSetA(theme->GetSystemColor(
-                      ui::NativeTheme::kColorId_TextfieldDefaultBackground),
-                  0xFF);
-  auto border = std::make_unique<views::BubbleBorder>(
-      views::BubbleBorder::NONE, views::BubbleBorder::SMALL_SHADOW, bg_color);
-
-  border->SetCornerRadius(
-      base::FeatureList::IsEnabled(
-          views::features::kEnableMDRoundedCornersOnDialogs)
-          ? views::LayoutProvider::Get()->GetCornerRadiusMetric(
-                views::EMPHASIS_MEDIUM)
-          : 2);
-
-  SetBackground(std::make_unique<views::BubbleBackground>(border.get()));
-  SetBorder(std::move(border));
-
-  const SkColor base_foreground_color =
-      theme->GetSystemColor(ui::NativeTheme::kColorId_TextfieldDefaultColor);
-
-  match_count_text_->SetBackgroundColor(bg_color);
-  match_count_text_->SetEnabledColor(
-      SkColorSetA(base_foreground_color, gfx::kGoogleGreyAlpha700));
-  separator_->SetColor(
-      SkColorSetA(base_foreground_color, gfx::kGoogleGreyAlpha300));
-
-  views::SetImageFromVectorIcon(find_previous_button_, kCaretUpIcon,
-                                base_foreground_color);
-  views::SetImageFromVectorIcon(find_next_button_, kCaretDownIcon,
-                                base_foreground_color);
-  views::SetImageFromVectorIcon(close_button_, vector_icons::kCloseRoundedIcon,
-                                base_foreground_color);
-}
+BEGIN_METADATA(FindBarView)
+END_METADATA

@@ -1,30 +1,28 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/policy/core/common/android/policy_service_android.h"
 
 #include "base/android/jni_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
 #include "components/policy/android/jni_headers/PolicyService_jni.h"
 
 namespace policy {
 namespace android {
 
-// PolicyServiceAndroid
-
 PolicyServiceAndroid::PolicyServiceAndroid(PolicyService* policy_service)
-    : policy_service_(policy_service) {}
+    : policy_service_(policy_service),
+      policy_map_(policy_service->GetPolicies(
+          PolicyNamespace(POLICY_DOMAIN_CHROME, std::string()))) {}
 PolicyServiceAndroid::~PolicyServiceAndroid() = default;
 
-void PolicyServiceAndroid::AddObserver(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& caller) {
+void PolicyServiceAndroid::AddObserver(JNIEnv* env) {
   policy_service_->AddObserver(POLICY_DOMAIN_CHROME, this);
 }
 
-void PolicyServiceAndroid::RemoveObserver(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& caller) {
+void PolicyServiceAndroid::RemoveObserver(JNIEnv* env) {
   policy_service_->RemoveObserver(POLICY_DOMAIN_CHROME, this);
 }
 
@@ -36,10 +34,26 @@ void PolicyServiceAndroid::OnPolicyServiceInitialized(PolicyDomain domain) {
       base::android::ScopedJavaLocalRef<jobject>(java_ref_));
 }
 
-bool PolicyServiceAndroid::IsInitializationComplete(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& caller) {
+void PolicyServiceAndroid::OnPolicyUpdated(const PolicyNamespace& ns,
+                                           const PolicyMap& previous,
+                                           const PolicyMap& current) {
+  DCHECK_EQ(POLICY_DOMAIN_CHROME, ns.domain);
+  DCHECK(java_ref_);
+  PolicyMapAndroid previous_android(previous);
+  PolicyMapAndroid current_android(current);
+  Java_PolicyService_onPolicyUpdated(
+      base::android::AttachCurrentThread(),
+      base::android::ScopedJavaLocalRef<jobject>(java_ref_),
+      previous_android.GetJavaObject(), current_android.GetJavaObject());
+}
+
+bool PolicyServiceAndroid::IsInitializationComplete(JNIEnv* env) const {
   return policy_service_->IsInitializationComplete(POLICY_DOMAIN_CHROME);
+}
+
+base::android::ScopedJavaLocalRef<jobject> PolicyServiceAndroid::GetPolicies(
+    JNIEnv* env) {
+  return policy_map_.GetJavaObject();
 }
 
 base::android::ScopedJavaLocalRef<jobject>
@@ -54,3 +68,5 @@ PolicyServiceAndroid::GetJavaObject() {
 
 }  // namespace android
 }  // namespace policy
+
+DEFINE_JNI(PolicyService)

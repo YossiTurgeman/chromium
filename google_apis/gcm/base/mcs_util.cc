@@ -1,15 +1,17 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #include "google_apis/gcm/base/mcs_util.h"
 
 #include <stddef.h>
 
+#include <string_view>
+
 #include "base/check_op.h"
 #include "base/format_macros.h"
 #include "base/notreached.h"
-#include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/clock.h"
@@ -22,25 +24,25 @@ namespace {
 // Type names corresponding to MCSProtoTags. Useful for identifying what type
 // of MCS protobuf is contained within a google::protobuf::MessageLite object.
 // WARNING: must match the order in MCSProtoTag.
-const char* kProtoNames[] = {
-  "mcs_proto.HeartbeatPing",
-  "mcs_proto.HeartbeatAck",
-  "mcs_proto.LoginRequest",
-  "mcs_proto.LoginResponse",
-  "mcs_proto.Close",
-  "mcs_proto.MessageStanza",
-  "mcs_proto.PresenceStanza",
-  "mcs_proto.IqStanza",
-  "mcs_proto.DataMessageStanza",
-  "mcs_proto.BatchPresenceStanza",
-  "mcs_proto.StreamErrorStanza",
-  "mcs_proto.HttpRequest",
-  "mcs_proto.HttpResponse",
-  "mcs_proto.BindAccountRequest",
-  "mcs_proto.BindAccountResponse",
-  "mcs_proto.TalkMetadata"
-};
-static_assert(base::size(kProtoNames) == kNumProtoTypes,
+constexpr auto kProtoNames = std::to_array<const char*>({
+    "mcs_proto.HeartbeatPing",
+    "mcs_proto.HeartbeatAck",
+    "mcs_proto.LoginRequest",
+    "mcs_proto.LoginResponse",
+    "mcs_proto.Close",
+    "mcs_proto.MessageStanza",
+    "mcs_proto.PresenceStanza",
+    "mcs_proto.IqStanza",
+    "mcs_proto.DataMessageStanza",
+    "mcs_proto.BatchPresenceStanza",
+    "mcs_proto.StreamErrorStanza",
+    "mcs_proto.HttpRequest",
+    "mcs_proto.HttpResponse",
+    "mcs_proto.BindAccountRequest",
+    "mcs_proto.BindAccountResponse",
+    "mcs_proto.TalkMetadata",
+});
+static_assert(std::size(kProtoNames) == kNumProtoTypes,
               "Proto Names Must Include All Tags");
 
 const char kLoginId[] = "chrome-";
@@ -139,14 +141,14 @@ std::unique_ptr<google::protobuf::MessageLite> BuildProtobufFromTag(
       return std::unique_ptr<google::protobuf::MessageLite>(
           new mcs_proto::StreamErrorStanza());
     default:
-      return std::unique_ptr<google::protobuf::MessageLite>();
+      return nullptr;
   }
 }
 
 // Utility method to extract a MCS tag from a google::protobuf::MessageLite
 // object.
 int GetMCSProtoTag(const google::protobuf::MessageLite& message) {
-  const std::string& type_name = message.GetTypeName();
+  std::string_view type_name = message.GetTypeName();
   if (type_name == kProtoNames[kHeartbeatPingTag]) {
     return kHeartbeatPingTag;
   } else if (type_name == kProtoNames[kHeartbeatAckTag]) {

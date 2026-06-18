@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,7 @@
 #include <memory>
 
 #include "ash/ash_export.h"
-#include "base/macros.h"
 #include "base/time/time.h"
-#include "ui/compositor/animation_metrics_reporter.h"
 #include "ui/compositor/layer_animation_element.h"
 #include "ui/gfx/animation/tween.h"
 #include "ui/gfx/geometry/point.h"
@@ -39,6 +37,10 @@ class ASH_EXPORT ScreenRotationAnimation : public ui::LayerAnimationElement {
                           gfx::Point pivot,
                           base::TimeDelta duration,
                           gfx::Tween::Type twen_type);
+
+  ScreenRotationAnimation(const ScreenRotationAnimation&) = delete;
+  ScreenRotationAnimation& operator=(const ScreenRotationAnimation&) = delete;
+
   ~ScreenRotationAnimation() override;
 
  private:
@@ -60,8 +62,6 @@ class ASH_EXPORT ScreenRotationAnimation : public ui::LayerAnimationElement {
 
   // The target layer opacity to end the animation with.
   float target_opacity_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScreenRotationAnimation);
 };
 
 }  // namespace ash

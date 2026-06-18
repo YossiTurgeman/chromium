@@ -32,7 +32,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_NETWORK_PARSED_CONTENT_TYPE_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_NETWORK_PARSED_CONTENT_TYPE_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/platform/network/parsed_content_header_field_parameters.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -56,7 +57,7 @@ class PLATFORM_EXPORT ParsedContentType final {
 
   // Note that in the case of multiple values for the same name, the last value
   // is returned.
-  String ParameterValueForName(const String& name) const {
+  String ParameterValueForName(StringView name) const {
     return IsValid() ? parameters_->ParameterValueForName(name) : String();
   }
   const ParsedContentHeaderFieldParameters& GetParameters() const {
@@ -68,9 +69,9 @@ class PLATFORM_EXPORT ParsedContentType final {
 
  private:
   String mime_type_;
-  base::Optional<ParsedContentHeaderFieldParameters> parameters_;
+  std::optional<ParsedContentHeaderFieldParameters> parameters_;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_NETWORK_PARSED_CONTENT_TYPE_H_

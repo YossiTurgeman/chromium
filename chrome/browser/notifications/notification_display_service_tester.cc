@@ -1,63 +1,24 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/notifications/notification_display_service_tester.h"
 
-#include <set>
-
-#include "base/bind.h"
-#include "build/buildflag.h"
+#include "base/functional/bind.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/notifications/notification_display_service.h"
 #include "chrome/browser/notifications/notification_display_service_factory.h"
-#include "chrome/browser/notifications/notification_platform_bridge.h"
 #include "chrome/browser/notifications/stub_notification_display_service.h"
 #include "chrome/browser/notifications/system_notification_helper.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/test/base/testing_browser_process.h"
 #include "components/keyed_service/content/browser_context_keyed_service_shutdown_notifier_factory.h"
 #include "components/keyed_service/core/keyed_service.h"
-#include "ui/base/buildflags.h"
 #include "ui/message_center/public/cpp/notification.h"
 
 namespace {
 
 // Pointer to currently active tester, which is assumed to be a singleton.
 NotificationDisplayServiceTester* g_tester = nullptr;
-
-#if !BUILDFLAG(ENABLE_MESSAGE_CENTER)
-
-// Mock implementation of the NotificationPlatformBridge interface that just
-// implements the interface, and doesn't exercise behaviour of its own.
-class MockNotificationPlatformBridge : public NotificationPlatformBridge {
- public:
-  MockNotificationPlatformBridge() = default;
-  MockNotificationPlatformBridge(const MockNotificationPlatformBridge&) =
-      delete;
-  MockNotificationPlatformBridge& operator=(
-      const MockNotificationPlatformBridge&) = delete;
-  ~MockNotificationPlatformBridge() override = default;
-
-  // NotificationPlatformBridge implementation:
-  void Display(
-      NotificationHandler::Type notification_type,
-      Profile* profile,
-      const message_center::Notification& notification,
-      std::unique_ptr<NotificationCommon::Metadata> metadata) override {}
-  void Close(Profile* profile, const std::string& notification_id) override {}
-  void GetDisplayed(Profile* profile,
-                    GetDisplayedNotificationsCallback callback) const override {
-    std::set<std::string> displayed_notifications;
-    std::move(callback).Run(std::move(displayed_notifications),
-                            false /* supports_synchronization */);
-  }
-  void SetReadyCallback(NotificationBridgeReadyCallback callback) override {
-    std::move(callback).Run(true /* ready */);
-  }
-  void DisplayServiceShutDown(Profile* profile) override {}
-};
-
-#endif  // !BUILDFLAG(ENABLE_MESSAGE_CENTER)
 
 class NotificationDisplayServiceShutdownNotifierFactory
     : public BrowserContextKeyedServiceShutdownNotifierFactory {
@@ -67,20 +28,20 @@ class NotificationDisplayServiceShutdownNotifierFactory
   NotificationDisplayServiceShutdownNotifierFactory& operator=(
       const NotificationDisplayServiceShutdownNotifierFactory&) = delete;
   static NotificationDisplayServiceShutdownNotifierFactory* GetInstance() {
-    return base::Singleton<
-        NotificationDisplayServiceShutdownNotifierFactory>::get();
+    static base::NoDestructor<NotificationDisplayServiceShutdownNotifierFactory>
+        instance;
+    return instance.get();
   }
 
  private:
-  friend struct base::DefaultSingletonTraits<
-      NotificationDisplayServiceShutdownNotifierFactory>;
+  friend base::NoDestructor<NotificationDisplayServiceShutdownNotifierFactory>;
 
   NotificationDisplayServiceShutdownNotifierFactory()
       : BrowserContextKeyedServiceShutdownNotifierFactory(
             "NotificationDisplayService") {
     DependsOn(NotificationDisplayServiceFactory::GetInstance());
   }
-  ~NotificationDisplayServiceShutdownNotifierFactory() override {}
+  ~NotificationDisplayServiceShutdownNotifierFactory() override = default;
 };
 
 }  // namespace
@@ -88,14 +49,6 @@ class NotificationDisplayServiceShutdownNotifierFactory
 NotificationDisplayServiceTester::NotificationDisplayServiceTester(
     Profile* profile)
     : profile_(profile) {
-#if !BUILDFLAG(ENABLE_MESSAGE_CENTER)
-  TestingBrowserProcess* browser_process = TestingBrowserProcess::GetGlobal();
-  if (browser_process) {
-    browser_process->SetNotificationPlatformBridge(
-        std::make_unique<MockNotificationPlatformBridge>());
-  }
-#endif
-
   // TODO(peter): Remove the StubNotificationDisplayService in favor of having
   // a fully functional MockNotificationPlatformBridge.
   if (profile_) {
@@ -152,7 +105,7 @@ NotificationDisplayServiceTester::GetDisplayedNotificationsForType(
   return display_service_->GetDisplayedNotificationsForType(type);
 }
 
-base::Optional<message_center::Notification>
+std::optional<message_center::Notification>
 NotificationDisplayServiceTester::GetNotification(
     const std::string& notification_id) const {
   return display_service_->GetNotification(notification_id);
@@ -167,8 +120,8 @@ NotificationDisplayServiceTester::GetMetadataForNotification(
 void NotificationDisplayServiceTester::SimulateClick(
     NotificationHandler::Type notification_type,
     const std::string& notification_id,
-    base::Optional<int> action_index,
-    base::Optional<base::string16> reply) {
+    std::optional<int> action_index,
+    std::optional<std::u16string> reply) {
   display_service_->SimulateClick(notification_type, notification_id,
                                   std::move(action_index), std::move(reply));
 }
@@ -201,5 +154,10 @@ void NotificationDisplayServiceTester::SetProcessNotificationOperationDelegate(
 
 void NotificationDisplayServiceTester::OnProfileShutdown() {
   profile_ = nullptr;
-  profile_shutdown_subscription_.reset();
+  profile_shutdown_subscription_ = {};
+}
+
+// static
+void NotificationDisplayServiceTester::EnsureFactoryBuilt() {
+  NotificationDisplayServiceShutdownNotifierFactory::GetInstance();
 }

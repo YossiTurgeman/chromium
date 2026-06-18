@@ -1,24 +1,24 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/platform_keys_certificate_selector_chromeos.h"
 
 #include <stddef.h>
+
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "base/memory/ref_counted.h"
-#include "base/strings/string16.h"
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/ui/browser_dialogs.h"
-#include "chrome/browser/ui/views/chrome_typography.h"
 #include "chrome/grit/generated_resources.h"
 #include "net/ssl/client_cert_identity.h"
 #include "net/ssl/ssl_private_key.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/gfx/font.h"
 #include "ui/views/controls/styled_label.h"
+#include "ui/views/style/typography.h"
 
 namespace chromeos {
 
@@ -56,31 +56,30 @@ net::ClientCertIdentityList CertificateListToIdentityList(
 PlatformKeysCertificateSelector::PlatformKeysCertificateSelector(
     const net::CertificateList& certificates,
     const std::string& extension_name,
-    const CertificateSelectedCallback& callback,
+    CertificateSelectedCallback callback,
     content::WebContents* web_contents)
     : CertificateSelector(CertificateListToIdentityList(certificates),
                           web_contents),
       extension_name_(extension_name),
-      callback_(callback) {
+      callback_(std::move(callback)) {
   DCHECK(!callback_.is_null());
   SetCancelCallback(base::BindOnce(
       [](PlatformKeysCertificateSelector* dialog) {
         std::move(dialog->callback_).Run(nullptr);
       },
       base::Unretained(this)));
-  chrome::RecordDialogCreation(
-      chrome::DialogIdentifier::PLATFORM_KEYS_CERTIFICATE_SELECTOR);
 }
 
 PlatformKeysCertificateSelector::~PlatformKeysCertificateSelector() {
   // Ensure to call back even if the dialog was closed because of the views
   // hierarchy being destroyed.
-  if (!callback_.is_null())
+  if (!callback_.is_null()) {
     std::move(callback_).Run(nullptr);
+  }
 }
 
 void PlatformKeysCertificateSelector::Init() {
-  const base::string16 name = base::ASCIIToUTF16(extension_name_);
+  const std::u16string name = base::ASCIIToUTF16(extension_name_);
 
   auto label = std::make_unique<views::StyledLabel>();
   size_t offset;
@@ -88,7 +87,7 @@ void PlatformKeysCertificateSelector::Init() {
       IDS_PLATFORM_KEYS_SELECT_CERT_DIALOG_TEXT, name, &offset));
 
   views::StyledLabel::RangeStyleInfo bold_style;
-  bold_style.text_style = STYLE_EMPHASIZED;
+  bold_style.text_style = views::style::STYLE_EMPHASIZED;
   label->AddStyleRange(gfx::Range(offset, offset + name.size()), bold_style);
   CertificateSelector::InitWithText(std::move(label));
 }
@@ -103,11 +102,10 @@ void ShowPlatformKeysCertificateSelector(
     content::WebContents* web_contents,
     const std::string& extension_name,
     const net::CertificateList& certificates,
-    const base::Callback<void(const scoped_refptr<net::X509Certificate>&)>&
-        callback) {
+    CertificateSelectedCallback callback) {
   PlatformKeysCertificateSelector* selector =
       new PlatformKeysCertificateSelector(certificates, extension_name,
-                                          callback, web_contents);
+                                          std::move(callback), web_contents);
   selector->Init();
   selector->Show();
 }

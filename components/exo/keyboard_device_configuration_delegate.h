@@ -1,9 +1,9 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef COMPONENTS_EXO_KEYBOARD_DEVICE_CONFIGURATION_H_
-#define COMPONENTS_EXO_KEYBOARD_DEVICE_CONFIGURATION_H_
+#ifndef COMPONENTS_EXO_KEYBOARD_DEVICE_CONFIGURATION_DELEGATE_H_
+#define COMPONENTS_EXO_KEYBOARD_DEVICE_CONFIGURATION_DELEGATE_H_
 
 namespace exo {
 
@@ -14,9 +14,9 @@ class KeyboardDeviceConfigurationDelegate {
   virtual void OnKeyboardTypeChanged(bool is_physical) = 0;
 
  protected:
-  virtual ~KeyboardDeviceConfigurationDelegate() {}
+  virtual ~KeyboardDeviceConfigurationDelegate() = default;
 };
 
 }  // namespace exo
 
-#endif  // COMPONENTS_EXO_KEYBOARD_DEVICE_CONFIGURATION_H_
+#endif  // COMPONENTS_EXO_KEYBOARD_DEVICE_CONFIGURATION_DELEGATE_H_

@@ -1,13 +1,15 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/process/memory.h"
 #include "base/test/test_discardable_memory_allocator.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkCanvas.h"
+#include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkImageFilter.h"
 
 namespace {
@@ -44,7 +46,7 @@ void RunTestCase(std::string& ipc_filter_message, SkBitmap& bitmap,
 
     // This call shouldn't crash or cause ASAN to flag any memory issues
     // If nothing bad happens within this call, everything is fine
-    canvas->drawBitmap(bitmap, 0, 0, &paint);
+    canvas->drawImage(bitmap.asImage(), 0, 0, SkSamplingOptions(), &paint);
 
     LOG(INFO) << "Filter DAG rendered successfully";
     canvas->restore();
@@ -79,12 +81,13 @@ int main(int argc, char** argv) {
 
   SkBitmap bitmap;
   bitmap.allocN32Pixels(BitmapSize, BitmapSize);
-  SkCanvas canvas(bitmap);
+  SkCanvas canvas(bitmap, SkSurfaceProps{});
   canvas.clear(0x00000000);
 
   for (int i = 1; i < argc; i++)
-    if (!ReadAndRunTestCase(argv[i], bitmap, &canvas))
+    if (!ReadAndRunTestCase(UNSAFE_TODO(argv[i]), bitmap, &canvas)) {
       ret = 2;
+    }
 
   // Cluster-Fuzz likes "#EOF" as the last line of output to help distinguish
   // successful runs from crashes.

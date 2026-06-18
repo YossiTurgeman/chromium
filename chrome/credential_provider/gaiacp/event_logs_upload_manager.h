@@ -1,12 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_CREDENTIAL_PROVIDER_GAIACP_EVENT_LOGS_UPLOAD_MANAGER_H_
 #define CHROME_CREDENTIAL_PROVIDER_GAIACP_EVENT_LOGS_UPLOAD_MANAGER_H_
 
-#include "base/strings/string16.h"
-#include "base/time/time.h"
+#include <string>
+
 #include "base/values.h"
 #include "base/win/windows_types.h"
 #include "url/gurl.h"
@@ -45,7 +45,7 @@ class EventLogsUploadManager {
     TimeStamp created_ts;
 
     // The data portion of the event log.
-    base::string16 data;
+    std::wstring data;
 
     // Severity level of the log entry.
     uint32_t severity_level;
@@ -53,12 +53,12 @@ class EventLogsUploadManager {
     EventLogEntry() : event_id(0), severity_level(0) {}
     EventLogEntry(uint64_t id,
                   const TimeStamp& ts,
-                  base::string16 data,
+                  std::wstring data,
                   uint32_t level)
         : event_id(id), created_ts(ts), data(data), severity_level(level) {}
 
     // Converts to dictionary in a base::Value.
-    void ToValue(base::Value& dict) const;
+    base::DictValue ToValue() const;
   };
 
  protected:
@@ -75,9 +75,10 @@ class EventLogsUploadManager {
   // Makes the upload HTTP request using the provided |access_token| for
   // the upload chunk with id |chunk_id| and the log entries specified
   // as a list in |log_entries|.
-  HRESULT MakeUploadLogChunkRequest(const std::string& access_token,
-                                    uint64_t chunk_id,
-                                    std::unique_ptr<base::Value> log_entries);
+  HRESULT MakeUploadLogChunkRequest(
+      const std::string& access_token,
+      uint64_t chunk_id,
+      std::unique_ptr<base::ListValue> log_entries);
 };
 
 }  // namespace credential_provider

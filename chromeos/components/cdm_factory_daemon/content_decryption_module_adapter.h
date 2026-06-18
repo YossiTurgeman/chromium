@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,11 @@
 #include <vector>
 
 #include "base/memory/weak_ptr.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/sequenced_task_runner_helpers.h"
 #include "base/threading/thread_checker.h"
 #include "chromeos/components/cdm_factory_daemon/cdm_storage_adapter.h"
+#include "chromeos/components/cdm_factory_daemon/chromeos_cdm_context.h"
 #include "chromeos/components/cdm_factory_daemon/mojom/content_decryption_module.mojom.h"
 #include "media/base/callback_registry.h"
 #include "media/base/cdm_context.h"
@@ -19,6 +22,7 @@
 #include "media/base/cdm_promise_adapter.h"
 #include "media/base/cdm_session_tracker.h"
 #include "media/base/content_decryption_module.h"
+#include "media/base/decrypt_config.h"
 #include "media/base/decryptor.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
@@ -34,12 +38,17 @@ namespace chromeos {
 // clear and not decoding.
 //
 // This implementation runs in the GPU process and expects all calls to be
-// executed on the mojo thread.  Decrypt, RegisterEventCB and CancelDecrypt
-// are exceptions, and can be called from any thread.
+// executed on the mojo thread.  Decrypt, RegisterEventCB, CancelDecrypt,
+// GetCdmContext, GetDecryptor, GetChromeOsCdmContext, GetHwKeyData and
+// GetCdmContextRef are exceptions, and can be called from any thread.
+//
+// Instances of this class will always be destructed on the mojo thread
+// automatically.
 class COMPONENT_EXPORT(CDM_FACTORY_DAEMON) ContentDecryptionModuleAdapter
     : public cdm::mojom::ContentDecryptionModuleClient,
       public media::ContentDecryptionModule,
       public media::CdmContext,
+      public chromeos::ChromeOsCdmContext,
       public media::Decryptor {
  public:
   ContentDecryptionModuleAdapter(
@@ -84,11 +93,29 @@ class COMPONENT_EXPORT(CDM_FACTORY_DAEMON) ContentDecryptionModuleAdapter
   void RemoveSession(const std::string& session_id,
                      std::unique_ptr<media::SimpleCdmPromise> promise) override;
   media::CdmContext* GetCdmContext() override;
+  void DeleteOnCorrectThread() const override;
 
   // media::CdmContext:
   std::unique_ptr<media::CallbackRegistration> RegisterEventCB(
       EventCB event_cb) override;
   Decryptor* GetDecryptor() override;
+  ChromeOsCdmContext* GetChromeOsCdmContext() override;
+
+  // chromeos::ChromeOsCdmContext:
+  void GetHwKeyData(const media::DecryptConfig* decrypt_config,
+                    const std::vector<uint8_t>& hw_identifier,
+                    GetHwKeyDataCB callback) override;
+  void GetHwConfigData(GetHwConfigDataCB callback) override;
+  void GetScreenResolutions(GetScreenResolutionsCB callback) override;
+  std::unique_ptr<media::CdmContextRef> GetCdmContextRef() override;
+  bool UsingArcCdm() const override;
+  bool IsRemoteCdm() const override;
+  void AllocateSecureBuffer(uint32_t size,
+                            AllocateSecureBufferCB callback) override;
+  void ParseEncryptedSliceHeader(uint64_t secure_handle,
+                                 uint32_t offset,
+                                 const std::vector<uint8_t>& stream_data,
+                                 ParseEncryptedSliceHeaderCB callback) override;
 
   // cdm::mojom::ContentDecryptionModuleClient:
   void OnSessionMessage(const std::string& session_id,
@@ -113,14 +140,17 @@ class COMPONENT_EXPORT(CDM_FACTORY_DAEMON) ContentDecryptionModuleAdapter
   void InitializeVideoDecoder(const media::VideoDecoderConfig& config,
                               DecoderInitCB init_cb) override;
   void DecryptAndDecodeAudio(scoped_refptr<media::DecoderBuffer> encrypted,
-                             const AudioDecodeCB& audio_decode_cb) override;
+                             AudioDecodeCB audio_decode_cb) override;
   void DecryptAndDecodeVideo(scoped_refptr<media::DecoderBuffer> encrypted,
-                             const VideoDecodeCB& video_decode_cb) override;
+                             VideoDecodeCB video_decode_cb) override;
   void ResetDecoder(StreamType stream_type) override;
   void DeinitializeDecoder(StreamType stream_type) override;
   bool CanAlwaysDecrypt() override;
 
  private:
+  // For DeleteSoon() in DeleteOnCorrectThread().
+  friend class base::DeleteHelper<ContentDecryptionModuleAdapter>;
+
   ~ContentDecryptionModuleAdapter() override;
   void OnConnectionError();
   void RejectTrackedPromise(uint32_t promise_id,
@@ -135,12 +165,16 @@ class COMPONENT_EXPORT(CDM_FACTORY_DAEMON) ContentDecryptionModuleAdapter
       uint32_t promise_id,
       cdm::mojom::CdmPromiseResultPtr cros_promise_result,
       const std::string& session_id);
-  void StoreDecryptCallback(StreamType stream_type, DecryptCB decrypt_cb);
   void OnDecrypt(StreamType stream_type,
                  scoped_refptr<media::DecoderBuffer> encrypted,
-                 size_t expected_decrypt_size,
+                 media::Decryptor::DecryptCB decrypt_cb,
                  media::Decryptor::Status status,
-                 const std::vector<uint8_t>& decrypted_data);
+                 const std::vector<uint8_t>& decrypted_data,
+                 std::unique_ptr<media::DecryptConfig> decrypt_config_out);
+  void GetHwKeyDataInternal(
+      std::unique_ptr<media::DecryptConfig> decrypt_config,
+      const std::vector<uint8_t>& hw_identifier,
+      GetHwKeyDataCB callback);
 
   THREAD_CHECKER(thread_checker_);
 
@@ -154,9 +188,6 @@ class COMPONENT_EXPORT(CDM_FACTORY_DAEMON) ContentDecryptionModuleAdapter
   media::SessionClosedCB session_closed_cb_;
   media::SessionKeysChangeCB session_keys_change_cb_;
   media::SessionExpirationUpdateCB session_expiration_update_cb_;
-
-  media::Decryptor::DecryptCB pending_audio_decrypt_cb_;
-  media::Decryptor::DecryptCB pending_video_decrypt_cb_;
 
   scoped_refptr<base::SequencedTaskRunner> mojo_task_runner_;
 

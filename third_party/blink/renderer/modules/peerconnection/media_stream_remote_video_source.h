@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,8 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "third_party/blink/public/web/modules/mediastream/media_stream_video_source.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/webrtc/api/media_stream_interface.h"
@@ -25,7 +26,13 @@ class MODULES_EXPORT MediaStreamRemoteVideoSource
     : public MediaStreamVideoSource {
  public:
   explicit MediaStreamRemoteVideoSource(
+      scoped_refptr<base::SingleThreadTaskRunner> task_runner,
       std::unique_ptr<TrackObserver> observer);
+
+  MediaStreamRemoteVideoSource(const MediaStreamRemoteVideoSource&) = delete;
+  MediaStreamRemoteVideoSource& operator=(const MediaStreamRemoteVideoSource&) =
+      delete;
+
   ~MediaStreamRemoteVideoSource() override;
 
   // Should be called when the remote video track this source originates from is
@@ -35,20 +42,24 @@ class MODULES_EXPORT MediaStreamRemoteVideoSource
 
   // MediaStreamVideoSource overrides.
   bool SupportsEncodedOutput() const override;
-  void RequestRefreshFrame() override;
+  void RequestKeyFrame() override;
+  base::WeakPtr<MediaStreamVideoSource> GetWeakPtr() override;
+  bool AllowsVideoThreadTypeOverride() const override;
+  void SetHasSeenScreencastContentTypeCallback(
+      base::OnceClosure callback) override;
 
  protected:
   // Implements MediaStreamVideoSource.
-  void StartSourceImpl(VideoCaptureDeliverFrameCB frame_callback,
-                       EncodedVideoFrameCB encoded_frame_callback) override;
+  void StartSourceImpl(
+      MediaStreamVideoSourceCallbacks media_stream_callbacks) override;
   void StopSourceImpl() override;
   void OnEncodedSinkEnabled() override;
   void OnEncodedSinkDisabled() override;
 
   // Used by tests to test that a frame can be received and that the
   // MediaStreamRemoteVideoSource behaves as expected.
-  rtc::VideoSinkInterface<webrtc::VideoFrame>* SinkInterfaceForTesting();
-  rtc::VideoSinkInterface<webrtc::RecordableEncodedFrame>*
+  webrtc::VideoSinkInterface<webrtc::VideoFrame>* SinkInterfaceForTesting();
+  webrtc::VideoSinkInterface<webrtc::RecordableEncodedFrame>*
   EncodedSinkInterfaceForTesting();
 
  private:
@@ -60,7 +71,7 @@ class MODULES_EXPORT MediaStreamRemoteVideoSource
   scoped_refptr<RemoteVideoSourceDelegate> delegate_;
   std::unique_ptr<TrackObserver> observer_;
 
-  DISALLOW_COPY_AND_ASSIGN(MediaStreamRemoteVideoSource);
+  base::WeakPtrFactory<MediaStreamVideoSource> weak_factory_{this};
 };
 
 }  // namespace blink

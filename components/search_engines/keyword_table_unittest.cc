@@ -1,39 +1,66 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/search_engines/keyword_table.h"
+
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/files/scoped_temp_dir.h"
-#include "base/macros.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/strings/cstring_view.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/time/time.h"
-#include "components/search_engines/keyword_table.h"
+#include "components/os_crypt/async/browser/test_utils.h"
+#include "components/os_crypt/async/common/encryptor.h"
+#include "components/os_crypt/async/common/test_encryptor.h"
 #include "components/search_engines/template_url_data.h"
 #include "components/webdata/common/web_database.h"
 #include "sql/statement.h"
+#include "sql/test/test_helpers.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 using base::ASCIIToUTF16;
 using base::Time;
-using base::TimeDelta;
 
 class KeywordTableTest : public testing::Test {
  public:
-  KeywordTableTest() {}
-  ~KeywordTableTest() override {}
+  KeywordTableTest()
+      : encryptor_(os_crypt_async::GetTestEncryptorForTesting()) {}
+
+  KeywordTableTest(const KeywordTableTest&) = delete;
+  KeywordTableTest& operator=(const KeywordTableTest&) = delete;
+
+  ~KeywordTableTest() override = default;
 
  protected:
   void SetUp() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
     file_ = temp_dir_.GetPath().AppendASCII("TestWebDatabase");
+    InitDatabase();
+  }
 
-    table_.reset(new KeywordTable);
-    db_.reset(new WebDatabase);
+  // Pass in an `encryptor` if wanting to override the default one.
+  void InitDatabase(
+      scoped_refptr<const os_crypt_async::Encryptor> encryptor = nullptr) {
+    table_ = std::make_unique<KeywordTable>();
+    db_ = std::make_unique<WebDatabase>();
     db_->AddTable(table_.get());
-    ASSERT_EQ(sql::INIT_OK, db_->Init(file_));
+    ASSERT_EQ(sql::INIT_OK,
+              db_->Init(file_, encryptor ? encryptor : encryptor_));
+  }
+
+  void CloseDatabase() {
+    db_.reset();
+    table_.reset();
   }
 
   void AddKeyword(const TemplateURLData& keyword) const {
@@ -42,8 +69,8 @@ class KeywordTableTest : public testing::Test {
 
   TemplateURLData CreateAndAddKeyword() const {
     TemplateURLData keyword;
-    keyword.SetShortName(ASCIIToUTF16("short_name"));
-    keyword.SetKeyword(ASCIIToUTF16("keyword"));
+    keyword.SetShortName(u"short_name");
+    keyword.SetKeyword(u"keyword");
     keyword.SetURL("http://url/");
     keyword.suggestions_url = "url2";
     keyword.image_url = "http://image-search-url/";
@@ -59,12 +86,16 @@ class KeywordTableTest : public testing::Test {
     keyword.date_created = base::Time::UnixEpoch();
     keyword.last_modified = base::Time::UnixEpoch();
     keyword.last_visited = base::Time::UnixEpoch();
-    keyword.created_by_policy = true;
+    keyword.policy_origin =
+        TemplateURLData::PolicyOrigin::kDefaultSearchProvider;
     keyword.usage_count = 32;
     keyword.prepopulate_id = 10;
     keyword.sync_guid = "1234-5678-90AB-CDEF";
     keyword.alternate_urls.push_back("a_url1");
     keyword.alternate_urls.push_back("a_url2");
+    keyword.starter_pack_id = 1;
+    keyword.enforced_by_policy = true;
+    keyword.featured_by_policy = true;
     AddKeyword(keyword);
     return keyword;
   }
@@ -83,35 +114,40 @@ class KeywordTableTest : public testing::Test {
     return keywords;
   }
 
-  void KeywordMiscTest() const {
-    EXPECT_EQ(kInvalidTemplateURLID, table_->GetDefaultSearchProviderID());
-    EXPECT_EQ(0, table_->GetBuiltinKeywordVersion());
-
-    EXPECT_TRUE(table_->SetDefaultSearchProviderID(10));
-    EXPECT_TRUE(table_->SetBuiltinKeywordVersion(11));
-
-    EXPECT_EQ(10, table_->GetDefaultSearchProviderID());
-    EXPECT_EQ(11, table_->GetBuiltinKeywordVersion());
+  void GetStatement(const base::cstring_view sql,
+                    sql::Statement* statement) const {
+    statement->Assign(table_->db()->GetUniqueStatement(sql));
   }
 
-  void GetStatement(const char* sql, sql::Statement* statement) const {
-    statement->Assign(table_->db_->GetUniqueStatement(sql));
-  }
+  KeywordTable* GetTable() { return table_.get(); }
+
+  base::FilePath file_;
+
+ protected:
+  scoped_refptr<os_crypt_async::TestEncryptor> encryptor_;
 
  private:
-  base::FilePath file_;
   base::ScopedTempDir temp_dir_;
   std::unique_ptr<KeywordTable> table_;
   std::unique_ptr<WebDatabase> db_;
-
-  DISALLOW_COPY_AND_ASSIGN(KeywordTableTest);
 };
 
 
 TEST_F(KeywordTableTest, Keywords) {
   TemplateURLData keyword(CreateAndAddKeyword());
 
+  base::HistogramTester histograms;
+
   KeywordTable::Keywords keywords(GetKeywords());
+  constexpr base::HistogramBase::Sample32 expected_bucket =
+#if BUILDFLAG(IS_WIN)
+      0;  // HashValidationStatus::kSuccess;
+#else
+      5;  // HashValidationStatus::kNotVerifiedFeatureDisabled;
+#endif  // BUILDFLAG(IS_WIN)
+  histograms.ExpectUniqueSample("Search.KeywordTable.HashValidationStatus",
+                                expected_bucket, 1);
+
   EXPECT_EQ(1U, keywords.size());
   const TemplateURLData& restored_keyword = keywords.front();
 
@@ -132,29 +168,31 @@ TEST_F(KeywordTableTest, Keywords) {
             restored_keyword.last_modified.ToTimeT());
   EXPECT_EQ(keyword.last_visited.ToTimeT(),
             restored_keyword.last_visited.ToTimeT());
-  EXPECT_EQ(keyword.created_by_policy, restored_keyword.created_by_policy);
-  EXPECT_EQ(keyword.created_from_play_api,
-            restored_keyword.created_from_play_api);
+  EXPECT_EQ(keyword.policy_origin, restored_keyword.policy_origin);
+  EXPECT_EQ(keyword.regulatory_origin, restored_keyword.regulatory_origin);
   EXPECT_EQ(keyword.usage_count, restored_keyword.usage_count);
   EXPECT_EQ(keyword.prepopulate_id, restored_keyword.prepopulate_id);
+  EXPECT_EQ(keyword.is_active, restored_keyword.is_active);
+  EXPECT_EQ(keyword.starter_pack_id, restored_keyword.starter_pack_id);
+  EXPECT_EQ(keyword.enforced_by_policy, restored_keyword.enforced_by_policy);
+  EXPECT_EQ(keyword.featured_by_policy, restored_keyword.featured_by_policy);
 
   RemoveKeyword(restored_keyword.id);
 
   EXPECT_EQ(0U, GetKeywords().size());
 }
 
-TEST_F(KeywordTableTest, KeywordMisc) {
-  KeywordMiscTest();
-}
-
 TEST_F(KeywordTableTest, UpdateKeyword) {
   TemplateURLData keyword(CreateAndAddKeyword());
 
-  keyword.SetKeyword(ASCIIToUTF16("url"));
+  keyword.SetKeyword(u"url");
   keyword.originating_url = GURL("http://originating.url/");
   keyword.input_encodings.push_back("Shift_JIS");
   keyword.prepopulate_id = 5;
-  keyword.created_from_play_api = true;
+  keyword.regulatory_origin = RegulatoryExtensionType::kAndroidEEA;
+  keyword.starter_pack_id = 0;
+  keyword.enforced_by_policy = false;
+  keyword.featured_by_policy = false;
   UpdateKeyword(keyword);
 
   KeywordTable::Keywords keywords(GetKeywords());
@@ -171,14 +209,17 @@ TEST_F(KeywordTableTest, UpdateKeyword) {
   EXPECT_EQ(keyword.input_encodings, restored_keyword.input_encodings);
   EXPECT_EQ(keyword.id, restored_keyword.id);
   EXPECT_EQ(keyword.prepopulate_id, restored_keyword.prepopulate_id);
-  EXPECT_EQ(keyword.created_from_play_api,
-            restored_keyword.created_from_play_api);
+  EXPECT_EQ(keyword.regulatory_origin, restored_keyword.regulatory_origin);
+  EXPECT_EQ(keyword.is_active, restored_keyword.is_active);
+  EXPECT_EQ(keyword.starter_pack_id, restored_keyword.starter_pack_id);
+  EXPECT_EQ(keyword.enforced_by_policy, restored_keyword.enforced_by_policy);
+  EXPECT_EQ(keyword.featured_by_policy, restored_keyword.featured_by_policy);
 }
 
 TEST_F(KeywordTableTest, KeywordWithNoFavicon) {
   TemplateURLData keyword;
-  keyword.SetShortName(ASCIIToUTF16("short_name"));
-  keyword.SetKeyword(ASCIIToUTF16("keyword"));
+  keyword.SetShortName(u"short_name");
+  keyword.SetKeyword(u"keyword");
   keyword.SetURL("http://url/");
   keyword.safe_for_autoreplace = true;
   keyword.id = -100;
@@ -198,14 +239,14 @@ TEST_F(KeywordTableTest, KeywordWithNoFavicon) {
 
 TEST_F(KeywordTableTest, SanitizeURLs) {
   TemplateURLData keyword;
-  keyword.SetShortName(ASCIIToUTF16("legit"));
-  keyword.SetKeyword(ASCIIToUTF16("legit"));
+  keyword.SetShortName(u"legit");
+  keyword.SetKeyword(u"legit");
   keyword.SetURL("http://url/");
   keyword.id = 1000;
   AddKeyword(keyword);
 
-  keyword.SetShortName(ASCIIToUTF16("bogus"));
-  keyword.SetKeyword(ASCIIToUTF16("bogus"));
+  keyword.SetShortName(u"bogus");
+  keyword.SetKeyword(u"bogus");
   keyword.id = 2000;
   AddKeyword(keyword);
 
@@ -215,7 +256,7 @@ TEST_F(KeywordTableTest, SanitizeURLs) {
   // previously saved into the database.
   sql::Statement s;
   GetStatement("UPDATE keywords SET url=? WHERE id=?", &s);
-  s.BindString16(0, base::string16());
+  s.BindString16(0, std::u16string());
   s.BindInt64(1, 2000);
   EXPECT_TRUE(s.Run());
 
@@ -226,8 +267,8 @@ TEST_F(KeywordTableTest, SanitizeURLs) {
 TEST_F(KeywordTableTest, SanitizeShortName) {
   TemplateURLData keyword;
   {
-    keyword.SetShortName(ASCIIToUTF16("legit name"));
-    keyword.SetKeyword(ASCIIToUTF16("legit"));
+    keyword.SetShortName(u"legit name");
+    keyword.SetKeyword(u"legit");
     keyword.SetURL("http://url/");
     keyword.id = 1000;
     AddKeyword(keyword);
@@ -235,20 +276,193 @@ TEST_F(KeywordTableTest, SanitizeShortName) {
     EXPECT_EQ(1U, keywords.size());
     const TemplateURLData& keyword_from_database = keywords.front();
     EXPECT_EQ(keyword.id, keyword_from_database.id);
-    EXPECT_EQ(ASCIIToUTF16("legit name"), keyword_from_database.short_name());
+    EXPECT_EQ(u"legit name", keyword_from_database.short_name());
     RemoveKeyword(keyword.id);
   }
 
   {
-    keyword.SetShortName(ASCIIToUTF16("\t\tbogus \tname \n"));
-    keyword.SetKeyword(ASCIIToUTF16("bogus"));
+    keyword.SetShortName(u"\t\tbogus \tname \n");
+    keyword.SetKeyword(u"bogus");
     keyword.id = 2000;
     AddKeyword(keyword);
     KeywordTable::Keywords keywords(GetKeywords());
     EXPECT_EQ(1U, keywords.size());
     const TemplateURLData& keyword_from_database = keywords.front();
     EXPECT_EQ(keyword.id, keyword_from_database.id);
-    EXPECT_EQ(ASCIIToUTF16("bogus name"), keyword_from_database.short_name());
+    EXPECT_EQ(u"bogus name", keyword_from_database.short_name());
     RemoveKeyword(keyword.id);
   }
+}
+
+#if BUILDFLAG(IS_WIN)
+namespace {
+
+enum class Tamper { kNone, kUrl, kKeyword };
+
+struct TestCase {
+  bool encryption_enabled;
+  Tamper tamper;
+  base::HistogramBase::Sample32 expected_histogram_sample;
+  size_t expected_keyword_count;
+
+  std::string Name() const {
+    std::string tamper_str = "NoTamper";
+    if (tamper == Tamper::kUrl) {
+      tamper_str = "TamperUrl";
+    }
+    if (tamper == Tamper::kKeyword) {
+      tamper_str = "TamperKeyword";
+    }
+    return base::StrCat(
+        {encryption_enabled ? "Encryption" : "NoEncryption", tamper_str});
+  }
+};
+
+}  // namespace
+
+class KeywordTableTestEncryption
+    : public KeywordTableTest,
+      public ::testing::WithParamInterface<::TestCase> {
+};
+
+TEST_P(KeywordTableTestEncryption, KeywordBadHash) {
+  TemplateURLData keyword(CreateAndAddKeyword());
+  {
+    KeywordTable::Keywords keywords(GetKeywords());
+    EXPECT_EQ(1U, keywords.size());
+  }
+  CloseDatabase();
+  if (GetParam().tamper != Tamper::kNone) {
+    sql::Database db(sql::test::kTestTag);
+    ASSERT_TRUE(db.Open(file_));
+    if (GetParam().tamper == Tamper::kUrl) {
+      EXPECT_TRUE(
+          db.Execute("UPDATE keywords SET url='http://bad.com/' WHERE id=1"));
+    } else {
+      EXPECT_TRUE(
+          db.Execute("UPDATE keywords SET keyword='badkeyword' WHERE id=1"));
+    }
+  }
+  encryptor_->set_decryption_available_for_testing(
+      GetParam().encryption_enabled);
+  base::HistogramTester histograms;
+  InitDatabase();
+  KeywordTable::Keywords keywords(GetKeywords());
+  // If decryption is not available, the hash is skipped, otherwise the hash
+  // should be invalid and the row dropped.
+  histograms.ExpectUniqueSample("Search.KeywordTable.HashValidationStatus",
+                                GetParam().expected_histogram_sample, 1);
+  EXPECT_EQ(GetParam().expected_keyword_count, keywords.size());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    /*empty*/,
+    KeywordTableTestEncryption,
+    ::testing::Values(
+        ::TestCase{.encryption_enabled = false,
+                   .tamper = Tamper::kUrl,
+                   .expected_histogram_sample = /*kNotVerifiedNoCrypto*/ 4,
+                   .expected_keyword_count = 1u},
+        ::TestCase{.encryption_enabled = true,
+                   .tamper = Tamper::kUrl,
+                   .expected_histogram_sample = /*kIncorrectHash*/ 3,
+                   .expected_keyword_count = 0},
+        ::TestCase{.encryption_enabled = false,
+                   .tamper = Tamper::kKeyword,
+                   .expected_histogram_sample = /*kNotVerifiedNoCrypto*/ 4,
+                   .expected_keyword_count = 1u},
+        ::TestCase{.encryption_enabled = true,
+                   .tamper = Tamper::kKeyword,
+                   .expected_histogram_sample = /*kIncorrectHash*/ 3,
+                   .expected_keyword_count = 0},
+        ::TestCase{.encryption_enabled = false,
+                   .tamper = Tamper::kNone,
+                   .expected_histogram_sample = /*kNotVerifiedNoCrypto*/ 4,
+                   .expected_keyword_count = 1u},
+        ::TestCase{.encryption_enabled = true,
+                   .tamper = Tamper::kNone,
+                   .expected_histogram_sample = /*kSuccess*/ 0,
+                   .expected_keyword_count = 1u}),
+    [](const auto& info) { return info.param.Name(); });
+
+TEST_F(KeywordTableTest, KeywordBadCrypto) {
+  TemplateURLData keyword(CreateAndAddKeyword());
+  {
+    KeywordTable::Keywords keywords(GetKeywords());
+    EXPECT_EQ(1U, keywords.size());
+  }
+  CloseDatabase();
+  {
+    base::HistogramTester histograms;
+    // A replacement encryptor with a new key that will make decryption of the
+    // hash fail.
+    const auto new_encryptor = os_crypt_async::GetTestEncryptorForTesting();
+    InitDatabase(new_encryptor);
+    {
+      KeywordTable::Keywords keywords(GetKeywords());
+      EXPECT_TRUE(keywords.empty());
+    }
+
+    histograms.ExpectUniqueSample("Search.KeywordTable.HashValidationStatus",
+                                  /*HashValidationStatus::kDecryptFailed*/ 1,
+                                  1);
+  }
+}
+#endif  // BUILDFLAG(IS_WIN)
+
+TEST_F(KeywordTableTest, KeywordBadUrl) {
+  TemplateURLData keyword(CreateAndAddKeyword());
+  {
+    KeywordTable::Keywords keywords(GetKeywords());
+    EXPECT_EQ(1U, keywords.size());
+  }
+  CloseDatabase();
+  {
+    sql::Database db(sql::test::kTestTag);
+    ASSERT_TRUE(db.Open(file_));
+    EXPECT_TRUE(db.Execute("UPDATE keywords SET url='' WHERE id=1"));
+  }
+  InitDatabase();
+  KeywordTable::Keywords keywords(GetKeywords());
+
+  // Invalid keyword with empty url should have been dropped.
+  EXPECT_TRUE(keywords.empty());
+}
+
+TEST_F(KeywordTableTest, MigrateVersion152ExpandHashColumnRetainsData) {
+  CloseDatabase();
+  {
+    sql::Database db(sql::test::kTestTag);
+    ASSERT_TRUE(db.Open(file_));
+    ASSERT_TRUE(
+        db.Execute("INSERT INTO keywords (id, short_name, keyword, "
+                   "favicon_url, url, safe_for_autoreplace, starter_pack_id, "
+                   "enforced_by_policy) VALUES (1, 'Test', '@testing', '', "
+                   "'chrome://test/?q={searchTerms}', 1, 1234, 1)"));
+  }
+
+  std::optional<KeywordTable::Keywords> keywords_no_hash;
+  {
+    // An Encryptor with no decryption services causes validation to pass,
+    // allowing access to retrieve the keyword data without hash verification,
+    // which is important as it's not yet present.
+    auto encryptor = os_crypt_async::GetTestEncryptorForTesting();
+    encryptor->set_decryption_available_for_testing(false);
+    InitDatabase(encryptor);
+    keywords_no_hash.emplace(GetKeywords());
+    CloseDatabase();
+  }
+
+  ASSERT_TRUE(keywords_no_hash.has_value());
+  ASSERT_EQ(1u, keywords_no_hash->size());
+
+  InitDatabase();
+  // Manually invoke the migration script, this generates the hashes from the
+  // keyword row.
+  ASSERT_TRUE(GetTable()->MigrateToVersion152ExpandHashColumn());
+
+  // Verify that the row survives hash validation during GetKeywords()
+  // and that its fields were retained.
+  KeywordTable::Keywords keywords(GetKeywords());
+  EXPECT_THAT(keywords, ::testing::ContainerEq(keywords_no_hash.value()));
 }

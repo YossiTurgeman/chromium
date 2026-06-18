@@ -1,17 +1,23 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/viz/public/cpp/compositing/copy_output_request_mojom_traits.h"
 
+#include <memory>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
+#include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+#include "services/viz/public/cpp/compositing/blit_request_mojom_traits.h"
 #include "services/viz/public/cpp/compositing/copy_output_result_mojom_traits.h"
 #include "services/viz/public/cpp/crash_keys.h"
 
@@ -25,9 +31,11 @@ class CopyOutputResultSenderImpl : public viz::mojom::CopyOutputResultSender {
  public:
   CopyOutputResultSenderImpl(
       viz::CopyOutputRequest::ResultFormat result_format,
+      viz::CopyOutputRequest::ResultDestination result_destination,
       viz::CopyOutputRequest::CopyOutputRequestCallback result_callback,
       scoped_refptr<base::SequencedTaskRunner> callback_task_runner)
       : result_format_(result_format),
+        result_destination_(result_destination),
         result_callback_(std::move(result_callback)),
         result_callback_task_runner_(std::move(callback_task_runner)) {
     DCHECK(result_callback_);
@@ -37,9 +45,11 @@ class CopyOutputResultSenderImpl : public viz::mojom::CopyOutputResultSender {
   ~CopyOutputResultSenderImpl() override {
     if (result_callback_) {
       result_callback_task_runner_->PostTask(
-          FROM_HERE, base::BindOnce(std::move(result_callback_),
-                                    std::make_unique<viz::CopyOutputResult>(
-                                        result_format_, gfx::Rect())));
+          FROM_HERE,
+          base::BindOnce(std::move(result_callback_),
+                         std::make_unique<viz::CopyOutputResult>(
+                             result_format_, result_destination_,
+                             viz::CopyOutputResult::Error::kUnknown)));
     }
   }
 
@@ -55,6 +65,7 @@ class CopyOutputResultSenderImpl : public viz::mojom::CopyOutputResultSender {
 
  private:
   const viz::CopyOutputRequest::ResultFormat result_format_;
+  const viz::CopyOutputRequest::ResultDestination result_destination_;
   viz::CopyOutputRequest::CopyOutputRequestCallback result_callback_;
   scoped_refptr<base::SequencedTaskRunner> result_callback_task_runner_;
 };
@@ -79,12 +90,10 @@ StructTraits<viz::mojom::CopyOutputRequestDataView,
     result_sender(const std::unique_ptr<viz::CopyOutputRequest>& request) {
   mojo::PendingRemote<viz::mojom::CopyOutputResultSender> result_sender;
   auto pending_receiver = result_sender.InitWithNewPipeAndPassReceiver();
-  // Receiving the result requires an expensive deserialize operation, so by
-  // default we want the pipe to operate on the ThreadPool, and then it will
-  // PostTask back to the current sequence.
+  CHECK(request->has_result_task_runner());
   auto impl = std::make_unique<CopyOutputResultSenderImpl>(
-      request->result_format(), std::move(request->result_callback_),
-      base::SequencedTaskRunnerHandle::Get());
+      request->result_format(), request->result_destination(),
+      std::move(request->result_callback_), request->result_task_runner_);
   auto runner = base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()});
   runner->PostTask(
       FROM_HERE,
@@ -107,11 +116,27 @@ bool StructTraits<viz::mojom::CopyOutputRequestDataView,
   if (!data.ReadResultFormat(&result_format))
     return false;
 
+  viz::CopyOutputRequest::ResultDestination result_destination;
+  if (!data.ReadResultDestination(&result_destination))
+    return false;
+
   auto result_sender = data.TakeResultSender<
       mojo::PendingRemote<viz::mojom::CopyOutputResultSender>>();
 
+  base::TimeDelta send_result_delay;
+  if (!data.ReadSendResultDelay(&send_result_delay)) {
+    return false;
+  }
+
   auto request = std::make_unique<viz::CopyOutputRequest>(
-      result_format, base::BindOnce(SendResult, std::move(result_sender)));
+      result_format, result_destination,
+      base::BindOnce(&SendResult, std::move(result_sender)));
+
+  request->set_send_result_delay(send_result_delay);
+  // Serializing the result requires an expensive copy, so to not block the
+  // any important thread we PostTask onto the threadpool.
+  request->set_result_task_runner(
+      base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()}));
 
   gfx::Vector2d scale_from;
   if (!data.ReadScaleFrom(&scale_from))
@@ -139,6 +164,10 @@ bool StructTraits<viz::mojom::CopyOutputRequestDataView,
 
   if (!data.ReadSource(&request->source_) || !data.ReadArea(&request->area_) ||
       !data.ReadResultSelection(&request->result_selection_)) {
+    return false;
+  }
+
+  if (!data.ReadBlitRequest(&request->blit_request_)) {
     return false;
   }
 

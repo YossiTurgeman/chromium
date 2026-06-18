@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,30 +7,27 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
 
-#include "base/check.h"
+#import "base/check.h"
 #import "ios/web/common/web_view_creation_util.h"
-#include "ios/web/public/test/fakes/test_browser_state.h"
+#import "ios/web/public/test/fakes/fake_browser_state.h"
+#import "ios/web/web_state/crw_web_view.h"
 #import "third_party/ocmock/OCMock/NSInvocation+OCMAdditions.h"
 #import "third_party/ocmock/OCMock/OCMock.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace {
 
-// Returns an OCMocked WKWebView whose |evaluateJavaScript:completionHandler:|
-// method has been mocked to execute |block| instead. |block| cannot be nil.
+// Returns an OCMocked WKWebView whose `evaluateJavaScript:completionHandler:`
+// method has been mocked to execute `block` instead. `block` cannot be nil.
 WKWebView* BuildMockWKWebViewWithStubbedJSEvalFunction(
     void (^block)(NSInvocation*)) {
   DCHECK(block);
-  web::TestBrowserState browser_state;
-  WKWebView* webView = web::BuildWKWebView(CGRectZero, &browser_state);
-  id mockWebView = [OCMockObject partialMockForObject:webView];
-  [[[mockWebView stub] andDo:^void(NSInvocation* invocation) {
-      block(invocation);
+  web::FakeBrowserState browser_state;
+  WKWebView* web_view = web::BuildWKWebView(CGRectZero, &browser_state);
+  id mock_web_view = [OCMockObject partialMockForObject:web_view];
+  [[[mock_web_view stub] andDo:^void(NSInvocation* invocation) {
+    block(invocation);
   }] evaluateJavaScript:OCMOCK_ANY completionHandler:OCMOCK_ANY];
-  return mockWebView;
+  return mock_web_view;
 }
 
 }  // namespace
@@ -53,25 +50,24 @@ void SimulateWKWebViewCrash(WKWebView* webView) {
 
 WKWebView* BuildTerminatedWKWebView() {
   id fail = ^void(NSInvocation* invocation) {
-      // Always fails with WKErrorWebContentProcessTerminated error.
-      NSError* error =
-          [NSError errorWithDomain:WKErrorDomain
-                              code:WKErrorWebContentProcessTerminated
-                          userInfo:nil];
+    // Always fails with WKErrorWebContentProcessTerminated error.
+    NSError* error = [NSError errorWithDomain:WKErrorDomain
+                                         code:WKErrorWebContentProcessTerminated
+                                     userInfo:nil];
 
-      void (^completionHandler)(id, NSError*) =
-          [invocation getArgumentAtIndexAsObject:3];
-      completionHandler(nil, error);
+    void (^completionHandler)(id, NSError*) =
+        [invocation getArgumentAtIndexAsObject:3];
+    completionHandler(nil, error);
   };
   return BuildMockWKWebViewWithStubbedJSEvalFunction(fail);
 }
 
 WKWebView* BuildHealthyWKWebView() {
   id succeed = ^void(NSInvocation* invocation) {
-      void (^completionHandler)(id, NSError*) =
-          [invocation getArgumentAtIndexAsObject:3];
-      // Always succceeds with nil result.
-      completionHandler(nil, nil);
+    void (^completionHandler)(id, NSError*) =
+        [invocation getArgumentAtIndexAsObject:3];
+    // Always succceeds with nil result.
+    completionHandler(nil, nil);
   };
   return BuildMockWKWebViewWithStubbedJSEvalFunction(succeed);
 }

@@ -1,20 +1,19 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_DOMAIN_RELIABILITY_UPLOADER_H_
 #define COMPONENTS_DOMAIN_RELIABILITY_UPLOADER_H_
 
-#include <map>
 #include <memory>
 
-#include "base/callback_forward.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback_forward.h"
 #include "base/time/time.h"
 #include "components/domain_reliability/domain_reliability_export.h"
 #include "url/gurl.h"
 
 namespace net {
+class IsolationInfo;
 class URLRequest;
 class URLRequestContext;
 }  // namespace net
@@ -58,6 +57,7 @@ class DOMAIN_RELIABILITY_EXPORT DomainReliabilityUploader {
   virtual void UploadReport(const std::string& report_json,
                             int max_beacon_depth,
                             const GURL& upload_url,
+                            const net::IsolationInfo& isolation_info,
                             UploadCallback callback) = 0;
 
   // Shuts down the uploader prior to destruction. Currently, terminates pending

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,21 @@
 #define CC_PAINT_PAINT_CANVAS_H_
 
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "build/build_config.h"
 #include "cc/paint/node_id.h"
 #include "cc/paint/paint_export.h"
 #include "cc/paint/paint_image.h"
+#include "cc/paint/refcounted_buffer.h"
+#include "cc/paint/skottie_color_map.h"
+#include "cc/paint/skottie_frame_data.h"
+#include "cc/paint/skottie_text_property_value.h"
 #include "third_party/skia/include/core/SkCanvas.h"
-#include "third_party/skia/include/core/SkTextBlob.h"
+#include "third_party/skia/include/core/SkRefCnt.h"
+
+class SkTextBlob;
 
 namespace printing {
 class MetafileSkia;
@@ -24,10 +32,11 @@ class PaintPreviewTracker;
 
 namespace cc {
 class SkottieWrapper;
+class PaintFilter;
 class PaintFlags;
-class PaintOpBuffer;
+class PaintRecord;
 
-using PaintRecord = PaintOpBuffer;
+enum class UsePaintCache { kDisabled = 0, kEnabled };
 
 // PaintCanvas is the cc/paint wrapper of SkCanvas.  It has a more restricted
 // interface than SkCanvas (trimmed back to only what Chrome uses).  Its reason
@@ -67,17 +76,25 @@ class CC_PAINT_EXPORT PaintCanvas {
   virtual void flush() = 0;
 
   virtual int save() = 0;
-  virtual int saveLayer(const SkRect* bounds, const PaintFlags* flags) = 0;
-  virtual int saveLayerAlpha(const SkRect* bounds, uint8_t alpha) = 0;
+  virtual int saveLayer(const PaintFlags& flags) = 0;
+  virtual int saveLayer(const SkRect& bounds, const PaintFlags& flags) = 0;
+  virtual int saveLayerAlphaf(float alpha) = 0;
+  virtual int saveLayerAlphaf(const SkRect& bounds, float alpha) = 0;
+  // Opens a layer whose output texture is composited multiple times to the
+  // canvas, once for every filter in `filters`. Useful to draw a foreground and
+  // its shadow.
+  virtual int saveLayerFilters(base::span<const sk_sp<PaintFilter>> filters,
+                               const PaintFlags& flags) = 0;
 
   virtual void restore() = 0;
   virtual int getSaveCount() const = 0;
   virtual void restoreToCount(int save_count) = 0;
   virtual void translate(SkScalar dx, SkScalar dy) = 0;
   virtual void scale(SkScalar sx, SkScalar sy) = 0;
+  void scale(SkScalar s) { scale(s, s); }
   virtual void rotate(SkScalar degrees) = 0;
-  virtual void concat(const SkMatrix& matrix) = 0;
-  virtual void setMatrix(const SkMatrix& matrix) = 0;
+  virtual void concat(const SkM44& matrix) = 0;
+  virtual void setMatrix(const SkM44& matrix) = 0;
 
   virtual void clipRect(const SkRect& rect,
                         SkClipOp op,
@@ -105,27 +122,36 @@ class CC_PAINT_EXPORT PaintCanvas {
 
   virtual void clipPath(const SkPath& path,
                         SkClipOp op,
-                        bool do_anti_alias) = 0;
-  void clipPath(const SkPath& path, SkClipOp op) { clipPath(path, op, false); }
+                        bool do_anti_alias,
+                        UsePaintCache) = 0;
+  void clipPath(const SkPath& path, SkClipOp op, bool do_anti_alias) {
+    clipPath(path, op, do_anti_alias, UsePaintCache::kEnabled);
+  }
+  void clipPath(const SkPath& path, SkClipOp op) {
+    clipPath(path, op, /*do_anti_alias=*/false, UsePaintCache::kEnabled);
+  }
   void clipPath(const SkPath& path, bool do_anti_alias) {
-    clipPath(path, SkClipOp::kIntersect, do_anti_alias);
+    clipPath(path, SkClipOp::kIntersect, do_anti_alias,
+             UsePaintCache::kEnabled);
   }
 
-  virtual SkRect getLocalClipBounds() const = 0;
   virtual bool getLocalClipBounds(SkRect* bounds) const = 0;
-  virtual SkIRect getDeviceClipBounds() const = 0;
   virtual bool getDeviceClipBounds(SkIRect* bounds) const = 0;
-  virtual void drawColor(SkColor color, SkBlendMode mode) = 0;
-  void drawColor(SkColor color) { drawColor(color, SkBlendMode::kSrcOver); }
+  virtual void drawColor(SkColor4f color, SkBlendMode mode) = 0;
+  void drawColor(SkColor4f color) { drawColor(color, SkBlendMode::kSrcOver); }
 
   // TODO(enne): This is a synonym for drawColor with kSrc.  Remove it.
-  virtual void clear(SkColor color) = 0;
+  virtual void clear(SkColor4f color) = 0;
 
   virtual void drawLine(SkScalar x0,
                         SkScalar y0,
                         SkScalar x1,
                         SkScalar y1,
                         const PaintFlags& flags) = 0;
+  virtual void drawArc(const SkRect& oval,
+                       SkScalar start_angle_degrees,
+                       SkScalar sweep_angle_degrees,
+                       const PaintFlags& flags) = 0;
   virtual void drawRect(const SkRect& rect, const PaintFlags& flags) = 0;
   virtual void drawIRect(const SkIRect& rect, const PaintFlags& flags) = 0;
   virtual void drawOval(const SkRect& oval, const PaintFlags& flags) = 0;
@@ -137,27 +163,44 @@ class CC_PAINT_EXPORT PaintCanvas {
                              SkScalar rx,
                              SkScalar ry,
                              const PaintFlags& flags) = 0;
-  virtual void drawPath(const SkPath& path, const PaintFlags& flags) = 0;
+  virtual void drawPath(const SkPath& path,
+                        const PaintFlags& flags,
+                        UsePaintCache) = 0;
+  void drawPath(const SkPath& path, const PaintFlags& flags) {
+    drawPath(path, flags, UsePaintCache::kEnabled);
+  }
   virtual void drawImage(const PaintImage& image,
                          SkScalar left,
                          SkScalar top,
+                         const SkSamplingOptions&,
                          const PaintFlags* flags) = 0;
   void drawImage(const PaintImage& image, SkScalar left, SkScalar top) {
-    drawImage(image, left, top, nullptr);
+    drawImage(image, left, top, SkSamplingOptions(), nullptr);
   }
 
   virtual void drawImageRect(const PaintImage& image,
                              const SkRect& src,
                              const SkRect& dst,
+                             const SkSamplingOptions&,
                              const PaintFlags* flags,
                              SkCanvas::SrcRectConstraint constraint) = 0;
 
+  virtual void drawVertices(scoped_refptr<RefCountedBuffer<SkPoint>> vertices,
+                            scoped_refptr<RefCountedBuffer<SkPoint>> uvs,
+                            scoped_refptr<RefCountedBuffer<uint16_t>> indices,
+                            const PaintFlags& flags) = 0;
+
   // Draws the frame of the |skottie| animation specified by the normalized time
   // t [0->first frame..1->last frame] at the destination bounds given by |dst|
-  // onto the canvas.
+  // onto the canvas. |images| is a map from asset id to the corresponding image
+  // to use when rendering this frame; it may be empty if this animation frame
+  // does not contain any images in it.
   virtual void drawSkottie(scoped_refptr<SkottieWrapper> skottie,
                            const SkRect& dst,
-                           float t) = 0;
+                           float t,
+                           SkottieFrameDataMap images,
+                           const SkottieColorMap& color_map,
+                           SkottieTextPropertyValueMap text_map) = 0;
 
   virtual void drawTextBlob(sk_sp<SkTextBlob> blob,
                             SkScalar x,
@@ -170,18 +213,28 @@ class CC_PAINT_EXPORT PaintCanvas {
                             NodeId node_id,
                             const PaintFlags& flags) = 0;
 
-  // Unlike SkCanvas::drawPicture, this only plays back the PaintRecord and does
-  // not add an additional clip.  This is closer to SkPicture::playback.
-  virtual void drawPicture(sk_sp<const PaintRecord> record) = 0;
+  // Draws `record` into the canvas. Unlike SkCanvas::drawPicture, this only
+  // plays back the PaintRecord and does not add an additional clip.  This is
+  // closer to SkPicture::playback.
+  //
+  // If `local_ctm` is `true`, transform ops in `record` are treated as local to
+  // that recording: `SetMatrixOp` acts relatively to the current canvas
+  // transform and any transform changes are restored before `drawPicture`
+  // returns. Otherwise, transforms in `record` are treated as global to the
+  // canvas: `SetMatrixOp` ignores and overrides any previously set transforms
+  // and all CTM changes are preserved after `drawPicture` returns.
+  virtual void drawPicture(PaintRecord record) = 0;
+  virtual void drawPicture(PaintRecord record, bool local_ctm) = 0;
 
-  virtual bool isClipEmpty() const = 0;
-  virtual SkMatrix getTotalMatrix() const = 0;
+  virtual SkM44 getLocalToDevice() const = 0;
+
+  virtual bool NeedsFlush() const = 0;
 
   // Used for printing
   enum class AnnotationType {
-    URL,
-    NAMED_DESTINATION,
-    LINK_TO_DESTINATION,
+    kUrl,
+    kNameDestination,
+    kLinkToDestination,
   };
   virtual void Annotate(AnnotationType type,
                         const SkRect& rect,
@@ -204,8 +257,8 @@ class CC_PAINT_EXPORT PaintCanvas {
   virtual void setNodeId(int) = 0;
 
  private:
-  printing::MetafileSkia* metafile_ = nullptr;
-  paint_preview::PaintPreviewTracker* tracker_ = nullptr;
+  raw_ptr<printing::MetafileSkia> metafile_ = nullptr;
+  raw_ptr<paint_preview::PaintPreviewTracker> tracker_ = nullptr;
 };
 
 class CC_PAINT_EXPORT PaintCanvasAutoRestore {
@@ -233,7 +286,7 @@ class CC_PAINT_EXPORT PaintCanvasAutoRestore {
   }
 
  private:
-  PaintCanvas* canvas_ = nullptr;
+  raw_ptr<PaintCanvas> canvas_ = nullptr;
   int save_count_ = 0;
 };
 

@@ -1,18 +1,32 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/web_applications/test/web_app_icon_test_utils.h"
 
+#include <algorithm>
 #include <utility>
-#include <vector>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/files/file_enumerator.h"
+#include "base/files/file_path.h"
+#include "base/run_loop.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/stringprintf.h"
+#include "base/test/bind.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/web_applications/components/web_app_icon_generator.h"
-#include "chrome/browser/web_applications/components/web_app_utils.h"
 #include "chrome/browser/web_applications/file_utils_wrapper.h"
-#include "third_party/skia/include/core/SkBitmap.h"
+#include "chrome/browser/web_applications/web_app_icon_generator.h"
+#include "chrome/browser/web_applications/web_app_icon_manager.h"
+#include "chrome/browser/web_applications/web_app_utils.h"
+#include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/skia/include/core/SkColor.h"
 #include "ui/gfx/codec/png_codec.h"
+#include "ui/gfx/color_utils.h"
+#include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/image/image_skia_rep.h"
+#include "url/gurl.h"
 
 namespace web_app {
 
@@ -32,7 +46,7 @@ SkBitmap CreateSquareIcon(int size_px, SkColor solid_color) {
   return bitmap;
 }
 
-void AddGeneratedIcon(std::map<SquareSizePx, SkBitmap>* icon_bitmaps,
+void AddGeneratedIcon(OrderedSizeToBitmap* icon_bitmaps,
                       int size_px,
                       SkColor solid_color) {
   (*icon_bitmaps)[size_px] = CreateSquareIcon(size_px, solid_color);
@@ -46,6 +60,13 @@ void AddIconToIconsMap(const GURL& icon_url,
 
   std::vector<SkBitmap> bitmaps;
   bitmaps.push_back(std::move(bitmap));
+
+  icons_map->emplace(icon_url, std::move(bitmaps));
+}
+
+void AddEmptyIconToIconsMap(const GURL& icon_url, IconsMap* icons_map) {
+  std::vector<SkBitmap> bitmaps;
+  bitmaps.emplace_back();
 
   icons_map->emplace(icon_url, std::move(bitmaps));
 }
@@ -68,7 +89,8 @@ bool AreColorsEqual(SkColor expected_color,
          abs_error_b <= threshold && abs_error_a <= threshold;
 }
 
-base::FilePath GetAppIconsAnyDir(Profile* profile, const AppId& app_id) {
+base::FilePath GetAppIconsAnyDir(Profile* profile,
+                                 const webapps::AppId& app_id) {
   base::FilePath web_apps_root_directory = GetWebAppsRootDirectory(profile);
   base::FilePath app_dir =
       GetManifestResourcesDirectoryForApp(web_apps_root_directory, app_id);
@@ -76,7 +98,8 @@ base::FilePath GetAppIconsAnyDir(Profile* profile, const AppId& app_id) {
   return icons_dir;
 }
 
-base::FilePath GetAppIconsMaskableDir(Profile* profile, const AppId& app_id) {
+base::FilePath GetAppIconsMaskableDir(Profile* profile,
+                                      const webapps::AppId& app_id) {
   base::FilePath web_apps_root_directory = GetWebAppsRootDirectory(profile);
   base::FilePath app_dir =
       GetManifestResourcesDirectoryForApp(web_apps_root_directory, app_id);
@@ -84,35 +107,189 @@ base::FilePath GetAppIconsMaskableDir(Profile* profile, const AppId& app_id) {
   return icons_dir;
 }
 
-bool ReadBitmap(FileUtilsWrapper* utils,
-                const base::FilePath& file_path,
-                SkBitmap* bitmap) {
-  std::string icon_data;
-  if (!utils->ReadFileToString(file_path, &icon_data))
-    return false;
+base::FilePath GetOtherIconsDir(Profile* profile,
+                                const webapps::AppId& app_id) {
+  base::FilePath web_apps_root_directory = GetWebAppsRootDirectory(profile);
+  base::FilePath app_dir =
+      GetManifestResourcesDirectoryForApp(web_apps_root_directory, app_id);
+  base::FilePath icons_dir = app_dir.AppendASCII("Image Cache");
+  return icons_dir;
+}
 
-  return gfx::PNGCodec::Decode(
-      reinterpret_cast<const unsigned char*>(icon_data.c_str()),
-      icon_data.size(), bitmap);
+SkBitmap ReadBitmap(FileUtilsWrapper* utils, const base::FilePath& file_path) {
+  std::string icon_data;
+  if (!utils->ReadFileToString(file_path, &icon_data)) {
+    return SkBitmap();
+  }
+
+  return gfx::PNGCodec::Decode(base::as_byte_span(icon_data));
 }
 
 base::span<const int> GetIconSizes() {
-  return base::span<const int>(kIconSizes, base::size(kIconSizes));
+  return kIconSizes;
 }
 
-bool ContainsOneIconOfEachSize(
-    const std::map<SquareSizePx, SkBitmap>& icon_bitmaps) {
+bool ContainsOneIconOfEachSize(const OrderedSizeToBitmap& icon_bitmaps) {
   for (int size_px : kIconSizes) {
-    int num_icons_for_size = std::count_if(
-        icon_bitmaps.begin(), icon_bitmaps.end(),
-        [&size_px](const std::pair<SquareSizePx, SkBitmap>& icon) {
-          return icon.first == size_px;
-        });
-    if (num_icons_for_size != 1)
+    if (!icon_bitmaps.contains(size_px)) {
       return false;
+    }
   }
 
   return true;
+}
+
+void ExpectImageSkiaRep(const gfx::ImageSkia& image_skia,
+                        float scale,
+                        SquareSizePx size_px,
+                        SkColor color) {
+  ASSERT_TRUE(image_skia.HasRepresentation(scale));
+
+  EXPECT_EQ(size_px, image_skia.GetRepresentation(scale).GetBitmap().width());
+  EXPECT_EQ(size_px, image_skia.GetRepresentation(scale).GetBitmap().height());
+
+  EXPECT_EQ(
+      color_utils::SkColorToRgbaString(color),
+      color_utils::SkColorToRgbaString(
+          image_skia.GetRepresentation(scale).GetBitmap().getColor(0, 0)));
+}
+
+blink::Manifest::ImageResource CreateSquareImageResource(
+    const GURL& src,
+    int size_px,
+    const std::vector<IconPurpose>& purposes) {
+  blink::Manifest::ImageResource r;
+  r.src = src;
+  r.type = u"image/png";
+  r.sizes = {gfx::Size{size_px, size_px}};
+  r.purpose = purposes;
+  return r;
+}
+
+OrderedSizeToBitmap ReadPngsFromDirectory(FileUtilsWrapper* file_utils,
+                                          const base::FilePath& icons_dir) {
+  OrderedSizeToBitmap pngs;
+
+  base::FileEnumerator enumerator(icons_dir, true, base::FileEnumerator::FILES);
+  for (base::FilePath path = enumerator.Next(); !path.empty();
+       path = enumerator.Next()) {
+    EXPECT_TRUE(path.MatchesExtension(FILE_PATH_LITERAL(".png")));
+
+    SkBitmap bitmap = ReadBitmap(file_utils, path);
+    EXPECT_FALSE(bitmap.empty());
+    EXPECT_EQ(bitmap.width(), bitmap.height());
+
+    const int size_px = bitmap.width();
+    EXPECT_FALSE(pngs.contains(size_px));
+
+    base::FilePath size_file_name;
+    size_file_name =
+        size_file_name.AppendASCII(base::StringPrintf("%i.png", size_px));
+    EXPECT_EQ(size_file_name, path.BaseName());
+
+    pngs[size_px] = bitmap;
+  }
+
+  return pngs;
+}
+
+GeneratedIconsInfo::GeneratedIconsInfo() = default;
+
+GeneratedIconsInfo::GeneratedIconsInfo(const GeneratedIconsInfo&) = default;
+
+GeneratedIconsInfo::GeneratedIconsInfo(IconPurpose purpose,
+                                       std::vector<SquareSizePx> sizes_px,
+                                       std::vector<SkColor> colors)
+    : purpose(purpose),
+      sizes_px(std::move(sizes_px)),
+      colors(std::move(colors)) {}
+
+GeneratedIconsInfo::~GeneratedIconsInfo() = default;
+
+apps::IconInfo CreateIconInfo(const GURL& icon_base_url,
+                              IconPurpose purpose,
+                              SquareSizePx size_px) {
+  apps::IconInfo apps_icon_info;
+
+  apps_icon_info.url =
+      icon_base_url.Resolve("icon-" + base::NumberToString(size_px) + ".png");
+  apps_icon_info.square_size_px = size_px;
+  apps_icon_info.purpose = ManifestPurposeToIconInfoPurpose(purpose);
+
+  return apps_icon_info;
+}
+
+void AddIconsToWebAppInstallInfo(
+    WebAppInstallInfo* install_info,
+    const GURL& icons_base_url,
+    const std::vector<GeneratedIconsInfo>& icons_info) {
+  for (const GeneratedIconsInfo& info : icons_info) {
+    DCHECK_EQ(info.sizes_px.size(), info.colors.size());
+
+    OrderedSizeToBitmap generated_bitmaps;
+
+    for (size_t i = 0; i < info.sizes_px.size(); ++i) {
+      apps::IconInfo apps_icon_info =
+          CreateIconInfo(icons_base_url, info.purpose, info.sizes_px[i]);
+      install_info->manifest_icons.push_back(apps_icon_info);
+      install_info->trusted_icons.push_back(apps_icon_info);
+
+      AddGeneratedIcon(&generated_bitmaps, info.sizes_px[i], info.colors[i]);
+    }
+
+    install_info->icon_bitmaps.SetBitmapsForPurpose(info.purpose,
+                                                    generated_bitmaps);
+    install_info->trusted_icon_bitmaps.SetBitmapsForPurpose(
+        info.purpose, std::move(generated_bitmaps));
+  }
+}
+
+void IconManagerWriteGeneratedIcons(
+    WebAppIconManager& icon_manager,
+    const webapps::AppId& app_id,
+    const std::vector<GeneratedIconsInfo>& icons_info) {
+  IconBitmaps manifest_icon_bitmaps;
+  IconBitmaps trusted_icon_bitmaps;
+
+  for (const GeneratedIconsInfo& info : icons_info) {
+    DCHECK_EQ(info.sizes_px.size(), info.colors.size());
+
+    OrderedSizeToBitmap generated_bitmaps;
+
+    for (size_t i = 0; i < info.sizes_px.size(); ++i)
+      AddGeneratedIcon(&generated_bitmaps, info.sizes_px[i], info.colors[i]);
+
+    manifest_icon_bitmaps.SetBitmapsForPurpose(info.purpose, generated_bitmaps);
+    trusted_icon_bitmaps.SetBitmapsForPurpose(info.purpose,
+                                              std::move(generated_bitmaps));
+  }
+
+  base::RunLoop run_loop;
+  icon_manager.WriteData(app_id, std::move(manifest_icon_bitmaps),
+                         std::move(trusted_icon_bitmaps), {}, {},
+                         base::BindLambdaForTesting([&](bool success) {
+                           DCHECK(success);
+                           run_loop.Quit();
+                         }));
+  run_loop.Run();
+}
+
+SkColor IconManagerReadAppIconPixel(WebAppIconManager& icon_manager,
+                                    const webapps::AppId& app_id,
+                                    SquareSizePx size_px,
+                                    int x,
+                                    int y) {
+  SkColor result = SK_ColorTRANSPARENT;
+  base::RunLoop run_loop;
+  icon_manager.ReadTrustedIconsWithFallbackToManifestIcons(
+      app_id, {size_px}, IconPurpose::ANY,
+      base::BindLambdaForTesting([&](IconMetadataFromDisk icon_metadata) {
+        DCHECK(icon_metadata.icons_map.contains(size_px));
+        result = icon_metadata.icons_map.at(size_px).getColor(x, y);
+        run_loop.Quit();
+      }));
+  run_loop.Run();
+  return result;
 }
 
 }  // namespace web_app

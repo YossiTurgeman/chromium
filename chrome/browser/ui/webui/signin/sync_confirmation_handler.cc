@@ -1,31 +1,36 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/webui/signin/sync_confirmation_handler.h"
 
+#include <optional>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/functional/bind.h"
+#include "base/location.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/metrics/user_metrics.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/notreached.h"
+#include "base/time/time.h"
 #include "chrome/browser/consent_auditor/consent_auditor_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_avatar_icon_util.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
-#include "chrome/browser/sync/profile_sync_service_factory.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/sync/sync_service_factory.h"
 #include "chrome/browser/ui/browser_window.h"
-#include "chrome/browser/ui/signin_view_controller_delegate.h"
+#include "chrome/browser/ui/signin/signin_view_controller_delegate.h"
 #include "chrome/browser/ui/webui/signin/login_ui_service_factory.h"
 #include "chrome/browser/ui/webui/signin/signin_utils.h"
 #include "chrome/browser/ui/webui/signin/sync_confirmation_ui.h"
 #include "chrome/common/webui_url_constants.h"
 #include "components/consent_auditor/consent_auditor.h"
 #include "components/signin/public/base/avatar_icon_util.h"
+#include "components/signin/public/base/consent_level.h"
+#include "components/signin/public/base/signin_metrics.h"
+#include "components/signin/public/base/signin_switches.h"
 #include "components/signin/public/identity_manager/account_info.h"
-#include "components/signin/public/identity_manager/consent_level.h"
+#include "components/signin/public/identity_manager/tribool.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
 #include "url/gurl.h"
@@ -34,35 +39,85 @@ using signin::ConsentLevel;
 
 namespace {
 const int kProfileImageSize = 128;
-}  // namespace
 
-SyncConfirmationHandler::SyncConfirmationHandler(
-    Browser* browser,
-    const std::unordered_map<std::string, int>& string_to_grd_id_map)
-    : profile_(browser->profile()),
-      browser_(browser),
-      string_to_grd_id_map_(string_to_grd_id_map),
-      identity_manager_(IdentityManagerFactory::GetForProfile(profile_)) {
-  DCHECK(profile_);
-  DCHECK(browser_);
-  BrowserList::AddObserver(this);
+// Derives screen mode of sync opt in screen from the
+// CanShowHistorySyncOptInsWithoutMinorModeRestrictions capability.
+constexpr bool UseMinorModeRestrictions() {
+#if BUILDFLAG(IS_CHROMEOS)
+  // ChromeOS handles minor modes separately.
+  return false;
+#else
+  return true;
+#endif
 }
 
-SyncConfirmationHandler::~SyncConfirmationHandler() {
-  BrowserList::RemoveObserver(this);
-  identity_manager_->RemoveObserver(this);
+inline bool ScreenModeIsPending(const AccountInfo& primary_account_info) {
+  return GetScreenMode(primary_account_info.GetAccountCapabilities()) ==
+         SyncConfirmationScreenMode::kPending;
+}
 
-  // Abort signin and prevent sync from starting if none of the actions on the
-  // sync confirmation dialog are taken by the user.
-  if (!did_user_explicitly_interact_) {
-    HandleUndo(nullptr);
-    base::RecordAction(base::UserMetricsAction("Signin_Abort_Signin"));
+// Translates screen `mode` to the corresponding metric describing what type of
+// buttons are presented.
+signin_metrics::SyncButtonsType GetButtonTypeMetricValue(
+    SyncConfirmationScreenMode mode) {
+  switch (mode) {
+    case SyncConfirmationScreenMode::kRestricted:
+      return signin_metrics::SyncButtonsType::kSyncEqualWeightedFromCapability;
+    case SyncConfirmationScreenMode::kDeadlined:
+      return signin_metrics::SyncButtonsType::kSyncEqualWeightedFromDeadline;
+    case SyncConfirmationScreenMode::kUnrestricted:
+      return signin_metrics::SyncButtonsType::kSyncNotEqualWeighted;
+
+    // Metric is not emitted for these cases:
+    case SyncConfirmationScreenMode::kUnsupported:
+    case SyncConfirmationScreenMode::kPending:
+      NOTREACHED();
+  }
+}
+}  // namespace
+
+SyncConfirmationScreenMode GetScreenMode(
+    const AccountCapabilities& capabilities) {
+  switch (
+      capabilities
+          .can_show_history_sync_opt_ins_without_minor_mode_restrictions()) {
+    case signin::Tribool::kUnknown:
+      return SyncConfirmationScreenMode::kPending;
+    case signin::Tribool::kFalse:
+      return SyncConfirmationScreenMode::kRestricted;
+    case signin::Tribool::kTrue:
+      return SyncConfirmationScreenMode::kUnrestricted;
   }
 }
 
-void SyncConfirmationHandler::OnBrowserRemoved(Browser* browser) {
-  if (browser_ == browser)
+SyncConfirmationHandler::SyncConfirmationHandler(
+    Profile* profile,
+    const std::unordered_map<std::string, int>& string_to_grd_id_map,
+    Browser* browser)
+    : profile_(profile),
+      string_to_grd_id_map_(string_to_grd_id_map),
+      browser_(browser),
+      identity_manager_(IdentityManagerFactory::GetForProfile(profile_)) {
+  DCHECK(profile_);
+  if (browser_) {
+    browser_close_subscription_ =
+        browser_->RegisterBrowserDidClose(base::BindRepeating(
+            &SyncConfirmationHandler::OnBrowserClosed, base::Unretained(this)));
+  }
+}
+
+SyncConfirmationHandler::~SyncConfirmationHandler() {
+  // Abort signin and prevent sync from starting if none of the actions on the
+  // sync confirmation dialog are taken by the user.
+  if (!did_user_explicitly_interact_) {
+    CloseModalSigninWindow(LoginUIService::UI_CLOSED);
+  }
+}
+
+void SyncConfirmationHandler::OnBrowserClosed(BrowserWindowInterface* browser) {
+  if (browser_ == browser) {
     browser_ = nullptr;
+  }
 }
 
 void SyncConfirmationHandler::RegisterMessages() {
@@ -81,49 +136,48 @@ void SyncConfirmationHandler::RegisterMessages() {
       base::BindRepeating(&SyncConfirmationHandler::HandleInitializedWithSize,
                           base::Unretained(this)));
   web_ui()->RegisterMessageCallback(
-      "accountImageRequest",
-      base::BindRepeating(&SyncConfirmationHandler::HandleAccountImageRequest,
+      "accountInfoRequest",
+      base::BindRepeating(&SyncConfirmationHandler::HandleAccountInfoRequest,
                           base::Unretained(this)));
 }
 
-void SyncConfirmationHandler::HandleConfirm(const base::ListValue* args) {
+void SyncConfirmationHandler::HandleConfirm(const base::ListValue& args) {
+  CHECK_EQ(3U, args.size());
   did_user_explicitly_interact_ = true;
-  RecordConsent(args);
+  RecordConsent(args[0].GetList(), args[1].GetString());
   CloseModalSigninWindow(LoginUIService::SYNC_WITH_DEFAULT_SETTINGS);
 }
 
-void SyncConfirmationHandler::HandleGoToSettings(const base::ListValue* args) {
-  DCHECK(ProfileSyncServiceFactory::IsSyncAllowed(profile_));
+void SyncConfirmationHandler::HandleGoToSettings(const base::ListValue& args) {
+  CHECK_EQ(3U, args.size());
+  DCHECK(SyncServiceFactory::IsSyncAllowed(profile_));
   did_user_explicitly_interact_ = true;
-  RecordConsent(args);
+  RecordConsent(args[0].GetList(), args[1].GetString());
   CloseModalSigninWindow(LoginUIService::CONFIGURE_SYNC_FIRST);
 }
 
-void SyncConfirmationHandler::HandleUndo(const base::ListValue* args) {
+void SyncConfirmationHandler::HandleUndo(const base::ListValue& args) {
+  CHECK_EQ(1U, args.size());
   did_user_explicitly_interact_ = true;
-  CloseModalSigninWindow(LoginUIService::ABORT_SIGNIN);
+  CloseModalSigninWindow(LoginUIService::ABORT_SYNC);
 }
 
-void SyncConfirmationHandler::HandleAccountImageRequest(
-    const base::ListValue* args) {
-  DCHECK(ProfileSyncServiceFactory::IsSyncAllowed(profile_));
-  base::Optional<AccountInfo> primary_account_info =
-      identity_manager_->FindExtendedAccountInfoForAccountWithRefreshToken(
-          identity_manager_->GetPrimaryAccountInfo(ConsentLevel::kNotRequired));
+void SyncConfirmationHandler::HandleAccountInfoRequest(
+    const base::ListValue& args) {
+  DCHECK(SyncServiceFactory::IsSyncAllowed(profile_));
+  AccountInfo primary_account_info = identity_manager_->FindExtendedAccountInfo(
+      identity_manager_->GetPrimaryAccountInfo(ConsentLevel::kSignin));
 
-  // Fire the "account-image-changed" listener from |SetUserImageURL()|.
+  // Fire the "account-info-changed" and "screen-mode-changed" listeners.
   // Note: If the account info is not available yet in the
-  // IdentityManager, i.e. account_info is empty, the listener will be
-  // fired again through |OnAccountUpdated()|.
-  if (primary_account_info)
-    SetUserImageURL(primary_account_info->picture_url);
+  // IdentityManager, i.e. account_info is empty or capabilities are not ready
+  // yet, the listener will be fired again through `OnAccountUpdated()`.
+  DispatchAccountInfoUpdate(primary_account_info);
 }
 
-void SyncConfirmationHandler::RecordConsent(const base::ListValue* args) {
-  CHECK_EQ(2U, args->GetSize());
-  base::Value::ConstListView consent_description = args->GetList()[0].GetList();
-  const std::string& consent_confirmation = args->GetList()[1].GetString();
-
+void SyncConfirmationHandler::RecordConsent(
+    const base::ListValue& consent_description,
+    const std::string& consent_confirmation) {
   // The strings returned by the WebUI are not free-form, they must belong into
   // a pre-determined set of strings (stored in |string_to_grd_id_map_|). As
   // this has privacy and legal implications, CHECK the integrity of the strings
@@ -152,46 +206,121 @@ void SyncConfirmationHandler::RecordConsent(const base::ListValue* args) {
   consent_auditor::ConsentAuditor* consent_auditor =
       ConsentAuditorFactory::GetForProfile(profile_);
   consent_auditor->RecordSyncConsent(
-      identity_manager_->GetPrimaryAccountId(ConsentLevel::kNotRequired),
+      identity_manager_->GetPrimaryAccountInfo(ConsentLevel::kSignin).gaia,
       sync_consent);
 }
 
-void SyncConfirmationHandler::SetUserImageURL(const std::string& picture_url) {
-  if (!ProfileSyncServiceFactory::IsSyncAllowed(profile_)) {
+void SyncConfirmationHandler::OnAvatarChanged(const AccountInfo& info) {
+  CHECK(info.GetAvatarUrl().has_value());
+  avatar_notified_ = true;
+
+  GURL picture_gurl(*info.GetAvatarUrl());
+  GURL picture_gurl_with_options = signin::GetAvatarImageURLWithOptions(
+      picture_gurl, kProfileImageSize, /*no_silhouette=*/false);
+
+  base::DictValue value;
+  value.Set("src", picture_gurl_with_options.spec());
+  value.Set("showEnterpriseBadge", info.IsManaged() == signin::Tribool::kTrue);
+  FireWebUIListener("account-info-changed", value);
+}
+
+void SyncConfirmationHandler::OnScreenModeChanged(
+    SyncConfirmationScreenMode mode) {
+  DCHECK_NE(mode, SyncConfirmationScreenMode::kPending);
+  DCHECK_NE(mode, SyncConfirmationScreenMode::kUnsupported);
+  DCHECK(!screen_mode_notified_) << "Must be called only once";
+  screen_mode_notified_ = true;
+  screen_mode_deadline_.Stop();
+
+  // Note on timing: this function is executed exactly once
+  // because it sets `screen_mode_notified_` to `true`. This means that the
+  // latencies are recorded only once, but either immediately from
+  // `HandleInitializedWithSize`, or subsequently as a result of OnDeadline or
+  // OnExtendedAccountInfoUpdated. For the latter case, the timer was started in
+  // `HandleInitializedWithSize` when the capability was requested but not
+  // available.
+
+  if (user_visible_latency_.has_value()) {
+    // Timer was started so it means it is a subsequent attempt.
+    base::TimeDelta elapsed = user_visible_latency_->Elapsed();
+    base::UmaHistogramTimes("Signin.AccountCapabilities.UserVisibleLatency",
+                            elapsed);
+    base::UmaHistogramTimes("Signin.AccountCapabilities.FetchLatency", elapsed);
+  } else {
+    base::UmaHistogramBoolean("Signin.AccountCapabilities.ImmediatelyAvailable",
+                              true);
+    base::UmaHistogramTimes("Signin.AccountCapabilities.UserVisibleLatency",
+                            base::Seconds(0));
+  }
+
+  FireWebUIListener("screen-mode-changed", static_cast<int>(mode));
+  base::UmaHistogramEnumeration("Signin.SyncButtons.Shown",
+                                GetButtonTypeMetricValue(mode));
+}
+
+void SyncConfirmationHandler::OnDeadline() {
+  if (screen_mode_notified_ || !IsJavascriptAllowed()) {
+    // Do not override already configured screen mode, and ignore update attempt
+    // when the UI is no longer present. Note: this is called from a timer
+    // routine rather than directly from being handled from the UI app.
+    return;
+  }
+
+  OnScreenModeChanged(SyncConfirmationScreenMode::kDeadlined);
+}
+
+void SyncConfirmationHandler::DispatchAccountInfoUpdate(
+    const AccountInfo& info) {
+  if (info.IsEmpty()) {
+    // No account is signed in, so there is nothing to be displayed in the sync
+    // confirmation dialog.
+    return;
+  }
+
+  if (!SyncServiceFactory::IsSyncAllowed(profile_)) {
     // The sync disabled confirmation handler does not present the user image.
     // Avoid updating the image URL in this case.
     return;
   }
 
-  std::string picture_url_to_load;
-  GURL picture_gurl(picture_url);
-  if (picture_gurl.is_valid()) {
-    picture_url_to_load =
-        signin::GetAvatarImageURLWithOptions(picture_gurl, kProfileImageSize,
-                                             false /* no_silhouette */)
-            .spec();
-  } else {
-    // Use the placeholder avatar icon until the account picture URL is fetched.
-    picture_url_to_load = profiles::GetPlaceholderAvatarIconUrl();
+  if (info.account_id !=
+      identity_manager_->GetPrimaryAccountId(ConsentLevel::kSignin)) {
+    return;
   }
-  base::Value picture_url_value(picture_url_to_load);
 
+  // Subsequent code will send updates to the UI.
   AllowJavascript();
-  FireWebUIListener("account-image-changed", picture_url_value);
+
+  if (info.IsValid() && !avatar_notified_) {
+    OnAvatarChanged(info);
+  }
+
+  if (screen_mode_notified_) {
+    // Screen mode must be changed only once.
+    return;
+  }
+
+  if (!UseMinorModeRestrictions()) {
+    OnScreenModeChanged(SyncConfirmationScreenMode::kUnrestricted);
+    return;
+  }
+
+  if (ScreenModeIsPending(info)) {
+    return;
+  }
+
+  OnScreenModeChanged(GetScreenMode(info.GetAccountCapabilities()));
 }
 
 void SyncConfirmationHandler::OnExtendedAccountInfoUpdated(
     const AccountInfo& info) {
-  if (!info.IsValid())
-    return;
+  DispatchAccountInfoUpdate(info);
 
-  if (info.account_id !=
-      identity_manager_->GetPrimaryAccountId(ConsentLevel::kNotRequired)) {
-    return;
+  if (avatar_notified_ && screen_mode_notified_) {
+    // IdentityManager emitted both avatar and screen mode information and its
+    // function is done.
+    identity_manager_observation_.Reset();
   }
-
-  identity_manager_->RemoveObserver(this);
-  SetUserImageURL(info.picture_url);
 }
 
 void SyncConfirmationHandler::CloseModalSigninWindow(
@@ -205,38 +334,54 @@ void SyncConfirmationHandler::CloseModalSigninWindow(
       base::RecordAction(
           base::UserMetricsAction("Signin_Signin_WithDefaultSyncSettings"));
       break;
-    case LoginUIService::ABORT_SIGNIN:
+    case LoginUIService::ABORT_SYNC:
       base::RecordAction(base::UserMetricsAction("Signin_Undo_Signin"));
+      break;
+    case LoginUIService::UI_CLOSED:
+      base::RecordAction(base::UserMetricsAction("Signin_Abort_Signin"));
       break;
   }
   LoginUIServiceFactory::GetForProfile(profile_)->SyncConfirmationUIClosed(
       result);
-  if (browser_)
-    browser_->signin_view_controller()->CloseModalSignin();
 }
 
 void SyncConfirmationHandler::HandleInitializedWithSize(
-    const base::ListValue* args) {
-  AllowJavascript();
-
-  if (!browser_)
-    return;
-
-  base::Optional<AccountInfo> primary_account_info =
-      identity_manager_->FindExtendedAccountInfoForAccountWithRefreshToken(
-          identity_manager_->GetPrimaryAccountInfo(ConsentLevel::kNotRequired));
-  if (!primary_account_info) {
+    const base::ListValue& args) {
+  AccountInfo primary_account_info = identity_manager_->FindExtendedAccountInfo(
+      identity_manager_->GetPrimaryAccountInfo(ConsentLevel::kSignin));
+  if (primary_account_info.IsEmpty()) {
     // No account is signed in, so there is nothing to be displayed in the sync
     // confirmation dialog.
     return;
   }
 
-  if (!primary_account_info->IsValid()) {
-    SetUserImageURL(kNoPictureURLFound);
-    identity_manager_->AddObserver(this);
-  } else {
-    SetUserImageURL(primary_account_info->picture_url);
+  DispatchAccountInfoUpdate(primary_account_info);
+
+  if (UseMinorModeRestrictions() && ScreenModeIsPending(primary_account_info) &&
+      !user_visible_latency_.has_value()) {
+    CHECK(!screen_mode_notified_);
+    // `user_visible_latency_` timer is only ticking when the capabilities
+    // were not immediately available, but is only started at the very first
+    // attempt to access them.
+    user_visible_latency_.emplace();
+    base::UmaHistogramBoolean("Signin.AccountCapabilities.ImmediatelyAvailable",
+                              false);
   }
 
-  signin::SetInitializedModalHeight(browser_, web_ui(), args);
+  if (!avatar_notified_ ||
+      (!screen_mode_notified_ && UseMinorModeRestrictions())) {
+    // IdentityManager emits both avatar and screen mode information.
+    identity_manager_observation_.Observe(identity_manager_);
+  }
+
+  if (!screen_mode_notified_ && UseMinorModeRestrictions()) {
+    // Deadline timer for the case when screen mode doesn't arrive in time.
+    screen_mode_deadline_.Start(FROM_HERE,
+                                signin::GetMinorModeRestrictionsDeadline(),
+                                this, &SyncConfirmationHandler::OnDeadline);
+  }
+
+  if (browser_) {
+    signin::SetInitializedModalHeight(browser_, web_ui(), args);
+  }
 }

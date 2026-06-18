@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 #define CHROME_BROWSER_UI_VIEWS_MEDIA_ROUTER_PRESENTATION_RECEIVER_WINDOW_VIEW_H_
 
 #include <memory>
+#include <string>
 
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "chrome/browser/command_updater_delegate.h"
 #include "chrome/browser/command_updater_impl.h"
@@ -18,6 +18,7 @@
 #include "chrome/browser/ui/toolbar/chrome_location_bar_model_delegate.h"
 #include "chrome/browser/ui/views/exclusive_access_bubble_views_context.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/widget/widget_delegate.h"
 
 class ExclusiveAccessBubbleViews;
@@ -25,7 +26,7 @@ class PresentationReceiverWindowDelegate;
 class PresentationReceiverWindowFrame;
 class LocationBarModelImpl;
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 class FullscreenWindowObserver;
 #endif
 
@@ -41,9 +42,15 @@ class PresentationReceiverWindowView final
       public ExclusiveAccessContext,
       public ExclusiveAccessBubbleViewsContext,
       public ui::AcceleratorProvider {
+  METADATA_HEADER(PresentationReceiverWindowView, views::WidgetDelegateView)
+
  public:
   PresentationReceiverWindowView(PresentationReceiverWindowFrame* frame,
                                  PresentationReceiverWindowDelegate* delegate);
+  PresentationReceiverWindowView(const PresentationReceiverWindowView&) =
+      delete;
+  PresentationReceiverWindowView& operator=(
+      const PresentationReceiverWindowView&) = delete;
   ~PresentationReceiverWindowView() final;
 
   void Init();
@@ -74,8 +81,7 @@ class PresentationReceiverWindowView final
   content::WebContents* GetActiveWebContents() const final;
 
   // views::WidgetDelegateView overrides.
-  void DeleteDelegate() final;
-  base::string16 GetWindowTitle() const final;
+  std::u16string GetWindowTitle() const final;
 
   // ui::AcceleratorTarget overrides.
   bool AcceleratorPressed(const ui::Accelerator& accelerator) final;
@@ -83,30 +89,27 @@ class PresentationReceiverWindowView final
   // ExclusiveAccessContext overrides.
   Profile* GetProfile() final;
   bool IsFullscreen() const final;
-  void EnterFullscreen(const GURL& url,
+  void EnterFullscreen(const url::Origin& origin,
                        ExclusiveAccessBubbleType bubble_type,
-                       const int64_t display_id) final;
+                       FullscreenTabParams fullscreen_tab_params) final;
   void ExitFullscreen() final;
-  void UpdateExclusiveAccessExitBubbleContent(
-      const GURL& url,
-      ExclusiveAccessBubbleType bubble_type,
-      ExclusiveAccessBubbleHideCallback bubble_first_hide_callback,
-      bool force_update) final;
+  void UpdateExclusiveAccessBubble(
+      const ExclusiveAccessBubbleParams& params,
+      ExclusiveAccessBubbleHideCallback first_hide_callback) override;
+  bool IsExclusiveAccessBubbleDisplayed() const final;
   void OnExclusiveAccessUserInput() final;
-  content::WebContents* GetActiveWebContents() final;
+  content::WebContents* GetWebContentsForExclusiveAccess() final;
+  bool CanUserEnterFullscreen() const final;
   bool CanUserExitFullscreen() const final;
 
   // ExclusiveAccessBubbleViewsContext overrides.
   ExclusiveAccessManager* GetExclusiveAccessManager() final;
-  views::Widget* GetBubbleAssociatedWidget() final;
   ui::AcceleratorProvider* GetAcceleratorProvider() final;
   gfx::NativeView GetBubbleParentView() const final;
-  gfx::Point GetCursorPointInParent() const final;
   gfx::Rect GetClientAreaBoundsInScreen() const final;
   bool IsImmersiveModeEnabled() const final;
   gfx::Rect GetTopContainerBoundsInScreen() final;
   void DestroyAnyExclusiveAccessBubble() final;
-  bool CanTriggerOnMouse() const final;
 
   // ui::AcceleratorProvider overrides.
   bool GetAcceleratorForCommandId(int command_id,
@@ -116,21 +119,19 @@ class PresentationReceiverWindowView final
   // Updates the UI in response to a change to fullscreen state.
   void OnFullscreenChanged();
 
-  PresentationReceiverWindowFrame* const frame_;
-  PresentationReceiverWindowDelegate* const delegate_;
-  base::string16 title_;
+  const raw_ptr<PresentationReceiverWindowFrame> frame_;
+  const raw_ptr<PresentationReceiverWindowDelegate> delegate_;
+  std::u16string title_;
   const std::unique_ptr<LocationBarModelImpl> location_bar_model_;
   CommandUpdaterImpl command_updater_;
-  LocationBarView* location_bar_view_ = nullptr;
+  raw_ptr<LocationBarView> location_bar_view_ = nullptr;
   ExclusiveAccessManager exclusive_access_manager_;
   ui::Accelerator fullscreen_accelerator_;
   std::unique_ptr<ExclusiveAccessBubbleViews> exclusive_access_bubble_;
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<FullscreenWindowObserver> window_observer_;
 #endif
-
-  DISALLOW_COPY_AND_ASSIGN(PresentationReceiverWindowView);
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_MEDIA_ROUTER_PRESENTATION_RECEIVER_WINDOW_VIEW_H_

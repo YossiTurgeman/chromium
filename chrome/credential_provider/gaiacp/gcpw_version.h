@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,12 @@
 #include <array>
 #include <string>
 
+#include "base/component_export.h"
+
 namespace credential_provider {
 
 // A structure to hold the version of GCPW.
-class GcpwVersion {
+class COMPONENT_EXPORT(GCPW_POLICIES) GcpwVersion {
  public:
   // Create a default version which is not valid.
   GcpwVersion();

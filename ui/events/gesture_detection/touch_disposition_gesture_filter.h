@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,17 @@
 
 #include <stdint.h>
 
+#include <optional>
+
+#include "base/auto_reset.h"
 #include "base/containers/queue.h"
-#include "base/macros.h"
-#include "ui/events/gesture_detection/bitset_32.h"
+#include "base/memory/raw_ptr.h"
+#include "base/time/time.h"
 #include "ui/events/gesture_detection/gesture_detection_export.h"
 #include "ui/events/gesture_detection/gesture_event_data_packet.h"
 #include "ui/events/types/event_type.h"
+#include "ui/events/velocity_tracker/bitset_32.h"
+#include "ui/latency/latency_info.h"
 
 namespace ui {
 
@@ -27,8 +32,15 @@ class GESTURE_DETECTION_EXPORT TouchDispositionGestureFilterClient {
 // sequence based on the ack dispositions of the generating touch events.
 class GESTURE_DETECTION_EXPORT TouchDispositionGestureFilter {
  public:
+  using AckTimestampOverride = base::AutoReset<base::TimeTicks>;
+
   explicit TouchDispositionGestureFilter(
       TouchDispositionGestureFilterClient* client);
+
+  TouchDispositionGestureFilter(const TouchDispositionGestureFilter&) = delete;
+  TouchDispositionGestureFilter& operator=(
+      const TouchDispositionGestureFilter&) = delete;
+
   ~TouchDispositionGestureFilter();
 
   // To be called upon production of touch-derived gestures by the platform,
@@ -37,22 +49,39 @@ class GESTURE_DETECTION_EXPORT TouchDispositionGestureFilter {
   // touch event. It is imperative that a single packet is received for
   // *each* touch event, even those that did not produce a gesture.
   enum PacketResult {
-    SUCCESS,              // Packet successfully queued.
-    INVALID_PACKET_ORDER, // Packets were received in the wrong order, i.e.,
-                          // TOUCH_BEGIN should always precede other packets.
-    INVALID_PACKET_TYPE,  // Packet had an invalid type.
+    SUCCESS,                // Packet successfully queued.
+    INVALID_PACKET_ORDER,   // Packets were received in the wrong order, i.e.,
+                            // TOUCH_BEGIN should always precede other packets.
+                            // CANCEL results in EMPTY_GESTURE_SEQ as it is
+                            // allowed without a corresponding TOUCH_BEGIN.
+    INVALID_PACKET_TYPE,    // Packet had an invalid type.
+    EMPTY_GESTURE_SEQUENCE  // CANCEL received without a TOUCH_BEGIN.
   };
   PacketResult OnGesturePacket(const GestureEventDataPacket& packet);
 
   // OnTouchEventAck must be called upon receipt of every touch event ack.
+  // |event_latency_metadata| is provided only if the touch event or
+  // corresponding touch event was blocked before sending to the Renderer. This
+  // definition of blocking is not related to the value of
+  // |is_source_touch_event_set_blocking| since
+  // |is_source_touch_event_set_blocking| refers to the behavior of blocking
+  // future inputs, not whether the current event was dispatched blocking to the
+  // renderer.
   void OnTouchEventAck(uint32_t unique_touch_event_id,
                        bool event_consumed,
-                       bool is_source_touch_event_set_non_blocking);
+                       bool is_source_touch_event_set_blocking,
+                       const std::optional<EventLatencyMetadata>&
+                           event_latency_metadata = std::nullopt);
+
+  void Shutdown();
 
   // Whether there are any active gesture sequences still queued in the filter.
   bool IsEmpty() const;
 
   void ResetGestureHandlingState();
+
+  static AckTimestampOverride OverrideReferenceTimestampForTesting(
+      base::TimeTicks reference_timestamp);
 
  private:
   // A single GestureSequence corresponds to all gestures created
@@ -93,11 +122,14 @@ class GESTURE_DETECTION_EXPORT TouchDispositionGestureFilter {
   void CancelFlingIfNecessary(const GestureEventDataPacket& packet);
   void EndScrollIfNecessary(const GestureEventDataPacket& packet);
   void PopGestureSequence();
-  void SendAckedEvents();
+  void SendAckedEvents(
+      const std::optional<EventLatencyMetadata>& event_latency_metadata);
   GestureSequence& Head();
   GestureSequence& Tail();
+  float GestureScrollUpdateCompensationFactor(
+      const GestureEventDataPacket& packet) const;
 
-  TouchDispositionGestureFilterClient* client_;
+  raw_ptr<TouchDispositionGestureFilterClient> client_;
   base::queue<GestureSequence> sequences_;
 
   GestureHandlingState state_;
@@ -112,7 +144,37 @@ class GESTURE_DETECTION_EXPORT TouchDispositionGestureFilter {
   bool needs_fling_ending_event_;
   bool needs_scroll_ending_event_;
 
-  DISALLOW_COPY_AND_ASSIGN(TouchDispositionGestureFilter);
+  bool first_gsu_sent_{false};
+
+  // Utility class for keeping generating gesture scroll updates that compensate
+  // for delays due to slow touchstart/touchmove handlers.
+  class ScrollUpdateCompensator {
+   public:
+    explicit ScrollUpdateCompensator(base::TimeDelta expected_latency,
+                                     base::TimeDelta acceptable_latency);
+    ~ScrollUpdateCompensator() = default;
+
+    ScrollUpdateCompensator(const ScrollUpdateCompensator&) = default;
+    ScrollUpdateCompensator(ScrollUpdateCompensator&&) = default;
+
+    GestureEventData GetCompensatedGestureScrollUpdate(
+        const GestureEventDataPacket& packet,
+        const GestureEventData& gesture);
+
+    GestureEventData GetCompensatedGestureScrollEnd(
+        const GestureEventDataPacket& packet,
+        const GestureEventData& gesture);
+
+    void Reset(base::TimeTicks reference_timestamp);
+
+   private:
+    const base::TimeDelta expected_latency_;
+    const base::TimeDelta acceptable_latency_;
+    base::TimeTicks reference_timestamp_;
+    gfx::Vector2dF total_compensated_scroll_update_;
+  };
+
+  std::optional<ScrollUpdateCompensator> scroll_update_compensator_;
 };
 
 }  // namespace ui

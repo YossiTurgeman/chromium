@@ -1,17 +1,18 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/gfx/font_util.h"
 
 #include "build/build_config.h"
+#include "skia/ext/font_utils.h"
 
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #include <fontconfig/fontconfig.h>
 #include "ui/gfx/linux/fontconfig_util.h"
 #endif
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "ui/gfx/win/direct_write.h"
 #endif
 
@@ -24,15 +25,15 @@ void InitializeFonts() {
   // background (resources have not yet been granted to cast) since it prevents
   // the long delay the user would have seen on first rendering.
 
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
-  // Ensures the config is created on this thread.
-  FcConfig* config = GetGlobalFontConfig();
-  DCHECK(config);
-#endif  // defined(OS_LINUX) || defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+  // Early initialize FontConfig.
+  InitializeGlobalFontConfigAsync();
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   gfx::win::InitializeDirectWrite();
-#endif  // OS_WIN
+#endif  // BUILDFLAG(IS_WIN)
+  skia::InitializeFontRendering();
 }
 
 }  // namespace gfx

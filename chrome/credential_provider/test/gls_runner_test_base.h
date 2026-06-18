@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include "chrome/credential_provider/gaiacp/gaia_credential_provider.h"
 #include "chrome/credential_provider/test/com_fakes.h"
 #include "chrome/credential_provider/test/gcp_fakes.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace credential_provider {
@@ -21,7 +22,7 @@ namespace credential_provider {
 namespace testing {
 
 extern const char kDefaultEmail[];
-extern const char kDefaultGaiaId[];
+extern const GaiaId::Literal kDefaultGaiaId;
 extern const wchar_t kDefaultUsername[];
 extern const char kDefaultInvalidTokenHandleResponse[];
 extern const char kDefaultValidTokenHandleResponse[];
@@ -37,15 +38,14 @@ class GlsRunnerTestBase : public ::testing::Test {
   // Gets a command line that runs a fake GLS that produces the desired output.
   // |default_exit_code| is the default value that will be written unless the
   // other command line arguments require a specific error code to be returned.
-  static HRESULT GetFakeGlsCommandline(
-      UiExitCodes default_exit_code,
-      const std::string& gls_email,
-      const std::string& gaia_id_override,
-      const std::string& gaia_password,
-      const std::string& full_name_override,
-      const base::string16& start_gls_event_name,
-      bool ignore_expected_gaia_id,
-      base::CommandLine* command_line);
+  static HRESULT GetFakeGlsCommandline(UiExitCodes default_exit_code,
+                                       const std::string& gls_email,
+                                       const GaiaId& gaia_id_override,
+                                       const std::string& gaia_password,
+                                       const std::string& full_name_override,
+                                       const std::wstring& start_gls_event_name,
+                                       bool ignore_expected_gaia_id,
+                                       base::CommandLine* command_line);
 
  protected:
   GlsRunnerTestBase();
@@ -55,6 +55,9 @@ class GlsRunnerTestBase : public ::testing::Test {
   void TearDown() override;
 
   FakeOSUserManager* fake_os_user_manager() { return &fake_os_user_manager_; }
+  FakeOSDeviceManager* fake_os_device_manager() {
+    return &fake_os_device_manager_;
+  }
   FakeWinHttpUrlFetcherFactory* fake_http_url_fetcher_factory() {
     return &fake_http_url_fetcher_factory_;
   }
@@ -88,7 +91,7 @@ class GlsRunnerTestBase : public ::testing::Test {
     return gaia_provider_;
   }
 
-  void SetSidLockingWorkstation(const base::string16& sid) {
+  void SetSidLockingWorkstation(const std::wstring& sid) {
     sid_locking_workstation_ = sid;
   }
 
@@ -167,7 +170,7 @@ class GlsRunnerTestBase : public ::testing::Test {
                              int expected_error_message);
   HRESULT FinishLogonProcess(bool expected_success,
                              bool expected_credentials_change_fired,
-                             const base::string16& expected_error_message);
+                             const std::wstring& expected_error_message);
   HRESULT FinishLogonProcessWithCred(
       bool expected_success,
       bool expected_credentials_change_fired,
@@ -177,7 +180,7 @@ class GlsRunnerTestBase : public ::testing::Test {
   HRESULT FinishLogonProcessWithCred(
       bool expected_success,
       bool expected_credentials_change_fired,
-      const base::string16& expected_error_message,
+      const std::wstring& expected_error_message,
       const Microsoft::WRL::ComPtr<ICredentialProviderCredential>&
           local_testing_cred);
   HRESULT ReportLogonProcessResult(
@@ -198,6 +201,7 @@ class GlsRunnerTestBase : public ::testing::Test {
 
   FakeOSProcessManager fake_os_process_manager_;
   FakeOSUserManager fake_os_user_manager_;
+  FakeOSDeviceManager fake_os_device_manager_;
   FakeScopedLsaPolicyFactory fake_scoped_lsa_policy_factory_;
   FakeScopedUserProfileFactory fake_scoped_user_profile_factory_;
   FakeInternetAvailabilityChecker fake_internet_checker_;
@@ -213,7 +217,7 @@ class GlsRunnerTestBase : public ::testing::Test {
 
   // SID of the user that is considered to be locking the workstation. This is
   // only relevant for CPUS_UNLOCK_WORKSTATION usage.
-  base::string16 sid_locking_workstation_;
+  std::wstring sid_locking_workstation_;
 
   // Reference to the provider that is created and owned by this class.
   Microsoft::WRL::ComPtr<ICredentialProvider> gaia_provider_;
@@ -240,7 +244,11 @@ class GlsRunnerTestBase : public ::testing::Test {
   std::string default_token_handle_response_;
 
   base::ScopedTempDir scoped_temp_program_files_dir_;
+  base::ScopedTempDir scoped_temp_program_files_x86_dir_;
+  base::ScopedTempDir scoped_temp_progdata_dir_;
   std::unique_ptr<base::ScopedPathOverride> program_files_override_;
+  std::unique_ptr<base::ScopedPathOverride> program_files_x86_override_;
+  std::unique_ptr<base::ScopedPathOverride> programdata_override_;
 };
 
 }  // namespace testing

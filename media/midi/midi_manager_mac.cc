@@ -1,23 +1,28 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/midi/midi_manager_mac.h"
 
+#include <mach/mach_time.h>
 #include <stddef.h>
 
 #include <algorithm>
 #include <iterator>
 #include <string>
 
-#include <CoreAudio/HostTime.h>
-
-#include "base/bind.h"
-#include "base/single_thread_task_runner.h"
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
+#include "build/build_config.h"
 #include "media/midi/midi_service.h"
 #include "media/midi/task_service.h"
+#include "third_party/abseil-cpp/absl/numeric/int128.h"
 
 using base::NumberToString;
 using base::SysCFStringRefToUTF8;
@@ -101,12 +106,24 @@ mojom::PortInfo GetPortInfoFromEndpoint(MIDIEndpointRef endpoint) {
 }
 
 base::TimeTicks MIDITimeStampToTimeTicks(MIDITimeStamp timestamp) {
-  UInt64 nanoseconds = AudioConvertHostTimeToNanos(timestamp);
-  return base::TimeTicks() + base::TimeDelta::FromNanoseconds(nanoseconds);
+  return base::TimeTicks::FromMachAbsoluteTime(timestamp);
 }
 
 MIDITimeStamp TimeTicksToMIDITimeStamp(base::TimeTicks ticks) {
-  return AudioConvertNanosToHostTime(ticks.since_origin().InNanoseconds());
+  // time.h doesn't yet support the opposite function for FromMachAbsoluteTime.
+  // Instead, adapted from CAHostTimeBase.h in the Core Audio Utility Classes.
+  struct mach_timebase_info base_time_info;
+  mach_timebase_info(&base_time_info);
+#if defined(ARCH_CPU_64_BITS)
+  absl::uint128 result = ticks.since_origin().InNanoseconds();
+#else
+  long double result = ticks.since_origin().InNanoseconds();
+#endif
+  if (base_time_info.numer != base_time_info.denom) {
+    result *= base_time_info.denom;
+    result /= base_time_info.numer;
+  }
+  return static_cast<uint64_t>(result);
 }
 
 }  // namespace
@@ -234,7 +251,7 @@ void MidiManagerMac::ReceiveMidiNotify(const MIDINotification* message) {
         static_cast<MIDIEndpointRef>(notification->child);
     if (notification->childType == kMIDIObjectType_Source) {
       // Attaching device is an input device.
-      auto it = std::find(sources_.begin(), sources_.end(), endpoint);
+      auto it = std::ranges::find(sources_, endpoint);
       if (it == sources_.end()) {
         mojom::PortInfo info = GetPortInfoFromEndpoint(endpoint);
         // If the device disappears before finishing queries, mojom::PortInfo
@@ -252,7 +269,7 @@ void MidiManagerMac::ReceiveMidiNotify(const MIDINotification* message) {
       }
     } else if (notification->childType == kMIDIObjectType_Destination) {
       // Attaching device is an output device.
-      auto it = std::find(destinations_.begin(), destinations_.end(), endpoint);
+      auto it = std::ranges::find(destinations_, endpoint);
       if (it == destinations_.end()) {
         mojom::PortInfo info = GetPortInfoFromEndpoint(endpoint);
         // Skip cases that queries are not finished correctly.
@@ -272,12 +289,12 @@ void MidiManagerMac::ReceiveMidiNotify(const MIDINotification* message) {
         static_cast<MIDIEndpointRef>(notification->child);
     if (notification->childType == kMIDIObjectType_Source) {
       // Detaching device is an input device.
-      auto it = std::find(sources_.begin(), sources_.end(), endpoint);
+      auto it = std::ranges::find(sources_, endpoint);
       if (it != sources_.end())
         SetInputPortState(it - sources_.begin(), PortState::DISCONNECTED);
     } else if (notification->childType == kMIDIObjectType_Destination) {
       // Detaching device is an output device.
-      auto it = std::find(destinations_.begin(), destinations_.end(), endpoint);
+      auto it = std::ranges::find(destinations_, endpoint);
       if (it != destinations_.end())
         SetOutputPortState(it - destinations_.begin(), PortState::DISCONNECTED);
     }
@@ -301,8 +318,13 @@ void MidiManagerMac::ReadMidiDispatch(const MIDIPacketList* packet_list,
     // Each packet contains MIDI data for one or more messages (like note-on).
     base::TimeTicks timestamp = MIDITimeStampToTimeTicks(packet->timeStamp);
 
-    manager->ReceiveMidiData(port_index, packet->data, packet->length,
-                             timestamp);
+    manager->ReceiveMidiData(
+        // SAFETY: `packet->data` is a variable-length stream of MIDI messages.
+        // `packet->length` is the number of valid MIDI data bytes in this
+        // packet. For more details, see:
+        // https://developer.apple.com/documentation/coremidi/midipacket?language=objc
+        port_index, UNSAFE_BUFFERS(base::span(packet->data, packet->length)),
+        timestamp);
 
     packet = MIDIPacketNext(packet);
   }
@@ -323,7 +345,7 @@ void MidiManagerMac::SendMidiData(MidiManagerClient* client,
   size_t send_size;
   for (size_t sent_size = 0u; sent_size < data.size(); sent_size += send_size) {
     MIDIPacketList* packet_list =
-        reinterpret_cast<MIDIPacketList*>(midi_buffer_.data());
+        UNSAFE_TODO(reinterpret_cast<MIDIPacketList*>(midi_buffer_.data()));
     MIDIPacket* midi_packet = MIDIPacketListInit(packet_list);
     // Limit the maximum payload size to kEstimatedMaxPacketDataSize that is
     // half of midi_buffer data size. MIDIPacketList and MIDIPacket consume

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,8 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "content/public/browser/browser_context.h"
-#include "extensions/browser/process_manager.h"
 
 namespace extensions {
 
@@ -31,7 +30,8 @@ KeepAliveImpl::KeepAliveImpl(content::BrowserContext* context,
       extension_, Activity::MOJO, std::string());
   receiver_.set_disconnect_handler(
       base::BindOnce(&KeepAliveImpl::OnDisconnected, base::Unretained(this)));
-  extension_registry_observer_.Add(ExtensionRegistry::Get(context_));
+  extension_registry_observation_.Observe(ExtensionRegistry::Get(context_));
+  process_manager_observation_.Observe(ProcessManager::Get(context_));
 }
 
 KeepAliveImpl::~KeepAliveImpl() = default;
@@ -40,8 +40,9 @@ void KeepAliveImpl::OnExtensionUnloaded(
     content::BrowserContext* browser_context,
     const Extension* extension,
     UnloadedExtensionReason reason) {
-  if (browser_context == context_ && extension == extension_)
+  if (browser_context == context_ && extension == extension_) {
     delete this;
+  }
 }
 
 void KeepAliveImpl::OnShutdown(ExtensionRegistry* registry) {
@@ -51,6 +52,10 @@ void KeepAliveImpl::OnShutdown(ExtensionRegistry* registry) {
 void KeepAliveImpl::OnDisconnected() {
   ProcessManager::Get(context_)->DecrementLazyKeepaliveCount(
       extension_, Activity::MOJO, std::string());
+  delete this;
+}
+
+void KeepAliveImpl::OnProcessManagerShutdown(ProcessManager* manager) {
   delete this;
 }
 

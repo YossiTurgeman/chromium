@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,13 @@ bool GetUserDataDirectoryThunk(wchar_t* user_data_dir,
                                size_t user_data_dir_length,
                                wchar_t* invalid_user_data_dir,
                                size_t invalid_user_data_dir_length);
-// This function is a temporary workaround for https://crbug.com/655788. We
+
+// Returns true if GetUserDataDirectoryThunk() returns a temporary user
+// data directory created when running in headless mode with no explicit user
+// data directory specification.
+bool IsTemporaryUserDataDirectoryCreatedForHeadless();
+
+// This function is a temporary workaround for https://crbug.com/41280821. We
 // need to come up with a better way to initialize crash reporting that can
 // happen inside DllMain().
 void SignalInitializeCrashReporting();
@@ -27,6 +33,14 @@ void SignalChromeElf();
 
 // Sets the metrics client ID in crash keys.
 void SetMetricsClientId(const char* client_id);
+
+// Returns true if invoked in a Chrome process other than the main browser
+// process. False otherwise.
+bool IsBrowserProcess();
+
+// Returns true if we set the PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY
+// was set
+bool IsExtensionPointDisableSet();
 
 }  // extern "C"
 

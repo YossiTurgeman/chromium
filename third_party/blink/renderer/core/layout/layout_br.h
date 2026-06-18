@@ -24,45 +24,28 @@
 #include "third_party/blink/renderer/core/layout/layout_text.h"
 
 // The whole class here is a hack to get <br> working, as long as we don't have
-// support for CSS2 :before and :after pseudo elements.
+// support for CSS2 :before and :after pseudo-elements.
 namespace blink {
 
-class LayoutBR final : public LayoutText {
+class HTMLBRElement;
+
+class LayoutBR : public LayoutText {
  public:
-  explicit LayoutBR(Node*);
+  explicit LayoutBR(HTMLBRElement& node);
   ~LayoutBR() override;
 
-  const char* GetName() const override { return "LayoutBR"; }
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutBR";
+  }
 
   // Although line breaks contain no actual text, if we're selected we need
   // to return a rect that includes space to illustrate a newline.
   using LayoutText::LocalSelectionVisualRect;
 
-  float Width(unsigned /* from */,
-              unsigned /* len */,
-              const Font&,
-              LayoutUnit /* xpos */,
-              TextDirection,
-              HashSet<const SimpleFontData*>* = nullptr /* fallbackFonts */,
-              FloatRect* /* glyphBounds */ = nullptr,
-              float /* expansion */ = false) const override {
-    return 0;
-  }
-  float Width(unsigned /* from */,
-              unsigned /* len */,
-              LayoutUnit /* xpos */,
-              TextDirection,
-              bool = false /* firstLine */,
-              HashSet<const SimpleFontData*>* = nullptr /* fallbackFonts */,
-              FloatRect* /* glyphBounds */ = nullptr,
-              float /* expansion */ = false) const override {
-    return 0;
-  }
-
-  int LineHeight(bool first_line) const;
-
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectBr || LayoutText::IsOfType(type);
+  bool IsBR() const final {
+    NOT_DESTROYED();
+    return true;
   }
 
   int CaretMinOffset() const override;
@@ -71,13 +54,16 @@ class LayoutBR final : public LayoutText {
   PositionWithAffinity PositionForPoint(const PhysicalOffset&) const final;
 
   Position PositionForCaretOffset(unsigned) const final;
-  base::Optional<unsigned> CaretOffsetForPosition(const Position&) const final;
+  std::optional<unsigned> CaretOffsetForPosition(const Position&) const final;
 
- protected:
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
+ private:
+  unsigned NonCollapsedCaretMaxOffset() const override;
 };
 
-DEFINE_LAYOUT_OBJECT_TYPE_CASTS(LayoutBR, IsBR());
+template <>
+struct DowncastTraits<LayoutBR> {
+  static bool AllowFrom(const LayoutObject& object) { return object.IsBR(); }
+};
 
 }  // namespace blink
 

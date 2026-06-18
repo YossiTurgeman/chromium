@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <memory>
 #include <string>
 
-#include "base/timer/timer.h"
 #include "third_party/libaddressinput/src/cpp/include/libaddressinput/preload_supplier.h"
 
 namespace i18n {
@@ -37,10 +36,9 @@ class RegionDataLoaderImpl : public RegionDataLoader {
 
   ~RegionDataLoaderImpl() override;
 
-  // autofill::RegionDataLoader.
+  // RegionDataLoader.
   void LoadRegionData(const std::string& country_code,
-                      RegionDataLoader::RegionDataLoaded callback,
-                      int64_t timeout_ms) override;
+                      RegionDataLoader::RegionDataLoaded callback) override;
   void ClearCallback() override;
 
  private:
@@ -58,7 +56,6 @@ class RegionDataLoaderImpl : public RegionDataLoader {
 
   std::string app_locale_;
   RegionDataLoader::RegionDataLoaded callback_;
-  base::OneShotTimer timer_;
 };
 
 }  // namespace autofill

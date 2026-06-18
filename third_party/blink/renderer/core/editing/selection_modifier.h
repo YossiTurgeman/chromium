@@ -27,8 +27,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_SELECTION_MODIFIER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_SELECTION_MODIFIER_H_
 
-#include "base/macros.h"
+#include <unicode/ubidi.h>
+
+#include <optional>
+
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/editing/position_with_affinity.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
 #include "third_party/blink/renderer/core/editing/visible_selection.h"
 #include "third_party/blink/renderer/platform/geometry/layout_unit.h"
@@ -48,13 +52,28 @@ class CORE_EXPORT SelectionModifier {
  public:
   // |frame| is used for providing settings.
   SelectionModifier(const LocalFrame& /* frame */,
-                    const SelectionInDOMTree&,
+                    const SelectionInDomTree&,
                     LayoutUnit);
-  SelectionModifier(const LocalFrame&, const SelectionInDOMTree&);
+  SelectionModifier(const LocalFrame&, const SelectionInDomTree&);
+  SelectionModifier(const SelectionModifier&) = delete;
+  SelectionModifier& operator=(const SelectionModifier&) = delete;
 
   LayoutUnit XPosForVerticalArrowNavigation() const {
     return x_pos_for_vertical_arrow_navigation_;
   }
+
+  // Bidi embedding level of the caret's current fragment, used to
+  // disambiguate caret position at bidi boundaries across keystrokes.
+  std::optional<UBiDiLevel> CaretBidiLevel() const { return caret_bidi_level_; }
+  void SetCaretBidiLevel(std::optional<UBiDiLevel> level) {
+    caret_bidi_level_ = level;
+  }
+
+  // Whether the previous visual caret movement placed the caret at a bidi
+  // boundary entry point. When true, the next boundary crossing is an EXIT
+  // and should skip the shared-x entry point to produce visible movement.
+  bool EnteredBidiRun() const { return entered_bidi_run_; }
+  void SetEnteredBidiRun(bool value) { entered_bidi_run_ = value; }
 
   // TODO(editing-dev): We should rename |Selection()| to
   // |ComputeVisibleSelectionDeprecated()| and introduce |GetSelection()|
@@ -77,54 +96,67 @@ class CORE_EXPORT SelectionModifier {
   const LocalFrame& GetFrame() const { return *frame_; }
 
   static bool ShouldAlwaysUseDirectionalSelection(const LocalFrame&);
-  VisibleSelection PrepareToModifySelection(SelectionModifyAlteration,
-                                            SelectionModifyDirection) const;
+  VisibleSelectionInFlatTree PrepareToModifySelection(
+      SelectionModifyAlteration,
+      SelectionModifyDirection) const;
   TextDirection DirectionOfEnclosingBlock() const;
-  TextDirection LineDirectionOfExtent() const;
-  VisiblePosition PositionForPlatform(bool is_get_start) const;
-  VisiblePosition StartForPlatform() const;
-  VisiblePosition EndForPlatform() const;
-  LayoutUnit LineDirectionPointForBlockDirectionNavigation(const Position&);
-  VisiblePosition ComputeModifyPosition(SelectionModifyAlteration,
-                                        SelectionModifyDirection,
-                                        TextGranularity);
-  VisiblePosition ModifyExtendingRight(TextGranularity);
-  VisiblePosition ModifyExtendingRightInternal(TextGranularity);
-  VisiblePosition ModifyExtendingForward(TextGranularity);
-  VisiblePosition ModifyExtendingForwardInternal(TextGranularity);
-  VisiblePosition ModifyMovingRight(TextGranularity);
-  VisiblePosition ModifyMovingForward(TextGranularity);
-  VisiblePosition ModifyExtendingLeft(TextGranularity);
-  VisiblePosition ModifyExtendingLeftInternal(TextGranularity);
-  VisiblePosition ModifyExtendingBackward(TextGranularity);
-  VisiblePosition ModifyExtendingBackwardInternal(TextGranularity);
-  VisiblePosition ModifyMovingLeft(TextGranularity);
-  VisiblePosition ModifyMovingBackward(TextGranularity);
-  Position NextWordPositionForPlatform(const Position&);
+  TextDirection LineDirectionOfFocus() const;
+  TextDirection TextDirectionOfFocus() const;
+  VisiblePositionInFlatTree PositionForPlatform(bool is_get_start) const;
+  VisiblePositionInFlatTree StartForPlatform() const;
+  VisiblePositionInFlatTree EndForPlatform() const;
+  LayoutUnit LineDirectionPointForBlockDirectionNavigation(
+      const PositionInFlatTree&);
+  VisiblePositionInFlatTree ComputeModifyPosition(SelectionModifyAlteration,
+                                                  SelectionModifyDirection,
+                                                  TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingRight(TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingRightInternal(TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingForward(TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingForwardInternal(TextGranularity);
+  VisiblePositionInFlatTree ModifyMovingRight(TextGranularity);
+  VisiblePositionInFlatTree ModifyMovingForward(TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingLeft(TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingLeftInternal(TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingBackward(TextGranularity);
+  VisiblePositionInFlatTree ModifyExtendingBackwardInternal(TextGranularity);
+  VisiblePositionInFlatTree ModifyMovingLeft(TextGranularity);
+  VisiblePositionInFlatTree ModifyMovingBackward(TextGranularity);
+  PositionInFlatTree NextWordPositionForPlatform(const PositionInFlatTree&);
 
-  static VisiblePosition PreviousLinePosition(const VisiblePosition&,
-                                              LayoutUnit line_direction_point);
-  static VisiblePosition NextLinePosition(const VisiblePosition&,
-                                          LayoutUnit line_direction_point);
-  static VisiblePosition PreviousParagraphPosition(
-      const VisiblePosition&,
+  void UpdateAllLifecyclePhasesExceptPaint();
+
+  static PositionInFlatTreeWithAffinity PreviousLinePosition(
+      const PositionInFlatTreeWithAffinity&,
       LayoutUnit line_direction_point);
-  static VisiblePosition NextParagraphPosition(const VisiblePosition&,
-                                               LayoutUnit line_direction_point);
+  static PositionInFlatTreeWithAffinity NextLinePosition(
+      const PositionInFlatTreeWithAffinity&,
+      LayoutUnit line_direction_point);
+  static VisiblePositionInFlatTree PreviousParagraphPosition(
+      const VisiblePositionInFlatTree&,
+      LayoutUnit line_direction_point);
+  static VisiblePositionInFlatTree NextParagraphPosition(
+      const VisiblePositionInFlatTree&,
+      LayoutUnit line_direction_point);
 
   const LocalFrame* frame_;
   // TODO(editing-dev): We should get rid of |selection_| once we change
   // all member functions not to use |selection_|.
   // |selection_| is used as implicit parameter or a cache instead of pass it.
-  VisibleSelection selection_;
+  VisibleSelectionInFlatTree selection_;
   // TODO(editing-dev): We should introduce |GetSelection()| to return
   // |result_| to replace |Selection().AsSelection()|.
   // |current_selection_| holds initial value and result of |Modify()|.
-  SelectionInDOMTree current_selection_;
+  SelectionInFlatTree current_selection_;
   LayoutUnit x_pos_for_vertical_arrow_navigation_;
+  std::optional<UBiDiLevel> caret_bidi_level_;
+  bool entered_bidi_run_ = false;
   bool selection_is_directional_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(SelectionModifier);
+  // Raw position from visual caret movement, bypassing VisiblePosition
+  // canonicalization. When set (IsNotNull), Modify() uses this directly
+  // instead of calling position.ToPositionWithAffinity() on the
+  // VisiblePosition, which would re-canonicalize and destroy bidi precision.
+  PositionInFlatTreeWithAffinity raw_visual_position_;
 };
 
 LayoutUnit NoXPosForVerticalArrowNavigation();

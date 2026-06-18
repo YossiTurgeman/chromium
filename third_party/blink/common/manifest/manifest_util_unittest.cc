@@ -1,11 +1,13 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/public/common/manifest/manifest_util.h"
+
+#include <string>
+
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/mojom/manifest/display_mode.mojom.h"
-#include "url/gurl.h"
 
 namespace blink {
 
@@ -19,6 +21,10 @@ TEST(ManifestUtilTest, DisplayModeConversions) {
       {blink::mojom::DisplayMode::kMinimalUi, "minimal-ui"},
       {blink::mojom::DisplayMode::kStandalone, "standalone"},
       {blink::mojom::DisplayMode::kFullscreen, "fullscreen"},
+      {blink::mojom::DisplayMode::kWindowControlsOverlay,
+       "window-controls-overlay"},
+      {blink::mojom::DisplayMode::kTabbed, "tabbed"},
+      {blink::mojom::DisplayMode::kUnframed, "unframed"},
   };
 
   for (const ReversibleConversion& conversion : reversible_conversions) {
@@ -75,6 +81,22 @@ TEST(ManifestUtilTest, WebScreenOrientationLockTypeConversions) {
   // blink::WebScreenOrientationLockDefault if the string isn't known.
   EXPECT_EQ(device::mojom::ScreenOrientationLockType::DEFAULT,
             WebScreenOrientationLockTypeFromString("random"));
+}
+
+TEST(ManifestUtilTest, LaunchHandlerClientModeFromString) {
+  using ClientMode = Manifest::LaunchHandler::ClientMode;
+  EXPECT_EQ(std::nullopt, ClientModeFromString(""));
+  EXPECT_EQ(ClientMode::kAuto, ClientModeFromString("auto"));
+  EXPECT_EQ(ClientMode::kNavigateNew, ClientModeFromString("navigate-new"));
+  EXPECT_EQ(ClientMode::kNavigateExisting,
+            ClientModeFromString("navigate-existing"));
+  EXPECT_EQ(ClientMode::kFocusExisting, ClientModeFromString("focus-existing"));
+
+  // Uppercase spelling.
+  EXPECT_EQ(ClientMode::kNavigateNew, ClientModeFromString("NAVIGATE-NEW"));
+
+  // Unknown value.
+  EXPECT_EQ(std::nullopt, ClientModeFromString("unknown-value"));
 }
 
 }  // namespace blink

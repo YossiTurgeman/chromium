@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<meta name=fuzzy content="maxDifference=0-3; totalPixels=0-100">
 <style>
 input {
   margin: 4px;
@@ -70,5 +71,24 @@ Styling ::-webkit-file-upload-button:
 <input type=file class="button-appearance-none">
 <input type=file class="button-shadow">
 <div>
+
+<div>
+<style>
+.overflow {
+  overflow: visible;
+  width: 10px;
+}
+</style>
+'overflow: visible' should not work:
+<input type=file class=overflow>
+</div>
+
+<style>
+.text-overflow {
+  text-overflow: "harmless filename";
+}
+</style>
+'text-overflow' should be 'ellipsis' even if it's specified string value:
+<input type=file class="text-overflow" style="width: 12em">
 
 </body>

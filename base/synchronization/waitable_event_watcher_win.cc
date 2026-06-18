@@ -1,20 +1,20 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/synchronization/waitable_event_watcher.h"
 
+#include <windows.h>
+
 #include "base/compiler_specific.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/win/object_watcher.h"
-
-#include <windows.h>
 
 namespace base {
 
 WaitableEventWatcher::WaitableEventWatcher() = default;
 
-WaitableEventWatcher::~WaitableEventWatcher() {}
+WaitableEventWatcher::~WaitableEventWatcher() = default;
 
 bool WaitableEventWatcher::StartWatching(
     WaitableEvent* event,
@@ -42,16 +42,16 @@ bool WaitableEventWatcher::StartWatching(
 
 void WaitableEventWatcher::StopWatching() {
   callback_.Reset();
-  event_ = NULL;
+  event_ = nullptr;
   watcher_.StopWatching();
   duplicated_event_handle_.Close();
 }
 
 void WaitableEventWatcher::OnObjectSignaled(HANDLE h) {
-  DCHECK_EQ(duplicated_event_handle_.Get(), h);
+  DCHECK_EQ(duplicated_event_handle_.get(), h);
   WaitableEvent* event = event_;
   EventCallback callback = std::move(callback_);
-  event_ = NULL;
+  event_ = nullptr;
   duplicated_event_handle_.Close();
   DCHECK(event);
 

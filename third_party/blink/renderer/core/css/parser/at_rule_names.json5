@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,13 +15,22 @@
 
   data: [
     {
+      name: "additive-symbols",
+    },
+    {
       name: "ascent-override",
+    },
+    {
+      name: "base-palette",
+    },
+    {
+      name: "base-url",
     },
     {
       name: "descent-override",
     },
     {
-      name: "end",
+      name: "fallback",
     },
     {
       name: "font-display",
@@ -43,10 +52,16 @@
       name: "font-variant",
     },
     {
+      name: "font-variation-settings",
+    },
+    {
       name: "font-weight",
     },
     {
-      name: "height",
+      name: "hash",
+    },
+    {
+      name: "hostname",
     },
     {
       name: "inherits"
@@ -55,58 +70,70 @@
       name: "initial-value"
     },
     {
-      name: "advance-override"
-    },
-    {
       name: "line-gap-override",
     },
     {
-      name: "max-height",
+      name: "navigation",
     },
     {
-      name: "max-width",
+      name: "negative",
     },
     {
-      name: "max-zoom",
+      name: "override-colors",
     },
     {
-      name: "min-height",
+      name: "pad",
     },
     {
-      name: "min-width",
+      name: "pathname",
     },
     {
-      name: "min-zoom",
+      name: "pattern",
     },
     {
-      name: "orientation",
+      name: "port",
     },
     {
-      name: "source",
+      name: "prefix",
+    },
+    {
+      name: "protocol",
+    },
+    {
+      name: "range",
+    },
+    {
+      name: "result",
+    },
+    {
+      name: "search",
+    },
+    {
+      name: "size-adjust",
+    },
+    {
+      name: "speak-as",
     },
     {
       name: "src",
     },
     {
-      name: "start",
+      name: "suffix",
+    },
+    {
+      name: "symbols",
     },
     {
       name: "syntax"
     },
     {
-      name: "time-range",
+      name: "system",
+    },
+    {
+      name: "types",
     },
     {
       name: "unicode-range",
-    },
-    {
-      name: "user-zoom",
-    },
-    {
-      name: "width",
-    },
-    {
-      name: "zoom",
     },
   ],
 }

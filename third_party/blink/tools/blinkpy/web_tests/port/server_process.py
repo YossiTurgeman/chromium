@@ -41,6 +41,7 @@ _quote_cmd = None
 
 if sys.platform == 'win32':
     import msvcrt
+    import pywintypes
     import win32pipe
     import win32file
     import subprocess
@@ -48,9 +49,9 @@ if sys.platform == 'win32':
 else:
     import fcntl
     import os
-    import pipes
+    import shlex
     import select
-    _quote_cmd = lambda cmdline: ' '.join(pipes.quote(arg) for arg in cmdline)
+    _quote_cmd = lambda cmdline: ' '.join(shlex.quote(arg) for arg in cmdline)
 
 _log = logging.getLogger(__name__)
 
@@ -103,6 +104,9 @@ class ServerProcess(object):
     def pid(self):
         return self._pid
 
+    def cmd(self):
+        return self._cmd[:]
+
     def _reset(self):
         if getattr(self, '_proc', None):
             if self._proc.stdin:
@@ -116,8 +120,8 @@ class ServerProcess(object):
                 self._proc.stderr = None
 
         self._proc = None
-        self._output = str()  # bytesarray() once we require Python 2.6
-        self._error = str()  # bytesarray() once we require Python 2.6
+        self._output = bytearray()
+        self._error = bytearray()
         self._crashed = False
         self.timed_out = False
 
@@ -187,19 +191,23 @@ class ServerProcess(object):
         try:
             self._log_data(' IN', bytes)
             self._proc.stdin.write(bytes)
+            # TODO(crbug/)In PY3 select.select to get the stdout/stderr
+            # file-descriptors times out without this flush.
+            # Revisit to see if this can be avoided.
+            self._proc.stdin.flush()
         except IOError:
             self.stop(0.0)
             # stop() calls _reset(), so we have to set crashed to True after calling stop().
             self._crashed = True
 
     def _pop_stdout_line_if_ready(self):
-        index_after_newline = self._output.find('\n') + 1
+        index_after_newline = self._output.find(b'\n') + 1
         if index_after_newline > 0:
             return self._pop_output_bytes(index_after_newline)
         return None
 
     def _pop_stderr_line_if_ready(self):
-        index_after_newline = self._error.find('\n') + 1
+        index_after_newline = self._error.find(b'\n') + 1
         if index_after_newline > 0:
             return self._pop_error_bytes(index_after_newline)
         return None
@@ -346,9 +354,9 @@ class ServerProcess(object):
             if avail > 0:
                 _, buf = win32file.ReadFile(handle, avail, None)
                 return buf
-        except Exception as error:  # pylint: disable=broad-except
+        except pywintypes.error as error:
             # 109 == win32 ERROR_BROKEN_PIPE
-            if error[0] not in (109, errno.ESHUTDOWN):
+            if error.args[0] not in (109, errno.ESHUTDOWN):
                 raise
         return None
 
@@ -384,7 +392,7 @@ class ServerProcess(object):
         if not self._proc:
             self._start()
 
-    def stop(self, timeout_secs=0.0, kill_tree=True):
+    def stop(self, timeout_secs=0.0, kill_tree=True, send_sigterm=False):
         if not self._proc:
             return (None, None)
 
@@ -392,8 +400,15 @@ class ServerProcess(object):
         if self._proc.stdin:
             if self._logging:
                 _log.info(' IN: ^D')
-            self._proc.stdin.close()
+            try:
+                # When we get here because of an IOError, close()
+                # may throw BrokenPipeError sometimes.
+                self._proc.stdin.close()
+            except BrokenPipeError:
+                pass
             self._proc.stdin = None
+        if send_sigterm:
+            self._host.executive.terminate(self._proc.pid)
         killed = False
         if timeout_secs:
             deadline = now + timeout_secs

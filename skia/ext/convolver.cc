@@ -1,12 +1,20 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
+
+#include "skia/ext/convolver.h"
 
 #include <algorithm>
 
 #include "base/check_op.h"
 #include "base/notreached.h"
-#include "skia/ext/convolver.h"
+#include "base/numerics/checked_math.h"
+#include "skia/ext/convolver_LSX.h"
 #include "skia/ext/convolver_SSE2.h"
 #include "skia/ext/convolver_mips_dspr2.h"
 #include "skia/ext/convolver_neon.h"
@@ -49,13 +57,17 @@ class CircularRowBuffer {
   //
   // We use the |first_input_row| to compute the coordinates of all of the
   // following rows returned by Advance().
-  CircularRowBuffer(int dest_row_pixel_width, int max_y_filter_size,
+  CircularRowBuffer(int dest_row_pixel_width,
+                    int max_y_filter_size,
                     int first_input_row)
-      : row_byte_width_(dest_row_pixel_width * 4),
+      : row_byte_width_(
+            (base::CheckedNumeric<int>(dest_row_pixel_width) * 4).ValueOrDie()),
         num_rows_(max_y_filter_size),
         next_row_(0),
         next_row_coordinate_(first_input_row) {
-    buffer_.resize(row_byte_width_ * max_y_filter_size);
+    buffer_.resize(
+        (base::CheckedNumeric<int>(row_byte_width_) * max_y_filter_size)
+            .ValueOrDie<size_t>());
     row_addresses_.resize(num_rows_);
   }
 
@@ -144,7 +156,7 @@ void ConvolveHorizontally(const unsigned char* src_data,
     const unsigned char* row_to_filter = &src_data[filter_offset * 4];
 
     // Apply the filter to the row to get the destination pixel in |accum|.
-    int accum[4] = {0};
+    int accum[4] = {};
     for (int filter_x = 0; filter_x < filter_length; filter_x++) {
       ConvolutionFilter1D::Fixed cur_filter = filter_values[filter_x];
       accum[0] += cur_filter * row_to_filter[filter_x * 4 + 0];
@@ -191,7 +203,7 @@ void ConvolveVertically(const ConvolutionFilter1D::Fixed* filter_values,
     int byte_offset = out_x * 4;
 
     // Apply the filter to one column of pixels.
-    int accum[4] = {0};
+    int accum[4] = {};
     for (int filter_y = 0; filter_y < filter_length; filter_y++) {
       ConvolutionFilter1D::Fixed cur_filter = filter_values[filter_y];
       accum[0] += cur_filter * source_data_rows[filter_y][byte_offset + 0];
@@ -376,6 +388,11 @@ void SetupSIMD(ConvolveProcs *procs) {
   procs->convolve_vertically = &ConvolveVertically_Neon;
   procs->convolve_4rows_horizontally = &Convolve4RowsHorizontally_Neon;
   procs->convolve_horizontally = &ConvolveHorizontally_Neon;
+#elif defined SIMD_LSX
+  procs->extra_horizontal_reads = 3;
+  procs->convolve_vertically = &ConvolveVertically_LSX;
+  procs->convolve_4rows_horizontally = &Convolve4RowsHorizontally_LSX;
+  procs->convolve_horizontally = &ConvolveHorizontally_LSX;
 #endif
 }
 
@@ -535,7 +552,6 @@ void SingleChannelConvolveX1D(const unsigned char* source_data,
 
   if (filter_values == NULL || image_size.width() < filter_size) {
     NOTREACHED();
-    return;
   }
 
   int centrepoint = filter_length / 2;
@@ -619,7 +635,6 @@ void SingleChannelConvolveY1D(const unsigned char* source_data,
 
   if (filter_values == NULL || image_size.height() < filter_size) {
     NOTREACHED();
-    return;
   }
 
   int centrepoint = filter_length / 2;

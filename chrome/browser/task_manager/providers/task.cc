@@ -1,10 +1,12 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/task_manager/providers/task.h"
 
 #include <stddef.h>
+
+#include <optional>
 
 #include "base/numerics/safe_conversions.h"
 #include "base/process/process.h"
@@ -34,17 +36,11 @@ base::ProcessId DetermineProcessId(base::ProcessHandle handle,
 
 }  // namespace
 
-Task::Task(const base::string16& title,
+Task::Task(const std::u16string& title,
            const gfx::ImageSkia* icon,
            base::ProcessHandle handle,
            base::ProcessId process_id)
     : task_id_(g_last_id++),
-      last_refresh_cumulative_bytes_sent_(0),
-      last_refresh_cumulative_bytes_read_(0),
-      cumulative_bytes_sent_(0),
-      cumulative_bytes_read_(0),
-      network_sent_rate_(0),
-      network_read_rate_(0),
       title_(title),
       icon_(icon ? *icon : gfx::ImageSkia()),
       process_handle_(handle),
@@ -53,20 +49,17 @@ Task::Task(const base::string16& title,
 Task::~Task() = default;
 
 // static
-base::string16 Task::GetProfileNameFromProfile(Profile* profile) {
+std::u16string Task::GetProfileNameFromProfile(Profile* profile) {
   DCHECK(profile);
-  ProfileAttributesEntry* entry;
-  if (g_browser_process->profile_manager()->GetProfileAttributesStorage().
-      GetProfileAttributesWithPath(profile->GetOriginalProfile()->GetPath(),
-                                   &entry)) {
-    return entry->GetName();
-  }
-
-  return base::string16();
+  ProfileAttributesEntry* entry =
+      g_browser_process->profile_manager()
+          ->GetProfileAttributesStorage()
+          .GetProfileAttributesWithPath(
+              profile->GetOriginalProfile()->GetPath());
+  return entry ? entry->GetName() : std::u16string();
 }
 
-void Task::Activate() {
-}
+void Task::Activate() {}
 
 bool Task::IsKillable() {
   // Protects from trying to kill a task that doesn't have an accurate process
@@ -77,12 +70,12 @@ bool Task::IsKillable() {
   return true;
 }
 
-void Task::Kill() {
+bool Task::Kill() {
   if (!IsKillable())
-    return;
+    return false;
   DCHECK_NE(process_id(), base::GetCurrentProcId());
   base::Process process = base::Process::Open(process_id());
-  process.Terminate(content::RESULT_CODE_KILLED, false);
+  return process.Terminate(content::RESULT_CODE_KILLED, false);
 }
 
 void Task::Refresh(const base::TimeDelta& update_interval,
@@ -91,15 +84,15 @@ void Task::Refresh(const base::TimeDelta& update_interval,
       update_interval == base::TimeDelta())
     return;
 
-  int64_t current_cycle_read_byte_count =
+  base::ByteSizeDelta current_cycle_read_byte_count =
       cumulative_bytes_read_ - last_refresh_cumulative_bytes_read_;
-  network_read_rate_ = base::ClampRound<int64_t>(current_cycle_read_byte_count /
-                                                 update_interval.InSecondsF());
+  network_read_rate_ = base::ByteSize(base::ClampRound<uint64_t>(
+      current_cycle_read_byte_count.InBytesF() / update_interval.InSecondsF()));
 
-  int64_t current_cycle_sent_byte_count =
+  base::ByteSizeDelta current_cycle_sent_byte_count =
       cumulative_bytes_sent_ - last_refresh_cumulative_bytes_sent_;
-  network_sent_rate_ = base::ClampRound<int64_t>(current_cycle_sent_byte_count /
-                                                 update_interval.InSecondsF());
+  network_sent_rate_ = base::ByteSize(base::ClampRound<uint64_t>(
+      current_cycle_sent_byte_count.InBytesF() / update_interval.InSecondsF()));
 
   last_refresh_cumulative_bytes_read_ = cumulative_bytes_read_;
   last_refresh_cumulative_bytes_sent_ = cumulative_bytes_sent_;
@@ -123,12 +116,16 @@ void Task::UpdateProcessInfo(base::ProcessHandle handle,
   observer->TaskAdded(this);
 }
 
-void Task::OnNetworkBytesRead(int64_t bytes_read) {
+void Task::OnNetworkBytesRead(base::ByteSize bytes_read) {
   cumulative_bytes_read_ += bytes_read;
 }
 
-void Task::OnNetworkBytesSent(int64_t bytes_sent) {
+void Task::OnNetworkBytesSent(base::ByteSize bytes_sent) {
   cumulative_bytes_sent_ += bytes_sent;
+}
+
+Task::SubType Task::GetSubType() const {
+  return Task::SubType::kNoSubType;
 }
 
 void Task::GetTerminationStatus(base::TerminationStatus* out_status,
@@ -140,8 +137,8 @@ void Task::GetTerminationStatus(base::TerminationStatus* out_status,
   *out_error_code = 0;
 }
 
-base::string16 Task::GetProfileName() const {
-  return base::string16();
+std::u16string Task::GetProfileName() const {
+  return std::u16string();
 }
 
 SessionID Task::GetTabId() const {
@@ -152,24 +149,24 @@ bool Task::HasParentTask() const {
   return GetParentTask() != nullptr;
 }
 
-const Task* Task::GetParentTask() const {
+base::WeakPtr<Task> Task::GetParentTask() const {
   return nullptr;
 }
 
 bool Task::ReportsSqliteMemory() const {
-  return GetSqliteMemoryUsed() != -1;
+  return GetSqliteMemoryUsed().has_value();
 }
 
-int64_t Task::GetSqliteMemoryUsed() const {
-  return -1;
+std::optional<base::ByteSize> Task::GetSqliteMemoryUsed() const {
+  return std::nullopt;
 }
 
-int64_t Task::GetV8MemoryAllocated() const {
-  return -1;
+std::optional<base::ByteSize> Task::GetV8MemoryAllocated() const {
+  return std::nullopt;
 }
 
-int64_t Task::GetV8MemoryUsed() const {
-  return -1;
+std::optional<base::ByteSize> Task::GetV8MemoryUsed() const {
+  return std::nullopt;
 }
 
 bool Task::ReportsWebCacheStats() const {
@@ -188,6 +185,14 @@ bool Task::IsRunningInVM() const {
   return false;
 }
 
+base::ByteSize Task::GetNetworkUsageRate() const {
+  return network_sent_rate_ + network_read_rate_;
+}
+
+base::ByteSize Task::GetCumulativeNetworkUsage() const {
+  return cumulative_bytes_sent_ + cumulative_bytes_read_;
+}
+
 // static
 gfx::ImageSkia* Task::FetchIcon(int id, gfx::ImageSkia** result_image) {
   if (!*result_image && ui::ResourceBundle::HasSharedInstance()) {
@@ -197,6 +202,10 @@ gfx::ImageSkia* Task::FetchIcon(int id, gfx::ImageSkia** result_image) {
       (*result_image)->MakeThreadSafe();
   }
   return *result_image;
+}
+
+base::WeakPtr<Task> Task::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace task_manager

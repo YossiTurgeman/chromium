@@ -1,14 +1,22 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_TASK_MANAGER_WEB_CONTENTS_TAGS_H_
 #define CHROME_BROWSER_TASK_MANAGER_WEB_CONTENTS_TAGS_H_
 
-#include "base/macros.h"
-#include "extensions/common/view_type.h"
+#include "build/build_config.h"
+#include "components/guest_view/buildflags/buildflags.h"
+#include "components/webapps/common/web_app_id.h"
+#include "extensions/buildflags/buildflags.h"
 
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "extensions/common/mojom/view_type.mojom.h"  // nogncheck
+#endif  // !BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+
+#if !BUILDFLAG(IS_ANDROID)
 class BackgroundContents;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 namespace content {
 class WebContents;
@@ -25,7 +33,11 @@ namespace task_manager {
 // task manager.
 class WebContentsTags {
  public:
-  // Tag a BackgroundContents so that it shows up in the task manager. Calling
+  WebContentsTags(const WebContentsTags&) = delete;
+  WebContentsTags& operator=(const WebContentsTags&) = delete;
+
+#if !BUILDFLAG(IS_ANDROID)
+  // Tags a BackgroundContents so that it shows up in the task manager. Calling
   // this function creates a BackgroundContentsTag, and attaches it to
   // |web_contents|. If an instance is already attached, this does nothing. The
   // resulting tag does not have to be cleaned up by the caller, as it is owned
@@ -33,42 +45,56 @@ class WebContentsTags {
   static void CreateForBackgroundContents(
       content::WebContents* web_contents,
       BackgroundContents* background_contents);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-  // Tag a DevTools WebContents so that it shows up in the task manager. Calling
-  // this function creates a DevToolsTag, and attaches it to |web_contents|. If
-  // an instance is already attached, this does nothing. The resulting tag does
-  // not have to be cleaned up by the caller, as it is owned by |web_contents|.
+  // Tags a DevTools WebContents so that it shows up in the task manager.
+  // Calling this function creates a DevToolsTag, and attaches it to
+  // |web_contents|. If an instance is already attached, this does nothing. The
+  // resulting tag does not have to be cleaned up by the caller, as it is owned
+  // by |web_contents|.
   static void CreateForDevToolsContents(content::WebContents* web_contents);
 
-  // Tag a WebContents owned by the PrerenderManager so that it shows up in the
-  // task manager. Calling this function creates a PrerenderTag, and attaches it
-  // to |web_contents|. If an instance is already attached, this does nothing.
-  // The resulting tag does not have to be cleaned up by the caller, as it is
-  // owned by |web_contents|.
-  static void CreateForPrerenderContents(content::WebContents* web_contents);
+  // Tags a WebContents owned by the NoStatePrefetchManager so that it shows up
+  // in the task manager. Calling this function creates a PrerenderTag, and
+  // attaches it to |web_contents|. If an instance is already attached, this
+  // does nothing. The resulting tag does not have to be cleaned up by the
+  // caller, as it is owned by |web_contents|.
+  static void CreateForNoStatePrefetchContents(
+      content::WebContents* web_contents);
 
-  // Tag a WebContents owned by the TabStripModel so that it shows up in the
+  // Tags a WebContents created by PrerenderNewTabHandle for prerendering in a
+  // new tab so that it shows up in the task manager. Calling this function
+  // creates a PrerenderNewTabTag, and attaches it to |web_contents|. If an
+  // instance is already attached, this does nothing. The resulting tag does not
+  // have to be cleaned up by the caller, as it is owned by |web_contents|.
+  static void CreateForPrerenderNewTabContents(
+      content::WebContents* web_contents);
+
+  // Tags a WebContents owned by the TabStripModel so that it shows up in the
   // task manager. Calling this function creates a TabContentsTag, and attaches
   // it to |web_contents|. If an instance is already attached, this does
   // nothing. The resulting tag does not have to be cleaned up by the caller, as
   // it is owned by |web_contents|.
   static void CreateForTabContents(content::WebContents* web_contents);
 
-  // Tag a WebContents created for a print preview or background printing so
+  // Tags a WebContents created for a print preview or background printing so
   // that it shows up in the task manager. Calling this function creates a
   // PrintingTag, and attaches it to |web_contents|. If an instance is already
   // attached, this does nothing. The resulting tag does not have to be cleaned
   // up by the caller, as it is owned by |web_contents|.
   static void CreateForPrintingContents(content::WebContents* web_contents);
 
-  // Tag a WebContents owned by a GuestViewBase so that it shows up in the
+#if BUILDFLAG(ENABLE_GUEST_VIEW)
+  // Tags a WebContents owned by a GuestViewBase so that it shows up in the
   // task manager. Calling this function creates a GuestTag, and attaches it to
   // |web_contents|. If an instance is already attached, this does nothing. The
   // resulting tag does not have to be cleaned up by the caller, as it is owned
   // by |web_contents|.
   static void CreateForGuestContents(content::WebContents* web_contents);
+#endif  // BUILDFLAG(ENABLE_GUEST_VIEW)
 
-  // Tag a WebContents that belongs to |extension| so that it shows up in the
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  // Tags a WebContents that belongs to |extension| so that it shows up in the
   // task manager. Calling this function creates a ExtensionTag, and attaches
   // it to |web_contents|. If an instance is already attached, this does
   // nothing. The resulting tag does not have to be cleaned up by the caller,
@@ -76,16 +102,10 @@ class WebContentsTags {
   // |web_contents| must be of a non-tab, non-guest view, or
   // non-background contents Extension.
   static void CreateForExtension(content::WebContents* web_contents,
-                                 extensions::ViewType view_type);
+                                 extensions::mojom::ViewType view_type);
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
-  // Tag a WebContents created for a Portal so that it shows up in the task
-  // manager. Calling this function creates a PortalTag, and attaches it to
-  // |web_contents|. If an instance is already attached, this does nothing.
-  // The resulting tag does not have to be cleaned up by the caller, as it is
-  // owned by |web_contents|.
-  static void CreateForPortal(content::WebContents* web_contents);
-
-  // Tag a WebContents created for a tool so that it shows up in the task
+  // Tags a WebContents created for a tool so that it shows up in the task
   // manager. Calling this function creates a ToolTag, and attaches it to
   // |web_contents|. If an instance is already attached, this does nothing. The
   // resulting tag does not have to be cleaned up by the caller, as it is owned
@@ -93,14 +113,21 @@ class WebContentsTags {
   static void CreateForToolContents(content::WebContents* web_contents,
                                     int tool_name);
 
+  // Tags a WebContents created for a web app so that it shows up in the task
+  // manager. Calling this function creates a WebAppTag, and attaches it to
+  // |web_contents|. If an instance is already attached, this does nothing (but
+  // caller may choose to overwrite the existing tag). The resulting tag does
+  // not have to be cleaned up by the caller, as it is owned by |web_contents|.
+  // |app_id| is the string ID of the web app.
+  static void CreateForWebApp(content::WebContents* web_contents,
+                              const webapps::AppId& app_id,
+                              const bool is_isolated_web_app);
+
   // Clears the task-manager tag, created by any of the above functions, from
   // the given |web_contents| if any.
   // Clearing the tag is necessary only when you need to re-tag an existing
   // WebContents, to indicate a change in ownership.
   static void ClearTag(content::WebContents* web_contents);
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(WebContentsTags);
 };
 
 }  // namespace task_manager

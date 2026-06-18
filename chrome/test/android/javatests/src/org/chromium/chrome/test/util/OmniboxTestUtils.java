@@ -1,334 +1,805 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.test.util;
 
+import static androidx.test.espresso.Espresso.onView;
+import static androidx.test.espresso.action.ViewActions.click;
+import static androidx.test.espresso.contrib.RecyclerViewActions.actionOnItemAtPosition;
+import static androidx.test.espresso.matcher.ViewMatchers.withId;
+
+import static org.chromium.base.test.transit.Triggers.noopTo;
+
+import android.app.Activity;
+import android.app.Instrumentation;
 import android.content.Context;
+import android.os.SystemClock;
+import android.text.Editable;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 
-import org.hamcrest.Matchers;
-import org.junit.Assert;
+import androidx.activity.ComponentActivity;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.test.espresso.UiController;
+import androidx.test.espresso.ViewAction;
+import androidx.test.platform.app.InstrumentationRegistry;
 
+import org.hamcrest.Matcher;
+import org.hamcrest.Matchers;
+
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.transit.ConditionStatus;
+import org.chromium.base.test.transit.UiThreadCondition;
+import org.chromium.base.test.util.Criteria;
+import org.chromium.base.test.util.CriteriaHelper;
+import org.chromium.base.test.util.KeyUtils;
+import org.chromium.base.ui.KeyboardUtils;
+import org.chromium.chrome.R;
 import org.chromium.chrome.browser.omnibox.LocationBarLayout;
 import org.chromium.chrome.browser.omnibox.UrlBar;
-import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteController;
 import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteController.OnSuggestionsReceivedListener;
-import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinatorTestUtils;
-import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteResult;
-import org.chromium.chrome.browser.omnibox.suggestions.OmniboxSuggestion;
+import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinator;
+import org.chromium.chrome.browser.omnibox.suggestions.DropdownItemViewInfo;
+import org.chromium.chrome.browser.omnibox.suggestions.OmniboxSuggestionsContainer;
 import org.chromium.chrome.browser.omnibox.suggestions.OmniboxSuggestionsDropdown;
-import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.content_public.browser.test.util.Criteria;
-import org.chromium.content_public.browser.test.util.CriteriaHelper;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
-import org.chromium.content_public.browser.test.util.TouchCommon;
+import org.chromium.chrome.browser.omnibox.suggestions.base.ActionChipsProperties;
+import org.chromium.chrome.browser.searchwidget.SearchActivity;
+import org.chromium.chrome.browser.toolbar.top.ToolbarLayout;
+import org.chromium.components.omnibox.AutocompleteMatch;
+import org.chromium.components.omnibox.AutocompleteResult;
+import org.chromium.components.omnibox.AutocompleteStopReason;
+import org.chromium.components.omnibox.suggestions.OmniboxSuggestionUiType;
+import org.chromium.ui.modelutil.MVCListAdapter.ModelList;
+import org.chromium.ui.modelutil.PropertyModel;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
-/**
- * Utility methods and classes for testing the Omnibox.
- */
+/** Utility methods and classes for testing the Omnibox. */
 public class OmniboxTestUtils {
-    private OmniboxTestUtils() {}
+    /** Value indicating that the index is not valid. */
+    public static final int SUGGESTION_INDEX_INVALID = -1;
+
+    private final @NonNull Activity mActivity;
+    private final @NonNull LocationBarLayout mLocationBar;
+    private final @NonNull AutocompleteCoordinator mAutocomplete;
+    private final @NonNull UrlBar mUrlBar;
+    private final @NonNull Instrumentation mInstrumentation;
+    private final @Nullable ToolbarLayout mToolbar;
 
     /**
-     * Builder for the data structure that describes a set of omnibox results for a given
-     * query.
+     * Invokes a specific ViewAction on an {@link
+     * org.chromium.chrome.browser.omnibox.suggestions.action.OmniboxAction} at specific position.
+     *
+     * <p>This class can be chained with {@link
+     * androidx.test.espresso.contrib.RecyclerViewActions.actionOnItemAtPosition}.
      */
-    public static class TestSuggestionResultsBuilder {
-        private final List<SuggestionsResultBuilder> mSuggestionBuilders =
-                new ArrayList<SuggestionsResultBuilder>();
-        private String mTextShownFor;
+    private static class ActionOnOmniboxActionAtPosition implements ViewAction {
+        private final ViewAction mAction;
 
-        public TestSuggestionResultsBuilder addSuggestions(SuggestionsResultBuilder suggestions) {
-            mSuggestionBuilders.add(suggestions);
-            return this;
+        public ActionOnOmniboxActionAtPosition(int position, ViewAction action) {
+            mAction = actionOnItemAtPosition(position, action);
         }
 
-        public TestSuggestionResultsBuilder setTextShownFor(String text) {
-            mTextShownFor = text;
-            return this;
+        @Override
+        public Matcher<View> getConstraints() {
+            return withId(R.id.omnibox_actions_carousel);
         }
 
-        private List<SuggestionsResult> buildSuggestionsList() {
-            ArrayList<SuggestionsResult> suggestions = new ArrayList<SuggestionsResult>();
-            for (int i = 0; i < mSuggestionBuilders.size(); i++) {
-                suggestions.add(mSuggestionBuilders.get(i).build());
-            }
-            return suggestions;
+        @Override
+        public String getDescription() {
+            return mAction.getDescription();
+        }
+
+        @Override
+        public void perform(UiController uiController, View view) {
+            mAction.perform(uiController, view.findViewById(R.id.omnibox_actions_carousel));
         }
     }
 
     /**
-     * Builder for {@link SuggestionsResult}.
+     * Create a ViewAction that can be executed on a Suggestion with Action Chips.
+     *
+     * @param position the index of an {@link
+     *     org.chromium.chrome.browser.omnibox.suggestions.action.OmniboxAction},
+     * @param action the action to perform.
      */
-    public static class SuggestionsResultBuilder {
-        private final List<OmniboxSuggestion> mSuggestions = new ArrayList<OmniboxSuggestion>();
-        private String mAutocompleteText;
+    public static ViewAction actionOnOmniboxActionAtPosition(int position, ViewAction action) {
+        return new ActionOnOmniboxActionAtPosition(position, action);
+    }
 
-        public SuggestionsResultBuilder addSuggestion(OmniboxSuggestion suggestion) {
-            mSuggestions.add(suggestion);
-            return this;
-        }
+    /**
+     * Class describing individual suggestion, delivering access to broad range of information.
+     *
+     * @param <T> The type of suggestion view.
+     */
+    public static class SuggestionInfo<T extends View> {
+        public final int index;
+        public final @OmniboxSuggestionUiType int type;
+        public final @NonNull AutocompleteMatch suggestion;
+        public final @NonNull PropertyModel model;
+        public final @NonNull T view;
 
-        public SuggestionsResultBuilder setAutocompleteText(String autocompleteText) {
-            mAutocompleteText = autocompleteText;
-            return this;
-        }
-
-        private SuggestionsResult build() {
-            return new SuggestionsResult(mSuggestions, mAutocompleteText);
+        protected SuggestionInfo(
+                int index,
+                @OmniboxSuggestionUiType int type,
+                @NonNull AutocompleteMatch suggestion,
+                @NonNull PropertyModel model,
+                @NonNull T view) {
+            this.index = index;
+            this.type = type;
+            this.suggestion = suggestion;
+            this.model = model;
+            this.view = view;
         }
     }
 
     /**
-     * Data structure that contains the test data to be sent to
-     * {@link OnSuggestionsReceivedListener#onSuggestionsReceived}.
+     * Create a new OmniboxTestUtils instance from supplied activity.
+     *
+     * <p>This method should be called if the caller intends to retain the instance for a longer
+     * period of time. For short or single-time uses, consider calling static method below.
      */
-    public static class SuggestionsResult {
-        private final List<OmniboxSuggestion> mSuggestions;
-        private final String mAutocompleteText;
-
-        public SuggestionsResult(List<OmniboxSuggestion> suggestions, String autocompleteText) {
-            mSuggestions = suggestions;
-            mAutocompleteText = autocompleteText;
+    public OmniboxTestUtils(@NonNull Activity activity) {
+        mActivity = activity;
+        if (activity instanceof SearchActivity) {
+            mLocationBar = mActivity.findViewById(R.id.search_location_bar);
+            mToolbar = null;
+        } else {
+            mLocationBar = mActivity.findViewById(R.id.location_bar);
+            mToolbar = mActivity.findViewById(R.id.toolbar);
         }
+        mAutocomplete = mLocationBar.getAutocompleteCoordinator();
+        mUrlBar = mActivity.findViewById(R.id.url_bar);
+        mInstrumentation = InstrumentationRegistry.getInstrumentation();
+    }
+
+    /** Disables any live autocompletion, making Omnibox behave like a standard text field. */
+    public void disableLiveAutocompletion() {
+        ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.setTextChangeListener(null));
     }
 
     /**
-     * Builds the necessary suggestion input for a TestAutocompleteController.
+     * Waits for all the animations to complete. Allows any preceding operation to kick off an
+     * animation.
      */
-    public static Map<String, List<SuggestionsResult>> buildSuggestionMap(
-            TestSuggestionResultsBuilder... builders) {
-        Map<String, List<SuggestionsResult>> suggestionMap =
-                new HashMap<String, List<SuggestionsResult>>();
-        for (TestSuggestionResultsBuilder builder : builders) {
-            suggestionMap.put(builder.mTextShownFor, builder.buildSuggestionsList());
-        }
-        return suggestionMap;
+    public void waitAnimationsComplete() {
+        // Note: SearchActivity has no toolbar and no animations, but we still need to
+        // give keyboard a bit of time to pop up (requested with delay).
+        do {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        } while (mToolbar != null && mToolbar.isAnimationRunningForTesting());
     }
 
     /**
-     * AutocompleteController instance that allows for easy testing.
+     * Check that the Omnibox reaches the expected focus state.
+     *
+     * <p>Note: this is known to cause issues with tests that run animations.
+     *
+     * @param active Whether the Omnibox is expected to have focus or not.
      */
-    public static class TestAutocompleteController extends AutocompleteController {
-        private final View mView;
-        private final Map<String, List<SuggestionsResult>> mSuggestions;
-        private Runnable mSuggestionsDispatcher;
-        private int mZeroSuggestCalledCount;
-        private boolean mStartAutocompleteCalled;
-
-        public TestAutocompleteController(View view, OnSuggestionsReceivedListener listener,
-                Map<String, List<SuggestionsResult>> suggestions) {
-            mView = view;
-            mSuggestions = suggestions;
-            setOnSuggestionsReceivedListener(listener);
-        }
-
-        @Override
-        public void start(Profile profile, String url, int pageClassification, final String text,
-                int cursorPosition, boolean preventInlineAutocomplete, String queryTileId,
-                boolean isQueryStartedFromTiles) {
-            mStartAutocompleteCalled = true;
-            mSuggestionsDispatcher = new Runnable() {
-                @Override
-                public void run() {
-                    List<SuggestionsResult> suggestions =
-                            mSuggestions.get(text.toLowerCase(Locale.US));
-                    if (suggestions == null) return;
-
-                    for (int i = 0; i < suggestions.size(); i++) {
-                        AutocompleteResult autocompleteResult =
-                                new AutocompleteResult(suggestions.get(i).mSuggestions, null);
-                        onSuggestionsReceived(
-                                autocompleteResult, suggestions.get(i).mAutocompleteText, 0);
-                    }
-                }
-            };
-            mView.post(mSuggestionsDispatcher);
-        }
-
-        @Override
-        public void startZeroSuggest(Profile profile, String omniboxText, String url,
-                int pageClassification, String title) {
-            mZeroSuggestCalledCount++;
-        }
-
-        public int numZeroSuggestRequests() {
-            return mZeroSuggestCalledCount;
-        }
-
-        public boolean isStartAutocompleteCalled() {
-            return mStartAutocompleteCalled;
-        }
-
-        @Override
-        public void stop(boolean clear) {
-            if (mSuggestionsDispatcher != null) mView.removeCallbacks(mSuggestionsDispatcher);
-            mSuggestionsDispatcher = null;
-        }
-
-        @Override
-        public void setProfile(Profile profile) {}
-    }
-
-    /**
-     * AutocompleteController instance that will trigger no suggestions.
-     */
-    public static class StubAutocompleteController extends AutocompleteController {
-        public StubAutocompleteController() {
-            super();
-            setOnSuggestionsReceivedListener(new OnSuggestionsReceivedListener() {
-                @Override
-                public void onSuggestionsReceived(
-                        AutocompleteResult autocompleteResult, String inlineAutocompleteText) {
-                    Assert.fail("No autocomplete suggestions should be received");
-                }
-            });
-        }
-
-        @Override
-        public void start(Profile profile, String url, int pageClassification, String text,
-                int cursorPosition, boolean preventInlineAutocomplete, String queryTileId,
-                boolean isQueryStartedFromTiles) {}
-
-        @Override
-        public void startZeroSuggest(Profile profile, String omniboxText, String url,
-                int pageClassification, String title) {}
-
-        @Override
-        public void stop(boolean clear) {}
-
-        @Override
-        public void setProfile(Profile profile) {}
-    }
-
-    /**
-     * Checks and verifies that the URL bar can request and release focus X times without issue.
-     * @param urlBar The view to focus.
-     * @param times The number of times focus should be requested and released.
-     */
-    public static void checkUrlBarRefocus(UrlBar urlBar, int times) {
-        for (int i = 0; i < times; i++) {
-            toggleUrlBarFocus(urlBar, true);
-            waitForFocusAndKeyboardActive(urlBar, true);
-            toggleUrlBarFocus(urlBar, false);
-            waitForFocusAndKeyboardActive(urlBar, false);
-        }
+    public void checkFocus(boolean active) {
+        noopTo().waitFor(
+                        new UrlBarHasFocusCondition(mUrlBar, active),
+                        active
+                                ? new InputMethodManagerIsActiveCondition(
+                                        mUrlBar, active) // Programmatic (Stable)
+                                : new SoftKeyboardShowingCondition(
+                                        mUrlBar, active)); // Physical (Bypasses Stickiness)
     }
 
     /**
      * Determines whether the UrlBar currently has focus.
-     * @param urlBar The view to check focus on.
+     *
      * @return Whether the UrlBar has focus.
      */
-    public static boolean doesUrlBarHaveFocus(final UrlBar urlBar) {
-        return TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Boolean>() {
-            @Override
-            public Boolean call() {
-                return urlBar.hasFocus();
-            }
-        });
+    public boolean getFocus() {
+        return ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.hasFocus());
     }
 
-    private static boolean isKeyboardActiveForView(final View view) {
-        return TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Boolean>() {
-            @Override
-            public Boolean call() {
-                InputMethodManager imm = (InputMethodManager) view.getContext().getSystemService(
-                        Context.INPUT_METHOD_SERVICE);
-                return imm.isActive(view);
-            }
-        });
+    /** Request the Omnibox focus and wait for soft keyboard to show. */
+    public void requestFocus() {
+        // During early startup (before completion of its first onDraw), the UrlBar
+        // is not focusable. Tests have to wait for that to happen before trying to focus it.
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    Criteria.checkThat("Omnibox not shown.", mUrlBar.isShown(), Matchers.is(true));
+                    Criteria.checkThat(
+                            "Omnibox not focusable.", mUrlBar.isFocusable(), Matchers.is(true));
+                    if (!mUrlBar.hasFocus()) mUrlBar.requestFocus();
+                    Criteria.checkThat(
+                            "Omnibox is focused.", mUrlBar.hasFocus(), Matchers.is(true));
+                });
     }
 
     /**
-     * Toggles the focus state for the passed in UrlBar.
-     * @param urlBar The UrlBar whose focus is being changed.
-     * @param gainFocus Whether focus should be requested or cleared.
+     * Clear the Omnibox focus and wait until keyboard is dismissed. Performs no action if the
+     * Omnibox is already unfocused.
      */
-    public static void toggleUrlBarFocus(final UrlBar urlBar, boolean gainFocus) {
-        if (gainFocus) {
-            // During early startup (before completion of its first onDraw), the UrlBar
-            // is not focusable. Tests have to wait for that to happen before trying to focus it.
-            CriteriaHelper.pollUiThread(() -> {
-                Criteria.checkThat("UrlBar not shown.", urlBar.isShown(), Matchers.is(true));
-                Criteria.checkThat(
-                        "UrlBar not focusable.", urlBar.isFocusable(), Matchers.is(true));
-            });
+    public void clearFocus() {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    if (mUrlBar.hasFocus()) {
+                        ((ComponentActivity) mActivity)
+                                .getOnBackPressedDispatcher()
+                                .onBackPressed();
+                    }
+                });
+        // Needed to complete scrolling the UrlBar to TLD.
+        mInstrumentation.waitForIdleSync();
+        checkFocus(false);
+    }
 
-            TouchCommon.singleClickView(urlBar);
-        } else {
-            TestThreadUtils.runOnUiThreadBlocking(() -> { urlBar.clearFocus(); });
+    /**
+     * Set the suggestions to the Omnibox to display.
+     *
+     * @param autocompleteResult The set of suggestions will be displayed on the Omnibox dropdown
+     *     list.
+     */
+    public void setSuggestions(AutocompleteResult autocompleteResult) {
+        checkFocus(true);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    OnSuggestionsReceivedListener listener =
+                            mAutocomplete.getSuggestionsReceivedListenerForTest();
+                    listener.onSuggestionsReceived(autocompleteResult, true);
+                });
+    }
+
+    /** Waits for a non-empty list of omnibox suggestions to be shown. */
+    public void checkSuggestionsShown() {
+        noopTo().waitFor(new SuggestionsShownCondition(mLocationBar));
+    }
+
+    /**
+     * Stops any subsequent AutocompleteResults from being generated. Ensures that no subsequent
+     * asynchronous AutocompleteResults could tamper with test execution.
+     */
+    public void waitForAutocomplete() {
+        AtomicLong previousId = new AtomicLong(-1);
+        AtomicLong count = new AtomicLong();
+
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    long currentId = mAutocomplete.getCurrentNativeAutocompleteResult();
+                    // Suggestions have changed as a result of a recent push.
+                    // Reset the counter and monitor for possible updates.
+                    if (currentId != previousId.get()) {
+                        previousId.set(currentId);
+                        count.set(0);
+                        return false;
+                    }
+
+                    // Check that nothing has changed 3 times in a row, rejecting everything that
+                    // arrives late. This guarantees that the suggestions will not change and the
+                    // list can be used for testing purposes.
+                    if (count.incrementAndGet() < 3) return false;
+                    mAutocomplete.stopAutocompleteForTest(AutocompleteStopReason.INTERACTION);
+                    return true;
+                });
+    }
+
+    /**
+     * Return the first suggestion of the specific type.
+     *
+     * @param type The type of suggestion to check.
+     */
+    public <T extends View> SuggestionInfo<T> findSuggestionWithType(
+            @OmniboxSuggestionUiType int type) {
+        return findSuggestion(info -> info.type == type);
+    }
+
+    /** Return the first suggestion that features Action Chips. */
+    public @Nullable <T extends View> SuggestionInfo<T> findSuggestionWithActionChips() {
+        return findSuggestion(
+                info -> {
+                    if (!info.model
+                            .getAllSetProperties()
+                            .contains(ActionChipsProperties.ACTION_CHIPS)) {
+                        return false;
+                    }
+                    return info.model.get(ActionChipsProperties.ACTION_CHIPS) != null;
+                });
+    }
+
+    /**
+     * Return the first suggestion that meets requirements set by supplied filter.
+     *
+     * @param filter The filter to use to identify appropriate suggestion type.
+     */
+    public @Nullable <T extends View> SuggestionInfo<T> findSuggestion(
+            @NonNull Function<DropdownItemViewInfo, Boolean> filter) {
+        checkSuggestionsShown();
+        AtomicReference<SuggestionInfo<T>> result = new AtomicReference<>();
+
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    OmniboxSuggestionsContainer container =
+                            mAutocomplete.getSuggestionsContainerForTest();
+                    OmniboxSuggestionsDropdown dropdown =
+                            container.findViewById(R.id.omnibox_suggestions_dropdown);
+
+                    ModelList currentModels = mAutocomplete.getSuggestionModelListForTest();
+                    for (int i = 0; i < currentModels.size(); i++) {
+                        DropdownItemViewInfo info = (DropdownItemViewInfo) currentModels.get(i);
+                        // Callers are responsible for ensuring the view type matches T.
+                        @SuppressWarnings("unchecked")
+                        T view = (T) dropdown.getDropdownItemViewForTest(i);
+                        if (filter.apply(info) && view != null) {
+                            result.set(
+                                    new SuggestionInfo<>(
+                                            i,
+                                            info.type,
+                                            mAutocomplete.getSuggestionAt(i),
+                                            info.model,
+                                            view));
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+
+        return result.get();
+    }
+
+    /**
+     * Type text in the Omnibox. Requires that the Omnibox is focused ahead of call.
+     *
+     * @param text Text to be "typed" in the Omnibox.
+     * @param execute Whether to perform the default action after typing text (ie. press the "go"
+     *     button/enter key).
+     */
+    public void typeText(String text, boolean execute) {
+        checkFocus(true);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> KeyUtils.typeTextIntoView(mInstrumentation, mUrlBar, text));
+
+        if (execute) sendKey(KeyEvent.KEYCODE_ENTER);
+    }
+
+    /**
+     * Send key event to the Omnibox. Requires that the Omnibox is focused.
+     *
+     * @param keyCode The Key code to send to the Omnibox.
+     */
+    public void sendKey(int keyCode) {
+        sendKey(keyCode, 0);
+    }
+
+    /**
+     * Send key event to the Omnibox. Requires that the Omnibox is focused.
+     *
+     * @param keyCode The Key code to send to the Omnibox.
+     * @param modifiers Additional modifiers pressed with the key (shift, alt, ...).
+     */
+    public void sendKey(int keyCode, int modifiers) {
+        checkFocus(true);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    var currentTime = SystemClock.uptimeMillis();
+                    var event =
+                            new KeyEvent(
+                                    /* downTime= */ currentTime,
+                                    /* eventTime= */ currentTime,
+                                    KeyEvent.ACTION_DOWN,
+                                    keyCode,
+                                    /* repeat= */ 0,
+                                    modifiers);
+                    if (!mUrlBar.dispatchKeyEventPreIme(event)) mUrlBar.dispatchKeyEvent(event);
+
+                    event =
+                            new KeyEvent(
+                                    /* downTime= */ currentTime,
+                                    /* eventTime= */ currentTime,
+                                    KeyEvent.ACTION_UP,
+                                    keyCode,
+                                    /* repeat= */ 0,
+                                    modifiers);
+
+                    if (!mUrlBar.dispatchKeyEventPreIme(event)) mUrlBar.dispatchKeyEvent(event);
+                });
+    }
+
+    /**
+     * Specify the text to be shown in the Omnibox. Cancels all autocompletion. Use this to
+     * initialize the state of the Omnibox, but avoid using this to validate any behavior.
+     *
+     * @param userText The text to be shown in the Omnibox.
+     */
+    public void setText(String userText) {
+        checkFocus(true);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.setText(userText);
+                    // Push this to the model as well.
+                    mUrlBar.setAutocompleteText(userText, "", null, null);
+                });
+        checkText(Matchers.equalTo(userText), null);
+    }
+
+    /**
+     * Commit text to the Omnibox, as if it was supplied by the soft keyboard
+     * autocorrect/autocomplete feature.
+     *
+     * @param textToCommit The text to supply as if it was supplied by Soft Keyboard.
+     * @param commitAsAutocomplete Whether the text should be applied as autocompletion (true) or
+     *     autocorrection (false). Note that autocorrection works only if the Omnibox is currently
+     *     composing text.
+     */
+    public void commitText(@NonNull String textToCommit, boolean commitAsAutocomplete) {
+        checkFocus(true);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    InputConnection conn = mUrlBar.getInputConnection();
+                    if (commitAsAutocomplete) conn.finishComposingText();
+                    // Value of 1 always advance the cursor to the position after the full text
+                    // being inserted.
+                    conn.commitText(textToCommit, 1);
+                });
+    }
+
+    /**
+     * Specify the text to be offered as an inline autocompletion for the current user input.
+     *
+     * @param autocompleteText The suggested autocompletion for the text.
+     * @param additionalText The additional autocompletion for the text.
+     */
+    public void setAutocompleteText(String autocompleteText, @Nullable String additionalText) {
+        checkFocus(true);
+
+        AtomicReference<String> userText = new AtomicReference<>();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    userText.set(mUrlBar.getTextWithoutAutocomplete());
+                    mUrlBar.setAutocompleteText(
+                            userText.get(), autocompleteText, additionalText, null);
+                });
+        checkText(
+                Matchers.equalTo(userText.get()),
+                Matchers.equalTo(userText.get() + autocompleteText));
+    }
+
+    /**
+     * Verify the text content of the Omnibox.
+     *
+     * @param textMatcher Matcher checking the content of the Omnibox.
+     * @param autocompleteTextMatcher Optional Matcher for autocompletion.
+     */
+    public void checkText(
+            @NonNull Matcher<String> textMatcher,
+            @Nullable Matcher<String> autocompleteTextMatcher) {
+        checkText(textMatcher, autocompleteTextMatcher, null);
+    }
+
+    /**
+     * Verify the text content of the Omnibox.
+     *
+     * @param textMatcher Matcher checking the content of the Omnibox.
+     * @param autocompleteTextMatcher Optional Matcher for autocompletion.
+     * @param additionalTextMatcher Optional Matcher for additional text.
+     */
+    public void checkText(
+            @NonNull Matcher<String> textMatcher,
+            @Nullable Matcher<String> autocompleteTextMatcher,
+            @Nullable Matcher<String> additionalTextMatcher) {
+        checkText(textMatcher, autocompleteTextMatcher, additionalTextMatcher, null, null);
+    }
+
+    /**
+     * Verify the text content of the Omnibox.
+     *
+     * @param textMatcher Matcher checking the content of the Omnibox.
+     * @param autocompleteTextMatcher Optional Matcher for autocompletion.
+     * @param additionalTextMatcher Optional Matcher for additional text.
+     * @param autocompleteSelectionStart Matcher for Autocomplete's start position.
+     * @param autocompleteSelectionEnd Matcher for Autocomplete's end position.
+     */
+    public void checkText(
+            @NonNull Matcher<String> textMatcher,
+            @Nullable Matcher<String> autocompleteTextMatcher,
+            @Nullable Matcher<String> additionalTextMatcher,
+            int autocompleteSelectionStart,
+            int autocompleteSelectionEnd) {
+        checkText(
+                textMatcher,
+                autocompleteTextMatcher,
+                additionalTextMatcher,
+                Matchers.is(autocompleteSelectionStart),
+                Matchers.is(autocompleteSelectionEnd));
+    }
+
+    /**
+     * Verify the text content of the Omnibox.
+     *
+     * @param textMatcher Matcher checking the content of the Omnibox.
+     * @param autocompleteTextMatcher Optional Matcher for autocompletion.
+     * @param additionalTextMatcher Optional Matcher for additional text.
+     * @param autocompleteSelectionStart Optional Matcher for Autocomplete's start position.
+     * @param autocompleteSelectionEnd Optional Matcher for Autocomplete's end position.
+     */
+    public void checkText(
+            @NonNull Matcher<String> textMatcher,
+            @Nullable Matcher<String> autocompleteTextMatcher,
+            @Nullable Matcher<String> additionalTextMatcher,
+            @Nullable Matcher<Integer> autocompleteSelectionStart,
+            @Nullable Matcher<Integer> autocompleteSelectionEnd) {
+        waitAnimationsComplete();
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    if (mUrlBar.hasFocus()) {
+                        // URL bar is focused. Match against the edit state.
+                        Criteria.checkThat(
+                                "Text without autocomplete should match",
+                                mUrlBar.getTextWithoutAutocomplete(),
+                                textMatcher);
+
+                        Criteria.checkThat(
+                                "Unexpected Autocomplete state",
+                                mUrlBar.hasAutocomplete(),
+                                Matchers.is(autocompleteTextMatcher != null));
+
+                        if (autocompleteTextMatcher != null) {
+                            Criteria.checkThat(
+                                    "Text with autocomplete should match",
+                                    mUrlBar.getTextWithAutocomplete(),
+                                    autocompleteTextMatcher);
+                        }
+
+                        if (additionalTextMatcher != null) {
+                            String additionalText = mUrlBar.getAdditionalText();
+                            Criteria.checkThat(
+                                    "Additional Text should match",
+                                    additionalText != null ? additionalText : "",
+                                    additionalTextMatcher);
+                        }
+
+                        if (autocompleteSelectionStart != null) {
+                            Criteria.checkThat(
+                                    "Autocomplete Selection start",
+                                    mUrlBar.getSelectionStart(),
+                                    autocompleteSelectionStart);
+                        }
+
+                        // TODO(crbug.com/40211958): Investigate why AutocompleteSelectionEnd was
+                        // never enforced and why it doesn't work, then possibly re-enable the
+                        // logic below: if (autocompleteSelectionEnd != null) {
+                        //     Criteria.checkThat("Autocomplete Selection end",
+                        //             mUrlBar.getSelectionEnd(),
+                        //             autocompleteSelectionEnd);
+                        // }
+                    } else {
+                        // URL bar is not focused. Match against the content.
+                        Criteria.checkThat(mUrlBar.getText().toString(), textMatcher);
+                    }
+                });
+    }
+
+    /**
+     * @return The text contents of the omnibox (without the Autocomplete part).
+     */
+    public String getText() {
+        return ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.getTextWithoutAutocomplete());
+    }
+
+    /**
+     * Verify the Composing text in the Omnibox.
+     *
+     * <p>Unlike Autocomplete, Composing text enables more finegrained control of the edited text.
+     * This is particularly relevant to certain family of languages and input connections, where
+     * individual characters or sequences are modified with subsequent keystrokes (eg. T9).
+     *
+     * @param textMatcher Matcher for the Omnibox content containing composed text.
+     * @param composingRangeStart Character index where the compose begins.
+     * @param composingRangeEnd Character index where the compose ends.
+     */
+    public void checkComposingText(
+            @NonNull Matcher<String> textMatcher, int composingRangeStart, int composingRangeEnd) {
+        checkFocus(true);
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    // Confirm no autocompletion during active compose.
+                    Criteria.checkThat(
+                            "Composing text should have no Autocompletion",
+                            mUrlBar.hasAutocomplete(),
+                            Matchers.is(false));
+
+                    // Here getTextWithAutocomplete, getTextWithoutAutocomplete and getText should
+                    // all return the same content. Since we already know there's no
+                    // autocompletion, we can skip the additional validation.
+                    Editable composingText = mUrlBar.getText();
+                    Criteria.checkThat(composingText.toString(), textMatcher);
+
+                    Criteria.checkThat(
+                            "Composing Span Start",
+                            BaseInputConnection.getComposingSpanStart(composingText),
+                            Matchers.is(composingRangeStart));
+                    Criteria.checkThat(
+                            "Composing Span End",
+                            BaseInputConnection.getComposingSpanEnd(composingText),
+                            Matchers.is(composingRangeEnd));
+                });
+    }
+
+    /**
+     * Set the Composing text in the Omnibox.
+     *
+     * <p>Assumes that the supplied composingRegionStart is a valid text position (does not verify
+     * test's sanity).
+     *
+     * @param composingText The composing text to apply.
+     * @param composingRegionStart The placement inside the existing text where composing starts.
+     * @param composingRegionEnd The placement inside the existing text where composing ends.
+     */
+    public void setComposingText(
+            @NonNull String composingText, int composingRegionStart, int composingRegionEnd) {
+        checkFocus(true);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    InputConnection conn = mUrlBar.getInputConnection();
+                    conn.setComposingRegion(composingRegionStart, composingRegionEnd);
+                    conn.setComposingText(
+                            composingText, /* newCursorPosition= */ composingText.length());
+                });
+    }
+
+    /**
+     * Click the n-th action.
+     *
+     * @param suggestionIndex the index of suggestion to click an action on.
+     * @param actionIndex the index of action to invoke.
+     */
+    public void clickOnAction(int suggestionIndex, int actionIndex) {
+        onView(withId(R.id.omnibox_suggestions_dropdown))
+                .perform(
+                        actionOnItemAtPosition(
+                                suggestionIndex,
+                                OmniboxTestUtils.actionOnOmniboxActionAtPosition(
+                                        actionIndex, click())));
+    }
+
+    /** Checks that the suggestions dropdown is shown. */
+    public static class SuggestionsShownCondition extends UiThreadCondition {
+        private final LocationBarLayout mLocationBar;
+
+        public SuggestionsShownCondition(LocationBarLayout locationBar) {
+            mLocationBar = locationBar;
+        }
+
+        @Override
+        protected ConditionStatus checkWithSuppliers() {
+            OmniboxSuggestionsContainer container =
+                    mLocationBar.getAutocompleteCoordinator().getSuggestionsContainerForTest();
+            OmniboxSuggestionsDropdown dropdown =
+                    (OmniboxSuggestionsDropdown)
+                            mLocationBar.getAutocompleteCoordinator().getSuggestionsDropdown();
+            if (container == null || dropdown == null) {
+                return notFulfilled("suggestion list is null");
+            }
+            if (!container.isShown() || !dropdown.isShown()) {
+                return notFulfilled("suggestion list is not shown");
+            }
+            int count = dropdown.getDropdownItemViewCountForTest();
+            return whether(count > 0, "suggestion list has %d entries", count);
+        }
+
+        @Override
+        public String buildDescription() {
+            return "Suggestions shown";
         }
     }
 
-    /**
-     * Waits for the UrlBar to have the expected focus state.
-     *
-     * @param urlBar The UrlBar whose focus is being inspected.
-     * @param active Whether the UrlBar is expected to have focus or not.
-     */
-    public static void waitForFocusAndKeyboardActive(final UrlBar urlBar, final boolean active) {
-        CriteriaHelper.pollInstrumentationThread(() -> {
-            Criteria.checkThat("URL Bar did not have expected focus", doesUrlBarHaveFocus(urlBar),
-                    Matchers.is(active));
-            Criteria.checkThat("Keyboard did not reach expected state",
-                    isKeyboardActiveForView(urlBar), Matchers.is(active));
-        });
+    /** Checks that the suggestions dropdown is hidden. */
+    public static class SuggestionsNotShownCondition extends UiThreadCondition {
+        private final LocationBarLayout mLocationBar;
+
+        public SuggestionsNotShownCondition(LocationBarLayout locationBar) {
+            mLocationBar = locationBar;
+        }
+
+        @Override
+        protected ConditionStatus checkWithSuppliers() {
+            OmniboxSuggestionsContainer container =
+                    mLocationBar.getAutocompleteCoordinator().getSuggestionsContainerForTest();
+            OmniboxSuggestionsDropdown dropdown =
+                    (OmniboxSuggestionsDropdown)
+                            mLocationBar.getAutocompleteCoordinator().getSuggestionsDropdown();
+            // Suggestions list can't be showing if it's not constructed.
+            if (container == null || dropdown == null) {
+                return fulfilled();
+            }
+            if (container.isShown() && dropdown.isShown()) {
+                return notFulfilled("suggestion list is shown");
+            }
+            int entries = dropdown.getDropdownItemViewCountForTest();
+            if (dropdown.getDropdownItemViewCountForTest() > 0) {
+                return notFulfilled("suggestion list has %d entries", entries);
+            }
+            return fulfilled();
+        }
+
+        @Override
+        public String buildDescription() {
+            return "Suggestions not shown";
+        }
     }
 
-    /**
-     * Waits for a non-empty list of omnibox suggestions is shown.
-     *
-     * @param locationBar The LocationBar who owns the suggestions.
-     */
-    public static void waitForOmniboxSuggestions(final LocationBarLayout locationBar) {
-        waitForOmniboxSuggestions(locationBar, CriteriaHelper.DEFAULT_MAX_TIME_TO_POLL);
+    public static class UrlBarHasFocusCondition extends UiThreadCondition {
+        private final UrlBar mUrlBar;
+        private final boolean mExpectHasFocus;
+
+        public UrlBarHasFocusCondition(UrlBar urlBar) {
+            this(urlBar, /* expectHasFocus= */ true);
+        }
+
+        public UrlBarHasFocusCondition(UrlBar urlBar, boolean expectHasFocus) {
+            mUrlBar = urlBar;
+            mExpectHasFocus = expectHasFocus;
+        }
+
+        @Override
+        protected ConditionStatus checkWithSuppliers() {
+            return whether(mUrlBar.hasFocus() == mExpectHasFocus);
+        }
+
+        @Override
+        public String buildDescription() {
+            return mExpectHasFocus ? "UrlBar has focus" : "UrlBar does not have focus";
+        }
     }
 
-    /**
-     * Waits for a non-empty list of omnibox suggestions is shown.
-     *
-     * @param locationBar The LocationBar who owns the suggestions.
-     * @param maxPollTimeMs The maximum time to wait for the suggestions to be visible.
-     */
-    public static void waitForOmniboxSuggestions(
-            final LocationBarLayout locationBar, long maxPollTimeMs) {
-        CriteriaHelper.pollUiThread(() -> {
-            OmniboxSuggestionsDropdown suggestionsDropdown =
-                    AutocompleteCoordinatorTestUtils.getSuggestionsDropdown(
-                            locationBar.getAutocompleteCoordinator());
-            Criteria.checkThat(
-                    "suggestion list is null", suggestionsDropdown, Matchers.notNullValue());
-            Criteria.checkThat("suggestion list is not shown",
-                    suggestionsDropdown.getViewGroup().isShown(), Matchers.is(true));
-            Criteria.checkThat("suggestion list has no entries", suggestionsDropdown.getItemCount(),
-                    Matchers.greaterThan(0));
-        }, maxPollTimeMs, CriteriaHelper.DEFAULT_POLLING_INTERVAL);
+    public static class InputMethodManagerIsActiveCondition extends UiThreadCondition {
+        private final View mView;
+        private final boolean mExpectActive;
+
+        public InputMethodManagerIsActiveCondition(View view) {
+            this(view, /* expectActive= */ true);
+        }
+
+        public InputMethodManagerIsActiveCondition(View view, boolean expectActive) {
+            mView = view;
+            mExpectActive = expectActive;
+        }
+
+        @Override
+        protected ConditionStatus checkWithSuppliers() {
+            InputMethodManager imm =
+                    (InputMethodManager)
+                            mView.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            return whether(imm.isActive(mView) == mExpectActive);
+        }
+
+        @Override
+        public String buildDescription() {
+            return mExpectActive
+                    ? "InputMethodManager is active"
+                    : "InputMethodManager is not active";
+        }
     }
 
-    /**
-     * Waits for a suggestion list to be shown with a specified number of entries.
-     * @param locationBar The LocationBar who owns the suggestions.
-     * @param expectedCount The number of suggestions expected to be shown.
-     */
-    public static void waitForOmniboxSuggestions(
-            final LocationBarLayout locationBar, final int expectedCount) {
-        CriteriaHelper.pollUiThread(() -> {
-            OmniboxSuggestionsDropdown suggestionsDropdown =
-                    AutocompleteCoordinatorTestUtils.getSuggestionsDropdown(
-                            locationBar.getAutocompleteCoordinator());
-            Criteria.checkThat(suggestionsDropdown, Matchers.notNullValue());
-            Criteria.checkThat(suggestionsDropdown.getViewGroup().isShown(), Matchers.is(true));
-            Criteria.checkThat(suggestionsDropdown.getItemCount(), Matchers.is(expectedCount));
-        });
+    public static class SoftKeyboardShowingCondition extends UiThreadCondition {
+        private final View mView;
+        private final boolean mExpectShowing;
+
+        public SoftKeyboardShowingCondition(View view, boolean expectShowing) {
+            mView = view;
+            mExpectShowing = expectShowing;
+        }
+
+        @Override
+        protected ConditionStatus checkWithSuppliers() {
+            boolean isShowing = KeyboardUtils.isAndroidSoftKeyboardShowing(mView);
+            return whether(isShowing == mExpectShowing, "Keyboard showing is %b", isShowing);
+        }
+
+        @Override
+        public String buildDescription() {
+            return mExpectShowing ? "Soft keyboard is showing" : "Soft keyboard is not showing";
+        }
     }
 }

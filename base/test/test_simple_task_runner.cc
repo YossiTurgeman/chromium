@@ -1,14 +1,15 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/test/test_simple_task_runner.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/check.h"
 #include "base/memory/ptr_util.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 
 namespace base {
 
@@ -85,19 +86,22 @@ void TestSimpleTaskRunner::RunPendingTasks() {
 
   // Multiple test task runners can share the same thread for determinism in
   // unit tests. Make sure this TestSimpleTaskRunner's tasks run in its scope.
-  ScopedClosureRunner undo_override;
-  if (!ThreadTaskRunnerHandle::IsSet() ||
-      ThreadTaskRunnerHandle::Get() != this) {
-    undo_override = ThreadTaskRunnerHandle::OverrideForTesting(this);
+  std::optional<SingleThreadTaskRunner::CurrentHandleOverrideForTesting>
+      ttrh_override;
+  if (!SingleThreadTaskRunner::HasCurrentDefault() ||
+      SingleThreadTaskRunner::GetCurrentDefault() != this) {
+    ttrh_override.emplace(this);
   }
 
-  for (auto& task : tasks_to_run)
+  for (auto& task : tasks_to_run) {
     std::move(task.task).Run();
+  }
 }
 
 void TestSimpleTaskRunner::RunUntilIdle() {
-  while (HasPendingTask())
+  while (HasPendingTask()) {
     RunPendingTasks();
+  }
 }
 
 }  // namespace base

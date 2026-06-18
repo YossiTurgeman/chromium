@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as ProtocolClient from 'devtools/core/protocol_client/protocol_client.js';
+
 (async function() {
   TestRunner.addResult(`Tests that computed styles are cached across synchronous requests.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <style>
@@ -27,17 +31,17 @@
   var backendCallCount = 0;
   var nodeId;
 
-  function onBackendCall(sessionId, domain, method, params) {
-    if (method === 'CSS.getComputedStyleForNode' && params.nodeId === nodeId)
+  function onBackendCall(params) {
+    if (params.nodeId === nodeId)
       ++backendCallCount;
   }
 
   function step1(node) {
     var callsLeft = 2;
     nodeId = node.id;
-    TestRunner.addSniffer(Protocol.SessionRouter.prototype, 'sendMessage', onBackendCall, true);
-    TestRunner.cssModel.computedStylePromise(nodeId).then(styleCallback);
-    TestRunner.cssModel.computedStylePromise(nodeId).then(styleCallback);
+    TestRunner.addSniffer(TestRunner.CSSAgent, 'invoke_getComputedStyleForNode', onBackendCall, true);
+    TestRunner.cssModel.getComputedStyle(nodeId).then(styleCallback);
+    TestRunner.cssModel.getComputedStyle(nodeId).then(styleCallback);
     function styleCallback() {
       if (--callsLeft)
         return;
@@ -47,7 +51,7 @@
   }
 
   function step2() {
-    TestRunner.cssModel.computedStylePromise(nodeId).then(callback);
+    TestRunner.cssModel.getComputedStyle(nodeId).then(callback);
     function callback() {
       TestRunner.addResult('# of backend calls sent [style update + another request]: ' + backendCallCount);
       TestRunner.completeTest();

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,9 +12,12 @@
 #include <vector>
 
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string16.h"
+#include "build/build_config.h"
+#include "components/prefs/pref_change_registrar.h"
+#include "components/translate/core/browser/translate_metrics_logger.h"
+#include "components/translate/core/browser/translate_ui_delegate.h"
 #include "components/translate/core/common/translate_errors.h"
 
 namespace translate {
@@ -23,62 +26,40 @@ class LanguageState;
 class TranslateDriver;
 class TranslateManager;
 class TranslatePrefs;
+class TranslateUILanguagesManager;
 
-// The TranslateUIDelegate is a generic delegate for UI which offers Translate
-// feature to the user.
-
-// Note that the API offers a way to read/set language values through array
-// indices. Such indices are only valid as long as the visual representation
-// (infobar, bubble...) is in sync with the underlying language list which
-// can actually change at run time (see translate_language_list.h).
-// It is recommended that languages are only updated by language code to
-// avoid bugs like crbug.com/555124
-
+// The delegate for the Full Page Translate Bubble UI.
 class TranslateUIDelegate {
  public:
-  static const size_t kNoIndex = static_cast<size_t>(-1);
-
   TranslateUIDelegate(const base::WeakPtr<TranslateManager>& translate_manager,
-                      const std::string& original_language,
+                      const std::string& source_language,
                       const std::string& target_language);
-  virtual ~TranslateUIDelegate();
+
+  TranslateUIDelegate(const TranslateUIDelegate&) = delete;
+  TranslateUIDelegate& operator=(const TranslateUIDelegate&) = delete;
+
+  ~TranslateUIDelegate();
+
+  TranslateUILanguagesManager* translate_ui_languages_manager() {
+    return translate_ui_languages_manager_.get();
+  }
+
+  // Wrappers for equivalent TranslateUILanguagesManager APIs used to add
+  // Full Page Translate related logging.
+  void UpdateAndRecordSourceLanguageIndex(size_t language_index);
+  void UpdateAndRecordSourceLanguage(const std::string& language_code);
+  void UpdateAndRecordTargetLanguageIndex(size_t language_index);
+  void UpdateAndRecordTargetLanguage(const std::string& language_code);
 
   // Handles when an error message is shown.
-  void OnErrorShown(TranslateErrors::Type error_type);
+  void OnErrorShown(TranslateErrors error_type);
 
   // Returns the LanguageState associated with this object.
-  const LanguageState& GetLanguageState();
+  const LanguageState* GetLanguageState();
 
-  // Returns the number of languages supported.
-  size_t GetNumberOfLanguages() const;
-
-  // Returns the original language index.
-  size_t GetOriginalLanguageIndex() const { return original_language_index_; }
-
-  // Returns the original language code.
-  std::string GetOriginalLanguageCode() const;
-
-  // Updates the original language index.
-  void UpdateOriginalLanguageIndex(size_t language_index);
-
-  void UpdateOriginalLanguage(const std::string& language_code);
-
-  // Returns the target language index.
-  size_t GetTargetLanguageIndex() const { return target_language_index_; }
-
-  // Returns the target language code.
-  std::string GetTargetLanguageCode() const;
-
-  // Updates the target language index.
-  void UpdateTargetLanguageIndex(size_t language_index);
-
-  void UpdateTargetLanguage(const std::string& language_code);
-
-  // Returns the ISO code for the language at |index|.
-  std::string GetLanguageCodeAt(size_t index) const;
-
-  // Returns the displayable name for the language at |index|.
-  base::string16 GetLanguageNameAt(size_t index) const;
+  // Translatable content languages.
+  void GetContentLanguagesCodes(
+      std::vector<std::string>* content_languages_codes) const;
 
   // Starts translating the current page.
   void Translate();
@@ -104,22 +85,24 @@ class TranslateUIDelegate {
   // Sets the value if the current language is blocked.
   void SetLanguageBlocked(bool value);
 
-  // Returns true if the current webpage is blacklisted.
-  bool IsSiteBlacklisted() const;
+  // Returns true if the current webpage should never be prompted for
+  // translation.
+  bool IsSiteOnNeverPromptList() const;
 
-  // Returns true if the site of the current webpage can be blacklisted.
-  bool CanBlacklistSite() const;
+  // Returns true if the site of the current webpage can be put on the never
+  // prompt list.
+  bool CanAddSiteToNeverPromptList() const;
 
-  // Sets the blacklisted state for the host of the current page. If
-  // value is true, the current host will be blacklisted and translations
-  // will not be offered for that site.
-  void SetSiteBlacklist(bool value);
+  // Sets the never-prompt state for the host of the current page. If
+  // value is true, the current host will be blocklisted and translation
+  // prompts will not show for that site.
+  void SetNeverPromptSite(bool value);
 
-  // Returns true if the webpage in the current original language should be
+  // Returns true if the webpage in the current source language should be
   // translated into the current target language automatically.
   bool ShouldAlwaysTranslate() const;
 
-  // Sets the value if the webpage in the current original language should be
+  // Sets the value if the webpage in the current source language should be
   // translated into the current target language automatically.
   void SetAlwaysTranslate(bool value);
 
@@ -134,40 +117,59 @@ class TranslateUIDelegate {
   // the language, when we think the user wants that functionality.
   bool ShouldShowNeverTranslateShortcut() const;
 
+  // Updates metrics when a user's action closes the translate UI. This includes
+  // when: the user presses the 'x' button, the user selects to never translate
+  // this site, and the user selects to never translate this language.
+  void OnUIClosedByUser();
+
+  // Records a high level UI interaction.
+  void ReportUIInteraction(UIInteraction ui_interaction);
+
+  // Updates TranslateMetricsLogger state of whether Translate UI is currently
+  // shown.
+  void ReportUIChange(bool is_ui_shown);
+
+  // If kContentLanguagesinLanguagePicker is on, build a vector of content
+  // languages data.
+  void MaybeSetContentLanguages();
+
+  // Returns whether or not the current session is off-the-record.
+  bool IsIncognito() const;
+
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+  // Returns whether "Always Translate Language" should automatically trigger.
+  // If true, this method has the side effect of mutating some prefs.
+  bool ShouldAutoAlwaysTranslate();
+
+  // Returns whether "Never Translate Language" should automatically trigger.
+  // If true, this method has the side effect of mutating some prefs.
+  bool ShouldAutoNeverTranslate();
+#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+
  private:
   FRIEND_TEST_ALL_PREFIXES(TranslateUIDelegateTest, GetPageHost);
+  FRIEND_TEST_ALL_PREFIXES(TranslateUIDelegateTest, MaybeSetContentLanguages);
 
   // Gets the host of the page being translated, or an empty string if no URL is
   // associated with the current page.
   std::string GetPageHost() const;
 
-  TranslateDriver* translate_driver_;
+  const TranslateDriver* GetTranslateDriver() const;
+
   base::WeakPtr<TranslateManager> translate_manager_;
 
-  // ISO code (en, fr...) -> displayable name in the current locale
-  typedef std::pair<std::string, base::string16> LanguageNamePair;
+  // Manages the Translate UI language list related APIs.
+  std::unique_ptr<TranslateUILanguagesManager> translate_ui_languages_manager_;
 
-  // The list supported languages for translation.
-  // The languages are sorted alphabetically based on the displayable name.
-  std::vector<LanguageNamePair> languages_;
+  // The list of language codes representing translatable user's setting
+  // languages. The languages are in order defined by the user.
+  std::vector<std::string> translatable_content_languages_codes_;
 
-  // The index for language the page is originally in.
-  size_t original_language_index_;
-
-  // The index for language the page is originally in that was originally
-  // reported (original_language_index_ changes if the user selects a new
-  // original language, but this one does not).  This is necessary to report
-  // language detection errors with the right original language even if the user
-  // changed the original language.
-  size_t initial_original_language_index_;
-
-  // The index for language the page should be translated to.
-  size_t target_language_index_;
-
-  // The translation related preferences.
+  // Translate related preferences.
   std::unique_ptr<TranslatePrefs> prefs_;
 
-  DISALLOW_COPY_AND_ASSIGN(TranslateUIDelegate);
+  // Listens to accept languages changes.
+  PrefChangeRegistrar pref_change_registrar_;
 };
 
 }  // namespace translate

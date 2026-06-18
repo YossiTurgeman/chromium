@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,17 +11,12 @@
 #include <map>
 #include <memory>
 
-#include "base/macros.h"
 #include "components/blocked_content/popup_blocker.h"
 #include "components/blocked_content/url_list_manager.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 #include "ui/base/window_open_disposition.h"
 #include "url/gurl.h"
-
-namespace content {
-class RenderFrameHost;
-}
 
 namespace blocked_content {
 class PopupNavigationDelegate;
@@ -56,6 +51,9 @@ class PopupBlockerTabHelper
     kMaxValue = kClickedThroughAbusive
   };
 
+  PopupBlockerTabHelper(const PopupBlockerTabHelper&) = delete;
+  PopupBlockerTabHelper& operator=(const PopupBlockerTabHelper&) = delete;
+
   ~PopupBlockerTabHelper() override;
 
   // Returns the number of blocked popups.
@@ -68,9 +66,12 @@ class PopupBlockerTabHelper
   // blocked popup will be opened as it was specified by renderer.
   void ShowBlockedPopup(int32_t popup_id, WindowOpenDisposition disposition);
 
+  // All blocked popups will be opened with the disposition defaulted to
+  // WindowOpenDisposition::CURRENT_TAB. Used only on Android.
+  void ShowAllBlockedPopups();
+
   // Adds a new blocked popup to the UI.
-  void AddBlockedPopup(content::RenderFrameHost* source_frame,
-                       std::unique_ptr<PopupNavigationDelegate> delegate,
+  void AddBlockedPopup(std::unique_ptr<PopupNavigationDelegate> delegate,
                        const blink::mojom::WindowFeatures& window_features,
                        PopupBlockType block_type);
 
@@ -101,8 +102,6 @@ class PopupBlockerTabHelper
   int32_t next_id_ = 0;
 
   WEB_CONTENTS_USER_DATA_KEY_DECL();
-
-  DISALLOW_COPY_AND_ASSIGN(PopupBlockerTabHelper);
 };
 
 }  // namespace blocked_content

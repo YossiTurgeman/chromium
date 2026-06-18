@@ -1,22 +1,23 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/constrained_window/constrained_window_views.h"
 
 #include <memory>
-#include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "build/build_config.h"
 #include "components/constrained_window/constrained_window_views_client.h"
 #include "components/web_modal/test_web_contents_modal_dialog_host.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/native_widget_types.h"
-#include "ui/views/border.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/views/test/test_views.h"
 #include "ui/views/test/views_test_base.h"
 #include "ui/views/widget/widget.h"
 #include "ui/views/window/dialog_delegate.h"
@@ -26,31 +27,16 @@ using views::Widget;
 namespace constrained_window {
 namespace {
 
-class DialogContents : public views::DialogDelegateView {
- public:
-  DialogContents() = default;
-  ~DialogContents() override = default;
-
-  void set_modal_type(ui::ModalType modal_type) { modal_type_ = modal_type; }
-
-  // DialogDelegateView:
-  views::View* GetContentsView() override { return this; }
-  gfx::Size GetMinimumSize() const override { return gfx::Size(); }
-
-  // WidgetDelegate:
-  ui::ModalType GetModalType() const override { return modal_type_; }
-
- private:
-  ui::ModalType modal_type_ = ui::MODAL_TYPE_NONE;
-
-  DISALLOW_COPY_AND_ASSIGN(DialogContents);
-};
-
 // Dummy client that returns a null modal dialog host and host view.
 class TestConstrainedWindowViewsClient
     : public constrained_window::ConstrainedWindowViewsClient {
  public:
   TestConstrainedWindowViewsClient() = default;
+
+  TestConstrainedWindowViewsClient(const TestConstrainedWindowViewsClient&) =
+      delete;
+  TestConstrainedWindowViewsClient& operator=(
+      const TestConstrainedWindowViewsClient&) = delete;
 
   // ConstrainedWindowViewsClient:
   web_modal::ModalDialogHost* GetModalDialogHost(
@@ -58,11 +44,8 @@ class TestConstrainedWindowViewsClient
     return nullptr;
   }
   gfx::NativeView GetDialogHostView(gfx::NativeWindow parent) override {
-    return nullptr;
+    return gfx::NativeView();
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(TestConstrainedWindowViewsClient);
 };
 
 // ViewsDelegate to provide context to dialog creation functions such as
@@ -71,6 +54,10 @@ class TestConstrainedWindowViewsClient
 class TestViewsDelegateWithContext : public views::TestViewsDelegate {
  public:
   TestViewsDelegateWithContext() = default;
+
+  TestViewsDelegateWithContext(const TestViewsDelegateWithContext&) = delete;
+  TestViewsDelegateWithContext& operator=(const TestViewsDelegateWithContext&) =
+      delete;
 
   void set_context(gfx::NativeWindow context) { context_ = context; }
 
@@ -84,44 +71,56 @@ class TestViewsDelegateWithContext : public views::TestViewsDelegate {
   }
 
  private:
-  gfx::NativeWindow context_ = nullptr;
-
-  DISALLOW_COPY_AND_ASSIGN(TestViewsDelegateWithContext);
+  gfx::NativeWindow context_ = gfx::NativeWindow();
 };
 
 class ConstrainedWindowViewsTest : public views::ViewsTestBase {
  public:
   ConstrainedWindowViewsTest() = default;
+
+  ConstrainedWindowViewsTest(const ConstrainedWindowViewsTest&) = delete;
+  ConstrainedWindowViewsTest& operator=(const ConstrainedWindowViewsTest&) =
+      delete;
+
   ~ConstrainedWindowViewsTest() override = default;
 
   void SetUp() override {
-    auto views_delegate = std::make_unique<TestViewsDelegateWithContext>();
-
     // set_views_delegate() must be called before SetUp(), and GetContext() is
-    // null before that, so take a reference.
-    TestViewsDelegateWithContext* views_delegate_weak = views_delegate.get();
-    set_views_delegate(std::move(views_delegate));
+    // null before that.
+    auto* views_delegate =
+        set_views_delegate(std::make_unique<TestViewsDelegateWithContext>());
     views::ViewsTestBase::SetUp();
-    views_delegate_weak->set_context(GetContext());
+    views_delegate->set_context(GetContext());
 
-    contents_ = new DialogContents;
+    delegate_ = std::make_unique<views::DialogDelegate>();
+    auto contents = std::make_unique<views::StaticSizedView>();
+    contents_ = delegate_->SetContentsView(std::move(contents));
+
     dialog_ = views::DialogDelegate::CreateDialogWidget(
-        contents_, GetContext(), nullptr);
-    dialog_host_.reset(new web_modal::TestWebContentsModalDialogHost(
-        dialog_->GetNativeView()));
+        delegate_.get(), GetContext(), gfx::NativeView());
+
+    // Create a dialog host sufficiently large enough to accommodate dialog
+    // size changes during testing.
+    dialog_host_widget_ =
+        CreateTestWidget(views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET);
+    dialog_host_widget_->SetBounds(GetPrimaryDisplayWorkArea());
+    dialog_host_ = std::make_unique<web_modal::TestWebContentsModalDialogHost>(
+        dialog_host_widget_->GetNativeView());
     dialog_host_->set_max_dialog_size(gfx::Size(5000, 5000));
 
     // Make sure the dialog size is dominated by the preferred size of the
     // contents.
-    gfx::Size preferred_size = dialog()->GetRootView()->GetPreferredSize();
-    preferred_size.Enlarge(500, 500);
-    contents()->SetPreferredSize(preferred_size);
+    gfx::Size preferred_size = dialog()->GetRootView()->GetPreferredSize({});
+    preferred_size.Enlarge(300, 300);
+    contents_->SetPreferredSize(preferred_size);
   }
 
   void TearDown() override {
     contents_ = nullptr;
+    dialog_host_widget_->CloseNow();
+    dialog_host_widget_.reset();
     dialog_host_.reset();
-    dialog_->CloseNow();
+    dialog_.ExtractAsDangling()->CloseNow();
     ViewsTestBase::TearDown();
   }
 
@@ -129,18 +128,24 @@ class ConstrainedWindowViewsTest : public views::ViewsTestBase {
     return dialog()->GetRootView()->GetBoundsInScreen().size();
   }
 
-  DialogContents* contents() { return contents_; }
+  gfx::Rect GetPrimaryDisplayWorkArea() const {
+    return display::Screen::Get()->GetPrimaryDisplay().work_area();
+  }
+
+  views::DialogDelegate* delegate() { return delegate_.get(); }
+  views::View* contents() { return contents_; }
   web_modal::TestWebContentsModalDialogHost* dialog_host() {
     return dialog_host_.get();
   }
+  Widget* dialog_host_widget() { return dialog_host_widget_.get(); }
   Widget* dialog() { return dialog_; }
 
  private:
-  DialogContents* contents_ = nullptr;
+  std::unique_ptr<views::DialogDelegate> delegate_;
+  raw_ptr<views::View> contents_ = nullptr;
   std::unique_ptr<web_modal::TestWebContentsModalDialogHost> dialog_host_;
-  Widget* dialog_ = nullptr;
-
-  DISALLOW_COPY_AND_ASSIGN(ConstrainedWindowViewsTest);
+  std::unique_ptr<views::Widget> dialog_host_widget_;
+  raw_ptr<Widget> dialog_ = nullptr;
 };
 
 }  // namespace
@@ -150,7 +155,7 @@ class ConstrainedWindowViewsTest : public views::ViewsTestBase {
 TEST_F(ConstrainedWindowViewsTest, GrowModalDialogSize) {
   UpdateWidgetModalDialogPosition(dialog(), dialog_host());
   gfx::Size expected_size = GetDialogSize();
-  gfx::Size preferred_size = contents()->GetPreferredSize();
+  gfx::Size preferred_size = contents()->GetPreferredSize({});
   expected_size.Enlarge(50, 50);
   preferred_size.Enlarge(50, 50);
   contents()->SetPreferredSize(preferred_size);
@@ -163,7 +168,7 @@ TEST_F(ConstrainedWindowViewsTest, GrowModalDialogSize) {
 TEST_F(ConstrainedWindowViewsTest, ShrinkModalDialogSize) {
   UpdateWidgetModalDialogPosition(dialog(), dialog_host());
   gfx::Size expected_size = GetDialogSize();
-  gfx::Size preferred_size = contents()->GetPreferredSize();
+  gfx::Size preferred_size = contents()->GetPreferredSize({});
   expected_size.Enlarge(-50, -50);
   preferred_size.Enlarge(-50, -50);
   contents()->SetPreferredSize(preferred_size);
@@ -196,9 +201,8 @@ TEST_F(ConstrainedWindowViewsTest, MaximumWebContentsDialogSize) {
   // specified by the dialog host, so add it to the size the dialog is expected
   // to occupy.
   gfx::Size expected_size = max_dialog_size;
-  views::Border* border = dialog()->non_client_view()->frame_view()->border();
-  if (border)
-    expected_size.Enlarge(0, border->GetInsets().top());
+  expected_size.Enlarge(
+      0, dialog()->non_client_view()->frame_view()->GetInsets().top());
   EXPECT_EQ(expected_size.ToString(), GetDialogSize().ToString());
 
   // Increasing the maximum dialog size should bring the dialog back to its
@@ -211,7 +215,7 @@ TEST_F(ConstrainedWindowViewsTest, MaximumWebContentsDialogSize) {
 
 // Ensure CreateBrowserModalDialogViews() works correctly with a null parent.
 // Flaky on Win10. https://crbug.com/1009182
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #define MAYBE_NullModalParent DISABLED_NullModalParent
 #else
 #define MAYBE_NullModalParent NullModalParent
@@ -222,46 +226,68 @@ TEST_F(ConstrainedWindowViewsTest, MAYBE_NullModalParent) {
 
   SetConstrainedWindowViewsClient(
       std::make_unique<TestConstrainedWindowViewsClient>());
-  DialogContents* contents = new DialogContents;
-  contents->set_modal_type(ui::MODAL_TYPE_WINDOW);
-  views::Widget* widget = CreateBrowserModalDialogViews(contents, nullptr);
+  auto delegate = std::make_unique<views::DialogDelegate>();
+  delegate->SetModalType(ui::mojom::ModalType::kWindow);
+  views::Widget* widget =
+      CreateBrowserModalDialogViews(delegate.get(), gfx::NativeWindow());
   widget->Show();
   EXPECT_TRUE(widget->IsVisible());
   widget->CloseNow();
 }
 
-// Make sure dialogs presented off-screen are properly clamped to the nearest
-// screen.
-TEST_F(ConstrainedWindowViewsTest, ClampDialogToNearestDisplay) {
-  // Make sure the dialog will fit fully on the display
+// Make sure dialogs hosted by windows partially off-screen are positioned to
+// maximize overlap with the screen's working area while respecting the host
+// window's viewport.
+TEST_F(ConstrainedWindowViewsTest, ClampDialogHostWindowToNearestDisplay) {
+  views::Widget* host_widget = dialog_host_widget();
+  const gfx::Rect original_host_bounds = host_widget->GetWindowBoundsInScreen();
+
+  // Make sure the dialog will fit fully within the bounds of the window.
+  constexpr gfx::Size kPreferredDialogSize = gfx::Size(200, 100);
   contents()->SetPreferredSize(gfx::Size(200, 100));
+  EXPECT_LE(kPreferredDialogSize.width(), original_host_bounds.width());
+  EXPECT_LE(kPreferredDialogSize.height(), original_host_bounds.height());
 
   // First, make sure the host and dialog are sized and positioned.
   UpdateWebContentsModalDialogPosition(dialog(), dialog_host());
 
-  const display::Screen* screen = display::Screen::GetScreen();
+  const display::Screen* screen = display::Screen::Get();
   const display::Display display = screen->GetPrimaryDisplay();
   // Within the tests there is only 1 display. Error if that ever changes.
   EXPECT_EQ(screen->GetNumDisplays(), 1);
   const gfx::Rect extents = display.work_area();
 
-  // Move the host completely off the screen.
-  views::Widget* host_widget =
-      views::Widget::GetWidgetForNativeView(dialog_host()->GetHostView());
+  // Move the host partially off-screen.
   gfx::Rect host_bounds = host_widget->GetWindowBoundsInScreen();
-  host_bounds.set_origin(gfx::Point(extents.right(), extents.bottom()));
+  host_bounds.set_origin(
+      gfx::Point(extents.right() - 50, extents.bottom() - 50));
   host_widget->SetBounds(host_bounds);
 
-  // Make sure the host is fully off the screen.
-  EXPECT_FALSE(extents.Intersects(host_widget->GetWindowBoundsInScreen()));
+  // The host window should be positioned partially off-screen.
+  EXPECT_TRUE(extents.Intersects(host_widget->GetWindowBoundsInScreen()));
+  EXPECT_FALSE(extents.Contains(host_widget->GetWindowBoundsInScreen()));
 
-  // Now reposition the modal dialog into the display.
+  // Update the dialog's position.
   UpdateWebContentsModalDialogPosition(dialog(), dialog_host());
-
   const gfx::Rect dialog_bounds = dialog()->GetRootView()->GetBoundsInScreen();
 
-  // The dialog should now be fully on the display.
-  EXPECT_TRUE(extents.Contains(dialog_bounds));
+  if (SupportsGlobalScreenCoordinates()) {
+    if (PlatformClipsChildrenToViewport()) {
+      // The dialog should be repositioned to maximize overlap with the display
+      // whilst remaining within the host window's bounds.
+      EXPECT_TRUE(extents.Intersects(dialog_bounds));
+      EXPECT_TRUE(host_bounds.Intersects(dialog_bounds));
+      EXPECT_EQ(dialog_bounds.origin(), host_bounds.origin());
+    } else {
+      // The dialog should be repositioned completely onto the display.
+      EXPECT_TRUE(extents.Contains(dialog_bounds));
+    }
+  } else {
+    // The dialog with bounds set using relative positioning should fit within
+    // the bounds of the host.
+    host_bounds.set_origin({0, 0});
+    EXPECT_TRUE(host_bounds.Contains(dialog_bounds));
+  }
 }
 
 }  // namespace constrained_window

@@ -1,9 +1,10 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -13,15 +14,24 @@
 #include <type_traits>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/compiler_specific.h"
+#include "base/files/file.h"
 #include "base/files/file_path.h"
+#include "base/files/file_path_watcher.h"
+#include "base/files/file_path_watcher_inotify.h"
+#include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/notreached.h"
 #include "base/posix/eintr_wrapper.h"
-#include "base/test/bind_test_util.h"
+#include "base/run_loop.h"
+#include "base/strings/cstring_view.h"
+#include "base/test/bind.h"
+#include "base/test/task_environment.h"
 #include "build/build_config.h"
 #include "sandbox/linux/bpf_dsl/bpf_dsl.h"
 #include "sandbox/linux/bpf_dsl/policy.h"
@@ -34,6 +44,7 @@
 #include "sandbox/linux/syscall_broker/broker_file_permission.h"
 #include "sandbox/linux/syscall_broker/broker_process.h"
 #include "sandbox/linux/system_headers/linux_seccomp.h"
+#include "sandbox/linux/system_headers/linux_stat.h"
 #include "sandbox/linux/system_headers/linux_syscalls.h"
 #include "sandbox/linux/tests/scoped_temporary_file.h"
 #include "sandbox/linux/tests/test_utils.h"
@@ -44,10 +55,14 @@
 namespace sandbox {
 
 using bpf_dsl::Allow;
+using bpf_dsl::Arg;
+using bpf_dsl::Error;
+using bpf_dsl::If;
 using bpf_dsl::ResultExpr;
 using bpf_dsl::Trap;
 
 using BrokerProcess = syscall_broker::BrokerProcess;
+using BrokerType = syscall_broker::BrokerProcess::BrokerType;
 using BrokerCommandSet = syscall_broker::BrokerCommandSet;
 using BrokerFilePermission = syscall_broker::BrokerFilePermission;
 
@@ -55,23 +70,28 @@ using BrokerFilePermission = syscall_broker::BrokerFilePermission;
 
 class InitializedOpenBroker {
  public:
-  InitializedOpenBroker() {
+  explicit InitializedOpenBroker(
+      BrokerType broker_type = BrokerType::SIGNAL_BASED) {
     syscall_broker::BrokerCommandSet command_set;
     command_set.set(syscall_broker::COMMAND_OPEN);
     command_set.set(syscall_broker::COMMAND_ACCESS);
     std::vector<BrokerFilePermission> permissions = {
         BrokerFilePermission::ReadOnly("/proc/allowed"),
         BrokerFilePermission::ReadOnly("/proc/cpuinfo")};
-    broker_process_ =
-        std::make_unique<BrokerProcess>(EPERM, command_set, permissions);
-    BPF_ASSERT(broker_process_->Init(base::BindOnce([]() { return true; })));
+    broker_process_ = std::make_unique<BrokerProcess>(
+        syscall_broker::BrokerSandboxConfig(command_set, permissions, EPERM),
+        broker_type);
+    BPF_ASSERT(broker_process_->Fork(base::BindOnce(
+        [](const syscall_broker::BrokerSandboxConfig&) { return true; })));
   }
+
+  InitializedOpenBroker(const InitializedOpenBroker&) = delete;
+  InitializedOpenBroker& operator=(const InitializedOpenBroker&) = delete;
 
   BrokerProcess* broker_process() const { return broker_process_.get(); }
 
  private:
   std::unique_ptr<BrokerProcess> broker_process_;
-  DISALLOW_COPY_AND_ASSIGN(InitializedOpenBroker);
 };
 
 intptr_t BrokerOpenTrapHandler(const struct arch_seccomp_data& args,
@@ -80,6 +100,7 @@ intptr_t BrokerOpenTrapHandler(const struct arch_seccomp_data& args,
   BrokerProcess* broker_process = static_cast<BrokerProcess*>(aux);
   switch (args.nr) {
     case __NR_faccessat:  // access is a wrapper of faccessat in android
+    case __NR_faccessat2:
       BPF_ASSERT(static_cast<int>(args.args[0]) == AT_FDCWD);
       return broker_process->GetBrokerClientSignalBased()->Access(
           reinterpret_cast<const char*>(args.args[1]),
@@ -112,6 +133,10 @@ intptr_t BrokerOpenTrapHandler(const struct arch_seccomp_data& args,
 class DenyOpenPolicy : public bpf_dsl::Policy {
  public:
   explicit DenyOpenPolicy(InitializedOpenBroker* iob) : iob_(iob) {}
+
+  DenyOpenPolicy(const DenyOpenPolicy&) = delete;
+  DenyOpenPolicy& operator=(const DenyOpenPolicy&) = delete;
+
   ~DenyOpenPolicy() override {}
 
   ResultExpr EvaluateSyscall(int sysno) const override {
@@ -119,6 +144,7 @@ class DenyOpenPolicy : public bpf_dsl::Policy {
 
     switch (sysno) {
       case __NR_faccessat:
+      case __NR_faccessat2:
 #if defined(__NR_access)
       case __NR_access:
 #endif
@@ -135,9 +161,7 @@ class DenyOpenPolicy : public bpf_dsl::Policy {
   }
 
  private:
-  InitializedOpenBroker* iob_;
-
-  DISALLOW_COPY_AND_ASSIGN(DenyOpenPolicy);
+  raw_ptr<InitializedOpenBroker> iob_;
 };
 
 // We use a InitializedOpenBroker class, so that we can run unsandboxed
@@ -200,6 +224,26 @@ namespace {
 // not accept this as a valid error number. E.g. bionic accepts up to 255, glibc
 // and musl up to 4096.
 const int kFakeErrnoSentinel = 254;
+
+void ConvertKernelStatToLibcStat(default_stat_struct& in_stat,
+                                 struct stat& out_stat) {
+  out_stat.st_dev = in_stat.st_dev;
+  out_stat.st_ino = in_stat.st_ino;
+  out_stat.st_mode = in_stat.st_mode;
+  out_stat.st_nlink = in_stat.st_nlink;
+  out_stat.st_uid = in_stat.st_uid;
+  out_stat.st_gid = in_stat.st_gid;
+  out_stat.st_rdev = in_stat.st_rdev;
+  out_stat.st_size = in_stat.st_size;
+  out_stat.st_blksize = in_stat.st_blksize;
+  out_stat.st_blocks = in_stat.st_blocks;
+  out_stat.st_atim.tv_sec = in_stat.st_atime_;
+  out_stat.st_atim.tv_nsec = in_stat.st_atime_nsec_;
+  out_stat.st_mtim.tv_sec = in_stat.st_mtime_;
+  out_stat.st_mtim.tv_nsec = in_stat.st_mtime_nsec_;
+  out_stat.st_ctim.tv_sec = in_stat.st_ctime_;
+  out_stat.st_ctim.tv_nsec = in_stat.st_ctime_nsec_;
+}
 }  // namespace
 
 // There are a variety of ways to make syscalls in a sandboxed process. One is
@@ -215,6 +259,10 @@ class Syscaller {
 
   virtual int Open(const char* filepath, int flags) = 0;
   virtual int Access(const char* filepath, int mode) = 0;
+  // NOTE: we use struct stat instead of default_stat_struct, to make the libc
+  // syscaller simpler. Copying from default_stat_struct (the structure returned
+  // from a stat sycall) to struct stat (the structure exposed by a libc to its
+  // users) is simpler than going in the opposite direction.
   virtual int Stat(const char* filepath,
                    bool follow_links,
                    struct stat* statbuf) = 0;
@@ -223,6 +271,7 @@ class Syscaller {
   virtual int Mkdir(const char* pathname, mode_t mode) = 0;
   virtual int Rmdir(const char* path) = 0;
   virtual int Unlink(const char* path) = 0;
+  virtual int InotifyAddWatch(int fd, const char* path, uint32_t mask) = 0;
 };
 
 class IPCSyscaller : public Syscaller {
@@ -241,8 +290,12 @@ class IPCSyscaller : public Syscaller {
   int Stat(const char* filepath,
            bool follow_links,
            struct stat* statbuf) override {
-    return broker_->GetBrokerClientSignalBased()->Stat(filepath, follow_links,
-                                                       statbuf);
+    default_stat_struct buf;
+    int ret = broker_->GetBrokerClientSignalBased()->DefaultStatForTesting(
+        filepath, follow_links, &buf);
+    if (ret >= 0)
+      ConvertKernelStatToLibcStat(buf, *statbuf);
+    return ret;
   }
 
   int Rename(const char* oldpath, const char* newpath) override {
@@ -265,13 +318,19 @@ class IPCSyscaller : public Syscaller {
     return broker_->GetBrokerClientSignalBased()->Unlink(path);
   }
 
+  int InotifyAddWatch(int fd, const char* path, uint32_t mask) override {
+    return broker_->GetBrokerClientSignalBased()->InotifyAddWatch(fd, path,
+                                                                  mask);
+  }
+
  private:
-  BrokerProcess* broker_;
+  raw_ptr<BrokerProcess> broker_;
 };
 
 // Only use syscall(...) on x64 to avoid having to reimplement a libc-like
 // layer that uses different syscalls on different architectures.
-#if (defined(OS_LINUX) || defined(OS_CHROMEOS) || defined(OS_ANDROID)) && \
+#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
+     BUILDFLAG(IS_ANDROID)) &&                        \
     defined(__x86_64__)
 #define DIRECT_SYSCALLER_ENABLED
 #endif
@@ -298,10 +357,13 @@ class DirectSyscaller : public Syscaller {
   int Stat(const char* filepath,
            bool follow_links,
            struct stat* statbuf) override {
-    int ret = follow_links ? syscall(__NR_stat, filepath, statbuf)
-                           : syscall(__NR_lstat, filepath, statbuf);
+    struct kernel_stat buf;
+    int ret = syscall(__NR_newfstatat, AT_FDCWD, filepath, &buf,
+                      follow_links ? 0 : AT_SYMLINK_NOFOLLOW);
     if (ret < 0)
       return -errno;
+
+    ConvertKernelStatToLibcStat(buf, *statbuf);
     return ret;
   }
 
@@ -335,6 +397,13 @@ class DirectSyscaller : public Syscaller {
 
   int Unlink(const char* path) override {
     int ret = syscall(__NR_unlink, path);
+    if (ret < 0)
+      return -errno;
+    return ret;
+  }
+
+  int InotifyAddWatch(int fd, const char* path, uint32_t mask) override {
+    int ret = syscall(__NR_inotify_add_watch, fd, path, mask);
     if (ret < 0)
       return -errno;
     return ret;
@@ -402,9 +471,21 @@ class LibcSyscaller : public Syscaller {
       return -errno;
     return ret;
   }
+
+  int InotifyAddWatch(int fd, const char* path, uint32_t mask) override {
+    int ret = inotify_add_watch(fd, path, mask);
+    if (ret < 0)
+      return -errno;
+    return ret;
+  }
 };
 
-enum class SyscallerType { IPCSyscaller = 0, DirectSyscaller, LibcSyscaller };
+enum class SyscallerType {
+  IPCSyscaller = 0,
+  DirectSyscaller,
+  LibcSyscaller,
+  NoSyscaller
+};
 
 // The testing infrastructure for the broker integration tests is built on the
 // same infrastructure that BPF_TEST or SANDBOX_TEST uses. Each individual test
@@ -457,22 +538,33 @@ class HandleFilesystemViaBrokerPolicy : public bpf_dsl::Policy {
   explicit HandleFilesystemViaBrokerPolicy(BrokerProcess* broker_process,
                                            int denied_errno)
       : broker_process_(broker_process), denied_errno_(denied_errno) {}
+
+  HandleFilesystemViaBrokerPolicy(const HandleFilesystemViaBrokerPolicy&) =
+      delete;
+  HandleFilesystemViaBrokerPolicy& operator=(
+      const HandleFilesystemViaBrokerPolicy&) = delete;
+
   ~HandleFilesystemViaBrokerPolicy() override = default;
 
   ResultExpr EvaluateSyscall(int sysno) const override {
     DCHECK(SandboxBPF::IsValidSyscallNumber(sysno));
     // Broker everything that we're supposed to broker.
     if (broker_process_->IsSyscallAllowed(sysno)) {
-      return sandbox::bpf_dsl::Trap(
-          sandbox::syscall_broker::BrokerProcess::SIGSYS_Handler,
-          broker_process_);
+      return Trap(BrokerClient::SIGSYS_Handler,
+                  broker_process_->GetBrokerClientSignalBased());
     }
 
     // Otherwise, if this is a syscall that takes a pathname but isn't an
     // allowed command, deny it.
     if (broker_process_->IsSyscallBrokerable(sysno,
                                              /*fast_check_in_client=*/false)) {
-      return bpf_dsl::Error(denied_errno_);
+      return Error(denied_errno_);
+    }
+
+    if (sysno == __NR_statx) {
+      const Arg<int> mask(3);
+      return If(mask == STATX_BASIC_STATS, Error(ENOSYS))
+          .Else(Error(denied_errno_));
     }
 
     // Allow everything else that doesn't take a pathname.
@@ -480,10 +572,8 @@ class HandleFilesystemViaBrokerPolicy : public bpf_dsl::Policy {
   }
 
  private:
-  BrokerProcess* broker_process_;
+  raw_ptr<BrokerProcess> broker_process_;
   int denied_errno_;
-
-  DISALLOW_COPY_AND_ASSIGN(HandleFilesystemViaBrokerPolicy);
 };
 }  // namespace syscall_broker
 
@@ -493,20 +583,25 @@ class BPFTesterBrokerDelegate : public BPFTesterDelegate {
  public:
   explicit BPFTesterBrokerDelegate(bool fast_check_in_client,
                                    BrokerTestDelegate* broker_test_delegate,
-                                   SyscallerType syscaller_type)
+                                   SyscallerType syscaller_type,
+                                   BrokerType broker_type)
       : fast_check_in_client_(fast_check_in_client),
         broker_test_delegate_(broker_test_delegate),
-        syscaller_type_(syscaller_type) {}
+        syscaller_type_(syscaller_type),
+        broker_type_(broker_type) {}
   ~BPFTesterBrokerDelegate() override = default;
 
   std::unique_ptr<bpf_dsl::Policy> GetSandboxBPFPolicy() override {
     BrokerTestDelegate::BrokerParams broker_params =
         broker_test_delegate_->ChildSetUpPreSandbox();
 
+    auto policy = std::make_optional<syscall_broker::BrokerSandboxConfig>(
+        broker_params.allowed_command_set, broker_params.permissions,
+        broker_params.denied_errno);
     broker_process_ = std::make_unique<BrokerProcess>(
-        broker_params.denied_errno, broker_params.allowed_command_set,
-        broker_params.permissions, fast_check_in_client_);
-    BPF_ASSERT(broker_process_->Init(base::BindOnce([]() { return true; })));
+        std::move(policy), broker_type_, fast_check_in_client_);
+    BPF_ASSERT(broker_process_->Fork(base::BindOnce(
+        [](const syscall_broker::BrokerSandboxConfig&) { return true; })));
     broker_test_delegate_->OnBrokerStarted(broker_process_->broker_pid());
 
     BPF_ASSERT(TestUtils::CurrentProcessHasChildren());
@@ -527,25 +622,30 @@ class BPFTesterBrokerDelegate : public BPFTesterDelegate {
     switch (syscaller_type_) {
       case SyscallerType::IPCSyscaller:
         syscaller_ = std::make_unique<IPCSyscaller>(broker_process_.get());
-        break;
+        return;
       case SyscallerType::DirectSyscaller:
 #if defined(DIRECT_SYSCALLER_ENABLED)
         syscaller_ = std::make_unique<DirectSyscaller>();
+        return;
 #else
-        CHECK(false) << "Requested instantiation of DirectSyscaller on a "
+        NOTREACHED() << "Requested instantiation of DirectSyscaller on a "
                         "platform that doesn't support it";
 #endif
-        break;
       case SyscallerType::LibcSyscaller:
         syscaller_ = std::make_unique<LibcSyscaller>();
-        break;
+        return;
+      case SyscallerType::NoSyscaller:
+        syscaller_ = nullptr;
+        return;
     }
+    NOTREACHED();
   }
 
  private:
   bool fast_check_in_client_;
-  BrokerTestDelegate* broker_test_delegate_;
+  raw_ptr<BrokerTestDelegate> broker_test_delegate_;
   SyscallerType syscaller_type_;
+  BrokerType broker_type_;
 
   std::unique_ptr<BrokerProcess> broker_process_;
   std::unique_ptr<Syscaller> syscaller_;
@@ -556,29 +656,35 @@ struct BrokerTestConfiguration {
   std::string test_name;
   bool fast_check_in_client;
   SyscallerType syscaller_type;
+  BrokerType broker_type;
 };
 
 // Lists out all the broker configurations we want to test.
 const std::vector<BrokerTestConfiguration> broker_test_configs = {
-    {"FastCheckInClient_IPCSyscaller", true, SyscallerType::IPCSyscaller},
+    {"FastCheckInClient_IPCSyscaller", true, SyscallerType::IPCSyscaller,
+     BrokerType::SIGNAL_BASED},
 #if defined(DIRECT_SYSCALLER_ENABLED)
-    {"FastCheckInClient_DirectSyscaller", true, SyscallerType::DirectSyscaller},
+    {"FastCheckInClient_DirectSyscaller", true, SyscallerType::DirectSyscaller,
+     BrokerType::SIGNAL_BASED},
 #endif
-    {"FastCheckInClient_LibcSyscaller", true, SyscallerType::LibcSyscaller},
-    {"NoFastCheckInClient_IPCSyscaller", false, SyscallerType::IPCSyscaller},
+    {"FastCheckInClient_LibcSyscaller", true, SyscallerType::LibcSyscaller,
+     BrokerType::SIGNAL_BASED},
+    {"NoFastCheckInClient_IPCSyscaller", false, SyscallerType::IPCSyscaller,
+     BrokerType::SIGNAL_BASED},
 #if defined(DIRECT_SYSCALLER_ENABLED)
     {"NoFastCheckInClient_DirectSyscaller", false,
-     SyscallerType::DirectSyscaller},
+     SyscallerType::DirectSyscaller, BrokerType::SIGNAL_BASED},
 #endif
-    {"NoFastCheckInClient_LibcSyscaller", false, SyscallerType::LibcSyscaller}};
+    {"NoFastCheckInClient_LibcSyscaller", false, SyscallerType::LibcSyscaller,
+     BrokerType::SIGNAL_BASED}};
 }  // namespace
 
 void RunSingleBrokerTest(BrokerTestDelegate* test_delegate,
                          const BrokerTestConfiguration& test_config) {
   test_delegate->ParentSetUp();
-  sandbox::SandboxBPFTestRunner bpf_test_runner(
-      new BPFTesterBrokerDelegate(test_config.fast_check_in_client,
-                                  test_delegate, test_config.syscaller_type));
+  sandbox::SandboxBPFTestRunner bpf_test_runner(new BPFTesterBrokerDelegate(
+      test_config.fast_check_in_client, test_delegate,
+      test_config.syscaller_type, test_config.broker_type));
   sandbox::UnitTests::RunTestInProcess(&bpf_test_runner, DEATH_SUCCESS());
   test_delegate->ParentTearDown();
 }
@@ -847,7 +953,7 @@ class OpenCpuinfoDelegate final : public BrokerTestDelegate {
     // Open cpuinfo directly.
     int cpu_info_fd = HANDLE_EINTR(open(kFileCpuInfo, O_RDONLY));
     BPF_ASSERT_GE(cpu_info_fd, 0);
-    memset(cpuinfo_buf_, 1, sizeof(cpuinfo_buf_));
+    UNSAFE_TODO(memset(cpuinfo_buf_, 1, sizeof(cpuinfo_buf_)));
     read_len_unsandboxed_ =
         HANDLE_EINTR(read(cpu_info_fd, cpuinfo_buf_, sizeof(cpuinfo_buf_)));
     BPF_ASSERT_GT(read_len_unsandboxed_, 0);
@@ -877,7 +983,7 @@ class OpenCpuinfoDelegate final : public BrokerTestDelegate {
     base::ScopedFD cpuinfo_fd_closer(cpuinfo_fd);
     BPF_ASSERT_GE(cpuinfo_fd, 0);
     char buf[3];
-    memset(buf, 0, sizeof(buf));
+    UNSAFE_TODO(memset(buf, 0, sizeof(buf)));
     int read_len_sandboxed = HANDLE_EINTR(read(cpuinfo_fd, buf, sizeof(buf)));
     BPF_ASSERT_GT(read_len_sandboxed, 0);
 
@@ -885,7 +991,8 @@ class OpenCpuinfoDelegate final : public BrokerTestDelegate {
     BPF_ASSERT_EQ(read_len_sandboxed, read_len_unsandboxed_);
     // Compare the cpuinfo as returned by the broker with the one we opened
     // ourselves.
-    BPF_ASSERT_EQ(memcmp(buf, cpuinfo_buf_, read_len_sandboxed), 0);
+    UNSAFE_TODO(
+        BPF_ASSERT_EQ(memcmp(buf, cpuinfo_buf_, read_len_sandboxed), 0));
   }
 
  private:
@@ -937,7 +1044,7 @@ class OpenFileRWDelegate final : public BrokerTestDelegate {
     len = HANDLE_EINTR(read(tempfile.fd(), buf, sizeof(buf)));
 
     BPF_ASSERT_EQ(len, static_cast<ssize_t>(sizeof(test_text)));
-    BPF_ASSERT_EQ(memcmp(test_text, buf, sizeof(test_text)), 0);
+    UNSAFE_TODO(BPF_ASSERT_EQ(memcmp(test_text, buf, sizeof(test_text)), 0));
 
     BPF_ASSERT_EQ(close(tempfile2), 0);
   }
@@ -1039,6 +1146,46 @@ TEST(BrokerProcessIntegrationTest, OpenComplexFlags) {
   RunAllBrokerTests<OpenComplexFlagsDelegate>();
 }
 
+class RewriteProcSelfDelegate final : public BrokerTestDelegate {
+ public:
+  BrokerParams ChildSetUpPreSandbox() override {
+    pre_sandbox_status_fd_.reset(HANDLE_EINTR(open(kProcSelfStatus, O_RDONLY)));
+    BPF_ASSERT(pre_sandbox_status_fd_.is_valid());
+
+    struct stat sb;
+    BPF_ASSERT_GE(fstat(pre_sandbox_status_fd_.get(), &sb), 0);
+    pre_sandbox_status_ino_ = sb.st_ino;
+
+    BrokerParams params;
+    params.allowed_command_set = syscall_broker::MakeBrokerCommandSet(
+        {syscall_broker::COMMAND_ACCESS, syscall_broker::COMMAND_OPEN});
+    params.permissions.push_back(
+        BrokerFilePermission::ReadOnly(kProcSelfStatus));
+    return params;
+  }
+
+  void RunTestInSandboxedChild(Syscaller* syscaller) override {
+    base::ScopedFD status_fd(syscaller->Open(kProcSelfStatus, O_RDONLY));
+    BPF_ASSERT(status_fd.is_valid());
+
+    // The fd opened by the broker should have the same inode number as the fd
+    // opened in this process pre-sandbox.
+    struct stat sb;
+    BPF_ASSERT_GE(fstat(status_fd.get(), &sb), 0);
+    BPF_ASSERT_EQ(pre_sandbox_status_ino_, sb.st_ino);
+  }
+
+ private:
+  static constexpr char kProcSelfStatus[] = "/proc/self/status";
+
+  ino_t pre_sandbox_status_ino_ = 0;
+  base::ScopedFD pre_sandbox_status_fd_;
+};
+
+TEST(BrokerProcessIntegrationTest, RewriteProcSelf) {
+  RunAllBrokerTests<RewriteProcSelfDelegate>();
+}
+
 class CreateFileDelegate final : public BrokerTestDelegate {
  public:
   void ParentSetUp() override {
@@ -1058,7 +1205,7 @@ class CreateFileDelegate final : public BrokerTestDelegate {
     // Create a conflict for the temp filename.
     base::ScopedFD fd(
         open(existing_temp_file_str_.c_str(), O_RDWR | O_CREAT, 0600));
-    BPF_ASSERT_GE(fd.get(), 0);
+    ASSERT_GE(fd.get(), 0);
   }
 
   BrokerParams ChildSetUpPreSandbox() override {
@@ -1131,7 +1278,7 @@ class CreateFileDelegate final : public BrokerTestDelegate {
       char buf[1024];
       ssize_t len = HANDLE_EINTR(read(fd_check, buf, sizeof(buf)));
       BPF_ASSERT_EQ(len, static_cast<ssize_t>(sizeof(kTestText)));
-      BPF_ASSERT_EQ(memcmp(kTestText, buf, sizeof(kTestText)), 0);
+      UNSAFE_TODO(BPF_ASSERT_EQ(memcmp(kTestText, buf, sizeof(kTestText)), 0));
     }
   }
 
@@ -1160,7 +1307,7 @@ class StatFileDelegate : public BrokerTestDelegate {
  public:
   BrokerParams ChildSetUpPreSandbox() override {
     BPF_ASSERT_EQ(12, HANDLE_EINTR(write(tmp_file_.fd(), "blahblahblah", 12)));
-    memset(&sb_, 0, sizeof(sb_));
+    UNSAFE_TODO(memset(&sb_, 0, sizeof(sb_)));
     return BrokerParams();
   }
 
@@ -1201,11 +1348,11 @@ class StatFileNoCommandDelegate final : public StatFileDelegate {
 };
 
 TEST(BrokerProcessIntegrationTest, StatFileNoCommandFollowLinks) {
-  RunAllBrokerTests<StatFileNoCommandDelegate<true>>();
+  RunAllBrokerTests<StatFileNoCommandDelegate</*follow_links=*/true>>();
 }
 
 TEST(BrokerProcessIntegrationTest, StatFileNoCommandNoFollowLinks) {
-  RunAllBrokerTests<StatFileNoCommandDelegate<false>>();
+  RunAllBrokerTests<StatFileNoCommandDelegate</*follow_links=*/false>>();
 }
 
 // Allows the STAT command without any file permissions.
@@ -1231,11 +1378,11 @@ class StatFilesNoPermissionDelegate final : public StatFileDelegate {
 };
 
 TEST(BrokerProcessIntegrationTest, StatFilesNoPermissionFollowLinks) {
-  RunAllBrokerTests<StatFilesNoPermissionDelegate<true>>();
+  RunAllBrokerTests<StatFilesNoPermissionDelegate</*follow_links=*/true>>();
 }
 
 TEST(BrokerProcessIntegrationTest, StatFilesNoPermissionNoFollowLinks) {
-  RunAllBrokerTests<StatFilesNoPermissionDelegate<false>>();
+  RunAllBrokerTests<StatFilesNoPermissionDelegate</*follow_links=*/false>>();
 }
 
 // Nonexistent file with permissions to see file.
@@ -1280,12 +1427,14 @@ class StatNonexistentFileWithPermissionsDelegate final
 
 TEST(BrokerProcessIntegrationTest,
      StatNonexistentFileWithPermissionsFollowLinks) {
-  RunAllBrokerTests<StatNonexistentFileWithPermissionsDelegate<true>>();
+  RunAllBrokerTests<
+      StatNonexistentFileWithPermissionsDelegate</*follow_links=*/true>>();
 }
 
 TEST(BrokerProcessIntegrationTest,
      StatNonexistentFileWithPermissionsNoFollowLinks) {
-  RunAllBrokerTests<StatNonexistentFileWithPermissionsDelegate<false>>();
+  RunAllBrokerTests<
+      StatNonexistentFileWithPermissionsDelegate</*follow_links=*/false>>();
 }
 
 // Nonexistent file with permissions to create file.
@@ -1329,12 +1478,14 @@ class StatNonexistentFileWithCreatePermissionsDelegate final
 
 TEST(BrokerProcessIntegrationTest,
      StatNonexistentFileWithCreatePermissionsFollowLinks) {
-  RunAllBrokerTests<StatNonexistentFileWithCreatePermissionsDelegate<true>>();
+  RunAllBrokerTests<StatNonexistentFileWithCreatePermissionsDelegate<
+      /*follow_links=*/true>>();
 }
 
 TEST(BrokerProcessIntegrationTest,
      StatNonexistentFileWithCreatePermissionsNoFollowLinks) {
-  RunAllBrokerTests<StatNonexistentFileWithCreatePermissionsDelegate<false>>();
+  RunAllBrokerTests<StatNonexistentFileWithCreatePermissionsDelegate<
+      /*follow_links=*/false>>();
 }
 
 // Actual file with permissions to see file.
@@ -1376,11 +1527,11 @@ class StatFileWithPermissionsDelegate final : public StatFileDelegate {
 };
 
 TEST(BrokerProcessIntegrationTest, StatFileWithPermissionsFollowLinks) {
-  RunAllBrokerTests<StatFileWithPermissionsDelegate<true>>();
+  RunAllBrokerTests<StatFileWithPermissionsDelegate</*follow_links=*/true>>();
 }
 
 TEST(BrokerProcessIntegrationTest, StatFileWithPermissionsNoFollowLinks) {
-  RunAllBrokerTests<StatFileWithPermissionsDelegate<false>>();
+  RunAllBrokerTests<StatFileWithPermissionsDelegate</*follow_links=*/false>>();
 }
 
 class RenameTestDelegate : public BrokerTestDelegate {
@@ -1410,6 +1561,16 @@ class RenameTestDelegate : public BrokerTestDelegate {
   }
 
  protected:
+  void ExpectRenamed() {
+    EXPECT_TRUE(access(oldpath_.c_str(), 0) < 0);
+    EXPECT_TRUE(access(newpath_.c_str(), 0) == 0);
+  }
+
+  void ExpectNotRenamed() {
+    EXPECT_TRUE(access(oldpath_.c_str(), 0) == 0);
+    EXPECT_TRUE(access(newpath_.c_str(), 0) < 0);
+  }
+
   std::string oldpath_;
   std::string newpath_;
 };
@@ -1432,13 +1593,7 @@ class RenameNoCommandDelegate final : public RenameTestDelegate {
   }
 
   void ParentTearDown() override {
-    if (true) {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) == 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) < 0);
-    } else {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) < 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) == 0);
-    }
+    ExpectNotRenamed();
     RenameTestDelegate::ParentTearDown();
   }
 };
@@ -1463,13 +1618,7 @@ class RenameNoPermNewDelegate final : public RenameTestDelegate {
   }
 
   void ParentTearDown() override {
-    if (true) {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) == 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) < 0);
-    } else {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) < 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) == 0);
-    }
+    ExpectNotRenamed();
     RenameTestDelegate::ParentTearDown();
   }
 };
@@ -1494,13 +1643,7 @@ class RenameNoPermOldDelegate final : public RenameTestDelegate {
   }
 
   void ParentTearDown() override {
-    if (true) {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) == 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) < 0);
-    } else {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) < 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) == 0);
-    }
+    ExpectNotRenamed();
     RenameTestDelegate::ParentTearDown();
   }
 };
@@ -1527,13 +1670,7 @@ class RenameReadPermNewDelegate final : public RenameTestDelegate {
   }
 
   void ParentTearDown() override {
-    if (true) {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) == 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) < 0);
-    } else {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) < 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) == 0);
-    }
+    ExpectNotRenamed();
     RenameTestDelegate::ParentTearDown();
   }
 };
@@ -1560,13 +1697,7 @@ class RenameReadPermOldDelegate final : public RenameTestDelegate {
   }
 
   void ParentTearDown() override {
-    if (true) {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) == 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) < 0);
-    } else {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) < 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) == 0);
-    }
+    ExpectNotRenamed();
     RenameTestDelegate::ParentTearDown();
   }
 };
@@ -1592,13 +1723,7 @@ class RenameWritePermsBothDelegate final : public RenameTestDelegate {
   }
 
   void ParentTearDown() override {
-    if (false) {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) == 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) < 0);
-    } else {
-      EXPECT_TRUE(access(oldpath_.c_str(), 0) < 0);
-      EXPECT_TRUE(access(newpath_.c_str(), 0) == 0);
-    }
+    ExpectRenamed();
     RenameTestDelegate::ParentTearDown();
   }
 };
@@ -1741,7 +1866,8 @@ class ReadlinkFileWithPermissionsDelegate final : public ReadlinkTestDelegate {
     ssize_t retlen = syscaller->Readlink(newpath_.c_str(), readlink_buf_,
                                          sizeof(readlink_buf_));
     BPF_ASSERT(retlen == static_cast<ssize_t>(oldpath_.length()));
-    BPF_ASSERT_EQ(0, memcmp(oldpath_.c_str(), readlink_buf_, retlen));
+    UNSAFE_TODO(
+        BPF_ASSERT_EQ(0, memcmp(oldpath_.c_str(), readlink_buf_, retlen)));
   }
 };
 
@@ -2488,6 +2614,278 @@ class UnlinkFileRWCPermissionsDelegate final : public UnlinkTestDelegate {
 
 TEST(BrokerProcessIntegrationTest, UnlinkFileRWCPermissions) {
   RunAllBrokerTests<UnlinkFileRWCPermissionsDelegate>();
+}
+
+// Parent class for the inotify_add_watch() tests.
+class InotifyAddWatchDelegate : public BrokerTestDelegate {
+ public:
+  const uint32_t kBadMask =
+      IN_CREATE | IN_DELETE | IN_CLOSE_WRITE | IN_MOVE | IN_ONLYDIR;
+  const uint32_t kGoodMask = kBadMask | IN_ATTRIB;
+
+  static constexpr char kNestedTempDirName[] = "nested_temp_dir";
+  static constexpr char kBadPrefixName[] = "nested_t";
+
+  void ParentSetUp() override {
+    // Create two nested temp dirs.
+    ASSERT_TRUE(temp_dir_.CreateUniqueTempDirUnderPath(
+        base::FilePath(kTempDirForTests)));
+    temp_dir_str_ = temp_dir_.GetPath().MaybeAsASCII();
+    ASSERT_FALSE(temp_dir_str_.empty());
+
+    ASSERT_TRUE(nested_temp_dir_.Set(
+        temp_dir_.GetPath().AppendASCII(kNestedTempDirName)));
+    nested_temp_dir_str_ = nested_temp_dir_.GetPath().MaybeAsASCII();
+    ASSERT_FALSE(nested_temp_dir_str_.empty());
+
+    temp_file_ = base::CreateAndOpenTemporaryFileInDir(
+        nested_temp_dir_.GetPath(), &temp_file_path_);
+    temp_file_path_str_ = temp_file_path_.MaybeAsASCII();
+    ASSERT_FALSE(temp_file_path_str_.empty());
+  }
+
+ protected:
+  // Parent temp directory.
+  base::ScopedTempDir temp_dir_;
+  std::string temp_dir_str_;
+
+  // A directory nested under |temp_dir_|.
+  base::ScopedTempDir nested_temp_dir_;
+  std::string nested_temp_dir_str_;
+
+  // In |nested_temp_dir_|.
+  base::FilePath temp_file_path_;
+  std::string temp_file_path_str_;
+  base::File temp_file_;
+};
+
+// Try inotify_add_watch() without the relevant broker command.
+class InotifyAddWatchNoCommandDelegate final : public InotifyAddWatchDelegate {
+ public:
+  BrokerParams ChildSetUpPreSandbox() override {
+    BrokerParams params;
+    params.allowed_command_set = syscall_broker::MakeBrokerCommandSet({});
+    params.permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            temp_file_path_str_),
+        BrokerFilePermission::ReadWriteCreateRecursive(nested_temp_dir_str_ +
+                                                       "/")};
+    return params;
+  }
+
+  void RunTestInSandboxedChild(Syscaller* syscaller) override {
+    base::ScopedFD inotify_instance(inotify_init());
+    BPF_ASSERT(inotify_instance.is_valid());
+    BPF_ASSERT_EQ(
+        -kFakeErrnoSentinel,
+        syscaller->InotifyAddWatch(inotify_instance.get(),
+                                   nested_temp_dir_str_.c_str(), kGoodMask));
+  }
+};
+
+TEST(BrokerProcessIntegrationTest, InotifyAddWatchNoCommand) {
+  RunAllBrokerTests<InotifyAddWatchNoCommandDelegate>();
+}
+
+// Try inotify_add_watch() without the relevant permissions.
+class InotifyAddWatchNoPermissionsDelegate final
+    : public InotifyAddWatchDelegate {
+ public:
+  BrokerParams ChildSetUpPreSandbox() override {
+    BrokerParams params;
+    params.allowed_command_set = syscall_broker::MakeBrokerCommandSet(
+        {syscall_broker::COMMAND_INOTIFY_ADD_WATCH});
+    params.permissions = {};
+    return params;
+  }
+
+  void RunTestInSandboxedChild(Syscaller* syscaller) override {
+    base::ScopedFD inotify_instance(inotify_init());
+    BPF_ASSERT(inotify_instance.is_valid());
+    BPF_ASSERT_EQ(
+        -kFakeErrnoSentinel,
+        syscaller->InotifyAddWatch(inotify_instance.get(),
+                                   nested_temp_dir_str_.c_str(), kGoodMask));
+  }
+};
+
+TEST(BrokerProcessIntegrationTest, InotifyAddWatchNoPermissions) {
+  RunAllBrokerTests<InotifyAddWatchNoPermissionsDelegate>();
+}
+
+// Try inotify_add_watch() with a variety of bad arguments.
+class InotifyAddWatchBadArgumentsDelegate final
+    : public InotifyAddWatchDelegate {
+ public:
+  void ParentSetUp() override {
+    InotifyAddWatchDelegate::ParentSetUp();
+
+    ASSERT_TRUE(
+        other_temp_dir_.Set(temp_dir_.GetPath().AppendASCII("other_temp_dir")));
+    other_temp_dir_str_ = other_temp_dir_.GetPath().MaybeAsASCII();
+    ASSERT_FALSE(other_temp_dir_str_.empty());
+
+    base::FilePath bad_prefix = temp_dir_.GetPath().AppendASCII(kBadPrefixName);
+    bad_prefix_str_ = bad_prefix.MaybeAsASCII();
+    ASSERT_FALSE(bad_prefix_str_.empty());
+  }
+
+  BrokerParams ChildSetUpPreSandbox() override {
+    BrokerParams params;
+    params.allowed_command_set = syscall_broker::MakeBrokerCommandSet(
+        {syscall_broker::COMMAND_INOTIFY_ADD_WATCH});
+    params.permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            temp_file_path_str_)};
+    return params;
+  }
+
+  void RunTestInSandboxedChild(Syscaller* syscaller) override {
+    base::ScopedFD inotify_instance(inotify_init());
+    BPF_ASSERT(inotify_instance.is_valid());
+    // Watch the correct directory with bad flags.
+    BPF_ASSERT_EQ(
+        -kFakeErrnoSentinel,
+        syscaller->InotifyAddWatch(inotify_instance.get(),
+                                   nested_temp_dir_str_.c_str(), kBadMask));
+
+    // Try to watch an unintended directory, should fail.
+    BPF_ASSERT_EQ(
+        -kFakeErrnoSentinel,
+        syscaller->InotifyAddWatch(inotify_instance.get(),
+                                   other_temp_dir_str_.c_str(), kGoodMask));
+
+    // Try to access a prefix that isn't a full directory.
+    BPF_ASSERT_EQ(-kFakeErrnoSentinel, syscaller->InotifyAddWatch(
+                                           inotify_instance.get(),
+                                           bad_prefix_str_.c_str(), kGoodMask));
+  }
+
+ protected:
+  // Another directory nested under |temp_dir_| with no sandbox permissions.
+  base::ScopedTempDir other_temp_dir_;
+  std::string other_temp_dir_str_;
+
+  // A prefix of |nested_temp_dir_| that doesn't match a valid directory.
+  std::string bad_prefix_str_;
+};
+
+TEST(BrokerProcessIntegrationTest, InotifyAddWatchBadArguments) {
+  RunAllBrokerTests<InotifyAddWatchBadArgumentsDelegate>();
+}
+
+// Use inottify_add_watch() successfully and verify it actually works.
+class InotifyAddWatchSuccessDelegate final : public InotifyAddWatchDelegate {
+ public:
+  BrokerParams ChildSetUpPreSandbox() override {
+    BrokerParams params;
+    params.allowed_command_set = syscall_broker::MakeBrokerCommandSet(
+        {syscall_broker::COMMAND_INOTIFY_ADD_WATCH,
+         syscall_broker::COMMAND_UNLINK});
+    params.permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            temp_file_path_str_),
+        BrokerFilePermission::ReadWriteCreateRecursive(nested_temp_dir_str_ +
+                                                       "/")};
+    return params;
+  }
+
+  void RunTestInSandboxedChild(Syscaller* syscaller) override {
+    base::ScopedFD inotify_instance(inotify_init());
+    BPF_ASSERT(inotify_instance.is_valid());
+    // This inotify_add_watch() call should succeed.
+    int wd = syscaller->InotifyAddWatch(
+        inotify_instance.get(), nested_temp_dir_str_.c_str(), kGoodMask);
+    BPF_ASSERT_GE(wd, 0);
+
+    // Unlinking the file generates an inotify notification.
+    BPF_ASSERT_GE(unlink(temp_file_path_str_.c_str()), 0);
+
+    // Read one inotify message and verify it names the correct watch descriptor
+    // |wd|. The test will timeout if no inotify notifications are ever
+    // generated.
+    std::vector<char> buf(4096);
+    BPF_ASSERT_GE(read(inotify_instance.get(), buf.data(), buf.size()), 0);
+    struct inotify_event* event =
+        UNSAFE_TODO(reinterpret_cast<struct inotify_event*>(buf.data()));
+    BPF_ASSERT_EQ(event->wd, wd);
+
+    // Removing the watch should succeed.
+    BPF_ASSERT_GE(inotify_rm_watch(inotify_instance.get(), wd), 0);
+  }
+};
+
+TEST(BrokerProcessIntegrationTest, InotifyAddWatchSuccess) {
+  RunAllBrokerTests<InotifyAddWatchSuccessDelegate>();
+}
+
+// Tests base::FilePathWatcher which uses inotify on Linux.
+// This is used in the network service sandbox.
+class BaseFilePathWatcherDelegate final : public InotifyAddWatchDelegate {
+ public:
+  BrokerParams ChildSetUpPreSandbox() override {
+    // Prewarm file accesses.
+    base::GetMaxNumberOfInotifyWatches();
+
+    BrokerParams params;
+    params.allowed_command_set = syscall_broker::MakeBrokerCommandSet(
+        {syscall_broker::COMMAND_INOTIFY_ADD_WATCH,
+         syscall_broker::COMMAND_OPEN});
+    params.permissions = {
+        BrokerFilePermission::InotifyAddWatchWithIntermediateDirs(
+            temp_file_path_str_),
+        BrokerFilePermission::ReadWriteCreateRecursive(nested_temp_dir_str_ +
+                                                       "/")};
+    return params;
+  }
+
+  void RunTestInSandboxedChild(Syscaller* syscaller) override {
+    base::test::SingleThreadTaskEnvironment task_environment(
+        base::test::TaskEnvironment::MainThreadType::IO);
+
+    // Watch the file and wait for a notification about that file from
+    // FilePathWatcher.
+    base::RunLoop run_loop;
+    base::FilePathWatcher file_watcher_;
+    BPF_ASSERT(file_watcher_.Watch(
+        temp_file_path_, base::FilePathWatcher::Type::kNonRecursive,
+        base::BindLambdaForTesting([&](const base::FilePath& path, bool error) {
+          BPF_ASSERT_EQ(temp_file_path_, path);
+          run_loop.Quit();
+        })));
+
+    // Our inotify file path watcher requires a file to be opened for writing
+    // *after* adding the watch, and then closed, in order to generate a
+    // notification. The actual call to Write() isn't even strictly necessary.
+    // Another way to generate a notification is
+    // base::DeleteFile(temp_file_path_).
+    base::File temp_file_again(temp_file_path_, base::File::FLAG_OPEN |
+                                                    base::File::FLAG_READ |
+                                                    base::File::FLAG_WRITE);
+    BPF_ASSERT_EQ(
+        temp_file_again.Write(0, base::byte_span_with_nul_from_cstring("a")),
+        2);
+    temp_file_again.Flush();
+    temp_file_again.Close();
+    // Wait until we receive a notification about the file modification.
+    // Failure results in a test timeout.
+    run_loop.Run();
+  }
+};
+
+TEST(BrokerProcessIntegrationTest, BaseFilePathWatcherInotifyTest) {
+  const std::vector<BrokerTestConfiguration> inotify_test_configs = {
+      {"FastCheckInClient_NoSyscaller", true, SyscallerType::NoSyscaller,
+       BrokerType::SIGNAL_BASED},
+      {"NoFastCheckInClient_NoSyscaller", false, SyscallerType::NoSyscaller,
+       BrokerType::SIGNAL_BASED},
+  };
+
+  for (const BrokerTestConfiguration& test_config : inotify_test_configs) {
+    SCOPED_TRACE(test_config.test_name);
+    auto test_delegate = std::make_unique<BaseFilePathWatcherDelegate>();
+    RunSingleBrokerTest(test_delegate.get(), test_config);
+  }
 }
 
 #endif  // !defined(THREAD_SANITIZER)

@@ -1,5 +1,5 @@
-#!/usr/bin/env vpython
-# Copyright 2016 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,8 +14,8 @@ class LegacyResultsProcessorUnittest(unittest.TestCase):
   def setUp(self):
     """Set up for all test method of each test method below."""
     super(LegacyResultsProcessorUnittest, self).setUp()
-    self.data_directory = os.path.join(os.path.dirname(
-      os.path.abspath(__file__)), 'testdata')
+    self.data_directory = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'testdata', 'python3')
 
   def _ConstructDefaultProcessor(self):
     """Creates a LegacyResultsProcessor instance.
@@ -35,8 +35,9 @@ class LegacyResultsProcessorUnittest(unittest.TestCase):
       log_processor: An PerformanceLogProcessor instance.
       logfile: File name of an input performance results log file.
     """
-    for line in open(os.path.join(self.data_directory, logfile)):
-      log_processor.ProcessLine(line)
+    with open(os.path.join(self.data_directory, logfile)) as log_file:
+      for line in log_file:
+        log_processor.ProcessLine(line)
 
   def _CheckFileExistsWithData(self, logs, graph):
     """Asserts that |graph| exists in the |logs| dict and is non-empty."""
@@ -79,7 +80,8 @@ class LegacyResultsProcessorUnittest(unittest.TestCase):
       graph_name = graphs[index]
       actual = logs[graph_name]
       path = os.path.join(self.data_directory, filename)
-      expected = json.load(open(path))
+      with open(path) as expected_file:
+        expected = json.load(expected_file)
       self.assertEqual(expected, actual, 'JSON data in %s did not match '
           'expectations.' % filename)
 

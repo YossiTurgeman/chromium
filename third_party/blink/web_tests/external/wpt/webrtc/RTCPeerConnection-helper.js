@@ -176,11 +176,9 @@ function exchangeIceCandidates(pc1, pc2) {
     localPc.addEventListener('icecandidate', event => {
       const { candidate } = event;
 
-      // candidate may be null to indicate end of candidate gathering.
-      // There is ongoing discussion on w3c/webrtc-pc#1213
-      // that there should be an empty candidate string event
-      // for end of candidate for each m= section.
-      if(candidate && remotePc.signalingState !== 'closed') {
+      // Guard against already closed peerconnection to
+      // avoid unrelated exceptions.
+      if (remotePc.signalingState !== 'closed') {
         remotePc.addIceCandidate(candidate);
       }
     });
@@ -232,18 +230,36 @@ async function waitForConnectionStateChange(pc, wantedStates) {
   }
 }
 
+function waitForConnectionStateChangeWithTimeout(t, pc, wantedStates, timeout) {
+  return new Promise((resolve, reject) => {
+    if (wantedStates.includes(pc.connectionState)) {
+      resolve();
+      return;
+    }
+    pc.addEventListener('connectionstatechange', () => {
+      if (wantedStates.includes(pc.connectionState))
+        resolve();
+    });
+    t.step_timeout(reject, timeout);
+  });
+}
+
 async function waitForIceGatheringState(pc, wantedStates) {
   while (!wantedStates.includes(pc.iceGatheringState)) {
     await waitUntilEvent(pc, 'icegatheringstatechange');
   }
 }
 
+async function waitForTrackUnmuted(track) {
+  if (track.muted === false) return true;
+  return waitUntilEvent(track, 'unmute');
+}
+
 // Resolves when RTP packets have been received.
 async function listenForSSRCs(t, receiver) {
   while (true) {
     const ssrcs = receiver.getSynchronizationSources();
-    assert_true(Array.isArray(ssrcs));
-    if (ssrcs.length > 0) {
+    if (Array.isArray(ssrcs) && ssrcs.length > 0) {
       return ssrcs;
     }
     await new Promise(r => t.step_timeout(r, 0));
@@ -255,19 +271,19 @@ async function listenForSSRCs(t, receiver) {
 // It does the heavy lifting of performing signaling handshake,
 // ICE candidate exchange, and waiting for data channel at two
 // end points to open. Can do both negotiated and non-negotiated setup.
-async function createDataChannelPair(t, options,
+async function createDataChannelPairWithLabel(t, label, options,
                                      pc1 = createPeerConnectionWithCleanup(t),
                                      pc2 = createPeerConnectionWithCleanup(t)) {
   let pair = [], bothOpen;
   try {
     if (options.negotiated) {
-      pair = [pc1, pc2].map(pc => pc.createDataChannel('', options));
+      pair = [pc1, pc2].map(pc => pc.createDataChannel(label, options));
       bothOpen = Promise.all(pair.map(dc => new Promise((r, e) => {
         dc.onopen = r;
         dc.onerror = ({error}) => e(error);
       })));
     } else {
-      pair = [pc1.createDataChannel('', options)];
+      pair = [pc1.createDataChannel(label, options)];
       bothOpen = Promise.all([
         new Promise((r, e) => {
           pair[0].onopen = r;
@@ -289,6 +305,10 @@ async function createDataChannelPair(t, options,
        dc.onopen = dc.onerror = null;
     }
   }
+}
+
+async function createDataChannelPair(t, options, pc1, pc2) {
+  return createDataChannelPairWithLabel(t, '', options, pc1, pc2);
 }
 
 // Wait for RTP and RTCP stats to arrive
@@ -410,6 +430,15 @@ const trackFactories = {
       ctx.fillStyle = `rgb(${count%255}, ${count*count%255}, ${count%255})`;
       count += 1;
       ctx.fillRect(0, 0, width, height);
+      // Add some bouncing boxes in contrast color to add a little more noise.
+      const contrast = count + 128;
+      ctx.fillStyle = `rgb(${contrast%255}, ${contrast*contrast%255}, ${contrast%255})`;
+      const xpos = count % (width - 20);
+      const ypos = count % (height - 20);
+      ctx.fillRect(xpos, ypos, xpos + 20, ypos + 20);
+      const xpos2 = (count + width / 2) % (width - 20);
+      const ypos2 = (count + height / 2) % (height - 20);
+      ctx.fillRect(xpos2, ypos2, xpos2 + 20, ypos2 + 20);
       // If signal is set (0-255), add a constant-color box of that luminance to
       // the video frame at coordinates 20 to 60 in both X and Y direction.
       // (big enough to avoid color bleed from surrounding video in some codecs,
@@ -640,7 +669,7 @@ function findTransceiverForSender(pc, sender) {
 }
 
 function preferCodec(transceiver, mimeType, sdpFmtpLine) {
-  const {codecs} = RTCRtpSender.getCapabilities(transceiver.receiver.track.kind);
+  const {codecs} = RTCRtpReceiver.getCapabilities(transceiver.receiver.track.kind);
   // sdpFmtpLine is optional, pick the first partial match if not given.
   const selectedCodecIndex = codecs.findIndex(c => {
     return c.mimeType === mimeType && (c.sdpFmtpLine === sdpFmtpLine || !sdpFmtpLine);
@@ -649,6 +678,13 @@ function preferCodec(transceiver, mimeType, sdpFmtpLine) {
   codecs.slice(selectedCodecIndex, 1);
   codecs.unshift(selectedCodec);
   return transceiver.setCodecPreferences(codecs);
+}
+
+function findSendCodecCapability(mimeType, sdpFmtpLine) {
+  return RTCRtpSender.getCapabilities(mimeType.split('/')[0])
+    .codecs
+    .filter(c => c.mimeType.localeCompare(name, undefined, { sensitivity: 'base' }) === 0
+      && (c.sdpFmtpLine === sdpFmtpLine || !sdpFmtpLine))[0];
 }
 
 // Contains a set of values and will yell at you if you try to add a value twice.
@@ -683,6 +719,7 @@ const iceGatheringStateTransitions = async (pc, ...states) => {
       }, {once: true});
     });
   }
+  return states;
 };
 
 const initialOfferAnswerWithIceGatheringStateTransitions =
@@ -700,6 +737,14 @@ const initialOfferAnswerWithIceGatheringStateTransitions =
       await pc2Transitions;
     };
 
+const expectNoMoreIceConnectionStateChanges = async (t, pc) => {
+  pc.oniceconnectionstatechange =
+      t.step_func(() => {
+        assert_unreached(
+            'Should not get an iceconnectionstatechange right now!');
+      });
+};
+
 const expectNoMoreGatheringStateChanges = async (t, pc) => {
   pc.onicegatheringstatechange =
       t.step_func(() => {
@@ -707,3 +752,136 @@ const expectNoMoreGatheringStateChanges = async (t, pc) => {
             'Should not get an icegatheringstatechange right now!');
       });
 };
+
+function gatheringStateReached(object, state) {
+  if (object instanceof RTCIceTransport) {
+    return new Promise(r =>
+      object.addEventListener("gatheringstatechange", function listener() {
+        if (object.gatheringState == state) {
+          object.removeEventListener("gatheringstatechange", listener);
+          r(state);
+        }
+      })
+    );
+  } else if (object instanceof RTCPeerConnection) {
+    return new Promise(r =>
+      object.addEventListener("icegatheringstatechange", function listener() {
+        if (object.iceGatheringState == state) {
+          object.removeEventListener("icegatheringstatechange", listener);
+          r(state);
+        }
+      })
+    );
+  } else {
+    throw "First parameter is neither an RTCIceTransport nor an RTCPeerConnection";
+  }
+}
+
+function nextGatheringState(object) {
+  if (object instanceof RTCIceTransport) {
+    return new Promise(resolve =>
+      object.addEventListener(
+        "gatheringstatechange",
+        () => resolve(object.gatheringState),
+        { once: true }
+      )
+    );
+  } else if (object instanceof RTCPeerConnection) {
+    return new Promise(resolve =>
+      object.addEventListener(
+        "icegatheringstatechange",
+        () => resolve(object.iceGatheringState),
+        { once: true }
+      )
+    );
+  } else {
+    throw "First parameter is neither an RTCIceTransport nor an RTCPeerConnection";
+  }
+}
+
+function emptyCandidate(pc) {
+  return new Promise(r =>
+    pc.addEventListener("icecandidate", function listener(e) {
+      if (e.candidate && e.candidate.candidate == "") {
+        pc.removeEventListener("icecandidate", listener);
+        r(e);
+      }
+    })
+  );
+}
+
+function nullCandidate(pc) {
+  return new Promise(r =>
+    pc.addEventListener("icecandidate", function listener(e) {
+      if (!e.candidate) {
+        pc.removeEventListener("icecandidate", listener);
+        r(e);
+      }
+    })
+  );
+}
+
+function connectionStateReached(object, state) {
+  if (object instanceof RTCIceTransport || object instanceof RTCDtlsTransport) {
+    return new Promise(resolve =>
+      object.addEventListener("statechange", function listener() {
+        if (object.state == state) {
+          object.removeEventListener("statechange", listener);
+          resolve(state);
+        }
+      })
+    );
+  } else if (object instanceof RTCPeerConnection) {
+    return new Promise(resolve =>
+      object.addEventListener("connectionstatechange", function listener() {
+        if (object.connectionState == state) {
+          object.removeEventListener("connectionstatechange", listener);
+          resolve(state);
+        }
+      })
+    );
+  } else {
+    throw "First parameter is neither an RTCIceTransport, an RTCDtlsTransport, nor an RTCPeerConnection";
+  }
+}
+
+function nextConnectionState(object) {
+  if (object instanceof RTCIceTransport || object instanceof RTCDtlsTransport) {
+    return new Promise(resolve =>
+      object.addEventListener("statechange", () => resolve(object.state), {
+        once: true,
+      })
+    );
+  } else if (object instanceof RTCPeerConnection) {
+    return new Promise(resolve =>
+      object.addEventListener(
+        "connectionstatechange",
+        () => resolve(object.connectionState),
+        { once: true }
+      )
+    );
+  } else {
+    throw "First parameter is neither an RTCIceTransport, an RTCDtlsTransport, nor an RTCPeerConnection";
+  }
+}
+
+function nextIceConnectionState(pc) {
+  if (pc instanceof RTCPeerConnection) {
+    return new Promise(resolve =>
+      pc.addEventListener(
+        "iceconnectionstatechange",
+        () => resolve(pc.iceConnectionState),
+        { once: true }
+      )
+    );
+  } else {
+    throw "First parameter is not an RTCPeerConnection";
+  }
+}
+
+async function queueAWebrtcTask() {
+  const pc = new RTCPeerConnection();
+  pc.addTransceiver('audio');
+  await new Promise(r => pc.onnegotiationneeded = r);
+}
+

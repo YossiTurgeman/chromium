@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,11 +9,9 @@
 
 #include "ash/ash_export.h"
 #include "ash/login/ui/pin_request_view.h"
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/time/time.h"
 
 namespace views {
 class Widget;
@@ -44,8 +42,11 @@ class ASH_EXPORT PinRequestWidget {
     void SimulateValidationFinished(bool access_granted);
 
    private:
-    PinRequestWidget* const pin_request_widget_;
+    const raw_ptr<PinRequestWidget, DanglingUntriaged> pin_request_widget_;
   };
+
+  PinRequestWidget(const PinRequestWidget&) = delete;
+  PinRequestWidget& operator=(const PinRequestWidget&) = delete;
 
   // Creates and shows the instance of PinRequestWidget.
   // This widget is modal and only one instance can be created at a time. It
@@ -60,8 +61,8 @@ class ASH_EXPORT PinRequestWidget {
 
   // Toggles showing an error state and updates displayed strings.
   void UpdateState(PinRequestViewState state,
-                   const base::string16& title,
-                   const base::string16& description);
+                   const std::u16string& title,
+                   const std::u16string& description);
 
   // Enables or disables PIN input.
   void SetPinInputEnabled(bool enabled);
@@ -91,8 +92,6 @@ class ASH_EXPORT PinRequestWidget {
   std::unique_ptr<WindowDimmer> dimmer_;
 
   base::WeakPtrFactory<PinRequestWidget> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(PinRequestWidget);
 };
 
 }  // namespace ash

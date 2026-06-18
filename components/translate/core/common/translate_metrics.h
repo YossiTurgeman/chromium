@@ -1,11 +1,9 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_TRANSLATE_CORE_COMMON_TRANSLATE_METRICS_H_
 #define COMPONENTS_TRANSLATE_CORE_COMMON_TRANSLATE_METRICS_H_
-
-#include <string>
 
 #include "base/time/time.h"
 
@@ -16,9 +14,7 @@ namespace translate {
 namespace metrics_internal {
 
 // Constant string values to indicate UMA names.
-extern const char kTranslateContentLanguage[];
-extern const char kTranslateHtmlLang[];
-extern const char kTranslateLanguageVerification[];
+extern const char kTranslateLanguageDetectionLanguageVerification[];
 extern const char kTranslateTimeToBeReady[];
 extern const char kTranslateTimeToLoad[];
 extern const char kTranslateTimeToTranslate[];
@@ -27,52 +23,66 @@ extern const char kTranslatePageScheme[];
 extern const char kTranslateSimilarLanguageMatch[];
 extern const char kTranslateLanguageDetectionConflict[];
 extern const char kTranslateLanguageDeterminedDuration[];
+extern const char kTranslatedLanguageDetectionContentLength[];
+extern const char kTranslateCompactInfobarEvent[];
 
 }  // namespace metrics_internal
 
-// A page may provide a Content-Language HTTP header or a META tag.
-// TranslateAgent checks if a server provides a valid Content-Language.
-enum LanguageCheckType {
-  LANGUAGE_NOT_PROVIDED,
-  LANGUAGE_VALID,
-  LANGUAGE_INVALID,
-  LANGUAGE_MAX,
-};
-
 // When a valid Content-Language is provided, TranslateAgent checks if a
-// server provided Content-Language matches to a language CLD determined.
-enum LanguageVerificationType {
-  LANGUAGE_VERIFICATION_CLD_DISABLED,  // obsolete
-  LANGUAGE_VERIFICATION_CLD_ONLY,
-  LANGUAGE_VERIFICATION_UNKNOWN,
-  LANGUAGE_VERIFICATION_CLD_AGREE,
-  LANGUAGE_VERIFICATION_CLD_DISAGREE,
-  LANGUAGE_VERIFICATION_TRUST_CLD,
-  LANGUAGE_VERIFICATION_CLD_COMPLEMENT_SUB_CODE,
-  LANGUAGE_VERIFICATION_MAX,
+// server provided Content-Language matches to a language the model determined.
+// This enum is used for recording metrics. This enum should remain synchronized
+// with the enum "TranslateLanguageVerification" in enums.xml.
+enum class LanguageVerificationType {
+  // kModelDisabled = 0, -- obsolete
+  kModelOnly = 1,
+  kModelUnknown = 2,
+  kModelAgrees = 3,
+  kModelDisagrees = 4,
+  kModelOverrides = 5,
+  kModelComplementsCountry = 6,
+  kNoPageContent = 7,
+  kModelNotAvailable = 8,
+  kModelHistogramBoundary = 9,
+  kMaxValue = kModelHistogramBoundary,
 };
 
-// Scheme type of pages Chrome is going to translate.
-enum SchemeType {
-  SCHEME_HTTP,
-  SCHEME_HTTPS,
-  SCHEME_OTHERS,
-  SCHEME_MAX,
+// Enum for the Translate.CompactInfobar.Event UMA histogram.
+// Note: This enum is used to back an UMA histogram, and should be treated as
+// append-only.
+// GENERATED_JAVA_ENUM_PACKAGE: org.chromium.chrome.browser.infobar
+// GENERATED_JAVA_CLASS_NAME_OVERRIDE: InfobarEvent
+enum class InfobarEvent {
+  INFOBAR_IMPRESSION = 0,
+  INFOBAR_TARGET_TAB_TRANSLATE = 1,
+  INFOBAR_DECLINE = 2,
+  INFOBAR_OPTIONS = 3,
+  INFOBAR_MORE_LANGUAGES = 4,
+  INFOBAR_MORE_LANGUAGES_TRANSLATE = 5,
+  INFOBAR_PAGE_NOT_IN = 6,
+  INFOBAR_ALWAYS_TRANSLATE = 7,
+  INFOBAR_NEVER_TRANSLATE = 8,
+  INFOBAR_NEVER_TRANSLATE_SITE = 9,
+  INFOBAR_SCROLL_HIDE = 10,
+  INFOBAR_SCROLL_SHOW = 11,
+  INFOBAR_REVERT = 12,
+  INFOBAR_SNACKBAR_ALWAYS_TRANSLATE_IMPRESSION = 13,
+  INFOBAR_SNACKBAR_NEVER_TRANSLATE_IMPRESSION = 14,
+  INFOBAR_SNACKBAR_NEVER_TRANSLATE_SITE_IMPRESSION = 15,
+  INFOBAR_SNACKBAR_CANCEL_ALWAYS = 16,
+  INFOBAR_SNACKBAR_CANCEL_NEVER_SITE = 17,
+  INFOBAR_SNACKBAR_CANCEL_NEVER = 18,
+  INFOBAR_ALWAYS_TRANSLATE_UNDO = 19,
+  INFOBAR_CLOSE_DEPRECATED = 20,
+  INFOBAR_SNACKBAR_AUTO_ALWAYS_IMPRESSION = 21,
+  INFOBAR_SNACKBAR_AUTO_NEVER_IMPRESSION = 22,
+  INFOBAR_SNACKBAR_CANCEL_AUTO_ALWAYS = 23,
+  INFOBAR_SNACKBAR_CANCEL_AUTO_NEVER = 24,
+  // 25 was a duplicate code and is now deprecated https://crbug.com/1414604
+  INFOBAR_NEVER_TRANSLATE_UNDO = 26,
+  INFOBAR_NEVER_TRANSLATE_SITE_UNDO = 27,
+  INFOBAR_HISTOGRAM_BOUNDARY = 28,
+  kMaxValue = INFOBAR_HISTOGRAM_BOUNDARY,
 };
-
-// Called after TranslateAgent verifies a server providing Content-Language
-// header. |provided_code| contains a Content-Language header value which a
-// server provides. It can be empty string when a server doesn't provide it.
-// |revised_code| is a value modified by format error corrector.
-void ReportContentLanguage(const std::string& provided_code,
-                           const std::string& revised_code);
-
-// Called after TranslateAgent verifies a page providing html lang attribute.
-// |provided_code| contains a html lang attribute which a page provides. It can
-// be empty string when a page doesn't provide it. |revised_code| is a value
-// modified by format error corrector.
-void ReportHtmlLang(const std::string& provided_code,
-                    const std::string& revised_code);
 
 // Called when CLD verifies Content-Language header.
 void ReportLanguageVerification(LanguageVerificationType type);
@@ -86,19 +96,15 @@ void ReportTimeToLoad(double time_in_msec);
 // Called when a page translation is finished.
 void ReportTimeToTranslate(double time_in_msec);
 
-// Called when a translation is triggered.
-void ReportUserActionDuration(base::TimeTicks begin, base::TimeTicks end);
-
-// Called when a translation is triggered.
-void ReportPageScheme(const std::string& scheme);
-
-// Called when CLD agreed on a language which is different, but in the similar
-// language list.
-void ReportSimilarLanguageMatch(bool match);
-
 // Called when the page language is determined.
 void ReportLanguageDeterminedDuration(base::TimeTicks begin,
                                       base::TimeTicks end);
+
+// Called after when a translation starts.
+void ReportTranslatedLanguageDetectionContentLength(size_t content_length);
+
+// Called when the Android Messages or iOS Translate UI is shown.
+void ReportCompactInfobarEvent(InfobarEvent event);
 
 }  // namespace translate
 

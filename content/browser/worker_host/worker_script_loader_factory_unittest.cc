@@ -1,22 +1,23 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/worker_host/worker_script_loader_factory.h"
 
-#include "base/bind_helpers.h"
+#include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
 #include "content/browser/service_worker/embedded_worker_test_helper.h"
-#include "content/browser/service_worker/service_worker_container_host.h"
+#include "content/browser/service_worker/service_worker_client.h"
 #include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "content/browser/service_worker/service_worker_main_resource_handle.h"
-#include "content/browser/service_worker/service_worker_main_resource_handle_core.h"
+#include "content/browser/worker_host/worker_script_loader.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/test/fake_network_url_loader_factory.h"
 #include "net/base/isolation_info.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "services/network/public/cpp/wrapper_shared_url_loader_factory.h"
+#include "services/network/public/mojom/fetch_api.mojom.h"
 #include "services/network/test/test_url_loader_client.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
@@ -25,7 +26,7 @@ namespace content {
 
 namespace {
 
-const int kProcessId = 1;
+const ChildProcessId kProcessId(1);
 
 }  // namespace
 
@@ -56,7 +57,8 @@ class WorkerScriptLoaderFactoryTest : public testing::Test {
 
     // Set up a service worker host for the shared worker.
     service_worker_handle_ = std::make_unique<ServiceWorkerMainResourceHandle>(
-        helper_->context_wrapper(), base::DoNothing());
+        helper_->context_wrapper(), base::DoNothing(),
+        /*fetch_event_client_id=*/"");
   }
 
  protected:
@@ -70,15 +72,16 @@ class WorkerScriptLoaderFactoryTest : public testing::Test {
     resource_request.trusted_params = network::ResourceRequest::TrustedParams();
     resource_request.trusted_params->isolation_info =
         net::IsolationInfo::Create(
-            net::IsolationInfo::RedirectMode::kUpdateNothing,
-            url::Origin::Create(url), url::Origin::Create(url),
-            net::SiteForCookies());
+            net::IsolationInfo::RequestType::kOther, url::Origin::Create(url),
+            url::Origin::Create(url), net::SiteForCookies());
     resource_request.resource_type =
         static_cast<int>(blink::mojom::ResourceType::kSharedWorker);
+    resource_request.destination =
+        network::mojom::RequestDestination::kSharedWorker;
     factory->CreateLoaderAndStart(
-        loader.InitWithNewPipeAndPassReceiver(), 0 /* routing_id */,
-        0 /* request_id */, network::mojom::kURLLoadOptionNone,
-        resource_request, client->CreateRemote(),
+        loader.InitWithNewPipeAndPassReceiver(), 0 /* request_id */,
+        network::mojom::kURLLoadOptionNone, resource_request,
+        client->CreateRemote(),
         net::MutableNetworkTrafficAnnotationTag(TRAFFIC_ANNOTATION_FOR_TESTS));
     return loader;
   }
@@ -93,35 +96,57 @@ class WorkerScriptLoaderFactoryTest : public testing::Test {
 };
 
 TEST_F(WorkerScriptLoaderFactoryTest, ServiceWorkerContainerHost) {
+  GURL url("https://www.example.com/worker.js");
+
   // Make the factory.
   auto factory = std::make_unique<WorkerScriptLoaderFactory>(
-      kProcessId, DedicatedOrSharedWorkerToken(), service_worker_handle_.get(),
-      /*appcache_host=*/nullptr, browser_context_getter_,
+      kProcessId, DedicatedOrSharedWorkerToken(),
+      net::IsolationInfo::CreateForInternalRequest(url::Origin::Create(url)),
+      service_worker_handle_.get(), browser_context_getter_,
       network_loader_factory_);
 
   // Load the script.
-  GURL url("https://www.example.com/worker.js");
   network::TestURLLoaderClient client;
   mojo::PendingRemote<network::mojom::URLLoader> loader =
       CreateTestLoaderAndStart(url, factory.get(), &client);
+  base::RunLoop().RunUntilIdle();
+
+  // `SetExecutionReady()` should wait for `OnFetcherCallbackCalled()`.
+  base::WeakPtr<ServiceWorkerClient> service_worker_client =
+      service_worker_handle_->service_worker_client();
+  EXPECT_FALSE(service_worker_client->is_response_committed());
+  EXPECT_FALSE(service_worker_client->is_execution_ready());
+
+  // Emulate CommitResponse() and SetContainerReady() calls that would happen
+  // inside `WorkerScriptFetcher::callback_`.
+  auto container_info =
+      service_worker_handle_->scoped_service_worker_client()
+          ->CommitResponseAndRelease(
+              /*rfh_id=*/std::nullopt, PolicyContainerPolicies(),
+              /*coep_reporter=*/{}, /*dip_reporter=*/{}, ukm::kInvalidSourceId);
+  (*service_worker_handle_->scoped_service_worker_client())
+      ->SetContainerReady();
+  factory->GetScriptLoader()->OnFetcherCallbackCalled();
   client.RunUntilComplete();
+
   EXPECT_EQ(net::OK, client.completion_status().error_code);
 
   // The container host should be set up.
-  base::WeakPtr<ServiceWorkerContainerHost> container_host =
-      service_worker_handle_->core()->container_host();
-  EXPECT_TRUE(container_host->is_response_committed());
-  EXPECT_TRUE(container_host->is_execution_ready());
-  EXPECT_EQ(url, container_host->url());
+  EXPECT_TRUE(service_worker_client->is_response_committed());
+  EXPECT_TRUE(service_worker_client->is_execution_ready());
+  EXPECT_EQ(url, service_worker_client->url());
 }
 
 // Test a null service worker handle. This typically only happens during
 // shutdown or after a fatal error occurred in the service worker system.
 TEST_F(WorkerScriptLoaderFactoryTest, NullServiceWorkerHandle) {
+  GURL url("https://www.example.com/worker.js");
+
   // Make the factory.
   auto factory = std::make_unique<WorkerScriptLoaderFactory>(
-      kProcessId, DedicatedOrSharedWorkerToken(), service_worker_handle_.get(),
-      nullptr /* appcache_host */, browser_context_getter_,
+      kProcessId, DedicatedOrSharedWorkerToken(),
+      net::IsolationInfo::CreateForInternalRequest(url::Origin::Create(url)),
+      service_worker_handle_.get(), browser_context_getter_,
       network_loader_factory_);
 
   // Destroy the handle.
@@ -130,7 +155,6 @@ TEST_F(WorkerScriptLoaderFactoryTest, NullServiceWorkerHandle) {
   base::RunLoop().RunUntilIdle();
 
   // Load the script.
-  GURL url("https://www.example.com/worker.js");
   network::TestURLLoaderClient client;
   mojo::PendingRemote<network::mojom::URLLoader> loader =
       CreateTestLoaderAndStart(url, factory.get(), &client);
@@ -142,17 +166,19 @@ TEST_F(WorkerScriptLoaderFactoryTest, NullServiceWorkerHandle) {
 // shutdown starts between the constructor and when CreateLoaderAndStart is
 // invoked.
 TEST_F(WorkerScriptLoaderFactoryTest, NullBrowserContext) {
+  GURL url("https://www.example.com/worker.js");
+
   // Make the factory.
   auto factory = std::make_unique<WorkerScriptLoaderFactory>(
-      kProcessId, DedicatedOrSharedWorkerToken(), service_worker_handle_.get(),
-      nullptr /* appcache_host */, browser_context_getter_,
+      kProcessId, DedicatedOrSharedWorkerToken(),
+      net::IsolationInfo::CreateForInternalRequest(url::Origin::Create(url)),
+      service_worker_handle_.get(), browser_context_getter_,
       network_loader_factory_);
 
   // Set a null browser context.
   helper_->context_wrapper()->Shutdown();
 
   // Load the script.
-  GURL url("https://www.example.com/worker.js");
   network::TestURLLoaderClient client;
   mojo::PendingRemote<network::mojom::URLLoader> loader =
       CreateTestLoaderAndStart(url, factory.get(), &client);

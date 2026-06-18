@@ -1,16 +1,15 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PERFORMANCE_MANAGER_TAB_HELPER_FRAME_NODE_SOURCE_H_
 #define COMPONENTS_PERFORMANCE_MANAGER_TAB_HELPER_FRAME_NODE_SOURCE_H_
 
+#include "base/memory/raw_ptr.h"
 #include "components/performance_manager/frame_node_source.h"
 
-#include "base/macros.h"
-#include "base/observer_list.h"
 #include "base/observer_list_types.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_multi_source_observation.h"
 #include "components/performance_manager/performance_manager_tab_helper.h"
 
 namespace performance_manager {
@@ -21,17 +20,21 @@ class TabHelperFrameNodeSource : public FrameNodeSource,
                                  public PerformanceManagerTabHelper::Observer {
  public:
   TabHelperFrameNodeSource();
+
+  TabHelperFrameNodeSource(const TabHelperFrameNodeSource&) = delete;
+  TabHelperFrameNodeSource& operator=(const TabHelperFrameNodeSource&) = delete;
+
   ~TabHelperFrameNodeSource() override;
 
   // FrameNodeSource:
   FrameNodeImpl* GetFrameNode(
-      content::GlobalFrameRoutingId render_process_host_id) override;
+      content::GlobalRenderFrameHostId render_process_host_id) override;
   void SubscribeToFrameNode(
-      content::GlobalFrameRoutingId render_process_host_id,
+      content::GlobalRenderFrameHostId render_process_host_id,
       OnbeforeFrameNodeRemovedCallback on_before_frame_node_removed_callback)
       override;
   void UnsubscribeFromFrameNode(
-      content::GlobalFrameRoutingId render_process_host_id) override;
+      content::GlobalRenderFrameHostId render_process_host_id) override;
 
   // PerformanceManagerTabHelper::Observer:
   void OnBeforeFrameNodeRemoved(
@@ -59,15 +62,14 @@ class TabHelperFrameNodeSource : public FrameNodeSource,
 
   // Maps each tab helper to the set of observed frame nodes that belongs to
   // that tab helper.
-  base::flat_map<PerformanceManagerTabHelper*, base::flat_set<FrameNodeImpl*>>
+  base::flat_map<PerformanceManagerTabHelper*,
+                 base::flat_set<raw_ptr<FrameNodeImpl, CtnExperimental>>>
       observed_frame_nodes_;
 
   // Observes frame node deletions.
-  ScopedObserver<PerformanceManagerTabHelper,
-                 PerformanceManagerTabHelper::Observer>
-      performance_manager_tab_helper_observers_;
-
-  DISALLOW_COPY_AND_ASSIGN(TabHelperFrameNodeSource);
+  base::ScopedMultiSourceObservation<PerformanceManagerTabHelper,
+                                     PerformanceManagerTabHelper::Observer>
+      performance_manager_tab_helper_observations_;
 };
 
 }  // namespace performance_manager

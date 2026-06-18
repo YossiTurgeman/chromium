@@ -1,18 +1,13 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CC_INPUT_SCROLL_STATE_H_
 #define CC_INPUT_SCROLL_STATE_H_
 
-#include <list>
-#include <memory>
-
 #include "cc/cc_export.h"
 #include "cc/input/scroll_state_data.h"
-#include "ui/gfx/geometry/point.h"
-#include "ui/gfx/geometry/scroll_offset.h"
-#include "ui/gfx/geometry/vector2d.h"
+#include "ui/gfx/geometry/vector2d_f.h"
 
 namespace cc {
 
@@ -39,9 +34,6 @@ class CC_EXPORT ScrollState {
   int position_x() const { return data_.position_x; }
   int position_y() const { return data_.position_y; }
 
-  double velocity_x() const { return data_.velocity_x; }
-  double velocity_y() const { return data_.velocity_y; }
-
   bool is_beginning() const { return data_.is_beginning; }
   void set_is_beginning(bool is_beginning) {
     data_.is_beginning = is_beginning;
@@ -57,6 +49,14 @@ class CC_EXPORT ScrollState {
   bool is_direct_manipulation() const { return data_.is_direct_manipulation; }
   void set_is_direct_manipulation(bool is_direct_manipulation) {
     data_.is_direct_manipulation = is_direct_manipulation;
+  }
+
+  // True if the user interacts with the scrollbar.
+  bool is_scrollbar_interaction() const {
+    return data_.is_scrollbar_interaction;
+  }
+  void set_is_scrollbar_interaction(bool is_scrollbar_interaction) {
+    data_.is_scrollbar_interaction = is_scrollbar_interaction;
   }
 
   bool delta_consumed_for_scroll_sequence() const {
@@ -84,14 +84,14 @@ class CC_EXPORT ScrollState {
 
   // Returns a the delta hints if this is a scroll begin or the real delta if
   // it's a scroll update
-  gfx::ScrollOffset DeltaOrHint() const;
+  gfx::Vector2dF DeltaOrHint() const;
 
   ElementId target_element_id() const {
     return data_.current_native_scrolling_element();
   }
 
-  bool is_main_thread_hit_tested() const {
-    return data_.is_main_thread_hit_tested;
+  uint32_t main_thread_hit_tested_reasons() const {
+    return data_.main_thread_hit_tested_reasons;
   }
 
   ScrollStateData* data() { return &data_; }

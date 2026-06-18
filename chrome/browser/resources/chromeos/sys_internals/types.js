@@ -1,6 +1,8 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {DataSeries} from './line_chart/data_series.js';
 
 /**
  * @fileoverview Typedef use by chrome://sys-internals.
@@ -16,7 +18,7 @@
  *   user: number,
  * }}
  */
-var GeneralCpuType;
+export let GeneralCpuType;
 
 /**
  * For info page.
@@ -27,7 +29,7 @@ var GeneralCpuType;
  *   used: number,
  * }}
  */
-var GeneralMemoryType;
+export let GeneralMemoryType;
 
 /**
  * For info page.
@@ -38,42 +40,60 @@ var GeneralMemoryType;
  *   total: number,
  * }}
  */
-var GeneralZramType;
+export let GeneralZramType;
+
+/**
+ * For info page.
+ * @typedef {{
+ *   usage: number,
+ * }}
+ */
+export let GeneralGpuType;
+
+/**
+ * For info page.
+ * @typedef {{
+ *   usage: number,
+ * }}
+ */
+export let GeneralNpuType;
 
 /**
  * @typedef {{
- *   cpu: GeneralCpuType,
- *   memory: GeneralMemoryType,
- *   zram: GeneralZramType,
+ *   cpu: !GeneralCpuType,
+ *   memory: !GeneralMemoryType,
+ *   zram: !GeneralZramType,
+ *   gpu: ?GeneralGpuType,
+ *   npu: ?GeneralNpuType,
  * }}
  */
-var GeneralInfoType;
+export let GeneralInfoType;
 
 /**
- * @typedef {Array<!LineChart.DataSeries>|null}
+ * @typedef {Array<!DataSeries>|null}
  */
-var CpuDataSeriesSet;
-
-/**
- * @typedef {{
- *   memUsed: !LineChart.DataSeries,
- *   swapUsed: !LineChart.DataSeries,
- *   pswpin: !LineChart.DataSeries,
- *   pswpout: !LineChart.DataSeries
- * }}
- */
-var MemoryDataSeriesSet;
+export let CpuDataSeriesSet;
 
 /**
  * @typedef {{
- *   origDataSize: !LineChart.DataSeries,
- *   comprDataSize: !LineChart.DataSeries,
- *   memUsedTotal: !LineChart.DataSeries,
- *   numReads: !LineChart.DataSeries,
- *   numWrites: !LineChart.DataSeries
+ *   memUsed: !DataSeries,
+ *   swapUsed: !DataSeries,
+ *   pswpin: !DataSeries,
+ *   pswpout: !DataSeries
  * }}
  */
-var ZramDataSeriesSet;
+export let MemoryDataSeriesSet;
+
+/**
+ * @typedef {{
+ *   origDataSize: !DataSeries,
+ *   comprDataSize: !DataSeries,
+ *   memUsedTotal: !DataSeries,
+ *   numReads: !DataSeries,
+ *   numWrites: !DataSeries
+ * }}
+ */
+export let ZramDataSeriesSet;
 
 /**
  * @typedef {{
@@ -82,9 +102,9 @@ var ZramDataSeriesSet;
  *   zram: ZramDataSeriesSet,
  * }}
  */
-var DataSeriesSet;
+export let DataSeriesSet;
 
 /**
  * @typedef {{value: number, timestamp: number}}
  */
-var CounterType;
+export let CounterType;

@@ -1,55 +1,52 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/network_context_client_base_impl.h"
 
-#include "base/bind.h"
-#include "base/task/post_task.h"
+#include "base/functional/bind.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
-#include "base/task_runner.h"
 #include "build/build_config.h"
+#include "components/file_access/scoped_file_access.h"
 #include "content/browser/child_process_security_policy_impl.h"
+#include "content/public/browser/content_browser_client.h"
 #include "content/public/browser/network_context_client_base.h"
+#include "content/public/common/child_process_id.h"
+#include "content/public/common/child_process_id_util.h"
+#include "content/public/common/content_client.h"
 #include "mojo/public/cpp/bindings/remote.h"
-
-#if defined(OS_ANDROID)
-#include "base/android/content_uri_utils.h"
-#endif
+#include "net/base/net_errors.h"
+#include "services/network/public/mojom/trust_tokens.mojom.h"
 
 namespace content {
 
 namespace {
 
 void HandleFileUploadRequest(
-    int32_t process_id,
+    network::OriginatingProcessId process_id,
     bool async,
     const std::vector<base::FilePath>& file_paths,
     network::mojom::NetworkContextClient::OnFileUploadRequestedCallback
         callback,
-    scoped_refptr<base::TaskRunner> task_runner) {
+    scoped_refptr<base::TaskRunner> task_runner,
+    file_access::ScopedFileAccess scoped_file_access) {
   std::vector<base::File> files;
   uint32_t file_flags = base::File::FLAG_OPEN | base::File::FLAG_READ |
                         (async ? base::File::FLAG_ASYNC : 0);
   ChildProcessSecurityPolicy* cpsp = ChildProcessSecurityPolicy::GetInstance();
   for (const auto& file_path : file_paths) {
-    if (process_id != network::mojom::kBrowserProcessId &&
-        !cpsp->CanReadFile(process_id, file_path)) {
+    if (!process_id.is_browser() &&
+        !cpsp->CanReadFile(ToChildProcessId(process_id.renderer_process_id()),
+                           file_path)) {
       task_runner->PostTask(
           FROM_HERE, base::BindOnce(std::move(callback), net::ERR_ACCESS_DENIED,
                                     std::vector<base::File>()));
       return;
     }
-#if defined(OS_ANDROID)
-    if (file_path.IsContentUri()) {
-      files.push_back(base::OpenContentUriForRead(file_path));
-    } else {
-      files.emplace_back(file_path, file_flags);
-    }
-#else
     files.emplace_back(file_path, file_flags);
-#endif
     if (!files.back().IsValid()) {
       task_runner->PostTask(
           FROM_HERE,
@@ -65,69 +62,49 @@ void HandleFileUploadRequest(
 
 }  // namespace
 
-void NetworkContextOnFileUploadRequested(
-    int32_t process_id,
+void OnScopedFilesAccessAcquired(
+    network::OriginatingProcessId process_id,
     bool async,
     const std::vector<base::FilePath>& file_paths,
     network::mojom::NetworkContextClient::OnFileUploadRequestedCallback
-        callback) {
+        callback,
+    file_access::ScopedFileAccess scoped_file_access) {
+  if (!scoped_file_access.is_allowed()) {
+    std::move(callback).Run(net::Error::ERR_ACCESS_DENIED, /*files=*/{});
+    return;
+  }
   base::ThreadPool::PostTask(
       FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
       base::BindOnce(&HandleFileUploadRequest, process_id, async, file_paths,
                      std::move(callback),
-                     base::SequencedTaskRunnerHandle::Get()));
+                     base::SequencedTaskRunner::GetCurrentDefault(),
+                     std::move(scoped_file_access)));
+}
+
+void NetworkContextOnFileUploadRequested(
+    network::OriginatingProcessId process_id,
+    bool async,
+    const std::vector<base::FilePath>& file_paths,
+    const GURL& destination_url,
+    network::mojom::NetworkContextClient::OnFileUploadRequestedCallback
+        callback) {
+  GetContentClient()->browser()->RequestFilesAccess(
+      file_paths, destination_url,
+      base::BindOnce(&OnScopedFilesAccessAcquired, process_id, async,
+                     file_paths, std::move(callback)));
 }
 
 NetworkContextClientBase::NetworkContextClientBase() = default;
 NetworkContextClientBase::~NetworkContextClientBase() = default;
 
-void NetworkContextClientBase::OnAuthRequired(
-    const base::Optional<base::UnguessableToken>& window_id,
-    int32_t process_id,
-    int32_t routing_id,
-    uint32_t request_id,
-    const GURL& url,
-    bool first_auth_attempt,
-    const net::AuthChallengeInfo& auth_info,
-    network::mojom::URLResponseHeadPtr head,
-    mojo::PendingRemote<network::mojom::AuthChallengeResponder>
-        auth_challenge_responder) {
-  mojo::Remote<network::mojom::AuthChallengeResponder>
-      auth_challenge_responder_remote(std::move(auth_challenge_responder));
-  auth_challenge_responder_remote->OnAuthCredentials(base::nullopt);
-}
-
-void NetworkContextClientBase::OnCertificateRequested(
-    const base::Optional<base::UnguessableToken>& window_id,
-    int32_t process_id,
-    int32_t routing_id,
-    uint32_t request_id,
-    const scoped_refptr<net::SSLCertRequestInfo>& cert_info,
-    mojo::PendingRemote<network::mojom::ClientCertificateResponder>
-        cert_responder_remote) {
-  mojo::Remote<network::mojom::ClientCertificateResponder> cert_responder(
-      std::move(cert_responder_remote));
-  cert_responder->CancelRequest();
-}
-
-void NetworkContextClientBase::OnSSLCertificateError(
-    int32_t process_id,
-    int32_t routing_id,
-    const GURL& url,
-    int net_error,
-    const net::SSLInfo& ssl_info,
-    bool fatal,
-    OnSSLCertificateErrorCallback response) {
-  std::move(response).Run(net::ERR_ABORTED);
-}
-
 void NetworkContextClientBase::OnFileUploadRequested(
-    int32_t process_id,
+    const network::OriginatingProcessId& process_id,
     bool async,
     const std::vector<base::FilePath>& file_paths,
+    const GURL& destination_url,
     OnFileUploadRequestedCallback callback) {
   NetworkContextOnFileUploadRequested(process_id, async, file_paths,
-                                      std::move(callback));
+                                      destination_url, std::move(callback));
 }
 
 void NetworkContextClientBase::OnCanSendReportingReports(
@@ -137,22 +114,12 @@ void NetworkContextClientBase::OnCanSendReportingReports(
 }
 
 void NetworkContextClientBase::OnCanSendDomainReliabilityUpload(
-    const GURL& origin,
+    const url::Origin& origin,
     OnCanSendDomainReliabilityUploadCallback callback) {
   std::move(callback).Run(false);
 }
 
-void NetworkContextClientBase::OnClearSiteData(
-    int32_t process_id,
-    int32_t routing_id,
-    const GURL& url,
-    const std::string& header_value,
-    int load_flags,
-    OnClearSiteDataCallback callback) {
-  std::move(callback).Run();
-}
-
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 void NetworkContextClientBase::OnGenerateHttpNegotiateAuthToken(
     const std::string& server_auth_token,
     bool can_delegate,
@@ -163,10 +130,13 @@ void NetworkContextClientBase::OnGenerateHttpNegotiateAuthToken(
 }
 #endif
 
-#if defined(OS_CHROMEOS)
-void NetworkContextClientBase::OnTrustAnchorUsed() {}
-#endif
+#if BUILDFLAG(IS_CT_SUPPORTED)
+void NetworkContextClientBase::OnCanSendSCTAuditingReport(
+    OnCanSendSCTAuditingReportCallback callback) {
+  std::move(callback).Run(false);
+}
 
-void NetworkContextClientBase::OnSCTReportReady(const std::string& cache_key) {}
+void NetworkContextClientBase::OnNewSCTAuditingReportSent() {}
+#endif
 
 }  // namespace content

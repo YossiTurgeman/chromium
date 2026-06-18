@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,10 @@
 
 #include <stdint.h>
 
+#include <optional>
+#include <string_view>
+
 #include "base/check.h"
-#include "base/macros.h"
-#include "base/optional.h"
-#include "base/strings/string_piece.h"
 
 namespace gcm {
 
@@ -36,7 +36,11 @@ enum class GCMDecryptionResult;
 // https://tools.ietf.org/html/draft-ietf-webpush-encryption-08#section-3.1
 class MessagePayloadParser {
  public:
-  explicit MessagePayloadParser(base::StringPiece message);
+  explicit MessagePayloadParser(std::string_view message);
+
+  MessagePayloadParser(const MessagePayloadParser&) = delete;
+  MessagePayloadParser& operator=(const MessagePayloadParser&) = delete;
+
   ~MessagePayloadParser();
 
   // Returns whether the parser represents a valid message.
@@ -81,14 +85,12 @@ class MessagePayloadParser {
 
  private:
   bool is_valid_ = false;
-  base::Optional<GCMDecryptionResult> failure_reason_;
+  std::optional<GCMDecryptionResult> failure_reason_;
 
   std::string salt_;
   uint32_t record_size_ = 0;
   std::string public_key_;
   std::string ciphertext_;
-
-  DISALLOW_COPY_AND_ASSIGN(MessagePayloadParser);
 };
 
 }  // namespace gcm

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Tests for protoc_wrapper."""
@@ -84,6 +84,20 @@ class ProtocWrapperTest(unittest.TestCase):
     mock_call.assert_called_once_with([
         '/foo/protoc', '--cpp_out', 'foo=bar:./bar', '--proto_path', '.',
         './foo.proto'
+    ])
+
+  @mock.patch('subprocess.call', return_value=0)
+  def test_ts_out_with_options_no_colon(self, mock_call):
+    protoc_wrapper.main([
+        '--proto-in-dir', './', '--ts-out-dir', './bar', '--protoc-gen-ts',
+        '/foo/protoc-gen-ts_proto', '--protoc', '/foo/protoc', 'foo.proto'
+    ])
+    mock_call.assert_called_once_with([
+        '/foo/protoc', '--ts_proto_out=./bar',
+        '--ts_proto_opt=env=browser,esModuleInterop=true,importSuffix=.js',
+        '--ts_proto_opt=useOptionals=all',
+        '--plugin=protoc-gen-ts_proto=/foo/protoc-gen-ts_proto', '--proto_path',
+        '.', './foo.proto'
     ])
 
 

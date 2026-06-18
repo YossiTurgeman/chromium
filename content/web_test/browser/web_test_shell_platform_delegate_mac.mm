@@ -1,13 +1,16 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/web_test/browser/web_test_shell_platform_delegate.h"
 
-#import "base/mac/foundation_util.h"
+#import "base/apple/foundation_util.h"
+#include "content/browser/renderer_host/render_frame_host_delegate.h"
+#include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/renderer_host/render_widget_host_view_mac.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_widget_host.h"
+#include "content/public/browser/web_contents.h"
 #include "content/shell/browser/shell.h"
 
 namespace content {
@@ -38,7 +41,7 @@ void WebTestShellPlatformDelegate::CreatePlatformWindow(
     return;
   }
 
-  DCHECK(!base::Contains(web_test_shell_data_map_, shell));
+  DCHECK(!web_test_shell_data_map_.contains(shell));
   WebTestShellData& shell_data = web_test_shell_data_map_[shell];
 
   shell_data.initial_size = initial_size;
@@ -49,7 +52,6 @@ gfx::NativeWindow WebTestShellPlatformDelegate::GetNativeWindow(Shell* shell) {
     return ShellPlatformDelegate::GetNativeWindow(shell);
 
   NOTREACHED();
-  return {};
 }
 
 void WebTestShellPlatformDelegate::CleanUp(Shell* shell) {
@@ -58,7 +60,7 @@ void WebTestShellPlatformDelegate::CleanUp(Shell* shell) {
     return;
   }
 
-  DCHECK(base::Contains(web_test_shell_data_map_, shell));
+  DCHECK(web_test_shell_data_map_.contains(shell));
   web_test_shell_data_map_.erase(shell);
   if (shell == activated_headless_shell_)
     activated_headless_shell_ = nullptr;
@@ -89,20 +91,22 @@ void WebTestShellPlatformDelegate::SetAddressBarURL(Shell* shell,
 }
 
 void WebTestShellPlatformDelegate::SetTitle(Shell* shell,
-                                            const base::string16& title) {
+                                            const std::u16string& title) {
   if (!IsHeadless()) {
     ShellPlatformDelegate::SetTitle(shell, title);
     return;
   }
 }
 
-void WebTestShellPlatformDelegate::RenderViewReady(Shell* shell) {
+void WebTestShellPlatformDelegate::MainFrameCreated(
+    Shell* shell,
+    RenderFrameHost* main_frame) {
   if (!IsHeadless()) {
-    ShellPlatformDelegate::RenderViewReady(shell);
+    ShellPlatformDelegate::MainFrameCreated(shell, main_frame);
     return;
   }
 
-  DCHECK(base::Contains(web_test_shell_data_map_, shell));
+  DCHECK(web_test_shell_data_map_.contains(shell));
   WebTestShellData& shell_data = web_test_shell_data_map_[shell];
 
   // In mac headless mode, the OS view for the WebContents is not attached to a
@@ -115,11 +119,27 @@ void WebTestShellPlatformDelegate::RenderViewReady(Shell* shell) {
   // RenderWidgetHostView to be created would leave the WebContents with invalid
   // sizes (such as the window screen rect).
   //
-  // We use the signal that the RenderView has been created in the renderer as
-  // a proxy for knowing when the top level RenderWidgetHostView is created,
-  // since they are created at the same time.
-  DCHECK(shell->web_contents()->GetMainFrame()->GetView());
+  // We use the signal that the `blink::WebView` has been created in the
+  // renderer as a proxy for knowing when the top level RenderWidgetHostView is
+  // created, since they are created at the same time.
   ResizeWebContent(shell, shell_data.initial_size);
+
+  // The above code changes the widget screen rects of the currently navigated
+  // RenderWidgetHostView, but not the RenderWidgetHostView of the new main
+  // frame. If there is no render frame swap (i.e. RenderDocument is disabled),
+  // then this doesn't matter. However, if there is a swap, then the new RWHV
+  // will also need to have its screen rects updated so they are not left at
+  // 0x0. Popups are left alone since there are some tests that modify the
+  // window size mid-navigation, and this code block can race with that and undo
+  // the resize.
+  if (!RenderFrameHostImpl::From(main_frame)->delegate()->IsPopup()) {
+    DCHECK(main_frame->GetView());
+    auto* rwhv_mac =
+        static_cast<RenderWidgetHostViewMac*>(main_frame->GetView());
+    if (rwhv_mac) {
+      rwhv_mac->SetWindowFrameInScreen(gfx::Rect(shell_data.initial_size));
+    }
+  }
 }
 
 bool WebTestShellPlatformDelegate::DestroyShell(Shell* shell) {
@@ -137,14 +157,14 @@ void WebTestShellPlatformDelegate::ResizeWebContent(
   }
 
   NSView* web_view = shell->web_contents()->GetNativeView().GetNativeNSView();
-  NSRect frame = NSMakeRect(0, 0, content_size.width(), content_size.height());
-  [web_view setFrame:frame];
+  web_view.frame =
+      NSMakeRect(0, 0, content_size.width(), content_size.height());
 
   // The above code changes the RenderWidgetHostView's size, but does not change
-  // the widget's screen rects, since the RenerWidgetHostView is not attached to
-  // a window in headless mode. So this call causes them to be updated so they
-  // are not left as 0x0.
-  auto* rwhv_mac = shell->web_contents()->GetMainFrame()->GetView();
+  // the widget's screen rects, since the RenderWidgetHostView is not attached
+  // to a window in headless mode. So this call causes them to be updated so
+  // they are not left as 0x0.
+  auto* rwhv_mac = shell->web_contents()->GetPrimaryMainFrame()->GetView();
   if (rwhv_mac)
     rwhv_mac->SetWindowFrameInScreen(gfx::Rect(content_size));
 }
@@ -164,25 +184,26 @@ void WebTestShellPlatformDelegate::ActivateContents(Shell* shell,
   for (Shell* window : Shell::windows()) {
     if (window != shell) {
       WebContents* other_top_contents = window->web_contents();
-      RenderWidgetHost* other_main_widget =
-          other_top_contents->GetMainFrame()->GetView()->GetRenderWidgetHost();
-      other_main_widget->Blur();
-      other_main_widget->SetActive(false);
+      auto* other_rwhv_mac = static_cast<RenderWidgetHostViewMac*>(
+          other_top_contents->GetPrimaryMainFrame()->GetView());
+      other_rwhv_mac->OnFirstResponderChanged(false);
+      other_rwhv_mac->GetRenderWidgetHost()->SetActive(false);
     }
   }
 
-  RenderWidgetHost* main_widget =
-      top_contents->GetMainFrame()->GetView()->GetRenderWidgetHost();
-  main_widget->Focus();
-  main_widget->SetActive(true);
+  auto* top_rwhv_mac = static_cast<RenderWidgetHostViewMac*>(
+      top_contents->GetPrimaryMainFrame()->GetView());
+  top_rwhv_mac->OnFirstResponderChanged(true);
+  top_rwhv_mac->GetRenderWidgetHost()->SetActive(true);
   activated_headless_shell_ = shell;
 }
 
-void WebTestShellPlatformDelegate::DidNavigateMainFramePostCommit(
+void WebTestShellPlatformDelegate::DidNavigatePrimaryMainFramePostCommit(
     Shell* shell,
     WebContents* contents) {
   if (!IsHeadless()) {
-    ShellPlatformDelegate::DidNavigateMainFramePostCommit(shell, contents);
+    ShellPlatformDelegate::DidNavigatePrimaryMainFramePostCommit(shell,
+                                                                 contents);
     return;
   }
 
@@ -198,7 +219,7 @@ void WebTestShellPlatformDelegate::DidNavigateMainFramePostCommit(
 bool WebTestShellPlatformDelegate::HandleKeyboardEvent(
     Shell* shell,
     WebContents* source,
-    const NativeWebKeyboardEvent& event) {
+    const input::NativeWebKeyboardEvent& event) {
   if (IsHeadless())
     return false;
   return ShellPlatformDelegate::HandleKeyboardEvent(shell, source, event);

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,8 @@
 #include <string>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
 
 namespace remoting {
 
@@ -20,22 +21,33 @@ class HostExtensionSession;
 namespace protocol {
 class ClientStub;
 class ExtensionMessage;
-}
+}  // namespace protocol
 
 // Helper class used to create and manage a set of HostExtensionSession
 // instances depending upon the set of registered HostExtensions, and the
 // set of capabilities negotiated between client and host.
 class HostExtensionSessionManager {
  public:
-  using HostExtensions = std::vector<HostExtension*>;
+  using HostExtensions =
+      std::vector<raw_ptr<HostExtension, VectorExperimental>>;
 
   // Creates an extension manager for the specified |extensions|.
   HostExtensionSessionManager(const HostExtensions& extensions,
                               ClientSessionDetails* client_session_details);
+
+  HostExtensionSessionManager(const HostExtensionSessionManager&) = delete;
+  HostExtensionSessionManager& operator=(const HostExtensionSessionManager&) =
+      delete;
+
   virtual ~HostExtensionSessionManager();
 
   // Returns the union of all capabilities supported by registered extensions.
   std::string GetCapabilities() const;
+
+  // Finds an extension session with the matching capability. Returns nullptr if
+  // the extension session is not found, or capability negotiation has not
+  // completed.
+  HostExtensionSession* FindExtensionSession(const std::string& capability);
 
   // Handles completion of authentication and capabilities negotiation, creating
   // the set of HostExtensionSessions to match the client's capabilities.
@@ -49,12 +61,13 @@ class HostExtensionSessionManager {
 
  private:
   using HostExtensionSessions =
-      std::vector<std::unique_ptr<HostExtensionSession>>;
+      base::flat_map</* capability */ std::string,
+                     std::unique_ptr<HostExtensionSession>>;
 
   // Passed to HostExtensionSessions to allow them to send messages,
   // disconnect the session, etc.
-  ClientSessionDetails* client_session_details_;
-  protocol::ClientStub* client_stub_;
+  raw_ptr<ClientSessionDetails> client_session_details_;
+  raw_ptr<protocol::ClientStub> client_stub_;
 
   // The HostExtensions to instantiate for the session, if it reaches the
   // authenticated state.
@@ -62,8 +75,6 @@ class HostExtensionSessionManager {
 
   // The instantiated HostExtensionSessions, used to handle extension messages.
   HostExtensionSessions extension_sessions_;
-
-  DISALLOW_COPY_AND_ASSIGN(HostExtensionSessionManager);
 };
 
 }  // namespace remoting

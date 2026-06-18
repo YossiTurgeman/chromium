@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,45 +23,40 @@ UsbPrinterManifestData::~UsbPrinterManifestData() {
 // static
 const UsbPrinterManifestData* UsbPrinterManifestData::Get(
     const Extension* extension) {
-  return static_cast<UsbPrinterManifestData*>(
+  return static_cast<const UsbPrinterManifestData*>(
       extension->GetManifestData(manifest_keys::kUsbPrinters));
 }
 
 // static
 std::unique_ptr<UsbPrinterManifestData> UsbPrinterManifestData::FromValue(
     const base::Value& value,
-    base::string16* error) {
-  std::unique_ptr<api::extensions_manifest_types::UsbPrinters> usb_printers =
-      api::extensions_manifest_types::UsbPrinters::FromValue(value, error);
-  if (!usb_printers) {
+    std::u16string* error) {
+  auto usb_printers =
+      api::extensions_manifest_types::UsbPrinters::FromValue(value);
+  if (!usb_printers.has_value()) {
+    *error = std::move(usb_printers).error();
     return nullptr;
   }
 
   auto result = std::make_unique<UsbPrinterManifestData>();
   for (const auto& input : usb_printers->filters) {
     if (input.product_id && input.interface_class) {
-      *error = base::ASCIIToUTF16(
-          "Only one of productId or interfaceClass may be specified.");
+      *error = u"Only one of productId or interfaceClass may be specified.";
       return nullptr;
     }
 
     auto output = device::mojom::UsbDeviceFilter::New();
-    output->has_vendor_id = true;
     output->vendor_id = input.vendor_id;
 
     if (input.product_id) {
-      output->has_product_id = true;
       output->product_id = *input.product_id;
     }
 
     if (input.interface_class) {
-      output->has_class_code = true;
       output->class_code = *input.interface_class;
       if (input.interface_subclass) {
-        output->has_subclass_code = true;
         output->subclass_code = *input.interface_subclass;
         if (input.interface_protocol) {
-          output->has_protocol_code = true;
           output->protocol_code = *input.interface_protocol;
         }
       }

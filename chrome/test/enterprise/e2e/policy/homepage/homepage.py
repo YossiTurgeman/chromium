@@ -1,11 +1,13 @@
-# Copyright (c) 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import os
 import re
 from absl import flags
-from chrome_ent_test.infra.core import environment, before_all, test
+from chrome_ent_test.infra.core import before_all
+from chrome_ent_test.infra.core import environment
+from chrome_ent_test.infra.core import test
 from infra import ChromeEnterpriseTestCase
 
 FLAGS = flags.FLAGS
@@ -16,15 +18,15 @@ class HomepageTest(ChromeEnterpriseTestCase):
   """Test HomepageIsNewTabPage and HomepageLocation policies.
 
   See:
-     https://cloud.google.com/docs/chrome-enterprise/policies/?policy=HomepageLocation
-     https://cloud.google.com/docs/chrome-enterprise/policies/?policy=HomepageIsNewTabPage
-     https://cloud.google.com/docs/chrome-enterprise/policies/?policy=ShowHomeButton
+     https://chromeenterprise.google/policies/?policy=HomepageLocation
+     https://chromeenterprise.google/policies/?policy=HomepageIsNewTabPage
+     https://chromeenterprise.google/policies/?policy=ShowHomeButton
   """
 
   @before_all
   def setup(self):
-    self.InstallChrome('client2019')
-    self.EnableUITest('client2019')
+    self.EnableUITest(self.win_config['client'])
+    self.InstallChrome(self.win_config['client'])
 
   def _getHomepageLocation(self, instance_name):
     dir = os.path.dirname(os.path.abspath(__file__))
@@ -45,33 +47,31 @@ class HomepageTest(ChromeEnterpriseTestCase):
     # -  HomepageIsNewTabPage is false
     # -  HomepageLocation is set
     # In this case, when a home page is opened, the HomepageLocation is used
-    self.SetPolicy('win2019-dc', 'HomepageIsNewTabPage', 0, 'DWORD')
-    self.SetPolicy('win2019-dc', 'HomepageLocation',
+    self.SetPolicy(self.win_config['dc'], 'HomepageIsNewTabPage', 0, 'DWORD')
+    self.SetPolicy(self.win_config['dc'], 'HomepageLocation',
                    '"http://www.example.com/"', 'String')
-    self.RunCommand('client2019', 'gpupdate /force')
+    self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
     # verify the home page is the value of HomepageLocation
-    homepage = self._getHomepageLocation('client2019')
-    self.assertEqual(homepage, 'http://www.example.com/')
+    homepage = self._getHomepageLocation(self.win_config['client'])
+    self.assertIn("www.example.com", homepage)
 
   @test
   def test_HomepageIsNewTab(self):
     # Test the case when HomepageIsNewTabPage is true
     # In this case, when a home page is opened, the new tab page will be used.
-    self.SetPolicy('win2019-dc', 'HomepageIsNewTabPage', 1, 'DWORD')
-    self.SetPolicy('win2019-dc', 'HomepageLocation',
+    self.SetPolicy(self.win_config['dc'], 'HomepageIsNewTabPage', 1, 'DWORD')
+    self.SetPolicy(self.win_config['dc'], 'HomepageLocation',
                    '"http://www.example.com/"', 'String')
-    self.RunCommand('client2019', 'gpupdate /force')
+    self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
     # verify that the home page is the new tab page.
-    homepage = self._getHomepageLocation('client2019')
+    homepage = self._getHomepageLocation(self.win_config['client'])
 
     # The URL of the new tab can be one of the following:
-    # - https://www.google.com/_/chrome/newtab?ie=UTF-8
     # - chrome://new-tab-page/
-    # - chrome-search://local-ntp/local-ntp.html
-    if ('new-tab-page' in homepage
-       ) or homepage == 'chrome-search://local-ntp/local-ntp.html':
+    # - chrome://new-tab-page-third-party/
+    if 'new-tab-page' in homepage:
       pass
     else:
       self.fail('homepage url is not new tab: %s' % homepage)
@@ -79,15 +79,15 @@ class HomepageTest(ChromeEnterpriseTestCase):
   @test
   def test_ShowHomeButton(self):
     # Test the case when ShowHomeButton is true
-    self.SetPolicy('win2019-dc', 'ShowHomeButton', 1, 'DWORD')
-    self.RunCommand('client2019', 'gpupdate /force')
+    self.SetPolicy(self.win_config['dc'], 'ShowHomeButton', 1, 'DWORD')
+    self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
-    isHomeButtonShown = self._isHomeButtonShown('client2019')
+    isHomeButtonShown = self._isHomeButtonShown(self.win_config['client'])
     self.assertTrue(isHomeButtonShown)
 
     # Test the case when ShowHomeButton is false
-    self.SetPolicy('win2019-dc', 'ShowHomeButton', 0, 'DWORD')
-    self.RunCommand('client2019', 'gpupdate /force')
+    self.SetPolicy(self.win_config['dc'], 'ShowHomeButton', 0, 'DWORD')
+    self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
-    isHomeButtonShown = self._isHomeButtonShown('client2019')
+    isHomeButtonShown = self._isHomeButtonShown(self.win_config['client'])
     self.assertFalse(isHomeButtonShown)

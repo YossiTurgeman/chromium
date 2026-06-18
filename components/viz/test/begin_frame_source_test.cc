@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,7 +27,7 @@ MockBeginFrameObserver::MockBeginFrameObserver()
       .WillByDefault(::testing::Return(false));
 }
 
-MockBeginFrameObserver::~MockBeginFrameObserver() {}
+MockBeginFrameObserver::~MockBeginFrameObserver() = default;
 
 const BeginFrameArgs MockBeginFrameObserver::kDefaultBeginFrameArgs =
     CreateBeginFrameArgsForTesting(
@@ -41,5 +41,8 @@ const BeginFrameArgs MockBeginFrameObserver::kDefaultBeginFrameArgs =
         -1,
         -1,
         -1);
+
+MockInputClient::MockInputClient() = default;
+MockInputClient::~MockInputClient() = default;
 
 }  // namespace viz

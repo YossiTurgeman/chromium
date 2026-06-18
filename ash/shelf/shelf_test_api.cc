@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,7 +24,7 @@ ash::Shelf* GetShelf() {
 
 ash::ShelfWidget* GetShelfWidget() {
   return ash::Shell::GetRootWindowControllerWithDisplayId(
-             display::Screen::GetScreen()->GetPrimaryDisplay().id())
+             display::Screen::Get()->GetPrimaryDisplay().id())
       ->shelf()
       ->shelf_widget();
 }
@@ -56,10 +56,6 @@ views::View* ShelfTestApi::GetHomeButton() {
   return GetShelfWidget()->navigation_widget()->GetHomeButton();
 }
 
-bool ShelfTestApi::HasLoginShelfGestureHandler() const {
-  return GetShelfWidget()->login_shelf_gesture_controller_for_testing();
-}
-
 ScrollableShelfInfo ShelfTestApi::GetScrollableShelfInfoForState(
     const ShelfState& state) {
   const auto* scrollable_shelf_view = GetScrollableShelfView();
@@ -85,6 +81,8 @@ ScrollableShelfInfo ShelfTestApi::GetScrollableShelfInfoForState(
         shelf_view->view_model()->view_at(i)->GetBoundsInScreen());
   }
 
+  info.icons_under_animation = shelf_view->IsAnimating();
+
   // Calculates the target offset only when |scroll_distance| is specified.
   if (state.scroll_distance != 0.f) {
     const float target_offset =
@@ -103,9 +101,11 @@ HotseatInfo ShelfTestApi::GetHotseatInfo() {
       hotseat_widget->GetNativeView()->layer()->GetAnimator()->is_animating();
   info.hotseat_state = hotseat_widget->state();
 
-  const gfx::Rect shelf_widget_bounds =
-      GetShelf()->shelf_widget()->GetWindowBoundsInScreen();
-  info.swipe_up.swipe_start_location = shelf_widget_bounds.CenterPoint();
+  // Hotseat swipe can happen from the bottom center of the display.
+  display::Display display = display::Screen::Get()->GetDisplayNearestWindow(
+      hotseat_widget->GetNativeWindow()->GetRootWindow());
+  info.swipe_up.swipe_start_location = gfx::Point(
+      display.bounds().CenterPoint().x(), display.bounds().bottom() - 1);
 
   // The swipe distance is small enough to avoid the window drag from shelf.
   const int swipe_distance = hotseat_widget->GetHotseatFullDragAmount() / 2;
@@ -113,6 +113,8 @@ HotseatInfo ShelfTestApi::GetHotseatInfo() {
   gfx::Point swipe_end_location = info.swipe_up.swipe_start_location;
   swipe_end_location.set_y(swipe_end_location.y() - swipe_distance);
   info.swipe_up.swipe_end_location = swipe_end_location;
+  info.is_auto_hidden =
+      GetShelf()->shelf_layout_manager()->is_shelf_auto_hidden();
 
   return info;
 }

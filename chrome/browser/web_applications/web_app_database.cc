@@ -1,75 +1,78 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/web_applications/web_app_database.h"
 
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/stl_util.h"
-#include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/web_applications/components/web_app_helpers.h"
-#include "chrome/browser/web_applications/components/web_app_utils.h"
+#include "base/base64.h"
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/strings/to_string.h"
+#include "base/trace_event/trace_event.h"
+#include "build/build_config.h"
+#include "chrome/browser/web_applications/proto/web_app.pb.h"
+#include "chrome/browser/web_applications/proto/web_app.to_value.h"
+#include "chrome/browser/web_applications/proto/web_app_launch_handler.pb.h"
 #include "chrome/browser/web_applications/web_app.h"
 #include "chrome/browser/web_applications/web_app_database_factory.h"
+#include "chrome/browser/web_applications/web_app_database_serialization.h"
+#include "chrome/browser/web_applications/web_app_helpers.h"
+#include "chrome/browser/web_applications/web_app_logging.h"
 #include "chrome/browser/web_applications/web_app_proto_utils.h"
+#include "chrome/browser/web_applications/web_app_provider.h"
 #include "chrome/browser/web_applications/web_app_registry_update.h"
-#include "chrome/common/web_application_info.h"
-#include "components/services/app_service/public/cpp/file_handler.h"
-#include "components/services/app_service/public/cpp/protocol_handler_info.h"
-#include "components/services/app_service/public/cpp/share_target.h"
-#include "components/sync/base/model_type.h"
-#include "components/sync/base/time.h"
+#include "chrome/browser/web_applications/web_app_utils.h"
+#include "chrome/common/chrome_features.h"
+#include "components/sync/base/data_type.h"
+#include "components/sync/model/data_type_store.h"
 #include "components/sync/model/metadata_batch.h"
 #include "components/sync/model/metadata_change_list.h"
 #include "components/sync/model/model_error.h"
-#include "third_party/blink/public/common/manifest/manifest.h"
+#include "components/sync/protocol/web_app_specifics.pb.h"
+#include "components/webapps/browser/installable/installable_metrics.h"
+#include "components/webapps/common/web_app_id.h"
+#include "third_party/protobuf/src/google/protobuf/repeated_ptr_field.h"
+#include "url/gurl.h"
 
 namespace web_app {
 
 namespace {
 
-ShareTarget_Method MethodToProto(apps::ShareTarget::Method method) {
-  switch (method) {
-    case apps::ShareTarget::Method::kGet:
-      return ShareTarget_Method_GET;
-    case apps::ShareTarget::Method::kPost:
-      return ShareTarget_Method_POST;
+// Check if the icon metadata stored for pending updates is corrupt.
+bool CorruptIconMetadataForIcons(
+    const ::google::protobuf::RepeatedPtrField<::sync_pb::WebAppIconInfo>&
+        icons) {
+  for (const auto& icon : icons) {
+    if (!icon.has_url() || !icon.has_purpose()) {
+      return true;
+    }
   }
+  return false;
 }
 
-apps::ShareTarget::Method ProtoToMethod(ShareTarget_Method method) {
-  switch (method) {
-    case ShareTarget_Method_GET:
-      return apps::ShareTarget::Method::kGet;
-    case ShareTarget_Method_POST:
-      return apps::ShareTarget::Method::kPost;
+// Check if the downloaded icon sizes stored for pending updates is corrupt.
+bool CorruptDownloadedSizeMetadata(
+    const ::google::protobuf::RepeatedPtrField<proto::DownloadedIconSizeInfo>&
+        downloaded_icon_sizes) {
+  for (const auto& downloaded_icon : downloaded_icon_sizes) {
+    // It's fine if there are no sizes specified for a purpose, but the purpose
+    // has to exist.
+    if (!downloaded_icon.has_purpose()) {
+      return true;
+    }
   }
+  return false;
 }
 
-ShareTarget_Enctype EnctypeToProto(apps::ShareTarget::Enctype enctype) {
-  switch (enctype) {
-    case apps::ShareTarget::Enctype::kFormUrlEncoded:
-      return ShareTarget_Enctype_FORM_URL_ENCODED;
-    case apps::ShareTarget::Enctype::kMultipartFormData:
-      return ShareTarget_Enctype_MULTIPART_FORM_DATA;
-  }
-}
-
-apps::ShareTarget::Enctype ProtoToEnctype(ShareTarget_Enctype enctype) {
-  switch (enctype) {
-    case ShareTarget_Enctype_FORM_URL_ENCODED:
-      return apps::ShareTarget::Enctype::kFormUrlEncoded;
-    case ShareTarget_Enctype_MULTIPART_FORM_DATA:
-      return apps::ShareTarget::Enctype::kMultipartFormData;
-  }
-}
-
-}  // anonymous namespace
+}  // namespace
 
 WebAppDatabase::WebAppDatabase(AbstractWebAppDatabaseFactory* database_factory,
                                ReportErrorCallback error_callback)
@@ -82,11 +85,25 @@ WebAppDatabase::~WebAppDatabase() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 }
 
+const PersistableLog* WebAppDatabase::log() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  return log_.get();
+}
+
+void WebAppDatabase::SetProvider(base::PassKey<WebAppProvider> pass_key,
+                                 WebAppProvider& provider) {
+  provider_ = &provider;
+}
+
 void WebAppDatabase::OpenDatabase(RegistryOpenedCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(!store_);
+  log_ = PersistableLog::Create(
+      PersistableLog::GetLogPath(provider_->profile(), "WebAppDatabase.log"),
+      PersistableLog::GetMode(), PersistableLog::GetMaxInMemoryLogEntries(),
+      provider_->file_utils());
 
-  syncer::OnceModelTypeStoreFactory store_factory =
+  syncer::OnceDataTypeStoreFactory store_factory =
       database_factory_->GetStoreFactory();
 
   std::move(store_factory)
@@ -102,25 +119,24 @@ void WebAppDatabase::Write(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   CHECK(opened_);
 
-  std::unique_ptr<syncer::ModelTypeStore::WriteBatch> write_batch =
-      store_->CreateWriteBatch();
-
   // |update_data| can be empty here but we should write |metadata_change_list|
   // anyway.
-  write_batch->TakeMetadataChangesFrom(std::move(metadata_change_list));
+  std::unique_ptr<syncer::DataTypeStore::WriteBatch> write_batch =
+      store_->CreateWriteBatch(std::move(metadata_change_list));
 
   for (const std::unique_ptr<WebApp>& web_app : update_data.apps_to_create) {
-    auto proto = CreateWebAppProto(*web_app);
+    auto proto = WebAppToProto(*web_app);
     write_batch->WriteData(web_app->app_id(), proto->SerializeAsString());
   }
 
   for (const std::unique_ptr<WebApp>& web_app : update_data.apps_to_update) {
-    auto proto = CreateWebAppProto(*web_app);
+    auto proto = WebAppToProto(*web_app);
     write_batch->WriteData(web_app->app_id(), proto->SerializeAsString());
   }
 
-  for (const AppId& app_id : update_data.apps_to_delete)
+  for (const webapps::AppId& app_id : update_data.apps_to_delete) {
     write_batch->DeleteData(app_id);
+  }
 
   store_->CommitWriteBatch(
       std::move(write_batch),
@@ -129,618 +145,719 @@ void WebAppDatabase::Write(
 }
 
 // static
-std::unique_ptr<WebAppProto> WebAppDatabase::CreateWebAppProto(
-    const WebApp& web_app) {
-  auto local_data = std::make_unique<WebAppProto>();
-
-  // Required fields:
-  const GURL start_url = web_app.start_url();
-  DCHECK(!start_url.is_empty() && start_url.is_valid());
-
-  DCHECK(!web_app.app_id().empty());
-  DCHECK_EQ(web_app.app_id(), GenerateAppIdFromURL(start_url));
-
-  // Set sync data to sync proto.
-  *(local_data->mutable_sync_data()) = WebAppToSyncProto(web_app);
-
-  local_data->set_name(web_app.name());
-
-  DCHECK(web_app.sources_.any());
-  local_data->mutable_sources()->set_system(web_app.sources_[Source::kSystem]);
-  local_data->mutable_sources()->set_policy(web_app.sources_[Source::kPolicy]);
-  local_data->mutable_sources()->set_web_app_store(
-      web_app.sources_[Source::kWebAppStore]);
-  local_data->mutable_sources()->set_sync(web_app.sources_[Source::kSync]);
-  local_data->mutable_sources()->set_default_(
-      web_app.sources_[Source::kDefault]);
-
-  local_data->set_is_locally_installed(web_app.is_locally_installed());
-
-  // Optional fields:
-  if (web_app.display_mode() != DisplayMode::kUndefined) {
-    local_data->set_display_mode(
-        ToWebAppProtoDisplayMode(web_app.display_mode()));
-  }
-
-  for (const DisplayMode& display_mode : web_app.display_mode_override()) {
-    local_data->add_display_mode_override(
-        ToWebAppProtoDisplayMode(display_mode));
-  }
-
-  local_data->set_description(web_app.description());
-  if (!web_app.scope().is_empty())
-    local_data->set_scope(web_app.scope().spec());
-  if (web_app.theme_color().has_value())
-    local_data->set_theme_color(web_app.theme_color().value());
-  if (web_app.background_color().has_value())
-    local_data->set_background_color(web_app.background_color().value());
-  if (!web_app.last_launch_time().is_null()) {
-    local_data->set_last_launch_time(
-        syncer::TimeToProtoTime(web_app.last_launch_time()));
-  }
-  if (!web_app.install_time().is_null()) {
-    local_data->set_install_time(
-        syncer::TimeToProtoTime(web_app.install_time()));
-  }
-
-  if (web_app.chromeos_data().has_value()) {
-    auto& chromeos_data = web_app.chromeos_data().value();
-    auto* mutable_chromeos_data = local_data->mutable_chromeos_data();
-    mutable_chromeos_data->set_show_in_launcher(chromeos_data.show_in_launcher);
-    mutable_chromeos_data->set_show_in_search(chromeos_data.show_in_search);
-    mutable_chromeos_data->set_show_in_management(
-        chromeos_data.show_in_management);
-    mutable_chromeos_data->set_is_disabled(chromeos_data.is_disabled);
-  }
-
-  if (web_app.run_on_os_login_mode() != RunOnOsLoginMode::kUndefined) {
-    local_data->set_user_run_on_os_login_mode(
-        ToWebAppProtoRunOnOsLoginMode(web_app.run_on_os_login_mode()));
-  }
-
-  local_data->set_is_in_sync_install(web_app.is_in_sync_install());
-
-  for (const WebApplicationIconInfo& icon_info : web_app.icon_infos())
-    *(local_data->add_icon_infos()) = WebAppIconInfoToSyncProto(icon_info);
-
-  for (SquareSizePx size : web_app.downloaded_icon_sizes(IconPurpose::ANY)) {
-    local_data->add_downloaded_icon_sizes_purpose_any(size);
-  }
-  for (SquareSizePx size :
-       web_app.downloaded_icon_sizes(IconPurpose::MASKABLE)) {
-    local_data->add_downloaded_icon_sizes_purpose_maskable(size);
-  }
-
-  local_data->set_is_generated_icon(web_app.is_generated_icon());
-
-  for (const auto& file_handler : web_app.file_handlers()) {
-    WebAppFileHandlerProto* file_handler_proto =
-        local_data->add_file_handlers();
-    file_handler_proto->set_action(file_handler.action.spec());
-
-    for (const auto& accept_entry : file_handler.accept) {
-      WebAppFileHandlerAcceptProto* accept_entry_proto =
-          file_handler_proto->add_accept();
-      accept_entry_proto->set_mimetype(accept_entry.mime_type);
-
-      for (const auto& file_extension : accept_entry.file_extensions)
-        accept_entry_proto->add_file_extensions(file_extension);
-    }
-  }
-
-  if (web_app.share_target()) {
-    const apps::ShareTarget& share_target = *web_app.share_target();
-    auto* const mutable_share_target = local_data->mutable_share_target();
-    mutable_share_target->set_action(share_target.action.spec());
-    mutable_share_target->set_method(MethodToProto(share_target.method));
-    mutable_share_target->set_enctype(EnctypeToProto(share_target.enctype));
-
-    const apps::ShareTarget::Params& params = share_target.params;
-    auto* const mutable_share_target_params =
-        mutable_share_target->mutable_params();
-    if (!params.title.empty())
-      mutable_share_target_params->set_title(params.title);
-    if (!params.text.empty())
-      mutable_share_target_params->set_text(params.text);
-    if (!params.url.empty())
-      mutable_share_target_params->set_url(params.url);
-
-    for (const auto& files_entry : params.files) {
-      ShareTargetParamsFile* mutable_share_target_files =
-          mutable_share_target_params->add_files();
-      mutable_share_target_files->set_name(files_entry.name);
-
-      for (const auto& file_type : files_entry.accept)
-        mutable_share_target_files->add_accept(file_type);
-    }
-  }
-
-  for (const WebApplicationShortcutsMenuItemInfo& shortcut_info :
-       web_app.shortcuts_menu_item_infos()) {
-    WebAppShortcutsMenuItemInfoProto* shortcut_info_proto =
-        local_data->add_shortcuts_menu_item_infos();
-    shortcut_info_proto->set_name(base::UTF16ToUTF8(shortcut_info.name));
-    shortcut_info_proto->set_url(shortcut_info.url.spec());
-    for (const WebApplicationShortcutsMenuItemInfo::Icon& icon_info :
-         shortcut_info.shortcut_icon_infos) {
-      sync_pb::WebAppIconInfo* shortcut_icon_info_proto =
-          shortcut_info_proto->add_shortcut_icon_infos();
-      DCHECK(!icon_info.url.is_empty());
-      shortcut_icon_info_proto->set_url(icon_info.url.spec());
-      shortcut_icon_info_proto->set_size_in_px(icon_info.square_size_px);
-    }
-  }
-
-  for (const std::vector<SquareSizePx>& icon_sizes :
-       web_app.downloaded_shortcuts_menu_icons_sizes()) {
-    DownloadedShortcutsMenuIconSizesProto* icon_sizes_proto =
-        local_data->add_downloaded_shortcuts_menu_icons_sizes();
-    for (const SquareSizePx& icon_size : icon_sizes) {
-      icon_sizes_proto->add_icon_sizes(icon_size);
-    }
-  }
-
-  for (const auto& additional_search_term : web_app.additional_search_terms()) {
-    // Additional search terms should be sanitized before being added here.
-    DCHECK(!additional_search_term.empty());
-    local_data->add_additional_search_terms(additional_search_term);
-  }
-
-  for (const auto& protocol_handler : web_app.protocol_handlers()) {
-    WebAppProtocolHandler* protocol_handler_proto =
-        local_data->add_protocol_handlers();
-    protocol_handler_proto->set_protocol(protocol_handler.protocol);
-    protocol_handler_proto->set_url(protocol_handler.url.spec());
-  }
-
-  return local_data;
+int WebAppDatabase::GetCurrentDatabaseVersion() {
+  return 7;
 }
 
-// static
-std::unique_ptr<WebApp> WebAppDatabase::CreateWebApp(
-    const WebAppProto& local_data) {
-  if (!local_data.has_sync_data()) {
-    DLOG(ERROR) << "WebApp proto parse error: no sync_data field";
-    return nullptr;
-  }
+void WebAppDatabase::SetDatabaseVersionForTesting(int version,
+                                                  base::OnceClosure callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CHECK(opened_);
+  std::unique_ptr<syncer::DataTypeStore::WriteBatch> write_batch =
+      store_->CreateWriteBatch();
+  proto::DatabaseMetadata metadata;
+  metadata.set_version(version);
+  write_batch->WriteData(std::string(kDatabaseMetadataKey),
+                         metadata.SerializeAsString());
+  store_->CommitWriteBatch(
+      std::move(write_batch),
+      base::BindOnce(
+          &WebAppDatabase::OnDataWritten, weak_ptr_factory_.GetWeakPtr(),
+          base::BindOnce(
+              [](base::OnceClosure cb, bool success) { std::move(cb).Run(); },
+              std::move(callback))));
+}
 
-  const sync_pb::WebAppSpecifics& sync_data = local_data.sync_data();
+WebAppDatabase::ProtobufState::ProtobufState() = default;
+WebAppDatabase::ProtobufState::~ProtobufState() = default;
+WebAppDatabase::ProtobufState::ProtobufState(ProtobufState&&) = default;
+WebAppDatabase::ProtobufState& WebAppDatabase::ProtobufState::operator=(
+    ProtobufState&&) = default;
 
-  // AppId is a hash of start_url. Read start_url first:
-  GURL start_url(sync_data.start_url());
-  if (start_url.is_empty() || !start_url.is_valid()) {
-    DLOG(ERROR) << "WebApp proto start_url parse error: "
-                << start_url.possibly_invalid_spec();
-    return nullptr;
-  }
-
-  const AppId app_id = GenerateAppIdFromURL(start_url);
-
-  auto web_app = std::make_unique<WebApp>(app_id);
-  web_app->SetStartUrl(start_url);
-
-  // Required fields:
-  if (!local_data.has_sources()) {
-    DLOG(ERROR) << "WebApp proto parse error: no sources field";
-    return nullptr;
-  }
-
-  WebApp::Sources sources;
-  sources[Source::kSystem] = local_data.sources().system();
-  sources[Source::kPolicy] = local_data.sources().policy();
-  sources[Source::kWebAppStore] = local_data.sources().web_app_store();
-  sources[Source::kSync] = local_data.sources().sync();
-  sources[Source::kDefault] = local_data.sources().default_();
-  if (!sources.any()) {
-    DLOG(ERROR) << "WebApp proto parse error: no any source in sources field";
-    return nullptr;
-  }
-  web_app->sources_ = sources;
-
-  if (!local_data.has_name()) {
-    DLOG(ERROR) << "WebApp proto parse error: no name field";
-    return nullptr;
-  }
-  web_app->SetName(local_data.name());
-
-  if (!sync_data.has_user_display_mode()) {
-    DLOG(ERROR) << "WebApp proto parse error: no user_display_mode field";
-    return nullptr;
-  }
-  web_app->SetUserDisplayMode(
-      ToMojomDisplayMode(sync_data.user_display_mode()));
-
-  // Ordinals used for chrome://apps page.
-  syncer::StringOrdinal page_ordinal =
-      syncer::StringOrdinal(sync_data.user_page_ordinal());
-  if (!page_ordinal.IsValid())
-    page_ordinal = syncer::StringOrdinal();
-  syncer::StringOrdinal launch_ordinal =
-      syncer::StringOrdinal(sync_data.user_launch_ordinal());
-  if (!launch_ordinal.IsValid())
-    launch_ordinal = syncer::StringOrdinal();
-  web_app->SetUserPageOrdinal(page_ordinal);
-  web_app->SetUserLaunchOrdinal(launch_ordinal);
-
-  if (!local_data.has_is_locally_installed()) {
-    DLOG(ERROR) << "WebApp proto parse error: no is_locally_installed field";
-    return nullptr;
-  }
-  web_app->SetIsLocallyInstalled(local_data.is_locally_installed());
-
-  auto& chromeos_data_proto = local_data.chromeos_data();
-
-  if (IsChromeOs() && !local_data.has_chromeos_data()) {
-    DLOG(ERROR) << "WebApp proto parse error: no chromeos_data field. The web "
-                << "app might have been installed when running on an OS other "
-                << "than Chrome OS.";
-    return nullptr;
-  }
-
-  if (!IsChromeOs() && local_data.has_chromeos_data()) {
-    DLOG(ERROR) << "WebApp proto parse error: has chromeos_data field. The web "
-                << "app might have been installed when running on Chrome OS.";
-    return nullptr;
-  }
-
-  if (local_data.has_chromeos_data()) {
-    auto chromeos_data = base::make_optional<WebAppChromeOsData>();
-    chromeos_data->show_in_launcher = chromeos_data_proto.show_in_launcher();
-    chromeos_data->show_in_search = chromeos_data_proto.show_in_search();
-    chromeos_data->show_in_management =
-        chromeos_data_proto.show_in_management();
-    chromeos_data->is_disabled = chromeos_data_proto.is_disabled();
-    web_app->SetWebAppChromeOsData(std::move(chromeos_data));
-  }
-
-  // Optional fields:
-  if (local_data.has_display_mode())
-    web_app->SetDisplayMode(ToMojomDisplayMode(local_data.display_mode()));
-
-  std::vector<DisplayMode> display_mode_override;
-  for (int i = 0; i < local_data.display_mode_override_size(); i++) {
-    WebAppProto::DisplayMode display_mode = local_data.display_mode_override(i);
-    display_mode_override.push_back(ToMojomDisplayMode(display_mode));
-  }
-  web_app->SetDisplayModeOverride(std::move(display_mode_override));
-
-  if (local_data.has_description())
-    web_app->SetDescription(local_data.description());
-
-  if (local_data.has_scope()) {
-    GURL scope(local_data.scope());
-    if (scope.is_empty() || !scope.is_valid()) {
-      DLOG(ERROR) << "WebApp proto scope parse error: "
-                  << scope.possibly_invalid_spec();
-      return nullptr;
-    }
-    web_app->SetScope(scope);
-  }
-
-  if (local_data.has_theme_color())
-    web_app->SetThemeColor(local_data.theme_color());
-
-  if (local_data.has_background_color())
-    web_app->SetBackgroundColor(local_data.background_color());
-
-  if (local_data.has_is_in_sync_install())
-    web_app->SetIsInSyncInstall(local_data.is_in_sync_install());
-
-  if (local_data.has_last_launch_time()) {
-    web_app->SetLastLaunchTime(
-        syncer::ProtoTimeToTime(local_data.last_launch_time()));
-  }
-  if (local_data.has_install_time()) {
-    web_app->SetInstallTime(syncer::ProtoTimeToTime(local_data.install_time()));
-  }
-
-  base::Optional<WebApp::SyncFallbackData> parsed_sync_fallback_data =
-      ParseSyncFallbackDataStruct(sync_data);
-  if (!parsed_sync_fallback_data.has_value()) {
-    // ParseSyncFallbackDataStruct() reports any errors.
-    return nullptr;
-  }
-  web_app->SetSyncFallbackData(std::move(parsed_sync_fallback_data.value()));
-
-  base::Optional<std::vector<WebApplicationIconInfo>> parsed_icon_infos =
-      ParseWebAppIconInfos("WebApp", local_data.icon_infos());
-  if (!parsed_icon_infos.has_value()) {
-    // ParseWebAppIconInfos() reports any errors.
-    return nullptr;
-  }
-  web_app->SetIconInfos(std::move(parsed_icon_infos.value()));
-
-  std::vector<SquareSizePx> icon_sizes_any;
-  for (int32_t size : local_data.downloaded_icon_sizes_purpose_any())
-    icon_sizes_any.push_back(size);
-  web_app->SetDownloadedIconSizes(IconPurpose::ANY,
-                                  SortedSizesPx(std::move(icon_sizes_any)));
-
-  std::vector<SquareSizePx> icon_sizes_maskable;
-  for (int32_t size : local_data.downloaded_icon_sizes_purpose_maskable())
-    icon_sizes_maskable.push_back(size);
-  web_app->SetDownloadedIconSizes(
-      IconPurpose::MASKABLE, SortedSizesPx(std::move(icon_sizes_maskable)));
-
-  web_app->SetIsGeneratedIcon(local_data.is_generated_icon());
-
-  apps::FileHandlers file_handlers;
-  for (const auto& file_handler_proto : local_data.file_handlers()) {
-    apps::FileHandler file_handler;
-    file_handler.action = GURL(file_handler_proto.action());
-
-    if (file_handler.action.is_empty() || !file_handler.action.is_valid()) {
-      DLOG(ERROR) << "WebApp FileHandler proto action parse error";
-      return nullptr;
-    }
-
-    for (const auto& accept_entry_proto : file_handler_proto.accept()) {
-      apps::FileHandler::AcceptEntry accept_entry;
-      accept_entry.mime_type = accept_entry_proto.mimetype();
-      for (const auto& file_extension : accept_entry_proto.file_extensions()) {
-        if (base::Contains(accept_entry.file_extensions, file_extension)) {
-          // We intentionally don't return a nullptr here; instead, duplicate
-          // entries are absorbed.
-          DLOG(ERROR) << "apps::FileHandler::AcceptEntry parsing encountered "
-                      << "duplicate file extension";
-        }
-        accept_entry.file_extensions.insert(file_extension);
+WebAppDatabase::ProtobufState WebAppDatabase::ParseProtobufs(
+    const syncer::DataTypeStore::RecordList& data_records) const {
+  ProtobufState state;
+  for (const syncer::DataTypeStore::Record& record : data_records) {
+    if (record.id == kDatabaseMetadataKey) {
+      bool success = state.metadata.ParseFromString(record.value);
+      if (!success) {
+        log_->Append(base::DictValue()
+                         .Set("error", "Cannot parse metadata proto.")
+                         .Set("record", base::Base64Encode(record.value)));
+        // TODO: Consider logging a histogram
       }
-      file_handler.accept.push_back(std::move(accept_entry));
+      continue;
     }
 
-    file_handlers.push_back(std::move(file_handler));
+    proto::WebApp app_proto;
+    bool success = app_proto.ParseFromString(record.value);
+    if (!success) {
+      log_->Append(base::DictValue()
+                       .Set("error", "Cannot parse app proto.")
+                       .Set("record", base::Base64Encode(record.value)));
+      // TODO: Consider logging a histogram
+    }
+    state.apps.emplace(record.id, std::move(app_proto));
   }
-  web_app->SetFileHandlers(std::move(file_handlers));
+  return state;
+}
 
-  if (local_data.has_share_target()) {
-    apps::ShareTarget share_target;
-    const ShareTarget& local_share_target = local_data.share_target();
-    const ShareTargetParams& local_share_target_params =
-        local_share_target.params();
+WebAppDatabase::MigrationResult WebAppDatabase::MigrateDatabase(
+    ProtobufState& state) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // Migration should happen when we have gotten a `store_`, but haven't
+  // finished opening the database yet.
+  CHECK(store_);
+  CHECK(!opened_);
 
-    GURL action(local_share_target.action());
-    if (action.is_empty() || !action.is_valid()) {
-      DLOG(ERROR) << "WebApp proto action parse error: "
-                  << action.possibly_invalid_spec();
-      return nullptr;
+  bool did_change_metadata = false;
+  std::set<webapps::AppId> changed_apps;
+
+  // Upgrade from version 0 to version 1. This migrates the kSync source to
+  // a combination of kSync and kUserInstalled.
+  if (state.metadata.version() < 1 && GetCurrentDatabaseVersion() >= 1) {
+    MigrateInstallSourceAddUserInstalled(state, changed_apps);
+    base::UmaHistogramSparse("WebApp.Database.VersionUpgradedTo", 1);
+    state.metadata.set_version(1);
+    did_change_metadata = true;
+  }
+
+  // Upgrade from version 1 to version 2.
+  if (state.metadata.version() < 2 && GetCurrentDatabaseVersion() >= 2) {
+    MigrateShortcutAppsToDiyApps(state, changed_apps);
+    MigrateDefaultDisplayModeToPlatformDisplayMode(state, changed_apps);
+    MigratePartiallyInstalledAppsToCorrectState(state, changed_apps);
+    base::UmaHistogramSparse("WebApp.Database.VersionUpgradedTo", 2);
+    state.metadata.set_version(2);
+    did_change_metadata = true;
+  }
+
+  // Upgrade from version 2 to version 3.
+  if (state.metadata.version() < 3 && GetCurrentDatabaseVersion() >= 3) {
+    MigrateDeprecatedLaunchHandlerToClientMode(state, changed_apps);
+    MigrateScopeToRemoveRefAndQuery(state, changed_apps);
+    MigrateToRelativeManifestIdNoFragment(state, changed_apps);
+    base::UmaHistogramSparse("WebApp.Database.VersionUpgradedTo", 3);
+    state.metadata.set_version(3);
+    did_change_metadata = true;
+  }
+
+  // Upgrade from version 3 to version 4.
+  if (state.metadata.version() < 4 && GetCurrentDatabaseVersion() >= 4) {
+    MigratePendingUpdateInfoWasIgnored(state, changed_apps);
+    base::UmaHistogramSparse("WebApp.Database.VersionUpgradedTo", 4);
+    state.metadata.set_version(4);
+    did_change_metadata = true;
+  }
+
+  // Upgrade from version 4 to version 5.
+  if (state.metadata.version() < 5 && GetCurrentDatabaseVersion() >= 5) {
+    MigratePendingUpdateInfoClearIconMetadataIfCorrupted(state, changed_apps);
+    base::UmaHistogramSparse("WebApp.Database.VersionUpgradedTo", 5);
+    state.metadata.set_version(5);
+    did_change_metadata = true;
+  }
+
+  // Upgrade from version 5 to version 6.
+  if (state.metadata.version() < 6 && GetCurrentDatabaseVersion() >= 6) {
+    MigrateDisplayModeOverrideToDisplayOverrides(state, changed_apps);
+    base::UmaHistogramSparse("WebApp.Database.VersionUpgradedTo", 6);
+    state.metadata.set_version(6);
+    did_change_metadata = true;
+  }
+
+  // Upgrade from version 6 to version 7.
+  bool declined_to_upgrade = false;
+  if (state.metadata.version() < 7 && GetCurrentDatabaseVersion() >= 7) {
+    if (base::FeatureList::IsEnabled(
+            features::kWebAppUpgradeToDatabaseVersion6)) {
+      MigrateScopeToStartUrlGetWithoutFilenameIfInvalid(state, changed_apps);
+      base::UmaHistogramSparse("WebApp.Database.VersionUpgradedTo", 7);
+      state.metadata.set_version(7);
+      did_change_metadata = true;
+    } else {
+      declined_to_upgrade = true;
+    }
+  }
+
+  int expected_version = declined_to_upgrade ? 6 : GetCurrentDatabaseVersion();
+  if (state.metadata.version() != expected_version) {
+    DLOG(ERROR) << "Mismatch between web app database state metadata version: "
+                << state.metadata.version()
+                << " and current version: " << expected_version;
+    return MigrationResult::kDowngradeDetected;
+  }
+
+  if (did_change_metadata || !changed_apps.empty()) {
+    std::unique_ptr<syncer::DataTypeStore::WriteBatch> write_batch =
+        store_->CreateWriteBatch();
+    if (did_change_metadata) {
+      write_batch->WriteData(std::string(kDatabaseMetadataKey),
+                             state.metadata.SerializeAsString());
+    }
+    for (const auto& app_id : changed_apps) {
+      CHECK(state.apps.contains(app_id));
+      write_batch->WriteData(app_id, state.apps[app_id].SerializeAsString());
+    }
+    store_->CommitWriteBatch(
+        std::move(write_batch),
+        base::BindOnce(&WebAppDatabase::OnDataWritten,
+                       weak_ptr_factory_.GetWeakPtr(), base::DoNothing()));
+  }
+  return MigrationResult::kSuccess;
+}
+
+void WebAppDatabase::MigrateInstallSourceAddUserInstalled(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 0 to version 1.
+  CHECK_LT(state.metadata.version(), 1);
+  const bool is_syncing_apps = database_factory_->IsSyncingApps();
+  int apps_migrated_count = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (!app_proto.sources().sync()) {
+      continue;
+    }
+    bool changed = false;
+    if (!app_proto.sources().user_installed()) {
+      app_proto.mutable_sources()->set_user_installed(true);
+      changed = true;
+    }
+    if (!is_syncing_apps) {
+      app_proto.mutable_sources()->set_sync(false);
+      changed = true;
+    }
+    if (changed) {
+      changed_apps.insert(app_id);
+      apps_migrated_count++;
+    }
+  }
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.InstallSourceAddUserInstalled", apps_migrated_count);
+}
+
+void WebAppDatabase::MigrateShortcutAppsToDiyApps(
+    WebAppDatabase::ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 1 to version 2.
+  CHECK_LT(state.metadata.version(), 2);
+  int shortcut_to_diy_apps = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    bool is_shortcut =
+        !app_proto.has_scope() || app_proto.scope().empty() ||
+        (app_proto.has_latest_install_source() &&
+         app_proto.latest_install_source() ==
+             static_cast<uint32_t>(
+                 webapps::WebappInstallSource::MENU_CREATE_SHORTCUT));
+    if (!is_shortcut) {
+      continue;
+    }
+    changed_apps.insert(app_id);
+    app_proto.set_is_diy_app(true);
+    app_proto.set_was_shortcut_app(true);
+    shortcut_to_diy_apps++;
+    if (app_proto.has_scope() && !app_proto.scope().empty() &&
+        GURL(app_proto.scope()).is_valid()) {
+      continue;
+    }
+    // Populate the scope if it was empty or invalid.
+    if (!app_proto.has_sync_data() || !app_proto.sync_data().has_start_url()) {
+      log_->Append(
+          base::DictValue()
+              .Set("migration_error", "Missing sync data or start_url.")
+              .Set("app_id", app_id));
+      continue;
+    }
+    GURL start_url(app_proto.sync_data().start_url());
+    if (!start_url.is_valid()) {
+      // Cannot recover scope, mark for potential cleanup later if needed.
+      log_->Append(base::DictValue()
+                       .Set("migration_error", "Invalid start_url.")
+                       .Set("app_id", app_id)
+                       .Set("start_url", start_url.possibly_invalid_spec()));
+      continue;
+    }
+    app_proto.set_scope(start_url.GetWithoutFilename().spec());
+  }
+  base::UmaHistogramCounts1000("WebApp.Migrations.ShortcutAppsToDiy2",
+                               shortcut_to_diy_apps);
+}
+
+void WebAppDatabase::MigrateDefaultDisplayModeToPlatformDisplayMode(
+    WebAppDatabase::ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 1 to version 2.
+  CHECK_LT(state.metadata.version(), 2);
+  int apps_migrated_count = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (!app_proto.has_sync_data()) {
+      // Cannot migrate without sync data.
+      continue;
+    }
+    sync_pb::WebAppSpecifics* sync_data = app_proto.mutable_sync_data();
+    if (!HasCurrentPlatformUserDisplayMode(*sync_data)) {
+      sync_pb::WebAppSpecifics_UserDisplayMode udm =
+          ResolvePlatformSpecificUserDisplayMode(*sync_data);
+      SetPlatformSpecificUserDisplayMode(udm, sync_data);
+      changed_apps.insert(app_id);
+      apps_migrated_count++;
+    }
+  }
+  base::UmaHistogramCounts1000("WebApp.Migrations.DefaultDisplayModeToPlatform",
+                               apps_migrated_count);
+}
+
+// Corrects the install_state for apps that claim OS integration but lack the
+// necessary OS integration state data.
+void WebAppDatabase::MigratePartiallyInstalledAppsToCorrectState(
+    WebAppDatabase::ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 1 to version 2.
+  CHECK_LT(state.metadata.version(), 2);
+  int install_state_fixed_count = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (app_proto.install_state() !=
+        proto::InstallState::INSTALLED_WITH_OS_INTEGRATION) {
+      continue;
+    }
+    // Check if any OS integration state exists. A simple check for shortcut
+    // presence is sufficient as a proxy for any OS integration.
+    if (app_proto.has_current_os_integration_states() &&
+        app_proto.current_os_integration_states().has_shortcut()) {
+      continue;
+    }
+    app_proto.set_install_state(
+        proto::InstallState::INSTALLED_WITHOUT_OS_INTEGRATION);
+    changed_apps.insert(app_id);
+    install_state_fixed_count++;
+  }
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.PartiallyInstalledAppsToCorrectState",
+      install_state_fixed_count);
+}
+
+void WebAppDatabase::MigrateDeprecatedLaunchHandlerToClientMode(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 2 to version 3.
+  CHECK_LT(state.metadata.version(), 3);
+  int apps_migrated_count = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (!app_proto.has_launch_handler()) {
+      continue;
     }
 
-    share_target.action = action;
-    share_target.method = ProtoToMethod(local_share_target.method());
-    share_target.enctype = ProtoToEnctype(local_share_target.enctype());
+    bool changed = false;
+    proto::LaunchHandler* launch_handler = app_proto.mutable_launch_handler();
 
-    if (local_share_target_params.has_title())
-      share_target.params.title = local_share_target_params.title();
-    if (local_share_target_params.has_text())
-      share_target.params.text = local_share_target_params.text();
-    if (local_share_target_params.has_url())
-      share_target.params.url = local_share_target_params.url();
-
-    for (const auto& share_target_params_file :
-         local_share_target_params.files()) {
-      apps::ShareTarget::Files files_entry;
-      files_entry.name = share_target_params_file.name();
-      for (const auto& file_type : share_target_params_file.accept()) {
-        if (base::Contains(files_entry.accept, file_type)) {
-          // We intentionally don't return a nullptr here; instead, duplicate
-          // entries are absorbed.
-          DLOG(ERROR) << "apps::ShareTarget::Files parsing encountered "
-                      << "duplicate file type";
-        } else {
-          files_entry.accept.push_back(file_type);
-        }
+    // If client_mode is unspecified, try migrating from deprecated fields.
+    if (launch_handler->client_mode() ==
+        proto::LaunchHandler::CLIENT_MODE_UNSPECIFIED) {
+      proto::LaunchHandler::ClientMode migrated_client_mode =
+          proto::LaunchHandler::CLIENT_MODE_UNSPECIFIED;
+      switch (launch_handler->route_to()) {
+        case proto::LaunchHandler_DeprecatedRouteTo_UNSPECIFIED_ROUTE:
+          break;
+        case proto::LaunchHandler_DeprecatedRouteTo_AUTO_ROUTE:
+          migrated_client_mode = proto::LaunchHandler::CLIENT_MODE_AUTO;
+          break;
+        case proto::LaunchHandler_DeprecatedRouteTo_NEW_CLIENT:
+          migrated_client_mode = proto::LaunchHandler::CLIENT_MODE_NAVIGATE_NEW;
+          break;
+        case proto::LaunchHandler_DeprecatedRouteTo_EXISTING_CLIENT:
+          if (launch_handler->navigate_existing_client() ==
+              proto::LaunchHandler_DeprecatedNavigateExistingClient_NEVER) {
+            migrated_client_mode =
+                proto::LaunchHandler::CLIENT_MODE_FOCUS_EXISTING;
+          } else {
+            migrated_client_mode =
+                proto::LaunchHandler::CLIENT_MODE_NAVIGATE_EXISTING;
+          }
+          break;
+        case proto::LaunchHandler_DeprecatedRouteTo_EXISTING_CLIENT_NAVIGATE:
+          migrated_client_mode =
+              proto::LaunchHandler::CLIENT_MODE_NAVIGATE_EXISTING;
+          break;
+        case proto::LaunchHandler_DeprecatedRouteTo_EXISTING_CLIENT_RETAIN:
+          migrated_client_mode =
+              proto::LaunchHandler::CLIENT_MODE_FOCUS_EXISTING;
+          break;
       }
-      share_target.params.files.push_back(std::move(files_entry));
+      launch_handler->set_client_mode(migrated_client_mode);
+      changed = true;
+    } else if (launch_handler->client_mode() ==
+               proto::LaunchHandler::CLIENT_MODE_AUTO) {
+      // If client_mode is set to auto, and client_mode_valid_and_specified is
+      // explicitly false, treat client_mode as unspecified.
+      if (launch_handler->has_client_mode_valid_and_specified() &&
+          !launch_handler->client_mode_valid_and_specified()) {
+        launch_handler->set_client_mode(
+            proto::LaunchHandler::CLIENT_MODE_UNSPECIFIED);
+        changed = true;
+      }
     }
 
-    web_app->SetShareTarget(std::move(share_target));
-  }
-
-  std::vector<WebApplicationShortcutsMenuItemInfo> shortcuts_menu_item_infos;
-  for (const auto& shortcut_info_proto :
-       local_data.shortcuts_menu_item_infos()) {
-    WebApplicationShortcutsMenuItemInfo shortcut_info;
-    shortcut_info.name = base::UTF8ToUTF16(shortcut_info_proto.name());
-    shortcut_info.url = GURL(shortcut_info_proto.url());
-    for (const auto& icon_info_proto :
-         shortcut_info_proto.shortcut_icon_infos()) {
-      WebApplicationShortcutsMenuItemInfo::Icon shortcut_icon_info;
-      shortcut_icon_info.square_size_px = icon_info_proto.size_in_px();
-      shortcut_icon_info.url = GURL(icon_info_proto.url());
-      shortcut_info.shortcut_icon_infos.emplace_back(
-          std::move(shortcut_icon_info));
+    // Clear deprecated fields if they exist.
+    if (launch_handler->has_route_to()) {
+      launch_handler->clear_route_to();
+      changed = true;
     }
-    shortcuts_menu_item_infos.emplace_back(std::move(shortcut_info));
-  }
-  web_app->SetShortcutsMenuItemInfos(std::move(shortcuts_menu_item_infos));
-
-  std::vector<std::vector<SquareSizePx>> shortcuts_menu_icons_sizes;
-  for (const auto& shortcuts_icon_sizes_proto :
-       local_data.downloaded_shortcuts_menu_icons_sizes()) {
-    std::vector<SquareSizePx> shortcuts_menu_icon_sizes;
-    for (const auto& icon_size : shortcuts_icon_sizes_proto.icon_sizes()) {
-      shortcuts_menu_icon_sizes.emplace_back(icon_size);
+    if (launch_handler->has_navigate_existing_client()) {
+      launch_handler->clear_navigate_existing_client();
+      changed = true;
     }
-    shortcuts_menu_icons_sizes.emplace_back(
-        std::move(shortcuts_menu_icon_sizes));
-  }
-  web_app->SetDownloadedShortcutsMenuIconsSizes(
-      std::move(shortcuts_menu_icons_sizes));
-
-  std::vector<std::string> additional_search_terms;
-  for (const std::string& additional_search_term :
-       local_data.additional_search_terms()) {
-    if (additional_search_term.empty()) {
-      DLOG(ERROR) << "WebApp AdditionalSearchTerms proto action parse error";
-      return nullptr;
+    if (launch_handler->has_client_mode_valid_and_specified()) {
+      launch_handler->clear_client_mode_valid_and_specified();
+      changed = true;
     }
-    additional_search_terms.push_back(additional_search_term);
-  }
-  web_app->SetAdditionalSearchTerms(std::move(additional_search_terms));
 
-  std::vector<apps::ProtocolHandlerInfo> protocol_handlers;
-  for (const auto& protocol_handler_proto : local_data.protocol_handlers()) {
-    apps::ProtocolHandlerInfo protocol_handler;
-    protocol_handler.protocol = protocol_handler_proto.protocol();
-    GURL protocol_handler_url(protocol_handler_proto.url());
-    if (protocol_handler_url.is_empty() || !protocol_handler_url.is_valid()) {
-      DLOG(ERROR) << "WebApp ProtocolHandler proto url parse error: "
-                  << protocol_handler_url.possibly_invalid_spec();
-      return nullptr;
+    if (changed) {
+      changed_apps.insert(app_id);
+      apps_migrated_count++;
     }
-    protocol_handler.url = protocol_handler_url;
-
-    protocol_handlers.push_back(std::move(protocol_handler));
   }
-  web_app->SetProtocolHandlers(std::move(protocol_handlers));
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.DeprecatedLaunchHandlerToClientMode",
+      apps_migrated_count);
+}
 
-  if (local_data.has_user_run_on_os_login_mode()) {
-    web_app->SetRunOnOsLoginMode(
-        ToRunOnOsLoginMode(local_data.user_run_on_os_login_mode()));
+void WebAppDatabase::MigrateScopeToRemoveRefAndQuery(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 2 to version 3.
+  CHECK_LT(state.metadata.version(), 3);
+  int apps_migrated_count = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (!app_proto.has_scope()) {
+      continue;
+    }
+    GURL scope(app_proto.scope());
+    if (!scope.is_valid()) {
+      continue;
+    }
+
+    if (scope.has_query() || scope.has_ref()) {
+      GURL::Replacements replacements;
+      replacements.ClearQuery();
+      replacements.ClearRef();
+      GURL clean_scope = scope.ReplaceComponents(replacements);
+      app_proto.set_scope(clean_scope.spec());
+      changed_apps.insert(app_id);
+      apps_migrated_count++;
+    }
+  }
+  base::UmaHistogramCounts1000("WebApp.Migrations.ScopeRefQueryRemoved",
+                               apps_migrated_count);
+}
+
+void WebAppDatabase::MigrateToRelativeManifestIdNoFragment(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 2 to version 3.
+  CHECK_LT(state.metadata.version(), 3);
+  int apps_migrated_count = 0;
+  int fragment_removed_count = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (!app_proto.has_sync_data()) {
+      continue;
+    }
+    sync_pb::WebAppSpecifics* sync_data = app_proto.mutable_sync_data();
+    if (!sync_data->has_start_url()) {
+      continue;
+    }
+    GURL start_url(sync_data->start_url());
+    if (!start_url.is_valid()) {
+      continue;
+    }
+
+    // Calculate the expected manifest_id and relative path without fragment.
+    std::optional<webapps::ManifestId> expected_manifest_id;
+    if (sync_data->has_relative_manifest_id()) {
+      expected_manifest_id = GenerateManifestIdUnsafe(
+          sync_data->relative_manifest_id(), start_url);
+    } else {
+      expected_manifest_id = webapps::ManifestId::Create(start_url);
+    }
+    if (!expected_manifest_id.has_value()) {
+      continue;
+    }
+    std::string expected_relative_path =
+        RelativeManifestIdPath(*expected_manifest_id);
+
+    bool changed = false;
+    if (!sync_data->has_relative_manifest_id()) {
+      // Populate if missing.
+      sync_data->set_relative_manifest_id(expected_relative_path);
+      changed = true;
+    } else if (sync_data->relative_manifest_id() != expected_relative_path) {
+      // Correct if different (e.g., had a fragment).
+      sync_data->set_relative_manifest_id(expected_relative_path);
+      changed = true;
+      fragment_removed_count++;
+    }
+
+    if (changed) {
+      changed_apps.insert(app_id);
+      apps_migrated_count++;
+    }
+  }
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.RelativeManifestIdFragmentRemoved",
+      fragment_removed_count);
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.RelativeManifestIdPopulatedOrFixed",
+      apps_migrated_count);
+}
+
+void WebAppDatabase::MigratePendingUpdateInfoWasIgnored(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 3 to version 4.
+  CHECK_LT(state.metadata.version(), 4);
+  int apps_migrated_count = 0;
+
+  for (auto& [app_id, app_proto] : state.apps) {
+    // Bypass apps that don't have a pending update info, or has the
+    // `was_ignored` field set.
+    if (!app_proto.has_pending_update_info() ||
+        app_proto.pending_update_info().has_was_ignored()) {
+      continue;
+    }
+
+    apps_migrated_count++;
+    app_proto.mutable_pending_update_info()->set_was_ignored(false);
+    changed_apps.insert(app_id);
+  }
+  // Record histograms correctly.
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.PendingInfoWasIgnoredMigrated", apps_migrated_count);
+}
+
+void WebAppDatabase::MigratePendingUpdateInfoClearIconMetadataIfCorrupted(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 4 to version 5.
+  CHECK_LT(state.metadata.version(), 5);
+  int corrupted_apps_count = 0;
+
+  for (auto& [app_id, app_proto] : state.apps) {
+    // Bypass apps that don't have a pending update info.
+    if (!app_proto.has_pending_update_info()) {
+      continue;
+    }
+
+    bool manifest_icons_corrupted =
+        (app_proto.pending_update_info().manifest_icons().empty() !=
+             app_proto.pending_update_info()
+                 .downloaded_manifest_icons()
+                 .empty() ||
+         CorruptIconMetadataForIcons(
+             app_proto.pending_update_info().manifest_icons()) ||
+         CorruptDownloadedSizeMetadata(
+             app_proto.pending_update_info().downloaded_manifest_icons()));
+    bool trusted_icons_corrupted =
+        (app_proto.pending_update_info().trusted_icons().empty() !=
+             app_proto.pending_update_info()
+                 .downloaded_trusted_icons()
+                 .empty() ||
+         CorruptIconMetadataForIcons(
+             app_proto.pending_update_info().trusted_icons()) ||
+         CorruptDownloadedSizeMetadata(
+             app_proto.pending_update_info().downloaded_trusted_icons()));
+    if (!manifest_icons_corrupted && !trusted_icons_corrupted) {
+      continue;
+    }
+
+    // At this point, icon metadata is corrupted. Clear them to prevent the
+    // proto web app serialization logic from dropping them.
+    corrupted_apps_count++;
+    app_proto.mutable_pending_update_info()->clear_manifest_icons();
+    app_proto.mutable_pending_update_info()->clear_trusted_icons();
+    app_proto.mutable_pending_update_info()->clear_downloaded_manifest_icons();
+    app_proto.mutable_pending_update_info()->clear_downloaded_trusted_icons();
+
+    // If this was just an icon update, then having an empty PendingUpdateInfo
+    // with no pending update metadata does not make sense. Clear the whole
+    // field in that case.
+    if (!app_proto.pending_update_info().has_name()) {
+      app_proto.clear_pending_update_info();
+    }
+    changed_apps.insert(app_id);
+  }
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.PendingUpdateInfoIconDataCorrupted",
+      corrupted_apps_count);
+}
+
+void WebAppDatabase::MigrateDisplayModeOverrideToDisplayOverrides(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 5 to version 6.
+  CHECK_LT(state.metadata.version(), 6);
+  int apps_migrated_count = 0;
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (app_proto.display_mode_override_deprecated_size() == 0) {
+      // This app does not have the deprecated field, nothing to migrate.
+      continue;
+    }
+
+    // Ignore the deprecated field if the new field is set.
+    if (app_proto.display_overrides_size() == 0) {
+      for (int i = 0; i < app_proto.display_mode_override_deprecated_size();
+           ++i) {
+        auto old_mode = app_proto.display_mode_override_deprecated(i);
+        auto* new_item = app_proto.add_display_overrides();
+        new_item->set_display_mode(old_mode);
+      }
+    }
+
+    // At this point both fields are non-empty. Clear the deprecated field.
+    app_proto.clear_display_mode_override_deprecated();
+    changed_apps.insert(app_id);
+    apps_migrated_count++;
+  }
+  base::UmaHistogramCounts1000(
+      "WebApp.Migrations.DisplayModeOverrideToDisplayOverrides",
+      apps_migrated_count);
+}
+
+void WebAppDatabase::MigrateScopeToStartUrlGetWithoutFilenameIfInvalid(
+    ProtobufState& state,
+    std::set<webapps::AppId>& changed_apps) {
+  // Migrating from version 6 to version 7.
+  CHECK_LT(state.metadata.version(), 7);
+  int apps_migrated_count = 0;
+
+  for (auto& [app_id, app_proto] : state.apps) {
+    if (!app_proto.has_sync_data() || !app_proto.sync_data().has_start_url() ||
+        !app_proto.has_scope()) {
+      continue;
+    }
+
+    GURL start_url(app_proto.sync_data().start_url());
+    GURL scope(app_proto.scope());
+
+    if (!start_url.is_valid()) {
+      continue;
+    }
+
+    if (scope.is_valid() && base::StartsWith(start_url.spec(), scope.spec(),
+                                             base::CompareCase::SENSITIVE)) {
+      continue;
+    }
+
+    // If start_url is not within scope, update scope.
+    GURL new_scope = start_url.GetWithoutFilename();
+    app_proto.set_scope(new_scope.spec());
+    changed_apps.insert(app_id);
+    apps_migrated_count++;
   }
 
-  return web_app;
+  base::UmaHistogramCounts1000("WebApp.Migrations.ScopeMismatchedWithStartUrl",
+                               apps_migrated_count);
 }
 
 void WebAppDatabase::OnDatabaseOpened(
     RegistryOpenedCallback callback,
-    const base::Optional<syncer::ModelError>& error,
-    std::unique_ptr<syncer::ModelTypeStore> store) {
+    const std::optional<syncer::ModelError>& error,
+    std::unique_ptr<syncer::DataTypeStore> store) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (error) {
-    error_callback_.Run(*error);
-    DLOG(ERROR) << "WebApps LevelDB opening error: " << error->ToString();
+    log_->Append(base::DictValue()
+                     .Set("message", "WebApps LevelDB open error")
+                     .Set("error", error->ToString()));
+    std::move(callback).Run(Registry(), nullptr,
+                            WebAppDatabaseOpenResult::kOpenError, {});
     return;
   }
 
   store_ = std::move(store);
-  // TODO(loyso): Use ReadAllDataAndPreprocess to parse protos in the background
-  // sequence.
-  store_->ReadAllData(base::BindOnce(&WebAppDatabase::OnAllDataRead,
-                                     weak_ptr_factory_.GetWeakPtr(),
-                                     std::move(callback)));
+  store_->ReadAllDataAndMetadata(
+      base::BindOnce(&WebAppDatabase::OnAllDataAndMetadataRead,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
-void WebAppDatabase::OnAllDataRead(
+void WebAppDatabase::OnAllDataAndMetadataRead(
     RegistryOpenedCallback callback,
-    const base::Optional<syncer::ModelError>& error,
-    std::unique_ptr<syncer::ModelTypeStore::RecordList> data_records) {
+    const std::optional<syncer::ModelError>& error,
+    std::unique_ptr<syncer::DataTypeStore::RecordList> data_records,
+    std::unique_ptr<syncer::MetadataBatch> metadata_batch) {
+  TRACE_EVENT0("ui", "WebAppDatabase::OnAllMetadataRead");
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (error) {
+    log_->Append(base::DictValue()
+                     .Set("message", "WebApps LevelDB read error")
+                     .Set("error", error->ToString()));
+    // TODO(crbug.com/506131577): Handle read error properly (e.g. trigger
+    // recovery, revert to in-memory database, disable os integration).
     error_callback_.Run(*error);
-    DLOG(ERROR) << "WebApps LevelDB data read error: " << error->ToString();
     return;
   }
 
-  store_->ReadAllMetadata(base::BindOnce(
-      &WebAppDatabase::OnAllMetadataRead, weak_ptr_factory_.GetWeakPtr(),
-      std::move(data_records), std::move(callback)));
-}
+  ProtobufState state = ParseProtobufs(*data_records);
 
-void WebAppDatabase::OnAllMetadataRead(
-    std::unique_ptr<syncer::ModelTypeStore::RecordList> data_records,
-    RegistryOpenedCallback callback,
-    const base::Optional<syncer::ModelError>& error,
-    std::unique_ptr<syncer::MetadataBatch> metadata_batch) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (error) {
-    error_callback_.Run(*error);
-    DLOG(ERROR) << "WebApps LevelDB metadata read error: " << error->ToString();
-    return;
+  std::vector<std::pair<webapps::AppId, GURL>> salvaged_apps;
+  for (const auto& [app_id, app_proto] : state.apps) {
+    if (app_proto.has_sync_data() && app_proto.sync_data().has_start_url()) {
+      salvaged_apps.emplace_back(app_id,
+                                 GURL(app_proto.sync_data().start_url()));
+    }
+  }
+
+  MigrationResult migration_result = MigrateDatabase(state);
+  switch (migration_result) {
+    case MigrationResult::kSuccess:
+      break;
+    case MigrationResult::kDowngradeDetected:
+      // The recovery code will re-initialize a new data store object. While
+      // opening two WEB_APPS data stores simultaneously might have worked in
+      // tests and during initial manual testing, it is prudent to destroy this
+      // instance first. This ensures we only ever have one store open at a
+      // time, preventing potential violations of sync system invariants.
+      store_.reset();
+      std::move(callback).Run(Registry(), nullptr,
+                              WebAppDatabaseOpenResult::kDowngradeDetected,
+                              std::move(salvaged_apps));
+      return;
   }
 
   Registry registry;
-  for (const syncer::ModelTypeStore::Record& record : *data_records) {
-    const AppId app_id = record.id;
-    std::unique_ptr<WebApp> web_app = ParseWebApp(app_id, record.value);
-    if (web_app)
-      registry.emplace(app_id, std::move(web_app));
+  for (const auto& [app_id, app_proto] : state.apps) {
+    std::unique_ptr<WebApp> web_app = ParseWebAppProto(app_proto, app_id);
+    base::UmaHistogramBoolean("WebApp.Database.ValidProto", web_app != nullptr);
+    if (!web_app) {
+      // TODO(https://crbug.com/40224498): Have ParseWebAppProto return a string
+      // or the error enum to output here.
+      log_->Append(base::DictValue()
+                       .Set("message", "Failed to parse web app proto")
+                       .Set("app_id", app_id)
+                       .Set("proto", proto::ToValue(app_proto)));
+      continue;
+    }
+
+    registry.emplace(app_id, std::move(web_app));
   }
 
   opened_ = true;
   // This should be a tail call: a callback code may indirectly call |this|
   // methods, like WebAppDatabase::Write()
-  std::move(callback).Run(std::move(registry), std::move(metadata_batch));
+  std::move(callback).Run(std::move(registry), std::move(metadata_batch),
+                          WebAppDatabaseOpenResult::kSuccess,
+                          std::move(salvaged_apps));
 }
 
 void WebAppDatabase::OnDataWritten(
     CompletionCallback callback,
-    const base::Optional<syncer::ModelError>& error) {
+    const std::optional<syncer::ModelError>& error) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (error) {
+    log_->Append(base::DictValue()
+                     .Set("message", "WebApps LevelDB write error")
+                     .Set("error", error->ToString()));
     error_callback_.Run(*error);
-    DLOG(ERROR) << "WebApps LevelDB write error: " << error->ToString();
   }
 
   std::move(callback).Run(!error);
-}
-
-// static
-std::unique_ptr<WebApp> WebAppDatabase::ParseWebApp(const AppId& app_id,
-                                                    const std::string& value) {
-  WebAppProto proto;
-  const bool parsed = proto.ParseFromString(value);
-  if (!parsed) {
-    DLOG(ERROR) << "WebApps LevelDB parse error: can't parse proto.";
-    return nullptr;
-  }
-
-  auto web_app = CreateWebApp(proto);
-  if (!web_app) {
-    // CreateWebApp() already logged what went wrong here.
-    return nullptr;
-  }
-
-  if (web_app->app_id() != app_id) {
-    DLOG(ERROR) << "WebApps LevelDB error: app_id doesn't match storage key";
-    return nullptr;
-  }
-
-  return web_app;
-}
-
-DisplayMode ToMojomDisplayMode(WebAppProto::DisplayMode display_mode) {
-  switch (display_mode) {
-    case WebAppProto::BROWSER:
-      return DisplayMode::kBrowser;
-    case WebAppProto::MINIMAL_UI:
-      return DisplayMode::kMinimalUi;
-    case WebAppProto::STANDALONE:
-      return DisplayMode::kStandalone;
-    case WebAppProto::FULLSCREEN:
-      return DisplayMode::kFullscreen;
-  }
-}
-
-DisplayMode ToMojomDisplayMode(
-    ::sync_pb::WebAppSpecifics::UserDisplayMode user_display_mode) {
-  switch (user_display_mode) {
-    case ::sync_pb::WebAppSpecifics::BROWSER:
-      return DisplayMode::kBrowser;
-    // New display modes will most likely be of the window variety than the
-    // browser tab variety so default to windowed if it's an enum value we don't
-    // know about.
-    case ::sync_pb::WebAppSpecifics::UNSPECIFIED:
-    case ::sync_pb::WebAppSpecifics::STANDALONE:
-      return DisplayMode::kStandalone;
-  }
-}
-
-WebAppProto::DisplayMode ToWebAppProtoDisplayMode(DisplayMode display_mode) {
-  switch (display_mode) {
-    case DisplayMode::kBrowser:
-      return WebAppProto::BROWSER;
-    case DisplayMode::kMinimalUi:
-      return WebAppProto::MINIMAL_UI;
-    case DisplayMode::kUndefined:
-      NOTREACHED();
-      FALLTHROUGH;
-    case DisplayMode::kStandalone:
-      return WebAppProto::STANDALONE;
-    case DisplayMode::kFullscreen:
-      return WebAppProto::FULLSCREEN;
-  }
 }
 
 }  // namespace web_app

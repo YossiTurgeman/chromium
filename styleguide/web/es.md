@@ -14,75 +14,6 @@
 hyphen-hyphen-hyphen (change to actual hyphen)
 -->
 
-<style>
-  .doc {
-    font-size: 16px;
-  }
-
-  .doc h3[id] {
-    line-height: 20px;
-    font-size: 16px;
-  }
-
-  .doc h3 > code {
-    font-size: 16px;
-    font-weight: bold;
-  }
-
-  .feature-container {
-    background-color: #e8eef7;
-    border: 1px solid #c3d9ff;
-    margin-bottom: 5px;
-    border-radius: 5px;
-  }
-
-  .feature-container > h3 {
-    cursor: pointer;
-    background-color: #c3d9ff;
-    margin: 0;
-    padding: 5px;
-    border-radius: 5px;
-  }
-
-  .feature-container > *:not(h3){
-    display: none;
-    padding: 0px 10px;
-  }
-
-  .feature-container.open > *:not(h3){
-    display: block;
-  }
-</style>
-
-<script>
-document.addEventListener('DOMContentLoaded', function(event) {
-  // Move all headers and corresponding contents to an accordion container.
-  document.querySelectorAll('h3[id]').forEach(function(header) {
-    const container = document.createElement('div');
-    container.classList.add('feature-container');
-    header.parentNode.insertBefore(container, header);
-
-    // Add all the following siblings until it hits an <hr>.
-    let el = header;
-    while (el && el.tagName !== 'HR') {
-      var nextEl = el.nextElementSibling;
-      container.append(el);
-      el = nextEl;
-    }
-
-    // Add handler to open accordion on click.
-    header.addEventListener('click', function() {
-      header.parentNode.classList.toggle('open');
-    });
-  });
-
-  // Then remove all <hr>s since everything's accordionized.
-  document.querySelectorAll('hr').forEach(function(el) {
-    el.parentNode.removeChild(el);
-  });
-});
-</script>
-
 # ECMAScript Features in Chromium
 
 This doc extends the [style guide](web.md#JavaScript) by specifying which new
@@ -179,6 +110,38 @@ fullyLoaded.then(startTheApp).then(maybeShowFirstRun);
 
 **Discussion Notes:** Feature already extensively used prior to creation of
 this document.
+
+---
+
+### Proxy
+
+Hooking into runtime-level object meta-operations.
+
+**Usage Example:**
+
+```js
+const keyTracker = new Proxy({}, {
+  keysCreated: 0,
+
+  get (receiver, key) {
+    if (key in receiver) {
+      console.log('key already exists');
+    } else {
+      ++this.keysCreated;
+      console.log(this.keysCreated + ' keys created!');
+      receiver[key] = true;
+    }
+  },
+});
+
+keyTracker.key1;  // '1 keys created!'
+keyTracker.key1;  // 'key already exists'
+keyTracker.key2;  // '2 keys created!'
+```
+
+**Documentation:** [link](https://tc39.github.io/ecma262/#sec-proxy-object-internal-methods-and-internal-slots)
+
+**Discussion Notes / Link to Thread:** [link](https://groups.google.com/a/chromium.org/g/chromium-dev/c/-vdPXELXCx4/m/gXfP5vpVBwAJ)
 
 ---
 
@@ -947,38 +910,6 @@ new UInt8ClampedArray();
 
 ---
 
-### Proxy
-
-Hooking into runtime-level object meta-operations.
-
-**Usage Example:**
-
-```js
-const keyTracker = new Proxy({}, {
-  keysCreated: 0,
-
-  get (receiver, key) {
-    if (key in receiver) {
-      console.log('key already exists');
-    } else {
-      ++this.keysCreated;
-      console.log(this.keysCreated + ' keys created!');
-      receiver[key] = true;
-    }
-  },
-});
-
-keyTracker.key1;  // '1 keys created!'
-keyTracker.key1;  // 'key already exists'
-keyTracker.key2;  // '2 keys created!'
-```
-
-**Documentation:** [link](https://tc39.github.io/ecma262/#sec-proxy-object-internal-methods-and-internal-slots)
-
-**Discussion Notes / Link to Thread:**
-
----
-
 ### Reflection
 
 Make calls corresponding to the object meta-operations.
@@ -1166,3 +1097,28 @@ console.log(Object.entries(object2)[1]);
 **Discussion Notes / Link to Thread:**
 
 ---
+
+# ES2020 Support in Chromium
+
+## Allowed features
+
+### Optional Chaining (?.)
+
+The optional chaining operator makes it easy to chain multiple functions /
+property accesses that may return null or undefined.
+
+**Usage Example:**
+
+```js
+// Before:
+const currentKeyboard = keyboards.getCurrentKeyboard();
+const keys = currentKeyboard && currentKeyboard.getKeys();
+const enterKey = keys && keys.getEnterKey();
+
+// After:
+const enterKey = keyboards.getCurrentKeyboard()?.getKeys()?.getEnterKey();
+```
+
+**Documentation:** [link](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Optional_chaining)
+
+**Discussion Notes / Link to Thread:** [link](https://groups.google.com/a/chromium.org/g/chromium-dev/c/DHLSm05HHlo)

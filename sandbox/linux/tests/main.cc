@@ -1,15 +1,18 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <string_view>
+
 #include "base/at_exit.h"
 #include "base/base_switches.h"
-#include "base/bind.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/test/test_suite.h"
+#include "base/test/test_timeouts.h"
 #include "build/build_config.h"
 #include "sandbox/linux/tests/test_utils.h"
 #include "sandbox/linux/tests/unit_tests.h"
@@ -40,8 +43,8 @@ void RunPostTestsChecks(const base::FilePath& orig_cwd) {
 #if !defined(SANDBOX_USES_BASE_TEST_SUITE)
 void UnitTestAssertHandler(const char* file,
                            int line,
-                           const base::StringPiece message,
-                           const base::StringPiece stack_trace) {
+                           std::string_view message,
+                           std::string_view stack_trace) {
   _exit(1);
 }
 #endif
@@ -70,12 +73,14 @@ int main(int argc, char* argv[]) {
   // we still do not use this on Android, we must install the handler ourselves.
   logging::ScopedLogAssertHandler scoped_assert_handler(
       base::BindRepeating(UnitTestAssertHandler));
+  // TaskEnvironment requires initialized TestTimeouts.
+  TestTimeouts::Initialize();
 #endif
   // Always go through re-execution for death tests.
   // This makes gtest only marginally slower for us and has the
   // additional side effect of getting rid of gtest warnings about fork()
   // safety.
-  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
 #if !defined(SANDBOX_USES_BASE_TEST_SUITE)
   int tests_result = RUN_ALL_TESTS();
 #else

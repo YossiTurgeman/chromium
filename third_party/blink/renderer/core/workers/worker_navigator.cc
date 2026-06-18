@@ -28,7 +28,6 @@
 #include "third_party/blink/public/platform/web_worker_fetch_context.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
-#include "third_party/blink/renderer/core/loader/worker_fetch_context.h"
 #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
 #include "third_party/blink/renderer/core/workers/worker_or_worklet_global_scope.h"
 #include "third_party/blink/renderer/core/workers/worker_thread.h"
@@ -36,43 +35,41 @@
 
 namespace blink {
 
-WorkerNavigator::WorkerNavigator(const String& user_agent,
-                                 const UserAgentMetadata& ua_metadata,
-                                 ExecutionContext* execution_context)
-    : ExecutionContextClient(execution_context),
-      NavigatorLanguage(execution_context),
-      user_agent_(user_agent),
-      ua_metadata_(ua_metadata) {}
+WorkerNavigator::WorkerNavigator(ExecutionContext* execution_context)
+    : NavigatorBase(execution_context) {}
 
 WorkerNavigator::~WorkerNavigator() = default;
 
-String WorkerNavigator::userAgent() const {
-  return user_agent_;
-}
-
 String WorkerNavigator::GetAcceptLanguages() {
-  WorkerOrWorkletGlobalScope* global_scope =
-      To<WorkerOrWorkletGlobalScope>(GetExecutionContext());
-  WebWorkerFetchContext* worker_fetch_context =
-      static_cast<WorkerFetchContext*>(
-          (&global_scope->EnsureFetcher()->Context()))
-          ->GetWebWorkerFetchContext();
-  return worker_fetch_context->GetAcceptLanguages();
+  auto* global_scope = To<WorkerOrWorkletGlobalScope>(GetExecutionContext());
+  if (!global_scope) {
+    // Prospective fix for crbug.com/40945292 and crbug.com/40827704
+    // Return empty string since it is better than crashing here, and the return
+    // value is not that important since the worker context is already
+    // destroyed.
+    return "";
+  }
+
+  return global_scope->GetAcceptLanguages();
 }
 
 void WorkerNavigator::NotifyUpdate() {
-  SetLanguagesDirty();
   WorkerOrWorkletGlobalScope* global_scope =
       To<WorkerOrWorkletGlobalScope>(GetExecutionContext());
+  if (!global_scope) {
+    // In case of the context destruction, `GetExecutionContext()` returns
+    // nullptr. Then, there is no `global_scope` to execute the language
+    // event.
+    return;
+  }
+  SetLanguagesDirty();
   global_scope->DispatchEvent(
       *Event::Create(event_type_names::kLanguagechange));
 }
 
 void WorkerNavigator::Trace(Visitor* visitor) const {
-  ScriptWrappable::Trace(visitor);
-  ExecutionContextClient::Trace(visitor);
-  NavigatorLanguage::Trace(visitor);
-  Supplementable<WorkerNavigator>::Trace(visitor);
+  NavigatorBase::Trace(visitor);
+  AcceptLanguagesWatcher::Trace(visitor);
 }
 
 }  // namespace blink

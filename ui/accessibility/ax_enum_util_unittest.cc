@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -89,9 +89,6 @@ TEST(AXEnumUtilTest, Action) {
   TestEnumStringConversion<ax::mojom::Action>();
 }
 
-TEST(AXEnumUtilTest, ActionFlags) {
-  TestEnumStringConversion<ax::mojom::ActionFlags>();
-}
 
 TEST(AXEnumUtilTest, DefaultActionVerb) {
   TestEnumStringConversion<ax::mojom::DefaultActionVerb>();
@@ -103,8 +100,17 @@ TEST(AXEnumUtilTest, Mutation) {
 
 TEST(AXEnumUtilTest, StringAttribute) {
   TestEnumStringConversion<ax::mojom::StringAttribute>();
-  TestAXNodeDataSetter<ax::mojom::StringAttribute>(
-      &AXNodeData::AddStringAttribute, std::string());
+
+  AXNodeData node_data;
+  for (int i = static_cast<int>(ax::mojom::StringAttribute::kMinValue) + 1;
+       i <= static_cast<int>(ax::mojom::StringAttribute::kMaxValue); ++i) {
+    ax::mojom::StringAttribute attr =
+        static_cast<ax::mojom::StringAttribute>(i);
+    if (attr == ax::mojom::StringAttribute::kChildTreeId)
+      continue;
+    node_data.AddStringAttribute(attr, std::string());
+  }
+  EXPECT_TRUE(!node_data.ToString().empty());
 }
 
 TEST(AXEnumUtilTest, IntAttribute) {
@@ -164,15 +170,19 @@ TEST(AXEnumUtilTest, Command) {
   TestEnumStringConversion<ax::mojom::Command>();
 }
 
-TEST(AXEnumUtilTest, TextAlign) {
-  TestEnumStringConversion<ax::mojom::TextAlign>();
+TEST(AXEnumUtilTest, InputEventType) {
+  TestEnumStringConversion<ax::mojom::InputEventType>();
 }
 
 TEST(AXEnumUtilTest, TextBoundary) {
   TestEnumStringConversion<ax::mojom::TextBoundary>();
 }
 
-TEST(AXEnumUtilTest, TextDirection) {
+TEST(AXEnumUtilTest, TextAlign) {
+  TestEnumStringConversion<ax::mojom::TextAlign>();
+}
+
+TEST(AXEnumUtilTest, WritingDirection) {
   TestEnumStringConversion<ax::mojom::WritingDirection>();
 }
 
@@ -234,10 +244,6 @@ TEST(AXEnumUtilTest, TreeOrder) {
 
 TEST(AXEnumUtilTest, ImageAnnotationStatus) {
   TestEnumStringConversion<ax::mojom::ImageAnnotationStatus>();
-}
-
-TEST(AXEnumUtilTest, Dropeffect) {
-  TestEnumStringConversion<ax::mojom::Dropeffect>();
 }
 
 }  // namespace ui

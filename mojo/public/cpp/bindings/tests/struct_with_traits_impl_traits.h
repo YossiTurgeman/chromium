@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,12 @@
 #include <stdint.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/strings/string_piece.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
 #include "mojo/public/cpp/bindings/tests/struct_with_traits_impl.h"
-#include "mojo/public/interfaces/bindings/tests/struct_with_traits.mojom.h"
+#include "mojo/public/interfaces/bindings/tests/struct_with_traits.test-mojom.h"
 
 namespace mojo {
 
@@ -29,8 +29,7 @@ struct StructTraits<test::NestedStructWithTraitsDataView,
 template <>
 struct EnumTraits<test::EnumWithTraits, test::EnumWithTraitsImpl> {
   static test::EnumWithTraits ToMojom(test::EnumWithTraitsImpl input);
-  static bool FromMojom(test::EnumWithTraits input,
-                        test::EnumWithTraitsImpl* output);
+  static test::EnumWithTraitsImpl FromMojom(test::EnumWithTraits input);
 };
 
 template <>
@@ -59,7 +58,7 @@ struct StructTraits<test::StructWithTraitsDataView,
     return value.get_uint64();
   }
 
-  static base::StringPiece f_string(const test::StructWithTraitsImpl& value) {
+  static std::string_view f_string(const test::StructWithTraitsImpl& value) {
     return value.get_string_as_string_piece();
   }
 
@@ -99,13 +98,11 @@ struct StructTraits<test::StructWithUnreachableTraitsDataView,
  public:
   static bool ignore_me(const test::StructWithUnreachableTraitsImpl& input) {
     NOTREACHED();
-    return false;
   }
 
   static bool Read(test::StructWithUnreachableTraitsDataView data,
                    test::StructWithUnreachableTraitsImpl* out) {
     NOTREACHED();
-    return false;
   }
 };
 
@@ -167,10 +164,11 @@ struct UnionTraits<test::UnionWithTraitsDataView,
 
   static test::UnionWithTraitsDataView::Tag GetTag(
       const std::unique_ptr<test::UnionWithTraitsBase>& data) {
-    if (data->type() == test::UnionWithTraitsBase::Type::INT32)
-      return test::UnionWithTraitsDataView::Tag::F_INT32;
+    if (data->type() == test::UnionWithTraitsBase::Type::INT32) {
+      return test::UnionWithTraitsDataView::Tag::kFInt32;
+    }
 
-    return test::UnionWithTraitsDataView::Tag::F_STRUCT;
+    return test::UnionWithTraitsDataView::Tag::kFStruct;
   }
 
   static int32_t f_int32(
@@ -186,11 +184,11 @@ struct UnionTraits<test::UnionWithTraitsDataView,
   static bool Read(test::UnionWithTraitsDataView data,
                    std::unique_ptr<test::UnionWithTraitsBase>* out) {
     switch (data.tag()) {
-      case test::UnionWithTraitsDataView::Tag::F_INT32: {
+      case test::UnionWithTraitsDataView::Tag::kFInt32: {
         out->reset(new test::UnionWithTraitsInt32(data.f_int32()));
         return true;
       }
-      case test::UnionWithTraitsDataView::Tag::F_STRUCT: {
+      case test::UnionWithTraitsDataView::Tag::kFStruct: {
         auto* struct_object = new test::UnionWithTraitsStruct();
         out->reset(struct_object);
         return data.ReadFStruct(&struct_object->get_mutable_struct());
@@ -198,7 +196,6 @@ struct UnionTraits<test::UnionWithTraitsDataView,
     }
 
     NOTREACHED();
-    return false;
   }
 };
 
@@ -229,8 +226,9 @@ struct StructTraits<test::StructNestedForceSerializeDataView,
 
   static bool Read(test::StructNestedForceSerializeDataView data,
                    test::StructNestedForceSerializeImpl* out) {
-    if (!data.ReadForce(&out->force()))
+    if (!data.ReadForce(&out->force())) {
       return false;
+    }
     out->set_was_deserialized();
     return true;
   }

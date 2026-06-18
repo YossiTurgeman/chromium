@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "extensions/common/constants.h"
+#include "extensions/common/extension_id.h"
 #include "url/gurl.h"
 
 namespace extensions {
@@ -15,11 +16,11 @@ namespace extensions {
 // ExtensionError
 
 ExtensionError::ExtensionError(Type type,
-                               const std::string& extension_id,
+                               const ExtensionId& extension_id,
                                bool from_incognito,
                                logging::LogSeverity level,
-                               const base::string16& source,
-                               const base::string16& message)
+                               const std::u16string& source,
+                               const std::u16string& message)
     : type_(type),
       extension_id_(extension_id),
       id_(0),
@@ -27,8 +28,7 @@ ExtensionError::ExtensionError(Type type,
       level_(level),
       source_(source),
       message_(message),
-      occurrences_(1u) {
-}
+      occurrences_(1u) {}
 
 ExtensionError::~ExtensionError() {
 }
@@ -54,19 +54,19 @@ bool ExtensionError::IsEqual(const ExtensionError* rhs) const {
 ////////////////////////////////////////////////////////////////////////////////
 // ManifestError
 
-ManifestError::ManifestError(const std::string& extension_id,
-                             const base::string16& message,
-                             const base::string16& manifest_key,
-                             const base::string16& manifest_specific)
-    : ExtensionError(ExtensionError::MANIFEST_ERROR,
-                     extension_id,
-                     false,  // extensions can't be installed while incognito.
-                     logging::LOG_WARNING,  // All manifest errors are warnings.
-                     base::FilePath(kManifestFilename).AsUTF16Unsafe(),
-                     message),
+ManifestError::ManifestError(const ExtensionId& extension_id,
+                             const std::u16string& message,
+                             const std::string& manifest_key,
+                             const std::u16string& manifest_specific)
+    : ExtensionError(
+          ExtensionError::Type::kManifestError,
+          extension_id,
+          false,  // extensions can't be installed while incognito.
+          logging::LOGGING_WARNING,  // All manifest errors are warnings.
+          base::FilePath(kManifestFilename).AsUTF16Unsafe(),
+          message),
       manifest_key_(manifest_key),
-      manifest_specific_(manifest_specific) {
-}
+      manifest_specific_(manifest_specific) {}
 
 ManifestError::~ManifestError() {
 }
@@ -85,25 +85,28 @@ bool ManifestError::IsEqualImpl(const ExtensionError* rhs) const {
 ////////////////////////////////////////////////////////////////////////////////
 // RuntimeError
 
-RuntimeError::RuntimeError(const std::string& extension_id,
+RuntimeError::RuntimeError(const ExtensionId& extension_id,
                            bool from_incognito,
-                           const base::string16& source,
-                           const base::string16& message,
+                           const std::u16string& source,
+                           const std::u16string& message,
                            const StackTrace& stack_trace,
                            const GURL& context_url,
                            logging::LogSeverity level,
                            int render_frame_id,
-                           int render_process_id)
-    : ExtensionError(ExtensionError::RUNTIME_ERROR,
-                     !extension_id.empty() ? extension_id : GURL(source).host(),
-                     from_incognito,
-                     level,
-                     source,
-                     message),
+                           int render_process_id,
+                           bool is_from_service_worker)
+    : ExtensionError(
+          ExtensionError::Type::kRuntimeError,
+          !extension_id.empty() ? extension_id : GURL(source).GetHost(),
+          from_incognito,
+          level,
+          source,
+          message),
       context_url_(context_url),
       stack_trace_(stack_trace),
       render_frame_id_(render_frame_id),
-      render_process_id_(render_process_id) {
+      render_process_id_(render_process_id),
+      is_from_service_worker_(is_from_service_worker) {
   CleanUpInit();
 }
 
@@ -145,7 +148,7 @@ void RuntimeError::CleanUpInit() {
   // background page in this case.
   GURL source_url = GURL(source_);
   if (context_url_.is_empty() &&
-      source_url.path_piece() ==
+      source_url.path() ==
           std::string("/") + kGeneratedBackgroundPageFilename) {
     context_url_ = source_url;
   }
@@ -156,23 +159,23 @@ void RuntimeError::CleanUpInit() {
   // sometimes the background page - but the error is thrown from the script.)
   // Make the source match the stack trace, since that is more likely the cause
   // of the error.
-  if (!stack_trace_.empty() && source_ != stack_trace_[0].source)
+  if (!stack_trace_.empty() && source_ != stack_trace_[0].source) {
     source_ = stack_trace_[0].source;
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // InternalError
 
-InternalError::InternalError(const std::string& extension_id,
-                             const base::string16& message,
+InternalError::InternalError(const ExtensionId& extension_id,
+                             const std::u16string& message,
                              logging::LogSeverity level)
-    : ExtensionError(ExtensionError::INTERNAL_ERROR,
+    : ExtensionError(ExtensionError::Type::kInternalError,
                      extension_id,
                      false,  // not incognito.
                      level,
-                     base::string16(),
-                     message) {
-}
+                     std::u16string(),
+                     message) {}
 
 InternalError::~InternalError() {
 }

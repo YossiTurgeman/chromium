@@ -1,12 +1,16 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {NetworkTestRunner} from 'network_test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as TextUtils from 'devtools/models/text_utils/text_utils.js';
+
 (async function() {
   TestRunner.addResult(`Tests long script content is correctly shown in source panel after page reload.\n`);
-  await TestRunner.loadModule('network_test_runner');
-  await TestRunner.loadModule('sources_test_runner');
-  await TestRunner.loadModule('console_test_runner');
   await TestRunner.showPanel('sources');
   await TestRunner.showPanel('network');
   await TestRunner.navigatePromise('resources/long-script-page.html');
@@ -30,7 +34,7 @@
   }
 
   function step5(uiSourceCode) {
-    uiSourceCode.requestContent().then(step6);
+    uiSourceCode.requestContentData().then(TextUtils.ContentData.ContentData.asDeferredContent).then(step6);
   }
 
   function step6({ content, error, isEncoded }) {

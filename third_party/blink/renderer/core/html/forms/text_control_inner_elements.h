@@ -37,11 +37,13 @@ class EditingViewPortElement final : public HTMLDivElement {
   explicit EditingViewPortElement(Document&);
 
  protected:
-  scoped_refptr<ComputedStyle> CustomStyleForLayoutObject() override;
+  const ComputedStyle* CustomStyleForLayoutObject(
+      const StyleRecalcContext&) override;
 
  private:
-  bool TypeShouldForceLegacyLayout() const final { return true; }
-  bool SupportsFocus() const override { return false; }
+  FocusableState SupportsFocus(UpdateBehavior) const override {
+    return FocusableState::kNotFocusable;
+  }
 };
 
 class TextControlInnerEditorElement final : public HTMLDivElement {
@@ -52,13 +54,14 @@ class TextControlInnerEditorElement final : public HTMLDivElement {
 
   void SetVisibility(bool is_visible);
   void FocusChanged();
-  scoped_refptr<ComputedStyle> CreateInnerEditorStyle() const;
 
  private:
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
-  bool TypeShouldForceLegacyLayout() const final { return true; }
-  scoped_refptr<ComputedStyle> CustomStyleForLayoutObject() override;
-  bool SupportsFocus() const override { return false; }
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
+  const ComputedStyle* CustomStyleForLayoutObject(
+      const StyleRecalcContext&) override;
+  FocusableState SupportsFocus(UpdateBehavior) const override {
+    return FocusableState::kNotFocusable;
+  }
   bool is_visible_ = true;
 };
 
@@ -70,8 +73,9 @@ class SearchFieldCancelButtonElement final : public HTMLDivElement {
   bool WillRespondToMouseClickEvents() override;
 
  private:
-  bool TypeShouldForceLegacyLayout() const final { return true; }
-  bool SupportsFocus() const override { return false; }
+  FocusableState SupportsFocus(UpdateBehavior) const override {
+    return FocusableState::kNotFocusable;
+  }
 };
 
 class PasswordRevealButtonElement final : public HTMLDivElement {
@@ -82,9 +86,11 @@ class PasswordRevealButtonElement final : public HTMLDivElement {
   bool WillRespondToMouseClickEvents() override;
 
  private:
-  bool SupportsFocus() const override { return false; }
+  FocusableState SupportsFocus(UpdateBehavior) const override {
+    return FocusableState::kNotFocusable;
+  }
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_FORMS_TEXT_CONTROL_INNER_ELEMENTS_H_

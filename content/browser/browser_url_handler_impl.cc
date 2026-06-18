@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,8 @@
 
 #include <stddef.h>
 
-#include "base/stl_util.h"
+#include <algorithm>
+
 #include "base/strings/string_util.h"
 #include "content/browser/renderer_host/debug_urls.h"
 #include "content/browser/webui/web_ui_impl.h"
@@ -14,50 +15,42 @@
 #include "content/public/common/content_client.h"
 #include "content/public/common/url_constants.h"
 #include "content/public/common/url_utils.h"
+#include "third_party/blink/public/common/chrome_debug_urls.h"
 #include "url/gurl.h"
 
 namespace content {
 
 // Handles rewriting view-source URLs for what we'll actually load.
 static bool HandleViewSource(GURL* url, BrowserContext* browser_context) {
-  if (url->SchemeIs(kViewSourceScheme)) {
-    // Load the inner URL instead.
-    *url = GURL(url->GetContent());
-
-    // Bug 26129: limit view-source to view the content and not any
-    // other kind of 'active' url scheme like 'javascript' or 'data'.
-    static const char* const default_allowed_sub_schemes[] = {
-        url::kHttpScheme,
-        url::kHttpsScheme,
-        url::kFtpScheme,
-        kChromeUIScheme,
-        url::kFileScheme,
-        url::kFileSystemScheme
-    };
-
-    // Merge all the schemes for which view-source is allowed by default, with
-    // the view-source schemes defined by the ContentBrowserClient.
-    std::vector<std::string> all_allowed_sub_schemes;
-    for (size_t i = 0; i < base::size(default_allowed_sub_schemes); ++i)
-      all_allowed_sub_schemes.push_back(default_allowed_sub_schemes[i]);
-    GetContentClient()->browser()->GetAdditionalViewSourceSchemes(
-        &all_allowed_sub_schemes);
-
-    bool is_sub_scheme_allowed = false;
-    for (size_t i = 0; i < all_allowed_sub_schemes.size(); ++i) {
-      if (url->SchemeIs(all_allowed_sub_schemes[i].c_str())) {
-        is_sub_scheme_allowed = true;
-        break;
-      }
-    }
-
-    if (!is_sub_scheme_allowed) {
-      *url = GURL(url::kAboutBlankURL);
-      return false;
-    }
-
-    return true;
+  if (!url->SchemeIs(kViewSourceScheme)) {
+    return false;
   }
+
+  // Load the inner URL instead.
+  *url = GURL(url->GetContent());
+
+  // https://crbug.com/40077794: limit view-source to view the content and
+  // not any other kind of 'active' url scheme like 'javascript' or 'data'.
+  std::vector<std::string> all_allowed_sub_schemes({
+      url::kHttpScheme,
+      url::kHttpsScheme,
+      kChromeUIScheme,
+      url::kFileScheme,
+      url::kFileSystemScheme,
+  });
+
+  // Merge all the schemes for which view-source is allowed by default, with
+  // the view-source schemes defined by the ContentBrowserClient.
+  GetContentClient()->browser()->GetAdditionalViewSourceSchemes(
+      &all_allowed_sub_schemes);
+
+  for (const auto& allowed_sub_scheme : all_allowed_sub_schemes) {
+    if (url->SchemeIs(allowed_sub_scheme)) {
+      return true;
+    }
+  }
+
+  *url = GURL(url::kAboutBlankURL);
   return false;
 }
 
@@ -73,7 +66,7 @@ static bool ReverseViewSource(GURL* url, BrowserContext* browser_context) {
 
 static bool DebugURLHandler(GURL* url, BrowserContext* browser_context) {
   // Circumvent processing URLs that the renderer process will handle.
-  return IsRendererDebugURL(*url);
+  return blink::IsRendererDebugURL(*url);
 }
 
 // static
@@ -92,8 +85,7 @@ BrowserURLHandlerImpl* BrowserURLHandlerImpl::GetInstance() {
   return base::Singleton<BrowserURLHandlerImpl>::get();
 }
 
-BrowserURLHandlerImpl::BrowserURLHandlerImpl() :
-    fixup_handler_(nullptr) {
+BrowserURLHandlerImpl::BrowserURLHandlerImpl() {
   AddHandlerPair(&DebugURLHandler, BrowserURLHandlerImpl::null_handler());
 
   // view-source: should take precedence over other rewriters, so it's
@@ -104,11 +96,6 @@ BrowserURLHandlerImpl::BrowserURLHandlerImpl() :
 }
 
 BrowserURLHandlerImpl::~BrowserURLHandlerImpl() {
-}
-
-void BrowserURLHandlerImpl::SetFixupHandler(URLHandler handler) {
-  DCHECK(fixup_handler_ == nullptr);
-  fixup_handler_ = handler;
 }
 
 void BrowserURLHandlerImpl::AddHandlerPair(URLHandler handler,
@@ -142,13 +129,6 @@ std::vector<GURL> BrowserURLHandlerImpl::GetPossibleRewrites(
   return rewrites;
 }
 
-void BrowserURLHandlerImpl::FixupURLBeforeRewrite(
-    GURL* url,
-    BrowserContext* browser_context) {
-  if (fixup_handler_)
-    fixup_handler_(url, browser_context);
-}
-
 void BrowserURLHandlerImpl::RewriteURLIfNecessary(
     GURL* url,
     BrowserContext* browser_context,
@@ -156,6 +136,11 @@ void BrowserURLHandlerImpl::RewriteURLIfNecessary(
   DCHECK(url);
   DCHECK(browser_context);
   DCHECK(reverse_on_redirect);
+
+  if (!url->is_valid()) {
+    *reverse_on_redirect = false;
+    return;
+  }
 
   for (const auto& it : url_handlers_) {
     const URLHandler& handler = it.first;
@@ -185,8 +170,11 @@ bool BrowserURLHandlerImpl::ReverseURLRewrite(
   return false;
 }
 
-void BrowserURLHandlerImpl::SetFixupHandlerForTesting(URLHandler handler) {
-  fixup_handler_ = handler;
+void BrowserURLHandlerImpl::RemoveHandlerForTesting(URLHandler handler) {
+  const auto it =
+      std::ranges::find(url_handlers_, handler, &HandlerPair::first);
+  CHECK(url_handlers_.end() != it);
+  url_handlers_.erase(it);
 }
 
 }  // namespace content

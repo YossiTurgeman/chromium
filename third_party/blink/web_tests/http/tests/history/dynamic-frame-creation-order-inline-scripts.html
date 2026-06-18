@@ -24,7 +24,10 @@
     <p>This is almost the same test as
     dynamic-frame-creation-order-onload-handler.html except that the dynamic
     frames are created from an inline script, rather than in response to an
-    onLoad event.
+    onload event.
+    </p>
+    <p>If we enable back-forward cache, back navigation doesn't run inline
+    script and thus this test fails.
     </p>
     <hr>
     <p>Frame creation order during this page load:</p>
@@ -36,6 +39,7 @@
     Dynamically created frames:
     <div id="dynamically-created-frames">
     </div>
+    <script src="/resources/prevent-bfcache.js"></script>
     <script>
       if (window.testRunner) {
           testRunner.dumpAsText();
@@ -53,7 +57,10 @@
           } else if (window.testRunner) {
               // Navigate in a timeout to make sure we generate a history entry
               // that we can go back to.
-              setTimeout(function() { location.href = 'resources/back.html'; }, 0);
+              setTimeout(async function() {
+                await preventBFCache();
+                location.href = 'resources/back.html';
+              }, 0);
               sessionStorage.didNav = true;
           }
       };

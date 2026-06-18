@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,8 @@ namespace blink {
 // This class encapsulates the properties that are common between mouse and
 // pointer events and touch points as we transition towards the unified pointer
 // event model.
-// TODO(mustaq): Unify WebTouchPoint & WebMouseEvent into WebPointerEvent.
-// crbug.com/508283
+// TODO(crbug.com/41371756): Unify WebTouchPoint & WebMouseEvent into
+// WebPointerEvent.
 class WebPointerProperties {
  public:
   using Button = mojom::Button;
@@ -80,8 +80,8 @@ class WebPointerProperties {
   // Tilt of a pen stylus from surface normal as plane angles in degrees,
   // Values lie in [-90,90]. A positive tiltX is to the right and a positive
   // tiltY is towards the user.
-  int tilt_x = 0;
-  int tilt_y = 0;
+  double tilt_x = 0;
+  double tilt_y = 0;
 
   // The normalized tangential pressure (or barrel pressure), typically set by
   // an additional control of the stylus, which has a range of [-1,1], where 0
@@ -109,6 +109,9 @@ class WebPointerProperties {
   // TODO(crbug.com/982379): Figure out how to avoid using this boolean.
   bool is_raw_movement_event = false;
 
+  // Contains unique device id for pen on supported devices.
+  int32_t device_id = -1;
+
  protected:
   // Widget coordinate, which is relative to the bound of current RenderWidget
   // (e.g. a plugin or OOPIF inside a RenderView). Similar to viewport
@@ -121,4 +124,4 @@ class WebPointerProperties {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_PUBLIC_COMMON_INPUT_WEB_POINTER_PROPERTIES_H_

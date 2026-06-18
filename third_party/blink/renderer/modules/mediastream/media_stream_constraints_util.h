@@ -1,18 +1,21 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_MEDIASTREAM_MEDIA_STREAM_CONSTRAINTS_UTIL_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_MEDIASTREAM_MEDIA_STREAM_CONSTRAINTS_UTIL_H_
 
+#include <optional>
 #include <string>
 
 #include "media/base/video_facing.h"
 #include "media/capture/video_capture_types.h"
+#include "third_party/blink/public/mojom/mediastream/media_devices.mojom-blink.h"
+#include "third_party/blink/renderer/modules/mediastream/image_capture_device_settings.h"
+#include "third_party/blink/renderer/modules/mediastream/media_constraints.h"
 #include "third_party/blink/renderer/modules/mediastream/media_stream_constraints_util_sets.h"
 #include "third_party/blink/renderer/modules/mediastream/video_track_adapter_settings.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
-#include "third_party/blink/renderer/platform/mediastream/media_constraints.h"
 #include "third_party/blink/renderer/platform/mediastream/media_stream_audio_processor_options.h"
 #include "third_party/blink/renderer/platform/mediastream/media_stream_source.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
@@ -66,14 +69,13 @@ class MODULES_EXPORT VideoCaptureSettings {
 
   // Creates an object with the given values.
   VideoCaptureSettings(std::string device_id,
-                       media::VideoCaptureParams capture_params_,
-                       base::Optional<bool> noise_reduction_,
+                       media::VideoCaptureParams capture_params,
+                       std::optional<bool> noise_reduction,
                        const VideoTrackAdapterSettings& track_adapter_settings,
-                       base::Optional<double> min_frame_rate,
-                       base::Optional<double> max_frame_rate,
-                       base::Optional<double> pan = base::nullopt,
-                       base::Optional<double> tilt = base::nullopt,
-                       base::Optional<double> zoom = base::nullopt);
+                       std::optional<double> min_frame_rate,
+                       std::optional<double> max_frame_rate,
+                       std::optional<ImageCaptureDeviceSettings>
+                           image_capture_device_settings = std::nullopt);
 
   VideoCaptureSettings(const VideoCaptureSettings& other);
   VideoCaptureSettings& operator=(const VideoCaptureSettings& other);
@@ -115,7 +117,7 @@ class MODULES_EXPORT VideoCaptureSettings {
     DCHECK(HasValue());
     return capture_params_;
   }
-  const base::Optional<bool>& noise_reduction() const {
+  const std::optional<bool>& noise_reduction() const {
     DCHECK(HasValue());
     return noise_reduction_;
   }
@@ -123,38 +125,29 @@ class MODULES_EXPORT VideoCaptureSettings {
     DCHECK(HasValue());
     return track_adapter_settings_;
   }
-  const base::Optional<double>& min_frame_rate() const {
+  const std::optional<double>& min_frame_rate() const {
     DCHECK(HasValue());
     return min_frame_rate_;
   }
-  const base::Optional<double>& max_frame_rate() const {
+  const std::optional<double>& max_frame_rate() const {
     DCHECK(HasValue());
     return max_frame_rate_;
   }
-  const base::Optional<double>& pan() const {
+  const std::optional<ImageCaptureDeviceSettings>&
+  image_capture_device_settings() const {
     DCHECK(HasValue());
-    return pan_;
-  }
-  const base::Optional<double>& tilt() const {
-    DCHECK(HasValue());
-    return tilt_;
-  }
-  const base::Optional<double>& zoom() const {
-    DCHECK(HasValue());
-    return zoom_;
+    return image_capture_device_settings_;
   }
 
  private:
   const char* failed_constraint_name_;
   std::string device_id_;
   media::VideoCaptureParams capture_params_;
-  base::Optional<bool> noise_reduction_;
+  std::optional<bool> noise_reduction_;
   VideoTrackAdapterSettings track_adapter_settings_;
-  base::Optional<double> min_frame_rate_;
-  base::Optional<double> max_frame_rate_;
-  base::Optional<double> pan_;
-  base::Optional<double> tilt_;
-  base::Optional<double> zoom_;
+  std::optional<double> min_frame_rate_;
+  std::optional<double> max_frame_rate_;
+  std::optional<ImageCaptureDeviceSettings> image_capture_device_settings_;
 };
 
 // This class represents the output the SelectSettings algorithm for audio
@@ -204,13 +197,14 @@ class MODULES_EXPORT AudioCaptureSettings {
   explicit AudioCaptureSettings(const char* failed_constraint_name);
 
   // Creates an object with the given values.
-  explicit AudioCaptureSettings(
+  AudioCaptureSettings(
       std::string device_id,
-      const base::Optional<int>& requested_buffer_size,
+      const std::optional<int>& requested_buffer_size,
       bool disable_local_echo,
       bool enable_automatic_output_device_selection,
       ProcessingType processing_type,
-      const AudioProcessingProperties& audio_processing_properties);
+      const AudioProcessingProperties& audio_processing_properties,
+      int num_channels);
   AudioCaptureSettings(const AudioCaptureSettings& other);
   AudioCaptureSettings& operator=(const AudioCaptureSettings& other);
   AudioCaptureSettings(AudioCaptureSettings&& other);
@@ -224,7 +218,7 @@ class MODULES_EXPORT AudioCaptureSettings {
     DCHECK(HasValue());
     return device_id_;
   }
-  const base::Optional<int>& requested_buffer_size() const {
+  const std::optional<int>& requested_buffer_size() const {
     DCHECK(HasValue());
     return requested_buffer_size_;
   }
@@ -244,15 +238,20 @@ class MODULES_EXPORT AudioCaptureSettings {
     DCHECK(HasValue());
     return audio_processing_properties_;
   }
+  int num_channels() const {
+    DCHECK(HasValue());
+    return num_channels_;
+  }
 
  private:
   const char* failed_constraint_name_;
   std::string device_id_;
-  base::Optional<int> requested_buffer_size_;
+  std::optional<int> requested_buffer_size_;
   bool disable_local_echo_;
   bool render_to_associated_sink_;
   ProcessingType processing_type_;
   AudioProcessingProperties audio_processing_properties_;
+  int num_channels_;
 };
 
 // Method to get boolean value of constraint with |name| from constraints.
@@ -288,6 +287,12 @@ MODULES_EXPORT bool GetConstraintValueAsDouble(
     const MediaConstraints& constraints,
     const blink::DoubleConstraint MediaTrackConstraintSetPlatform::*picker,
     double* value);
+
+bool IsPanTiltZoomConstraintPresentAndNotFalse(
+    const MediaConstraints& constraints);
+
+bool IsPanTiltZoomConstraintPresentAndNotFalse(
+    const MediaTrackConstraintSetPlatform& constraint_set);
 
 // This function selects track settings from a set of candidate resolutions and
 // frame rates, given the source video-capture format and ideal values.
@@ -339,9 +344,9 @@ MODULES_EXPORT MediaStreamSource::Capabilities
 ComputeCapabilitiesForVideoSource(
     const String& device_id,
     const media::VideoCaptureFormats& formats,
-    media::VideoFacingMode facing_mode,
+    mojom::blink::FacingMode facing_mode,
     bool is_device_capture,
-    const base::Optional<std::string>& group_id = base::nullopt);
+    const std::optional<std::string>& group_id = std::nullopt);
 
 }  // namespace blink
 

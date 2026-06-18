@@ -1,81 +1,135 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/system/phonehub/phone_hub_interstitial_view.h"
 
 #include <memory>
+#include <string>
 
 #include "ash/public/cpp/resources/grit/ash_public_unscaled_resources.h"
 #include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
-#include "ash/style/ash_color_provider.h"
-#include "ash/system/tray/tray_popup_item_style.h"
-#include "ash/system/unified/rounded_label_button.h"
-#include "base/strings/string16.h"
+#include "ash/style/typography.h"
+#include "ash/system/phonehub/ui_constants.h"
+#include "ash/system/tray/tray_constants.h"
+#include "ash/system/tray/tray_popup_utils.h"
 #include "skia/ext/image_operations.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/models/image_model.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/chromeos/styles/cros_tokens_color_mappings.h"
+#include "ui/compositor/layer.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/image/image_skia_operations.h"
+#include "ui/views/border.h"
 #include "ui/views/controls/button/button.h"
 #include "ui/views/controls/button/label_button.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/controls/progress_bar.h"
-#include "ui/views/layout/box_layout.h"
-#include "ui/views/layout/grid_layout.h"
+#include "ui/views/layout/box_layout_view.h"
+#include "ui/views/layout/flex_layout_view.h"
+#include "ui/views/view_class_properties.h"
 
 namespace ash {
 
 namespace {
-
-// Appearance.
-// TODO(meilinw): Update those constants to spec.
-constexpr int kImageWidthDip = 330;
-constexpr int kImageHeightDip = 200;
-constexpr int kDialogContentWidthDip = 330;
-constexpr int kHorizontalPaddingDip = 20;
-constexpr int kVerticalPaddingDip = 20;
-constexpr int kTitleBottomPaddingDip = 10;
-constexpr int kButtonSpacingDip = 10;
-constexpr int kButtonContainerTopPaddingDip = 45;
-constexpr int kProgressBarHeightDip = 2;
-constexpr double kInfiniteLoadingProgressValue = -1.0;
-
-// Adds a ColumnSet on |layout| with a single View column and padding columns
-// on either side of it with |padding| width.
-void AddColumnWithSidePadding(views::GridLayout* layout, int padding, int id) {
-  views::ColumnSet* column_set = layout->AddColumnSet(id);
-  column_set->AddPaddingColumn(views::GridLayout::kFixedSize, padding);
-  column_set->AddColumn(views::GridLayout::CENTER, views::GridLayout::CENTER,
-                        views::GridLayout::kFixedSize,
-                        views::GridLayout::ColumnSize::kFixed,
-                        kDialogContentWidthDip, 0);
-  column_set->AddPaddingColumn(views::GridLayout::kFixedSize, padding);
+constexpr auto kLabelInsets = gfx::Insets::VH(0, 4);
+constexpr int kTitleLabelLineHeight = 48;
 }
 
-}  // namespace
+PhoneHubInterstitialView::PhoneHubInterstitialView(bool show_progress,
+                                                   bool show_image) {
+  auto* layout = SetLayoutManager(std::make_unique<views::BoxLayout>());
+  layout->SetOrientation(views::BoxLayout::Orientation::kVertical);
 
-PhoneHubInterstitialView::PhoneHubInterstitialView(bool show_progress) {
-  InitLayout(show_progress);
+  if (show_progress) {
+    auto* progress_bar_container =
+        AddChildView(std::make_unique<views::BoxLayoutView>());
+    progress_bar_container->SetOrientation(
+        views::BoxLayout::Orientation::kVertical);
+    progress_bar_container->SetMainAxisAlignment(
+        views::BoxLayout::MainAxisAlignment::kCenter);
+    progress_bar_ = progress_bar_container->AddChildView(
+        std::make_unique<views::ProgressBar>());
+    progress_bar_->SetPreferredHeight(2);
+    progress_bar_->SetForegroundColor(cros_tokens::kIconColorProminent);
+    progress_bar_->SetValue(-1.0);
+  }
+
+  auto* content_container =
+      AddChildView(std::make_unique<views::FlexLayoutView>());
+  content_container->SetOrientation(views::LayoutOrientation::kVertical);
+  content_container->SetMainAxisAlignment(views::LayoutAlignment::kCenter);
+  content_container->SetInteriorMargin(
+      gfx::Insets::VH(0, kBubbleHorizontalSidePaddingDip) +
+      gfx::Insets::TLBR(0, 0, 16, 0));
+
+  // Set up image if any.
+  if (show_image) {
+    image_ =
+        content_container->AddChildView(std::make_unique<views::ImageView>());
+    image_->SetProperty(views::kMarginsKey, gfx::Insets::VH(20, 0));
+    image_->SetProperty(views::kCrossAxisAlignmentKey,
+                        views::LayoutAlignment::kCenter);
+    image_->SetImageSize(gfx::Size(216, 216));
+  }
+
+  // Set up title view, which should be left-aligned.
+  title_ = content_container->AddChildView(std::make_unique<views::Label>());
+  title_->SetProperty(views::kCrossAxisAlignmentKey,
+                      views::LayoutAlignment::kStart);
+  title_->SetProperty(views::kMarginsKey, kLabelInsets);
+  title_->SetEnabledColor(cros_tokens::kTextColorPrimary);
+  TypographyProvider::Get()->StyleLabel(ash::TypographyToken::kCrosButton1,
+                                        *title_);
+
+  // Overriding because the typography line height set does not match Phone
+  // Hub specs.
+  title_->SetLineHeight(kTitleLabelLineHeight);
+
+  // Set up multi-line description view.
+  description_ =
+      content_container->AddChildView(std::make_unique<views::Label>());
+  description_->SetProperty(views::kMarginsKey,
+                            kLabelInsets + gfx::Insets::TLBR(0, 0, 12, 0));
+  description_->SetEnabledColor(cros_tokens::kTextColorPrimary);
+  description_->SetMultiLine(true);
+  description_->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
+  // TODO(b/281844561): Migrate the `description_` to use a slightly lighter
+  // text color when tokens have been finalized.
+  TypographyProvider::Get()->StyleLabel(ash::TypographyToken::kCrosBody2,
+                                        *description_);
+  description_->SetLineHeight(20);
+
+  // Set up button container view, which should be right-aligned.
+  button_container_ =
+      content_container->AddChildView(std::make_unique<views::BoxLayoutView>());
+  button_container_->SetProperty(views::kCrossAxisAlignmentKey,
+                                 views::LayoutAlignment::kEnd);
+  button_container_->SetProperty(views::kMarginsKey,
+                                 gfx::Insets::TLBR(16, 0, 0, 0));
+  button_container_->SetBetweenChildSpacing(8);
 }
 
 PhoneHubInterstitialView::~PhoneHubInterstitialView() = default;
 
-void PhoneHubInterstitialView::SetImage(const gfx::ImageSkia& image) {
-  // Expect a non-empty string for the title.
-  DCHECK(!image.isNull());
-  image_->SetImage(image);
+void PhoneHubInterstitialView::SetImage(const ui::ImageModel& image_model) {
+  // Expect a non-null |image_| view and a nonempty |image_model|.
+  DCHECK(image_);
+  DCHECK(!image_model.IsEmpty());
+  image_->SetImage(image_model);
 }
 
-void PhoneHubInterstitialView::SetTitle(const base::string16& title) {
+void PhoneHubInterstitialView::SetTitle(const std::u16string& title) {
   // Expect a non-empty string for the title.
   DCHECK(!title.empty());
   title_->SetText(title);
 }
 
-void PhoneHubInterstitialView::SetDescription(const base::string16& desc) {
+void PhoneHubInterstitialView::SetDescription(const std::u16string& desc) {
   // Expect a non-empty string for the description.
   DCHECK(!desc.empty());
   description_->SetText(desc);
@@ -83,79 +137,11 @@ void PhoneHubInterstitialView::SetDescription(const base::string16& desc) {
 
 void PhoneHubInterstitialView::AddButton(
     std::unique_ptr<views::Button> button) {
+  description_->SetProperty(views::kMarginsKey, kLabelInsets);
   button_container_->AddChildView(std::move(button));
 }
 
-void PhoneHubInterstitialView::InitLayout(bool show_progress) {
-  SetPaintToLayer();
-  layer()->SetFillsBoundsOpaquely(false);
-
-  // Set up layout column.
-  views::GridLayout* layout =
-      SetLayoutManager(std::make_unique<views::GridLayout>());
-  const int kFirstColumnSetId = 0;
-  // Set up the first column set to layout the progressing bar if needed.
-  views::ColumnSet* column_set = layout->AddColumnSet(kFirstColumnSetId);
-  column_set->AddColumn(views::GridLayout::Alignment::FILL,
-                        views::GridLayout::CENTER, 1,
-                        views::GridLayout::ColumnSize::kFixed, 0, 0);
-  // Set up the second column set with horizontal paddings to layout the image,
-  // text and buttons.
-  const int kSecondColumnSetId = 1;
-  AddColumnWithSidePadding(layout, kHorizontalPaddingDip, kSecondColumnSetId);
-
-  if (show_progress) {
-    // Set up layout row for the progress bar if |show_progess| is true.
-    layout->StartRow(views::GridLayout::kFixedSize, kFirstColumnSetId);
-    progress_bar_ = layout->AddView(
-        std::make_unique<views::ProgressBar>(kProgressBarHeightDip));
-    progress_bar_->SetForegroundColor(
-        AshColorProvider::Get()->GetContentLayerColor(
-            AshColorProvider::ContentLayerType::kIconColorProminent));
-    progress_bar_->SetValue(kInfiniteLoadingProgressValue);
-  }
-
-  // Set up layout row for the image view.
-  layout->StartRow(views::GridLayout::kFixedSize, kSecondColumnSetId);
-  image_ = layout->AddView(std::make_unique<views::ImageView>());
-  image_->SetImageSize(gfx::Size(kImageWidthDip, kImageHeightDip));
-
-  // Set up layout row for the title view, which should be left-aligned.
-  layout->StartRow(views::GridLayout::kFixedSize, kSecondColumnSetId);
-  title_ =
-      layout->AddView(std::make_unique<views::Label>(), 1, 1,
-                      views::GridLayout::LEADING, views::GridLayout::CENTER);
-  TrayPopupItemStyle title_style(TrayPopupItemStyle::FontStyle::SUB_HEADER);
-  title_style.SetupLabel(title_);
-
-  // Set up layout row for the multi-line description view.
-  layout->StartRowWithPadding(views::GridLayout::kFixedSize, kSecondColumnSetId,
-                              views::GridLayout::kFixedSize,
-                              kTitleBottomPaddingDip);
-  description_ = layout->AddView(std::make_unique<views::Label>());
-  TrayPopupItemStyle body_style(
-      TrayPopupItemStyle::FontStyle::DETAILED_VIEW_LABEL);
-  body_style.SetupLabel(description_);
-  description_->SetMultiLine(true);
-  description_->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
-
-  // Set up the layout row for the button container view, which should be
-  // right-aligned.
-  layout->StartRowWithPadding(views::GridLayout::kFixedSize, kSecondColumnSetId,
-                              views::GridLayout::kFixedSize,
-                              kButtonContainerTopPaddingDip);
-  button_container_ =
-      layout->AddView(std::make_unique<views::View>(), 1, 1,
-                      views::GridLayout::TRAILING, views::GridLayout::CENTER);
-  button_container_->SetLayoutManager(std::make_unique<views::BoxLayout>(
-      views::BoxLayout::Orientation::kHorizontal, gfx::Insets(),
-      kButtonSpacingDip));
-
-  // Set up the layout row for the bottom spacing.
-  layout->AddPaddingRow(views::GridLayout::kFixedSize, kVerticalPaddingDip);
-}
-
-BEGIN_METADATA(PhoneHubInterstitialView, views::View)
+BEGIN_METADATA(PhoneHubInterstitialView)
 END_METADATA
 
 }  // namespace ash

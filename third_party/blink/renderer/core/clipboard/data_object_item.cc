@@ -31,14 +31,14 @@
 #include "third_party/blink/renderer/core/clipboard/data_object_item.h"
 
 #include "base/time/time.h"
-#include "third_party/blink/public/mojom/native_file_system/native_file_system_drag_drop_token.mojom-blink.h"
+#include "third_party/blink/public/mojom/file_system_access/file_system_access_data_transfer_token.mojom-blink.h"
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/core/clipboard/clipboard_mime_types.h"
 #include "third_party/blink/renderer/core/clipboard/system_clipboard.h"
 #include "third_party/blink/renderer/core/fileapi/blob.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/image-encoders/image_encoder.h"
 #include "third_party/blink/renderer/platform/network/mime/mime_type_registry.h"
+#include "ui/base/clipboard/clipboard_constants.h"
 
 namespace blink {
 
@@ -63,12 +63,12 @@ DataObjectItem* DataObjectItem::CreateFromFile(File* file) {
 DataObjectItem* DataObjectItem::CreateFromFileWithFileSystemId(
     File* file,
     const String& file_system_id,
-    scoped_refptr<NativeFileSystemDropData> native_file_entry) {
+    scoped_refptr<FileSystemAccessDropData> file_system_access_entry) {
   DataObjectItem* item =
       MakeGarbageCollected<DataObjectItem>(kFileKind, file->type());
   item->file_ = file;
   item->file_system_id_ = file_system_id;
-  item->native_file_system_entry_ = native_file_entry;
+  item->file_system_access_entry_ = file_system_access_entry;
   return item;
 }
 
@@ -76,7 +76,7 @@ DataObjectItem* DataObjectItem::CreateFromFileWithFileSystemId(
 DataObjectItem* DataObjectItem::CreateFromURL(const String& url,
                                               const String& title) {
   DataObjectItem* item =
-      MakeGarbageCollected<DataObjectItem>(kStringKind, kMimeTypeTextURIList);
+      MakeGarbageCollected<DataObjectItem>(kStringKind, ui::kMimeTypeUriList);
   item->data_ = url;
   item->title_ = title;
   return item;
@@ -86,15 +86,16 @@ DataObjectItem* DataObjectItem::CreateFromURL(const String& url,
 DataObjectItem* DataObjectItem::CreateFromHTML(const String& html,
                                                const KURL& base_url) {
   DataObjectItem* item =
-      MakeGarbageCollected<DataObjectItem>(kStringKind, kMimeTypeTextHTML);
+      MakeGarbageCollected<DataObjectItem>(kStringKind, ui::kMimeTypeHtml);
   item->data_ = html;
   item->base_url_ = base_url;
   return item;
 }
 
 // static
-DataObjectItem* DataObjectItem::CreateFromSharedBuffer(
+DataObjectItem* DataObjectItem::CreateFromFileSharedBuffer(
     scoped_refptr<SharedBuffer> buffer,
+    bool is_image_accessible,
     const KURL& source_url,
     const String& filename_extension,
     const AtomicString& content_disposition) {
@@ -102,8 +103,8 @@ DataObjectItem* DataObjectItem::CreateFromSharedBuffer(
       kFileKind,
       MIMETypeRegistry::GetWellKnownMIMETypeForExtension(filename_extension));
   item->shared_buffer_ = std::move(buffer);
+  item->is_image_accessible_ = is_image_accessible;
   item->filename_extension_ = filename_extension;
-  // TODO(dcheng): Rename these fields to be more generically named.
   item->title_ = content_disposition;
   item->base_url_ = source_url;
   return item;
@@ -113,8 +114,8 @@ DataObjectItem* DataObjectItem::CreateFromSharedBuffer(
 DataObjectItem* DataObjectItem::CreateFromClipboard(
     SystemClipboard* system_clipboard,
     const String& type,
-    uint64_t sequence_number) {
-  if (type == kMimeTypeImagePng) {
+    absl::uint128 sequence_number) {
+  if (type == ui::kMimeTypePng) {
     return MakeGarbageCollected<DataObjectItem>(
         kFileKind, type, sequence_number, system_clipboard);
   }
@@ -131,7 +132,7 @@ DataObjectItem::DataObjectItem(ItemKind kind, const String& type)
 
 DataObjectItem::DataObjectItem(ItemKind kind,
                                const String& type,
-                               uint64_t sequence_number,
+                               absl::uint128 sequence_number,
                                SystemClipboard* system_clipboard)
     : source_(DataSource::kClipboardSource),
       kind_(kind),
@@ -148,33 +149,39 @@ File* DataObjectItem::GetAsFile() const {
   if (source_ == DataSource::kInternalSource) {
     if (file_)
       return file_.Get();
+
+    // If this file is not backed by |file_| then it must be a |shared_buffer_|.
     DCHECK(shared_buffer_);
-    // TODO: This code is currently impossible--we never populate
-    // |shared_buffer_| when dragging in. At some point though, we may need to
-    // support correctly converting a shared buffer into a file.
-    return nullptr;
+    // If dragged image is cross-origin, do not allow access to it.
+    if (!is_image_accessible_)
+      return nullptr;
+    auto data = std::make_unique<BlobData>();
+    data->SetContentType(type_);
+    for (const auto& span : *shared_buffer_)
+      data->AppendBytes(base::as_bytes(span));
+    const uint64_t length = data->length();
+    auto blob = BlobDataHandle::Create(std::move(data), length);
+    return MakeGarbageCollected<File>(
+        DecodeUrlEscapeSequences(base_url_.LastPathComponent(),
+                                 DecodeUrlMode::kUtf8OrIsomorphic),
+        base::Time::Now(), std::move(blob));
   }
 
   DCHECK_EQ(source_, DataSource::kClipboardSource);
-  if (GetType() == kMimeTypeImagePng) {
-    SkBitmap bitmap =
-        system_clipboard_->ReadImage(mojom::ClipboardBuffer::kStandard);
+  // Verify that the clipboard has not changed since the item was created.
+  // See crbug.com/501920294.
+  if (system_clipboard_->SequenceNumber() != sequence_number_) {
+    return nullptr;
+  }
 
-    SkPixmap pixmap;
-    bitmap.peekPixels(&pixmap);
-
-    // Set encoding options to favor speed over size.
-    SkPngEncoder::Options options;
-    options.fZLibLevel = 1;
-    options.fFilterFlags = SkPngEncoder::FilterFlag::kNone;
-
-    Vector<uint8_t> png_data;
-    if (!ImageEncoder::Encode(&png_data, pixmap, options))
-      return nullptr;
+  if (GetType() == ui::kMimeTypePng) {
+    mojo_base::BigBuffer png_data =
+        system_clipboard_->ReadPng(mojom::blink::ClipboardBuffer::kStandard);
 
     auto data = std::make_unique<BlobData>();
-    data->SetContentType(kMimeTypeImagePng);
-    data->AppendBytes(png_data.data(), png_data.size());
+    data->SetContentType(ui::kMimeTypePng);
+    data->AppendBytes(png_data);
+
     const uint64_t length = data->length();
     auto blob = BlobDataHandle::Create(std::move(data), length);
     return MakeGarbageCollected<File>("image.png", base::Time::Now(),
@@ -194,16 +201,16 @@ String DataObjectItem::GetAsString() const {
 
   String data;
   // This is ugly but there's no real alternative.
-  if (type_ == kMimeTypeTextPlain) {
+  if (type_ == ui::kMimeTypePlainText) {
     data = system_clipboard_->ReadPlainText();
-  } else if (type_ == kMimeTypeTextRTF) {
+  } else if (type_ == ui::kMimeTypeRtf) {
     data = system_clipboard_->ReadRTF();
-  } else if (type_ == kMimeTypeTextHTML) {
+  } else if (type_ == ui::kMimeTypeHtml) {
     KURL ignored_source_url;
     unsigned ignored;
     data = system_clipboard_->ReadHTML(ignored_source_url, ignored, ignored);
   } else {
-    data = system_clipboard_->ReadCustomData(type_);
+    data = system_clipboard_->ReadDataTransferCustomData(type_);
   }
 
   return system_clipboard_->SequenceNumber() == sequence_number_ ? data
@@ -211,32 +218,30 @@ String DataObjectItem::GetAsString() const {
 }
 
 bool DataObjectItem::IsFilename() const {
-  // TODO(https://bugs.webkit.org/show_bug.cgi?id=81261): When we properly
-  // support File dragout, we'll need to make sure this works as expected for
-  // DragDataChromium.
   return kind_ == kFileKind && file_;
 }
 
 bool DataObjectItem::HasFileSystemId() const {
-  return kind_ == kFileKind && !file_system_id_.IsEmpty();
+  return kind_ == kFileKind && !file_system_id_.empty();
 }
 
 String DataObjectItem::FileSystemId() const {
   return file_system_id_;
 }
 
-bool DataObjectItem::HasNativeFileSystemEntry() const {
-  return static_cast<bool>(native_file_system_entry_);
+bool DataObjectItem::HasFileSystemAccessEntry() const {
+  return static_cast<bool>(file_system_access_entry_);
 }
 
-mojo::PendingRemote<mojom::blink::NativeFileSystemDragDropToken>
-DataObjectItem::CloneNativeFileSystemEntryToken() const {
-  DCHECK(HasNativeFileSystemEntry());
-  mojo::Remote<mojom::blink::NativeFileSystemDragDropToken> token_cloner(
-      std::move(native_file_system_entry_->data));
-  mojo::PendingRemote<mojom::blink::NativeFileSystemDragDropToken> token_clone;
+mojo::PendingRemote<mojom::blink::FileSystemAccessDataTransferToken>
+DataObjectItem::CloneFileSystemAccessEntryToken() const {
+  DCHECK(HasFileSystemAccessEntry());
+  mojo::Remote<mojom::blink::FileSystemAccessDataTransferToken> token_cloner(
+      std::move(file_system_access_entry_->data));
+  mojo::PendingRemote<mojom::blink::FileSystemAccessDataTransferToken>
+      token_clone;
   token_cloner->Clone(token_clone.InitWithNewPipeAndPassReceiver());
-  native_file_system_entry_->data = token_cloner.Unbind();
+  file_system_access_entry_->data = token_cloner.Unbind();
   return token_clone;
 }
 

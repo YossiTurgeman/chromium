@@ -1,11 +1,13 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {LayersTestRunner} from 'layers_test_runner';
 
 (async function() {
   TestRunner.addResult(`Tests overlay layers are not present in the layer tree`);
 
-  await TestRunner.loadModule('layers_test_runner');
   await TestRunner.loadHTML(`
       <style>
       .layer {
@@ -31,7 +33,7 @@
   LayersTestRunner.layerTreeModel().layerTree().forEachLayer(function(layer) {
     layersBeforeHighlight.push(layer.id());
   });
-  TestRunner.OverlayAgent.highlightRect(0, 0, 200, 200, {r: 255, g: 0, b: 0});
+  TestRunner.OverlayAgent.invoke_highlightRect({x: 0, y: 0, width: 200, height: 200, color: {r: 255, g: 0, b: 0}});
 
   await LayersTestRunner.evaluateAndWaitForTreeChange('updateGeometry()');
 

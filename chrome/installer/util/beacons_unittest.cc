@@ -1,11 +1,10 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/installer/util/beacons.h"
 
 #include <memory>
-#include <tuple>
 
 #include "base/test/test_reg_util_win.h"
 #include "base/test/test_timeouts.h"
@@ -32,7 +31,7 @@ namespace installer_util {
 class BeaconTest : public ::testing::TestWithParam<
                        ::testing::tuple<BeaconType, BeaconScope, bool>> {
  protected:
-  static const base::char16 kBeaconName[];
+  static const wchar_t kBeaconName[];
 
   BeaconTest()
       : beacon_type_(::testing::get<0>(GetParam())),
@@ -64,7 +63,7 @@ class BeaconTest : public ::testing::TestWithParam<
 };
 
 // static
-const base::char16 BeaconTest::kBeaconName[] = L"TestBeacon";
+const wchar_t BeaconTest::kBeaconName[] = L"TestBeacon";
 
 // Nothing in the regsitry, so the beacon should not exist.
 TEST_P(BeaconTest, GetNonExistent) {
@@ -106,9 +105,9 @@ TEST_P(BeaconTest, Location) {
       install_static::InstallDetails::Get();
   HKEY right_root = system_install() ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
   HKEY wrong_root = system_install() ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
-  base::string16 right_key;
-  base::string16 wrong_key;
-  base::string16 value_name;
+  std::wstring right_key;
+  std::wstring wrong_key;
+  std::wstring value_name;
 
   if (beacon_scope() == BeaconScope::PER_INSTALL || !system_install()) {
     value_name = kBeaconName;
@@ -140,7 +139,7 @@ TEST_P(BeaconTest, Location) {
   //   Software\Chromium, so it always exists.
 
   // Silence unused variable warnings.
-  ignore_result(wrong_root);
+  std::ignore = wrong_root;
 #endif
 
   // The right key should exist.
@@ -168,9 +167,7 @@ class DefaultBrowserBeaconTest
   void SetUp() override {
     Super::SetUp();
 
-    install_static::InstallConstantIndex mode_index;
-    const char* level;
-    std::tie(mode_index, level) = GetParam();
+    auto [mode_index, level] = GetParam();
 
     system_install_ = (std::string(level) != "user");
 
@@ -251,6 +248,14 @@ INSTANTIATE_TEST_SUITE_P(
     DefaultBrowserBeaconTest,
     testing::Combine(testing::Values(install_static::CANARY_INDEX),
                      testing::Values("user")));
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+// Chrome for Testing is only at user level.
+INSTANTIATE_TEST_SUITE_P(
+    ChromeForTesting,
+    DefaultBrowserBeaconTest,
+    testing::Combine(
+        testing::Values(install_static::GOOGLE_CHROME_FOR_TESTING_INDEX),
+        testing::Values("user")));
 #else   // BUILDFLAG(GOOGLE_CHROME_BRANDING)
 // Chromium supports user and system levels.
 INSTANTIATE_TEST_SUITE_P(

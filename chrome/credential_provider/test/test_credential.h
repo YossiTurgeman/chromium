@@ -1,25 +1,23 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_CREDENTIAL_PROVIDER_TEST_TEST_CREDENTIAL_H_
 #define CHROME_CREDENTIAL_PROVIDER_TEST_TEST_CREDENTIAL_H_
 
-#include <atlbase.h>
-#include <atlcom.h>
-#include <atlcomcli.h>
 #include <credentialprovider.h>
 
 #include <memory>
 #include <string>
 
 #include "base/command_line.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "base/synchronization/waitable_event.h"
+#include "base/win/atl.h"
 #include "chrome/credential_provider/common/gcp_strings.h"
 #include "chrome/credential_provider/gaiacp/gaia_credential_base.h"
 #include "chrome/credential_provider/test/gls_runner_test_base.h"
+#include "google_apis/gaia/gaia_id.h"
 
 namespace credential_provider {
 
@@ -35,13 +33,12 @@ class DECLSPEC_UUID("3710aa3a-13c7-44c2-bc38-09ba137804d8") ITestCredential
   virtual HRESULT STDMETHODCALLTYPE
   SetGlsGaiaPassword(const std::string& gaia_password) = 0;
   virtual HRESULT STDMETHODCALLTYPE
-  SetGaiaIdOverride(const std::string& gaia_id,
-                    bool ignore_expected_gaia_id) = 0;
+  SetGaiaIdOverride(const GaiaId& gaia_id, bool ignore_expected_gaia_id) = 0;
   virtual HRESULT STDMETHODCALLTYPE
   SetGaiaFullNameOverride(const std::string& full_name) = 0;
   virtual HRESULT STDMETHODCALLTYPE WaitForGls() = 0;
   virtual HRESULT STDMETHODCALLTYPE
-  SetStartGlsEventName(const base::string16& event_name) = 0;
+  SetStartGlsEventName(const std::wstring& event_name) = 0;
   virtual HRESULT STDMETHODCALLTYPE FailLoadingGaiaLogonStub() = 0;
   virtual HRESULT STDMETHODCALLTYPE
   UseRealGlsBaseCommandLine(bool use_real_gls_base_command_line) = 0;
@@ -57,6 +54,8 @@ class DECLSPEC_UUID("3710aa3a-13c7-44c2-bc38-09ba137804d8") ITestCredential
   virtual bool STDMETHODCALLTYPE ContainsIsAdJoinedUser() = 0;
   virtual base::CommandLine STDMETHODCALLTYPE GetTestGlsCommandline() = 0;
   virtual std::string STDMETHODCALLTYPE GetShowTosFromCmdLine() = 0;
+  virtual HRESULT STDMETHODCALLTYPE
+  InitializeThreadForNamedPipe(base::win::ScopedHandle hid_read_handle) = 0;
 };
 
 // Test implementation of an ICredentialProviderCredential backed by a Gaia
@@ -81,13 +80,12 @@ class ATL_NO_VTABLE CTestCredentialBase : public T, public ITestCredential {
   IFACEMETHODIMP SetDefaultExitCode(UiExitCodes default_exit_code) override;
   IFACEMETHODIMP SetGlsEmailAddress(const std::string& email) override;
   IFACEMETHODIMP SetGlsGaiaPassword(const std::string& gaia_password) override;
-  IFACEMETHODIMP SetGaiaIdOverride(const std::string& gaia_id,
+  IFACEMETHODIMP SetGaiaIdOverride(const GaiaId& gaia_id,
                                    bool ignore_expected_gaia_id) override;
   IFACEMETHODIMP SetGaiaFullNameOverride(const std::string& full_name) override;
   IFACEMETHODIMP FailLoadingGaiaLogonStub() override;
   IFACEMETHODIMP WaitForGls() override;
-  IFACEMETHODIMP SetStartGlsEventName(
-      const base::string16& event_name) override;
+  IFACEMETHODIMP SetStartGlsEventName(const std::wstring& event_name) override;
   IFACEMETHODIMP UseRealGlsBaseCommandLine(
       bool use_real_gls_base_command_line) override;
   BSTR STDMETHODCALLTYPE GetFinalUsername() override;
@@ -127,17 +125,20 @@ class ATL_NO_VTABLE CTestCredentialBase : public T, public ITestCredential {
       CGaiaCredentialBase::UIProcessInfo* uiprocinfo) override;
 
   // Overrides to directly save to a fake scoped user profile.
-  HRESULT ForkPerformPostSigninActionsStub(const base::Value& dict,
+  HRESULT ForkPerformPostSigninActionsStub(const base::DictValue& dict,
                                            BSTR* status_text) override;
+
+  HRESULT STDMETHODCALLTYPE InitializeThreadForNamedPipe(
+      base::win::ScopedHandle hid_read_handle) override;
 
   UiExitCodes default_exit_code_ = kUiecSuccess;
   std::string gls_email_;
   std::string gaia_password_;
-  std::string gaia_id_override_;
+  GaiaId gaia_id_override_;
   std::string full_name_override_;
   base::WaitableEvent gls_done_;
   base::win::ScopedHandle process_continue_event_;
-  base::string16 start_gls_event_name_;
+  std::wstring start_gls_event_name_;
   CComBSTR error_text_;
   bool gls_process_started_ = false;
   bool ignore_expected_gaia_id_ = false;
@@ -153,7 +154,7 @@ CTestCredentialBase<T>::CTestCredentialBase()
                 base::WaitableEvent::InitialState::NOT_SIGNALED) {}
 
 template <class T>
-CTestCredentialBase<T>::~CTestCredentialBase() {}
+CTestCredentialBase<T>::~CTestCredentialBase() = default;
 
 template <class T>
 HRESULT CTestCredentialBase<T>::SetDefaultExitCode(
@@ -183,7 +184,7 @@ HRESULT CTestCredentialBase<T>::SetGlsGaiaPassword(
 
 template <class T>
 HRESULT CTestCredentialBase<T>::SetGaiaIdOverride(
-    const std::string& gaia_id,
+    const GaiaId& gaia_id,
     bool ignore_expected_gaia_id) {
   ignore_expected_gaia_id_ = ignore_expected_gaia_id;
   gaia_id_override_ = gaia_id;
@@ -199,15 +200,14 @@ HRESULT CTestCredentialBase<T>::SetGaiaFullNameOverride(
 
 template <class T>
 HRESULT CTestCredentialBase<T>::WaitForGls() {
-  return !gls_process_started_ ||
-                 gls_done_.TimedWait(base::TimeDelta::FromSeconds(30))
+  return !gls_process_started_ || gls_done_.TimedWait(base::Seconds(30))
              ? S_OK
              : HRESULT_FROM_WIN32(WAIT_TIMEOUT);
 }
 
 template <class T>
 HRESULT CTestCredentialBase<T>::SetStartGlsEventName(
-    const base::string16& event_name) {
+    const std::wstring& event_name) {
   if (!start_gls_event_name_.empty())
     return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
   start_gls_event_name_ = event_name;
@@ -221,19 +221,19 @@ BSTR CTestCredentialBase<T>::GetFinalUsername() {
 
 template <class T>
 bool CTestCredentialBase<T>::IsAuthenticationResultsEmpty() {
-  auto& results = this->get_authentication_results();
+  const auto& results = this->get_authentication_results();
 
-  return !results || (results->is_dict() && results->DictEmpty());
+  return !results || results->empty();
 }
 
 template <class T>
 std::string CTestCredentialBase<T>::GetFinalEmail() {
-  auto& results = this->get_authentication_results();
+  const auto& results = this->get_authentication_results();
 
   if (!results)
     return std::string();
 
-  const std::string* email_value = results->FindStringKey(kKeyEmail);
+  const std::string* email_value = results->FindString(kKeyEmail);
 
   if (!email_value)
     return std::string();
@@ -242,13 +242,13 @@ std::string CTestCredentialBase<T>::GetFinalEmail() {
 
 template <class T>
 bool CTestCredentialBase<T>::IsAdJoinedUser() {
-  auto& results = this->get_authentication_results();
+  const auto& results = this->get_authentication_results();
 
   if (!results)
     return false;
 
   const std::string* is_ad_joined_user =
-      results->FindStringKey(kKeyIsAdJoinedUser);
+      results->FindString(kKeyIsAdJoinedUser);
 
   if (!is_ad_joined_user)
     return false;
@@ -257,13 +257,13 @@ bool CTestCredentialBase<T>::IsAdJoinedUser() {
 
 template <class T>
 bool CTestCredentialBase<T>::ContainsIsAdJoinedUser() {
-  auto& results = this->get_authentication_results();
+  const auto& results = this->get_authentication_results();
 
   if (!results)
     return false;
 
   const std::string* is_ad_joined_user =
-      results->FindStringKey(kKeyIsAdJoinedUser);
+      results->FindString(kKeyIsAdJoinedUser);
 
   if (!is_ad_joined_user)
     return false;
@@ -359,7 +359,7 @@ HRESULT CTestCredentialBase<T>::ForkGaiaLogonStub(
 
 template <class T>
 HRESULT CTestCredentialBase<T>::ForkPerformPostSigninActionsStub(
-    const base::Value& dict,
+    const base::DictValue& dict,
     BSTR* status_text) {
   return CGaiaCredentialBase::PerformPostSigninActions(
       dict, /* com_initialized */ true);
@@ -396,6 +396,12 @@ void CTestCredentialBase<T>::DisplayErrorInUI(LONG status,
                                               BSTR status_text) {
   error_text_ = status_text;
   T::DisplayErrorInUI(status, substatus, status_text);
+}
+
+template <class T>
+HRESULT CTestCredentialBase<T>::InitializeThreadForNamedPipe(
+    base::win::ScopedHandle hid_read_handle) {
+  return T::InitializeThreadForNamedPipe(std::move(hid_read_handle));
 }
 
 // This class is used to implement a test credential based off a fully

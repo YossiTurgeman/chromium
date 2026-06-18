@@ -28,43 +28,54 @@
 
 #include <memory>
 
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
-#include "third_party/blink/renderer/core/html/parser/html_token.h"
 #include "third_party/blink/renderer/platform/text/segmented_string.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_codec.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
 
 namespace blink {
 
+class HTMLToken;
 class HTMLTokenizer;
 
 class HTMLMetaCharsetParser {
   USING_FAST_MALLOC(HTMLMetaCharsetParser);
 
  public:
+  enum class MetaCharsetDisposition {
+    kUnknown,
+    kFoundInFirst1024Bytes,
+    kFoundAfterFirst1024Bytes,
+    kNotFound,
+  };
+
   HTMLMetaCharsetParser();
+  HTMLMetaCharsetParser(const HTMLMetaCharsetParser&) = delete;
+  HTMLMetaCharsetParser& operator=(const HTMLMetaCharsetParser&) = delete;
   ~HTMLMetaCharsetParser();
 
   // Returns true if done checking, regardless whether an encoding is found.
-  bool CheckForMetaCharset(const char*, wtf_size_t);
+  bool CheckForMetaCharset(base::span<const char> data);
+  void Finish();
 
-  const WTF::TextEncoding& Encoding() { return encoding_; }
+  const TextEncoding& Encoding() { return encoding_; }
+  MetaCharsetDisposition MetaCharsetResult() const {
+    return meta_charset_disposition_;
+  }
 
  private:
-  bool ProcessMeta();
+  bool ProcessMeta(const HTMLToken& token);
 
   std::unique_ptr<HTMLTokenizer> tokenizer_;
   std::unique_ptr<TextCodec> assumed_codec_;
   SegmentedString input_;
-  HTMLToken token_;
   bool in_head_section_;
 
   bool done_checking_;
-  WTF::TextEncoding encoding_;
-
-  DISALLOW_COPY_AND_ASSIGN(HTMLMetaCharsetParser);
+  TextEncoding encoding_;
+  MetaCharsetDisposition meta_charset_disposition_ =
+      MetaCharsetDisposition::kUnknown;
 };
 
 }  // namespace blink
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_HTML_META_CHARSET_PARSER_H_

@@ -1,21 +1,131 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/base/clipboard/clipboard.h"
 
+#include <algorithm>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <string_view>
+#include <variant>
 
 #include "base/check.h"
+#include "base/json/json_reader.h"
 #include "base/memory/ptr_util.h"
+#include "base/no_destructor.h"
 #include "base/notreached.h"
-#include "base/stl_util.h"
+#include "base/strings/strcat.h"
+#include "base/strings/utf_string_conversions.h"
+#include "base/types/optional_util.h"
+#include "build/build_config.h"
+#include "net/base/mime_util.h"
+#include "third_party/abseil-cpp/absl/functional/overload.h"
 #include "third_party/skia/include/core/SkBitmap.h"
+#include "ui/base/clipboard/clipboard_constants.h"
+#include "ui/base/clipboard/clipboard_util.h"
 #include "ui/gfx/geometry/size.h"
+#include "url/gurl.h"
+
+#if BUILDFLAG(IS_LINUX)
+#include "ui/linux/linux_ui.h"
+#endif
 
 namespace ui {
+
+namespace {
+
+void OnCustomFormatDataRead(
+    Clipboard::ExtractCustomPlatformNamesCallback callback,
+    std::string custom_format_json) {
+  std::map<std::string, std::string> custom_format_names;
+  if (custom_format_json.empty()) {
+    std::move(callback).Run(std::move(custom_format_names));
+    return;
+  }
+  std::optional<base::Value> json_val = base::JSONReader::Read(
+      custom_format_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (json_val.has_value() && json_val->is_dict()) {
+    for (const auto it : json_val->GetDict()) {
+      const std::string* custom_format_name = it.second.GetIfString();
+      if (custom_format_name) {
+        // Prepend "web " prefix to the custom format.
+        std::string web_top_level_mime_type;
+        std::string web_mime_sub_type;
+        std::string web_format = it.first;
+        if (net::ParseMimeTypeWithoutParameter(
+                web_format, &web_top_level_mime_type, &web_mime_sub_type)) {
+          std::string web_custom_format_string =
+              base::StrCat({kWebClipboardFormatPrefix, web_top_level_mime_type,
+                            "/", web_mime_sub_type});
+          custom_format_names.emplace(std::move(web_custom_format_string),
+                                      *custom_format_name);
+        }
+      }
+    }
+  }
+  std::move(callback).Run(std::move(custom_format_names));
+}
+
+}  // namespace
+
+Clipboard::HtmlData::HtmlData() noexcept = default;
+Clipboard::HtmlData::~HtmlData() = default;
+Clipboard::HtmlData::HtmlData(const HtmlData&) = default;
+Clipboard::HtmlData& Clipboard::HtmlData::operator=(const HtmlData&) = default;
+Clipboard::HtmlData::HtmlData(HtmlData&&) = default;
+Clipboard::HtmlData& Clipboard::HtmlData::operator=(HtmlData&&) = default;
+
+Clipboard::RawData::RawData() noexcept = default;
+Clipboard::RawData::~RawData() = default;
+Clipboard::RawData::RawData(const RawData&) = default;
+Clipboard::RawData& Clipboard::RawData::operator=(const RawData&) = default;
+Clipboard::RawData::RawData(RawData&&) = default;
+Clipboard::RawData& Clipboard::RawData::operator=(RawData&&) = default;
+
+// static
+bool Clipboard::IsSupportedClipboardBuffer(ClipboardBuffer buffer) {
+  // Use lambda instead of local helper function in order to access private
+  // member IsSelectionBufferAvailable().
+  static auto IsSupportedSelectionClipboard = []() -> bool {
+#if BUILDFLAG(IS_OZONE) && !BUILDFLAG(IS_CHROMEOS)
+    ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
+    CHECK(clipboard);
+    return clipboard->IsSelectionBufferAvailable();
+#elif !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_CHROMEOS)
+    return true;
+#else
+    return false;
+#endif
+  };
+
+  switch (buffer) {
+    case ClipboardBuffer::kCopyPaste:
+      return true;
+    case ClipboardBuffer::kSelection:
+      // Cache the result to make this function cheap.
+      static bool selection_result = IsSupportedSelectionClipboard();
+      return selection_result;
+    case ClipboardBuffer::kDrag:
+      return false;
+  }
+  NOTREACHED();
+}
+
+// static
+bool Clipboard::IsMiddleClickPasteEnabled() {
+#if BUILDFLAG(IS_LINUX)
+  if (auto* linux_ui = ui::LinuxUi::instance()) {
+    return linux_ui->PrimaryPasteEnabled();
+  }
+#endif
+
+  // This code is most likely never hit on other platforms, but
+  // if it happens to be, let's return `true` to preserve
+  // middle click paste behavior without a preference.
+  return true;
+}
 
 // static
 void Clipboard::SetAllowedThreads(
@@ -23,8 +133,7 @@ void Clipboard::SetAllowedThreads(
   base::AutoLock lock(ClipboardMapLock());
 
   AllowedThreads().clear();
-  std::copy(allowed_threads.begin(), allowed_threads.end(),
-            std::back_inserter(AllowedThreads()));
+  std::ranges::copy(allowed_threads, std::back_inserter(AllowedThreads()));
 }
 
 // static
@@ -35,7 +144,7 @@ void Clipboard::SetClipboardForCurrentThread(
 
   ClipboardMap* clipboard_map = ClipboardMapPtr();
   // This shouldn't happen. The clipboard should not already exist.
-  DCHECK(!base::Contains(*clipboard_map, id));
+  DCHECK(!clipboard_map->contains(id));
   clipboard_map->insert({id, std::move(platform_clipboard)});
 }
 
@@ -100,77 +209,180 @@ base::Time Clipboard::GetLastModifiedTime() const {
 
 void Clipboard::ClearLastModifiedTime() {}
 
+void Clipboard::ExtractCustomPlatformNames(
+    ClipboardBuffer buffer,
+    const std::optional<DataTransferEndpoint>& data_dst,
+    ExtractCustomPlatformNamesCallback callback) const {
+  // Read the JSON metadata payload.
+  GetAllAvailableFormats(
+      buffer, data_dst,
+      base::BindOnce(
+          [](base::WeakPtr<const Clipboard> clipboard, ClipboardBuffer buffer,
+             const std::optional<DataTransferEndpoint>& data_dst,
+             ExtractCustomPlatformNamesCallback callback,
+             base::flat_set<ClipboardFormatType> formats) {
+            if (!clipboard ||
+                !formats.contains(
+                    ui::ClipboardFormatType::WebCustomFormatMap())) {
+              std::move(callback).Run({});
+              return;
+            }
+
+            clipboard->ReadData(
+                ui::ClipboardFormatType::WebCustomFormatMap(), data_dst,
+                base::BindOnce(&OnCustomFormatDataRead, std::move(callback)));
+          },
+          weak_ptr_factory_.GetWeakPtr(), buffer, data_dst,
+          std::move(callback)));
+}
+
+void Clipboard::ReadAvailableStandardAndCustomFormatNames(
+    ClipboardBuffer buffer,
+    const std::optional<DataTransferEndpoint>& data_dst,
+    ReadAvailableStandardAndCustomFormatNamesCallback callback) const {
+  DCHECK(CalledOnValidThread());
+
+  // Native applications generally read formats in order of
+  // fidelity/specificity, reading only the most specific format they support
+  // when possible to save resources. For example, if an image/tiff and
+  // image/jpg were both available on the clipboard, an image editing
+  // application with sophisticated needs may choose the image/tiff payload, due
+  // to it providing an uncompressed image, and only fall back to image/jpg when
+  // the image/tiff is not available. To allow other native applications to read
+  // these most specific formats first, clipboard formats will be ordered as
+  // follows:
+  // 1. Pickled formats, in order of definition in the ClipboardItem.
+  // 2. Sanitized standard formats, ordered as determined by the browser.
+  GetStandardFormats(
+      buffer, data_dst,
+      base::BindOnce(
+          [](const Clipboard* clipboard, ClipboardBuffer buffer,
+             const std::optional<DataTransferEndpoint> data_dst,
+             ReadAvailableStandardAndCustomFormatNamesCallback callback,
+             std::vector<std::u16string> standard_formats) {
+            clipboard->ExtractCustomPlatformNames(
+                buffer, data_dst,
+                base::BindOnce(
+                    [](std::vector<std::u16string> standard_formats,
+                       ReadAvailableStandardAndCustomFormatNamesCallback
+                           callback,
+                       std::map<std::string, std::string> custom_format_names) {
+                      std::vector<std::u16string> format_names;
+                      for (const auto& items : custom_format_names) {
+                        format_names.push_back(base::ASCIIToUTF16(items.first));
+                      }
+                      for (const auto& item : standard_formats) {
+                        format_names.push_back(item);
+                      }
+                      std::move(callback).Run(std::move(format_names));
+                    },
+                    std::move(standard_formats), std::move(callback)));
+          },
+          base::Unretained(this), buffer, data_dst, std::move(callback)));
+}
+
 Clipboard::Clipboard() = default;
 Clipboard::~Clipboard() = default;
 
-void Clipboard::DispatchPortableRepresentation(PortableFormat format,
-                                               const ObjectMapParams& params) {
-  // Ignore writes with empty parameters.
-  for (const auto& param : params) {
-    if (param.empty())
-      return;
-  }
+void Clipboard::DispatchPortableRepresentation(const ObjectMapParams& params) {
+  // Note: most of the branches below are intentionally a no-op when any of the
+  // arguments to write are empty. Historically, `params` was passed as a vector
+  // of byte vectors, and if any of the byte vectors were empty, this would
+  // simply early return.
+  std::visit(
+      absl::Overload{
+          [&](const BitmapData& data) {
+            // Unlike many of the other types, this does not perform an empty
+            // check. Due to a historical quirk of how bitmaps were transferred
+            // between ScopedClipboardWriter and Clipboard, the empty check
+            // mentioned above would never be true for bitmaps.
+            WriteBitmap(data.bitmap);
+          },
+          [&](const HtmlData& data) {
+            if (data.markup.empty()) {
+              return;
+            }
 
-  switch (format) {
-    case PortableFormat::kText:
-      WriteText(&(params[0].front()), params[0].size());
-      break;
+            WriteHTML(data.markup, data.source_url);
+          },
+          [&](const RtfData& data) {
+            if (data.data.empty()) {
+              return;
+            }
 
-    case PortableFormat::kHtml:
-      if (params.size() == 2) {
-        if (params[1].empty())
-          return;
-        WriteHTML(&(params[0].front()), params[0].size(),
-                  &(params[1].front()), params[1].size());
-      } else if (params.size() == 1) {
-        WriteHTML(&(params[0].front()), params[0].size(), nullptr, 0);
-      }
-      break;
+            WriteRTF(data.data);
+          },
+          [&](const UrlData& data) {
+            if (ui::clipboard_util::ShouldSkipBookmark(
+                    data.url_info.title, data.url_info.url.spec())) {
+              return;
+            }
 
-    case PortableFormat::kSvg:
-      WriteSvg(&(params[0].front()), params[0].size());
-      break;
+            WriteURL(data.url_info);
+          },
+          [&](const TextData& data) {
+            if (data.data.empty()) {
+              return;
+            }
 
-    case PortableFormat::kRtf:
-      WriteRTF(&(params[0].front()), params[0].size());
-      break;
+            WriteText(data.data);
+          },
+          [&](const WebkitData& data) { WriteWebSmartPaste(); },
+          [&](const SvgData& data) {
+            if (data.markup.empty()) {
+              return;
+            }
 
-    case PortableFormat::kBookmark:
-      WriteBookmark(&(params[0].front()), params[0].size(),
-                    &(params[1].front()), params[1].size());
-      break;
+            WriteSvg(data.markup);
+          },
+          [&](const FilenamesData& data) {
+            if (data.text_uri_list.empty()) {
+              return;
+            }
 
-    case PortableFormat::kWebkit:
-      WriteWebSmartPaste();
-      break;
+            WriteFilenames(ui::URIListToFileInfos(data.text_uri_list));
+          },
+          [&](const WebCustomFormatMapData& data) {
+            if (data.data.empty()) {
+              return;
+            }
 
-    case PortableFormat::kBitmap: {
-      // Usually, the params are just UTF-8 strings. However, for images,
-      // ScopedClipboardWriter actually sizes the buffer to sizeof(SkBitmap*),
-      // aliases the contents of the vector to a SkBitmap**, and writes the
-      // pointer to the actual SkBitmap in the clipboard object param.
-      const char* packed_pointer_buffer = &params[0].front();
-      WriteBitmap(**reinterpret_cast<SkBitmap* const*>(packed_pointer_buffer));
-      break;
-    }
-
-    case PortableFormat::kData:
-      WriteData(ClipboardFormatType::Deserialize(
-                    std::string(&(params[0].front()), params[0].size())),
-                &(params[1].front()), params[1].size());
-      break;
-
-    default:
-      NOTREACHED();
-  }
+            WriteData(ClipboardFormatType::WebCustomFormatMap(),
+                      base::as_byte_span(data.data));
+          },
+      },
+      params.data);
 }
+
+void Clipboard::DispatchPortableRepresentation(const RawData& data) {
+  if (data.data.empty()) {
+    return;
+  }
+
+  WriteData(data.format, base::as_byte_span(data.data));
+}
+
+Clipboard::ObjectMapParams::ObjectMapParams() = default;
+
+Clipboard::ObjectMapParams::ObjectMapParams(Data data)
+    : data(std::move(data)) {}
+
+Clipboard::ObjectMapParams::ObjectMapParams(const ObjectMapParams& other) =
+    default;
+Clipboard::ObjectMapParams& Clipboard::ObjectMapParams::operator=(
+    const ObjectMapParams& other) = default;
+
+Clipboard::ObjectMapParams::ObjectMapParams(ObjectMapParams&& other) = default;
+Clipboard::ObjectMapParams& Clipboard::ObjectMapParams::operator=(
+    ObjectMapParams&& other) = default;
+
+Clipboard::ObjectMapParams::~ObjectMapParams() = default;
 
 void Clipboard::DispatchPlatformRepresentations(
     std::vector<Clipboard::PlatformRepresentation> platform_representations) {
   for (const auto& representation : platform_representations) {
-    WriteData(ClipboardFormatType::GetType(representation.format),
-              reinterpret_cast<const char*>(representation.data.data()),
-              representation.data.size());
+    WriteData(ClipboardFormatType::CustomPlatformType(representation.format),
+              base::as_byte_span(representation.data));
   }
 }
 
@@ -181,11 +393,30 @@ base::PlatformThreadId Clipboard::GetAndValidateThreadID() {
 
   // A Clipboard instance must be allocated for every thread that uses the
   // clipboard. To prevented unbounded memory use, CHECK that the current thread
-  // was whitelisted to use the clipboard. This is a CHECK rather than a DCHECK
+  // was allowlisted to use the clipboard. This is a CHECK rather than a DCHECK
   // to catch incorrect usage in production (e.g. https://crbug.com/872737).
-  CHECK(AllowedThreads().empty() || base::Contains(AllowedThreads(), id));
+  CHECK(AllowedThreads().empty() ||
+        std::ranges::contains(AllowedThreads(), id));
 
   return id;
+}
+
+void Clipboard::AddObserver(ClipboardWriteObserver* observer) {
+  write_observers_.AddObserver(observer);
+}
+
+void Clipboard::RemoveObserver(ClipboardWriteObserver* observer) {
+  write_observers_.RemoveObserver(observer);
+}
+
+void Clipboard::NotifyCopyWithUrl(std::string_view text,
+                                  const GURL& frame,
+                                  const GURL& main_frame) {
+  GURL text_url(text);
+  if (text_url.is_valid()) {
+    write_observers_.Notify(&ClipboardWriteObserver::OnCopyURL, text_url, frame,
+                            main_frame);
+  }
 }
 
 // static
@@ -210,7 +441,5 @@ base::Lock& Clipboard::ClipboardMapLock() {
 bool Clipboard::IsMarkedByOriginatorAsConfidential() const {
   return false;
 }
-
-void Clipboard::MarkAsConfidential() {}
 
 }  // namespace ui

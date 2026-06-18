@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,20 @@
 
 #include <cmath>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "base/android/jni_bytebuffer.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/default_tick_clock.h"
 #include "media/audio/audio_manager_base.h"
-#include "media/base/android/media_jni_headers/AudioTrackOutputStream_jni.h"
+#include "media/base/audio_bus.h"
 #include "media/base/audio_sample_types.h"
 #include "media/base/audio_timestamp_helper.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "media/base/android/media_jni_headers/AudioTrackOutputStream_jni.h"
 
 using base::android::AttachCurrentThread;
 using base::android::ScopedJavaLocalRef;
@@ -24,9 +29,12 @@ namespace media {
 // Android audio format. For more information, please see:
 // https://developer.android.com/reference/android/media/AudioFormat.html
 enum {
-  kEncodingPcm16bit = 2,  // ENCODING_PCM_16BIT
-  kEncodingAc3 = 5,       // ENCODING_AC3
-  kEncodingEac3 = 6,      // ENCODING_E_AC3
+  kEncodingPcm16bit = 2,   // ENCODING_PCM_16BIT
+  kEncodingAc3 = 5,        // ENCODING_AC3
+  kEncodingEac3 = 6,       // ENCODING_E_AC3
+  kEncodingDts = 7,        // ENCODING_DTS
+  kEncodingDtshd = 8,      // ENCODING_DTS_HD
+  kEncodingIec61937 = 13,  // ENCODING_IEC61937
 };
 
 AudioTrackOutputStream::AudioTrackOutputStream(AudioManagerBase* manager,
@@ -50,12 +58,28 @@ bool AudioTrackOutputStream::Open() {
 
   int format = kEncodingPcm16bit;
   if (params_.IsBitstreamFormat()) {
-    if (params_.format() == AudioParameters::AUDIO_BITSTREAM_AC3) {
-      format = kEncodingAc3;
-    } else if (params_.format() == AudioParameters::AUDIO_BITSTREAM_EAC3) {
-      format = kEncodingEac3;
-    } else {
-      NOTREACHED();
+    switch (params_.format()) {
+      case AudioParameters::AUDIO_BITSTREAM_AC3:
+        format = kEncodingAc3;
+        break;
+      case AudioParameters::AUDIO_BITSTREAM_EAC3:
+        format = kEncodingEac3;
+        break;
+      case AudioParameters::AUDIO_BITSTREAM_DTS:
+        format = kEncodingDts;
+        break;
+      case AudioParameters::AUDIO_BITSTREAM_DTS_HD:
+      case AudioParameters::AUDIO_BITSTREAM_DTS_HD_MA:
+        format = kEncodingDtshd;
+        break;
+      case AudioParameters::AUDIO_BITSTREAM_IEC61937:
+        format = kEncodingIec61937;
+        break;
+      case AudioParameters::AUDIO_BITSTREAM_DTSX_P2:
+      case AudioParameters::AUDIO_FAKE:
+      case AudioParameters::AUDIO_PCM_LINEAR:
+      case AudioParameters::AUDIO_PCM_LOW_LATENCY:
+        NOTREACHED();
     }
   }
 
@@ -130,56 +154,60 @@ void AudioTrackOutputStream::GetVolume(double* volume) {
 // AudioOutputStream::SourceCallback implementation methods called from Java.
 ScopedJavaLocalRef<jobject> AudioTrackOutputStream::OnMoreData(
     JNIEnv* env,
-    jobject obj,
-    jobject audio_data,
-    jlong delay_in_frame) {
+    const base::android::JavaRef<jobject>& audio_data,
+    int64_t delay_in_frame) {
   DCHECK(callback_);
 
   base::TimeDelta delay =
       AudioTimestampHelper::FramesToTime(delay_in_frame, params_.sample_rate());
 
-  void* native_buffer = env->GetDirectBufferAddress(audio_data);
+  base::span<uint8_t> native_buffer =
+      base::android::JavaByteBufferToMutableSpan(env, audio_data);
+  CHECK_GE(native_buffer.size(), AudioBus::CalculateMemorySize(params_));
 
   if (params_.IsBitstreamFormat()) {
     // For bitstream formats, use the direct buffer memory to avoid additional
     // memory copy.
-    std::unique_ptr<AudioBus> audio_bus(
-        AudioBus::WrapMemory(params_, native_buffer));
+    auto audio_bus = AudioBus::WrapMemory(params_, native_buffer);
     audio_bus->set_is_bitstream_format(true);
 
-    callback_->OnMoreData(delay, tick_clock_->NowTicks(), 0, audio_bus.get());
+    callback_->OnMoreData(delay, tick_clock_->NowTicks(), {}, audio_bus.get());
 
-    if (audio_bus->GetBitstreamDataSize() <= 0)
+    if (audio_bus->bitstream_data().empty()) {
       return nullptr;
+    }
 
     return Java_AudioTrackOutputStream_createAudioBufferInfo(
         env, j_audio_output_stream_, audio_bus->GetBitstreamFrames(),
-        audio_bus->GetBitstreamDataSize());
+        audio_bus->bitstream_data().size());
   }
 
   // For PCM format, we need extra memory to convert planar float32 into
   // interleaved int16.
 
-  callback_->OnMoreData(delay, tick_clock_->NowTicks(), 0, audio_bus_.get());
+  callback_->OnMoreData(delay, tick_clock_->NowTicks(), {}, audio_bus_.get());
 
-  int16_t* native_bus = reinterpret_cast<int16_t*>(native_buffer);
-  audio_bus_->ToInterleaved<SignedInt16SampleTypeTraits>(audio_bus_->frames(),
-                                                         native_bus);
+  const size_t total_bytes =
+      audio_bus_->frames() * audio_bus_->channels() * sizeof(int16_t);
+  base::span<uint8_t> target_buffer = native_buffer.first(total_bytes);
+  audio_bus_->ToInterleavedBytes<SignedInt16SampleTypeTraits>(target_buffer);
 
   return Java_AudioTrackOutputStream_createAudioBufferInfo(
-      env, j_audio_output_stream_, audio_bus_->frames(),
-      sizeof(*native_bus) * audio_bus_->channels() * audio_bus_->frames());
+      env, j_audio_output_stream_, audio_bus_->frames(), total_bytes);
 }
 
-void AudioTrackOutputStream::OnError(JNIEnv* env, jobject obj) {
+void AudioTrackOutputStream::OnError(JNIEnv* env) {
   DCHECK(callback_);
   callback_->OnError(AudioSourceCallback::ErrorType::kUnknown);
 }
 
-jlong AudioTrackOutputStream::GetAddress(JNIEnv* env,
-                                         jobject obj,
-                                         jobject byte_buffer) {
-  return reinterpret_cast<jlong>(env->GetDirectBufferAddress(byte_buffer));
+int64_t AudioTrackOutputStream::GetAddress(
+    JNIEnv* env,
+    const base::android::JavaRef<jobject>& byte_buffer) {
+  return reinterpret_cast<int64_t>(
+      env->GetDirectBufferAddress(byte_buffer.obj()));
 }
 
 }  // namespace media
+
+DEFINE_JNI(AudioTrackOutputStream)

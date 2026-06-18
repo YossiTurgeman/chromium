@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,8 @@
 
 namespace blink {
 
+struct Foo {};
+
 class HeapObject : public GarbageCollected<HeapObject> {
  public:
   virtual void Trace(Visitor*) const;
@@ -16,6 +18,7 @@ class HeapObject : public GarbageCollected<HeapObject> {
  private:
   Member<HeapObject> m_one;
   int m_two;
+  std::unique_ptr<Foo> m_three;
 };
 
 }  // namespace blink

@@ -1,31 +1,32 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/cfi_buildflags.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/test_timeouts.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "build/build_config.h"
+#include "components/dom_distiller/content/browser/test/test_util.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/content_switches.h"
+#include "content/public/common/isolated_world_ids.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/shell/browser/shell.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
-#include "ui/base/resource/resource_bundle.h"
 
 namespace {
 
@@ -53,9 +54,9 @@ namespace dom_distiller {
 
 const char* kExternalTestResourcesPath =
     "third_party/dom_distiller_js/dist/test/data";
-// TODO(877461): Remove filter once image construction happens synchronously and
-// asserts do not flake anymore when exposed to different garbage collection
-// heuristics.
+// TODO(crbug.com/40590818): Remove filter once image construction happens
+// synchronously and asserts do not flake anymore when exposed to different
+// garbage collection heuristics.
 const char* kTestFilePath =
     "/war/test.html?console_log=0&filter="
     "-*.testImageExtractorWithAttributesCSSHeightCM"
@@ -67,7 +68,7 @@ const char* kRunJsTestsJs =
 
 class DomDistillerJsTest : public content::ContentBrowserTest {
  public:
-  DomDistillerJsTest() {}
+  DomDistillerJsTest() = default;
 
   // content::ContentBrowserTest:
   void SetUpOnMainThread() override {
@@ -86,53 +87,36 @@ class DomDistillerJsTest : public content::ContentBrowserTest {
   base::Value result_;
 
  private:
-  void AddComponentsResources() {
-    base::FilePath pak_file;
-    base::FilePath pak_dir;
-#if defined(OS_ANDROID)
-    CHECK(base::PathService::Get(base::DIR_ANDROID_APP_DATA, &pak_dir));
-    pak_dir = pak_dir.Append(FILE_PATH_LITERAL("paks"));
-#else
-    base::PathService::Get(base::DIR_MODULE, &pak_dir);
-#endif  // OS_ANDROID
-    pak_file =
-        pak_dir.Append(FILE_PATH_LITERAL("components_tests_resources.pak"));
-    ui::ResourceBundle::GetSharedInstance().AddDataPackFromPath(
-        pak_file, ui::SCALE_FACTOR_NONE);
-  }
-
   void SetUpTestServer() {
     base::FilePath path;
-    base::PathService::Get(base::DIR_SOURCE_ROOT, &path);
+    base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
     path = path.AppendASCII(kExternalTestResourcesPath);
     embedded_test_server()->ServeFilesFromDirectory(path);
     ASSERT_TRUE(embedded_test_server()->Start());
   }
 };
 
-// Disabled on MSan as well as Android and Linux CFI bots.
+// Disabled on MSan, TSAN as well as Android and Linux CFI bots.
 // https://crbug.com/845180
+// https://crbug.com/1434395
+// https://crbug.com/387892105
 // Then disabled more generally on Android: https://crbug.com/979685
-#if defined(MEMORY_SANITIZER) || defined(OS_WIN) || defined(OS_ANDROID) || \
-    ((defined(OS_LINUX) || defined(OS_CHROMEOS)) &&                        \
-     (BUILDFLAG(CFI_CAST_CHECK) || BUILDFLAG(CFI_ICALL_CHECK) ||           \
-      BUILDFLAG(CFI_ENFORCEMENT_DIAGNOSTIC) ||                             \
+// TODO(jaebaek):  HTMLImageElement::LayoutBoxWidth() returns a value that has
+// a small error from the real one (i.e., the real is 38, but it returns 37)
+// and it results in the failure of
+// EmbedExtractorTest.testImageExtractorWithAttributesCSSHeightCM (See
+// crrev.com/c/916021). We must solve this precision issue.
+#if defined(MEMORY_SANITIZER) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || \
+    BUILDFLAG(IS_FUCHSIA) || defined(THREAD_SANITIZER) ||                      \
+    ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) &&                        \
+     (BUILDFLAG(CFI_CAST_CHECK) || BUILDFLAG(CFI_ICALL_CHECK) ||               \
+      BUILDFLAG(CFI_ENFORCEMENT_DIAGNOSTIC) ||                                 \
       BUILDFLAG(CFI_ENFORCEMENT_TRAP)))
 #define MAYBE_RunJsTests DISABLED_RunJsTests
 #else
 #define MAYBE_RunJsTests RunJsTests
 #endif
 IN_PROC_BROWSER_TEST_F(DomDistillerJsTest, MAYBE_RunJsTests) {
-  // TODO(jaebaek): Revisit this code when the --use-zoom-for-dsf feature on
-  // Android is done. If we remove this code (i.e., enable --use-zoom-for-dsf),
-  // HTMLImageElement::LayoutBoxWidth() returns a value that has a small error
-  // from the real one (i.e., the real is 38, but it returns 37) and it results
-  // in the failure of
-  // EmbedExtractorTest.testImageExtractorWithAttributesCSSHeightCM (See
-  // crrev.com/c/916021). We must solve this precision issue.
-  base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
-      switches::kEnableUseZoomForDSF, "false");
-
   // Load the test file in content shell and wait until it has fully loaded.
   content::WebContents* web_contents = shell()->web_contents();
   base::RunLoop url_loaded_runner;
@@ -150,24 +134,26 @@ IN_PROC_BROWSER_TEST_F(DomDistillerJsTest, MAYBE_RunJsTests) {
   js_test_execution_done_callback_ = run_loop.QuitClosure();
   // Add timeout in case JS Test execution fails. It is safe to call the
   // QuitClosure multiple times.
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, run_loop.QuitClosure(), TestTimeouts::action_max_timeout());
-  web_contents->GetMainFrame()->ExecuteJavaScriptForTests(
+  web_contents->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
       base::UTF8ToUTF16(kRunJsTestsJs),
       base::BindOnce(&DomDistillerJsTest::OnJsTestExecutionDone,
-                     base::Unretained(this)));
+                     base::Unretained(this)),
+      content::ISOLATED_WORLD_ID_GLOBAL);
   run_loop.Run();
 
   // Convert to dictionary and parse the results.
   ASSERT_TRUE(result_.is_dict()) << "Result is not a dictionary: " << result_;
 
-  base::Optional<bool> success = result_.FindBoolKey("success");
+  const base::DictValue& dict = result_.GetDict();
+  std::optional<bool> success = dict.FindBool("success");
   ASSERT_TRUE(success.has_value());
-  base::Optional<int> num_tests = result_.FindIntKey("numTests");
+  std::optional<int> num_tests = dict.FindInt("numTests");
   ASSERT_TRUE(num_tests.has_value());
-  base::Optional<int> failed = result_.FindIntKey("failed");
+  std::optional<int> failed = dict.FindInt("failed");
   ASSERT_TRUE(failed.has_value());
-  base::Optional<int> skipped = result_.FindIntKey("skipped");
+  std::optional<int> skipped = dict.FindInt("skipped");
   ASSERT_TRUE(skipped.has_value());
 
   VLOG(0) << "Ran " << num_tests.value()
@@ -178,7 +164,7 @@ IN_PROC_BROWSER_TEST_F(DomDistillerJsTest, MAYBE_RunJsTests) {
 
   // Only print the log if there was an error.
   if (!success.value()) {
-    const std::string* console_log = result_.FindStringKey("log");
+    const std::string* console_log = dict.FindString("log");
     ASSERT_TRUE(console_log);
     VLOG(0) << "Console log:\n" << *console_log;
     VLOG(0) << "\n\n"

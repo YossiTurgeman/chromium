@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,16 @@
 #define CHROME_BROWSER_NOTIFICATIONS_SCHEDULER_PUBLIC_NOTIFICATION_SCHEDULER_TYPES_H_
 
 #include <map>
+#include <optional>
 #include <string>
-
-#include "base/optional.h"
 
 namespace notifications {
 
 // The type of a list of clients using the notification scheduler system. Used
 // in metrics, need to sync with histogram suffix
 // NotificationSchedulerClientType in histograms.xml.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
 // GENERATED_JAVA_ENUM_PACKAGE: (
 //   org.chromium.chrome.browser.notifications.scheduler)
 enum class SchedulerClientType {
@@ -23,15 +24,25 @@ enum class SchedulerClientType {
   kTest2 = -2,
   kTest3 = -3,
 
+  kMinValue = kTest3,
+
   // Default value of client type.
   kUnknown = 0,
   // Client used in chrome://notifications-internals for debugging.
   kWebUI = 1,
   // Chrome update notification.
   kChromeUpdate = 2,
-  // Offline prefetch notification.
+  // Offline prefetch notification. (Deprecated)
   kPrefetch = 3,
-  kMaxValue = kPrefetch
+  // Reading list weekly notification.
+  kReadingList = 4,
+  // Feature guide specific notifications. (Deprecated)
+  kDeprecatedFeatureGuide = 5,
+  // Clank tips notifications feature.
+  kTips = 6,
+  // Clank finds notifications feature.
+  kChromeFinds = 7,
+  kMaxValue = kChromeFinds
 };
 
 // The type of user feedback from a displayed notification.
@@ -74,6 +85,8 @@ enum class ImpressionResult {
 // Defines user actions type. Used in metrics, can only insert enum values, need
 // to sync with histogram enum NotificationSchedulerUserActionType in
 // enums.xml. A Java counterpart will be generated for this enum.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
 // GENERATED_JAVA_ENUM_PACKAGE: (
 //   org.chromium.chrome.browser.notifications.scheduler)
 enum class UserActionType {
@@ -133,7 +146,7 @@ struct UserActionData {
   std::map<std::string, std::string> custom_data;
 
   // The button click info, only available when the user clicked a button.
-  base::Optional<ButtonClickInfo> button_click_info;
+  std::optional<ButtonClickInfo> button_click_info;
 };
 
 // Categorizes type of notification icons.

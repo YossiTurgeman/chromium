@@ -1,13 +1,10 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/test/test_layout_provider.h"
 
-#include "ui/gfx/font_list.h"
-
-namespace views {
-namespace test {
+namespace views::test {
 
 TestLayoutProvider::TestLayoutProvider() = default;
 TestLayoutProvider::~TestLayoutProvider() = default;
@@ -20,15 +17,17 @@ void TestLayoutProvider::SetSnappedDialogWidth(int width) {
   snapped_dialog_width_ = width;
 }
 
-void TestLayoutProvider::SetFont(int context,
-                                 int style,
-                                 const gfx::FontList& font) {
-  fonts_[{context, style}] = font;
+void TestLayoutProvider::SetFontDetails(
+    int context,
+    int style,
+    const ui::ResourceBundle::FontDetails& details) {
+  details_[{context, style}] = details;
 }
 
 int TestLayoutProvider::GetDistanceMetric(int metric) const {
-  if (distance_metrics_.count(metric))
+  if (distance_metrics_.count(metric)) {
     return distance_metrics_.find(metric)->second;
+  }
   return LayoutProvider::GetDistanceMetric(metric);
 }
 
@@ -40,11 +39,13 @@ int TestLayoutProvider::GetSnappedDialogWidth(int min_width) const {
   return snapped_dialog_width_ ? snapped_dialog_width_ : min_width;
 }
 
-const gfx::FontList& TestLayoutProvider::GetFont(int context, int style) const {
-  auto it = fonts_.find({context, style});
-  return it != fonts_.end() ? it->second
-                            : TypographyProvider::GetFont(context, style);
+ui::ResourceBundle::FontDetails TestLayoutProvider::GetFontDetailsImpl(
+    int context,
+    int style) const {
+  auto it = details_.find({context, style});
+  return it != details_.end()
+             ? it->second
+             : TypographyProvider::GetFontDetailsImpl(context, style);
 }
 
-}  // namespace test
-}  // namespace views
+}  // namespace views::test

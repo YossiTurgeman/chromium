@@ -29,7 +29,7 @@
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/html/track/text_track.h"
 #include "third_party/blink/renderer/core/loader/text_track_loader.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -42,21 +42,28 @@ class HTMLTrackElement final : public HTMLElement,
 
  public:
   explicit HTMLTrackElement(Document&);
+  ~HTMLTrackElement() override;
 
-  const AtomicString& kind();
+  ElementType GetElementType() const final {
+    return ElementType::kHTMLTrackElement;
+  }
+
+  AtomicString kind();
   void setKind(const AtomicString&);
 
-  enum ReadyState { kNone = 0, kLoading = 1, kLoaded = 2, kError = 3 };
+  enum class ReadyState { kNone = 0, kLoading = 1, kLoaded = 2, kError = 3 };
   ReadyState getReadyState();
   void ScheduleLoad();
 
   TextTrack* track();
 
+  // Called when parent media element's lazy loading completes.
+  // Triggers deferred track loading if this track was waiting.
+  void LoadIfDeferredForLazyMedia();
+
   void Trace(Visitor*) const override;
 
  private:
-  ~HTMLTrackElement() override;
-
   void ParseAttribute(const AttributeModificationParams&) override;
 
   InsertionNotificationRequest InsertedInto(ContainerNode&) override;
@@ -83,8 +90,11 @@ class HTMLTrackElement final : public HTMLElement,
 
   Member<LoadableTextTrack> track_;
   Member<TextTrackLoader> loader_;
-  TaskRunnerTimer<HTMLTrackElement> load_timer_;
+  HeapTaskRunnerTimer<HTMLTrackElement> load_timer_;
   KURL url_;
+
+  // True if loading was deferred because parent media element has loading=lazy.
+  bool load_deferred_for_lazy_media_ = false;
 };
 
 }  // namespace blink

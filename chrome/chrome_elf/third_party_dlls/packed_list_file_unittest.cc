@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,10 @@
 #include <string>
 #include <utility>
 
-#include "base/files/file_util.h"
+#include "base/containers/span.h"
+#include "base/files/file.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/path_service.h"
-#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/test_reg_util_win.h"
 #include "base/win/pe_image.h"
@@ -33,7 +33,7 @@ void RegRedirect(nt::ROOT_KEY key,
                  registry_util::RegistryOverrideManager* rom) {
   ASSERT_NE(key, nt::AUTO);
   HKEY root = (key == nt::HKCU ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE);
-  base::string16 temp;
+  std::wstring temp;
 
   ASSERT_NO_FATAL_FAILURE(rom->OverrideRegistry(root, &temp));
   ASSERT_TRUE(nt::SetTestingOverride(key, temp));
@@ -41,10 +41,10 @@ void RegRedirect(nt::ROOT_KEY key,
 
 void CancelRegRedirect(nt::ROOT_KEY key) {
   ASSERT_NE(key, nt::AUTO);
-  ASSERT_TRUE(nt::SetTestingOverride(key, base::string16()));
+  ASSERT_TRUE(nt::SetTestingOverride(key, std::wstring()));
 }
 
-bool CreateRegistryKeyValue(const base::string16& full_file_path) {
+bool CreateRegistryKeyValue(const std::wstring& full_file_path) {
   base::win::RegKey key;
   if (key.Create(HKEY_CURRENT_USER,
                  install_static::GetRegistryPath()
@@ -89,8 +89,9 @@ bool GetTestModules(std::vector<TestModule>* test_modules,
     base::File binary(path, base::File::FLAG_READ | base::File::FLAG_OPEN);
     if (!binary.IsValid())
       return false;
-    if (binary.Read(0, &buffer[0], kPageSize) != kPageSize)
+    if (!binary.ReadAndCheck(0, base::as_writable_byte_span(buffer))) {
       return false;
+    }
     base::win::PEImage pe_image(buffer);
     if (!pe_image.VerifyMagic())
       return false;
@@ -98,7 +99,7 @@ bool GetTestModules(std::vector<TestModule>* test_modules,
 
     // Save the module info for tests.
     TestModule test_module;
-    test_module.basename = base::UTF16ToASCII(test_bin);
+    test_module.basename = base::WideToASCII(test_bin);
     test_module.timedatestamp = nt_headers->FileHeader.TimeDateStamp;
     test_module.imagesize = nt_headers->OptionalHeader.SizeOfImage;
     test_modules->push_back(test_module);
@@ -120,6 +121,10 @@ bool GetTestModules(std::vector<TestModule>* test_modules,
 //------------------------------------------------------------------------------
 
 class ThirdPartyFileTest : public testing::Test {
+ public:
+  ThirdPartyFileTest(const ThirdPartyFileTest&) = delete;
+  ThirdPartyFileTest& operator=(const ThirdPartyFileTest&) = delete;
+
  protected:
   ThirdPartyFileTest() = default;
 
@@ -143,28 +148,22 @@ class ThirdPartyFileTest : public testing::Test {
   void CreateTestFile() {
     base::File file(base::FilePath(bl_test_file_path_),
                     base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE |
-                        base::File::FLAG_SHARE_DELETE |
+                        base::File::FLAG_WIN_SHARE_DELETE |
                         base::File::FLAG_DELETE_ON_CLOSE);
     ASSERT_TRUE(file.IsValid());
 
     // Write content {metadata}{array_of_modules}.
     PackedListMetadata meta = {
         kInitialVersion, static_cast<uint32_t>(test_packed_array_.size())};
-    ASSERT_EQ(file.Write(0, reinterpret_cast<const char*>(&meta), sizeof(meta)),
-              static_cast<int>(sizeof(meta)));
-    int size =
-        static_cast<int>(test_packed_array_.size() * sizeof(PackedListModule));
-    ASSERT_EQ(
-        file.Write(sizeof(PackedListMetadata),
-                   reinterpret_cast<const char*>(test_packed_array_.data()),
-                   size),
-        size);
+    ASSERT_TRUE(file.WriteAndCheck(0, base::byte_span_from_ref(meta)));
+    ASSERT_TRUE(file.WriteAndCheck(sizeof(PackedListMetadata),
+                                   base::as_byte_span(test_packed_array_)));
 
     // Leave file handle open for DELETE_ON_CLOSE.
     bl_file_ = std::move(file);
   }
 
-  const base::string16& GetBlTestFilePath() { return bl_test_file_path_; }
+  const std::wstring& GetBlTestFilePath() { return bl_test_file_path_; }
 
   base::File* GetBlFile() { return &bl_file_; }
 
@@ -173,11 +172,9 @@ class ThirdPartyFileTest : public testing::Test {
  private:
   base::ScopedTempDir scoped_temp_dir_;
   base::File bl_file_;
-  base::string16 bl_test_file_path_;
+  std::wstring bl_test_file_path_;
   std::vector<TestModule> test_array_;
   std::vector<PackedListModule> test_packed_array_;
-
-  DISALLOW_COPY_AND_ASSIGN(ThirdPartyFileTest);
 };
 
 //------------------------------------------------------------------------------
@@ -186,7 +183,7 @@ class ThirdPartyFileTest : public testing::Test {
 
 // Test successful initialization and module lookup.
 TEST_F(ThirdPartyFileTest, Success) {
-  // Create blacklist data file.
+  // Create blocklist data file.
   ASSERT_NO_FATAL_FAILURE(CreateTestFile());
 
   // Init.
@@ -226,21 +223,18 @@ TEST_F(ThirdPartyFileTest, CorruptFile) {
 
   // 1) Not enough data for array size
   PackedListMetadata meta = {kCurrent, static_cast<uint32_t>(50)};
-  ASSERT_EQ(file->Write(0, reinterpret_cast<const char*>(&meta), sizeof(meta)),
-            static_cast<int>(sizeof(meta)));
+  ASSERT_TRUE(file->WriteAndCheck(0, base::byte_span_from_ref(meta)));
   EXPECT_EQ(InitFromFile(), ThirdPartyStatus::kFileArrayReadFailure);
 
   // 2) Corrupt data or just unsupported metadata version.
   meta = {kUnsupported, static_cast<uint32_t>(50)};
-  ASSERT_EQ(file->Write(0, reinterpret_cast<const char*>(&meta), sizeof(meta)),
-            static_cast<int>(sizeof(meta)));
+  ASSERT_TRUE(file->WriteAndCheck(0, base::byte_span_from_ref(meta)));
   EXPECT_EQ(InitFromFile(), ThirdPartyStatus::kFileInvalidFormatVersion);
 
   // 3) Not enough data for metadata.
   meta = {kCurrent, static_cast<uint32_t>(10)};
-  ASSERT_EQ(
-      file->Write(0, reinterpret_cast<const char*>(&meta), sizeof(meta) / 2),
-      static_cast<int>(sizeof(meta) / 2));
+  ASSERT_TRUE(file->WriteAndCheck(
+      0, base::byte_span_from_ref(meta).first(sizeof(meta) / 2)));
   ASSERT_TRUE(file->SetLength(sizeof(meta) / 2));
   EXPECT_EQ(InitFromFile(), ThirdPartyStatus::kFileMetadataReadFailure);
 }
@@ -255,7 +249,7 @@ TEST_F(ThirdPartyFileTest, SuccessFromRegistry) {
   //    chrome.dll.
   ASSERT_TRUE(CreateRegistryKeyValue(GetBlTestFilePath()));
 
-  // 3. Drop a blacklist to the expected path.
+  // 3. Drop a blocklist to the expected path.
   ASSERT_NO_FATAL_FAILURE(CreateTestFile());
 
   // Clear override file path so that initialization goes to registry.

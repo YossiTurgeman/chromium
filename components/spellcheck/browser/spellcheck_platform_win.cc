@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,7 @@
 
 #include <string>
 
-#include "base/callback.h"
-#include "base/no_destructor.h"
-#include "base/task/post_task.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/functional/callback.h"
 #include "build/build_config.h"
 #include "components/spellcheck/browser/windows_spell_checker.h"
 #include "components/spellcheck/common/spellcheck_common.h"
@@ -27,64 +24,94 @@ bool SpellCheckerAvailable() {
 void PlatformSupportsLanguage(PlatformSpellChecker* spell_checker_instance,
                               const std::string& lang_tag,
                               base::OnceCallback<void(bool)> callback) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+  if (!spell_checker_instance) {
+    std::move(callback).Run(false);
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->IsLanguageSupported(lang_tag, std::move(callback));
 }
 
 void SetLanguage(PlatformSpellChecker* spell_checker_instance,
                  const std::string& lang_to_set,
                  base::OnceCallback<void(bool)> callback) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+  if (!spell_checker_instance) {
+    std::move(callback).Run(false);
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->CreateSpellChecker(lang_to_set, std::move(callback));
 }
 
 void DisableLanguage(PlatformSpellChecker* spell_checker_instance,
                      const std::string& lang_to_disable) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+  if (!spell_checker_instance) {
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->DisableSpellChecker(lang_to_disable);
 }
 
-bool CheckSpelling(const base::string16& word_to_check, int tag) {
+bool CheckSpelling(const std::u16string& word_to_check, int tag) {
   return true;  // Not used in the Windows native spell checker.
 }
 
-void FillSuggestionList(const base::string16& wrong_word,
-                        std::vector<base::string16>* optional_suggestions) {
+void FillSuggestionList(const std::u16string& wrong_word,
+                        std::vector<std::u16string>* optional_suggestions) {
   // Not used in the Windows native spell checker.
 }
 
 void RequestTextCheck(PlatformSpellChecker* spell_checker_instance,
                       int document_tag,
-                      const base::string16& text,
+                      const std::u16string& text,
                       TextCheckCompleteCallback callback) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+  if (!spell_checker_instance) {
+    std::move(callback).Run(std::vector<SpellCheckResult>());
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->RequestTextCheck(document_tag, text, std::move(callback));
 }
 
-#if defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 void GetPerLanguageSuggestions(PlatformSpellChecker* spell_checker_instance,
-                               const base::string16& word,
+                               const std::u16string& word,
                                GetSuggestionsCallback callback) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+  if (!spell_checker_instance) {
+    std::move(callback).Run(spellcheck::PerLanguageSuggestions());
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->GetPerLanguageSuggestions(word, std::move(callback));
 }
-#endif  // defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 
 void AddWord(PlatformSpellChecker* spell_checker_instance,
-             const base::string16& word) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+             const std::u16string& word) {
+  if (!spell_checker_instance) {
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->AddWordForAllLanguages(word);
 }
 
 void RemoveWord(PlatformSpellChecker* spell_checker_instance,
-                const base::string16& word) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+                const std::u16string& word) {
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->RemoveWordForAllLanguages(word);
 }
 
+bool IsUserAddedWord(PlatformSpellChecker* spell_checker_instance,
+                     const std::u16string& word) {
+  return false;
+}
+
 void IgnoreWord(PlatformSpellChecker* spell_checker_instance,
-                const base::string16& word) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+                const std::u16string& word) {
+  if (!spell_checker_instance) {
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->IgnoreWordForAllLanguages(word);
 }
 
@@ -95,14 +122,17 @@ void GetAvailableLanguages(std::vector<std::string>* spellcheck_languages) {
 void RetrieveSpellcheckLanguages(
     PlatformSpellChecker* spell_checker_instance,
     RetrieveSpellcheckLanguagesCompleteCallback callback) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->RetrieveSpellcheckLanguages(std::move(callback));
 }
 
 void AddSpellcheckLanguagesForTesting(
     PlatformSpellChecker* spell_checker_instance,
     const std::vector<std::string>& languages) {
-  reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
+  if (!spell_checker_instance) {
+    return;
+  }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
       ->AddSpellcheckLanguagesForTesting(languages);
 }
 
@@ -126,27 +156,26 @@ void ShowSpellingPanel(bool show) {
   // Not implemented since Windows doesn't have spelling panel like Mac
 }
 
-void UpdateSpellingPanelWithMisspelledWord(const base::string16& word) {
+void UpdateSpellingPanelWithMisspelledWord(const std::u16string& word) {
   // Not implemented since Windows doesn't have spelling panel like Mac
 }
 
 void RecordChromeLocalesStats(PlatformSpellChecker* spell_checker_instance,
-                              const std::vector<std::string> chrome_locales,
-                              SpellCheckHostMetrics* metrics) {
-  if (spellcheck::WindowsVersionSupportsSpellchecker()) {
-    reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
-        ->RecordChromeLocalesStats(std::move(chrome_locales), metrics);
+                              std::vector<std::string> chrome_locales) {
+  if (!spell_checker_instance) {
+    return;
   }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
+      ->RecordChromeLocalesStats(std::move(chrome_locales));
 }
 
-void RecordSpellcheckLocalesStats(
-    PlatformSpellChecker* spell_checker_instance,
-    const std::vector<std::string> spellcheck_locales,
-    SpellCheckHostMetrics* metrics) {
-  if (spellcheck::WindowsVersionSupportsSpellchecker()) {
-    reinterpret_cast<WindowsSpellChecker*>(spell_checker_instance)
-        ->RecordSpellcheckLocalesStats(std::move(spellcheck_locales), metrics);
+void RecordSpellcheckLocalesStats(PlatformSpellChecker* spell_checker_instance,
+                                  std::vector<std::string> spellcheck_locales) {
+  if (!spell_checker_instance) {
+    return;
   }
+  static_cast<WindowsSpellChecker*>(spell_checker_instance)
+      ->RecordSpellcheckLocalesStats(std::move(spellcheck_locales));
 }
 
 }  // namespace spellcheck_platform

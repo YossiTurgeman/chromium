@@ -1,63 +1,95 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/gtk/x/gtk_event_loop_x11.h"
 
-#include <gdk/gdk.h>
-#include <gtk/gtk.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
 
-#include "base/memory/singleton.h"
-#include "ui/events/platform/x11/x11_event_source.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "ui/base/x/x11_util.h"
 #include "ui/gfx/x/event.h"
-#include "ui/gfx/x/x11.h"
+#include "ui/gtk/gtk_compat.h"
+#include "ui/gtk/gtk_util.h"
 
-extern "C" {
-Window gdk_x11_window_get_xid(GdkWindow* window);
-}
-
-namespace ui {
+namespace gtk {
 
 namespace {
 
-int BuildXkbStateFromGdkEvent(unsigned int state, unsigned char group) {
-  return state | ((group & 0x3) << 13);
+x11::KeyButMask BuildXkbStateFromGdkEvent(unsigned int state,
+                                          unsigned char group) {
+  return static_cast<x11::KeyButMask>(state | ((group & 0x3) << 13));
 }
 
-}  // namespace
+x11::Event ConvertGdkEventToKeyEvent(GdkEvent* gdk_event) {
+  if (!gtk::GtkCheckVersion(4)) {
+    auto* key = reinterpret_cast<GdkEventKey*>(gdk_event);
+    DCHECK(key->type == GdkKeyPress() || key->type == GdkKeyRelease());
+    x11::Window window = x11::Window::None;
+    if (key->window) {
+      window = static_cast<x11::Window>(gdk_x11_window_get_xid(key->window));
+    }
 
-// static
-GtkEventLoopX11* GtkEventLoopX11::EnsureInstance() {
-  return base::Singleton<GtkEventLoopX11>::get();
-}
-
-GtkEventLoopX11::GtkEventLoopX11() {
-  gdk_event_handler_set(DispatchGdkEvent, nullptr, nullptr);
-}
-
-GtkEventLoopX11::~GtkEventLoopX11() {
-  gdk_event_handler_set(reinterpret_cast<GdkEventFunc>(gtk_main_do_event),
-                        nullptr, nullptr);
-}
-
-// static
-void GtkEventLoopX11::DispatchGdkEvent(GdkEvent* gdk_event, gpointer) {
-  switch (gdk_event->type) {
-    case GDK_KEY_PRESS:
-    case GDK_KEY_RELEASE:
-      ProcessGdkEventKey(gdk_event->key);
-      break;
-    default:
-      break;  // Do nothing.
+    x11::KeyEvent key_event{
+        .opcode = key->type == GdkKeyPress() ? x11::KeyEvent::Press
+                                             : x11::KeyEvent::Release,
+        .detail = static_cast<x11::KeyCode>(key->hardware_keycode),
+        .time = static_cast<x11::Time>(key->time),
+        .root = ui::GetX11RootWindow(),
+        .event = window,
+        .state = BuildXkbStateFromGdkEvent(key->state, key->group),
+        .same_screen = true,
+    };
+    return x11::Event(!!key->send_event, std::move(key_event));
   }
 
-  gtk_main_do_event(gdk_event);
+  GdkKeymapKey* keys = nullptr;
+  guint* keyvals = nullptr;
+  gint n_entries = 0;
+  gdk_display_map_keycode(gdk_display_get_default(),
+                          gdk_key_event_get_keycode(gdk_event), &keys, &keyvals,
+                          &n_entries);
+  guint keyval = gdk_key_event_get_keyval(gdk_event);
+  GdkKeymapKey keymap_key{0, 0, 0};
+  if (keys) {
+    // SAFETY: `gdk_display_map_keycode` allocates memory for `keys` and
+    // `keyvals` and returns the size in `n_entries`. The returned pointers are
+    // valid for `n_entries` elements.
+    // https://docs.gtk.org/gdk4/method.Display.map_keycode.html
+    base::span<GdkKeymapKey> keys_span =
+        UNSAFE_BUFFERS(base::span(keys, base::checked_cast<size_t>(n_entries)));
+    base::span<guint> keyvals_span = UNSAFE_BUFFERS(
+        base::span(keyvals, base::checked_cast<size_t>(n_entries)));
+    for (gint i = 0; i < n_entries; i++) {
+      if (keyvals_span[i] == keyval) {
+        keymap_key = keys_span[i];
+        break;
+      }
+    }
+    g_free(keys);
+    g_free(keyvals);
+  }
+
+  x11::KeyEvent key_event{
+      .opcode = gtk::GdkEventGetEventType(gdk_event) == GdkKeyPress()
+                    ? x11::KeyEvent::Press
+                    : x11::KeyEvent::Release,
+      .detail = static_cast<x11::KeyCode>(keymap_key.keycode),
+      .time = static_cast<x11::Time>(gtk::GdkEventGetTime(gdk_event)),
+      .root = ui::GetX11RootWindow(),
+      .event = static_cast<x11::Window>(
+          gdk_x11_surface_get_xid(gdk_event_get_surface(gdk_event))),
+      .state = BuildXkbStateFromGdkEvent(
+          gdk_event_get_modifier_state(gdk_event), keymap_key.group),
+      .same_screen = true,
+  };
+  return x11::Event(false, std::move(key_event));
 }
 
-// static
-void GtkEventLoopX11::ProcessGdkEventKey(const GdkEventKey& gdk_event_key) {
+void ProcessGdkEvent(GdkEvent* gdk_event) {
   // This function translates GdkEventKeys into XKeyEvents and puts them to
   // the X event queue.
   //
@@ -72,41 +104,50 @@ void GtkEventLoopX11::ProcessGdkEventKey(const GdkEventKey& gdk_event_key) {
   // corresponding key event in the X event queue.  So we have to handle this
   // case.  ibus-gtk is used through gtk-immodule to support IMEs.
 
-  auto* conn = x11::Connection::Get();
-  XDisplay* display = conn->display();
-
-  xcb_generic_event_t generic_event;
-  memset(&generic_event, 0, sizeof(generic_event));
-  auto* key_event = reinterpret_cast<xcb_key_press_event_t*>(&generic_event);
-  key_event->response_type = gdk_event_key.type == GDK_KEY_PRESS
-                                 ? x11::KeyEvent::Press
-                                 : x11::KeyEvent::Release;
-  if (gdk_event_key.send_event)
-    key_event->response_type |= x11::kSendEventMask;
-  key_event->event = gdk_x11_window_get_xid(gdk_event_key.window);
-  key_event->root = XDefaultRootWindow(display);
-  key_event->time = gdk_event_key.time;
-  key_event->detail = gdk_event_key.hardware_keycode;
-  key_event->same_screen = true;
-
-  x11::Event event(&generic_event, conn, false);
-
-  // The key state is 16 bits on the wire, but ibus-gtk adds additional flags
-  // that may be outside this range, so set the state after conversion from
-  // the wire format.
-  // TODO(https://crbug.com/1066670): Add a test to ensure this subtle logic
-  // doesn't regress after all X11 event code is refactored from using Xlib to
-  // XProto.
-  int state =
-      BuildXkbStateFromGdkEvent(gdk_event_key.state, gdk_event_key.group);
-  event.As<x11::KeyEvent>()->state = static_cast<x11::KeyButMask>(state);
+  auto event_type = gtk::GtkCheckVersion(4)
+                        ? gtk::GdkEventGetEventType(gdk_event)
+                        : *reinterpret_cast<GdkEventType*>(gdk_event);
+  if (event_type != GdkKeyPress() && event_type != GdkKeyRelease()) {
+    return;
+  }
 
   // We want to process the gtk event; mapped to an X11 event immediately
   // otherwise if we put it back on the queue we may get items out of order.
-  if (ui::X11EventSource* x11_source = ui::X11EventSource::GetInstance())
-    x11_source->DispatchXEvent(&event);
-  else
-    conn->events().push_front(std::move(event));
+  x11::Connection::Get()->DispatchEvent(ConvertGdkEventToKeyEvent(gdk_event));
 }
 
-}  // namespace ui
+}  // namespace
+
+GtkEventLoopX11::GtkEventLoopX11() {
+  if (gtk::GtkCheckVersion(4)) {
+    auto* surface =
+        gtk_native_get_surface(gtk_widget_get_native(GetDummyWindow()));
+    signal_ = ScopedGSignal(
+        surface, "event",
+        base::BindRepeating(&GtkEventLoopX11::OnEvent, base::Unretained(this)));
+  } else {
+    gdk_event_handler_set(DispatchGdkEvent, nullptr, nullptr);
+  }
+}
+
+GtkEventLoopX11::~GtkEventLoopX11() {
+  if (!gtk::GtkCheckVersion(4)) {
+    gdk_event_handler_set(reinterpret_cast<GdkEventFunc>(gtk_main_do_event),
+                          nullptr, nullptr);
+  }
+}
+
+gboolean GtkEventLoopX11::OnEvent(GdkSurface* surface, GdkEvent* gdk_event) {
+  DCHECK(gtk::GtkCheckVersion(4));
+  ProcessGdkEvent(gdk_event);
+  return false;
+}
+
+// static
+void GtkEventLoopX11::DispatchGdkEvent(GdkEvent* gdk_event, gpointer) {
+  DCHECK(!gtk::GtkCheckVersion(4));
+  ProcessGdkEvent(gdk_event);
+  gtk_main_do_event(gdk_event);
+}
+
+}  // namespace gtk

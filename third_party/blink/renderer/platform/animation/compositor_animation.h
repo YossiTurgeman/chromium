@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,10 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_ANIMATION_COMPOSITOR_ANIMATION_H_
 
 #include <memory>
+#include <optional>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/optional.h"
 #include "cc/animation/animation.h"
 #include "cc/animation/animation_delegate.h"
 #include "cc/animation/worklet_animation.h"
@@ -17,19 +17,22 @@
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
-namespace cc {
+namespace gfx {
 class AnimationCurve;
 }
 
 namespace blink {
 
 class CompositorAnimationDelegate;
-class CompositorKeyframeModel;
 
 // A compositor representation for Animation.
 class PLATFORM_EXPORT CompositorAnimation : public cc::AnimationDelegate {
  public:
-  static std::unique_ptr<CompositorAnimation> Create();
+  // If this CompositorAnimation is being created to replace an
+  // existing cc::Animation, the existing Animation's id should be
+  // passed in to ensure the same id is used.
+  static std::unique_ptr<CompositorAnimation> Create(
+      std::optional<int> replaced_cc_animation_id = std::nullopt);
   static std::unique_ptr<CompositorAnimation> CreateWorkletAnimation(
       cc::WorkletAnimationId,
       const String& name,
@@ -38,9 +41,12 @@ class PLATFORM_EXPORT CompositorAnimation : public cc::AnimationDelegate {
       std::unique_ptr<cc::AnimationEffectTimings> effect_timings);
 
   explicit CompositorAnimation(scoped_refptr<cc::Animation>);
+  CompositorAnimation(const CompositorAnimation&) = delete;
+  CompositorAnimation& operator=(const CompositorAnimation&) = delete;
   ~CompositorAnimation() override;
 
   cc::Animation* CcAnimation() const;
+  int CcAnimationId() const;
 
   // An animation delegate is notified when animations are started and stopped.
   // The CompositorAnimation does not take ownership of the delegate, and
@@ -49,12 +55,14 @@ class PLATFORM_EXPORT CompositorAnimation : public cc::AnimationDelegate {
   void SetAnimationDelegate(CompositorAnimationDelegate*);
 
   void AttachElement(const CompositorElementId&);
+  void AttachPaintWorkletElement();
   void DetachElement();
   bool IsElementAttached() const;
 
-  void AddKeyframeModel(std::unique_ptr<CompositorKeyframeModel>);
+  void AddKeyframeModel(std::unique_ptr<cc::KeyframeModel>);
   void RemoveKeyframeModel(int keyframe_model_id);
-  void PauseKeyframeModel(int keyframe_model_id, base::TimeDelta time_offset);
+  void PauseKeyframeModelForTesting(int keyframe_model_id,
+                                    base::TimeDelta hold_time);
   void AbortKeyframeModel(int keyframe_model_id);
 
   void UpdatePlaybackRate(double playback_rate);
@@ -73,14 +81,12 @@ class PLATFORM_EXPORT CompositorAnimation : public cc::AnimationDelegate {
   void NotifyAnimationTakeover(base::TimeTicks monotonic_time,
                                int target_property,
                                base::TimeTicks animation_start_time,
-                               std::unique_ptr<cc::AnimationCurve>) override;
+                               std::unique_ptr<gfx::AnimationCurve>) override;
   void NotifyLocalTimeUpdated(
-      base::Optional<base::TimeDelta> local_time) override;
+      std::optional<base::TimeDelta> local_time) override;
 
   scoped_refptr<cc::Animation> animation_;
-  CompositorAnimationDelegate* delegate_;
-
-  DISALLOW_COPY_AND_ASSIGN(CompositorAnimation);
+  raw_ptr<CompositorAnimationDelegate> delegate_;
 };
 
 }  // namespace blink

@@ -1,8 +1,10 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "gls_runner_test_base.h"
+
+#include <memory>
 
 #include "base/base_switches.h"
 #include "base/command_line.h"
@@ -10,9 +12,11 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/multiprocess_test.h"
+#include "base/win/ntsecapi_shim.h"
 #include "chrome/credential_provider/gaiacp/gaia_credential_provider_filter.h"
 #include "chrome/credential_provider/gaiacp/scoped_lsa_policy.h"
 #include "chrome/credential_provider/test/test_credential.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/multiprocess_func_list.h"
 
 namespace credential_provider {
@@ -33,7 +37,7 @@ namespace testing {
 
 // Corresponding default email and username for tests that don't override them.
 const char kDefaultEmail[] = "foo@gmail.com";
-const char kDefaultGaiaId[] = "test-gaia-id";
+const GaiaId::Literal kDefaultGaiaId("test-gaia-id");
 const wchar_t kDefaultUsername[] = L"foo";
 const char kDefaultInvalidTokenHandleResponse[] = "{}";
 const char kDefaultValidTokenHandleResponse[] = "{\"expires_in\":1}";
@@ -49,12 +53,12 @@ MULTIPROCESS_TEST_MAIN(gls_main) {
   // If a start event name is specified, the process waits for an event from the
   // tester telling it that it can start running.
   if (command_line->HasSwitch(switches::kStartGlsEventName)) {
-    base::string16 start_event_name =
+    std::wstring start_event_name =
         command_line->GetSwitchValueNative(switches::kStartGlsEventName);
     if (!start_event_name.empty()) {
-      base::win::ScopedHandle start_event_handle(::CreateEvent(
-          nullptr, false, false, base::UTF16ToWide(start_event_name).c_str()));
-      if (start_event_handle.IsValid()) {
+      base::win::ScopedHandle start_event_handle(
+          ::CreateEvent(nullptr, false, false, start_event_name.c_str()));
+      if (start_event_handle.is_valid()) {
         base::WaitableEvent start_event(std::move(start_event_handle));
         start_event.Wait();
       }
@@ -67,14 +71,13 @@ MULTIPROCESS_TEST_MAIN(gls_main) {
       &default_exit_code));
   std::string gls_email =
       command_line->GetSwitchValueASCII(switches::kGlsUserEmail);
-  std::string gaia_id_override =
-      command_line->GetSwitchValueASCII(switches::kOverrideGaiaId);
+  GaiaId gaia_id_override(
+      command_line->GetSwitchValueASCII(switches::kOverrideGaiaId));
   std::string gaia_password =
       command_line->GetSwitchValueASCII(switches::kOverrideGaiaPassword);
   std::string full_name =
       command_line->GetSwitchValueASCII(switches::kOverrideFullName);
-  std::string expected_gaia_id =
-      command_line->GetSwitchValueASCII(kGaiaIdSwitch);
+  GaiaId expected_gaia_id(command_line->GetSwitchValueASCII(kGaiaIdSwitch));
   std::string expected_email =
       command_line->GetSwitchValueASCII(kPrefillEmailSwitch);
   if (expected_email.empty()) {
@@ -83,7 +86,7 @@ MULTIPROCESS_TEST_MAIN(gls_main) {
     EXPECT_EQ(gls_email, std::string());
   }
   if (expected_gaia_id.empty())
-    expected_gaia_id = kDefaultGaiaId;
+    expected_gaia_id = GaiaId(kDefaultGaiaId);
 
   if (gaia_password.empty())
     gaia_password = "password";
@@ -96,19 +99,19 @@ MULTIPROCESS_TEST_MAIN(gls_main) {
     expected_gaia_id = gaia_id_override;
   }
 
-  base::Value dict(base::Value::Type::DICTIONARY);
+  base::DictValue dict;
   if (!gaia_id_override.empty() && gaia_id_override != expected_gaia_id) {
-    dict.SetIntKey(kKeyExitCode, kUiecEMailMissmatch);
+    dict.Set(kKeyExitCode, kUiecEMailMissmatch);
   } else {
-    dict.SetIntKey(kKeyExitCode, static_cast<UiExitCodes>(default_exit_code));
-    dict.SetStringKey(kKeyEmail, expected_email);
-    dict.SetStringKey(kKeyFullname, full_name);
-    dict.SetStringKey(kKeyId, expected_gaia_id);
-    dict.SetStringKey(kKeyAccessToken, "at-123456");
-    dict.SetStringKey(kKeyMdmIdToken, "idt-123456");
-    dict.SetStringKey(kKeyPassword, gaia_password);
-    dict.SetStringKey(kKeyRefreshToken, "rt-123456");
-    dict.SetStringKey(kKeyTokenHandle, "th-123456");
+    dict.Set(kKeyExitCode, static_cast<UiExitCodes>(default_exit_code));
+    dict.Set(kKeyEmail, expected_email);
+    dict.Set(kKeyFullname, full_name);
+    dict.Set(kKeyId, expected_gaia_id.ToString());
+    dict.Set(kKeyAccessToken, "at-123456");
+    dict.Set(kKeyMdmIdToken, "idt-123456");
+    dict.Set(kKeyPassword, gaia_password);
+    dict.Set(kKeyRefreshToken, "rt-123456");
+    dict.Set(kKeyTokenHandle, "th-123456");
   }
 
   std::string json;
@@ -141,6 +144,7 @@ void GlsRunnerTestBase::SetUp() {
                       L"comment", true, &sid, &error));
 
   auto policy = ScopedLsaPolicy::Create(POLICY_ALL_ACCESS);
+  EXPECT_NE(policy, nullptr);
   EXPECT_EQ(S_OK, policy->StorePrivateData(kLsaKeyGaiaUsername,
                                            kDefaultGaiaAccountName));
   EXPECT_EQ(S_OK, policy->StorePrivateData(kLsaKeyGaiaPassword, L"password"));
@@ -149,11 +153,20 @@ void GlsRunnerTestBase::SetUp() {
   // the tests.
   InitializeRegistryOverrideForTesting(&registry_override_);
 
-  // Override location of "Program Files" system folder so we don't modify local
-  // machine settings.
+  // Override location of "Program Files" system folder and its x86 version so
+  // we don't modify local machine settings.
   ASSERT_TRUE(scoped_temp_program_files_dir_.CreateUniqueTempDir());
-  program_files_override_.reset(new base::ScopedPathOverride(
-      base::DIR_PROGRAM_FILES, scoped_temp_program_files_dir_.GetPath()));
+  program_files_override_ = std::make_unique<base::ScopedPathOverride>(
+      base::DIR_PROGRAM_FILES, scoped_temp_program_files_dir_.GetPath());
+  ASSERT_TRUE(scoped_temp_program_files_x86_dir_.CreateUniqueTempDir());
+  program_files_x86_override_ = std::make_unique<base::ScopedPathOverride>(
+      base::DIR_PROGRAM_FILESX86, scoped_temp_program_files_x86_dir_.GetPath());
+
+  // Also override location of "ProgramData" system folder as we store user
+  // policies there.
+  ASSERT_TRUE(scoped_temp_progdata_dir_.CreateUniqueTempDir());
+  programdata_override_ = std::make_unique<base::ScopedPathOverride>(
+      base::DIR_COMMON_APP_DATA, scoped_temp_progdata_dir_.GetPath());
 }
 
 void GlsRunnerTestBase::TearDown() {
@@ -521,24 +534,24 @@ HRESULT GlsRunnerTestBase::StartLogonProcessAndWait() {
 HRESULT GlsRunnerTestBase::GetFakeGlsCommandline(
     UiExitCodes default_exit_code,
     const std::string& gls_email,
-    const std::string& gaia_id_override,
+    const GaiaId& gaia_id_override,
     const std::string& gaia_password,
     const std::string& full_name_override,
-    const base::string16& start_gls_event_name,
+    const std::wstring& start_gls_event_name,
     bool ignore_expected_gaia_id,
     base::CommandLine* command_line) {
   *command_line = base::GetMultiProcessTestChildBaseCommandLine();
   command_line->AppendSwitchASCII(::switches::kTestChildProcess, "gls_main");
   command_line->AppendSwitchASCII(switches::kGlsUserEmail, gls_email);
   command_line->AppendSwitchNative(switches::kDefaultExitCode,
-                                   base::NumberToString16(default_exit_code));
+                                   base::NumberToWString(default_exit_code));
 
   if (ignore_expected_gaia_id)
     command_line->AppendSwitch(switches::kIgnoreExpectedGaiaId);
 
   if (!gaia_id_override.empty()) {
     command_line->AppendSwitchASCII(switches::kOverrideGaiaId,
-                                    gaia_id_override);
+                                    gaia_id_override.ToString());
   }
 
   if (!gaia_password.empty()) {
@@ -571,7 +584,7 @@ HRESULT GlsRunnerTestBase::FinishLogonProcess(
 HRESULT GlsRunnerTestBase::FinishLogonProcess(
     bool expected_success,
     bool expected_credentials_change_fired,
-    const base::string16& expected_error_message) {
+    const std::wstring& expected_error_message) {
   // If no logon process was started, there is nothing to finish.
   if (!logon_process_started_successfully_)
     return S_OK;
@@ -618,7 +631,7 @@ HRESULT GlsRunnerTestBase::FinishLogonProcessWithCred(
 HRESULT GlsRunnerTestBase::FinishLogonProcessWithCred(
     bool expected_success,
     bool expected_credentials_change_fired,
-    const base::string16& expected_error_message,
+    const std::wstring& expected_error_message,
     const Microsoft::WRL::ComPtr<ICredentialProviderCredential>&
         local_testing_cred) {
   // If no logon process was started, there is nothing to finish.

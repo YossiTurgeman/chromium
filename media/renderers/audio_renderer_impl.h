@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,12 +22,15 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/power_monitor/power_observer.h"
 #include "base/synchronization/lock.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
+#include "build/build_config.h"
 #include "media/base/audio_decoder.h"
 #include "media/base/audio_decoder_config.h"
 #include "media/base/audio_renderer.h"
@@ -37,10 +40,9 @@
 #include "media/base/time_source.h"
 #include "media/filters/audio_renderer_algorithm.h"
 #include "media/filters/decoder_stream.h"
-#include "media/renderers/default_renderer_factory.h"
+#include "media/renderers/renderer_impl_factory.h"
 
 namespace base {
-class SingleThreadTaskRunner;
 class TickClock;
 }  // namespace base
 
@@ -55,7 +57,7 @@ class SpeechRecognitionClient;
 class MEDIA_EXPORT AudioRendererImpl
     : public AudioRenderer,
       public TimeSource,
-      public base::PowerObserver,
+      public base::PowerSuspendObserver,
       public AudioRendererSink::RenderCallback {
  public:
   using PlayDelayCBForTesting = base::RepeatingCallback<void(base::TimeDelta)>;
@@ -73,11 +75,16 @@ class MEDIA_EXPORT AudioRendererImpl
   //
   // |decoders| contains the AudioDecoders to use when initializing.
   AudioRendererImpl(
-      const scoped_refptr<base::SingleThreadTaskRunner>& task_runner,
-      AudioRendererSink* sink,
+      const scoped_refptr<base::SequencedTaskRunner>& task_runner,
+      scoped_refptr<AudioRendererSink> sink,
       const CreateAudioDecodersCB& create_audio_decoders_cb,
       MediaLog* media_log,
+      MediaPlayerLoggingID media_player_id,
       SpeechRecognitionClient* speech_recognition_client = nullptr);
+
+  AudioRendererImpl(const AudioRendererImpl&) = delete;
+  AudioRendererImpl& operator=(const AudioRendererImpl&) = delete;
+
   ~AudioRendererImpl() override;
 
   // TimeSource implementation.
@@ -99,14 +106,22 @@ class MEDIA_EXPORT AudioRendererImpl
   void Flush(base::OnceClosure callback) override;
   void StartPlaying() override;
   void SetVolume(float volume) override;
-  void SetLatencyHint(base::Optional<base::TimeDelta> latency_hint) override;
+  void SetLatencyHint(std::optional<base::TimeDelta> latency_hint) override;
   void SetPreservesPitch(bool preserves_pitch) override;
+  void SetRenderMutedAudio(bool render_muted_audio) override;
+  void SetWasPlayedWithUserActivationAndHighMediaEngagement(
+      bool was_played_with_user_activation_and_high_media_engagement) override;
 
-  // base::PowerObserver implementation.
+  // base::PowerSuspendObserver implementation.
   void OnSuspend() override;
   void OnResume() override;
 
   void SetPlayDelayCBForTesting(PlayDelayCBForTesting cb);
+  bool was_unmuted_for_testing() const { return was_unmuted_; }
+
+  void decoded_audio_ready_for_testing() {
+    DecodedAudioReady(DecoderStatus::Codes::kFailed);
+  }
 
  private:
   friend class AudioRendererImplTest;
@@ -126,20 +141,37 @@ class MEDIA_EXPORT AudioRendererImpl
   //  |      |
   //  |      V            Decoders reset
   //  +-  kFlushed <------------------ kFlushing
-  //         | StartPlaying()             ^
-  //         |                            |
-  //         |                            | Flush()
-  //         `---------> kPlaying --------'
-  enum State { kUninitialized, kInitializing, kFlushing, kFlushed, kPlaying };
+  //      ^  | StartPlaying()             ^
+  //      |  |                            |
+  //      |  |                            | Flush()
+  //      |  `---------> kPlaying --------'
+  //      |               ^    |
+  //      |               |    |
+  //      |               |    V
+  //      `-------- kReinitializingSink
+  //
+  enum State {
+    kUninitialized,
+    kInitializing,
+    kFlushing,
+    kFlushed,
+    kReinitializingSink,
+    kPlaying
+  };
 
   // Called after hardware device information is available.
   void OnDeviceInfoReceived(DemuxerStream* stream,
                             CdmContext* cdm_context,
                             OutputDeviceInfo output_device_info);
 
+  void InitializeSink();
+
+  // Called when the channel count of the decoded buffer from the audio decoder
+  // has changed.
+  void OnSourceChannelCountChanged(OutputDeviceInfo /* output_device_info */);
+
   // Callback from the audio decoder delivering decoded audio samples.
-  void DecodedAudioReady(AudioDecoderStream::ReadStatus status,
-                         scoped_refptr<AudioBuffer> buffer);
+  void DecodedAudioReady(AudioDecoderStream::ReadResult result);
 
   // Handles buffers that come out of decoder (MSE: after passing through
   // |buffer_converter_|).
@@ -174,7 +206,7 @@ class MEDIA_EXPORT AudioRendererImpl
   // should the filled buffer be played.
   int Render(base::TimeDelta delay,
              base::TimeTicks delay_timestamp,
-             int prior_frames_skipped,
+             const AudioGlitchInfo& glitch_info,
              AudioBus* dest) override;
   void OnRenderError() override;
 
@@ -193,7 +225,7 @@ class MEDIA_EXPORT AudioRendererImpl
 
   // Called upon AudioDecoderStream initialization, or failure thereof
   // (indicated by the value of |success|).
-  void OnAudioDecoderStreamInitialized(bool succes);
+  void OnAudioDecoderStreamInitialized(bool success);
 
   void FinishInitialization(PipelineStatus status);
   void FinishFlush();
@@ -227,7 +259,14 @@ class MEDIA_EXPORT AudioRendererImpl
   void EnableSpeechRecognition();
   void TranscribeAudio(scoped_refptr<media::AudioBuffer> buffer);
 
-  scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
+  void MaybeStartRealSink();
+  void SuspendRealSink();
+
+  // Returns the delta between AudioClock::back_timestamp() and
+  // AudioRendererAlgorithm::FrontTimestamp().
+  base::TimeDelta CalculateClockAndAlgorithmDrift() const;
+
+  scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
   std::unique_ptr<AudioBufferConverter> buffer_converter_;
 
@@ -256,15 +295,20 @@ class MEDIA_EXPORT AudioRendererImpl
 
   std::unique_ptr<AudioDecoderStream> audio_decoder_stream_;
 
-  MediaLog* media_log_;
+  // This dangling raw_ptr occurred in:
+  // blink_unittests: WebMediaPlayerImplTest.MediaPositionState_Playing
+  // https://ci.chromium.org/ui/p/chromium/builders/try/linux-rel/1425332/test-results?q=ExactID%3Aninja%3A%2F%2Fthird_party%2Fblink%2Frenderer%2Fcontroller%3Ablink_unittests%2FWebMediaPlayerImplTest.MediaPositionState_Playing+VHash%3A896f1103f2d1008d
+  raw_ptr<MediaLog, FlakyDanglingUntriaged> media_log_;
+
+  MediaPlayerLoggingID player_id_;
 
   // Cached copy of audio params that the renderer is initialized with.
   AudioParameters audio_parameters_;
 
   // Passed in during Initialize().
-  DemuxerStream* demuxer_stream_;
+  raw_ptr<DemuxerStream> demuxer_stream_;
 
-  RendererClient* client_;
+  raw_ptr<RendererClient> client_;
 
   // Callback provided during Initialize().
   PipelineStatusCallback init_cb_;
@@ -273,7 +317,7 @@ class MEDIA_EXPORT AudioRendererImpl
   base::OnceClosure flush_cb_;
 
   // Overridable tick clock for testing.
-  const base::TickClock* tick_clock_;
+  raw_ptr<const base::TickClock> tick_clock_;
 
   // Memory usage of |algorithm_| recorded during the last
   // HandleDecodedBuffer_Locked() call.
@@ -297,6 +341,9 @@ class MEDIA_EXPORT AudioRendererImpl
   // Cached volume provided by SetVolume().
   float volume_;
 
+  // A flag indicating whether the audio stream was ever unmuted.
+  bool was_unmuted_ = false;
+
   // After Initialize() has completed, all variables below must be accessed
   // under |lock_|. ------------------------------------------------------------
   base::Lock lock_;
@@ -307,11 +354,13 @@ class MEDIA_EXPORT AudioRendererImpl
 
   // Stored value from last call to SetLatencyHint(). Passed to |algorithm_|
   // during Initialize().
-  base::Optional<base::TimeDelta> latency_hint_;
+  std::optional<base::TimeDelta> latency_hint_;
 
   // Passed to |algorithm_|. Indicates whether |algorithm_| should or should not
   // make pitch adjustments at playbacks other than 1.0.
   bool preserves_pitch_ = true;
+
+  bool was_played_with_user_activation_and_high_media_engagement_ = false;
 
   // Simple state tracking variable.
   State state_;
@@ -370,15 +419,23 @@ class MEDIA_EXPORT AudioRendererImpl
 
   // End variables which must be accessed under |lock_|. ----------------------
 
-#if !defined(OS_ANDROID)
-  SpeechRecognitionClient* speech_recognition_client_;
+#if !BUILDFLAG(IS_ANDROID)
+  raw_ptr<SpeechRecognitionClient, DanglingUntriaged>
+      speech_recognition_client_;
   TranscribeAudioCallback transcribe_audio_callback_;
+
+  // Whether there was a discontinuity in the audio's presentation timestamps,
+  // and we should send a new PTS to `speech_recognition_client_`.
+  bool send_pts_for_transcription_ = true;
 #endif
+
+  // Ensures we don't issue log spam when absurd delay values are encountered.
+  int num_absurd_delay_warnings_ = 0;
+
+  bool render_muted_audio_ = false;
 
   // NOTE: Weak pointers must be invalidated before all other member variables.
   base::WeakPtrFactory<AudioRendererImpl> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(AudioRendererImpl);
 };
 
 }  // namespace media

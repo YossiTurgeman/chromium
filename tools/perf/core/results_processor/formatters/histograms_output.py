@@ -1,11 +1,11 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Output formatter for HistogramSet Results Format.
 
 Format specification:
-https://github.com/catapult-project/catapult/blob/master/docs/histogram-set-json-format.md
+https://chromium.googlesource.com/catapult/+/refs/heads/main/docs/histogram-set-json-format.md
 """
 
 import json

@@ -1,18 +1,26 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_TEST_BASE_INTERACTIVE_TEST_UTILS_H_
 #define CHROME_TEST_BASE_INTERACTIVE_TEST_UTILS_H_
 
-#include "base/macros.h"
+#include <utility>
+
+#include "base/callback_list.h"
 #include "base/run_loop.h"
+#include "base/scoped_observation.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser_list_observer.h"
 #include "chrome/browser/ui/view_ids.h"
 #include "ui/base/test/ui_controls.h"
 #include "ui/display/display.h"
 #include "ui/gfx/geometry/point.h"
+#include "ui/gfx/geometry/vector2d.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/views/widget/widget_observer.h"
+
+class Browser;
+class BrowserWindowInterface;
 
 namespace display {
 class Screen;
@@ -21,66 +29,52 @@ class Screen;
 #if defined(TOOLKIT_VIEWS)
 namespace views {
 class View;
+class Widget;
 }
 #endif
 
 namespace ui_test_utils {
 
+#if !BUILDFLAG(IS_ANDROID)
+
 // Use in browser interactive uitests to wait until a browser is set to active.
-// To use, create and call WaitForActivation().
-class BrowserActivationWaiter : public BrowserListObserver {
+// To use, create and call WaitForActivation(). Since on some platforms, the
+// active browser list kept in |BrowserList| is updated before the actual
+// activation (see |BrowserView::Show()| for details), observe the widget
+// directly and wait for it to actually get activated.
+class BrowserActivationWaiter : public views::WidgetObserver {
  public:
-  explicit BrowserActivationWaiter(const Browser* browser);
+  explicit BrowserActivationWaiter(const BrowserWindowInterface* browser);
+  BrowserActivationWaiter(const BrowserActivationWaiter&) = delete;
+  BrowserActivationWaiter& operator=(const BrowserActivationWaiter&) = delete;
   ~BrowserActivationWaiter() override;
 
-  // Runs a message loop until the |browser_| supplied to the constructor is
-  // activated, or returns immediately if |browser_| has already become active.
-  // Should only be called once.
+  // Runs a message loop until the widget associated to |browser| supplied to
+  // the constructor is activated, or returns immediately if |browser| has
+  // already active. Should only be called once.
   void WaitForActivation();
 
- private:
-  // BrowserListObserver:
-  void OnBrowserSetLastActive(Browser* browser) override;
-
-  const Browser* const browser_;
-  bool observed_;
-  base::RunLoop run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(BrowserActivationWaiter);
-};
-
-// Use in browser interactive uitests to wait until a browser is deactivated.
-// To use, create and call WaitForDeactivation().
-class BrowserDeactivationWaiter : public BrowserListObserver {
- public:
-  explicit BrowserDeactivationWaiter(const Browser* browser);
-  ~BrowserDeactivationWaiter() override;
-
-  // Runs a message loop until the |browser_| supplied to the constructor is
-  // deactivated, or returns immediately if |browser_| has already become
-  // inactive.
-  // Should only be called once.
-  void WaitForDeactivation();
+  // views::WidgetObserver
+  void OnWidgetActivationChanged(views::Widget* widget, bool active) override;
 
  private:
-  // BrowserListObserver:
-  void OnBrowserNoLongerActive(Browser* browser) override;
-
-  const Browser* const browser_;
-  bool observed_;
+  bool observed_ = false;
   base::RunLoop run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(BrowserDeactivationWaiter);
+  base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{
+      this};
 };
+
 
 // Brings the native window for |browser| to the foreground and waits until the
 // browser is active.
-bool BringBrowserWindowToFront(const Browser* browser) WARN_UNUSED_RESULT;
+[[nodiscard]] bool BringBrowserWindowToFront(
+    const BrowserWindowInterface* browser);
 
 // Returns true if the View is focused.
-bool IsViewFocused(const Browser* browser, ViewID vid);
+bool IsViewFocused(const BrowserWindowInterface* browser, ViewID vid);
 
 // Simulates a mouse click on a View in the browser.
+void ClickOnView(views::View* view);
 void ClickOnView(const Browser* browser, ViewID vid);
 
 // Makes focus shift to the given View without clicking it.
@@ -94,41 +88,62 @@ void FocusView(const Browser* browser, ViewID vid);
 void HideNativeWindow(gfx::NativeWindow window);
 
 // Show and focus a native window. Returns true on success.
-bool ShowAndFocusNativeWindow(gfx::NativeWindow window) WARN_UNUSED_RESULT;
+[[nodiscard]] bool ShowAndFocusNativeWindow(gfx::NativeWindow window);
 
-// Sends a key press, blocking until the key press is received or the test times
-// out. This uses ui_controls::SendKeyPress, see it for details. Returns true
-// if the event was successfully sent and received.
-bool SendKeyPressSync(const Browser* browser,
-                      ui::KeyboardCode key,
-                      bool control,
-                      bool shift,
-                      bool alt,
-                      bool command) WARN_UNUSED_RESULT;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-// Sends a key press, blocking until the key press is received or the test times
-// out. This uses ui_controls::SendKeyPress, see it for details. Returns true
-// if the event was successfully sent and received.
-bool SendKeyPressToWindowSync(const gfx::NativeWindow window,
-                              ui::KeyboardCode key,
-                              bool control,
-                              bool shift,
-                              bool alt,
-                              bool command) WARN_UNUSED_RESULT;
+// Sends key press and release events to a `browser` or `window`. Waits until at
+// least the key release (or key press, depending on `wait_for`) events have
+// been dispatched, or the test times out. It's useful to wait for key press
+// instead of key release when the target may be deleted in response to key
+// press. This may wait for key release even if `wait_for` is `kKeyPress` on
+// platforms where it's possible to confirm that key release has been dispatched
+// on a deleted target. This uses `ui_controls::SendKeyPress`, see it for
+// details. Returns true if the event was successfully dispatched.
+[[nodiscard]] bool SendKeyPressSync(
+    const BrowserWindowInterface* browser,
+    ui::KeyboardCode key,
+    bool control,
+    bool shift,
+    bool alt,
+    bool command,
+    ui_controls::KeyEventType wait_for = ui_controls::kKeyRelease);
+[[nodiscard]] bool SendKeyPressToWindowSync(
+    const gfx::NativeWindow window,
+    ui::KeyboardCode key,
+    bool control,
+    bool shift,
+    bool alt,
+    bool command,
+    ui_controls::KeyEventType wait_for = ui_controls::kKeyRelease);
+
+#if !BUILDFLAG(IS_ANDROID)
 
 // Sends a move event blocking until received. Returns true if the event was
 // successfully received. This uses ui_controls::SendMouse***NotifyWhenDone,
 // see it for details.
-bool SendMouseMoveSync(const gfx::Point& location) WARN_UNUSED_RESULT;
-bool SendMouseEventsSync(ui_controls::MouseButton type,
-                         int button_state) WARN_UNUSED_RESULT;
+[[nodiscard]] bool SendMouseMoveSync(
+    const gfx::Point& location,
+    gfx::NativeWindow window_hint = gfx::NativeWindow());
+[[nodiscard]] bool SendMouseEventsSync(
+    ui_controls::MouseButton type,
+    int button_state,
+    gfx::NativeWindow window_hint = gfx::NativeWindow());
 
 // A combination of SendMouseMove to the middle of the view followed by
 // SendMouseEvents. Only exposed for toolkit-views.
 // Alternatives: ClickOnView() and ui::test::EventGenerator.
 #if defined(TOOLKIT_VIEWS)
-void MoveMouseToCenterAndPress(
+void MoveMouseToCenterAndClick(
     views::View* view,
+    ui_controls::MouseButton button,
+    int button_state,
+    base::OnceClosure task,
+    int accelerator_state = ui_controls::kNoAccelerator);
+
+void MoveMouseToCenterWithOffsetAndClick(
+    views::View* view,
+    const gfx::Vector2d& offset,
     ui_controls::MouseButton button,
     int button_state,
     base::OnceClosure task,
@@ -140,18 +155,17 @@ gfx::Point GetCenterInScreenCoordinates(const views::View* view);
 // Blocks until the given view is focused (or not focused, depending on
 // |focused|). Returns immediately if the state is already correct.
 void WaitForViewFocus(Browser* browser, ViewID vid, bool focused);
+void WaitForViewFocus(Browser* browser, views::View* view, bool focused);
 #endif
 
-#if defined(OS_MAC)
-// Send press and release events for |key_code| with selected modifiers and wait
-// until the last event arrives to our NSApp. Events will be sent as CGEvents
-// through HID event tap. |key_code| must be a virtual key code (reference can
-// be found in HIToolbox/Events.h from macOS SDK). |modifier_flags| must be a
-// bitmask from ui::EventFlags.
-void SendGlobalKeyEventsAndWait(int key_code, int modifier_flags);
-
+#if BUILDFLAG(IS_MAC)
 // Clear pressed modifier keys and report true if any key modifiers were down.
 bool ClearKeyEventModifiers();
+
+// Ensures that if no key window is set (can happen in apps that are not
+// frontmost), we simulate the frontmost window becoming key, which triggers
+// any logic that would normally run in this case.
+void HandleMissingKeyWindow();
 #endif
 
 namespace internal {
@@ -173,6 +187,8 @@ display::Display GetSecondaryDisplay(display::Screen* screen);
 // second one is the other display.
 std::pair<display::Display, display::Display> GetDisplays(
     display::Screen* screen);
+
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace ui_test_utils
 

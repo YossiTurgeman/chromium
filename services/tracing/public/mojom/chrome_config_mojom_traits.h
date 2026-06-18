@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 
 #include <string>
 
+#include "base/notreached.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
 #include "services/tracing/public/mojom/perfetto_service.mojom-shared.h"
 #include "third_party/perfetto/include/perfetto/tracing/core/chrome_config.h"
@@ -25,6 +26,15 @@ class StructTraits<tracing::mojom::ChromeConfigDataView,
 
   static bool privacy_filtering_enabled(const perfetto::ChromeConfig& src) {
     return src.privacy_filtering_enabled();
+  }
+
+  static bool convert_to_legacy_json(const perfetto::ChromeConfig& src) {
+    return src.convert_to_legacy_json();
+  }
+
+  static bool event_package_name_filter_enabled(
+      const perfetto::ChromeConfig& src) {
+    return src.event_package_name_filter_enabled();
   }
 
   static bool Read(tracing::mojom::ChromeConfigDataView data,

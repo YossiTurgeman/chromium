@@ -1,6 +1,11 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
 
 #include "chrome/install_static/install_util.h"
 
@@ -8,7 +13,8 @@
 
 #include <tuple>
 
-#include "base/stl_util.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/strings/string_util.h"
 #include "base/test/test_reg_util_win.h"
 #include "base/win/win_util.h"
@@ -22,90 +28,92 @@
 #include "testing/gtest/include/gtest/gtest.h"
 
 using ::testing::ElementsAre;
+using ::testing::Eq;
+using ::testing::HasSubstr;
+using ::testing::Optional;
 using ::testing::StrCaseEq;
+using ::testing::StrNe;
 
 namespace install_static {
 
-// Tests the MatchPattern function in the install_static library.
-TEST(InstallStaticTest, MatchPattern) {
-  EXPECT_TRUE(MatchPattern(L"", L""));
-  EXPECT_TRUE(MatchPattern(L"", L"*"));
-  EXPECT_FALSE(MatchPattern(L"", L"*a"));
-  EXPECT_FALSE(MatchPattern(L"", L"abc"));
-  EXPECT_TRUE(MatchPattern(L"Hello1234", L"He??o*1*"));
-  EXPECT_TRUE(MatchPattern(L"Foo", L"F*?"));
-  EXPECT_TRUE(MatchPattern(L"Foo", L"F*"));
-  EXPECT_FALSE(MatchPattern(L"Foo", L"F*b"));
-  EXPECT_TRUE(MatchPattern(L"abcd", L"*c*d"));
-  EXPECT_TRUE(MatchPattern(L"abcd", L"*?c*d"));
-  EXPECT_FALSE(MatchPattern(L"abcd", L"abcd*efgh"));
-  EXPECT_TRUE(MatchPattern(L"foobarabc", L"*bar*"));
-}
-
-// Tests the install_static::GetSwitchValueFromCommandLine function.
-TEST(InstallStaticTest, GetSwitchValueFromCommandLineTest) {
+TEST(InstallStaticTest, GetCommandLineSwitchTest) {
   // Simple case with one switch.
-  std::wstring value =
-      GetSwitchValueFromCommandLine(L"c:\\temp\\bleh.exe --type=bar", L"type");
-  EXPECT_EQ(L"bar", value);
+  std::optional<std::wstring> opt =
+      GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type=bar", L"type");
+  EXPECT_THAT(opt, Optional(std::wstring(L"bar")));
 
   // Multiple switches with trailing spaces between them.
-  value = GetSwitchValueFromCommandLine(
-      L"c:\\temp\\bleh.exe --type=bar  --abc=def bleh", L"abc");
-  EXPECT_EQ(L"def", value);
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type=bar  --abc=def bleh",
+                             L"abc");
+  EXPECT_THAT(opt, Optional(std::wstring(L"def")));
 
   // Multiple switches with trailing spaces and tabs between them.
-  value = GetSwitchValueFromCommandLine(
+  opt = GetCommandLineSwitch(
       L"c:\\temp\\bleh.exe --type=bar \t\t\t --abc=def bleh", L"abc");
-  EXPECT_EQ(L"def", value);
+  EXPECT_THAT(opt, Optional(std::wstring(L"def")));
 
   // Non existent switch.
-  value = GetSwitchValueFromCommandLine(
-      L"c:\\temp\\bleh.exe --foo=bar  --abc=def bleh", L"type");
-  EXPECT_EQ(L"", value);
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --foo=bar  --abc=def bleh",
+                             L"type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
 
   // Non existent switch.
-  value = GetSwitchValueFromCommandLine(L"c:\\temp\\bleh.exe", L"type");
-  EXPECT_EQ(L"", value);
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe", L"type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
 
   // Non existent switch.
-  value =
-      GetSwitchValueFromCommandLine(L"c:\\temp\\bleh.exe type=bar", L"type");
-  EXPECT_EQ(L"", value);
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe type=bar", L"type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
+
+  // Non existent switch.
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe -type=bar", L"type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
+
+  // Non existent switch.
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --Type=bar", L"type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
+
+  // Non existent switch.
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type=bar", L"Type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
 
   // Trailing spaces after the switch.
-  value = GetSwitchValueFromCommandLine(
-      L"c:\\temp\\bleh.exe --type=bar      \t\t", L"type");
-  EXPECT_EQ(L"bar", value);
+  opt =
+      GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type=bar      \t\t", L"type");
+  EXPECT_THAT(opt, Optional(std::wstring(L"bar")));
 
   // Multiple switches with trailing spaces and tabs between them.
-  value = GetSwitchValueFromCommandLine(
+  opt = GetCommandLineSwitch(
       L"c:\\temp\\bleh.exe --type=bar      \t\t --foo=bleh", L"foo");
-  EXPECT_EQ(L"bleh", value);
+  EXPECT_THAT(opt, Optional(std::wstring(L"bleh")));
 
   // Nothing after a switch.
-  value = GetSwitchValueFromCommandLine(L"c:\\temp\\bleh.exe --type=", L"type");
-  EXPECT_TRUE(value.empty());
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type=", L"type");
+  EXPECT_THAT(opt, Optional(std::wstring()));
 
   // Whitespace after a switch.
-  value =
-      GetSwitchValueFromCommandLine(L"c:\\temp\\bleh.exe --type= ", L"type");
-  EXPECT_TRUE(value.empty());
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type= ", L"type");
+  EXPECT_THAT(opt, Optional(std::wstring()));
 
   // Just tabs after a switch.
-  value = GetSwitchValueFromCommandLine(L"c:\\temp\\bleh.exe --type=\t\t\t",
-                                        L"type");
-  EXPECT_TRUE(value.empty());
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type=\t\t\t", L"type");
+  EXPECT_THAT(opt, Optional(std::wstring()));
 
   // Bad command line without closing quotes. Should not crash.
-  value = GetSwitchValueFromCommandLine(L"\"blah --type=\t\t\t", L"type");
-  EXPECT_TRUE(value.empty());
+  opt = GetCommandLineSwitch(L"\"blah --type=\t\t\t", L"type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
 
   // Anything following "--" should be considered args and therefore ignored.
-  value = GetSwitchValueFromCommandLine(L"blah -- --type=bleh", L"type");
-  EXPECT_TRUE(value.empty());
+  opt = GetCommandLineSwitch(L"blah -- --type=bleh", L"type");
+  EXPECT_THAT(opt, Eq(std::nullopt));
+
+  // Duplicate switch value.
+  opt = GetCommandLineSwitch(L"c:\\temp\\bleh.exe --type=foo --type=bar",
+                             L"type");
+  EXPECT_THAT(opt, Optional(std::wstring(L"foo")));
 }
 
+// Tests the install_static::TokenizeCommandLineToArray function.
 TEST(InstallStaticTest, SpacesAndQuotesInCommandLineArguments) {
   std::vector<std::wstring> tokenized;
 
@@ -279,12 +287,43 @@ TEST(InstallStaticTest, SpacesAndQuotesWindowsInspired) {
 TEST(InstallStaticTest, BrowserProcessTest) {
   EXPECT_FALSE(IsProcessTypeInitialized());
   InitializeProcessType();
-  EXPECT_FALSE(IsNonBrowserProcess());
+  EXPECT_TRUE(IsBrowserProcess());
+}
+
+TEST(InstallStaticTest, CreateUniqueTempDirectoryTest) {
+  constexpr std::wstring_view kPrefix(L"Foobar");
+  std::wstring dir = CreateUniqueTempDirectory(kPrefix);
+  ASSERT_FALSE(dir.empty());
+
+  EXPECT_THAT(dir, HasSubstr(L"\\" + std::wstring(kPrefix)));
+
+  base::FilePath dir_path(dir);
+  EXPECT_TRUE(base::DirectoryExists(dir_path));
+  EXPECT_TRUE(dir_path.IsAbsolute());
+
+  EXPECT_TRUE(base::DeleteFile(dir_path));
+}
+
+TEST(InstallStaticTest, CreateMoreThanOneUniqueTempDirectoryTest) {
+  std::wstring dir1 = CreateUniqueTempDirectory({});
+  ASSERT_FALSE(dir1.empty());
+
+  std::wstring dir2 = CreateUniqueTempDirectory({});
+  ASSERT_FALSE(dir2.empty());
+
+  EXPECT_THAT(dir2, StrNe(dir1));
+
+  EXPECT_TRUE(base::DeleteFile(base::FilePath(dir1)));
+  EXPECT_TRUE(base::DeleteFile(base::FilePath(dir2)));
 }
 
 class InstallStaticUtilTest
     : public ::testing::TestWithParam<
           std::tuple<InstallConstantIndex, const char*>> {
+ public:
+  InstallStaticUtilTest(const InstallStaticUtilTest&) = delete;
+  InstallStaticUtilTest& operator=(const InstallStaticUtilTest&) = delete;
+
  protected:
   InstallStaticUtilTest()
       : system_level_(std::string(std::get<1>(GetParam())) != "user"),
@@ -295,14 +334,14 @@ class InstallStaticUtilTest
 
   void SetUp() override {
     ASSERT_TRUE(!system_level_ || mode_->supports_system_level);
-    base::string16 path;
+    std::wstring path;
     ASSERT_NO_FATAL_FAILURE(
         override_manager_.OverrideRegistry(root_key_, &path));
     nt::SetTestingOverride(nt_root_key_, path);
   }
 
   void TearDown() override {
-    nt::SetTestingOverride(nt_root_key_, base::string16());
+    nt::SetTestingOverride(nt_root_key_, std::wstring());
   }
 
   bool system_level() const { return system_level_; }
@@ -355,8 +394,6 @@ class InstallStaticUtilTest
   const HKEY root_key_;
   const nt::ROOT_KEY nt_root_key_;
   registry_util::RegistryOverrideManager override_manager_;
-
-  DISALLOW_COPY_AND_ASSIGN(InstallStaticUtilTest);
 };
 
 TEST_P(InstallStaticUtilTest, GetChromeInstallSubDirectory) {
@@ -369,6 +406,12 @@ TEST_P(InstallStaticUtilTest, GetChromeInstallSubDirectory) {
       L"Google\\Chrome Dev",
       L"Google\\Chrome SxS",
   };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  // The directory strings for the brand's install modes; parallel to
+  // kInstallModes.
+  static constexpr const wchar_t* kInstallDirs[] = {
+      L"Google\\Chrome for Testing",
+  };
 #else
   // The directory strings for the brand's install modes; parallel to
   // kInstallModes.
@@ -376,7 +419,7 @@ TEST_P(InstallStaticUtilTest, GetChromeInstallSubDirectory) {
       L"Chromium",
   };
 #endif
-  static_assert(base::size(kInstallDirs) == NUM_INSTALL_MODES,
+  static_assert(std::size(kInstallDirs) == NUM_INSTALL_MODES,
                 "kInstallDirs out of date.");
   EXPECT_THAT(GetChromeInstallSubDirectory(),
               StrCaseEq(kInstallDirs[std::get<0>(GetParam())]));
@@ -392,6 +435,12 @@ TEST_P(InstallStaticUtilTest, GetRegistryPath) {
       L"Software\\Google\\Chrome Dev",
       L"Software\\Google\\Chrome SxS",
   };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  // The registry path strings for the brand's install modes; parallel to
+  // kInstallModes.
+  static constexpr const wchar_t* kRegistryPaths[] = {
+      L"Software\\Google\\Chrome for Testing",
+  };
 #else
   // The registry path strings for the brand's install modes; parallel to
   // kInstallModes.
@@ -399,7 +448,7 @@ TEST_P(InstallStaticUtilTest, GetRegistryPath) {
       L"Software\\Chromium",
   };
 #endif
-  static_assert(base::size(kRegistryPaths) == NUM_INSTALL_MODES,
+  static_assert(std::size(kRegistryPaths) == NUM_INSTALL_MODES,
                 "kRegistryPaths out of date.");
   EXPECT_THAT(GetRegistryPath(),
               StrCaseEq(kRegistryPaths[std::get<0>(GetParam())]));
@@ -418,6 +467,13 @@ TEST_P(InstallStaticUtilTest, GetUninstallRegistryPath) {
       L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\"  // (cont'd)
       L"Google Chrome SxS",
   };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  // The registry path strings for the brand's install modes; parallel to
+  // kInstallModes.
+  static constexpr const wchar_t* kUninstallRegistryPaths[] = {
+      L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Google Chrome "
+      L"for Testing",
+  };
 #else
   // The registry path strings for the brand's install modes; parallel to
   // kInstallModes.
@@ -425,7 +481,7 @@ TEST_P(InstallStaticUtilTest, GetUninstallRegistryPath) {
       L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Chromium",
   };
 #endif
-  static_assert(base::size(kUninstallRegistryPaths) == NUM_INSTALL_MODES,
+  static_assert(std::size(kUninstallRegistryPaths) == NUM_INSTALL_MODES,
                 "kUninstallRegistryPaths out of date.");
   EXPECT_THAT(GetUninstallRegistryPath(),
               StrCaseEq(kUninstallRegistryPaths[std::get<0>(GetParam())]));
@@ -444,7 +500,7 @@ TEST_P(InstallStaticUtilTest, GetAppGuid) {
       L"{401C381F-E0DE-4B85-8BD8-3F3F14FBDA57}",  // Google Chrome Dev.
       L"{4EA16AC7-FD5A-47C3-875B-DBF4A2008C20}",  // Google Chrome SxS (Canary).
   };
-  static_assert(base::size(kAppGuids) == NUM_INSTALL_MODES,
+  static_assert(std::size(kAppGuids) == NUM_INSTALL_MODES,
                 "kAppGuids out of date.");
   EXPECT_THAT(GetAppGuid(), StrCaseEq(kAppGuids[std::get<0>(GetParam())]));
 #else
@@ -461,13 +517,18 @@ TEST_P(InstallStaticUtilTest, GetBaseAppId) {
       L"ChromeDev",
       L"ChromeCanary",
   };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  // The base app ids for the brand's install modes; parallel to kInstallModes.
+  static constexpr const wchar_t* kBaseAppIds[] = {
+      L"ChromeForTesting",
+  };
 #else
   // The base app ids for the brand's install modes; parallel to kInstallModes.
   static constexpr const wchar_t* kBaseAppIds[] = {
       L"Chromium",
   };
 #endif
-  static_assert(base::size(kBaseAppIds) == NUM_INSTALL_MODES,
+  static_assert(std::size(kBaseAppIds) == NUM_INSTALL_MODES,
                 "kBaseAppIds out of date.");
   EXPECT_THAT(GetBaseAppId(), StrCaseEq(kBaseAppIds[std::get<0>(GetParam())]));
 }
@@ -504,6 +565,21 @@ TEST_P(InstallStaticUtilTest, GetToastActivatorClsid) {
       L"{F01C03EB-D431-4C83-8D7A-902771E732FA}",  // Google Chrome Dev.
       L"{FA372A6E-149F-4E95-832D-8F698D40AD7F}",  // Google Chrome SxS (Canary).
   };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  // The toast activator CLSIDs for the brand's install modes; parallel to
+  // kInstallModes.
+  static constexpr CLSID kToastActivatorClsids[] = {
+      {0x77ED8F9B,
+       0xE27A,
+       0x499F,
+       {0x8E, 0x2F, 0xD7, 0xC0, 0x41, 0x57, 0xCF, 0x64}}  // Google Chrome for
+                                                          // Testing.
+  };
+
+  // The string representation of the CLSIDs above.
+  static constexpr const wchar_t* kToastActivatorClsidsString[] = {
+      L"{77ED8F9B-E27A-499F-8E2F-D7C04157CF64}"  // Google Chrome for Testing.
+  };
 #else
   // The toast activator CLSIDs for the brand's install modes; parallel to
   // kInstallModes.
@@ -519,14 +595,14 @@ TEST_P(InstallStaticUtilTest, GetToastActivatorClsid) {
       L"{635EFA6F-08D6-4EC9-BD14-8A0FDE975159}"  // Chromium.
   };
 #endif
-  static_assert(base::size(kToastActivatorClsids) == NUM_INSTALL_MODES,
+  static_assert(std::size(kToastActivatorClsids) == NUM_INSTALL_MODES,
                 "kToastActivatorClsids out of date.");
 
   EXPECT_EQ(GetToastActivatorClsid(),
             kToastActivatorClsids[std::get<0>(GetParam())]);
 
   auto clsid_str = base::win::WStringFromGUID(GetToastActivatorClsid());
-  EXPECT_THAT(base::as_wcstr(clsid_str.c_str()),
+  EXPECT_THAT(clsid_str.c_str(),
               StrCaseEq(kToastActivatorClsidsString[std::get<0>(GetParam())]));
 }
 
@@ -560,6 +636,20 @@ TEST_P(InstallStaticUtilTest, GetElevatorClsid) {
       L"{DA7FDCA5-2CAA-4637-AA17-0740584DE7DA}",  // Google Chrome Dev.
       L"{704C2872-2049-435E-A469-0A534313C42B}",  // Google Chrome SxS (Canary).
   };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  // The Elevator CLSIDs, one for each of the kInstallModes.
+  static constexpr CLSID kElevatorClsids[] = {
+      {0x724349BF,
+       0xE1CF,
+       0x4481,
+       {0xA6, 0x4D, 0x8C, 0xD1, 0x01, 0x83, 0xCA, 0x03}},  // Google Chrome for
+                                                           // Testing
+  };
+
+  // The string representation of the CLSIDs above.
+  static constexpr const wchar_t* kElevatorClsidsString[] = {
+      L"{724349BF-E1CF-4481-A64D-8CD10183CA03}",  // Google Chrome for Testing
+  };
 #else
   // The Elevator CLSIDs, one for each of the kInstallModes.
   static constexpr CLSID kElevatorClsids[] = {
@@ -574,13 +664,13 @@ TEST_P(InstallStaticUtilTest, GetElevatorClsid) {
       L"{D133B120-6DB4-4D6B-8BFE-83BF8CA1B1B0}",  // Chromium.
   };
 #endif
-  static_assert(base::size(kElevatorClsids) == NUM_INSTALL_MODES,
+  static_assert(std::size(kElevatorClsids) == NUM_INSTALL_MODES,
                 "kElevatorClsids needs to be updated for any new modes.");
 
   EXPECT_EQ(GetElevatorClsid(), kElevatorClsids[std::get<0>(GetParam())]);
 
   auto clsid_str = base::win::WStringFromGUID(GetElevatorClsid());
-  EXPECT_THAT(base::as_wcstr(clsid_str.c_str()),
+  EXPECT_THAT(clsid_str.c_str(),
               StrCaseEq(kElevatorClsidsString[std::get<0>(GetParam())]));
 }
 
@@ -588,65 +678,81 @@ TEST_P(InstallStaticUtilTest, GetElevatorIid) {
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
   // The Elevator IIDs, one for each of the kInstallModes.
   static constexpr IID kElevatorIids[] = {
-      {0x463abecf,
-       0x410d,
-       0x407f,
-       {0x8a, 0xf5, 0xd, 0xf3, 0x5a, 0x0, 0x5c,
-        0xc8}},  // IElevator IID and TypeLib
-                 // {463ABECF-410D-407F-8AF5-0DF35A005CC8} for Google Chrome.
-      {0xa2721d66,
-       0x376e,
-       0x4d2f,
-       {0x9f, 0xf, 0x90, 0x70, 0xe9, 0xa4, 0x2b,
-        0x5f}},  // IElevator IID and TypeLib
-                 // {A2721D66-376E-4D2F-9F0F-9070E9A42B5F} for Google Chrome
+      {0x1bf5208b,
+       0x295f,
+       0x4992,
+       {0xb5, 0xf4, 0x3a, 0x9b, 0xb6, 0x49, 0x48,
+        0x38}},  // IElevator IID and TypeLib
+                 // {1BF5208B-295F-4992-B5F4-3A9BB6494838} for Google Chrome.
+      {0xb96a14b8,
+       0xd0b0,
+       0x44d8,
+       {0xba, 0x68, 0x23, 0x85, 0xb2, 0xa0, 0x32,
+        0x54}},  // IElevator IID and TypeLib
+                 // {B96A14B8-D0B0-44D8-BA68-2385B2A03254} for Google Chrome
                  // Beta.
-      {0xbb2aa26b,
-       0x343a,
-       0x4072,
-       {0x8b, 0x6f, 0x80, 0x55, 0x7b, 0x8c, 0xe5,
-        0x71}},  // IElevator IID and TypeLib
-                 // {BB2AA26B-343A-4072-8B6F-80557B8CE571} for Google Chrome
-                 // Dev.
-      {0x4f7ce041,
-       0x28e9,
-       0x484f,
-       {0x9d, 0xd0, 0x61, 0xa8, 0xca, 0xce, 0xfe,
-        0xe4}},  // IElevator IID and TypeLib
-                 // {4F7CE041-28E9-484F-9DD0-61A8CACEFEE4} for Google Chrome
-                 // Canary.
+      {0x3fefa48e,
+       0xc8bf,
+       0x461f,
+       {0xae, 0xd6, 0x63, 0xf6, 0x58, 0xcc, 0x85,
+        0xa}},  // IElevator IID and TypeLib
+                // {3FEFA48E-C8BF-461F-AED6-63F658CC850A} for Google Chrome
+                // Dev.
+      {0xff672e9f,
+       0x994,
+       0x4322,
+       {0x81, 0xe5, 0x3a, 0x5a, 0x97, 0x46, 0x14,
+        0xa}},  // IElevator IID and TypeLib
+                // {FF672E9F-0994-4322-81E5-3A5A9746140A} for Google Chrome
+                // Canary.
   };
 
   // The string representation of the IIDs above.
   static constexpr const wchar_t* kElevatorIidsString[] = {
-      L"{463ABECF-410D-407F-8AF5-0DF35A005CC8}",  // Google Chrome.
-      L"{A2721D66-376E-4D2F-9F0F-9070E9A42B5F}",  // Google Chrome Beta.
-      L"{BB2AA26B-343A-4072-8B6F-80557B8CE571}",  // Google Chrome Dev.
-      L"{4F7CE041-28E9-484F-9DD0-61A8CACEFEE4}",  // Google Chrome Canary.
+      L"{1BF5208B-295F-4992-B5F4-3A9BB6494838}",  // Google Chrome.
+      L"{B96A14B8-D0B0-44D8-BA68-2385B2A03254}",  // Google Chrome Beta.
+      L"{3FEFA48E-C8BF-461F-AED6-63F658CC850A}",  // Google Chrome Dev.
+      L"{FF672E9F-0994-4322-81E5-3A5A9746140A}",  // Google Chrome Canary.
+  };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  // The Elevator IIDs, one for each of the kInstallModes.
+  static constexpr IID kElevatorIids[] = {
+      {0x3DC48E97,
+       0x47D0,
+       0x476F,
+       {0x8F, 0x89, 0x07, 0x92, 0xFC, 0x61, 0x15,
+        0x67}},  // IElevator IID and TypeLib
+                 // {3DC48E97-47D0-476F-8F89-0792FC611567} for Google Chrome for
+                 // Testing
+  };
+
+  // The string representation of the IIDs above.
+  static constexpr const wchar_t* kElevatorIidsString[] = {
+      L"{3DC48E97-47D0-476F-8F89-0792FC611567}",  // Google Chrome for Testing
   };
 #else
   // The Elevator IIDs, one for each of the kInstallModes.
   static constexpr IID kElevatorIids[] = {
-      {0xb88c45b9,
-       0x8825,
-       0x4629,
-       {0xb8, 0x3e, 0x77, 0xcc, 0x67, 0xd9, 0xce,
-        0xed}},  // IElevator IID and TypeLib
-                 // {B88C45B9-8825-4629-B83E-77CC67D9CEED} for Chromium.
+      {0xbb19a0e5,
+       0xc6,
+       0x4966,
+       {0x94, 0xb2, 0x5a, 0xfe, 0xc6, 0xfe, 0xd9,
+        0x3a}},  // IElevator IID and TypeLib
+                 // {BB19A0E5-00C6-4966-94B2-5AFEC6FED93A} for Chromium.
   };
 
   // The string representation of the IIDs above.
   static constexpr const wchar_t* kElevatorIidsString[] = {
-      L"{B88C45B9-8825-4629-B83E-77CC67D9CEED}",  // Chromium.
+      L"{BB19A0E5-00C6-4966-94B2-5AFEC6FED93A}",  // Chromium.
   };
 #endif
-  static_assert(base::size(kElevatorIids) == NUM_INSTALL_MODES,
+  static_assert(std::size(kElevatorIids) == NUM_INSTALL_MODES,
                 "kElevatorIids needs to be updated for any new modes.");
 
   EXPECT_EQ(GetElevatorIid(), kElevatorIids[std::get<0>(GetParam())]);
 
   auto iid_str = base::win::WStringFromGUID(GetElevatorIid());
-  EXPECT_THAT(base::as_wcstr(iid_str.c_str()),
+  EXPECT_THAT(iid_str.c_str(),
               StrCaseEq(kElevatorIidsString[std::get<0>(GetParam())]));
 }
 
@@ -710,7 +816,8 @@ TEST_P(InstallStaticUtilTest, UsageStatsPolicy) {
 }
 
 TEST_P(InstallStaticUtilTest, GetChromeChannelName) {
-  EXPECT_EQ(default_channel(), GetChromeChannelName());
+  EXPECT_EQ(default_channel(),
+            GetChromeChannelName(/*with_extended_stable=*/false));
 }
 
 TEST_P(InstallStaticUtilTest, GetSandboxSidPrefix) {
@@ -724,6 +831,11 @@ TEST_P(InstallStaticUtilTest, GetSandboxSidPrefix) {
       L"924012152-",  // Google Chrome Dev.
       L"S-1-15-2-3251537155-1984446955-2931258699-841473695-1938553385-"
       L"924012150-",  // Google Chrome SxS (Canary).
+  };
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  static constexpr const wchar_t* kSandBoxSids[] = {
+      L"S-1-15-2-3251537155-1984446955-2931258699-841473695-1938553385-"
+      L"924012153-",  // Google Chrome for Testing
   };
 #else
   static constexpr const wchar_t* kSandBoxSids[] = {
@@ -755,6 +867,13 @@ INSTANTIATE_TEST_SUITE_P(Canary,
                          InstallStaticUtilTest,
                          testing::Combine(testing::Values(CANARY_INDEX),
                                           testing::Values("user")));
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+// Chrome for Testing is only at user level.
+INSTANTIATE_TEST_SUITE_P(
+    ChromeForTesting,
+    InstallStaticUtilTest,
+    testing::Combine(testing::Values(GOOGLE_CHROME_FOR_TESTING_INDEX),
+                     testing::Values("user")));
 #else   // BUILDFLAG(GOOGLE_CHROME_BRANDING)
 // Chromium supports user and system levels.
 INSTANTIATE_TEST_SUITE_P(Chromium,

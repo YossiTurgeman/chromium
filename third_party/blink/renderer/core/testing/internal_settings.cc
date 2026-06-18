@@ -29,77 +29,13 @@
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/supplementable.h"
 #include "third_party/blink/renderer/platform/text/locale_to_script_mapping.h"
 
-#define InternalSettingsGuardForSettingsReturn(returnValue)             \
-  if (!settings()) {                                                    \
-    exceptionState.throwDOMException(                                   \
-        InvalidAccessError, "The settings object cannot be obtained."); \
-    return returnValue;                                                 \
-  }
-
-#define InternalSettingsGuardForSettings()          \
-  if (!GetSettings()) {                             \
-    exception_state.ThrowDOMException(              \
-        DOMExceptionCode::kInvalidAccessError,      \
-        "The settings object cannot be obtained."); \
-    return;                                         \
-  }
-
-#define InternalSettingsGuardForPage()                                       \
-  if (!page()) {                                                             \
-    exceptionState.throwDOMException(InvalidAccessError,                     \
-                                     "The page object cannot be obtained."); \
-    return;                                                                  \
-  }
-
 namespace blink {
 
-InternalSettings::Backup::Backup(Settings* settings)
-    : original_csp_(RuntimeEnabledFeatures::
-                        ExperimentalContentSecurityPolicyFeaturesEnabled()),
-      original_editing_behavior_(settings->GetEditingBehaviorType()),
-      original_text_autosizing_enabled_(settings->TextAutosizingEnabled()),
-      original_text_autosizing_window_size_override_(
-          settings->TextAutosizingWindowSizeOverride()),
-      original_accessibility_font_scale_factor_(
-          settings->GetAccessibilityFontScaleFactor()),
-      original_media_type_override_(settings->GetMediaTypeOverride()),
-      original_display_mode_override_(settings->GetDisplayModeOverride()),
-      original_mock_gesture_tap_highlights_enabled_(
-          settings->GetMockGestureTapHighlightsEnabled()),
-      lang_attribute_aware_form_control_ui_enabled_(
-          RuntimeEnabledFeatures::LangAttributeAwareFormControlUIEnabled()),
-      images_enabled_(settings->GetImagesEnabled()),
-      default_video_poster_url_(settings->GetDefaultVideoPosterURL()),
-      original_image_animation_policy_(settings->GetImageAnimationPolicy()),
-      original_scroll_top_left_interop_enabled_(
-          RuntimeEnabledFeatures::ScrollTopLeftInteropEnabled()) {}
-
-void InternalSettings::Backup::RestoreTo(Settings* settings) {
-  RuntimeEnabledFeatures::SetExperimentalContentSecurityPolicyFeaturesEnabled(
-      original_csp_);
-  settings->SetEditingBehaviorType(original_editing_behavior_);
-  settings->SetTextAutosizingEnabled(original_text_autosizing_enabled_);
-  settings->SetTextAutosizingWindowSizeOverride(
-      original_text_autosizing_window_size_override_);
-  settings->SetAccessibilityFontScaleFactor(
-      original_accessibility_font_scale_factor_);
-  settings->SetMediaTypeOverride(original_media_type_override_);
-  settings->SetDisplayModeOverride(original_display_mode_override_);
-  settings->SetMockGestureTapHighlightsEnabled(
-      original_mock_gesture_tap_highlights_enabled_);
-  RuntimeEnabledFeatures::SetLangAttributeAwareFormControlUIEnabled(
-      lang_attribute_aware_form_control_ui_enabled_);
-  settings->SetImagesEnabled(images_enabled_);
-  settings->SetDefaultVideoPosterURL(default_video_poster_url_);
-  settings->GetGenericFontFamilySettings().Reset();
-  settings->SetImageAnimationPolicy(original_image_animation_policy_);
-  RuntimeEnabledFeatures::SetScrollTopLeftInteropEnabled(
-      original_scroll_top_left_interop_enabled_);
-}
+using mojom::blink::HoverType;
+using mojom::blink::PointerType;
 
 InternalSettings* InternalSettings::From(Page& page) {
   InternalSettings* supplement = Supplement<Page>::From<InternalSettings>(page);
@@ -110,174 +46,87 @@ InternalSettings* InternalSettings::From(Page& page) {
   return supplement;
 }
 
+InternalSettings::InternalSettings(Page& page)
+    : InternalSettingsGenerated(page),
+      generic_font_family_settings_backup_(
+          GetSettings().GetGenericFontFamilySettings()) {}
+
 InternalSettings::~InternalSettings() = default;
 
-InternalSettings::InternalSettings(Page& page)
-    : InternalSettingsGenerated(&page),
-      InternalSettingsPageSupplementBase(page),
-      backup_(&page.GetSettings()) {}
-
 void InternalSettings::ResetToConsistentState() {
-  backup_.RestoreTo(GetSettings());
-  backup_ = Backup(GetSettings());
-  backup_.original_text_autosizing_enabled_ =
-      GetSettings()->TextAutosizingEnabled();
-
-  InternalSettingsGenerated::resetToConsistentState();
-}
-
-Settings* InternalSettings::GetSettings() const {
-  if (!GetPage())
-    return nullptr;
-  return &GetPage()->GetSettings();
-}
-
-void InternalSettings::setHideScrollbars(bool enabled,
-                                         ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetHideScrollbars(enabled);
-}
-
-void InternalSettings::setMockGestureTapHighlightsEnabled(
-    bool enabled,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetMockGestureTapHighlightsEnabled(enabled);
-}
-
-void InternalSettings::setExperimentalContentSecurityPolicyFeaturesEnabled(
-    bool enabled) {
-  RuntimeEnabledFeatures::SetExperimentalContentSecurityPolicyFeaturesEnabled(
-      enabled);
-}
-
-void InternalSettings::setViewportEnabled(bool enabled,
-                                          ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetViewportEnabled(enabled);
-}
-
-void InternalSettings::setViewportMetaEnabled(bool enabled,
-                                              ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetViewportMetaEnabled(enabled);
+  InternalSettingsGenerated::ResetToConsistentState();
+  GetSettings().GetGenericFontFamilySettings() =
+      generic_font_family_settings_backup_;
 }
 
 void InternalSettings::setViewportStyle(const String& style,
                                         ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  if (EqualIgnoringASCIICase(style, "default"))
-    GetSettings()->SetViewportStyle(WebViewportStyle::kDefault);
-  else if (EqualIgnoringASCIICase(style, "mobile"))
-    GetSettings()->SetViewportStyle(WebViewportStyle::kMobile);
-  else if (EqualIgnoringASCIICase(style, "television"))
-    GetSettings()->SetViewportStyle(WebViewportStyle::kTelevision);
-  else
+  if (EqualIgnoringAsciiCase(style, "default")) {
+    GetSettings().SetViewportStyle(mojom::blink::ViewportStyle::kDefault);
+  } else if (EqualIgnoringAsciiCase(style, "mobile")) {
+    GetSettings().SetViewportStyle(mojom::blink::ViewportStyle::kMobile);
+  } else if (EqualIgnoringAsciiCase(style, "television")) {
+    GetSettings().SetViewportStyle(mojom::blink::ViewportStyle::kTelevision);
+  } else {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
         "The viewport style type provided ('" + style + "') is invalid.");
+  }
+}
+
+void InternalSettings::SetFontFamily(
+    const AtomicString& family,
+    const String& script,
+    bool (GenericFontFamilySettings::*update_method)(const AtomicString&,
+                                                     UScriptCode)) {
+  UScriptCode code = ScriptNameToCode(script);
+  if (code == USCRIPT_INVALID_CODE) {
+    return;
+  }
+  if ((GetSettings().GetGenericFontFamilySettings().*update_method)(family,
+                                                                    code)) {
+    GetSettings().NotifyGenericFontFamilyChange();
+  }
 }
 
 void InternalSettings::setStandardFontFamily(const AtomicString& family,
-                                             const String& script,
-                                             ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  UScriptCode code = ScriptNameToCode(script);
-  if (code == USCRIPT_INVALID_CODE)
-    return;
-  if (GetSettings()->GetGenericFontFamilySettings().UpdateStandard(family,
-                                                                   code))
-    GetSettings()->NotifyGenericFontFamilyChange();
+                                             const String& script) {
+  SetFontFamily(family, script, &GenericFontFamilySettings::UpdateStandard);
 }
 
 void InternalSettings::setSerifFontFamily(const AtomicString& family,
-                                          const String& script,
-                                          ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  UScriptCode code = ScriptNameToCode(script);
-  if (code == USCRIPT_INVALID_CODE)
-    return;
-  if (GetSettings()->GetGenericFontFamilySettings().UpdateSerif(family, code))
-    GetSettings()->NotifyGenericFontFamilyChange();
+                                          const String& script) {
+  SetFontFamily(family, script, &GenericFontFamilySettings::UpdateSerif);
 }
 
 void InternalSettings::setSansSerifFontFamily(const AtomicString& family,
-                                              const String& script,
-                                              ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  UScriptCode code = ScriptNameToCode(script);
-  if (code == USCRIPT_INVALID_CODE)
-    return;
-  if (GetSettings()->GetGenericFontFamilySettings().UpdateSansSerif(family,
-                                                                    code))
-    GetSettings()->NotifyGenericFontFamilyChange();
+                                              const String& script) {
+  SetFontFamily(family, script, &GenericFontFamilySettings::UpdateSansSerif);
 }
 
 void InternalSettings::setFixedFontFamily(const AtomicString& family,
-                                          const String& script,
-                                          ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  UScriptCode code = ScriptNameToCode(script);
-  if (code == USCRIPT_INVALID_CODE)
-    return;
-  if (GetSettings()->GetGenericFontFamilySettings().UpdateFixed(family, code))
-    GetSettings()->NotifyGenericFontFamilyChange();
+                                          const String& script) {
+  SetFontFamily(family, script, &GenericFontFamilySettings::UpdateFixed);
 }
 
 void InternalSettings::setCursiveFontFamily(const AtomicString& family,
-                                            const String& script,
-                                            ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  UScriptCode code = ScriptNameToCode(script);
-  if (code == USCRIPT_INVALID_CODE)
-    return;
-  if (GetSettings()->GetGenericFontFamilySettings().UpdateCursive(family, code))
-    GetSettings()->NotifyGenericFontFamilyChange();
+                                            const String& script) {
+  SetFontFamily(family, script, &GenericFontFamilySettings::UpdateCursive);
 }
 
 void InternalSettings::setFantasyFontFamily(const AtomicString& family,
-                                            const String& script,
-                                            ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  UScriptCode code = ScriptNameToCode(script);
-  if (code == USCRIPT_INVALID_CODE)
-    return;
-  if (GetSettings()->GetGenericFontFamilySettings().UpdateFantasy(family, code))
-    GetSettings()->NotifyGenericFontFamilyChange();
+                                            const String& script) {
+  SetFontFamily(family, script, &GenericFontFamilySettings::UpdateFantasy);
 }
 
-void InternalSettings::setPictographFontFamily(
-    const AtomicString& family,
-    const String& script,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  UScriptCode code = ScriptNameToCode(script);
-  if (code == USCRIPT_INVALID_CODE)
-    return;
-  if (GetSettings()->GetGenericFontFamilySettings().UpdatePictograph(family,
-                                                                     code))
-    GetSettings()->NotifyGenericFontFamilyChange();
-}
-
-void InternalSettings::setTextAutosizingEnabled(
-    bool enabled,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetTextAutosizingEnabled(enabled);
-}
-
-void InternalSettings::setTextAutosizingWindowSizeOverride(
-    int width,
-    int height,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetTextAutosizingWindowSizeOverride(IntSize(width, height));
+void InternalSettings::setMathFontFamily(const AtomicString& family,
+                                         const String& script) {
+  SetFontFamily(family, script, &GenericFontFamilySettings::UpdateMath);
 }
 
 void InternalSettings::setTextTrackKindUserPreference(
     const String& preference,
     ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
   String token = preference.StripWhiteSpace();
   TextTrackKindUserPreference user_preference =
       TextTrackKindUserPreference::kDefault;
@@ -295,99 +144,64 @@ void InternalSettings::setTextTrackKindUserPreference(
     return;
   }
 
-  GetSettings()->SetTextTrackKindUserPreference(user_preference);
-}
-
-void InternalSettings::setMediaTypeOverride(const String& media_type,
-                                            ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetMediaTypeOverride(media_type);
-}
-
-void InternalSettings::setAccessibilityFontScaleFactor(
-    float font_scale_factor,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetAccessibilityFontScaleFactor(font_scale_factor);
+  GetSettings().SetTextTrackKindUserPreference(user_preference);
 }
 
 void InternalSettings::setEditingBehavior(const String& editing_behavior,
                                           ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  if (EqualIgnoringASCIICase(editing_behavior, "win"))
-    GetSettings()->SetEditingBehaviorType(web_pref::kEditingWindowsBehavior);
-  else if (EqualIgnoringASCIICase(editing_behavior, "mac"))
-    GetSettings()->SetEditingBehaviorType(web_pref::kEditingMacBehavior);
-  else if (EqualIgnoringASCIICase(editing_behavior, "unix"))
-    GetSettings()->SetEditingBehaviorType(web_pref::kEditingUnixBehavior);
-  else if (EqualIgnoringASCIICase(editing_behavior, "android"))
-    GetSettings()->SetEditingBehaviorType(web_pref::kEditingAndroidBehavior);
-  else if (EqualIgnoringASCIICase(editing_behavior, "chromeos"))
-    GetSettings()->SetEditingBehaviorType(web_pref::kEditingChromeOSBehavior);
-  else
+  if (EqualIgnoringAsciiCase(editing_behavior, "win")) {
+    GetSettings().SetEditingBehaviorType(
+        mojom::EditingBehavior::kEditingWindowsBehavior);
+  } else if (EqualIgnoringAsciiCase(editing_behavior, "mac")) {
+    GetSettings().SetEditingBehaviorType(
+        mojom::EditingBehavior::kEditingMacBehavior);
+  } else if (EqualIgnoringAsciiCase(editing_behavior, "unix")) {
+    GetSettings().SetEditingBehaviorType(
+        mojom::EditingBehavior::kEditingUnixBehavior);
+  } else if (EqualIgnoringAsciiCase(editing_behavior, "android")) {
+    GetSettings().SetEditingBehaviorType(
+        mojom::EditingBehavior::kEditingAndroidBehavior);
+  } else if (EqualIgnoringAsciiCase(editing_behavior, "chromeos")) {
+    GetSettings().SetEditingBehaviorType(
+        mojom::EditingBehavior::kEditingChromeOSBehavior);
+  } else {
     exception_state.ThrowDOMException(DOMExceptionCode::kSyntaxError,
                                       "The editing behavior type provided ('" +
                                           editing_behavior + "') is invalid.");
-}
-
-void InternalSettings::setLangAttributeAwareFormControlUIEnabled(bool enabled) {
-  RuntimeEnabledFeatures::SetLangAttributeAwareFormControlUIEnabled(enabled);
-}
-
-void InternalSettings::setImagesEnabled(bool enabled,
-                                        ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetImagesEnabled(enabled);
-}
-
-void InternalSettings::setDefaultVideoPosterURL(
-    const String& url,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetDefaultVideoPosterURL(url);
-}
-
-void InternalSettings::Trace(Visitor* visitor) const {
-  InternalSettingsGenerated::Trace(visitor);
-  Supplement<Page>::Trace(visitor);
+  }
 }
 
 void InternalSettings::setAvailablePointerTypes(
     const String& pointers,
     ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-
   // Allow setting multiple pointer types by passing comma seperated list
   // ("coarse,fine").
-  Vector<String> tokens;
-  pointers.Split(",", false, tokens);
+  Vector<StringView> tokens = StringView(pointers).SplitSkippingEmpty(',');
 
   int pointer_types = 0;
-  for (const String& split_token : tokens) {
-    String token = split_token.StripWhiteSpace();
+  for (const StringView& split_token : tokens) {
+    StringView token = split_token.StripWhiteSpace();
 
     if (token == "coarse") {
-      pointer_types |= kPointerTypeCoarse;
+      pointer_types |= static_cast<int>(PointerType::kPointerCoarseType);
     } else if (token == "fine") {
-      pointer_types |= kPointerTypeFine;
+      pointer_types |= static_cast<int>(PointerType::kPointerFineType);
     } else if (token == "none") {
-      pointer_types |= kPointerTypeNone;
+      pointer_types |= static_cast<int>(PointerType::kPointerNone);
     } else {
       exception_state.ThrowDOMException(
           DOMExceptionCode::kSyntaxError,
-          "The pointer type token ('" + token + ")' is invalid.");
+          StrCat({"The pointer type token ('", token, ")' is invalid."}));
       return;
     }
   }
 
-  GetSettings()->SetAvailablePointerTypes(pointer_types);
+  GetSettings().SetAvailablePointerTypes(pointer_types);
 }
 
 void InternalSettings::setDisplayModeOverride(const String& display_mode,
                                               ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
   String token = display_mode.StripWhiteSpace();
-
   auto mode = blink::mojom::DisplayMode::kBrowser;
   if (token == "browser") {
     mode = blink::mojom::DisplayMode::kBrowser;
@@ -397,6 +211,10 @@ void InternalSettings::setDisplayModeOverride(const String& display_mode,
     mode = blink::mojom::DisplayMode::kStandalone;
   } else if (token == "fullscreen") {
     mode = blink::mojom::DisplayMode::kFullscreen;
+  } else if (token == "window-controls-overlay") {
+    mode = blink::mojom::DisplayMode::kWindowControlsOverlay;
+  } else if (token == "unframed") {
+    mode = blink::mojom::DisplayMode::kUnframed;
   } else {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
@@ -404,21 +222,19 @@ void InternalSettings::setDisplayModeOverride(const String& display_mode,
     return;
   }
 
-  GetSettings()->SetDisplayModeOverride(mode);
+  GetSettings().SetDisplayModeOverride(mode);
 }
 
 void InternalSettings::setPrimaryPointerType(const String& pointer,
                                              ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
   String token = pointer.StripWhiteSpace();
-
-  PointerType type = kPointerTypeNone;
+  PointerType type = PointerType::kPointerNone;
   if (token == "coarse") {
-    type = kPointerTypeCoarse;
+    type = PointerType::kPointerCoarseType;
   } else if (token == "fine") {
-    type = kPointerTypeFine;
+    type = PointerType::kPointerFineType;
   } else if (token == "none") {
-    type = kPointerTypeNone;
+    type = PointerType::kPointerNone;
   } else {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
@@ -426,46 +242,41 @@ void InternalSettings::setPrimaryPointerType(const String& pointer,
     return;
   }
 
-  GetSettings()->SetPrimaryPointerType(type);
+  GetSettings().SetPrimaryPointerType(type);
 }
 
 void InternalSettings::setAvailableHoverTypes(const String& types,
                                               ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-
   // Allow setting multiple hover types by passing comma seperated list
   // ("on-demand,none").
-  Vector<String> tokens;
-  types.Split(",", false, tokens);
+  Vector<StringView> tokens = StringView(types).SplitSkippingEmpty(',');
 
   int hover_types = 0;
-  for (const String& split_token : tokens) {
-    String token = split_token.StripWhiteSpace();
+  for (const StringView& split_token : tokens) {
+    StringView token = split_token.StripWhiteSpace();
     if (token == "none") {
-      hover_types |= kHoverTypeNone;
+      hover_types |= static_cast<int>(HoverType::kHoverNone);
     } else if (token == "hover") {
-      hover_types |= kHoverTypeHover;
+      hover_types |= static_cast<int>(HoverType::kHoverHoverType);
     } else {
       exception_state.ThrowDOMException(
           DOMExceptionCode::kSyntaxError,
-          "The hover type token ('" + token + ")' is invalid.");
+          StrCat({"The hover type token ('", token, ")' is invalid."}));
       return;
     }
   }
 
-  GetSettings()->SetAvailableHoverTypes(hover_types);
+  GetSettings().SetAvailableHoverTypes(hover_types);
 }
 
 void InternalSettings::setPrimaryHoverType(const String& type,
                                            ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
   String token = type.StripWhiteSpace();
-
-  HoverType hover_type = kHoverTypeNone;
+  HoverType hover_type = HoverType::kHoverNone;
   if (token == "none") {
-    hover_type = kHoverTypeNone;
+    hover_type = HoverType::kHoverNone;
   } else if (token == "hover") {
-    hover_type = kHoverTypeHover;
+    hover_type = HoverType::kHoverHoverType;
   } else {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
@@ -473,22 +284,21 @@ void InternalSettings::setPrimaryHoverType(const String& type,
     return;
   }
 
-  GetSettings()->SetPrimaryHoverType(hover_type);
+  GetSettings().SetPrimaryHoverType(hover_type);
 }
 
 void InternalSettings::setImageAnimationPolicy(
     const String& policy,
     ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  if (EqualIgnoringASCIICase(policy, "allowed")) {
-    GetSettings()->SetImageAnimationPolicy(
-        web_pref::kImageAnimationPolicyAllowed);
-  } else if (EqualIgnoringASCIICase(policy, "once")) {
-    GetSettings()->SetImageAnimationPolicy(
-        web_pref::kImageAnimationPolicyAnimateOnce);
-  } else if (EqualIgnoringASCIICase(policy, "none")) {
-    GetSettings()->SetImageAnimationPolicy(
-        web_pref::kImageAnimationPolicyNoAnimation);
+  if (EqualIgnoringAsciiCase(policy, "allowed")) {
+    GetSettings().SetImageAnimationPolicy(
+        mojom::blink::ImageAnimationPolicy::kImageAnimationPolicyAllowed);
+  } else if (EqualIgnoringAsciiCase(policy, "once")) {
+    GetSettings().SetImageAnimationPolicy(
+        mojom::blink::ImageAnimationPolicy::kImageAnimationPolicyAnimateOnce);
+  } else if (EqualIgnoringAsciiCase(policy, "none")) {
+    GetSettings().SetImageAnimationPolicy(
+        mojom::blink::ImageAnimationPolicy::kImageAnimationPolicyNoAnimation);
   } else {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
@@ -497,33 +307,8 @@ void InternalSettings::setImageAnimationPolicy(
   }
 }
 
-void InternalSettings::setScrollTopLeftInteropEnabled(bool enabled) {
-  RuntimeEnabledFeatures::SetScrollTopLeftInteropEnabled(enabled);
-}
-
-void InternalSettings::SetDnsPrefetchLogging(bool enabled,
-                                             ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetLogDnsPrefetchAndPreconnect(enabled);
-}
-
-void InternalSettings::SetPreloadLogging(bool enabled,
-                                         ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetLogPreload(enabled);
-}
-
-void InternalSettings::setPresentationReceiver(
-    bool enabled,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetPresentationReceiver(enabled);
-}
-
 void InternalSettings::setAutoplayPolicy(const String& policy_str,
                                          ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-
   AutoplayPolicy::Type policy = AutoplayPolicy::Type::kNoUserGestureRequired;
   if (policy_str == "no-user-gesture-required") {
     policy = AutoplayPolicy::Type::kNoUserGestureRequired;
@@ -537,14 +322,11 @@ void InternalSettings::setAutoplayPolicy(const String& policy_str,
         "The autoplay policy ('" + policy_str + ")' is invalid.");
   }
 
-  GetSettings()->SetAutoplayPolicy(policy);
+  GetSettings().SetAutoplayPolicy(policy);
 }
 
-void InternalSettings::setUniversalAccessFromFileURLs(
-    bool enabled,
-    ExceptionState& exception_state) {
-  InternalSettingsGuardForSettings();
-  GetSettings()->SetAllowUniversalAccessFromFileURLs(enabled);
+void InternalSettings::setPreferCompositingToLCDTextEnabled(bool enabled) {
+  GetSettings().SetPreferCompositingToLCDTextForTesting(enabled);
 }
 
 }  // namespace blink

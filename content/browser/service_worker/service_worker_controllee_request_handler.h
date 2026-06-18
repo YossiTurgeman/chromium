@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,67 +8,99 @@
 #include <stdint.h>
 
 #include <memory>
-#include <string>
 
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
-#include "content/browser/loader/single_request_url_loader_factory.h"
 #include "content/browser/service_worker/service_worker_accessed_callback.h"
 #include "content/browser/service_worker/service_worker_main_resource_loader.h"
+#include "content/browser/service_worker/service_worker_metrics.h"
 #include "content/common/content_export.h"
 #include "services/network/public/cpp/resource_request.h"
-#include "services/network/public/mojom/fetch_api.mojom.h"
-#include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom.h"
-#include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
-#include "url/gurl.h"
+#include "services/network/public/cpp/single_request_url_loader_factory.h"
 
 namespace content {
 
-class ResourceContext;
-class ServiceWorkerContainerHost;
+class ServiceWorkerClient;
 class ServiceWorkerContextCore;
 class ServiceWorkerRegistration;
 class ServiceWorkerVersion;
 
-// Handles main resource requests for service worker clients (documents and
-// shared workers).
+// Handles a main resource request for service worker clients (documents and
+// shared workers). This manages state for a single request and does not
+// live across redirects. ServiceWorkerMainResourceLoaderInterceptor creates
+// one instance of this class for each request/redirect.
 //
-// TODO(crbug.com/824858): Merge into ServiceWorkerMainResourceLoaderInterceptor
-// after the service worker core thread changes to the UI thread.
+// This class associates the ServiceWorkerClient undergoing navigation
+// with a controller service worker, after looking up the registration and
+// activating the service worker if needed.  Once ready, it creates
+// ServiceWorkerMainResourceLoader to perform the resource load.
 class CONTENT_EXPORT ServiceWorkerControlleeRequestHandler final {
  public:
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  //
+  // These have to be consistent with ServiceWorkerFetchHandlerSkipReason in
+  // tools/metrics/histograms/enums.xml
+  //
+  // Only one reason is recorded even if multiple reasons are matched.
+  // The order is following:
+  // 1. kSkippedForEmptyFetchHandler
+  // 2. kMainResourceSkippedDueToOriginTrial
+  // 3. kMainResourceSkippedDueToFeatureFlag
+  // 4. kMainResourceSkippedBecauseMatchedWithAllowedScriptList
+  // 5.
+  // kBypassFetchHandlerForAllOnlyIfServiceWorkerNotStarted_Status_[Stop|Starting]
+  enum class FetchHandlerSkipReason {
+    kNoFetchHandler = 0,
+    kNotSkipped = 1,
+    kSkippedForEmptyFetchHandler = 2,
+    // kMainResourceSkippedDueToOriginTrial = 3,
+    // kMainResourceSkippedDueToFeatureFlag = 4,
+    // kMainResourceSkippedBecauseMatchedWithAllowedOriginList = 5,
+    // kMainResourceSkippedBecauseMatchedWithAllowedScriptList = 6,
+    // kBypassFetchHandlerForAllOnlyIfServiceWorkerNotStarted_Status_Stop = 7,
+    // kBypassFetchHandlerForAllOnlyIfServiceWorkerNotStarted_Status_Starting =
+    // 8,
+
+    kMaxValue = kSkippedForEmptyFetchHandler,
+  };
+
+  // Default duration to start fetch handler when service worker is started in
+  // `TaskRunner::PostDelayTask`.
+  static constexpr int kStartServiceWorkerForEmptyFetchHandlerDurationInMs = 50;
+
+  static void SetStartServiceWorkerForEmptyFetchHandlerDurationForTesting(
+      int duration);
+
   // If |skip_service_worker| is true, service workers are bypassed for
   // request interception.
+  // `service_worker_client->UpdateUrls()` should be called for this
+  // request/redirect leg before constructing
+  // `ServiceWorkerControlleeRequestHandler`.
   ServiceWorkerControlleeRequestHandler(
       base::WeakPtr<ServiceWorkerContextCore> context,
-      base::WeakPtr<ServiceWorkerContainerHost> container_host,
-      blink::mojom::ResourceType resource_type,
+      std::string fetch_event_client_id,
+      base::WeakPtr<ServiceWorkerClient> service_worker_client,
       bool skip_service_worker,
       ServiceWorkerAccessedCallback service_worker_accessed_callback);
+
+  ServiceWorkerControlleeRequestHandler(
+      const ServiceWorkerControlleeRequestHandler&) = delete;
+  ServiceWorkerControlleeRequestHandler& operator=(
+      const ServiceWorkerControlleeRequestHandler&) = delete;
+
   ~ServiceWorkerControlleeRequestHandler();
 
-  // This could get called multiple times during the lifetime in redirect
-  // cases. (In fallback-to-network cases we basically forward the request
-  // to the request to the next request handler)
-  using ServiceWorkerLoaderCallback =
-      base::OnceCallback<void(SingleRequestURLLoaderFactory::RequestHandler)>;
+  // This is called only once. On redirects, a new instance of this
+  // class is created.
   void MaybeCreateLoader(
       const network::ResourceRequest& tentative_request,
       BrowserContext* browser_context,
-      ResourceContext* resource_context,
-      ServiceWorkerLoaderCallback callback,
+      NavigationLoaderInterceptor::LoaderCallback loader_callback,
       NavigationLoaderInterceptor::FallbackCallback fallback_callback);
-  // Returns params with the ControllerServiceWorkerInfoPtr if we have found
-  // a matching controller service worker for the |request| that is given
-  // to MaybeCreateLoader(). Otherwise this returns base::nullopt.
-  base::Optional<SubresourceLoaderParams> MaybeCreateSubresourceLoaderParams();
-
-  // Does all initialization of |container_host_| for a request.
-  bool InitializeContainerHost(
-      const network::ResourceRequest& tentative_request);
 
   // Exposed for testing.
   ServiceWorkerMainResourceLoader* loader() {
@@ -80,11 +112,15 @@ class CONTENT_EXPORT ServiceWorkerControlleeRequestHandler final {
                            ActivateWaitingVersion);
 
   void ContinueWithRegistration(
+      // True when FindRegistrationForClientUrl() is called for navigation.
+      bool is_for_navigation,
+      base::TimeTicks find_registration_start_time,
       blink::ServiceWorkerStatusCode status,
       scoped_refptr<ServiceWorkerRegistration> registration);
   void ContinueWithActivatedVersion(
       scoped_refptr<ServiceWorkerRegistration> registration,
-      scoped_refptr<ServiceWorkerVersion> version);
+      scoped_refptr<ServiceWorkerVersion> version,
+      base::TimeTicks find_registration_start_time);
 
   // For forced update.
   void DidUpdateRegistration(
@@ -96,39 +132,53 @@ class CONTENT_EXPORT ServiceWorkerControlleeRequestHandler final {
       scoped_refptr<ServiceWorkerRegistration> registration,
       scoped_refptr<ServiceWorkerVersion> version);
 
-  // Sets |job_| to nullptr, and clears all extra response info associated with
-  // that job, except for timing information.
-  void ClearJob();
-
   void CompleteWithoutLoader();
+  void CreateLoaderAndStartRequest(
+      base::TimeTicks find_registration_start_time);
 
   // Schedules a service worker update to occur shortly after the page and its
   // initial subresources load, if this handler was for a navigation.
   void MaybeScheduleUpdate();
 
+  // Runs service worker if not running.
+  static void MaybeStartServiceWorker(
+      scoped_refptr<ServiceWorkerVersion> active_version,
+      ServiceWorkerMetrics::EventType event_type,
+      uintptr_t trace_id);
+
+  // Runs after ServiceWorker has started.
+  // Normally ServiceWorker starts before dispatching the main resource request,
+  // but if the browser handles an empty fetch handler, this runs after the
+  // service worker starts.
+  static void DidStartWorker(uintptr_t trace_id,
+                             blink::ServiceWorkerStatusCode status);
+
+  int GetServiceWorkerForEmptyFetchHandlerDurationMs();
+
+  static std::optional<int>
+      start_service_worker_for_empty_fetch_handler_duration_for_testing_;
+
   const base::WeakPtr<ServiceWorkerContextCore> context_;
-  const base::WeakPtr<ServiceWorkerContainerHost> container_host_;
-  const blink::mojom::ResourceType resource_type_;
+
+  // FetchEvent.clientId
+  // https://w3c.github.io/ServiceWorker/#fetch-event-clientid
+  const std::string fetch_event_client_id_;
+
+  const base::WeakPtr<ServiceWorkerClient> service_worker_client_;
 
   // If true, service workers are bypassed for request interception.
   const bool skip_service_worker_;
 
   std::unique_ptr<ServiceWorkerMainResourceLoaderWrapper> loader_wrapper_;
-  BrowserContext* browser_context_;
-  ResourceContext* resource_context_;
-  GURL stripped_url_;
   bool force_update_started_;
-  base::TimeTicks registration_lookup_start_time_;
 
-  ServiceWorkerLoaderCallback loader_callback_;
+  NavigationLoaderInterceptor::LoaderCallback loader_callback_;
   NavigationLoaderInterceptor::FallbackCallback fallback_callback_;
 
   ServiceWorkerAccessedCallback service_worker_accessed_callback_;
 
   base::WeakPtrFactory<ServiceWorkerControlleeRequestHandler> weak_factory_{
       this};
-
-  DISALLOW_COPY_AND_ASSIGN(ServiceWorkerControlleeRequestHandler);
 };
 
 }  // namespace content

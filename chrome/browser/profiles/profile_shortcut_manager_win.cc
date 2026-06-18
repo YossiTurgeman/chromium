@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,23 +11,25 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/bind.h"
 #include "base/command_line.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/logging.h"
+#include "base/memory/raw_ref.h"
 #include "base/path_service.h"
-#include "base/stl_util.h"
-#include "base/strings/string16.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/task/post_task.h"
 #include "base/task/thread_pool.h"
-#include "base/task_runner_util.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "base/win/shortcut.h"
+#include "base/win/windows_version.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/policy/policy_path_parser.h"
 #include "chrome/browser/profiles/profile_attributes_entry.h"
@@ -40,7 +42,7 @@
 #include "chrome/common/chrome_paths_internal.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/pref_names.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/installer/util/install_util.h"
 #include "chrome/installer/util/shell_util.h"
 #include "components/prefs/pref_service.h"
@@ -51,9 +53,9 @@
 #include "third_party/skia/include/core/SkRRect.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
-#include "ui/gfx/icon_util.h"
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/image/image_family.h"
+#include "ui/gfx/win/icon_util.h"
 
 using content::BrowserThread;
 
@@ -61,10 +63,11 @@ namespace {
 
 // Characters that are not allowed in Windows filenames. Taken from
 // http://msdn.microsoft.com/en-us/library/aa365247.aspx
-const base::char16 kReservedCharacters[] =
-    L"<>:\"/\\|?*\x01\x02\x03\x04\x05"
-    L"\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10\x11\x12\x13\x14\x15\x16\x17"
-    L"\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F";
+const char16_t kReservedCharacters[] =
+    u"<>:\"/"
+    u"\\|?*"
+    u"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10\x11\x12"
+    u"\x13\x14\x15\x16\x17\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F";
 
 // The maximum number of characters allowed in profile shortcuts' file names.
 // Warning: migration code will be needed if this is changed later, since
@@ -75,7 +78,11 @@ const int kMaxProfileShortcutFileNameLength = 64;
 // Incrementing this number will cause profile icons to be regenerated on
 // profile startup (it should be incremented whenever the product/avatar icons
 // change, etc).
-const int kCurrentProfileIconVersion = 6;
+const int kCurrentProfileIconVersion = 10;
+
+bool disabled_for_unit_tests = false;
+bool disable_unpinning_for_unit_tests = false;
+bool disable_oop_shortcut_update_or_create_for_unit_tests = false;
 
 // Updates the preferences with the current icon version on icon creation
 // success.
@@ -88,6 +95,9 @@ void OnProfileIconCreateSuccess(base::FilePath profile_path) {
   if (profile) {
     profile->GetPrefs()->SetInteger(prefs::kProfileIconVersion,
                                     kCurrentProfileIconVersion);
+    profile->GetPrefs()->SetBoolean(
+        prefs::kProfileIconWin11Format,
+        base::win::GetVersion() >= base::win::Version::WIN11);
   }
 }
 
@@ -162,9 +172,23 @@ base::FilePath CreateOrUpdateShortcutIconForProfile(
     // This invalidates the Windows icon cache and causes the icon changes to
     // register with the taskbar and desktop. SHCNE_ASSOCCHANGED will cause a
     // desktop flash and we would like to avoid that if possible.
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    // On Win 11, SHCNE_ASSOCCHANGED doesn't update the taskbar icons, so find
+    // the affected shortcuts and tell Windows they've changed.
+    // TODO:(crbug.com/40816037) Find all affected shortcuts, e.g., desktop, and
+    // remove the SHCNE_ASSOCCHANGED notification, to avoid flashing the
+    // desktop (and taskbar on Win 10). Remove Win 11 version check.
+    if (base::win::GetVersion() >= base::win::Version::WIN11) {
+      std::vector<base::FilePath> pinned_shortcuts =
+          profiles::internal::GetPinnedShortCutsForProfile(profile_path);
+      for (const auto& shortcut : pinned_shortcuts) {
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, shortcut.value().c_str(),
+                       nullptr);
+      }
+    }
   } else {
-    SHChangeNotify(SHCNE_CREATE, SHCNF_PATH, icon_path.value().c_str(), NULL);
+    SHChangeNotify(SHCNE_CREATE, SHCNF_PATH, icon_path.value().c_str(),
+                   nullptr);
   }
   content::GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(&OnProfileIconCreateSuccess, profile_path));
@@ -180,36 +204,20 @@ bool GetDesktopShortcutsDirectories(
       !ShellUtil::GetShortcutPath(ShellUtil::SHORTCUT_LOCATION_DESKTOP,
                                   ShellUtil::CURRENT_USER,
                                   user_shortcuts_directory)) {
-    NOTREACHED();
     return false;
   }
   if (system_shortcuts_directory &&
       !ShellUtil::GetShortcutPath(ShellUtil::SHORTCUT_LOCATION_DESKTOP,
                                   ShellUtil::SYSTEM_LEVEL,
                                   system_shortcuts_directory)) {
-    NOTREACHED();
     return false;
   }
   return true;
 }
 
-// Returns the long form of |path|, which will expand any shortened components
-// like "foo~2" to their full names.
-base::FilePath ConvertToLongPath(const base::FilePath& path) {
-  const size_t length = GetLongPathName(path.value().c_str(), NULL, 0);
-  if (length != 0 && length != path.value().length()) {
-    std::vector<wchar_t> long_path(length);
-    if (GetLongPathName(path.value().c_str(), &long_path[0], length) != 0)
-      return base::FilePath(&long_path[0]);
-  }
-  return path;
-}
-
-// Returns true if the file at |path| is a Chrome shortcut and returns its
-// command line in output parameter |command_line|.
 bool IsChromeShortcut(const base::FilePath& path,
                       const base::FilePath& chrome_exe,
-                      base::string16* command_line) {
+                      std::wstring* command_line) {
   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
                                                 base::BlockingType::MAY_BLOCK);
 
@@ -219,54 +227,53 @@ bool IsChromeShortcut(const base::FilePath& path,
   base::FilePath target_path;
   if (!base::win::ResolveShortcut(path, &target_path, command_line))
     return false;
+
   // One of the paths may be in short (elided) form. Compare long paths to
   // ensure these are still properly matched.
-  return ConvertToLongPath(target_path) == ConvertToLongPath(chrome_exe);
+  return MakeLongFilePath(target_path) == MakeLongFilePath(chrome_exe);
 }
 
 // A functor checks if |path| is the Chrome desktop shortcut (|chrome_exe|)
 // that have the specified |command_line|. If |include_empty_command_lines| is
 // true Chrome desktop shortcuts with empty command lines will also be included.
 struct ChromeCommandLineFilter {
-  const base::FilePath& chrome_exe;
-  const base::string16& command_line;
+  const raw_ref<const base::FilePath> chrome_exe;
+  const raw_ref<const std::wstring> command_line;
   bool include_empty_command_lines;
 
   ChromeCommandLineFilter(const base::FilePath& chrome_exe,
-                          const base::string16& command_line,
+                          const std::wstring& command_line,
                           bool include_empty_command_lines)
       : chrome_exe(chrome_exe),
         command_line(command_line),
         include_empty_command_lines(include_empty_command_lines) {}
 
   bool operator()(const base::FilePath& path) const {
-    base::string16 shortcut_command_line;
-    if (!IsChromeShortcut(path, chrome_exe, &shortcut_command_line))
+    std::wstring shortcut_command_line;
+    if (!IsChromeShortcut(path, *chrome_exe, &shortcut_command_line)) {
       return false;
+    }
 
     // TODO(asvitkine): Change this to build a CommandLine object and ensure all
     // args from |command_line| are present in the shortcut's CommandLine. This
     // will be more robust when |command_line| contains multiple args.
     if ((shortcut_command_line.empty() && include_empty_command_lines) ||
-        (shortcut_command_line.find(command_line) != base::string16::npos)) {
+        (shortcut_command_line.find(*command_line) != std::wstring::npos)) {
       return true;
     }
     return false;
   }
 };
 
-// Get the file paths of desktop files and folders optionally filtered
-// by |filter|.
-std::set<base::FilePath> ListUserDesktopContents(
+// Get the file paths of files optionally filtered by `filter`.
+std::set<base::FilePath> ListDirContents(
+    const base::FilePath& start_dir,
+    bool recursive,
     const ChromeCommandLineFilter* filter) {
   std::set<base::FilePath> result;
 
-  base::FilePath user_shortcuts_directory;
-  if (!GetDesktopShortcutsDirectories(&user_shortcuts_directory, nullptr))
-    return result;
-
   base::FileEnumerator enumerator(
-      user_shortcuts_directory, false,
+      start_dir, recursive,
       base::FileEnumerator::FILES | base::FileEnumerator::DIRECTORIES);
   for (base::FilePath path = enumerator.Next(); !path.empty();
        path = enumerator.Next()) {
@@ -274,6 +281,25 @@ std::set<base::FilePath> ListUserDesktopContents(
       result.insert(path);
   }
   return result;
+}
+
+std::set<base::FilePath> ListUserDesktopContents(
+    const ChromeCommandLineFilter* filter) {
+  base::FilePath desktop_directory;
+  if (!GetDesktopShortcutsDirectories(&desktop_directory, nullptr))
+    return std::set<base::FilePath>();
+  return ListDirContents(desktop_directory, /*recursive=*/false, filter);
+}
+
+// Get the file paths of implicit apps sub-dirs filtered by `filter`.
+std::set<base::FilePath> ListImplicitAppContents(
+    const ChromeCommandLineFilter* filter) {
+  base::FilePath implicit_apps_path;
+  if (!base::PathService::Get(base::DIR_IMPLICIT_APP_SHORTCUTS,
+                              &implicit_apps_path)) {
+    return std::set<base::FilePath>();
+  }
+  return ListDirContents(implicit_apps_path, /*recursive=*/true, filter);
 }
 
 // Renames the given desktop shortcut and informs the shell of this change.
@@ -300,8 +326,8 @@ bool RenameDesktopShortcut(const base::FilePath& old_shortcut_path,
 // This function updates |profile_shortcuts| and |desktop_contents| respectively
 // when renaming occurs.
 void RenameChromeDesktopShortcutForProfile(
-    const base::string16& old_profile_name,
-    const base::string16& new_profile_name,
+    const std::u16string& old_profile_name,
+    const std::u16string& new_profile_name,
     std::set<base::FilePath>* profile_shortcuts,
     std::set<base::FilePath>* desktop_contents) {
   DCHECK(profile_shortcuts);
@@ -317,7 +343,7 @@ void RenameChromeDesktopShortcutForProfile(
   }
 
   // Get a new unique shortcut name.
-  const base::string16 new_shortcut_filename =
+  const std::wstring new_shortcut_filename =
       profiles::internal::GetUniqueShortcutFilenameForProfile(
           new_profile_name, *desktop_contents);
   const base::FilePath new_shortcut_path =
@@ -326,10 +352,10 @@ void RenameChromeDesktopShortcutForProfile(
   if (!profile_shortcuts->empty()) {
     // From all profile_shortcuts choose the one with a known (canonical) name.
     profiles::internal::ShortcutFilenameMatcher matcher(old_profile_name);
-    auto it = std::find_if(profile_shortcuts->begin(), profile_shortcuts->end(),
-                           [&matcher](const base::FilePath& p) {
-                             return matcher.IsCanonical(p.BaseName().value());
-                           });
+    auto it = std::ranges::find_if(
+        *profile_shortcuts, [&matcher](const base::FilePath& p) {
+          return matcher.IsCanonical(p.BaseName().value());
+        });
     // If all profile_shortcuts were renamed by user, respect it and do not
     // rename.
     if (it == profile_shortcuts->end())
@@ -391,7 +417,7 @@ struct CreateOrUpdateShortcutsParams {
         profile_path(profile_path),
         single_profile(single_profile),
         incognito(incognito) {}
-  ~CreateOrUpdateShortcutsParams() {}
+  ~CreateOrUpdateShortcutsParams() = default;
 
   ProfileShortcutManagerWin::CreateOrUpdateMode create_mode;
   ProfileShortcutManagerWin::NonProfileShortcutAction action;
@@ -399,9 +425,9 @@ struct CreateOrUpdateShortcutsParams {
   // The path for this profile.
   base::FilePath profile_path;
   // The profile name before this update. Empty on create.
-  base::string16 old_profile_name;
+  std::u16string old_profile_name;
   // The new profile name.
-  base::string16 profile_name;
+  std::u16string profile_name;
 
   // If true, this is for a shortcut to a single profile, which won't have a
   // badged icon or the name of profile in the shortcut name.
@@ -436,12 +462,12 @@ void CreateOrUpdateDesktopShortcutsAndIconForProfile(
   base::FilePath chrome_exe;
   if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
     NOTREACHED();
-    return;
   }
 
-  std::set<base::FilePath> desktop_contents = ListUserDesktopContents(nullptr);
+  std::set<base::FilePath> desktop_contents =
+      ListUserDesktopContents(/*filter=*/nullptr);
 
-  const base::string16 command_line =
+  const std::wstring command_line =
       profiles::internal::CreateProfileShortcutFlags(params.profile_path,
                                                      params.incognito);
   ChromeCommandLineFilter filter(
@@ -452,21 +478,21 @@ void CreateOrUpdateDesktopShortcutsAndIconForProfile(
   // Do not call ListUserDesktopContents again (but with filter) to avoid
   // excess work inside it. Just reuse non-filtered desktop_contents.
   // We need both of them (desktop_contents and shortcuts) later.
-  std::copy_if(desktop_contents.begin(), desktop_contents.end(),
-               std::inserter(shortcuts, shortcuts.begin()), filter);
+  std::ranges::copy_if(desktop_contents,
+                       std::inserter(shortcuts, shortcuts.begin()), filter);
 
   if (params.old_profile_name != params.profile_name || params.single_profile) {
     RenameChromeDesktopShortcutForProfile(
         params.old_profile_name,
-        params.single_profile ? L"" : params.profile_name, &shortcuts,
-        &desktop_contents);
+        params.single_profile ? std::u16string() : params.profile_name,
+        &shortcuts, &desktop_contents);
   }
   // Rename default named profile shortcuts as well, e.g., Chrome.lnk, by
   // passing "" for the old profile name.
   if (params.action ==
       ProfileShortcutManagerWin::UPDATE_NON_PROFILE_SHORTCUTS) {
-    RenameChromeDesktopShortcutForProfile(L"", params.profile_name, &shortcuts,
-                                          &desktop_contents);
+    RenameChromeDesktopShortcutForProfile(std::u16string(), params.profile_name,
+                                          &shortcuts, &desktop_contents);
   }
 
   ShellUtil::ShortcutProperties properties(ShellUtil::CURRENT_USER);
@@ -486,19 +512,42 @@ void CreateOrUpdateDesktopShortcutsAndIconForProfile(
 
   if (params.create_mode == ProfileShortcutManagerWin::CREATE_WHEN_NONE_FOUND &&
       shortcuts.empty()) {
-    const base::string16 shortcut_name =
+    const std::wstring shortcut_name =
         profiles::internal::GetUniqueShortcutFilenameForProfile(
-            params.single_profile ? L"" : params.profile_name,
+            params.single_profile ? std::u16string() : params.profile_name,
             desktop_contents);
     shortcuts.insert(base::FilePath(shortcut_name));
     operation = ShellUtil::SHELL_SHORTCUT_CREATE_IF_NO_SYSTEM_LEVEL;
   }
 
+  // `shortcut_operation` will be the same for each shortcut.
+  base::win::ShortcutOperation shortcut_operation;
+  std::vector<base::win::ShortcutProperties> shortcuts_properties;
+  std::vector<base::FilePath> shortcuts_to_create_or_update;
   for (const auto& shortcut : shortcuts) {
     const base::FilePath shortcut_name = shortcut.BaseName().RemoveExtension();
     properties.set_shortcut_name(shortcut_name.value());
-    ShellUtil::CreateOrUpdateShortcut(ShellUtil::SHORTCUT_LOCATION_DESKTOP,
-                                      properties, operation);
+    bool should_install_shortcut;
+    base::win::ShortcutProperties shortcut_properties;
+    base::FilePath shortcut_path;
+    ShellUtil::TranslateShortcutCreationOrUpdateInfo(
+        ShellUtil::SHORTCUT_LOCATION_DESKTOP, properties, operation,
+        shortcut_operation, shortcut_properties, should_install_shortcut,
+        shortcut_path);
+    if (should_install_shortcut) {
+      if (!disable_oop_shortcut_update_or_create_for_unit_tests) {
+        shortcuts_to_create_or_update.push_back(std::move(shortcut_path));
+        shortcuts_properties.push_back(std::move(shortcut_properties));
+      } else {
+        base::win::CreateOrUpdateShortcutLink(
+            shortcut_path, shortcut_properties, shortcut_operation);
+      }
+    }
+  }
+  if (!shortcuts_to_create_or_update.empty()) {
+    shell_integration::win::CreateOrUpdateShortcuts(
+        shortcuts_to_create_or_update, shortcuts_properties, shortcut_operation,
+        base::DoNothing());
   }
 }
 
@@ -506,51 +555,32 @@ void CreateOrUpdateDesktopShortcutsAndIconForProfile(
 // regardless of their command line arguments.
 bool ChromeDesktopShortcutsExist(const base::FilePath& chrome_exe) {
   base::FilePath user_shortcuts_directory;
-  if (!GetDesktopShortcutsDirectories(&user_shortcuts_directory, NULL))
+  if (!GetDesktopShortcutsDirectories(&user_shortcuts_directory, nullptr))
     return false;
 
   base::FileEnumerator enumerator(user_shortcuts_directory, false,
                                   base::FileEnumerator::FILES);
   for (base::FilePath path = enumerator.Next(); !path.empty();
        path = enumerator.Next()) {
-    if (IsChromeShortcut(path, chrome_exe, NULL))
+    if (IsChromeShortcut(path, chrome_exe, nullptr))
       return true;
   }
 
   return false;
 }
 
-// Deletes all desktop shortcuts for the specified profile. If
-// |ensure_shortcuts_remain| is true, then a regular non-profile shortcut will
-// be created if this function would otherwise delete the last Chrome desktop
-// shortcut(s). File and COM operations must be allowed on the calling thread.
-// |default_profile_path| is used to create the command line for the shortcut
-// created if |ensure_shortcuts_remain| is true and the last desktop shortcut
-// was deleted.
 void DeleteDesktopShortcuts(
-    const base::FilePath& profile_path,
-    const base::Optional<base::FilePath>& default_profile_path,
-    bool ensure_shortcuts_remain) {
+    const std::set<base::FilePath>& shortcuts,
+    bool ensure_shortcuts_remain,
+    const std::optional<base::FilePath>& default_profile_path,
+    const base::FilePath& chrome_exe) {
   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
                                                 base::BlockingType::MAY_BLOCK);
-
-  base::FilePath chrome_exe;
-  if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
-    NOTREACHED();
-    return;
-  }
-
-  const base::string16 command_line =
-      profiles::internal::CreateProfileShortcutFlags(profile_path);
-  ChromeCommandLineFilter filter(chrome_exe, command_line, false);
-  const std::set<base::FilePath> shortcuts = ListUserDesktopContents(&filter);
-
   for (const auto& shortcut : shortcuts) {
     // Use base::DeleteFile() instead of ShellUtil::RemoveShortcuts(), as the
     // latter causes non-profile taskbar shortcuts to be removed since it
     // doesn't consider the command-line of the shortcuts it deletes.
     // TODO(huangs): Refactor with ShellUtil::RemoveShortcuts().
-    base::win::UnpinShortcutFromTaskbar(shortcut);
     base::DeleteFile(shortcut);
     // Notify the shell that the shortcut was deleted to ensure desktop refresh.
     SHChangeNotify(SHCNE_DELETE, SHCNF_PATH, shortcut.value().c_str(), nullptr);
@@ -569,11 +599,53 @@ void DeleteDesktopShortcuts(
           default_profile_path.value()));
     }
     properties.set_shortcut_name(
-        profiles::internal::GetShortcutFilenameForProfile(base::string16()));
+        profiles::internal::GetShortcutFilenameForProfile(std::u16string()));
     ShellUtil::CreateOrUpdateShortcut(
         ShellUtil::SHORTCUT_LOCATION_DESKTOP, properties,
         ShellUtil::SHELL_SHORTCUT_CREATE_IF_NO_SYSTEM_LEVEL);
   }
+}
+
+// Deletes all desktop shortcuts for the specified profile, and unpins them,
+// if pinned. If |ensure_shortcuts_remain| is true, then a regular non-profile
+// shortcut will be created if this function would otherwise delete the last
+// Chrome desktop shortcut(s). File and COM operations must be allowed on the
+// calling thread. |default_profile_path| is used to create the command line for
+// the shortcutcreated if |ensure_shortcuts_remain| is true and the last desktop
+// shortcut was deleted.
+void UnpinAndDeleteDesktopShortcuts(
+    const base::FilePath& profile_path,
+    const std::optional<base::FilePath>& default_profile_path,
+    bool ensure_shortcuts_remain) {
+  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                base::BlockingType::MAY_BLOCK);
+
+  base::FilePath chrome_exe;
+  if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
+    NOTREACHED();
+  }
+
+  const std::wstring command_line =
+      profiles::internal::CreateProfileShortcutFlags(profile_path);
+  ChromeCommandLineFilter filter(chrome_exe, command_line, false);
+  std::set<base::FilePath> shortcuts = ListUserDesktopContents(&filter);
+  if (shortcuts.empty()) {
+    shortcuts = ListImplicitAppContents(&filter);
+    if (shortcuts.empty())
+      return;
+  }
+  std::vector<base::FilePath> shortcuts_vector(shortcuts.begin(),
+                                               shortcuts.end());
+  // Unpinning is done out-of-process, which isn't allowed in unit tests.
+  if (disable_unpinning_for_unit_tests) {
+    DeleteDesktopShortcuts(shortcuts, ensure_shortcuts_remain,
+                           default_profile_path, chrome_exe);
+    return;
+  }
+  shell_integration::win::UnpinShortcuts(
+      shortcuts_vector, base::BindOnce(&DeleteDesktopShortcuts, shortcuts,
+                                       ensure_shortcuts_remain,
+                                       default_profile_path, chrome_exe));
 }
 
 // Returns true if profile at |profile_path| has any shortcuts. Does not
@@ -586,10 +658,9 @@ bool HasAnyProfileShortcuts(const base::FilePath& profile_path) {
   base::FilePath chrome_exe;
   if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
     NOTREACHED();
-    return false;
   }
 
-  const base::string16 command_line =
+  const std::wstring command_line =
       profiles::internal::CreateProfileShortcutFlags(profile_path);
   ChromeCommandLineFilter filter(chrome_exe, command_line, false);
   return !ListUserDesktopContents(&filter).empty();
@@ -601,11 +672,11 @@ bool HasAnyProfileShortcuts(const base::FilePath& profile_path) {
 // TODO(macourteau): find a way to limit the total path's length to MAX_PATH
 // instead of limiting the profile's name to |kMaxProfileShortcutFileNameLength|
 // characters.
-base::string16 SanitizeShortcutProfileNameString(
-    const base::string16& profile_name) {
-  base::string16 sanitized = profile_name;
+std::wstring SanitizeShortcutProfileNameString(
+    const std::u16string& profile_name) {
+  std::u16string sanitized = profile_name;
   size_t pos = sanitized.find_first_of(kReservedCharacters);
-  while (pos != base::string16::npos) {
+  while (pos != std::u16string::npos) {
     sanitized[pos] = L' ';
     pos = sanitized.find_first_of(kReservedCharacters, pos + 1);
   }
@@ -615,14 +686,14 @@ base::string16 SanitizeShortcutProfileNameString(
     sanitized.erase(kMaxProfileShortcutFileNameLength);
   base::TrimWhitespace(sanitized, base::TRIM_TRAILING, &sanitized);
 
-  return sanitized;
+  return base::AsWString(sanitized);
 }
 
 }  // namespace
 
 namespace profiles {
 
-const base::FilePath::StringPieceType kProfileIconFileName =
+const base::FilePath::StringViewType kProfileIconFileName =
     FILE_PATH_LITERAL("Google Profile.ico");
 
 namespace internal {
@@ -631,26 +702,26 @@ base::FilePath GetProfileIconPath(const base::FilePath& profile_path) {
   return profile_path.Append(kProfileIconFileName);
 }
 
-base::string16 GetShortcutFilenameForProfile(
-    const base::string16& profile_name) {
-  base::string16 shortcut_name;
+std::wstring GetShortcutFilenameForProfile(const std::u16string& profile_name) {
+  std::wstring shortcut_name;
   if (!profile_name.empty()) {
     shortcut_name.append(SanitizeShortcutProfileNameString(profile_name));
     shortcut_name.append(L" - ");
-    shortcut_name.append(l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME));
+    shortcut_name.append(
+        base::AsWString(l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME)));
   } else {
     shortcut_name.append(InstallUtil::GetShortcutName());
   }
   return shortcut_name + installer::kLnkExt;
 }
 
-base::string16 GetUniqueShortcutFilenameForProfile(
-    const base::string16& profile_name,
+std::wstring GetUniqueShortcutFilenameForProfile(
+    const std::u16string& profile_name,
     const std::set<base::FilePath>& excludes) {
-  std::set<base::string16> excludes_names;
-  std::transform(excludes.begin(), excludes.end(),
-                 std::inserter(excludes_names, excludes_names.begin()),
-                 [](const base::FilePath& e) { return e.BaseName().value(); });
+  std::set<std::wstring> excludes_names;
+  std::ranges::transform(
+      excludes, std::inserter(excludes_names, excludes_names.begin()),
+      [](const base::FilePath& e) { return e.BaseName().value(); });
 
   const auto base_name = GetShortcutFilenameForProfile(profile_name);
   auto name = base_name;
@@ -664,7 +735,7 @@ base::string16 GetUniqueShortcutFilenameForProfile(
 
 // Corresponds to GetUniqueShortcutFilenameForProfile.
 ShortcutFilenameMatcher::ShortcutFilenameMatcher(
-    const base::string16& profile_name)
+    const std::u16string& profile_name)
     : profile_shortcut_filename_(GetShortcutFilenameForProfile(profile_name)),
       lnk_ext_(installer::kLnkExt),
       profile_shortcut_name_(profile_shortcut_filename_) {
@@ -672,12 +743,11 @@ ShortcutFilenameMatcher::ShortcutFilenameMatcher(
   profile_shortcut_name_.remove_suffix(lnk_ext_.size());
 }
 
-bool ShortcutFilenameMatcher::IsCanonical(
-    const base::string16& filename) const {
+bool ShortcutFilenameMatcher::IsCanonical(const std::wstring& filename) const {
   if (filename == profile_shortcut_filename_)
     return true;
 
-  base::StringPiece16 shortcut_suffix(filename);
+  std::wstring_view shortcut_suffix = filename;
   if (!base::StartsWith(shortcut_suffix, profile_shortcut_name_))
     return false;
   shortcut_suffix.remove_prefix(profile_shortcut_name_.size());
@@ -694,26 +764,89 @@ bool ShortcutFilenameMatcher::IsCanonical(
                      iswdigit);
 }
 
-base::string16 CreateProfileShortcutFlags(const base::FilePath& profile_path,
-                                          const bool incognito) {
-  base::string16 flags = base::StringPrintf(
-      L"--%ls=\"%ls\"", base::ASCIIToUTF16(switches::kProfileDirectory).c_str(),
-      profile_path.BaseName().value().c_str());
+std::wstring CreateProfileShortcutFlags(const base::FilePath& profile_path,
+                                        const bool incognito) {
+  std::wstring flags =
+      base::StrCat({L"--", base::ASCIIToWide(switches::kProfileDirectory),
+                    L"=\"", profile_path.BaseName().value(), L"\""});
 
   if (incognito) {
-    flags.append(base::StringPrintf(
-        L" --%ls", base::ASCIIToUTF16(switches::kIncognito).c_str()));
+    flags.append(L" --" + base::ASCIIToWide(switches::kIncognito));
   }
 
   return flags;
 }
 
+// Returns true iff `shortcut` is a shortcut to the currently running version
+// of Chrome.exe, and specifies `profile_path` as its profile_dir.
+bool IsChromeShortcutForProfile(const base::FilePath& shortcut,
+                                const base::FilePath& profile_path) {
+  base::FilePath chrome_exe;
+  if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
+    NOTREACHED();
+  }
+
+  std::wstring cmd_line_string;
+  if (!IsChromeShortcut(shortcut, chrome_exe, &cmd_line_string))
+    return false;
+  cmd_line_string.insert(0, chrome_exe.value() + L" ");
+  base::CommandLine shortcut_cmd_line =
+      base::CommandLine::FromString(cmd_line_string);
+  return shortcut_cmd_line.HasSwitch(switches::kProfileDirectory) &&
+         shortcut_cmd_line.GetSwitchValuePath(switches::kProfileDirectory) ==
+             profile_path.BaseName();
+}
+
+// Returns a vector of Chrome.exe shortcuts for profile `profile_path` in the
+// directory `shortcut_dir`.
+const std::vector<base::FilePath> FindChromeShortcutsForProfile(
+    const base::FilePath& shortcut_dir,
+    const base::FilePath& profile_path) {
+  std::vector<base::FilePath> shortcut_paths;
+
+  // Find all shortcuts for this profile.
+  base::FileEnumerator files(shortcut_dir, false, base::FileEnumerator::FILES,
+                             FILE_PATH_LITERAL("*.lnk"));
+  base::FilePath shortcut_file = files.Next();
+  while (!shortcut_file.empty()) {
+    if (IsChromeShortcutForProfile(shortcut_file, profile_path))
+      shortcut_paths.push_back(shortcut_file);
+    shortcut_file = files.Next();
+  }
+  return shortcut_paths;
+}
+
+const std::vector<base::FilePath> GetPinnedShortCutsForProfile(
+    const base::FilePath& profile_path) {
+  std::vector<base::FilePath> pinned_shortcuts;
+  // Find matching shortcuts in taskbar pin directories.
+  base::FilePath taskbar_pins_dir;
+  if (base::PathService::Get(base::DIR_TASKBAR_PINS, &taskbar_pins_dir)) {
+    const std::vector<base::FilePath> shortcut_files =
+        FindChromeShortcutsForProfile(taskbar_pins_dir, profile_path);
+    pinned_shortcuts.insert(pinned_shortcuts.end(), shortcut_files.begin(),
+                            shortcut_files.end());
+  }
+
+  // Check all folders in ImplicitAppShortcuts.
+  base::FilePath implicit_app_shortcuts_dir;
+  if (base::PathService::Get(base::DIR_IMPLICIT_APP_SHORTCUTS,
+                             &implicit_app_shortcuts_dir)) {
+    base::FileEnumerator directory_enum(implicit_app_shortcuts_dir, false,
+                                        base::FileEnumerator::DIRECTORIES);
+    for (base::FilePath directory = directory_enum.Next(); !directory.empty();
+         directory = directory_enum.Next()) {
+      const std::vector<base::FilePath> shortcut_files =
+          FindChromeShortcutsForProfile(directory, profile_path);
+      pinned_shortcuts.insert(pinned_shortcuts.end(), shortcut_files.begin(),
+                              shortcut_files.end());
+    }
+  }
+  return pinned_shortcuts;
+}
+
 }  // namespace internal
 }  // namespace profiles
-
-namespace {
-bool disabled_for_unit_tests = false;
-}
 
 void ProfileShortcutManager::DisableForUnitTests() {
   disabled_for_unit_tests = true;
@@ -734,11 +867,8 @@ bool ProfileShortcutManager::IsFeatureEnabled() {
   base::FilePath user_data_dir;
   bool success = base::PathService::Get(chrome::DIR_USER_DATA, &user_data_dir);
   DCHECK(success);
-  base::FilePath default_user_data_dir;
-  success = chrome::GetDefaultUserDataDirectory(&default_user_data_dir);
-  DCHECK(success);
-  return user_data_dir == default_user_data_dir ||
-         user_data_dir == policy_user_data_dir;
+  return user_data_dir == policy_user_data_dir ||
+         chrome::IsUsingDefaultDataDirectory().value_or(false);
 }
 
 // static
@@ -758,21 +888,19 @@ ProfileShortcutManagerWin::~ProfileShortcutManagerWin() {
   profile_manager_->GetProfileAttributesStorage().RemoveObserver(this);
 }
 
+void ProfileShortcutManagerWin::DisableUnpinningForTests() {
+  disable_unpinning_for_unit_tests = true;
+}
+
+void ProfileShortcutManagerWin::DisableOutOfProcessShortcutOpsForTests() {
+  disable_oop_shortcut_update_or_create_for_unit_tests = true;
+}
+
 void ProfileShortcutManagerWin::CreateOrUpdateProfileIcon(
     const base::FilePath& profile_path) {
   CreateOrUpdateShortcutsForProfileAtPath(
       profile_path, CREATE_OR_UPDATE_ICON_ONLY, IGNORE_NON_PROFILE_SHORTCUTS,
       /*incognito=*/false);
-}
-
-// Creates an incognito desktop shortcut for the current profile.
-// TODO(crbug.com/1113162): Update the shortcut label and icon to chrome +
-// incognito.
-void ProfileShortcutManagerWin::CreateIncognitoProfileShortcut(
-    const base::FilePath& profile_path) {
-  CreateOrUpdateShortcutsForProfileAtPath(profile_path, CREATE_WHEN_NONE_FOUND,
-                                          IGNORE_NON_PROFILE_SHORTCUTS,
-                                          /*incognito=*/true);
 }
 
 void ProfileShortcutManagerWin::CreateProfileShortcut(
@@ -785,38 +913,37 @@ void ProfileShortcutManagerWin::CreateProfileShortcut(
 void ProfileShortcutManagerWin::RemoveProfileShortcuts(
     const base::FilePath& profile_path) {
   base::ThreadPool::CreateCOMSTATaskRunner({base::MayBlock()})
-      ->PostTask(FROM_HERE, base::BindOnce(&DeleteDesktopShortcuts,
-                                           profile_path, base::nullopt, false));
+      ->PostTask(FROM_HERE, base::BindOnce(&UnpinAndDeleteDesktopShortcuts,
+                                           profile_path, std::nullopt, false));
 }
 
 void ProfileShortcutManagerWin::HasProfileShortcuts(
     const base::FilePath& profile_path,
-    const base::Callback<void(bool)>& callback) {
-  base::PostTaskAndReplyWithResult(
-      base::ThreadPool::CreateCOMSTATaskRunner({base::MayBlock()}).get(),
-      FROM_HERE, base::BindOnce(&HasAnyProfileShortcuts, profile_path),
-      base::BindOnce(callback));
+    base::OnceCallback<void(bool)> callback) {
+  base::ThreadPool::CreateCOMSTATaskRunner({base::MayBlock()})
+      ->PostTaskAndReplyWithResult(
+          FROM_HERE, base::BindOnce(&HasAnyProfileShortcuts, profile_path),
+          std::move(callback));
 }
 
 void ProfileShortcutManagerWin::GetShortcutProperties(
     const base::FilePath& profile_path,
     base::CommandLine* command_line,
-    base::string16* name,
+    std::wstring* name,
     base::FilePath* icon_path) {
   base::FilePath chrome_exe;
   if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
     NOTREACHED();
-    return;
   }
 
   ProfileAttributesStorage& storage =
       profile_manager_->GetProfileAttributesStorage();
-  ProfileAttributesEntry* entry;
-  bool has_entry = storage.GetProfileAttributesWithPath(profile_path, &entry);
-  DCHECK(has_entry);
+  ProfileAttributesEntry* entry =
+      storage.GetProfileAttributesWithPath(profile_path);
+  DCHECK(entry);
 
   // The shortcut shouldn't include the profile name if there is only 1 profile.
-  base::string16 shortcut_profile_name;
+  std::u16string shortcut_profile_name;
   if (storage.GetNumberOfProfiles() > 1u)
     shortcut_profile_name = entry->GetName();
 
@@ -848,7 +975,7 @@ void ProfileShortcutManagerWin::OnProfileAdded(
 
 void ProfileShortcutManagerWin::OnProfileWasRemoved(
     const base::FilePath& profile_path,
-    const base::string16& profile_name) {
+    const std::u16string& profile_name) {
   ProfileAttributesStorage& storage =
       profile_manager_->GetProfileAttributesStorage();
   // If there is only one profile remaining, remove the badging information
@@ -870,14 +997,14 @@ void ProfileShortcutManagerWin::OnProfileWasRemoved(
     first_profile_path = all_profiles[0]->GetPath();
 
   base::ThreadPool::CreateCOMSTATaskRunner({base::MayBlock()})
-      ->PostTask(FROM_HERE, base::BindOnce(&DeleteDesktopShortcuts,
+      ->PostTask(FROM_HERE, base::BindOnce(&UnpinAndDeleteDesktopShortcuts,
                                            profile_path, first_profile_path,
                                            deleting_down_to_last_profile));
 }
 
 void ProfileShortcutManagerWin::OnProfileNameChanged(
     const base::FilePath& profile_path,
-    const base::string16& old_profile_name) {
+    const std::u16string& old_profile_name) {
   CreateOrUpdateShortcutsForProfileAtPath(profile_path, UPDATE_EXISTING_ONLY,
                                           IGNORE_NON_PROFILE_SHORTCUTS,
                                           /*incognito=*/false);
@@ -888,11 +1015,38 @@ void ProfileShortcutManagerWin::OnProfileAvatarChanged(
   CreateOrUpdateProfileIcon(profile_path);
 }
 
+void ProfileShortcutManagerWin::OnProfileHighResAvatarLoaded(
+    const base::FilePath& profile_path) {
+  if (profiles_with_pending_avatar_load_.contains(profile_path)) {
+    profiles_with_pending_avatar_load_.erase(profile_path);
+    CreateOrUpdateProfileIcon(profile_path);
+  }
+}
+
 void ProfileShortcutManagerWin::OnProfileAdded(Profile* profile) {
-  if (profile->GetPrefs()->GetInteger(prefs::kProfileIconVersion) <
-      kCurrentProfileIconVersion) {
+  // Upgrade the profile icon if the current profile icon version has
+  // increased or if running on Win 11 and we don't know that the profile icon
+  // is the Win 11 format. This will result in a one time upgrade of profile
+  // icons on Win 11 since we were previously not tracking whether or not the
+  // profile icon was Win11 format.
+  if ((base::win::GetVersion() >= base::win::Version::WIN11 &&
+       !profile->GetPrefs()->GetBoolean(prefs::kProfileIconWin11Format)) ||
+      (profile->GetPrefs()->GetInteger(prefs::kProfileIconVersion) <
+       kCurrentProfileIconVersion)) {
+    const base::FilePath profile_path = profile->GetPath();
     // Ensure the profile's icon file has been created.
-    CreateOrUpdateProfileIcon(profile->GetPath());
+    CreateOrUpdateProfileIcon(profile_path);
+
+    ProfileAttributesStorage& storage =
+        profile_manager_->GetProfileAttributesStorage();
+    const ProfileAttributesEntry* entry =
+        storage.GetProfileAttributesWithPath(profile_path);
+    // If GAIA picture is not yet loaded, the profile icon will be updated when
+    // it loads.
+    if (entry && !entry->GetLastDownloadedGAIAPictureUrlWithSize().empty() &&
+        !entry->IsGAIAPictureLoaded()) {
+      profiles_with_pending_avatar_load_.insert(profile_path);
+    }
   }
 }
 
@@ -913,7 +1067,6 @@ base::FilePath ProfileShortcutManagerWin::GetOtherProfilePath(
       return path;
   }
   NOTREACHED();
-  return base::FilePath();
 }
 
 void ProfileShortcutManagerWin::CreateOrUpdateShortcutsForProfileAtPath(
@@ -925,10 +1078,10 @@ void ProfileShortcutManagerWin::CreateOrUpdateShortcutsForProfileAtPath(
          BrowserThread::CurrentlyOn(BrowserThread::UI));
   ProfileAttributesStorage& storage =
       profile_manager_->GetProfileAttributesStorage();
-  ProfileAttributesEntry* entry;
-  bool has_entry = storage.GetProfileAttributesWithPath(profile_path, &entry);
+  ProfileAttributesEntry* entry =
+      storage.GetProfileAttributesWithPath(profile_path);
 
-  if (!has_entry)
+  if (!entry)
     return;
   bool remove_badging = storage.GetNumberOfProfiles() == 1u;
 

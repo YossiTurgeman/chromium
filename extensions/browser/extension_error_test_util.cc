@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include "content/public/common/url_constants.h"
 #include "extensions/browser/extension_error.h"
 #include "extensions/common/constants.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/stack_frame.h"
 #include "url/gurl.h"
 
@@ -17,45 +18,44 @@ namespace extensions {
 namespace error_test_util {
 
 namespace {
-const char kDefaultStackTrace[] = "function_name (https://url.com:1:1)";
+const char16_t kDefaultStackTrace[] = u"function_name (https://url.com:1:1)";
 }
 
 std::unique_ptr<ExtensionError> CreateNewRuntimeError(
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     const std::string& message,
     bool from_incognito) {
   StackTrace stack_trace;
   std::unique_ptr<StackFrame> frame =
-      StackFrame::CreateFromText(base::ASCIIToUTF16(kDefaultStackTrace));
+      StackFrame::CreateFromText(kDefaultStackTrace);
   CHECK(frame.get());
   stack_trace.push_back(*frame);
 
-  base::string16 source =
+  std::u16string source =
       base::UTF8ToUTF16(std::string(kExtensionScheme) +
-                            url::kStandardSchemeSeparator +
-                            extension_id);
+                        url::kStandardSchemeSeparator + extension_id);
 
   return std::unique_ptr<ExtensionError>(
       new RuntimeError(extension_id, from_incognito, source,
                        base::UTF8ToUTF16(message), stack_trace,
-                       GURL::EmptyGURL(),  // no context url
-                       logging::LOG_ERROR,
+                       GURL(),  // no context url
+                       logging::LOGGING_ERROR,
                        0,    // Render frame id
                        0));  // Render process id
 }
 
 std::unique_ptr<ExtensionError> CreateNewRuntimeError(
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     const std::string& message) {
   return CreateNewRuntimeError(extension_id, message, false);
 }
 
 std::unique_ptr<ExtensionError> CreateNewManifestError(
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     const std::string& message) {
   return std::unique_ptr<ExtensionError>(
-      new ManifestError(extension_id, base::UTF8ToUTF16(message),
-                        base::string16(), base::string16()));
+      new ManifestError(extension_id, base::UTF8ToUTF16(message), std::string(),
+                        std::u16string()));
 }
 
 }  // namespace error_test_util

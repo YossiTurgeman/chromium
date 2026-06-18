@@ -37,8 +37,10 @@
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
+#include "third_party/blink/renderer/platform/json/json_values.h"
 #include "third_party/blink/renderer/platform/text/date_components.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
+#include "ui/strings/grit/ax_strings.h"
 
 namespace blink {
 
@@ -47,14 +49,10 @@ static const int kDateDefaultStepBase = 0;
 static const int kDateStepScaleFactor = 86400000;
 
 DateInputType::DateInputType(HTMLInputElement& element)
-    : BaseTemporalInputType(element) {}
+    : BaseTemporalInputType(Type::kDate, element) {}
 
 void DateInputType::CountUsage() {
   CountUsageIfVisible(WebFeature::kInputTypeDate);
-}
-
-const AtomicString& DateInputType::FormControlType() const {
-  return input_type_names::kDate;
 }
 
 StepRange DateInputType::CreateStepRange(
@@ -81,6 +79,10 @@ bool DateInputType::SetMillisecondToDateComponents(double value,
                                                    DateComponents* date) const {
   DCHECK(date);
   return date->SetMillisecondsSinceEpochForDate(value);
+}
+
+bool DateInputType::CanSetSuggestedValue() {
+  return true;
 }
 
 void DateInputType::WarnIfValueIsInvalid(const String& value) const {
@@ -134,7 +136,7 @@ bool DateInputType::IsValidFormat(bool has_year,
   return has_year && has_month && has_day;
 }
 
-String DateInputType::AriaRoleForPickerIndicator() const {
+String DateInputType::AriaLabelForPickerIndicator() const {
   return GetLocale().QueryString(IDS_AX_CALENDAR_SHOW_DATE_PICKER);
 }
 

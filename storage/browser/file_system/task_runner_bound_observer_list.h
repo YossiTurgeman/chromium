@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,11 @@
 #include <map>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/sequenced_task_runner.h"
-#include "base/threading/thread.h"
+#include "base/task/sequenced_task_runner.h"
+#include "storage/browser/file_system/file_observers.h"
 
 namespace storage {
 
@@ -26,17 +26,20 @@ namespace storage {
 template <typename Observer>
 class TaskRunnerBoundObserverList {
  public:
-  using ObserversListMap =
-      std::map<Observer*, scoped_refptr<base::SequencedTaskRunner>>;
+  using ObserversListMap = std::map<scoped_refptr<Observer>,
+                                    scoped_refptr<base::SequencedTaskRunner>>;
 
   // Creates an empty list.
-  TaskRunnerBoundObserverList() {}
+  TaskRunnerBoundObserverList() = default;
 
   // Creates a new list with given |observers|.
   explicit TaskRunnerBoundObserverList(const ObserversListMap& observers)
       : observers_(observers) {}
 
-  virtual ~TaskRunnerBoundObserverList() {}
+  TaskRunnerBoundObserverList(const TaskRunnerBoundObserverList&) = default;
+  TaskRunnerBoundObserverList& operator=(const TaskRunnerBoundObserverList&) =
+      default;
+  virtual ~TaskRunnerBoundObserverList() = default;
 
   // Returns a new observer list with given observer.
   // It is valid to give nullptr as |runner_to_notify|, and in that case
@@ -44,11 +47,17 @@ class TaskRunnerBoundObserverList {
   // Note that this is a const method and does NOT change 'this' observer
   // list but returns a new list.
   TaskRunnerBoundObserverList AddObserver(
-      Observer* observer,
+      scoped_refptr<Observer> observer,
       base::SequencedTaskRunner* runner_to_notify) const {
     ObserversListMap observers = observers_;
-    observers.insert(std::make_pair(observer, runner_to_notify));
+    observers.insert(std::make_pair(std::move(observer), runner_to_notify));
     return TaskRunnerBoundObserverList(observers);
+  }
+
+  void Shutdown() {
+    for (auto& observer : observers_) {
+      observer.first->Disable();
+    }
   }
 
   // Notify on the task runner that is given to AddObserver.
@@ -61,18 +70,13 @@ class TaskRunnerBoundObserverList {
         continue;
       }
       observer.second->PostTask(
-          FROM_HERE,
-          base::BindOnce(method, base::Unretained(observer.first), params...));
+          FROM_HERE, base::BindOnce(method, observer.first, params...));
     }
   }
 
  private:
   ObserversListMap observers_;
 };
-
-class FileAccessObserver;
-class FileChangeObserver;
-class FileUpdateObserver;
 
 using AccessObserverList = TaskRunnerBoundObserverList<FileAccessObserver>;
 using ChangeObserverList = TaskRunnerBoundObserverList<FileChangeObserver>;

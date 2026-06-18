@@ -1,13 +1,14 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_ANDROID_WEBAPK_WEBAPK_METRICS_H_
 #define CHROME_BROWSER_ANDROID_WEBAPK_WEBAPK_METRICS_H_
 
-namespace base {
-class TimeDelta;
-}
+#include <string>
+
+#include "base/time/time.h"
+#include "components/webapps/browser/android/webapk/webapk_types.h"
 
 namespace webapk {
 
@@ -25,9 +26,11 @@ enum InstallEvent {
   INSTALL_EVENT_MAX = 5,
 };
 
-void TrackRequestTokenDuration(base::TimeDelta delta);
+void TrackRequestTokenDuration(base::TimeDelta delta,
+                               const std::string& webapk_package);
 void TrackInstallDuration(base::TimeDelta delta);
 void TrackInstallEvent(InstallEvent event);
+void TrackInstallResult(webapps::WebApkInstallResult result);
 
 }  // namespace webapk
 

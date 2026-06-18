@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include "build/build_config.h"
 #include "components/policy/core/common/policy_service.h"
+#include "components/policy/core/common/policy_types.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 namespace policy {
@@ -20,6 +21,7 @@ class MockPolicyServiceObserver : public PolicyService::Observer {
                                      const PolicyMap& previous,
                                      const PolicyMap& current));
   MOCK_METHOD1(OnPolicyServiceInitialized, void(PolicyDomain));
+  MOCK_METHOD1(OnFirstPoliciesLoaded, void(PolicyDomain));
 };
 
 class MockPolicyServiceProviderUpdateObserver
@@ -45,9 +47,11 @@ class MockPolicyService : public PolicyService {
 
   MOCK_CONST_METHOD1(GetPolicies, const PolicyMap&(const PolicyNamespace&));
   MOCK_CONST_METHOD1(IsInitializationComplete, bool(PolicyDomain domain));
-  MOCK_METHOD1(RefreshPolicies, void(base::OnceClosure));
+  MOCK_CONST_METHOD1(IsFirstPolicyLoadComplete, bool(PolicyDomain domain));
+  MOCK_METHOD2(RefreshPolicies, void(base::OnceClosure, PolicyFetchReason));
+  MOCK_METHOD1(UseLocalTestPolicyProvider, void(ConfigurationPolicyProvider*));
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   MOCK_METHOD0(GetPolicyServiceAndroid, android::PolicyServiceAndroid*());
 #endif
 };

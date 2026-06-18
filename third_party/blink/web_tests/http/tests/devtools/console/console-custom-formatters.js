@@ -1,11 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as Console from 'devtools/panels/console/console.js';
 
 (async function() {
   TestRunner.addResult('Tests that console logging dumps properly when there are multiple custom formatters on the page\n');
 
-  await TestRunner.loadModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   await TestRunner.evaluateInPagePromise(`
@@ -127,16 +131,16 @@
     }
   `);
 
-  TestRunner.mainTarget.runtimeAgent().setCustomObjectFormatterEnabled(true);
+  TestRunner.mainTarget.runtimeAgent().invoke_setCustomObjectFormatterEnabled({enabled: true});
   TestRunner.evaluateInPage('logVars()', expandVariablesInConsole);
 
   function expandVariablesInConsole() {
-    var consoleView = Console.ConsoleView.instance();
+    var consoleView = Console.ConsoleView.ConsoleView.instance();
 
-    if (consoleView._needsFullUpdate)
-      consoleView._updateMessageList();
+    if (consoleView.needsFullUpdate)
+      consoleView.updateMessageList();
 
-    var viewMessages = consoleView._visibleViewMessages;
+    var viewMessages = consoleView.visibleViewMessages;
 
     for (var i = 0; i < viewMessages.length; ++i) {
       var uiMessage = viewMessages[i];

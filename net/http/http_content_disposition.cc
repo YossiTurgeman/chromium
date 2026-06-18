@@ -1,18 +1,23 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "net/http/http_content_disposition.h"
 
+#include <string>
+#include <string_view>
+
 #include "base/base64.h"
 #include "base/check_op.h"
-#include "base/strings/string_piece.h"
+#include "base/feature_list.h"
+#include "base/strings/escape.h"
 #include "base/strings/string_tokenizer.h"
 #include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
-#include "net/base/escape.h"
+#include "net/base/features.h"
 #include "net/base/net_string_util.h"
+#include "net/http/http_response_headers.h"
 #include "net/http/http_util.h"
 
 namespace net {
@@ -26,11 +31,10 @@ enum RFC2047EncodingType {
 
 // Decodes a "Q" encoded string as described in RFC 2047 section 4.2. Similar to
 // decoding a quoted-printable string.  Returns true if the input was valid.
-bool DecodeQEncoding(const std::string& input, std::string* output) {
+bool DecodeQEncoding(std::string_view input, std::string* output) {
   std::string temp;
   temp.reserve(input.size());
-  for (std::string::const_iterator it = input.begin(); it != input.end();
-       ++it) {
+  for (auto it = input.begin(); it != input.end(); ++it) {
     if (*it == '_') {
       temp.push_back(' ');
     } else if (*it == '=') {
@@ -61,7 +65,7 @@ bool DecodeQEncoding(const std::string& input, std::string* output) {
 
 // Decodes a "Q" or "B" encoded string as per RFC 2047 section 4. The encoding
 // type is specified in |enc_type|.
-bool DecodeBQEncoding(const std::string& part,
+bool DecodeBQEncoding(std::string_view part,
                       RFC2047EncodingType enc_type,
                       const std::string& charset,
                       std::string* output) {
@@ -79,7 +83,7 @@ bool DecodeBQEncoding(const std::string& part,
   return ConvertToUtf8(decoded, charset.c_str(), output);
 }
 
-bool DecodeWord(const std::string& encoded_word,
+bool DecodeWord(std::string_view encoded_word,
                 const std::string& referrer_charset,
                 bool* is_rfc2047,
                 std::string* output,
@@ -92,9 +96,9 @@ bool DecodeWord(const std::string& encoded_word,
   if (!base::IsStringASCII(encoded_word)) {
     // Try UTF-8, referrer_charset and the native OS default charset in turn.
     if (base::IsStringUTF8(encoded_word)) {
-      *output = encoded_word;
+      *output = std::string(encoded_word);
     } else {
-      base::string16 utf16_output;
+      std::u16string utf16_output;
       if (!referrer_charset.empty() &&
           ConvertToUTF16(encoded_word, referrer_charset.c_str(),
                          &utf16_output)) {
@@ -117,10 +121,10 @@ bool DecodeWord(const std::string& encoded_word,
   *is_rfc2047 = true;
   int part_index = 0;
   std::string charset;
-  base::StringTokenizer t(encoded_word, "?");
+  base::StringViewTokenizer t(encoded_word, "?");
   RFC2047EncodingType enc_type = Q_ENCODING;
   while (*is_rfc2047 && t.GetNext()) {
-    std::string part = t.token();
+    std::string_view part = t.token_piece();
     switch (part_index) {
       case 0:
         if (part != "=") {
@@ -131,7 +135,7 @@ bool DecodeWord(const std::string& encoded_word,
         break;
       case 1:
         // Do we need charset validity check here?
-        charset = part;
+        charset = std::string(part);
         ++part_index;
         break;
       case 2:
@@ -189,8 +193,8 @@ bool DecodeWord(const std::string& encoded_word,
   // web browser.
 
   // What IE6/7 does: %-escaped UTF-8.
-  decoded_word =
-      base::UnescapeBinaryURLComponent(encoded_word, UnescapeRule::NORMAL);
+  decoded_word = base::UnescapeBinaryURLComponent(encoded_word,
+                                                  base::UnescapeRule::NORMAL);
   if (decoded_word != encoded_word)
     *parse_result_flags |= HttpContentDisposition::HAS_PERCENT_ENCODED_STRINGS;
   if (base::IsStringUTF8(decoded_word)) {
@@ -212,7 +216,7 @@ bool DecodeWord(const std::string& encoded_word,
 //
 // However we currently also allow RFC 2047 encoding and non-ASCII
 // strings. Non-ASCII strings are interpreted based on |referrer_charset|.
-bool DecodeFilenameValue(const std::string& input,
+bool DecodeFilenameValue(std::string_view input,
                          const std::string& referrer_charset,
                          std::string* output,
                          int* parse_result_flags) {
@@ -221,8 +225,8 @@ bool DecodeFilenameValue(const std::string& input,
   bool is_previous_token_rfc2047 = true;
 
   // Tokenize with whitespace characters.
-  base::StringTokenizer t(input, " \t\n\r");
-  t.set_options(base::StringTokenizer::RETURN_DELIMS);
+  base::StringViewTokenizer t(input, " \t\n\r");
+  t.set_options(base::StringViewTokenizer::RETURN_DELIMS);
   while (t.GetNext()) {
     if (t.token_is_delim()) {
       // If the previous non-delimeter token is not RFC2047-encoded,
@@ -237,8 +241,9 @@ bool DecodeFilenameValue(const std::string& input,
     // in a single encoded-word. Firefox/Thunderbird do not support
     // it, either.
     std::string decoded;
-    if (!DecodeWord(t.token(), referrer_charset, &is_previous_token_rfc2047,
-                    &decoded, &current_parse_result_flags))
+    if (!DecodeWord(t.token_piece(), referrer_charset,
+                    &is_previous_token_rfc2047, &decoded,
+                    &current_parse_result_flags))
       return false;
     decoded_value.append(decoded);
   }
@@ -251,40 +256,40 @@ bool DecodeFilenameValue(const std::string& input,
 // Parses the charset and value-chars out of an ext-value string.
 //
 //  ext-value     = charset  "'" [ language ] "'" value-chars
-bool ParseExtValueComponents(const std::string& input,
+bool ParseExtValueComponents(std::string_view input,
                              std::string* charset,
                              std::string* value_chars) {
-  base::StringTokenizer t(input, "'");
+  base::StringViewTokenizer t(input, "'");
   t.set_options(base::StringTokenizer::RETURN_DELIMS);
-  std::string temp_charset;
-  std::string temp_value;
-  int numDelimsSeen = 0;
+  std::string_view temp_charset;
+  std::string_view temp_value;
+  int num_delims_seen = 0;
   while (t.GetNext()) {
     if (t.token_is_delim()) {
-      ++numDelimsSeen;
+      ++num_delims_seen;
       continue;
     } else {
-      switch (numDelimsSeen) {
+      switch (num_delims_seen) {
         case 0:
-          temp_charset = t.token();
+          temp_charset = t.token_piece();
           break;
         case 1:
           // Language is ignored.
           break;
         case 2:
-          temp_value = t.token();
+          temp_value = t.token_piece();
           break;
         default:
           return false;
       }
     }
   }
-  if (numDelimsSeen != 2)
+  if (num_delims_seen != 2)
     return false;
   if (temp_charset.empty() || temp_value.empty())
     return false;
-  charset->swap(temp_charset);
-  value_chars->swap(temp_value);
+  *charset = std::string(temp_charset);
+  *value_chars = std::string(temp_value);
   return true;
 }
 
@@ -309,7 +314,7 @@ bool ParseExtValueComponents(const std::string& input,
 //  attr-char     = ALPHA / DIGIT
 //                 / "!" / "#" / "$" / "&" / "+" / "-" / "."
 //                 / "^" / "_" / "`" / "|" / "~"
-bool DecodeExtValue(const std::string& param_value, std::string* decoded) {
+bool DecodeExtValue(std::string_view param_value, std::string* decoded) {
   if (param_value.find('"') != std::string::npos)
     return false;
 
@@ -325,7 +330,7 @@ bool DecodeExtValue(const std::string& param_value, std::string* decoded) {
   }
 
   std::string unescaped =
-      base::UnescapeBinaryURLComponent(value, UnescapeRule::NORMAL);
+      base::UnescapeBinaryURLComponent(value, base::UnescapeRule::NORMAL);
 
   return ConvertToUtf8AndNormalize(unescaped, charset.c_str(), decoded);
 }
@@ -333,41 +338,71 @@ bool DecodeExtValue(const std::string& param_value, std::string* decoded) {
 } // namespace
 
 HttpContentDisposition::HttpContentDisposition(
-    const std::string& header, const std::string& referrer_charset)
-  : type_(INLINE),
-    parse_result_flags_(INVALID) {
-  Parse(header, referrer_charset);
+    const HttpResponseHeaders& headers,
+    const std::string& referrer_charset) {
+  if (!base::FeatureList::IsEnabled(
+          features::kOnlyParseFirstContentDisposition)) {
+    std::optional<std::string> header =
+        headers.GetNormalizedHeader("Content-Disposition");
+    if (header) {
+      Parse(*header, referrer_charset);
+    }
+    return;
+  }
+  std::optional<std::string_view> header =
+      headers.EnumerateHeader(/*iter=*/nullptr, "Content-Disposition");
+  if (header) {
+    Parse(*header, referrer_charset);
+  }
+}
+
+HttpContentDisposition::HttpContentDisposition(
+    std::string_view header,
+    const std::string& referrer_charset) {
+  if (!base::FeatureList::IsEnabled(
+          features::kOnlyParseFirstContentDisposition)) {
+    Parse(header, referrer_charset);
+    return;
+  }
+  HttpUtil::ValuesIterator it(header, ',', /*ignore_empty_values=*/false);
+  if (it.GetNext()) {
+    Parse(it.value(), referrer_charset);
+  }
 }
 
 HttpContentDisposition::~HttpContentDisposition() = default;
 
-std::string::const_iterator HttpContentDisposition::ConsumeDispositionType(
-    std::string::const_iterator begin, std::string::const_iterator end) {
+std::string_view HttpContentDisposition::ConsumeDispositionType(
+    std::string_view header) {
   DCHECK(type_ == INLINE);
-  base::StringPiece header(begin, end);
   size_t delimiter = header.find(';');
-  base::StringPiece type = header.substr(0, delimiter);
+  std::string_view type = header.substr(0, delimiter);
   type = HttpUtil::TrimLWS(type);
 
   // If the disposition-type isn't a valid token the then the
   // Content-Disposition header is malformed, and we treat the first bytes as
   // a parameter rather than a disposition-type.
   if (type.empty() || !HttpUtil::IsToken(type))
-    return begin;
+    return header;
 
   parse_result_flags_ |= HAS_DISPOSITION_TYPE;
 
-  DCHECK(type.find('=') == base::StringPiece::npos);
+  DCHECK(type.find('=') == std::string_view::npos);
 
-  if (base::LowerCaseEqualsASCII(type, "inline")) {
+  if (base::EqualsCaseInsensitiveASCII(type, "inline")) {
     type_ = INLINE;
-  } else if (base::LowerCaseEqualsASCII(type, "attachment")) {
+  } else if (base::EqualsCaseInsensitiveASCII(type, "attachment")) {
     type_ = ATTACHMENT;
   } else {
     parse_result_flags_ |= HAS_UNKNOWN_DISPOSITION_TYPE;
     type_ = ATTACHMENT;
   }
-  return begin + (type.data() + type.size() - header.data());
+
+  // Return everything in the string after the delimiter, if there was one.
+  if (delimiter == std::string_view::npos) {
+    return std::string_view();
+  }
+  return header.substr(delimiter + 1);
 }
 
 // http://tools.ietf.org/html/rfc6266
@@ -388,22 +423,20 @@ std::string::const_iterator HttpContentDisposition::ConsumeDispositionType(
 //                      | ext-token "=" ext-value
 //  ext-token           = <the characters in token, followed by "*">
 //
-void HttpContentDisposition::Parse(const std::string& header,
+void HttpContentDisposition::Parse(std::string_view header,
                                    const std::string& referrer_charset) {
   DCHECK(type_ == INLINE);
   DCHECK(filename_.empty());
 
-  std::string::const_iterator pos = header.begin();
-  std::string::const_iterator end = header.end();
-  pos = ConsumeDispositionType(pos, end);
+  std::string_view params = ConsumeDispositionType(header);
 
   std::string filename;
   std::string ext_filename;
 
-  HttpUtil::NameValuePairsIterator iter(pos, end, ';');
+  HttpUtil::NameValuePairsIterator iter(params, ';');
   while (iter.GetNext()) {
     if (filename.empty() &&
-        base::LowerCaseEqualsASCII(iter.name_piece(), "filename")) {
+        base::EqualsCaseInsensitiveASCII(iter.name(), "filename")) {
       DecodeFilenameValue(iter.value(), referrer_charset, &filename,
                           &parse_result_flags_);
       if (!filename.empty()) {
@@ -412,7 +445,7 @@ void HttpContentDisposition::Parse(const std::string& header,
           parse_result_flags_ |= HAS_SINGLE_QUOTED_FILENAME;
       }
     } else if (ext_filename.empty() &&
-               base::LowerCaseEqualsASCII(iter.name_piece(), "filename*")) {
+               base::EqualsCaseInsensitiveASCII(iter.name(), "filename*")) {
       DecodeExtValue(iter.raw_value(), &ext_filename);
       if (!ext_filename.empty())
         parse_result_flags_ |= HAS_EXT_FILENAME;

@@ -1,10 +1,12 @@
 include_rules = [
+  "+components/enterprise/common",
   "+components/history/core/browser",
-  "+components/safe_browsing/core/proto/csd.pb.h",
+  "+components/content_settings/core",
+  "+components/password_manager/core/common/password_manager_pref_names.h",
   "+components/sessions/core/session_id.h",
-  "+content/public/browser",
-  "+ipc/ipc_message.h",
+  "+components/version_info",
   "+net/cookies",
+  "+net/dns/public",
   "+net/extras",
   "+net/http",
   "+net/ssl",
@@ -13,9 +15,3 @@ include_rules = [
   "+services/network/public",
   "+services/service_manager/public/cpp",
 ]
-
-specific_include_rules = {
-  ".*test\.cc": [
-    "+content/public/test/browser_task_environment.h",
-  ],
-}

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,21 +8,10 @@
 #include <utility>
 
 #include "base/memory/ptr_util.h"
-#include "base/task_runner_util.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
 
 namespace storage {
-
-std::unique_ptr<FileStreamWriter> FileStreamWriter::CreateForMemoryFile(
-    scoped_refptr<base::TaskRunner> task_runner,
-    base::WeakPtr<ObfuscatedFileUtilMemoryDelegate> memory_file_util,
-    const base::FilePath& file_path,
-    int64_t initial_offset) {
-  return base::WrapUnique(new MemoryFileStreamWriter(
-      std::move(task_runner), std::move(memory_file_util), file_path,
-      initial_offset));
-}
 
 MemoryFileStreamWriter::MemoryFileStreamWriter(
     scoped_refptr<base::TaskRunner> task_runner,
@@ -34,6 +23,7 @@ MemoryFileStreamWriter::MemoryFileStreamWriter(
       file_path_(file_path),
       offset_(initial_offset) {
   DCHECK(memory_file_util_.MaybeValid());
+  has_pending_operation_ = false;
 }
 
 MemoryFileStreamWriter::~MemoryFileStreamWriter() = default;
@@ -41,6 +31,11 @@ MemoryFileStreamWriter::~MemoryFileStreamWriter() = default;
 int MemoryFileStreamWriter::Write(net::IOBuffer* buf,
                                   int buf_len,
                                   net::CompletionOnceCallback callback) {
+  DCHECK(!has_pending_operation_);
+  DCHECK(cancel_callback_.is_null());
+
+  has_pending_operation_ = true;
+
   task_runner_->PostTaskAndReplyWithResult(
       FROM_HERE,
       base::BindOnce(
@@ -66,17 +61,44 @@ int MemoryFileStreamWriter::Write(net::IOBuffer* buf,
 void MemoryFileStreamWriter::OnWriteCompleted(
     net::CompletionOnceCallback callback,
     int result) {
+  DCHECK(has_pending_operation_);
+
+  if (CancelIfRequested())
+    return;
+  has_pending_operation_ = false;
+
   if (result > 0)
     offset_ += result;
 
   std::move(callback).Run(result);
 }
 
-int MemoryFileStreamWriter::Cancel(net::CompletionOnceCallback /*callback*/) {
-  return net::ERR_UNEXPECTED;
+int MemoryFileStreamWriter::Cancel(net::CompletionOnceCallback callback) {
+  if (!has_pending_operation_)
+    return net::ERR_UNEXPECTED;
+
+  DCHECK(!callback.is_null());
+  cancel_callback_ = std::move(callback);
+  return net::ERR_IO_PENDING;
 }
 
-int MemoryFileStreamWriter::Flush(net::CompletionOnceCallback /*callback*/) {
+int MemoryFileStreamWriter::Flush(FlushMode /*flush_mode*/,
+                                  net::CompletionOnceCallback /*callback*/) {
+  DCHECK(!has_pending_operation_);
+  DCHECK(cancel_callback_.is_null());
+
   return net::OK;
 }
+
+bool MemoryFileStreamWriter::CancelIfRequested() {
+  DCHECK(has_pending_operation_);
+
+  if (cancel_callback_.is_null())
+    return false;
+
+  has_pending_operation_ = false;
+  std::move(cancel_callback_).Run(net::OK);
+  return true;
+}
+
 }  // namespace storage

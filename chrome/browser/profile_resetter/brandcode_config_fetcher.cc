@@ -1,15 +1,16 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/profile_resetter/brandcode_config_fetcher.h"
 
 #include <stddef.h>
+
+#include <memory>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
-#include "base/stl_util.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profile_resetter/brandcoded_default_settings.h"
@@ -20,6 +21,7 @@
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 
 namespace {
 
@@ -93,31 +95,37 @@ BrandcodeConfigFetcher::BrandcodeConfigFetcher(
       base::BindOnce(&BrandcodeConfigFetcher::OnSimpleLoaderComplete,
                      weak_ptr_factory_.GetWeakPtr()));
   // Abort the download attempt if it takes too long.
-  download_timer_.Start(FROM_HERE,
-                        base::TimeDelta::FromSeconds(kDownloadTimeoutSec),
-                        this,
+  download_timer_.Start(FROM_HERE, base::Seconds(kDownloadTimeoutSec), this,
                         &BrandcodeConfigFetcher::OnDownloadTimeout);
 }
 
-BrandcodeConfigFetcher::~BrandcodeConfigFetcher() {}
+BrandcodeConfigFetcher::~BrandcodeConfigFetcher() = default;
 
 void BrandcodeConfigFetcher::SetCallback(FetchCallback callback) {
   fetch_callback_ = std::move(callback);
 }
 
 void BrandcodeConfigFetcher::OnSimpleLoaderComplete(
-    std::unique_ptr<std::string> response_body) {
-  if (response_body && simple_url_loader_->ResponseInfo() &&
-      simple_url_loader_->ResponseInfo()->mime_type == "text/xml") {
+    std::optional<std::string> response_body) {
+  const bool is_valid_response =
+      response_body && simple_url_loader_->ResponseInfo() &&
+      simple_url_loader_->ResponseInfo()->mime_type == "text/xml";
+
+  // Release resources before potentially running the callback.
+  simple_url_loader_.reset();
+  download_timer_.Stop();
+
+  if (is_valid_response) {
     data_decoder::DataDecoder::ParseXmlIsolated(
         *response_body,
+        data_decoder::mojom::XmlParser::WhitespaceBehavior::kIgnore,
         base::BindOnce(&BrandcodeConfigFetcher::OnXmlConfigParsed,
                        weak_ptr_factory_.GetWeakPtr()));
   } else {
     std::move(fetch_callback_).Run();
   }
-  simple_url_loader_.reset();
-  download_timer_.Stop();
+
+  // `this` may now be deleted from `fetch_callback_`.
 }
 
 void BrandcodeConfigFetcher::OnXmlConfigParsed(
@@ -126,10 +134,10 @@ void BrandcodeConfigFetcher::OnXmlConfigParsed(
   // failure. The difference is whether |default_settings_| is populated.
   base::ScopedClosureRunner scoped_closure(std::move(fetch_callback_));
 
-  if (!value_or_error.value)
+  if (!value_or_error.has_value())
     return;
 
-  const base::Value* node = &value_or_error.value.value();
+  const base::Value* node = &*value_or_error;
   if (!data_decoder::IsXmlElementNamed(*node, "response"))
     return;
 
@@ -144,8 +152,10 @@ void BrandcodeConfigFetcher::OnXmlConfigParsed(
   // Extract the text JSON data from the "data" node to specify the new
   // settings.
   std::string master_prefs;
-  if (node && data_decoder::GetXmlElementText(*node, &master_prefs))
-    default_settings_.reset(new BrandcodedDefaultSettings(master_prefs));
+  if (node && data_decoder::GetXmlElementText(*node, &master_prefs)) {
+    default_settings_ =
+        std::make_unique<BrandcodedDefaultSettings>(master_prefs);
+  }
 }
 
 void BrandcodeConfigFetcher::OnDownloadTimeout() {

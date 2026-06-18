@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,10 @@
 #include <algorithm>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/compiler_specific.h"
-#include "base/single_thread_task_runner.h"
-#include "base/stl_util.h"
+#include "base/functional/bind.h"
+#include "base/not_fatal_until.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "media/audio/audio_logging.h"
 #include "media/audio/audio_manager.h"
@@ -33,19 +33,22 @@ AudioOutputDispatcherImpl::AudioOutputDispatcherImpl(
                    &AudioOutputDispatcherImpl::CloseAllIdleStreams),
       audio_stream_id_(0) {
   DCHECK(audio_manager->GetTaskRunner()->BelongsToCurrentThread());
+  audio_manager->AddOutputDeviceChangeListener(this);
 }
 
 AudioOutputDispatcherImpl::~AudioOutputDispatcherImpl() {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
 
   // Stop all active streams.
-  for (auto& iter : proxy_to_physical_map_) {
-    StopPhysicalStream(iter.second);
+  for (const auto& [proxy, stream] : proxy_to_physical_map_) {
+    StopPhysicalStream(stream);
   }
 
   // Close all idle streams immediately.  The |close_timer_| will handle
   // invalidating any outstanding tasks upon its destruction.
   CloseAllIdleStreams();
+
+  audio_manager()->RemoveOutputDeviceChangeListener(this);
 
   // All idle physical streams must have been closed during shutdown.
   CHECK(idle_streams_.empty());
@@ -60,8 +63,9 @@ bool AudioOutputDispatcherImpl::OpenStream() {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
 
   // Ensure that there is at least one open stream.
-  if (idle_streams_.empty() && !CreateAndOpenStream())
+  if (idle_streams_.empty() && !CreateAndOpenStream()) {
     return false;
+  }
 
   ++idle_proxies_;
   close_timer_.Reset();
@@ -72,11 +76,11 @@ bool AudioOutputDispatcherImpl::StartStream(
     AudioOutputStream::AudioSourceCallback* callback,
     AudioOutputProxy* stream_proxy) {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
-  DCHECK(proxy_to_physical_map_.find(stream_proxy) ==
-         proxy_to_physical_map_.end());
+  DCHECK(!proxy_to_physical_map_.contains(stream_proxy));
 
-  if (idle_streams_.empty() && !CreateAndOpenStream())
+  if (idle_streams_.empty() && !CreateAndOpenStream()) {
     return false;
+  }
 
   AudioOutputStream* physical_stream = idle_streams_.back();
   idle_streams_.pop_back();
@@ -87,7 +91,7 @@ bool AudioOutputDispatcherImpl::StartStream(
   double volume = 0;
   stream_proxy->GetVolume(&volume);
   physical_stream->SetVolume(volume);
-  DCHECK(base::Contains(audio_logs_, physical_stream));
+  DCHECK(audio_logs_.contains(physical_stream));
   AudioLog* const audio_log = audio_logs_[physical_stream].get();
   audio_log->OnSetVolume(volume);
   physical_stream->Start(callback);
@@ -101,7 +105,7 @@ bool AudioOutputDispatcherImpl::StartStream(
 void AudioOutputDispatcherImpl::StopStream(AudioOutputProxy* stream_proxy) {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
   auto it = proxy_to_physical_map_.find(stream_proxy);
-  DCHECK(it != proxy_to_physical_map_.end());
+  CHECK(it != proxy_to_physical_map_.end());
   StopPhysicalStream(it->second);
   proxy_to_physical_map_.erase(it);
   ++idle_proxies_;
@@ -114,7 +118,7 @@ void AudioOutputDispatcherImpl::StreamVolumeSet(AudioOutputProxy* stream_proxy,
   if (it != proxy_to_physical_map_.end()) {
     AudioOutputStream* physical_stream = it->second;
     physical_stream->SetVolume(volume);
-    DCHECK(base::Contains(audio_logs_, physical_stream));
+    DCHECK(audio_logs_.contains(physical_stream));
     audio_logs_[physical_stream]->OnSetVolume(volume);
   }
 }
@@ -134,6 +138,17 @@ void AudioOutputDispatcherImpl::CloseStream(AudioOutputProxy* stream_proxy) {
 // StopStream().
 void AudioOutputDispatcherImpl::FlushStream(AudioOutputProxy* stream_proxy) {}
 
+void AudioOutputDispatcherImpl::OnDeviceChange() {
+  DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
+
+  // We don't want to end up reusing streams which were opened for the wrong
+  // default device. We need to post this task so it runs after device changes
+  // have been sent to all listeners and they've had time to close streams.
+  audio_manager()->GetTaskRunner()->PostTask(
+      FROM_HERE, base::BindOnce(&AudioOutputDispatcherImpl::CloseAllIdleStreams,
+                                weak_factory_.GetWeakPtr()));
+}
+
 bool AudioOutputDispatcherImpl::HasOutputProxies() const {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
   return idle_proxies_ || !proxy_to_physical_map_.empty();
@@ -143,13 +158,14 @@ bool AudioOutputDispatcherImpl::CreateAndOpenStream() {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
   const int stream_id = audio_stream_id_++;
   std::unique_ptr<AudioLog> audio_log = audio_manager()->CreateAudioLog(
-      AudioLogFactory::AUDIO_OUTPUT_STREAM, stream_id);
+      AudioLogFactory::AudioComponent::kAudioOutputStream, stream_id);
   AudioOutputStream* stream = audio_manager()->MakeAudioOutputStream(
       params_, device_id_,
       base::BindRepeating(&AudioLog::OnLogMessage,
                           base::Unretained(audio_log.get())));
-  if (!stream)
+  if (!stream) {
     return false;
+  }
 
   if (!stream->Open()) {
     stream->Close();
@@ -170,14 +186,15 @@ void AudioOutputDispatcherImpl::CloseAllIdleStreams() {
 
 void AudioOutputDispatcherImpl::CloseIdleStreams(size_t keep_alive) {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
-  if (idle_streams_.size() <= keep_alive)
+  if (idle_streams_.size() <= keep_alive) {
     return;
+  }
   for (size_t i = keep_alive; i < idle_streams_.size(); ++i) {
     AudioOutputStream* stream = idle_streams_[i];
     stream->Close();
 
     auto it = audio_logs_.find(stream);
-    DCHECK(it != audio_logs_.end());
+    CHECK(it != audio_logs_.end());
     it->second->OnClosed();
     audio_logs_.erase(it);
   }
@@ -187,7 +204,7 @@ void AudioOutputDispatcherImpl::CloseIdleStreams(size_t keep_alive) {
 void AudioOutputDispatcherImpl::StopPhysicalStream(AudioOutputStream* stream) {
   DCHECK(audio_manager()->GetTaskRunner()->BelongsToCurrentThread());
   stream->Stop();
-  DCHECK(base::Contains(audio_logs_, stream));
+  DCHECK(audio_logs_.contains(stream));
   audio_logs_[stream]->OnStopped();
   idle_streams_.push_back(stream);
   close_timer_.Reset();

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,32 +6,37 @@
 
 #include <utility>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/app/vector_icons/vector_icons.h"
 #include "chrome/browser/external_protocol/external_protocol_handler.h"
 #include "chrome/browser/sharing/click_to_call/click_to_call_utils.h"
-#include "chrome/browser/sharing/sharing_constants.h"
-#include "chrome/browser/sharing/sharing_dialog.h"
-#include "chrome/browser/shell_integration.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "components/sync_device_info/device_info.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/grit/branded_strings.h"
+#include "components/sharing_message/sharing_constants.h"
+#include "components/sharing_message/sharing_dialog.h"
+#include "components/sharing_message/sharing_target_device_info.h"
+#include "components/tabs/public/tab_interface.h"
 #include "components/vector_icons/vector_icons.h"
+#include "content/public/browser/weak_document_ptr.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/strings/grit/ui_strings.h"
 
-using SharingMessage = chrome_browser_sharing::SharingMessage;
+using SharingMessage = components_sharing_message::SharingMessage;
 
 // static
 ClickToCallUiController* ClickToCallUiController::GetOrCreateFromWebContents(
     content::WebContents* web_contents) {
   // Use active WebContents if available.
-  Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
+  auto* tab = tabs::TabInterface::MaybeGetFromContents(web_contents);
+  BrowserWindowInterface* browser =
+      tab ? tab->GetBrowserWindowInterface() : nullptr;
   if (browser)
-    web_contents = browser->tab_strip_model()->GetActiveWebContents();
+    web_contents = browser->GetTabStripModel()->GetActiveWebContents();
   ClickToCallUiController::CreateForWebContents(web_contents);
   return ClickToCallUiController::FromWebContents(web_contents);
 }
@@ -39,32 +44,45 @@ ClickToCallUiController* ClickToCallUiController::GetOrCreateFromWebContents(
 // static
 void ClickToCallUiController::ShowDialog(
     content::WebContents* web_contents,
-    const base::Optional<url::Origin>& initiating_origin,
+    const std::optional<url::Origin>& initiating_origin,
+    content::WeakDocumentPtr initiator_document,
     const GURL& url,
-    bool hide_default_handler) {
+    bool hide_default_handler,
+    const std::u16string& program_name) {
   auto* controller = GetOrCreateFromWebContents(web_contents);
   controller->phone_url_ = url;
+  controller->initiator_document_ = std::move(initiator_document);
   controller->hide_default_handler_ = hide_default_handler;
+  controller->default_program_name_ = program_name;
   controller->UpdateAndShowDialog(initiating_origin);
 }
 
 ClickToCallUiController::ClickToCallUiController(
     content::WebContents* web_contents)
-    : SharingUiController(web_contents) {}
+    : SharingUiController(web_contents),
+      content::WebContentsUserData<ClickToCallUiController>(*web_contents) {}
 
 ClickToCallUiController::~ClickToCallUiController() = default;
 
 void ClickToCallUiController::OnDeviceSelected(
     const std::string& phone_number,
-    const syncer::DeviceInfo& device,
+    const SharingTargetDeviceInfo& device,
     SharingClickToCallEntryPoint entry_point) {
-  // TODO(knollr): figure out how to get a value for |has_apps|.
   LogClickToCallUKM(web_contents(), entry_point,
                     /*has_devices=*/true, /*has_apps=*/false,
                     SharingClickToCallSelection::kDevice);
 
   SendNumberToDevice(device, phone_number, entry_point);
 }
+
+#if BUILDFLAG(IS_CHROMEOS)
+
+void ClickToCallUiController::OnIntentPickerShown(bool has_devices,
+                                                  bool has_apps) {
+  OnDialogShown(has_devices, has_apps);
+}
+
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 void ClickToCallUiController::OnDialogClosed(SharingDialog* dialog) {
   if (ukm_recorder_ && this->dialog() == dialog)
@@ -73,7 +91,7 @@ void ClickToCallUiController::OnDialogClosed(SharingDialog* dialog) {
   SharingUiController::OnDialogClosed(dialog);
 }
 
-base::string16 ClickToCallUiController::GetTitle(
+std::u16string ClickToCallUiController::GetTitle(
     SharingDialogType dialog_type) {
   switch (dialog_type) {
     case SharingDialogType::kErrorDialog:
@@ -88,13 +106,9 @@ base::string16 ClickToCallUiController::GetTitle(
   }
 }
 
-PageActionIconType ClickToCallUiController::GetIconType() {
-  return PageActionIconType::kClickToCall;
-}
-
-sync_pb::SharingSpecificFields::EnabledFeatures
-ClickToCallUiController::GetRequiredFeature() {
-  return sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2;
+syncer::DeviceInfo::SharingFeature ClickToCallUiController::GetRequiredFeature()
+    const {
+  return syncer::DeviceInfo::SharingFeature::kClickToCallV2;
 }
 
 void ClickToCallUiController::DoUpdateApps(UpdateAppsCallback callback) {
@@ -104,41 +118,42 @@ void ClickToCallUiController::DoUpdateApps(UpdateAppsCallback callback) {
     return;
   }
 
-  base::string16 app_name =
-      shell_integration::GetApplicationNameForProtocol(phone_url_);
-
-  if (!app_name.empty()) {
-    apps.emplace_back(&vector_icons::kOpenInNewIcon, gfx::Image(),
-                      std::move(app_name), std::string());
+  if (!default_program_name_.empty()) {
+    apps.emplace_back(&(features::IsRoundedIconsEnabled() ? kOpenInNewIcon
+                                                          : kOpenInNewOldIcon),
+                      gfx::Image(), default_program_name_, std::string());
   }
   std::move(callback).Run(std::move(apps));
 }
 
-void ClickToCallUiController::OnDeviceChosen(const syncer::DeviceInfo& device) {
+void ClickToCallUiController::OnDeviceChosen(
+    const SharingTargetDeviceInfo& device) {
   if (ukm_recorder_)
     std::move(ukm_recorder_).Run(SharingClickToCallSelection::kDevice);
 
-  SendNumberToDevice(device, GetUnescapedURLContent(phone_url_),
+  SendNumberToDevice(device, phone_url_.GetContent(),
                      SharingClickToCallEntryPoint::kLeftClickLink);
 }
 
 void ClickToCallUiController::SendNumberToDevice(
-    const syncer::DeviceInfo& device,
+    const SharingTargetDeviceInfo& device,
     const std::string& phone_number,
     SharingClickToCallEntryPoint entry_point) {
   SharingMessage sharing_message;
   sharing_message.mutable_click_to_call_message()->set_phone_number(
       phone_number);
 
-  SendMessageToDevice(device, std::move(sharing_message));
+  SendMessageToDevice(device, /*response_timeout=*/std::nullopt,
+                      std::move(sharing_message),
+                      /*callback=*/std::nullopt);
 }
 
 void ClickToCallUiController::OnAppChosen(const SharingApp& app) {
   if (ukm_recorder_)
     std::move(ukm_recorder_).Run(SharingClickToCallSelection::kApp);
 
-  ExternalProtocolHandler::LaunchUrlWithoutSecurityCheck(phone_url_,
-                                                         web_contents());
+  ExternalProtocolHandler::LaunchUrlWithoutSecurityCheck(
+      phone_url_, web_contents(), initiator_document_);
 }
 
 void ClickToCallUiController::OnDialogShown(bool has_devices, bool has_apps) {
@@ -151,15 +166,16 @@ void ClickToCallUiController::OnDialogShown(bool has_devices, bool has_apps) {
   SharingUiController::OnDialogShown(has_devices, has_apps);
 }
 
-base::string16 ClickToCallUiController::GetContentType() const {
+std::u16string ClickToCallUiController::GetContentType() const {
   return l10n_util::GetStringUTF16(IDS_BROWSER_SHARING_CONTENT_TYPE_NUMBER);
 }
 
 const gfx::VectorIcon& ClickToCallUiController::GetVectorIcon() const {
-  return vector_icons::kCallIcon;
+  return features::IsRoundedIconsEnabled() ? vector_icons::kCallIcon
+                                           : vector_icons::kCallRefreshOldIcon;
 }
 
-base::string16 ClickToCallUiController::GetTextForTooltipAndAccessibleName()
+std::u16string ClickToCallUiController::GetTextForTooltipAndAccessibleName()
     const {
   return l10n_util::GetStringUTF16(
       IDS_BROWSER_SHARING_CLICK_TO_CALL_DIALOG_TITLE_LABEL);
@@ -175,20 +191,19 @@ SharingDialogData ClickToCallUiController::CreateDialogData(
 
   // Do not add the header image for error dialogs.
   if (dialog_type != SharingDialogType::kErrorDialog) {
-    data.header_icons = SharingDialogData::HeaderIcons(
-        &kClickToCallIllustrationIcon, &kClickToCallIllustrationDarkIcon);
+    data.header_icons =
+        SharingDialogData::HeaderIcons(&kClickToCallIllustrationCustomIcon,
+                                       &kClickToCallIllustrationDarkCustomIcon);
   }
 
   data.help_text_id =
       IDS_BROWSER_SHARING_CLICK_TO_CALL_DIALOG_HELP_TEXT_NO_DEVICES;
   data.help_text_origin_id =
       IDS_BROWSER_SHARING_CLICK_TO_CALL_DIALOG_HELP_TEXT_NO_DEVICES_ORIGIN;
-  data.help_link_text_id =
-      IDS_BROWSER_SHARING_CLICK_TO_CALL_DIALOG_TROUBLESHOOT_LINK;
   data.origin_text_id =
       IDS_BROWSER_SHARING_CLICK_TO_CALL_DIALOG_INITIATING_ORIGIN;
 
   return data;
 }
 
-WEB_CONTENTS_USER_DATA_KEY_IMPL(ClickToCallUiController)
+WEB_CONTENTS_USER_DATA_KEY_IMPL(ClickToCallUiController);

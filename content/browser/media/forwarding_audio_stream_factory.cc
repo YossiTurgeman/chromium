@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,13 @@
 
 #include <utility>
 
-#include "base/bind.h"
 #include "base/check_op.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/no_destructor.h"
-#include "base/stl_util.h"
 #include "base/trace_event/trace_event.h"
+#include "content/browser/guest_page_holder_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
 #include "content/public/browser/audio_service.h"
 #include "content/public/browser/browser_task_traits.h"
@@ -20,24 +21,25 @@
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
 #include "media/base/audio_parameters.h"
-#include "media/base/user_input_monitor.h"
+#include "media/mojo/mojom/audio_processing.mojom.h"
 #include "ui/gfx/geometry/size.h"
 
 namespace content {
 
 namespace {
 
-ForwardingAudioStreamFactory::StreamFactoryBinder&
-GetStreamFactoryBinderOverride() {
-  static base::NoDestructor<ForwardingAudioStreamFactory::StreamFactoryBinder>
+ForwardingAudioStreamFactory::AudioStreamFactoryBinder&
+GetAudioStreamFactoryBinderOverride() {
+  static base::NoDestructor<
+      ForwardingAudioStreamFactory::AudioStreamFactoryBinder>
       binder;
   return *binder;
 }
 
 void BindStreamFactoryFromUIThread(
-    mojo::PendingReceiver<audio::mojom::StreamFactory> receiver) {
+    mojo::PendingReceiver<media::mojom::AudioStreamFactory> receiver) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  const auto& binder_override = GetStreamFactoryBinderOverride();
+  const auto& binder_override = GetAudioStreamFactoryBinderOverride();
   if (binder_override) {
     binder_override.Run(std::move(receiver));
     return;
@@ -50,10 +52,8 @@ void BindStreamFactoryFromUIThread(
 
 ForwardingAudioStreamFactory::Core::Core(
     base::WeakPtr<ForwardingAudioStreamFactory> owner,
-    media::UserInputMonitorBase* user_input_monitor,
     std::unique_ptr<AudioStreamBrokerFactory> broker_factory)
-    : user_input_monitor_(user_input_monitor),
-      owner_(std::move(owner)),
+    : owner_(std::move(owner)),
       broker_factory_(std::move(broker_factory)),
       group_id_(base::UnguessableToken::Create()) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
@@ -79,6 +79,7 @@ void ForwardingAudioStreamFactory::Core::CreateInputStream(
     const media::AudioParameters& params,
     uint32_t shared_memory_count,
     bool enable_agc,
+    media::mojom::AudioProcessingConfigPtr processing_config,
     mojo::PendingRemote<blink::mojom::RendererAudioInputStreamFactoryClient>
         renderer_factory_client) {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
@@ -86,8 +87,8 @@ void ForwardingAudioStreamFactory::Core::CreateInputStream(
   // |this| owns |inputs_|, so Unretained is safe.
   inputs_
       .insert(broker_factory_->CreateAudioInputStreamBroker(
-          render_process_id, render_frame_id, device_id, params,
-          shared_memory_count, user_input_monitor_, enable_agc,
+          render_process_id, render_frame_id, device_id, params, group_id_,
+          shared_memory_count, enable_agc, std::move(processing_config),
           base::BindOnce(&ForwardingAudioStreamFactory::Core::RemoveInput,
                          base::Unretained(this)),
           std::move(renderer_factory_client)))
@@ -110,6 +111,7 @@ void ForwardingAudioStreamFactory::Core::AssociateInputAndOutputForAec(
 void ForwardingAudioStreamFactory::Core::CreateOutputStream(
     int render_process_id,
     int render_frame_id,
+    const GlobalRenderFrameHostToken& main_frame_token,
     const std::string& device_id,
     const media::AudioParameters& params,
     mojo::PendingRemote<media::mojom::AudioOutputStreamProviderClient> client) {
@@ -118,8 +120,8 @@ void ForwardingAudioStreamFactory::Core::CreateOutputStream(
   // |this| owns |outputs_|, so Unretained is safe.
   outputs_
       .insert(broker_factory_->CreateAudioOutputStreamBroker(
-          render_process_id, render_frame_id, ++stream_id_counter_, device_id,
-          params, group_id_,
+          render_process_id, render_frame_id, main_frame_token,
+          ++stream_id_counter_, device_id, params, group_id_,
           base::BindOnce(&ForwardingAudioStreamFactory::Core::RemoveOutput,
                          base::Unretained(this)),
           std::move(client)))
@@ -159,8 +161,8 @@ void ForwardingAudioStreamFactory::Core::CreateLoopbackStream(
 void ForwardingAudioStreamFactory::Core::SetMuted(bool muted) {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
   DCHECK_NE(muted, !!muter_);
-  TRACE_EVENT_INSTANT2("audio", "SetMuted", TRACE_EVENT_SCOPE_THREAD, "group",
-                       group_id_.GetLowForSerialization(), "muted", muted);
+  TRACE_EVENT_INSTANT("audio", "SetMuted", "group",
+                      group_id_.GetLowForSerialization(), "muted", muted);
 
   if (!muted) {
     muter_.reset();
@@ -201,11 +203,21 @@ const base::UnguessableToken& ForwardingAudioStreamFactory::Core::GetGroupID() {
 ForwardingAudioStreamFactory* ForwardingAudioStreamFactory::ForFrame(
     RenderFrameHost* frame) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  if (!frame) {
+    return nullptr;
+  }
+
+  GuestPageHolderImpl* guest_holder = GuestPageHolderImpl::FromRenderFrameHost(
+      static_cast<RenderFrameHostImpl&>(*frame));
+  if (guest_holder) {
+    return guest_holder->GetAudioStreamFactory();
+  }
 
   auto* contents =
       static_cast<WebContentsImpl*>(WebContents::FromRenderFrameHost(frame));
-  if (!contents)
+  if (!contents) {
     return nullptr;
+  }
 
   return contents->GetAudioStreamFactory();
 }
@@ -221,12 +233,11 @@ ForwardingAudioStreamFactory::Core* ForwardingAudioStreamFactory::CoreForFrame(
 
 ForwardingAudioStreamFactory::ForwardingAudioStreamFactory(
     WebContents* web_contents,
-    media::UserInputMonitorBase* user_input_monitor,
     std::unique_ptr<AudioStreamBrokerFactory> broker_factory)
     : WebContentsObserver(web_contents), core_() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   core_ = std::make_unique<Core>(weak_ptr_factory_.GetWeakPtr(),
-                                 user_input_monitor, std::move(broker_factory));
+                                 std::move(broker_factory));
 }
 
 ForwardingAudioStreamFactory::~ForwardingAudioStreamFactory() {
@@ -236,18 +247,19 @@ ForwardingAudioStreamFactory::~ForwardingAudioStreamFactory() {
   // causes issues in unit tests where the UI thread and the IO thread are the
   // same.
   GetIOThreadTaskRunner({})->PostTask(
-      FROM_HERE,
-      base::BindOnce([](std::unique_ptr<Core>) {}, std::move(core_)));
+      FROM_HERE, base::DoNothingWithBoundArgs(std::move(core_)));
 }
 
 void ForwardingAudioStreamFactory::LoopbackStreamStarted() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  web_contents()->IncrementCapturerCount(gfx::Size(), /* stay_hidden */ false);
+  capture_handle_ = web_contents()->IncrementCapturerCount(
+      gfx::Size(), /*stay_hidden=*/false,
+      /*stay_awake=*/true, /*is_activity=*/true);
 }
 
 void ForwardingAudioStreamFactory::LoopbackStreamStopped() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  web_contents()->DecrementCapturerCount(/* stay_hidden */ false);
+  capture_handle_.RunAndReset();
 }
 
 void ForwardingAudioStreamFactory::SetMuted(bool muted) {
@@ -268,7 +280,7 @@ bool ForwardingAudioStreamFactory::IsMuted() const {
   return is_muted_;
 }
 
-void ForwardingAudioStreamFactory::FrameDeleted(
+void ForwardingAudioStreamFactory::RenderFrameDeleted(
     RenderFrameHost* render_frame_host) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   DCHECK(render_frame_host);
@@ -276,15 +288,16 @@ void ForwardingAudioStreamFactory::FrameDeleted(
   // Unretained is safe since the destruction of |core_| will be posted to the
   // IO thread later.
   GetIOThreadTaskRunner({})->PostTask(
-      FROM_HERE, base::BindOnce(&Core::CleanupStreamsBelongingTo,
-                                base::Unretained(core_.get()),
-                                render_frame_host->GetProcess()->GetID(),
-                                render_frame_host->GetRoutingID()));
+      FROM_HERE,
+      base::BindOnce(&Core::CleanupStreamsBelongingTo,
+                     base::Unretained(core_.get()),
+                     render_frame_host->GetProcess()->GetDeprecatedID(),
+                     render_frame_host->GetRoutingID()));
 }
 
-void ForwardingAudioStreamFactory::OverrideStreamFactoryBinderForTesting(
-    StreamFactoryBinder binder) {
-  GetStreamFactoryBinderOverride() = std::move(binder);
+void ForwardingAudioStreamFactory::OverrideAudioStreamFactoryBinderForTesting(
+    AudioStreamFactoryBinder binder) {
+  GetAudioStreamFactoryBinderOverride() = std::move(binder);
 }
 
 void ForwardingAudioStreamFactory::Core::CleanupStreamsBelongingTo(
@@ -330,12 +343,13 @@ void ForwardingAudioStreamFactory::Core::RemoveOutput(
   ResetRemoteFactoryPtrIfIdle();
 }
 
-audio::mojom::StreamFactory* ForwardingAudioStreamFactory::Core::GetFactory() {
+media::mojom::AudioStreamFactory*
+ForwardingAudioStreamFactory::Core::GetFactory() {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
   if (!remote_factory_) {
-    TRACE_EVENT_INSTANT1(
-        "audio", "ForwardingAudioStreamFactory: Binding new factory",
-        TRACE_EVENT_SCOPE_THREAD, "group", group_id_.GetLowForSerialization());
+    TRACE_EVENT_INSTANT("audio",
+                        "ForwardingAudioStreamFactory: Binding new factory",
+                        "group", group_id_.GetLowForSerialization());
     GetUIThreadTaskRunner({})->PostTask(
         FROM_HERE,
         base::BindOnce(&BindStreamFactoryFromUIThread,
@@ -362,9 +376,9 @@ void ForwardingAudioStreamFactory::Core::ResetRemoteFactoryPtrIfIdle() {
 void ForwardingAudioStreamFactory::Core::ResetRemoteFactoryPtr() {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
   if (remote_factory_) {
-    TRACE_EVENT_INSTANT1(
-        "audio", "ForwardingAudioStreamFactory: Resetting factory",
-        TRACE_EVENT_SCOPE_THREAD, "group", group_id_.GetLowForSerialization());
+    TRACE_EVENT_INSTANT("audio",
+                        "ForwardingAudioStreamFactory: Resetting factory",
+                        "group", group_id_.GetLowForSerialization());
   }
   remote_factory_.reset();
   // The stream brokers will call a callback to be deleted soon, give them a

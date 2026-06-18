@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,110 +6,104 @@
 
 #include <stddef.h>
 
-#include "base/macros.h"
-#include "base/strings/string_util.h"
-#include "base/strings/utf_string_conversions.h"
+#include <algorithm>
+#include <string>
+#include <string_view>
+#include <utility>
 
-namespace autofill {
-namespace state_names {
+#include "base/containers/fixed_flat_map.h"
+#include "base/strings/string_util.h"
+
+namespace autofill::state_names {
 
 namespace {
 
 // TODO(jhawkins): Add more states/provinces.  See http://crbug.com/45039.
-
-struct StateData {
-  const char* const name;
-  const char abbreviation[3];
-};
-
-const StateData kStateData[] = {
-    {"alabama", "al"},
-    {"alaska", "ak"},
-    {"arizona", "az"},
-    {"arkansas", "ar"},
-    {"california", "ca"},
-    {"colorado", "co"},
-    {"connecticut", "ct"},
-    {"delaware", "de"},
-    {"district of columbia", "dc"},
-    {"florida", "fl"},
-    {"georgia", "ga"},
-    {"hawaii", "hi"},
-    {"idaho", "id"},
-    {"illinois", "il"},
-    {"indiana", "in"},
-    {"iowa", "ia"},
-    {"kansas", "ks"},
-    {"kentucky", "ky"},
-    {"louisiana", "la"},
-    {"maine", "me"},
-    {"maryland", "md"},
-    {"massachusetts", "ma"},
-    {"michigan", "mi"},
-    {"minnesota", "mn"},
-    {"mississippi", "ms"},
-    {"missouri", "mo"},
-    {"montana", "mt"},
-    {"nebraska", "ne"},
-    {"nevada", "nv"},
-    {"new hampshire", "nh"},
-    {"new jersey", "nj"},
-    {"new mexico", "nm"},
-    {"new york", "ny"},
-    {"north carolina", "nc"},
-    {"north dakota", "nd"},
-    {"ohio", "oh"},
-    {"oklahoma", "ok"},
-    {"oregon", "or"},
-    {"pennsylvania", "pa"},
-    {"puerto rico", "pr"},
-    {"rhode island", "ri"},
-    {"south carolina", "sc"},
-    {"south dakota", "sd"},
-    {"tennessee", "tn"},
-    {"texas", "tx"},
-    {"utah", "ut"},
-    {"vermont", "vt"},
-    {"virginia", "va"},
-    {"washington", "wa"},
-    {"west virginia", "wv"},
-    {"wisconsin", "wi"},
-    {"wyoming", "wy"},
-};
+constexpr auto kStateData =
+    base::MakeFixedFlatMap<std::u16string_view, std::u16string_view>(
+        {{u"alabama", u"al"},
+         {u"alaska", u"ak"},
+         {u"arizona", u"az"},
+         {u"arkansas", u"ar"},
+         {u"california", u"ca"},
+         {u"colorado", u"co"},
+         {u"connecticut", u"ct"},
+         {u"delaware", u"de"},
+         {u"district of columbia", u"dc"},
+         {u"florida", u"fl"},
+         {u"georgia", u"ga"},
+         {u"hawaii", u"hi"},
+         {u"idaho", u"id"},
+         {u"illinois", u"il"},
+         {u"indiana", u"in"},
+         {u"iowa", u"ia"},
+         {u"kansas", u"ks"},
+         {u"kentucky", u"ky"},
+         {u"louisiana", u"la"},
+         {u"maine", u"me"},
+         {u"maryland", u"md"},
+         {u"massachusetts", u"ma"},
+         {u"michigan", u"mi"},
+         {u"minnesota", u"mn"},
+         {u"mississippi", u"ms"},
+         {u"missouri", u"mo"},
+         {u"montana", u"mt"},
+         {u"nebraska", u"ne"},
+         {u"nevada", u"nv"},
+         {u"new hampshire", u"nh"},
+         {u"new jersey", u"nj"},
+         {u"new mexico", u"nm"},
+         {u"new york", u"ny"},
+         {u"north carolina", u"nc"},
+         {u"north dakota", u"nd"},
+         {u"ohio", u"oh"},
+         {u"oklahoma", u"ok"},
+         {u"oregon", u"or"},
+         {u"pennsylvania", u"pa"},
+         {u"puerto rico", u"pr"},
+         {u"rhode island", u"ri"},
+         {u"south carolina", u"sc"},
+         {u"south dakota", u"sd"},
+         {u"tennessee", u"tn"},
+         {u"texas", u"tx"},
+         {u"utah", u"ut"},
+         {u"vermont", u"vt"},
+         {u"virginia", u"va"},
+         {u"washington", u"wa"},
+         {u"west virginia", u"wv"},
+         {u"wisconsin", u"wi"},
+         {u"wyoming", u"wy"}});
 
 }  // namespace
 
-base::string16 GetAbbreviationForName(const base::string16& name) {
-  for (const StateData& state : kStateData) {
-    if (base::LowerCaseEqualsASCII(name, state.name))
-      return base::ASCIIToUTF16(state.abbreviation);
-  }
-  return base::string16();
+std::u16string_view GetAbbreviationForName(std::u16string_view name) {
+  auto it = kStateData.find(base::ToLowerASCII(name));
+  return it != kStateData.end() ? it->second : std::u16string_view();
 }
 
-base::string16 GetNameForAbbreviation(const base::string16& abbreviation) {
-  for (const StateData& state : kStateData) {
-    if (base::LowerCaseEqualsASCII(abbreviation, state.abbreviation))
-      return base::ASCIIToUTF16(state.name);
-  }
-  return base::string16();
+std::u16string_view GetNameForAbbreviation(std::u16string_view abbreviation) {
+  using Member = decltype(kStateData)::value_type;
+  auto it = std::ranges::find(kStateData, base::ToLowerASCII(abbreviation),
+                              &Member::second);
+  return it != kStateData.end() ? it->first : std::u16string_view();
 }
 
-void GetNameAndAbbreviation(const base::string16& value,
-                            base::string16* name,
-                            base::string16* abbreviation) {
-  base::string16 full = GetNameForAbbreviation(value);
-  base::string16 abbr = value;
+void GetNameAndAbbreviation(std::u16string_view value,
+                            std::u16string* name,
+                            std::u16string* abbreviation) {
+  std::u16string_view full = GetNameForAbbreviation(value);
+  std::u16string_view abbr = value;
   if (full.empty()) {
     abbr = GetAbbreviationForName(value);
     full = value;
   }
 
-  if (name)
-    name->swap(full);
-  if (abbreviation)
-    abbreviation->swap(abbr);
+  if (name) {
+    *name = full;
+  }
+  if (abbreviation) {
+    *abbreviation = abbr;
+  }
 }
 
-}  // namespace state_names
-}  // namespace autofill
+}  // namespace autofill::state_names

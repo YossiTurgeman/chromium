@@ -1,10 +1,11 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MOJO_CORE_BROKER_MESSAGES_H_
 #define MOJO_CORE_BROKER_MESSAGES_H_
 
+#include "base/compiler_specific.h"
 #include "build/build_config.h"
 #include "mojo/core/channel.h"
 
@@ -36,7 +37,7 @@ struct BufferResponseData {
   uint64_t guid_low;
 };
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 struct InitData {
   // NOTE: InitData in the payload is followed by string16 data with exactly
   // |pipe_name_length| wide characters (i.e., |pipe_name_length|*2 bytes.)
@@ -50,11 +51,12 @@ struct InitData {
 template <typename T>
 inline bool GetBrokerMessageData(Channel::Message* message, T** out_data) {
   const size_t required_size = sizeof(BrokerMessageHeader) + sizeof(T);
-  if (message->payload_size() < required_size)
+  if (message->payload_size() < required_size) {
     return false;
+  }
 
   auto* header = static_cast<BrokerMessageHeader*>(message->mutable_payload());
-  *out_data = reinterpret_cast<T*>(header + 1);
+  *out_data = reinterpret_cast<T*>(UNSAFE_TODO(header + 1));
   return true;
 }
 
@@ -67,14 +69,16 @@ inline Channel::MessagePtr CreateBrokerMessage(
     void** out_extra_data = nullptr) {
   const size_t message_size = sizeof(BrokerMessageHeader) +
                               sizeof(**out_message_data) + extra_data_size;
-  Channel::MessagePtr message(new Channel::Message(message_size, num_handles));
+  Channel::MessagePtr message =
+      Channel::Message::CreateMessage(message_size, num_handles);
   BrokerMessageHeader* header =
       reinterpret_cast<BrokerMessageHeader*>(message->mutable_payload());
   header->type = type;
   header->padding = 0;
-  *out_message_data = reinterpret_cast<T*>(header + 1);
-  if (out_extra_data)
-    *out_extra_data = *out_message_data + 1;
+  *out_message_data = reinterpret_cast<T*>(UNSAFE_TODO(header + 1));
+  if (out_extra_data) {
+    *out_extra_data = UNSAFE_TODO(*out_message_data + 1);
+  }
   return message;
 }
 
@@ -82,8 +86,8 @@ inline Channel::MessagePtr CreateBrokerMessage(
     BrokerMessageType type,
     size_t num_handles,
     std::nullptr_t** dummy_out_data) {
-  Channel::MessagePtr message(
-      new Channel::Message(sizeof(BrokerMessageHeader), num_handles));
+  Channel::MessagePtr message =
+      Channel::Message::CreateMessage(sizeof(BrokerMessageHeader), num_handles);
   BrokerMessageHeader* header =
       reinterpret_cast<BrokerMessageHeader*>(message->mutable_payload());
   header->type = type;

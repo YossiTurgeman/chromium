@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,70 +8,78 @@ import android.content.Context;
 import android.net.Uri;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
-import android.text.format.DateUtils;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.CollectionUtil;
-import org.chromium.chrome.browser.ChromeVersionInfo;
-import org.chromium.chrome.browser.compositor.bottombar.contextualsearch.ContextualSearchPanel;
-import org.chromium.chrome.browser.contextualsearch.ContextualSearchFieldTrial.ContextualSearchSetting;
-import org.chromium.chrome.browser.contextualsearch.ContextualSearchFieldTrial.ContextualSearchSwitch;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.base.Log;
+import org.chromium.base.shared_preferences.SharedPreferencesManager;
+import org.chromium.base.version_info.VersionInfo;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.compositor.overlay_panel.contextualsearch.ContextualSearchPanel;
+import org.chromium.chrome.browser.contextualsearch.ContextualSearchInternalStateController.InternalState;
 import org.chromium.chrome.browser.contextualsearch.ContextualSearchSelectionController.SelectionType;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
-import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
-import org.chromium.chrome.browser.privacy.settings.PrivacyPreferencesManager;
+import org.chromium.chrome.browser.contextualsearch.ContextualSearchUma.ContextualSearchPreference;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+import org.chromium.chrome.browser.preferences.Pref;
+import org.chromium.chrome.browser.prefetch.settings.PreloadPagesSettingsBridge;
+import org.chromium.chrome.browser.prefetch.settings.PreloadPagesState;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
-import org.chromium.chrome.browser.signin.UnifiedConsentServiceBridge;
+import org.chromium.chrome.browser.signin.services.UnifiedConsentServiceBridge;
 import org.chromium.components.embedder_support.util.UrlConstants;
+import org.chromium.components.embedder_support.util.UrlUtilities;
+import org.chromium.components.prefs.PrefService;
+import org.chromium.components.user_prefs.UserPrefs;
+import org.chromium.url.GURL;
 
-import java.net.URL;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.regex.Pattern;
-
-/**
- * Handles policy decisions for the {@code ContextualSearchManager}.
- */
+/** Handles business decision policy for the {@code ContextualSearchManager}. */
+@NullMarked
 class ContextualSearchPolicy {
-    private static final Pattern CONTAINS_WHITESPACE_PATTERN = Pattern.compile("\\s");
+    private static final String TAG = "ContextualSearch";
     private static final String DOMAIN_GOOGLE = "google";
     private static final String PATH_AMP = "/amp/";
     private static final int REMAINING_NOT_APPLICABLE = -1;
     private static final int TAP_TRIGGERED_PROMO_LIMIT = 50;
+    private static final int PROMO_DEFAULT_LIMIT = 3;
 
-    private static final HashSet<String> PREDOMINENTLY_ENGLISH_SPEAKING_COUNTRIES =
-            CollectionUtil.newHashSet("GB", "US");
+    // Constants related to the Contextual Search preference.
+    private static final String CONTEXTUAL_SEARCH_DISABLED = "false";
+    private static final String CONTEXTUAL_SEARCH_ENABLED = "true";
 
     private final SharedPreferencesManager mPreferencesManager;
+    private final Profile mProfile;
     private final ContextualSearchSelectionController mSelectionController;
+    private final RelatedSearchesStamp mRelatedSearchesStamp;
     private ContextualSearchNetworkCommunicator mNetworkCommunicator;
-    private ContextualSearchPanel mSearchPanel;
+    private @Nullable ContextualSearchPanel mSearchPanel;
 
     // Members used only for testing purposes.
-    private boolean mDidOverrideDecidedStateForTesting;
-    private boolean mDecidedStateForTesting;
-    private Integer mTapTriggeredPromoLimitForTesting;
+    private boolean mDidOverrideFullyEnabledForTesting;
+    private boolean mFullyEnabledForTesting;
+    private boolean mDidOverrideAllowSendingPageUrlForTesting;
+    private boolean mAllowSendingPageUrlForTesting;
+    private @Nullable Boolean mContextualSearchResolutionUrlValid;
 
-    /**
-     * ContextualSearchPolicy constructor.
-     */
-    public ContextualSearchPolicy(ContextualSearchSelectionController selectionController,
+    /** ContextualSearchPolicy constructor. */
+    public ContextualSearchPolicy(
+            Profile profile,
+            ContextualSearchSelectionController selectionController,
             ContextualSearchNetworkCommunicator networkCommunicator) {
-        mPreferencesManager = SharedPreferencesManager.getInstance();
+        mPreferencesManager = ChromeSharedPreferences.getInstance();
 
+        mProfile = profile;
         mSelectionController = selectionController;
         mNetworkCommunicator = networkCommunicator;
-        if (selectionController != null) selectionController.setPolicy(this);
+        mRelatedSearchesStamp = new RelatedSearchesStamp(this);
     }
 
     /**
      * Sets the handle to the ContextualSearchPanel.
+     *
      * @param panel The ContextualSearchPanel.
      */
     public void setContextualSearchPanel(ContextualSearchPanel panel) {
@@ -80,8 +88,7 @@ class ContextualSearchPolicy {
 
     /**
      * @return The number of additional times to show the promo on tap, 0 if it should not be shown,
-     *         or a negative value if the counter has been disabled or the user has accepted
-     *         the promo.
+     *     or a negative value if the counter has been disabled or the user has accepted the promo.
      */
     int getPromoTapsRemaining() {
         if (!isUserUndecided()) return REMAINING_NOT_APPLICABLE;
@@ -89,17 +96,10 @@ class ContextualSearchPolicy {
         // Return a non-negative value if opt-out promo counter is enabled, and there's a limit.
         DisableablePromoTapCounter counter = getPromoTapCounter();
         if (counter.isEnabled()) {
-            int limit = getPromoTapTriggeredLimit();
-            if (limit >= 0) return Math.max(0, limit - counter.getCount());
+            return Math.max(0, TAP_TRIGGERED_PROMO_LIMIT - counter.getCount());
         }
 
         return REMAINING_NOT_APPLICABLE;
-    }
-
-    private int getPromoTapTriggeredLimit() {
-        return mTapTriggeredPromoLimitForTesting != null
-                ? mTapTriggeredPromoLimitForTesting.intValue()
-                : TAP_TRIGGERED_PROMO_LIMIT;
     }
 
     /**
@@ -113,53 +113,40 @@ class ContextualSearchPolicy {
      * @return Whether a Tap gesture is currently supported as a trigger for the feature.
      */
     boolean isTapSupported() {
-        if (isRelatedSearchesEnabled()) return true;
-
-        if (isTapDisabledDueToLongpress()) return false;
-
-        return (!isUserUndecided()
-                       || ContextualSearchFieldTrial.getSwitch(
-                               ContextualSearchSwitch
-                                       .IS_CONTEXTUAL_SEARCH_TAP_DISABLE_OVERRIDE_ENABLED))
-                ? true
-                : (getPromoTapsRemaining() != 0);
+        return isContextualSearchFullyEnabled() ? true : (getPromoTapsRemaining() != 0);
     }
 
     /**
      * @return whether or not the Contextual Search Result should be preloaded before the user
-     *         explicitly interacts with the feature.
+     *     explicitly interacts with the feature.
      */
     boolean shouldPrefetchSearchResult() {
-        if (isMandatoryPromoAvailable()
-                || !PrivacyPreferencesManager.getInstance().getNetworkPredictionEnabled()) {
+        if (PreloadPagesSettingsBridge.getState(mProfile) == PreloadPagesState.NO_PRELOADING) {
             return false;
         }
 
         // We never preload unless we have sent page context (done through a Resolve request).
         // Only some gestures can resolve, and only when resolve privacy rules are met.
-        return (mSelectionController.getSelectionType() == SelectionType.TAP
-                       || mSelectionController.getSelectionType()
-                               == SelectionType.RESOLVING_LONG_PRESS)
-                && shouldPreviousGestureResolve();
+        return isResolvingGesture() && shouldPreviousGestureResolve();
     }
 
     /**
+     * Determines whether the current gesture can trigger a resolve request to use page context.
+     * This only checks the gesture, not privacy status -- {@see #shouldPreviousGestureResolve}.
+     */
+    boolean isResolvingGesture() {
+        return mSelectionController.getSelectionType() == SelectionType.TAP
+                || mSelectionController.getSelectionType() == SelectionType.RESOLVING_LONG_PRESS;
+    }
+
+    /**
+     * Determines whether the gesture being processed is allowed to resolve.
+     * TODO(donnd): rename to be more descriptive. Maybe isGestureAllowedToResolve?
      * @return Whether the previous gesture should resolve.
      */
     boolean shouldPreviousGestureResolve() {
-        if (isMandatoryPromoAvailable()
-                || ContextualSearchFieldTrial.getSwitch(
-                        ContextualSearchSwitch.IS_SEARCH_TERM_RESOLUTION_DISABLED)) {
-            return false;
-        }
-
-        return !isUserUndecided(); // The user must have decided on privacy to resolve page content.
-    }
-
-    /** @return Whether a long-press gesture can resolve. */
-    boolean canResolveLongpress() {
-        return ChromeFeatureList.isEnabled(ChromeFeatureList.CONTEXTUAL_SEARCH_LONGPRESS_RESOLVE)
-                || ChromeFeatureList.isEnabled(ChromeFeatureList.CONTEXTUAL_SEARCH_TRANSLATIONS);
+        // The user must have decided on privacy to resolve page content on HTTPS.
+        return isContextualSearchFullyEnabled();
     }
 
     /**
@@ -167,87 +154,44 @@ class ContextualSearchPolicy {
      * @return Whether surroundings are available.
      */
     boolean canSendSurroundings() {
-        if (mDidOverrideDecidedStateForTesting) return mDecidedStateForTesting;
-
-        return !isUserUndecided(); // The user must have decided on privacy to send page content.
-    }
-
-    /**
-     * @return Whether the Mandatory Promo is enabled.
-     */
-    boolean isMandatoryPromoAvailable() {
-        if (!isUserUndecided()
-                || !ContextualSearchFieldTrial.getSwitch(
-                        ContextualSearchSwitch.IS_MANDATORY_PROMO_ENABLED)) {
-            return false;
-        }
-
-        return getPromoOpenCount() >= ContextualSearchFieldTrial.getValue(
-                       ContextualSearchSetting.MANDATORY_PROMO_LIMIT);
+        // The user must have decided on privacy to send page content on HTTPS.
+        return isContextualSearchFullyEnabled();
     }
 
     /**
      * @return Whether the Opt-out promo is available to be shown in any panel.
      */
     boolean isPromoAvailable() {
-        return isUserUndecided();
+        // Only show promo card a limited number of times.
+        return isUserUndecided()
+                && getContextualSearchPromoCardShownCount(mProfile) < PROMO_DEFAULT_LIMIT;
     }
 
     /**
-     * Registers that a tap has taken place by incrementing tap-tracking counters.
+     * Returns whether conditions are right for an IPH for Longpress to be shown.
+     * We only show this for users that have already opted-in because it's all about using page
+     * context with the right gesture.
      */
+    boolean isLongpressInPanelHelpCondition() {
+        // We no longer support an IPH in the panel for promoting a Longpress instead of a Tap.
+        return false;
+    }
+
+    /** Registers that a tap has taken place by incrementing tap-tracking counters. */
     void registerTap() {
         if (isPromoAvailable()) {
             DisableablePromoTapCounter promoTapCounter = getPromoTapCounter();
             // Bump the counter only when it is still enabled.
             if (promoTapCounter.isEnabled()) promoTapCounter.increment();
         }
-        int tapsSinceOpen = mPreferencesManager.incrementInt(
-                ChromePreferenceKeys.CONTEXTUAL_SEARCH_TAP_SINCE_OPEN_COUNT);
-        if (isUserUndecided()) {
-            ContextualSearchUma.logTapsSinceOpenForUndecided(tapsSinceOpen);
-        } else {
-            ContextualSearchUma.logTapsSinceOpenForDecided(tapsSinceOpen);
-        }
-        mPreferencesManager.incrementInt(ChromePreferenceKeys.CONTEXTUAL_SEARCH_ALL_TIME_TAP_COUNT);
     }
 
-    /**
-     * Updates all the counters to account for an open-action on the panel.
-     */
+    /** Updates all the counters to account for an open-action on the panel. */
     void updateCountersForOpen() {
-        // Always completely reset the tap counters that accumulate only since the last open.
-        mPreferencesManager.writeInt(
-                ChromePreferenceKeys.CONTEXTUAL_SEARCH_TAP_SINCE_OPEN_COUNT, 0);
-        mPreferencesManager.writeInt(
-                ChromePreferenceKeys.CONTEXTUAL_SEARCH_TAP_SINCE_OPEN_QUICK_ANSWER_COUNT, 0);
-
         // Disable the "promo tap" counter, but only if we're using the Opt-out onboarding.
         // For Opt-in, we never disable the promo tap counter.
         if (isPromoAvailable()) {
             getPromoTapCounter().disable();
-
-            // Bump the total-promo-opens counter.
-            int count = mPreferencesManager.incrementInt(
-                    ChromePreferenceKeys.CONTEXTUAL_SEARCH_PROMO_OPEN_COUNT);
-            ContextualSearchUma.logPromoOpenCount(count);
-        }
-        mPreferencesManager.incrementInt(
-                ChromePreferenceKeys.CONTEXTUAL_SEARCH_ALL_TIME_OPEN_COUNT);
-    }
-
-    /**
-     * Updates Tap counters to account for a quick-answer caption shown on the panel.
-     * @param wasActivatedByTap Whether the triggering gesture was a Tap or not.
-     * @param doesAnswer Whether the caption is considered an answer rather than just
-     *                          informative.
-     */
-    void updateCountersForQuickAnswer(boolean wasActivatedByTap, boolean doesAnswer) {
-        if (wasActivatedByTap && doesAnswer) {
-            mPreferencesManager.incrementInt(
-                    ChromePreferenceKeys.CONTEXTUAL_SEARCH_TAP_SINCE_OPEN_QUICK_ANSWER_COUNT);
-            mPreferencesManager.incrementInt(
-                    ChromePreferenceKeys.CONTEXTUAL_SEARCH_ALL_TIME_TAP_QUICK_ANSWER_COUNT);
         }
     }
 
@@ -256,19 +200,9 @@ class ContextualSearchPolicy {
      *         is no existing request.
      */
     boolean shouldCreateVerbatimRequest() {
-        @SelectionType
-        int selectionType = mSelectionController.getSelectionType();
+        @SelectionType int selectionType = mSelectionController.getSelectionType();
         return (mSelectionController.getSelectedText() != null
                 && (selectionType == SelectionType.LONG_PRESS || !shouldPreviousGestureResolve()));
-    }
-
-    /** @return whether Tap is disabled due to the longpress experiment. */
-    private boolean isTapDisabledDueToLongpress() {
-        return canResolveLongpress()
-                && !ContextualSearchFieldTrial.LONGPRESS_RESOLVE_PRESERVE_TAP.equals(
-                        ChromeFeatureList.getFieldTrialParamByFeature(
-                                ChromeFeatureList.CONTEXTUAL_SEARCH_LONGPRESS_RESOLVE,
-                                ContextualSearchFieldTrial.LONGPRESS_RESOLVE_PARAM_NAME));
     }
 
     /**
@@ -277,47 +211,26 @@ class ContextualSearchPolicy {
      */
     boolean shouldShowErrorCodeInBar() {
         // Builds with lots of real users should not see raw error codes.
-        return !(ChromeVersionInfo.isStableBuild() || ChromeVersionInfo.isBetaBuild());
+        return !(VersionInfo.isStableBuild() || VersionInfo.isBetaBuild());
     }
 
-    /**
-     * Logs the current user's state, including preference, tap and open counters, etc.
-     */
+    /** Logs the current user's state, including preference, tap and open counters, etc. */
     void logCurrentState() {
-        ContextualSearchUma.logPreferenceState();
-
-        // Log the number of promo taps remaining.
-        int promoTapsRemaining = getPromoTapsRemaining();
-        if (promoTapsRemaining >= 0) ContextualSearchUma.logPromoTapsRemaining(promoTapsRemaining);
-
-        // Also log the total number of taps before opening the promo, even for those
-        // that are no longer tap limited. That way we'll know the distribution of the
-        // number of taps needed before opening the promo.
-        DisableablePromoTapCounter promoTapCounter = getPromoTapCounter();
-        boolean wasOpened = !promoTapCounter.isEnabled();
-        int count = promoTapCounter.getCount();
-        if (wasOpened) {
-            ContextualSearchUma.logPromoTapsBeforeFirstOpen(count);
-        } else {
-            ContextualSearchUma.logPromoTapsForNeverOpened(count);
-        }
+        ContextualSearchUma.logPreferenceState(mProfile);
+        RelatedSearchesUma.logRelatedSearchesPermissionsForAllUsers(
+                hasSendUrlPermissions(), canSendSurroundings());
     }
 
     /**
-     * Logs details about the Search Term Resolution.
-     * Should only be called when a search term has been resolved.
-     * @param searchTerm The Resolved Search Term.
+     * Logs whether the current user is qualified to do Related Searches requests. This does not
+     * check if Related Searches is actually enabled for the current user, only whether they are
+     * qualified. We use this to gauge whether each group has a balanced number of qualified users.
+     * Can be logged multiple times since we'll just look at the user-count of this histogram.
+     * @param basePageLanguage The language of the page, to check if supported by the server.
      */
-    void logSearchTermResolutionDetails(String searchTerm) {
-        // Only log for decided users so the data reflect fully-enabled behavior.
-        // Otherwise we'll get skewed data; more HTTP pages than HTTPS (since those don't resolve),
-        // and it's also possible that public pages, e.g. news, have more searches for multi-word
-        // entities like people.
-        if (!isUserUndecided()) {
-            URL url = mNetworkCommunicator.getBasePageUrl();
-            ContextualSearchUma.logBasePageProtocol(isBasePageHTTP(url));
-            boolean isSingleWord = !CONTAINS_WHITESPACE_PATTERN.matcher(searchTerm.trim()).find();
-            ContextualSearchUma.logSearchTermResolvedWords(isSingleWord);
+    void logRelatedSearchesQualifiedUsers(String basePageLanguage) {
+        if (mRelatedSearchesStamp.isQualifiedForRelatedSearches(basePageLanguage)) {
+            RelatedSearchesUma.logRelatedSearchesQualifiedUsers();
         }
     }
 
@@ -328,64 +241,55 @@ class ContextualSearchPolicy {
      * @return {@code true} if the URL should be sent.
      */
     boolean doSendBasePageUrl() {
-        if (isUserUndecided()) return false;
-
-        // Check whether there is a Field Trial setting preventing us from sending the page URL.
-        if (ContextualSearchFieldTrial.getSwitch(
-                    ContextualSearchSwitch.IS_SEND_BASE_PAGE_URL_DISABLED)) {
-            return false;
-        }
+        if (!isContextualSearchFullyEnabled()) return false;
 
         // Ensure that the default search provider is Google.
-        if (!TemplateUrlServiceFactory.get().isDefaultSearchEngineGoogle()) return false;
-
-        // Only allow HTTP or HTTPS URLs.
-        URL url = mNetworkCommunicator.getBasePageUrl();
-        String urlProtocol = url != null ? url.getProtocol() : "";
-        if (!(urlProtocol.equals(UrlConstants.HTTP_SCHEME)
-                    || urlProtocol.equals(UrlConstants.HTTPS_SCHEME))) {
+        if (!TemplateUrlServiceFactory.getForProfile(mProfile).isDefaultSearchEngineGoogle()) {
             return false;
         }
+
+        // Only allow HTTP or HTTPS URLs.
+        GURL url = mNetworkCommunicator.getBasePageUrl();
+
+        if (url == null || !UrlUtilities.isHttpOrHttps(url)) {
+            return false;
+        }
+
+        return hasSendUrlPermissions();
+    }
+
+    /**
+     * Determines whether the user has given permission to send URLs through the "Make searches and
+     * browsing better" user setting.
+     * @return Whether we can send a URL.
+     */
+    boolean hasSendUrlPermissions() {
+        if (mDidOverrideAllowSendingPageUrlForTesting) return mAllowSendingPageUrlForTesting;
 
         // Check whether the user has enabled anonymous URL-keyed data collection.
         // This is surfaced on the relatively new "Make searches and browsing better" user setting.
         // In case an experiment is active for the legacy UI call through the unified consent
         // service.
-        return UnifiedConsentServiceBridge.isUrlKeyedAnonymizedDataCollectionEnabled(
-                Profile.getLastUsedRegularProfile());
+        return UnifiedConsentServiceBridge.isUrlKeyedAnonymizedDataCollectionEnabled(mProfile);
     }
 
     /**
-     * The search provider icon is animated every time on long press if the user has never opened
-     * the panel before and once a day on tap.
+     * Returns whether a transition that is both from and to the given state should be done. This
+     * allows prevention of the short-circuiting that ignores a state transition to the current
+     * state in cases where rerunning the current state might safeguard against problematic
+     * behavior.
      *
-     * @return Whether the search provider icon should be animated.
+     * @param state The current state, which is also the state being transitioned into.
+     * @return {@code true} to go ahead with the logic for that state transition even though we're
+     *     already in that state. {@code false} indicates that ignoring this redundant state
+     *     transition is fine.
      */
-    boolean shouldAnimateSearchProviderIcon() {
-        if (mSearchPanel.isShowing()) return false;
-
-        @SelectionType
-        int selectionType = mSelectionController.getSelectionType();
-        if (selectionType == SelectionType.TAP) {
-            long currentTimeMillis = System.currentTimeMillis();
-            long lastAnimatedTimeMillis = mPreferencesManager.readLong(
-                    ChromePreferenceKeys.CONTEXTUAL_SEARCH_LAST_ANIMATION_TIME);
-            if (Math.abs(currentTimeMillis - lastAnimatedTimeMillis) > DateUtils.DAY_IN_MILLIS) {
-                mPreferencesManager.writeLong(
-                        ChromePreferenceKeys.CONTEXTUAL_SEARCH_LAST_ANIMATION_TIME,
-                        currentTimeMillis);
-                return true;
-            } else {
-                return false;
-            }
-        } else if (selectionType == SelectionType.LONG_PRESS) {
-            // If the panel has never been opened before, getPromoOpenCount() will be 0.
-            // Once the panel has been opened, regardless of whether or not the user has opted-in or
-            // opted-out, the promo open count will be greater than zero.
-            return isUserUndecided() && getPromoOpenCount() == 0;
-        }
-
-        return false;
+    boolean shouldRetryCurrentState(@InternalState int state) {
+        // Make sure we don't get stuck in the IDLE state if the panel is still showing.
+        // See https://crbug.com/40792729
+        return state == InternalState.IDLE
+                && mSearchPanel != null
+                && (mSearchPanel.isShowing() || mSearchPanel.isActive());
     }
 
     /**
@@ -398,102 +302,201 @@ class ContextualSearchPolicy {
         return uri.getHost().contains(DOMAIN_GOOGLE) && uri.getPath().startsWith(PATH_AMP);
     }
 
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search feature was disabled by the user explicitly.
+     */
+    static boolean isContextualSearchDisabled(Profile profile) {
+        return UserPrefs.get(profile)
+                .getString(Pref.CONTEXTUAL_SEARCH_ENABLED)
+                .equals(CONTEXTUAL_SEARCH_DISABLED);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search feature was enabled by the user explicitly.
+     */
+    static boolean isContextualSearchEnabled(Profile profile) {
+        return UserPrefs.get(profile)
+                .getString(Pref.CONTEXTUAL_SEARCH_ENABLED)
+                .equals(CONTEXTUAL_SEARCH_ENABLED);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search feature is uninitialized (preference unset by the
+     *     user).
+     */
+    static boolean isContextualSearchUninitialized(Profile profile) {
+        return UserPrefs.get(profile).getString(Pref.CONTEXTUAL_SEARCH_ENABLED).isEmpty();
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search fully privacy opt-in was disabled by the user
+     *     explicitly.
+     */
+    static boolean isContextualSearchOptInDisabled(Profile profile) {
+        return !UserPrefs.get(profile).getBoolean(Pref.CONTEXTUAL_SEARCH_WAS_FULLY_PRIVACY_ENABLED);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search fully privacy opt-in was enabled by the user
+     *     explicitly.
+     */
+    static boolean isContextualSearchOptInEnabled(Profile profile) {
+        return UserPrefs.get(profile).getBoolean(Pref.CONTEXTUAL_SEARCH_WAS_FULLY_PRIVACY_ENABLED);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search fully privacy opt-in is uninitialized (preference unset
+     *     by the user).
+     */
+    static boolean isContextualSearchOptInUninitialized(Profile profile) {
+        return !UserPrefs.get(profile)
+                .hasPrefPath(Pref.CONTEXTUAL_SEARCH_WAS_FULLY_PRIVACY_ENABLED);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Count of times the promo card has been shown.
+     */
+    static int getContextualSearchPromoCardShownCount(Profile profile) {
+        return UserPrefs.get(profile).getInteger(Pref.CONTEXTUAL_SEARCH_PROMO_CARD_SHOWN_COUNT);
+    }
+
+    /**
+     * Sets Count of times the promo card has been shown.
+     *
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     */
+    private static void setContextualSearchPromoCardShownCount(Profile profile, int count) {
+        UserPrefs.get(profile).setInteger(Pref.CONTEXTUAL_SEARCH_PROMO_CARD_SHOWN_COUNT, count);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search feature is disabled when the prefs service considers it
+     *     managed.
+     */
+    static boolean isContextualSearchDisabledByPolicy(Profile profile) {
+        return UserPrefs.get(profile).isManagedPreference(Pref.CONTEXTUAL_SEARCH_ENABLED)
+                && isContextualSearchDisabled(profile);
+    }
+
+    /**
+     * Explicitly set whether Contextual Search is enabled or not, with the enabled state being
+     * either fully or default-enabled based on previous state. 'enabled' is true - fully opt in or
+     * default-enabled based on previous state. 'enabled' is false - the feature is disabled.
+     *
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @param enabled Whether Contextual Search should be enabled.
+     */
+    static void setContextualSearchState(Profile profile, boolean enabled) {
+        @ContextualSearchPreference
+        int onState =
+                isContextualSearchOptInEnabled(profile)
+                        ? ContextualSearchPreference.ENABLED
+                        : ContextualSearchPreference.UNINITIALIZED;
+        setContextualSearchStateInternal(
+                profile, enabled ? onState : ContextualSearchPreference.DISABLED);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @return Whether the Contextual Search feature was fully opted in based on the preference
+     *     itself.
+     */
+    static boolean isContextualSearchPrefFullyOptedIn(Profile profile) {
+        return isContextualSearchOptInUninitialized(profile)
+                ? isContextualSearchEnabled(profile)
+                : isContextualSearchOptInEnabled(profile);
+    }
+
+    /**
+     * Sets whether the user is fully opted in for Contextual Search Privacy. 'enabled' is true -
+     * fully opt in. 'enabled' is false - remain undecided.
+     *
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @param enabled Whether Contextual Search privacy is opted in.
+     */
+    static void setContextualSearchFullyOptedIn(Profile profile, boolean enabled) {
+        UserPrefs.get(profile)
+                .setBoolean(Pref.CONTEXTUAL_SEARCH_WAS_FULLY_PRIVACY_ENABLED, enabled);
+        setContextualSearchStateInternal(
+                profile,
+                enabled
+                        ? ContextualSearchPreference.ENABLED
+                        : ContextualSearchPreference.UNINITIALIZED);
+    }
+
+    /** Notifies that a promo card has been shown. */
+    static void onPromoShown(Profile profile) {
+        int count = getContextualSearchPromoCardShownCount(profile);
+        count++;
+        setContextualSearchPromoCardShownCount(profile, count);
+        ContextualSearchUma.logRevisedPromoOpenCount(count);
+    }
+
+    /**
+     * @param profile The {@link Profile} associated with this Contextual Search session.
+     * @param state The state for the Contextual Search.
+     */
+    private static void setContextualSearchStateInternal(
+            Profile profile, @ContextualSearchPreference int state) {
+        PrefService prefs = UserPrefs.get(profile);
+        switch (state) {
+            case ContextualSearchPreference.UNINITIALIZED:
+                prefs.clearPref(Pref.CONTEXTUAL_SEARCH_ENABLED);
+                break;
+            case ContextualSearchPreference.ENABLED:
+                prefs.setString(Pref.CONTEXTUAL_SEARCH_ENABLED, CONTEXTUAL_SEARCH_ENABLED);
+                break;
+            case ContextualSearchPreference.DISABLED:
+                prefs.setString(Pref.CONTEXTUAL_SEARCH_ENABLED, CONTEXTUAL_SEARCH_DISABLED);
+                break;
+            default:
+                Log.e(TAG, "Unexpected state for ContextualSearchPreference state=" + state);
+                break;
+        }
+    }
+
     // --------------------------------------------------------------------------------------------
     // Testing support.
     // --------------------------------------------------------------------------------------------
 
     /**
      * Overrides the decided/undecided state for the user preference.
-     * @param decidedState Whether the user has decided or not.
+     * @param decidedState Whether the user has decided to opt-in to sending page content or not.
+     * @return whether the previous decided state was fully enabled or not.
      */
-    @VisibleForTesting
-    void overrideDecidedStateForTesting(boolean decidedState) {
-        mDidOverrideDecidedStateForTesting = true;
-        mDecidedStateForTesting = decidedState;
+    boolean overrideDecidedStateForTesting(boolean decidedState) {
+        boolean wasEnabled = mFullyEnabledForTesting;
+        mDidOverrideFullyEnabledForTesting = true;
+        mFullyEnabledForTesting = decidedState;
+        return wasEnabled;
     }
 
     /**
-     * @return count of times the panel with the promo has been opened.
+     * Overrides the user preference for sending the page URL to Google.
+     * @param doAllowSendingPageUrl Whether to allow sending the page URL or not, for tests.
      */
-    @VisibleForTesting
-    int getPromoOpenCount() {
-        return mPreferencesManager.readInt(ChromePreferenceKeys.CONTEXTUAL_SEARCH_PROMO_OPEN_COUNT);
-    }
-
-    /**
-     * @return The number of times the user has tapped since the last panel open.
-     */
-    @VisibleForTesting
-    int getTapCount() {
-        return mPreferencesManager.readInt(
-                ChromePreferenceKeys.CONTEXTUAL_SEARCH_TAP_SINCE_OPEN_COUNT);
+    void overrideAllowSendingPageUrlForTesting(boolean doAllowSendingPageUrl) {
+        mDidOverrideAllowSendingPageUrlForTesting = true;
+        mAllowSendingPageUrlForTesting = doAllowSendingPageUrl;
     }
 
     // --------------------------------------------------------------------------------------------
-    // Translation support.
+    // Additional considerations.
     // --------------------------------------------------------------------------------------------
 
     /**
-     * Determines whether translation is needed between the given languages.
-     * @param sourceLanguage The source language code; language we're translating from.
-     * @param targetLanguages A list of target language codes; languages we might translate to.
-     * @return Whether translation is needed or not.
+     * @return The ISO country code for the user's home country, or an empty string if not available
+     *     or privacy-enabled.
      */
-    boolean needsTranslation(String sourceLanguage, List<String> targetLanguages) {
-        // For now, we just look for a language match.
-        for (String targetLanguage : targetLanguages) {
-            if (TextUtils.equals(sourceLanguage, targetLanguage)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * @return The best target language from the ordered list, or the empty string if
-     *         none is available.
-     */
-    String bestTargetLanguage(List<String> targetLanguages) {
-        return bestTargetLanguage(targetLanguages, Locale.getDefault().getCountry());
-    }
-
-    /**
-     * Determines the best language to convert into, given the ordered list of languages the user
-     * knows, and the UX language.
-     * @param targetLanguages The list of languages to consider converting to.
-     * @param countryOfUx The country of the UX.
-     * @return the best language or an empty string.
-     */
-    @VisibleForTesting
-    String bestTargetLanguage(List<String> targetLanguages, String countryOfUx) {
-        // For now, we just return the first language, unless it's English
-        // (due to over-usage).
-        // TODO(donnd): Improve this logic. Determining the right language seems non-trivial.
-        // E.g. If this language doesn't match the user's server preferences, they might see a page
-        // in one language and the one box translation in another, which might be confusing.
-        // Also this logic should only apply on Android, where English setup is overused.
-        if (targetLanguages.size() > 1
-                && TextUtils.equals(targetLanguages.get(0), Locale.ENGLISH.getLanguage())
-                && !PREDOMINENTLY_ENGLISH_SPEAKING_COUNTRIES.contains(countryOfUx)) {
-            return targetLanguages.get(1);
-        } else if (targetLanguages.size() > 0) {
-            return targetLanguages.get(0);
-        } else {
-            return "";
-        }
-    }
-
-    /**
-     * @return The ISO country code for the user's home country, or an empty string if not
-     *         available or privacy-enabled.
-     */
-    @NonNull
     String getHomeCountry(Context context) {
-        if (ContextualSearchFieldTrial.getSwitch(
-                    ContextualSearchSwitch.IS_SEND_HOME_COUNTRY_DISABLED)) {
-            return "";
-        }
-
         TelephonyManager telephonyManager =
                 (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
         if (telephonyManager == null) return "";
@@ -507,17 +510,47 @@ class ContextualSearchPolicy {
      *         on enabling or disabling the feature.
      */
     boolean isUserUndecided() {
-        if (mDidOverrideDecidedStateForTesting) return !mDecidedStateForTesting;
+        if (mDidOverrideFullyEnabledForTesting) return !mFullyEnabledForTesting;
 
-        return ContextualSearchManager.isContextualSearchUninitialized();
+        return isContextualSearchUninitialized(mProfile)
+                && isContextualSearchOptInUninitialized(mProfile);
+    }
+
+    /**
+     * @return Whether a user explicitly enabled the Contextual Search feature.
+     */
+    boolean isContextualSearchFullyEnabled() {
+        if (mDidOverrideFullyEnabledForTesting) return mFullyEnabledForTesting;
+
+        return isContextualSearchResolutionUrlValid() && isContextualSearchEnabled(mProfile);
+    }
+
+    /**
+     * @return Whether the contextual search resolution URL is valid and can be used to resolve
+     *     highlight.
+     */
+    boolean isContextualSearchResolutionUrlValid() {
+        // This function is needed because certain DMA implementations supply a persistent set of
+        // Template URL overrides. These overrides are in effect until the user performs a factory
+        // data reset of their device, and occasionally miss relevant information, such as - in this
+        // particular case - "contextual_search_url" value.
+        if (mContextualSearchResolutionUrlValid == null) {
+            if (ContextualSearchPolicyJni.get() == null) {
+                // JNI is not initialized.
+                return false;
+            }
+            mContextualSearchResolutionUrlValid =
+                    ContextualSearchPolicyJni.get().isContextualSearchResolutionUrlValid(mProfile);
+        }
+        return mContextualSearchResolutionUrlValid;
     }
 
     /**
      * @param url The URL of the base page.
      * @return Whether the given content view is for an HTTP page.
      */
-    boolean isBasePageHTTP(@Nullable URL url) {
-        return url != null && UrlConstants.HTTP_SCHEME.equals(url.getProtocol());
+    boolean isBasePageHTTP(@Nullable GURL url) {
+        return url != null && UrlConstants.HTTP_SCHEME.equals(url.getScheme());
     }
 
     // --------------------------------------------------------------------------------------------
@@ -525,51 +558,15 @@ class ContextualSearchPolicy {
     // --------------------------------------------------------------------------------------------
 
     /**
-     * @return Whether the experimental Feature for Related Searches is enabled.
+     * Gets the runtime processing stamp for Related Searches. This typically gets the value from
+     * a param from a Field Trial Feature.
+     * @param basePageLanguage The language of the page, to check for server support.
+     * @return A {@code String} whose value describes the schema version and current processing
+     *         of Related Searches, or an empty string if the user is not qualified to request
+     *         Related Searches or the feature is not enabled.
      */
-    boolean isRelatedSearchesEnabled() {
-        return ChromeFeatureList.isEnabled(ChromeFeatureList.RELATED_SEARCHES);
-    }
-
-    /**
-     * @return Whether we're currently processing a Related Search gesture.
-     */
-    boolean isProcessingRelatedSearch() {
-        return isRelatedSearchesEnabled()
-                && mSelectionController.getSelectionType() == SelectionType.TAP;
-    }
-
-    /**
-     * @return The number of times a navigation in the panel can be done without promoting the
-     *         panel into a separate tab.
-     */
-    int navigateWithoutPromotionLimitForRelatedSearches() {
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.RELATED_SEARCHES)
-                && mSelectionController.getSelectionType() == SelectionType.TAP) {
-            // For Related Searches the returned page has a list of search-result pages
-            // that the user can choose from, so initial navigation should be done
-            // without promotion.  We want normal behavior for Longpress.
-            return 2;
-        }
-        return 1;
-    }
-
-    /**
-     * Overrides the selection if we're processing a Related Searches gesture.
-    * @param selection The original selection.  This is returned if not processing Related
-             Searches.
-    * @param relatedSearchesWord The word to show if we are processing Related Searches.
-    * @return the input or an override of the selection appropriate for experiments.
-    */
-    String overrideSelectionIfProcessingRelatedSearches(
-            String selection, String relatedSearchesWord) {
-        return isProcessingRelatedSearch() ? relatedSearchesWord : selection;
-    }
-
-    /** @return whether doing Related Searches should be part of processing the current request. */
-    boolean doRelatedSearches() {
-        // TODO(donnd): Update this along with crbug.com/1119585.
-        return isProcessingRelatedSearch();
+    String getRelatedSearchesStamp(String basePageLanguage) {
+        return mRelatedSearchesStamp.getRelatedSearchesStamp(basePageLanguage);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -583,5 +580,10 @@ class ContextualSearchPolicy {
     @VisibleForTesting
     public void setNetworkCommunicator(ContextualSearchNetworkCommunicator networkCommunicator) {
         mNetworkCommunicator = networkCommunicator;
+    }
+
+    @NativeMethods
+    interface Natives {
+        boolean isContextualSearchResolutionUrlValid(@JniType("Profile*") Profile profile);
     }
 }

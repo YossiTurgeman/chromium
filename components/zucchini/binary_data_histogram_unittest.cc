@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "components/zucchini/buffer_view.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -85,7 +86,7 @@ TEST(BinaryDataHistogramTest, Basic) {
 
   for (size_t i = 0; i <= n; ++i) {
     ConstBufferView prefix(region.begin(), i);
-    ConstBufferView suffix(region.begin() + i, n - i);
+    ConstBufferView suffix(UNSAFE_TODO(region.begin() + i), n - i);
     // If regions are smaller than 2 bytes then it is invalid. Else valid.
     EXPECT_EQ(prefix.size() >= 2, prefix_histograms[i].Compute(prefix));
     EXPECT_EQ(suffix.size() >= 2, suffix_histograms[i].Compute(suffix));

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,27 @@
 
 #include <stdint.h>
 
+#include <iosfwd>
 #include <memory>
-#include <ostream>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "base/base_export.h"
-#include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/byte_size.h"
+#include "base/compiler_specific.h"
 #include "base/trace_event/memory_allocator_dump_guid.h"
 #include "base/trace_event/memory_dump_request_args.h"
-#include "base/trace_event/traced_value.h"
 #include "base/unguessable_token.h"
-#include "base/values.h"
+
+namespace perfetto {
+namespace protos {
+namespace pbzero {
+class MemoryTrackerSnapshot_ProcessSnapshot_MemoryNode;
+}
+}  // namespace protos
+}  // namespace perfetto
 
 namespace base {
 namespace trace_event {
@@ -31,10 +39,10 @@ class TracedValue;
 class BASE_EXPORT MemoryAllocatorDump {
  public:
   enum Flags {
-    DEFAULT = 0,
+    kDefault = 0,
 
     // A dump marked weak will be discarded by TraceViewer.
-    WEAK = 1 << 0,
+    kWeak = 1 << 0,
   };
 
   // In the TraceViewer UI table each MemoryAllocatorDump becomes
@@ -49,11 +57,13 @@ class BASE_EXPORT MemoryAllocatorDump {
     // By design name, units and value_string are  always coming from
     // indefinitely lived const char* strings, the only reason we copy
     // them into a std::string is to handle Mojo (de)serialization.
-    // TODO(hjd): Investigate optimization (e.g. using StringPiece).
+    // TODO(hjd): Investigate optimization (e.g. using std::string_view).
     Entry();  // Only for deserialization.
     Entry(std::string name, std::string units, uint64_t value);
     Entry(std::string name, std::string units, std::string value);
     Entry(Entry&& other) noexcept;
+    Entry(const Entry&) = delete;
+    Entry& operator=(const Entry&) = delete;
     Entry& operator=(Entry&& other);
     bool operator==(const Entry& rhs) const;
 
@@ -64,18 +74,18 @@ class BASE_EXPORT MemoryAllocatorDump {
 
     uint64_t value_uint64;
     std::string value_string;
-
-    DISALLOW_COPY_AND_ASSIGN(Entry);
   };
 
   MemoryAllocatorDump(const std::string& absolute_name,
                       MemoryDumpLevelOfDetail,
                       const MemoryAllocatorDumpGuid&);
+  MemoryAllocatorDump(const MemoryAllocatorDump&) = delete;
+  MemoryAllocatorDump& operator=(const MemoryAllocatorDump&) = delete;
   ~MemoryAllocatorDump();
 
   // Standard attribute |name|s for the AddScalar and AddString() methods.
-  static const char kNameSize[];          // To represent allocated space.
-  static const char kNameObjectCount[];   // To represent number of objects.
+  static const char kNameSize[];         // To represent allocated space.
+  static const char kNameObjectCount[];  // To represent number of objects.
 
   // Standard attribute |unit|s for the AddScalar and AddString() methods.
   static const char kUnitsBytes[];    // Unit name to represent bytes.
@@ -93,17 +103,26 @@ class BASE_EXPORT MemoryAllocatorDump {
   // - Other informational column:
   //    AddString("kitten", "name", "shadow");
   void AddScalar(const char* name, const char* units, uint64_t value);
+  void AddScalar(const char* name, ByteSize value) {
+    AddScalar(name, kUnitsBytes, value.InBytes());
+  }
   void AddString(const char* name, const char* units, const std::string& value);
 
   // Absolute name, unique within the scope of an entire ProcessMemoryDump.
-  const std::string& absolute_name() const { return absolute_name_; }
+  const std::string& absolute_name() const LIFETIME_BOUND {
+    return absolute_name_;
+  }
 
   // Called at trace generation time to populate the TracedValue.
   void AsValueInto(TracedValue* value) const;
 
+  void AsProtoInto(
+      perfetto::protos::pbzero::
+          MemoryTrackerSnapshot_ProcessSnapshot_MemoryNode* memory_node) const;
+
   // Get the size for this dump.
   // The size is the value set with AddScalar(kNameSize, kUnitsBytes, size);
-  // TODO(hjd): this should return an Optional<uint64_t>.
+  // TODO(hjd): this should return an optional<uint64_t>.
   uint64_t GetSizeInternal() const;
 
   MemoryDumpLevelOfDetail level_of_detail() const { return level_of_detail_; }
@@ -119,9 +138,9 @@ class BASE_EXPORT MemoryAllocatorDump {
   // cross process sharing. See crbug.com/492102 for design docs.
   // Subsequent MemoryAllocatorDump(s) with the same |absolute_name| are
   // expected to have the same guid.
-  const MemoryAllocatorDumpGuid& guid() const { return guid_; }
+  const MemoryAllocatorDumpGuid& guid() const LIFETIME_BOUND { return guid_; }
 
-  const std::vector<Entry>& entries() const { return entries_; }
+  const std::vector<Entry>& entries() const LIFETIME_BOUND { return entries_; }
 
   // Only for mojo serialization, which can mutate the collection.
   std::vector<Entry>* mutable_entries_for_serialization() const {
@@ -136,11 +155,9 @@ class BASE_EXPORT MemoryAllocatorDump {
   const std::string absolute_name_;
   MemoryAllocatorDumpGuid guid_;
   MemoryDumpLevelOfDetail level_of_detail_;
-  int flags_;  // See enum Flags.
-  mutable Optional<uint64_t> cached_size_;  // Lazy, for GetSizeInternal().
+  int flags_;                                    // See enum Flags.
+  mutable std::optional<uint64_t> cached_size_;  // Lazy, for GetSizeInternal().
   std::vector<Entry> entries_;
-
-  DISALLOW_COPY_AND_ASSIGN(MemoryAllocatorDump);
 };
 
 // This is required by gtest to print a readable output on test failures.

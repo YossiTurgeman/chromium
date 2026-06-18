@@ -1,11 +1,11 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_DOM_DISTILLER_CORE_FAKE_DISTILLER_H_
 #define COMPONENTS_DOM_DISTILLER_CORE_FAKE_DISTILLER_H_
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "components/dom_distiller/core/article_distillation_update.h"
 #include "components/dom_distiller/core/article_entry.h"
 #include "components/dom_distiller/core/distiller.h"
@@ -22,8 +22,7 @@ class MockDistillerFactory : public DistillerFactory {
   MockDistillerFactory();
   ~MockDistillerFactory() override;
   MOCK_METHOD0(CreateDistillerImpl, Distiller*());
-  std::unique_ptr<Distiller> CreateDistillerForUrl(
-      const GURL& unused) override {
+  std::unique_ptr<Distiller> CreateDistiller() override {
     return std::unique_ptr<Distiller>(CreateDistillerImpl());
   }
 };

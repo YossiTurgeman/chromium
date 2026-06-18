@@ -25,8 +25,8 @@
 
 #include "third_party/blink/renderer/core/editing/commands/simplify_markup_command.h"
 
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/node_traversal.h"
+#include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/layout/layout_inline.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
@@ -57,7 +57,8 @@ void SimplifyMarkupCommand::DoApply(EditingState* editing_state) {
     ContainerNode* const starting_node = node->parentNode();
     if (!starting_node)
       continue;
-    const ComputedStyle* starting_style = starting_node->GetComputedStyle();
+    const ComputedStyle* starting_style =
+        GetComputedStyleForElementOrLayoutObject(*starting_node);
     if (!starting_style)
       continue;
     ContainerNode* current_node = starting_node;
@@ -73,7 +74,7 @@ void SimplifyMarkupCommand::DoApply(EditingState* editing_state) {
 
       if (!current_node->GetLayoutObject() ||
           !current_node->GetLayoutObject()->IsLayoutInline() ||
-          ToLayoutInline(current_node->GetLayoutObject())
+          To<LayoutInline>(current_node->GetLayoutObject())
               ->AlwaysCreateLineBoxes())
         continue;
 
@@ -82,16 +83,18 @@ void SimplifyMarkupCommand::DoApply(EditingState* editing_state) {
         break;
       }
 
-      if (!current_node->GetComputedStyle()
+      if (!GetComputedStyleForElementOrLayoutObject(*current_node)
                ->VisualInvalidationDiff(GetDocument(), *starting_style)
-               .HasDifference())
+               .HasDifference()) {
         top_node_with_starting_style = current_node;
+      }
     }
     if (top_node_with_starting_style) {
-      for (Node& node : NodeTraversal::InclusiveAncestorsOf(*starting_node)) {
-        if (node == top_node_with_starting_style)
+      for (Node& ancestor_node :
+           NodeTraversal::InclusiveAncestorsOf(*starting_node)) {
+        if (ancestor_node == top_node_with_starting_style)
           break;
-        nodes_to_remove.push_back(static_cast<ContainerNode*>(&node));
+        nodes_to_remove.push_back(static_cast<ContainerNode*>(&ancestor_node));
       }
     }
   }
@@ -107,7 +110,7 @@ void SimplifyMarkupCommand::DoApply(EditingState* editing_state) {
     if (num_pruned_ancestors < 0)
       continue;
     RemoveNodePreservingChildren(nodes_to_remove[i], editing_state,
-                                 kAssumeContentIsAlwaysEditable);
+                                 ShouldAssumeContentIsAlwaysEditable(true));
     if (editing_state->IsAborted())
       return;
     i += num_pruned_ancestors;
@@ -138,16 +141,16 @@ int SimplifyMarkupCommand::PruneSubsequentAncestorsToRemove(
     return 0;
 
   RemoveNode(nodes_to_remove[start_node_index], editing_state,
-             kAssumeContentIsAlwaysEditable);
+             ShouldAssumeContentIsAlwaysEditable(true));
   if (editing_state->IsAborted())
     return -1;
   InsertNodeBefore(nodes_to_remove[start_node_index],
                    highest_ancestor_to_remove, editing_state,
-                   kAssumeContentIsAlwaysEditable);
+                   ShouldAssumeContentIsAlwaysEditable(true));
   if (editing_state->IsAborted())
     return -1;
   RemoveNode(highest_ancestor_to_remove, editing_state,
-             kAssumeContentIsAlwaysEditable);
+             ShouldAssumeContentIsAlwaysEditable(true));
   if (editing_state->IsAborted())
     return -1;
 

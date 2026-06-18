@@ -3,8 +3,7 @@ AXWebArea
 ++++AXGroup
 ++++++AXStaticText AXValue='Choose one:'
 ++++AXPopUpButton AXTitle='Choose one: Foo'
-++++++AXStaticText AXValue='Foo'
 ++++AXList AXTitle='Choose one:'
-++++++AXStaticText AXValue='Baz'
-++++++AXStaticText AXValue='Bar'
-++++++AXStaticText AXValue='Foo'
+++++++AXMenuItem AXValue='Baz'
+++++++AXMenuItem AXValue='Bar'
+++++++AXMenuItem AXValue='Foo'

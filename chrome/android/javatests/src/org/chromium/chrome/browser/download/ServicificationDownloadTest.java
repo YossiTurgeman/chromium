@@ -1,25 +1,25 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.download;
 
 import android.graphics.Bitmap;
-import android.support.test.InstrumentationRegistry;
 
 import androidx.test.filters.LargeTest;
+import androidx.test.platform.app.InstrumentationRegistry;
 
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-import org.chromium.base.test.util.CommandLineFlags;
-import org.chromium.base.test.util.DisabledTest;
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.util.CriteriaHelper;
 import org.chromium.base.test.util.Feature;
 import org.chromium.base.test.util.TestFileUtil;
 import org.chromium.chrome.browser.download.items.OfflineContentAggregatorFactory;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.chrome.browser.profiles.OtrProfileId;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 import org.chromium.chrome.test.ReducedModeNativeTestRule;
 import org.chromium.components.offline_items_collection.ContentId;
@@ -27,21 +27,16 @@ import org.chromium.components.offline_items_collection.OfflineContentProvider;
 import org.chromium.components.offline_items_collection.OfflineItem;
 import org.chromium.components.offline_items_collection.OfflineItemState;
 import org.chromium.components.offline_items_collection.UpdateDelta;
-import org.chromium.content_public.browser.test.util.CriteriaHelper;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
 import org.chromium.net.test.EmbeddedTestServerRule;
+import org.chromium.url.GURL;
 
-import java.util.ArrayList;
+import java.util.List;
 
-/**
- * Tests interrupted download can be resumed with Service Manager only mode.
- */
+/** Tests interrupted download can be resumed with minimal browser mode. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 public final class ServicificationDownloadTest {
-    @Rule
-    public EmbeddedTestServerRule mEmbeddedTestServerRule = new EmbeddedTestServerRule();
-    @Rule
-    public ReducedModeNativeTestRule mNativeTestRule = new ReducedModeNativeTestRule();
+    @Rule public EmbeddedTestServerRule mEmbeddedTestServerRule = new EmbeddedTestServerRule();
+    @Rule public ReducedModeNativeTestRule mNativeTestRule = new ReducedModeNativeTestRule();
 
     private static final String TEST_DOWNLOAD_FILE = "/chrome/test/data/android/download/test.gzip";
     private static final String DOWNLOAD_GUID = "F7FB1F59-7DE1-4845-AFDB-8A688F70F583";
@@ -52,17 +47,21 @@ public final class ServicificationDownloadTest {
         private boolean mDownloadCompleted;
 
         @Override
-        public int notifyDownloadSuccessful(ContentId id, String filePath, String fileName,
-                long systemDownloadId, boolean isOffTheRecord, boolean isSupportedMimeType,
-                boolean isOpenable, Bitmap icon, String originalUrl, boolean shouldPromoteOrigin,
-                String referrer, long totalBytes) {
+        public int notifyDownloadSuccessful(
+                ContentId id,
+                String filePath,
+                String fileName,
+                long systemDownloadId,
+                OtrProfileId otrProfileId,
+                boolean isSupportedMimeType,
+                boolean isOpenable,
+                Bitmap icon,
+                GURL originalUrl,
+                boolean shouldPromoteOrigin,
+                GURL referrer,
+                long totalBytes) {
             mDownloadCompleted = true;
             return 0;
-        }
-
-        public void waitForDownloadCompletion() {
-            CriteriaHelper.pollUiThread(
-                    () -> mDownloadCompleted, "Failed waiting for the download to complete.");
         }
     }
 
@@ -70,7 +69,7 @@ public final class ServicificationDownloadTest {
         private boolean mDownloadCompleted;
 
         @Override
-        public void onItemsAdded(ArrayList<OfflineItem> items) {}
+        public void onItemsAdded(List<OfflineItem> items) {}
 
         @Override
         public void onItemRemoved(ContentId id) {}
@@ -88,75 +87,39 @@ public final class ServicificationDownloadTest {
 
     @Before
     public void setUp() {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mNotificationService = new MockDownloadNotificationService();
-            mDownloadUpdateObserver = new DownloadUpdateObserver();
-        });
-    }
-
-    private static boolean useDownloadOfflineContentProvider() {
-        return ChromeFeatureList.isEnabled(ChromeFeatureList.DOWNLOAD_OFFLINE_CONTENT_PROVIDER);
-    }
-
-    @Test
-    @LargeTest
-    @DisabledTest(message = "Noop since UseDownloadOfflineContentProvider is enabled in debug.")
-    @Feature({"Download"})
-    public void testResumeInterruptedDownload() {
-        if (useDownloadOfflineContentProvider()) return;
-        mNativeTestRule.assertOnlyServiceManagerStarted();
-
-        String tempFile = InstrumentationRegistry.getInstrumentation()
-                                  .getTargetContext()
-                                  .getCacheDir()
-                                  .getPath()
-                + "/test.gzip";
-        TestFileUtil.deleteFile(tempFile);
-        DownloadItem item = new DownloadItem(false,
-                new DownloadInfo.Builder()
-                        .setDownloadGuid(DOWNLOAD_GUID)
-                        .setIsOffTheRecord(false)
-                        .build());
-        final String url = mEmbeddedTestServerRule.getServer().getURL(TEST_DOWNLOAD_FILE);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            DownloadManagerService downloadManagerService =
-                    DownloadManagerService.getDownloadManagerService();
-            downloadManagerService.disableAddCompletedDownloadToDownloadManager();
-            ((SystemDownloadNotifier) downloadManagerService.getDownloadNotifier())
-                    .setDownloadNotificationService(mNotificationService);
-            downloadManagerService.createInterruptedDownloadForTest(url, DOWNLOAD_GUID, tempFile);
-            downloadManagerService.resumeDownload(
-                    new ContentId("download", DOWNLOAD_GUID), item, true);
-        });
-        mNotificationService.waitForDownloadCompletion();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mNotificationService = new MockDownloadNotificationService();
+                    mDownloadUpdateObserver = new DownloadUpdateObserver();
+                });
     }
 
     @Test
     @LargeTest
     @Feature({"Download"})
-    @CommandLineFlags.Add({"enable-features=UseDownloadOfflineContentProvider"})
     public void testResumeInterruptedDownloadUsingDownloadOfflineContentProvider() {
-        if (!useDownloadOfflineContentProvider()) return;
-        mNativeTestRule.assertOnlyServiceManagerStarted();
+        mNativeTestRule.assertMinimalBrowserStarted();
 
-        String tempFile = InstrumentationRegistry.getInstrumentation()
-                                  .getTargetContext()
-                                  .getCacheDir()
-                                  .getPath()
-                + "/test.gzip";
+        String tempFile =
+                InstrumentationRegistry.getInstrumentation()
+                                .getTargetContext()
+                                .getCacheDir()
+                                .getPath()
+                        + "/test.gzip";
         TestFileUtil.deleteFile(tempFile);
         final String url = mEmbeddedTestServerRule.getServer().getURL(TEST_DOWNLOAD_FILE);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            DownloadManagerService downloadManagerService =
-                    DownloadManagerService.getDownloadManagerService();
-            downloadManagerService.disableAddCompletedDownloadToDownloadManager();
-            ((SystemDownloadNotifier) downloadManagerService.getDownloadNotifier())
-                    .setDownloadNotificationService(mNotificationService);
-            downloadManagerService.createInterruptedDownloadForTest(url, DOWNLOAD_GUID, tempFile);
-            OfflineContentAggregatorFactory.get().addObserver(mDownloadUpdateObserver);
-            OfflineContentAggregatorFactory.get().resumeDownload(
-                    new ContentId("LEGACY_DOWNLOAD", DOWNLOAD_GUID), true);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    DownloadManagerService downloadManagerService =
+                            DownloadManagerService.getDownloadManagerService();
+                    ((SystemDownloadNotifier) downloadManagerService.getDownloadNotifier())
+                            .setDownloadNotificationService(mNotificationService);
+                    downloadManagerService.createInterruptedDownloadForTest(
+                            url, DOWNLOAD_GUID, tempFile);
+                    OfflineContentAggregatorFactory.get().addObserver(mDownloadUpdateObserver);
+                    OfflineContentAggregatorFactory.get()
+                            .resumeDownload(new ContentId("LEGACY_DOWNLOAD", DOWNLOAD_GUID));
+                });
         mDownloadUpdateObserver.waitForDownloadCompletion();
     }
 }

@@ -1,14 +1,11 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/features.gni")
-
-# Reset sources_assignment_filter for the BUILD.gn file to prevent
-# regression during the migration of Chromium away from the feature.
-# See docs/no_sources_assignment_filter.md for more information.
-# TODO(crbug.com/1018739): remove this when migration is done.
-set_sources_assignment_filter([])
+if (is_android) {
+  import("//build/config/android/config.gni")
+  import("//build/config/android/rules.gni")
+}
 
 static_library("sync_device_info") {
   sources = [
@@ -18,6 +15,8 @@ static_library("sync_device_info") {
     "device_info.h",
     "device_info_prefs.cc",
     "device_info_prefs.h",
+    "device_info_proto_enum_util.cc",
+    "device_info_proto_enum_util.h",
     "device_info_sync_bridge.cc",
     "device_info_sync_bridge.h",
     "device_info_sync_client.cc",
@@ -29,6 +28,8 @@ static_library("sync_device_info") {
     "device_info_tracker.h",
     "device_info_util.cc",
     "device_info_util.h",
+    "device_name_util.cc",
+    "device_name_util.h",
     "local_device_info_provider.h",
     "local_device_info_provider_impl.cc",
     "local_device_info_provider_impl.h",
@@ -45,9 +46,11 @@ static_library("sync_device_info") {
     "//components/sync/protocol",
   ]
   deps = [
+    "//components/desktop_to_mobile_promos",
     "//components/keyed_service/core",
     "//components/metrics",
     "//components/prefs",
+    "//components/strings",
     "//components/version_info",
     "//ui/base",
   ]
@@ -58,12 +61,24 @@ static_library("sync_device_info") {
     sources += [ "local_device_info_util_android.cc" ]
   }
 
+  if (is_chromeos) {
+    sources += [ "local_device_info_util_chromeos.cc" ]
+    deps += [
+      "//chromeos/ash/components/system",
+      "//chromeos/constants",
+    ]
+  }
+
   if (is_ios) {
     sources += [ "local_device_info_util_ios.mm" ]
   }
 
-  if (is_linux || is_chromeos) {
+  if (is_linux) {
     sources += [ "local_device_info_util_linux.cc" ]
+  }
+
+  if (is_fuchsia) {
+    sources += [ "local_device_info_util_fuchsia.cc" ]
   }
 
   if (is_mac) {
@@ -77,11 +92,6 @@ static_library("sync_device_info") {
   if (is_win) {
     sources += [ "local_device_info_util_win.cc" ]
   }
-
-  if (is_chromeos) {
-    # Required by device_info_util_linux.cc on Chrome OS.
-    deps += [ "//chromeos/constants" ]
-  }
 }
 
 static_library("test_support") {
@@ -93,11 +103,13 @@ static_library("test_support") {
     "fake_device_info_tracker.h",
     "fake_local_device_info_provider.cc",
     "fake_local_device_info_provider.h",
+    "test_device_info_builder.cc",
+    "test_device_info_builder.h",
   ]
 
   public_deps = [ ":sync_device_info" ]
 
-  deps = [ "//components/sync:test_support_model" ]
+  deps = [ "//components/sync:test_support" ]
 }
 
 source_set("unit_tests") {
@@ -107,6 +119,7 @@ source_set("unit_tests") {
     "device_info_prefs_unittest.cc",
     "device_info_sync_bridge_unittest.cc",
     "device_info_util_unittest.cc",
+    "device_name_util_unittest.cc",
     "local_device_info_provider_impl_unittest.cc",
     "local_device_info_util_unittest.cc",
   ]
@@ -120,14 +133,23 @@ source_set("unit_tests") {
     "//base/test:test_support",
     "//components/prefs:test_support",
     "//components/sync:test_support",
-    "//components/sync/invalidations:test_support",
     "//components/version_info:version_string",
     "//testing/gmock",
     "//testing/gtest",
   ]
 
   if (is_chromeos) {
-    # Required by local_device_info_util_unittest.cc on Chrome OS.
-    deps += [ "//chromeos/constants" ]
+    deps += [ "//chromeos/ash/components/system" ]
+  }
+}
+
+if (is_android) {
+  java_cpp_enum("java_enums") {
+    sources = [ "//components/sync_device_info/device_info.h" ]
+  }
+
+  android_library("sync_device_info_java") {
+    deps = [ "//third_party/androidx:androidx_annotation_annotation_java" ]
+    srcjar_deps = [ ":java_enums" ]
   }
 }

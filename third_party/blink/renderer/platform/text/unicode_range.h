@@ -36,7 +36,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_UNICODE_RANGE_H_
 
 #include "third_party/blink/renderer/platform/platform_export.h"
-#include "third_party/blink/renderer/platform/wtf/text/unicode.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_uchar.h"
 
 namespace blink {
 
@@ -76,7 +76,7 @@ const unsigned char kCRangeSpecificItemNum = 22;
 const unsigned char kCRangeSetStart =
     30;  // range set definition starts from here
 const unsigned char kCRangeSetLatin = 30;
-const unsigned char kCRangeSetCJK = 31;
+const unsigned char kCRangeSetCjk = 31;
 const unsigned char kCRangeSetEnd = 31;  // range set definition ends here
 
 // less frequently used range definition

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,8 @@
 #ifndef CHROME_INSTALLER_SETUP_BRAND_BEHAVIORS_H_
 #define CHROME_INSTALLER_SETUP_BRAND_BEHAVIORS_H_
 
-#include "base/strings/string16.h"
+#include <string>
+
 #include "chrome/installer/util/util_constants.h"
 
 namespace base {
@@ -19,17 +20,14 @@ class Version;
 
 namespace installer {
 
-// Communicates a change in install status to the updater. |archive_type|, if
-// not UNKNOWN_ARCHIVE_TYPE, indicates what type of install/update is being
-// applied. |install_status|, if not UNKNOWN_STATUS, indicates the result of the
-// install/update.
-void UpdateInstallStatus(installer::ArchiveType archive_type,
-                         installer::InstallStatus install_status);
+// Updates the updater's view of "ap" to match current norms.
+// TODO(crbug.com/441478433): Delete this cleanup some time in 2027.
+void UpdateInstallStatus();
 
 // Returns an opaque string holding data relating to the browser being
 // uninstalled. This function is called before the product's Clients key is
 // deleted. This blob is later passed to DoPostUninstallOperations.
-base::string16 GetDistributionData();
+std::wstring GetDistributionData();
 
 // Performs brand-specific operations following unintsallation of the browser.
 // |version| is the version of the browser being uninstalled. |local_data_path|
@@ -38,7 +36,7 @@ base::string16 GetDistributionData();
 // |GetDistributionData().
 void DoPostUninstallOperations(const base::Version& version,
                                const base::FilePath& local_data_path,
-                               const base::string16& distribution_data);
+                               const std::wstring& distribution_data);
 
 }  // namespace installer
 

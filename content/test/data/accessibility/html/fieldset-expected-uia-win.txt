@@ -1,5 +1,9 @@
 Document
-++Group IsControlElement=false
+++Group
 ++++Group Name='Browser Engines:'
-++++++Text IsControlElement=false
-++++++++Text Name='Browser Engines:' IsControlElement=false
+++++++Group IsControlElement=false
+++++++++Text Name='Browser Engines:'
+++Group Name='Which cake do you prefer?'
+++++Group IsControlElement=false
+++++++Text Name='Which cake do you prefer?'
+++++++++Text Name='Which cake do you prefer?' IsControlElement=false

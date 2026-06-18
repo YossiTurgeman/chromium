@@ -1,26 +1,24 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/sharing/click_to_call/click_to_call_context_menu_observer.h"
+#include "chrome/browser/sharing/click_to_call/click_to_call_utils.h"
 
 #include <memory>
 
-#include "base/macros.h"
 #include "base/test/scoped_feature_list.h"
-#include "chrome/browser/sharing/click_to_call/click_to_call_utils.h"
-#include "chrome/browser/sharing/click_to_call/feature.h"
-#include "chrome/browser/sharing/mock_sharing_service.h"
-#include "chrome/browser/sharing/sharing_fcm_handler.h"
-#include "chrome/browser/sharing/sharing_fcm_sender.h"
-#include "chrome/browser/sharing/sharing_handler_registry.h"
-#include "chrome/browser/sharing/sharing_service.h"
+#include "chrome/browser/sharing/click_to_call/click_to_call_context_menu_observer.h"
 #include "chrome/browser/sharing/sharing_service_factory.h"
-#include "chrome/browser/sharing/sharing_sync_preference.h"
-#include "chrome/browser/sharing/vapid_key_manager.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/prefs/pref_service.h"
+#include "components/sharing_message/features.h"
+#include "components/sharing_message/mock_sharing_service.h"
+#include "components/sharing_message/pref_names.h"
+#include "components/sharing_message/sharing_channel_sender.h"
+#include "components/sharing_message/sharing_fcm_handler.h"
+#include "components/sharing_message/sharing_handler_registry.h"
+#include "components/sharing_message/sharing_service.h"
+#include "components/sharing_message/sharing_sync_preference.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -32,7 +30,7 @@ using ::testing::Eq;
 using ::testing::NiceMock;
 using ::testing::Return;
 
-using SharingMessage = chrome_browser_sharing::SharingMessage;
+using SharingMessage = components_sharing_message::SharingMessage;
 
 namespace {
 
@@ -46,6 +44,9 @@ class ClickToCallUtilsTest : public testing::Test {
  public:
   ClickToCallUtilsTest() = default;
 
+  ClickToCallUtilsTest(const ClickToCallUtilsTest&) = delete;
+  ClickToCallUtilsTest& operator=(const ClickToCallUtilsTest&) = delete;
+
   ~ClickToCallUtilsTest() override = default;
 
   void SetUp() override {
@@ -58,8 +59,10 @@ class ClickToCallUtilsTest : public testing::Test {
       const std::string& selection_text,
       bool use_incognito_profile = false) {
     Profile* profile_to_use =
-        use_incognito_profile ? profile_.GetPrimaryOTRProfile() : &profile_;
-    base::Optional<std::string> phone_number =
+        use_incognito_profile
+            ? profile_.GetPrimaryOTRProfile(/*create_if_needed=*/true)
+            : &profile_;
+    std::optional<std::string> phone_number =
         ExtractPhoneNumberForClickToCall(profile_to_use, selection_text);
     EXPECT_FALSE(phone_number.has_value())
         << " Found phone number: " << phone_number.value()
@@ -67,68 +70,73 @@ class ClickToCallUtilsTest : public testing::Test {
   }
 
  protected:
+  base::test::ScopedFeatureList features_{kClickToCall};
+
   std::unique_ptr<KeyedService> CreateService(
       content::BrowserContext* context) {
     return create_service_ ? std::make_unique<MockSharingService>() : nullptr;
   }
 
-  base::test::ScopedFeatureList scoped_feature_list_;
   content::BrowserTaskEnvironment task_environment_;
   TestingProfile profile_;
   bool create_service_ = true;
-
-  DISALLOW_COPY_AND_ASSIGN(ClickToCallUtilsTest);
 };
 
 }  // namespace
 
 TEST_F(ClickToCallUtilsTest, NoSharingService_DoNotOfferAnyMenu) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   create_service_ = false;
   EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL(kTelUrl)));
   ExpectClickToCallDisabledForSelectionText(kSelectionTextWithNumber);
 }
 
-TEST_F(ClickToCallUtilsTest, UIFlagDisabled_DoNotOfferAnyMenu) {
-  scoped_feature_list_.InitAndDisableFeature(kClickToCallUI);
-  EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL(kTelUrl)));
-  ExpectClickToCallDisabledForSelectionText(kSelectionTextWithNumber);
-}
-
 TEST_F(ClickToCallUtilsTest, PolicyDisabled_DoNotOfferAnyMenu) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   profile_.GetPrefs()->SetBoolean(prefs::kClickToCallEnabled, false);
   EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL(kTelUrl)));
   ExpectClickToCallDisabledForSelectionText(kSelectionTextWithNumber);
 }
 
 TEST_F(ClickToCallUtilsTest, IncognitoProfile_DoNotOfferAnyMenu) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
-  EXPECT_FALSE(ShouldOfferClickToCallForURL(profile_.GetPrimaryOTRProfile(),
-                                            GURL(kTelUrl)));
+  EXPECT_FALSE(ShouldOfferClickToCallForURL(
+      profile_.GetPrimaryOTRProfile(/*create_if_needed=*/true), GURL(kTelUrl)));
   ExpectClickToCallDisabledForSelectionText(kSelectionTextWithNumber,
                                             /*use_incognito_profile =*/true);
 }
 
 TEST_F(ClickToCallUtilsTest, EmptyTelLink_DoNotOfferForLink) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL(kEmptyTelUrl)));
 }
 
 TEST_F(ClickToCallUtilsTest, TelLink_OfferForLink) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   EXPECT_TRUE(ShouldOfferClickToCallForURL(&profile_, GURL(kTelUrl)));
 }
 
 TEST_F(ClickToCallUtilsTest, NonTelLink_DoNotOfferForLink) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL(kNonTelUrl)));
+}
+
+TEST_F(ClickToCallUtilsTest, TelLinkWithFragment) {
+  GURL fragment("tel:123#456");
+  EXPECT_TRUE(ShouldOfferClickToCallForURL(&profile_, fragment));
+  EXPECT_EQ("123", fragment.GetContentPiece());
+}
+
+TEST_F(ClickToCallUtilsTest, TelLinkWithEncodedCharacters) {
+  // %23 == '#'
+  EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL("tel:123%23456")));
+  // %2A == '*'
+  EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL("tel:123%2A456")));
+  EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL("tel:123*456")));
+  // %25 == '%'
+  EXPECT_FALSE(ShouldOfferClickToCallForURL(&profile_, GURL("tel:123%25456")));
+
+  // %2B == '+'
+  EXPECT_TRUE(ShouldOfferClickToCallForURL(&profile_, GURL("tel:%2B44123")));
+  EXPECT_TRUE(ShouldOfferClickToCallForURL(&profile_, GURL("tel:+44123")));
 }
 
 TEST_F(ClickToCallUtilsTest,
        SelectionText_ValidPhoneNumberRegex_OfferForSelection) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
-
   // Stores a mapping of selected text to expected phone number parsed.
   std::map<std::string, std::string> expectations;
   // Selection text only consists of the phone number.
@@ -155,16 +163,15 @@ TEST_F(ClickToCallUtilsTest,
   expectations.emplace("78.0.3904.108", "78.0.3904.108");
 
   for (auto& expectation : expectations) {
-    base::Optional<std::string> phone_number =
+    std::optional<std::string> phone_number =
         ExtractPhoneNumberForClickToCall(&profile_, expectation.first);
-    ASSERT_NE(base::nullopt, phone_number);
+    ASSERT_NE(std::nullopt, phone_number);
     EXPECT_EQ(expectation.second, phone_number.value());
   }
 }
 
 TEST_F(ClickToCallUtilsTest,
        SelectionText_InvalidPhoneNumberRegex_DoNotOfferForSelection) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   std::vector<std::string> invalid_selection_texts;
 
   // Does not contain any number.
@@ -187,21 +194,29 @@ TEST_F(ClickToCallUtilsTest,
 }
 
 TEST_F(ClickToCallUtilsTest, SelectionText_Length) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   // Expect text length of 30 to pass.
-  EXPECT_NE(base::nullopt, ExtractPhoneNumberForClickToCall(
-                               &profile_, " +1 2 3 4 5 6 7 8 9 0 1 2 3 45"));
+  EXPECT_NE(std::nullopt, ExtractPhoneNumberForClickToCall(
+                              &profile_, " +1 2 3 4 5 6 7 8 9 0 1 2 3 45"));
   // Expect text length of 31 to fail.
-  EXPECT_EQ(base::nullopt, ExtractPhoneNumberForClickToCall(
-                               &profile_, " +1 2 3 4 5 6 7 8 9 0 1 2 3 4 5"));
+  EXPECT_EQ(std::nullopt, ExtractPhoneNumberForClickToCall(
+                              &profile_, " +1 2 3 4 5 6 7 8 9 0 1 2 3 4 5"));
 }
 
 TEST_F(ClickToCallUtilsTest, SelectionText_Digits) {
-  scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
   // Expect text with 15 digits to pass.
-  EXPECT_NE(base::nullopt,
+  EXPECT_NE(std::nullopt,
             ExtractPhoneNumberForClickToCall(&profile_, "+123456789012345"));
   // Expect text with 16 digits to fail.
-  EXPECT_EQ(base::nullopt,
+  EXPECT_EQ(std::nullopt,
             ExtractPhoneNumberForClickToCall(&profile_, "+1234567890123456"));
+}
+
+TEST_F(ClickToCallUtilsTest, IsUrlSafeForClickToCall) {
+  EXPECT_FALSE(IsUrlSafeForClickToCall(GURL("tel:123%23456")));
+  EXPECT_FALSE(IsUrlSafeForClickToCall(GURL("tel:123%2A456")));
+  EXPECT_FALSE(IsUrlSafeForClickToCall(GURL("tel:123*456")));
+  EXPECT_FALSE(IsUrlSafeForClickToCall(GURL("tel:123%25456")));
+
+  EXPECT_TRUE(IsUrlSafeForClickToCall(GURL("tel:%2B44123")));
+  EXPECT_TRUE(IsUrlSafeForClickToCall(GURL("tel:+44123")));
 }

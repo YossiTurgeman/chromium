@@ -1,17 +1,18 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_CREDENTIAL_PROVIDER_GAIACP_USER_POLICIES_H_
 #define CHROME_CREDENTIAL_PROVIDER_GAIACP_USER_POLICIES_H_
 
+#include "base/component_export.h"
 #include "base/values.h"
 #include "chrome/credential_provider/gaiacp/gcpw_version.h"
 
 namespace credential_provider {
 
 // Structure to hold the policies for each user.
-struct UserPolicies {
+struct COMPONENT_EXPORT(GCPW_POLICIES) UserPolicies {
   // Controls whether MDM enrollment is enabled/disabled.
   bool enable_dm_enrollment;
 
@@ -33,7 +34,7 @@ struct UserPolicies {
 
   // Creates the user policies by reading the values found in the |dict|
   // dictionary.
-  static UserPolicies FromValue(const base::Value& dict);
+  static UserPolicies FromValue(const base::DictValue& dict);
 
   base::Value ToValue() const;
 

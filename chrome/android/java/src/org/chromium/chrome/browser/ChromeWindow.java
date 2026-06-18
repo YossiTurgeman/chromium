@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,77 +9,89 @@ import android.view.View;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.infobar.InfoBarIdentifier;
-import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.browser.ui.messages.infobar.SimpleConfirmInfoBarBuilder;
-import org.chromium.ui.base.ActivityKeyboardVisibilityDelegate;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.compositor.CompositorViewHolder;
+import org.chromium.chrome.browser.keyboard_accessory.ManualFillingComponent;
+import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerFactory;
 import org.chromium.ui.base.ActivityWindowAndroid;
+import org.chromium.ui.base.IntentRequestTracker;
+import org.chromium.ui.insets.InsetObserver;
 import org.chromium.ui.modaldialog.ModalDialogManager;
 
 import java.lang.ref.WeakReference;
+import java.util.function.Supplier;
 
 /**
- * The window that has access to the main activity and is able to create and receive intents,
- * and show error messages.
+ * The window that has access to the main activity and is able to create and receive intents, and
+ * show error messages.
  */
+@NullMarked
 public class ChromeWindow extends ActivityWindowAndroid {
-    /**
-     * Interface allowing to inject a different keyboard delegate for testing.
-     */
+    /** Interface allowing to inject a different keyboard delegate for testing. */
     @VisibleForTesting
     public interface KeyboardVisibilityDelegateFactory {
-        ActivityKeyboardVisibilityDelegate create(WeakReference<Activity> activity);
+        ChromeKeyboardVisibilityDelegate create(
+                WeakReference<Activity> activity,
+                Supplier<@Nullable ManualFillingComponent> manualFillingComponentSupplier);
     }
+
     private static KeyboardVisibilityDelegateFactory sKeyboardVisibilityDelegateFactory =
             ChromeKeyboardVisibilityDelegate::new;
 
+    private final Supplier<@Nullable CompositorViewHolder> mCompositorViewHolderSupplier;
+    private final Supplier<@Nullable ModalDialogManager> mModalDialogManagerSupplier;
+
     /**
      * Creates Chrome specific ActivityWindowAndroid.
+     *
      * @param activity The activity that owns the ChromeWindow.
+     * @param compositorViewHolderSupplier Supplies the {@link CompositorViewHolder}.
+     * @param modalDialogManagerSupplier Supplies the {@link ModalDialogManager}.
+     * @param manualFillingComponentSupplier Supplies the {@link ManualFillingComponent}.
+     * @param intentRequestTracker The {@link IntentRequestTracker} of the current activity.
+     * @param insetObserver Observes window insets to track keyboard and layout changes.
      */
-    public ChromeWindow(ChromeActivity activity) {
-        super(activity);
+    public ChromeWindow(
+            Activity activity,
+            Supplier<@Nullable CompositorViewHolder> compositorViewHolderSupplier,
+            Supplier<@Nullable ModalDialogManager> modalDialogManagerSupplier,
+            Supplier<@Nullable ManualFillingComponent> manualFillingComponentSupplier,
+            IntentRequestTracker intentRequestTracker,
+            InsetObserver insetObserver) {
+        super(
+                activity,
+                /* listenToActivityState= */ true,
+                sKeyboardVisibilityDelegateFactory.create(
+                        new WeakReference<>(activity), manualFillingComponentSupplier),
+                /* activityTopResumedSupported= */ true,
+                intentRequestTracker,
+                insetObserver,
+                /* occlusionTrackingAllowed= */ true);
+        assert insetObserver != null;
+        mCompositorViewHolderSupplier = compositorViewHolderSupplier;
+        mModalDialogManagerSupplier = modalDialogManagerSupplier;
     }
 
     @Override
-    public View getReadbackView() {
-        assert getActivity().get() instanceof ChromeActivity;
-
-        ChromeActivity chromeActivity = (ChromeActivity) getActivity().get();
-        return chromeActivity.getCompositorViewHolder() == null
-                ? null
-                : chromeActivity.getCompositorViewHolder().getActiveSurfaceView();
-    }
-
-    @Override
-    public ModalDialogManager getModalDialogManager() {
-        ChromeActivity activity = (ChromeActivity) getActivity().get();
-        return activity == null ? null : activity.getModalDialogManager();
-    }
-
-    @Override
-    protected ActivityKeyboardVisibilityDelegate createKeyboardVisibilityDelegate() {
-        return sKeyboardVisibilityDelegateFactory.create(getActivity());
-    }
-
-    /**
-     * Shows an infobar error message overriding the WindowAndroid implementation.
-     */
-    @Override
-    protected void showCallbackNonExistentError(String error) {
-        Activity activity = getActivity().get();
-
-        // We can assume that activity is a ChromeActivity because we require one to be passed in
-        // in the constructor.
-        Tab tab = activity != null ? ((ChromeActivity) activity).getActivityTab() : null;
-
-        if (tab != null) {
-            SimpleConfirmInfoBarBuilder.create(tab.getWebContents(),
-                    InfoBarIdentifier.WINDOW_ERROR_INFOBAR_DELEGATE_ANDROID, error, false);
-        } else {
-            super.showCallbackNonExistentError(error);
+    public void destroy() {
+        var chromeAndroidTaskTracker = ChromeAndroidTaskTrackerFactory.getInstance();
+        if (chromeAndroidTaskTracker != null) {
+            chromeAndroidTaskTracker.onActivityWindowAndroidDestroy(this);
         }
+
+        super.destroy();
+    }
+
+    @Override
+    public @Nullable View getReadbackView() {
+        var holder = mCompositorViewHolderSupplier.get();
+        return holder == null ? null : holder.getActiveSurfaceView();
+    }
+
+    @Override
+    public @Nullable ModalDialogManager getModalDialogManager() {
+        return mModalDialogManagerSupplier.get();
     }
 
     @VisibleForTesting

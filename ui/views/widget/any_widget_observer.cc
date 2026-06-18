@@ -1,9 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/widget/any_widget_observer.h"
-#include "base/bind.h"
+
+#include <utility>
+
+#include "base/functional/bind.h"
 #include "ui/views/widget/any_widget_observer_singleton.h"
 #include "ui/views/widget/widget.h"
 
@@ -25,13 +28,14 @@ AnyWidgetObserver::~AnyWidgetObserver() {
 #define PROPAGATE_NOTIFICATION(method, callback)   \
   void AnyWidgetObserver::method(Widget* widget) { \
     if (callback)                                  \
-      callback.Run(widget);                        \
+      (callback).Run(widget);                      \
   }
 
 PROPAGATE_NOTIFICATION(OnAnyWidgetInitialized, initialized_callback_)
 PROPAGATE_NOTIFICATION(OnAnyWidgetShown, shown_callback_)
 PROPAGATE_NOTIFICATION(OnAnyWidgetHidden, hidden_callback_)
 PROPAGATE_NOTIFICATION(OnAnyWidgetClosing, closing_callback_)
+PROPAGATE_NOTIFICATION(OnAnyWidgetActivated, activated_callback_)
 
 #undef PROPAGATE_NOTIFICATION
 
@@ -48,8 +52,7 @@ NamedWidgetShownWaiter::~NamedWidgetShownWaiter() = default;
 
 Widget* NamedWidgetShownWaiter::WaitIfNeededAndGet() {
   run_loop_.Run();
-  DCHECK(widget_);
-  return widget_;
+  return widget_.get();
 }
 
 NamedWidgetShownWaiter::NamedWidgetShownWaiter(const std::string& name)
@@ -60,11 +63,9 @@ NamedWidgetShownWaiter::NamedWidgetShownWaiter(const std::string& name)
 
 void NamedWidgetShownWaiter::OnAnyWidgetShown(Widget* widget) {
   if (widget->GetName() == name_) {
-    widget_ = widget;
+    widget_ = widget->GetWeakPtr();
     run_loop_.Quit();
   }
 }
-
-AnyWidgetPasskey::AnyWidgetPasskey() = default;
 
 }  // namespace views

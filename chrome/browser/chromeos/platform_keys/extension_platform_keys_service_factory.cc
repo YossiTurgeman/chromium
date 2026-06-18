@@ -1,27 +1,21 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/chromeos/platform_keys/extension_platform_keys_service_factory.h"
 
 #include <memory>
+#include <utility>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/check.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
-#include "base/memory/singleton.h"
 #include "base/memory/weak_ptr.h"
+#include "base/no_destructor.h"
+#include "chrome/browser/ash/platform_keys/keystore_service_factory.h"
 #include "chrome/browser/chromeos/platform_keys/extension_platform_keys_service.h"
-#include "chrome/browser/chromeos/platform_keys/key_permissions/key_permissions_manager_user_service.h"
-#include "chrome/browser/chromeos/platform_keys/platform_keys_service_factory.h"
-#include "chrome/browser/extensions/extension_system_factory.h"
-#include "chrome/browser/policy/profile_policy_connector.h"
-#include "chrome/browser/profiles/incognito_helpers.h"
-#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/platform_keys_certificate_selector_chromeos.h"
-#include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/common/extension.h"
 #include "net/cert/x509_certificate.h"
@@ -34,40 +28,41 @@ namespace {
 class DefaultSelectDelegate
     : public chromeos::ExtensionPlatformKeysService::SelectDelegate {
  public:
-  DefaultSelectDelegate() {}
-  ~DefaultSelectDelegate() override {}
+  DefaultSelectDelegate() = default;
+  DefaultSelectDelegate(const DefaultSelectDelegate&) = delete;
+  auto operator=(const DefaultSelectDelegate&) = delete;
+  ~DefaultSelectDelegate() override = default;
 
   void Select(const std::string& extension_id,
               const net::CertificateList& certs,
-              const CertificateSelectedCallback& callback,
+              CertificateSelectedCallback callback,
               content::WebContents* web_contents,
               content::BrowserContext* context) override {
     CHECK(web_contents);
     const extensions::Extension* const extension =
-        extensions::ExtensionRegistry::Get(context)->GetExtensionById(
-            extension_id, extensions::ExtensionRegistry::ENABLED);
+        extensions::ExtensionRegistry::Get(context)
+            ->enabled_extensions()
+            .GetByID(extension_id);
     if (!extension) {
-      callback.Run(nullptr /* no certificate selected */);
+      std::move(callback).Run(nullptr /* no certificate selected */);
       return;
     }
     ShowPlatformKeysCertificateSelector(
         web_contents, extension->short_name(), certs,
         // Don't call |callback| once this delegate is destructed, thus use a
         // WeakPtr.
-        base::Bind(&DefaultSelectDelegate::SelectedCertificate,
-                   weak_factory_.GetWeakPtr(), callback));
+        base::BindOnce(&DefaultSelectDelegate::SelectedCertificate,
+                       weak_factory_.GetWeakPtr(), std::move(callback)));
   }
 
   void SelectedCertificate(
-      const CertificateSelectedCallback& callback,
+      CertificateSelectedCallback callback,
       const scoped_refptr<net::X509Certificate>& selected_cert) {
-    callback.Run(selected_cert);
+    std::move(callback).Run(selected_cert);
   }
 
  private:
   base::WeakPtrFactory<DefaultSelectDelegate> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(DefaultSelectDelegate);
 };
 
 }  // namespace
@@ -83,41 +78,33 @@ ExtensionPlatformKeysServiceFactory::GetForBrowserContext(
 // static
 ExtensionPlatformKeysServiceFactory*
 ExtensionPlatformKeysServiceFactory::GetInstance() {
-  return base::Singleton<ExtensionPlatformKeysServiceFactory>::get();
+  static base::NoDestructor<ExtensionPlatformKeysServiceFactory> instance;
+  return instance.get();
 }
 
 ExtensionPlatformKeysServiceFactory::ExtensionPlatformKeysServiceFactory()
-    : BrowserContextKeyedServiceFactory(
+    : ProfileKeyedServiceFactory(
           "ExtensionPlatformKeysService",
-          BrowserContextDependencyManager::GetInstance()) {
-  DependsOn(extensions::ExtensionSystemFactory::GetInstance());
-  DependsOn(chromeos::platform_keys::PlatformKeysServiceFactory::GetInstance());
-  DependsOn(chromeos::platform_keys::KeyPermissionsManagerUserServiceFactory::
-                GetInstance());
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kRedirectedToOriginal)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kRedirectedToOriginal)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kRedirectedToOriginal)
+              .Build()) {
+  DependsOn(ash::KeystoreServiceFactory::GetInstance());
 }
 
-ExtensionPlatformKeysServiceFactory::~ExtensionPlatformKeysServiceFactory() {}
+ExtensionPlatformKeysServiceFactory::~ExtensionPlatformKeysServiceFactory() =
+    default;
 
-content::BrowserContext*
-ExtensionPlatformKeysServiceFactory::GetBrowserContextToUse(
+std::unique_ptr<KeyedService>
+ExtensionPlatformKeysServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return chrome::GetBrowserContextRedirectedInIncognito(context);
-}
-
-KeyedService* ExtensionPlatformKeysServiceFactory::BuildServiceInstanceFor(
-    content::BrowserContext* context) const {
-  extensions::StateStore* const store =
-      extensions::ExtensionSystem::Get(context)->state_store();
-
-  policy::ProfilePolicyConnector* const policy_connector =
-      Profile::FromBrowserContext(context)->GetProfilePolicyConnector();
-
-  Profile* const profile = Profile::FromBrowserContext(context);
-
-  ExtensionPlatformKeysService* const service =
-      new ExtensionPlatformKeysService(
-          policy_connector->IsManaged(), profile->GetPrefs(),
-          policy_connector->policy_service(), context, store);
+  std::unique_ptr<ExtensionPlatformKeysService> service =
+      std::make_unique<ExtensionPlatformKeysService>(context);
 
   service->SetSelectDelegate(std::make_unique<DefaultSelectDelegate>());
   return service;

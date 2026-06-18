@@ -31,10 +31,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_FORMS_FORM_DATA_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_FORMS_FORM_DATA_H_
 
-#include "third_party/blink/renderer/bindings/core/v8/file_or_usv_string.h"
 #include "third_party/blink/renderer/bindings/core/v8/iterable.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_sync_iterator_form_data.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_typedefs.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/network/encoded_form_data.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
@@ -42,16 +44,14 @@
 namespace blink {
 
 class Blob;
+class File;
 class FormControlState;
 class HTMLFormElement;
 class ScriptState;
+class ExecutionContext;
 
-// Typedef from form_data.idl:
-typedef FileOrUSVString FormDataEntryValue;
-
-class CORE_EXPORT FormData final
-    : public ScriptWrappable,
-      public PairIterable<String, FormDataEntryValue> {
+class CORE_EXPORT FormData final : public ScriptWrappable,
+                                   public PairSyncIterable<FormData> {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
@@ -60,8 +60,11 @@ class CORE_EXPORT FormData final
   }
   static FormData* Create(HTMLFormElement* form,
                           ExceptionState& exception_state);
+  static FormData* Create(HTMLFormElement* form,
+                          HTMLElement* submitter,
+                          ExceptionState& exception_state);
 
-  explicit FormData(const WTF::TextEncoding&);
+  explicit FormData(const TextEncoding&);
   // Clones form_data.  This clones |form_data.entries_| Vector, but
   // doesn't clone entries in it because they are immutable.
   FormData(const FormData& form_data);
@@ -75,15 +78,15 @@ class CORE_EXPORT FormData final
               Blob*,
               const String& filename = String());
   void deleteEntry(const String& name);
-  void get(const String& name, FormDataEntryValue& result);
-  HeapVector<FormDataEntryValue> getAll(const String& name);
+  V8FormDataEntryValue* get(const String& name);
+  HeapVector<Member<V8FormDataEntryValue>> getAll(const String& name);
   bool has(const String& name);
   void set(const String& name, const String& value);
   void set(const String& name, Blob*, const String& filename = String());
 
   // Internal functions.
 
-  const WTF::TextEncoding& Encoding() const { return encoding_; }
+  const TextEncoding& Encoding() const { return encoding_; }
   std::string Encode(const String& key) const;
   class Entry;
   const HeapVector<Member<const Entry>>& Entries() const { return entries_; }
@@ -99,18 +102,19 @@ class CORE_EXPORT FormData final
   void SetContainsPasswordData(bool flag) { contains_password_data_ = flag; }
 
   scoped_refptr<EncodedFormData> EncodeFormData(
-      EncodedFormData::EncodingType = EncodedFormData::kFormURLEncoded);
+      EncodedFormData::EncodingType = EncodedFormData::kFormUrlEncoded);
   scoped_refptr<EncodedFormData> EncodeMultiPartFormData();
 
   void AppendToControlState(FormControlState& state) const;
-  static FormData* CreateFromControlState(const FormControlState& state,
+  static FormData* CreateFromControlState(ExecutionContext& execution_context,
+                                          const FormControlState& state,
                                           wtf_size_t& index);
 
  private:
   void SetEntry(const Entry*);
-  IterationSource* StartIteration(ScriptState*, ExceptionState&) override;
+  IterationSource* CreateIterationSource(ScriptState*) override;
 
-  WTF::TextEncoding encoding_;
+  TextEncoding encoding_;
   // Entry pointers in entries_ never be nullptr.
   HeapVector<Member<const Entry>> entries_;
   bool contains_password_data_ = false;
@@ -126,7 +130,7 @@ class FormData::Entry final : public GarbageCollected<FormData::Entry> {
   void Trace(Visitor*) const;
 
   bool IsString() const { return !blob_; }
-  bool isFile() const { return blob_; }
+  bool isFile() const { return blob_ != nullptr; }
   const String& name() const { return name_; }
   const String& Value() const { return value_; }
   Blob* GetBlob() const { return blob_.Get(); }

@@ -1,7 +1,4 @@
 *
-
-# build@ isn't really the right component for this, but it'll
-# do until we create a component for documentation.
-
-# TEAM: build@chromium.org
-# COMPONENT: Build
+per-file supported_platforms.md=set noparent
+per-file supported_platforms.md=file://ATL_OWNERS
+per-file supported_platforms.md=blundell@chromium.org

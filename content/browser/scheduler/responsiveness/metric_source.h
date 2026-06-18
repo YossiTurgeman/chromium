@@ -1,17 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_BROWSER_SCHEDULER_RESPONSIVENESS_METRIC_SOURCE_H_
 #define CONTENT_BROWSER_SCHEDULER_RESPONSIVENESS_METRIC_SOURCE_H_
 
+#include <stdint.h>
+
 #include <memory>
 
-#include "base/callback.h"
-#include "base/callback_helpers.h"
-#include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/time/time.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "content/common/content_export.h"
 
 namespace base {
@@ -22,7 +22,7 @@ namespace content {
 namespace responsiveness {
 
 class MessageLoopObserver;
-class NativeEventObserver;
+class BrowserUINativeEventObserver;
 
 // This class represents the source of browser responsiveness metrics.
 // This class watches events and tasks processed on the UI and IO threads of the
@@ -61,11 +61,15 @@ class CONTENT_EXPORT MetricSource {
 
     // These methods are called by the NativeEventObserver of the UI thread to
     // allow Delegate to collect metadata about the events being run.
-    virtual void WillRunEventOnUIThread(const void* opaque_identifier) = 0;
-    virtual void DidRunEventOnUIThread(const void* opaque_identifier) = 0;
+    virtual void WillRunEventOnUIThread(uintptr_t opaque_identifier) = 0;
+    virtual void DidRunEventOnUIThread(uintptr_t opaque_identifier) = 0;
   };
 
   explicit MetricSource(Delegate* delegate);
+
+  MetricSource(const MetricSource&) = delete;
+  MetricSource& operator=(const MetricSource&) = delete;
+
   virtual ~MetricSource();
 
   // Must be called immediately after the constructor. This cannot be called
@@ -81,7 +85,8 @@ class CONTENT_EXPORT MetricSource {
   void Destroy(base::ScopedClosureRunner on_finish_destroy);
 
  protected:
-  virtual std::unique_ptr<NativeEventObserver> CreateNativeEventObserver();
+  virtual std::unique_ptr<BrowserUINativeEventObserver>
+  CreateNativeEventObserver();
   virtual void RegisterMessageLoopObserverUI();
   virtual void RegisterMessageLoopObserverIO();
 
@@ -90,18 +95,16 @@ class CONTENT_EXPORT MetricSource {
   void TearDownOnIOThread(base::ScopedClosureRunner on_finish_destroy);
   void TearDownOnUIThread(base::ScopedClosureRunner on_finish_destroy);
 
-  Delegate* delegate_;
+  raw_ptr<Delegate> delegate_;
 
   // The following members are all affine to the UI thread.
   std::unique_ptr<MessageLoopObserver> message_loop_observer_ui_;
-  std::unique_ptr<NativeEventObserver> native_event_observer_ui_;
+  std::unique_ptr<BrowserUINativeEventObserver> native_event_observer_ui_;
 
   // The following members are all affine to the IO thread.
   std::unique_ptr<MessageLoopObserver> message_loop_observer_io_;
 
   bool destroy_was_called_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(MetricSource);
 };
 
 }  // namespace responsiveness

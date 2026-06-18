@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,22 @@
 #include <string>
 #include <utility>
 
+#include "base/feature_list.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/macros.h"
 #include "base/run_loop.h"
 #include "base/strings/string_util.h"
-#include "base/test/bind_test_util.h"
+#include "base/strings/stringprintf.h"
+#include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/threading/thread_restrictions.h"
+#include "content/browser/bad_message.h"
 #include "content/browser/renderer_host/navigation_request.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
+#include "content/common/content_navigation_policy.h"
+#include "content/common/frame.mojom.h"
+#include "content/public/common/url_constants.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
@@ -23,6 +29,7 @@
 #include "content/public/test/navigation_handle_observer.h"
 #include "content/public/test/test_utils.h"
 #include "content/shell/browser/shell.h"
+#include "content/test/content_browser_test_utils_internal.h"
 #include "mojo/public/c/system/trap.h"
 #include "mojo/public/c/system/types.h"
 #include "mojo/public/cpp/system/data_pipe.h"
@@ -30,6 +37,9 @@
 #include "mojo/public/cpp/system/simple_watcher.h"
 #include "net/base/filename_util.h"
 #include "net/dns/mock_host_resolver.h"
+#include "services/network/public/cpp/web_sandbox_flags.h"
+#include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/common/page_state/page_state.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
 
@@ -45,7 +55,7 @@ class NavigationMhtmlBrowserTest : public ContentBrowserTest {
   }
 
   RenderFrameHostImpl* main_frame_host() {
-    return web_contents()->GetFrameTree()->root()->current_frame_host();
+    return web_contents()->GetPrimaryFrameTree().root()->current_frame_host();
   }
 
  protected:
@@ -59,6 +69,10 @@ class NavigationMhtmlBrowserTest : public ContentBrowserTest {
 class MhtmlArchive {
  public:
   MhtmlArchive() = default;
+
+  MhtmlArchive(const MhtmlArchive&) = delete;
+  MhtmlArchive& operator=(const MhtmlArchive&) = delete;
+
   ~MhtmlArchive() {
     base::ScopedAllowBlockingForTesting allow_blocking_;
     EXPECT_TRUE(file_directory_.Delete());
@@ -66,6 +80,20 @@ class MhtmlArchive {
 
   void AddResource(const std::string content) {
     content_ += "\n--MHTML_BOUNDARY\n" + content;
+  }
+
+  void AddResource(const GURL& url,
+                   const std::string mime_type,
+                   const std::string headers,
+                   const std::string body) {
+    const char* document_template =
+        "Content-Type: $1\n"
+        "Content-Location: $2\n"
+        "$3"
+        "\n"
+        "$4";
+    AddResource(base::ReplaceStringPlaceholders(
+        document_template, {mime_type, url.spec(), headers, body}, nullptr));
   }
 
   void AddHtmlDocument(const GURL& url,
@@ -110,8 +138,6 @@ class MhtmlArchive {
  private:
   base::ScopedTempDir file_directory_;
   std::string content_;
-
-  DISALLOW_COPY_AND_ASSIGN(MhtmlArchive);
 };
 
 }  // namespace
@@ -136,9 +162,8 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeFound) {
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
 
-  // |is_mhtml_document| is confusing. It always returns false for subframe.
   EXPECT_TRUE(main_document->is_mhtml_document());
-  EXPECT_FALSE(sub_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
 
   // When the iframe's content is loaded from the MHTML archive, a successful
   // commit using the provided URL happens, even if the resource wasn't loaded
@@ -171,15 +196,14 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeNotFound) {
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
 
-  // |is_mhtml_document| is confusing. It always returns false for subframe.
   EXPECT_TRUE(main_document->is_mhtml_document());
-  EXPECT_FALSE(sub_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
 
   // This should commit as a failed navigation, but the browser side doesn't
   // have enough information to make that determination. On the renderer side,
   // there's no existing way to turn `CommitNavigation()` into
   // `CommitFailedNavigation()`.
-  // TODO(https://crbug.com/1112965): Fix this by implementing a MHTML
+  // TODO(crbug.com/40143262): Fix this by implementing a MHTML
   // URLLoaderFactory; then failure to find the resource can use the standard
   // error handling path.
   EXPECT_TRUE(iframe_navigation_observer.has_committed());
@@ -190,7 +214,7 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeNotFound) {
 
 // An MHTML document with an iframe using a data-URL. The data-URL is not
 // defined in the MHTML archive.
-// TODO(https://crbug.com/967307): Enable this test. It currently reaches a
+// TODO(crbug.com/40629273): Enable this test. It currently reaches a
 // DCHECK or timeout in release mode.
 IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeDataUrlNotFound) {
   MhtmlArchive mhtml_archive;
@@ -207,6 +231,9 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeDataUrlNotFound) {
       main_document->child_at(0)->current_frame_host();
   EXPECT_EQ(GURL("data:text/html,<iframe></iframe>"),
             sub_document->GetLastCommittedURL());
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
 
   // Check the iframe is properly loaded. EvalJs("document.body.innerHTML")
   // can't be used, because javascript is disabled. Instead, check it was able
@@ -234,6 +261,9 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeDataUrlFound) {
   EXPECT_EQ(GURL("data:text/html,<iframe></iframe>"),
             sub_document->GetLastCommittedURL());
 
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
+
   // Check the iframe is properly loaded. EvalJs("document.body.innerHTML")
   // can't be used, because javascript is disabled. Instead, check it was able
   // to load an iframe.
@@ -255,6 +285,9 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeAboutSrcdocNoFound) {
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
   EXPECT_TRUE(sub_document->GetLastCommittedURL().IsAboutSrcdoc());
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
 
   // Check the iframe is properly loaded. EvalJs("document.body.innerHTML")
   // can't be used, because javascript is disabled. Instead, check it was able
@@ -278,6 +311,9 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeAboutSrcdocFound) {
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
   EXPECT_TRUE(sub_document->GetLastCommittedURL().IsAboutSrcdoc());
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
 
   // Check the iframe is properly loaded. EvalJs("document.body.innerHTML")
   // can't be used, because javascript is disabled. Instead, check it was able
@@ -351,6 +387,11 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeAboutBlankFound) {
   ASSERT_EQ(1u, main_document->child_count());
   RenderFrameHostImpl* about_blank_document =
       main_document->child_at(0)->current_frame_host();
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  // TODO(arthursonzogni): This should be true here.
+  EXPECT_FALSE(about_blank_document->is_mhtml_document());
+
   // about:blank is loaded from the archive, so it has an iframe.
   // See https://crbug.com/969667
   ASSERT_EQ(1u, about_blank_document->child_count());
@@ -359,6 +400,10 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeAboutBlankFound) {
 // An MHTML document with an iframe trying to load a javascript URL.
 IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest,
                        IframeJavascriptUrlNotFound) {
+  // JS is allowed to execute when this feature is enabled.
+  if (base::FeatureList::IsEnabled(blink::features::kMHTML_Improvements)) {
+    return;
+  }
   MhtmlArchive mhtml_archive;
   mhtml_archive.AddHtmlDocument(
       GURL("http://example.com"),
@@ -372,17 +417,26 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest,
       mhtml_url.spec().c_str()));
 
   EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
-  console_observer.Wait();
+  ASSERT_TRUE(console_observer.Wait());
 
   RenderFrameHostImpl* main_document = main_frame_host();
   ASSERT_EQ(1u, main_document->child_count());
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+
+  // The |sub_document| is the initial empty document.
+  EXPECT_FALSE(sub_document->is_mhtml_document());
   EXPECT_EQ(GURL(), sub_document->GetLastCommittedURL());
 }
 
 // An MHTML document with an iframe trying to load a javascript URL. The
 IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeJavascriptUrlFound) {
+  // JS is allowed to execute when this feature is enabled.
+  if (base::FeatureList::IsEnabled(blink::features::kMHTML_Improvements)) {
+    return;
+  }
   MhtmlArchive mhtml_archive;
   mhtml_archive.AddHtmlDocument(
       GURL("http://example.com"),
@@ -398,15 +452,66 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeJavascriptUrlFound) {
       mhtml_url.spec().c_str()));
 
   EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
-  console_observer.Wait();
+  ASSERT_TRUE(console_observer.Wait());
 
   RenderFrameHostImpl* main_document = main_frame_host();
   ASSERT_EQ(1u, main_document->child_count());
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+
+  // The |sub_document| is the initial empty document.
+  EXPECT_FALSE(sub_document->is_mhtml_document());
   EXPECT_EQ(GURL(), sub_document->GetLastCommittedURL());
 
   EXPECT_EQ(0u, sub_document->child_count());
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest,
+                       MhtmlSubframeSameDocumentOriginSpoof) {
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(
+      GURL("http://example.com"),
+      "<iframe src=\"http://example.com/subframe.html\"></iframe>");
+  mhtml_archive.AddHtmlDocument(GURL("http://example.com/subframe.html"),
+                                "subframe content");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  RenderFrameHostImpl* main_document = main_frame_host();
+  ASSERT_EQ(1u, main_document->child_count());
+  RenderFrameHostImpl* sub_document =
+      main_document->child_at(0)->current_frame_host();
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->GetLastCommittedOrigin().opaque());
+
+  // Simulate a compromised renderer sending a malicious
+  // DidCommitSameDocumentNavigation IPC with a non-opaque origin.
+  auto params = mojom::DidCommitProvisionalLoadParams::New();
+  params->url = GURL("https://victim.example/#poc");
+  params->origin = url::Origin::Create(GURL("https://victim.example"));
+  params->navigation_token = base::UnguessableToken::Create();
+  // Fill in other required params to avoid other validation failures.
+  params->did_create_new_entry = false;
+  params->method = "GET";
+  params->page_state = blink::PageState::CreateFromURL(params->url);
+  params->transition = ui::PAGE_TRANSITION_AUTO_SUBFRAME;
+  params->referrer = blink::mojom::Referrer::New();
+
+  auto same_doc_params = mojom::DidCommitSameDocumentNavigationParams::New();
+
+  // We expect the renderer to be killed.
+  RenderProcessHostBadIpcMessageWaiter kill_waiter(sub_document->GetProcess());
+
+  static_cast<mojom::FrameHost*>(sub_document)
+      ->DidCommitSameDocumentNavigation(std::move(params),
+                                        std::move(same_doc_params));
+
+  EXPECT_EQ(bad_message::RFH_INVALID_ORIGIN_ON_COMMIT, kill_waiter.Wait());
 }
 
 // Load iframe with the content-ID scheme. The resource is found in the MHTML
@@ -427,6 +532,9 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeContentIdFound) {
   ASSERT_EQ(1u, main_document->child_count());
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
 
   EXPECT_EQ(GURL("cid:iframe"), sub_document->GetLastCommittedURL());
   EXPECT_TRUE(iframe_navigation.has_committed());
@@ -455,11 +563,14 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, IframeContentIdNotFound) {
   RenderFrameHostImpl* sub_document =
       main_document->child_at(0)->current_frame_host();
 
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
+
   // This should commit as a failed navigation, but the browser side doesn't
   // have enough information to make that determination. On the renderer side,
   // there's no existing way to turn `CommitNavigation()` into
   // `CommitFailedNavigation()`.
-  // TODO(https://crbug.com/1112965): Fix this by implementing a MHTML
+  // TODO(crbug.com/40143262): Fix this by implementing a MHTML
   // URLLoaderFactory; then failure to find the resource can use the standard
   // error handling path.
   EXPECT_EQ(GURL("cid:iframe"), sub_document->GetLastCommittedURL());
@@ -482,20 +593,64 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, CspFrameAncestor) {
 
   EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
 
-  RenderFrameHostImpl* main_frame = main_frame_host();
-  ASSERT_EQ(1u, main_frame->child_count());
-  RenderFrameHostImpl* sub_frame =
-      main_frame->child_at(0)->current_frame_host();
+  RenderFrameHostImpl* main_document = main_frame_host();
+  ASSERT_EQ(1u, main_document->child_count());
+  RenderFrameHostImpl* sub_document =
+      main_document->child_at(0)->current_frame_host();
+
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  EXPECT_TRUE(sub_document->is_mhtml_document());
 
   // Currently, frame-ancestors is not enforced. See https://crbug.com/969711.
   // Check that the iframe is properly loaded. EvalJs("document.body.innerHTML")
   // can't be used, because javascript is disabled. Instead, check it was able
   // to load an iframe.
-  ASSERT_EQ(1u, sub_frame->child_count());
+  ASSERT_EQ(1u, sub_document->child_count());
+}
+
+// Tests CSP embedded enforcement blocking an iframes.
+// Regression test for https://crbug.com/1112965
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, CSPEmbeddedEnforcement) {
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(
+      GURL("http://a.com"),
+      "<iframe csp=\"sandbox\" src=\"http://a.com/\"></iframe>"
+      "<iframe csp=\"sandbox\" src=\"http://b.com/\"></iframe>"
+      "<iframe csp=\"sandbox\" src=\"http://b.com/allow\"></iframe>");
+  mhtml_archive.AddHtmlDocument(GURL("http://a.com/"), "");
+  mhtml_archive.AddHtmlDocument(GURL("http://b.com/"), "");
+  mhtml_archive.AddHtmlDocument(GURL("http://b.com/allow"), "Allow-CSP-From: *",
+                                "");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  RenderFrameHostImpl* main_document = main_frame_host();
+  ASSERT_EQ(3u, main_document->child_count());
+  RenderFrameHostImpl* rfh_1 = main_document->child_at(0)->current_frame_host();
+  RenderFrameHostImpl* rfh_2 = main_document->child_at(0)->current_frame_host();
+  RenderFrameHostImpl* rfh_3 = main_document->child_at(0)->current_frame_host();
+
+  // Same-origin without Allow-CSP-From:* => response allowed.
+  EXPECT_FALSE(rfh_1->IsErrorDocument());
+
+  // Cross-origin without Allow-CSP-From:* => response blocked;
+  // TODO(crbug.com/40143262) Add support for CSPEE in MHTML documents.
+  // An error page should be displayed here.
+  EXPECT_FALSE(rfh_2->IsErrorDocument());
+
+  // Cross-origin with Allow-CSP-From:* => response allowed.
+  EXPECT_FALSE(rfh_3->IsErrorDocument());
 }
 
 IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest,
                        SameDocumentNavigationWhileLoading) {
+  if (ShouldCreateNewHostForAllFrames()) {
+    GTEST_SKIP() << "When RenderDocument is enabled, the "
+                    "same-document navigation won't cancel the cross-document "
+                    "navigation due to navigation queueing";
+  }
+
   // Load a MHTML archive normally so there's a renderer process for file://.
   MhtmlArchive mhtml_archive;
   mhtml_archive.AddHtmlDocument(GURL("http://example.com/main"),
@@ -527,7 +682,7 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest,
   mojo::ScopedDataPipeConsumerHandle consumer;
   mojo::ScopedDataPipeProducerHandle producer;
   ASSERT_EQ(MOJO_RESULT_OK,
-            mojo::CreateDataPipe(/* options */ nullptr, &producer, &consumer));
+            mojo::CreateDataPipe(/* options */ nullptr, producer, consumer));
   using std::swap;
   swap(request->mutable_response_body_for_testing(), consumer);
 
@@ -548,8 +703,8 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest,
 
   // While archive loading is still in progress and nothing has been committed,
   // trigger a same-document navigation.
-  url::Replacements<char> replacements;
-  replacements.SetRef("fragment", url::Component(0, strlen("fragment")));
+  GURL::Replacements replacements;
+  replacements.SetRefStr("fragment");
   const GURL mhtml_url_with_fragment =
       mhtml_url.ReplaceComponents(replacements);
   // TODO(dcheng): Using NavigateToURL() here seems to cause the test to hang.
@@ -610,6 +765,261 @@ IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest,
   web_contents()->GetController().GoBack();
   WaitForLoadStop(web_contents());
   EXPECT_TRUE(main_frame_host()->is_mhtml_document());
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, SandboxedIframe) {
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(GURL("http://a.com"), "", R"(
+    <iframe src="http://a.com/unsandboxed.html"        ></iframe>
+    <iframe src="http://a.com/sandboxed.html"   sandbox></iframe>
+  )");
+  mhtml_archive.AddHtmlDocument(GURL("http://a.com/sandboxed.html"), "");
+  mhtml_archive.AddHtmlDocument(GURL("http://a.com/unsandboxed.html"), "");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  RenderFrameHostImpl* rfh_main = main_frame_host();
+  ASSERT_EQ(2u, rfh_main->child_count());
+  RenderFrameHostImpl* rfh_unsandboxed =
+      rfh_main->child_at(0)->current_frame_host();
+  RenderFrameHostImpl* rfh_sandboxed =
+      rfh_main->child_at(1)->current_frame_host();
+
+  auto strict_sandbox = network::mojom::WebSandboxFlags::kAll;
+  auto default_mhtml_sandbox =
+      ~network::mojom::WebSandboxFlags::kPopups &
+      ~network::mojom::WebSandboxFlags::kPropagatesToAuxiliaryBrowsingContexts;
+
+  if (base::FeatureList::IsEnabled(blink::features::kMHTML_Improvements)) {
+    default_mhtml_sandbox &= ~network::mojom::WebSandboxFlags::kScripts;
+  }
+  EXPECT_EQ(default_mhtml_sandbox, rfh_main->active_sandbox_flags());
+  EXPECT_EQ(default_mhtml_sandbox, rfh_unsandboxed->active_sandbox_flags());
+  EXPECT_EQ(strict_sandbox, rfh_sandboxed->active_sandbox_flags());
+}
+
+// Regression test for https://crbug.com/1155862.
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, DataIframe) {
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(
+      GURL("http://127.0.0.1/starte.html"), "",
+      R"( <iframe src="http://8.8.8.8/test.html"></iframe>
+          <iframe src="data:text/html,blah1"></iframe>
+          <iframe src="about:blank?foo=123"></iframe> )");
+  mhtml_archive.AddHtmlDocument(GURL("http://8.8.8.8/test.html"), "", R"(
+          <iframe src="data:text/html,blah2"></iframe>
+          <iframe src="about:blank?foo=123"></iframe> )");
+  mhtml_archive.AddHtmlDocument(GURL("about:blank?foo=123"), "", "foo");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+
+  // The main test verification is that the navigation below succeeds (without
+  // crashing in NavigationRequest::GetOriginForURLLoaderFactory).
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  // All MHTML frames should have an opaque origin.
+  shell()->web_contents()->GetPrimaryMainFrame()->ForEachRenderFrameHost(
+      [](RenderFrameHost* frame) {
+        EXPECT_TRUE(frame->GetLastCommittedOrigin().opaque())
+            << "frame->GetLastCommittedURL() = "
+            << frame->GetLastCommittedURL();
+      });
+}
+
+// Regression test for https://crbug.com/1168249.
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, PreloadedTextTrack) {
+  // The test uses a cross-site subframe, so any HTTP requests that reach the
+  // NetworkService will have `network::ResourceRequest::request_initiator` with
+  // a tuple (or precursor tuple in case of opaque origins expected for MHTML
+  // documents) that is incompatible with `request_initiator_origin_lock` in
+  // `network::mojom::URLLoaderFactoryParams`.
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(
+      GURL("http://main.com/main.html"), "",
+      R"( <iframe src="http://subframe.com/subframe.html"></iframe> )");
+  mhtml_archive.AddHtmlDocument(
+      GURL("http://subframe.com/subframe.html"), "",
+      R"( <link rel="preload" href="http://resource.com/track" as="track"> )");
+  mhtml_archive.AddResource(GURL("http://resource.com/track"), "text/vtt", "",
+                            "fake text track body");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  // The main verification is that ResourceFetcher::StartLoad didn't reach
+  // NOTREACHED assertion (against HTTP resource loads triggered from MHTML
+  // documents). To detect such NOTREACHED (via renderer crash) it is sufficient
+  // for the test to wait for DidStopLoading notification (which is done
+  // underneath NavigateToURL called above).
+}
+
+// MHTML document with a base URL of |kUnreachableWebDataURL| should not be
+// treated as an error page.
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlBrowserTest, ErrorBaseURL) {
+  NavigationController& controller = web_contents()->GetController();
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+
+  // Prepare an MHTML document with the base URL set to the error page URL.
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(GURL(kUnreachableWebDataURL), "foo");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+
+  // Navigate to the MHTML document.
+  FrameNavigateParamsCapturer params_capturer(root);
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+  params_capturer.Wait();
+
+  // Check that the RenderFrameHost, NavigationRequest and NavigationEntry all
+  // agree that the document is not an error page.
+  RenderFrameHostImpl* main_document = main_frame_host();
+  EXPECT_FALSE(main_document->IsErrorDocument());
+  EXPECT_FALSE(params_capturer.is_error_page());
+  EXPECT_NE(PAGE_TYPE_ERROR, controller.GetLastCommittedEntry()->GetPageType());
+}
+
+class NavigationMhtmlFragmentBrowserTest : public NavigationMhtmlBrowserTest {
+ public:
+  NavigationMhtmlFragmentBrowserTest() {
+    scoped_feature_list_.InitAndEnableFeature(
+        blink::features::kTreatMhtmlInitialDocumentLoadsAsCrossDocument);
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+// Verifies that the first navigation to about:blank#fragment inside an MHTML
+// iframe is cross-document (RFH swap / opaque origin) and that a subsequent
+// fragment navigation is same-document (no RFH swap, origin unchanged).
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlFragmentBrowserTest,
+                       MhtmlAboutBlankFragment_FirstIsCrossDoc_RestAreSameDoc) {
+  MhtmlArchive mhtml;
+  mhtml.AddHtmlDocument(GURL("http://example.com"),
+                        "<iframe src=\"about:blank#foo\"></iframe>");
+  const GURL mhtml_url = mhtml.Write("index.mhtml");
+
+  NavigationHandleObserver first_nav(web_contents(), GURL("about:blank#foo"));
+  ASSERT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  RenderFrameHostImpl* main_rfh = main_frame_host();
+  ASSERT_EQ(1u, main_rfh->child_count());
+  base::WeakPtr<RenderFrameHostImpl> child_rfh =
+      main_rfh->child_at(0)->current_frame_host()->GetWeakPtr();
+  ASSERT_TRUE(child_rfh);
+  const url::Origin first_origin = child_rfh->GetLastCommittedOrigin();
+
+  // The initial nav must be cross-document since it uses a new opaque origin.
+  EXPECT_TRUE(first_nav.has_committed());
+  EXPECT_FALSE(first_nav.is_same_document());
+  EXPECT_TRUE(first_origin.opaque());
+
+  // Same document fragment navigation.
+  NavigationHandleObserver second_nav(web_contents(), GURL("about:blank#bar"));
+  EXPECT_TRUE(ExecJs(child_rfh, "location.href = 'about:blank#bar';"));
+  ASSERT_TRUE(WaitForLoadStop(web_contents()));
+
+  base::WeakPtr<RenderFrameHostImpl> after_rfh =
+      main_rfh->child_at(0)->current_frame_host()->GetWeakPtr();
+  ASSERT_TRUE(after_rfh);
+
+  // The second fragment navigation is same-document and doesn't change RFH.
+  EXPECT_EQ(child_rfh.get(), after_rfh.get());
+  EXPECT_TRUE(second_nav.has_committed());
+  EXPECT_TRUE(second_nav.is_same_document());
+  EXPECT_EQ(first_origin, after_rfh->GetLastCommittedOrigin());
+}
+
+class NavigationMhtmlFencedFrameBrowserTest
+    : public NavigationMhtmlBrowserTest {
+ public:
+  NavigationMhtmlFencedFrameBrowserTest() {
+    scoped_feature_list_.InitWithFeaturesAndParameters(
+        {{blink::features::kFencedFrames, {}}}, /*disabled_features=*/{});
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlFencedFrameBrowserTest,
+                       MhtmlCannotCreateFencedFrame) {
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(
+      GURL("http://example.com"),
+      "<fencedframe src=\"http://example.com/found.html\"></fencedframe>");
+  mhtml_archive.AddHtmlDocument(GURL("http://example.com/found.html"),
+                                "<iframe></iframe>");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  RenderFrameHostImpl* main_document = main_frame_host();
+  EXPECT_TRUE(main_document->is_mhtml_document());
+  // Ensure nothing was created for the fencedframe element. Only a single
+  // RenderFrameHost, the `main_document`, should exist.
+  int num_documents = 0;
+  main_document->ForEachRenderFrameHostImpl(
+      [&](RenderFrameHostImpl* rfh) { num_documents++; });
+  EXPECT_EQ(1, num_documents);
+}
+
+// Helper test fixture to enable `kMHTML_Improvements`. Enabling this feature
+// allows script execution in MHTML documents, which is necessary for the tests
+// to execute the JavaScript payload that triggers the Mojo IPC request.
+class NavigationMhtmlImprovementsBrowserTest
+    : public NavigationMhtmlBrowserTest {
+ public:
+  NavigationMhtmlImprovementsBrowserTest() {
+    scoped_feature_list_.InitAndEnableFeature(
+        blink::features::kMHTML_Improvements);
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlImprovementsBrowserTest,
+                       MhtmlBlocksWebSocket) {
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(GURL("http://example.com"), "MHTML content");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  RenderFrameHostImpl* main_document = main_frame_host();
+  EXPECT_TRUE(main_document->is_mhtml_document());
+
+  RenderProcessHostBadMojoMessageWaiter kill_waiter(
+      main_document->GetProcess());
+
+  ExecuteScriptAsync(main_document, "new WebSocket('ws://127.0.0.1');");
+
+  EXPECT_EQ(
+      "Received bad user message: WebSockets are not allowed in MHTML "
+      "documents.",
+      kill_waiter.Wait());
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationMhtmlImprovementsBrowserTest,
+                       MhtmlBlocksWebTransport) {
+  MhtmlArchive mhtml_archive;
+  mhtml_archive.AddHtmlDocument(GURL("http://example.com"), "MHTML content");
+  GURL mhtml_url = mhtml_archive.Write("index.mhtml");
+  EXPECT_TRUE(NavigateToURL(shell(), mhtml_url));
+
+  RenderFrameHostImpl* main_document = main_frame_host();
+  EXPECT_TRUE(main_document->is_mhtml_document());
+
+  RenderProcessHostBadMojoMessageWaiter kill_waiter(
+      main_document->GetProcess());
+
+  ExecuteScriptAsync(main_document, "new WebTransport('https://127.0.0.1');");
+
+  EXPECT_EQ(
+      "Received bad user message: WebTransport is not allowed in MHTML "
+      "documents.",
+      kill_waiter.Wait());
 }
 
 }  // namespace content

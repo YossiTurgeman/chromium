@@ -34,8 +34,8 @@
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/core_probe_sink.h"
 #include "third_party/blink/renderer/core/inspector/inspector_session_state.h"
-#include "third_party/blink/renderer/core/inspector/protocol/Protocol.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/core/inspector/protocol/protocol.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -63,8 +63,6 @@ template <typename DomainMetainfo>
 class InspectorBaseAgent : public InspectorAgent,
                            public DomainMetainfo::BackendClass {
  public:
-  ~InspectorBaseAgent() override = default;
-
   void Init(CoreProbeSink* instrumenting_agents,
             protocol::UberDispatcher* dispatcher,
             InspectorSessionState* session_state) override {
@@ -93,7 +91,9 @@ class InspectorBaseAgent : public InspectorAgent,
 
  protected:
   InspectorBaseAgent() : agent_state_(DomainMetainfo::domainName) {}
-
+  ~InspectorBaseAgent() override {
+    CHECK(!frontend_);  // Ensure Dispose() has been called.
+  }
   typename DomainMetainfo::FrontendClass* GetFrontend() const {
     return frontend_.get();
   }

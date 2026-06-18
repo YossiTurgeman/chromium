@@ -1,9 +1,10 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chromecast/base/chromecast_switches.h"
 
+#include "base/check_op.h"
 #include "base/command_line.h"
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
@@ -21,17 +22,27 @@ const char kSwitchValueFalse[] = "false";
 // Default is "https://clients2.google.com/cr/staging_report" for non prod.
 const char kCrashServerUrl[] = "crash-server-url";
 
+// Switch to enable daemon-mode in crash_uploader.
+const char kCrashUploaderDaemon[] = "daemon";
+
+// Switch to specify product name used when crash_uploader uploads crash report.
+// Default to "Eureka" if not specified.
+const char kCrashReportProductName[] = "product-name";
+
 // Switch to disable Crash reporting
 const char kDisableCrashReporter[] = "disable-crash-reporter";
+
+// Switch to disable Crashpad forwarding
+const char kDisableCrashpadForwarding[] = "disable-crashpad-forwarding";
+
+// Switch to dumpstate binary path.
+const char kDumpstateBinPath[] = "dumpstate-path";
 
 // Enable file accesses. It should not be enabled for most Cast devices.
 const char kEnableLocalFileAccesses[] = "enable-local-file-accesses";
 
 // Override the URL to which metrics logs are sent for debugging.
 const char kOverrideMetricsUploadUrl[] = "override-metrics-upload-url";
-
-// Disable features that require WiFi management.
-const char kNoWifi[] = "no-wifi";
 
 // Only connect to WLAN interfaces.
 const char kRequireWlan[] = "require-wlan";
@@ -186,6 +197,9 @@ const char kBackGestureHorizontalThreshold[] =
 // Whether to enable detection and dispatch of a 'drag from the top' gesture.
 const char kEnableTopDragGesture[] = "enable-top-drag-gesture";
 
+// Whether in hospitality mode
+const char kManagedMode[] = "managed-mode";
+
 // Endpoint that the mixer service listens on. This is a path for a UNIX domain
 // socket (default is /tmp/mixer-service).
 const char kMixerServiceEndpoint[] = "mixer-service-endpoint";
@@ -204,6 +218,17 @@ extern const char kCastMemoryPressureModerateFraction[] =
 // of the media service.
 const char kDisableMojoRenderer[] = "disable-mojo-renderer";
 
+// Forces the use of the mojo renderer. In other words, the renderer process
+// will run a mojo renderer and CastRenderer will run in the browser process.
+// This is necessary for devices that use CastRenderer.
+//
+// For this flag to have any effect, note that you must build the cast web
+// runtime with the gn arg "enable_cast_renderer" set to true, and "renderer"
+// must be included in the list "mojo_media_services".
+//
+// This flag has lower priority than "disable-mojo-renderer".
+const char kForceMojoRenderer[] = "force-mojo-renderer";
+
 // Per-product customization of force update UI remote url, also used in
 // testing.
 const char kForceUpdateRemoteUrl[] = "force-update-remote-url";
@@ -211,6 +236,26 @@ const char kForceUpdateRemoteUrl[] = "force-update-remote-url";
 // System info file path. Default is an empty string, which
 // means that dummy info will be used.
 const char kSysInfoFilePath[] = "sys-info-file-path";
+
+// Defer initialization of the base::FeatureList in an external service process,
+// allowing the process to include its own non-default features.
+const char kDeferFeatureList[] = "defer-feature-list";
+
+// Rather than share a common pref config file with cast_service, use a
+// dedicated browser pref config file. This must be set when `cast_browser` is
+// running in a different process from `cast_service`.
+const char kUseCastBrowserPrefConfig[] = "use-cast-browser-pref-config";
+
+// Creates the service broker inside of this process. Only one process should
+// host the service broker.
+const char kInProcessBroker[] = "in-process-broker";
+
+// Command-line arg to change the Unix domain socket path to connect to the
+// Cast Mojo broker.
+const char kCastMojoBrokerPath[] = "cast-mojo-broker-path";
+
+// Allows specifying the base::ASSETS dir for Cast via commandline.
+const char kCastAssetsDir[] = "cast-assets-dir";
 
 }  // namespace switches
 

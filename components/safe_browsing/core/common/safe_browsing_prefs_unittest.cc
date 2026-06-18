@@ -1,29 +1,30 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/safe_browsing/core/common/safe_browsing_prefs.h"
+
 #include <string>
-#include <vector>
 
 #include "base/command_line.h"
-#include "base/strings/string_piece.h"
+#include "base/logging.h"
 #include "base/strings/string_util.h"
 #include "base/test/scoped_feature_list.h"
+#include "base/values.h"
 #include "build/build_config.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/testing_pref_service.h"
-#include "components/safe_browsing/core/common/safe_browsing_prefs.h"
-#include "components/safe_browsing/core/common/test_task_environment.h"
-#include "components/safe_browsing/core/features.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 
 namespace safe_browsing {
 
+using enum ExtendedReportingLevel;
+
 class SafeBrowsingPrefsTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    task_environment_ = CreateTestTaskEnvironment();
     prefs_.registry()->RegisterBooleanPref(prefs::kSafeBrowsingEnabled, true);
     prefs_.registry()->RegisterBooleanPref(prefs::kSafeBrowsingEnhanced, false);
     prefs_.registry()->RegisterBooleanPref(
@@ -35,7 +36,11 @@ class SafeBrowsingPrefsTest : public ::testing::Test {
     prefs_.registry()->RegisterListPref(prefs::kPasswordProtectionLoginURLs);
     prefs_.registry()->RegisterBooleanPref(
         prefs::kSafeBrowsingExtendedReportingOptInAllowed, true);
-    prefs_.registry()->RegisterListPref(prefs::kSafeBrowsingWhitelistDomains);
+    prefs_.registry()->RegisterListPref(prefs::kSafeBrowsingAllowlistDomains);
+    prefs_.registry()->RegisterBooleanPref(
+        prefs::kHashPrefixRealTimeChecksAllowedByPolicy, true);
+    prefs_.registry()->RegisterBooleanPref(
+        prefs::kEnhancedProtectionEnabledViaTailoredSecurity, false);
   }
 
   void ResetPrefs(bool scout_reporting) {
@@ -55,20 +60,53 @@ class SafeBrowsingPrefsTest : public ::testing::Test {
               prefs_.HasPrefPath(prefs::kSafeBrowsingScoutReportingEnabled));
   }
   TestingPrefServiceSimple prefs_;
-
- private:
-  std::unique_ptr<base::test::TaskEnvironment> task_environment_;
 };
 
-// TODO(crbug.com/881476) disabled for flaky crashes.
-#if defined(OS_WIN)
-#define MAYBE_GetSafeBrowsingExtendedReportingLevel \
-  DISABLED_GetSafeBrowsingExtendedReportingLevel
-#else
-#define MAYBE_GetSafeBrowsingExtendedReportingLevel \
-  GetSafeBrowsingExtendedReportingLevel
-#endif
-TEST_F(SafeBrowsingPrefsTest, MAYBE_GetSafeBrowsingExtendedReportingLevel) {
+TEST_F(SafeBrowsingPrefsTest,
+       TailoredSecuritySyncFlowLastRunTimeIsInitialized) {
+  TestingPrefServiceSimple prefs;
+  RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(prefs.GetTime(prefs::kTailoredSecuritySyncFlowLastRunTime),
+            base::Time());
+}
+
+TEST_F(SafeBrowsingPrefsTest,
+       TailoredSecuritySyncLastUserInteractionStateIsInitialized) {
+  TestingPrefServiceSimple prefs;
+  RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(
+      prefs.GetValue(prefs::kTailoredSecuritySyncFlowLastUserInteractionState),
+      TailoredSecurityRetryState::UNSET);
+}
+
+TEST_F(SafeBrowsingPrefsTest,
+       TailoredSecurityNextSyncFlowTimestampIsInitialized) {
+  TestingPrefServiceSimple prefs;
+  RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(prefs.GetTime(prefs::kTailoredSecurityNextSyncFlowTimestamp),
+            base::Time());
+}
+
+TEST_F(SafeBrowsingPrefsTest, TailoredSecuritySyncFlowRetryStateIsInitialized) {
+  TestingPrefServiceSimple prefs;
+  RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(prefs.GetValue(prefs::kTailoredSecuritySyncFlowRetryState),
+            TailoredSecurityRetryState::UNSET);
+}
+
+TEST_F(SafeBrowsingPrefsTest,
+       TailoredSecuritySyncUserObservedOutcomeUnsetTimestampIsInitialized) {
+  TestingPrefServiceSimple prefs;
+  RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(prefs.GetTime(
+                prefs::kTailoredSecuritySyncFlowObservedOutcomeUnsetTimestamp),
+            base::Time());
+}
+
+TEST_F(SafeBrowsingPrefsTest, GetSafeBrowsingExtendedReportingLevel) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      safe_browsing::kExtendedReportingRemovePrefDependency);
   // By Default, extended reporting is off.
   EXPECT_EQ(SBER_LEVEL_OFF, GetExtendedReportingLevel(prefs_));
 
@@ -80,29 +118,48 @@ TEST_F(SafeBrowsingPrefsTest, MAYBE_GetSafeBrowsingExtendedReportingLevel) {
   EXPECT_EQ(SBER_LEVEL_OFF, GetExtendedReportingLevel(prefs_));
 }
 
-// TODO(crbug.com/881476) disabled for flaky crashes.
-#if defined(OS_WIN)
-#define MAYBE_VerifyMatchesPasswordProtectionLoginURL \
-  DISABLED_VerifyMatchesPasswordProtectionLoginURL
-#else
-#define MAYBE_VerifyMatchesPasswordProtectionLoginURL \
-  VerifyMatchesPasswordProtectionLoginURL
-#endif
-TEST_F(SafeBrowsingPrefsTest, MAYBE_VerifyMatchesPasswordProtectionLoginURL) {
+TEST_F(SafeBrowsingPrefsTest,
+       GetSafeBrowsingExtendedReportingLevelWhenSBERDeprecated) {
+  // When enhanced protection is on and SBER deprecation flag is on, the
+  // reporting level is ENHANCED_PROTECTION.
+  prefs_.SetBoolean(prefs::kSafeBrowsingEnhanced, true);
+  base::test::ScopedFeatureList scoped_features_;
+  scoped_features_.InitAndEnableFeature(
+      safe_browsing::kExtendedReportingRemovePrefDependency);
+  EXPECT_EQ(SBER_LEVEL_ENHANCED_PROTECTION, GetExtendedReportingLevel(prefs_));
+}
+
+TEST_F(SafeBrowsingPrefsTest, VerifyMatchesPasswordProtectionLoginURL) {
   GURL url("https://mydomain.com/login.html#ref?username=alice");
+  GURL chrome_url("chrome://os-settings");
   EXPECT_FALSE(prefs_.HasPrefPath(prefs::kPasswordProtectionLoginURLs));
   EXPECT_FALSE(MatchesPasswordProtectionLoginURL(url, prefs_));
-
+#if BUILDFLAG(IS_CHROMEOS)
+  EXPECT_TRUE(MatchesPasswordProtectionLoginURL(chrome_url, prefs_));
+#endif
   base::ListValue login_urls;
-  login_urls.AppendString("https://otherdomain.com/login.html");
-  prefs_.Set(prefs::kPasswordProtectionLoginURLs, login_urls);
+  login_urls.Append("https://otherdomain.com/login.html");
+  prefs_.SetList(prefs::kPasswordProtectionLoginURLs, login_urls.Clone());
   EXPECT_TRUE(prefs_.HasPrefPath(prefs::kPasswordProtectionLoginURLs));
   EXPECT_FALSE(MatchesPasswordProtectionLoginURL(url, prefs_));
 
-  login_urls.AppendString("https://mydomain.com/login.html");
-  prefs_.Set(prefs::kPasswordProtectionLoginURLs, login_urls);
+  base::ListValue login_urls1;
+  login_urls1.Append("https://mydomain.com/login.html");
+  prefs_.SetList(prefs::kPasswordProtectionLoginURLs, std::move(login_urls1));
   EXPECT_TRUE(prefs_.HasPrefPath(prefs::kPasswordProtectionLoginURLs));
   EXPECT_TRUE(MatchesPasswordProtectionLoginURL(url, prefs_));
+
+  base::ListValue login_urls2;
+  login_urls2.Append("chrome://os-settings");
+  prefs_.SetList(prefs::kPasswordProtectionLoginURLs, std::move(login_urls2));
+  EXPECT_TRUE(prefs_.HasPrefPath(prefs::kPasswordProtectionLoginURLs));
+  EXPECT_TRUE(MatchesPasswordProtectionLoginURL(chrome_url, prefs_));
+
+  base::ListValue login_urls3;
+  login_urls3.Append("https://mylogin.com/login");
+  GURL target_url("https://mylogin.com/login/");
+  prefs_.SetList(prefs::kPasswordProtectionLoginURLs, std::move(login_urls3));
+  EXPECT_TRUE(MatchesPasswordProtectionLoginURL(target_url, prefs_));
 }
 
 TEST_F(SafeBrowsingPrefsTest,
@@ -127,27 +184,34 @@ TEST_F(SafeBrowsingPrefsTest, EnhancedProtection) {
   EXPECT_FALSE(IsEnhancedProtectionEnabled(prefs_));
 
   SetEnhancedProtectionPrefForTests(&prefs_, true);
+  EXPECT_TRUE(IsEnhancedProtectionEnabled(prefs_));
   {
-    base::test::ScopedFeatureList scoped_feature_list;
-    scoped_feature_list.InitAndEnableFeature(kEnhancedProtection);
-    EXPECT_TRUE(IsEnhancedProtectionEnabled(prefs_));
-  }
-  {
-    base::test::ScopedFeatureList scoped_feature_list;
-    scoped_feature_list.InitAndEnableFeature(kEnhancedProtection);
     prefs_.SetBoolean(prefs::kSafeBrowsingEnabled, false);
     EXPECT_FALSE(IsEnhancedProtectionEnabled(prefs_));
   }
 }
 
-TEST_F(SafeBrowsingPrefsTest, IsExtendedReportingPolicyManaged) {
-  // This test checks that manipulating SBEROptInAllowed and the management
-  // state of SBER behaves as expected. Below, we describe what should happen
-  // to the results of IsExtendedReportingPolicyManaged and
-  // IsExtendedReportingOptInAllowed.
+TEST_F(SafeBrowsingPrefsTest, InitializesEsbProtegoPingWithTokenLastLogTime) {
+  TestingPrefServiceSimple prefs;
+  safe_browsing::RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(
+      prefs.GetTime(prefs::kSafeBrowsingEsbProtegoPingWithTokenLastLogTime),
+      base::Time());
+}
 
-  // Confirm default state, SBER should be disabled, OptInAllowed should
-  // be enabled, and SBER is not managed.
+TEST_F(SafeBrowsingPrefsTest,
+       InitializesEsbProtegoPingWithoutTokenLastLogTime) {
+  TestingPrefServiceSimple prefs;
+  safe_browsing::RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(
+      prefs.GetTime(prefs::kSafeBrowsingEsbProtegoPingWithoutTokenLastLogTime),
+      base::Time());
+}
+
+TEST_F(SafeBrowsingPrefsTest, IsExtendedReportingPolicyManaged) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndDisableFeature(
+      kExtendedReportingRemovePrefDependency);
   EXPECT_FALSE(IsExtendedReportingEnabled(prefs_));
   EXPECT_TRUE(IsExtendedReportingOptInAllowed(prefs_));
   EXPECT_FALSE(IsExtendedReportingPolicyManaged(prefs_));
@@ -175,23 +239,122 @@ TEST_F(SafeBrowsingPrefsTest, IsExtendedReportingPolicyManaged) {
   EXPECT_TRUE(IsExtendedReportingOptInAllowed(prefs_));
 }
 
-TEST_F(SafeBrowsingPrefsTest, VerifyIsURLWhitelistedByPolicy) {
-  GURL target_url("https://www.foo.com");
-  // When PrefMember is null, URL is not whitelisted.
-  EXPECT_FALSE(IsURLWhitelistedByPolicy(target_url, nullptr));
+TEST_F(SafeBrowsingPrefsTest, IsSafeBrowsingPolicyManaged_ForESB) {
+  // This test checks that manipulating ESB and the management state of ESB
+  // behaves as expected.
+  EXPECT_FALSE(IsSafeBrowsingPolicyManaged(prefs_));
 
-  EXPECT_FALSE(prefs_.HasPrefPath(prefs::kSafeBrowsingWhitelistDomains));
-  base::ListValue whitelisted_domains;
-  whitelisted_domains.AppendString("foo.com");
-  prefs_.Set(prefs::kSafeBrowsingWhitelistDomains, whitelisted_domains);
-  StringListPrefMember string_list_pref;
-  string_list_pref.Init(prefs::kSafeBrowsingWhitelistDomains, &prefs_);
-  EXPECT_TRUE(IsURLWhitelistedByPolicy(target_url, prefs_));
-  EXPECT_TRUE(IsURLWhitelistedByPolicy(target_url, &string_list_pref));
+  // Make the ESB pref managed and ensure that the pref gets the
+  // expected value.
+  prefs_.SetManagedPref(prefs::kSafeBrowsingEnhanced,
+                        std::make_unique<base::Value>(true));
+  EXPECT_TRUE(prefs_.IsManagedPreference(prefs::kSafeBrowsingEnhanced));
+  EXPECT_TRUE(IsSafeBrowsingPolicyManaged(prefs_));
 
-  GURL not_whitelisted_url("https://www.bar.com");
-  EXPECT_FALSE(IsURLWhitelistedByPolicy(not_whitelisted_url, prefs_));
-  EXPECT_FALSE(
-      IsURLWhitelistedByPolicy(not_whitelisted_url, &string_list_pref));
+  // Remove the managed pref.
+  prefs_.RemoveManagedPref(prefs::kSafeBrowsingEnhanced);
+  EXPECT_FALSE(IsSafeBrowsingPolicyManaged(prefs_));
 }
+
+TEST_F(SafeBrowsingPrefsTest, VerifyIsURLAllowlistedByPolicy) {
+  GURL target_url("https://www.foo.com");
+
+  EXPECT_FALSE(prefs_.HasPrefPath(prefs::kSafeBrowsingAllowlistDomains));
+  base::ListValue allowlisted_domains;
+  allowlisted_domains.Append("foo.com");
+  prefs_.SetList(prefs::kSafeBrowsingAllowlistDomains,
+                 std::move(allowlisted_domains));
+  StringListPrefMember string_list_pref;
+  string_list_pref.Init(prefs::kSafeBrowsingAllowlistDomains, &prefs_);
+  EXPECT_TRUE(IsURLAllowlistedByPolicy(target_url, prefs_));
+
+  GURL not_allowlisted_url("https://www.bar.com");
+  EXPECT_FALSE(IsURLAllowlistedByPolicy(not_allowlisted_url, prefs_));
+}
+
+TEST_F(SafeBrowsingPrefsTest, VerifyHashPrefixRealTimeChecksAllowedByPolicy) {
+  EXPECT_TRUE(AreHashPrefixRealTimeLookupsAllowedByPolicy(prefs_));
+  prefs_.SetBoolean(prefs::kHashPrefixRealTimeChecksAllowedByPolicy, false);
+  EXPECT_FALSE(AreHashPrefixRealTimeLookupsAllowedByPolicy(prefs_));
+}
+
+TEST_F(SafeBrowsingPrefsTest, InitializesExtensionTelemetryLastUploadTime) {
+  TestingPrefServiceSimple prefs;
+  safe_browsing::RegisterProfilePrefs(prefs.registry());
+  EXPECT_EQ(prefs.GetTime(prefs::kExtensionTelemetryLastUploadTime),
+            base::Time());
+}
+
+struct SetSafeBrowsingStateTestParams {
+  bool initial_tailored_security_enabled;
+  bool initial_enhanced_protection_enabled;
+  bool initial_standard_protection_enabled;
+  SafeBrowsingState state_to_set;
+  bool is_esb_enabled_by_account_integration;
+  bool expected_tailored_security_enabled;
+  bool expected_enhanced_protection_enabled;
+  bool expected_standard_protection_enabled;
+};
+
+class SetSafeBrowsingStateTest
+    : public SafeBrowsingPrefsTest,
+      public ::testing::WithParamInterface<SetSafeBrowsingStateTestParams> {};
+
+TEST_P(SetSafeBrowsingStateTest, SetSafeBrowsingState) {
+  const auto& params = GetParam();
+  prefs_.SetBoolean(prefs::kEnhancedProtectionEnabledViaTailoredSecurity,
+                    params.initial_tailored_security_enabled);
+  prefs_.SetBoolean(prefs::kSafeBrowsingEnhanced,
+                    params.initial_enhanced_protection_enabled);
+  prefs_.SetBoolean(prefs::kSafeBrowsingEnabled,
+                    params.initial_standard_protection_enabled);
+
+  SetSafeBrowsingState(&prefs_, params.state_to_set,
+                       params.is_esb_enabled_by_account_integration);
+
+  EXPECT_EQ(
+      prefs_.GetBoolean(prefs::kEnhancedProtectionEnabledViaTailoredSecurity),
+      params.expected_tailored_security_enabled);
+  EXPECT_EQ(prefs_.GetBoolean(prefs::kSafeBrowsingEnhanced),
+            params.expected_enhanced_protection_enabled);
+  EXPECT_EQ(prefs_.GetBoolean(prefs::kSafeBrowsingEnabled),
+            params.expected_standard_protection_enabled);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    SetSafeBrowsingStateTest,
+    ::testing::Values(
+        // Enabling ESB with account integration.
+        SetSafeBrowsingStateTestParams{
+            .initial_tailored_security_enabled = false,
+            .initial_enhanced_protection_enabled = false,
+            .initial_standard_protection_enabled = false,
+            .state_to_set = SafeBrowsingState::ENHANCED_PROTECTION,
+            .is_esb_enabled_by_account_integration = true,
+            .expected_tailored_security_enabled = true,
+            .expected_enhanced_protection_enabled = true,
+            .expected_standard_protection_enabled = true},
+        // Enabling ESB without account integration.
+        SetSafeBrowsingStateTestParams{
+            .initial_tailored_security_enabled = true,
+            .initial_enhanced_protection_enabled = false,
+            .initial_standard_protection_enabled = false,
+            .state_to_set = SafeBrowsingState::ENHANCED_PROTECTION,
+            .is_esb_enabled_by_account_integration = false,
+            .expected_tailored_security_enabled = false,
+            .expected_enhanced_protection_enabled = true,
+            .expected_standard_protection_enabled = true},
+        // This test case simulates a scenario where a user has ESB enabled, and
+        // then disables Safe Browsing entirely.
+        SetSafeBrowsingStateTestParams{
+            .initial_tailored_security_enabled = true,
+            .initial_enhanced_protection_enabled = true,
+            .initial_standard_protection_enabled = true,
+            .state_to_set = SafeBrowsingState::NO_SAFE_BROWSING,
+            .is_esb_enabled_by_account_integration = true,
+            .expected_tailored_security_enabled = false,
+            .expected_enhanced_protection_enabled = false,
+            .expected_standard_protection_enabled = false}));
+
 }  // namespace safe_browsing

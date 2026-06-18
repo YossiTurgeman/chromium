@@ -1,13 +1,13 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/network/trust_tokens/trust_token_key_commitments.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/command_line.h"
-#include "base/optional.h"
 #include "base/values.h"
 #include "services/network/public/cpp/network_switches.h"
 #include "services/network/public/mojom/trust_tokens.mojom-forward.h"
@@ -51,8 +51,8 @@ ParseCommitmentsFromCommandLine() {
 mojom::TrustTokenKeyCommitmentResultPtr FilterCommitments(
     mojom::TrustTokenKeyCommitmentResultPtr result) {
   if (result) {
-    RetainSoonestToExpireTrustTokenKeys(
-        &result->keys, kMaximumConcurrentlyValidTrustTokenVerificationKeys);
+    size_t max_keys = TrustTokenMaxKeysForVersion(result->protocol_version);
+    RetainSoonestToExpireTrustTokenKeys(&result->keys, max_keys);
   }
 
   return result;
@@ -94,7 +94,7 @@ void TrustTokenKeyCommitments::Set(
   commitments_.replace(std::move(filtered));
 }
 
-void TrustTokenKeyCommitments::ParseAndSet(base::StringPiece raw_commitments) {
+void TrustTokenKeyCommitments::ParseAndSet(std::string_view raw_commitments) {
   TrustTokenKeyCommitmentParser parser;
   if (auto parsed = parser.ParseMultipleIssuers(raw_commitments))
     commitments_.swap(*parsed);
@@ -109,7 +109,7 @@ void TrustTokenKeyCommitments::Get(
 
 mojom::TrustTokenKeyCommitmentResultPtr TrustTokenKeyCommitments::GetSync(
     const url::Origin& origin) const {
-  base::Optional<SuitableTrustTokenOrigin> suitable_origin =
+  std::optional<SuitableTrustTokenOrigin> suitable_origin =
       SuitableTrustTokenOrigin::Create(origin);
   if (!suitable_origin) {
     return nullptr;
@@ -117,7 +117,7 @@ mojom::TrustTokenKeyCommitmentResultPtr TrustTokenKeyCommitments::GetSync(
 
   if (!additional_commitments_from_command_line_.empty()) {
     auto it = additional_commitments_from_command_line_.find(*suitable_origin);
-    if (it != commitments_.end()) {
+    if (it != additional_commitments_from_command_line_.end()) {
       return FilterCommitments(it->second->Clone());
     }
   }

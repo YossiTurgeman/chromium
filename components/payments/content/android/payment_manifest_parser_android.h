@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <memory>
 
 #include "base/android/jni_android.h"
-#include "base/macros.h"
 #include "components/payments/content/utility/payment_manifest_parser.h"
 
 namespace payments {
@@ -21,25 +20,27 @@ class ErrorLogger;
 class PaymentManifestParserAndroid {
  public:
   explicit PaymentManifestParserAndroid(std::unique_ptr<ErrorLogger> log);
+
+  PaymentManifestParserAndroid(const PaymentManifestParserAndroid&) = delete;
+  PaymentManifestParserAndroid& operator=(const PaymentManifestParserAndroid&) =
+      delete;
+
   ~PaymentManifestParserAndroid();
 
   void ParsePaymentMethodManifest(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& jmanifest_url,
-      const base::android::JavaParamRef<jstring>& jcontent,
-      const base::android::JavaParamRef<jobject>& jcallback);
+      const base::android::JavaRef<jobject>& jmanifest_url,
+      const base::android::JavaRef<jstring>& jcontent,
+      const base::android::JavaRef<jobject>& jcallback);
 
-  void ParseWebAppManifest(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jstring>& jcontent,
-      const base::android::JavaParamRef<jobject>& jcallback);
+  void ParseWebAppManifest(JNIEnv* env,
+                           const base::android::JavaRef<jstring>& jcontent,
+                           const base::android::JavaRef<jobject>& jcallback);
 
   void DestroyPaymentManifestParserAndroid(JNIEnv* env);
 
  private:
   PaymentManifestParser parser_;
-
-  DISALLOW_COPY_AND_ASSIGN(PaymentManifestParserAndroid);
 };
 
 }  // namespace payments

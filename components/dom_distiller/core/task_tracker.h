@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,11 @@
 #include <string>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/observer_list.h"
 #include "components/dom_distiller/core/article_distillation_update.h"
 #include "components/dom_distiller/core/article_entry.h"
 #include "components/dom_distiller/core/distiller.h"
@@ -40,9 +42,9 @@ class ViewerHandle {
 
 // Interface for a DOM distiller entry viewer. Implement this to make a view
 // request and receive the data for an entry when it becomes available.
-class ViewRequestDelegate {
+class ViewRequestDelegate : public base::CheckedObserver {
  public:
-  virtual ~ViewRequestDelegate() = default;
+  ~ViewRequestDelegate() override = default;
 
   // Called when the distilled article contents are available. The
   // DistilledArticleProto is owned by a TaskTracker instance and is invalidated
@@ -84,8 +86,12 @@ class TaskTracker {
   ~TaskTracker();
 
   // |factory| will not be stored after this call.
+  // |distiller_page| the page environment used to load and distill the content.
+  // |use_cache| whether the distilled article should be saved to the
+  // DistilledContentStore upon completion.
   void StartDistiller(DistillerFactory* factory,
-                      std::unique_ptr<DistillerPage> distiller_page);
+                      std::unique_ptr<DistillerPage> distiller_page,
+                      bool use_cache);
   void StartBlobFetcher();
 
   void AddSaveCallback(SaveCallback callback);
@@ -107,6 +113,7 @@ class TaskTracker {
       const ArticleDistillationUpdate& article_update);
 
   void OnDistillerFinished(
+      bool use_cache,
       std::unique_ptr<DistilledArticleProto> distilled_article);
   void OnBlobFetched(bool success,
                      std::unique_ptr<DistilledArticleProto> distilled_article);
@@ -135,12 +142,12 @@ class TaskTracker {
 
   CancelCallback cancel_callback_;
 
-  DistilledContentStore* content_store_;
+  raw_ptr<DistilledContentStore> content_store_;
 
   std::vector<SaveCallback> save_callbacks_;
   // A ViewRequestDelegate will be added to this list when a view request is
   // made and removed when the corresponding ViewerHandle is destroyed.
-  std::vector<ViewRequestDelegate*> viewers_;
+  base::ObserverList<ViewRequestDelegate> viewers_;
 
   std::unique_ptr<Distiller> distiller_;
   bool blob_fetcher_running_;

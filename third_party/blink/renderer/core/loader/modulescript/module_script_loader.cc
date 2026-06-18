@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,10 @@
 #include "third_party/blink/renderer/core/script/js_module_script.h"
 #include "third_party/blink/renderer/core/script/modulator.h"
 #include "third_party/blink/renderer/core/script/value_wrapper_synthetic_module_script.h"
+#include "third_party/blink/renderer/core/script/wasm_module_script.h"
+#include "third_party/blink/renderer/platform/bindings/script_forbidden_scope.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_client_settings_object_snapshot.h"
+#include "third_party/blink/renderer/platform/loader/fetch/fetch_initiator_type_names.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher_properties.h"
@@ -52,11 +55,11 @@ const char* ModuleScriptLoader::StateToString(ModuleScriptLoader::State state) {
       return "Finished";
   }
   NOTREACHED();
-  return "";
 }
 #endif
 
-void ModuleScriptLoader::AdvanceState(ModuleScriptLoader::State new_state) {
+void ModuleScriptLoader::AdvanceState(ModuleScriptLoader::State new_state,
+                                      ModuleImportPhase load_type) {
   switch (state_) {
     case State::kInitial:
       DCHECK_EQ(new_state, State::kFetching);
@@ -66,7 +69,6 @@ void ModuleScriptLoader::AdvanceState(ModuleScriptLoader::State new_state) {
       break;
     case State::kFinished:
       NOTREACHED();
-      break;
   }
 
 #if DCHECK_IS_ON()
@@ -78,7 +80,7 @@ void ModuleScriptLoader::AdvanceState(ModuleScriptLoader::State new_state) {
 
   if (state_ == State::kFinished) {
     registry_->ReleaseFinishedLoader(this);
-    client_->NotifyNewSingleModuleFinished(module_script_);
+    client_->NotifyNewSingleModuleFinished(module_script_, load_type);
   }
 }
 
@@ -97,6 +99,42 @@ void ModuleScriptLoader::Fetch(
                         level, custom_fetch_type);
 }
 
+// <specdef
+// href="https://html.spec.whatwg.org/C/#fetch-destination-from-module-type">
+void SetFetchDestinationFromModuleType(
+    ResourceRequest& resource_request,
+    const ModuleScriptFetchRequest& module_request) {
+  if (!base::FeatureList::IsEnabled(
+          features::kFetchDestinationJsonCssModules)) {
+    resource_request.SetRequestContext(module_request.ContextType());
+    resource_request.SetRequestDestination(module_request.Destination());
+    return;
+  }
+
+  switch (module_request.GetExpectedModuleType()) {
+    case ModuleType::kCSS:
+      resource_request.SetRequestContext(
+          mojom::blink::RequestContextType::STYLE);
+      resource_request.SetRequestDestination(
+          network::mojom::RequestDestination::kStyle);
+      break;
+    case ModuleType::kJSON:
+      resource_request.SetRequestContext(
+          mojom::blink::RequestContextType::JSON);
+      resource_request.SetRequestDestination(
+          network::mojom::RequestDestination::kJson);
+      break;
+    case ModuleType::kJavaScriptOrWasm:
+      resource_request.SetRequestContext(module_request.ContextType());
+      resource_request.SetRequestDestination(module_request.Destination());
+      break;
+    case ModuleType::kInvalid:
+      // ModuleTreeLinker checks that the module type is valid
+      // before creating ModuleScriptFetchRequest objects.
+      NOTREACHED();
+  }
+}
+
 // <specdef href="https://html.spec.whatwg.org/C/#fetch-a-single-module-script">
 void ModuleScriptLoader::FetchInternal(
     const ModuleScriptFetchRequest& module_request,
@@ -107,28 +145,34 @@ void ModuleScriptLoader::FetchInternal(
       fetch_client_settings_object_fetcher->GetProperties()
           .GetFetchClientSettingsObject();
 
-  // <spec step="4">Set moduleMap[url] to "fetching".</spec>
+  // <spec step="7">Set moduleMap[(url, moduleType)] to "fetching".</spec>
   AdvanceState(State::kFetching);
 
-  // <spec step="5">Let request be a new request whose url is url, ...</spec>
+  // <spec step="8">Let request be a new request whose url is url, ...</spec>
   ResourceRequest resource_request(module_request.Url());
 #if DCHECK_IS_ON()
   url_ = module_request.Url();
 #endif
 
-  // <spec step="5">... destination is destination, ...</spec>
-  resource_request.SetRequestContext(module_request.ContextType());
-  resource_request.SetRequestDestination(module_request.Destination());
+  DOMWrapperWorld& request_world = modulator_->GetScriptState()->World();
 
-  ResourceLoaderOptions options(&modulator_->GetScriptState()->World());
+  // Prevents web service workers from intercepting isolated world dynamic
+  // script imports requests and responding with different contents.
+  // TODO(crbug.com/1296102): Link to documentation that describes the criteria
+  // where module imports are handled by service worker fetch handler.
+  resource_request.SetSkipServiceWorker(request_world.IsIsolatedWorld());
 
-  // <spec step="6">If destination is "worker" or "sharedworker" and the
-  // top-level module fetch flag is set, then set request's mode to
-  // "same-origin".</spec>
-  // Cross-origin workers are not supported due to security checks in
-  // AbstractWorker::ResolveURL, so no action needs to be taken here.
+  // <spec step="9">Set request 's destination to the result of running the
+  // fetch destination from module type steps given destination and
+  // moduleType.</spec>
+  SetFetchDestinationFromModuleType(resource_request, module_request);
 
-  // <spec step="7">Set up the module script request given request and
+  ResourceLoaderOptions options(&request_world);
+
+  // <spec step="11">Set request's initiator type to "script".</spec>
+  options.initiator_info.name = fetch_initiator_type_names::kScript;
+
+  // <spec step="12">Set up the module script request given request and
   // options.</spec>
   //
   // <specdef label="SMSR"
@@ -138,14 +182,6 @@ void ModuleScriptLoader::FetchInternal(
   // ...</spec>
   options.parser_disposition = options_.ParserState();
 
-  // As initiator for module script fetch is not specified in HTML spec,
-  // we specify "" as initiator per:
-  // https://fetch.spec.whatwg.org/#concept-request-initiator
-  options.initiator_info.name = g_empty_atom;
-
-  // TODO(crbug.com/1064920): Remove this once PlzDedicatedWorker ships.
-  options.reject_coep_unsafe_none = options_.GetRejectCoepUnsafeNone();
-
   if (level == ModuleGraphLevel::kDependentModuleFetch) {
     options.initiator_info.is_imported_module = true;
     options.initiator_info.referrer = module_request.ReferrerString();
@@ -154,12 +190,16 @@ void ModuleScriptLoader::FetchInternal(
 
   // Note: |options| should not be modified after here.
   FetchParameters fetch_params(std::move(resource_request), options);
+  fetch_params.SetModuleScript();
 
   // <spec label="SMSR">... its integrity metadata to options's integrity
   // metadata, ...</spec>
   fetch_params.SetIntegrityMetadata(options_.GetIntegrityMetadata());
+
+  const FeatureContext* feature_context =
+      ExecutionContext::From(modulator_->GetScriptState());
   fetch_params.MutableResourceRequest().SetFetchIntegrity(
-      options_.GetIntegrityAttributeValue());
+      options_.GetIntegrityAttributeValue(), feature_context);
 
   // <spec label="SMSR">Set request's cryptographic nonce metadata to options's
   // cryptographic nonce, ...</spec>
@@ -178,15 +218,34 @@ void ModuleScriptLoader::FetchInternal(
       fetch_client_settings_object.GetSecurityOrigin(),
       options_.CredentialsMode());
 
+  // <spec step="6">If destination is "worker" or "sharedworker" and the
+  // top-level module fetch flag is set, then set request's mode to
+  // "same-origin".</spec>
+  //
+  // `kServiceWorker` is included here for consistency, while it isn't mentioned
+  // in the spec. This doesn't affect the behavior, because we already forbid
+  // redirects and cross-origin response URLs in other places.
+  if ((module_request.Destination() ==
+           network::mojom::RequestDestination::kWorker ||
+       module_request.Destination() ==
+           network::mojom::RequestDestination::kSharedWorker ||
+       module_request.Destination() ==
+           network::mojom::RequestDestination::kServiceWorker) &&
+      level == ModuleGraphLevel::kTopLevelModuleFetch) {
+    // This should be done after SetCrossOriginAccessControl() that sets the
+    // mode to kCors.
+    fetch_params.MutableResourceRequest().SetMode(
+        network::mojom::RequestMode::kSameOrigin);
+  }
+
   // <spec step="5">... referrer is referrer, ...</spec>
   fetch_params.MutableResourceRequest().SetReferrerString(
       module_request.ReferrerString());
 
-  // Priority Hints and a request's "importance" are currently non-standard, but
-  // we can assume the following (see https://crbug.com/821464):
-  // Step 5. "... importance is options's importance ..."
-  fetch_params.MutableResourceRequest().SetFetchImportanceMode(
-      options_.Importance());
+  // https://wicg.github.io/priority-hints/#script :
+  // Step 10. "... request’s priority to option’s fetchpriority ..."
+  fetch_params.MutableResourceRequest().SetFetchPriorityHint(
+      options_.FetchPriorityHint());
 
   // <spec step="5">... and client is fetch client settings object.</spec>
   //
@@ -199,10 +258,8 @@ void ModuleScriptLoader::FetchInternal(
 
   // Module scripts are always defer.
   fetch_params.SetDefer(FetchParameters::kLazyLoad);
-  // [nospec] Unlike defer/async classic scripts, module scripts are fetched at
-  // High priority.
-  fetch_params.MutableResourceRequest().SetPriority(
-      ResourceLoadPriority::kHigh);
+  fetch_params.SetRenderBlockingBehavior(
+      module_request.Options().GetRenderBlockingBehavior());
 
   // <spec step="12.1">Let source text be the result of UTF-8 decoding
   // response's body.</spec>
@@ -218,13 +275,13 @@ void ModuleScriptLoader::FetchInternal(
   // response.</spec>
   module_fetcher_ =
       modulator_->CreateModuleScriptFetcher(custom_fetch_type, PassKey());
-  module_fetcher_->Fetch(fetch_params, fetch_client_settings_object_fetcher,
-                         level, this);
+  module_fetcher_->Fetch(fetch_params, module_request.GetExpectedModuleType(),
+                         fetch_client_settings_object_fetcher, level, this,
+                         module_request.GetModuleImportPhase());
 }
 
 // <specdef href="https://html.spec.whatwg.org/C/#fetch-a-single-module-script">
-void ModuleScriptLoader::NotifyFetchFinished(
-    const base::Optional<ModuleScriptCreationParams>& params,
+void ModuleScriptLoader::NotifyFetchFinishedError(
     const HeapVector<Member<ConsoleMessage>>& error_messages) {
   // [nospec] Abort the steps if the browsing context is discarded.
   if (!modulator_->HasValidContext()) {
@@ -237,46 +294,118 @@ void ModuleScriptLoader::NotifyFetchFinished(
   // <spec step="9">If any of the following conditions are met, set
   // moduleMap[url] to null, asynchronously complete this algorithm with null,
   // and abort these steps: ...</spec>
-  if (!params.has_value()) {
-    for (ConsoleMessage* error_message : error_messages) {
-      ExecutionContext::From(modulator_->GetScriptState())
-          ->AddConsoleMessage(error_message);
-    }
+  for (ConsoleMessage* error_message : error_messages) {
+    ExecutionContext::From(modulator_->GetScriptState())
+        ->AddConsoleMessage(error_message);
+  }
+  AdvanceState(State::kFinished);
+}
+
+// This implements the `processResponseConsumeBody` part of
+// https://html.spec.whatwg.org/C#fetch-a-single-module-script
+void ModuleScriptLoader::NotifyFetchFinishedSuccess(
+    const ModuleScriptCreationParams& params) {
+  // [nospec] Abort the steps if the browsing context is discarded.
+  if (!modulator_->HasValidContext()) {
     AdvanceState(State::kFinished);
     return;
   }
 
-  // <spec step="12.1">Let source text be the result of UTF-8 decoding
-  // response's body.</spec>
+  // <spec step="13.5">If referrerPolicy is not the empty string, set
+  // options's referrer policy to referrerPolicy.</spec>
   //
-  // <spec step="12.2">Set module script to the result of creating a JavaScript
-  // module script given source text, module map settings object, response's
-  // url, and options.</spec>
-  switch (params->GetModuleType()) {
-    case ModuleScriptCreationParams::ModuleType::kJSONModule:
-      DCHECK(base::FeatureList::IsEnabled(blink::features::kJSONModules));
+  // Note that the "empty string" referrer policy corresponds to `kDefault`,
+  // so we only use the response referrer policy if it is *not* `kDefault`.
+  if (params.ResponseReferrerPolicy() !=
+      network::mojom::ReferrerPolicy::kDefault) {
+    options_.UpdateReferrerPolicyAfterResponseReceived(
+        params.ResponseReferrerPolicy());
+  }
+
+  switch (params.GetModuleType()) {
+    // The MIME type verification happens at
+    // ModuleScriptFetcher::WasModuleLoadSuccessful.
+    case ResolvedModuleType::kJSON:
+      // <spec step="13.7.4"> If mimeType is a JSON MIME type and moduleType is
+      // "json", then set moduleScript to the result of creating a JSON module
+      // script given sourceText and settingsObject</spec>
       module_script_ = ValueWrapperSyntheticModuleScript::
           CreateJSONWrapperSyntheticModuleScript(params, modulator_);
       break;
-    case ModuleScriptCreationParams::ModuleType::kCSSModule:
-      DCHECK(RuntimeEnabledFeatures::CSSModulesEnabled());
-      module_script_ = ValueWrapperSyntheticModuleScript::
-          CreateCSSWrapperSyntheticModuleScript(params, modulator_);
+    case ResolvedModuleType::kCSS:
+      // <spec step="13.7.3"> If mimeType is "text/css" and moduleType is "css",
+      // then set moduleScript to the result of creating a CSS module script
+      // given sourceText and settingsObject.</spec>
+      {
+        // Retrieve the pre-created CSS module from the module map entry and
+        // update the contents with the fetch result. The empty CSSStyleSheet
+        // was created at fetch start time in FetchSingleModuleScript.
+        ModuleScript* pre_created = modulator_->GetFetchedModuleScript(
+            params.SourceURL(), ModuleType::kCSS);
+        CHECK(pre_created);
+        module_script_ =
+            ValueWrapperSyntheticModuleScript::UpdateCSSModuleScript(
+                static_cast<ValueWrapperSyntheticModuleScript*>(pre_created),
+                params.GetSourceText().ToString(), modulator_);
+      }
       break;
-    case ModuleScriptCreationParams::ModuleType::kJavaScriptModule:
-      // Step 9. "Let source text be the result of UTF-8 decoding response's
-      // body." [spec text]
-      // Step 10. "Let module script be the result of creating
-      // a module script given source text, module map settings object,
-      // response's url, and options." [spec text]
-      module_script_ = JSModuleScript::Create(
-          params->GetSourceText(), params->CacheHandler(),
-          ScriptSourceLocationType::kExternalFile, modulator_,
-          params->GetResponseUrl(), params->GetResponseUrl(), options_);
+    case ResolvedModuleType::kJavaScript:
+      // <spec step="13.7.2">If mimeType is a JavaScript MIME type and
+      // moduleType is "javascript-or-wasm", then set moduleScript to the result
+      // of creating a JavaScript module script given sourceText,
+      // settingsObject, response's URL, and options/</spec>
+      //
+      module_script_ = JSModuleScript::Create(params, modulator_, options_);
       break;
+    case ResolvedModuleType::kWasm: {
+      // <spec step="13.6">If mimeType's essence is "application/wasm" and
+      // moduleType is "javascript-or-wasm", then set moduleScript to the result
+      // of creating a WebAssembly module script given bodyBytes,
+      // settingsObject, response's URL, and options/</spec>
+      ScriptStreamer* streamer = params.GetScriptStreamer();
+      if (streamer) {
+        // The wasm streaming compilation is not finished yet. Call
+        // `WasmModuleCompilation::Finish()` which will finish the compilation
+        // asynchronously and call `result_callback` when finished.
+        v8::WasmModuleCompilation* wasm_module_compilation =
+            streamer->GetWasmModuleCompilation();
+        CHECK(wasm_module_compilation);
+        ScriptState* script_state = modulator_->GetScriptState();
+        ScriptState::Scope scope(script_state);
+        auto result_callback =
+            [script_loader = WrapPersistent(this),
+             source_url = params.SourceURL(), base_url = params.BaseURL()](
+                std::variant<v8::Local<v8::WasmModuleObject>,
+                             v8::Local<v8::Value>> module_or_error) {
+              script_loader->NotifyWasmStreamingFinished(module_or_error,
+                                                         source_url, base_url);
+            };
+        // TODO(https://crbug.com/42204365): Implement code caching support.
+        wasm_module_compilation->Finish(
+            modulator_->GetScriptState()->GetIsolate(), nullptr,
+            std::move(result_callback));
+        return;
+      }
+      module_script_ = WasmModuleScript::Create(params, modulator_, options_);
+      break;
+    }
   }
+  AdvanceState(State::kFinished, params.GetModuleImportPhase());
+}
 
-  AdvanceState(State::kFinished);
+void ModuleScriptLoader::NotifyWasmStreamingFinished(
+    const std::variant<v8::Local<v8::WasmModuleObject>, v8::Local<v8::Value>>&
+        wasm_module_or_error,
+    const KURL& source_url,
+    const KURL& base_url) {
+  // [nospec] Abort the steps if the browsing context is discarded.
+  if (!modulator_->HasValidContext()) {
+    AdvanceState(State::kFinished);
+    return;
+  }
+  module_script_ = WasmModuleScript::CreateFromStreamingResult(
+      modulator_, options_, wasm_module_or_error, source_url, base_url);
+  AdvanceState(State::kFinished, ModuleImportPhase::kSource);
 }
 
 void ModuleScriptLoader::Trace(Visitor* visitor) const {

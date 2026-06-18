@@ -1,9 +1,11 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import os
-from chrome_ent_test.infra.core import environment, before_all, test
+from chrome_ent_test.infra.core import before_all
+from chrome_ent_test.infra.core import environment
+from chrome_ent_test.infra.core import test
 from infra import ChromeEnterpriseTestCase
 
 
@@ -11,20 +13,20 @@ from infra import ChromeEnterpriseTestCase
 class ExtensionInstallForcelistTest(ChromeEnterpriseTestCase):
   """Test the ExtensionInstallForcelist policy.
 
-  See https://cloud.google.com/docs/chrome-enterprise/policies/?policy=ExtensionInstallForcelist"""
+  See https://chromeenterprise.google/policies/?policy=ExtensionInstallForcelist"""
 
   # This is the extension id of the Google Keep extension.
   ExtensionId = 'lpcaedmchfhocbbapmcbpinfpgnhiddi'
 
   @before_all
   def setup(self):
-    self.InstallChrome('client2019')
-    self.InstallWebDriver('client2019')
+    self.InstallChrome(self.win_config['client'])
+    self.InstallWebDriver(self.win_config['client'])
 
   def isExtensionInstalled(self, incognito=False):
     dir = os.path.dirname(os.path.abspath(__file__))
     output = self.RunWebDriverTest(
-        'client2019',
+        self.win_config['client'],
         os.path.join(dir, 'is_extension_installed.py'),
         args=["--extension_id", ExtensionInstallForcelistTest.ExtensionId])
 
@@ -36,8 +38,9 @@ class ExtensionInstallForcelistTest(ChromeEnterpriseTestCase):
 
   @test
   def test_NoForcelistNoExtensionInstalled(self):
-    self.SetPolicy('win2019-dc', r'ExtensionInstallForcelist\1', '""', 'String')
-    self.RunCommand('client2019', 'gpupdate /force')
+    self.SetPolicy(self.win_config['dc'], r'ExtensionInstallForcelist\1', '""',
+                   'String')
+    self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
     installed = self.isExtensionInstalled()
     self.assertFalse(installed)
@@ -46,9 +49,9 @@ class ExtensionInstallForcelistTest(ChromeEnterpriseTestCase):
   def test_ForcelistExtensionInstalled(self):
     url = 'https://clients2.google.com/service/update2/crx'
     extension = '"%s;%s"' % (ExtensionInstallForcelistTest.ExtensionId, url)
-    self.SetPolicy('win2019-dc', r'ExtensionInstallForcelist\1', extension,
-                   'String')
-    self.RunCommand('client2019', 'gpupdate /force')
+    self.SetPolicy(self.win_config['dc'], r'ExtensionInstallForcelist\1',
+                   extension, 'String')
+    self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
     installed = self.isExtensionInstalled()
     self.assertTrue(installed)

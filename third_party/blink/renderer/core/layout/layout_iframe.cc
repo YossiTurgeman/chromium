@@ -25,40 +25,90 @@
 
 #include "third_party/blink/renderer/core/layout/layout_iframe.h"
 
-#include "third_party/blink/renderer/core/layout/layout_analyzer.h"
+#include "base/notreached.h"
 #include "third_party/blink/renderer/core/page/scrolling/root_scroller_controller.h"
+#include "third_party/blink/renderer/core/style/computed_style_base_constants.h"
 
 namespace blink {
+
+namespace {
+
+EFrameSizing PhysicalFrameSizing(const ComputedStyle& style) {
+  const EFrameSizing value = style.FrameSizing();
+  switch (value) {
+    case EFrameSizing::kAuto:
+    case EFrameSizing::kContentWidth:
+    case EFrameSizing::kContentHeight:
+      return value;
+    case EFrameSizing::kContentInlineSize:
+      return style.IsHorizontalWritingMode() ? EFrameSizing::kContentWidth
+                                             : EFrameSizing::kContentHeight;
+    case EFrameSizing::kContentBlockSize:
+      return style.IsHorizontalWritingMode() ? EFrameSizing::kContentHeight
+                                             : EFrameSizing::kContentWidth;
+  }
+}
+
+}  // namespace
 
 LayoutIFrame::LayoutIFrame(HTMLFrameOwnerElement* element)
     : LayoutEmbeddedContent(element) {}
 
-bool LayoutIFrame::ShouldComputeSizeAsReplaced() const {
-  return true;
+void LayoutIFrame::UpdateAfterLayout() {
+  NOT_DESTROYED();
+  LayoutEmbeddedContent::UpdateAfterLayout();
+
+  const ComputedStyle& style = StyleRef();
+  if (!style.IsResponsivelySized()) {
+    return;
+  }
+  DCHECK(RuntimeEnabledFeatures::ResponsiveIframesEnabled());
+  if (!GetEmbeddedContentView() && GetFrameView()) {
+    GetFrameView()->AddPartToUpdate(*this);
+  }
 }
 
-bool LayoutIFrame::IsInlineBlockOrInlineTable() const {
-  return IsInline();
-}
+PhysicalNaturalSizingInfo LayoutIFrame::GetNaturalDimensions() const {
+  NOT_DESTROYED();
+  const ComputedStyle& style = StyleRef();
+  if (style.IsResponsivelySized()) {
+    DCHECK(RuntimeEnabledFeatures::ResponsiveIframesEnabled());
+    std::optional<NaturalSizingInfo> sizing_info;
+    if (const FrameView* frame_view = ChildFrameView()) {
+      // Use the natural size received from the child frame if it exists.
+      sizing_info = frame_view->GetNaturalDimensions();
+    }
 
-PaintLayerType LayoutIFrame::LayerTypeRequired() const {
-  if (StyleRef().HasResize())
-    return kNormalPaintLayer;
-  return LayoutEmbeddedContent::LayerTypeRequired();
-}
+    if (!sizing_info) {
+      // Check if this `<iframe>` element has received natural sizes from old
+      // `ChildFrameView`s.
+      if (const HTMLFrameOwnerElement* owner = GetFrameOwnerElement()) {
+        sizing_info = owner->LastNaturalSizingInfo();
+      }
+    }
 
-void LayoutIFrame::UpdateLayout() {
-  DCHECK(NeedsLayout());
-  LayoutAnalyzer::Scope analyzer(*this);
+    if (sizing_info) {
+      switch (PhysicalFrameSizing(style)) {
+        case EFrameSizing::kContentWidth:
+          sizing_info->has_height = false;
+          break;
+        case EFrameSizing::kContentHeight:
+          sizing_info->has_width = false;
+          break;
+        case EFrameSizing::kAuto:
+        case EFrameSizing::kContentInlineSize:
+        case EFrameSizing::kContentBlockSize:
+          NOTREACHED();
+      }
 
-  UpdateLogicalWidth();
-  // No kids to layout as a replaced element.
-  UpdateLogicalHeight();
+      // Scale based on our zoom as the embedded document doesn't have that
+      // info.
+      sizing_info->size.Scale(style.EffectiveZoom());
+      return PhysicalNaturalSizingInfo::FromSizingInfo(*sizing_info);
+    }
+  }
 
-  ClearLayoutOverflow();
-  UpdateAfterLayout();
-
-  ClearNeedsLayout();
+  return LayoutEmbeddedContent::GetNaturalDimensions();
 }
 
 }  // namespace blink

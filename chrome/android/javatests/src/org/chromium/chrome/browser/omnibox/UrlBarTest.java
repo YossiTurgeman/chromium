@@ -1,59 +1,49 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.omnibox;
 
-import static org.chromium.base.test.util.Restriction.RESTRICTION_TYPE_NON_LOW_END_DEVICE;
+import static org.hamcrest.core.IsEqual.equalTo;
 
-import android.annotation.SuppressLint;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.res.Resources;
-import android.support.test.InstrumentationRegistry;
-import android.text.Editable;
-import android.text.Selection;
 import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.inputmethod.BaseInputConnection;
-import android.view.inputmethod.InputMethodManager;
-import android.widget.FrameLayout;
-import android.widget.LinearLayout;
+import android.view.inputmethod.InputConnection;
 
 import androidx.test.filters.SmallTest;
+import androidx.test.platform.app.InstrumentationRegistry;
 
-import org.hamcrest.Matchers;
 import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
-import org.chromium.base.test.params.ParameterAnnotations.ClassParameter;
+import org.chromium.base.Callback;
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.params.ParameterAnnotations.UseRunnerDelegate;
-import org.chromium.base.test.params.ParameterSet;
-import org.chromium.base.test.params.ParameterizedRunner;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CallbackHelper;
 import org.chromium.base.test.util.DisabledTest;
-import org.chromium.base.test.util.Feature;
-import org.chromium.base.test.util.Restriction;
-import org.chromium.chrome.R;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
-import org.chromium.chrome.browser.omnibox.UrlBar.UrlBarDelegate;
+import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 import org.chromium.chrome.test.ChromeJUnit4RunnerDelegate;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.ReusedCtaTransitTestRule;
+import org.chromium.chrome.test.transit.page.WebPageStation;
 import org.chromium.chrome.test.util.OmniboxTestUtils;
-import org.chromium.content_public.browser.test.util.Criteria;
-import org.chromium.content_public.browser.test.util.CriteriaHelper;
-import org.chromium.content_public.browser.test.util.KeyUtils;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
-import org.chromium.ui.test.util.DummyUiActivityTestCase;
+import org.chromium.components.omnibox.OmniboxCapabilities;
+import org.chromium.components.omnibox.TextSelection;
+import org.chromium.content_public.common.ContentUrlConstants;
+import org.chromium.url.GURL;
 
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -61,447 +51,380 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Tests for the URL bar UI component.
+ *
+ * <p>TODO(ender): Wrap the UrlBar in a separate standalone activity to focus testing on the
+ * component alone. This should help deflake several tests here and focus on the logic and behavior.
  */
-@RunWith(ParameterizedRunner.class)
+@RunWith(ChromeJUnit4ClassRunner.class)
 @UseRunnerDelegate(ChromeJUnit4RunnerDelegate.class)
-public class UrlBarTest extends DummyUiActivityTestCase {
-    @ClassParameter
-    private static List<ParameterSet> sClassParams =
-            Arrays.asList(new ParameterSet().value(false).name("DisableSpannableInline"),
-                    new ParameterSet().value(true).name("EnableSpannableInline"));
-
+@Batch(Batch.PER_CLASS)
+public class UrlBarTest {
+    public static final String EXAMPLE_STRING = "example string";
     private UrlBar mUrlBar;
-    @Mock
-    private UrlBarDelegate mUrlBarDelegate;
 
-    public UrlBarTest(boolean enableSpannableInline) {
-        Map<String, Boolean> featureList = new HashMap<>();
-        featureList.put(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE, enableSpannableInline);
-        ChromeFeatureList.setTestFeatures(featureList);
-    }
+    @Rule
+    public ReusedCtaTransitTestRule<WebPageStation> mActivityTestRule =
+            ChromeTransitTestRules.blankPageStartReusedActivityRule();
 
-    @Override
+    private OmniboxTestUtils mOmnibox;
+    private WebPageStation mStartingPage;
+
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private Callback<String> mUrlTextChangeListener;
+
+    @Before
     public void setUpTest() throws Exception {
-        super.setUpTest();
-        MockitoAnnotations.initMocks(this);
+        mStartingPage = mActivityTestRule.start();
+        // Needed to make sure all the necessary ChromeFeatureFlags are populated.
+        mActivityTestRule.getActivityTestRule().waitForDeferredStartup();
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            ViewGroup view = new LinearLayout(getActivity());
-            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-            getActivity().setContentView(view, params);
+        mOmnibox = new OmniboxTestUtils(mStartingPage.getActivity());
+        mUrlBar = mStartingPage.urlBarElement.value();
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
 
-            ViewGroup urlBarContainer = new FrameLayout(getActivity());
-            urlBarContainer.setFocusable(true);
-            urlBarContainer.setFocusableInTouchMode(true);
-
-            Resources res = getActivity().getResources();
-            view.addView(urlBarContainer,
-                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                            res.getDimensionPixelSize(R.dimen.toolbar_height_no_shadow)
-                                    - 2
-                                            * res.getDimensionPixelSize(
-                                                    R.dimen.location_bar_vertical_margin)));
-
-            mUrlBar = (UrlBar) getActivity().getLayoutInflater().inflate(R.layout.url_bar, null);
-            mUrlBar.setDelegate(mUrlBarDelegate);
-
-            urlBarContainer.addView(mUrlBar, new FrameLayout.LayoutParams(params));
-        });
-    }
-
-    // Prevent real keyboard app from interfering with test result. After calling this function,
-    // real keyboard app will interact with null InputConnection while the test can still interact
-    // with BaseInputConnection's method and thus affects EditText's Editable through
-    // {@link UrlBar#getInputConnection()}. https://crbug.com/723901 for details.
-    private void startIgnoringImeUntilRestart() {
-        mUrlBar.setIgnoreImeForTest(true);
-        InputMethodManager imm =
-                (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
-        imm.restartInput(mUrlBar);
-    }
-
-    private void toggleFocusAndIgnoreImeOperations(final UrlBar urlBar, final boolean gainFocus) {
-        OmniboxTestUtils.toggleUrlBarFocus(urlBar, gainFocus);
-        if (gainFocus) {
-            TestThreadUtils.runOnUiThreadBlocking(() -> {
-                urlBar.setIgnoreTextChangesForAutocomplete(false);
-                startIgnoringImeUntilRestart();
-            });
-            CriteriaHelper.pollUiThread(() -> urlBar.getInputConnection() != null,
-                    "Input connection never initialized for URL bar.");
-        }
-    }
-
-    private void runInputConnectionMethodOnUiThreadBlocking(final Runnable runnable) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            // Note: in order for this to work correctly, the following conditions should be met
-            // 1) Unset and set ignoreImeForTest within one UI loop.
-            // 2) Do not restartInput() in between.
-            mUrlBar.setIgnoreImeForTest(false);
-            runnable.run();
-            mUrlBar.setIgnoreImeForTest(true);
-        });
+        // Start with an empty Omnibox and disable all automatic features.
+        mOmnibox.disableLiveAutocompletion();
+        mOmnibox.requestFocus();
+        mOmnibox.setText("");
     }
 
     private static class AutocompleteState {
         public final boolean hasAutocomplete;
         public final String textWithoutAutocomplete;
         public final String textWithAutocomplete;
+        public final String additionalText;
 
         public AutocompleteState(
-                boolean hasAutocomplete, String textWithoutAutocomplete,
-                String textWithAutocomplete) {
+                boolean hasAutocomplete,
+                String textWithoutAutocomplete,
+                String textWithAutocomplete,
+                String additionalText) {
             this.hasAutocomplete = hasAutocomplete;
             this.textWithoutAutocomplete = textWithoutAutocomplete;
             this.textWithAutocomplete = textWithAutocomplete;
+            this.additionalText = additionalText;
         }
-    }
-
-    private Editable getUrlBarText() {
-        return TestThreadUtils.runOnUiThreadBlockingNoException(() -> mUrlBar.getText());
     }
 
     private AutocompleteState getAutocompleteState(final Runnable action) {
         final AtomicBoolean hasAutocomplete = new AtomicBoolean();
-        final AtomicReference<String> textWithoutAutocomplete = new AtomicReference<String>();
-        final AtomicReference<String> textWithAutocomplete = new AtomicReference<String>();
+        final AtomicReference<String> textWithoutAutocomplete = new AtomicReference<>();
+        final AtomicReference<String> textWithAutocomplete = new AtomicReference<>();
+        final AtomicReference<String> additionalText = new AtomicReference<>();
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            if (action != null) action.run();
-            textWithoutAutocomplete.set(mUrlBar.getTextWithoutAutocomplete());
-            textWithAutocomplete.set(mUrlBar.getTextWithAutocomplete());
-            hasAutocomplete.set(mUrlBar.hasAutocomplete());
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    if (action != null) action.run();
+                    hasAutocomplete.set(mUrlBar.hasAutocomplete());
+                    textWithoutAutocomplete.set(mUrlBar.getTextWithoutAutocomplete());
+                    textWithAutocomplete.set(mUrlBar.getTextWithAutocomplete());
+                    String additionalTextStr = mUrlBar.getAdditionalText();
+                    additionalText.set(additionalTextStr != null ? additionalTextStr : "");
+                });
 
         return new AutocompleteState(
-                hasAutocomplete.get(), textWithoutAutocomplete.get(), textWithAutocomplete.get());
-    }
-
-    private void setTextAndVerifyNoAutocomplete(final String text) {
-        AutocompleteState state = getAutocompleteState(() -> {
-            mUrlBar.setText(text);
-            mUrlBar.setSelection(text.length());
-        });
-
-        Assert.assertEquals(text, state.textWithoutAutocomplete);
-        Assert.assertEquals(text, state.textWithAutocomplete);
-        Assert.assertFalse(state.hasAutocomplete);
-    }
-
-    private void setAutocomplete(final String userText, final String autocompleteText) {
-        AutocompleteState state =
-                getAutocompleteState(() -> mUrlBar.setAutocompleteText(userText, autocompleteText));
-
-        Assert.assertEquals(userText, state.textWithoutAutocomplete);
-        Assert.assertEquals(userText + autocompleteText, state.textWithAutocomplete);
-        Assert.assertTrue(state.hasAutocomplete);
+                hasAutocomplete.get(),
+                textWithoutAutocomplete.get(),
+                textWithAutocomplete.get(),
+                additionalText.get());
     }
 
     private AutocompleteState setSelection(final int selectionStart, final int selectionEnd) {
         return getAutocompleteState(() -> mUrlBar.setSelection(selectionStart, selectionEnd));
     }
 
-    private void assertAutocompleteSelectionRange(
-            int expectedSelectionStart, int expectedSelectionEnd) {
-        int[] selection = getSelectionRange();
-        Assert.assertEquals("Selection start did not match", expectedSelectionStart, selection[0]);
-        if (!ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            Assert.assertEquals("Selection end did not match", expectedSelectionEnd, selection[1]);
-        }
-    }
-
-    private int[] getSelectionRange() {
-        return TestThreadUtils.runOnUiThreadBlockingNoException(() -> {
-            int[] selection = new int[2];
-            CharSequence text = mUrlBar.getText();
-            selection[0] = Selection.getSelectionStart(text);
-            selection[1] = Selection.getSelectionEnd(text);
-            return selection;
-        });
-    }
-
     private void setTextAndVerifyTextDirection(String text, int expectedDirection)
             throws TimeoutException {
         CallbackHelper directionCallback = new CallbackHelper();
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mUrlBar.setUrlDirectionListener((direction) -> {
-                if (direction == expectedDirection) directionCallback.notifyCalled();
-            });
-        });
-        setTextAndVerifyNoAutocomplete(text);
-        directionCallback.waitForFirst(
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.setUrlDirectionListener(
+                            (direction) -> {
+                                if (direction == expectedDirection) {
+                                    directionCallback.notifyCalled();
+                                }
+                            });
+                });
+        mOmnibox.setText(text);
+        directionCallback.waitForOnly(
                 "Direction never reached expected direction: " + expectedDirection);
         assertUrlDirection(expectedDirection);
-        TestThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.setUrlDirectionListener(null));
+        ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.setUrlDirectionListener(null));
     }
 
     private void assertUrlDirection(int expectedDirection) {
-        int actualDirection =
-                TestThreadUtils.runOnUiThreadBlockingNoException(() -> mUrlBar.getUrlDirection());
+        int actualDirection = ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.getUrlDirection());
         Assert.assertEquals(expectedDirection, actualDirection);
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
-    @DisabledTest
     public void testRefocusing() {
-        Assert.assertFalse(OmniboxTestUtils.doesUrlBarHaveFocus(mUrlBar));
-        OmniboxTestUtils.checkUrlBarRefocus(mUrlBar, 5);
+        // This test is flaky, because of the asynchronous nature of keyboard management that does
+        // not involve canceling previously scheduled tasks.
+        // For cases where keyboard is requested and dismissed rapidly, tasks begin to compete with
+        // each other, and eventually a subsequent action's keyboard callup / dismiss is scheduled
+        // before the previous action's counter-request, leading to a flake.
+        for (int i = 0; i < 5; i++) {
+            mOmnibox.requestFocus();
+            mOmnibox.clearFocus();
+        }
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
     public void testAutocompleteUpdatedOnSetText() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-
         // Verify that setting a new string will clear the autocomplete.
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is fun");
-        setTextAndVerifyNoAutocomplete("new string");
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing is fun", null);
 
         // Replace part of the non-autocomplete text
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is fun");
-        AutocompleteState state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.setText(mUrlBar.getText().replace(1, 2, "a"));
-            }
-        });
-        Assert.assertFalse(state.hasAutocomplete);
-        // Clears autocomplete text when non-IME change has been made.
-        // The autocomplete gets removed.
-        Assert.assertEquals("tast", state.textWithoutAutocomplete);
-        Assert.assertEquals("tast", state.textWithAutocomplete);
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing is fun", null);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.setText(mUrlBar.getText().replace(1, 2, "a"));
+                });
+        mOmnibox.checkText(equalTo("tast"), null);
 
         // Replace part of the autocomplete text.
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is fun");
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.setText(mUrlBar.getText().replace(8, 10, "no"));
-            }
-        });
-        Assert.assertFalse(state.hasAutocomplete);
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: new model clears autocomplete text when non-IME change has been made.
-            // The autocomplete gets removed.
-            Assert.assertEquals("test", state.textWithoutAutocomplete);
-            Assert.assertEquals("test", state.textWithAutocomplete);
-        } else {
-            // The autocomplete gets committed.
-            Assert.assertEquals("testing no fun", state.textWithoutAutocomplete);
-            Assert.assertEquals("testing no fun", state.textWithAutocomplete);
-        }
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing is fun", null);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.setText(mUrlBar.getText().replace(8, 10, "no"));
+                });
+        mOmnibox.checkText(equalTo("test"), null);
     }
 
-    private void verifySelectionState(String text, String inlineAutocomplete, int selectionStart,
-            int selectionEnd, boolean expectedHasAutocomplete,
-            String expectedTextWithoutAutocomplete, String expectedTextWithAutocomplete,
-            boolean expectedPreventInline, String expectedRequestedAutocompleteText)
+    private void verifySelectionState(
+            String text,
+            String inlineAutocomplete,
+            String additionalText,
+            int selectionStart,
+            int selectionEnd,
+            boolean expectedHasAutocomplete,
+            String expectedTextWithoutAutocomplete,
+            String expectedTextWithAutocomplete,
+            boolean expectedPreventInline,
+            String expectedRequestedAutocompleteText)
             throws TimeoutException {
-        setTextAndVerifyNoAutocomplete(text);
-        setAutocomplete(text, inlineAutocomplete);
+        mOmnibox.setText(text);
+        mOmnibox.setAutocompleteText(inlineAutocomplete, additionalText);
 
         final CallbackHelper autocompleteHelper = new CallbackHelper();
-        final AtomicReference<String> requestedAutocompleteText = new AtomicReference<String>();
+        final AtomicReference<String> requestedAutocompleteText = new AtomicReference<>();
         final AtomicBoolean didPreventInlineAutocomplete = new AtomicBoolean();
-        mUrlBar.setUrlTextChangeListener((textWithoutAutocomplete, textWithAutocomplete) -> {
-            autocompleteHelper.notifyCalled();
-            requestedAutocompleteText.set(textWithoutAutocomplete);
-            didPreventInlineAutocomplete.set(!mUrlBar.shouldAutocomplete());
-            mUrlBar.setUrlTextChangeListener(null);
-        });
+        mUrlBar.setTextChangeListener(
+                (info) -> {
+                    autocompleteHelper.notifyCalled();
+                    requestedAutocompleteText.set(info);
+                    didPreventInlineAutocomplete.set(!mUrlBar.shouldAutocomplete());
+                    mUrlBar.setTextChangeListener(null);
+                });
 
         AutocompleteState state = setSelection(selectionStart, selectionEnd);
         Assert.assertEquals("Has autocomplete", expectedHasAutocomplete, state.hasAutocomplete);
-        Assert.assertEquals("Text w/o Autocomplete", expectedTextWithoutAutocomplete,
+        Assert.assertEquals(
+                "Text w/o Autocomplete",
+                expectedTextWithoutAutocomplete,
                 state.textWithoutAutocomplete);
         Assert.assertEquals(
                 "Text w/ Autocomplete", expectedTextWithAutocomplete, state.textWithAutocomplete);
+        Assert.assertEquals("Addition Text", additionalText, state.additionalText);
 
         autocompleteHelper.waitForCallback(0);
-        Assert.assertEquals("Prevent inline autocomplete", expectedPreventInline,
+        Assert.assertEquals(
+                "Prevent inline autocomplete",
+                expectedPreventInline,
                 didPreventInlineAutocomplete.get());
-        Assert.assertEquals("Requested autocomplete text", expectedRequestedAutocompleteText,
+        Assert.assertEquals(
+                "Requested autocomplete text",
+                expectedRequestedAutocompleteText,
                 requestedAutocompleteText.get());
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
+    // @DisableFeatures(OmniboxFeatureList.MULTILINE_EDIT_FIELD)
     public void testAutocompleteUpdatedOnSelection() throws TimeoutException {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-
         // Verify that setting a selection before the autocomplete clears it.
-        verifySelectionState("test", "ing is fun", 1, 1, false, "test", "test", true, "test");
+        verifySelectionState(
+                "test", "ing is fun", "foo.com", 1, 1, false, "test", "test", true, "test");
 
         // Verify that setting a selection range before the autocomplete clears it.
-        verifySelectionState("test", "ing is fun", 0, 4, false, "test", "test", true, "test");
-
-        // Note: with new model touching the beginning of the autocomplete text is a no-op.
-        if (!ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Verify that setting a selection at the start of the autocomplete clears it.
-            verifySelectionState("test", "ing is fun", 4, 4, false, "test", "test", true, "test");
-        }
+        verifySelectionState(
+                "test", "ing is fun", "foo.com", 0, 4, false, "test", "test", true, "test");
 
         // Verify that setting a selection range that covers a portion of the non-autocomplete
         // and autocomplete text does not delete the autocomplete text.
-        verifySelectionState("test", "ing is fun", 2, 5,
-                false, "testing is fun", "testing is fun", true, "testing is fun");
+        verifySelectionState(
+                "test",
+                "ing_is_fun",
+                "foo.com",
+                2,
+                5,
+                false,
+                "testing_is_fun",
+                "testing_is_fun",
+                true,
+                "testing_is_fun");
 
         // Verify that setting a selection range that over the entire string does not delete
         // the autocomplete text.
-        verifySelectionState("test", "ing is fun", 0, 14,
-                false, "testing is fun", "testing is fun", true, "testing is fun");
+        verifySelectionState(
+                "test",
+                "ing_is_fun",
+                "foo.com",
+                0,
+                14,
+                false,
+                "testing_is_fun",
+                "testing_is_fun",
+                true,
+                "testing_is_fun");
 
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: with new model touching the beginning of the autocomplete text is a no-op.
-            // Verify that setting a selection at the end of the text does not delete the
-            // autocomplete text.
-            verifySelectionState("test", "ing is fun", 14, 14, false, "testing is fun",
-                    "testing is fun", true, "testing is fun");
-        } else {
-            // Verify that setting a selection at the end of the text does not delete the
-            // autocomplete text.
-            verifySelectionState("test", "ing is fun", 14, 14, false, "testing is fun",
-                    "testing is fun", false, "testing is fun");
-        }
+        // Note: with new model touching the beginning of the autocomplete text is a no-op.
+        // Verify that setting a selection at the end of the text does not delete the
+        // autocomplete text.
+        verifySelectionState(
+                "test",
+                "ing_is_fun",
+                "foo.com",
+                14,
+                14,
+                false,
+                "testing_is_fun",
+                "testing_is_fun",
+                true,
+                "testing_is_fun");
+
         // Verify that setting a selection in the middle of the autocomplete text does not delete
         // the autocomplete text.
-        verifySelectionState("test", "ing is fun", 9, 9,
-                false, "testing is fun", "testing is fun", true, "testing is fun");
+        verifySelectionState(
+                "test",
+                "ing_is_fun",
+                "foo.com",
+                9,
+                9,
+                false,
+                "testing_is_fun",
+                "testing_is_fun",
+                true,
+                "testing_is_fun");
 
         // Verify that setting a selection range in the middle of the autocomplete text does not
         // delete the autocomplete text.
-        verifySelectionState("test", "ing is fun", 8, 11,
-                false, "testing is fun", "testing is fun", true, "testing is fun");
+        verifySelectionState(
+                "test",
+                "ing_is_fun",
+                "foo.com",
+                8,
+                11,
+                false,
+                "testing_is_fun",
+                "testing_is_fun",
+                true,
+                "testing_is_fun");
 
         // Select autocomplete text. As we do not expect the suggestions to be refreshed, we test
         // this slightly differently than the other cases.
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is fun");
-        AutocompleteState state = setSelection(4, 14);
-
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: with new model selecting the autocomplete text will commit autocomplete.
-            Assert.assertEquals("Has autocomplete", false, state.hasAutocomplete);
-            Assert.assertEquals(
-                    "Text w/o Autocomplete", "testing is fun", state.textWithoutAutocomplete);
-            Assert.assertEquals(
-                    "Text w/ Autocomplete", "testing is fun", state.textWithAutocomplete);
-        } else {
-            // Verify that setting the same selection does not clear the autocomplete text.
-            Assert.assertEquals("Has autocomplete", true, state.hasAutocomplete);
-            Assert.assertEquals("Text w/o Autocomplete", "test", state.textWithoutAutocomplete);
-            Assert.assertEquals(
-                    "Text w/ Autocomplete", "testing is fun", state.textWithAutocomplete);
-        }
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing_is_fun", "www.bar.com");
+        ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.setSelection(4, 14));
+        mOmnibox.checkText(equalTo("testing_is_fun"), null, equalTo("www.bar.com"));
     }
 
     /**
      * Ensure that we send cursor position with autocomplete requests.
      *
-     * When reading this test, it helps to remember that autocomplete requests are not sent
-     * with the user simply moves the cursor.  They're only sent on text modifications.
+     * <p>When reading this test, it helps to remember that autocomplete requests are not sent with
+     * the user simply moves the cursor. They're only sent on text modifications.
      */
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
     public void testSendCursorPosition() throws TimeoutException {
         final CallbackHelper autocompleteHelper = new CallbackHelper();
         final AtomicInteger cursorPositionUsed = new AtomicInteger();
-        mUrlBar.setUrlTextChangeListener((textWithoutAutocomplete, textWithAutocomplete) -> {
-            int cursorPosition = mUrlBar.getSelectionEnd() == mUrlBar.getSelectionStart()
-                    ? mUrlBar.getSelectionStart()
-                    : -1;
-            cursorPositionUsed.set(cursorPosition);
-            autocompleteHelper.notifyCalled();
-        });
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
+        mUrlBar.setTextChangeListener(
+                (textWithoutAutocomplete) -> {
+                    int cursorPosition =
+                            mUrlBar.getSelectionEnd() == mUrlBar.getSelectionStart()
+                                    ? mUrlBar.getSelectionStart()
+                                    : -1;
+                    cursorPositionUsed.set(cursorPosition);
+                    autocompleteHelper.notifyCalled();
+                });
 
-        // Add "a" to the omnibox and leave the cursor at the end of the new
-        // text.
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().commitText("a", 1); });
+        // User types "a".
+        // Omnibox: a|
+        mOmnibox.typeText("a", false);
         autocompleteHelper.waitForCallback(0);
-        // omnmibox text: a|
         Assert.assertEquals(1, cursorPositionUsed.get());
 
-        // Append "cd" to the omnibox and leave the cursor at the end of the new
-        // text.
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().commitText("cd", 1); });
+        // Keyboard autocompletes "cd".
+        // Omnibox: acd|
+        mOmnibox.commitText("cd", true);
         autocompleteHelper.waitForCallback(1);
-        // omnmibox text: acd|
         Assert.assertEquals(3, cursorPositionUsed.get());
 
-        // Move the cursor.
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().setSelection(1, 1); });
-        // omnmibox text: a|cd
-        // Moving the cursor shouldn't have caused a new call.
+        // User moves the cursor.
+        mOmnibox.sendKey(KeyEvent.KEYCODE_DPAD_LEFT);
+        mOmnibox.sendKey(KeyEvent.KEYCODE_DPAD_LEFT);
+
+        // Omnibox: a|cd.
+        // No new events sent - cursor position movements don't count as autocomplete events.
         Assert.assertEquals(2, autocompleteHelper.getCallCount());
-        // The cursor position used on the last call should be the old position.
         Assert.assertEquals(3, cursorPositionUsed.get());
 
-        // Insert "b" at the current cursor position and leave the cursor at
-        // the end of the new text.
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().commitText("b", 1); });
+        // User appends "b"
+        // Omnibox: ab|cd.
+        mOmnibox.typeText("b", false);
         autocompleteHelper.waitForCallback(2);
-        // omnmibox text: ab|cd
         Assert.assertEquals(2, cursorPositionUsed.get());
 
-        // Delete the character before the cursor.
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().deleteSurroundingText(1, 0); });
+        // User deletes "b"
+        // Omnibox text: a|cd
+        mOmnibox.sendKey(KeyEvent.KEYCODE_DEL);
         autocompleteHelper.waitForCallback(3);
-        // omnmibox text: a|cd
         Assert.assertEquals(1, cursorPositionUsed.get());
 
-        // Delete the character before the cursor (again).
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().deleteSurroundingText(1, 0); });
+        // User deletes "a"
+        // Omnibox text: |cd
+        mOmnibox.sendKey(KeyEvent.KEYCODE_DEL);
         autocompleteHelper.waitForCallback(4);
-        // omnmibox text: |cd
         Assert.assertEquals(0, cursorPositionUsed.get());
 
-        mUrlBar.setUrlTextChangeListener(null);
+        mUrlBar.setTextChangeListener(null);
     }
 
     /**
      * Ensure that we allow inline autocomplete when the text gets shorter but is not an explicit
      * delete action by the user.
      *
-     * If you focus the omnibox and there is the selected text "[about:blank]", then typing new text
-     * should clear that entirely and allow autocomplete on the newly entered text.
+     * <p>If you focus the omnibox and there is the selected text "[about:blank]", then typing new
+     * text should clear that entirely and allow autocomplete on the newly entered text.
      *
-     * If we assume deletes happen any time the text gets shorter, then this would be prevented.
+     * <p>If we assume deletes happen any time the text gets shorter, then this would be prevented.
      */
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
     public void testAutocompleteAllowedWhenReplacingText() throws TimeoutException {
         final String textToBeEntered = "c";
 
         final CallbackHelper autocompleteHelper = new CallbackHelper();
         final AtomicBoolean didPreventInlineAutocomplete = new AtomicBoolean();
-        mUrlBar.setUrlTextChangeListener((textWithoutAutocomplete, textWithAutocomplete) -> {
-            if (!TextUtils.equals(textToBeEntered, mUrlBar.getTextWithoutAutocomplete())) return;
-            didPreventInlineAutocomplete.set(!mUrlBar.shouldAutocomplete());
-            autocompleteHelper.notifyCalled();
-            mUrlBar.setUrlTextChangeListener(null);
-        });
+        mUrlBar.setTextChangeListener(
+                (textWithoutAutocomplete) -> {
+                    if (!TextUtils.equals(textToBeEntered, mUrlBar.getTextWithoutAutocomplete())) {
+                        return;
+                    }
+                    didPreventInlineAutocomplete.set(!mUrlBar.shouldAutocomplete());
+                    autocompleteHelper.notifyCalled();
+                    mUrlBar.setTextChangeListener(null);
+                });
 
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().commitText(textToBeEntered, 1); });
+        mOmnibox.typeText(textToBeEntered, false);
         autocompleteHelper.waitForCallback(0);
         Assert.assertFalse(
                 "Inline autocomplete incorrectly prevented.", didPreventInlineAutocomplete.get());
@@ -513,415 +436,312 @@ public class UrlBarTest extends DummyUiActivityTestCase {
      */
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
     public void testSuggestionsUpdatedWhenDeletingInlineAutocomplete() throws TimeoutException {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing");
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing", null);
 
         final CallbackHelper autocompleteHelper = new CallbackHelper();
         final AtomicBoolean didPreventInlineAutocomplete = new AtomicBoolean();
-        mUrlBar.setUrlTextChangeListener((textWithoutAutocomplete, textWithAutocomplete) -> {
-            if (!TextUtils.equals("test", mUrlBar.getTextWithoutAutocomplete())) return;
-            didPreventInlineAutocomplete.set(!mUrlBar.shouldAutocomplete());
-            autocompleteHelper.notifyCalled();
-            mUrlBar.setUrlTextChangeListener(null);
-        });
+        mUrlBar.setTextChangeListener(
+                (textWithoutAutocomplete) -> {
+                    if (!TextUtils.equals("test", mUrlBar.getTextWithoutAutocomplete())) return;
+                    didPreventInlineAutocomplete.set(!mUrlBar.shouldAutocomplete());
+                    autocompleteHelper.notifyCalled();
+                    mUrlBar.setTextChangeListener(null);
+                });
 
-        runInputConnectionMethodOnUiThreadBlocking(new Runnable() {
-            @Override
-            public void run() {
-                KeyUtils.singleKeyEventView(InstrumentationRegistry.getInstrumentation(), mUrlBar,
-                        KeyEvent.KEYCODE_DEL);
-            }
-        });
+        mOmnibox.sendKey(KeyEvent.KEYCODE_DEL);
 
-        CriteriaHelper.pollUiThread(
-                () -> Criteria.checkThat(mUrlBar.getText().toString(), Matchers.is("test")));
+        mOmnibox.checkText(equalTo("test"), null);
 
         autocompleteHelper.waitForCallback(0);
-        Assert.assertTrue("Inline autocomplete incorrectly allowed after delete.",
+        Assert.assertTrue(
+                "Inline autocomplete incorrectly allowed after delete.",
                 didPreventInlineAutocomplete.get());
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
-    public void testSelectionChangesIgnoredInBatchMode() {
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: with the new model, we remove autocomplete text at the beginning of a batch
-            // edit and add it at the end of a batch edit.
-            return;
-        }
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is fun");
-
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().beginBatchEdit(); });
-        // Ensure the autocomplete is not modified if in batch mode.
-        AutocompleteState state = setSelection(1, 1);
-        Assert.assertTrue(state.hasAutocomplete);
-        Assert.assertEquals("test", state.textWithoutAutocomplete);
-        Assert.assertEquals("testing is fun", state.textWithAutocomplete);
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().endBatchEdit(); });
-        // Ensure that after batch mode has ended that the autocomplete is cleared due to the
-        // invalid selection range.
-        state = getAutocompleteState(null);
-        Assert.assertFalse(state.hasAutocomplete);
-        Assert.assertEquals("test", state.textWithoutAutocomplete);
-        Assert.assertEquals("test", state.textWithAutocomplete);
+    @DisabledTest(message = "Disabled because of crbug.com/477262537")
+    public void testAutocorrectionChangesTriggerCorrectSuggestions() {
+        mOmnibox.setComposingText("test", 0, 4);
+        mOmnibox.setAutocompleteText("ing is fun", null);
+        mOmnibox.checkText(equalTo("test"), equalTo("testing is fun"));
+        mOmnibox.commitText("rest", false);
+        mOmnibox.checkText(equalTo("rest"), null);
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
-    public void testBatchModeChangesTriggerCorrectSuggestions() {
-        final AtomicReference<String> requestedAutocompleteText = new AtomicReference<String>();
-        mUrlBar.setUrlTextChangeListener(
-                (textWithoutAutocomplete, textWithAutocomplete)
-                        -> requestedAutocompleteText.set(mUrlBar.getTextWithoutAutocomplete()));
-
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is fun");
-
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().beginBatchEdit(); });
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().commitText("y", 1); });
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mUrlBar.getInputConnection().endBatchEdit(); });
-
-        CriteriaHelper.pollUiThread(
-                () -> Criteria.checkThat(requestedAutocompleteText.get(), Matchers.is("testy")));
-
-        mUrlBar.setUrlTextChangeListener(null);
+    public void testAutocompletionChangesTriggerCorrectSuggestions() {
+        // Type text. Make sure it appears as composing text for the IME.
+        mOmnibox.setComposingText("test", 0, 4);
+        mOmnibox.setAutocompleteText("ing is fun", null);
+        mOmnibox.checkText(equalTo("test"), equalTo("testing is fun"));
+        mOmnibox.commitText("y", true);
+        mOmnibox.checkText(equalTo("testy"), null);
     }
 
     @Test
     @SmallTest
-    @Feature("Omnibox")
     public void testAutocompleteCorrectlyPerservedOnBatchMode() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        OmniboxTestUtils.waitForFocusAndKeyboardActive(mUrlBar, true);
-
         // Valid case (cursor at the end of text, single character, matches previous autocomplete).
-        setTextAndVerifyNoAutocomplete("g");
-        setAutocomplete("g", "oogle.com");
-        AutocompleteState state = getAutocompleteState(new Runnable() {
-            @Override
-            // TODO(crbug.com/635567): Fix this properly.
-            @SuppressLint("SetTextI18n")
-            public void run() {
-                mUrlBar.getInputConnection().commitText("o", 1);
-            }
-        });
-        Assert.assertTrue(state.hasAutocomplete);
-        Assert.assertEquals("google.com", state.textWithAutocomplete);
-        Assert.assertEquals("go", state.textWithoutAutocomplete);
+        mOmnibox.setText("g");
+        mOmnibox.setAutocompleteText("oogle.com", null);
+        mOmnibox.typeText("o", false);
+        mOmnibox.checkText(equalTo("go"), equalTo("google.com"));
 
-        // Invalid case (cursor not at the end of the text)
-        setTextAndVerifyNoAutocomplete("g");
-        setAutocomplete("g", "oogle.com");
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            // TODO(crbug.com/635567): Fix this properly.
-            @SuppressLint("SetTextI18n")
-            public void run() {
-                mUrlBar.getInputConnection().beginBatchEdit();
-                mUrlBar.getInputConnection().commitText("o", 1);
-                mUrlBar.getInputConnection().setSelection(0, 0);
-                mUrlBar.getInputConnection().endBatchEdit();
-            }
-        });
-        Assert.assertFalse(state.hasAutocomplete);
+        // Invalid case (cursor not at the end of the text).
+        mOmnibox.setText("g");
+        mOmnibox.setAutocompleteText("oogle.com", null);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    InputConnection conn = mUrlBar.getInputConnection();
+                    conn.beginBatchEdit();
+                    conn.finishComposingText();
+                    conn.commitText("o", 1);
+                    conn.setSelection(0, 0);
+                    conn.endBatchEdit();
+                });
+        mOmnibox.checkText(equalTo("go"), null);
 
         // Invalid case (next character did not match previous autocomplete)
-        setTextAndVerifyNoAutocomplete("g");
-        setAutocomplete("g", "oogle.com");
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            // TODO(crbug.com/635567): Fix this properly.
-            @SuppressLint("SetTextI18n")
-            public void run() {
-                mUrlBar.getInputConnection().commitText("a", 1);
-            }
-        });
-        Assert.assertFalse(state.hasAutocomplete);
+        mOmnibox.setText("g");
+        mOmnibox.setAutocompleteText("oogle.com", null);
+        mOmnibox.typeText("a", false);
+        mOmnibox.checkText(equalTo("ga"), null);
 
         // Multiple characters entered instead of 1.
-        setTextAndVerifyNoAutocomplete("g");
-        setAutocomplete("g", "oogle.com");
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            // TODO(crbug.com/635567): Fix this properly.
-            @SuppressLint("SetTextI18n")
-            public void run() {
-                mUrlBar.getInputConnection().commitText("oogl", 1);
-            }
-        });
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: new model allows multiple characters because usually keyboard app's UI and
-            // InputConnection threads are separated and user may type fast enough.
-            Assert.assertTrue(state.hasAutocomplete);
-        } else {
-            Assert.assertFalse(state.hasAutocomplete);
-        }
+        mOmnibox.setText("g");
+        mOmnibox.setAutocompleteText("oogle.com", null);
+        mOmnibox.commitText("oogl", true);
+        mOmnibox.checkText(equalTo("googl"), equalTo("google.com"));
     }
 
     @Test
     @SmallTest
-    @Feature("Omnibox")
     public void testAutocompleteSpanClearedOnNonMatchingCommitText() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        OmniboxTestUtils.waitForFocusAndKeyboardActive(mUrlBar, true);
+        mOmnibox.setText("a");
+        mOmnibox.setAutocompleteText("mazon.com", null);
+        mOmnibox.checkText(equalTo("a"), equalTo("amazon.com"));
 
-        setTextAndVerifyNoAutocomplete("a");
-        setAutocomplete("a", "mazon.com");
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mUrlBar.getInputConnection().beginBatchEdit();
-            mUrlBar.getInputConnection().commitText("l", 1);
-            mUrlBar.getInputConnection().setComposingText("", 1);
-            mUrlBar.getInputConnection().endBatchEdit();
-        });
-
-        CriteriaHelper.pollUiThread(
-                () -> Criteria.checkThat(mUrlBar.getText().toString(), Matchers.is("al")));
+        mOmnibox.typeText("l", false);
+        mOmnibox.checkText(equalTo("al"), null);
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
     public void testAutocompleteClearedOnComposition() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        OmniboxTestUtils.waitForFocusAndKeyboardActive(mUrlBar, true);
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing is fun", null);
 
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is fun");
-
-        Assert.assertNotNull(mUrlBar.getInputConnection());
-        AutocompleteState state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.getInputConnection().setComposingText("ing compose", 4);
-            }
-        });
-        Assert.assertFalse(state.hasAutocomplete);
-
-        Editable urlText = getUrlBarText();
-        Assert.assertEquals("testing compose", urlText.toString());
-        // TODO(tedchoc): Investigate why this fails on x86.
-        //assertEquals(4, BaseInputConnection.getComposingSpanStart(urlText));
-        //assertEquals(15, BaseInputConnection.getComposingSpanEnd(urlText));
+        mOmnibox.setComposingText("ing compose", 4, 4);
+        mOmnibox.checkText(equalTo("testing compose"), null);
     }
 
     @Test
     @SmallTest
-    @Feature("Omnibox")
-    @Restriction({RESTRICTION_TYPE_NON_LOW_END_DEVICE}) // crbug.com/635714
     public void testDelayedCompositionCorrectedWithAutocomplete() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        OmniboxTestUtils.waitForFocusAndKeyboardActive(mUrlBar, true);
-
-        Assert.assertNotNull(mUrlBar.getInputConnection());
-
-        // Test with a single autocomplete
-
-        setTextAndVerifyNoAutocomplete("chrome://f");
-        setAutocomplete("chrome://f", "lags");
-
-        AutocompleteState state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.getInputConnection().setComposingRegion(13, 14);
-                mUrlBar.getInputConnection().setComposingText("f", 1);
-            }
-        });
-
-        Editable urlText = getUrlBarText();
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: the new model hides autocomplete text from IME.
-            // setComposingRegion fails because autocomplete is hidden from IME. In reality, IME
-            // shouldn't do this.
-            Assert.assertFalse(state.hasAutocomplete);
-            Assert.assertEquals("chrome://ff", urlText.toString());
-            Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 10);
-            Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 11);
-        } else {
-            Assert.assertFalse(state.hasAutocomplete);
-            Assert.assertEquals("chrome://f", urlText.toString());
-            Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 9);
-            Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 10);
-        }
+        // Test with a single IME autocomplete
+        mOmnibox.typeText("chrome://f", false);
+        mOmnibox.setAutocompleteText("lags", null);
+        mOmnibox.setComposingText("l", 13, 14);
+        mOmnibox.checkText(equalTo("chrome://fl"), equalTo("chrome://flags"));
 
         // Test with > 1 characters in composition.
-
-        setTextAndVerifyNoAutocomplete("chrome://fl");
-        setAutocomplete("chrome://fl", "ags");
-
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.getInputConnection().setComposingRegion(12, 14);
-                mUrlBar.getInputConnection().setComposingText("fl", 1);
-            }
-        });
-        urlText = getUrlBarText();
-
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: the new model hides autocomplete text from IME.
-            // setComposingRegion fails because autocomplete is hidden from IME. In reality, IME
-            // shouldn't do this.
-            Assert.assertFalse(state.hasAutocomplete);
-            Assert.assertEquals("chrome://flfl", urlText.toString());
-            Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 11);
-            Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 13);
-        } else {
-            Assert.assertFalse(state.hasAutocomplete);
-            Assert.assertEquals("chrome://fl", urlText.toString());
-            Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 9);
-            Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 11);
-        }
+        mOmnibox.setText("chrome://fl");
+        mOmnibox.setAutocompleteText("ags", null);
+        mOmnibox.checkText(equalTo("chrome://fl"), equalTo("chrome://flags"));
+        mOmnibox.setComposingText("fl", 12, 14);
+        mOmnibox.checkText(equalTo("chrome://flfl"), null);
 
         // Test with non-matching composition.  Should just append to the URL text.
-
-        setTextAndVerifyNoAutocomplete("chrome://f");
-        setAutocomplete("chrome://f", "lags");
-
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.getInputConnection().setComposingRegion(13, 14);
-                mUrlBar.getInputConnection().setComposingText("g", 1);
-            }
-        });
-        Assert.assertFalse(state.hasAutocomplete);
-
-        urlText = getUrlBarText();
-        Assert.assertEquals("chrome://fg", urlText.toString());
-        Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 10);
-        Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 11);
+        mOmnibox.setText("chrome://f");
+        mOmnibox.setAutocompleteText("lags", null);
+        mOmnibox.checkText(equalTo("chrome://f"), equalTo("chrome://flags"));
+        mOmnibox.setComposingText("g", 13, 14);
+        mOmnibox.checkText(equalTo("chrome://fg"), null);
 
         // Test with composition text that matches the entire text w/o autocomplete.
+        mOmnibox.setText("chrome://f");
+        mOmnibox.setAutocompleteText("lags", null);
+        mOmnibox.checkText(equalTo("chrome://f"), equalTo("chrome://flags"));
+        mOmnibox.setComposingText("chrome://f", 13, 14);
+        mOmnibox.checkText(equalTo("chrome://fchrome://f"), null);
 
-        setTextAndVerifyNoAutocomplete("chrome://f");
-        setAutocomplete("chrome://f", "lags");
-
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.getInputConnection().setComposingRegion(13, 14);
-                mUrlBar.getInputConnection().setComposingText("chrome://f", 1);
-            }
-        });
-        urlText = getUrlBarText();
-        if (ChromeFeatureList.isEnabled(ChromeFeatureList.SPANNABLE_INLINE_AUTOCOMPLETE)) {
-            // Note: the new model hides autocomplete text from IME.
-            // setComposingRegion fails because autocomplete is hidden from IME. In reality, IME
-            // shouldn't do this.
-            Assert.assertFalse(state.hasAutocomplete);
-            Assert.assertEquals("chrome://fchrome://f", urlText.toString());
-            Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 10);
-            Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 20);
-        } else {
-            Assert.assertFalse(state.hasAutocomplete);
-            Assert.assertEquals("chrome://f", urlText.toString());
-            Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 0);
-            Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 10);
-        }
-
-        // Test with composition text longer than the URL text.  Shouldn't crash and should
-        // just append text.
-
-        setTextAndVerifyNoAutocomplete("chrome://f");
-        setAutocomplete("chrome://f", "lags");
-
-        state = getAutocompleteState(new Runnable() {
-            @Override
-            public void run() {
-                mUrlBar.getInputConnection().setComposingRegion(13, 14);
-                mUrlBar.getInputConnection().setComposingText("blahblahblah", 1);
-            }
-        });
-        Assert.assertFalse(state.hasAutocomplete);
-
-        urlText = getUrlBarText();
-        Assert.assertEquals("chrome://fblahblahblah", urlText.toString());
-        Assert.assertEquals(BaseInputConnection.getComposingSpanStart(urlText), 10);
-        Assert.assertEquals(BaseInputConnection.getComposingSpanEnd(urlText), 22);
+        // Test with composition text longer than the URL text.
+        // Shouldn't crash and should just append text.
+        mOmnibox.setText("chrome://f");
+        mOmnibox.setAutocompleteText("lags", null);
+        mOmnibox.checkText(equalTo("chrome://f"), equalTo("chrome://flags"));
+        mOmnibox.setComposingText("blahblahblah", 13, 14);
+        mOmnibox.checkText(equalTo("chrome://fblahblahblah"), null);
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
+    @DisabledTest(message = "Disabled because of b/333536371")
+    @SuppressWarnings(
+            "unchecked") // Mockito.clearInvocations() varargs on generic Callback<String>.
     public void testUrlTextChangeListener() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
+        mUrlBar.setTextChangeListener(mUrlTextChangeListener);
 
-        UrlBar.UrlTextChangeListener listener = Mockito.mock(UrlBar.UrlTextChangeListener.class);
-        mUrlBar.setUrlTextChangeListener(listener);
-
-        setTextAndVerifyNoAutocomplete("onomatop");
-        Mockito.verify(listener).onTextChanged("onomatop", "onomatop");
+        mOmnibox.setText("onomatop");
+        Mockito.verify(mUrlTextChangeListener).onResult("onomatop");
 
         // Setting autocomplete does not send a change update.
-        setAutocomplete("onomatop", "oeia");
+        mOmnibox.setAutocompleteText("oeia", null);
 
-        setTextAndVerifyNoAutocomplete("");
-        Mockito.verify(listener).onTextChanged("", "");
+        Mockito.clearInvocations(mUrlTextChangeListener);
+        mOmnibox.setText("");
+        Mockito.verify(mUrlTextChangeListener).onResult("");
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
     public void testSetAutocompleteText_ShrinkingText() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ing is awesome");
-        setAutocomplete("test", "ing is hard");
-        setAutocomplete("test", "ingz");
-        assertAutocompleteSelectionRange(4, 8);
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing is awesome", null);
+        mOmnibox.setAutocompleteText("ing is hard", null);
+        mOmnibox.setAutocompleteText("ingz", null);
+        mOmnibox.checkText(equalTo("test"), equalTo("testingz"), null, 4, 8);
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
+    public void testSetAutocompleteTextWithAdditionalText_ShrinkingText() {
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ing is awesome", "www.foobar.com");
+        mOmnibox.setAutocompleteText("ing is hard", "www.bar.com");
+        mOmnibox.setAutocompleteText("ingz", "www.foo.com");
+        mOmnibox.checkText(equalTo("test"), equalTo("testingz"), equalTo("www.foo.com"), 4, 8);
+    }
+
+    @Test
+    @SmallTest
     public void testSetAutocompleteText_GrowingText() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ingz");
-        setAutocomplete("test", "ing is hard");
-        setAutocomplete("test", "ing is awesome");
-        assertAutocompleteSelectionRange(4, 18);
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ingz", null);
+        mOmnibox.setAutocompleteText("ing is hard", null);
+        mOmnibox.setAutocompleteText("ing is awesome", null);
+        mOmnibox.checkText(equalTo("test"), equalTo("testing is awesome"), null, 4, 18);
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
+    public void testSetAutocompleteTextWithAdditionalText_GrowingText() {
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ingz", "www.foo.com");
+        mOmnibox.setAutocompleteText("ing is hard", "www.bar.com");
+        mOmnibox.setAutocompleteText("ing is awesome", "www.foobar.com");
+        mOmnibox.checkText(
+                equalTo("test"), equalTo("testing is awesome"), equalTo("www.foobar.com"), 4, 18);
+    }
+
+    @Test
+    @SmallTest
     public void testSetAutocompleteText_DuplicateText() {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        setTextAndVerifyNoAutocomplete("test");
-        setAutocomplete("test", "ingz");
-        setAutocomplete("test", "ingz");
-        setAutocomplete("test", "ingz");
-        assertAutocompleteSelectionRange(4, 8);
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ingz", null);
+        mOmnibox.setAutocompleteText("ingz", null);
+        mOmnibox.setAutocompleteText("ingz", null);
+        mOmnibox.checkText(equalTo("test"), equalTo("testingz"), null, 4, 8);
     }
 
     @Test
     @SmallTest
-    @Feature({"Omnibox"})
+    public void testSetAutocompleteTextWithAdditionalText_DuplicateText() {
+        mOmnibox.setText("test");
+        mOmnibox.setAutocompleteText("ingz", "www.foo.com");
+        mOmnibox.setAutocompleteText("ingz", "www.foo.com");
+        mOmnibox.setAutocompleteText("ingz", "www.foo.com");
+        mOmnibox.checkText(equalTo("test"), equalTo("testingz"), equalTo("www.foo.com"), 4, 8);
+    }
+
+    @Test
+    @SmallTest
     public void testUrlDirection() throws TimeoutException {
-        toggleFocusAndIgnoreImeOperations(mUrlBar, true);
-        assertUrlDirection(View.LAYOUT_DIRECTION_LOCALE);
         setTextAndVerifyTextDirection("ل", View.LAYOUT_DIRECTION_RTL);
         setTextAndVerifyTextDirection("a", View.LAYOUT_DIRECTION_LTR);
         setTextAndVerifyTextDirection("للك", View.LAYOUT_DIRECTION_RTL);
         setTextAndVerifyTextDirection("f", View.LAYOUT_DIRECTION_LTR);
-        setTextAndVerifyTextDirection("", View.LAYOUT_DIRECTION_LOCALE);
+    }
+
+    @Test
+    @SmallTest
+    public void testAutocompleteUpdatedOnDefocus() throws InterruptedException {
+        mActivityTestRule.loadUrl(ContentUrlConstants.ABOUT_BLANK_DISPLAY_URL);
+        mOmnibox.requestFocus();
+        mOmnibox.typeText("test", false);
+        mOmnibox.clearFocus();
+        mOmnibox.checkText(equalTo(ContentUrlConstants.ABOUT_BLANK_DISPLAY_URL), null);
+    }
+
+    @Test
+    @SmallTest
+    public void testCopyUrl_SchemePreservation() throws Exception {
+        // Force desktop mode.
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> OmniboxCapabilities.setHasDesktopExperienceForTesting(Boolean.TRUE));
+
+        mOmnibox.clearFocus();
+
+        String url = "https://www.foo.com/index.html";
+        mOmnibox.requestFocus();
+        LocationBarCoordinator locationBarCoordinator =
+                (LocationBarCoordinator)
+                        mActivityTestRule
+                                .getActivity()
+                                .getToolbarManager()
+                                .getToolbarLayoutForTesting()
+                                .getLocationBar();
+        UrlBarData urlBarData = UrlBarData.forUrlAndText(new GURL(url), "www.foo.com/index.html");
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    locationBarCoordinator
+                            .getMediatorForTesting()
+                            .setUrlBarText(
+                                    urlBarData,
+                                    UrlBar.ScrollType.NO_SCROLL,
+                                    TextSelection.SELECT_ALL);
+                });
+
+        String expectedStripped = "www.foo.com/index.html";
+        mOmnibox.checkText(equalTo(expectedStripped), null);
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> mUrlBar.setSelection(0, mUrlBar.getText().length()));
+        ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.onTextContextMenuItem(android.R.id.copy));
+
+        String clipboardText = getClipboardText();
+        Assert.assertEquals(url, clipboardText);
+
+        mOmnibox.setText("");
+        mOmnibox.typeText("bar", false);
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> mUrlBar.setSelection(0, mUrlBar.getText().length()));
+        ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.onTextContextMenuItem(android.R.id.copy));
+
+        clipboardText = getClipboardText();
+        Assert.assertEquals("bar", clipboardText);
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> OmniboxCapabilities.setHasDesktopExperienceForTesting((Boolean) null));
+    }
+
+    private String getClipboardText() {
+        return ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    ClipboardManager clipboard =
+                            (ClipboardManager)
+                                    mUrlBar.getContext()
+                                            .getSystemService(Context.CLIPBOARD_SERVICE);
+                    ClipData clip = clipboard.getPrimaryClip();
+                    if (clip != null && clip.getItemCount() > 0) {
+                        return clip.getItemAt(0).getText().toString();
+                    }
+                    return "";
+                });
     }
 }

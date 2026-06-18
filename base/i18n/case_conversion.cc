@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,50 +6,62 @@
 
 #include <stdint.h>
 
+#include <string>
+#include <string_view>
+
 #include "base/numerics/safe_conversions.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "third_party/icu/source/common/unicode/uchar.h"
 #include "third_party/icu/source/common/unicode/unistr.h"
 #include "third_party/icu/source/common/unicode/ustring.h"
 
-namespace base {
-namespace i18n {
+namespace base::i18n {
 
 namespace {
 
 // Provides a uniform interface for upper/lower/folding which take take
 // slightly varying parameters.
-typedef int32_t (*CaseMapperFunction)(UChar* dest, int32_t dest_capacity,
-                                      const UChar* src, int32_t src_length,
+typedef int32_t (*CaseMapperFunction)(UChar* dest,
+                                      int32_t dest_capacity,
+                                      const UChar* src,
+                                      int32_t src_length,
                                       UErrorCode* error);
 
-int32_t ToUpperMapper(UChar* dest, int32_t dest_capacity,
-                      const UChar* src, int32_t src_length,
+int32_t ToUpperMapper(UChar* dest,
+                      int32_t dest_capacity,
+                      const UChar* src,
+                      int32_t src_length,
                       UErrorCode* error) {
   // Use default locale.
   return u_strToUpper(dest, dest_capacity, src, src_length, nullptr, error);
 }
 
-int32_t ToLowerMapper(UChar* dest, int32_t dest_capacity,
-                      const UChar* src, int32_t src_length,
+int32_t ToLowerMapper(UChar* dest,
+                      int32_t dest_capacity,
+                      const UChar* src,
+                      int32_t src_length,
                       UErrorCode* error) {
   // Use default locale.
   return u_strToLower(dest, dest_capacity, src, src_length, nullptr, error);
 }
 
-int32_t FoldCaseMapper(UChar* dest, int32_t dest_capacity,
-                       const UChar* src, int32_t src_length,
+int32_t FoldCaseMapper(UChar* dest,
+                       int32_t dest_capacity,
+                       const UChar* src,
+                       int32_t src_length,
                        UErrorCode* error) {
   return u_strFoldCase(dest, dest_capacity, src, src_length,
                        U_FOLD_CASE_DEFAULT, error);
 }
 
-// Provides similar functionality as UnicodeString::caseMap but on string16.
-string16 CaseMap(StringPiece16 string, CaseMapperFunction case_mapper) {
-  string16 dest;
-  if (string.empty())
+// Provides similar functionality as UnicodeString::caseMap but on
+// std::u16string.
+std::u16string CaseMap(std::u16string_view string,
+                       CaseMapperFunction case_mapper) {
+  std::u16string dest;
+  if (string.empty()) {
     return dest;
+  }
 
   // Provide an initial guess that the string length won't change. The typical
   // strings we use will very rarely change length in this process, so don't
@@ -64,9 +76,8 @@ string16 CaseMap(StringPiece16 string, CaseMapperFunction case_mapper) {
     // terminator, but will otherwise. So we don't need to save room for that.
     // Don't use WriteInto, which assumes null terminators.
     int32_t new_length = case_mapper(
-        &dest[0], saturated_cast<int32_t>(dest.size()),
-        string.data(), saturated_cast<int32_t>(string.size()),
-        &error);
+        &dest[0], saturated_cast<int32_t>(dest.size()), string.data(),
+        saturated_cast<int32_t>(string.size()), &error);
     dest.resize(new_length);
   } while (error == U_BUFFER_OVERFLOW_ERROR);
   return dest;
@@ -74,17 +85,16 @@ string16 CaseMap(StringPiece16 string, CaseMapperFunction case_mapper) {
 
 }  // namespace
 
-string16 ToLower(StringPiece16 string) {
+std::u16string ToLower(std::u16string_view string) {
   return CaseMap(string, &ToLowerMapper);
 }
 
-string16 ToUpper(StringPiece16 string) {
+std::u16string ToUpper(std::u16string_view string) {
   return CaseMap(string, &ToUpperMapper);
 }
 
-string16 FoldCase(StringPiece16 string) {
+std::u16string FoldCase(std::u16string_view string) {
   return CaseMap(string, &FoldCaseMapper);
 }
 
-}  // namespace i18n
-}  // namespace base
+}  // namespace base::i18n

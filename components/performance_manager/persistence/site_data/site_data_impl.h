@@ -1,16 +1,18 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PERFORMANCE_MANAGER_PERSISTENCE_SITE_DATA_SITE_DATA_IMPL_H_
 #define COMPONENTS_PERFORMANCE_MANAGER_PERSISTENCE_SITE_DATA_SITE_DATA_IMPL_H_
 
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include "base/callback_forward.h"
+#include "base/byte_size.h"
+#include "base/functional/callback_forward.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
@@ -63,6 +65,9 @@ class SiteDataImpl : public base::RefCounted<SiteDataImpl> {
     virtual void OnSiteDataImplDestroyed(SiteDataImpl* impl) = 0;
   };
 
+  SiteDataImpl(const SiteDataImpl&) = delete;
+  SiteDataImpl& operator=(const SiteDataImpl&) = delete;
+
   // Must be called when a load event is received for this site, this can be
   // invoked several times if instances of this class are shared between
   // multiple tabs.
@@ -114,29 +119,39 @@ class SiteDataImpl : public base::RefCounted<SiteDataImpl> {
   void NotifyLoadTimePerformanceMeasurement(
       base::TimeDelta load_duration,
       base::TimeDelta cpu_usage_estimate,
-      uint64_t private_footprint_kb_estimate);
+      base::ByteSize private_footprint_estimate);
 
   base::TimeDelta last_loaded_time_for_testing() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     return InternalRepresentationToTimeDelta(
         site_characteristics_.last_loaded());
   }
 
   const SiteDataProto& site_characteristics_for_testing() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     return site_characteristics_;
   }
 
-  size_t loaded_tabs_count_for_testing() const { return loaded_tabs_count_; }
+  size_t loaded_tabs_count_for_testing() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return loaded_tabs_count_;
+  }
 
   size_t loaded_tabs_in_background_count_for_testing() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     return loaded_tabs_in_background_count_;
   }
 
   base::TimeTicks background_session_begin_for_testing() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     return background_session_begin_;
   }
 
   const url::Origin& origin() const { return origin_; }
-  bool is_dirty() const { return is_dirty_; }
+  bool is_dirty() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return is_dirty_;
+  }
 
   void ExpireAllObservationWindowsForTesting();
 
@@ -144,7 +159,10 @@ class SiteDataImpl : public base::RefCounted<SiteDataImpl> {
     ClearObservationsAndInvalidateReadOperation();
   }
 
-  bool fully_initialized_for_testing() const { return fully_initialized_; }
+  bool fully_initialized_for_testing() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return fully_initialized_;
+  }
 
   static const base::TimeDelta GetFeatureObservationWindowLengthForTesting();
 
@@ -159,16 +177,15 @@ class SiteDataImpl : public base::RefCounted<SiteDataImpl> {
   friend class performance_manager::MockDataCache;
 
   SiteDataImpl(const url::Origin& origin,
-               OnDestroyDelegate* delegate,
+               base::WeakPtr<OnDestroyDelegate> delegate,
                SiteDataStore* data_store);
 
   virtual ~SiteDataImpl();
 
   // Helper functions to convert from/to the internal representation that is
   // used to store TimeDelta values in the |SiteDataProto| protobuf.
-  static base::TimeDelta InternalRepresentationToTimeDelta(
-      ::google::protobuf::int64 value) {
-    return base::TimeDelta::FromSeconds(value);
+  static base::TimeDelta InternalRepresentationToTimeDelta(int64_t value) {
+    return base::Seconds(value);
   }
   static int64_t TimeDeltaToInternalRepresentation(base::TimeDelta delta) {
     return delta.InSeconds();
@@ -209,14 +226,16 @@ class SiteDataImpl : public base::RefCounted<SiteDataImpl> {
 
   // Helper function to update a given |SiteDataFeatureProto| when a
   // feature gets used.
-  void NotifyFeatureUsage(SiteDataFeatureProto* feature_proto,
-                          const char* feature_name);
+  void NotifyFeatureUsage(SiteDataFeatureProto* feature_proto);
 
-  bool IsLoaded() const { return loaded_tabs_count_ > 0U; }
+  bool IsLoaded() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return loaded_tabs_count_ > 0U;
+  }
 
   // Callback that needs to be called by the data store once it has finished
   // trying to read the protobuf.
-  void OnInitCallback(base::Optional<SiteDataProto> site_characteristic_proto);
+  void OnInitCallback(std::optional<SiteDataProto> site_characteristic_proto);
 
   // Decrement the |loaded_tabs_in_background_count_| counter and update the
   // local feature observation durations if necessary.
@@ -233,12 +252,15 @@ class SiteDataImpl : public base::RefCounted<SiteDataImpl> {
 
   // This site's characteristics, contains the features and other values are
   // measured.
-  SiteDataProto site_characteristics_;
+  SiteDataProto site_characteristics_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // The in-memory storage for the moving performance averages.
-  ExponentialMovingAverage load_duration_;       // microseconds.
-  ExponentialMovingAverage cpu_usage_estimate_;  // microseconds.
-  ExponentialMovingAverage private_footprint_kb_estimate_;
+  ExponentialMovingAverage load_duration_
+      GUARDED_BY_CONTEXT(sequence_checker_);  // microseconds.
+  ExponentialMovingAverage cpu_usage_estimate_
+      GUARDED_BY_CONTEXT(sequence_checker_);  // microseconds.
+  ExponentialMovingAverage private_footprint_kb_estimate_
+      GUARDED_BY_CONTEXT(sequence_checker_);
 
   // This site's origin.
   const url::Origin origin_;
@@ -247,42 +269,49 @@ class SiteDataImpl : public base::RefCounted<SiteDataImpl> {
   // same origin might share the same instance of this object, this counter
   // will allow to properly update the observation time (starts when the first
   // tab gets loaded, stops when the last one gets unloaded).
-  size_t loaded_tabs_count_;
+  size_t loaded_tabs_count_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // Number of loaded tabs currently in background for this origin, the
   // implementation doesn't need to track unloaded tabs running in background.
-  size_t loaded_tabs_in_background_count_;
+  size_t loaded_tabs_in_background_count_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // The time at which the |loaded_tabs_in_background_count_| counter changed
   // from 0 to 1.
-  base::TimeTicks background_session_begin_;
+  base::TimeTicks background_session_begin_
+      GUARDED_BY_CONTEXT(sequence_checker_);
 
   // The data store used to store the site characteristics, it should outlive
   // this object.
-  SiteDataStore* const data_store_;
+  const raw_ptr<SiteDataStore, DanglingUntriaged> data_store_;
 
   // The delegate that should get notified when this object is about to get
   // destroyed, it should outlive this object.
-  OnDestroyDelegate* const delegate_;
+  // The use of WeakPtr here is a temporary, minimally invasive fix for the UAF
+  // reported in https://crbug.com/1231933. By using a WeakPtr, the call-out
+  // is avoided in the case where the OnDestroyDelegate has been deleted before
+  // all SiteDataImpls have been released.
+  // The proper fix for this is going to be more invasive and less suitable
+  // for merging, should it come to that.
+  base::WeakPtr<OnDestroyDelegate> const delegate_;
 
   // Indicates if this object has been fully initialized, either because the
   // read operation from the database has completed or because it has been
   // cleared.
-  bool fully_initialized_;
+  bool fully_initialized_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // Dirty bit, indicates if any of the fields in |site_characteristics_| has
   // changed since it has been initialized.
-  bool is_dirty_;
+  bool is_dirty_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // A collection of callbacks to be invoked when this object becomes fully
   // initialized.
-  std::vector<base::OnceClosure> data_loaded_callbacks_;
+  std::vector<base::OnceClosure> data_loaded_callbacks_
+      GUARDED_BY_CONTEXT(sequence_checker_);
 
   SEQUENCE_CHECKER(sequence_checker_);
 
-  base::WeakPtrFactory<SiteDataImpl> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(SiteDataImpl);
+  base::WeakPtrFactory<SiteDataImpl> weak_factory_
+      GUARDED_BY_CONTEXT(sequence_checker_){this};
 };
 
 }  // namespace internal

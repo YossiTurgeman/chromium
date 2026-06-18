@@ -1,9 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "mojo/public/tools/fuzzers/mojolpm.h"
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/no_destructor.h"
 #include "mojo/public/c/system/data_pipe.h"
 #include "mojo/public/cpp/system/data_pipe.h"
@@ -13,6 +15,9 @@ namespace mojolpm {
 const uint32_t kPipeElementMaxSize = 0x1000u;
 const uint32_t kPipeCapacityMaxSize = 0x100000u;
 const uint32_t kPipeActionMaxSize = 0x100000u;
+
+const uint64_t kSharedBufferMaxSize = 0x100000u;
+const uint32_t kSharedBufferActionMaxSize = 0x100000u;
 
 Context::Context() = default;
 
@@ -237,8 +242,7 @@ bool FromProto(const ::mojolpm::DataPipeConsumerHandle& input,
     options.capacity_num_bytes =
         std::min(input.new_().capacity_num_bytes(), kPipeCapacityMaxSize);
 
-    if (MOJO_RESULT_OK ==
-        mojo::CreateDataPipe(&options, &producer, &consumer)) {
+    if (MOJO_RESULT_OK == mojo::CreateDataPipe(&options, producer, consumer)) {
       result = true;
       output = std::move(consumer);
       mojolpm::GetContext()->AddInstance(std::move(producer));
@@ -276,8 +280,7 @@ bool FromProto(const ::mojolpm::DataPipeProducerHandle& input,
     options.capacity_num_bytes =
         std::min(input.new_().capacity_num_bytes(), kPipeCapacityMaxSize);
 
-    if (MOJO_RESULT_OK ==
-        mojo::CreateDataPipe(&options, &producer, &consumer)) {
+    if (MOJO_RESULT_OK == mojo::CreateDataPipe(&options, producer, consumer)) {
       result = true;
       output = std::move(producer);
       mojolpm::GetContext()->AddInstance(std::move(consumer));
@@ -304,7 +307,22 @@ bool ToProto(const mojo::ScopedMessagePipeHandle& input,
 
 bool FromProto(const ::mojolpm::SharedBufferHandle& input,
                mojo::ScopedSharedBufferHandle& output) {
-  return true;
+  bool result = false;
+
+  if (input.instance_case() == ::mojolpm::SharedBufferHandle::kOld) {
+    auto old =
+        mojolpm::GetContext()
+            ->GetAndRemoveInstance<mojo::ScopedSharedBufferHandle>(input.old());
+    if (old) {
+      output = std::move(*old.release());
+    }
+  } else {
+    output = mojo::SharedBufferHandle::Create(
+        std::min(input.new_().num_bytes(), kSharedBufferMaxSize));
+    result = true;
+  }
+
+  return result;
 }
 
 bool ToProto(const mojo::ScopedSharedBufferHandle& input,
@@ -342,8 +360,7 @@ void HandleDataPipeRead(const ::mojolpm::DataPipeRead& input) {
     options.capacity_num_bytes = std::min(
         input.handle().new_().capacity_num_bytes(), kPipeCapacityMaxSize);
 
-    if (MOJO_RESULT_OK ==
-        mojo::CreateDataPipe(&options, &producer, &consumer)) {
+    if (MOJO_RESULT_OK == mojo::CreateDataPipe(&options, producer, consumer)) {
       int id = mojolpm::GetContext()->AddInstance(std::move(consumer));
       mojolpm::GetContext()->AddInstance(std::move(producer));
       consumer_ptr = mojolpm::GetContext()
@@ -352,12 +369,13 @@ void HandleDataPipeRead(const ::mojolpm::DataPipeRead& input) {
   }
 
   if (consumer_ptr) {
-    unsigned int size = input.size();
+    size_t size = size_t{input.size()};
     if (size > kPipeActionMaxSize) {
       size = kPipeActionMaxSize;
     }
-    std::vector<char> data(size);
-    consumer_ptr->get().ReadData(data.data(), &size, 0);
+    std::vector<uint8_t> data(size);
+    size_t bytes_read = 0;
+    consumer_ptr->get().ReadData(MOJO_READ_DATA_FLAG_NONE, data, bytes_read);
   }
 }
 
@@ -381,8 +399,7 @@ void HandleDataPipeWrite(const ::mojolpm::DataPipeWrite& input) {
     options.capacity_num_bytes = std::min(
         input.handle().new_().capacity_num_bytes(), kPipeCapacityMaxSize);
 
-    if (MOJO_RESULT_OK ==
-        mojo::CreateDataPipe(&options, &producer, &consumer)) {
+    if (MOJO_RESULT_OK == mojo::CreateDataPipe(&options, producer, consumer)) {
       mojolpm::GetContext()->AddInstance(std::move(consumer));
       int id = mojolpm::GetContext()->AddInstance(std::move(producer));
       producer_ptr = mojolpm::GetContext()
@@ -391,12 +408,31 @@ void HandleDataPipeWrite(const ::mojolpm::DataPipeWrite& input) {
   }
 
   if (producer_ptr) {
-    unsigned int size = input.data().size();
+    size_t size = input.data().size();
     if (size > kPipeActionMaxSize) {
       size = kPipeActionMaxSize;
     }
-    producer_ptr->get().WriteData(input.data().data(), &size, 0);
+    size_t bytes_written = 0;
+    producer_ptr->get().WriteData(base::as_byte_span(input.data()),
+                                  MOJO_WRITE_DATA_FLAG_NONE, bytes_written);
   }
+}
+
+void HandleSharedBufferWrite(const ::mojolpm::SharedBufferWrite& input) {
+  mojo::ScopedSharedBufferHandle handle;
+  if (!FromProto(input.handle(), handle)) {
+    return;
+  }
+  size_t size = input.data().size();
+  if (size > kSharedBufferActionMaxSize) {
+    size = kSharedBufferActionMaxSize;
+  }
+  size = std::min(handle->GetSize(), static_cast<uint64_t>(size));
+  auto mem = handle->Map(size);
+  if (!mem) {
+    return;
+  }
+  UNSAFE_TODO(std::memcpy(mem.get(), input.data().data(), size));
 }
 
 void HandleDataPipeConsumerClose(
@@ -408,6 +444,11 @@ void HandleDataPipeConsumerClose(
 void HandleDataPipeProducerClose(
     const ::mojolpm::DataPipeProducerClose& input) {
   mojolpm::GetContext()->RemoveInstance<mojo::ScopedDataPipeProducerHandle>(
+      input.id());
+}
+
+void HandleSharedBufferRelease(const ::mojolpm::SharedBufferRelease& input) {
+  mojolpm::GetContext()->RemoveInstance<mojo::ScopedSharedBufferHandle>(
       input.id());
 }
 }  // namespace mojolpm

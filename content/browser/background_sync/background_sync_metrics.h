@@ -1,11 +1,10 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_BROWSER_BACKGROUND_SYNC_BACKGROUND_SYNC_METRICS_H_
 #define CONTENT_BROWSER_BACKGROUND_SYNC_BACKGROUND_SYNC_METRICS_H_
 
-#include "base/macros.h"
 #include "base/time/time.h"
 #include "content/browser/background_sync/background_sync.pb.h"
 #include "content/browser/background_sync/background_sync_status.h"
@@ -39,6 +38,10 @@ class CONTENT_EXPORT BackgroundSyncMetrics {
     REGISTRATION_IS_DUPLICATE
   };
 
+  BackgroundSyncMetrics() = delete;
+  BackgroundSyncMetrics(const BackgroundSyncMetrics&) = delete;
+  BackgroundSyncMetrics& operator=(const BackgroundSyncMetrics&) = delete;
+
   // Records the start of a sync event.
   static void RecordEventStarted(blink::mojom::BackgroundSyncType sync_type,
                                  bool startedin_foreground);
@@ -49,9 +52,8 @@ class CONTENT_EXPORT BackgroundSyncMetrics {
                                 bool finished_in_foreground);
 
   // Records, at the completion of a one-shot sync registration, whether the
-  // sync event was successful, and how many attempts it took to get there.
-  static void RecordRegistrationComplete(bool event_succeeded,
-                                         int num_attempts_required);
+  // sync event was successful.
+  static void RecordRegistrationComplete(bool event_succeeded);
 
   // Records the result of running a batch of sync events, including the total
   // time spent, the batch size, and whether the operation originated from a
@@ -88,9 +90,6 @@ class CONTENT_EXPORT BackgroundSyncMetrics {
   static void RecordEventsFiredFromWakeupTask(
       blink::mojom::BackgroundSyncType sync_type,
       bool fired_events);
-
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(BackgroundSyncMetrics);
 };
 
 }  // namespace content

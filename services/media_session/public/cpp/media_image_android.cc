@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,9 @@
 
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
+#include "url/android/gurl_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
 #include "services/media_session/public/cpp/android/media_session_jni_headers/MediaImage_jni.h"
 
 using base::android::ScopedJavaLocalRef;
@@ -28,13 +31,11 @@ ScopedJavaLocalRef<jobjectArray> MediaImage::ToJavaArray(
     ScopedJavaLocalRef<jobject> item = images[i].CreateJavaObject(env);
     env->SetObjectArrayElement(joa, i, item.obj());
   }
-  return ScopedJavaLocalRef<jobjectArray>(env, joa);
+  return jni_zero::AdoptRef(env, joa);
 }
 
 ScopedJavaLocalRef<jobject> MediaImage::CreateJavaObject(JNIEnv* env) const {
-  std::string src_spec = src.spec();
-  ScopedJavaLocalRef<jstring> j_src(
-      base::android::ConvertUTF8ToJavaString(env, src_spec));
+  ScopedJavaLocalRef<jobject> j_src(url::GURLAndroid::FromNativeGURL(env, src));
   ScopedJavaLocalRef<jstring> j_type(
       base::android::ConvertUTF16ToJavaString(env, type));
 
@@ -53,7 +54,9 @@ ScopedJavaLocalRef<jobject> MediaImage::CreateJavaObject(JNIEnv* env) const {
   }
 
   return Java_MediaImage_create(env, j_src, j_type,
-                                ScopedJavaLocalRef<jobjectArray>(env, joa));
+                                jni_zero::AdoptRef(env, joa));
 }
 
 }  // namespace media_session
+
+DEFINE_JNI(MediaImage)

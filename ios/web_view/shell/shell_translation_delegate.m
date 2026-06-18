@@ -1,14 +1,10 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "ios/web_view/shell/shell_translation_delegate.h"
 
 #import <UIKit/UIKit.h>
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 @interface ShellTranslationDelegate ()
 // Action Sheet to prompt user whether or not the page should be translated.
@@ -37,8 +33,8 @@
                        message:@"Pick Translate Action"
                 preferredStyle:UIAlertControllerStyleActionSheet];
   _beforeTranslateActionSheet.popoverPresentationController.sourceView =
-      UIApplication.sharedApplication.keyWindow;
-  CGRect bounds = UIApplication.sharedApplication.keyWindow.bounds;
+      [self anyKeyWindow];
+  CGRect bounds = [self anyKeyWindow].bounds;
   _beforeTranslateActionSheet.popoverPresentationController.sourceRect =
       CGRectMake(CGRectGetWidth(bounds) / 2, 60, 1, 1);
   UIAlertAction* cancelAction =
@@ -51,20 +47,20 @@
 
   NSString* translateTitle = [NSString
       stringWithFormat:@"Translate to %@", userLanguage.localizedName];
-  UIAlertAction* translateAction = [UIAlertAction
-      actionWithTitle:translateTitle
-                style:UIAlertActionStyleDefault
-              handler:^(UIAlertAction* action) {
-                weakSelf.beforeTranslateActionSheet = nil;
-                if (!weakSelf) {
-                  return;
-                }
-                CWVTranslationLanguage* source = pageLanguage;
-                CWVTranslationLanguage* target = userLanguage;
-                [controller translatePageFromLanguage:source
-                                           toLanguage:target
-                                        userInitiated:YES];
-              }];
+  UIAlertAction* translateAction =
+      [UIAlertAction actionWithTitle:translateTitle
+                               style:UIAlertActionStyleDefault
+                             handler:^(UIAlertAction* action) {
+                               weakSelf.beforeTranslateActionSheet = nil;
+                               if (!weakSelf) {
+                                 return;
+                               }
+                               CWVTranslationLanguage* source = pageLanguage;
+                               CWVTranslationLanguage* target = userLanguage;
+                               [controller translatePageFromLanguage:source
+                                                          toLanguage:target
+                                                       userInitiated:YES];
+                             }];
   [_beforeTranslateActionSheet addAction:translateAction];
 
   UIAlertAction* alwaysTranslateAction = [UIAlertAction
@@ -97,7 +93,7 @@
               }];
   [_beforeTranslateActionSheet addAction:neverTranslateAction];
 
-  [[UIApplication sharedApplication].keyWindow.rootViewController
+  [[self anyKeyWindow].rootViewController
       presentViewController:_beforeTranslateActionSheet
                    animated:YES
                  completion:nil];
@@ -117,6 +113,29 @@
                                error:(nullable NSError*)error {
   NSLog(@"%@:%@:%@:%@", NSStringFromSelector(_cmd), sourceLanguage,
         targetLanguage, error);
+}
+
+- (void)translationController:(CWVTranslationController*)controller
+    didDeterminePageLanguageDetectionDetails:
+        (CWVTranslationLanguageDetectionDetails*)pageLanguageDetectionDetails {
+  NSLog(@"%@:%@", NSStringFromSelector(_cmd), pageLanguageDetectionDetails);
+}
+
+#pragma mark - Private
+
+- (UIWindow*)anyKeyWindow {
+  for (UIWindowScene* windowScene in UIApplication.sharedApplication
+           .connectedScenes) {
+    NSAssert([windowScene isKindOfClass:[UIWindowScene class]],
+             @"UIScene is not a UIWindowScene: %@", windowScene);
+    for (UIWindow* window in windowScene.windows) {
+      if (window.isKeyWindow) {
+        return window;
+      }
+    }
+  }
+
+  return nil;
 }
 
 @end

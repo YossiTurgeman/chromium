@@ -1,215 +1,347 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.history;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.app.Activity;
-import android.app.ActivityManager;
-import android.content.ComponentName;
-import android.content.Context;
 import android.content.Intent;
-import android.net.Uri;
-import android.provider.Browser;
+import android.content.res.Resources;
+import android.os.Build;
 import android.view.LayoutInflater;
 import android.view.MenuItem;
+import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
 import android.widget.TextView;
 
-import androidx.annotation.VisibleForTesting;
 import androidx.appcompat.widget.Toolbar.OnMenuItemClickListener;
 import androidx.recyclerview.widget.LinearLayoutManager;
-import androidx.recyclerview.widget.RecyclerView;
-import androidx.recyclerview.widget.RecyclerView.OnScrollListener;
 
-import org.chromium.base.ContextUtils;
 import org.chromium.base.IntentUtils;
-import org.chromium.base.metrics.RecordHistogram;
-import org.chromium.base.metrics.RecordUserAction;
+import org.chromium.base.supplier.NonNullObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
+import org.chromium.base.supplier.SettableNonNullObservableSupplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.ChromeTabbedActivity;
 import org.chromium.chrome.browser.IntentHandler;
-import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.browsing_data.ClearBrowsingDataTabsFragment;
 import org.chromium.chrome.browser.document.ChromeLauncherActivity;
-import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.chrome.browser.history.HistoryManagerToolbar.InfoHeaderPref;
+import org.chromium.chrome.browser.incognito.IncognitoUtils;
 import org.chromium.chrome.browser.preferences.Pref;
-import org.chromium.chrome.browser.preferences.PrefChangeRegistrar;
-import org.chromium.chrome.browser.preferences.PrefChangeRegistrar.PrefObserver;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.settings.SettingsLauncher;
-import org.chromium.chrome.browser.settings.SettingsLauncherImpl;
-import org.chromium.chrome.browser.signin.IdentityServicesProvider;
-import org.chromium.chrome.browser.signin.SigninManager.SignInStateObserver;
-import org.chromium.chrome.browser.tab.TabLaunchType;
-import org.chromium.chrome.browser.tabmodel.TabCreator;
-import org.chromium.chrome.browser.ui.favicon.LargeIconBridge;
+import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
+import org.chromium.chrome.browser.settings.SettingsNavigationFactory;
+import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tabmodel.document.ChromeAsyncTabLauncher;
 import org.chromium.chrome.browser.ui.messages.snackbar.Snackbar;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager.SnackbarController;
-import org.chromium.chrome.browser.util.ChromeAccessibilityUtil;
-import org.chromium.components.browser_ui.util.ConversionUtils;
+import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
+import org.chromium.components.browser_ui.settings.SettingsNavigation;
+import org.chromium.components.browser_ui.widget.DateDividedAdapter.ItemViewType;
+import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
 import org.chromium.components.browser_ui.widget.selectable_list.SelectableListLayout;
 import org.chromium.components.browser_ui.widget.selectable_list.SelectableListToolbar.SearchDelegate;
 import org.chromium.components.browser_ui.widget.selectable_list.SelectionDelegate;
 import org.chromium.components.browser_ui.widget.selectable_list.SelectionDelegate.SelectionObserver;
-import org.chromium.content_public.browser.LoadUrlParams;
+import org.chromium.components.prefs.PrefService;
+import org.chromium.components.search_engines.TemplateUrl;
+import org.chromium.components.user_prefs.UserPrefs;
+import org.chromium.ui.base.ActivityResultTracker;
 import org.chromium.ui.base.Clipboard;
-import org.chromium.ui.base.PageTransition;
+import org.chromium.ui.base.DeviceFormFactor;
+import org.chromium.ui.base.DeviceInput;
+import org.chromium.ui.base.WindowAndroid;
+import org.chromium.ui.edge_to_edge.EdgeToEdgePadAdjuster;
+import org.chromium.ui.modaldialog.ModalDialogManager;
 
 import java.util.List;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
-/**
- * Displays and manages the UI for browsing history.
- */
-public class HistoryManager implements OnMenuItemClickListener, SignInStateObserver,
-                                       SelectionObserver<HistoryItem>, SearchDelegate,
-                                       SnackbarController, PrefObserver {
-    private static final int FAVICON_MAX_CACHE_SIZE_BYTES =
-            10 * ConversionUtils.BYTES_PER_MEGABYTE; // 10MB
-    private static final String METRICS_PREFIX = "Android.HistoryPage.";
+/** Combines and manages the different UI components of browsing history. */
+@NullMarked
+public class HistoryManager
+        implements OnMenuItemClickListener,
+                SelectionObserver<HistoryItem>,
+                SearchDelegate,
+                SnackbarController,
+                HistoryContentManager.Observer,
+                BackPressHandler {
 
-    // Keep consistent with the UMA constants on the WebUI history page (history/constants.js).
-    private static final int UMA_MAX_BUCKET_VALUE = 1000;
-    private static final int UMA_MAX_SUBSET_BUCKET_VALUE = 100;
-
-    // TODO(msramek): The WebUI counterpart computes the bucket count by
-    // dividing by 10 until it gets under 100, reaching 10 for both
-    // UMA_MAX_BUCKET_VALUE and UMA_MAX_SUBSET_BUCKET_VALUE, and adds +1
-    // for overflow. How do we keep that in sync with this code?
-    private static final int UMA_BUCKET_COUNT = 11;
-
-    // PageTransition value to use for all URL requests triggered by the history page.
-    private static final int PAGE_TRANSITION_TYPE = PageTransition.AUTO_BOOKMARK;
-
-    private static HistoryProvider sProviderForTests;
-    private static Boolean sIsScrollToLoadDisabledForTests;
+    static final String HISTORY_CLUSTERS_VISIBLE_PREF = "history_clusters.visible";
 
     private final Activity mActivity;
     private final boolean mIsIncognito;
     private final boolean mIsSeparateActivity;
-    private final boolean mIsScrollToLoadDisabled;
-    private final SelectableListLayout<HistoryItem> mSelectableListLayout;
-    private final HistoryAdapter mHistoryAdapter;
-    private final SelectionDelegate<HistoryItem> mSelectionDelegate;
-    private final HistoryManagerToolbar mToolbar;
-    private final TextView mEmptyView;
-    private final RecyclerView mRecyclerView;
+    private final boolean mLaunchedForApp;
+    private final HistoryUmaRecorder mUmaRecorder;
+    private final InfoHeaderPref mHeaderPref;
+    private final @Nullable String mAppId;
+
+    private final ViewGroup mRootView;
+    private ViewGroup mContentView;
+    private final @Nullable SelectableListLayout<HistoryItem> mSelectableListLayout;
+    private @Nullable HistoryContentManager mContentManager;
+    private @Nullable SelectionDelegate<HistoryItem> mSelectionDelegate;
+    private @Nullable HistoryManagerToolbar mToolbar;
+    private TextView mEmptyView;
     private final SnackbarManager mSnackbarManager;
-    private final PrefChangeRegistrar mPrefChangeRegistrar;
-    private LargeIconBridge mLargeIconBridge;
+    private final SettableMonotonicObservableSupplier<Boolean>
+            mShouldShowPrivacyDisclaimerSupplier = ObservableSuppliers.createMonotonic();
+    private final SettableMonotonicObservableSupplier<Boolean>
+            mShouldShowClearBrowsingDataSupplier = ObservableSuppliers.createMonotonic();
+
+    private final SettableNonNullObservableSupplier<Boolean> mBackPressStateSupplier =
+            ObservableSuppliers.createNonNull(false);
+
+    private final PrefService mPrefService;
+    private final Profile mProfile;
+    private final boolean mIsLargeFormFactorDevice;
 
     private boolean mIsSearching;
-    private boolean mShouldShowInfoHeader;
+
+    public static boolean isAppSpecificHistoryEnabled() {
+        return ChromeFeatureList.sAppSpecificHistory.isEnabled()
+                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
+    }
 
     /**
      * Creates a new HistoryManager.
+     *
+     * @param profile The profile launching History.
+     * @param windowAndroid The current {@link WindowAndroid} showing the history UI.
      * @param activity The Activity associated with the HistoryManager.
      * @param isSeparateActivity Whether the history UI will be shown in a separate activity than
-     *                           the main Chrome activity.
+     *     the main Chrome activity.
      * @param snackbarManager The {@link SnackbarManager} used to display snackbars.
-     * @param isIncognito Whether the incognito tab model is currently selected.
+     * @param bottomSheetControllerSupplier Supplier of {@link BottomSheetController} to show app
+     *     filter sheet in.
+     * @param modalDialogManagerSupplier Supplies the {@link ModalDialogManager}.
+     * @param activityResultTracker Tracker of activity results.
+     * @param tabSupplier Supplies the current tab, null if the history UI will be shown in a
+     *     separate activity.
+     * @param historyProvider Provider of methods for querying and managing browsing history.
+     * @param umaRecorder Records UMA user action/histograms.
+     * @param clientPackageName Package name of the client the history UI is launched on top of.
+     * @param shouldShowClearData Whether the 'Clear browsing data' button should be shown.
+     * @param launchedForApp Whether history UI is launched for app-specific history.
+     * @param showAppFilter Whether history page will show app filter UI.
+     * @param openHistoryItemCallback Optional callback which is run when a history item is opened
+     *     (not called when history manager is in a separate activity).
+     * @param edgeToEdgePadAdjusterGenerator Generator of {@link EdgeToEdgePadAdjuster} to update
+     *     the edge-to-edge pad.
      */
     @SuppressWarnings("unchecked") // mSelectableListLayout
-    public HistoryManager(Activity activity, boolean isSeparateActivity,
-            SnackbarManager snackbarManager, boolean isIncognito) {
-        mShouldShowInfoHeader = SharedPreferencesManager.getInstance().readBoolean(
-                ChromePreferenceKeys.HISTORY_SHOW_HISTORY_INFO, true);
+    public HistoryManager(
+            Profile profile,
+            WindowAndroid windowAndroid,
+            Activity activity,
+            boolean isSeparateActivity,
+            SnackbarManager snackbarManager,
+            Supplier<BottomSheetController> bottomSheetControllerSupplier,
+            Supplier<ModalDialogManager> modalDialogManagerSupplier,
+            ActivityResultTracker activityResultTracker,
+            @Nullable Supplier<@Nullable Tab> tabSupplier,
+            HistoryProvider historyProvider,
+            HistoryUmaRecorder umaRecorder,
+            @Nullable String clientPackageName,
+            boolean shouldShowClearData,
+            boolean launchedForApp,
+            boolean showAppFilter,
+            boolean shouldClusterByDomain,
+            @Nullable Runnable openHistoryItemCallback,
+            @Nullable Function<View, EdgeToEdgePadAdjuster> edgeToEdgePadAdjusterGenerator) {
+        mProfile = profile;
         mActivity = activity;
         mIsSeparateActivity = isSeparateActivity;
         mSnackbarManager = snackbarManager;
-        mIsIncognito = isIncognito;
-        mIsScrollToLoadDisabled = ChromeAccessibilityUtil.get().isAccessibilityEnabled()
-                || ChromeAccessibilityUtil.isHardwareKeyboardAttached(
-                        mActivity.getResources().getConfiguration());
+        mIsIncognito = profile.isOffTheRecord();
+        mUmaRecorder = umaRecorder;
+        mLaunchedForApp = launchedForApp;
+        mAppId = clientPackageName;
 
-        Profile profile = Profile.getLastUsedRegularProfile();
-        if (isIncognito) profile = profile.getOffTheRecordProfile();
+        mPrefService = UserPrefs.get(mProfile);
+        mBackPressStateSupplier.set(false);
+
+        // When launched for apps, info header always starts in hidden state.
+        mHeaderPref =
+                launchedForApp
+                        ? new AppHistoryInfoHeaderPref()
+                        : new BrowserHistoryInfoHeaderPref();
+
+        mUmaRecorder.recordOpenHistory();
+        // If incognito placeholder is shown, we don't need to create History UI elements.
+        if (mIsIncognito) {
+            mIsLargeFormFactorDevice = false;
+            mSelectableListLayout = null;
+            mRootView = getIncognitoHistoryPlaceholderView();
+            return;
+        }
+
+        mRootView = new FrameLayout(mActivity);
+
+        // 1. Create selectable components.
+        mSelectableListLayout =
+                (SelectableListLayout<HistoryItem>)
+                        LayoutInflater.from(activity).inflate(R.layout.history_main, null);
         mSelectionDelegate = new SelectionDelegate<>();
         mSelectionDelegate.addObserver(this);
-        mHistoryAdapter = new HistoryAdapter(mSelectionDelegate, this,
-                sProviderForTests != null ? sProviderForTests : new BrowsingHistoryBridge(profile));
 
-        // 1. Create SelectableListLayout.
-        mSelectableListLayout =
-                (SelectableListLayout<HistoryItem>) LayoutInflater.from(activity).inflate(
-                        R.layout.history_main, null);
+        // 2. Create HistoryContentManager and initialize recycler view.
+        boolean shouldShowInfoHeader = mHeaderPref.isVisible();
 
-        // 2. Initialize RecyclerView.
-        mRecyclerView = mSelectableListLayout.initializeRecyclerView(mHistoryAdapter);
+        mContentManager =
+                HistoryContentManager.create(
+                        windowAndroid,
+                        mActivity,
+                        this,
+                        isSeparateActivity,
+                        profile,
+                        shouldShowInfoHeader,
+                        shouldShowClearData,
+                        mSelectionDelegate,
+                        bottomSheetControllerSupplier,
+                        modalDialogManagerSupplier,
+                        snackbarManager,
+                        activityResultTracker,
+                        tabSupplier,
+                        () -> assumeNonNull(mToolbar).hideKeyboard(),
+                        mUmaRecorder,
+                        historyProvider,
+                        clientPackageName,
+                        launchedForApp,
+                        showAppFilter,
+                        shouldClusterByDomain,
+                        openHistoryItemCallback,
+                        new ChromeAsyncTabLauncher(/* incognito= */ false),
+                        new ChromeAsyncTabLauncher(/* incognito= */ true));
+        mSelectableListLayout.initializeRecyclerView(
+                mContentManager.getAdapter(),
+                mContentManager.getRecyclerView(),
+                edgeToEdgePadAdjusterGenerator);
+
+        mIsLargeFormFactorDevice = DeviceFormFactor.isNonMultiDisplayContextOnTablet(mActivity);
+        if (mContentManager.showAppFilter() || mIsLargeFormFactorDevice) {
+            // Now the search mode can have a header. Let the layout ignore it to
+            // return the right item count.
+            mSelectableListLayout.ignoreItemTypeForEmptyState(ItemViewType.STANDARD_HEADER);
+        }
+
+        mShouldShowPrivacyDisclaimerSupplier.set(
+                shouldShowInfoHeader && mContentManager.isInfoHeaderAvailable());
+        mShouldShowClearBrowsingDataSupplier.set(mContentManager.getShouldShowClearData());
 
         // 3. Initialize toolbar.
-        mToolbar = (HistoryManagerToolbar) mSelectableListLayout.initializeToolbar(
-                R.layout.history_toolbar, mSelectionDelegate, R.string.menu_history,
-                R.id.normal_menu_group, R.id.selection_mode_menu_group, this, true,
-                isSeparateActivity);
+        mToolbar =
+                (HistoryManagerToolbar)
+                        mSelectableListLayout.initializeToolbar(
+                                R.layout.history_toolbar,
+                                mSelectionDelegate,
+                                launchedForApp ? R.string.chrome_history : R.string.menu_history,
+                                R.id.normal_menu_group,
+                                R.id.selection_mode_menu_group,
+                                this,
+                                isSeparateActivity,
+                                launchedForApp
+                                        ? R.menu.app_specific_history_manager_menu
+                                        : R.menu.history_manager_menu,
+                                launchedForApp);
         mToolbar.setManager(this);
-        mToolbar.initializeSearchView(this, R.string.history_manager_search, R.id.search_menu_id);
+        mToolbar.setMenuDelegate(
+                new HistoryManagerToolbar.HistoryManagerMenuDelegate() {
+                    @Override
+                    public boolean supportsDeletingHistory() {
+                        return mPrefService.getBoolean(Pref.ALLOW_DELETING_BROWSER_HISTORY);
+                    }
+
+                    @Override
+                    public boolean supportsIncognito() {
+                        return IncognitoUtils.isIncognitoModeEnabled(profile);
+                    }
+                });
+
+        /* If the current device is LFF device w/ physical keyboard attached,
+         * then initialize the search box only; Otherwise initialize the whole toolbar
+         */
+        if (!mIsLargeFormFactorDevice) {
+            mToolbar.initializeSearchView(
+                    this, R.string.history_manager_search, R.id.search_menu_id);
+        } else {
+            mToolbar.initializeInlineSearchView(this, R.id.search_menu_id);
+            ViewGroup searchBoxContainer =
+                    mToolbar.initializeSearchBoxContainer(
+                            mSelectableListLayout, R.string.history_manager_search);
+            mSelectableListLayout.addInlineSearchBox(searchBoxContainer);
+        }
+
         mToolbar.setInfoMenuItem(R.id.info_menu_id);
         mToolbar.updateInfoMenuItem(shouldShowInfoButton(), shouldShowInfoHeaderIfAvailable());
+
+        // Make the toolbar focusable, so that focus transitions can move out from descendents of
+        // the toolbar to the neighboring delete button, and automatically to other items on the
+        // HistoryPage such as the list of HistoryItem(s).
+        mToolbar.setFocusable(true);
 
         // 4. Width constrain the SelectableListLayout.
         mSelectableListLayout.configureWideDisplayStyle();
 
         // 5. Initialize empty view.
-        mEmptyView = mSelectableListLayout.initializeEmptyView(
-                R.string.history_manager_empty, R.string.history_manager_no_results);
+        initializeEmptyView();
 
-        // 6. Create large icon bridge.
-        mLargeIconBridge = new LargeIconBridge(Profile.getLastUsedRegularProfile());
-        ActivityManager activityManager = ((ActivityManager) ContextUtils
-                .getApplicationContext().getSystemService(Context.ACTIVITY_SERVICE));
-        int maxSize = Math.min(
-                (activityManager.getMemoryClass() / 4) * ConversionUtils.BYTES_PER_MEGABYTE,
-                FAVICON_MAX_CACHE_SIZE_BYTES);
-        mLargeIconBridge.createCache(maxSize);
+        // 6. Load items.
+        mContentManager.startLoadingItems();
 
-        // 7. Initialize the adapter to load items.
-        mHistoryAdapter.generateHeaderItems();
-        mHistoryAdapter.generateFooterItems();
-        mHistoryAdapter.initialize();
+        setContentView(mSelectableListLayout);
+        mRootView.addView(mContentView);
+        mSelectableListLayout
+                .getHandleBackPressChangedSupplier()
+                .addSyncObserverAndPostIfNonNull((x) -> onBackPressStateChanged());
 
-        // 8. Add scroll listener to show/hide info button on scroll and page in more items
-        // when necessary.
-        mRecyclerView.addOnScrollListener(new OnScrollListener() {
-            @Override
-            public void onScrolled(RecyclerView recyclerView, int dx, int dy) {
-                LinearLayoutManager layoutManager =
-                        (LinearLayoutManager) recyclerView.getLayoutManager();
-                // Show info button if available if first visible position is close to info header;
-                // otherwise hide info button.
-                mToolbar.updateInfoMenuItem(
-                        shouldShowInfoButton(), shouldShowInfoHeaderIfAvailable());
+        onBackPressStateChanged(); // Initialize back press State.
+        mContentManager.maybeQueryApps();
 
-                if (!mHistoryAdapter.canLoadMoreItems() || isScrollToLoadDisabled()) {
-                    return;
-                }
+        mContentManager.getAdapter().setIsLargeFormFactorDevice(mIsLargeFormFactorDevice);
+    }
 
-                // Load more items if the scroll position is close to the bottom of the list.
-                if (layoutManager.findLastVisibleItemPosition()
-                        > (mHistoryAdapter.getItemCount() - 25)) {
-                    mHistoryAdapter.loadMoreItems();
-                    recordUserActionWithOptionalSearch("LoadMoreOnScroll");
-                }
-            }});
+    private void initializeEmptyView() {
+        int imgResId =
+                mLaunchedForApp
+                        ? R.drawable.history_app_empty_state_illustration
+                        : R.drawable.history_empty_state_illustration;
+        int subjResId =
+                mLaunchedForApp
+                        ? R.string.history_manager_app_specific_empty_state_title
+                        : R.string.history_manager_empty_state;
+        Resources res = mActivity.getResources();
+        String descText;
+        if (mLaunchedForApp) {
+            assert mAppId != null;
+            assumeNonNull(mContentManager);
+            descText =
+                    res.getString(
+                            R.string.history_manager_app_specific_empty_state_description,
+                            mContentManager.getAppInfoCache().get(mAppId).label);
+        } else {
+            descText =
+                    res.getString(R.string.history_manager_empty_state_view_or_clear_page_visited);
+        }
 
-        // 9. Listen to changes in sign in state.
-        IdentityServicesProvider.get()
-                .getSigninManager(Profile.getLastUsedRegularProfile())
-                .addSignInStateObserver(this);
-
-        // 10. Create PrefChangeRegistrar to receive notifications on preference changes.
-        mPrefChangeRegistrar = new PrefChangeRegistrar();
-        mPrefChangeRegistrar.addObserver(Pref.ALLOW_DELETING_BROWSER_HISTORY, this);
-        mPrefChangeRegistrar.addObserver(Pref.INCOGNITO_MODE_AVAILABILITY, this);
-
-        recordUserAction("Show");
+        mEmptyView =
+                assumeNonNull(mSelectableListLayout)
+                        .initializeEmptyStateView(imgResId, subjResId, descText);
     }
 
     /**
      * @return Whether the history manager UI is displayed in a separate activity than the main
-     *         Chrome activity.
+     *     Chrome activity.
      */
     public boolean isDisplayedInSeparateActivity() {
         return mIsSeparateActivity;
@@ -217,6 +349,11 @@ public class HistoryManager implements OnMenuItemClickListener, SignInStateObser
 
     @Override
     public boolean onMenuItemClick(MenuItem item) {
+        assumeNonNull(mToolbar);
+        assumeNonNull(mContentManager);
+        assumeNonNull(mSelectableListLayout);
+        assumeNonNull(mSelectionDelegate);
+
         mToolbar.hideOverflowMenu();
 
         if (item.getItemId() == R.id.close_menu_id && isDisplayedInSeparateActivity()) {
@@ -224,364 +361,358 @@ public class HistoryManager implements OnMenuItemClickListener, SignInStateObser
             return true;
         } else if (item.getItemId() == R.id.selection_mode_open_in_new_tab) {
             openItemsInNewTabs(mSelectionDelegate.getSelectedItemsAsList(), false);
-            mSelectionDelegate.clearSelection();
             return true;
         } else if (item.getItemId() == R.id.selection_mode_copy_link) {
-            recordUserActionWithOptionalSearch("CopyLink");
-            Clipboard.getInstance().setText(
-                    mSelectionDelegate.getSelectedItemsAsList().get(0).getUrl());
+            mUmaRecorder.recordCopyLink(mIsSearching);
+            Clipboard.getInstance()
+                    .setText(mSelectionDelegate.getSelectedItemsAsList().get(0).getUrl().getSpec());
             mSelectionDelegate.clearSelection();
-            Snackbar snackbar = Snackbar.make(mActivity.getString(R.string.copied), this,
-                    Snackbar.TYPE_NOTIFICATION, Snackbar.UMA_HISTORY_LINK_COPIED);
+            Snackbar snackbar =
+                    Snackbar.make(
+                            mActivity.getString(R.string.copied),
+                            this,
+                            Snackbar.TYPE_NOTIFICATION,
+                            Snackbar.UMA_HISTORY_LINK_COPIED);
             mSnackbarManager.showSnackbar(snackbar);
             return true;
         } else if (item.getItemId() == R.id.selection_mode_open_in_incognito) {
             openItemsInNewTabs(mSelectionDelegate.getSelectedItemsAsList(), true);
-            mSelectionDelegate.clearSelection();
             return true;
         } else if (item.getItemId() == R.id.selection_mode_delete_menu_id) {
-            recordUserActionWithOptionalSearch("RemoveSelected");
+            mUmaRecorder.recordRemoveSelected(mIsSearching);
 
-            int numItemsRemoved = 0;
-            HistoryItem lastItemRemoved = null;
             for (HistoryItem historyItem : mSelectionDelegate.getSelectedItems()) {
-                mHistoryAdapter.markItemForRemoval(historyItem);
-                numItemsRemoved++;
-                lastItemRemoved = historyItem;
+                mContentManager.markItemForRemoval(historyItem);
             }
 
-            mHistoryAdapter.removeItems();
+            mContentManager.removeItems();
             mSelectionDelegate.clearSelection();
-
-            if (numItemsRemoved == 1) {
-                assert lastItemRemoved != null;
-                announceItemRemoved(lastItemRemoved);
-            } else if (numItemsRemoved > 1) {
-                mRecyclerView.announceForAccessibility(mRecyclerView.getContext().getString(
-                        R.string.multiple_history_items_deleted, numItemsRemoved));
-            }
 
             return true;
         } else if (item.getItemId() == R.id.search_menu_id) {
-            mHistoryAdapter.removeHeader();
-            mToolbar.showSearchView();
-            mSelectableListLayout.onStartSearch();
-            recordUserAction("Search");
-            mIsSearching = true;
+            enterSearchMode(true);
             return true;
         } else if (item.getItemId() == R.id.info_menu_id) {
-            mShouldShowInfoHeader = !mShouldShowInfoHeader;
-            SharedPreferencesManager.getInstance().writeBoolean(
-                    ChromePreferenceKeys.HISTORY_SHOW_HISTORY_INFO, mShouldShowInfoHeader);
-            mToolbar.updateInfoMenuItem(shouldShowInfoButton(), shouldShowInfoHeaderIfAvailable());
-            mHistoryAdapter.setPrivacyDisclaimer();
+            toggleInfoHeaderVisibility();
         }
         return false;
+    }
+
+    private void enterSearchMode(boolean showKeyboard) {
+        assumeNonNull(mContentManager);
+        assumeNonNull(mToolbar);
+        assumeNonNull(mSelectableListLayout);
+
+        mContentManager.maybeResetAppFilterChip();
+        mContentManager.getAdapter().onSearchStart();
+        mToolbar.showSearchView(showKeyboard);
+        String searchEmptyString = getSearchEmptyString();
+        mSelectableListLayout.onStartSearch(
+                searchEmptyString, R.string.history_manager_empty_state_view_or_open_more_history);
+        mUmaRecorder.recordSearchHistory();
+        mIsSearching = true;
+    }
+
+    public void setQuery(String query) {
+        if (mToolbar == null) {
+            // In the Incognito mode, we don't have the query box.
+            return;
+        }
+
+        if (!mIsLargeFormFactorDevice && !mIsSearching) {
+            enterSearchMode(false);
+        }
+        mToolbar.setSearchText(query);
+    }
+
+    private void toggleInfoHeaderVisibility() {
+        assumeNonNull(mToolbar);
+        assumeNonNull(mContentManager);
+        boolean shouldShowInfoHeader =
+                !mContentManager.getShouldShowPrivacyDisclaimersIfAvailable();
+        mHeaderPref.setVisible(shouldShowInfoHeader);
+        mToolbar.updateInfoMenuItem(shouldShowInfoButton(), shouldShowInfoHeader);
+        mContentManager.updatePrivacyDisclaimers(shouldShowInfoHeader);
+        mShouldShowPrivacyDisclaimerSupplier.set(
+                shouldShowInfoHeader && mContentManager.isInfoHeaderAvailable());
+    }
+
+    private String getSearchEmptyString() {
+        if (mLaunchedForApp) {
+            return mActivity.getString(R.string.history_manager_app_specific_history_no_results);
+        }
+        String defaultSearchEngineName = null;
+        TemplateUrl dseTemplateUrl =
+                TemplateUrlServiceFactory.getForProfile(mProfile)
+                        .getDefaultSearchEngineTemplateUrl();
+        if (dseTemplateUrl != null) defaultSearchEngineName = dseTemplateUrl.getShortName();
+        return defaultSearchEngineName == null
+                ? mActivity.getString(R.string.history_manager_no_results_no_dse)
+                : mActivity.getString(R.string.history_manager_no_results, defaultSearchEngineName);
     }
 
     /**
      * @return The view that shows the main browsing history UI.
      */
     public ViewGroup getView() {
-        return mSelectableListLayout;
+        return mRootView;
     }
 
     /**
-     * Called when the activity/native page is destroyed.
+     * @return The view that shows the list content below toolbar.
      */
-    public void onDestroyed() {
-        mSelectableListLayout.onDestroyed();
-        mHistoryAdapter.onDestroyed();
-        mLargeIconBridge.destroy();
-        mLargeIconBridge = null;
-        IdentityServicesProvider.get()
-                .getSigninManager(Profile.getLastUsedRegularProfile())
-                .removeSignInStateObserver(this);
-        mPrefChangeRegistrar.destroy();
+    View getListContentView() {
+        return mActivity.findViewById(R.id.list_content);
     }
 
     /**
-     * Called when the user presses the back key. This is only going to be called
-     * when the history UI is shown in a separate activity rather inside a tab.
-     * @return True if manager handles this event, false if it decides to ignore.
+     * @return The placeholder view to be shown instead of history UI in incognito mode.
      */
-    public boolean onBackPressed() {
-        return mSelectableListLayout.onBackPressed();
-    }
-
-    /**
-     * Removes the HistoryItem from the history backend and the HistoryAdapter.
-     * @param item The HistoryItem to remove.
-     */
-    public void removeItem(HistoryItem item) {
-        if (mSelectionDelegate.isItemSelected(item)) {
-            mSelectionDelegate.toggleSelectionForItem(item);
+    private ViewGroup getIncognitoHistoryPlaceholderView() {
+        ViewGroup placeholderView =
+                (ViewGroup)
+                        LayoutInflater.from(mActivity)
+                                .inflate(R.layout.incognito_history_placeholder, null);
+        ImageButton dismissButton =
+                placeholderView.findViewById(R.id.close_history_placeholder_button);
+        if (mIsSeparateActivity) {
+            dismissButton.setOnClickListener(v -> mActivity.finish());
+        } else {
+            dismissButton.setVisibility(View.GONE);
         }
-        mHistoryAdapter.markItemForRemoval(item);
-        mHistoryAdapter.removeItems();
-        announceItemRemoved(item);
+        placeholderView.setFocusable(true);
+        placeholderView.setFocusableInTouchMode(true);
+        return placeholderView;
     }
 
-    private void announceItemRemoved(HistoryItem item) {
-        mRecyclerView.announceForAccessibility(
-                mRecyclerView.getContext().getString(R.string.delete_message, item.getTitle()));
+    private void setContentView(ViewGroup contentView) {
+        mContentView = contentView;
+        onBackPressStateChanged();
     }
 
-    /**
-     * Open the provided url.
-     * @param url The url to open.
-     * @param isIncognito Whether to open the url in an incognito tab. If null, the tab
-     *                    will open in the current tab model.
-     * @param createNewTab Whether a new tab should be created. If false, the item will clobber the
-     *                     the current tab.
-     */
-    public void openUrl(String url, Boolean isIncognito, boolean createNewTab) {
-        if (isDisplayedInSeparateActivity()) {
-            IntentHandler.startActivityForTrustedIntent(
-                    getOpenUrlIntent(url, isIncognito, createNewTab));
+    /** Called when the activity/native page is destroyed. */
+    public void onDestroyed() {
+        if (mIsIncognito) {
+            // If Incognito placeholder is shown no need to call any destroy method.
             return;
         }
 
-        ChromeActivity activity = (ChromeActivity) mActivity;
-        if (createNewTab) {
-            TabCreator tabCreator = (isIncognito == null) ? activity.getCurrentTabCreator()
-                                                          : activity.getTabCreator(isIncognito);
-            tabCreator.createNewTab(new LoadUrlParams(url, PAGE_TRANSITION_TYPE),
-                    TabLaunchType.FROM_LINK, activity.getActivityTab());
-        } else {
-            activity.getActivityTab().loadUrl(new LoadUrlParams(url, PAGE_TRANSITION_TYPE));
+        if (mSelectableListLayout != null) {
+            mSelectableListLayout.onDestroyed();
+            assumeNonNull(mContentManager).onDestroyed();
         }
     }
 
-    /**
-     * @return Whether the HistoryManager is displaying history for the incognito profile.
-     */
-    public boolean isIncognito() {
-        return mIsIncognito;
+    // BackPressHandler implementation.
+    @Override
+    public @BackPressResult int handleBackPress() {
+        return onBackPressed() ? BackPressResult.SUCCESS : BackPressResult.FAILURE;
     }
 
-    @VisibleForTesting
-    Intent getOpenUrlIntent(String url, Boolean isIncognito, boolean createNewTab) {
-        // Construct basic intent.
-        Intent viewIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-        viewIntent.putExtra(Browser.EXTRA_APPLICATION_ID,
-                mActivity.getApplicationContext().getPackageName());
-        viewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-
-        // Determine component or class name.
-        ComponentName component;
-        if (mActivity instanceof HistoryActivity) { // phone
-            component = IntentUtils.safeGetParcelableExtra(
-                    mActivity.getIntent(), IntentHandler.EXTRA_PARENT_COMPONENT);
-        } else { // tablet
-            component = mActivity.getComponentName();
-        }
-        if (component != null) {
-            ChromeTabbedActivity.setNonAliasedComponent(viewIntent, component);
-        } else {
-            viewIntent.setClass(mActivity, ChromeLauncherActivity.class);
-        }
-
-        // Set other intent extras.
-        if (isIncognito != null) {
-            viewIntent.putExtra(IntentHandler.EXTRA_OPEN_NEW_INCOGNITO_TAB, isIncognito);
-        }
-        if (createNewTab) viewIntent.putExtra(Browser.EXTRA_CREATE_NEW_TAB, true);
-
-        viewIntent.putExtra(IntentHandler.EXTRA_PAGE_TRANSITION_TYPE, PAGE_TRANSITION_TYPE);
-        return viewIntent;
+    @Override
+    public NonNullObservableSupplier<Boolean> getHandleBackPressChangedSupplier() {
+        return mBackPressStateSupplier;
     }
 
-    /**
-     * Opens the clear browsing data preference.
-     */
-    public void openClearBrowsingDataPreference() {
-        recordUserAction("ClearBrowsingData");
-        SettingsLauncher settingsLauncher = new SettingsLauncherImpl();
-        settingsLauncher.launchSettingsActivity(mActivity, ClearBrowsingDataTabsFragment.class);
+    private void onBackPressStateChanged() {
+        assumeNonNull(mSelectableListLayout);
+        mBackPressStateSupplier.set(
+                mSelectableListLayout.getHandleBackPressChangedSupplier().get());
     }
 
     @Override
     public void onSearchTextChanged(String query) {
-        mHistoryAdapter.search(query);
+        assumeNonNull(mSelectionDelegate);
+        boolean isLargeScreenWithKeyboard =
+                DeviceInput.supportsKeyboard(mActivity)
+                        && DeviceFormFactor.isNonMultiDisplayContextOnTablet(mActivity);
+        if (isLargeScreenWithKeyboard && mSelectionDelegate.isSelectionEnabled()) {
+            mSelectionDelegate.clearSelection();
+        }
+        assumeNonNull(mContentManager).search(query);
     }
 
     @Override
     public void onEndSearch() {
-        mHistoryAdapter.onEndSearch();
-        mSelectableListLayout.onEndSearch();
+        assumeNonNull(mContentManager).onEndSearch();
+        assumeNonNull(mSelectableListLayout).onEndSearch();
         mIsSearching = false;
     }
 
-    /**
-     * @return The {@link LargeIconBridge} used to fetch large favicons.
-     */
-    public LargeIconBridge getLargeIconBridge() {
-        return mLargeIconBridge;
-    }
-
-    /**
-     * @return The SelectableListLayout that displays HistoryItems.
-     */
-    public SelectableListLayout<HistoryItem> getSelectableListLayout() {
+    /** @return The SelectableListLayout that displays HistoryItems. */
+    public @Nullable SelectableListLayout<HistoryItem> getSelectableListLayout() {
         return mSelectableListLayout;
     }
 
+    protected void finish() {
+        mActivity.finish();
+    }
+
     private void openItemsInNewTabs(List<HistoryItem> items, boolean isIncognito) {
-        recordUserActionWithOptionalSearch("OpenSelected" + (isIncognito ? "Incognito" : ""));
+        mUmaRecorder.recordOpenInTabs(mIsSearching, isIncognito);
+        assumeNonNull(mContentManager).openItemsInNewTab(items, isIncognito);
+    }
 
-        for (HistoryItem item : items) {
-            openUrl(item.getUrl(), isIncognito, true);
-            recordOpenedItemMetrics(item);
+    /**
+     * Called when the user presses the back key. This is only going to be called when the history
+     * UI is shown in a separate activity rather inside a tab.
+     *
+     * @return True if manager handles this event, false if it decides to ignore.
+     */
+    private boolean onBackPressed() {
+        if (mIsIncognito || mSelectableListLayout == null) {
+            // If Incognito placeholder is shown, the back press should handled by HistoryActivity.
+            return false;
         }
-    }
-
-    /**
-     * Sets a {@link HistoryProvider} that is used in place of a real one.
-     */
-    @VisibleForTesting
-    public static void setProviderForTests(HistoryProvider provider) {
-        sProviderForTests = provider;
-    }
-
-    @VisibleForTesting
-    SelectionDelegate<HistoryItem> getSelectionDelegateForTests() {
-        return mSelectionDelegate;
-    }
-
-    @VisibleForTesting
-    HistoryManagerToolbar getToolbarForTests() {
-        return mToolbar;
-    }
-
-    @VisibleForTesting
-    public HistoryAdapter getAdapterForTests() {
-        return mHistoryAdapter;
-    }
-
-    /**
-     * @param action The user action string to record.
-     */
-    static void recordUserAction(String action) {
-        RecordUserAction.record(METRICS_PREFIX + action);
-    }
-
-    /**
-     * Records the user action with "Search" prepended if the user is currently searching.
-     * @param action The user action string to record.
-     */
-    void recordUserActionWithOptionalSearch(String action) {
-        recordUserAction((mIsSearching ? "Search." : "") + action);
-    }
-
-    /**
-     * Records metrics about the age of an opened history |item|.
-     * @param item The item that has been opened.
-     */
-    void recordOpenedItemMetrics(HistoryItem item) {
-        int ageInDays = 1
-                + (int) ((System.currentTimeMillis() - item.getTimestamp())
-                        / 1000 /* s/ms */ / 60 /* m/s */ / 60 /* h/m */ / 24 /* d/h */);
-
-        RecordHistogram.recordCustomCountHistogram("HistoryPage.ClickAgeInDays",
-                Math.min(ageInDays, UMA_MAX_BUCKET_VALUE), 1, UMA_MAX_BUCKET_VALUE,
-                UMA_BUCKET_COUNT);
-
-        if (ageInDays <= UMA_MAX_SUBSET_BUCKET_VALUE) {
-            RecordHistogram.recordCustomCountHistogram("HistoryPage.ClickAgeInDaysSubset",
-                    ageInDays, 1, UMA_MAX_SUBSET_BUCKET_VALUE, UMA_BUCKET_COUNT);
-        }
+        return mSelectableListLayout.onBackPressed();
     }
 
     /**
      * @return True if info menu item should be shown on history toolbar, false otherwise.
      */
     boolean shouldShowInfoButton() {
-        LinearLayoutManager layoutManager = (LinearLayoutManager) mRecyclerView.getLayoutManager();
+        assumeNonNull(mContentManager);
+        assumeNonNull(mSelectionDelegate);
+        assumeNonNull(mToolbar);
+        LinearLayoutManager layoutManager =
+                (LinearLayoutManager) mContentManager.getRecyclerView().getLayoutManager();
         // Before the RecyclerView binds its items, LinearLayoutManager#firstVisibleItemPosition()
         // returns {@link RecyclerView#NO_POSITION}. If #findVisibleItemPosition() returns
         // NO_POSITION, the current adapter position should not prevent the info button from being
-        // displayed if all of the other criteria is met. See crbug.com/756249#c3.
-        boolean firstAdapterItemScrolledOff = layoutManager.findFirstVisibleItemPosition() > 0;
+        // displayed if all of the other criteria is met. See crbug.com/41339744#comment4.
+        boolean firstAdapterItemScrolledOff =
+                assumeNonNull(layoutManager).findFirstVisibleItemPosition() > 0;
 
-        return !firstAdapterItemScrolledOff && mHistoryAdapter.hasPrivacyDisclaimers()
-                && mHistoryAdapter.getItemCount() > 0 && !mToolbar.isSearching()
+        return !firstAdapterItemScrolledOff
+                && mContentManager.isInfoHeaderAvailable()
+                && mContentManager.getItemCount() > 0
+                && !mToolbar.isSearching()
                 && !mSelectionDelegate.isSelectionEnabled();
     }
 
-    /**
-     * Called to notify when privacy disclaimers visibility has changed.
-     */
-    void onHasPrivacyDisclaimersChanged() {
-        mToolbar.updateInfoMenuItem(shouldShowInfoButton(), shouldShowInfoHeaderIfAvailable());
+    void showIph() {
+        AppSpecificHistoryIphController iphController =
+                new AppSpecificHistoryIphController(mActivity, () -> mProfile);
+        iphController.maybeShowIph();
     }
 
     /**
-     * @return True if the available privacy disclaimers should be shown.
-     * Note that this may return true even if there are currently no privacy disclaimers.
+     * @return True if the available privacy disclaimers should be shown. Note that this may return
+     *     true even if there are currently no privacy disclaimers.
      */
     boolean shouldShowInfoHeaderIfAvailable() {
-        return mShouldShowInfoHeader;
+        return assumeNonNull(mContentManager).getShouldShowPrivacyDisclaimersIfAvailable();
     }
 
-    /**
-     * Check if we want to enable the scrolling to load for recycled view. Noting this function
-     * will be called during testing with RecycledView == null. Will return False in such case.
-     * @return True if accessibility is enabled or a hardware keyboard is attached.
-     */
-    boolean isScrollToLoadDisabled() {
-        if (sIsScrollToLoadDisabledForTests != null) {
-            return sIsScrollToLoadDisabledForTests.booleanValue();
-        }
-
-        return mIsScrollToLoadDisabled;
-    }
-
-    @Override
-    public void onSignedIn() {
-        mToolbar.onSignInStateChange();
-        mHistoryAdapter.onSignInStateChange();
-    }
-
-    @Override
-    public void onSignedOut() {
-        mToolbar.onSignInStateChange();
-        mHistoryAdapter.onSignInStateChange();
-    }
-
-    @Override
-    public void onPreferenceChange() {
-        mToolbar.onSignInStateChange();
-        mHistoryAdapter.onSignInStateChange();
+    void recordSelectionEstablished() {
+        mUmaRecorder.recordSelectionEstablished(mIsSearching);
     }
 
     @Override
     public void onSelectionStateChange(List<HistoryItem> selectedItems) {
-        mHistoryAdapter.onSelectionStateChange(mSelectionDelegate.isSelectionEnabled());
+        assumeNonNull(mContentManager)
+                .setSelectionActive(assumeNonNull(mSelectionDelegate).isSelectionEnabled());
     }
 
     @Override
-    public void onAction(Object actionData) {
+    public void onAction(@Nullable Object actionData) {
         // Handler for the link copied snackbar. Do nothing.
     }
 
     @Override
-    public void onDismissNoAction(Object actionData) {
+    public void onDismissNoAction(@Nullable Object actionData) {
         // Handler for the link copied snackbar. Do nothing.
     }
 
-    @VisibleForTesting
+    // HistoryContentManager.Observer
+    @Override
+    public void onScrolledCallback(boolean loadedMore) {
+        // Show info button if available if first visible position is close to info header;
+        // otherwise hide info button.
+        assumeNonNull(mToolbar)
+                .updateInfoMenuItem(shouldShowInfoButton(), shouldShowInfoHeaderIfAvailable());
+        if (loadedMore) {
+            mUmaRecorder.recordLoadMoreOnScroll(mIsSearching);
+        }
+    }
+
+    // HistoryContentManager.Observer
+    @Override
+    public void onItemClicked(HistoryItem item) {
+        mUmaRecorder.recordOpenItem(mIsSearching);
+    }
+
+    // HistoryContentManager.Observer
+    @Override
+    public void onItemRemoved(HistoryItem item) {
+        mUmaRecorder.recordRemoveItem(mIsSearching);
+        assumeNonNull(mSelectionDelegate);
+        if (mSelectionDelegate.isItemSelected(item)) {
+            mSelectionDelegate.toggleSelectionForItem(item);
+        }
+    }
+
+    // HistoryContentManager.Observer
+    @Override
+    public void onClearBrowsingDataClicked() {
+        mUmaRecorder.recordClearBrowsingData();
+        // Opens the clear browsing data preference.
+        SettingsNavigation settingsNavigation =
+                SettingsNavigationFactory.createSettingsNavigation();
+        settingsNavigation.startSettings(
+                mActivity, SettingsNavigation.SettingsFragment.CLEAR_BROWSING_DATA);
+    }
+
+    // HistoryContentManager.Observer
+    @Override
+    public void onPrivacyDisclaimerHasChanged() {
+        assumeNonNull(mToolbar);
+        assumeNonNull(mContentManager);
+        mToolbar.updateInfoMenuItem(shouldShowInfoButton(), shouldShowInfoHeaderIfAvailable());
+        mShouldShowPrivacyDisclaimerSupplier.set(
+                mContentManager.getShouldShowPrivacyDisclaimersIfAvailable()
+                        && mContentManager.isInfoHeaderAvailable());
+    }
+
+    @Override
+    public void onOpenFullChromeHistoryClicked() {
+        Intent fullHistoryIntent = new Intent(Intent.ACTION_MAIN);
+        fullHistoryIntent.setClass(mActivity, ChromeLauncherActivity.class);
+        fullHistoryIntent.putExtra(IntentHandler.EXTRA_OPEN_HISTORY, true);
+        IntentUtils.addTrustedIntentExtras(fullHistoryIntent);
+        mActivity.startActivity(fullHistoryIntent);
+        mUmaRecorder.recordOpenFullHistory();
+    }
+
+    // HistoryContentManager.Observer
+    @Override
+    public void onUserAccountStateChanged() {
+        assumeNonNull(mToolbar).onSignInStateChange();
+        mShouldShowClearBrowsingDataSupplier.set(
+                assumeNonNull(mContentManager).getShouldShowClearData());
+    }
+
+    // HistoryContentManager.Observer
+    @Override
+    public void onHistoryDeletedExternally() {}
+
     TextView getEmptyViewForTests() {
         return mEmptyView;
     }
 
-    @VisibleForTesting
-    public RecyclerView getRecyclerViewForTests() {
-        return mRecyclerView;
+    public @Nullable HistoryContentManager getContentManagerForTests() {
+        return mContentManager;
     }
 
-    @VisibleForTesting
-    public static void setScrollToLoadDisabledForTesting(boolean isScrollToLoadDisabled) {
-        sIsScrollToLoadDisabledForTests = isScrollToLoadDisabled;
+    @Nullable SelectionDelegate<HistoryItem> getSelectionDelegateForTests() {
+        return mSelectionDelegate;
+    }
+
+    @Nullable HistoryManagerToolbar getToolbarForTests() {
+        return mToolbar;
+    }
+
+    InfoHeaderPref getInfoHeaderPrefForTests() {
+        return mHeaderPref;
     }
 }

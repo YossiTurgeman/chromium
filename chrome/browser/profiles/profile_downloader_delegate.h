@@ -1,14 +1,11 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_PROFILES_PROFILE_DOWNLOADER_DELEGATE_H_
 #define CHROME_BROWSER_PROFILES_PROFILE_DOWNLOADER_DELEGATE_H_
 
-#include <string>
-
-#include "base/strings/string16.h"
-
+class GURL;
 class ProfileDownloader;
 
 namespace signin {
@@ -34,7 +31,7 @@ class ProfileDownloaderDelegate {
     INVALID_PROFILE_PICTURE_URL  // The profile picture URL is invalid.
   };
 
-  virtual ~ProfileDownloaderDelegate() {}
+  virtual ~ProfileDownloaderDelegate() = default;
 
   // Whether the delegate need profile picture to be downloaded.
   virtual bool NeedsProfilePicture() const = 0;
@@ -44,20 +41,15 @@ class ProfileDownloaderDelegate {
   virtual int GetDesiredImageSideLength() const = 0;
 
   // Returns the cached URL. If the cache URL matches the new image URL
-  // the image will not be downloaded. Return an empty string when there is no
+  // the image will not be downloaded. Return an empty GURL when there is no
   // cached URL.
-  virtual std::string GetCachedPictureURL() const = 0;
+  virtual const GURL& GetCachedPictureURL() const = 0;
 
   // Returns the IdentityManager associated with this download request.
   virtual signin::IdentityManager* GetIdentityManager() = 0;
 
   // Returns the URLLoaderFactory to use for this download request.
   virtual network::mojom::URLLoaderFactory* GetURLLoaderFactory() = 0;
-
-  // Returns true if the profile download is taking place before the user has
-  // signed in. This can happen for example on Android and will trigger some
-  // additional fetches since some information is not yet available.
-  virtual bool IsPreSignin() const = 0;
 
   // Called when the profile download has completed successfully. Delegate can
   // query the downloader for the picture and full name.

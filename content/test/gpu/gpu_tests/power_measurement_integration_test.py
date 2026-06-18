@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """This script only works on Windows with Intel CPU. Intel Power Gadget needs
@@ -23,16 +23,22 @@ This script is tested and works fine with the following video sites:
   * http://crosvideo.appspot.com
 """
 
-from gpu_tests import common_browser_args as cba
-from gpu_tests import gpu_integration_test
-from gpu_tests import ipg_utils
-from gpu_tests import path_util
-
+import dataclasses
 import logging
 import os
-import py_utils
+import posixpath
 import sys
 import time
+from typing import Any
+import unittest
+
+import py_utils
+
+import gpu_path_util
+from gpu_tests import common_browser_args as cba
+from gpu_tests import common_typing as ct
+from gpu_tests import gpu_integration_test
+from gpu_tests import ipg_utils
 
 # Waits for [x] seconds after browser launch before measuring power to
 # avoid startup tasks affecting results.
@@ -44,11 +50,11 @@ _POWER_MEASUREMENT_DURATION = 15
 # Measures power in resolution of [x] milli-seconds.
 _POWER_MEASUREMENT_RESOLUTION = 100
 
-_GPU_RELATIVE_PATH = "content/test/data/gpu/"
+_GPU_RELATIVE_PATH = gpu_path_util.GPU_DATA_RELATIVE_PATH
 
 _DATA_PATHS = [
-    os.path.join(path_util.GetChromiumSrcDir(), _GPU_RELATIVE_PATH),
-    os.path.join(path_util.GetChromiumSrcDir(), 'media', 'test', 'data')
+    gpu_path_util.GPU_DATA_DIR,
+    os.path.join(gpu_path_util.CHROMIUM_SRC_DIR, 'media', 'test', 'data')
 ]
 
 _VIDEO_TEST_SCRIPT = r"""
@@ -204,175 +210,177 @@ _VIDEO_TEST_SCRIPT = r"""
 """
 
 
-class _PowerMeasurementTestArguments(object):
+@dataclasses.dataclass
+class _PowerMeasurementTestArguments():
   """Struct-like object for passing power measurement args instead of a dict."""
-
-  def __init__(  # pylint: disable=too-many-arguments
-      self,
-      test_func,
-      repeat,
-      bypass_ipg,
-      underlay=None,
-      fullscreen=None,
-      outliers=None,
-      ipg_logdir=None,
-      ipg_duration=None,
-      ipg_delay=None,
-      ipg_resolution=None):
-    self.test_func = test_func
-    self.repeat = repeat
-    self.bypass_ipg = bypass_ipg
-    self.underlay = underlay
-    self.fullscreen = fullscreen
-    self.outliers = outliers
-    self.ipg_logdir = ipg_logdir
-    self.ipg_duration = ipg_duration
-    self.ipg_delay = ipg_delay
-    self.ipg_resolution = ipg_resolution
+  test_func: str
+  repeat: int
+  bypass_ipg: bool
+  underlay: bool | None = None
+  fullscreen: bool | None = None
+  outliers: int | None = None
+  ipg_logdir: str | None = None
+  ipg_duration: int | None = None
+  ipg_delay: int | None = None
+  ipg_resolution: int | None = None
 
 
 class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
 
-  _url_mode = None
+  _url_mode: bool | None = None
 
   @classmethod
-  def Name(cls):
+  def Name(cls) -> str:
     return 'power'
 
   @classmethod
-  def AddCommandlineArgs(cls, parser):
+  def AddCommandlineArgs(cls, parser: ct.CmdArgParser) -> None:
     super(PowerMeasurementIntegrationTest, cls).AddCommandlineArgs(parser)
-    parser.add_option(
-        "--duration",
+    parser.add_argument(
+        '--duration',
         default=_POWER_MEASUREMENT_DURATION,
-        type="int",
-        help="specify how many seconds Intel Power Gadget measures. By "
-        "default, %d seconds is selected." % _POWER_MEASUREMENT_DURATION)
-    parser.add_option(
-        "--delay",
+        type=int,
+        help=('Specify how many seconds Intel Power Gadget measures. By '
+              'default, %(default)s seconds is selected.'))
+    parser.add_argument(
+        '--delay',
         default=_POWER_MEASUREMENT_DELAY,
-        type="int",
-        help="specify how many seconds we skip in the data Intel Power Gadget "
-        "collects. This time is for starting video play, switching to "
-        "fullscreen mode, etc. By default, %d seconds is selected." %
-        _POWER_MEASUREMENT_DELAY)
-    parser.add_option(
-        "--resolution",
+        type=int,
+        help=('Specify how many seconds we skip in the data Intel Power Gadget '
+              'collects. This time is for starting video play, switching to '
+              'fullscreen mode, etc. By default, %(default)s seconds is '
+              'selected.'))
+    parser.add_argument(
+        '--resolution',
         default=100,
-        type="int",
-        help="specify how often Intel Power Gadget samples data in "
-        "milliseconds. By default, 100 ms is selected.")
-    parser.add_option(
-        "--url", help="specify the webpage URL the browser launches with.")
-    parser.add_option(
-        "--fullscreen",
-        action="store_true",
+        type=int,
+        help=('Specify how often Intel Power Gadget samples data in '
+              'milliseconds. By default, %(default)s ms is selected.'))
+    parser.add_argument(
+        '--url', help='specify the webpage URL the browser launches with.')
+    parser.add_argument(
+        '--fullscreen',
+        action='store_true',
         default=False,
-        help="specify if the browser goes to fullscreen mode automatically, "
-        "specifically if there is a single video element in the page, switch "
-        "it to fullsrceen mode.")
-    parser.add_option(
-        "--underlay",
-        action="store_true",
+        help=('Specify if the browser goes to fullscreen mode automatically, '
+              'specifically if there is a single video element in the page, '
+              'switch it to fullsrceen mode.'))
+    parser.add_argument(
+        '--underlay',
+        action='store_true',
         default=False,
-        help="add a layer on top so the video layer becomes an underlay.")
-    parser.add_option(
-        "--logdir",
-        help="Speficy where the Intel Power Gadget log file should be stored. "
-        "If specified, the log file name will include a timestamp. If not "
-        "specified, the log file will be PowerLog.csv at the current dir and "
-        "will be overwritten at next run.")
-    parser.add_option(
-        "--repeat",
+        help='Add a layer on top so the video layer becomes an underlay.')
+    parser.add_argument(
+        '--logdir',
+        help=('Specify where the Intel Power Gadget log file should be stored. '
+              'If specified, the log file name will include a timestamp. If '
+              'not specified, the log file will be PowerLog.csv at the current '
+              'dir and will be overwritten at next run.'))
+    parser.add_argument(
+        '--repeat',
         default=3,
-        type="int",
-        help="specify how many times to repreat the measurement. By default, "
-        "measure only once. If measure more than once, between each "
-        "measurement, browser restarts.")
-    parser.add_option(
-        "--outliers",
+        type=int,
+        help=('Specify how many times to repreat the measurement. By default, '
+              'measure only once. If measure more than once, between each '
+              'measurement, browser restarts.'))
+    parser.add_argument(
+        '--outliers',
         default=0,
-        type="int",
-        help="if a test is repeated multiples and outliers is set to N, then "
-        "N smallest results and N largest results are discarded before "
-        "computing mean and stdev.")
-    parser.add_option(
-        "--bypass-ipg",
-        action="store_true",
+        type=int,
+        help=('If a test is repeated multiples and outliers is set to N, then '
+              'N smallest results and N largest results are discarded before '
+              'computing mean and stdev.'))
+    parser.add_argument(
+        '--bypass-ipg',
+        action='store_true',
         default=False,
-        help="Do not launch Intel Power Gadget. This is for testing "
-        "convenience on machines where Intel Power Gadget does not work.")
+        help=('Do not launch Intel Power Gadget. This is for testing '
+              'convenience on machines where Intel Power Gadget does not '
+              'work.'))
 
   @classmethod
-  def GenerateGpuTests(cls, options):
+  def GenerateGpuTests(cls, options: ct.ParsedCmdArgs) -> ct.TestGenerator:
     if options.url is not None:
       # This is for local testing convenience only and is not to be added to
       # any bots.
       cls._url_mode = True
-      yield ('URL', options.url,
-             _PowerMeasurementTestArguments(test_func='URL',
-                                            repeat=options.repeat,
-                                            outliers=options.outliers,
-                                            fullscreen=options.fullscreen,
-                                            underlay=options.underlay,
-                                            ipg_logdir=options.logdir,
-                                            ipg_duration=options.duration,
-                                            ipg_delay=options.delay,
-                                            ipg_resolution=options.resolution,
-                                            bypass_ipg=options.bypass_ipg))
+      yield ('URL', options.url, [
+          _PowerMeasurementTestArguments(test_func='URL',
+                                         repeat=options.repeat,
+                                         outliers=options.outliers,
+                                         fullscreen=options.fullscreen,
+                                         underlay=options.underlay,
+                                         ipg_logdir=options.logdir,
+                                         ipg_duration=options.duration,
+                                         ipg_delay=options.delay,
+                                         ipg_resolution=options.resolution,
+                                         bypass_ipg=options.bypass_ipg)
+      ])
     else:
       cls._url_mode = False
-      yield ('Basic', '-',
-             _PowerMeasurementTestArguments(test_func='Basic',
-                                            repeat=options.repeat,
-                                            bypass_ipg=options.bypass_ipg))
+      yield ('Basic', '-', [
+          _PowerMeasurementTestArguments(test_func='Basic',
+                                         repeat=options.repeat,
+                                         bypass_ipg=options.bypass_ipg)
+      ])
       yield ('Video_720_MP4',
-             _GPU_RELATIVE_PATH + 'power_video_bear_1280x720_mp4.html',
-             _PowerMeasurementTestArguments(test_func='Video',
-                                            repeat=options.repeat,
-                                            bypass_ipg=options.bypass_ipg,
-                                            underlay=False,
-                                            fullscreen=False))
+             posixpath.join(_GPU_RELATIVE_PATH,
+                            'power_video_bear_1280x720_mp4.html'),
+             [
+                 _PowerMeasurementTestArguments(test_func='Video',
+                                                repeat=options.repeat,
+                                                bypass_ipg=options.bypass_ipg,
+                                                underlay=False,
+                                                fullscreen=False)
+             ])
       yield ('Video_720_MP4_Underlay',
-             _GPU_RELATIVE_PATH + 'power_video_bear_1280x720_mp4.html',
-             _PowerMeasurementTestArguments(test_func='Video',
-                                            repeat=options.repeat,
-                                            bypass_ipg=options.bypass_ipg,
-                                            underlay=True,
-                                            fullscreen=False))
+             posixpath.join(_GPU_RELATIVE_PATH,
+                            'power_video_bear_1280x720_mp4.html'),
+             [
+                 _PowerMeasurementTestArguments(test_func='Video',
+                                                repeat=options.repeat,
+                                                bypass_ipg=options.bypass_ipg,
+                                                underlay=True,
+                                                fullscreen=False)
+             ])
       yield ('Video_720_MP4_Fullscreen',
-             _GPU_RELATIVE_PATH + 'power_video_bear_1280x720_mp4.html',
-             _PowerMeasurementTestArguments(test_func='Video',
-                                            repeat=options.repeat,
-                                            bypass_ipg=options.bypass_ipg,
-                                            underlay=False,
-                                            fullscreen=True))
+             posixpath.join(_GPU_RELATIVE_PATH,
+                            'power_video_bear_1280x720_mp4.html'),
+             [
+                 _PowerMeasurementTestArguments(test_func='Video',
+                                                repeat=options.repeat,
+                                                bypass_ipg=options.bypass_ipg,
+                                                underlay=False,
+                                                fullscreen=True)
+             ])
       yield ('Video_720_MP4_Underlay_Fullscreen',
-             _GPU_RELATIVE_PATH + 'power_video_bear_1280x720_mp4.html',
-             _PowerMeasurementTestArguments(test_func='Video',
-                                            repeat=options.repeat,
-                                            bypass_ipg=options.bypass_ipg,
-                                            underlay=True,
-                                            fullscreen=True))
+             posixpath.join(_GPU_RELATIVE_PATH,
+                            'power_video_bear_1280x720_mp4.html'),
+             [
+                 _PowerMeasurementTestArguments(test_func='Video',
+                                                repeat=options.repeat,
+                                                bypass_ipg=options.bypass_ipg,
+                                                underlay=True,
+                                                fullscreen=True)
+             ])
 
   @classmethod
-  def SetUpProcess(cls):
+  def SetUpProcess(cls) -> None:
     super(cls, PowerMeasurementIntegrationTest).SetUpProcess()
-    path_util.SetupTelemetryPaths()
     cls.CustomizeBrowserArgs([])
     cls.StartBrowser()
     assert cls._url_mode is not None
     if not cls._url_mode:
       cls.SetStaticServerDirs(_DATA_PATHS)
 
-  def RunActualGpuTest(self, test_path, *args):
+  def RunActualGpuTest(self, test_path: str, args: ct.TestArgs) -> None:
     test_params = args[0]
     assert test_params is not None
-    prefixed_test_func_name = '_RunTest_%s' % test_params.test_func
+    prefixed_test_func_name = f'_RunTest_{test_params.test_func}'
     getattr(self, prefixed_test_func_name)(test_path, test_params)
 
   @classmethod
-  def GenerateBrowserArgs(cls, additional_args):
+  def GenerateBrowserArgs(cls, additional_args: list[str]) -> list[str]:
     """Adds default arguments to |additional_args|.
 
     See the parent class' method documentation for additional information.
@@ -383,10 +391,10 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
     return default_args
 
   @staticmethod
-  def _MeasurePowerWithIPG(bypass_ipg):
+  def _MeasurePowerWithIPG(bypass_ipg: bool) -> dict:
     total_time = _POWER_MEASUREMENT_DURATION + _POWER_MEASUREMENT_DELAY
     if bypass_ipg:
-      logging.info("Bypassing Intel Power Gadget")
+      logging.info('Bypassing Intel Power Gadget')
       time.sleep(total_time)
       return {}
     logfile = None  # Use the default path
@@ -395,8 +403,8 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
     return results
 
   @staticmethod
-  def _AppendResults(results_sum, results):
-    assert type(results_sum) is dict and type(results) is dict
+  def _AppendResults(results_sum: dict, results: dict) -> dict:
+    assert isinstance(results_sum, dict) and isinstance(results, dict)
     assert results
     first_append = not results_sum
     for key, value in results.items():
@@ -404,17 +412,17 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
         results_sum[key] = [value]
       else:
         assert key in results_sum
-        assert type(results_sum[key]) is list
+        assert isinstance(results_sum[key], list)
         results_sum[key].append(value)
     return results_sum
 
   @staticmethod
-  def _LogResults(results):
+  def _LogResults(results: dict) -> None:
     # TODO(zmo): output in a way that the results can be tracked at
     # chromeperf.appspot.com.
-    logging.info("Results: %s", str(results))
+    logging.info('Results: %s', str(results))
 
-  def _SetupVideo(self, fullscreen, underlay):
+  def _SetupVideo(self, fullscreen: bool, underlay: bool) -> None:
     self.tab.action_runner.WaitForJavaScriptCondition(
         'waitForVideoToPlay()', timeout=30)
     if fullscreen:
@@ -432,7 +440,8 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
   #########################################
   # Actual test functions
 
-  def _RunTest_Basic(self, test_path, params):
+  def _RunTest_Basic(self, test_path: str,
+                     params: _PowerMeasurementTestArguments) -> None:
     del test_path  # Unused in this particular test.
 
     results_sum = {}
@@ -447,11 +456,9 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
           results_sum, results)
     PowerMeasurementIntegrationTest._LogResults(results_sum)
 
-  def _RunTest_Video(self, test_path, params):
-    disabled_features = [
-        'D3D11VideoDecoder', 'DirectCompositionUseNV12DecodeSwapChain',
-        'DirectCompositionUnderlays'
-    ]
+  def _RunTest_Video(self, test_path: str,
+                     params: _PowerMeasurementTestArguments) -> None:
+    disabled_features = ['D3D11VideoDecoder']
 
     results_sum = {}
     for iteration in range(params.repeat):
@@ -460,7 +467,7 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
       self.RestartBrowserWithArgs([
           # All bots are connected with a power source, however, we want to to
           # test with the code path that's enabled with battery power.
-          cba.DISABLE_VP_SCALING,
+          cba.DISABLE_DIRECT_COMPOSITION_VP_SCALING,
           '--disable-features=' + ','.join(disabled_features)
       ])
 
@@ -474,7 +481,8 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
           results_sum, results)
     PowerMeasurementIntegrationTest._LogResults(results_sum)
 
-  def _RunTest_URL(self, test_path, params):
+  def _RunTest_URL(self, test_path: str,
+                   params: _PowerMeasurementTestArguments) -> None:
     repeat = params.repeat
     ipg_logdir = params.ipg_logdir
     ipg_duration = params.ipg_duration
@@ -482,23 +490,23 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
     bypass_ipg = params.bypass_ipg
 
     if repeat > 1:
-      logging.info("Total iterations: %d", repeat)
+      logging.info('Total iterations: %d', repeat)
     logfiles = []
     for iteration in range(repeat):
       if repeat > 1:
-        logging.info("Iteration %d", iteration)
+        logging.info('Iteration %d', iteration)
       self.tab.action_runner.Navigate(test_path, _VIDEO_TEST_SCRIPT)
       self.tab.WaitForDocumentReadyStateToBeComplete()
       self._SetupVideo(fullscreen=params.fullscreen, underlay=params.underlay)
 
       if bypass_ipg:
-        logging.info("Bypassing Intel Power Gadget")
+        logging.info('Bypassing Intel Power Gadget')
         time.sleep(ipg_duration + ipg_delay)
       else:
         logfile = None
         if ipg_logdir:
           if not os.path.isdir(ipg_logdir):
-            self.fail("Folder " + ipg_logdir + " doesn't exist")
+            self.fail('Folder ' + ipg_logdir + " doesn't exist")
           logfile = ipg_utils.GenerateIPGLogFilename(
               log_dir=ipg_logdir, timestamp=True)
         ipg_utils.RunIPG(ipg_duration + ipg_delay, params.ipg_resolution,
@@ -514,19 +522,19 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
 
     if repeat == 1:
       results = ipg_utils.AnalyzeIPGLogFile(logfiles[0], ipg_delay)
-      logging.info("Results: %s", str(results))
+      logging.info('Results: %s', str(results))
     else:
       json_path = None
       if ipg_logdir:
-        json_path = os.path.join(ipg_logdir, "output.json")
-        print "Results saved in ", json_path
+        json_path = os.path.join(ipg_logdir, 'output.json')
+        print('Results saved in ', json_path)
 
       summary = ipg_utils.ProcessResultsFromMultipleIPGRuns(
           logfiles, ipg_delay, params.outliers, json_path)
-      logging.info("Summary: %s", str(summary))
+      logging.info('Summary: %s', str(summary))
 
   @classmethod
-  def ExpectationsFiles(cls):
+  def ExpectationsFiles(cls) -> list[str]:
     return [
         os.path.join(
             os.path.dirname(os.path.abspath(__file__)), 'test_expectations',
@@ -534,6 +542,7 @@ class PowerMeasurementIntegrationTest(gpu_integration_test.GpuIntegrationTest):
     ]
 
 
-def load_tests(loader, tests, pattern):
+def load_tests(loader: unittest.TestLoader, tests: Any,
+               pattern: Any) -> unittest.TestSuite:
   del loader, tests, pattern  # Unused.
   return gpu_integration_test.LoadAllTestsInModule(sys.modules[__name__])

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,14 +8,14 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "components/feature_engagement/internal/proto/availability.pb.h"
 #include "components/feature_engagement/public/feature_list.h"
@@ -26,14 +26,18 @@
 namespace feature_engagement {
 
 namespace {
-const base::Feature kPersistentTestFeatureFoo{
-    "test_foo", base::FEATURE_DISABLED_BY_DEFAULT};
-const base::Feature kPersistentTestFeatureBar{
-    "test_bar", base::FEATURE_DISABLED_BY_DEFAULT};
-const base::Feature kPersistentTestFeatureQux{
-    "test_qux", base::FEATURE_DISABLED_BY_DEFAULT};
-const base::Feature kPersistentTestFeatureNop{
-    "test_nop", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kPersistentTestFeatureFoo,
+             "test_foo",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kPersistentTestFeatureBar,
+             "test_bar",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kPersistentTestFeatureQux,
+             "test_qux",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kPersistentTestFeatureNop,
+             "test_nop",
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
 Availability CreateAvailability(const base::Feature& feature, uint32_t day) {
   Availability availability;
@@ -47,9 +51,14 @@ class PersistentAvailabilityStoreTest : public testing::Test {
   PersistentAvailabilityStoreTest()
       : db_(nullptr),
         storage_dir_(FILE_PATH_LITERAL("/persistent/store/lalala")) {
-    load_callback_ = base::Bind(&PersistentAvailabilityStoreTest::LoadCallback,
-                                base::Unretained(this));
+    load_callback_ = base::BindOnce(
+        &PersistentAvailabilityStoreTest::LoadCallback, base::Unretained(this));
   }
+
+  PersistentAvailabilityStoreTest(const PersistentAvailabilityStoreTest&) =
+      delete;
+  PersistentAvailabilityStoreTest& operator=(
+      const PersistentAvailabilityStoreTest&) = delete;
 
   ~PersistentAvailabilityStoreTest() override = default;
 
@@ -66,6 +75,10 @@ class PersistentAvailabilityStoreTest : public testing::Test {
       std::unique_ptr<std::map<std::string, uint32_t>> availabilities) {
     load_successful_ = success;
     load_results_ = std::move(availabilities);
+    // This callback only gets called once and the DB, created in CreateDB(),
+    // will be freed before the callstack unwinds. Clear the cached pointer to
+    // avoid a dangling pointer error later.
+    db_ = nullptr;
   }
 
  protected:
@@ -75,7 +88,7 @@ class PersistentAvailabilityStoreTest : public testing::Test {
   PersistentAvailabilityStore::OnLoadedCallback load_callback_;
 
   // Callback results.
-  base::Optional<bool> load_successful_;
+  std::optional<bool> load_successful_;
   std::unique_ptr<std::map<std::string, uint32_t>> load_results_;
 
   // |db_availabilities_| is used during creation of the FakeDB in CreateDB(),
@@ -83,13 +96,10 @@ class PersistentAvailabilityStoreTest : public testing::Test {
   std::map<std::string, Availability> db_availabilities_;
 
   // The database that is in use.
-  leveldb_proto::test::FakeDB<Availability>* db_;
+  raw_ptr<leveldb_proto::test::FakeDB<Availability>> db_;
 
   // Constant test data.
   base::FilePath storage_dir_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(PersistentAvailabilityStoreTest);
 };
 
 }  // namespace

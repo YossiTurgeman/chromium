@@ -1,16 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/chrome_elf/third_party_dlls/main.h"
 
-#include <limits>
-
 #include <windows.h>
 
+#include <assert.h>
 #include <versionhelpers.h>
 
-#include <assert.h>
+#include <limits>
 
 #include "chrome/chrome_elf/nt_registry/nt_registry.h"
 #include "chrome/chrome_elf/third_party_dlls/hook.h"
@@ -96,7 +95,7 @@ bool Init() {
 
   // Sanity check: third_party_dlls should only be enabled in the browser
   // process at this time.
-  if (install_static::IsNonBrowserProcess())
+  if (!install_static::IsBrowserProcess())
     return false;
 
   // Zero tolerance for unsupported versions of Windows.  Third-party control
@@ -107,7 +106,7 @@ bool Init() {
   if (!ResetStatusCodes())
     AddStatusCode(ThirdPartyStatus::kStatusCodeResetFailure);
 
-  // 1) Initialize the blacklist from file
+  // 1) Initialize the blocklist from file
   ThirdPartyStatus status = InitFromFile();
   if (status != ThirdPartyStatus::kSuccess) {
     AddStatusCode(status);

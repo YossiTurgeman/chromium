@@ -26,6 +26,8 @@
 
 #include "third_party/blink/renderer/core/events/touch_event.h"
 
+#include <memory>
+
 #include "third_party/blink/public/common/input/web_coalesced_input_event.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_touch_event_init.h"
 #include "third_party/blink/renderer/core/dom/events/event_dispatcher.h"
@@ -34,6 +36,7 @@
 #include "third_party/blink/renderer/core/frame/frame_console.h"
 #include "third_party/blink/renderer/core/frame/intervention.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
@@ -83,7 +86,7 @@ TouchEvent::TouchEvent(const WebCoalescedInputEvent& event,
       changed_touches_(changed_touches),
       current_touch_action_(current_touch_action) {
   DCHECK(WebInputEvent::IsTouchEventType(event.Event().GetType()));
-  native_event_.reset(new WebCoalescedInputEvent(event));
+  native_event_ = std::make_unique<WebCoalescedInputEvent>(event);
 }
 
 TouchEvent::TouchEvent(const AtomicString& type,
@@ -107,6 +110,12 @@ bool TouchEvent::IsTouchEvent() const {
 void TouchEvent::preventDefault() {
   UIEventWithKeyState::preventDefault();
 
+  if (!IsFullyTrusted()) {
+    // The messages below should only be sent for implementation-created
+    // events, not for script-created ones.
+    return;
+  }
+
   // A common developer error is to wait too long before attempting to stop
   // scrolling by consuming a touchmove event. Generate an error if this
   // event is uncancelable.
@@ -117,10 +126,10 @@ void TouchEvent::preventDefault() {
     case PassiveMode::kNotPassiveDefault:
       if (!cancelable()) {
         id = "IgnoredEventCancel";
-        message = "Ignored attempt to cancel a " + type() +
-                  " event with cancelable=false, for example "
-                  "because scrolling is in progress and "
-                  "cannot be interrupted.";
+        message =
+            StrCat({"Ignored attempt to cancel a ", type(),
+                    " event with cancelable=false, for example because "
+                    "scrolling is in progress and cannot be interrupted."});
       }
       break;
     case PassiveMode::kPassiveForcedDocumentLevel:
@@ -132,7 +141,7 @@ void TouchEvent::preventDefault() {
         message =
             "Unable to preventDefault inside passive event listener due to "
             "target being treated as passive. See "
-            "https://www.chromestatus.com/features/5093566007214080";
+            "https://www.chromestatus.com/feature/5093566007214080";
       }
       break;
     default:
@@ -140,7 +149,7 @@ void TouchEvent::preventDefault() {
   }
 
   auto* local_dom_window = DynamicTo<LocalDOMWindow>(view());
-  if (!message.IsEmpty() && local_dom_window && local_dom_window->GetFrame()) {
+  if (!message.empty() && local_dom_window && local_dom_window->GetFrame()) {
     Intervention::GenerateReport(local_dom_window->GetFrame(), id, message);
   }
 
@@ -181,7 +190,8 @@ void TouchEvent::Trace(Visitor* visitor) const {
 }
 
 DispatchEventResult TouchEvent::DispatchEvent(EventDispatcher& dispatcher) {
-  GetEventPath().AdjustForTouchEvent(*this);
+  if (isTrusted())
+    GetEventPath().AdjustForTouchEvent(*this);
   return dispatcher.Dispatch();
 }
 

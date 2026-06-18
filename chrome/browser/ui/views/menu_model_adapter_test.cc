@@ -1,21 +1,22 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/controls/menu/menu_model_adapter.h"
-#include "base/callback.h"
+
+#include "base/functional/callback.h"
 #include "base/location.h"
-#include "base/macros.h"
-#include "base/single_thread_task_runner.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/current_thread.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/ui/views/test/view_event_test_base.h"
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "ui/base/models/menu_model.h"
+#include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/base/test/ui_controls.h"
-#include "ui/views/controls/button/button.h"
 #include "ui/views/controls/button/menu_button.h"
 #include "ui/views/controls/menu/menu_controller.h"
 #include "ui/views/controls/menu/menu_item_view.h"
@@ -36,125 +37,124 @@ const int kSubMenuBaseId = 200;
 //  virtual int GetItemCount() const = 0;
 //  virtual ItemType GetTypeAt(int index) const = 0;
 //  virtual int GetCommandIdAt(int index) const = 0;
-//  virtual base::string16 GetLabelAt(int index) const = 0;
+//  virtual std::u16string GetLabelAt(int index) const = 0;
 class CommonMenuModel : public ui::MenuModel {
  public:
-  CommonMenuModel() {
-  }
+  CommonMenuModel() = default;
 
-  ~CommonMenuModel() override {}
+  CommonMenuModel(const CommonMenuModel&) = delete;
+  CommonMenuModel& operator=(const CommonMenuModel&) = delete;
+
+  ~CommonMenuModel() override = default;
 
  protected:
-  // ui::MenuModel implementation.
-  bool HasIcons() const override { return false; }
+  // ui::MenuModel:
+  bool IsItemDynamicAt(size_t index) const override { return false; }
 
-  bool IsItemDynamicAt(int index) const override { return false; }
-
-  bool GetAcceleratorAt(int index,
+  bool GetAcceleratorAt(size_t index,
                         ui::Accelerator* accelerator) const override {
     return false;
   }
 
-  ui::MenuSeparatorType GetSeparatorTypeAt(int index) const override {
+  ui::MenuSeparatorType GetSeparatorTypeAt(size_t index) const override {
     return ui::NORMAL_SEPARATOR;
   }
 
-  bool IsItemCheckedAt(int index) const override { return false; }
+  bool IsItemCheckedAt(size_t index) const override { return false; }
 
-  int GetGroupIdAt(int index) const override { return 0; }
+  int GetGroupIdAt(size_t index) const override { return 0; }
 
-  ui::ImageModel GetIconAt(int index) const override {
+  ui::ImageModel GetIconAt(size_t index) const override {
     return ui::ImageModel();
   }
 
-  ui::ButtonMenuItemModel* GetButtonMenuItemAt(int index) const override {
+  ui::ButtonMenuItemModel* GetButtonMenuItemAt(size_t index) const override {
     return nullptr;
   }
 
-  bool IsEnabledAt(int index) const override { return true; }
+  bool IsEnabledAt(size_t index) const override { return true; }
 
-  ui::MenuModel* GetSubmenuModelAt(int index) const override { return nullptr; }
+  ui::MenuModel* GetSubmenuModelAt(size_t index) const override {
+    return nullptr;
+  }
 
-  void ActivatedAt(int index) override {}
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(CommonMenuModel);
+  void ActivatedAt(size_t index) override {}
 };
 
-class SubMenuModel : public CommonMenuModel {
+class SubMenuModel final : public CommonMenuModel {
  public:
-  SubMenuModel()
-      : showing_(false) {
-  }
+  SubMenuModel() = default;
 
-  ~SubMenuModel() override {}
+  SubMenuModel(const SubMenuModel&) = delete;
+  SubMenuModel& operator=(const SubMenuModel&) = delete;
 
-  bool showing() const {
-    return showing_;
-  }
+  ~SubMenuModel() override = default;
+
+  bool showing() const { return showing_; }
 
  private:
   // ui::MenuModel implementation.
-  int GetItemCount() const override { return 1; }
-
-  ItemType GetTypeAt(int index) const override { return TYPE_COMMAND; }
-
-  int GetCommandIdAt(int index) const override {
-    return index + kSubMenuBaseId;
+  base::WeakPtr<ui::MenuModel> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
   }
 
-  base::string16 GetLabelAt(int index) const override {
-    return base::ASCIIToUTF16("Item");
+  size_t GetItemCount() const override { return 1; }
+
+  ItemType GetTypeAt(size_t index) const override { return TYPE_COMMAND; }
+
+  int GetCommandIdAt(size_t index) const override {
+    return static_cast<int>(index) + kSubMenuBaseId;
   }
+
+  std::u16string GetLabelAt(size_t index) const override { return u"Item"; }
 
   void MenuWillShow() override { showing_ = true; }
 
   // Called when the menu is about to close.
   void MenuWillClose() override { showing_ = false; }
 
-  bool showing_;
-
-  DISALLOW_COPY_AND_ASSIGN(SubMenuModel);
+  bool showing_ = false;
+  base::WeakPtrFactory<SubMenuModel> weak_ptr_factory_{this};
 };
 
-class TopMenuModel : public CommonMenuModel {
+class TopMenuModel final : public CommonMenuModel {
  public:
-  TopMenuModel() {
-  }
+  TopMenuModel() = default;
 
-  ~TopMenuModel() override {}
+  TopMenuModel(const TopMenuModel&) = delete;
+  TopMenuModel& operator=(const TopMenuModel&) = delete;
 
-  bool IsSubmenuShowing() {
-    return sub_menu_model_.showing();
-  }
+  ~TopMenuModel() override = default;
+
+  bool IsSubmenuShowing() { return sub_menu_model_.showing(); }
 
  private:
   // ui::MenuModel implementation.
-  int GetItemCount() const override { return 1; }
-
-  ItemType GetTypeAt(int index) const override { return TYPE_SUBMENU; }
-
-  int GetCommandIdAt(int index) const override {
-    return index + kTopMenuBaseId;
+  base::WeakPtr<ui::MenuModel> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
   }
 
-  base::string16 GetLabelAt(int index) const override {
-    return base::ASCIIToUTF16("submenu");
+  size_t GetItemCount() const override { return 1; }
+
+  ItemType GetTypeAt(size_t index) const override { return TYPE_SUBMENU; }
+
+  int GetCommandIdAt(size_t index) const override {
+    return static_cast<int>(index) + kTopMenuBaseId;
   }
 
-  MenuModel* GetSubmenuModelAt(int index) const override {
+  std::u16string GetLabelAt(size_t index) const override { return u"submenu"; }
+
+  MenuModel* GetSubmenuModelAt(size_t index) const override {
     return &sub_menu_model_;
   }
 
   mutable SubMenuModel sub_menu_model_;
-
-  DISALLOW_COPY_AND_ASSIGN(TopMenuModel);
+  base::WeakPtrFactory<TopMenuModel> weak_ptr_factory_{this};
 };
 
 }  // namespace
 
-class MenuModelAdapterTest : public ViewEventTestBase,
-                             public views::ButtonListener {
+class MenuModelAdapterTest : public ViewEventTestBase {
  public:
   MenuModelAdapterTest() = default;
   ~MenuModelAdapterTest() override = default;
@@ -164,36 +164,32 @@ class MenuModelAdapterTest : public ViewEventTestBase,
   void SetUp() override {
     ViewEventTestBase::SetUp();
 
-    menu_ = menu_model_adapter_.CreateMenu();
+    std::unique_ptr<views::MenuItemView> menu =
+        menu_model_adapter_.CreateMenu();
+    menu_ = menu.get();
     menu_runner_ = std::make_unique<views::MenuRunner>(
-        menu_, views::MenuRunner::HAS_MNEMONICS);
+        std::move(menu), views::MenuRunner::HAS_MNEMONICS);
   }
 
   void TearDown() override {
+    menu_ = nullptr;
     menu_runner_.reset();
 
+    button_ = nullptr;
     ViewEventTestBase::TearDown();
   }
 
   std::unique_ptr<views::View> CreateContentsView() override {
     auto button = std::make_unique<views::MenuButton>(
-        this, base::ASCIIToUTF16("Menu Adapter Test"));
+        base::BindRepeating(&MenuModelAdapterTest::ButtonPressed,
+                            base::Unretained(this)),
+        u"Menu Adapter Test");
     button_ = button.get();
     return button;
   }
 
   gfx::Size GetPreferredSizeForContents() const override {
     return button_->GetPreferredSize();
-  }
-
-  // views::ButtonListener implementation.
-  void ButtonPressed(views::Button* source, const ui::Event& event) override {
-    gfx::Point screen_location;
-    views::View::ConvertPointToScreen(source, &screen_location);
-    gfx::Rect bounds(screen_location, source->size());
-    menu_runner_->RunMenuAt(source->GetWidget(), button_->button_controller(),
-                            bounds, views::MenuAnchorPosition::kTopLeft,
-                            ui::MENU_SOURCE_NONE);
   }
 
   // ViewEventTestBase implementation
@@ -225,7 +221,7 @@ class MenuModelAdapterTest : public ViewEventTestBase,
     menu_model_adapter_.BuildMenu(menu_);
 
     ASSERT_TRUE(base::CurrentUIThread::IsSet());
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, CreateEventTask(this, &MenuModelAdapterTest::Step3));
   }
 
@@ -255,17 +251,24 @@ class MenuModelAdapterTest : public ViewEventTestBase,
  private:
   // Generate a mouse click on the specified view and post a new task.
   virtual void Click(views::View* view, base::OnceClosure next) {
-    ui_test_utils::MoveMouseToCenterAndPress(
+    ui_test_utils::MoveMouseToCenterAndClick(
         view, ui_controls::LEFT, ui_controls::DOWN | ui_controls::UP,
         std::move(next));
   }
 
-  views::MenuButton* button_ = nullptr;
+  void ButtonPressed() {
+    menu_runner_->RunMenuAt(button_->GetWidget(), button_->button_controller(),
+                            button_->GetBoundsInScreen(),
+                            views::MenuAnchorPosition::kTopLeft,
+                            ui::mojom::MenuSourceType::kNone);
+  }
+
+  raw_ptr<views::MenuButton> button_ = nullptr;
   TopMenuModel top_menu_model_;
   views::MenuModelAdapter menu_model_adapter_{&top_menu_model_};
-  views::MenuItemView* menu_ = nullptr;
   std::unique_ptr<views::MenuRunner> menu_runner_;
+  raw_ptr<views::MenuItemView> menu_ = nullptr;
 };
 
-// If this flakes, disable and log details in http://crbug.com/523255.
+// If this flakes, disable and log details in http://crbug.com/40432443.
 VIEW_TEST(MenuModelAdapterTest, RebuildMenu)

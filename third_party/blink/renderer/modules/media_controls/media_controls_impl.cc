@@ -26,11 +26,18 @@
 
 #include "third_party/blink/renderer/modules/media_controls/media_controls_impl.h"
 
+#include <array>
+
+#include "base/auto_reset.h"
+#include "media/base/media_switches.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/task_type.h"
-#include "third_party/blink/public/platform/web_size.h"
+#include "third_party/blink/public/platform/user_metrics_action.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_mutation_observer_init.h"
+#include "third_party/blink/renderer/core/css/css_property_names.h"
 #include "third_party/blink/renderer/core/css/css_property_value_set.h"
+#include "third_party/blink/renderer/core/css_value_keywords.h"
+#include "third_party/blink/renderer/core/keywords.h"
 #include "third_party/blink/renderer/core/dom/element_traversal.h"
 #include "third_party/blink/renderer/core/dom/events/event_dispatch_forbidden_scope.h"
 #include "third_party/blink/renderer/core/dom/mutation_observer.h"
@@ -46,12 +53,16 @@
 #include "third_party/blink/renderer/core/fullscreen/fullscreen.h"
 #include "third_party/blink/renderer/core/geometry/dom_rect.h"
 #include "third_party/blink/renderer/core/html/media/autoplay_policy.h"
+#include "third_party/blink/renderer/core/html/media/html_audio_element.h"
 #include "third_party/blink/renderer/core/html/media/html_media_element.h"
 #include "third_party/blink/renderer/core/html/media/html_media_element_controls_list.h"
 #include "third_party/blink/renderer/core/html/media/html_video_element.h"
+#include "third_party/blink/renderer/core/html/time_ranges.h"
+#include "third_party/blink/renderer/core/html/track/audio_track_list.h"
 #include "third_party/blink/renderer/core/html/track/text_track.h"
 #include "third_party/blink/renderer/core/html/track/text_track_container.h"
 #include "third_party/blink/renderer/core/html/track/text_track_list.h"
+#include "third_party/blink/renderer/core/html/track/video_track_list.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/page/spatial_navigation.h"
 #include "third_party/blink/renderer/core/resize_observer/resize_observer.h"
@@ -75,11 +86,15 @@
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_panel_enclosure_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_picture_in_picture_button_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_play_button_element.h"
+#include "third_party/blink/renderer/modules/media_controls/elements/media_control_playback_speed_button_element.h"
+#include "third_party/blink/renderer/modules/media_controls/elements/media_control_playback_speed_list_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_remaining_time_display_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_scrubbing_message_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_text_track_list_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_timeline_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_toggle_closed_captions_button_element.h"
+#include "third_party/blink/renderer/modules/media_controls/elements/media_control_track_selector_list_element.h"
+#include "third_party/blink/renderer/modules/media_controls/elements/media_control_track_selector_menu_button_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_volume_control_container_element.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_volume_slider_element.h"
 #include "third_party/blink/renderer/modules/media_controls/media_controls_display_cutout_delegate.h"
@@ -95,6 +110,8 @@
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
 #include "third_party/blink/renderer/platform/web_test_support.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+#include "ui/gfx/geometry/size.h"
 
 namespace blink {
 
@@ -106,7 +123,7 @@ constexpr int kMinWidthForOverlayPlayButton = 72;
 
 constexpr int kMinScrubbingMessageWidth = 300;
 
-const char* const kStateCSSClasses[8] = {
+const std::array<const char*, 8> kStateCSSClasses = {
     "state-no-source",                 // kNoSource
     "state-no-metadata",               // kNotLoaded
     "state-loading-metadata-paused",   // kLoadingMetadataPaused
@@ -125,19 +142,15 @@ const char kShowDefaultPosterCSSClass[] = "use-default-poster";
 const char kActAsAudioControlsCSSClass[] = "audio-only";
 const char kScrubbingMessageCSSClass[] = "scrubbing-message";
 const char kTestModeCSSClass[] = "test-mode";
-const char kImmersiveModeCSSClass[] = "immersive-mode";
 
 // The delay between two taps to be recognized as a double tap gesture.
-constexpr base::TimeDelta kDoubleTapDelay =
-    base::TimeDelta::FromMilliseconds(300);
+constexpr base::TimeDelta kDoubleTapDelay = base::Milliseconds(300);
 
 // The time user have to hover on mute button to show volume slider.
 // If this value is changed, you need to change the corresponding value in
 // media_controls_impl_test.cc
-constexpr base::TimeDelta kTimeToShowVolumeSlider =
-    base::TimeDelta::FromMilliseconds(200);
-constexpr base::TimeDelta kTimeToShowVolumeSliderTest =
-    base::TimeDelta::FromMilliseconds(0);
+constexpr base::TimeDelta kTimeToShowVolumeSlider = base::Milliseconds(200);
+constexpr base::TimeDelta kTimeToShowVolumeSliderTest = base::Milliseconds(0);
 
 // The number of seconds to jump when double tapping.
 constexpr int kNumberOfSecondsToJump = 10;
@@ -148,6 +161,44 @@ void MaybeParserAppendChild(Element* parent, Element* child) {
     parent->ParserAppendChild(child);
 }
 
+bool ShouldShowPlaybackSpeedButton(HTMLMediaElement& media_element) {
+  // The page disabled the button via the controlsList attribute.
+  if (media_element.ControlsListInternal()->ShouldHidePlaybackRate() &&
+      !media_element.UserWantsControlsVisible()) {
+    UseCounter::Count(media_element.GetDocument(),
+                      WebFeature::kHTMLMediaElementControlsListNoPlaybackRate);
+    return false;
+  }
+
+  // A MediaStream is not seekable.
+  if (media_element.GetLoadType() == WebMediaPlayer::kLoadTypeMediaStream)
+    return false;
+
+  // Don't allow for live infinite streams.
+  if (media_element.duration() == std::numeric_limits<double>::infinity() &&
+      media_element.getReadyState() > HTMLMediaElement::kHaveNothing) {
+    return false;
+  }
+
+  return true;
+}
+
+bool ShouldShowTrackSelectionButton(WebMediaPlayer::TrackType track_type,
+                                    HTMLMediaElement& element) {
+  if (!RuntimeEnabledFeatures::AudioVideoTracksEnabled()) {
+    return false;
+  }
+  switch (track_type) {
+    case WebMediaPlayer::TrackType::kVideoTrack:
+      return element.videoTracks().length() >= 2;
+    case WebMediaPlayer::TrackType::kAudioTrack:
+      return element.audioTracks().length() >= 2;
+    case WebMediaPlayer::TrackType::kTextTrack:
+      NOTREACHED();
+  }
+  return false;
+}
+
 bool ShouldShowPictureInPictureButton(HTMLMediaElement& media_element) {
   return media_element.SupportsPictureInPicture();
 }
@@ -156,19 +207,17 @@ bool ShouldShowCastButton(HTMLMediaElement& media_element) {
   if (media_element.FastHasAttribute(html_names::kDisableremoteplaybackAttr))
     return false;
 
-  // Explicitly do not show cast button when:
-  // - the mediaControlsEnabled setting is false, to make sure the overlay does
-  //   not appear;
-  // - the immersiveModeEnabled setting is true.
+  // Explicitly do not show cast button when the mediaControlsEnabled setting is
+  // false, to make sure the overlay does not appear.
   Document& document = media_element.GetDocument();
   if (document.GetSettings() &&
-      (!document.GetSettings()->GetMediaControlsEnabled() ||
-       document.GetSettings()->GetImmersiveModeEnabled())) {
+      (!document.GetSettings()->GetMediaControlsEnabled())) {
     return false;
   }
 
   // The page disabled the button via the attribute.
-  if (media_element.ControlsListInternal()->ShouldHideRemotePlayback()) {
+  if (media_element.ControlsListInternal()->ShouldHideRemotePlayback() &&
+      !media_element.UserWantsControlsVisible()) {
     UseCounter::Count(
         media_element.GetDocument(),
         WebFeature::kHTMLMediaElementControlsListNoRemotePlayback);
@@ -176,6 +225,11 @@ bool ShouldShowCastButton(HTMLMediaElement& media_element) {
   }
 
   return RemotePlayback::From(media_element).RemotePlaybackAvailable();
+}
+
+bool ShouldShowCastOverlayButton(HTMLMediaElement& media_element) {
+  return !media_element.ShouldShowControls() &&
+         ShouldShowCastButton(media_element);
 }
 
 bool PreferHiddenVolumeControls(const Document& document) {
@@ -186,7 +240,7 @@ bool PreferHiddenVolumeControls(const Document& document) {
 // If you change this value, then also update the corresponding value in
 // web_tests/media/media-controls.js.
 constexpr base::TimeDelta kTimeWithoutMouseMovementBeforeHidingMediaControls =
-    base::TimeDelta::FromSecondsD(2.5);
+    base::Seconds(2.5);
 
 base::TimeDelta GetTimeWithoutMouseMovementBeforeHidingMediaControls() {
   return kTimeWithoutMouseMovementBeforeHidingMediaControls;
@@ -204,6 +258,10 @@ class MediaControlsImpl::BatchedControlUpdate {
     DCHECK_GE(batch_depth_, 0);
     ++batch_depth_;
   }
+
+  BatchedControlUpdate(const BatchedControlUpdate&) = delete;
+  BatchedControlUpdate& operator=(const BatchedControlUpdate&) = delete;
+
   ~BatchedControlUpdate() {
     DCHECK(IsMainThread());
     DCHECK_GT(batch_depth_, 0);
@@ -214,8 +272,6 @@ class MediaControlsImpl::BatchedControlUpdate {
  private:
   MediaControlsImpl* controls_;
   static int batch_depth_;
-
-  DISALLOW_COPY_AND_ASSIGN(BatchedControlUpdate);
 };
 
 // Count of number open batches for controls visibility.
@@ -332,6 +388,12 @@ MediaControlsImpl::MediaControlsImpl(HTMLMediaElement& media_element)
       volume_control_container_(nullptr),
       toggle_closed_captions_button_(nullptr),
       text_track_list_(nullptr),
+      audio_track_selector_button_(nullptr),
+      video_track_selector_button_(nullptr),
+      video_track_selector_list_(nullptr),
+      audio_track_selector_list_(nullptr),
+      playback_speed_button_(nullptr),
+      playback_speed_list_(nullptr),
       overflow_list_(nullptr),
       media_button_panel_(nullptr),
       loading_panel_(nullptr),
@@ -447,6 +509,7 @@ MediaControlsImpl* MediaControlsImpl::Create(HTMLMediaElement& media_element,
 //     |  |    (-webkit-media-controls-current-time-display)
 //     |  +-MediaControlRemainingTimeDisplayElement
 //     |  |    (-webkit-media-controls-time-remaining-display)
+//     |  |    {if !IsLivePlayback}
 //     |  +-HTMLDivElement
 //     |  |    (-internal-media-controls-button-spacer)
 //     |  |    {if is video element}
@@ -464,6 +527,7 @@ MediaControlsImpl* MediaControlsImpl::Create(HTMLMediaElement& media_element,
 //     |  |    (-webkit-media-controls-fullscreen-button)
 //     \-MediaControlTimelineElement
 //          (-webkit-media-controls-timeline)
+//          {if !IsLivePlayback}
 // +-MediaControlTextTrackListElement
 // |    (-internal-media-controls-text-track-list)
 // | {for each renderable text track}
@@ -524,14 +588,14 @@ void MediaControlsImpl::InitializeControls() {
   timeline_ = MakeGarbageCollected<MediaControlTimelineElement>(*this);
   mute_button_ = MakeGarbageCollected<MediaControlMuteButtonElement>(*this);
 
-  volume_slider_ = MakeGarbageCollected<MediaControlVolumeSliderElement>(*this);
   volume_control_container_ =
       MakeGarbageCollected<MediaControlVolumeControlContainerElement>(*this);
+  volume_slider_ = MakeGarbageCollected<MediaControlVolumeSliderElement>(
+      *this, volume_control_container_.Get());
   if (PreferHiddenVolumeControls(GetDocument()))
     volume_slider_->SetIsWanted(false);
 
-  if (RuntimeEnabledFeatures::PictureInPictureEnabled() &&
-      GetDocument().GetSettings() &&
+  if (GetDocument().GetSettings() &&
       GetDocument().GetSettings()->GetPictureInPictureEnabled() &&
       IsA<HTMLVideoElement>(MediaElement())) {
     picture_in_picture_button_ =
@@ -556,6 +620,22 @@ void MediaControlsImpl::InitializeControls() {
   toggle_closed_captions_button_ =
       MakeGarbageCollected<MediaControlToggleClosedCaptionsButtonElement>(
           *this);
+  playback_speed_button_ =
+      MakeGarbageCollected<MediaControlPlaybackSpeedButtonElement>(*this);
+
+  playback_speed_button_->SetIsWanted(
+      ShouldShowPlaybackSpeedButton(MediaElement()));
+
+  video_track_selector_button_ =
+      MakeGarbageCollected<MediaControlTrackSelectorMenuButtonElement>(
+          *this, WebMediaPlayer::TrackType::kVideoTrack);
+  audio_track_selector_button_ =
+      MakeGarbageCollected<MediaControlTrackSelectorMenuButtonElement>(
+          *this, WebMediaPlayer::TrackType::kAudioTrack);
+  video_track_selector_button_->SetIsWanted(ShouldShowTrackSelectionButton(
+      WebMediaPlayer::TrackType::kVideoTrack, MediaElement()));
+  audio_track_selector_button_->SetIsWanted(ShouldShowTrackSelectionButton(
+      WebMediaPlayer::TrackType::kAudioTrack, MediaElement()));
   overflow_menu_ =
       MakeGarbageCollected<MediaControlOverflowMenuButtonElement>(*this);
 
@@ -567,6 +647,17 @@ void MediaControlsImpl::InitializeControls() {
   text_track_list_ =
       MakeGarbageCollected<MediaControlTextTrackListElement>(*this);
   ParserAppendChild(text_track_list_);
+
+  playback_speed_list_ =
+      MakeGarbageCollected<MediaControlPlaybackSpeedListElement>(*this);
+  ParserAppendChild(playback_speed_list_);
+
+  video_track_selector_list_ =
+      MakeGarbageCollected<MediaControlTrackSelectorListElement>(*this, true);
+  audio_track_selector_list_ =
+      MakeGarbageCollected<MediaControlTrackSelectorListElement>(*this, false);
+  ParserAppendChild(video_track_selector_list_);
+  ParserAppendChild(audio_track_selector_list_);
 
   overflow_list_ =
       MakeGarbageCollected<MediaControlOverflowMenuListElement>(*this);
@@ -590,6 +681,18 @@ void MediaControlsImpl::InitializeControls() {
       toggle_closed_captions_button_->CreateOverflowElement(
           MakeGarbageCollected<MediaControlToggleClosedCaptionsButtonElement>(
               *this)));
+  overflow_list_->ParserAppendChild(
+      playback_speed_button_->CreateOverflowElement(
+          MakeGarbageCollected<MediaControlPlaybackSpeedButtonElement>(*this)));
+  overflow_list_->ParserAppendChild(
+      video_track_selector_button_->CreateOverflowElement(
+          MakeGarbageCollected<MediaControlTrackSelectorMenuButtonElement>(
+              *this, WebMediaPlayer::TrackType::kVideoTrack)));
+  overflow_list_->ParserAppendChild(
+      audio_track_selector_button_->CreateOverflowElement(
+          MakeGarbageCollected<MediaControlTrackSelectorMenuButtonElement>(
+              *this, WebMediaPlayer::TrackType::kAudioTrack)));
+
   if (picture_in_picture_button_) {
     overflow_list_->ParserAppendChild(
         picture_in_picture_button_->CreateOverflowElement(
@@ -603,9 +706,9 @@ void MediaControlsImpl::InitializeControls() {
 
 void MediaControlsImpl::PopulatePanel() {
   // Clear the panels.
-  panel_->setInnerHTML("");
+  panel_->SetInnerHTMLWithoutTrustedTypes("");
   if (media_button_panel_)
-    media_button_panel_->setInnerHTML("");
+    media_button_panel_->SetInnerHTMLWithoutTrustedTypes("");
 
   Element* button_panel = panel_;
   if (ShouldShowVideoControls()) {
@@ -624,7 +727,7 @@ void MediaControlsImpl::PopulatePanel() {
 
   if (ShouldShowVideoControls()) {
     MediaControlElementsHelper::CreateDiv(
-        "-internal-media-controls-button-spacer", button_panel);
+        AtomicString("-internal-media-controls-button-spacer"), button_panel);
   }
 
   panel_->ParserAppendChild(timeline_);
@@ -645,7 +748,7 @@ void MediaControlsImpl::PopulatePanel() {
 
 void MediaControlsImpl::AttachHoverBackground(Element* element) {
   MediaControlElementsHelper::CreateDiv(
-      "-internal-media-controls-button-hover-background",
+      AtomicString("-internal-media-controls-button-hover-background"),
       element->GetShadowRoot());
 }
 
@@ -684,6 +787,11 @@ Node::InsertionNotificationRequest MediaControlsImpl::InsertedInto(
 }
 
 void MediaControlsImpl::UpdateCSSClassFromState() {
+  // Skip CSS class updates when not needed in order to avoid triggering
+  // unnecessary style calculation.
+  if (!MediaElement().ShouldShowControls() && !is_hiding_controls_)
+    return;
+
   const ControlsState state = State();
 
   Vector<String> toAdd;
@@ -715,13 +823,6 @@ void MediaControlsImpl::UpdateCSSClassFromState() {
     toRemove.push_back(kShowDefaultPosterCSSClass);
   }
 
-  if (ShouldShowVideoControls() && GetDocument().GetSettings() &&
-      GetDocument().GetSettings()->GetImmersiveModeEnabled()) {
-    toAdd.push_back(kImmersiveModeCSSClass);
-  } else {
-    toRemove.push_back(kImmersiveModeCSSClass);
-  }
-
   classList().add(toAdd, ASSERT_NO_EXCEPTION);
   classList().remove(toRemove, ASSERT_NO_EXCEPTION);
 
@@ -739,13 +840,13 @@ void MediaControlsImpl::UpdateCSSClassFromState() {
       // Check if the play button or overflow menu has the "disabled" attribute
       // set so we avoid unnecessarily resetting it.
       if (!play_button_->FastHasAttribute(html_names::kDisabledAttr)) {
-        play_button_->setAttribute(html_names::kDisabledAttr, "");
+        play_button_->setAttribute(html_names::kDisabledAttr, g_empty_atom);
         updated = true;
       }
 
       if (ShouldShowVideoControls() &&
           !overflow_menu_->FastHasAttribute(html_names::kDisabledAttr)) {
-        overflow_menu_->setAttribute(html_names::kDisabledAttr, "");
+        overflow_menu_->setAttribute(html_names::kDisabledAttr, g_empty_atom);
         updated = true;
       }
     } else {
@@ -762,7 +863,7 @@ void MediaControlsImpl::UpdateCSSClassFromState() {
 
     if (state == kNoSource || state == kNotLoaded) {
       if (!timeline_->FastHasAttribute(html_names::kDisabledAttr)) {
-        timeline_->setAttribute(html_names::kDisabledAttr, "");
+        timeline_->setAttribute(html_names::kDisabledAttr, g_empty_atom);
         updated = true;
       }
     } else {
@@ -777,12 +878,14 @@ void MediaControlsImpl::UpdateCSSClassFromState() {
   }
 }
 
-void MediaControlsImpl::SetClass(const AtomicString& class_name,
+void MediaControlsImpl::SetClass(const String& class_name,
                                  bool should_have_class) {
-  if (should_have_class && !classList().contains(class_name))
-    classList().Add(class_name);
-  else if (!should_have_class && classList().contains(class_name))
-    classList().Remove(class_name);
+  AtomicString atomic_class = AtomicString(class_name);
+  if (should_have_class && !classList().contains(atomic_class)) {
+    classList().Add(atomic_class);
+  } else if (!should_have_class && classList().contains(atomic_class)) {
+    classList().Remove(atomic_class);
+  }
 }
 
 MediaControlsImpl::ControlsState MediaControlsImpl::State() const {
@@ -803,7 +906,7 @@ MediaControlsImpl::ControlsState MediaControlsImpl::State() const {
                                        : ControlsState::kLoadingMetadataPlaying;
       }
       if (!MediaElement().paused() &&
-          ready_state != HTMLMediaElement::kHaveEnoughData) {
+          ready_state < HTMLMediaElement::kHaveFutureData) {
         return ControlsState::kBuffering;
       }
       break;
@@ -900,6 +1003,14 @@ void MediaControlsImpl::OnControlsListUpdated() {
 
   download_button_->SetIsWanted(
       download_button_->ShouldDisplayDownloadButton());
+
+  playback_speed_button_->SetIsWanted(
+      ShouldShowPlaybackSpeedButton(MediaElement()));
+
+  video_track_selector_button_->SetIsWanted(ShouldShowTrackSelectionButton(
+      WebMediaPlayer::TrackType::kVideoTrack, MediaElement()));
+  audio_track_selector_button_->SetIsWanted(ShouldShowTrackSelectionButton(
+      WebMediaPlayer::TrackType::kAudioTrack, MediaElement()));
 }
 
 LayoutObject* MediaControlsImpl::PanelLayoutObject() {
@@ -927,6 +1038,7 @@ void MediaControlsImpl::MaybeShow() {
   panel_->SetIsWanted(true);
   panel_->SetIsDisplayed(true);
 
+  UpdateContainerDisplay();
   UpdateCurrentTimeDisplay();
 
   if (overlay_play_button_ && !is_paused_for_scrubbing_)
@@ -944,6 +1056,8 @@ void MediaControlsImpl::MaybeShow() {
 }
 
 void MediaControlsImpl::Hide() {
+  base::AutoReset<bool> auto_reset_hiding_controls(&is_hiding_controls_, true);
+
   panel_->SetIsWanted(false);
   panel_->SetIsDisplayed(false);
 
@@ -955,6 +1069,9 @@ void MediaControlsImpl::Hide() {
     overlay_play_button_->SetIsWanted(false);
   if (loading_panel_)
     loading_panel_->OnControlsHidden();
+
+  // Hide any popup menus.
+  HidePopupMenu();
 
   // Cancel scrubbing if necessary.
   if (is_scrubbing_) {
@@ -972,6 +1089,32 @@ void MediaControlsImpl::Hide() {
   // when the media element is connected.
   if (MediaElement().isConnected())
     UpdateActingAsAudioControls();
+
+  UpdateContainerDisplay();
+}
+
+void MediaControlsImpl::UpdateContainerDisplay() {
+  if (!RuntimeEnabledFeatures::HideVideoControlsWhenUnneededEnabled()) {
+    return;
+  }
+
+  // When native controls are not shown and no overlay needs the container, hide
+  // it entirely to avoid creating layers that interfere with hit-test ordering.
+  bool should_hide =
+      !MediaElement().ShouldShowControls() && !overlay_cast_button_->IsWanted();
+  bool is_hidden = InlineStyle() &&
+                   InlineStyle()->GetPropertyValue(CSSPropertyID::kDisplay) ==
+                       keywords::kNone;
+
+  if (should_hide == is_hidden) {
+    return;
+  }
+
+  if (should_hide) {
+    SetInlineStyleProperty(CSSPropertyID::kDisplay, CSSValueID::kNone);
+  } else {
+    RemoveInlineStyleProperty(CSSPropertyID::kDisplay);
+  }
 }
 
 bool MediaControlsImpl::IsVisible() const {
@@ -981,6 +1124,16 @@ bool MediaControlsImpl::IsVisible() const {
 void MediaControlsImpl::MaybeShowOverlayPlayButton() {
   if (overlay_play_button_)
     overlay_play_button_->SetIsDisplayed(true);
+}
+
+void MediaControlsImpl::MaybeShowOverlayCastButton() {
+  if (RuntimeEnabledFeatures::HideVideoControlsWhenUnneededEnabled()) {
+    // Ensure the container is visible before TryShowOverlay(), which needs
+    // layout to determine if the button is covered by another element.
+    RemoveInlineStyleProperty(CSSPropertyID::kDisplay);
+  }
+
+  overlay_cast_button_->TryShowOverlay();
 }
 
 void MediaControlsImpl::MakeOpaque() {
@@ -1023,40 +1176,63 @@ bool MediaControlsImpl::ShouldHideMediaControls(unsigned behavior_flags) const {
 
   // Keep the controls visible as long as the timer is running.
   const bool ignore_wait_for_timer = behavior_flags & kIgnoreWaitForTimer;
-  if (!ignore_wait_for_timer && keep_showing_until_timer_fires_)
+  if (!ignore_wait_for_timer && keep_showing_until_timer_fires_) {
     return false;
+  }
 
   // Don't hide if the mouse is over the controls.
   // Touch focus shouldn't affect controls visibility.
   const bool ignore_controls_hover = behavior_flags & kIgnoreControlsHover;
   if (!ignore_controls_hover && AreVideoControlsHovered() &&
-      !is_touch_interaction_)
+      !is_touch_interaction_) {
     return false;
+  }
 
   // Don't hide if the mouse is over the video area.
   const bool ignore_video_hover = behavior_flags & kIgnoreVideoHover;
-  if (!ignore_video_hover && is_mouse_over_controls_)
+  if (!ignore_video_hover && is_mouse_over_controls_) {
     return false;
+  }
 
   // Don't hide if focus is on the HTMLMediaElement or within the
   // controls/shadow tree. (Perform the checks separately to avoid going
   // through all the potential ancestor hosts for the focused element.)
   const bool ignore_focus = behavior_flags & kIgnoreFocus;
-  if (!ignore_focus && (MediaElement().IsFocused() ||
-                        contains(GetDocument().FocusedElement()))) {
+  const bool has_focus =
+      MediaElement().IsFocused() || contains(GetDocument().FocusedElement());
+  if (!ignore_focus && has_focus) {
+    return false;
+  }
+
+  // If anything on the panel has the focus, and that focus would trigger the
+  // focus ring [1], then also keep the controls visible.  Otherwise, the
+  // controls will fade out when the timer expires since we ignore focus.
+  // Getting focus back with the keyboard is tricky since there's no equivalent
+  // of hovering / mouse-overing.
+  //
+  // [1] from SelectorChecker::MatchesFocusVisiblePseudoClass()
+  const bool last_focus_from_mouse =
+      GetDocument().LastFocusType() == mojom::blink::FocusType::kMouse;
+  const bool had_keyboard_event = GetDocument().HadKeyboardEvent();
+  const bool focus_from_keyboard = !last_focus_from_mouse || had_keyboard_event;
+  if (has_focus && focus_from_keyboard) {
     return false;
   }
 
   // Don't hide the media controls when a panel is showing.
-  if (text_track_list_->IsWanted() || overflow_list_->IsWanted())
+  if (text_track_list_->IsWanted() || playback_speed_list_->IsWanted() ||
+      overflow_list_->IsWanted()) {
     return false;
+  }
 
   // Don't hide if we have accessiblity focus.
-  if (panel_->KeepDisplayedForAccessibility())
+  if (panel_->KeepDisplayedForAccessibility()) {
     return false;
+  }
 
-  if (MediaElement().seeking())
+  if (MediaElement().seeking()) {
     return false;
+  }
 
   return true;
 }
@@ -1092,8 +1268,10 @@ void MediaControlsImpl::BeginScrubbing(bool is_touch_event) {
 
   if (scrubbing_message_ && is_touch_event) {
     scrubbing_message_->SetIsWanted(true);
-    if (scrubbing_message_->DoesFit())
-      panel_->setAttribute("class", kScrubbingMessageCSSClass);
+    if (scrubbing_message_->DoesFit()) {
+      panel_->setAttribute(html_names::kClassAttr,
+                           AtomicString(kScrubbingMessageCSSClass));
+    }
   }
 
   is_scrubbing_ = true;
@@ -1109,7 +1287,7 @@ void MediaControlsImpl::EndScrubbing() {
 
   if (scrubbing_message_) {
     scrubbing_message_->SetIsWanted(false);
-    panel_->removeAttribute("class");
+    panel_->removeAttribute(html_names::kClassAttr);
   }
 
   is_scrubbing_ = false;
@@ -1117,8 +1295,10 @@ void MediaControlsImpl::EndScrubbing() {
 }
 
 void MediaControlsImpl::UpdateCurrentTimeDisplay() {
-  if (panel_->IsWanted())
+  timeline_->SetIsWanted(!IsLivePlayback());
+  if (panel_->IsWanted()) {
     current_time_display_->SetCurrentValue(MediaElement().currentTime());
+  }
 }
 
 void MediaControlsImpl::ToggleTextTrackList() {
@@ -1134,6 +1314,30 @@ bool MediaControlsImpl::TextTrackListIsWanted() {
   return text_track_list_->IsWanted();
 }
 
+void MediaControlsImpl::TogglePlaybackSpeedList() {
+  playback_speed_list_->SetIsWanted(!playback_speed_list_->IsWanted());
+}
+
+void MediaControlsImpl::ToggleTrackSelectionList(
+    WebMediaPlayer::TrackType type) {
+  switch (type) {
+    case WebMediaPlayer::TrackType::kAudioTrack:
+      audio_track_selector_list_->SetIsWanted(
+          !audio_track_selector_list_->IsWanted());
+      break;
+    case WebMediaPlayer::TrackType::kVideoTrack:
+      video_track_selector_list_->SetIsWanted(
+          !video_track_selector_list_->IsWanted());
+      break;
+    case WebMediaPlayer::TrackType::kTextTrack:
+      NOTREACHED();
+  }
+}
+
+bool MediaControlsImpl::PlaybackSpeedListIsWanted() {
+  return playback_speed_list_->IsWanted();
+}
+
 MediaControlsTextTrackManager& MediaControlsImpl::GetTextTrackManager() {
   return *text_track_manager_;
 }
@@ -1147,19 +1351,19 @@ void MediaControlsImpl::RefreshCastButtonVisibilityWithoutUpdate() {
   if (!ShouldShowCastButton(MediaElement())) {
     cast_button_->SetIsWanted(false);
     overlay_cast_button_->SetIsWanted(false);
+    UpdateContainerDisplay();
     return;
   }
 
-  // The reason for the autoplay muted test is that some pages (e.g. vimeo.com)
-  // have an autoplay background video which has to be muted on Android to play.
-  // In such cases we don't want to automatically show the cast button, since
-  // it looks strange and is unlikely to correspond with anything the user wants
-  // to do.  If a user does want to cast a muted autoplay video then they can
-  // still do so by touching or clicking on the video, which will cause the cast
-  // button to appear. Note that this concerns various animated images websites
-  // too.
-  if (!MediaElement().ShouldShowControls() &&
-      !MediaElement().GetAutoplayPolicy().IsOrWillBeAutoplayingMuted()) {
+  cast_button_->SetIsWanted(MediaElement().ShouldShowControls());
+
+  // On sites with muted autoplaying videos as background, it's unlikely that
+  // users want to cast such content and showing a Cast overlay button is
+  // distracting.  If a user does want to cast a muted autoplay video then they
+  // can still do so by touching or clicking on the video, which will cause the
+  // cast button to appear.
+  if (!MediaElement().GetAutoplayPolicy().IsOrWillBeAutoplayingMuted() &&
+      ShouldShowCastOverlayButton(MediaElement())) {
     // Note that this is a case where we add the overlay cast button
     // without wanting the panel cast button.  We depend on the fact
     // that computeWhichControlsFit() won't change overlay cast button
@@ -1168,23 +1372,22 @@ void MediaControlsImpl::RefreshCastButtonVisibilityWithoutUpdate() {
     // non-cast changes (e.g., resize) occur.  If the panel button
     // is shown, however, compute...() will take control of the
     // overlay cast button if it needs to hide it from the panel.
-    if (RuntimeEnabledFeatures::MediaCastOverlayButtonEnabled())
-      overlay_cast_button_->TryShowOverlay();
-    cast_button_->SetIsWanted(false);
-  } else if (MediaElement().ShouldShowControls()) {
+    MaybeShowOverlayCastButton();
+  } else {
     overlay_cast_button_->SetIsWanted(false);
-    cast_button_->SetIsWanted(true);
   }
+  UpdateContainerDisplay();
 }
 
 void MediaControlsImpl::ShowOverlayCastButtonIfNeeded() {
-  if (MediaElement().ShouldShowControls() ||
-      !ShouldShowCastButton(MediaElement()) ||
-      !RuntimeEnabledFeatures::MediaCastOverlayButtonEnabled()) {
+  if (!ShouldShowCastOverlayButton(MediaElement())) {
+    overlay_cast_button_->SetIsWanted(false);
+    UpdateContainerDisplay();
     return;
   }
 
-  overlay_cast_button_->TryShowOverlay();
+  MaybeShowOverlayCastButton();
+  UpdateContainerDisplay();
   ResetHideMediaControlsTimer();
 }
 
@@ -1219,6 +1422,9 @@ void MediaControlsImpl::UpdateOverflowMenuWanted() const {
       std::make_pair(cast_button_.Get(), false),
       std::make_pair(download_button_.Get(), false),
       std::make_pair(toggle_closed_captions_button_.Get(), false),
+      std::make_pair(playback_speed_button_.Get(), false),
+      std::make_pair(video_track_selector_button_.Get(), false),
+      std::make_pair(audio_track_selector_button_.Get(), false),
   };
 
   // These are the elements in order of priority that take up vertical room.
@@ -1227,32 +1433,42 @@ void MediaControlsImpl::UpdateOverflowMenuWanted() const {
   };
 
   // Current size of the media controls.
-  WebSize controls_size = size_;
+  gfx::Size controls_size = size_;
 
   // The video controls are more than one row so we need to allocate vertical
   // room and hide the overlay play button if there is not enough room.
   if (ShouldShowVideoControls()) {
     // Allocate vertical room for overlay play button if necessary.
     if (overlay_play_button_) {
-      WebSize overlay_play_button_size =
+      const gfx::Size overlay_play_button_size =
           overlay_play_button_->GetSizeOrDefault();
-      if (controls_size.height >= overlay_play_button_size.height &&
-          controls_size.width >= kMinWidthForOverlayPlayButton) {
+      const gfx::Size play_button_size = play_button_->GetSizeOrDefault();
+      const gfx::Size timeline_size =
+          timeline_->IsWanted() ? timeline_->GetSizeOrDefault() : gfx::Size();
+      // There must be at least enough room left over vertically to show the
+      // normal button controls, else the overlay play button will push them off
+      // the bottom of the element.  We use the regular play button's size as a
+      // proxy for this.  Similarly, make sure that it leaves room for the
+      // timeline if we want it.
+      if (controls_size.height() - play_button_size.height() -
+                  timeline_size.height() >=
+              overlay_play_button_size.height() &&
+          controls_size.width() >= kMinWidthForOverlayPlayButton) {
         overlay_play_button_->SetDoesFit(true);
-        controls_size.height -= overlay_play_button_size.height;
+        controls_size.Enlarge(0, -overlay_play_button_size.height());
       } else {
         overlay_play_button_->SetDoesFit(false);
       }
     }
 
-    controls_size.width -= kVideoButtonPadding;
+    controls_size.Enlarge(-kVideoButtonPadding, 0);
 
     // Allocate vertical room for the column elements.
     for (MediaControlElementBase* element : column_elements) {
-      WebSize element_size = element->GetSizeOrDefault();
-      if (controls_size.height - element_size.height >= 0) {
+      gfx::Size element_size = element->GetSizeOrDefault();
+      if (controls_size.height() - element_size.height() >= 0) {
         element->SetDoesFit(true);
-        controls_size.height -= element_size.height;
+        controls_size.Enlarge(0, -element_size.height());
       } else {
         element->SetDoesFit(false);
       }
@@ -1262,7 +1478,7 @@ void MediaControlsImpl::UpdateOverflowMenuWanted() const {
     play_button_->SetIsWanted(!overlay_play_button_ ||
                               !overlay_play_button_->DoesFit());
   } else {
-    controls_size.width -= kAudioButtonPadding;
+    controls_size.Enlarge(-kAudioButtonPadding, 0);
 
     // Undo any IsWanted/DoesFit changes made in the above block if we're
     // switching to act as audio controls.
@@ -1292,9 +1508,9 @@ void MediaControlsImpl::UpdateOverflowMenuWanted() const {
       continue;
 
     // Get the size of the element and see if we should allocate space to it.
-    WebSize element_size = element->GetSizeOrDefault();
+    gfx::Size element_size = element->GetSizeOrDefault();
     bool does_fit = add_elements && pair.second &&
-                    ((controls_size.width - element_size.width) >= 0);
+                    ((controls_size.width() - element_size.width()) >= 0);
     element->SetDoesFit(does_fit);
 
     if (element == mute_button_.Get())
@@ -1304,7 +1520,7 @@ void MediaControlsImpl::UpdateOverflowMenuWanted() const {
     // we cannot fit this element we should stop allocating space for other
     // elements.
     if (does_fit) {
-      controls_size.width -= element_size.width;
+      controls_size.Enlarge(-element_size.width(), 0);
       last_element = element;
     } else {
       add_elements = false;
@@ -1323,9 +1539,9 @@ void MediaControlsImpl::UpdateOverflowMenuWanted() const {
 
   // If we want to show the overflow button and we do not have any space to show
   // it then we should hide the last shown element.
-  int overflow_icon_width = overflow_menu_->GetSizeOrDefault().width;
+  int overflow_icon_width = overflow_menu_->GetSizeOrDefault().width();
   if (overflow_wanted && last_element &&
-      controls_size.width < overflow_icon_width) {
+      controls_size.width() < overflow_icon_width) {
     last_element->SetDoesFit(false);
     last_element->SetOverflowElementIsWanted(true);
 
@@ -1349,12 +1565,13 @@ void MediaControlsImpl::UpdateOverflowMenuItemCSSClass() const {
     DOMTokenList& class_list = item->classList();
 
     // We don't care if the hidden element still have animated-* CSS class
-    if (inline_style &&
-        inline_style->GetPropertyValue(CSSPropertyID::kDisplay) == "none")
+    if (inline_style && inline_style->GetPropertyValue(
+                            CSSPropertyID::kDisplay) == keywords::kNone) {
       continue;
+    }
 
     AtomicString css_class =
-        AtomicString("animated-") + AtomicString::Number(id++);
+        AtomicString(StrCat({"animated-", AtomicString::Number(id++)}));
     if (!class_list.contains(css_class))
       class_list.setValue(css_class);
   }
@@ -1362,12 +1579,12 @@ void MediaControlsImpl::UpdateOverflowMenuItemCSSClass() const {
 
 void MediaControlsImpl::UpdateScrubbingMessageFits() const {
   if (scrubbing_message_)
-    scrubbing_message_->SetDoesFit(size_.Width() >= kMinScrubbingMessageWidth);
+    scrubbing_message_->SetDoesFit(size_.width() >= kMinScrubbingMessageWidth);
 }
 
 void MediaControlsImpl::UpdateSizingCSSClass() {
   MediaControlsSizingClass sizing_class =
-      MediaControls::GetSizingClass(size_.Width());
+      MediaControls::GetSizingClass(size_.width());
 
   SetClass(kMediaControlsSizingSmallCSSClass,
            ShouldShowVideoControls() &&
@@ -1470,8 +1687,8 @@ void MediaControlsImpl::DefaultEventHandler(Event& event) {
   auto* keyboard_event = DynamicTo<KeyboardEvent>(event);
   if (keyboard_event && !event.defaultPrevented() &&
       !IsSpatialNavigationEnabled(GetDocument().GetFrame())) {
-    const String& key = keyboard_event->key();
-    if (key == "Enter" || keyboard_event->keyCode() == ' ') {
+    const AtomicString key(keyboard_event->key());
+    if (key == keywords::kCapitalEnter || keyboard_event->keyCode() == ' ') {
       if (overlay_play_button_) {
         overlay_play_button_->OnMediaKeyboardEvent(&event);
       } else {
@@ -1479,12 +1696,13 @@ void MediaControlsImpl::DefaultEventHandler(Event& event) {
       }
       return;
     }
-    if (key == "ArrowLeft" || key == "ArrowRight" || key == "Home" ||
-        key == "End") {
+    if (key == keywords::kArrowLeft || key == keywords::kArrowRight ||
+        key == keywords::kHome || key == keywords::kEnd) {
       timeline_->OnMediaKeyboardEvent(&event);
       return;
     }
-    if (volume_slider_ && (key == "ArrowDown" || key == "ArrowUp")) {
+    if (volume_slider_ &&
+        (key == keywords::kArrowDown || key == keywords::kArrowUp)) {
       for (int i = 0; i < 5; i++)
         volume_slider_->OnMediaKeyboardEvent(&event);
       return;
@@ -1564,19 +1782,6 @@ void MediaControlsImpl::HandleTouchEvent(Event* event) {
       !ContainsRelatedTarget(event)) {
     event->SetDefaultHandled();
 
-    // Since handling the gesturetap event will prevent the click event from
-    // happening, we need to manually hide any popups.
-    HidePopupMenu();
-
-    // In immersive mode we don't use double-tap features, so instead of
-    // waiting 300 ms for a potential second tap, we just immediately toggle
-    // controls visibility.
-    if (GetDocument().GetSettings() &&
-        GetDocument().GetSettings()->GetImmersiveModeEnabled()) {
-      MaybeToggleControlsFromTap();
-      return;
-    }
-
     if (tap_timer_.IsActive()) {
       // Cancel the visibility toggle event.
       tap_timer_.Stop();
@@ -1622,10 +1827,10 @@ bool MediaControlsImpl::IsOnLeftSide(Event* event) {
 
   float tap_x = gesture_event->NativeEvent().PositionInWidget().x();
 
-  DOMRect* rect = getBoundingClientRect();
+  DOMRect* rect = GetBoundingClientRect();
   double middle = rect->x() + (rect->width() / 2);
   if (GetDocument().GetFrame())
-    middle *= GetDocument().GetFrame()->PageZoomFactor();
+    middle *= GetDocument().GetFrame()->LayoutZoomFactor();
 
   return tap_x < middle;
 }
@@ -1792,11 +1997,13 @@ void MediaControlsImpl::OnPlay() {
 void MediaControlsImpl::OnPlaying() {
   StartHideMediaControlsTimer();
   UpdateCSSClassFromState();
+  timeline_->OnMediaPlaying();
 }
 
 void MediaControlsImpl::OnPause() {
   UpdatePlayState();
   UpdateTimeIndicators();
+  timeline_->OnMediaStoppedPlaying();
   MakeOpaque();
 
   StopHideMediaControlsTimer();
@@ -1896,9 +2103,9 @@ void MediaControlsImpl::NotifyElementSizeChanged(DOMRectReadOnly* new_size) {
   // this, but it would be even greater to move this code entirely to
   // JS and fix it there.
 
-  IntSize old_size = size_;
-  size_.SetWidth(new_size->width());
-  size_.SetHeight(new_size->height());
+  gfx::Size old_size = size_;
+  size_.set_width(new_size->width());
+  size_.set_height(new_size->height());
 
   // Don't bother to do any work if this matches the most recent size.
   if (old_size != size_) {
@@ -1921,7 +2128,7 @@ void MediaControlsImpl::ElementSizeChangedTimerFired(TimerBase*) {
 }
 
 void MediaControlsImpl::OnLoadingProgress() {
-  timeline_->RenderBarSegments();
+  timeline_->OnProgress();
 }
 
 void MediaControlsImpl::ComputeWhichControlsFit() {
@@ -1947,6 +2154,9 @@ void MediaControlsImpl::MaybeRecordElementsDisplayed() const {
       mute_button_.Get(),
       volume_slider_.Get(),
       toggle_closed_captions_button_.Get(),
+      playback_speed_button_.Get(),
+      video_track_selector_button_.Get(),
+      audio_track_selector_button_.Get(),
       picture_in_picture_button_.Get(),
       cast_button_.Get(),
       current_time_display_.Get(),
@@ -2023,6 +2233,12 @@ bool MediaControlsImpl::ShouldShowVideoControls() const {
   return IsA<HTMLVideoElement>(MediaElement()) && !ShouldShowAudioControls();
 }
 
+bool MediaControlsImpl::IsLivePlayback() const {
+  // It can't be determined whether a player with no source element is a live
+  // playback or not, similarly with an unloaded player.
+  return MediaElement().seekable()->length() == 0 && (State() >= kStopped);
+}
+
 void MediaControlsImpl::NetworkStateChanged() {
   // Update the display state of the download button in case we now have a
   // source or no longer have a source.
@@ -2060,6 +2276,17 @@ void MediaControlsImpl::HidePopupMenu() {
 
   if (TextTrackListIsWanted())
     ToggleTextTrackList();
+
+  if (PlaybackSpeedListIsWanted())
+    TogglePlaybackSpeedList();
+
+  if (video_track_selector_list_->IsWanted()) {
+    ToggleTrackSelectionList(WebMediaPlayer::TrackType::kVideoTrack);
+  }
+
+  if (audio_track_selector_list_->IsWanted()) {
+    ToggleTrackSelectionList(WebMediaPlayer::TrackType::kAudioTrack);
+  }
 }
 
 void MediaControlsImpl::VolumeSliderWantedTimerFired(TimerBase*) {
@@ -2093,8 +2320,13 @@ void MediaControlsImpl::CloseVolumeSliderIfNecessary() {
 }
 
 bool MediaControlsImpl::ShouldOpenVolumeSlider() const {
-  if (!volume_slider_)
+  if (!volume_slider_) {
     return false;
+  }
+
+  if (!MediaElement().HasAudio()) {
+    return false;
+  }
 
   return !PreferHiddenVolumeControls(GetDocument());
 }
@@ -2117,6 +2349,7 @@ MediaControlOverflowMenuButtonElement& MediaControlsImpl::OverflowButton() {
 }
 
 void MediaControlsImpl::OnWaiting() {
+  timeline_->OnMediaStoppedPlaying();
   UpdateCSSClassFromState();
 }
 
@@ -2130,6 +2363,9 @@ HTMLVideoElement& MediaControlsImpl::VideoElement() {
 
 void MediaControlsImpl::Trace(Visitor* visitor) const {
   visitor->Trace(element_mutation_callback_);
+  visitor->Trace(element_size_changed_timer_);
+  visitor->Trace(tap_timer_);
+  visitor->Trace(volume_slider_wanted_timer_);
   visitor->Trace(resize_observer_);
   visitor->Trace(panel_);
   visitor->Trace(overlay_play_button_);
@@ -2143,11 +2379,20 @@ void MediaControlsImpl::Trace(Visitor* visitor) const {
   visitor->Trace(picture_in_picture_button_);
   visitor->Trace(animated_arrow_container_element_);
   visitor->Trace(toggle_closed_captions_button_);
+  visitor->Trace(playback_speed_button_);
+
+  visitor->Trace(video_track_selector_button_);
+  visitor->Trace(audio_track_selector_button_);
+
+  visitor->Trace(video_track_selector_list_);
+  visitor->Trace(audio_track_selector_list_);
+
   visitor->Trace(fullscreen_button_);
   visitor->Trace(download_button_);
   visitor->Trace(duration_display_);
   visitor->Trace(enclosure_);
   visitor->Trace(text_track_list_);
+  visitor->Trace(playback_speed_list_);
   visitor->Trace(overflow_menu_);
   visitor->Trace(overflow_list_);
   visitor->Trace(cast_button_);
@@ -2156,6 +2401,7 @@ void MediaControlsImpl::Trace(Visitor* visitor) const {
   visitor->Trace(orientation_lock_delegate_);
   visitor->Trace(rotate_to_fullscreen_delegate_);
   visitor->Trace(display_cutout_delegate_);
+  visitor->Trace(hide_media_controls_timer_);
   visitor->Trace(media_button_panel_);
   visitor->Trace(loading_panel_);
   visitor->Trace(display_cutout_fullscreen_button_);

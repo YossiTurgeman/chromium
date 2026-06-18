@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "extensions/browser/api/extensions_api_client.h"
 #include "extensions/browser/api/virtual_keyboard_private/virtual_keyboard_delegate.h"
 #include "extensions/browser/api_unittest.h"
@@ -16,7 +17,12 @@ namespace {
 
 class MockVirtualKeyboardDelegate : public VirtualKeyboardDelegate {
  public:
-  MockVirtualKeyboardDelegate() {}
+  MockVirtualKeyboardDelegate() = default;
+
+  MockVirtualKeyboardDelegate(const MockVirtualKeyboardDelegate&) = delete;
+  MockVirtualKeyboardDelegate& operator=(const MockVirtualKeyboardDelegate&) =
+      delete;
+
   ~MockVirtualKeyboardDelegate() override = default;
 
   // VirtualKeyboardDelegate impl:
@@ -24,7 +30,7 @@ class MockVirtualKeyboardDelegate : public VirtualKeyboardDelegate {
       OnKeyboardSettingsCallback on_settings_callback) override {}
   void OnKeyboardConfigChanged() override {}
   bool HideKeyboard() override { return false; }
-  bool InsertText(const base::string16& text) override { return false; }
+  bool InsertText(const std::u16string& text) override { return false; }
   bool OnKeyboardLoaded() override { return false; }
   void SetHotrodKeyboard(bool enable) override {}
   bool LockKeyboard(bool state) override { return false; }
@@ -36,8 +42,9 @@ class MockVirtualKeyboardDelegate : public VirtualKeyboardDelegate {
     return false;
   }
   bool ShowLanguageSettings() override { return false; }
-  bool IsLanguageSettingsEnabled() override { return false; }
-  bool SetVirtualKeyboardMode(int mode_enum,
+  bool ShowSuggestionSettings() override { return false; }
+  bool IsSettingsEnabled() override { return false; }
+  bool SetVirtualKeyboardMode(api::virtual_keyboard_private::KeyboardMode mode,
                               gfx::Rect target_bounds,
                               OnSetModeCallback on_set_mode_callback) override {
     return false;
@@ -46,7 +53,10 @@ class MockVirtualKeyboardDelegate : public VirtualKeyboardDelegate {
       const api::virtual_keyboard_private::Bounds& rect) override {
     return false;
   }
-  bool SetRequestedKeyboardState(int state_enum) override { return false; }
+  bool SetRequestedKeyboardState(
+      api::virtual_keyboard_private::KeyboardState state) override {
+    return false;
+  }
 
   bool SetOccludedBounds(const std::vector<gfx::Rect>& bounds) override {
     occluded_bounds_ = bounds;
@@ -74,9 +84,19 @@ class MockVirtualKeyboardDelegate : public VirtualKeyboardDelegate {
   }
   const gfx::Rect& GetWindowBounds() { return window_bounds_; }
 
-  api::virtual_keyboard::FeatureRestrictions RestrictFeatures(
-      const api::virtual_keyboard::RestrictFeatures::Params& params) override {
-    return api::virtual_keyboard::FeatureRestrictions();
+  void GetClipboardHistory(
+      OnGetClipboardHistoryCallback get_history_callback) override {}
+  bool PasteClipboardItem(const std::string& clipboard_item_id) override {
+    return false;
+  }
+  bool DeleteClipboardItem(const std::string& clipboard_item_id) override {
+    return false;
+  }
+
+  void RestrictFeatures(
+      const api::virtual_keyboard::RestrictFeatures::Params& params,
+      OnRestrictFeaturesCallback callback) override {
+    std::move(callback).Run(api::virtual_keyboard::FeatureRestrictions());
   }
 
  private:
@@ -84,14 +104,18 @@ class MockVirtualKeyboardDelegate : public VirtualKeyboardDelegate {
   std::vector<gfx::Rect> hit_test_bounds_;
   gfx::Rect area_to_remain_on_screen_;
   gfx::Rect window_bounds_;
-
-  DISALLOW_COPY_AND_ASSIGN(MockVirtualKeyboardDelegate);
 };
 
 class TestVirtualKeyboardExtensionsAPIClient : public ExtensionsAPIClient {
  public:
-  TestVirtualKeyboardExtensionsAPIClient() {}
-  ~TestVirtualKeyboardExtensionsAPIClient() override {}
+  TestVirtualKeyboardExtensionsAPIClient() = default;
+
+  TestVirtualKeyboardExtensionsAPIClient(
+      const TestVirtualKeyboardExtensionsAPIClient&) = delete;
+  TestVirtualKeyboardExtensionsAPIClient& operator=(
+      const TestVirtualKeyboardExtensionsAPIClient&) = delete;
+
+  ~TestVirtualKeyboardExtensionsAPIClient() override = default;
 
   // ExtensionsAPIClient implementation.
   std::unique_ptr<VirtualKeyboardDelegate> CreateVirtualKeyboardDelegate(
@@ -109,18 +133,17 @@ class TestVirtualKeyboardExtensionsAPIClient : public ExtensionsAPIClient {
  private:
   // Points to the last mock delegate created for each browser context. Does not
   // own the delegates.
-  mutable std::map<content::BrowserContext*, MockVirtualKeyboardDelegate*>
+  mutable std::map<content::BrowserContext*,
+                   raw_ptr<MockVirtualKeyboardDelegate, CtnExperimental>>
       delegates_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestVirtualKeyboardExtensionsAPIClient);
 };
 
 }  // namespace
 
 class VirtualKeyboardPrivateApiUnittest : public ApiUnitTest {
  public:
-  VirtualKeyboardPrivateApiUnittest() {}
-  ~VirtualKeyboardPrivateApiUnittest() override {}
+  VirtualKeyboardPrivateApiUnittest() = default;
+  ~VirtualKeyboardPrivateApiUnittest() override = default;
 
   const TestVirtualKeyboardExtensionsAPIClient& client() const {
     return extensions_api_client_;
@@ -131,7 +154,9 @@ class VirtualKeyboardPrivateApiUnittest : public ApiUnitTest {
 };
 
 TEST_F(VirtualKeyboardPrivateApiUnittest, SetOccludedBoundsWithNoBounds) {
-  RunFunction(new VirtualKeyboardPrivateSetOccludedBoundsFunction(), "[[]]");
+  RunFunction(
+      base::MakeRefCounted<VirtualKeyboardPrivateSetOccludedBoundsFunction>(),
+      "[[]]");
 
   const auto bounds = client()
                           .GetDelegateForBrowserContext(browser_context())
@@ -140,8 +165,9 @@ TEST_F(VirtualKeyboardPrivateApiUnittest, SetOccludedBoundsWithNoBounds) {
 }
 
 TEST_F(VirtualKeyboardPrivateApiUnittest, SetOccludedBoundsWithOneBound) {
-  RunFunction(new VirtualKeyboardPrivateSetOccludedBoundsFunction(),
-              R"([[{ "left": 0, "top": 10, "width": 20, "height": 30 }]])");
+  RunFunction(
+      base::MakeRefCounted<VirtualKeyboardPrivateSetOccludedBoundsFunction>(),
+      R"([[{ "left": 0, "top": 10, "width": 20, "height": 30 }]])");
 
   const auto bounds = client()
                           .GetDelegateForBrowserContext(browser_context())
@@ -151,8 +177,9 @@ TEST_F(VirtualKeyboardPrivateApiUnittest, SetOccludedBoundsWithOneBound) {
 }
 
 TEST_F(VirtualKeyboardPrivateApiUnittest, SetOccludedBoundsWithTwoBounds) {
-  RunFunction(new VirtualKeyboardPrivateSetOccludedBoundsFunction(),
-              R"([[{ "left": 0, "top": 10, "width": 20, "height": 30 },
+  RunFunction(
+      base::MakeRefCounted<VirtualKeyboardPrivateSetOccludedBoundsFunction>(),
+      R"([[{ "left": 0, "top": 10, "width": 20, "height": 30 },
       { "left": 10, "top": 20, "width": 30, "height": 40 }]])");
 
   const auto bounds = client()
@@ -164,7 +191,9 @@ TEST_F(VirtualKeyboardPrivateApiUnittest, SetOccludedBoundsWithTwoBounds) {
 }
 
 TEST_F(VirtualKeyboardPrivateApiUnittest, SetHitTestBoundsWithNoBounds) {
-  RunFunction(new VirtualKeyboardPrivateSetHitTestBoundsFunction(), "[[]]");
+  RunFunction(
+      base::MakeRefCounted<VirtualKeyboardPrivateSetHitTestBoundsFunction>(),
+      "[[]]");
 
   const auto bounds = client()
                           .GetDelegateForBrowserContext(browser_context())
@@ -173,8 +202,9 @@ TEST_F(VirtualKeyboardPrivateApiUnittest, SetHitTestBoundsWithNoBounds) {
 }
 
 TEST_F(VirtualKeyboardPrivateApiUnittest, SetHitTestBoundsWithMultipleBounds) {
-  RunFunction(new VirtualKeyboardPrivateSetHitTestBoundsFunction(),
-              R"([[{ "left": 0, "top": 10, "width": 20, "height": 30 },
+  RunFunction(
+      base::MakeRefCounted<VirtualKeyboardPrivateSetHitTestBoundsFunction>(),
+      R"([[{ "left": 0, "top": 10, "width": 20, "height": 30 },
       { "left": 10, "top": 20, "width": 30, "height": 40 }]])");
 
   const auto bounds = client()
@@ -186,7 +216,8 @@ TEST_F(VirtualKeyboardPrivateApiUnittest, SetHitTestBoundsWithMultipleBounds) {
 }
 
 TEST_F(VirtualKeyboardPrivateApiUnittest, SetAreaToRemainOnScreenWithBounds) {
-  RunFunction(new VirtualKeyboardPrivateSetAreaToRemainOnScreenFunction(),
+  RunFunction(base::MakeRefCounted<
+                  VirtualKeyboardPrivateSetAreaToRemainOnScreenFunction>(),
               R"([{ "left": 0, "top": 0, "width": 10, "height": 20 }])");
 
   const gfx::Rect bounds = client()
@@ -196,7 +227,8 @@ TEST_F(VirtualKeyboardPrivateApiUnittest, SetAreaToRemainOnScreenWithBounds) {
 }
 
 TEST_F(VirtualKeyboardPrivateApiUnittest, SetWindowBoundsInScreenWithBounds) {
-  RunFunction(new VirtualKeyboardPrivateSetWindowBoundsInScreenFunction(),
+  RunFunction(base::MakeRefCounted<
+                  VirtualKeyboardPrivateSetWindowBoundsInScreenFunction>(),
               R"([{ "left": 120, "top": 300, "width": 400, "height": 250 }])");
 
   const gfx::Rect bounds = client()

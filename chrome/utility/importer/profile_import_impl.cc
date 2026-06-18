@@ -1,18 +1,18 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/utility/importer/profile_import_impl.h"
 
+#include <memory>
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/memory/ref_counted.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "build/build_config.h"
 #include "chrome/common/importer/profile_import.mojom.h"
 #include "chrome/utility/importer/external_process_importer_bridge.h"
@@ -22,27 +22,14 @@
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/shared_remote.h"
 
-#if defined(OS_MAC)
-#include <stdlib.h>
-
-#include "chrome/common/importer/firefox_importer_utils.h"
-#endif
-
 ProfileImportImpl::ProfileImportImpl(
     mojo::PendingReceiver<chrome::mojom::ProfileImport> receiver)
-    : receiver_(this, std::move(receiver)) {
-#if defined(OS_MAC)
-  std::string dylib_path = GetFirefoxDylibPath().value();
-  if (!dylib_path.empty())
-    ::setenv("DYLD_FALLBACK_LIBRARY_PATH", dylib_path.c_str(),
-             1 /* overwrite */);
-#endif
-}
+    : receiver_(this, std::move(receiver)) {}
 
 ProfileImportImpl::~ProfileImportImpl() = default;
 
 void ProfileImportImpl::StartImport(
-    const importer::SourceProfile& source_profile,
+    const user_data_importer::SourceProfile& source_profile,
     uint16_t items,
     const base::flat_map<uint32_t, std::string>& localized_strings,
     mojo::PendingRemote<chrome::mojom::ProfileImportObserver> observer) {
@@ -57,13 +44,12 @@ void ProfileImportImpl::StartImport(
   items_to_import_ = items;
 
   // Create worker thread in which importer runs.
-  import_thread_.reset(new base::Thread("import_thread"));
-#if defined(OS_WIN)
+  import_thread_ = std::make_unique<base::Thread>("import_thread");
+#if BUILDFLAG(IS_WIN)
   import_thread_->init_com_with_mta(false);
 #endif
   if (!import_thread_->Start()) {
     NOTREACHED();
-    ImporterCleanup();
   }
   bridge_ = new ExternalProcessImporterBridge(
       localized_strings,
@@ -79,7 +65,8 @@ void ProfileImportImpl::CancelImport() {
   ImporterCleanup();
 }
 
-void ProfileImportImpl::ReportImportItemFinished(importer::ImportItem item) {
+void ProfileImportImpl::ReportImportItemFinished(
+    user_data_importer::ImportItem item) {
   items_to_import_ ^= item;  // Remove finished item from mask.
   if (items_to_import_ == 0) {
     ImporterCleanup();

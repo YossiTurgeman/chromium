@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,10 @@
 #define CHROME_BROWSER_APPS_APP_SHIM_MACH_BOOTSTRAP_ACCEPTOR_H_
 
 #include <memory>
+#include <string>
 
-#include "base/mac/dispatch_source_mach.h"
-#include "base/macros.h"
+#include "base/apple/dispatch_source.h"
+#include "base/memory/raw_ptr.h"
 #include "base/process/process_handle.h"
 #include "mojo/public/cpp/platform/named_platform_channel.h"
 #include "mojo/public/cpp/platform/platform_channel_endpoint.h"
@@ -25,10 +26,10 @@ class MachBootstrapAcceptor {
  public:
   class Delegate {
    public:
-    // Called when a client identified by |peer_pid| connects with the
+    // Called when a client identified by |audit_token| connects with the
     // Mach port it provided in |endpoint|.
     virtual void OnClientConnected(mojo::PlatformChannelEndpoint endpoint,
-                                   base::ProcessId peer_pid) = 0;
+                                   audit_token_t audit_token) = 0;
 
     // Called when there is an error creating the server channel.
     virtual void OnServerChannelCreateError() = 0;
@@ -38,6 +39,8 @@ class MachBootstrapAcceptor {
   // appended to the running process's bundle identifier, to be published in
   // the bootstrap server.
   MachBootstrapAcceptor(const std::string& name_fragment, Delegate* delegate);
+  MachBootstrapAcceptor(const MachBootstrapAcceptor&) = delete;
+  MachBootstrapAcceptor& operator=(const MachBootstrapAcceptor&) = delete;
   ~MachBootstrapAcceptor();
 
   // Creates a Mach receive port and publishes a send right to it in the system
@@ -59,11 +62,9 @@ class MachBootstrapAcceptor {
   mach_port_t port();
 
   mojo::NamedPlatformChannel::ServerName server_name_;
-  Delegate* delegate_;
+  raw_ptr<Delegate, AcrossTasksDanglingUntriaged> delegate_;
   mojo::PlatformChannelServerEndpoint endpoint_;
-  std::unique_ptr<base::DispatchSourceMach> dispatch_source_;
-
-  DISALLOW_COPY_AND_ASSIGN(MachBootstrapAcceptor);
+  std::unique_ptr<base::apple::DispatchSource> dispatch_source_;
 };
 
 }  // namespace apps

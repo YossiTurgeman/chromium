@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,10 +13,6 @@
 #include "base/files/file_path.h"
 #include "content/common/content_export.h"
 #include "third_party/skia/include/core/SkColor.h"
-
-namespace base {
-class Version;
-}
 
 namespace content {
 
@@ -37,15 +33,15 @@ struct CONTENT_EXPORT WebPluginMimeType {
   std::vector<std::string> file_extensions;
 
   // Description of the mime type.
-  base::string16 description;
+  std::u16string description;
 
   // Extra parameters to include when instantiating the plugin.
   struct Param {
     Param() = default;
-    Param(base::string16 n, base::string16 v)
+    Param(std::u16string n, std::u16string v)
         : name(std::move(n)), value(std::move(v)) {}
-    base::string16 name;
-    base::string16 value;
+    std::u16string name;
+    std::u16string value;
   };
   std::vector<Param> additional_params;
 };
@@ -53,8 +49,7 @@ struct CONTENT_EXPORT WebPluginMimeType {
 // Describes an available Pepper plugin.
 struct CONTENT_EXPORT WebPluginInfo {
   enum PluginType {
-    PLUGIN_TYPE_PEPPER_IN_PROCESS,
-    PLUGIN_TYPE_PEPPER_OUT_OF_PROCESS,
+    PLUGIN_TYPE_BROWSER_INTERNAL_PLUGIN,
     PLUGIN_TYPE_BROWSER_PLUGIN
   };
 
@@ -66,41 +61,28 @@ struct CONTENT_EXPORT WebPluginInfo {
   WebPluginInfo& operator=(const WebPluginInfo& rhs);
 
   // Special constructor only used during unit testing:
-  WebPluginInfo(const base::string16& fake_name,
+  WebPluginInfo(const std::u16string& fake_name,
                 const base::FilePath& fake_path,
-                const base::string16& fake_version,
-                const base::string16& fake_desc);
-
-  bool is_pepper_plugin() const {
-    return ((type == PLUGIN_TYPE_PEPPER_IN_PROCESS ) ||
-          (type == PLUGIN_TYPE_PEPPER_OUT_OF_PROCESS));
-  }
-
-  // Parse a version string as used by a plugin. This method is more lenient
-  // in accepting weird version strings than base::Version::GetFromString()
-  static void CreateVersionFromString(const base::string16& version_string,
-                                      base::Version* parsed_version);
+                const std::u16string& fake_version,
+                const std::u16string& fake_desc);
 
   // The name of the plugin (i.e. Flash).
-  base::string16 name;
+  std::u16string name;
 
   // The path to the plugin file (DLL/bundle/library).
   base::FilePath path;
 
   // The version number of the plugin file (may be OS-specific)
-  base::string16 version;
+  std::u16string version;
 
   // A description of the plugin that we get from its version info.
-  base::string16 desc;
+  std::u16string desc;
 
   // A list of all the mime types that this plugin supports.
   std::vector<WebPluginMimeType> mime_types;
 
   // Plugin type. See the PluginType enum.
-  int type;
-
-  // When type is PLUGIN_TYPE_PEPPER_* this indicates the permission bits.
-  int32_t pepper_permissions;
+  int type = PLUGIN_TYPE_BROWSER_PLUGIN;
 
   // The color to use as the background before the plugin loads.
   SkColor background_color = kDefaultBackgroundColor;

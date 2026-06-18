@@ -1,17 +1,17 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/subresource_filter/core/browser/subresource_filter_features.h"
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/stl_util.h"
+#include "base/check.h"
 #include "base/strings/string_util.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
@@ -57,22 +57,22 @@ class ScopedExperimentalStateToggle {
 
       case base::FeatureList::OVERRIDE_USE_DEFAULT:
         NOTREACHED();
-        break;
     }
   }
 
-  ~ScopedExperimentalStateToggle() {
-  }
+  ScopedExperimentalStateToggle(const ScopedExperimentalStateToggle&) = delete;
+  ScopedExperimentalStateToggle& operator=(
+      const ScopedExperimentalStateToggle&) = delete;
+
+  ~ScopedExperimentalStateToggle() {}
 
  private:
   testing::ScopedSubresourceFilterConfigurator scoped_configurator_;
   base::test::ScopedFeatureList scoped_feature_list_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedExperimentalStateToggle);
 };
 
 void ExpectAndRetrieveExactlyOneEnabledConfig(Configuration* actual_config) {
-  DCHECK(actual_config);
+  CHECK(actual_config);
   const auto config_list = GetEnabledConfigurations();
   ASSERT_EQ(1u, config_list->configs_by_decreasing_priority().size());
   *actual_config = config_list->configs_by_decreasing_priority().front();
@@ -80,7 +80,7 @@ void ExpectAndRetrieveExactlyOneEnabledConfig(Configuration* actual_config) {
 
 void ExpectAndRetrieveExactlyOneExtraEnabledConfig(
     Configuration* actual_config) {
-  DCHECK(actual_config);
+  CHECK(actual_config);
   const auto config_list = GetEnabledConfigurations();
   ASSERT_EQ(4u, config_list->configs_by_decreasing_priority().size());
   *actual_config = config_list->configs_by_decreasing_priority().back();
@@ -118,17 +118,19 @@ void ExpectParamsGeneratePreset(
 
 class SubresourceFilterFeaturesTest : public ::testing::Test {
  public:
-  SubresourceFilterFeaturesTest() {}
-  ~SubresourceFilterFeaturesTest() override {}
+  SubresourceFilterFeaturesTest() = default;
+
+  SubresourceFilterFeaturesTest(const SubresourceFilterFeaturesTest&) = delete;
+  SubresourceFilterFeaturesTest& operator=(
+      const SubresourceFilterFeaturesTest&) = delete;
+
+  ~SubresourceFilterFeaturesTest() override = default;
 
   void SetUp() override {
     // Reset the global configuration at the start so tests start without a
     // cached value from a previous in-process test run.
     testing::GetAndSetActivateConfigurations(nullptr);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SubresourceFilterFeaturesTest);
 };
 
 TEST_F(SubresourceFilterFeaturesTest, ActivationLevel) {
@@ -666,7 +668,7 @@ TEST_F(SubresourceFilterFeaturesTest, AdTagging_EnablesDryRun) {
       Configuration::MakePresetForPerformanceTestingDryRunOnAllSites();
   base::test::ScopedFeatureList scoped_feature;
   scoped_feature.InitAndEnableFeature(kAdTagging);
-  EXPECT_TRUE(base::Contains(
+  EXPECT_TRUE(std::ranges::contains(
       GetEnabledConfigurations()->configs_by_decreasing_priority(), dryrun));
 }
 
@@ -675,7 +677,7 @@ TEST_F(SubresourceFilterFeaturesTest, AdTaggingDisabled_DisablesDryRun) {
       Configuration::MakePresetForPerformanceTestingDryRunOnAllSites();
   base::test::ScopedFeatureList scoped_feature;
   scoped_feature.InitAndDisableFeature(kAdTagging);
-  EXPECT_FALSE(base::Contains(
+  EXPECT_FALSE(std::ranges::contains(
       GetEnabledConfigurations()->configs_by_decreasing_priority(), dryrun));
 }
 

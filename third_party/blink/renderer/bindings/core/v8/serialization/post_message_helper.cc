@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,20 +7,23 @@
 #include "third_party/blink/public/mojom/messaging/user_activation_snapshot.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_post_message_options.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_structured_serialize_options.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_window_post_message_options.h"
 #include "third_party/blink/renderer/core/frame/frame.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/imagebitmap/image_bitmap.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
 scoped_refptr<SerializedScriptValue> PostMessageHelper::SerializeMessageByMove(
     v8::Isolate* isolate,
     const ScriptValue& message,
-    const PostMessageOptions* options,
+    const StructuredSerializeOptions* options,
     Transferables& transferables,
     ExceptionState& exception_state) {
-  if (options->hasTransfer() && !options->transfer().IsEmpty()) {
+  if (options->hasTransfer() && !options->transfer().empty()) {
     if (!SerializedScriptValue::ExtractTransferables(
             isolate, options->transfer(), transferables, exception_state)) {
       return nullptr;
@@ -32,8 +35,9 @@ scoped_refptr<SerializedScriptValue> PostMessageHelper::SerializeMessageByMove(
   scoped_refptr<SerializedScriptValue> serialized_message =
       SerializedScriptValue::Serialize(isolate, message.V8Value(),
                                        serialize_options, exception_state);
-  if (exception_state.HadException())
+  if (exception_state.HadException()) {
     return nullptr;
+  }
 
   serialized_message->UnregisterMemoryAllocatedWithCurrentScriptContext();
   return serialized_message;
@@ -42,10 +46,10 @@ scoped_refptr<SerializedScriptValue> PostMessageHelper::SerializeMessageByMove(
 scoped_refptr<SerializedScriptValue> PostMessageHelper::SerializeMessageByCopy(
     v8::Isolate* isolate,
     const ScriptValue& message,
-    const PostMessageOptions* options,
+    const StructuredSerializeOptions* options,
     Transferables& transferables,
     ExceptionState& exception_state) {
-  if (options->hasTransfer() && !options->transfer().IsEmpty()) {
+  if (options->hasTransfer() && !options->transfer().empty()) {
     if (!SerializedScriptValue::ExtractTransferables(
             isolate, options->transfer(), transferables, exception_state)) {
       return nullptr;
@@ -117,10 +121,10 @@ scoped_refptr<const SecurityOrigin> PostMessageHelper::GetTargetOrigin(
   // It doesn't make sense target a postMessage at an opaque origin
   // because there's no way to represent an opaque origin in a string.
   if (target->IsOpaque()) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kSyntaxError,
-                                      "Invalid target origin '" +
-                                          target_origin +
-                                          "' in a call to 'postMessage'.");
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kSyntaxError,
+        StrCat({"Invalid target origin '", target_origin,
+                "' in a call to 'postMessage'."}));
     return nullptr;
   }
   return target;

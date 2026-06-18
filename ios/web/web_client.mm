@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,12 @@
 
 #import <Foundation/Foundation.h>
 
-#include "ios/web/common/features.h"
-#include "ios/web/public/init/web_main_parts.h"
+#import <string_view>
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "base/notimplemented.h"
+#import "ios/web/common/features.h"
+#import "ios/web/public/init/web_main_parts.h"
+#import "url/gurl.h"
 
 namespace web {
 
@@ -44,61 +44,31 @@ bool WebClient::IsAppSpecificURL(const GURL& url) const {
   return false;
 }
 
-bool WebClient::ShouldBlockUrlDuringRestore(const GURL& url,
-                                            WebState* web_state) const {
-  return false;
-}
-
-void WebClient::AddSerializableData(
-    web::SerializableUserDataManager* user_data_manager,
-    web::WebState* web_state) {}
-
-base::string16 WebClient::GetPluginNotSupportedText() const {
-  return base::string16();
-}
-
 std::string WebClient::GetUserAgent(UserAgentType type) const {
   return std::string();
 }
 
-base::string16 WebClient::GetLocalizedString(int message_id) const {
-  return base::string16();
+std::string WebClient::GetMainThreadName() const {
+  return std::string();
 }
 
-base::StringPiece WebClient::GetDataResource(
+std::u16string WebClient::GetLocalizedString(int message_id) const {
+  return std::u16string();
+}
+
+std::string_view WebClient::GetDataResource(
     int resource_id,
-    ui::ScaleFactor scale_factor) const {
-  return base::StringPiece();
+    ui::ResourceScaleFactor scale_factor) const {
+  return std::string_view();
 }
 
 base::RefCountedMemory* WebClient::GetDataResourceBytes(int resource_id) const {
   return nullptr;
 }
 
-NSString* WebClient::GetDocumentStartScriptForAllFrames(
+std::vector<JavaScriptFeature*> WebClient::GetJavaScriptFeatures(
     BrowserState* browser_state) const {
-  return @"";
-}
-
-NSString* WebClient::GetDocumentStartScriptForMainFrame(
-    BrowserState* browser_state) const {
-  return @"";
-}
-
-void WebClient::AllowCertificateError(
-    WebState* web_state,
-    int cert_error,
-    const net::SSLInfo& ssl_info,
-    const GURL& request_url,
-    bool overridable,
-    int64_t navigation_id,
-    const base::Callback<void(bool)>& callback) {
-  callback.Run(false);
-}
-
-bool WebClient::IsLegacyTLSAllowedForHost(WebState* web_state,
-                                          const std::string& hostname) {
-  return false;
+  return std::vector<JavaScriptFeature*>();
 }
 
 void WebClient::PrepareErrorPage(WebState* web_state,
@@ -106,7 +76,7 @@ void WebClient::PrepareErrorPage(WebState* web_state,
                                  NSError* error,
                                  bool is_post,
                                  bool is_off_the_record,
-                                 const base::Optional<net::SSLInfo>& info,
+                                 const std::optional<net::SSLInfo>& info,
                                  int64_t navigation_id,
                                  base::OnceCallback<void(NSString*)> callback) {
   DCHECK(error);
@@ -117,20 +87,77 @@ UIView* WebClient::GetWindowedContainer() {
   return nullptr;
 }
 
-bool WebClient::EnableLongPressAndForceTouchHandling() const {
-  return true;
-}
-
-bool WebClient::ForceMobileVersionByDefault(const GURL&) {
+bool WebClient::EnableFullscreenAPI() const {
   return false;
 }
 
-UserAgentType WebClient::GetDefaultUserAgent(id<UITraitEnvironment> web_view,
-                                             const GURL& url) {
+bool WebClient::EnableLongPressUIContextMenu() const {
+  return false;
+}
+
+bool WebClient::EnableWebInspector(BrowserState* browser_state) const {
+  return false;
+}
+
+void WebClient::CleanupNativeRestoreURLs(web::WebState* web_state) const {}
+
+void WebClient::WillDisplayMediaCapturePermissionPrompt(
+    web::WebState* web_state) const {}
+
+UserAgentType WebClient::GetDefaultUserAgent(web::WebState* web_state,
+                                             const GURL& url) const {
   return UserAgentType::MOBILE;
 }
 
-bool WebClient::IsEmbedderBlockRestoreUrlEnabled() {
+void WebClient::LogDefaultUserAgent(web::WebState* web_state,
+                                    const GURL& url) const {}
+
+bool WebClient::IsPointingToSameDocument(const GURL& url1,
+                                         const GURL& url2) const {
+  return url1 == url2;
+}
+
+bool WebClient::IsBrowserLockdownModeEnabled() {
+  return false;
+}
+
+void WebClient::SetOSLockdownModeEnabled(bool enabled) {}
+
+bool WebClient::IsInsecureFormWarningEnabled(
+    web::BrowserState* browser_state) const {
+  return true;
+}
+
+void WebClient::BuildEditMenu(web::WebState* web_state,
+                              id<UIMenuBuilder>) const {}
+
+bool WebClient::CanRunOpenPanel(web::WebState* web_state) const
+    API_AVAILABLE(ios(18.4)) {
+  return false;
+}
+
+void WebClient::RunOpenPanel(
+    web::WebState* web_state,
+    WKOpenPanelParameters* parameters,
+    WKFrameInfo* frame,
+    base::OnceCallback<void(NSArray<NSURL*>*)> completion) const
+    API_AVAILABLE(ios(18.4)) {
+  NOTIMPLEMENTED() << "WebClient::RunOpenPanel() is not implemented.\n"
+                      "If a subclass returns true from CanRunOpenPanel(),"
+                      "then it must override RunOpenPanel().";
+}
+
+JSErrorReportLoggingLevel WebClient::GetJSErrorReportLoggingLevel(
+    BrowserState* browser_state) const {
+  return JSErrorReportLoggingLevel::NONE;
+}
+
+CobaltController* WebClient::GetCobaltController(
+    BrowserState* browser_state) const {
+  return nullptr;
+}
+
+bool WebClient::IsSmoothScrollingSupported() const {
   return false;
 }
 

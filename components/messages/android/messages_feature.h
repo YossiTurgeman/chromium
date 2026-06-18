@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,18 @@
 
 namespace messages {
 
-// Feature that controls whether Messages for Android infrastucture components
-// are initialized. When this feature is disabled all individual message
-// implementations also fallback to Infobar implementations.
-extern const base::Feature kMessagesForAndroidInfrastructure;
+// Feature that exposes a listener to notify whether the current message
+// is fully visible.
+BASE_DECLARE_FEATURE(kMessagesForAndroidFullyVisibleCallback);
 
-// Feature that controls whether "save password" and "update password" prompts
-// use Messages or Infobars infrastructure.
-extern const base::Feature kMessagesForAndroidPasswords;
+// Feature that enables extra histogram recordings.
+BASE_DECLARE_FEATURE(kMessagesAndroidExtraHistograms);
 
-bool IsPasswordMessagesUiEnabled();
+// Feature that enables a close button when mouses hovers over.
+BASE_DECLARE_FEATURE(kMessagesCloseButton);
+
+// Feature that dismisses navigation messages on primary page changed.
+BASE_DECLARE_FEATURE(kDismissNavigationMessagesOnPrimaryPageChanged);
 
 }  // namespace messages
 

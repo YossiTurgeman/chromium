@@ -1,13 +1,13 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_SESSIONS_CORE_SERIALIZED_USER_AGENT_OVERRIDE_H_
 #define COMPONENTS_SESSIONS_CORE_SERIALIZED_USER_AGENT_OVERRIDE_H_
 
+#include <optional>
 #include <string>
 
-#include "base/optional.h"
 #include "components/sessions/core/sessions_export.h"
 
 namespace sessions {
@@ -45,7 +45,7 @@ struct SESSIONS_EXPORT SerializedUserAgentOverride {
   // Override of user-agent client hints. Format is user dependent; content/
   // encodes it via blink::UserAgentMetadata::Marshal(). Should be nullopt
   // if |ua_string_override| is empty.
-  base::Optional<std::string> opaque_ua_metadata_override;
+  std::optional<std::string> opaque_ua_metadata_override;
 };
 
 }  // namespace sessions

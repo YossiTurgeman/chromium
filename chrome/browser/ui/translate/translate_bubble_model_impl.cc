@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,19 +9,27 @@
 #include "chrome/browser/translate/chrome_translate_client.h"
 #include "components/translate/core/browser/language_state.h"
 #include "components/translate/core/browser/translate_ui_delegate.h"
+#include "components/translate/core/browser/translate_ui_languages_manager.h"
 
 TranslateBubbleModelImpl::TranslateBubbleModelImpl(
     translate::TranslateStep step,
     std::unique_ptr<translate::TranslateUIDelegate> ui_delegate)
     : ui_delegate_(std::move(ui_delegate)),
-      view_state_transition_(TranslateStepToViewState(step)),
+      ui_languages_manager_(ui_delegate_->translate_ui_languages_manager()),
       translation_declined_(false),
       translate_executed_(false) {
-  if (GetViewState() != TranslateBubbleModel::VIEW_STATE_BEFORE_TRANSLATE)
+  ViewState view_state = TranslateStepToViewState(step);
+  // The initial view type must not be 'Advanced'.
+  DCHECK_NE(VIEW_STATE_SOURCE_LANGUAGE, view_state);
+  DCHECK_NE(VIEW_STATE_TARGET_LANGUAGE, view_state);
+  current_view_state_ = view_state;
+
+  if (GetViewState() != TranslateBubbleModel::VIEW_STATE_BEFORE_TRANSLATE) {
     translate_executed_ = true;
+  }
 }
 
-TranslateBubbleModelImpl::~TranslateBubbleModelImpl() {}
+TranslateBubbleModelImpl::~TranslateBubbleModelImpl() = default;
 
 // static
 TranslateBubbleModel::ViewState
@@ -29,6 +37,7 @@ TranslateBubbleModelImpl::TranslateStepToViewState(
     translate::TranslateStep step) {
   switch (step) {
     case translate::TRANSLATE_STEP_BEFORE_TRANSLATE:
+    case translate::TRANSLATE_STEP_AFTER_UNDO:
       return TranslateBubbleModel::VIEW_STATE_BEFORE_TRANSLATE;
     case translate::TRANSLATE_STEP_TRANSLATING:
       return TranslateBubbleModel::VIEW_STATE_TRANSLATING;
@@ -39,11 +48,10 @@ TranslateBubbleModelImpl::TranslateStepToViewState(
   }
 
   NOTREACHED();
-  return TranslateBubbleModel::VIEW_STATE_ERROR;
 }
 
 TranslateBubbleModel::ViewState TranslateBubbleModelImpl::GetViewState() const {
-  return view_state_transition_.view_state();
+  return current_view_state_;
 }
 
 bool TranslateBubbleModelImpl::ShouldAlwaysTranslateBeCheckedByDefault() const {
@@ -56,40 +64,67 @@ bool TranslateBubbleModelImpl::ShouldShowAlwaysTranslateShortcut() const {
 
 void TranslateBubbleModelImpl::SetViewState(
     TranslateBubbleModel::ViewState view_state) {
-  view_state_transition_.SetViewState(view_state);
+  current_view_state_ = view_state;
 }
 
 void TranslateBubbleModelImpl::ShowError(
-    translate::TranslateErrors::Type error_type) {
+    translate::TranslateErrors error_type) {
   ui_delegate_->OnErrorShown(error_type);
 }
 
-void TranslateBubbleModelImpl::GoBackFromAdvanced() {
-  view_state_transition_.GoBackFromAdvanced();
+int TranslateBubbleModelImpl::GetNumberOfSourceLanguages() const {
+  return ui_languages_manager_->GetNumberOfLanguages();
 }
 
-int TranslateBubbleModelImpl::GetNumberOfLanguages() const {
-  return ui_delegate_->GetNumberOfLanguages();
+int TranslateBubbleModelImpl::GetNumberOfTargetLanguages() const {
+  // Subtract 1 to account for unknown language option being omitted.
+  return ui_languages_manager_->GetNumberOfLanguages() - 1;
 }
 
-base::string16 TranslateBubbleModelImpl::GetLanguageNameAt(int index) const {
-  return ui_delegate_->GetLanguageNameAt(index);
+std::u16string TranslateBubbleModelImpl::GetSourceLanguageNameAt(
+    int index) const {
+  return ui_languages_manager_->GetLanguageNameAt(index);
 }
 
-int TranslateBubbleModelImpl::GetOriginalLanguageIndex() const {
-  return ui_delegate_->GetOriginalLanguageIndex();
+std::u16string TranslateBubbleModelImpl::GetTargetLanguageNameAt(
+    int index) const {
+  // Add 1 to account for unknown language option at index 0 in
+  // TranslateUIDelegate language list.
+  return ui_languages_manager_->GetLanguageNameAt(index + 1);
 }
 
-void TranslateBubbleModelImpl::UpdateOriginalLanguageIndex(int index) {
-  ui_delegate_->UpdateOriginalLanguageIndex(index);
+std::optional<size_t> TranslateBubbleModelImpl::GetTargetLanguageIndexForCode(
+    const std::string& language_code) const {
+  for (size_t i = 0; i < ui_languages_manager_->GetNumberOfLanguages(); ++i) {
+    if (ui_languages_manager_->GetLanguageCodeAt(i) == language_code) {
+      return i == 0 ? std::nullopt : std::make_optional<size_t>(i - 1);
+    }
+  }
+  return std::nullopt;
+}
+
+std::string TranslateBubbleModelImpl::GetSourceLanguageCode() const {
+  return ui_languages_manager_->GetSourceLanguageCode();
+}
+
+int TranslateBubbleModelImpl::GetSourceLanguageIndex() const {
+  return ui_languages_manager_->GetSourceLanguageIndex();
+}
+
+void TranslateBubbleModelImpl::UpdateSourceLanguageIndex(int index) {
+  ui_delegate_->UpdateAndRecordSourceLanguageIndex(index);
 }
 
 int TranslateBubbleModelImpl::GetTargetLanguageIndex() const {
-  return ui_delegate_->GetTargetLanguageIndex();
+  // Subtract 1 to account for unknown language option being omitted from the
+  // bubble target language list.
+  return ui_languages_manager_->GetTargetLanguageIndex() - 1;
 }
 
 void TranslateBubbleModelImpl::UpdateTargetLanguageIndex(int index) {
-  ui_delegate_->UpdateTargetLanguageIndex(index);
+  // Add 1 to account for unknown language option at index 0 in
+  // TranslateUIDelegate language list.
+  ui_delegate_->UpdateAndRecordTargetLanguageIndex(index + 1);
 }
 
 void TranslateBubbleModelImpl::DeclineTranslation() {
@@ -105,15 +140,15 @@ void TranslateBubbleModelImpl::SetNeverTranslateLanguage(bool value) {
 }
 
 bool TranslateBubbleModelImpl::ShouldNeverTranslateSite() {
-  return ui_delegate_->IsSiteBlacklisted();
+  return ui_delegate_->IsSiteOnNeverPromptList();
 }
 
 void TranslateBubbleModelImpl::SetNeverTranslateSite(bool value) {
-  ui_delegate_->SetSiteBlacklist(value);
+  ui_delegate_->SetNeverPromptSite(value);
 }
 
-bool TranslateBubbleModelImpl::CanBlocklistSite() {
-  return ui_delegate_->CanBlacklistSite();
+bool TranslateBubbleModelImpl::CanAddSiteToNeverPromptList() {
+  return ui_delegate_->CanAddSiteToNeverPromptList();
 }
 
 bool TranslateBubbleModelImpl::ShouldAlwaysTranslate() const {
@@ -134,15 +169,36 @@ void TranslateBubbleModelImpl::RevertTranslation() {
 }
 
 void TranslateBubbleModelImpl::OnBubbleClosing() {
-  if (!translate_executed_)
+  // TODO(curranmax): This will mark the UI as closed when the widget has lost
+  // focus. This means it is basically impossible for the final state to have
+  // the UI shown. https://crbug.com/40144098.
+  ui_delegate_->OnUIClosedByUser();
+
+  if (!translate_executed_) {
     ui_delegate_->TranslationDeclined(translation_declined_);
+  }
 }
 
 bool TranslateBubbleModelImpl::IsPageTranslatedInCurrentLanguages() const {
-  const translate::LanguageState& language_state =
+  const translate::LanguageState* language_state =
       ui_delegate_->GetLanguageState();
-  return ui_delegate_->GetOriginalLanguageCode() ==
-             language_state.original_language() &&
-         ui_delegate_->GetTargetLanguageCode() ==
-             language_state.current_language();
+  if (language_state) {
+    return ui_languages_manager_->GetSourceLanguageCode() ==
+               language_state->source_language() &&
+           ui_languages_manager_->GetTargetLanguageCode() ==
+               language_state->current_language();
+  }
+  // If LanguageState does not exist, it means that TranslateManager has been
+  // destructed. Return true so that callers don't try to kick off any more
+  // translations.
+  return true;
+}
+
+void TranslateBubbleModelImpl::ReportUIInteraction(
+    translate::UIInteraction ui_interaction) {
+  ui_delegate_->ReportUIInteraction(ui_interaction);
+}
+
+void TranslateBubbleModelImpl::ReportUIChange(bool is_ui_shown) {
+  ui_delegate_->ReportUIChange(is_ui_shown);
 }

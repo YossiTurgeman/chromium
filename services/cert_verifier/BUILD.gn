@@ -1,9 +1,14 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//net/features.gni")
+import("//services/network/public/cpp/features.gni")
+
 source_set("lib") {
   sources = [
+    "cert_verifier_creation.cc",
+    "cert_verifier_creation.h",
     "cert_verifier_service.cc",
     "cert_verifier_service.h",
     "cert_verifier_service_factory.cc",
@@ -12,15 +17,23 @@ source_set("lib") {
 
   deps = [
     "//base",
+    "//components/network_time/time_tracker",
+    "//mojo/public/cpp/base:protobuf_support",
     "//net",
+    "//net/cert:root_store_proto_lite",
     "//services/cert_verifier/cert_net_url_loader",
-    "//services/network/public/cpp/cert_verifier:cert_verifier_creation",
+    "//services/network/public/cpp:buildflags",
+    "//services/network/public/mojom",
   ]
 
   public_deps = [
     "//services/cert_verifier/public/mojom",
     "//services/network/public/mojom",
   ]
+
+  if (is_ct_supported) {
+    deps += [ "//components/certificate_transparency" ]
+  }
 }
 
 source_set("tests") {
@@ -31,16 +44,18 @@ source_set("tests") {
     "cert_verifier_service_unittest.cc",
     "integration_tests/network_context_unittest.cc",
     "integration_tests/network_service_unittest.cc",
-    "integration_tests/ssl_config_service_mojo_unittest.cc",
   ]
 
   deps = [
     ":lib",
     "//base",
     "//base/test:test_support",
+    "//crypto:test_support",
+    "//mojo/public/cpp/base:protobuf_support",
     "//net",
     "//net:test_support",
-    "//services/cert_verifier/cert_net_url_loader:cert_net_url_loader",
+    "//net/cert:root_store_proto_lite",
+    "//services/cert_verifier/cert_net_url_loader",
     "//services/cert_verifier/public/mojom",
     "//services/network:network_service",
     "//services/network:test_support",
@@ -48,19 +63,8 @@ source_set("tests") {
     "//services/network/public/mojom",
     "//testing/gtest",
   ]
-}
 
-source_set("test_support") {
-  testonly = true
-
-  sources = [
-    "test_cert_verifier_service_factory.cc",
-    "test_cert_verifier_service_factory.h",
-  ]
-
-  deps = [
-    ":lib",
-    "//base",
-    "//net",
-  ]
+  if (is_ct_supported) {
+    deps += [ "//components/certificate_transparency" ]
+  }
 }

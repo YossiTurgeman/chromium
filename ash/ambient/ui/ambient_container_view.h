@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,56 +8,36 @@
 #include <memory>
 
 #include "ash/ash_export.h"
-#include "base/macros.h"
 #include "ui/views/view.h"
 
 namespace ash {
 
-class AmbientAssistantContainerView;
-class AmbientViewDelegate;
-class PhotoView;
-class MediaStringView;
+class AmbientUiSettings;
+
+namespace ambient {
+class AmbientOrientationMetricsRecorder;
+}  // namespace ambient
 
 // Container view to display all Ambient Mode related views, i.e. photo frame,
 // weather info.
 class ASH_EXPORT AmbientContainerView : public views::View {
- public:
-  explicit AmbientContainerView(AmbientViewDelegate* delegate);
-  ~AmbientContainerView() override;
+  METADATA_HEADER(AmbientContainerView, views::View)
 
-  // views::View:
-  const char* GetClassName() const override;
-  gfx::Size CalculatePreferredSize() const override;
-  void Layout() override;
-  void AddedToWidget() override;
+ public:
+  // |main_rendering_view| should contain the primary content; it becomes a
+  // child of |AmbientContainerView|, and |AmbientContainerView| sets up some
+  // parameters in the view hierarchy that are common to all ambient UIs.
+  AmbientContainerView(AmbientUiSettings ui_settings,
+                       std::unique_ptr<views::View> main_rendering_view);
+  ~AmbientContainerView() override;
 
  private:
   friend class AmbientAshTestBase;
-  class HostWidgetEventObserver;
 
-  void Init();
+  void InitializeCommonSettings();
 
-  // Layouts its child views.
-  // TODO(meilinw): Use LayoutManagers to lay out children instead of overriding
-  // Layout(). See b/163170162.
-  void LayoutPhotoView();
-  void LayoutAssistantView();
-  void LayoutMediaStringView();
-
-  // Invoked on specific types of events.
-  void HandleEvent();
-
-  AmbientViewDelegate* delegate_ = nullptr;
-
-  // Owned by view hierarchy.
-  PhotoView* photo_view_ = nullptr;
-  AmbientAssistantContainerView* ambient_assistant_container_view_ = nullptr;
-  MediaStringView* media_string_view_ = nullptr;
-
-  // Observes events from its host widget.
-  std::unique_ptr<HostWidgetEventObserver> event_observer_;
-
-  DISALLOW_COPY_AND_ASSIGN(AmbientContainerView);
+  std::unique_ptr<ambient::AmbientOrientationMetricsRecorder>
+      orientation_metrics_recorder_;
 };
 
 }  // namespace ash

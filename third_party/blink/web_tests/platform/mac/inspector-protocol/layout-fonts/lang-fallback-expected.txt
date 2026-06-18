@@ -48,7 +48,7 @@
 
 𐐀𐐁
 #en:
-"Baskerville" : 2
+"Apple Symbols" : 2
 
 अआ
 #hi:
@@ -96,7 +96,7 @@
 
 בג
 #he:
-"Lucida Grande" : 2
+"Times New Roman" : 2
 
 កខ
 #km:
@@ -160,11 +160,11 @@
 
 ߁߂
 #nko:
-"Noto Sans N'Ko" : 2
+"Noto Sans NKo" : 2
 
 ᚁ
 #script_ogham:
-"Noto Sans Ogham" : 2
+"Apple Symbols" : 2
 
 ᱑᱒
 #script_ol_chiki:
@@ -192,11 +192,11 @@
 
 ᚠᚡ
 #script_runic:
-"Noto Sans Runic" : 2
+"Apple Symbols" : 2
 
 𐑑𐑒
 #script_shavian:
-"Noto Sans Shavian" : 2
+"Apple Symbols" : 2
 
 එඒ
 #si:
@@ -232,7 +232,7 @@
 
 ༁༂
 #bo:
-"Songti SC" : 2
+"Kokonor" : 2
 
 ⴱⴲ
 #script_tifinagh:

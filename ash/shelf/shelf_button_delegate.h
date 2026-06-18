@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,8 +24,7 @@ class ShelfButton;
 // TODO(mohsen): A better approach would be to return a value indicating the
 // type of action performed such that the button can animate the ink drop.
 // Currently, it is not possible because showing menu is synchronous and blocks
-// the call. Fix this after menu is converted to asynchronous.  Long-term, the
-// return value can be merged into ButtonListener.
+// the call. Fix this after menu is converted to asynchronous.
 class ShelfButtonDelegate {
  public:
   class ScopedActiveInkDropCount {
@@ -34,6 +33,10 @@ class ShelfButtonDelegate {
   };
 
   ShelfButtonDelegate() {}
+
+  ShelfButtonDelegate(const ShelfButtonDelegate&) = delete;
+  ShelfButtonDelegate& operator=(const ShelfButtonDelegate&) = delete;
+
   ~ShelfButtonDelegate() = default;
 
   // Used to let the host view redirect focus.
@@ -59,8 +62,11 @@ class ShelfButtonDelegate {
   virtual std::unique_ptr<ScopedActiveInkDropCount>
   CreateScopedActiveInkDropCount(const ShelfButton* button);
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(ShelfButtonDelegate);
+  // Notifies the host view that one button will be removed.
+  virtual void OnButtonWillBeRemoved() {}
+
+  // Notifies the host view that the app button `button` is activated.
+  virtual void OnAppButtonActivated(const ShelfButton* button) {}
 };
 
 }  // namespace ash

@@ -1,9 +1,16 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/editing/spellcheck/idle_spell_check_controller.h"
 
+#include <array>
+
+#include "base/check_deref.h"
+#include "base/debug/crash_logging.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/time/time.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_idle_request_options.h"
 #include "third_party/blink/renderer/core/editing/commands/undo_stack.h"
@@ -22,49 +29,48 @@
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/scheduler/scripted_idle_task_controller.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cancellable_task.h"
 
 namespace blink {
 
 namespace {
 
-constexpr base::TimeDelta kColdModeTimerInterval =
-    base::TimeDelta::FromMilliseconds(1000);
+constexpr base::TimeDelta kColdModeTimerInterval = base::Milliseconds(1000);
 constexpr base::TimeDelta kConsecutiveColdModeTimerInterval =
-    base::TimeDelta::FromMilliseconds(200);
+    base::Milliseconds(200);
 const int kHotModeRequestTimeoutMS = 200;
 const int kInvalidHandle = -1;
 const int kDummyHandleForForcedInvocation = -2;
-constexpr base::TimeDelta kIdleSpellcheckTestTimeout =
-    base::TimeDelta::FromSeconds(10);
+constexpr base::TimeDelta kIdleSpellcheckTestTimeout = base::Seconds(10);
 
 }  // namespace
 
-class IdleSpellCheckController::IdleCallback final
-    : public ScriptedIdleTaskController::IdleTask {
+class IdleSpellCheckController::IdleCallback final : public IdleTask {
  public:
   explicit IdleCallback(IdleSpellCheckController* controller)
       : controller_(controller) {}
+  IdleCallback(const IdleCallback&) = delete;
+  IdleCallback& operator=(const IdleCallback&) = delete;
 
   void Trace(Visitor* visitor) const final {
     visitor->Trace(controller_);
-    ScriptedIdleTaskController::IdleTask::Trace(visitor);
+    IdleTask::Trace(visitor);
   }
 
  private:
   void invoke(IdleDeadline* deadline) final { controller_->Invoke(deadline); }
 
   const Member<IdleSpellCheckController> controller_;
-
-  DISALLOW_COPY_AND_ASSIGN(IdleCallback);
 };
 
 IdleSpellCheckController::~IdleSpellCheckController() = default;
 
 void IdleSpellCheckController::Trace(Visitor* visitor) const {
   visitor->Trace(cold_mode_requester_);
-  visitor->Trace(spell_check_requeseter_);
+  visitor->Trace(spell_check_requester_);
   ExecutionContextLifecycleObserver::Trace(visitor);
 }
 
@@ -72,12 +78,10 @@ IdleSpellCheckController::IdleSpellCheckController(
     LocalDOMWindow& window,
     SpellCheckRequester& requester)
     : ExecutionContextLifecycleObserver(&window),
-      state_(State::kInactive),
       idle_callback_handle_(kInvalidHandle),
-      last_processed_undo_step_sequence_(0),
       cold_mode_requester_(
           MakeGarbageCollected<ColdModeSpellCheckRequester>(window)),
-      spell_check_requeseter_(requester) {}
+      spell_check_requester_(requester) {}
 
 LocalDOMWindow& IdleSpellCheckController::GetWindow() const {
   DCHECK(GetExecutionContext());
@@ -96,8 +100,10 @@ bool IdleSpellCheckController::IsSpellCheckingEnabled() const {
 }
 
 void IdleSpellCheckController::DisposeIdleCallback() {
-  if (idle_callback_handle_ != kInvalidHandle && GetExecutionContext())
-    GetDocument().CancelIdleCallback(idle_callback_handle_);
+  if (idle_callback_handle_ != kInvalidHandle && GetExecutionContext()) {
+    ScriptedIdleTaskController::From(*GetExecutionContext())
+        .CancelCallback(idle_callback_handle_);
+  }
   idle_callback_handle_ = kInvalidHandle;
 }
 
@@ -105,16 +111,96 @@ void IdleSpellCheckController::Deactivate() {
   state_ = State::kInactive;
   if (cold_mode_timer_.IsActive())
     cold_mode_timer_.Cancel();
-  cold_mode_requester_->ClearProgress();
+  cold_mode_requester_->Deactivate();
   DisposeIdleCallback();
-  spell_check_requeseter_->Deactivate();
+  spell_check_requester_->Deactivate();
 }
 
-void IdleSpellCheckController::SetNeedsInvocation() {
+void IdleSpellCheckController::RespondToChangedSelection() {
   if (!IsSpellCheckingEnabled()) {
     Deactivate();
     return;
   }
+
+  // We can skip this pass if the selection isn't the result of a user gesture.
+  // For more see:
+  // https://explainers-by-googlers.github.io/user-dictionary-leaks/
+  const Element* focused_element = GetDocument().FocusedElement();
+  if ((!focused_element || !focused_element->WasLastFocusFromUserGesture()) &&
+      !base::FeatureList::IsEnabled(
+          features::kUnrestrictSpellingAndGrammarForTesting)) {
+    Deactivate();
+    base::UmaHistogramBoolean(
+        "WebCore.Editing.SpellCheckUserActionLimitation.Hot.Selection", true);
+    return;
+  }
+  base::UmaHistogramBoolean(
+      "WebCore.Editing.SpellCheckUserActionLimitation.Hot.Selection", false);
+
+  if (IsInInvocation())
+    return;
+
+  needs_invocation_for_changed_selection_ = true;
+  SetNeedsInvocation();
+}
+
+void IdleSpellCheckController::RespondToChangedContents() {
+  if (!IsSpellCheckingEnabled()) {
+    Deactivate();
+    return;
+  }
+
+  // We can skip this pass if the page isn't being interacted with.
+  // This isn't the ideal signal, as it has a 5 second timeout, but it's
+  // enough to prevent a user focused field from being taken advantage of.
+  // For more see:
+  // https://explainers-by-googlers.github.io/user-dictionary-leaks/
+  if (!LocalFrame::HasTransientUserActivation(GetWindow().GetFrame()) &&
+      !base::FeatureList::IsEnabled(
+          features::kUnrestrictSpellingAndGrammarForTesting)) {
+    Deactivate();
+    base::UmaHistogramBoolean(
+        "WebCore.Editing.SpellCheckUserActionLimitation.Hot.Contents", true);
+    return;
+  }
+  base::UmaHistogramBoolean(
+      "WebCore.Editing.SpellCheckUserActionLimitation.Hot.Contents", false);
+
+  if (IsInInvocation())
+    return;
+
+  needs_invocation_for_changed_contents_ = true;
+  SetNeedsInvocation();
+}
+
+void IdleSpellCheckController::RespondToChangedEnablement() {
+  if (!IsSpellCheckingEnabled()) {
+    Deactivate();
+    return;
+  }
+
+  // We can skip this pass as it must be the result of a script.
+  // For more see:
+  // https://explainers-by-googlers.github.io/user-dictionary-leaks/
+  if (!base::FeatureList::IsEnabled(
+          features::kUnrestrictSpellingAndGrammarForTesting)) {
+    Deactivate();
+    base::UmaHistogramBoolean(
+        "WebCore.Editing.SpellCheckUserActionLimitation.Hot.Enablement", true);
+    return;
+  }
+  base::UmaHistogramBoolean(
+      "WebCore.Editing.SpellCheckUserActionLimitation.Hot.Enablement", false);
+
+  if (IsInInvocation())
+    return;
+
+  needs_invocation_for_changed_enablement_ = true;
+  SetNeedsInvocation();
+}
+
+void IdleSpellCheckController::SetNeedsInvocation() {
+  DCHECK(IsSpellCheckingEnabled());
 
   if (state_ == State::kHotModeRequested)
     return;
@@ -131,8 +217,9 @@ void IdleSpellCheckController::SetNeedsInvocation() {
 
   IdleRequestOptions* options = IdleRequestOptions::Create();
   options->setTimeout(kHotModeRequestTimeoutMS);
-  idle_callback_handle_ = GetDocument().RequestIdleCallback(
-      MakeGarbageCollected<IdleCallback>(this), options);
+  idle_callback_handle_ =
+      ScriptedIdleTaskController::From(CHECK_DEREF(GetExecutionContext()))
+          .RegisterCallback(MakeGarbageCollected<IdleCallback>(this), options);
   state_ = State::kHotModeRequested;
 }
 
@@ -148,8 +235,8 @@ void IdleSpellCheckController::SetNeedsColdModeInvocation() {
                                  : kColdModeTimerInterval;
   cold_mode_timer_ = PostDelayedCancellableTask(
       *GetWindow().GetTaskRunner(TaskType::kInternalDefault), FROM_HERE,
-      WTF::Bind(&IdleSpellCheckController::ColdModeTimerFired,
-                WrapPersistent(this)),
+      BindOnce(&IdleSpellCheckController::ColdModeTimerFired,
+               WrapPersistent(this)),
       interval);
   state_ = State::kColdModeTimerStarted;
 }
@@ -162,9 +249,29 @@ void IdleSpellCheckController::ColdModeTimerFired() {
     return;
   }
 
-  idle_callback_handle_ = GetDocument().RequestIdleCallback(
-      MakeGarbageCollected<IdleCallback>(this), IdleRequestOptions::Create());
+  idle_callback_handle_ =
+      ScriptedIdleTaskController::From(CHECK_DEREF(GetExecutionContext()))
+          .RegisterCallback(MakeGarbageCollected<IdleCallback>(this),
+                            IdleRequestOptions::Create());
   state_ = State::kColdModeRequested;
+}
+
+bool IdleSpellCheckController::NeedsHotModeCheckingUnderCurrentSelection()
+    const {
+  if (needs_invocation_for_changed_contents_ ||
+      needs_invocation_for_changed_enablement_) {
+    return true;
+  }
+
+  // If there's only selection movement, we skip hot mode if cold mode has
+  // already fully checked the current element.
+  DCHECK(needs_invocation_for_changed_selection_);
+  const Position& position =
+      GetWindow().GetFrame()->Selection().GetSelectionInDomTree().Focus();
+  const auto* element = DynamicTo<Element>(HighestEditableRoot(position));
+  if (!element || !element->isConnected())
+    return false;
+  return !cold_mode_requester_->HasFullyChecked(*element);
 }
 
 void IdleSpellCheckController::HotModeInvocation(IdleDeadline* deadline) {
@@ -173,10 +280,12 @@ void IdleSpellCheckController::HotModeInvocation(IdleDeadline* deadline) {
   // TODO(xiaochengh): Figure out if this has any performance impact.
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
 
-  HotModeSpellCheckRequester requester(*spell_check_requeseter_);
+  HotModeSpellCheckRequester requester(*spell_check_requester_);
 
-  requester.CheckSpellingAt(
-      GetWindow().GetFrame()->Selection().GetSelectionInDOMTree().Extent());
+  if (NeedsHotModeCheckingUnderCurrentSelection()) {
+    requester.CheckSpellingAt(
+        GetWindow().GetFrame()->Selection().GetSelectionInDomTree().Focus());
+  }
 
   const uint64_t watermark = last_processed_undo_step_sequence_;
   for (const UndoStep* step :
@@ -192,8 +301,12 @@ void IdleSpellCheckController::HotModeInvocation(IdleDeadline* deadline) {
     // before using it.
     if (!step->EndingSelection().IsValidFor(GetDocument()))
       continue;
-    requester.CheckSpellingAt(step->EndingSelection().Extent());
+    requester.CheckSpellingAt(step->EndingSelection().Focus());
   }
+
+  needs_invocation_for_changed_selection_ = false;
+  needs_invocation_for_changed_contents_ = false;
+  needs_invocation_for_changed_enablement_ = false;
 }
 
 void IdleSpellCheckController::Invoke(IdleDeadline* deadline) {
@@ -205,6 +318,22 @@ void IdleSpellCheckController::Invoke(IdleDeadline* deadline) {
     return;
   }
 
+  // If focus node has canonical position null then spellcheck should not
+  // be executed.
+  if (RuntimeEnabledFeatures::
+          CheckForCanonicalPositionInIdleSpellCheckEnabled()) {
+    Position selection_focus =
+        GetWindow().GetFrame()->Selection().GetSelectionInDomTree().Focus();
+    if (selection_focus) {
+      GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+      if (CanonicalPositionOf(EphemeralRange(selection_focus).StartPosition())
+              .IsNull()) {
+        Deactivate();
+        return;
+      }
+    }
+  }
+
   if (state_ == State::kHotModeRequested) {
     state_ = State::kInHotModeInvocation;
     HotModeInvocation(deadline);
@@ -212,12 +341,19 @@ void IdleSpellCheckController::Invoke(IdleDeadline* deadline) {
   } else if (state_ == State::kColdModeRequested) {
     state_ = State::kInColdModeInvocation;
     cold_mode_requester_->Invoke(deadline);
-    if (cold_mode_requester_->FullyChecked())
+    if (cold_mode_requester_->FullyCheckedCurrentRootEditable()) {
       state_ = State::kInactive;
-    else
+    } else {
       SetNeedsColdModeInvocation();
+    }
   } else {
-    NOTREACHED();
+    // TODO(crbug.com/1424540): The other states are unexpected but reached in
+    // real world. We work around it and dump debugging information.
+    static auto* state_data = base::debug::AllocateCrashKeyString(
+        "spellchecker-state-on-invocation", base::debug::CrashKeySize::Size32);
+    base::debug::SetCrashKeyString(state_data, GetStateAsString());
+    DUMP_WILL_BE_NOTREACHED() << GetStateAsString();
+    Deactivate();
   }
 }
 
@@ -229,8 +365,13 @@ void IdleSpellCheckController::ForceInvocationForTesting() {
   if (!IsSpellCheckingEnabled())
     return;
 
+  bool cross_origin_isolated_capability =
+      GetExecutionContext() &&
+      GetExecutionContext()->CrossOriginIsolatedCapability();
+
   auto* deadline = MakeGarbageCollected<IdleDeadline>(
       base::TimeTicks::Now() + kIdleSpellcheckTestTimeout,
+      cross_origin_isolated_capability,
       IdleDeadline::CallbackType::kCalledWhenIdle);
 
   switch (state_) {
@@ -242,10 +383,14 @@ void IdleSpellCheckController::ForceInvocationForTesting() {
       break;
     case State::kHotModeRequested:
     case State::kColdModeRequested:
-      GetDocument().CancelIdleCallback(idle_callback_handle_);
+      if (GetExecutionContext()) {
+        ScriptedIdleTaskController::From(*GetExecutionContext())
+            .CancelCallback(idle_callback_handle_);
+      }
       Invoke(deadline);
       break;
     case State::kInactive:
+      break;
     case State::kInHotModeInvocation:
     case State::kInColdModeInvocation:
       NOTREACHED();
@@ -260,6 +405,25 @@ void IdleSpellCheckController::SkipColdModeTimerForTesting() {
 
 void IdleSpellCheckController::SetNeedsMoreColdModeInvocationForTesting() {
   cold_mode_requester_->SetNeedsMoreInvocationForTesting();
+}
+
+void IdleSpellCheckController::SetSpellCheckingDisabled(
+    const Element& element) {
+  cold_mode_requester_->RemoveFromFullyChecked(element);
+}
+
+const char* IdleSpellCheckController::GetStateAsString() const {
+  static const auto kTexts = std::to_array<const char*>({
+#define V(state) #state,
+      FOR_EACH_IDLE_SPELL_CHECK_CONTROLLER_STATE(V)
+#undef V
+  });
+
+  unsigned index = static_cast<unsigned>(state_);
+  if (index < std::size(kTexts)) {
+    return kTexts[index];
+  }
+  return "Invalid";
 }
 
 }  // namespace blink

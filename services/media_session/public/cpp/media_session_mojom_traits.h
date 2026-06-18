@@ -1,14 +1,15 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SERVICES_MEDIA_SESSION_PUBLIC_CPP_MEDIA_SESSION_MOJOM_TRAITS_H_
 #define SERVICES_MEDIA_SESSION_PUBLIC_CPP_MEDIA_SESSION_MOJOM_TRAITS_H_
 
+#include <string>
 #include <vector>
 
 #include "base/containers/span.h"
-#include "base/strings/string16.h"
+#include "services/media_session/public/cpp/chapter_information.h"
 #include "services/media_session/public/cpp/media_image.h"
 #include "services/media_session/public/cpp/media_metadata.h"
 #include "services/media_session/public/cpp/media_position.h"
@@ -25,7 +26,7 @@ struct StructTraits<media_session::mojom::MediaImageDataView,
     return image.src;
   }
 
-  static const base::string16& type(const media_session::MediaImage& image) {
+  static const std::u16string& type(const media_session::MediaImage& image) {
     return image.type;
   }
 
@@ -41,22 +42,27 @@ struct StructTraits<media_session::mojom::MediaImageDataView,
 template <>
 struct StructTraits<media_session::mojom::MediaMetadataDataView,
                     media_session::MediaMetadata> {
-  static const base::string16& title(
+  static const std::u16string& title(
       const media_session::MediaMetadata& metadata) {
     return metadata.title;
   }
 
-  static const base::string16& artist(
+  static const std::u16string& artist(
       const media_session::MediaMetadata& metadata) {
     return metadata.artist;
   }
 
-  static const base::string16& album(
+  static const std::u16string& album(
       const media_session::MediaMetadata& metadata) {
     return metadata.album;
   }
 
-  static const base::string16& source_title(
+  static const std::vector<media_session::ChapterInformation>& chapters(
+      const media_session::MediaMetadata& metadata) {
+    return metadata.chapters;
+  }
+
+  static const std::u16string& source_title(
       const media_session::MediaMetadata& metadata) {
     return metadata.source_title;
   }
@@ -104,8 +110,34 @@ struct StructTraits<media_session::mojom::MediaPositionDataView,
     return media_position.last_updated_time_;
   }
 
+  static bool end_of_media(const media_session::MediaPosition& media_position) {
+    return media_position.end_of_media_;
+  }
+
   static bool Read(media_session::mojom::MediaPositionDataView data,
                    media_session::MediaPosition* out);
+};
+
+template <>
+struct StructTraits<media_session::mojom::ChapterInformationDataView,
+                    media_session::ChapterInformation> {
+  static const std::u16string& title(
+      const media_session::ChapterInformation& chapter_information) {
+    return chapter_information.title_;
+  }
+
+  static base::TimeDelta startTime(
+      const media_session::ChapterInformation& chapter_information) {
+    return chapter_information.startTime_;
+  }
+
+  static const std::vector<media_session::MediaImage>& artwork(
+      const media_session::ChapterInformation& chapter_information) {
+    return chapter_information.artwork_;
+  }
+
+  static bool Read(media_session::mojom::ChapterInformationDataView data,
+                   media_session::ChapterInformation* out);
 };
 
 }  // namespace mojo

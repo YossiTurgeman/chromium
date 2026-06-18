@@ -1,6 +1,11 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
 
 // A simple unit-test style driver for libfuzzer tests.
 // Usage: <fuzzer_test> <file>...
@@ -42,7 +47,7 @@ int main(int argc, char **argv) {
            "Alternatively, try building this target with "
            "use_libfuzzer=true for a better test driver. For details see:\n"
            "\n"
-           "https://chromium.googlesource.com/chromium/src/+/master/"
+           "https://chromium.googlesource.com/chromium/src/+/main/"
            "testing/libfuzzer/getting_started.md"
         << std::endl;
     exit(1);

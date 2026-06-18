@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,10 @@
 #include "content/common/content_export.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
-#include "services/network/public/mojom/ip_address_space.mojom.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/script/script_type.mojom.h"
 #include "third_party/blink/public/mojom/worker/shared_worker_creation_context_type.mojom.h"
+#include "third_party/blink/public/mojom/worker/shared_worker_info.mojom.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -33,11 +34,12 @@ class CONTENT_EXPORT SharedWorkerInstance {
       blink::mojom::ScriptType script_type,
       network::mojom::CredentialsMode credentials_mode,
       const std::string& name,
-      const url::Origin& constructor_origin,
-      const std::string& content_security_policy,
-      network::mojom::ContentSecurityPolicyType content_security_policy_type,
-      network::mojom::IPAddressSpace creation_address_space,
-      blink::mojom::SharedWorkerCreationContextType creation_context_type);
+      const blink::StorageKey& creator_storage_key,
+      const blink::StorageKey& worker_storage_key,
+      const url::Origin& renderer_origin,
+      blink::mojom::SharedWorkerCreationContextType creation_context_type,
+      blink::mojom::SharedWorkerSameSiteCookies same_site_cookies,
+      bool extended_lifetime);
   SharedWorkerInstance(const SharedWorkerInstance& other);
   SharedWorkerInstance(SharedWorkerInstance&& other);
   SharedWorkerInstance& operator=(const SharedWorkerInstance& other) = delete;
@@ -48,9 +50,14 @@ class CONTENT_EXPORT SharedWorkerInstance {
   // constructor origin params according to the SharedWorker constructor steps
   // in the HTML spec:
   // https://html.spec.whatwg.org/multipage/workers.html#shared-workers-and-the-sharedworker-interface
-  bool Matches(const GURL& url,
-               const std::string& name,
-               const url::Origin& constructor_origin) const;
+  // Note that we are using StorageKey to represent the constructor origin.
+  // A match for the same_site_cookies setting is also performed per:
+  // https://privacycg.github.io/saa-non-cookie-storage/shared-workers.html
+  bool Matches(
+      const GURL& url,
+      const std::string& name,
+      const blink::StorageKey& creator_storage_key,
+      const blink::mojom::SharedWorkerSameSiteCookies same_site_cookies) const;
 
   // Accessors.
   const GURL& url() const { return url_; }
@@ -59,20 +66,26 @@ class CONTENT_EXPORT SharedWorkerInstance {
   network::mojom::CredentialsMode credentials_mode() const {
     return credentials_mode_;
   }
-  const url::Origin& constructor_origin() const { return constructor_origin_; }
-  const std::string& content_security_policy() const {
-    return content_security_policy_;
+  const blink::StorageKey& creator_storage_key() const {
+    return creator_storage_key_;
   }
-  network::mojom::ContentSecurityPolicyType content_security_policy_type()
-      const {
-    return content_security_policy_type_;
+  const blink::StorageKey& worker_storage_key() const {
+    return worker_storage_key_;
   }
-  network::mojom::IPAddressSpace creation_address_space() const {
-    return creation_address_space_;
-  }
+  const url::Origin& renderer_origin() const { return renderer_origin_; }
   blink::mojom::SharedWorkerCreationContextType creation_context_type() const {
     return creation_context_type_;
   }
+
+  blink::mojom::SharedWorkerSameSiteCookies same_site_cookies() const {
+    return same_site_cookies_;
+  }
+  bool DoesRequireCrossSiteRequestForCookies() const {
+    return creator_storage_key_.IsThirdPartyContext() ||
+           same_site_cookies() ==
+               blink::mojom::SharedWorkerSameSiteCookies::kNone;
+  }
+  bool extended_lifetime() const { return extended_lifetime_; }
 
  private:
   const GURL url_;
@@ -83,15 +96,33 @@ class CONTENT_EXPORT SharedWorkerInstance {
 
   const std::string name_;
 
-  // The origin of the document that created this shared worker instance. Used
-  // for security checks. See Matches() for details.
+  // The storage key. The key contains the origin of the document that created
+  // this shared worker instance. Used for security checks. See Matches() for
+  // details.
   // https://html.spec.whatwg.org/multipage/workers.html#concept-sharedworkerglobalscope-constructor-origin
-  const url::Origin constructor_origin_;
+  const blink::StorageKey creator_storage_key_;
 
-  const std::string content_security_policy_;
-  const network::mojom::ContentSecurityPolicyType content_security_policy_type_;
-  const network::mojom::IPAddressSpace creation_address_space_;
+  // The storage key of this shared worker. This will be the same as the
+  // creator's creator's storage key, except in the case of data: URL workers
+  // when the kDataUrlWorkerOpaqueOrigin feature is enabled, in which case it is
+  // an opaque storage key derived from the creator's.
+  const blink::StorageKey worker_storage_key_;
+
+  // The origin used by this shared worker on the renderer side. This will
+  // almost always be the same as `worker_storage_key_`'s origin, except in the
+  // case of data: URL workers when the feature is disabled.
+  // TODO(crbug.com/40051700): Remove this when the feature is enabled by
+  // default.
+  const url::Origin renderer_origin_;
+
   const blink::mojom::SharedWorkerCreationContextType creation_context_type_;
+
+  const blink::mojom::SharedWorkerSameSiteCookies same_site_cookies_;
+
+  // Indicates if SharedWorker should extend its lifetime on all clients
+  // have been destructed.
+  // See: https://github.com/whatwg/html/issues/10997
+  const bool extended_lifetime_;
 };
 
 }  // namespace content

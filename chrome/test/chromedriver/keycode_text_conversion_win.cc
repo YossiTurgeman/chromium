@@ -1,25 +1,27 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/test/chromedriver/keycode_text_conversion.h"
 
-#include <VersionHelpers.h>
+// windows.h must be included before versionhelpers.h
+#include <windows.h>
+
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include <versionhelpers.h>
 
 #include <memory>
 
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/test/chromedriver/chrome/ui_events.h"
+#include "third_party/abseil-cpp/absl/strings/ascii.h"
 
 bool ConvertKeyCodeToText(
     ui::KeyboardCode key_code, int modifiers, std::string* text,
     std::string* error_msg) {
   UINT scan_code = ::MapVirtualKeyW(key_code, MAPVK_VK_TO_VSC);
-  BYTE keyboard_state[256];
-  memset(keyboard_state, 0, 256);
+  BYTE keyboard_state[256] = {};
   *error_msg = std::string();
   if (modifiers & kShiftKeyModifierMask)
     keyboard_state[VK_SHIFT] |= 0x80;
@@ -31,16 +33,20 @@ bool ConvertKeyCodeToText(
   int code = ::ToUnicode(key_code, scan_code, keyboard_state, chars, 4, 0);
   // |ToUnicode| converts some non-text key codes like F1 to various
   // control chars. Filter those out.
-  if (code <= 0 || (code == 1 && iswcntrl(chars[0])))
+  if (code <= 0 ||
+      (code == 1 && chars[0] <= UCHAR_MAX &&
+       absl::ascii_iscntrl(static_cast<unsigned char>(chars[0])))) {
     *text = std::string();
-  else
+  } else {
     base::WideToUTF8(chars, code, text);
+  }
   return true;
 }
 
-bool ConvertCharToKeyCode(
-    base::char16 key, ui::KeyboardCode* key_code, int *necessary_modifiers,
-    std::string* error_msg) {
+bool ConvertCharToKeyCode(char16_t key,
+                          ui::KeyboardCode* key_code,
+                          int* necessary_modifiers,
+                          std::string* error_msg) {
   short vkey_and_modifiers = ::VkKeyScanW(key);
   bool translated = vkey_and_modifiers != -1 &&
                     LOBYTE(vkey_and_modifiers) != 0xFF &&
@@ -63,34 +69,18 @@ bool ConvertCharToKeyCode(
 }
 
 bool SwitchToUSKeyboardLayout() {
-  // For LoadKeyboardLayout - Prior to Windows 8: If the specified input
-  // locale identifier is not already loaded, the function loads and
-  // activates the input locale identifier for the current thread.
-  // Beginning in Windows 8: If the specified input locale identifier is not
-  // already loaded, the function loads and activates the input
-  // locale identifier for the system.
-  // For Windows 8 - Use ActivateKeyboardLayout instead of LoadKeyboardLayout
+  // Prior to Windows 8, calling LoadKeyboardLayout() with KLF_SETFORPROCESS
+  // activates specified keyboard layout for the entire process.
+  //
+  // Beginning in Windows 8: KLF_SETFORPROCESS flag is not used.
+  // LoadKeyboardLayout always activates an input locale identifier for
+  // the entire system if the current process owns the window with keyboard
+  // focus.
   LPCTSTR kUsKeyboardLayout = TEXT("00000409");
+  HKL hkl =
+      ::LoadKeyboardLayout(kUsKeyboardLayout, KLF_SETFORPROCESS | KLF_ACTIVATE);
 
-  if (IsWindows8OrGreater()) {
-    int size;
-    TCHAR active_keyboard[KL_NAMELENGTH];
-
-    if ((size = ::GetKeyboardLayoutList(0, NULL)) <= 0)
-      return false;
-
-    std::unique_ptr<HKL[]> keyboard_handles_list(new HKL[size]);
-    ::GetKeyboardLayoutList(size, keyboard_handles_list.get());
-
-    for (int keyboard_index = 0; keyboard_index < size; keyboard_index++) {
-      ::ActivateKeyboardLayout(keyboard_handles_list[keyboard_index],
-          KLF_SETFORPROCESS);
-      ::GetKeyboardLayoutName(active_keyboard);
-      if (wcscmp(active_keyboard, kUsKeyboardLayout) == 0)
-        return true;
-    }
-    return false;
-  } else {
-    return ::LoadKeyboardLayout(kUsKeyboardLayout, KLF_ACTIVATE) != NULL;
-  }
+  // Inspect only the low word that contains keyboard language identifier,
+  // ignoring the device identifier (Dvorak keyboard, etc) in the high word.
+  return LOWORD(hkl) == 0x0409;
 }

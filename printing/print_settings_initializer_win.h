@@ -1,23 +1,19 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef PRINTING_PRINTING_SETTINGS_INITIALIZER_WIN_H_
-#define PRINTING_PRINTING_SETTINGS_INITIALIZER_WIN_H_
-
-#include <string>
+#ifndef PRINTING_PRINT_SETTINGS_INITIALIZER_WIN_H_
+#define PRINTING_PRINT_SETTINGS_INITIALIZER_WIN_H_
 
 #include "printing/page_range.h"
-
-typedef struct HDC__* HDC;
-typedef struct _devicemodeW DEVMODE;
+#include "printing/windows_types.h"
 
 namespace printing {
 
 class PrintSettings;
 
 // Initializes a PrintSettings object from the provided device context.
-class PRINTING_EXPORT PrintSettingsInitializerWin {
+class COMPONENT_EXPORT(PRINTING) PrintSettingsInitializerWin {
  public:
   PrintSettingsInitializerWin() = delete;
   PrintSettingsInitializerWin(const PrintSettingsInitializerWin&) = delete;
@@ -31,4 +27,4 @@ class PRINTING_EXPORT PrintSettingsInitializerWin {
 
 }  // namespace printing
 
-#endif  // PRINTING_PRINTING_SETTINGS_INITIALIZER_WIN_H_
+#endif  // PRINTING_PRINT_SETTINGS_INITIALIZER_WIN_H_

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_CREDENTIAL_MANAGER_IMPL_H_
@@ -8,7 +8,10 @@
 #include <utility>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
+#include "components/credential_management/credential_manager_interface.h"
 #include "components/password_manager/core/browser/credential_manager_password_form_manager.h"
 #include "components/password_manager/core/browser/credential_manager_pending_prevent_silent_access_task.h"
 #include "components/password_manager/core/browser/credential_manager_pending_request_task.h"
@@ -23,7 +26,7 @@ using StoreCallback = base::OnceCallback<void()>;
 using PreventSilentAccessCallback = base::OnceCallback<void()>;
 using GetCallback =
     base::OnceCallback<void(CredentialManagerError,
-                            const base::Optional<CredentialInfo>&)>;
+                            const std::optional<CredentialInfo>&)>;
 
 // Class implementing Credential Manager methods Store, PreventSilentAccess
 // and Get in a platform independent way. Each method takes a callback as an
@@ -33,25 +36,30 @@ using GetCallback =
 class CredentialManagerImpl
     : public CredentialManagerPendingPreventSilentAccessTaskDelegate,
       public CredentialManagerPendingRequestTaskDelegate,
-      public CredentialManagerPasswordFormManagerDelegate {
+      public CredentialManagerPasswordFormManagerDelegate,
+      public credential_management::CredentialManagerInterface {
  public:
   explicit CredentialManagerImpl(PasswordManagerClient* client);
+  CredentialManagerImpl(const CredentialManagerImpl&) = delete;
+  CredentialManagerImpl& operator=(const CredentialManagerImpl&) = delete;
   ~CredentialManagerImpl() override;
 
-  void Store(const CredentialInfo& credential, StoreCallback callback);
-  void PreventSilentAccess(PreventSilentAccessCallback callback);
+  // credential_management::CredentialManagerInterface:
+  void Store(const CredentialInfo& credential, StoreCallback callback) override;
+  void PreventSilentAccess(PreventSilentAccessCallback callback) override;
   void Get(CredentialMediationRequirement mediation,
            bool include_passwords,
            const std::vector<GURL>& federations,
-           GetCallback callback);
+           GetCallback callback) override;
+  void ResetAfterDisconnecting() override;
 
   // CredentialManagerPendingRequestTaskDelegate:
   // Exposed publicly for testing.
   bool IsZeroClickAllowed() const override;
 
-  // Returns FormDigest for the current URL.
+  // Returns PasswordFormDigest for the current URL.
   // Exposed publicly for testing.
-  PasswordStore::FormDigest GetSynthesizedFormForOrigin() const;
+  PasswordFormDigest GetSynthesizedFormForOrigin() const;
 
 #if defined(UNIT_TEST)
   void set_leak_factory(std::unique_ptr<LeakDetectionCheckFactory> factory) {
@@ -66,38 +74,40 @@ class CredentialManagerImpl
                       const CredentialInfo& info) override;
   void SendPasswordForm(SendCredentialCallback send_callback,
                         CredentialMediationRequirement mediation,
-                        const autofill::PasswordForm* form) override;
+                        const PasswordForm* form) override;
   PasswordManagerClient* client() const override;
 
   // CredentialManagerPendingPreventSilentAccessTaskDelegate:
-  PasswordStore* GetProfilePasswordStore() override;
-  PasswordStore* GetAccountPasswordStore() override;
+  PasswordStoreInterface* GetProfilePasswordStore() override;
+  PasswordStoreInterface* GetAccountPasswordStore() override;
   void DoneRequiringUserMediation() override;
 
   // CredentialManagerPasswordFormManagerDelegate:
   void OnProvisionalSaveComplete() override;
 
-  PasswordManagerClient* client_;
-
-  // Set to false to disable automatic signing in.
-  BooleanPrefMember auto_signin_enabled_;
+  raw_ptr<PasswordManagerClient> client_;
 
   // Used to store or update a credential. Calls OnProvisionalSaveComplete
   // on this delegate.
   std::unique_ptr<CredentialManagerPasswordFormManager> form_manager_;
-  // Retrieves credentials from the PasswordStore and calls
+  // Retrieves credentials from the PasswordStoreInterface and calls
   // SendCredential on this delegate. SendCredential then runs a callback
   // which was passed as an argument to Get().
   std::unique_ptr<CredentialManagerPendingRequestTask> pending_request_;
-  // Notifies the PasswordStore that the origin requires user mediation.
-  // Calls DoneRequiringUserMediation on this delegate.
+  // Notifies the PasswordStoreInterface that the origin requires user
+  // mediation. Calls DoneRequiringUserMediation on this delegate.
   std::unique_ptr<CredentialManagerPendingPreventSilentAccessTask>
       pending_require_user_mediation_;
 
   // Helper for making the requests on leak detection.
   LeakDetectionDelegate leak_delegate_;
 
-  DISALLOW_COPY_AND_ASSIGN(CredentialManagerImpl);
+  // Last form that Password Manager considers submitted. Set in
+  // `Store` (if it was available) and reset in `OnProvisionalSaveComplete`.
+  // Only used on desktop.
+  std::optional<PasswordForm> last_submitted_form_;
+
+  base::WeakPtrFactory<CredentialManagerImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace password_manager

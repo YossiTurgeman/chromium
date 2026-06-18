@@ -21,8 +21,6 @@ folder. Arguably, the most important pages are:
 *   [all_sites.html](https://cs.chromium.org/chromium/src/chrome/browser/resources/settings/site_settings/all_sites.html)
     lists all sites that have any relevant information to the users
     (`chrome://settings/content/all`).
-*   [category_default_setting.html](https://cs.chromium.org/chromium/src/chrome/browser/resources/settings/site_settings/category_default_setting.html?g=0)
-    is used to show some particular settings category (e.g. "location").
 *   [site_details.html](https://cs.chromium.org/chromium/src/chrome/browser/resources/settings/site_settings/site_details.html?type=cs&g=0)
     displays a detailed page for a particular origin.
 
@@ -36,9 +34,9 @@ localized to the language settings of the user. Examples:
 
 ```
 <site-details-permission
-  category="{{ContentSettingsTypes.UNSANDBOXED_PLUGINS}}"
-  icon="cr:extension" id="unsandboxedPlugins"
-  label="$i18n{siteSettingsUnsandboxedPlugins}">
+  category="{{ContentSettingsTypes.SITE_SETTINGS_SOUND}}"
+  icon="settings:volume-up" id="siteSettingsSound"
+  label="$i18n{siteSettingsSound}">
 </site-details-permission>
 ```
 
@@ -93,7 +91,7 @@ make use of the `this.browserProxy` object which allows you to communicate with
 the browser.
 
 The class is declared in
-[site_settings_prefs_browser_proxy.js](https://cs.chromium.org/chromium/src/chrome/browser/resources/settings/site_settings/site_settings_prefs_browser_proxy.js?q=clearFlashPref&dr=CSs&l=236)
+[site_settings_prefs_browser_proxy.js](https://cs.chromium.org/chromium/src/chrome/browser/resources/settings/site_settings/site_settings_prefs_browser_proxy.js)
 and the browser implementation resides in
 [site_settings_handler.h](https://cs.chromium.org/chromium/src/chrome/browser/ui/webui/settings/site_settings_handler.h?type=cs&g=0).
 Make sure to
@@ -145,13 +143,13 @@ available expressions.
 Examples:
 
 ```
-<if expr="chromeos">
+<if expr="is_chromeos">
   <link rel="import" href="android_info_browser_proxy.html">
 </if>
 ```
 
 ```
-<if expr="chromeos">
+<if expr="is_chromeos">
   <template is="dom-if" if="[[settingsAppAvailable_]]">
     <cr-link-row on-click="onManageAndroidAppsClick_"
         label="$i18n{androidAppsManageAppLinks}" external></cr-link-row>

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,13 @@
 #include <memory>
 
 #include "base/files/file_path.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "components/prefs/pref_service.h"
 #include "ios/web/public/browser_state.h"
 
-namespace user_prefs {
-class PrefRegistrySyncable;
-}
-
 namespace web {
 class WebUIIOS;
+class SystemCookieStoreHandle;
 }  // namespace web
 
 namespace ios_web_view {
@@ -28,11 +24,15 @@ class WebViewDownloadManager;
 
 // WebView implementation of BrowserState. Can only be used only on the UI
 // thread.
-class WebViewBrowserState : public web::BrowserState {
+class WebViewBrowserState final : public web::BrowserState {
  public:
   explicit WebViewBrowserState(
       bool off_the_record,
       WebViewBrowserState* recording_browser_state = nullptr);
+
+  WebViewBrowserState(const WebViewBrowserState&) = delete;
+  WebViewBrowserState& operator=(const WebViewBrowserState&) = delete;
+
   ~WebViewBrowserState() override;
 
   // web::BrowserState implementation.
@@ -54,9 +54,6 @@ class WebViewBrowserState : public web::BrowserState {
   static WebViewBrowserState* FromWebUIIOS(web::WebUIIOS* web_ui);
 
  private:
-  // Registers the preferences for this BrowserState.
-  void RegisterPrefs(user_prefs::PrefRegistrySyncable* pref_registry);
-
   // The path associated with this BrowserState object.
   base::FilePath path_;
 
@@ -75,7 +72,8 @@ class WebViewBrowserState : public web::BrowserState {
   // Handles browser downloads.
   std::unique_ptr<WebViewDownloadManager> download_manager_;
 
-  DISALLOW_COPY_AND_ASSIGN(WebViewBrowserState);
+  // Handle to the SystemCookieStore that must live on the UI thread.
+  std::unique_ptr<web::SystemCookieStoreHandle> cookie_store_handle_;
 };
 
 }  // namespace ios_web_view

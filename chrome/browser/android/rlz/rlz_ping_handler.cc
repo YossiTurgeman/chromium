@@ -1,19 +1,19 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/android/rlz/rlz_ping_handler.h"
 
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "base/android/callback_android.h"
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/strings/stringprintf.h"
-#include "chrome/android/chrome_jni_headers/RlzPingHandler_jni.h"
-#include "chrome/browser/profiles/profile_android.h"
-#include "chrome/browser/profiles/profile_manager.h"
+#include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/storage_partition.h"
 #include "net/base/load_flags.h"
@@ -26,10 +26,13 @@
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 #include "url/gurl.h"
 
-using base::android::ConvertJavaStringToUTF16;
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/RlzPingHandler_jni.h"
+
+using base::android::ConvertJavaStringToUTF8;
 using base::android::JavaRef;
 
 constexpr int kMaxRetries = 10;
@@ -41,22 +44,19 @@ const char kProtocolCgiVariable[] = "rep";
 namespace chrome {
 namespace android {
 
-RlzPingHandler::RlzPingHandler(const JavaRef<jobject>& jprofile) {
-  Profile* profile = ProfileAndroid::FromProfileAndroid(jprofile);
+RlzPingHandler::RlzPingHandler(Profile* profile) {
   DCHECK(profile);
-  url_loader_factory_ =
-      content::BrowserContext::GetDefaultStoragePartition(profile)
-          ->GetURLLoaderFactoryForBrowserProcess();
+  url_loader_factory_ = profile->GetDefaultStoragePartition()
+                            ->GetURLLoaderFactoryForBrowserProcess();
 }
 
 RlzPingHandler::~RlzPingHandler() = default;
 
-void RlzPingHandler::Ping(
-    const base::android::JavaParamRef<jstring>& j_brand,
-    const base::android::JavaParamRef<jstring>& j_language,
-    const base::android::JavaParamRef<jstring>& j_events,
-    const base::android::JavaParamRef<jstring>& j_id,
-    const base::android::JavaParamRef<jobject>& j_callback) {
+void RlzPingHandler::Ping(const base::android::JavaRef<jstring>& j_brand,
+                          const base::android::JavaRef<jstring>& j_language,
+                          const base::android::JavaRef<jstring>& j_events,
+                          const base::android::JavaRef<jstring>& j_id,
+                          const base::android::JavaRef<jobject>& j_callback) {
   if (!j_brand || !j_language || !j_events || !j_id || !j_callback) {
     base::android::RunBooleanCallbackAndroid(j_callback, false);
     delete this;
@@ -100,11 +100,11 @@ void RlzPingHandler::Ping(
             trigger:
             "Critical signals like first install, a promotion dialog being"
             "shown, a user selection for a promotion may trigger a ping"
+            data: "TODO(crbug.com/40190832): Add this field."
             destination: WEBSITE
           }
           policy {
             cookies_allowed: NO
-            cookies_store: "user"
             setting: "Not user controlled. But it uses a trusted web end point"
                      "that doesn't use user data"
             policy_exception_justification:
@@ -129,7 +129,7 @@ void RlzPingHandler::Ping(
 }
 
 void RlzPingHandler::OnSimpleLoaderComplete(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   bool valid = false;
   if (!response_body) {
     int response_code = -1;
@@ -152,17 +152,19 @@ void RlzPingHandler::OnSimpleLoaderComplete(
   delete this;
 }
 
-void JNI_RlzPingHandler_StartPing(
+static void JNI_RlzPingHandler_StartPing(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& j_profile,
-    const base::android::JavaParamRef<jstring>& j_brand,
-    const base::android::JavaParamRef<jstring>& j_language,
-    const base::android::JavaParamRef<jstring>& j_events,
-    const base::android::JavaParamRef<jstring>& j_id,
-    const base::android::JavaParamRef<jobject>& j_callback) {
-  RlzPingHandler* handler = new RlzPingHandler(j_profile);
+    Profile* profile,
+    const base::android::JavaRef<jstring>& j_brand,
+    const base::android::JavaRef<jstring>& j_language,
+    const base::android::JavaRef<jstring>& j_events,
+    const base::android::JavaRef<jstring>& j_id,
+    const base::android::JavaRef<jobject>& j_callback) {
+  RlzPingHandler* handler = new RlzPingHandler(profile);
   handler->Ping(j_brand, j_language, j_events, j_id, j_callback);
 }
 
 }  // namespace android
 }  // namespace chrome
+
+DEFINE_JNI(RlzPingHandler)

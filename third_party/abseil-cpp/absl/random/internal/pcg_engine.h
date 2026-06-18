@@ -19,6 +19,7 @@
 
 #include "absl/base/config.h"
 #include "absl/meta/type_traits.h"
+#include "absl/numeric/bits.h"
 #include "absl/numeric/int128.h"
 #include "absl/random/internal/fastmath.h"
 #include "absl/random/internal/iostream_state_saver.h"
@@ -38,12 +39,12 @@ namespace random_internal {
 //
 template <typename Params, typename Mix>
 class pcg_engine {
-  static_assert(std::is_same<typename Params::state_type,
-                             typename Mix::state_type>::value,
-                "Class-template absl::pcg_engine must be parameterized by "
-                "Params and Mix with identical state_type");
+  static_assert(
+      std::is_same_v<typename Params::state_type, typename Mix::state_type>,
+      "Class-template absl::pcg_engine must be parameterized by "
+      "Params and Mix with identical state_type");
 
-  static_assert(std::is_unsigned<typename Mix::result_type>::value,
+  static_assert(std::is_unsigned_v<typename Mix::result_type>,
                 "Class-template absl::pcg_engine must be parameterized by "
                 "an unsigned Mix::result_type");
 
@@ -65,9 +66,8 @@ class pcg_engine {
 
   explicit pcg_engine(uint64_t seed_value = 0) { seed(seed_value); }
 
-  template <class SeedSequence,
-            typename = typename absl::enable_if_t<
-                !std::is_same<SeedSequence, pcg_engine>::value>>
+  template <class SeedSequence, typename = typename std::enable_if_t<
+                                    !std::is_same_v<SeedSequence, pcg_engine>>>
   explicit pcg_engine(SeedSequence&& seq) {
     seed(seq);
   }
@@ -89,8 +89,8 @@ class pcg_engine {
   }
 
   template <class SeedSequence>
-  typename absl::enable_if_t<
-      !std::is_convertible<SeedSequence, uint64_t>::value, void>
+  typename std::enable_if_t<!std::is_convertible_v<SeedSequence, uint64_t>,
+                            void>
   seed(SeedSequence&& seq) {
     reseed(seq);
   }
@@ -104,7 +104,7 @@ class pcg_engine {
   bool operator!=(const pcg_engine& other) const { return !(*this == other); }
 
   template <class CharT, class Traits>
-  friend typename absl::enable_if_t<(sizeof(state_type) == 16),
+  friend typename std::enable_if_t<(sizeof(state_type) == 16),
                                     std::basic_ostream<CharT, Traits>&>
   operator<<(
       std::basic_ostream<CharT, Traits>& os,  // NOLINT(runtime/references)
@@ -120,7 +120,7 @@ class pcg_engine {
   }
 
   template <class CharT, class Traits>
-  friend typename absl::enable_if_t<(sizeof(state_type) <= 8),
+  friend typename std::enable_if_t<(sizeof(state_type) <= 8),
                                     std::basic_ostream<CharT, Traits>&>
   operator<<(
       std::basic_ostream<CharT, Traits>& os,  // NOLINT(runtime/references)
@@ -133,7 +133,7 @@ class pcg_engine {
   }
 
   template <class CharT, class Traits>
-  friend typename absl::enable_if_t<(sizeof(state_type) == 16),
+  friend typename std::enable_if_t<(sizeof(state_type) == 16),
                                     std::basic_istream<CharT, Traits>&>
   operator>>(
       std::basic_istream<CharT, Traits>& is,  // NOLINT(runtime/references)
@@ -154,7 +154,7 @@ class pcg_engine {
   }
 
   template <class CharT, class Traits>
-  friend typename absl::enable_if_t<(sizeof(state_type) <= 8),
+  friend typename std::enable_if_t<(sizeof(state_type) <= 8),
                                     std::basic_istream<CharT, Traits>&>
   operator>>(
       std::basic_istream<CharT, Traits>& is,  // NOLINT(runtime/references)
@@ -220,48 +220,27 @@ class pcg_engine {
 template <uint64_t kMultA, uint64_t kMultB, uint64_t kIncA, uint64_t kIncB>
 class pcg128_params {
  public:
-#if ABSL_HAVE_INTRINSIC_INT128
-  using state_type = __uint128_t;
-  static inline constexpr state_type make_u128(uint64_t a, uint64_t b) {
-    return (static_cast<__uint128_t>(a) << 64) | b;
-  }
-#else
   using state_type = absl::uint128;
-  static inline constexpr state_type make_u128(uint64_t a, uint64_t b) {
-    return absl::MakeUint128(a, b);
-  }
-#endif
-
   static inline constexpr state_type multiplier() {
-    return make_u128(kMultA, kMultB);
+    return absl::MakeUint128(kMultA, kMultB);
   }
   static inline constexpr state_type increment() {
-    return make_u128(kIncA, kIncB);
+    return absl::MakeUint128(kIncA, kIncB);
   }
 };
 
 // Implementation of the PCG xsl_rr_128_64 128-bit mixing function, which
 // accepts an input of state_type and mixes it into an output of result_type.
 struct pcg_xsl_rr_128_64 {
-#if ABSL_HAVE_INTRINSIC_INT128
-  using state_type = __uint128_t;
-#else
   using state_type = absl::uint128;
-#endif
   using result_type = uint64_t;
 
   inline uint64_t operator()(state_type state) {
     // This is equivalent to the xsl_rr_128_64 mixing function.
-#if ABSL_HAVE_INTRINSIC_INT128
     uint64_t rotate = static_cast<uint64_t>(state >> 122u);
     state ^= state >> 64;
     uint64_t s = static_cast<uint64_t>(state);
-#else
-    uint64_t h = Uint128High64(state);
-    uint64_t rotate = h >> 58u;
-    uint64_t s = Uint128Low64(state) ^ h;
-#endif
-    return random_internal::rotr(s, rotate);
+    return rotr(s, static_cast<int>(rotate));
   }
 };
 
@@ -281,8 +260,8 @@ struct pcg_xsh_rr_64_32 {
   using state_type = uint64_t;
   using result_type = uint32_t;
   inline uint32_t operator()(uint64_t state) {
-    return random_internal::rotr(
-        static_cast<uint32_t>(((state >> 18) ^ state) >> 27), state >> 59);
+    return rotr(static_cast<uint32_t>(((state >> 18) ^ state) >> 27),
+                state >> 59);
   }
 };
 

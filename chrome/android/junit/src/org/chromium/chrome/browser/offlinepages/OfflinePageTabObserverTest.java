@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,13 +21,15 @@ import android.app.Activity;
 import android.content.Context;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
-import org.robolectric.shadows.multidex.ShadowMultiDex;
 
+import org.chromium.base.UserDataHost;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.base.test.util.Feature;
 import org.chromium.chrome.browser.app.ChromeActivity;
@@ -38,36 +40,33 @@ import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager.SnackbarController;
 import org.chromium.ui.base.WindowAndroid;
+import org.chromium.url.GURL;
+import org.chromium.url.JUnitTestGURLs;
 
 import java.lang.ref.WeakReference;
 
-/**
- * Unit tests for OfflinePageUtils.
- */
+/** Unit tests for OfflinePageUtils. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, shadows = {ShadowMultiDex.class})
+@Config(manifest = Config.NONE)
 public class OfflinePageTabObserverTest {
     // Using a null tab, as it cannot be mocked. TabHelper will help return proper mocked responses.
     private static final int TAB_ID = 77;
-    private static final String TAB_URL = "mock.com";
-
-    @Mock
-    private ChromeActivity mActivity;
-    @Mock
-    private TabModelSelector mTabModelSelector;
+    private static final GURL TAB_URL = JUnitTestGURLs.EXAMPLE_URL;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private ChromeActivity mActivity;
+    @Mock private TabModelSelector mTabModelSelector;
     @Mock private SnackbarManager mSnackbarManager;
     @Mock private SnackbarController mSnackbarController;
-    @Mock
-    private Tab mTab;
-    @Mock
-    private OfflinePageUtils.Internal mOfflinePageUtils;
-    @Mock
-    private WindowAndroid mWindowAndroid;
+    @Mock private Tab mTab;
+    @Mock private OfflinePageUtils.Internal mOfflinePageUtils;
+    @Mock private WindowAndroid mWindowAndroid;
     private WeakReference<Activity> mActivityRef;
 
     private OfflinePageTabObserver createObserver() {
-        OfflinePageTabObserver observer = spy(new OfflinePageTabObserver(
-                mTabModelSelector, mSnackbarManager, mSnackbarController));
+        OfflinePageTabObserver observer =
+                spy(
+                        new OfflinePageTabObserver(
+                                mTabModelSelector, mSnackbarManager, mSnackbarController));
         // Mocking out all of the calls that touch on NetworkChangeNotifier, which we cannot
         // directly mock out.
         doNothing().when(observer).startObservingNetworkChanges();
@@ -80,18 +79,23 @@ public class OfflinePageTabObserverTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
 
         mActivityRef = new WeakReference<>(mActivity);
 
         // Setting up a mock tab. These are the values common to most tests, but individual
         // tests might easily overwrite them.
         doReturn(TAB_ID).when(mTab).getId();
-        doReturn(TAB_URL).when(mTab).getUrlString();
+        doReturn(TAB_URL).when(mTab).getUrl();
         doReturn(false).when(mTab).isFrozen();
         doReturn(false).when(mTab).isHidden();
         doReturn(mWindowAndroid).when(mTab).getWindowAndroid();
+        doReturn(true).when(mTab).isInitialized();
         doReturn(mActivityRef).when(mWindowAndroid).getActivity();
+
+        UserDataHost userDataHost = new UserDataHost();
+        OfflinePageTabData offlinePageTabData = new OfflinePageTabData();
+        userDataHost.setUserData(OfflinePageTabData.class, offlinePageTabData);
+        doReturn(userDataHost).when(mTab).getUserDataHost();
 
         // Setting up mock snackbar manager.
         doNothing().when(mSnackbarManager).dismissSnackbars(eq(mSnackbarController));
@@ -103,8 +107,11 @@ public class OfflinePageTabObserverTest {
         doReturn(true).when(mOfflinePageUtils).isOfflinePage(any(Tab.class));
         doNothing()
                 .when(mOfflinePageUtils)
-                .showReloadSnackbar(any(Context.class), any(SnackbarManager.class),
-                        any(SnackbarController.class), anyInt());
+                .showReloadSnackbar(
+                        any(Context.class),
+                        any(SnackbarManager.class),
+                        any(SnackbarController.class),
+                        anyInt());
     }
 
     private void showTab(OfflinePageTabObserver observer) {
@@ -157,12 +164,17 @@ public class OfflinePageTabObserverTest {
         doReturn(false).when(mOfflinePageUtils).isOfflinePage(any(Tab.class));
         observer.startObservingTab(mTab);
 
+        assertFalse(OfflinePageTabData.isShowingOfflinePage(mTab));
+        assertFalse(OfflinePageTabData.isShowingTrustedOfflinePage(mTab));
+
         assertFalse(observer.isObservingNetworkChanges());
         assertFalse(observer.isObservingTab(mTab));
         verify(observer, times(0)).showReloadSnackbar(any(Tab.class));
 
         doReturn(true).when(mOfflinePageUtils).isOfflinePage(any(Tab.class));
         observer.startObservingTab(mTab);
+
+        assertTrue(OfflinePageTabData.isShowingOfflinePage(mTab));
 
         assertTrue(observer.isObservingNetworkChanges());
         assertTrue(observer.isObservingTab(mTab));
@@ -422,11 +434,13 @@ public class OfflinePageTabObserverTest {
         assertFalse(observer.wasSnackbarSeen(mTab));
         verify(observer, times(0)).stopObservingTab(any(Tab.class));
         verify(mSnackbarManager, times(1)).dismissSnackbars(eq(mSnackbarController));
+        assertTrue(OfflinePageTabData.isShowingOfflinePage(mTab));
 
         // URL updated and tab no longer shows offline page.
         doReturn(false).when(mOfflinePageUtils).isOfflinePage(any(Tab.class));
         observer.onUrlUpdated(mTab);
 
+        assertFalse(OfflinePageTabData.isShowingOfflinePage(mTab));
         assertFalse(observer.isObservingTab(mTab));
         assertFalse(observer.isLoadedTab(mTab));
         assertFalse(observer.wasSnackbarSeen(mTab));

@@ -1,20 +1,33 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef NET_WEBSOCKETS_WEBSOCKET_BASIC_STREAM_H_
 #define NET_WEBSOCKETS_WEBSOCKET_BASIC_STREAM_H_
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "base/containers/heap_array.h"
+#include "base/containers/queue.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/time/time.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/net_export.h"
+#include "net/log/net_log_with_source.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
+#include "net/websockets/websocket_chunk_assembler.h"
+#include "net/websockets/websocket_frame.h"
 #include "net/websockets/websocket_frame_parser.h"
 #include "net/websockets/websocket_stream.h"
+
+namespace base {
+class TimeTicks;
+}  // namespace base
 
 namespace net {
 
@@ -25,6 +38,7 @@ class IOBuffer;
 class IOBufferWithSize;
 struct WebSocketFrame;
 struct WebSocketFrameChunk;
+struct NetworkTrafficAnnotationTag;
 
 // Implementation of WebSocketStream for non-multiplexed ws:// connections (or
 // the physical side of a multiplexed ws:// connection).
@@ -36,6 +50,53 @@ struct WebSocketFrameChunk;
 class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
  public:
   typedef WebSocketMaskingKey (*WebSocketMaskingKeyGeneratorFunction)();
+
+  enum class BufferSize : uint8_t {
+    kSmall,
+    kLarge,
+  };
+
+  // A class that calculates whether the associated WebSocketBasicStream
+  // should use a small buffer or large buffer, given the timing information
+  // or Read calls. This class is public for testing.
+  class NET_EXPORT_PRIVATE BufferSizeManager final {
+   public:
+    BufferSizeManager();
+    BufferSizeManager(const BufferSizeManager&) = delete;
+    BufferSizeManager& operator=(const BufferSizeManager&) = delete;
+    ~BufferSizeManager();
+
+    // Called when the associated WebSocketBasicStream starts reading data
+    // into a buffer.
+    void OnRead(base::TimeTicks now);
+
+    // Called when the Read operation completes. `size` must be positive.
+    void OnReadComplete(base::TimeTicks now, int size);
+
+    // Returns the appropriate buffer size the associated WebSocketBasicStream
+    // should use.
+    BufferSize buffer_size() const { return buffer_size_; }
+
+    // Set the rolling average window for tests.
+    void set_window_for_test(size_t size) { rolling_average_window_ = size; }
+
+   private:
+    // This keeps the best read buffer size.
+    BufferSize buffer_size_ = BufferSize::kSmall;
+
+    // The number of results to calculate the throughput. This is a variable so
+    // that unittests can set other values.
+    size_t rolling_average_window_ = 100;
+
+    // This keeps the timestamps to calculate the throughput.
+    base::queue<base::TimeTicks> read_start_timestamps_;
+
+    // The sum of the last few read size.
+    int rolling_byte_total_ = 0;
+
+    // This keeps the read size.
+    base::queue<int> recent_read_sizes_;
+  };
 
   // Adapter that allows WebSocketBasicStream to use
   // either a TCP/IP or TLS socket, or an HTTP/2 stream.
@@ -60,7 +121,8 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
   WebSocketBasicStream(std::unique_ptr<Adapter> connection,
                        const scoped_refptr<GrowableIOBuffer>& http_read_buffer,
                        const std::string& sub_protocol,
-                       const std::string& extensions);
+                       const std::string& extensions,
+                       const NetLogWithSource& net_log);
 
   // The destructor has to make sure the connection is closed when we finish so
   // that it does not get returned to the pool.
@@ -79,6 +141,8 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
 
   std::string GetExtensions() const override;
 
+  const NetLogWithSource& GetNetLogWithSource() const override;
+
   ////////////////////////////////////////////////////////////////////////////
   // Methods for testing only.
 
@@ -88,6 +152,7 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
       const scoped_refptr<GrowableIOBuffer>& http_read_buffer,
       const std::string& sub_protocol,
       const std::string& extensions,
+      const NetLogWithSource& net_log,
       WebSocketMaskingKeyGeneratorFunction key_generator_function);
 
  private:
@@ -124,49 +189,18 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
       std::vector<std::unique_ptr<WebSocketFrameChunk>>* frame_chunks,
       std::vector<std::unique_ptr<WebSocketFrame>>* frames);
 
-  // Converts a |chunk| to a |frame|. |*frame| should be NULL on entry to this
-  // method. If |chunk| is an incomplete control frame, or an empty middle
-  // frame, then |*frame| may still be NULL on exit. If an invalid control frame
-  // is found, returns ERR_WS_PROTOCOL_ERROR and the stream is no longer
-  // usable. Otherwise returns OK (even if frame is still NULL).
-  int ConvertChunkToFrame(std::unique_ptr<WebSocketFrameChunk> chunk,
-                          std::unique_ptr<WebSocketFrame>* frame);
-
-  // Creates a frame based on the value of |is_final_chunk|, |data| and
-  // |current_frame_header_|. Clears |current_frame_header_| if |is_final_chunk|
-  // is true. |data| may be NULL if the frame has an empty payload. A frame in
-  // the middle of a message with no data is not useful; in this case the
-  // returned frame will be NULL. Otherwise, |current_frame_header_->opcode| is
-  // set to Continuation after use if it was Text or Binary, in accordance with
-  // WebSocket RFC6455 section 5.4.
-  std::unique_ptr<WebSocketFrame> CreateFrame(bool is_final_chunk,
-                                              base::span<const char> data);
-
-  // Adds |data_buffer| to the end of |incomplete_control_frame_body_|, applying
-  // bounds checks.
-  void AddToIncompleteControlFrameBody(base::span<const char> data);
-
   // Storage for pending reads.
-  const scoped_refptr<IOBufferWithSize> read_buffer_;
+  scoped_refptr<IOBufferWithSize> read_buffer_;
+
+  // The best read buffer size for the current throughput.
+  size_t target_read_buffer_size_;
 
   // The connection, wrapped in a ClientSocketHandle so that we can prevent it
   // from being returned to the pool.
   std::unique_ptr<Adapter> connection_;
 
-  // Frame header for the frame currently being received. Only non-NULL while we
-  // are processing the frame. If the frame arrives in multiple chunks, it can
-  // remain non-NULL until additional chunks arrive. If the header of the frame
-  // was invalid, this is set to NULL, the channel is failed, and subsequent
-  // chunks of the same frame will be ignored.
-  std::unique_ptr<WebSocketFrameHeader> current_frame_header_;
-
-  // Although it should rarely happen in practice, a control frame can arrive
-  // broken into chunks. This variable provides storage for a partial control
-  // frame until the rest arrives. It will be empty the rest of the time.
-  std::vector<char> incomplete_control_frame_body_;
-  // Storage for payload of combined (see |incomplete_control_frame_body_|)
-  // control frame.
-  std::vector<char> complete_control_frame_body_;
+  // Storage for payload of multiple control frames.
+  std::vector<base::HeapArray<uint8_t>> control_frame_payloads_;
 
   // Only used during handshake. Some data may be left in this buffer after the
   // handshake, in which case it will be picked up during the first call to
@@ -186,6 +220,14 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
   // The extensions negotiated with the remote server.
   const std::string extensions_;
 
+  NetLogWithSource net_log_;
+
+  // This is used for adaptive read buffer size.
+  BufferSizeManager buffer_size_manager_;
+
+  // This keeps the current read buffer size.
+  BufferSize buffer_size_ = buffer_size_manager_.buffer_size();
+
   // This can be overridden in tests to make the output deterministic. We don't
   // use a Callback here because a function pointer is faster and good enough
   // for our purposes.
@@ -194,6 +236,9 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
   // User callback saved for asynchronous writes and reads.
   CompletionOnceCallback write_callback_;
   CompletionOnceCallback read_callback_;
+
+  // Used to assemble FrameChunks into Frames.
+  WebSocketChunkAssembler chunk_assembler_;
 };
 
 }  // namespace net

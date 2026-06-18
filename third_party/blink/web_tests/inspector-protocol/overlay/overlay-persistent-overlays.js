@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   const {page, session, dp} = await testRunner.startHTML(`
     <style>
       #grid {
@@ -40,6 +40,14 @@
         showTrackSizes: true,
       },
     }]
+  });
+
+  //The overlay is rendered as an animation. Wait for two animation frames to be sure the overlay is actually rendered.
+  await session.evaluate(() => {
+    return new Promise(resolve => requestAnimationFrame(resolve));
+  });
+  await session.evaluate(() => {
+    return new Promise(resolve => requestAnimationFrame(resolve));
   });
 
   testRunner.log('Expected 3 track size labels; actual: ' + await getTrackSizeLabels());

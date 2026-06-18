@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,10 +10,12 @@ import sys
 
 import common
 
-# Add src/content/test/gpu into sys.path for importing common.
-sys.path.append(os.path.join(os.path.dirname(__file__),
-                             '..', '..', 'content', 'test', 'gpu'))
+sys.path.append(
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir,
+                     'content', 'test', 'gpu')))
 
+# //content/test/gpu imports.
 import gather_power_measurement_results
 import gather_swarming_json_results
 
@@ -32,7 +34,7 @@ class BuildBucketApiGpuUseCaseTests:
     # Verify we can get power measurement test data from latest successful
     # build, including the swarming bot that runs the test, and actual test
     # results.
-    bot = 'Win10 FYI x64 Release (Intel HD 630)'
+    bot = 'Win10 FYI x64 Release (Intel)'
     step = 'power_measurement_test'
     build_id = gather_power_measurement_results.GetLatestGreenBuild(bot)
     build_json = gather_power_measurement_results.GetJsonForBuildSteps(
@@ -43,7 +45,7 @@ class BuildBucketApiGpuUseCaseTests:
         build_json['steps'], step, 'stdout')
     if not stdout_url:
       return 'Unable to find stdout from step %s' % step
-    results = { 'number': build_id, 'tests': [] }
+    results = {'number': build_id, 'tests': []}
     gather_power_measurement_results.ProcessStepStdout(stdout_url, results)
     if 'bot' not in results or not results['bot'].startswith('BUILD'):
       return 'Failed to find bot name as BUILD*'
@@ -57,7 +59,7 @@ class BuildBucketApiGpuUseCaseTests:
     # latest successful build.
     extracted_times, _ = gather_swarming_json_results.GatherResults(
         bot='Linux FYI Release (NVIDIA)',
-        build=None, # Use the latest green build
+        build=None,  # Use the latest green build
         step='webgl2_conformance_validating_tests')
 
     if 'times' not in extracted_times:
@@ -72,18 +74,14 @@ class BuildBucketApiGpuUseCaseTests:
 
 def main(argv):
   parser = argparse.ArgumentParser()
-  parser.add_argument(
-      '--isolated-script-test-output', type=str,
-      required=True)
-  parser.add_argument(
-      '--isolated-script-test-chartjson-output', type=str,
-      required=False)
-  parser.add_argument(
-      '--isolated-script-test-perf-output', type=str,
-      required=False)
-  parser.add_argument(
-      '--isolated-script-test-filter', type=str,
-      required=False)
+  parser.add_argument('--isolated-script-test-output', type=str)
+  parser.add_argument('--isolated-script-test-chartjson-output',
+                      type=str,
+                      required=False)
+  parser.add_argument('--isolated-script-test-perf-output',
+                      type=str,
+                      required=False)
+  parser.add_argument('--isolated-script-test-filter', type=str, required=False)
 
   args = parser.parse_args(argv)
 
@@ -95,18 +93,19 @@ def main(argv):
     error_msg = test()
     if error_msg is not None:
       result = '%s: %s' % (test_name, error_msg)
-      print 'FAIL: %s' % result
+      print('FAIL: %s' % result)
       failures.append(result)
 
   if not failures:
-    print 'PASS: test_buildbucket_api_gpu_use_cases ran successfully.'
+    print('PASS: test_buildbucket_api_gpu_use_cases ran successfully.')
     retval = 0
 
-  with open(args.isolated_script_test_output, 'w') as json_file:
-    json.dump({
-        'valid': True,
-        'failures': failures,
-    }, json_file)
+  if args.isolated_script_test_output:
+    with open(args.isolated_script_test_output, 'w') as json_file:
+      json.dump({
+          'valid': True,
+          'failures': failures,
+      }, json_file)
 
   return retval
 
@@ -121,8 +120,8 @@ if __name__ == '__main__':
   # Conform minimally to the protocol defined by ScriptTest.
   if 'compile_targets' in sys.argv:
     funcs = {
-      'run': None,
-      'compile_targets': main_compile_targets,
+        'run': None,
+        'compile_targets': main_compile_targets,
     }
     sys.exit(common.run_script(sys.argv[1:], funcs))
   sys.exit(main(sys.argv[1:]))

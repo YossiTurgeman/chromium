@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,14 @@
 #define GOOGLE_APIS_GAIA_FAKE_OAUTH2_ACCESS_TOKEN_MANAGER_H_
 
 #include "base/compiler_specific.h"
-#include "base/macros.h"
 #include "base/memory/weak_ptr.h"
 #include "google_apis/gaia/oauth2_access_token_manager.h"
 
 namespace network {
 class SharedURLLoaderFactory;
 }
+
+class GoogleServiceAuthError;
 
 // Helper class to simplify writing unittests that depend on an instance of
 // OAuth2AccessTokenManager.
@@ -33,6 +34,11 @@ class FakeOAuth2AccessTokenManager : public OAuth2AccessTokenManager {
 
   explicit FakeOAuth2AccessTokenManager(
       OAuth2AccessTokenManager::Delegate* delegate);
+
+  FakeOAuth2AccessTokenManager(const FakeOAuth2AccessTokenManager&) = delete;
+  FakeOAuth2AccessTokenManager& operator=(const FakeOAuth2AccessTokenManager&) =
+      delete;
+
   ~FakeOAuth2AccessTokenManager() override;
 
   // Gets a list of active requests (can be used by tests to validate that the
@@ -76,19 +82,17 @@ class FakeOAuth2AccessTokenManager : public OAuth2AccessTokenManager {
     auto_post_fetch_response_on_message_loop_ = auto_post_response;
   }
 
-  // OAuth2AccessTokenManager overrides.
-  void CancelAllRequests() override;
-
-  void CancelRequestsForAccount(const CoreAccountId& account_id) override;
-
+  // OAuth2AccessTokenManager:
+  void CancelRequestsForAccount(const CoreAccountId& account_id,
+                                const GoogleServiceAuthError& error) override;
   void FetchOAuth2Token(
       OAuth2AccessTokenManager::RequestImpl* request,
       const CoreAccountId& account_id,
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
       const std::string& client_id,
       const std::string& client_secret,
+      const std::string& consumer_name,
       const OAuth2AccessTokenManager::ScopeSet& scopes) override;
-
   void InvalidateAccessTokenImpl(
       const CoreAccountId& account_id,
       const std::string& client_id,
@@ -116,8 +120,6 @@ class FakeOAuth2AccessTokenManager : public OAuth2AccessTokenManager {
   bool auto_post_fetch_response_on_message_loop_;
 
   base::WeakPtrFactory<FakeOAuth2AccessTokenManager> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(FakeOAuth2AccessTokenManager);
 };
 
 #endif  // GOOGLE_APIS_GAIA_FAKE_OAUTH2_ACCESS_TOKEN_MANAGER_H_

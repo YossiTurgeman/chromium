@@ -31,19 +31,22 @@
 
 namespace blink {
 
-class HTMLElement;
+class HTMLWBRElement;
 
-class LayoutWordBreak final : public LayoutText {
+class LayoutWordBreak : public LayoutText {
  public:
-  explicit LayoutWordBreak(HTMLElement*);
+  explicit LayoutWordBreak(HTMLWBRElement& node);
 
   Position PositionForCaretOffset(unsigned offset) const final;
-  base::Optional<unsigned> CaretOffsetForPosition(const Position&) const final;
+  std::optional<unsigned> CaretOffsetForPosition(const Position&) const final;
 
-  const char* GetName() const override { return "LayoutWordBreak"; }
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutWordBreak";
+  }
   bool IsWordBreak() const override;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_LAYOUT_WORD_BREAK_H_

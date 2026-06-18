@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include "third_party/blink/renderer/core/layout/geometry/physical_rect.h"
-#include "third_party/blink/renderer/platform/geometry/layout_rect.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -25,6 +24,11 @@ inline LogicalOffset Max(LogicalOffset a, LogicalOffset b) {
 
 }  // namespace
 
+void LogicalRect::Contract(const BoxStrut& strut) {
+  ExpandEdges(-strut.block_start, -strut.inline_end, -strut.block_end,
+              -strut.inline_start);
+}
+
 void LogicalRect::Unite(const LogicalRect& other) {
   if (other.IsEmpty())
     return;
@@ -33,6 +37,10 @@ void LogicalRect::Unite(const LogicalRect& other) {
     return;
   }
 
+  UniteEvenIfEmpty(other);
+}
+
+void LogicalRect::UniteEvenIfEmpty(const LogicalRect& other) {
   LogicalOffset new_end_offset(Max(EndOffset(), other.EndOffset()));
   LogicalOffset new_start_offset(Min(offset, other.offset));
   size = new_end_offset - new_start_offset;

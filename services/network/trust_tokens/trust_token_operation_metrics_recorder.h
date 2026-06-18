@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,17 +27,18 @@ extern const char kTrustTokenBeginTimeHistogramNameBase[];
 // part finishes; if the Begin part was successful, call BeginFinalize and
 // FinishFinalize analogously during the Finalize (inbound) part of the
 // operation.
-class TrustTokenOperationMetricsRecorder final {
+class TrustTokenOperationMetricsRecorder {
  public:
-  TrustTokenOperationMetricsRecorder() = default;
-  ~TrustTokenOperationMetricsRecorder() = default;
+  explicit TrustTokenOperationMetricsRecorder(
+      mojom::TrustTokenOperationType type);
+  ~TrustTokenOperationMetricsRecorder();
 
   TrustTokenOperationMetricsRecorder(
       const TrustTokenOperationMetricsRecorder&) = delete;
   TrustTokenOperationMetricsRecorder& operator=(
       const TrustTokenOperationMetricsRecorder&) = delete;
 
-  void BeginBegin(mojom::TrustTokenOperationType type);
+  void BeginBegin();
   void FinishBegin(mojom::TrustTokenOperationStatus status);
 
   void BeginFinalize();
@@ -53,6 +54,15 @@ class TrustTokenOperationMetricsRecorder final {
   // Start time for the Finalize part of the operation:
   base::TimeTicks finalize_start_;
 };
+
+// HistogramTrustTokenOperationNetError logs a //net error code corresponding to
+// a Trust Tokens operation. This is a temporary measure for helping understand
+// why "Failed to fetch" errors occur quite often in live testing: see
+// https://crbug.com/1128174.
+void HistogramTrustTokenOperationNetError(
+    network::mojom::TrustTokenOperationType type,
+    network::mojom::TrustTokenOperationStatus status,
+    int net_error);
 
 }  // namespace network
 

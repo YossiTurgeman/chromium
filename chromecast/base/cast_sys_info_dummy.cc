@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,18 +22,15 @@ const char kDefaultSerialNumber[] = "dummy.serial.number";
 const char kDefaultDeviceModel[] = "dummy model";
 const char kDefaultManufacturer[] = "google";
 
-std::string GetStringValue(const base::Value& sys_info_file,
+std::string GetStringValue(const base::DictValue& sys_info_file,
                            const std::string& key,
                            const std::string& default_val) {
-  DCHECK(sys_info_file.is_dict());
-
-  const base::Value* val =
-      sys_info_file.FindKeyOfType(key, base::Value::Type::STRING);
+  const std::string* val = sys_info_file.FindString(key);
   if (!val) {
     LOG(WARNING) << "Json key not found: " << key;
     return default_val;
   }
-  return val->GetString();
+  return *val;
 }
 }  // namespace
 
@@ -56,10 +53,11 @@ CastSysInfoDummy::CastSysInfoDummy(const std::string& sys_info_file)
     return;
   }
 
-  auto value = base::JSONReader::Read(content);
-  if (!value || !value->is_dict()) {
+  auto value =
+      base::JSONReader::ReadDict(content, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (!value) {
     LOG(ERROR)
-        << "Invaild sys info json file, using the default values instead.";
+        << "Invalid sys info json file, using the default values instead.";
     return;
   }
 
@@ -127,6 +125,10 @@ std::string CastSysInfoDummy::GetApInterface() {
   return ap_interface_;
 }
 
+std::string CastSysInfoDummy::GetProductSsidSuffix() {
+  return ssid_suffix_;
+}
+
 void CastSysInfoDummy::SetBuildTypeForTesting(
     CastSysInfo::BuildType build_type) {
   build_type_ = build_type;
@@ -189,6 +191,11 @@ void CastSysInfoDummy::SetWifiInterfaceForTesting(
 void CastSysInfoDummy::SetApInterfaceForTesting(
     const std::string& ap_interface) {
   ap_interface_ = ap_interface;
+}
+
+void CastSysInfoDummy::SetProductSsidSuffixForTesting(
+    const std::string& ssid_suffix) {
+  ssid_suffix_ = ssid_suffix;
 }
 
 }  // namespace chromecast

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,8 @@
 #include <memory>
 #include <vector>
 
-#include "base/compiler_specific.h"
 #include "base/feature_list.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
@@ -49,7 +47,7 @@ class TrackedPreferenceValidationDelegate;
 
 namespace safe_browsing {
 
-extern const base::Feature kIncidentReportingEnableUpload;
+BASE_DECLARE_FEATURE(kIncidentReportingEnableUpload);
 
 class ClientDownloadRequest;
 class ClientIncidentReport;
@@ -58,7 +56,7 @@ class ClientIncidentReport_EnvironmentData;
 class ClientIncidentReport_ExtensionData;
 class Incident;
 class IncidentReceiver;
-class SafeBrowsingService;
+class SafeBrowsingServiceImpl;
 
 // A class that manages the collection of incidents and submission of incident
 // reports to the safe browsing client-side detection service. The service
@@ -74,9 +72,14 @@ class SafeBrowsingService;
 // the initial incident. Finally, already-reported incidents are pruned and any
 // remaining are uploaded in an incident report.
 // Lives on the UI thread.
-class IncidentReportingService : public ProfileManagerObserver {
+class IncidentReportingService : public ProfileManagerObserver,
+                                 public ProfileObserver {
  public:
-  explicit IncidentReportingService(SafeBrowsingService* safe_browsing_service);
+  explicit IncidentReportingService(
+      SafeBrowsingServiceImpl* safe_browsing_service);
+
+  IncidentReportingService(const IncidentReportingService&) = delete;
+  IncidentReportingService& operator=(const IncidentReportingService&) = delete;
 
   // All incident collection, data collection, and uploads in progress are
   // dropped at destruction.
@@ -98,7 +101,7 @@ class IncidentReportingService : public ProfileManagerObserver {
   CreatePreferenceValidationDelegate(Profile* profile);
 
   // Registers |callback| to be run after some delay following process launch.
-  void RegisterDelayedAnalysisCallback(const DelayedAnalysisCallback& callback);
+  void RegisterDelayedAnalysisCallback(DelayedAnalysisCallback callback);
 
   // Adds |download_manager| to the set monitored for client download request
   // storage.
@@ -106,6 +109,9 @@ class IncidentReportingService : public ProfileManagerObserver {
 
   // ProfileManagerObserver:
   void OnProfileAdded(Profile* profile) override;
+
+  // ProfileObserver:
+  void OnProfileWillBeDestroyed(Profile* profile) override;
 
  protected:
   // A pointer to a function that populates a protobuf with environment data.
@@ -115,7 +121,7 @@ class IncidentReportingService : public ProfileManagerObserver {
   // For testing so that the TaskRunner used for delayed analysis callbacks can
   // be specified.
   IncidentReportingService(
-      SafeBrowsingService* safe_browsing_service,
+      SafeBrowsingServiceImpl* safe_browsing_service,
       base::TimeDelta delayed_task_interval,
       const scoped_refptr<base::TaskRunner>& delayed_task_runner);
 
@@ -134,11 +140,11 @@ class IncidentReportingService : public ProfileManagerObserver {
   // Initiates a search for the most recent binary download. Overriden by unit
   // tests to provide a fake finder.
   virtual std::unique_ptr<LastDownloadFinder> CreateDownloadFinder(
-      const LastDownloadFinder::LastDownloadCallback& callback);
+      LastDownloadFinder::LastDownloadCallback callback);
 
   // Initiates an upload. Overridden by unit tests to provide a fake uploader.
   virtual std::unique_ptr<IncidentReportUploader> StartReportUpload(
-      const IncidentReportUploader::OnResultCallback& callback,
+      IncidentReportUploader::OnResultCallback callback,
       const ClientIncidentReport& report);
 
   // Returns true if a report is currently being processed.
@@ -268,7 +274,7 @@ class IncidentReportingService : public ProfileManagerObserver {
 
   // A subscription for ClientDownloadRequests, used to persist them for later
   // use.
-  ClientDownloadRequestSubscription client_download_request_subscription_;
+  base::CallbackListSubscription client_download_request_subscription_;
 
   // True when the asynchronous environment collection task has been fired off
   // but has not yet completed.
@@ -289,15 +295,6 @@ class IncidentReportingService : public ProfileManagerObserver {
 
   // The time at which the initial incident is reported.
   base::Time first_incident_time_;
-
-  // The time at which the last incident is reported.
-  base::TimeTicks last_incident_time_;
-
-  // The time at which environmental data collection was initiated.
-  base::TimeTicks environment_collection_begin_;
-
-  // The time at which download collection was initiated.
-  base::TimeTicks last_download_begin_;
 
   // Context data for all on-the-record profiles plus the process-wide (NULL)
   // context. A mapping of profiles to contexts holding state about received
@@ -324,8 +321,6 @@ class IncidentReportingService : public ProfileManagerObserver {
   // that are posted during normal processing (e.g., environment collection,
   // and report uploads).
   base::WeakPtrFactory<IncidentReportingService> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(IncidentReportingService);
 };
 
 }  // namespace safe_browsing

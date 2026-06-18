@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,49 +7,46 @@
 
 #include <memory>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_bubble.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_bubble_hide_callback.h"
-#include "chrome/browser/ui/exclusive_access/fullscreen_controller.h"
-#include "chrome/browser/ui/exclusive_access/fullscreen_observer.h"
+#include "ui/gfx/animation/animation_delegate.h"
 #include "ui/views/widget/widget_observer.h"
 
 class ExclusiveAccessBubbleViewsContext;
-class GURL;
 namespace gfx {
 class SlideAnimation;
 }
 namespace views {
 class View;
 class Widget;
+}  // namespace views
+
+namespace viz {
+class FrameTimingDetails;
 }
 
 class SubtleNotificationView;
 
-// ExclusiveAccessBubbleViews is responsible for showing a bubble atop the
-// screen in fullscreen/mouse lock mode, telling users how to exit and providing
-// a click target. The bubble auto-hides, and re-shows when the user moves to
-// the screen top.
+// ExclusiveAccessBubbleViews is shows a bubble informing users of fullscreen,
+// keyboard lock, and pointer lock modes, with instructions for exiting.
 class ExclusiveAccessBubbleViews : public ExclusiveAccessBubble,
-                                   public FullscreenObserver,
+                                   public gfx::AnimationDelegate,
                                    public views::WidgetObserver {
  public:
   ExclusiveAccessBubbleViews(
       ExclusiveAccessBubbleViewsContext* context,
-      const GURL& url,
-      ExclusiveAccessBubbleType bubble_type,
-      ExclusiveAccessBubbleHideCallback bubble_first_hide_callback);
+      const ExclusiveAccessBubbleParams& params,
+      ExclusiveAccessBubbleHideCallback first_hide_callback);
+
+  ExclusiveAccessBubbleViews(const ExclusiveAccessBubbleViews&) = delete;
+  ExclusiveAccessBubbleViews& operator=(const ExclusiveAccessBubbleViews&) =
+      delete;
+
   ~ExclusiveAccessBubbleViews() override;
 
-  // |force_update| indicates the caller wishes to show the bubble contents
-  // regardless of whether the contents have changed.
-  void UpdateContent(
-      const GURL& url,
-      ExclusiveAccessBubbleType bubble_type,
-      ExclusiveAccessBubbleHideCallback bubble_first_hide_callback,
-      bool force_update);
+  void Update(const ExclusiveAccessBubbleParams& params,
+              ExclusiveAccessBubbleHideCallback first_hide_callback);
 
   // Repositions |popup_| if it is visible.
   void RepositionIfVisible();
@@ -61,64 +58,78 @@ class ExclusiveAccessBubbleViews : public ExclusiveAccessBubble,
   // Returns true if the popup is being shown (and not fully shown).
   bool IsShowing() const;
 
+  // Returns whether the popup is visible.
+  bool IsVisible() const;
+
   views::View* GetView();
 
   gfx::SlideAnimation* animation_for_test() { return animation_.get(); }
 
- private:
-  // Starts or stops polling the mouse location based on |popup_| and
-  // |bubble_type_|.
-  void UpdateMouseWatcher();
+  static void set_skip_presentation_delay_for_testing(bool skip) {
+    skip_presentation_delay_for_testing_ = skip;
+  }
 
+  static void set_simulate_gpu_hang_for_testing(bool simulate) {
+    simulate_gpu_hang_for_testing_ = simulate;
+  }
+
+ private:
   // Updates |popup|'s bounds given |animation_| and |animated_attribute_|.
   void UpdateBounds();
 
   void UpdateViewContent(ExclusiveAccessBubbleType bubble_type);
 
-  // Returns the root view containing |browser_view_|.
-  views::View* GetBrowserRootView() const;
+  // Returns the desired rect for the popup window in screen coordinates.
+  gfx::Rect GetPopupRect() const;
 
-  // ExclusiveAccessBubble:
+  // gfx::AnimationDelegate:
   void AnimationProgressed(const gfx::Animation* animation) override;
   void AnimationEnded(const gfx::Animation* animation) override;
-  gfx::Rect GetPopupRect(bool ignore_animation_state) const override;
-  gfx::Point GetCursorScreenPoint() override;
-  bool WindowContainsPoint(gfx::Point pos) override;
-  bool IsWindowActive() override;
-  void Hide() override;
-  void Show() override;
-  bool IsAnimating() override;
-  bool CanTriggerOnMouse() const override;
 
-  // FullscreenObserver:
-  void OnFullscreenStateChanged() override;
+  // ExclusiveAccessBubble:
+  void Show() override;
+  void Hide() override;
+  void ShowAndStartTimers() override;
 
   // views::WidgetObserver:
   void OnWidgetDestroyed(views::Widget* widget) override;
-  void OnWidgetVisibilityChanged(views::Widget* widget, bool visible) override;
 
   void RunHideCallbackIfNeeded(ExclusiveAccessBubbleHideReason reason);
 
-  ExclusiveAccessBubbleViewsContext* const bubble_view_context_;
+  void OnFirstPresentation(const viz::FrameTimingDetails& details);
 
-  views::Widget* popup_;
+  const raw_ptr<ExclusiveAccessBubbleViewsContext> bubble_view_context_;
 
-  // Classic mode: Bubble may show & hide multiple times. The callback only runs
-  // for the first hide.
-  // Simplified mode: Bubble only hides once.
-  ExclusiveAccessBubbleHideCallback bubble_first_hide_callback_;
+  raw_ptr<views::Widget> popup_;
+
+  // Callback that runs the first time the bubble hides.
+  ExclusiveAccessBubbleHideCallback first_hide_callback_;
 
   // Animation controlling showing/hiding of the exit bubble.
   std::unique_ptr<gfx::SlideAnimation> animation_;
 
   // The contents of the popup.
-  SubtleNotificationView* view_;
-  base::string16 browser_fullscreen_exit_accelerator_;
+  raw_ptr<SubtleNotificationView> view_;
+  std::u16string browser_fullscreen_exit_accelerator_;
 
-  ScopedObserver<FullscreenController, FullscreenObserver> fullscreen_observer_{
-      this};
+  // Whether the bubble was updated for a download while showing.
+  bool notify_overridden_ = false;
 
-  DISALLOW_COPY_AND_ASSIGN(ExclusiveAccessBubbleViews);
+  // If set, don't bother waiting for the compositor to present a frame with the
+  // bubble visible.
+  static bool skip_presentation_delay_for_testing_;
+
+  // If set, simulates a GPU hang by never running the presentation callback.
+  static bool simulate_gpu_hang_for_testing_;
+
+  // If set, will be called during the 'show' animation.
+  base::OnceCallback<void(const viz::FrameTimingDetails&)> presentation_cb_;
+
+  void OnPresentationTimeout();
+
+  base::OneShotTimer presentation_watchdog_timer_;
+
+  base::WeakPtrFactory<ExclusiveAccessBubbleViews> weak_ptr_factory_{this};
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_EXCLUSIVE_ACCESS_BUBBLE_VIEWS_H_

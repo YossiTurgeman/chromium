@@ -3,13 +3,14 @@ include_rules = [
   # resource_request.h is an exception since it's not used by Blink.
   "-services/network/public/mojom/cors.mojom.h",
   "+third_party/webrtc/rtc_base/async_packet_socket.h",
+  "+components/link_header_util/link_header_util.h",
 ]
 
 specific_include_rules = {
-  "resource_request\.h": [
+  "resource_request\\.h": [
     "+services/network/public/mojom/cors.mojom.h",
   ],
-  ".*\.cc": [
+  ".*\\.cc": [
     # Prefs are used to create an independent file with a persisted key:value
     # store for networking-related data (Like which servers support QUIC),
     # rather than to store user preferences.

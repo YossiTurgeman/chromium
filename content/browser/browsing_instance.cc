@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,11 @@
 #include "base/check_op.h"
 #include "base/command_line.h"
 #include "content/browser/child_process_security_policy_impl.h"
+#include "content/browser/origin_agent_cluster_isolation_state.h"
+#include "content/browser/site_info.h"
+#include "content/browser/site_instance_group.h"
 #include "content/browser/site_instance_impl.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/browser_or_resource_context.h"
 #include "content/public/browser/content_browser_client.h"
 #include "content/public/browser/site_isolation_policy.h"
 #include "content/public/common/content_features.h"
@@ -24,136 +26,134 @@ int BrowsingInstance::next_browsing_instance_id_ = 1;
 
 BrowsingInstance::BrowsingInstance(
     BrowserContext* browser_context,
-    bool is_coop_coep_cross_origin_isolated,
-    const base::Optional<url::Origin>& coop_coep_cross_origin_isolated_origin)
+    const WebExposedIsolationInfo& web_exposed_isolation_info,
+    bool is_guest,
+    bool is_fenced,
+    bool is_fixed_storage_partition)
     : isolation_context_(
           BrowsingInstanceId::FromUnsafeValue(next_browsing_instance_id_++),
-          BrowserOrResourceContext(browser_context)),
+          browser_context,
+          is_guest,
+          is_fenced,
+          OriginAgentClusterIsolationState::CreateForDefaultIsolation(
+              browser_context)),
       active_contents_count_(0u),
-      default_process_(nullptr),
       default_site_instance_(nullptr),
-      is_coop_coep_cross_origin_isolated_(is_coop_coep_cross_origin_isolated),
-      coop_coep_cross_origin_isolated_origin_(
-          coop_coep_cross_origin_isolated_origin) {
-  DCHECK(!is_coop_coep_cross_origin_isolated_ ||
-         coop_coep_cross_origin_isolated_origin_.has_value());
+      default_site_instance_group_(nullptr),
+      web_exposed_isolation_info_(web_exposed_isolation_info),
+      is_fixed_storage_partition_(is_fixed_storage_partition) {
   DCHECK(browser_context);
-}
-
-void BrowsingInstance::RenderProcessHostDestroyed(RenderProcessHost* host) {
-  DCHECK_EQ(default_process_, host);
-  // Only clear the default process if the RenderProcessHost object goes away,
-  // not if the renderer process goes away while the RenderProcessHost remains.
-  default_process_->RemoveObserver(this);
-  default_process_ = nullptr;
-}
-
-BrowserContext* BrowsingInstance::GetBrowserContext() const {
-  return isolation_context_.browser_or_resource_context().ToBrowserContext();
-}
-
-void BrowsingInstance::SetDefaultProcess(RenderProcessHost* default_process) {
-  DCHECK(!default_process_);
-  DCHECK(!default_site_instance_);
-  default_process_ = default_process;
-  default_process_->AddObserver(this);
-}
-
-bool BrowsingInstance::IsDefaultSiteInstance(
-    const SiteInstanceImpl* site_instance) const {
-  return site_instance != nullptr && site_instance == default_site_instance_;
-}
-
-bool BrowsingInstance::IsSiteInDefaultSiteInstance(const GURL& site_url) const {
-  return site_url_set_.find(site_url) != site_url_set_.end();
+  if (is_guest) {
+    CHECK(is_fixed_storage_partition);
+  }
 }
 
 bool BrowsingInstance::HasSiteInstance(const SiteInfo& site_info) {
-  return site_instance_map_.find(site_info) != site_instance_map_.end();
+  return site_instance_map_.contains(site_info);
 }
 
 scoped_refptr<SiteInstanceImpl> BrowsingInstance::GetSiteInstanceForURL(
-    const GURL& url,
+    const UrlInfo& url_info,
+    bool allow_default_instance) {
+  return GetSiteInstanceForURL(url_info, /*creation_group=*/nullptr,
+                               allow_default_instance);
+}
+
+scoped_refptr<SiteInstanceImpl> BrowsingInstance::GetSiteInstanceForURL(
+    const UrlInfo& url_info,
+    SiteInstanceGroup* creation_group,
     bool allow_default_instance) {
   scoped_refptr<SiteInstanceImpl> site_instance =
-      GetSiteInstanceForURLHelper(url, allow_default_instance);
+      GetSiteInstanceForURLHelper(url_info, allow_default_instance);
 
-  if (site_instance)
+  if (site_instance) {
     return site_instance;
+  }
 
   // No current SiteInstance for this site, so let's create one.
   scoped_refptr<SiteInstanceImpl> instance = new SiteInstanceImpl(this);
 
-  // Set the site of this new SiteInstance, which will register it with us,
-  // unless this URL should leave the SiteInstance's site unassigned.
-  if (SiteInstance::ShouldAssignSiteForURL(url))
-    instance->SetSite(url);
+  // Set the site of this new SiteInstance, which will register it with us.
+  // Some URLs should leave the SiteInstance's site unassigned, though if
+  // `instance` is for a guest, we should always set the site to ensure that it
+  // carries guest information contained within SiteInfo.
+  if (SiteInstanceImpl::ShouldAssignSiteForUrlInfo(url_info) ||
+      isolation_context_.is_guest()) {
+    instance->SetSite(url_info);
+  }
+
+  // Add the new SiteInstance to `group`, if it exists.
+  if (creation_group) {
+    creation_group->AddSiteInstance(instance.get());
+    instance->SetSiteInstanceGroup(creation_group);
+  }
+
   return instance;
 }
 
-SiteInfo BrowsingInstance::GetSiteInfoForURL(const GURL& url,
+SiteInfo BrowsingInstance::GetSiteInfoForURL(const UrlInfo& url_info,
                                              bool allow_default_instance) {
   scoped_refptr<SiteInstanceImpl> site_instance =
-      GetSiteInstanceForURLHelper(url, allow_default_instance);
+      GetSiteInstanceForURLHelper(url_info, allow_default_instance);
 
-  if (site_instance)
+  if (site_instance) {
     return site_instance->GetSiteInfo();
-
-  return ComputeSiteInfoForURL(url);
-}
-
-bool BrowsingInstance::TrySettingDefaultSiteInstance(
-    SiteInstanceImpl* site_instance,
-    const GURL& url) {
-  DCHECK(!site_instance->HasSite());
-  const SiteInfo site_info = ComputeSiteInfoForURL(url);
-  if (default_site_instance_ ||
-      !SiteInstanceImpl::CanBePlacedInDefaultSiteInstance(isolation_context_,
-                                                          url, site_info)) {
-    return false;
   }
 
-  // Note: |default_site_instance_| must be set before SetSite() call to
-  // properly trigger default SiteInstance behavior inside that method.
-  default_site_instance_ = site_instance;
-  site_instance->SetSiteInfoToDefault();
-  site_url_set_.insert(site_info.site_url());
-  return true;
+  return ComputeSiteInfoForURL(url_info);
+}
+
+scoped_refptr<SiteInstanceImpl> BrowsingInstance::GetSiteInstanceForSiteInfo(
+    const SiteInfo& site_info) {
+  auto i = site_instance_map_.find(site_info);
+  if (i != site_instance_map_.end()) {
+    return i->second.get();
+  }
+
+  scoped_refptr<SiteInstanceImpl> instance = new SiteInstanceImpl(this);
+  instance->SetSite(site_info);
+  return instance;
+}
+
+scoped_refptr<SiteInstanceImpl>
+BrowsingInstance::GetMaybeGroupRelatedSiteInstanceForURL(
+    const UrlInfo& url_info,
+    SiteInstanceGroup* creation_group) {
+  CHECK(creation_group);
+  scoped_refptr<SiteInstanceImpl> instance = GetSiteInstanceForURL(
+      url_info, creation_group, /*allow_default_instance=*/false);
+  return instance;
 }
 
 scoped_refptr<SiteInstanceImpl> BrowsingInstance::GetSiteInstanceForURLHelper(
-    const GURL& url,
+    const UrlInfo& url_info,
     bool allow_default_instance) {
-  const SiteInfo site_info = ComputeSiteInfoForURL(url);
+  const SiteInfo site_info = ComputeSiteInfoForURL(url_info);
   auto i = site_instance_map_.find(site_info);
-  if (i != site_instance_map_.end())
-    return i->second;
+  if (i != site_instance_map_.end()) {
+    return i->second.get();
+  }
 
   // Check to see if we can use the default SiteInstance for sites that don't
   // need to be isolated in their own process.
-  if (allow_default_instance &&
-      SiteInstanceImpl::CanBePlacedInDefaultSiteInstance(isolation_context_,
-                                                         url, site_info)) {
-    DCHECK(!default_process_);
-    scoped_refptr<SiteInstanceImpl> site_instance = default_site_instance_;
+  if (!ShouldUseDefaultSiteInstanceGroup() && allow_default_instance &&
+      SiteInstanceImpl::CanBePlacedInDefaultSiteInstanceOrGroup(
+          isolation_context_, url_info.url, site_info)) {
+    scoped_refptr<SiteInstanceImpl> site_instance =
+        default_site_instance_.get();
     if (!site_instance) {
       site_instance = new SiteInstanceImpl(this);
 
-      // Keep a copy of the pointer so it can be used for other URLs. This is
-      // safe because the SiteInstanceImpl destructor will call
-      // UnregisterSiteInstance() to clear this copy when the last
-      // reference to |site_instance| is destroyed.
-      // Note: This assignment MUST happen before the SetSite() call to ensure
-      // this instance is not added to |site_instance_map_| when SetSite()
-      // calls RegisterSiteInstance().
-      default_site_instance_ = site_instance.get();
-
-      site_instance->SetSiteInfoToDefault();
+      // Note: |default_site_instance_| will get set inside this call
+      // via RegisterSiteInstance().
+      site_instance->SetSiteInfoToDefault(
+          site_info.GetStoragePartitionConfig());
+      DCHECK_EQ(default_site_instance_, site_instance.get());
     }
 
-    // Add |site_url| to the set so we can keep track of all the sites the
+    // Add |site_info| to the set so we can keep track of all the sites the
     // the default SiteInstance has been returned for.
-    site_url_set_.insert(site_info.site_url());
+    site_instance->AddSiteInfoToDefault(site_info);
     return site_instance;
   }
 
@@ -164,10 +164,30 @@ void BrowsingInstance::RegisterSiteInstance(SiteInstanceImpl* site_instance) {
   DCHECK(site_instance->browsing_instance_.get() == this);
   DCHECK(site_instance->HasSite());
 
-  // Explicitly prevent the |default_site_instance_| from being added since
+  // Verify that the SiteInstance's StoragePartitionConfig matches this
+  // BrowsingInstance's StoragePartitionConfig if it already has one.
+  const StoragePartitionConfig& storage_partition_config =
+      site_instance->GetSecurityPrincipal().GetStoragePartitionConfig();
+  if (storage_partition_config_.has_value()) {
+    // We should only use a single StoragePartition within a BrowsingInstance.
+    // If we're attempting to use multiple, something has gone wrong with the
+    // logic at upper layers.  Similarly, whether this StoragePartition is for
+    // a guest should remain constant over a BrowsingInstance's lifetime.
+    CHECK_EQ(storage_partition_config_.value(), storage_partition_config);
+    CHECK_EQ(isolation_context_.is_guest(),
+             site_instance->GetSecurityPrincipal().IsGuest());
+  } else {
+    storage_partition_config_ = storage_partition_config;
+  }
+
+  // Explicitly prevent the default SiteInstance from being added since
   // the map is only supposed to contain instances that map to a single site.
-  if (site_instance == default_site_instance_)
+  if (site_instance->IsDefaultSiteInstance()) {
+    DCHECK(!ShouldUseDefaultSiteInstanceGroup());
+    CHECK(!default_site_instance_);
+    default_site_instance_ = site_instance;
     return;
+  }
 
   const SiteInfo& site_info = site_instance->GetSiteInfo();
 
@@ -213,19 +233,98 @@ BrowsingInstance::~BrowsingInstance() {
   DCHECK(site_instance_map_.empty());
   DCHECK_EQ(0u, active_contents_count_);
   DCHECK(!default_site_instance_);
-  if (default_process_)
-    default_process_->RemoveObserver(this);
+  DCHECK(!default_site_instance_group_);
 
   // Remove any origin isolation opt-ins related to this instance.
   ChildProcessSecurityPolicyImpl* policy =
       ChildProcessSecurityPolicyImpl::GetInstance();
-  policy->RemoveOptInIsolatedOriginsForBrowsingInstance(isolation_context_);
+  policy->RemoveAllStateForBrowsingInstance(
+      isolation_context_.browsing_instance_id());
 }
 
-SiteInfo BrowsingInstance::ComputeSiteInfoForURL(const GURL& url) const {
-  return SiteInstanceImpl::ComputeSiteInfo(
-      isolation_context_, url, is_coop_coep_cross_origin_isolated_,
-      coop_coep_cross_origin_isolated_origin_);
+SiteInfo BrowsingInstance::ComputeSiteInfoForURL(
+    const UrlInfo& url_info) const {
+  // If a StoragePartitionConfig is specified in both `url_info` and this
+  // BrowsingInstance, make sure they match.
+  if (url_info.storage_partition_config.has_value() &&
+      storage_partition_config_.has_value()) {
+    CHECK_EQ(storage_partition_config_.value(),
+             url_info.storage_partition_config.value());
+  }
+  // If no StoragePartitionConfig was set in `url_info`, create a new UrlInfo
+  // that inherit's this BrowsingInstance's StoragePartitionConfig.
+  UrlInfo url_info_with_partition =
+      url_info.storage_partition_config.has_value()
+          ? url_info
+          : UrlInfo(UrlInfoInit(url_info).WithStoragePartitionConfig(
+                storage_partition_config_));
+
+  // The WebExposedIsolationInfos must be compatible for this function to make
+  // sense.
+  DCHECK(WebExposedIsolationInfo::AreCompatible(
+      url_info.web_exposed_isolation_info, web_exposed_isolation_info_));
+
+  // If the passed in UrlInfo has a null WebExposedIsolationInfo, meaning that
+  // it is compatible with any isolation state, we reuse the isolation state of
+  // the BrowsingInstance.
+  url_info_with_partition.web_exposed_isolation_info =
+      url_info.web_exposed_isolation_info.value_or(web_exposed_isolation_info_);
+  return SiteInfo::Create(isolation_context_, url_info_with_partition);
+}
+
+int BrowsingInstance::EstimateOriginAgentClusterOverhead() {
+  DCHECK(SiteIsolationPolicy::IsProcessIsolationForOriginAgentClusterEnabled());
+
+  std::set<SiteInfo> site_info_set;
+  std::set<SiteInfo> site_info_set_no_oac;
+
+  // The following computes an estimate of how many additional processes have
+  // been created to deal with OriginAgentCluster (OAC) headers. When OAC
+  // headers forces an additional process, that corresponds to the SiteInfo's
+  // is_origin_keyed_ flag being set. To compute the estimate, we use the set of
+  // unique SiteInstances (each represented by a unique SiteInfo) in each
+  // BrowsingInstance as a proxy for the set of different RenderProcesses. We
+  // start with the total count of SiteInfos, then we create a new set of
+  // SiteInfos created by resetting the is_origin_keyed_ flag on each of the
+  // SiteInfos (along with any corresponding adjustments to the site_url_ and
+  // process_lock_url_ to reflect the possible conversion from origin to site).
+  // The assumption here is that SiteInfos that forced a new process due to OAC
+  // may no longer be unique once these values are reset, and as such the new
+  // set will have less elements than the original set, with the difference
+  // being the count of extra SiteInstances due to OAC. There are cases where
+  // ignoring the OAC header would still result in an extra process, e.g. when
+  // the SiteInfo's origin appears in the command-line origin isolation list.
+  //
+  // The estimate is computed using several simplifying assumptions:
+  // 1) We only consider HTTPS SiteInfos to compute the additional SiteInfos.
+  // This assumption should generally be valid, since we don't apply
+  // is_origin_keyed_ to non-HTTPS schemes.
+  // 2) We assume that SiteInfos from multiple BrowsingInstances aren't
+  // coalesced into a single RenderProcess.  While this isn't true in general,
+  // it is difficult in practice to account for, so we don't try to.
+  for (auto& entry : site_instance_map_) {
+    const SiteInfo& site_info = entry.first;
+    GURL process_lock_url = site_info.GetProcessLockURL();
+    if (!process_lock_url.SchemeIs(url::kHttpsScheme)) {
+      continue;
+    }
+
+    site_info_set.insert(site_info);
+    site_info_set_no_oac.insert(
+        site_info.GetNonOriginKeyedEquivalentForMetrics(isolation_context_));
+  }
+  DCHECK_GE(site_info_set.size(), site_info_set_no_oac.size());
+  int result = site_info_set.size() - site_info_set_no_oac.size();
+  return result;
+}
+
+void BrowsingInstance::IncrementActiveContentsCount() {
+  active_contents_count_++;
+}
+
+void BrowsingInstance::DecrementActiveContentsCount() {
+  DCHECK_LT(0u, active_contents_count_);
+  active_contents_count_--;
 }
 
 }  // namespace content

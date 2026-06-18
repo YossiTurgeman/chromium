@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,8 @@
 #include <set>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/guid.h"
-#include "base/strings/nullable_string16.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/utf_string_conversions.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
@@ -32,6 +30,7 @@ MockPlatformNotificationService::~MockPlatformNotificationService() = default;
 void MockPlatformNotificationService::DisplayNotification(
     const std::string& notification_id,
     const GURL& origin,
+    const GURL& document_url,
     const blink::PlatformNotificationData& notification_data,
     const blink::NotificationResources& notification_resources) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
@@ -65,12 +64,11 @@ void MockPlatformNotificationService::CloseNotification(
     const std::string& notification_id) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
-  const auto non_persistent_iter =
-      non_persistent_notifications_.find(notification_id);
-  if (non_persistent_iter == non_persistent_notifications_.end())
+  if (!non_persistent_notifications_.contains(notification_id)) {
     return;
+  }
 
-  non_persistent_notifications_.erase(non_persistent_iter);
+  non_persistent_notifications_.erase(notification_id);
 }
 
 void MockPlatformNotificationService::ClosePersistentNotification(
@@ -97,14 +95,20 @@ void MockPlatformNotificationService::GetDisplayedNotifications(
                                 true /* supports_synchronization */));
 }
 
+void MockPlatformNotificationService::GetDisplayedNotificationsForOrigin(
+    const GURL& origin,
+    DisplayedNotificationsCallback callback) {
+  GetDisplayedNotifications(std::move(callback));
+}
+
 void MockPlatformNotificationService::ScheduleTrigger(base::Time timestamp) {
   if (timestamp > base::Time::Now())
     return;
 
-  BrowserContext::ForEachStoragePartition(
-      context_, base::BindRepeating([](content::StoragePartition* partition) {
+  context_->ForEachLoadedStoragePartition(
+      [](content::StoragePartition* partition) {
         partition->GetPlatformNotificationContext()->TriggerNotifications();
-      }));
+      });
 }
 
 base::Time MockPlatformNotificationService::ReadNextTriggerTimestamp() {
@@ -120,8 +124,8 @@ void MockPlatformNotificationService::RecordNotificationUkmEvent(
 
 void MockPlatformNotificationService::SimulateClick(
     const std::string& title,
-    const base::Optional<int>& action_index,
-    const base::Optional<base::string16>& reply) {
+    const std::optional<int>& action_index,
+    const std::optional<std::u16string>& reply) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   const auto notification_id_iter = notification_id_map_.find(title);
   if (notification_id_iter == notification_id_map_.end())

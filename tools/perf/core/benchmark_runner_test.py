@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,9 +7,9 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
-import mock
-
+from telemetry import decorators
 from telemetry.testing import test_stories
 from telemetry.web_perf import timeline_based_measurement
 from tracing.value.diagnostics import all_diagnostics
@@ -74,7 +74,7 @@ class BenchmarkRunnerIntegrationTest(unittest.TestCase):
 
   def RunBenchmark(self, benchmark_class):
     """Run a benchmark, process results, and return generated histograms."""
-    # TODO(crbug.com/985712): Ideally we should be able to just call
+    # TODO(crbug.com/40636798): Ideally we should be able to just call
     # telemetry.command_line.RunCommand(self.options) with the right set
     # of options chosen. However, argument parsing and command running are
     # currently tangled in Telemetry. In particular the class property
@@ -84,7 +84,8 @@ class BenchmarkRunnerIntegrationTest(unittest.TestCase):
     run_return_code = benchmark_class().Run(self.options)
     self.assertEqual(run_return_code, 0)
 
-    process_return_code = results_processor.ProcessResults(self.options)
+    process_return_code = results_processor.ProcessResults(self.options,
+                                                           is_unittest=True)
     self.assertEqual(process_return_code, 0)
 
     histograms_file = os.path.join(self.options.output_dir, 'histograms.json')
@@ -96,6 +97,10 @@ class BenchmarkRunnerIntegrationTest(unittest.TestCase):
     histograms.ImportDicts(dicts)
     return histograms
 
+  @decorators.Disabled(
+      'chromeos',  # TODO(crbug.com/40137013): Fix the test.
+      'android-nougat',  # Flaky: https://crbug.com/1342706
+      'mac')  # Failing: https://crbug.com/1370958
   def testTimelineBasedEndToEnd(self):
     class TestTimelineBasedBenchmark(perf_benchmark.PerfBenchmark):
       """A dummy benchmark that records a trace and runs sampleMetric on it."""

@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "ash/ash_export.h"
-#include "base/macros.h"
-#include "base/observer_list.h"
+#include "base/memory/advanced_memory_safety_checks.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/aura/window_observer.h"
 #include "ui/wm/public/activation_change_observer.h"
 
@@ -29,24 +29,28 @@ enum DesksMruType {
   kActiveDesk,
 };
 
-// A predicate that determines whether |window| can be included in the MRU
+// A predicate that determines whether `window` can be included in the MRU
 // window list.
 bool CanIncludeWindowInMruList(aura::Window* window);
 
+// A predicate that determines whether `window` is an app type.
+bool CanIncludeWindowInAppMruList(aura::Window* window);
+
 // Maintains a most recently used list of windows. This is used for window
 // cycling using Alt+Tab and overview mode.
-class ASH_EXPORT MruWindowTracker : public ::wm::ActivationChangeObserver,
+class ASH_EXPORT MruWindowTracker : public wm::ActivationChangeObserver,
                                     public aura::WindowObserver {
- public:
-  using WindowList = std::vector<aura::Window*>;
+  // TODO(crbug.com/454818182): Remove this macro once the bug gets fixed.
+  ADVANCED_MEMORY_SAFETY_CHECKS();
 
-  class Observer : public base::CheckedObserver {
-   public:
-    // Invoked when a tracked window is destroyed,
-    virtual void OnWindowUntracked(aura::Window* untracked_window) {}
-  };
+ public:
+  using WindowList = std::vector<raw_ptr<aura::Window, VectorExperimental>>;
 
   MruWindowTracker();
+
+  MruWindowTracker(const MruWindowTracker&) = delete;
+  MruWindowTracker& operator=(const MruWindowTracker&) = delete;
+
   ~MruWindowTracker() override;
 
   // Returns the set windows in the mru list regardless of whether they can be
@@ -97,32 +101,36 @@ class ASH_EXPORT MruWindowTracker : public ::wm::ActivationChangeObserver,
   // used window across all desks.
   void OnWindowMovedOutFromRemovingDesk(aura::Window* window);
 
-  // Add/Remove observers.
-  void AddObserver(Observer* observer);
-  void RemoveObserver(Observer* observer);
+  // Called when a window is moved to another desk or created by a window
+  // restore feature. This function should be only called by
+  // `WindowRestoreController`.
+  void OnWindowAlteredByWindowRestore(aura::Window* window);
+
+  const std::vector<raw_ptr<aura::Window, VectorExperimental>>&
+  GetMruWindowsForTesting() {
+    return mru_windows_;
+  }
 
  private:
-  // Updates the mru_windows_ list to insert/move |active_window| at/to the
-  // front.
+  // Updates the `mru_windows_` list to insert/move `active_window` at/to the
+  // back.
   void SetActiveWindow(aura::Window* active_window);
 
-  // Overridden from wm::ActivationChangeObserver:
+  // wm::ActivationChangeObserver:
   void OnWindowActivated(ActivationReason reason,
                          aura::Window* gained_active,
                          aura::Window* lost_active) override;
 
-  // Overridden from aura::WindowObserver:
+  // aura::WindowObserver:
   void OnWindowDestroyed(aura::Window* window) override;
 
   // List of windows that have been activated in containers that we cycle
-  // through, sorted such that the most recently used window comes last.
-  std::vector<aura::Window*> mru_windows_;
-
-  base::ObserverList<Observer, true> observers_;
+  // through, sorted such that the most recently used window comes last. Note
+  // that this ordering differs from the lists returned by the
+  // `Build*Window*List` functions, which are reversed.
+  std::vector<raw_ptr<aura::Window, VectorExperimental>> mru_windows_;
 
   bool ignore_window_activations_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(MruWindowTracker);
 };
 
 }  // namespace ash

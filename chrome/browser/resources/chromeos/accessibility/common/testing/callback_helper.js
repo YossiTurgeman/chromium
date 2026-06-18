@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,11 +35,19 @@ CallbackHelper.prototype = {
         if (!(result instanceof Promise)) {
           throw new Error('Only support return type of Promise');
         }
-        result.then(() => {
-          if (--this.pendingCallbacks_ <= 0) {
-            CallbackHelper.testDone_();
-          }
-        });
+        result
+            .then(
+                () => {
+                  if (--this.pendingCallbacks_ <= 0) {
+                    CallbackHelper.testDone_();
+                  }
+                },
+                reason => {
+                  CallbackHelper.testDone_([false, reason.toString()]);
+                })
+            .catch(reason => {
+              CallbackHelper.testDone_([false, reason.toString()]);
+            });
       } else {
         if (--this.pendingCallbacks_ <= 0) {
           CallbackHelper.testDone_();
@@ -54,7 +62,7 @@ CallbackHelper.prototype = {
       savedArgs.arguments = Array.prototype.slice.call(arguments);
       runAll.invoke();
     };
-  }
+  },
 };
 
 /**

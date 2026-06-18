@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,44 @@
 
 #include <memory>
 
-#include "base/callback.h"
-#include "base/no_destructor.h"
-#include "base/optional.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "net/http/http_request_headers.h"
 #include "net/log/net_log_with_source.h"
 #include "services/network/public/cpp/features.h"
+#include "services/network/public/mojom/network_context_client.mojom-forward.h"
 #include "services/network/public/mojom/trust_tokens.mojom.h"
 #include "services/network/trust_tokens/pending_trust_token_store.h"
 #include "services/network/trust_tokens/suitable_trust_token_origin.h"
 #include "services/network/trust_tokens/trust_token_key_commitment_getter.h"
 #include "services/network/trust_tokens/trust_token_request_helper.h"
+#include "services/network/trust_tokens/trust_token_request_issuance_helper.h"
 
 namespace network {
+
+namespace internal {
+
+// These are the possible results of constructing a Trust Tokens request helper;
+// exposed in the header file for use in tests. Please do not use them directly
+// outside of the class's implementation.
+//
+// Additionally, since this enum is used in histograms:
+// 1. please do not reorder or delete values;
+// 2. the values must be kept in sync with the enum of the same name in
+// enums.xml.
+enum class TrustTokenRequestHelperFactoryOutcome {
+  kSuccessfullyCreatedAnIssuanceHelper = 0,
+  kSuccessfullyCreatedARedemptionHelper = 1,
+  kSuccessfullyCreatedASigningHelper = 2,
+  kEmptyIssuersParameter = 3,
+  kUnsuitableIssuerInIssuersParameter = 4,
+  kUnsuitableTopFrameOrigin = 5,
+  kRequestRejectedDueToBearingAnInternalTrustTokensHeader = 6,
+  kRejectedByAuthorizer = 7,
+  kMaxValue = kRejectedByAuthorizer
+};
+
+}  // namespace internal
 
 class TrustTokenStatusOrRequestHelper;
 
@@ -31,12 +57,20 @@ class TrustTokenRequestHelperFactory {
   // Tokens state and |key_commitment_getter| to obtain keys; consequently, both
   // arguments must outlive all of the created helpers.
   //
+  // |context_client_provider| provides a handle to a NetworkContextClient that
+  // will be used for requesting Trust Tokens operations' local execution.
+  // context_client_provider.Run() will be called before each attempt to
+  // delegate a Trust Tokens operation. It is permitted to return nullptr; in
+  // this case, the operation will be cancelled.
+  //
   // Each decision whether to vend a helper will first query |authorizer| to
   // determine whether it's currently allowed to execute Trust Tokens
   // operations.
   TrustTokenRequestHelperFactory(
       PendingTrustTokenStore* store,
       const TrustTokenKeyCommitmentGetter* key_commitment_getter,
+      base::RepeatingCallback<mojom::NetworkContextClient*(void)>
+          context_client_provider,
       base::RepeatingCallback<bool(void)> authorizer);
 
   TrustTokenRequestHelperFactory(const TrustTokenRequestHelperFactory&) =
@@ -61,8 +95,10 @@ class TrustTokenRequestHelperFactory {
   // |request|'s Trust Tokens parameters, using |store| to access persistent
   // state.
   virtual void CreateTrustTokenHelperForRequest(
-      const net::URLRequest& request,
+      const url::Origin& top_frame_origin,
+      const net::HttpRequestHeaders& headers,
       const mojom::TrustTokenParams& params,
+      const net::NetLogWithSource& net_log,
       base::OnceCallback<void(TrustTokenStatusOrRequestHelper)> done);
 
  private:
@@ -76,8 +112,10 @@ class TrustTokenRequestHelperFactory {
       base::OnceCallback<void(TrustTokenStatusOrRequestHelper)> done,
       TrustTokenStore* store);
 
-  PendingTrustTokenStore* store_;
-  const TrustTokenKeyCommitmentGetter* key_commitment_getter_;
+  raw_ptr<PendingTrustTokenStore> store_;
+  raw_ptr<const TrustTokenKeyCommitmentGetter> key_commitment_getter_;
+  base::RepeatingCallback<mojom::NetworkContextClient*(void)>
+      context_client_provider_;
   base::RepeatingCallback<bool(void)> authorizer_;
 
   base::WeakPtrFactory<TrustTokenRequestHelperFactory> weak_factory_{this};

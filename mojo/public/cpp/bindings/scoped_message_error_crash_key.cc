@@ -1,8 +1,10 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "mojo/public/cpp/bindings/scoped_message_error_crash_key.h"
+
+#include "base/debug/crash_logging.h"
 
 namespace mojo {
 namespace debug {

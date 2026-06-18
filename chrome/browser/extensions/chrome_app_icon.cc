@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,23 @@
 
 #include <algorithm>
 
+#include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/chrome_app_icon_delegate.h"
 #include "chrome/browser/extensions/extension_util.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/browser/extension_util.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/manifest_handlers/icons_handler.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/image/canvas_image_source.h"
 #include "ui/gfx/image/image_skia_operations.h"
 
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/chromeos/extensions/gfx_utils.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/ash/extensions/gfx_utils.h"
 #endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -29,7 +34,12 @@ class RoundedCornersImageSource : public gfx::CanvasImageSource {
  public:
   explicit RoundedCornersImageSource(const gfx::ImageSkia& icon)
       : gfx::CanvasImageSource(icon.size()), icon_(icon) {}
-  ~RoundedCornersImageSource() override {}
+
+  RoundedCornersImageSource(const RoundedCornersImageSource&) = delete;
+  RoundedCornersImageSource& operator=(const RoundedCornersImageSource&) =
+      delete;
+
+  ~RoundedCornersImageSource() override = default;
 
  private:
   // gfx::CanvasImageSource overrides:
@@ -55,8 +65,6 @@ class RoundedCornersImageSource : public gfx::CanvasImageSource {
   }
 
   gfx::ImageSkia icon_;
-
-  DISALLOW_COPY_AND_ASSIGN(RoundedCornersImageSource);
 };
 
 }  // namespace
@@ -65,7 +73,7 @@ class RoundedCornersImageSource : public gfx::CanvasImageSource {
 void ChromeAppIcon::ApplyEffects(int resource_size_in_dip,
                                  const ResizeFunction& resize_function,
                                  bool app_launchable,
-                                 bool from_bookmark,
+                                 bool rounded_corners,
                                  Badge badge_type,
                                  gfx::ImageSkia* image_skia) {
   if (!resize_function.is_null()) {
@@ -79,13 +87,14 @@ void ChromeAppIcon::ApplyEffects(int resource_size_in_dip,
         gfx::ImageSkiaOperations::CreateHSLShiftedImage(*image_skia, shift);
   }
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   // Badge should be added after graying out the icon to have a crisp look.
-  if (badge_type != Badge::kNone)
+  if (badge_type != Badge::kNone) {
     util::ApplyBadge(image_skia, badge_type);
+  }
 #endif
 
-  if (from_bookmark) {
+  if (rounded_corners) {
     *image_skia =
         gfx::ImageSkia(std::make_unique<RoundedCornersImageSource>(*image_skia),
                        image_skia->size());
@@ -144,21 +153,16 @@ void ChromeAppIcon::UpdateIcon() {
 
   Badge badge_type = Badge::kNone;
   bool app_launchable = util::IsAppLaunchable(app_id_, browser_context_);
-#if defined(OS_CHROMEOS)
-  has_chrome_badge_ = util::ShouldApplyChromeBadge(browser_context_, app_id_);
+#if BUILDFLAG(IS_CHROMEOS)
   if (!app_launchable) {
     badge_type = Badge::kBlocked;
-  } else if (has_chrome_badge_) {
+  } else if (util::ShouldApplyChromeBadge(browser_context_, app_id_)) {
     badge_type = Badge::kChrome;
   }
 #endif
 
-  const Extension* extension =
-      ExtensionRegistry::Get(browser_context_)->GetInstalledExtension(app_id_);
-  bool from_bookmark = extension && extension->from_bookmark();
-
   ApplyEffects(resource_size_in_dip_, resize_function_, app_launchable,
-               from_bookmark, badge_type, &image_skia_);
+               /*rounded_corners=*/false, badge_type, &image_skia_);
 
   delegate_->OnIconUpdated(this);
 }

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,10 +19,7 @@ template <>
 struct BLINK_COMMON_EXPORT
     StructTraits<blink::mojom::IDBDatabaseMetadataDataView,
                  blink::IndexedDBDatabaseMetadata> {
-  static int64_t id(const blink::IndexedDBDatabaseMetadata& metadata) {
-    return metadata.id;
-  }
-  static const base::string16& name(
+  static const std::u16string& name(
       const blink::IndexedDBDatabaseMetadata& metadata) {
     return metadata.name;
   }
@@ -37,8 +34,8 @@ struct BLINK_COMMON_EXPORT
       const blink::IndexedDBDatabaseMetadata& metadata) {
     return metadata.object_stores;
   }
-  static bool was_cold_open(const blink::IndexedDBDatabaseMetadata& metadata) {
-    return metadata.was_cold_open;
+  static bool is_sqlite(const blink::IndexedDBDatabaseMetadata& metadata) {
+    return metadata.is_sqlite;
   }
   static bool Read(blink::mojom::IDBDatabaseMetadataDataView data,
                    blink::IndexedDBDatabaseMetadata* out);
@@ -64,7 +61,7 @@ struct BLINK_COMMON_EXPORT StructTraits<blink::mojom::IDBIndexMetadataDataView,
   static int64_t id(const blink::IndexedDBIndexMetadata& metadata) {
     return metadata.id;
   }
-  static const base::string16& name(
+  static const std::u16string& name(
       const blink::IndexedDBIndexMetadata& metadata) {
     return metadata.name;
   }
@@ -93,11 +90,9 @@ struct BLINK_COMMON_EXPORT
     return key.array();
   }
   static base::span<const uint8_t> binary(const blink::IndexedDBKey& key) {
-    return base::make_span(
-        reinterpret_cast<const uint8_t*>(key.binary().data()),
-        key.binary().size());
+    return base::as_byte_span(key.binary());
   }
-  static const base::string16& string(const blink::IndexedDBKey& key) {
+  static const std::u16string& string(const blink::IndexedDBKey& key) {
     return key.string();
   }
   static double date(const blink::IndexedDBKey& key) { return key.date(); }
@@ -147,7 +142,7 @@ struct BLINK_COMMON_EXPORT
   static int64_t id(const blink::IndexedDBObjectStoreMetadata& metadata) {
     return metadata.id;
   }
-  static const base::string16& name(
+  static const std::u16string& name(
       const blink::IndexedDBObjectStoreMetadata& metadata) {
     return metadata.name;
   }

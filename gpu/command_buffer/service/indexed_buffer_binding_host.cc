@@ -1,4 +1,4 @@
-// Copyright (c) 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -153,7 +153,7 @@ void IndexedBufferBindingHost::DoAdjustedBindBufferRange(
     glBindBufferBase(target, index, service_id);
     return;
   }
-  if (offset + size > full_buffer_size) {
+  if (size > full_buffer_size - offset) {
     adjusted_size = full_buffer_size - offset;
     // size needs to be a multiple of 4.
     adjusted_size = adjusted_size & ~3;
@@ -279,8 +279,12 @@ GLsizeiptr IndexedBufferBindingHost::GetEffectiveBufferSize(
     case IndexedBufferBindingType::kBindBufferBase:
       return full_buffer_size;
     case IndexedBufferBindingType::kBindBufferRange:
-      if (binding.offset + binding.size > full_buffer_size)
+      if (binding.offset > full_buffer_size) {
+        return 0;
+      }
+      if (binding.size > full_buffer_size - binding.offset) {
         return full_buffer_size - binding.offset;
+      }
       return binding.size;
     case IndexedBufferBindingType::kBindBufferNone:
       return 0;

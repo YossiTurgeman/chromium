@@ -1,9 +1,11 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_SURFACE_RANGE_MOJOM_TRAITS_H_
 #define SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_SURFACE_RANGE_MOJOM_TRAITS_H_
+
+#include <optional>
 
 #include "components/viz/common/surfaces/surface_id.h"
 #include "components/viz/common/surfaces/surface_range.h"
@@ -14,7 +16,7 @@ namespace mojo {
 
 template <>
 struct StructTraits<viz::mojom::SurfaceRangeDataView, viz::SurfaceRange> {
-  static const base::Optional<viz::SurfaceId>& start(
+  static const std::optional<viz::SurfaceId>& start(
       const viz::SurfaceRange& range) {
     DCHECK(range.IsValid());
     return range.start();

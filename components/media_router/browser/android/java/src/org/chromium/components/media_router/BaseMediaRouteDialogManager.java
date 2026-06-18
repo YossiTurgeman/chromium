@@ -1,26 +1,27 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.media_router;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.app.Activity;
 import android.view.View;
 import android.widget.FrameLayout;
 
-import androidx.annotation.Nullable;
 import androidx.fragment.app.DialogFragment;
-import androidx.fragment.app.FragmentActivity;
 import androidx.fragment.app.FragmentManager;
 import androidx.mediarouter.media.MediaRouteSelector;
 import androidx.mediarouter.media.MediaRouter;
 
-import org.chromium.base.ApplicationStatus;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.content_public.browser.WebContents;
 
-/**
- * Shared code for {@link MediaRouteDialogManager} implementations.
- */
-public abstract class BaseMediaRouteDialogManager implements MediaRouteDialogManager {
+/** Shared code for media route dialogs. */
+@NullMarked
+public abstract class BaseMediaRouteDialogManager {
     /**
      * A helper class to handle the system visibility change caused by the dialog showing up.
      * Call saveSystemVisibility() in onCreateDialog() of the DialogFragment and later
@@ -60,23 +61,16 @@ public abstract class BaseMediaRouteDialogManager implements MediaRouteDialogMan
     private final MediaRouter mAndroidMediaRouter;
     private final MediaRouteDialogDelegate mDelegate;
 
-    protected DialogFragment mDialogFragment;
+    protected @Nullable DialogFragment mDialogFragment;
 
-    @Override
-    public void openDialog() {
+    public void openDialog(WebContents initiator) {
         if (mAndroidMediaRouter == null) {
             mDelegate.onDialogCancelled();
             return;
         }
 
-        FragmentActivity currentActivity =
-                (FragmentActivity) ApplicationStatus.getLastTrackedFocusedActivity();
-        if (currentActivity == null) {
-            mDelegate.onDialogCancelled();
-            return;
-        }
-
-        FragmentManager fm = currentActivity.getSupportFragmentManager();
+        assumeNonNull(MediaRouterClient.getInstance());
+        FragmentManager fm = MediaRouterClient.getInstance().getSupportFragmentManager(initiator);
         if (fm == null) {
             mDelegate.onDialogCancelled();
             return;
@@ -89,7 +83,6 @@ public abstract class BaseMediaRouteDialogManager implements MediaRouteDialogMan
         }
     }
 
-    @Override
     public void closeDialog() {
         if (mDialogFragment == null) return;
 
@@ -97,7 +90,6 @@ public abstract class BaseMediaRouteDialogManager implements MediaRouteDialogMan
         mDialogFragment = null;
     }
 
-    @Override
     public boolean isShowingDialog() {
         return mDialogFragment != null && mDialogFragment.isVisible();
     }
@@ -117,14 +109,13 @@ public abstract class BaseMediaRouteDialogManager implements MediaRouteDialogMan
      * @param fm {@link FragmentManager} to use to show the dialog.
      * @return null if the initialization fails, otherwise the initialized dialog fragment.
      */
-    @Nullable
-    protected abstract DialogFragment openDialogInternal(FragmentManager fm);
+    protected abstract @Nullable DialogFragment openDialogInternal(FragmentManager fm);
 
     protected MediaRouteDialogDelegate delegate() {
         return mDelegate;
     }
 
-    protected MediaRouter androidMediaRouter() {
+    MediaRouter androidMediaRouter() {
         return mAndroidMediaRouter;
     }
 

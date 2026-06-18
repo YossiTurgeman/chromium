@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,8 @@
 
 #include <string>
 
-#include "base/callback_forward.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/scoped_refptr.h"
 
 namespace network {
 class SharedURLLoaderFactory;
@@ -21,8 +20,12 @@ namespace rlz {
 // specific singletons or gives information about the embedder environment.
 class RLZTrackerDelegate {
  public:
-  RLZTrackerDelegate() {}
-  virtual ~RLZTrackerDelegate() {}
+  RLZTrackerDelegate() = default;
+
+  RLZTrackerDelegate(const RLZTrackerDelegate&) = delete;
+  RLZTrackerDelegate& operator=(const RLZTrackerDelegate&) = delete;
+
+  virtual ~RLZTrackerDelegate() = default;
 
   // Invoked during RLZTracker cleanup, to request the cleanup of the delegate.
   virtual void Cleanup() = 0;
@@ -50,31 +53,31 @@ class RLZTrackerDelegate {
 
   // Returns the installation language in |language| and a boolean indicating
   // whether the operation was a success or not.
-  virtual bool GetLanguage(base::string16* language) = 0;
+  virtual bool GetLanguage(std::u16string* language) = 0;
 
   // Returns the referral code in |referral| and a boolean indicating whether
   // the operation was a success or not. Deprecated.
-  virtual bool GetReferral(base::string16* referral) = 0;
+  virtual bool GetReferral(std::u16string* referral) = 0;
 
   // Clears the referral code. Deprecated.
   virtual bool ClearReferral() = 0;
 
-  // Registers |callback| to be invoked the next time the user perform a search
+  // Registers |callback| to be invoked the next time the user performs a search
   // using Google search engine via the omnibox. Callback will invoked at most
   // once.
   virtual void SetOmniboxSearchCallback(base::OnceClosure callback) = 0;
 
-  // Registers |callback| to be invoked the next time the user perform a search
+  // Registers |callback| to be invoked the next time the user performs a search
   // using Google search engine via the homepage. Callback will invoked at most
   // once.
   virtual void SetHomepageSearchCallback(base::OnceClosure callback) = 0;
 
+  // Invokes the homepage search callback if it is set.
+  virtual void RunHomepageSearchCallback() = 0;
+
   // Returns true if the existing access point RLZ strings in the data file
   // should be updated.
   virtual bool ShouldUpdateExistingAccessPointRlz() = 0;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RLZTrackerDelegate);
 };
 
 }  // namespace rlz

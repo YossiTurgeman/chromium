@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,15 @@
 #define CHROME_BROWSER_ANDROID_VR_ARCORE_DEVICE_FAKE_ARCORE_H_
 
 #include <memory>
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include <unordered_map>
+
+#include "base/memory/scoped_refptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "device/vr/android/arcore/arcore.h"
+#include "device/vr/public/mojom/anchor_id.h"
+#include "device/vr/public/mojom/hit_test_subscription_id.h"
+#include "device/vr/public/mojom/plane_id.h"
 
 namespace device {
 
@@ -19,16 +24,27 @@ namespace device {
 class FakeArCore : public ArCore {
  public:
   FakeArCore();
+
+  FakeArCore(const FakeArCore&) = delete;
+  FakeArCore& operator=(const FakeArCore&) = delete;
+
   ~FakeArCore() override;
 
   // ArCore implementation.
-  bool Initialize(
+  std::optional<ArCore::InitializeResult> Initialize(
       base::android::ScopedJavaLocalRef<jobject> application_context,
       const std::unordered_set<device::mojom::XRSessionFeature>&
-          enabled_features) override;
+          required_features,
+      const std::unordered_set<device::mojom::XRSessionFeature>&
+          optional_features,
+      const std::vector<device::mojom::XRTrackedImagePtr>& tracked_images,
+      std::optional<ArCore::DepthSensingConfiguration> depth_sensing_config)
+      override;
+  MinMaxRange GetTargetFramerateRange() override;
   void SetCameraTexture(uint32_t texture) override;
   void SetDisplayGeometry(const gfx::Size& frame_size,
                           display::Display::Rotation display_rotation) override;
+  gfx::Size GetUncroppedCameraImageSize() const override;
 
   gfx::Transform GetProjectionMatrix(float near, float far) override;
   mojom::VRPosePtr Update(bool* camera_updated) override;
@@ -42,11 +58,11 @@ class FakeArCore : public ArCore {
   bool RequestHitTest(const mojom::XRRayPtr& ray,
                       std::vector<mojom::XRHitResultPtr>* hit_results) override;
 
-  base::Optional<uint64_t> SubscribeToHitTest(
+  std::optional<HitTestSubscriptionId> SubscribeToHitTest(
       mojom::XRNativeOriginInformationPtr nativeOriginInformation,
       const std::vector<mojom::EntityTypeForHitTest>& entity_types,
       mojom::XRRayPtr ray) override;
-  base::Optional<uint64_t> SubscribeToHitTestForTransientInput(
+  std::optional<HitTestSubscriptionId> SubscribeToHitTestForTransientInput(
       const std::string& profile_name,
       const std::vector<mojom::EntityTypeForHitTest>& entity_types,
       mojom::XRRayPtr ray) override;
@@ -55,7 +71,7 @@ class FakeArCore : public ArCore {
       const gfx::Transform& mojo_from_viewer,
       const std::vector<mojom::XRInputSourceStatePtr>& input_state) override;
 
-  void UnsubscribeFromHitTest(uint64_t subscription_id) override;
+  void UnsubscribeFromHitTest(HitTestSubscriptionId subscription_id) override;
 
   mojom::XRPlaneDetectionDataPtr GetDetectedPlanesData() override;
   mojom::XRAnchorsDataPtr GetAnchorsData() override;
@@ -65,11 +81,7 @@ class FakeArCore : public ArCore {
   void CreateAnchor(
       const mojom::XRNativeOriginInformation& native_origin_information,
       const device::Pose& native_origin_from_anchor,
-      CreateAnchorCallback callback) override;
-  void CreatePlaneAttachedAnchor(
-      const mojom::XRNativeOriginInformation& native_origin_information,
-      const device::Pose& native_origin_from_anchor,
-      uint64_t plane_id,
+      const std::optional<PlaneId>& plane_id,
       CreateAnchorCallback callback) override;
 
   void ProcessAnchorCreationRequests(
@@ -77,7 +89,9 @@ class FakeArCore : public ArCore {
       const std::vector<mojom::XRInputSourceStatePtr>& input_state,
       const base::TimeTicks& frame_time) override;
 
-  void DetachAnchor(uint64_t anchor_id) override;
+  void DetachAnchor(AnchorId anchor_id) override;
+
+  mojom::XRTrackedImagesDataPtr GetTrackedImages() override;
 
   void SetCameraAspect(float aspect) { camera_aspect_ = aspect; }
 
@@ -100,9 +114,7 @@ class FakeArCore : public ArCore {
     gfx::Quaternion orientation;
   };
 
-  std::unordered_map<uint64_t, FakeAnchorData> anchors_;
-
-  DISALLOW_COPY_AND_ASSIGN(FakeArCore);
+  std::unordered_map<AnchorId, FakeAnchorData> anchors_;
 };
 
 class FakeArCoreFactory : public ArCoreFactory {

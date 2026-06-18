@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,11 @@
 
 #include "base/metrics/histogram.h"
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
+
+// Enabled on all platforms (including desktop Android) because it is used by
+// internal webui (chrome:// pages).
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -58,6 +63,18 @@ class MetricsPrivateRecordUserActionFunction : public ExtensionFunction {
 
  protected:
   ~MetricsPrivateRecordUserActionFunction() override {}
+
+  // ExtensionFunction:
+  ResponseAction Run() override;
+};
+
+class MetricsPrivateRecordExtensionUsageUkmFunction : public ExtensionFunction {
+ public:
+  DECLARE_EXTENSION_FUNCTION("metricsPrivate.recordExtensionUsageUkm",
+                             METRICSPRIVATE_RECORDEXTENSIONUSAGEUKM)
+
+ protected:
+  ~MetricsPrivateRecordExtensionUsageUkmFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -113,14 +130,31 @@ class MetricsPrivateRecordEnumerationValueFunction
   ResponseAction Run() override;
 };
 
-class MetricsPrivateRecordSparseHashableFunction
+class MetricsPrivateRecordSparseValueWithHashMetricNameFunction
     : public MetricsHistogramHelperFunction {
  public:
-  DECLARE_EXTENSION_FUNCTION("metricsPrivate.recordSparseHashable",
-                             METRICSPRIVATE_RECORDSPARSEHASHABLE)
+  DECLARE_EXTENSION_FUNCTION(
+      "metricsPrivate.recordSparseValueWithHashMetricName",
+      METRICSPRIVATE_RECORDSPARSEVALUEWITHHASHMETRICNAME)
 
  protected:
-  ~MetricsPrivateRecordSparseHashableFunction() override {}
+  ~MetricsPrivateRecordSparseValueWithHashMetricNameFunction() override =
+      default;
+
+  // ExtensionFunction:
+  ResponseAction Run() override;
+};
+
+class MetricsPrivateRecordSparseValueWithPersistentHashFunction
+    : public MetricsHistogramHelperFunction {
+ public:
+  DECLARE_EXTENSION_FUNCTION(
+      "metricsPrivate.recordSparseValueWithPersistentHash",
+      METRICSPRIVATE_RECORDSPARSEVALUEWITHPERSISTENTHASH)
+
+ protected:
+  ~MetricsPrivateRecordSparseValueWithPersistentHashFunction() override =
+      default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -239,11 +273,11 @@ class MetricsPrivateGetHistogramFunction : public ExtensionFunction {
   ResponseAction Run() override;
 
   // Sends an asynchronous response containing data for the histogram named
-  // |name|. Passed to content::FetchHistogramsAsynchronously() to be run after
+  // `name`. Passed to content::FetchHistogramsAsynchronously() to be run after
   // new data from other processes has been collected.
   void RespondOnHistogramsFetched(const std::string& name);
 
-  // Creates a response with current data for the histogram named |name|.
+  // Creates a response with current data for the histogram named `name`.
   ResponseValue GetHistogram(const std::string& name);
 };
 

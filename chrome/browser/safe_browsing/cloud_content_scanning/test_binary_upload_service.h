@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,31 +7,46 @@
 
 #include <memory>
 
-#include "chrome/browser/safe_browsing/cloud_content_scanning/binary_upload_service.h"
+#include "base/memory/weak_ptr.h"
+#include "chrome/browser/safe_browsing/cloud_content_scanning/cloud_binary_upload_service.h"
 #include "chrome/browser/safe_browsing/services_delegate.h"
-#include "components/safe_browsing/core/proto/webprotect.pb.h"
+#include "components/enterprise/common/proto/connectors.pb.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/common.h"
 
 namespace safe_browsing {
 
-class TestBinaryUploadService : public BinaryUploadService {
+class TestBinaryUploadService
+    : public enterprise_connectors::BinaryUploadService {
  public:
   TestBinaryUploadService();
-  ~TestBinaryUploadService() override = default;
+  ~TestBinaryUploadService() override;
 
-  void MaybeUploadForDeepScanning(std::unique_ptr<Request> request) override;
-  void SetResponse(Result result,
+  void MaybeUploadForDeepScanning(
+      std::unique_ptr<enterprise_connectors::BinaryUploadRequest> request)
+      override;
+  void MaybeAcknowledge(
+      std::unique_ptr<enterprise_connectors::BinaryUploadAck> ack) override {}
+  void MaybeCancelRequests(
+      std::unique_ptr<enterprise_connectors::BinaryUploadCancelRequests> cancel)
+      override {}
+  base::WeakPtr<enterprise_connectors::BinaryUploadService> AsWeakPtr()
+      override;
+  void SetResponse(enterprise_connectors::ScanRequestUploadResult result,
                    enterprise_connectors::ContentAnalysisResponse response);
-  void SetResponse(Result result, DeepScanningClientResponse response);
 
   bool was_called() { return was_called_; }
+  const enterprise_connectors::ContentAnalysisRequest& last_request() {
+    return last_request_;
+  }
   void ClearWasCalled();
 
  private:
-  Result saved_result_ = Result::UNKNOWN;
-  DeepScanningClientResponse saved_response_ = DeepScanningClientResponse();
-  enterprise_connectors::ContentAnalysisResponse
-      saved_content_analysis_response_;
+  enterprise_connectors::ContentAnalysisRequest last_request_;
+  enterprise_connectors::ScanRequestUploadResult saved_result_ =
+      enterprise_connectors::ScanRequestUploadResult::kUnknown;
+  enterprise_connectors::ContentAnalysisResponse saved_response_;
   bool was_called_ = false;
+  base::WeakPtrFactory<TestBinaryUploadService> weak_ptr_factory_{this};
 };
 
 }  // namespace safe_browsing

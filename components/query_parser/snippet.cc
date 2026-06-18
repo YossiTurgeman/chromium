@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -113,7 +114,7 @@ size_t AdvanceAndReturnUTF16Pos(const char* utf8_string,
 
   UChar32 wide_char;
   while (*utf8_pos < offset) {
-    U8_NEXT(utf8_string, *utf8_pos, utf8_length, wide_char);
+    UNSAFE_TODO(U8_NEXT(utf8_string, *utf8_pos, utf8_length, wide_char));
     *utf16_pos += (wide_char <= 0xFFFF) ? 1 : 2;
   }
   return *utf16_pos;
@@ -220,7 +221,7 @@ void Snippet::ComputeSnippet(const MatchPositions& match_positions,
   // The length of snippets we try to produce.
   // We can generate longer snippets but stop once we cross kSnippetMaxLength.
   const size_t kSnippetMaxLength = 200;
-  const base::string16 kEllipsis = base::ASCIIToUTF16(" ... ");
+  const std::u16string kEllipsis = u" ... ";
 
   UText* document_utext = nullptr;
   UErrorCode status = U_ZERO_ERROR;
@@ -237,7 +238,7 @@ void Snippet::ComputeSnippet(const MatchPositions& match_positions,
   // We build the snippet by iterating through the matches and then grabbing
   // context around each match.  If matches are near enough each other (within
   // kSnippetContext), we skip the "..." between them.
-  base::string16 snippet;
+  std::u16string snippet;
   size_t start = 0;
   for (size_t i = 0; i < match_positions.size(); ++i) {
     // Some shorter names for the current match.

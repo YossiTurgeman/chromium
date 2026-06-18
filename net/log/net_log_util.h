@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <memory>
 #include <set>
 
+#include "base/trace_event/trace_event.h"  // IWYU pragma: export
 #include "net/base/net_export.h"
 #include "net/log/net_log.h"
 
@@ -15,30 +16,25 @@ namespace net {
 
 class URLRequestContext;
 
-// A set of flags that can be OR'd together to request specific information
-// about the current state of the URLRequestContext.  See GetNetInfo, below.
-enum NetInfoSource {
-#define NET_INFO_SOURCE(label, string, value) NET_INFO_##label = value,
-#include "net/base/net_info_source_list.h"
-#undef NET_INFO_SOURCE
-  NET_INFO_ALL_SOURCES = -1,
+// Request mode for GetNetConstants.
+enum class NetConstantsRequestMode {
+  // Requests all constants including field trials. This is the default mode.
+  kDefault,
+  // Requests only minimum constants. Used for tracing metadata.
+  kTracing,
 };
 
 // Utility methods for creating NetLog dumps.
 
-// Returns a friendly string to use for a given NetInfoSource in the net log.
-NET_EXPORT const char* NetInfoSourceToString(NetInfoSource source);
-
 // Creates a dictionary containing a legend for net/ constants.
-NET_EXPORT base::Value GetNetConstants();
+NET_EXPORT base::DictValue GetNetConstants(
+    NetConstantsRequestMode request_mode = NetConstantsRequestMode::kDefault);
 
 // Retrieves a dictionary containing information about the current state of
-// |context|.  |info_sources| is a set of NetInfoSources OR'd together,
-// indicating just what information is being requested.  Each NetInfoSource adds
-// one top-level entry to the returned dictionary.
+// |context|.
 //
 // May only be called on |context|'s thread.
-NET_EXPORT base::Value GetNetInfo(URLRequestContext* context, int info_sources);
+NET_EXPORT base::DictValue GetNetInfo(URLRequestContext* context);
 
 // Takes in a set of contexts and a NetLog::Observer, and passes in
 // NetLog::Entries to the observer for certain NetLogSources with pending
@@ -59,6 +55,10 @@ NET_EXPORT base::Value GetNetInfo(URLRequestContext* context, int info_sources);
 NET_EXPORT void CreateNetLogEntriesForActiveObjects(
     const std::set<URLRequestContext*>& contexts,
     NetLog::ThreadSafeObserver* observer);
+
+// Creates a trace Flow from a NetLogWithSource.
+NET_EXPORT perfetto::Flow NetLogWithSourceToFlow(
+    const NetLogWithSource& net_log);
 
 }  // namespace net
 

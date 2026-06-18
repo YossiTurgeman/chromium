@@ -1,10 +1,12 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/payments/payment_handler_modal_dialog_manager_delegate.h"
 
 #include "chrome/browser/platform_util.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "components/tabs/public/tab_interface.h"
 #include "components/web_modal/web_contents_modal_dialog_host.h"
 #include "content/public/browser/web_contents.h"
 
@@ -12,10 +14,11 @@ namespace payments {
 
 PaymentHandlerModalDialogManagerDelegate::
     PaymentHandlerModalDialogManagerDelegate(
-        web_modal::WebContentsModalDialogHost* host)
-    : host_(host), web_contents_(nullptr) {
-  DCHECK(host);
-}
+        content::WebContents* host_web_contents)
+    : host_web_contents_(host_web_contents->GetWeakPtr()) {}
+
+PaymentHandlerModalDialogManagerDelegate::
+    ~PaymentHandlerModalDialogManagerDelegate() = default;
 
 void PaymentHandlerModalDialogManagerDelegate::SetWebContentsBlocked(
     content::WebContents* web_contents,
@@ -28,8 +31,24 @@ void PaymentHandlerModalDialogManagerDelegate::SetWebContentsBlocked(
 }
 
 web_modal::WebContentsModalDialogHost*
-PaymentHandlerModalDialogManagerDelegate::GetWebContentsModalDialogHost() {
-  return host_;
+PaymentHandlerModalDialogManagerDelegate::GetWebContentsModalDialogHost(
+    content::WebContents* web_contents) {
+  if (!host_web_contents_) {
+    return nullptr;
+  }
+
+  tabs::TabInterface* tab =
+      tabs::TabInterface::MaybeGetFromContents(host_web_contents_.get());
+  if (!tab) {
+    return nullptr;
+  }
+
+  BrowserWindowInterface* browser = tab->GetBrowserWindowInterface();
+
+  // Borrow the browser's WebContentModalDialogHost to display modal dialogs
+  // triggered by the payment handler's web view (e.g. WebAuthn and Secure
+  // Payment Confirmation dialogs).
+  return browser->GetWebContentsModalDialogHostForTab(tab);
 }
 
 bool PaymentHandlerModalDialogManagerDelegate::IsWebContentsVisible(

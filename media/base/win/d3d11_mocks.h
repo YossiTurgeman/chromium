@@ -1,12 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_BASE_WIN_D3D11_MOCKS_H_
 #define MEDIA_BASE_WIN_D3D11_MOCKS_H_
 
-#include <d3d11.h>
-#include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <dxgi1_4.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
@@ -17,6 +16,24 @@
 
 namespace media {
 
+class DXGIKeyedMutexMock
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          IDXGIKeyedMutex> {
+ public:
+  DXGIKeyedMutexMock();
+  ~DXGIKeyedMutexMock() override;
+
+  MOCK_STDCALL_METHOD2(AcquireSync, HRESULT(UINT64, DWORD));
+  MOCK_STDCALL_METHOD1(ReleaseSync, HRESULT(UINT64));
+  MOCK_STDCALL_METHOD2(GetDevice, HRESULT(REFIID, void**));
+  MOCK_STDCALL_METHOD2(GetParent, HRESULT(REFIID, void**));
+  MOCK_STDCALL_METHOD3(GetPrivateData, HRESULT(REFGUID, UINT*, void*));
+  MOCK_STDCALL_METHOD3(SetPrivateData, HRESULT(REFGUID, UINT, const void*));
+  MOCK_STDCALL_METHOD2(SetPrivateDataInterface,
+                       HRESULT(REFGUID, const IUnknown*));
+};
+
 class D3D11Texture2DMock
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
@@ -24,6 +41,7 @@ class D3D11Texture2DMock
  public:
   D3D11Texture2DMock();
   ~D3D11Texture2DMock() override;
+  MOCK_STDCALL_METHOD2(QueryInterface, HRESULT(REFIID riid, void** ppv));
   MOCK_STDCALL_METHOD1(GetDevice, void(ID3D11Device**));
   MOCK_STDCALL_METHOD3(GetPrivateData, HRESULT(const GUID&, UINT*, void*));
   MOCK_STDCALL_METHOD3(SetPrivateData, HRESULT(const GUID&, UINT, const void*));
@@ -33,6 +51,19 @@ class D3D11Texture2DMock
   MOCK_STDCALL_METHOD1(SetEvictionPriority, void(UINT));
   MOCK_STDCALL_METHOD0(GetEvictionPriority, UINT());
   MOCK_STDCALL_METHOD1(GetDesc, void(D3D11_TEXTURE2D_DESC*));
+};
+
+class D3D11MultithreadMock
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          ID3D11Multithread> {
+ public:
+  D3D11MultithreadMock();
+  ~D3D11MultithreadMock() override;
+  MOCK_STDCALL_METHOD0(Enter, void());
+  MOCK_STDCALL_METHOD0(GetMultithreadProtected, BOOL());
+  MOCK_STDCALL_METHOD0(Leave, void());
+  MOCK_STDCALL_METHOD1(SetMultithreadProtected, BOOL(BOOL));
 };
 
 class D3D11BufferMock
@@ -58,7 +89,7 @@ class D3D11BufferMock
 class D3D11DeviceMock
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-          ID3D11Device> {
+          ID3D11Device5> {
  public:
   D3D11DeviceMock();
   ~D3D11DeviceMock() override;
@@ -211,6 +242,108 @@ class D3D11DeviceMock
   MOCK_STDCALL_METHOD1(SetExceptionMode, HRESULT(UINT));
 
   MOCK_STDCALL_METHOD0(GetExceptionMode, UINT());
+
+  // ID3D11Device1
+  MOCK_STDCALL_METHOD1(GetImmediateContext1, void(ID3D11DeviceContext1**));
+
+  MOCK_STDCALL_METHOD2(CreateDeferredContext1,
+                       HRESULT(UINT, ID3D11DeviceContext1**));
+
+  MOCK_STDCALL_METHOD2(CreateBlendState1,
+                       HRESULT(const D3D11_BLEND_DESC1*, ID3D11BlendState1**));
+
+  MOCK_STDCALL_METHOD2(CreateRasterizerState1,
+                       HRESULT(const D3D11_RASTERIZER_DESC1*,
+                               ID3D11RasterizerState1**));
+
+  MOCK_STDCALL_METHOD7(CreateDeviceContextState,
+                       HRESULT(UINT,
+                               const D3D_FEATURE_LEVEL*,
+                               UINT,
+                               UINT,
+                               REFIID,
+                               D3D_FEATURE_LEVEL*,
+                               ID3DDeviceContextState**));
+
+  MOCK_STDCALL_METHOD3(OpenSharedResource1, HRESULT(HANDLE, REFIID, void**));
+
+  MOCK_STDCALL_METHOD4(OpenSharedResourceByName,
+                       HRESULT(LPCWSTR, DWORD, REFIID, void**));
+
+  // ID3D11Device2
+  MOCK_STDCALL_METHOD4(CheckMultisampleQualityLevels1,
+                       HRESULT(DXGI_FORMAT, UINT, UINT, UINT*));
+
+  MOCK_STDCALL_METHOD2(CreateDeferredContext2,
+                       HRESULT(UINT, ID3D11DeviceContext2**));
+
+  MOCK_STDCALL_METHOD1(GetImmediateContext2, void(ID3D11DeviceContext2**));
+
+  MOCK_STDCALL_METHOD7(GetResourceTiling,
+                       void(ID3D11Resource*,
+                            UINT*,
+                            D3D11_PACKED_MIP_DESC*,
+                            D3D11_TILE_SHAPE*,
+                            UINT*,
+                            UINT,
+                            D3D11_SUBRESOURCE_TILING*));
+
+  // ID3D11Device3
+  MOCK_STDCALL_METHOD3(CreateTexture2D1,
+                       HRESULT(const D3D11_TEXTURE2D_DESC1*,
+                               const D3D11_SUBRESOURCE_DATA*,
+                               ID3D11Texture2D1**));
+
+  MOCK_STDCALL_METHOD3(CreateTexture3D1,
+                       HRESULT(const D3D11_TEXTURE3D_DESC1*,
+                               const D3D11_SUBRESOURCE_DATA*,
+                               ID3D11Texture3D1**));
+
+  MOCK_STDCALL_METHOD2(CreateRasterizerState2,
+                       HRESULT(const D3D11_RASTERIZER_DESC2*,
+                               ID3D11RasterizerState2**));
+
+  MOCK_STDCALL_METHOD3(CreateShaderResourceView1,
+                       HRESULT(ID3D11Resource*,
+                               const D3D11_SHADER_RESOURCE_VIEW_DESC1*,
+                               ID3D11ShaderResourceView1**));
+
+  MOCK_STDCALL_METHOD3(CreateUnorderedAccessView1,
+                       HRESULT(ID3D11Resource*,
+                               const D3D11_UNORDERED_ACCESS_VIEW_DESC1*,
+                               ID3D11UnorderedAccessView1**));
+
+  MOCK_STDCALL_METHOD3(CreateRenderTargetView1,
+                       HRESULT(ID3D11Resource*,
+                               const D3D11_RENDER_TARGET_VIEW_DESC1*,
+                               ID3D11RenderTargetView1**));
+
+  MOCK_STDCALL_METHOD2(CreateQuery1,
+                       HRESULT(const D3D11_QUERY_DESC1*, ID3D11Query1**));
+
+  MOCK_STDCALL_METHOD1(GetImmediateContext3, void(ID3D11DeviceContext3**));
+
+  MOCK_STDCALL_METHOD2(CreateDeferredContext3,
+                       HRESULT(UINT, ID3D11DeviceContext3**));
+
+  MOCK_STDCALL_METHOD6(
+      WriteToSubresource,
+      void(ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT));
+
+  MOCK_STDCALL_METHOD6(
+      ReadFromSubresource,
+      void(void*, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*));
+
+  // ID3D11Device4
+  MOCK_STDCALL_METHOD2(RegisterDeviceRemovedEvent, HRESULT(HANDLE, DWORD*));
+
+  MOCK_STDCALL_METHOD1(UnregisterDeviceRemoved, void(DWORD));
+
+  // ID3D11Device5
+  MOCK_STDCALL_METHOD3(OpenSharedFence, HRESULT(HANDLE, REFIID, void**));
+
+  MOCK_STDCALL_METHOD4(CreateFence,
+                       HRESULT(UINT64, D3D11_FENCE_FLAG, REFIID, void**));
 };
 
 class DXGIFactoryMock
@@ -233,6 +366,64 @@ class DXGIFactoryMock
                        HRESULT(REFGUID, const IUnknown*));
   MOCK_STDCALL_METHOD2(GetParent, HRESULT(REFIID, void**));
   MOCK_STDCALL_METHOD3(GetPrivateData, HRESULT(REFGUID, UINT*, void*));
+};
+
+class DXGIFactory2Mock
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          IDXGIFactory2> {
+ public:
+  DXGIFactory2Mock();
+  ~DXGIFactory2Mock() override;
+
+  // IDXGIFactory (inherited)
+  MOCK_STDCALL_METHOD2(CreateSoftwareAdapter, HRESULT(HMODULE, IDXGIAdapter**));
+  MOCK_STDCALL_METHOD3(CreateSwapChain,
+                       HRESULT(IUnknown*,
+                               DXGI_SWAP_CHAIN_DESC*,
+                               IDXGISwapChain**));
+  MOCK_STDCALL_METHOD2(EnumAdapters, HRESULT(UINT, IDXGIAdapter**));
+  MOCK_STDCALL_METHOD1(GetWindowAssociation, HRESULT(HWND*));
+  MOCK_STDCALL_METHOD2(MakeWindowAssociation, HRESULT(HWND, UINT));
+  MOCK_STDCALL_METHOD3(SetPrivateData, HRESULT(REFGUID, UINT, const void*));
+  MOCK_STDCALL_METHOD2(SetPrivateDataInterface,
+                       HRESULT(REFGUID, const IUnknown*));
+  MOCK_STDCALL_METHOD2(GetParent, HRESULT(REFIID, void**));
+  MOCK_STDCALL_METHOD3(GetPrivateData, HRESULT(REFGUID, UINT*, void*));
+
+  // IDXGIFactory1
+  MOCK_STDCALL_METHOD2(EnumAdapters1,
+                       HRESULT(UINT Adapter, IDXGIAdapter1** ppAdapter));
+  MOCK_STDCALL_METHOD0(IsCurrent, BOOL());
+
+  // IDXGIFactory2
+  MOCK_STDCALL_METHOD0(IsWindowedStereoEnabled, BOOL());
+  MOCK_STDCALL_METHOD6(CreateSwapChainForHwnd,
+                       HRESULT(IUnknown*,
+                               HWND,
+                               const DXGI_SWAP_CHAIN_DESC1*,
+                               const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*,
+                               IDXGIOutput*,
+                               IDXGISwapChain1**));
+  MOCK_STDCALL_METHOD5(CreateSwapChainForCoreWindow,
+                       HRESULT(IUnknown*,
+                               IUnknown*,
+                               const DXGI_SWAP_CHAIN_DESC1*,
+                               IDXGIOutput*,
+                               IDXGISwapChain1**));
+  MOCK_STDCALL_METHOD2(GetSharedResourceAdapterLuid, HRESULT(HANDLE, LUID*));
+  MOCK_STDCALL_METHOD3(RegisterStereoStatusWindow, HRESULT(HWND, UINT, DWORD*));
+  MOCK_STDCALL_METHOD2(RegisterStereoStatusEvent, HRESULT(HANDLE, DWORD*));
+  MOCK_STDCALL_METHOD1(UnregisterStereoStatus, void(DWORD));
+  MOCK_STDCALL_METHOD3(RegisterOcclusionStatusWindow,
+                       HRESULT(HWND, UINT, DWORD*));
+  MOCK_STDCALL_METHOD2(RegisterOcclusionStatusEvent, HRESULT(HANDLE, DWORD*));
+  MOCK_STDCALL_METHOD1(UnregisterOcclusionStatus, void(DWORD));
+  MOCK_STDCALL_METHOD4(CreateSwapChainForComposition,
+                       HRESULT(IUnknown*,
+                               const DXGI_SWAP_CHAIN_DESC1*,
+                               IDXGIOutput*,
+                               IDXGISwapChain1**));
 };
 
 class DXGIDeviceMock
@@ -768,12 +959,12 @@ class D3D11VideoDecoderMock
   MOCK_STDCALL_METHOD1(GetDriverHandle, HRESULT(HANDLE*));
 };
 
-// This classs must mock QueryInterface, since a lot of things are
-// QueryInterfac()ed thru this class.
+// This class must mock QueryInterface, since a lot of things are
+// QueryInterface()ed thru this class.
 class D3D11DeviceContextMock
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-          ID3D11DeviceContext> {
+          ID3D11DeviceContext4> {
  public:
   D3D11DeviceContextMock();
   ~D3D11DeviceContextMock() override;
@@ -1299,6 +1490,219 @@ class D3D11DeviceContextMock
   MOCK_STDCALL_METHOD2(FinishCommandList,
                        HRESULT(BOOL RestoreDeferredContextState,
                                ID3D11CommandList** ppCommandList));
+
+  // ID3D11DeviceContext1
+  MOCK_STDCALL_METHOD9(CopySubresourceRegion1,
+                       void(ID3D11Resource*,
+                            UINT,
+                            UINT,
+                            UINT,
+                            UINT,
+                            ID3D11Resource*,
+                            UINT,
+                            const D3D11_BOX*,
+                            UINT));
+
+  MOCK_STDCALL_METHOD7(UpdateSubresource1,
+                       void(ID3D11Resource*,
+                            UINT,
+                            const D3D11_BOX*,
+                            const void*,
+                            UINT,
+                            UINT,
+                            UINT));
+
+  MOCK_STDCALL_METHOD1(DiscardResource, void(ID3D11Resource*));
+
+  MOCK_STDCALL_METHOD1(DiscardView, void(ID3D11View*));
+
+  MOCK_STDCALL_METHOD5(
+      VSSetConstantBuffers1,
+      void(UINT, UINT, ID3D11Buffer* const*, const UINT*, const UINT*));
+
+  MOCK_STDCALL_METHOD5(
+      HSSetConstantBuffers1,
+      void(UINT, UINT, ID3D11Buffer* const*, const UINT*, const UINT*));
+
+  MOCK_STDCALL_METHOD5(
+      DSSetConstantBuffers1,
+      void(UINT, UINT, ID3D11Buffer* const*, const UINT*, const UINT*));
+
+  MOCK_STDCALL_METHOD5(
+      GSSetConstantBuffers1,
+      void(UINT, UINT, ID3D11Buffer* const*, const UINT*, const UINT*));
+
+  MOCK_STDCALL_METHOD5(
+      PSSetConstantBuffers1,
+      void(UINT, UINT, ID3D11Buffer* const*, const UINT*, const UINT*));
+
+  MOCK_STDCALL_METHOD5(
+      CSSetConstantBuffers1,
+      void(UINT, UINT, ID3D11Buffer* const*, const UINT*, const UINT*));
+
+  MOCK_STDCALL_METHOD5(VSGetConstantBuffers1,
+                       void(UINT, UINT, ID3D11Buffer**, UINT*, UINT*));
+
+  MOCK_STDCALL_METHOD5(HSGetConstantBuffers1,
+                       void(UINT, UINT, ID3D11Buffer**, UINT*, UINT*));
+
+  MOCK_STDCALL_METHOD5(DSGetConstantBuffers1,
+                       void(UINT, UINT, ID3D11Buffer**, UINT*, UINT*));
+
+  MOCK_STDCALL_METHOD5(GSGetConstantBuffers1,
+                       void(UINT, UINT, ID3D11Buffer**, UINT*, UINT*));
+
+  MOCK_STDCALL_METHOD5(PSGetConstantBuffers1,
+                       void(UINT, UINT, ID3D11Buffer**, UINT*, UINT*));
+
+  MOCK_STDCALL_METHOD5(CSGetConstantBuffers1,
+                       void(UINT, UINT, ID3D11Buffer**, UINT*, UINT*));
+
+  MOCK_STDCALL_METHOD2(SwapDeviceContextState,
+                       void(ID3DDeviceContextState*, ID3DDeviceContextState**));
+
+  MOCK_STDCALL_METHOD4(
+      ClearView,
+      void(ID3D11View*, const FLOAT[4], const D3D11_RECT*, UINT));
+
+  MOCK_STDCALL_METHOD3(DiscardView1,
+                       void(ID3D11View*, const D3D11_RECT*, UINT));
+
+  // ID3D11DeviceContext2
+  MOCK_STDCALL_METHOD10(UpdateTileMappings,
+                        HRESULT(ID3D11Resource*,
+                                UINT,
+                                const D3D11_TILED_RESOURCE_COORDINATE*,
+                                const D3D11_TILE_REGION_SIZE*,
+                                ID3D11Buffer*,
+                                UINT,
+                                const UINT*,
+                                const UINT*,
+                                const UINT*,
+                                UINT));
+
+  MOCK_STDCALL_METHOD6(CopyTileMappings,
+                       HRESULT(ID3D11Resource*,
+                               const D3D11_TILED_RESOURCE_COORDINATE*,
+                               ID3D11Resource*,
+                               const D3D11_TILED_RESOURCE_COORDINATE*,
+                               const D3D11_TILE_REGION_SIZE*,
+                               UINT));
+
+  MOCK_STDCALL_METHOD6(CopyTiles,
+                       void(ID3D11Resource*,
+                            const D3D11_TILED_RESOURCE_COORDINATE*,
+                            const D3D11_TILE_REGION_SIZE*,
+                            ID3D11Buffer*,
+                            UINT64,
+                            UINT));
+
+  MOCK_STDCALL_METHOD5(UpdateTiles,
+                       void(ID3D11Resource*,
+                            const D3D11_TILED_RESOURCE_COORDINATE*,
+                            const D3D11_TILE_REGION_SIZE*,
+                            const void*,
+                            UINT));
+
+  MOCK_STDCALL_METHOD2(ResizeTilePool, HRESULT(ID3D11Buffer*, UINT64));
+
+  MOCK_STDCALL_METHOD2(TiledResourceBarrier,
+                       void(ID3D11DeviceChild*, ID3D11DeviceChild*));
+
+  MOCK_STDCALL_METHOD0(IsAnnotationEnabled, BOOL());
+
+  MOCK_STDCALL_METHOD2(SetMarkerInt, void(LPCWSTR, INT));
+
+  MOCK_STDCALL_METHOD2(BeginEventInt, void(LPCWSTR, INT));
+
+  MOCK_STDCALL_METHOD0(EndEvent, void());
+
+  // ID3D11DeviceContext3
+  MOCK_STDCALL_METHOD2(Flush1, void(D3D11_CONTEXT_TYPE, HANDLE));
+
+  MOCK_STDCALL_METHOD1(SetHardwareProtectionState, void(BOOL));
+
+  MOCK_STDCALL_METHOD1(GetHardwareProtectionState, void(BOOL*));
+
+  // ID3D11DeviceContext4
+  MOCK_STDCALL_METHOD2(Signal, HRESULT(ID3D11Fence*, UINT64));
+
+  MOCK_STDCALL_METHOD2(Wait, HRESULT(ID3D11Fence*, UINT64));
+};
+
+class D3D11FenceMock
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          ID3D11Fence> {
+ public:
+  D3D11FenceMock();
+  ~D3D11FenceMock() override;
+
+  MOCK_STDCALL_METHOD1(GetDevice, void(ID3D11Device**));
+  MOCK_STDCALL_METHOD3(GetPrivateData, HRESULT(const GUID&, UINT*, void*));
+  MOCK_STDCALL_METHOD3(SetPrivateData, HRESULT(const GUID&, UINT, const void*));
+  MOCK_STDCALL_METHOD2(SetPrivateDataInterface,
+                       HRESULT(const GUID&, const IUnknown*));
+
+  MOCK_STDCALL_METHOD4(
+      CreateSharedHandle,
+      HRESULT(const SECURITY_ATTRIBUTES*, DWORD, LPCWSTR, HANDLE*));
+
+  MOCK_STDCALL_METHOD0(GetCompletedValue, UINT64());
+
+  MOCK_STDCALL_METHOD2(SetEventOnCompletion, HRESULT(UINT64, HANDLE));
+};
+
+class DXGISwapChain1Mock
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          IDXGISwapChain1> {
+ public:
+  DXGISwapChain1Mock();
+  ~DXGISwapChain1Mock() override;
+
+  // IUnknown
+  MOCK_STDCALL_METHOD2(QueryInterface, HRESULT(REFIID, void**));
+  MOCK_STDCALL_METHOD0(AddRef, ULONG());
+  MOCK_STDCALL_METHOD0(Release, ULONG());
+
+  // IDXGIObject
+  MOCK_STDCALL_METHOD3(SetPrivateData, HRESULT(REFGUID, UINT, const void*));
+  MOCK_STDCALL_METHOD2(SetPrivateDataInterface,
+                       HRESULT(REFGUID, const IUnknown*));
+  MOCK_STDCALL_METHOD3(GetPrivateData, HRESULT(REFGUID, UINT*, void*));
+  MOCK_STDCALL_METHOD2(GetParent, HRESULT(REFIID, void**));
+
+  // IDXGIDeviceSubObject
+  MOCK_STDCALL_METHOD2(GetDevice, HRESULT(REFIID, void**));
+
+  // IDXGISwapChain
+  MOCK_STDCALL_METHOD2(Present, HRESULT(UINT, UINT));
+  MOCK_STDCALL_METHOD3(GetBuffer, HRESULT(UINT, REFIID, void**));
+  MOCK_STDCALL_METHOD2(SetFullscreenState, HRESULT(BOOL, IDXGIOutput*));
+  MOCK_STDCALL_METHOD2(GetFullscreenState, HRESULT(BOOL*, IDXGIOutput**));
+  MOCK_STDCALL_METHOD1(GetDesc, HRESULT(DXGI_SWAP_CHAIN_DESC*));
+  MOCK_STDCALL_METHOD5(ResizeBuffers,
+                       HRESULT(UINT, UINT, UINT, DXGI_FORMAT, UINT));
+  MOCK_STDCALL_METHOD1(ResizeTarget, HRESULT(const DXGI_MODE_DESC*));
+  MOCK_STDCALL_METHOD1(GetContainingOutput, HRESULT(IDXGIOutput**));
+  MOCK_STDCALL_METHOD1(GetFrameStatistics, HRESULT(DXGI_FRAME_STATISTICS*));
+  MOCK_STDCALL_METHOD1(GetLastPresentCount, HRESULT(UINT*));
+
+  // IDXGISwapChain1
+  MOCK_STDCALL_METHOD3(Present1,
+                       HRESULT(UINT, UINT, const DXGI_PRESENT_PARAMETERS*));
+  MOCK_STDCALL_METHOD0(IsTemporaryMonoSupported, BOOL());
+  MOCK_STDCALL_METHOD1(GetRestrictToOutput, HRESULT(IDXGIOutput**));
+  MOCK_STDCALL_METHOD1(SetBackgroundColor, HRESULT(const DXGI_RGBA*));
+  MOCK_STDCALL_METHOD1(GetBackgroundColor, HRESULT(DXGI_RGBA*));
+  MOCK_STDCALL_METHOD1(SetRotation, HRESULT(DXGI_MODE_ROTATION));
+  MOCK_STDCALL_METHOD1(GetRotation, HRESULT(DXGI_MODE_ROTATION*));
+  MOCK_STDCALL_METHOD1(GetDesc1, HRESULT(DXGI_SWAP_CHAIN_DESC1* pDesc));
+  MOCK_STDCALL_METHOD1(GetFullscreenDesc,
+                       HRESULT(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc));
+  MOCK_STDCALL_METHOD1(GetHwnd, HRESULT(HWND* pHwnd));
+  MOCK_STDCALL_METHOD2(GetCoreWindow, HRESULT(REFIID refiid, void** ppUnk));
 };
 
 }  // namespace media

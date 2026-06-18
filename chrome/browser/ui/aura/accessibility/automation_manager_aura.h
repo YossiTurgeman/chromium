@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,134 +9,80 @@
 
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
-#include "base/macros.h"
-#include "ui/accessibility/ax_action_handler.h"
-#include "ui/accessibility/ax_tree_serializer.h"
-#include "ui/views/accessibility/ax_aura_obj_cache.h"
-#include "ui/views/accessibility/ax_event_observer.h"
-#include "ui/views/accessibility/ax_tree_source_views.h"
+#include "base/gtest_prod_util.h"
+#include "base/no_destructor.h"
+#include "base/scoped_observation.h"
+#include "extensions/browser/api/automation_internal/automation_event_router.h"
+#include "ui/accessibility/ax_tree_id.h"
+#include "ui/views/accessibility/tree/views_ax_manager.h"
 
-namespace base {
-template <typename T>
-class NoDestructor;
-}  // namespace base
-
-namespace ui {
-class AXEventBundleSink;
-}  // namespace ui
-
-namespace views {
-class AccessibilityAlertWindow;
-class AXAuraObjWrapper;
-class View;
-}  // namespace views
-
-using AuraAXTreeSerializer = ui::
-    AXTreeSerializer<views::AXAuraObjWrapper*, ui::AXNodeData, ui::AXTreeData>;
+namespace extensions {
+class AutomationEventRouterInterface;
+}  // namespace extensions
 
 // Manages a tree of automation nodes backed by aura constructs.
-class AutomationManagerAura : public ui::AXActionHandler,
-                              public views::AXAuraObjCache::Delegate,
-                              public views::AXEventObserver {
+class AutomationManagerAura : public views::ViewsAXManager,
+                              public extensions::AutomationEventRouterObserver {
  public:
+  AutomationManagerAura(const AutomationManagerAura&) = delete;
+  AutomationManagerAura& operator=(const AutomationManagerAura&) = delete;
+
   // Get the single instance of this class.
   static AutomationManagerAura* GetInstance();
 
-  // Enable automation support for views.
-  void Enable();
-
-  // Disable automation support for views.
-  void Disable();
+  // views::ViewsAXManager:
+  void Enable() override;
+  void Disable() override;
 
   // Handle an event fired upon the root view.
-  void HandleEvent(ax::mojom::Event event_type);
+  // TODO(https://crbug.com/40672441): Investigate whether this can be
+  // refactored away.
+  void HandleEvent(ax::mojom::Event event_type, bool from_user);
 
-  // Handles a textual alert.
-  void HandleAlert(const std::string& text);
+  // AutomationEventRouterObserver:
+  void AllAutomationExtensionsGone() override;
+  void ExtensionListenerAdded() override;
 
-  // AXActionHandlerBase implementation.
-  void PerformAction(const ui::AXActionData& data) override;
-
-  // views::AXAuraObjCache::Delegate implementation.
-  void OnChildWindowRemoved(views::AXAuraObjWrapper* parent) override;
-  void OnEvent(views::AXAuraObjWrapper* aura_obj,
-               ax::mojom::Event event_type) override;
-
-  // views::AXEventObserver:
-  void OnViewEvent(views::View* view, ax::mojom::Event event_type) override;
-
-  void set_event_bundle_sink(ui::AXEventBundleSink* sink) {
-    event_bundle_sink_ = sink;
-  }
-
-  void set_ax_aura_obj_cache_for_testing(
-      std::unique_ptr<views::AXAuraObjCache> cache) {
-    cache_ = std::move(cache);
+  void set_automation_event_router_interface(
+      extensions::AutomationEventRouterInterface* router) {
+    automation_event_router_interface_ = router;
   }
 
  private:
   friend class base::NoDestructor<AutomationManagerAura>;
-
   FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest, ScrollView);
+  FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest, TableView);
   FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest, WebAppearsOnce);
   FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest, EventFromAction);
+  FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest,
+                           SerializeOnDataChanged);
+  FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest,
+                           GetFocusOnChildTree);
+  FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest,
+                           TransientFocusChangesAreSuppressed);
+  FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest,
+                           ViewAddedAndRemovedFromParent);
+  FRIEND_TEST_ALL_PREFIXES(AutomationManagerAuraBrowserTest,
+                           ViewReparentedBetweenViews);
 
   AutomationManagerAura();
   ~AutomationManagerAura() override;
 
-  // Reset state in this manager. If |reset_serializer| is true, reset the
-  // serializer to save memory.
-  void Reset(bool reset_serializer);
-
-  void PostEvent(int32_t id,
-                 ax::mojom::Event event_type,
-                 int action_request_id = -1);
-
-  void SendPendingEvents();
-
-  void PerformHitTest(const ui::AXActionData& data);
-
-  // Logs an error with details about a serialization failure.
-  void OnSerializeFailure(ax::mojom::Event event_type,
-                          const ui::AXTreeUpdate& update);
-
-  // Whether automation support for views is enabled.
-  bool enabled_ = false;
-
-  // Holds the active views-based accessibility tree. A tree currently consists
-  // of all views descendant to a |Widget| (see |AXTreeSourceViews|).
-  // A tree becomes active when an event is fired on a descendant view.
-  std::unique_ptr<views::AXTreeSourceViews> current_tree_;
-
-  // Serializes incremental updates on the currently active tree
-  // |current_tree_|.
-  std::unique_ptr<AuraAXTreeSerializer> current_tree_serializer_;
-
-  bool processing_posted_ = false;
-
-  struct Event {
-    int id;
-    ax::mojom::Event event_type;
-    int action_request_id;
-    bool is_performing_action;
-  };
-
-  std::vector<Event> pending_events_;
+  void DispatchAccessibilityEvents(const ui::AXTreeID& tree_id,
+                                   std::vector<ui::AXTreeUpdate> tree_updates,
+                                   const gfx::Point& mouse_location,
+                                   std::vector<ui::AXEvent> events) override;
 
   // The handler for AXEvents (e.g. the extensions subsystem in production, or
   // a fake for tests).
-  ui::AXEventBundleSink* event_bundle_sink_ = nullptr;
+  raw_ptr<extensions::AutomationEventRouterInterface>
+      automation_event_router_interface_ = nullptr;
 
-  std::unique_ptr<views::AccessibilityAlertWindow> alert_window_;
-
-  std::unique_ptr<views::AXAuraObjCache> cache_;
-
-  bool is_performing_action_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(AutomationManagerAura);
+  base::ScopedObservation<extensions::AutomationEventRouter,
+                          extensions::AutomationEventRouterObserver>
+      automation_event_router_observer_{this};
 };
 
 #endif  // CHROME_BROWSER_UI_AURA_ACCESSIBILITY_AUTOMATION_MANAGER_AURA_H_

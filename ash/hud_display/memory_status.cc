@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,10 @@
 
 #include <unistd.h>
 
+#include <string_view>
+
 #include "base/files/file_util.h"
 #include "base/logging.h"
-#include "base/process/internal_linux.h"
 #include "base/process/process_iterator.h"
 #include "base/process/process_metrics.h"
 #include "base/strings/string_number_conversions.h"
@@ -37,9 +38,6 @@ base::FilePath GetProcPidDir(pid_t pid) {
 }
 
 std::string ReadProcFile(const base::FilePath& path) {
-  // Synchronously reading files in /proc and /sys are safe.
-  base::ThreadRestrictions::ScopedAllowIO allow_io;
-
   std::string result;
   ReadFileToString(path, &result);
   return result;
@@ -54,7 +52,7 @@ std::string GetProcCmdline(pid_t pid) {
 
 int64_t GetProcVM_RSS(pid_t pid) {
   const std::string statm = ReadProcFile(GetProcPidDir(pid).Append("statm"));
-  const std::vector<base::StringPiece> parts = base::SplitStringPiece(
+  const std::vector<std::string_view> parts = base::SplitStringPiece(
       statm, " \n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
   if (parts.size() <= static_cast<size_t>(ProcStatMFields::VM_RSS)) {
@@ -69,7 +67,7 @@ int64_t GetProcVM_RSS(pid_t pid) {
 
 int64_t GetProcVM_SHARED(pid_t pid) {
   const std::string statm = ReadProcFile(GetProcPidDir(pid).Append("statm"));
-  const std::vector<base::StringPiece> parts = base::SplitStringPiece(
+  const std::vector<std::string_view> parts = base::SplitStringPiece(
       statm, " \n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
   if (parts.size() <= static_cast<size_t>(ProcStatMFields::VM_SHARED)) {
@@ -115,7 +113,7 @@ MemoryStatus::ProcessMemoryCountersByCgroup::ProcessMemoryCountersByCgroup(
     // Ignore read failures.
     return;
   }
-  const std::vector<base::StringPiece> pids = base::SplitStringPiece(
+  const std::vector<std::string_view> pids = base::SplitStringPiece(
       pids_list_str, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
   for (const auto& p : pids) {
     int64_t pid;
@@ -164,11 +162,16 @@ void MemoryStatus::UpdatePerProcessStat() {
 }
 
 void MemoryStatus::UpdateMeminfo() {
-  base::SystemMemoryInfoKB meminfo;
+  base::SystemMemoryInfo meminfo;
   base::GetSystemMemoryInfo(&meminfo);
-  total_ram_size_ = meminfo.total * 1024LL;
-  total_free_ = meminfo.free * 1024LL;
-  gpu_kernel_ = std::max(meminfo.gem_size, 0LL);  // == -1 when not supported.
+  total_ram_size_ = meminfo.total.InBytes();
+  total_free_ = meminfo.free.InBytes();
+
+  base::GraphicsMemoryInfoKB gpu_meminfo;
+  if (base::GetGraphicsMemoryInfo(&gpu_meminfo))
+    gpu_kernel_ = gpu_meminfo.gpu_memory_size;
+  else
+    gpu_kernel_ = 0LL;
 }
 
 }  // namespace hud_display

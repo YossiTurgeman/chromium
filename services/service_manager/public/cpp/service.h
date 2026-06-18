@@ -1,16 +1,15 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SERVICES_SERVICE_MANAGER_PUBLIC_CPP_SERVICE_H_
 #define SERVICES_SERVICE_MANAGER_PUBLIC_CPP_SERVICE_H_
 
+#include <optional>
 #include <string>
 
-#include "base/callback.h"
 #include "base/component_export.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/functional/callback.h"
 #include "base/process/process_handle.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/system/message_pipe.h"
@@ -84,9 +83,9 @@ class COMPONENT_EXPORT(SERVICE_MANAGER_CPP) Service {
   // is created, |callback| should be invoked with the new instance's PID (which
   // may be the same as this service's PID if they will share a process). If the
   // requested service is not launched, |callback| should be invoked with
-  // |base::nullopt|.
+  // |std::nullopt|.
   using CreatePackagedServiceInstanceCallback =
-      base::OnceCallback<void(base::Optional<base::ProcessId>)>;
+      base::OnceCallback<void(std::optional<base::ProcessId>)>;
   virtual void CreatePackagedServiceInstance(
       const std::string& service_name,
       mojo::PendingReceiver<mojom::Service> service_receiver,

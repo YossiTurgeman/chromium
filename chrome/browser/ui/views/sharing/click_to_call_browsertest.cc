@@ -1,16 +1,16 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 #include <string>
 
-#include "base/bind_helpers.h"
-#include "base/macros.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "chrome/app/chrome_command_ids.h"
@@ -19,12 +19,10 @@
 #include "chrome/browser/sharing/click_to_call/click_to_call_metrics.h"
 #include "chrome/browser/sharing/click_to_call/click_to_call_ui_controller.h"
 #include "chrome/browser/sharing/click_to_call/click_to_call_utils.h"
-#include "chrome/browser/sharing/click_to_call/feature.h"
-#include "chrome/browser/sharing/features.h"
-#include "chrome/browser/sharing/sharing_constants.h"
-#include "chrome/browser/sharing/sharing_sync_preference.h"
 #include "chrome/browser/sync/test/integration/sessions_helper.h"
-#include "chrome/browser/ui/views/hover_button.h"
+#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/ui_features.h"
+#include "chrome/browser/ui/views/controls/hover_button.h"
 #include "chrome/browser/ui/views/page_action/page_action_icon_view.h"
 #include "chrome/browser/ui/views/sharing/sharing_browsertest.h"
 #include "chrome/browser/ui/views/sharing/sharing_dialog_view.h"
@@ -32,17 +30,24 @@
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/policy/policy_constants.h"
 #include "components/prefs/pref_service.h"
-#include "components/sync/driver/profile_sync_service.h"
-#include "components/sync/driver/sync_driver_switches.h"
+#include "components/sharing_message/features.h"
+#include "components/sharing_message/pref_names.h"
+#include "components/sharing_message/sharing_constants.h"
+#include "components/sharing_message/sharing_sync_preference.h"
+#include "components/sync/service/sync_service_impl.h"
 #include "components/ukm/test_ukm_recorder.h"
+#include "content/public/common/isolated_world_ids.h"
 #include "content/public/test/browser_test.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "ui/events/base_event_utils.h"
-#include "ui/views/layout/grid_layout.h"
+#include "ui/views/test/button_test_api.h"
 #include "url/gurl.h"
 
 namespace {
+
+using SharingFeature = syncer::DeviceInfo::SharingFeature;
+
 const char kTelUrl[] = "tel:+9876543210";
 const char kNonTelUrl[] = "https://google.com";
 const char kLinkText[] = "Google";
@@ -59,10 +64,18 @@ enum class ClickToCallPolicy {
 
 }  // namespace
 
-// Base browser tests for the Click To Call feature.
-class BaseClickToCallBrowserTest : public SharingBrowserTest {
+// Browser tests for the Click To Call feature.
+class ClickToCallBrowserTest : public SharingBrowserTest {
  public:
-  ~BaseClickToCallBrowserTest() override {}
+  ClickToCallBrowserTest() {
+    features_.InitWithFeatures(
+        {
+            kClickToCall,
+            features::kPageActionsMigration,
+        },
+        {});
+  }
+  ~ClickToCallBrowserTest() override = default;
 
   std::string GetTestPageURL() const override {
     return std::string(kTestPageURL);
@@ -70,7 +83,7 @@ class BaseClickToCallBrowserTest : public SharingBrowserTest {
 
   void CheckLastSharingMessageSent(
       const std::string& expected_phone_number) const {
-    chrome_browser_sharing::SharingMessage sharing_message =
+    components_sharing_message::SharingMessage sharing_message =
         GetLastSharingMessageSent();
     ASSERT_TRUE(sharing_message.has_click_to_call_message());
     EXPECT_EQ(expected_phone_number,
@@ -78,42 +91,27 @@ class BaseClickToCallBrowserTest : public SharingBrowserTest {
   }
 
  protected:
-  base::test::ScopedFeatureList feature_list_;
-
   std::string HistogramName(const char* suffix) {
     return base::StrCat({"Sharing.ClickToCall", suffix});
   }
 
   base::HistogramTester::CountsMap GetTotalHistogramCounts(
       const base::HistogramTester& histograms) {
-    base::HistogramTester::CountsMap counts =
-        histograms.GetTotalCountsForPrefix(HistogramName(""));
-    // PhoneNumberPrecompileTime will be logged 15 seconds after startup but
-    // we want to ignore it in these browser tests as we don't know if the
-    // test takes more or less time than that.
-    counts.erase(HistogramName("PhoneNumberPrecompileTime"));
-    return counts;
-  }
-};
-
-// Browser tests for the Click To Call feature.
-class ClickToCallBrowserTest : public BaseClickToCallBrowserTest {
- public:
-  ClickToCallBrowserTest() {
-    feature_list_.InitAndEnableFeature(kClickToCallUI);
+    return histograms.GetTotalCountsForPrefix(HistogramName(""));
   }
 
- protected:
-  base::test::ScopedFeatureList feature_list_;
+ private:
+  base::test::ScopedFeatureList features_;
 };
 
 // TODO(himanshujaju): Add UI checks.
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest,
                        ContextMenu_TelLink_SingleDeviceAvailable) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
+  Init(SharingFeature::kClickToCallV2);
+  auto devices =
+      sharing_service()->GetDeviceCandidates(SharingFeature::kClickToCallV2);
+  // Only the remote device is available; the local device is filtered out by
+  // GUID, mirroring production behavior.
   ASSERT_EQ(1u, devices.size());
 
   std::unique_ptr<TestRenderViewContextMenu> menu =
@@ -127,15 +125,14 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest,
 
   menu->ExecuteCommand(IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_SINGLE_DEVICE,
                        0);
-  CheckLastReceiver(*devices[0]);
-  CheckLastSharingMessageSent(GetUnescapedURLContent(GURL(kTelUrl)));
+  CheckLastReceiver(devices[0]);
+  CheckLastSharingMessageSent(GURL(kTelUrl).GetContent());
 }
 
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_NoDevicesAvailable) {
-  Init(sync_pb::SharingSpecificFields::UNKNOWN,
-       sync_pb::SharingSpecificFields::UNKNOWN);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
+  Init(SharingFeature::kUnknown);
+  auto devices =
+      sharing_service()->GetDeviceCandidates(SharingFeature::kClickToCallV2);
   ASSERT_EQ(0u, devices.size());
 
   std::unique_ptr<TestRenderViewContextMenu> menu =
@@ -146,105 +143,48 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_NoDevicesAvailable) {
       IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_MULTIPLE_DEVICES));
 }
 
-IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest,
-                       ContextMenu_DevicesAvailable_SyncTurnedOff) {
-  if (base::FeatureList::IsEnabled(kSharingSendViaSync)) {
-    // Turning off sync will have no effect when Click to Call is available on
-    // sign-in.
-    return;
-  }
-
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
+IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_UnsafeTelLink) {
+  Init(SharingFeature::kClickToCallV2);
+  auto devices =
+      sharing_service()->GetDeviceCandidates(SharingFeature::kClickToCallV2);
+  // Only the remote device is available; the local device is filtered out by
+  // GUID, mirroring production behavior.
   ASSERT_EQ(1u, devices.size());
 
-  // Disable syncing preferences which is necessary for Sharing.
-  GetSyncService(0)->GetUserSettings()->SetSelectedTypes(false, {});
-  ASSERT_TRUE(AwaitQuiescence());
-
-  std::unique_ptr<TestRenderViewContextMenu> menu =
-      InitContextMenu(GURL(kTelUrl), kLinkText, kTextWithoutPhoneNumber);
+  std::unique_ptr<TestRenderViewContextMenu> menu = InitContextMenu(
+      GURL("tel:%23*999%23"), kLinkText, kTextWithoutPhoneNumber);
   EXPECT_FALSE(menu->IsItemPresent(
       IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_SINGLE_DEVICE));
   EXPECT_FALSE(menu->IsItemPresent(
       IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_MULTIPLE_DEVICES));
 }
 
-IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest,
-                       ContextMenu_TelLink_MultipleDevicesAvailable) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
-  ASSERT_EQ(2u, devices.size());
+IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_EscapedCharacters) {
+  Init(SharingFeature::kClickToCallV2);
+  auto devices =
+      sharing_service()->GetDeviceCandidates(SharingFeature::kClickToCallV2);
+  // Only the remote device is available; the local device is filtered out by
+  // GUID, mirroring production behavior.
+  ASSERT_EQ(1u, devices.size());
 
+  GURL phone_number("tel:%2B44%20123");
   std::unique_ptr<TestRenderViewContextMenu> menu =
-      InitContextMenu(GURL(kTelUrl), kLinkText, kTextWithoutPhoneNumber);
-  EXPECT_FALSE(menu->IsItemPresent(
-      IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_SINGLE_DEVICE));
+      InitContextMenu(phone_number, kLinkText, kTextWithoutPhoneNumber);
   ASSERT_TRUE(menu->IsItemPresent(
-      IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_MULTIPLE_DEVICES));
-
-  ui::MenuModel* sub_menu_model = nullptr;
-  int device_id = -1;
-  ASSERT_TRUE(menu->GetMenuModelAndItemIndex(kSubMenuFirstDeviceCommandId,
-                                             &sub_menu_model, &device_id));
-  EXPECT_EQ(2, sub_menu_model->GetItemCount());
-  EXPECT_EQ(0, device_id);
-
-  for (auto& device : devices) {
-    EXPECT_EQ(kSubMenuFirstDeviceCommandId + device_id,
-              sub_menu_model->GetCommandIdAt(device_id));
-    sub_menu_model->ActivatedAt(device_id);
-
-    CheckLastReceiver(*device);
-    CheckLastSharingMessageSent(GetUnescapedURLContent(GURL(kTelUrl)));
-    device_id++;
-  }
-}
-
-IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest,
-                       ContextMenu_HighlightedText_MultipleDevicesAvailable) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
-  ASSERT_EQ(2u, devices.size());
-
-  std::unique_ptr<TestRenderViewContextMenu> menu =
-      InitContextMenu(GURL(kNonTelUrl), kLinkText, kTextWithPhoneNumber);
-  EXPECT_FALSE(menu->IsItemPresent(
       IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_SINGLE_DEVICE));
-  ASSERT_TRUE(menu->IsItemPresent(
+  EXPECT_FALSE(menu->IsItemPresent(
       IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_MULTIPLE_DEVICES));
 
-  ui::MenuModel* sub_menu_model = nullptr;
-  int device_id = -1;
-  ASSERT_TRUE(menu->GetMenuModelAndItemIndex(kSubMenuFirstDeviceCommandId,
-                                             &sub_menu_model, &device_id));
-  EXPECT_EQ(2, sub_menu_model->GetItemCount());
-  EXPECT_EQ(0, device_id);
-
-  for (auto& device : devices) {
-    EXPECT_EQ(kSubMenuFirstDeviceCommandId + device_id,
-              sub_menu_model->GetCommandIdAt(device_id));
-    sub_menu_model->ActivatedAt(device_id);
-
-    CheckLastReceiver(*device);
-    base::Optional<std::string> expected_number =
-        ExtractPhoneNumberForClickToCall(GetProfile(0), kTextWithPhoneNumber);
-    ASSERT_TRUE(expected_number.has_value());
-    CheckLastSharingMessageSent(expected_number.value());
-    device_id++;
-  }
+  menu->ExecuteCommand(IDC_CONTENT_CONTEXT_SHARING_CLICK_TO_CALL_SINGLE_DEVICE,
+                       0);
+  CheckLastReceiver(devices[0]);
+  CheckLastSharingMessageSent(phone_number.GetContent());
 }
+
 
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_TelLink_Histograms) {
   base::HistogramTester histograms;
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
+  Init(SharingFeature::kClickToCallV2);
 
   // Trigger a context menu for a link with 8 digits and 9 characters.
   std::unique_ptr<TestRenderViewContextMenu> menu = InitContextMenu(
@@ -274,8 +214,7 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_TelLink_Histograms) {
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest,
                        ContextMenu_HighlightedText_Histograms) {
   base::HistogramTester histograms;
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
+  Init(SharingFeature::kClickToCallV2);
 
   // Trigger a context menu for a selection with 8 digits and 9 characters.
   std::unique_ptr<TestRenderViewContextMenu> menu =
@@ -303,10 +242,11 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest,
 }
 
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_UKM) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
+  Init(SharingFeature::kClickToCallV2);
+  auto devices =
+      sharing_service()->GetDeviceCandidates(SharingFeature::kClickToCallV2);
+  // Only the remote device is available; the local device is filtered out by
+  // GUID, mirroring production behavior.
   ASSERT_EQ(1u, devices.size());
 
   ukm::TestAutoSetUkmRecorder ukm_recorder;
@@ -326,8 +266,8 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_UKM) {
 
   // Expect UKM metrics to be logged
   run_loop.Run();
-  std::vector<const ukm::mojom::UkmEntry*> ukm_entries =
-      ukm_recorder.GetEntriesByName(
+  std::vector<raw_ptr<const ukm::mojom::UkmEntry, VectorExperimental>>
+      ukm_entries = ukm_recorder.GetEntriesByName(
           ukm::builders::Sharing_ClickToCall::kEntryName);
   ASSERT_EQ(1u, ukm_entries.size());
 
@@ -351,14 +291,14 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, ContextMenu_UKM) {
   EXPECT_EQ(true, *has_devices);
   EXPECT_EQ(static_cast<int64_t>(SharingClickToCallSelection::kDevice),
             *selection);
-  // TODO(knollr): mock apps and verify |has_apps| here too.
 }
 
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, CloseTabWithBubble) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
+  Init(SharingFeature::kClickToCallV2);
+  auto devices =
+      sharing_service()->GetDeviceCandidates(SharingFeature::kClickToCallV2);
+  // Only the remote device is available; the local device is filtered out by
+  // GUID, mirroring production behavior.
   ASSERT_EQ(1u, devices.size());
 
   base::RunLoop run_loop;
@@ -366,67 +306,59 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, CloseTabWithBubble) {
       ->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
 
   // Click on the tel link to trigger the bubble view.
-  web_contents()->GetMainFrame()->ExecuteJavaScriptForTests(
-      base::ASCIIToUTF16("document.querySelector('a').click();"),
-      base::NullCallback());
+  web_contents()->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
+      u"document.querySelector('a').click();", base::NullCallback(),
+      content::ISOLATED_WORLD_ID_GLOBAL);
   // Wait until the bubble is visible.
   run_loop.Run();
 
   // Close the tab while the bubble is opened.
-  // Regression test for http://crbug.com/1000934.
+  // Regression test for http://crbug.com/40050060.
   sessions_helper::CloseTab(/*browser_index=*/0, /*tab_index=*/0);
 }
 
 // TODO(himanshujaju) - Add chromeos test for same flow.
-#if !defined(OS_CHROMEOS)
+#if !BUILDFLAG(IS_CHROMEOS)
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, LeftClick_ChooseDevice) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
-  auto devices = sharing_service()->GetDeviceCandidates(
-      sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2);
+  Init(SharingFeature::kClickToCallV2);
+  auto devices =
+      sharing_service()->GetDeviceCandidates(SharingFeature::kClickToCallV2);
+  // Only the remote device is available; the local device is filtered out by
+  // GUID, mirroring production behavior.
   ASSERT_EQ(1u, devices.size());
 
   base::RunLoop run_loop;
-  PageActionIconView* click_to_call_icon =
-      GetPageActionIconView(PageActionIconType::kClickToCall);
-  ASSERT_FALSE(click_to_call_icon->GetVisible());
-
   ClickToCallUiController* controller =
       ClickToCallUiController::GetOrCreateFromWebContents(web_contents());
   controller->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
 
   // Click on the tel link to trigger the bubble view.
-  web_contents()->GetMainFrame()->ExecuteJavaScriptForTests(
-      base::ASCIIToUTF16("document.querySelector('a').click();"),
-      base::NullCallback());
+  web_contents()->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
+      u"document.querySelector('a').click();", base::NullCallback(),
+      content::ISOLATED_WORLD_ID_GLOBAL);
   // Wait until the bubble is visible.
   run_loop.Run();
 
-  ASSERT_TRUE(click_to_call_icon->GetVisible());
-
   SharingDialogView* dialog =
       static_cast<SharingDialogView*>(controller->dialog());
+
   EXPECT_EQ(SharingDialogType::kDialogWithDevicesMaybeApps,
             dialog->GetDialogType());
-  EXPECT_EQ(1u, dialog->data_.devices.size());
-  EXPECT_EQ(dialog->data_.devices.size() + dialog->data_.apps.size(),
-            dialog->dialog_buttons_.size());
-
-  const ui::MouseEvent event(ui::ET_MOUSE_PRESSED, gfx::Point(), gfx::Point(),
-                             ui::EventTimeForNow(), 0, 0);
 
   // Choose first device.
-  dialog->ButtonPressed(dialog->dialog_buttons_[0], event);
+  const auto& buttons = dialog->button_list_for_testing()->children();
+  ASSERT_GT(buttons.size(), 0u);
+  views::test::ButtonTestApi(static_cast<views::Button*>(buttons[0]))
+      .NotifyDefaultMouseClick();
 
-  CheckLastReceiver(*devices[0]);
+  CheckLastReceiver(devices[0]);
   // Defined in tel.html
   CheckLastSharingMessageSent("0123456789");
 }
 #endif
 
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, OpenNewTabAndShowBubble) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
+  Init(SharingFeature::kClickToCallV2);
 
   // Open tab to different origin.
   sessions_helper::OpenTab(
@@ -435,9 +367,9 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, OpenNewTabAndShowBubble) {
 
   // Expect dialog to be shown in context of active WebContents.
   base::RunLoop run_loop;
-  ClickToCallUiController::GetOrCreateFromWebContents(
-      GetBrowser(0)->tab_strip_model()->GetWebContentsAt(1))
-      ->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
+  auto* controller = ClickToCallUiController::GetOrCreateFromWebContents(
+      GetBrowser(0)->tab_strip_model()->GetWebContentsAt(1));
+  controller->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
 
   // Navigate initial tab to a tel link.
   NavigateParams params(GetBrowser(0), GURL(kTelUrl), ui::PAGE_TRANSITION_LINK);
@@ -449,52 +381,46 @@ IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, OpenNewTabAndShowBubble) {
   // Wait until the bubble is visible.
   run_loop.Run();
   views::BubbleDialogDelegate* bubble =
-      GetPageActionIconView(PageActionIconType::kClickToCall)->GetBubble();
+      SharingDialogView::GetAsBubbleForClickToCall(controller->dialog());
   ASSERT_NE(nullptr, bubble);
 
-#if defined(OS_CHROMEOS)
-  // Ensure that the dialog shows the origin in column id 1.
-  EXPECT_NE(nullptr, static_cast<views::GridLayout*>(
-                         bubble->GetContentsView()->GetLayoutManager())
-                         ->GetColumnSet(1));
-#else
+#if !BUILDFLAG(IS_CHROMEOS)
   // Ensure that the dialog shows the origin in the footnote.
   EXPECT_NE(nullptr, bubble->GetFootnoteViewForTesting());
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 IN_PROC_BROWSER_TEST_F(ClickToCallBrowserTest, NavigateDifferentOrigin) {
-  Init(sync_pb::SharingSpecificFields::CLICK_TO_CALL_V2,
-       sync_pb::SharingSpecificFields::UNKNOWN);
+  Init(SharingFeature::kClickToCallV2);
 
   base::RunLoop run_loop;
-  PageActionIconView* click_to_call_icon =
-      GetPageActionIconView(PageActionIconType::kClickToCall);
-  ClickToCallUiController::GetOrCreateFromWebContents(web_contents())
-      ->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
+
+  auto* controller =
+      ClickToCallUiController::GetOrCreateFromWebContents(web_contents());
+  controller->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
 
   // Click on the tel link to trigger the bubble view.
-  web_contents()->GetMainFrame()->ExecuteJavaScriptForTests(
-      base::ASCIIToUTF16("document.querySelector('a').click();"),
-      base::NullCallback());
+  web_contents()->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
+      u"document.querySelector('a').click();", base::NullCallback(),
+      content::ISOLATED_WORLD_ID_GLOBAL);
   // Wait until the bubble is visible.
   run_loop.Run();
-  EXPECT_NE(nullptr, click_to_call_icon->GetBubble());
+  EXPECT_NE(nullptr,
+            SharingDialogView::GetAsBubbleForClickToCall(controller->dialog()));
 
   // Navigate to a different origin.
   sessions_helper::NavigateTab(/*browser_index=*/0, GURL("https://google.com"));
 
   // Ensure that the bubble is now closed.
-  EXPECT_EQ(nullptr, click_to_call_icon->GetBubble());
+  EXPECT_EQ(nullptr,
+            SharingDialogView::GetAsBubbleForClickToCall(controller->dialog()));
 }
 
 class ClickToCallPolicyTest
     : public policy::PolicyTest,
       public testing::WithParamInterface<ClickToCallPolicy> {
  public:
-  ClickToCallPolicyTest() {
-    scoped_feature_list_.InitAndEnableFeature(kClickToCallUI);
-  }
+  ClickToCallPolicyTest() = default;
   ~ClickToCallPolicyTest() override = default;
 
   void SetUpInProcessBrowserTestFixture() override {
@@ -515,7 +441,7 @@ class ClickToCallPolicyTest
   }
 
  private:
-  base::test::ScopedFeatureList scoped_feature_list_;
+  base::test::ScopedFeatureList features_{kClickToCall};
 };
 
 IN_PROC_BROWSER_TEST_P(ClickToCallPolicyTest, RunTest) {
@@ -532,12 +458,13 @@ IN_PROC_BROWSER_TEST_P(ClickToCallPolicyTest, RunTest) {
   EXPECT_EQ(expected_enabled, ShouldOfferClickToCallForURL(browser()->profile(),
                                                            GURL(kPhoneLink)));
 
-  base::Optional<std::string> extracted =
+  std::optional<std::string> extracted =
       ExtractPhoneNumberForClickToCall(browser()->profile(), kPhoneNumber);
-  if (expected_enabled)
+  if (expected_enabled) {
     EXPECT_EQ(kPhoneNumber, extracted.value());
-  else
+  } else {
     EXPECT_FALSE(extracted.has_value());
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(All,

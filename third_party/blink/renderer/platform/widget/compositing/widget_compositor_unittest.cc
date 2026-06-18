@@ -1,64 +1,61 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/widget/compositing/widget_compositor.h"
 
+#include <tuple>
+
+#include "base/memory/raw_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/task_environment.h"
+#include "base/types/pass_key.h"
 #include "cc/test/layer_tree_test.h"
 #include "cc/trees/layer_tree_host.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "third_party/blink/public/platform/scheduler/test/renderer_scheduler_test_support.h"
+#include "third_party/blink/renderer/platform/widget/compositing/test/stub_widget_base_client.h"
 #include "third_party/blink/renderer/platform/widget/widget_base.h"
 #include "third_party/blink/renderer/platform/widget/widget_base_client.h"
+#include "third_party/blink/renderer/platform/wtf/thread_safe_ref_counted.h"
 
 namespace blink {
 
-class StubWidgetBaseClient : public WidgetBaseClient {
- public:
-  void BeginMainFrame(base::TimeTicks) override {}
-  void RecordTimeToFirstActivePaint(base::TimeDelta) override {}
-  void UpdateLifecycle(WebLifecycleUpdate, DocumentUpdateReason) override {}
-  void RequestNewLayerTreeFrameSink(LayerTreeFrameSinkCallback) override {}
-  WebInputEventResult DispatchBufferedTouchEvents() override {
-    return WebInputEventResult::kNotHandled;
-  }
-  WebInputEventResult HandleInputEvent(const WebCoalescedInputEvent&) override {
-    return WebInputEventResult::kNotHandled;
-  }
-  bool SupportsBufferedTouchEvents() override { return false; }
-  bool WillHandleGestureEvent(const WebGestureEvent&) override { return false; }
-  bool WillHandleMouseEvent(const WebMouseEvent&) override { return false; }
-  void ObserveGestureEventAndResult(const WebGestureEvent&,
-                                    const gfx::Vector2dF&,
-                                    const cc::OverscrollBehavior&,
-                                    bool) override {}
-  void FocusChanged(bool) override {}
-  void UpdateVisualProperties(
-      const VisualProperties& visual_properties) override {}
-  const ScreenInfo& GetOriginalScreenInfo() override { return screen_info_; }
-  gfx::Rect ViewportVisibleRect() override { return gfx::Rect(); }
-
- private:
-  ScreenInfo screen_info_;
-};
-
 class FakeWidgetCompositor : public WidgetCompositor {
  public:
-  FakeWidgetCompositor(
+  static scoped_refptr<FakeWidgetCompositor> Create(
       cc::LayerTreeHost* layer_tree_host,
       base::WeakPtr<WidgetBase> widget_base,
       scoped_refptr<base::SingleThreadTaskRunner> main_task_runner,
       scoped_refptr<base::SingleThreadTaskRunner> compositor_task_runner,
-      mojo::PendingReceiver<mojom::blink::WidgetCompositor> receiver)
-      : WidgetCompositor(widget_base,
+      mojo::PendingReceiver<mojom::blink::WidgetCompositor> receiver) {
+    auto compositor = base::MakeRefCounted<FakeWidgetCompositor>(
+        WidgetCompositorPassKeyProvider::GetPassKey(), layer_tree_host,
+        std::move(widget_base), std::move(main_task_runner),
+        std::move(compositor_task_runner));
+    compositor->BindOnThread(std::move(receiver));
+    return compositor;
+  }
+
+  FakeWidgetCompositor(
+      base::PassKey<WidgetCompositorPassKeyProvider> pass_key,
+      cc::LayerTreeHost* layer_tree_host,
+      base::WeakPtr<WidgetBase> widget_base,
+      scoped_refptr<base::SingleThreadTaskRunner> main_task_runner,
+      scoped_refptr<base::SingleThreadTaskRunner> compositor_task_runner)
+      : WidgetCompositor(std::move(pass_key),
+                         widget_base,
                          std::move(main_task_runner),
-                         std::move(compositor_task_runner),
-                         std::move(receiver)),
+                         std::move(compositor_task_runner)),
         layer_tree_host_(layer_tree_host) {}
 
   cc::LayerTreeHost* LayerTreeHost() const override { return layer_tree_host_; }
 
-  cc::LayerTreeHost* layer_tree_host_;
+  raw_ptr<cc::LayerTreeHost> layer_tree_host_;
+
+ private:
+  friend class ThreadSafeRefCounted<FakeWidgetCompositor>;
+  ~FakeWidgetCompositor() override = default;
 };
 
 class WidgetCompositorTest : public cc::LayerTreeTest {
@@ -66,16 +63,23 @@ class WidgetCompositorTest : public cc::LayerTreeTest {
   using CompositorMode = cc::CompositorMode;
 
   void BeginTest() override {
-    widget_base_ = std::make_unique<WidgetBase>(
-        &client_,
-        blink::CrossVariantMojoAssociatedRemote<
-            blink::mojom::WidgetHostInterfaceBase>(),
-        blink::CrossVariantMojoAssociatedReceiver<
-            blink::mojom::WidgetInterfaceBase>(),
-        /* is_hidden */ false,
-        /* never_composited */ false);
+    mojo::AssociatedRemote<mojom::blink::Widget> widget_remote;
+    mojo::PendingAssociatedReceiver<mojom::blink::Widget> widget_receiver =
+        widget_remote.BindNewEndpointAndPassDedicatedReceiver();
 
-    widget_compositor_ = base::MakeRefCounted<FakeWidgetCompositor>(
+    mojo::AssociatedRemote<mojom::blink::WidgetHost> widget_host_remote;
+    std::ignore = widget_host_remote.BindNewEndpointAndPassDedicatedReceiver();
+
+    widget_base_ = std::make_unique<WidgetBase>(
+        /*widget_base_client=*/&client_, widget_host_remote.Unbind(),
+        std::move(widget_receiver),
+        scheduler::GetSingleThreadTaskRunnerForTesting(),
+        /*is_hidden=*/false,
+        /*never_composited=*/false,
+        /*is_for_child_local_root=*/false,
+        /*is_for_scalable_page=*/true);
+
+    widget_compositor_ = FakeWidgetCompositor::Create(
         layer_tree_host(), widget_base_->GetWeakPtr(),
         layer_tree_host()->GetTaskRunnerProvider()->MainThreadTaskRunner(),
         layer_tree_host()->GetTaskRunnerProvider()->ImplThreadTaskRunner(),

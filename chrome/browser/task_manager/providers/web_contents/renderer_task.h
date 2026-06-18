@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,11 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/byte_count.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "chrome/browser/task_manager/providers/task.h"
 #include "components/favicon/core/favicon_driver_observer.h"
-#include "content/public/browser/navigation_entry.h"
 
 class ProcessResourceUsage;
 
@@ -29,12 +30,14 @@ namespace task_manager {
 class RendererTask : public Task,
                      public favicon::FaviconDriverObserver {
  public:
-  RendererTask(const base::string16& title,
+  RendererTask(const std::u16string& title,
                const gfx::ImageSkia* icon,
                content::WebContents* web_contents);
-  RendererTask(const base::string16& title,
+  RendererTask(const std::u16string& title,
                const gfx::ImageSkia* icon,
                content::RenderFrameHost* subframe);
+  RendererTask(const RendererTask&) = delete;
+  RendererTask& operator=(const RendererTask&) = delete;
   ~RendererTask() override;
 
   // An abstract method that will be called when the event
@@ -50,16 +53,18 @@ class RendererTask : public Task,
 
   // task_manager::Task:
   void Activate() override;
+  bool IsKillable() override;
+  bool Kill() override;
   void Refresh(const base::TimeDelta& update_interval,
                int64_t refresh_flags) override;
   Type GetType() const override;
   int GetChildProcessUniqueID() const override;
   void GetTerminationStatus(base::TerminationStatus* out_status,
                             int* out_error_code) const override;
-  base::string16 GetProfileName() const override;
+  std::u16string GetProfileName() const override;
   SessionID GetTabId() const override;
-  int64_t GetV8MemoryAllocated() const override;
-  int64_t GetV8MemoryUsed() const override;
+  std::optional<base::ByteSize> GetV8MemoryAllocated() const override;
+  std::optional<base::ByteSize> GetV8MemoryUsed() const override;
   bool ReportsWebCacheStats() const override;
   blink::WebCacheResourceTypeStats GetWebCacheStats() const override;
 
@@ -80,36 +85,40 @@ class RendererTask : public Task,
 
   content::WebContents* web_contents() const { return web_contents_; }
 
+  base::WeakPtr<RendererTask> AsWeakPtr();
+
  protected:
   // Returns the title of the given |web_contents|.
-  static base::string16 GetTitleFromWebContents(
+  static std::u16string GetTitleFromWebContents(
       content::WebContents* web_contents);
 
   // Returns the favicon of the given |web_contents| if any, and returns
   // |nullptr| otherwise.
-  static const gfx::ImageSkia* GetFaviconFromWebContents(
+  static std::unique_ptr<gfx::ImageSkia> GetFaviconFromWebContents(
       content::WebContents* web_contents);
 
   // Prefixes the given renderer |title| with the appropriate string based on
   // whether it's an app, an extension, incognito or a background page or
   // contents.
-  static const base::string16 PrefixRendererTitle(const base::string16& title,
+  static const std::u16string PrefixRendererTitle(const std::u16string& title,
                                                   bool is_app,
                                                   bool is_extension,
                                                   bool is_incognito,
                                                   bool is_background);
 
+  void DefaultUpdateFaviconImpl();
+
  private:
-  RendererTask(const base::string16& title,
+  RendererTask(const std::u16string& title,
                const gfx::ImageSkia* icon,
                content::WebContents* web_contents,
                content::RenderProcessHost* render_process_host);
 
   // The WebContents of the task this object represents.
-  content::WebContents* web_contents_;
+  const raw_ptr<content::WebContents> web_contents_;
 
   // The render process host of the task this object represents.
-  content::RenderProcessHost* render_process_host_;
+  const raw_ptr<content::RenderProcessHost> render_process_host_;
 
   // The Mojo service wrapper that will provide us with the V8 memory usage and
   // the WebCache resource stats of the render process represented by this
@@ -120,20 +129,21 @@ class RendererTask : public Task,
   const int render_process_id_;
 
   // The allocated and used V8 memory (in bytes).
-  int64_t v8_memory_allocated_;
-  int64_t v8_memory_used_;
+  base::ByteSize v8_memory_allocated_;
+  base::ByteSize v8_memory_used_;
 
   // The WebKit resource cache statistics for this renderer.
-  blink::WebCacheResourceTypeStats webcache_stats_;
+  blink::WebCacheResourceTypeStats webcache_stats_ = {};
 
   // The profile name associated with the browser context of the render view
   // host.
-  const base::string16 profile_name_;
+  const std::u16string profile_name_;
 
-  base::TerminationStatus termination_status_;
-  int termination_error_code_;
+  base::TerminationStatus termination_status_ =
+      base::TERMINATION_STATUS_STILL_RUNNING;
+  int termination_error_code_ = 0;
 
-  DISALLOW_COPY_AND_ASSIGN(RendererTask);
+  base::WeakPtrFactory<RendererTask> weak_ptr_factor_{this};
 };
 
 }  // namespace task_manager

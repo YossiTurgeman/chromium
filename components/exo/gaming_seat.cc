@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,7 +18,8 @@ namespace exo {
 ////////////////////////////////////////////////////////////////////////////////
 // GamingSeat, public:
 
-GamingSeat::GamingSeat(GamingSeatDelegate* delegate) : delegate_(delegate) {
+GamingSeat::GamingSeat(GamingSeatDelegate* delegate)
+    : delegate_(delegate->GetWeakPtr()) {
   auto* helper = WMHelper::GetInstance();
   helper->AddFocusObserver(this);
   OnWindowFocused(helper->GetFocusedWindow(), nullptr);
@@ -27,7 +28,9 @@ GamingSeat::GamingSeat(GamingSeatDelegate* delegate) : delegate_(delegate) {
 GamingSeat::~GamingSeat() {
   if (focused_)
     ui::GamepadProviderOzone::GetInstance()->RemoveGamepadObserver(this);
-  delegate_->OnGamingSeatDestroying(this);
+  if (delegate_) {
+    delegate_->OnGamingSeatDestroying(this);
+  }
 
   WMHelper::GetInstance()->RemoveFocusObserver(this);
 }
@@ -43,11 +46,12 @@ void GamingSeat::OnWindowFocused(aura::Window* gained_focus,
     if (!target) {
       aura::Window* top_level_window = gained_focus->GetToplevelWindow();
       if (top_level_window)
-        target = GetShellMainSurface(top_level_window);
+        target = GetShellRootSurface(top_level_window);
     }
   }
 
-  bool focused = target && delegate_->CanAcceptGamepadEventsForSurface(target);
+  bool focused = target && delegate_ &&
+                 delegate_->CanAcceptGamepadEventsForSurface(target);
   if (focused_ != focused) {
     focused_ = focused;
     if (focused) {
@@ -87,7 +91,9 @@ void GamingSeat::OnGamepadDevicesUpdated() {
       std::unique_ptr<Gamepad> gamepad = std::make_unique<Gamepad>(device);
       if (focused_)
         gamepad->OnGamepadFocused();
-      delegate_->GamepadAdded(*gamepad);
+      if (delegate_) {
+        delegate_->GamepadAdded(*gamepad);
+      }
       new_gamepads[device.id] = std::move(gamepad);
     }
   }

@@ -1,24 +1,50 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2021 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/features.gni")
-import("//mojo/public/tools/bindings/mojom.gni")
+import("//extensions/buildflags/buildflags.gni")
+import("//pdf/features.gni")
 
-mojom("interfaces") {
-  sources = [ "pdf.mojom" ]
+# enable_pdf is not required. Some platforms may not have PDF enabled, but some
+# existing files still use the constants.
 
-  public_deps = [
-    "//third_party/blink/public/mojom:mojom_platform",
-    "//ui/gfx/geometry/mojom",
-    "//url/mojom:url_mojom_gurl",
+source_set("constants") {
+  sources = [ "constants.h" ]
+}
+
+source_set("util") {
+  sources = [
+    "pdf_util.cc",
+    "pdf_util.h",
   ]
 
-  overridden_deps = [ "//third_party/blink/public/mojom:mojom_platform" ]
-  component_deps = [ "//content/public/common" ]
+  public_deps = [ "//skia" ]
 
-  overridden_deps_blink = [ "//third_party/blink/public/mojom:mojom_platform" ]
-  component_deps_blink = [ "//third_party/blink/renderer/platform" ]
+  deps = [
+    "//base",
+    "//content/public/common",
+    "//extensions/buildflags",
+    "//pdf:buildflags",
+    "//url",
+  ]
 
-  cpp_only = true
+  if (enable_extensions) {
+    deps += [ "//extensions/common:common_constants" ]
+  }
+
+  if (enable_pdf) {
+    deps += [ "//pdf:features" ]
+  }
+}
+
+source_set("unit_tests") {
+  testonly = true
+  sources = [ "pdf_util_unittest.cc" ]
+
+  deps = [
+    ":util",
+    "//extensions/buildflags",
+    "//testing/gtest",
+    "//url",
+  ]
 }

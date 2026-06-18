@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,37 @@ var CHECK = requireNative('logging').CHECK;
 var idGeneratorNatives = requireNative('id_generator');
 var utils = require('utils');
 var webRequestInternal = getInternalApi('webRequestInternal');
+var webRequestNatives = requireNative('web_request_natives');
+const allowAsyncResponsesForAllEvents =
+    webRequestNatives.AllowAsyncResponsesForAllEvents();
+const isServiceWorkerContext =
+    requireNative('service_worker_natives').IsServiceWorkerContext();
 
+// Returns an ID that is either globally unique (in this process) or unique
+// within this given context. Note that we use separate prefixes ('g' and 's')
+// to ensure there are no collisions between these two groups.
+function getGloballyUniqueSubEventName(eventName) {
+  return eventName + '/g' + idGeneratorNatives.GetNextId();
+}
+function getScopedUniqueSubEventName(eventName) {
+  return eventName + '/s' + idGeneratorNatives.GetNextScopedId();
+}
+
+// A sub-event-name uses a suffix with an additional identifier. For service
+// worker contexts, we use a context-specific identifier; this allows multiple
+// runs of the service worker script to produce subevents with the same IDs.
+// For non-service worker contexts, we need to use a global identifier. This is
+// because there may be multiple contexts, each with listeners (such as multiple
+// webviews [https://crbug.com/1309302] or multiple frames
+// [https://crbug.com/1297276]) that run in the same process. This would result
+// in collisions between the event listener IDs in the webRequest API. This
+// isn't an issue with service worker contexts because, even though they run in
+// the same process, they have additional identifiers of the service worker
+// thread and version.
 function getUniqueSubEventName(eventName) {
-  return eventName + '/' + idGeneratorNatives.GetNextId();
+  return isServiceWorkerContext ?
+      getScopedUniqueSubEventName(eventName) :
+      getGloballyUniqueSubEventName(eventName);
 }
 
 // WebRequestEventImpl object. This is used for special webRequest events
@@ -24,8 +52,9 @@ function getUniqueSubEventName(eventName) {
 //   ^ callback will only be called for onBeforeRequests matching the filter.
 function WebRequestEventImpl(eventName, opt_argSchemas, opt_extraArgSchemas,
                              opt_eventOptions, opt_webViewInstanceId) {
-  if (typeof eventName != 'string')
+  if (typeof eventName != 'string') {
     throw new Error('chrome.WebRequestEvent requires an event name.');
+  }
 
   bindingUtil.addCustomSignature(eventName, opt_extraArgSchemas);
 
@@ -61,11 +90,8 @@ WebRequestEventImpl.prototype.addListener =
   // subEvent listener.
   bindingUtil.validateCustomSignature(this.eventName,
                                       $Array.slice(arguments, 1));
-  webRequestInternal.addEventListener(
-      cb, opt_filter, opt_extraInfo, this.eventName, subEventName,
-      this.webViewInstanceId);
 
-  var supportsFilters = false;
+  var supportsFilters = true;
   var supportsLazyListeners = true;
   var subEvent =
       bindingUtil.createCustomEvent(subEventName, supportsFilters,
@@ -77,14 +103,33 @@ WebRequestEventImpl.prototype.addListener =
     var webViewInstanceId = this.webViewInstanceId;
     subEventCallback = function() {
       var requestId = arguments[0].requestId;
-      try {
-        var result = $Function.apply(cb, null, arguments);
+
+      function sendEventHandledWithResult(result) {
         webRequestInternal.eventHandled(
             eventName, subEventName, requestId, webViewInstanceId, result);
-      } catch (e) {
+      }
+      function handleHandlerError(e) {
         webRequestInternal.eventHandled(
             eventName, subEventName, requestId, webViewInstanceId);
         throw e;
+      }
+
+      try {
+        let result = $Function.apply(cb, null, arguments);
+        if (allowAsyncResponsesForAllEvents &&
+            result instanceof $Promise.self) {
+          $Promise.catch(
+              $Promise.then(result, (asyncResult) => {
+                sendEventHandledWithResult(asyncResult);
+              }),
+              (e) => {
+                handleHandlerError(e);
+              });
+        } else {
+          sendEventHandledWithResult(result);
+        }
+      } catch (e) {
+        handleHandlerError(e);
       }
     };
   } else if (
@@ -103,7 +148,9 @@ WebRequestEventImpl.prototype.addListener =
   }
   $Array.push(this.subEvents,
       {subEvent: subEvent, callback: cb, subEventCallback: subEventCallback});
-  subEvent.addListener(subEventCallback);
+
+  subEvent.addListener(subEventCallback, opt_filter,
+    { extraInfo: opt_extraInfo, webViewInstanceId: this.webViewInstanceId });
 };
 
 // Unregisters a callback.
@@ -124,8 +171,9 @@ WebRequestEventImpl.prototype.findListener_ = function(cb) {
   for (var i in this.subEvents) {
     var e = this.subEvents[i];
     if (e.callback === cb) {
-      if (e.subEvent.hasListener(e.subEventCallback))
+      if (e.subEvent.hasListener(e.subEventCallback)) {
         return i;
+      }
       console.error('Internal error: webRequest subEvent has no callback.');
     }
   }

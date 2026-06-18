@@ -1,13 +1,16 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/performance_manager/graph/system_node_impl.h"
 
+#include "base/memory/raw_ptr.h"
+#include "base/run_loop.h"
+#include "base/scoped_observation.h"
 #include "components/performance_manager/graph/frame_node_impl.h"
 #include "components/performance_manager/graph/page_node_impl.h"
 #include "components/performance_manager/graph/process_node_impl.h"
-#include "components/performance_manager/graph/system_node_impl.h"
+#include "components/performance_manager/test_support/graph/mock_system_node_observer.h"
 #include "components/performance_manager/test_support/graph_test_harness.h"
 #include "components/performance_manager/test_support/mock_graphs.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -16,15 +19,6 @@
 namespace performance_manager {
 
 namespace {
-
-// Observer used to make sure that signals are dispatched correctly.
-class SystemObserver : public SystemNodeImpl::ObserverDefaultImpl {
- public:
-  size_t system_event_seen_count() const { return system_event_seen_count_; }
-
- private:
-  size_t system_event_seen_count_ = 0;
-};
 
 using SystemNodeImplTest = GraphTestHarness;
 
@@ -43,21 +37,24 @@ TEST_F(SystemNodeImplTest, SafeDowncast) {
 using SystemNodeImplDeathTest = SystemNodeImplTest;
 
 TEST_F(SystemNodeImplDeathTest, SafeDowncast) {
-  const NodeBase* system =
-      NodeBase::FromNode(graph()->FindOrCreateSystemNode());
+  const NodeBase* system = NodeBase::FromNode(graph()->GetSystemNodeImpl());
   ASSERT_DEATH_IF_SUPPORTED(PageNodeImpl::FromNodeBase(system), "");
 }
 
 namespace {
 
-class LenientMockObserver : public SystemNodeImpl::Observer {
- public:
-  LenientMockObserver() {}
-  ~LenientMockObserver() override {}
+using testing::_;
+using testing::Invoke;
+using testing::InvokeWithoutArgs;
 
-  MOCK_METHOD1(OnSystemNodeAdded, void(const SystemNode*));
-  MOCK_METHOD1(OnBeforeSystemNodeRemoved, void(const SystemNode*));
-  MOCK_METHOD1(OnProcessMemoryMetricsAvailable, void(const SystemNode*));
+class MockObserver : public MockSystemNodeObserver {
+ public:
+  explicit MockObserver(Graph* graph = nullptr) {
+    // If a `graph` is passed, automatically start observing it.
+    if (graph) {
+      scoped_observation_.Observe(graph);
+    }
+  }
 
   void SetNotifiedSystemNode(const SystemNode* system_node) {
     notified_system_node_ = system_node;
@@ -70,35 +67,35 @@ class LenientMockObserver : public SystemNodeImpl::Observer {
   }
 
  private:
-  const SystemNode* notified_system_node_ = nullptr;
+  base::ScopedObservation<Graph, SystemNodeObserver> scoped_observation_{this};
+  raw_ptr<const SystemNode> notified_system_node_ = nullptr;
 };
-
-using MockObserver = ::testing::StrictMock<LenientMockObserver>;
-
-using testing::_;
-using testing::Invoke;
 
 }  // namespace
 
 TEST_F(SystemNodeImplTest, ObserverWorks) {
+  MockObserver head_obs;
   MockObserver obs;
+  MockObserver tail_obs;
+  graph()->AddSystemNodeObserver(&head_obs);
   graph()->AddSystemNodeObserver(&obs);
+  graph()->AddSystemNodeObserver(&tail_obs);
 
-  // Fetch the system node and expect a matching call to "OnSystemNodeAdded".
-  EXPECT_CALL(obs, OnSystemNodeAdded(_))
-      .WillOnce(Invoke(&obs, &MockObserver::SetNotifiedSystemNode));
-  const SystemNode* system_node = graph()->FindOrCreateSystemNode();
-  EXPECT_EQ(system_node, obs.TakeNotifiedSystemNode());
+  const SystemNode* system_node = graph()->GetSystemNode();
+
+  // Remove observers at the head and tail of the list inside a callback, and
+  // expect that `obs` is still notified correctly.
+  EXPECT_CALL(head_obs, OnProcessMemoryMetricsAvailable(_))
+      .WillOnce(InvokeWithoutArgs([&] {
+        graph()->RemoveSystemNodeObserver(&head_obs);
+        graph()->RemoveSystemNodeObserver(&tail_obs);
+      }));
+  // `tail_obs` should not be notified as it was removed.
+  EXPECT_CALL(tail_obs, OnProcessMemoryMetricsAvailable(_)).Times(0);
 
   EXPECT_CALL(obs, OnProcessMemoryMetricsAvailable(_))
       .WillOnce(Invoke(&obs, &MockObserver::SetNotifiedSystemNode));
   SystemNodeImpl::FromNode(system_node)->OnProcessMemoryMetricsAvailable();
-  EXPECT_EQ(system_node, obs.TakeNotifiedSystemNode());
-
-  // Release the system node and expect a call to "OnBeforeSystemNodeRemoved".
-  EXPECT_CALL(obs, OnBeforeSystemNodeRemoved(_))
-      .WillOnce(Invoke(&obs, &MockObserver::SetNotifiedSystemNode));
-  graph()->ReleaseSystemNodeForTesting();
   EXPECT_EQ(system_node, obs.TakeNotifiedSystemNode());
 
   graph()->RemoveSystemNodeObserver(&obs);

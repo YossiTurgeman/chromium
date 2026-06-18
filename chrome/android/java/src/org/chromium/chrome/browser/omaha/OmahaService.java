@@ -1,139 +1,127 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.omaha;
 
-import android.annotation.TargetApi;
 import android.app.IntentService;
 import android.app.job.JobService;
 import android.content.Context;
-import android.os.Build;
-
-import androidx.annotation.Nullable;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
 import org.chromium.base.task.AsyncTask;
 import org.chromium.base.task.PostTask;
+import org.chromium.base.task.TaskTraits;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.background_task_scheduler.BackgroundTask;
+import org.chromium.components.background_task_scheduler.BackgroundTaskScheduler;
 import org.chromium.components.background_task_scheduler.BackgroundTaskSchedulerFactory;
 import org.chromium.components.background_task_scheduler.TaskIds;
 import org.chromium.components.background_task_scheduler.TaskInfo;
 import org.chromium.components.background_task_scheduler.TaskParameters;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
 
 /**
- * Manages scheduling and running of the Omaha client code.
- * Delegates out to either an {@link IntentService} or {@link JobService}, as necessary.
+ * Manages scheduling and running of the Omaha client code. Delegates out to either an {@link
+ * IntentService} or {@link JobService}, as necessary.
  */
+@NullMarked
 public class OmahaService extends OmahaBase implements BackgroundTask {
     private static class OmahaClientDelegate extends OmahaDelegateBase {
-        public OmahaClientDelegate(Context context) {
-            super(context);
-        }
-
         @Override
         public void scheduleService(long currentTimestampMs, long nextTimestampMs) {
-            if (Build.VERSION.SDK_INT < OmahaBase.MIN_API_JOB_SCHEDULER) {
-                getScheduler().createAlarm(OmahaClient.createIntent(getContext()), nextTimestampMs);
-                Log.i(OmahaBase.TAG, "Scheduled using AlarmManager and IntentService");
-            } else {
-                final long delay = nextTimestampMs - currentTimestampMs;
-                PostTask.runOrPostTask(UiThreadTaskTraits.DEFAULT, () -> {
-                    if (scheduleJobService(getContext(), delay)) {
-                        Log.i(OmahaBase.TAG, "Scheduled using JobService");
-                    } else {
-                        Log.e(OmahaBase.TAG, "Failed to schedule job");
-                    }
-                });
-            }
+            final long delay = nextTimestampMs - currentTimestampMs;
+            PostTask.runOrPostTask(
+                    TaskTraits.UI_DEFAULT,
+                    () -> {
+                        if (scheduleJobService(delay)) {
+                            Log.i(OmahaBase.TAG, "Scheduled using JobService");
+                        } else {
+                            Log.e(OmahaBase.TAG, "Failed to schedule job");
+                        }
+                    });
         }
     }
 
     private static final Object DELEGATE_LOCK = new Object();
-    private static OmahaService sInstance;
+    private static @Nullable OmahaService sInstance;
+    private static boolean sHasPendingJob;
 
-    @Nullable
-    public static OmahaService getInstance(Context context) {
+    public static OmahaService getInstance() {
         synchronized (DELEGATE_LOCK) {
-            if (sInstance == null) sInstance = new OmahaService(context);
+            if (sInstance == null) sInstance = new OmahaService();
             return sInstance;
         }
     }
 
-    private AsyncTask<Void> mJobServiceTask;
+    private @Nullable AsyncTask<Void> mJobServiceTask;
 
     /** Used only by {@link BackgroundTaskScheduler}. */
     public OmahaService() {
-        this(ContextUtils.getApplicationContext());
+        super(new OmahaClientDelegate());
     }
 
-    private OmahaService(Context context) {
-        super(new OmahaClientDelegate(context));
+    OmahaService(OmahaDelegate delegate) {
+        super(delegate);
     }
 
     /**
-     * Trigger the {@link BackgroundTaskScheduler} immediately.
-     * Must only be called by {@link OmahaBase#onForegroundSessionStart}.
+     * Trigger the {@link BackgroundTaskScheduler} immediately. Must only be called by {@link
+     * OmahaBase#onForegroundSessionStart}.
      */
-    static void startServiceImmediately(Context context) {
-        if (Build.VERSION.SDK_INT < OmahaBase.MIN_API_JOB_SCHEDULER) {
-            context.startService(OmahaClient.createIntent(context));
-        } else {
-            scheduleJobService(context, 0);
-        }
+    static void startServiceImmediately() {
+        if (sHasPendingJob) return;
+        scheduleJobService(0);
     }
 
     // Incorrectly infers that this is called on a worker thread because of AsyncTask doInBackground
     // overriding.
     @SuppressWarnings("WrongThread")
     @Override
-    @TargetApi(Build.VERSION_CODES.M)
     public boolean onStartTask(
             Context context, TaskParameters parameters, final TaskFinishedCallback callback) {
-        mJobServiceTask = new AsyncTask<Void>() {
-            @Override
-            public Void doInBackground() {
-                run();
-                return null;
-            }
+        sHasPendingJob = false;
+        mJobServiceTask =
+                new AsyncTask<Void>() {
+                    @Override
+                    public Void doInBackground() {
+                        run();
+                        return null;
+                    }
 
-            @Override
-            public void onPostExecute(Void result) {
-                callback.taskFinished(false);
-            }
-        }.executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
-        return false;
+                    @Override
+                    public void onPostExecute(@Nullable Void result) {
+                        callback.taskFinished(false);
+                    }
+                }.executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
+        return true;
     }
 
     @Override
-    @TargetApi(Build.VERSION_CODES.M)
     public boolean onStopTask(Context context, TaskParameters taskParameters) {
+        // Just in case it's possible for onStopTask to be called before onStartTask, we should
+        // clear this flag to avoid getting stuck in state where we won't ever be scheduled again.
+        sHasPendingJob = false;
         if (mJobServiceTask != null) {
-            mJobServiceTask.cancel(false);
+            mJobServiceTask.cancel(true);
             mJobServiceTask = null;
         }
         return false;
     }
 
-    @Override
-    @TargetApi(Build.VERSION_CODES.M)
-    public void reschedule(Context context) {
-        // Needs appropriate implementation.
-    }
-
     /**
      * Schedules the Omaha code to run at the given time.
-     * @param context Context to use.
      * @param delayMs How long to wait until the job should be triggered.
      */
-    @TargetApi(Build.VERSION_CODES.M)
-    static boolean scheduleJobService(Context context, long delayMs) {
+    static boolean scheduleJobService(long delayMs) {
         long latency = Math.max(0, delayMs);
 
         TaskInfo taskInfo =
                 TaskInfo.createOneOffTask(TaskIds.OMAHA_JOB_ID, latency, latency).build();
-        return BackgroundTaskSchedulerFactory.getScheduler().schedule(context, taskInfo);
+        sHasPendingJob =
+                BackgroundTaskSchedulerFactory.getScheduler()
+                        .schedule(ContextUtils.getApplicationContext(), taskInfo);
+        return sHasPendingJob;
     }
 }

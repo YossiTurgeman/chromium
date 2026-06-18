@@ -1,8 +1,10 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/fonts/typesetting_features.h"
+
+#include <array>
 
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
@@ -11,7 +13,7 @@ namespace blink {
 
 namespace {
 
-const char* kFeatureNames[kMaxTypesettingFeatureIndex + 1] = {
+std::array<const char*, kMaxTypesettingFeatureIndex + 1> kFeatureNames = {
     "Kerning", "Ligatures", "Caps"};
 
 }  // namespace

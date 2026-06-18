@@ -1,15 +1,18 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/viz/common/quads/draw_quad.h"
+
 #include <vector>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/lap_timer.h"
 #include "components/viz/common/quads/compositor_render_pass.h"
-#include "components/viz/common/quads/draw_quad.h"
 #include "components/viz/common/quads/texture_draw_quad.h"
+#include "components/viz/common/resources/resource_id.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/perf/perf_result_reporter.h"
 #include "third_party/skia/include/core/SkBlendMode.h"
@@ -24,6 +27,10 @@ static const int kTimeCheckInterval = 10;
 constexpr char kMetricPrefixDrawQuad[] = "DrawQuad.";
 constexpr char kMetricIterateResourcesRunsPerS[] = "iterate_resources";
 
+ResourceId NextId(ResourceId id) {
+  return ResourceId(id.GetUnsafeValue() + 1);
+}
+
 perf_test::PerfResultReporter SetUpDrawQuadReporter(const std::string& story) {
   perf_test::PerfResultReporter reporter(kMetricPrefixDrawQuad, story);
   reporter.RegisterImportantMetric(kMetricIterateResourcesRunsPerS, "runs/s");
@@ -31,20 +38,20 @@ perf_test::PerfResultReporter SetUpDrawQuadReporter(const std::string& story) {
 }
 
 SharedQuadState* CreateSharedQuadState(CompositorRenderPass* render_pass) {
-  gfx::Transform quad_transform = gfx::Transform(1.0, 0.0, 0.5, 1.0, 0.5, 0.0);
+  gfx::Transform quad_transform =
+      gfx::Transform::Affine(1.0, 0.5, 0.0, 1.0, 0.5, 0.0);
   gfx::Rect content_rect(26, 28);
   gfx::Rect visible_layer_rect(10, 12, 14, 16);
-  gfx::Rect clip_rect(19, 21, 23, 25);
-  bool is_clipped = false;
   bool are_contents_opaque = false;
   float opacity = 1.f;
   int sorting_context_id = 65536;
   SkBlendMode blend_mode = SkBlendMode::kSrcOver;
 
   SharedQuadState* state = render_pass->CreateAndAppendSharedQuadState();
-  state->SetAll(quad_transform, content_rect, visible_layer_rect, gfx::RRectF(),
-                clip_rect, is_clipped, are_contents_opaque, opacity, blend_mode,
-                sorting_context_id);
+  state->SetAll(quad_transform, content_rect, visible_layer_rect,
+                gfx::MaskFilterInfo(), /*clip=*/std::nullopt,
+                are_contents_opaque, opacity, blend_mode, sorting_context_id,
+                /*layer_id=*/0u, /*fast_rounded_corner=*/false);
   return state;
 }
 
@@ -52,7 +59,7 @@ class DrawQuadPerfTest : public testing::Test {
  public:
   DrawQuadPerfTest()
       : timer_(kWarmupRuns,
-               base::TimeDelta::FromMilliseconds(kTimeLimitMillis),
+               base::Milliseconds(kTimeLimitMillis),
                kTimeCheckInterval) {}
 
   void CreateRenderPass() {
@@ -73,20 +80,17 @@ class DrawQuadPerfTest : public testing::Test {
       auto* quad = render_pass_->CreateAndAppendDrawQuad<TextureDrawQuad>();
       gfx::Rect rect(0, 0, 100, 100);
       bool needs_blending = false;
-      ResourceId resource_id = 1;
-      bool premultiplied_alpha = true;
-      gfx::PointF uv_top_left(0, 0);
-      gfx::PointF uv_bottom_right(1, 1);
-      SkColor background_color = SK_ColorRED;
-      float vertex_opacity[4] = {1.f, 1.f, 1.f, 1.f};
-      bool y_flipped = false;
+      ResourceId resource_id{1};
+      gfx::PointF tex_coord_top_left(0, 0);
+      gfx::PointF tex_coord_bottom_right(100, 100);
+      SkColor4f background_color = SkColors::kRed;
       bool nearest_neighbor = true;
 
       quad->SetNew(shared_state_, rect, rect, needs_blending, resource_id,
-                   premultiplied_alpha, uv_top_left, uv_bottom_right,
-                   background_color, vertex_opacity, y_flipped,
-                   nearest_neighbor, /*secure_output_only=*/false,
-                   gfx::ProtectedVideoType::kClear);
+                   tex_coord_top_left, tex_coord_bottom_right, background_color,
+                   nearest_neighbor,
+                   /*secure_output=*/false, gfx::ProtectedVideoType::kClear,
+                   /*is_tex_coords_normalized=*/false);
       quads->push_back(quad);
     }
   }
@@ -99,8 +103,9 @@ class DrawQuadPerfTest : public testing::Test {
     timer_.Reset();
     do {
       for (auto* quad : quads) {
-        for (ResourceId& resource_id : quad->resources)
-          ++resource_id;
+        if (quad->resource_id != kInvalidResourceId) {
+          quad->resource_id = NextId(quad->resource_id);
+        }
       }
       timer_.NextLap();
     } while (!timer_.HasTimeLimitExpired());
@@ -112,7 +117,7 @@ class DrawQuadPerfTest : public testing::Test {
 
  private:
   std::unique_ptr<CompositorRenderPass> render_pass_;
-  SharedQuadState* shared_state_;
+  raw_ptr<SharedQuadState> shared_state_;
   base::LapTimer timer_;
 };
 

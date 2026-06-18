@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,10 @@
 
 #include <tuple>
 
-#include "base/bind.h"
 #include "base/check_op.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/no_destructor.h"
 #include "base/sequence_checker.h"
-#include "base/stl_util.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
@@ -40,21 +39,26 @@ class GalleryWatchManagerShutdownNotifierFactory
     : public BrowserContextKeyedServiceShutdownNotifierFactory {
  public:
   static GalleryWatchManagerShutdownNotifierFactory* GetInstance() {
-    return base::Singleton<GalleryWatchManagerShutdownNotifierFactory>::get();
+    static base::NoDestructor<GalleryWatchManagerShutdownNotifierFactory>
+        instance;
+    return instance.get();
   }
 
+  GalleryWatchManagerShutdownNotifierFactory(
+      const GalleryWatchManagerShutdownNotifierFactory&) = delete;
+  GalleryWatchManagerShutdownNotifierFactory& operator=(
+      const GalleryWatchManagerShutdownNotifierFactory&) = delete;
+
  private:
-  friend struct base::DefaultSingletonTraits<
-      GalleryWatchManagerShutdownNotifierFactory>;
+  friend base::NoDestructor<GalleryWatchManagerShutdownNotifierFactory>;
 
   GalleryWatchManagerShutdownNotifierFactory()
       : BrowserContextKeyedServiceShutdownNotifierFactory(
             "GalleryWatchManager") {
     DependsOn(MediaGalleriesPreferencesFactory::GetInstance());
+    DependsOn(MediaFileSystemRegistry::GetFactoryInstance());
   }
-  ~GalleryWatchManagerShutdownNotifierFactory() override {}
-
-  DISALLOW_COPY_AND_ASSIGN(GalleryWatchManagerShutdownNotifierFactory);
+  ~GalleryWatchManagerShutdownNotifierFactory() override = default;
 };
 
 }  // namespace.
@@ -73,6 +77,10 @@ const char GalleryWatchManager::kCouldNotWatchGalleryError[] =
 class GalleryWatchManager::FileWatchManager {
  public:
   explicit FileWatchManager(const base::FilePathWatcher::Callback& callback);
+
+  FileWatchManager(const FileWatchManager&) = delete;
+  FileWatchManager& operator=(const FileWatchManager&) = delete;
+
   ~FileWatchManager();
 
   // Posts success or failure via |callback| to the UI thread.
@@ -96,8 +104,6 @@ class GalleryWatchManager::FileWatchManager {
   SEQUENCE_CHECKER(sequence_checker_);
 
   base::WeakPtrFactory<FileWatchManager> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(FileWatchManager);
 };
 
 GalleryWatchManager::FileWatchManager::FileWatchManager(
@@ -119,18 +125,18 @@ void GalleryWatchManager::FileWatchManager::AddFileWatch(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   // This can occur if the GalleryWatchManager attempts to watch the same path
-  // again before recieving the callback. It's benign.
-  if (base::Contains(watchers_, path)) {
+  // again before receiving the callback. It's benign.
+  if (watchers_.contains(path)) {
     content::GetUIThreadTaskRunner({})->PostTask(
         FROM_HERE, base::BindOnce(std::move(callback), false));
     return;
   }
 
   auto watcher = std::make_unique<base::FilePathWatcher>();
-  bool success = watcher->Watch(path,
-                                true /*recursive*/,
-                                base::Bind(&FileWatchManager::OnFilePathChanged,
-                                           weak_factory_.GetWeakPtr()));
+  bool success =
+      watcher->Watch(path, base::FilePathWatcher::Type::kRecursive,
+                     base::BindRepeating(&FileWatchManager::OnFilePathChanged,
+                                         weak_factory_.GetWeakPtr()));
 
   if (success)
     watchers_[path] = std::move(watcher);
@@ -183,16 +189,15 @@ GalleryWatchManager::NotificationInfo::NotificationInfo()
 GalleryWatchManager::NotificationInfo::NotificationInfo(
     const NotificationInfo& other) = default;
 
-GalleryWatchManager::NotificationInfo::~NotificationInfo() {
-}
+GalleryWatchManager::NotificationInfo::~NotificationInfo() = default;
 
 GalleryWatchManager::GalleryWatchManager()
     : storage_monitor_observed_(false),
       watch_manager_task_runner_(base::ThreadPool::CreateSequencedTaskRunner(
           {base::MayBlock(), base::TaskPriority::BEST_EFFORT})) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  watch_manager_.reset(new FileWatchManager(base::Bind(
-      &GalleryWatchManager::OnFilePathChanged, weak_factory_.GetWeakPtr())));
+  watch_manager_ = std::make_unique<FileWatchManager>(base::BindRepeating(
+      &GalleryWatchManager::OnFilePathChanged, weak_factory_.GetWeakPtr()));
 }
 
 GalleryWatchManager::~GalleryWatchManager() {
@@ -210,7 +215,7 @@ void GalleryWatchManager::AddObserver(BrowserContext* browser_context,
                                       GalleryWatchManagerObserver* observer) {
   DCHECK(browser_context);
   DCHECK(observer);
-  DCHECK(!base::Contains(observers_, browser_context));
+  DCHECK(!observers_.contains(browser_context));
   observers_[browser_context] = observer;
 }
 
@@ -255,7 +260,7 @@ void GalleryWatchManager::AddWatch(BrowserContext* browser_context,
   DCHECK(extension);
 
   WatchOwner owner(browser_context, extension->id(), gallery_id);
-  if (base::Contains(watches_, owner)) {
+  if (watches_.contains(owner)) {
     std::move(callback).Run(std::string());
     return;
   }
@@ -264,14 +269,14 @@ void GalleryWatchManager::AddWatch(BrowserContext* browser_context,
       g_browser_process->media_file_system_registry()->GetPreferences(
           Profile::FromBrowserContext(browser_context));
 
-  if (!base::Contains(preferences->known_galleries(), gallery_id)) {
+  if (!preferences->known_galleries().contains(gallery_id)) {
     std::move(callback).Run(kInvalidGalleryIDError);
     return;
   }
 
   MediaGalleryPrefIdSet permitted =
       preferences->GalleriesForExtension(*extension);
-  if (!base::Contains(permitted, gallery_id)) {
+  if (!permitted.contains(gallery_id)) {
     std::move(callback).Run(kNoPermissionError);
     return;
   }
@@ -285,8 +290,8 @@ void GalleryWatchManager::AddWatch(BrowserContext* browser_context,
   }
 
   // Observe the preferences if we haven't already.
-  if (!base::Contains(observed_preferences_, preferences)) {
-    observed_preferences_.insert(preferences);
+  if (bool inserted = observed_preferences_.emplace(preferences).second;
+      inserted) {
     preferences->AddGalleryChangeObserver(this);
   }
 
@@ -294,7 +299,7 @@ void GalleryWatchManager::AddWatch(BrowserContext* browser_context,
   EnsureBrowserContextSubscription(owner.browser_context);
 
   // Start the FilePathWatcher on |gallery_path| if necessary.
-  if (base::Contains(watched_paths_, path)) {
+  if (watched_paths_.contains(path)) {
     OnFileWatchActivated(owner, path, std::move(callback), true);
   } else {
     base::OnceCallback<void(bool)> on_watch_added = base::BindOnce(
@@ -362,8 +367,9 @@ void GalleryWatchManager::EnsureBrowserContextSubscription(
     browser_context_subscription_map_[browser_context] =
         GalleryWatchManagerShutdownNotifierFactory::GetInstance()
             ->Get(browser_context)
-            ->Subscribe(base::Bind(&GalleryWatchManager::ShutdownBrowserContext,
-                                   base::Unretained(this), browser_context));
+            ->Subscribe(base::BindRepeating(
+                &GalleryWatchManager::ShutdownBrowserContext,
+                base::Unretained(this), browser_context));
   }
 }
 
@@ -411,9 +417,11 @@ void GalleryWatchManager::OnFilePathChanged(const base::FilePath& path,
     for (auto it = owners.begin(); it != owners.end(); ++it) {
       Profile* profile = Profile::FromBrowserContext(it->browser_context);
       RemoveWatch(it->browser_context, it->extension_id, it->gallery_id);
-      if (base::Contains(observers_, profile))
-        observers_[profile]->OnGalleryWatchDropped(it->extension_id,
+      if (auto observer_it = observers_.find(profile);
+          observer_it != observers_.end()) {
+        observer_it->second->OnGalleryWatchDropped(it->extension_id,
                                                    it->gallery_id);
+      }
     }
 
     return;
@@ -421,14 +429,12 @@ void GalleryWatchManager::OnFilePathChanged(const base::FilePath& path,
 
   base::TimeDelta time_since_last_notify =
       base::Time::Now() - notification_info->second.last_notify_time;
-  if (time_since_last_notify <
-      base::TimeDelta::FromSeconds(kMinNotificationDelayInSeconds)) {
+  if (time_since_last_notify < base::Seconds(kMinNotificationDelayInSeconds)) {
     if (!notification_info->second.delayed_notification_pending) {
       notification_info->second.delayed_notification_pending = true;
       base::TimeDelta delay_to_next_valid_time =
           notification_info->second.last_notify_time +
-          base::TimeDelta::FromSeconds(kMinNotificationDelayInSeconds) -
-          base::Time::Now();
+          base::Seconds(kMinNotificationDelayInSeconds) - base::Time::Now();
       content::GetUIThreadTaskRunner({})->PostDelayedTask(
           FROM_HERE,
           base::BindOnce(&GalleryWatchManager::OnFilePathChanged,
@@ -444,10 +450,10 @@ void GalleryWatchManager::OnFilePathChanged(const base::FilePath& path,
   for (it = notification_info->second.owners.begin();
        it != notification_info->second.owners.end();
        ++it) {
-    DCHECK(base::Contains(watches_, *it));
-    if (base::Contains(observers_, it->browser_context)) {
-      observers_[it->browser_context]->OnGalleryChanged(it->extension_id,
-                                                        it->gallery_id);
+    DCHECK(watches_.contains(*it));
+    if (auto observer_it = observers_.find(it->browser_context);
+        observer_it != observers_.end()) {
+      observer_it->second->OnGalleryChanged(it->extension_id, it->gallery_id);
     }
   }
 }
@@ -456,8 +462,10 @@ void GalleryWatchManager::OnPermissionRemoved(MediaGalleriesPreferences* pref,
                                               const std::string& extension_id,
                                               MediaGalleryPrefId pref_id) {
   RemoveWatch(pref->profile(), extension_id, pref_id);
-  if (base::Contains(observers_, pref->profile()))
-    observers_[pref->profile()]->OnGalleryWatchDropped(extension_id, pref_id);
+  if (auto observer_it = observers_.find(pref->profile());
+      observer_it != observers_.end()) {
+    observer_it->second->OnGalleryWatchDropped(extension_id, pref_id);
+  }
 }
 
 void GalleryWatchManager::OnGalleryRemoved(MediaGalleriesPreferences* pref,
@@ -474,8 +482,10 @@ void GalleryWatchManager::OnGalleryRemoved(MediaGalleriesPreferences* pref,
 
   for (auto it = extension_ids.begin(); it != extension_ids.end(); ++it) {
     RemoveWatch(pref->profile(), *it, pref_id);
-    if (base::Contains(observers_, pref->profile()))
-      observers_[pref->profile()]->OnGalleryWatchDropped(*it, pref_id);
+    if (auto observer_it = observers_.find(pref->profile());
+        observer_it != observers_.end()) {
+      observer_it->second->OnGalleryWatchDropped(*it, pref_id);
+    }
   }
 }
 
@@ -489,7 +499,7 @@ void GalleryWatchManager::OnRemovableStorageDetached(
     MediaGalleryPrefIdSet detached_ids =
         preferences->LookUpGalleriesByDeviceId(info.device_id());
 
-    if (base::Contains(detached_ids, it->first.gallery_id)) {
+    if (detached_ids.contains(it->first.gallery_id)) {
       WatchOwner owner = it->first;
       DeactivateFileWatch(owner, it->second);
       // Post increment moves iterator to next element while deleting current.
@@ -500,4 +510,9 @@ void GalleryWatchManager::OnRemovableStorageDetached(
       ++it;
     }
   }
+}
+
+// static
+void GalleryWatchManager::EnsureFactoryBuilt() {
+  GalleryWatchManagerShutdownNotifierFactory::GetInstance();
 }

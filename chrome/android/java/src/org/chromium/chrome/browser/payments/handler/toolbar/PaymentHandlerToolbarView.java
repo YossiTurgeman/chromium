@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,12 +11,13 @@ import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
-import org.chromium.base.ApiCompatibilityUtils;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.R;
 import org.chromium.components.browser_ui.widget.FadingShadow;
 import org.chromium.components.browser_ui.widget.FadingShadowView;
 
 /** PaymentHandlerToolbar UI. */
+@NullMarked
 /* package */ class PaymentHandlerToolbarView {
     private final int mToolbarHeightPx;
     private final int mShadowHeightPx;
@@ -52,9 +53,7 @@ import org.chromium.components.browser_ui.widget.FadingShadowView;
         mToolbarView.findViewById(R.id.favicon).setVisibility(View.GONE);
 
         FadingShadowView shadow = mToolbarView.findViewById(R.id.shadow);
-        shadow.init(ApiCompatibilityUtils.getColor(
-                            context.getResources(), R.color.toolbar_shadow_color),
-                FadingShadow.POSITION_TOP);
+        shadow.init(context.getColor(R.color.toolbar_shadow_color), FadingShadow.POSITION_TOP);
     }
 
     /** @return The height of the toolbar in px. */

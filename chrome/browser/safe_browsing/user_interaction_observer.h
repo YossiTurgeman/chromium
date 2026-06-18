@@ -1,18 +1,19 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_SAFE_BROWSING_USER_INTERACTION_OBSERVER_H_
 #define CHROME_BROWSER_SAFE_BROWSING_USER_INTERACTION_OBSERVER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/default_clock.h"
-#include "chrome/browser/safe_browsing/ui_manager.h"
+#include "base/time/time.h"
 #include "components/permissions/permission_request_manager.h"
+#include "components/safe_browsing/content/browser/ui_manager.h"
 #include "components/security_interstitials/core/unsafe_resource.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/web_contents_observer.h"
-
-#include <memory>
+#include "content/public/browser/web_contents_user_data.h"
 
 namespace blink {
 class WebMouseEvent;
@@ -58,50 +59,28 @@ enum class DelayedWarningEvent {
   kMaxValue = kWarningShownOnPaste,
 };
 
-// Name of the recorded histograms when the user did not disable URL elision via
-// "Always Show Full URLs" menu option or by installing Suspicious Site Reporter
-// extension.
-extern const char kDelayedWarningsHistogram[];
-extern const char kDelayedWarningsTimeOnPageHistogram[];
-
-// Same as above but only recorded if the user disabled URL elision.
-extern const char kDelayedWarningsWithElisionDisabledHistogram[];
-extern const char kDelayedWarningsTimeOnPageWithElisionDisabledHistogram[];
-
 // Observes user interactions and shows an interstitial if necessary.
 // Only created when an interstitial was about to be displayed but was delayed
 // due to the Delayed Warnings experiment. Deleted once the interstitial is
 // shown, or the tab is closed or navigated away.
 class SafeBrowsingUserInteractionObserver
-    : public base::SupportsUserData::Data,
+    : public content::WebContentsUserData<SafeBrowsingUserInteractionObserver>,
       public content::WebContentsObserver,
       public permissions::PermissionRequestManager::Observer {
  public:
   // Creates an observer for given |web_contents|. |resource| is the unsafe
   // resource for which a delayed interstitial will be displayed.
-  // |is_main_frame| is true if the interstitial is for the top frame. If false,
-  // it's for a subresource / subframe.
   // |ui_manager| is the UIManager that shows the actual warning.
   static void CreateForWebContents(
       content::WebContents* web_contents,
       const security_interstitials::UnsafeResource& resource,
-      bool is_main_frame,
       scoped_refptr<SafeBrowsingUIManager> ui_manager);
 
-  static SafeBrowsingUserInteractionObserver* FromWebContents(
-      content::WebContents* web_contents);
-
-  // See CreateForWebContents() for parameters. These need to be public.
-  SafeBrowsingUserInteractionObserver(
-      content::WebContents* web_contents,
-      const security_interstitials::UnsafeResource& resource,
-      bool is_main_frame,
-      scoped_refptr<SafeBrowsingUIManager> ui_manager);
   ~SafeBrowsingUserInteractionObserver() override;
 
   // content::WebContentsObserver methods:
-  void RenderViewHostChanged(content::RenderViewHost* old_host,
-                             content::RenderViewHost* new_host) override;
+  void RenderFrameHostChanged(content::RenderFrameHost* old_frame,
+                              content::RenderFrameHost* new_frame) override;
   void WebContentsDestroyed() override;
   void DidFinishNavigation(content::NavigationHandle* handle) override;
   void DidToggleFullscreenModeForTab(bool entered_fullscreen,
@@ -109,7 +88,7 @@ class SafeBrowsingUserInteractionObserver
   void OnPaste() override;
 
   // permissions::PermissionRequestManager::Observer methods:
-  void OnBubbleAdded() override;
+  void OnPromptAdded() override;
 
   // Called by the JavaScript dialog manager when the current page is about to
   // show a JavaScript dialog (alert, confirm or prompt). Shows the
@@ -122,17 +101,21 @@ class SafeBrowsingUserInteractionObserver
   // a desktop capture. Shows the delayed interstitial immediately.
   void OnDesktopCaptureRequest();
 
-  static void SetSuspiciousSiteReporterExtensionIdForTesting(
-      const char* extension_id);
-  static void ResetSuspiciousSiteReporterExtensionIdForTesting();
-
   void SetClockForTesting(base::Clock* clock);
   base::Time GetCreationTimeForTesting() const;
 
  private:
-  void RecordUMA(DelayedWarningEvent event);
+  friend class content::WebContentsUserData<
+      SafeBrowsingUserInteractionObserver>;
+  WEB_CONTENTS_USER_DATA_KEY_DECL();
 
-  bool HandleKeyPress(const content::NativeWebKeyboardEvent& event);
+  // See CreateForWebContents() for parameters.
+  SafeBrowsingUserInteractionObserver(
+      content::WebContents* web_contents,
+      const security_interstitials::UnsafeResource& resource,
+      scoped_refptr<SafeBrowsingUIManager> ui_manager);
+
+  bool HandleKeyPress(const input::NativeWebKeyboardEvent& event);
   bool HandleMouseEvent(const blink::WebMouseEvent& event);
 
   void ShowInterstitial(DelayedWarningEvent event);
@@ -142,7 +125,6 @@ class SafeBrowsingUserInteractionObserver
   content::RenderWidgetHost::KeyPressEventCallback key_press_callback_;
   content::RenderWidgetHost::MouseEventCallback mouse_event_callback_;
 
-  content::WebContents* web_contents_;
   security_interstitials::UnsafeResource resource_;
   scoped_refptr<SafeBrowsingUIManager> ui_manager_;
   bool interstitial_shown_ = false;
@@ -155,14 +137,11 @@ class SafeBrowsingUserInteractionObserver
   // it the first time the hook is called.
   bool initial_navigation_finished_ = false;
 
-  // Id of the Suspicious Site Reporter extension. Only set in tests.
-  static const char* suspicious_site_reporter_extension_id_;
-
   // The time that this observer was created. Used for recording histograms.
   base::Time creation_time_;
   // This clock is used to record the delta from |creation_time_| when the
   // observer is detached, and can be injected by tests.
-  base::Clock* clock_;
+  raw_ptr<base::Clock> clock_;
 };
 
 }  // namespace safe_browsing

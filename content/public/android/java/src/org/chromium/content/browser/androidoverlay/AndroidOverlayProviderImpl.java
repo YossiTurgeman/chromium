@@ -1,15 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.content.browser.androidoverlay;
 
-import android.os.Handler;
-import android.os.HandlerThread;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
 
 import org.chromium.base.ThreadUtils;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.media.mojom.AndroidOverlay;
 import org.chromium.media.mojom.AndroidOverlayClient;
 import org.chromium.media.mojom.AndroidOverlayConfig;
@@ -23,6 +23,7 @@ import org.chromium.services.service_manager.InterfaceFactory;
  * sense that all provider clients talk to the same instance in the browser.
  */
 @JNINamespace("content")
+@NullMarked
 public class AndroidOverlayProviderImpl implements AndroidOverlayProvider {
     private static final String TAG = "AndroidOverlayProvider";
 
@@ -32,30 +33,26 @@ public class AndroidOverlayProviderImpl implements AndroidOverlayProvider {
     // concurrent overlays, we need to revisit this logic.
     private static final int MAX_OVERLAYS = 1;
 
-    // We maintain a thread with a Looper for the AndroidOverlays to use, since Dialog requires one.
-    // We don't want this to be the native thread that's used to create them (the browser UI thread)
-    // since we don't want to block that waiting for sync callbacks from Android, such as
-    // surfaceDestroyed.  Instead, we run all AndroidOverlays on one shared overlay-ui thread.
-    private HandlerThread mOverlayUiThread;
-    private Handler mHandler;
-
     // Number of AndroidOverlays that have been created but not released.
     private int mNumOverlays;
 
     // Runnable that notifies us that a client has been released.
-    private Runnable mNotifyReleasedRunnable = new Runnable() {
-        @Override
-        public void run() {
-            notifyReleased();
-        }
-    };
+    private final Runnable mNotifyReleasedRunnable =
+            new Runnable() {
+                @Override
+                public void run() {
+                    notifyReleased();
+                }
+            };
 
     /**
      * Create an overlay matching |config| for |client|, and bind it to |request|.  Remember that
      * potentially many providers are created.
      */
     @Override
-    public void createOverlay(InterfaceRequest<AndroidOverlay> request, AndroidOverlayClient client,
+    public void createOverlay(
+            InterfaceRequest<AndroidOverlay> request,
+            AndroidOverlayClient client,
             AndroidOverlayConfig config) {
         ThreadUtils.assertOnUiThread();
 
@@ -69,23 +66,12 @@ public class AndroidOverlayProviderImpl implements AndroidOverlayProvider {
             return;
         }
 
-        startThreadIfNeeded();
         mNumOverlays++;
 
-        DialogOverlayImpl impl = new DialogOverlayImpl(
-                client, config, mHandler, mNotifyReleasedRunnable, false /* asPanel*/);
+        DialogOverlayImpl impl =
+                new DialogOverlayImpl(
+                        client, config, mNotifyReleasedRunnable, /* asPanel= */ false);
         DialogOverlayImpl.MANAGER.bind(impl, request);
-    }
-
-    /**
-     * Make sure that mOverlayUiThread and mHandler are ready for use, if needed.
-     */
-    private void startThreadIfNeeded() {
-        if (mOverlayUiThread != null) return;
-
-        mOverlayUiThread = new HandlerThread("AndroidOverlayThread");
-        mOverlayUiThread.start();
-        mHandler = new Handler(mOverlayUiThread.getLooper());
     }
 
     /**
@@ -117,11 +103,10 @@ public class AndroidOverlayProviderImpl implements AndroidOverlayProvider {
         return true;
     }
 
-    /**
-     * Mojo factory.
-     */
-    public static class Factory implements InterfaceFactory<AndroidOverlayProvider> {
-        private static AndroidOverlayProviderImpl sImpl;
+    /** Mojo factory. */
+    public static class Factory implements InterfaceFactory<@Nullable AndroidOverlayProvider> {
+        private static @Nullable AndroidOverlayProviderImpl sImpl;
+
         public Factory() {}
 
         @Override

@@ -1,9 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/theme_helper.h"
 
+#include "base/no_destructor.h"
+#include "build/build_config.h"
 #include "content/browser/renderer_host/render_process_host_impl.h"
 #include "content/common/renderer.mojom.h"
 
@@ -15,8 +17,8 @@ ThemeHelper* ThemeHelper::GetInstance() {
   return s_theme_helper.get();
 }
 
-ThemeHelper::ThemeHelper() : theme_observer_(this) {
-  theme_observer_.Add(ui::NativeTheme::GetInstanceForWeb());
+ThemeHelper::ThemeHelper() : theme_observation_(this) {
+  theme_observation_.Observe(ui::NativeTheme::GetInstanceForWeb());
 }
 
 ThemeHelper::~ThemeHelper() {}
@@ -25,16 +27,15 @@ mojom::UpdateSystemColorInfoParamsPtr MakeUpdateSystemColorInfoParams(
     ui::NativeTheme* native_theme) {
   mojom::UpdateSystemColorInfoParamsPtr params =
       mojom::UpdateSystemColorInfoParams::New();
-  params->is_dark_mode = native_theme->ShouldUseDarkColors();
-  params->is_high_contrast = native_theme->UsesHighContrastColors();
-  const auto& colors = native_theme->GetSystemColors();
-  params->colors.insert(colors.begin(), colors.end());
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX)
+  params->accent_color = native_theme->user_color();
+#endif
 
   return params;
 }
 
 void ThemeHelper::OnNativeThemeUpdated(ui::NativeTheme* observed_theme) {
-  DCHECK(theme_observer_.IsObserving(observed_theme));
+  DCHECK(theme_observation_.IsObservingSource(observed_theme));
 
   mojom::UpdateSystemColorInfoParamsPtr params =
       MakeUpdateSystemColorInfoParams(observed_theme);

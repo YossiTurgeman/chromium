@@ -1,134 +1,309 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.content_public.browser;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
-import org.chromium.net.NetError;
+import static org.chromium.build.NullUtil.assumeNonNull;
 
-/**
- * JNI bridge with content::NavigationHandle
- */
+import androidx.annotation.VisibleForTesting;
+
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+
+import org.chromium.base.UserDataHost;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.net.NetError;
+import org.chromium.ui.base.PageTransition;
+import org.chromium.url.GURL;
+import org.chromium.url.Origin;
+
+/** JNI bridge with content::NavigationHandle */
 @JNINamespace("content")
+@NullMarked
 public class NavigationHandle {
-    private long mNativeNavigationHandleProxy;
-    private final boolean mIsInMainFrame;
+    private long mNativeNavigationHandle;
+    private boolean mIsInPrimaryMainFrame;
     private final boolean mIsRendererInitiated;
-    private final boolean mIsSameDocument;
-    private Integer mPageTransition;
-    private String mUrl;
+    private boolean mIsSameDocument;
+    private @PageTransition int mPageTransition;
+    private GURL mUrl;
+    private @Nullable GURL mReferrerUrl;
+    private @Nullable GURL mBaseUrlForDataUrl;
     private boolean mHasCommitted;
     private boolean mIsDownload;
     private boolean mIsErrorPage;
-    private boolean mIsFragmentNavigation;
+    private boolean mIsPrimaryMainFrameFragmentNavigation;
     private boolean mIsValidSearchFormUrl;
     private @NetError int mErrorCode;
+    private @Nullable String mErrorDescription;
     private int mHttpStatusCode;
+    private @Nullable Origin mInitiatorOrigin;
+    private boolean mIsPost;
+    private boolean mHasUserGesture;
+    private boolean mIsRedirect;
+    private boolean mIsExternalProtocol;
+    private long mNavigationId;
+    private boolean mIsPageActivation;
+    private final boolean mIsReload;
+    private final boolean mIsHistory;
+    private final boolean mIsBack;
+    private final boolean mIsForward;
+    private final boolean mIsRestore;
+    private @Nullable UserDataHost mUserDataHost;
+    private boolean mIsPdf;
+    private @Nullable String mMimeType;
+    private @Nullable WebContents mWebContents;
+    private @Nullable Page mCommittedPage;
+    private boolean mIsSameOrigin;
+    private int mIgnoredDuplicateNavigationCount;
+
+    private boolean mStarted;
+
+    public static NavigationHandle createForTesting(
+            GURL url,
+            boolean isRendererInitiated,
+            @PageTransition int transition,
+            boolean hasUserGesture) {
+        return createForTesting(
+                url,
+                /* isInPrimaryMainFrame= */ true,
+                /* isSameDocument= */ false,
+                isRendererInitiated,
+                transition,
+                hasUserGesture,
+                /* isReload= */ false);
+    }
+
+    public static NavigationHandle createForTesting(
+            GURL url,
+            boolean isInPrimaryMainFrame,
+            boolean isSameDocument,
+            boolean isRendererInitiated,
+            @PageTransition int transition,
+            boolean hasUserGesture,
+            boolean isReload) {
+        NavigationHandle handle =
+                new NavigationHandle(
+                        0,
+                        url,
+                        isRendererInitiated,
+                        isReload,
+                        /* isHistory= */ false,
+                        /* isBack= */ false,
+                        /* isForward= */ false,
+                        /* isRestore= */ false);
+        handle.didStart(
+                /* referrerUrl= */ GURL.emptyGURL(),
+                /* baseUrlForDataUrl= */ GURL.emptyGURL(),
+                isInPrimaryMainFrame,
+                isSameDocument,
+                /* initiatorOrigin= */ null,
+                transition,
+                /* isPost= */ false,
+                hasUserGesture,
+                /* isRedirect= */ false,
+                /* isExternalProtocol= */ false,
+                /* navigationId= */ 0,
+                /* isPageActivation= */ false,
+                /* isPdf= */ false,
+                /* mimeType= */ "",
+                /* webContents= */ null);
+        return handle;
+    }
 
     @CalledByNative
-    public NavigationHandle(long nativeNavigationHandleProxy, String url, boolean isInMainFrame,
-            boolean isSameDocument, boolean isRendererInitiated) {
-        mNativeNavigationHandleProxy = nativeNavigationHandleProxy;
+    private NavigationHandle(
+            long nativeNavigationHandle,
+            GURL url,
+            boolean isRendererInitiated,
+            boolean isReload,
+            boolean isHistory,
+            boolean isBack,
+            boolean isForward,
+            boolean isRestore) {
+        mNativeNavigationHandle = nativeNavigationHandle;
         mUrl = url;
-        mIsInMainFrame = isInMainFrame;
-        mIsSameDocument = isSameDocument;
         mIsRendererInitiated = isRendererInitiated;
+        mIsReload = isReload;
+        mIsHistory = isHistory;
+        mIsBack = isBack;
+        mIsForward = isForward;
+        mIsRestore = isRestore;
+    }
+
+    @CalledByNative
+    private void didStart(
+            GURL referrerUrl,
+            GURL baseUrlForDataUrl,
+            boolean isInPrimaryMainFrame,
+            boolean isSameDocument,
+            @Nullable Origin initiatorOrigin,
+            @PageTransition int transition,
+            boolean isPost,
+            boolean hasUserGesture,
+            boolean isRedirect,
+            boolean isExternalProtocol,
+            long navigationId,
+            boolean isPageActivation,
+            boolean isPdf,
+            String mimeType,
+            @Nullable WebContents webContents) {
+        mReferrerUrl = referrerUrl;
+        mBaseUrlForDataUrl = baseUrlForDataUrl;
+        mIsInPrimaryMainFrame = isInPrimaryMainFrame;
+        mIsSameDocument = isSameDocument;
+        mInitiatorOrigin = initiatorOrigin;
+        mPageTransition = transition;
+        mIsPost = isPost;
+        mHasUserGesture = hasUserGesture;
+        mIsRedirect = isRedirect;
+        mIsExternalProtocol = isExternalProtocol;
+        mNavigationId = navigationId;
+        mIsPdf = isPdf;
+        mIsPageActivation = isPageActivation;
+        mMimeType = mimeType;
+        mWebContents = webContents;
+
+        mStarted = true;
     }
 
     /**
      * The navigation received a redirect. Called once per redirect.
+     *
      * @param url The new URL.
      */
     @CalledByNative
-    private void didRedirect(String url) {
+    @VisibleForTesting
+    public void didRedirect(GURL url, boolean isExternalProtocol) {
         mUrl = url;
+        mIsRedirect = true;
+        mIsExternalProtocol = isExternalProtocol;
     }
 
-    /**
-     * The navigation finished. Called once per navigation.
-     */
+    /** The navigation finished. Called once per navigation. */
     @CalledByNative
-    public void didFinish(String url, boolean isErrorPage, boolean hasCommitted,
-            boolean isFragmentNavigation, boolean isDownload, boolean isValidSearchFormUrl,
-            int transition, @NetError int errorCode, int httpStatuscode) {
+    @VisibleForTesting
+    public void didFinish(
+            GURL url,
+            boolean isErrorPage,
+            boolean hasCommitted,
+            boolean isPrimaryMainFrameFragmentNavigation,
+            boolean isDownload,
+            boolean isValidSearchFormUrl,
+            @PageTransition int transition,
+            @NetError int errorCode,
+            String errorDescription,
+            int httpStatuscode,
+            boolean isExternalProtocol,
+            boolean isPdf,
+            String mimeType,
+            Page currentPage,
+            boolean isSameOrigin,
+            int ignoredDuplicateNavigationCount) {
         mUrl = url;
         mIsErrorPage = isErrorPage;
         mHasCommitted = hasCommitted;
-        mIsFragmentNavigation = isFragmentNavigation;
+        mIsPrimaryMainFrameFragmentNavigation = isPrimaryMainFrameFragmentNavigation;
         mIsDownload = isDownload;
         mIsValidSearchFormUrl = isValidSearchFormUrl;
-        mPageTransition = transition == -1 ? null : transition;
+        mPageTransition = transition;
         mErrorCode = errorCode;
+        mErrorDescription = errorDescription;
         mHttpStatusCode = httpStatuscode;
+        mIsExternalProtocol = isExternalProtocol;
+        mIsPdf = isPdf;
+        mMimeType = mimeType;
+        if (mHasCommitted && mIsInPrimaryMainFrame) {
+            mCommittedPage = currentPage;
+        }
+        mIsSameOrigin = isSameOrigin;
+        mIgnoredDuplicateNavigationCount = ignoredDuplicateNavigationCount;
     }
 
-    /**
-     * Release the C++ pointer.
-     */
+    /** Release the C++ pointer. */
     @CalledByNative
     private void release() {
-        mNativeNavigationHandleProxy = 0;
+        mNativeNavigationHandle = 0;
     }
 
-    public long nativePtr() {
-        return mNativeNavigationHandleProxy;
+    public long nativeNavigationHandlePtr() {
+        return mNativeNavigationHandle;
     }
 
     /**
-     * The URL the frame is navigating to.  This may change during the navigation when encountering
-     * a server redirect.
+     * The URL the frame is navigating to. This may change during the navigation when encountering a
+     * server redirect.
      */
-    public String getUrl() {
+    public GURL getUrl() {
         return mUrl;
     }
 
+    /** The referrer URL for the navigation. */
+    public GURL getReferrerUrl() {
+        assert mStarted;
+        return assumeNonNull(mReferrerUrl);
+    }
+
+    /** Used for specifying a base URL for pages loaded via data URLs. */
+    public GURL getBaseUrlForDataUrl() {
+        assert mStarted;
+        return assumeNonNull(mBaseUrlForDataUrl);
+    }
+
     /**
-     * Whether the navigation is taking place in the main frame or in a subframe.
+     * Whether the navigation is taking place in the main frame of the primary frame tree. With
+     * MPArch (crbug.com/1164280), a WebContents may have additional frame trees for prerendering
+     * pages in addition to the primary frame tree (holding the page currently shown to the user).
+     * This remains constant over the navigation lifetime.
      */
-    public boolean isInMainFrame() {
-        return mIsInMainFrame;
+    public boolean isInPrimaryMainFrame() {
+        assert mStarted;
+        return mIsInPrimaryMainFrame;
     }
 
     /**
      * Whether the navigation was initiated by the renderer process. Examples of renderer-initiated
-     * navigations include:
-     *  - <a> link click
-     *  - changing window.location.href
-     *  - redirect via the <meta http-equiv="refresh"> tag
-     *  - using window.history.pushState
+     * navigations include: - <a> link click - changing window.location.href - redirect via the
+     * <meta http-equiv="refresh"> tag - using window.history.pushState
      *
-     * This method returns false for browser-initiated navigations, including:
-     *  - any navigation initiated from the omnibox
-     *  - navigations via suggestions in browser UI
-     *  - navigations via browser UI: Ctrl-R, refresh/forward/back/home buttons
-     *  - using window.history.forward() or window.history.back()
-     *  - any other "explicit" URL navigations, e.g. bookmarks
+     * <p>This method returns false for browser-initiated navigations, including: - any navigation
+     * initiated from the omnibox - navigations via suggestions in browser UI - navigations via
+     * browser UI: Ctrl-R, refresh/forward/back/home buttons - using window.history.forward() or
+     * window.history.back() - any other "explicit" URL navigations, e.g. bookmarks
      */
     public boolean isRendererInitiated() {
         return mIsRendererInitiated;
     }
 
     /**
-     * Whether the navigation happened without changing document.
-     * Examples of same document navigations are:
-     * - reference fragment navigations
-     * - pushState/replaceState
-     * - same page history navigation
+     * Whether the previous document in this frame was same-origin with the new one created by this
+     * navigation.
+     */
+    public boolean isSameOrigin() {
+        assert mHasCommitted;
+        return mIsSameOrigin;
+    }
+
+    /**
+     * Whether the navigation happened without changing document. Examples of same document
+     * navigations are: - reference fragment navigations - pushState/replaceState - same page
+     * history navigation
      */
     public boolean isSameDocument() {
+        assert mStarted;
         return mIsSameDocument;
     }
 
-    public String errorDescription() {
-        // TODO(shaktisahu): Provide appropriate error description (crbug/690784).
-        return "";
+    public @NetError int errorCode() {
+        assert mStarted;
+        return mErrorCode;
     }
 
-    public @NetError int errorCode() {
-        return mErrorCode;
+    public @Nullable String errorDescription() {
+        assert mStarted;
+        return mErrorDescription;
     }
 
     /**
@@ -139,37 +314,37 @@ public class NavigationHandle {
      * page.
      */
     public boolean hasCommitted() {
+        assert mStarted;
         return mHasCommitted;
     }
 
     /**
      * Return the HTTP status code. This can be used after the response is received in
-     * didFinishNavigation()
+     * didFinishNavigationInPrimaryMainFrame()
      */
     public int httpStatusCode() {
+        assert mStarted;
         return mHttpStatusCode;
     }
 
-    /**
-     * Returns the page transition type.
-     */
-    public Integer pageTransition() {
+    /** Returns the page transition type. */
+    public @PageTransition int pageTransition() {
+        assert mStarted;
         return mPageTransition;
     }
 
-    /**
-     * Returns true on same-document navigation with fragment change.
-     */
-    public boolean isFragmentNavigation() {
-        return mIsFragmentNavigation;
+    /** Returns true on same-document navigation with fragment change in the primary main frame. */
+    public boolean isPrimaryMainFrameFragmentNavigation() {
+        assert mStarted;
+        return mIsPrimaryMainFrameFragmentNavigation;
     }
 
     /**
-     * Whether the navigation resulted in an error page.
-     * Note that if an error page reloads, this will return true even though GetNetErrorCode will be
-     * net::OK.
+     * Whether the navigation resulted in an error page. Note that if an error page reloads, this
+     * will return true even though GetNetErrorCode will be net::OK.
      */
     public boolean isErrorPage() {
+        assert mStarted;
         return mIsErrorPage;
     }
 
@@ -180,39 +355,130 @@ public class NavigationHandle {
      * response headers.
      */
     public boolean isDownload() {
+        assert mStarted;
         return mIsDownload;
     }
 
-    /**
-     * Returns true if the navigation is a search.
-     */
+    /** Returns true if the navigation is a search. */
     public boolean isValidSearchFormUrl() {
+        assert mStarted;
         return mIsValidSearchFormUrl;
     }
 
     /**
-     * Set request's header. If the header is already present, its value is overwritten. When
-     * modified during a navigation start, the headers will be applied to the initial network
-     * request. When modified during a redirect, the headers will be applied to the redirected
-     * request.
+     * Get the Origin that initiated this navigation. May be null in the case of navigations
+     * originating from the browser.
      */
-    public void setRequestHeader(String headerName, String headerValue) {
-        NavigationHandleJni.get().setRequestHeader(
-                mNativeNavigationHandleProxy, headerName, headerValue);
+    public @Nullable Origin getInitiatorOrigin() {
+        assert mStarted;
+        return mInitiatorOrigin;
     }
 
-    /**
-     * Remove a request's header. If the header is not present, it has no effect. Must be called
-     * during a redirect.
-     */
-    public void removeRequestHeader(String headerName) {
-        NavigationHandleJni.get().removeRequestHeader(mNativeNavigationHandleProxy, headerName);
+    /** True if the the navigation method is "POST". */
+    public boolean isPost() {
+        assert mStarted;
+        return mIsPost;
     }
 
-    @NativeMethods
-    interface Natives {
-        void setRequestHeader(
-                long nativeNavigationHandleProxy, String headerName, String headerValue);
-        void removeRequestHeader(long nativeNavigationHandleProxy, String headerName);
+    /** True if the navigation was initiated by the user. */
+    public boolean hasUserGesture() {
+        assert mStarted;
+        return mHasUserGesture;
+    }
+
+    /** Is the navigation a redirect (in which case URL is the "target" address). */
+    public boolean isRedirect() {
+        assert mStarted;
+        return mIsRedirect;
+    }
+
+    /** True if the target URL can't be handled by Chrome's internal protocol handlers. */
+    public boolean isExternalProtocol() {
+        assert mStarted;
+        return mIsExternalProtocol;
+    }
+
+    /** Get a unique ID for this navigation. */
+    public long getNavigationId() {
+        assert mStarted;
+        return mNavigationId;
+    }
+
+    /*
+     * Whether this navigation is activating an existing page (e.g. served from
+     * the BackForwardCache or Prerender).
+     */
+    public boolean isPageActivation() {
+        assert mStarted;
+        return mIsPageActivation;
+    }
+
+    /** Whether this navigation was initiated by a page reload. */
+    public boolean isReload() {
+        return mIsReload;
+    }
+
+    /** Whether this navigation is a history navigation or not. */
+    public boolean isHistory() {
+        return mIsHistory;
+    }
+
+    /** Whether this navigation is a back history navigation or not (offset < 0). */
+    public boolean isBack() {
+        return mIsBack;
+    }
+
+    /** Whether this navigation is a back history navigation or not (offset > 0). */
+    public boolean isForward() {
+        return mIsForward;
+    }
+
+    /** Whether this navigation was initiated by a session restore. */
+    public boolean isRestore() {
+        return mIsRestore;
+    }
+
+    /** Return any user data which has been set on the NavigationHandle. */
+    public UserDataHost getUserDataHost() {
+        if (mUserDataHost == null) {
+            mUserDataHost = new UserDataHost();
+        }
+        return mUserDataHost;
+    }
+
+    /** Sets the user data host. This should not be considered part of the content API. */
+    public void setUserDataHost(@Nullable UserDataHost userDataHost) {
+        mUserDataHost = userDataHost;
+    }
+
+    /** Whether the navigation is for PDF content. */
+    public boolean isPdf() {
+        assert mStarted;
+        return mIsPdf;
+    }
+
+    /** MIME type of the page. */
+    public String getMimeType() {
+        assert mStarted;
+        return assumeNonNull(mMimeType);
+    }
+
+    /** A navigation is always taking place inside of a WebContents, so this will never be null. */
+    public WebContents getWebContents() {
+        assert mStarted;
+        return assumeNonNull(mWebContents);
+    }
+
+    /*
+     * The Page that the navigation commits into. Set to null if the navigation doesn't commit or
+     * result in a Page (e.g. 204/download)
+     */
+    public @Nullable Page getCommittedPage() {
+        return mCommittedPage;
+    }
+
+    /** Returns the number of duplicate navigations ignored during this navigation. */
+    public int getIgnoredDuplicateNavigationCount() {
+        return mIgnoredDuplicateNavigationCount;
     }
 }

@@ -27,6 +27,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import mock
 import sys
 import unittest
 
@@ -34,12 +35,21 @@ from blinkpy.common.host_mock import MockHost
 from blinkpy.common.system.system_host_mock import MockSystemHost
 from blinkpy.web_tests import run_web_tests
 from blinkpy.web_tests.controllers.test_result_sink import CreateTestResultSink
-from blinkpy.web_tests.controllers.web_test_runner import WebTestRunner, Worker, Sharder, TestRunInterruptedException
+from blinkpy.web_tests.controllers.web_test_runner import (
+    WebTestRunner,
+    Worker,
+    Sharder,
+    TestRunInterruptedException,
+)
 from blinkpy.web_tests.models import test_expectations
 from blinkpy.web_tests.models import test_failures
-from blinkpy.web_tests.models.test_run_results import TestRunResults
+from blinkpy.web_tests.models.test_run_results import (
+    TestRunResults,
+    InterruptReason,
+)
 from blinkpy.web_tests.models.test_input import TestInput
 from blinkpy.web_tests.models.test_results import TestResult
+from blinkpy.web_tests.models.typ_types import ResultType
 from blinkpy.web_tests.port.test import TestPort
 from blinkpy.web_tests.port.driver import DriverOutput
 
@@ -66,6 +76,9 @@ class FakePrinter(object):
     def write(self, msg):
         pass
 
+    def writeln(self, msg):
+        pass
+
     def write_update(self, msg):
         pass
 
@@ -74,14 +87,14 @@ class FakePrinter(object):
 
 
 class LockCheckingRunner(WebTestRunner):
-    def __init__(self, port, options, printer, tester, http_lock, sink):
+
+    def __init__(self, port, options, printer, tester, sink):
         super(LockCheckingRunner,
               self).__init__(options, port, printer,
                              port.results_directory(), lambda test_name: False,
                              sink)
         self._finished_list_called = False
         self._tester = tester
-        self._should_have_http_lock = http_lock
 
 
 # TODO(crbug.com/926841): Debug running this test on Swarming on Windows.
@@ -103,7 +116,7 @@ class WebTestRunnerTests(unittest.TestCase):
 
         host = MockHost()
         port = port or host.port_factory.get(options.platform, options=options)
-        return LockCheckingRunner(port, options, FakePrinter(), self, True,
+        return LockCheckingRunner(port, options, FakePrinter(), self,
                                   CreateTestResultSink(port))
 
     def _run_tests(self, runner, tests):
@@ -113,28 +126,28 @@ class WebTestRunnerTests(unittest.TestCase):
 
     def test_interrupt_if_at_failure_limits(self):
         runner = self._runner()
-        runner._options.exit_after_n_failures = None
-        runner._options.exit_after_n_crashes_or_times = None
+        runner._exit_after_n_failures = 0
+        runner._exit_after_n_crashes_or_times = 0
         test_names = ['passes/text.html', 'passes/image.html']
         runner._test_inputs = [
             TestInput(test_name, timeout_ms=6000) for test_name in test_names
         ]
 
-        run_results = TestRunResults(
-            TestExpectations(runner._port), len(test_names))
+        run_results = TestRunResults(TestExpectations(runner._port),
+                                     len(test_names), None)
         run_results.unexpected_failures = 100
         run_results.unexpected_crashes = 50
         run_results.unexpected_timeouts = 50
-        # No exception when the exit_after* options are None.
+        # No exception when the exit_after* parameters are 0.
         runner._interrupt_if_at_failure_limits(run_results)
 
         # No exception when we haven't hit the limit yet.
-        runner._options.exit_after_n_failures = 101
-        runner._options.exit_after_n_crashes_or_timeouts = 101
+        runner._exit_after_n_failures = 101
+        runner._exit_after_n_crashes_or_timeouts = 101
         runner._interrupt_if_at_failure_limits(run_results)
 
         # Interrupt if we've exceeded either limit:
-        runner._options.exit_after_n_crashes_or_timeouts = 10
+        runner._exit_after_n_crashes_or_timeouts = 10
         with self.assertRaises(TestRunInterruptedException):
             runner._interrupt_if_at_failure_limits(run_results)
         self.assertEqual(run_results.results_by_name['passes/text.html'].type,
@@ -142,10 +155,27 @@ class WebTestRunnerTests(unittest.TestCase):
         self.assertEqual(run_results.results_by_name['passes/image.html'].type,
                          'SKIP')
 
-        runner._options.exit_after_n_crashes_or_timeouts = None
-        runner._options.exit_after_n_failures = 10
+        runner._exit_after_n_crashes_or_timeouts = 0
+        runner._exit_after_n_failures = 10
         with self.assertRaises(TestRunInterruptedException):
             runner._interrupt_if_at_failure_limits(run_results)
+
+    def test_keyboard_interrupt(self):
+        runner = self._runner()
+        runner._options.derived_batch_size = 1
+        runner._options.must_use_derived_batch_size = True
+        expectations = TestExpectations(runner._port)
+        test_inputs = [TestInput('passes/text.html', timeout_ms=6000)]
+        with mock.patch('blinkpy.common.message_pool.get',
+                        side_effect=KeyboardInterrupt):
+            results = runner.run_tests(expectations,
+                                       test_inputs,
+                                       tests_to_skip=[],
+                                       num_workers=1,
+                                       retry_attempt=0)
+        self.assertEqual(results.interrupted, True)
+        self.assertIs(results.interrupt_reason,
+                      InterruptReason.EXTERNAL_SIGNAL)
 
     def test_update_summary_with_result(self):
         runner = self._runner()
@@ -153,7 +183,7 @@ class WebTestRunnerTests(unittest.TestCase):
         expectations = TestExpectations(runner._port)
         runner._expectations = expectations
 
-        run_results = TestRunResults(expectations, 1)
+        run_results = TestRunResults(expectations, 1, None)
         result = TestResult(
             test_name=test,
             failures=[
@@ -165,11 +195,71 @@ class WebTestRunnerTests(unittest.TestCase):
         self.assertEqual(1, run_results.expected)
         self.assertEqual(0, run_results.unexpected)
 
-        run_results = TestRunResults(expectations, 1)
+        run_results = TestRunResults(expectations, 1, None)
         result = TestResult(test_name=test, failures=[], reftest_type=['=='])
         runner._update_summary_with_result(run_results, result)
         self.assertEqual(0, run_results.expected)
         self.assertEqual(1, run_results.unexpected)
+
+    def test_skipped_tests_are_sinked(self):
+        runner = self._runner()
+        runner._options.derived_batch_size = 1
+        runner._options.must_use_derived_batch_size = True
+        expectations = TestExpectations(runner._port)
+        with mock.patch.object(runner, "_test_result_sink") as rdb:
+            runner.run_tests(
+                expectations,
+                [],
+                tests_to_skip=['skips/image.html'],
+                num_workers=1,
+                retry_attempt=0,
+            )
+            rdb.sink.assert_called_with(
+                TestResult(test_name='skips/image.html'))
+
+    def test_results_are_sinked(self):
+        runner = self._runner()
+        runner._options.derived_batch_size = 1
+        runner._options.must_use_derived_batch_size = True
+        test_names = ['passes/text.html', 'passes/image.html']
+        test_inputs = [
+            TestInput(test_name, timeout_ms=6000) for test_name in test_names
+        ]
+        with mock.patch.object(runner, "_test_result_sink") as rdb:
+            runner.run_tests(
+                TestExpectations(runner._port),
+                test_inputs,
+                tests_to_skip=[],
+                num_workers=1,
+                retry_attempt=0,
+            )
+            rdb.sink.assert_has_calls(
+                '', [True, TestResult(test_name='passes/text.html')])
+            rdb.sink.assert_has_calls(
+                '', [True, TestResult(test_name='passes/images.html')])
+
+    def test_device_failures_are_sinked(self):
+        runner = self._runner()
+        runner._options.derived_batch_size = 1
+        runner._options.must_use_derived_batch_size = True
+        test_names = ['failures/expected/device_failure.html']
+        test_inputs = [
+            TestInput(test_name, timeout_ms=6000) for test_name in test_names
+        ]
+        with mock.patch.object(runner, '_test_result_sink') as rdb:
+            runner.run_tests(
+                TestExpectations(runner._port),
+                test_inputs,
+                tests_to_skip=[],
+                num_workers=1,
+                retry_attempt=0,
+            )
+
+        self.assertEqual(1, rdb.sink.call_count, rdb.sink.call_args_list)
+        (result, ), _kwargs = rdb.sink.call_args
+        self.assertTrue(result.device_failed)
+        self.assertEqual(ResultType.Timeout, result.type)
+        self.assertFalse(result.is_expected)
 
 
 class SharderTests(unittest.TestCase):
@@ -368,6 +458,6 @@ class WorkerTests(unittest.TestCase):
         # pylint: disable=protected-access
         options = run_web_tests.parse_args(['--platform',
                                             'test-mac-mac10.11'])[0]
-        worker = Worker(self.DummyCaller(), '/results', options)
+        worker = Worker(self.DummyCaller(), '/results', options, {})
         self.assertTrue(options.manifest_update)
         self.assertFalse(worker._options.manifest_update)

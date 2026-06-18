@@ -1,19 +1,19 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_DOWNLOAD_PUBLIC_BACKGROUND_SERVICE_FEATURES_H_
 #define COMPONENTS_DOWNLOAD_PUBLIC_BACKGROUND_SERVICE_FEATURES_H_
 
+#include "base/component_export.h"
 #include "base/feature_list.h"
 
 namespace download {
 
-extern const base::Feature kDownloadServiceFeature;
-
-// Incognito support of download service. No database or file IO is allowed if
-// this feature is enabled. The download data will be saved to blob.
-extern const base::Feature kDownloadServiceIncognito;
+// Used to set configuration of download service through Finch. This is not used
+// to turn on/off the feature.
+COMPONENT_EXPORT(COMPONENTS_DOWNLOAD_PUBLIC_BACKGROUND_SERVICE)
+BASE_DECLARE_FEATURE(kDownloadServiceFeature);
 
 }  // namespace download
 

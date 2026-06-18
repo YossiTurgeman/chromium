@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,13 +20,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Tests to validate correctness of the PropertyListModel. Mainly that sub-observers are
- * added and removed at the correct times.
+ * Tests to validate correctness of the PropertyListModel. Mainly that sub-observers are added and
+ * removed at the correct times.
  */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class PropertyListModelTest implements ListObservable.ListObserver<PropertyKey> {
-    private static final int METHOD_COUNT = 33;
+    private static final int METHOD_COUNT = 36;
     private static final PropertyModel.WritableIntPropertyKey INTEGER_KEY =
             new PropertyModel.WritableIntPropertyKey();
 
@@ -59,7 +59,10 @@ public class PropertyListModelTest implements ListObservable.ListObserver<Proper
     }
 
     @Override
-    public void onItemRangeChanged(ListObservable<PropertyKey> source, int index, int count,
+    public void onItemRangeChanged(
+            ListObservable<PropertyKey> source,
+            int index,
+            int count,
             @Nullable PropertyKey payload) {
         mIndex = index;
         mCount = count;
@@ -97,6 +100,29 @@ public class PropertyListModelTest implements ListObservable.ListObserver<Proper
 
         // Index and parameters are that of the last call.
         assertThat(mIndex, equalTo(2));
+        assertThat(mCount, equalTo(1));
+        assertThat(mPayload, equalTo(INTEGER_KEY));
+    }
+
+    @Test
+    public void addAllSimpleList() {
+        ListModelBase<PropertyModel, Void> simpleList = new ListModelBase<>();
+        simpleList.add(new PropertyModel.Builder(INTEGER_KEY).build());
+        simpleList.add(new PropertyModel.Builder(INTEGER_KEY).build());
+        simpleList.add(new PropertyModel.Builder(INTEGER_KEY).build());
+        simpleList.add(new PropertyModel.Builder(INTEGER_KEY).build());
+
+        mListModel.addAll(simpleList);
+
+        // Verify that an observer was attached to each model.
+        simpleList.get(0).set(INTEGER_KEY, 1);
+        simpleList.get(1).set(INTEGER_KEY, 5);
+        simpleList.get(2).set(INTEGER_KEY, 10);
+        simpleList.get(3).set(INTEGER_KEY, 20);
+        assertThat(mOnRangeChangedCalled, equalTo(4));
+
+        // Index and parameters are that of the last call.
+        assertThat(mIndex, equalTo(3));
         assertThat(mCount, equalTo(1));
         assertThat(mPayload, equalTo(INTEGER_KEY));
     }

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,10 @@
 #include "gpu/config/gpu_info.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
+#if BUILDFLAG(IS_WIN)
+#include <d3dcommon.h>
+#endif
+
 const char kOsVersion[] = "10.6.4";
 const uint32_t kIntelVendorId = 0x8086;
 const uint32_t kNvidiaVendorId = 0x10de;
@@ -24,7 +28,8 @@ const uint32_t kNvidiaVendorId = 0x10de;
 
 namespace gpu {
 
-class GpuControlListTest : public testing::Test {
+class GpuControlListTest : public testing::Test,
+                           public testing::WithParamInterface<bool> {
  public:
   typedef GpuControlList::Entry Entry;
 
@@ -35,15 +40,18 @@ class GpuControlListTest : public testing::Test {
     return gpu_info_;
   }
 
-  std::unique_ptr<GpuControlList> Create(size_t entry_count,
-                                         const Entry* entries) {
-    GpuControlListData data(entry_count, entries);
-    std::unique_ptr<GpuControlList> rt(new GpuControlList(data));
+  std::unique_ptr<GpuControlList> Create(base::span<const Entry> entries) {
+    std::unique_ptr<GpuControlList> rt(new GpuControlList(entries));
     rt->AddSupportedFeature("test_feature_0", TEST_FEATURE_0);
     rt->AddSupportedFeature("test_feature_1", TEST_FEATURE_1);
     rt->AddSupportedFeature("test_feature_2", TEST_FEATURE_2);
     return rt;
   }
+
+  GpuControlList::GLType GetGLType(const std::string& gl_renderer) {
+    return GpuControlList::ProcessANGLEGLRenderer(gl_renderer);
+  }
+  bool is_angle() const { return GetParam(); }
 
  protected:
   void SetUp() override {
@@ -53,8 +61,15 @@ class GpuControlListTest : public testing::Test {
     gpu_info_.gpu.driver_version = "1.6.18";
     gpu_info_.machine_model_name = "MacBookPro";
     gpu_info_.machine_model_version = "7.1";
-    gpu_info_.gl_vendor = "NVIDIA Corporation";
-    gpu_info_.gl_renderer = "NVIDIA GeForce GT 120 OpenGL Engine";
+    if (is_angle()) {
+      gpu_info_.gl_vendor = "Google Inc. (NVIDIA Corporation)";
+      gpu_info_.gl_renderer =
+          "ANGLE (NVIDIA Corporation, NVIDIA GeForce GT 120 OpenGL Engine,)";
+      gpu_info_.gl_renderer = "";
+    } else {
+      gpu_info_.gl_vendor = "NVIDIA Corporation";
+      gpu_info_.gl_renderer = "NVIDIA GeForce GT 120 OpenGL Engine";
+    }
   }
 
   void TearDown() override {}
@@ -63,24 +78,29 @@ class GpuControlListTest : public testing::Test {
   GPUInfo gpu_info_;
 };
 
-TEST_F(GpuControlListTest, NeedsMoreInfo) {
+INSTANTIATE_TEST_SUITE_P(,
+                         GpuControlListTest,
+                         testing::Values(false, true),
+                         testing::PrintToStringParamName());
+
+TEST_P(GpuControlListTest, NeedsMoreInfo) {
   const Entry kEntries[1] = {
-      kGpuControlListTestingEntries[kGpuControlListTest_NeedsMoreInfo]};
-  std::unique_ptr<GpuControlList> control_list = Create(1, kEntries);
+      GetGpuControlListTestingEntries()[kGpuControlListTest_NeedsMoreInfo]};
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
 
   GPUInfo gpu_info;
   gpu_info.gpu.vendor_id = kNvidiaVendorId;
 
-  std::set<int> features = control_list->MakeDecision(
-      GpuControlList::kOsWin, kOsVersion, gpu_info);
+  std::set<int> features = control_list->MakeDecision(GpuControlList::kOsWin,
+                                                      kOsVersion, gpu_info, {});
   EXPECT_EMPTY_SET(features);
   EXPECT_TRUE(control_list->needs_more_info());
   std::vector<uint32_t> decision_entries = control_list->GetActiveEntries();
   EXPECT_EQ(0u, decision_entries.size());
 
   gpu_info.gpu.driver_version = "11";
-  features = control_list->MakeDecision(
-      GpuControlList::kOsWin, kOsVersion, gpu_info);
+  features = control_list->MakeDecision(GpuControlList::kOsWin, kOsVersion,
+                                        gpu_info, {});
   EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
   EXPECT_FALSE(control_list->needs_more_info());
   decision_entries = control_list->GetActiveEntries();
@@ -93,71 +113,114 @@ TEST_F(GpuControlListTest, NeedsMoreInfo) {
             entry_ids[0]);
 }
 
-TEST_F(GpuControlListTest, NeedsMoreInfoForExceptions) {
+TEST_P(GpuControlListTest, NeedsMoreInfoForExceptions) {
   const Entry kEntries[1] = {
-      kGpuControlListTestingEntries
+      GetGpuControlListTestingEntries()
           [kGpuControlListTest_NeedsMoreInfoForExceptions]};
-  std::unique_ptr<GpuControlList> control_list = Create(1, kEntries);
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
 
   GPUInfo gpu_info;
   gpu_info.gpu.vendor_id = kIntelVendorId;
 
   // The case this entry does not apply.
-  std::set<int> features = control_list->MakeDecision(
-      GpuControlList::kOsMacosx, kOsVersion, gpu_info);
+  std::set<int> features = control_list->MakeDecision(GpuControlList::kOsMacosx,
+                                                      kOsVersion, gpu_info, {});
   EXPECT_EMPTY_SET(features);
   EXPECT_FALSE(control_list->needs_more_info());
 
   // The case this entry might apply, but need more info.
-  features = control_list->MakeDecision(
-      GpuControlList::kOsLinux, kOsVersion, gpu_info);
+  features = control_list->MakeDecision(GpuControlList::kOsLinux, kOsVersion,
+                                        gpu_info, {});
   // Ignore exceptions if main entry info matches
   EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
   EXPECT_TRUE(control_list->needs_more_info());
 
   // The case we have full info, and the exception applies (so the entry
   // does not apply).
-  gpu_info.gl_renderer = "mesa";
-  features = control_list->MakeDecision(
-      GpuControlList::kOsLinux, kOsVersion, gpu_info);
+  gpu_info.gl_renderer = is_angle() ? "ANGLE (vendor, mesa, version)" : "mesa";
+  features = control_list->MakeDecision(GpuControlList::kOsLinux, kOsVersion,
+                                        gpu_info, {});
   EXPECT_EMPTY_SET(features);
   EXPECT_FALSE(control_list->needs_more_info());
 
   // The case we have full info, and this entry applies.
-  gpu_info.gl_renderer = "my renderer";
+  gpu_info.gl_renderer =
+      is_angle() ? "ANGLE (vendor, my renderer, version)" : "my renderer";
   features = control_list->MakeDecision(GpuControlList::kOsLinux, kOsVersion,
-      gpu_info);
+                                        gpu_info, {});
   EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
   EXPECT_FALSE(control_list->needs_more_info());
 }
 
-TEST_F(GpuControlListTest, IgnorableEntries) {
+TEST_P(GpuControlListTest, IgnorableEntries) {
   // If an entry will not change the control_list decisions, then it should not
   // trigger the needs_more_info flag.
   const Entry kEntries[2] = {
-      kGpuControlListTestingEntries[kGpuControlListTest_IgnorableEntries_0],
-      kGpuControlListTestingEntries[kGpuControlListTest_IgnorableEntries_1]};
-  std::unique_ptr<GpuControlList> control_list = Create(2, kEntries);
+      GetGpuControlListTestingEntries()[kGpuControlListTest_IgnorableEntries_0],
+      GetGpuControlListTestingEntries()
+          [kGpuControlListTest_IgnorableEntries_1]};
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
 
   GPUInfo gpu_info;
   gpu_info.gpu.vendor_id = kIntelVendorId;
 
-  std::set<int> features = control_list->MakeDecision(
-      GpuControlList::kOsLinux, kOsVersion, gpu_info);
+  std::set<int> features = control_list->MakeDecision(GpuControlList::kOsLinux,
+                                                      kOsVersion, gpu_info, {});
   EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
   EXPECT_FALSE(control_list->needs_more_info());
 }
 
-TEST_F(GpuControlListTest, DisabledExtensionTest) {
-  // exact setting.
-  const Entry kEntries[2] = {kGpuControlListTestingEntries
-                                 [kGpuControlListTest_DisabledExtensionTest_0],
-                             kGpuControlListTestingEntries
-                                 [kGpuControlListTest_DisabledExtensionTest_1]};
-  std::unique_ptr<GpuControlList> control_list = Create(2, kEntries);
+TEST_P(GpuControlListTest, IgnoredEntries) {
+  const Entry kEntries[2] = {
+      GetGpuControlListTestingEntries()[kGpuControlListTest_IgnorableEntries_0],
+      GetGpuControlListTestingEntries()
+          [kGpuControlListEntryTest_DirectRendering]};
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
 
   GPUInfo gpu_info;
-  control_list->MakeDecision(GpuControlList::kOsWin, kOsVersion, gpu_info);
+  gpu_info.gpu.vendor_id = kIntelVendorId;
+  gpu_info.direct_rendering_version = "2.0";
+
+  // By default, both entries apply.
+  std::set<int> features = control_list->MakeDecision(GpuControlList::kOsLinux,
+                                                      kOsVersion, gpu_info, {});
+  EXPECT_EQ(2u, features.size());
+  EXPECT_EQ(1u, features.count(TEST_FEATURE_0));
+  EXPECT_EQ(1u, features.count(TEST_FEATURE_1));
+
+  // Skip the first entry.
+  std::vector<uint32_t> ignored_entries;
+  ignored_entries.push_back(kEntries[0].id);
+  features = control_list->MakeDecision(GpuControlList::kOsLinux, kOsVersion,
+                                        gpu_info, ignored_entries);
+  EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_1);
+
+  // Skip the second entry.
+  ignored_entries.clear();
+  ignored_entries.push_back(kEntries[1].id);
+  features = control_list->MakeDecision(GpuControlList::kOsLinux, kOsVersion,
+                                        gpu_info, ignored_entries);
+  EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
+
+  // Skip both entries.
+  ignored_entries.clear();
+  ignored_entries.push_back(kEntries[0].id);
+  ignored_entries.push_back(kEntries[1].id);
+  features = control_list->MakeDecision(GpuControlList::kOsLinux, kOsVersion,
+                                        gpu_info, ignored_entries);
+  EXPECT_EMPTY_SET(features);
+}
+
+TEST_P(GpuControlListTest, DisabledExtensionTest) {
+  // exact setting.
+  const Entry kEntries[2] = {GetGpuControlListTestingEntries()
+                                 [kGpuControlListTest_DisabledExtensionTest_0],
+                             GetGpuControlListTestingEntries()
+                                 [kGpuControlListTest_DisabledExtensionTest_1]};
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
+
+  GPUInfo gpu_info;
+  control_list->MakeDecision(GpuControlList::kOsWin, kOsVersion, gpu_info, {});
 
   std::vector<std::string> disabled_extensions =
       control_list->GetDisabledExtensions();
@@ -168,50 +231,97 @@ TEST_F(GpuControlListTest, DisabledExtensionTest) {
   ASSERT_STREQ("test_extension3", disabled_extensions[2].c_str());
 }
 
-TEST_F(GpuControlListTest, LinuxKernelVersion) {
-  const Entry kEntries[1] = {
-      kGpuControlListTestingEntries[kGpuControlListTest_LinuxKernelVersion]};
-  std::unique_ptr<GpuControlList> control_list = Create(1, kEntries);
+TEST_P(GpuControlListTest, LinuxKernelVersion) {
+  const Entry kEntries[1] = {GetGpuControlListTestingEntries()
+                                 [kGpuControlListTest_LinuxKernelVersion]};
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
 
   GPUInfo gpu_info;
   gpu_info.gpu.vendor_id = 0x8086;
 
   std::set<int> features = control_list->MakeDecision(
-      GpuControlList::kOsLinux, "3.13.0-63-generic", gpu_info);
+      GpuControlList::kOsLinux, "3.13.0-63-generic", gpu_info, {});
   EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
 
   features = control_list->MakeDecision(GpuControlList::kOsLinux,
-                                        "3.19.2-1-generic", gpu_info);
+                                        "3.19.2-1-generic", gpu_info, {});
   EXPECT_EMPTY_SET(features);
 }
 
-TEST_F(GpuControlListTest, TestGroup) {
+TEST_P(GpuControlListTest, TestGroup) {
   const Entry kEntries[3] = {
-      kGpuControlListTestingEntries[kGpuControlListTest_LinuxKernelVersion],
-      kGpuControlListTestingEntries[kGpuControlListTest_TestGroup_0],
-      kGpuControlListTestingEntries[kGpuControlListTest_TestGroup_1]};
-  std::unique_ptr<GpuControlList> control_list = Create(3, kEntries);
+      GetGpuControlListTestingEntries()[kGpuControlListTest_LinuxKernelVersion],
+      GetGpuControlListTestingEntries()[kGpuControlListTest_TestGroup_0],
+      GetGpuControlListTestingEntries()[kGpuControlListTest_TestGroup_1]};
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
   GPUInfo gpu_info;
 
   // Default test group.
   std::set<int> features = control_list->MakeDecision(
-      GpuControlList::kOsLinux, "3.13.2-1-generic", gpu_info);
+      GpuControlList::kOsLinux, "3.13.2-1-generic", gpu_info, 0, {});
   EXPECT_EMPTY_SET(features);
 
   // Test group 0, the default test group
   features = control_list->MakeDecision(GpuControlList::kOsLinux,
-                                        "3.13.2-1-generic", gpu_info, 0);
+                                        "3.13.2-1-generic", gpu_info, 0, {});
   EXPECT_EMPTY_SET(features);
 
   // Test group 1.
   features = control_list->MakeDecision(GpuControlList::kOsLinux,
-                                        "3.13.2-1-generic", gpu_info, 1);
+                                        "3.13.2-1-generic", gpu_info, 1, {});
   EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
 
   // Test group 2.
   features = control_list->MakeDecision(GpuControlList::kOsLinux,
-                                        "3.13.2-1-generic", gpu_info, 2);
+                                        "3.13.2-1-generic", gpu_info, 2, {});
   EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_1);
 }
+
+TEST_P(GpuControlListTest, AngleVulkan) {
+  EXPECT_EQ(GpuControlList::kGLTypeANGLE_VULKAN,
+            GetGLType("ANGLE (ARM, Vulkan 1.3.247 (Mali-G52 (0x74021000)), "
+                      "Mali G52-44.1.0)"));
+
+  EXPECT_EQ(
+      GpuControlList::kGLTypeANGLE_VULKAN,
+      GetGLType("ANGLE (Intel, Vulkan 1.3.289 (Intel(R) Graphics (ADL GT2) "
+                "(0x00004626)), Intel open-source Mesa driver-24.2.0)"));
+
+  EXPECT_EQ(GpuControlList::kGLTypeANGLE_GLES,
+            GetGLType("ANGLE (ARM, Mali-G52, OpenGL ES 3.1 vxxxxx)"));
+
+  EXPECT_EQ(GpuControlList::kGLTypeGLES, GetGLType("Mali-G52"));
+}
+
+#if BUILDFLAG(IS_WIN)
+TEST_P(GpuControlListTest, D3DFeatureLevel) {
+  const Entry kEntries[1] = {
+      GetGpuControlListTestingEntries()[kGpuControlListEntryTest_D3DFeatureLevel]};
+  std::unique_ptr<GpuControlList> control_list = Create(kEntries);
+  GPUInfo gpu_info;
+
+  // D3D feature level 11.0. Entry requires < 12.0. So it applies.
+  gpu_info.d3d11_feature_level = D3D_FEATURE_LEVEL_11_0;
+  std::set<int> features = control_list->MakeDecision(GpuControlList::kOsWin,
+                                                      kOsVersion, gpu_info, {});
+  EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
+
+  gpu_info.d3d11_feature_level = D3D_FEATURE_LEVEL_11_1;
+  features = control_list->MakeDecision(GpuControlList::kOsWin, kOsVersion,
+                                        gpu_info, {});
+  EXPECT_SINGLE_FEATURE(features, TEST_FEATURE_0);
+
+  // D3D feature level 12.0. Entry requires < 12.0. So it does not apply.
+  gpu_info.d3d11_feature_level = D3D_FEATURE_LEVEL_12_0;
+  features = control_list->MakeDecision(GpuControlList::kOsWin, kOsVersion,
+                                        gpu_info, {});
+  EXPECT_EMPTY_SET(features);
+
+  gpu_info.d3d11_feature_level = D3D_FEATURE_LEVEL_12_1;
+  features = control_list->MakeDecision(GpuControlList::kOsWin, kOsVersion,
+                                        gpu_info, {});
+  EXPECT_EMPTY_SET(features);
+}
+#endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace gpu

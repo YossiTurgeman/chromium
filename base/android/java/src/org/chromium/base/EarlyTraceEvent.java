@@ -1,21 +1,23 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.base;
 
-import android.annotation.SuppressLint;
-import android.os.Build;
 import android.os.Process;
 import android.os.StrictMode;
 import android.os.SystemClock;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.MainDex;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.build.annotations.EnsuresNonNullIf;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -26,25 +28,22 @@ import javax.annotation.concurrent.GuardedBy;
 /**
  * Support for early tracing, before the native library is loaded.
  *
- * Note that arguments are not currently supported for early events, but could
- * be added in the future.
+ * <p>Note that arguments are not currently supported for early events, but could be added in the
+ * future.
  *
- * Events recorded here are buffered in Java until the native library is available, at which point
- * they are flushed to the native side and regular java tracing (TraceEvent) takes over.
+ * <p>Events recorded here are buffered in Java until the native library is available, at which
+ * point they are flushed to the native side and regular java tracing (TraceEvent) takes over.
  *
- * Locking: This class is threadsafe. It is enabled when general tracing is, and then disabled when
- *          tracing is enabled from the native side. At this point, buffered events are flushed to
- *          the native side and then early tracing is permanently disabled after dumping the events.
+ * <p>Locking: This class is threadsafe. It is enabled when general tracing is, and then disabled
+ * when tracing is enabled from the native side. At this point, buffered events are flushed to the
+ * native side and then early tracing is permanently disabled after dumping the events.
  *
- * Like the TraceEvent, the event name of the trace events must be a string literal or a |static
+ * <p>Like the TraceEvent, the event name of the trace events must be a string literal or a |static
  * final String| class member. Otherwise NoDynamicStringsInTraceEventCheck error will be thrown.
  */
 @JNINamespace("base::android")
-@MainDex
+@NullMarked
 public class EarlyTraceEvent {
-    // Must be kept in sync with the native kAndroidTraceConfigFile.
-    private static final String TRACE_CONFIG_FILENAME = "/data/local/chrome-trace-config.json";
-
     /** Single trace event. */
     @VisibleForTesting
     static final class Event {
@@ -60,18 +59,8 @@ public class EarlyTraceEvent {
             mIsToplevel = isToplevel;
             mName = name;
             mThreadId = Process.myTid();
-            mTimeNanos = elapsedRealtimeNanos();
+            mTimeNanos = System.nanoTime(); // Same timebase as TimeTicks::Now().
             mThreadTimeMillis = SystemClock.currentThreadTimeMillis();
-        }
-
-        @VisibleForTesting
-        @SuppressLint("NewApi")
-        static long elapsedRealtimeNanos() {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
-                return SystemClock.elapsedRealtimeNanos();
-            } else {
-                return SystemClock.elapsedRealtime() * 1000000;
-            }
         }
     }
 
@@ -80,13 +69,37 @@ public class EarlyTraceEvent {
         final boolean mIsStart;
         final String mName;
         final long mId;
-        final long mTimestampNanos;
+        final long mTimeNanos;
 
         AsyncEvent(String name, long id, boolean isStart) {
             mName = name;
             mId = id;
             mIsStart = isStart;
-            mTimestampNanos = Event.elapsedRealtimeNanos();
+            mTimeNanos = System.nanoTime(); // Same timebase as TimeTicks::Now().
+        }
+    }
+
+    @VisibleForTesting
+    static final class ActivityStartupEvent {
+        final long mId;
+        final long mTimeMs;
+
+        ActivityStartupEvent(long id, long timeMs) {
+            mId = id;
+            mTimeMs = timeMs;
+        }
+    }
+
+    @VisibleForTesting
+    static final class ActivityLaunchCauseEvent {
+        final long mId;
+        final long mTimeMs;
+        final int mLaunchCause;
+
+        ActivityLaunchCauseEvent(long id, int launchCause) {
+            mId = id;
+            mTimeMs = SystemClock.uptimeMillis();
+            mLaunchCause = launchCause;
         }
     }
 
@@ -95,33 +108,66 @@ public class EarlyTraceEvent {
     // - disable(): ENABLED -> FINISHED
     @VisibleForTesting static final int STATE_DISABLED = 0;
     @VisibleForTesting static final int STATE_ENABLED = 1;
-    @VisibleForTesting
-    static final int STATE_FINISHED = 2;
+    @VisibleForTesting static final int STATE_FINISHED = 2;
+    @VisibleForTesting static volatile int sState = STATE_DISABLED;
+
+    // In child processes the CommandLine is not available immediately, so early tracing is enabled
+    // unconditionally in Chrome. This flag allows not to enable early tracing twice in this case.
+    private static volatile boolean sEnabledInChildProcessBeforeCommandLine;
 
     private static final String BACKGROUND_STARTUP_TRACING_ENABLED_KEY = "bg_startup_tracing";
     private static boolean sCachedBackgroundStartupTracingFlag;
 
-    // Locks the fields below.
-    private static final Object sLock = new Object();
+    // Early tracing can be enabled on browser start if the browser finds this file present. Must be
+    // kept in sync with the native kAndroidTraceConfigFile.
+    private static final String TRACE_CONFIG_FILENAME = "/data/local/chrome-trace-config.json";
 
-    @VisibleForTesting static volatile int sState = STATE_DISABLED;
-    // Not final as these object are not likely to be used at all.
+    // Early tracing can be enabled on browser start if the browser finds this command line switch.
+    // Must be kept in sync with switches::kTraceStartup.
+    private static final String TRACE_STARTUP_SWITCH = "trace-startup";
+
+    // Added to child process switches if tracing is enabled when the process is getting created.
+    // The flag is checked early in child process lifetime to have a solid guarantee that the early
+    // java tracing is not enabled forever. Native flags cannot be used for this purpose because the
+    // native library is not loaded at the moment. Cannot set --trace-startup for the child to avoid
+    // overriding the list of categories it may load from the config later. Also --trace-startup
+    // depends on other flags that early tracing should not know about. Public for use in
+    // ChildProcessLauncherHelperImpl.
+    public static final String TRACE_EARLY_JAVA_IN_CHILD_SWITCH = "trace-early-java-in-child";
+
+    // Protects the fields below.
+    @VisibleForTesting static final Object sLock = new Object();
+
+    // Not final because in many configurations these objects are not used.
     @GuardedBy("sLock")
     @VisibleForTesting
-    static List<Event> sEvents;
+    static @Nullable List<Event> sEvents;
+
     @GuardedBy("sLock")
     @VisibleForTesting
-    static List<AsyncEvent> sAsyncEvents;
+    static @Nullable List<AsyncEvent> sAsyncEvents;
 
-    /** @see TraceEvent#maybeEnableEarlyTracing() */
-    static void maybeEnable() {
+    @GuardedBy("sLock")
+    @VisibleForTesting
+    static final List<ActivityStartupEvent> sActivityStartupEvents =
+            new ArrayList<ActivityStartupEvent>();
+
+    @GuardedBy("sLock")
+    @VisibleForTesting
+    static final List<ActivityLaunchCauseEvent> sActivityLaunchCauseEvents =
+            new ArrayList<ActivityLaunchCauseEvent>();
+
+    /** @see TraceEvent#maybeEnableEarlyTracing(boolean) */
+    static void maybeEnableInBrowserProcess() {
         ThreadUtils.assertOnUiThread();
+        assert !sEnabledInChildProcessBeforeCommandLine
+                : "Should not have been initialized in a child process";
         if (sState != STATE_DISABLED) return;
         boolean shouldEnable = false;
         // Checking for the trace config filename touches the disk.
         StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReads();
         try {
-            if (CommandLine.getInstance().hasSwitch("trace-startup")) {
+            if (CommandLine.getInstance().hasSwitch(TRACE_STARTUP_SWITCH)) {
                 shouldEnable = true;
             } else {
                 try {
@@ -130,8 +176,8 @@ public class EarlyTraceEvent {
                     // Access denied, not enabled.
                 }
             }
-            if (ContextUtils.getAppSharedPreferences().getBoolean(
-                        BACKGROUND_STARTUP_TRACING_ENABLED_KEY, false)) {
+            if (ContextUtils.getAppSharedPreferences()
+                    .getBoolean(BACKGROUND_STARTUP_TRACING_ENABLED_KEY, false)) {
                 if (shouldEnable) {
                     // If user has enabled tracing, then force disable background tracing for this
                     // session.
@@ -148,7 +194,42 @@ public class EarlyTraceEvent {
         if (shouldEnable) enable();
     }
 
-    static void enable() {
+    /** Enables early tracing in child processes before CommandLine arrives there. */
+    public static void earlyEnableInChildWithoutCommandLine() {
+        sEnabledInChildProcessBeforeCommandLine = true;
+        assert sState == STATE_DISABLED;
+        enable();
+    }
+
+    /**
+     * Based on a command line switch from the process launcher, enables or resets early tracing.
+     * Should be called only in child processes and as soon as possible after the CommandLine is
+     * initialized.
+     */
+    public static void onCommandLineAvailableInChildProcess() {
+        // Ignore early Java tracing in WebView and other startup configurations that did not start
+        // collecting events before the command line was available.
+        if (!sEnabledInChildProcessBeforeCommandLine) return;
+        synchronized (sLock) {
+            // Remove early trace events if the child process launcher did not ask for early
+            // tracing.
+            if (!CommandLine.getInstance().hasSwitch(TRACE_EARLY_JAVA_IN_CHILD_SWITCH)) {
+                reset();
+                return;
+            }
+            // Otherwise continue with tracing enabled.
+            if (sState == STATE_DISABLED) enable();
+        }
+    }
+
+    /**
+     * Enables early startup tracing.
+     *
+     * <p>Tracing will be disabled and events emitted if and only if tracing is enabled. Callers
+     * must ensure to also call {@link #reset()} once early tracing should no longer be collected to
+     * avoid indefinitely collecting trace events if no trace session is started.
+     */
+    public static void enable() {
         synchronized (sLock) {
             if (sState != STATE_DISABLED) return;
             sEvents = new ArrayList<Event>();
@@ -160,7 +241,7 @@ public class EarlyTraceEvent {
     /**
      * Disables Early tracing and flushes buffered events to the native side.
      *
-     * Once this is called, no new event will be registered.
+     * <p>Once this is called, no new event will be registered.
      */
     static void disable() {
         synchronized (sLock) {
@@ -181,19 +262,35 @@ public class EarlyTraceEvent {
         }
     }
 
-    static boolean enabled() {
+    /**
+     * Stops early tracing without flushing the buffered events.
+     *
+     * <p>This is safe to call even if tracing has never been enabled or has since been disabled.
+     */
+    public static void reset() {
+        synchronized (sLock) {
+            sState = STATE_DISABLED;
+            sEvents = null;
+            sAsyncEvents = null;
+        }
+    }
+
+    @EnsuresNonNullIf({"sEvents", "sAsyncEvents"})
+    @SuppressWarnings("NullAway")
+    public static boolean enabled() {
         return sState == STATE_ENABLED;
     }
 
-    /**
-     * Sets the background startup tracing enabled in app preferences for next startup.
-     */
+    /** Sets the background startup tracing enabled in app preferences for next startup. */
     @CalledByNative
     static void setBackgroundStartupTracingFlag(boolean enabled) {
-        ContextUtils.getAppSharedPreferences()
-                .edit()
-                .putBoolean(BACKGROUND_STARTUP_TRACING_ENABLED_KEY, enabled)
-                .apply();
+        // Setting preferences might cause a disk write
+        try (StrictModeContext ignored = StrictModeContext.allowDiskWrites()) {
+            ContextUtils.getAppSharedPreferences()
+                    .edit()
+                    .putBoolean(BACKGROUND_STARTUP_TRACING_ENABLED_KEY, enabled)
+                    .apply();
+        }
     }
 
     /**
@@ -212,7 +309,7 @@ public class EarlyTraceEvent {
         // begin() and end() are going to be called once per TraceEvent, this avoids entering a
         // synchronized block at each and every call.
         if (!enabled()) return;
-        Event event = new Event(name, true /*isStart*/, isToplevel);
+        Event event = new Event(name, /* isStart= */ true, isToplevel);
         synchronized (sLock) {
             if (!enabled()) return;
             sEvents.add(event);
@@ -222,7 +319,7 @@ public class EarlyTraceEvent {
     /** @see TraceEvent#end */
     public static void end(String name, boolean isToplevel) {
         if (!enabled()) return;
-        Event event = new Event(name, false /*isStart*/, isToplevel);
+        Event event = new Event(name, /* isStart= */ false, isToplevel);
         synchronized (sLock) {
             if (!enabled()) return;
             sEvents.add(event);
@@ -232,7 +329,7 @@ public class EarlyTraceEvent {
     /** @see TraceEvent#startAsync */
     public static void startAsync(String name, long id) {
         if (!enabled()) return;
-        AsyncEvent event = new AsyncEvent(name, id, true /*isStart*/);
+        AsyncEvent event = new AsyncEvent(name, id, /* isStart= */ true);
         synchronized (sLock) {
             if (!enabled()) return;
             sAsyncEvents.add(event);
@@ -242,82 +339,121 @@ public class EarlyTraceEvent {
     /** @see TraceEvent#finishAsync */
     public static void finishAsync(String name, long id) {
         if (!enabled()) return;
-        AsyncEvent event = new AsyncEvent(name, id, false /*isStart*/);
+        AsyncEvent event = new AsyncEvent(name, id, /* isStart= */ false);
         synchronized (sLock) {
             if (!enabled()) return;
             sAsyncEvents.add(event);
         }
     }
 
-    @VisibleForTesting
-    static void resetForTesting() {
+    /**
+     * @see TraceEvent#startupActivityStart
+     */
+    public static void startupActivityStart(long activityId, long startTimeMs) {
+        ActivityStartupEvent event = new ActivityStartupEvent(activityId, startTimeMs);
         synchronized (sLock) {
-            sState = EarlyTraceEvent.STATE_DISABLED;
-            sEvents = null;
-            sAsyncEvents = null;
+            sActivityStartupEvents.add(event);
+        }
+    }
+
+    /**
+     * @see TraceEvent#startupLaunchCause
+     */
+    public static void startupLaunchCause(long activityId, int launchCause) {
+        ActivityLaunchCauseEvent event = new ActivityLaunchCauseEvent(activityId, launchCause);
+        synchronized (sLock) {
+            sActivityLaunchCauseEvents.add(event);
+        }
+    }
+
+    static List<Event> getMatchingCompletedEventsForTesting(String eventName) {
+        synchronized (sLock) {
+            List<Event> matchingEvents = new ArrayList<Event>();
+            if (!enabled()) return matchingEvents;
+            for (Event evt : EarlyTraceEvent.sEvents) {
+                if (evt.mName.equals(eventName)) {
+                    matchingEvents.add(evt);
+                }
+            }
+            return matchingEvents;
         }
     }
 
     private static void dumpEvents(List<Event> events) {
-        long offsetNanos = getOffsetNanos();
         for (Event e : events) {
             if (e.mIsStart) {
                 if (e.mIsToplevel) {
-                    EarlyTraceEventJni.get().recordEarlyToplevelBeginEvent(
-                            e.mName, e.mTimeNanos + offsetNanos, e.mThreadId, e.mThreadTimeMillis);
+                    EarlyTraceEventJni.get()
+                            .recordEarlyToplevelBeginEvent(e.mName, e.mTimeNanos, e.mThreadId);
                 } else {
-                    EarlyTraceEventJni.get().recordEarlyBeginEvent(
-                            e.mName, e.mTimeNanos + offsetNanos, e.mThreadId, e.mThreadTimeMillis);
+                    EarlyTraceEventJni.get()
+                            .recordEarlyBeginEvent(
+                                    e.mName, e.mTimeNanos, e.mThreadId, e.mThreadTimeMillis);
                 }
             } else {
                 if (e.mIsToplevel) {
-                    EarlyTraceEventJni.get().recordEarlyToplevelEndEvent(
-                            e.mName, e.mTimeNanos + offsetNanos, e.mThreadId, e.mThreadTimeMillis);
+                    EarlyTraceEventJni.get()
+                            .recordEarlyToplevelEndEvent(e.mName, e.mTimeNanos, e.mThreadId);
                 } else {
-                    EarlyTraceEventJni.get().recordEarlyEndEvent(
-                            e.mName, e.mTimeNanos + offsetNanos, e.mThreadId, e.mThreadTimeMillis);
+                    EarlyTraceEventJni.get()
+                            .recordEarlyEndEvent(
+                                    e.mName, e.mTimeNanos, e.mThreadId, e.mThreadTimeMillis);
                 }
             }
         }
     }
+
     private static void dumpAsyncEvents(List<AsyncEvent> events) {
-        long offsetNanos = getOffsetNanos();
         for (AsyncEvent e : events) {
             if (e.mIsStart) {
-                EarlyTraceEventJni.get().recordEarlyAsyncBeginEvent(
-                        e.mName, e.mId, e.mTimestampNanos + offsetNanos);
+                EarlyTraceEventJni.get().recordEarlyAsyncBeginEvent(e.mName, e.mId, e.mTimeNanos);
             } else {
-                EarlyTraceEventJni.get().recordEarlyAsyncEndEvent(
-                        e.mName, e.mId, e.mTimestampNanos + offsetNanos);
+                EarlyTraceEventJni.get().recordEarlyAsyncEndEvent(e.mId, e.mTimeNanos);
             }
         }
     }
 
-    private static long getOffsetNanos() {
-        long nativeNowNanos = TimeUtilsJni.get().getTimeTicksNowUs() * 1000;
-        long javaNowNanos = Event.elapsedRealtimeNanos();
-        return nativeNowNanos - javaNowNanos;
-    }
-
-    /**
-     * Returns a key which consists of |name| and the ID of the current thread.
-     * The key is used with pending events making them thread-specific, thus avoiding
-     * an exception when similarly named events are started from multiple threads.
-     */
-    @VisibleForTesting
-    static String makeEventKeyForCurrentThread(String name) {
-        return name + "@" + Process.myTid();
+    /** Can only be called if the TraceEventJni has been enabled. */
+    public static void dumpActivityStartupEvents() {
+        synchronized (sLock) {
+            if (!sActivityStartupEvents.isEmpty()) {
+                for (ActivityStartupEvent e : sActivityStartupEvents) {
+                    TraceEventJni.get().startupActivityStart(e.mId, e.mTimeMs);
+                }
+                sActivityStartupEvents.clear();
+            }
+            if (!sActivityLaunchCauseEvents.isEmpty()) {
+                for (ActivityLaunchCauseEvent e : sActivityLaunchCauseEvents) {
+                    TraceEventJni.get().startupLaunchCause(e.mId, e.mTimeMs, e.mLaunchCause);
+                }
+                sActivityLaunchCauseEvents.clear();
+            }
+        }
     }
 
     @NativeMethods
     interface Natives {
-        void recordEarlyBeginEvent(String name, long timeNanos, int threadId, long threadMillis);
-        void recordEarlyEndEvent(String name, long timeNanos, int threadId, long threadMillis);
+        void recordEarlyBeginEvent(
+                @JniType("std::string") String name,
+                long timeNanos,
+                int threadId,
+                long threadMillis);
+
+        void recordEarlyEndEvent(
+                @JniType("std::string") String name,
+                long timeNanos,
+                int threadId,
+                long threadMillis);
+
         void recordEarlyToplevelBeginEvent(
-                String name, long timeNanos, int threadId, long threadMillis);
+                @JniType("std::string") String name, long timeNanos, int threadId);
+
         void recordEarlyToplevelEndEvent(
-                String name, long timeNanos, int threadId, long threadMillis);
-        void recordEarlyAsyncBeginEvent(String name, long id, long timestamp);
-        void recordEarlyAsyncEndEvent(String name, long id, long timestamp);
+                @JniType("std::string") String name, long timeNanos, int threadId);
+
+        void recordEarlyAsyncBeginEvent(
+                @JniType("std::string") String name, long id, long timeNanos);
+
+        void recordEarlyAsyncEndEvent(long id, long timeNanos);
     }
 }

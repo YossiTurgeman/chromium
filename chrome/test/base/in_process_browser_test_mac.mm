@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,8 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #import "chrome/browser/ui/cocoa/chrome_command_dispatcher_delegate.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "content/public/test/test_navigation_observer.h"
@@ -19,7 +20,8 @@ void InProcessBrowserTest::OpenDevToolsWindow(
   // autorelease pool. Flush the pool when this function returns.
   @autoreleasepool {
     ASSERT_FALSE(content::DevToolsAgentHost::HasFor(web_contents));
-    DevToolsWindow::OpenDevToolsWindow(web_contents);
+    DevToolsWindow::OpenDevToolsWindow(web_contents,
+                                       DevToolsOpenedByAction::kUnknown);
     ASSERT_TRUE(content::DevToolsAgentHost::HasFor(web_contents));
   }
 }
@@ -30,12 +32,14 @@ Browser* InProcessBrowserTest::OpenURLOffTheRecord(Profile* profile,
   // autorelease pool. Flush the pool when this function returns.
   @autoreleasepool {
     chrome::OpenURLOffTheRecord(profile, url);
-    Browser* browser =
-        chrome::FindTabbedBrowser(profile->GetPrimaryOTRProfile(), false);
+    BrowserWindowInterface* browser_window =
+        ProfileBrowserCollection::GetForProfile(
+            profile->GetPrimaryOTRProfile(/*create_if_needed=*/true))
+            ->FindTabbedBrowser();
     content::TestNavigationObserver observer(
-        browser->tab_strip_model()->GetActiveWebContents());
+        browser_window->GetTabStripModel()->GetActiveWebContents());
     observer.Wait();
-    return browser;
+    return browser_window->GetBrowserForMigrationOnly();
   }
 }
 
@@ -45,7 +49,7 @@ Browser* InProcessBrowserTest::CreateBrowser(Profile* profile) {
   // Making a browser window can cause AppKit to throw objects into the
   // autorelease pool. Flush the pool when this function returns.
   @autoreleasepool {
-    Browser* browser = new Browser(Browser::CreateParams(profile, true));
+    Browser* browser = Browser::Create(Browser::CreateParams(profile, true));
     AddBlankTabAndShow(browser);
     return browser;
   }
@@ -60,8 +64,8 @@ Browser* InProcessBrowserTest::CreateIncognitoBrowser(Profile* profile) {
       profile = browser()->profile();
 
     // Create a new browser with using the incognito profile.
-    Browser* incognito = new Browser(
-        Browser::CreateParams(profile->GetPrimaryOTRProfile(), true));
+    Browser* incognito = Browser::Create(Browser::CreateParams(
+        profile->GetPrimaryOTRProfile(/*create_if_needed=*/true), true));
     AddBlankTabAndShow(incognito);
     return incognito;
   }
@@ -71,8 +75,8 @@ Browser* InProcessBrowserTest::CreateBrowserForPopup(Profile* profile) {
   // Making a browser window can cause AppKit to throw objects into the
   // autorelease pool. Flush the pool when this function returns.
   @autoreleasepool {
-    Browser* browser =
-        new Browser(Browser::CreateParams(Browser::TYPE_POPUP, profile, true));
+    Browser* browser = Browser::Create(
+        Browser::CreateParams(Browser::TYPE_POPUP, profile, true));
     AddBlankTabAndShow(browser);
     return browser;
   }
@@ -83,8 +87,9 @@ Browser* InProcessBrowserTest::CreateBrowserForApp(const std::string& app_name,
   // Making a browser window can cause AppKit to throw objects into the
   // autorelease pool. Flush the pool when this function returns.
   @autoreleasepool {
-    Browser* browser = new Browser(Browser::CreateParams::CreateForApp(
-        app_name, false /* trusted_source */, gfx::Rect(), profile, true));
+    Browser* browser = Browser::Create(Browser::CreateParams::CreateForApp(
+        app_name, /*trusted_source=*/false, gfx::Rect(), profile,
+        /*user_gesture=*/true));
     AddBlankTabAndShow(browser);
     return browser;
   }

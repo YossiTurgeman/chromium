@@ -1,101 +1,130 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_BROWSER_LIVE_TAB_CONTEXT_H_
 #define CHROME_BROWSER_UI_BROWSER_LIVE_TAB_CONTEXT_H_
 
+#include <map>
 #include <string>
 #include <vector>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
+#include "base/memory/raw_ref.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "components/sessions/core/live_tab_context.h"
+#include "components/sessions/core/session_id.h"
+#include "components/sessions/core/session_types.h"
+#include "components/sessions/core/tab_restore_types.h"
+#include "components/split_tabs/split_tab_id.h"
+#include "components/split_tabs/split_tab_visual_data.h"
 #include "components/tab_groups/tab_group_id.h"
 #include "components/tab_groups/tab_group_visual_data.h"
+#include "ui/base/mojom/window_show_state.mojom-forward.h"
 #include "ui/base/ui_base_types.h"
 
-class Browser;
 class Profile;
+class TabStripModel;
+
+namespace base {
+class Uuid;
+}  // namespace base
 
 namespace content {
 class WebContents;
-}
+}  // namespace content
 
 namespace gfx {
 class Rect;
-}
+}  // namespace gfx
+
+namespace ui {
+class BaseWindow;
+}  // namespace ui
 
 // Implementation of LiveTabContext which uses an instance of
 // Browser in order to fulfil its duties.
 class BrowserLiveTabContext : public sessions::LiveTabContext {
  public:
-  explicit BrowserLiveTabContext(Browser* browser) : browser_(browser) {}
-  ~BrowserLiveTabContext() override {}
+  BrowserLiveTabContext(BrowserWindowInterface* browser,
+                        TabStripModel* tab_strip_model,
+                        Profile* profile,
+                        ui::BaseWindow* base_window,
+                        BrowserWindowInterface::Type type,
+                        const std::string& app_name,
+                        SessionID session_id);
+
+  BrowserLiveTabContext(const BrowserLiveTabContext&) = delete;
+  BrowserLiveTabContext& operator=(const BrowserLiveTabContext&) = delete;
+
+  ~BrowserLiveTabContext() override;
 
   // Overridden from LiveTabContext:
   void ShowBrowserWindow() override;
   SessionID GetSessionID() const override;
+  sessions::SessionWindow::WindowType GetWindowType() const override;
   int GetTabCount() const override;
   int GetSelectedIndex() const override;
   std::string GetAppName() const override;
   std::string GetUserTitle() const override;
   sessions::LiveTab* GetLiveTabAt(int index) const override;
   sessions::LiveTab* GetActiveLiveTab() const override;
-  bool IsTabPinned(int index) const override;
-  base::Optional<tab_groups::TabGroupId> GetTabGroupForTab(
+  std::map<std::string, std::string> GetExtraDataForTab(
+      int index) const override;
+  std::map<std::string, std::string> GetExtraDataForWindow() const override;
+  std::optional<tab_groups::TabGroupId> GetTabGroupForTab(
+      int index) const override;
+  std::optional<split_tabs::SplitTabId> GetSplitForTab(
       int index) const override;
   const tab_groups::TabGroupVisualData* GetVisualDataForGroup(
       const tab_groups::TabGroupId& group) const override;
+  const split_tabs::SplitTabVisualData* GetVisualDataForSplit(
+      const split_tabs::SplitTabId& split_id) const override;
+  const std::optional<base::Uuid> GetSavedTabGroupIdForGroup(
+      const tab_groups::TabGroupId& group) const override;
+  const std::optional<tab_groups::TabGroupId> GetGroupIdForSavedGroup(
+      const base::Uuid& saved) const override;
+  bool IsTabPinned(int index) const override;
   void SetVisualDataForGroup(
       const tab_groups::TabGroupId& group,
       const tab_groups::TabGroupVisualData& visual_data) override;
   const gfx::Rect GetRestoredBounds() const override;
-  ui::WindowShowState GetRestoredState() const override;
+  ui::mojom::WindowShowState GetRestoredState() const override;
   std::string GetWorkspace() const override;
-
   sessions::LiveTab* AddRestoredTab(
-      const std::vector<sessions::SerializedNavigationEntry>& navigations,
+      const sessions::tab_restore::Tab& tab,
       int tab_index,
-      int selected_navigation,
-      const std::string& extension_app_id,
-      base::Optional<tab_groups::TabGroupId> group,
-      const tab_groups::TabGroupVisualData& group_visual_data,
       bool select,
-      bool pin,
-      bool from_last_session,
-      const sessions::PlatformSpecificTabData* storage_namespace,
-      const sessions::SerializedUserAgentOverride& user_agent_override)
-      override;
+      bool is_restoring_group_or_window,
+      sessions::tab_restore::Type original_session_type) override;
   sessions::LiveTab* ReplaceRestoredTab(
-      const std::vector<sessions::SerializedNavigationEntry>& navigations,
-      base::Optional<tab_groups::TabGroupId> group,
-      int selected_navigation,
-      bool from_last_session,
-      const std::string& extension_app_id,
-      const sessions::PlatformSpecificTabData* tab_platform_data,
-      const sessions::SerializedUserAgentOverride& user_agent_override)
-      override;
+      const sessions::tab_restore::Tab& tab) override;
+  void ReconstructSplit(
+      sessions::LiveTab* leading_tab,
+      sessions::LiveTab* trailing_tab,
+      split_tabs::SplitTabId split_id,
+      const split_tabs::SplitTabVisualData& visual_data) override;
   void CloseTab() override;
 
   // see Browser::Create
-  static sessions::LiveTabContext* Create(Profile* profile,
-                                          const std::string& app_name,
-                                          const gfx::Rect& bounds,
-                                          ui::WindowShowState show_state,
-                                          const std::string& workspace,
-                                          const std::string& user_title);
+  static sessions::LiveTabContext* Create(
+      Profile* profile,
+      sessions::SessionWindow::WindowType type,
+      const std::string& app_name,
+      const gfx::Rect& bounds,
+      ui::mojom::WindowShowState show_state,
+      const std::string& workspace,
+      const std::string& user_title,
+      const std::map<std::string, std::string>& extra_data);
 
   // see browser::FindBrowserForWebContents
   static sessions::LiveTabContext* FindContextForWebContents(
       const content::WebContents* contents);
 
-  // see chrome::FindBrowserWithID
+  // see BrowserCollection::FindBrowserWithID
   // Returns the LiveTabContext of the Browser with |desired_id| if
   // such a Browser exists.
   static sessions::LiveTabContext* FindContextWithID(SessionID desired_id);
 
-  // see chrome::FindBrowserWithGroup
   // Returns the LiveTabContext of the Browser containing the group with ID
   // |group| if such a Browser exists within the given |profile|.
   static sessions::LiveTabContext* FindContextWithGroup(
@@ -103,9 +132,13 @@ class BrowserLiveTabContext : public sessions::LiveTabContext {
       Profile* profile);
 
  private:
-  Browser* const browser_;
-
-  DISALLOW_COPY_AND_ASSIGN(BrowserLiveTabContext);
+  const raw_ref<BrowserWindowInterface> browser_;
+  const raw_ref<TabStripModel> tab_strip_model_;
+  const raw_ref<Profile> profile_;
+  const raw_ref<ui::BaseWindow> base_window_;
+  const sessions::SessionWindow::WindowType window_type_;
+  const std::string app_name_;
+  const SessionID session_id_;
 };
 
 #endif  // CHROME_BROWSER_UI_BROWSER_LIVE_TAB_CONTEXT_H_

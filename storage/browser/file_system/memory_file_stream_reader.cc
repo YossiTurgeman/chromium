@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,22 +8,10 @@
 #include <utility>
 
 #include "base/memory/ptr_util.h"
-#include "base/task_runner_util.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
 
 namespace storage {
-
-std::unique_ptr<FileStreamReader> FileStreamReader::CreateForMemoryFile(
-    scoped_refptr<base::TaskRunner> task_runner,
-    base::WeakPtr<ObfuscatedFileUtilMemoryDelegate> memory_file_util,
-    const base::FilePath& file_path,
-    int64_t initial_offset,
-    const base::Time& expected_modification_time) {
-  return base::WrapUnique(new MemoryFileStreamReader(
-      std::move(task_runner), std::move(memory_file_util), file_path,
-      initial_offset, expected_modification_time));
-}
 
 MemoryFileStreamReader::MemoryFileStreamReader(
     scoped_refptr<base::TaskRunner> task_runner,
@@ -81,24 +69,23 @@ void MemoryFileStreamReader::OnReadCompleted(
   std::move(callback).Run(result);
 }
 
-int64_t MemoryFileStreamReader::GetLength(
-    net::Int64CompletionOnceCallback callback) {
+int64_t MemoryFileStreamReader::GetLength(GetLengthCallback callback) {
   task_runner_->PostTaskAndReplyWithResult(
       FROM_HERE,
       base::BindOnce(
           [](base::WeakPtr<ObfuscatedFileUtilMemoryDelegate> util,
-             const base::FilePath& path,
-             base::Time expected_modification_time) -> int64_t {
+             const base::FilePath& path, base::Time expected_modification_time)
+              -> base::expected<int64_t, net::Error> {
             if (!util)
-              return net::ERR_FILE_NOT_FOUND;
+              return base::unexpected(net::ERR_FILE_NOT_FOUND);
             base::File::Info file_info;
             if (util->GetFileInfo(path, &file_info) != base::File::FILE_OK) {
-              return net::ERR_FILE_NOT_FOUND;
+              return base::unexpected(net::ERR_FILE_NOT_FOUND);
             }
 
             if (!FileStreamReader::VerifySnapshotTime(
                     expected_modification_time, file_info)) {
-              return net::ERR_UPLOAD_FILE_CHANGED;
+              return base::unexpected(net::ERR_UPLOAD_FILE_CHANGED);
             }
 
             return file_info.size;
@@ -113,9 +100,9 @@ int64_t MemoryFileStreamReader::GetLength(
 }
 
 void MemoryFileStreamReader::OnGetLengthCompleted(
-    net::Int64CompletionOnceCallback callback,
-    int64_t result) {
-  std::move(callback).Run(result);
+    GetLengthCallback callback,
+    base::expected<int64_t, net::Error> result) {
+  std::move(callback).Run(std::move(result));
 }
 
 }  // namespace storage

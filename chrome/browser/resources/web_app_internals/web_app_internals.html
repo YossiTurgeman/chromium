@@ -1,76 +1,103 @@
-<style>
-  h2 {
-    margin-bottom: 10px;
-    margin-top: 0;
-  }
+<!DOCTYPE HTML>
+<html lang="en">
 
-  .section {
-    margin: 10px;
-    margin-bottom: 20px;
-    padding: 5px;
-  }
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web App Internals</title>
+  <link rel="stylesheet" href="web_app_internals.css">
 
-  .web-app {
-    background-color: var(--highlight, #00000007);
-    border-inline-start-color: rgb(0, 50, 220);
-    border-inline-start-style: solid;
-  }
+  <script type="module" src="web_app_internals.js"></script>
+</head>
 
-  .highlight {
-    --highlight: #eff;
-  }
+<body>
+  <button id="download-button">Download</button>
+  <button id="copy-button">Copy to Clipboard</button>
 
-  .web-app-name {
-    font-weight: bold;
-  }
-</style>
+  <hr>
 
-<h1>Web App Internals</h1>
-
-<div class="section">
-  BMO enabled: <b>[[isBmoEnabled_]]</b>
-  <template is="dom-if" if="[[!isBmoEnabled_]]">
-    <p>
-      Web apps are using the extension system via bookmark apps, see
-      <a href="chrome://extensions-internals">
-       chrome://extensions-internals
-      </a>
-      for bookmark app details.
-    </p>
-    <p>
-      Enable BMO via
-      <a href="chrome://flags/#enable-desktop-pwas-without-extensions">
-        chrome://flags/#enable-desktop-pwas-without-extensions.
-      </a>
-    </p>
-  </template>
-</div>
-
-<div class="section">
-  <h2>Page index:</h2>
-  <template is="dom-repeat" items="[[webAppList_]]">
-    <div>
-      <a href="#[[item.id]]">
-        <img src="chrome://app-icon/[[item.id]]/32">
-        [[item.name]]
-      </a>
+  <div id="iwa-container" style="display: none;">
+    <h2>Isolated Web Apps</h2>
+    <div id="iwa-updates-container" style="display: none;">
+      <button id="iwa-updates-search-button">
+        Discover updates of policy-installed IWAs now
+      </button>
+      <div id="iwa-updates-message"></div>
     </div>
-  </template>
-  <a href="#external">Externally installed web app prefs</a>
-</div>
-
-<div class="section">
-  <h2 id="details">Web apps details:</h2>
-  <template is="dom-repeat" items="[[webAppList_]]">
-    <div class="section web-app" id="[[item.id]]">
-      <h2>[[item.name]]</h2>
-      <img src="chrome://app-icon/[[item.id]]/128">
-      <pre>[[item.debugInfo]]</pre>
+    <div id="iwa-kr-container" style="display: none;">
+      <h3>Key Rotation</h3>
+      Set Rotated Key for Web Bundle ID:
+      <div>
+        <input type="text" id="iwa-kr-web-bundle-id" size="20" required
+              placeholder="web-bundle-id...">
+        <input type="text" id="iwa-kr-public-key-b64" size="20" required
+              placeholder="public-key-b64...">
+        <button id="iwa-rotate-key-button" type="submit">Rotate</button>
+      </div>
+      <div id="iwa-kr-message"></div>
     </div>
-  </template>
-</div>
+    <div id="iwa-dev-container" style="display: none;">
+      <h3>Developer Mode</h3>
+      <p>Install IWA via Dev Mode Proxy:
+        <input type="url" id="iwa-dev-install-proxy-url" size="30" required
+            placeholder="http://localhost:8000/">
+        <button id="iwa-dev-install-proxy-button" type="submit">Install</button>
+      </p>
+      <p>
+        Install IWA from Signed Web Bundle:
+        <button id="iwa-dev-install-bundle-selector" type="submit">
+          Select file...
+        </button>
+      </p>
+      <p>Install IWA from Update Manifest:
+        <input type="url" id="iwa-dev-update-manifest-url" size="50" required
+            placeholder="http://localhost:8000/update_manifest.json">
+        <button id="iwa-dev-update-manifest-fetch-button" type="submit">Fetch</button>
+      </p>
 
-<div class="section" id="external">
-  <h2>Externally installed web app prefs:</h2>
-  <pre>[[externallyInstalledWebAppPrefs_]]</pre>
-</div>
+      <dialog id="iwa-update-manifest-dialog">
+        <div>Installing IWA</div>
+        <div id="iwa-update-manifest-version">
+          <div id="iwa-update-manifest-version-title">Select Version:</div>
+          <select id="iwa-update-manifest-version-select"></select>
+        </div>
+        <div id="iwa-update-manifest-dialog-buttons">
+          <button id="iwa-update-manifest-dialog-close">Close</button>
+          <button id="iwa-update-manifest-dialog-install">Install</button>
+        </div>
+      </dialog>
+
+      <dialog id="iwa-switch-channel-input-dialog" class="update-input-dialog">
+        <div>Switching update channel for IWA</div>
+        <div>New Channel:</div>
+        <input type="text" id="iwa-update-channel" size="15" required
+            placeholder="default">
+        <div class="dialog-buttons">
+          <button id="iwa-switch-channel-dialog-close">Close</button>
+          <button id="iwa-switch-channel-dialog-switch">Switch</button>
+        </div>
+      </dialog>
+
+      <dialog id="iwa-pinned-version-input-dialog" class="update-input-dialog">
+        <div>Pinned Version:</div>
+        <input type="text" id="iwa-pinned-version" size="15">
+        <div class="dialog-buttons">
+          <button id="iwa-pinned-version-dialog-close">Close</button>
+          <button id="iwa-pinned-version-dialog-unpin">Unpin</button>
+          <button id="iwa-pinned-version-dialog-pin">Pin</button>
+        </div>
+      </dialog>
+
+      <div id="iwa-dev-install-message"></div>
+      <h4>Installed Dev Mode IWAs</h4>
+      <ul id="iwa-dev-updates-app-list"></ul>
+      <div id="iwa-dev-updates-message"></div>
+    </div>
+    <hr>
+  </div>
+
+  <div id="app-index" role="navigation" aria-label="Installed web apps"></div>
+  <pre id="json"></pre>
+</body>
+
+</html>

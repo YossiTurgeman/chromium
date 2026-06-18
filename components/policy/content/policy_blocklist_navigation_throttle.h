@@ -1,20 +1,22 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_POLICY_CONTENT_POLICY_BLOCKLIST_NAVIGATION_THROTTLE_H_
 #define COMPONENTS_POLICY_CONTENT_POLICY_BLOCKLIST_NAVIGATION_THROTTLE_H_
 
-#include "base/macros.h"
-#include "base/memory/weak_ptr.h"
+#include "base/gtest_prod_util.h"
+#include "base/time/time.h"
+#include "components/policy/core/browser/url_list/policy_blocklist_service.h"
 #include "content/public/browser/navigation_throttle.h"
 
+class GURL;
 class PolicyBlocklistService;
 class PrefService;
+class SafeSearchService;
 
 namespace content {
-class BrowserContext;
-class NavigationHandle;
+class NavigationThrottleRegistry;
 }  // namespace content
 
 // PolicyBlocklistNavigationThrottle provides a simple way to block a navigation
@@ -26,35 +28,52 @@ class NavigationHandle;
 class PolicyBlocklistNavigationThrottle : public content::NavigationThrottle {
  public:
   PolicyBlocklistNavigationThrottle(
-      content::NavigationHandle* navigation_handle,
-      content::BrowserContext* context);
+      content::NavigationThrottleRegistry& registry,
+      PrefService* prefs,
+      PolicyBlocklistService* blocklist_service,
+      SafeSearchService* safe_search_service);
+  PolicyBlocklistNavigationThrottle(const PolicyBlocklistNavigationThrottle&) =
+      delete;
+  PolicyBlocklistNavigationThrottle& operator=(
+      const PolicyBlocklistNavigationThrottle&) = delete;
   ~PolicyBlocklistNavigationThrottle() override;
 
   // NavigationThrottle overrides.
   ThrottleCheckResult WillStartRequest() override;
   ThrottleCheckResult WillRedirectRequest() override;
-
+  ThrottleCheckResult WillProcessResponse() override;
   const char* GetNameForLogging() override;
 
  private:
-  // Callback from PolicyBlocklistService.
-  void CheckSafeSearchCallback(bool is_safe);
+  FRIEND_TEST_ALL_PREFIXES(PolicyBlocklistNavigationThrottleTest, Blocklist);
+  FRIEND_TEST_ALL_PREFIXES(PolicyBlocklistNavigationThrottleTest, Allowlist);
+  FRIEND_TEST_ALL_PREFIXES(PolicyBlocklistNavigationThrottleTest,
+                           SafeSites_Safe);
+  FRIEND_TEST_ALL_PREFIXES(PolicyBlocklistNavigationThrottleTest,
+                           SafeSites_Porn);
 
-  PolicyBlocklistService* blocklist_service_;
+  // Returns TRUE if this navigation is to view-source.
+  bool IsViewSourceNavigation();
 
-  PrefService* prefs_;
+  // Returns the PolicyBlocklistState for a view-source navigation.
+  // Should only be called if the navigation is a view-source.
+  PolicyBlocklistService::PolicyBlocklistState
+  GetViewSourceNavigationBlocklistState();
 
-  // Whether the request was deferred in order to check the Safe Search API.
-  bool deferred_ = false;
+  // To ensure both allow and block policies override Safe Sites,
+  // SafeSitesNavigationThrottle must be consulted as part of this throttle
+  // rather than added separately to the list of throttles.
+  ThrottleCheckResult CheckSafeSitesFilter(const GURL& url, bool is_redirect);
+  void OnDeferredSafeSitesResult(bool proceed,
+                                 std::optional<ThrottleCheckResult> result);
 
-  // Whether the Safe Search API callback determined the in-progress navigation
-  // should be canceled.
-  bool should_cancel_ = false;
+  ThrottleCheckResult WillStartOrRedirectRequest(bool is_redirect);
 
-  base::WeakPtrFactory<PolicyBlocklistNavigationThrottle> weak_ptr_factory_{
-      this};
+  std::unique_ptr<content::NavigationThrottle> safe_sites_navigation_throttle_;
 
-  DISALLOW_COPY_AND_ASSIGN(PolicyBlocklistNavigationThrottle);
+  const raw_ptr<PolicyBlocklistService, DanglingUntriaged> blocklist_service_;
+
+  const raw_ptr<PrefService> prefs_;
 };
 
 #endif  // COMPONENTS_POLICY_CONTENT_POLICY_BLOCKLIST_NAVIGATION_THROTTLE_H_

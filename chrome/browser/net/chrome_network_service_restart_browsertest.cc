@@ -1,8 +1,7 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/net/system_network_context_manager.h"
@@ -10,8 +9,8 @@
 #include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/browser/network_service_util.h"
 #include "content/public/browser/storage_partition.h"
-#include "content/public/common/network_service_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "services/network/public/cpp/features.h"
@@ -27,14 +26,16 @@ class ChromeNetworkServiceRestartBrowserTest : public InProcessBrowserTest {
     EXPECT_TRUE(embedded_test_server()->Start());
   }
 
+  ChromeNetworkServiceRestartBrowserTest(
+      const ChromeNetworkServiceRestartBrowserTest&) = delete;
+  ChromeNetworkServiceRestartBrowserTest& operator=(
+      const ChromeNetworkServiceRestartBrowserTest&) = delete;
+
   GURL GetTestURL() const {
     // Use '/echoheader' instead of '/echo' to avoid a disk_cache bug.
-    // See https://crbug.com/792255.
+    // See https://crbug.com/40553335.
     return embedded_test_server()->GetURL("/echoheader");
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ChromeNetworkServiceRestartBrowserTest);
 };
 
 // Make sure |StoragePartition::GetNetworkContext()| returns valid interface
@@ -44,9 +45,9 @@ IN_PROC_BROWSER_TEST_F(ChromeNetworkServiceRestartBrowserTest,
   if (content::IsInProcessNetworkService())
     return;
   // |NetworkServiceTestHelper| doesn't work on browser_tests on macOS.
-#if !defined(OS_MAC)
+#if !BUILDFLAG(IS_MAC)
   StoragePartition* partition =
-      BrowserContext::GetDefaultStoragePartition(browser()->profile());
+      browser()->profile()->GetDefaultStoragePartition();
 
   network::mojom::NetworkContext* old_network_context =
       partition->GetNetworkContext();
@@ -58,9 +59,10 @@ IN_PROC_BROWSER_TEST_F(ChromeNetworkServiceRestartBrowserTest,
   // Flush the interface to make sure the error notification was received.
   partition->FlushNetworkInterfaceForTesting();
 
-  // |partition->GetNetworkContext()| should return a valid new pointer after
-  // crash.
-  EXPECT_NE(old_network_context, partition->GetNetworkContext());
+  // |partition->GetNetworkContext()| should return a valid pointer after crash.
+  // TODO(crbug.org/478890190): We probably need to add an identifier to
+  // NetworkContext to verify that "new" network context is created.
+  EXPECT_NE(nullptr, partition->GetNetworkContext());
   EXPECT_EQ(net::OK,
             LoadBasicRequest(partition->GetNetworkContext(), GetTestURL()));
 #endif
@@ -73,7 +75,7 @@ IN_PROC_BROWSER_TEST_F(ChromeNetworkServiceRestartBrowserTest,
   if (content::IsInProcessNetworkService())
     return;
   // |NetworkServiceTestHelper| doesn't work on browser_tests on macOS.
-#if !defined(OS_MAC)
+#if !BUILDFLAG(IS_MAC)
   SystemNetworkContextManager* system_network_context_manager =
       g_browser_process->system_network_context_manager();
 

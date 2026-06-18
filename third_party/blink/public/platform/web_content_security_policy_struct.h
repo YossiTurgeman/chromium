@@ -31,58 +31,86 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEB_CONTENT_SECURITY_POLICY_STRUCT_H_
 #define THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEB_CONTENT_SECURITY_POLICY_STRUCT_H_
 
+#include <optional>
+#include <vector>
+
+#include "services/network/public/cpp/integrity_metadata.h"
 #include "services/network/public/mojom/content_security_policy.mojom-shared.h"
 #include "third_party/blink/public/platform/web_string.h"
-#include "third_party/blink/public/platform/web_vector.h"
 
 namespace blink {
 
-// TODO(arthursonzogni): Remove this when BeginNavigation will be sent directly
-// from blink.
-enum WebWildcardDisposition {
-  kWebWildcardDispositionNoWildcard,
-  kWebWildcardDispositionHasWildcard
-};
-
-// TODO(arthursonzogni): Remove this when BeginNavigation will be sent directly
-// from blink.
-struct WebContentSecurityPolicySourceExpression {
+struct WebCSPSource {
   WebString scheme;
   WebString host;
-  WebWildcardDisposition is_host_wildcard;
-  int port;
-  WebWildcardDisposition is_port_wildcard;
+  int port = -1;
   WebString path;
+  bool is_host_wildcard;
+  bool is_port_wildcard;
 };
 
-// TODO(arthursonzogni): Remove this when BeginNavigation will be sent directly
-// from blink.
-struct WebContentSecurityPolicySourceList {
+struct WebCSPSourceList {
+  std::vector<WebCSPSource> sources;
+  std::vector<WebString> nonces;
+  std::vector<network::IntegrityMetadata> hashes;
+  std::vector<network::IntegrityMetadata> url_hashes;
+  std::vector<network::IntegrityMetadata> eval_hashes;
   bool allow_self;
   bool allow_star;
-  bool allow_redirects;
-  WebVector<WebContentSecurityPolicySourceExpression> sources;
+  bool allow_inline;
+  bool allow_inline_speculation_rules;
+  bool allow_eval;
+  bool allow_wasm_eval;
+  bool allow_wasm_unsafe_eval;
+  bool allow_dynamic;
+  bool allow_dynamic_url;
+  bool allow_unsafe_hashes;
+  bool report_sample;
+  bool allow_trusted_types_eval;
+  std::optional<network::mojom::IntegrityAlgorithm> report_hash_algorithm;
 };
 
-// TODO(arthursonzogni): Remove this when BeginNavigation will be sent directly
-// from blink.
 struct WebContentSecurityPolicyDirective {
-  WebString name;
-  WebContentSecurityPolicySourceList source_list;
+  network::mojom::CSPDirectiveName name;
+  WebCSPSourceList source_list;
 };
 
-// TODO(arthursonzogni): Remove this when BeginNavigation will be sent directly
-// from blink.
+struct WebContentSecurityPolicyRawDirective {
+  network::mojom::CSPDirectiveName name;
+  WebString value;
+};
+
+struct WebCSPTrustedTypes {
+  std::vector<WebString> list;
+  bool allow_any;
+  bool allow_duplicates;
+};
+
+struct WebContentSecurityPolicyHeader {
+  WebString header_value;
+  network::mojom::ContentSecurityPolicyType type =
+      network::mojom::ContentSecurityPolicyType::kEnforce;
+  network::mojom::ContentSecurityPolicySource source =
+      network::mojom::ContentSecurityPolicySource::kHTTP;
+};
+
 struct WebContentSecurityPolicy {
-  network::mojom::ContentSecurityPolicyType disposition;
-  network::mojom::ContentSecurityPolicySource source;
-  WebVector<WebContentSecurityPolicyDirective> directives;
+  WebCSPSource self_origin;
+  std::vector<WebContentSecurityPolicyRawDirective> raw_directives;
+  std::vector<WebContentSecurityPolicyDirective> directives;
   bool upgrade_insecure_requests;
-  WebVector<WebString> report_endpoints;
-  WebString header;
+  bool treat_as_public_address;
+  bool block_all_mixed_content;
+  network::mojom::WebSandboxFlags sandbox =
+      network::mojom::WebSandboxFlags::kNone;
+  WebContentSecurityPolicyHeader header;
   bool use_reporting_api;
+  std::vector<WebString> report_endpoints;
+  network::mojom::CSPRequireTrustedTypesFor require_trusted_types_for;
+  std::optional<WebCSPTrustedTypes> trusted_types;
+  std::vector<WebString> parsing_errors;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEB_CONTENT_SECURITY_POLICY_STRUCT_H_

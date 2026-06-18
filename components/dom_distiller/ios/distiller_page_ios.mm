@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,107 +8,21 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/apple/foundation_util.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/logging.h"
-#include "base/mac/foundation_util.h"
 #include "base/strings/string_split.h"
-#include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
+#import "components/dom_distiller/ios/distiller_page_utils.h"
 #include "ios/web/public/browser_state.h"
-#import "ios/web/public/deprecated/crw_js_injection_manager.h"
-#import "ios/web/public/deprecated/crw_js_injection_receiver.h"
+#import "ios/web/public/js_messaging/web_frame.h"
+#import "ios/web/public/js_messaging/web_frames_manager.h"
 #import "ios/web/public/navigation/navigation_manager.h"
 #import "ios/web/public/navigation/web_state_policy_decider.h"
 #import "ios/web/public/web_state.h"
 #include "ios/web/public/web_state_observer.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
-namespace {
-
-// This is duplicated here from ios/web/js_messaging/web_view_js_utils.mm in
-// order to handle numbers. The dom distiller proto expects integers and the
-// generated JSON deserializer does not accept doubles in the place of ints.
-// However WKWebView only returns "numbers." However, here the proto expects
-// integers and doubles, which is done by checking if the number has a fraction
-// or not; since this is a hacky method it's isolated to this file so as to
-// limit the risk of broken JS calls.
-
-int const kMaximumParsingRecursionDepth = 6;
-
-// Converts result of WKWebView script evaluation to base::Value, parsing
-// |wk_result| up to a depth of |max_depth|.
-base::Value ValueResultFromScriptResult(id wk_result, int max_depth) {
-  base::Value result;
-  if (!wk_result) {
-    return result;
-  }
-
-  if (max_depth < 0) {
-    DLOG(WARNING) << "JS maximum recursion depth exceeded.";
-    return result;
-  }
-
-  CFTypeID result_type = CFGetTypeID(reinterpret_cast<CFTypeRef>(wk_result));
-  if (result_type == CFStringGetTypeID()) {
-    result = base::Value(base::SysNSStringToUTF8(wk_result));
-    DCHECK_EQ(result.type(), base::Value::Type::STRING);
-  } else if (result_type == CFNumberGetTypeID()) {
-    // Different implementation is here.
-    if ([wk_result intValue] != [wk_result doubleValue]) {
-      result = base::Value([wk_result doubleValue]);
-      DCHECK_EQ(result.type(), base::Value::Type::DOUBLE);
-    } else {
-      result = base::Value([wk_result intValue]);
-      DCHECK_EQ(result.type(), base::Value::Type::INTEGER);
-    }
-    // End of different implementation.
-  } else if (result_type == CFBooleanGetTypeID()) {
-    result = base::Value(static_cast<bool>([wk_result boolValue]));
-    DCHECK_EQ(result.type(), base::Value::Type::BOOLEAN);
-  } else if (result_type == CFNullGetTypeID()) {
-    DCHECK_EQ(result.type(), base::Value::Type::NONE);
-  } else if (result_type == CFDictionaryGetTypeID()) {
-    base::Value dictionary(base::Value::Type::DICTIONARY);
-    for (id key in wk_result) {
-      NSString* obj_c_string = base::mac::ObjCCast<NSString>(key);
-      base::Value value =
-          ValueResultFromScriptResult(wk_result[obj_c_string], max_depth - 1);
-
-      if (value.type() == base::Value::Type::NONE) {
-        return result;
-      }
-
-      std::string combined_path = base::SysNSStringToUTF8(obj_c_string);
-      std::vector<base::StringPiece> path = base::SplitStringPiece(
-          combined_path, ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
-      dictionary.SetPath(path, std::move(value));
-    }
-    result = std::move(dictionary);
-    DCHECK_EQ(result.type(), base::Value::Type::DICTIONARY);
-  } else if (result_type == CFArrayGetTypeID()) {
-    std::vector<base::Value> list;
-    for (id list_item in wk_result) {
-      base::Value value = ValueResultFromScriptResult(list_item, max_depth - 1);
-      if (value.type() == base::Value::Type::NONE) {
-        return result;
-      }
-
-      list.push_back(std::move(value));
-    }
-    result = base::Value(list);
-    DCHECK_EQ(result.type(), base::Value::Type::LIST);
-  } else {
-    NOTREACHED();  // Convert other types as needed.
-  }
-  return result;
-}
-
-}  // namespace
 
 namespace dom_distiller {
 
@@ -119,13 +33,17 @@ class DistillerPageMediaBlocker : public web::WebStatePolicyDecider {
       : web::WebStatePolicyDecider(web_state),
         main_frame_navigation_blocked_(false) {}
 
+  DistillerPageMediaBlocker(const DistillerPageMediaBlocker&) = delete;
+  DistillerPageMediaBlocker& operator=(const DistillerPageMediaBlocker&) =
+      delete;
+
   void ShouldAllowResponse(
       NSURLResponse* response,
-      bool for_main_frame,
-      base::OnceCallback<void(PolicyDecision)> callback) override {
+      web::WebStatePolicyDecider::ResponseInfo response_info,
+      web::WebStatePolicyDecider::PolicyDecisionCallback callback) override {
     if ([response.MIMEType hasPrefix:@"audio/"] ||
         [response.MIMEType hasPrefix:@"video/"]) {
-      if (for_main_frame) {
+      if (response_info.for_main_frame) {
         main_frame_navigation_blocked_ = true;
       }
       std::move(callback).Run(PolicyDecision::Cancel());
@@ -140,17 +58,12 @@ class DistillerPageMediaBlocker : public web::WebStatePolicyDecider {
 
  private:
   bool main_frame_navigation_blocked_;
-  DISALLOW_COPY_AND_ASSIGN(DistillerPageMediaBlocker);
 };
 
 #pragma mark -
 
 DistillerPageIOS::DistillerPageIOS(web::BrowserState* browser_state)
     : browser_state_(browser_state), weak_ptr_factory_(this) {}
-
-bool DistillerPageIOS::StringifyOutput() {
-  return false;
-}
 
 DistillerPageIOS::~DistillerPageIOS() {
   DetachWebState();
@@ -163,7 +76,7 @@ void DistillerPageIOS::AttachWebState(
   }
   web_state_ = std::move(web_state);
   if (web_state_) {
-    web_state_->AddObserver(this);
+    web_state_observation_.Observe(web_state_.get());
     media_blocker_ =
         std::make_unique<DistillerPageMediaBlocker>(web_state_.get());
   }
@@ -172,7 +85,7 @@ void DistillerPageIOS::AttachWebState(
 std::unique_ptr<web::WebState> DistillerPageIOS::DetachWebState() {
   if (web_state_) {
     media_blocker_.reset();
-    web_state_->RemoveObserver(this);
+    web_state_observation_.Reset();
   }
   return std::move(web_state_);
 }
@@ -194,17 +107,25 @@ void DistillerPageIOS::DistillPageImpl(const GURL& url,
         web::WebState::Create(web_state_create_params);
     AttachWebState(std::move(web_state_unique));
   }
+
+  distilling_navigation_ = true;
   // Load page using WebState.
   web::NavigationManager::WebLoadParams params(url_);
   web_state_->SetKeepRenderProcessAlive(true);
   web_state_->GetNavigationManager()->LoadURLWithParams(params);
   // LoadIfNecessary is needed because the view is not created (but needed) when
-  // loading the page. TODO(crbug.com/705819): Remove this call.
+  // loading the page. TODO(crbug.com/41309809): Remove this call.
   web_state_->GetNavigationManager()->LoadIfNecessary();
 }
 
 void DistillerPageIOS::OnLoadURLDone(
     web::PageLoadCompletionStatus load_completion_status) {
+  if (!distilling_navigation_) {
+    // This is a second navigation after the distillation request.
+    // Distillation was already requested, so ignore this one.
+    return;
+  }
+  distilling_navigation_ = false;
   // Don't attempt to distill if the page load failed or if there is no
   // WebState.
   if (load_completion_status == web::PageLoadCompletionStatus::FAILURE ||
@@ -212,22 +133,23 @@ void DistillerPageIOS::OnLoadURLDone(
     HandleJavaScriptResult(nil);
     return;
   }
+
+  web::WebFrame* main_frame =
+      web_state_->GetPageWorldWebFramesManager()->GetMainWebFrame();
+  if (!main_frame) {
+    HandleJavaScriptResult(nil);
+    return;
+  }
+
   // Inject the script.
   base::WeakPtr<DistillerPageIOS> weak_this = weak_ptr_factory_.GetWeakPtr();
-  [[web_state_->GetJSInjectionReceiver()
-      instanceOfClass:[CRWJSInjectionManager class]]
-      executeJavaScript:base::SysUTF8ToNSString(script_)
-      completionHandler:^(id result, NSError* error) {
-        DistillerPageIOS* distiller_page = weak_this.get();
-        if (distiller_page)
-          distiller_page->HandleJavaScriptResult(result);
-      }];
+  main_frame->ExecuteJavaScript(
+      base::UTF8ToUTF16(script_),
+      base::BindOnce(&DistillerPageIOS::HandleJavaScriptResult, weak_this));
 }
 
-void DistillerPageIOS::HandleJavaScriptResult(id result) {
-  base::Value result_as_value =
-      ValueResultFromScriptResult(result, kMaximumParsingRecursionDepth);
-
+void DistillerPageIOS::HandleJavaScriptResult(const base::Value* result) {
+  base::Value result_as_value = ParseValueFromScriptResult(result);
   OnDistillationDone(url_, &result_as_value);
 }
 
@@ -250,8 +172,7 @@ void DistillerPageIOS::DidStartLoading(web::WebState* web_state) {
 
 void DistillerPageIOS::DidStopLoading(web::WebState* web_state) {
   DCHECK_EQ(web_state_.get(), web_state);
-  if (web_state->IsShowingWebInterstitial() ||
-      media_blocker_->main_frame_navigation_blocked()) {
+  if (media_blocker_->main_frame_navigation_blocked()) {
     // If there is an interstitial, stop the distillation.
     // The interstitial is not displayed to the user who cannot choose to
     // continue.

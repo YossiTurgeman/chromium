@@ -1,82 +1,115 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/android/jni_string.h"
 #include "base/files/file_path.h"
-#include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/safe_browsing/android/jni_headers/SafeBrowsingBridge_jni.h"
-#include "chrome/browser/signin/identity_manager_factory.h"
-#include "components/password_manager/core/browser/leak_detection/authenticated_leak_check.h"
+// NOTE: This target is transitively depended on by //chrome/browser and thus
+// can't depend on it.
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/safe_browsing/advanced_protection_status_manager.h"
+#include "chrome/browser/safe_browsing/advanced_protection_status_manager_factory.h"
+#include "chrome/browser/signin/identity_manager_factory.h"  // nogncheck
 #include "components/password_manager/core/common/password_manager_pref_names.h"
 #include "components/prefs/pref_service.h"
+#include "components/safe_browsing/content/browser/safe_browsing_service_interface.h"
+#include "components/safe_browsing/content/common/file_type_policies.h"
+#include "components/safe_browsing/core/common/hashprefix_realtime/hash_realtime_utils.h"
 #include "components/safe_browsing/core/common/safe_browsing_prefs.h"
-#include "components/safe_browsing/core/file_type_policies.h"
-#include "components/signin/public/identity_manager/identity_manager.h"
+#include "content/public/browser/web_contents.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/browser/safe_browsing/android/jni_headers/SafeBrowsingBridge_jni.h"
+
+using base::android::JavaRef;
 
 namespace {
 
-PrefService* GetPrefService() {
-  return ProfileManager::GetActiveUserProfile()
-      ->GetOriginalProfile()
-      ->GetPrefs();
+PrefService* GetPrefService(const base::android::JavaRef<jobject>& j_profile) {
+  return Profile::FromJavaObject(j_profile)->GetPrefs();
 }
 
 }  // namespace
 
 namespace safe_browsing {
 
-static jint JNI_SafeBrowsingBridge_UmaValueForFile(
+static int32_t JNI_SafeBrowsingBridge_UmaValueForFile(
     JNIEnv* env,
-    const base::android::JavaParamRef<jstring>& path) {
-  base::FilePath file_path(ConvertJavaStringToUTF8(env, path));
+    const JavaRef<jstring>& path) {
+  base::FilePath file_path(base::android::ConvertJavaStringToUTF8(env, path));
   return safe_browsing::FileTypePolicies::GetInstance()->UmaValueForFile(
       file_path);
 }
 
-static jboolean JNI_SafeBrowsingBridge_GetSafeBrowsingExtendedReportingEnabled(
-    JNIEnv* env) {
-  return safe_browsing::IsExtendedReportingEnabled(*GetPrefService());
+static bool JNI_SafeBrowsingBridge_GetSafeBrowsingExtendedReportingEnabled(
+    JNIEnv* env,
+    const JavaRef<jobject>& j_profile) {
+  return safe_browsing::IsExtendedReportingEnabled(*GetPrefService(j_profile));
 }
 
 static void JNI_SafeBrowsingBridge_SetSafeBrowsingExtendedReportingEnabled(
     JNIEnv* env,
-    jboolean enabled) {
+    const JavaRef<jobject>& j_profile,
+    bool enabled) {
   safe_browsing::SetExtendedReportingPrefAndMetric(
-      GetPrefService(), enabled,
+      GetPrefService(j_profile), enabled,
       safe_browsing::SBER_OPTIN_SITE_ANDROID_SETTINGS);
 }
 
-static jboolean JNI_SafeBrowsingBridge_GetSafeBrowsingExtendedReportingManaged(
-    JNIEnv* env) {
-  PrefService* pref_service = GetPrefService();
+static bool JNI_SafeBrowsingBridge_GetSafeBrowsingExtendedReportingManaged(
+    JNIEnv* env,
+    const JavaRef<jobject>& j_profile) {
+  PrefService* pref_service = GetPrefService(j_profile);
   return pref_service->IsManagedPreference(
       prefs::kSafeBrowsingScoutReportingEnabled);
 }
 
-static jint JNI_SafeBrowsingBridge_GetSafeBrowsingState(JNIEnv* env) {
-  return safe_browsing::GetSafeBrowsingState(*GetPrefService());
+static int32_t JNI_SafeBrowsingBridge_GetSafeBrowsingState(
+    JNIEnv* env,
+    const JavaRef<jobject>& j_profile) {
+  return static_cast<int32_t>(
+      safe_browsing::GetSafeBrowsingState(*GetPrefService(j_profile)));
 }
 
-static void JNI_SafeBrowsingBridge_SetSafeBrowsingState(JNIEnv* env,
-                                                        jint state) {
+static void JNI_SafeBrowsingBridge_SetSafeBrowsingState(
+    JNIEnv* env,
+    const JavaRef<jobject>& j_profile,
+    int32_t state) {
   return safe_browsing::SetSafeBrowsingState(
-      GetPrefService(), static_cast<SafeBrowsingState>(state));
+      GetPrefService(j_profile), static_cast<SafeBrowsingState>(state),
+      /*is_esb_enabled_by_account_integration=*/false);
 }
 
-static jboolean JNI_SafeBrowsingBridge_IsSafeBrowsingManaged(JNIEnv* env) {
-  return safe_browsing::IsSafeBrowsingPolicyManaged(*GetPrefService());
+static void JNI_SafeBrowsingBridge_EnableSafeBrowsingSettingSetLocallyPref(
+    JNIEnv* env,
+    const JavaRef<jobject>& j_profile) {
+  return safe_browsing::EnableSafeBrowsingSettingSetLocallyPref(
+      GetPrefService(j_profile));
 }
 
-static jboolean JNI_SafeBrowsingBridge_HasAccountForLeakCheckRequest(
+static bool JNI_SafeBrowsingBridge_IsSafeBrowsingManaged(
+    JNIEnv* env,
+    const JavaRef<jobject>& j_profile) {
+  return safe_browsing::IsSafeBrowsingPolicyManaged(*GetPrefService(j_profile));
+}
+
+static bool JNI_SafeBrowsingBridge_IsHashRealTimeLookupEligibleInSession(
     JNIEnv* env) {
-  signin::IdentityManager* identity_manager =
-      IdentityManagerFactory::GetForProfile(
-          ProfileManager::GetLastUsedProfile());
-  return password_manager::AuthenticatedLeakCheck::HasAccountForRequest(
-      identity_manager);
+  return safe_browsing::hash_realtime_utils::
+      IsHashRealTimeLookupEligibleInSession();
+}
+
+static void JNI_SafeBrowsingBridge_ReportIntent(
+    JNIEnv* env,
+    content::WebContents* web_contents,
+    const std::string& package_name,
+    const std::string& uri) {
+  reinterpret_cast<SafeBrowsingServiceInterface*>(
+      g_browser_process->safe_browsing_service())
+      ->ReportExternalAppRedirect(web_contents, package_name, uri);
 }
 
 }  // namespace safe_browsing
+
+DEFINE_JNI(SafeBrowsingBridge)

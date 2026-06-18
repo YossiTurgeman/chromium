@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2015 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -58,6 +58,38 @@ class FilterTestNamesTest(unittest.TestCase):
                           "Bar.Three",
                           "Foo.Two",
                           "Quux.Two"])
+
+  def testMatchWithStrippedName(self):
+    possible_list = ["Suite.Test", "Suite.PRE_Test", "Other.Test"]
+
+    def strip_pre(test):
+      return test.replace("PRE_", "")
+
+    x = unittest_util.FilterTestNames(possible_list,
+                                      "Suite.Test",
+                                      test_name_stripped_func=strip_pre)
+    self.assertEquals(x, ["Suite.Test", "Suite.PRE_Test"])
+
+    x = unittest_util.FilterTestNames(possible_list,
+                                      "Suite.*",
+                                      test_name_stripped_func=strip_pre)
+    self.assertEquals(x, ["Suite.Test", "Suite.PRE_Test"])
+
+    x = unittest_util.FilterTestNames(possible_list,
+                                      "-Suite.Test",
+                                      test_name_stripped_func=strip_pre)
+    self.assertEquals(x, ["Other.Test"])
+
+  def testMatchWithStrippedNameExplicitPreTest(self):
+    possible_list = ["Suite.Test", "Suite.PRE_Test", "Other.Test"]
+
+    def strip_pre(test):
+      return test.replace("PRE_", "")
+
+    x = unittest_util.FilterTestNames(possible_list,
+                                      "Suite.PRE_Test",
+                                      test_name_stripped_func=strip_pre)
+    self.assertEquals(x, ["Suite.PRE_Test"])
 
 
 if __name__ == '__main__':

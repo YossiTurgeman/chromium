@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,20 +8,26 @@
 #include <map>
 #include <memory>
 
-#include "base/callback_forward.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
+#include "base/time/time.h"
+#include "base/timer/timer.h"
+#include "chrome/browser/picture_in_picture/picture_in_picture_occlusion_observer.h"
+#include "chrome/browser/picture_in_picture/scoped_picture_in_picture_occlusion_observation.h"
 #include "chrome/browser/ui/views/payments/view_stack.h"
 #include "components/payments/content/initialization_task.h"
 #include "components/payments/content/payment_request_dialog.h"
 #include "components/payments/content/payment_request_spec.h"
 #include "components/payments/content/payment_request_state.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/controls/throbber.h"
+#include "ui/views/widget/widget_observer.h"
 #include "ui/views/window/dialog_delegate.h"
 
 namespace autofill {
 class AutofillProfile;
-class CreditCard;
 }  // namespace autofill
 
 class Profile;
@@ -48,11 +54,17 @@ enum class BackNavigationType {
 class PaymentRequestDialogView : public views::DialogDelegateView,
                                  public PaymentRequestDialog,
                                  public PaymentRequestSpec::Observer,
-                                 public InitializationTask::Observer {
+                                 public InitializationTask::Observer,
+                                 public PictureInPictureOcclusionObserver,
+                                 public views::WidgetObserver {
+  METADATA_HEADER(PaymentRequestDialogView, views::DialogDelegateView)
+
  public:
   class ObserverForTest {
    public:
     virtual void OnDialogOpened() = 0;
+
+    virtual void OnDialogClosed() = 0;
 
     virtual void OnContactInfoOpened() = 0;
 
@@ -63,8 +75,6 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
     virtual void OnShippingAddressSectionOpened() = 0;
 
     virtual void OnShippingOptionSectionOpened() = 0;
-
-    virtual void OnCreditCardEditorOpened() = 0;
 
     virtual void OnShippingAddressEditorOpened() = 0;
 
@@ -80,27 +90,29 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
 
     virtual void OnSpecDoneUpdating() = 0;
 
-    virtual void OnCvcPromptShown() = 0;
-
     virtual void OnProcessingSpinnerShown() = 0;
 
     virtual void OnProcessingSpinnerHidden() = 0;
 
     virtual void OnPaymentHandlerWindowOpened() = 0;
+
+    virtual void OnPaymentHandlerTitleSet() = 0;
   };
+
+  PaymentRequestDialogView(const PaymentRequestDialogView&) = delete;
+  PaymentRequestDialogView& operator=(const PaymentRequestDialogView&) = delete;
 
   // Build a Dialog around the PaymentRequest object. |observer| is used to
   // be notified of dialog events as they happen (but may be NULL) and should
   // outlive this object.
   static base::WeakPtr<PaymentRequestDialogView> Create(
-      PaymentRequest* request,
-      PaymentRequestDialogView::ObserverForTest* observer);
+      base::WeakPtr<PaymentRequest> request,
+      base::WeakPtr<PaymentRequestDialogView::ObserverForTest> observer);
 
   // views::View
   void RequestFocus() override;
 
   // views::WidgetDelegate:
-  ui::ModalType GetModalType() const override;
   views::View* GetInitiallyFocusedView() override;
 
   // views::DialogDelegate:
@@ -117,6 +129,7 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
       PaymentHandlerOpenWindowCallback callback) override;
   void RetryDialog() override;
   void ConfirmPaymentForTesting() override;
+  bool ClickOptOutForTesting() override;
 
   // PaymentRequestSpec::Observer:
   void OnStartUpdating(PaymentRequestSpec::UpdateReason reason) override;
@@ -124,6 +137,11 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
 
   // InitializationTask::Observer:
   void OnInitialized(InitializationTask* initialization_task) override;
+
+  // views::WidgetObserver:
+  void OnWidgetDestroying(views::Widget* widget) override;
+  void OnWidgetBoundsChanged(views::Widget* widget,
+                             const gfx::Rect& new_bounds) override;
 
   void Pay();
   void GoBack();
@@ -133,19 +151,6 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
   void ShowShippingProfileSheet();
   void ShowPaymentMethodSheet();
   void ShowShippingOptionSheet();
-  // |credit_card| is the card to be edited, or nullptr for adding a card.
-  // |on_edited| is called when |credit_card| was successfully edited, and
-  // |on_added| is called when a new credit card was added (the reference is
-  // short-lived; callee should make a copy of the CreditCard object).
-  // |back_navigation_type| identifies the type of navigation to execute once
-  // the editor has completed successfully. |next_ui_tag| is the lowest value
-  // that the credit card editor can use to assign to custom controls.
-  void ShowCreditCardEditor(
-      BackNavigationType back_navigation_type,
-      int next_ui_tag,
-      base::OnceClosure on_edited,
-      base::OnceCallback<void(const autofill::CreditCard&)> on_added,
-      autofill::CreditCard* credit_card = nullptr);
   // |profile| is the address to be edited, or nullptr for adding an address.
   // |on_edited| is called when |profile| was successfully edited, and
   // |on_added| is called when a new profile was added (the reference is
@@ -170,12 +175,6 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
       autofill::AutofillProfile* profile = nullptr);
   void EditorViewUpdated();
 
-  void ShowCvcUnmaskPrompt(
-      const autofill::CreditCard& credit_card,
-      base::WeakPtr<autofill::payments::FullCardRequest::ResultDelegate>
-          result_delegate,
-      content::WebContents* web_contents) override;
-
   // Hides the full dialog spinner with the "processing" label.
   void HideProcessingSpinner();
 
@@ -189,15 +188,21 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
   // handler window is currently showing.
   int GetActualDialogWidth() const;
 
+  // Called when a PaymentHandler dialog detects a title being set from the
+  // underlying WebContents.
+  void OnPaymentHandlerTitleSet();
+
   ViewStack* view_stack_for_testing() { return view_stack_; }
+  ControllerMap* controller_map_for_testing() { return &controller_map_; }
   views::View* throbber_overlay_for_testing() { return throbber_overlay_; }
 
  private:
   // The browsertest validates the calculated dialog size.
   friend class PaymentHandlerWindowSizeTest;
 
-  PaymentRequestDialogView(PaymentRequest* request,
-                           PaymentRequestDialogView::ObserverForTest* observer);
+  PaymentRequestDialogView(
+      base::WeakPtr<PaymentRequest> request,
+      base::WeakPtr<PaymentRequestDialogView::ObserverForTest> observer);
   ~PaymentRequestDialogView() override;
 
   void OnDialogOpened();
@@ -205,27 +210,29 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
   void SetupSpinnerOverlay();
   void OnDialogClosed();
   void ResizeDialogWindow();
+  void CheckIfDialogFitsInBrowserWindow();
+  bool DialogFitsInBrowserWindow() const;
 
   // views::View
-  gfx::Size CalculatePreferredSize() const override;
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& /*available_size*/) const override;
   void ViewHierarchyChanged(
       const views::ViewHierarchyChangedDetails& details) override;
 
-  // Non-owned reference to the PaymentRequest that initiated this dialog. Since
-  // the PaymentRequest object always outlives this one, the pointer should
-  // always be valid even though there is no direct ownership relationship
-  // between the two.
-  PaymentRequest* request_;
+  // PictureInPictureOcclusionObserver
+  void OnOcclusionStateChanged(bool occluded) override;
+
+  // The PaymentRequest object that initiated this dialog.
+  base::WeakPtr<PaymentRequest> request_;
   ControllerMap controller_map_;
-  ViewStack* view_stack_;
+  raw_ptr<ViewStack, AcrossTasksDanglingUntriaged> view_stack_;
 
   // A full dialog overlay that shows a spinner and the "processing" label. It's
   // hidden until ShowProcessingSpinner is called.
-  views::View* throbber_overlay_;
-  views::Throbber* throbber_;
+  raw_ptr<views::View> throbber_overlay_;
+  raw_ptr<views::Throbber> throbber_;
 
-  // May be null.
-  ObserverForTest* observer_for_testing_;
+  base::WeakPtr<ObserverForTest> observer_for_testing_;
 
   // Used when the dialog is being closed to avoid re-entrance into the
   // controller_map_ or view_stack_.
@@ -234,17 +241,29 @@ class PaymentRequestDialogView : public views::DialogDelegateView,
   // The number of initialization tasks that are not yet initialized.
   size_t number_of_initialization_tasks_ = 0;
 
-  // True when payment handler screen is shown and the
-  // kPaymentHandlerPopUpSizeWindow runtime flag is set.
+  // True when payment handler screen is shown, as it is larger than the Payment
+  // Request sheet view.
   bool is_showing_large_payment_handler_window_ = false;
 
   // Calculated based on the browser content size at the time of opening payment
   // handler window.
   int payment_handler_window_height_ = 0;
 
-  base::WeakPtrFactory<PaymentRequestDialogView> weak_ptr_factory_{this};
+  // We track the size of the containing browser window in order to detect cases
+  // where it becomes too small to contain the Payment Request/Handler dialog.
+  base::ScopedObservation<views::Widget, views::WidgetObserver>
+      browser_widget_observation_{this};
 
-  DISALLOW_COPY_AND_ASSIGN(PaymentRequestDialogView);
+  // State used to throttle checks for the browser window being too small, to
+  // avoid re-computing Payment Request/Handler dialog size constantly while the
+  // browser is being resized.
+  base::TimeTicks last_check_for_too_small_window_time_;
+  base::OneShotTimer check_for_too_small_window_timer_;
+  gfx::Size last_observed_browser_window_size_;
+
+  ScopedPictureInPictureOcclusionObservation occlusion_observation_{this};
+
+  base::WeakPtrFactory<PaymentRequestDialogView> weak_ptr_factory_{this};
 };
 
 }  // namespace payments

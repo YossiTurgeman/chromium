@@ -1,15 +1,17 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/network/transitional_url_loader_factory_owner.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
-#include "base/test/bind_test_util.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "base/threading/thread.h"
 #include "net/test/embedded_test_server/default_handlers.h"
@@ -54,7 +56,7 @@ class TransitionalURLLoaderFactoryOwnerTest : public ::testing::Test {
     base::RunLoop run_loop;
     loader->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
         url_loader_factory.get(),
-        base::BindLambdaForTesting([&](std::unique_ptr<std::string> body) {
+        base::BindLambdaForTesting([&](std::optional<std::string> body) {
           ASSERT_TRUE(body);
           EXPECT_NE(std::string::npos, body->find("<title>Cache:")) << *body;
           run_loop.Quit();
@@ -75,7 +77,7 @@ TEST_F(TransitionalURLLoaderFactoryOwnerTest, CrossThread) {
   base::Thread io_thread("IO");
   base::Thread::Options options;
   options.message_pump_type = base::MessagePumpType::IO;
-  ASSERT_TRUE(io_thread.StartWithOptions(options));
+  ASSERT_TRUE(io_thread.StartWithOptions(std::move(options)));
 
   TestOnTaskRunner(io_thread.task_runner(), base::BindLambdaForTesting([&]() {
                      io_thread.FlushForTesting();

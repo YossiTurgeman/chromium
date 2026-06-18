@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2018 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -20,24 +20,37 @@ from annotation_tools import NetworkTrafficAnnotationTools
 # //tools/traffic_annotation/OWNERS.
 TEST_IS_ENABLED = True
 
+# If this test starts failing due to a critical bug in auditor.py, please set
+# USE_PYTHON_AUDITOR to "False" and file a bug (see comment above).
+USE_PYTHON_AUDITOR = True
+
 MINIMUM_EXPECTED_NUMBER_OF_ANNOTATIONS = 260
 
 class TrafficAnnotationTestsChecker():
-  def __init__(self, build_path=None, annotations_filename=None):
+
+  def __init__(self,
+               build_path=None,
+               annotations_filename=None,
+               errors_filename=None):
     """Initializes a TrafficAnnotationTestsChecker object.
 
     Args:
       build_path: str Absolute or relative path to a fully compiled build
           directory.
+      annotations_filename: str Path to a file to write annotations to.
+      errors_filename: str Path to a file to write errors to.
     """
     self.tools = NetworkTrafficAnnotationTools(build_path)
     self.last_result = None
     self.persist_annotations = bool(annotations_filename)
     if not annotations_filename:
-      annotations_file = tempfile.NamedTemporaryFile()
-      annotations_filename = annotations_file.name
-      annotations_file.close()
+      annotations_file, annotations_filename = tempfile.mkstemp()
+      os.close(annotations_file)
     self.annotations_filename = annotations_filename
+    if not errors_filename:
+      errors_file, errors_filename = tempfile.mkstemp()
+      os.close(errors_file)
+    self.errors_filename = errors_filename
 
   def RunAllTests(self):
     """Runs all tests and returns the result."""
@@ -72,7 +85,7 @@ class TrafficAnnotationTestsChecker():
 
     self.last_result = None
     for config in configs:
-      result = self._RunTest(config)
+      result = self._RunTest(config, USE_PYTHON_AUDITOR)
       if not result:
         print("No output for config: %s" % config)
         return False
@@ -103,18 +116,24 @@ class TrafficAnnotationTestsChecker():
     return True
 
 
-  def _RunTest(self, args):
+  def _RunTest(self, args, use_python_auditor):
     """Runs the auditor test with given |args|, and returns the extracted
     annotations.
 
     Args:
       args: list of str Arguments to be passed to auditor.
+      use_python_auditor: If True, test auditor.py instead of
+        traffic_annotation_auditor.exe.
 
     Returns:
       str Content of annotations.tsv file if successful, otherwise None.
     """
 
-    print("Running auditor using config: %s" % args)
+    if use_python_auditor:
+      auditor_name = "auditor.py"
+    else:
+      auditor_name = "traffic_annotation_auditor"
+    print("Running %s using config: %s" % (auditor_name, args))
 
     try:
       os.remove(self.annotations_filename)
@@ -122,7 +141,10 @@ class TrafficAnnotationTestsChecker():
       pass
 
     stdout_text, stderr_text, return_code = self.tools.RunAuditor(
-        args + ["--annotations-file=%s" % self.annotations_filename])
+        args + [
+            "--annotations-file", self.annotations_filename, "--errors-file",
+            self.errors_filename
+        ], use_python_auditor)
 
     annotations = None
     if os.path.exists(self.annotations_filename):
@@ -164,10 +186,13 @@ def main():
   parser.add_argument(
       '--annotations-file',
       help='Optional path to a TSV output file with all annotations.')
+  parser.add_argument('--errors-file',
+                      help="Optional path to a JSON output file with errors.")
 
   args = parser.parse_args()
   checker = TrafficAnnotationTestsChecker(args.build_path,
-                                          args.annotations_file)
+                                          args.annotations_file,
+                                          args.errors_file)
   return 0 if checker.RunAllTests() else 1
 
 

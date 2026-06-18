@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,11 +30,11 @@ class InteractionProvider {
   virtual ~InteractionProvider() {}
 
   // Returns a token representing the current state of interaction,
-  // possibly for use in later point in time to create a |Scope|.
+  // possibly for use in later point in time to create a `Scope`.
   virtual std::unique_ptr<Token> GetCurrentToken(
       v8::Local<v8::Context> v8_context) const = 0;
 
-  // Creates a scoped interaction from a |token|, possibly retrieved earlier.
+  // Creates a scoped interaction from a `token`, possibly retrieved earlier.
   virtual std::unique_ptr<Scope> CreateScopedInteraction(
       v8::Local<v8::Context> v8_context,
       std::unique_ptr<Token> token) const = 0;

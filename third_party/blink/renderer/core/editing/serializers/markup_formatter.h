@@ -27,7 +27,6 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_SERIALIZERS_MARKUP_FORMATTER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_SERIALIZERS_MARKUP_FORMATTER_H_
 
-#include "base/macros.h"
 #include "third_party/blink/renderer/core/editing/editing_strategy.h"
 #include "third_party/blink/renderer/core/editing/serializers/serialization.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
@@ -56,11 +55,14 @@ enum EntityMask {
   kEntityMaskInCDATA = 0,
   kEntityMaskInPCDATA = kEntityAmp | kEntityLt | kEntityGt,
   kEntityMaskInHTMLPCDATA = kEntityMaskInPCDATA | kEntityNbsp,
-  kEntityMaskInAttributeValue =
-      kEntityAmp | kEntityQuot | kEntityLt | kEntityGt | kEntityTab |
-      kEntityLineFeed |
-      kEntityCarriageReturn,
-  kEntityMaskInHTMLAttributeValue = kEntityAmp | kEntityQuot | kEntityNbsp,
+  kEntityMaskInAttributeValue = kEntityAmp | kEntityQuot | kEntityLt |
+                                kEntityGt | kEntityTab | kEntityLineFeed |
+                                kEntityCarriageReturn,
+  // Note: historically, "<" and ">" were not escaped in HTML attribute values.
+  // This was changed in the HTML spec on May 20, 2025, see:
+  // https://github.com/whatwg/html/pull/6362.
+  kEntityMaskInHTMLAttributeValue =
+      kEntityAmp | kEntityQuot | kEntityLt | kEntityGt | kEntityNbsp,
 };
 
 enum class SerializationType { kHTML, kXML };
@@ -92,7 +94,9 @@ class MarkupFormatter final {
                                           const String& data);
   static void AppendXMLDeclaration(StringBuilder&, const Document&);
 
-  MarkupFormatter(AbsoluteURLs, SerializationType);
+  MarkupFormatter(ResolveUrls, SerializationType);
+  MarkupFormatter(const MarkupFormatter&) = delete;
+  MarkupFormatter& operator=(const MarkupFormatter&) = delete;
 
   void AppendStartMarkup(StringBuilder&, const Node&);
   void AppendEndMarkup(StringBuilder&, const Element&);
@@ -117,12 +121,10 @@ class MarkupFormatter final {
   String ResolveURLIfNeeded(const Element&, const Attribute& attribute) const;
 
  private:
-  const AbsoluteURLs resolve_urls_method_;
+  const ResolveUrls resolve_urls_method_;
   SerializationType serialization_type_;
-
-  DISALLOW_COPY_AND_ASSIGN(MarkupFormatter);
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_SERIALIZERS_MARKUP_FORMATTER_H_

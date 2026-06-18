@@ -10,8 +10,9 @@
   </style>
 
   <script>
-    if (window.internals)
+    if (window.internals) {
       internals.settings.setPreferCompositingToLCDTextEnabled(false);
+    }
 
     if (window.testRunner) {
       testRunner.dumpAsText();

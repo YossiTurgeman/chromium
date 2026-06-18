@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,42 +7,54 @@
 
 #include "device/vr/public/mojom/vr_service.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
+#include "third_party/blink/renderer/modules/xr/xr_rigid_transform.h"
+#include "third_party/blink/renderer/modules/xr/xr_view_geometry.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
-#include "third_party/blink/renderer/platform/wtf/forward.h"
-#include "ui/gfx/transform.h"
+#include "third_party/blink/renderer/platform/heap/member.h"
+#include "ui/gfx/geometry/size.h"
+#include "ui/gfx/geometry/transform.h"
 
 namespace blink {
 
 class ExceptionState;
+class XRView;
 class XRRigidTransform;
 
-class XRDepthInformation final : public ScriptWrappable {
+class XRDepthInformation : public ScriptWrappable {
   DEFINE_WRAPPERTYPEINFO();
 
+ protected:
+  XRDepthInformation(
+      const XRView* xr_view,
+      const device::mojom::blink::XRViewGeometryPtr& view_geometry,
+      const gfx::Size& size,
+      const gfx::Transform& norm_depth_buffer_from_norm_view,
+      float raw_value_to_meters);
+
+  // Helper to validate whether a frame is in a correct state. Should be invoked
+  // before every member access. If the validation returns `false`, it means the
+  // validation failed & an exception is going to be thrown and the rest of the
+  // member access code should not run.
+  bool ValidateFrame(ExceptionState& exception_state) const;
+
  public:
-  explicit XRDepthInformation(
-      const device::mojom::blink::XRDepthData& depth_data);
-
-  DOMUint16Array* data() const;
-
   uint32_t width() const;
-
   uint32_t height() const;
-
-  XRRigidTransform* normTextureFromNormView() const;
-
-  float getDepth(uint32_t column,
-                 uint32_t row,
-                 ExceptionState& exception_state) const;
+  XRRigidTransform* normDepthBufferFromNormView() const;
+  float rawValueToMeters() const;
+  NotShared<DOMFloat32Array> projectionMatrix() const;
+  XRRigidTransform* viewGeometryTransform() const;
 
   void Trace(Visitor* visitor) const override;
 
- private:
-  uint32_t width_;
-  uint32_t height_;
+ protected:
+  const Member<const XRView> xr_view_;
 
-  Member<DOMUint16Array> data_;
-  gfx::Transform norm_texture_from_norm_view_;
+  const gfx::Size size_;
+
+  const gfx::Transform norm_depth_buffer_from_norm_view_;
+  const float raw_value_to_meters_;
+  const std::optional<XRViewGeometry> view_geometry_;
 };
 
 }  // namespace blink

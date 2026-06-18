@@ -1,17 +1,16 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_STORAGE_MONITOR_STORAGE_MONITOR_WIN_H_
 #define COMPONENTS_STORAGE_MONITOR_STORAGE_MONITOR_WIN_H_
 
+#include <windows.h>
+
 #include <memory>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/component_export.h"
 #include "components/storage_monitor/storage_monitor.h"
-
-#include <windows.h>
 
 namespace base {
 class FilePath;
@@ -19,19 +18,23 @@ class FilePath;
 
 namespace storage_monitor {
 
-class PortableDeviceWatcherWin;
 class TestStorageMonitorWin;
 class VolumeMountWatcherWin;
 
-class StorageMonitorWin : public StorageMonitor {
+class COMPONENT_EXPORT(STORAGE_MONITOR) StorageMonitorWin
+    : public StorageMonitor {
  public:
   // Should only be called by browser start up code.
   // Use StorageMonitor::GetInstance() instead.
-  // To support unit tests, this constructor takes |volume_mount_watcher| and
-  // |portable_device_watcher| objects. These params are either constructed in
-  // unit tests or in StorageMonitorWin CreateInternal() function.
-  StorageMonitorWin(VolumeMountWatcherWin* volume_mount_watcher,
-                    PortableDeviceWatcherWin* portable_device_watcher);
+  // To support unit tests, this constructor takes a `volume_mount_watcher`
+  // object. This parameter is either constructed in unit tests or in
+  // StorageMonitorWin CreateInternal().
+  explicit StorageMonitorWin(
+      std::unique_ptr<VolumeMountWatcherWin> volume_mount_watcher);
+
+  StorageMonitorWin(const StorageMonitorWin&) = delete;
+  StorageMonitorWin& operator=(const StorageMonitorWin&) = delete;
+
   ~StorageMonitorWin() override;
 
   // Must be called after the file thread is created.
@@ -40,16 +43,10 @@ class StorageMonitorWin : public StorageMonitor {
   // StorageMonitor:
   bool GetStorageInfoForPath(const base::FilePath& path,
                              StorageInfo* device_info) const override;
-  bool GetMTPStorageInfoFromDeviceId(
-      const std::string& storage_device_id,
-      base::string16* device_location,
-      base::string16* storage_object_id) const override;
-
   void EjectDevice(const std::string& device_id,
                    base::OnceCallback<void(EjectStatus)> callback) override;
 
  private:
-  class PortableDeviceNotifications;
   friend class TestStorageMonitorWin;
 
   void MediaChangeNotificationRegister();
@@ -69,23 +66,17 @@ class StorageMonitorWin : public StorageMonitor {
   void OnMediaChange(WPARAM wparam, LPARAM lparam);
 
   // The window class of |window_|.
-  ATOM window_class_;
+  ATOM window_class_ = 0;
 
   // The handle of the module that contains the window procedure of |window_|.
-  HMODULE instance_;
-  HWND window_;
+  HMODULE instance_ = nullptr;
+  HWND window_ = nullptr;
 
   // The handle of a registration for shell notifications.
-  ULONG shell_change_notify_id_;
+  ULONG shell_change_notify_id_ = 0;
 
   // The volume mount point watcher, used to manage the mounted devices.
-  std::unique_ptr<VolumeMountWatcherWin> volume_mount_watcher_;
-
-  // The portable device watcher, used to manage media transfer protocol
-  // devices.
-  std::unique_ptr<PortableDeviceWatcherWin> portable_device_watcher_;
-
-  DISALLOW_COPY_AND_ASSIGN(StorageMonitorWin);
+  const std::unique_ptr<VolumeMountWatcherWin> volume_mount_watcher_;
 };
 
 }  // namespace storage_monitor

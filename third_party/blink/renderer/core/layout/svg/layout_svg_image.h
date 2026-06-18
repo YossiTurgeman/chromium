@@ -25,6 +25,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_IMAGE_H_
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_model_object.h"
+#include "ui/gfx/geometry/rect_f.h"
 
 namespace blink {
 
@@ -35,62 +36,93 @@ class LayoutSVGImage final : public LayoutSVGModelObject {
  public:
   explicit LayoutSVGImage(SVGImageElement*);
   ~LayoutSVGImage() override;
+  void Trace(Visitor*) const override;
 
-  void SetNeedsBoundariesUpdate() override { needs_boundaries_update_ = true; }
-  void SetNeedsTransformUpdate() override { needs_transform_update_ = true; }
+  void SetNeedsTransformUpdate() override {
+    NOT_DESTROYED();
+    needs_transform_update_ = true;
+  }
 
-  LayoutImageResource* ImageResource() { return image_resource_.Get(); }
+  LayoutImageResource* ImageResource() {
+    NOT_DESTROYED();
+    return image_resource_.Get();
+  }
   const LayoutImageResource* ImageResource() const {
+    NOT_DESTROYED();
     return image_resource_.Get();
   }
 
-  FloatRect ObjectBoundingBox() const override { return object_bounding_box_; }
+  gfx::RectF ObjectBoundingBox() const override {
+    NOT_DESTROYED();
+    return object_bounding_box_;
+  }
   bool IsObjectBoundingBoxValid() const {
+    NOT_DESTROYED();
     return !object_bounding_box_.IsEmpty();
   }
 
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectSVGImage ||
-           LayoutSVGModelObject::IsOfType(type);
+  bool IsSVGImage() const final {
+    NOT_DESTROYED();
+    return true;
   }
 
-  const char* GetName() const override { return "LayoutSVGImage"; }
+  AffineTransform LocalSVGTransform() const override {
+    NOT_DESTROYED();
+    return local_transform_;
+  }
+
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutSVGImage";
+  }
 
  protected:
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const StyleChangeContext&) override;
   void WillBeDestroyed() override;
 
  private:
-  FloatRect StrokeBoundingBox() const override { return object_bounding_box_; }
+  gfx::RectF StrokeBoundingBox() const override {
+    NOT_DESTROYED();
+    return object_bounding_box_;
+  }
+
+  gfx::RectF DecoratedBoundingBox() const override {
+    NOT_DESTROYED();
+    return object_bounding_box_;
+  }
 
   void ImageChanged(WrappedImagePtr, CanDeferInvalidation) override;
 
-  void UpdateLayout() override;
+  SVGLayoutResult UpdateSVGLayout(const SVGLayoutInfo&) override;
   void Paint(const PaintInfo&) const override;
 
   bool UpdateBoundingBox();
+  // Update LayoutObject state after layout has completed. Returns true if
+  // boundaries needs to be propagated (because of a change to the transform).
+  bool UpdateAfterSVGLayout(const SVGLayoutInfo&, bool bbox_changed);
 
   bool NodeAtPoint(HitTestResult&,
                    const HitTestLocation&,
                    const PhysicalOffset& accumulated_offset,
-                   HitTestAction) override;
+                   HitTestPhase) override;
 
-  AffineTransform LocalSVGTransform() const override {
-    return local_transform_;
-  }
+  gfx::SizeF CalculateObjectSize() const;
 
-  FloatSize CalculateObjectSize() const;
-  bool HasOverriddenIntrinsicSize() const;
-
-  bool needs_boundaries_update_ : 1;
   bool needs_transform_update_ : 1;
   bool transform_uses_reference_box_ : 1;
   AffineTransform local_transform_;
-  FloatRect object_bounding_box_;
-  Persistent<LayoutImageResource> image_resource_;
+  gfx::RectF object_bounding_box_;
+  Member<LayoutImageResource> image_resource_;
 };
 
-DEFINE_LAYOUT_OBJECT_TYPE_CASTS(LayoutSVGImage, IsSVGImage());
+template <>
+struct DowncastTraits<LayoutSVGImage> {
+  static bool AllowFrom(const LayoutObject& object) {
+    return object.IsSVGImage();
+  }
+};
 
 }  // namespace blink
 

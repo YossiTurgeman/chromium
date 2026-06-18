@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,11 @@
 
 #include <math.h>
 
-#include "base/optional.h"
+#include <optional>
+
+#include "base/containers/span.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_microtasks_scope.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_readable_stream.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_writable_stream.h"
 #include "third_party/blink/renderer/core/streams/readable_stream.h"
@@ -19,42 +23,15 @@
 #include "third_party/blink/renderer/platform/bindings/trace_wrapper_v8_reference.h"
 #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
 #include "third_party/blink/renderer/platform/heap/visitor.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
 namespace {
 
-// PromiseRejectInternal() implements Promise.reject(_r_) from the ECMASCRIPT
-// standard, https://tc39.github.io/ecma262/#sec-promise.reject.
-// The |recursion_depth| argument is used to prevent infinite recursion in the
-// case that we can't create a promise.
-v8::Local<v8::Promise> PromiseRejectInternal(ScriptState* script_state,
-                                             v8::Local<v8::Value> value,
-                                             int recursion_depth) {
-  auto context = script_state->GetContext();
-  v8::TryCatch trycatch(script_state->GetIsolate());
-  // TODO(ricea): Can this fail for reasons other than memory exhaustion? Can we
-  // recover if it does?
-  auto resolver = v8::Promise::Resolver::New(context).ToLocalChecked();
-  if (resolver->Reject(context, value).IsNothing()) {
-    // Assume that the exception can be successfully used to create a Promise.
-    // TODO(ricea): Can the body of this if statement actually be reached?
-    if (recursion_depth >= 2) {
-      LOG(FATAL) << "Recursion depth exceeded in PromiseRejectInternal";
-    }
-    return PromiseRejectInternal(script_state, trycatch.Exception(),
-                                 recursion_depth + 1);
-  }
-  return resolver->GetPromise();
-}
-
 class DefaultSizeAlgorithm final : public StrategySizeAlgorithm {
  public:
-  base::Optional<double> Run(ScriptState*,
-                             v8::Local<v8::Value>,
-                             ExceptionState&) override {
+  std::optional<double> Run(ScriptState*, v8::Local<v8::Value>) override {
     return 1;
   }
 };
@@ -64,22 +41,19 @@ class JavaScriptSizeAlgorithm final : public StrategySizeAlgorithm {
   JavaScriptSizeAlgorithm(v8::Isolate* isolate, v8::Local<v8::Function> size)
       : function_(isolate, size) {}
 
-  base::Optional<double> Run(ScriptState* script_state,
-                             v8::Local<v8::Value> chunk,
-                             ExceptionState& exception_state) override {
+  std::optional<double> Run(ScriptState* script_state,
+                            v8::Local<v8::Value> chunk) override {
     auto* isolate = script_state->GetIsolate();
     auto context = script_state->GetContext();
-    v8::TryCatch trycatch(isolate);
     v8::Local<v8::Value> argv[] = {chunk};
 
     // https://streams.spec.whatwg.org/#make-size-algorithm-from-size-function
     // 3.a. Return ? Call(size, undefined, « chunk »).
-    v8::MaybeLocal<v8::Value> result_maybe = function_.NewLocal(isolate)->Call(
-        context, v8::Undefined(isolate), 1, argv);
+    v8::MaybeLocal<v8::Value> result_maybe =
+        function_.Get(isolate)->Call(context, v8::Undefined(isolate), 1, argv);
     v8::Local<v8::Value> result;
     if (!result_maybe.ToLocal(&result)) {
-      exception_state.RethrowV8Exception(trycatch.Exception());
-      return base::nullopt;
+      return std::nullopt;
     }
 
     // This conversion to double comes from the EnqueueValueWithSize
@@ -88,8 +62,7 @@ class JavaScriptSizeAlgorithm final : public StrategySizeAlgorithm {
     v8::MaybeLocal<v8::Number> number_maybe = result->ToNumber(context);
     v8::Local<v8::Number> number;
     if (!number_maybe.ToLocal(&number)) {
-      exception_state.RethrowV8Exception(trycatch.Exception());
-      return base::nullopt;
+      return std::nullopt;
     }
     return number->Value();
   }
@@ -105,10 +78,10 @@ class JavaScriptSizeAlgorithm final : public StrategySizeAlgorithm {
 
 class TrivialStreamAlgorithm final : public StreamAlgorithm {
  public:
-  v8::Local<v8::Promise> Run(ScriptState* script_state,
-                             int argc,
-                             v8::Local<v8::Value> argv[]) override {
-    return PromiseResolveWithUndefined(script_state);
+  ScriptPromise<IDLUndefined> Run(
+      ScriptState* script_state,
+      base::span<v8::Local<v8::Value>> argv) override {
+    return ToResolvedUndefinedPromise(script_state);
   }
 };
 
@@ -123,19 +96,19 @@ class JavaScriptStreamAlgorithmWithoutExtraArg final : public StreamAlgorithm {
   // CreateAlgorithmFromUnderlyingMethod() in the standard, but it is
   // determined when the algorithm is called rather than when the algorithm is
   // created.
-  v8::Local<v8::Promise> Run(ScriptState* script_state,
-                             int argc,
-                             v8::Local<v8::Value> argv[]) override {
+  ScriptPromise<IDLUndefined> Run(
+      ScriptState* script_state,
+      base::span<v8::Local<v8::Value>> argv) override {
     // This method technically supports any number of arguments, but we only
     // call it with 0 or 1 in practice.
-    DCHECK_GE(argc, 0);
+    DCHECK_GE(argv.size(), 0u);
     auto* isolate = script_state->GetIsolate();
     // https://streams.spec.whatwg.org/#create-algorithm-from-underlying-method
     // 6.b.i. Return ! PromiseCall(method, underlyingObject, extraArgs).
     // In this class extraArgs is always empty, but there may be other arguments
     // supplied to the method.
-    return PromiseCall(script_state, method_.NewLocal(isolate),
-                       recv_.NewLocal(isolate), argc, argv);
+    return PromiseCall(script_state, method_.Get(isolate), recv_.Get(isolate),
+                       argv.size(), argv.data());
   }
 
   void Trace(Visitor* visitor) const override {
@@ -161,26 +134,26 @@ class JavaScriptStreamAlgorithmWithExtraArg final : public StreamAlgorithm {
 
   // |argc| is equivalent to the "algoArgCount" argument to
   // CreateAlgorithmFromUnderlyingMethod() in the standard,
-  v8::Local<v8::Promise> Run(ScriptState* script_state,
-                             int argc,
-                             v8::Local<v8::Value> argv[]) override {
-    DCHECK_GE(argc, 0);
-    DCHECK_LE(argc, 1);
+  ScriptPromise<IDLUndefined> Run(
+      ScriptState* script_state,
+      base::span<v8::Local<v8::Value>> argv) override {
+    DCHECK_GE(argv.size(), 0u);
+    DCHECK_LE(argv.size(), 1u);
     auto* isolate = script_state->GetIsolate();
     // https://streams.spec.whatwg.org/#create-algorithm-from-underlying-method
     // 6.c.
     //      i. Let fullArgs be a List consisting of arg followed by the
     //         elements of extraArgs in order.
-    v8::Local<v8::Value> full_argv[2];
-    if (argc != 0) {
+    std::array<v8::Local<v8::Value>, 2> full_argv;
+    if (!argv.empty()) {
       full_argv[0] = argv[0];
     }
-    full_argv[argc] = extra_arg_.NewLocal(isolate);
-    int full_argc = argc + 1;
+    full_argv[argv.size()] = extra_arg_.Get(isolate);
+    int full_argc = argv.size() + 1;
 
     //     ii. Return ! PromiseCall(method, underlyingObject, fullArgs).
-    return PromiseCall(script_state, method_.NewLocal(isolate),
-                       recv_.NewLocal(isolate), full_argc, full_argv);
+    return PromiseCall(script_state, method_.Get(isolate), recv_.Get(isolate),
+                       full_argc, full_argv.data());
   }
 
   void Trace(Visitor* visitor) const override {
@@ -196,6 +169,43 @@ class JavaScriptStreamAlgorithmWithExtraArg final : public StreamAlgorithm {
   TraceWrapperV8Reference<v8::Value> extra_arg_;
 };
 
+class JavaScriptByteStreamStartAlgorithm : public StreamStartAlgorithm {
+ public:
+  JavaScriptByteStreamStartAlgorithm(v8::Isolate* isolate,
+                                     v8::Local<v8::Function> method,
+                                     v8::Local<v8::Object> recv,
+                                     v8::Local<v8::Value> controller)
+      : recv_(isolate, recv),
+        method_(isolate, method),
+        controller_(isolate, controller) {}
+
+  ScriptPromise<IDLUndefined> Run(ScriptState* script_state) override {
+    auto* isolate = script_state->GetIsolate();
+
+    v8::Local<v8::Value> controller = controller_.Get(isolate);
+    auto value_maybe = method_.Get(isolate)->Call(
+        script_state->GetContext(), recv_.Get(isolate), 1, &controller);
+    if (isolate->HasPendingException()) {
+      return EmptyPromise();
+    }
+
+    return ScriptPromise<IDLUndefined>::FromV8Value(
+        script_state, value_maybe.ToLocalChecked());
+  }
+
+  void Trace(Visitor* visitor) const override {
+    visitor->Trace(recv_);
+    visitor->Trace(method_);
+    visitor->Trace(controller_);
+    StreamStartAlgorithm::Trace(visitor);
+  }
+
+ private:
+  TraceWrapperV8Reference<v8::Object> recv_;
+  TraceWrapperV8Reference<v8::Function> method_;
+  TraceWrapperV8Reference<v8::Value> controller_;
+};
+
 class JavaScriptStreamStartAlgorithm : public StreamStartAlgorithm {
  public:
   JavaScriptStreamStartAlgorithm(v8::Isolate* isolate,
@@ -206,24 +216,19 @@ class JavaScriptStreamStartAlgorithm : public StreamStartAlgorithm {
         method_name_for_error_(method_name_for_error),
         controller_(isolate, controller) {}
 
-  v8::MaybeLocal<v8::Promise> Run(ScriptState* script_state,
-                                  ExceptionState& exception_state) override {
+  ScriptPromise<IDLUndefined> Run(ScriptState* script_state) override {
     auto* isolate = script_state->GetIsolate();
     // https://streams.spec.whatwg.org/#set-up-writable-stream-default-controller-from-underlying-sink
     // 3. Let startAlgorithm be the following steps:
     //    a. Return ? InvokeOrNoop(underlyingSink, "start", « controller »).
     auto value_maybe = CallOrNoop1(
-        script_state, recv_.NewLocal(isolate), "start", method_name_for_error_,
-        controller_.NewLocal(isolate), exception_state);
-    if (exception_state.HadException()) {
-      return v8::MaybeLocal<v8::Promise>();
+        script_state, recv_.Get(isolate), "start", method_name_for_error_,
+        controller_.Get(isolate), PassThroughException(isolate));
+    if (isolate->HasPendingException()) {
+      return EmptyPromise();
     }
-    v8::Local<v8::Value> value;
-    if (!value_maybe.ToLocal(&value)) {
-      exception_state.ThrowTypeError("internal error");
-      return v8::MaybeLocal<v8::Promise>();
-    }
-    return PromiseResolve(script_state, value);
+    return ScriptPromise<IDLUndefined>::FromV8Value(
+        script_state, value_maybe.ToLocalChecked());
   }
 
   void Trace(Visitor* visitor) const override {
@@ -240,9 +245,8 @@ class JavaScriptStreamStartAlgorithm : public StreamStartAlgorithm {
 
 class TrivialStartAlgorithm : public StreamStartAlgorithm {
  public:
-  v8::MaybeLocal<v8::Promise> Run(ScriptState* script_state,
-                                  ExceptionState&) override {
-    return PromiseResolveWithUndefined(script_state);
+  ScriptPromise<IDLUndefined> Run(ScriptState* script_state) override {
+    return ToResolvedUndefinedPromise(script_state);
   }
 };
 
@@ -286,7 +290,7 @@ CORE_EXPORT v8::MaybeLocal<v8::Value> ResolveMethod(
     const char* name_for_error,
     ExceptionState& exception_state) {
   auto* isolate = script_state->GetIsolate();
-  v8::TryCatch try_catch(isolate);
+  TryRethrowScope rethrow_scope(isolate, exception_state);
 
   // Algorithm steps from CreateAlgorithmFromUnderlyingMethod in the standard.
   // https://streams.spec.whatwg.org/#create-algorithm-from-underlying-method
@@ -295,15 +299,14 @@ CORE_EXPORT v8::MaybeLocal<v8::Value> ResolveMethod(
                                   V8AtomicString(isolate, method_name));
   v8::Local<v8::Value> method;
   if (!method_maybe.ToLocal(&method)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
     return v8::MaybeLocal<v8::Value>();
   }
 
   // 6. If method is not undefined,
   //    a. If ! IsCallable(method) is false, throw a TypeError exception.
   if (!method->IsFunction() && !method->IsUndefined()) {
-    exception_state.ThrowTypeError(String(name_for_error) +
-                                   " must be a function or undefined");
+    exception_state.ThrowTypeError(
+        StrCat({name_for_error, " must be a function or undefined"}));
     return v8::MaybeLocal<v8::Value>();
   }
 
@@ -343,8 +346,36 @@ CORE_EXPORT StreamStartAlgorithm* CreateStartAlgorithm(
       controller);
 }
 
+CORE_EXPORT StreamStartAlgorithm* CreateByteStreamStartAlgorithm(
+    ScriptState* script_state,
+    v8::Local<v8::Object> underlying_object,
+    v8::Local<v8::Value> method,
+    v8::Local<v8::Value> controller) {
+  return MakeGarbageCollected<JavaScriptByteStreamStartAlgorithm>(
+      script_state->GetIsolate(), method.As<v8::Function>(), underlying_object,
+      controller);
+}
+
 CORE_EXPORT StreamStartAlgorithm* CreateTrivialStartAlgorithm() {
   return MakeGarbageCollected<TrivialStartAlgorithm>();
+}
+
+CORE_EXPORT StreamAlgorithm* CreateTrivialStreamAlgorithm() {
+  return MakeGarbageCollected<TrivialStreamAlgorithm>();
+}
+
+CORE_EXPORT ScriptValue CreateTrivialQueuingStrategy(v8::Isolate* isolate,
+                                                     size_t high_water_mark) {
+  v8::Local<v8::Name> high_water_mark_string =
+      V8AtomicString(isolate, "highWaterMark");
+  v8::Local<v8::Value> high_water_mark_value =
+      v8::Number::New(isolate, high_water_mark);
+
+  auto strategy =
+      v8::Object::New(isolate, v8::Null(isolate), &high_water_mark_string,
+                      &high_water_mark_value, 1);
+
+  return ScriptValue(isolate, strategy);
 }
 
 CORE_EXPORT v8::MaybeLocal<v8::Value> CallOrNoop1(
@@ -371,23 +402,21 @@ CORE_EXPORT v8::MaybeLocal<v8::Value> CallOrNoop1(
   DCHECK(method->IsFunction());
 
   // 6. Return ? Call(method, O, args).
-  v8::TryCatch try_catch(script_state->GetIsolate());
-  v8::MaybeLocal<v8::Value> result = method.As<v8::Function>()->Call(
-      script_state->GetContext(), object, 1, &arg0);
-  if (result.IsEmpty()) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
-    return v8::MaybeLocal<v8::Value>();
-  }
-  return result;
+  TryRethrowScope rethrow_scope(script_state->GetIsolate(), exception_state);
+  return method.As<v8::Function>()->Call(script_state->GetContext(), object, 1,
+                                         &arg0);
 }
 
-CORE_EXPORT v8::Local<v8::Promise> PromiseCall(ScriptState* script_state,
-                                               v8::Local<v8::Function> method,
-                                               v8::Local<v8::Object> recv,
-                                               int argc,
-                                               v8::Local<v8::Value> argv[]) {
+CORE_EXPORT ScriptPromise<IDLUndefined> PromiseCall(
+    ScriptState* script_state,
+    v8::Local<v8::Function> method,
+    v8::Local<v8::Object> recv,
+    int argc,
+    v8::Local<v8::Value> argv[]) {
   DCHECK_GE(argc, 0);
-  v8::TryCatch trycatch(script_state->GetIsolate());
+  v8::Isolate* isolate = script_state->GetIsolate();
+  v8::TryCatch trycatch(isolate);
+  V8DoNotRunMicrotasksScope microtasks_scope(script_state);
 
   // https://streams.spec.whatwg.org/#promise-call
   // 4. Let returnValue be Call(F, V, args).
@@ -398,11 +427,12 @@ CORE_EXPORT v8::Local<v8::Promise> PromiseCall(ScriptState* script_state,
   // 5. If returnValue is an abrupt completion, return a promise rejected with
   //    returnValue.[[Value]].
   if (!result_maybe.ToLocal(&result)) {
-    return PromiseReject(script_state, trycatch.Exception());
+    return ScriptPromise<IDLUndefined>::Reject(script_state,
+                                               trycatch.Exception());
   }
 
   // 6. Otherwise, return a promise resolved with returnValue.[[Value]].
-  return PromiseResolve(script_state, result);
+  return ScriptPromise<IDLUndefined>::FromV8Value(script_state, result);
 }
 
 CORE_EXPORT double ValidateAndNormalizeHighWaterMark(
@@ -449,37 +479,6 @@ CORE_EXPORT StrategySizeAlgorithm* CreateDefaultSizeAlgorithm() {
   return MakeGarbageCollected<DefaultSizeAlgorithm>();
 }
 
-// PromiseResolve implements Promise.resolve(_x_) from the ECMASCRIPT standard,
-// https://tc39.github.io/ecma262/#sec-promise.resolve, except that the
-// Get(_x_, "constructor") step is skipped.
-CORE_EXPORT v8::Local<v8::Promise> PromiseResolve(ScriptState* script_state,
-                                                  v8::Local<v8::Value> value) {
-  if (value->IsPromise()) {
-    return value.As<v8::Promise>();
-  }
-  auto context = script_state->GetContext();
-  v8::TryCatch trycatch(script_state->GetIsolate());
-  // TODO(ricea): Can this fail for reasons other than memory exhaustion? Can we
-  // recover if it does?
-  auto resolver = v8::Promise::Resolver::New(context).ToLocalChecked();
-  if (resolver->Resolve(context, value).IsNothing()) {
-    // TODO(ricea): Is this actually reachable?
-    return PromiseReject(script_state, trycatch.Exception());
-  }
-  return resolver->GetPromise();
-}
-
-CORE_EXPORT v8::Local<v8::Promise> PromiseResolveWithUndefined(
-    ScriptState* script_state) {
-  return PromiseResolve(script_state,
-                        v8::Undefined(script_state->GetIsolate()));
-}
-
-CORE_EXPORT v8::Local<v8::Promise> PromiseReject(ScriptState* script_state,
-                                                 v8::Local<v8::Value> value) {
-  return PromiseRejectInternal(script_state, value, 0);
-}
-
 void ScriptValueToObject(ScriptState* script_state,
                          ScriptValue value,
                          v8::Local<v8::Object>* object,
@@ -493,11 +492,8 @@ void ScriptValueToObject(ScriptState* script_state,
     *object = v8::Object::New(isolate);
     return;
   }
-  v8::TryCatch try_catch(isolate);
-  if (!v8_value->ToObject(script_state->GetContext()).ToLocal(object)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
-    return;
-  }
+  TryRethrowScope rethrow_scope(isolate, exception_state);
+  std::ignore = v8_value->ToObject(script_state->GetContext()).ToLocal(object);
 }
 
 StrategyUnpacker::StrategyUnpacker(ScriptState* script_state,
@@ -515,17 +511,15 @@ StrategyUnpacker::StrategyUnpacker(ScriptState* script_state,
   // This is used in several places. The steps here are taken from
   // https://streams.spec.whatwg.org/#ws-constructor.
   // 2. Let size be ? GetV(strategy, "size").
-  v8::TryCatch try_catch(isolate);
+  TryRethrowScope rethrow_scope(isolate, exception_state);
   if (!strategy_object->Get(context, V8AtomicString(isolate, "size"))
            .ToLocal(&size_)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
     return;
   }
 
   // 3. Let highWaterMark be ? GetV(strategy, "highWaterMark").
   if (!strategy_object->Get(context, V8AtomicString(isolate, "highWaterMark"))
            .ToLocal(&high_water_mark_)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
     return;
   }
 }
@@ -549,17 +543,20 @@ double StrategyUnpacker::GetHighWaterMark(
     return default_value;
   }
 
-  v8::TryCatch try_catch(script_state->GetIsolate());
+  TryRethrowScope rethrow_scope(script_state->GetIsolate(), exception_state);
   v8::Local<v8::Number> high_water_mark_as_number;
   if (!high_water_mark_->ToNumber(script_state->GetContext())
            .ToLocal(&high_water_mark_as_number)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
     return 0.0;
   }
 
   // 8. Set highWaterMark to ? ValidateAndNormalizeHighWaterMark(highWaterMark)
   return ValidateAndNormalizeHighWaterMark(high_water_mark_as_number->Value(),
                                            exception_state);
+}
+
+bool StrategyUnpacker::IsSizeUndefined() const {
+  return size_->IsUndefined();
 }
 
 }  // namespace blink

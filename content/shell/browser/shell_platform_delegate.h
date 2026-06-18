@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,25 +6,34 @@
 #define CONTENT_SHELL_BROWSER_SHELL_PLATFORM_DELEGATE_H_
 
 #include <memory>
+#include <string>
 
 #include "base/containers/flat_map.h"
-#include "base/strings/string16.h"
+#include "base/memory/scoped_refptr.h"
 #include "build/build_config.h"
-#include "content/public/browser/bluetooth_chooser.h"
+#include "third_party/blink/public/mojom/choosers/color_chooser.mojom-forward.h"
+#include "third_party/blink/public/mojom/choosers/file_chooser.mojom-forward.h"
+#include "third_party/skia/include/core/SkColor.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
-#if defined(OS_MAC)
-#include "content/public/browser/native_web_keyboard_event.h"
+#if BUILDFLAG(IS_MAC)
+#include "components/input/native_web_keyboard_event.h"
+#endif
+
+#if BUILDFLAG(IS_APPLE)
+#include "ui/display/screen.h"
 #endif
 
 class GURL;
 
 namespace content {
+class ColorChooser;
+class FileSelectListener;
 class JavaScriptDialogManager;
-class RenderFrameHost;
 class Shell;
 class ShellPlatformDataAura;
+class RenderFrameHost;
 class WebContents;
 
 class ShellPlatformDelegate {
@@ -50,6 +59,10 @@ class ShellPlatformDelegate {
   // cleanup.
   virtual void CleanUp(Shell* shell);
 
+  // Called from the Shell destructor after destroying the last one. This is
+  // usually a good time to call Shell::Shutdown().
+  virtual void DidCloseLastWindow();
+
   // Links the WebContents into the newly created window.
   virtual void SetContents(Shell* shell);
 
@@ -68,23 +81,28 @@ class ShellPlatformDelegate {
   virtual void SetIsLoading(Shell* shell, bool loading);
 
   // Set the title of shell window
-  virtual void SetTitle(Shell* shell, const base::string16& title);
+  virtual void SetTitle(Shell* shell, const std::u16string& title);
 
-  // Called when a RenderView is created for a renderer process; forwarded from
-  // WebContentsObserver.
-  virtual void RenderViewReady(Shell* shell);
+  // Called when the main frame is created in the renderer process; forwarded
+  // from WebContentsObserver. If navigation creates a new main frame, this may
+  // occur more than once.
+  // |main_frame| points to the new frame that was created. This is different
+  // than |shell|'s primary main frame, because |main_frame|'s document hasn't
+  // committed at this point and hasn't been swapped with the old |shell|'s
+  // primary main frame.
+  virtual void MainFrameCreated(Shell* shell, RenderFrameHost* main_frame);
 
   // Allows platforms to override the JavascriptDialogManager. By default
   // returns null, which signals that the Shell should use its own instance.
   virtual std::unique_ptr<JavaScriptDialogManager>
   CreateJavaScriptDialogManager(Shell* shell);
 
-  // Allows platforms to create and run a BluetoothChoose. By default returns
-  // null, which means no chooser is run at all.
-  virtual std::unique_ptr<BluetoothChooser> RunBluetoothChooser(
-      Shell* shell,
-      RenderFrameHost* frame,
-      const BluetoothChooser::EventHandler& event_handler);
+  // Requests handling of locking the mouse pointer. This returns true if the
+  // request has been handled, otherwise false.
+  virtual bool HandlePointerLockRequest(Shell* shell,
+                                        WebContents* web_contents,
+                                        bool user_gesture,
+                                        bool last_unlocked_by_target);
 
   // Allows platforms to prevent running insecure content. By default returns
   // false, only allowing what Shell allows on its own.
@@ -94,31 +112,48 @@ class ShellPlatformDelegate {
   // destruction. Returns false if the Shell should destroy itself.
   virtual bool DestroyShell(Shell* shell);
 
-#if !defined(OS_ANDROID)
+  // Called when color chooser should open. Returns the opened color chooser.
+  // Returns nullptr if we failed to open the color chooser. The color chooser
+  // is supported/required for Android or iOS.
+  virtual std::unique_ptr<ColorChooser> OpenColorChooser(
+      WebContents* web_contents,
+      SkColor color,
+      const std::vector<blink::mojom::ColorSuggestionPtr>& suggestions);
+
+  // Called when a file selection is to be done.
+  // This function is responsible for calling listener->FileSelected() or
+  // listener->FileSelectionCanceled().
+  virtual void RunFileChooser(RenderFrameHost* render_frame_host,
+                              scoped_refptr<FileSelectListener> listener,
+                              const blink::mojom::FileChooserParams& params);
+
+#if !BUILDFLAG(IS_ANDROID)
   // Returns the native window. Valid after calling CreatePlatformWindow().
   virtual gfx::NativeWindow GetNativeWindow(Shell* shell);
 #endif
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   // Activate (make key) the native window, and focus the web contents.
   virtual void ActivateContents(Shell* shell, WebContents* contents);
 
-  virtual void DidNavigateMainFramePostCommit(Shell* shell,
-                                              WebContents* contents);
+  virtual void DidNavigatePrimaryMainFramePostCommit(Shell* shell,
+                                                     WebContents* contents);
 
   virtual bool HandleKeyboardEvent(Shell* shell,
                                    WebContents* source,
-                                   const NativeWebKeyboardEvent& event);
+                                   const input::NativeWebKeyboardEvent& event);
 #endif
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
   void ToggleFullscreenModeForTab(Shell* shell,
                                   WebContents* web_contents,
                                   bool enter_fullscreen);
 
   bool IsFullscreenForTabOrPending(Shell* shell,
                                    const WebContents* web_contents) const;
+#endif
 
+#if BUILDFLAG(IS_ANDROID)
   // Forwarded from WebContentsDelegate.
   void SetOverlayMode(Shell* shell, bool use_overlay_mode);
 
@@ -127,7 +162,7 @@ class ShellPlatformDelegate {
 #endif
 
  protected:
-#if defined(USE_AURA) && !defined(TOOLKIT_VIEWS)
+#if defined(USE_AURA) && !defined(SHELL_USE_TOOLKIT_VIEWS)
   // Helper to avoid duplicating aura's ShellPlatformDelegate in web tests. If
   // this hack gets expanded to become more expansive then we should just
   // duplicate the aura ShellPlatformDelegate code to the web test code impl in
@@ -136,6 +171,9 @@ class ShellPlatformDelegate {
 #endif
 
  private:
+#if BUILDFLAG(IS_APPLE)
+  std::unique_ptr<display::ScopedNativeScreen> screen_;
+#endif
   // Data held for each Shell instance, since there is one ShellPlatformDelegate
   // for the whole browser process (shared across Shells). This is defined for
   // each platform implementation.

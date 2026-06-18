@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,110 +6,122 @@
 #define ASH_WM_OVERVIEW_OVERVIEW_UTILS_H_
 
 #include <memory>
+#include <optional>
 
 #include "ash/ash_export.h"
 #include "ash/wm/overview/overview_types.h"
 #include "ash/wm/splitview/split_view_drag_indicators.h"
-#include "ash/wm/window_transient_descendant_iterator.h"
-#include "base/optional.h"
-#include "third_party/skia/include/core/SkColor.h"
-#include "ui/compositor/layer_type.h"
-#include "ui/gfx/geometry/point_conversions.h"
-#include "ui/gfx/geometry/rect.h"
-#include "ui/gfx/geometry/size_conversions.h"
-#include "ui/gfx/transform.h"
+#include "ui/base/models/image_model.h"
+#include "ui/gfx/vector_icon_types.h"
 
 namespace aura {
 class Window;
 }  // namespace aura
+
+namespace gfx {
+class Rect;
+}  // namespace gfx
 
 namespace views {
 class Widget;
 }  // namespace views
 
 namespace ash {
+class OverviewItemBase;
 
-// Returns true if |window| can cover available workspace.
+// Returns true if an overview session is active.
+ASH_EXPORT bool IsInOverviewSession();
+
+// Returns the overview session if overview mode is active, otherwise returns
+// nullptr.
+ASH_EXPORT OverviewSession* GetOverviewSession();
+
+// Returns true if `window` can cover available workspace.
 bool CanCoverAvailableWorkspace(aura::Window* window);
 
-// Returns false if any window with |root_window| covers the entire workspace,
-// true otherwise.
-bool ShouldAnimateWallpaper(aura::Window* root_window);
+// Fades `widget` to opacity one and sets the transform to target with the enter
+// overview settings. Have OverviewController observe this animation as a enter
+// animation if `observe` is true.
+void FadeInAndTransformWidgetToOverview(views::Widget* widget,
+                                        const gfx::Transform& target_transform,
+                                        OverviewAnimationType animation_type,
+                                        bool observe);
 
-// Fades |widget| to opacity one with the enter overview settings. Additionally
-// place |widget| closer to the top of screen and slide it down if |slide| is
-// true. Have OverviewController observe this animation as a enter animation if
-// |observe| is true.
-void FadeInWidgetAndMaybeSlideOnEnter(views::Widget* widget,
-                                      OverviewAnimationType animation_type,
-                                      bool slide,
-                                      bool observe);
+// Fades `widget` to opacity one with the enter overview settings.
+// Have OverviewController observe this animation as a enter animation if
+// `observe` is true.
+ASH_EXPORT void FadeInWidgetToOverview(views::Widget* widget,
+                                       OverviewAnimationType animation_type,
+                                       bool observe);
 
-// Fades |widget| to opacity zero with animation settings depending on
-// |animation_type|. Used by several classes which need to be destroyed on
+// Makes `widget` not be able to process events. This should only be used if
+// `widget` is shutting down with animation, as `widget` will no longer be
+// interactable during the process.
+void PrepareWidgetForShutdownAnimation(views::Widget* widget);
+
+// Fades `widget` to opacity zero with animation settings depending on
+// `animation_type`. Used by several classes which need to be destroyed on
 // exiting overview, but have some widgets which need to continue animating.
-// |widget| is destroyed after finishing animation.
-// If |slide| is true, the |widget| will slide closer to the top of the screen.
-void FadeOutWidgetAndMaybeSlideOnExit(std::unique_ptr<views::Widget> widget,
-                                      OverviewAnimationType animation_type,
-                                      bool slide);
+// `widget` is destroyed after finishing animation.
+void FadeOutWidgetFromOverview(std::unique_ptr<views::Widget> widget,
+                               OverviewAnimationType animation_type);
 
-// Takes ownership of |widget|, closes and destroys it without any animations.
+// Takes ownership of `widget`, closes and destroys it without any animations.
 void ImmediatelyCloseWidgetOnExit(std::unique_ptr<views::Widget> widget);
 
-// Iterates through all the windows in the transient tree associated with
-// |window| that are visible.
-WindowTransientDescendantIteratorRange GetVisibleTransientTreeIterator(
-    aura::Window* window);
+// Returns the original bounds for the given `window` outside of overview. The
+// bounds are a union of all regular (normal and transient) windows in the
+// window's transient hierarchy.
+ASH_EXPORT gfx::RectF GetUnionScreenBoundsForWindow(aura::Window* window);
 
-// Calculates the bounds of the |transformed_window|. Those bounds are a union
-// of all regular (normal and panel) windows in the |transformed_window|'s
-// transient hierarchy. The returned Rect is in virtual screen coordinates. The
-// returned bounds are adjusted to allow the original |transformed_window|'s
-// header to be hidden if |top_inset| is not zero.
-gfx::RectF GetTransformedBounds(aura::Window* transformed_window,
-                                int top_inset);
+// Returns the corresponding `OverviewItemFillMode` with given `size`.
+OverviewItemFillMode GetOverviewItemFillMode(const gfx::Size& size);
 
-// Returns the original target bounds of |window|. The bounds are a union of all
-// regular (normal and panel) windows in the window's transient hierarchy.
-gfx::RectF GetTargetBoundsInScreen(aura::Window* window);
-
-// Applies the |transform| to |window| and all of its transient children. Note
-// |transform| is the transform that is applied to |window| and needs to be
-// adjusted for the transient child windows.
-ASH_EXPORT void SetTransform(aura::Window* window,
-                             const gfx::Transform& transform);
-
-// Checks if we are currently in sliding up on the shelf to hide overview mode.
-bool IsSlidingOutOverviewFromShelf();
+// Returns the corresponding `OverviewItemFillMode` for the given `window`:
+//  - For independent `OverviewItem`s, any `OverviewItemFillMode` are allowed.
+//  - For `OverviewItem`s within an `OverviewGroupItem`, only the default
+//  `kNormal` mode is allowed. (This restriction is in place to avoid visual
+//  glitches and header misalignment problems on the header view).
+OverviewItemFillMode GetOverviewItemFillModeForWindow(aura::Window* window);
 
 // Maximize the window if it is snapped without animation.
 void MaximizeIfSnapped(aura::Window* window);
 
 // Get the grid bounds if a window is snapped in splitview, or what they will be
-// when snapped based on |target_root| and |indicator_state|. If
-// |divider_changed| is true, maybe clamp the bounds to a minimum size and shift
-// the bounds offscreen. If |account_for_hotseat| is true, inset the bounds by
+// when snapped based on `target_root` and `indicator_state`. If
+// `account_for_hotseat` is true and we are in tablet mode, inset the bounds by
 // the hotseat size.
-gfx::Rect GetGridBoundsInScreen(aura::Window* target_root);
+ASH_EXPORT gfx::Rect GetGridBoundsInScreen(aura::Window* target_root);
 gfx::Rect GetGridBoundsInScreen(
     aura::Window* target_root,
-    base::Optional<SplitViewDragIndicators::WindowDraggingState>
+    std::optional<SplitViewDragIndicators::WindowDraggingState>
         window_dragging_state,
-    bool divider_changed,
     bool account_for_hotseat);
 
 // Gets the bounds of a window if it were to be snapped or about to be snapped
 // in splitview. Returns nothing if we are not in tablet mode, or if we aren't
 // in splitview, or if we aren't showing a splitview preview.
-base::Optional<gfx::RectF> GetSplitviewBoundsMaintainingAspectRatio();
+std::optional<gfx::RectF> GetSplitviewBoundsMaintainingAspectRatio();
 
-// Check if kNewOverviewLayout is enabled for tablet mode.
+// Check if the grid layout in tablet mode should be used.
 bool ShouldUseTabletModeGridLayout();
 
 // Returns a Rect by rounding the values of the given RectF in a way that
 // returns the same size for SizeF regardless of its origin.
 ASH_EXPORT gfx::Rect ToStableSizeRoundedRect(const gfx::RectF& rect);
+
+// Determines if an `item` is eligible for snapping in Overview. Snapping is
+// disallowed for `OverviewGroupItem`s holding two `OverviewItem`s.
+bool IsEligibleForDraggingToSnapInOverview(OverviewItemBase* item);
+
+// For all `windows`, change their visibility by changing the window opacity,
+// animating where necessary.
+void SetWindowsVisibleDuringItemDragging(const aura::Window::Windows& windows,
+                                         bool visible,
+                                         bool animate);
+
+// Generates and stylizes the icon for menu item.
+ui::ImageModel CreateIconForMenuItem(const gfx::VectorIcon& icon);
 
 }  // namespace ash
 

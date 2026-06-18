@@ -1,17 +1,17 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var assertFalse = chrome.test.assertFalse;
-var assertTrue = chrome.test.assertTrue;
-var succeed = chrome.test.succeed;
+const assertFalse = chrome.test.assertFalse;
+const assertTrue = chrome.test.assertTrue;
 
 function isAvailable(api) {
-  if (!(api in chrome.runtime))
+  if (!(api in chrome.runtime)) {
     return false;
+  }
 
   try {
-    var mightThrowException = chrome.runtime[api];
+    const mightThrowException = chrome.runtime[api];
   } catch (e) {
     return false;
   }
@@ -30,4 +30,4 @@ assertFalse(isAvailable('getBackgroundPage'), 'getBackgroundPage available');
 assertFalse(isAvailable('onInstalled'), 'onInstalled available');
 assertFalse(isAvailable('onSuspend'), 'onSuspend available');
 
-succeed();
+chrome.test.notifyPass();

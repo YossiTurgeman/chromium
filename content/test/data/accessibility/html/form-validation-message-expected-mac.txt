@@ -1,6 +1,6 @@
 AXWebArea
-++AXGroup
+++AXGroup AXSubrole=AXApplicationAlert AXDescription='Please enter pet name'
+++AXGroup AXSubrole=AXLandmarkForm
 ++++AXGroup
 ++++++AXStaticText AXValue='Pet name:'
-++++AXTextField AXTitle='Pet name:'
-++AXGroup AXSubrole=AXApplicationAlert AXDescription='Please enter pet name'
+++++AXTextField AXErrorMessageElements=[:2] AXTitle='Pet name:'

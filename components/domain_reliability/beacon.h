@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,11 @@
 #include <string>
 
 #include "base/time/time.h"
+#include "base/values.h"
 #include "components/domain_reliability/domain_reliability_export.h"
+#include "net/base/isolation_info.h"
 #include "net/base/net_error_details.h"
 #include "url/gurl.h"
-
-namespace base {
-class Value;
-}  // namespace base
 
 namespace domain_reliability {
 
@@ -26,6 +24,26 @@ struct DOMAIN_RELIABILITY_EXPORT DomainReliabilityBeacon {
   DomainReliabilityBeacon(const DomainReliabilityBeacon& other);
   ~DomainReliabilityBeacon();
 
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  enum class Outcome {
+    // Default value. This should not be recorded to the histogram.
+    kUnknown = 0,
+    // Successfully uploaded.
+    kUploaded = 1,
+    // Removed for being expired.
+    kExpired = 2,
+    // Evicted to make room for newer beacons.
+    kEvicted = 3,
+    // Deleted for user clearing browsing data.
+    kCleared = 4,
+    // Beacon was deleted upon context shutdown.
+    kContextShutDown = 5,
+
+    // Keep last.
+    kMaxValue = kContextShutDown,
+  };
+
   // Converts the Beacon to JSON format for uploading. Calculates the age
   // relative to an upload time of |upload_time|.
   //
@@ -35,7 +53,7 @@ struct DOMAIN_RELIABILITY_EXPORT DomainReliabilityBeacon {
   // are being uploaded to a same-origin collector.
   // |path_prefixes| are used to include only a known-safe (not PII) prefix of
   // URLs when uploading to a non-same-origin collector.
-  std::unique_ptr<base::Value> ToValue(
+  base::DictValue ToValue(
       base::TimeTicks upload_time,
       base::TimeTicks last_network_change_time,
       const GURL& collector_url,
@@ -44,8 +62,9 @@ struct DOMAIN_RELIABILITY_EXPORT DomainReliabilityBeacon {
   // The URL that the beacon is reporting on, if included.
   // The scheme can be non-secure.
   GURL url;
-  // The resource name that the beacon is reporting on, if included.
-  std::string resource;
+  // The IsolationInfo that must be used when uploading the report.
+  // This field does not appear in the uploaded report.
+  net::IsolationInfo isolation_info;
   // Status string (e.g. "ok", "dns.nxdomain", "http.403").
   std::string status;
   // Granular QUIC error string (e.g. "quic.peer_going_away").
@@ -74,6 +93,9 @@ struct DOMAIN_RELIABILITY_EXPORT DomainReliabilityBeacon {
   int upload_depth;
   // The probability that this request had of being reported ("sample rate").
   double sample_rate;
+
+  // Records the ultimate outcome of this beacon, for metrics.
+  Outcome outcome = Outcome::kUnknown;
 
   // Okay to copy and assign.
 };

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,8 @@
 namespace blink {
 
 CustomCountHistogram::CustomCountHistogram(const char* name,
-                                           base::HistogramBase::Sample min,
-                                           base::HistogramBase::Sample max,
+                                           base::HistogramBase::Sample32 min,
+                                           base::HistogramBase::Sample32 max,
                                            int32_t bucket_count) {
   histogram_ = base::Histogram::FactoryGet(
       name, min, max, bucket_count,
@@ -22,58 +22,18 @@ CustomCountHistogram::CustomCountHistogram(const char* name,
 CustomCountHistogram::CustomCountHistogram(base::HistogramBase* histogram)
     : histogram_(histogram) {}
 
-void CustomCountHistogram::Count(base::HistogramBase::Sample sample) {
+void CustomCountHistogram::Count(base::HistogramBase::Sample32 sample) {
   histogram_->Add(sample);
 }
 
-void CustomCountHistogram::CountMany(base::HistogramBase::Sample sample,
+void CustomCountHistogram::CountMany(base::HistogramBase::Sample32 sample,
                                      int count) {
   histogram_->AddCount(sample, count);
 }
 
 void CustomCountHistogram::CountMicroseconds(base::TimeDelta delta) {
-  Count(base::saturated_cast<base::HistogramBase::Sample>(
+  Count(base::saturated_cast<base::HistogramBase::Sample32>(
       delta.InMicroseconds()));
 }
-
-void CustomCountHistogram::CountMilliseconds(base::TimeDelta delta) {
-  Count(base::saturated_cast<base::HistogramBase::Sample>(
-      delta.InMilliseconds()));
-}
-
-BooleanHistogram::BooleanHistogram(const char* name)
-    : CustomCountHistogram(base::BooleanHistogram::FactoryGet(
-          name,
-          base::HistogramBase::kUmaTargetedHistogramFlag)) {}
-
-EnumerationHistogram::EnumerationHistogram(
-    const char* name,
-    base::HistogramBase::Sample boundary_value)
-    : CustomCountHistogram(base::LinearHistogram::FactoryGet(
-          name,
-          1,
-          boundary_value,
-          boundary_value + 1,
-          base::HistogramBase::kUmaTargetedHistogramFlag)) {}
-
-SparseHistogram::SparseHistogram(const char* name) {
-  histogram_ = base::SparseHistogram::FactoryGet(
-      name, base::HistogramBase::kUmaTargetedHistogramFlag);
-}
-
-void SparseHistogram::Sample(base::HistogramBase::Sample sample) {
-  histogram_->Add(sample);
-}
-
-LinearHistogram::LinearHistogram(const char* name,
-                                 base::HistogramBase::Sample min,
-                                 base::HistogramBase::Sample max,
-                                 int32_t bucket_count)
-    : CustomCountHistogram(base::LinearHistogram::FactoryGet(
-          name,
-          min,
-          max,
-          bucket_count,
-          base::HistogramBase::kUmaTargetedHistogramFlag)) {}
 
 }  // namespace blink

@@ -36,7 +36,10 @@ import time
 from blinkpy.common import message_pool
 from blinkpy.tool import grammar
 from blinkpy.web_tests.controllers import single_test_runner
-from blinkpy.web_tests.models.test_run_results import TestRunResults
+from blinkpy.web_tests.models.test_run_results import (
+    InterruptReason,
+    TestRunResults,
+)
 from blinkpy.web_tests.models import test_failures
 from blinkpy.web_tests.models import test_results
 from blinkpy.web_tests.models.typ_types import ResultType
@@ -47,13 +50,12 @@ _log = logging.getLogger(__name__)
 class TestRunInterruptedException(Exception):
     """Raised when a test run should be stopped immediately."""
 
-    def __init__(self, reason):
-        Exception.__init__(self)
+    def __init__(self, msg: str, reason: InterruptReason):
+        super().__init__(msg)
         self.reason = reason
-        self.msg = reason
 
     def __reduce__(self):
-        return self.__class__, (self.reason, )
+        return self.__class__, (str(self), self.reason)
 
 
 class WebTestRunner(object):
@@ -74,6 +76,8 @@ class WebTestRunner(object):
         self._shards_to_redo = []
 
         self._current_run_results = None
+        self._exit_after_n_failures = 0
+        self._exit_after_n_crashes_or_timeouts = 0
 
     def run_tests(self, expectations, test_inputs, tests_to_skip, num_workers,
                   retry_attempt):
@@ -89,19 +93,29 @@ class WebTestRunner(object):
         self._expectations = expectations
         self._test_inputs = test_inputs
 
+        # dynamically set exit_after_n_failures and exit_after_n_crashes_or_timeouts
+        self._exit_after_n_failures = self._port.max_allowed_failures(
+            len(test_inputs))
+        self._exit_after_n_crashes_or_timeouts = self._port.max_allowed_crash_or_timeouts(
+            len(test_inputs))
+
         test_run_results = TestRunResults(
             self._expectations,
-            len(test_inputs) + len(tests_to_skip))
+            len(test_inputs) + len(tests_to_skip),
+            self._test_result_sink,
+        )
         self._current_run_results = test_run_results
         self._printer.num_tests = len(test_inputs)
         self._printer.num_completed = 0
 
         for test_name in set(tests_to_skip):
-            result = test_results.TestResult(test_name)
+            result = test_results.TestResult(
+                test_name,
+                expected=frozenset([ResultType.Skip]),
+            )
             result.type = ResultType.Skip
             test_run_results.add(
                 result,
-                expected=True,
                 test_is_slow=self._test_is_slow(test_name))
 
         self._printer.write_update('Sharding tests ...')
@@ -139,25 +153,21 @@ class WebTestRunner(object):
 
             if self._shards_to_redo:
                 num_workers -= len(self._shards_to_redo)
-                if num_workers > 0:
-                    with message_pool.get(self, self._worker_factory,
-                                          num_workers,
-                                          self._port.host) as pool:
-                        pool.run(('test_list', shard.name, shard.test_inputs,
-                                  batch_size)
-                                 for shard in self._shards_to_redo)
-                else:
-                    self._mark_interrupted_tests_as_skipped(
-                        self._current_run_results)
+                if num_workers <= 0:
                     raise TestRunInterruptedException(
-                        'All workers have device failures. Exiting.')
+                        'All workers have device failures. Exiting.',
+                        InterruptReason.ALL_WORKERS_FAILED)
+                with message_pool.get(self, self._worker_factory, num_workers,
+                                      self._port.host) as pool:
+                    pool.run(('test_list', shard.name, shard.test_inputs,
+                              batch_size) for shard in self._shards_to_redo)
         except TestRunInterruptedException as error:
-            _log.warning(error.reason)
-            test_run_results.interrupted = True
+            _log.warning('%s', error)
+            test_run_results.interrupt_reason = error.reason
         except KeyboardInterrupt:
             self._printer.flush()
             self._printer.writeln('Interrupted, exiting ...')
-            test_run_results.keyboard_interrupted = True
+            test_run_results.interrupt_reason = InterruptReason.EXTERNAL_SIGNAL
         except Exception as error:
             _log.debug('%s("%s") raised, exiting', error.__class__.__name__,
                        error)
@@ -165,6 +175,8 @@ class WebTestRunner(object):
         finally:
             test_run_results.run_time = time.time() - start_time
 
+        if test_run_results.interrupted:
+            self._mark_interrupted_tests_as_skipped(test_run_results)
         return test_run_results
 
     def _reorder_tests_by_args(self, shards):
@@ -179,7 +191,7 @@ class WebTestRunner(object):
 
     def _worker_factory(self, worker_connection):
         return Worker(worker_connection, self._results_directory,
-                      self._options)
+                      self._options, self._port.child_kwargs())
 
     def _mark_interrupted_tests_as_skipped(self, test_run_results):
         for test_input in self._test_inputs:
@@ -187,30 +199,36 @@ class WebTestRunner(object):
                 result = test_results.TestResult(
                     test_input.test_name,
                     failures=[test_failures.FailureEarlyExit()])
+                if self._expectations:
+                    result.expected = self._expectations.get_expectations(
+                        test_input.test_name).results
                 # FIXME: We probably need to loop here if there are multiple iterations.
                 # FIXME: Also, these results are really neither expected nor unexpected. We probably
                 # need a third type of result.
                 test_run_results.add(
                     result,
-                    expected=False,
                     test_is_slow=self._test_is_slow(test_input.test_name))
 
     def _interrupt_if_at_failure_limits(self, test_run_results):
         def interrupt_if_at_failure_limit(limit, failure_count,
                                           test_run_results, message):
             if limit and failure_count >= limit:
-                message += ' %d tests run.' % (
-                    test_run_results.expected + test_run_results.unexpected)
+                # Skipped tests are not run, so they don't count towards the number
+                # of run tests.
+                num_run = (
+                    test_run_results.expected + test_run_results.unexpected -
+                    len(test_run_results.tests_by_expectation[ResultType.Skip]))
+                message += f' {num_run} tests run.'
                 self._mark_interrupted_tests_as_skipped(test_run_results)
-                raise TestRunInterruptedException(message)
+                raise TestRunInterruptedException(
+                    message, InterruptReason.TOO_MANY_FAILURES)
 
         interrupt_if_at_failure_limit(
-            self._options.exit_after_n_failures,
-            test_run_results.unexpected_failures, test_run_results,
-            'Exiting early after %d failures.' %
+            self._exit_after_n_failures, test_run_results.unexpected_failures,
+            test_run_results, 'Exiting early after %d failures.' %
             test_run_results.unexpected_failures)
         interrupt_if_at_failure_limit(
-            self._options.exit_after_n_crashes_or_timeouts,
+            self._exit_after_n_crashes_or_timeouts,
             test_run_results.unexpected_crashes +
             test_run_results.unexpected_timeouts, test_run_results,
             'Exiting early after %d crashes and %d timeouts.' %
@@ -221,22 +239,21 @@ class WebTestRunner(object):
         if not self._expectations:
             return
 
-        expected = self._expectations.matches_an_expected_result(
-            result.test_name, result.type)
-        expectation_string = ' '.join(
-            self._expectations.get_expectations(result.test_name).results)
-        if self._test_result_sink:
-            self._test_result_sink.sink(expected, result)
-
         if result.device_failed:
-            self._printer.print_finished_test(self._port, result, False,
-                                              expectation_string, 'Aborted')
-            return
+            status_displayed = 'Aborted'
+            # Device failures are always unexpected, so don't update the result
+            # from `TestExpectations`.
+            assert result.expected == {ResultType.Pass}, result.expected
+        else:
+            status_displayed = result.type
+            result.expected = self._expectations.get_expectations(
+                result.test_name).results
 
-        test_run_results.add(result, expected,
-                             self._test_is_slow(result.test_name))
-        self._printer.print_finished_test(self._port, result, expected,
-                                          expectation_string, result.type)
+        expectation_string = ' '.join(result.expected)
+        test_run_results.add(result, self._test_is_slow(result.test_name))
+        self._printer.print_finished_test(self._port, result,
+                                          result.is_expected,
+                                          expectation_string, status_displayed)
         self._interrupt_if_at_failure_limits(test_run_results)
 
     def handle(self, name, source, *args):
@@ -264,7 +281,7 @@ class WebTestRunner(object):
 
 
 class Worker(object):
-    def __init__(self, caller, results_directory, options):
+    def __init__(self, caller, results_directory, options, port_kwargs):
         self._caller = caller
         self._worker_number = caller.worker_number
         self._name = caller.name
@@ -273,6 +290,7 @@ class Worker(object):
         # in the workers (this also prevents race conditions among workers).
         self._options = copy.copy(options)
         self._options.manifest_update = False
+        self._port_kwargs = port_kwargs
 
         # The remaining fields are initialized in start()
         self._host = None
@@ -293,7 +311,8 @@ class Worker(object):
         self._host = self._caller.host
         self._filesystem = self._host.filesystem
         self._port = self._host.port_factory.get(self._options.platform,
-                                                 self._options)
+                                                 self._options,
+                                                 **self._port_kwargs)
         self._driver = self._port.create_driver(self._worker_number)
         self._batch_count = 0
 
@@ -335,6 +354,7 @@ class Worker(object):
 
         result.shard_name = shard_name
         result.worker_name = self._name
+        result.start_time = start
         result.total_run_time = time.time() - start
         result.test_number = self._num_tests
         self._num_tests += 1
@@ -354,8 +374,7 @@ class Worker(object):
             # ensure that the trace is recorded properly.
             tracing_enabled = self._port.get_option(
                 'enable_tracing') is not None or any(
-                    flag.startswith(tracing_command) for tracing_command in
-                    ['--trace-startup', '--trace-shutdown']
+                    flag.startswith('--trace-startup')
                     for flag in self._options.additional_driver_flag)
 
             if tracing_enabled:
@@ -511,7 +530,7 @@ class Sharder(object):
             tests_by_dir.setdefault(directory, [])
             tests_by_dir[directory].append(test_input)
 
-        for directory, test_inputs in tests_by_dir.iteritems():
+        for directory, test_inputs in tests_by_dir.items():
             shard = TestShard(directory, test_inputs)
             if test_inputs[0].requires_lock:
                 locked_shards.append(shard)

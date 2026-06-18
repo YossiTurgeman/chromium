@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,14 +12,17 @@
 #include <memory>
 #include <set>
 
+#include "base/check.h"
+#include "base/containers/span.h"
 #include "base/containers/stack.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
 #include "base/location.h"
-#include "base/macros.h"
+#include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/notreached.h"
 #include "base/pickle.h"
-#include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "storage/browser/file_system/file_system_usage_cache.h"
@@ -36,8 +39,8 @@ void PickleFromFileInfo(const SandboxDirectoryDatabase::FileInfo& info,
   DCHECK(pickle);
   std::string data_path;
   // Round off here to match the behavior of the filesystem on real files.
-  base::Time time =
-      base::Time::FromDoubleT(floor(info.modification_time.ToDoubleT()));
+  base::Time time = base::Time::FromSecondsSinceUnixEpoch(
+      floor(info.modification_time.InSecondsFSinceUnixEpoch()));
   std::string name;
 
   data_path = FilePathToString(info.data_path);
@@ -49,9 +52,8 @@ void PickleFromFileInfo(const SandboxDirectoryDatabase::FileInfo& info,
   pickle->WriteInt64(time.ToInternalValue());
 }
 
-bool FileInfoFromPickle(const base::Pickle& pickle,
+bool FileInfoFromPickle(base::PickleIterator iter,
                         SandboxDirectoryDatabase::FileInfo* info) {
-  base::PickleIterator iter(pickle);
   std::string data_path;
   std::string name;
   int64_t internal_time;
@@ -76,8 +78,6 @@ const char kSandboxDirectoryLastIntegerKey[] = "LAST_INTEGER";
 const int64_t kSandboxDirectoryMinimumReportIntervalHours = 1;
 const char kSandboxDirectoryInitStatusHistogramLabel[] =
     "FileSystem.DirectoryDatabaseInit";
-const char kSandboxDirectoryDatabaseRepairHistogramLabel[] =
-    "FileSystem.DirectoryDatabaseRepair";
 
 // These values are recorded in UMA. Changing existing values will invalidate
 // results for older Chrome releases. Only add new values.
@@ -87,14 +87,6 @@ enum class SandboxDirectoryInitStatus {
   INIT_STATUS_IO_ERROR,
   INIT_STATUS_UNKNOWN_ERROR,
   INIT_STATUS_MAX
-};
-
-// These values are recorded in UMA. Changing existing values will invalidate
-// results for older Chrome releases. Only add new values.
-enum class SandboxDirectoryRepairResult {
-  DB_REPAIR_SUCCEEDED = 0,
-  DB_REPAIR_FAILED,
-  DB_REPAIR_MAX
 };
 
 std::string GetChildLookupKey(SandboxDirectoryDatabase::FileId parent_id,
@@ -158,8 +150,8 @@ class DatabaseCheckHelper {
   bool ScanDirectory();
   bool ScanHierarchy();
 
-  SandboxDirectoryDatabase* dir_db_;
-  leveldb::DB* db_;
+  raw_ptr<SandboxDirectoryDatabase> dir_db_;
+  raw_ptr<leveldb::DB> db_;
   base::FilePath path_;
 
   std::set<base::FilePath> files_in_db_;
@@ -230,9 +222,10 @@ bool DatabaseCheckHelper::ScanDatabase() {
       // value: "<pickled FileInfo>"
       FileInfo file_info;
       if (!FileInfoFromPickle(
-              base::Pickle(itr->value().data(), itr->value().size()),
-              &file_info))
+              base::PickleIterator::WithData(base::as_byte_span(itr->value())),
+              &file_info)) {
         return false;
+      }
 
       FileId file_id = -1;
       if (!base::StringToInt64(key, &file_id) || file_id < 0)
@@ -305,8 +298,7 @@ bool DatabaseCheckHelper::ScanDirectory() {
       if (!path_.AppendRelativePath(absolute_file_path, &relative_file_path))
         return false;
 
-      if (std::find(kExcludes, kExcludes + base::size(kExcludes),
-                    relative_file_path) != kExcludes + base::size(kExcludes))
+      if (std::ranges::contains(kExcludes, relative_file_path))
         continue;
 
       if (find_info.IsDirectory()) {
@@ -357,7 +349,6 @@ bool DatabaseCheckHelper::ScanHierarchy() {
         return false;
 
       // Check if the child knows the parent as its parent.
-      FileInfo file_info;
       if (!dir_db_->GetFileInfo(id, &file_info))
         return false;
       if (file_info.parent_id != dir_id)
@@ -490,7 +481,8 @@ bool SandboxDirectoryDatabase::GetFileInfo(FileId file_id, FileInfo* info) {
       db_->Get(leveldb::ReadOptions(), file_key, &file_data_string);
   if (status.ok()) {
     bool success = FileInfoFromPickle(
-        base::Pickle(file_data_string.data(), file_data_string.length()), info);
+        base::PickleIterator::WithData(base::as_byte_span(file_data_string)),
+        info);
     if (!success)
       return false;
     if (!VerifyDataPath(info->data_path)) {
@@ -737,17 +729,10 @@ bool SandboxDirectoryDatabase::Init(RecoveryOption recovery_option) {
       LOG(WARNING) << "Corrupted SandboxDirectoryDatabase detected."
                    << " Attempting to repair.";
       if (RepairDatabase(path)) {
-        UMA_HISTOGRAM_ENUMERATION(
-            kSandboxDirectoryDatabaseRepairHistogramLabel,
-            SandboxDirectoryRepairResult::DB_REPAIR_SUCCEEDED,
-            SandboxDirectoryRepairResult::DB_REPAIR_MAX);
         return true;
       }
-      UMA_HISTOGRAM_ENUMERATION(kSandboxDirectoryDatabaseRepairHistogramLabel,
-                                SandboxDirectoryRepairResult::DB_REPAIR_FAILED,
-                                SandboxDirectoryRepairResult::DB_REPAIR_MAX);
       LOG(WARNING) << "Failed to repair SandboxDirectoryDatabase.";
-      FALLTHROUGH;
+      [[fallthrough]];
     case DELETE_ON_CORRUPTION:
       LOG(WARNING) << "Clearing SandboxDirectoryDatabase.";
       if (!leveldb_chrome::DeleteDB(filesystem_data_directory_, options).ok())
@@ -758,7 +743,6 @@ bool SandboxDirectoryDatabase::Init(RecoveryOption recovery_option) {
   }
 
   NOTREACHED();
-  return false;
 }
 
 bool SandboxDirectoryDatabase::RepairDatabase(const std::string& db_path) {
@@ -799,7 +783,7 @@ bool SandboxDirectoryDatabase::IsFileSystemConsistent() {
 void SandboxDirectoryDatabase::ReportInitStatus(const leveldb::Status& status) {
   base::Time now = base::Time::Now();
   const base::TimeDelta minimum_interval =
-      base::TimeDelta::FromHours(kSandboxDirectoryMinimumReportIntervalHours);
+      base::Hours(kSandboxDirectoryMinimumReportIntervalHours);
   if (last_reported_time_ + minimum_interval >= now)
     return;
   last_reported_time_ = now;
@@ -919,7 +903,6 @@ bool SandboxDirectoryDatabase::RemoveFileInfoHelper(
     if (!ListChildren(file_id, &children))
       return false;
     if (children.size()) {
-      LOG(ERROR) << "Can't remove a directory with children.";
       return false;
     }
   }

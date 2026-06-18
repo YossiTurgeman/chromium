@@ -1,6 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env vpython3
 #
-# Copyright (c) 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -46,7 +46,7 @@ _CHROME_PACKAGE_REGEX = re.compile('.*chrom.*')
 _TOMBSTONE_REGEX = re.compile('tombstone.*')
 
 
-class _DEFAULT_TIMEOUTS(object):
+class _DEFAULT_TIMEOUTS:
   # L can take a while to reboot after a wipe.
   LOLLIPOP = 600
   PRE_LOLLIPOP = 180
@@ -54,7 +54,7 @@ class _DEFAULT_TIMEOUTS(object):
   HELP_TEXT = '{}s on L, {}s on pre-L'.format(LOLLIPOP, PRE_LOLLIPOP)
 
 
-class _PHASES(object):
+class _PHASES:
   WIPE = 'wipe'
   PROPERTIES = 'properties'
   FINISH = 'finish'
@@ -67,7 +67,7 @@ def ProvisionDevices(args):
               if args.denylist_file else None)
   devices = [
       d for d in device_utils.DeviceUtils.HealthyDevices(denylist)
-      if not args.emulators or d.adb.is_emulator
+      if not args.emulators or d.is_emulator
   ]
   if args.device:
     devices = [d for d in devices if d == args.device]
@@ -394,14 +394,13 @@ def FinishProvisioning(device, options):
         get_date_command, as_root=True, single_line=True).replace('"', '')
     device_time = datetime.datetime.strptime(device_time, "%Y%m%d.%H%M%S")
     correct_time = datetime.datetime.strptime(strgmtime, date_format)
-    tdelta = (correct_time - device_time).seconds
+    tdelta = abs(correct_time - device_time).seconds
     if tdelta <= 1:
       logging.info('Date/time successfully set on %s', device)
       return True
-    else:
-      logging.error('Date mismatch. Device: %s Correct: %s',
-                    device_time.isoformat(), correct_time.isoformat())
-      return False
+    logging.error('Date mismatch. Device: %s Correct: %s',
+                  device_time.isoformat(), correct_time.isoformat())
+    return False
 
   # Sometimes the date is not set correctly on the devices. Retry on failure.
   if device.IsUserBuild():
@@ -501,11 +500,6 @@ def main():
                       ' (the default is to provision all devices attached)')
   parser.add_argument('--adb-path',
                       help='Absolute path to the adb binary to use.')
-  # TODO(crbug.com/1097306): Remove this once callers have all switched to
-  # --denylist-file.
-  parser.add_argument('--blacklist-file',
-                      dest='denylist_file',
-                      help=argparse.SUPPRESS)
   parser.add_argument('--denylist-file', help='Device denylist JSON file.')
   parser.add_argument('--phase', action='append', choices=_PHASES.ALL,
                       dest='phases',
@@ -544,11 +538,6 @@ def main():
                       help='Log more information.')
   parser.add_argument('--max-battery-temp', type=int, metavar='NUM',
                       help='Wait for the battery to have this temp or lower.')
-  # TODO(crbug.com/1097306): Remove this once callers have all switched to
-  # --output-device-denylist.
-  parser.add_argument('--output-device-blacklist',
-                      dest='output_device_denylist',
-                      help=argparse.SUPPRESS)
   parser.add_argument('--output-device-denylist',
                       help='Json file to output the device denylist.')
   parser.add_argument('--chrome-specific-wipe', action='store_true',

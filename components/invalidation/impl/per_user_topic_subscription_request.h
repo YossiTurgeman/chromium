@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,25 +6,20 @@
 #define COMPONENTS_INVALIDATION_IMPL_PER_USER_TOPIC_SUBSCRIPTION_REQUEST_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
-#include "base/callback.h"
-#include "base/feature_list.h"
+#include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/time/time.h"
 #include "components/invalidation/impl/status.h"
 #include "components/invalidation/public/invalidation_util.h"
 #include "net/http/http_request_headers.h"
-#include "services/data_decoder/public/cpp/data_decoder.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
+#include "url/gurl.h"
 
-namespace syncer {
-
-constexpr base::Feature kInvalidationsSkipUnsubscription{
-    "InvalidationsSkipUnsubscription", base::FEATURE_DISABLED_BY_DEFAULT};
+namespace invalidation {
 
 // A single request to subscribe to a topic on the per-user-topic service.
 class PerUserTopicSubscriptionRequest {
@@ -34,13 +29,14 @@ class PerUserTopicSubscriptionRequest {
   using CompletedCallback =
       base::OnceCallback<void(const Status& status,
                               const std::string& topic_name)>;
-  enum RequestType { SUBSCRIBE, UNSUBSCRIBE };
+  enum class RequestType { kSubscribe, kUnsubscribe };
 
   // Builds authenticated PerUserTopicSubscriptionRequests.
   class Builder {
    public:
     Builder();
-    Builder(Builder&&);
+    Builder(const Builder& other) = delete;
+    Builder& operator=(const Builder& other) = delete;
     ~Builder();
 
     // Builds a Request object in order to perform the subscription.
@@ -74,10 +70,12 @@ class PerUserTopicSubscriptionRequest {
     std::string auth_header_;
     RequestType type_;
     bool topic_is_public_ = false;
-
-    DISALLOW_COPY_AND_ASSIGN(Builder);
   };
 
+  PerUserTopicSubscriptionRequest(
+      const PerUserTopicSubscriptionRequest& other) = delete;
+  PerUserTopicSubscriptionRequest& operator=(
+      const PerUserTopicSubscriptionRequest& other) = delete;
   ~PerUserTopicSubscriptionRequest();
 
   // Starts an async request. The callback is invoked when the request succeeds
@@ -94,11 +92,10 @@ class PerUserTopicSubscriptionRequest {
   // which potentially lead to destroying |this|. Hence, |this| object must
   // assume that it is dead after invoking any of these methods and must not
   // run any more code.
-  void OnURLFetchComplete(std::unique_ptr<std::string> response_body);
+  void OnURLFetchComplete(std::optional<std::string> response_body);
   void OnURLFetchCompleteInternal(int net_error,
                                   int response_code,
-                                  std::unique_ptr<std::string> response_body);
-  void OnJsonParse(data_decoder::DataDecoder::ValueOrError result);
+                                  std::optional<std::string> response_body);
 
   // Invokes |request_completed_callback_| with (|status|, |topic_name|). Per
   // the contract of this class, it is allowed for clients to delete this
@@ -117,7 +114,7 @@ class PerUserTopicSubscriptionRequest {
   // Note: This callback should only be invoked from
   // RunCompletedCallbackAndMaybeDie(), as invoking it has the potential to
   // destroy this object per this class's contract.
-  // TODO(crbug.com/1054759): find a way to avoid this fragile logic.
+  // TODO(crbug.com/40675891): find a way to avoid this fragile logic.
   CompletedCallback request_completed_callback_;
 
   // Full URL. Used in tests only.
@@ -126,10 +123,8 @@ class PerUserTopicSubscriptionRequest {
   std::string topic_;
 
   base::WeakPtrFactory<PerUserTopicSubscriptionRequest> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(PerUserTopicSubscriptionRequest);
 };
 
-}  // namespace syncer
+}  // namespace invalidation
 
 #endif  // COMPONENTS_INVALIDATION_IMPL_PER_USER_TOPIC_SUBSCRIPTION_REQUEST_H_

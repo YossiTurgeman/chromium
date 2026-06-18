@@ -1,19 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.webapps;
 
-import androidx.annotation.NonNull;
+import android.app.Activity;
 
-import org.chromium.base.StrictModeContext;
-import org.chromium.chrome.browser.ActivityTabProvider;
-import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.browserservices.BrowserServicesIntentDataProvider;
-import org.chromium.chrome.browser.browserservices.ui.SharedActivityCoordinator;
-import org.chromium.chrome.browser.browserservices.ui.controller.CurrentPageVerifier;
-import org.chromium.chrome.browser.browserservices.ui.splashscreen.webapps.WebappSplashController;
-import org.chromium.chrome.browser.dependency_injection.ActivityScope;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider;
+import org.chromium.chrome.browser.browserservices.intents.WebappInfo;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
 import org.chromium.chrome.browser.lifecycle.InflationObserver;
 import org.chromium.chrome.browser.lifecycle.PauseResumeWithNativeObserver;
@@ -21,81 +16,55 @@ import org.chromium.chrome.browser.lifecycle.StartStopWithNativeObserver;
 import org.chromium.chrome.browser.metrics.LaunchMetrics;
 import org.chromium.chrome.browser.util.AndroidTaskUtils;
 
-import javax.inject.Inject;
-
 /**
- * Coordinator shared between webapp activity and WebAPK activity components.
- * Add methods here if other components need to communicate with either of these components.
+ * Coordinator shared between webapp activity and WebAPK activity components. Add methods here if
+ * other components need to communicate with either of these components.
  */
-@ActivityScope
+@NullMarked
 public class WebappActivityCoordinator
         implements InflationObserver, PauseResumeWithNativeObserver, StartStopWithNativeObserver {
     private final BrowserServicesIntentDataProvider mIntentDataProvider;
     private final WebappInfo mWebappInfo;
-    private final ChromeActivity<?> mActivity;
-    private final WebappSplashController mSplashController;
+    private final Activity mActivity;
     private final WebappDeferredStartupWithStorageHandler mDeferredStartupWithStorageHandler;
 
-    // Whether the current page is within the webapp's scope.
-    private boolean mInScope = true;
-
-    @Inject
-    public WebappActivityCoordinator(SharedActivityCoordinator sharedActivityCoordinator,
-            ChromeActivity<?> activity, BrowserServicesIntentDataProvider intentDataProvider,
-            ActivityTabProvider activityTabProvider, CurrentPageVerifier currentPageVerifier,
-            WebappSplashController splashController,
-            WebappDeferredStartupWithStorageHandler deferredStartupWithStorageHandler,
-            WebappActionsNotificationManager actionsNotificationManager,
+    public WebappActivityCoordinator(
+            BrowserServicesIntentDataProvider intentDataProvider,
+            Activity activity,
+            WebappDeferredStartupWithStorageHandler webappDeferredStartupWithStorageHandler,
             ActivityLifecycleDispatcher lifecycleDispatcher) {
-        // We don't need to do anything with |sharedActivityCoordinator| or
-        // |actionsNotificationManager|. We just need to resolve it so that it starts working.
-
         mIntentDataProvider = intentDataProvider;
         mWebappInfo = WebappInfo.create(mIntentDataProvider);
         mActivity = activity;
-        mSplashController = splashController;
-        mDeferredStartupWithStorageHandler = deferredStartupWithStorageHandler;
+        mDeferredStartupWithStorageHandler = webappDeferredStartupWithStorageHandler;
 
-        // WebappActiveTabUmaTracker sets itself as an observer of |activityTabProvider|.
-        new WebappActiveTabUmaTracker(activityTabProvider, intentDataProvider, currentPageVerifier);
+        mDeferredStartupWithStorageHandler.addTask(
+                (storage, didCreateStorage) -> {
+                    if (lifecycleDispatcher.isActivityFinishingOrDestroyed()) return;
 
-        mDeferredStartupWithStorageHandler.addTask((storage, didCreateStorage) -> {
-            if (activity.isActivityFinishingOrDestroyed()) return;
-
-            if (storage != null) {
-                updateStorage(storage);
-            }
-        });
+                    if (storage != null) {
+                        updateStorage(storage);
+                    }
+                });
 
         lifecycleDispatcher.register(this);
 
         // Initialize the WebappRegistry and warm up the shared preferences for this web app. No-ops
         // if the registry and this web app are already initialized. Must override Strict Mode to
         // avoid a violation.
-        try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
-            WebappRegistry.getInstance();
-            WebappRegistry.warmUpSharedPrefsForId(mWebappInfo.id());
-        }
+        WebappRegistry.getInstance();
+        WebappRegistry.warmUpSharedPrefsForId(mWebappInfo.id());
+
+        LaunchMetrics.recordHomeScreenLaunchIntoStandaloneActivity(mWebappInfo);
     }
 
-    /**
-     * Invoked to add deferred startup tasks to queue.
-     */
+    /** Invoked to add deferred startup tasks to queue. */
     public void initDeferredStartupForActivity() {
         mDeferredStartupWithStorageHandler.initDeferredStartupForActivity();
     }
 
-    /**
-     * Called once the Activity's main layout is inflated and added to the content view.
-     */
-    public void onInitialLayoutInflationComplete() {
-        mSplashController.onInitialLayoutInflationComplete();
-    }
-
     @Override
-    public void onPreInflationStartup() {
-        LaunchMetrics.recordHomeScreenLaunchIntoStandaloneActivity(mWebappInfo);
-    }
+    public void onPreInflationStartup() {}
 
     @Override
     public void onPostInflationStartup() {}
@@ -122,7 +91,7 @@ public class WebappActivityCoordinator
         }
     }
 
-    private void updateStorage(@NonNull WebappDataStorage storage) {
+    private void updateStorage(WebappDataStorage storage) {
         // The information in the WebappDataStorage may have been purged by the
         // user clearing their history or not launching the web app recently.
         // Restore the data if necessary.
@@ -138,5 +107,12 @@ public class WebappActivityCoordinator
             // WebappDataStorage objects for legacy webapps which haven't been used in a while.
             storage.updateLastUsedTime();
         }
+    }
+
+    /**
+     * @return the {@link WebappInfo} for the WebappActivity.
+     */
+    public WebappInfo getWebappInfo() {
+        return mWebappInfo;
     }
 }

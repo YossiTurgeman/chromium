@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -7,11 +7,12 @@
 #include "rlz/win/lib/process_info.h"
 
 #include <windows.h>
+
 #include <stddef.h>
 
-#include "base/macros.h"
+#include <string>
+
 #include "base/process/process_info.h"
-#include "base/strings/string16.h"
 #include "base/win/scoped_handle.h"
 #include "base/win/win_util.h"
 #include "base/win/windows_version.h"
@@ -48,7 +49,7 @@ HRESULT GetElevationType(PTOKEN_ELEVATION_TYPE elevation) {
 namespace rlz_lib {
 
 bool ProcessInfo::IsRunningAsSystem() {
-  static base::string16 user_sid;
+  static std::wstring user_sid;
   if (user_sid.empty()) {
     if (!base::win::GetUserSidString(&user_sid))
       return false;

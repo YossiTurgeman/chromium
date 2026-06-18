@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,38 +9,56 @@
 
 #include <limits>
 #include <map>
+#include <memory>
+#include <set>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/command_line.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/functional/bind.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/synchronization/lock.h"
+#include "base/time/time.h"
+#include "base/trace_event/trace_event.h"
+#include "build/build_config.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/chrome_isolated_world_ids.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/open_search_description_document_handler.mojom.h"
-#include "chrome/common/render_messages.h"
+#include "chrome/common/webui_url_constants.h"
+#include "chrome/renderer/actor/journal.h"
+#include "chrome/renderer/actor/page_stability_monitor_delegate.h"
+#include "chrome/renderer/actor/tool_executor.h"
+#include "chrome/renderer/chrome_content_settings_agent_delegate.h"
 #include "chrome/renderer/media/media_feeds.h"
-#include "chrome/renderer/web_apps.h"
+#include "chrome/renderer/process_state.h"
 #include "components/crash/core/common/crash_key.h"
+#include "components/guest_view/buildflags/buildflags.h"
+#include "components/guest_view/renderer/slim_web_view/slim_web_view_bindings.h"
+#include "components/lens/lens_metadata.mojom.h"
+#include "components/no_state_prefetch/renderer/no_state_prefetch_helper.h"
+#include "components/no_state_prefetch/renderer/no_state_prefetch_utils.h"
 #include "components/offline_pages/buildflags/buildflags.h"
-#include "components/prerender/renderer/prerender_helper.h"
+#include "components/optimization_guide/content/renderer/page_text_agent.h"
+#include "components/page_content_annotations/content/renderer/page_stability_monitor.h"
 #include "components/translate/content/renderer/translate_agent.h"
 #include "components/translate/core/common/translate_util.h"
 #include "components/web_cache/renderer/web_cache_impl.h"
 #include "content/public/common/bindings_policy.h"
+#include "content/public/common/buildflags.h"
+#include "content/public/common/content_features.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/renderer/render_frame.h"
+#include "content/public/renderer/render_frame_visitor.h"
 #include "content/public/renderer/render_thread.h"
-#include "content/public/renderer/render_view.h"
 #include "content/public/renderer/window_features_converter.h"
-#include "extensions/common/constants.h"
 #include "printing/buildflags/buildflags.h"
 #include "services/service_manager/public/cpp/binder_registry.h"
 #include "skia/ext/image_operations.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/web_url_request.h"
 #include "third_party/blink/public/web/web_console_message.h"
 #include "third_party/blink/public/web/web_document.h"
@@ -48,25 +66,34 @@
 #include "third_party/blink/public/web/web_element.h"
 #include "third_party/blink/public/web/web_frame_content_dumper.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+#include "third_party/blink/public/web/web_local_frame_client.h"
 #include "third_party/blink/public/web/web_node.h"
 #include "third_party/blink/public/web/web_security_policy.h"
 #include "third_party/blink/public/web/web_view.h"
+#include "third_party/libwebp/src/src/webp/decode.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/gfx/codec/jpeg_codec.h"
 #include "ui/gfx/codec/png_codec.h"
+#include "ui/gfx/codec/webp_codec.h"
 #include "ui/gfx/geometry/size_f.h"
 #include "url/gurl.h"
 
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/renderer/accessibility/read_anything/read_anything_app_controller.h"
 #include "chrome/renderer/searchbox/searchbox_extension.h"
-#endif  // !defined(OS_ANDROID)
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
-#include "chrome/renderer/safe_browsing/phishing_classifier_delegate.h"
+#include "components/safe_browsing/content/renderer/phishing_classifier/phishing_classifier_delegate.h"
+#include "components/safe_browsing/content/renderer/phishing_classifier/phishing_image_embedder_delegate.h"
 #endif
 
 #if BUILDFLAG(ENABLE_OFFLINE_PAGES)
 #include "chrome/common/mhtml_page_notifier.mojom.h"
+#endif
+
+#if BUILDFLAG(ENABLE_PLUGINS)
+#include "chrome/renderer/plugins/chrome_plugin_placeholder.h"
 #endif
 
 using blink::WebDocumentLoader;
@@ -81,13 +108,10 @@ using content::RenderFrame;
 // Any text beyond this point will be clipped.
 static const size_t kMaxIndexChars = 65535;
 
-// Constants for UMA statistic collection.
-static const char kTranslateCaptureText[] = "Translate.CaptureText";
 
 // For a page that auto-refreshes, we still show the bubble, if
 // the refresh delay is less than this value (in seconds).
-static constexpr base::TimeDelta kLocationChangeInterval =
-    base::TimeDelta::FromSeconds(10);
+static constexpr base::TimeDelta kLocationChangeInterval = base::Seconds(10);
 
 // For the context menu, we want to keep transparency as is instead of
 // replacing transparent pixels with black ones
@@ -95,17 +119,18 @@ static const bool kDiscardTransparencyForContextMenu = false;
 
 namespace {
 
-const char kGifExtension[] = ".gif";
-const char kPngExtension[] = ".png";
-const char kJpgExtension[] = ".jpg";
+const char kImageGif[] = "image/gif";
+const char kImageJpeg[] = "image/jpeg";
+const char kImagePng[] = "image/png";
+const char kImageWebp[] = "image/webp";
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 base::Lock& GetFrameHeaderMapLock() {
   static base::NoDestructor<base::Lock> s;
   return *s;
 }
 
-using FrameHeaderMap = std::map<int, std::string>;
+using FrameHeaderMap = std::map<blink::LocalFrameToken, std::string>;
 
 FrameHeaderMap& GetFrameHeaderMap() {
   GetFrameHeaderMapLock().AssertAcquired();
@@ -114,6 +139,52 @@ FrameHeaderMap& GetFrameHeaderMap() {
 }
 #endif
 
+// Renderers can handle multiple pages, especially in low-memory conditions.
+// Record crash keys for a few origins, in the hope of finding more culprit
+// origins for OOM crashes. Keys are recorded here and not via
+// ChromeContentClient::SetActiveURL() because that method is only invoked in
+// response to IPC messages and most OOMs do not occur in response to an IPC.
+// https://crbug.com/40830140
+void UpdateLoadedOriginCrashKeys() {
+  // Capture the origin for each RenderFrame.
+  struct Visitor : public content::RenderFrameVisitor {
+    bool Visit(RenderFrame* render_frame) override {
+      if (render_frame) {
+        WebLocalFrame* web_frame = render_frame->GetWebFrame();
+        if (web_frame) {
+          frame_count_++;
+          origins_.insert(web_frame->GetSecurityOrigin().ToString().Utf8());
+        }
+      }
+      return true;  // Keep going.
+    }
+    int frame_count_ = 0;
+    std::set<std::string> origins_;  // Use set to collapse duplicate origins.
+  } visitor;
+  RenderFrame::ForEach(&visitor);
+
+  static crash_reporter::CrashKeyString<8> frame_count("web-frame-count");
+  frame_count.Set(base::NumberToString(visitor.frame_count_));
+
+  // Record 3 recently-loaded origins in crash keys (which 3 is arbitrary).
+  using ArrayItemKey = crash_reporter::CrashKeyString<64>;
+  static ArrayItemKey crash_keys[] = {
+      {"loaded-origin-0", ArrayItemKey::Tag::kArray},
+      {"loaded-origin-1", ArrayItemKey::Tag::kArray},
+      {"loaded-origin-2", ArrayItemKey::Tag::kArray},
+  };
+  for (auto& crash_key : crash_keys) {
+    if (!visitor.origins_.empty()) {
+      auto origin_it = visitor.origins_.begin();
+      crash_key.Set(*origin_it);
+      visitor.origins_.erase(origin_it);
+    } else {
+      // If there are fewer than 3 origins, clear the remaining keys.
+      crash_key.Clear();
+    }
+  }
+}
+
 }  // namespace
 
 ChromeRenderFrameObserver::ChromeRenderFrameObserver(
@@ -121,9 +192,11 @@ ChromeRenderFrameObserver::ChromeRenderFrameObserver(
     web_cache::WebCacheImpl* web_cache_impl)
     : content::RenderFrameObserver(render_frame),
       translate_agent_(nullptr),
+      page_text_agent_(new optimization_guide::PageTextAgent(render_frame)),
+      actor_journal_(std::make_unique<actor::Journal>()),
       web_cache_impl_(web_cache_impl) {
-  render_frame->GetAssociatedInterfaceRegistry()->AddInterface(
-      base::BindRepeating(
+  render_frame->GetAssociatedInterfaceRegistry()
+      ->AddInterface<chrome::mojom::ChromeRenderFrame>(base::BindRepeating(
           &ChromeRenderFrameObserver::OnRenderFrameObserverRequest,
           base::Unretained(this)));
 
@@ -132,30 +205,28 @@ ChromeRenderFrameObserver::ChromeRenderFrameObserver(
     return;
 
 #if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
-  const base::CommandLine& command_line =
-      *base::CommandLine::ForCurrentProcess();
-  if (!command_line.HasSwitch(switches::kDisableClientSidePhishingDetection))
-    SetClientSidePhishingDetection();
+  SetClientSidePhishingDetection();
 #endif
-  if (!translate::IsSubFrameTranslationEnabled()) {
-    translate_agent_ =
-        new translate::TranslateAgent(render_frame, ISOLATED_WORLD_ID_TRANSLATE,
-                                      extensions::kExtensionScheme);
+
+  bool skip_translate = base::FeatureList::IsEnabled(features::kInitialWebUI) &&
+                        features::kInitialWebUIWithoutTranslate.Get() &&
+                        base::CommandLine::ForCurrentProcess()->HasSwitch(
+                            switches::kTopChromeWebUI);
+
+  if (!skip_translate) {
+    translate_agent_ = new translate::TranslateAgent(
+        render_frame, ISOLATED_WORLD_ID_TRANSLATE);
   }
 }
 
-ChromeRenderFrameObserver::~ChromeRenderFrameObserver() {
-#if defined(OS_ANDROID)
-  base::AutoLock auto_lock(GetFrameHeaderMapLock());
-  GetFrameHeaderMap().erase(routing_id());
-#endif
-}
+ChromeRenderFrameObserver::~ChromeRenderFrameObserver() = default;
 
-#if defined(OS_ANDROID)
-std::string ChromeRenderFrameObserver::GetCCTClientHeader(int render_frame_id) {
+#if BUILDFLAG(IS_ANDROID)
+std::string ChromeRenderFrameObserver::GetCCTClientHeader(
+    const blink::LocalFrameToken& frame_token) {
   base::AutoLock auto_lock(GetFrameHeaderMapLock());
   auto frame_map = GetFrameHeaderMap();
-  auto iter = frame_map.find(render_frame_id);
+  auto iter = frame_map.find(frame_token);
   return iter == frame_map.end() ? std::string() : iter->second;
 }
 #endif
@@ -179,26 +250,42 @@ void ChromeRenderFrameObserver::ReadyToCommitNavigation(
   if (render_frame()->IsMainFrame() && web_cache_impl_)
     web_cache_impl_->ExecutePendingClearCache();
 
-  // Let translate_agent do any preparatory work for loading a URL.
-  if (!translate_agent_)
-    return;
+  // Let translate_agent do any preparatory work before the new document loads.
+  if (translate_agent_) {
+    translate_agent_->PrepareForNewDocument();
+  }
+}
 
-  translate_agent_->PrepareForUrl(
-      render_frame()->GetWebFrame()->GetDocument().Url());
+void ChromeRenderFrameObserver::DidSetPageLifecycleState(
+    blink::BFCacheStateChange bfcache_change) {
+  if (bfcache_change == blink::BFCacheStateChange::kRestoredFromBFCache &&
+      translate_agent_) {
+    translate_agent_->RenewPageRegistration();
+  }
+  if (bfcache_change == blink::BFCacheStateChange::kStoredToBFCache) {
+    // Reset actor state if entering the BFCache
+    page_stability_monitor_.reset();
+    tool_executor_.reset();
+
+    // Flush any remaining log entries which may have been added in the
+    // destructors above. Don't reset the actor journal since it is only created
+    // from the constructor.
+    actor_journal_->SendLogBuffer();
+  }
 }
 
 void ChromeRenderFrameObserver::DidFinishLoad() {
   WebLocalFrame* frame = render_frame()->GetWebFrame();
   // Don't do anything for subframes.
-  if (frame->Parent())
+  if (frame->Parent() || frame->IsInFencedFrameTree())
     return;
 
   GURL osdd_url = frame->GetDocument().OpenSearchDescriptionURL();
   if (!osdd_url.is_empty()) {
-    mojo::AssociatedRemote<chrome::mojom::OpenSearchDescriptionDocumentHandler>
+    mojo::Remote<chrome::mojom::OpenSearchDescriptionDocumentHandler>
         osdd_handler;
-    render_frame()->GetRemoteAssociatedInterfaces()->GetInterface(
-        &osdd_handler);
+    render_frame()->GetBrowserInterfaceBroker().GetInterface(
+        osdd_handler.BindNewPipeAndPassReceiver());
     osdd_handler->PageHasOpenSearchDescriptionDocument(
         frame->GetDocument().Url(), osdd_url);
   }
@@ -234,6 +321,9 @@ void ChromeRenderFrameObserver::DidCreateNewDocument() {
 
 void ChromeRenderFrameObserver::DidCommitProvisionalLoad(
     ui::PageTransition transition) {
+  // Update crash keys on any frame transition, not just the main frame.
+  UpdateLoadedOriginCrashKeys();
+
   WebLocalFrame* frame = render_frame()->GetWebFrame();
 
   // Don't do anything for subframes.
@@ -241,12 +331,11 @@ void ChromeRenderFrameObserver::DidCommitProvisionalLoad(
     return;
 
   static crash_reporter::CrashKeyString<8> view_count_key("view-count");
-  view_count_key.Set(
-      base::NumberToString(content::RenderView::GetRenderViewCount()));
+  view_count_key.Set(base::NumberToString(blink::WebView::GetWebViewCount()));
 
-#if !defined(OS_ANDROID)
-  if (render_frame()->GetEnabledBindings() &
-      content::kWebUIBindingsPolicyMask) {
+#if !BUILDFLAG(IS_ANDROID)
+  if (render_frame()->GetEnabledBindings().HasAny(
+          content::kWebUIBindingsPolicySet)) {
     for (const auto& script : webui_javascript_)
       render_frame()->ExecuteJavaScript(script);
     webui_javascript_.clear();
@@ -255,45 +344,51 @@ void ChromeRenderFrameObserver::DidCommitProvisionalLoad(
 }
 
 void ChromeRenderFrameObserver::DidClearWindowObject() {
-#if !defined(OS_ANDROID)
-  const base::CommandLine& command_line =
-      *base::CommandLine::ForCurrentProcess();
-  if (command_line.HasSwitch(switches::kInstantProcess))
+#if !BUILDFLAG(IS_ANDROID)
+  if (process_state::IsInstantProcess()) {
     SearchBoxExtension::Install(render_frame()->GetWebFrame());
-#endif  // !defined(OS_ANDROID)
+  }
+
+  // Install ReadAnythingAppController on render frames with the Read Anything
+  // url, which is chrome-untrusted. ReadAnythingAppController installs v8
+  // bindings in the chrome.readingMode namespace which are consumed by
+  // read_anything/app.ts, the resource of the Read Anything WebUI.
+  if (render_frame()->GetWebFrame()->GetDocument().Url() ==
+      chrome::kChromeUIUntrustedReadAnythingSidePanelURL) {
+    ReadAnythingAppController::Install(render_frame());
+  }
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_GUEST_VIEW) && !BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  guest_view::SlimWebViewBindings::MaybeInstall(*render_frame());
+#endif  // BUILDFLAG(ENABLE_GUEST_VIEW) && !BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 }
 
 void ChromeRenderFrameObserver::DidMeaningfulLayout(
     blink::WebMeaningfulLayout layout_type) {
-  // Don't do any work for subframes.
-  if (!render_frame()->IsMainFrame())
-    return;
-
-  switch (layout_type) {
-    case blink::WebMeaningfulLayout::kFinishedParsing:
-      CapturePageText(PRELIMINARY_CAPTURE);
-      break;
-    case blink::WebMeaningfulLayout::kFinishedLoading:
-      CapturePageText(FINAL_CAPTURE);
-      break;
-    default:
-      break;
-  }
+  CapturePageText(layout_type);
 }
 
 void ChromeRenderFrameObserver::OnDestruct() {
   delete this;
 }
 
+void ChromeRenderFrameObserver::WillDetach(blink::DetachReason detach_reason) {
+#if BUILDFLAG(IS_ANDROID)
+  base::AutoLock auto_lock(GetFrameHeaderMapLock());
+  GetFrameHeaderMap().erase(
+      render_frame()->GetWebFrame()->GetLocalFrameToken());
+#endif
+}
+
 void ChromeRenderFrameObserver::SetWindowFeatures(
     blink::mojom::WindowFeaturesPtr window_features) {
-  render_frame()->GetRenderView()->GetWebView()->SetWindowFeatures(
+  render_frame()->GetWebView()->SetWindowFeatures(
       content::ConvertMojoWindowFeaturesToWebWindowFeatures(*window_features));
 }
 
 void ChromeRenderFrameObserver::ExecuteWebUIJavaScript(
-    const base::string16& javascript) {
-#if !defined(OS_ANDROID)
+    const std::u16string& javascript) {
+#if !BUILDFLAG(IS_ANDROID)
   webui_javascript_.push_back(javascript);
 #endif
 }
@@ -302,32 +397,67 @@ void ChromeRenderFrameObserver::RequestImageForContextNode(
     int32_t thumbnail_min_area_pixels,
     const gfx::Size& thumbnail_max_size_pixels,
     chrome::mojom::ImageFormat image_format,
+    int32_t quality,
     RequestImageForContextNodeCallback callback) {
-  WebNode context_node = render_frame()->GetWebFrame()->ContextMenuNode();
+  WebNode context_node = render_frame()->GetWebFrame()->ContextMenuImageNode();
   std::vector<uint8_t> image_data;
   gfx::Size original_size;
-  std::string image_extension;
+  std::string mime_type;
+  std::vector<lens::mojom::LatencyLogPtr> latency_logs;
+
+  // Map for converting between multiple mojom ImageFormat structures to
+  // prevent a circular dependency (go/lens-logging-in-chromium)
+  // TODO(shivpatel): add default value UNKNOWN for if ImageFormat is updated
+  const std::map<chrome::mojom::ImageFormat, lens::mojom::ImageFormat>
+      image_format_conversion = {
+          {chrome::mojom::ImageFormat::ORIGINAL,
+           lens::mojom::ImageFormat::ORIGINAL},
+          {chrome::mojom::ImageFormat::PNG, lens::mojom::ImageFormat::PNG},
+          {chrome::mojom::ImageFormat::JPEG, lens::mojom::ImageFormat::JPEG},
+          {chrome::mojom::ImageFormat::WEBP, lens::mojom::ImageFormat::WEBP},
+      };
 
   if (context_node.IsNull() || !context_node.IsElementNode()) {
-    std::move(callback).Run(image_data, original_size, image_extension);
+    // The downscaled size is the original size, since no downscaling was
+    // required.
+    std::move(callback).Run(image_data, original_size,
+                            /*downscaled_size=*/original_size, mime_type,
+                            std::move(latency_logs));
     return;
   }
 
   WebElement web_element = context_node.To<WebElement>();
   original_size = web_element.GetImageSize();
-  image_extension = "." + web_element.ImageExtension();
-  if (!NeedsEncodeImage(image_extension, image_format) &&
-      !NeedsDownscale(original_size, thumbnail_min_area_pixels,
-                      thumbnail_max_size_pixels)) {
+  mime_type = web_element.ImageMimeType().Utf8();
+  bool needs_downscale = NeedsDownscale(
+      original_size, thumbnail_min_area_pixels, thumbnail_max_size_pixels);
+  bool needs_encode = NeedsEncodeImage(mime_type, image_format) ||
+                      IsAnimatedWebp(web_element.CopyOfImageData());
+  if (!needs_encode && !needs_downscale) {
     image_data = web_element.CopyOfImageData();
+    // The downscaled size is the original size, since no downscaling was
+    // required.
     std::move(callback).Run(std::move(image_data), original_size,
-                            image_extension);
+                            /*downscaled_size=*/original_size, mime_type,
+                            std::move(latency_logs));
     return;
   }
-
   SkBitmap image = web_element.ImageContents();
+  if (needs_downscale) {
+    latency_logs.push_back(lens::mojom::LatencyLog::New(
+        lens::mojom::Phase::DOWNSCALE_START, original_size, gfx::Size(),
+        image_format_conversion.at(image_format), base::Time::Now(),
+        /*encoded_size_bytes=*/0));
+  }
   SkBitmap thumbnail =
       Downscale(image, thumbnail_min_area_pixels, thumbnail_max_size_pixels);
+  gfx::Size downscaled_size = gfx::Size(thumbnail.width(), thumbnail.height());
+  if (needs_downscale) {
+    latency_logs.push_back(lens::mojom::LatencyLog::New(
+        lens::mojom::Phase::DOWNSCALE_END, original_size, downscaled_size,
+        image_format_conversion.at(image_format), base::Time::Now(),
+        /*encoded_size_bytes=*/0));
+  }
 
   SkBitmap bitmap;
   if (thumbnail.colorType() == kN32_SkColorType) {
@@ -339,92 +469,142 @@ void ChromeRenderFrameObserver::RequestImageForContextNode(
     }
   }
 
-  constexpr int kDefaultQuality = 90;
-  std::vector<unsigned char> data;
-
   if (image_format == chrome::mojom::ImageFormat::ORIGINAL) {
     // ORIGINAL will only fall back to here if the image needs to downscale.
     // Let's PNG downscale to PNG and JEPG downscale to JPEG.
-    if (image_extension == kPngExtension) {
+    if (mime_type == kImagePng) {
       image_format = chrome::mojom::ImageFormat::PNG;
-    } else if (image_extension == kJpgExtension) {
+    } else if (mime_type == kImageJpeg) {
       image_format = chrome::mojom::ImageFormat::JPEG;
     }
   }
 
+  if (needs_encode) {
+    latency_logs.push_back(lens::mojom::LatencyLog::New(
+        lens::mojom::Phase::ENCODE_START, original_size, downscaled_size,
+        image_format_conversion.at(image_format), base::Time::Now(),
+        /*encoded_size_bytes=*/0));
+  }
+  std::optional<std::vector<uint8_t>> data;
   switch (image_format) {
     case chrome::mojom::ImageFormat::PNG:
-      if (gfx::PNGCodec::EncodeBGRASkBitmap(
-              bitmap, kDiscardTransparencyForContextMenu, &data)) {
-        image_data.swap(data);
-        image_extension = kPngExtension;
+      data = gfx::PNGCodec::EncodeBGRASkBitmap(
+          bitmap, kDiscardTransparencyForContextMenu);
+      if (data) {
+        image_data.swap(data.value());
+        mime_type = kImagePng;
+      }
+      break;
+    case chrome::mojom::ImageFormat::WEBP:
+      data = gfx::WebpCodec::Encode(bitmap, quality);
+      if (data) {
+        image_data.swap(data.value());
+        mime_type = kImageWebp;
       }
       break;
     case chrome::mojom::ImageFormat::ORIGINAL:
     // Any format other than PNG and JPEG fall back to here.
     case chrome::mojom::ImageFormat::JPEG:
-      if (gfx::JPEGCodec::Encode(bitmap, kDefaultQuality, &data)) {
-        image_data.swap(data);
-        image_extension = kJpgExtension;
+      data = gfx::JPEGCodec::Encode(bitmap, quality);
+      if (data) {
+        image_data.swap(data.value());
+        mime_type = kImageJpeg;
       }
       break;
   }
-  std::move(callback).Run(image_data, original_size, image_extension);
+  if (needs_encode) {
+    latency_logs.push_back(lens::mojom::LatencyLog::New(
+        lens::mojom::Phase::ENCODE_END, original_size, downscaled_size,
+        image_format_conversion.at(image_format), base::Time::Now(),
+        sizeof(uint8_t) * image_data.size()));
+  }
+
+  std::move(callback).Run(image_data, original_size, downscaled_size, mime_type,
+                          std::move(latency_logs));
+}
+
+void ChromeRenderFrameObserver::RequestBitmapForContextNode(
+    RequestBitmapForContextNodeCallback callback) {
+  WebNode context_node = render_frame()->GetWebFrame()->ContextMenuImageNode();
+  SkBitmap image;
+  if (context_node.IsNull() || !context_node.IsElementNode()) {
+    std::move(callback).Run(image);
+    return;
+  }
+
+  WebElement web_element = context_node.To<WebElement>();
+  image = web_element.ImageContents();
+  std::move(callback).Run(image);
+}
+
+void ChromeRenderFrameObserver::RequestBitmapForContextNodeWithBoundsHint(
+    RequestBitmapForContextNodeWithBoundsHintCallback callback) {
+  WebNode context_node = render_frame()->GetWebFrame()->ContextMenuImageNode();
+  SkBitmap image;
+  gfx::Rect bounds;
+  if (context_node.IsNull() || !context_node.IsElementNode()) {
+    std::move(callback).Run(image, bounds);
+    return;
+  }
+
+  WebElement web_element = context_node.To<WebElement>();
+  image = web_element.ImageContents();
+  bounds = web_element.BoundsInWidget();
+  std::move(callback).Run(image, bounds);
+}
+
+void ChromeRenderFrameObserver::RequestBoundsHintForAllImages(
+    RequestBoundsHintForAllImagesCallback callback) {
+  std::vector<blink::WebElement> image_elements;
+  std::vector<gfx::Rect> all_bounds;
+  const blink::WebDocument doc = render_frame()->GetWebFrame()->GetDocument();
+  if (doc.IsNull() || doc.Body().IsNull()) {
+    return;
+  }
+  FindImageElements(doc.Body(), image_elements);
+
+  for (auto& element : image_elements) {
+    all_bounds.emplace_back(
+        render_frame()->ConvertViewportToWindow(element.BoundsInWidget()));
+  }
+  std::move(callback).Run(all_bounds);
+}
+
+// Depth-first search for recursively traversing DOM elements and pulling out
+// references for images.
+void ChromeRenderFrameObserver::FindImageElements(
+    blink::WebElement element,
+    std::vector<blink::WebElement>& images) {
+  if (element.ImageContents().isNull()) {
+    for (blink::WebNode child = element.FirstChild(); !child.IsNull();
+         child = child.NextSibling()) {
+      if (child.IsElementNode()) {
+        FindImageElements(child.To<blink::WebElement>(), images);
+      }
+    }
+  } else {
+    images.emplace_back(element);
+  }
 }
 
 void ChromeRenderFrameObserver::RequestReloadImageForContextNode() {
   WebLocalFrame* frame = render_frame()->GetWebFrame();
   // TODO(dglazkov): This code is clearly in the wrong place. Need
-  // to investigate what it is doing and fix (http://crbug.com/606164).
-  WebNode context_node = frame->ContextMenuNode();
+  // to investigate what it is doing and fix (http://crbug.com/41250588).
+  WebNode context_node = frame->ContextMenuImageNode();
   if (!context_node.IsNull()) {
     frame->ReloadImage(context_node);
   }
 }
 
-void ChromeRenderFrameObserver::GetWebApplicationInfo(
-    GetWebApplicationInfoCallback callback) {
-  WebLocalFrame* frame = render_frame()->GetWebFrame();
-
-  WebApplicationInfo web_app_info;
-  web_apps::ParseWebAppFromWebDocument(frame, &web_app_info);
-
-  // The warning below is specific to mobile but it doesn't hurt to show it even
-  // if the Chromium build is running on a desktop. It will get more exposition.
-  if (web_app_info.mobile_capable == WebApplicationInfo::MOBILE_CAPABLE_APPLE) {
-    blink::WebConsoleMessage message(
-        blink::mojom::ConsoleMessageLevel::kWarning,
-        "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\"> is "
-        "deprecated. Please include <meta name=\"mobile-web-app-capable\" "
-        "content=\"yes\">");
-    frame->AddMessageToConsole(message);
-  }
-
-  // Prune out any data URLs in the set of icons.  The browser process expects
-  // any icon with a data URL to have originated from a favicon.  We don't want
-  // to decode arbitrary data URLs in the browser process.  See
-  // http://b/issue?id=1162972
-  for (auto it = web_app_info.icon_infos.begin();
-       it != web_app_info.icon_infos.end();) {
-    if (it->url.SchemeIs(url::kDataScheme))
-      it = web_app_info.icon_infos.erase(it);
-    else
-      ++it;
-  }
-
-  // Truncate the strings we send to the browser process.
-  web_app_info.title =
-      web_app_info.title.substr(0, chrome::kMaxMetaTagAttributeLength);
-  web_app_info.description =
-      web_app_info.description.substr(0, chrome::kMaxMetaTagAttributeLength);
-
-  std::move(callback).Run(web_app_info);
-}
-
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 void ChromeRenderFrameObserver::SetCCTClientHeader(const std::string& header) {
+  auto* web_frame = render_frame()->GetWebFrame();
+  if (!web_frame) {
+    return;
+  }
   base::AutoLock auto_lock(GetFrameHeaderMapLock());
-  GetFrameHeaderMap()[routing_id()] = header;
+  GetFrameHeaderMap()[web_frame->GetLocalFrameToken()] = header;
 }
 #endif
 
@@ -433,12 +613,111 @@ void ChromeRenderFrameObserver::GetMediaFeedURL(
   std::move(callback).Run(MediaFeeds::GetMediaFeedURL(render_frame()));
 }
 
+void ChromeRenderFrameObserver::LoadBlockedPlugins(
+    const std::string& identifier) {
+  // Record that this plugin is temporarily allowed and notify all placeholders.
+
+  ChromeContentSettingsAgentDelegate::Get(render_frame())
+      ->AllowPluginTemporarily(identifier);
+
+#if BUILDFLAG(ENABLE_PLUGINS)
+  ChromePluginPlaceholder::ForEach(
+      render_frame(), base::BindRepeating(
+                          [](const std::string& identifier,
+                             ChromePluginPlaceholder* placeholder) {
+                            placeholder->MaybeLoadBlockedPlugin(identifier);
+                          },
+                          identifier));
+#endif  // BUILDFLAG(ENABLE_PLUGINS)
+}
+
+void ChromeRenderFrameObserver::SetShouldDeferMediaLoad(bool should_defer) {
+  prerender::SetShouldDeferMediaLoad(render_frame(), should_defer);
+}
+
+void ChromeRenderFrameObserver::InitializeTool(
+    actor::mojom::ToolInvocationPtr request,
+    InitializeToolCallback callback) {
+  if (!tool_executor_) {
+    tool_executor_ =
+        std::make_unique<actor::ToolExecutor>(render_frame(), *actor_journal_);
+  }
+
+  actor::mojom::InitializeToolResultPtr result =
+      tool_executor_->InitializeTool(std::move(request));
+  std::move(callback).Run(std::move(result));
+}
+
+void ChromeRenderFrameObserver::ExecuteTool(const actor::TaskId& task_id,
+                                            ExecuteToolCallback callback) {
+  CHECK(tool_executor_) << "ExecuteTool was called before InitializeTool";
+  tool_executor_->ExecuteTool(task_id, std::move(callback));
+}
+
+void ChromeRenderFrameObserver::InvokeTool(
+    actor::mojom::ToolInvocationPtr request,
+    InvokeToolCallback callback) {
+  if (!tool_executor_) {
+    tool_executor_ =
+        std::make_unique<actor::ToolExecutor>(render_frame(), *actor_journal_);
+  }
+
+  tool_executor_->InvokeTool(std::move(request), std::move(callback));
+}
+
+void ChromeRenderFrameObserver::CancelTool(const actor::TaskId& task_id) {
+  if (tool_executor_) {
+    tool_executor_->CancelTool(task_id);
+  }
+}
+
+void ChromeRenderFrameObserver::StartActorJournal(
+    mojo::PendingAssociatedRemote<actor::mojom::JournalClient> client) {
+  actor_journal_->Bind(std::move(client));
+}
+
+void ChromeRenderFrameObserver::GetCrossDocumentScriptToolResult(
+    const base::UnguessableToken& execution_id,
+    GetCrossDocumentScriptToolResultCallback callback) {
+  render_frame()->GetWebFrame()->GetDocument().GetCrossDocumentScriptToolResult(
+      execution_id,
+      base::BindOnce(
+          [](GetCrossDocumentScriptToolResultCallback cb,
+             blink::WebString result) { std::move(cb).Run(result.Utf8()); },
+          std::move(callback)));
+}
+
+void ChromeRenderFrameObserver::CreatePageStabilityMonitor(
+    mojo::PendingReceiver<page_content_annotations::mojom::PageStabilityMonitor>
+        monitor,
+    const actor::TaskId& task_id,
+    bool supports_paint_stability) {
+  page_stability_monitor_ =
+      std::make_unique<page_content_annotations::PageStabilityMonitor>(
+          *render_frame(), supports_paint_stability,
+          std::make_unique<actor::PageStabilityMonitorDelegate>(
+              task_id, *actor_journal_));
+  page_stability_monitor_->Bind(std::move(monitor));
+}
+
 void ChromeRenderFrameObserver::SetClientSidePhishingDetection() {
 #if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
   phishing_classifier_ = safe_browsing::PhishingClassifierDelegate::Create(
       render_frame(), nullptr);
+  phishing_image_embedder_ =
+      safe_browsing::PhishingImageEmbedderDelegate::Create(render_frame());
 #endif
 }
+
+#if BUILDFLAG(ENABLE_PDF)
+void ChromeRenderFrameObserver::PdfPageCaptured(const std::u16string& contents,
+                                                const std::string& pdf_lang,
+                                                const GURL& page_url) {
+  if (translate_agent_) {
+    translate_agent_->PdfPageCaptured(contents, pdf_lang, page_url);
+  }
+}
+#endif
 
 void ChromeRenderFrameObserver::OnRenderFrameObserverRequest(
     mojo::PendingAssociatedReceiver<chrome::mojom::ChromeRenderFrame>
@@ -446,68 +725,115 @@ void ChromeRenderFrameObserver::OnRenderFrameObserverRequest(
   receivers_.Add(this, std::move(receiver));
 }
 
-void ChromeRenderFrameObserver::CapturePageText(TextCaptureType capture_type) {
+bool ChromeRenderFrameObserver::ShouldCapturePageTextForTranslateOrPhishing(
+    blink::WebMeaningfulLayout layout_type) const {
   WebLocalFrame* frame = render_frame()->GetWebFrame();
-  if (!frame)
-    return;
+  if (!frame) {
+    return false;
+  }
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Check |frame| for conditions shared by both Translate and Phishing.
+
+  if (!render_frame()->IsMainFrame()) {
+    return false;
+  }
+
+  // |kVisuallyNonEmpty| is ignored by Translate and Phishing.
+  switch (layout_type) {
+    case blink::WebMeaningfulLayout::kFinishedParsing:
+    case blink::WebMeaningfulLayout::kFinishedLoading:
+      break;
+    case blink::WebMeaningfulLayout::kVisuallyNonEmpty:
+    default:
+      return false;
+  }
 
   // Don't capture pages that have pending redirect or location change.
-  if (frame->IsNavigationScheduledWithin(kLocationChangeInterval))
-    return;
+  if (frame->IsNavigationScheduledWithin(kLocationChangeInterval)) {
+    return false;
+  }
 
-  // Don't index/capture pages that are in view source mode.
-  if (frame->IsViewSourceModeEnabled())
-    return;
+  // Don't capture pages that are in view source mode.
+  if (frame->IsViewSourceModeEnabled()) {
+    return false;
+  }
 
   // Don't capture text of the error pages.
   WebDocumentLoader* document_loader = frame->GetDocumentLoader();
-  if (document_loader && document_loader->HasUnreachableURL())
-    return;
+  if (document_loader && document_loader->HasUnreachableURL()) {
+    return false;
+  }
 
-  // Don't index/capture pages that are being prerendered.
-  if (prerender::PrerenderHelper::IsPrerendering(render_frame()))
-    return;
+  // Don't capture pages that are being no-state prefetched.
+  if (prerender::NoStatePrefetchHelper::IsPrefetching(render_frame())) {
+    return false;
+  }
 
-    // Don't capture contents unless there is either a translate agent or a
-    // phishing classifier to consume them.
+  //////////////////////////////////////////////////////////////////////////////
+  // Translate specific checks.
+  bool should_capture_for_translate = !!translate_agent_;
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Phishing specific checks.
+  bool should_capture_for_phishing = false;
+
 #if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
-  if (!translate_agent_ && !phishing_classifier_)
-    return;
-#else
-  if (!translate_agent_)
-    return;
+  should_capture_for_phishing = phishing_classifier_->is_ready();
 #endif
 
-  base::TimeTicks capture_begin_time = base::TimeTicks::Now();
+  return should_capture_for_translate || should_capture_for_phishing;
+}
 
-  // Retrieve the frame's full text (up to kMaxIndexChars), and pass it to the
-  // translate helper for language detection and possible translation.
-  // TODO(dglazkov): WebFrameContentDumper should only be used for
-  // testing purposes. See http://crbug.com/585164.
-  base::string16 contents =
-      WebFrameContentDumper::DeprecatedDumpFrameTreeAsText(frame,
-                                                           kMaxIndexChars)
-          .Utf16();
+void ChromeRenderFrameObserver::CapturePageText(
+    blink::WebMeaningfulLayout layout_type) {
+  bool capture_for_translate_phishing =
+      ShouldCapturePageTextForTranslateOrPhishing(layout_type);
 
-  UMA_HISTOGRAM_TIMES(kTranslateCaptureText,
-                      base::TimeTicks::Now() - capture_begin_time);
+  uint32_t capture_max_size =
+      capture_for_translate_phishing ? kMaxIndexChars : 0;
+  auto text_callback = page_text_agent_->MaybeRequestTextDumpOnLayoutEvent(
+      layout_type, &capture_max_size);
+  bool capture_for_opt_guide = !!text_callback;
 
-  // We should run language detection only once. Parsing finishes before
-  // the page loads, so let's pick that timing.
-  if (translate_agent_ && capture_type == PRELIMINARY_CAPTURE) {
+  if (!capture_for_translate_phishing && !capture_for_opt_guide) {
+    return;
+  }
+  DCHECK_GT(capture_max_size, 0U);
+
+  scoped_refptr<const base::RefCountedString16> contents;
+
+  {
+    TRACE_EVENT0("renderer", "ChromeRenderFrameObserver::CapturePageText");
+    contents = base::MakeRefCounted<const base::RefCountedString16>(
+        WebFrameContentDumper::DumpFrameTreeAsText(
+            render_frame()->GetWebFrame(), capture_max_size)
+            .Utf16());
+  }
+
+  // Language detection should run only once. Parsing finishes before the page
+  // loads, so attempt detection here first.
+  if (translate_agent_ &&
+      (layout_type == blink::WebMeaningfulLayout::kFinishedParsing)) {
     translate_agent_->PageCaptured(contents);
   }
 
-  TRACE_EVENT0("renderer", "ChromeRenderFrameObserver::CapturePageText");
+  if (text_callback) {
+    std::move(text_callback).Run(contents);
+  }
 
 #if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
   // Will swap out the string.
-  if (phishing_classifier_)
-    phishing_classifier_->PageCaptured(&contents,
-                                       capture_type == PRELIMINARY_CAPTURE);
+  if (phishing_classifier_) {
+    phishing_classifier_->PageCaptured(
+        layout_type == blink::WebMeaningfulLayout::kFinishedParsing);
+  }
+  if (phishing_image_embedder_) {
+    phishing_image_embedder_->PageCaptured(
+        layout_type == blink::WebMeaningfulLayout::kFinishedParsing);
+  }
 #endif
 }
-
 
 // static
 bool ChromeRenderFrameObserver::NeedsDownscale(
@@ -554,25 +880,29 @@ SkBitmap ChromeRenderFrameObserver::Downscale(
 
 // static
 bool ChromeRenderFrameObserver::NeedsEncodeImage(
-    const std::string& image_extension,
+    const std::string& mime_type,
     chrome::mojom::ImageFormat image_format) {
   switch (image_format) {
     case chrome::mojom::ImageFormat::PNG:
-      return !base::EqualsCaseInsensitiveASCII(image_extension, kPngExtension);
-      break;
+      return mime_type != kImagePng;
+    case chrome::mojom::ImageFormat::WEBP:
+      return mime_type != kImageWebp;
     case chrome::mojom::ImageFormat::JPEG:
-      return !base::EqualsCaseInsensitiveASCII(image_extension, kJpgExtension);
-      break;
+      return mime_type != kImageJpeg;
     case chrome::mojom::ImageFormat::ORIGINAL:
-      return !base::EqualsCaseInsensitiveASCII(image_extension,
-                                               kGifExtension) &&
-             !base::EqualsCaseInsensitiveASCII(image_extension,
-                                               kJpgExtension) &&
-             !base::EqualsCaseInsensitiveASCII(image_extension, kPngExtension);
-      break;
+      return mime_type != kImageGif && mime_type != kImageJpeg &&
+             mime_type != kImagePng;
   }
 
   // Should never hit this code since all cases were handled above.
   NOTREACHED();
-  return true;
+}
+
+// static
+bool ChromeRenderFrameObserver::IsAnimatedWebp(
+    const std::vector<uint8_t>& image_data) {
+  WebPBitstreamFeatures features{};
+  VP8StatusCode status =
+      WebPGetFeatures(image_data.data(), image_data.size(), &features);
+  return status == VP8_STATUS_OK && features.has_animation;
 }

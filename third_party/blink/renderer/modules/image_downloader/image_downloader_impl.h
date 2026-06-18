@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,14 +11,16 @@
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_wrapper_mode.h"
 #include "third_party/blink/renderer/platform/supplementable.h"
 
+namespace gfx {
+class Size;
+}  // namespace gfx
+
 namespace blink {
 
 class KURL;
 class LocalFrame;
 class MultiResolutionImageResourceFetcher;
 class WebString;
-
-struct WebSize;
 
 class ImageDownloaderImpl final : public GarbageCollected<ImageDownloaderImpl>,
                                   public Supplement<LocalFrame>,
@@ -28,10 +30,14 @@ class ImageDownloaderImpl final : public GarbageCollected<ImageDownloaderImpl>,
   static const char kSupplementName[];
 
   explicit ImageDownloaderImpl(LocalFrame&);
+
+  ImageDownloaderImpl(const ImageDownloaderImpl&) = delete;
+  ImageDownloaderImpl& operator=(const ImageDownloaderImpl&) = delete;
+
   ~ImageDownloaderImpl() override;
 
   using DownloadCallback =
-      base::OnceCallback<void(int32_t, const WTF::Vector<SkBitmap>&)>;
+      base::OnceCallback<void(int32_t, const Vector<SkBitmap>&)>;
 
   static ImageDownloaderImpl* From(LocalFrame&);
 
@@ -47,10 +53,18 @@ class ImageDownloaderImpl final : public GarbageCollected<ImageDownloaderImpl>,
   // image. When done, |callback| will be called.
   void DownloadImage(const KURL& url,
                      bool is_favicon,
-                     uint32_t preferred_size,
+                     const gfx::Size& preferred_size,
                      uint32_t max_bitmap_size,
                      bool bypass_cache,
                      DownloadImageCallback callback) override;
+
+  // ImageDownloader implementation. Request to asynchronously download an
+  // image. When done, |callback| will be called.
+  void DownloadImageFromAxNode(int ax_node_id,
+                               const gfx::Size& preferred_size,
+                               uint32_t max_bitmap_size,
+                               bool bypass_cache,
+                               DownloadImageCallback callback) override;
 
   // Called when downloading finishes. All frames in |images| whose size <=
   // |max_image_size| will be returned through |callback|. If all of the frames
@@ -60,7 +74,7 @@ class ImageDownloaderImpl final : public GarbageCollected<ImageDownloaderImpl>,
   void DidDownloadImage(uint32_t max_bitmap_size,
                         DownloadImageCallback callback,
                         int32_t http_status_code,
-                        const WTF::Vector<SkBitmap>& images);
+                        const Vector<SkBitmap>& images);
 
   void CreateMojoService(
       mojo::PendingReceiver<mojom::blink::ImageDownloader> receiver);
@@ -73,7 +87,7 @@ class ImageDownloaderImpl final : public GarbageCollected<ImageDownloaderImpl>,
   // are returned.
   void FetchImage(const KURL& image_url,
                   bool is_favicon,
-                  const WebSize& preferred_size,
+                  const gfx::Size& preferred_size,
                   bool bypass_cache,
                   DownloadCallback callback);
 
@@ -81,12 +95,12 @@ class ImageDownloaderImpl final : public GarbageCollected<ImageDownloaderImpl>,
   // successfully or with a failure. See FetchImage for more
   // details.
   void DidFetchImage(DownloadCallback callback,
-                     const WebSize& preferred_size,
+                     const gfx::Size& preferred_size,
                      MultiResolutionImageResourceFetcher* fetcher,
                      const std::string& image_data,
                      const WebString& mime_type);
 
-  typedef WTF::Vector<std::unique_ptr<MultiResolutionImageResourceFetcher>>
+  typedef Vector<std::unique_ptr<MultiResolutionImageResourceFetcher>>
       ImageResourceFetcherList;
 
   // ImageResourceFetchers schedule via FetchImage.
@@ -96,8 +110,6 @@ class ImageDownloaderImpl final : public GarbageCollected<ImageDownloaderImpl>,
                    ImageDownloaderImpl,
                    HeapMojoWrapperMode::kForceWithoutContextObserver>
       receiver_;
-
-  DISALLOW_COPY_AND_ASSIGN(ImageDownloaderImpl);
 };
 
 }  // namespace blink

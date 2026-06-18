@@ -1,3 +1,3 @@
 file://components/feedback/OWNERS
 
-# COMPONENT: Platform>Apps>Feedback
+per-file report_unsafe_site*=file://chrome/browser/ui/webui/feedback/report_unsafe_site/OWNERS

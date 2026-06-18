@@ -1,172 +1,111 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/policy/chrome_browser_cloud_management_controller_desktop.h"
 
+#include <stdint.h>
+
+#include <set>
+#include <string>
+#include <utility>
+
+#include "base/check_is_test.h"
 #include "base/command_line.h"
 #include "base/path_service.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/default_clock.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/device_identity/device_identity_provider.h"
-#include "chrome/browser/device_identity/device_oauth2_token_service.h"
 #include "chrome/browser/device_identity/device_oauth2_token_service_factory.h"
+#include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/key_loader.h"
 #include "chrome/browser/enterprise/remote_commands/cbcm_remote_commands_factory.h"
+#include "chrome/browser/enterprise/reporting/reporting_delegate_factory_desktop.h"
 #include "chrome/browser/lifetime/application_lifetime.h"
 #include "chrome/browser/net/system_network_context_manager.h"
 #include "chrome/browser/policy/chrome_browser_cloud_management_register_watcher.h"
 #include "chrome/browser/policy/chrome_browser_policy_connector.h"
+#include "chrome/browser/policy/client_data_delegate_desktop.h"
 #include "chrome/browser/policy/cloud/cloud_policy_invalidator.h"
-#include "chrome/browser/policy/cloud/remote_commands_invalidator_impl.h"
-#include "chrome/browser/policy/device_account_initializer.h"
+#include "chrome/browser/policy/cloud/extension_install_policy_invalidator.h"
+#include "chrome/browser/policy/cloud/fm_registration_token_uploader.h"
+#include "chrome/browser/policy/policy_util.h"
 #include "chrome/common/chrome_features.h"
 #include "chrome/common/chrome_paths.h"
+#include "components/gcm_driver/gcm_driver.h"
 #include "components/gcm_driver/instance_id/instance_id_driver.h"
-#include "components/invalidation/impl/fcm_invalidation_service.h"
-#include "components/invalidation/impl/fcm_network_handler.h"
+#include "components/invalidation/invalidation_listener.h"
+#include "components/invalidation/legacy_topics_cleaner.h"
 #include "components/policy/core/common/cloud/machine_level_user_cloud_policy_manager.h"
 #include "components/policy/core/common/features.h"
+#include "components/policy/core/common/remote_commands/remote_commands_constants.h"
+#include "components/policy/core/common/remote_commands/remote_commands_invalidator.h"
+#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/network_service_instance.h"
-#include "google_apis/gaia/gaia_constants.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
-#if defined(OS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
 #include "base/base_paths_win.h"
 #include "chrome/install_static/install_modes.h"
 #else
 #include "chrome/common/chrome_switches.h"
-#endif  // defined(OS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 #include "chrome/browser/app_controller_mac.h"
 #include "chrome/browser/policy/browser_dm_token_storage_mac.h"
-#endif  // defined(OS_MAC)
+#endif  // BUILDFLAG(IS_MAC)
 
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/policy/browser_dm_token_storage_linux.h"
-#endif  // defined(OS_LINUX) || defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "chrome/browser/policy/browser_dm_token_storage_win.h"
 #include "chrome/install_static/install_util.h"
-#endif  // defined(OS_WIN)
+#endif  // BUILDFLAG(IS_WIN)
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+#include "chrome/browser/enterprise/client_certificates/browser_context_delegate.h"
+#include "chrome/browser/enterprise/client_certificates/cert_utils.h"
+#include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/device_trust_key_manager_impl.h"
+#include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/key_rotation_launcher.h"
+#include "chrome/browser/enterprise/reporting/saas_usage/saas_usage_reporting_delegate_factory_desktop.h"
+#include "components/enterprise/browser/reporting/saas_usage/saas_usage_reporting_delegate_factory.h"
+#include "components/enterprise/client_certificates/core/browser_cloud_management_delegate.h"
+#include "components/enterprise/client_certificates/core/certificate_provisioning_service.h"
+#include "components/enterprise/client_certificates/core/dm_server_client.h"
+#include "components/enterprise/client_certificates/core/key_upload_client.h"
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
 
 namespace policy {
 
 namespace {
 
-#if defined(OS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
-constexpr base::FilePath::StringPieceType kCachedPolicyDirname =
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+constexpr base::FilePath::StringViewType kCachedPolicyDirname =
     FILE_PATH_LITERAL("Policies");
-constexpr base::FilePath::StringPieceType kCachedPolicyFilename =
-    FILE_PATH_LITERAL("PolicyFetchResponse");
 #endif
+
+constexpr char kInvalidationListenerLogPrefix[] =
+    "ChromeBrowserCloudManagementControllerDesktop";
+
+// Returns a set of all project numbers that will be used by user.
+std::set<int64_t> GetAllInvalidationProjectNumbers() {
+  return {
+      policy::kPolicyInvalidationProjectNumber,
+      policy::kRemoteCommandsInvalidationsProjectNumber,
+  };
+}
 
 }  // namespace
 
-// A helper class to make the appropriate calls into the device account
-// initializer and manage the ChromeBrowserCloudManagementRegistrar callback's
-// lifetime.
-class MachineLevelDeviceAccountInitializerHelper
-    : public DeviceAccountInitializer::Delegate {
- public:
-  using Callback = base::OnceCallback<void(bool)>;
-
-  // |policy_client| should be registered and outlive this object.
-  MachineLevelDeviceAccountInitializerHelper(
-      policy::CloudPolicyClient* policy_client,
-      Callback callback,
-      scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
-      : policy_client_(std::move(policy_client)),
-        callback_(std::move(callback)),
-        url_loader_factory_(url_loader_factory) {
-    DCHECK(base::FeatureList::IsEnabled(
-        policy::features::kCBCMPolicyInvalidations));
-
-    DCHECK(url_loader_factory_);
-
-    device_account_initializer_ =
-        std::make_unique<DeviceAccountInitializer>(policy_client_, this);
-    device_account_initializer_->FetchToken();
-  }
-
-  MachineLevelDeviceAccountInitializerHelper& operator=(
-      MachineLevelDeviceAccountInitializerHelper&) = delete;
-  MachineLevelDeviceAccountInitializerHelper(
-      MachineLevelDeviceAccountInitializerHelper&) = delete;
-  MachineLevelDeviceAccountInitializerHelper(
-      MachineLevelDeviceAccountInitializerHelper&&) = delete;
-
-  ~MachineLevelDeviceAccountInitializerHelper() override = default;
-
-  // DeviceAccountInitializer::Delegate:
-  void OnDeviceAccountTokenFetched(bool empty_token) override {
-    DCHECK(base::FeatureList::IsEnabled(
-        policy::features::kCBCMPolicyInvalidations))
-        << "DeviceAccountInitializer is active but CBCM service accounts "
-           "are not enabled.";
-    if (empty_token) {
-      // Not being able to obtain a token isn't a showstopper for machine
-      // level policies: the browser will fallback to fetching policies on a
-      // regular schedule and won't support remote commands. Getting a refresh
-      // token will be reattempted on the next successful policy fetch.
-      std::move(callback_).Run(false);
-      return;
-    }
-
-    device_account_initializer_->StoreToken();
-  }
-
-  void OnDeviceAccountTokenStored() override {
-    DCHECK(base::FeatureList::IsEnabled(
-        policy::features::kCBCMPolicyInvalidations))
-        << "DeviceAccountInitializer is active but CBCM service accounts "
-           "are not enabled.";
-    std::move(callback_).Run(true);
-  }
-
-  void OnDeviceAccountTokenError(EnrollmentStatus status) override {
-    DCHECK(base::FeatureList::IsEnabled(
-        policy::features::kCBCMPolicyInvalidations))
-        << "DeviceAccountInitializer is active but CBCM service accounts "
-           "are not enabled.";
-    std::move(callback_).Run(false);
-  }
-
-  void OnDeviceAccountClientError(DeviceManagementStatus status) override {
-    DCHECK(base::FeatureList::IsEnabled(
-        policy::features::kCBCMPolicyInvalidations))
-        << "DeviceAccountInitializer is active but CBCM service accounts "
-           "are not enabled.";
-    std::move(callback_).Run(false);
-  }
-
-  enterprise_management::DeviceServiceApiAccessRequest::DeviceType
-  GetRobotAuthCodeDeviceType() override {
-    return enterprise_management::DeviceServiceApiAccessRequest::CHROME_BROWSER;
-  }
-
-  std::set<std::string> GetRobotOAuthScopes() override {
-    return {
-        GaiaConstants::kOAuthWrapBridgeUserInfoScope,
-        GaiaConstants::kFCMOAuthScope,
-    };
-  }
-
-  scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory()
-      override {
-    return url_loader_factory_;
-  }
-
-  policy::CloudPolicyClient* policy_client_;
-  std::unique_ptr<DeviceAccountInitializer> device_account_initializer_;
-  Callback callback_;
-  scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
-};
-
 ChromeBrowserCloudManagementControllerDesktop::
-    ChromeBrowserCloudManagementControllerDesktop() = default;
+    ChromeBrowserCloudManagementControllerDesktop()
+    : invalidations_initializer_(this) {}
 ChromeBrowserCloudManagementControllerDesktop::
     ~ChromeBrowserCloudManagementControllerDesktop() = default;
 
@@ -174,26 +113,17 @@ void ChromeBrowserCloudManagementControllerDesktop::
     SetDMTokenStorageDelegate() {
   std::unique_ptr<BrowserDMTokenStorage::Delegate> storage_delegate;
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   storage_delegate = std::make_unique<BrowserDMTokenStorageMac>();
-#elif defined(OS_LINUX) || defined(OS_CHROMEOS)
+#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
   storage_delegate = std::make_unique<BrowserDMTokenStorageLinux>();
-#elif defined(OS_WIN)
+#elif BUILDFLAG(IS_WIN)
   storage_delegate = std::make_unique<BrowserDMTokenStorageWin>();
 #else
-  NOT_REACHED();
+  NOTREACHED();
 #endif
 
   BrowserDMTokenStorage::SetDelegate(std::move(storage_delegate));
-}
-
-bool ChromeBrowserCloudManagementControllerDesktop::IsEnabled() {
-#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-  return true;
-#else
-  return base::CommandLine::ForCurrentProcess()->HasSwitch(
-      switches::kEnableChromeBrowserCloudManagement);
-#endif
 }
 
 int ChromeBrowserCloudManagementControllerDesktop::GetUserDataDirKey() {
@@ -201,17 +131,14 @@ int ChromeBrowserCloudManagementControllerDesktop::GetUserDataDirKey() {
 }
 
 base::FilePath
-ChromeBrowserCloudManagementControllerDesktop::GetExternalPolicyPath() {
+ChromeBrowserCloudManagementControllerDesktop::GetExternalPolicyDir() {
   base::FilePath external_policy_path;
-#if defined(OS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
   base::PathService::Get(base::DIR_PROGRAM_FILESX86, &external_policy_path);
 
   external_policy_path =
       external_policy_path.Append(install_static::kCompanyPathName)
-          .Append(kCachedPolicyDirname)
-          .AppendASCII(
-              policy::dm_protocol::kChromeMachineLevelUserCloudPolicyTypeBase64)
-          .Append(kCachedPolicyFilename);
+          .Append(kCachedPolicyDirname);
 #endif
 
   return external_policy_path;
@@ -226,7 +153,8 @@ ChromeBrowserCloudManagementControllerDesktop::
 void ChromeBrowserCloudManagementControllerDesktop::InitializeOAuthTokenFactory(
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
     PrefService* local_state) {
-  DeviceOAuth2TokenServiceFactory::Initialize(url_loader_factory, local_state);
+  DeviceOAuth2TokenServiceFactory::Initialize(
+      url_loader_factory, local_state, g_browser_process->os_crypt_async());
 }
 
 void ChromeBrowserCloudManagementControllerDesktop::StartWatchingRegistration(
@@ -251,7 +179,7 @@ bool ChromeBrowserCloudManagementControllerDesktop::
           kEnrollmentSuccess:
       case ChromeBrowserCloudManagementController::RegisterResult::
           kEnrollmentFailedSilently:
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
         app_controller_mac::EnterpriseStartupDialogClosed();
 #endif
         return true;
@@ -277,40 +205,26 @@ bool ChromeBrowserCloudManagementControllerDesktop::
 void ChromeBrowserCloudManagementControllerDesktop::OnServiceAccountSet(
     CloudPolicyClient* client,
     const std::string& account_email) {
-  if (!base::FeatureList::IsEnabled(
-          policy::features::kCBCMPolicyInvalidations)) {
-    return;
-  }
-
-  // No need to get a refresh token if there is one present already.
-  if (!DeviceOAuth2TokenServiceFactory::Get()->RefreshTokenIsAvailable()) {
-    // If this feature is enabled, we need to ensure the device service
-    // account is initialized and fetch auth codes to exchange for a refresh
-    // token. Creating this object starts that process and the callback will
-    // be called from it whether it succeeds or not.
-    DeviceOAuth2TokenServiceFactory::Get()->SetServiceAccountEmail(
-        account_email);
-    account_initializer_helper_ = std::make_unique<
-        MachineLevelDeviceAccountInitializerHelper>(
-        std::move(client),
-        base::BindOnce(
-            &ChromeBrowserCloudManagementControllerDesktop::AccountInitCallback,
-            base::Unretained(this), account_email),
-        gaia_url_loader_factory_
-            ? gaia_url_loader_factory_
-            : g_browser_process->system_network_context_manager()
-                  ->GetSharedURLLoaderFactory());
-  } else if (!policy_invalidator_) {
-    // There's already a refresh token available but no |policy_invalidator_|
-    // which means this is browser startup and the refresh token was retrieved
-    // from local storage. It's OK to start invalidations now.
-    StartInvalidations();
-  }
+  invalidations_initializer_.OnServiceAccountSet(client, account_email);
 }
 
 void ChromeBrowserCloudManagementControllerDesktop::ShutDown() {
-  if (policy_invalidator_)
-    policy_invalidator_->Shutdown();
+  policy_invalidator_.reset();
+  extension_install_invalidator_.reset();
+  commands_invalidator_.reset();
+  fm_registration_token_uploaders_.clear();
+  invalidation_listener_per_project_.clear();
+  device_instance_id_driver_.reset();
+  legacy_topics_cleaner_.reset();
+
+  // In some tests, `DCHECK_CURRENTLY_ON(content::BrowserThread::UI)` fails.
+  // Such tests have not initialized device_oauth2_token_service anyway, so
+  // skip calling Shutdown() for the service.
+  if (!content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
+    CHECK_IS_TEST();
+    return;
+  }
+  DeviceOAuth2TokenServiceFactory::Shutdown();
 }
 
 MachineLevelUserCloudPolicyManager*
@@ -332,13 +246,29 @@ ChromeBrowserCloudManagementControllerDesktop::GetSharedURLLoaderFactory() {
       ->GetSharedURLLoaderFactory();
 }
 
-std::unique_ptr<enterprise_reporting::ReportScheduler>
-ChromeBrowserCloudManagementControllerDesktop::CreateReportScheduler(
-    CloudPolicyClient* client) {
-  auto generator = std::make_unique<enterprise_reporting::ReportGenerator>(
-      &reporting_delegate_factory_);
-  return std::make_unique<enterprise_reporting::ReportScheduler>(
-      client, std::move(generator), &reporting_delegate_factory_);
+scoped_refptr<base::SingleThreadTaskRunner>
+ChromeBrowserCloudManagementControllerDesktop::GetBestEffortTaskRunner() {
+  // ChromeBrowserCloudManagementControllerDesktop is bound to BrowserThread::UI
+  // and so must its best-effort task runner.
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  return content::GetUIThreadTaskRunner({base::TaskPriority::BEST_EFFORT});
+}
+
+std::unique_ptr<enterprise_reporting::ReportingDelegateFactory>
+ChromeBrowserCloudManagementControllerDesktop::GetReportingDelegateFactory() {
+  return std::make_unique<
+      enterprise_reporting::ReportingDelegateFactoryDesktop>();
+}
+
+std::unique_ptr<enterprise_reporting::SaasUsageReportingDelegateFactory>
+ChromeBrowserCloudManagementControllerDesktop::
+    GetSaasUsageReportingDelegateFactory() {
+#if BUILDFLAG(IS_CHROMEOS)
+  return nullptr;
+#else
+  return enterprise_reporting::SaasUsageReportingDelegateFactoryDesktop::
+      CreateForBrowser();
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 }
 
 void ChromeBrowserCloudManagementControllerDesktop::SetGaiaURLLoaderFactory(
@@ -346,63 +276,168 @@ void ChromeBrowserCloudManagementControllerDesktop::SetGaiaURLLoaderFactory(
   gaia_url_loader_factory_ = url_loader_factory;
 }
 
-void ChromeBrowserCloudManagementControllerDesktop::StartInvalidations() {
-  DCHECK(
-      base::FeatureList::IsEnabled(policy::features::kCBCMPolicyInvalidations));
+bool ChromeBrowserCloudManagementControllerDesktop::
+    ReadyToCreatePolicyManager() {
+  return true;
+}
 
-  identity_provider_ = std::make_unique<DeviceIdentityProvider>(
-      DeviceOAuth2TokenServiceFactory::Get());
+bool ChromeBrowserCloudManagementControllerDesktop::ReadyToInit() {
+  return true;
+}
+
+std::unique_ptr<ClientDataDelegate>
+ChromeBrowserCloudManagementControllerDesktop::CreateClientDataDelegate() {
+  return std::make_unique<ClientDataDelegateDesktop>();
+}
+
+std::unique_ptr<enterprise_connectors::DeviceTrustKeyManager>
+ChromeBrowserCloudManagementControllerDesktop::CreateDeviceTrustKeyManager() {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+  auto* browser_dm_token_storage = BrowserDMTokenStorage::Get();
+  auto* device_management_service = GetDeviceManagementService();
+  auto shared_url_loader_factory = GetSharedURLLoaderFactory();
+
+  auto key_rotation_launcher =
+      enterprise_connectors::KeyRotationLauncher::Create(
+          browser_dm_token_storage, device_management_service,
+          shared_url_loader_factory);
+  auto key_loader = enterprise_connectors::KeyLoader::Create(
+      device_management_service, shared_url_loader_factory);
+
+  return std::make_unique<enterprise_connectors::DeviceTrustKeyManagerImpl>(
+      std::move(key_rotation_launcher), std::move(key_loader));
+#else
+  return nullptr;
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+}
+
+std::unique_ptr<client_certificates::CertificateProvisioningService>
+ChromeBrowserCloudManagementControllerDesktop::
+    CreateCertificateProvisioningService() {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+  if (!certificate_store_) {
+    certificate_store_ =
+        std::make_unique<client_certificates::PrefsCertificateStore>(
+            g_browser_process->local_state(),
+            client_certificates::CreatePrivateKeyFactory());
+  }
+
+  return client_certificates::CreateBrowserCertificateProvisioningService(
+      g_browser_process->local_state(), certificate_store_.get(),
+      GetDeviceManagementService(), GetSharedURLLoaderFactory());
+#else
+  return nullptr;
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+}
+
+void ChromeBrowserCloudManagementControllerDesktop::StartInvalidations() {
+  if (IsInvalidationsServiceStarted()) {
+    NOTREACHED() << "Trying to start an invalidation service when there's "
+                    "already one. Please see crbug.com/40172363.";
+  }
+
   device_instance_id_driver_ = std::make_unique<instance_id::InstanceIDDriver>(
       g_browser_process->gcm_driver());
 
-  invalidation_service_ =
-      std::make_unique<invalidation::FCMInvalidationService>(
-          identity_provider_.get(),
-          base::BindRepeating(&syncer::FCMNetworkHandler::Create,
-                              g_browser_process->gcm_driver(),
-                              device_instance_id_driver_.get()),
-          base::BindRepeating(
-              &syncer::PerUserTopicSubscriptionManager::Create,
-              identity_provider_.get(), g_browser_process->local_state(),
-              base::RetainedRef(
-                  g_browser_process->shared_url_loader_factory())),
-          device_instance_id_driver_.get(), g_browser_process->local_state(),
-          policy::kPolicyFCMInvalidationSenderID);
-  invalidation_service_->Init();
-
-  policy_invalidator_ = std::make_unique<CloudPolicyInvalidator>(
-      PolicyInvalidationScope::kCBCM,
-      g_browser_process->browser_policy_connector()
-          ->machine_level_user_cloud_policy_manager()
-          ->core(),
-      base::ThreadTaskRunnerHandle::Get(), base::DefaultClock::GetInstance(),
-      0 /* highest_handled_invalidation_version */);
-  policy_invalidator_->Initialize(invalidation_service_.get());
-
-  if (base::FeatureList::IsEnabled(policy::features::kCBCMRemoteCommands)) {
-    g_browser_process->browser_policy_connector()
-        ->machine_level_user_cloud_policy_manager()
-        ->core()
-        ->StartRemoteCommandsService(
-            std::make_unique<enterprise_commands::CBCMRemoteCommandsFactory>(),
-            PolicyInvalidationScope::kCBCM);
-
-    commands_invalidator_ = std::make_unique<RemoteCommandsInvalidatorImpl>(
-        g_browser_process->browser_policy_connector()
-            ->machine_level_user_cloud_policy_manager()
-            ->core(),
-        base::DefaultClock::GetInstance(), PolicyInvalidationScope::kCBCM);
-    commands_invalidator_->Initialize(invalidation_service_.get());
-    commands_invalidator_->Start();
+  for (const int64_t project_number : GetAllInvalidationProjectNumbers()) {
+    invalidation_listener_per_project_[project_number] =
+        invalidation::InvalidationListener::Create(
+            g_browser_process->gcm_driver(), device_instance_id_driver_.get(),
+            project_number, kInvalidationListenerLogPrefix);
   }
+
+  auto* core = g_browser_process->browser_policy_connector()
+                   ->machine_level_user_cloud_policy_manager()
+                   ->core();
+
+  invalidation::InvalidationListener* policy_invalidation_listener =
+      invalidation_listener_per_project_
+          [policy::kPolicyInvalidationProjectNumber]
+              .get();
+  policy_invalidator_ = std::make_unique<CloudPolicyInvalidator>(
+      PolicyInvalidationScope::kCBCM, policy_invalidation_listener, core,
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
+      base::DefaultClock::GetInstance());
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+  if (CanStartExtensionInstallPolicyInvalidator()) {
+    StartExtensionInstallPolicyInvalidator();
+  }
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+
+  core->StartRemoteCommandsService(
+      std::make_unique<enterprise_commands::CBCMRemoteCommandsFactory>(),
+      PolicyInvalidationScope::kCBCM);
+
+  invalidation::InvalidationListener* remote_commands_invalidation_listener =
+      invalidation_listener_per_project_
+          [policy::kRemoteCommandsInvalidationsProjectNumber]
+              .get();
+  commands_invalidator_ = std::make_unique<RemoteCommandsInvalidator>(
+      remote_commands_invalidation_listener, core,
+      base::DefaultClock::GetInstance(), PolicyInvalidationScope::kCBCM);
+
+  for (const auto& [project_number, invalidation_listener] :
+       invalidation_listener_per_project_) {
+    fm_registration_token_uploaders_.emplace_back(
+        std::make_unique<FmRegistrationTokenUploader>(
+            PolicyInvalidationScope::kCBCM, invalidation_listener.get(), core));
+  }
+
+  legacy_topics_cleaner_ = std::make_unique<invalidation::LegacyTopicsCleaner>(
+      g_browser_process->shared_url_loader_factory(),
+      std::make_unique<DeviceIdentityProvider>(
+          DeviceOAuth2TokenServiceFactory::Get()),
+      g_browser_process->local_state());
 }
 
-void ChromeBrowserCloudManagementControllerDesktop::AccountInitCallback(
-    const std::string& account_email,
-    bool success) {
-  account_initializer_helper_.reset();
-  if (success)
-    StartInvalidations();
+bool ChromeBrowserCloudManagementControllerDesktop::
+    CanStartExtensionInstallPolicyInvalidator() const {
+  return base::FeatureList::IsEnabled(
+             policy::features::kEnableExtensionInstallPolicyFetching) &&
+        !extension_install_invalidator_ &&
+         IsInvalidationsServiceStarted() &&
+         g_browser_process->browser_policy_connector()
+             ->machine_level_user_cloud_policy_manager()
+             ->extension_install_core();
+}
+
+void ChromeBrowserCloudManagementControllerDesktop::
+    StartExtensionInstallPolicyInvalidator() {
+  if (!base::FeatureList::IsEnabled(
+          policy::features::kEnableExtensionInstallPolicyFetching)) {
+    return;
+  }
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+  // Must be called after normal invalidations have started
+  CHECK(IsInvalidationsServiceStarted());
+  auto* extension_install_core = g_browser_process->browser_policy_connector()
+                                     ->machine_level_user_cloud_policy_manager()
+                                     ->extension_install_core();
+  CHECK(extension_install_core);
+  extension_install_invalidator_ =
+      std::make_unique<ExtensionInstallPolicyInvalidator>(
+          PolicyInvalidationScope::kCBCM,
+          invalidation_listener_per_project_
+              [policy::kPolicyInvalidationProjectNumber]
+                  .get(),
+          extension_install_core,
+          base::SingleThreadTaskRunner::GetCurrentDefault(),
+          base::DefaultClock::GetInstance());
+#else
+  NOTREACHED();
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+}
+
+scoped_refptr<network::SharedURLLoaderFactory>
+ChromeBrowserCloudManagementControllerDesktop::GetURLLoaderFactory() {
+  return gaia_url_loader_factory_;
+}
+
+bool ChromeBrowserCloudManagementControllerDesktop::
+    IsInvalidationsServiceStarted() const {
+  // This object is created when StartInvalidations is called, and stays alive
+  // thereafter.
+  return !invalidation_listener_per_project_.empty();
 }
 
 }  // namespace policy

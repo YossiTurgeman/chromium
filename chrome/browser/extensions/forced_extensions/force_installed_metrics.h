@@ -1,18 +1,22 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_EXTENSIONS_FORCED_EXTENSIONS_FORCE_INSTALLED_METRICS_H_
 #define CHROME_BROWSER_EXTENSIONS_FORCED_EXTENSIONS_FORCE_INSTALLED_METRICS_H_
 
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "chrome/browser/extensions/forced_extensions/force_installed_tracker.h"
-#include "chrome/browser/extensions/forced_extensions/install_stage_tracker.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/browser/forced_extensions/install_stage_tracker.h"
 #include "extensions/browser/updater/extension_downloader_delegate.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 class Profile;
 
@@ -46,14 +50,16 @@ class ForceInstalledMetrics : public ForceInstalledTracker::Observer {
     // Session with Regular new user, which has a user name and password.
     USER_TYPE_REGULAR_NEW = 2,
     USER_TYPE_PUBLIC_ACCOUNT = 3,
-    USER_TYPE_SUPERVISED = 4,
+    // USER_TYPE_SUPERVISED_DEPRECATED = 4,
     USER_TYPE_KIOSK_APP = 5,
     USER_TYPE_CHILD = 6,
-    USER_TYPE_ARC_KIOSK_APP = 7,
+    // USER_TYPE_ARC_KIOSK_APP_DEPRECATED = 7,
     USER_TYPE_ACTIVE_DIRECTORY = 8,
     USER_TYPE_WEB_KIOSK_APP = 9,
+    USER_TYPE_KIOSK_IWA = 10,
+    USER_TYPE_KIOSK_ARCVM_APP = 11,
     // Maximum histogram value.
-    kMaxValue = USER_TYPE_WEB_KIOSK_APP
+    kMaxValue = USER_TYPE_KIOSK_ARCVM_APP
   };
 
   // ForceInstalledTracker::Observer overrides:
@@ -63,37 +69,54 @@ class ForceInstalledMetrics : public ForceInstalledTracker::Observer {
   // observers.
   void OnForceInstalledExtensionsLoaded() override;
 
+  // Calls ReportMetricsOnExtensionsReady method if there is a non-empty list of
+  // force-installed extensions.
+  void OnForceInstalledExtensionsReady() override;
+
   // Reports cache status for the force installed extensions.
   void OnExtensionDownloadCacheStatusRetrieved(
       const ExtensionId& id,
       ExtensionDownloaderDelegate::CacheStatus cache_status) override;
 
  private:
-  // Returns false if the extension status corresponds to a missing extension
-  // which is not yet installed or loaded.
-  bool IsStatusGood(ForceInstalledTracker::ExtensionStatus status);
-
   // Reports disable reasons for the extensions which are installed but not
   // loaded.
   void ReportDisableReason(const ExtensionId& extension_id);
 
-  // If |kInstallationTimeout| report time elapsed for extensions load,
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+  // Reports whether the greylisted force-installed extensions are enabled in
+  // high/low trust environments.
+  void ReportGreylistedStateByTrustLevel(const ExtensionId& extension_id,
+                                         bool is_low_trust_environment);
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+
+  // If `kInstallationTimeout` report time elapsed for extensions load,
   // otherwise amount of not yet loaded extensions and reasons
   // why they were not installed.
   void ReportMetrics();
 
-  ExtensionRegistry* const registry_;
-  Profile* const profile_;
-  ForceInstalledTracker* const tracker_;
+  // Reports metrics for sessions when all force installed extensions are ready
+  // for use.
+  void ReportMetricsOnExtensionsReady();
 
-  // Moment when the class was initialized.
+  const raw_ptr<ExtensionRegistry> registry_;
+  const raw_ptr<Profile> profile_;
+  const raw_ptr<ForceInstalledTracker> tracker_;
+
+  // Tracks the moment when the class was initialized and used as timer start
+  // for reporting metrics related to extensions not loaded after 5 minutes.
   base::Time start_time_;
 
-  // Tracks whether stats were already reported for the session.
-  bool reported_ = false;
+  // Tracks whether extensions load stats were already for the session.
+  bool load_reported_ = false;
 
-  ScopedObserver<ForceInstalledTracker, ForceInstalledTracker::Observer>
-      tracker_observer_{this};
+  // Tracks whether extensions ready stats were already reported for the
+  // session.
+  bool ready_reported_ = false;
+
+  base::ScopedObservation<ForceInstalledTracker,
+                          ForceInstalledTracker::Observer>
+      tracker_observation_{this};
 
   // Tracks installation reporting timeout.
   std::unique_ptr<base::OneShotTimer> timer_;

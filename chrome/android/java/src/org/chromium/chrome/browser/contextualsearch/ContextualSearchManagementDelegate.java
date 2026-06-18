@@ -1,39 +1,44 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.contextualsearch;
 
-import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayContentDelegate;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayPanel.StateChangeReason;
-import org.chromium.chrome.browser.compositor.bottombar.contextualsearch.ContextualSearchPanel;
-import org.chromium.components.browser_ui.widget.scrim.ScrimCoordinator;
+import android.app.Activity;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanel.StateChangeReason;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanelContentDelegate;
+import org.chromium.chrome.browser.compositor.overlay_panel.contextualsearch.ContextualSearchPanel;
+import org.chromium.components.browser_ui.widget.scrim.ScrimManager;
 
 /**
- * The delegate that provides global management functionality for Contextual Search.
+ * Provides an interface to allow external objects like the {@link ContextualSearchPanel} to drive
+ * specific actions in the {@link ContextualSearchManager} e.g tell it to close or promote the panel
+ * into a separate Tab.
  */
+@NullMarked
 public interface ContextualSearchManagementDelegate {
 
     /**
      * @return The ChromeActivity that associated with the manager.
      */
-    ChromeActivity getChromeActivity();
+    Activity getActivity();
 
-    /**
-     * Promotes the current Content View Core in the Contextual Search Panel to its own Tab.
-     */
+    /** Promotes the current Content View Core in the Contextual Search Panel to its own Tab. */
     void promoteToTab();
 
     /**
      * Sets the handle to the ContextualSearchPanel.
+     *
      * @param panel The ContextualSearchPanel.
      */
     void setContextualSearchPanel(ContextualSearchPanel panel);
 
     /**
-     * Gets whether the device is running in compatibility mode for Contextual Search.
-     * If so, a new tab showing search results should be opened instead of showing the panel.
+     * Gets whether the device is running in compatibility mode for Contextual Search. If so, a new
+     * tab showing search results should be opened instead of showing the panel.
+     *
      * @return whether the device is running in compatibility mode.
      */
     boolean isRunningInCompatibilityMode();
@@ -62,33 +67,37 @@ public interface ContextualSearchManagementDelegate {
      */
     void onCloseContextualSearch(@StateChangeReason int reason);
 
-    /**
-     * @return An OverlayContentDelegate to watch events on the panel's content.
-     */
-    OverlayContentDelegate getOverlayContentDelegate();
+    /** Notifies that the Panel has started a transition from an open state to the peeking state. */
+    void onPanelCollapsing();
 
     /**
-     * Log the current state of Contextual Search.
+     * @return An OverlayPanelContentDelegate to watch events on the panel's content.
      */
+    OverlayPanelContentDelegate getOverlayPanelContentDelegate();
+
+    /** Log the current state of Contextual Search. */
     void logCurrentState();
 
-    /**
-     * Called when the Contextual Search panel's animation is finished and it's shown.
-     */
+    /** Called when the Contextual Search panel is closed. */
     void onPanelFinishedShowing();
 
     /**
-     * Called when the Contextual Search panel is resized.
+     * Notifies that a Related Searches suggestion has been clicked, and whether it was shown in the
+     * Bar or the content area of the Panel.
+     *
+     * @param suggestionIndex The 0-based index into the list of suggestions provided by the panel
+     *     and presented in the UI. E.g. if the user clicked the second chip this value would be 1.
      */
-    void onPanelResized();
+    void onRelatedSearchesSuggestionClicked(int suggestionIndex);
+
+    /** Returns the {@link ScrimManager} to fade the status bar in and out. */
+    ScrimManager getScrimManager();
 
     /**
-     * Called when the privacy Opt-in in the panel has been accepted.
+     * @param enabled Whether The user to choose fully Contextual Search privacy opt-in.
      */
-    void onPromoOptIn();
+    void setContextualSearchPromoCardSelection(boolean enabled);
 
-    /**
-     * @return A {@link ScrimCoordinator} to fade the status bar in and out.
-     */
-    ScrimCoordinator getScrimCoordinator();
+    /** Notifies that a promo card has been shown. */
+    void onPromoShown();
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,17 @@
 #define GOOGLE_APIS_GAIA_OAUTH2_ACCESS_TOKEN_FETCHER_IMPL_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "base/component_export.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "google_apis/gaia/oauth2_access_token_consumer.h"
 #include "google_apis/gaia/oauth2_access_token_fetcher.h"
+#include "google_apis/gaia/oauth2_response.h"
+#include "net/traffic_annotation/network_traffic_annotation.h"
 #include "url/gurl.h"
 
 class OAuth2AccessTokenFetcherImplTest;
@@ -24,13 +27,11 @@ class SharedURLLoaderFactory;
 }
 
 // Abstracts the details to get OAuth2 access token from OAuth2 refresh token.
-// See "Using the Refresh Token" section in:
-// http://code.google.com/apis/accounts/docs/OAuth2WebServer.html
+// See general document about Oauth2 in https://tools.ietf.org/html/rfc6749.
 //
 // This class should be used on a single thread, but it can be whichever thread
-// that you like.
-// Also, do not reuse the same instance. Once Start() is called, the instance
-// should not be reused.
+// that you like. Also, do not reuse the same instance. Once Start() is called,
+// the instance should not be reused.
 //
 // Usage:
 // * Create an instance with a consumer.
@@ -39,13 +40,21 @@ class SharedURLLoaderFactory;
 //   thread Start was called with the results.
 //
 // This class can handle one request at a time. To parallelize requests,
-// create multiple instances.
-class OAuth2AccessTokenFetcherImpl : public OAuth2AccessTokenFetcher {
+// create multiple instances.  Prefer `GaiaAccessTokenFetcher` over this class
+// while talking to Google's OAuth servers.
+class COMPONENT_EXPORT(GOOGLE_APIS) OAuth2AccessTokenFetcherImpl
+    : public OAuth2AccessTokenFetcher {
  public:
   OAuth2AccessTokenFetcherImpl(
       OAuth2AccessTokenConsumer* consumer,
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
-      const std::string& refresh_token);
+      const std::string& refresh_token,
+      const std::string& auth_code = std::string());
+
+  OAuth2AccessTokenFetcherImpl(const OAuth2AccessTokenFetcherImpl&) = delete;
+  OAuth2AccessTokenFetcherImpl& operator=(const OAuth2AccessTokenFetcherImpl&) =
+      delete;
+
   ~OAuth2AccessTokenFetcherImpl() override;
 
   // Implementation of OAuth2AccessTokenFetcher
@@ -60,41 +69,56 @@ class OAuth2AccessTokenFetcherImpl : public OAuth2AccessTokenFetcher {
     INITIAL,
     GET_ACCESS_TOKEN_STARTED,
     GET_ACCESS_TOKEN_DONE,
+    GET_ACCESS_TOKEN_CANCELED,
     ERROR_STATE,
   };
 
-  void OnURLLoadComplete(std::unique_ptr<std::string> response_body);
+  // Derived classes override these methods to record UMA histograms if needed.
+  virtual void RecordResponseCodeUma(int error_value) const {}
+  virtual void RecordOAuth2Response(OAuth2Response response) const {}
+
+  // Derived class must specify the GetAccessToken base URL to use.
+  virtual GURL GetAccessTokenURL() const = 0;
+
+  // Derived classes must specify a network annotation for the fetcher.
+  virtual net::NetworkTrafficAnnotationTag GetTrafficAnnotationTag() const = 0;
+
+  void OnURLLoadComplete(std::optional<std::string> response_body);
 
   // Helper methods for the flow.
   void StartGetAccessToken();
-  void EndGetAccessToken(std::unique_ptr<std::string> response_body);
+  void EndGetAccessToken(std::optional<std::string> response_body);
 
   // Helper mehtods for reporting back results.
   void OnGetTokenSuccess(
       const OAuth2AccessTokenConsumer::TokenResponse& token_response);
   void OnGetTokenFailure(const GoogleServiceAuthError& error);
 
-  // Other helpers.
-  static GURL MakeGetAccessTokenUrl();
   static std::string MakeGetAccessTokenBody(
       const std::string& client_id,
       const std::string& client_secret,
       const std::string& refresh_token,
+      const std::string& auth_code,
       const std::vector<std::string>& scopes);
 
   static bool ParseGetAccessTokenSuccessResponse(
-      std::unique_ptr<std::string> response_body,
-      std::string* access_token,
-      int* expires_in,
-      std::string* id_token);
+      const std::string& response_body,
+      OAuth2AccessTokenConsumer::TokenResponse* token_response);
 
+  // Parses `response_body` as JSON and populates the corresponding output
+  // pointers. Returns true if parsing was successful, false otherwise. Note:
+  // `error_subtype` and `error_description` are optional fields - an empty
+  // string is returned if they are not present in `response_body`.
   static bool ParseGetAccessTokenFailureResponse(
-      std::unique_ptr<std::string> response_body,
-      std::string* error);
+      const std::string& response_body,
+      std::string* error,
+      std::string* error_subtype,
+      std::string* error_description);
 
   // State that is set during construction.
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
   const std::string refresh_token_;
+  const std::string auth_code_;
   State state_;
 
   // While a fetch is in progress.
@@ -122,7 +146,10 @@ class OAuth2AccessTokenFetcherImpl : public OAuth2AccessTokenFetcher {
                            ParseGetAccessTokenFailure);
   FRIEND_TEST_ALL_PREFIXES(OAuth2AccessTokenFetcherImplTest,
                            ParseGetAccessTokenFailureInvalidError);
-  DISALLOW_COPY_AND_ASSIGN(OAuth2AccessTokenFetcherImpl);
+  FRIEND_TEST_ALL_PREFIXES(OAuth2AccessTokenFetcherImplTest,
+                           ParseGetAccessTokenFailureForMissingRaptError);
+  FRIEND_TEST_ALL_PREFIXES(OAuth2AccessTokenFetcherImplTest,
+                           ParseGetAccessTokenFailureForInvalidRaptError);
 };
 
 #endif  // GOOGLE_APIS_GAIA_OAUTH2_ACCESS_TOKEN_FETCHER_IMPL_H_

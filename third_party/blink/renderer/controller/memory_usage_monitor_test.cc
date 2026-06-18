@@ -1,10 +1,13 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/controller/memory_usage_monitor.h"
 
+#include <memory>
+
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 
 namespace blink {
@@ -23,7 +26,7 @@ class MemoryUsageMonitorTest : public testing::Test {
   MemoryUsageMonitorTest() = default;
 
   void SetUp() override {
-    monitor_.reset(new MemoryUsageMonitor);
+    monitor_ = std::make_unique<MemoryUsageMonitor>();
     MemoryUsageMonitor::SetInstanceForTesting(monitor_.get());
   }
 
@@ -33,6 +36,7 @@ class MemoryUsageMonitorTest : public testing::Test {
   }
 
  private:
+  test::TaskEnvironment task_environment_;
   std::unique_ptr<MemoryUsageMonitor> monitor_;
 };
 
@@ -45,14 +49,14 @@ TEST_F(MemoryUsageMonitorTest, StartStopMonitor) {
   EXPECT_TRUE(MemoryUsageMonitor::Instance().TimerIsActive());
   EXPECT_EQ(0, observer->count());
 
-  test::RunDelayedTasks(base::TimeDelta::FromSeconds(1));
+  test::RunDelayedTasks(base::Seconds(1));
   EXPECT_EQ(1, observer->count());
 
-  test::RunDelayedTasks(base::TimeDelta::FromSeconds(1));
+  test::RunDelayedTasks(base::Seconds(1));
   EXPECT_EQ(2, observer->count());
   MemoryUsageMonitor::Instance().RemoveObserver(observer.get());
 
-  test::RunDelayedTasks(base::TimeDelta::FromSeconds(1));
+  test::RunDelayedTasks(base::Seconds(1));
   EXPECT_EQ(2, observer->count());
   EXPECT_FALSE(MemoryUsageMonitor::Instance().TimerIsActive());
 }
@@ -74,10 +78,10 @@ TEST_F(MemoryUsageMonitorTest, RemoveObserverFromNotification) {
   MemoryUsageMonitor::Instance().AddObserver(observer2.get());
   EXPECT_EQ(0, observer1->count());
   EXPECT_EQ(0, observer2->count());
-  test::RunDelayedTasks(base::TimeDelta::FromSeconds(1));
+  test::RunDelayedTasks(base::Seconds(1));
   EXPECT_EQ(1, observer1->count());
   EXPECT_EQ(1, observer2->count());
-  test::RunDelayedTasks(base::TimeDelta::FromSeconds(1));
+  test::RunDelayedTasks(base::Seconds(1));
   EXPECT_EQ(1, observer1->count());
   EXPECT_EQ(2, observer2->count());
 }

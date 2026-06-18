@@ -1,10 +1,10 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/sync_file_system/drive_backend/callback_tracker.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace sync_file_system {
@@ -25,13 +25,13 @@ TEST(CallbackTrackerTest, AbortAll) {
 
   bool aborted = false;
   bool invoked = false;
-  base::Closure callback = tracker.Register(base::Bind(&Receiver, &aborted),
-                                            base::Bind(&Receiver, &invoked));
+  base::OnceClosure callback = tracker.Register(
+      base::BindOnce(&Receiver, &aborted), base::BindOnce(&Receiver, &invoked));
   tracker.AbortAll();
   EXPECT_TRUE(aborted);
   EXPECT_FALSE(invoked);
 
-  callback.Run();
+  std::move(callback).Run();
   EXPECT_TRUE(aborted);
   EXPECT_FALSE(invoked);
 }
@@ -41,16 +41,11 @@ TEST(CallbackTrackerTest, Invoke) {
 
   bool aborted = false;
   bool invoked = false;
-  base::Closure callback = tracker.Register(base::Bind(&Receiver, &aborted),
-                                            base::Bind(&Receiver, &invoked));
-  callback.Run();
+  base::OnceClosure callback = tracker.Register(
+      base::BindOnce(&Receiver, &aborted), base::BindOnce(&Receiver, &invoked));
+  std::move(callback).Run();
   EXPECT_FALSE(aborted);
   EXPECT_TRUE(invoked);
-
-  // Second call should not do anything.
-  invoked = false;
-  callback.Run();
-  EXPECT_FALSE(invoked);
 
   tracker.AbortAll();
   EXPECT_FALSE(aborted);

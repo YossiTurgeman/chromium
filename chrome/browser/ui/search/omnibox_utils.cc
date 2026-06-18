@@ -1,42 +1,87 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/search/omnibox_utils.h"
 
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/location_bar/location_bar.h"
-#include "chrome/browser/ui/omnibox/clipboard_utils.h"
-#include "components/omnibox/browser/omnibox_edit_model.h"
-#include "components/omnibox/browser/omnibox_popup_model.h"
-#include "components/omnibox/browser/omnibox_view.h"
+#include "chrome/browser/ui/omnibox/omnibox_controller.h"
+#include "chrome/browser/ui/omnibox/omnibox_edit_model.h"
+#include "chrome/browser/ui/omnibox/omnibox_view.h"
+#include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/web_contents.h"
+
+namespace search {
 
 namespace {
 
-OmniboxView* GetOmniboxView(content::WebContents* web_contents) {
-  Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
-  if (!browser)
+LocationBar* GetLocationBar(content::WebContents* web_contents) {
+  if (!web_contents) {
     return nullptr;
-  return browser->window()->GetLocationBar()->GetOmniboxView();
+  }
+
+  const auto* tab = tabs::TabInterface::MaybeGetFromContents(web_contents);
+  if (!tab) {
+    return nullptr;
+  }
+
+  auto* bwi =
+      const_cast<BrowserWindowInterface*>(tab->GetBrowserWindowInterface());
+  if (!bwi) {
+    return nullptr;
+  }
+
+  return bwi->GetFeatures().location_bar();
+}
+
+OmniboxView* GetOmniboxView(content::WebContents* web_contents) {
+  auto* location_bar = GetLocationBar(web_contents);
+  if (!location_bar) {
+    return nullptr;
+  }
+
+  return location_bar->GetOmniboxView();
+}
+
+OmniboxEditModel* GetOmniboxEditModel(content::WebContents* web_contents) {
+  auto* controller = GetOmniboxController(web_contents);
+  if (!controller) {
+    return nullptr;
+  }
+
+  return controller->edit_model();
 }
 
 }  // namespace
 
-namespace search {
+OmniboxController* GetOmniboxController(content::WebContents* web_contents) {
+  auto* location_bar = GetLocationBar(web_contents);
+  if (!location_bar) {
+    return nullptr;
+  }
+
+  return location_bar->GetOmniboxController();
+}
 
 void FocusOmnibox(bool focus, content::WebContents* web_contents) {
-  OmniboxView* omnibox_view = GetOmniboxView(web_contents);
-  if (!omnibox_view)
+  auto* omnibox_view = GetOmniboxView(web_contents);
+  if (!omnibox_view) {
     return;
+  }
+  auto* controller = GetOmniboxController(web_contents);
+  if (!controller) {
+    return;
+  }
+  auto* edit_model = controller->edit_model();
 
   if (focus) {
-    // This is an invisible focus to support "realbox" implementations on NTPs
+    // This is an invisible focus to support "fakebox" implementations on NTPs
     // (including other search providers). We shouldn't consider it as the user
     // explicitly focusing the omnibox.
     omnibox_view->SetFocus(/*is_user_initiated=*/false);
-    omnibox_view->model()->SetCaretVisibility(false);
+    edit_model->SetCaretVisibility(false);
     // If the user clicked on the fakebox, any text already in the omnibox
     // should get cleared when they start typing. Selecting all the existing
     // text is a convenient way to accomplish this. It also gives a slight
@@ -48,43 +93,19 @@ void FocusOmnibox(bool focus, content::WebContents* web_contents) {
     // Remove focus only if the popup is closed. This will prevent someone
     // from changing the omnibox value and closing the popup without user
     // interaction.
-    if (!omnibox_view->model()->popup_model()->IsOpen())
+    if (!controller->IsPopupOpen()) {
       web_contents->Focus();
+    }
   }
-}
-
-void PasteIntoOmnibox(const base::string16& text,
-                      content::WebContents* web_contents) {
-  OmniboxView* omnibox_view = GetOmniboxView(web_contents);
-  if (!omnibox_view)
-    return;
-  // The first case is for right click to paste, where the text is retrieved
-  // from the clipboard already sanitized. The second case is needed to handle
-  // drag-and-drop value and it has to be sanitazed before setting it into the
-  // omnibox.
-  base::string16 text_to_paste = text.empty()
-                                     ? GetClipboardText()
-                                     : omnibox_view->SanitizeTextForPaste(text);
-
-  if (text_to_paste.empty())
-    return;
-
-  if (!omnibox_view->model()->has_focus()) {
-    // Pasting into a "realbox" should not be considered the user explicitly
-    // focusing the omnibox.
-    omnibox_view->SetFocus(/*is_user_initiated=*/false);
-  }
-
-  omnibox_view->OnBeforePossibleChange();
-  omnibox_view->model()->OnPaste();
-  omnibox_view->SetUserText(text_to_paste);
-  omnibox_view->OnAfterPossibleChange(true);
 }
 
 bool IsOmniboxInputInProgress(content::WebContents* web_contents) {
-  OmniboxView* omnibox_view = GetOmniboxView(web_contents);
-  return omnibox_view && omnibox_view->model()->user_input_in_progress() &&
-         omnibox_view->model()->focus_state() == OMNIBOX_FOCUS_VISIBLE;
+  auto* edit_model = GetOmniboxEditModel(web_contents);
+  if (!edit_model) {
+    return false;
+  }
+  return edit_model->user_input_in_progress() &&
+         edit_model->focus_state() == OMNIBOX_FOCUS_VISIBLE;
 }
 
 }  // namespace search

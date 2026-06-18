@@ -1,265 +1,205 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.sync;
 
-import android.accounts.Account;
-
 import androidx.test.filters.LargeTest;
 
-import org.hamcrest.Matchers;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TestRule;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.util.CallbackHelper;
 import org.chromium.base.test.util.CommandLineFlags;
-import org.chromium.base.test.util.DisabledTest;
+import org.chromium.base.test.util.Criteria;
+import org.chromium.base.test.util.CriteriaHelper;
+import org.chromium.base.test.util.DisableIf;
+import org.chromium.base.test.util.DoNotBatch;
 import org.chromium.base.test.util.Feature;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.base.test.util.Matchers;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
-import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.signin.IdentityServicesProvider;
-import org.chromium.chrome.browser.signin.SigninHelper;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.util.browser.Features;
-import org.chromium.chrome.test.util.browser.signin.MockChangeEventChecker;
 import org.chromium.chrome.test.util.browser.sync.SyncTestUtil;
-import org.chromium.components.sync.test.util.MockSyncContentResolverDelegate;
-import org.chromium.content_public.browser.test.util.Criteria;
-import org.chromium.content_public.browser.test.util.CriteriaHelper;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.components.signin.base.CoreAccountInfo;
+import org.chromium.components.sync.DataType;
+import org.chromium.components.sync.LocalDataDescription;
+import org.chromium.components.sync.PassphraseType;
+import org.chromium.components.sync.TransportState;
+import org.chromium.components.sync.UserSelectableType;
+import org.chromium.ui.base.DeviceFormFactor;
 
-/**
- * Test suite for Sync.
- */
+import java.util.Set;
+
+/** Test suite for Sync. */
 @RunWith(ChromeJUnit4ClassRunner.class)
+@DoNotBatch(reason = "TODO(crbug.com/40743432): SyncTestRule doesn't support batching.")
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class SyncTest {
-    @Rule
-    public SyncTestRule mSyncTestRule = new SyncTestRule();
-    @Rule
-    public TestRule mProcessorRule = new Features.JUnitProcessor();
+    @Rule public SyncTestRule mSyncTestRule = new SyncTestRule();
 
-    private static final String TAG = "SyncTest";
-
-    @Test
-    @LargeTest
-    @Feature({"Sync"})
-    public void testSignInAndOut() {
-        Account account = mSyncTestRule.setUpAccountAndSignInForTesting();
-
-        // Signing out should disable sync.
-        mSyncTestRule.signOut();
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-
-        // Signing back in should re-enable sync.
-        mSyncTestRule.signinAndEnableSync(account);
-        Assert.assertTrue("Sync should be re-enabled.", SyncTestUtil.isSyncActive());
+    /** Waits until {@link SyncService#isSyncingUnencryptedUrls} returns desired value. */
+    private void waitForIsSyncingUnencryptedUrls(boolean desiredValue) {
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    Criteria.checkThat(
+                            mSyncTestRule.getSyncService().isSyncingUnencryptedUrls(),
+                            Matchers.is(desiredValue));
+                },
+                SyncTestUtil.TIMEOUT_MS,
+                SyncTestUtil.INTERVAL_MS);
     }
 
     @Test
     @LargeTest
     @Feature({"Sync"})
+    @DisableIf.Device(DeviceFormFactor.DESKTOP_FREEFORM) // crbug.com/511288619
     public void testStopAndClear() {
+        mSyncTestRule.getFakeServerHelper().setTrustedVaultNigori(new byte[] {1, 2, 3, 4});
         mSyncTestRule.setUpAccountAndSignInForTesting();
         CriteriaHelper.pollUiThread(
-                ()
-                        -> IdentityServicesProvider.get()
-                                   .getIdentityManager(Profile.getLastUsedRegularProfile())
-                                   .hasPrimaryAccount(),
-                "Timed out checking that hasPrimaryAccount() == true", SyncTestUtil.TIMEOUT_MS,
+                () ->
+                        mSyncTestRule.getSyncService().getPassphraseType()
+                                == PassphraseType.TRUSTED_VAULT_PASSPHRASE,
+                "Timed out checking getPassphraseType() == PassphraseType.TRUSTED_VAULT_PASSPHRASE",
+                SyncTestUtil.TIMEOUT_MS,
                 SyncTestUtil.INTERVAL_MS);
 
         mSyncTestRule.clearServerData();
 
-        // Clearing server data should turn off sync and sign out of chrome.
-        Assert.assertNull(mSyncTestRule.getCurrentSignedInAccount());
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
+        // Sync should get re-initialized with the default passphrase type, KEYSTORE_PASSPHRASE.
         CriteriaHelper.pollUiThread(
-                ()
-                        -> !IdentityServicesProvider.get()
-                                    .getIdentityManager(Profile.getLastUsedRegularProfile())
-                                    .hasPrimaryAccount(),
-                "Timed out checking that hasPrimaryAccount() == false", SyncTestUtil.TIMEOUT_MS,
+                () ->
+                        mSyncTestRule.getSyncService().getPassphraseType()
+                                == PassphraseType.KEYSTORE_PASSPHRASE,
+                "Timed out checking getPassphraseType() == PassphraseType.KEYSTORE_PASSPHRASE",
+                SyncTestUtil.TIMEOUT_MS,
                 SyncTestUtil.INTERVAL_MS);
-    }
-
-    /*
-     * @FlakyTest
-     * @LargeTest
-     * @Feature({"Sync"})
-     */
-    @Test
-    @DisabledTest(message = "crbug.com/588050,crbug.com/595893")
-    public void testRename() {
-        // The two accounts object that would represent the account rename.
-        final Account oldAccount = mSyncTestRule.setUpAccountAndSignInForTesting();
-        final Account newAccount = mSyncTestRule.addAccount("test2@gmail.com");
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            // First, we force a call to updateAccountRenameData. In the real world,
-            // this should be called by one of our broadcast listener that listens to
-            // real account rename events instead of the mocks.
-            MockChangeEventChecker eventChecker = new MockChangeEventChecker();
-            eventChecker.insertRenameEvent(oldAccount.name, newAccount.name);
-            SigninHelper.updateAccountRenameData(eventChecker, oldAccount.name);
-
-            // Tell the fake content resolver that a rename had happen and copy over the sync
-            // settings.
-            MockSyncContentResolverDelegate contentResolver =
-                    mSyncTestRule.getSyncContentResolver();
-            String authority = AndroidSyncSettings.getContractAuthority();
-            int oldIsSyncable = contentResolver.getIsSyncable(oldAccount, authority);
-            contentResolver.setIsSyncable(newAccount, authority, oldIsSyncable);
-            if (oldIsSyncable > 0) {
-                contentResolver.setSyncAutomatically(newAccount, authority,
-                        contentResolver.getSyncAutomatically(oldAccount, authority));
-            }
-
-            // Starts the rename process. Normally, this is triggered by the broadcast
-            // listener as well.
-            SigninHelper.get().validateAccountSettings(true);
-        });
-
-        CriteriaHelper.pollInstrumentationThread(() -> {
-            Criteria.checkThat(mSyncTestRule.getCurrentSignedInAccount(), Matchers.is(newAccount));
-        });
-        SyncTestUtil.waitForSyncActive();
     }
 
     @Test
     @LargeTest
     @Feature({"Sync"})
     public void testStopAndStartSync() {
-        Account account = mSyncTestRule.setUpAccountAndSignInForTesting();
+        CoreAccountInfo accountInfo = mSyncTestRule.setUpAccountAndSignInForTesting();
+        Assert.assertEquals(accountInfo, mSyncTestRule.getPrimaryAccount());
 
-        mSyncTestRule.stopSync();
-        Assert.assertEquals(account, mSyncTestRule.getCurrentSignedInAccount());
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
+        // Signing out should disable sync.
+        mSyncTestRule.signOut();
+        Assert.assertNull(mSyncTestRule.getPrimaryAccount());
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    Assert.assertEquals(
+                            TransportState.DISABLED,
+                            SyncTestUtil.getSyncServiceForLastUsedProfile().getTransportState());
+                });
 
-        mSyncTestRule.startSyncAndWait();
+        accountInfo = mSyncTestRule.setUpAccountAndSignInForTesting();
+        Assert.assertEquals(accountInfo, mSyncTestRule.getPrimaryAccount());
     }
 
     @Test
     @LargeTest
     @Feature({"Sync"})
-    public void testStopAndStartSyncThroughAndroidChromeSync() {
-        Account account = mSyncTestRule.setUpAccountAndSignInForTesting();
-        String authority = AndroidSyncSettings.getContractAuthority();
+    public void testIsSyncingUnencryptedUrlsWhileUsingKeystorePassphrase() {
+        mSyncTestRule.setUpAccountAndEnableHistorySync();
 
-        Assert.assertTrue(AndroidSyncSettingsTestUtils.getIsSyncEnabledOnUiThread());
-        Assert.assertTrue(SyncTestUtil.isSyncRequested());
+        // By default Sync is being setup with KEYSTORE_PASSPHRASE.
+        CriteriaHelper.pollUiThread(
+                () ->
+                        mSyncTestRule.getSyncService().getPassphraseType()
+                                == PassphraseType.KEYSTORE_PASSPHRASE,
+                "Timed out checking getPassphraseType() == PassphraseType.KEYSTORE_PASSPHRASE",
+                SyncTestUtil.TIMEOUT_MS,
+                SyncTestUtil.INTERVAL_MS);
+        waitForIsSyncingUnencryptedUrls(true);
 
-        // Disabling Android sync should turn Chrome sync engine off.
-        mSyncTestRule.getSyncContentResolver().setSyncAutomatically(account, authority, false);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
+        // isSyncingUnencryptedUrls() should return false when history is disabled.
+        mSyncTestRule.setSelectedType(UserSelectableType.HISTORY, false);
+        waitForIsSyncingUnencryptedUrls(false);
 
-        // Enabling Android sync should turn Chrome sync engine on.
-        mSyncTestRule.getSyncContentResolver().setSyncAutomatically(account, authority, true);
-        SyncTestUtil.waitForSyncActive();
+        // Now enable history datatypes and verify that isSyncingUnencryptedUrls() returns true
+        // again.
+        mSyncTestRule.setSelectedType(UserSelectableType.HISTORY, true);
+        waitForIsSyncingUnencryptedUrls(true);
     }
 
     @Test
     @LargeTest
-    @Features.DisableFeatures(ChromeFeatureList.DECOUPLE_SYNC_FROM_ANDROID_MASTER_SYNC)
     @Feature({"Sync"})
-    @DisabledTest(message = "crbug.com/1103515")
-    public void testStopAndStartSyncThroughAndroidMasterSync() {
+    public void testIsSyncingUnencryptedUrlsWhileUsingTrustedVaultPassprhase() {
+        mSyncTestRule.getFakeServerHelper().setTrustedVaultNigori(new byte[] {1, 2, 3, 4});
+        mSyncTestRule.setUpAccountAndEnableHistorySync();
+
+        // isSyncingUnencryptedUrls() should treat TRUSTED_VAULT_PASSPHRASE in exactly the same way
+        // as KEYSTORE_PASSPHRASE.
+        CriteriaHelper.pollUiThread(
+                () ->
+                        mSyncTestRule.getSyncService().getPassphraseType()
+                                == PassphraseType.TRUSTED_VAULT_PASSPHRASE,
+                "Timed out checking getPassphraseType() == PassphraseType.TRUSTED_VAULT_PASSPHRASE",
+                SyncTestUtil.TIMEOUT_MS,
+                SyncTestUtil.INTERVAL_MS);
+        waitForIsSyncingUnencryptedUrls(true);
+
+        // isSyncingUnencryptedUrls() should return false when history is disabled.
+        mSyncTestRule.setSelectedType(UserSelectableType.HISTORY, false);
+        waitForIsSyncingUnencryptedUrls(false);
+
+        // Now enable history datatype and verify that isSyncingUnencryptedUrls() returns true
+        // again.
+        mSyncTestRule.setSelectedType(UserSelectableType.HISTORY, true);
+        waitForIsSyncingUnencryptedUrls(true);
+    }
+
+    @Test
+    @LargeTest
+    @Feature({"Sync"})
+    public void testIsSyncingUnencryptedUrlsWhileUsingCustomPassphrase() {
         mSyncTestRule.setUpAccountAndSignInForTesting();
+        SyncTestUtil.encryptWithPassphrase("passphrase");
+        CriteriaHelper.pollUiThread(
+                () ->
+                        mSyncTestRule.getSyncService().getPassphraseType()
+                                == PassphraseType.CUSTOM_PASSPHRASE,
+                "Timed out checking getPassphraseType() == PassphraseType.CUSTOM_PASSPHRASE",
+                SyncTestUtil.TIMEOUT_MS,
+                SyncTestUtil.INTERVAL_MS);
 
-        Assert.assertTrue(AndroidSyncSettingsTestUtils.getIsSyncEnabledOnUiThread());
-        Assert.assertTrue(SyncTestUtil.isSyncRequested());
-
-        // Disabling Android's master sync should turn Chrome sync engine off.
-        mSyncTestRule.getSyncContentResolver().setMasterSyncAutomatically(false);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-
-        // Enabling Android's master sync should turn Chrome sync engine on.
-        mSyncTestRule.getSyncContentResolver().setMasterSyncAutomatically(true);
-        SyncTestUtil.waitForSyncActive();
+        // isSyncingUnencryptedUrls() should return false with CUSTOM_PASSPHRASE no matter which
+        // datatypes are enabled.
+        waitForIsSyncingUnencryptedUrls(false);
     }
 
     @Test
     @LargeTest
     @Feature({"Sync"})
-    @Features.DisableFeatures(ChromeFeatureList.DECOUPLE_SYNC_FROM_ANDROID_MASTER_SYNC)
-    @DisabledTest(message = "Test is flaky crbug.com/1100890")
-    public void testReenableMasterSyncFirst() {
-        Account account = mSyncTestRule.setUpAccountAndSignInForTesting();
-        String authority = AndroidSyncSettings.getContractAuthority();
+    public void testGetLocalDataDescription() throws Exception {
+        CoreAccountInfo accountInfo = mSyncTestRule.setUpAccountAndSignInForTesting();
+        Assert.assertEquals(accountInfo, mSyncTestRule.getPrimaryAccount());
 
-        Assert.assertTrue(AndroidSyncSettingsTestUtils.getIsSyncEnabledOnUiThread());
-        Assert.assertTrue(SyncTestUtil.isSyncRequested());
-        Assert.assertTrue(SyncTestUtil.canSyncFeatureStart());
-
-        // Disable Chrome sync first. Sync should be off.
-        mSyncTestRule.getSyncContentResolver().setSyncAutomatically(account, authority, false);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-        Assert.assertFalse(SyncTestUtil.canSyncFeatureStart());
-
-        // Also disable master sync.
-        mSyncTestRule.getSyncContentResolver().setMasterSyncAutomatically(false);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-        Assert.assertFalse(SyncTestUtil.canSyncFeatureStart());
-
-        // Re-enabling master sync should not turn sync back on.
-        mSyncTestRule.getSyncContentResolver().setMasterSyncAutomatically(true);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-        Assert.assertFalse(SyncTestUtil.canSyncFeatureStart());
-
-        // But then re-enabling Chrome sync should.
-        mSyncTestRule.getSyncContentResolver().setSyncAutomatically(account, authority, true);
-        Assert.assertTrue(SyncTestUtil.canSyncFeatureStart());
-        SyncTestUtil.waitForSyncActive();
-    }
-
-    @Test
-    @LargeTest
-    @Features.DisableFeatures(ChromeFeatureList.DECOUPLE_SYNC_FROM_ANDROID_MASTER_SYNC)
-    @Feature({"Sync"})
-    public void testReenableChromeSyncFirst() {
-        Account account = mSyncTestRule.setUpAccountAndSignInForTesting();
-        String authority = AndroidSyncSettings.getContractAuthority();
-
-        Assert.assertTrue(AndroidSyncSettingsTestUtils.getIsSyncEnabledOnUiThread());
-        Assert.assertTrue(SyncTestUtil.isSyncRequested());
-        Assert.assertTrue(SyncTestUtil.canSyncFeatureStart());
-
-        // Disabling master sync first. Sync should be off.
-        mSyncTestRule.getSyncContentResolver().setMasterSyncAutomatically(false);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-        Assert.assertFalse(SyncTestUtil.canSyncFeatureStart());
-
-        // Also disable Chrome sync.
-        mSyncTestRule.getSyncContentResolver().setSyncAutomatically(account, authority, false);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-        Assert.assertFalse(SyncTestUtil.canSyncFeatureStart());
-
-        // Re-enabling Chrome sync should not turn sync back on.
-        mSyncTestRule.getSyncContentResolver().setSyncAutomatically(account, authority, true);
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-        Assert.assertFalse(SyncTestUtil.canSyncFeatureStart());
-
-        // But then re-enabling master sync should.
-        mSyncTestRule.getSyncContentResolver().setMasterSyncAutomatically(true);
-        Assert.assertTrue(SyncTestUtil.canSyncFeatureStart());
-        SyncTestUtil.waitForSyncActive();
-    }
-
-    @Test
-    @LargeTest
-    @Features.DisableFeatures(ChromeFeatureList.DECOUPLE_SYNC_FROM_ANDROID_MASTER_SYNC)
-    @Feature({"Sync"})
-    public void testMasterSyncBlocksSyncStart() {
-        mSyncTestRule.setUpAccountAndSignInForTesting();
-        mSyncTestRule.stopSync();
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
-
-        mSyncTestRule.getSyncContentResolver().setMasterSyncAutomatically(false);
-        mSyncTestRule.startSync();
-        Assert.assertFalse(SyncTestUtil.isSyncRequested());
+        CallbackHelper callbackHelper = new CallbackHelper();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mSyncTestRule
+                            .getSyncService()
+                            .getLocalDataDescriptions(
+                                    Set.of(
+                                            DataType.BOOKMARKS,
+                                            DataType.PASSWORDS,
+                                            DataType.READING_LIST),
+                                    localDataDescriptionsMap -> {
+                                        int sum =
+                                                localDataDescriptionsMap.values().stream()
+                                                        .map(LocalDataDescription::itemCount)
+                                                        .reduce(0, Integer::sum);
+                                        Assert.assertEquals(0, sum);
+                                        callbackHelper.notifyCalled();
+                                        return;
+                                    });
+                });
+        callbackHelper.waitForOnly();
     }
 }

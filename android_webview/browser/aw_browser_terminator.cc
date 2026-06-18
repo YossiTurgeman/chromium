@@ -1,18 +1,21 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "android_webview/browser/aw_browser_terminator.h"
 
 #include <unistd.h>
+
 #include <memory>
 
 #include "android_webview/browser/aw_browser_process.h"
+#include "android_webview/browser/aw_render_process.h"
 #include "android_webview/browser/aw_render_process_gone_delegate.h"
 #include "android_webview/common/aw_descriptors.h"
+#include "android_webview/common/aw_features.h"
 #include "base/android/scoped_java_ref.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/stringprintf.h"
 #include "components/crash/content/browser/crash_metrics_reporter_android.h"
 #include "components/crash/core/app/crashpad.h"
@@ -20,8 +23,6 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/child_process_data.h"
 #include "content/public/browser/child_process_launcher_utils.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_types.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
@@ -34,6 +35,25 @@ using content::BrowserThread;
 namespace android_webview {
 
 namespace {
+
+constexpr char kRenderProcessGoneHistogramName[] =
+    "Android.WebView.OnRenderProcessGoneResult2";
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class RenderProcessGoneResult {
+  kJavaException = 0,
+  // kCrashNotHandled = 1,  // Deprecated
+  // kKillNotHandled = 2,   // Deprecated
+  // kAllWebViewsHandled = 3, // Deprecated: use kCrashHandled/kKillHandled
+  kCrashHandled = 4,
+  kKillHandled = 5,
+  kCrashNotHandledVisible = 6,
+  kCrashNotHandledBackground = 7,
+  kKillNotHandledVisible = 8,
+  kKillNotHandledBackground = 9,
+  kMaxValue = kKillNotHandledBackground,
+};
 
 void GetJavaWebContentsForRenderProcess(
     content::RenderProcessHost* rph,
@@ -71,18 +91,31 @@ void OnRenderProcessGone(
 
     switch (delegate->OnRenderProcessGone(child_process_pid, crashed)) {
       case AwRenderProcessGoneDelegate::RenderProcessGoneResult::kException:
+        base::UmaHistogramEnumeration(kRenderProcessGoneHistogramName,
+                                      RenderProcessGoneResult::kJavaException);
         // Let the exception propagate back to the message loop.
         base::CurrentUIThread::Get()->Abort();
         return;
-      case AwRenderProcessGoneDelegate::RenderProcessGoneResult::kUnhandled:
+      case AwRenderProcessGoneDelegate::RenderProcessGoneResult::kUnhandled: {
+        const bool is_app_visible_to_user =
+            AwBrowserProcess::IsAppVisibleToUser();
         if (crashed) {
-          // Keeps this log unchanged, CTS test uses it to detect crash.
+          base::UmaHistogramEnumeration(
+              kRenderProcessGoneHistogramName,
+              is_app_visible_to_user
+                  ? RenderProcessGoneResult::kCrashNotHandledVisible
+                  : RenderProcessGoneResult::kCrashNotHandledBackground);
           std::string message = base::StringPrintf(
               "Render process (%d)'s crash wasn't handled by all associated  "
               "webviews, triggering application crash.",
               child_process_pid);
           crash_reporter::CrashWithoutDumping(message);
         } else {
+          base::UmaHistogramEnumeration(
+              kRenderProcessGoneHistogramName,
+              is_app_visible_to_user
+                  ? RenderProcessGoneResult::kKillNotHandledVisible
+                  : RenderProcessGoneResult::kKillNotHandledBackground);
           // The render process was most likely killed for OOM or switching
           // WebView provider, to make WebView backward compatible, kills the
           // browser process instead of triggering crash.
@@ -92,10 +125,20 @@ void OnRenderProcessGone(
           kill(getpid(), SIGKILL);
         }
         NOTREACHED();
-        break;
+      }
       case AwRenderProcessGoneDelegate::RenderProcessGoneResult::kHandled:
+        // Don't log UMA yet. This WebView may be handled, but we need to wait
+        // until we're out of the loop to know if all WebViews were handled.
         break;
     }
+  }
+  // If we reached this point, it means the crash was handled for all WebViews.
+  if (crashed) {
+    base::UmaHistogramEnumeration(kRenderProcessGoneHistogramName,
+                                  RenderProcessGoneResult::kCrashHandled);
+  } else {
+    base::UmaHistogramEnumeration(kRenderProcessGoneHistogramName,
+                                  RenderProcessGoneResult::kKillHandled);
   }
 
   // By this point we have moved the minidump to the crash directory, so it can
@@ -115,6 +158,13 @@ void AwBrowserTerminator::OnChildExit(
       content::RenderProcessHost::FromID(info.process_host_id);
 
   crash_reporter::CrashMetricsReporter::GetInstance()->ChildProcessExited(info);
+
+  // If the process has never been used, this is the spare render process.
+  // Treat this as if it never existed since it's an internal performance
+  // optimization.
+  if (rph && AwRenderProcess::IsUnused(rph)) {
+    return;
+  }
 
   if (info.normal_termination) {
     return;

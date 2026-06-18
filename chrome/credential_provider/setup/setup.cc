@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,39 +6,37 @@
 // that the app can be made entireless silent, as required by omaha.
 
 #include <Windows.h>
+
 #include <shlobj.h>  // Needed for IsUserAnAdmin()
-
 #include <stdlib.h>
+
+#include <algorithm>
 #include <string>
-
-#define _ATL_CSTRING_EXPLICIT_CONSTRUCTORS  // make some CString ctors explicit
-
-#include <atlbase.h>
-#include <atlstr.h>
 
 #include "base/at_exit.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/logging/logging_settings.h"
 #include "base/process/memory.h"
-#include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/win/atl.h"
 #include "base/win/process_startup_helper.h"
 #include "base/win/scoped_com_initializer.h"
 #include "base/win/scoped_handle.h"
-#include "base/win/win_util.h"
+#include "base/win/windows_handle_util.h"
 #include "base/win/windows_version.h"
 #include "chrome/common/chrome_version.h"
 #include "chrome/credential_provider/eventlog/gcp_eventlog_messages.h"
 #include "chrome/credential_provider/gaiacp/gcp_utils.h"
 #include "chrome/credential_provider/gaiacp/logging.h"
-#include "chrome/credential_provider/gaiacp/mdm_utils.h"
 #include "chrome/credential_provider/gaiacp/reg_utils.h"
 #include "chrome/credential_provider/setup/gcp_installer_crash_reporting.h"
 #include "chrome/credential_provider/setup/setup_lib.h"
+#include "chrome/credential_provider/setup/setup_utils.h"
 #include "components/crash/core/app/crash_switches.h"
 #include "components/crash/core/app/run_as_crashpad_handler_win.h"
 #include "content/public/common/content_switches.h"
@@ -53,7 +51,7 @@ namespace {
 bool IsPerUserInstallFromGoogleUpdate() {
   wchar_t value[2];
   DWORD length = ::GetEnvironmentVariable(L"GoogleUpdateIsMachine", value,
-                                          base::size(value));
+                                          std::size(value));
 
   return length == 1 && value[0] == L'0';
 }
@@ -100,7 +98,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
   logging::SetEventSource("GCPW", GCPW_CATEGORY, MSG_LOG_MESSAGE);
 
   if (GetGlobalFlagOrDefault(kRegEnableVerboseLogging, 1))
-    logging::SetMinLogLevel(logging::LOG_VERBOSE);
+    logging::SetMinLogLevel(logging::LOGGING_VERBOSE);
 
   // Set GCPW as the default credential provider for the end user.
   MakeGcpwDefaultCP();
@@ -110,7 +108,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
         cmdline->GetSwitchValueASCII(switches::kLoggingLevel);
     int level = 0;
     if (base::StringToInt(log_level, &level) && level >= 0 &&
-        level < logging::LOG_NUM_SEVERITIES) {
+        level < logging::LOGGING_NUM_SEVERITIES) {
       logging::SetMinLogLevel(level);
     } else {
       LOGFN(WARNING) << "Bad log level: " << log_level;
@@ -120,6 +118,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
   // Make sure the process exits cleanly on unexpected errors.
   base::EnableTerminationOnHeapCorruption();
   base::EnableTerminationOnOutOfMemory();
+  logging::RegisterAbslAbortHook();
   base::win::RegisterInvalidParamHandler();
   base::win::SetupCRT(*base::CommandLine::ForCurrentProcess());
 
@@ -147,10 +146,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
 
   wchar_t time_string[64];
   if (::GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, nullptr, nullptr,
-                        time_string, base::size(time_string)) == 0) {
-    HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
-    LOGFN(ERROR) << "GetTimeFormatEx(start) hr=" << putHR(hr);
-    wcscpy_s(time_string, base::size(time_string), L"Unknown");
+                        time_string, std::size(time_string)) == 0) {
+    HRESULT last_error_hr = HRESULT_FROM_WIN32(::GetLastError());
+    LOGFN(ERROR) << "GetTimeFormatEx(start) hr=" << putHR(last_error_hr);
+    UNSAFE_TODO(wcscpy_s(time_string, std::size(time_string), L"Unknown"));
   }
 
   LOGFN(INFO) << "Start: " << time_string;
@@ -158,8 +157,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
   LOGFN(INFO) << "Args: " << lpCmdLine;
   LOGFN(INFO) << "Version: " << TEXT(CHROME_VERSION_STRING);
 
-  LOGFN(INFO) << "Windows: "
-              << base::win::OSInfo::GetInstance()->Kernel32BaseVersion()
+  LOGFN(INFO) << "Windows: " << base::win::OSInfo::Kernel32BaseVersion()
               << " Version:" << credential_provider::GetWindowsVersion();
 
   // If running from omaha, make sure machine install is used.
@@ -179,6 +177,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
   std::string parent_handle_str = cmdline->GetSwitchValueASCII(
       credential_provider::switches::kParentHandle);
 
+  credential_provider::StandaloneInstallerConfigurator::Get()
+      ->ConfigureInstallationType(*cmdline);
+
   if (is_uninstall) {
     // If this is a user invoked uninstall, copy the exe to the temp directory
     // and rerun it from there.  Append a new arg so that setup knows it is not
@@ -192,8 +193,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
         if (base::StringToUint(parent_handle_str, &parent_handle_value)) {
           base::win::ScopedHandle parent_handle(
               base::win::Uint32ToHandle(parent_handle_value));
-          DWORD ret = ::WaitForSingleObject(parent_handle.Get(), 5000);
-          LOGFN(VERBOSE) << "Waited for parent(" << parent_handle.Get()
+          DWORD ret = ::WaitForSingleObject(parent_handle.get(), 5000);
+          LOGFN(VERBOSE) << "Waited for parent(" << parent_handle.get()
                          << "): ret=" << ret;
         }
       }
@@ -202,8 +203,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
 
       // Schedule the installer to be deleted on the next reboot.
       if (!base::DeleteFileAfterReboot(gcp_setup_exe_path)) {
-        HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
-        LOGFN(ERROR) << "DeleteFileAfterReboot hr=" << putHR(hr);
+        HRESULT last_error_hr = HRESULT_FROM_WIN32(::GetLastError());
+        LOGFN(ERROR) << "DeleteFileAfterReboot hr=" << putHR(last_error_hr);
       }
     }
   } else {
@@ -215,10 +216,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
   // process.
   if (!(is_uninstall && path.empty())) {
     if (::GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, nullptr, nullptr,
-                          time_string, base::size(time_string)) == 0) {
-      HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
-      LOGFN(ERROR) << "GetTimeFormatEx(end) hr=" << putHR(hr);
-      wcscpy_s(time_string, base::size(time_string), L"Unknown");
+                          time_string, std::size(time_string)) == 0) {
+      HRESULT last_error_hr = HRESULT_FROM_WIN32(::GetLastError());
+      LOGFN(ERROR) << "GetTimeFormatEx(end) hr=" << putHR(last_error_hr);
+      UNSAFE_TODO(wcscpy_s(time_string, std::size(time_string), L"Unknown"));
     }
 
     LOGFN(INFO) << (SUCCEEDED(hr) ? "Setup completed successfully"

@@ -1,14 +1,16 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.tab;
 
-import org.chromium.base.annotations.MockedInTests;
+import org.chromium.build.annotations.MockedInTests;
+import org.chromium.build.annotations.NullMarked;
 
 /**
  */
 @MockedInTests
+@NullMarked
 public interface TabLifecycle {
     /**
      * @return Whether or not this Tab has a live native component.  This will be true prior to
@@ -17,16 +19,20 @@ public interface TabLifecycle {
     boolean isInitialized();
 
     /**
+     * @return Whether this Tab has been destroyed.
+     */
+    boolean isDestroyed();
+
+    /**
      * Prepares the tab to be shown. This method is supposed to be called before the tab is
      * displayed. It restores the ContentView if it is not available after the cold start and
      * reloads the tab if its renderer has crashed.
+     *
      * @param type Specifies how the tab was selected.
      */
     void show(@TabSelectionType int type);
 
-    /**
-     * Triggers the hiding logic for the view backing the tab.
-     */
+    /** Triggers the hiding logic for the view backing the tab. */
     void hide(@TabHidingType int type);
 
     /**
@@ -40,6 +46,15 @@ public interface TabLifecycle {
      * @param closing Whether or not the tab is in the closing process.
      */
     void setClosing(boolean closing);
+
+    /** Mark the Tab for closure following an async request received while the tab was detached. */
+    void setDidCloseWhileDetached();
+
+    /**
+     * Returns whether this Tab was closed following an async request received while the tab was
+     * detached.
+     */
+    boolean didCloseWhileDetached();
 
     /**
      * @return Whether or not the tab is hidden.

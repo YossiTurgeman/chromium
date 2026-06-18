@@ -16,21 +16,49 @@ which you can set up in a new GN out directory with the following args:
 The scripts are invoked using the driver located at
 `//chrome/installer/mac/sign_chrome.py`. In order to sign a binary, a signing
 identity is required. Googlers can use the [internal development
-identity](https://goto.google.com/macoscerts); otherwise you must supply your
+identity](https://goto.google.com/ioscerts); otherwise you must supply your
 own. Note that a
 [self-signed](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html)
 identity is incompatible with the _library validation_ signing option that
 Chrome uses.
 
-A sample invocation to use during development would be:
+A sample invocation to use the
+[internal Google development identity](https://goto.google.com/appledev/book/getting_started/provisioning/index.md#googles-development-certificate) during development would be:
 
     $ ninja -C out/release chrome chrome/installer/mac
-    $ ./out/release/Chromium\ Packaging/sign_chrome.py --input out/release --output /tmp/signed --identity 'MacOS Developer' --development --disable-packaging
+    $ ./out/release/Chromium\ Packaging/sign_chrome.py --input out/release --output out/release/signed --identity 'Google Development' --development --disable-packaging
 
 The `--disable-packaging` flag skips the creation of DMG and PKG files, which
 speeds up the signing process when one is only interested in a signed .app
 bundle. The `--development` flag skips over code signing requirements and checks
-that do not work without the official Google signing identity.
+that do not work without the official Google signing identity, and it injects
+the `com.apple.security.get-task-allow` that lets the app be debugged.
+
+## The Installer Identity
+
+The above section speaks of the `--identity` parameter to `sign_chrome.py`, and
+how the normal development identity will do, and how a self-signed identity will
+not work. However, the identity used for Installer (.pkg) files is different.
+
+Installer files require a special Installer Package Signing Certificate, which
+is different than a normal certificate in that it has a special Extended Key
+Usage extension.
+
+For the normal identity, Apple provides both a development and a deployment
+certificate, and while the deployment certificate can be (and should be)
+carefully guarded, the development certificate can be more widely used by the
+development team. However, Apple provides _only_ a deployment installer
+certificate. For development purposes, you must self-sign your own.
+
+Directions on how to create a self-signed certificate with the special Extended
+Key Usage extension for installer use can be found on
+[security.stackexchange](https://security.stackexchange.com/a/47908).
+
+You will need to explicitly mark the certificate as trusted. This can be done
+with
+`sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain my_installer_cert.crt`.
+Be sure that `sudo security -v find-identity` lists this new certificate as a
+valid identity.
 
 ## Chromium
 
@@ -44,8 +72,46 @@ tied to the official Google signing identity.
 In addition, the Chromium [code sign
 config](https://cs.chromium.org/chromium/src/chrome/installer/mac/signing/chromium_config.py)
 only produces one Distribution to sign just the .app. An
-`is_chrome_build=true` build produces several Distributions for the official
+`is_chrome_branded=true` build produces several Distributions for the official
 release system.
+
+## Google Chrome
+
+If you attempt to sign an `is_chrome_branded=true` build locally, the app will
+fail to launch because certain entitlements are tied to the official Google code
+signing identity/certificate. To test an `is_chrome_branded=true` build locally,
+build with `include_branded_entitlements=false` or replace the contents of
+[`app-entitlements-chrome.plist`](../../../app/app-entitlements-chrome.plist)
+with an empty plist.
+
+### TCC Permissions
+
+MacOS grants applications access to privileged resources using the TCC
+(Transparency, Consent, and Control) subsystem. TCC records user authorization
+decisions, in part, based on the code signing identity of the responsible
+application.
+
+One important point, as discussed in the [debugging
+tips](../../../../docs/mac/debugging.md#system-permission-prompts_transparency_consent_and-control-tcc)
+is if Chrome/Chromium is launched as a subprocess of another GUI application
+(such as Terminal), the parent GUI process – not the browser – is considered the
+responsible application for TCC's purposes.
+
+An authorization decision can be reset manually using the `tccutil(1)` command.
+For example, this would reset the microphone access permission:
+
+    tccutil reset Microphone org.chromium.Chromium
+
+Unfortunately there is not an authoritative list of service names for resetting,
+but the value `All` will remove all decisions. The decisions are recorded in a
+SQLite database, which can be inspected using the command below. This requires
+granting the **Full Disk Access** permission in System Settings to the Terminal
+or disabling System Integrity Protection.
+
+    sqlite3 ~"/Library/Application Support/com.apple.TCC/TCC.db"
+
+The `access.service` column's values corresponds to the `tccutil reset` service,
+sans the `kTCCService` prefix.
 
 ### System Detached Signatures
 

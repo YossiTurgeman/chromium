@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,13 +19,23 @@
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_request.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_test.h"
+#include "third_party/blink/renderer/platform/heap/thread_state.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkCanvas.h"
+#include "third_party/skia/include/core/SkColor.h"
+#include "third_party/skia/include/core/SkData.h"
+#include "third_party/skia/include/core/SkImage.h"
+#include "third_party/skia/include/core/SkImageInfo.h"
+#include "third_party/skia/include/core/SkRefCnt.h"
+#include "third_party/skia/include/encode/SkJpegEncoder.h"
 
 namespace blink {
 
 namespace {
 
-// An image of size 50x50.
+// A non-animated jpeg image of size 50x50.
 Vector<unsigned char> JpegImage() {
   Vector<unsigned char> jpeg;
 
@@ -57,10 +67,49 @@ Vector<unsigned char> JpegImage() {
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x03, 0xff, 0xd9};
 
-  jpeg.Append(kData, sizeof(kData));
+  jpeg.append_range(kData);
   return jpeg;
 }
+
+// An animated webp image of size 50x50.
+Vector<unsigned char> AnimatedWebpImage() {
+  Vector<unsigned char> animated_webp;
+
+  static const unsigned char kData[] = {
+      0x52, 0x49, 0x46, 0x46, 0x90, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+      0x56, 0x50, 0x38, 0x58, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+      0x31, 0x00, 0x00, 0x31, 0x00, 0x00, 0x41, 0x4e, 0x49, 0x4d, 0x06, 0x00,
+      0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x41, 0x4e, 0x4d, 0x46,
+      0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0x00,
+      0x00, 0x31, 0x00, 0x00, 0x64, 0x00, 0x00, 0x02, 0x56, 0x50, 0x38, 0x4c,
+      0x15, 0x00, 0x00, 0x00, 0x2f, 0x31, 0x40, 0x0c, 0x00, 0x07, 0x10, 0xe5,
+      0x8f, 0xfe, 0x07, 0x80, 0x84, 0xf0, 0x7f, 0xbd, 0x18, 0xd1, 0xff, 0x94,
+      0x0b, 0x00, 0x41, 0x4e, 0x4d, 0x46, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x31, 0x00, 0x00, 0x31, 0x00, 0x00, 0x64, 0x00,
+      0x00, 0x00, 0x56, 0x50, 0x38, 0x4c, 0x15, 0x00, 0x00, 0x00, 0x2f, 0x31,
+      0x40, 0x0c, 0x00, 0x07, 0xd0, 0xbf, 0x88, 0xfe, 0x07, 0x80, 0x84, 0xf0,
+      0x7f, 0xbd, 0x18, 0xd1, 0xff, 0x94, 0x0b, 0x00};
+
+  animated_webp.append_range(kData);
+  return animated_webp;
 }
+
+Vector<char> CreateJpegImageData(int width, int height) {
+  SkBitmap bitmap;
+  bitmap.allocPixels(SkImageInfo::MakeN32(width, height, kOpaque_SkAlphaType));
+  SkCanvas canvas(bitmap);
+  canvas.clear(SK_ColorWHITE);
+  sk_sp<SkImage> image = SkImages::RasterFromBitmap(bitmap);
+
+  Vector<char> result;
+  SkJpegEncoder::Options options;
+  sk_sp<SkData> data = SkJpegEncoder::Encode(nullptr, image.get(), options);
+  if (data) {
+    result.Append(reinterpret_cast<const char*>(data->data()), data->size());
+  }
+  return result;
+}
+}  // namespace
 
 class WindowToViewportScalingChromeClient : public EmptyChromeClient {
  public:
@@ -82,8 +131,12 @@ class ImageDocumentTest : public testing::Test {
     ThreadState::Current()->CollectAllGarbageForTesting();
   }
 
-  void CreateDocumentWithoutLoadingImage(int view_width, int view_height);
-  void CreateDocument(int view_width, int view_height);
+  void CreateDocumentWithoutLoadingImage(int view_width,
+                                         int view_height,
+                                         bool is_animated);
+  void CreateDocument(int view_width,
+                      int view_height,
+                      bool is_animated = false);
 
   ImageDocument& GetDocument() const;
 
@@ -95,25 +148,25 @@ class ImageDocumentTest : public testing::Test {
   void SetForceZeroLayoutHeight(bool);
 
  private:
+  test::TaskEnvironment task_environment_;
   Persistent<WindowToViewportScalingChromeClient> chrome_client_;
   std::unique_ptr<DummyPageHolder> dummy_page_holder_;
-  float page_zoom_factor_ = 0.0f;
+  float zoom_factor_ = 0.0f;
   float viewport_scaling_factor_ = 0.0f;
-  base::Optional<bool> force_zero_layout_height_;
+  std::optional<bool> force_zero_layout_height_;
 };
 
 void ImageDocumentTest::CreateDocumentWithoutLoadingImage(int view_width,
-                                                          int view_height) {
-  Page::PageClients page_clients;
-  FillWithEmptyClients(page_clients);
+                                                          int view_height,
+                                                          bool is_animated) {
   chrome_client_ = MakeGarbageCollected<WindowToViewportScalingChromeClient>();
-  page_clients.chrome_client = chrome_client_;
   dummy_page_holder_ = nullptr;
   dummy_page_holder_ = std::make_unique<DummyPageHolder>(
-      IntSize(view_width, view_height), &page_clients);
+      gfx::Size(view_width, view_height), chrome_client_);
 
-  if (page_zoom_factor_)
-    dummy_page_holder_->GetFrame().SetPageZoomFactor(page_zoom_factor_);
+  if (zoom_factor_) {
+    dummy_page_holder_->GetFrame().SetLayoutZoomFactor(zoom_factor_);
+  }
   if (viewport_scaling_factor_)
     chrome_client_->SetScalingFactor(viewport_scaling_factor_);
   if (force_zero_layout_height_.has_value()) {
@@ -122,18 +175,21 @@ void ImageDocumentTest::CreateDocumentWithoutLoadingImage(int view_width,
   }
 
   auto params = std::make_unique<WebNavigationParams>();
-  params->url = KURL("http://www.example.com/image.jpg");
+  params->url = is_animated ? KURL("http://www.example.com/image.webp")
+                            : KURL("http://www.example.com/image.jpg");
 
-  const Vector<unsigned char>& data = JpegImage();
+  Vector<unsigned char> data = is_animated ? AnimatedWebpImage() : JpegImage();
   WebNavigationParams::FillStaticResponse(
-      params.get(), "image/jpeg", "UTF-8",
-      base::make_span(reinterpret_cast<const char*>(data.data()), data.size()));
+      params.get(), is_animated ? "image/webp" : "image/jpeg", "UTF-8",
+      base::as_chars(base::span(data)));
   dummy_page_holder_->GetFrame().Loader().CommitNavigation(std::move(params),
                                                            nullptr);
 }
 
-void ImageDocumentTest::CreateDocument(int view_width, int view_height) {
-  CreateDocumentWithoutLoadingImage(view_width, view_height);
+void ImageDocumentTest::CreateDocument(int view_width,
+                                       int view_height,
+                                       bool is_animated /*=false*/) {
+  CreateDocumentWithoutLoadingImage(view_width, view_height, is_animated);
   blink::test::RunPendingTasks();
 }
 
@@ -144,9 +200,9 @@ ImageDocument& ImageDocumentTest::GetDocument() const {
 }
 
 void ImageDocumentTest::SetPageZoom(float factor) {
-  page_zoom_factor_ = factor;
+  zoom_factor_ = factor;
   if (dummy_page_holder_)
-    dummy_page_holder_->GetFrame().SetPageZoomFactor(factor);
+    dummy_page_holder_->GetFrame().SetLayoutZoomFactor(factor);
 }
 
 void ImageDocumentTest::SetWindowToViewportScalingFactor(float factor) {
@@ -240,12 +296,26 @@ TEST_F(ImageDocumentTest, DomInteractive) {
 }
 
 TEST_F(ImageDocumentTest, ImageSrcChangedBeforeFinish) {
-  CreateDocumentWithoutLoadingImage(80, 70);
+  CreateDocumentWithoutLoadingImage(80, 70, /*is_animated*/ false);
   GetDocument().ImageElement()->removeAttribute(html_names::kSrcAttr);
   blink::test::RunPendingTasks();
 }
 
-#if defined(OS_ANDROID)
+TEST_F(ImageDocumentTest, ImageStyleContainsTransitionForNonAnimatedImage) {
+  CreateDocument(50, 50);
+  auto& style =
+      GetDocument().ImageElement()->getAttribute(html_names::kStyleAttr);
+  EXPECT_TRUE(style.contains("transition:"));
+}
+
+TEST_F(ImageDocumentTest, ImageStyleDoesNotContainTransitionForAnimatedImage) {
+  CreateDocument(50, 50, /*is_animated*/ true);
+  auto& style =
+      GetDocument().ImageElement()->getAttribute(html_names::kStyleAttr);
+  EXPECT_FALSE(style.contains("transition:"));
+}
+
+#if BUILDFLAG(IS_ANDROID)
 #define MAYBE(test) DISABLED_##test
 #else
 #define MAYBE(test) test
@@ -259,8 +329,8 @@ TEST_F(ImageDocumentTest, MAYBE(ImageCenteredAtDeviceScaleFactor)) {
   GetDocument().ImageClicked(15, 27);
   ScrollOffset offset =
       GetDocument().GetFrame()->View()->LayoutViewport()->GetScrollOffset();
-  EXPECT_EQ(20, offset.Width());
-  EXPECT_EQ(20, offset.Height());
+  EXPECT_EQ(20, offset.x());
+  EXPECT_EQ(20, offset.y());
 
   GetDocument().ImageClicked(20, 20);
 
@@ -268,11 +338,11 @@ TEST_F(ImageDocumentTest, MAYBE(ImageCenteredAtDeviceScaleFactor)) {
   offset =
       GetDocument().GetFrame()->View()->LayoutViewport()->GetScrollOffset();
   if (RuntimeEnabledFeatures::FractionalScrollOffsetsEnabled()) {
-    EXPECT_EQ(11.25f, offset.Width());
-    EXPECT_EQ(20, offset.Height());
+    EXPECT_EQ(11.25f, offset.x());
+    EXPECT_EQ(20, offset.y());
   } else {
-    EXPECT_EQ(11, offset.Width());
-    EXPECT_EQ(20, offset.Height());
+    EXPECT_EQ(11, offset.x());
+    EXPECT_EQ(20, offset.y());
   }
 }
 
@@ -305,24 +375,24 @@ class ImageDocumentViewportTest : public SimTest {
 // Tests that hiding the URL bar doesn't cause a "jump" when viewing an image
 // much wider than the viewport.
 TEST_F(ImageDocumentViewportTest, HidingURLBarDoesntChangeImageLocation) {
-  v8::HandleScope handle_scope(v8::Isolate::GetCurrent());
+  v8::HandleScope handle_scope(
+      WebView().GetPage()->GetAgentGroupScheduler().Isolate());
 
   // Initialize with the URL bar showing. Make the viewport very thin so that
   // we load an image much wider than the viewport but fits vertically. The
   // page will load zoomed out so the image will be vertically centered.
-  WebView().ResizeWithBrowserControls(IntSize(5, 40), 10, 10, true);
+  WebView().ResizeWithBrowserControls(gfx::Size(5, 40), 10, 10, true);
   SimRequest request("https://example.com/test.jpg", "image/jpeg");
   LoadURL("https://example.com/test.jpg");
 
-  Vector<unsigned char> jpeg = JpegImage();
-  Vector<char> data = Vector<char>();
-  data.Append(jpeg.data(), jpeg.size());
+  Vector<char> data;
+  data.append_range(JpegImage());
   request.Complete(data);
 
   Compositor().BeginFrame();
 
   HTMLImageElement* img = GetDocument().ImageElement();
-  DOMRect* rect = img->getBoundingClientRect();
+  DOMRect* rect = img->GetBoundingClientRect();
 
   // Some initial sanity checking. We'll use the BoundingClientRect for the
   // image location since that's relative to the layout viewport and the layout
@@ -337,29 +407,29 @@ TEST_F(ImageDocumentViewportTest, HidingURLBarDoesntChangeImageLocation) {
 
   // Hide the URL bar. This will make the viewport taller but won't change the
   // layout size so the image location shouldn't change.
-  WebView().ResizeWithBrowserControls(IntSize(5, 50), 10, 10, false);
+  WebView().ResizeWithBrowserControls(gfx::Size(5, 50), 10, 10, false);
   Compositor().BeginFrame();
-  rect = img->getBoundingClientRect();
+  rect = img->GetBoundingClientRect();
   EXPECT_EQ(50, rect->width());
   EXPECT_EQ(50, rect->height());
   EXPECT_EQ(0, rect->x());
   EXPECT_EQ(125, rect->y());
 }
 
-TEST_F(ImageDocumentViewportTest, ZoomForDSFScaleImage) {
-  v8::HandleScope handle_scope(v8::Isolate::GetCurrent());
+TEST_F(ImageDocumentViewportTest, ScaleImage) {
+  v8::HandleScope handle_scope(
+      WebView().GetPage()->GetAgentGroupScheduler().Isolate());
   SimRequest request("https://example.com/test.jpg", "image/jpeg");
   LoadURL("https://example.com/test.jpg");
 
-  Vector<unsigned char> jpeg = JpegImage();
-  Vector<char> data = Vector<char>();
-  data.Append(jpeg.data(), jpeg.size());
+  Vector<char> data;
+  data.append_range(JpegImage());
   request.Complete(data);
 
   HTMLImageElement* img = GetDocument().ImageElement();
 
   // no zoom
-  WebView().MainFrameWidget()->Resize(IntSize(100, 100));
+  WebView().MainFrameWidget()->Resize(gfx::Size(100, 100));
   WebView().SetZoomFactorForDeviceScaleFactor(1.f);
   Compositor().BeginFrame();
   EXPECT_EQ(50u, img->width());
@@ -373,7 +443,7 @@ TEST_F(ImageDocumentViewportTest, ZoomForDSFScaleImage) {
   // visual viewport should be same in CSS pixel, as no dsf applied.
   // This simulates running on two phones with different screen densities but
   // same (physical) screen size, image document should displayed the same.
-  WebView().MainFrameWidget()->Resize(IntSize(400, 400));
+  WebView().MainFrameWidget()->Resize(gfx::Size(400, 400));
   WebView().SetZoomFactorForDeviceScaleFactor(4.f);
   Compositor().BeginFrame();
   EXPECT_EQ(50u, img->width());
@@ -386,14 +456,14 @@ TEST_F(ImageDocumentViewportTest, ZoomForDSFScaleImage) {
 
 // Tests that with zoom factor for device scale factor, image with different
 // size fit in the viewport correctly.
-TEST_F(ImageDocumentViewportTest, DivWidthWithZoomForDSF) {
-  v8::HandleScope handle_scope(v8::Isolate::GetCurrent());
+TEST_F(ImageDocumentViewportTest, DivWidth) {
+  v8::HandleScope handle_scope(
+      WebView().GetPage()->GetAgentGroupScheduler().Isolate());
   SimRequest request("https://example.com/test.jpg", "image/jpeg");
   LoadURL("https://example.com/test.jpg");
 
-  Vector<unsigned char> jpeg = JpegImage();
-  Vector<char> data = Vector<char>();
-  data.Append(jpeg.data(), jpeg.size());
+  Vector<char> data;
+  data.append_range(JpegImage());
   request.Complete(data);
 
   HTMLImageElement* img = GetDocument().ImageElement();
@@ -402,7 +472,7 @@ TEST_F(ImageDocumentViewportTest, DivWidthWithZoomForDSF) {
 
   // Image smaller then webview size, visual viewport is not zoomed, and image
   // will be centered in the viewport.
-  WebView().MainFrameWidget()->Resize(IntSize(200, 200));
+  WebView().MainFrameWidget()->Resize(gfx::Size(200, 200));
   Compositor().BeginFrame();
   EXPECT_EQ(50u, img->width());
   EXPECT_EQ(50u, img->height());
@@ -410,13 +480,13 @@ TEST_F(ImageDocumentViewportTest, DivWidthWithZoomForDSF) {
   EXPECT_EQ(1.f, GetVisualViewport().Scale());
   EXPECT_EQ(100, GetVisualViewport().Width());
   EXPECT_EQ(100, GetVisualViewport().Height());
-  DOMRect* rect = img->getBoundingClientRect();
+  DOMRect* rect = img->GetBoundingClientRect();
   EXPECT_EQ(25, rect->x());
   EXPECT_EQ(25, rect->y());
 
   // Image wider than webview size, image should fill the visual viewport, and
   // visual viewport zoom out to 0.5.
-  WebView().MainFrameWidget()->Resize(IntSize(50, 50));
+  WebView().MainFrameWidget()->Resize(gfx::Size(50, 50));
   Compositor().BeginFrame();
   EXPECT_EQ(50u, img->width());
   EXPECT_EQ(50u, img->height());
@@ -427,7 +497,7 @@ TEST_F(ImageDocumentViewportTest, DivWidthWithZoomForDSF) {
 
   // When image is more than 10X wider than webview, shrink the image to fit the
   // width of the screen.
-  WebView().MainFrameWidget()->Resize(IntSize(4, 20));
+  WebView().MainFrameWidget()->Resize(gfx::Size(4, 20));
   Compositor().BeginFrame();
   EXPECT_EQ(20u, img->width());
   EXPECT_EQ(20u, img->height());
@@ -435,9 +505,94 @@ TEST_F(ImageDocumentViewportTest, DivWidthWithZoomForDSF) {
   EXPECT_EQ(0.1f, GetVisualViewport().Scale());
   EXPECT_EQ(20, GetVisualViewport().Width());
   EXPECT_EQ(100, GetVisualViewport().Height());
-  rect = img->getBoundingClientRect();
+  rect = img->GetBoundingClientRect();
   EXPECT_EQ(0, rect->x());
   EXPECT_EQ(40, rect->y());
+}
+
+// Tests that image is correctly centered when viewport meta is disabled on
+// mobile.
+TEST_F(ImageDocumentViewportTest, DivWidthOnMobileWithDisabledViewportMeta) {
+  v8::HandleScope handle_scope(
+      WebView().GetPage()->GetAgentGroupScheduler().Isolate());
+  WebView().GetSettings()->SetViewportMetaEnabled(false);
+  WebView().GetSettings()->SetViewportStyle(
+      mojom::blink::ViewportStyle::kMobile);
+  SimRequest request("https://example.com/test.jpg", "image/jpeg");
+  LoadURL("https://example.com/test.jpg");
+  Vector<char> data;
+  data.append_range(JpegImage());
+  request.Complete(data);
+  HTMLImageElement* img = GetDocument().ImageElement();
+  WebView().SetZoomFactorForDeviceScaleFactor(1.f);
+  WebView().MainFrameWidget()->Resize(gfx::Size(200, 200));
+  Compositor().BeginFrame();
+  EXPECT_EQ(50u, img->width());
+  EXPECT_EQ(50u, img->height());
+  EXPECT_EQ(980, GetDocument().CalculateDivWidth());
+  EXPECT_EQ(1.f, GetVisualViewport().Scale());
+  EXPECT_EQ(200, GetVisualViewport().Width());
+  EXPECT_EQ(200, GetVisualViewport().Height());
+  DOMRect* rect = img->GetBoundingClientRect();
+  // 465 = (980 - 50) / 2, so the image is centered.
+  EXPECT_EQ(465, rect->x());
+  EXPECT_EQ(465, rect->y());
+}
+
+// Tests that a very wide image is correctly centered when viewport meta is
+// disabled on mobile.
+TEST_F(ImageDocumentViewportTest,
+       DivWidthOnMobileWithDisabledViewportMetaWideImage) {
+  v8::HandleScope handle_scope(
+      WebView().GetPage()->GetAgentGroupScheduler().Isolate());
+  WebView().GetSettings()->SetViewportMetaEnabled(false);
+  WebView().GetSettings()->SetViewportStyle(
+      mojom::blink::ViewportStyle::kMobile);
+  SimRequest request("https://example.com/test.jpg", "image/jpeg");
+  LoadURL("https://example.com/test.jpg");
+  request.Complete(CreateJpegImageData(10000, 100));
+  HTMLImageElement* img = GetDocument().ImageElement();
+  WebView().SetZoomFactorForDeviceScaleFactor(1.f);
+  WebView().MainFrameWidget()->Resize(gfx::Size(200, 200));
+  Compositor().BeginFrame();
+  EXPECT_EQ(9800u, img->width());
+  EXPECT_EQ(98u, img->height());
+  EXPECT_EQ(9800, GetDocument().CalculateDivWidth());
+  EXPECT_EQ(1.f, GetVisualViewport().Scale());
+  EXPECT_EQ(200, GetVisualViewport().Width());
+  EXPECT_EQ(200, GetVisualViewport().Height());
+  DOMRect* rect = img->GetBoundingClientRect();
+  EXPECT_EQ(0, rect->x());
+  // 4851 = (9800 - 98) / 2, so the image is centered.
+  EXPECT_EQ(4851, rect->y());
+}
+
+// Tests that a very tall image is correctly centered when viewport meta is
+// disabled on mobile.
+TEST_F(ImageDocumentViewportTest,
+       DivWidthOnMobileWithDisabledViewportMetaTallImage) {
+  v8::HandleScope handle_scope(
+      WebView().GetPage()->GetAgentGroupScheduler().Isolate());
+  WebView().GetSettings()->SetViewportMetaEnabled(false);
+  WebView().GetSettings()->SetViewportStyle(
+      mojom::blink::ViewportStyle::kMobile);
+  SimRequest request("https://example.com/test.jpg", "image/jpeg");
+  LoadURL("https://example.com/test.jpg");
+  request.Complete(CreateJpegImageData(100, 10000));
+  HTMLImageElement* img = GetDocument().ImageElement();
+  WebView().SetZoomFactorForDeviceScaleFactor(1.f);
+  WebView().MainFrameWidget()->Resize(gfx::Size(200, 200));
+  Compositor().BeginFrame();
+  EXPECT_EQ(100u, img->width());
+  EXPECT_EQ(10000u, img->height());
+  EXPECT_EQ(980, GetDocument().CalculateDivWidth());
+  EXPECT_EQ(1.f, GetVisualViewport().Scale());
+  EXPECT_EQ(200, GetVisualViewport().Width());
+  EXPECT_EQ(200, GetVisualViewport().Height());
+  DOMRect* rect = img->GetBoundingClientRect();
+  // 440 = (980 - 100) / 2, so the image is centered.
+  EXPECT_EQ(440, rect->x());
+  EXPECT_EQ(0, rect->y());
 }
 
 #undef MAYBE

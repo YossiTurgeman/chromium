@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright (c) 2011 The Chromium Authors. All rights reserved.
+# Copyright 2011 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 # based on an almost identical script by: jyrki@google.com (Jyrki Alakuijala)
@@ -29,7 +29,6 @@ INCLUDE_PATHS = [
   'skia/ext',
   'testing/gmock/include',
   'testing/gtest/include',
-  'third_party/google_toolbox_for_mac/src',
   'third_party/icu/public/common',
   'third_party/icu/public/i18n',
   'third_party/protobuf',

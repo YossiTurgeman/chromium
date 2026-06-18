@@ -36,7 +36,6 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 
 _log = logging.getLogger(__name__)
@@ -66,13 +65,14 @@ class ScriptError(Exception):
             message += '\n\noutput: %s' % shortened_output
 
         Exception.__init__(self, message)
+        self.message = message
         self.script_args = script_args  # 'args' is already used by Exception
         self.exit_code = exit_code
         self.output = output
         self.cwd = cwd
 
     def message_with_output(self):
-        return unicode(self)
+        return str(self)
 
     def command_name(self):
         command_path = self.script_args
@@ -81,10 +81,10 @@ class ScriptError(Exception):
         return os.path.basename(command_path)
 
 
-class Executive(object):
+class Executive:
     PIPE = subprocess.PIPE
     STDOUT = subprocess.STDOUT
-    DEVNULL = open(os.devnull, 'wb')
+    DEVNULL = subprocess.DEVNULL
 
     def __init__(self, error_output_limit=500):
         """Args:
@@ -103,14 +103,19 @@ class Executive(object):
         return sys.platform != 'win32'
 
     def cpu_count(self):
-        return multiprocessing.cpu_count()
+        cpu_count = multiprocessing.cpu_count()
+        if sys.platform == 'win32':
+            # TODO(crbug.com/1190269) - we can't use more than 56
+            # cores on Windows or Python3 may hang.
+            cpu_count = min(cpu_count, 56)
+        return cpu_count
 
     def kill_process(self, pid, kill_tree=True):
         """Attempts to kill the given pid.
 
         if kill_tree is True, the whole process group will be killed.
 
-        Will fail silently if pid does not exist or insufficient permissions.
+        Will fail silently if pid does not exist.
         """
         if sys.platform == 'win32':
             # Workaround for race condition that occurs when the browser is
@@ -126,7 +131,10 @@ class Executive(object):
                 NtSuspendProcess(process_handle)
                 CloseHandle(process_handle)
 
-            command = ['taskkill.exe', '/f', '/t', '/pid', pid]
+            command = ['taskkill.exe', '/f']
+            if kill_tree:
+                command.append('/t')
+            command += ['/pid', pid]
             # taskkill will exit 128 if the process is not found. We should log.
             self.run_command(command, error_handler=self.log_error)
             return
@@ -136,7 +144,9 @@ class Executive(object):
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
             else:
                 os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, os.WNOHANG)
+            # At this point if no exception has been raised, the kill has
+            # succeeded, so we can safely use a blocking wait.
+            os.waitpid(pid, 0)
         except OSError as error:
             if error.errno == errno.ESRCH:
                 _log.debug("PID %s does not exist.", pid)
@@ -144,6 +154,13 @@ class Executive(object):
             if error.errno == errno.ECHILD:
                 # Can't wait on a non-child process, but the kill worked.
                 return
+            if error.errno == errno.EPERM and \
+                    kill_tree and sys.platform == 'darwin':
+                # Calling killpg on a process group whose leader is defunct
+                # causes a permission error on macOS, in which case we try to
+                # collect the defunct process.
+                if os.waitpid(pid, os.WNOHANG) == (0, 0):
+                    return
             raise
 
     def _win32_check_running_pid(self, pid):
@@ -202,7 +219,8 @@ class Executive(object):
                                           stdout=self.PIPE,
                                           stderr=self.PIPE)
             stdout, _ = tasklist_process.communicate()
-            stdout_reader = csv.reader(stdout.splitlines())
+            stdout_reader = csv.reader(
+                stdout.decode('utf8', 'replace').splitlines())
             for line in stdout_reader:
                 processes.append([column for column in line])
         else:
@@ -213,7 +231,7 @@ class Executive(object):
             for line in stdout.splitlines():
                 # In some cases the line can contain one or more
                 # leading white-spaces, so strip it before split.
-                pid, process_name = line.strip().split(' ', 1)
+                pid, process_name = line.strip().split(b' ', 1)
                 processes.append([process_name, pid])
         return processes
 
@@ -255,6 +273,13 @@ class Executive(object):
             # It's impossible for callers to avoid race conditions with process shutdown.
             pass
 
+    def terminate(self, pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            # Silently ignore when the pid doesn't exist.
+            pass
+
     # Error handlers do not need to be static methods once all callers are
     # updated to use an Executive object.
 
@@ -286,7 +311,7 @@ class Executive(object):
         # See https://bugs.webkit.org/show_bug.cgi?id=37528
         # for an example of a regression caused by passing a unicode string directly.
         # FIXME: We may need to encode differently on different platforms.
-        if isinstance(user_input, unicode):
+        if isinstance(user_input, str):
             user_input = user_input.encode(self._child_process_encoding())
         return (self.PIPE, user_input)
 
@@ -297,11 +322,11 @@ class Executive(object):
         args = self._stringify_args(args)
         escaped_args = []
         for arg in args:
-            if isinstance(arg, unicode):
+            if isinstance(arg, str):
                 # Escape any non-ascii characters for easy copy/paste
                 arg = arg.encode('unicode_escape')
             # FIXME: Do we need to fix quotes here?
-            escaped_args.append(arg)
+            escaped_args.append(arg.decode(self._child_process_encoding()))
         return ' '.join(escaped_args)
 
     def run_command(
@@ -313,19 +338,39 @@ class Executive(object):
             timeout_seconds=None,
             error_handler=None,
             return_exit_code=False,
-            return_stderr=True,
-            ignore_stderr=False,
+            stderr=STDOUT,
             decode_output=True,
             debug_logging=True):
-        """Popen wrapper for convenience and to work around python bugs."""
+        """Popen wrapper for convenience and to work around python bugs.
+
+        By default, run_command will expect a zero exit code and will return the
+        program output in that case, or throw a ScriptError if the program has a
+        non-zero exit code. This behavior can be changed by setting the
+        appropriate input parameters.
+
+        Args:
+            args: the program arguments. Passed to Popen.
+            cwd: the current working directory for the program. Passed to Popen.
+            env: the environment for the program. Passed to Popen.
+            input: input to give to the program on stdin. Accepts either a file
+                handler (will be passed directly) or a string (will be passed
+                via a pipe).
+            timeout_seconds: maximum time in seconds to wait for the program to
+                terminate; on a timeout the process will be killed
+            error_handler: a custom error handler called with a ScriptError when
+                the program fails. The default handler raises the error.
+            return_exit_code: instead of returning the program output, return
+                the exit code. Setting this makes non-zero exit codes non-fatal
+                (the error_handler will not be called).
+            stderr: How to handle stderr. See [0] for usage.
+            decode_output: whether to decode the program output.
+            debug_logging: whether to log details about program execution.
+
+        [0]: https://docs.python.org/3/library/subprocess.html#frequently-used-arguments
+        """
         assert isinstance(args, list) or isinstance(args, tuple)
         start_time = time.time()
-
-        assert not (return_stderr and ignore_stderr)
         stdin, string_to_communicate = self._compute_stdin(input)
-        stderr = self.STDOUT if return_stderr else (
-            self.DEVNULL if ignore_stderr else None)
-
         process = self.popen(
             args,
             stdin=stdin,
@@ -335,23 +380,19 @@ class Executive(object):
             env=env,
             close_fds=self._should_close_fds())
 
-        if timeout_seconds:
-            timer = threading.Timer(timeout_seconds, process.kill)
-            timer.start()
-
-        output = process.communicate(string_to_communicate)[0]
-
-        # run_command automatically decodes to unicode() unless explicitly told not to.
-        if decode_output:
-            output = output.decode(
-                self._child_process_encoding(), errors='replace')
+        stdout_data, stderr_data = b'', b''
+        try:
+            stdout_data, stderr_data = process.communicate(
+                string_to_communicate, timeout_seconds)
+        except subprocess.TimeoutExpired:
+            _log.error('Error: Command timed out after %s seconds',
+                       timeout_seconds)
+        finally:
+            process.kill()
 
         # wait() is not threadsafe and can throw OSError due to:
         # http://bugs.python.org/issue1731717
         exit_code = process.wait()
-
-        if timeout_seconds:
-            timer.cancel()
 
         if debug_logging:
             _log.debug('"%s" took %.2fs', self.command_for_printing(args),
@@ -361,14 +402,20 @@ class Executive(object):
             return exit_code
 
         if exit_code:
-            script_error = ScriptError(
-                script_args=args,
-                exit_code=exit_code,
-                output=output,
-                cwd=cwd,
-                output_limit=self.error_output_limit)
+            # `stderr_data` may be `None` if `stderr` was not `PIPE`.
+            output = stdout_data + (stderr_data or b'')
+            script_error = ScriptError(script_args=args,
+                                       exit_code=exit_code,
+                                       output=output.decode(errors='replace'),
+                                       cwd=cwd,
+                                       output_limit=self.error_output_limit)
             (error_handler or self.default_error_handler)(script_error)
-        return output
+
+        # run_command automatically decodes to str() unless explicitly told not to.
+        if decode_output:
+            return stdout_data.decode(self._child_process_encoding(),
+                                      errors='replace')
+        return stdout_data
 
     def _child_process_encoding(self):
         # Win32 Python 2.x uses CreateProcessA rather than CreateProcessW
@@ -403,7 +450,7 @@ class Executive(object):
 
     def _stringify_args(self, args):
         # Popen will throw an exception if args are non-strings (like int())
-        string_args = map(unicode, args)
+        string_args = map(str, args)
         # The Windows implementation of Popen cannot handle unicode strings. :(
         return map(self._encode_argument_if_needed, string_args)
 
@@ -428,8 +475,7 @@ class Executive(object):
     def map(self, thunk, arglist, processes=None):
         if sys.platform == 'win32' or len(arglist) == 1:
             return map(thunk, arglist)
-        pool = multiprocessing.Pool(
-            processes=(processes or multiprocessing.cpu_count()))
+        pool = multiprocessing.Pool(processes=(processes or self.cpu_count()))
         try:
             return pool.map(thunk, arglist)
         finally:

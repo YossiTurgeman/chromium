@@ -1,20 +1,15 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_BASE_VIDEO_DECODER_H_
 #define MEDIA_BASE_VIDEO_DECODER_H_
 
-#include <string>
-
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
-#include "media/base/decode_status.h"
+#include "base/memory/scoped_refptr.h"
 #include "media/base/decoder.h"
+#include "media/base/decoder_status.h"
 #include "media/base/media_export.h"
 #include "media/base/pipeline_status.h"
-#include "media/base/status.h"
 #include "media/base/waiting.h"
 #include "ui/gfx/geometry/size.h"
 
@@ -25,10 +20,14 @@ class DecoderBuffer;
 class VideoDecoderConfig;
 class VideoFrame;
 
+// Interface for all video decoders.
+//
+// VideoDecoders may be constructed on any thread, after which all calls must
+// occur on a single sequence (which may differ from the construction sequence).
 class MEDIA_EXPORT VideoDecoder : public Decoder {
  public:
-  // Callback for VideoDecoder initialization.
-  using InitCB = base::OnceCallback<void(Status status)>;
+  // Callback for Decoder initialization.
+  using InitCB = base::OnceCallback<void(DecoderStatus)>;
 
   // Callback for VideoDecoder to return a decoded frame whenever it becomes
   // available. Only non-EOS frames should be returned via this callback.
@@ -36,10 +35,15 @@ class MEDIA_EXPORT VideoDecoder : public Decoder {
 
   // Callback type for Decode(). Called after the decoder has completed decoding
   // corresponding DecoderBuffer, indicating that it's ready to accept another
-  // buffer to decode.
-  using DecodeCB = base::OnceCallback<void(DecodeStatus)>;
+  // buffer to decode.  |kOk| implies success, |kAborted| implies that the
+  // decode was aborted, which does not necessarily indicate an error.  For
+  // example, a Reset() can trigger this.  Any other status code indicates that
+  // the decoder encountered an error, and must be reset.
+  using DecodeCB = base::OnceCallback<void(DecoderStatus)>;
 
   VideoDecoder();
+  VideoDecoder(const VideoDecoder&) = delete;
+  VideoDecoder& operator=(const VideoDecoder&) = delete;
   ~VideoDecoder() override;
 
   // Initializes a VideoDecoder with the given |config|, executing the
@@ -94,6 +98,11 @@ class MEDIA_EXPORT VideoDecoder : public Decoder {
   // |output_cb| must be called for each frame pending in the queue and
   // |decode_cb| must be called after that. Callers will not call Decode()
   // again until after the flush completes.
+  //
+  // If |buffer| is an EOS buffer with an attached VideoDecoderConfig, the
+  // decoder may choose to elide the flush if feasible. If so, it should reply
+  // to the |decode_cb| with kElidedEndOfStreamForConfigChange to avoid being
+  // reinitialized.
   virtual void Decode(scoped_refptr<DecoderBuffer> buffer,
                       DecodeCB decode_cb) = 0;
 
@@ -114,6 +123,11 @@ class MEDIA_EXPORT VideoDecoder : public Decoder {
   // Returns maximum number of parallel decode requests.
   virtual int GetMaxDecodeRequests() const;
 
+  // If true, the VideoDecoder outputs frames that hold resources which must be
+  // kept alive for as long as the decoder's client needs them. This is only
+  // relevant for VideoDecoders owned directly by the MojoVideoDecoderService.
+  virtual bool FramesHoldExternalResources() const;
+
   // Returns the recommended number of threads for software video decoding. If
   // the --video-threads command line option is specified and is valid, that
   // value is returned. Otherwise |desired_threads| is clamped to the number of
@@ -121,8 +135,11 @@ class MEDIA_EXPORT VideoDecoder : public Decoder {
   // [|limits::kMinVideoDecodeThreads|, |limits::kMaxVideoDecodeThreads|].
   static int GetRecommendedThreadCount(int desired_threads);
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(VideoDecoder);
+  // Returns the type of the decoder for statistics recording purposes.
+  // For meta-decoders (those which wrap other decoders, ie, MojoVideoDecoder)
+  // this should return the underlying type, if it is known, otherwise return
+  // its own type.
+  virtual VideoDecoderType GetDecoderType() const = 0;
 };
 
 }  // namespace media

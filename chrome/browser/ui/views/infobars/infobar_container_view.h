@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,39 +7,50 @@
 
 #include <stddef.h>
 
-#include "base/macros.h"
-#include "components/infobars/core/infobar_container.h"
+#include "base/memory/raw_ptr.h"
+#include "components/infobars/core/infobar_container_with_priority.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/accessible_pane_view.h"
 #include "ui/views/view_targeter_delegate.h"
 
 // The views-specific implementation of InfoBarContainer.
 class InfoBarContainerView : public views::AccessiblePaneView,
-                             public infobars::InfoBarContainer {
- public:
-  static const char kViewClassName[];
+                             public infobars::InfoBarContainerWithPriority {
+  METADATA_HEADER(InfoBarContainerView, views::AccessiblePaneView)
 
+ public:
   explicit InfoBarContainerView(Delegate* delegate);
+  InfoBarContainerView(const InfoBarContainerView&) = delete;
+  InfoBarContainerView& operator=(const InfoBarContainerView&) = delete;
   ~InfoBarContainerView() override;
 
+  // Returns true if there are no infobars.
+  bool IsEmpty() const;
+
   // views::AccessiblePaneView:
-  void Layout() override;
-  const char* GetClassName() const override;
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override;
-  gfx::Size CalculatePreferredSize() const override;
+  void Layout(PassKey) override;
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& available_size) const override;
 
   // InfobarContainer:
   void PlatformSpecificAddInfoBar(infobars::InfoBar* infobar,
                                   size_t position) override;
   void PlatformSpecificRemoveInfoBar(infobars::InfoBar* infobar) override;
-  void PlatformSpecificInfoBarStateChanged(bool is_animating) override;
+  void PlatformSpecificWillRemoveInfoBar(infobars::InfoBar* infobar) override;
+  void PlatformSpecificInfoBarShown(infobars::InfoBar* infobar) override;
 
  private:
   // This view draws the shadow over the web contents below the
   // lowest infobar. A separate view with a layer is used so it can
   // draw outside the bounds of |this|.
-  views::View* content_shadow_;
+  raw_ptr<views::View> content_shadow_;
 
-  DISALLOW_COPY_AND_ASSIGN(InfoBarContainerView);
+  // True when the focused view was inside this container at the moment an
+  // infobar removal started. Used to restore focus back to the infobar region
+  // when the next infobar is shown (e.g. a queued infobar being promoted), so
+  // focus does not jump to page contents and screen reader users are made aware
+  // of the newly surfaced infobar.
+  bool restore_focus_on_next_shown_ = false;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_INFOBARS_INFOBAR_CONTAINER_VIEW_H_

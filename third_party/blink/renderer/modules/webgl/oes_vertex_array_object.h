@@ -27,11 +27,13 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_OES_VERTEX_ARRAY_OBJECT_H_
 
 #include "third_party/blink/renderer/modules/webgl/webgl_extension.h"
+#include "third_party/khronos/GLES2/gl2.h"
 
 namespace blink {
 
 class WebGLRenderingContextBase;
 class WebGLVertexArrayObjectOES;
+class ExecutionContext;
 
 class OESVertexArrayObject final : public WebGLExtension {
   DEFINE_WRAPPERTYPEINFO();
@@ -40,13 +42,13 @@ class OESVertexArrayObject final : public WebGLExtension {
   static bool Supported(WebGLRenderingContextBase*);
   static const char* ExtensionName();
 
-  explicit OESVertexArrayObject(WebGLRenderingContextBase*);
+  OESVertexArrayObject(WebGLRenderingContextBase*, ExecutionContext*);
 
   WebGLExtensionName GetName() const override;
 
   WebGLVertexArrayObjectOES* createVertexArrayOES();
   void deleteVertexArrayOES(WebGLVertexArrayObjectOES*);
-  GLboolean isVertexArrayOES(WebGLVertexArrayObjectOES*);
+  bool isVertexArrayOES(WebGLVertexArrayObjectOES*);
   void bindVertexArrayOES(WebGLVertexArrayObjectOES*);
 };
 

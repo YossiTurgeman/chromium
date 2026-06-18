@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,18 +13,10 @@
 #include <unistd.h>
 
 #include "base/check.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
 #include "base/notreached.h"
 #include "base/posix/eintr_wrapper.h"
-
-#if !defined(PR_SET_PTRACER_ANY)
-#define PR_SET_PTRACER_ANY ((unsigned long)-1)
-#endif
-
-#if !defined(PR_SET_PTRACER)
-#define PR_SET_PTRACER 0x59616d61
-#endif
+#include "sandbox/linux/system_headers/linux_prctl.h"
 
 namespace sandbox {
 
@@ -105,7 +97,6 @@ int Yama::GetStatus() {
              STATUS_STRICT_ENFORCING;
     default:
       NOTREACHED();
-      return 0;
   }
 }
 

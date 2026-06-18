@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -7,14 +7,15 @@
 
 #include "rlz/win/lib/registry_util.h"
 
+#include <windows.h>
+
+#include "base/compiler_specific.h"
 #include "base/process/process_info.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/win/registry.h"
 #include "base/win/windows_version.h"
 #include "rlz/lib/assert.h"
 #include "rlz/win/lib/process_info.h"
-
-#include <windows.h>
 
 namespace rlz_lib {
 
@@ -33,14 +34,15 @@ bool RegKeyReadValue(const base::win::RegKey& key, const wchar_t* name,
   }
 
   // Note that RLZ string are always ASCII by design.
-  strncpy(value, base::WideToUTF8(value_string).c_str(), *value_size);
-  value[*value_size - 1] = 0;
+  UNSAFE_TODO(
+      strncpy(value, base::WideToUTF8(value_string).c_str(), *value_size));
+  UNSAFE_TODO(value[*value_size - 1]) = 0;
   return true;
 }
 
 bool RegKeyWriteValue(base::win::RegKey* key, const wchar_t* name,
                       const char* value) {
-  base::string16 value_string(base::ASCIIToUTF16(value));
+  std::wstring value_string(base::ASCIIToWide(value));
   return key->WriteValue(name, value_string.c_str()) == ERROR_SUCCESS;
 }
 

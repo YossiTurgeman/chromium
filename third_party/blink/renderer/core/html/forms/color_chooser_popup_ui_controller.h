@@ -55,17 +55,19 @@ class CORE_EXPORT ColorChooserPopupUIController final
 
   // ColorChooser functions
   void EndChooser() override;
-  AXObject* RootAXObject() override;
+  AXObject* RootAXObject(Element* popup_owner) override;
+  bool IsPickerVisible() const override;
 
   // PagePopupClient functions:
-  void WriteDocument(SharedBuffer*) override;
+  void WriteDocument(SegmentedBuffer&) override;
   Locale& GetLocale() override;
-  void SetValueAndClosePopup(int, const String&) override;
+  void SetValueAndClosePopup(int, const String&, bool) override;
   void SetValue(const String&) override;
   void CancelPopup() override;
   Element& OwnerElement() override;
   void DidClosePopup() override;
   PagePopupController* CreatePagePopupController(Page&, PagePopup&) override;
+  void AdjustSettings(Settings& popup_settings) override;
 
   void OpenEyeDropper();
   void EyeDropperResponseHandler(bool success, uint32_t color);
@@ -75,15 +77,13 @@ class CORE_EXPORT ColorChooserPopupUIController final
 
   void OpenPopup();
 
-  void WriteColorPickerDocument(SharedBuffer*);
-  void WriteColorSuggestionPickerDocument(SharedBuffer*);
+  void WriteColorPickerDocument(SegmentedBuffer&);
+  void WriteColorSuggestionPickerDocument(SegmentedBuffer&);
 
   Member<ChromeClient> chrome_client_;
   PagePopup* popup_;
   Locale& locale_;
-  HeapMojoRemote<mojom::blink::EyeDropperChooser,
-                 HeapMojoWrapperMode::kWithoutContextObserver>
-      eye_dropper_chooser_;
+  HeapMojoRemote<mojom::blink::EyeDropperChooser> eye_dropper_chooser_;
 };
 
 }  // namespace blink

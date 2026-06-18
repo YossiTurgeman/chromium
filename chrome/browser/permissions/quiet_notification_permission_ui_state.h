@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,12 +15,6 @@ class QuietNotificationPermissionUiState {
  public:
   // Register Profile-keyed preferences used for permission UI selection.
   static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
-
-  // Whether to show a promo for the prompt indicator.
-  static bool ShouldShowPromo(Profile* profile);
-
-  // Records that the promo was shown.
-  static void PromoWasShown(Profile* profile);
 };
 
-#endif  // CHROME_BROWSER_PERMISSIONS_QUIET_NOTIFICATION_PERMISSION_UI_STATE_H_:b
+#endif  // CHROME_BROWSER_PERMISSIONS_QUIET_NOTIFICATION_PERMISSION_UI_STATE_H_

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -26,7 +26,8 @@ class AtRuleNamesWriter(json5_generator.Writer):
         self._character_offsets = []
 
         # AtRuleDescriptorID::Invalid is 0.
-        first_descriptor_id = 1
+        # AtRuleDescriptorID::Variable is 1.
+        first_descriptor_id = 2
         # Aliases are resolved immediately at parse time, and thus don't appear
         # in the enum.
         self._descriptors_count = len(self._descriptors) + first_descriptor_id

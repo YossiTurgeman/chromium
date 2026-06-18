@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "android_webview/browser/gfx/aw_gl_surface_external_stencil.h"
 
 #include "android_webview/browser/gfx/scoped_app_gl_state_restore.h"
+#include "base/feature_list.h"
 #include "base/strings/stringize_macros.h"
 #include "ui/gfx/geometry/quad_f.h"
 #include "ui/gl/gl_bindings.h"
@@ -12,6 +13,7 @@
 
 namespace android_webview {
 
+// Lifetime: WebView
 class AwGLSurfaceExternalStencil::BlitContext {
  public:
   BlitContext() {
@@ -82,6 +84,12 @@ class AwGLSurfaceExternalStencil::BlitContext {
       glDisableVertexAttribArray(i);
     }
 
+    // Note that function is not ANGLE only.
+    if (gl::g_current_gl_driver->fn.glVertexAttribDivisorANGLEFn) {
+      glVertexAttribDivisorANGLE(0, 0);
+      glVertexAttribDivisorANGLE(1, 0);
+    }
+
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
 
@@ -95,6 +103,7 @@ class AwGLSurfaceExternalStencil::BlitContext {
   GLint gl_max_vertex_attribs_;
 };
 
+// Lifetime: WebView
 class AwGLSurfaceExternalStencil::FrameBuffer {
  public:
   FrameBuffer(gfx::Size size) : size_(size) {
@@ -149,9 +158,14 @@ class AwGLSurfaceExternalStencil::FrameBuffer {
   gfx::Size size_;
 };
 
-AwGLSurfaceExternalStencil::AwGLSurfaceExternalStencil() {}
+AwGLSurfaceExternalStencil::AwGLSurfaceExternalStencil(
+    gl::GLDisplayEGL* display,
+    bool is_angle)
+    : AwGLSurface(display, is_angle) {}
 
-AwGLSurfaceExternalStencil::~AwGLSurfaceExternalStencil() = default;
+AwGLSurfaceExternalStencil::~AwGLSurfaceExternalStencil() {
+  InvalidateWeakPtrs();
+}
 
 unsigned int AwGLSurfaceExternalStencil::GetBackingFramebufferObject() {
   const auto& stencil_state =
@@ -167,7 +181,8 @@ unsigned int AwGLSurfaceExternalStencil::GetBackingFramebufferObject() {
 }
 
 gfx::SwapResult AwGLSurfaceExternalStencil::SwapBuffers(
-    PresentationCallback callback) {
+    PresentationCallback callback,
+    gfx::FrameData frame_data) {
   const auto& stencil_state =
       android_webview::ScopedAppGLStateRestore::Current()->stencil_state();
 
@@ -175,14 +190,25 @@ gfx::SwapResult AwGLSurfaceExternalStencil::SwapBuffers(
     DCHECK(framebuffer_);
     DCHECK(blit_context_);
 
+    // Flush skia renderer rendering. This is working around what appears to be
+    // a driver bug that causes rendering to break.
+    glFlush();
+
+    // Bind required context.
+    blit_context_->Bind();
+
+    // Bind real frame buffer.
+    glBindFramebufferEXT(GL_FRAMEBUFFER,
+                         AwGLSurface::GetBackingFramebufferObject());
+
     // Restore stencil state.
     glEnable(GL_STENCIL_TEST);
     glStencilFuncSeparate(GL_FRONT, stencil_state.stencil_front_func,
-                          stencil_state.stencil_front_mask,
-                          stencil_state.stencil_front_ref);
+                          stencil_state.stencil_front_ref,
+                          stencil_state.stencil_front_mask);
     glStencilFuncSeparate(GL_BACK, stencil_state.stencil_back_func,
-                          stencil_state.stencil_back_mask,
-                          stencil_state.stencil_back_ref);
+                          stencil_state.stencil_back_ref,
+                          stencil_state.stencil_back_mask);
     glStencilMaskSeparate(GL_FRONT, stencil_state.stencil_front_writemask);
     glStencilMaskSeparate(GL_BACK, stencil_state.stencil_back_writemask);
     glStencilOpSeparate(GL_FRONT, stencil_state.stencil_front_fail_op,
@@ -191,13 +217,6 @@ gfx::SwapResult AwGLSurfaceExternalStencil::SwapBuffers(
     glStencilOpSeparate(GL_BACK, stencil_state.stencil_back_fail_op,
                         stencil_state.stencil_back_z_fail_op,
                         stencil_state.stencil_back_z_pass_op);
-
-    // Bind required context.
-    blit_context_->Bind();
-
-    // Bind real frame buffer.
-    glBindFramebufferEXT(GL_FRAMEBUFFER,
-                         AwGLSurface::GetBackingFramebufferObject());
 
     // Scale clip rect to (0, 0)x(1, 1) space.
     gfx::QuadF quad = gfx::QuadF(gfx::RectF(clip_rect_));
@@ -220,6 +239,8 @@ gfx::SwapResult AwGLSurfaceExternalStencil::SwapBuffers(
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, framebuffer_->texture_id());
+    if (gl::g_current_gl_driver->fn.glBindSamplerFn)
+      glBindSampler(0, 0);
 
     // We need to restore viewport as it might have changed by renderer
     glViewport(0, 0, viewport_.width(), viewport_.height());
@@ -230,10 +251,21 @@ gfx::SwapResult AwGLSurfaceExternalStencil::SwapBuffers(
     // Restore color mask in case.
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
+    // Restore blending.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glFrontFace(GL_CCW);
+
+    if (gl::g_current_gl_driver->fn.glWindowRectanglesEXTFn)
+      glWindowRectanglesEXT(GL_EXCLUSIVE_EXT, 0, nullptr);
+
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   }
 
-  return AwGLSurface::SwapBuffers(std::move(callback));
+  return AwGLSurface::SwapBuffers(std::move(callback), std::move(frame_data));
 }
 
 void AwGLSurfaceExternalStencil::RecalculateClipAndTransform(
@@ -271,6 +303,17 @@ void AwGLSurfaceExternalStencil::RecalculateClipAndTransform(
     // memory, assuming |stencil_test_enabled| doesn't change often.
     framebuffer_.reset();
   }
+}
+
+bool AwGLSurfaceExternalStencil::IsDrawingToFBO() {
+  const auto& stencil_state =
+      android_webview::ScopedAppGLStateRestore::Current()->stencil_state();
+  return stencil_state.stencil_test_enabled;
+}
+
+void AwGLSurfaceExternalStencil::DestroyExternalStencilFramebuffer() {
+  framebuffer_.reset();
+  blit_context_.reset();
 }
 
 }  // namespace android_webview

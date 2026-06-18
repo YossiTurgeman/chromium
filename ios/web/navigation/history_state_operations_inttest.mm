@@ -1,13 +1,13 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/compiler_specific.h"
-#include "base/memory/ptr_util.h"
-#include "base/strings/string_number_conversions.h"
-#include "base/strings/sys_string_conversions.h"
-#include "base/strings/utf_string_conversions.h"
+#import "base/memory/ptr_util.h"
+#import "base/strings/string_number_conversions.h"
+#import "base/strings/sys_string_conversions.h"
+#import "base/strings/utf_string_conversions.h"
 #import "base/test/ios/wait_util.h"
+#import "base/time/time.h"
 #import "ios/web/navigation/navigation_item_impl.h"
 #import "ios/web/public/navigation/navigation_item.h"
 #import "ios/web/public/navigation/navigation_manager.h"
@@ -15,14 +15,10 @@
 #import "ios/web/public/web_client.h"
 #import "ios/web/public/web_state.h"
 #import "ios/web/test/web_int_test.h"
-#include "net/test/embedded_test_server/embedded_test_server.h"
-#include "testing/gtest/include/gtest/gtest.h"
-#include "testing/gtest_mac.h"
-#include "url/url_canon.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "net/test/embedded_test_server/embedded_test_server.h"
+#import "testing/gtest/include/gtest/gtest.h"
+#import "testing/gtest_mac.h"
+#import "url/url_canon.h"
 
 using base::ASCIIToUTF16;
 
@@ -49,11 +45,11 @@ const char kReplaceStateId[] = "replace-state";
 // JavaScript functions on the history state test page.
 NSString* const kUpdateStateParamsScriptFormat =
     @"updateStateParams('%s', '%s', '%s')";
-NSString* const kOnLoadCheckScript = @"isOnLoadPlaceholderTextVisible()";
-NSString* const kNoOpCheckScript = @"isNoOpPlaceholderTextVisible()";
+const char kOnLoadCheckScript[] = "isOnLoadPlaceholderTextVisible()";
+const char kNoOpCheckScript[] = "isNoOpPlaceholderTextVisible()";
 
 // Wait timeout for state updates.
-const NSTimeInterval kWaitForStateUpdateTimeout = 5.0;
+constexpr base::TimeDelta kWaitForStateUpdateTimeout = base::Seconds(5);
 
 }  // namespace
 
@@ -79,11 +75,10 @@ class HistoryStateOperationsTest : public web::WebIntTest {
   const GURL& state_operations_url() { return state_operations_url_; }
 
   // Reloads the page and waits for the load to finish.
-  bool Reload() WARN_UNUSED_RESULT {
+  [[nodiscard]] bool Reload() {
     return ExecuteBlockAndWaitForLoad(GetLastCommittedItem()->GetURL(), ^{
-      // TODO(crbug.com/677364): Use NavigationManager::Reload() once it no
-      // longer requires a web delegate.
-      web_state()->ExecuteJavaScript(ASCIIToUTF16("window.location.reload()"));
+      web_state()->GetNavigationManager()->Reload(web::ReloadType::NORMAL,
+                                                  /*check_for_repost=*/false);
     });
   }
 
@@ -99,22 +94,26 @@ class HistoryStateOperationsTest : public web::WebIntTest {
     NSString* set_params_script = [NSString
         stringWithFormat:kUpdateStateParamsScriptFormat, state_object.c_str(),
                          title.c_str(), url_spec.c_str()];
-    ExecuteJavaScript(set_params_script);
+    web::test::ExecuteJavaScript(web_state(),
+                                 base::SysNSStringToUTF8(set_params_script));
   }
 
   // Returns the state object returned by JavaScript.
   std::string GetJavaScriptState() {
-    return base::SysNSStringToUTF8(ExecuteJavaScript(@"window.history.state"));
+    return web::test::ExecuteJavaScript(web_state(), "window.history.state")
+        ->GetString();
   }
 
   // Executes JavaScript to check whether the onload text is visible.
   bool IsOnLoadTextVisible() {
-    return [ExecuteJavaScript(kOnLoadCheckScript) boolValue];
+    return web::test::ExecuteJavaScript(web_state(), kOnLoadCheckScript)
+        ->GetBool();
   }
 
   // Executes JavaScript to check whether the no-op text is visible.
   bool IsNoOpTextVisible() {
-    return [ExecuteJavaScript(kNoOpCheckScript) boolValue];
+    return web::test::ExecuteJavaScript(web_state(), kNoOpCheckScript)
+        ->GetBool();
   }
 
   // Waits for the NoOp text to be visible.
@@ -204,9 +203,8 @@ TEST_F(HistoryStateOperationsTest, NoOpPushDifferentOrigin) {
   std::string empty_state;
   std::string empty_title;
   std::string new_port_string = base::NumberToString(test_server_->port() + 1);
-  url::Replacements<char> port_replacement;
-  port_replacement.SetPort(new_port_string.c_str(),
-                           url::Component(0, new_port_string.length()));
+  GURL::Replacements port_replacement;
+  port_replacement.SetPortStr(new_port_string);
   GURL different_origin_url =
       state_operations_url().ReplaceComponents(port_replacement);
   ASSERT_TRUE(IsOnLoadTextVisible());
@@ -225,47 +223,14 @@ TEST_F(HistoryStateOperationsTest, NoOpReplaceDifferentOrigin) {
   std::string empty_state;
   std::string empty_title;
   std::string new_port_string = base::NumberToString(test_server_->port() + 1);
-  url::Replacements<char> port_replacement;
-  port_replacement.SetPort(new_port_string.c_str(),
-                           url::Component(0, new_port_string.length()));
+  GURL::Replacements port_replacement;
+  port_replacement.SetPortStr(new_port_string);
   GURL different_origin_url =
       state_operations_url().ReplaceComponents(port_replacement);
   ASSERT_TRUE(IsOnLoadTextVisible());
   SetStateParams(empty_state, empty_title, different_origin_url);
   ASSERT_TRUE(web::test::TapWebViewElementWithId(web_state(), kReplaceStateId));
   WaitForNoOpText();
-}
-
-// Tests that calling window.history.replaceState() with only a new title
-// successfully replaces the current NavigationItem's title.
-// TODO(crbug.com/677356): Enable this test once the NavigationItem's title is
-// updated from within the web layer.
-TEST_F(HistoryStateOperationsTest, DISABLED_TitleReplacement) {
-  // Navigate to about:blank then navigate back to the test page.  The created
-  // NavigationItem can be used later to verify that the title is replaced
-  // rather than pushed.
-  GURL about_blank("about:blank");
-  ASSERT_TRUE(LoadUrl(about_blank));
-  web::NavigationItem* about_blank_item = GetLastCommittedItem();
-  EXPECT_TRUE(ExecuteBlockAndWaitForLoad(state_operations_url(), ^{
-    navigation_manager()->GoBack();
-  }));
-  EXPECT_EQ(state_operations_url(), GetLastCommittedItem()->GetURL());
-  // Set up the state parameters and tap the replace state button.
-  std::string empty_state;
-  std::string new_title("NEW TITLE");
-  GURL empty_url;
-  SetStateParams(empty_state, new_title, empty_url);
-  ASSERT_TRUE(web::test::TapWebViewElementWithId(web_state(), kReplaceStateId));
-  // Wait for the title to be reflected in the NavigationItem.
-  BOOL completed = base::test::ios::WaitUntilConditionOrTimeout(
-      kWaitForStateUpdateTimeout, ^{
-        return GetLastCommittedItem()->GetTitle() == ASCIIToUTF16(new_title);
-      });
-  EXPECT_TRUE(completed) << "Failed to validate NavigationItem title.";
-  // Verify that the forward navigation was not pruned.
-  EXPECT_EQ(GetIndexOfNavigationItem(GetLastCommittedItem()) + 1,
-            GetIndexOfNavigationItem(about_blank_item));
 }
 
 // Tests that calling window.history.replaceState() with a new state object
@@ -315,12 +280,12 @@ TEST_F(HistoryStateOperationsTest, StateReplacement) {
 
 // Tests that the state object is reset to the correct value after reloading a
 // page whose state has been replaced.
-#if TARGET_IPHONE_SIMULATOR
+#if TARGET_OS_SIMULATOR
 #define MAYBE_StateReplacementReload StateReplacementReload
 #else
 #define MAYBE_StateReplacementReload DISABLED_StateReplacementReload
 #endif
-// TODO(crbug.com/720381): Enable this test on device.
+// TODO(crbug.com/40519813): Enable this test on device.
 TEST_F(HistoryStateOperationsTest, MAYBE_StateReplacementReload) {
   // Set up the state parameters and tap the replace state button.
   std::string new_state("STATE OBJECT");
@@ -364,7 +329,7 @@ TEST_F(HistoryStateOperationsTest, StateReplacementBackForward) {
     navigation_manager()->GoBack();
   }));
 
-  // WebKit doesn't trigger onload on back. WKBasedNavigationManager inherits
+  // WebKit doesn't trigger onload on back. NavigationManagerImpl inherits
   // this behavior.
   WaitForNoOpText();
 

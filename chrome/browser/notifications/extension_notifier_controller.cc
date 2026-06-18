@@ -1,8 +1,10 @@
-// Copyright (c) 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/notifications/extension_notifier_controller.h"
+
+#include <memory>
 
 #include "ash/public/cpp/notifier_metadata.h"
 #include "base/strings/utf_string_conversions.h"
@@ -21,7 +23,7 @@
 ExtensionNotifierController::ExtensionNotifierController(Observer* observer)
     : observer_(observer) {}
 
-ExtensionNotifierController::~ExtensionNotifierController() {}
+ExtensionNotifierController::~ExtensionNotifierController() = default;
 
 std::vector<ash::NotifierMetadata> ExtensionNotifierController::GetNotifierList(
     Profile* profile) {
@@ -32,14 +34,14 @@ std::vector<ash::NotifierMetadata> ExtensionNotifierController::GetNotifierList(
   // the icon doesn't exist for the specified size, and in that case it falls
   // back to the default icon. The fetched icon will be resized in the
   // settings dialog. See chrome/browser/extensions/extension_icon_image.cc
-  // and crbug.com/222931
-  app_icon_loader_.reset(new extensions::ChromeAppIconLoader(
-      profile, extension_misc::EXTENSION_ICON_SMALL, this));
+  // and crbug.com/41001667
+  app_icon_loader_ = std::make_unique<extensions::ChromeAppIconLoader>(
+      profile, extension_misc::EXTENSION_ICON_SMALL, this);
   for (extensions::ExtensionSet::const_iterator iter = extension_set.begin();
        iter != extension_set.end(); ++iter) {
     const extensions::Extension* extension = iter->get();
     if (!extension->permissions_data()->HasAPIPermission(
-            extensions::APIPermission::kNotifications)) {
+            extensions::mojom::APIPermissionID::kNotifications)) {
       continue;
     }
 
@@ -75,7 +77,9 @@ void ExtensionNotifierController::SetNotifierEnabled(
 
 void ExtensionNotifierController::OnAppImageUpdated(
     const std::string& id,
-    const gfx::ImageSkia& image) {
+    const gfx::ImageSkia& image,
+    bool is_placeholder_icon,
+    const std::optional<gfx::ImageSkia>& badge_image) {
   observer_->OnIconImageUpdated(
       message_center::NotifierId(message_center::NotifierType::APPLICATION, id),
       image);

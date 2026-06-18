@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,31 +7,34 @@
 
 #include <stddef.h>
 
-#include <map>
 #include <memory>
-#include <set>
+#include <optional>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/optional.h"
-#include "base/strings/string_piece.h"
+#include "base/containers/flat_map.h"
+#include "base/containers/span.h"
+#include "base/containers/to_vector.h"
+#include "base/memory/raw_ptr.h"
+#include "base/types/pass_key.h"
 #include "components/autofill/core/browser/autofill_field.h"
-#include "components/autofill/core/browser/autofill_metrics.h"
-#include "components/autofill/core/browser/autofill_type.h"
+#include "components/autofill/core/browser/country_type.h"
 #include "components/autofill/core/browser/field_types.h"
 #include "components/autofill/core/browser/form_types.h"
+#include "components/autofill/core/browser/heuristic_source.h"
 #include "components/autofill/core/browser/proto/api_v1.pb.h"
-#include "components/autofill/core/browser/proto/server.pb.h"
+#include "components/autofill/core/browser/suggestions/suggestion_util.h"
+#include "components/autofill/core/common/dense_set.h"
+#include "components/autofill/core/common/form_data.h"
+#include "components/autofill/core/common/form_field_data.h"
+#include "components/autofill/core/common/language_code.h"
 #include "components/autofill/core/common/mojom/autofill_types.mojom.h"
-#include "components/autofill/core/common/password_form.h"
-#include "components/autofill/core/common/renderer_id.h"
+#include "components/autofill/core/common/signatures.h"
+#include "components/autofill/core/common/unique_ids.h"
 #include "url/gurl.h"
 #include "url/origin.h"
-
-enum UploadRequired { UPLOAD_NOT_REQUIRED, UPLOAD_REQUIRED, USE_UPLOAD_RATES };
 
 namespace base {
 class TimeTicks;
@@ -39,79 +42,48 @@ class TimeTicks;
 
 namespace autofill {
 
-class LogBuffer;
-class LogManager;
-
-// Password attributes (whether a password has special symbols, numeric, etc.)
-enum class PasswordAttribute {
-  kHasLowercaseLetter,
-  kHasSpecialSymbol,
-  kPasswordAttributesCount
-};
-
 // The structure of forms and fields, represented by their signatures, on a
 // page. These are sequence containers to reflect their order in the DOM.
 using FormAndFieldSignatures =
     std::vector<std::pair<FormSignature, std::vector<FieldSignature>>>;
+using FieldSuggestion = AutofillQueryResponse::FormSuggestion::FieldSuggestion;
 
-struct FormData;
+class AutofillManager;
+struct AutofillServerPrediction;
+class BrowserAutofillManager;
+class FormData;
 struct FormDataPredictions;
-
-class RandomizedEncoder;
+class LogBuffer;
+class LogManager;
 
 // FormStructure stores a single HTML form together with the values entered
 // in the fields along with additional information needed by Autofill.
 class FormStructure {
  public:
   explicit FormStructure(const FormData& form);
+
   virtual ~FormStructure();
 
-  // Runs several heuristics against the form fields to determine their possible
-  // types.
-  void DetermineHeuristicTypes(LogManager* log_manager = nullptr);
+  static std::unique_ptr<FormStructure> Clone(
+      const FormStructure& other,
+      base::PassKey<BrowserAutofillManager> pass_key) {
+    return base::WrapUnique(new FormStructure(other));
+  }
 
-  // Encodes the proto |upload| request from this FormStructure, and stores
-  // the (single) FormSignature and the signatures of the fields to be uploaded
-  // in |encoded_signatures|.
-  // In some cases, a |login_form_signature| is included as part of the upload.
-  // This field is empty when sending upload requests for non-login forms.
-  bool EncodeUploadRequest(const ServerFieldTypeSet& available_field_types,
-                           bool form_was_autofilled,
-                           const std::string& login_form_signature,
-                           bool observed_submission,
-                           autofill::AutofillUploadContents* upload,
-                           FormAndFieldSignatures* encoded_signatures) const;
+  // Runs rationalization and sectioning. This is to be run after the field
+  // types change.
+  //
+  // For historical reasons, the order of rationalization and sectioning is
+  // context-dependent: Usually, sectioning comes first. But for server
+  // predictions (or `legacy_order` is true), parts of the rationalization
+  // happens before sectioning.
+  // TODO(crbug.com/408497919): Make the order consistent.
+  void RationalizeAndAssignSections(const GeoIpCountryCode& client_country,
+                                    const LanguageCode& current_page_language,
+                                    LogManager* log_manager);
 
-  // Encodes the proto |query| request for the list of |forms| and their fields
-  // that are valid. The queried FormSignatures and FieldSignatures are stored
-  // in |encoded_signatures| in the same order as in |query|. In case multiple
-  // FormStructures have the same FormSignature, only the first one is included
-  // in |query| and |encoded_signatures|.
-  static bool EncodeQueryRequest(const std::vector<FormStructure*>& forms,
-                                 autofill::AutofillQueryContents* query,
-                                 FormAndFieldSignatures* encoded_signatures);
-
-  // Parses response as AutofillQueryResponseContents proto and calls
-  // ProcessQueryResponse.
-  static void ParseQueryResponse(
-      std::string response,
-      const std::vector<FormStructure*>& forms,
-      const FormAndFieldSignatures& encoded_signatures,
-      AutofillMetrics::FormInteractionsUkmLogger*);
-
-  static void ParseApiQueryResponse(
-      base::StringPiece payload,
-      const std::vector<FormStructure*>& forms,
-      const FormAndFieldSignatures& encoded_signatures,
-      AutofillMetrics::FormInteractionsUkmLogger*);
-
-  // Returns predictions using the details from the given |form_structures| and
-  // their fields' predicted types.
-  static std::vector<FormDataPredictions> GetFieldTypePredictions(
-      const std::vector<FormStructure*>& form_structures);
-
-  // Returns whether sending autofill field metadata to the server is enabled.
-  static bool IsAutofillFieldMetadataEnabled();
+  // Returns predictions that can be sent to the renderer process for debugging.
+  FormDataPredictions GetFieldTypePredictions() const;
 
   // Creates FormStructure that has bare minimum information for uploading
   // votes, namely form and field signatures. Warning: do not use for Autofill
@@ -123,122 +95,61 @@ class FormStructure {
   // Return the form signature as string.
   std::string FormSignatureAsStr() const;
 
-  // Runs a quick heuristic to rule out forms that are obviously not
-  // auto-fillable, like google/yahoo/msn search, etc.
-  bool IsAutofillable() const;
+  // This enum defines two different states of completeness for a credit card
+  // form, each used for a distinct purpose to check if the required credit card
+  // fields exist.
+  enum class CreditCardFormCompleteness {
+    // This represents a minimal complete credit card form which has at least a
+    // credit card number field and an expiration date field.
+    kCompleteCreditCardForm,
+    // This represents a credit card form which has a CVC field and a cardholder
+    // name field in addition to the credit card number field and the expiration
+    // date field. For example, this level is required for offering `Save and
+    // Fill`.
+    kCompleteCreditCardFormIncludingCvcAndName,
+  };
 
-  // Returns whether |this| form represents a complete Credit Card form, which
-  // consists in having at least a credit card number field and an expiration
-  // field.
-  bool IsCompleteCreditCardForm() const;
+  // Returns whether |this| form represents a complete Credit Card form, as
+  // defined by the given CreditCardFormCompleteness level.
+  bool IsCompleteCreditCardForm(
+      CreditCardFormCompleteness credit_card_form_completeness) const;
 
-  // Resets |autofill_count_| and counts the number of auto-fillable fields.
-  // This is used when we receive server data for form fields.  At that time,
-  // we may have more known fields than just the number of fields we matched
-  // heuristically.
-  void UpdateAutofillCount();
+  void UpdateFormData(
+      const FormData& form_data,
+      base::PassKey<AutofillManager, BrowserAutofillManager> pass_key) {
+    UpdateFormData(form_data);
+  }
 
-  // Returns true if this form matches the structural requirements for Autofill.
-  bool ShouldBeParsed(LogManager* log_manager = nullptr) const;
+  // Returns the FieldGlobalIds of the |fields_| that are eligible for manual
+  // filling on form interaction.
+  static std::vector<FieldGlobalId> FindFieldsEligibleForManualFilling(
+      const std::vector<raw_ptr<FormStructure, VectorExperimental>>& forms);
 
-  // Returns true if heuristic autofill type detection should be attempted for
-  // this form.
-  bool ShouldRunHeuristics() const;
-
-  // Returns true if we should query the crowd-sourcing server to determine this
-  // form's field types. If the form includes author-specified types, this will
-  // return false unless there are password fields in the form. If there are no
-  // password fields the assumption is that the author has expressed their
-  // intent and crowdsourced data should not be used to override this. Password
-  // fields are different because there is no way to specify password generation
-  // directly.
-  bool ShouldBeQueried() const;
-
-  // Returns true if we should upload Autofill votes for this form to the
-  // crowd-sourcing server. It is not applied for Password Manager votes.
-  bool ShouldBeUploaded() const;
-
-  // Sets the field types to be those set for |cached_form|.
-  void RetrieveFromCache(const FormStructure& cached_form,
-                         const bool should_keep_cached_value,
-                         const bool only_server_and_autofill_state);
-
-  // Logs quality metrics for |this|, which should be a user-submitted form.
-  // This method should only be called after the possible field types have been
-  // set for each field.  |interaction_time| should be a timestamp corresponding
-  // to the user's first interaction with the form.  |submission_time| should be
-  // a timestamp corresponding to the form's submission. |observed_submission|
-  // indicates whether this method is called as a result of observing a
-  // submission event (otherwise, it may be that an upload was triggered after
-  // a form was unfocused or a navigation occurred).
-  // TODO(sebsg): We log more than quality metrics. Maybe rename or split
-  // function?
-  void LogQualityMetrics(
-      const base::TimeTicks& load_time,
-      const base::TimeTicks& interaction_time,
-      const base::TimeTicks& submission_time,
-      AutofillMetrics::FormInteractionsUkmLogger* form_interactions_ukm_logger,
-      bool did_show_suggestions,
-      bool observed_submission) const;
-
-  // Log the quality of the heuristics and server predictions for this form
-  // structure, if autocomplete attributes are present on the fields (they are
-  // used as golden truths).
-  void LogQualityMetricsBasedOnAutocomplete(
-      AutofillMetrics::FormInteractionsUkmLogger* form_interactions_ukm_logger)
-      const;
-
-  // Classifies each field in |fields_| based upon its |autocomplete| attribute,
-  // if the attribute is available.  The association is stored into the field's
-  // |heuristic_type|.
-  // Fills |has_author_specified_types_| with |true| if the attribute is
-  // available and neither empty nor set to the special values "on" or "off" for
-  // at least one field.
-  // Fills |has_author_specified_sections_| with |true| if the attribute
-  // specifies a section for at least one field.
-  void ParseFieldTypesFromAutocompleteAttributes();
-
-  // Returns the values that can be filled into the form structure for the
-  // given type. For example, there's no way to fill in a value of "The Moon"
-  // into ADDRESS_HOME_STATE if the form only has a
-  // <select autocomplete="region"> with no "The Moon" option. Returns an
-  // empty set if the form doesn't reference the given type or if all inputs
-  // are accepted (e.g., <input type="text" autocomplete="region">).
-  // All returned values are standardized to upper case.
-  std::set<base::string16> PossibleValues(ServerFieldType type);
-
-  // Rationalize phone number fields in a given section, that is only fill
-  // the fields that are considered composing a first complete phone number.
-  void RationalizePhoneNumbersInSection(std::string section);
-
-  // Overrides server predictions with specific heuristic predictions:
-  // * NAME_LAST_SECOND heuristic predictions are unconditionally used.
-  void OverrideServerPredictionsWithHeuristics();
-
+  // See FormFieldData::fields.
+  const std::vector<std::unique_ptr<AutofillField>>& fields() const {
+    return fields_.data();
+  }
   const AutofillField* field(size_t index) const;
   AutofillField* field(size_t index);
   size_t field_count() const;
 
-  // Returns the number of fields that are part of the form signature and that
-  // are included in queries to the Autofill server.
-  size_t active_field_count() const;
-
-  // Returns the number of fields that are able to be autofilled.
-  size_t autofill_count() const { return autofill_count_; }
+  const AutofillField* GetFieldById(FieldGlobalId field_id) const;
+  AutofillField* GetFieldById(FieldGlobalId field_id);
 
   // Used for iterating over the fields.
   std::vector<std::unique_ptr<AutofillField>>::const_iterator begin() const {
-    return fields_.begin();
+    return fields_.data().begin();
   }
+
   std::vector<std::unique_ptr<AutofillField>>::const_iterator end() const {
-    return fields_.end();
+    return fields_.data().end();
   }
 
-  const base::string16& form_name() const { return form_name_; }
+  const std::u16string& form_name() const { return form_name_; }
 
-  const base::string16& id_attribute() const { return id_attribute_; }
+  const std::u16string& id_attribute() const { return id_attribute_; }
 
-  const base::string16& name_attribute() const { return name_attribute_; }
+  const std::u16string& name_attribute() const { return name_attribute_; }
 
   const GURL& source_url() const { return source_url_; }
 
@@ -250,107 +161,63 @@ class FormStructure {
 
   const ButtonTitleList& button_titles() const { return button_titles_; }
 
-  bool has_author_specified_types() const {
-    return has_author_specified_types_;
-  }
-
-  bool has_author_specified_upi_vpa_hint() const {
-    return has_author_specified_upi_vpa_hint_;
-  }
-
-  bool has_password_field() const { return has_password_field_; }
-
-  bool is_form_tag() const { return is_form_tag_; }
-
-  void set_submission_event(mojom::SubmissionIndicatorEvent submission_event) {
-    submission_event_ = submission_event;
-  }
-
-  void set_upload_required(UploadRequired required) {
-    upload_required_ = required;
-  }
-  UploadRequired upload_required() const { return upload_required_; }
+  // Returns whether the form comes from an HTML form with a <form> tag.
+  bool is_form_element() const;
 
   base::TimeTicks form_parsed_timestamp() const {
     return form_parsed_timestamp_;
   }
 
-  bool all_fields_are_passwords() const { return all_fields_are_passwords_; }
+  std::optional<base::TimeTicks> last_filling_timestamp() const {
+    return last_filling_timestamp_;
+  }
+  void set_last_filling_timestamp(base::TimeTicks last_filling_timestamp) {
+    last_filling_timestamp_ = last_filling_timestamp;
+  }
 
-  const FormSignature form_signature() const { return form_signature_; }
+  base::TimeTicks server_predictions_received_timestamp() const {
+    return server_predictions_received_timestamp_;
+  }
+  void set_server_predictions_received_timestamp(base::TimeTicks timestamp) {
+    server_predictions_received_timestamp_ = timestamp;
+  }
+
+  bool may_run_autofill_ai_model() const { return may_run_autofill_ai_model_; }
+
+  void set_may_run_autofill_ai_model(bool may_run_autofill_ai_model) {
+    may_run_autofill_ai_model_ = may_run_autofill_ai_model;
+  }
+
+  FormSignature form_signature() const { return form_signature_; }
 
   void set_form_signature(FormSignature signature) {
     form_signature_ = signature;
   }
 
+  FormSignature alternative_form_signature() const {
+    return alternative_form_signature_;
+  }
+
+  void set_alternative_form_signature(FormSignature signature) {
+    alternative_form_signature_ = signature;
+  }
+
+  FormSignature structural_form_signature() const {
+    return structural_form_signature_;
+  }
+
+  void set_structural_form_signature(FormSignature signature) {
+    structural_form_signature_ = signature;
+  }
+
   // Returns a FormData containing the data this form structure knows about.
   FormData ToFormData() const;
 
-  // Returns the possible form types.
-  std::set<FormType> GetFormTypes() const;
-
-  bool passwords_were_revealed() const { return passwords_were_revealed_; }
-  void set_passwords_were_revealed(bool passwords_were_revealed) {
-    passwords_were_revealed_ = passwords_were_revealed;
-  }
-
-  void set_password_attributes_vote(
-      const std::pair<PasswordAttribute, bool>& vote) {
-    password_attributes_vote_ = vote;
-  }
-
-  base::Optional<std::pair<PasswordAttribute, bool>>
-  get_password_attributes_vote() const {
-    return password_attributes_vote_;
-  }
-
-  void set_password_length_vote(const size_t noisified_password_length) {
-    DCHECK(password_attributes_vote_.has_value())
-        << "|password_length_vote_| doesn't make sense if "
-           "|password_attributes_vote_| has no value.";
-    password_length_vote_ = noisified_password_length;
-  }
-
-  size_t get_password_length_vote() const {
-    DCHECK(password_attributes_vote_.has_value())
-        << "|password_length_vote_| doesn't make sense if "
-           "|password_attributes_vote_| has no value.";
-    return password_length_vote_;
-  }
-
-#if defined(UNIT_TEST)
-  mojom::SubmissionIndicatorEvent get_submission_event_for_testing() const {
-    return submission_event_;
-  }
-
-  // Identify sections for the |fields_| for testing purposes.
-  void identify_sections_for_testing() {
-    ParseFieldTypesFromAutocompleteAttributes();
-    IdentifySections(has_author_specified_sections_);
-  }
-
-  // Set the Overall field type for |fields_[field_index]| to |type| for testing
-  // purposes.
-  void set_overall_field_type_for_testing(size_t field_index,
-                                          ServerFieldType type) {
-    if (field_index < fields_.size() && type > 0 && type < MAX_VALID_FIELD_TYPE)
-      fields_[field_index]->set_heuristic_type(type);
-  }
-#endif
-
-  void set_password_symbol_vote(int noisified_symbol) {
-    DCHECK(password_attributes_vote_.has_value())
-        << "password_symbol_vote_| doesn't make sense if "
-           "|password_attributes_vote_| has no value.";
-    password_symbol_vote_ = noisified_symbol;
-  }
-
-  int get_password_symbol_vote() const {
-    DCHECK(password_attributes_vote_.has_value())
-        << "|password_symbol_vote_| doesn't make sense if "
-           "|password_attributes_vote_| has no value";
-    return password_symbol_vote_;
-  }
+  // Returns the possible form types. Detailed documentation for
+  // `ac_unrecognized_behavior` can be found at
+  // `AutocompleteUnrecognizedBehavior`.
+  DenseSet<FormType> GetFormTypes(
+      AutocompleteUnrecognizedBehavior ac_unrecognized_behavior) const;
 
   mojom::SubmissionSource submission_source() const {
     return submission_source_;
@@ -359,360 +226,178 @@ class FormStructure {
     submission_source_ = submission_source;
   }
 
-  // Returns an identifier that is used by the refill logic. Takes the first non
-  // empty of these or returns an empty string:
-  // - Form name
-  // - Name for Autofill of first field
-  base::string16 GetIdentifierForRefill() const;
+  FormGlobalId global_id() const { return {host_frame_, renderer_id_}; }
 
-  int developer_engagement_metrics() { return developer_engagement_metrics_; }
+  FormVersion version() const { return version_; }
 
-  void set_randomized_encoder(std::unique_ptr<RandomizedEncoder> encoder);
-
-  void set_is_rich_query_enabled(bool v) { is_rich_query_enabled_ = v; }
-
-  const std::string& page_language() const { return page_language_; }
-
-  void set_page_language(std::string language) {
-    page_language_ = std::move(language);
+  FormVersion last_successfully_queried_version() const {
+    return last_successfully_queried_version_;
   }
 
-  bool value_from_dynamic_change_form() const {
-    return value_from_dynamic_change_form_;
+  void set_last_successfully_queried_version(FormVersion version) {
+    last_successfully_queried_version_ = version;
   }
 
-  void set_value_from_dynamic_change_form(bool v) {
-    value_from_dynamic_change_form_ = v;
-  }
-
-  FormRendererId unique_renderer_id() const { return unique_renderer_id_; }
-
-  bool ShouldSkipFieldVisibleForTesting(const FormFieldData& field) const {
-    return ShouldSkipField(field);
-  }
-
-  static void ProcessQueryResponseForTesting(
-      const AutofillQueryResponseContents& response,
-      const std::vector<FormStructure*>& forms,
-      const FormAndFieldSignatures& encoded_signatures,
-      AutofillMetrics::FormInteractionsUkmLogger*
-          form_interactions_ukm_logger) {
-    ProcessQueryResponse(response, forms, encoded_signatures,
-                         form_interactions_ukm_logger);
-  }
-
- private:
-  friend class AutofillMergeTest;
-  friend class FormStructureTestImpl;
-  FRIEND_TEST_ALL_PREFIXES(AutofillDownloadTest, QueryAndUploadTest);
-  FRIEND_TEST_ALL_PREFIXES(FormStructureTestImpl, FindLongestCommonPrefix);
-  FRIEND_TEST_ALL_PREFIXES(FormStructureTestImpl, FindLongestCommonAffixLength);
-  FRIEND_TEST_ALL_PREFIXES(FormStructureTestImpl, IsValidParseableName);
-  FRIEND_TEST_ALL_PREFIXES(FormStructureTestImpl,
-                           RationalizePhoneNumber_RunsOncePerSection);
-
-  class SectionedFieldsIndexes {
-   public:
-    SectionedFieldsIndexes();
-    ~SectionedFieldsIndexes();
-
-    size_t LastFieldIndex() const {
-      if (sectioned_indexes.empty())
-        return (size_t)-1;  // Shouldn't happen.
-      return sectioned_indexes.back().back();
-    }
-
-    void AddFieldIndex(const size_t index, bool is_new_section) {
-      if (is_new_section || Empty()) {
-        sectioned_indexes.push_back(std::vector<size_t>(1, index));
-        return;
-      }
-      sectioned_indexes.back().push_back(index);
-    }
-
-    void WalkForwardToTheNextSection() { current_section_ptr++; }
-
-    bool IsFinished() const {
-      return current_section_ptr >= sectioned_indexes.size();
-    }
-
-    size_t CurrentIndex() const { return CurrentSection()[0]; }
-
-    std::vector<size_t> CurrentSection() const {
-      if (current_section_ptr < sectioned_indexes.size())
-        return sectioned_indexes[current_section_ptr];
-      return std::vector<size_t>(1, (size_t)-1);  // To handle edge cases.
-    }
-
-    void Reset() { current_section_ptr = 0; }
-
-    bool Empty() const { return sectioned_indexes.empty(); }
-
-   private:
-    // A vector of sections. Each section is a vector of some of the indexes
-    // that belong to the same section. The sections and indexes are sorted by
-    // their order of appearance on the form.
-    std::vector<std::vector<size_t>> sectioned_indexes;
-    // Points to a vector of indexes that belong to the same section.
-    size_t current_section_ptr = 0;
+  // The signatures of forms recently submitted on the same origin within a
+  // small period of time.
+  struct FormAssociations {
+    std::optional<FormSignature> last_address_form_submitted;
+    std::optional<FormSignature> second_last_address_form_submitted;
+    std::optional<FormSignature> last_credit_card_form_submitted;
   };
 
-  // Parses the field types from the server query response. |forms| must be the
-  // same as the one passed to EncodeQueryRequest when constructing the query.
-  // |form_interactions_ukm_logger| is used to provide logs to UKM and can be
-  // null in tests.
-  static void ProcessQueryResponse(
-      const AutofillQueryResponseContents& response,
-      const std::vector<FormStructure*>& forms,
-      const FormAndFieldSignatures& encoded_signatures,
-      AutofillMetrics::FormInteractionsUkmLogger* form_interactions_ukm_logger);
+  base::flat_map<FieldGlobalId, AutofillServerPrediction> GetServerPredictions(
+      base::span<const FieldGlobalId> field_ids) const;
+
+  base::flat_map<FieldGlobalId, FieldType> GetHeuristicPredictions(
+      HeuristicSource source,
+      base::span<const FieldGlobalId> field_ids) const;
+
+ private:
+  friend class FormStructureTestApi;
+
+  FormStructure(const FormStructure&);
+  FormStructure& operator=(const FormStructure&);
+
+  // Copies the information from `form_data` into the members of `FormStructure`
+  // that are copies of information in `FormData`. `this` and `form_data` must
+  // have the same `global_id()`.
+  void UpdateFormData(const FormData& form_data);
+
+  // Sets the rank of each field in the form.
+  void DetermineFieldRanks();
+
+  // Sets each field's `html_type` and `html_mode` based on the field's
+  // `parsed_autocomplete` member.
+  void SetFieldTypesFromAutocompleteAttribute();
 
   FormStructure(FormSignature form_signature,
                 const std::vector<FieldSignature>& field_signatures);
 
-  // A function to fine tune the credit cards related predictions. For example:
-  // lone credit card fields in an otherwise non-credit-card related form is
-  // unlikely to be correct, the function will override that prediction.
-  void RationalizeCreditCardFieldPredictions();
-
-  // The rationalization is based on the visible fields, but should be applied
-  // to the hidden select fields. This is because hidden 'select' fields are
-  // also autofilled to take care of the synthetic fields.
-  void ApplyRationalizationsToHiddenSelects(
-      size_t field_index,
-      ServerFieldType new_type,
-      AutofillMetrics::FormInteractionsUkmLogger*);
-
-  // Returns true if we can replace server predictions with the heuristics one.
-  bool HeuristicsPredictionsAreApplicable(size_t upper_index,
-                                          size_t lower_index,
-                                          ServerFieldType first_type,
-                                          ServerFieldType second_type);
-
-  // Applies upper type to upper field, and lower type to lower field, and
-  // applies the rationalization also to hidden select fields if necessary.
-  void ApplyRationalizationsToFields(
-      size_t upper_index,
-      size_t lower_index,
-      ServerFieldType upper_type,
-      ServerFieldType lower_type,
-      AutofillMetrics::FormInteractionsUkmLogger*);
-
-  // Returns true if the fields_[index] server type should be rationalized to
-  // ADDRESS_HOME_COUNTRY.
-  bool FieldShouldBeRationalizedToCountry(size_t index);
-
-  // Set fields_[|field_index|] to |new_type| and log this change.
-  void ApplyRationalizationsToFieldAndLog(
-      size_t field_index,
-      ServerFieldType new_type,
-      AutofillMetrics::FormInteractionsUkmLogger* form_interactions_ukm_logger);
-
-  // Two or three fields predicted as the whole address should be address lines
-  // 1, 2 and 3 instead.
-  void RationalizeAddressLineFields(
-      SectionedFieldsIndexes* sections_of_address_indexes,
-      AutofillMetrics::FormInteractionsUkmLogger*);
-
-  // Rationalize state and country interdependently.
-  void RationalizeAddressStateCountry(
-      SectionedFieldsIndexes* sections_of_state_indexes,
-      SectionedFieldsIndexes* sections_of_country_indexes,
-      AutofillMetrics::FormInteractionsUkmLogger*);
-
-  // Tunes the fields with identical predictions.
-  void RationalizeRepeatedFields(AutofillMetrics::FormInteractionsUkmLogger*);
-
-  // Filters out fields that don't meet the relationship ruleset for their type
-  // defined in |type_relationships_rules_|.
-  void RationalizeTypeRelationships();
-
-  // A helper function to review the predictions and do appropriate adjustments
-  // when it considers necessary.
-  void RationalizeFieldTypePredictions();
-
-  void EncodeFormForQuery(autofill::AutofillQueryContents::Form* query_form,
-                          FormAndFieldSignatures* encoded_signatures) const;
-
-  void EncodeFormForUpload(autofill::AutofillUploadContents* upload,
-                           FormAndFieldSignatures* encoded_signatures) const;
-
-  // Returns true if the form has no fields, or too many.
-  bool IsMalformed() const;
-
-  // Classifies each field in |fields_| into a logical section.
-  // Sections are identified by the heuristic (or by the heuristic and the
-  // autocomplete section attribute, if defined when feature flag
-  // kAutofillUseNewSectioningMethod is enabled) that a logical section should
-  // not include multiple fields of the same autofill type (with some
-  // exceptions, as described in the implementation). Credit card fields also,
-  // have a single separate section from address fields.
-  // If |has_author_specified_sections| is true, only the second pass --
-  // distinguishing credit card sections from non-credit card ones -- is made.
-  void IdentifySections(bool has_author_specified_sections);
-
-  // Returns true if field should be skipped when talking to Autofill server.
-  bool ShouldSkipField(const FormFieldData& field) const;
-
-  // Further processes the extracted |fields_|.
-  void ProcessExtractedFields();
-
-  // Tries to set |parseable_name| fields by stripping the given offsets from
-  // both sides of the |name| fields.
-  // Sets |parseable_name| to |name| if the sum of offsets is bigger than
-  // |name|.
-  // Sets all |parseable_name| to |name| without modification and returns
-  // false if a name fails the |IsValidParseableName()| check after stripping.
-  bool SetStrippedParseableNames(size_t offset_left, size_t offset_right);
-
-  // Returns true if |string| is a valid parseable_name. Current criterion
-  // is the |autofill::kParseableNameValidationRe| regex.
-  static bool IsValidParseableName(base::string16 string);
-
-  // Returns the length of the longest common prefix found within |strings|
-  // if |findCommonSuffix| is false. Otherwise returns longest common suffix.
-  static size_t FindLongestCommonAffixLength(
-      const std::vector<base::StringPiece16>& strings,
-      bool findCommonSuffix = false);
-
-  // Returns the longest common prefix found within |strings|. Strings below a
-  // threshold length defined by |kMinCommonNamePrefixLength| are excluded
-  // when performing this check; this is needed because an exceptional
-  // field may be missing a prefix which is otherwise consistently applied.
-  // For instance, a framework may only apply a prefix to those fields
-  // which are bound when POSTing.
-  //
-  // Soon to be replaced by FindLongestCommonPrefixLength
-  static base::string16 FindLongestCommonPrefix(
-      const std::vector<base::string16>& strings);
-
-  // The language detected for this form's page, prior to any translations
-  // performed by Chrome.
-  std::string page_language_;
+  // Extracts the parseable field name by removing a common affix.
+  void ExtractParseableFieldNames();
 
   // The id attribute of the form.
-  base::string16 id_attribute_;
+  std::u16string id_attribute_;
 
   // The name attribute of the form.
-  base::string16 name_attribute_;
+  std::u16string name_attribute_;
 
   // The name of the form.
-  base::string16 form_name_;
+  std::u16string form_name_;
 
   // The titles of form's buttons.
   ButtonTitleList button_titles_;
-
-  // The type of the event that was taken as an indication that the form has
-  // been successfully submitted.
-  mojom::SubmissionIndicatorEvent submission_event_ =
-      mojom::SubmissionIndicatorEvent::NONE;
 
   // The source URL (excluding the query parameters and fragment identifiers).
   GURL source_url_;
 
   // The full source URL including query parameters and fragment identifiers.
+  // If `kAutofillIncludeUrlInCrowdsourcing` is disabled, this value should only
+  // be set for password forms.
   GURL full_source_url_;
 
   // The target URL.
   GURL target_url_;
 
   // The origin of the main frame of this form.
+  // |main_frame_origin| represents the main frame (not necessarily primary
+  // main frame) of the form's frame tree as described by MPArch nested frame
+  // trees. For details, see RenderFrameHost::GetMainFrame().
   url::Origin main_frame_origin_;
 
-  // The number of fields able to be auto-filled.
-  size_t autofill_count_ = 0;
-
-  // A vector of all the input fields in the form.
-  std::vector<std::unique_ptr<AutofillField>> fields_;
-
-  // The number of fields that are part of the form signature and that are
-  // included in queries to the Autofill server.
-  size_t active_field_count_ = 0;
-
-  // Whether the server expects us to always upload, never upload, or default
-  // to the stored upload rates.
-  UploadRequired upload_required_ = USE_UPLOAD_RATES;
-
-  // Whether the form includes any field types explicitly specified by the site
-  // author, via the |autocompletetype| attribute.
-  bool has_author_specified_types_ = false;
-
-  // Whether the form includes any sections explicitly specified by the site
-  // author, via the autocomplete attribute.
-  bool has_author_specified_sections_ = false;
-
-  // Whether the form includes a field that explicitly sets it autocomplete
-  // type to "upi-vpa".
-  bool has_author_specified_upi_vpa_hint_ = false;
-
-  // Whether the form was parsed for autocomplete attribute, thus assigning
-  // the real values of |has_author_specified_types_| and
-  // |has_author_specified_sections_|.
-  bool was_parsed_for_autocomplete_attributes_ = false;
-
-  // True if the form contains at least one password field.
-  bool has_password_field_ = false;
-
-  // True if the form is a <form>.
-  bool is_form_tag_ = true;
-
-  // True if the form is made of unowned fields (i.e., not within a <form> tag)
-  // in what appears to be a checkout flow. This attribute is only calculated
-  // and used if features::kAutofillRestrictUnownedFieldsToFormlessCheckout is
-  // enabled, to prevent heuristics from running on formless non-checkout.
-  bool is_formless_checkout_ = false;
-
-  // True if all form fields are password fields.
-  bool all_fields_are_passwords_ = false;
+  // Indicates whether the client may run the AutofillAI model for this form.
+  bool may_run_autofill_ai_model_ = false;
 
   // The unique signature for this form, composed of the target url domain,
   // the form name, and the form field names in a 64-bit hash.
   FormSignature form_signature_;
 
+  // The alternative signature for this form which is more stable/generic than
+  // `form_signature_`, used when signature is random/unstable at each reload.
+  // It is a 64-bit hash of the target url domain, the fields' form control
+  // types, and for forms with 1-2 fields, the first non-empty element of the
+  // following: [path, reference, query].
+  //
+  // TODO(crbug.com/430889664): Update the comment once deprecated.
+  // The alternative signature is currently only sent to server as part of Query
+  // requests and is used for overrides by password manager.
+  FormSignature alternative_form_signature_;
+
+  // This form signature is equivalent to `alternative_form_signature_` for
+  // forms with more than 2 fields. For forms with 2 fields or less, it is more
+  // stable as doesn't depend on url path, reference, or query.
+  //
+  // TODO(crbug.com/427418538): Update the comment once the feature is launched.
+  // This signature is currently sent to server as part of Upload requests and
+  // will eventually be used together with three-bit hashes to fetch server
+  // predictions. See go/autofill-stable-form-signature and
+  // go/autofill-signatures-more-data for more details.
+  FormSignature structural_form_signature_;
+
   // The timestamp (not wallclock time) when this form was initially parsed.
   base::TimeTicks form_parsed_timestamp_;
 
-  // If phone number rationalization has been performed for a given section.
-  std::map<std::string, bool> phone_rationalized_;
+  // The timestamp when this form or one of its fields was last filled.
+  std::optional<base::TimeTicks> last_filling_timestamp_;
 
-  // True iff the form is a password form and the user has seen the password
-  // value before accepting the prompt to save. Used for crowdsourcing.
-  bool passwords_were_revealed_ = false;
-
-  // The vote about password attributes (e.g. whether the password has a numeric
-  // character).
-  base::Optional<std::pair<PasswordAttribute, bool>> password_attributes_vote_;
-
-  // If |password_attribute_vote_| contains (kHasSpecialSymbol, true), this
-  // field contains nosified information about a special symbol in a
-  // user-created password stored as ASCII code. The default value of 0
-  // indicates that no symbol was set.
-  int password_symbol_vote_ = 0;
-
-  // Noisified password length for crowdsourcing. If |password_attributes_vote_|
-  // has no value, |password_length_vote_| should be ignored.
-  size_t password_length_vote_;
-
-  // Used to record whether developer has used autocomplete markup or
-  // UPI-VPA hints, This is a bitmask of DeveloperEngagementMetric and set in
-  // DetermineHeuristicTypes().
-  int developer_engagement_metrics_ = 0;
+  // The timestamp when server predictions were received for this form.
+  base::TimeTicks server_predictions_received_timestamp_;
 
   mojom::SubmissionSource submission_source_ = mojom::SubmissionSource::NONE;
-
-  // The randomized encoder to use to encode form metadata during upload.
-  // If this is nullptr, no randomized metadata will be sent.
-  std::unique_ptr<RandomizedEncoder> randomized_encoder_;
 
   // True iff queries encoded from this form structure should include rich
   // form/field metadata.
   bool is_rich_query_enabled_ = false;
 
-  bool value_from_dynamic_change_form_ = false;
+  // A unique identifier of the containing frame.
+  // This value must not be leaked to other renderer processes.
+  LocalFrameToken host_frame_;
 
-  FormRendererId unique_renderer_id_;
+  // A monotonically increasing counter that indicates the generation of the
+  // form.
+  FormVersion version_;
 
-  DISALLOW_COPY_AND_ASSIGN(FormStructure);
+  // The last FormVersion for which ServerPredictions::ApplyTo() ran
+  // successfully.
+  FormVersion last_successfully_queried_version_;
+
+  // An identifier of the form that is unique among the forms from the same
+  // frame.
+  FormRendererId renderer_id_;
+
+  // A vector of all iframes in the form.
+  std::vector<FrameTokenWithPredecessor> child_frames_;
+
+  // A vector of all the input fields in the form. See `FormFieldData::fields`.
+  // This is a separate class to enable cloning `std::unique_ptr<AutofillField>`
+  // values.
+  class AutofillFieldCopyableVector {
+   public:
+    AutofillFieldCopyableVector();
+    AutofillFieldCopyableVector(const AutofillFieldCopyableVector& other);
+    AutofillFieldCopyableVector(AutofillFieldCopyableVector&&);
+    AutofillFieldCopyableVector& operator=(AutofillFieldCopyableVector&&);
+    AutofillFieldCopyableVector& operator=(const AutofillFieldCopyableVector&);
+    ~AutofillFieldCopyableVector();
+
+    std::vector<std::unique_ptr<AutofillField>>& data() { return data_; }
+    const std::vector<std::unique_ptr<AutofillField>>& data() const {
+      return data_;
+    }
+
+    // Delegate common vector methods for ease of use
+    auto begin() { return data_.begin(); }
+    auto end() { return data_.end(); }
+    auto begin() const { return data_.begin(); }
+    auto end() const { return data_.end(); }
+    size_t size() const { return data_.size(); }
+    bool empty() const { return data_.empty(); }
+    void clear() { data_.clear(); }
+
+   private:
+    std::vector<std::unique_ptr<AutofillField>> data_;
+  } fields_;
 };
 
 LogBuffer& operator<<(LogBuffer& buffer, const FormStructure& form);

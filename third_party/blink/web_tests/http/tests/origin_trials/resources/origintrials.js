@@ -83,19 +83,6 @@ expect_css_media = (feature_name) => {
   assert_true(media_list.mediaText.indexOf("not all") === -1);
 }
 
-// Verify that the given constant exists, and returns the expected value, and
-// is not modifiable.
-expect_constant = (constant_name, constant_value, get_value_func) => {
-  var testObject = internals.originTrialsTest();
-  var testInterface = testObject.constructor;
-  assert_own_property(testInterface, constant_name);
-  assert_equals(get_value_func(testInterface), constant_value,
-    'Constant should return expected value');
-  testInterface[constant_name] = constant_value + 1;
-  assert_equals(get_value_func(testInterface), constant_value,
-    'Constant should not be modifiable');
-}
-
 // Verify that given member does not exist, and does not provide a value
 // (i.e. is undefined).
 expect_member_fails = (member_name) => {
@@ -162,14 +149,9 @@ expect_css_supports_fails = (member_name, member_css_name, member_value, element
 expect_css_media_fails = (feature_name) => {
   let media_feature_string = make_css_media_feature_string(feature_name);
   assert_false(window.matchMedia(media_feature_string).matches);
+  assert_false(window.matchMedia(`not (${media_feature_string})`).matches);
 
   assert_equals(getComputedStyle(document.documentElement).opacity, "1");
-
-  let media_list = document.styleSheets[0].media;
-  media_list.appendMedium(media_feature_string);
-  assert_true(media_list.mediaText.indexOf("not all") !== -1);
-  media_list.mediaText = media_feature_string;
-  assert_true(media_list.mediaText.indexOf("not all") !== -1);
 }
 
 // These tests verify that any gated parts of the API are not available.
@@ -185,10 +167,6 @@ expect_failure = (skip_worker) => {
   test(() => {
       expect_member_fails('normalAttribute');
     }, 'Attribute should not exist, with trial disabled');
-
-  test(() => {
-      expect_static_member_fails('CONSTANT');
-    }, 'Constant should not exist, with trial disabled');
 
   if (!skip_worker) {
     fetch_tests_from_worker(new Worker('resources/disabled-worker.js'));
@@ -249,17 +227,18 @@ expect_failure_invalid_os = (skip_worker) => {
   if (!skip_worker) {
     fetch_tests_from_worker(new Worker('resources/invalid-os-worker.js'));
   }
-}
+};
 
 // These tests verify that any gated parts of the API are not available for a
 // third-party trial.
-expect_failure_third_party = (skip_worker) => {
+expect_failure_third_party = async (skip_worker) => {
   test(() => {
     expect_member_fails('thirdPartyAttribute');
   }, 'Third-party attribute should not exist, with trial disabled');
 
   if (!skip_worker) {
-    fetch_tests_from_worker(new Worker('resources/third-party-disabled-worker.js'));
+    await fetch_tests_from_worker(
+        new Worker('resources/third-party-disabled-worker.js'));
   }
 };
 
@@ -279,10 +258,11 @@ expect_success = () => {
     }, 'Attribute should exist on object and return value');
 
   test(() => {
-      expect_constant('CONSTANT', 1, (testObject) => {
-          return testObject.CONSTANT;
-        });
-    }, 'Constant should exist on interface and return value');
+    assert_true('testOriginTrialGlobalAttribute' in self,
+      'Attribute exists on global scope (window)');
+    assert_true(self.testOriginTrialGlobalAttribute,
+      'Atttribute on global scope (window) should return boolean value');
+  }, 'Attribute should exist on global scope (window) and return value');
 
   fetch_tests_from_worker(new Worker('resources/enabled-worker.js'));
 };
@@ -383,12 +363,6 @@ expect_always_bindings = (insecure_context, opt_description_suffix) => {
           return testObject.staticUnconditionalMethod();
         });
     }, 'Static method should exist and return value, regardless of trial' + description_suffix);
-
-  test(() => {
-      expect_constant('UNCONDITIONAL_CONSTANT', 99, (testObject) => {
-          return testObject.UNCONDITIONAL_CONSTANT;
-        });
-    }, 'Constant should exist on interface and return value, regardless of trial' + description_suffix);
 
   test(() => {
       expect_dictionary_member('unconditionalBool');
@@ -539,12 +513,6 @@ expect_success_bindings = (insecure_context) => {
         });
     }, 'Static method should exist on partial interface and return value');
 
-  test(() => {
-      expect_constant('CONSTANT_PARTIAL', 2, (testObject) => {
-          return testObject.CONSTANT_PARTIAL;
-        });
-    }, 'Constant should exist on partial interface and return value');
-
   // Tests for combination of [RuntimeEnabled] and [SecureContext]
   test(() => {
       expect_member('secureAttribute', (testObject) => {
@@ -645,9 +613,6 @@ expect_failure_bindings_impl = (insecure_context, description_suffix) => {
   test(() => {
       expect_static_member_fails('staticMethodPartial');
     }, 'Static method should not exist on partial interface, with trial disabled');
-  test(() => {
-      expect_static_member_fails('CONSTANT_PARTIAL');
-    }, 'Constant should not exist on partial interface, with trial disabled');
 
   // Tests for combination of [RuntimeEnabled] and [SecureContext]
   test(() => {

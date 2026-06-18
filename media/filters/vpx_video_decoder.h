@@ -1,13 +1,14 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_FILTERS_VPX_VIDEO_DECODER_H_
 #define MEDIA_FILTERS_VPX_VIDEO_DECODER_H_
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "base/sequence_checker.h"
+#include "media/base/frame_buffer_pool.h"
+#include "media/base/supported_video_decoder_config.h"
 #include "media/base/video_decoder.h"
 #include "media/base/video_decoder_config.h"
 #include "media/base/video_frame.h"
@@ -18,7 +19,6 @@ struct vpx_codec_ctx;
 struct vpx_image;
 
 namespace media {
-class FrameBufferPool;
 
 // Libvpx video decoder wrapper.
 // Note: VpxVideoDecoder accepts only YV12A VP8 content or VP9 content. This is
@@ -30,10 +30,14 @@ class FrameBufferPool;
 class MEDIA_EXPORT VpxVideoDecoder : public OffloadableVideoDecoder {
  public:
   explicit VpxVideoDecoder(OffloadState offload_state = OffloadState::kNormal);
+
+  VpxVideoDecoder(const VpxVideoDecoder&) = delete;
+  VpxVideoDecoder& operator=(const VpxVideoDecoder&) = delete;
+
   ~VpxVideoDecoder() override;
 
   // VideoDecoder implementation.
-  std::string GetDisplayName() const override;
+  VideoDecoderType GetDecoderType() const override;
   void Initialize(const VideoDecoderConfig& config,
                   bool low_delay,
                   CdmContext* cdm_context,
@@ -46,21 +50,19 @@ class MEDIA_EXPORT VpxVideoDecoder : public OffloadableVideoDecoder {
   // OffloadableVideoDecoder implementation.
   void Detach() override;
 
+  void force_allocation_error_for_testing() {
+    memory_pool_->force_allocation_error_for_testing();
+  }
+
  private:
-  enum DecoderState {
-    kUninitialized,
-    kNormal,
-    kFlushCodec,
-    kDecodeFinished,
-    kError
-  };
+  enum class DecoderState { kUninitialized, kNormal, kDecodeFinished, kError };
 
   // Return values for decoding alpha plane.
   enum AlphaDecodeStatus {
     kAlphaPlaneProcessed,  // Alpha plane (if found) was decoded successfully.
     kNoAlphaPlaneData,  // Alpha plane was found, but decoder did not return any
                         // data.
-    kAlphaPlaneError  // Fatal error occured when trying to decode alpha plane.
+    kAlphaPlaneError  // Fatal error occurred when trying to decode alpha plane.
   };
 
   // Handles (re-)initializing the decoder with a (new) config.
@@ -91,7 +93,7 @@ class MEDIA_EXPORT VpxVideoDecoder : public OffloadableVideoDecoder {
 
   // |state_| must only be read and written to on |offload_task_runner_| if it
   // is non-null and there are outstanding tasks on the offload thread.
-  DecoderState state_ = kUninitialized;
+  DecoderState state_ = DecoderState::kUninitialized;
 
   OutputCB output_cb_;
 
@@ -100,12 +102,13 @@ class MEDIA_EXPORT VpxVideoDecoder : public OffloadableVideoDecoder {
   std::unique_ptr<vpx_codec_ctx> vpx_codec_;
   std::unique_ptr<vpx_codec_ctx> vpx_codec_alpha_;
 
-  // |memory_pool_| is a single-threaded memory pool used for VP9 decoding
-  // with no alpha. |frame_pool_| is used for all other cases.
+  // |memory_pool_| is a thread-safe memory pool used for zero-copy VP9 decoding
+  // (both with and without alpha). |frame_pool_| is used for VP8.
   scoped_refptr<FrameBufferPool> memory_pool_;
   VideoFramePool frame_pool_;
 
-  DISALLOW_COPY_AND_ASSIGN(VpxVideoDecoder);
+  // More specific error code to surface after an error occurs during decoding.
+  DecoderStatus::Codes error_status_ = DecoderStatus::Codes::kFailed;
 };
 
 // Helper class for creating a VpxVideoDecoder which will offload > 720p VP9
@@ -115,7 +118,7 @@ class OffloadingVpxVideoDecoder : public OffloadingVideoDecoder {
   OffloadingVpxVideoDecoder()
       : OffloadingVideoDecoder(
             1024,
-            std::vector<VideoCodec>(1, kCodecVP9),
+            std::vector<VideoCodec>(1, VideoCodec::kVP9),
             std::make_unique<VpxVideoDecoder>(
                 OffloadableVideoDecoder::OffloadState::kOffloaded)) {}
 };

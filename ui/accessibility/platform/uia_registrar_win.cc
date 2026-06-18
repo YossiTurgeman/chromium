@@ -1,10 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/accessibility/platform/uia_registrar_win.h"
+
 #include <wrl/implements.h>
-#include "base/stl_util.h"
+
+#include "base/no_destructor.h"
+#include "base/win/windows_version.h"
+#include "ui/accessibility/accessibility_features.h"
 
 namespace ui {
 
@@ -17,29 +21,61 @@ UiaRegistrarWin::UiaRegistrarWin() {
                               &registrar)))
     return;
 
+  // Register the custom UIA event that represents the test end event for the
+  // UIA test suite.
+  UIAutomationEventInfo test_complete_event_info = {
+      kUiaEventTestCompleteSentinelGuid, L"kUiaTestCompleteSentinel"};
+  registrar->RegisterEvent(&test_complete_event_info, &test_complete_event_id_);
+
   // Register the custom UIA property that represents the unique id of an UIA
   // element which also matches its corresponding IA2 element's unique id.
   UIAutomationPropertyInfo unique_id_property_info = {
       kUiaPropertyUniqueIdGuid, L"UniqueId", UIAutomationType_String};
   registrar->RegisterProperty(&unique_id_property_info,
-                              &uia_unique_id_property_id_);
+                              &unique_id_property_id_);
 
-  // Register the custom UIA event that represents the test end event for the
-  // UIA test suite.
-  UIAutomationEventInfo test_complete_event_info = {
-      kUiaEventTestCompleteSentinelGuid, L"kUiaTestCompleteSentinel"};
-  registrar->RegisterEvent(&test_complete_event_info,
-                           &uia_test_complete_event_id_);
+  if (features::IsUiaMathMlSupportEnabled()) {
+    // Register the custom UIA property that provides MathML markup for
+    // math elements. This GUID matches Microsoft Word's implementation for
+    // compatibility with assistive technologies.
+    UIAutomationPropertyInfo mathml_property_info = {
+        kUiaPropertyMathMlGuid, L"MathML", UIAutomationType_String};
+    registrar->RegisterProperty(&mathml_property_info, &mathml_property_id_);
+  }
+
+  // Register the custom UIA property that exposes the list of
+  // aria-actions action names. UIAutomationType_ElementArray is only
+  // supported for custom properties on Windows 11 and later.
+  if (base::win::GetVersion() >= base::win::Version::WIN11) {
+    UIAutomationPropertyInfo aria_actions_property_info = {
+        kUiaPropertyAriaActionsGuid, L"AccessibleActions",
+        UIAutomationType_ElementArray};
+    registrar->RegisterProperty(&aria_actions_property_info,
+                                &aria_actions_property_id_);
+  }
 }
 
 UiaRegistrarWin::~UiaRegistrarWin() = default;
 
-PROPERTYID UiaRegistrarWin::GetUiaUniqueIdPropertyId() const {
-  return uia_unique_id_property_id_;
+// UIA custom events.
+EVENTID UiaRegistrarWin::GetTestCompleteEventId() const {
+  return test_complete_event_id_;
 }
 
-EVENTID UiaRegistrarWin::GetUiaTestCompleteEventId() const {
-  return uia_test_complete_event_id_;
+// UIA custom properties.
+PROPERTYID UiaRegistrarWin::GetUniqueIdPropertyId() const {
+  return unique_id_property_id_;
+}
+
+PROPERTYID UiaRegistrarWin::GetMathMLPropertyId() const {
+  if (!features::IsUiaMathMlSupportEnabled()) {
+    return 0;
+  }
+  return mathml_property_id_;
+}
+
+PROPERTYID UiaRegistrarWin::GetAriaActionsPropertyId() const {
+  return aria_actions_property_id_;
 }
 
 const UiaRegistrarWin& UiaRegistrarWin::GetInstance() {

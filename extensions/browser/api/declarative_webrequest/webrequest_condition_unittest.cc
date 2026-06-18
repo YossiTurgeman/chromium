@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,11 @@
 #include "components/url_matcher/url_matcher_constants.h"
 #include "extensions/browser/api/declarative_webrequest/webrequest_constants.h"
 #include "extensions/browser/api/web_request/web_request_info.h"
+#include "extensions/buildflags/buildflags.h"
+#include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 using url_matcher::URLMatcher;
 using url_matcher::URLMatcherConditionSet;
@@ -69,7 +73,6 @@ TEST(WebRequestConditionTest, CreateCondition) {
   const GURL http_url("http://www.example.com");
   WebRequestInfoInitParams match_params;
   match_params.url = http_url;
-  match_params.type = blink::mojom::ResourceType::kMainFrame;
   match_params.web_request_type = WebRequestResourceType::MAIN_FRAME;
   WebRequestInfo match_request_info(std::move(match_params));
   WebRequestData data(&match_request_info, ON_BEFORE_REQUEST);
@@ -81,7 +84,6 @@ TEST(WebRequestConditionTest, CreateCondition) {
   const GURL https_url("https://www.example.com");
   WebRequestInfoInitParams wrong_resource_type_params;
   wrong_resource_type_params.url = https_url;
-  wrong_resource_type_params.type = blink::mojom::ResourceType::kSubFrame;
   wrong_resource_type_params.web_request_type =
       WebRequestResourceType::SUB_FRAME;
   WebRequestInfo wrong_resource_type_request_info(
@@ -112,6 +114,35 @@ TEST(WebRequestConditionTest, IgnoreConditionFirstPartyForCookies) {
   ASSERT_TRUE(result.get());
 }
 
+TEST(WebRequestConditionTest, IgnoreConditionThirdPartForCookies) {
+  // thirdPartyForCookies is deprecated, but must still be accepted in
+  // parsing.
+  URLMatcher matcher;
+
+  std::string error;
+  std::unique_ptr<WebRequestCondition> result;
+
+  constexpr const char kConditionTrue[] = R"({
+    "thirdPartyForCookies": true,
+    "instanceType": "declarativeWebRequest.RequestMatcher",
+  })";
+  result = WebRequestCondition::Create(nullptr, matcher.condition_factory(),
+                                       base::test::ParseJson(kConditionTrue),
+                                       &error);
+  EXPECT_EQ("", error);
+  ASSERT_TRUE(result.get());
+
+  constexpr const char kConditionFalse[] = R"({
+    "thirdPartyForCookies": false,
+    "instanceType": "declarativeWebRequest.RequestMatcher",
+  })";
+  result = WebRequestCondition::Create(nullptr, matcher.condition_factory(),
+                                       base::test::ParseJson(kConditionFalse),
+                                       &error);
+  EXPECT_EQ("", error);
+  ASSERT_TRUE(result.get());
+}
+
 // Conditions without UrlFilter attributes need to be independent of URL
 // matching results. We test here that:
 //   1. A non-empty condition without UrlFilter attributes is fulfilled iff its
@@ -134,14 +165,13 @@ TEST(WebRequestConditionTest, NoUrlAttributes) {
   EXPECT_EQ("", error);
   ASSERT_TRUE(condition_empty.get());
 
-  // A condition without a UrlFilter attribute, which is always true.
+  // A condition without a UrlFilter attribute, which is true.
   error.clear();
   constexpr const char kTrueConditionWithoutUrlFilter[] = R"({
     "instanceType": "declarativeWebRequest.RequestMatcher",
 
-    // There is no "1st party for cookies" URL in the requests below,
-    // therefore all requests are considered first party for cookies.
-    "thirdPartyForCookies": false,
+    // This header is set on the WebRequestInfo below.
+    "requestHeaders": [{ "nameEquals": "foo" }],
   })";
   std::unique_ptr<WebRequestCondition> condition_no_url_true =
       WebRequestCondition::Create(
@@ -150,12 +180,12 @@ TEST(WebRequestConditionTest, NoUrlAttributes) {
   EXPECT_EQ("", error);
   ASSERT_TRUE(condition_no_url_true.get());
 
-  // A condition without a UrlFilter attribute, which is always false.
+  // A condition without a UrlFilter attribute, which is false.
   error.clear();
   constexpr const char kFalseConditionWithoutUrlFilter[] = R"({
     "instanceType": "declarativeWebRequest.RequestMatcher",
 
-    "thirdPartyForCookies": true,
+    "excludeRequestHeaders": [{ "nameEquals": "foo" }],
   })";
   std::unique_ptr<WebRequestCondition> condition_no_url_false =
       WebRequestCondition::Create(
@@ -166,31 +196,30 @@ TEST(WebRequestConditionTest, NoUrlAttributes) {
 
   WebRequestInfoInitParams params;
   params.url = GURL("https://www.example.com");
-  params.site_for_cookies =
-      net::SiteForCookies::FromUrl(GURL("https://www.example.com"));
+  params.extra_request_headers.SetHeader("foo", "bar");
   WebRequestInfo https_request_info(std::move(params));
 
   // 1. A non-empty condition without UrlFilter attributes is fulfilled iff its
   //    attributes are fulfilled.
-  WebRequestData data(&https_request_info, ON_BEFORE_REQUEST);
+  WebRequestData data(&https_request_info, ON_BEFORE_SEND_HEADERS);
   EXPECT_FALSE(
       condition_no_url_false->IsFulfilled(WebRequestDataWithMatchIds(&data)));
 
-  data = WebRequestData(&https_request_info, ON_BEFORE_REQUEST);
+  data = WebRequestData(&https_request_info, ON_BEFORE_SEND_HEADERS);
   EXPECT_TRUE(
       condition_no_url_true->IsFulfilled(WebRequestDataWithMatchIds(&data)));
 
   // 2. An empty condition (in particular, without UrlFilter attributes) is
   //    always fulfilled.
-  data = WebRequestData(&https_request_info, ON_BEFORE_REQUEST);
+  data = WebRequestData(&https_request_info, ON_BEFORE_SEND_HEADERS);
   EXPECT_TRUE(condition_empty->IsFulfilled(WebRequestDataWithMatchIds(&data)));
 }
 
 TEST(WebRequestConditionTest, CreateConditionSet) {
   URLMatcher matcher;
 
-  WebRequestConditionSet::Values conditions;
-  conditions.push_back(base::test::ParseJsonDeprecated(
+  base::ListValue conditions;
+  conditions.Append(base::test::ParseJson(
       "{ \n"
       "  \"instanceType\": \"declarativeWebRequest.RequestMatcher\", \n"
       "  \"url\": { \n"
@@ -198,7 +227,7 @@ TEST(WebRequestConditionTest, CreateConditionSet) {
       "    \"schemes\": [\"http\"], \n"
       "  }, \n"
       "}"));
-  conditions.push_back(base::test::ParseJsonDeprecated(
+  conditions.Append(base::test::ParseJson(
       "{ \n"
       "  \"instanceType\": \"declarativeWebRequest.RequestMatcher\", \n"
       "  \"url\": { \n"
@@ -259,8 +288,8 @@ TEST(WebRequestConditionTest, CreateConditionSet) {
 TEST(WebRequestConditionTest, TestPortFilter) {
   URLMatcher matcher;
 
-  WebRequestConditionSet::Values conditions;
-  conditions.push_back(base::test::ParseJsonDeprecated(
+  base::ListValue conditions;
+  conditions.Append(base::test::ParseJson(
       "{ \n"
       "  \"instanceType\": \"declarativeWebRequest.RequestMatcher\", \n"
       "  \"url\": { \n"
@@ -283,7 +312,7 @@ TEST(WebRequestConditionTest, TestPortFilter) {
   result->GetURLMatcherConditionSets(&url_matcher_condition_set);
   matcher.AddConditionSets(url_matcher_condition_set);
 
-  std::set<URLMatcherConditionSet::ID> url_match_ids;
+  std::set<base::MatcherStringPattern::ID> url_match_ids;
 
   // Test various URLs.
   GURL http_url("http://www.example.com");

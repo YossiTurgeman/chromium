@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,51 +6,61 @@
 
 #include <limits>
 #include <set>
+#include <string_view>
 
 #include "base/android/library_loader/anchor_functions.h"
-#include "base/bind_helpers.h"
 #include "base/debug/leak_annotations.h"
 #include "base/debug/stack_trace.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/hash/hash.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/process/process.h"
-#include "base/process/process_handle.h"
 #include "base/profiler/sampling_profiler_thread_token.h"
 #include "base/profiler/stack_sampling_profiler.h"
 #include "base/strings/strcat.h"
+#include "base/task/thread_pool.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
+#include "base/thread_annotations.h"
 #include "base/threading/sequence_local_storage_slot.h"
 #include "base/trace_event/trace_event.h"
+#include "base/trace_event/typed_macros.h"
 #include "build/build_config.h"
 #include "services/tracing/public/cpp/buildflags.h"
-#include "services/tracing/public/cpp/perfetto/perfetto_traced_process.h"
-#include "services/tracing/public/cpp/perfetto/producer_client.h"
+#include "services/tracing/public/cpp/perfetto/perfetto_data_source_names.h"
+#include "third_party/perfetto/include/perfetto/tracing/core/chrome_config.h"
+#include "third_party/perfetto/include/perfetto/tracing/core/data_source_config.h"
+#include "third_party/perfetto/include/perfetto/tracing/core/data_source_descriptor.h"
+#include "third_party/perfetto/include/perfetto/tracing/platform.h"
 #include "third_party/perfetto/protos/perfetto/trace/interned_data/interned_data.pbzero.h"
 #include "third_party/perfetto/protos/perfetto/trace/profiling/profile_common.pbzero.h"
 #include "third_party/perfetto/protos/perfetto/trace/profiling/profile_packet.pbzero.h"
 #include "third_party/perfetto/protos/perfetto/trace/trace_packet.pbzero.h"
+#include "third_party/perfetto/protos/perfetto/trace/track_event/chrome_thread_descriptor.pbzero.h"
 #include "third_party/perfetto/protos/perfetto/trace/track_event/process_descriptor.pbzero.h"
 #include "third_party/perfetto/protos/perfetto/trace/track_event/thread_descriptor.pbzero.h"
+
+#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE)
+#include "base/profiler/thread_delegate_posix.h"
+#define INITIALIZE_THREAD_DELEGATE_POSIX 1
+#else  // BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE)
+#define INITIALIZE_THREAD_DELEGATE_POSIX 0
+#endif  // BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE)
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "base/profiler/core_unwinders.h"
+#endif
 
 #if ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED
 #include <dlfcn.h>
 
-#include "base/android/reached_code_profiler.h"
-
-#if ANDROID_ARM64_UNWINDING_SUPPORTED
-#include "services/tracing/public/cpp/stack_sampling/stack_unwinder_arm64_android.h"
-
-#elif ANDROID_CFI_UNWINDING_SUPPORTED
-#include "base/trace_event/cfi_backtrace_android.h"
-#include "services/tracing/public/cpp/stack_sampling/stack_sampler_android.h"
-
-#endif  // ANDROID_ARM64_UNWINDING_SUPPORTED
-
+#include "base/debug/elf_reader.h"
 #endif  // ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED
 
 #if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-#include "services/tracing/public/cpp/stack_sampling/loader_lock_sampler_win.h"
+#include "services/tracing/public/cpp/stack_sampling/loader_lock_sampling_thread_win.h"
 #endif
 
 using StreamingProfilePacketHandle =
@@ -82,18 +92,42 @@ uintptr_t executable_start_addr() {
 // Pointer to the main thread instance, if any.
 TracingSamplerProfiler* g_main_thread_instance = nullptr;
 
-class TracingSamplerProfilerDataSource
-    : public PerfettoTracedProcess::DataSourceBase {
+// A random UUID for the track used to emit streaming profile packets, to avoid
+// collisions with other tracks.
+constexpr uint64_t kStreamingProfileTrackUuid = 0x6A7E8A54C18B7778ul;
+
+class TracingSamplerProfilerManager {
  public:
-  static TracingSamplerProfilerDataSource* Get() {
-    static base::NoDestructor<TracingSamplerProfilerDataSource> instance;
+  static TracingSamplerProfilerManager* Get() {
+    static base::NoDestructor<TracingSamplerProfilerManager> instance;
     return instance.get();
   }
 
-  TracingSamplerProfilerDataSource()
-      : DataSourceBase(mojom::kSamplerProfilerSourceName) {}
+  void OnDataSourceStart(TracingSamplerProfiler::DataSource* data_source) {
+    base::AutoLock lock(lock_);
+    DCHECK_EQ(data_source_, nullptr);
+    data_source_ = data_source;
+    for (TracingSamplerProfiler* profiler : profilers_) {
+      profiler->StartTracing(data_source_->CreateTraceWriter(),
+                             data_source_->privacy_filtering_enabled());
+    }
+  }
+  void OnDataSourceStop(TracingSamplerProfiler::DataSource* data_source) {
+    base::AutoLock lock(lock_);
+    DCHECK_EQ(data_source_, data_source);
+    data_source_ = nullptr;
+    for (TracingSamplerProfiler* profiler : profilers_) {
+      profiler->StopTracing();
+    }
+  }
 
-  ~TracingSamplerProfilerDataSource() override { NOTREACHED(); }
+  void WillClearIncrementalState() {
+    incremental_state_reset_id_.fetch_add(1u, std::memory_order_relaxed);
+  }
+
+  uint32_t GetIncrementalStateResetID() {
+    return incremental_state_reset_id_.load(std::memory_order_relaxed);
+  }
 
   void RegisterProfiler(TracingSamplerProfiler* profiler) {
     base::AutoLock lock(lock_);
@@ -101,164 +135,197 @@ class TracingSamplerProfilerDataSource
       return;
     }
 
-    if (is_started_) {
-      profiler->StartTracing(
-          producer_->CreateTraceWriter(data_source_config_.target_buffer()),
-          data_source_config_.chrome_config().privacy_filtering_enabled());
-    } else if (is_startup_tracing_) {
-      profiler->StartTracing(nullptr, /*should_enable_filtering=*/true);
+    if (data_source_) {
+      profiler->StartTracing(data_source_->CreateTraceWriter(),
+                             data_source_->privacy_filtering_enabled());
     }
   }
 
   void UnregisterProfiler(TracingSamplerProfiler* profiler) {
     base::AutoLock lock(lock_);
-    if (!profilers_.erase(profiler) || !(is_started_ || is_startup_tracing_)) {
+    if (!profilers_.erase(profiler)) {
       return;
     }
 
-    profiler->StopTracing();
-  }
-
-  // PerfettoTracedProcess::DataSourceBase implementation, called by
-  // ProducerClient.
-  void StartTracing(
-      PerfettoProducer* producer,
-      const perfetto::DataSourceConfig& data_source_config) override {
-    base::AutoLock lock(lock_);
-    DCHECK(!is_started_);
-    is_started_ = true;
-    is_startup_tracing_ = false;
-    data_source_config_ = data_source_config;
-
-    bool should_enable_filtering =
-        data_source_config.chrome_config().privacy_filtering_enabled();
-
-    for (auto* profiler : profilers_) {
-      profiler->StartTracing(
-          producer->CreateTraceWriter(data_source_config.target_buffer()),
-          should_enable_filtering);
-    }
-  }
-
-  void StopTracing(base::OnceClosure stop_complete_callback) override {
-    base::AutoLock lock(lock_);
-    DCHECK(is_started_);
-    is_started_ = false;
-    is_startup_tracing_ = false;
-    producer_ = nullptr;
-
-    for (auto* profiler : profilers_) {
+    if (data_source_) {
       profiler->StopTracing();
     }
-
-    std::move(stop_complete_callback).Run();
-  }
-
-  void Flush(base::RepeatingClosure flush_complete_callback) override {
-    flush_complete_callback.Run();
-  }
-
-  void SetupStartupTracing(PerfettoProducer* producer,
-                           const base::trace_event::TraceConfig& trace_config,
-                           bool privacy_filtering_enabled) override {
-    bool enable_sampler_profiler = trace_config.IsCategoryGroupEnabled(
-        TRACE_DISABLED_BY_DEFAULT("cpu_profiler"));
-    if (!enable_sampler_profiler)
-      return;
-
-    base::AutoLock lock(lock_);
-    if (is_started_) {
-      return;
-    }
-    is_startup_tracing_ = true;
-    for (auto* profiler : profilers_) {
-      // Enable filtering for startup tracing always to be safe.
-      profiler->StartTracing(nullptr, /*should_enable_filtering=*/true);
-    }
-  }
-
-  void AbortStartupTracing() override {
-    base::AutoLock lock(lock_);
-    if (!is_startup_tracing_) {
-      return;
-    }
-    for (auto* profiler : profilers_) {
-      // Enable filtering for startup tracing always to be safe.
-      profiler->StartTracing(nullptr, /*should_enable_filtering=*/true);
-    }
-    is_startup_tracing_ = false;
-  }
-
-  void ClearIncrementalState() override {
-    incremental_state_reset_id_.fetch_add(1u, std::memory_order_relaxed);
-  }
-
-  static uint32_t GetIncrementalStateResetID() {
-    return incremental_state_reset_id_.load(std::memory_order_relaxed);
   }
 
  private:
+  friend class base::NoDestructor<TracingSamplerProfilerManager>;
+
+  TracingSamplerProfilerManager() = default;
+  ~TracingSamplerProfilerManager() = default;
+
   base::Lock lock_;  // Protects subsequent members.
-  std::set<TracingSamplerProfiler*> profilers_;
-  bool is_startup_tracing_ = false;
-  bool is_started_ = false;
-  perfetto::DataSourceConfig data_source_config_;
-
-  static std::atomic<uint32_t> incremental_state_reset_id_;
+  std::set<raw_ptr<TracingSamplerProfiler, SetExperimental>> profilers_
+      GUARDED_BY(lock_);
+  raw_ptr<TracingSamplerProfiler::DataSource> data_source_ GUARDED_BY(lock_);
+  std::atomic<uint32_t> incremental_state_reset_id_{1};
 };
-
-// static
-std::atomic<uint32_t>
-    TracingSamplerProfilerDataSource::incremental_state_reset_id_{0};
 
 base::SequenceLocalStorageSlot<TracingSamplerProfiler>&
 GetSequenceLocalStorageProfilerSlot() {
-  static base::NoDestructor<
-      base::SequenceLocalStorageSlot<TracingSamplerProfiler>>
-      storage;
-  return *storage;
+  static base::SequenceLocalStorageSlot<TracingSamplerProfiler> storage;
+  return storage;
 }
 
-#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-TracingSamplerProfiler::LoaderLockSampler* g_test_loader_lock_sampler = nullptr;
+// Stores information about the StackFrame, to emit to the trace.
+struct FrameDetails {
+  std::string frame_name;
+  std::string module_name;
+  std::string module_id;
+  uintptr_t module_base_address = 0;
+  uintptr_t rel_pc = 0;
+
+  // True if the module of the stack frame will be considered valid by the trace
+  // processor.
+  bool has_valid_module() const {
+    return !module_name.empty() && module_base_address > 0;
+  }
+
+  bool has_valid_frame() const {
+    // Valid only if |rel_pc|, since filtering mode does not record frame names.
+    return rel_pc > 0;
+  }
+
+  // Gets module from the frame's module cache.
+  void SetModule(const base::ModuleCache::Module& module) {
+    module_base_address = module.GetBaseAddress();
+    module_id = module.GetId();
+    if (module_name.empty()) {
+      module_name = module.GetDebugBasename().MaybeAsASCII();
+    }
+  }
+
+  // Leaves the valid fields as is and fills in dummy values for invalid fields.
+  // Useful to observe errors in traces.
+  void FillWithDummyFields(uintptr_t frame_ip) {
+    if (rel_pc == 0) {
+      // Record the |frame_ip| as |rel_pc| if available, might be useful to
+      // debug.
+      rel_pc = frame_ip > 0 ? frame_ip : 1;
+    }
+    if (module_base_address == 0) {
+      module_base_address = 1;
+    }
+    // TODO(crbug.com/40248195): Investigate and maybe cleanup this logic.
+    if (module_name.empty()) {
+      module_name = "missing";
+    }
+    DCHECK(has_valid_frame());
+    DCHECK(has_valid_module());
+  }
+
+#if ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED
+  // Sets Chrome's module info for the frame.
+  void SetChromeModuleInfo() {
+    module_base_address = executable_start_addr();
+    static const std::optional<std::string_view> library_name =
+        base::debug::ReadElfLibraryName(
+            reinterpret_cast<void*>(executable_start_addr()));
+    static const base::NoDestructor<std::string> chrome_debug_id([] {
+      base::debug::ElfBuildIdBuffer build_id;
+      size_t build_id_length = base::debug::ReadElfBuildId(
+          reinterpret_cast<void*>(executable_start_addr()), true, build_id);
+      return std::string(build_id, build_id_length);
+    }());
+    if (library_name) {
+      module_name = std::string(*library_name);
+    }
+    module_id = *chrome_debug_id;
+  }
+
+  // Sets system library module info for the frame.
+  void SetSystemModuleInfo(uintptr_t frame_ip) {
+    Dl_info info = {};
+    // For addresses in framework libraries, symbolize and write the function
+    // name.
+    if (dladdr(reinterpret_cast<void*>(frame_ip), &info) == 0) {
+      return;
+    }
+    if (info.dli_sname) {
+      frame_name = info.dli_sname;
+    }
+    if (info.dli_fname) {
+      module_name = info.dli_fname;
+    }
+    module_base_address = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    rel_pc = frame_ip - module_base_address;
+
+    DCHECK(has_valid_frame());
+    DCHECK(has_valid_module());
+  }
 #endif
+};
+
+#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_WIN) && defined(_WIN64) ||          \
+    ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED || \
+    (BUILDFLAG(IS_CHROMEOS) &&                                              \
+     (defined(ARCH_CPU_X86_64) || defined(ARCH_CPU_ARM64))) ||              \
+    BUILDFLAG(IS_LINUX)
+// Returns whether stack sampling is supported on the current platform.
+bool IsStackSamplingSupported() {
+  return base::StackSamplingProfiler::IsSupportedForCurrentPlatform();
+}
+#endif
+
+perfetto::StaticString UnwinderTypeToString(
+    const TracingSamplerProfiler::UnwinderType unwinder_type) {
+  switch (unwinder_type) {
+    case TracingSamplerProfiler::UnwinderType::kUnknown:
+      return "TracingSamplerProfiler (unknown unwinder)";
+    case TracingSamplerProfiler::UnwinderType::kCustomAndroid:
+      return "TracingSamplerProfiler (custom android unwinder)";
+    case TracingSamplerProfiler::UnwinderType::kDefault:
+      return "TracingSamplerProfiler (default unwinder)";
+    case TracingSamplerProfiler::UnwinderType::kLibunwindstackUnwinderAndroid:
+      return "TracingSamplerProfiler (libunwindstack unwinder android)";
+  }
+}
 
 }  // namespace
 
-#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-const char TracingSamplerProfiler::kLoaderLockHeldEventName[] =
-    "LoaderLockHeld (sampled)";
-#endif
+TracingSamplerProfiler::DataSource::DataSource() = default;
 
-TracingSamplerProfiler::TracingProfileBuilder::BufferedSample::BufferedSample(
-    base::TimeTicks ts,
-    std::vector<base::Frame>&& s)
-    : timestamp(ts), sample(std::move(s)) {}
+TracingSamplerProfiler::DataSource::~DataSource() = default;
 
-TracingSamplerProfiler::TracingProfileBuilder::BufferedSample::
-    ~BufferedSample() = default;
+void TracingSamplerProfiler::DataSource::OnSetup(const SetupArgs& args) {
+  privacy_filtering_enabled_ =
+      args.config->chrome_config().privacy_filtering_enabled();
+}
 
-TracingSamplerProfiler::TracingProfileBuilder::BufferedSample::BufferedSample(
-    TracingSamplerProfiler::TracingProfileBuilder::BufferedSample&& other)
-    : BufferedSample(other.timestamp, std::move(other.sample)) {}
+void TracingSamplerProfiler::DataSource::OnStart(const StartArgs&) {
+  TracingSamplerProfilerManager::Get()->OnDataSourceStart(this);
+}
+
+void TracingSamplerProfiler::DataSource::OnStop(const StopArgs&) {
+  TracingSamplerProfilerManager::Get()->OnDataSourceStop(this);
+}
+
+void TracingSamplerProfiler::DataSource::WillClearIncrementalState(
+    const ClearIncrementalStateArgs& args) {
+  TracingSamplerProfilerManager::Get()->WillClearIncrementalState();
+}
 
 TracingSamplerProfiler::TracingProfileBuilder::TracingProfileBuilder(
     base::PlatformThreadId sampled_thread_id,
-    std::unique_ptr<perfetto::TraceWriter> trace_writer,
+    std::unique_ptr<perfetto::TraceWriterBase> trace_writer,
     bool should_enable_filtering,
     const base::RepeatingClosure& sample_callback_for_testing)
     : sampled_thread_id_(sampled_thread_id),
       trace_writer_(std::move(trace_writer)),
-      should_enable_filtering_(should_enable_filtering),
+      stack_profile_writer_(should_enable_filtering),
       sample_callback_for_testing_(sample_callback_for_testing) {}
 
 TracingSamplerProfiler::TracingProfileBuilder::~TracingProfileBuilder() {
   // Deleting a TraceWriter can end up triggering a Mojo call which calls
-  // TaskRunnerHandle::Get() and isn't safe on thread shutdown, which is when
-  // TracingProfileBuilder gets destructed, so we make sure this happens on
+  // task runner GetCurrentDefault() and isn't safe on thread shutdown, which is
+  // when TracingProfileBuilder gets destructed, so we make sure this happens on
   // a different sequence.
   if (base::ThreadPoolInstance::Get()) {
-    PerfettoTracedProcess::GetTaskRunner()->GetOrCreateTaskRunner()->DeleteSoon(
+    base::ThreadPool::CreateSequencedTaskRunner({})->DeleteSoon(
         FROM_HERE, std::move(trace_writer_));
   } else {
     // Intentionally leak; we have no way of safely destroying this at this
@@ -273,98 +340,94 @@ TracingSamplerProfiler::TracingProfileBuilder::GetModuleCache() {
   return &module_cache_;
 }
 
+using SampleDebugProto =
+    perfetto::protos::pbzero::ChromeSamplingProfilerSampleCollected;
+
 void TracingSamplerProfiler::TracingProfileBuilder::OnSampleCompleted(
     std::vector<base::Frame> frames,
     base::TimeTicks sample_timestamp) {
-#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-  SampleLoaderLock();
-#endif
-
-  base::AutoLock l(trace_writer_lock_);
-  if (!trace_writer_) {
-    if (buffered_samples_.size() < kMaxBufferedSamples) {
-      buffered_samples_.emplace_back(
-          BufferedSample(sample_timestamp, std::move(frames)));
-    }
-    return;
-  }
-  if (!buffered_samples_.empty()) {
-    for (const auto& sample : buffered_samples_) {
-      WriteSampleToTrace(sample);
-    }
-    buffered_samples_.clear();
-  }
-  WriteSampleToTrace(BufferedSample(sample_timestamp, std::move(frames)));
-
+  WriteSampleToTrace(std::move(frames), sample_timestamp);
   if (sample_callback_for_testing_) {
     sample_callback_for_testing_.Run();
   }
 }
 
 void TracingSamplerProfiler::TracingProfileBuilder::WriteSampleToTrace(
-    const TracingSamplerProfiler::TracingProfileBuilder::BufferedSample&
-        sample) {
-  const auto& frames = sample.sample;
-  auto reset_id =
-      TracingSamplerProfilerDataSource::GetIncrementalStateResetID();
-  if (reset_id != last_incremental_state_reset_id_) {
-    reset_incremental_state_ = true;
-    last_incremental_state_reset_id_ = reset_id;
-  }
+    std::vector<base::Frame> frames,
+    base::TimeTicks sample_timestamp) {
+  uint32_t previous_incremental_state_reset_id = std::exchange(
+      last_incremental_state_reset_id_,
+      TracingSamplerProfilerManager::Get()->GetIncrementalStateResetID());
+  bool reset_incremental_state =
+      (previous_incremental_state_reset_id != last_incremental_state_reset_id_);
 
-  if (reset_incremental_state_) {
-    interned_callstacks_.ResetEmittedState();
-    interned_frames_.ResetEmittedState();
-    interned_frame_names_.ResetEmittedState();
-    interned_module_names_.ResetEmittedState();
-    interned_module_ids_.ResetEmittedState();
-    interned_modules_.ResetEmittedState();
+  if (reset_incremental_state) {
+    stack_profile_writer_.ResetEmittedState();
 
-    auto trace_packet = trace_writer_->NewTracePacket();
+    TracePacketHandle trace_packet = trace_writer_->NewTracePacket();
     trace_packet->set_sequence_flags(
         perfetto::protos::pbzero::TracePacket::SEQ_INCREMENTAL_STATE_CLEARED);
 
     // Note: Make sure ThreadDescriptors we emit here won't cause
     // metadata events to be emitted from the JSON exporter which conflict
     // with the metadata events emitted by the regular TrackEventDataSource.
-    auto* thread_descriptor = trace_packet->set_thread_descriptor();
-    thread_descriptor->set_pid(base::GetCurrentProcId());
-    thread_descriptor->set_tid(sampled_thread_id_);
-    last_timestamp_ = sample.timestamp;
+    auto thread_track =
+        perfetto::ThreadTrack::ForThread(sampled_thread_id_.raw());
+    perfetto::Track profile_track(kStreamingProfileTrackUuid, thread_track);
+    auto* track_descriptor = trace_packet->set_track_descriptor();
+    track_descriptor->set_uuid(profile_track.uuid);
+    auto* thread_descriptor = track_descriptor->set_thread();
+    thread_descriptor->set_pid(thread_track.pid);
+    thread_descriptor->set_tid(thread_track.tid);
+
+    last_timestamp_ = sample_timestamp;
     thread_descriptor->set_reference_timestamp_us(
         last_timestamp_.since_origin().InMicroseconds());
-    reset_incremental_state_ = false;
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_AIX)
+    if (base::GetCurrentProcId() != perfetto::Platform::GetCurrentProcessId()) {
+      auto* chrome_thread = track_descriptor->set_chrome_thread();
+      chrome_thread->set_is_sandboxed_tid(true);
+    }
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_AIX)
+
+    TRACE_EVENT_INSTANT(TRACE_DISABLED_BY_DEFAULT("cpu_profiler"),
+                        UnwinderTypeToString(unwinder_type_));
   }
 
-
-  auto trace_packet = trace_writer_->NewTracePacket();
+  TracePacketHandle trace_packet = trace_writer_->NewTracePacket();
   // Delta encoded timestamps and interned data require incremental state.
   trace_packet->set_sequence_flags(
       perfetto::protos::pbzero::TracePacket::SEQ_NEEDS_INCREMENTAL_STATE);
-  auto callstack_id = GetCallstackIDAndMaybeEmit(frames, &trace_packet);
+  auto callstack_id =
+      stack_profile_writer_.GetCallstackIDAndMaybeEmit(frames, &trace_packet);
   auto* streaming_profile_packet = trace_packet->set_streaming_profile_packet();
   streaming_profile_packet->add_callstack_iid(callstack_id);
 
-  int32_t current_process_priority = base::Process::Current().GetPriority();
+  int32_t current_process_priority = base::Process::Current().GetOSPriority();
   if (current_process_priority != 0) {
     streaming_profile_packet->set_process_priority(current_process_priority);
   }
 
   streaming_profile_packet->add_timestamp_delta_us(
-      (sample.timestamp - last_timestamp_).InMicroseconds());
-  last_timestamp_ = sample.timestamp;
+      (sample_timestamp - last_timestamp_).InMicroseconds());
+  last_timestamp_ = sample_timestamp;
 }
 
-void TracingSamplerProfiler::TracingProfileBuilder::SetTraceWriter(
-    std::unique_ptr<perfetto::TraceWriter> writer) {
-  base::AutoLock l(trace_writer_lock_);
-  trace_writer_ = std::move(writer);
+void TracingSamplerProfiler::TracingProfileBuilder::SetUnwinderType(
+    const TracingSamplerProfiler::UnwinderType unwinder_type) {
+  unwinder_type_ = unwinder_type;
 }
+
+TracingSamplerProfiler::StackProfileWriter::StackProfileWriter(
+    bool enable_filtering)
+    : should_enable_filtering_(enable_filtering) {}
+TracingSamplerProfiler::StackProfileWriter::~StackProfileWriter() = default;
 
 InterningID
-TracingSamplerProfiler::TracingProfileBuilder::GetCallstackIDAndMaybeEmit(
-    const std::vector<base::Frame>& frames,
-    perfetto::TraceWriter::TracePacketHandle* trace_packet) {
+TracingSamplerProfiler::StackProfileWriter::GetCallstackIDAndMaybeEmit(
+    std::vector<base::Frame>& frames,
+    TracePacketHandle* trace_packet) {
   size_t ip_hash = 0;
   for (const auto& frame : frames) {
     ip_hash = base::HashInts(ip_hash, frame.instruction_pointer);
@@ -373,116 +436,120 @@ TracingSamplerProfiler::TracingProfileBuilder::GetCallstackIDAndMaybeEmit(
   InterningIndexEntry interned_callstack =
       interned_callstacks_.LookupOrAdd(ip_hash);
 
-  if (interned_callstack.was_emitted)
+  if (interned_callstack.was_emitted) {
     return interned_callstack.id;
+  }
 
   auto* interned_data = (*trace_packet)->set_interned_data();
 
   std::vector<InterningID> frame_ids;
-  for (const auto& frame : frames) {
-    std::string frame_name;
-    std::string module_name;
-    std::string module_id;
-    uintptr_t rel_pc = 0;
+  for (auto& frame : frames) {
+    bool is_unwinder_provided_function_name = false;
+    FrameDetails frame_details;
+    if (frame.module) {
+      frame_details.SetModule(*frame.module);
+      frame_details.rel_pc =
+          frame.instruction_pointer - frame_details.module_base_address;
+    }
 
 #if ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED
-    Dl_info info = {};
-    // For chrome address we do not have symbols on the binary. So, just write
-    // the offset address. For addresses on framework libraries, symbolize
-    // and write the function name.
-    if (frame.instruction_pointer == 0) {
-      frame_name = "Scanned";
-    } else if (is_chrome_address(frame.instruction_pointer)) {
-      rel_pc = frame.instruction_pointer - executable_start_addr();
-    } else if (dladdr(reinterpret_cast<void*>(frame.instruction_pointer),
-                      &info) != 0) {
-      // TODO(ssid): Add offset and module debug id if symbol was not resolved
-      // in case this might be useful to send report to vendors.
-      if (info.dli_sname)
-        frame_name = info.dli_sname;
-      if (info.dli_fname)
-        module_name = info.dli_fname;
-    }
-
-    if (frame.module) {
-      module_id = frame.module->GetId();
-      if (module_name.empty())
-        module_name = frame.module->GetDebugBasename().MaybeAsASCII();
-    }
-
-    // If no module is available, then name it unknown. Adding PC would be
-    // useless anyway.
-    if (module_name.empty() && !is_chrome_address(frame.instruction_pointer)) {
-      frame_name = "Unknown";
-      rel_pc = 0;
-    }
-#else   // ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED
-    if (frame.module) {
-      module_name = frame.module->GetDebugBasename().MaybeAsASCII();
-      module_id = frame.module->GetId();
-      rel_pc = frame.instruction_pointer - frame.module->GetBaseAddress();
+    if (is_chrome_address(frame.instruction_pointer)) {
+      frame_details.rel_pc =
+          frame.instruction_pointer - executable_start_addr();
+      if (!frame_details.has_valid_module()) {
+        frame_details.SetChromeModuleInfo();
+      }
     } else {
-      module_name = module_id = "";
-      frame_name = "Unknown";
+      if (!frame.function_name.empty()) {
+        // Set function names for modules other than native chrome.
+        // This includes Java frames and native Android system frames.
+        // Chrome native frames can already be symbolized server side.
+        // Currently only libunwindstack_unwinder fills function_names in
+        // frames.
+        is_unwinder_provided_function_name = true;
+        frame_details.frame_name = std::move(frame.function_name);
+      }
+      if (frame.instruction_pointer == 0) {
+        // TODO(ssid): This frame is currently skipped from inserting. Find a
+        // way to specify that this frame is scanned in the trace.
+        frame_details.frame_name = "Scanned";
+      } else if (frame_details.module_id.empty() ||
+                 !frame_details.has_valid_module()) {
+        // For AOT modules the build id is empty. Set full pathname for these
+        // modules, so that deobfuscation logic can work, since it depends on
+        // getting full path name to extract package name.
+        frame_details.SetSystemModuleInfo(frame.instruction_pointer);
+      }
     }
 #endif  // !(ANDROID_ARM64_UNWINDING_SUPPORTED ||
         // ANDROID_CFI_UNWINDING_SUPPORTED)
 
-    MangleModuleIDIfNeeded(&module_id);
-
-    // We never emit frame names in privacy filtered mode.
-    bool should_emit_frame_names =
-        !frame_name.empty() && !should_enable_filtering_;
-
-    if (should_enable_filtering_ && !rel_pc && frame.module) {
-      rel_pc = frame.instruction_pointer - frame.module->GetBaseAddress();
+    // If we do not have a valid module and a valid frame, add a frame with
+    // dummy details. Adding invalid frame would make trace processor invalidate
+    // the whole sample.
+    if (!frame_details.has_valid_module() || !frame_details.has_valid_frame()) {
+      frame_details.FillWithDummyFields(frame.instruction_pointer);
     }
+
+    if (!frame_details.module_id.empty()) {
+      // TODO(b/270470700): Remove this on all platforms once tools/tracing is
+      // fixed.
+      frame_details.module_id =
+          base::TransformModuleIDToSymbolServerFormat(frame_details.module_id);
+    }
+
+    // Allow uploading function names passed from unwinder, which would be
+    // coming from static compile time strings.
+    bool should_emit_frame_names =
+        !frame_details.frame_name.empty() &&
+        (is_unwinder_provided_function_name || !should_enable_filtering_);
 
     InterningIndexEntry interned_frame;
     if (should_emit_frame_names) {
-      interned_frame =
-          interned_frames_.LookupOrAdd(std::make_pair(frame_name, module_id));
+      interned_frame = interned_frames_.LookupOrAdd(
+          std::make_pair(frame_details.frame_name, frame_details.module_id));
     } else {
-      interned_frame =
-          interned_frames_.LookupOrAdd(std::make_pair(rel_pc, module_id));
+      interned_frame = interned_frames_.LookupOrAdd(
+          std::make_pair(frame_details.rel_pc, frame_details.module_id));
     }
 
     if (!interned_frame.was_emitted) {
       InterningIndexEntry interned_frame_name;
       if (should_emit_frame_names) {
-        interned_frame_name = interned_frame_names_.LookupOrAdd(frame_name);
+        interned_frame_name =
+            interned_frame_names_.LookupOrAdd(frame_details.frame_name);
         if (!interned_frame_name.was_emitted) {
           auto* frame_name_entry = interned_data->add_function_names();
           frame_name_entry->set_iid(interned_frame_name.id);
           frame_name_entry->set_str(
-              reinterpret_cast<const uint8_t*>(frame_name.data()),
-              frame_name.length());
+              reinterpret_cast<const uint8_t*>(frame_details.frame_name.data()),
+              frame_details.frame_name.length());
         }
       }
 
       InterningIndexEntry interned_module;
-      if (frame.module) {
+      if (frame_details.has_valid_module()) {
         interned_module =
-            interned_modules_.LookupOrAdd(frame.module->GetBaseAddress());
+            interned_modules_.LookupOrAdd(frame_details.module_base_address);
         if (!interned_module.was_emitted) {
           InterningIndexEntry interned_module_id =
-              interned_module_ids_.LookupOrAdd(module_id);
+              interned_module_ids_.LookupOrAdd(frame_details.module_id);
           if (!interned_module_id.was_emitted) {
             auto* module_id_entry = interned_data->add_build_ids();
             module_id_entry->set_iid(interned_module_id.id);
-            module_id_entry->set_str(
-                reinterpret_cast<const uint8_t*>(module_id.data()),
-                module_id.length());
+            module_id_entry->set_str(reinterpret_cast<const uint8_t*>(
+                                         frame_details.module_id.data()),
+                                     frame_details.module_id.length());
           }
 
           InterningIndexEntry interned_module_name =
-              interned_module_names_.LookupOrAdd(module_name);
+              interned_module_names_.LookupOrAdd(frame_details.module_name);
           if (!interned_module_name.was_emitted) {
             auto* module_name_entry = interned_data->add_mapping_paths();
             module_name_entry->set_iid(interned_module_name.id);
-            module_name_entry->set_str(
-                reinterpret_cast<const uint8_t*>(module_name.data()),
-                module_name.length());
+            module_name_entry->set_str(reinterpret_cast<const uint8_t*>(
+                                           frame_details.module_name.data()),
+                                       frame_details.module_name.length());
           }
           auto* module_entry = interned_data->add_mappings();
           module_entry->set_iid(interned_module.id);
@@ -496,9 +563,9 @@ TracingSamplerProfiler::TracingProfileBuilder::GetCallstackIDAndMaybeEmit(
       if (should_emit_frame_names) {
         frame_entry->set_function_name_id(interned_frame_name.id);
       } else {
-        frame_entry->set_rel_pc(rel_pc);
+        frame_entry->set_rel_pc(frame_details.rel_pc);
       }
-      if (frame.module) {
+      if (frame_details.has_valid_module()) {
         frame_entry->set_mapping_id(interned_module.id);
       }
     }
@@ -508,87 +575,66 @@ TracingSamplerProfiler::TracingProfileBuilder::GetCallstackIDAndMaybeEmit(
 
   auto* callstack_entry = interned_data->add_callstacks();
   callstack_entry->set_iid(interned_callstack.id);
-  for (auto& frame_id : frame_ids)
-    callstack_entry->add_frame_ids(frame_id);
+  // base::Unwinder starts from stack top and works to the bottom, but our
+  // Callstack proto wants bottom first to stack top, so we iterate in reverse.
+  // See b/241357440 for context.
+  for (auto it = frame_ids.rbegin(); it != frame_ids.rend(); ++it) {
+    callstack_entry->add_frame_ids(*it);
+  }
 
   return interned_callstack.id;
 }
 
-#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-void TracingSamplerProfiler::TracingProfileBuilder::SampleLoaderLock() {
-  if (!should_sample_loader_lock_)
-    return;
-
-  bool loader_lock_now_held =
-      g_test_loader_lock_sampler
-          ? g_test_loader_lock_sampler->IsLoaderLockHeld()
-          : IsLoaderLockHeld();
-
-  // TODO(crbug.com/1065077): It would be cleaner to save the loader lock state
-  // alongside buffered_samples_ and then add it to the ProcessDescriptor
-  // packet in
-  // TracingSamplerProfiler::TracingProfileBuilder::WriteSampleToTrace. But
-  // ProcessDescriptor is currently not being collected correctly. See the full
-  // discussion in the linked crbug.
-  if (loader_lock_now_held && !loader_lock_is_held_) {
-    TRACE_EVENT_NESTABLE_ASYNC_BEGIN0(
-        TRACE_DISABLED_BY_DEFAULT("cpu_profiler"),
-        TracingSamplerProfiler::kLoaderLockHeldEventName, TRACE_ID_LOCAL(this));
-  } else if (!loader_lock_now_held && loader_lock_is_held_) {
-    TRACE_EVENT_NESTABLE_ASYNC_END0(
-        TRACE_DISABLED_BY_DEFAULT("cpu_profiler"),
-        TracingSamplerProfiler::kLoaderLockHeldEventName, TRACE_ID_LOCAL(this));
-  }
-  loader_lock_is_held_ = loader_lock_now_held;
-}
-#endif
-
-// static
-void TracingSamplerProfiler::MangleModuleIDIfNeeded(std::string* module_id) {
-#if defined(OS_ANDROID) || defined(OS_LINUX) || defined(OS_CHROMEOS)
-  // Linux ELF module IDs are 160bit integers, which we need to mangle
-  // down to 128bit integers to match the id that Breakpad outputs.
-  // Example on version '66.0.3359.170' x64:
-  //   Build-ID: "7f0715c2 86f8 b16c 10e4ad349cda3b9b 56c7a773
-  //   Debug-ID  "C215077F F886 6CB1 10E4AD349CDA3B9B 0"
-  if (module_id->size() >= 32) {
-    *module_id =
-        base::StrCat({module_id->substr(6, 2), module_id->substr(4, 2),
-                      module_id->substr(2, 2), module_id->substr(0, 2),
-                      module_id->substr(10, 2), module_id->substr(8, 2),
-                      module_id->substr(14, 2), module_id->substr(12, 2),
-                      module_id->substr(16, 16), "0"});
-  }
-#endif
+void TracingSamplerProfiler::StackProfileWriter::ResetEmittedState() {
+  interned_callstacks_.ResetEmittedState();
+  interned_frames_.ResetEmittedState();
+  interned_frame_names_.ResetEmittedState();
+  interned_module_names_.ResetEmittedState();
+  interned_module_ids_.ResetEmittedState();
+  interned_modules_.ResetEmittedState();
 }
 
 // static
 std::unique_ptr<TracingSamplerProfiler>
-TracingSamplerProfiler::CreateOnMainThread() {
+TracingSamplerProfiler::CreateOnMainThread(
+    CoreUnwindersCallback core_unwinders_factory_function,
+    UnwinderType unwinder_type) {
   auto profiler = std::make_unique<TracingSamplerProfiler>(
-      base::GetSamplingProfilerCurrentThreadToken());
-#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-  // The loader lock is process-wide so should only be sampled on a single
-  // thread. The main thread is convenient.
-  InitializeLoaderLockSampling();
-  profiler->EnableLoaderLockSampling();
-#endif
+      base::GetSamplingProfilerCurrentThreadToken(),
+      std::move(core_unwinders_factory_function), unwinder_type);
   // If running in single process mode, there may be multiple "main thread"
   // profilers created. In this case, we assume the first created one is the
   // browser one.
-  if (!g_main_thread_instance)
+  if (!g_main_thread_instance) {
     g_main_thread_instance = profiler.get();
+
+#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
+    // The loader lock is process-wide so should only be sampled on a single
+    // thread. So only one TracingSamplerProfiler should create a
+    // LoaderLockSamplingThread.
+    profiler->loader_lock_sampling_thread_ =
+        std::make_unique<LoaderLockSamplingThread>();
+#endif
+  }
   return profiler;
 }
 
 // static
 void TracingSamplerProfiler::CreateOnChildThread() {
+  CreateOnChildThreadWithCustomUnwinders(CoreUnwindersCallback());
+}
+
+// static
+void TracingSamplerProfiler::CreateOnChildThreadWithCustomUnwinders(
+    CoreUnwindersCallback core_unwinders_factory_function) {
   base::SequenceLocalStorageSlot<TracingSamplerProfiler>& slot =
       GetSequenceLocalStorageProfilerSlot();
-  if (slot)
+  if (slot) {
     return;
+  }
 
-  slot.emplace(base::GetSamplingProfilerCurrentThreadToken());
+  slot.emplace(base::GetSamplingProfilerCurrentThreadToken(),
+               std::move(core_unwinders_factory_function));
 }
 
 // static
@@ -598,8 +644,22 @@ void TracingSamplerProfiler::DeleteOnChildThreadForTesting() {
 
 // static
 void TracingSamplerProfiler::RegisterDataSource() {
-  PerfettoTracedProcess::Get()->AddDataSource(
-      TracingSamplerProfilerDataSource::Get());
+  perfetto::DataSourceDescriptor dsd;
+  dsd.set_name(kSamplerProfilerSourceName);
+  perfetto::DataSource<TracingSamplerProfiler::DataSource>::Register(dsd);
+}
+
+// static
+bool TracingSamplerProfiler::IsStackUnwindingSupportedForTesting() {
+#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_WIN) && defined(_WIN64) ||          \
+    ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED || \
+    (BUILDFLAG(IS_CHROMEOS) &&                                              \
+     (defined(ARCH_CPU_X86_64) || defined(ARCH_CPU_ARM64))) ||              \
+    BUILDFLAG(IS_LINUX)
+  return IsStackSamplingSupported();
+#else
+  return false;
+#endif
 }
 
 void TracingSamplerProfiler::SetAuxUnwinderFactoryOnMainThread(
@@ -608,126 +668,105 @@ void TracingSamplerProfiler::SetAuxUnwinderFactoryOnMainThread(
   g_main_thread_instance->SetAuxUnwinderFactory(factory);
 }
 
-// static
-void TracingSamplerProfiler::StartTracingForTesting(
-    PerfettoProducer* producer) {
-  TracingSamplerProfilerDataSource::Get()->StartTracingWithID(
-      1, producer, perfetto::DataSourceConfig());
-}
-
-// static
-void TracingSamplerProfiler::SetupStartupTracingForTesting() {
-  base::trace_event::TraceConfig config(
-      TRACE_DISABLED_BY_DEFAULT("cpu_profiler"),
-      base::trace_event::TraceRecordMode::RECORD_UNTIL_FULL);
-  TracingSamplerProfilerDataSource::Get()->SetupStartupTracing(
-      /*producer=*/nullptr, config, /*privacy_filtering_enabled=*/false);
-}
-
-// static
-void TracingSamplerProfiler::StopTracingForTesting() {
-  TracingSamplerProfilerDataSource::Get()->StopTracing(base::DoNothing());
-}
-
-#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-// static
-void TracingSamplerProfiler::SetLoaderLockSamplerForTesting(
-    LoaderLockSampler* sampler) {
-  g_test_loader_lock_sampler = sampler;
-}
-#endif
-
-TracingSamplerProfiler::TracingSamplerProfiler(
-    base::SamplingProfilerThreadToken sampled_thread_token)
-    : sampled_thread_token_(sampled_thread_token) {
-  DCHECK_NE(sampled_thread_token_.id, base::kInvalidThreadId);
-  TracingSamplerProfilerDataSource::Get()->RegisterProfiler(this);
-}
-
-TracingSamplerProfiler::~TracingSamplerProfiler() {
-  TracingSamplerProfilerDataSource::Get()->UnregisterProfiler(this);
-  if (g_main_thread_instance == this)
-    g_main_thread_instance = nullptr;
-}
-
-void TracingSamplerProfiler::SetAuxUnwinderFactory(
-    const base::RepeatingCallback<std::unique_ptr<base::Unwinder>()>& factory) {
-  base::AutoLock lock(lock_);
-  aux_unwinder_factory_ = factory;
-  if (profiler_)
-    profiler_->AddAuxUnwinder(aux_unwinder_factory_.Run());
-}
-
 void TracingSamplerProfiler::SetSampleCallbackForTesting(
     const base::RepeatingClosure& sample_callback_for_testing) {
   base::AutoLock lock(lock_);
   sample_callback_for_testing_ = sample_callback_for_testing;
 }
 
+TracingSamplerProfiler::TracingSamplerProfiler(
+    base::SamplingProfilerThreadToken sampled_thread_token,
+    CoreUnwindersCallback core_unwinders_factory_function,
+    UnwinderType unwinder_type)
+    : sampled_thread_token_(sampled_thread_token),
+      core_unwinders_factory_function_(
+          std::move(core_unwinders_factory_function)),
+      unwinder_type_(unwinder_type) {
+  DCHECK_NE(sampled_thread_token_.id, base::kInvalidThreadId);
+#if INITIALIZE_THREAD_DELEGATE_POSIX
+  // Since StackSamplingProfiler is scoped to a tracing session and lives on the
+  // thread where `StartTracing` is called, we use `ThreadDelegatePosix` to
+  // initialize global data, like the thread stack base address, that has to be
+  // created on the profiled thread. See crbug.com/1392158#c26 for details.
+  base::ThreadDelegatePosix::Create(sampled_thread_token_);
+#endif  // INITIALIZE_THREAD_DELEGATE_POSIX
+  TracingSamplerProfilerManager::Get()->RegisterProfiler(this);
+}
+
+TracingSamplerProfiler::~TracingSamplerProfiler() {
+  TracingSamplerProfilerManager::Get()->UnregisterProfiler(this);
+  if (g_main_thread_instance == this) {
+    g_main_thread_instance = nullptr;
+  }
+}
+
+void TracingSamplerProfiler::SetAuxUnwinderFactory(
+    const base::RepeatingCallback<std::unique_ptr<base::Unwinder>()>& factory) {
+  base::AutoLock lock(lock_);
+  aux_unwinder_factory_ = factory;
+  if (profiler_) {
+    profiler_->AddAuxUnwinder(aux_unwinder_factory_.Run());
+  }
+}
+
 void TracingSamplerProfiler::StartTracing(
-    std::unique_ptr<perfetto::TraceWriter> trace_writer,
+    std::unique_ptr<perfetto::TraceWriterBase> trace_writer,
     bool should_enable_filtering) {
   base::AutoLock lock(lock_);
-  if (profiler_) {
-    if (trace_writer) {
-      profile_builder_->SetTraceWriter(std::move(trace_writer));
-    }
+  DCHECK_EQ(profiler_, nullptr);
+
+  if (!base::StackSamplingProfiler::IsSupportedForCurrentPlatform()) {
     return;
   }
 
-#if ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED
-  // The sampler profiler would conflict with the reached code profiler if they
-  // run at the same time because they use the same signal to suspend threads.
-  if (base::android::IsReachedCodeProfilerEnabled())
-    return;
-#else   // ANDROID_ARM64_UNWINDING_SUPPORTED || ANDROID_CFI_UNWINDING_SUPPORTED
-
-  // On Android the sampling profiler is implemented by tracing service and is
-  // not yet supported by base::StackSamplingProfiler. So, only check this if
-  // service does not support unwinding in current platform.
-  if (!base::StackSamplingProfiler::IsSupported())
-    return;
-#endif  // !(ANDROID_ARM64_UNWINDING_SUPPORTED ||
-        // ANDROID_CFI_UNWINDING_SUPPORTED)
-
   base::StackSamplingProfiler::SamplingParams params;
   params.samples_per_profile = std::numeric_limits<int>::max();
-  params.sampling_interval = base::TimeDelta::FromMilliseconds(50);
+  params.sampling_interval = base::Milliseconds(50);
 
   auto profile_builder = std::make_unique<TracingProfileBuilder>(
       sampled_thread_token_.id, std::move(trace_writer),
       should_enable_filtering, sample_callback_for_testing_);
-#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
-  if (should_sample_loader_lock_)
-    profile_builder->EnableLoaderLockSampling();
-#endif
 
   profile_builder_ = profile_builder.get();
-  // Create and start the stack sampling profiler.
-#if defined(OS_ANDROID)
-#if ANDROID_ARM64_UNWINDING_SUPPORTED
-  std::vector<std::unique_ptr<base::Unwinder>> unwinder;
-  unwinder.push_back(std::make_unique<UnwinderArm64>());
+  // There is a dichotomy between stack samplers for Android and other
+  // platforms. While Android explicitly needs a factory to provide "core"
+  // unwinders, other platforms explicitly check that no such factory is
+  // provided.
+#if BUILDFLAG(IS_ANDROID)
+  base::StackSamplingProfiler::UnwindersFactory core_unwinders_factory;
+  if (core_unwinders_factory_function_) {
+    core_unwinders_factory = core_unwinders_factory_function_.Run();
+  }
+  if (core_unwinders_factory) {
+    if (unwinder_type_ == UnwinderType::kUnknown) {
+      unwinder_type_ = UnwinderType::kCustomAndroid;
+    }
+    profile_builder->SetUnwinderType(unwinder_type_);
+    profiler_ = std::make_unique<base::StackSamplingProfiler>(
+        sampled_thread_token_, params, std::move(profile_builder),
+        std::move(core_unwinders_factory));
+  }
+#else   // BUILDFLAG(IS_ANDROID)
+  if (unwinder_type_ == UnwinderType::kUnknown) {
+    unwinder_type_ = UnwinderType::kDefault;
+  }
+  profile_builder->SetUnwinderType(unwinder_type_);
   profiler_ = std::make_unique<base::StackSamplingProfiler>(
       sampled_thread_token_, params, std::move(profile_builder),
-      std::move(unwinder));
-  profiler_->Start();
+      base::CreateCoreUnwindersFactory());
+#endif  // BUILDFLAG(IS_ANDROID)
+  if (profiler_ != nullptr) {
+    if (aux_unwinder_factory_) {
+      profiler_->AddAuxUnwinder(aux_unwinder_factory_.Run());
+    }
+    profiler_->Start();
+  }
 
-#elif ANDROID_CFI_UNWINDING_SUPPORTED
-  auto* module_cache = profile_builder->GetModuleCache();
-  profiler_ = std::make_unique<base::StackSamplingProfiler>(
-      params, std::move(profile_builder),
-      std::make_unique<StackSamplerAndroid>(sampled_thread_token_,
-                                            module_cache));
-  profiler_->Start();
+#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
+  if (loader_lock_sampling_thread_) {
+    loader_lock_sampling_thread_->StartSampling();
+  }
 #endif
-#else   // defined(OS_ANDROID)
-  profiler_ = std::make_unique<base::StackSamplingProfiler>(
-      sampled_thread_token_, params, std::move(profile_builder));
-  if (aux_unwinder_factory_)
-    profiler_->AddAuxUnwinder(aux_unwinder_factory_.Run());
-  profiler_->Start();
-#endif  // defined(OS_ANDROID)
 }
 
 void TracingSamplerProfiler::StopTracing() {
@@ -740,6 +779,31 @@ void TracingSamplerProfiler::StopTracing() {
   profiler_->Stop();
   profile_builder_ = nullptr;
   profiler_.reset();
+
+#if BUILDFLAG(ENABLE_LOADER_LOCK_SAMPLING)
+  if (loader_lock_sampling_thread_) {
+    loader_lock_sampling_thread_->StopSampling();
+  }
+#endif
 }
 
 }  // namespace tracing
+
+PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS_WITH_ATTRS(
+    COMPONENT_EXPORT(TRACING_CPP),
+    tracing::TracingSamplerProfiler::DataSource);
+
+// This should go after PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS_WITH_ATTRS
+// to avoid instantiation of type() template method before specialization.
+std::unique_ptr<perfetto::TraceWriterBase>
+tracing::TracingSamplerProfiler::DataSource::CreateTraceWriter() {
+  perfetto::internal::DataSourceStaticState* static_state =
+      perfetto::DataSourceHelper<TracingSamplerProfiler::DataSource>::type()
+          .static_state();
+  // DataSourceProxy disallows multiple instances, so our instance will always
+  // have index 0.
+  perfetto::internal::DataSourceState* instance_state = static_state->TryGet(0);
+  CHECK(instance_state);
+  return perfetto::internal::TracingMuxer::Get()->CreateTraceWriter(
+      static_state, 0, instance_state, perfetto::BufferExhaustedPolicy::kDrop);
+}

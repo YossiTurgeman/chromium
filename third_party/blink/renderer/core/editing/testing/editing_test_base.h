@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include "third_party/blink/renderer/core/editing/forward.h"
+#include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 
@@ -34,26 +35,26 @@ class EditingTestBase : public PageTestBase {
   // caret marker "|".
   Position SetCaretTextToBody(const std::string& caret_text);
 
-  // Returns |SelectionInDOMTree| for specified |selection_text| by using
+  // Returns |SelectionInDomTree| for specified |selection_text| by using
   // |SetSelectionText()| on BODY.
-  SelectionInDOMTree SetSelectionTextToBody(const std::string& selection_text);
+  SelectionInDomTree SetSelectionTextToBody(const std::string& selection_text);
 
   // Sets |HTMLElement#innerHTML| with |selection_text|, which is HTML markup
-  // with selection markers "^" and "|" and returns |SelectionInDOMTree| of
+  // with selection markers "^" and "|" and returns |SelectionInDomTree| of
   // specified selection markers.
   // See also |GetSelectionText()| which returns selection text from specified
-  // |ContainerNode| and |SelectionInDOMTree|.
+  // |ContainerNode| and |SelectionInDomTree|.
   // Note: Unlike |assert_selection()|, this function doesn't change
   // |FrameSelection|.
-  SelectionInDOMTree SetSelectionText(HTMLElement*,
+  SelectionInDomTree SetSelectionText(HTMLElement*,
                                       const std::string& selection_text);
 
   // Returns selection text for child nodes of BODY with specific |Position|.
   std::string GetCaretTextFromBody(const Position&) const;
 
   // Returns selection text for child nodes of BODY with specified
-  // |SelectionInDOMTree|.
-  std::string GetSelectionTextFromBody(const SelectionInDOMTree&) const;
+  // |SelectionInDomTree|.
+  std::string GetSelectionTextFromBody(const SelectionInDomTree&) const;
 
   std::string GetSelectionTextFromBody() const;
 

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,18 +9,21 @@
 
 #include <string>
 
+#include "base/format_macros.h"
+#include "base/strings/stringprintf.h"
+#include "build/build_config.h"
 #include "ui/gfx/ipc/geometry/gfx_param_traits.h"
 #include "ui/gfx/range/range.h"
 
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_APPLE)
 #include "ipc/mach_port_mac.h"
 #endif
 
 namespace IPC {
 
 void ParamTraits<gfx::Range>::Write(base::Pickle* m, const gfx::Range& r) {
-  m->WriteUInt32(r.start());
-  m->WriteUInt32(r.end());
+  m->WriteUInt32(static_cast<uint32_t>(r.start()));
+  m->WriteUInt32(static_cast<uint32_t>(r.end()));
 }
 
 bool ParamTraits<gfx::Range>::Read(const base::Pickle* m,
@@ -34,11 +37,7 @@ bool ParamTraits<gfx::Range>::Read(const base::Pickle* m,
   return true;
 }
 
-void ParamTraits<gfx::Range>::Log(const gfx::Range& r, std::string* l) {
-  l->append(base::StringPrintf("(%d, %d)", r.start(), r.end()));
-}
-
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_APPLE)
 void ParamTraits<gfx::ScopedRefCountedIOSurfaceMachPort>::Write(
     base::Pickle* m,
     const param_type p) {
@@ -57,13 +56,29 @@ bool ParamTraits<gfx::ScopedRefCountedIOSurfaceMachPort>::Read(
   return true;
 }
 
-void ParamTraits<gfx::ScopedRefCountedIOSurfaceMachPort>::Log(
-    const param_type& p,
-    std::string* l) {
-  l->append("IOSurface Mach send right: ");
-  LogParam(p.get(), l);
+void ParamTraits<gfx::ScopedIOSurface>::Write(base::Pickle* m,
+                                              const param_type p) {
+  gfx::ScopedRefCountedIOSurfaceMachPort io_surface_mach_port(
+      IOSurfaceCreateMachPort(p.get()));
+  MachPortMac mach_port_mac(io_surface_mach_port.get());
+  ParamTraits<MachPortMac>::Write(m, mach_port_mac);
 }
-#endif  // defined(OS_MAC)
+
+bool ParamTraits<gfx::ScopedIOSurface>::Read(const base::Pickle* m,
+                                             base::PickleIterator* iter,
+                                             param_type* r) {
+  MachPortMac mach_port_mac;
+  if (!ParamTraits<MachPortMac>::Read(m, iter, &mach_port_mac))
+    return false;
+  gfx::ScopedRefCountedIOSurfaceMachPort io_surface_mach_port(
+      mach_port_mac.get_mach_port());
+  if (io_surface_mach_port)
+    r->reset(IOSurfaceLookupFromMachPort(io_surface_mach_port.get()));
+  else
+    r->reset();
+  return true;
+}
+#endif  // BUILDFLAG(IS_APPLE)
 
 void ParamTraits<gfx::SelectionBound>::Write(base::Pickle* m,
                                              const param_type& p) {
@@ -101,23 +116,6 @@ bool ParamTraits<gfx::SelectionBound>::Read(const base::Pickle* m,
   return true;
 }
 
-void ParamTraits<gfx::SelectionBound>::Log(const param_type& p,
-                                           std::string* l) {
-  l->append("gfx::SelectionBound(");
-  LogParam(static_cast<uint32_t>(p.type()), l);
-  l->append(", ");
-  LogParam(p.edge_start(), l);
-  l->append(", ");
-  LogParam(p.edge_end(), l);
-  l->append(", ");
-  LogParam(p.visible_edge_start(), l);
-  l->append(", ");
-  LogParam(p.visible_edge_end(), l);
-  l->append(", ");
-  LogParam(p.visible(), l);
-  l->append(")");
-}
-
 }  // namespace IPC
 
 // Generate param traits write methods.
@@ -129,13 +127,6 @@ namespace IPC {
 
 // Generate param traits read methods.
 #include "ipc/param_traits_read_macros.h"
-namespace IPC {
-#undef UI_GFX_IPC_GFX_PARAM_TRAITS_MACROS_H_
-#include "ui/gfx/ipc/gfx_param_traits_macros.h"
-}  // namespace IPC
-
-// Generate param traits log methods.
-#include "ipc/param_traits_log_macros.h"
 namespace IPC {
 #undef UI_GFX_IPC_GFX_PARAM_TRAITS_MACROS_H_
 #include "ui/gfx/ipc/gfx_param_traits_macros.h"

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,9 +20,6 @@ namespace blink {
 
 // nan means data not available.
 struct MemoryUsage {
-  double v8_bytes = std::numeric_limits<double>::quiet_NaN();
-  double partition_alloc_bytes = std::numeric_limits<double>::quiet_NaN();
-  double blink_gc_bytes = std::numeric_limits<double>::quiet_NaN();
   double private_footprint_bytes = std::numeric_limits<double>::quiet_NaN();
   double swap_bytes = std::numeric_limits<double>::quiet_NaN();
   double vm_size_bytes = std::numeric_limits<double>::quiet_NaN();

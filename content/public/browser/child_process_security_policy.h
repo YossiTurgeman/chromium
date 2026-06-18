@@ -1,14 +1,17 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_PUBLIC_BROWSER_CHILD_PROCESS_SECURITY_POLICY_H_
 #define CONTENT_PUBLIC_BROWSER_CHILD_PROCESS_SECURITY_POLICY_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "content/common/content_export.h"
+#include "content/public/common/child_process_id.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -52,15 +55,7 @@ class ChildProcessSecurityPolicy {
   // may be requested by any child process, but navigations to this scheme may
   // only commit in child processes that have been explicitly granted
   // permission to do so.
-  //
-  // |always_allow_in_origin_headers| controls whether this scheme is allowed to
-  // appear as the Origin HTTP header in outbound requests, even if the
-  // originating process does not have permission to commit this scheme. This
-  // may be necessary if the scheme is used in conjunction with blink's
-  // IsolatedWorldSecurityOrigin mechanism, as for extension content scripts.
-  virtual void RegisterWebSafeIsolatedScheme(
-      const std::string& scheme,
-      bool always_allow_in_origin_headers) = 0;
+  virtual void RegisterWebSafeIsolatedScheme(const std::string& scheme) = 0;
 
   // Returns true iff |scheme| has been registered as a web-safe scheme.
   // TODO(nick): https://crbug.com/651534 This function does not have enough
@@ -72,7 +67,8 @@ class ChildProcessSecurityPolicy {
   // Whenever the user picks a file from a <input type="file"> element, the
   // browser should call this function to grant the child process the capability
   // to upload the file to the web. Grants FILE_PERMISSION_READ_ONLY.
-  virtual void GrantReadFile(int child_id, const base::FilePath& file) = 0;
+  virtual void GrantReadFile(ChildProcessId child_id,
+                             const base::FilePath& file) = 0;
 
   // This permission grants creation, read, and full write access to a file,
   // including attributes.
@@ -87,14 +83,15 @@ class ChildProcessSecurityPolicy {
 
   // Determine whether the process has the capability to request the URL.
   // Before servicing a child process's request for a URL, the content layer
-  // calls this method to determine whether it is safe.
+  // calls this method to determine whether it is safe. CanRequestURL() allows
+  // for requests that might lead to cross-process navigations or external
+  // protocol handlers.
+  //
+  // Note that this check is different from checking whether a document with
+  // the given URL can be committed in a process; that latter check is more
+  // restrictive and is performed within //content (see
+  // ChildProcessSecurityPolicyImpl::CanCommitURL).
   virtual bool CanRequestURL(int child_id, const GURL& url) = 0;
-
-  // Whether the process is allowed to commit a document from the given URL.
-  // This is more restrictive than CanRequestURL, since CanRequestURL allows
-  // requests that might lead to cross-process navigations or external protocol
-  // handlers.
-  virtual bool CanCommitURL(int child_id, const GURL& url) = 0;
 
   // These methods verify whether or not the child process has been granted
   // permissions perform these functions on |file|.
@@ -102,7 +99,8 @@ class ChildProcessSecurityPolicy {
   // Before servicing a child process's request to upload a file to the web, the
   // browser should call this method to determine whether the process has the
   // capability to upload the requested file.
-  virtual bool CanReadFile(int child_id, const base::FilePath& file) = 0;
+  virtual bool CanReadFile(ChildProcessId child_id,
+                           const base::FilePath& file) = 0;
   virtual bool CanCreateReadWriteFile(int child_id,
                                       const base::FilePath& file) = 0;
 
@@ -176,6 +174,10 @@ class ChildProcessSecurityPolicy {
   // origin.
   virtual void GrantRequestOrigin(int child_id, const url::Origin& origin) = 0;
 
+  // Grants the child process the capability to commit URLs of the provided
+  // scheme.
+  virtual void GrantCommitScheme(int child_id, const std::string& scheme) = 0;
+
   // Grants the child process the capability to request URLs of the provided
   // scheme.
   virtual void GrantRequestScheme(int child_id, const std::string& scheme) = 0;
@@ -201,26 +203,57 @@ class ChildProcessSecurityPolicy {
   // is allowed to use WebUI bindings.
   virtual bool HasWebUIBindings(int child_id) = 0;
 
-  // Grants permission to send system exclusive message to any MIDI devices.
+  // Grants permission to send messages to any MIDI devices.
+  virtual void GrantSendMidiMessage(int child_id) = 0;
+
+  // Grants permission to send system exclusive (SysEx) messages to any MIDI
+  // devices.
   virtual void GrantSendMidiSysExMessage(int child_id) = 0;
 
-  // Returns true if the process is permitted to read and modify the data for
-  // the origin of |url|. This is currently used to protect data such as
-  // cookies, passwords, and local storage. Does not affect cookies attached to
-  // or set by network requests.
+  // This function checks whether a process is allowed to read and/or modify
+  // `origin`'s data such as passwords, cookies, or localStorage. Generally,
+  // this implies that an instance of `origin` must have previously been
+  // committed in this process (e.g., via a navigation or worker instantiation).
   //
-  // This can only return false for processes locked to a particular origin,
-  // which can happen for any origin when the --site-per-process flag is used,
-  // or for isolated origins that require a dedicated process (see
-  // AddIsolatedOrigin).
+  // Internally, this function performs two kinds of security checks:
+  // - "Jail" check: ensures that a process locked to a particular site can only
+  //   access data belonging to that site.
+  // - "Citadel" check: ensures that a process that is *not* locked to a
+  //   particular site does not access data belonging to a site that requires a
+  //   dedicated process. This check is mainly relevant on Android, where only
+  //   some sites require site isolation.
   //
-  // TODO(lukasza, nasko): https://crbug.com/882053: Convert this method to take
-  // url::Origin instead of GURL (so that CanAccessDataForOrigin can verify
-  // whether precursor of opaque origins also matches the process lock).
-  virtual bool CanAccessDataForOrigin(int child_id, const GURL& url) = 0;
+  // This is one of two core ways of enforcing Site Isolation (see
+  // docs/process_model_and_site_isolation.md), the other being `HostsOrigin()`
+  // below. Compared to `HostsOrigin()`, this check is more strict.  In
+  // particular, it may block access for renderer processes that should never
+  // need to access any origin's data, such as processes containing only
+  // documents with opaque origins (e.g., from sandboxed frames), or processes
+  // containing more restricted content types like PDF.
+  virtual bool CanAccessDataForOrigin(int child_id,
+                                      const url::Origin& origin) = 0;
+
+  // This function checks whether a process has an instance of a particular
+  // `origin`, either because it has committed a document or has instantiated a
+  // worker with that origin. This can be used to validate initiator or source
+  // origins that are included in messages or IPCs received from the renderer,
+  // such as the source origin for postMessage. Generally, this function
+  // performs similar enforcements to `CanAccessDataForOrigin()` above,
+  // including both jail and citadel checks. In contrast to
+  // `CanAccessDataForOrigin()`, this function permits access from opaque
+  // origins, making it more suitable to use for APIs that are allowed in such
+  // origins (such as postMessage).
+  //
+  // Subtle note: due to shutdown races, where a document/worker destruction may
+  // race with processing legitimate IPCs on behalf of `origin` from the
+  // renderer, this function actually checks for the process either *currently*
+  // having an origin, or having hosted it in the *past* (but not necessarily
+  // now).
+  virtual bool HostsOrigin(int child_id, const url::Origin& origin) = 0;
 
   // Defines available sources of isolated origins.  This should be specified
-  // when adding isolated origins with the AddIsolatedOrigins() call below.
+  // when adding isolated origins with the AddFutureIsolatedOrigins() call
+  // below.
   enum class IsolatedOriginSource {
     // Used for origins that are hardcoded into the browser.
     BUILT_IN,
@@ -235,6 +268,9 @@ class ChildProcessSecurityPolicy {
     // Used for origins that are isolated based on user-triggered runtime
     // heuristics.
     USER_TRIGGERED,
+    // Used for origins that are isolated based on runtime heuristics triggered
+    // directly by web pages, such as headers.
+    WEB_TRIGGERED,
     // Used for testing purposes.
     TEST
   };
@@ -286,7 +322,7 @@ class ChildProcessSecurityPolicy {
   // BrowserContexts for which this function has been called.  However,
   // attempts to re-add an origin for the same |browser_context| will be
   // ignored.
-  virtual void AddIsolatedOrigins(
+  virtual void AddFutureIsolatedOrigins(
       const std::vector<url::Origin>& origins,
       IsolatedOriginSource source,
       BrowserContext* browser_context = nullptr) = 0;
@@ -302,9 +338,9 @@ class ChildProcessSecurityPolicy {
   // implies breaking document.domain for all of its subdomains.
   //
   // Note that wildcards can only be added using this version of
-  // AddIsolatedOrigins; they cannot be specified in a url::Origin().
-  virtual void AddIsolatedOrigins(
-      base::StringPiece origins_to_add,
+  // AddFutureIsolatedOrigins(); they cannot be specified in a url::Origin().
+  virtual void AddFutureIsolatedOrigins(
+      std::string_view origins_to_add,
       IsolatedOriginSource source,
       BrowserContext* browser_context = nullptr) = 0;
 
@@ -316,7 +352,7 @@ class ChildProcessSecurityPolicy {
   // by the source of how they were added and/or by BrowserContext.
   //
   // If |source| is provided, only origins that were added with the same source
-  // will be returned; if |source| is base::nullopt, origins from all sources
+  // will be returned; if |source| is std::nullopt, origins from all sources
   // will be returned.
   //
   // If |browser_context| is null, only globally applicable origins will be
@@ -324,9 +360,21 @@ class ChildProcessSecurityPolicy {
   // within that particular BrowserContext will be returned (note that this
   // includes both matching per-profile isolated origins as well as globally
   // applicable origins which apply to |browser_context| by definition).
+  //
+  // Origins returned by this function only include origins that would apply to
+  // any future BrowsingInstance (browsing context group).  Origins that were
+  // isolated only in specific BrowsingInstances are not included.  (In
+  // particular, this excludes BrowsingInstance-specific isolated origins for
+  // Origin-Agent-Cluster as well as COOP documents loaded without user
+  // activation.)
   virtual std::vector<url::Origin> GetIsolatedOrigins(
-      base::Optional<IsolatedOriginSource> source = base::nullopt,
+      std::optional<IsolatedOriginSource> source = std::nullopt,
       BrowserContext* browser_context = nullptr) = 0;
+
+  // Returns whether the site of |origin| is isolated and was added by the
+  // |source| to be isolated.
+  virtual bool IsIsolatedSiteFromSource(const url::Origin& origin,
+                                        IsolatedOriginSource source) = 0;
 
   // Clears all isolated origins.  This is unsafe to use outside of testing.
   virtual void ClearIsolatedOriginsForTesting() = 0;

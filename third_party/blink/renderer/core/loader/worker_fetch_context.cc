@@ -1,17 +1,17 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/loader/worker_fetch_context.h"
 
-#include "base/single_thread_task_runner.h"
-#include "third_party/blink/public/platform/web_mixed_content.h"
-#include "third_party/blink/public/platform/web_mixed_content_context_type.h"
-#include "third_party/blink/public/platform/web_url_loader_factory.h"
+#include "base/task/single_thread_task_runner.h"
+#include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
+#include "third_party/blink/public/platform/web_content_settings_client.h"
 #include "third_party/blink/public/platform/web_url_request.h"
 #include "third_party/blink/public/platform/web_worker_fetch_context.h"
-#include "third_party/blink/renderer/core/frame/deprecation.h"
+#include "third_party/blink/renderer/core/frame/deprecation/deprecation.h"
 #include "third_party/blink/renderer/core/loader/mixed_content_checker.h"
+#include "third_party/blink/renderer/core/loader/resource_initiator_helper.h"
 #include "third_party/blink/renderer/core/loader/subresource_filter.h"
 #include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/core/timing/worker_global_scope_performance.h"
@@ -22,10 +22,12 @@
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_client_settings_object.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher_properties.h"
-#include "third_party/blink/renderer/platform/loader/fetch/resource_timing_info.h"
+#include "third_party/blink/renderer/platform/loader/fetch/resource_timing_utils.h"
+#include "third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader_factory.h"
 #include "third_party/blink/renderer/platform/loader/fetch/worker_resource_timing_notifier.h"
 #include "third_party/blink/renderer/platform/network/network_state_notifier.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/scheduler/public/virtual_time_controller.h"
 #include "third_party/blink/renderer/platform/supplementable.h"
 #include "third_party/blink/renderer/platform/weborigin/security_policy.h"
 
@@ -40,7 +42,9 @@ WorkerFetchContext::WorkerFetchContext(
     SubresourceFilter* subresource_filter,
     ContentSecurityPolicy& content_security_policy,
     WorkerResourceTimingNotifier& resource_timing_notifier)
-    : BaseFetchContext(properties),
+    : BaseFetchContext(
+          properties,
+          MakeGarbageCollected<DetachableConsoleLogger>(&global_scope)),
       global_scope_(global_scope),
       web_context_(std::move(web_context)),
       subresource_filter_(subresource_filter),
@@ -58,7 +62,7 @@ net::SiteForCookies WorkerFetchContext::GetSiteForCookies() const {
 
 scoped_refptr<const SecurityOrigin> WorkerFetchContext::GetTopFrameOrigin()
     const {
-  base::Optional<WebSecurityOrigin> top_frame_origin =
+  std::optional<WebSecurityOrigin> top_frame_origin =
       web_context_->TopFrameOrigin();
 
   // The top frame origin of shared and service workers is null.
@@ -75,19 +79,10 @@ SubresourceFilter* WorkerFetchContext::GetSubresourceFilter() const {
   return subresource_filter_.Get();
 }
 
-PreviewsResourceLoadingHints*
-WorkerFetchContext::GetPreviewsResourceLoadingHints() const {
-  return nullptr;
-}
-
-bool WorkerFetchContext::AllowScriptFromSource(const KURL& url) const {
-  if (!global_scope_->ContentSettingsClient()) {
-    return true;
-  }
-  // If we're on a worker, script should be enabled, so no need to plumb
-  // Settings::GetScriptEnabled() here.
-  return global_scope_->ContentSettingsClient()->AllowScriptFromSource(true,
-                                                                       url);
+bool WorkerFetchContext::AllowScript() const {
+  // Script is always allowed in worker fetch contexts, since the fact that
+  // they're running is already evidence that script is allowed.
+  return true;
 }
 
 bool WorkerFetchContext::ShouldBlockRequestByInspector(const KURL& url) const {
@@ -98,22 +93,21 @@ bool WorkerFetchContext::ShouldBlockRequestByInspector(const KURL& url) const {
 
 void WorkerFetchContext::DispatchDidBlockRequest(
     const ResourceRequest& resource_request,
-    const FetchInitiatorInfo& fetch_initiator_info,
+    const ResourceLoaderOptions& options,
     ResourceRequestBlockedReason blocked_reason,
     ResourceType resource_type) const {
-  probe::DidBlockRequest(Probe(), resource_request, nullptr, Url(),
-                         fetch_initiator_info, blocked_reason, resource_type);
+  probe::DidBlockRequest(Probe(), resource_request, nullptr, Url(), options,
+                         blocked_reason, resource_type);
 }
 
-const ContentSecurityPolicy*
-WorkerFetchContext::GetContentSecurityPolicyForWorld(
+ContentSecurityPolicy* WorkerFetchContext::GetContentSecurityPolicyForWorld(
     const DOMWrapperWorld* world) const {
   // Worker threads don't support per-world CSP. Hence just return the default
   // CSP.
   return GetContentSecurityPolicy();
 }
 
-bool WorkerFetchContext::IsSVGImageChromeClient() const {
+bool WorkerFetchContext::IsIsolatedSVGChromeClient() const {
   return false;
 }
 
@@ -144,16 +138,17 @@ WorkerFetchContext::CreateWebSocketHandshakeThrottle() {
 }
 
 bool WorkerFetchContext::ShouldBlockFetchByMixedContentCheck(
-    mojom::RequestContextType request_context,
-    const base::Optional<ResourceRequest::RedirectInfo>& redirect_info,
+    mojom::blink::RequestContextType request_context,
+    network::mojom::blink::IPAddressSpace target_address_space,
+    base::optional_ref<const ResourceRequest::RedirectInfo> redirect_info,
     const KURL& url,
     ReportingDisposition reporting_disposition,
-    const base::Optional<String>& devtools_id) const {
-  RedirectStatus redirect_status = redirect_info
+    const String& devtools_id) const {
+  RedirectStatus redirect_status = redirect_info.has_value()
                                        ? RedirectStatus::kFollowedRedirect
                                        : RedirectStatus::kNoRedirect;
   const KURL& url_before_redirects =
-      redirect_info ? redirect_info->original_url : url;
+      redirect_info.has_value() ? redirect_info->original_url : url;
   return MixedContentChecker::ShouldBlockFetchOnWorker(
       *const_cast<WorkerFetchContext*>(this), request_context,
       url_before_redirects, redirect_status, url, reporting_disposition,
@@ -163,17 +158,14 @@ bool WorkerFetchContext::ShouldBlockFetchByMixedContentCheck(
 bool WorkerFetchContext::ShouldBlockFetchAsCredentialedSubresource(
     const ResourceRequest& resource_request,
     const KURL& url) const {
-  if ((!url.User().IsEmpty() || !url.Pass().IsEmpty()) &&
+  if ((!url.User().empty() || !url.Pass().empty()) &&
       resource_request.GetRequestContext() !=
-          mojom::RequestContextType::XML_HTTP_REQUEST) {
+          mojom::blink::RequestContextType::XML_HTTP_REQUEST) {
     if (Url().User() != url.User() || Url().Pass() != url.Pass()) {
       CountDeprecation(
           WebFeature::kRequestedSubresourceWithEmbeddedCredentials);
 
-      // TODO(mkwst): Remove the runtime check one way or the other once we're
-      // sure it's going to stick (or that it's not).
-      if (RuntimeEnabledFeatures::BlockCredentialedSubresourcesEnabled())
-        return true;
+      return true;
     }
   }
   return false;
@@ -185,92 +177,132 @@ const KURL& WorkerFetchContext::Url() const {
       .GlobalObjectUrl();
 }
 
-const SecurityOrigin* WorkerFetchContext::GetParentSecurityOrigin() const {
-  // This method was introduced to check the parent frame's security context
-  // while loading iframe document resources. So this method is not suitable for
-  // workers.
-  NOTREACHED();
-  return nullptr;
-}
-
-const ContentSecurityPolicy* WorkerFetchContext::GetContentSecurityPolicy()
-    const {
-  return content_security_policy_;
-}
-
-void WorkerFetchContext::AddConsoleMessage(ConsoleMessage* message) const {
-  return global_scope_->AddConsoleMessage(message);
+ContentSecurityPolicy* WorkerFetchContext::GetContentSecurityPolicy() const {
+  return content_security_policy_.Get();
 }
 
 void WorkerFetchContext::PrepareRequest(
     ResourceRequest& request,
-    const FetchInitiatorInfo& initiator_info,
-    WebScopedVirtualTimePauser&,
+    ResourceLoaderOptions& options,
+    WebScopedVirtualTimePauser& virtual_time_pauser,
     ResourceType resource_type) {
+  GetExecutionContext()->MaybeRecordNetworkRequestUrlForPushEvents(
+      request.Url());
+  request.SetUkmSourceId(GetExecutionContext()->UkmSourceID());
+
   String user_agent = global_scope_->UserAgent();
   probe::ApplyUserAgentOverride(Probe(), &user_agent);
   DCHECK(!user_agent.IsNull());
   request.SetHTTPUserAgent(AtomicString(user_agent));
+  request.SetSharedDictionaryWriterEnabled(
+      RuntimeEnabledFeatures::CompressionDictionaryTransportEnabled(
+          GetExecutionContext()));
+
+  request.SetStorageAccessApiStatus(
+      GetExecutionContext()->GetStorageAccessApiStatus());
 
   WrappedResourceRequest webreq(request);
-  web_context_->WillSendRequest(webreq);
+  web_context_->FinalizeRequest(webreq);
+  if (auto* worker_scope = DynamicTo<WorkerGlobalScope>(*global_scope_)) {
+    virtual_time_pauser =
+        worker_scope->GetScheduler()
+            ->GetVirtualTimeController()
+            ->CreateWebScopedVirtualTimePauser(
+                request.Url().GetString(),
+                WebScopedVirtualTimePauser::VirtualTaskDuration::kNonInstant);
+  }
 
-  probe::PrepareRequest(Probe(), nullptr, request, initiator_info,
-                        resource_type);
+  probe::PrepareRequest(Probe(), nullptr, request, options, resource_type);
 }
 
 void WorkerFetchContext::AddAdditionalRequestHeaders(ResourceRequest& request) {
   // The remaining modifications are only necessary for HTTP and HTTPS.
-  if (!request.Url().IsEmpty() && !request.Url().ProtocolIsInHTTPFamily())
+  if (!request.Url().IsEmpty() && !request.Url().ProtocolIsInHttpFamily()) {
     return;
+  }
 
-  if (save_data_enabled_)
-    request.SetHttpHeaderField(http_names::kSaveData, "on");
-
-  AddBackForwardCacheExperimentHTTPHeaderIfNeeded(global_scope_, request);
+  // TODO(crbug.com/1315612): WARNING: This bypasses the permissions policy.
+  // Unfortunately, workers lack a permissions policy and to derive proper hints
+  // https://github.com/w3c/webappsec-permissions-policy/issues/207.
+  // Save-Data was previously included in hints for workers, thus we cannot
+  // remove it for the time being. If you're reading this, consider building
+  // permissions policies for workers and/or deprecating this inclusion.
+  bool save_data_enabled = save_data_enabled_;
+  probe::ApplyDataSaverOverride(Probe(), save_data_enabled);
+  if (save_data_enabled) {
+    request.SetHttpHeaderField(http_names::kSaveData, AtomicString("on"));
+  }
 }
 
-void WorkerFetchContext::AddResourceTiming(const ResourceTimingInfo& info) {
-  // TODO(nhiroki): Add ResourceTiming API support once it's spec'ed for
-  // worklets.
-  if (global_scope_->IsWorkletGlobalScope())
+// TODO(crbug.com/40919714): After determine exactly how we support initiator
+// for resource timing on worker threads, consider merging this function with
+// FrameFetchContext::FillInitiatorInfo().
+void WorkerFetchContext::FillInitiatorInfo(FetchInitiatorInfo& initiator_info) {
+  CHECK(RuntimeEnabledFeatures::ResourceTimingInitiatorEnabled());
+  if (initiator_info.is_imported_module && !initiator_info.referrer.empty()) {
+    // TODO(crbug.com/40919714): Fill |initiator_url|.
+    // Initiator is a referrer of an imported js file.
     return;
-  const SecurityOrigin* security_origin = GetResourceFetcherProperties()
-                                              .GetFetchClientSettingsObject()
-                                              .GetSecurityOrigin();
-  mojom::blink::ResourceTimingInfoPtr mojo_info =
-      Performance::GenerateResourceTiming(*security_origin, info,
-                                          *global_scope_);
-  // |info| is taken const-ref but this can make destructive changes to
-  // WorkerTimingContainer on |info| when a page is controlled by a service
-  // worker.
-  resource_timing_notifier_->AddResourceTiming(std::move(mojo_info),
-                                               info.InitiatorType(),
-                                               info.TakeWorkerTimingReceiver());
+  }
+
+  v8::Isolate* isolate = ResourceInitiatorHelper::GetIsolateIfRunningScript();
+  if (isolate) {
+    // It is the currently executing JavaScript that is fetching the resource.
+    // The initiator is the JavaScript that originally dispatched currently
+    // executing JavaScript.
+    initiator_info.initiator_url =
+        ResourceInitiatorHelper::GetScriptInitiatorUrl(*isolate);
+    return;
+  }
 }
 
-void WorkerFetchContext::PopulateResourceRequest(
+void WorkerFetchContext::AddResourceTiming(
+    mojom::blink::ResourceTimingInfoPtr info,
+    const AtomicString& initiator_type) {
+  resource_timing_notifier_->AddResourceTiming(std::move(info), initiator_type);
+}
+
+void WorkerFetchContext::ModifyRequestForMixedContentUpgrade(
+    ResourceRequest& request) {
+  MixedContentChecker::UpgradeInsecureRequest(
+      request, &GetResourceFetcherProperties().GetFetchClientSettingsObject(),
+      global_scope_, mojom::blink::RequestContextFrameType::kNone,
+      global_scope_->ContentSettingsClient(), nullptr);
+}
+
+void WorkerFetchContext::PopulateResourceRequestBeforeCacheAccess(
+    const ResourceLoaderOptions& options,
+    ResourceRequest& request) {
+  ModifyRequestForMixedContentUpgrade(request);
+  request.SetTopFrameOrigin(GetTopFrameOrigin());
+}
+
+void WorkerFetchContext::WillSendRequest(ResourceRequest& request) {
+  std::optional<WebURL> overriden_url =
+      web_context_->WillSendRequest(request.Url());
+  if (overriden_url.has_value()) {
+    request.SetUrl(*overriden_url);
+  }
+}
+
+void WorkerFetchContext::UpgradeResourceRequestForLoader(
     ResourceType type,
-    const ClientHintsPreferences& hints_preferences,
-    const FetchParameters::ResourceWidth& resource_width,
+    const std::optional<float> resource_width,
     ResourceRequest& out_request,
     const ResourceLoaderOptions& options) {
-  if (!GetResourceFetcherProperties().IsDetached())
+  if (!GetResourceFetcherProperties().IsDetached()) {
     probe::SetDevToolsIds(Probe(), out_request, options.initiator_info);
-  MixedContentChecker::UpgradeInsecureRequest(
-      out_request,
-      &GetResourceFetcherProperties().GetFetchClientSettingsObject(),
-      global_scope_, mojom::RequestContextFrameType::kNone,
-      global_scope_->ContentSettingsClient());
+  }
   SetFirstPartyCookie(out_request);
-  if (!out_request.TopFrameOrigin())
-    out_request.SetTopFrameOrigin(GetTopFrameOrigin());
 }
 
-mojo::PendingReceiver<mojom::blink::WorkerTimingContainer>
-WorkerFetchContext::TakePendingWorkerTimingReceiver(int request_id) {
-  return GetWebWorkerFetchContext()->TakePendingWorkerTimingReceiver(
-      request_id);
+const FeatureContext* WorkerFetchContext::GetFeatureContext() const {
+  return GetExecutionContext();
+}
+
+std::unique_ptr<ResourceLoadInfoNotifierWrapper>
+WorkerFetchContext::CreateResourceLoadInfoNotifierWrapper() {
+  return web_context_->CreateResourceLoadInfoNotifierWrapper();
 }
 
 void WorkerFetchContext::SetFirstPartyCookie(ResourceRequest& out_request) {
@@ -300,6 +332,10 @@ WorkerFetchContext::GetContentSecurityNotifier() {
             global_scope_->GetTaskRunner(TaskType::kInternalLoading)));
   }
   return *content_security_notifier_.get();
+}
+
+ExecutionContext* WorkerFetchContext::GetExecutionContext() const {
+  return global_scope_.Get();
 }
 
 void WorkerFetchContext::Trace(Visitor* visitor) const {

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 #define ASH_PUBLIC_CPP_CHILD_ACCOUNTS_PARENT_ACCESS_CONTROLLER_H_
 
 #include "ash/public/cpp/ash_public_export.h"
-#include "base/callback_forward.h"
+#include "base/functional/callback_forward.h"
 #include "base/time/time.h"
 
 class AccountId;
@@ -25,8 +25,19 @@ enum class SupervisedAction {
   kUpdateTimezone,
   // Add user flow.
   kAddUser,
-  // Re-authentication flow.
-  kReauth,
+};
+
+// The result of parent access code validation.
+enum class ParentCodeValidationResult {
+  // Parent code is valid.
+  kValid,
+  // Parent code is invalid. Can also happen if the configuration on the device
+  // is outdated.
+  kInvalid,
+  // No matching parent access code configuration available on the device.
+  kNoConfig,
+  // Internal error of the system processing parent access code.
+  kInternalError,
 };
 
 // ParentAccessController serves as a single point of access for PIN requests

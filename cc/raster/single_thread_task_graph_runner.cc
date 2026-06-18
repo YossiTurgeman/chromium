@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,21 @@
 
 #include <stdint.h>
 
+#include <algorithm>
+#include <memory>
 #include <string>
 #include <utility>
 
 #include "base/threading/simple_thread.h"
-#include "base/trace_event/trace_event.h"
+#include "base/trace_event/typed_macros.h"
 
 namespace cc {
 
 SingleThreadTaskGraphRunner::SingleThreadTaskGraphRunner()
     : lock_(),
       has_ready_to_run_tasks_cv_(&lock_),
-      has_namespaces_with_finished_running_tasks_cv_(&lock_) {
+      has_namespaces_with_finished_running_tasks_cv_(&lock_),
+      is_idle_cv_(&lock_) {
   has_ready_to_run_tasks_cv_.declare_only_used_while_idle();
 }
 
@@ -26,8 +29,8 @@ SingleThreadTaskGraphRunner::~SingleThreadTaskGraphRunner() = default;
 void SingleThreadTaskGraphRunner::Start(
     const std::string& thread_name,
     const base::SimpleThread::Options& thread_options) {
-  thread_.reset(
-      new base::DelegateSimpleThread(this, thread_name, thread_options));
+  thread_ = std::make_unique<base::DelegateSimpleThread>(this, thread_name,
+                                                         thread_options);
   thread_->StartAsync();
 }
 
@@ -73,6 +76,15 @@ void SingleThreadTaskGraphRunner::ScheduleTasks(NamespaceToken token,
   }
 }
 
+void SingleThreadTaskGraphRunner::ExternalDependencyCompletedForTask(
+    NamespaceToken token,
+    scoped_refptr<Task> task) {
+  base::AutoLock lock(lock_);
+  if (work_queue_.ExternalDependencyCompletedForTask(token, std::move(task))) {
+    has_ready_to_run_tasks_cv_.Signal();
+  }
+}
+
 void SingleThreadTaskGraphRunner::WaitForTasksToFinishRunning(
     NamespaceToken token) {
   TRACE_EVENT0("cc",
@@ -110,11 +122,22 @@ void SingleThreadTaskGraphRunner::CollectCompletedTasks(
   }
 }
 
+void SingleThreadTaskGraphRunner::RunTasksUntilIdleForTest() {
+  base::AutoLock lock(lock_);
+
+  while (work_queue_.HasReadyToRunTasks() ||
+         work_queue_.NumRunningTasks() > 0) {
+    is_idle_cv_.Wait();
+  }
+}
+
 void SingleThreadTaskGraphRunner::Run() {
   base::AutoLock lock(lock_);
 
   while (true) {
     if (!RunTaskWithLockAcquired()) {
+      is_idle_cv_.Signal();
+
       // Exit when shutdown is set and no more tasks are pending.
       if (shutdown_)
         break;
@@ -133,12 +156,10 @@ bool SingleThreadTaskGraphRunner::RunTaskWithLockAcquired() {
   // Find the first category with any tasks to run. This task graph runner
   // treats categories as an additional priority.
   const auto& ready_to_run_namespaces = work_queue_.ready_to_run_namespaces();
-  auto found = std::find_if(
-      ready_to_run_namespaces.cbegin(), ready_to_run_namespaces.cend(),
-      [](const std::pair<const uint16_t,
-                         TaskGraphWorkQueue::TaskNamespace::Vector>& pair) {
-        return !pair.second.empty();
-      });
+  auto found = std::ranges::find_if_not(
+      ready_to_run_namespaces,
+      &TaskGraphWorkQueue::TaskNamespace::Vector::empty,
+      &TaskGraphWorkQueue::ReadyNamespaces::value_type::second);
 
   if (found == ready_to_run_namespaces.cend()) {
     return false;
@@ -148,11 +169,14 @@ bool SingleThreadTaskGraphRunner::RunTaskWithLockAcquired() {
   auto prioritized_task = work_queue_.GetNextTaskToRun(category);
 
   {
+    TRACE_EVENT("toplevel", "cc::SingleThreadTaskGraphRunner::RunTask",
+                perfetto::TerminatingFlow::Global(
+                    prioritized_task.task->trace_task_id()));
     base::AutoUnlock unlock(lock_);
     prioritized_task.task->RunOnWorkerThread();
   }
 
-  auto* task_namespace = prioritized_task.task_namespace;
+  auto* task_namespace = prioritized_task.task_namespace.get();
   work_queue_.CompleteTask(std::move(prioritized_task));
 
   // If namespace has finished running all tasks, wake up origin thread.

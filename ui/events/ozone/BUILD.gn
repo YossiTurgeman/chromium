@@ -1,4 +1,4 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -11,8 +11,6 @@ component("ozone") {
   output_name = "events_ozone"
 
   sources = [
-    "chromeos/cursor_controller.cc",
-    "chromeos/cursor_controller.h",
     "device/device_event.cc",
     "device/device_event.h",
     "device/device_event_observer.h",
@@ -29,11 +27,12 @@ component("ozone") {
     "gamepad/gamepad_provider_ozone.h",
     "keyboard/event_auto_repeat_handler.cc",
     "keyboard/event_auto_repeat_handler.h",
+    "keyboard/slow_keys_handler.cc",
+    "keyboard/slow_keys_handler.h",
   ]
 
   deps = [
     "//base",
-    "//base/third_party/dynamic_annotations",
     "//ui/display",
     "//ui/events",
     "//ui/events/devices",
@@ -41,6 +40,13 @@ component("ozone") {
   ]
 
   defines = [ "IS_EVENTS_OZONE_IMPL" ]
+
+  if (is_chromeos) {
+    sources += [
+      "chromeos/cursor_controller.cc",
+      "chromeos/cursor_controller.h",
+    ]
+  }
 
   if (use_udev) {
     sources += [
@@ -59,15 +65,19 @@ source_set("unittests") {
   deps = [
     ":ozone",
     "//base",
+    "//base/test:test_support",
     "//testing/gtest",
     "//ui/events",
     "//ui/events/ozone/layout:unittests",
-    "//ui/gfx:native_widget_types",
+    "//ui/gfx:native_ui_types",
     "//ui/gfx/geometry",
   ]
 
   if (is_chromeos) {
-    sources += [ "chromeos/cursor_controller_unittest.cc" ]
+    sources += [
+      "chromeos/cursor_controller_unittest.cc",
+      "keyboard/slow_keys_handler_unittest.cc",
+    ]
   }
 
   if (is_linux || is_chromeos) {

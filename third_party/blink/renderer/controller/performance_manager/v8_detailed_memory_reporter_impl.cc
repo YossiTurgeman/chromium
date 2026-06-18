@@ -1,24 +1,29 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/controller/performance_manager/v8_detailed_memory_reporter_impl.h"
 
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "base/callback.h"
+#include "base/byte_size.h"
 #include "base/check.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/notreached.h"
-#include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/controller/performance_manager/v8_worker_memory_reporter.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context_host.h"
+#include "third_party/blink/renderer/core/html/canvas/canvas_resource_tracker.h"
 #include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
+#include "third_party/blink/renderer/platform/heap/thread_state.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 #include "third_party/blink/renderer/platform/wtf/ref_counted.h"
 #include "v8/include/v8.h"
@@ -47,44 +52,57 @@ class FrameAssociatedMeasurementDelegate : public v8::MeasureMemoryDelegate {
     return true;
   }
 
-  void MeasurementComplete(
-      const std::vector<std::pair<v8::Local<v8::Context>, size_t>>&
-          context_sizes_in_bytes,
-      size_t unattributed_size_in_bytes) override {
+  void MeasurementComplete(v8::MeasureMemoryDelegate::Result result) override {
+    DCHECK(IsMainThread());
     mojom::blink::PerIsolateV8MemoryUsagePtr isolate_memory_usage =
         mojom::blink::PerIsolateV8MemoryUsage::New();
-    for (const auto& context_and_size : context_sizes_in_bytes) {
-      const v8::Local<v8::Context>& context = context_and_size.first;
-      const size_t size = context_and_size.second;
+    DCHECK_EQ(result.contexts.size(), result.sizes_in_bytes.size());
+    for (size_t i = 0; i < result.contexts.size(); ++i) {
+      const v8::Local<v8::Context>& context = result.contexts[i];
+      const base::ByteSize size(result.sizes_in_bytes[i]);
 
       LocalFrame* frame = ToLocalFrameIfNotDetached(context);
 
       if (!frame) {
-        // TODO(crbug.com/1080672): It would be prefereable to count the
-        // V8SchemaRegistry context's overhead with unassociated_bytes, but at
-        // present there isn't a public API that allows this distinction.
-        ++(isolate_memory_usage->num_unassociated_contexts);
-        isolate_memory_usage->unassociated_context_bytes_used += size;
+        // TODO(https://crbug.com/40130181): It would be preferable to count
+        // the V8SchemaRegistry context's overhead with unassociated_bytes, but
+        // at present there isn't a public API that allows this distinction.
+        ++(isolate_memory_usage->num_detached_contexts);
+        isolate_memory_usage->detached_memory_used += size;
         continue;
       }
-      if (DOMWrapperWorld::World(context).GetWorldId() !=
-          DOMWrapperWorld::kMainWorldId) {
-        // TODO(crbug.com/1085129): Handle extension contexts once they get
-        // their own V8ContextToken.
-        continue;
+      v8::Isolate* isolate = v8::Isolate::GetCurrent();
+      DOMWrapperWorld& world = DOMWrapperWorld::World(isolate, context);
+      String stable_id;
+      if (world.GetWorldId() != DOMWrapperWorld::kMainWorldId) {
+        // Non-main-world: report with stable ID if available.
+        stable_id = world.NonMainWorldStableId();
+        if (stable_id.IsNull() || stable_id.empty()) {
+          continue;
+        }
       }
       auto context_memory_usage = mojom::blink::PerContextV8MemoryUsage::New();
       context_memory_usage->token =
           frame->DomWindow()->GetExecutionContextToken();
-      context_memory_usage->bytes_used = size;
+      context_memory_usage->memory_used = size;
+      context_memory_usage->world_stable_id = stable_id;
 #if DCHECK_IS_ON()
-      // Check that the token didn't already occur.
-      for (const auto& entry : isolate_memory_usage->contexts) {
-        DCHECK_NE(entry->token, context_memory_usage->token);
+      // Verify that each main-world context has a unique token. Non-main-world
+      // entries can share a token (same frame, different isolated worlds) and
+      // can also share world_stable_id (same extension with both content script
+      // and user script worlds), so we only check main-world uniqueness.
+      if (stable_id.IsNull()) {
+        for (const auto& entry : isolate_memory_usage->contexts) {
+          if (entry->world_stable_id.IsNull()) {
+            DCHECK_NE(entry->token, context_memory_usage->token);
+          }
+        }
       }
 #endif
       isolate_memory_usage->contexts.push_back(std::move(context_memory_usage));
     }
+    isolate_memory_usage->shared_memory_used =
+        base::ByteSize(result.unattributed_size_in_bytes);
     std::move(callback_).Run(std::move(isolate_memory_usage));
   }
 
@@ -127,28 +145,88 @@ class V8ProcessMemoryReporter : public RefCounted<V8ProcessMemoryReporter> {
         result_(mojom::blink::PerProcessV8MemoryUsage::New()) {}
 
   void StartMeasurements(V8DetailedMemoryReporterImpl::Mode mode) {
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    DCHECK(IsMainThread());
+    DCHECK(!isolate_);
+    isolate_ = v8::Isolate::GetCurrent();
     // 1. Start measurement of the main V8 isolate.
-    if (!isolate) {
+    if (!isolate_) {
       // This can happen in tests that do not set up the main V8 isolate
       // or during setup/teardown of the process.
       MainMeasurementComplete(mojom::blink::PerIsolateV8MemoryUsage::New());
     } else {
       auto delegate = std::make_unique<FrameAssociatedMeasurementDelegate>(
-          WTF::Bind(&V8ProcessMemoryReporter::MainMeasurementComplete,
-                    scoped_refptr<V8ProcessMemoryReporter>(this)));
+          blink::BindOnce(&V8ProcessMemoryReporter::MainV8MeasurementComplete,
+                          scoped_refptr<V8ProcessMemoryReporter>(this)));
 
-      isolate->MeasureMemory(std::move(delegate),
-                             ToV8MeasureMemoryExecution(mode));
+      isolate_->MeasureMemory(std::move(delegate),
+                              ToV8MeasureMemoryExecution(mode));
     }
     // 2. Start measurement of all worker isolates.
     V8WorkerMemoryReporter::GetMemoryUsage(
-        WTF::Bind(&V8ProcessMemoryReporter::WorkerMeasurementComplete,
-                  scoped_refptr<V8ProcessMemoryReporter>(this)),
+        blink::BindOnce(&V8ProcessMemoryReporter::WorkerMeasurementComplete,
+                        scoped_refptr<V8ProcessMemoryReporter>(this)),
         ToV8MeasureMemoryExecution(mode));
   }
 
  private:
+  void MainV8MeasurementComplete(
+      mojom::blink::PerIsolateV8MemoryUsagePtr isolate_memory_usage) {
+    // At this point measurement of the main V8 isolate is done and we
+    // can measure the corresponding Blink memory. Note that the order
+    // of the measurements is important because the V8 measurement does
+    // a GC and we want to get the Blink memory after the GC.
+    // This function and V8ProcessMemoryReporter::StartMeasurements both
+    // run on the main thread of the renderer. This means that the Blink
+    // heap given by ThreadState::Current() is attached to the main V8
+    // isolate given by v8::Isolate::GetCurrent().
+    ThreadState::Current()->CollectNodeAndCssStatistics(
+        blink::BindOnce(&V8ProcessMemoryReporter::MainBlinkMeasurementComplete,
+                        scoped_refptr<V8ProcessMemoryReporter>(this),
+                        std::move(isolate_memory_usage)));
+  }
+
+  void MainBlinkMeasurementComplete(
+      mojom::blink::PerIsolateV8MemoryUsagePtr isolate_memory_usage,
+      size_t node_bytes,
+      size_t css_bytes) {
+    isolate_memory_usage->blink_memory_used =
+        base::ByteSize(node_bytes + css_bytes);
+    MeasureCanvasMemory(std::move(isolate_memory_usage));
+  }
+
+  void MeasureCanvasMemory(
+      mojom::blink::PerIsolateV8MemoryUsagePtr isolate_memory_usage) {
+    // We do not use HashMap here because there is no designated deleted value
+    // of ExecutionContextToken.
+    std::unordered_map<ExecutionContextToken, base::ByteSize,
+                       ExecutionContextToken::Hasher>
+        per_context_bytes;
+    // Group and accumulate canvas bytes by execution context token.
+    for (const auto& entry :
+         CanvasResourceTracker::For(isolate_)->GetResourceMap()) {
+      ExecutionContextToken token = entry.value->GetExecutionContextToken();
+      base::ByteSize memory_used = entry.key->GetMemoryUsage();
+      if (memory_used.is_zero()) {
+        // Ignore canvas elements that do not have buffers.
+        continue;
+      }
+      auto it = per_context_bytes.find(token);
+      if (it == per_context_bytes.end()) {
+        per_context_bytes[token] = memory_used;
+      } else {
+        it->second += memory_used;
+      }
+    }
+    for (const auto& entry : per_context_bytes) {
+      auto memory_usage = mojom::blink::PerContextCanvasMemoryUsage::New();
+      memory_usage->token = entry.first;
+      memory_usage->memory_used = entry.second;
+      isolate_memory_usage->canvas_contexts.push_back(std::move(memory_usage));
+    }
+
+    MainMeasurementComplete(std::move(isolate_memory_usage));
+  }
+
   void MainMeasurementComplete(
       mojom::blink::PerIsolateV8MemoryUsagePtr isolate_memory_usage) {
     result_->isolates.push_back(std::move(isolate_memory_usage));
@@ -161,7 +239,10 @@ class V8ProcessMemoryReporter : public RefCounted<V8ProcessMemoryReporter> {
       auto worker_memory_usage = mojom::blink::PerIsolateV8MemoryUsage::New();
       auto context_memory_usage = mojom::blink::PerContextV8MemoryUsage::New();
       context_memory_usage->token = ToExecutionContextToken(worker.token);
-      context_memory_usage->bytes_used = worker.bytes;
+      context_memory_usage->memory_used = worker.memory;
+      if (!worker.url.IsNull()) {
+        context_memory_usage->url = worker.url.GetString();
+      }
       worker_memory_usage->contexts.push_back(std::move(context_memory_usage));
       result_->isolates.push_back(std::move(worker_memory_usage));
     }
@@ -175,19 +256,26 @@ class V8ProcessMemoryReporter : public RefCounted<V8ProcessMemoryReporter> {
 
     std::move(callback_).Run(std::move(result_));
   }
+  raw_ptr<v8::Isolate> isolate_ = nullptr;
   GetV8MemoryUsageCallback callback_;
   mojom::blink::PerProcessV8MemoryUsagePtr result_;
   bool main_measurement_done_ = false;
   bool worker_measurement_done_ = false;
 };
 
+V8DetailedMemoryReporterImpl& GetV8DetailedMemoryReporter() {
+  DEFINE_STATIC_LOCAL(V8DetailedMemoryReporterImpl, v8_memory_reporter, ());
+  return v8_memory_reporter;
+}
+
 }  // namespace
 
 // static
-void V8DetailedMemoryReporterImpl::Create(
+void V8DetailedMemoryReporterImpl::Bind(
     mojo::PendingReceiver<mojom::blink::V8DetailedMemoryReporter> receiver) {
-  mojo::MakeSelfOwnedReceiver(std::make_unique<V8DetailedMemoryReporterImpl>(),
-                              std::move(receiver));
+  // This should be called only once per process on RenderProcessWillLaunch.
+  DCHECK(!GetV8DetailedMemoryReporter().receiver_.is_bound());
+  GetV8DetailedMemoryReporter().receiver_.Bind(std::move(receiver));
 }
 
 void V8DetailedMemoryReporterImpl::GetV8MemoryUsage(
@@ -196,7 +284,7 @@ void V8DetailedMemoryReporterImpl::GetV8MemoryUsage(
   auto v8_process_memory_reporter =
       base::MakeRefCounted<V8ProcessMemoryReporter>(std::move(callback));
   // Start async measurements. The lifetime of the reporter is extended
-  // using more shared pointers until the measuremnts complete.
+  // using more shared pointers until the measurements complete.
   v8_process_memory_reporter->StartMeasurements(mode);
 }
 

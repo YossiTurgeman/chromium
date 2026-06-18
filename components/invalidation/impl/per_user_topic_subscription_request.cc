@@ -1,37 +1,34 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/invalidation/impl/per_user_topic_subscription_request.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/stringprintf.h"
-#include "base/threading/sequenced_task_runner_handle.h"
 #include "base/values.h"
-#include "components/sync/base/model_type.h"
+#include "net/http/http_response_headers.h"
 #include "net/http/http_status_code.h"
-#include "net/url_request/url_fetcher.h"
+#include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 
 using net::HttpRequestHeaders;
+
+namespace invalidation {
 
 namespace {
 
 const char kPublicTopicNameKey[] = "publicTopicName";
 const char kPrivateTopicNameKey[] = "privateTopicName";
-
-const std::string* GetTopicName(const base::Value& value) {
-  if (!value.is_dict())
-    return nullptr;
-  if (value.FindBoolKey("isPublic").value_or(false))
-    return value.FindStringKey(kPublicTopicNameKey);
-  return value.FindStringKey(kPrivateTopicNameKey);
-}
 
 bool IsNetworkError(int net_error) {
   // Note: ERR_HTTP_RESPONSE_CODE_FAILURE isn't a real network error - it
@@ -54,25 +51,24 @@ enum class SubscriptionStatus {
   kMaxValue = kFailure,
 };
 
-void RecordRequestStatus(
-    SubscriptionStatus status,
-    syncer::PerUserTopicSubscriptionRequest::RequestType type,
-    const std::string& topic,
-    int net_error = net::OK,
-    int response_code = 200) {
+void RecordRequestStatus(SubscriptionStatus status,
+                         PerUserTopicSubscriptionRequest::RequestType type,
+                         const std::string& topic,
+                         int net_error = net::OK,
+                         int response_code = 200) {
   switch (type) {
-    case syncer::PerUserTopicSubscriptionRequest::SUBSCRIBE: {
+    case PerUserTopicSubscriptionRequest::RequestType::kSubscribe: {
       base::UmaHistogramEnumeration(
           "FCMInvalidations.SubscriptionRequestStatus", status);
       break;
     }
-    case syncer::PerUserTopicSubscriptionRequest::UNSUBSCRIBE: {
+    case PerUserTopicSubscriptionRequest::RequestType::kUnsubscribe: {
       base::UmaHistogramEnumeration(
           "FCMInvalidations.UnsubscriptionRequestStatus", status);
       break;
     }
   }
-  if (type != syncer::PerUserTopicSubscriptionRequest::SUBSCRIBE) {
+  if (type != PerUserTopicSubscriptionRequest::RequestType::kSubscribe) {
     return;
   }
 
@@ -86,23 +82,10 @@ void RecordRequestStatus(
     // Log a histogram to track response success vs. failure rates.
     base::UmaHistogramSparse("FCMInvalidations.SubscriptionResponseCode",
                              response_code);
-    // If the topic corresponds to a Sync ModelType, use that as the histogram
-    // suffix. Otherwise (e.g. Drive or Policy), just use "OTHER" for now.
-    // TODO(crbug.com/1029698): Depending on sync is a layering violation.
-    // Eventually the "whitelisted for metrics" bit should be part of a Topic.
-    syncer::ModelType model_type;  // Unused.
-    std::string suffix =
-        syncer::NotificationTypeToRealModelType(topic, &model_type) ? topic
-                                                                    : "OTHER";
-    base::UmaHistogramSparse(
-        "FCMInvalidations.SubscriptionResponseCodeForTopic." + suffix,
-        response_code);
   }
 }
 
 }  // namespace
-
-namespace syncer {
 
 PerUserTopicSubscriptionRequest::PerUserTopicSubscriptionRequest() = default;
 
@@ -114,30 +97,14 @@ void PerUserTopicSubscriptionRequest::Start(
   DCHECK(request_completed_callback_.is_null()) << "Request already running!";
   request_completed_callback_ = std::move(callback);
 
-  if (type_ == UNSUBSCRIBE &&
-      base::FeatureList::IsEnabled(kInvalidationsSkipUnsubscription)) {
-    // If the kInvalidationsSkipUnsubscription feature is enabled, don't send an
-    // actual unsubscription request and instead just report failure. Net error
-    // 499 is somewhat arbitrarily chosen (it's a non-standard code for "client
-    // closed request" which vaguely makes sense in this context); the important
-    // part is that it'll be reported as a non-retryable failure.
-    base::SequencedTaskRunnerHandle::Get()->PostTask(
-        FROM_HERE,
-        base::BindOnce(
-            &PerUserTopicSubscriptionRequest::OnURLFetchCompleteInternal,
-            weak_ptr_factory_.GetWeakPtr(),
-            /*net_error=*/net::ERR_HTTP_RESPONSE_CODE_FAILURE,
-            /*response_code=*/499, /*response_body=*/nullptr));
-  } else {
-    simple_loader_->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
-        loader_factory,
-        base::BindOnce(&PerUserTopicSubscriptionRequest::OnURLFetchComplete,
-                       weak_ptr_factory_.GetWeakPtr()));
-  }
+  simple_loader_->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
+      loader_factory,
+      base::BindOnce(&PerUserTopicSubscriptionRequest::OnURLFetchComplete,
+                     weak_ptr_factory_.GetWeakPtr()));
 }
 
 void PerUserTopicSubscriptionRequest::OnURLFetchComplete(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   int response_code = 0;
   if (simple_loader_->ResponseInfo() &&
       simple_loader_->ResponseInfo()->headers) {
@@ -151,13 +118,12 @@ void PerUserTopicSubscriptionRequest::OnURLFetchComplete(
 void PerUserTopicSubscriptionRequest::OnURLFetchCompleteInternal(
     int net_error,
     int response_code,
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   if (IsNetworkError(net_error)) {
     RecordRequestStatus(SubscriptionStatus::kNetworkFailure, type_, topic_,
                         net_error, response_code);
-    RunCompletedCallbackAndMaybeDie(
-        Status(StatusCode::FAILED, base::StringPrintf("Network Error")),
-        std::string());
+    RunCompletedCallbackAndMaybeDie(Status(StatusCode::FAILED, "Network Error"),
+                                    std::string());
     // Potentially dead after the above invocation; nothing to do except return.
     return;
   }
@@ -178,7 +144,7 @@ void PerUserTopicSubscriptionRequest::OnURLFetchCompleteInternal(
     return;
   }
 
-  if (type_ == UNSUBSCRIBE) {
+  if (type_ == RequestType::kUnsubscribe) {
     // No response body expected for DELETE requests.
     RecordRequestStatus(SubscriptionStatus::kSuccess, type_, topic_, net_error,
                         response_code);
@@ -191,43 +157,39 @@ void PerUserTopicSubscriptionRequest::OnURLFetchCompleteInternal(
   if (!response_body || response_body->empty()) {
     RecordRequestStatus(SubscriptionStatus::kParsingFailure, type_, topic_,
                         net_error, response_code);
-    RunCompletedCallbackAndMaybeDie(
-        Status(StatusCode::FAILED, base::StringPrintf("Body missing")),
-        std::string());
+    RunCompletedCallbackAndMaybeDie(Status(StatusCode::FAILED, "Body missing"),
+                                    std::string());
     // Potentially dead after the above invocation; nothing to do except return.
     return;
   }
 
-  data_decoder::DataDecoder::ParseJsonIsolated(
-      *response_body,
-      base::BindOnce(&PerUserTopicSubscriptionRequest::OnJsonParse,
-                     weak_ptr_factory_.GetWeakPtr()));
-}
-
-void PerUserTopicSubscriptionRequest::OnJsonParse(
-    data_decoder::DataDecoder::ValueOrError result) {
-  if (!result.value) {
+  std::optional<base::DictValue> response_dict =
+      base::JSONReader::ReadDict(*response_body, base::JSON_PARSE_RFC);
+  if (!response_dict) {
     RecordRequestStatus(SubscriptionStatus::kParsingFailure, type_, topic_);
     RunCompletedCallbackAndMaybeDie(
-        Status(StatusCode::FAILED, base::StringPrintf("Body parse error")),
-        std::string());
+        Status(StatusCode::FAILED, "Body parse error"), std::string());
     // Potentially dead after the above invocation; nothing to do except return.
     return;
   }
 
-  const std::string* topic_name = GetTopicName(*result.value);
-  if (topic_name) {
-    RecordRequestStatus(SubscriptionStatus::kSuccess, type_, topic_);
-    RunCompletedCallbackAndMaybeDie(Status(StatusCode::SUCCESS, std::string()),
-                                    *topic_name);
-    // Potentially dead after the above invocation; nothing to do except return.
-  } else {
+  const std::string* topic_name =
+      response_dict->FindBool("isPublic").value_or(false)
+          ? response_dict->FindString(kPublicTopicNameKey)
+          : response_dict->FindString(kPrivateTopicNameKey);
+
+  if (!topic_name) {
     RecordRequestStatus(SubscriptionStatus::kParsingFailure, type_, topic_);
     RunCompletedCallbackAndMaybeDie(
-        Status(StatusCode::FAILED, base::StringPrintf("Missing topic name")),
-        std::string());
+        Status(StatusCode::FAILED, "Missing topic name"), std::string());
     // Potentially dead after the above invocation; nothing to do except return.
+    return;
   }
+
+  RecordRequestStatus(SubscriptionStatus::kSuccess, type_, topic_);
+  RunCompletedCallbackAndMaybeDie(Status(StatusCode::SUCCESS, std::string()),
+                                  *topic_name);
+  // Potentially dead after the above invocation; nothing to do except return.
 }
 
 void PerUserTopicSubscriptionRequest::RunCompletedCallbackAndMaybeDie(
@@ -238,8 +200,6 @@ void PerUserTopicSubscriptionRequest::RunCompletedCallbackAndMaybeDie(
 }
 
 PerUserTopicSubscriptionRequest::Builder::Builder() = default;
-PerUserTopicSubscriptionRequest::Builder::Builder(
-    PerUserTopicSubscriptionRequest::Builder&&) = default;
 PerUserTopicSubscriptionRequest::Builder::~Builder() = default;
 
 std::unique_ptr<PerUserTopicSubscriptionRequest>
@@ -249,12 +209,12 @@ PerUserTopicSubscriptionRequest::Builder::Build() const {
 
   std::string url;
   switch (type_) {
-    case SUBSCRIBE:
+    case RequestType::kSubscribe:
       url = base::StringPrintf(
           "%s/v1/perusertopics/%s/rel/topics/?subscriber_token=%s",
           scope_.c_str(), project_id_.c_str(), instance_id_token_.c_str());
       break;
-    case UNSUBSCRIBE:
+    case RequestType::kUnsubscribe:
       std::string public_param;
       if (topic_is_public_) {
         public_param = "subscription.is_public=true&";
@@ -274,8 +234,9 @@ PerUserTopicSubscriptionRequest::Builder::Build() const {
   request->topic_ = topic_;
 
   std::string body;
-  if (type_ == SUBSCRIBE)
+  if (type_ == RequestType::kSubscribe) {
     body = BuildBody();
+  }
   net::HttpRequestHeaders headers = BuildHeaders();
   request->simple_loader_ = BuildURLFetcher(headers, body, full_url);
 
@@ -343,12 +304,11 @@ HttpRequestHeaders PerUserTopicSubscriptionRequest::Builder::BuildHeaders()
 }
 
 std::string PerUserTopicSubscriptionRequest::Builder::BuildBody() const {
-  base::DictionaryValue request;
+  base::DictValue request;
 
-  request.SetString("public_topic_name", topic_);
-  if (topic_is_public_) {
-    request.SetBoolean("is_public", true);
-  }
+  request.Set("public_topic_name", topic_);
+  if (topic_is_public_)
+    request.Set("is_public", true);
 
   std::string request_json;
   bool success = base::JSONWriter::Write(request, &request_json);
@@ -366,12 +326,10 @@ PerUserTopicSubscriptionRequest::Builder::BuildURLFetcher(
                                           R"(
         semantics {
           sender:
-            "Subscribe the Sync client for listening to the specific topic"
+            "Subscribe for listening to the specific user topic"
           description:
-            "Chromium can receive Sync invalidations via FCM messages."
-            "This request subscribes the client for receiving messages for the"
-            "concrete topic. In case of Chrome Sync topic is a ModelType,"
-            "e.g. BOOKMARK"
+            "This request subscribes the client for receiving FCM messages for"
+            "the concrete user topic."
           trigger:
             "Subscription takes place only once per profile per topic. "
           data:
@@ -382,20 +340,17 @@ PerUserTopicSubscriptionRequest::Builder::BuildURLFetcher(
           cookies_allowed: NO
           setting:
             "This feature can not be disabled by settings now"
-          chrome_policy: {
-             SyncDisabled {
-               policy_options {mode: MANDATORY}
-               SyncDisabled: false
-             }
-          }
+          policy_exception_justification:
+            "This feature is required to deliver core user experiences and "
+            "cannot be disabled by policy."
         })");
 
   auto request = std::make_unique<network::ResourceRequest>();
   switch (type_) {
-    case SUBSCRIBE:
+    case PerUserTopicSubscriptionRequest::RequestType::kSubscribe:
       request->method = "POST";
       break;
-    case UNSUBSCRIBE:
+    case PerUserTopicSubscriptionRequest::RequestType::kUnsubscribe:
       request->method = "DELETE";
       break;
   }
@@ -411,4 +366,4 @@ PerUserTopicSubscriptionRequest::Builder::BuildURLFetcher(
   return url_loader;
 }
 
-}  // namespace syncer
+}  // namespace invalidation

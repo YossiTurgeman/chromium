@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,57 +11,38 @@
 // arbitrary code, please refrain from #including this header in
 // another header.
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "ui/gfx/x/x11.h"
+#include <string>
+
+#include "base/memory/raw_ptr.h"
+#include "ui/gfx/x/connection.h"
+#include "ui/gfx/x/randr.h"
 
 namespace remoting {
-
-// Temporarily install an alternative handler for X errors. The default handler
-// exits the process, which is not what we want.
-//
-// Note that X error handlers are global, which means that this class is not
-// thread safe.
-class ScopedXErrorHandler {
- public:
-  typedef base::RepeatingCallback<void(Display*, XErrorEvent*)> Handler;
-
-  // |handler| may be empty, in which case errors are ignored.
-  explicit ScopedXErrorHandler(const Handler& handler);
-  ~ScopedXErrorHandler();
-
-  // Return false if any X errors have been encountered in the scope of this
-  // handler.
-  bool ok() const { return ok_; }
-
- private:
-  static int HandleXErrors(Display* display, XErrorEvent* error);
-
-  Handler handler_;
-  int (*previous_handler_)(Display*, XErrorEvent*);
-  bool ok_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedXErrorHandler);
-};
-
-
-// Grab/release the X server within a scope. This can help avoid race
-// conditions that would otherwise lead to X errors.
-class ScopedXGrabServer {
- public:
-  ScopedXGrabServer(Display* display);
-  ~ScopedXGrabServer();
-
- private:
-  Display* display_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedXGrabServer);
-};
-
 
 // Make a connection to the X Server impervious to X Server grabs. Returns
 // true if successful or false if the required XTEST extension is not present.
 bool IgnoreXServerGrabs(x11::Connection* connection, bool ignore);
+
+// Returns whether the host is running under a virtual session.
+bool IsVirtualSession(x11::Connection* connection);
+
+// Returns whether the video dummy driver is being used (all outputs are
+// DUMMY*).
+bool IsUsingVideoDummyDriver(x11::Connection* connection);
+
+// Returns the X11 Atom for the string, or x11::Atom::None if there was an
+// error. Callers can assign the result to a static local variable to avoid
+// repeated X11 round-trips.
+x11::Atom GetX11Atom(x11::Connection* connection, const std::string& name);
+
+// Sets the physical size of a RANDR Output device in mm. This is done by
+// setting some RANDR properties which are supported by the xf86-video-dummy
+// driver. The values are returned to the client in the X11 RRGetOutputInfo
+// response.
+void SetOutputPhysicalSizeInMM(x11::Connection* connection,
+                               x11::RandR::Output output,
+                               int width,
+                               int height);
 
 }  // namespace remoting
 

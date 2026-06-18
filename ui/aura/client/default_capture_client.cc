@@ -1,9 +1,10 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/aura/client/default_capture_client.h"
 
+#include "base/observer_list.h"
 #include "ui/aura/client/capture_client_observer.h"
 #include "ui/aura/env.h"
 #include "ui/aura/window.h"
@@ -55,8 +56,8 @@ void DefaultCaptureClient::SetCapture(Window* window) {
 
   capture_delegate->UpdateCapture(old_capture_window, capture_window_);
 
-  for (CaptureClientObserver& observer : observers_)
-    observer.OnCaptureChanged(old_capture_window, capture_window_);
+  observers_.Notify(&CaptureClientObserver::OnCaptureChanged,
+                    old_capture_window, capture_window_);
 }
 
 void DefaultCaptureClient::ReleaseCapture(Window* window) {

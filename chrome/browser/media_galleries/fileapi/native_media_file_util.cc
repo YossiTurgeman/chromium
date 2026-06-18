@@ -1,21 +1,24 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/media_galleries/fileapi/native_media_file_util.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
-#include "base/sequenced_task_runner.h"
-#include "base/strings/string_piece.h"
+#include "base/files/safe_base_name.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/string_util.h"
-#include "base/task/post_task.h"
-#include "base/task_runner_util.h"
+#include "base/strings/string_view_util.h"
+#include "base/task/sequenced_task_runner.h"
 #include "chrome/browser/media_galleries/fileapi/media_path_filter.h"
 #include "components/services/filesystem/public/mojom/types.mojom.h"
 #include "content/public/browser/browser_task_traits.h"
@@ -35,14 +38,12 @@ bool IsOnTaskRunnerThread(storage::FileSystemOperationContext* context) {
   return context->task_runner()->RunsTasksInCurrentSequence();
 }
 
-base::File::Error IsMediaHeader(const char* buf, size_t length) {
-  if (length == 0)
-    return base::File::FILE_ERROR_SECURITY;
-
+base::File::Error IsMediaHeader(base::span<const uint8_t> data) {
   std::string mime_type;
-  if (!net::SniffMimeTypeFromLocalData(base::StringPiece(buf, length),
-                                       &mime_type))
+  if (data.empty() || !net::SniffMimeTypeFromLocalData(
+                          base::as_string_view(data), &mime_type)) {
     return base::File::FILE_ERROR_SECURITY;
+  }
 
   if (base::StartsWith(mime_type, "image/", base::CompareCase::SENSITIVE) ||
       base::StartsWith(mime_type, "audio/", base::CompareCase::SENSITIVE) ||
@@ -60,7 +61,7 @@ void DidOpenSnapshot(storage::AsyncFileUtil::CreateOrOpenCallback callback,
                      base::File file) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   if (!file.IsValid()) {
-    std::move(callback).Run(std::move(file), base::Closure());
+    std::move(callback).Run(std::move(file), base::OnceClosure());
     return;
   }
   std::move(callback).Run(std::move(file),
@@ -75,6 +76,10 @@ class NativeMediaFileUtil::Core {
  public:
   explicit Core(scoped_refptr<base::SequencedTaskRunner> media_task_runner)
       : media_task_runner_(std::move(media_task_runner)) {}
+
+  Core(const Core&) = delete;
+  Core& operator=(const Core&) = delete;
+
   ~Core() = default;
 
   // The following calls are made on the media TaskRunner, using
@@ -91,7 +96,7 @@ class NativeMediaFileUtil::Core {
       std::unique_ptr<storage::FileSystemOperationContext> context,
       const storage::FileSystemURL& src_url,
       const storage::FileSystemURL& dest_url,
-      CopyOrMoveOption option,
+      CopyOrMoveOptionSet options,
       bool copy);
   base::File::Error CopyInForeignFile(
       std::unique_ptr<storage::FileSystemOperationContext> context,
@@ -167,8 +172,6 @@ class NativeMediaFileUtil::Core {
 
   MediaPathFilter media_path_filter_;
   scoped_refptr<base::SequencedTaskRunner> media_task_runner_;
-
-  DISALLOW_COPY_AND_ASSIGN(Core);
 };
 
 NativeMediaFileUtil::NativeMediaFileUtil(
@@ -189,25 +192,27 @@ base::File::Error NativeMediaFileUtil::IsMediaFile(
     return file.error_details();
 
   char buffer[net::kMaxBytesToSniff];
+  base::span<uint8_t> buffer_span = base::as_writable_byte_span(buffer);
 
   // Read as much as net::SniffMimeTypeFromLocalData() will bother looking at.
-  int64_t len = file.Read(0, buffer, net::kMaxBytesToSniff);
-  if (len < 0)
+  std::optional<size_t> len = file.Read(0, buffer_span);
+  if (!len) {
     return base::File::FILE_ERROR_FAILED;
+  }
 
-  return IsMediaHeader(buffer, len);
+  return IsMediaHeader(buffer_span.first(*len));
 }
 
 // static
 base::File::Error NativeMediaFileUtil::BufferIsMediaHeader(
     net::IOBuffer* buf, size_t length) {
-  return IsMediaHeader(buf->data(), length);
+  return IsMediaHeader(buf->first(length));
 }
 
 // static
 void NativeMediaFileUtil::CreatedSnapshotFileForCreateOrOpen(
     base::SequencedTaskRunner* media_task_runner,
-    int file_flags,
+    uint32_t file_flags,
     storage::AsyncFileUtil::CreateOrOpenCallback callback,
     base::File::Error result,
     const base::File::Info& file_info,
@@ -215,11 +220,11 @@ void NativeMediaFileUtil::CreatedSnapshotFileForCreateOrOpen(
     scoped_refptr<storage::ShareableFileReference> file_ref) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   if (result != base::File::FILE_OK) {
-    std::move(callback).Run(base::File(), base::Closure());
+    std::move(callback).Run(base::File(), base::OnceClosure());
     return;
   }
-  base::PostTaskAndReplyWithResult(
-      media_task_runner, FROM_HERE,
+  media_task_runner->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&storage::NativeFileUtil::CreateOrOpen, platform_path,
                      file_flags),
       base::BindOnce(&DidOpenSnapshot, std::move(callback),
@@ -229,15 +234,15 @@ void NativeMediaFileUtil::CreatedSnapshotFileForCreateOrOpen(
 void NativeMediaFileUtil::CreateOrOpen(
     std::unique_ptr<storage::FileSystemOperationContext> context,
     const storage::FileSystemURL& url,
-    int file_flags,
+    uint32_t file_flags,
     CreateOrOpenCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   // Returns an error if any unsupported flag is found.
-  if (file_flags & ~(base::File::FLAG_OPEN |
-                     base::File::FLAG_READ |
-                     base::File::FLAG_WRITE_ATTRIBUTES)) {
+  if (file_flags &
+      ~(base::File::FLAG_OPEN | base::File::FLAG_READ |
+        base::File::FLAG_WRITE_ATTRIBUTES | base::File::FLAG_WIN_NO_EXECUTE)) {
     std::move(callback).Run(base::File(base::File::FILE_ERROR_SECURITY),
-                            base::Closure());
+                            base::OnceClosure());
     return;
   }
   scoped_refptr<base::SequencedTaskRunner> task_runner = context->task_runner();
@@ -264,8 +269,8 @@ void NativeMediaFileUtil::CreateDirectory(
     StatusCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   storage::FileSystemOperationContext* context_ptr = context.get();
-  const bool success = base::PostTaskAndReplyWithResult(
-      context_ptr->task_runner(), FROM_HERE,
+  const bool success = context_ptr->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&NativeMediaFileUtil::Core::CreateDirectory,
                      base::Unretained(core_.get()), std::move(context), url,
                      exclusive, recursive),
@@ -276,7 +281,7 @@ void NativeMediaFileUtil::CreateDirectory(
 void NativeMediaFileUtil::GetFileInfo(
     std::unique_ptr<storage::FileSystemOperationContext> context,
     const storage::FileSystemURL& url,
-    int /* fields */,
+    GetMetadataFieldSet fields,
     GetFileInfoCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   storage::FileSystemOperationContext* context_ptr = context.get();
@@ -326,16 +331,16 @@ void NativeMediaFileUtil::CopyFileLocal(
     std::unique_ptr<storage::FileSystemOperationContext> context,
     const storage::FileSystemURL& src_url,
     const storage::FileSystemURL& dest_url,
-    CopyOrMoveOption option,
+    CopyOrMoveOptionSet options,
     CopyFileProgressCallback progress_callback,
     StatusCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   storage::FileSystemOperationContext* context_ptr = context.get();
-  const bool success = base::PostTaskAndReplyWithResult(
-      context_ptr->task_runner(), FROM_HERE,
+  const bool success = context_ptr->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&NativeMediaFileUtil::Core::CopyOrMoveFileLocal,
                      base::Unretained(core_.get()), std::move(context), src_url,
-                     dest_url, option, true /* copy */),
+                     dest_url, options, true /* copy */),
       std::move(callback));
   DCHECK(success);
 }
@@ -344,15 +349,15 @@ void NativeMediaFileUtil::MoveFileLocal(
     std::unique_ptr<storage::FileSystemOperationContext> context,
     const storage::FileSystemURL& src_url,
     const storage::FileSystemURL& dest_url,
-    CopyOrMoveOption option,
+    CopyOrMoveOptionSet options,
     StatusCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   storage::FileSystemOperationContext* context_ptr = context.get();
-  const bool success = base::PostTaskAndReplyWithResult(
-      context_ptr->task_runner(), FROM_HERE,
+  const bool success = context_ptr->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&NativeMediaFileUtil::Core::CopyOrMoveFileLocal,
                      base::Unretained(core_.get()), std::move(context), src_url,
-                     dest_url, option, false /* copy */),
+                     dest_url, options, false /* copy */),
       std::move(callback));
   DCHECK(success);
 }
@@ -364,8 +369,8 @@ void NativeMediaFileUtil::CopyInForeignFile(
     StatusCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   storage::FileSystemOperationContext* context_ptr = context.get();
-  const bool success = base::PostTaskAndReplyWithResult(
-      context_ptr->task_runner(), FROM_HERE,
+  const bool success = context_ptr->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&NativeMediaFileUtil::Core::CopyInForeignFile,
                      base::Unretained(core_.get()), std::move(context),
                      src_file_path, dest_url),
@@ -379,8 +384,8 @@ void NativeMediaFileUtil::DeleteFile(
     StatusCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   storage::FileSystemOperationContext* context_ptr = context.get();
-  const bool success = base::PostTaskAndReplyWithResult(
-      context_ptr->task_runner(), FROM_HERE,
+  const bool success = context_ptr->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&NativeMediaFileUtil::Core::DeleteFile,
                      base::Unretained(core_.get()), std::move(context), url),
       std::move(callback));
@@ -394,8 +399,8 @@ void NativeMediaFileUtil::DeleteDirectory(
     StatusCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   storage::FileSystemOperationContext* context_ptr = context.get();
-  const bool success = base::PostTaskAndReplyWithResult(
-      context_ptr->task_runner(), FROM_HERE,
+  const bool success = context_ptr->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&NativeMediaFileUtil::Core::DeleteDirectory,
                      base::Unretained(core_.get()), std::move(context), url),
       std::move(callback));
@@ -444,7 +449,7 @@ base::File::Error NativeMediaFileUtil::Core::CopyOrMoveFileLocal(
     std::unique_ptr<storage::FileSystemOperationContext> context,
     const storage::FileSystemURL& src_url,
     const storage::FileSystemURL& dest_url,
-    CopyOrMoveOption option,
+    CopyOrMoveOptionSet options,
     bool copy) {
   DCHECK(media_task_runner_->RunsTasksInCurrentSequence());
   DCHECK(IsOnTaskRunnerThread(context.get()));
@@ -472,9 +477,7 @@ base::File::Error NativeMediaFileUtil::Core::CopyOrMoveFileLocal(
     return base::File::FILE_ERROR_SECURITY;
 
   return storage::NativeFileUtil::CopyOrMoveFile(
-      src_file_path,
-      dest_file_path,
-      option,
+      src_file_path, dest_file_path, options,
       storage::NativeFileUtil::CopyOrMoveModeForDestination(dest_url, copy));
 }
 
@@ -493,9 +496,8 @@ base::File::Error NativeMediaFileUtil::Core::CopyInForeignFile(
   if (error != base::File::FILE_OK)
     return error;
   return storage::NativeFileUtil::CopyOrMoveFile(
-      src_file_path,
-      dest_file_path,
-      storage::FileSystemOperation::OPTION_NONE,
+      src_file_path, dest_file_path,
+      storage::FileSystemOperation::CopyOrMoveOptionSet(),
       storage::NativeFileUtil::CopyOrMoveModeForDestination(dest_url,
                                                             true /* copy */));
 }
@@ -536,7 +538,7 @@ void NativeMediaFileUtil::Core::GetFileInfoOnTaskRunnerThread(
   DCHECK(IsOnTaskRunnerThread(context.get()));
   base::File::Info file_info;
   base::File::Error error =
-      GetFileInfoSync(context.get(), url, &file_info, NULL);
+      GetFileInfoSync(context.get(), url, &file_info, nullptr);
   content::GetIOThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(std::move(callback), error, file_info));
 }
@@ -627,7 +629,9 @@ base::File::Error NativeMediaFileUtil::Core::ReadDirectorySync(
     if (!info.IsDirectory() && !media_path_filter_.Match(enum_path))
       continue;
 
-    file_list->emplace_back(enum_path.BaseName(),
+    auto name = base::SafeBaseName::Create(enum_path);
+    CHECK(name) << enum_path;
+    file_list->emplace_back(*name, info.GetName().AsUTF8Unsafe(),
                             info.IsDirectory()
                                 ? filesystem::mojom::FsFileType::DIRECTORY
                                 : filesystem::mojom::FsFileType::REGULAR_FILE);

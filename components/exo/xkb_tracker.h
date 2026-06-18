@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,9 +14,9 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "base/memory/free_deleter.h"
-#include "base/optional.h"
 #include "ui/events/event_constants.h"
 #include "ui/events/keycodes/scoped_xkb.h"  // nogncheck
+#include "ui/events/ozone/layout/xkb/xkb_modifier_converter.h"
 #endif
 
 namespace exo {
@@ -41,6 +41,10 @@ class XkbTracker {
   // ui::EventFlags.
   void UpdateKeyboardModifiers(int modifier_flags);
 
+  // Returns the keysym for the given XKB keycode, based on the current
+  // keymap and its modifier state.
+  uint32_t GetKeysym(uint32_t xkb_keycode) const;
+
   // Returns the XKB keymap data.
   std::unique_ptr<char, base::FreeDeleter> GetKeymap() const;
 
@@ -61,6 +65,7 @@ class XkbTracker {
       xkb_context_new(XKB_CONTEXT_NO_FLAGS)};
   std::unique_ptr<xkb_keymap, ui::XkbKeymapDeleter> xkb_keymap_;
   std::unique_ptr<xkb_state, ui::XkbStateDeleter> xkb_state_;
+  ui::XkbModifierConverter xkb_modifier_converter_{{}};
 
 #endif  // BUILDFLAG(USE_XKBCOMMON)
 };

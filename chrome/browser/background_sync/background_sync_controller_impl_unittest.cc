@@ -1,21 +1,22 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-#include "chrome/browser/background_sync/background_sync_controller_impl.h"
 
 #include <stdint.h>
 
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/macros.h"
-#include "chrome/browser/engagement/site_engagement_score.h"
-#include "chrome/browser/engagement/site_engagement_service.h"
+#include "base/metrics/field_trial_params.h"
+#include "build/build_config.h"
+#include "chrome/browser/background_sync/background_sync_delegate_impl.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/test/base/testing_profile.h"
+#include "components/background_sync/background_sync_controller_impl.h"
 #include "components/history/core/browser/history_database_params.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/test/test_history_database.h"
+#include "components/site_engagement/content/site_engagement_score.h"
+#include "components/site_engagement/content/site_engagement_service.h"
 #include "components/variations/variations_associated_data.h"
 #include "content/public/browser/background_sync_parameters.h"
 #include "content/public/browser/background_sync_registration.h"
@@ -25,7 +26,7 @@
 #include "url/gurl.h"
 #include "url/origin.h"
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/android/background_sync_launcher_android.h"
 #endif
 
@@ -37,10 +38,9 @@ const char kFieldTrialGroup[] = "GroupA";
 const char kExampleUrl[] = "https://www.example.com/foo/";
 const char kTag[] = "test_tag";
 
-constexpr base::TimeDelta kSmallerThanMinGap = base::TimeDelta::FromHours(11);
-constexpr base::TimeDelta kLargerThanMinGap = base::TimeDelta::FromHours(13);
-constexpr base::TimeDelta kLargerThanMinGapExpectedDelay =
-    base::TimeDelta::FromHours(24);
+constexpr base::TimeDelta kSmallerThanMinGap = base::Hours(11);
+constexpr base::TimeDelta kLargerThanMinGap = base::Hours(13);
+constexpr base::TimeDelta kLargerThanMinGapExpectedDelay = base::Hours(24);
 
 std::unique_ptr<KeyedService> BuildTestHistoryService(
     const base::FilePath& file_path,
@@ -51,11 +51,17 @@ std::unique_ptr<KeyedService> BuildTestHistoryService(
 }
 
 class BackgroundSyncControllerImplTest : public testing::Test {
+ public:
+  BackgroundSyncControllerImplTest(const BackgroundSyncControllerImplTest&) =
+      delete;
+  BackgroundSyncControllerImplTest& operator=(
+      const BackgroundSyncControllerImplTest&) = delete;
+
  protected:
   BackgroundSyncControllerImplTest()
       : task_environment_(content::BrowserTaskEnvironment::IO_MAINLOOP) {
     ResetFieldTrialList();
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
     BackgroundSyncLauncherAndroid::SetPlayServicesVersionCheckDisabledForTests(
         true);
 #endif
@@ -70,11 +76,12 @@ class BackgroundSyncControllerImplTest : public testing::Test {
 
     HistoryServiceFactory::GetInstance()->SetTestingFactory(
         &profile_, base::BindRepeating(&BuildTestHistoryService, sub_dir));
-    controller_ = std::make_unique<BackgroundSyncControllerImpl>(&profile_);
+    controller_ = std::make_unique<BackgroundSyncControllerImpl>(
+        &profile_, std::make_unique<BackgroundSyncDelegateImpl>(&profile_));
   }
 
   void ResetFieldTrialList() {
-    variations::testing::ClearAllVariationParams();
+    variations::test::ClearAllVariationParams();
     base::FieldTrialList::CreateFieldTrial(
         BackgroundSyncControllerImpl::kFieldTrialName, kFieldTrialGroup);
   }
@@ -98,8 +105,6 @@ class BackgroundSyncControllerImplTest : public testing::Test {
   content::BrowserTaskEnvironment task_environment_;
   TestingProfile profile_;
   std::unique_ptr<BackgroundSyncControllerImpl> controller_;
-
-  DISALLOW_COPY_AND_ASSIGN(BackgroundSyncControllerImplTest);
 };
 
 TEST_F(BackgroundSyncControllerImplTest, NoFieldTrial) {
@@ -115,7 +120,7 @@ TEST_F(BackgroundSyncControllerImplTest, SomeParamsSet) {
       "TrUe";
   field_parameters[BackgroundSyncControllerImpl::kInitialRetryParameterName] =
       "100";
-  ASSERT_TRUE(variations::AssociateVariationParams(
+  ASSERT_TRUE(base::AssociateFieldTrialParams(
       BackgroundSyncControllerImpl::kFieldTrialName, kFieldTrialGroup,
       field_parameters));
 
@@ -123,8 +128,7 @@ TEST_F(BackgroundSyncControllerImplTest, SomeParamsSet) {
   content::BackgroundSyncParameters sync_parameters;
   controller_->GetParameterOverrides(&sync_parameters);
   EXPECT_TRUE(sync_parameters.disable);
-  EXPECT_EQ(base::TimeDelta::FromSeconds(100),
-            sync_parameters.initial_retry_delay);
+  EXPECT_EQ(base::Seconds(100), sync_parameters.initial_retry_delay);
 
   EXPECT_EQ(original.max_sync_attempts, sync_parameters.max_sync_attempts);
   EXPECT_EQ(original.retry_delay_factor, sync_parameters.retry_delay_factor);
@@ -155,7 +159,7 @@ TEST_F(BackgroundSyncControllerImplTest, AllParamsSet) {
       "500";
   field_parameters
       [BackgroundSyncControllerImpl::kMinPeriodicSyncEventsInterval] = "43200";
-  ASSERT_TRUE(variations::AssociateVariationParams(
+  ASSERT_TRUE(base::AssociateFieldTrialParams(
       BackgroundSyncControllerImpl::kFieldTrialName, kFieldTrialGroup,
       field_parameters));
 
@@ -163,26 +167,24 @@ TEST_F(BackgroundSyncControllerImplTest, AllParamsSet) {
   controller_->GetParameterOverrides(&sync_parameters);
 
   EXPECT_FALSE(sync_parameters.disable);
-  EXPECT_EQ(base::TimeDelta::FromSeconds(100),
-            sync_parameters.initial_retry_delay);
+  EXPECT_EQ(base::Seconds(100), sync_parameters.initial_retry_delay);
   EXPECT_EQ(200, sync_parameters.max_sync_attempts);
   EXPECT_EQ(250,
             sync_parameters.max_sync_attempts_with_notification_permission);
   EXPECT_EQ(300, sync_parameters.retry_delay_factor);
-  EXPECT_EQ(base::TimeDelta::FromSeconds(400),
-            sync_parameters.min_sync_recovery_time);
-  EXPECT_EQ(base::TimeDelta::FromSeconds(500),
-            sync_parameters.max_sync_event_duration);
-  EXPECT_EQ(base::TimeDelta::FromSeconds(43200),
+  EXPECT_EQ(base::Seconds(400), sync_parameters.min_sync_recovery_time);
+  EXPECT_EQ(base::Seconds(500), sync_parameters.max_sync_event_duration);
+  EXPECT_EQ(base::Seconds(43200),
             sync_parameters.min_periodic_sync_events_interval);
 }
 
 TEST_F(BackgroundSyncControllerImplTest, OneShotSyncMultipleAttempts) {
   content::BackgroundSyncParameters sync_parameters;
   url::Origin origin = url::Origin::Create(GURL(kExampleUrl));
-  SiteEngagementScore::SetParamValuesForTesting();
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
-      GURL(kExampleUrl), SiteEngagementScore::GetHighEngagementBoundary());
+  site_engagement::SiteEngagementScore::SetParamValuesForTesting();
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+      GURL(kExampleUrl),
+      site_engagement::SiteEngagementScore::GetHighEngagementBoundary());
 
   base::TimeDelta delay = controller_->GetNextEventDelay(
       MakeBackgroundSyncRegistration(
@@ -209,9 +211,10 @@ TEST_F(BackgroundSyncControllerImplTest, OneShotSyncMultipleAttempts) {
 TEST_F(BackgroundSyncControllerImplTest, PeriodicSyncMultipleAttempts) {
   content::BackgroundSyncParameters sync_parameters;
   url::Origin origin = url::Origin::Create(GURL(kExampleUrl));
-  SiteEngagementScore::SetParamValuesForTesting();
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
-      GURL(kExampleUrl), SiteEngagementScore::GetHighEngagementBoundary());
+  site_engagement::SiteEngagementScore::SetParamValuesForTesting();
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+      GURL(kExampleUrl),
+      site_engagement::SiteEngagementScore::GetHighEngagementBoundary());
 
   base::TimeDelta delay = controller_->GetNextEventDelay(
       MakeBackgroundSyncRegistration(
@@ -245,44 +248,45 @@ TEST_F(BackgroundSyncControllerImplTest,
           min_gap_between_periodic_sync_events_ms,
           /*num_attempts= */ 0, blink::mojom::BackgroundSyncType::PERIODIC);
 
-  SiteEngagementScore::SetParamValuesForTesting();
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
-      GURL(kExampleUrl), SiteEngagementScore::GetMediumEngagementBoundary());
+  site_engagement::SiteEngagementScore::SetParamValuesForTesting();
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+      GURL(kExampleUrl),
+      site_engagement::SiteEngagementScore::GetMediumEngagementBoundary());
 
   // Medium engagement.
   base::TimeDelta delay = controller_->GetNextEventDelay(
       registration, &sync_parameters, base::TimeDelta::Max());
   EXPECT_EQ(
       delay,
-      base::TimeDelta::FromMilliseconds(
+      base::Milliseconds(
           min_gap_between_periodic_sync_events_ms *
-          BackgroundSyncControllerImpl::kEngagementLevelLowOrMediumPenalty));
+          BackgroundSyncDelegateImpl::kEngagementLevelLowOrMediumPenalty));
 
   // Low engagement.
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
       GURL(kExampleUrl),
-      SiteEngagementScore::GetMediumEngagementBoundary() - 1);
+      site_engagement::SiteEngagementScore::GetMediumEngagementBoundary() - 1);
   delay = controller_->GetNextEventDelay(registration, &sync_parameters,
                                          base::TimeDelta::Max());
   EXPECT_EQ(
       delay,
-      base::TimeDelta::FromMilliseconds(
+      base::Milliseconds(
           min_gap_between_periodic_sync_events_ms *
-          BackgroundSyncControllerImpl::kEngagementLevelLowOrMediumPenalty));
+          BackgroundSyncDelegateImpl::kEngagementLevelLowOrMediumPenalty));
 
   // Minimal engagement.
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(GURL(kExampleUrl),
-                                                              0.5);
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+      GURL(kExampleUrl), 0.5);
   delay = controller_->GetNextEventDelay(registration, &sync_parameters,
                                          base::TimeDelta::Max());
   EXPECT_EQ(delay,
-            base::TimeDelta::FromMilliseconds(
+            base::Milliseconds(
                 min_gap_between_periodic_sync_events_ms *
-                BackgroundSyncControllerImpl::kEngagementLevelMinimalPenalty));
+                BackgroundSyncDelegateImpl::kEngagementLevelMinimalPenalty));
 
   // No engagement.
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(GURL(kExampleUrl),
-                                                              0);
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+      GURL(kExampleUrl), 0);
   delay = controller_->GetNextEventDelay(registration, &sync_parameters,
                                          base::TimeDelta::Max());
   EXPECT_EQ(delay, base::TimeDelta::Max());
@@ -291,9 +295,10 @@ TEST_F(BackgroundSyncControllerImplTest,
 TEST_F(BackgroundSyncControllerImplTest, MaxFrequencyForOrigin) {
   content::BackgroundSyncParameters sync_parameters;
   url::Origin origin = url::Origin::Create(GURL(kExampleUrl));
-  SiteEngagementScore::SetParamValuesForTesting();
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
-      GURL(kExampleUrl), SiteEngagementScore::GetHighEngagementBoundary());
+  site_engagement::SiteEngagementScore::SetParamValuesForTesting();
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+      GURL(kExampleUrl),
+      site_engagement::SiteEngagementScore::GetHighEngagementBoundary());
 
   // Periodic Sync: zero attempts.
   // |min_interval| < kMinGapBetweenPeriodicSyncEvents.
@@ -336,9 +341,10 @@ TEST_F(BackgroundSyncControllerImplTest, MaxFrequencyForOrigin) {
 TEST_F(BackgroundSyncControllerImplTest, CrossRegistrationLimitsForOrigin) {
   content::BackgroundSyncParameters sync_parameters;
   url::Origin origin = url::Origin::Create(GURL(kExampleUrl));
-  SiteEngagementScore::SetParamValuesForTesting();
-  SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
-      GURL(kExampleUrl), SiteEngagementScore::GetHighEngagementBoundary());
+  site_engagement::SiteEngagementScore::SetParamValuesForTesting();
+  site_engagement::SiteEngagementService::Get(&profile_)->ResetBaseScoreForURL(
+      GURL(kExampleUrl),
+      site_engagement::SiteEngagementScore::GetHighEngagementBoundary());
 
   // Periodic Sync: zero attempts.
   // |min_interval| < kMinGapBetweenPeriodicSyncEvents.
@@ -377,7 +383,7 @@ TEST_F(BackgroundSyncControllerImplTest, CrossRegistrationLimitsForOrigin) {
       MakeBackgroundSyncRegistration(
           /* min_interval= */ kSmallerThanMinGap.InMilliseconds(),
           /* num_attempts= */ 0, blink::mojom::BackgroundSyncType::PERIODIC),
-      &sync_parameters, base::TimeDelta::FromHours(24));
+      &sync_parameters, base::Hours(24));
   EXPECT_EQ(delay, sync_parameters.min_periodic_sync_events_interval);
 
   // Periodic Sync: zero attempts.
@@ -388,9 +394,9 @@ TEST_F(BackgroundSyncControllerImplTest, CrossRegistrationLimitsForOrigin) {
       MakeBackgroundSyncRegistration(
           /* min_interval= */ kSmallerThanMinGap.InMilliseconds(),
           /* num_attempts= */ 0, blink::mojom::BackgroundSyncType::PERIODIC),
-      &sync_parameters, base::TimeDelta::FromHours(1));
-  EXPECT_EQ(delay, sync_parameters.min_periodic_sync_events_interval +
-                       base::TimeDelta::FromHours(1));
+      &sync_parameters, base::Hours(1));
+  EXPECT_EQ(delay,
+            sync_parameters.min_periodic_sync_events_interval + base::Hours(1));
 
   // Periodic Sync: zero attempts.
   // |min_interval| < kMinGapBetweenPeriodicSyncEvents.
@@ -399,7 +405,7 @@ TEST_F(BackgroundSyncControllerImplTest, CrossRegistrationLimitsForOrigin) {
       MakeBackgroundSyncRegistration(
           /* min_interval= */ kLargerThanMinGap.InMilliseconds(),
           /* num_attempts= */ 0, blink::mojom::BackgroundSyncType::PERIODIC),
-      &sync_parameters, base::TimeDelta::FromHours(1));
+      &sync_parameters, base::Hours(1));
   EXPECT_EQ(delay, kLargerThanMinGapExpectedDelay);
 }
 

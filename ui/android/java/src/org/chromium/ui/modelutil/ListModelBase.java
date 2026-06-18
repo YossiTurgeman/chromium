@@ -1,10 +1,10 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.ui.modelutil;
 
-import androidx.annotation.NonNull;
+import org.chromium.build.annotations.NullMarked;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -20,6 +20,7 @@ import java.util.List;
  * @param <T> The object type that this class manages in a list.
  * @param <P> The payload type for partial change notifications.
  */
+@NullMarked
 public class ListModelBase<T, P> extends ListObservableImpl<P> implements SimpleList<T> {
     private final List<T> mItems = new ArrayList<>();
 
@@ -38,15 +39,20 @@ public class ListModelBase<T, P> extends ListObservableImpl<P> implements Simple
         return mItems.size();
     }
 
-    @NonNull
     @Override
     public Iterator<T> iterator() {
         return mItems.iterator();
     }
 
+    /** Checks if the list model has no items. */
+    public boolean isEmpty() {
+        return mItems.size() <= 0;
+    }
+
     /**
-     * Appends a given {@code item} to the last position of the held {@link List}.
-     * Notifies observers about the inserted item.
+     * Appends a given {@code item} to the last position of the held {@link List}. Notifies
+     * observers about the inserted item.
+     *
      * @param item The item to be stored.
      */
     public void add(T item) {
@@ -82,6 +88,29 @@ public class ListModelBase<T, P> extends ListObservableImpl<P> implements Simple
      */
     public void addAll(Collection<? extends T> items, int insertionIndex) {
         mItems.addAll(insertionIndex, items);
+        notifyItemRangeInserted(insertionIndex, items.size());
+    }
+
+    /**
+     * Appends all given {@code items} to the last position of the held {@link List}.
+     * Notifies observers about the inserted items.
+     * @param items The items to be stored.
+     */
+    public void addAll(SimpleList<T> items) {
+        addAll(items, mItems.size());
+    }
+
+    /**
+     * Adds all given {@code items} to the {@link List} at specific position.
+     * Notifies observers about the inserted items.
+     * @param items The items to be stored.
+     * @param insertionIndex Position where items should be inserted.
+     */
+    public void addAll(SimpleList<T> items, int insertionIndex) {
+        int currentIndex = insertionIndex;
+        for (T item : items) {
+            mItems.add(currentIndex++, item);
+        }
         notifyItemRangeInserted(insertionIndex, items.size());
     }
 

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -38,8 +38,8 @@ CWV_EXPORT
 // |YES|. When it is NO, it doesn't ask if you want to save passwords but will
 // continue to fill passwords.
 //
-// TODO(crbug.com/905221): Preference should also control autofill behavior for
-// the passwords.
+// TODO(crbug.com/40602365): Preference should also control autofill behavior
+// for the passwords.
 @property(nonatomic, assign, getter=isPasswordAutofillEnabled)
     BOOL passwordAutofillEnabled;
 
@@ -47,6 +47,33 @@ CWV_EXPORT
 // submission. Defaults to |YES|.
 @property(nonatomic, assign, getter=isPasswordLeakCheckEnabled)
     BOOL passwordLeakCheckEnabled;
+
+// Whether or not safe browsing is enabled.
+// Specifically this controls whether or not
+// -[CWVNavigationDelegate handleUnsafeURLWithHandler:] is called.
+// Defaults to |YES|.
+@property(nonatomic, assign, getter=isSafeBrowsingEnabled)
+    BOOL safeBrowsingEnabled;
+
+// Whether or not address sync is enabled.
+@property(nonatomic, assign, getter=isAutofillAddressSyncEnabled)
+    BOOL autofillAddressSyncEnabled;
+
+// Whether or not address sync is enabled.
+@property(nonatomic, assign, getter=isPasswordAffiliationEnabled)
+    BOOL passwordAffiliationEnabled;
+
+// Whether or not credit card virtual card usage is enabled.
+@property(nonatomic, assign, getter=isAutofillVCNUsageEnabled)
+    BOOL autofillVCNUsageEnabled;
+
+// Whether or not to trigger a non-fatal check during initialization.
+// This is for integration testing purposes of non-fatal checks on clients.
+// Defaults to NO. In-memory only i.e. doesn't persist through startups.
+// TODO(crbug.com/503005390): Remove after release integration testing in
+// stable.
+@property(nonatomic, assign, getter=isTriggerNonFatalCheckEnabled)
+    BOOL triggerNonFatalCheck;
 
 - (instancetype)init NS_UNAVAILABLE;
 
@@ -56,6 +83,10 @@ CWV_EXPORT
 // incognito to non-incognito, this has no effect if this instance is from an
 // incognito CWVWebViewConfiguration.
 - (void)resetTranslationSettings;
+
+// Immediately writes any changes in memory to disk.
+// `completionHandler` callback when writes are committed.
+- (void)commitPendingWrite:(void (^)(void))completionHandler;
 
 @end
 

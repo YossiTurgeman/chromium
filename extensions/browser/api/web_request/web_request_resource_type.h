@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,15 @@
 
 #include <stdint.h>
 
-#include "base/optional.h"
-#include "base/strings/string_piece.h"
-#include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
+#include <string_view>
+
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+namespace network {
+struct ResourceRequest;
+}
 
 namespace extensions {
 
@@ -27,21 +33,22 @@ enum class WebRequestResourceType : uint8_t {
   CSP_REPORT,
   MEDIA,
   WEB_SOCKET,
+  WEB_TRANSPORT,
+  WEBBUNDLE,
 
   OTHER,  // The type is unknown, or differs from all the above.
 };
 
-// Multiple blink::mojom::ResourceTypes may map to the same
-// WebRequestResourceType, but the converse is not possible.
 WebRequestResourceType ToWebRequestResourceType(
-    blink::mojom::ResourceType type);
+    const network::ResourceRequest& request,
+    bool is_download);
 
-// Returns a string representation of |type|.
+// Returns a string representation of `type`.
 const char* WebRequestResourceTypeToString(WebRequestResourceType type);
 
-// Finds a |type| such that its string representation equals to |text|. Returns
+// Finds a `type` such that its string representation equals to `text`. Returns
 // true iff the type is found.
-bool ParseWebRequestResourceType(base::StringPiece text,
+bool ParseWebRequestResourceType(std::string_view text,
                                  WebRequestResourceType* type);
 
 }  // namespace extensions

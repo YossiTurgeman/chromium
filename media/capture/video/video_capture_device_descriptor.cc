@@ -1,8 +1,10 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/capture/video/video_capture_device_descriptor.h"
+
+#include <array>
 
 #include "base/strings/string_util.h"
 
@@ -25,30 +27,32 @@ VideoCaptureDeviceDescriptor::VideoCaptureDeviceDescriptor(
     const std::string& display_name,
     const std::string& device_id,
     VideoCaptureApi capture_api,
-    bool pan_tilt_zoom_supported,
+    const VideoCaptureControlSupport& control_support,
     VideoCaptureTransportType transport_type)
     : device_id(device_id),
       facing(VideoFacingMode::MEDIA_VIDEO_FACING_NONE),
       capture_api(capture_api),
       transport_type(transport_type),
       display_name_(TrimDisplayName(display_name)),
-      pan_tilt_zoom_supported_(pan_tilt_zoom_supported) {}
+      control_support_(control_support) {}
 
 VideoCaptureDeviceDescriptor::VideoCaptureDeviceDescriptor(
     const std::string& display_name,
     const std::string& device_id,
     const std::string& model_id,
     VideoCaptureApi capture_api,
-    bool pan_tilt_zoom_supported,
+    const VideoCaptureControlSupport& control_support,
     VideoCaptureTransportType transport_type,
-    VideoFacingMode facing)
+    VideoFacingMode facing,
+    std::optional<CameraAvailability> availability)
     : device_id(device_id),
       model_id(model_id),
       facing(facing),
+      availability(std::move(availability)),
       capture_api(capture_api),
       transport_type(transport_type),
       display_name_(TrimDisplayName(display_name)),
-      pan_tilt_zoom_supported_(pan_tilt_zoom_supported) {}
+      control_support_(control_support) {}
 
 VideoCaptureDeviceDescriptor::~VideoCaptureDeviceDescriptor() = default;
 
@@ -57,7 +61,8 @@ VideoCaptureDeviceDescriptor::VideoCaptureDeviceDescriptor(
 
 bool VideoCaptureDeviceDescriptor::operator<(
     const VideoCaptureDeviceDescriptor& other) const {
-  static constexpr int kFacingMapping[NUM_MEDIA_VIDEO_FACING_MODES] = {0, 2, 1};
+  constexpr static std::array<int, NUM_MEDIA_VIDEO_FACING_MODES>
+      kFacingMapping = {0, 2, 1};
   static_assert(kFacingMapping[MEDIA_VIDEO_FACING_NONE] == 0,
                 "FACING_NONE has a wrong value");
   static_assert(kFacingMapping[MEDIA_VIDEO_FACING_ENVIRONMENT] == 1,
@@ -99,6 +104,8 @@ const char* VideoCaptureDeviceDescriptor::GetCaptureApiTypeString() const {
       return "Virtual Device";
     case VideoCaptureApi::UNKNOWN:
       return "Unknown";
+    case VideoCaptureApi::WEBRTC_LINUX_PIPEWIRE_SINGLE_PLANE:
+      return "WEBRTC Single Plane";
   }
 }
 

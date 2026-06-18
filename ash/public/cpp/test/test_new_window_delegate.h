@@ -1,12 +1,13 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_PUBLIC_CPP_TEST_TEST_NEW_WINDOW_DELEGATE_H_
 #define ASH_PUBLIC_CPP_TEST_TEST_NEW_WINDOW_DELEGATE_H_
 
+#include <memory>
+
 #include "ash/public/cpp/new_window_delegate.h"
-#include "base/macros.h"
 
 namespace ash {
 
@@ -14,23 +15,36 @@ namespace ash {
 class ASH_PUBLIC_EXPORT TestNewWindowDelegate : public NewWindowDelegate {
  public:
   TestNewWindowDelegate();
+  TestNewWindowDelegate(const TestNewWindowDelegate&) = delete;
+  TestNewWindowDelegate& operator=(const TestNewWindowDelegate&) = delete;
   ~TestNewWindowDelegate() override;
 
  private:
   // NewWindowDelegate:
   void NewTab() override;
-  void NewTabWithUrl(const GURL& url, bool from_user_interaction) override;
-  void NewWindow(bool incognito) override;
+  void NewWindow(bool incognito, bool should_trigger_session_restore) override;
+  void NewWindowForDetachingTab(
+      aura::Window* source_window,
+      const ui::OSExchangeData& drop_data,
+      NewWindowForDetachingTabCallback closure) override;
+  void OpenUrl(const GURL& url,
+               OpenUrlFrom from,
+               Disposition disposition) override;
+  void OpenCalculator() override;
   void OpenFileManager() override;
   void OpenDownloadsFolder() override;
   void OpenCrosh() override;
+  void OpenDiagnostics() override;
   void OpenGetHelp() override;
   void RestoreTab() override;
-  void ShowKeyboardShortcutViewer() override;
-  void ShowTaskManager() override;
-  void OpenFeedbackPage(bool from_assistant) override;
-
-  DISALLOW_COPY_AND_ASSIGN(TestNewWindowDelegate);
+  void ShowShortcutCustomizationApp() override;
+  void ShowTaskManager(bool from_context_menu) override;
+  void OpenFeedbackPage(FeedbackSource source,
+                        const std::string& description_template) override;
+  void OpenPersonalizationHub() override;
+  void OpenCaptivePortalSignin(const GURL& url) override;
+  void OpenFile(const base::FilePath& file_path) override;
+  void ToggleGeminiApp() override;
 };
 
 }  // namespace ash

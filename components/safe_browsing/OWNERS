@@ -1,6 +1,7 @@
-drubery@chromium.org
-nparker@chromium.org
-vakh@chromium.org
+# Keep list sorted alphabetically
 
-# COMPONENT: Services>Safebrowsing
-# TEAM: safebrowsing@chromium.org
+drubery@chromium.org #{LAST_RESORT_SUGGESTION}
+nparker@chromium.org
+thefrog@chromium.org
+vakh@chromium.org
+xinghuilu@chromium.org

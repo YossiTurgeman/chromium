@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 #include <memory>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/containers/span.h"
 
 namespace safe_browsing {
 
@@ -55,6 +55,10 @@ class MachOImageReader {
   static bool IsMachOMagicValue(uint32_t magic);
 
   MachOImageReader();
+
+  MachOImageReader(const MachOImageReader&) = delete;
+  MachOImageReader& operator=(const MachOImageReader&) = delete;
+
   ~MachOImageReader();
 
   // Initializes the instance and verifies that the data is a valid Mach-O
@@ -62,7 +66,7 @@ class MachOImageReader {
   // remain valid for the lifetime of this object. Returns true if the
   // instance is initialized and valid, false if the file could not be parsed
   // as a Mach-O image.
-  bool Initialize(const uint8_t* image, size_t image_size);
+  bool Initialize(base::span<const uint8_t> image);
 
   // Returns whether this is a fat Mach-O image. If this returns true, it is
   // only valid to call GetFatImages() and none of the other methods.
@@ -97,8 +101,6 @@ class MachOImageReader {
 
   bool is_64_bit_;
   std::vector<LoadCommand> commands_;
-
-  DISALLOW_COPY_AND_ASSIGN(MachOImageReader);
 };
 
 }  // namespace safe_browsing

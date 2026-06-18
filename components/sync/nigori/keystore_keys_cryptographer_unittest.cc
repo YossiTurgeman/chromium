@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/sync/nigori/keystore_keys_cryptographer.h"
 
 #include "components/sync/nigori/cryptographer_impl.h"
+#include "components/sync/nigori/key_derivation_params.h"
 #include "components/sync/nigori/nigori.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -17,11 +18,10 @@ using testing::Eq;
 using testing::NotNull;
 
 std::string ComputeKeystoreKeyName(const std::string& keystore_key) {
-  std::string key_name;
-  Nigori::CreateByDerivation(KeyDerivationParams::CreateForPbkdf2(),
-                             keystore_key)
-      ->Permute(Nigori::Password, kNigoriKeyName, &key_name);
-  return key_name;
+  return Nigori::CreateByDerivation(NigoriPassKey::ForTesting(),
+                                    KeyDerivationParams::CreateForPbkdf2(),
+                                    keystore_key)
+      ->GetKeyName();
 }
 
 TEST(KeystoreKeysCryptographerTest, ShouldCreateEmpty) {
@@ -30,7 +30,6 @@ TEST(KeystoreKeysCryptographerTest, ShouldCreateEmpty) {
 
   EXPECT_TRUE(keystore_keys_cryptographer->IsEmpty());
   EXPECT_TRUE(keystore_keys_cryptographer->keystore_keys().empty());
-  EXPECT_TRUE(keystore_keys_cryptographer->GetLastKeystoreKeyName().empty());
 
   std::unique_ptr<CryptographerImpl> underlying_cryptographer =
       keystore_keys_cryptographer->ToCryptographerImpl();
@@ -49,8 +48,6 @@ TEST(KeystoreKeysCryptographerTest, ShouldCreateNonEmpty) {
 
   EXPECT_FALSE(keystore_keys_cryptographer->IsEmpty());
   EXPECT_THAT(keystore_keys_cryptographer->keystore_keys(), Eq(kKeystoreKeys));
-  EXPECT_THAT(keystore_keys_cryptographer->GetLastKeystoreKeyName(),
-              Eq(keystore_key_name2));
 
   std::unique_ptr<CryptographerImpl> underlying_cryptographer =
       keystore_keys_cryptographer->ToCryptographerImpl();

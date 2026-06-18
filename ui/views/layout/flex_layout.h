@@ -1,24 +1,24 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_VIEWS_LAYOUT_FLEX_LAYOUT_H_
 #define UI_VIEWS_LAYOUT_FLEX_LAYOUT_H_
 
+#include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
-#include <string>
 #include <utility>
 #include <vector>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/base/class_property.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/views/layout/flex_layout_types.h"
 #include "ui/views/layout/layout_manager_base.h"
+#include "ui/views/view_class_properties.h"
 #include "ui/views/views_export.h"
 
 namespace views {
@@ -35,8 +35,7 @@ class View;
 // space to leave around each child view. The |interior_margin| says how much
 // empty space to leave at the edges of the parent view. If |collapse_margins|
 // is false, these values are additive; if true, the greater of the two values
-// is used. The |default_child_margins| provides a fallback for views without
-// kMarginsKey set.
+// is used.
 //
 // collapse_margins = false:
 //
@@ -66,19 +65,25 @@ class View;
 // take up its preferred size in the layout.
 //
 // The core function of this class is contained in
-// GetPreferredSize(maximum_size) and Layout(). In both cases, a layout will
-// be cached and typically not recalculated as long as none of the layout's
+// GetPreferredSize(maximum_size) and Layout(). In both cases, a layout will be
+// cached and typically not recalculated as long as none of the layout's
 // properties or the preferred size or visibility of any of its children has
 // changed.
 class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
  public:
   FlexLayout();
+
+  FlexLayout(const FlexLayout&) = delete;
+  FlexLayout& operator=(const FlexLayout&) = delete;
+
   ~FlexLayout() override;
 
   // Note: setters provide a Builder-style interface, so you can type:
   // layout.SetMainAxisAlignment()
   //       .SetCrossAxisAlignment()
   //       .SetDefaultFlex(...);
+  // Note that cross-axis alignment can be overridden per-child using:
+  //   child->SetProperty(kCrossAxisAlignmentKey, <value>);
   FlexLayout& SetOrientation(LayoutOrientation orientation);
   FlexLayout& SetMainAxisAlignment(LayoutAlignment main_axis_alignment);
   FlexLayout& SetCrossAxisAlignment(LayoutAlignment cross_axis_alignment);
@@ -93,7 +98,9 @@ class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
   LayoutOrientation orientation() const { return orientation_; }
   bool collapse_margins() const { return collapse_margins_; }
   LayoutAlignment main_axis_alignment() const { return main_axis_alignment_; }
-  LayoutAlignment cross_axis_alignment() const { return cross_axis_alignment_; }
+  LayoutAlignment cross_axis_alignment() const {
+    return *GetDefault(kCrossAxisAlignmentKey);
+  }
   const gfx::Insets& interior_margin() const { return interior_margin_; }
   int minimum_cross_axis_size() const { return minimum_cross_axis_size_; }
   bool include_host_insets_in_layout() const {
@@ -124,6 +131,11 @@ class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
     return *this;
   }
 
+  template <class T>
+  T* GetDefaultForTesting(const ui::ClassProperty<T*>* key) const {
+    return GetDefault(key);
+  }
+
  protected:
   // LayoutManagerBase:
   ProposedLayout CalculateProposedLayout(
@@ -143,13 +155,23 @@ class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
     void AfterPropertyChange(const void* key, int64_t old_value) override;
 
    private:
-    FlexLayout* const layout_;
+    const raw_ptr<FlexLayout> layout_;
   };
+
+  using ChildIndices = std::list<size_t>;
 
   // Maps a flex order (lower = allocated first, and therefore higher priority)
   // to the indices of child views within that order that can flex.
   // See FlexSpecification::order().
-  using FlexOrderToViewIndexMap = std::map<int, std::vector<size_t>>;
+  using FlexOrderToViewIndexMap = std::map<int, ChildIndices>;
+
+  // Alignment used when the main-axis alignment is not specified.
+  static constexpr LayoutAlignment kDefaultMainAxisAlignment =
+      LayoutAlignment::kStart;
+
+  // Layout used when the cross-axis alignment is not specified.
+  static constexpr LayoutAlignment kDefaultCrossAxisAlignment =
+      LayoutAlignment::kStretch;
 
   // Returns the preferred size for a given |rule| and |child| given unbounded
   // space, with the caveat that for vertical layouts the horizontal axis is
@@ -165,25 +187,6 @@ class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
       const FlexRule& rule,
       const View* child,
       const NormalizedSizeBounds& available) const;
-
-  // Fills out the child entries for |data| and generates some initial size
-  // and visibility data, and stores off information about which views can
-  // expand in |flex_order_to_index|.
-  void InitializeChildData(const NormalizedSizeBounds& bounds,
-                           FlexLayoutData* data,
-                           FlexOrderToViewIndexMap* flex_order_to_index) const;
-
-  // Caclulates the child bounds (in screen coordinates) for each visible child
-  // in the layout.
-  void CalculateChildBounds(const SizeBounds& size_bounds,
-                            FlexLayoutData* data) const;
-
-  // Calculates available space for non-flex views.
-  void CalculateNonFlexAvailableSpace(
-      FlexLayoutData* data,
-      const SizeBound& available_space,
-      const ChildViewSpacing& child_spacing,
-      const FlexOrderToViewIndexMap& flex_views) const;
 
   // Returns the combined margins across the cross axis of the host view, for a
   // particular child view.
@@ -205,46 +208,111 @@ class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
   // Calculates the preferred spacing between two child views, or between a
   // view edge and the first or last visible child views.
   int CalculateChildSpacing(const FlexLayoutData& layout,
-                            base::Optional<size_t> child1_index,
-                            base::Optional<size_t> child2_index) const;
+                            std::optional<size_t> child1_index,
+                            std::optional<size_t> child2_index) const;
 
   // Calculates the position of each child view and the size of the overall
   // layout based on tentative visibilities and sizes for each child.
   void UpdateLayoutFromChildren(const NormalizedSizeBounds& bounds,
-                                FlexLayoutData* data,
-                                ChildViewSpacing* child_spacing) const;
+                                FlexLayoutData& data,
+                                ChildViewSpacing& child_spacing) const;
 
-  // Applies flex rules to each view in a layout, updating |data| and
-  // |child_spacing|.
-  //
-  // If |expandable_views| is specified, any view requesting more than its
-  // preferred size will be clamped to its preferred size and be added to
-  // |expandable_views| for later processing after all other flex space has been
-  // allocated.
-  //
-  // Typically, this method will be called once with |expandable_views| set and
-  // then again with it null to allocate the remaining space.
-  void AllocateFlexSpace(const NormalizedSizeBounds& bounds,
-                         const FlexOrderToViewIndexMap& order_to_index,
-                         FlexLayoutData* data,
-                         ChildViewSpacing* child_spacing,
-                         FlexOrderToViewIndexMap* expandable_views) const;
+  // Fills out the child entries for |data| and generates some initial size
+  // and visibility data, and stores off information about which views can
+  // expand in |flex_order_to_index|.
+  void InitializeChildData(const NormalizedSizeBounds& bounds,
+                           FlexLayoutData& data,
+                           FlexOrderToViewIndexMap& flex_order_to_index) const;
+
+  // Caclulates the child bounds (in screen coordinates) for each visible child
+  // in the layout.
+  void CalculateChildBounds(const SizeBounds& size_bounds,
+                            FlexLayoutData& data) const;
+
+  // Calculates available space along the main axis for non-flex views and
+  // the values in |data.child_data|.
+  void CalculateNonFlexAvailableSpace(const SizeBound& available_space,
+                                      const FlexOrderToViewIndexMap& flex_views,
+                                      const ChildViewSpacing& child_spacing,
+                                      FlexLayoutData& data) const;
+
+  // Updates the available space for each flex child in |child_indices| in
+  // |data.child_data| based on |data.total_size|, |bounds|, and the margin data
+  // in |child_spacing|.
+  void CalculateFlexAvailableSpace(const NormalizedSizeBounds& bounds,
+                                   const ChildIndices& child_indices,
+                                   const ChildViewSpacing& child_spacing,
+                                   FlexLayoutData& data) const;
+
+  // Calculate the size of the view under the given |size| and constrain it to
+  // the maximum and minimum space.
+  NormalizedSize ClampSizeToMinAndMax(FlexLayoutData& data,
+                                      const size_t view_index,
+                                      SizeBound size) const;
+
+  // Allocate space for flexible views
+  void AllocateFlexItem(const NormalizedSizeBounds& bounds,
+                        const FlexOrderToViewIndexMap& order_to_index,
+                        FlexLayoutData& data,
+                        ChildViewSpacing& child_spacing,
+                        bool skip_zero_preferred_size_view) const;
+
+  // Pre-allocates space associated with zero-weight views at a particular flex
+  // priority |flex_order|. Zero-weight child views are removed from
+  // |child_list| and their entries are updated in |data|. If |expandable_views|
+  // is specified, this is treated as the first pass, and space allocated to
+  // each view is capped at its preferred size; if the view would claim more
+  // space it is added to |expandable_views| (if specified).
+  SizeBound AllocateZeroWeightFlex(const NormalizedSizeBounds& bounds,
+                                   ChildIndices& child_list,
+                                   FlexLayoutData& data,
+                                   ChildViewSpacing& child_spacing) const;
+
+  // 0 preferred size views have a unique layout algorithm and they are either
+  // visible together. If they are not visible, they are not visible at all, so
+  // we need to delete them if necessary.
+  void FilterZeroSizeChildreIfNeeded(const NormalizedSizeBounds& bounds,
+                                     SizeBound& to_allocate,
+                                     ChildIndices& child_list,
+                                     FlexLayoutData& data,
+                                     ChildViewSpacing& child_spacing) const;
+
+  // Combining the actual situation of CSS flexbox and views, we solve the
+  // problem of flexible view allocation. The main thing here is to integrate
+  // https://www.w3.org/TR/css-flexbox-1/#resolve-flexible-lengths $9.2.7
+  bool ResolveFlexibleLengths(const NormalizedSizeBounds& bounds,
+                              SizeBound& remaining_free_space,
+                              ChildIndices& child_list,
+                              FlexLayoutData& data,
+                              ChildViewSpacing& child_spacing) const;
+
+  // Freeze flexible views according to css flexbox algorithm. But there is a
+  // special scene. If the view visibility changes. We terminate the freeze and
+  // force a restart.
+  bool FreezeViolations(ChildIndices& child_list,
+                        SizeBound& remaining_free_space,
+                        ChildIndices& freeze_child_list,
+                        ChildViewSpacing& child_spacing,
+                        FlexLayoutData& data) const;
+
+  // Algorithms required by views alone. Because views have custom flex rules,
+  // this may lead to unallocated space. Here we allocate these spaces.
+  void AllocateRemainingSpaceIfNeeded(
+      const NormalizedSizeBounds& bounds,
+      const FlexOrderToViewIndexMap& order_to_index,
+      FlexLayoutData& data,
+      ChildViewSpacing& child_spacing) const;
+
+  // Returns the total weight for all children listed in |child_indices|.
+  static int CalculateFlexTotal(const FlexLayoutData& data,
+                                const ChildIndices& child_indices);
 
   // Gets the default value for a particular layout property, which will be used
   // if the property is not set on a child view being laid out (e.g.
   // kMarginsKey).
   template <class T>
-  T* GetDefault(const ui::ClassProperty<T>* key) const {
+  T* GetDefault(const ui::ClassProperty<T*>* key) const {
     return layout_defaults_.GetProperty(key);
-  }
-
-  // Clears the default value for a particular layout property, which will be
-  // used if the property is not set on a child view being laid out (e.g.
-  // kMarginsKey).
-  template <class T>
-  FlexLayout& ClearDefault(const ui::ClassProperty<T>* key) {
-    layout_defaults_.ClearProperty(key);
-    return *this;
   }
 
   static gfx::Size DefaultFlexRuleImpl(const FlexLayout* flex_layout,
@@ -260,10 +328,7 @@ class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
   gfx::Insets interior_margin_;
 
   // The alignment of children in the main axis. This is start by default.
-  LayoutAlignment main_axis_alignment_ = LayoutAlignment::kStart;
-
-  // The alignment of children in the cross axis. This is stretch by default.
-  LayoutAlignment cross_axis_alignment_ = LayoutAlignment::kStretch;
+  LayoutAlignment main_axis_alignment_ = kDefaultMainAxisAlignment;
 
   // The minimum cross axis size for the layout.
   int minimum_cross_axis_size_ = 0;
@@ -304,8 +369,6 @@ class VIEWS_EXPORT FlexLayout : public LayoutManagerBase {
   // Default properties for any views that don't have them explicitly set for
   // this layout.
   PropertyHandler layout_defaults_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(FlexLayout);
 };
 
 }  // namespace views

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,8 +34,8 @@ TEST(LibValuesUnittest, GetAccessPointFromName) {
 
   for (int ap = rlz_lib::NO_ACCESS_POINT + 1;
        ap < rlz_lib::LAST_ACCESS_POINT; ++ap) {
-    rlz_lib::AccessPoint point = static_cast<rlz_lib::AccessPoint>(ap);
-    EXPECT_TRUE(GetAccessPointName(point) != NULL);
+    EXPECT_TRUE(GetAccessPointName(static_cast<rlz_lib::AccessPoint>(ap)) !=
+                NULL);
   }
 }
 
@@ -62,4 +62,16 @@ TEST(LibValuesUnittest, GetEventFromName) {
 
   EXPECT_FALSE(rlz_lib::GetEventFromName("F ", &event));
   EXPECT_EQ(rlz_lib::INVALID_EVENT, event);
+
+  EXPECT_TRUE(rlz_lib::GetEventFromName("X", &event));
+  EXPECT_EQ(rlz_lib::ENTERPRISE_ENROLLMENT, event);
+
+  EXPECT_TRUE(rlz_lib::GetEventFromName("Y", &event));
+  EXPECT_EQ(rlz_lib::ENTERPRISE_UNENROLLMENT, event);
+
+  EXPECT_TRUE(rlz_lib::GetEventFromName("Z", &event));
+  EXPECT_EQ(rlz_lib::ENTERPRISE_ENROLLED_ACTIVATE, event);
+
+  EXPECT_TRUE(rlz_lib::GetEventFromName("W", &event));
+  EXPECT_EQ(rlz_lib::ENTERPRISE_ENROLLED_FIRST_SEARCH, event);
 }

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,16 @@
 
 #include <utility>
 
-#include "remoting/codec/video_encoder.h"
+#include "base/notimplemented.h"
+#include "remoting/base/fifo_buffer.h"
 #include "remoting/protocol/audio_source.h"
 #include "remoting/protocol/audio_stream.h"
 #include "remoting/protocol/session.h"
-#include "remoting/protocol/video_frame_pump.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capturer.h"
 
-namespace remoting {
-namespace protocol {
+namespace remoting::protocol {
 
-FakeVideoStream::FakeVideoStream() {}
+FakeVideoStream::FakeVideoStream() = default;
 FakeVideoStream::~FakeVideoStream() = default;
 
 void FakeVideoStream::SetEventTimestampsSource(
@@ -24,15 +23,27 @@ void FakeVideoStream::SetEventTimestampsSource(
 
 void FakeVideoStream::Pause(bool pause) {}
 
-void FakeVideoStream::SetLosslessEncode(bool want_lossless) {}
-
-void FakeVideoStream::SetLosslessColor(bool want_lossless) {}
-
 void FakeVideoStream::SetObserver(Observer* observer) {
   observer_ = observer;
 }
 
-void FakeVideoStream::SelectSource(int id) {}
+void FakeVideoStream::SelectSource(webrtc::ScreenId id) {
+  selected_source_ = id;
+}
+
+void FakeVideoStream::SetComposeEnabled(bool enabled) {}
+
+void FakeVideoStream::SetMouseCursor(
+    std::unique_ptr<webrtc::MouseCursor> mouse_cursor) {}
+
+void FakeVideoStream::SetMouseCursorPosition(
+    const webrtc::DesktopVector& position) {}
+
+void FakeVideoStream::SetTargetFramerate(int framerate) {}
+
+webrtc::ScreenId FakeVideoStream::selected_source() const {
+  return selected_source_;
+}
 
 base::WeakPtr<FakeVideoStream> FakeVideoStream::GetWeakPtr() {
   return weak_factory_.GetWeakPtr();
@@ -47,19 +58,15 @@ void FakeConnectionToClient::SetEventHandler(EventHandler* event_handler) {
   event_handler_ = event_handler;
 }
 
-std::unique_ptr<VideoStream> FakeConnectionToClient::StartVideoStream(
-    std::unique_ptr<webrtc::DesktopCapturer> desktop_capturer) {
-  desktop_capturer_ = std::move(desktop_capturer);
-  if (video_stub_ && video_encode_task_runner_) {
-    std::unique_ptr<VideoEncoder> video_encoder =
-        VideoEncoder::Create(session_->config());
+void FakeConnectionToClient::ApplyNetworkSettings(
+    const NetworkSettings& settings) {
+  network_settings_ = settings;
+}
 
-    std::unique_ptr<protocol::VideoFramePump> pump(new protocol::VideoFramePump(
-        video_encode_task_runner_, std::move(desktop_capturer_),
-        std::move(video_encoder), video_stub_));
-    video_feedback_stub_ = pump->video_feedback_stub();
-    return std::move(pump);
-  }
+std::unique_ptr<VideoStream> FakeConnectionToClient::StartVideoStream(
+    webrtc::ScreenId screen_id,
+    std::unique_ptr<DesktopCapturer> desktop_capturer) {
+  desktop_capturer_ = std::move(desktop_capturer);
 
   std::unique_ptr<FakeVideoStream> result(new FakeVideoStream());
   last_video_stream_ = result->GetWeakPtr();
@@ -72,17 +79,25 @@ std::unique_ptr<AudioStream> FakeConnectionToClient::StartAudioStream(
   return nullptr;
 }
 
+void FakeConnectionToClient::SetAudioWriter(
+    std::unique_ptr<FifoBufferWriter> writer) {
+  audio_writer_ = std::move(writer);
+}
+
 ClientStub* FakeConnectionToClient::client_stub() {
   return client_stub_;
 }
 
-void FakeConnectionToClient::Disconnect(ErrorCode disconnect_error) {
+void FakeConnectionToClient::Disconnect(ErrorCode disconnect_error,
+                                        std::string_view error_details,
+                                        const SourceLocation& error_location) {
   CHECK(is_connected_);
 
   is_connected_ = false;
   disconnect_error_ = disconnect_error;
-  if (event_handler_)
+  if (event_handler_) {
     event_handler_->OnConnectionClosed(disconnect_error_);
+  }
 }
 
 Session* FakeConnectionToClient::session() {
@@ -105,5 +120,8 @@ PeerConnectionControls* FakeConnectionToClient::peer_connection_controls() {
   return nullptr;
 }
 
-}  // namespace protocol
-}  // namespace remoting
+WebrtcEventLogData* FakeConnectionToClient::rtc_event_log() {
+  return nullptr;
+}
+
+}  // namespace remoting::protocol

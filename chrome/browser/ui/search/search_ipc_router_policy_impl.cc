@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,11 +15,12 @@ SearchIPCRouterPolicyImpl::SearchIPCRouterPolicyImpl(
 
   Profile* profile =
       Profile::FromBrowserContext(web_contents_->GetBrowserContext());
-  if (profile)
+  if (profile) {
     is_incognito_ = profile->IsOffTheRecord();
+  }
 }
 
-SearchIPCRouterPolicyImpl::~SearchIPCRouterPolicyImpl() {}
+SearchIPCRouterPolicyImpl::~SearchIPCRouterPolicyImpl() = default;
 
 bool SearchIPCRouterPolicyImpl::ShouldProcessFocusOmnibox(bool is_active_tab) {
   return is_active_tab && !is_incognito_ && search::IsInstantNTP(web_contents_);
@@ -35,51 +36,6 @@ bool SearchIPCRouterPolicyImpl::ShouldProcessUndoMostVisitedDeletion() {
 
 bool SearchIPCRouterPolicyImpl::ShouldProcessUndoAllMostVisitedDeletions() {
   return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessAddCustomLink() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessUpdateCustomLink() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessReorderCustomLink() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessDeleteCustomLink() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessUndoCustomLinkAction() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessResetCustomLinks() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessToggleMostVisitedOrCustomLinks() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessToggleShortcutsVisibility() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessLogEvent() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessLogSuggestionEventWithValue() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessPasteIntoOmnibox(
-    bool is_active_tab) {
-  return is_active_tab && !is_incognito_ && search::IsInstantNTP(web_contents_);
 }
 
 bool SearchIPCRouterPolicyImpl::ShouldSendSetInputInProgress(
@@ -99,80 +55,6 @@ bool SearchIPCRouterPolicyImpl::ShouldSendNtpTheme() {
   return !is_incognito_ && search::IsInstantNTP(web_contents_);
 }
 
-bool SearchIPCRouterPolicyImpl::ShouldSendLocalBackgroundSelected() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessSelectLocalBackgroundImage() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessSetCustomBackgroundInfo() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessBlocklistSearchSuggestion() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::
-    ShouldProcessBlocklistSearchSuggestionWithHash() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessSearchSuggestionSelected() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessOptOutOfSearchSuggestions() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
 bool SearchIPCRouterPolicyImpl::ShouldProcessThemeChangeMessages() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessAutocompleteResultChanged(
-    bool is_active_tab) {
-  return is_active_tab && !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessAutocompleteMatchImageAvailable(
-    bool is_active_tab) {
-  return is_active_tab && !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessQueryAutocomplete(
-    bool is_active_tab) {
-  return is_active_tab && !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessStopAutocomplete() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessLogCharTypedToRepaintLatency() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessBlocklistPromo() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessOpenExtensionsPage() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessOpenAutocompleteMatch(
-    bool is_active_tab) {
-  return is_active_tab && !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::ShouldProcessDeleteAutocompleteMatch() {
-  return !is_incognito_ && search::IsInstantNTP(web_contents_);
-}
-
-bool SearchIPCRouterPolicyImpl::
-    ShouldProcessToggleSuggestionGroupIdVisibility() {
   return !is_incognito_ && search::IsInstantNTP(web_contents_);
 }

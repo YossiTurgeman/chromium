@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,47 +8,51 @@
 #include "base/time/default_tick_clock.h"
 #include "chrome/browser/themes/theme_properties.h"
 #include "chrome/browser/ui/views/page_action/page_action_icon_view.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/theme_provider.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/paint_throbber.h"
+#include "ui/views/property_effects.h"
 
 PageActionIconLoadingIndicatorView::PageActionIconLoadingIndicatorView(
     PageActionIconView* parent)
     : parent_(parent) {
   parent_->AddObserver(this);
   // Don't let the loading indicator process events.
-  set_can_process_events_within_subtree(false);
+  SetCanProcessEventsWithinSubtree(false);
 }
 
 PageActionIconLoadingIndicatorView::~PageActionIconLoadingIndicatorView() {
   parent_->RemoveObserver(this);
 }
 
-void PageActionIconLoadingIndicatorView::ShowAnimation() {
-  if (!throbber_start_time_)
+void PageActionIconLoadingIndicatorView::SetAnimating(bool animating) {
+  if (!throbber_start_time_ == !animating) {
+    return;
+  }
+
+  SetVisible(animating);
+  if (animating) {
     throbber_start_time_ = base::TimeTicks::Now();
-
-  SetVisible(true);
-  animation_.StartThrobbing(-1);
+    animation_.StartThrobbing(-1);
+  } else {
+    throbber_start_time_.reset();
+    animation_.Reset();
+  }
+  OnPropertyChanged(&throbber_start_time_, views::PropertyEffects::kNone);
 }
 
-void PageActionIconLoadingIndicatorView::StopAnimation() {
-  throbber_start_time_.reset();
-  SetVisible(false);
-  animation_.Reset();
-}
-
-bool PageActionIconLoadingIndicatorView::IsAnimating() {
+bool PageActionIconLoadingIndicatorView::GetAnimating() const {
   return animation_.is_animating();
 }
 
 void PageActionIconLoadingIndicatorView::OnPaint(gfx::Canvas* canvas) {
-  if (!throbber_start_time_)
+  if (!throbber_start_time_) {
     return;
+  }
 
-  const SkColor color = GetThemeProvider()->GetColor(
-      ThemeProperties::COLOR_TAB_THROBBER_SPINNING);
+  const SkColor color = GetColorProvider()->GetColor(ui::kColorThrobber);
   constexpr int kThrobberStrokeWidth = 2;
   gfx::PaintThrobberSpinning(canvas, GetLocalBounds(), color,
                              base::TimeTicks::Now() - *throbber_start_time_,
@@ -65,3 +69,7 @@ void PageActionIconLoadingIndicatorView::AnimationProgressed(
   DCHECK_EQ(animation, &animation_);
   SchedulePaint();
 }
+
+BEGIN_METADATA(PageActionIconLoadingIndicatorView)
+ADD_PROPERTY_METADATA(bool, Animating)
+END_METADATA

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,15 @@
 #include "third_party/blink/public/platform/web_input_event_result.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/element.h"
-#include "third_party/blink/renderer/core/layout/geometry/physical_offset.h"
 #include "third_party/blink/renderer/core/layout/hit_test_result.h"
 #include "third_party/blink/renderer/core/page/event_with_hit_test_results.h"
+#include "third_party/blink/renderer/platform/geometry/physical_offset.h"
 
 namespace blink {
 
 class ContainerNode;
 class EventTarget;
 class LocalFrame;
-class ScrollableArea;
-class PaintLayer;
 enum class DispatchEventResult;
 
 namespace event_handling_util {
@@ -33,33 +31,34 @@ WebInputEventResult MergeEventResult(WebInputEventResult result_a,
                                      WebInputEventResult result_b);
 WebInputEventResult ToWebInputEventResult(DispatchEventResult);
 
-PaintLayer* LayerForNode(Node*);
-ScrollableArea* AssociatedScrollableArea(const PaintLayer*);
-
 bool IsInDocument(EventTarget*);
 
 ContainerNode* ParentForClickEvent(const Node&);
-ContainerNode* ParentForClickEventInteractiveElementSensitive(const Node&);
 
-PhysicalOffset ContentPointFromRootFrame(LocalFrame*,
-                                         const FloatPoint& point_in_root_frame);
+CORE_EXPORT PhysicalOffset
+ContentPointFromRootFrame(LocalFrame*, const gfx::PointF& point_in_root_frame);
 
 MouseEventWithHitTestResults PerformMouseEventHitTest(LocalFrame*,
                                                       const HitTestRequest&,
                                                       const WebMouseEvent&);
 
 LocalFrame* GetTargetSubframe(const MouseEventWithHitTestResults&,
-                              Node* capturing_node = nullptr,
                               bool* is_remote_frame = nullptr);
 
 LocalFrame* SubframeForTargetNode(Node*, bool* is_remote_frame = nullptr);
 
-// Intervention: if an input event lands on a cross-origin iframe that has
-// moved or resized recently (recent==500ms), and which contains an
+// Intervention: if an input event lands on a cross-origin iframe or fencedframe
+// that has moved or resized recently (recent==500ms), and which contains an
 // IntersectionObserver that is tracking visibility, then the event is quietly
 // discarded.
 bool ShouldDiscardEventTargetingFrame(const WebInputEvent& event,
                                       const LocalFrame& frame);
+
+// If a "down" event was discarded by the above intervention, and the next down
+// event arrives within `DiscardedEventMistakeInterval` with the same target as
+// the discarded event, we conclude that the first event was intentional and
+// should not have been discarded.
+constexpr base::TimeDelta kDiscardedEventMistakeInterval = base::Seconds(5);
 
 class PointerEventTarget {
   DISALLOW_NEW();
@@ -69,7 +68,7 @@ class PointerEventTarget {
 
   Member<Element> target_element;
   Member<LocalFrame> target_frame;
-  String region;
+  Member<Scrollbar> scrollbar;
 };
 
 }  // namespace event_handling_util

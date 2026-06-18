@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 #include <utility>
 
@@ -13,41 +14,41 @@
 #include "base/files/file_util.h"
 #include "base/notreached.h"
 #include "base/path_service.h"
-#include "base/stl_util.h"
 #include "chrome/browser/safe_browsing/incident_reporting/binary_integrity_incident.h"
 #include "chrome/browser/safe_browsing/incident_reporting/incident_receiver.h"
 #include "chrome/common/chrome_version.h"
 #include "chrome/common/safe_browsing/binary_feature_extractor.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
 
 namespace safe_browsing {
 
 std::vector<base::FilePath> GetCriticalBinariesPath() {
-  static const base::FilePath::CharType* const kUnversionedFiles[] = {
+  static constexpr auto kUnversionedFiles = std::to_array({
       FILE_PATH_LITERAL("chrome.exe"),
-  };
-  static const base::FilePath::CharType* const kVersionedFiles[] = {
+  });
+  static constexpr auto kVersionedFiles = std::to_array({
       FILE_PATH_LITERAL("chrome.dll"),
       FILE_PATH_LITERAL("chrome_child.dll"),
       FILE_PATH_LITERAL("chrome_elf.dll"),
-  };
+  });
 
   // Find where chrome.exe is installed.
   base::FilePath chrome_exe_dir;
-  if (!base::PathService::Get(base::DIR_EXE, &chrome_exe_dir))
+  if (!base::PathService::Get(base::DIR_EXE, &chrome_exe_dir)) {
     NOTREACHED();
+  }
 
   std::vector<base::FilePath> critical_binaries;
-  critical_binaries.reserve(base::size(kUnversionedFiles) +
-                            base::size(kVersionedFiles));
+  critical_binaries.reserve(std::size(kUnversionedFiles) +
+                            std::size(kVersionedFiles));
 
-  for (size_t i = 0; i < base::size(kUnversionedFiles); ++i) {
+  for (size_t i = 0; i < std::size(kUnversionedFiles); ++i) {
     critical_binaries.push_back(chrome_exe_dir.Append(kUnversionedFiles[i]));
   }
 
   base::FilePath version_dir(
       chrome_exe_dir.AppendASCII(CHROME_VERSION_STRING));
-  for (size_t i = 0; i < base::size(kVersionedFiles); ++i) {
+  for (size_t i = 0; i < std::size(kVersionedFiles); ++i) {
     critical_binaries.push_back(version_dir.Append(kVersionedFiles[i]));
   }
 
@@ -68,9 +69,7 @@ void VerifyBinaryIntegrity(
     std::unique_ptr<ClientDownloadRequest_SignatureInfo> signature_info(
         new ClientDownloadRequest_SignatureInfo());
 
-    base::TimeTicks time_before = base::TimeTicks::Now();
     binary_feature_extractor->CheckSignature(binary_path, signature_info.get());
-    RecordSignatureVerificationTime(i, base::TimeTicks::Now() - time_before);
 
     // Only create a report if the signature is untrusted.
     if (!signature_info->trusted()) {

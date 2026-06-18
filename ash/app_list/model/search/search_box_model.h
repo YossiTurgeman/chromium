@@ -1,18 +1,18 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_APP_LIST_MODEL_SEARCH_SEARCH_BOX_MODEL_H_
 #define ASH_APP_LIST_MODEL_SEARCH_SEARCH_BOX_MODEL_H_
 
-#include <memory>
+#include <optional>
+#include <string>
 
 #include "ash/app_list/model/app_list_model_export.h"
-#include "base/macros.h"
+#include "ash/public/cpp/app_list/app_list_client.h"
 #include "base/observer_list.h"
-#include "base/strings/string16.h"
-#include "ui/gfx/image/image_skia.h"
-#include "ui/gfx/selection_model.h"
+#include "ui/base/models/image_model.h"
+#include "ui/gfx/image/image.h"
 
 namespace ash {
 
@@ -22,36 +22,62 @@ class SearchBoxModelObserver;
 // influences the search box behavior.
 class APP_LIST_MODEL_EXPORT SearchBoxModel {
  public:
+  // How the Sunfish-session button should appear in the search box.
+  enum class SunfishButtonVisibility {
+    kHidden = 0,
+    kShownWithScannerIcon = 1,
+    kShownWithSunfishIcon = 2,
+  };
+
+  // Display text and icon for an icon button in search box. This is currently
+  // used only for Gemini button.
+  struct SearchBoxIconButton {
+    std::string display_name;
+    gfx::Image icon;
+  };
+
   SearchBoxModel();
+  SearchBoxModel(const SearchBoxModel&) = delete;
+  SearchBoxModel& operator=(const SearchBoxModel&) = delete;
   ~SearchBoxModel();
 
-  void SetTabletMode(bool is_tablet_mode);
-  bool is_tablet_mode() const { return is_tablet_mode_; }
+  // TODO: crbug.com/388361414 - Delete.
+  bool show_assistant_button() const { return false; }
 
-  void SetShowAssistantButton(bool show);
-  bool show_assistant_button() const { return show_assistant_button_; }
+  // Show gemini button with display name and icon specified in
+  // `search_box_icon_button`. Passing `std::nullopt` hides the button.
+  void SetGeminiButtonVisibility(
+      std::optional<SearchBoxIconButton> search_box_icon_button);
+  std::optional<SearchBoxIconButton> gemini_button() const {
+    return gemini_search_box_icon_button_;
+  }
+
+  void SetSunfishButtonVisibility(SunfishButtonVisibility show);
+  SunfishButtonVisibility sunfish_button_visibility() const {
+    return sunfish_button_visibility_;
+  }
+
+  void SetWouldTriggerIph(bool would_trigger_iph);
+  bool would_trigger_iph() const { return would_trigger_iph_; }
 
   void SetSearchEngineIsGoogle(bool is_google);
   bool search_engine_is_google() const { return search_engine_is_google_; }
-
-  // Sets/gets the text for the search box's Textfield and the voice search
-  // flag.
-  void Update(const base::string16& text,
-              bool initiated_by_user);
-  const base::string16& text() const { return text_; }
 
   void AddObserver(SearchBoxModelObserver* observer);
   void RemoveObserver(SearchBoxModelObserver* observer);
 
  private:
-  base::string16 text_;
   bool search_engine_is_google_ = false;
-  bool is_tablet_mode_ = false;
-  bool show_assistant_button_ = false;
+  std::optional<SearchBoxIconButton> gemini_search_box_icon_button_;
+  SunfishButtonVisibility sunfish_button_visibility_ =
+      SunfishButtonVisibility::kHidden;
 
-  base::ObserverList<SearchBoxModelObserver>::Unchecked observers_;
+  // `would_trigger_iph_` indicates whether we should START showing an IPH or
+  // not. This can be set to false while an IPH is being shown and the IPH
+  // should be kept showing.
+  bool would_trigger_iph_ = false;
 
-  DISALLOW_COPY_AND_ASSIGN(SearchBoxModel);
+  base::ObserverList<SearchBoxModelObserver> observers_;
 };
 
 }  // namespace ash

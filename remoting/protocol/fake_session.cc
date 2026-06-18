@@ -1,25 +1,27 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/protocol/fake_session.h"
 
-#include "base/bind.h"
+#include <memory>
+
 #include "base/check.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
+#include "remoting/base/constants.h"
+#include "remoting/protocol/authenticator.h"
 #include "remoting/protocol/fake_authenticator.h"
 #include "remoting/protocol/session_plugin.h"
-#include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
+#include "remoting/signaling/jingle_message_xml_converter.h"
 
-namespace remoting {
-namespace protocol {
+namespace remoting::protocol {
 
 const char kTestJid[] = "host1@gmail.com/chromoting123";
 const char kTestAuthKey[] = "test_auth_key";
 
-FakeSession::FakeSession()
-    : config_(SessionConfig::ForTest()), jid_(kTestJid) {}
+FakeSession::FakeSession() : jid_(kTestJid) {}
 FakeSession::~FakeSession() = default;
 
 void FakeSession::SimulateConnection(FakeSession* peer) {
@@ -34,14 +36,16 @@ void FakeSession::SimulateConnection(FakeSession* peer) {
   peer->event_handler_->OnSessionStateChange(AUTHENTICATING);
 
   // Initialize transport and authenticator on the client.
-  authenticator_.reset(new FakeAuthenticator(FakeAuthenticator::ACCEPT));
+  authenticator_ =
+      std::make_unique<FakeAuthenticator>(FakeAuthenticator::ACCEPT);
   authenticator_->set_auth_key(kTestAuthKey);
   transport_->Start(authenticator_.get(),
                     base::BindRepeating(&FakeSession::SendTransportInfo,
                                         weak_factory_.GetWeakPtr()));
 
   // Initialize transport and authenticator on the host.
-  peer->authenticator_.reset(new FakeAuthenticator(FakeAuthenticator::ACCEPT));
+  peer->authenticator_ =
+      std::make_unique<FakeAuthenticator>(FakeAuthenticator::ACCEPT);
   peer->authenticator_->set_auth_key(kTestAuthKey);
   peer->transport_->Start(
       peer->authenticator_.get(),
@@ -55,7 +59,7 @@ void FakeSession::SetEventHandler(EventHandler* event_handler) {
   event_handler_ = event_handler;
 }
 
-ErrorCode FakeSession::error() {
+ErrorCode FakeSession::error() const {
   return error_;
 }
 
@@ -63,15 +67,17 @@ const std::string& FakeSession::jid() {
   return jid_;
 }
 
-const SessionConfig& FakeSession::config() {
-  return *config_;
+const Authenticator& FakeSession::authenticator() const {
+  return *authenticator_;
 }
 
 void FakeSession::SetTransport(Transport* transport) {
   transport_ = transport;
 }
 
-void FakeSession::Close(ErrorCode error) {
+void FakeSession::Close(ErrorCode error,
+                        std::string_view error_details,
+                        const SourceLocation& error_location) {
   closed_ = true;
   error_ = error;
   event_handler_->OnSessionStateChange(CLOSED);
@@ -82,24 +88,30 @@ void FakeSession::Close(ErrorCode error) {
     peer_.reset();
 
     if (signaling_delay_.is_zero()) {
-      peer->Close(error);
+      peer->Close(error, error_details, error_location);
     } else {
-      base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-          FROM_HERE, base::BindOnce(&FakeSession::Close, peer, error),
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE,
+          // Cannot just bind `error_details` as a string view, since the
+          // underlying data could be invalidated before the callback is run.
+          // See: crbug.com/376675478
+          base::BindOnce(&FakeSession::Close, peer, error,
+                         std::string(error_details), error_location),
           signaling_delay_);
     }
   }
 }
 
 void FakeSession::SendTransportInfo(
-    std::unique_ptr<jingle_xmpp::XmlElement> transport_info) {
-  if (!peer_)
+    std::unique_ptr<JingleTransportInfo> transport_info) {
+  if (!peer_) {
     return;
+  }
 
   if (signaling_delay_.is_zero()) {
     peer_->ProcessTransportInfo(std::move(transport_info));
   } else {
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindOnce(&FakeSession::ProcessTransportInfo, peer_,
                        std::move(transport_info)),
@@ -108,29 +120,24 @@ void FakeSession::SendTransportInfo(
 }
 
 void FakeSession::ProcessTransportInfo(
-    std::unique_ptr<jingle_xmpp::XmlElement> transport_info) {
-  transport_->ProcessTransportInfo(transport_info.get());
+    std::unique_ptr<JingleTransportInfo> transport_info) {
+  transport_->ProcessTransportInfo(*transport_info);
 }
 
 void FakeSession::AddPlugin(SessionPlugin* plugin) {
   DCHECK(plugin);
-  for (const auto& message : attachments_) {
-    if (message) {
-      JingleMessage jingle_message;
-      jingle_message.AddAttachment(
-          std::make_unique<jingle_xmpp::XmlElement>(*message));
-      plugin->OnIncomingMessage(*(jingle_message.attachments));
+  for (const auto& attachment : attachments_) {
+    if (attachment.host_attributes || attachment.host_config) {
+      plugin->OnIncomingMessage(attachment);
     }
   }
 }
 
-void FakeSession::SetAttachment(size_t round,
-                                std::unique_ptr<jingle_xmpp::XmlElement> attachment) {
-  while (attachments_.size() <= round) {
-    attachments_.emplace_back();
+void FakeSession::SetAttachment(size_t round, const Attachment& attachment) {
+  if (attachments_.size() <= round) {
+    attachments_.resize(round + 1);
   }
-  attachments_[round] = std::move(attachment);
+  attachments_[round] = attachment;
 }
 
-}  // namespace protocol
-}  // namespace remoting
+}  // namespace remoting::protocol

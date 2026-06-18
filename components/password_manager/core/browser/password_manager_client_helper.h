@@ -1,10 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_PASSWORD_MANAGER_CLIENT_HELPER_H_
 #define COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_PASSWORD_MANAGER_CLIENT_HELPER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "components/password_manager/core/browser/password_manager_client.h"
 
 namespace password_manager {
@@ -17,8 +18,7 @@ class PasswordManagerClientHelper {
   ~PasswordManagerClientHelper();
 
   // Implementation of PasswordManagerClient::NotifyUserCouldBeAutoSignedIn.
-  void NotifyUserCouldBeAutoSignedIn(
-      std::unique_ptr<autofill::PasswordForm> form);
+  void NotifyUserCouldBeAutoSignedIn(std::unique_ptr<PasswordForm> form);
 
   // Implementation of
   // PasswordManagerClient::NotifySuccessfulLoginWithExistingPassword.
@@ -31,7 +31,7 @@ class PasswordManagerClientHelper {
   // just one local credential to be chosen from.
   void OnCredentialsChosen(PasswordManagerClient::CredentialsCallback callback,
                            bool one_local_credential,
-                           const autofill::PasswordForm* form);
+                           const PasswordForm* form);
 
   // Common logic for IOSChromePasswordManagerClient and
   // ChromePasswordManagerClient implementation of NotifyStorePasswordCalled.
@@ -54,11 +54,11 @@ class PasswordManagerClientHelper {
   bool ShouldPromptToMovePasswordToAccount(
       const PasswordFormManagerForUI& submitted_manager) const;
 
-  PasswordManagerClient* delegate_;
+  raw_ptr<PasswordManagerClient> delegate_;
 
   // Set during 'NotifyUserCouldBeAutoSignedIn' in order to store the
   // form for potential use during 'NotifySuccessfulLoginWithExistingPassword'.
-  std::unique_ptr<autofill::PasswordForm> possible_auto_sign_in_;
+  std::unique_ptr<PasswordForm> possible_auto_sign_in_;
 };
 
 }  // namespace password_manager

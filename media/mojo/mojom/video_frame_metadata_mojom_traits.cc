@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,25 +6,77 @@
 
 #include <utility>
 
-#include "base/bind_helpers.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/notreached.h"
 #include "build/build_config.h"
+#include "media/base/capture_version.h"
 #include "mojo/public/cpp/base/time_mojom_traits.h"
 #include "mojo/public/cpp/base/unguessable_token_mojom_traits.h"
 
-namespace mojo {
-
-// Deserializes has_field and field into a base::Optional.
-#define DESERIALIZE_INTO_OPT(field) \
-  if (input.has_##field())          \
-    output->field = input.field()
+namespace {
 
 #define READ_AND_ASSIGN_OPT(type, field, FieldInCamelCase) \
-  base::Optional<type> field;                              \
+  std::optional<type> field;                               \
   if (!input.Read##FieldInCamelCase(&field))               \
     return false;                                          \
                                                            \
   output->field = field
+
+std::optional<media::EffectInfo> FromMojom(media::mojom::EffectState input) {
+  switch (input) {
+    case media::mojom::EffectState::kUnknown:
+      return std::nullopt;
+    case media::mojom::EffectState::kDisabled:
+      return media::EffectInfo{.enabled = false};
+    case media::mojom::EffectState::kEnabled:
+      return media::EffectInfo{.enabled = true};
+  }
+
+  NOTREACHED();
+}
+}  // namespace
+
+namespace mojo {
+
+// static
+media::mojom::EffectState
+EnumTraits<media::mojom::EffectState, intermediate::EffectState>::ToMojom(
+    intermediate::EffectState input) {
+  switch (input) {
+    case intermediate::EffectState::kUnknown:
+      return media::mojom::EffectState::kUnknown;
+    case intermediate::EffectState::kDisabled:
+      return media::mojom::EffectState::kDisabled;
+    case intermediate::EffectState::kEnabled:
+      return media::mojom::EffectState::kEnabled;
+  }
+  NOTREACHED();
+}
+
+// static
+intermediate::EffectState
+EnumTraits<media::mojom::EffectState, intermediate::EffectState>::FromMojom(
+    media::mojom::EffectState input) {
+  switch (input) {
+    case media::mojom::EffectState::kUnknown:
+      return intermediate::EffectState::kUnknown;
+    case media::mojom::EffectState::kDisabled:
+      return intermediate::EffectState::kDisabled;
+    case media::mojom::EffectState::kEnabled:
+      return intermediate::EffectState::kEnabled;
+  }
+  NOTREACHED();
+}
+
+// static
+bool StructTraits<media::mojom::CaptureVersionDataView, media::CaptureVersion>::
+    Read(media::mojom::CaptureVersionDataView data,
+         media::CaptureVersion* out) {
+  out->source = data.source();
+  out->sub_capture = data.sub_capture();
+  return true;
+}
 
 // static
 bool StructTraits<media::mojom::VideoFrameMetadataDataView,
@@ -32,46 +84,42 @@ bool StructTraits<media::mojom::VideoFrameMetadataDataView,
     Read(media::mojom::VideoFrameMetadataDataView input,
          media::VideoFrameMetadata* output) {
   // int.
-  DESERIALIZE_INTO_OPT(capture_counter);
+  output->capture_counter = input.capture_counter();
+  output->frame_sequence = input.frame_sequence();
+  output->source_id = input.source_id();
+  output->background_blur = FromMojom(input.background_blur());
 
   // bool.
   output->allow_overlay = input.allow_overlay();
+  output->copy_required = input.copy_required();
   output->end_of_stream = input.end_of_stream();
-  output->texture_owner = input.texture_owner();
+  output->in_surface_view = input.in_surface_view();
   output->wants_promotion_hint = input.wants_promotion_hint();
   output->protected_video = input.protected_video();
   output->hw_protected = input.hw_protected();
+  output->needs_detiling = input.needs_detiling();
+  output->is_webgpu_compatible = input.is_webgpu_compatible();
   output->power_efficient = input.power_efficient();
   output->read_lock_fences_enabled = input.read_lock_fences_enabled();
   output->interactive_content = input.interactive_content();
 
   // double.
-  DESERIALIZE_INTO_OPT(device_scale_factor);
-  DESERIALIZE_INTO_OPT(page_scale_factor);
-  DESERIALIZE_INTO_OPT(root_scroll_offset_x);
-  DESERIALIZE_INTO_OPT(root_scroll_offset_y);
-  DESERIALIZE_INTO_OPT(top_controls_visible_height);
-  DESERIALIZE_INTO_OPT(frame_rate);
-  DESERIALIZE_INTO_OPT(rtp_timestamp);
+  output->device_scale_factor = input.device_scale_factor();
+  output->page_scale_factor = input.page_scale_factor();
+  output->root_scroll_offset_x = input.root_scroll_offset_x();
+  output->root_scroll_offset_y = input.root_scroll_offset_y();
+  output->top_controls_visible_height = input.top_controls_visible_height();
+  output->frame_rate = input.frame_rate();
+  output->rtp_timestamp = input.rtp_timestamp();
 
-  if (input.has_rotation()) {
-    media::VideoRotation rotation;
-    if (!input.ReadRotation(&rotation))
-      return false;
+  READ_AND_ASSIGN_OPT(media::VideoTransformation, transformation,
+                      Transformation);
 
-    output->rotation = rotation;
-  }
+  READ_AND_ASSIGN_OPT(base::UnguessableToken, tracking_token, TrackingToken);
 
-  if (input.has_copy_mode()) {
-    media::VideoFrameMetadata::CopyMode copy_mode;
-    if (!input.ReadCopyMode(&copy_mode))
-      return false;
-    output->copy_mode = copy_mode;
-  }
-
-  READ_AND_ASSIGN_OPT(base::UnguessableToken, overlay_plane_id, OverlayPlaneId);
-
+  READ_AND_ASSIGN_OPT(gfx::Size, source_size, SourceSize);
   READ_AND_ASSIGN_OPT(gfx::Rect, capture_update_rect, CaptureUpdateRect);
+  READ_AND_ASSIGN_OPT(gfx::Rect, region_capture_rect, RegionCaptureRect);
 
   READ_AND_ASSIGN_OPT(base::TimeTicks, receive_time, ReceiveTime);
   READ_AND_ASSIGN_OPT(base::TimeTicks, capture_begin_time, CaptureBeginTime);
@@ -84,6 +132,14 @@ bool StructTraits<media::mojom::VideoFrameMetadataDataView,
   READ_AND_ASSIGN_OPT(base::TimeDelta, frame_duration, FrameDuration);
   READ_AND_ASSIGN_OPT(base::TimeDelta, wallclock_frame_duration,
                       WallclockFrameDuration);
+
+#if BUILDFLAG(IS_ANDROID)
+  READ_AND_ASSIGN_OPT(gpu::VulkanYCbCrInfo, ycbcr_info, YcbcrInfo);
+#endif
+
+  if (!input.ReadCaptureVersion(&output->capture_version)) {
+    return false;
+  }
 
   return true;
 }

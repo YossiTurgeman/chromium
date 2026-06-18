@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Top-level presubmit script for dependency_analysis.
@@ -14,9 +14,7 @@ def CommonChecks(input_api, output_api):
         output_api,
         input_api.PresubmitLocalPath(),
         files_to_check=[r'.+_unittest\.py$'],
-        files_to_skip=[],
-        run_on_python2=False,
-        run_on_python3=True)
+        files_to_skip=[])
 
     return input_api.RunTests(checks, False)
 

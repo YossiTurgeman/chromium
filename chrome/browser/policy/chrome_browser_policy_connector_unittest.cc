@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@
 
 namespace policy {
 
-#if !defined(OS_CHROMEOS)
+#if !BUILDFLAG(IS_CHROMEOS)
 // HasMachineLevelPolicies() is not implemented on ChromeOS.
 TEST(ChromeBrowserPolicyConnectorTest, HasMachineLevelPolicies) {
   base::test::TaskEnvironment env;
@@ -33,6 +33,6 @@ TEST(ChromeBrowserPolicyConnectorTest, HasMachineLevelPolicies) {
   EXPECT_TRUE(connector.HasMachineLevelPolicies());
   BrowserPolicyConnectorBase::SetPolicyProviderForTesting(nullptr);
 }
-#endif  // !defined(OS_CHROMEOS)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace policy

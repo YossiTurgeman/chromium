@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_DOM_EVENTS_ADD_EVENT_LISTENER_OPTIONS_RESOLVED_H_
 
 #include "third_party/blink/renderer/bindings/core/v8/v8_add_event_listener_options.h"
+#include "third_party/blink/renderer/core/core_export.h"
 
 namespace blink {
 
@@ -32,11 +33,15 @@ class CORE_EXPORT AddEventListenerOptionsResolved
   void SetPassiveSpecified(bool specified) { passive_specified_ = specified; }
   bool PassiveSpecified() const { return passive_specified_; }
 
+  void SetAnimationTrigger(bool val) { animation_trigger_ = val; }
+  bool IsAnimationTrigger() const { return animation_trigger_; }
+
   void Trace(Visitor*) const override;
 
  private:
-  bool passive_forced_for_document_target_;
-  bool passive_specified_;
+  bool passive_forced_for_document_target_{false};
+  bool passive_specified_{false};
+  bool animation_trigger_{false};
 };
 
 }  // namespace blink

@@ -1,74 +1,261 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "extensions/common/extension_features.h"
 
+#include "base/feature_list.h"
+#include "build/branding_buildflags.h"
+#include "build/build_config.h"
+
 namespace extensions_features {
 
-// Controls whether we redirect the NTP to the chrome://extensions page or show
-// a middle slot promo, and which of the the three checkup banner messages
-// (performance focused, privacy focused or neutral) to show.
-const base::Feature kExtensionsCheckup{"ExtensionsCheckup",
-                                       base::FEATURE_DISABLED_BY_DEFAULT};
+///////////////////////////////////////////////////////////////////////////////
+// API Features
+///////////////////////////////////////////////////////////////////////////////
 
-// Controls whether we disable extensions for malware.
-const base::Feature kDisableMalwareExtensionsRemotely{
-    "DisableMalwareExtensionsRemotely", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kApiActionOpenPopup, base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Parameters for ExtensionsCheckup feature.
-const char kExtensionsCheckupEntryPointParameter[] = "entry_point";
-const char kExtensionsCheckupBannerMessageParameter[] = "banner_message_type";
+BASE_FEATURE(kApiAlarmsCreateLengthLimit, base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Constants for ExtensionsCheckup parameters.
-// Indicates that the user should be shown the chrome://extensions page on
-// startup.
-const char kStartupEntryPoint[] = "startup";
-// Indicates that the user should be shown a promo on the NTP leading to the
-// chrome://extensions page.
-const char kNtpPromoEntryPoint[] = "promo";
-// Indicates the focus of the message shown on chrome://the extensions page
-// banner and the NTP promo.
-const char kPerformanceMessage[] = "0";
-const char kPrivacyMessage[] = "1";
-const char kNeutralMessage[] = "2";
+BASE_FEATURE(kApiContentSettingsClipboard, base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Forces requests to go through WebRequestProxyingURLLoaderFactory.
-const base::Feature kForceWebRequestProxyForTest{
-    "ForceWebRequestProxyForTest", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kApiEnterpriseKioskInput, base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Enables the UI in the install prompt which lets a user choose to withhold
-// requested host permissions by default.
-const base::Feature kAllowWithholdingExtensionPermissionsOnInstall{
-    "AllowWithholdingExtensionPermissionsOnInstall",
-    base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kApiMimeHandler, base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Enables support for the "match_origin_as_fallback" property in content
-// scripts.
-const base::Feature kContentScriptsMatchOriginAsFallback{
-    "ContentScriptsMatchOriginAsFallback", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kApiRuntimeActionData, base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Reports Extensions.WebRequest.KeepaliveRequestFinished when enabled.
-const base::Feature kReportKeepaliveUkm{"ReportKeepaliveUkm",
-                                        base::FEATURE_ENABLED_BY_DEFAULT};
+BASE_FEATURE(kApiPermissionsHostAccessRequests,
+             base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Enables callers of the GetAuthToken API to request for the unbundled consent
-// UI and populates the scopes parameter in the GetAuthToken callback function.
-const base::Feature kReturnScopesInGetAuthToken{
-    "ReturnScopesInGetAuthToken", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kApiUserScriptsExecute, base::FEATURE_ENABLED_BY_DEFAULT);
 
-// If enabled, allows the GetAuthToken API to provide the "selected_user_id"
-// parameter to the server, indicating which account to request permissions
-// from.
-const base::Feature kSelectedUserIdInGetAuthToken{
-    "SelectedUserIdInGetAuthToken", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kApiUserScriptsMultipleWorlds, base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Feature used mostly for exposing a field-trial-param-based mechanism for
-// adding remaining strugglers to the CORB/CORS allowlist which has been
-// deprecated in Chrome 87.
-const base::Feature kCorbCorsAllowlist{"CorbCorsAllowlist",
-                                       base::FEATURE_DISABLED_BY_DEFAULT};
-const char kCorbCorsAllowlistParamName[] =
-    "CorbCorsAllowlistDeprecationParamName";
+BASE_FEATURE(kApiOdfsConfigPrivate, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kApiContextualTasksPrivate, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kApiGlicPrivate, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kApiEnterpriseReportingPrivateOnDataMaskingRulesTriggered,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kApiGlicAccessFromGoogleWebpage,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kApiGlicAccessFromPromotionPage,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+const base::FeatureParam<std::string> kProdPromptEndpointUrlParam(
+    &kApiGlicAccessFromGoogleWebpage,
+    /*name=*/"prod_prompt_endpoint_url",
+    /*default_value=*/
+    "https://confection.pa.googleapis.com/v1:GetPromptForWebProperty");
+
+const base::FeatureParam<std::string> kGlicInvokeApiOAuth2ScopeParam(
+    &kApiGlicAccessFromGoogleWebpage,
+    /*name=*/"glic_invoke_api_oauth2_scope",
+    /*default_value=*/
+    "https://www.googleapis.com/auth/chrome.autobrowse.readprompts");
+
+const base::FeatureParam<bool> kGlicRequireConsentForInvokeParam(
+    &kApiGlicAccessFromGoogleWebpage,
+    "glic_require_consent_for_invoke",
+    false);
+
+const base::FeatureParam<GlicOpenNewTabDisposition>::Option
+    kGlicOpenNewTabDispositionOptions[] = {
+        {GlicOpenNewTabDisposition::kForeground,
+         kGlicOpenNewTabDispositionForeground},
+        {GlicOpenNewTabDisposition::kBackground,
+         kGlicOpenNewTabDispositionBackground},
+        {GlicOpenNewTabDisposition::kForegroundIfNotConsented,
+         kGlicOpenNewTabDispositionForegroundIfNotConsented}};
+
+const base::FeatureParam<GlicOpenNewTabDisposition>
+    kGlicOpenNewTabDispositionParam{
+        &kApiGlicAccessFromGoogleWebpage, "glic_open_new_tab_disposition",
+        GlicOpenNewTabDisposition::kForegroundIfNotConsented,
+        &kGlicOpenNewTabDispositionOptions};
+
+BASE_FEATURE(kApiProxyOverrideRulesPrivate, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kApiRuntimeGetPlatformInfoNaClArch,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kWebRequestSecurityInfo, base::FEATURE_DISABLED_BY_DEFAULT);
+
+///////////////////////////////////////////////////////////////////////////////
+// Other Features
+///////////////////////////////////////////////////////////////////////////////
+
+// For historical reasons, this includes some APIs. Please don't add more.
+
+BASE_FEATURE(kAllowWithholdingExtensionPermissionsOnInstall,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kCheckingNoExtensionIdInExtensionIpcs,
+             "EMF_NO_EXTENSION_ID_FOR_EXTENSION_SOURCE",
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kComponentExtensionAllowWorkerChromeResources,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kEnableWebHidInWebView, base::FEATURE_ENABLED_BY_DEFAULT);
+
+#if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+// Disabled by default because on first-run we don't have a Finch seed yet, so
+// we want to default to the safe behavior of no extensions.
+BASE_FEATURE(kEnableExtensionsForCorpDesktopAndroid,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+#endif
+
+BASE_FEATURE(kExtensionDisableUnsupportedDeveloper,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionLocalizationGuid, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionIconVariants, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionsBackgroundCompilation,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE_PARAM(base::TimeDelta,
+                   kBackgroundCompilationTimeout,
+                   &kExtensionsBackgroundCompilation,
+                   "timeout",
+                   base::Milliseconds(0));
+
+// Default to the same value v8 uses to code cache scripts.
+BASE_FEATURE_PARAM(size_t,
+                   kMinScriptSizeForBackgroundCompilation,
+                   &kExtensionsBackgroundCompilation,
+                   "min_script_size",
+                   1024);
+BASE_FEATURE_PARAM(size_t,
+                   kMaxScriptSizeForBackgroundCompilation,
+                   &kExtensionsBackgroundCompilation,
+                   "max_script_size",
+                   0);
+
+BASE_FEATURE(kExtensionProtocolHandlers, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionTabContextMenu, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionsMenuAccessControl,
+#if BUILDFLAG(IS_ANDROID)
+             base::FEATURE_ENABLED_BY_DEFAULT
+#else
+             base::FEATURE_DISABLED_BY_DEFAULT
+#endif
+);
+
+BASE_FEATURE(kExtensionsMenuAccessControlWithPermittedSites,
+             "ExtensionsMenuAccessControlWithPermittedSitesName",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionsServiceWorkerStartRetry,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionsToolbarZeroState, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kForceWebRequestProxyForTest, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kLaunchWindowsNativeHostsDirectly,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kSafeBrowsingCrxAllowlistAutoDisable,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kStructuredCloningForMessaging, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// TODO(https://crbug.com/328494022): Disable this on ChromeOS, too, and then
+// eventually remove it.
+BASE_FEATURE(kWebstoreHostedApp,
+#if BUILDFLAG(IS_CHROMEOS)
+             base::FEATURE_ENABLED_BY_DEFAULT
+#else
+             base::FEATURE_DISABLED_BY_DEFAULT
+#endif  // BUILDFLAG(IS_CHROMEOS)
+);
+
+// TODO(crbug.com/399447642): Clean up this feature after confirming the fix is
+// sufficient.
+BASE_FEATURE(kWebstoreInstallerUserGestureKillSwitch,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kDeclarativeNetRequestSafeRuleLimits,
+             "DeclarativeNetRequestSafeDynamicRules",
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExperimentalOmniboxLabs, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kDeclarativeNetRequestResponseHeaderMatching,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kIncludeJSCallStackInExtensionApiRequest,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kUseNewServiceWorkerTaskQueue, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kDeclarativeNetRequestHeaderSubstitution,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kDisableDisableExtensionsExceptCommandLineSwitch,
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING) && !BUILDFLAG(IS_CHROMEOS)
+             base::FEATURE_ENABLED_BY_DEFAULT
+#else
+             base::FEATURE_DISABLED_BY_DEFAULT
+#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
+);
+
+BASE_FEATURE(kDisableExtensionsOnChromeUrlsSwitch,
+// TODO (crbug.com/426554244): Determine if this switch should be
+// removed for desktop-android builds as well.
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING) && !BUILDFLAG(IS_CHROMEOS) && \
+    !BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+             base::FEATURE_ENABLED_BY_DEFAULT
+#else
+             base::FEATURE_DISABLED_BY_DEFAULT
+#endif
+);
+
+BASE_FEATURE(kEnterpriseExtensionDOMActivityTelemetry,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kDebuggerAPIRestrictedToDevMode,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionBrowserNamespaceOnWebPages,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kAvoidCloneArgsOnExtensionFunctionDispatch,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kExtensionContentVerificationUsesExtensionRoot,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kEnableShouldShowPromotion, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kSearchEngineExplicitChoiceDialog,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE_PARAM(bool,
+                   kSearchEngineExplicitChoiceDialogEscapable,
+                   &kSearchEngineExplicitChoiceDialog,
+                   "escapable",
+                   false);
+
+BASE_FEATURE_PARAM(bool,
+                   kSearchEngineExplicitChoiceDialogUnlimitedShows,
+                   &kSearchEngineExplicitChoiceDialog,
+                   "unlimited_shows",
+                   true);
+
+BASE_FEATURE(kSearchEngineUnconditionalDialog,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kOptimizeWebRequestProxy, base::FEATURE_DISABLED_BY_DEFAULT);
 
 }  // namespace extensions_features

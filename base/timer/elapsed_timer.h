@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 #define BASE_TIMER_ELAPSED_TIMER_H_
 
 #include "base/base_export.h"
-#include "base/macros.h"
 #include "base/time/time.h"
 
 namespace base {
@@ -15,26 +14,27 @@ namespace base {
 class BASE_EXPORT ElapsedTimer {
  public:
   ElapsedTimer();
-  ElapsedTimer(ElapsedTimer&& other);
 
-  void operator=(ElapsedTimer&& other);
+  ElapsedTimer(const ElapsedTimer&) = default;
+  ElapsedTimer& operator=(const ElapsedTimer&) = default;
 
   // Returns the time elapsed since object construction.
   TimeDelta Elapsed() const;
 
   // Returns the timestamp of the creation of this timer.
-  TimeTicks Begin() const { return begin_; }
+  TimeTicks start_time() const { return start_time_; }
 
  private:
-  TimeTicks begin_;
-
-  DISALLOW_COPY_AND_ASSIGN(ElapsedTimer);
+  TimeTicks start_time_;
 };
 
 // A simple wrapper around ThreadTicks::Now().
 class BASE_EXPORT ElapsedThreadTimer {
  public:
   ElapsedThreadTimer();
+
+  ElapsedThreadTimer(const ElapsedThreadTimer&) = default;
+  ElapsedThreadTimer& operator=(const ElapsedThreadTimer&) = default;
 
   // Returns the ThreadTicks time elapsed since object construction.
   // Only valid if |is_supported()| returns true, otherwise returns TimeDelta().
@@ -43,29 +43,49 @@ class BASE_EXPORT ElapsedThreadTimer {
   bool is_supported() const { return is_supported_; }
 
  private:
-  const bool is_supported_;
-  const ThreadTicks begin_;
-
-  DISALLOW_COPY_AND_ASSIGN(ElapsedThreadTimer);
+  bool is_supported_;
+  ThreadTicks begin_;
 };
 
-// Whenever there's a ScopedMockElapsedTimersForTest in scope,
-// Elapsed(Thread)Timers will always return kMockElapsedTime from Elapsed().
-// This is useful, for example, in unit tests that verify that their impl
-// records timing histograms. It enables such tests to observe reliable timings.
+// A simple wrapper around LiveTicks::Now().
+class BASE_EXPORT ElapsedLiveTimer {
+ public:
+  ElapsedLiveTimer();
+
+  ElapsedLiveTimer(const ElapsedLiveTimer&) = default;
+  ElapsedLiveTimer& operator=(const ElapsedLiveTimer&) = default;
+
+  // Returns the time elapsed since object construction, not including time that
+  // the system was suspended.
+  TimeDelta Elapsed() const;
+
+  // Returns the timestamp of the creation of this timer.
+  LiveTicks start_time() const { return start_time_; }
+
+ private:
+  LiveTicks start_time_;
+};
+
+// Whenever there's a ScopedMockElapsedTimersForTest in scope, every
+// ElapsedTimer (and variants like ElapsedThreadTimer and ElapsedLiveTimer) will
+// always return kMockElapsedTime from Elapsed(). This is useful, for example,
+// in unit tests that verify that their impl records timing histograms. It
+// enables such tests to observe reliable timings.
 class BASE_EXPORT ScopedMockElapsedTimersForTest {
  public:
-  static constexpr TimeDelta kMockElapsedTime =
-      TimeDelta::FromMilliseconds(1337);
+  static constexpr TimeDelta kMockElapsedTime = Milliseconds(1337);
 
   // ScopedMockElapsedTimersForTest is not thread-safe (it must be instantiated
   // in a test before other threads begin using ElapsedTimers; and it must
   // conversely outlive any usage of ElapsedTimer in that test).
   ScopedMockElapsedTimersForTest();
-  ~ScopedMockElapsedTimersForTest();
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(ScopedMockElapsedTimersForTest);
+  ScopedMockElapsedTimersForTest(const ScopedMockElapsedTimersForTest&) =
+      delete;
+  ScopedMockElapsedTimersForTest& operator=(
+      const ScopedMockElapsedTimersForTest&) = delete;
+
+  ~ScopedMockElapsedTimersForTest();
 };
 
 }  // namespace base

@@ -1,32 +1,34 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_BROWSER_PICTURE_IN_PICTURE_PICTURE_IN_PICTURE_SERVICE_IMPL_H_
 #define CONTENT_BROWSER_PICTURE_IN_PICTURE_PICTURE_IN_PICTURE_SERVICE_IMPL_H_
 
-#include <memory>
-
+#include "base/memory/weak_ptr.h"
 #include "content/common/content_export.h"
-#include "content/public/browser/frame_service_base.h"
+#include "content/public/browser/document_service.h"
+#include "content/public/browser/immersive_playback_options.h"
+#include "media/mojo/mojom/media_player.mojom.h"
+#include "mojo/public/cpp/bindings/pending_associated_remote.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "third_party/blink/public/mojom/picture_in_picture/picture_in_picture.mojom.h"
 
 namespace content {
 
-class PictureInPictureWindowControllerImpl;
+class VideoPictureInPictureWindowControllerImpl;
 
-// Receives Picture-in-Picture messages from a given RenderFrame. There is one
-// PictureInPictureServiceImpl per RenderFrameHost. The service pipes the
-// `StartSession()` call to the PictureInPictureWindowControllerImpl which owns
-// the created session. The same object will get notified when the service is
-// killed given that the PictureInPictureWindowControllerImpl is
-// WebContents-bound instead of RenderFrameHost.
-// PictureInPictureServiceImpl owns itself. It self-destruct as needed, see the
-// FrameServiceBase's documentation for more information.
+// Receives Picture-in-Picture messages from a given RenderFrame for video
+// Picture-in-Picture mode. There is one PictureInPictureServiceImpl per
+// RenderFrameHost. The service pipes the `StartSession()` call to the
+// VideoPictureInPictureWindowControllerImpl which owns the created session. The
+// same object will get notified when the service is killed given that the
+// VideoPictureInPictureWindowControllerImpl is WebContents-bound instead of
+// RenderFrameHost.  PictureInPictureServiceImpl owns itself. It self-destructs
+// as needed, see the DocumentService's documentation for more information.
 class CONTENT_EXPORT PictureInPictureServiceImpl final
-    : public content::FrameServiceBase<blink::mojom::PictureInPictureService> {
+    : public content::DocumentService<blink::mojom::PictureInPictureService> {
  public:
   static void Create(
       RenderFrameHost*,
@@ -36,26 +38,66 @@ class CONTENT_EXPORT PictureInPictureServiceImpl final
       RenderFrameHost*,
       mojo::PendingReceiver<blink::mojom::PictureInPictureService>);
 
+  PictureInPictureServiceImpl(const PictureInPictureServiceImpl&) = delete;
+  PictureInPictureServiceImpl& operator=(const PictureInPictureServiceImpl&) =
+      delete;
+
   // PictureInPictureService implementation.
   void StartSession(
       uint32_t player_id,
-      const base::Optional<viz::SurfaceId>& surface_id,
+      mojo::PendingAssociatedRemote<media::mojom::MediaPlayer> player_remote,
+      const viz::SurfaceId& surface_id,
       const gfx::Size& natural_size,
       bool show_play_pause_button,
       mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>,
+      const gfx::Rect& source_bounds,
+      bool request_immersive,
       StartSessionCallback) final;
 
  private:
   friend class PictureInPictureSession;
 
+  struct PendingSession {
+    PendingSession(
+        uint32_t player_id,
+        mojo::PendingAssociatedRemote<media::mojom::MediaPlayer> player_remote,
+        const viz::SurfaceId& surface_id,
+        const gfx::Size& natural_size,
+        bool show_play_pause_button,
+        mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+            observer,
+        const gfx::Rect& source_bounds,
+        StartSessionCallback callback);
+    ~PendingSession();
+
+    uint32_t player_id;
+    mojo::PendingAssociatedRemote<media::mojom::MediaPlayer> player_remote;
+    viz::SurfaceId surface_id;
+    gfx::Size natural_size;
+    bool show_play_pause_button;
+    mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver> observer;
+    gfx::Rect source_bounds;
+    StartSessionCallback callback;
+  };
+
   PictureInPictureServiceImpl(
-      RenderFrameHost*,
+      RenderFrameHost&,
       mojo::PendingReceiver<blink::mojom::PictureInPictureService>);
   ~PictureInPictureServiceImpl() override;
 
-  PictureInPictureWindowControllerImpl& GetController();
+  VideoPictureInPictureWindowControllerImpl& GetController();
 
-  DISALLOW_COPY_AND_ASSIGN(PictureInPictureServiceImpl);
+  void StartSessionInternal(std::unique_ptr<PendingSession> pending_session,
+                            std::optional<ImmersiveOptions> immersive_options);
+
+  void StartSessionImmersive(std::unique_ptr<PendingSession> pending_session);
+
+  void OnImmersivePlaybackConfirmation(
+      std::unique_ptr<PendingSession> pending_session,
+      ImmersivePlaybackConfirmationResult result);
+
+  base::WeakPtrFactory<PictureInPictureServiceImpl>
+      immersive_confirmation_weak_factory_{this};
 };
 
 }  // namespace content

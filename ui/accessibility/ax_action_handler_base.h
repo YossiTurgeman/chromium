@@ -1,11 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_ACCESSIBILITY_AX_ACTION_HANDLER_BASE_H_
 #define UI_ACCESSIBILITY_AX_ACTION_HANDLER_BASE_H_
 
-#include "ui/accessibility/ax_export.h"
+#include "ui/accessibility/ax_base_export.h"
 #include "ui/accessibility/ax_tree_id.h"
 
 namespace ui {
@@ -20,7 +20,7 @@ struct AXActionData;
 //
 // Subclasses can use |tree_id| when annotating their |AXNodeData| for clients
 // to respond with the appropriate target node id.
-class AX_EXPORT AXActionHandlerBase {
+class AX_BASE_EXPORT AXActionHandlerBase {
  public:
   virtual ~AXActionHandlerBase();
 
@@ -36,18 +36,18 @@ class AX_EXPORT AXActionHandlerBase {
   const AXTreeID& ax_tree_id() const { return tree_id_; }
 
  protected:
-  // Initializes the AXActionHandlerBase subclass with ui::AXTreeIDUnknown().
+  // Initializes the AXActionHandlerBase subclass with AXTreeIDUnknown().
   AXActionHandlerBase();
 
   // Initializes the AXActionHandlerBase subclass with |ax_tree_id|. It is Ok to
-  // pass ui::AXTreeIDUnknown() and then call SetAXTreeID() at a later point.
+  // pass AXTreeIDUnknown() and then call SetAXTreeID() at a later point.
   explicit AXActionHandlerBase(const AXTreeID& ax_tree_id);
 
-  // Change the AXTreeID.
   void SetAXTreeID(AXTreeID new_ax_tree_id);
+  void RemoveAXTreeID();
 
  private:
-  // Register or unregister this class with |AXTreeIDRegistry|.
+  // Register or unregister this class with |AXActionHandlerRegistry|.
   void UpdateActiveState(bool active);
 
   // Manually set in this base class, but automatically set by instances of the

@@ -1,4 +1,4 @@
-# Copyright 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -95,7 +95,7 @@ def GetTestName(test):
 def FilterTestSuite(suite, gtest_filter):
   """Returns a new filtered tests suite based on the given gtest filter.
 
-  See https://github.com/google/googletest/blob/master/googletest/docs/AdvancedGuide.md
+  See https://github.com/google/googletest/blob/main/docs/advanced.md
   for gtest_filter specification.
   """
   return unittest.TestSuite(FilterTests(GetTestsFromSuite(suite), gtest_filter))
@@ -116,15 +116,17 @@ def FilterTests(all_tests, gtest_filter):
   return [test for test in all_tests if GetTestName(test) in filtered_names]
 
 
-def FilterTestNames(all_tests, gtest_filter):
+def FilterTestNames(all_tests, gtest_filter, test_name_stripped_func=None):
   """Filter a list of test names based on the given gtest filter.
 
-  See https://github.com/google/googletest/blob/master/googletest/docs/AdvancedGuide.md
+  See https://github.com/google/googletest/blob/main/docs/advanced.md
   for gtest_filter specification.
 
   Args:
     all_tests: List of test names.
     gtest_filter: Filter to apply.
+    test_name_stripped_func: Optional function to strip prefixes from test names
+        for checking if the base test name matches the filter.
 
   Returns:
     Filtered subset of the given list of test names.
@@ -145,11 +147,23 @@ def FilterTestNames(all_tests, gtest_filter):
   tests = []
   test_set = set()
   for pattern in positive_patterns:
-    pattern_tests = [
-        test for test in all_tests
-        if (fnmatch.fnmatch(test, pattern)
-            and not (neg_pats and neg_pats.match(test))
-            and test not in test_set)]
+    pattern_tests = []
+    for test in all_tests:
+      if test in test_set:
+        continue
+
+      test_stripped = (test_name_stripped_func(test)
+                       if test_name_stripped_func else test)
+
+      pos_match = (fnmatch.fnmatch(test, pattern)
+                   or fnmatch.fnmatch(test_stripped, pattern))
+
+      neg_match = neg_pats and (neg_pats.match(test)
+                                or neg_pats.match(test_stripped))
+
+      if pos_match and not neg_match:
+        pattern_tests.append(test)
+
     tests.extend(pattern_tests)
     test_set.update(pattern_tests)
   return tests

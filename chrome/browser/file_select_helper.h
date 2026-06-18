@@ -1,58 +1,70 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_FILE_SELECT_HELPER_H_
 #define CHROME_BROWSER_FILE_SELECT_HELPER_H_
 
-#include <map>
 #include <memory>
 #include <vector>
 
-#include "base/compiler_specific.h"
+#include "base/callback_list.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/ref_counted.h"
+#include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
-#include "components/safe_browsing/buildflags.h"
+#include "components/enterprise/buildflags/buildflags.h"
+#include "components/enterprise/common/files_scan_data.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/render_widget_host.h"
-#include "content/public/browser/render_widget_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "net/base/directory_lister.h"
 #include "third_party/blink/public/mojom/choosers/file_chooser.mojom.h"
 #include "ui/shell_dialogs/select_file_dialog.h"
 
-#if BUILDFLAG(FULL_SAFE_BROWSING)
-#include "chrome/browser/safe_browsing/cloud_content_scanning/deep_scanning_dialog_delegate.h"
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+#include "chrome/browser/enterprise/connectors/analysis/content_analysis_delegate.h"
 #endif
 
 class Profile;
+class ScopedDisallowPictureInPicture;
+class ScopedTuckPictureInPicture;
 
 namespace content {
 class FileSelectListener;
 class WebContents;
 }
 
+namespace tabs {
+class TabInterface;
+}
+
 namespace ui {
+class DialogModel;
 struct SelectedFileInfo;
 }
+
+namespace policy {
+FORWARD_DECLARE_TEST(DlpFilesControllerAshBrowserTest, FilesUploadCallerPassed);
+}  // namespace policy
 
 // This class handles file-selection requests coming from renderer processes.
 // It implements both the initialisation and listener functions for
 // file-selection dialogs.
 //
-// Since FileSelectHelper listens to observations of a widget, it needs to live
-// on and be destroyed on the UI thread. References to FileSelectHelper may be
+// Since FileSelectHelper listens to WebContentsObserver, it needs to live on
+// and be destroyed on the UI thread. References to FileSelectHelper may be
 // passed on to other threads.
 class FileSelectHelper : public base::RefCountedThreadSafe<
                              FileSelectHelper,
                              content::BrowserThread::DeleteOnUIThread>,
                          public ui::SelectFileDialog::Listener,
                          public content::WebContentsObserver,
-                         public content::RenderWidgetHostObserver,
                          private net::DirectoryLister::DirectoryListerDelegate {
  public:
+  FileSelectHelper(const FileSelectHelper&) = delete;
+  FileSelectHelper& operator=(const FileSelectHelper&) = delete;
+
   // Show the file chooser dialog.
   static void RunFileChooser(
       content::RenderFrameHost* render_frame_host,
@@ -69,6 +81,8 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   friend class base::RefCountedThreadSafe<FileSelectHelper>;
   friend class base::DeleteHelper<FileSelectHelper>;
   friend class FileSelectHelperContactsAndroid;
+  friend class FileSelectHelperTest;
+  friend class FileSelectHelperChromeOSTest;
   friend struct content::BrowserThread::DeleteOnThread<
       content::BrowserThread::UI>;
 
@@ -77,16 +91,39 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest, GetSanitizedFileName);
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest, LastSelectedDirectory);
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
-                           DeepScanCompletionCallback_NoFiles);
+                           ContentAnalysisCompletionCallback_NoFiles);
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
-                           DeepScanCompletionCallback_OneOKFile);
+                           ContentAnalysisCompletionCallback_OneOKFile);
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
-                           DeepScanCompletionCallback_TwoOKFiles);
+                           ContentAnalysisCompletionCallback_TwoOKFiles);
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
-                           DeepScanCompletionCallback_TwoBadFiles);
+                           ContentAnalysisCompletionCallback_TwoBadFiles);
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
-                           DeepScanCompletionCallback_OKBadFiles);
+                           ContentAnalysisCompletionCallback_OKBadFiles);
+  FRIEND_TEST_ALL_PREFIXES(
+      FileSelectHelperTest,
+      ContentAnalysisCompletionCallback_SystemFilesSkipped);
+  FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
+                           ContentAnalysisCompletionCallback_SystemOKBadFiles);
+  FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
+                           ContentAnalysisCompletionCallback_FolderUpload_OK);
+  FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
+                           ContentAnalysisCompletionCallback_FolderUpload_Bad);
+  FRIEND_TEST_ALL_PREFIXES(
+      FileSelectHelperTest,
+      ContentAnalysisCompletionCallback_FolderUploadBlockedThenAllowed);
+  FRIEND_TEST_ALL_PREFIXES(
+      FileSelectHelperTest,
+      ContentAnalysisCompletionCallback_FolderUpload_OKBad);
   FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest, GetFileTypesFromAcceptType);
+  FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest, MultipleFileExtensionsForMime);
+  FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest, ConfirmationDialog);
+  FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
+                           WebContentsDestroyedDuringAsyncFileProcessing);
+  FRIEND_TEST_ALL_PREFIXES(FileSelectHelperTest,
+                           EnumerateDirectory_TabDeactivated);
+  FRIEND_TEST_ALL_PREFIXES(policy::DlpFilesControllerAshBrowserTest,
+                           FilesUploadCallerPassed);
 
   explicit FileSelectHelper(Profile* profile);
   ~FileSelectHelper() override;
@@ -97,14 +134,6 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   void GetFileTypesInThreadPool(blink::mojom::FileChooserParamsPtr params);
   void GetSanitizedFilenameOnUIThread(
       blink::mojom::FileChooserParamsPtr params);
-#if BUILDFLAG(FULL_SAFE_BROWSING)
-  void CheckDownloadRequestWithSafeBrowsing(
-      const base::FilePath& default_path,
-      blink::mojom::FileChooserParamsPtr params);
-  void ProceedWithSafeBrowsingVerdict(const base::FilePath& default_path,
-                                      blink::mojom::FileChooserParamsPtr params,
-                                      bool allowed_by_safe_browsing);
-#endif
   void RunFileChooserOnUIThread(const base::FilePath& default_path,
                                 blink::mojom::FileChooserParamsPtr params);
 
@@ -113,22 +142,10 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   void RunFileChooserEnd();
 
   // SelectFileDialog::Listener overrides.
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override;
-  void FileSelectedWithExtraInfo(const ui::SelectedFileInfo& file,
-                                 int index,
-                                 void* params) override;
-  void MultiFilesSelected(const std::vector<base::FilePath>& files,
-                          void* params) override;
-  void MultiFilesSelectedWithExtraInfo(
-      const std::vector<ui::SelectedFileInfo>& files,
-      void* params) override;
-  void FileSelectionCanceled(void* params) override;
-
-  // content::RenderWidgetHostObserver overrides.
-  void RenderWidgetHostDestroyed(
-      content::RenderWidgetHost* widget_host) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
+  void MultiFilesSelected(
+      const std::vector<ui::SelectedFileInfo>& files) override;
+  void FileSelectionCanceled() override;
 
   // content::WebContentsObserver overrides.
   void RenderFrameHostChanged(content::RenderFrameHost* old_host,
@@ -136,28 +153,34 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
   void WebContentsDestroyed() override;
 
+  void InitLifecycleObserver(content::WebContents* web_contents);
+  void OnTabDeactivated(tabs::TabInterface* tab);
+
   void EnumerateDirectoryImpl(
       content::WebContents* tab,
       scoped_refptr<content::FileSelectListener> listener,
       const base::FilePath& path);
 
   // Kicks off a new directory enumeration.
-  void StartNewEnumeration(const base::FilePath& path);
+  void StartNewEnumeration(const base::FilePath& path,
+                           const std::u16string& display_name);
 
   // net::DirectoryLister::DirectoryListerDelegate overrides.
   void OnListFile(
       const net::DirectoryLister::DirectoryListerData& data) override;
   void OnListDone(int error) override;
 
-  void LaunchConfirmationDialog(
-      const base::FilePath& path,
-      std::vector<ui::SelectedFileInfo> selected_files);
+  std::unique_ptr<ui::DialogModel> CreateConfirmationDialog(
+      const std::u16string& display_name,
+      std::vector<blink::mojom::FileChooserFileInfoPtr> selected_files,
+      base::OnceCallback<
+          void(std::vector<blink::mojom::FileChooserFileInfoPtr>)> callback);
 
   // Cleans up and releases this instance. This must be called after the last
   // callback is received from the enumeration code.
   void EnumerateDirectoryEnd();
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   // Must be called from a MayBlock() task. Each selected file that is a package
   // will be zipped, and the zip will be passed to the render view host in place
   // of the package.
@@ -173,7 +196,7 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   // temporary destination, if the zip was successful. Otherwise returns an
   // empty path.
   static base::FilePath ZipPackage(const base::FilePath& path);
-#endif  // defined(OS_MAC)
+#endif  // BUILDFLAG(IS_MAC)
 
   // This function is the start of a call chain that may or may not be async
   // depending on the platform and features enabled.  The call to this method
@@ -183,18 +206,20 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   //
   // ConvertToFileChooserFileInfoList: converts a vector of SelectedFileInfo
   // into a vector of FileChooserFileInfoPtr and then calls
-  // PerformSafeBrowsingDeepScanIfNeeded().  On chromeos, the conversion is
+  // PerformContentAnalysisIfNeeded().  On chromeos, the conversion is
   // performed asynchronously.
   //
-  // PerformSafeBrowsingDeepScanIfNeeded: if the deep scanning feature is
+  // PerformContentAnalysisIfNeeded: if the deep scanning feature is
   // enabled and it is determined by enterprise policy that scans are required,
-  // starts the scans and sets DeepScanCompletionCallback() as the async
+  // starts the scans and sets ContentAnalysisCompletionCallback() as the async
   // callback.  If deep scanning is not enabled or is not supported on the
   // platform, this function calls NotifyListenerAndEnd() directly.
   //
-  // DeepScanCompletionCallback: processes the results of the deep scan.  Any
-  // files that did not pass the scan are removed from the list.  Ends by
-  // calling NotifyListenerAndEnd().
+  // ContentAnalysisCompletionCallback: processes the results of the deep scan.
+  // For folder upload, any files not passing the scan result in the entire
+  // folder being blocked (the list cleared). For multiple-file upload, any
+  // files that did not pass the scan are removed from the list. Ends by calling
+  // NotifyListenerAndEnd().
   //
   // NotifyListenerAndEnd: Informs the listener of the final list of files to
   // use and performs any required cleanup.
@@ -207,22 +232,26 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
       const std::vector<ui::SelectedFileInfo>& files);
 
   // Checks to see if scans are required for the specified files.
-  void PerformSafeBrowsingDeepScanIfNeeded(
+  void PerformContentAnalysisIfNeeded(
       std::vector<blink::mojom::FileChooserFileInfoPtr> list);
 
-#if BUILDFLAG(FULL_SAFE_BROWSING)
-  // Callback used to receive the results of a deep scan.
-  void DeepScanCompletionCallback(
+  // Helper to resolve virtual file system paths to local Fusebox paths on
+  // ChromeOS.
+  base::FilePath MaybeSubstituteFuseboxFilePath(
+      const blink::mojom::FileSystemFileInfo& file_system_info);
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+  // Callback used to receive the results of a content analysis scan.
+  void ContentAnalysisCompletionCallback(
       std::vector<blink::mojom::FileChooserFileInfoPtr> list,
-      const safe_browsing::DeepScanningDialogDelegate::Data& data,
-      const safe_browsing::DeepScanningDialogDelegate::Result& result);
+      const enterprise_connectors::ContentAnalysisDelegate::Data& data,
+      enterprise_connectors::ContentAnalysisDelegate::Result& result);
 #endif
 
-  // Finish the PerformSafeBrowsingDeepScanIfNeeded() handling after the
+  // Finish the PerformContentAnalysisIfNeeded() handling after the
   // deep scanning checks have been performed.  Deep scanning may change the
   // list of files chosen by the user, so the list of files passed here may be
-  // a subset of of the files passed to
-  // PerformSafeBrowsingDeepScanIfNeeded().
+  // a subset of of the files passed to PerformContentAnalysisIfNeeded().
   void NotifyListenerAndEnd(
       std::vector<blink::mojom::FileChooserFileInfoPtr> list);
 
@@ -248,7 +277,7 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   // |accept_types| contains only valid lowercased MIME types or file extensions
   // beginning with a period (.).
   static std::unique_ptr<ui::SelectFileDialog::FileTypeInfo>
-  GetFileTypesFromAcceptType(const std::vector<base::string16>& accept_types);
+  GetFileTypesFromAcceptType(const std::vector<std::u16string>& accept_types);
 
   // Check the accept type is valid. It is expected to be all lower case with
   // no whitespace.
@@ -271,12 +300,12 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
       const base::FilePath& suggested_path);
 
   // Profile used to set/retrieve the last used directory.
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
 
   // The RenderFrameHost and WebContents for the page showing a file dialog
   // (may only be one such dialog).
-  content::RenderFrameHost* render_frame_host_;
-  content::WebContents* web_contents_;
+  raw_ptr<content::RenderFrameHost> render_frame_host_;
+  raw_ptr<content::WebContents> web_contents_;
 
   // |listener_| receives the result of the FileSelectHelper.
   scoped_refptr<content::FileSelectListener> listener_;
@@ -302,17 +331,29 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   struct ActiveDirectoryEnumeration;
   std::unique_ptr<ActiveDirectoryEnumeration> directory_enumeration_;
 
-  ScopedObserver<content::RenderWidgetHost, content::RenderWidgetHostObserver>
-      observer_{this};
-
   // Temporary files only used on OSX. This class is responsible for deleting
   // these files when they are no longer needed.
   std::vector<base::FilePath> temporary_files_;
 
+  // Tracks whether the initial reference (added in RunFileChooser or
+  // EnumerateDirectoryImpl) has been released.
+  scoped_refptr<FileSelectHelper> self_ptr_;
+
   // Set to false in unit tests since there is no WebContents.
   bool abort_on_missing_web_contents_in_tests_ = true;
 
-  DISALLOW_COPY_AND_ASSIGN(FileSelectHelper);
+  base::CallbackListSubscription tab_deactivated_subscription_;
+
+#if !BUILDFLAG(IS_ANDROID)
+  // When not null, this prevents picture-in-picture windows from opening.
+  std::unique_ptr<ScopedDisallowPictureInPicture>
+      scoped_disallow_picture_in_picture_;
+
+  // When not null, this tucks picture-in-picture windows out of the way.
+  std::unique_ptr<ScopedTuckPictureInPicture> scoped_tuck_picture_in_picture_;
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+  base::WeakPtrFactory<FileSelectHelper> weak_ptr_factory_{this};
 };
 
 #endif  // CHROME_BROWSER_FILE_SELECT_HELPER_H_

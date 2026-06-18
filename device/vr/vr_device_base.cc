@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,20 @@
 
 #include <utility>
 
+#include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
+#include "build/build_config.h"
 #include "device/vr/public/cpp/vr_device_provider.h"
+
+#if BUILDFLAG(IS_WIN)
+#include "base/win/windows_types.h"
+#endif
 
 namespace device {
 
-VRDeviceBase::VRDeviceBase(mojom::XRDeviceId id) : id_(id) {}
+VRDeviceBase::VRDeviceBase(mojom::XRDeviceId id) : id_(id) {
+  device_data_.is_ar_blend_mode_supported = false;
+}
 
 VRDeviceBase::~VRDeviceBase() = default;
 
@@ -26,20 +34,6 @@ mojom::XRDeviceDataPtr VRDeviceBase::GetDeviceData() const {
 void VRDeviceBase::PauseTracking() {}
 
 void VRDeviceBase::ResumeTracking() {}
-
-mojom::VRDisplayInfoPtr VRDeviceBase::GetVRDisplayInfo() {
-  return display_info_.Clone();
-}
-
-void VRDeviceBase::ShutdownSession(base::OnceClosure on_completed) {
-  DVLOG(2) << __func__;
-  // TODO(https://crbug.com/1015594): The default implementation of running the
-  // callback immediately is backwards compatible, but runtimes should be
-  // updated to override this, calling the callback at the appropriate time
-  // after any necessary cleanup has been completed. Once that's done, make this
-  // method abstract.
-  std::move(on_completed).Run();
-}
 
 void VRDeviceBase::OnExitPresent() {
   DVLOG(2) << __func__ << ": !!listener_=" << !!listener_;
@@ -58,19 +52,9 @@ bool VRDeviceBase::HasExclusiveSession() {
 }
 
 void VRDeviceBase::ListenToDeviceChanges(
-    mojo::PendingAssociatedRemote<mojom::XRRuntimeEventListener> listener_info,
-    mojom::XRRuntime::ListenToDeviceChangesCallback callback) {
+    mojo::PendingAssociatedRemote<mojom::XRRuntimeEventListener>
+        listener_info) {
   listener_.Bind(std::move(listener_info));
-  std::move(callback).Run(display_info_.Clone());
-}
-
-void VRDeviceBase::SetVRDisplayInfo(mojom::VRDisplayInfoPtr display_info) {
-  DCHECK(display_info);
-  DCHECK(display_info->id == id_);
-  display_info_ = std::move(display_info);
-
-  if (listener_)
-    listener_->OnDisplayInfoChanged(display_info_.Clone());
 }
 
 void VRDeviceBase::OnVisibilityStateChanged(
@@ -79,11 +63,15 @@ void VRDeviceBase::OnVisibilityStateChanged(
     listener_->OnVisibilityStateChanged(visibility_state);
 }
 
-#if defined(OS_WIN)
-void VRDeviceBase::SetLuid(const LUID& luid) {
+void VRDeviceBase::SetArBlendModeSupported(bool is_ar_blend_mode_supported) {
+  device_data_.is_ar_blend_mode_supported = is_ar_blend_mode_supported;
+}
+
+#if BUILDFLAG(IS_WIN)
+void VRDeviceBase::SetLuid(const CHROME_LUID& luid) {
   if (luid.HighPart != 0 || luid.LowPart != 0) {
     // Only set the LUID if it exists and is nonzero.
-    device_data_.luid = base::make_optional<LUID>(luid);
+    device_data_.luid = luid;
   }
 }
 #endif
@@ -93,12 +81,13 @@ mojo::PendingRemote<mojom::XRRuntime> VRDeviceBase::BindXRRuntime() {
   return runtime_receiver_.BindNewPipeAndPassRemote();
 }
 
-void VRDeviceBase::SetInlinePosesEnabled(bool enable) {
-  inline_poses_enabled_ = enable;
+void VRDeviceBase::SetSupportedFeatures(
+        const std::vector<mojom::XRSessionFeature>& features) {
+  device_data_.supported_features = features;
 }
 
-void LogViewerType(VrViewerType type) {
-  base::UmaHistogramSparse("VRViewerType", static_cast<int>(type));
+void VRDeviceBase::SetDeviceData(device::mojom::XRDeviceData&& device_data) {
+  device_data_ = std::move(device_data);
 }
 
 }  // namespace device

@@ -1,13 +1,14 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "net/http/http_auth_sspi_win.h"
 
+#include <string_view>
 #include <vector>
 
 #include "base/base64.h"
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_auth.h"
@@ -28,11 +29,11 @@ namespace net {
 
 namespace {
 
-void MatchDomainUserAfterSplit(const base::string16& combined,
-                               const base::string16& expected_domain,
-                               const base::string16& expected_user) {
-  base::string16 actual_domain;
-  base::string16 actual_user;
+void MatchDomainUserAfterSplit(const std::u16string& combined,
+                               const std::u16string& expected_domain,
+                               const std::u16string& expected_user) {
+  std::u16string actual_domain;
+  std::u16string actual_user;
   SplitDomainAndUser(combined, &actual_domain, &actual_user);
   EXPECT_EQ(expected_domain, actual_domain);
   EXPECT_EQ(expected_user, actual_user);
@@ -49,15 +50,12 @@ void UnexpectedCallback(int result) {
 }  // namespace
 
 TEST(HttpAuthSSPITest, SplitUserAndDomain) {
-  MatchDomainUserAfterSplit(STRING16_LITERAL("foobar"), STRING16_LITERAL(""),
-                            STRING16_LITERAL("foobar"));
-  MatchDomainUserAfterSplit(STRING16_LITERAL("FOO\\bar"),
-                            STRING16_LITERAL("FOO"), STRING16_LITERAL("bar"));
+  MatchDomainUserAfterSplit(u"foobar", u"", u"foobar");
+  MatchDomainUserAfterSplit(u"FOO\\bar", u"FOO", u"bar");
 }
 
 TEST(HttpAuthSSPITest, DetermineMaxTokenLength_Normal) {
-  SecPkgInfoW package_info;
-  memset(&package_info, 0x0, sizeof(package_info));
+  SecPkgInfoW package_info = {};
   package_info.cbMaxToken = 1337;
 
   MockSSPILibrary mock_library{L"NTLM"};
@@ -83,9 +81,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_FirstRound) {
   // The first round should just consist of an unadorned "Negotiate" header.
   MockSSPILibrary mock_library{NEGOSSP_NAME};
   HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
-  std::string challenge_text = "Negotiate";
-  HttpAuthChallengeTokenizer challenge(challenge_text.begin(),
-                                       challenge_text.end());
+  HttpAuthChallengeTokenizer challenge("Negotiate");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&challenge));
 }
@@ -95,9 +91,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_TwoRounds) {
   // have a valid base64 token associated with it.
   MockSSPILibrary mock_library{NEGOSSP_NAME};
   HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
-  std::string first_challenge_text = "Negotiate";
-  HttpAuthChallengeTokenizer first_challenge(first_challenge_text.begin(),
-                                             first_challenge_text.end());
+  HttpAuthChallengeTokenizer first_challenge("Negotiate");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&first_challenge));
 
@@ -108,9 +102,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_TwoRounds) {
                 nullptr, "HTTP/intranet.google.com", std::string(), &auth_token,
                 NetLogWithSource(), base::BindOnce(&UnexpectedCallback)));
 
-  std::string second_challenge_text = "Negotiate Zm9vYmFy";
-  HttpAuthChallengeTokenizer second_challenge(second_challenge_text.begin(),
-                                              second_challenge_text.end());
+  HttpAuthChallengeTokenizer second_challenge("Negotiate Zm9vYmFy");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&second_challenge));
 }
@@ -120,9 +112,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_UnexpectedTokenFirstRound) {
   // should be treated as an invalid challenge from the server.
   MockSSPILibrary mock_library{NEGOSSP_NAME};
   HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
-  std::string challenge_text = "Negotiate Zm9vYmFy";
-  HttpAuthChallengeTokenizer challenge(challenge_text.begin(),
-                                       challenge_text.end());
+  HttpAuthChallengeTokenizer challenge("Negotiate Zm9vYmFy");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_INVALID,
             auth_sspi.ParseChallenge(&challenge));
 }
@@ -132,9 +122,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_MissingTokenSecondRound) {
   // an authentication challenge rejection from the server or proxy.
   MockSSPILibrary mock_library{NEGOSSP_NAME};
   HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
-  std::string first_challenge_text = "Negotiate";
-  HttpAuthChallengeTokenizer first_challenge(first_challenge_text.begin(),
-                                             first_challenge_text.end());
+  HttpAuthChallengeTokenizer first_challenge("Negotiate");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&first_challenge));
 
@@ -143,9 +131,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_MissingTokenSecondRound) {
             auth_sspi.GenerateAuthToken(
                 nullptr, "HTTP/intranet.google.com", std::string(), &auth_token,
                 NetLogWithSource(), base::BindOnce(&UnexpectedCallback)));
-  std::string second_challenge_text = "Negotiate";
-  HttpAuthChallengeTokenizer second_challenge(second_challenge_text.begin(),
-                                              second_challenge_text.end());
+  HttpAuthChallengeTokenizer second_challenge("Negotiate");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_REJECT,
             auth_sspi.ParseChallenge(&second_challenge));
 }
@@ -156,8 +142,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_NonBase64EncodedToken) {
   MockSSPILibrary mock_library{NEGOSSP_NAME};
   HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
   std::string first_challenge_text = "Negotiate";
-  HttpAuthChallengeTokenizer first_challenge(first_challenge_text.begin(),
-                                             first_challenge_text.end());
+  HttpAuthChallengeTokenizer first_challenge("Negotiate");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&first_challenge));
 
@@ -166,9 +151,7 @@ TEST(HttpAuthSSPITest, ParseChallenge_NonBase64EncodedToken) {
             auth_sspi.GenerateAuthToken(
                 nullptr, "HTTP/intranet.google.com", std::string(), &auth_token,
                 NetLogWithSource(), base::BindOnce(&UnexpectedCallback)));
-  std::string second_challenge_text = "Negotiate =happyjoy=";
-  HttpAuthChallengeTokenizer second_challenge(second_challenge_text.begin(),
-                                              second_challenge_text.end());
+  HttpAuthChallengeTokenizer second_challenge("Negotiate =happyjoy=");
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_INVALID,
             auth_sspi.ParseChallenge(&second_challenge));
 }
@@ -178,8 +161,7 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds) {
   MockSSPILibrary mock_library{NEGOSSP_NAME};
   HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
   std::string first_challenge_text = "Negotiate";
-  HttpAuthChallengeTokenizer first_challenge(first_challenge_text.begin(),
-                                             first_challenge_text.end());
+  HttpAuthChallengeTokenizer first_challenge("Negotiate");
   ASSERT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&first_challenge));
 
@@ -198,9 +180,7 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds) {
   EXPECT_EQ("<Default>'s token #1 for HTTP/intranet.google.com", decoded_token);
 
   // The server token is arbitrary.
-  std::string second_challenge_text = "Negotiate UmVzcG9uc2U=";
-  HttpAuthChallengeTokenizer second_challenge(second_challenge_text.begin(),
-                                              second_challenge_text.end());
+  HttpAuthChallengeTokenizer second_challenge("Negotiate UmVzcG9uc2U=");
   ASSERT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&second_challenge));
 
@@ -215,12 +195,12 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds) {
 
 // Test NetLogs produced while going through a full Negotiate handshake.
 TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds_Logging) {
-  RecordingBoundTestNetLog net_log;
+  RecordingNetLogObserver net_log_observer;
+  NetLogWithSource net_log_with_source =
+      NetLogWithSource::Make(NetLogSourceType::NONE);
   MockSSPILibrary mock_library{NEGOSSP_NAME};
   HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
-  std::string first_challenge_text = "Negotiate";
-  HttpAuthChallengeTokenizer first_challenge(first_challenge_text.begin(),
-                                             first_challenge_text.end());
+  HttpAuthChallengeTokenizer first_challenge("Negotiate");
   ASSERT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&first_challenge));
 
@@ -228,21 +208,19 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds_Logging) {
   ASSERT_EQ(OK,
             auth_sspi.GenerateAuthToken(
                 nullptr, "HTTP/intranet.google.com", std::string(), &auth_token,
-                net_log.bound(), base::BindOnce(&UnexpectedCallback)));
+                net_log_with_source, base::BindOnce(&UnexpectedCallback)));
 
   // The token is the ASCII string "Response" in base64.
-  std::string second_challenge_text = "Negotiate UmVzcG9uc2U=";
-  HttpAuthChallengeTokenizer second_challenge(second_challenge_text.begin(),
-                                              second_challenge_text.end());
+  HttpAuthChallengeTokenizer second_challenge("Negotiate UmVzcG9uc2U=");
   ASSERT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
             auth_sspi.ParseChallenge(&second_challenge));
   ASSERT_EQ(OK,
             auth_sspi.GenerateAuthToken(
                 nullptr, "HTTP/intranet.google.com", std::string(), &auth_token,
-                net_log.bound(), base::BindOnce(&UnexpectedCallback)));
+                net_log_with_source, base::BindOnce(&UnexpectedCallback)));
 
-  auto entries =
-      net_log.GetEntriesWithType(NetLogEventType::AUTH_LIBRARY_ACQUIRE_CREDS);
+  auto entries = net_log_observer.GetEntriesWithType(
+      NetLogEventType::AUTH_LIBRARY_ACQUIRE_CREDS);
   ASSERT_EQ(2u, entries.size());  // BEGIN and END.
   auto expected = base::JSONReader::Read(R"(
     {
@@ -251,11 +229,12 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds_Logging) {
         "security_status": 0
        }
     }
-  )");
+  )",
+                                         base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   EXPECT_EQ(expected, entries[1].params);
 
-  entries =
-      net_log.GetEntriesWithType(NetLogEventType::AUTH_LIBRARY_INIT_SEC_CTX);
+  entries = net_log_observer.GetEntriesWithType(
+      NetLogEventType::AUTH_LIBRARY_INIT_SEC_CTX);
   ASSERT_EQ(4u, entries.size());
 
   expected = base::JSONReader::Read(R"(
@@ -267,7 +246,8 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds_Logging) {
        },
        "spn": "HTTP/intranet.google.com"
     }
-  )");
+  )",
+                                    base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   EXPECT_EQ(expected, entries[0].params);
 
   expected = base::JSONReader::Read(R"(
@@ -289,7 +269,8 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds_Logging) {
          "security_status": 0
       }
     }
-  )");
+  )",
+                                    base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   EXPECT_EQ(expected, entries[1].params);
 
   expected = base::JSONReader::Read(R"(
@@ -311,7 +292,79 @@ TEST(HttpAuthSSPITest, GenerateAuthToken_FullHandshake_AmbientCreds_Logging) {
          "security_status": 0
       }
     }
-  )");
+  )",
+                                    base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   EXPECT_EQ(expected, entries[3].params);
 }
+
+TEST(HttpAuthSSPITest, GenerateAuthToken_Negotiate_WithDelegation) {
+  RecordingNetLogObserver net_log_observer;
+  NetLogWithSource net_log_with_source =
+      NetLogWithSource::Make(NetLogSourceType::NONE);
+  MockSSPILibrary mock_library{NEGOSSP_NAME};
+  HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NEGOTIATE);
+  auth_sspi.SetDelegation(HttpAuth::DelegationType::kUnconstrained);
+  HttpAuthChallengeTokenizer first_challenge("Negotiate");
+  ASSERT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
+            auth_sspi.ParseChallenge(&first_challenge));
+
+  std::string auth_token;
+  ASSERT_EQ(OK,
+            auth_sspi.GenerateAuthToken(
+                nullptr, "HTTP/intranet.google.com", std::string(), &auth_token,
+                net_log_with_source, base::BindOnce(&UnexpectedCallback)));
+
+  auto entries = net_log_observer.GetEntriesWithType(
+      NetLogEventType::AUTH_LIBRARY_INIT_SEC_CTX);
+  ASSERT_GE(entries.size(), 1u);
+
+  auto expected = base::JSONReader::Read(R"(
+    {
+       "flags": {
+          "delegated": true,
+          "mutual": true,
+          "value": "0x00000003"
+       },
+       "spn": "HTTP/intranet.google.com"
+    }
+  )",
+                                         base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  EXPECT_EQ(expected, entries[0].params);
+}
+
+TEST(HttpAuthSSPITest, GenerateAuthToken_NTLM_WithDelegation) {
+  RecordingNetLogObserver net_log_observer;
+  NetLogWithSource net_log_with_source =
+      NetLogWithSource::Make(NetLogSourceType::NONE);
+  MockSSPILibrary mock_library{L"NTLM"};
+  HttpAuthSSPI auth_sspi(&mock_library, HttpAuth::AUTH_SCHEME_NTLM);
+  auth_sspi.SetDelegation(HttpAuth::DelegationType::kUnconstrained);
+  HttpAuthChallengeTokenizer first_challenge("NTLM");
+  ASSERT_EQ(HttpAuth::AUTHORIZATION_RESULT_ACCEPT,
+            auth_sspi.ParseChallenge(&first_challenge));
+
+  std::string auth_token;
+  ASSERT_EQ(OK,
+            auth_sspi.GenerateAuthToken(
+                nullptr, "HTTP/intranet.google.com", std::string(), &auth_token,
+                net_log_with_source, base::BindOnce(&UnexpectedCallback)));
+
+  auto entries = net_log_observer.GetEntriesWithType(
+      NetLogEventType::AUTH_LIBRARY_INIT_SEC_CTX);
+  ASSERT_GE(entries.size(), 1u);
+
+  auto expected = base::JSONReader::Read(R"(
+    {
+       "flags": {
+          "delegated": false,
+          "mutual": false,
+          "value": "0x00000000"
+       },
+       "spn": "HTTP/intranet.google.com"
+    }
+  )",
+                                         base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  EXPECT_EQ(expected, entries[0].params);
+}
+
 }  // namespace net

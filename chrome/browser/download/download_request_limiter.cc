@@ -1,21 +1,26 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/download/download_request_limiter.h"
 
 #include <iterator>
+#include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/stl_util.h"
+#include "base/feature_list.h"
+#include "base/functional/bind.h"
 #include "build/build_config.h"
 #include "chrome/browser/content_settings/chrome_content_settings_utils.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/download/download_permission_request.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/tab_contents/tab_util.h"
-#include "components/content_settings/core/browser/content_settings_details.h"
+#include "components/content_settings/core/browser/content_settings_utils.h"
+#include "components/content_settings/core/common/content_settings_constraints.h"
+#include "components/content_settings/core/common/content_settings_types.h"
+#include "components/content_settings/core/common/content_settings_utils.h"
+#include "components/permissions/features.h"
 #include "components/permissions/permission_request_manager.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
@@ -46,7 +51,6 @@ ContentSetting GetSettingFromDownloadStatus(
       return CONTENT_SETTING_BLOCK;
   }
   NOTREACHED();
-  return CONTENT_SETTING_DEFAULT;
 }
 
 DownloadRequestLimiter::DownloadStatus GetDownloadStatusFromSetting(
@@ -61,12 +65,9 @@ DownloadRequestLimiter::DownloadStatus GetDownloadStatusFromSetting(
       return DownloadRequestLimiter::PROMPT_BEFORE_DOWNLOAD;
     case CONTENT_SETTING_SESSION_ONLY:
     case CONTENT_SETTING_NUM_SETTINGS:
-    case CONTENT_SETTING_DETECT_IMPORTANT_CONTENT:
       NOTREACHED();
-      return DownloadRequestLimiter::PROMPT_BEFORE_DOWNLOAD;
   }
   NOTREACHED();
-  return DownloadRequestLimiter::PROMPT_BEFORE_DOWNLOAD;
 }
 
 DownloadRequestLimiter::DownloadUiStatus GetUiStatusFromDownloadStatus(
@@ -85,7 +86,6 @@ DownloadRequestLimiter::DownloadUiStatus GetUiStatusFromDownloadStatus(
       return DownloadRequestLimiter::DOWNLOAD_UI_DEFAULT;
   }
   NOTREACHED();
-  return DownloadRequestLimiter::DOWNLOAD_UI_DEFAULT;
 }
 
 }  // namespace
@@ -103,11 +103,7 @@ DownloadRequestLimiter::TabDownloadState::TabDownloadState(
       origin_(url::Origin::Create(contents->GetVisibleURL())),
       download_count_(0),
       download_seen_(false) {
-  observer_.Add(GetContentSettings(contents));
-  NavigationEntry* last_entry =
-      contents->GetController().GetLastCommittedEntry();
-  if (last_entry)
-    initial_page_host_ = last_entry->GetURL().host();
+  observation_.Observe(GetContentSettings(contents));
 }
 
 DownloadRequestLimiter::TabDownloadState::~TabDownloadState() {
@@ -127,46 +123,21 @@ void DownloadRequestLimiter::TabDownloadState::SetDownloadStatusAndNotify(
 
 void DownloadRequestLimiter::TabDownloadState::DidStartNavigation(
     content::NavigationHandle* navigation_handle) {
-  if (!navigation_handle->IsInMainFrame())
+  if (!navigation_handle->IsInPrimaryMainFrame())
     return;
 
   download_seen_ = false;
   ui_status_ = DOWNLOAD_UI_DEFAULT;
 
-  if (status_ == PROMPT_BEFORE_DOWNLOAD || status_ == DOWNLOADS_NOT_ALLOWED) {
-    // If the navigation is renderer-initiated (but not user-initiated), ensure
-    // that a prompting or blocking limiter state is not reset, so
-    // window.location.href or meta refresh can't be abused to avoid the
-    // limiter.
-    if (navigation_handle->IsRendererInitiated()) {
-      GURL url = navigation_handle->GetURL();
-      // Mark the origin as restricted. If the origin does not exist in
-      // |download_status_map_|, give it a default value of
-      // PROMPT_BEFORE_DOWNLOAD and content setting will be checked later once
-      // CanDownloadImpl() is called.
-      if (!url.is_empty())
-        download_status_map_.emplace(url::Origin::Create(url),
-                                     PROMPT_BEFORE_DOWNLOAD);
-      return;
-    }
-
-    // If this is a forward/back navigation, also don't reset a prompting or
-    // blocking limiter state unless a new host is encounted. This prevents a
-    // page to use history forward/backward to trigger multiple downloads.
-    if (IsNavigationRestricted(navigation_handle))
-      return;
+  if (navigation_handle->IsRendererInitiated()) {
+    return;
   }
 
-  if (status_ == DownloadRequestLimiter::ALLOW_ALL_DOWNLOADS ||
-      status_ == DownloadRequestLimiter::DOWNLOADS_NOT_ALLOWED) {
-    // User has either allowed all downloads or blocked all downloads. Only
-    // reset the download state if the user is navigating to a different host
-    // (or host is empty).
-    if (!initial_page_host_.empty() &&
-        navigation_handle->GetURL().host_piece() == initial_page_host_) {
-      return;
-    }
-  }
+  // If this is a forward/back navigation, also don't reset a prompting or
+  // blocking limiter state if an origin is limited. This prevents a page
+  // to use history forward/backward to trigger multiple downloads.
+  if (!shouldClearDownloadState(navigation_handle))
+    return;
 
   NotifyCallbacks(false);
   host_->Remove(this, web_contents());
@@ -174,13 +145,18 @@ void DownloadRequestLimiter::TabDownloadState::DidStartNavigation(
 
 void DownloadRequestLimiter::TabDownloadState::DidFinishNavigation(
     content::NavigationHandle* navigation_handle) {
-  if (!navigation_handle->IsInMainFrame())
+  if (!navigation_handle->IsInPrimaryMainFrame())
+    return;
+
+  // If this is a forward/back navigation, also don't reset a prompting or
+  // blocking limiter state if an origin is limited. This prevents a page
+  // to use history forward/backward to trigger multiple downloads.
+  if (!shouldClearDownloadState(navigation_handle))
     return;
 
   // Treat browser-initiated navigations as user interactions as long as the
-  // navigation isn't restricted.
-  if (!navigation_handle->IsRendererInitiated() &&
-      !IsNavigationRestricted(navigation_handle)) {
+  // navigation can clear download state.
+  if (!navigation_handle->IsRendererInitiated()) {
     OnUserInteraction();
     return;
   }
@@ -190,17 +166,20 @@ void DownloadRequestLimiter::TabDownloadState::DidFinishNavigation(
   // downloads from this host. If they accidentally Accepted or Canceled, they
   // can adjust the limiter state by adjusting the automatic downloads content
   // settings. Alternatively, they can copy the URL into a new tab, which will
-  // make a new DownloadRequestLimiter. See also the initial_page_host_ logic in
-  // DidStartNavigation.
+  // make a new DownloadRequestLimiter.
   if (status_ == ALLOW_ONE_DOWNLOAD) {
     // When the user reloads the page without responding to the prompt,
     // they are expecting DownloadRequestLimiter to behave as if they had
-    // just initially navigated to this page. See http://crbug.com/171372.
+    // just initially navigated to this page. See http://crbug.com/40299431.
     // However, explicitly leave the limiter in place if the navigation was
     // renderer-initiated and we are in a prompt state.
     NotifyCallbacks(false);
     host_->Remove(this, web_contents());
+    return;
     // WARNING: We've been deleted.
+  } else if (status_ == ALLOW_ALL_DOWNLOADS) {
+    OnUserInteraction();
+    return;
   }
 }
 
@@ -235,11 +214,16 @@ void DownloadRequestLimiter::TabDownloadState::PromptUserForDownload(
   permissions::PermissionRequestManager* permission_request_manager =
       permissions::PermissionRequestManager::FromWebContents(web_contents_);
   if (permission_request_manager) {
-    // TODO(https://crbug.com/1061899): We should pass the frame which initiated
-    // the action instead of assuming that it was the current main frame.
+    // The RFH is used to scope the lifetime of the request and scoping it to
+    // the initiator doesn't make sense for downloads as download navigation
+    // requests are never committed and don't update the omnibox url.
+    // Download requests should only be granted by checking `request_origin`,
+    // so we use the primary main RenderFrameHost here, to avoid discarding the
+    // request in the case that the initiator RFH is already gone.
     permission_request_manager->AddRequest(
-        web_contents_->GetMainFrame(),
-        new DownloadPermissionRequest(factory_.GetWeakPtr(), request_origin));
+        web_contents_->GetPrimaryMainFrame(),
+        std::make_unique<DownloadPermissionRequest>(factory_.GetWeakPtr(),
+                                                    request_origin));
   } else {
     // Call CancelOnce() so we don't set the content settings.
     CancelOnce(request_origin);
@@ -257,9 +241,24 @@ void DownloadRequestLimiter::TabDownloadState::SetContentSetting(
       DownloadRequestLimiter::GetContentSettings(web_contents_);
   if (!settings)
     return;
+
+  content_settings::ContentSettingConstraints constraints;
+
+  // Enable last-visit tracking for eligible permissions granted from
+  // Permission Prompt UI. This allows Safety Hub to auto-revoke the permission
+  // if the site is not visited for a finite amount of time.
+  if (base::FeatureList::IsEnabled(
+          permissions::features::
+              kSafetyHubUnusedPermissionRevocationForAllSurfaces) &&
+      content_settings::CanBeAutoRevokedAsUnusedPermission(
+          ContentSettingsType::AUTOMATIC_DOWNLOADS,
+          content_settings::ContentSettingToValue(setting))) {
+    constraints.set_track_last_visit_for_autoexpiration(true);
+  }
+
   settings->SetContentSettingDefaultScope(
       request_origin.GetURL(), GURL(), ContentSettingsType::AUTOMATIC_DOWNLOADS,
-      std::string(), setting);
+      setting, constraints);
 }
 
 void DownloadRequestLimiter::TabDownloadState::Cancel(
@@ -300,8 +299,7 @@ DownloadRequestLimiter::TabDownloadState::TabDownloadState()
       status_(DownloadRequestLimiter::ALLOW_ONE_DOWNLOAD),
       ui_status_(DownloadRequestLimiter::DOWNLOAD_UI_DEFAULT),
       download_count_(0),
-      download_seen_(false),
-      observer_(this) {}
+      download_seen_(false) {}
 
 bool DownloadRequestLimiter::TabDownloadState::is_showing_prompt() const {
   return factory_.HasWeakPtrs();
@@ -310,50 +308,53 @@ bool DownloadRequestLimiter::TabDownloadState::is_showing_prompt() const {
 void DownloadRequestLimiter::TabDownloadState::OnUserInteraction() {
   // See PromptUserForDownload(): if there's no PermissionRequestManager, then
   // DOWNLOADS_NOT_ALLOWED is functionally equivalent to PROMPT_BEFORE_DOWNLOAD.
-  bool need_prompt = (permissions::PermissionRequestManager::FromWebContents(
-                          web_contents()) == nullptr &&
-                      status_ == DOWNLOADS_NOT_ALLOWED) ||
-                     status_ == PROMPT_BEFORE_DOWNLOAD;
+  bool no_permission_request_manager =
+      (permissions::PermissionRequestManager::FromWebContents(web_contents()) ==
+       nullptr);
 
-  // If content setting blocks automatic downloads, don't reset the
-  // PROMPT_BEFORE_DOWNLOAD status for the current page because doing
-  // that will default the download status to ALLOW_ONE_DOWNLOAD. That
-  // will allow an extra download when CanDownloadImpl() is called.
-  ContentSetting setting = GetAutoDownloadContentSetting(
-      web_contents(), web_contents()->GetVisibleURL());
-  if (status_ == ALLOW_ONE_DOWNLOAD ||
-      (need_prompt && setting != CONTENT_SETTING_BLOCK)) {
-    url::Origin origin = url::Origin::Create(web_contents()->GetVisibleURL());
-
-    // Revert to default status and notify if needed.
-    download_status_map_.erase(origin);
-    if (download_status_map_.empty()) {
-      host_->Remove(this, web_contents());
-      // WARNING: We've been deleted.
+  for (auto it = download_status_map_.begin();
+       it != download_status_map_.end();) {
+    ContentSetting setting =
+        GetAutoDownloadContentSetting(web_contents(), it->first.GetURL());
+    // If an origin has non-block content setting and does not have
+    // |DOWNLOADS_NOT_ALLOWED| or |ALLOW_ALL_DOWNLOADS| status, remove
+    // it from the map so that it is able to initiate one download
+    // without asking the user.
+    if (setting != CONTENT_SETTING_BLOCK && it->second != ALLOW_ALL_DOWNLOADS &&
+        ((no_permission_request_manager &&
+          it->second == DOWNLOADS_NOT_ALLOWED) ||
+         it->second != DOWNLOADS_NOT_ALLOWED)) {
+      it = download_status_map_.erase(it);
+    } else {
+      ++it;
     }
+  }
+
+  // Reset the download count to 0 so that one download can go through.
+  download_count_ = 0;
+
+  if (download_status_map_.empty()) {
+    host_->Remove(this, web_contents());
+    // WARNING: We've been deleted.
   }
 }
 
 void DownloadRequestLimiter::TabDownloadState::OnContentSettingChanged(
     const ContentSettingsPattern& primary_pattern,
     const ContentSettingsPattern& secondary_pattern,
-    ContentSettingsType content_type,
-    const std::string& resource_identifier) {
-  if (content_type != ContentSettingsType::AUTOMATIC_DOWNLOADS)
+    ContentSettingsTypeSet content_type_set) {
+  if (!content_type_set.Contains(ContentSettingsType::AUTOMATIC_DOWNLOADS))
     return;
 
   if (origin_.opaque())
     return;
 
   GURL origin = origin_.GetURL();
-  // Analogous to PageSpecificContentSettings::OnContentSettingChanged:
-  const ContentSettingsDetails details(primary_pattern, secondary_pattern,
-                                       content_type, resource_identifier);
 
   // Check if the settings change affects the most recent origin passed
   // to SetDownloadStatusAndNotify(). If so, we need to update the omnibox
   // decoration.
-  if (!details.update_all() && !details.primary_pattern().Matches(origin))
+  if (!primary_pattern.Matches(origin))
     return;
 
   // Content settings have been updated for our web contents, e.g. via the OIB
@@ -372,7 +373,7 @@ void DownloadRequestLimiter::TabDownloadState::OnContentSettingChanged(
     return;
 
   ContentSetting setting = content_settings->GetContentSetting(
-      origin, origin, ContentSettingsType::AUTOMATIC_DOWNLOADS, std::string());
+      origin, origin, ContentSettingsType::AUTOMATIC_DOWNLOADS);
 
   // Update the internal state to match if necessary.
   SetDownloadStatusAndNotifyImpl(origin_, GetDownloadStatusFromSetting(setting),
@@ -418,12 +419,7 @@ void DownloadRequestLimiter::TabDownloadState::SetDownloadStatusAndNotifyImpl(
          (GetDownloadStatusFromSetting(setting) == status))
       << "status " << status << " and setting " << setting
       << " do not correspond to each other";
-  ContentSetting last_setting = GetSettingFromDownloadStatus(status_);
-  DownloadUiStatus last_ui_status = ui_status_;
-  url::Origin last_origin = origin_;
-
   status_ = status;
-  ui_status_ = GetUiStatusFromDownloadStatus(status_, download_seen_);
   origin_ = request_origin;
 
   if (status_ != ALLOW_ONE_DOWNLOAD)
@@ -439,6 +435,11 @@ void DownloadRequestLimiter::TabDownloadState::SetDownloadStatusAndNotifyImpl(
   if (origin_.opaque())
     return;
 
+  ContentSetting last_setting = GetSettingFromDownloadStatus(status_);
+  url::Origin last_origin = origin_;
+  DownloadUiStatus last_ui_status = ui_status_;
+  ui_status_ = GetUiStatusFromDownloadStatus(status_, download_seen_);
+
   // We want to send a notification if the UI status has changed to ensure that
   // the omnibox decoration updates appropriately. This is effectively the same
   // as other permissions which might be in an allow state, but do not show UI
@@ -451,21 +452,24 @@ void DownloadRequestLimiter::TabDownloadState::SetDownloadStatusAndNotifyImpl(
   content_settings::UpdateLocationBarUiForWebContents(web_contents());
 }
 
-bool DownloadRequestLimiter::TabDownloadState::IsNavigationRestricted(
+bool DownloadRequestLimiter::TabDownloadState::shouldClearDownloadState(
     content::NavigationHandle* navigation_handle) {
-  url::Origin origin = url::Origin::Create(navigation_handle->GetURL());
+  // For forward/backward navigations, don't clear download state if some
+  // origins are restricted.
   if (navigation_handle->GetPageTransition() &
       ui::PAGE_TRANSITION_FORWARD_BACK) {
-    auto it = download_status_map_.find(origin);
-    if (it != download_status_map_.end())
-      return it->second != ALLOW_ALL_DOWNLOADS;
+    for (const auto& entry : download_status_map_) {
+      if (entry.second == PROMPT_BEFORE_DOWNLOAD ||
+          entry.second == DOWNLOADS_NOT_ALLOWED)
+        return false;
+    }
   }
-  return false;
+  return true;
 }
 
 // DownloadRequestLimiter ------------------------------------------------------
 
-DownloadRequestLimiter::DownloadRequestLimiter() {}
+DownloadRequestLimiter::DownloadRequestLimiter() = default;
 
 DownloadRequestLimiter::~DownloadRequestLimiter() {
   // All the tabs should have closed before us, which sends notification and
@@ -474,21 +478,22 @@ DownloadRequestLimiter::~DownloadRequestLimiter() {
 }
 
 DownloadRequestLimiter::DownloadStatus
-DownloadRequestLimiter::GetDownloadStatus(content::WebContents* web_contents) {
-  TabDownloadState* state = GetDownloadState(web_contents, false);
+DownloadRequestLimiter::GetDownloadStatus(
+    content::WebContents* web_contents) const {
+  const TabDownloadState* state = GetDownloadState(web_contents);
   return state ? state->download_status() : ALLOW_ONE_DOWNLOAD;
 }
 
 DownloadRequestLimiter::DownloadUiStatus
 DownloadRequestLimiter::GetDownloadUiStatus(
-    content::WebContents* web_contents) {
-  TabDownloadState* state = GetDownloadState(web_contents, false);
+    content::WebContents* web_contents) const {
+  const TabDownloadState* state = GetDownloadState(web_contents);
   return state ? state->download_ui_status() : DOWNLOAD_UI_DEFAULT;
 }
 
 GURL DownloadRequestLimiter::GetDownloadOrigin(
-    content::WebContents* web_contents) {
-  TabDownloadState* state = GetDownloadState(web_contents, false);
+    content::WebContents* web_contents) const {
+  const TabDownloadState* state = GetDownloadState(web_contents);
   if (state && !state->origin().opaque())
     return state->origin().GetURL();
   return web_contents->GetVisibleURL();
@@ -496,17 +501,24 @@ GURL DownloadRequestLimiter::GetDownloadOrigin(
 
 DownloadRequestLimiter::TabDownloadState*
 DownloadRequestLimiter::GetDownloadState(
-    content::WebContents* web_contents,
-    bool create) {
+    content::WebContents* web_contents) const {
   DCHECK(web_contents);
   auto i = state_map_.find(web_contents);
-  if (i != state_map_.end())
-    return i->second;
-
-  if (!create)
+  if (i == state_map_.end()) {
     return nullptr;
+  }
+  return i->second;
+}
 
-  TabDownloadState* state = new TabDownloadState(this, web_contents);
+DownloadRequestLimiter::TabDownloadState*
+DownloadRequestLimiter::GetOrCreateDownloadState(
+    content::WebContents* web_contents) {
+  TabDownloadState* state = GetDownloadState(web_contents);
+  if (state) {
+    return state;
+  }
+
+  state = new TabDownloadState(this, web_contents);
   state_map_[web_contents] = state;
   return state;
 }
@@ -515,7 +527,7 @@ void DownloadRequestLimiter::CanDownload(
     const content::WebContents::Getter& web_contents_getter,
     const GURL& url,
     const std::string& request_method,
-    base::Optional<url::Origin> request_initiator,
+    std::optional<url::Origin> request_initiator,
     bool from_download_cross_origin_redirect,
     Callback callback) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
@@ -536,7 +548,7 @@ void DownloadRequestLimiter::CanDownload(
   // OnCanDownloadDecided is invoked, we look it up by |render_process_host_id|
   // and |render_view_id|.
   base::OnceCallback<void(bool)> can_download_callback = base::BindOnce(
-      &DownloadRequestLimiter::OnCanDownloadDecided, factory_.GetWeakPtr(),
+      &DownloadRequestLimiter::OnCanDownloadDecided, factory_.GetWeakPtr(), url,
       web_contents_getter, request_method, std::move(request_initiator),
       from_download_cross_origin_redirect, std::move(callback));
 
@@ -545,9 +557,10 @@ void DownloadRequestLimiter::CanDownload(
 }
 
 void DownloadRequestLimiter::OnCanDownloadDecided(
+    const GURL& url,
     const content::WebContents::Getter& web_contents_getter,
     const std::string& request_method,
-    base::Optional<url::Origin> request_initiator,
+    std::optional<url::Origin> request_initiator,
     bool from_download_cross_origin_redirect,
     Callback orig_callback,
     bool allow) {
@@ -559,7 +572,7 @@ void DownloadRequestLimiter::OnCanDownloadDecided(
   }
 
   CanDownloadImpl(
-      originating_contents, request_method, std::move(request_initiator),
+      url, originating_contents, request_method, std::move(request_initiator),
       from_download_cross_origin_redirect, std::move(orig_callback));
 }
 
@@ -577,15 +590,16 @@ ContentSetting DownloadRequestLimiter::GetAutoDownloadContentSetting(
   if (content_settings) {
     setting = content_settings->GetContentSetting(
         request_initiator, request_initiator,
-        ContentSettingsType::AUTOMATIC_DOWNLOADS, std::string());
+        ContentSettingsType::AUTOMATIC_DOWNLOADS);
   }
   return setting;
 }
 
 void DownloadRequestLimiter::CanDownloadImpl(
+    const GURL& url,
     content::WebContents* originating_contents,
     const std::string& request_method,
-    base::Optional<url::Origin> request_initiator,
+    std::optional<url::Origin> request_initiator,
     bool from_download_cross_origin_redirect,
     Callback callback) {
   DCHECK(originating_contents);
@@ -599,35 +613,27 @@ void DownloadRequestLimiter::CanDownloadImpl(
     return;
   }
 
-  TabDownloadState* state = GetDownloadState(originating_contents, true);
+  TabDownloadState* state = GetOrCreateDownloadState(originating_contents);
   state->set_download_seen();
   bool ret = true;
 
-  // |request_initiator| may come from another web_contents. Check the content
-  // settings first to see if the download needs to be blocked.
-  GURL initiator = request_initiator ? request_initiator->GetURL()
-                                     : originating_contents->GetVisibleURL();
-  // Use the origin of |originating_contents| as a back up, if it is non-opaque.
-  url::Origin origin =
-      url::Origin::Create(originating_contents->GetVisibleURL());
-  // If |request_initiator| has a non-opaque origin or if the origin from
-  // |originating_contents| is opaque, use the origin from |request_initiator|
-  // to make decisions so that it won't impact the download state of
-  // |originating_contents|.
-  if (request_initiator && (!request_initiator->opaque() || origin.opaque()))
-    origin = request_initiator.value();
+  // If `request_initiator` is empty, this is a browser initiated request.
+  // Get the origin from `url` as visible URL of the current tab may not
+  // represent the correct WebContents that triggers the download.
+  url::Origin origin = request_initiator
+                           ? request_initiator.value()
+                           : url::Origin::Resolve(url, url::Origin());
 
   DownloadStatus status = state->GetDownloadStatus(origin);
-
-  bool is_opaque_initiator = request_initiator && request_initiator->opaque();
+  bool is_opaque_initiator = origin.opaque();
 
   // Always check for the content setting first. Having an content setting
   // observer won't work as |request_initiator| might be different from the tab
   // URL.
-  ContentSetting setting =
-      is_opaque_initiator
-          ? CONTENT_SETTING_BLOCK
-          : GetAutoDownloadContentSetting(originating_contents, initiator);
+  ContentSetting setting = is_opaque_initiator
+                               ? CONTENT_SETTING_BLOCK
+                               : GetAutoDownloadContentSetting(
+                                     originating_contents, origin.GetURL());
   // Override the status if content setting is block or allow. If the content
   // setting is always allow, only reset the status if it is
   // DOWNLOADS_NOT_ALLOWED so unnecessary notifications will not be triggered.
@@ -660,8 +666,24 @@ void DownloadRequestLimiter::CanDownloadImpl(
 
     case ALLOW_ONE_DOWNLOAD:
       state->SetDownloadStatusAndNotify(origin, PROMPT_BEFORE_DOWNLOAD);
-      std::move(callback).Run(true);
-      state->increment_download_count();
+      // If one download is seen for this WebContent, ALLOW_ONE_DOWNLOAD is the
+      // same as PROMPT_BEFORE_DOWNLOAD unless all downloads are allowed for the
+      // origin. This is to avoid a page using different origins to initiate
+      // multiple downloads.
+      if (state->download_count() > 0 && setting != CONTENT_SETTING_ALLOW) {
+        ret = false;
+        // If setting is CONTENT_SETTING_BLOCK, don't prompt user.
+        if (setting == CONTENT_SETTING_BLOCK) {
+          state->SetDownloadStatusAndNotify(origin, DOWNLOADS_NOT_ALLOWED);
+          std::move(callback).Run(false);
+        } else {
+          state->PromptUserForDownload(std::move(callback), origin);
+          state->increment_download_count();
+        }
+      } else {
+        std::move(callback).Run(true);
+        state->increment_download_count();
+      }
       break;
 
     case DOWNLOADS_NOT_ALLOWED:
@@ -694,7 +716,6 @@ void DownloadRequestLimiter::CanDownloadImpl(
         case CONTENT_SETTING_NUM_SETTINGS:
         default:
           NOTREACHED();
-          return;
       }
       break;
     }
@@ -709,7 +730,7 @@ void DownloadRequestLimiter::CanDownloadImpl(
 
 void DownloadRequestLimiter::Remove(TabDownloadState* state,
                                     content::WebContents* contents) {
-  DCHECK(base::Contains(state_map_, contents));
+  DCHECK(state_map_.contains(contents));
   state_map_.erase(contents);
   delete state;
 }

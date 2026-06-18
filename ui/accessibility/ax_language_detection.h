@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,16 +7,20 @@
 
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "base/macros.h"
-#include "third_party/cld_3/src/src/nnet_language_identifier.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "ui/accessibility/ax_enums.mojom-forward.h"
 #include "ui/accessibility/ax_export.h"
 #include "ui/accessibility/ax_tree_observer.h"
+
+namespace chrome_lang_id {
+class NNetLanguageIdentifier;
+}  // namespace chrome_lang_id
 
 namespace ui {
 
@@ -150,7 +154,7 @@ class AX_EXPORT AXLanguageInfoStats {
   friend class AXLanguageDetectionTestFixture;
 
   // Store a count of the occurrences of a given language.
-  std::unordered_map<std::string, int> lang_counts_;
+  absl::flat_hash_map<std::string, int> lang_counts_;
 
   // Cache of last calculated top language results.
   // A vector of pairs of (score, language) sorted by descending score.
@@ -201,7 +205,7 @@ class AX_EXPORT AXLanguageInfoStats {
 
   // Set of top language detected for every node, used to generate the unique
   // number of detected languages metric (LangsPerPage).
-  std::unordered_set<std::string> unique_top_lang_detected_;
+  absl::flat_hash_set<std::string> unique_top_lang_detected_;
 };
 
 // AXLanguageDetectionObserver is registered as a change observer on an AXTree
@@ -217,26 +221,22 @@ class AX_EXPORT AXLanguageInfoStats {
 // TODO(chrishall): Investigate the cost of using AXTreeObserver, given that it
 // has many empty virtual methods which are called for every AXTree change and
 // we are only currently interested in OnAtomicUpdateFinished.
-class AX_EXPORT AXLanguageDetectionObserver : public ui::AXTreeObserver {
+class AX_EXPORT AXLanguageDetectionObserver : public AXTreeObserver {
  public:
   // Observer constructor will register itself with the provided AXTree.
-  AXLanguageDetectionObserver(AXTree* tree);
-
-  // Observer destructor will remove itself as an observer from the AXTree.
+  explicit AXLanguageDetectionObserver(AXTree* tree);
   ~AXLanguageDetectionObserver() override;
-
-  // AXLanguageDetectionObserver contains a pointer so copying is non-trivial.
   AXLanguageDetectionObserver(const AXLanguageDetectionObserver&) = delete;
   AXLanguageDetectionObserver& operator=(const AXLanguageDetectionObserver&) =
       delete;
 
  private:
-  void OnAtomicUpdateFinished(ui::AXTree* tree,
+  // |ui::AXTreeObserver|
+  void OnAtomicUpdateFinished(AXTree* tree,
                               bool root_changed,
                               const std::vector<Change>& changes) override;
 
-  // Non-owning pointer to AXTree, used to de-register observer on destruction.
-  AXTree* const tree_;
+  base::ScopedObservation<ui::AXTree, ui::AXTreeObserver> observation_{this};
 };
 
 // AXLanguageDetectionManager manages all of the context needed for language
@@ -252,17 +252,6 @@ class AX_EXPORT AXLanguageDetectionManager {
   AXLanguageDetectionManager& operator=(const AXLanguageDetectionManager&) =
       delete;
 
-  // Detect languages for each node in the tree managed by this manager.
-  // This is the first pass in detection and labelling.
-  // This only detects the language, it does not label it, for that see
-  //  LabelLanguageForSubtree.
-  void DetectLanguages();
-
-  // Label languages for each node in the tree manager by this manager.
-  // This is the second pass in detection and labelling.
-  // This will label the language, but relies on the earlier detection phase
-  // having already completed.
-  void LabelLanguages();
 
   // Sub-node language detection for a given string attribute.
   // For example, if a node has name: "My name is Fred", then calling
@@ -282,33 +271,43 @@ class AX_EXPORT AXLanguageDetectionManager {
   friend class AXLanguageDetectionTestFixture;
 
   // Helper methods to test if language detection features are enabled.
-  static bool IsStaticLanguageDetectionEnabled();
   static bool IsDynamicLanguageDetectionEnabled();
 
-  // Perform detection for subtree rooted at subtree_root.
-  void DetectLanguagesForSubtree(AXNode* subtree_root);
   // Perform detection for node. Will not descend into children.
   void DetectLanguagesForNode(AXNode* node);
-  // Perform labelling for subtree rooted at subtree_root.
-  void LabelLanguagesForSubtree(AXNode* subtree_root);
   // Perform labelling for node. Will not descend into children.
   void LabelLanguagesForNode(AXNode* node);
 
-  // This language identifier is constructed with a default minimum byte length
-  // of chrome_lang_id::NNetLanguageIdentifier::kMinNumBytesToConsider and is
-  // used for detecting page-level languages.
-  chrome_lang_id::NNetLanguageIdentifier language_identifier_;
+  // Lazy accessor for `language_identifier_`. Constructs the CLD3 model on
+  // first use to avoid the ~MB of matrix-weight allocations when the language-
+  // detection APIs are never invoked (the common case: the feature is disabled
+  // by default and most AXTrees never call DetectLanguagesForNode).
+  // Must be called on the same sequence as the rest of the manager (AXTree's
+  // sequence).
+  chrome_lang_id::NNetLanguageIdentifier& GetLanguageIdentifier();
 
-  // This language identifier is constructed with a minimum byte length of
+  // Lazy accessor for `short_text_language_identifier_`. Same rationale and
+  // sequence requirements as GetLanguageIdentifier().
+  chrome_lang_id::NNetLanguageIdentifier& GetShortTextLanguageIdentifier();
+
+  // This language identifier is constructed lazily (via GetLanguageIdentifier)
+  // with a default minimum byte length of
+  // chrome_lang_id::NNetLanguageIdentifier::kMinNumBytesToConsider and is
+  // used for detecting page-level languages.
+  std::unique_ptr<chrome_lang_id::NNetLanguageIdentifier> language_identifier_;
+
+  // This language identifier is constructed lazily (via
+  // GetShortTextLanguageIdentifier) with a minimum byte length of
   // kShortTextIdentifierMinByteLength so it can be used for detecting languages
   // of shorter text (e.g. one character).
-  chrome_lang_id::NNetLanguageIdentifier short_text_language_identifier_;
+  std::unique_ptr<chrome_lang_id::NNetLanguageIdentifier>
+      short_text_language_identifier_;
 
   // The observer to support dynamic content language detection.
   std::unique_ptr<AXLanguageDetectionObserver> language_detection_observer_;
 
   // Non-owning back pointer to the tree which owns this manager.
-  AXTree* tree_;
+  raw_ptr<AXTree> tree_;
 
   AXLanguageInfoStats lang_info_stats_;
 };

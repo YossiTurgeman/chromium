@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,42 +26,44 @@ namespace errors = manifest_errors;
 
 // static
 const std::string& LocaleInfo::GetDefaultLocale(const Extension* extension) {
-  LocaleInfo* info = static_cast<LocaleInfo*>(
+  const LocaleInfo* info = static_cast<const LocaleInfo*>(
       extension->GetManifestData(keys::kDefaultLocale));
   return info ? info->default_locale : base::EmptyString();
 }
 
-DefaultLocaleHandler::DefaultLocaleHandler() {
-}
+DefaultLocaleHandler::DefaultLocaleHandler() = default;
+DefaultLocaleHandler::~DefaultLocaleHandler() = default;
 
-DefaultLocaleHandler::~DefaultLocaleHandler() {
-}
-
-bool DefaultLocaleHandler::Parse(Extension* extension, base::string16* error) {
+bool DefaultLocaleHandler::Parse(Extension* extension, std::u16string* error) {
   std::unique_ptr<LocaleInfo> info(new LocaleInfo);
-  if (!extension->manifest()->GetString(keys::kDefaultLocale,
-                                        &info->default_locale) ||
-      !l10n_util::IsValidLocaleSyntax(info->default_locale)) {
-    *error = base::ASCIIToUTF16(manifest_errors::kInvalidDefaultLocale);
+
+  const std::string* default_locale =
+      extension->manifest()->FindStringPath(keys::kDefaultLocale);
+  if (default_locale == nullptr ||
+      !l10n_util::IsValidLocaleSyntax(*default_locale)) {
+    *error = manifest_errors::kInvalidDefaultLocale16;
     return false;
   }
+  info->default_locale = *default_locale;
+
   extension->SetManifestData(keys::kDefaultLocale, std::move(info));
   return true;
 }
 
 bool DefaultLocaleHandler::Validate(
-    const Extension* extension,
+    const Extension& extension,
     std::string* error,
     std::vector<InstallWarning>* warnings) const {
   // default_locale and _locales have to be both present or both missing.
-  const base::FilePath path = extension->path().Append(kLocaleFolder);
+  const base::FilePath path = extension.path().Append(kLocaleFolder);
   bool path_exists = base::PathExists(path);
   std::string default_locale =
-      extensions::LocaleInfo::GetDefaultLocale(extension);
+      extensions::LocaleInfo::GetDefaultLocale(&extension);
 
   // If both default locale and _locales folder are empty, skip verification.
-  if (default_locale.empty() && !path_exists)
+  if (default_locale.empty() && !path_exists) {
     return true;
+  }
 
   if (default_locale.empty() && path_exists) {
     *error = l10n_util::GetStringUTF8(
@@ -82,7 +84,7 @@ bool DefaultLocaleHandler::Validate(
 
   bool gzipped_messages_allowed =
       extension_l10n_util::GetGzippedMessagesPermissionForLocation(
-          extension->location()) ==
+          extension.location()) ==
       extension_l10n_util::GzippedMessagesPermission::kAllowForTrustedSource;
 
   base::FilePath locale_path;
@@ -100,13 +102,15 @@ bool DefaultLocaleHandler::Validate(
         !(gzipped_messages_allowed &&
           base::PathExists(gzipped_messages_path))) {
       *error = base::StringPrintf(
-          "%s %s", errors::kLocalesMessagesFileMissing,
+          "%s %s",
+          base::UTF16ToUTF8(errors::kLocalesMessagesFileMissing).c_str(),
           base::UTF16ToUTF8(messages_path.LossyDisplayName()).c_str());
       return false;
     }
 
-    if (locale_path == default_locale_path)
+    if (locale_path == default_locale_path) {
       has_default_locale_message_file = true;
+    }
   }
 
   // Only message file for default locale has to exist.

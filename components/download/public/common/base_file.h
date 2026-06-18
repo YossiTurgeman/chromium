@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,15 +11,13 @@
 #include <memory>
 #include <string>
 
-#include "base/callback.h"
-#include "base/callback_forward.h"
 #include "base/check.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_forward.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/sequence_checker.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
@@ -31,6 +29,7 @@
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/net_errors.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 namespace download {
 
@@ -41,9 +40,20 @@ namespace download {
 // Detach().
 class COMPONENTS_DOWNLOAD_EXPORT BaseFile {
  public:
+  // Given a source and a referrer, determines the "safest" URL that can be used
+  // to determine the authority of the download source. Returns an empty URL if
+  // no HTTP/S URL can be determined for the <|source_url|, |referrer_url|>
+  // pair.
+  static GURL GetEffectiveAuthorityURL(const GURL& source_url,
+                                       const GURL& referrer_url);
+
   // May be constructed on any thread.  All other routines (including
   // destruction) must occur on the same sequence.
-  BaseFile(uint32_t download_id);
+  explicit BaseFile(uint32_t download_id);
+
+  BaseFile(const BaseFile&) = delete;
+  BaseFile& operator=(const BaseFile&) = delete;
+
   ~BaseFile();
 
   // Returns DOWNLOAD_INTERRUPT_REASON_NONE on success, or a
@@ -110,17 +120,16 @@ class COMPONENTS_DOWNLOAD_EXPORT BaseFile {
   // Write a new chunk of data to the file. Returns a DownloadInterruptReason
   // indicating the result of the operation. Works only if |is_sparse_file| is
   // false.
-  DownloadInterruptReason AppendDataToFile(const char* data, size_t data_len);
+  DownloadInterruptReason AppendDataToFile(base::span<const uint8_t> data);
 
   // Write a new chunk of data to the file. Returns a DownloadInterruptReason
   // indicating the result of the operation.
   DownloadInterruptReason WriteDataToFile(int64_t offset,
-                                          const char* data,
-                                          size_t data_len);
+                                          base::span<const uint8_t> data);
 
   // Validates that the content starting from |offset| matches that of |data|
   // with the given length.
-  bool ValidateDataInFile(int64_t offset, const char* data, size_t data_len);
+  bool ValidateDataInFile(int64_t offset, base::span<const uint8_t> data);
 
   // Rename the download file. Returns a DownloadInterruptReason indicating the
   // result of the operation. A return code of NONE indicates that the rename
@@ -146,8 +155,15 @@ class COMPONENTS_DOWNLOAD_EXPORT BaseFile {
   // will cause |secure_hash_| to get calculated.
   std::unique_ptr<crypto::SecureHash> Finish();
 
-  // Informs the OS that this file came from the internet. Returns a
-  // DownloadInterruptReason indicating the result of the operation.
+  // Callback used with AnnotateWithSourceInformation.
+  // Created by DownloadFileImpl::RenameWithRetryInternal
+  // to bind DownloadFileImpl::OnRenameComplete.
+  using OnAnnotationDoneCallback =
+      base::OnceCallback<void(DownloadInterruptReason)>;
+
+  // Informs the OS that this file came from the internet. Calls
+  // |on_annotation_done_callback| with DownloadInterruptReason indicating the
+  // result of the operation.
   //
   // |client_guid|: The client GUID which will be used to identify the caller to
   //     the system AV scanning function.
@@ -156,29 +172,19 @@ class COMPONENTS_DOWNLOAD_EXPORT BaseFile {
   //     that originated this download. Will be used to annotate source
   //     information and also to determine the relative danger level of the
   //     file.
-  DownloadInterruptReason AnnotateWithSourceInformationSync(
-      const std::string& client_guid,
-      const GURL& source_url,
-      const GURL& referrer_url);
-
-  // Callback used with AnnotateWithSourceInformation.
-  // Created by DownloadFileImpl::RenameWithRetryInternal
-  // to bind DownloadFileImpl::OnRenameComplete.
-  using OnAnnotationDoneCallback =
-      base::OnceCallback<void(DownloadInterruptReason)>;
-
-  // Called when a quarantine service is used.
-  // and the callback will be called from the service.
-  // TODO (crbug.com/973497): Remove non-service version when
-  // kPreventDownloadsWithSamePath feature is removed.
+  //
+  // `request_initiator`: Initiating origin for the request. This will
+  //     be used in place of the `source_url` when the `source_url` is not
+  //     suitable for reporting to the OS.
   void AnnotateWithSourceInformation(
       const std::string& client_guid,
       const GURL& source_url,
       const GURL& referrer_url,
+      const std::optional<url::Origin>& request_initiator,
       mojo::PendingRemote<quarantine::mojom::Quarantine> remote_quarantine,
       OnAnnotationDoneCallback on_annotation_done_callback);
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   // Publishes the intermediate download to public download collection.
   DownloadInterruptReason PublishDownload();
 #endif
@@ -271,8 +277,7 @@ class COMPONENTS_DOWNLOAD_EXPORT BaseFile {
 
   // Callback invoked by quarantine service. Also called by
   // OnQuarantineServiceError after manually applying mark-of-the-web.
-  void OnFileQuarantined(bool connection_error,
-                         quarantine::mojom::QuarantineFileResult result);
+  void OnFileQuarantined(quarantine::mojom::QuarantineFileResult result);
 
   // Full path to the file including the file name.
   base::FilePath full_path_;
@@ -310,8 +315,6 @@ class COMPONENTS_DOWNLOAD_EXPORT BaseFile {
   SEQUENCE_CHECKER(sequence_checker_);
 
   base::WeakPtrFactory<BaseFile> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(BaseFile);
 };
 
 }  // namespace download

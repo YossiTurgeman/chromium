@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #import <objc/runtime.h>
 #include <stddef.h>
 
-#include "base/stl_util.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
 #import "content/browser/renderer_host/render_widget_host_view_mac.h"
 
@@ -19,96 +18,95 @@ namespace {
 //
 // This needs to be kept in Sync with WEB_COMMAND list in the WebKit tree at:
 // WebKit/mac/WebView/WebHTMLView.mm .
-const char* const kEditCommands[] = {
-  "alignCenter",
-  "alignJustified",
-  "alignLeft",
-  "alignRight",
-  "copy",
-  "cut",
-  "delete",
-  "deleteBackward",
-  "deleteBackwardByDecomposingPreviousCharacter",
-  "deleteForward",
-  "deleteToBeginningOfLine",
-  "deleteToBeginningOfParagraph",
-  "deleteToEndOfLine",
-  "deleteToEndOfParagraph",
-  "deleteToMark",
-  "deleteWordBackward",
-  "deleteWordForward",
-  "ignoreSpelling",
-  "indent",
-  "insertBacktab",
-  "insertLineBreak",
-  "insertNewline",
-  "insertNewlineIgnoringFieldEditor",
-  "insertParagraphSeparator",
-  "insertTab",
-  "insertTabIgnoringFieldEditor",
-  "makeTextWritingDirectionLeftToRight",
-  "makeTextWritingDirectionNatural",
-  "makeTextWritingDirectionRightToLeft",
-  "moveBackward",
-  "moveBackwardAndModifySelection",
-  "moveDown",
-  "moveDownAndModifySelection",
-  "moveForward",
-  "moveForwardAndModifySelection",
-  "moveLeft",
-  "moveLeftAndModifySelection",
-  "moveParagraphBackwardAndModifySelection",
-  "moveParagraphForwardAndModifySelection",
-  "moveRight",
-  "moveRightAndModifySelection",
-  "moveToBeginningOfDocument",
-  "moveToBeginningOfDocumentAndModifySelection",
-  "moveToBeginningOfLine",
-  "moveToBeginningOfLineAndModifySelection",
-  "moveToBeginningOfParagraph",
-  "moveToBeginningOfParagraphAndModifySelection",
-  "moveToBeginningOfSentence",
-  "moveToBeginningOfSentenceAndModifySelection",
-  "moveToEndOfDocument",
-  "moveToEndOfDocumentAndModifySelection",
-  "moveToEndOfLine",
-  "moveToEndOfLineAndModifySelection",
-  "moveToEndOfParagraph",
-  "moveToEndOfParagraphAndModifySelection",
-  "moveToEndOfSentence",
-  "moveToEndOfSentenceAndModifySelection",
-  "moveUp",
-  "moveUpAndModifySelection",
-  "moveWordBackward",
-  "moveWordBackwardAndModifySelection",
-  "moveWordForward",
-  "moveWordForwardAndModifySelection",
-  "moveWordLeft",
-  "moveWordLeftAndModifySelection",
-  "moveWordRight",
-  "moveWordRightAndModifySelection",
-  "outdent",
-  "pageDown",
-  "pageDownAndModifySelection",
-  "pageUp",
-  "pageUpAndModifySelection",
-  "selectAll",
-  "selectLine",
-  "selectParagraph",
-  "selectSentence",
-  "selectToMark",
-  "selectWord",
-  "setMark",
-  "showGuessPanel",
-  "subscript",
-  "superscript",
-  "swapWithMark",
-  "transpose",
-  "underline",
-  "unscript",
-  "yank",
-  "yankAndSelect"
-};
+const auto kEditCommands =
+    std::to_array<const char*>({"alignCenter",
+                                "alignJustified",
+                                "alignLeft",
+                                "alignRight",
+                                "copy",
+                                "cut",
+                                "delete",
+                                "deleteBackward",
+                                "deleteBackwardByDecomposingPreviousCharacter",
+                                "deleteForward",
+                                "deleteToBeginningOfLine",
+                                "deleteToBeginningOfParagraph",
+                                "deleteToEndOfLine",
+                                "deleteToEndOfParagraph",
+                                "deleteToMark",
+                                "deleteWordBackward",
+                                "deleteWordForward",
+                                "ignoreSpelling",
+                                "indent",
+                                "insertBacktab",
+                                "insertLineBreak",
+                                "insertNewline",
+                                "insertNewlineIgnoringFieldEditor",
+                                "insertParagraphSeparator",
+                                "insertTab",
+                                "insertTabIgnoringFieldEditor",
+                                "makeTextWritingDirectionLeftToRight",
+                                "makeTextWritingDirectionNatural",
+                                "makeTextWritingDirectionRightToLeft",
+                                "moveBackward",
+                                "moveBackwardAndModifySelection",
+                                "moveDown",
+                                "moveDownAndModifySelection",
+                                "moveForward",
+                                "moveForwardAndModifySelection",
+                                "moveLeft",
+                                "moveLeftAndModifySelection",
+                                "moveParagraphBackwardAndModifySelection",
+                                "moveParagraphForwardAndModifySelection",
+                                "moveRight",
+                                "moveRightAndModifySelection",
+                                "moveToBeginningOfDocument",
+                                "moveToBeginningOfDocumentAndModifySelection",
+                                "moveToBeginningOfLine",
+                                "moveToBeginningOfLineAndModifySelection",
+                                "moveToBeginningOfParagraph",
+                                "moveToBeginningOfParagraphAndModifySelection",
+                                "moveToBeginningOfSentence",
+                                "moveToBeginningOfSentenceAndModifySelection",
+                                "moveToEndOfDocument",
+                                "moveToEndOfDocumentAndModifySelection",
+                                "moveToEndOfLine",
+                                "moveToEndOfLineAndModifySelection",
+                                "moveToEndOfParagraph",
+                                "moveToEndOfParagraphAndModifySelection",
+                                "moveToEndOfSentence",
+                                "moveToEndOfSentenceAndModifySelection",
+                                "moveUp",
+                                "moveUpAndModifySelection",
+                                "moveWordBackward",
+                                "moveWordBackwardAndModifySelection",
+                                "moveWordForward",
+                                "moveWordForwardAndModifySelection",
+                                "moveWordLeft",
+                                "moveWordLeftAndModifySelection",
+                                "moveWordRight",
+                                "moveWordRightAndModifySelection",
+                                "outdent",
+                                "pageDown",
+                                "pageDownAndModifySelection",
+                                "pageUp",
+                                "pageUpAndModifySelection",
+                                "selectAll",
+                                "selectLine",
+                                "selectParagraph",
+                                "selectSentence",
+                                "selectToMark",
+                                "selectWord",
+                                "setMark",
+                                "showGuessPanel",
+                                "subscript",
+                                "superscript",
+                                "swapWithMark",
+                                "transpose",
+                                "underline",
+                                "unscript",
+                                "yank",
+                                "yankAndSelect"});
 
 // This function is installed via the objc runtime as the implementation of all
 // the various editing selectors.
@@ -125,11 +123,11 @@ const char* const kEditCommands[] = {
 // The route the message takes is:
 // RenderWidgetHostViewMac -> RenderViewHost ->
 // | IPC | ->
-// RenderView -> currently focused WebFrame.
+// `blink::WebView` -> currently focused WebFrame.
 // The WebFrame is in the Chrome glue layer and forwards the message to WebCore.
 void EditCommandImp(id self, SEL _cmd, id sender) {
   // Make sure |self| is the right type.
-  DCHECK([self conformsToProtocol:@protocol(RenderWidgetHostNSViewHostOwner)]);
+  DCHECK([self respondsToSelector:@selector(renderWidgetHostNSViewHost)]);
 
   // SEL -> command name string.
   NSString* command_name_ns =
@@ -138,7 +136,7 @@ void EditCommandImp(id self, SEL _cmd, id sender) {
 
   // Forward the edit command string down the pipeline.
   remote_cocoa::mojom::RenderWidgetHostNSViewHost* host =
-      [(id<RenderWidgetHostNSViewHostOwner>)self renderWidgetHostNSViewHost];
+      [self renderWidgetHostNSViewHost];
   DCHECK(host);
   host->ExecuteEditCommand(command);
 }
@@ -180,30 +178,14 @@ NSString* RenderWidgetHostViewMacEditCommandHelper::CommandNameForSelector(
 
 RenderWidgetHostViewMacEditCommandHelper::
     RenderWidgetHostViewMacEditCommandHelper() {
-  for (size_t i = 0; i < base::size(kEditCommands); ++i) {
-    edit_command_set_.insert(kEditCommands[i]);
+  for (const char* command : kEditCommands) {
+    edit_command_set_.insert(command);
   }
 }
 
 RenderWidgetHostViewMacEditCommandHelper::
     ~RenderWidgetHostViewMacEditCommandHelper() {}
 
-// Dynamically adds Selectors to the aformentioned class.
-void RenderWidgetHostViewMacEditCommandHelper::AddEditingSelectorsToClass(
-    Class klass) {
-  for (size_t i = 0; i < base::size(kEditCommands); ++i) {
-    // Append trailing ':' to command name to get selector name.
-    NSString* sel_str = [NSString stringWithFormat: @"%s:", kEditCommands[i]];
-
-    SEL edit_selector = NSSelectorFromString(sel_str);
-    // May want to use @encode() for the last parameter to this method.
-    // If class_addMethod fails we assume that all the editing selectors where
-    // added to the class.
-    // If a certain class already implements a method then class_addMethod
-    // returns NO, which we can safely ignore.
-    class_addMethod(klass, edit_selector, (IMP)EditCommandImp, "v@:@");
-  }
-}
 
 bool RenderWidgetHostViewMacEditCommandHelper::IsMenuItemEnabled(
     SEL item_action,
@@ -226,12 +208,31 @@ bool RenderWidgetHostViewMacEditCommandHelper::IsMenuItemEnabled(
   return ret;
 }
 
-NSArray* RenderWidgetHostViewMacEditCommandHelper::GetEditSelectorNames() {
-  size_t num_edit_commands = base::size(kEditCommands);
+// static
+void RenderWidgetHostViewMacEditCommandHelper::AddEditingSelectorsToClass(
+    Class klass) {
+  for (const char* command : kEditCommands) {
+    // Append trailing ':' to command name to get selector name.
+    NSString* sel_str = [NSString stringWithFormat:@"%s:", command];
+
+    SEL edit_selector = NSSelectorFromString(sel_str);
+    // May want to use @encode() for the last parameter to this method.
+    // If class_addMethod fails we assume that all the editing selectors where
+    // added to the class.
+    // If a certain class already implements a method then class_addMethod
+    // returns NO, which we can safely ignore.
+    class_addMethod(klass, edit_selector, (IMP)EditCommandImp, "v@:@");
+  }
+}
+
+// static
+NSArray*
+RenderWidgetHostViewMacEditCommandHelper::GetEditSelectorNamesForTesting() {
+  size_t num_edit_commands = std::size(kEditCommands);
   NSMutableArray* ret = [NSMutableArray arrayWithCapacity:num_edit_commands];
 
-  for (size_t i = 0; i < num_edit_commands; ++i) {
-      [ret addObject:[NSString stringWithUTF8String:kEditCommands[i]]];
+  for (const char* command : kEditCommands) {
+    [ret addObject:[NSString stringWithUTF8String:command]];
   }
 
   return ret;

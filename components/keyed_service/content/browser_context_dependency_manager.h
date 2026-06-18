@@ -1,22 +1,15 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_KEYED_SERVICE_CONTENT_BROWSER_CONTEXT_DEPENDENCY_MANAGER_H_
 #define COMPONENTS_KEYED_SERVICE_CONTENT_BROWSER_CONTEXT_DEPENDENCY_MANAGER_H_
 
-#include <memory>
-
-#include "base/callback_forward.h"
 #include "base/callback_list.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
+#include "base/no_destructor.h"
 #include "components/keyed_service/core/dependency_manager.h"
 #include "components/keyed_service/core/keyed_service_export.h"
-
-namespace base {
-template <typename T>
-class NoDestructor;
-}  // namespace base
 
 namespace content {
 class BrowserContext;
@@ -65,7 +58,7 @@ class KEYED_SERVICE_EXPORT BrowserContextDependencyManager
   // CreateBrowserContextServices() or CreateBrowserContextServicesForTest().
   // This can be useful in browser tests which wish to substitute test or mock
   // builders for the keyed services.
-  std::unique_ptr<CreateServicesCallbackList::Subscription>
+  [[nodiscard]] base::CallbackListSubscription
   RegisterCreateServicesCallbackForTesting(
       const CreateServicesCallback& callback);
 
@@ -84,6 +77,11 @@ class KEYED_SERVICE_EXPORT BrowserContextDependencyManager
 
   static BrowserContextDependencyManager* GetInstance();
 
+  BrowserContextDependencyManager(const BrowserContextDependencyManager&) =
+      delete;
+  BrowserContextDependencyManager& operator=(
+      const BrowserContextDependencyManager&) = delete;
+
  private:
   friend class BrowserContextDependencyManagerUnittests;
   friend class base::NoDestructor<BrowserContextDependencyManager>;
@@ -95,16 +93,9 @@ class KEYED_SERVICE_EXPORT BrowserContextDependencyManager
   BrowserContextDependencyManager();
   ~BrowserContextDependencyManager() override;
 
-#ifndef NDEBUG
-  // DependencyManager:
-  void DumpContextDependencies(void* context) const final;
-#endif  // NDEBUG
-
   // A list of callbacks to call just before executing
   // CreateBrowserContextServices() or CreateBrowserContextServicesForTest().
   CreateServicesCallbackList create_services_callbacks_;
-
-  DISALLOW_COPY_AND_ASSIGN(BrowserContextDependencyManager);
 };
 
 #endif  // COMPONENTS_KEYED_SERVICE_CONTENT_BROWSER_CONTEXT_DEPENDENCY_MANAGER_H_

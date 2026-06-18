@@ -21,10 +21,7 @@ Running: testResetClearsList
 
 Number of contexts (items): 0
 Title: Audio context: (no recordings)}
-Selected Context: {
-   "contextId": "924c4ee4-4cae-4e62-b4c6-71603edc39fd",
-   "contextType": "realtime"
-}
+Selected Context: null
 
 
 Running: testReSelectsCreatedContextAfterChange
@@ -68,8 +65,8 @@ Selected Context: {
 
 
 Running: testOnListItemReplacedCalled
-_onListItemReplaced called with contexts (items) count: 1
-_onListItemReplaced called with contexts (items) count: 1
+onListItemReplaced called with contexts (items) count: 1
+onListItemReplaced called with contexts (items) count: 1
 
 Number of contexts (items): 1
 Title: Audio context: realtime (dc39fd)}

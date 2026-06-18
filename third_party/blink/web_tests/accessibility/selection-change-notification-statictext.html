@@ -10,9 +10,9 @@
 async_test((t) => {
   const axElement = accessibilityController.rootElement;
   axElement.setNotificationListener(t.step_func(function(notification, intents) {
-    if (notification == 'SelectedTextChanged') {
+    if (notification == 'DocumentSelectionChanged') {
       assert_array_equals(intents,
-                          ['AXEventIntent(setSelection,character,forward)']);
+                          ['AXEventIntent(setSelection,none,character,forward)']);
       axElement.unsetNotificationListener();
       t.done();
     }

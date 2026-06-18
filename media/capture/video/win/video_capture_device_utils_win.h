@@ -1,15 +1,17 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_CAPTURE_VIDEO_WIN_VIDEO_CAPTURE_DEVICE_UTILS_WIN_H_
 #define MEDIA_CAPTURE_VIDEO_WIN_VIDEO_CAPTURE_DEVICE_UTILS_WIN_H_
 
+#include <windows.h>
+
 // Avoid including strsafe.h via dshow as it will cause build warnings.
 #define NO_DSHOW_STRSAFE
 #include <dshow.h>
-#include <windows.h>
 
+#include "base/logging.h"
 #include "media/base/video_facing.h"
 #include "media/capture/mojom/image_capture_types.h"
 
@@ -52,10 +54,10 @@ HRESULT CheckPathInfoForInternal(const PCWSTR device_name);
 bool IsInternalVideoOutput(
     const DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY video_output_tech_type);
 
-static double PlatformToCaptureValue(long value) {
+static inline double PlatformToCaptureValue(long value) {
   return value;
 }
-static double PlatformToCaptureStep(long step, double min, double max) {
+static inline double PlatformToCaptureStep(long step, double min, double max) {
   return step;
 }
 

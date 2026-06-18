@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,14 +12,14 @@
 
 #include "base/callback_list.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
+#include "base/no_destructor.h"
 #include "base/observer_list.h"
 #include "chrome/browser/sessions/session_restore_observer.h"
-#include "components/history/core/browser/history_service.h"
 #include "components/sessions/core/session_types.h"
 #include "ui/base/window_open_disposition.h"
 
 class Browser;
+class BrowserWindowInterface;
 class Profile;
 class SessionRestoreImpl;
 
@@ -27,18 +27,36 @@ namespace content {
 class WebContents;
 }
 
+struct StartupTab;
+using StartupTabs = std::vector<StartupTab>;
+
 // SessionRestore handles restoring either the last or saved session. Session
 // restore come in two variants, asynchronous or synchronous. The synchronous
 // variety is meant for startup and blocks until restore is complete.
+// TODO(crbug.com/469787848): Plumb BrowserWindowInterface through the
+// SessionRestore code.
 class SessionRestore {
  public:
+  // Struct to hold the number of tabs and windows per profile.
+  struct StateCounts {
+    int normal_tabs = 0;
+    int normal_windows = 0;
+    int app_tabs = 0;
+    int app_windows = 0;
+  };
+
+  static constexpr char kNormalTabsKey[] = "normal_tabs";
+  static constexpr char kNormalWindowsKey[] = "normal_windows";
+  static constexpr char kAppTabsKey[] = "app_tabs";
+  static constexpr char kAppWindowsKey[] = "app_windows";
+
   // Bitmask representing behaviors available when restoring a session. Populate
   // using the values below.
   using BehaviorBitmask = uint32_t;
 
   enum {
     // Indicates the active tab of the supplied browser should be closed.
-    CLOBBER_CURRENT_TAB          = 1 << 0,
+    CLOBBER_CURRENT_TAB = 1 << 0,
 
     // Indicates that if there is a problem restoring the last session then a
     // new tabbed browser should be created.
@@ -46,26 +64,31 @@ class SessionRestore {
 
     // Restore blocks until complete. This is intended for use during startup
     // when we want to block until restore is complete.
-    SYNCHRONOUS                  = 1 << 2,
+    SYNCHRONOUS = 1 << 2,
+
+    // Restore apps as well.
+    RESTORE_APPS = 1 << 3,
+
+    // Restores normal browsers.
+    RESTORE_BROWSER = 1 << 4,
   };
 
   // Notification callback list.
-  using CallbackList = base::RepeatingCallbackList<void(int)>;
+  using CallbackList = base::RepeatingCallbackList<void(Profile*, int)>;
+  using RestoredCallback = base::RepeatingCallback<void(Profile*, int)>;
 
-  // Used by objects calling RegisterOnSessionRestoredCallback() to de-register
-  // themselves when they are destroyed.
-  using CallbackSubscription =
-      std::unique_ptr<base::RepeatingCallbackList<void(int)>::Subscription>;
+  SessionRestore(const SessionRestore&) = delete;
+  SessionRestore& operator=(const SessionRestore&) = delete;
 
   // Restores the last session. |behavior| is a bitmask of Behaviors, see it
   // for details. If |browser| is non-null the tabs for the first window are
   // added to it. Returns the last active browser.
   //
-  // If |urls_to_open| is non-empty, a tab is added for each of the URLs.
+  // If |startup_tabs| is non-empty, a tab is added for each of the URLs.
   static Browser* RestoreSession(Profile* profile,
                                  Browser* browser,
                                  BehaviorBitmask behavior,
-                                 const std::vector<GURL>& urls_to_open);
+                                 const StartupTabs& startup_tabs);
 
   // Restores the last session when the last session crashed. It's a wrapper
   // of function RestoreSession.
@@ -75,25 +98,32 @@ class SessionRestore {
   static void OpenStartupPagesAfterCrash(Browser* browser);
 
   // Specifically used in the restoration of a foreign session.  This function
-  // restores the given session windows to multiple browsers. Returns the
-  // created Browsers.
-  static std::vector<Browser*> RestoreForeignSessionWindows(
+  // restores the given session windows to multiple browsers. Takes a callback
+  // that receives the created BrowserWindowInterfaces.
+  static void RestoreForeignSessionWindows(
       Profile* profile,
       std::vector<const sessions::SessionWindow*>::const_iterator begin,
-      std::vector<const sessions::SessionWindow*>::const_iterator end);
+      std::vector<const sessions::SessionWindow*>::const_iterator end,
+      base::OnceCallback<void(std::vector<BrowserWindowInterface*>)> callback);
 
   // Specifically used in the restoration of a foreign session.  This method
   // restores the given session tab to the browser of |source_web_contents| if
   // the disposition is not NEW_WINDOW. Returns the WebContents corresponding
   // to the restored tab. If |disposition| is CURRENT_TAB, |source_web_contents|
-  // may be destroyed.
+  // may be destroyed. If |skip_renderer_creation| is true, depending on if
+  // |disposition| is BACKGROUND_TAB, lazily initialize tabs without a renderer.
   static content::WebContents* RestoreForeignSessionTab(
       content::WebContents* source_web_contents,
       const sessions::SessionTab& tab,
-      WindowOpenDisposition disposition);
+      WindowOpenDisposition disposition,
+      bool skip_renderer_creation = false);
 
   // Returns true if we're in the process of restoring |profile|.
   static bool IsRestoring(const Profile* profile);
+
+  // Returns true if any session has been restored during the current process
+  // lifetime.
+  static bool IsAnySessionRestored();
 
   // Returns true if synchronously restoring a session.
   static bool IsRestoringSynchronously();
@@ -102,8 +132,8 @@ class SessionRestore {
   // Note that 'complete' means all the browsers and tabs have been created but
   // have not necessarily finished loading. The integer supplied to the callback
   // indicates the number of tabs that were created.
-  static CallbackSubscription RegisterOnSessionRestoredCallback(
-      const base::RepeatingCallback<void(int)>& callback);
+  static base::CallbackListSubscription RegisterOnSessionRestoredCallback(
+      const RestoredCallback& callback);
 
   // Add/remove an observer to/from this session restore.
   static void AddObserver(SessionRestoreObserver* observer);
@@ -113,8 +143,11 @@ class SessionRestore {
   // without session restore started.
   static void OnTabLoaderFinishedLoadingTabs();
 
-  // Is called when session restore is going to restore a tab.
-  static void OnWillRestoreTab(content::WebContents* web_contents);
+  // Is called when windows are read from the last session restore file.
+  static void OnGotSession(
+      Profile* profile,
+      bool for_apps,
+      const std::vector<const sessions::SessionWindow*>& windows);
 
  private:
   friend class SessionRestoreImpl;
@@ -134,35 +167,19 @@ class SessionRestore {
 
   // Accessor for |*on_session_restored_callbacks_|. Creates a new object the
   // first time so that it always returns a valid object.
-  static CallbackList* on_session_restored_callbacks() {
-    if (!on_session_restored_callbacks_)
-      on_session_restored_callbacks_ = new CallbackList();
-    return on_session_restored_callbacks_;
-  }
+  static CallbackList* on_session_restored_callbacks();
 
   // Accessor for the observer list. Create the list the first time to always
   // return a valid reference.
-  static SessionRestoreObserverList* observers() {
-    if (!observers_)
-      observers_ = new SessionRestoreObserverList();
-    return observers_;
-  }
-
-  // Contains all registered callbacks for session restore notifications.
-  static CallbackList* on_session_restored_callbacks_;
+  static SessionRestoreObserverList* observers();
 
   // Notify SessionRestoreObservers session restore started. If there are
   // multiple concurrent session restores, observers get notified only once in
   // the first session restore.
   static void NotifySessionRestoreStartedLoadingTabs();
 
-  // Contains all registered observers for session restore events.
-  static SessionRestoreObserverList* observers_;
-
   // Whether session restore started or not.
   static bool session_restore_started_;
-
-  DISALLOW_COPY_AND_ASSIGN(SessionRestore);
 };
 
 #endif  // CHROME_BROWSER_SESSIONS_SESSION_RESTORE_H_

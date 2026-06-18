@@ -1,21 +1,35 @@
-// Copyright (c) 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/viz/common/gpu/vulkan_in_process_context_provider.h"
 
+#include <algorithm>
+#include <string_view>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/memory_coordinator/memory_consumer.h"
+#include "base/memory_coordinator/memory_coordinator_features.h"
 #include "gpu/vulkan/buildflags.h"
-#include "gpu/vulkan/init/gr_vk_memory_allocator_impl.h"
 #include "gpu/vulkan/vulkan_device_queue.h"
 #include "gpu/vulkan/vulkan_fence_helper.h"
 #include "gpu/vulkan/vulkan_function_pointers.h"
 #include "gpu/vulkan/vulkan_implementation.h"
 #include "gpu/vulkan/vulkan_instance.h"
 #include "gpu/vulkan/vulkan_util.h"
-#include "third_party/skia/include/gpu/GrDirectContext.h"
-#include "third_party/skia/include/gpu/vk/GrVkExtensions.h"
+#include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrVkDirectContext.h"
+#include "third_party/skia/include/gpu/vk/VulkanBackendContext.h"
+#include "third_party/skia/include/gpu/vk/VulkanExtensions.h"
+#include "third_party/skia/include/gpu/vk/VulkanTypes.h"
+
+namespace {
+
+// Setting this limit to 0 practically forces sync at every submit.
+constexpr uint32_t kSyncCpuMemoryLimitAtMemoryPressureCritical = 0;
+
+}  // namespace
 
 namespace viz {
 
@@ -23,26 +37,65 @@ namespace viz {
 scoped_refptr<VulkanInProcessContextProvider>
 VulkanInProcessContextProvider::Create(
     gpu::VulkanImplementation* vulkan_implementation,
-    const GrContextOptions& options,
-    const gpu::GPUInfo* gpu_info) {
+    uint32_t heap_memory_limit,
+    uint32_t sync_cpu_memory_limit,
+    const bool is_thread_safe,
+    const gpu::GPUInfo* gpu_info,
+    base::TimeDelta cooldown_duration_at_memory_pressure_critical) {
   scoped_refptr<VulkanInProcessContextProvider> context_provider(
-      new VulkanInProcessContextProvider(vulkan_implementation));
-  if (!context_provider->Initialize(options, gpu_info))
+      new VulkanInProcessContextProvider(
+          vulkan_implementation, heap_memory_limit, sync_cpu_memory_limit,
+          cooldown_duration_at_memory_pressure_critical));
+  if (!context_provider->Initialize(gpu_info, is_thread_safe))
     return nullptr;
   return context_provider;
 }
 
+scoped_refptr<VulkanInProcessContextProvider>
+VulkanInProcessContextProvider::CreateForCompositorGpuThread(
+    gpu::VulkanImplementation* vulkan_implementation,
+    std::unique_ptr<gpu::VulkanDeviceQueue> vulkan_device_queue,
+    uint32_t sync_cpu_memory_limit,
+    base::TimeDelta cooldown_duration_at_memory_pressure_critical) {
+  if (!vulkan_implementation)
+    return nullptr;
+
+  scoped_refptr<VulkanInProcessContextProvider> context_provider(
+      new VulkanInProcessContextProvider(
+          vulkan_implementation, /*heap_memory_limit=*/0, sync_cpu_memory_limit,
+          cooldown_duration_at_memory_pressure_critical));
+  context_provider->InitializeForCompositorGpuThread(
+      std::move(vulkan_device_queue));
+  return context_provider;
+}
+
 VulkanInProcessContextProvider::VulkanInProcessContextProvider(
-    gpu::VulkanImplementation* vulkan_implementation)
-    : vulkan_implementation_(vulkan_implementation) {}
+    gpu::VulkanImplementation* vulkan_implementation,
+    uint32_t heap_memory_limit,
+    uint32_t sync_cpu_memory_limit,
+    base::TimeDelta cooldown_duration_at_memory_pressure_critical)
+    : vulkan_implementation_(vulkan_implementation),
+      heap_memory_limit_(heap_memory_limit),
+      sync_cpu_memory_limit_(sync_cpu_memory_limit > 0
+                                 ? std::make_optional(sync_cpu_memory_limit)
+                                 : std::nullopt),
+      cooldown_duration_at_memory_pressure_critical_(
+          cooldown_duration_at_memory_pressure_critical),
+      critical_memory_pressure_expiration_time_(base::TimeTicks()),
+      active_sync_cpu_memory_limit_(sync_cpu_memory_limit) {
+  memory_pressure_listener_registration_ =
+      std::make_unique<base::AsyncMemoryPressureListenerRegistration>(
+          FROM_HERE,
+          base::MemoryPressureListenerTag::kVulkanInProcessContextProvider,
+          this);
+}
 
 VulkanInProcessContextProvider::~VulkanInProcessContextProvider() {
   Destroy();
 }
 
-bool VulkanInProcessContextProvider::Initialize(
-    const GrContextOptions& context_options,
-    const gpu::GPUInfo* gpu_info) {
+bool VulkanInProcessContextProvider::Initialize(const gpu::GPUInfo* gpu_info,
+                                                const bool is_thread_safe) {
   DCHECK(!device_queue_);
 
   const auto& instance_extensions = vulkan_implementation_->GetVulkanInstance()
@@ -50,7 +103,7 @@ bool VulkanInProcessContextProvider::Initialize(
                                         .enabled_instance_extensions;
 
   uint32_t flags = gpu::VulkanDeviceQueue::GRAPHICS_QUEUE_FLAG;
-  constexpr base::StringPiece surface_extension_name(
+  constexpr std::string_view surface_extension_name(
       VK_KHR_SURFACE_EXTENSION_NAME);
   for (const auto* extension : instance_extensions) {
     if (surface_extension_name == extension) {
@@ -60,11 +113,25 @@ bool VulkanInProcessContextProvider::Initialize(
   }
 
   device_queue_ =
-      gpu::CreateVulkanDeviceQueue(vulkan_implementation_, flags, gpu_info);
+      gpu::CreateVulkanDeviceQueue(vulkan_implementation_, flags, gpu_info,
+                                   heap_memory_limit_, is_thread_safe);
   if (!device_queue_)
     return false;
 
-  GrVkBackendContext backend_context;
+  return true;
+}
+
+void VulkanInProcessContextProvider::InitializeForCompositorGpuThread(
+    std::unique_ptr<gpu::VulkanDeviceQueue> vulkan_device_queue) {
+  DCHECK(!device_queue_);
+  DCHECK(vulkan_device_queue);
+
+  device_queue_ = std::move(vulkan_device_queue);
+}
+
+bool VulkanInProcessContextProvider::InitializeGrContext(
+    const GrContextOptions& context_options) {
+  skgpu::VulkanBackendContext backend_context;
   backend_context.fInstance = device_queue_->GetVulkanInstance();
   backend_context.fPhysicalDevice = device_queue_->GetVulkanPhysicalDevice();
   backend_context.fDevice = device_queue_->GetVulkanDevice();
@@ -73,38 +140,56 @@ bool VulkanInProcessContextProvider::Initialize(
   backend_context.fMaxAPIVersion = vulkan_implementation_->GetVulkanInstance()
                                        ->vulkan_info()
                                        .used_api_version;
-  backend_context.fMemoryAllocator =
-      gpu::CreateGrVkMemoryAllocator(device_queue_.get());
+  backend_context.fMemoryAllocator = device_queue_->GetSkiaVkMemoryAllocator();
 
-  GrVkGetProc get_proc = [](const char* proc_name, VkInstance instance,
-                            VkDevice device) {
+  skgpu::VulkanGetProc get_proc = [](const char* proc_name, VkInstance instance,
+                                     VkDevice device) {
     if (device) {
-      if (std::strcmp("vkQueueSubmit", proc_name) == 0)
-        return reinterpret_cast<PFN_vkVoidFunction>(&gpu::QueueSubmitHook);
+      // Using vkQueue*Hook for all vkQueue* methods here to make both chrome
+      // side access and skia side access to the same queue thread safe.
+      // vkQueue*Hook routes all skia side access to the same
+      // VulkanFunctionPointers vkQueue* api which chrome uses and is under the
+      // lock.
+      std::string_view proc_name_view(proc_name);
+      if (proc_name_view == "vkCreateGraphicsPipelines") {
+        return reinterpret_cast<PFN_vkVoidFunction>(
+            &gpu::CreateGraphicsPipelinesHook);
+      } else if (proc_name_view == "vkQueueSubmit") {
+        return reinterpret_cast<PFN_vkVoidFunction>(
+            &gpu::VulkanQueueSubmitHook);
+      } else if (proc_name_view == "vkQueueWaitIdle") {
+        return reinterpret_cast<PFN_vkVoidFunction>(
+            &gpu::VulkanQueueWaitIdleHook);
+      } else if (proc_name_view == "vkQueuePresentKHR") {
+        return reinterpret_cast<PFN_vkVoidFunction>(
+            &gpu::VulkanQueuePresentKHRHook);
+      }
       return vkGetDeviceProcAddr(device, proc_name);
     }
     return vkGetInstanceProcAddr(instance, proc_name);
   };
 
+  const auto& instance_extensions = vulkan_implementation_->GetVulkanInstance()
+                                        ->vulkan_info()
+                                        .enabled_instance_extensions;
+
   std::vector<const char*> device_extensions;
   device_extensions.reserve(device_queue_->enabled_extensions().size());
   for (const auto& extension : device_queue_->enabled_extensions())
     device_extensions.push_back(extension.data());
-  GrVkExtensions gr_extensions;
-  gr_extensions.init(get_proc,
+  skgpu::VulkanExtensions vk_extensions;
+  vk_extensions.init(get_proc,
                      vulkan_implementation_->GetVulkanInstance()->vk_instance(),
                      device_queue_->GetVulkanPhysicalDevice(),
                      instance_extensions.size(), instance_extensions.data(),
                      device_extensions.size(), device_extensions.data());
-  backend_context.fVkExtensions = &gr_extensions;
+  backend_context.fVkExtensions = &vk_extensions;
   backend_context.fDeviceFeatures2 =
       &device_queue_->enabled_device_features_2();
   backend_context.fGetProc = get_proc;
-  backend_context.fProtectedContext =
-      vulkan_implementation_->enforce_protected_memory() ? GrProtected::kYes
-                                                         : GrProtected::kNo;
+  backend_context.fProtectedContext = GrProtected::kNo;
 
-  gr_context_ = GrDirectContext::MakeVulkan(backend_context, context_options);
+  gr_context_ = GrDirectContexts::MakeVulkan(backend_context, context_options);
 
   return gr_context_ != nullptr;
 }
@@ -156,6 +241,52 @@ void VulkanInProcessContextProvider::EnqueueSecondaryCBSemaphores(
 void VulkanInProcessContextProvider::EnqueueSecondaryCBPostSubmitTask(
     base::OnceClosure closure) {
   NOTREACHED();
+}
+
+std::optional<uint32_t> VulkanInProcessContextProvider::GetSyncCpuMemoryLimit()
+    const {
+  // Return nullopt to indicate that there's no limit.
+  if (!sync_cpu_memory_limit_) {
+    return std::nullopt;
+  }
+
+  if (base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    return active_sync_cpu_memory_limit_.load(std::memory_order_relaxed);
+  }
+
+  return base::TimeTicks::Now() <
+                 critical_memory_pressure_expiration_time_.load(
+                     std::memory_order_relaxed)
+             ? std::optional<uint32_t>(
+                   kSyncCpuMemoryLimitAtMemoryPressureCritical)
+             : sync_cpu_memory_limit_;
+}
+
+void VulkanInProcessContextProvider::OnMemoryPressure(
+    base::MemoryPressureLevel level) {
+  if (!sync_cpu_memory_limit_) {
+    return;
+  }
+
+  if (base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    // We cap the ratio to 1.0 to ensure that we never exceed the
+    // user-provided sync_cpu_memory_limit, even if the memory coordinator
+    // allows for more memory usage (ratio > 1.0).
+    int capped_memory_limit = std::min(100, GetMemoryLimit());
+    uint32_t new_sync_cpu_memory_limit =
+        base::ScaleByMemoryLimit(*sync_cpu_memory_limit_, capped_memory_limit);
+    active_sync_cpu_memory_limit_.store(new_sync_cpu_memory_limit,
+                                        std::memory_order_relaxed);
+    return;
+  }
+
+  if (level != base::MEMORY_PRESSURE_LEVEL_CRITICAL) {
+    return;
+  }
+
+  critical_memory_pressure_expiration_time_.store(
+      base::TimeTicks::Now() + cooldown_duration_at_memory_pressure_critical_,
+      std::memory_order_relaxed);
 }
 
 }  // namespace viz

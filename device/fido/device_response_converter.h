@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,15 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <vector>
 
 #include "base/component_export.h"
-#include "base/optional.h"
 #include "device/fido/authenticator_get_assertion_response.h"
 #include "device/fido/authenticator_get_info_response.h"
 #include "device/fido/authenticator_make_credential_response.h"
-#include "device/fido/fido_constants.h"
-#include "device/fido/fido_transport_protocol.h"
+#include "device/fido/public/fido_constants.h"
+#include "device/fido/public/fido_transport_protocol.h"
 
 // Converts response from authenticators to CTAPResponse objects. If the
 // response of the authenticator does not conform to format specified by the
@@ -31,27 +31,36 @@ CtapDeviceResponseCode GetResponseCode(base::span<const uint8_t> buffer);
 // that conform to format of attestation object defined by the Webauthn spec:
 // https://w3c.github.io/webauthn/#fig-attStructs
 COMPONENT_EXPORT(DEVICE_FIDO)
-base::Optional<AuthenticatorMakeCredentialResponse>
+std::optional<AuthenticatorMakeCredentialResponse>
 ReadCTAPMakeCredentialResponse(FidoTransportProtocol transport_used,
-                               const base::Optional<cbor::Value>& cbor);
+                               const std::optional<cbor::Value>& cbor);
 
 // Converts |cbor|, the response to an |AuthenticatorGetAssertion| /
 // |AuthenticatorGetNextAssertion| request, to an
 // |AuthenticatorGetAssertionResponse|.
 COMPONENT_EXPORT(DEVICE_FIDO)
-base::Optional<AuthenticatorGetAssertionResponse> ReadCTAPGetAssertionResponse(
-    const base::Optional<cbor::Value>& cbor);
+std::optional<AuthenticatorGetAssertionResponse> ReadCTAPGetAssertionResponse(
+    FidoTransportProtocol transport_used,
+    const std::optional<cbor::Value>& cbor);
 
 // De-serializes CBOR encoded response to AuthenticatorGetInfo request to
 // AuthenticatorGetInfoResponse object.
 COMPONENT_EXPORT(DEVICE_FIDO)
-base::Optional<AuthenticatorGetInfoResponse> ReadCTAPGetInfoResponse(
+std::optional<AuthenticatorGetInfoResponse> ReadCTAPGetInfoResponse(
     base::span<const uint8_t> buffer);
 
 COMPONENT_EXPORT(DEVICE_FIDO)
-base::Optional<cbor::Value> FixInvalidUTF8(
+std::optional<cbor::Value> FixInvalidUTF8(
     cbor::Value in,
     bool (*predicate)(const std::vector<const cbor::Value*>&));
+
+// Converts |in| to the equivalent |PINUVAuthProtocol|.
+std::optional<PINUVAuthProtocol> ToPINUVAuthProtocol(int64_t in);
+
+// Returns a copy of a CTAP get assertion response with its sensitive fields
+// redacted.
+COMPONENT_EXPORT(DEVICE_FIDO)
+cbor::Value RedactCtapGetAssertionResponse(const cbor::Value& cbor);
 
 }  // namespace device
 

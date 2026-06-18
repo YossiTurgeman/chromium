@@ -1,12 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_VIEWS_MESSAGE_BOX_DIALOG_H_
 #define CHROME_BROWSER_UI_VIEWS_MESSAGE_BOX_DIALOG_H_
 
-#include "chrome/browser/ui/simple_message_box.h"
+#include <string_view>
 
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ui/simple_message_box.h"
 #include "ui/views/widget/widget_observer.h"
 #include "ui/views/window/dialog_delegate.h"
 
@@ -20,32 +22,37 @@ class MessageBoxDialog : public views::DialogDelegate,
   using MessageBoxResultCallback =
       base::OnceCallback<void(chrome::MessageBoxResult result)>;
 
+  MessageBoxDialog(const MessageBoxDialog&) = delete;
+  MessageBoxDialog& operator=(const MessageBoxDialog&) = delete;
+
   static chrome::MessageBoxResult Show(
       gfx::NativeWindow parent,
-      const base::string16& title,
-      const base::string16& message,
+      std::u16string_view title,
+      std::u16string_view message,
       chrome::MessageBoxType type,
-      const base::string16& yes_text,
-      const base::string16& no_text,
-      const base::string16& checkbox_text,
+      std::u16string_view yes_text,
+      std::u16string_view no_text,
+      std::u16string_view checkbox_text,
       MessageBoxResultCallback callback = MessageBoxResultCallback());
 
+  void set_close_on_deactivate(bool value) { close_on_deactivate_ = value; }
+
   // views::DialogDelegate:
-  base::string16 GetWindowTitle() const override;
+  std::u16string GetWindowTitle() const override;
   views::View* GetContentsView() override;
   bool ShouldShowCloseButton() const override;
 
   // views::WidgetObserver:
   void OnWidgetActivationChanged(views::Widget* widget, bool active) override;
+  void OnWidgetDestroying(views::Widget* widget) override;
 
  private:
-  MessageBoxDialog(const base::string16& title,
-                   const base::string16& message,
+  MessageBoxDialog(std::u16string_view title,
+                   std::u16string_view message,
                    chrome::MessageBoxType type,
-                   const base::string16& yes_text,
-                   const base::string16& no_text,
-                   const base::string16& checkbox_text,
-                   bool is_system_modal);
+                   std::u16string_view yes_text,
+                   std::u16string_view no_text,
+                   std::u16string_view checkbox_text);
   ~MessageBoxDialog() override;
 
   void Run(MessageBoxResultCallback result_callback);
@@ -57,12 +64,11 @@ class MessageBoxDialog : public views::DialogDelegate,
   views::Widget* GetWidget() override;
   const views::Widget* GetWidget() const override;
 
-  const base::string16 window_title_;
+  const std::u16string window_title_;
   const chrome::MessageBoxType type_;
-  views::MessageBoxView* message_box_view_;
+  raw_ptr<views::MessageBoxView> message_box_view_;
   MessageBoxResultCallback result_callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(MessageBoxDialog);
+  bool close_on_deactivate_ = true;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_MESSAGE_BOX_DIALOG_H_

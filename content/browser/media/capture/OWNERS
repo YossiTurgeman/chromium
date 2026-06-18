@@ -1,12 +1,10 @@
-miu@chromium.org
 mfoltz@chromium.org
+jophba@chromium.org
+alcooper@chromium.org
 sergeyu@chromium.org
-wez@chromium.org
+eladalon@chromium.org
+tovep@chromium.org
 
-# For WebRTC desktop capturer
-per-file desktop*=braveyao@chromium.org
-per-file screen_capture*=braveyao@chromium.org
-
-per-file image_capture*=mcasas@chromium.org
-
-# COMPONENT: Internals>Media>ScreenCapture
+per-file native_screen_capture_picker*=agpalak@chromium.org
+per-file native_screen_capture_picker*=tovep@chromium.org
+per-file web_contents_*=ilnik@chromium.org

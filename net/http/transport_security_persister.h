@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,22 +33,28 @@
 #ifndef NET_HTTP_TRANSPORT_SECURITY_PERSISTER_H_
 #define NET_HTTP_TRANSPORT_SECURITY_PERSISTER_H_
 
+#include <optional>
 #include <string>
 
+#include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/files/important_file_writer.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/time/time.h"
 #include "net/base/net_export.h"
 #include "net/http/transport_security_state.h"
 
 namespace base {
 class SequencedTaskRunner;
-class Value;
 }
 
 namespace net {
+
+// Exists only to hold a "commit-interval" param. If disabled, the default
+// ImportantFileWriter commit interval is used.
+NET_EXPORT BASE_DECLARE_FEATURE(kTransportSecurityFileWriterSchedule);
 
 // Reads and updates on-disk TransportSecurity state. Clients of this class
 // should create, destroy, and call into it from one thread.
@@ -59,10 +65,18 @@ class NET_EXPORT TransportSecurityPersister
     : public TransportSecurityState::Delegate,
       public base::ImportantFileWriter::DataSerializer {
  public:
+  // Create a TransportSecurityPersister with state |state| on background runner
+  // |background_runner|. |data_path| points to the file to hold the transport
+  // security state data on disk.
   TransportSecurityPersister(
       TransportSecurityState* state,
-      const base::FilePath& profile_path,
-      const scoped_refptr<base::SequencedTaskRunner>& background_runner);
+      const scoped_refptr<base::SequencedTaskRunner>& background_runner,
+      const base::FilePath& data_path);
+
+  TransportSecurityPersister(const TransportSecurityPersister&) = delete;
+  TransportSecurityPersister& operator=(const TransportSecurityPersister&) =
+      delete;
+
   ~TransportSecurityPersister() override;
 
   // Called by the TransportSecurityState when it changes its state.
@@ -75,13 +89,12 @@ class NET_EXPORT TransportSecurityPersister
   // ImportantFileWriter::DataSerializer:
   //
   // Serializes |transport_security_state_| into |*output|. Returns true if
-  // all STS and Expect_CT states were serialized correctly.
+  // all STS states were serialized correctly.
   //
   // The serialization format is JSON; the JSON represents a dictionary of
-  // host:DomainState pairs (host is a string). The DomainState contains
-  // the STS and Expect-CT states and is represented as a dictionary containing
-  // the following keys and value types (not all keys will always be
-  // present):
+  // host:DomainState pairs (host is a string). The DomainState contains the STS
+  // states and is represented as a dictionary containing the following keys and
+  // value types (not all keys will always be present):
   //
   //     "sts_include_subdomains": true|false
   //     "created": double
@@ -92,47 +105,30 @@ class NET_EXPORT TransportSecurityPersister
   //             legacy value "spdy-only" is unused and ignored
   //     "report-uri": string
   //     "sts_observed": double
-  //     "expect_ct": dictionary with keys:
-  //         "expect_ct_expiry": double
-  //         "expect_ct_observed": double
-  //         "expect_ct_enforce": true|false
-  //         "expect_ct_report_uri": string
   //
   // The JSON dictionary keys are strings containing
   // Base64(SHA256(TransportSecurityState::CanonicalizeHost(domain))).
   // The reason for hashing them is so that the stored state does not
   // trivially reveal a user's browsing history to an attacker reading the
   // serialized state on disk.
-  bool SerializeData(std::string* data) override;
+  std::optional<std::string> SerializeData() override;
 
   // Clears any existing non-static entries, and then re-populates
   // |transport_security_state_|.
-  //
-  // Sets |*data_in_old_format| to true if the loaded data is in an older format
-  // and should be overwritten with data in the newest format.
-  bool LoadEntries(const std::string& serialized, bool* data_in_old_format);
+  void LoadEntries(const std::string& serialized);
+
+  // Returns the commit interval used by the ImportantFileWriter.
+  static base::TimeDelta GetCommitInterval();
 
  private:
-  // Populates |state| from the JSON string |serialized|. Returns true if
-  // all entries were parsed and deserialized correctly.
-  //
-  // Sets |*data_in_old_format| to true if the old data is in the old file
-  // format and needs to be overwritten with data in the newer format; false
-  // otherwise.
-  static bool Deserialize(const std::string& serialized,
-                          bool* data_in_old_format,
+  // Populates |state| from the JSON string |serialized|.
+  static void Deserialize(const std::string& serialized,
                           TransportSecurityState* state);
-
-  // Used internally by Deserialize() to handle older dictionaries.
-  // TODO(https://crbug.com/1086975): This should be removed in Chrome 88.
-  static bool DeserializeObsoleteData(const base::Value& value,
-                                      bool* dirty,
-                                      TransportSecurityState* state);
 
   void CompleteLoad(const std::string& state);
   void OnWriteFinished(base::OnceClosure callback);
 
-  TransportSecurityState* transport_security_state_;
+  raw_ptr<TransportSecurityState> transport_security_state_;
 
   // Helper for safely writing the data.
   base::ImportantFileWriter writer_;
@@ -141,8 +137,6 @@ class NET_EXPORT TransportSecurityPersister
   scoped_refptr<base::SequencedTaskRunner> background_runner_;
 
   base::WeakPtrFactory<TransportSecurityPersister> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(TransportSecurityPersister);
 };
 
 }  // namespace net

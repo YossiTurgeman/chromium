@@ -31,49 +31,42 @@
 #include "third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.h"
 
 #include <memory>
+#include <tuple>
 
+#include "base/debug/crash_logging.h"
+#include "base/notreached.h"
+#include "third_party/blink/public/mojom/origin_trials/origin_trial_feature.mojom-blink.h"
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/bindings/core/v8/referrer_script_info.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
-#include "third_party/blink/renderer/bindings/core/v8/script_source_code.h"
-#include "third_party/blink/renderer/bindings/core/v8/script_value.h"
-#include "third_party/blink/renderer/bindings/core/v8/source_location.h"
-#include "third_party/blink/renderer/bindings/core/v8/v8_code_cache.h"
-#include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
-#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
-#include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
-#include "third_party/blink/renderer/core/events/error_event.h"
 #include "third_party/blink/renderer/core/execution_context/agent.h"
-#include "third_party/blink/renderer/core/execution_context/execution_context.h"
-#include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
 #include "third_party/blink/renderer/core/inspector/worker_thread_debugger.h"
-#include "third_party/blink/renderer/core/workers/dedicated_worker_global_scope.h"
-#include "third_party/blink/renderer/core/workers/shared_worker_global_scope.h"
+#include "third_party/blink/renderer/core/origin_trials/origin_trial_context.h"
 #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
 #include "third_party/blink/renderer/core/workers/worker_or_worklet_global_scope.h"
-#include "third_party/blink/renderer/core/workers/worker_thread.h"
+#include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
+#include "third_party/blink/renderer/platform/bindings/extensions_registry.h"
 #include "third_party/blink/renderer/platform/bindings/origin_trial_features.h"
 #include "third_party/blink/renderer/platform/bindings/v8_dom_wrapper.h"
-#include "third_party/blink/renderer/platform/bindings/v8_object_constructor.h"
-#include "third_party/blink/renderer/platform/bindings/v8_throw_exception.h"
 #include "third_party/blink/renderer/platform/bindings/wrapper_type_info.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
-#include "third_party/blink/renderer/platform/heap/thread_state.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/scheduler/public/event_loop.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "third_party/blink/renderer/platform/wtf/vector.h"
 #include "v8/include/v8.h"
 
 namespace blink {
 
 WorkerOrWorkletScriptController::WorkerOrWorkletScriptController(
     WorkerOrWorkletGlobalScope* global_scope,
-    v8::Isolate* isolate)
+    v8::Isolate* isolate,
+    bool is_default_world_of_isolate)
     : global_scope_(global_scope),
       isolate_(isolate),
-      rejected_promises_(RejectedPromises::Create()) {
-  DCHECK(isolate);
-  world_ =
-      DOMWrapperWorld::Create(isolate, DOMWrapperWorld::WorldType::kWorker);
-}
+      world_(
+          DOMWrapperWorld::Create(isolate,
+                                  DOMWrapperWorld::WorldType::kWorkerOrWorklet,
+                                  is_default_world_of_isolate)),
+      rejected_promises_(RejectedPromises::Create()) {}
 
 WorkerOrWorkletScriptController::~WorkerOrWorkletScriptController() {
   DCHECK(!rejected_promises_);
@@ -91,33 +84,27 @@ void WorkerOrWorkletScriptController::DisposeContextIfNeeded() {
   if (!IsContextInitialized())
     return;
 
+  ScriptState::Scope scope(script_state_);
   if (!global_scope_->IsMainThreadWorkletGlobalScope()) {
-    ScriptState::Scope scope(script_state_);
     WorkerThreadDebugger* debugger = WorkerThreadDebugger::From(isolate_);
     debugger->ContextWillBeDestroyed(global_scope_->GetThread(),
                                      script_state_->GetContext());
   }
 
-  {
-    ScriptState::Scope scope(script_state_);
-    v8::Local<v8::Context> context = script_state_->GetContext();
-    // After disposing the world, all Blink->V8 references are gone. Blink
-    // stand-alone GCs may collect the WorkerOrWorkletGlobalScope because there
-    // are no more roots (V8->Blink references that are actually found by
-    // iterating Blink->V8 references). Clear the back pointers to avoid
-    // referring to cleared memory on the next GC in case the JS wrapper objects
-    // survived.
-    v8::Local<v8::Object> global_proxy_object = context->Global();
-    v8::Local<v8::Object> global_object =
-        global_proxy_object->GetPrototype().As<v8::Object>();
-    DCHECK(!global_object.IsEmpty());
-    V8DOMWrapper::ClearNativeInfo(isolate_, global_object);
-    V8DOMWrapper::ClearNativeInfo(isolate_, global_proxy_object);
+  v8::Local<v8::Context> context = script_state_->GetContext();
+  // After disposing the world, all Blink->V8 references are gone. Blink
+  // stand-alone GCs may collect the WorkerOrWorkletGlobalScope because there
+  // are no more roots (V8->Blink references that are actually found by
+  // iterating Blink->V8 references). Clear the back pointers to avoid
+  // referring to cleared memory on the next GC in case the JS wrapper objects
+  // survived.
+  v8::Local<v8::Object> global_proxy_object = context->Global();
+  V8DOMWrapper::ClearNativeInfoForGlobal(isolate_, global_proxy_object,
+                                         global_scope_->GetWrapperTypeInfo());
 
-    // This detaches v8::MicrotaskQueue pointer from v8::Context, so that we can
-    // destroy EventLoop safely.
-    context->DetachGlobal();
-  }
+  // This detaches v8::MicrotaskQueue pointer from v8::Context, so that we can
+  // destroy EventLoop safely.
+  context->DetachGlobal();
 
   script_state_->DisposePerContextData();
   script_state_->DissociateContext();
@@ -132,9 +119,10 @@ void WorkerOrWorkletScriptController::Initialize(const KURL& url_for_debugger) {
   // (aka the inner global).
   auto* script_wrappable = static_cast<ScriptWrappable*>(global_scope_);
   const WrapperTypeInfo* wrapper_type_info =
-      script_wrappable->GetWrapperTypeInfo();
+      ToWrapperTypeInfo(script_wrappable);
   v8::Local<v8::FunctionTemplate> global_interface_template =
-      wrapper_type_info->DomTemplate(isolate_, *world_);
+      wrapper_type_info->GetV8ClassTemplate(isolate_, *world_)
+          .As<v8::FunctionTemplate>();
   DCHECK(!global_interface_template.IsEmpty());
   v8::Local<v8::ObjectTemplate> global_template =
       global_interface_template->InstanceTemplate();
@@ -153,10 +141,42 @@ void WorkerOrWorkletScriptController::Initialize(const KURL& url_for_debugger) {
                                v8::DeserializeInternalFieldsCallback(),
                                microtask_queue);
   }
-  DCHECK(!context.IsEmpty());
+  // TODO(crbug.com/1501387): Remove temporary crash key when crash is fixed.
+  // While this logging involves a lot of string operations, it is only
+  // performed when a crash is certain.
+  StringBuilder ot_feature_string;
+  if (context.IsEmpty()) {
+    ot_feature_string.Append("Interface name: ");
+    if (global_scope_->GetWrapperTypeInfo()) {
+      ot_feature_string.Append(
+          global_scope_->GetWrapperTypeInfo()->interface_name);
+    }
+    ot_feature_string.Append("; OT Features: ");
 
-  script_state_ =
-      MakeGarbageCollected<ScriptState>(context, world_, global_scope_);
+    if (OriginTrialContext* ot_context =
+            global_scope_->GetOriginTrialContext()) {
+      if (std::unique_ptr<Vector<mojom::blink::OriginTrialFeature>>
+              ot_features = ot_context->GetInheritedTrialFeatures()) {
+        for (mojom::blink::OriginTrialFeature& feature : *ot_features) {
+          ot_feature_string.AppendNumber(static_cast<int>(feature));
+          ot_feature_string.Append(',');
+        }
+      } else {
+        ot_feature_string.Append("none");
+      }
+    }
+
+    // Ensure the string fits in the crash key, with space for a null
+    if (ot_feature_string.length() > 255) {
+      ot_feature_string.Resize(255);
+    }
+    SCOPED_CRASH_KEY_STRING256("shared-storage", "context-empty",
+                               ot_feature_string.ReleaseString().Utf8());
+    NOTREACHED() << "V8 context is empty";
+  }
+  CHECK(!context.IsEmpty());
+
+  script_state_ = ScriptState::Create(context, world_, global_scope_);
 
   ScriptState::Scope scope(script_state_);
 
@@ -187,20 +207,18 @@ void WorkerOrWorkletScriptController::Initialize(const KURL& url_for_debugger) {
 
   // The global proxy object.  Note this is not the global object.
   v8::Local<v8::Object> global_proxy = context->Global();
+  // Set a link from both JSGlobalProxy and its hidden prototype
+  // (JSGlobalObject) to the |script_wrappable| object.
+  V8DOMWrapper::SetNativeInfoForGlobal(isolate_, global_proxy,
+                                       script_wrappable);
   v8::Local<v8::Object> associated_wrapper =
       V8DOMWrapper::AssociateObjectWithWrapper(isolate_, script_wrappable,
                                                wrapper_type_info, global_proxy);
   CHECK(global_proxy == associated_wrapper);
 
-  // The global object, aka worker/worklet wrapper object.
-  v8::Local<v8::Object> global_object =
-      global_proxy->GetPrototype().As<v8::Object>();
-  V8DOMWrapper::SetNativeInfo(isolate_, global_object, wrapper_type_info,
-                              script_wrappable);
-
   if (global_scope_->IsMainThreadWorkletGlobalScope()) {
     // Set the human readable name for the world.
-    DCHECK(!global_scope_->Name().IsEmpty());
+    DCHECK(!global_scope_->Name().empty());
     world_->SetNonMainWorldHumanReadableName(world_->GetWorldId(),
                                              global_scope_->Name());
   } else {
@@ -211,9 +229,14 @@ void WorkerOrWorkletScriptController::Initialize(const KURL& url_for_debugger) {
                              context);
   }
 
-  if (!disable_eval_pending_.IsEmpty()) {
+  if (!disable_eval_pending_.empty()) {
     DisableEvalInternal(disable_eval_pending_);
     disable_eval_pending_ = String();
+  }
+
+  if (!disable_wasm_eval_pending_.empty()) {
+    SetWasmEvalErrorMessageInternal(disable_wasm_eval_pending_);
+    disable_wasm_eval_pending_ = String();
   }
 
   // This is a workaround for worker with on-the-main-thread script fetch and
@@ -268,42 +291,19 @@ void WorkerOrWorkletScriptController::PrepareForEvaluation() {
 
   v8::HandleScope handle_scope(isolate_);
 
-#if defined(USE_BLINK_V8_BINDING_NEW_IDL_INTERFACE)
   V8PerContextData* per_context_data = script_state_->PerContextData();
-  ignore_result(per_context_data->ConstructorForType(
-      global_scope_->GetWrapperTypeInfo()));
-#else   // USE_BLINK_V8_BINDING_NEW_IDL_INTERFACE
-  ScriptState::Scope scope(script_state_);
-  v8::Local<v8::Context> context = script_state_->GetContext();
-
-  auto* script_wrappable = static_cast<ScriptWrappable*>(global_scope_);
-  const WrapperTypeInfo* wrapper_type_info =
-      script_wrappable->GetWrapperTypeInfo();
-
-  // All interfaces must be registered to V8PerContextData.
-  // So we explicitly call constructorForType for the global object.
-  // This should be called after OriginTrialContext::AddTokens() in
-  // WorkerGlobalScope::Initialize() to install origin trial features.
-  V8PerContextData::From(context)->ConstructorForType(wrapper_type_info);
-
-  v8::Local<v8::Object> global_object =
-      context->Global()->GetPrototype().As<v8::Object>();
-  DCHECK(!global_object.IsEmpty());
-
-  v8::Local<v8::FunctionTemplate> global_interface_template =
-      wrapper_type_info->DomTemplate(isolate_, *world_);
-  DCHECK(!global_interface_template.IsEmpty());
-
-  wrapper_type_info->InstallConditionalFeatures(
-      context, *world_, global_object, v8::Local<v8::Object>(),
-      v8::Local<v8::Function>(), global_interface_template);
-#endif  // USE_BLINK_V8_BINDING_NEW_IDL_INTERFACE
+  std::ignore =
+      per_context_data->ConstructorForType(global_scope_->GetWrapperTypeInfo());
+  // Inform V8 that origin trial information is now connected with the context,
+  // and V8 can extend the context with origin trial features.
+  isolate_->InstallConditionalFeatures(script_state_->GetContext());
+  ExtensionsRegistry::GetInstance().InstallExtensions(script_state_);
 }
 
 void WorkerOrWorkletScriptController::DisableEvalInternal(
     const String& error_message) {
   DCHECK(IsContextInitialized());
-  DCHECK(!error_message.IsEmpty());
+  DCHECK(!error_message.empty());
 
   ScriptState::Scope scope(script_state_);
   script_state_->GetContext()->AllowCodeGenerationFromStrings(false);
@@ -311,119 +311,14 @@ void WorkerOrWorkletScriptController::DisableEvalInternal(
       V8String(isolate_, error_message));
 }
 
-// https://html.spec.whatwg.org/C/#run-a-classic-script
-ClassicEvaluationResult WorkerOrWorkletScriptController::EvaluateAndReturnValue(
-    const ScriptSourceCode& source_code,
-    SanitizeScriptErrors sanitize_script_errors,
-    mojom::blink::V8CacheOptions v8_cache_options,
-    RethrowErrorsOption rethrow_errors) {
-  if (IsExecutionForbidden())
-    return ClassicEvaluationResult();
+void WorkerOrWorkletScriptController::SetWasmEvalErrorMessageInternal(
+    const String& error_message) {
+  DCHECK(IsContextInitialized());
+  DCHECK(!error_message.empty());
 
-  // Scope for |TRACE_EVENT1| and |v8::TryCatch| below.
-  {
-    DCHECK(IsContextInitialized());
-    DCHECK(is_ready_to_evaluate_);
-
-    TRACE_EVENT1("devtools.timeline", "EvaluateScript", "data",
-                 inspector_evaluate_script_event::Data(
-                     nullptr, source_code.Url(), source_code.StartPosition()));
-
-    v8::TryCatch block(isolate_);
-
-    // Step 8.3. Otherwise, rethrow errors is false. Perform the following
-    // steps: [spec text]
-    // Step 8.3.1. Report the exception given by evaluationStatus.[[Value]]
-    // for script. [spec text]
-    //
-    // This will be done inside V8 (inside V8ScriptRunner::CompileAndRunScript()
-    // below) by setting TryCatch::SetVerbose(true) here.
-    if (!rethrow_errors.ShouldRethrow()) {
-      block.SetVerbose(true);
-    }
-
-    // TODO(crbug/1114994): Plumb this from ClassicScript.
-    const KURL base_url = source_code.Url();
-
-    // Use default ReferrerScriptInfo here, as
-    // - A work{er,let} script doesn't have a nonce, and
-    // - a work{er,let} script is always "not parser inserted".
-    // TODO(crbug/1114988): After crbug/1114988 is fixed, this can be the
-    // default ScriptFetchOptions(). Currently the default ScriptFetchOptions()
-    // is not used because it has CredentialsMode::kOmit.
-    // TODO(crbug/1114989): Plumb this from ClassicScript.
-    ScriptFetchOptions script_fetch_options(
-        String(), IntegrityMetadataSet(), String(),
-        ParserDisposition::kNotParserInserted,
-        network::mojom::CredentialsMode::kSameOrigin,
-        network::mojom::ReferrerPolicy::kDefault,
-        mojom::blink::FetchImportanceMode::kImportanceAuto);
-
-    v8::MaybeLocal<v8::Value> maybe_result =
-        V8ScriptRunner::CompileAndRunScript(
-            isolate_, script_state_, global_scope_, source_code, base_url,
-            sanitize_script_errors, script_fetch_options, v8_cache_options);
-
-    // TODO(crbug/1114601): Investigate whether to check CanContinue() in other
-    // script evaluation code paths.
-    if (!block.CanContinue()) {
-      ForbidExecution();
-      return ClassicEvaluationResult();
-    }
-
-    CHECK(!IsExecutionForbidden());
-
-    if (!block.HasCaught()) {
-      // Step 10. If evaluationStatus is a normal completion, then return
-      // evaluationStatus. [spec text]
-      v8::Local<v8::Value> result;
-      if (!maybe_result.ToLocal(&result))
-        return ClassicEvaluationResult();
-
-      return ClassicEvaluationResult(result);
-    }
-
-    DCHECK(maybe_result.IsEmpty());
-
-    if (rethrow_errors.ShouldRethrow() &&
-        sanitize_script_errors == SanitizeScriptErrors::kDoNotSanitize) {
-      // Step 8.1. If rethrow errors is true and script's muted errors is
-      // false, then: [spec text]
-      //
-      // Step 8.1.2. Rethrow evaluationStatus.[[Value]]. [spec text]
-      //
-      // We rethrow exceptions reported from importScripts() here. The
-      // original filename/lineno/colno information (which points inside of
-      // imported scripts) is kept through ReThrow(), and will be eventually
-      // reported to WorkerGlobalScope.onerror via `TryCatch::SetVerbose(true)`
-      // called at top-level worker script evaluation.
-      block.ReThrow();
-      return ClassicEvaluationResult();
-    }
-  }
-  // |v8::TryCatch| is (and should be) exited, before ThrowException() below.
-
-  if (rethrow_errors.ShouldRethrow()) {
-    // kDoNotSanitize case is processed and early-exited above.
-    DCHECK_EQ(sanitize_script_errors, SanitizeScriptErrors::kSanitize);
-
-    // Step 8.2. If rethrow errors is true and script's muted errors is
-    // true, then: [spec text]
-    //
-    // Step 8.2.2. Throw a "NetworkError" DOMException. [spec text]
-    //
-    // We don't supply any message here to avoid leaking details of muted
-    // errors.
-    V8ThrowException::ThrowException(
-        isolate_, V8ThrowDOMException::CreateOrEmpty(
-                      isolate_, DOMExceptionCode::kNetworkError,
-                      rethrow_errors.Message()));
-    return ClassicEvaluationResult();
-  }
-
-  // #report-the-error for rethrow errors == true is already handled via
-  // |TryCatch::SetVerbose(true)| above.
-  return ClassicEvaluationResult();
+  ScriptState::Scope scope(script_state_);
+  script_state_->GetContext()->SetErrorMessageForWasmCodeGeneration(
+      V8String(isolate_, error_message));
 }
 
 void WorkerOrWorkletScriptController::ForbidExecution() {
@@ -437,7 +332,7 @@ bool WorkerOrWorkletScriptController::IsExecutionForbidden() const {
 }
 
 void WorkerOrWorkletScriptController::DisableEval(const String& error_message) {
-  DCHECK(!error_message.IsEmpty());
+  DCHECK(!error_message.empty());
   // Currently, this can be called before or after
   // WorkerOrWorkletScriptController::Initialize() because of messy
   // worker/worklet initialization sequences. Tidy them up after
@@ -453,13 +348,36 @@ void WorkerOrWorkletScriptController::DisableEval(const String& error_message) {
   // WorkerOrWorkletScriptController::Initialize() to be called from
   // WorkerThread::InitializeOnWorkerThread() immediately and synchronously
   // after returning here. Keep the error message until that time.
-  DCHECK(disable_eval_pending_.IsEmpty());
+  DCHECK(disable_eval_pending_.empty());
   disable_eval_pending_ = error_message;
+}
+
+void WorkerOrWorkletScriptController::SetWasmEvalErrorMessage(
+    const String& error_message) {
+  DCHECK(!error_message.empty());
+  // Currently, this can be called before or after
+  // WorkerOrWorkletScriptController::Initialize() because of messy
+  // worker/worklet initialization sequences. Tidy them up after
+  // off-the-main-thread worker script fetch is enabled by default, make
+  // sure to call WorkerOrWorkletScriptController::SetWasmEvalErrorMessage()
+  // after WorkerOrWorkletScriptController::Initialize(), and remove
+  // |disable_wasm_eval_pending_| logic (https://crbug.com/960770).
+  if (IsContextInitialized()) {
+    SetWasmEvalErrorMessageInternal(error_message);
+    return;
+  }
+  // wasm-eval will actually be disabled on
+  // WorkerOrWorkletScriptController::Initialize() to be called from
+  // WorkerThread::InitializeOnWorkerThread() immediately and synchronously
+  // after returning here. Keep the error message until that time.
+  DCHECK(disable_wasm_eval_pending_.empty());
+  disable_wasm_eval_pending_ = error_message;
 }
 
 void WorkerOrWorkletScriptController::Trace(Visitor* visitor) const {
   visitor->Trace(global_scope_);
   visitor->Trace(script_state_);
+  visitor->Trace(world_);
 }
 
 }  // namespace blink

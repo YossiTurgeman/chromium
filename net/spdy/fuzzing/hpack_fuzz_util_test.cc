@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,14 +10,14 @@
 #include "base/files/file.h"
 #include "base/files/file_util.h"
 #include "base/path_service.h"
-#include "base/stl_util.h"
-#include "net/third_party/quiche/src/spdy/platform/api/spdy_string_utils.h"
+#include "net/base/hex_utils.h"
+#include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace spdy {
-namespace test {
+namespace spdy::test {
 
+using quiche::HttpHeaderBlock;
 using std::map;
 
 TEST(HpackFuzzUtilTest, GeneratorContextInitialization) {
@@ -32,7 +32,7 @@ TEST(HpackFuzzUtilTest, GeneratorContextInitialization) {
 TEST(HpackFuzzUtil, GeneratorContextExpansion) {
   HpackFuzzUtil::GeneratorContext context;
 
-  SpdyHeaderBlock headers = HpackFuzzUtil::NextGeneratedHeaderSet(&context);
+  HttpHeaderBlock headers = HpackFuzzUtil::NextGeneratedHeaderSet(&context);
 
   // Headers were generated, and the generator context was expanded.
   EXPECT_LT(0u, headers.size());
@@ -69,9 +69,9 @@ TEST(HpackFuzzUtilTest, ParsesSequenceOfHeaderBlocks) {
       "fin";
 
   HpackFuzzUtil::Input input;
-  input.input.assign(fixture, base::size(fixture) - 1);
+  input.input.assign(fixture, std::size(fixture) - 1);
 
-  quiche::QuicheStringPiece block;
+  std::string_view block;
 
   EXPECT_TRUE(HpackFuzzUtil::NextHeaderBlock(&input, &block));
   EXPECT_EQ("aaaaa", block);
@@ -100,7 +100,7 @@ TEST(HpackFuzzUtilTest, SerializedHeaderBlockPrefixes) {
 
 TEST(HpackFuzzUtilTest, PassValidInputThroughAllStages) {
   // Example lifted from HpackDecoderTest.SectionD4RequestHuffmanExamples.
-  std::string input = SpdyHexDecode("828684418cf1e3c2e5f23a6ba0ab90f4ff");
+  std::string input = net::HexDecode("828684418cf1e3c2e5f23a6ba0ab90f4ff");
 
   HpackFuzzUtil::FuzzerContext context;
   HpackFuzzUtil::InitializeFuzzerContext(&context);
@@ -108,17 +108,18 @@ TEST(HpackFuzzUtilTest, PassValidInputThroughAllStages) {
   EXPECT_TRUE(
       HpackFuzzUtil::RunHeaderBlockThroughFuzzerStages(&context, input));
 
-  SpdyHeaderBlock expect;
+  HttpHeaderBlock expect;
   expect[":method"] = "GET";
   expect[":scheme"] = "http";
   expect[":path"] = "/";
   expect[":authority"] = "www.example.com";
-  EXPECT_EQ(expect, context.third_stage->decoded_block());
+  EXPECT_EQ(expect, context.third_stage_handler->decoded_block());
 }
 
 TEST(HpackFuzzUtilTest, ValidFuzzExamplesRegressionTest) {
   base::FilePath source_root;
-  ASSERT_TRUE(base::PathService::Get(base::DIR_SOURCE_ROOT, &source_root));
+  ASSERT_TRUE(
+      base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &source_root));
 
   // Load the example fixtures versioned with the source tree.
   HpackFuzzUtil::Input input;
@@ -132,7 +133,7 @@ TEST(HpackFuzzUtilTest, ValidFuzzExamplesRegressionTest) {
   HpackFuzzUtil::FuzzerContext context;
   HpackFuzzUtil::InitializeFuzzerContext(&context);
 
-  quiche::QuicheStringPiece block;
+  std::string_view block;
   while (HpackFuzzUtil::NextHeaderBlock(&input, &block)) {
     // As these are valid examples, all fuzz stages should succeed.
     EXPECT_TRUE(
@@ -140,15 +141,4 @@ TEST(HpackFuzzUtilTest, ValidFuzzExamplesRegressionTest) {
   }
 }
 
-TEST(HpackFuzzUtilTest, FlipBitsMutatesBuffer) {
-  char buffer[] = "testbuffer1234567890";
-  std::string unmodified(buffer, base::size(buffer) - 1);
-
-  EXPECT_EQ(unmodified, buffer);
-  HpackFuzzUtil::FlipBits(reinterpret_cast<uint8_t*>(buffer),
-                          base::size(buffer) - 1, 1);
-  EXPECT_NE(unmodified, buffer);
-}
-
-}  // namespace test
-}  // namespace spdy
+}  // namespace spdy::test

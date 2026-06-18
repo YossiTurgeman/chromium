@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,14 +8,16 @@
 #include <stddef.h>
 
 #include <list>
+#include <string>
 
-#include "base/strings/string16.h"
+#include "third_party/omnibox_proto/answer_type.pb.h"
 
 struct AnswersQueryData {
   AnswersQueryData();
-  AnswersQueryData(const base::string16& full_query_text, int query_type);
-  base::string16 full_query_text;
-  int query_type;
+  AnswersQueryData(const std::u16string& full_query_text,
+                   omnibox::AnswerType query_type);
+  std::u16string full_query_text;
+  omnibox::AnswerType query_type;
 };
 
 // Cache for the most-recently seen answer for Answers in Suggest.
@@ -28,11 +30,11 @@ class AnswersCache {
 
   // Gets the top answer query completion for the query term. The query data
   // will contain empty query text and type if no matching data was found.
-  AnswersQueryData GetTopAnswerEntry(const base::string16& query);
+  AnswersQueryData GetTopAnswerEntry(const std::u16string& query);
 
   // Registers a query that received an answer suggestion.
-  void UpdateRecentAnswers(const base::string16& full_query_text,
-                           int query_type);
+  void UpdateRecentAnswers(const std::u16string& full_query_text,
+                           omnibox::AnswerType query_type);
 
   // Signals if cache is empty.
   bool empty() const { return cache_.empty(); }

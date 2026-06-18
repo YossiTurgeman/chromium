@@ -1,10 +1,9 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/features.gni")
 import("//build/config/ui.gni")
-import("//ppapi/buildflags/buildflags.gni")
+import("//device/vr/buildflags/buildflags.gni")
 import("//third_party/blink/public/public_features.gni")
 if (is_android) {
   import("//build/config/android/config.gni")
@@ -23,11 +22,9 @@ target(link_target_type, "child") {
   visibility = [
     ":*",
     "//content/gpu/*",
-    "//content/ppapi_plugin/*",
     "//content/public/child:child_sources",
     "//content/renderer/*",
     "//content/utility/*",
-    "//tools/ipc_fuzzer/*",
   ]
   if (is_android) {
     # See comment in content/app/BUILD.gn above content_app_deps.
@@ -40,69 +37,58 @@ target(link_target_type, "child") {
     "blink_platform_impl.h",
     "browser_exposed_child_interfaces.cc",
     "browser_exposed_child_interfaces.h",
-    "browser_font_resource_trusted.cc",
-    "browser_font_resource_trusted.h",
-    "child_histogram_fetcher_impl.cc",
-    "child_histogram_fetcher_impl.h",
+    "child_performance_coordinator.cc",
+    "child_performance_coordinator.h",
     "child_process.cc",
     "child_process.h",
-    "child_process_sandbox_support_impl_linux.cc",
-    "child_process_sandbox_support_impl_linux.h",
-    "child_process_sandbox_support_impl_mac.cc",
-    "child_process_sandbox_support_impl_mac.h",
+    "child_process_synthetic_trial_syncer.cc",
+    "child_process_synthetic_trial_syncer.h",
     "child_thread_impl.cc",
     "child_thread_impl.h",
-    "dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc",
-    "dwrite_font_proxy/dwrite_font_proxy_init_impl_win.h",
-    "dwrite_font_proxy/dwrite_font_proxy_win.cc",
-    "dwrite_font_proxy/dwrite_font_proxy_win.h",
-    "dwrite_font_proxy/dwrite_localized_strings_win.cc",
-    "dwrite_font_proxy/dwrite_localized_strings_win.h",
-    "dwrite_font_proxy/font_fallback_win.cc",
-    "dwrite_font_proxy/font_fallback_win.h",
     "field_trial.cc",
     "field_trial.h",
-    "font_warmup_win.cc",
-    "font_warmup_win.h",
     "image_decoder_utils.cc",
+    "memory_coordinator/browser_memory_coordinator_bridge.cc",
+    "memory_coordinator/browser_memory_coordinator_bridge.h",
+    "memory_coordinator/child_memory_coordinator.cc",
+    "memory_coordinator/child_memory_coordinator.h",
     "runtime_features.cc",
     "runtime_features.h",
     "scoped_child_process_reference.cc",
     "scoped_child_process_reference.h",
-    "webthemeengine_impl_android.cc",
-    "webthemeengine_impl_android.h",
-    "webthemeengine_impl_conversions.cc",
-    "webthemeengine_impl_conversions.h",
-    "webthemeengine_impl_default.cc",
-    "webthemeengine_impl_default.h",
-    "webthemeengine_impl_mac.cc",
-    "webthemeengine_impl_mac.h",
   ]
 
   configs += [ "//build/config:precompiled_headers" ]
 
   public_deps = [
-    "//gpu/ipc/client:client",
+    "//gpu/ipc/client",
     "//ipc",
     "//services/service_manager/public/mojom:mojom_blink",
+    "//ui/base/mojom:ui_base_types",
   ]
 
   deps = [
     "//base",
+    "//build/config/compiler:compiler_buildflags",
     "//cc/paint",
     "//components/discardable_memory/client",
     "//components/discardable_memory/public/mojom",
-    "//components/tracing:startup_tracing",
+    "//components/metrics",
+    "//components/performance_manager/public/mojom",
+    "//components/performance_manager/scenario_api",
+    "//components/permissions:permissions_common",
+    "//components/tracing:tracing_config",
     "//components/variations",
     "//components/webcrypto",
-    "//content/app/resources",
     "//content/common",
+    "//content/common:mojo_bindings",
+    "//content/common/memory_coordinator/mojom",
     "//content/public/common:common_sources",
-    "//crypto:platform",
+    "//device/base",
     "//device/gamepad/public/cpp:switches",
+    "//device/vr/buildflags",
     "//gpu/command_buffer/client",
     "//media",
-    "//media/blink",
     "//mojo/core/embedder",
     "//net",
     "//services/device/public/cpp:device_features",
@@ -113,7 +99,8 @@ target(link_target_type, "child") {
     "//services/service_manager/public/mojom",
     "//services/tracing/public/cpp",
     "//services/tracing/public/cpp:traced_process",
-    "//services/tracing/public/cpp/background_tracing:background_tracing",
+    "//services/tracing/public/cpp/background_tracing",
+    "//services/webnn/public/mojom",
     "//skia",
     "//storage/common",
     "//third_party/blink/public:blink_headers",
@@ -121,6 +108,7 @@ target(link_target_type, "child") {
     "//third_party/blink/public:resources",
     "//third_party/blink/public:scaled_resources",
     "//third_party/blink/public/common",
+    "//third_party/blink/public/common:buildflags",
     "//third_party/blink/public/strings",
     "//third_party/ced",
     "//third_party/zlib/google:compression_utils",
@@ -135,15 +123,13 @@ target(link_target_type, "child") {
     "//v8",
   ]
 
-  if (is_android) {
-    deps += [ "//third_party/android_ndk:cpu_features" ]
-    sources -= [
-      "webthemeengine_impl_default.cc",
-      "webthemeengine_impl_default.h",
-    ]
-  }
-
   if (is_linux || is_chromeos) {
+    sources += [
+      "child_process_sandbox_support_impl_linux.cc",
+      "child_process_sandbox_support_impl_linux.h",
+      "sandboxed_process_thread_type_handler.cc",
+      "sandboxed_process_thread_type_handler.h",
+    ]
     deps += [
       "//components/services/font/public/cpp",
       "//components/services/font/public/mojom",
@@ -151,25 +137,48 @@ target(link_target_type, "child") {
   }
 
   if (is_win) {
+    sources += [
+      "child_process_sandbox_support_impl_win.cc",
+      "child_process_sandbox_support_impl_win.h",
+      "dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc",
+      "dwrite_font_proxy/dwrite_font_proxy_init_impl_win.h",
+      "dwrite_font_proxy/dwrite_font_proxy_win.cc",
+      "dwrite_font_proxy/dwrite_font_proxy_win.h",
+      "dwrite_font_proxy/dwrite_localized_strings_win.cc",
+      "dwrite_font_proxy/dwrite_localized_strings_win.h",
+      "dwrite_font_proxy/font_fallback_win.cc",
+      "dwrite_font_proxy/font_fallback_win.h",
+      "font_warmup_win.cc",
+      "font_warmup_win.h",
+    ]
     libs = [ "dwrite.lib" ]
   }
 
-  if (enable_plugins) {
-    deps += [
-      "//ppapi/proxy",
-      "//ppapi/shared_impl",
+  if (is_win || is_linux || is_chromeos) {
+    sources += [
+      "font_data/font_data_manager.cc",
+      "font_data/font_data_manager.h",
+      "font_integration_init.cc",
     ]
-  } else {
-    sources -= [
-      "browser_font_resource_trusted.cc",
-      "browser_font_resource_trusted.h",
+    deps += [
+      # For font_data_manager
+      "//components/services/font_data/public/mojom",
+      "//third_party:freetype_buildflags",
     ]
   }
 
-  configs += [
-    "//content:content_implementation",
-    "//build/config/compiler:no_size_t_to_int_warning",
-  ]
+  if (is_mac) {
+    sources += [
+      "child_process_sandbox_support_impl_mac.cc",
+      "child_process_sandbox_support_impl_mac.h",
+    ]
+  }
+
+  if (enable_vr) {
+    deps += [ "//device/vr/public/cpp:features" ]
+  }
+
+  configs += [ "//content:content_implementation" ]
 }
 
 # See comment at the top of //content/BUILD.gn for how this works.

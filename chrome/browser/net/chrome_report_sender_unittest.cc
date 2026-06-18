@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,10 @@
 
 #include <vector>
 
-#include "base/bind_helpers.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/scoped_refptr.h"
 #include "content/public/test/browser_task_environment.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/load_flags.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "services/network/public/cpp/resource_request.h"
@@ -24,7 +25,7 @@ class FakeSharedURLLoaderFactory : public network::SharedURLLoaderFactory {
  public:
   FakeSharedURLLoaderFactory() = default;
 
-  const std::vector<network::ResourceRequest> resource_requests() {
+  const std::vector<network::ResourceRequest>& resource_requests() {
     return resource_requests_;
   }
 
@@ -34,7 +35,6 @@ class FakeSharedURLLoaderFactory : public network::SharedURLLoaderFactory {
   // network::SharedURLLoaderFactory
   void CreateLoaderAndStart(
       mojo::PendingReceiver<network::mojom::URLLoader> receiver,
-      int32_t routing_id,
       int32_t request_id,
       uint32_t options,
       const network::ResourceRequest& url_request,
@@ -48,7 +48,8 @@ class FakeSharedURLLoaderFactory : public network::SharedURLLoaderFactory {
     head->headers =
         net::HttpResponseHeaders::TryToCreate("HTTP/1.1 200 OK\n\n");
     head->mime_type = "text/html";
-    client_remote->OnReceiveResponse(std::move(head));
+    client_remote->OnReceiveResponse(
+        std::move(head), mojo::ScopedDataPipeConsumerHandle(), std::nullopt);
     client_remote->OnComplete(network::URLLoaderCompletionStatus());
   }
 
@@ -59,7 +60,6 @@ class FakeSharedURLLoaderFactory : public network::SharedURLLoaderFactory {
 
   std::unique_ptr<network::PendingSharedURLLoaderFactory> Clone() override {
     NOTREACHED();
-    return nullptr;
   }
 
   std::vector<network::ResourceRequest> resource_requests_;

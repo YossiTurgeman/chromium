@@ -1,19 +1,18 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "mojo/public/cpp/bindings/message.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/tests/bindings_test_base.h"
 #include "mojo/public/cpp/system/functions.h"
-#include "mojo/public/interfaces/bindings/tests/test_bad_messages.mojom.h"
+#include "mojo/public/interfaces/bindings/tests/test_bad_messages.test-mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace mojo {
@@ -23,6 +22,10 @@ namespace {
 class TestBadMessagesImpl : public TestBadMessages {
  public:
   TestBadMessagesImpl() = default;
+
+  TestBadMessagesImpl(const TestBadMessagesImpl&) = delete;
+  TestBadMessagesImpl& operator=(const TestBadMessagesImpl&) = delete;
+
   ~TestBadMessagesImpl() override = default;
 
   void Bind(PendingReceiver<TestBadMessages> receiver) {
@@ -55,8 +58,6 @@ class TestBadMessagesImpl : public TestBadMessages {
 
   ReportBadMessageCallback bad_message_callback_;
   mojo::Receiver<TestBadMessages> receiver_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(TestBadMessagesImpl);
 };
 
 class ReportBadMessageTest : public BindingsTestBase {
@@ -84,8 +85,9 @@ class ReportBadMessageTest : public BindingsTestBase {
 
  private:
   void OnProcessError(const std::string& error) {
-    if (error_handler_)
+    if (error_handler_) {
       std::move(error_handler_).Run();
+    }
   }
 
   Remote<TestBadMessages> remote_;
@@ -153,34 +155,6 @@ TEST_P(ReportBadMessageTest, ResponseAsync) {
   // handler immediately.
   std::move(bad_message_callback)
       .Run("this message is bad and should feel bad");
-  EXPECT_TRUE(error);
-}
-
-TEST_P(ReportBadMessageTest, ResponseSync) {
-  bool error = false;
-  SetErrorHandler(base::BindLambdaForTesting([&] { error = true; }));
-
-  SyncMessageResponseContext context;
-  remote()->RequestResponseSync();
-
-  EXPECT_FALSE(error);
-  context.ReportBadMessage("i don't like this response");
-  EXPECT_TRUE(error);
-}
-
-TEST_P(ReportBadMessageTest, ResponseSyncDeferred) {
-  bool error = false;
-  SetErrorHandler(base::BindLambdaForTesting([&] { error = true; }));
-
-  ReportBadMessageCallback bad_message_callback;
-  {
-    SyncMessageResponseContext context;
-    remote()->RequestResponseSync();
-    bad_message_callback = context.GetBadMessageCallback();
-  }
-
-  EXPECT_FALSE(error);
-  std::move(bad_message_callback).Run("nope nope nope");
   EXPECT_TRUE(error);
 }
 

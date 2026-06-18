@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,12 +23,12 @@ class StatusBubbleMacInteractiveUITest : public InProcessBrowserTest {
 // do not work properly.
 IN_PROC_BROWSER_TEST_F(StatusBubbleMacInteractiveUITest,
                        DISABLED_TestSettingStatusDoesNotUnhideApp) {
-  StatusBubble* status_bubble = browser()->window()->GetStatusBubble();
+  StatusBubble* status_bubble = browser()->window()->GetStatusBubbles().front();
 
   EXPECT_FALSE(NSApp.hidden);
   [NSApp hide:nil];
   EXPECT_TRUE(NSApp.hidden);
-  status_bubble->SetStatus(base::UTF8ToUTF16("Testing"));
+  status_bubble->SetStatus(u"Testing");
   EXPECT_TRUE(NSApp.hidden);
   [NSApp unhide:nil];
   EXPECT_FALSE(NSApp.hidden);

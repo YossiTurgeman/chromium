@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,9 @@
 #include <memory>
 
 #include "base/base_paths.h"
-#include "base/bind.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
 #include "base/test/scoped_path_override.h"
 #include "chromecast/base/scoped_temp_file.h"
 #include "chromecast/crash/linux/crash_testing_utils.h"
@@ -43,6 +42,10 @@ int FakeDumpState(const std::string& minidump_path) {
 }  // namespace
 
 class MinidumpWriterTest : public testing::Test {
+ public:
+  MinidumpWriterTest(const MinidumpWriterTest&) = delete;
+  MinidumpWriterTest& operator=(const MinidumpWriterTest&) = delete;
+
  protected:
   MinidumpWriterTest() {}
   ~MinidumpWriterTest() override {}
@@ -65,8 +68,8 @@ class MinidumpWriterTest : public testing::Test {
   }
 
   bool AppendLockFile(const DumpInfo& dump) {
-    return chromecast::AppendLockFile(
-        lockfile_path_.value(), metadata_path_.value(), dump);
+    return chromecast::AppendLockFile(lockfile_path_.value(),
+                                      metadata_path_.value(), dump);
   }
 
   FakeMinidumpGenerator fake_generator_;
@@ -78,8 +81,6 @@ class MinidumpWriterTest : public testing::Test {
  private:
   base::ScopedTempDir fake_home_dir_;
   std::unique_ptr<base::ScopedPathOverride> home_;
-
-  DISALLOW_COPY_AND_ASSIGN(MinidumpWriterTest);
 };
 
 TEST_F(MinidumpWriterTest, Write_FailsWithIncorrectMinidumpPath) {
@@ -106,6 +107,20 @@ TEST_F(MinidumpWriterTest, Write_SucceedsWithSimpleFilename) {
 TEST_F(MinidumpWriterTest, Write_SucceedsWithCorrectMinidumpPath) {
   MinidumpWriter writer(&fake_generator_, dumplog_file_.value(),
                         MinidumpParams(), base::BindOnce(&FakeDumpState));
+
+  ASSERT_EQ(0, writer.Write());
+}
+
+TEST_F(MinidumpWriterTest, Write_SucceedsWithMultipleAttachments) {
+  std::vector<Attachment> attachments{
+      {minidump_dir_.Append("attachment").value(), false},
+      {"/tmp/attachment_temporary", false},
+      {"/tmp/attachment_static", true},
+  };
+
+  MinidumpWriter writer(&fake_generator_, dumplog_file_.value(),
+                        MinidumpParams(), base::BindOnce(&FakeDumpState),
+                        &attachments);
 
   ASSERT_EQ(0, writer.Write());
 }

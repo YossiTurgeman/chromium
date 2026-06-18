@@ -1,183 +1,123 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.sync;
 
-import android.content.Context;
+import androidx.annotation.Nullable;
 
 import com.google.protobuf.InvalidProtocolBufferException;
 
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.base.Log;
 import org.chromium.base.ThreadUtils;
 import org.chromium.components.sync.protocol.EntitySpecifics;
 import org.chromium.components.sync.protocol.SyncEntity;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.url.GURL;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 
-/**
- * Assists in Java interaction the native Sync FakeServer.
- */
+/** Assists in Java interaction the native Sync FakeServer. Can be used from any thread. */
 public class FakeServerHelper {
     private static final String TAG = "FakeServerHelper";
 
-    // Lazily-instantiated singleton FakeServerHelper.
+    // Singleton instance. Set on every createInstanceAndGet() and reset to null on every destroy().
+    // This must be assigned on the UI thread.
     private static FakeServerHelper sFakeServerHelper;
 
-    // Pointer value for the FakeServer. This pointer is not owned by native
-    // code, so it must be stored here for future deletion.
-    private static long sNativeFakeServer;
+    // Must be used from the UI thread.
+    private final long mNativeFakeServer;
 
-    // The pointer to the native object called here.
-    private final long mNativeFakeServerHelperAndroid;
+    /**
+     * Creates the singleton FakeServerHelper and returns it. destroyInstance() must be called when
+     * done to prevent the native object from leaking. If this is called before the previous
+     * instance is destroyed, it will return null (just to avoid throwing ExecutionException).
+     * TODO(crbug.com/41451146): When refactoring this method, throw an exception instead of
+     * returning null.
+     */
+    public static @Nullable FakeServerHelper createInstanceAndGet() {
+        return ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    if (sFakeServerHelper == null) {
+                        sFakeServerHelper = new FakeServerHelper();
+                        return sFakeServerHelper;
+                    }
 
-    // Accesses the singleton FakeServerHelper. There is at most one instance created per
-    // application lifetime, so no deletion mechanism is provided for the native object.
-    public static FakeServerHelper get() {
-        ThreadUtils.assertOnUiThread();
-        if (sFakeServerHelper == null) {
-            sFakeServerHelper = new FakeServerHelper();
-        }
-        return sFakeServerHelper;
+                    Log.w(
+                            TAG,
+                            "destroyInstance() must be called before another FakeServerHelper is"
+                                    + " created");
+                    return null;
+                });
+    }
+
+    /** Deletes the existing FakeServer if any. */
+    public static void destroyInstance() {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    if (sFakeServerHelper == null) return;
+
+                    FakeServerHelperJni.get().deleteFakeServer(sFakeServerHelper.mNativeFakeServer);
+                    sFakeServerHelper = null;
+                });
     }
 
     private FakeServerHelper() {
-        mNativeFakeServerHelperAndroid = nativeInit();
+        ThreadUtils.assertOnUiThread();
+        mNativeFakeServer = FakeServerHelperJni.get().createFakeServer();
+        assert mNativeFakeServer != 0L;
     }
 
     /**
-     * Creates and configures FakeServer.
-     *
-     * Each call to this method should be accompanied by a later call to deleteFakeServer to avoid
-     * a memory leak.
-     */
-    public static void useFakeServer(final Context context) {
-        if (sNativeFakeServer != 0L) {
-            throw new IllegalStateException(
-                    "deleteFakeServer must be called before calling useFakeServer again.");
-        }
-
-        sNativeFakeServer = TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Long>() {
-            @Override
-            public Long call() {
-                FakeServerHelper fakeServerHelper = FakeServerHelper.get();
-                return fakeServerHelper.createFakeServer();
-            }
-        });
-    }
-
-    /**
-     * Deletes the existing FakeServer.
-     */
-    public static void deleteFakeServer() {
-        checkFakeServerInitialized("useFakeServer must be called before calling deleteFakeServer.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                FakeServerHelper.get().deleteFakeServer(sNativeFakeServer);
-                sNativeFakeServer = 0L;
-                return null;
-            }
-        });
-    }
-
-    /**
-     * Creates a native FakeServer object and returns its pointer. This pointer is owned by the
-     * Java caller.
-     *
-     * @return the FakeServer pointer
-     */
-    public long createFakeServer() {
-        return TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Long>() {
-            @Override
-            public Long call() {
-                return nativeCreateFakeServer(mNativeFakeServerHelperAndroid,
-                        ProfileSyncService.get().getNativeProfileSyncServiceForTest());
-            }
-        });
-    }
-
-    /**
-     * Deletes a native FakeServer.
-     *
-     * @param nativeFakeServer the pointer to be deleted
-     */
-    public void deleteFakeServer(final long nativeFakeServer) {
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                nativeDeleteFakeServer(mNativeFakeServerHelperAndroid, nativeFakeServer,
-                        ProfileSyncService.get().getNativeProfileSyncServiceForTest());
-                return null;
-            }
-        });
-    }
-
-    /**
-     * Returns whether {@code count} entities exist on the fake Sync server with the given
-     * {@code modelType} and {@code name}.
+     * Returns whether {@code count} entities exist on the fake Sync server with the given {@code
+     * dataType} and {@code name}.
      *
      * @param count the number of fake server entities to verify
-     * @param modelType the model type of entities to verify
+     * @param dataType the data type of entities to verify
      * @param name the name of entities to verify
-     *
      * @return whether the number of specified entities exist
      */
     public boolean verifyEntityCountByTypeAndName(
-            final int count, final int modelType, final String name) {
-        checkFakeServerInitialized("useFakeServer must be called before data verification.");
-        return TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Boolean>() {
-            @Override
-            public Boolean call() {
-                return nativeVerifyEntityCountByTypeAndName(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, count, modelType, name);
-            }
-        });
+            final int count, final int dataType, final String name) {
+        return ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .verifyEntityCountByTypeAndName(
+                                        mNativeFakeServer, count, dataType, name));
     }
 
     /**
      * Verifies whether the sessions on the fake Sync server match the given set of urls.
      *
      * @param urls the set of urls to check against; order does not matter.
-     *
      * @return whether the sessions on the server match the given urls.
      */
     public boolean verifySessions(final String[] urls) {
-        checkFakeServerInitialized("useFakeServer must be called before data verification.");
-        return TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Boolean>() {
-            @Override
-            public Boolean call() {
-                return nativeVerifySessions(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, urls);
-            }
-        });
+        return ThreadUtils.runOnUiThreadBlocking(
+                () -> FakeServerHelperJni.get().verifySessions(mNativeFakeServer, urls));
     }
 
     /**
-     * Returns all the SyncEntities on the fake server with the given modelType.
+     * Returns all the SyncEntities on the fake server with the given dataType.
      *
-     * @param modelType the type of entities to return.
-     *
+     * @param dataType the type of entities to return.
      * @return a list of all the SyncEntity protos for that type.
      */
-    public List<SyncEntity> getSyncEntitiesByModelType(final int modelType)
-            throws ExecutionException {
-        checkFakeServerInitialized("useFakeServer must be called before getting sync entities.");
-        return TestThreadUtils.runOnUiThreadBlocking(new Callable<List<SyncEntity>>() {
-            @Override
-            public List<SyncEntity> call() throws InvalidProtocolBufferException {
-                byte[][] serializedEntities = nativeGetSyncEntitiesByModelType(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, modelType);
-                List<SyncEntity> entities = new ArrayList<SyncEntity>(serializedEntities.length);
-                for (int i = 0; i < serializedEntities.length; i++) {
-                    entities.add(SyncEntity.parseFrom(serializedEntities[i]));
-                }
-                return entities;
-            }
-        });
+    public List<SyncEntity> getSyncEntitiesByDataType(final int dataType)
+            throws InvalidProtocolBufferException {
+        byte[][] serializedEntities =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () ->
+                                FakeServerHelperJni.get()
+                                        .getSyncEntitiesByDataType(mNativeFakeServer, dataType));
+        List<SyncEntity> entities = new ArrayList<>(serializedEntities.length);
+        for (byte[] serializedEntity : serializedEntities) {
+            entities.add(SyncEntity.parseFrom(serializedEntity));
+        }
+        return entities;
     }
 
     /**
@@ -185,24 +125,25 @@ public class FakeServerHelper {
      * eventually contain a unique client tag (e.g., preferences, typed URLs).
      *
      * @param nonUniqueName the human-readable name for the entity. This value will be used for the
-     *        SyncEntity.name value
+     *     SyncEntity.name value
      * @param clientTag the ID that makes this entity unique across clients. This value will be used
-     *        in hashed form in SyncEntity.server_defined_unique_tag
+     *     in hashed form in SyncEntity.server_defined_unique_tag
      * @param entitySpecifics the EntitySpecifics proto that represents the entity to inject
      */
-    public void injectUniqueClientEntity(final String nonUniqueName, final String clientTag,
+    public void injectUniqueClientEntity(
+            final String nonUniqueName,
+            final String clientTag,
             final EntitySpecifics entitySpecifics) {
-        checkFakeServerInitialized("useFakeServer must be called before data injection.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                // The protocol buffer is serialized as a byte array because it can be easily
-                // deserialized from this format in native code.
-                nativeInjectUniqueClientEntity(mNativeFakeServerHelperAndroid, sNativeFakeServer,
-                        nonUniqueName, clientTag, entitySpecifics.toByteArray());
-                return null;
-            }
-        });
+        // The protocol buffer is serialized as a byte array because it can be easily
+        // deserialized from this format in native code.
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .injectUniqueClientEntity(
+                                        mNativeFakeServer,
+                                        nonUniqueName,
+                                        clientTag,
+                                        entitySpecifics.toByteArray()));
     }
 
     /**
@@ -213,17 +154,12 @@ public class FakeServerHelper {
      * @param entity the SyncEntity to serve for Wallet.
      */
     public void setWalletData(final SyncEntity entity) {
-        checkFakeServerInitialized("useFakeServer must be called before data injection.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                // The protocol buffer is serialized as a byte array because it can be easily
-                // deserialized from this format in native code.
-                nativeSetWalletData(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, entity.toByteArray());
-                return null;
-            }
-        });
+        // The protocol buffer is serialized as a byte array because it can be easily
+        // deserialized from this format in native code.
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .setWalletData(mNativeFakeServer, entity.toByteArray()));
     }
 
     /**
@@ -233,17 +169,38 @@ public class FakeServerHelper {
      * @param entitySpecifics the new specifics proto for the entity
      */
     public void modifyEntitySpecifics(final String id, final EntitySpecifics entitySpecifics) {
-        checkFakeServerInitialized("useFakeServer must be called before data modification.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                // The protocol buffer is serialized as a byte array because it can be easily
-                // deserialized from this format in native code.
-                nativeModifyEntitySpecifics(mNativeFakeServerHelperAndroid, sNativeFakeServer, id,
-                        entitySpecifics.toByteArray());
-                return null;
-            }
-        });
+        // The protocol buffer is serialized as a byte array because it can be easily
+        // deserialized from this format in native code.
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .modifyEntitySpecifics(
+                                        mNativeFakeServer, id, entitySpecifics.toByteArray()));
+    }
+
+    /**
+     * Injects a device info entity into the fake Sync server.
+     *
+     * @param cacheGuid The cache GUID of the entry to inject.
+     * @param clientName The client name of the entry to inject.
+     * @param creationTimestamp The timestamp when the entry was created.
+     * @param lastUpdatedTimestamp The timestamp when the entry was last updated.
+     */
+    public void injectDeviceInfoEntity(
+            String cacheGuid,
+            String clientName,
+            long creationTimestamp,
+            long lastUpdatedTimestamp) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    FakeServerHelperJni.get()
+                            .injectDeviceInfoEntity(
+                                    mNativeFakeServer,
+                                    cacheGuid,
+                                    clientName,
+                                    creationTimestamp,
+                                    lastUpdatedTimestamp);
+                });
     }
 
     /**
@@ -251,19 +208,17 @@ public class FakeServerHelper {
      *
      * @param title the title of the bookmark to inject
      * @param url the URL of the bookmark to inject. This String will be passed to the native GURL
-     *            class, so it must be a valid URL under its definition.
+     *     class, so it must be a valid URL under its definition.
      * @param parentId the ID of the desired parent bookmark folder
+     * @param parentGuid the GUID of the desired parent bookmark folder
      */
-    public void injectBookmarkEntity(final String title, final String url, final String parentId) {
-        checkFakeServerInitialized("useFakeServer must be called before data injection.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                nativeInjectBookmarkEntity(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, title, url, parentId);
-                return null;
-            }
-        });
+    public void injectBookmarkEntity(
+            final String title, final GURL url, final String parentId, final String parentGuid) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .injectBookmarkEntity(
+                                        mNativeFakeServer, title, url, parentId, parentGuid));
     }
 
     /**
@@ -271,84 +226,89 @@ public class FakeServerHelper {
      *
      * @param title the title of the bookmark folder to inject
      * @param parentId the ID of the desired parent bookmark folder
+     * @param parentGuid the GUID of the desired parent bookmark folder
      */
-    public void injectBookmarkFolderEntity(final String title, final String parentId) {
-        checkFakeServerInitialized("useFakeServer must be called before data injection.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                nativeInjectBookmarkFolderEntity(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, title, parentId);
-                return null;
-            }
-        });
+    public void injectBookmarkFolderEntity(
+            final String title, final String parentId, final String parentGuid) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .injectBookmarkFolderEntity(
+                                        mNativeFakeServer, title, parentId, parentGuid));
     }
 
     /**
      * Modifies an existing bookmark on the fake Sync server.
      *
      * @param bookmarkId the ID of the bookmark to modify
+     * @param bookmarkGuid the GUID of the bookmark to modify
      * @param title the new title of the bookmark
-     * @param url the new URL of the bookmark. This String will be passed to the native GURL
-     *            class, so it must be a valid URL under its definition.
+     * @param url the new URL of the bookmark. This String will be passed to the native GURL class,
+     *     so it must be a valid URL under its definition.
      * @param parentId the ID of the new desired parent bookmark folder
+     * @param parentGuid the GUID of the new desired parent bookmark folder
      */
     public void modifyBookmarkEntity(
-            final String bookmarkId, final String title, final String url, final String parentId) {
-        checkFakeServerInitialized("useFakeServer must be called before data injection.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                nativeModifyBookmarkEntity(mNativeFakeServerHelperAndroid, sNativeFakeServer,
-                        bookmarkId, title, url, parentId);
-                return null;
-            }
-        });
+            final String bookmarkId,
+            final String bookmarkGuid,
+            final String title,
+            final GURL url,
+            final String parentId,
+            final String parentGuid) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .modifyBookmarkEntity(
+                                        mNativeFakeServer,
+                                        bookmarkId,
+                                        bookmarkGuid,
+                                        title,
+                                        url,
+                                        parentId,
+                                        parentGuid));
     }
 
     /**
      * Modifies an existing bookmark folder on the fake Sync server.
      *
      * @param folderId the ID of the bookmark folder to modify
+     * @param folderGuid the GUID of the bookmark folder to modify
      * @param title the new title of the bookmark folder
      * @param parentId the ID of the new desired parent bookmark folder
+     * @param parentGuid the GUID of the new desired parent bookmark folder
      */
     public void modifyBookmarkFolderEntity(
-            final String folderId, final String title, final String parentId) {
-        checkFakeServerInitialized("useFakeServer must be called before data injection.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                nativeModifyBookmarkFolderEntity(mNativeFakeServerHelperAndroid, sNativeFakeServer,
-                        folderId, title, parentId);
-                return null;
-            }
-        });
+            final String folderId,
+            final String folderGuid,
+            final String title,
+            final String parentId,
+            final String parentGuid) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .modifyBookmarkFolderEntity(
+                                        mNativeFakeServer,
+                                        folderId,
+                                        folderGuid,
+                                        title,
+                                        parentId,
+                                        parentGuid));
     }
 
     /**
      * Deletes an entity on the fake Sync server.
      *
-     * In other words, this method injects a tombstone into the fake Sync server.
+     * <p>In other words, this method injects a tombstone into the fake Sync server.
      *
      * @param id the server ID of the entity to delete
-     * @param clientTagHash the client defined unique tag hash of the entity to delete (or an empty
-     *         string if sync does not care about this being a hash)
      */
     public void deleteEntity(final String id) {
         deleteEntity(id, "");
     }
 
     public void deleteEntity(final String id, final String clientTagHash) {
-        checkFakeServerInitialized("useFakeServer must be called before deleting an entity.");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                nativeDeleteEntity(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, id, clientTagHash);
-                return null;
-            }
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> FakeServerHelperJni.get().deleteEntity(mNativeFakeServer, id, clientTagHash));
     }
 
     /**
@@ -358,80 +318,183 @@ public class FakeServerHelper {
      * @return the opaque ID of the bookmark bar entity stored in the server
      */
     public String getBookmarkBarFolderId() {
-        checkFakeServerInitialized("useFakeServer must be called before access");
-        return TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<String>() {
-            @Override
-            public String call() {
-                return nativeGetBookmarkBarFolderId(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer);
-            }
-        });
+        return ThreadUtils.runOnUiThreadBlocking(
+                () -> FakeServerHelperJni.get().getBookmarkBarFolderId(mNativeFakeServer));
     }
 
     /**
-     * Sets trusted vault nigori with keys derived from trustedVaultKey on the server.
+     * Sets a custom passphrase nigori.
+     *
+     * @param passphrase the plaintext custom passphrase to set.
      */
+    public void setCustomPassphraseNigori(String passphrase) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    FakeServerHelperJni.get()
+                            .setCustomPassphraseNigori(mNativeFakeServer, passphrase);
+                });
+    }
+
+    /** Sets trusted vault nigori with keys derived from trustedVaultKey on the server. */
     public void setTrustedVaultNigori(byte[] trustedVaultKey) {
-        checkFakeServerInitialized("useFakeServer must be called before access");
-        TestThreadUtils.runOnUiThreadBlockingNoException(new Callable<Void>() {
-            @Override
-            public Void call() {
-                nativeSetTrustedVaultNigori(
-                        mNativeFakeServerHelperAndroid, sNativeFakeServer, trustedVaultKey);
-                return null;
-            }
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .setTrustedVaultNigori(mNativeFakeServer, trustedVaultKey));
+    }
+
+    /** Clear the server data (perform dashboard stop and clear). */
+    public void clearServerData() {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> FakeServerHelperJni.get().clearServerData(mNativeFakeServer));
+    }
+
+    /** Adds collaboration to fake sync server. */
+    public void addCollaboration(String collaborationId) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .addCollaboration(mNativeFakeServer, collaborationId));
+    }
+
+    /** Removes collaboration from fake sync server. */
+    public void removeCollaboration(String collaborationId) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .removeCollaboration(mNativeFakeServer, collaborationId));
+    }
+
+    /** Adds collaboration group to fake sync server. */
+    public void addCollaborationGroupToFakeServer(String collaborationId) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .addCollaborationGroupToFakeServer(
+                                        mNativeFakeServer, collaborationId));
+    }
+
+    /** Adds saved tab group to fake sync server. */
+    public void addSavedTabGroupToFakeServer(
+            @Nullable String syncGroupId, String groupTitle, int numberOfTabs) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .addSavedTabGroupToFakeServer(
+                                        mNativeFakeServer, syncGroupId, groupTitle, numberOfTabs));
     }
 
     /**
-     * Clear the server data (perform dashboard stop and clear).
+     * Deletes all the SyncEntities on the fake server with the given dataType.
+     *
+     * @param dataType the type of entities to return.
      */
-    public void clearServerData() {
-        checkFakeServerInitialized("useFakeServer must be called before clearing data");
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            nativeClearServerData(mNativeFakeServerHelperAndroid, sNativeFakeServer);
-        });
+    public void deleteAllEntitiesForDataType(final int dataType) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        FakeServerHelperJni.get()
+                                .deleteAllEntitiesForDataType(mNativeFakeServer, dataType));
     }
 
-    private static void checkFakeServerInitialized(String failureMessage) {
-        if (sNativeFakeServer == 0L) {
-            throw new IllegalStateException(failureMessage);
-        }
+    /** Returns the local device's sync cache GUID. */
+    public String getLocalCacheGuid() {
+        return ThreadUtils.runOnUiThreadBlocking(
+                () -> FakeServerHelperJni.get().getLocalCacheGuid());
     }
 
-    // Native methods.
-    private native long nativeInit();
-    private native long nativeCreateFakeServer(
-            long nativeFakeServerHelperAndroid, long nativeProfileSyncService);
-    private native void nativeDeleteFakeServer(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, long nativeProfileSyncService);
-    private native boolean nativeVerifyEntityCountByTypeAndName(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, int count, int modelType, String name);
-    private native boolean nativeVerifySessions(
-            long nativeFakeServerHelperAndroid, long nativeFakeServer, String[] urlArray);
-    private native byte[][] nativeGetSyncEntitiesByModelType(
-            long nativeFakeServerHelperAndroid, long nativeFakeServer, int modelType);
-    private native void nativeInjectUniqueClientEntity(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, String nonUniqueName, String clientTag,
-            byte[] serializedEntitySpecifics);
-    private native void nativeSetWalletData(
-            long nativeFakeServerHelperAndroid, long nativeFakeServer, byte[] serializedEntity);
-    private native void nativeModifyEntitySpecifics(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, String id, byte[] serializedEntitySpecifics);
-    private native void nativeInjectBookmarkEntity(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, String title, String url, String parentId);
-    private native void nativeInjectBookmarkFolderEntity(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, String title, String parentId);
-    private native void nativeModifyBookmarkEntity(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, String bookmarkId, String title, String url, String parentId);
-    private native void nativeModifyBookmarkFolderEntity(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, String bookmarkId, String title, String parentId);
-    private native String nativeGetBookmarkBarFolderId(
-            long nativeFakeServerHelperAndroid, long nativeFakeServer);
-    private native void nativeDeleteEntity(long nativeFakeServerHelperAndroid,
-            long nativeFakeServer, String id, String clientDefinedUniqueTag);
-    private native void nativeSetTrustedVaultNigori(
-            long nativeFakeServerHelperAndroid, long nativeFakeServer, byte[] trustedVaultKey);
-    private native void nativeClearServerData(
-            long nativeFakeServerHelperAndroid, long nativeFakeServer);
+    @NativeMethods
+    interface Natives {
+        long createFakeServer();
+
+        void deleteFakeServer(long fakeServer);
+
+        boolean verifyEntityCountByTypeAndName(
+                long fakeServer, int count, int dataType, @JniType("std::string") String name);
+
+        boolean verifySessions(long fakeServer, String[] urlArray);
+
+        byte[][] getSyncEntitiesByDataType(long fakeServer, int dataType);
+
+        void injectUniqueClientEntity(
+                long fakeServer,
+                @JniType("std::string") String nonUniqueName,
+                @JniType("std::string") String clientTag,
+                byte[] serializedEntitySpecifics);
+
+        void setWalletData(long fakeServer, byte[] serializedEntity);
+
+        void modifyEntitySpecifics(
+                long fakeServer,
+                @JniType("std::string") String id,
+                byte[] serializedEntitySpecifics);
+
+        void injectDeviceInfoEntity(
+                long fakeServer,
+                @JniType("std::string") String cacheGuid,
+                @JniType("std::string") String clientName,
+                long creationTimestamp,
+                long lastUpdatedTimestamp);
+
+        void injectBookmarkEntity(
+                long fakeServer,
+                @JniType("std::string") String title,
+                GURL url,
+                @JniType("std::string") String parentId,
+                @JniType("std::string") String parentGuid);
+
+        void injectBookmarkFolderEntity(
+                long fakeServer,
+                @JniType("std::string") String title,
+                @JniType("std::string") String parentId,
+                @JniType("std::string") String parentGuid);
+
+        void modifyBookmarkEntity(
+                long fakeServer,
+                @JniType("std::string") String bookmarkId,
+                @JniType("std::string") String bookmarkGuid,
+                @JniType("std::string") String title,
+                GURL url,
+                @JniType("std::string") String parentId,
+                @JniType("std::string") String parentGuid);
+
+        void modifyBookmarkFolderEntity(
+                long fakeServer,
+                @JniType("std::string") String bookmarkId,
+                @JniType("std::string") String bookmarkGuid,
+                @JniType("std::string") String title,
+                @JniType("std::string") String parentId,
+                @JniType("std::string") String parentGuid);
+
+        @JniType("std::string")
+        String getBookmarkBarFolderId(long fakeServer);
+
+        void deleteEntity(
+                long fakeServer,
+                @JniType("std::string") String id,
+                @JniType("std::string") String clientDefinedUniqueTag);
+
+        void setCustomPassphraseNigori(long fakeServer, @JniType("std::string") String passphrase);
+
+        void setTrustedVaultNigori(long fakeServer, byte[] trustedVaultKey);
+
+        void clearServerData(long fakeServer);
+
+        void addCollaboration(long fakeServer, @JniType("std::string") String collaborationId);
+
+        void removeCollaboration(long fakeServer, @JniType("std::string") String collaborationId);
+
+        void addCollaborationGroupToFakeServer(
+                long fakeServer, @JniType("std::string") String collaborationId);
+
+        void addSavedTabGroupToFakeServer(
+                long fakeServer,
+                @Nullable String syncGroupId,
+                @JniType("std::string") String groupTitle,
+                int numberOfTabs);
+
+        void deleteAllEntitiesForDataType(long fakeServer, int dataType);
+
+        @JniType("std::string")
+        String getLocalCacheGuid();
+    }
 }

@@ -1,10 +1,9 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/notifications/popups_only_ui_controller.h"
 
-#include "ui/display/screen.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/views/desktop_message_popup_collection.h"
 
@@ -15,7 +14,7 @@ PopupsOnlyUiController::PopupsOnlyUiController()
 
   // Initialize collection after calling message_center_->AddObserver to ensure
   // the correct order of observers. (PopupsOnlyUiController has to be called
-  // before MessagePopupCollection, see crbug.com/901350)
+  // before MessagePopupCollection, see crbug.com/41424101)
   popup_collection_ =
       std::make_unique<message_center::DesktopMessagePopupCollection>();
 }
@@ -42,8 +41,8 @@ void PopupsOnlyUiController::OnNotificationUpdated(
 
 void PopupsOnlyUiController::OnNotificationClicked(
     const std::string& notification_id,
-    const base::Optional<int>& button_index,
-    const base::Optional<base::string16>& reply) {
+    const std::optional<int>& button_index,
+    const std::optional<std::u16string>& reply) {
   if (popups_visible_)
     ShowOrHidePopupBubbles();
 }
@@ -57,7 +56,7 @@ void PopupsOnlyUiController::ShowOrHidePopupBubbles() {
   if (popups_visible_ && !message_center_->HasPopupNotifications()) {
     popups_visible_ = false;
   } else if (!popups_visible_ && message_center_->HasPopupNotifications()) {
-    popup_collection_->StartObserving(display::Screen::GetScreen());
+    popup_collection_->StartObserving();
     popups_visible_ = true;
   }
 }

@@ -1,16 +1,16 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_DOM_DISTILLER_IOS_DISTILLER_PAGE_IOS_H_
 #define COMPONENTS_DOM_DISTILLER_IOS_DISTILLER_PAGE_IOS_H_
 
-#include <objc/objc.h>
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "components/dom_distiller/core/distiller_page.h"
 #include "ios/web/public/web_state_observer.h"
 #include "url/gurl.h"
@@ -29,10 +29,13 @@ class DistillerPageMediaBlocker;
 class DistillerPageIOS : public DistillerPage, public web::WebStateObserver {
  public:
   explicit DistillerPageIOS(web::BrowserState* browser_state);
+
+  DistillerPageIOS(const DistillerPageIOS&) = delete;
+  DistillerPageIOS& operator=(const DistillerPageIOS&) = delete;
+
   ~DistillerPageIOS() override;
 
  protected:
-  bool StringifyOutput() override;
   void DistillPageImpl(const GURL& url, const std::string& script) override;
 
   // Sets the WebState that will be used for the distillation. Do not call
@@ -52,7 +55,7 @@ class DistillerPageIOS : public DistillerPage, public web::WebStateObserver {
 
  private:
   // Called once the |script_| has been evaluated on the page.
-  void HandleJavaScriptResult(id result);
+  void HandleJavaScriptResult(const base::Value* result);
 
   // web::WebStateObserver implementation.
   void PageLoaded(
@@ -64,20 +67,22 @@ class DistillerPageIOS : public DistillerPage, public web::WebStateObserver {
 
   GURL url_;
   std::string script_;
-  web::BrowserState* browser_state_;
+  raw_ptr<web::BrowserState> browser_state_;
   std::unique_ptr<web::WebState> web_state_;
   std::unique_ptr<DistillerPageMediaBlocker> media_blocker_;
+  bool distilling_navigation_ = false;
 
   // Used to store whether the owned WebState is currently loading or not.
-  // TODO(crbug.com/782159): this is a work-around as WebState::IsLoading()
+  // TODO(crbug.com/40548473): this is a work-around as WebState::IsLoading()
   // is/was not returning the expected value when an SLL interstitial is
   // blocked. Remove this and use WebState::IsLoading() when WebState has
   // been fixed.
   bool loading_ = false;
 
-  base::WeakPtrFactory<DistillerPageIOS> weak_ptr_factory_;
+  base::ScopedObservation<web::WebState, web::WebStateObserver>
+      web_state_observation_{this};
 
-  DISALLOW_COPY_AND_ASSIGN(DistillerPageIOS);
+  base::WeakPtrFactory<DistillerPageIOS> weak_ptr_factory_;
 };
 
 }  // namespace dom_distiller

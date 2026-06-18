@@ -1,18 +1,19 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/test/base/tracing.h"
 
 #include <memory>
+#include <utility>
 
-#include "base/bind.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/singleton.h"
 #include "base/strings/string_util.h"
 #include "base/timer/timer.h"
+#include "base/trace_event/trace_config.h"
 #include "base/trace_event/trace_event.h"
 #include "base/values.h"
 #include "content/public/browser/browser_thread.h"
@@ -31,6 +32,9 @@ class StringTraceEndpoint
                       const base::RepeatingClosure& callback)
       : result_(result), completion_callback_(callback) {}
 
+  StringTraceEndpoint(const StringTraceEndpoint&) = delete;
+  StringTraceEndpoint& operator=(const StringTraceEndpoint&) = delete;
+
   void ReceiveTraceChunk(std::unique_ptr<std::string> chunk) override {
     *result_ += result_->empty() ? "[" : "";
     DCHECK(chunk);
@@ -44,12 +48,10 @@ class StringTraceEndpoint
   }
 
  private:
-  ~StringTraceEndpoint() override {}
+  ~StringTraceEndpoint() override = default;
 
-  std::string* result_;
+  raw_ptr<std::string> result_;
   base::RepeatingClosure completion_callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(StringTraceEndpoint);
 };
 
 class InProcessTraceController {
@@ -58,8 +60,10 @@ class InProcessTraceController {
     return base::Singleton<InProcessTraceController>::get();
   }
 
-  InProcessTraceController() {}
-  virtual ~InProcessTraceController() {}
+  InProcessTraceController() = default;
+  InProcessTraceController(const InProcessTraceController&) = delete;
+  InProcessTraceController& operator=(const InProcessTraceController&) = delete;
+  virtual ~InProcessTraceController() = default;
 
   bool BeginTracing(
       const base::trace_event::TraceConfig& trace_config,
@@ -99,8 +103,6 @@ class InProcessTraceController {
   scoped_refptr<content::MessageLoopRunner> message_loop_runner_;
 
   base::OneShotTimer timer_;
-
-  DISALLOW_COPY_AND_ASSIGN(InProcessTraceController);
 };
 
 }  // namespace

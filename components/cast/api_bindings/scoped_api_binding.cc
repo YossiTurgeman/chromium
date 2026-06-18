@@ -1,21 +1,22 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/cast/api_bindings/scoped_api_binding.h"
 
 #include <string>
+#include <string_view>
 
+#include "base/functional/bind.h"
 #include "base/logging.h"
-#include "base/strings/utf_string_conversions.h"
 #include "components/cast/api_bindings/manager.h"
 
 namespace cast_api_bindings {
 
 ScopedApiBinding::ScopedApiBinding(Manager* bindings_manager,
                                    Delegate* delegate,
-                                   base::StringPiece js_bindings_id,
-                                   base::StringPiece js_bindings)
+                                   std::string_view js_bindings_id,
+                                   std::string_view js_bindings)
     : bindings_manager_(bindings_manager),
       delegate_(delegate),
       js_bindings_id_(js_bindings_id) {
@@ -33,7 +34,7 @@ ScopedApiBinding::ScopedApiBinding(Manager* bindings_manager,
 }
 
 ScopedApiBinding::~ScopedApiBinding() {
-  // TODO(crbug.com/1104369): Remove binding JS when RemoveBinding() added to
+  // TODO(crbug.com/40139651): Remove binding JS when RemoveBinding() added to
   // ApiBindingsManager.
 
   if (delegate_) {
@@ -41,38 +42,34 @@ ScopedApiBinding::~ScopedApiBinding() {
   }
 }
 
-void ScopedApiBinding::OnPortConnected(blink::WebMessagePort port) {
+void ScopedApiBinding::OnPortConnected(
+    std::unique_ptr<cast_api_bindings::MessagePort> port) {
   message_port_ = std::move(port);
-  message_port_.SetReceiver(this, base::SequencedTaskRunnerHandle::Get());
+  message_port_->SetReceiver(this);
   delegate_->OnConnected();
 }
 
-bool ScopedApiBinding::SendMessage(base::StringPiece data_utf8) {
+bool ScopedApiBinding::SendMessage(std::string_view data_utf8) {
   DCHECK(delegate_);
 
   DVLOG(1) << "SendMessage: message=" << data_utf8;
-  if (!message_port_.IsValid()) {
+  if (!message_port_->CanPostMessage()) {
     LOG(WARNING)
         << "Attempted to write to unconnected MessagePort, dropping message.";
     return false;
   }
 
-  if (!message_port_.PostMessage(
-          blink::WebMessagePort::Message(base::UTF8ToUTF16(data_utf8)))) {
+  if (!message_port_->PostMessage(data_utf8)) {
     return false;
   }
 
   return true;
 }
 
-bool ScopedApiBinding::OnMessage(blink::WebMessagePort::Message message) {
-  std::string message_utf8;
-  if (!base::UTF16ToUTF8(message.data.data(), message.data.size(),
-                         &message_utf8)) {
-    return false;
-  }
-
-  return delegate_->OnMessage(message_utf8);
+bool ScopedApiBinding::OnMessage(
+    std::string_view message,
+    std::vector<std::unique_ptr<cast_api_bindings::MessagePort>> ports) {
+  return delegate_->OnMessage(message);
 }
 
 void ScopedApiBinding::OnPipeError() {

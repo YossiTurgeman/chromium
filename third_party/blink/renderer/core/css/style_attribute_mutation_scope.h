@@ -30,6 +30,7 @@
 namespace blink {
 
 class AbstractPropertySetCSSStyleDeclaration;
+class Element;
 class MutationObserverInterestGroup;
 class MutationRecord;
 
@@ -37,7 +38,8 @@ class StyleAttributeMutationScope {
   STACK_ALLOCATED();
 
  public:
-  StyleAttributeMutationScope(AbstractPropertySetCSSStyleDeclaration*);
+  explicit StyleAttributeMutationScope(AbstractPropertySetCSSStyleDeclaration*);
+  explicit StyleAttributeMutationScope(Element*);
   StyleAttributeMutationScope(const StyleAttributeMutationScope&) = delete;
   StyleAttributeMutationScope& operator=(const StyleAttributeMutationScope&) =
       delete;
@@ -49,8 +51,10 @@ class StyleAttributeMutationScope {
   void DidInvalidateStyleAttr() { should_notify_inspector_ = true; }
 
  private:
+  void Initialize(Element*);
+
   static unsigned scope_count_;
-  static AbstractPropertySetCSSStyleDeclaration* current_decl_;
+  static Element* current_element_;
   static bool should_notify_inspector_;
   static bool should_deliver_;
 
@@ -61,4 +65,4 @@ class StyleAttributeMutationScope {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_CSS_STYLE_ATTRIBUTE_MUTATION_SCOPE_H_

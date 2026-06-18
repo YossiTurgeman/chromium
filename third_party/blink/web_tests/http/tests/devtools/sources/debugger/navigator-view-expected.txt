@@ -208,12 +208,10 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -225,14 +223,11 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     script.js
@@ -250,15 +245,12 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
@@ -282,14 +274,11 @@ script2.js
       script2.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   script.js
@@ -304,15 +293,12 @@ script2.js
     script2.js
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
@@ -334,37 +320,37 @@ script2.js
 Content Scripts:
 -------- Setting mode: [frame]
 top
+  contentScript2.js?a=1
   contentScript.js?a=1
   contentScript.js?a=2
-  contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [frame/domain]
 top
   localhost:8080
+    contentScript2.js?a=1
     contentScript.js?a=1
     contentScript.js?a=2
-    contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [frame/domain/folder]
 top
   localhost:8080
     LayoutTests/inspector/debugger/foo/bar
+      contentScript2.js?a=1
       contentScript.js?a=1
       contentScript.js?a=2
-      contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [domain]
 localhost:8080
+  contentScript2.js?a=1
   contentScript.js?a=1
   contentScript.js?a=2
-  contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [domain/folder]
 localhost:8080
   LayoutTests/inspector/debugger/foo/bar
+    contentScript2.js?a=1
     contentScript.js?a=1
     contentScript.js?a=2
-    contentScript2.js?a=1
 
 
 ================================================
@@ -374,12 +360,10 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -391,14 +375,11 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     script.js
@@ -416,15 +397,12 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
@@ -448,14 +426,11 @@ script2.js
       script2.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   script.js
@@ -470,15 +445,12 @@ script2.js
     script2.js
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
@@ -506,13 +478,11 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -524,14 +494,11 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     script.js
@@ -550,24 +517,21 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
     LayoutTests/inspector
+      debugger2/foo/bar
+        script.js
       debugger/foo/bar
         script.js
         script.js?a=2
-      debugger2/foo/bar
-        script.js
   childframe (post-message-listener.html)
     localhost:8080
       LayoutTests/inspector/debugger/foo
@@ -585,14 +549,11 @@ script2.js
       script2.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   script.js
@@ -608,19 +569,18 @@ script2.js
     script2.js
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
   LayoutTests/inspector
+    debugger2/foo/bar
+      script.js
     debugger/foo
       bar
         script.js
@@ -628,8 +588,6 @@ localhost:8080
         script.js?a=2
       baz
         script.js
-    debugger2/foo/bar
-      script.js
 script1.js
   127.0.0.1:8000
     devtools/sources/debugger/resources
@@ -647,14 +605,12 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js
   script.js?a=2
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -666,14 +622,11 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     script.js
@@ -693,23 +646,20 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
     LayoutTests/inspector
-      debugger/foo/bar
+      debugger2/foo/bar
         script.js
         script.js?a=2
-      debugger2/foo/bar
+      debugger/foo/bar
         script.js
         script.js?a=2
   childframe (post-message-listener.html)
@@ -729,14 +679,11 @@ script2.js
       script2.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   script.js
@@ -753,19 +700,19 @@ script2.js
     script2.js
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
   LayoutTests/inspector
+    debugger2/foo/bar
+      script.js
+      script.js?a=2
     debugger/foo
       bar
         script.js
@@ -773,9 +720,6 @@ localhost:8080
         script.js?a=2
       baz
         script.js
-    debugger2/foo/bar
-      script.js
-      script.js?a=2
 script1.js
   127.0.0.1:8000
     devtools/sources/debugger/resources
@@ -793,16 +737,14 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js
   script.js
   script.js?a=1
   script.js?a=2
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -814,14 +756,11 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     script.js
@@ -843,22 +782,16 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
     LayoutTests/inspector
-      debugger/foo/bar
-        script.js
-        script.js?a=2
       debugger2/foo
         bar
           script.js
@@ -866,6 +799,9 @@ top
           script.js?a=2
         baz
           script.js
+      debugger/foo/bar
+        script.js
+        script.js?a=2
   childframe (post-message-listener.html)
     localhost:8080
       LayoutTests/inspector/debugger/foo
@@ -883,14 +819,11 @@ script2.js
       script2.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   script.js
@@ -909,27 +842,24 @@ script2.js
     script2.js
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
   LayoutTests/inspector
-    debugger/foo
+    debugger2/foo
       bar
         script.js
         script.js?a=1
         script.js?a=2
       baz
         script.js
-    debugger2/foo
+    debugger/foo
       bar
         script.js
         script.js?a=1
@@ -952,19 +882,17 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo.js
   foo.js
   foo.js
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js
   script.js
   script.js?a=1
   script.js?a=2
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -976,14 +904,11 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     foo.js
@@ -1008,22 +933,16 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
     LayoutTests/inspector
-      debugger/foo/bar
-        script.js
-        script.js?a=2
       debugger2/foo
         bar
           script.js
@@ -1037,6 +956,9 @@ top
             foo.js
           foo.js
         foo.js
+      debugger/foo/bar
+        script.js
+        script.js?a=2
   childframe (post-message-listener.html)
     localhost:8080
       LayoutTests/inspector/debugger/foo
@@ -1054,14 +976,11 @@ script2.js
       script2.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   foo.js
@@ -1083,26 +1002,16 @@ script2.js
     script2.js
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
   LayoutTests/inspector
-    debugger/foo
-      bar
-        script.js
-        script.js?a=1
-        script.js?a=2
-      baz
-        script.js
     debugger2/foo
       bar
         script.js
@@ -1116,6 +1025,13 @@ localhost:8080
           foo.js
         foo.js
       foo.js
+    debugger/foo
+      bar
+        script.js
+        script.js?a=1
+        script.js?a=2
+      baz
+        script.js
 script1.js
   127.0.0.1:8000
     devtools/sources/debugger/resources
@@ -1133,19 +1049,17 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo.js
   foo.js
   foo.js
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js
   script.js
   script.js?a=1
   script.js?a=2
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -1157,14 +1071,11 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     foo.js
@@ -1189,22 +1100,16 @@ script2.js
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
     LayoutTests/inspector
-      debugger/foo/bar
-        script.js
-        script.js?a=2
       debugger2/foo
         bar
           script.js
@@ -1218,6 +1123,9 @@ top
             foo.js
           foo.js
         foo.js
+      debugger/foo/bar
+        script.js
+        script.js?a=2
   childframe (post-message-listener.html)
     localhost:8080
       LayoutTests/inspector/debugger/foo
@@ -1235,14 +1143,11 @@ script2.js
       script2.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   foo.js
@@ -1264,26 +1169,16 @@ script2.js
     script2.js
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
   LayoutTests/inspector
-    debugger/foo
-      bar
-        script.js
-        script.js?a=1
-        script.js?a=2
-      baz
-        script.js
     debugger2/foo
       bar
         script.js
@@ -1297,6 +1192,13 @@ localhost:8080
           foo.js
         foo.js
       foo.js
+    debugger/foo
+      bar
+        script.js
+        script.js?a=1
+        script.js?a=2
+      baz
+        script.js
 script1.js
   127.0.0.1:8000
     devtools/sources/debugger/resources
@@ -1308,37 +1210,37 @@ script2.js
 Content Scripts:
 -------- Setting mode: [frame]
 top
+  contentScript2.js?a=1
   contentScript.js?a=1
   contentScript.js?a=2
-  contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [frame/domain]
 top
   localhost:8080
+    contentScript2.js?a=1
     contentScript.js?a=1
     contentScript.js?a=2
-    contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [frame/domain/folder]
 top
   localhost:8080
     LayoutTests/inspector/debugger/foo/bar
+      contentScript2.js?a=1
       contentScript.js?a=1
       contentScript.js?a=2
-      contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [domain]
 localhost:8080
+  contentScript2.js?a=1
   contentScript.js?a=1
   contentScript.js?a=2
-  contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [domain/folder]
 localhost:8080
   LayoutTests/inspector/debugger/foo/bar
+    contentScript2.js?a=1
     contentScript.js?a=1
     contentScript.js?a=2
-    contentScript2.js?a=1
 
 
 ================================================
@@ -1348,19 +1250,17 @@ Sources:
 top
   (index)
   ?a=b
-  ?a=b
   foo.js
   foo.js
   foo.js
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   script.js
   script.js
   script.js
   script.js?a=1
   script.js?a=2
   script.js?a=2
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   white space.html
   childframe (post-message-listener.html)
     script.js
@@ -1368,14 +1268,11 @@ top
 Sources:
 -------- Setting mode: [frame/domain]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     (index)
     ?a=b
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
     white space.html
   localhost:8080
     foo.js
@@ -1394,22 +1291,16 @@ top
 Sources:
 -------- Setting mode: [frame/domain/folder]
 top
-  (no domain)
-    ?a=b
-    very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
   example.com
     path with spaces
       white space.html
-    the%2fdir
+    the/dir
       foo?bar=100%&baz=a%20%2fb
-      foo?bar=100&baz=a %2fb
+      foo?bar=100&baz=a%20%2fb
     (index)
     ?a=b
   localhost:8080
     LayoutTests/inspector
-      debugger/foo/bar
-        script.js
-        script.js?a=2
       debugger2/foo
         bar
           script.js
@@ -1423,6 +1314,9 @@ top
             foo.js
           foo.js
         foo.js
+      debugger/foo/bar
+        script.js
+        script.js?a=2
   childframe (post-message-listener.html)
     localhost:8080
       LayoutTests/inspector/debugger/foo
@@ -1432,14 +1326,11 @@ top
           script.js
 Sources:
 -------- Setting mode: [domain]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   (index)
   ?a=b
   foo?bar=100%&baz=a%20%2fb
-  foo?bar=100&baz=a %2fb
+  foo?bar=100&baz=a%20%2fb
   white space.html
 localhost:8080
   foo.js
@@ -1455,26 +1346,16 @@ localhost:8080
   script.js?a=2
 Sources:
 -------- Setting mode: [domain/folder]
-(no domain)
-  ?a=b
-  very_looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo…
 example.com
   path with spaces
     white space.html
-  the%2fdir
+  the/dir
     foo?bar=100%&baz=a%20%2fb
-    foo?bar=100&baz=a %2fb
+    foo?bar=100&baz=a%20%2fb
   (index)
   ?a=b
 localhost:8080
   LayoutTests/inspector
-    debugger/foo
-      bar
-        script.js
-        script.js?a=1
-        script.js?a=2
-      baz
-        script.js
     debugger2/foo
       bar
         script.js
@@ -1488,38 +1369,45 @@ localhost:8080
           foo.js
         foo.js
       foo.js
+    debugger/foo
+      bar
+        script.js
+        script.js?a=1
+        script.js?a=2
+      baz
+        script.js
 Content Scripts:
 -------- Setting mode: [frame]
 top
+  contentScript2.js?a=1
   contentScript.js?a=1
   contentScript.js?a=2
-  contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [frame/domain]
 top
   localhost:8080
+    contentScript2.js?a=1
     contentScript.js?a=1
     contentScript.js?a=2
-    contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [frame/domain/folder]
 top
   localhost:8080
     LayoutTests/inspector/debugger/foo/bar
+      contentScript2.js?a=1
       contentScript.js?a=1
       contentScript.js?a=2
-      contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [domain]
 localhost:8080
+  contentScript2.js?a=1
   contentScript.js?a=1
   contentScript.js?a=2
-  contentScript2.js?a=1
 Content Scripts:
 -------- Setting mode: [domain/folder]
 localhost:8080
   LayoutTests/inspector/debugger/foo/bar
+    contentScript2.js?a=1
     contentScript.js?a=1
     contentScript.js?a=2
-    contentScript2.js?a=1
 

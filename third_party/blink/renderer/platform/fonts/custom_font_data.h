@@ -21,28 +21,29 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_CUSTOM_FONT_DATA_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_CUSTOM_FONT_DATA_H_
 
-#include "base/memory/scoped_refptr.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
-#include "third_party/blink/renderer/platform/wtf/ref_counted.h"
 
 namespace blink {
 
-class PLATFORM_EXPORT CustomFontData : public RefCounted<CustomFontData> {
+// The `CustomFontData` provides an interface of loadable font resource and
+// lifetime management. `SimpleFontData` owns its instance.
+//
+// Following classes construct an instance:
+//  * `BinaryDataFontFaceSource` as loaded font resource
+//  * `LocalFontFaceSource` as derived class `CSSCustomFontData`
+//  * `RemoteFontFaceSource` as derived class `CSSCustomFontData`
+class PLATFORM_EXPORT CustomFontData : public GarbageCollected<CustomFontData> {
  public:
-  static scoped_refptr<CustomFontData> Create() {
-    return base::AdoptRef(new CustomFontData());
-  }
-
+  CustomFontData() = default;
   virtual ~CustomFontData() = default;
+  virtual void Trace(Visitor*) const {}
 
   virtual void BeginLoadIfNeeded() const {}
   virtual bool IsLoading() const { return false; }
   virtual bool IsLoadingFallback() const { return false; }
   virtual bool ShouldSkipDrawing() const { return false; }
-  virtual void ClearFontFaceSource() {}
-
- protected:
-  CustomFontData() = default;
+  virtual bool IsPendingDataUrl() const { return false; }
 };
 
 }  // namespace blink

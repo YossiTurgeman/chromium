@@ -1,56 +1,91 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/network/public/cpp/isolation_info_mojom_traits.h"
 
 #include "base/notreached.h"
+#include "base/unguessable_token.h"
+#include "net/base/isolation_info.h"
+#include "net/base/network_isolation_partition.h"
+#include "services/network/public/cpp/cookie_manager_shared_mojom_traits.h"
 #include "services/network/public/cpp/crash_keys.h"
-#include "services/network/public/cpp/site_for_cookies_mojom_traits.h"
+#include "services/network/public/mojom/isolation_info.mojom-shared.h"
 
 namespace mojo {
 
-bool EnumTraits<network::mojom::IsolationInfoRedirectMode,
-                net::IsolationInfo::RedirectMode>::
-    FromMojom(network::mojom::IsolationInfoRedirectMode redirect_mode,
-              net::IsolationInfo::RedirectMode* out) {
-  switch (redirect_mode) {
-    case network::mojom::IsolationInfoRedirectMode::kUpdateTopFrame:
-      *out = net::IsolationInfo::RedirectMode::kUpdateTopFrame;
-      return true;
-    case network::mojom::IsolationInfoRedirectMode::kUpdateFrameOnly:
-      *out = net::IsolationInfo::RedirectMode::kUpdateFrameOnly;
-      return true;
-    case network::mojom::IsolationInfoRedirectMode::kUpdateNothing:
-      *out = net::IsolationInfo::RedirectMode::kUpdateNothing;
-      return true;
+net::IsolationInfo::RequestType
+EnumTraits<network::mojom::IsolationInfoRequestType,
+           net::IsolationInfo::RequestType>::
+    FromMojom(network::mojom::IsolationInfoRequestType request_type) {
+  switch (request_type) {
+    case network::mojom::IsolationInfoRequestType::kMainFrame:
+      return net::IsolationInfo::RequestType::kMainFrame;
+    case network::mojom::IsolationInfoRequestType::kSubFrame:
+      return net::IsolationInfo::RequestType::kSubFrame;
+    case network::mojom::IsolationInfoRequestType::kOther:
+      return net::IsolationInfo::RequestType::kOther;
   }
-  return false;
+  NOTREACHED();
 }
 
-network::mojom::IsolationInfoRedirectMode EnumTraits<
-    network::mojom::IsolationInfoRedirectMode,
-    net::IsolationInfo::RedirectMode>::ToMojom(net::IsolationInfo::RedirectMode
-                                                   redirect_mode) {
-  switch (redirect_mode) {
-    case net::IsolationInfo::RedirectMode::kUpdateTopFrame:
-      return network::mojom::IsolationInfoRedirectMode::kUpdateTopFrame;
-    case net::IsolationInfo::RedirectMode::kUpdateFrameOnly:
-      return network::mojom::IsolationInfoRedirectMode::kUpdateFrameOnly;
-    case net::IsolationInfo::RedirectMode::kUpdateNothing:
-      return network::mojom::IsolationInfoRedirectMode::kUpdateNothing;
+net::IsolationInfo::FrameAncestorRelation
+EnumTraits<network::mojom::IsolationInfoFrameAncestorRelation,
+           net::IsolationInfo::FrameAncestorRelation>::
+    FromMojom(network::mojom::IsolationInfoFrameAncestorRelation input) {
+  switch (input) {
+    case network::mojom::IsolationInfoFrameAncestorRelation::kSameOrigin:
+      return net::IsolationInfo::FrameAncestorRelation::kSameOrigin;
+    case network::mojom::IsolationInfoFrameAncestorRelation::kSameSite:
+      return net::IsolationInfo::FrameAncestorRelation::kSameSite;
+    case network::mojom::IsolationInfoFrameAncestorRelation::kCrossSite:
+      return net::IsolationInfo::FrameAncestorRelation::kCrossSite;
+  }
+  NOTREACHED();
+}
+
+network::mojom::IsolationInfoRequestType EnumTraits<
+    network::mojom::IsolationInfoRequestType,
+    net::IsolationInfo::RequestType>::ToMojom(net::IsolationInfo::RequestType
+                                                  request_type) {
+  switch (request_type) {
+    case net::IsolationInfo::RequestType::kMainFrame:
+      return network::mojom::IsolationInfoRequestType::kMainFrame;
+    case net::IsolationInfo::RequestType::kSubFrame:
+      return network::mojom::IsolationInfoRequestType::kSubFrame;
+    case net::IsolationInfo::RequestType::kOther:
+      return network::mojom::IsolationInfoRequestType::kOther;
   }
 
   NOTREACHED();
-  return network::mojom::IsolationInfoRedirectMode::kUpdateNothing;
+}
+
+network::mojom::IsolationInfoFrameAncestorRelation
+EnumTraits<network::mojom::IsolationInfoFrameAncestorRelation,
+           net::IsolationInfo::FrameAncestorRelation>::
+    ToMojom(net::IsolationInfo::FrameAncestorRelation frame_ancestor_relation) {
+  switch (frame_ancestor_relation) {
+    case net::IsolationInfo::FrameAncestorRelation::kSameOrigin:
+      return network::mojom::IsolationInfoFrameAncestorRelation::kSameOrigin;
+    case net::IsolationInfo::FrameAncestorRelation::kSameSite:
+      return network::mojom::IsolationInfoFrameAncestorRelation::kSameSite;
+    case net::IsolationInfo::FrameAncestorRelation::kCrossSite:
+      return network::mojom::IsolationInfoFrameAncestorRelation::kCrossSite;
+  }
+
+  NOTREACHED();
 }
 
 bool StructTraits<network::mojom::IsolationInfoDataView, net::IsolationInfo>::
     Read(network::mojom::IsolationInfoDataView data, net::IsolationInfo* out) {
-  base::Optional<url::Origin> top_frame_origin;
-  base::Optional<url::Origin> frame_origin;
+  std::optional<url::Origin> top_frame_origin;
+  std::optional<url::Origin> frame_origin;
+  std::optional<base::UnguessableToken> nonce;
   net::SiteForCookies site_for_cookies;
-  net::IsolationInfo::RedirectMode redirect_mode;
+  net::IsolationInfo::RequestType request_type;
+  net::NetworkIsolationPartition network_isolation_partition;
+  std::optional<net::IsolationInfo::FrameAncestorRelation>
+      frame_ancestor_relation;
 
   if (!data.ReadTopFrameOrigin(&top_frame_origin)) {
     network::debug::SetDeserializationCrashKeyString("isolation_top_origin");
@@ -60,15 +95,18 @@ bool StructTraits<network::mojom::IsolationInfoDataView, net::IsolationInfo>::
     network::debug::SetDeserializationCrashKeyString("isolation_frame_origin");
     return false;
   }
-  if (!data.ReadSiteForCookies(&site_for_cookies) ||
-      !data.ReadRedirectMode(&redirect_mode)) {
+  if (!data.ReadNonce(&nonce) || !data.ReadSiteForCookies(&site_for_cookies) ||
+      !data.ReadRequestType(&request_type) ||
+      !data.ReadNetworkIsolationPartition(&network_isolation_partition) ||
+      !data.ReadFrameAncestorRelation(&frame_ancestor_relation)) {
     return false;
   }
 
-  base::Optional<net::IsolationInfo> isolation_info =
-      net::IsolationInfo::CreateIfConsistent(redirect_mode, top_frame_origin,
-                                             frame_origin, site_for_cookies,
-                                             data.opaque_and_non_transient());
+  std::optional<net::IsolationInfo> isolation_info =
+      net::IsolationInfo::CreateIfConsistent(
+          request_type, std::move(top_frame_origin), std::move(frame_origin),
+          std::move(site_for_cookies), std::move(nonce),
+          network_isolation_partition, frame_ancestor_relation);
   if (!isolation_info) {
     network::debug::SetDeserializationCrashKeyString("isolation_inconsistent");
     return false;

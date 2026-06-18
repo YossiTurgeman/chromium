@@ -1,24 +1,15 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
 
-// https://gpuweb.github.io/gpuweb/
 
 dictionary GPUBindGroupLayoutEntry {
     required GPUIndex32 binding;
     required GPUShaderStageFlags visibility;
-    required GPUBindingType type;
+    [RuntimeEnabled=WebGPUExperimentalFeatures] GPUSize32 bindingArraySize = 1;
 
-    boolean hasDynamicOffset = false;
-
-    GPUSize64 minBufferBindingSize;
-
-    GPUTextureViewDimension viewDimension = "2d";
-
-    GPUTextureComponentType textureComponentType = "float";
-    boolean multisampled = false;
-
-    GPUTextureFormat storageTextureFormat;
+    GPUBufferBindingLayout buffer;
+    GPUSamplerBindingLayout sampler;
+    GPUTextureBindingLayout texture;
+    GPUStorageTextureBindingLayout storageTexture;
+    GPUExternalTextureBindingLayout externalTexture;
 };
 
 enum GPUBindingType {
@@ -28,12 +19,6 @@ enum GPUBindingType {
     "sampler",
     "comparison-sampler",
     "sampled-texture",
-    "readonly-storage-texture",
+    "multisampled-texture",
     "writeonly-storage-texture",
-};
-
-enum GPUTextureComponentType {
-    "float",
-    "sint",
-    "uint"
 };

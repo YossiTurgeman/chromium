@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 #include <unordered_map>
 
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
 #include "content/browser/cache_storage/cache_storage.h"
+#include "content/common/content_export.h"
 
 namespace content {
 
@@ -21,12 +21,11 @@ namespace content {
 class CONTENT_EXPORT CacheStorageIndex {
  public:
   struct CacheMetadata {
-    CacheMetadata(const std::string& name,
-                  int64_t size,
-                  int64_t padding,
-                  const std::string& padding_key)
-        : name(name), size(size), padding(padding), padding_key(padding_key) {}
-    std::string name;
+    CacheMetadata(const std::u16string& name, int64_t size, int64_t padding)
+        : name(name), size(size), padding(padding) {}
+
+    std::u16string name;
+
     // The size (in bytes) of the cache. Set to CacheStorage::kSizeUnknown if
     // size not known.
     int64_t size;
@@ -35,32 +34,33 @@ class CONTENT_EXPORT CacheStorageIndex {
     // if padding not known.
     int64_t padding;
 
-    // The raw key used to calculate padding for some cache entries.
-    std::string padding_key;
-
     // The algorithm version used to calculate this padding.
     int32_t padding_version;
   };
 
   CacheStorageIndex();
+
+  CacheStorageIndex(const CacheStorageIndex&) = delete;
+  CacheStorageIndex& operator=(const CacheStorageIndex&) = delete;
+
   ~CacheStorageIndex();
 
   CacheStorageIndex& operator=(CacheStorageIndex&& rhs);
 
   void Insert(const CacheMetadata& cache_metadata);
-  void Delete(const std::string& cache_name);
+  void Delete(const std::u16string& cache_name);
 
   // Sets the actual (unpadded) cache size. Returns true if the new size is
   // different than the current size else false.
-  bool SetCacheSize(const std::string& cache_name, int64_t size);
+  bool SetCacheSize(const std::u16string& cache_name, int64_t size);
 
   // Get the cache metadata for a given cache name. If not found nullptr is
   // returned.
-  const CacheMetadata* GetMetadata(const std::string& cache_name) const;
+  const CacheMetadata* GetMetadata(const std::u16string& cache_name) const;
 
   // Sets the cache padding. Returns true if the new padding is different than
   // the current padding else false.
-  bool SetCachePadding(const std::string& cache_name, int64_t padding);
+  bool SetCachePadding(const std::u16string& cache_name, int64_t padding);
 
   const std::list<CacheMetadata>& ordered_cache_metadata() const {
     return ordered_cache_metadata_;
@@ -79,13 +79,14 @@ class CONTENT_EXPORT CacheStorageIndex {
   //
   // RestoreDoomedCache restores the metadata to the index at the original
   // position prior to calling DoomCache.
-  void DoomCache(const std::string& cache_name);
+  void DoomCache(const std::u16string& cache_name);
   void FinalizeDoomedCache();
   void RestoreDoomedCache();
 
  private:
   FRIEND_TEST_ALL_PREFIXES(CacheStorageIndexTest, TestSetCacheSize);
   FRIEND_TEST_ALL_PREFIXES(CacheStorageIndexTest, TestSetCachePadding);
+  FRIEND_TEST_ALL_PREFIXES(CacheStorageIndexTest, TestInvalidCacheName);
 
   void UpdateStorageSize();
   void CalculateStoragePadding();
@@ -93,16 +94,16 @@ class CONTENT_EXPORT CacheStorageIndex {
 
   // Return the size (in bytes) of the specified cache. Will return
   // CacheStorage::kSizeUnknown if the specified cache does not exist.
-  int64_t GetCacheSizeForTesting(const std::string& cache_name) const;
+  int64_t GetCacheSizeForTesting(const std::u16string& cache_name) const;
 
   // Return the padding (in bytes) of the specified cache. Will return
   // CacheStorage::kSizeUnknown if the specified cache does not exist.
-  int64_t GetCachePaddingForTesting(const std::string& cache_name) const;
+  int64_t GetCachePaddingForTesting(const std::u16string& cache_name) const;
 
   // Use a list to keep saved iterators valid during insert/erase.
   // Note: ordered by cache creation.
   std::list<CacheMetadata> ordered_cache_metadata_;
-  std::unordered_map<std::string, std::list<CacheMetadata>::iterator>
+  std::unordered_map<std::u16string, std::list<CacheMetadata>::iterator>
       cache_metadata_map_;
 
   // The total unpadded size of all caches in this store.
@@ -115,8 +116,6 @@ class CONTENT_EXPORT CacheStorageIndex {
   CacheMetadata doomed_cache_metadata_;
   std::list<CacheMetadata>::iterator after_doomed_cache_metadata_;
   bool has_doomed_cache_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(CacheStorageIndex);
 };
 
 }  // namespace content

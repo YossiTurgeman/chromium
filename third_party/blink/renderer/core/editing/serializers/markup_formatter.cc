@@ -27,7 +27,6 @@
 
 #include "third_party/blink/renderer/core/editing/serializers/markup_formatter.h"
 
-#include "base/stl_util.h"
 #include "third_party/blink/renderer/core/dom/cdata_section.h"
 #include "third_party/blink/renderer/core/dom/comment.h"
 #include "third_party/blink/renderer/core/dom/document.h"
@@ -36,6 +35,7 @@
 #include "third_party/blink/renderer/core/dom/processing_instruction.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/editor.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/html/html_template_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
@@ -48,6 +48,8 @@
 
 namespace blink {
 
+namespace {
+
 struct EntityDescription {
   UChar entity;
   const std::string& reference;
@@ -55,27 +57,25 @@ struct EntityDescription {
 };
 
 template <typename CharType>
-static inline void AppendCharactersReplacingEntitiesInternal(
+inline void AppendCharactersReplacingEntitiesInternal(
     StringBuilder& result,
     const StringView& source,
-    CharType* text,
-    unsigned length,
-    const EntityDescription entity_maps[],
-    unsigned entity_maps_count,
+    base::span<const CharType> text,
+    base::span<const EntityDescription> entities,
     EntityMask entity_mask) {
-  unsigned position_after_last_entity = 0;
+  size_t position_after_last_entity = 0;
   // Avoid scanning the string in cases where the mask is empty, for example
-  // scripTag.innerHTML that use the kEntityMaskInCDATA mask.
+  // scriptTag.innerHTML that use the kEntityMaskInCDATA mask.
   if (entity_mask) {
-    for (unsigned i = 0; i < length; ++i) {
-      for (unsigned entity_index = 0; entity_index < entity_maps_count;
+    for (size_t i = 0; i < text.size(); ++i) {
+      const CharType c = text[i];
+      for (size_t entity_index = 0; entity_index < entities.size();
            ++entity_index) {
-        if (text[i] == entity_maps[entity_index].entity &&
-            entity_maps[entity_index].mask & entity_mask) {
-          result.Append(text + position_after_last_entity,
-                        i - position_after_last_entity);
-          const std::string& replacement = entity_maps[entity_index].reference;
-          result.Append(replacement.c_str(), replacement.length());
+        const auto& entity = entities[entity_index];
+        if (c == entity.entity && entity.mask & entity_mask) {
+          result.Append(text.subspan(position_after_last_entity,
+                                     i - position_after_last_entity));
+          result.Append(base::as_byte_span(entity.reference));
           position_after_last_entity = i + 1;
           break;
         }
@@ -89,9 +89,43 @@ static inline void AppendCharactersReplacingEntitiesInternal(
     result.Append(source);
     return;
   }
-  result.Append(text + position_after_last_entity,
-                length - position_after_last_entity);
+  result.Append(text.subspan(position_after_last_entity));
 }
+
+// https://html.spec.whatwg.org/C/#attribute's-serialised-name
+const AtomicString& ResolveAttributePrefixForHtml(
+    const QualifiedName& attr_name) {
+  if (attr_name.NamespaceURI() == xmlns_names::kNamespaceURI) {
+    if (!attr_name.Prefix() && attr_name.LocalName() != g_xmlns_atom) {
+      return g_xmlns_atom;
+    }
+  } else if (attr_name.NamespaceURI() == xml_names::kNamespaceURI) {
+    return g_xml_atom;
+  } else if (attr_name.NamespaceURI() == xlink_names::kNamespaceURI) {
+    return g_xlink_atom;
+  }
+  return attr_name.Prefix();
+}
+
+const AtomicString& ResolveAttributePrefixForXml(
+    const QualifiedName& attr_name) {
+  if (attr_name.Prefix()) {
+    return attr_name.Prefix();
+  }
+  const AtomicString& attribute_namespace = attr_name.NamespaceURI();
+  if (attribute_namespace == xmlns_names::kNamespaceURI) {
+    if (attr_name.LocalName() != g_xmlns_atom) {
+      return g_xmlns_atom;
+    }
+  } else if (attribute_namespace == xml_names::kNamespaceURI) {
+    return g_xml_atom;
+  } else if (attribute_namespace == xlink_names::kNamespaceURI) {
+    return g_xlink_atom;
+  }
+  return g_null_atom;
+}
+
+}  // namespace
 
 void MarkupFormatter::AppendCharactersReplacingEntities(
     StringBuilder& result,
@@ -111,20 +145,19 @@ void MarkupFormatter::AppendCharactersReplacingEntities(
       {'<', lt_reference, kEntityLt},
       {'>', gt_reference, kEntityGt},
       {'"', quot_reference, kEntityQuot},
-      {kNoBreakSpaceCharacter, nbsp_reference, kEntityNbsp},
+      {uchar::kNoBreakSpace, nbsp_reference, kEntityNbsp},
       {'\t', tab_reference, kEntityTab},
       {'\n', line_feed_reference, kEntityLineFeed},
       {'\r', carriage_return_reference, kEntityCarriageReturn},
   };
 
-  WTF::VisitCharacters(source, [&](const auto* chars, unsigned) {
-    AppendCharactersReplacingEntitiesInternal(
-        result, source, chars, source.length(), kEntityMaps,
-        base::size(kEntityMaps), entity_mask);
+  VisitCharacters(source, [&](auto chars) {
+    AppendCharactersReplacingEntitiesInternal(result, source, chars,
+                                              kEntityMaps, entity_mask);
   });
 }
 
-MarkupFormatter::MarkupFormatter(AbsoluteURLs resolve_urls_method,
+MarkupFormatter::MarkupFormatter(ResolveUrls resolve_urls_method,
                                  SerializationType serialization_type)
     : resolve_urls_method_(resolve_urls_method),
       serialization_type_(serialization_type) {}
@@ -133,18 +166,18 @@ String MarkupFormatter::ResolveURLIfNeeded(const Element& element,
                                            const Attribute& attribute) const {
   String value = attribute.Value();
   switch (resolve_urls_method_) {
-    case kResolveAllURLs:
+    case ResolveUrls::kAll:
       if (element.IsURLAttribute(attribute))
         return element.GetDocument().CompleteURL(value).GetString();
       break;
 
-    case kResolveNonLocalURLs:
+    case ResolveUrls::kNonLocal:
       if (element.IsURLAttribute(attribute) &&
           !element.GetDocument().Url().IsLocalFile())
         return element.GetDocument().CompleteURL(value).GetString();
       break;
 
-    case kDoNotResolveURLs:
+    case ResolveUrls::kNone:
       break;
   }
   return value;
@@ -155,7 +188,6 @@ void MarkupFormatter::AppendStartMarkup(StringBuilder& result,
   switch (node.getNodeType()) {
     case Node::kTextNode:
       NOTREACHED();
-      break;
     case Node::kCommentNode:
       AppendComment(result, To<Comment>(node).data());
       break;
@@ -174,13 +206,17 @@ void MarkupFormatter::AppendStartMarkup(StringBuilder& result,
       break;
     case Node::kElementNode:
       NOTREACHED();
+    case Node::kCdataSectionNode: {
+      auto& cdata = To<CDATASection>(node);
+      if (SerializeAsHTML()) {
+        AppendText(result, cdata);
+      } else {
+        AppendCDATASection(result, cdata.data());
+      }
       break;
-    case Node::kCdataSectionNode:
-      AppendCDATASection(result, To<CDATASection>(node).data());
-      break;
+    }
     case Node::kAttributeNode:
       NOTREACHED();
-      break;
   }
 }
 
@@ -198,7 +234,7 @@ void MarkupFormatter::AppendEndMarkup(StringBuilder& result,
     return;
 
   result.Append("</");
-  if (!prefix.IsEmpty()) {
+  if (!prefix.empty()) {
     result.Append(prefix);
     result.Append(":");
   }
@@ -209,10 +245,9 @@ void MarkupFormatter::AppendEndMarkup(StringBuilder& result,
 void MarkupFormatter::AppendAttributeValue(StringBuilder& result,
                                            const String& attribute,
                                            bool document_is_html) {
-  AppendCharactersReplacingEntities(result, attribute,
-                                    document_is_html
-                                        ? kEntityMaskInHTMLAttributeValue
-                                        : kEntityMaskInAttributeValue);
+  EntityMask entity_mask = document_is_html ? kEntityMaskInHTMLAttributeValue
+                                            : kEntityMaskInAttributeValue;
+  AppendCharactersReplacingEntities(result, attribute, entity_mask);
 }
 
 void MarkupFormatter::AppendAttribute(StringBuilder& result,
@@ -221,7 +256,7 @@ void MarkupFormatter::AppendAttribute(StringBuilder& result,
                                       const String& value,
                                       bool document_is_html) {
   result.Append(' ');
-  if (!prefix.IsEmpty()) {
+  if (!prefix.empty()) {
     result.Append(prefix);
     result.Append(':');
   }
@@ -253,7 +288,7 @@ void MarkupFormatter::AppendXMLDeclaration(StringBuilder& result,
   result.Append("<?xml version=\"");
   result.Append(document.xmlVersion());
   const String& encoding = document.xmlEncoding();
-  if (!encoding.IsEmpty()) {
+  if (!encoding.empty()) {
     result.Append("\" encoding=\"");
     result.Append(encoding);
   }
@@ -270,21 +305,21 @@ void MarkupFormatter::AppendXMLDeclaration(StringBuilder& result,
 
 void MarkupFormatter::AppendDocumentType(StringBuilder& result,
                                          const DocumentType& n) {
-  if (n.name().IsEmpty())
+  if (n.name().empty())
     return;
 
   result.Append("<!DOCTYPE ");
   result.Append(n.name());
-  if (!n.publicId().IsEmpty()) {
+  if (!n.publicId().empty()) {
     result.Append(" PUBLIC \"");
     result.Append(n.publicId());
     result.Append('"');
-    if (!n.systemId().IsEmpty()) {
+    if (!n.systemId().empty()) {
       result.Append(" \"");
       result.Append(n.systemId());
       result.Append('"');
     }
-  } else if (!n.systemId().IsEmpty()) {
+  } else if (!n.systemId().empty()) {
     result.Append(" SYSTEM \"");
     result.Append(n.systemId());
     result.Append('"');
@@ -313,7 +348,7 @@ void MarkupFormatter::AppendStartTagOpen(StringBuilder& result,
                                          const AtomicString& prefix,
                                          const AtomicString& local_name) {
   result.Append('<');
-  if (!prefix.IsEmpty()) {
+  if (!prefix.empty()) {
     result.Append(prefix);
     result.Append(":");
   }
@@ -333,38 +368,18 @@ void MarkupFormatter::AppendStartTagClose(StringBuilder& result,
 void MarkupFormatter::AppendAttributeAsHTML(StringBuilder& result,
                                             const Attribute& attribute,
                                             const String& value) {
-  // https://html.spec.whatwg.org/C/#attribute's-serialised-name
-  QualifiedName prefixed_name = attribute.GetName();
-  if (attribute.NamespaceURI() == xmlns_names::kNamespaceURI) {
-    if (!attribute.Prefix() && attribute.LocalName() != g_xmlns_atom)
-      prefixed_name.SetPrefix(g_xmlns_atom);
-  } else if (attribute.NamespaceURI() == xml_names::kNamespaceURI) {
-    prefixed_name.SetPrefix(g_xml_atom);
-  } else if (attribute.NamespaceURI() == xlink_names::kNamespaceURI) {
-    prefixed_name.SetPrefix(g_xlink_atom);
-  }
-  AppendAttribute(result, prefixed_name.Prefix(), prefixed_name.LocalName(),
-                  value, true);
+  const AtomicString& resolved_prefix =
+      ResolveAttributePrefixForHtml(attribute.GetName());
+  AppendAttribute(result, resolved_prefix, attribute.LocalName(), value, true);
 }
 
 void MarkupFormatter::AppendAttributeAsXMLWithoutNamespace(
     StringBuilder& result,
     const Attribute& attribute,
     const String& value) {
-  const AtomicString& attribute_namespace = attribute.NamespaceURI();
-  AtomicString candidate_prefix = attribute.Prefix();
-  if (attribute_namespace == xmlns_names::kNamespaceURI) {
-    if (!attribute.Prefix() && attribute.LocalName() != g_xmlns_atom)
-      candidate_prefix = g_xmlns_atom;
-  } else if (attribute_namespace == xml_names::kNamespaceURI) {
-    if (!candidate_prefix)
-      candidate_prefix = g_xml_atom;
-  } else if (attribute_namespace == xlink_names::kNamespaceURI) {
-    if (!candidate_prefix)
-      candidate_prefix = g_xlink_atom;
-  }
-  AppendAttribute(result, candidate_prefix, attribute.LocalName(), value,
-                  false);
+  const AtomicString& resolved_prefix =
+      ResolveAttributePrefixForXml(attribute.GetName());
+  AppendAttribute(result, resolved_prefix, attribute.LocalName(), value, false);
 }
 
 void MarkupFormatter::AppendCDATASection(StringBuilder& result,
@@ -385,18 +400,28 @@ EntityMask MarkupFormatter::EntityMaskForText(const Text& text) const {
   if (text.parentElement())
     parent_name = &(text.parentElement())->TagQName();
 
-  if (parent_name && (*parent_name == html_names::kScriptTag ||
-                      *parent_name == html_names::kStyleTag ||
-                      *parent_name == html_names::kXmpTag ||
-                      *parent_name == html_names::kIFrameTag ||
-                      *parent_name == html_names::kPlaintextTag ||
-                      *parent_name == html_names::kNoembedTag ||
-                      *parent_name == html_names::kNoframesTag ||
-                      (*parent_name == html_names::kNoscriptTag &&
-                       text.GetExecutionContext() &&
-                       text.GetExecutionContext()->CanExecuteScripts(
-                           kNotAboutToExecuteScript))))
-    return kEntityMaskInCDATA;
+  if (parent_name) {
+    // For a NOSCRIPT tag, escape the string unless there's an execution context
+    // and scripting is enabled. Note that some documents (e.g. the one created
+    // by DOMParser) are created with a script-enabled execution context, but no
+    // DOMWindow. But per spec [1], they should behave as if they have no
+    // execution context. So check for a DOMWindow here.
+    // [1] https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html
+    bool is_noscript_tag_with_script_enabled =
+        *parent_name == html_names::kNoscriptTag &&
+        text.GetExecutionContext() && text.GetDocument().domWindow() &&
+        text.GetExecutionContext()->CanExecuteScripts(kNotAboutToExecuteScript);
+    if (*parent_name == html_names::kScriptTag ||
+        *parent_name == html_names::kStyleTag ||
+        *parent_name == html_names::kXmpTag ||
+        *parent_name == html_names::kIFrameTag ||
+        *parent_name == html_names::kPlaintextTag ||
+        *parent_name == html_names::kNoembedTag ||
+        *parent_name == html_names::kNoframesTag ||
+        is_noscript_tag_with_script_enabled) {
+      return kEntityMaskInCDATA;
+    }
+  }
   return kEntityMaskInHTMLPCDATA;
 }
 

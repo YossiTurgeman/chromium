@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,20 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory_coordinator/test_memory_consumer_registry.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
 #include "base/synchronization/lock.h"
+#include "base/test/task_environment.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
+#include "net/base/features.h"
 #include "net/cert/cert_net_fetcher.h"
-#include "net/cert/ct_policy_enforcer.h"
 #include "net/cert/mock_cert_verifier.h"
 #include "net/cert/multi_log_ct_verifier.h"
 #include "net/dns/mock_host_resolver.h"
+#include "net/dns/public/secure_dns_policy.h"
 #include "net/http/http_server_properties.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/test/gtest_util.h"
@@ -31,6 +34,7 @@
 #include "services/cert_verifier/cert_net_url_loader/cert_net_fetcher_test.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
 #include "services/network/test/test_url_loader_factory.h"
+#include "services/network/url_loader.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
@@ -74,9 +78,15 @@ void VerifyFailure(net::Error expected_error,
   EXPECT_EQ(0u, actual_body.size());
 }
 
-class CertNetFetcherURLLoaderTest : public PlatformTest {
+class CertNetFetcherURLLoaderTest : public PlatformTest,
+                                    public net::WithTaskEnvironment {
  public:
-  CertNetFetcherURLLoaderTest() {
+  CertNetFetcherURLLoaderTest()
+      : net::WithTaskEnvironment(
+            base::test::TaskEnvironment::TimeSource::DEFAULT,
+            // TODO(crbug.com/463794414): Enable the Net Task Scheduler on
+            // this test.
+            {net::features::kNetTaskScheduler}) {
     test_server_.AddDefaultHandlers(base::FilePath(kDocRoot));
     StartNetworkThread();
   }
@@ -147,9 +157,9 @@ class CertNetFetcherURLLoaderTest : public PlatformTest {
 
   void StartNetworkThread() {
     // Start the network thread.
-    creation_thread_.reset(new base::Thread("network thread"));
+    creation_thread_ = std::make_unique<base::Thread>("network thread");
     base::Thread::Options options(base::MessagePumpType::IO, 0);
-    EXPECT_TRUE(creation_thread_->StartWithOptions(options));
+    EXPECT_TRUE(creation_thread_->StartWithOptions(std::move(options)));
   }
 
   void ResetTestUtilOnNetworkThread(base::WaitableEvent* done) {
@@ -211,6 +221,8 @@ class CertNetFetcherURLLoaderTest : public PlatformTest {
     done->Signal();
   }
 
+  base::TestMemoryConsumerRegistry test_memory_consumer_registry_;
+
   net::EmbeddedTestServer test_server_;
   std::unique_ptr<base::Thread> creation_thread_;
   std::unique_ptr<CertNetFetcherTestUtil> test_util_;
@@ -229,17 +241,16 @@ class SecureDnsInterceptor : public net::URLRequestInterceptor {
   // URLRequestInterceptor implementation:
   std::unique_ptr<net::URLRequestJob> MaybeInterceptRequest(
       net::URLRequest* request) const override {
-    EXPECT_TRUE(request->disable_secure_dns());
+    EXPECT_EQ(net::SecureDnsPolicy::kDisable, request->secure_dns_policy());
     *invoked_interceptor_ = true;
     return nullptr;
   }
 
-  bool* invoked_interceptor_;
+  raw_ptr<bool> invoked_interceptor_;
 };
 
 class CertNetFetcherURLLoaderTestWithSecureDnsInterceptor
-    : public CertNetFetcherURLLoaderTest,
-      public net::WithTaskEnvironment {
+    : public CertNetFetcherURLLoaderTest {
  public:
   CertNetFetcherURLLoaderTestWithSecureDnsInterceptor()
       : invoked_interceptor_(false) {}
@@ -261,7 +272,7 @@ class CertNetFetcherURLLoaderTestWithSecureDnsInterceptor
 };
 
 // Helper to start an AIA fetch using default parameters.
-WARN_UNUSED_RESULT std::unique_ptr<net::CertNetFetcher::Request> StartRequest(
+[[nodiscard]] std::unique_ptr<net::CertNetFetcher::Request> StartRequest(
     net::CertNetFetcher* fetcher,
     const GURL& url) {
   return fetcher->FetchCaIssuers(url, net::CertNetFetcher::DEFAULT,
@@ -499,7 +510,7 @@ TEST_F(CertNetFetcherURLLoaderTest,
     request1->WaitForResult(&error, &body);
   }
 
-  EXPECT_GE(2, NumCreatedRequests());
+  EXPECT_LE(2, NumCreatedRequests());
 
   ResetTestURLLoaderFactory();
 

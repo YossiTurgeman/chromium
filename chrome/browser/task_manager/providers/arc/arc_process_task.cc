@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,19 +6,19 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/i18n/rtl.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/grit/generated_resources.h"
-#include "components/arc/arc_service_manager.h"
-#include "components/arc/arc_util.h"
-#include "components/arc/intent_helper/arc_intent_helper_bridge.h"
-#include "components/arc/mojom/process.mojom.h"
-#include "components/arc/session/arc_bridge_service.h"
+#include "chromeos/ash/experiences/arc/arc_util.h"
+#include "chromeos/ash/experiences/arc/intent_helper/arc_intent_helper_bridge.h"
+#include "chromeos/ash/experiences/arc/mojom/process.mojom.h"
+#include "chromeos/ash/experiences/arc/session/arc_bridge_service.h"
+#include "chromeos/ash/experiences/arc/session/arc_service_manager.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/common/child_process_host.h"
+#include "content/public/browser/child_process_host.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/gfx/image/image.h"
 
@@ -38,7 +38,7 @@ std::string FirstPackage(const std::vector<std::string>& packages) {
   return packages.empty() ? std::string() : packages[0];
 }
 
-base::string16 MakeTitle(const arc::ArcProcess& arc_process) {
+std::u16string MakeTitle(const arc::ArcProcess& arc_process) {
   int name_template = IDS_TASK_MANAGER_ARC_PREFIX;
   switch (arc_process.process_state()) {
     case arc::mojom::ProcessState::PERSISTENT:
@@ -59,7 +59,7 @@ base::string16 MakeTitle(const arc::ArcProcess& arc_process) {
     default:
       break;
   }
-  base::string16 title = l10n_util::GetStringFUTF16(
+  std::u16string title = l10n_util::GetStringFUTF16(
       name_template, base::UTF8ToUTF16(arc_process.process_name()));
   base::i18n::AdjustStringForLocaleDirection(&title);
   return title;
@@ -134,14 +134,15 @@ bool ArcProcessTask::IsRunningInVM() const {
   return arc::IsArcVmEnabled();
 }
 
-void ArcProcessTask::Kill() {
+bool ArcProcessTask::Kill() {
   auto* process_instance = ARC_GET_INSTANCE_FOR_METHOD(
       arc::ArcServiceManager::Get()->arc_bridge_service()->process(),
       KillProcess);
   if (!process_instance)
-    return;
+    return false;
   process_instance->KillProcess(arc_process_.nspid(),
                                 "Killed manually from Task Manager");
+  return true;
 }
 
 void ArcProcessTask::OnConnectionReady() {

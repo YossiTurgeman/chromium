@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,24 +10,23 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <string_view>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/apple/scoped_cftyperef.h"
 #include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/i18n/break_iterator.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/mac/scoped_cftyperef.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/ref_counted.h"
-#include "base/single_thread_task_runner.h"
-#include "base/strings/string_piece.h"
+#include "base/notimplemented.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "remoting/host/clipboard.h"
 #include "remoting/proto/internal.pb.h"
-#include "remoting/protocol/message_decoder.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_geometry.h"
 #include "third_party/webrtc/modules/desktop_capture/mac/desktop_configuration.h"
 #include "ui/events/keycodes/dom/keycode_converter.h"
@@ -36,7 +35,7 @@ namespace remoting {
 
 namespace {
 
-void SetOrClearBit(uint64_t &value, uint64_t bit, bool set_bit) {
+void SetOrClearBit(uint64_t& value, uint64_t bit, bool set_bit) {
   value = set_bit ? (value | bit) : (value & ~bit);
 }
 
@@ -44,14 +43,18 @@ void SetOrClearBit(uint64_t &value, uint64_t bit, bool set_bit) {
 void CreateAndPostKeyEvent(int keycode,
                            bool pressed,
                            uint64_t flags,
-                           const base::string16& unicode) {
-  base::ScopedCFTypeRef<CGEventRef> eventRef(
+                           const std::u16string& unicode) {
+  base::apple::ScopedCFTypeRef<CGEventRef> eventRef(
       CGEventCreateKeyboardEvent(nullptr, keycode, pressed));
   if (eventRef) {
-    CGEventSetFlags(eventRef, static_cast<CGEventFlags>(flags));
-    if (!unicode.empty())
-      CGEventKeyboardSetUnicodeString(eventRef, unicode.size(), &(unicode[0]));
-    CGEventPost(kCGSessionEventTap, eventRef);
+    CGEventSetFlags(eventRef.get(), static_cast<CGEventFlags>(flags));
+    if (!unicode.empty()) {
+      CGEventKeyboardSetUnicodeString(
+          eventRef.get(), unicode.size(),
+          reinterpret_cast<const UniChar*>(unicode.data()));
+    }
+    VLOG(3) << "Injecting key " << (pressed ? "down" : "up") << " event.";
+    CGEventPost(kCGSessionEventTap, eventRef.get());
   }
 }
 
@@ -76,16 +79,18 @@ void PostMouseEvent(int32_t x,
   CGError error =
       CGPostMouseEvent(position, true, 3, left_down, right_down, middle_down);
 #pragma clang diagnostic pop
-  if (error != kCGErrorSuccess)
+  if (error != kCGErrorSuccess) {
     LOG(WARNING) << "CGPostMouseEvent error " << error;
+  }
 }
 
 // Must be called on UI thread.
 void CreateAndPostScrollWheelEvent(int32_t delta_x, int32_t delta_y) {
-  base::ScopedCFTypeRef<CGEventRef> eventRef(CGEventCreateScrollWheelEvent(
-      nullptr, kCGScrollEventUnitPixel, 2, delta_y, delta_x));
+  base::apple::ScopedCFTypeRef<CGEventRef> eventRef(
+      CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 2,
+                                    delta_y, delta_x));
   if (eventRef) {
-    CGEventPost(kCGSessionEventTap, eventRef);
+    CGEventPost(kCGSessionEventTap, eventRef.get());
   }
 }
 
@@ -100,8 +105,8 @@ const int kWakeUpDisplayIntervalMs = 1000;
 
 using protocol::ClipboardEvent;
 using protocol::KeyEvent;
-using protocol::TextEvent;
 using protocol::MouseEvent;
+using protocol::TextEvent;
 using protocol::TouchEvent;
 
 // A class to generate events on Mac.
@@ -110,6 +115,10 @@ class InputInjectorMac : public InputInjector {
   explicit InputInjectorMac(
       scoped_refptr<base::SingleThreadTaskRunner> input_thread_task_runner,
       scoped_refptr<base::SingleThreadTaskRunner> ui_thread_task_runner);
+
+  InputInjectorMac(const InputInjectorMac&) = delete;
+  InputInjectorMac& operator=(const InputInjectorMac&) = delete;
+
   ~InputInjectorMac() override;
 
   // ClipboardStub interface.
@@ -132,6 +141,9 @@ class InputInjectorMac : public InputInjector {
     explicit Core(
         scoped_refptr<base::SingleThreadTaskRunner> input_thread_task_runner,
         scoped_refptr<base::SingleThreadTaskRunner> ui_thread_task_runner);
+
+    Core(const Core&) = delete;
+    Core& operator=(const Core&) = delete;
 
     // Mirrors the ClipboardStub interface.
     void InjectClipboardEvent(const ClipboardEvent& event);
@@ -160,13 +172,9 @@ class InputInjectorMac : public InputInjector {
     uint64_t left_modifiers_;
     uint64_t right_modifiers_;
     base::TimeTicks last_time_display_woken_;
-
-    DISALLOW_COPY_AND_ASSIGN(Core);
   };
 
   scoped_refptr<Core> core_;
-
-  DISALLOW_COPY_AND_ASSIGN(InputInjectorMac);
 };
 
 InputInjectorMac::InputInjectorMac(
@@ -240,20 +248,19 @@ void InputInjectorMac::Core::InjectClipboardEvent(const ClipboardEvent& event) {
 
 void InputInjectorMac::Core::InjectKeyEvent(const KeyEvent& event) {
   // HostEventDispatcher should filter events missing the pressed field.
-  if (!event.has_pressed() || !event.has_usb_keycode())
+  if (!event.has_pressed() || !event.has_usb_keycode()) {
     return;
+  }
 
   WakeUpDisplay();
 
   int keycode =
       ui::KeycodeConverter::UsbKeycodeToNativeKeycode(event.usb_keycode());
 
-  VLOG(3) << "Converting USB keycode: " << std::hex << event.usb_keycode()
-          << " to keycode: " << keycode << std::dec;
-
   // If we couldn't determine the Mac virtual key code then ignore the event.
-  if (keycode == ui::KeycodeConverter::InvalidNativeKeycode())
+  if (keycode == ui::KeycodeConverter::InvalidNativeKeycode()) {
     return;
+  }
 
   // If this is a modifier key, remember its new state so that it can be
   // correctly applied to subsequent events.
@@ -286,7 +293,7 @@ void InputInjectorMac::Core::InjectKeyEvent(const KeyEvent& event) {
 
   ui_thread_task_runner_->PostTask(
       FROM_HERE, base::BindOnce(CreateAndPostKeyEvent, keycode, event.pressed(),
-                                flags, base::string16()));
+                                flags, std::u16string()));
 }
 
 void InputInjectorMac::Core::InjectTextEvent(const TextEvent& event) {
@@ -294,7 +301,7 @@ void InputInjectorMac::Core::InjectTextEvent(const TextEvent& event) {
 
   WakeUpDisplay();
 
-  base::string16 text = base::UTF8ToUTF16(event.text());
+  std::u16string text = base::UTF8ToUTF16(event.text());
 
   // CGEventKeyboardSetUnicodeString appears to only process up to 20 code
   // units (and key presses are generally expected to generate a single
@@ -308,28 +315,28 @@ void InputInjectorMac::Core::InjectTextEvent(const TextEvent& event) {
   }
 
   while (grapheme_iterator.Advance()) {
-    base::StringPiece16 grapheme = grapheme_iterator.GetStringPiece();
+    std::u16string_view grapheme = grapheme_iterator.GetString();
 
     if (grapheme.length() == 1 && grapheme[0] == '\n') {
       // On Mac, the return key sends "\r" rather than "\n", so handle it
       // specially.
       ui_thread_task_runner_->PostTask(
           FROM_HERE, base::BindOnce(CreateAndPostKeyEvent, kVK_Return,
-                                    /*pressed=*/true, 0, base::string16()));
+                                    /*pressed=*/true, 0, std::u16string()));
       ui_thread_task_runner_->PostTask(
           FROM_HERE, base::BindOnce(CreateAndPostKeyEvent, kVK_Return,
-                                    /*pressed=*/false, 0, base::string16()));
+                                    /*pressed=*/false, 0, std::u16string()));
     } else {
       // Applications that ignore UnicodeString field will see the text event as
       // Space key.
       ui_thread_task_runner_->PostTask(
           FROM_HERE,
           base::BindOnce(CreateAndPostKeyEvent, kVK_Space,
-                         /*pressed=*/true, 0, base::string16(grapheme)));
+                         /*pressed=*/true, 0, std::u16string(grapheme)));
       ui_thread_task_runner_->PostTask(
           FROM_HERE,
           base::BindOnce(CreateAndPostKeyEvent, kVK_Space,
-                         /*pressed=*/false, 0, base::string16(grapheme)));
+                         /*pressed=*/false, 0, std::u16string(grapheme)));
     }
   }
 }
@@ -346,10 +353,11 @@ void InputInjectorMac::Core::InjectMouseEvent(const MouseEvent& event) {
       VLOG(2) << "Button " << event.button()
               << (event.button_down() ? " down" : " up");
       int button_change = 1 << (event.button() - 1);
-      if (event.button_down())
+      if (event.button_down()) {
         mouse_button_state_ |= button_change;
-      else
+      } else {
         mouse_button_state_ &= ~button_change;
+      }
     } else {
       VLOG(1) << "Unknown mouse button: " << event.button();
     }
@@ -398,7 +406,7 @@ void InputInjectorMac::Core::Stop() {
 void InputInjectorMac::Core::WakeUpDisplay() {
   base::TimeTicks now = base::TimeTicks::Now();
   if (now - last_time_display_woken_ <
-      base::TimeDelta::FromMilliseconds(kWakeUpDisplayIntervalMs)) {
+      base::Milliseconds(kWakeUpDisplayIntervalMs)) {
     return;
   }
 
@@ -414,10 +422,8 @@ void InputInjectorMac::Core::WakeUpDisplay() {
   // re-awaken at the moment the assertion is created.
   IOPMAssertionID power_assertion_id = kIOPMNullAssertionID;
   IOReturn result = IOPMAssertionCreateWithName(
-      CFSTR("UserIsActive"),
-      kIOPMAssertionLevelOn,
-      CFSTR("Chrome Remote Desktop connection active"),
-      &power_assertion_id);
+      CFSTR("UserIsActive"), kIOPMAssertionLevelOn,
+      CFSTR("Chrome Remote Desktop connection active"), &power_assertion_id);
   if (result == kIOReturnSuccess) {
     IOPMAssertionRelease(power_assertion_id);
   }

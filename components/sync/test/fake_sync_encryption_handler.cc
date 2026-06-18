@@ -1,22 +1,34 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/sync/test/fake_sync_encryption_handler.h"
 
 #include "base/base64.h"
-#include "components/sync/base/model_type.h"
+#include "base/logging.h"
+#include "components/sync/base/custom_passphrase_bootstrap_token.h"
+#include "components/sync/base/data_type.h"
 #include "components/sync/protocol/nigori_specifics.pb.h"
 
 namespace syncer {
 
-FakeSyncEncryptionHandler::FakeSyncEncryptionHandler()
-    : encrypt_everything_(false) {}
+FakeSyncEncryptionHandler::FakeSyncEncryptionHandler() = default;
 
 FakeSyncEncryptionHandler::~FakeSyncEncryptionHandler() = default;
 
-bool FakeSyncEncryptionHandler::Init() {
-  return true;
+void FakeSyncEncryptionHandler::NotifyInitialStateToObservers() {}
+
+DataTypeSet FakeSyncEncryptionHandler::GetEncryptedTypes() {
+  return AlwaysEncryptedUserTypes();
+}
+
+Cryptographer* FakeSyncEncryptionHandler::GetCryptographer() {
+  // GetCryptographer() must never return null.
+  return &fake_cryptographer_;
+}
+
+PassphraseType FakeSyncEncryptionHandler::GetPassphraseType() {
+  return PassphraseType::kKeystorePassphrase;
 }
 
 bool FakeSyncEncryptionHandler::NeedKeystoreKey() const {
@@ -25,17 +37,14 @@ bool FakeSyncEncryptionHandler::NeedKeystoreKey() const {
 
 bool FakeSyncEncryptionHandler::SetKeystoreKeys(
     const std::vector<std::vector<uint8_t>>& keys) {
-  if (keys.empty())
+  if (keys.empty()) {
     return false;
+  }
   std::vector<uint8_t> new_key = keys.back();
-  if (new_key.empty())
+  if (new_key.empty()) {
     return false;
+  }
   keystore_key_ = new_key;
-
-  DVLOG(1) << "Keystore bootstrap token updated.";
-  for (auto& observer : observers_)
-    observer.OnBootstrapTokenUpdated(base::Base64Encode(keystore_key_),
-                                     KEYSTORE_BOOTSTRAP_TOKEN);
 
   return true;
 }
@@ -58,31 +67,27 @@ void FakeSyncEncryptionHandler::SetDecryptionPassphrase(
   // Do nothing.
 }
 
+void FakeSyncEncryptionHandler::SetDecryptionBootstrapToken(
+    const CustomPassphraseBootstrapToken& bootstrap_token) {
+  // Do nothing.
+}
+
 void FakeSyncEncryptionHandler::AddTrustedVaultDecryptionKeys(
     const std::vector<std::vector<uint8_t>>& encryption_keys) {
   // Do nothing.
 }
 
-void FakeSyncEncryptionHandler::EnableEncryptEverything() {
-  if (encrypt_everything_)
-    return;
-  encrypt_everything_ = true;
-  for (auto& observer : observers_) {
-    observer.OnEncryptedTypesChanged(/*encrypted_types=*/ModelTypeSet::All(),
-                                     encrypt_everything_);
-  }
-}
-
-bool FakeSyncEncryptionHandler::IsEncryptEverythingEnabled() const {
-  return encrypt_everything_;
-}
-
-base::Time FakeSyncEncryptionHandler::GetKeystoreMigrationTime() const {
+base::Time FakeSyncEncryptionHandler::GetKeystoreMigrationTime() {
   return base::Time();
 }
 
 KeystoreKeysHandler* FakeSyncEncryptionHandler::GetKeystoreKeysHandler() {
   return this;
+}
+
+const sync_pb::NigoriSpecifics::TrustedVaultDebugInfo&
+FakeSyncEncryptionHandler::GetTrustedVaultDebugInfo() {
+  return sync_pb::NigoriSpecifics::TrustedVaultDebugInfo::default_instance();
 }
 
 }  // namespace syncer

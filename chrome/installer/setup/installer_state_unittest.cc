@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,13 @@
 #include <stddef.h>
 
 #include <fstream>
+#include <memory>
 
 #include "base/base_paths.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/macros.h"
 #include "base/path_service.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -34,24 +34,26 @@
 #include "chrome/installer/util/installer_util_strings.h"
 #include "chrome/installer/util/util_constants.h"
 #include "chrome/installer/util/work_item.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 using base::win::RegKey;
+using installer::InitialPreferences;
 using installer::InstallationState;
 using installer::InstallerState;
-using installer::MasterPreferences;
 using registry_util::RegistryOverrideManager;
 
 class InstallerStateTest : public testing::Test {
+ public:
+  InstallerStateTest(const InstallerStateTest&) = delete;
+  InstallerStateTest& operator=(const InstallerStateTest&) = delete;
+
  protected:
-  InstallerStateTest() {}
+  InstallerStateTest() = default;
 
   void SetUp() override { ASSERT_TRUE(test_dir_.CreateUniqueTempDir()); }
 
   base::ScopedTempDir test_dir_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(InstallerStateTest);
 };
 
 // An installer state on which we can access otherwise protected members.
@@ -70,7 +72,7 @@ TEST_F(InstallerStateTest, WithProduct) {
   const bool system_level = true;
   base::CommandLine cmd_line = base::CommandLine::FromString(
       std::wstring(L"setup.exe") + (system_level ? L" --system-level" : L""));
-  MasterPreferences prefs(cmd_line);
+  InitialPreferences prefs(cmd_line);
   InstallationState machine_state;
   machine_state.Initialize();
   MockInstallerState installer_state;
@@ -120,7 +122,7 @@ TEST_F(InstallerStateTest, InstallerResult) {
   RegistryOverrideManager override_manager;
   ASSERT_NO_FATAL_FAILURE(override_manager.OverrideRegistry(root));
   base::CommandLine cmd_line = base::CommandLine::FromString(command_line);
-  const MasterPreferences prefs(cmd_line);
+  const InitialPreferences prefs(cmd_line);
   InstallationState machine_state;
   machine_state.Initialize();
   InstallerState state;
@@ -170,15 +172,16 @@ TEST_F(InstallerStateTest, InitializeTwice) {
   // Initialize the instance to install user-level Chrome.
   {
     base::CommandLine cmd_line(base::CommandLine::FromString(L"setup.exe"));
-    MasterPreferences prefs(cmd_line);
+    InitialPreferences prefs(cmd_line);
     installer_state.Initialize(cmd_line, prefs, machine_state);
   }
   // Confirm the expected state.
   EXPECT_EQ(InstallerState::USER_LEVEL, installer_state.level());
   EXPECT_EQ(InstallerState::SINGLE_INSTALL_OR_UPDATE,
             installer_state.operation());
-  EXPECT_TRUE(wcsstr(installer_state.target_path().value().c_str(),
-                     install_static::GetChromeInstallSubDirectory().c_str()));
+  EXPECT_THAT(
+      installer_state.target_path().value(),
+      testing::HasSubstr(install_static::GetChromeInstallSubDirectory()));
   EXPECT_FALSE(installer_state.verbose_logging());
   EXPECT_EQ(installer_state.state_key(),
             install_static::GetClientStateKeyPath());
@@ -187,7 +190,7 @@ TEST_F(InstallerStateTest, InitializeTwice) {
   {
     base::CommandLine cmd_line(base::CommandLine::FromString(
         L"setup.exe --system-level --verbose-logging"));
-    MasterPreferences prefs(cmd_line);
+    InitialPreferences prefs(cmd_line);
     installer_state.Initialize(cmd_line, prefs, machine_state);
   }
 
@@ -195,8 +198,9 @@ TEST_F(InstallerStateTest, InitializeTwice) {
   EXPECT_EQ(InstallerState::SYSTEM_LEVEL, installer_state.level());
   EXPECT_EQ(InstallerState::SINGLE_INSTALL_OR_UPDATE,
             installer_state.operation());
-  EXPECT_TRUE(wcsstr(installer_state.target_path().value().c_str(),
-                     install_static::GetChromeInstallSubDirectory().c_str()));
+  EXPECT_THAT(
+      installer_state.target_path().value(),
+      testing::HasSubstr(install_static::GetChromeInstallSubDirectory()));
   EXPECT_TRUE(installer_state.verbose_logging());
   EXPECT_EQ(installer_state.state_key(),
             install_static::GetClientStateKeyPath());
@@ -222,8 +226,8 @@ class InstallerStateCriticalVersionTest : public ::testing::Test {
                     ? base::CommandLine::FromString(L"setup.exe")
                     : base::CommandLine::FromString(
                           L"setup.exe --critical-update-version=" +
-                          base::ASCIIToUTF16(version.GetString()));
-    prefs_.reset(new MasterPreferences(cmd_line_));
+                          base::ASCIIToWide(version.GetString()));
+    prefs_ = std::make_unique<InitialPreferences>(cmd_line_);
     machine_state_.Initialize();
     installer_state_.Initialize(cmd_line_, *prefs_, machine_state_);
     return installer_state_;
@@ -236,7 +240,7 @@ class InstallerStateCriticalVersionTest : public ::testing::Test {
   const base::Version high_version_;
 
   base::CommandLine cmd_line_;
-  std::unique_ptr<MasterPreferences> prefs_;
+  std::unique_ptr<InitialPreferences> prefs_;
   InstallationState machine_state_;
   MockInstallerState installer_state_;
 };

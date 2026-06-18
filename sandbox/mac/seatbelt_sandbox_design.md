@@ -1,5 +1,5 @@
 # **Mac Sandbox V2 Design Doc**
-*Status: Final, Authors: kerrnel@chromium.org, rsesek@chromium.org, Last Updated: 2020-05-14*
+*Status: Final, Authors: kerrnel@chromium.org, rsesek@chromium.org, Last Updated: 2025-01-30*
 
 # **Objective**
 
@@ -80,7 +80,7 @@ continue its execution into the ChromeMain function.
 
 Both the main Chromium executable and all of the bundled Chromium Helper
 executables contain [a minimal amount of
-code](https://source.chromium.org/chromium/chromium/src/+/master:chrome/app/chrome_exe_main_mac.cc;drc=05219ddeb8130389da9ad634ba3e021a70bff393).
+code](https://source.chromium.org/chromium/chromium/src/+/main:chrome/app/chrome_exe_main_mac.cc;drc=05219ddeb8130389da9ad634ba3e021a70bff393).
 The bulk of the code lives in the Chromium Framework library, which is
 `dlopen()`ed at runtime to call `ChromeMain()`, after applying the sandbox.
 
@@ -109,7 +109,7 @@ implementing the profiles for each process type.
 ## Sandbox Design
 
 The V1 sandbox code lives in
-[sandbox_mac.mm](https://source.chromium.org/chromium/chromium/src/+/master:services/service_manager/sandbox/mac/sandbox_mac.mm;l=1;drc=efd8e880522dc1df3b8883648513016fab3d3956).
+[sandbox_mac.mm](https://source.chromium.org/chromium/chromium/src/+/main:services/service_manager/sandbox/mac/sandbox_mac.mm;l=1;drc=efd8e880522dc1df3b8883648513016fab3d3956).
 This file will continue to exist until the V1 sandbox is removed for all process
 types. Chromium now uses the V2 sandbox for all process types except the GPU
 process.
@@ -120,18 +120,17 @@ Chromium's architecture is multi-process with a main browser process
 and some number of helper processes which performs tasks such as
 rendering web pages, running GPU processes, or various utility
 functions. The main browser process launches the other processes
-using the "Google Chromium Helper" executable. The browser passes
+using the "Chromium Helper" executable. The browser passes
 command line flags to the Helper executable indicating what type
 of process it should execute as.
 
 The browser creates a pipe to the Helper executable, and
-using that pipe, the Helper executable reads a protobuf message
-from the browser process. The profobuf message contains the
-profile string and a map of the sandbox parameters. Using the
-lightweight protobuf prevents the error prone parsing code for a
-whole parameters list from being re-implemented. This must happen
-in the main executable itself, as the process must be sandboxed
-before the framework is loaded.
+using that pipe, the Helper executable reads a serialized string
+from the browser process. The serialized string is either a "compiled"
+representation, which is output of `sandbox_compile_string()`, or a "source"
+representation containing the profile string and a map of the sandbox
+parameters. This must happen in the main executable itself, as the process
+must be sandboxed before the framework is loaded.
 
 The Helper executable will immediately initialize the sandbox, using
 the profile and parameters, before continuing execution to the

@@ -1,15 +1,18 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "net/base/scheme_host_port_matcher_rule.h"
 
 #include "base/strings/pattern.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/trace_event/memory_usage_estimator.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/parse_number.h"
 #include "net/base/url_util.h"
+#include "url/gurl.h"
 #include "url/url_util.h"
 
 namespace net {
@@ -28,15 +31,15 @@ std::string AddBracketsIfIPv6(const IPAddress& ip_address) {
 // static
 std::unique_ptr<SchemeHostPortMatcherRule>
 SchemeHostPortMatcherRule::FromUntrimmedRawString(
-    const std::string& raw_untrimmed) {
-  std::string raw;
-  base::TrimWhitespaceASCII(raw_untrimmed, base::TRIM_ALL, &raw);
+    std::string_view raw_untrimmed) {
+  std::string_view raw =
+      base::TrimWhitespaceASCII(raw_untrimmed, base::TRIM_ALL);
 
   // Extract any scheme-restriction.
   std::string::size_type scheme_pos = raw.find("://");
   std::string scheme;
   if (scheme_pos != std::string::npos) {
-    scheme = raw.substr(0, scheme_pos);
+    scheme = std::string(raw.substr(0, scheme_pos));
     raw = raw.substr(scheme_pos + 3);
     if (scheme.empty())
       return nullptr;
@@ -55,7 +58,7 @@ SchemeHostPortMatcherRule::FromUntrimmedRawString(
       return nullptr;
 
     return std::make_unique<SchemeHostPortMatcherIPBlockRule>(
-        raw, scheme, ip_prefix, prefix_length_in_bits);
+        std::string(raw), scheme, ip_prefix, prefix_length_in_bits);
   }
 
   // Check if we have an <ip-address>[:port] input. We need to treat this
@@ -76,8 +79,8 @@ SchemeHostPortMatcherRule::FromUntrimmedRawString(
   std::string::size_type pos_colon = raw.rfind(':');
   port = -1;
   if (pos_colon != std::string::npos) {
-    if (!ParseInt32(base::StringPiece(raw.begin() + pos_colon + 1, raw.end()),
-                    ParseIntFormat::NON_NEGATIVE, &port) ||
+    if (!ParseInt32(raw.substr(pos_colon + 1), ParseIntFormat::NON_NEGATIVE,
+                    &port) ||
         port > 0xFFFF) {
       return nullptr;  // Port was invalid.
     }
@@ -86,16 +89,26 @@ SchemeHostPortMatcherRule::FromUntrimmedRawString(
 
   // Special-case hostnames that begin with a period.
   // For example, we remap ".google.com" --> "*.google.com".
-  if (base::StartsWith(raw, ".", base::CompareCase::SENSITIVE))
-    raw = "*" + raw;
+  std::string hostname_pattern;
+  if (raw.starts_with(".")) {
+    hostname_pattern = base::StrCat({"*", raw});
+  } else {
+    hostname_pattern = std::string(raw);
+  }
 
-  return std::make_unique<SchemeHostPortMatcherHostnamePatternRule>(scheme, raw,
-                                                                    port);
+  return std::make_unique<SchemeHostPortMatcherHostnamePatternRule>(
+      scheme, hostname_pattern, port);
 }
 
 bool SchemeHostPortMatcherRule::IsHostnamePatternRule() const {
   return false;
 }
+
+#if !BUILDFLAG(CRONET_BUILD)
+size_t SchemeHostPortMatcherRule::EstimateMemoryUsage() const {
+  return 0;
+}
+#endif  // !BUILDFLAG(CRONET_BUILD)
 
 SchemeHostPortMatcherHostnamePatternRule::
     SchemeHostPortMatcherHostnamePatternRule(
@@ -116,14 +129,14 @@ SchemeHostPortMatcherResult SchemeHostPortMatcherHostnamePatternRule::Evaluate(
     return SchemeHostPortMatcherResult::kNoMatch;
   }
 
-  if (!optional_scheme_.empty() && url.scheme() != optional_scheme_) {
+  if (!optional_scheme_.empty() && url.GetScheme() != optional_scheme_) {
     // Didn't match scheme expectation.
     return SchemeHostPortMatcherResult::kNoMatch;
   }
 
   // Note it is necessary to lower-case the host, since GURL uses capital
   // letters for percent-escaped characters.
-  return base::MatchPattern(url.host(), hostname_pattern_)
+  return base::MatchPattern(url.GetHost(), hostname_pattern_)
              ? SchemeHostPortMatcherResult::kInclude
              : SchemeHostPortMatcherResult::kNoMatch;
 }
@@ -144,7 +157,7 @@ bool SchemeHostPortMatcherHostnamePatternRule::IsHostnamePatternRule() const {
 
 std::unique_ptr<SchemeHostPortMatcherHostnamePatternRule>
 SchemeHostPortMatcherHostnamePatternRule::GenerateSuffixMatchingRule() const {
-  if (!base::StartsWith(hostname_pattern_, "*", base::CompareCase::SENSITIVE)) {
+  if (!hostname_pattern_.starts_with("*")) {
     return std::make_unique<SchemeHostPortMatcherHostnamePatternRule>(
         optional_scheme_, "*" + hostname_pattern_, optional_port_);
   }
@@ -152,6 +165,13 @@ SchemeHostPortMatcherHostnamePatternRule::GenerateSuffixMatchingRule() const {
   return std::make_unique<SchemeHostPortMatcherHostnamePatternRule>(
       optional_scheme_, hostname_pattern_, optional_port_);
 }
+
+#if !BUILDFLAG(CRONET_BUILD)
+size_t SchemeHostPortMatcherHostnamePatternRule::EstimateMemoryUsage() const {
+  return base::trace_event::EstimateMemoryUsage(optional_scheme_) +
+         base::trace_event::EstimateMemoryUsage(hostname_pattern_);
+}
+#endif  // !BUILDFLAG(CRONET_BUILD)
 
 SchemeHostPortMatcherIPHostRule::SchemeHostPortMatcherIPHostRule(
     const std::string& optional_scheme,
@@ -167,14 +187,14 @@ SchemeHostPortMatcherResult SchemeHostPortMatcherIPHostRule::Evaluate(
     return SchemeHostPortMatcherResult::kNoMatch;
   }
 
-  if (!optional_scheme_.empty() && url.scheme() != optional_scheme_) {
+  if (!optional_scheme_.empty() && url.GetScheme() != optional_scheme_) {
     // Didn't match scheme expectation.
     return SchemeHostPortMatcherResult::kNoMatch;
   }
 
   // Note it is necessary to lower-case the host, since GURL uses capital
   // letters for percent-escaped characters.
-  return base::MatchPattern(url.host(), ip_host_)
+  return base::MatchPattern(url.GetHost(), ip_host_)
              ? SchemeHostPortMatcherResult::kInclude
              : SchemeHostPortMatcherResult::kNoMatch;
 }
@@ -188,6 +208,13 @@ std::string SchemeHostPortMatcherIPHostRule::ToString() const {
     base::StringAppendF(&str, ":%d", optional_port_);
   return str;
 }
+
+#if !BUILDFLAG(CRONET_BUILD)
+size_t SchemeHostPortMatcherIPHostRule::EstimateMemoryUsage() const {
+  return base::trace_event::EstimateMemoryUsage(optional_scheme_) +
+         base::trace_event::EstimateMemoryUsage(ip_host_);
+}
+#endif  // !BUILDFLAG(CRONET_BUILD)
 
 SchemeHostPortMatcherIPBlockRule::SchemeHostPortMatcherIPBlockRule(
     const std::string& description,
@@ -204,7 +231,7 @@ SchemeHostPortMatcherResult SchemeHostPortMatcherIPBlockRule::Evaluate(
   if (!url.HostIsIPAddress())
     return SchemeHostPortMatcherResult::kNoMatch;
 
-  if (!optional_scheme_.empty() && url.scheme() != optional_scheme_) {
+  if (!optional_scheme_.empty() && url.GetScheme() != optional_scheme_) {
     // Didn't match scheme expectation.
     return SchemeHostPortMatcherResult::kNoMatch;
   }
@@ -223,5 +250,13 @@ SchemeHostPortMatcherResult SchemeHostPortMatcherIPBlockRule::Evaluate(
 std::string SchemeHostPortMatcherIPBlockRule::ToString() const {
   return description_;
 }
+
+#if !BUILDFLAG(CRONET_BUILD)
+size_t SchemeHostPortMatcherIPBlockRule::EstimateMemoryUsage() const {
+  return base::trace_event::EstimateMemoryUsage(description_) +
+         base::trace_event::EstimateMemoryUsage(optional_scheme_) +
+         base::trace_event::EstimateMemoryUsage(ip_prefix_);
+}
+#endif  // !BUILDFLAG(CRONET_BUILD)
 
 }  // namespace net

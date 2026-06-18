@@ -1,16 +1,19 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ui/views/frame/browser_view.h"
-
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/tabs/split_tab_metrics.h"
 #include "chrome/browser/ui/view_ids.h"
+#include "chrome/browser/ui/views/frame/browser_view.h"
+#include "chrome/browser/ui/views/frame/multi_contents_resize_area.h"
+#include "chrome/browser/ui/views/frame/multi_contents_view.h"
+#include "chrome/browser/ui/views/frame/multi_contents_view_mini_toolbar.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -20,6 +23,7 @@
 #include "ui/views/controls/webview/webview.h"
 #include "ui/views/focus/focus_manager.h"
 #include "ui/views/view.h"
+#include "ui/views/view_utils.h"
 #include "url/gurl.h"
 
 const char kSimplePage[] = "/focus/page_with_focus.html";
@@ -27,14 +31,107 @@ const char kSimplePage[] = "/focus/page_with_focus.html";
 class BrowserViewFocusTest : public InProcessBrowserTest {
  public:
   BrowserViewFocusTest() = default;
+
+  BrowserViewFocusTest(const BrowserViewFocusTest&) = delete;
+  BrowserViewFocusTest& operator=(const BrowserViewFocusTest&) = delete;
+
   ~BrowserViewFocusTest() override = default;
 
   bool IsViewFocused(ViewID vid) {
     return ui_test_utils::IsViewFocused(browser(), vid);
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(BrowserViewFocusTest);
+  void TestSplitTabFocusOrder() {
+    gfx::NativeWindow window = browser()->GetWindow()->GetNativeWindow();
+    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(window);
+    views::FocusManager* focus_manager = widget->GetFocusManager();
+
+    std::vector<ContentsContainerView*> contents_container_views =
+        browser()->GetBrowserView().GetContentsContainerViews();
+    ASSERT_EQ(2, contents_container_views.size());
+
+    // Start from the view prior to the left contents web view in the focus
+    // order. This should be somewhere outside of the contents container, but
+    // where it is depends on the platform.
+    focus_manager->SetFocusedView(contents_container_views[0]->contents_view());
+    focus_manager->AdvanceFocus(true);
+    views::View* start_view = focus_manager->GetFocusedView();
+    ASSERT_FALSE(
+        browser()->GetBrowserView().contents_container()->Contains(start_view));
+
+    // Start advancing focus forwards.
+    focus_manager->AdvanceFocus(false);
+    EXPECT_EQ(0, browser()->tab_strip_model()->active_index());
+    EXPECT_EQ(focus_manager->GetFocusedView(),
+              contents_container_views[0]->contents_view());
+
+    focus_manager->AdvanceFocus(false);
+    EXPECT_EQ(0, browser()->tab_strip_model()->active_index());
+    EXPECT_TRUE(contents_container_views[0]->mini_toolbar()->Contains(
+        focus_manager->GetFocusedView()));
+
+    focus_manager->AdvanceFocus(false);
+    EXPECT_EQ(0, browser()->tab_strip_model()->active_index());
+    EXPECT_TRUE(browser()
+                    ->GetBrowserView()
+                    .multi_contents_view()
+                    ->resize_area_for_testing()
+                    ->Contains(focus_manager->GetFocusedView()));
+
+    focus_manager->AdvanceFocus(false);
+    EXPECT_EQ(1, browser()->tab_strip_model()->active_index());
+    EXPECT_EQ(focus_manager->GetFocusedView(),
+              contents_container_views[1]->contents_view());
+
+    focus_manager->AdvanceFocus(false);
+    EXPECT_EQ(1, browser()->tab_strip_model()->active_index());
+    EXPECT_TRUE(contents_container_views[1]->mini_toolbar()->Contains(
+        focus_manager->GetFocusedView()));
+
+    // Focus has advanced past the right tab's mini toolbar button. This should
+    // be somewhere outside of the contents container, but where it is depends
+    // on the platform.
+    focus_manager->AdvanceFocus(false);
+    EXPECT_EQ(1, browser()->tab_strip_model()->active_index());
+    ASSERT_FALSE(browser()->GetBrowserView().contents_container()->Contains(
+        focus_manager->GetFocusedView()));
+
+    // Start advancing focus backwards.
+    focus_manager->AdvanceFocus(true);
+    EXPECT_EQ(1, browser()->tab_strip_model()->active_index());
+    EXPECT_TRUE(contents_container_views[1]->mini_toolbar()->Contains(
+        focus_manager->GetFocusedView()));
+
+    focus_manager->AdvanceFocus(true);
+    EXPECT_EQ(1, browser()->tab_strip_model()->active_index());
+    EXPECT_EQ(focus_manager->GetFocusedView(),
+              contents_container_views[1]->contents_view());
+
+    focus_manager->AdvanceFocus(true);
+    EXPECT_EQ(1, browser()->tab_strip_model()->active_index());
+    EXPECT_TRUE(browser()
+                    ->GetBrowserView()
+                    .multi_contents_view()
+                    ->resize_area_for_testing()
+                    ->Contains(focus_manager->GetFocusedView()));
+
+    focus_manager->AdvanceFocus(true);
+    // The right tab is still focused here, because we entered the left tab's
+    // mini toolbar in reverse, so we have not yet focused the left contents web
+    // view.
+    EXPECT_EQ(1, browser()->tab_strip_model()->active_index());
+    EXPECT_TRUE(contents_container_views[0]->mini_toolbar()->Contains(
+        focus_manager->GetFocusedView()));
+
+    focus_manager->AdvanceFocus(true);
+    EXPECT_EQ(0, browser()->tab_strip_model()->active_index());
+    EXPECT_EQ(focus_manager->GetFocusedView(),
+              contents_container_views[0]->contents_view());
+
+    focus_manager->AdvanceFocus(true);
+    EXPECT_EQ(0, browser()->tab_strip_model()->active_index());
+    EXPECT_EQ(start_view, focus_manager->GetFocusedView());
+  }
 };
 
 IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, BrowsersRememberFocus) {
@@ -43,9 +140,9 @@ IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, BrowsersRememberFocus) {
 
   // First we navigate to our test page.
   GURL url = embedded_test_server()->GetURL(kSimplePage);
-  ui_test_utils::NavigateToURL(browser(), url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
-  gfx::NativeWindow window = browser()->window()->GetNativeWindow();
+  gfx::NativeWindow window = browser()->GetWindow()->GetNativeWindow();
 
   // The focus should be on the Tab contents.
   ASSERT_TRUE(IsViewFocused(VIEW_ID_TAB_CONTAINER));
@@ -63,16 +160,16 @@ IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, BrowsersRememberFocus) {
 
   // The rest of this test does not make sense on Linux because the behavior
   // of Activate() is not well defined and can vary by window manager.
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   // Open a new browser window.
   Browser* browser2 =
-      new Browser(Browser::CreateParams(browser()->profile(), true));
+      Browser::Create(Browser::CreateParams(browser()->profile(), true));
   ASSERT_TRUE(browser2);
   chrome::AddTabAt(browser2, GURL(), -1, true);
-  browser2->window()->Show();
-  ui_test_utils::NavigateToURL(browser2, url);
+  browser2->GetWindow()->Show();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser2, url));
 
-  gfx::NativeWindow window2 = browser2->window()->GetNativeWindow();
+  gfx::NativeWindow window2 = browser2->GetWindow()->GetNativeWindow();
   BrowserView* browser_view2 = BrowserView::GetBrowserViewForBrowser(browser2);
   ASSERT_TRUE(browser_view2);
   const views::Widget* widget2 =
@@ -85,12 +182,12 @@ IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, BrowsersRememberFocus) {
 
   // Switch to the 1st browser window, focus should still be on the location
   // bar and the second browser should have nothing focused.
-  browser()->window()->Activate();
+  browser()->GetWindow()->Activate();
   ASSERT_TRUE(IsViewFocused(VIEW_ID_OMNIBOX));
   EXPECT_EQ(nullptr, focus_manager2->GetFocusedView());
 
   // Switch back to the second browser, focus should still be on the page.
-  browser2->window()->Activate();
+  browser2->GetWindow()->Activate();
   views::Widget* widget = views::Widget::GetWidgetForNativeWindow(window);
   ASSERT_TRUE(widget);
   EXPECT_EQ(nullptr, widget->GetFocusManager()->GetFocusedView());
@@ -110,45 +207,49 @@ class FocusedViewClassRecorder : public views::FocusChangeListener {
     focus_manager_->AddFocusChangeListener(this);
   }
 
+  FocusedViewClassRecorder(const FocusedViewClassRecorder&) = delete;
+  FocusedViewClassRecorder& operator=(const FocusedViewClassRecorder&) = delete;
   ~FocusedViewClassRecorder() override {
     focus_manager_->RemoveFocusChangeListener(this);
   }
 
-  std::vector<std::string>& GetFocusClasses() { return focus_classes_; }
+  bool GetHasFocusedOnNonWebView() { return has_focused_on_non_webview_; }
+  int GetFocusChangeCount() { return focus_change_count; }
 
  private:
   // Inherited from views::FocusChangeListener
-  void OnWillChangeFocus(views::View* focused_before,
-                         views::View* focused_now) override {}
   void OnDidChangeFocus(views::View* focused_before,
                         views::View* focused_now) override {
-    std::string class_name;
-    if (focused_now)
-      class_name = focused_now->GetClassName();
-    focus_classes_.push_back(class_name);
+    if (focused_now) {
+      if (!views::IsViewClass<views::WebView>(focused_now)) {
+        // Focused views could be destroyed. Track what we want to test for when
+        // OnDidChangeFocus is called.
+        has_focused_on_non_webview_ = true;
+      }
+    }
+    focus_change_count++;
   }
 
-  views::FocusManager* focus_manager_;
-  std::vector<std::string> focus_classes_;
-
-  DISALLOW_COPY_AND_ASSIGN(FocusedViewClassRecorder);
+  raw_ptr<views::FocusManager> focus_manager_;
+  bool has_focused_on_non_webview_ = false;
+  int focus_change_count = 0;
 };
 
 // Switching tabs does not focus views unexpectedly.
-// (bug http://crbug.com/791757, bug http://crbug.com/777051)
+// (bug http://crbug.com/41359257, bug http://crbug.com/41351034)
 IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, TabChangesAvoidSpuriousFocus) {
   ASSERT_TRUE(ui_test_utils::BringBrowserWindowToFront(browser()));
   ASSERT_TRUE(embedded_test_server()->Start());
 
   // First we navigate to our test page.
   GURL url = embedded_test_server()->GetURL(kSimplePage);
-  ui_test_utils::NavigateToURL(browser(), url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   // Create another tab.
-  AddTabAtIndex(1, url, ui::PAGE_TRANSITION_TYPED);
+  ASSERT_TRUE(AddTabAtIndex(1, url, ui::PAGE_TRANSITION_TYPED));
 
   // Begin recording focus changes.
-  gfx::NativeWindow window = browser()->window()->GetNativeWindow();
+  gfx::NativeWindow window = browser()->GetWindow()->GetNativeWindow();
   views::Widget* widget = views::Widget::GetWidgetForNativeWindow(window);
   views::FocusManager* focus_manager = widget->GetFocusManager();
   FocusedViewClassRecorder focus_change_recorder(focus_manager);
@@ -157,16 +258,53 @@ IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, TabChangesAvoidSpuriousFocus) {
   ASSERT_TRUE(ui_test_utils::SendKeyPressSync(browser(), ui::VKEY_TAB, true,
                                               false, false, false));
 
-  std::vector<std::string>& focused_classes =
-      focus_change_recorder.GetFocusClasses();
+  // Everything that was focused on must be a WebView.
+  EXPECT_FALSE(focus_change_recorder.GetHasFocusedOnNonWebView());
+  EXPECT_EQ(focus_change_recorder.GetFocusChangeCount(), 2);
+}
 
-  // Everything before the last focus must be either "" (nothing) or a WebView.
-  for (size_t index = 0; index < focused_classes.size() - 1; index++) {
-    EXPECT_THAT(focused_classes[index],
-                testing::AnyOf("", views::WebView::kViewClassName));
-  }
+IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, FocusOrder) {
+  ASSERT_TRUE(ui_test_utils::BringBrowserWindowToFront(browser()));
+  ASSERT_TRUE(embedded_test_server()->Start());
 
-  // Must end up focused on a WebView.
-  ASSERT_FALSE(focused_classes.empty());
-  EXPECT_EQ(views::WebView::kViewClassName, focused_classes.back());
+  // Create a split tab.
+  GURL url = GURL(url::kAboutBlankURL);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+  ASSERT_TRUE(AddTabAtIndex(1, url, ui::PAGE_TRANSITION_TYPED));
+  browser()->tab_strip_model()->AddToNewSplit(
+      {0}, split_tabs::SplitTabVisualData(),
+      split_tabs::SplitTabCreatedSource::kToolbarButton);
+  ASSERT_EQ(1, browser()->tab_strip_model()->active_index());
+
+  TestSplitTabFocusOrder();
+}
+
+// Tests that when we activate and then close the right tab in a split, focus
+// order is preserved. Previously there was a bug where this would cause the
+// left/right containers' order in the view hierarchy to be reversed.
+IN_PROC_BROWSER_TEST_F(BrowserViewFocusTest, FocusOrderAfterClosingRightTab) {
+  ASSERT_TRUE(ui_test_utils::BringBrowserWindowToFront(browser()));
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  // Create a split tab.
+  GURL url = GURL(url::kAboutBlankURL);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+  ASSERT_TRUE(AddTabAtIndex(1, url, ui::PAGE_TRANSITION_TYPED));
+  browser()->tab_strip_model()->AddToNewSplit(
+      {0}, split_tabs::SplitTabVisualData(),
+      split_tabs::SplitTabCreatedSource::kToolbarButton);
+  ASSERT_EQ(1, browser()->tab_strip_model()->active_index());
+
+  // Close the right tab, then create another split.
+  browser()->tab_strip_model()->CloseWebContentsAt(1,
+                                                   TabCloseTypes::CLOSE_NONE);
+  ASSERT_EQ(1, browser()->tab_strip_model()->count());
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+  ASSERT_TRUE(AddTabAtIndex(1, url, ui::PAGE_TRANSITION_TYPED));
+  browser()->tab_strip_model()->AddToNewSplit(
+      {0}, split_tabs::SplitTabVisualData(),
+      split_tabs::SplitTabCreatedSource::kToolbarButton);
+  ASSERT_EQ(1, browser()->tab_strip_model()->active_index());
+
+  TestSplitTabFocusOrder();
 }

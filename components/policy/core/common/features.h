@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,29 +6,85 @@
 #define COMPONENTS_POLICY_CORE_COMMON_FEATURES_H_
 
 #include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/policy/policy_export.h"
 
-namespace policy {
-namespace features {
+namespace policy::features {
 
-#if defined(OS_APPLE)
-// Feature that controls whether the browser ignores sensitive policies on an
-// unmanaged Mac.
-POLICY_EXPORT extern const base::Feature kIgnoreSensitivePoliciesOnUnmanagedMac;
+// Enable the PolicyBlocklistThrottle optimization to hide the DEFER latency
+// on WillStartRequest and WillRedirectRequest. See https://crbug.com/349964973.
+// This is launched, but the feature flag will be kept in 2025 for monitoring.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kPolicyBlocklistProceedUntilResponse);
+
+// Enables the fact that the ProfileSeparationDomainExceptionList retroactively
+// signs out accounts that require a new profile. This is used as a kill switch.
+POLICY_EXPORT BASE_DECLARE_FEATURE(
+    kProfileSeparationDomainExceptionListRetroactive);
+
+// Enables the addition of new security fields for SecOps.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kEnhancedSecurityEventFields);
+
+// Controls if we can use the cec flag in PolicyData.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kUseCECFlagInPolicyData);
+
+#if BUILDFLAG(IS_ANDROID)
+// Enables policy initialization for signed-in users in new entry points.
+POLICY_EXPORT BASE_DECLARE_FEATURE(
+    kInitializePoliciesForSignedInUserInNewEntryPoints);
 #endif
 
-// Feature that controls whether the browser registers for FCM invalidations for
-// Machine Level Policies. If enabled, |kCBCMServiceAccounts| must also be
-// enabled.
-POLICY_EXPORT extern const base::Feature kCBCMPolicyInvalidations;
+// Enables a configurable delay for policy registration.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kCustomPolicyRegistrationDelay);
+POLICY_EXPORT extern const base::FeatureParam<base::TimeDelta>
+    kPolicyRegistrationDelay;
 
-// Feature that controls if remote commands are enabled in CBCM. If enabled,
-// the browser will register for remote commands FCM invalidations, and fetch
-// remote commands when fetching policies.
-POLICY_EXPORT extern const base::Feature kCBCMRemoteCommands;
+// Used to enable future_on policies on Desktop Android.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kFuturePoliciesOnDesktopAndroid);
 
-}  // namespace features
-}  // namespace policy
+// A blocklist of policies supported on Desktop Android.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kDesktopAndroidPolicy);
+POLICY_EXPORT extern const base::FeatureParam<std::string>
+    kDesktopAndroidPolicyBlocklist;
+
+// Used to add a captive portal check in SafeSitesNavigationThrottle.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kSafeSitesCaptivePortalCheck);
+
+// Used to enable extension install policy support.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kEnableExtensionInstallPolicyFetching);
+
+// When enabled, uses ManagementService to determine whether to honor sensitive
+// policies. When disabled, falls back to the original ShouldHonorPolicies()
+// behavior. This flag allows reverting if the new approach causes issues.
+// Note: Only has an effect on Mac and Windows where ShouldHonorPolicies()
+// performs platform-specific checks.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kUseManagementServiceForSensitivePolicies);
+
+// Modifies behavior of policies utilizing URLBlocklistManager.
+// When enabled, bypasses the wildcard "*" in the blocklist for internal
+// chrome:// URLs such as chrome://ntp, chrome://bookmarks, etc.
+// This feature serves as a killswitch to allow for immediate revert via Finch
+// if regressions are detected.
+POLICY_EXPORT BASE_DECLARE_FEATURE(
+    kBypassURLBlocklistWildcardForInternalChromeUrls);
+
+// Modifies behavior of policies utilizing URLBlocklistManager.
+// When enabled, downgrades the match level to neutral if the URL is allowed by
+// the wildcard '*' in the allowlist.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kDowngradeURLAllowlistWildcardToNeutral);
+
+// Enables the mojo version of the page handler for chrome://policy.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kPolicyPageMojoMigration);
+
+// If enabled, device signals collection disclaimer will be shown during signin
+// for profiles created before the profile flow with disclaimer was released.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kDeviceSignalsBackfillDisclaimer);
+
+// When enabled, URLs in the general blocklist are still blocked in incognito
+// even if they are in the incognito allowlist.
+POLICY_EXPORT BASE_DECLARE_FEATURE(kURLBlocklistOverridesIncognitoAllowlist);
+
+}  // namespace policy::features
 
 #endif  // COMPONENTS_POLICY_CORE_COMMON_FEATURES_H_

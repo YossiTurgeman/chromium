@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,69 +9,65 @@
 #include <limits>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/numerics/safe_conversions.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/browser/web_contents_observer.h"
+#include "content/public/common/url_constants.h"
 #include "skia/ext/image_operations.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
 
 namespace content {
 
-// DevToolsConsoleHelper is a class that holds a WebContents in order to be able
-// to send a message to the WebContents' main frame. It is used so
-// ManifestIconDownloader and the callers do not have to worry about
-// |web_contents| lifetime. If the |web_contents| is invalidated before the
-// message can be sent, the message will simply be ignored.
-class ManifestIconDownloader::DevToolsConsoleHelper
-    : public WebContentsObserver {
- public:
-  explicit DevToolsConsoleHelper(WebContents* web_contents);
-  ~DevToolsConsoleHelper() override = default;
+namespace {
 
-  void AddMessage(blink::mojom::ConsoleMessageLevel level,
-                  const std::string& message);
-};
-
-ManifestIconDownloader::DevToolsConsoleHelper::DevToolsConsoleHelper(
-    WebContents* web_contents)
-    : WebContentsObserver(web_contents) {}
-
-void ManifestIconDownloader::DevToolsConsoleHelper::AddMessage(
-    blink::mojom::ConsoleMessageLevel level,
-    const std::string& message) {
-  if (!web_contents())
-    return;
-  web_contents()->GetMainFrame()->AddMessageToConsole(level, message);
+const SkBitmap& MeasureMetrics(const GURL& icon_url,
+                               const SkBitmap& bitmap,
+                               ManifestIconDownloader::Result icon_result) {
+  base::UmaHistogramEnumeration("WebApp.ManifestIconDownloader.Result",
+                                icon_result);
+  if (icon_url.SchemeIs(content::kChromeUIScheme)) {
+    base::UmaHistogramEnumeration(
+        "WebApp.ManifestIconDownloader.ChromeUrl.Result", icon_result);
+  }
+  return bitmap;
 }
+
+}  // namespace
 
 bool ManifestIconDownloader::Download(
     WebContents* web_contents,
     const GURL& icon_url,
     int ideal_icon_size_in_px,
     int minimum_icon_size_in_px,
+    int maximum_icon_size_in_px,
     IconFetchCallback callback,
     bool square_only,
-    const GlobalFrameRoutingId& initiator_frame_routing_id) {
+    const GlobalRenderFrameHostId& initiator_frame_routing_id,
+    bool suppress_warnings) {
   DCHECK(minimum_icon_size_in_px <= ideal_icon_size_in_px);
   if (!web_contents || !icon_url.is_valid())
     return false;
 
+  const gfx::Size preferred_size(ideal_icon_size_in_px, ideal_icon_size_in_px);
+
+  IconFetchCallbackWithResult final_callback_with_metrics =
+      base::BindOnce(&MeasureMetrics, icon_url).Then(std::move(callback));
+
   web_contents->DownloadImageInFrame(
       initiator_frame_routing_id, icon_url,
-      false,                  // is_favicon
-      ideal_icon_size_in_px,  // preferred_size
-      0,                      // max_bitmap_size - 0 means no maximum size.
-      false,                  // bypass_cache
-      base::BindOnce(&ManifestIconDownloader::OnIconFetched,
-                     ideal_icon_size_in_px, minimum_icon_size_in_px,
-                     square_only,
-                     base::Owned(new DevToolsConsoleHelper(web_contents)),
-                     std::move(callback)));
+      false,                    // is_favicon
+      preferred_size,           // preferred_size
+      maximum_icon_size_in_px,  // max_bitmap_size - 0 means no maximum size.
+      false,                    // bypass_cache
+      base::BindOnce(
+          &ManifestIconDownloader::OnIconFetched, ideal_icon_size_in_px,
+          minimum_icon_size_in_px, square_only, web_contents->GetWeakPtr(),
+          std::move(final_callback_with_metrics), suppress_warnings));
   return true;
 }
 
@@ -79,8 +75,9 @@ void ManifestIconDownloader::OnIconFetched(
     int ideal_icon_size_in_px,
     int minimum_icon_size_in_px,
     bool square_only,
-    DevToolsConsoleHelper* console_helper,
-    IconFetchCallback callback,
+    base::WeakPtr<WebContents> web_contents,
+    IconFetchCallbackWithResult callback,
+    bool suppress_warnings,
     int id,
     int http_status_code,
     const GURL& url,
@@ -89,12 +86,15 @@ void ManifestIconDownloader::OnIconFetched(
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   if (bitmaps.empty()) {
-    console_helper->AddMessage(
-        blink::mojom::ConsoleMessageLevel::kError,
-        "Error while trying to use the following icon from the Manifest: " +
-            url.spec() + " (Download error or resource isn't a valid image)");
+    if (web_contents && !suppress_warnings) {
+      web_contents->GetPrimaryMainFrame()->AddMessageToConsole(
+          blink::mojom::ConsoleMessageLevel::kWarning,
+          "Error while trying to use the following icon from the Manifest: " +
+              url.spec() + " (Download error or resource isn't a valid image)");
+    }
 
-    std::move(callback).Run(SkBitmap());
+    std::move(callback).Run(SkBitmap(),
+                            ManifestIconDownloader::Result::kNoImageFound);
     return;
   }
 
@@ -102,13 +102,16 @@ void ManifestIconDownloader::OnIconFetched(
       ideal_icon_size_in_px, minimum_icon_size_in_px, square_only, bitmaps);
 
   if (closest_index == -1) {
-    console_helper->AddMessage(
-        blink::mojom::ConsoleMessageLevel::kError,
-        "Error while trying to use the following icon from the Manifest: " +
-            url.spec() +
-            " (Resource size is not correct - typo in the Manifest?)");
+    if (web_contents && !suppress_warnings) {
+      web_contents->GetPrimaryMainFrame()->AddMessageToConsole(
+          blink::mojom::ConsoleMessageLevel::kWarning,
+          "Error while trying to use the following icon from the Manifest: " +
+              url.spec() +
+              " (Resource size is not correct - typo in the Manifest?)");
+    }
 
-    std::move(callback).Run(SkBitmap());
+    std::move(callback).Run(SkBitmap(),
+                            ManifestIconDownloader::Result::kIncorrectSize);
     return;
   }
 
@@ -132,13 +135,13 @@ void ManifestIconDownloader::OnIconFetched(
     return;
   }
 
-  std::move(callback).Run(chosen);
+  std::move(callback).Run(chosen, ManifestIconDownloader::Result::kSuccess);
 }
 
 void ManifestIconDownloader::ScaleIcon(int ideal_icon_width_in_px,
                                        int ideal_icon_height_in_px,
                                        const SkBitmap& bitmap,
-                                       IconFetchCallback callback) {
+                                       IconFetchCallbackWithResult callback) {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
 
   const SkBitmap& scaled = skia::ImageOperations::Resize(
@@ -146,7 +149,8 @@ void ManifestIconDownloader::ScaleIcon(int ideal_icon_width_in_px,
       ideal_icon_height_in_px);
 
   GetUIThreadTaskRunner({})->PostTask(
-      FROM_HERE, base::BindOnce(std::move(callback), scaled));
+      FROM_HERE, base::BindOnce(std::move(callback), scaled,
+                                ManifestIconDownloader::Result::kSuccess));
 }
 
 int ManifestIconDownloader::FindClosestBitmapIndex(

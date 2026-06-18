@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 
 namespace {
 const char kDefaultId[] = "123456789A";
+const char kDefaultDeviceName[] = "Barack's Chromebook";
 }  // namespace
 
 FakeNearbyShareLocalDeviceDataManager::Factory::Factory() = default;
@@ -16,19 +17,19 @@ FakeNearbyShareLocalDeviceDataManager::Factory::~Factory() = default;
 
 std::unique_ptr<NearbyShareLocalDeviceDataManager>
 FakeNearbyShareLocalDeviceDataManager::Factory::CreateInstance(
-    PrefService* pref_service,
+    user_manager::User& user,
     NearbyShareClientFactory* http_client_factory) {
-  latest_pref_service_ = pref_service;
   latest_http_client_factory_ = http_client_factory;
 
-  auto instance = std::make_unique<FakeNearbyShareLocalDeviceDataManager>();
+  auto instance = std::make_unique<FakeNearbyShareLocalDeviceDataManager>(
+      kDefaultDeviceName);
   instances_.push_back(instance.get());
 
   return instance;
 }
 
 FakeNearbyShareLocalDeviceDataManager::UploadContactsCall::UploadContactsCall(
-    std::vector<nearbyshare::proto::Contact> contacts,
+    std::vector<nearby::sharing::proto::Contact> contacts,
     UploadCompleteCallback callback)
     : contacts(std::move(contacts)), callback(std::move(callback)) {}
 
@@ -40,7 +41,7 @@ FakeNearbyShareLocalDeviceDataManager::UploadContactsCall::
 
 FakeNearbyShareLocalDeviceDataManager::UploadCertificatesCall::
     UploadCertificatesCall(
-        std::vector<nearbyshare::proto::PublicCertificate> certificates,
+        std::vector<nearby::sharing::proto::PublicCertificate> certificates,
         UploadCompleteCallback callback)
     : certificates(std::move(certificates)), callback(std::move(callback)) {}
 
@@ -50,8 +51,9 @@ FakeNearbyShareLocalDeviceDataManager::UploadCertificatesCall::
 FakeNearbyShareLocalDeviceDataManager::UploadCertificatesCall::
     ~UploadCertificatesCall() = default;
 
-FakeNearbyShareLocalDeviceDataManager::FakeNearbyShareLocalDeviceDataManager()
-    : id_(kDefaultId) {}
+FakeNearbyShareLocalDeviceDataManager::FakeNearbyShareLocalDeviceDataManager(
+    const std::string& default_device_name)
+    : id_(kDefaultId), device_name_(default_device_name) {}
 
 FakeNearbyShareLocalDeviceDataManager::
     ~FakeNearbyShareLocalDeviceDataManager() = default;
@@ -60,34 +62,41 @@ std::string FakeNearbyShareLocalDeviceDataManager::GetId() {
   return id_;
 }
 
-base::Optional<std::string>
-FakeNearbyShareLocalDeviceDataManager::GetDeviceName() const {
-  if (!device_name_ || device_name_->empty())
-    return base::nullopt;
-
+std::string FakeNearbyShareLocalDeviceDataManager::GetDeviceName() const {
   return device_name_;
 }
 
-base::Optional<std::string> FakeNearbyShareLocalDeviceDataManager::GetFullName()
+std::optional<std::string> FakeNearbyShareLocalDeviceDataManager::GetFullName()
     const {
   return full_name_;
 }
 
-base::Optional<std::string> FakeNearbyShareLocalDeviceDataManager::GetIconUrl()
+std::optional<std::string> FakeNearbyShareLocalDeviceDataManager::GetIconUrl()
     const {
   return icon_url_;
 }
 
-void FakeNearbyShareLocalDeviceDataManager::SetDeviceName(
+nearby_share::mojom::DeviceNameValidationResult
+FakeNearbyShareLocalDeviceDataManager::ValidateDeviceName(
     const std::string& name) {
-  if (device_name_ == name)
-    return;
+  return next_validation_result_;
+}
 
-  device_name_ = name;
-  NotifyLocalDeviceDataChanged(
-      /*did_device_name_change=*/true,
-      /*did_full_name_change=*/false,
-      /*did_icon_url_change=*/false);
+nearby_share::mojom::DeviceNameValidationResult
+FakeNearbyShareLocalDeviceDataManager::SetDeviceName(const std::string& name) {
+  if (next_validation_result_ !=
+      nearby_share::mojom::DeviceNameValidationResult::kValid)
+    return next_validation_result_;
+
+  if (device_name_ != name) {
+    device_name_ = name;
+    NotifyLocalDeviceDataChanged(
+        /*did_device_name_change=*/true,
+        /*did_full_name_change=*/false,
+        /*did_icon_change=*/false);
+  }
+
+  return nearby_share::mojom::DeviceNameValidationResult::kValid;
 }
 
 void FakeNearbyShareLocalDeviceDataManager::DownloadDeviceData() {
@@ -95,19 +104,19 @@ void FakeNearbyShareLocalDeviceDataManager::DownloadDeviceData() {
 }
 
 void FakeNearbyShareLocalDeviceDataManager::UploadContacts(
-    std::vector<nearbyshare::proto::Contact> contacts,
+    std::vector<nearby::sharing::proto::Contact> contacts,
     UploadCompleteCallback callback) {
   upload_contacts_calls_.emplace_back(std::move(contacts), std::move(callback));
 }
 
 void FakeNearbyShareLocalDeviceDataManager::UploadCertificates(
-    std::vector<nearbyshare::proto::PublicCertificate> certificates,
+    std::vector<nearby::sharing::proto::PublicCertificate> certificates,
     UploadCompleteCallback callback) {
   upload_certificates_calls_.emplace_back(std::move(certificates),
                                           std::move(callback));
 }
 void FakeNearbyShareLocalDeviceDataManager::SetFullName(
-    const base::Optional<std::string>& full_name) {
+    const std::optional<std::string>& full_name) {
   if (full_name_ == full_name)
     return;
 
@@ -115,11 +124,11 @@ void FakeNearbyShareLocalDeviceDataManager::SetFullName(
   NotifyLocalDeviceDataChanged(
       /*did_device_name_change=*/false,
       /*did_full_name_change=*/true,
-      /*did_icon_url_change=*/false);
+      /*did_icon_change=*/false);
 }
 
 void FakeNearbyShareLocalDeviceDataManager::SetIconUrl(
-    const base::Optional<std::string>& icon_url) {
+    const std::optional<std::string>& icon_url) {
   if (icon_url_ == icon_url)
     return;
 
@@ -127,7 +136,7 @@ void FakeNearbyShareLocalDeviceDataManager::SetIconUrl(
   NotifyLocalDeviceDataChanged(
       /*did_device_name_change=*/false,
       /*did_full_name_change=*/false,
-      /*did_icon_url_change=*/true);
+      /*did_icon_change=*/true);
 }
 
 void FakeNearbyShareLocalDeviceDataManager::OnStart() {}

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,73 +7,74 @@
 
 #include <memory>
 
-#include "base/containers/flat_set.h"
-#include "base/macros.h"
+#include "base/byte_size.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
+#include "base/types/pass_key.h"
 #include "base/unguessable_token.h"
-#include "base/util/type_safety/pass_key.h"
+#include "components/performance_manager/execution_context/execution_context_impl.h"
+#include "components/performance_manager/graph/node_attached_data_storage.h"
 #include "components/performance_manager/graph/node_base.h"
+#include "components/performance_manager/graph/node_inline_data.h"
+#include "components/performance_manager/graph/tracing_observer.h"
 #include "components/performance_manager/public/graph/frame_node.h"
 #include "components/performance_manager/public/graph/node_attached_data.h"
+#include "components/performance_manager/public/mojom/coordination_unit.mojom.h"
+#include "components/performance_manager/public/mojom/web_memory.mojom.h"
 #include "components/performance_manager/public/render_frame_host_proxy.h"
+#include "components/performance_manager/resource_attribution/cpu_measurement_data.h"
+#include "content/public/browser/browsing_instance_id.h"
+#include "content/public/browser/site_instance.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 namespace performance_manager {
 
 class FrameNodeImplDescriber;
-class PageNodeImpl;
-class ProcessNodeImpl;
-class WorkerNodeImpl;
 
-namespace execution_context {
-class ExecutionContextAccess;
-}  // namespace execution_context
-
-// Frame nodes form a tree structure, each FrameNode at most has one parent that
-// is a FrameNode. Conceptually, a frame corresponds to a
-// content::RenderFrameHost in the browser, and a content::RenderFrameImpl /
-// blink::LocalFrame in a renderer.
-//
-// Note that a frame in a frame tree can be replaced with another, with the
-// continuity of that position represented via the |frame_tree_node_id|. It is
-// possible to have multiple "sibling" nodes that share the same
-// |frame_tree_node_id|. Only one of these may contribute to the content being
-// rendered, and this node is designated the "current" node in content
-// terminology. A swap is effectively atomic but will take place in two steps
-// in the graph: the outgoing frame will first be marked as not current, and the
-// incoming frame will be marked as current. As such, the graph invariant is
-// that there will be 0 or 1 |is_current| frames with a given
-// |frame_tree_node_id|.
-//
-// This occurs when a frame is navigated and the existing frame can't be reused.
-// In that case a "provisional" frame is created to start the navigation. Once
-// the navigation completes (which may actually involve a redirect to another
-// origin meaning the frame has to be destroyed and another one created in
-// another process!) and commits, the frame will be swapped with the previously
-// active frame.
+// Frame nodes for a tree structure that is described in
+// components/performance_manager/public/graph/frame_node.h.
 class FrameNodeImpl
     : public PublicNodeImpl<FrameNodeImpl, FrameNode>,
       public TypedNodeBase<FrameNodeImpl, FrameNode, FrameNodeObserver>,
-      public mojom::DocumentCoordinationUnit {
+      public mojom::DocumentCoordinationUnit,
+      public SupportsNodeInlineData<
+          execution_context::FrameExecutionContext,
+          resource_attribution::SharedCPUTimeResultData,
+          // Keep this last to avoid merge conflicts.
+          NodeAttachedDataStorage>,
+      public TracingObserver {
  public:
   static const char kDefaultPriorityReason[];
-  static constexpr NodeTypeEnum Type() { return NodeTypeEnum::kFrame; }
 
-  // Construct a frame node associated with a |process_node|, a |page_node| and
-  // optionally with a |parent_frame_node|. For the main frame of |page_node|
-  // the |parent_frame_node| parameter should be nullptr. |render_frame_id| is
-  // the routing id of the frame (from RenderFrameHost::GetRoutingID).
+  using TypedNodeBase<FrameNodeImpl, FrameNode, FrameNodeObserver>::FromNode;
+
+  // Construct a frame node associated with a `process_node`, a `page_node` and
+  // optionally with a `parent_frame_node`. For the main frame of `page_node`
+  // the `parent_frame_node` parameter should be nullptr. For <fencedframe>s,
+  // and MPArch aware <webview>s,  `outer_document_for_inner_frame_root` should
+  // be set to its outer document, nullptr otherwise. `render_frame_id` is the
+  // routing id of the frame (from RenderFrameHost::GetRoutingID).
   FrameNodeImpl(ProcessNodeImpl* process_node,
                 PageNodeImpl* page_node,
                 FrameNodeImpl* parent_frame_node,
-                int frame_tree_node_id,
+                FrameNodeImpl* outer_document_for_inner_frame_root,
                 int render_frame_id,
                 const blink::LocalFrameToken& frame_token,
-                int32_t browsing_instance_id,
-                int32_t site_instance_id);
+                const perfetto::NamedTrack& tracing_track,
+                content::BrowsingInstanceId browsing_instance_id,
+                content::SiteInstanceGroupId site_instance_group_id,
+                bool is_current,
+                bool is_active);
+
+  FrameNodeImpl(const FrameNodeImpl&) = delete;
+  FrameNodeImpl& operator=(const FrameNodeImpl&) = delete;
+
   ~FrameNodeImpl() override;
 
   void Bind(mojo::PendingReceiver<mojom::DocumentCoordinationUnit> receiver);
@@ -82,53 +83,101 @@ class FrameNodeImpl
   void SetNetworkAlmostIdle() override;
   void SetLifecycleState(LifecycleState state) override;
   void SetHasNonEmptyBeforeUnload(bool has_nonempty_beforeunload) override;
-  void SetOriginTrialFreezePolicy(mojom::InterventionPolicy policy) override;
-  void SetIsAdFrame() override;
+  void SetIsAdFrame(bool is_ad_frame) override;
   void SetHadFormInteraction() override;
+  void SetHadUserEdits() override;
+  void OnStartedUsingWebRTC() override;
+  void OnStoppedUsingWebRTC() override;
   void OnNonPersistentNotificationCreated() override;
   void OnFirstContentfulPaint(
       base::TimeDelta time_since_navigation_start) override;
-  const RenderFrameHostProxy& GetRenderFrameHostProxy() const override;
+  void OnWebMemoryMeasurementRequested(
+      mojom::WebMemoryMeasurement::Mode mode,
+      OnWebMemoryMeasurementRequestedCallback callback) override;
+  void OnFreezingOriginTrialOptOut() override;
 
-  // Partial FrameNodbase::TimeDelta time_since_navigatione implementation:
+  // Partial FrameNode implementation:
+  const blink::LocalFrameToken& GetFrameToken() const override;
+  content::BrowsingInstanceId GetBrowsingInstanceId() const override;
+  content::SiteInstanceGroupId GetSiteInstanceGroupId() const override;
+  resource_attribution::FrameContext GetResourceContext() const override;
   bool IsMainFrame() const override;
+  LifecycleState GetLifecycleState() const override;
+  bool HasNonemptyBeforeUnload() const override;
+  const GURL& GetURL() const override;
+  const std::optional<url::Origin>& GetOrigin() const override;
+  bool IsCurrent() const override;
+  bool IsActive() const override;
+  const PriorityAndReason& GetPriorityAndReason() const override;
+  bool GetNetworkAlmostIdle() const override;
+  bool IsAdFrame() const override;
+  bool IsHoldingWebLock() const override;
+  bool IsHoldingBlockingIndexedDBLock() const override;
+  bool UsesWebRTC() const override;
+  bool HadUserActivation() const override;
+  bool HadFormInteraction() const override;
+  bool HadUserEdits() const override;
+  bool IsAudible() const override;
+  bool IsCapturingMediaStream() const override;
+  bool HasFreezingOriginTrialOptOut() const override;
+  ViewportIntersection GetViewportIntersection() const override;
+  Visibility GetVisibility() const override;
+  bool IsIntersectingLargeArea() const override;
+  bool IsRendered() const override;
+  bool IsImportant() const override;
+  const RenderFrameHostProxy& GetRenderFrameHostProxy() const override;
+  base::ByteSize GetResidentSetEstimate() const override;
+  base::ByteSize GetPrivateFootprintEstimate() const override;
+  void CrossProcessSubframeRenderProcessGone() override;
 
-  // Getters for const properties. These can be called from any thread.
+  // TracingObserver implementation:
+  void OnTraceSessionStart() override;
+
+  // Getters for const properties.
   FrameNodeImpl* parent_frame_node() const;
+  FrameNodeImpl* parent_or_outer_document_or_embedder() const;
   PageNodeImpl* page_node() const;
   ProcessNodeImpl* process_node() const;
-  int frame_tree_node_id() const;
   int render_frame_id() const;
-  const blink::LocalFrameToken& frame_token() const;
-  int32_t browsing_instance_id() const;
-  int32_t site_instance_id() const;
-  const RenderFrameHostProxy& render_frame_host_proxy() const;
+  perfetto::Track tracing_track() const;
 
   // Getters for non-const properties. These are not thread safe.
-  const base::flat_set<FrameNodeImpl*>& child_frame_nodes() const;
-  const base::flat_set<PageNodeImpl*>& opened_page_nodes() const;
-  LifecycleState lifecycle_state() const;
-  InterventionPolicy origin_trial_freeze_policy() const;
-  bool has_nonempty_beforeunload() const;
-  const GURL& url() const;
-  bool is_current() const;
-  bool network_almost_idle() const;
-  bool is_ad_frame() const;
-  bool is_holding_weblock() const;
-  bool is_holding_indexeddb_lock() const;
-  const base::flat_set<WorkerNodeImpl*>& child_worker_nodes() const;
-  const PriorityAndReason& priority_and_reason() const;
-  bool had_form_interaction() const;
-  bool is_audible() const;
+  NodeSetView<FrameNodeImpl*> child_frame_nodes() const;
+  NodeSetView<PageNodeImpl*> opened_page_nodes() const;
+  NodeSetView<PageNodeImpl*> embedded_page_nodes() const;
+  NodeSetView<WorkerNodeImpl*> child_worker_nodes() const;
 
   // Setters are not thread safe.
-  void SetIsCurrent(bool is_current);
+  // Updates the IsCurrent() property on both `previous_frame_node` and
+  // `current_frame_node` and sends a single notification to FrameNodeObservers.
+  static void UpdateCurrentFrame(FrameNodeImpl* previous_frame_node,
+                                 FrameNodeImpl* current_frame_node,
+                                 GraphImpl* graph);
+  void SetIsActive(bool is_active);
+  void SetHadUserActivation();
   void SetIsHoldingWebLock(bool is_holding_weblock);
-  void SetIsHoldingIndexedDBLock(bool is_holding_indexeddb_lock);
+  void SetIsHoldingBlockingIndexedDBLock(
+      bool is_holding_blocking_indexeddb_lock);
   void SetIsAudible(bool is_audible);
+  void SetIsCapturingMediaStream(bool is_capturing_media_stream);
+  void SetViewportIntersection(ViewportIntersection viewport_intersection);
+  void SetInitialVisibility(Visibility visibility);
+  void SetVisibility(Visibility visibility);
+  void SetIsRendered(bool is_rendered);
+  void SetIsIntersectingLargeArea(bool is_intersecting_large_area);
+  void SetIsImportant(bool is_important);
+  void SetResidentSetEstimate(base::ByteSize rss_estimate);
+  void SetPrivateFootprintEstimate(base::ByteSize private_footprint_estimate);
 
   // Invoked when a navigation is committed in the frame.
-  void OnNavigationCommitted(const GURL& url, bool same_document);
+  void OnNavigationCommitted(GURL url,
+                             url::Origin origin,
+                             bool same_document,
+                             bool is_served_from_back_forward_cache);
+
+  // Traverses the frame tree and notifies all frames that their embedding
+  // primary page is about to be discarded.
+  void OnPrimaryPageAboutToBeDiscarded();
 
   // Invoked by |worker_node| when it starts/stops being a child of this frame.
   void AddChildWorker(WorkerNodeImpl* worker_node);
@@ -137,73 +186,61 @@ class FrameNodeImpl
   // Invoked to set the frame priority, and the reason behind it.
   void SetPriorityAndReason(const PriorityAndReason& priority_and_reason);
 
-  base::WeakPtr<FrameNodeImpl> GetWeakPtr() {
-    return weak_factory_.GetWeakPtr();
-  }
+  base::WeakPtr<FrameNodeImpl> GetWeakPtr();
 
-  void SeverOpenedPagesAndMaybeReparentForTesting() {
-    SeverOpenedPagesAndMaybeReparent();
+  void SeverPageRelationshipsAndMaybeReparentForTesting() {
+    SeverPageRelationshipsAndMaybeReparent();
   }
 
   // Implementation details below this point.
 
   // Invoked by opened pages when this frame is set/cleared as their opener.
-  // See PageNodeImpl::(Set|Clear)OpenerFrameNodeAndOpenedType.
-  void AddOpenedPage(util::PassKey<PageNodeImpl> key, PageNodeImpl* page_node);
-  void RemoveOpenedPage(util::PassKey<PageNodeImpl> key,
+  // See PageNodeImpl::(Set|Clear)OpenerFrameNode.
+  void AddOpenedPage(base::PassKey<PageNodeImpl> key, PageNodeImpl* page_node);
+  void RemoveOpenedPage(base::PassKey<PageNodeImpl> key,
                         PageNodeImpl* page_node);
 
-  // Used by the ExecutionContextRegistry mechanism.
-  std::unique_ptr<NodeAttachedData>* GetExecutionContextStorage(
-      util::PassKey<execution_context::ExecutionContextAccess> key) {
-    return &execution_context_;
-  }
+  // Invoked by embedded pages when this frame is set/cleared as their embedder.
+  // See PageNodeImpl::(Set|Clear)EmbedderFrameNodeAndEmbeddingType.
+  void AddEmbeddedPage(base::PassKey<PageNodeImpl> key,
+                       PageNodeImpl* page_node);
+  void RemoveEmbeddedPage(base::PassKey<PageNodeImpl> key,
+                          PageNodeImpl* page_node);
+
+  // Returns true if the mojom::DocumentCoordinationUnit connection is bound.
+  bool IsDocumentCoordinationUnitBoundForTesting() const;
 
  private:
   friend class FrameNodeImplDescriber;
-  friend class FramePriorityAccess;
   friend class ProcessNodeImpl;
 
   // Rest of FrameNode implementation. These are private so that users of the
   // impl use the private getters rather than the public interface.
   const FrameNode* GetParentFrameNode() const override;
+  const FrameNode* GetParentOrOuterDocumentOrEmbedder() const override;
   const PageNode* GetPageNode() const override;
   const ProcessNode* GetProcessNode() const override;
-  int GetFrameTreeNodeId() const override;
-  const blink::LocalFrameToken& GetFrameToken() const override;
-  int32_t GetBrowsingInstanceId() const override;
-  int32_t GetSiteInstanceId() const override;
-  bool VisitChildFrameNodes(const FrameNodeVisitor& visitor) const override;
-  const base::flat_set<const FrameNode*> GetChildFrameNodes() const override;
-  bool VisitOpenedPageNodes(const PageNodeVisitor& visitor) const override;
-  const base::flat_set<const PageNode*> GetOpenedPageNodes() const override;
-  LifecycleState GetLifecycleState() const override;
-  InterventionPolicy GetOriginTrialFreezePolicy() const override;
-  bool HasNonemptyBeforeUnload() const override;
-  const GURL& GetURL() const override;
-  bool IsCurrent() const override;
-  bool GetNetworkAlmostIdle() const override;
-  bool IsAdFrame() const override;
-  bool IsHoldingWebLock() const override;
-  bool IsHoldingIndexedDBLock() const override;
-  const base::flat_set<const WorkerNode*> GetChildWorkerNodes() const override;
-  const PriorityAndReason& GetPriorityAndReason() const override;
-  bool HadFormInteraction() const override;
-  bool IsAudible() const override;
+  NodeSetView<const FrameNode*> GetChildFrameNodes() const override;
+  NodeSetView<const PageNode*> GetOpenedPageNodes() const override;
+  NodeSetView<const PageNode*> GetEmbeddedPageNodes() const override;
+  NodeSetView<const WorkerNode*> GetChildWorkerNodes() const override;
 
   // Properties associated with a Document, which are reset when a
   // different-document navigation is committed in the frame.
+  // LINT.IfChange(document_prop)
   struct DocumentProperties {
     DocumentProperties();
     ~DocumentProperties();
 
-    void Reset(FrameNodeImpl* frame_node, const GURL& url_in);
+    void Reset(FrameNodeImpl* frame_node, GURL url_in, url::Origin origin_in);
 
-    ObservedProperty::NotifiesOnlyOnChangesWithPreviousValue<
-        GURL,
-        const GURL&,
-        &FrameNodeObserver::OnURLChanged>
-        url;
+    // FrameNodeObserver::OnURLChanged/OnOriginChanged() is invoked when the
+    // URL/origin changes. Not using ObservedProperty here to allow updating
+    // both properties before notifying observers (see
+    // `FrameNodeImpl::DocumentProperties::Reset` implementation).
+    GURL url;
+    std::optional<url::Origin> origin;
+
     bool has_nonempty_beforeunload = false;
 
     // Network is considered almost idle when there are no more than 2 network
@@ -213,33 +250,51 @@ class FrameNodeImpl
         &FrameNodeObserver::OnNetworkAlmostIdleChanged>
         network_almost_idle{false};
 
-    // Opt-in or opt-out of freezing via origin trial.
-    ObservedProperty::NotifiesOnlyOnChangesWithPreviousValue<
-        mojom::InterventionPolicy,
-        const mojom::InterventionPolicy&,
-        &FrameNodeObserver::OnOriginTrialFreezePolicyChanged>
-        origin_trial_freeze_policy{mojom::InterventionPolicy::kDefault};
-
     // Indicates if a form in the frame has been interacted with.
+    // TODO(crbug.com/40735910): Remove this once HadUserEdits is known to cover
+    // all existing cases.
     ObservedProperty::NotifiesOnlyOnChanges<
         bool,
         &FrameNodeObserver::OnHadFormInteractionChanged>
         had_form_interaction{false};
+
+    // Indicates that the user has made edits to the page. This is a superset of
+    // `had_form_interaction`, but can also represent changes to
+    // `contenteditable` elements.
+    ObservedProperty::
+        NotifiesOnlyOnChanges<bool, &FrameNodeObserver::OnHadUserEditsChanged>
+            had_user_edits{false};
+
+    // Whether the document uses WebRTC.
+    ObservedProperty::NotifiesOnlyOnChanges<
+        bool,
+        &FrameNodeObserver::OnFrameUsesWebRTCChanged>
+        uses_web_rtc{false};
+
+    // Whether the document is opted-out from freezing via origin trial.
+    ObservedProperty::NotifiesOnlyOnChanges<
+        bool,
+        &FrameNodeObserver::OnFrameHasFreezingOriginTrialOptOutChanged>
+        has_freezing_origin_trial_opt_out{false};
   };
+  // LINT.ThenChange(//components/performance_manager/graph/frame_node_impl.cc:document_prop_reset)
 
   // Invoked by subframes on joining/leaving the graph.
   void AddChildFrame(FrameNodeImpl* frame_node);
   void RemoveChildFrame(FrameNodeImpl* frame_node);
 
   // NodeBase:
-  void OnJoiningGraph() override;
+  void OnInitializingProperties() override;
+  void OnInitializingEdges() override;
   void OnBeforeLeavingGraph() override;
+  void OnUninitializingEdges() override;
+  void CleanUpNodeState() override;
 
-  // Helper function to sever all opened page relationships. This is called
-  // before destroying the frame node in "OnBeforeLeavingGraph". Note that this
-  // will reparent opened pages to this frame's parent so that tracking is
-  // maintained.
-  void SeverOpenedPagesAndMaybeReparent();
+  // Helper function to sever all opened/embedded page relationships. This is
+  // called before destroying the frame node in "OnBeforeLeavingGraph". Note
+  // that this will reparent embedded pages to this frame's parent so that
+  // tracking is maintained.
+  void SeverPageRelationshipsAndMaybeReparent();
 
   // This is not quite the same as GetMainFrame, because there can be multiple
   // main frames while the main frame is navigating. This explicitly walks up
@@ -247,18 +302,28 @@ class FrameNodeImpl
   // even if it is not current.
   FrameNodeImpl* GetFrameTreeRoot() const;
 
+  void TraceEdges();
+
   bool HasFrameNodeInAncestors(FrameNodeImpl* frame_node) const;
   bool HasFrameNodeInDescendants(FrameNodeImpl* frame_node) const;
   bool HasFrameNodeInTree(FrameNodeImpl* frame_node) const;
 
+  // Sets the `is_current_` property. Returns true if its value changed as a
+  // result of this call.
+  bool SetIsCurrent(bool is_current);
+
+  // Updates the inherited `IsIntersectingLargeArea()` property of this frame.
+  void SetInheritedIsIntersectingLargeArea(bool is_intersecting_large_area);
+
+  void SetIsIntersectingLargeAreaImpl(bool is_intersecting_large_area);
+
   mojo::Receiver<mojom::DocumentCoordinationUnit> receiver_{this};
 
-  FrameNodeImpl* const parent_frame_node_;
-  PageNodeImpl* const page_node_;
-  ProcessNodeImpl* const process_node_;
-  // Can be used to tie together "sibling" frames, where a navigation is ongoing
-  // in a new frame that will soon replace the existing one.
-  const int frame_tree_node_id_;
+  const raw_ptr<FrameNodeImpl, DanglingUntriaged> parent_frame_node_;
+  const raw_ptr<FrameNodeImpl, DanglingUntriaged>
+      outer_document_for_inner_frame_root_;
+  const raw_ptr<PageNodeImpl, DanglingUntriaged> page_node_;
+  const raw_ptr<ProcessNodeImpl, DanglingUntriaged> process_node_;
   // The routing id of the frame.
   const int render_frame_id_;
 
@@ -270,19 +335,35 @@ class FrameNodeImpl
   // same BrowsingInstance are allowed to script each other at least
   // asynchronously (if cross-site), and sometimes synchronously (if same-site,
   // and thus same SiteInstance).
-  const int32_t browsing_instance_id_;
-  // The unique ID of the SiteInstance this frame belongs to. Frames in the
-  // same SiteInstance may sychronously script each other. Frames with the
-  // same |site_instance_id_| will also have the same |browsing_instance_id_|.
-  const int32_t site_instance_id_;
+  const content::BrowsingInstanceId browsing_instance_id_;
+
+  // The unique ID of the SiteInstanceGroup this frame belongs to. Frames in the
+  // same SiteInstanceGroup are in the same process and exist as LocalFrames in
+  // the same blink::FrameTree. Frames with the same |site_instance_group_id_|
+  // will also have the same |browsing_instance_id_|.
+  const content::SiteInstanceGroupId site_instance_group_id_;
+
   // A proxy object that lets the underlying RFH be safely dereferenced on the
   // UI thread.
   const RenderFrameHostProxy render_frame_host_proxy_;
 
-  base::flat_set<FrameNodeImpl*> child_frame_nodes_;
+  // Perfetto track that can record trace events for the page.
+  const perfetto::NamedTrack tracing_track_;
+
+  base::ScopedObservation<TracingObserverList, TracingObserver>
+      tracing_observation_{this};
+
+  NodeSet child_frame_nodes_;
 
   // The set of pages that have been opened by this frame.
-  base::flat_set<PageNodeImpl*> opened_page_nodes_;
+  NodeSet opened_page_nodes_;
+
+  // The set of pages that have been embedded by this frame.
+  NodeSet embedded_page_nodes_;
+
+  base::ByteSize resident_set_estimate_;
+
+  base::ByteSize private_footprint_estimate_;
 
   // Does *not* change when a navigation is committed.
   ObservedProperty::NotifiesOnlyOnChanges<
@@ -290,7 +371,12 @@ class FrameNodeImpl
       &FrameNodeObserver::OnFrameLifecycleStateChanged>
       lifecycle_state_{LifecycleState::kRunning};
 
-  // This is a one way switch. Once marked an ad-frame, always an ad-frame.
+  // Indicates if the frame has been interacted with.
+  ObservedProperty::NotifiesOnlyOnChanges<
+      bool,
+      &FrameNodeObserver::OnHadUserActivationChanged>
+      had_user_activation_{false};
+
   ObservedProperty::
       NotifiesOnlyOnChanges<bool, &FrameNodeObserver::OnIsAdFrameChanged>
           is_ad_frame_{false};
@@ -304,12 +390,11 @@ class FrameNodeImpl
       is_holding_weblock_{false};
   ObservedProperty::NotifiesOnlyOnChanges<
       bool,
-      &FrameNodeObserver::OnFrameIsHoldingIndexedDBLockChanged>
-      is_holding_indexeddb_lock_{false};
+      &FrameNodeObserver::OnFrameIsHoldingBlockingIndexedDBLockChanged>
+      is_holding_blocking_indexeddb_lock_{false};
 
-  ObservedProperty::
-      NotifiesOnlyOnChanges<bool, &FrameNodeObserver::OnIsCurrentChanged>
-          is_current_{false};
+  bool is_current_{false};
+  bool is_active_{false};
 
   // Properties associated with a Document, which are reset when a
   // different-document navigation is committed in the frame.
@@ -319,32 +404,67 @@ class FrameNodeImpl
   DocumentProperties document_;
 
   // The child workers of this frame.
-  base::flat_set<WorkerNodeImpl*> child_worker_nodes_;
+  NodeSet child_worker_nodes_;
 
-  // Frame priority information. Set via FramePriorityDecorator.
+  // Frame priority information. Set via ExecutionContextPriorityDecorator.
   ObservedProperty::NotifiesOnlyOnChangesWithPreviousValue<
       PriorityAndReason,
-      const PriorityAndReason&,
-      &FrameNodeObserver::OnPriorityAndReasonChanged>
-      priority_and_reason_{PriorityAndReason(base::TaskPriority::LOWEST,
-                                             kDefaultPriorityReason)};
+      &FrameNodeObserver::OnPriorityAndReasonChanged,
+      TracedWrapper<PriorityAndReason>>
+      priority_and_reason_;
 
   // Indicates if the frame is audible. This is tracked independently of a
   // document, and if a document swap occurs the audio stream monitor machinery
   // will keep this up to date.
+  ObservedProperty::NotifiesOnlyOnChanges<
+      bool,
+      &FrameNodeObserver::OnIsAudibleChanged,
+      TracedWrapper<bool>>
+      is_audible_;
+
+  // Indicates if the frame is capturing at least one media stream.
+  ObservedProperty::NotifiesOnlyOnChanges<
+      bool,
+      &FrameNodeObserver::OnIsCapturingMediaStreamChanged>
+      is_capturing_media_stream_{false};
+
+  // Indicates the intersection between the frame and the viewport.
+  //
+  // Note that calling `GetViewportIntersection()` will always returns
+  // ViewportIntersection::kIntersecting for the outermost main frame. This is
+  // because it always occupies the entirety of the viewport, so there is no
+  // point in tracking it.
+  ObservedProperty::NotifiesOnlyOnChanges<
+      ViewportIntersection,
+      &FrameNodeObserver::OnViewportIntersectionChanged>
+      viewport_intersection_{ViewportIntersection::kUnknown};
+
+  // Indicates if the frame is visible. This is maintained by the
+  // FrameVisibilityDecorator.
+  ObservedProperty::NotifiesOnlyOnChangesWithPreviousValue<
+      Visibility,
+      &FrameNodeObserver::OnFrameVisibilityChanged,
+      TracedWrapper<Visibility>>
+      visibility_;
+
+  // Indicates if this frame is rendered.
+  bool is_rendered_ = false;
+
+  // Indicates if this frame intersects with a large area of the viewport.
+  // Defaults to true when its value is unknown.
+  bool is_intersecting_large_area_ = true;
+
+  // Indicates that SetIsIntersectingLargeArea() was called for this frame. This
+  // is only called for local root frames and means this frame should not
+  // inherit the value of its parent.
+  bool has_is_intersecting_large_area_updates_ = false;
+
   ObservedProperty::
-      NotifiesOnlyOnChanges<bool, &FrameNodeObserver::OnIsAudibleChanged>
-          is_audible_{false};
+      NotifiesOnlyOnChanges<bool, &FrameNodeObserver::OnIsImportantChanged>
+          is_important_{true};
 
-  // Inline storage for FramePriorityDecorator data.
-  frame_priority::AcceptedVote accepted_vote_;
-
-  // Inline storage for ExecutionContext.
-  std::unique_ptr<NodeAttachedData> execution_context_;
-
-  base::WeakPtrFactory<FrameNodeImpl> weak_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(FrameNodeImpl);
+  base::WeakPtrFactory<FrameNodeImpl> weak_factory_
+      GUARDED_BY_CONTEXT(sequence_checker_){this};
 };
 
 }  // namespace performance_manager

@@ -1,24 +1,28 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_SIGNIN_DICE_INTERCEPTED_SESSION_STARTUP_HELPER_H_
 #define CHROME_BROWSER_SIGNIN_DICE_INTERCEPTED_SESSION_STARTUP_HELPER_H_
 
-#include "base/callback_forward.h"
 #include "base/cancelable_callback.h"
-#include "base/scoped_observer.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
+#include "components/signin/core/browser/account_reconcilor.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "google_apis/gaia/core_account_id.h"
-#include "url/gurl.h"
 
 namespace content {
 class WebContents;
 }
 
 namespace signin {
-struct AccountsInCookieJarInfo;
+class AccountsInCookieJarInfo;
+class IdentityManager;
+enum class SetAccountsInCookieResult;
 }
 
 class GoogleServiceAuthError;
@@ -30,8 +34,8 @@ class Profile;
 // It is assumed that the account is already in the profile, but not necessarily
 // in the content area (cookies).
 class DiceInterceptedSessionStartupHelper
-    : public content::WebContentsObserver,
-      public signin::IdentityManager::Observer {
+    : public signin::IdentityManager::Observer,
+      public AccountReconcilor::Observer {
  public:
   // |profile| is the new profile that was created after signin interception.
   // |account_id| is the main account for the profile, it's already in the
@@ -39,6 +43,7 @@ class DiceInterceptedSessionStartupHelper
   // |tab_to_move| is the tab where the interception happened, in the source
   // profile.
   DiceInterceptedSessionStartupHelper(Profile* profile,
+                                      bool is_new_profile,
                                       CoreAccountId account_id,
                                       content::WebContents* tab_to_move);
 
@@ -57,20 +62,48 @@ class DiceInterceptedSessionStartupHelper
       const signin::AccountsInCookieJarInfo& accounts_in_cookie_jar_info,
       const GoogleServiceAuthError& error) override;
 
+  // AccountReconcilor::Observer:
+  void OnStateChanged(signin_metrics::AccountReconcilorState state) override;
+
  private:
-  // Creates a browser with a new tab, and closes the intercepted tab if it's
-  // still open.
+  // For new profiles, the account is added directly using multilogin.
+  void StartupMultilogin(signin::IdentityManager* identity_manager);
+
+  // For existing profiles, simply wait for the reconcilor to update the
+  // accounts.
+  void StartupReconcilor(signin::IdentityManager* identity_manager);
+
+  // Called when multilogin completes.
+  void OnSetAccountInCookieCompleted(signin::SetAccountsInCookieResult result);
+
+  // Entry point to move the intercepted tab to the new/target profile.
+  // This method synchronously disconnects all observers to avoid receiving
+  // further events, and then schedules the actual tab movement asynchronously
+  // (via PerformMoveTab) to avoid observer reentrancy issues in
+  // AccountReconcilor.
   void MoveTab();
 
-  Profile* const profile_;
+  // Performs the actual tab movement and browser creation. Called
+  // asynchronously from MoveTab().
+  void PerformMoveTab();
+
+  const raw_ptr<Profile> profile_;
+  base::WeakPtr<content::WebContents> web_contents_;
+  bool use_multilogin_;
   CoreAccountId account_id_;
   base::OnceClosure callback_;
-  ScopedObserver<signin::IdentityManager, signin::IdentityManager::Observer>
+  bool reconcile_error_encountered_ = false;
+  base::ScopedObservation<signin::IdentityManager,
+                          signin::IdentityManager::Observer>
       accounts_in_cookie_observer_{this};
+  base::ScopedObservation<AccountReconcilor, AccountReconcilor::Observer>
+      reconcilor_observer_{this};
+  std::unique_ptr<AccountReconcilor::Lock> reconcilor_lock_;
   // Timeout while waiting for the account to be added to the cookies in the new
   // profile.
   base::CancelableOnceCallback<void()> on_cookie_update_timeout_;
-  GURL url_to_open_;
+
+  base::WeakPtrFactory<DiceInterceptedSessionStartupHelper> weak_factory_{this};
 };
 
 #endif  // CHROME_BROWSER_SIGNIN_DICE_INTERCEPTED_SESSION_STARTUP_HELPER_H_

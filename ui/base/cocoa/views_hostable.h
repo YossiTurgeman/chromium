@@ -1,15 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_BASE_COCOA_VIEWS_HOSTABLE_H_
 #define UI_BASE_COCOA_VIEWS_HOSTABLE_H_
 
-#import <objc/objc.h>
-
 #include "base/component_export.h"
 #include "ui/gfx/geometry/rect.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace remote_cocoa {
 namespace mojom {
@@ -62,7 +60,8 @@ class ViewsHostableView {
   virtual void ViewsHostableDetach() = 0;
 
   // Resize the WebContentsView's NSView.
-  virtual void ViewsHostableSetBounds(const gfx::Rect& bounds_in_window) = 0;
+  virtual void ViewsHostableSetBounds(const gfx::Rect& bounds_in_superview,
+                                      int superview_height) = 0;
 
   // Show or hide the WebContentsView's NSView.
   virtual void ViewsHostableSetVisible(bool visible) = 0;
@@ -73,6 +72,9 @@ class ViewsHostableView {
   // Set the WebContentsView's parent accessibility element.
   virtual void ViewsHostableSetParentAccessible(
       gfx::NativeViewAccessible parent_accessibility_element) = 0;
+
+  // Get the WebContentsView's parent accessibility element.
+  virtual gfx::NativeViewAccessible ViewsHostableGetParentAccessible() = 0;
 
   // Retrieve the WebContentsView's accessibility element.
   virtual gfx::NativeViewAccessible ViewsHostableGetAccessibilityElement() = 0;

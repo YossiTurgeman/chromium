@@ -1,31 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.tasks.tab_management;
 
-import org.chromium.base.supplier.Supplier;
-import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.toolbar.bottom.BottomControlsCoordinator;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.toolbar.bottom.BottomControlsContentDelegate;
 
-/**
- * Interface for the Tab Groups related UI. This UI manages its own visibility through {@link
- * BottomControlsCoordinator.BottomControlsVisibilityController}.
- */
-public interface TabGroupUi {
+/** Interface for the Tab Groups related UI. */
+@NullMarked
+public interface TabGroupUi extends BottomControlsContentDelegate {
     /**
-     * Called by the ToolbarManager when the system back button is pressed.
-     * @return Whether or not the TabGroupUi consumed the event.
+     * @return Whether the TabGridDialog is visible.
      */
-    boolean onBackPressed();
-
-    void initializeWithNative(ChromeActivity activity,
-            BottomControlsCoordinator.BottomControlsVisibilityController visibilityController);
-
-    /**
-     * @return {@link Supplier} that provides dialog visibility.
-     */
-    Supplier<Boolean> getTabGridDialogVisibilitySupplier();
-
-    void destroy();
+    boolean isTabGridDialogVisible();
 }

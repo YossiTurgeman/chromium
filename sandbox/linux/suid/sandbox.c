@@ -1,8 +1,13 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// https://chromium.googlesource.com/chromium/src/+/master/docs/linux/suid_sandbox.md
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
+
+// https://chromium.googlesource.com/chromium/src/+/main/docs/linux/suid_sandbox.md
 
 #include "sandbox/linux/suid/common/sandbox.h"
 
@@ -44,7 +49,13 @@
 
 static bool DropRoot();
 
-#define HANDLE_EINTR(x) TEMP_FAILURE_RETRY(x)
+#define HANDLE_EINTR(x) ({ \
+  long eintr_wrapper_result; \
+  do { \
+    eintr_wrapper_result = (x); \
+  } while (eintr_wrapper_result == -1L && errno == EINTR); \
+  eintr_wrapper_result; \
+})
 
 static void FatalError(const char* msg, ...)
     __attribute__((noreturn, format(printf, 1, 2)));
@@ -403,7 +414,7 @@ bool CheckAndExportApiVersion() {
         "The setuid sandbox provides API version %d, "
         "but you need %d\n"
         "Please read "
-        "https://chromium.googlesource.com/chromium/src/+/master/docs/linux/suid_sandbox_development.md."
+        "https://chromium.googlesource.com/chromium/src/+/main/docs/linux/suid_sandbox_development.md."
         "\n\n",
         kSUIDSandboxApiNumber,
         api_number);
@@ -480,6 +491,4 @@ int main(int argc, char** argv) {
 
   execv(argv[1], &argv[1]);
   FatalError("execv failed");
-
-  return 1;
 }

@@ -28,10 +28,11 @@
 
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/events/window_event_context.h"
+#include "third_party/blink/renderer/core/dom/pseudo_element.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
-#include "third_party/blink/renderer/core/dom/v0_insertion_point.h"
 #include "third_party/blink/renderer/core/events/touch_event.h"
 #include "third_party/blink/renderer/core/events/touch_event_context.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/html/html_slot_element.h"
 #include "third_party/blink/renderer/core/input/touch.h"
 #include "third_party/blink/renderer/core/input/touch_list.h"
@@ -39,26 +40,52 @@
 namespace blink {
 
 EventTarget& EventPath::EventTargetRespectingTargetRules(Node& reference_node) {
-  if (reference_node.IsPseudoElement()) {
-    DCHECK(reference_node.parentNode());
-    return *reference_node.parentNode();
+  if (auto* pseudo = DynamicTo<PseudoElement>(reference_node)) {
+    // Pseudos with activation behavior (::scroll-marker, ::scroll-button,
+    // ::interest-button) are kept as event.RawTarget() so their
+    // DefaultEventHandler fires correctly (the handler checks
+    // |event.RawTarget() == this|).
+    // Other pseudos resolve to their originating element.
+    if (!pseudo->HasActivationBehavior()) {
+      if (pseudo->isConnected()) {
+        return pseudo->UltimateOriginatingElement();
+      }
+      // Disconnected pseudo — fall back to the pseudo itself.
+    }
   }
 
   return reference_node;
 }
 
-static inline bool ShouldStopAtShadowRoot(Event& event,
-                                          ShadowRoot& shadow_root,
-                                          EventTarget& target) {
-  if (shadow_root.IsV1()) {
-    // In v1, an event is scoped by default unless event.composed flag is set.
-    return !event.composed() && target.ToNode() &&
-           target.ToNode()->OwnerShadowHost() == shadow_root.host();
+// https://dom.spec.whatwg.org/#ref-for-get-the-parent%E2%91%A6
+// A shadow root’s get the parent algorithm, given an event, returns null if
+// event’s composed flag is unset and shadow root is the root of event’s
+// path’s first struct’s invocation target; otherwise shadow root’s host.
+static inline Node* GetShadowRootParent(const ShadowRoot& shadow_root,
+                                        Event* event,
+                                        const Node& target) {
+  if (!event || event->composed()) {
+    return &shadow_root.host();
   }
-  // Ignores event.composed() for v0.
-  // Instead, use event.isScopedInV0() for backward compatibility.
-  return event.IsScopedInV0() && target.ToNode() &&
-         target.ToNode()->OwnerShadowHost() == shadow_root.host();
+
+  // crbug.com/346835896: If the event has a source in a shadow-including
+  // ancestor via reference target, the event path should include the
+  // target element retargeted against the source element.
+  // See: https://github.com/whatwg/dom/pull/1377
+  Element* source = RuntimeEnabledFeatures::ShadowRootReferenceTargetEnabled(
+                        target.GetExecutionContext())
+                        ? event->SourceElement()
+                        : nullptr;
+  if (&shadow_root != target.ContainingShadowRoot() &&
+      (!source || &shadow_root != source->ContainingShadowRoot())) {
+    return &shadow_root.host();
+  } else if (!shadow_root.IsUserAgent() && source &&
+             source->GetTreeScope() != shadow_root &&
+             source->GetTreeScope().IsInclusiveAncestorOf(shadow_root)) {
+    return &source->GetTreeScope().Retarget(target);
+  } else {
+    return nullptr;
+  }
 }
 
 EventPath::EventPath(Node& node, Event* event) : node_(node), event_(event) {
@@ -75,7 +102,11 @@ void EventPath::InitializeWith(Node& node, Event* event) {
 }
 
 static inline bool EventPathShouldBeEmptyFor(Node& node) {
-  return node.IsPseudoElement() && !node.parentElement();
+  // Event path should be empty for orphaned pseudo-elements, and nodes
+  // whose document is stopped. In corner cases (crbug.com/1210480), the node
+  // document can get detached before we can remove event listeners.
+  return (node.IsPseudoElement() && !node.parentElement()) ||
+         node.GetDocument().IsStopped();
 }
 
 void EventPath::Initialize() {
@@ -89,8 +120,7 @@ void EventPath::Initialize() {
 
 void EventPath::CalculatePath() {
   DCHECK(node_);
-  DCHECK(node_event_contexts_.IsEmpty());
-  node_->UpdateDistributionForLegacyDistributedNodes();
+  DCHECK(node_event_contexts_.empty());
 
   // For performance and memory usage reasons we want to store the
   // path using as few bytes as possible and with as few allocations
@@ -98,20 +128,19 @@ void EventPath::CalculatePath() {
   // storing it in a perfectly sized node_event_contexts_ Vector.
   HeapVector<Member<Node>, 64> nodes_in_path;
   Node* current = node_;
+  // Don't expose pseudo-element in the event path.
+  if (auto* pseudo = DynamicTo<PseudoElement>(node_.Get())) {
+    if (event_) {
+      event_->SetPseudoElementTarget(pseudo);
+    }
+    current = &pseudo->UltimateOriginatingElement();
+  }
 
   nodes_in_path.push_back(current);
   while (current) {
     if (event_ && current->KeepEventInNode(*event_))
       break;
-    HeapVector<Member<V0InsertionPoint>, 8> insertion_points;
-    CollectDestinationInsertionPoints(*current, insertion_points);
-    if (!insertion_points.IsEmpty()) {
-      for (const auto& insertion_point : insertion_points)
-        nodes_in_path.push_back(insertion_point);
-      current = insertion_points.back();
-      continue;
-    }
-    if (current->IsChildOfV1ShadowHost()) {
+    if (current->IsChildOfShadowHost() && !current->IsPseudoElement()) {
       if (HTMLSlotElement* slot = current->AssignedSlot()) {
         current = slot;
         nodes_in_path.push_back(current);
@@ -119,23 +148,20 @@ void EventPath::CalculatePath() {
       }
     }
     if (auto* shadow_root = DynamicTo<ShadowRoot>(current)) {
-      if (event_ && ShouldStopAtShadowRoot(*event_, *shadow_root, *node_))
-        break;
-      current = current->OwnerShadowHost();
-      nodes_in_path.push_back(current);
+      current = GetShadowRootParent(*shadow_root, event_, *node_);
     } else {
       current = current->parentNode();
-      if (current)
-        nodes_in_path.push_back(current);
+    }
+    if (current) {
+      nodes_in_path.push_back(current);
     }
   }
-
-  node_event_contexts_.ReserveCapacity(nodes_in_path.size());
-  for (Node* node_in_path : nodes_in_path) {
-    DCHECK(node_in_path);
-    node_event_contexts_.push_back(NodeEventContext(
-        *node_in_path, EventTargetRespectingTargetRules(*node_in_path)));
-  }
+  node_event_contexts_ = HeapVector<NodeEventContext>(
+      nodes_in_path, [](Node* node_in_path) -> NodeEventContext {
+        DCHECK(node_in_path);
+        return NodeEventContext(
+            *node_in_path, EventTargetRespectingTargetRules(*node_in_path));
+      });
 }
 
 void EventPath::CalculateTreeOrderAndSetNearestAncestorClosedTree() {
@@ -259,6 +285,15 @@ void EventPath::AdjustForRelatedTarget(Node& target,
   Node* related_target_node = related_target->ToNode();
   if (!related_target_node)
     return;
+  // If the related target is a pseudo-element without a parent element,
+  // we don't need to adjust the related target.
+  // This is because pseudo-elements shouldn't be exposed to the web
+  // and when they don't have a parent element in the DOM tree, we can't
+  // retarget them.
+  if (related_target_node->IsPseudoElement() &&
+      !related_target_node->parentNode()) {
+    return;
+  }
   if (target.GetDocument() != related_target_node->GetDocument())
     return;
   RetargetRelatedTarget(*related_target_node);
@@ -380,6 +415,15 @@ void EventPath::AdjustTouchList(
     // hot path.
     // TODO(bikineev): Revisit after young generation is there.
     related_node_map.clear();
+  }
+}
+
+void EventPath::AdjustForDisabledFormControl() {
+  for (unsigned i = 0; i < node_event_contexts_.size(); i++) {
+    if (IsDisabledFormControl(&node_event_contexts_[i].GetNode())) {
+      Shrink(i);
+      return;
+    }
   }
 }
 

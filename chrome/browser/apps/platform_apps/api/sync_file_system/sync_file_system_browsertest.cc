@@ -1,33 +1,38 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stdint.h>
+
+#include <memory>
 #include <utility>
 
-#include "base/macros.h"
+#include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
-#include "base/sequenced_task_runner.h"
-#include "base/task/post_task.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/test/bind.h"
 #include "chrome/browser/apps/platform_apps/app_browsertest_util.h"
 #include "chrome/browser/extensions/extension_service.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sync_file_system/drive_backend/sync_engine.h"
 #include "chrome/browser/sync_file_system/local/local_file_sync_service.h"
 #include "chrome/browser/sync_file_system/sync_file_system_service.h"
 #include "chrome/browser/sync_file_system/sync_file_system_service_factory.h"
+#include "chrome/browser/ui/browser.h"
 #include "components/drive/service/fake_drive_service.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
 #include "components/signin/public/identity_manager/identity_test_environment.h"
 #include "content/public/test/browser_test.h"
-#include "extensions/browser/extension_registry.h"
-#include "extensions/browser/extension_system.h"
 #include "extensions/test/extension_test_message_listener.h"
 #include "extensions/test/result_catcher.h"
 #include "storage/browser/quota/quota_manager.h"
 #include "third_party/leveldatabase/leveldb_chrome.h"
+
+using signin::PrimaryAccountChangeEvent;
 
 namespace sync_file_system {
 
@@ -41,7 +46,9 @@ class FakeDriveServiceFactory
   explicit FakeDriveServiceFactory(
       drive::FakeDriveService::ChangeObserver* change_observer)
       : change_observer_(change_observer) {}
-  ~FakeDriveServiceFactory() override {}
+  FakeDriveServiceFactory(const FakeDriveServiceFactory&) = delete;
+  FakeDriveServiceFactory& operator=(const FakeDriveServiceFactory&) = delete;
+  ~FakeDriveServiceFactory() override = default;
 
   std::unique_ptr<drive::DriveServiceInterface> CreateDriveService(
       signin::IdentityManager* identity_manager,
@@ -54,9 +61,7 @@ class FakeDriveServiceFactory
   }
 
  private:
-  drive::FakeDriveService::ChangeObserver* change_observer_;
-
-  DISALLOW_COPY_AND_ASSIGN(FakeDriveServiceFactory);
+  raw_ptr<drive::FakeDriveService::ChangeObserver> change_observer_;
 };
 
 }  // namespace
@@ -64,7 +69,9 @@ class FakeDriveServiceFactory
 class SyncFileSystemTest : public extensions::PlatformAppBrowserTest,
                            public drive::FakeDriveService::ChangeObserver {
  public:
-  SyncFileSystemTest() : remote_service_(nullptr) {}
+  SyncFileSystemTest() = default;
+  SyncFileSystemTest(const SyncFileSystemTest&) = delete;
+  SyncFileSystemTest& operator=(const SyncFileSystemTest&) = delete;
 
   scoped_refptr<base::SequencedTaskRunner> MakeSequencedTaskRunner() {
     return base::ThreadPool::CreateSequencedTaskRunner(
@@ -76,39 +83,32 @@ class SyncFileSystemTest : public extensions::PlatformAppBrowserTest,
     extensions::PlatformAppBrowserTest::SetUpOnMainThread();
     ASSERT_TRUE(base_dir_.CreateUniqueTempDir());
 
-    SyncFileSystemServiceFactory* factory =
-        SyncFileSystemServiceFactory::GetInstance();
+    identity_test_env_ = std::make_unique<signin::IdentityTestEnvironment>();
 
-    content::BrowserContext* context = browser()->profile();
-    extensions::ExtensionServiceInterface* extension_service =
-        extensions::ExtensionSystem::Get(context)->extension_service();
-    extensions::ExtensionRegistry* extension_registry =
-        extensions::ExtensionRegistry::Get(context);
+    // Override factory to inject a test RemoteFileSyncService.
+    SyncFileSystemServiceFactory::GetInstance()->SetTestingFactory(
+        profile(),
+        base::BindLambdaForTesting([this](content::BrowserContext* context)
+                                       -> std::unique_ptr<KeyedService> {
+          auto remote_service = base::WrapUnique(new drive_backend::SyncEngine(
+              base::SingleThreadTaskRunner::GetCurrentDefault(),
+              MakeSequencedTaskRunner(), MakeSequencedTaskRunner(),
+              base_dir_.GetPath(),
+              /*task_logger=*/nullptr, profile(),
+              identity_test_env_->identity_manager(),
+              /*url_loader_factory=*/nullptr,
+              std::make_unique<FakeDriveServiceFactory>(this),
+              in_memory_env_.get()));
+          remote_service->SetSyncEnabled(true);
 
-    std::unique_ptr<drive_backend::SyncEngine::DriveServiceFactory>
-        drive_service_factory(new FakeDriveServiceFactory(this));
-
-    identity_test_env_.reset(new signin::IdentityTestEnvironment);
-
-    remote_service_ = new drive_backend::SyncEngine(
-        base::ThreadTaskRunnerHandle::Get(),  // ui_task_runner
-        MakeSequencedTaskRunner(), MakeSequencedTaskRunner(),
-        base_dir_.GetPath(),
-        nullptr,  // task_logger
-        nullptr,  // notification_manager
-        extension_service, extension_registry,
-        identity_test_env_->identity_manager(),  // identity_manager
-        nullptr,                                 // url_loader_factory
-        std::move(drive_service_factory), in_memory_env_.get());
-    remote_service_->SetSyncEnabled(true);
-    factory->set_mock_remote_file_service(
-        std::unique_ptr<RemoteFileSyncService>(remote_service_));
+          return SyncFileSystemServiceFactory::
+              BuildWithRemoteFileSyncServiceForTest(context,
+                                                    std::move(remote_service));
+        }));
   }
 
   // drive::FakeDriveService::ChangeObserver override.
-  void OnNewChangeAvailable() override {
-    sync_engine()->OnNotificationTimerFired();
-  }
+  void OnNewChangeAvailable() override {}
 
   SyncFileSystemService* sync_file_system_service() {
     return SyncFileSystemServiceFactory::GetForProfile(browser()->profile());
@@ -124,12 +124,7 @@ class SyncFileSystemTest : public extensions::PlatformAppBrowserTest,
   }
 
   void SignIn() {
-    identity_test_env_->SetPrimaryAccount(kEmail);
-
-    // It's necessary to invoke this method manually as the observer callback is
-    // not triggered on ChromeOS.
-    sync_engine()->OnPrimaryAccountSet(
-        identity_test_env_->identity_manager()->GetPrimaryAccountInfo());
+    identity_test_env_->SetPrimaryAccount(kEmail, signin::ConsentLevel::kSync);
   }
 
   void SetSyncEnabled(bool enabled) {
@@ -151,19 +146,15 @@ class SyncFileSystemTest : public extensions::PlatformAppBrowserTest,
   std::unique_ptr<leveldb::Env> in_memory_env_;
 
   std::unique_ptr<signin::IdentityTestEnvironment> identity_test_env_;
-
-  drive_backend::SyncEngine* remote_service_;
-
-  DISALLOW_COPY_AND_ASSIGN(SyncFileSystemTest);
 };
 
 IN_PROC_BROWSER_TEST_F(SyncFileSystemTest, AuthorizationTest) {
   ExtensionTestMessageListener open_failure("checkpoint: Failed to get syncfs",
-                                            true);
+                                            ReplyBehavior::kWillReply);
   ExtensionTestMessageListener bar_created("checkpoint: \"/bar\" created",
-                                           true);
+                                           ReplyBehavior::kWillReply);
   ExtensionTestMessageListener foo_created("checkpoint: \"/foo\" created",
-                                           true);
+                                           ReplyBehavior::kWillReply);
   extensions::ResultCatcher catcher;
 
   LoadAndLaunchPlatformApp("sync_file_system/authorization_test", "Launched");
@@ -184,8 +175,13 @@ IN_PROC_BROWSER_TEST_F(SyncFileSystemTest, AuthorizationTest) {
   // service.  Wait for the completion and resume the app.
   WaitUntilIdle();
 
-  sync_engine()->OnPrimaryAccountCleared(
-      identity_manager()->GetPrimaryAccountInfo());
+  sync_engine()->OnPrimaryAccountChanged(
+      PrimaryAccountChangeEvent(PrimaryAccountChangeEvent::State(
+                                    identity_manager()->GetPrimaryAccountInfo(
+                                        signin::ConsentLevel::kSync),
+                                    signin::ConsentLevel::kSync),
+                                PrimaryAccountChangeEvent::State(),
+                                signin_metrics::ProfileSignout::kTest));
   foo_created.Reply("resume");
 
   ASSERT_TRUE(bar_created.WaitUntilSatisfied());
@@ -198,8 +194,13 @@ IN_PROC_BROWSER_TEST_F(SyncFileSystemTest, AuthorizationTest) {
   EXPECT_EQ(REMOTE_SERVICE_AUTHENTICATION_REQUIRED,
             sync_engine()->GetCurrentState());
 
-  sync_engine()->OnPrimaryAccountSet(
-      identity_manager()->GetPrimaryAccountInfo());
+  sync_engine()->OnPrimaryAccountChanged(
+      PrimaryAccountChangeEvent(PrimaryAccountChangeEvent::State(),
+                                PrimaryAccountChangeEvent::State(
+                                    identity_manager()->GetPrimaryAccountInfo(
+                                        signin::ConsentLevel::kSync),
+                                    signin::ConsentLevel::kSync),
+                                signin_metrics::AccessPoint::kStartPage));
   WaitUntilIdle();
 
   bar_created.Reply("resume");

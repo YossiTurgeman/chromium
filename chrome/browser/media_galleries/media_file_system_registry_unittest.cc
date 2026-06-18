@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,12 +14,12 @@
 #include <set>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
@@ -27,6 +27,7 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "build/build_config.h"
+#include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/test_extension_system.h"
 #include "chrome/browser/media_galleries/media_file_system_context.h"
@@ -51,10 +52,6 @@
 #include "extensions/common/extension.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/chromeos/settings/scoped_cros_settings_test_helper.h"
-#endif
-
 namespace content {
 class SiteInstance;
 }
@@ -68,7 +65,7 @@ using storage_monitor::TestStorageMonitor;
 class TestMediaFileSystemContext : public MediaFileSystemContext {
  public:
   struct FSInfo {
-    FSInfo() {}
+    FSInfo() = default;
     FSInfo(const std::string& device_id, const base::FilePath& path,
            const std::string& fs_name);
 
@@ -80,7 +77,7 @@ class TestMediaFileSystemContext : public MediaFileSystemContext {
   };
 
   explicit TestMediaFileSystemContext(MediaFileSystemRegistry* registry);
-  ~TestMediaFileSystemContext() override {}
+  ~TestMediaFileSystemContext() override = default;
 
   // MediaFileSystemContext implementation.
   bool RegisterFileSystem(const std::string& device_id,
@@ -98,7 +95,7 @@ class TestMediaFileSystemContext : public MediaFileSystemContext {
                   const base::FilePath& path,
                   const std::string& fs_name);
 
-  MediaFileSystemRegistry* registry_;
+  raw_ptr<MediaFileSystemRegistry> registry_;
 
   // The currently allocated mock file systems.
   std::map<std::string /*fs_name*/, FSInfo> file_systems_by_name_;
@@ -135,8 +132,9 @@ bool TestMediaFileSystemContext::RegisterFileSystem(
 }
 
 void TestMediaFileSystemContext::RevokeFileSystem(const std::string& fs_name) {
-  if (!base::Contains(file_systems_by_name_, fs_name))
+  if (!file_systems_by_name_.contains(fs_name)) {
     return;
+  }
   EXPECT_EQ(1U, file_systems_by_name_.erase(fs_name));
 }
 
@@ -167,7 +165,7 @@ void GetGalleryInfoCallback(
     FSInfoMap* results,
     const std::vector<MediaFileSystemInfo>& file_systems) {
   for (size_t i = 0; i < file_systems.size(); ++i) {
-    ASSERT_FALSE(base::Contains(*results, file_systems[i].pref_id));
+    ASSERT_FALSE(results->contains(file_systems[i].pref_id));
     (*results)[file_systems[i].pref_id] = file_systems[i];
   }
 }
@@ -194,12 +192,18 @@ void CheckGalleryInfo(const MediaFileSystemInfo& info,
 class MockProfileSharedRenderProcessHostFactory
     : public content::RenderProcessHostFactory {
  public:
-  MockProfileSharedRenderProcessHostFactory() {}
+  MockProfileSharedRenderProcessHostFactory() = default;
+
+  MockProfileSharedRenderProcessHostFactory(
+      const MockProfileSharedRenderProcessHostFactory&) = delete;
+  MockProfileSharedRenderProcessHostFactory& operator=(
+      const MockProfileSharedRenderProcessHostFactory&) = delete;
+
   ~MockProfileSharedRenderProcessHostFactory() override;
 
   // RPH created with this factory are owned by it.  If the RPH is destroyed
   // for testing purposes, it must be removed from the factory first.
-  content::MockRenderProcessHost* ReleaseRPH(
+  std::unique_ptr<content::MockRenderProcessHost> ReleaseRPH(
       content::BrowserContext* browser_context);
 
   content::RenderProcessHost* CreateRenderProcessHost(
@@ -207,31 +211,18 @@ class MockProfileSharedRenderProcessHostFactory
       content::SiteInstance* site_instance) override;
 
  private:
-  class SharedMockRenderProcessHost : public content::MockRenderProcessHost {
-   public:
-    explicit SharedMockRenderProcessHost(
-        content::BrowserContext* browser_context)
-        : content::MockRenderProcessHost(browser_context) {}
-
-    // This test class lies that the process has not been used to allow
-    // testing of process sharing/reuse inherent in the unit tests that depend
-    // on the MockProfileSharedRenderProcessHostFactory.
-    bool HostHasNotBeenUsed() override { return true; }
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(SharedMockRenderProcessHost);
-  };
-
   mutable std::map<content::BrowserContext*,
                    std::unique_ptr<content::MockRenderProcessHost>>
       rph_map_;
-
-  DISALLOW_COPY_AND_ASSIGN(MockProfileSharedRenderProcessHostFactory);
 };
 
 class ProfileState {
  public:
   explicit ProfileState(MockProfileSharedRenderProcessHostFactory* rph_factory);
+
+  ProfileState(const ProfileState&) = delete;
+  ProfileState& operator=(const ProfileState&) = delete;
+
   ~ProfileState();
 
   MediaGalleriesPreferences* GetMediaGalleriesPrefs();
@@ -247,12 +238,12 @@ class ProfileState {
   extensions::Extension* regular_permission_extension();
   Profile* profile();
 
-  void AddNameForReadCompare(const base::string16& name);
-  void AddNameForAllCompare(const base::string16& name);
+  void AddNameForReadCompare(const std::u16string& name);
+  void AddNameForAllCompare(const std::u16string& name);
 
  private:
   void CompareResults(const std::string& test,
-                      const std::vector<base::string16>& names,
+                      const std::vector<std::u16string>& names,
                       const std::vector<MediaFileSystemInfo>& expected,
                       const std::vector<MediaFileSystemInfo>& actual);
   bool ContainsEntry(const MediaFileSystemInfo& info,
@@ -274,21 +265,15 @@ class ProfileState {
 
   // The RenderProcessHosts are freed when their respective WebContents /
   // RenderViewHosts go away.
-  content::MockRenderProcessHost* single_rph_;
-  content::MockRenderProcessHost* shared_rph_;
+  std::unique_ptr<content::MockRenderProcessHost> single_rph_;
+  std::unique_ptr<content::MockRenderProcessHost> shared_rph_;
 
-  std::vector<base::string16> compare_names_read_;
-  std::vector<base::string16> compare_names_all_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProfileState);
+  std::vector<std::u16string> compare_names_read_;
+  std::vector<std::u16string> compare_names_all_;
 };
 
-base::string16 GetExpectedFolderName(const base::FilePath& path) {
-#if defined(OS_CHROMEOS)
+std::u16string GetExpectedFolderName(const base::FilePath& path) {
   return path.BaseName().LossyDisplayName();
-#else
-  return path.LossyDisplayName();
-#endif
 }
 
 }  // namespace
@@ -296,6 +281,10 @@ base::string16 GetExpectedFolderName(const base::FilePath& path) {
 class MediaFileSystemRegistryTest : public ChromeRenderViewHostTestHarness {
  public:
   MediaFileSystemRegistryTest() = default;
+
+  MediaFileSystemRegistryTest(const MediaFileSystemRegistryTest&) = delete;
+  MediaFileSystemRegistryTest& operator=(const MediaFileSystemRegistryTest&) =
+      delete;
 
   ~MediaFileSystemRegistryTest() override = default;
 
@@ -349,9 +338,9 @@ class MediaFileSystemRegistryTest : public ChromeRenderViewHostTestHarness {
       ProfileState* profile_state);
 
   void ProcessAttach(const std::string& id,
-                     const base::string16& name,
+                     const std::u16string& name,
                      const base::FilePath::StringType& location) {
-    StorageInfo info(id, location, name, base::string16(), base::string16(), 0);
+    StorageInfo info(id, location, name, std::u16string(), std::u16string(), 0);
     StorageMonitor::GetInstance()->receiver()->ProcessAttach(info);
   }
 
@@ -366,19 +355,11 @@ class MediaFileSystemRegistryTest : public ChromeRenderViewHostTestHarness {
   size_t GetExtensionGalleriesHostCount(
       const MediaFileSystemRegistry* registry) const;
 
-  int num_auto_galleries() {
-    return media_directories_.num_galleries();
-  }
-
  protected:
   void SetUp() override;
   void TearDown() override;
 
  private:
-  // This makes sure that at least one default gallery exists on the file
-  // system.
-  EnsureMediaDirectoriesExists media_directories_;
-
   // Some test gallery directories.
   base::ScopedTempDir galleries_dir_;
   // An empty directory in |galleries_dir_|
@@ -387,26 +368,23 @@ class MediaFileSystemRegistryTest : public ChromeRenderViewHostTestHarness {
   base::FilePath dcim_dir_;
 
   // MediaFileSystemRegistry owns this.
-  TestMediaFileSystemContext* test_file_system_context_;
+  raw_ptr<TestMediaFileSystemContext, DanglingUntriaged>
+      test_file_system_context_;
 
   // Needed for extension service & friends to work.
 
-#if defined(OS_CHROMEOS)
-  chromeos::ScopedCrosSettingsTestHelper cros_settings_test_helper_;
-#endif
+  ash::ScopedCrosSettingsTestHelper cros_settings_test_helper_;
 
   MockProfileSharedRenderProcessHostFactory rph_factory_;
 
   std::vector<std::unique_ptr<ProfileState>> profile_states_;
-
-  DISALLOW_COPY_AND_ASSIGN(MediaFileSystemRegistryTest);
 };
 
 namespace {
 
 bool MediaFileSystemInfoComparator(const MediaFileSystemInfo& a,
                                    const MediaFileSystemInfo& b) {
-  CHECK_NE(a.name, b.name);  // Name must be unique.
+  CHECK(&a == &b || a.name != b.name);  // Name must be unique.
   return a.name < b.name;
 }
 
@@ -415,10 +393,9 @@ bool MediaFileSystemInfoComparator(const MediaFileSystemInfo& a,
 ///////////////////////////////////////////////
 
 MockProfileSharedRenderProcessHostFactory::
-    ~MockProfileSharedRenderProcessHostFactory() {
-}
+    ~MockProfileSharedRenderProcessHostFactory() = default;
 
-content::MockRenderProcessHost*
+std::unique_ptr<content::MockRenderProcessHost>
 MockProfileSharedRenderProcessHostFactory::ReleaseRPH(
     content::BrowserContext* browser_context) {
   auto existing = rph_map_.find(browser_context);
@@ -427,7 +404,7 @@ MockProfileSharedRenderProcessHostFactory::ReleaseRPH(
   std::unique_ptr<content::MockRenderProcessHost> result =
       std::move(existing->second);
   rph_map_.erase(existing);
-  return result.release();
+  return result;
 }
 
 content::RenderProcessHost*
@@ -438,7 +415,7 @@ MockProfileSharedRenderProcessHostFactory::CreateRenderProcessHost(
   if (existing != rph_map_.end())
     return existing->second.get();
   rph_map_[browser_context] =
-      std::make_unique<SharedMockRenderProcessHost>(browser_context);
+      std::make_unique<content::MockRenderProcessHost>(browser_context);
   return rph_map_[browser_context].get();
 }
 
@@ -509,32 +486,33 @@ void ProfileState::CheckGalleries(
 
   // No Media Galleries permissions.
   std::vector<MediaFileSystemInfo> empty_expectation;
-  std::vector<base::string16> empty_names;
+  std::vector<std::u16string> empty_names;
   registry->GetMediaFileSystemsForExtension(
       single_web_contents_.get(), no_permissions_extension_.get(),
-      base::Bind(&ProfileState::CompareResults, base::Unretained(this),
-                 base::StringPrintf("%s (no permission)", test.c_str()),
-                 std::cref(empty_names), std::cref(empty_expectation)));
+      base::BindOnce(&ProfileState::CompareResults, base::Unretained(this),
+                     base::StringPrintf("%s (no permission)", test.c_str()),
+                     std::cref(empty_names), std::cref(empty_expectation)));
   content::RunAllTasksUntilIdle();
   EXPECT_EQ(1, GetAndClearComparisonCount());
 
   // Read permission only.
   registry->GetMediaFileSystemsForExtension(
       single_web_contents_.get(), regular_permission_extension_.get(),
-      base::Bind(&ProfileState::CompareResults, base::Unretained(this),
-                 base::StringPrintf("%s (regular permission)", test.c_str()),
-                 std::cref(compare_names_read_),
-                 std::cref(regular_extension_galleries)));
+      base::BindOnce(
+          &ProfileState::CompareResults, base::Unretained(this),
+          base::StringPrintf("%s (regular permission)", test.c_str()),
+          std::cref(compare_names_read_),
+          std::cref(regular_extension_galleries)));
   content::RunAllTasksUntilIdle();
   EXPECT_EQ(1, GetAndClearComparisonCount());
 
   // All galleries permission.
   registry->GetMediaFileSystemsForExtension(
       single_web_contents_.get(), all_permission_extension_.get(),
-      base::Bind(&ProfileState::CompareResults, base::Unretained(this),
-                 base::StringPrintf("%s (all permission)", test.c_str()),
-                 std::cref(compare_names_all_),
-                 std::cref(all_extension_galleries)));
+      base::BindOnce(&ProfileState::CompareResults, base::Unretained(this),
+                     base::StringPrintf("%s (all permission)", test.c_str()),
+                     std::cref(compare_names_all_),
+                     std::cref(all_extension_galleries)));
   content::RunAllTasksUntilIdle();
   EXPECT_EQ(1, GetAndClearComparisonCount());
 }
@@ -545,7 +523,7 @@ FSInfoMap ProfileState::GetGalleriesInfo(extensions::Extension* extension) {
       g_browser_process->media_file_system_registry();
   registry->GetMediaFileSystemsForExtension(
       single_web_contents_.get(), extension,
-      base::Bind(&GetGalleryInfoCallback, base::Unretained(&results)));
+      base::BindOnce(&GetGalleryInfoCallback, base::Unretained(&results)));
   content::RunAllTasksUntilIdle();
   return results;
 }
@@ -562,11 +540,11 @@ Profile* ProfileState::profile() {
   return profile_.get();
 }
 
-void ProfileState::AddNameForReadCompare(const base::string16& name) {
+void ProfileState::AddNameForReadCompare(const std::u16string& name) {
   compare_names_read_.push_back(name);
 }
 
-void ProfileState::AddNameForAllCompare(const base::string16& name) {
+void ProfileState::AddNameForAllCompare(const std::u16string& name) {
   compare_names_all_.push_back(name);
 }
 
@@ -586,7 +564,7 @@ bool ProfileState::ContainsEntry(
 
 void ProfileState::CompareResults(
     const std::string& test,
-    const std::vector<base::string16>& names,
+    const std::vector<std::u16string>& names,
     const std::vector<MediaFileSystemInfo>& expected,
     const std::vector<MediaFileSystemInfo>& actual) {
   num_comparisons_++;
@@ -597,7 +575,7 @@ void ProfileState::CompareResults(
   std::sort(sorted.begin(), sorted.end(), MediaFileSystemInfoComparator);
   std::vector<MediaFileSystemInfo> expect(expected);
   std::sort(expect.begin(), expect.end(), MediaFileSystemInfoComparator);
-  std::vector<base::string16> expect_names(names);
+  std::vector<std::u16string> expect_names(names);
   std::sort(expect_names.begin(), expect_names.end());
 
   for (size_t i = 0; i < expect.size() && i < sorted.size(); ++i) {
@@ -648,7 +626,7 @@ std::string MediaFileSystemRegistryTest::AddUserGallery(
   for (size_t i = 0; i < profile_states_.size(); ++i) {
     profile_states_[i]->GetMediaGalleriesPrefs()->AddGallery(
         device_id, base::FilePath(), MediaGalleryPrefInfo::kUserAdded,
-        base::string16(), base::string16(), base::string16(), 0,
+        std::u16string(), std::u16string(), std::u16string(), 0,
         base::Time::Now(), 0, 0, 0);
   }
   return device_id;
@@ -660,7 +638,7 @@ std::string MediaFileSystemRegistryTest::AttachDevice(
     const base::FilePath& location) {
   std::string device_id = StorageInfo::MakeDeviceId(type, unique_id);
   DCHECK(StorageInfo::IsRemovableDevice(device_id));
-  base::string16 label = location.BaseName().LossyDisplayName();
+  std::u16string label = location.BaseName().LossyDisplayName();
   ProcessAttach(device_id, label, location.value());
   content::RunAllTasksUntilIdle();
   return device_id;
@@ -692,9 +670,6 @@ void MediaFileSystemRegistryTest::AssertAllAutoAddedGalleries() {
     // Make sure that we have at least one gallery and that they are all
     // auto added galleries.
     const MediaGalleriesPrefInfoMap& galleries = prefs->known_galleries();
-#if !defined(OS_CHROMEOS) && !defined(OS_ANDROID)
-    ASSERT_GT(galleries.size(), 0U);
-#endif
     for (auto it = galleries.begin(); it != galleries.end(); ++it) {
       ASSERT_EQ(MediaGalleryPrefInfo::kAutoDetected, it->second.type);
     }
@@ -710,11 +685,7 @@ void MediaFileSystemRegistryTest::InitForGalleriesInfoTest(
   ProfileState* profile_state = GetProfileState(0U);
   *galleries_info = profile_state->GetGalleriesInfo(
       profile_state->all_permission_extension());
-#if !defined(OS_CHROMEOS) && !defined(OS_ANDROID)
-  ASSERT_EQ(3U, galleries_info->size());
-#else
   ASSERT_EQ(0U, galleries_info->size());
-#endif
 }
 
 void MediaFileSystemRegistryTest::CheckNewGalleryInfo(
@@ -732,8 +703,9 @@ void MediaFileSystemRegistryTest::CheckNewGalleryInfo(
   for (FSInfoMap::const_iterator it = new_galleries_info.begin();
        it != new_galleries_info.end();
        ++it) {
-    if (base::Contains(galleries_info, it->first))
+    if (galleries_info.contains(it->first)) {
       continue;
+    }
 
     ASSERT_FALSE(found_new);
     CheckGalleryInfo(it->second, test_file_system_context_, location,
@@ -878,9 +850,9 @@ TEST_F(MediaFileSystemRegistryTest, EraseGalleries) {
 }
 
 // Regression test to make sure calling GetPreferences() does not re-insert
-// galleries on auto-detected removable devices that were blacklisted.
+// galleries on auto-detected removable devices that were blocklisted.
 TEST_F(MediaFileSystemRegistryTest,
-       GetPreferencesDoesNotReinsertBlacklistedGalleries) {
+       GetPreferencesDoesNotReinsertBlocklistedGalleries) {
   CreateProfileState(1);
   AssertAllAutoAddedGalleries();
 
@@ -926,8 +898,6 @@ TEST_F(MediaFileSystemRegistryTest, GalleryNameDefault) {
   }
 }
 
-// TODO(gbillock): Move the remaining test into the linux directory.
-#if !defined(OS_MAC) && !defined(OS_WIN)
 TEST_F(MediaFileSystemRegistryTest, GalleryMTP) {
   FSInfoMap galleries_info;
   InitForGalleriesInfoTest(&galleries_info);
@@ -937,7 +907,6 @@ TEST_F(MediaFileSystemRegistryTest, GalleryMTP) {
   CheckNewGalleryInfo(GetProfileState(0U), galleries_info, location,
                       true /*removable*/, true /* media device */);
 }
-#endif
 
 TEST_F(MediaFileSystemRegistryTest, GalleryDCIM) {
   FSInfoMap galleries_info;
@@ -1039,25 +1008,12 @@ TEST_F(MediaFileSystemRegistryTest, TestNameConstruction) {
   std::vector<MediaFileSystemInfo> one_expectation;
   one_expectation.push_back(added_info);
 
-  base::string16 empty_dir_name = GetExpectedFolderName(empty_dir());
+  std::u16string empty_dir_name = GetExpectedFolderName(empty_dir());
   profile_state->AddNameForReadCompare(empty_dir_name);
   profile_state->AddNameForAllCompare(empty_dir_name);
 
-  // This part of the test is conditional on default directories existing
-  // on the test platform. In ChromeOS, these directories do not exist.
-  base::FilePath path;
-  if (num_auto_galleries() > 0) {
-    ASSERT_TRUE(base::PathService::Get(chrome::DIR_USER_MUSIC, &path));
-    profile_state->AddNameForAllCompare(GetExpectedFolderName(path));
-    ASSERT_TRUE(base::PathService::Get(chrome::DIR_USER_PICTURES, &path));
-    profile_state->AddNameForAllCompare(GetExpectedFolderName(path));
-    ASSERT_TRUE(base::PathService::Get(chrome::DIR_USER_VIDEOS, &path));
-    profile_state->AddNameForAllCompare(GetExpectedFolderName(path));
-
-    profile_state->CheckGalleries("names-dir", one_expectation, auto_galleries);
-  } else {
-    profile_state->CheckGalleries("names", one_expectation, one_expectation);
-  }
+  // In ChromeOS, there are no default media directories.
+  profile_state->CheckGalleries("names", one_expectation, one_expectation);
 }
 
 TEST_F(MediaFileSystemRegistryTest, PreferenceListener) {

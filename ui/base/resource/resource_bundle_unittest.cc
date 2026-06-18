@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,30 +6,41 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
+
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "base/base_paths.h"
-#include "base/big_endian.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/memory/ref_counted_memory.h"
-#include "base/stl_util.h"
+#include "base/numerics/byte_conversions.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
+#include "skia/buildflags.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/skia/include/core/SkBitmap.h"
-#include "ui/base/layout.h"
 #include "ui/base/resource/data_pack.h"
 #include "ui/base/resource/data_pack_literal.h"
 #include "ui/base/resource/mock_resource_bundle_delegate.h"
+#include "ui/base/resource/resource_scale_factor.h"
 #include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/font_list.h"
+#include "ui/gfx/geometry/size.h"
 #include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/image/image_skia_rep.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "ui/display/win/dpi.h"
 #endif
 
@@ -54,27 +65,87 @@ const unsigned char kPngScaleChunk[12] = { 0x00, 0x00, 0x00, 0x00,
                                            'c', 's', 'C', 'l',
                                            0xc1, 0x30, 0x60, 0x4d };
 
-// Returns |bitmap_data| with |custom_chunk| inserted after the IHDR chunk.
-void AddCustomChunk(const base::StringPiece& custom_chunk,
-                    std::vector<unsigned char>* bitmap_data) {
-  EXPECT_LT(base::size(kPngMagic) + kPngChunkMetadataSize, bitmap_data->size());
-  EXPECT_TRUE(std::equal(bitmap_data->begin(),
-                         bitmap_data->begin() + base::size(kPngMagic),
-                         kPngMagic));
-  auto ihdr_start = bitmap_data->begin() + base::size(kPngMagic);
-  char ihdr_length_data[sizeof(uint32_t)];
-  for (size_t i = 0; i < sizeof(uint32_t); ++i)
-    ihdr_length_data[i] = *(ihdr_start + i);
-  uint32_t ihdr_chunk_length = 0;
-  base::ReadBigEndian(reinterpret_cast<char*>(ihdr_length_data),
-                      &ihdr_chunk_length);
-  EXPECT_TRUE(
-      std::equal(ihdr_start + sizeof(uint32_t),
-                 ihdr_start + sizeof(uint32_t) + sizeof(kPngIHDRChunkType),
-                 kPngIHDRChunkType));
+#if BUILDFLAG(SKIA_SUPPORT_SKOTTIE) && BUILDFLAG(USE_BLINK)
+// The width and height attributes values in the lottie asset.
+constexpr int kLottieWidth = 200;
+constexpr int kLottieHeight = 200;
+// A string with the "LOTTIE" prefix that GRIT adds to Lottie assets.
+constexpr std::string_view kLottieData =
+    R"(LOTTIE{
+    "v": "5.5.2",
+    "fr": 1,
+    "ip": 0,
+    "op": 1,
+    "w": 200,
+    "h": 200,
+    "ddd": 0,
+    "assets": [],
+    "layers": [
+        {
+        "ty": 1,
+        "ip": 0,
+        "op": 1,
+        "st": 0,
+        "ks": {},
+        "sc": "#ff0000",
+        "sh": 200,
+        "sw": 200
+        }
+    ]
+    })";
+// The contents after the prefix has been removed.
+constexpr std::string_view kLottieExpected =
+    R"({
+    "v": "5.5.2",
+    "fr": 1,
+    "ip": 0,
+    "op": 1,
+    "w": 200,
+    "h": 200,
+    "ddd": 0,
+    "assets": [],
+    "layers": [
+        {
+        "ty": 1,
+        "ip": 0,
+        "op": 1,
+        "st": 0,
+        "ks": {},
+        "sc": "#ff0000",
+        "sh": 200,
+        "sw": 200
+        }
+    ]
+    })";
+#endif  // BUILDFLAG(SKIA_SUPPORT_SKOTTIE) && BUILDFLAG(USE_BLINK)
 
-  bitmap_data->insert(ihdr_start + kPngChunkMetadataSize + ihdr_chunk_length,
-                      custom_chunk.begin(), custom_chunk.end());
+// Returns |bitmap_data| with |custom_chunk| inserted after the IHDR chunk.
+void AddCustomChunk(std::string_view custom_chunk,
+                    std::vector<unsigned char>* bitmap_data) {
+  size_t chunk_offset = 0u;
+
+  // Expect the magic signature first.
+  auto magic_span =
+      base::as_byte_span(*bitmap_data).first<std::size(kPngMagic)>();
+  EXPECT_TRUE(magic_span == kPngMagic);
+  chunk_offset += magic_span.size();
+
+  // Expect an IHDR chunk next. It starts with a length.
+  auto ihdr_chunk = base::as_byte_span(*bitmap_data).subspan(chunk_offset);
+  uint32_t ihdr_chunk_length =
+      base::U32FromBigEndian(ihdr_chunk.first<sizeof(uint32_t)>());
+  auto ihdr_type =
+      ihdr_chunk.subspan<sizeof(uint32_t), std::size(kPngIHDRChunkType)>();
+  EXPECT_TRUE(ihdr_type == kPngIHDRChunkType);
+  chunk_offset += ihdr_chunk_length;
+
+  // Expect a PNG Metadata chunk next.
+  chunk_offset += kPngChunkMetadataSize;
+
+  // Then insert custom chunk.
+  ASSERT_LE(chunk_offset, bitmap_data->size());
+  bitmap_data->insert(bitmap_data->begin() + chunk_offset, custom_chunk.begin(),
+                      custom_chunk.end());
 }
 
 // Creates datapack at |path| with a single bitmap at resource ID 3
@@ -83,19 +154,20 @@ void AddCustomChunk(const base::StringPiece& custom_chunk,
 // in the encoded bitmap data.
 void CreateDataPackWithSingleBitmap(const base::FilePath& path,
                                     int edge_size,
-                                    const base::StringPiece& custom_chunk) {
+                                    std::string_view custom_chunk) {
   SkBitmap bitmap;
   bitmap.allocN32Pixels(edge_size, edge_size);
   bitmap.eraseColor(SK_ColorWHITE);
-  std::vector<unsigned char> bitmap_data;
-  EXPECT_TRUE(gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, false, &bitmap_data));
+  std::optional<std::vector<uint8_t>> bitmap_data =
+      gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, /*discard_transparency=*/false);
+  ASSERT_TRUE(bitmap_data);
 
-  if (custom_chunk.size() > 0)
-    AddCustomChunk(custom_chunk, &bitmap_data);
+  if (custom_chunk.size() > 0) {
+    AddCustomChunk(custom_chunk, &bitmap_data.value());
+  }
 
-  std::map<uint16_t, base::StringPiece> resources;
-  resources[3u] = base::StringPiece(
-      reinterpret_cast<const char*>(&bitmap_data[0]), bitmap_data.size());
+  std::map<uint16_t, std::string_view> resources;
+  resources[3u] = base::as_string_view(bitmap_data.value());
   DataPack::WritePack(path, resources, ui::DataPack::BINARY);
 }
 
@@ -105,11 +177,14 @@ class ResourceBundleTest : public testing::Test {
  public:
   ResourceBundleTest() : resource_bundle_(nullptr) {}
 
+  ResourceBundleTest(const ResourceBundleTest&) = delete;
+  ResourceBundleTest& operator=(const ResourceBundleTest&) = delete;
+
   ~ResourceBundleTest() override {}
 
   // Overridden from testing::Test:
   void TearDown() override {
-    delete resource_bundle_;
+    resource_bundle_.reset();
     if (temp_dir_.IsValid())
       ASSERT_TRUE(temp_dir_.Delete());
   }
@@ -119,73 +194,36 @@ class ResourceBundleTest : public testing::Test {
   // ResourceBundle.
   ResourceBundle* CreateResourceBundle(ResourceBundle::Delegate* delegate) {
     DCHECK(!resource_bundle_);
-
-    resource_bundle_ = new ResourceBundle(delegate);
-    return resource_bundle_;
+    resource_bundle_ = std::make_unique<ResourceBundle>(delegate);
+    return resource_bundle_.get();
   }
 
  protected:
   base::ScopedTempDir temp_dir_;
-  ResourceBundle* resource_bundle_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ResourceBundleTest);
+  MockResourceBundleDelegate delegate_;
+  std::unique_ptr<ResourceBundle> resource_bundle_;
 };
 
 TEST_F(ResourceBundleTest, DelegateGetPathForResourcePack) {
-  MockResourceBundleDelegate delegate;
-  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate);
-
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
   base::FilePath pack_path(FILE_PATH_LITERAL("/path/to/test_path.pak"));
-  ui::ScaleFactor pack_scale_factor = ui::SCALE_FACTOR_200P;
+  ResourceScaleFactor pack_scale_factor = ui::k200Percent;
 
-  EXPECT_CALL(delegate,
-      GetPathForResourcePack(
-          Property(&base::FilePath::value, pack_path.value()),
-          pack_scale_factor))
+  EXPECT_CALL(delegate_, GetPathForResourcePack(Property(&base::FilePath::value,
+                                                         pack_path.value()),
+                                                pack_scale_factor))
       .Times(1)
       .WillOnce(Return(pack_path));
 
   resource_bundle->AddDataPackFromPath(pack_path, pack_scale_factor);
 }
 
-TEST_F(ResourceBundleTest, DelegateGetPathForLocalePack) {
-  ResourceBundle* orig_instance =
-      ResourceBundle::SwapSharedInstanceForTesting(nullptr);
-  MockResourceBundleDelegate delegate;
-  ResourceBundle::InitSharedInstance(&delegate);
-
-  std::string locale = "en-US";
-
-  // Cancel the load.
-  EXPECT_CALL(delegate, GetPathForLocalePack(_, _))
-      .WillRepeatedly(Return(base::FilePath()))
-      .RetiresOnSaturation();
-
-  EXPECT_FALSE(ResourceBundle::LocaleDataPakExists(locale));
-  EXPECT_EQ("", ResourceBundle::GetSharedInstance().LoadLocaleResources(
-                    locale, /*crash_on_failure=*/false));
-
-  // Allow the load to proceed.
-  EXPECT_CALL(delegate, GetPathForLocalePack(_, _))
-      .WillRepeatedly(ReturnArg<0>());
-
-  EXPECT_TRUE(ResourceBundle::LocaleDataPakExists(locale));
-  EXPECT_EQ(locale, ResourceBundle::GetSharedInstance().LoadLocaleResources(
-                        locale, /*crash_on_failure=*/false));
-
-  ResourceBundle::CleanupSharedInstance();
-  ResourceBundle::SwapSharedInstanceForTesting(orig_instance);
-}
-
 TEST_F(ResourceBundleTest, DelegateGetImageNamed) {
-  MockResourceBundleDelegate delegate;
-  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate);
-
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
   gfx::Image empty_image = resource_bundle->GetEmptyImage();
   int resource_id = 5;
 
-  EXPECT_CALL(delegate, GetImageNamed(resource_id))
+  EXPECT_CALL(delegate_, GetImageNamed(resource_id))
       .Times(1)
       .WillOnce(Return(empty_image));
 
@@ -194,18 +232,16 @@ TEST_F(ResourceBundleTest, DelegateGetImageNamed) {
 }
 
 TEST_F(ResourceBundleTest, DelegateGetNativeImageNamed) {
-  MockResourceBundleDelegate delegate;
-  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate);
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
 
   gfx::Image empty_image = resource_bundle->GetEmptyImage();
   int resource_id = 5;
 
   // Some platforms delegate GetNativeImageNamed calls to GetImageNamed.
-  EXPECT_CALL(delegate, GetImageNamed(resource_id))
+  EXPECT_CALL(delegate_, GetImageNamed(resource_id))
       .Times(Between(0, 1))
       .WillOnce(Return(empty_image));
-  EXPECT_CALL(delegate,
-      GetNativeImageNamed(resource_id))
+  EXPECT_CALL(delegate_, GetNativeImageNamed(resource_id))
       .Times(Between(0, 1))
       .WillOnce(Return(empty_image));
 
@@ -213,20 +249,33 @@ TEST_F(ResourceBundleTest, DelegateGetNativeImageNamed) {
   EXPECT_EQ(empty_image.ToSkBitmap(), result.ToSkBitmap());
 }
 
-TEST_F(ResourceBundleTest, DelegateLoadDataResourceBytes) {
-  MockResourceBundleDelegate delegate;
-  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate);
-
-  // Create the data resource for testing purposes.
-  unsigned char data[] = "My test data";
-  scoped_refptr<base::RefCountedStaticMemory> static_memory(
-      new base::RefCountedStaticMemory(data, sizeof(data)));
+TEST_F(ResourceBundleTest, DelegateHasDataResource) {
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
 
   int resource_id = 5;
-  ui::ScaleFactor scale_factor = ui::SCALE_FACTOR_NONE;
 
-  EXPECT_CALL(delegate, LoadDataResourceBytes(resource_id, scale_factor))
-      .Times(1).WillOnce(Return(static_memory.get()));
+  EXPECT_CALL(delegate_, HasDataResource(resource_id))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  bool result = resource_bundle->HasDataResource(resource_id);
+  EXPECT_EQ(result, true);
+}
+
+TEST_F(ResourceBundleTest, DelegateLoadDataResourceBytes) {
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
+
+  // Create the data resource for testing purposes.
+  const unsigned char data[] = "My test data";
+  scoped_refptr<base::RefCountedStaticMemory> static_memory(
+      new base::RefCountedStaticMemory(data));
+
+  int resource_id = 5;
+  ResourceScaleFactor scale_factor = ui::kScaleFactorNone;
+
+  EXPECT_CALL(delegate_, LoadDataResourceBytes(resource_id, scale_factor))
+      .Times(1)
+      .WillOnce(Return(static_memory.get()));
 
   scoped_refptr<base::RefCountedMemory> result =
       resource_bundle->LoadDataResourceBytesForScale(resource_id, scale_factor);
@@ -234,22 +283,20 @@ TEST_F(ResourceBundleTest, DelegateLoadDataResourceBytes) {
 }
 
 TEST_F(ResourceBundleTest, DelegateGetRawDataResource) {
-  MockResourceBundleDelegate delegate;
-  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate);
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
 
   // Create the string piece for testing purposes.
   char data[] = "My test data";
-  base::StringPiece string_piece(data);
+  std::string_view string_piece(data);
 
   int resource_id = 5;
 
-  EXPECT_CALL(delegate,
-              GetRawDataResource(resource_id, ui::SCALE_FACTOR_NONE, _))
+  EXPECT_CALL(delegate_,
+              GetRawDataResource(resource_id, ui::kScaleFactorNone, _))
       .Times(1)
       .WillOnce(DoAll(SetArgPointee<2>(string_piece), Return(true)));
 
-  base::StringPiece result = resource_bundle->GetRawDataResource(
-      resource_id);
+  std::string_view result = resource_bundle->GetRawDataResource(resource_id);
   EXPECT_EQ(string_piece.data(), result.data());
 }
 
@@ -258,11 +305,10 @@ TEST_F(ResourceBundleTest, IsGzipped) {
   base::FilePath data_path =
       temp_dir_.GetPath().Append(FILE_PATH_LITERAL("sample.pak"));
   // Dump contents into a pak file and load it.
-  ASSERT_TRUE(
-      base::WriteFile(data_path, base::StringPiece(kSampleCompressPakContentsV5,
-                                                   kSampleCompressPakSizeV5)));
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_path, {kSampleCompressPakContentsV5, kSampleCompressPakSizeV5})));
   ResourceBundle* resource_bundle = CreateResourceBundle(nullptr);
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_100P);
+  resource_bundle->AddDataPackFromPath(data_path, k100Percent);
 
   ASSERT_FALSE(resource_bundle->IsGzipped(1));
   ASSERT_FALSE(resource_bundle->IsGzipped(4));
@@ -277,11 +323,10 @@ TEST_F(ResourceBundleTest, IsBrotli) {
   base::FilePath data_path =
       temp_dir_.GetPath().Append(FILE_PATH_LITERAL("sample.pak"));
   // Dump contents into a pak file and load it.
-  ASSERT_TRUE(
-      base::WriteFile(data_path, base::StringPiece(kSampleCompressPakContentsV5,
-                                                   kSampleCompressPakSizeV5)));
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_path, {kSampleCompressPakContentsV5, kSampleCompressPakSizeV5})));
   ResourceBundle* resource_bundle = CreateResourceBundle(nullptr);
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_100P);
+  resource_bundle->AddDataPackFromPath(data_path, k100Percent);
 
   ASSERT_FALSE(resource_bundle->IsBrotli(1));
   ASSERT_FALSE(resource_bundle->IsBrotli(4));
@@ -293,28 +338,26 @@ TEST_F(ResourceBundleTest, IsBrotli) {
 }
 
 TEST_F(ResourceBundleTest, DelegateGetLocalizedString) {
-  MockResourceBundleDelegate delegate;
-  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate);
-
-  base::string16 data = base::ASCIIToUTF16("My test data");
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
+  std::u16string data = u"My test data";
   int resource_id = 5;
 
-  EXPECT_CALL(delegate, GetLocalizedString(resource_id, _))
+  EXPECT_CALL(delegate_, GetLocalizedString(resource_id, _))
       .Times(1)
       .WillOnce(DoAll(SetArgPointee<1>(data), Return(true)));
 
-  base::string16 result = resource_bundle->GetLocalizedString(resource_id);
+  std::u16string result = resource_bundle->GetLocalizedString(resource_id);
   EXPECT_EQ(data, result);
 }
 
 TEST_F(ResourceBundleTest, OverrideStringResource) {
   ResourceBundle* resource_bundle = CreateResourceBundle(nullptr);
 
-  base::string16 data = base::ASCIIToUTF16("My test data");
+  std::u16string data = u"My test data";
   int resource_id = 5;
 
-  base::string16 result = resource_bundle->GetLocalizedString(resource_id);
-  EXPECT_EQ(base::string16(), result);
+  std::u16string result = resource_bundle->GetLocalizedString(resource_id);
+  EXPECT_EQ(std::u16string(), result);
 
   resource_bundle->OverrideLocaleStringResource(resource_id, data);
 
@@ -325,8 +368,7 @@ TEST_F(ResourceBundleTest, OverrideStringResource) {
 #if DCHECK_IS_ON()
 TEST_F(ResourceBundleTest, CanOverrideStringResources) {
   ResourceBundle* resource_bundle = CreateResourceBundle(nullptr);
-
-  base::string16 data = base::ASCIIToUTF16("My test data");
+  std::u16string data = u"My test data";
   int resource_id = 5;
 
   EXPECT_TRUE(
@@ -338,31 +380,34 @@ TEST_F(ResourceBundleTest, CanOverrideStringResources) {
 #endif
 
 TEST_F(ResourceBundleTest, DelegateGetLocalizedStringWithOverride) {
-  MockResourceBundleDelegate delegate;
-  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate);
-
-  base::string16 delegate_data = base::ASCIIToUTF16("My delegate data");
+  ResourceBundle* resource_bundle = CreateResourceBundle(&delegate_);
+  std::u16string delegate_data = u"My delegate data";
   int resource_id = 5;
 
-  EXPECT_CALL(delegate, GetLocalizedString(resource_id, _))
+  EXPECT_CALL(delegate_, GetLocalizedString(resource_id, _))
       .Times(1)
       .WillOnce(DoAll(SetArgPointee<1>(delegate_data), Return(true)));
 
-  base::string16 override_data = base::ASCIIToUTF16("My override data");
+  std::u16string override_data = u"My override data";
 
-  base::string16 result = resource_bundle->GetLocalizedString(resource_id);
+  std::u16string result = resource_bundle->GetLocalizedString(resource_id);
   EXPECT_EQ(delegate_data, result);
 }
 
 TEST_F(ResourceBundleTest, LocaleDataPakExists) {
   // Check that ResourceBundle::LocaleDataPakExists returns the correct results.
-  EXPECT_TRUE(ResourceBundle::LocaleDataPakExists("en-US"));
-  EXPECT_FALSE(ResourceBundle::LocaleDataPakExists("not_a_real_locale"));
+  EXPECT_TRUE(ResourceBundle::LocaleDataPakExists(
+      "en-US", ResourceBundle::Gender::kDefault));
+  EXPECT_FALSE(ResourceBundle::LocaleDataPakExists(
+      "not_a_real_locale", ResourceBundle::Gender::kDefault));
 }
 
 class ResourceBundleImageTest : public ResourceBundleTest {
  public:
   ResourceBundleImageTest() {}
+
+  ResourceBundleImageTest(const ResourceBundleImageTest&) = delete;
+  ResourceBundleImageTest& operator=(const ResourceBundleImageTest&) = delete;
 
   ~ResourceBundleImageTest() override {}
 
@@ -373,12 +418,12 @@ class ResourceBundleImageTest : public ResourceBundleTest {
   }
 
   // Returns resource bundle which uses an empty data pak for locale data.
-  ui::ResourceBundle* CreateResourceBundleWithEmptyLocalePak() {
+  ResourceBundle* CreateResourceBundleWithEmptyLocalePak() {
     // Write an empty data pak for locale data.
     const base::FilePath& locale_path = dir_path().Append(
         FILE_PATH_LITERAL("locale.pak"));
-    EXPECT_TRUE(base::WriteFile(
-        locale_path, base::StringPiece(kEmptyPakContents, kEmptyPakSize)));
+    UNSAFE_TODO(EXPECT_TRUE(
+        base::WriteFile(locale_path, {kEmptyPakContents, kEmptyPakSize})));
 
     ui::ResourceBundle* resource_bundle = CreateResourceBundle(nullptr);
 
@@ -393,44 +438,56 @@ class ResourceBundleImageTest : public ResourceBundleTest {
   // Returns the number of DataPacks managed by |resource_bundle|.
   size_t NumDataPacksInResourceBundle(ResourceBundle* resource_bundle) {
     DCHECK(resource_bundle);
-    return resource_bundle->data_packs_.size();
+    return resource_bundle->resource_handles_.size();
   }
 
  private:
   std::unique_ptr<DataPack> locale_pack_;
-
-  DISALLOW_COPY_AND_ASSIGN(ResourceBundleImageTest);
 };
+
+TEST_F(ResourceBundleImageTest, HasDataResource) {
+  base::FilePath data_path = dir_path().Append(FILE_PATH_LITERAL("sample.pak"));
+
+  // Dump content into pak file.
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_path, {kSampleCompressPakContentsV5, kSampleCompressPakSizeV5})));
+
+  // Load pak file.
+  ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
+  resource_bundle->AddDataPackFromPath(data_path, kScaleFactorNone);
+
+  EXPECT_FALSE(resource_bundle->HasDataResource(1));
+  EXPECT_TRUE(resource_bundle->HasDataResource(4));
+  EXPECT_TRUE(resource_bundle->HasDataResource(6));
+  EXPECT_TRUE(resource_bundle->HasDataResource(8));
+  EXPECT_FALSE(resource_bundle->HasDataResource(200));
+}
 
 TEST_F(ResourceBundleImageTest, LoadDataResourceBytes) {
   base::FilePath data_path = dir_path().Append(FILE_PATH_LITERAL("sample.pak"));
 
   // Dump contents into the pak files.
-  ASSERT_TRUE(
-      base::WriteFile(data_path, base::StringPiece(kSampleCompressPakContentsV5,
-                                                   kSampleCompressPakSizeV5)));
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_path, {kSampleCompressPakContentsV5, kSampleCompressPakSizeV5})));
 
   // Load pak file.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_NONE);
+  resource_bundle->AddDataPackFromPath(data_path, kScaleFactorNone);
 
   // Test normal uncompressed data.
   scoped_refptr<base::RefCountedMemory> resource =
       resource_bundle->LoadDataResourceBytes(4);
-  EXPECT_EQ("this is id 4",
-            std::string(resource->front_as<char>(), resource->size()));
+  EXPECT_EQ("this is id 4", base::as_string_view(*resource));
 
   // Test the brotli data.
   scoped_refptr<base::RefCountedMemory> brotli_resource =
       resource_bundle->LoadDataResourceBytes(6);
-  EXPECT_EQ("this is id 6", std::string(brotli_resource->front_as<char>(),
-                                        brotli_resource->size()));
+  EXPECT_EQ("this is id 6", base::as_string_view(*brotli_resource));
 
   // Test the gzipped data.
   scoped_refptr<base::RefCountedMemory> gzip_resource =
       resource_bundle->LoadDataResourceBytes(8);
-  EXPECT_EQ("this is id 8", std::string(gzip_resource->front_as<char>(),
-                                        gzip_resource->size()));
+  EXPECT_EQ("this is id 8", base::as_string_view(*gzip_resource));
 }
 
 // Verify that we don't crash when trying to load a resource that is not found.
@@ -439,12 +496,12 @@ TEST_F(ResourceBundleImageTest, LoadDataResourceBytesNotFound) {
   base::FilePath data_path = dir_path().Append(FILE_PATH_LITERAL("sample.pak"));
 
   // Dump contents into the pak files.
-  ASSERT_TRUE(base::WriteFile(
-      data_path, base::StringPiece(kEmptyPakContents, kEmptyPakSize)));
+  UNSAFE_TODO(ASSERT_TRUE(
+      base::WriteFile(data_path, {kEmptyPakContents, kEmptyPakSize})));
 
   // Create a resource bundle from the file.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_100P);
+  resource_bundle->AddDataPackFromPath(data_path, k100Percent);
 
   const int kUnfoundResourceId = 10000;
   EXPECT_EQ(nullptr,
@@ -453,7 +510,7 @@ TEST_F(ResourceBundleImageTest, LoadDataResourceBytesNotFound) {
   // Give a .pak file that doesn't exist so we will fail to load it.
   resource_bundle->AddDataPackFromPath(
       base::FilePath(FILE_PATH_LITERAL("non-existant-file.pak")),
-      ui::SCALE_FACTOR_NONE);
+      ui::kScaleFactorNone);
   EXPECT_EQ(nullptr,
             resource_bundle->LoadDataResourceBytes(kUnfoundResourceId));
 }
@@ -464,35 +521,33 @@ TEST_F(ResourceBundleImageTest, LoadDataResourceStringForScale) {
       dir_path().Append(FILE_PATH_LITERAL("sample_2x.pak"));
 
   // Dump content into pak files.
-  ASSERT_TRUE(
-      base::WriteFile(data_path, base::StringPiece(kSampleCompressPakContentsV5,
-                                                   kSampleCompressPakSizeV5)));
-  ASSERT_TRUE(base::WriteFile(
-      data_2x_path, base::StringPiece(kSampleCompressScaledPakContents,
-                                      kSampleCompressScaledPakSize)));
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_path, {kSampleCompressPakContentsV5, kSampleCompressPakSizeV5})));
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_2x_path,
+      {kSampleCompressScaledPakContents, kSampleCompressScaledPakSize})));
 
   // Load pak files.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_100P);
-  resource_bundle->AddDataPackFromPath(data_2x_path, SCALE_FACTOR_200P);
+  resource_bundle->AddDataPackFromPath(data_path, k100Percent);
+  resource_bundle->AddDataPackFromPath(data_2x_path, k200Percent);
 
   // Resource ID 6 is brotlied and exists in both 1x and 2x paks, so we expect a
   // different result when requesting the 2x scale.
-  EXPECT_EQ("this is id 6", resource_bundle->LoadDataResourceStringForScale(
-                                6, SCALE_FACTOR_100P));
-  EXPECT_EQ("this is id 6 x2", resource_bundle->LoadDataResourceStringForScale(
-                                   6, SCALE_FACTOR_200P));
+  EXPECT_EQ("this is id 6",
+            resource_bundle->LoadDataResourceStringForScale(6, k100Percent));
+  EXPECT_EQ("this is id 6 x2",
+            resource_bundle->LoadDataResourceStringForScale(6, k200Percent));
 }
 
 TEST_F(ResourceBundleImageTest, LoadLocalizedResourceString) {
   base::FilePath data_path = dir_path().Append(FILE_PATH_LITERAL("sample.pak"));
   // Dump content into pak file.
-  ASSERT_TRUE(
-      base::WriteFile(data_path, base::StringPiece(kSampleCompressPakContentsV5,
-                                                   kSampleCompressPakSizeV5)));
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_path, {kSampleCompressPakContentsV5, kSampleCompressPakSizeV5})));
   // Load pak file.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_NONE);
+  resource_bundle->AddDataPackFromPath(data_path, kScaleFactorNone);
   resource_bundle->OverrideLocalePakForTest(data_path);
 
   EXPECT_EQ("this is id 6", resource_bundle->LoadLocalizedResourceString(6));
@@ -502,12 +557,11 @@ TEST_F(ResourceBundleImageTest, LoadLocalizedResourceString) {
 TEST_F(ResourceBundleImageTest, LoadDataResourceString) {
   base::FilePath data_path = dir_path().Append(FILE_PATH_LITERAL("sample.pak"));
   // Dump content into pak file.
-  ASSERT_TRUE(
-      base::WriteFile(data_path, base::StringPiece(kSampleCompressPakContentsV5,
-                                                   kSampleCompressPakSizeV5)));
+  UNSAFE_TODO(ASSERT_TRUE(base::WriteFile(
+      data_path, {kSampleCompressPakContentsV5, kSampleCompressPakSizeV5})));
   // Load pak file.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_NONE);
+  resource_bundle->AddDataPackFromPath(data_path, kScaleFactorNone);
 
   // Resource ID 6 is Brotli compressed, expect it to be uncompressed.
   EXPECT_EQ("this is id 6", resource_bundle->LoadDataResourceString(6));
@@ -525,84 +579,82 @@ TEST_F(ResourceBundleImageTest, GetRawDataResource) {
       dir_path().Append(FILE_PATH_LITERAL("sample_2x.pak"));
 
   // Dump contents into the pak files.
-  ASSERT_TRUE(base::WriteFile(
-      data_path, base::StringPiece(kSamplePakContentsV4, kSamplePakSizeV4)));
-  ASSERT_TRUE(base::WriteFile(
-      data_2x_path, base::StringPiece(kSamplePakContents2x, kSamplePakSize2x)));
+  UNSAFE_TODO(ASSERT_TRUE(
+      base::WriteFile(data_path, {kSamplePakContentsV4, kSamplePakSizeV4})));
+  UNSAFE_TODO(ASSERT_TRUE(
+      base::WriteFile(data_2x_path, {kSamplePakContents2x, kSamplePakSize2x})));
 
   // Load the regular and 2x pak files.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_100P);
-  resource_bundle->AddDataPackFromPath(data_2x_path, SCALE_FACTOR_200P);
+  resource_bundle->AddDataPackFromPath(data_path, k100Percent);
+  resource_bundle->AddDataPackFromPath(data_2x_path, k200Percent);
 
   // Resource ID 4 exists in both 1x and 2x paks, so we expect a different
   // result when requesting the 2x scale.
-  EXPECT_EQ("this is id 4", resource_bundle->GetRawDataResourceForScale(4,
-      SCALE_FACTOR_100P));
-  EXPECT_EQ("this is id 4 2x", resource_bundle->GetRawDataResourceForScale(4,
-      SCALE_FACTOR_200P));
+  EXPECT_EQ("this is id 4",
+            resource_bundle->GetRawDataResourceForScale(4, k100Percent));
+  EXPECT_EQ("this is id 4 2x",
+            resource_bundle->GetRawDataResourceForScale(4, k200Percent));
 
   // Resource ID 6 only exists in the 1x pak so we expect the same resource
   // for both scale factor requests.
-  EXPECT_EQ("this is id 6", resource_bundle->GetRawDataResourceForScale(6,
-      SCALE_FACTOR_100P));
-  EXPECT_EQ("this is id 6", resource_bundle->GetRawDataResourceForScale(6,
-      SCALE_FACTOR_200P));
+  EXPECT_EQ("this is id 6",
+            resource_bundle->GetRawDataResourceForScale(6, k100Percent));
+  EXPECT_EQ("this is id 6",
+            resource_bundle->GetRawDataResourceForScale(6, k200Percent));
 }
 
 // Test requesting image reps at various scale factors from the image returned
 // via ResourceBundle::GetImageNamed().
 TEST_F(ResourceBundleImageTest, GetImageNamed) {
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   display::win::SetDefaultDeviceScaleFactor(2.0);
 #endif
-  std::vector<ScaleFactor> supported_factors;
-  supported_factors.push_back(SCALE_FACTOR_100P);
-  supported_factors.push_back(SCALE_FACTOR_200P);
-  test::ScopedSetSupportedScaleFactors scoped_supported(supported_factors);
+  test::ScopedSetSupportedResourceScaleFactors scoped_supported(
+      {k100Percent, k200Percent});
   base::FilePath data_1x_path = dir_path().AppendASCII("sample_1x.pak");
   base::FilePath data_2x_path = dir_path().AppendASCII("sample_2x.pak");
 
   // Create the pak files.
-  CreateDataPackWithSingleBitmap(data_1x_path, 10, base::StringPiece());
-  CreateDataPackWithSingleBitmap(data_2x_path, 20, base::StringPiece());
+  CreateDataPackWithSingleBitmap(data_1x_path, 10, std::string_view());
+  CreateDataPackWithSingleBitmap(data_2x_path, 20, std::string_view());
 
   // Load the regular and 2x pak files.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_1x_path, SCALE_FACTOR_100P);
-  resource_bundle->AddDataPackFromPath(data_2x_path, SCALE_FACTOR_200P);
+  resource_bundle->AddDataPackFromPath(data_1x_path, k100Percent);
+  resource_bundle->AddDataPackFromPath(data_2x_path, k200Percent);
 
-  EXPECT_EQ(SCALE_FACTOR_200P, resource_bundle->GetMaxScaleFactor());
+  EXPECT_EQ(k200Percent, resource_bundle->GetMaxResourceScaleFactor());
 
   gfx::ImageSkia* image_skia = resource_bundle->GetImageSkiaNamed(3);
 
-#if defined(OS_CHROMEOS) || defined(OS_WIN)
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN)
   // ChromeOS/Windows load highest scale factor first.
-  EXPECT_EQ(ui::SCALE_FACTOR_200P,
-            GetSupportedScaleFactor(image_skia->image_reps()[0].scale()));
+  EXPECT_EQ(ui::k200Percent, GetSupportedResourceScaleFactor(
+                                 image_skia->image_reps()[0].scale()));
 #else
-  EXPECT_EQ(ui::SCALE_FACTOR_100P,
-            GetSupportedScaleFactor(image_skia->image_reps()[0].scale()));
+  EXPECT_EQ(ui::k100Percent, GetSupportedResourceScaleFactor(
+                                 image_skia->image_reps()[0].scale()));
 #endif
 
   // Resource ID 3 exists in both 1x and 2x paks. Image reps should be
   // available for both scale factors in |image_skia|.
-  gfx::ImageSkiaRep image_rep =
-      image_skia->GetRepresentation(
-      GetScaleForScaleFactor(ui::SCALE_FACTOR_100P));
-  EXPECT_EQ(ui::SCALE_FACTOR_100P, GetSupportedScaleFactor(image_rep.scale()));
-  image_rep =
-      image_skia->GetRepresentation(
-      GetScaleForScaleFactor(ui::SCALE_FACTOR_200P));
-  EXPECT_EQ(ui::SCALE_FACTOR_200P, GetSupportedScaleFactor(image_rep.scale()));
-
-  // The 1.4x pack was not loaded. Requesting the 1.4x resource should return
-  // either the 1x or the 2x resource.
+  gfx::ImageSkiaRep image_rep = image_skia->GetRepresentation(
+      GetScaleForResourceScaleFactor(ui::k100Percent));
+  EXPECT_EQ(ui::k100Percent,
+            GetSupportedResourceScaleFactor(image_rep.scale()));
   image_rep = image_skia->GetRepresentation(
-      ui::GetScaleForScaleFactor(ui::SCALE_FACTOR_140P));
-  ui::ScaleFactor scale_factor = GetSupportedScaleFactor(image_rep.scale());
-  EXPECT_TRUE(scale_factor == ui::SCALE_FACTOR_100P ||
-              scale_factor == ui::SCALE_FACTOR_200P);
+      GetScaleForResourceScaleFactor(ui::k200Percent));
+  EXPECT_EQ(ui::k200Percent,
+            GetSupportedResourceScaleFactor(image_rep.scale()));
+
+  // Requesting the 1.4x resource should return either the 1x or the 2x
+  // resource.
+  image_rep = image_skia->GetRepresentation(1.4f);
+  ResourceScaleFactor scale_factor =
+      GetSupportedResourceScaleFactor(image_rep.scale());
+  EXPECT_TRUE(scale_factor == ui::k100Percent ||
+              scale_factor == ui::k200Percent);
 
   // ImageSkia scales image if the one for the requested scale factor is not
   // available.
@@ -612,106 +664,92 @@ TEST_F(ResourceBundleImageTest, GetImageNamed) {
 // Test that GetImageNamed() behaves properly for images which GRIT has
 // annotated as having fallen back to 1x.
 TEST_F(ResourceBundleImageTest, GetImageNamedFallback1x) {
-  std::vector<ScaleFactor> supported_factors;
-  supported_factors.push_back(SCALE_FACTOR_100P);
-  supported_factors.push_back(SCALE_FACTOR_200P);
-  test::ScopedSetSupportedScaleFactors scoped_supported(supported_factors);
+  test::ScopedSetSupportedResourceScaleFactors scoped_supported(
+      {k100Percent, k200Percent});
   base::FilePath data_path = dir_path().AppendASCII("sample.pak");
   base::FilePath data_2x_path = dir_path().AppendASCII("sample_2x.pak");
 
   // Create the pak files.
-  CreateDataPackWithSingleBitmap(data_path, 10, base::StringPiece());
+  CreateDataPackWithSingleBitmap(data_path, 10, std::string_view());
   // 2x data pack bitmap has custom chunk to indicate that the 2x bitmap is not
   // available and that GRIT fell back to 1x.
   CreateDataPackWithSingleBitmap(
       data_2x_path, 10,
-      base::StringPiece(reinterpret_cast<const char*>(kPngScaleChunk),
-                        base::size(kPngScaleChunk)));
+      std::string_view(reinterpret_cast<const char*>(kPngScaleChunk),
+                       std::size(kPngScaleChunk)));
 
   // Load the regular and 2x pak files.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_100P);
-  resource_bundle->AddDataPackFromPath(data_2x_path, SCALE_FACTOR_200P);
+  resource_bundle->AddDataPackFromPath(data_path, k100Percent);
+  resource_bundle->AddDataPackFromPath(data_2x_path, k200Percent);
 
   gfx::ImageSkia* image_skia = resource_bundle->GetImageSkiaNamed(3);
 
   // The image rep for 2x should be available. It should be resized to the
   // proper 2x size.
-  gfx::ImageSkiaRep image_rep =
-      image_skia->GetRepresentation(GetScaleForScaleFactor(
-      ui::SCALE_FACTOR_200P));
-  EXPECT_EQ(ui::SCALE_FACTOR_200P, GetSupportedScaleFactor(image_rep.scale()));
+  gfx::ImageSkiaRep image_rep = image_skia->GetRepresentation(
+      GetScaleForResourceScaleFactor(ui::k200Percent));
+  EXPECT_EQ(ui::k200Percent,
+            GetSupportedResourceScaleFactor(image_rep.scale()));
   EXPECT_EQ(20, image_rep.pixel_width());
   EXPECT_EQ(20, image_rep.pixel_height());
 }
 
-#if defined(OS_WIN)
-// Tests GetImageNamed() behaves properly when the size of a scaled image
-// requires rounding as a result of using a non-integer scale factor.
-// Scale factors of 140 and 1805 are Windows specific.
-TEST_F(ResourceBundleImageTest, GetImageNamedFallback1xRounding) {
-  std::vector<ScaleFactor> supported_factors;
-  supported_factors.push_back(SCALE_FACTOR_100P);
-  supported_factors.push_back(SCALE_FACTOR_140P);
-  supported_factors.push_back(SCALE_FACTOR_180P);
-  test::ScopedSetSupportedScaleFactors scoped_supported(supported_factors);
-
-  base::FilePath data_path = dir_path().AppendASCII("sample.pak");
-  base::FilePath data_140P_path = dir_path().AppendASCII("sample_140P.pak");
-  base::FilePath data_180P_path = dir_path().AppendASCII("sample_180P.pak");
-
-  CreateDataPackWithSingleBitmap(data_path, 8, base::StringPiece());
-  // Mark 140% and 180% images as requiring 1x fallback.
-  CreateDataPackWithSingleBitmap(
-      data_140P_path, 8,
-      base::StringPiece(reinterpret_cast<const char*>(kPngScaleChunk),
-                        base::size(kPngScaleChunk)));
-  CreateDataPackWithSingleBitmap(
-      data_180P_path, 8,
-      base::StringPiece(reinterpret_cast<const char*>(kPngScaleChunk),
-                        base::size(kPngScaleChunk)));
-
-  ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_path, SCALE_FACTOR_100P);
-  resource_bundle->AddDataPackFromPath(data_140P_path, SCALE_FACTOR_140P);
-  resource_bundle->AddDataPackFromPath(data_180P_path, SCALE_FACTOR_180P);
-
-  // Non-integer dimensions should be rounded up.
-  gfx::ImageSkia* image_skia = resource_bundle->GetImageSkiaNamed(3);
-  gfx::ImageSkiaRep image_rep =
-    image_skia->GetRepresentation(
-    GetScaleForScaleFactor(ui::SCALE_FACTOR_140P));
-  EXPECT_EQ(12, image_rep.pixel_width());
-  image_rep = image_skia->GetRepresentation(
-    GetScaleForScaleFactor(ui::SCALE_FACTOR_180P));
-  EXPECT_EQ(15, image_rep.pixel_width());
-}
-#endif
-
 TEST_F(ResourceBundleImageTest, FallbackToNone) {
-  std::vector<ScaleFactor> supported_factors;
-  supported_factors.push_back(SCALE_FACTOR_100P);
-  supported_factors.push_back(SCALE_FACTOR_200P);
-  supported_factors.push_back(SCALE_FACTOR_300P);
-
   // Presents a consistent set of supported scale factors for all platforms.
-  // iOS does not include SCALE_FACTOR_100P, which breaks the test below.
-  test::ScopedSetSupportedScaleFactors scoped_supported(supported_factors);
+  // iOS does not include k100Percent, which breaks the test below.
+  test::ScopedSetSupportedResourceScaleFactors scoped_supported(
+      {k100Percent, k200Percent, k300Percent});
 
   base::FilePath data_default_path = dir_path().AppendASCII("sample.pak");
 
   // Create the pak files.
-  CreateDataPackWithSingleBitmap(data_default_path, 10, base::StringPiece());
+  CreateDataPackWithSingleBitmap(data_default_path, 10, std::string_view());
 
-    // Load the regular pak files only.
+  // Load the regular pak files only.
   ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
-  resource_bundle->AddDataPackFromPath(data_default_path, SCALE_FACTOR_NONE);
+  resource_bundle->AddDataPackFromPath(data_default_path, kScaleFactorNone);
 
   gfx::ImageSkia* image_skia = resource_bundle->GetImageSkiaNamed(3);
   EXPECT_EQ(1u, image_skia->image_reps().size());
   EXPECT_TRUE(image_skia->image_reps()[0].unscaled());
-  EXPECT_EQ(ui::SCALE_FACTOR_100P,
-            GetSupportedScaleFactor(image_skia->image_reps()[0].scale()));
+  EXPECT_EQ(ui::k100Percent, GetSupportedResourceScaleFactor(
+                                 image_skia->image_reps()[0].scale()));
 }
+
+#if BUILDFLAG(SKIA_SUPPORT_SKOTTIE) && BUILDFLAG(USE_BLINK)
+TEST_F(ResourceBundleImageTest, Lottie) {
+  // Create the pak files.
+  const base::FilePath data_unscaled_path =
+      dir_path().AppendASCII("sample.pak");
+  const std::map<uint16_t, std::string_view> resources = {
+      std::make_pair(3u, kLottieData)};
+  DataPack::WritePack(data_unscaled_path, resources, ui::DataPack::BINARY);
+
+  // Load the unscaled pack file.
+  ResourceBundle* resource_bundle = CreateResourceBundleWithEmptyLocalePak();
+  resource_bundle->AddDataPackFromPath(data_unscaled_path, kScaleFactorNone);
+
+  std::optional<std::vector<uint8_t>> data = resource_bundle->GetLottieData(3);
+  ASSERT_TRUE(data.has_value());
+  EXPECT_TRUE(std::ranges::equal(*data, kLottieExpected));
+
+  test::ScopedSetSupportedResourceScaleFactors scoped_supported(
+      {k100Percent, k200Percent});
+
+  gfx::ImageSkia* image_skia = resource_bundle->GetImageSkiaNamed(3);
+
+  // Unscaled image should always return scale=1.
+  EXPECT_EQ(1.f, image_skia->GetRepresentation(2.f).scale());
+  EXPECT_EQ(1.f, image_skia->GetRepresentation(1.f).scale());
+  EXPECT_EQ(1.f, image_skia->GetRepresentation(1.4f).scale());
+
+  EXPECT_EQ(kLottieWidth, image_skia->width());
+  EXPECT_EQ(kLottieHeight, image_skia->height());
+
+  // Lottie resource should be 'unscaled'.
+  EXPECT_TRUE(image_skia->image_reps()[0].unscaled());
+}
+#endif  // BUILDFLAG(SKIA_SUPPORT_SKOTTIE) && BUILDFLAG(USE_BLINK)
 
 }  // namespace ui

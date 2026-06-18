@@ -33,17 +33,17 @@ namespace blink {
 
 class Element;
 
-class RemoveCSSPropertyCommand final : public SimpleEditCommand {
+class RemoveCssPropertyCommand final : public SimpleEditCommand {
  public:
-  RemoveCSSPropertyCommand(Document&, Element*, CSSPropertyID);
+  RemoveCssPropertyCommand(Document&, Element*, CSSPropertyID);
+  ~RemoveCssPropertyCommand() override;
 
   void Trace(Visitor*) const override;
 
  private:
-  ~RemoveCSSPropertyCommand() override;
-
   void DoApply(EditingState*) override;
   void DoUnapply() override;
+  String ToString() const override;
 
   Member<Element> element_;
   CSSPropertyID property_;

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,12 +11,14 @@
 #include <utility>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list_threadsafe.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/timer/timer.h"
 #include "chromecast/device/bluetooth/le/ble_notification_logger.h"
 #include "chromecast/device/bluetooth/le/gatt_client_manager.h"
 #include "chromecast/device/bluetooth/shlib/gatt_client.h"
+#include "chromecast/public/bluetooth/gatt.h"
 
 namespace chromecast {
 namespace bluetooth {
@@ -29,18 +31,19 @@ class GattClientManagerImpl
  public:
   // If a Connect request takes longer than this amount of time, we will treat
   // it as a failure.
-  static constexpr base::TimeDelta kConnectTimeout =
-      base::TimeDelta::FromSeconds(40);
+  static constexpr base::TimeDelta kConnectTimeout = base::Seconds(40);
   // If a Disconnect request takes longer than this amount of time, we will
   // treat it as a failure.
-  static constexpr base::TimeDelta kDisconnectTimeout =
-      base::TimeDelta::FromSeconds(10);
+  static constexpr base::TimeDelta kDisconnectTimeout = base::Seconds(10);
   // If a ReadRemoteRssi request takes longer than this amount of time, we will
   // treat it as a failure.
-  static constexpr base::TimeDelta kReadRemoteRssiTimeout =
-      base::TimeDelta::FromSeconds(10);
+  static constexpr base::TimeDelta kReadRemoteRssiTimeout = base::Seconds(10);
 
   explicit GattClientManagerImpl(bluetooth_v2_shlib::GattClient* gatt_client);
+
+  GattClientManagerImpl(const GattClientManagerImpl&) = delete;
+  GattClientManagerImpl& operator=(const GattClientManagerImpl&) = delete;
+
   ~GattClientManagerImpl() override;
 
   void InitializeOnIoThread();
@@ -67,9 +70,12 @@ class GattClientManagerImpl
 
   // Add a Connect or Disconnect request to the queue. |is_connect| is true for
   // Connect request and false for Disconnect request. They can only be executed
-  // serially.
-  void EnqueueConnectRequest(const bluetooth_v2_shlib::Addr& addr,
-                             bool is_connect);
+  // serially. |transport| need only be set if is_connect == true and you wish
+  // to force a BT Classic or LE connection.
+  void EnqueueConnectRequest(
+      const bluetooth_v2_shlib::Addr& addr,
+      bool is_connect,
+      bluetooth_v2_shlib::Gatt::Client::Transport transport = bluetooth_v2_shlib::Gatt::Client::Transport::kAuto);
 
   // Add a ReadRemoteRssi request to the queue. They can only be executed
   // serially.
@@ -132,7 +138,7 @@ class GattClientManagerImpl
 
   void FinalizeOnIoThread();
 
-  bluetooth_v2_shlib::GattClient* const gatt_client_;
+  const raw_ptr<bluetooth_v2_shlib::GattClient> gatt_client_;
 
   scoped_refptr<base::ObserverListThreadSafe<Observer>> observers_;
 
@@ -160,8 +166,17 @@ class GattClientManagerImpl
   // Queue for concurrent Connect/Disconnect requests. Each request is
   // represented using a <addr, is_connect> pair. |is_connect| is true for
   // Connect requests and false for Disconnect requests.
-  std::deque<std::pair<bluetooth_v2_shlib::Addr, bool>>
-      pending_connect_requests_;
+  struct PendingRequest {
+    PendingRequest(const bluetooth_v2_shlib::Addr& addr,
+                   bool is_connect,
+                   bluetooth_v2_shlib::Gatt::Client::Transport transport);
+    ~PendingRequest();
+
+    bluetooth_v2_shlib::Addr addr;
+    bool is_connect;
+    bluetooth_v2_shlib::Gatt::Client::Transport transport;
+  };
+  std::deque<PendingRequest> pending_connect_requests_;
 
   bool disconnect_all_pending_ = false;
 
@@ -179,7 +194,6 @@ class GattClientManagerImpl
 
   base::WeakPtr<GattClientManagerImpl> weak_this_;
   std::unique_ptr<base::WeakPtrFactory<GattClientManagerImpl>> weak_factory_;
-  DISALLOW_COPY_AND_ASSIGN(GattClientManagerImpl);
 };
 
 }  // namespace bluetooth

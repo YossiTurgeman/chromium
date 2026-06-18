@@ -1,3 +1,12 @@
+<!--
+@BLINK-ALLOW:description*
+@WIN-ALLOW:description*
+@AURALINUX-ALLOW:description*
+@UIA-WIN-ALLOW:FullDescription*
+@MAC-ALLOW:AXDescription
+@MAC-ALLOW:AXHelp
+@BLINK-ALLOW:labelledbyIds*
+-->
 <!DOCTYPE html>
 <html>
 <body>
@@ -15,6 +24,15 @@
   <tr>
     <td>Safari</td>
     <td>WebKit</td>
+  </tr>
+</table>
+
+<!-- If there is already a name, the caption becomes a description -->
+<table aria-label="Name">
+  <caption>Description</caption>
+  <tr>
+    <td>A</td>
+    <td>B</td>
   </tr>
 </table>
 

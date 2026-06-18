@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,11 @@
 #include <set>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/values.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "chrome/browser/media/media_engagement_score.h"
 #include "chrome/browser/media/media_engagement_score_details.mojom.h"
+#include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/history_service_observer.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/pref_registry/pref_registry_syncable.h"
@@ -28,10 +29,6 @@ class Clock;
 namespace content {
 class WebContents;
 }  // namespace content
-
-namespace history {
-class HistoryService;
-}
 
 namespace url {
 class Origin;
@@ -54,13 +51,20 @@ class MediaEngagementService : public KeyedService,
   static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
 
   explicit MediaEngagementService(Profile* profile);
+
+  MediaEngagementService(const MediaEngagementService&) = delete;
+  MediaEngagementService& operator=(const MediaEngagementService&) = delete;
+
   ~MediaEngagementService() override;
 
   // Returns the engagement score of |origin|.
   double GetEngagementScore(const url::Origin& origin) const;
 
-  // Returns true if |origin| has an engagement score considered high.
-  bool HasHighEngagement(const url::Origin& origin) const;
+  // Returns true if `origin` has an engagement score considered high.
+  // Otherwise, check the global data (`MediaEngagementPreloadedList`) if the
+  // `kPreloadMediaEngagementData` feature flag is enabled and the number of
+  // visits is less than the number of visits required to have an MEI score.
+  virtual bool HasHighEngagement(const url::Origin& origin) const;
 
   // Returns a map of all stored origins and their engagement levels.
   std::map<url::Origin, double> GetScoreMapForTesting() const;
@@ -74,8 +78,8 @@ class MediaEngagementService : public KeyedService,
       const;
 
   // Overridden from history::HistoryServiceObserver:
-  void OnURLsDeleted(history::HistoryService* history_service,
-                     const history::DeletionInfo& deletion_info) override;
+  void OnHistoryDeletions(history::HistoryService* history_service,
+                          const history::DeletionInfo& deletion_info) override;
 
   // KeyedService support:
   void Shutdown() override;
@@ -89,6 +93,9 @@ class MediaEngagementService : public KeyedService,
 
   MediaEngagementContentsObserver* GetContentsObserverFor(
       content::WebContents* web_contents) const;
+
+  // Sets the |history| service to observe.
+  void SetHistoryServiceForTesting(history::HistoryService* history);
 
   Profile* profile() const;
 
@@ -107,16 +114,17 @@ class MediaEngagementService : public KeyedService,
   // engagement is only earned for HTTP and HTTPS.
   bool ShouldRecordEngagement(const url::Origin& origin) const;
 
-  base::flat_map<content::WebContents*, MediaEngagementContentsObserver*>
+  base::flat_map<content::WebContents*,
+                 raw_ptr<MediaEngagementContentsObserver, CtnExperimental>>
       contents_observers_;
 
-  Profile* profile_;
+  raw_ptr<Profile, DanglingUntriaged> profile_;
 
   // Clear any data for a specific origin.
   void Clear(const url::Origin& origin);
 
   // An internal clock for testing.
-  base::Clock* clock_;
+  raw_ptr<base::Clock> clock_;
 
   std::vector<MediaEngagementScore> GetAllStoredScores() const;
 
@@ -130,7 +138,9 @@ class MediaEngagementService : public KeyedService,
       const std::set<url::Origin>& deleted_origins,
       const history::OriginCountAndLastVisitMap& origin_data);
 
-  DISALLOW_COPY_AND_ASSIGN(MediaEngagementService);
+  base::ScopedObservation<history::HistoryService,
+                          history::HistoryServiceObserver>
+      history_service_observation_{this};
 };
 
 #endif  // CHROME_BROWSER_MEDIA_MEDIA_ENGAGEMENT_SERVICE_H_

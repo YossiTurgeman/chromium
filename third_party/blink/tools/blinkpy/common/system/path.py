@@ -41,7 +41,7 @@ def _escape(path):
     # when converting filenames to files. Instead of using urllib's default
     # rules, we allow a small list of other characters through un-escaped.
     # It's unclear if this is the best possible solution.
-    return urllib.quote(path, safe='/+:')
+    return urllib.parse.quote(path, safe='/+:')
 
 
 def _convert_path(platform, path):

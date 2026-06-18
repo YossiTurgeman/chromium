@@ -1,11 +1,9 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEVICE_BLUETOOTH_TEST_MOCK_BLUETOOTH_SOCKET_H_
 #define DEVICE_BLUETOOTH_TEST_MOCK_BLUETOOTH_SOCKET_H_
-
-#include <string>
 
 #include "device/bluetooth/bluetooth_socket.h"
 #include "device/bluetooth/public/cpp/bluetooth_uuid.h"
@@ -17,7 +15,6 @@ namespace device {
 class MockBluetoothSocket : public BluetoothSocket {
  public:
   MockBluetoothSocket();
-  MOCK_METHOD0(Close, void());
   MOCK_METHOD1(Disconnect, void(base::OnceClosure success_callback));
   MOCK_METHOD3(Receive,
                void(int count,

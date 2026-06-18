@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,16 +11,17 @@ class FilePath;
 
 namespace installer {
 
-class MasterPreferences;
+class InitialPreferences;
 
 // Verbose installer runs clock in at around 50K, non-verbose much less than
 // that. Some installer operations span multiple setup.exe runs, so we try
 // to keep enough for at least 10 runs or so at any given time.
-const int kMaxInstallerLogFileSize = 1024 * 1024;
+inline constexpr int kMaxInstallerLogFileSize = 1024 * 1024;
 
 // Truncate the file down to half of the max, such that we don't incur
 // truncation on every update.
-const int kTruncatedInstallerLogFileSize = kMaxInstallerLogFileSize / 2;
+inline constexpr int kTruncatedInstallerLogFileSize =
+    kMaxInstallerLogFileSize / 2;
 
 static_assert(kTruncatedInstallerLogFileSize < kMaxInstallerLogFileSize,
               "kTruncatedInstallerLogFileSize must be less than "
@@ -43,13 +44,13 @@ enum TruncateResult {
 TruncateResult TruncateLogFileIfNeeded(const base::FilePath& log_file);
 
 // Call to initialize logging for Chrome installer.
-void InitInstallerLogging(const installer::MasterPreferences& prefs);
+void InitInstallerLogging(const installer::InitialPreferences& prefs);
 
 // Call when done using logging for Chrome installer.
 void EndInstallerLogging();
 
 // Returns the full path of the log file.
-base::FilePath GetLogFilePath(const installer::MasterPreferences& prefs);
+base::FilePath GetLogFilePath(const installer::InitialPreferences& prefs);
 
 }  // namespace installer
 

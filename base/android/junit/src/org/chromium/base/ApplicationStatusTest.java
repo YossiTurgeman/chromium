@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,7 +32,6 @@ import org.robolectric.annotation.Config;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 import org.robolectric.shadows.ShadowActivity;
-import org.robolectric.shadows.multidex.ShadowMultiDex;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
@@ -40,8 +39,9 @@ import java.util.List;
 
 /** Unit tests for {@link ApplicationStatus}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE,
-        shadows = {ApplicationStatusTest.TrackingShadowActivity.class, ShadowMultiDex.class})
+@Config(
+        manifest = Config.NONE,
+        shadows = {ApplicationStatusTest.TrackingShadowActivity.class})
 public class ApplicationStatusTest {
     private static class WindowCallbackWrapper implements Window.Callback {
         final Window.Callback mWrapped;
@@ -245,19 +245,71 @@ public class ApplicationStatusTest {
 
     @Test
     public void testSingleWrappedCallback() {
-        Assert.assertTrue(ApplicationStatus.reachesWindowCallback(
-                new WindowCallbackWrapper(createWindowCallbackProxy())));
+        Assert.assertTrue(
+                ApplicationStatus.reachesWindowCallback(
+                        new WindowCallbackWrapper(createWindowCallbackProxy())));
     }
 
     @Test
     public void testDoubleWrappedCallback() {
-        Assert.assertTrue(ApplicationStatus.reachesWindowCallback(
-                new WindowCallbackWrapper(new WindowCallbackWrapper(createWindowCallbackProxy()))));
+        Assert.assertTrue(
+                ApplicationStatus.reachesWindowCallback(
+                        new WindowCallbackWrapper(
+                                new WindowCallbackWrapper(createWindowCallbackProxy()))));
     }
 
     @Test
     public void testSubclassWrappedCallback() {
-        Assert.assertTrue(ApplicationStatus.reachesWindowCallback(
-                new SubclassedCallbackWrapper(createWindowCallbackProxy())));
+        Assert.assertTrue(
+                ApplicationStatus.reachesWindowCallback(
+                        new SubclassedCallbackWrapper(createWindowCallbackProxy())));
+    }
+
+    @Test
+    public void testTaskVisibilityForCreatedActivity() {
+        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class);
+
+        controller.create();
+        Assert.assertFalse(ApplicationStatus.isTaskVisible(controller.get().getTaskId()));
+    }
+
+    @Test
+    public void testTaskVisibilityForStartedActivity() {
+        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class);
+
+        controller.create().start();
+        Assert.assertFalse(ApplicationStatus.isTaskVisible(controller.get().getTaskId()));
+    }
+
+    @Test
+    public void testTaskVisibilityForResumedActivity() {
+        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class);
+
+        controller.create().resume();
+        Assert.assertTrue(ApplicationStatus.isTaskVisible(controller.get().getTaskId()));
+    }
+
+    @Test
+    public void testTaskVisibilityForPausedActivity() {
+        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class);
+
+        controller.create().pause();
+        Assert.assertTrue(ApplicationStatus.isTaskVisible(controller.get().getTaskId()));
+    }
+
+    @Test
+    public void testTaskVisibilityForStoppedActivity() {
+        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class);
+
+        controller.create().stop();
+        Assert.assertFalse(ApplicationStatus.isTaskVisible(controller.get().getTaskId()));
+    }
+
+    @Test
+    public void testTaskVisibilityForDestroyedActivity() {
+        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class);
+
+        controller.create().destroy();
+        Assert.assertFalse(ApplicationStatus.isTaskVisible(controller.get().getTaskId()));
     }
 }

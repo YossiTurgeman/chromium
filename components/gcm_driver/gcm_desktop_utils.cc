@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,13 @@
 #include <utility>
 
 #include "base/command_line.h"
-#include "base/sequenced_task_runner.h"
+#include "base/task/sequenced_task_runner.h"
 #include "build/build_config.h"
 #include "components/gcm_driver/gcm_client_factory.h"
 #include "components/gcm_driver/gcm_driver.h"
 #include "components/gcm_driver/gcm_driver_desktop.h"
-#include "components/sync/base/sync_util.h"
+#include "components/version_info/channel.h"
+#include "components/version_info/version_info.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "url/gurl.h"
 
@@ -21,17 +22,17 @@ namespace gcm {
 namespace {
 
 GCMClient::ChromePlatform GetPlatform() {
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   return GCMClient::PLATFORM_WIN;
-#elif defined(OS_APPLE)
+#elif BUILDFLAG(IS_APPLE)
   return GCMClient::PLATFORM_MAC;
-#elif defined(OS_IOS)
+#elif BUILDFLAG(IS_IOS)
   return GCMClient::PLATFORM_IOS;
-#elif defined(OS_ANDROID)
+#elif BUILDFLAG(IS_ANDROID)
   return GCMClient::PLATFORM_ANDROID;
-#elif defined(OS_CHROMEOS)
+#elif BUILDFLAG(IS_CHROMEOS)
   return GCMClient::PLATFORM_CROS;
-#elif defined(OS_LINUX)
+#elif BUILDFLAG(IS_LINUX)
   return GCMClient::PLATFORM_LINUX;
 #else
   // For all other platforms, return as LINUX.
@@ -53,11 +54,10 @@ GCMClient::ChromeChannel GetChannel(version_info::Channel channel) {
       return GCMClient::CHANNEL_STABLE;
   }
   NOTREACHED();
-  return GCMClient::CHANNEL_UNKNOWN;
 }
 
 std::string GetVersion() {
-  return version_info::GetVersionNumber();
+  return std::string(version_info::GetVersionNumber());
 }
 
 GCMClient::ChromeBuildInfo GetChromeBuildInfo(
@@ -78,7 +78,6 @@ std::unique_ptr<GCMDriver> CreateGCMDriverDesktop(
     std::unique_ptr<GCMClientFactory> gcm_client_factory,
     PrefService* prefs,
     const base::FilePath& store_path,
-    bool remove_account_mappings_with_email_key,
     base::RepeatingCallback<void(
         mojo::PendingReceiver<network::mojom::ProxyResolvingSocketFactory>)>
         get_socket_factory_callback,
@@ -88,14 +87,14 @@ std::unique_ptr<GCMDriver> CreateGCMDriverDesktop(
     const std::string& product_category_for_subtypes,
     const scoped_refptr<base::SequencedTaskRunner>& ui_task_runner,
     const scoped_refptr<base::SequencedTaskRunner>& io_task_runner,
-    const scoped_refptr<base::SequencedTaskRunner>& blocking_task_runner) {
+    const scoped_refptr<base::SequencedTaskRunner>& blocking_task_runner,
+    os_crypt_async::OSCryptAsync* os_crypt_async) {
   return std::unique_ptr<GCMDriver>(new GCMDriverDesktop(
       std::move(gcm_client_factory),
-      GetChromeBuildInfo(channel, product_category_for_subtypes),
-      syncer::MakeUserAgentForSync(channel), prefs, store_path,
-      remove_account_mappings_with_email_key, get_socket_factory_callback,
-      std::move(url_loader_factory), network_connection_tracker, ui_task_runner,
-      io_task_runner, blocking_task_runner));
+      GetChromeBuildInfo(channel, product_category_for_subtypes), prefs,
+      store_path, get_socket_factory_callback, std::move(url_loader_factory),
+      network_connection_tracker, ui_task_runner, io_task_runner,
+      blocking_task_runner, os_crypt_async));
 }
 
 }  // namespace gcm

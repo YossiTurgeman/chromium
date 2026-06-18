@@ -1,10 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_MARKERS_SUGGESTION_MARKER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_MARKERS_SUGGESTION_MARKER_H_
 
+#include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/markers/styleable_marker.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
 
@@ -21,12 +22,20 @@ class SuggestionMarkerProperties;
 // SuggestionMarker a suggestion replace operation pertains to.
 class CORE_EXPORT SuggestionMarker final : public StyleableMarker {
  public:
-  enum class SuggestionType { kMisspelling, kNotMisspelling, kAutocorrect };
+  enum class SuggestionType {
+    kMisspelling,
+    kNotMisspelling,
+    kAutocorrect,
+    kGrammar,
+  };
   enum class RemoveOnFinishComposing { kRemove, kDoNotRemove };
+  enum class HideSuggestionMenu { kNo, kYes };
 
   SuggestionMarker(unsigned start_offset,
                    unsigned end_offset,
                    const SuggestionMarkerProperties&);
+  SuggestionMarker(const SuggestionMarker&) = delete;
+  SuggestionMarker& operator=(const SuggestionMarker&) = delete;
 
   // DocumentMarker implementations
   MarkerType GetType() const final;
@@ -36,8 +45,10 @@ class CORE_EXPORT SuggestionMarker final : public StyleableMarker {
   SuggestionType GetSuggestionType() const;
   const Vector<String>& Suggestions() const;
   bool IsMisspelling() const;
+  bool IsGrammarError() const;
   bool NeedsRemovalOnFinishComposing() const;
   Color SuggestionHighlightColor() const;
+  bool ShouldHideSuggestionMenu() const;
 
   // Replace the suggestion at suggestion_index with new_suggestion.
   void SetSuggestion(unsigned suggestion_index, const String& new_suggestion);
@@ -54,8 +65,7 @@ class CORE_EXPORT SuggestionMarker final : public StyleableMarker {
   const SuggestionType suggestion_type_;
   const RemoveOnFinishComposing remove_on_finish_composing_;
   const Color suggestion_highlight_color_;
-
-  DISALLOW_COPY_AND_ASSIGN(SuggestionMarker);
+  const HideSuggestionMenu should_hide_suggestion_menu_;
 };
 
 template <>
@@ -67,4 +77,4 @@ struct DowncastTraits<SuggestionMarker> {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_MARKERS_SUGGESTION_MARKER_H_

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,7 @@
 
 #include <stdint.h>
 
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include <string>
 
 class WorkItemList;
 
@@ -21,7 +20,7 @@ class WorkItemList;
 //
 // NOTE: This uses the default WOW64 view (32-bit on 32-bit applications, 64-bit
 // on 64-bit applications). If the view needs to be customized, a parameter
-// should be added, like in WorkItem. http://crbug.com/569816.
+// should be added, like in WorkItem. http://crbug.com/40449323.
 class RegistryEntry {
  public:
   // A bit-field enum of places to look for this key in the Windows registry.
@@ -42,17 +41,20 @@ class RegistryEntry {
   };
 
   // Create an object that represent default value of a key.
-  RegistryEntry(const base::string16& key_path, const base::string16& value);
+  RegistryEntry(const std::wstring& key_path, const std::wstring& value);
 
   // Create an object that represent a key of type REG_SZ.
-  RegistryEntry(const base::string16& key_path,
-                const base::string16& name,
-                const base::string16& value);
+  RegistryEntry(const std::wstring& key_path,
+                const std::wstring& name,
+                const std::wstring& value);
 
   // Create an object that represent a key of integer type.
-  RegistryEntry(const base::string16& key_path,
-                const base::string16& name,
+  RegistryEntry(const std::wstring& key_path,
+                const std::wstring& name,
                 DWORD value);
+
+  RegistryEntry(const RegistryEntry&) = delete;
+  RegistryEntry& operator=(const RegistryEntry&) = delete;
 
   // Flags this RegistryKey with |removal_flag|, indicating that it should be
   // removed rather than created. Note that this will not result in cleaning up
@@ -94,7 +96,7 @@ class RegistryEntry {
   // with the same key.
   bool KeyExistsInRegistry(uint32_t look_for_in) const;
 
-  const base::string16& key_path() const { return key_path_; }
+  const std::wstring& key_path() const { return key_path_; }
 
  private:
   // States this RegistryKey can be in compared to the registry.
@@ -107,10 +109,10 @@ class RegistryEntry {
     SAME_VALUE,
   };
 
-  base::string16 key_path_;  // key path for the registry entry
-  base::string16 name_;      // name of the registry entry
+  std::wstring key_path_;    // key path for the registry entry
+  std::wstring name_;        // name of the registry entry
   bool is_string_;           // true if current registry entry is of type REG_SZ
-  base::string16 value_;     // string value (useful if is_string_ = true)
+  std::wstring value_;       // string value (useful if is_string_ = true)
   DWORD int_value_;          // integer value (useful if is_string_ = false)
 
   // Identifies whether this RegistryEntry is flagged for removal (i.e. no
@@ -121,8 +123,6 @@ class RegistryEntry {
   // Returns the RegistryStatus of the current registry entry in
   // |root|\|key_path_|\|name_|.
   RegistryStatus StatusInRegistryUnderRoot(HKEY root) const;
-
-  DISALLOW_COPY_AND_ASSIGN(RegistryEntry);
 };
 
 #endif  // CHROME_INSTALLER_UTIL_REGISTRY_ENTRY_H_

@@ -1,20 +1,20 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/updates/announcement_notification/announcement_notification_service.h"
 
-#include "base/bind.h"
 #include "base/files/file_path.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/metrics/field_trial_params.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "base/time/clock.h"
+#include "base/time/time.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/profiles/profile_attributes_entry.h"
-#include "chrome/browser/profiles/profile_attributes_storage.h"
-#include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/updates/announcement_notification/announcement_notification_metrics.h"
+#include "chrome/browser/profiles/profile_attributes_entry.h"    // nogncheck
+#include "chrome/browser/profiles/profile_attributes_storage.h"  // nogncheck
+#include "chrome/browser/profiles/profile_manager.h"             // nogncheck
 #include "chrome/grit/generated_resources.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
@@ -78,6 +78,11 @@ class AnnouncementNotificationServiceImpl
       skip_first_run_after_ = base::Time();
   }
 
+  AnnouncementNotificationServiceImpl(
+      const AnnouncementNotificationServiceImpl&) = delete;
+  AnnouncementNotificationServiceImpl& operator=(
+      const AnnouncementNotificationServiceImpl&) = delete;
+
   ~AnnouncementNotificationServiceImpl() override = default;
 
  private:
@@ -89,8 +94,6 @@ class AnnouncementNotificationServiceImpl
 
     if (!IsFeatureEnabled())
       return;
-
-    RecordAnnouncementHistogram(AnnouncementNotificationEvent::kStart);
 
     // No valid version Finch parameter.
     if (!IsVersionValid(remote_version_))
@@ -184,17 +187,15 @@ class AnnouncementNotificationServiceImpl
 
     // Can't find the profile path, assume the user is not signed in.
     DCHECK(profile_);
-    ProfileAttributesEntry* entry = nullptr;
-    if (!storage.GetProfileAttributesWithPath(profile_->GetPath(), &entry))
-      return false;
-
-    return entry->GetSigninState() != SigninState::kNotSignedIn;
+    ProfileAttributesEntry* entry =
+        storage.GetProfileAttributesWithPath(profile_->GetPath());
+    return entry && entry->GetSigninState() != SigninState::kNotSignedIn;
   }
 
-  Profile* profile_;
-  PrefService* pref_service_;
+  raw_ptr<Profile, DanglingUntriaged> profile_;
+  raw_ptr<PrefService, DanglingUntriaged> pref_service_;
   std::unique_ptr<Delegate> delegate_;
-  base::Clock* clock_;
+  raw_ptr<base::Clock> clock_;
 
   // Whether to skip first Chrome launch. Parsed from Finch.
   bool skip_first_run_;
@@ -224,12 +225,11 @@ class AnnouncementNotificationServiceImpl
 
   base::WeakPtrFactory<AnnouncementNotificationServiceImpl> weak_ptr_factory_{
       this};
-
-  DISALLOW_COPY_AND_ASSIGN(AnnouncementNotificationServiceImpl);
 };
 
-const base::Feature kAnnouncementNotification{
-    "AnnouncementNotificationService", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kAnnouncementNotification,
+             "AnnouncementNotificationService",
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
 // static
 void AnnouncementNotificationService::RegisterProfilePrefs(
@@ -240,13 +240,13 @@ void AnnouncementNotificationService::RegisterProfilePrefs(
 }
 
 // static
-AnnouncementNotificationService* AnnouncementNotificationService::Create(
-    Profile* profile,
-    PrefService* pref_service,
-    std::unique_ptr<Delegate> delegate,
-    base::Clock* clock) {
-  return new AnnouncementNotificationServiceImpl(profile, pref_service,
-                                                 std::move(delegate), clock);
+std::unique_ptr<AnnouncementNotificationService>
+AnnouncementNotificationService::Create(Profile* profile,
+                                        PrefService* pref_service,
+                                        std::unique_ptr<Delegate> delegate,
+                                        base::Clock* clock) {
+  return std::make_unique<AnnouncementNotificationServiceImpl>(
+      profile, pref_service, std::move(delegate), clock);
 }
 
 // static
@@ -266,7 +266,7 @@ bool AnnouncementNotificationService::CanOpenAnnouncement(Profile* profile) {
   if (!profile)
     return false;
 
-  return !(profile->IsGuestSession() || profile->IsSystemProfile());
+  return !profile->IsGuestSession() && !profile->IsSystemProfile();
 }
 
 AnnouncementNotificationService::AnnouncementNotificationService() = default;

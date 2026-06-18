@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,7 @@
 #define ASH_PUBLIC_CPP_NEARBY_SHARE_CONTROLLER_H_
 
 #include "ash/public/cpp/ash_public_export.h"
-
-namespace base {
-class TimeDelta;
-}  // namespace base
+#include "chromeos/ash/services/nearby/public/mojom/nearby_share_settings.mojom.h"
 
 namespace ash {
 
@@ -21,10 +18,12 @@ class ASH_PUBLIC_EXPORT NearbyShareController {
   // To be called whenever Nearby Share's  High Visibility state changes.
   virtual void HighVisibilityEnabledChanged(bool enabled) = 0;
 
-  // Called periodically while high visibility is on in order to update the
-  // Nearby Share pod button's countdown display.
-  virtual void HighVisibilityCountdownUpdate(
-      base::TimeDelta remaining_time) = 0;
+  // To be called whenever Nearby Share's enabled state changes.
+  virtual void NearbyShareEnabledChanged(bool enabled) = 0;
+
+  // Call on change in Nearby Share selected Visibility.
+  virtual void VisibilityChanged(
+      ::nearby_share::mojom::Visibility visibility) const = 0;
 };
 
 }  // namespace ash

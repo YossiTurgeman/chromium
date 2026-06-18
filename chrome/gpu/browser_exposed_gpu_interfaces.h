@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,15 @@
 
 namespace gpu {
 struct GpuPreferences;
+class GpuDriverBugWorkarounds;
 }
 
 namespace mojo {
 class BinderMap;
+}
+
+namespace viz {
+class GpuServiceImpl;
 }
 
 class ChromeContentGpuClient;
@@ -20,7 +25,9 @@ class ChromeContentGpuClient;
 // |GpuProcessHost::BindReceiver()|.
 void ExposeChromeGpuInterfacesToBrowser(
     ChromeContentGpuClient* client,
+    viz::GpuServiceImpl* gpu_service,
     const gpu::GpuPreferences& gpu_preferences,
+    const gpu::GpuDriverBugWorkarounds& gpu_workarounds,
     mojo::BinderMap* binders);
 
 #endif  // CHROME_GPU_BROWSER_EXPOSED_GPU_INTERFACES_H_

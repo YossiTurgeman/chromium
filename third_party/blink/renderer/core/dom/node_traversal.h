@@ -30,13 +30,14 @@
 
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/container_node.h"
+#include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/node.h"
 #include "third_party/blink/renderer/core/dom/traversal_range.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
 namespace blink {
 
-class NodeTraversal {
+class CORE_EXPORT NodeTraversal {
   STATIC_ONLY(NodeTraversal);
 
  public:
@@ -60,10 +61,11 @@ class NodeTraversal {
     return TraverseNextTemplate(current, stay_within);
   }
 
-  // Like next, but skips children and starts with the next sibling.
-  CORE_EXPORT static Node* NextSkippingChildren(const Node&);
-  CORE_EXPORT static Node* NextSkippingChildren(const Node&,
-                                                const Node* stay_within);
+  // Like next, but skips children and starts with the next sibling. If you're
+  // looking for the "Previous" version of this method, see
+  // PreviousAbsoluteSibling().
+  static Node* NextSkippingChildren(const Node&);
+  static Node* NextSkippingChildren(const Node&, const Node* stay_within);
 
   static Node* FirstWithin(const Node& current) { return current.firstChild(); }
 
@@ -74,9 +76,12 @@ class NodeTraversal {
   // current one in document order
   static Node* Previous(const Node&, const Node* stay_within = nullptr);
 
-  // Like previous, but skips children and starts with the next sibling.
-  static Node* PreviousSkippingChildren(const Node&,
-                                        const Node* stay_within = nullptr);
+  // Returns the previous direct sibling of the node, if there is one. If not,
+  // it will traverse up the ancestor chain until it finds an ancestor
+  // that has a previous sibling, returning that sibling. Or nullptr if none.
+  // See comment for |FlatTreeTraversal::PreviousAbsoluteSibling| for details.
+  static Node* PreviousAbsoluteSibling(const Node&,
+                                       const Node* stay_within = nullptr);
 
   // Like next, but visits parents after their children.
   static Node* NextPostOrder(const Node&, const Node* stay_within = nullptr);
@@ -86,19 +91,20 @@ class NodeTraversal {
                                  const Node* stay_within = nullptr);
 
   // Pre-order traversal including the pseudo-elements.
-  CORE_EXPORT static Node* PreviousIncludingPseudo(
-      const Node&,
-      const Node* stay_within = nullptr);
-  CORE_EXPORT static Node* NextIncludingPseudo(
+  static Node* PreviousIncludingPseudo(const Node&,
+                                       const Node* stay_within = nullptr);
+  static Node* NextIncludingPseudo(const Node&,
+                                   const Node* stay_within = nullptr);
+  // See comment for |FlatTreeTraversal::PreviousAbsoluteSibling| for details.
+  static Node* PreviousAbsoluteSiblingIncludingPseudo(
       const Node&,
       const Node* stay_within = nullptr);
   static Node* NextIncludingPseudoSkippingChildren(
       const Node&,
       const Node* stay_within = nullptr);
 
-  CORE_EXPORT static Node* NextAncestorSibling(const Node&);
-  CORE_EXPORT static Node* NextAncestorSibling(const Node&,
-                                               const Node* stay_within);
+  static Node* NextAncestorSibling(const Node&);
+  static Node* NextAncestorSibling(const Node&, const Node* stay_within);
   static Node& HighestAncestorOrSelf(const Node&);
 
   // Children traversal.
@@ -114,12 +120,16 @@ class NodeTraversal {
   static bool IsDescendantOf(const Node& node, const Node& other) {
     return node.IsDescendantOf(&other);
   }
+  static bool IsInclusiveDescendantOf(const Node& node, const Node& other) {
+    return node == other || IsDescendantOf(node, other);
+  }
   static Node* FirstChild(const Node& parent) { return parent.firstChild(); }
   static Node* LastChild(const Node& parent) { return parent.lastChild(); }
   static Node* NextSibling(const Node& node) { return node.nextSibling(); }
   static Node* PreviousSibling(const Node& node) {
     return node.previousSibling();
   }
+  static Node* PreviousAncestorSibling(const Node&, const Node* stay_within);
   static ContainerNode* Parent(const Node& node) { return node.parentNode(); }
   static Node* CommonAncestor(const Node& node_a, const Node& node_b);
   static unsigned Index(const Node& node) { return node.NodeIndex(); }
@@ -191,8 +201,9 @@ template <class NodeType>
 inline Node* NodeTraversal::TraverseNextTemplate(NodeType& current) {
   if (current.hasChildren())
     return current.firstChild();
-  if (current.nextSibling())
+  if (current.HasNextSibling()) {
     return current.nextSibling();
+  }
   return NextAncestorSibling(current);
 }
 
@@ -203,14 +214,16 @@ inline Node* NodeTraversal::TraverseNextTemplate(NodeType& current,
     return current.firstChild();
   if (current == stay_within)
     return nullptr;
-  if (current.nextSibling())
+  if (current.HasNextSibling()) {
     return current.nextSibling();
+  }
   return NextAncestorSibling(current, stay_within);
 }
 
 inline Node* NodeTraversal::NextSkippingChildren(const Node& current) {
-  if (current.nextSibling())
+  if (current.HasNextSibling()) {
     return current.nextSibling();
+  }
   return NextAncestorSibling(current);
 }
 
@@ -218,15 +231,22 @@ inline Node* NodeTraversal::NextSkippingChildren(const Node& current,
                                                  const Node* stay_within) {
   if (current == stay_within)
     return nullptr;
-  if (current.nextSibling())
+  if (current.HasNextSibling()) {
     return current.nextSibling();
+  }
   return NextAncestorSibling(current, stay_within);
 }
 
+// Note that `HighestAncestorOrSelf` is used most commonly in `RemovedFrom` and
+// `InsertedInfo`, during which `current.isConnected()` hasn't yet been
+// updated to its new state. Which means `HighestAncestorOrSelf` cannot use
+// `current.TreeRoot()` because it might return the root of the old tree,
+// rather than the highest ancestor of the newly-removed/inserted node.
 inline Node& NodeTraversal::HighestAncestorOrSelf(const Node& current) {
   Node* highest = const_cast<Node*>(&current);
-  while (highest->parentNode())
+  while (highest->parentNode()) {
     highest = highest->parentNode();
+  }
   return *highest;
 }
 
@@ -240,4 +260,4 @@ inline Node* NodeTraversal::ChildAtTemplate(NodeType& parent, unsigned index) {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_DOM_NODE_TRAVERSAL_H_

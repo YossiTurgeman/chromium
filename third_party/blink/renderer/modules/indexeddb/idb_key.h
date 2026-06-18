@@ -29,18 +29,19 @@
 #include <memory>
 #include <utility>
 
-#include "base/macros.h"
+#include "base/check_op.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/scoped_refptr.h"
 #include "third_party/blink/public/mojom/indexeddb/indexeddb.mojom-shared.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
-#include "third_party/blink/renderer/platform/wtf/shared_buffer.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
+#include "v8/include/v8-forward.h"
 
 namespace blink {
+class ScriptState;
 
 // An IndexedDB primary or index key.
 //
@@ -68,7 +69,7 @@ class MODULES_EXPORT IDBKey {
   }
 
   static std::unique_ptr<IDBKey> CreateBinary(
-      scoped_refptr<SharedBuffer> binary) {
+      scoped_refptr<base::RefCountedData<Vector<char>>> binary) {
     return base::WrapUnique(new IDBKey(std::move(binary)));
   }
 
@@ -90,6 +91,10 @@ class MODULES_EXPORT IDBKey {
 
   static std::unique_ptr<IDBKey> Clone(const IDBKey* rkey);
 
+  // Disallow copy and assign.
+  IDBKey(const IDBKey&) = delete;
+  IDBKey& operator=(const IDBKey&) = delete;
+
   ~IDBKey();
 
   mojom::IDBKeyType GetType() const { return type_; }
@@ -100,7 +105,7 @@ class MODULES_EXPORT IDBKey {
     return array_;
   }
 
-  scoped_refptr<SharedBuffer> Binary() const {
+  scoped_refptr<base::RefCountedData<Vector<char>>> Binary() const {
     DCHECK_EQ(type_, mojom::IDBKeyType::Binary);
     return binary_;
   }
@@ -125,6 +130,8 @@ class MODULES_EXPORT IDBKey {
   bool IsEqual(const IDBKey* other) const;
   size_t SizeEstimate() const { return size_estimate_; }
 
+  v8::Local<v8::Value> ToV8(ScriptState*) const;
+
   // Returns a new key array with invalid keys and duplicates removed.
   //
   // The items in the key array are moved out of the given IDBKey, which must be
@@ -138,18 +145,16 @@ class MODULES_EXPORT IDBKey {
       std::unique_ptr<IDBKey> array_key);
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(IDBKey);
-
   IDBKey();
-  IDBKey(mojom::IDBKeyType type);
+  explicit IDBKey(mojom::IDBKeyType type);
   IDBKey(mojom::IDBKeyType type, double number);
   explicit IDBKey(const String& value);
-  explicit IDBKey(scoped_refptr<SharedBuffer> value);
+  explicit IDBKey(scoped_refptr<base::RefCountedData<Vector<char>>> value);
   explicit IDBKey(KeyArray key_array);
 
   mojom::IDBKeyType type_;
   KeyArray array_;
-  scoped_refptr<SharedBuffer> binary_;
+  scoped_refptr<base::RefCountedData<Vector<char>>> binary_;
   const String string_;
   const double number_ = 0;
 

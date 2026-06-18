@@ -1,3 +1,5 @@
-steimel@chromium.org
+file://components/global_media_controls/OWNERS
 
-# COMPONENT: Internals>Media>UI
+per-file cast_*=file://chrome/browser/media/router/OWNERS
+per-file presentation_request_*=file://chrome/browser/media/router/OWNERS
+per-file supplemental_device_picker*=file://chrome/browser/media/router/OWNERS

@@ -1,36 +1,54 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/host/basic_desktop_environment.h"
 
+#include <cstdint>
+#include <memory>
+#include <string>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/check.h"
-#include "base/single_thread_task_runner.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/logging.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/notreached.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
+#include "remoting/base/fifo_buffer.h"
+#include "remoting/base/ipc_fifo_buffer.h"
 #include "remoting/host/action_executor.h"
+#include "remoting/host/active_display_monitor.h"
 #include "remoting/host/audio_capturer.h"
+#include "remoting/host/audio_injector.h"
+#include "remoting/host/base/desktop_environment_options.h"
+#include "remoting/host/base/screen_controls.h"
 #include "remoting/host/client_session_control.h"
-#include "remoting/host/desktop_capturer_proxy.h"
+#include "remoting/host/desktop_display_info_monitor.h"
+#include "remoting/host/desktop_interaction_strategy.h"
+#include "remoting/host/file_transfer/file_operations.h"
 #include "remoting/host/file_transfer/local_file_operations.h"
 #include "remoting/host/input_injector.h"
 #include "remoting/host/keyboard_layout_monitor.h"
 #include "remoting/host/mouse_cursor_monitor_proxy.h"
-#include "remoting/host/screen_controls.h"
-#include "remoting/protocol/capability_names.h"
+#include "remoting/host/remote_open_url/url_forwarder_configurator.h"
+#include "remoting/host/resizing_host_observer.h"
+#include "remoting/host/webauthn/remote_webauthn_extension_notifier.h"
+#include "remoting/host/webauthn/remote_webauthn_state_change_notifier.h"
+#include "remoting/protocol/desktop_capturer.h"
+#include "remoting/protocol/desktop_capturer_proxy.h"
+#include "remoting/protocol/desktop_capturer_wrapper.h"
+#include "remoting/protocol/mouse_cursor_monitor.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capture_options.h"
+#include "third_party/webrtc/modules/desktop_capture/desktop_capture_types.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capturer.h"
-#include "third_party/webrtc/modules/desktop_capture/mouse_cursor_monitor.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "remoting/host/win/evaluate_d3d.h"
-#endif
-
-#if defined(USE_X11)
-#include "remoting/host/linux/x11_util.h"
-#include "ui/base/ui_base_features.h"
 #endif
 
 namespace remoting {
@@ -51,13 +69,13 @@ BasicDesktopEnvironment::CreateActionExecutor() {
 std::unique_ptr<AudioCapturer> BasicDesktopEnvironment::CreateAudioCapturer() {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
-  return AudioCapturer::Create();
+  return interaction_strategy_->CreateAudioCapturer();
 }
 
 std::unique_ptr<InputInjector> BasicDesktopEnvironment::CreateInputInjector() {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
-  return InputInjector::Create(input_task_runner(), ui_task_runner());
+  return interaction_strategy_->CreateInputInjector();
 }
 
 std::unique_ptr<ScreenControls>
@@ -67,21 +85,61 @@ BasicDesktopEnvironment::CreateScreenControls() {
   return nullptr;
 }
 
-std::unique_ptr<webrtc::MouseCursorMonitor>
+DesktopDisplayInfoMonitor* BasicDesktopEnvironment::GetDisplayInfoMonitor() {
+  if (!display_info_monitor_) {
+    using VideoLayoutCallback =
+        base::RepeatingCallback<void(std::unique_ptr<protocol::VideoLayout>)>;
+
+    VideoLayoutCallback video_layout_callback =
+        base::BindRepeating(&ClientSessionControl::OnDesktopDisplayChanged,
+                            client_session_control_);
+
+    display_info_monitor_ = interaction_strategy_->CreateDisplayInfoMonitor();
+    // |video_layout_callback| is bound to |client_session_control_| which is a
+    // WeakPtr, but it accepts a VideoLayout proto as the parameter. DDIM needs
+    // a callback that accepts a DesktopDisplayInfo& instead.
+    // Safe to bind raw pointer of `display_info_monitor_`, since the callback
+    // won't be called after `display_info_monitor_` is destroyed.
+    base::RepeatingClosure callback = base::BindRepeating(
+        [](DesktopDisplayInfoMonitor* monitor,
+           VideoLayoutCallback video_layout_callback) {
+          const auto* info = monitor->GetLatestDisplayInfo();
+          DCHECK(info);
+          video_layout_callback.Run(info->GetVideoLayoutProto());
+        },
+        display_info_monitor_.get(), std::move(video_layout_callback));
+    display_info_subscription_ =
+        display_info_monitor_->AddCallback(std::move(callback));
+  }
+  return display_info_monitor_.get();
+}
+
+std::unique_ptr<protocol::MouseCursorMonitor>
 BasicDesktopEnvironment::CreateMouseCursorMonitor() {
-  return std::make_unique<MouseCursorMonitorProxy>(video_capture_task_runner_,
-                                                   desktop_capture_options());
+  return interaction_strategy_->CreateMouseCursorMonitor();
 }
 
 std::unique_ptr<KeyboardLayoutMonitor>
 BasicDesktopEnvironment::CreateKeyboardLayoutMonitor(
     base::RepeatingCallback<void(const protocol::KeyboardLayout&)> callback) {
-  return KeyboardLayoutMonitor::Create(std::move(callback), input_task_runner_);
+  return interaction_strategy_->CreateKeyboardLayoutMonitor(
+      std::move(callback));
+}
+
+std::unique_ptr<ActiveDisplayMonitor>
+BasicDesktopEnvironment::CreateActiveDisplayMonitor(
+    ActiveDisplayMonitor::Callback callback) {
+  return interaction_strategy_->CreateActiveDisplayMonitor(std::move(callback));
 }
 
 std::unique_ptr<FileOperations>
 BasicDesktopEnvironment::CreateFileOperations() {
   return std::make_unique<LocalFileOperations>(ui_task_runner_);
+}
+
+std::unique_ptr<UrlForwarderConfigurator>
+BasicDesktopEnvironment::CreateUrlForwarderConfigurator() {
+  return UrlForwarderConfigurator::Create();
 }
 
 std::string BasicDesktopEnvironment::GetCapabilities() const {
@@ -91,70 +149,57 @@ std::string BasicDesktopEnvironment::GetCapabilities() const {
 void BasicDesktopEnvironment::SetCapabilities(const std::string& capabilities) {
 }
 
-uint32_t BasicDesktopEnvironment::GetDesktopSessionId() const {
-  return UINT32_MAX;
+std::unique_ptr<RemoteWebAuthnStateChangeNotifier>
+BasicDesktopEnvironment::CreateRemoteWebAuthnStateChangeNotifier() {
+  return std::make_unique<RemoteWebAuthnExtensionNotifier>();
 }
 
-std::unique_ptr<DesktopAndCursorConditionalComposer>
-BasicDesktopEnvironment::CreateComposingVideoCapturer() {
-#if defined(OS_APPLE)
-  // Mac includes the mouse cursor in the captured image in curtain mode.
-  if (options_.enable_curtaining())
-    return nullptr;
-#endif
-  return std::make_unique<DesktopAndCursorConditionalComposer>(
-      CreateVideoCapturer());
-}
-
-std::unique_ptr<webrtc::DesktopCapturer>
-BasicDesktopEnvironment::CreateVideoCapturer() {
+std::unique_ptr<AudioInjector> BasicDesktopEnvironment::CreateAudioInjector(
+    std::unique_ptr<IpcFifoBufferReader> reader) {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
-  std::unique_ptr<DesktopCapturerProxy> result(new DesktopCapturerProxy(
-      video_capture_task_runner_, client_session_control_));
-  result->CreateCapturer(desktop_capture_options());
-  return std::move(result);
+  return AudioInjector::Create(std::move(reader));
+}
+
+std::unique_ptr<DesktopCapturer> BasicDesktopEnvironment::CreateVideoCapturer(
+    webrtc::ScreenId id) {
+  DCHECK(caller_task_runner_->BelongsToCurrentThread());
+
+  return interaction_strategy_->CreateVideoCapturer(id);
 }
 
 BasicDesktopEnvironment::BasicDesktopEnvironment(
     scoped_refptr<base::SingleThreadTaskRunner> caller_task_runner,
-    scoped_refptr<base::SingleThreadTaskRunner> video_capture_task_runner,
-    scoped_refptr<base::SingleThreadTaskRunner> input_task_runner,
     scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner,
+    std::unique_ptr<DesktopInteractionStrategy> interaction_strategy,
     base::WeakPtr<ClientSessionControl> client_session_control,
     const DesktopEnvironmentOptions& options)
     : caller_task_runner_(caller_task_runner),
-      video_capture_task_runner_(video_capture_task_runner),
-      input_task_runner_(input_task_runner),
       ui_task_runner_(ui_task_runner),
+      interaction_strategy_(std::move(interaction_strategy)),
       client_session_control_(client_session_control),
       options_(options) {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
-#if defined(USE_X11)
-  if (!features::IsUsingOzonePlatform())
-    desktop_capture_options().x_display()->IgnoreXServerGrabs();
-#elif defined(OS_WIN)
-  // The options passed to this instance are determined by a process running in
-  // Session 0.  Access to DirectX functions in Session 0 is limited so the
-  // results are not guaranteed to be accurate in the desktop context.  Due to
-  // this problem, we need to requery the following method to make sure we are
-  // still safe to use D3D APIs.  Only overwrite the value if it isn't safe to
-  // use D3D APIs as we don't want to re-enable this setting if it was disabled
-  // via an experiment or client flag.
-  if (!IsD3DAvailable())
-    options_.desktop_capture_options()->set_allow_directx_capturer(false);
+#if BUILDFLAG(IS_WIN)
+  // Check whether D3D is available as long as the DirectX capturer wasn't
+  // explicitly disabled. This check is necessary because the network process
+  // runs in Session 0 and cannot check whether D3D is available or not so the
+  // default value is set to true but can be overridden by the client.
+  if (options_.desktop_capture_options()->allow_directx_capturer()) {
+    options_.desktop_capture_options()->set_allow_directx_capturer(
+        IsD3DAvailable());
+  }
 #endif
 }
 
 BasicDesktopEnvironmentFactory::BasicDesktopEnvironmentFactory(
     scoped_refptr<base::SingleThreadTaskRunner> caller_task_runner,
-    scoped_refptr<base::SingleThreadTaskRunner> video_capture_task_runner,
-    scoped_refptr<base::SingleThreadTaskRunner> input_task_runner,
-    scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner)
-    : caller_task_runner_(caller_task_runner),
-      video_capture_task_runner_(video_capture_task_runner),
-      input_task_runner_(input_task_runner),
-      ui_task_runner_(ui_task_runner) {}
+    scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner,
+    std::unique_ptr<DesktopInteractionStrategyFactory>
+        interaction_strategy_factory)
+    : caller_task_runner_(std::move(caller_task_runner)),
+      ui_task_runner_(std::move(ui_task_runner)),
+      interaction_strategy_factory_(std::move(interaction_strategy_factory)) {}
 
 BasicDesktopEnvironmentFactory::~BasicDesktopEnvironmentFactory() = default;
 
@@ -162,6 +207,12 @@ bool BasicDesktopEnvironmentFactory::SupportsAudioCapture() const {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
   return AudioCapturer::IsSupported();
+}
+
+void BasicDesktopEnvironmentFactory::CreateInteractionStrategy(
+    const DesktopEnvironmentOptions& options,
+    DesktopInteractionStrategyFactory::CreateCallback callback) {
+  interaction_strategy_factory_->Create(options, std::move(callback));
 }
 
 }  // namespace remoting

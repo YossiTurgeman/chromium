@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,8 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/strings/utf_string_conversions.h"
 #include "services/device/usb/mock_usb_device_handle.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -32,16 +33,18 @@ namespace {
 
 ACTION_P2(InvokeCallback, data, length) {
   size_t transferred_length = std::min(length, arg6->size());
-  memcpy(arg6->front(), data, transferred_length);
+  base::span(arg6->as_vector())
+      .copy_prefix_from(
+          UNSAFE_TODO(base::span(data, length)).first(transferred_length));
   std::move(arg8).Run(UsbTransferStatus::COMPLETED, arg6, transferred_length);
 }
 
 void ExpectStringDescriptors(
-    std::unique_ptr<std::map<uint8_t, base::string16>> string_map) {
+    std::unique_ptr<std::map<uint8_t, std::u16string>> string_map) {
   EXPECT_EQ(3u, string_map->size());
-  EXPECT_EQ(base::ASCIIToUTF16("String 1"), (*string_map)[1]);
-  EXPECT_EQ(base::ASCIIToUTF16("String 2"), (*string_map)[2]);
-  EXPECT_EQ(base::ASCIIToUTF16("String 3"), (*string_map)[3]);
+  EXPECT_EQ(u"String 1", (*string_map)[1]);
+  EXPECT_EQ(u"String 2", (*string_map)[2]);
+  EXPECT_EQ(u"String 3", (*string_map)[3]);
 }
 
 // clang-format off
@@ -217,11 +220,11 @@ class UsbDescriptorsTest : public ::testing::Test {};
 TEST_F(UsbDescriptorsTest, ParseDescriptor) {
   std::vector<uint8_t> buffer;
   buffer.insert(buffer.end(), kDeviceDescriptor,
-                kDeviceDescriptor + sizeof(kDeviceDescriptor));
+                UNSAFE_TODO(kDeviceDescriptor + sizeof(kDeviceDescriptor)));
   buffer.insert(buffer.end(), kConfig1Descriptor,
-                kConfig1Descriptor + sizeof(kConfig1Descriptor));
+                UNSAFE_TODO(kConfig1Descriptor + sizeof(kConfig1Descriptor)));
   buffer.insert(buffer.end(), kConfig2Descriptor,
-                kConfig2Descriptor + sizeof(kConfig2Descriptor));
+                UNSAFE_TODO(kConfig2Descriptor + sizeof(kConfig2Descriptor)));
 
   UsbDeviceDescriptor descriptor;
   ASSERT_TRUE(descriptor.Parse(buffer));
@@ -286,20 +289,22 @@ TEST_F(UsbDescriptorsTest, InterfaceAssociations) {
 
   mojom::UsbConfigurationInfoPtr config =
       BuildUsbConfigurationInfoPtr(1, false, false, 0);
-  config->extra_data.assign(kIAD1, kIAD1 + sizeof(kIAD1));
+  config->extra_data.assign(kIAD1, UNSAFE_TODO(kIAD1 + sizeof(kIAD1)));
   config->extra_data.insert(config->extra_data.end(), kIAD2,
-                            kIAD2 + sizeof(kIAD2));
+                            UNSAFE_TODO(kIAD2 + sizeof(kIAD2)));
   config->interfaces.push_back(BuildUsbInterfaceInfoPtr(0, 0, 255, 255, 255));
   config->interfaces.push_back(BuildUsbInterfaceInfoPtr(1, 0, 255, 255, 255));
   mojom::UsbInterfaceInfoPtr iface1a =
       BuildUsbInterfaceInfoPtr(1, 1, 255, 255, 255);
-  iface1a->alternates[0]->extra_data.assign(kIAD3, kIAD3 + sizeof(kIAD3));
+  iface1a->alternates[0]->extra_data.assign(kIAD3,
+                                            UNSAFE_TODO(kIAD3 + sizeof(kIAD3)));
   config->interfaces.push_back(std::move(iface1a));
   config->interfaces.push_back(BuildUsbInterfaceInfoPtr(2, 0, 255, 255, 255));
   config->interfaces.push_back(BuildUsbInterfaceInfoPtr(3, 0, 255, 255, 255));
   mojom::UsbInterfaceInfoPtr iface4 =
       BuildUsbInterfaceInfoPtr(4, 0, 255, 255, 255);
-  iface4->alternates[0]->extra_data.assign(kIAD4, kIAD4 + sizeof(kIAD4));
+  iface4->alternates[0]->extra_data.assign(kIAD4,
+                                           UNSAFE_TODO(kIAD4 + sizeof(kIAD4)));
   config->interfaces.push_back(std::move(iface4));
   config->interfaces.push_back(BuildUsbInterfaceInfoPtr(5, 0, 255, 255, 255));
   AssignFirstInterfaceNumbers(config.get());
@@ -331,7 +336,7 @@ TEST_F(UsbDescriptorsTest, CorruptInterfaceAssociations) {
     static const uint8_t kIAD[] = {0x01};
     mojom::UsbConfigurationInfoPtr config =
         BuildUsbConfigurationInfoPtr(1, false, false, 0);
-    config->extra_data.assign(kIAD, kIAD + sizeof(kIAD));
+    config->extra_data.assign(kIAD, UNSAFE_TODO(kIAD + sizeof(kIAD)));
     AssignFirstInterfaceNumbers(config.get());
   }
   {
@@ -340,7 +345,7 @@ TEST_F(UsbDescriptorsTest, CorruptInterfaceAssociations) {
                                    0x00, 0x00, 0x00, 0x00};
     mojom::UsbConfigurationInfoPtr config =
         BuildUsbConfigurationInfoPtr(1, false, false, 0);
-    config->extra_data.assign(kIAD, kIAD + sizeof(kIAD));
+    config->extra_data.assign(kIAD, UNSAFE_TODO(kIAD + sizeof(kIAD)));
     AssignFirstInterfaceNumbers(config.get());
   }
   {
@@ -350,7 +355,7 @@ TEST_F(UsbDescriptorsTest, CorruptInterfaceAssociations) {
     mojom::UsbConfigurationInfoPtr config =
         BuildUsbConfigurationInfoPtr(1, false, false, 0);
     config->interfaces.push_back(BuildUsbInterfaceInfoPtr(0, 0, 255, 255, 255));
-    config->extra_data.assign(kIAD, kIAD + sizeof(kIAD));
+    config->extra_data.assign(kIAD, UNSAFE_TODO(kIAD + sizeof(kIAD)));
     AssignFirstInterfaceNumbers(config.get());
 
     EXPECT_EQ(0, config->interfaces[0]->interface_number);
@@ -362,62 +367,56 @@ TEST_F(UsbDescriptorsTest, StringDescriptor) {
   static const uint8_t kBuffer[] = {0x1a, 0x03, 'H', 0, 'e', 0, 'l', 0, 'l', 0,
                                     'o',  0,    ' ', 0, 'w', 0, 'o', 0, 'r', 0,
                                     'l',  0,    'd', 0, '!', 0};
-  base::string16 string;
-  ASSERT_TRUE(ParseUsbStringDescriptor(
-      std::vector<uint8_t>(kBuffer, kBuffer + sizeof(kBuffer)), &string));
-  EXPECT_EQ(base::ASCIIToUTF16("Hello world!"), string);
+  std::u16string string;
+  ASSERT_TRUE(ParseUsbStringDescriptor(kBuffer, &string));
+  EXPECT_EQ(u"Hello world!", string);
 }
 
 TEST_F(UsbDescriptorsTest, ShortStringDescriptorHeader) {
   // The buffer is just too darn short.
   static const uint8_t kBuffer[] = {0x01};
-  base::string16 string;
-  ASSERT_FALSE(ParseUsbStringDescriptor(
-      std::vector<uint8_t>(kBuffer, kBuffer + sizeof(kBuffer)), &string));
+  std::u16string string;
+  ASSERT_FALSE(ParseUsbStringDescriptor(kBuffer, &string));
 }
 
 TEST_F(UsbDescriptorsTest, ShortStringDescriptor) {
   // The buffer is just too darn short.
   static const uint8_t kBuffer[] = {0x01, 0x03};
-  base::string16 string;
-  ASSERT_FALSE(ParseUsbStringDescriptor(
-      std::vector<uint8_t>(kBuffer, kBuffer + sizeof(kBuffer)), &string));
+  std::u16string string;
+  ASSERT_FALSE(ParseUsbStringDescriptor(kBuffer, &string));
 }
 
 TEST_F(UsbDescriptorsTest, OddLengthStringDescriptor) {
   // There's an extra byte at the end of the string.
   static const uint8_t kBuffer[] = {0x0d, 0x03, 'H', 0,   'e', 0,  'l',
                                     0,    'l',  0,   'o', 0,   '!'};
-  base::string16 string;
-  ASSERT_TRUE(ParseUsbStringDescriptor(
-      std::vector<uint8_t>(kBuffer, kBuffer + sizeof(kBuffer)), &string));
-  EXPECT_EQ(base::ASCIIToUTF16("Hello"), string);
+  std::u16string string;
+  ASSERT_TRUE(ParseUsbStringDescriptor(kBuffer, &string));
+  EXPECT_EQ(u"Hello", string);
 }
 
 TEST_F(UsbDescriptorsTest, EmptyStringDescriptor) {
   // The string is empty.
   static const uint8_t kBuffer[] = {0x02, 0x03};
-  base::string16 string;
-  ASSERT_TRUE(ParseUsbStringDescriptor(
-      std::vector<uint8_t>(kBuffer, kBuffer + sizeof(kBuffer)), &string));
-  EXPECT_EQ(base::string16(), string);
+  std::u16string string;
+  ASSERT_TRUE(ParseUsbStringDescriptor(kBuffer, &string));
+  EXPECT_EQ(std::u16string(), string);
 }
 
 TEST_F(UsbDescriptorsTest, OneByteStringDescriptor) {
   // The string is only one byte.
   static const uint8_t kBuffer[] = {0x03, 0x03, '?'};
-  base::string16 string;
-  ASSERT_TRUE(ParseUsbStringDescriptor(
-      std::vector<uint8_t>(kBuffer, kBuffer + sizeof(kBuffer)), &string));
-  EXPECT_EQ(base::string16(), string);
+  std::u16string string;
+  ASSERT_TRUE(ParseUsbStringDescriptor(kBuffer, &string));
+  EXPECT_EQ(std::u16string(), string);
 }
 
 TEST_F(UsbDescriptorsTest, ReadStringDescriptors) {
-  std::unique_ptr<std::map<uint8_t, base::string16>> string_map(
-      new std::map<uint8_t, base::string16>());
-  (*string_map)[1] = base::string16();
-  (*string_map)[2] = base::string16();
-  (*string_map)[3] = base::string16();
+  std::unique_ptr<std::map<uint8_t, std::u16string>> string_map(
+      new std::map<uint8_t, std::u16string>());
+  (*string_map)[1] = std::u16string();
+  (*string_map)[2] = std::u16string();
+  (*string_map)[3] = std::u16string();
 
   scoped_refptr<MockUsbDeviceHandle> device_handle(
       new MockUsbDeviceHandle(nullptr));

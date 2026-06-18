@@ -1,10 +1,13 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/extensions/api/permissions/permissions_api_helpers.h"
 
 #include <stddef.h>
+
+#include <memory>
+#include <string_view>
 
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
@@ -17,6 +20,7 @@
 #include "extensions/common/permissions/permissions_info.h"
 #include "extensions/common/permissions/usb_device_permission.h"
 #include "extensions/common/url_pattern_set.h"
+#include "extensions/common/user_script.h"
 
 namespace extensions {
 
@@ -27,25 +31,22 @@ namespace permissions_api_helpers {
 namespace {
 
 const char kDelimiter[] = "|";
-const char kInvalidParameter[] =
-    "Invalid argument for permission '*'.";
-const char kInvalidOrigin[] =
-    "Invalid value for origin pattern *: *";
-const char kUnknownPermissionError[] =
-    "'*' is not a recognized permission.";
+const char kInvalidParameter[] = "Invalid argument for permission '*'.";
+const char kInvalidOrigin[] = "Invalid value for origin pattern *: *";
+const char kUnknownPermissionError[] = "'*' is not a recognized permission.";
 const char kUnsupportedPermissionId[] =
     "Only the usbDevices permission supports arguments.";
 
 // Extracts an API permission that supports arguments. In practice, this is
 // restricted to the UsbDevicePermission.
 std::unique_ptr<APIPermission> UnpackPermissionWithArguments(
-    base::StringPiece permission_name,
-    base::StringPiece permission_arg,
+    std::string_view permission_name,
+    std::string_view permission_arg,
     const std::string& permission_str,
     std::string* error) {
-  std::unique_ptr<base::Value> permission_json =
-      base::JSONReader::ReadDeprecated(permission_arg);
-  if (!permission_json.get()) {
+  std::optional<base::Value> permission_json = base::JSONReader::Read(
+      permission_arg, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (!permission_json) {
     *error = ErrorUtils::FormatErrorMessage(kInvalidParameter, permission_str);
     return nullptr;
   }
@@ -53,9 +54,10 @@ std::unique_ptr<APIPermission> UnpackPermissionWithArguments(
   std::unique_ptr<APIPermission> permission;
 
   // Explicitly check the permissions that accept arguments until
-  // https://crbug.com/162042 is fixed.
+  // https://crbug.com/40294655 is fixed.
   const APIPermissionInfo* usb_device_permission_info =
-      PermissionsInfo::GetInstance()->GetByID(APIPermission::kUsbDevice);
+      PermissionsInfo::GetInstance()->GetByID(
+          mojom::APIPermissionID::kUsbDevice);
   if (permission_name == usb_device_permission_info->name()) {
     permission =
         std::make_unique<UsbDevicePermission>(usb_device_permission_info);
@@ -65,7 +67,7 @@ std::unique_ptr<APIPermission> UnpackPermissionWithArguments(
   }
 
   CHECK(permission);
-  if (!permission->FromValue(permission_json.get(), nullptr, nullptr)) {
+  if (!permission->FromValue(&permission_json.value(), nullptr, nullptr)) {
     *error = ErrorUtils::FormatErrorMessage(kInvalidParameter, permission_str);
     return nullptr;
   }
@@ -91,12 +93,13 @@ bool UnpackAPIPermissions(const std::vector<std::string>& permissions_input,
     // http://code.google.com/p/chromium/issues/detail?id=162042
     size_t delimiter = permission_str.find(kDelimiter);
     if (delimiter != std::string::npos) {
-      base::StringPiece permission_piece(permission_str);
+      std::string_view permission_piece(permission_str);
       std::unique_ptr<APIPermission> permission = UnpackPermissionWithArguments(
           permission_piece.substr(0, delimiter),
           permission_piece.substr(delimiter + 1), permission_str, error);
-      if (!permission)
+      if (!permission) {
         return false;
+      }
 
       apis.insert(std::move(permission));
     } else {
@@ -161,16 +164,19 @@ bool UnpackOriginPermissions(const std::vector<std::string>& origins_input,
     // Note that we don't check PermissionsData::AllUrlsIncludesChromeUrls()
     // here, since that's only needed for Chromevox (which doesn't use optional
     // permissions).
-    if (pattern->scheme() != content::kChromeUIScheme)
+    if (pattern->scheme() != content::kChromeUIScheme) {
       valid_schemes &= ~URLPattern::SCHEME_CHROMEUI;
+    }
 
     // Similarly, <all_urls> should only match file:-scheme URLs if file access
     // is granted.
-    if (!allow_file_access && pattern->scheme() != url::kFileScheme)
+    if (!allow_file_access && pattern->scheme() != url::kFileScheme) {
       valid_schemes &= ~URLPattern::SCHEME_FILE;
+    }
 
-    if (valid_schemes != pattern->valid_schemes())
+    if (valid_schemes != pattern->valid_schemes()) {
       pattern->SetValidSchemes(valid_schemes);
+    }
   };
 
   for (const auto& origin_str : origins_input) {
@@ -218,8 +224,9 @@ bool UnpackOriginPermissions(const std::vector<std::string>& origins_input,
       }
     }
 
-    if (!used_origin)
+    if (!used_origin) {
       result->unlisted_hosts.AddPattern(explicit_origin);
+    }
   }
 
   return true;
@@ -233,15 +240,14 @@ UnpackPermissionSetResult::~UnpackPermissionSetResult() = default;
 std::unique_ptr<Permissions> PackPermissionSet(const PermissionSet& set) {
   std::unique_ptr<Permissions> permissions(new Permissions());
 
-  permissions->permissions.reset(new std::vector<std::string>());
+  permissions->permissions.emplace();
   for (const APIPermission* api : set.apis()) {
     std::unique_ptr<base::Value> value(api->ToValue());
     if (!value) {
       permissions->permissions->push_back(api->name());
     } else {
       std::string name(api->name());
-      std::string json;
-      base::JSONWriter::Write(*value, &json);
+      std::string json = base::WriteJson(*value).value_or("");
       permissions->permissions->push_back(name + kDelimiter + json);
     }
   }
@@ -249,9 +255,10 @@ std::unique_ptr<Permissions> PackPermissionSet(const PermissionSet& set) {
   // TODO(rpaquay): We currently don't expose manifest permissions
   // to apps/extensions via the permissions API.
 
-  permissions->origins.reset(new std::vector<std::string>());
-  for (const URLPattern& pattern : set.effective_hosts())
+  permissions->origins.emplace();
+  for (const URLPattern& pattern : set.effective_hosts()) {
     permissions->origins->push_back(pattern.GetAsString());
+  }
 
   return permissions;
 }

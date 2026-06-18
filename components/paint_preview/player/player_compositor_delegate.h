@@ -1,22 +1,26 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PAINT_PREVIEW_PLAYER_PLAYER_COMPOSITOR_DELEGATE_H_
 #define COMPONENTS_PAINT_PREVIEW_PLAYER_PLAYER_COMPOSITOR_DELEGATE_H_
 
-#include "base/callback.h"
+#include <optional>
+
+#include "base/cancelable_callback.h"
 #include "base/containers/flat_map.h"
+#include "base/containers/queue.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/unguessable_token.h"
 #include "components/paint_preview/browser/hit_tester.h"
 #include "components/paint_preview/browser/paint_preview_base_service.h"
+#include "components/paint_preview/player/bitmap_request.h"
 #include "components/paint_preview/player/compositor_status.h"
 #include "components/paint_preview/public/paint_preview_compositor_client.h"
 #include "components/paint_preview/public/paint_preview_compositor_service.h"
 #include "components/services/paint_preview_compositor/public/mojom/paint_preview_compositor.mojom.h"
-#include "mojo/public/cpp/bindings/remote.h"
 
 namespace gfx {
 class Rect;
@@ -38,14 +42,22 @@ class PlayerCompositorDelegate {
   PlayerCompositorDelegate(const PlayerCompositorDelegate&) = delete;
   PlayerCompositorDelegate& operator=(const PlayerCompositorDelegate&) = delete;
 
+  // Callback used for compositor error
+  using CompositorErrorCallback = base::OnceCallback<void(int32_t)>;
+
   // Initializes the compositor.
   void Initialize(PaintPreviewBaseService* paint_preview_service,
                   const GURL& url,
                   const DirectoryKey& key,
-                  base::OnceCallback<void(int)> compositor_error);
+                  bool main_frame_mode,
+                  CompositorErrorCallback compositor_error,
+                  base::TimeDelta timeout_duration,
+                  int max_requests);
 
   // Returns whether initialization has happened.
   bool IsInitialized() const { return paint_preview_service_; }
+
+  void SetCaptureResult(std::unique_ptr<CaptureResult> capture_result);
 
   // Overrides whether to compress the directory when the player is closed. By
   // default compression will happen.
@@ -55,20 +67,38 @@ class PlayerCompositorDelegate {
   // situations.
   virtual void OnCompositorReady(
       CompositorStatus compositor_status,
-      mojom::PaintPreviewBeginCompositeResponsePtr composite_response) {}
+      mojom::PaintPreviewBeginCompositeResponsePtr composite_response,
+      float page_scale_factor,
+      std::unique_ptr<ui::AXTreeUpdate> update) {}
 
   // Called when there is a request for a new bitmap. When the bitmap
-  // is ready, it will be passed to callback.
-  void RequestBitmap(
-      const base::UnguessableToken& frame_guid,
+  // is ready, it will be passed to callback. Returns an ID for the request.
+  // Pass this ID to `CancelBitmapRequest(int32_t)` to cancel the request if it
+  // hasn't already been sent.
+  int32_t RequestBitmap(
+      const std::optional<base::UnguessableToken>& frame_guid,
       const gfx::Rect& clip_rect,
       float scale_factor,
       base::OnceCallback<void(mojom::PaintPreviewCompositor::BitmapStatus,
-                              const SkBitmap&)> callback);
+                              const SkBitmap&)> callback,
+      bool run_callback_on_default_task_runner = true);
+
+  // Cancels the bitmap request associated with `request_id` if possible.
+  // Returns true on success.
+  bool CancelBitmapRequest(int32_t request_id);
+
+  // Cancels all pending bitmap requests.
+  void CancelAllBitmapRequests();
 
   // Called on touch event on a frame.
   std::vector<const GURL*> OnClick(const base::UnguessableToken& frame_guid,
                                    const gfx::Rect& rect);
+
+  // Called by PlayerCompositorDelegateAndroid when failing to allocated a
+  // bitmap.
+  void OnAllocationFailure();
+
+  gfx::Point GetRootFrameOffsets() const { return root_frame_offsets_; }
 
   // Test methods:
 
@@ -77,7 +107,10 @@ class PlayerCompositorDelegate {
       PaintPreviewBaseService* paint_preview_service,
       const GURL& expected_url,
       const DirectoryKey& key,
-      base::OnceCallback<void(int)> compositor_error,
+      bool main_frame_mode,
+      CompositorErrorCallback compositor_error,
+      base::TimeDelta timeout_duration,
+      int max_requests,
       std::unique_ptr<PaintPreviewCompositorService, base::OnTaskRunnerDeleter>
           fake_compositor_service);
 
@@ -90,17 +123,28 @@ class PlayerCompositorDelegate {
   }
 
  protected:
-  base::OnceCallback<void(int)> compositor_error_;
+  CompositorErrorCallback compositor_error_;
 
  private:
   void InitializeInternal(PaintPreviewBaseService* paint_preview_service,
                           const GURL& expected_url,
                           const DirectoryKey& key,
-                          base::OnceCallback<void(int)> compositor_error);
+                          bool main_frame_mode,
+                          CompositorErrorCallback compositor_error,
+                          base::TimeDelta timeout_duration,
+                          int max_requests);
+
+  void ValidateProtoAndLoadAXTree(const GURL& expected_url);
+
+  void OnAXTreeUpdateAvailable(std::unique_ptr<ui::AXTreeUpdate> update);
 
   void OnCompositorReadyStatusAdapter(
       mojom::PaintPreviewCompositor::BeginCompositeStatus status,
       mojom::PaintPreviewBeginCompositeResponsePtr composite_response);
+
+  void OnHitTestersBuilt(
+      std::unique_ptr<base::flat_map<base::UnguessableToken,
+                                     std::unique_ptr<HitTester>>> hit_testers);
 
   void OnCompositorServiceDisconnected();
 
@@ -109,23 +153,44 @@ class PlayerCompositorDelegate {
 
   void OnCompositorClientDisconnected();
 
+  void OnCompositorTimeout();
+
   void OnProtoAvailable(const GURL& expected_url,
-                        PaintPreviewBaseService::ProtoReadStatus proto_status,
+                        PaintPreviewFileMixin::ProtoReadStatus proto_status,
                         std::unique_ptr<PaintPreviewProto> proto);
 
   void SendCompositeRequest(
       mojom::PaintPreviewBeginCompositeRequestPtr begin_composite_request);
 
-  PaintPreviewBaseService* paint_preview_service_{nullptr};
+  void ProcessBitmapRequestsFromQueue();
+  void AfterBitmapRequestCallback();
+
+  raw_ptr<PaintPreviewBaseService> paint_preview_service_{nullptr};
   DirectoryKey key_;
   bool compress_on_close_{true};
+
   std::unique_ptr<PaintPreviewCompositorService, base::OnTaskRunnerDeleter>
       paint_preview_compositor_service_;
   std::unique_ptr<PaintPreviewCompositorClient, base::OnTaskRunnerDeleter>
       paint_preview_compositor_client_;
-  base::flat_map<base::UnguessableToken, std::unique_ptr<HitTester>>
+
+  base::CancelableOnceClosure timeout_;
+  int max_requests_{1};
+  bool main_frame_mode_{false};
+
+  std::unique_ptr<
+      base::flat_map<base::UnguessableToken, std::unique_ptr<HitTester>>>
       hit_testers_;
-  std::unique_ptr<PaintPreviewProto> proto_;
+  std::unique_ptr<PaintPreviewProto> proto_copy_;
+  std::unique_ptr<CaptureResult> capture_result_;
+  float page_scale_factor_;
+  std::unique_ptr<ui::AXTreeUpdate> ax_tree_update_;
+
+  int active_requests_{0};
+  int32_t next_request_id_{0};
+  base::queue<int32_t> bitmap_request_queue_;
+  std::map<int32_t, BitmapRequest> pending_bitmap_requests_;
+  gfx::Point root_frame_offsets_;
 
   base::WeakPtrFactory<PlayerCompositorDelegate> weak_factory_{this};
 };

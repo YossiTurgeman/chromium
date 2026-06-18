@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,12 +19,39 @@ void InitAndEnableRenderDocumentFeature(
                                                    parameters);
 }
 
+void InitAndEnableRenderDocumentForAllFrames(
+    base::test::ScopedFeatureList* feature_list) {
+  std::map<std::string, std::string> parameters;
+  parameters[kRenderDocumentLevelParameterName] =
+      GetRenderDocumentLevelName(RenderDocumentLevel::kAllFrames);
+  feature_list->InitAndEnableFeatureWithParameters(features::kRenderDocument,
+                                                   parameters);
+}
+
 std::vector<std::string> RenderDocumentFeatureLevelValues() {
+  // Note: We don't return kSubframe nor kNonLocalRootSubframe here as
+  // kAllFrames also covers subframe navigations and will affect tests that only
+  // do subframe navigations.
   return {
-      GetRenderDocumentLevelName(RenderDocumentLevel::kDisabled),
       GetRenderDocumentLevelName(RenderDocumentLevel::kCrashedFrame),
-      GetRenderDocumentLevelName(RenderDocumentLevel::kSubframe),
+      GetRenderDocumentLevelName(RenderDocumentLevel::kAllFrames),
   };
+}
+
+std::vector<std::string> RenderDocumentFeatureFullyEnabled() {
+  return {
+      GetRenderDocumentLevelName(RenderDocumentLevel::kAllFrames),
+  };
+}
+
+std::string GetRenderDocumentLevelNameForTestParams(
+    std::string render_document_level) {
+  if (render_document_level ==
+      GetRenderDocumentLevelName(RenderDocumentLevel::kCrashedFrame)) {
+    return "RDCrashedFrame";
+  } else {
+    return "RDAllFrames";
+  }
 }
 
 }  // namespace content

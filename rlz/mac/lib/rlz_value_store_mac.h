@@ -1,20 +1,16 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef RLZ_MAC_LIB_RLZ_VALUE_STORE_MAC_H_
 #define RLZ_MAC_LIB_RLZ_VALUE_STORE_MAC_H_
 
+#import <Foundation/Foundation.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "base/compiler_specific.h"
-#include "base/mac/scoped_nsobject.h"
-#include "base/macros.h"
 #include "rlz/lib/rlz_value_store.h"
-
-@class NSDictionary;
-@class NSMutableDictionary;
 
 namespace rlz_lib {
 
@@ -22,6 +18,9 @@ namespace rlz_lib {
 // plist file in the user's Application Support folder.
 class RlzValueStoreMac : public RlzValueStore {
  public:
+  RlzValueStoreMac(const RlzValueStoreMac&) = delete;
+  RlzValueStoreMac& operator=(const RlzValueStoreMac&) = delete;
+
   bool HasAccess(AccessType type) override;
 
   bool WritePingTime(Product product, int64_t time) override;
@@ -61,9 +60,9 @@ class RlzValueStoreMac : public RlzValueStore {
   // Returns the dictionary to which all data should be written. Usually, this
   // is just |dictionary()|, but if supplementary branding is used, it's a
   // subdirectory at key "brand_<supplementary branding code>".
-  // Note that windows stores data at
+  // Note that Windows stores data at
   //    rlz/name (e.g. "pingtime")/supplementalbranding/productcode
-  // Mac on the other hand does
+  // The Mac on the other hand uses
   //    supplementalbranding/productcode/pingtime.
   NSMutableDictionary* WorkingDict();
 
@@ -71,10 +70,8 @@ class RlzValueStoreMac : public RlzValueStore {
   // product p.
   NSMutableDictionary* ProductDict(Product p);
 
-  base::scoped_nsobject<NSMutableDictionary> dict_;
-  base::scoped_nsobject<NSString> plist_path_;
-
-  DISALLOW_COPY_AND_ASSIGN(RlzValueStoreMac);
+  NSMutableDictionary* __strong dict_;
+  NSString* __strong plist_path_;
 };
 
 }  // namespace rlz_lib

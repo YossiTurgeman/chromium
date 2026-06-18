@@ -1,10 +1,13 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/task_manager/task_manager_interface.h"
 
-#include "base/bind.h"
+#include "base/byte_count.h"
+#include "base/functional/bind.h"
+#include "base/observer_list.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/task_manager/sampling/task_manager_impl.h"
 #include "chrome/common/chrome_switches.h"
@@ -12,17 +15,18 @@
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/common/child_process_host.h"
+#include "content/public/browser/child_process_host.h"
 
-#if defined(OS_MAC)
-#include "chrome/browser/ui/browser_dialogs.h"
-#endif  // defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
+#include "chrome/browser/ui/dialogs/browser_dialogs.h"  // nogncheck
+#endif  // BUILDFLAG(IS_MAC)
 
 namespace task_manager {
 
 // static
 void TaskManagerInterface::RegisterPrefs(PrefRegistrySimple* registry) {
   registry->RegisterDictionaryPref(prefs::kTaskManagerWindowPlacement);
+  registry->RegisterIntegerPref(prefs::kTaskManagerCategory, 1);
   registry->RegisterDictionaryPref(prefs::kTaskManagerColumnVisibility);
   registry->RegisterBooleanPref(prefs::kTaskManagerEndProcessEnabled, true);
 }
@@ -40,6 +44,18 @@ TaskManagerInterface* TaskManagerInterface::GetTaskManager() {
   return TaskManagerImpl::GetInstance();
 }
 
+// static
+void TaskManagerInterface::UpdateAccumulatedStatsNetworkForRoute(
+    content::GlobalRenderFrameHostId render_frame_host_id,
+    base::ByteSize recv_bytes,
+    base::ByteSize sent_bytes) {
+  // Don't create a task manager if it hasn't already been created.
+  if (TaskManagerImpl::IsCreated()) {
+    TaskManagerImpl::GetInstance()->UpdateAccumulatedStatsNetworkForRoute(
+        render_frame_host_id, recv_bytes, sent_bytes);
+  }
+}
+
 void TaskManagerInterface::AddObserver(TaskManagerObserver* observer) {
   observers_.AddObserver(observer);
   observer->observed_task_manager_ = this;
@@ -52,6 +68,10 @@ void TaskManagerInterface::AddObserver(TaskManagerObserver* observer) {
     StartUpdating();
   }
 
+  // Observer was removed as part of StartUpdating.
+  if (!observers_.HasObserver(observer)) {
+    return;
+  }
   if (observer->desired_refresh_time() > current_refresh_time)
     return;
 
@@ -69,11 +89,11 @@ void TaskManagerInterface::RemoveObserver(TaskManagerObserver* observer) {
   // Recalculate the minimum refresh rate and the enabled resource flags.
   int64_t flags = 0;
   base::TimeDelta min_time = base::TimeDelta::Max();
-  for (auto& observer : observers_) {
-    if (observer.desired_refresh_time() < min_time)
-      min_time = observer.desired_refresh_time();
+  for (auto& obs : observers_) {
+    if (obs.desired_refresh_time() < min_time)
+      min_time = obs.desired_refresh_time();
 
-    flags |= observer.desired_resources_flags();
+    flags |= obs.desired_resources_flags();
   }
 
   if (min_time == base::TimeDelta::Max()) {
@@ -95,6 +115,10 @@ void TaskManagerInterface::RecalculateRefreshFlags() {
   SetEnabledResourceFlags(flags);
 }
 
+bool TaskManagerInterface::IsTaskValid(TaskId task_id) const {
+  return true;
+}
+
 bool TaskManagerInterface::IsResourceRefreshEnabled(RefreshType type) const {
   return (enabled_resources_flags_ & type) != 0;
 }
@@ -102,8 +126,7 @@ bool TaskManagerInterface::IsResourceRefreshEnabled(RefreshType type) const {
 TaskManagerInterface::TaskManagerInterface()
     : refresh_timer_(new base::RepeatingTimer()), enabled_resources_flags_(0) {}
 
-TaskManagerInterface::~TaskManagerInterface() {
-}
+TaskManagerInterface::~TaskManagerInterface() = default;
 
 void TaskManagerInterface::NotifyObserversOnTaskAdded(TaskId id) {
   for (TaskManagerObserver& observer : observers_)
@@ -122,7 +145,7 @@ void TaskManagerInterface::NotifyObserversOnRefresh(
 }
 
 void TaskManagerInterface::NotifyObserversOnRefreshWithBackgroundCalculations(
-      const TaskIdList& task_ids) {
+    const TaskIdList& task_ids) {
   for (TaskManagerObserver& observer : observers_)
     observer.OnTasksRefreshedWithBackgroundCalculations(task_ids);
 }
@@ -138,7 +161,7 @@ base::TimeDelta TaskManagerInterface::GetCurrentRefreshTime() const {
 }
 
 void TaskManagerInterface::ResourceFlagsAdded(int64_t flags) {
-  enabled_resources_flags_ |= flags;
+  SetEnabledResourceFlags(enabled_resources_flags_ | flags);
 }
 
 void TaskManagerInterface::SetEnabledResourceFlags(int64_t flags) {

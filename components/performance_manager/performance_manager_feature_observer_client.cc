@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,11 @@ namespace performance_manager {
 
 namespace {
 
-void OnChangeNodeUsing(content::GlobalFrameRoutingId id,
+void OnChangeNodeUsing(content::GlobalRenderFrameHostId id,
                        blink::mojom::ObservedFeatureType feature_type,
-                       bool is_using,
-                       GraphImpl* graph) {
+                       bool is_using) {
+  GraphImpl* graph = PerformanceManagerImpl::GetGraphImpl();
+
   FrameNodeImpl* frame_node = graph->GetFrameNodeById(
       RenderProcessHostId(id.child_id), id.frame_routing_id);
   if (!frame_node)
@@ -26,11 +27,8 @@ void OnChangeNodeUsing(content::GlobalFrameRoutingId id,
       frame_node->SetIsHoldingWebLock(is_using);
       return;
 
-    // TODO(https://crbug.com/980533): Rename
-    // FrameNodeImpl::SetIsHoldingIndexedDBLock() to
-    // SetIsHoldingIndexedDBConnections().
-    case blink::mojom::ObservedFeatureType::kIndexedDBConnection:
-      frame_node->SetIsHoldingIndexedDBLock(is_using);
+    case blink::mojom::ObservedFeatureType::kBlockingIndexedDBLock:
+      frame_node->SetIsHoldingBlockingIndexedDBLock(is_using);
       return;
   }
 
@@ -46,21 +44,17 @@ PerformanceManagerFeatureObserverClient::
     ~PerformanceManagerFeatureObserverClient() = default;
 
 void PerformanceManagerFeatureObserverClient::OnStartUsing(
-    content::GlobalFrameRoutingId id,
+    content::GlobalRenderFrameHostId id,
     blink::mojom::ObservedFeatureType feature_type) {
   bool is_using = true;
-  PerformanceManagerImpl::CallOnGraphImpl(
-      FROM_HERE,
-      base::BindOnce(&OnChangeNodeUsing, id, feature_type, is_using));
+  OnChangeNodeUsing(id, feature_type, is_using);
 }
 
 void PerformanceManagerFeatureObserverClient::OnStopUsing(
-    content::GlobalFrameRoutingId id,
+    content::GlobalRenderFrameHostId id,
     blink::mojom::ObservedFeatureType feature_type) {
   bool is_using = false;
-  PerformanceManagerImpl::CallOnGraphImpl(
-      FROM_HERE,
-      base::BindOnce(&OnChangeNodeUsing, id, feature_type, is_using));
+  OnChangeNodeUsing(id, feature_type, is_using);
 }
 
 }  // namespace performance_manager

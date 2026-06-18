@@ -56,7 +56,6 @@ const AtomicString& EventTypeForKeyboardEventType(WebInputEvent::Type type) {
       break;
   }
   NOTREACHED();
-  return event_type_names::kKeydown;
 }
 
 KeyboardEvent::KeyLocationCode GetKeyLocationCode(const WebInputEvent& key) {
@@ -78,8 +77,8 @@ bool HasCurrentComposition(LocalDOMWindow* dom_window) {
   return local_frame->GetInputMethodController().HasComposition();
 }
 
-static String FromUTF8(const std::string& s) {
-  return String::FromUTF8(s.data(), s.length());
+static String FromUtf8(const std::string& s) {
+  return String::FromUtf8(s);
 }
 
 }  // namespace
@@ -114,10 +113,10 @@ KeyboardEvent::KeyboardEvent(const WebKeyboardEvent& key,
               : nullptr),
       key_event_(std::make_unique<WebKeyboardEvent>(key)),
       // TODO(crbug.com/482880): Fix this initialization to lazy initialization.
-      code_(FromUTF8(ui::KeycodeConverter::DomCodeToCodeString(
+      code_(FromUtf8(ui::KeycodeConverter::DomCodeToCodeString(
           static_cast<ui::DomCode>(key.dom_code)))),
-      key_(FromUTF8(ui::KeycodeConverter::DomKeyToKeyString(
-          static_cast<ui::DomKey>(key.dom_key)))),
+      key_(FromUtf8(
+          ui::KeycodeConverter::DomKeyToKeyString(ui::DomKey(key.dom_key)))),
       location_(GetKeyLocationCode(key)),
       is_composing_(HasCurrentComposition(dom_window)) {
   InitLocationModifiers(location_);
@@ -133,7 +132,7 @@ KeyboardEvent::KeyboardEvent(const WebKeyboardEvent& key,
   else
     key_code_ = char_code_;
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   // FIXME: Check to see if this applies to other OS.
   // If the key event belongs to IME composition then propagate to JS.
   if (key.native_key_code == 0xE5)  // VKEY_PROCESSKEY
@@ -142,8 +141,9 @@ KeyboardEvent::KeyboardEvent(const WebKeyboardEvent& key,
 }
 
 KeyboardEvent::KeyboardEvent(const AtomicString& event_type,
-                             const KeyboardEventInit* initializer)
-    : UIEventWithKeyState(event_type, initializer),
+                             const KeyboardEventInit* initializer,
+                             base::TimeTicks platform_time_stamp)
+    : UIEventWithKeyState(event_type, initializer, platform_time_stamp),
       code_(initializer->code()),
       key_(initializer->key()),
       location_(initializer->location()),

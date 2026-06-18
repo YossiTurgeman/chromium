@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,7 +41,7 @@ class TestLoopBack {
 
   void RemoveObserver(
       ExternalAudioPipelineShlib::LoopbackAudioObserver* observer) {
-    auto it = std::find(observers_.begin(), observers_.end(), observer);
+    auto it = std::ranges::find(observers_, observer);
     if (it != observers_.end()) {
       observers_.erase(it);
     }

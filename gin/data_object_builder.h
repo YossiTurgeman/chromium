@@ -1,18 +1,19 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef GIN_DATA_OBJECT_BUILDER_H_
 #define GIN_DATA_OBJECT_BUILDER_H_
 
+#include <string_view>
 #include <utility>
 
 #include "base/check.h"
-#include "base/macros.h"
-#include "base/strings/string_piece.h"
+#include "base/memory/raw_ptr.h"
 #include "gin/converter.h"
 #include "gin/gin_export.h"
-#include "v8/include/v8.h"
+#include "v8/include/v8-forward.h"
+#include "v8/include/v8-object.h"
 
 namespace gin {
 
@@ -38,9 +39,13 @@ namespace gin {
 class GIN_EXPORT DataObjectBuilder {
  public:
   explicit DataObjectBuilder(v8::Isolate* isolate);
+  DataObjectBuilder(const DataObjectBuilder&) = delete;
+  DataObjectBuilder& operator=(const DataObjectBuilder&) = delete;
+
+  ~DataObjectBuilder();
 
   template <typename T>
-  DataObjectBuilder& Set(base::StringPiece key, T&& value) {
+  DataObjectBuilder& Set(std::string_view key, T&& value) {
     DCHECK(!object_.IsEmpty());
     v8::Local<v8::String> v8_key = StringToSymbol(isolate_, key);
     v8::Local<v8::Value> v8_value =
@@ -66,11 +71,9 @@ class GIN_EXPORT DataObjectBuilder {
   }
 
  private:
-  v8::Isolate* isolate_;
+  raw_ptr<v8::Isolate> isolate_;
   v8::Local<v8::Context> context_;
   v8::Local<v8::Object> object_;
-
-  DISALLOW_COPY_AND_ASSIGN(DataObjectBuilder);
 };
 
 }  // namespace gin

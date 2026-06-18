@@ -1,90 +1,202 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_AUTOFILL_CORE_COMMON_AUTOFILL_REGEX_CONSTANTS_H_
 #define COMPONENTS_AUTOFILL_CORE_COMMON_AUTOFILL_REGEX_CONSTANTS_H_
-
 namespace autofill {
 
-extern const char kAttentionIgnoredRe[];
-extern const char kRegionIgnoredRe[];
-extern const char kAddressNameIgnoredRe[];
-extern const char kCompanyRe[];
-extern const char kHouseNumberRe[];
-extern const char kStreetNameRe[];
-extern const char kAddressLine1Re[];
-extern const char kAddressLine1LabelRe[];
-extern const char kAddressLine2Re[];
-extern const char kAddressLine2LabelRe[];
-extern const char kAddressLinesExtraRe[];
-extern const char kAddressLookupRe[];
-extern const char kCountryRe[];
-extern const char kCountryLocationRe[];
-extern const char kZipCodeRe[];
-extern const char kZip4Re[];
-extern const char kCityRe[];
-extern const char kStateRe[];
-extern const char kNameOnCardRe[];
-extern const char kNameOnCardContextualRe[];
-extern const char kCardNumberRe[];
-extern const char kCardCvcRe[];
-extern const char kCardTypeRe[];
-extern const char kExpirationMonthRe[];
-extern const char kExpirationYearRe[];
-extern const char kExpirationDate2DigitYearRe[];
-extern const char kExpirationDate4DigitYearRe[];
-extern const char kExpirationDateRe[];
-extern const char kCardIgnoredRe[];
-extern const char kGiftCardRe[];
-extern const char kDebitGiftCardRe[];
-extern const char kDebitCardRe[];
-extern const char kDayRe[];
-extern const char kEmailRe[];
-extern const char kNameIgnoredRe[];
-extern const char kNameRe[];
-extern const char kNameSpecificRe[];
-extern const char kFirstNameRe[];
-extern const char kMiddleInitialRe[];
-extern const char kMiddleNameRe[];
-extern const char kLastNameRe[];
-extern const char kHonorificPrefixRe[];
-extern const char kNameLastFirstRe[];
-extern const char kNameLastSecondRe[];
-extern const char kPhoneRe[];
-extern const char kAugmentedPhoneCountryCodeRe[];
-extern const char kCountryCodeRe[];
-extern const char kAreaCodeNotextRe[];
-extern const char kAreaCodeRe[];
-extern const char kFaxRe[];
-extern const char kPhonePrefixSeparatorRe[];
-extern const char kPhoneSuffixSeparatorRe[];
-extern const char kPhonePrefixRe[];
-extern const char kPhoneSuffixRe[];
-extern const char kPhoneExtensionRe[];
-extern const char kSearchTermRe[];
-extern const char kPassportRe[];
-extern const char kTravelOriginRe[];
-extern const char kTravelDestinationRe[];
-extern const char kFlightRe[];
-extern const char kPriceRe[];
-extern const char kCreditCardCVCPattern[];
-extern const char kCreditCard4DigitExpYearPattern[];
-extern const char kSocialSecurityRe[];
-extern const char kOneTimePwdRe[];
+// TODO(crbug.com/40280853): This regex corresponds to the
+// "CREDIT_CARD_VERIFICATION_CODE" pattern. However, it has a use in password
+// manager code, which doesn't use pattern provider. Either move this constant
+// to password manager code or use the pattern provider pattern in
+// password manager.
+inline constexpr char16_t kCardCvcRe[] =
+    u"verification|card.?identification|security.?code|card.?code"
+    u"|security.?value"
+    u"|security.?number|card.?pin|c-v-v"
+    u"|código de segurança"  // pt-BR
+    u"|código de seguridad"  // es-MX
+    u"|karten.?prüfn"        // de-DE
+    u"|(?:cvn|cvv|cvc|csc|cvd|ccv)"
+    // We used to match "cid", but it is a substring of "cidade" (Portuguese for
+    // "city") and needs to be handled carefully.
+    u"|\\bcid\\b|cccid";
+
+/////////////////////////////////////////////////////////////////////////////
+// All regexes below this point are non-parsing related and thus don't have a
+// JSON based definition.
+/////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////
+// data_model_utils.cc
+/////////////////////////////////////////////////////////////////////////////
+
+// These regexes are used for phone number country code detection. The second
+// one matches the same patterns as the first one, plus patterns like +1 (234)
+// that often appear in select fields.
+//
+// The second regex does not capture any group since it is only used to detect
+// if an option value is a phone country code or not.
+//
+// The first regex captures the country code value to use later for comparison.
+// It is different from the second regex because the second one would capture
+// groups like +1 (234 (Without the second parenthesis) which could cause
+// problems during comparison.
+//
+// See https://en.wikipedia.org/wiki/List_of_telephone_country_codes
+inline constexpr char16_t kAugmentedPhoneCountryCodeExtractionRe[] =
+    u"^[^0-9+]*(?:\\+|00)\\s*([1-9]\\d{0,3})\\D*$";
+inline constexpr char16_t kAugmentedPhoneCountryCodeParsingRe[] =
+    u"^[^\\p{N}+]*"      // No numbers or plus.
+    u"(?:\\+|00)\\s*"    // Start of country code.
+    u"(?:[2-9]\\d{0,2}"  // Country code not starting with 1.
+    // Country code starting with 1 followed by 3 optional digits from
+    // North American Numbering Plan
+    u"|1\\s?[^\\p{L}\\p{N}\\s]?\\s?(?:\\d{3})?)"
+    u"[^\\p{N}]*$";  // Trailing no numbers.
+
+/////////////////////////////////////////////////////////////////////////////
+// validation.cc
+/////////////////////////////////////////////////////////////////////////////
 
 // Used to match field data that might be a UPI Virtual Payment Address.
 // See:
 //   - http://crbug.com/702220
 //   - https://upipayments.co.in/virtual-payment-address-vpa/
-extern const char kUPIVirtualPaymentAddressRe[];
+inline constexpr char16_t kUPIVirtualPaymentAddressRe[] =
+    u"^[\\w.+-_]+@("        // eg user@
+    u"\\w+\\.ifsc\\.npci|"  // IFSC code
+    u"aadhaar\\.npci|"      // Aadhaar number
+    u"mobile\\.npci|"       // Mobile number
+    u"rupay\\.npci|"        // RuPay card number
+    u"airtel|"  // List of banks https://www.npci.org.in/upi-live-members
+    u"airtelpaymentsbank|"
+    u"albk|"
+    u"allahabadbank|"
+    u"allbank|"
+    u"andb|"
+    u"apb|"
+    u"apl|"
+    u"axis|"
+    u"axisbank|"
+    u"axisgo|"
+    u"bandhan|"
+    u"barodampay|"
+    u"birla|"
+    u"boi|"
+    u"cbin|"
+    u"cboi|"
+    u"centralbank|"
+    u"cmsidfc|"
+    u"cnrb|"
+    u"csbcash|"
+    u"csbpay|"
+    u"cub|"
+    u"dbs|"
+    u"dcb|"
+    u"dcbbank|"
+    u"denabank|"
+    u"dlb|"
+    u"eazypay|"
+    u"equitas|"
+    u"ezeepay|"
+    u"fbl|"
+    u"federal|"
+    u"finobank|"
+    u"hdfcbank|"
+    u"hsbc|"
+    u"icici|"
+    u"idbi|"
+    u"idbibank|"
+    u"idfc|"
+    u"idfcbank|"
+    u"idfcnetc|"
+    u"ikwik|"
+    u"imobile|"
+    u"indbank|"
+    u"indianbank|"
+    u"indianbk|"
+    u"indus|"
+    u"iob|"
+    u"jkb|"
+    u"jsb|"
+    u"jsbp|"
+    u"karb|"
+    u"karurvysyabank|"
+    u"kaypay|"
+    u"kbl|"
+    u"kbl052|"
+    u"kmb|"
+    u"kmbl|"
+    u"kotak|"
+    u"kvb|"
+    u"kvbank|"
+    u"lime|"
+    u"lvb|"
+    u"lvbank|"
+    u"mahb|"
+    u"obc|"
+    u"okaxis|"
+    u"okbizaxis|"
+    u"okhdfcbank|"
+    u"okicici|"
+    u"oksbi|"
+    u"paytm|"
+    u"payzapp|"
+    u"pingpay|"
+    u"pnb|"
+    u"pockets|"
+    u"psb|"
+    u"purz|"
+    u"rajgovhdfcbank|"
+    u"rbl|"
+    u"sbi|"
+    u"sc|"
+    u"scb|"
+    u"scbl|"
+    u"scmobile|"
+    u"sib|"
+    u"srcb|"
+    u"synd|"
+    u"syndbank|"
+    u"syndicate|"
+    u"tjsb|"
+    u"tjsp|"
+    u"ubi|"
+    u"uboi|"
+    u"uco|"
+    u"unionbank|"
+    u"unionbankofindia|"
+    u"united|"
+    u"upi|"
+    u"utbi|"
+    u"vijayabank|"
+    u"vijb|"
+    u"vjb|"
+    u"ybl|"
+    u"yesbank|"
+    u"yesbankltd"
+    u")$";
 
-// Used to match field data that might be an International Bank Account Number.
-// TODO(crbug.com/977377): The regex doesn't match IBANs for Saint Lucia (LC),
+// Used to match field value that might be an International Bank Account Number.
+// TODO(crbug.com/40633135): The regex doesn't match IBANs for Saint Lucia (LC),
 // Kazakhstan (KZ) and Romania (RO). Consider replace the regex with something
 // like "(?:IT|SM)\d{2}[A-Z]\d{22}|CY\d{2}[A-Z]\d{23}...". For reference:
 //    - https://www.swift.com/resource/iban-registry-pdf
-extern const char kInternationalBankAccountNumberRe[];
+inline constexpr char16_t kInternationalBankAccountNumberValueRe[] =
+    u"^[a-zA-Z]{2}[0-9]{2}[a-zA-Z0-9]{4}[0-9]{7}([a-zA-Z0-9]?){0,16}$";
+
+// Matches all 3 and 4 digit numbers.
+inline constexpr char16_t kCreditCardCVCPattern[] = u"^\\d{3,4}$";
+
+// Matches numbers in the range [2010-2099].
+inline constexpr char16_t kCreditCard4DigitExpYearPattern[] =
+    u"^[2][0][1-9][0-9]$";
+
+/////////////////////////////////////////////////////////////////////////////
+// form_structure.cc
+/////////////////////////////////////////////////////////////////////////////
 
 // Match the path values for form actions that look like generic search:
 //  e.g. /search
@@ -92,7 +204,8 @@ extern const char kInternationalBankAccountNumberRe[];
 //       /search/products...
 //       /products/search/
 //       /blah/search_all.jsp
-extern const char kUrlSearchActionRe[];
+inline constexpr char16_t kUrlSearchActionRe[] =
+    u"/search(/|((\\w*\\.\\w+)?$))";
 
 }  // namespace autofill
 

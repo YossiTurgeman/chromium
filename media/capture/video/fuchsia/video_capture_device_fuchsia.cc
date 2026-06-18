@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,13 @@
 
 #include <zircon/status.h>
 
+#include "base/compiler_specific.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
 #include "media/base/video_types.h"
 #include "third_party/libyuv/include/libyuv/convert.h"
 #include "third_party/libyuv/include/libyuv/video_common.h"
-#include "ui/gfx/buffer_format_util.h"
 
 namespace media {
 
@@ -23,17 +23,16 @@ size_t RoundUp(size_t value, size_t alignment) {
 }
 
 libyuv::FourCC GetFourccForPixelFormat(
-    fuchsia::sysmem::PixelFormatType src_pixel_format) {
+    fuchsia::images2::PixelFormat src_pixel_format) {
   switch (src_pixel_format) {
-    case fuchsia::sysmem::PixelFormatType::I420:
+    case fuchsia::images2::PixelFormat::I420:
       return libyuv::FourCC::FOURCC_I420;
-    case fuchsia::sysmem::PixelFormatType::YV12:
+    case fuchsia::images2::PixelFormat::YV12:
       return libyuv::FourCC::FOURCC_YV12;
-    case fuchsia::sysmem::PixelFormatType::NV12:
+    case fuchsia::images2::PixelFormat::NV12:
       return libyuv::FourCC::FOURCC_NV12;
     default:
       NOTREACHED();
-      return libyuv::FourCC::FOURCC_I420;
   }
 }
 
@@ -91,11 +90,11 @@ gfx::Size RotateSize(gfx::Size size, libyuv::RotationMode rotation) {
 
 // static
 VideoPixelFormat VideoCaptureDeviceFuchsia::GetConvertedPixelFormat(
-    fuchsia::sysmem::PixelFormatType format) {
+    fuchsia::images2::PixelFormat format) {
   switch (format) {
-    case fuchsia::sysmem::PixelFormatType::I420:
-    case fuchsia::sysmem::PixelFormatType::YV12:
-    case fuchsia::sysmem::PixelFormatType::NV12:
+    case fuchsia::images2::PixelFormat::I420:
+    case fuchsia::images2::PixelFormat::YV12:
+    case fuchsia::images2::PixelFormat::NV12:
       // Convert all YUV formats to I420 since consumers currently don't support
       // NV12 or YV12.
       return PIXEL_FORMAT_I420;
@@ -107,13 +106,26 @@ VideoPixelFormat VideoCaptureDeviceFuchsia::GetConvertedPixelFormat(
   }
 }
 
-bool VideoCaptureDeviceFuchsia::IsSupportedPixelFormat(
+// static
+VideoPixelFormat VideoCaptureDeviceFuchsia::GetConvertedPixelFormat(
     fuchsia::sysmem::PixelFormatType format) {
+  // All fuchsia.sysmem.PixelFormatType values are valid
+  // fuchsia.images2.PixelFormat values with the same meaning, and this will
+  // remain true because sysmem(1) won't be getting any new PixelFormatType
+  // values.
+  auto images2_pixel_format =
+      static_cast<fuchsia::images2::PixelFormat>(fidl::ToUnderlying(format));
+  return GetConvertedPixelFormat(images2_pixel_format);
+}
+
+bool VideoCaptureDeviceFuchsia::IsSupportedPixelFormat(
+    fuchsia::images2::PixelFormat format) {
   return GetConvertedPixelFormat(format) != PIXEL_FORMAT_UNKNOWN;
 }
 
 VideoCaptureDeviceFuchsia::VideoCaptureDeviceFuchsia(
-    fidl::InterfaceHandle<fuchsia::camera3::Device> device) {
+    fidl::InterfaceHandle<fuchsia::camera3::Device> device)
+    : sysmem_allocator_("CrVideoCaptureDeviceFuchsia") {
   device_.Bind(std::move(device));
   device_.set_error_handler(
       fit::bind_member(this, &VideoCaptureDeviceFuchsia::OnDeviceError));
@@ -142,7 +154,7 @@ void VideoCaptureDeviceFuchsia::AllocateAndStart(
   start_time_ = base::TimeTicks::Now();
   frames_received_ = 0;
 
-  // TODO(crbug.com/1075839) Select stream_id based on requested resolution.
+  // TODO(crbug.com/40128395) Select stream_id based on requested resolution.
   device_->ConnectToStream(/*stream_id=*/0, stream_.NewRequest());
   stream_.set_error_handler(
       fit::bind_member(this, &VideoCaptureDeviceFuchsia::OnStreamError));
@@ -154,7 +166,7 @@ void VideoCaptureDeviceFuchsia::AllocateAndStart(
   // that we are interested in buffer collection negotiation. The collection
   // token will be returned back from WatchBufferCollection(). After that it
   // will be initialized in InitializeBufferCollection().
-  stream_->SetBufferCollection(sysmem_allocator_.CreateNewToken());
+  stream_->SetBufferCollection2(sysmem_allocator_.CreateNewToken());
   WatchBufferCollection();
 }
 
@@ -178,9 +190,8 @@ void VideoCaptureDeviceFuchsia::OnStreamError(zx_status_t status) {
 
 void VideoCaptureDeviceFuchsia::DisconnectStream() {
   stream_.Unbind();
-  buffer_collection_creator_.reset();
   buffer_collection_.reset();
-  buffer_reader_.reset();
+  buffers_.clear();
   frame_size_.reset();
 }
 
@@ -230,8 +241,8 @@ void VideoCaptureDeviceFuchsia::OnWatchOrientationResult(
 void VideoCaptureDeviceFuchsia::WatchBufferCollection() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
-  stream_->WatchBufferCollection(
-      [this](fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>
+  stream_->WatchBufferCollection2(
+      [this](fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
                  token_handle) {
         InitializeBufferCollection(std::move(token_handle));
         WatchBufferCollection();
@@ -239,72 +250,68 @@ void VideoCaptureDeviceFuchsia::WatchBufferCollection() {
 }
 
 void VideoCaptureDeviceFuchsia::InitializeBufferCollection(
-    fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>
+    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
         token_handle) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   // Drop old buffers.
   buffer_collection_.reset();
-  buffer_reader_.reset();
+  buffers_.clear();
 
   // Initialize the new collection.
-  fuchsia::sysmem::BufferCollectionTokenPtr token;
+  fuchsia::sysmem2::BufferCollectionTokenPtr token;
   token.Bind(std::move(token_handle));
-  buffer_collection_creator_ =
-      sysmem_allocator_.MakeBufferPoolCreatorFromToken(std::move(token));
 
   // Request just one buffer in collection constraints: each frame is copied as
   // soon as it's received.
   const size_t kMaxUsedOutputFrames = 1;
-  fuchsia::sysmem::BufferCollectionConstraints constraints =
-      SysmemBufferReader::GetRecommendedConstraints(kMaxUsedOutputFrames);
-  buffer_collection_creator_->Create(
-      std::move(constraints),
-      base::BindOnce(&VideoCaptureDeviceFuchsia::OnBufferCollectionCreated,
-                     base::Unretained(this)));
+
+  // This is not an actual device driver, so the priority should be > 1. It's
+  // also not a high-level system, so the name should be < 100.
+  constexpr uint32_t kNamePriority = 10;
+
+  // Sysmem calculates buffer size based on image constraints, so it doesn't
+  // need to be specified explicitly.
+  fuchsia::sysmem2::BufferCollectionConstraints constraints =
+      VmoBuffer::GetRecommendedConstraints(kMaxUsedOutputFrames,
+                                           /*min_buffer_size=*/std::nullopt,
+                                           /*writable=*/false);
+  buffer_collection_ = sysmem_allocator_.BindSharedCollection(std::move(token));
+  buffer_collection_->Initialize(std::move(constraints), "CrVideoCaptureDevice",
+                                 kNamePriority);
+  buffer_collection_->AcquireBuffers(base::BindOnce(
+      &VideoCaptureDeviceFuchsia::OnBuffersAcquired, base::Unretained(this)));
 }
 
-void VideoCaptureDeviceFuchsia::OnBufferCollectionCreated(
-    std::unique_ptr<SysmemBufferPool> collection) {
+void VideoCaptureDeviceFuchsia::OnBuffersAcquired(
+    std::vector<VmoBuffer> buffers,
+    const fuchsia::sysmem2::SingleBufferSettings& buffer_settings) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   // Buffer collection allocation has failed. This case is not treated as an
   // error because the camera may create a new collection.
-  if (!collection)
-    return;
-
-  buffer_collection_ = std::move(collection);
-  buffer_collection_->CreateReader(
-      base::BindOnce(&VideoCaptureDeviceFuchsia::OnBufferReaderCreated,
-                     base::Unretained(this)));
-}
-
-void VideoCaptureDeviceFuchsia::OnBufferReaderCreated(
-    std::unique_ptr<SysmemBufferReader> reader) {
-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-
-  // Buffer collection allocation has failed. This case is not treated as an
-  // error because the camera may create a new collection.
-  if (!reader) {
+  if (buffers.empty()) {
     buffer_collection_.reset();
     return;
   }
 
-  buffer_reader_ = std::move(reader);
-  if (!buffer_reader_->buffer_settings().has_image_format_constraints) {
+  buffers_ = std::move(buffers);
+
+  if (!buffer_settings.has_image_format_constraints()) {
     OnError(FROM_HERE, VideoCaptureError::kFuchsiaSysmemDidNotSetImageFormat,
             "Sysmem created buffer without image format constraints");
     return;
   }
 
-  auto pixel_format = buffer_reader_->buffer_settings()
-                          .image_format_constraints.pixel_format.type;
+  auto pixel_format = buffer_settings.image_format_constraints().pixel_format();
   if (!IsSupportedPixelFormat(pixel_format)) {
     OnError(FROM_HERE, VideoCaptureError::kFuchsiaUnsupportedPixelFormat,
             base::StringPrintf("Unsupported video frame format: %d",
                                static_cast<int>(pixel_format)));
     return;
   }
+
+  buffers_format_ = fidl::Clone(buffer_settings.image_format_constraints());
 
   if (!started_) {
     started_ = true;
@@ -325,38 +332,35 @@ void VideoCaptureDeviceFuchsia::ProcessNewFrame(
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   DCHECK(client_);
 
-  if (!buffer_reader_) {
+  if (buffers_.empty()) {
     DLOG(WARNING) << "Dropping frame received before sysmem collection has "
                      "been initialized.";
     return;
   }
 
   size_t index = frame_info.buffer_index;
-  if (index >= buffer_reader_->num_buffers()) {
+  if (index >= buffers_.size()) {
     OnError(FROM_HERE, VideoCaptureError::kFuchsiaSysmemInvalidBufferIndex,
             base::StringPrintf("Received frame with invalid buffer_index=%zu",
                                index));
     return;
   }
 
-  const fuchsia::sysmem::ImageFormatConstraints& sysmem_buffer_format =
-      buffer_reader_->buffer_settings().image_format_constraints;
-
   // Calculate coded frame dimensions for the buffer collection based on the
   // sysmem collection constraints. This logic should match
   // LogicalBufferCollection::Allocate() in sysmem.
   size_t src_coded_width =
-      RoundUp(std::max(sysmem_buffer_format.min_coded_width,
-                       sysmem_buffer_format.required_max_coded_width),
-              sysmem_buffer_format.coded_width_divisor);
+      RoundUp(std::max(buffers_format_.min_size().width,
+                       buffers_format_.required_max_size().width),
+              buffers_format_.size_alignment().width);
   size_t src_coded_height =
-      RoundUp(std::max(sysmem_buffer_format.min_coded_height,
-                       sysmem_buffer_format.required_max_coded_height),
-              sysmem_buffer_format.coded_height_divisor);
-  size_t src_stride = RoundUp(
-      std::max(static_cast<size_t>(sysmem_buffer_format.min_bytes_per_row),
-               src_coded_width),
-      sysmem_buffer_format.bytes_per_row_divisor);
+      RoundUp(std::max(buffers_format_.min_size().height,
+                       buffers_format_.required_max_size().height),
+              buffers_format_.size_alignment().height);
+  size_t src_stride =
+      RoundUp(std::max(static_cast<size_t>(buffers_format_.min_bytes_per_row()),
+                       src_coded_width),
+              buffers_format_.bytes_per_row_divisor());
   gfx::Size visible_size =
       frame_size_.value_or(gfx::Size(src_coded_width, src_coded_height));
   gfx::Size nonrotated_output_size((visible_size.width() + 1) & ~1,
@@ -376,7 +380,7 @@ void VideoCaptureDeviceFuchsia::ProcessNewFrame(
 
   ++frames_received_;
   float frame_rate =
-      (timestamp > base::TimeDelta())
+      (timestamp.is_positive())
           ? static_cast<float>(frames_received_) / timestamp.InSecondsF()
           : 0.0;
   VideoCaptureFormat capture_format(output_size, frame_rate, PIXEL_FORMAT_I420);
@@ -384,13 +388,14 @@ void VideoCaptureDeviceFuchsia::ProcessNewFrame(
   Client::Buffer buffer;
   Client::ReserveResult result = client_->ReserveOutputBuffer(
       capture_format.frame_size, capture_format.pixel_format,
-      /*frame_feedback_id=*/0, &buffer);
+      /*frame_feedback_id=*/0, &buffer, /*require_new_buffer_id=*/nullptr,
+      /*retire_old_buffer_id=*/nullptr);
   if (result != Client::ReserveResult::kSucceeded) {
     DLOG(WARNING) << "Failed to allocate output buffer for a video frame";
     return;
   }
 
-  auto src_span = buffer_reader_->GetMappingForBuffer(index);
+  auto src_span = buffers_[index].GetMemory();
   if (src_span.empty()) {
     OnError(FROM_HERE, VideoCaptureError::kFuchsiaFailedToMapSysmemBuffer,
             "Failed to map buffers allocated by sysmem");
@@ -412,26 +417,25 @@ void VideoCaptureDeviceFuchsia::ProcessNewFrame(
       buffer.handle_provider->GetHandleForInProcessAccess();
 
   // Calculate offsets and strides for the output buffer.
-  uint8_t* dst_y = output_handle->data();
+  uint8_t* dst_y = output_handle->data().data();
   int dst_stride_y = output_size.width();
   size_t dst_y_plane_size = output_size.width() * output_size.height();
-  uint8_t* dst_u = dst_y + dst_y_plane_size;
+  uint8_t* dst_u = UNSAFE_TODO(dst_y + dst_y_plane_size);
   int dst_stride_u = output_size.width() / 2;
-  uint8_t* dst_v = dst_u + dst_y_plane_size / 4;
+  uint8_t* dst_v = UNSAFE_TODO(dst_u + dst_y_plane_size / 4);
   int dst_stride_v = output_size.width() / 2;
 
   // Check that the output fits in the buffer.
-  const uint8_t* dst_end = dst_v + dst_y_plane_size / 4;
-  CHECK_LE(dst_end, output_handle->data() + output_handle->mapped_size());
+  const uint8_t* dst_end = UNSAFE_TODO(dst_v + dst_y_plane_size / 4);
+  UNSAFE_TODO(CHECK_LE(
+      dst_end, output_handle->data().data() + output_handle->mapped_size()));
 
   // Vertical flip is indicated to ConvertToI420() by negating src_height.
   int flipped_src_height = static_cast<int>(src_coded_height);
   if (flip_y)
     flipped_src_height = -flipped_src_height;
 
-  auto four_cc =
-      GetFourccForPixelFormat(buffer_reader_->buffer_settings()
-                                  .image_format_constraints.pixel_format.type);
+  auto four_cc = GetFourccForPixelFormat(buffers_format_.pixel_format());
 
   libyuv::ConvertToI420(src_span.data(), src_span.size(), dst_y, dst_stride_y,
                         dst_u, dst_stride_u, dst_v, dst_stride_v,
@@ -441,7 +445,7 @@ void VideoCaptureDeviceFuchsia::ProcessNewFrame(
 
   client_->OnIncomingCapturedBufferExt(
       std::move(buffer), capture_format, gfx::ColorSpace(), reference_time,
-      timestamp, gfx::Rect(visible_size), VideoFrameMetadata());
+      timestamp, std::nullopt, gfx::Rect(visible_size), VideoFrameMetadata());
 
   // Frame buffer is returned to the device by dropping the |frame_info|.
 }

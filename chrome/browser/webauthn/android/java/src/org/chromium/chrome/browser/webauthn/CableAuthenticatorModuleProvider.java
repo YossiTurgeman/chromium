@@ -1,105 +1,130 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.webauthn;
 
-import android.annotation.SuppressLint;
+import android.app.KeyguardManager;
+import android.bluetooth.BluetoothAdapter;
 import android.content.Context;
-import android.os.Bundle;
-import android.view.Gravity;
-import android.view.LayoutInflater;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.LinearLayout;
-import android.widget.TextView;
+import android.os.Parcel;
 
-import androidx.fragment.app.Fragment;
-import androidx.fragment.app.FragmentTransaction;
+import com.google.android.gms.tasks.Task;
 
-import org.chromium.base.annotations.NativeMethods;
-import org.chromium.chrome.modules.cablev2_authenticator.Cablev2AuthenticatorModule;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.base.ContextUtils;
+import org.chromium.base.Log;
+import org.chromium.base.PackageUtils;
+import org.chromium.base.ThreadUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.enterprise.util.EnterpriseInfo;
+import org.chromium.components.browser_ui.notifications.NotificationProxyUtils;
+import org.chromium.components.externalauth.ExternalAuthUtils;
+import org.chromium.components.webauthn.Fido2ApiCall;
 
 /**
- * Provides a UI that attempts to install the caBLEv2 Authenticator module. If already installed, or
- * successfully installed, it replaces itself in the back-stack with the authenticator UI.
+ * Provides linking information to the native side.
  *
- * This code lives in the base module, i.e. is _not_ part of the dynamically-loaded module.
- *
- * This does not use {@link ModuleInstallUi} because it needs to integrate into the Fragment-based
- * settings UI, while {@link ModuleInstallUi} assumes that the UI does in a {@link Tab}.
+ * <p>TODO(crbug.com/348204152): Rename this class to CableInformationProvider and consider
+ * providing the information from GMSCore.
  */
-public class CableAuthenticatorModuleProvider extends Fragment {
-    // NETWORK_CONTEXT_KEY is the key under which a pointer to a NetworkContext
-    // is passed (as a long) in the arguments {@link Bundle} to the {@link
-    // Fragment} in the module.
-    private static final String NETWORK_CONTEXT_KEY =
-            "org.chromium.chrome.modules.cablev2_authenticator.NetworkContext";
-    private TextView mStatus;
+@NullMarked
+public class CableAuthenticatorModuleProvider {
+    // TAG is subject to a 20 character limit.
+    private static final String TAG = "CableAuthModuleProv";
 
-    @Override
-    @SuppressLint("SetTextI18n")
-    public View onCreateView(
-            LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
-        final Context context = getContext();
+    @CalledByNative
+    public static boolean canDeviceSupportCable() {
+        // This function will be run on a background thread.
 
-        // This UI is a placeholder for development, has not been reviewed by
-        // UX, and thus just uses untranslated strings for now.
-        getActivity().setTitle("Installing");
-
-        mStatus = new TextView(context);
-        mStatus.setPadding(0, 60, 0, 60);
-
-        LinearLayout layout = new LinearLayout(context);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setGravity(Gravity.CENTER_HORIZONTAL);
-        layout.addView(mStatus,
-                new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT));
-
-        if (Cablev2AuthenticatorModule.isInstalled()) {
-            showModule();
-        } else {
-            mStatus.setText("Installing security key functionality…");
-            Cablev2AuthenticatorModule.install((success) -> {
-                if (!success) {
-                    mStatus.setText("Failed to install.");
-                    return;
-                }
-                showModule();
-            });
+        if (BluetoothAdapter.getDefaultAdapter() == null) {
+            return false;
         }
 
-        return layout;
+        // GMSCore will immediately fail all requests if a screenlock
+        // isn't configured.
+        final Context context = ContextUtils.getApplicationContext();
+        KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
+        if (!km.isDeviceSecure()) {
+            return false;
+        }
+
+        return NotificationProxyUtils.areNotificationsEnabled();
     }
 
-    @SuppressLint("SetTextI18n")
-    private void showModule() {
-        mStatus.setText("Installed.");
+    /** Calls back into native code with whether we are running in a work profile. */
+    @CalledByNative
+    public static void amInWorkProfile(long pointer) {
+        ThreadUtils.assertOnUiThread();
+        EnterpriseInfo enterpriseInfo = EnterpriseInfo.getInstance();
+        enterpriseInfo.getDeviceEnterpriseInfo(
+                (state) -> {
+                    // If the state is unable to determine, assume it's not a work profile.
+                    boolean isWorkProfile = false;
+                    if (state != null) {
+                        isWorkProfile = state.mProfileOwned;
+                    }
+                    CableAuthenticatorModuleProviderJni.get()
+                            .onHaveWorkProfileResult(pointer, isWorkProfile);
+                });
+    }
 
-        FragmentTransaction transaction =
-                getActivity().getSupportFragmentManager().beginTransaction();
-        Fragment fragment = Cablev2AuthenticatorModule.getImpl().getFragment();
-        Bundle arguments = getArguments();
-        if (arguments == null) {
-            arguments = new Bundle();
+    @CalledByNative
+    public static void getLinkingInformation(long pointer) {
+        boolean ok = true;
+        if (!ExternalAuthUtils.getInstance().canUseFirstPartyGooglePlayServices()) {
+            Log.i(TAG, "Cannot get linking information from Play Services without 1p access.");
+            ok = false;
+        } else if (PackageUtils.getPackageVersion("com.google.android.gms") < 232400000) {
+            Log.i(TAG, "GMS Core version is too old to get linking information.");
+            ok = false;
         }
-        arguments.putLong(NETWORK_CONTEXT_KEY,
-                CableAuthenticatorModuleProviderJni.get().getSystemNetworkContext());
-        fragment.setArguments(arguments);
-        transaction.replace(getId(), fragment);
-        // This fragment is deliberately not added to the back-stack here so
-        // that it appears to have been "replaced" by the authenticator UI.
-        transaction.commit();
+
+        if (!ok) {
+            CableAuthenticatorModuleProviderJni.get().onHaveLinkingInformation(pointer, null);
+            return;
+        }
+
+        Fido2ApiCall call =
+                new Fido2ApiCall(
+                        ContextUtils.getApplicationContext(), Fido2ApiCall.FIRST_PARTY_API);
+        Parcel args = call.start();
+        Fido2ApiCall.ByteArrayResult result = new Fido2ApiCall.ByteArrayResult();
+        args.writeStrongBinder(result);
+        Task<byte[]> task =
+                call.run(
+                        Fido2ApiCall.METHOD_GET_LINK_INFO,
+                        Fido2ApiCall.TRANSACTION_GET_LINK_INFO,
+                        args,
+                        result);
+        task.addOnSuccessListener(
+                        linkInfo -> {
+                            CableAuthenticatorModuleProviderJni.get()
+                                    .onHaveLinkingInformation(pointer, linkInfo);
+                        })
+                .addOnFailureListener(
+                        exception -> {
+                            Log.e(
+                                    TAG,
+                                    "Call to get linking information from Play Services failed",
+                                    exception);
+                            CableAuthenticatorModuleProviderJni.get()
+                                    .onHaveLinkingInformation(pointer, null);
+                        });
     }
 
     @NativeMethods
     interface Natives {
-        // getSystemNetworkContext returns a pointer, encoded in a long, to the
-        // global NetworkContext for system services that hangs off
-        // |g_browser|. This is needed because //chrome/browser, being a
-        // static_library, cannot be depended on by another component thus we
-        // pass this value into the feature module.
-        long getSystemNetworkContext();
+        // onHaveLinkingInformation is called when pre-link information has been received from Play
+        // Services. The argument is a CBOR-encoded linking structure, as defined in CTAP 2.2, or is
+        // null on error.
+        void onHaveLinkingInformation(long pointer, byte @Nullable [] cbor);
+
+        // onHaveWorkProfileResult is called when it has been determined if
+        // Chrome is running in a work profile or not.
+        void onHaveWorkProfileResult(long pointer, boolean inWorkProfile);
     }
 }

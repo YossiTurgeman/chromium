@@ -1,14 +1,13 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from optparse import OptionParser
 import unittest
 
 from telemetry.page import shared_page_state
+from telemetry.core import optparse_argparse_migration as oam
 
 from contrib.cluster_telemetry import rasterize_and_record_micro_ct
-from contrib.cluster_telemetry import repaint
 from contrib.cluster_telemetry import skpicture_printer
 
 
@@ -26,7 +25,6 @@ class CTBenchmarks(unittest.TestCase):
   def setUp(self):
     self.ct_benchmarks = [
         rasterize_and_record_micro_ct.RasterizeAndRecordMicroCT(),
-        repaint.RepaintCT(),
         skpicture_printer.SkpicturePrinterCT(),
     ]
     self.shared_page_state_class = shared_page_state.SharedMobilePageState
@@ -36,7 +34,7 @@ class CTBenchmarks(unittest.TestCase):
 
   def testCTBenchmarks(self):
     for benchmark in self.ct_benchmarks:
-      parser = OptionParser()
+      parser = oam.CreateFromOptparseInputs()
       parser.user_agent = 'mobile'
       parser.archive_data_file = self.archive_data_file
       parser.urls_list = self.urls_list
@@ -45,21 +43,18 @@ class CTBenchmarks(unittest.TestCase):
       benchmark.ProcessCommandLineArgs(None, parser)
       ct_page_set = benchmark.CreateStorySet(parser)
 
-      self.assertEquals(
-          len(self.urls_list.split(',')), len(ct_page_set.stories))
-      self.assertEquals(
-          self.archive_data_file, ct_page_set.archive_data_file)
+      self.assertEqual(len(self.urls_list.split(',')), len(ct_page_set.stories))
+      self.assertEqual(self.archive_data_file, ct_page_set.archive_data_file)
       for i in range(len(self.urls_list.split(','))):
         url = self.urls_list.split(',')[i]
         story = ct_page_set.stories[i]
-        self.assertEquals(url, story.url)
-        self.assertEquals(
-            self.shared_page_state_class, story.shared_state_class)
-        self.assertEquals(self.archive_data_file, story.archive_data_file)
+        self.assertEqual(url, story.url)
+        self.assertEqual(self.shared_page_state_class, story.shared_state_class)
+        self.assertEqual(self.archive_data_file, story.archive_data_file)
 
   def testCTBenchmarks_wrongAgent(self):
     for benchmark in self.ct_benchmarks:
-      parser = OptionParser()
+      parser = oam.CreateFromOptparseInputs()
       parser.user_agent = 'mobileeeeee'
       parser.archive_data_file = self.archive_data_file
       parser.urls_list = self.urls_list
@@ -69,12 +64,12 @@ class CTBenchmarks(unittest.TestCase):
       try:
         benchmark.CreateStorySet(parser)
         self.fail('Expected ValueError')
-      except ValueError, e:
-        self.assertEquals('user_agent mobileeeeee is unrecognized', e.message)
+      except ValueError as e:
+        self.assertEqual('user_agent mobileeeeee is unrecognized', str(e))
 
   def testCTBenchmarks_missingDataFile(self):
     for benchmark in self.ct_benchmarks:
-      parser = OptionParser()
+      parser = oam.CreateFromOptparseInputs()
       parser.user_agent = 'mobile'
       parser.urls_list = self.urls_list
       parser.use_live_sites = False
@@ -84,20 +79,20 @@ class CTBenchmarks(unittest.TestCase):
       try:
         benchmark.ProcessCommandLineArgs(None, parser)
         self.fail('Expected AttributeError')
-      except AttributeError, e:
-        self.assertEquals(
-            'OptionParser instance has no attribute \'archive_data_file\'',
-            e.message)
+      except AttributeError as e:
+        self.assertEqual(
+            "'ArgumentParser' object has no attribute 'archive_data_file'",
+            str(e))
 
       # Now add an empty archive_data_file.
       parser.archive_data_file = ''
       benchmark.ProcessCommandLineArgs(self.mock_parser, parser)
-      self.assertEquals(
-          'Please specify --archive-data-file.', self.mock_parser.err_msg)
+      self.assertEqual('Please specify --archive-data-file.',
+                       self.mock_parser.err_msg)
 
   def testCTBenchmarks_missingDataFileUseLiveSites(self):
     for benchmark in self.ct_benchmarks:
-      parser = OptionParser()
+      parser = oam.CreateFromOptparseInputs()
       parser.user_agent = 'mobile'
       parser.urls_list = self.urls_list
       parser.use_live_sites = True
@@ -110,7 +105,7 @@ class CTBenchmarks(unittest.TestCase):
 
   def testCTBenchmarks_missingUrlsList(self):
     for benchmark in self.ct_benchmarks:
-      parser = OptionParser()
+      parser = oam.CreateFromOptparseInputs()
       parser.user_agent = 'mobile'
       parser.archive_data_file = self.archive_data_file
       benchmark.AddBenchmarkCommandLineArgs(parser)
@@ -119,12 +114,11 @@ class CTBenchmarks(unittest.TestCase):
       try:
         benchmark.ProcessCommandLineArgs(None, parser)
         self.fail('Expected AttributeError')
-      except AttributeError, e:
-        self.assertEquals(
-            'OptionParser instance has no attribute \'urls_list\'',
-            e.message)
+      except AttributeError as e:
+        self.assertEqual("'ArgumentParser' object has no attribute 'urls_list'",
+                         str(e))
 
       # Now add an empty urls_list.
       parser.urls_list = ''
       benchmark.ProcessCommandLineArgs(self.mock_parser, parser)
-      self.assertEquals('Please specify --urls-list.', self.mock_parser.err_msg)
+      self.assertEqual('Please specify --urls-list.', self.mock_parser.err_msg)

@@ -1,22 +1,23 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/predictors/loading_data_collector.h"
+
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 
-#include "chrome/browser/browser_features.h"
-#include "chrome/browser/predictors/loading_data_collector.h"
 #include "chrome/browser/predictors/loading_stats_collector.h"
 #include "chrome/browser/predictors/predictors_features.h"
 #include "chrome/browser/predictors/resource_prefetch_predictor.h"
 #include "chrome/browser/predictors/resource_prefetch_predictor_tables.h"
-#include "chrome/browser/profiles/profile.h"
 #include "components/history/core/browser/history_service.h"
 #include "content/public/browser/browser_thread.h"
 #include "net/base/mime_util.h"
+#include "net/base/url_util.h"
 #include "net/http/http_response_headers.h"
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "third_party/blink/public/common/loader/resource_type_util.h"
@@ -59,11 +60,10 @@ network::mojom::RequestDestination GetRequestDestinationFromMimeType(
   } else if (net::MatchesMimeType("text/css", mime_type)) {
     return network::mojom::RequestDestination::kStyle;
   } else {
-    bool found =
-        std::any_of(std::begin(kFontMimeTypes), std::end(kFontMimeTypes),
-                    [&mime_type](const std::string& mime) {
-                      return net::MatchesMimeType(mime, mime_type);
-                    });
+    bool found = std::ranges::any_of(
+        kFontMimeTypes, [&mime_type](const std::string& mime) {
+          return net::MatchesMimeType(mime, mime_type);
+        });
     if (found)
       return network::mojom::RequestDestination::kFont;
   }
@@ -92,29 +92,49 @@ OriginRequestSummary::OriginRequestSummary(const OriginRequestSummary& other) =
     default;
 OriginRequestSummary::~OriginRequestSummary() = default;
 
-PageRequestSummary::PageRequestSummary(const NavigationID& navigation_id)
-    : ukm_source_id(navigation_id.ukm_source_id),
-      main_frame_url(navigation_id.main_frame_url),
-      initial_url(navigation_id.main_frame_url),
-      navigation_started(navigation_id.creation_time),
-      navigation_committed(base::TimeTicks::Max()),
-      first_contentful_paint(base::TimeTicks::Max()) {}
+PageRequestSummary::PageRequestSummary(ukm::SourceId ukm_source_id,
+                                       const GURL& main_frame_url,
+                                       base::TimeTicks navigation_started)
+    : ukm_source_id(ukm_source_id),
+      main_frame_url(main_frame_url),
+      initial_url(main_frame_url),
+      navigation_started(navigation_started) {}
 
 PageRequestSummary::PageRequestSummary(const PageRequestSummary& other) =
     default;
 
 void PageRequestSummary::UpdateOrAddResource(
     const blink::mojom::ResourceLoadInfo& resource_load_info) {
-  for (const auto& redirect_info : resource_load_info.redirect_info_chain) {
-    UpdateOrAddToOrigins(redirect_info->origin_of_new_url,
-                         redirect_info->network_info);
+  auto should_record_resource_load =
+      ShouldRecordResourceLoad(resource_load_info);
+  switch (should_record_resource_load) {
+    case ShouldRecordResourceLoadResult::kNo:
+      return;
+    case ShouldRecordResourceLoadResult::kLowPriority:
+    case ShouldRecordResourceLoadResult::kYes:
+      const bool is_low_priority = should_record_resource_load ==
+                                   ShouldRecordResourceLoadResult::kLowPriority;
+      for (const auto& redirect_info : resource_load_info.redirect_info_chain) {
+        UpdateOrAddToOrigins(redirect_info->origin_of_new_url,
+                             redirect_info->network_info, is_low_priority);
+      }
+      UpdateOrAddToOrigins(url::Origin::Create(resource_load_info.final_url),
+                           resource_load_info.network_info, is_low_priority);
+      const GURL final_url =
+          net::SimplifyUrlForRequest(resource_load_info.final_url);
+      if (is_low_priority) {
+        low_priority_subresource_urls.insert(final_url);
+      } else {
+        subresource_urls.insert(final_url);
+      }
+      return;
   }
-  UpdateOrAddToOrigins(url::Origin::Create(resource_load_info.final_url),
-                       resource_load_info.network_info);
-  subresource_urls.insert(resource_load_info.final_url);
 }
 
 void PageRequestSummary::AddPreconnectAttempt(const GURL& preconnect_url) {
+  if (main_frame_load_complete) {
+    return;
+  }
   url::Origin preconnect_origin = url::Origin::Create(preconnect_url);
   if (preconnect_origin == url::Origin::Create(main_frame_url)) {
     // Do not count preconnect to main frame origin in number of origins
@@ -125,17 +145,78 @@ void PageRequestSummary::AddPreconnectAttempt(const GURL& preconnect_url) {
 }
 
 void PageRequestSummary::AddPrefetchAttempt(const GURL& prefetch_url) {
+  if (main_frame_load_complete) {
+    return;
+  }
   prefetch_urls.insert(prefetch_url);
 
   if (!first_prefetch_initiated)
     first_prefetch_initiated = base::TimeTicks::Now();
 }
 
+void PageRequestSummary::MainFrameLoadComplete() {
+  main_frame_load_complete = true;
+}
+
+PageRequestSummary::ShouldRecordResourceLoadResult
+PageRequestSummary::ShouldRecordResourceLoad(
+    const blink::mojom::ResourceLoadInfo& resource_load_info) const {
+  const GURL& url = resource_load_info.final_url;
+  if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) {
+    return kNo;
+  }
+
+  if (!g_allow_port_in_urls && url.has_port()) {
+    return kNo;
+  }
+
+  if (!IsHandledResourceType(resource_load_info.request_destination,
+                             resource_load_info.mime_type)) {
+    return kNo;
+  }
+
+  if (resource_load_info.method != "GET") {
+    return kNo;
+  }
+
+  if (main_frame_load_complete) {
+    return kLowPriority;
+  }
+
+  // Guard behind feature: All delayable requests are considered low priority.
+  if (base::FeatureList::IsEnabled(
+          features::kLoadingOnlyLearnHighPriorityResources) &&
+      resource_load_info.request_priority < net::MEDIUM) {
+    return kLowPriority;
+  }
+
+  return kYes;
+}
+
+// static
+bool PageRequestSummary::IsHandledResourceType(
+    network::mojom::RequestDestination destination,
+    const std::string& mime_type) {
+  network::mojom::RequestDestination actual_destination =
+      GetRequestDestination(destination, mime_type);
+  return actual_destination == network::mojom::RequestDestination::kDocument ||
+         actual_destination == network::mojom::RequestDestination::kStyle ||
+         actual_destination == network::mojom::RequestDestination::kScript ||
+         actual_destination == network::mojom::RequestDestination::kImage ||
+         actual_destination == network::mojom::RequestDestination::kFont;
+}
+
 void PageRequestSummary::UpdateOrAddToOrigins(
     const url::Origin& origin,
-    const blink::mojom::CommonNetworkInfoPtr& network_info) {
+    const blink::mojom::CommonNetworkInfoPtr& network_info,
+    bool is_low_priority) {
   if (origin.opaque())
     return;
+
+  if (is_low_priority) {
+    low_priority_origins.insert(origin);
+    return;
+  }
 
   auto it = origins.find(origin);
   if (it == origins.end()) {
@@ -167,50 +248,39 @@ LoadingDataCollector::LoadingDataCollector(
 LoadingDataCollector::~LoadingDataCollector() = default;
 
 void LoadingDataCollector::RecordStartNavigation(
-    const NavigationID& navigation_id) {
-  CleanupAbandonedNavigations(navigation_id);
+    NavigationId navigation_id,
+    ukm::SourceId ukm_source_id,
+    const GURL& main_frame_url,
+    base::TimeTicks creation_time) {
+  CleanupAbandonedNavigations();
 
   // New empty navigation entry.
   inflight_navigations_.emplace(
-      navigation_id, std::make_unique<PageRequestSummary>(navigation_id));
+      navigation_id, std::make_unique<PageRequestSummary>(
+                         ukm_source_id, main_frame_url, creation_time));
 }
 
 void LoadingDataCollector::RecordFinishNavigation(
-    const NavigationID& old_navigation_id,
-    const NavigationID& new_navigation_id,
+    NavigationId navigation_id,
+    const GURL& new_main_frame_url,
     bool is_error_page) {
   if (is_error_page) {
-    inflight_navigations_.erase(old_navigation_id);
+    inflight_navigations_.erase(navigation_id);
     return;
   }
 
-  // All subsequent events corresponding to this navigation will have
-  // |new_navigation_id|. Find the |old_navigation_id| entry in
-  // |inflight_navigations_| and change its key to the |new_navigation_id|.
-  std::unique_ptr<PageRequestSummary> summary;
-  auto nav_it = inflight_navigations_.find(old_navigation_id);
+  auto nav_it = inflight_navigations_.find(navigation_id);
   if (nav_it != inflight_navigations_.end()) {
-    summary = std::move(nav_it->second);
-    DCHECK_EQ(summary->main_frame_url, old_navigation_id.main_frame_url);
-    summary->main_frame_url = new_navigation_id.main_frame_url;
-    inflight_navigations_.erase(nav_it);
-  } else {
-    summary = std::make_unique<PageRequestSummary>(new_navigation_id);
-    summary->initial_url = old_navigation_id.main_frame_url;
+    nav_it->second->main_frame_url = new_main_frame_url;
+    nav_it->second->navigation_committed = base::TimeTicks::Now();
   }
-  summary->navigation_committed = base::TimeTicks::Now();
-
-  inflight_navigations_.emplace(new_navigation_id, std::move(summary));
 }
 
 void LoadingDataCollector::RecordResourceLoadComplete(
-    const NavigationID& navigation_id,
+    NavigationId navigation_id,
     const blink::mojom::ResourceLoadInfo& resource_load_info) {
   auto nav_it = inflight_navigations_.find(navigation_id);
   if (nav_it == inflight_navigations_.end())
-    return;
-
-  if (!ShouldRecordResourceLoad(navigation_id, resource_load_info))
     return;
 
   auto& page_request_summary = *nav_it->second;
@@ -218,7 +288,7 @@ void LoadingDataCollector::RecordResourceLoadComplete(
 }
 
 void LoadingDataCollector::RecordPreconnectInitiated(
-    const NavigationID& navigation_id,
+    NavigationId navigation_id,
     const GURL& preconnect_url) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
@@ -230,9 +300,8 @@ void LoadingDataCollector::RecordPreconnectInitiated(
   page_request_summary.AddPreconnectAttempt(preconnect_url);
 }
 
-void LoadingDataCollector::RecordPrefetchInitiated(
-    const NavigationID& navigation_id,
-    const GURL& prefetch_url) {
+void LoadingDataCollector::RecordPrefetchInitiated(NavigationId navigation_id,
+                                                   const GURL& prefetch_url) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   auto nav_it = inflight_navigations_.find(navigation_id);
@@ -244,9 +313,7 @@ void LoadingDataCollector::RecordPrefetchInitiated(
 }
 
 void LoadingDataCollector::RecordMainFrameLoadComplete(
-    const NavigationID& navigation_id,
-    const base::Optional<OptimizationGuidePrediction>&
-        optimization_guide_prediction) {
+    NavigationId navigation_id) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   // Initialize |predictor_| no matter whether the |navigation_id| is present in
@@ -259,83 +326,41 @@ void LoadingDataCollector::RecordMainFrameLoadComplete(
   if (nav_it == inflight_navigations_.end())
     return;
 
-  // Remove the navigation from the inflight navigations.
-  std::unique_ptr<PageRequestSummary> summary = std::move(nav_it->second);
-  inflight_navigations_.erase(nav_it);
+  PageRequestSummary& summary = *nav_it->second;
+  summary.MainFrameLoadComplete();
 
+  if (predictor_)
+    predictor_->RecordPageRequestSummary(summary);
+}
+
+void LoadingDataCollector::RecordPageDestroyed(
+    NavigationId navigation_id,
+    const std::optional<OptimizationGuidePrediction>&
+        optimization_guide_prediction) {
+  auto nav_it = inflight_navigations_.find(navigation_id);
+  if (nav_it == inflight_navigations_.end()) {
+    return;
+  }
+
+  std::unique_ptr<PageRequestSummary> summary = std::move(nav_it->second);
+  CHECK(summary->navigation_committed.has_value());
+  inflight_navigations_.erase(nav_it);
   if (stats_collector_) {
     stats_collector_->RecordPageRequestSummary(*summary,
                                                optimization_guide_prediction);
   }
-
-  if (predictor_)
-    predictor_->RecordPageRequestSummary(std::move(summary));
 }
 
-void LoadingDataCollector::RecordFirstContentfulPaint(
-    const NavigationID& navigation_id,
-    const base::TimeTicks& first_contentful_paint) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-
-  auto nav_it = inflight_navigations_.find(navigation_id);
-  if (nav_it != inflight_navigations_.end())
-    nav_it->second->first_contentful_paint = first_contentful_paint;
-}
-
-bool LoadingDataCollector::ShouldRecordResourceLoad(
-    const NavigationID& navigation_id,
-    const blink::mojom::ResourceLoadInfo& resource_load_info) const {
-  const GURL& url = resource_load_info.final_url;
-  if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS())
-    return false;
-
-  if (!g_allow_port_in_urls && url.has_port())
-    return false;
-
-  // Guard behind feature: All delayable requests are considered low priority.
-  if (base::FeatureList::IsEnabled(
-          features::kLoadingOnlyLearnHighPriorityResources) &&
-      resource_load_info.request_priority < net::MEDIUM) {
-    return false;
-  }
-
-  if (!IsHandledResourceType(resource_load_info.request_destination,
-                             resource_load_info.mime_type)) {
-    return false;
-  }
-  if (resource_load_info.method != "GET")
-    return false;
-
-  return true;
-}
-
-// static
-bool LoadingDataCollector::IsHandledResourceType(
-    network::mojom::RequestDestination destination,
-    const std::string& mime_type) {
-  network::mojom::RequestDestination actual_destination =
-      GetRequestDestination(destination, mime_type);
-  return actual_destination == network::mojom::RequestDestination::kDocument ||
-         actual_destination == network::mojom::RequestDestination::kStyle ||
-         actual_destination == network::mojom::RequestDestination::kScript ||
-         actual_destination == network::mojom::RequestDestination::kImage ||
-         actual_destination == network::mojom::RequestDestination::kFont;
-}
-
-void LoadingDataCollector::CleanupAbandonedNavigations(
-    const NavigationID& navigation_id) {
-  if (stats_collector_)
-    stats_collector_->CleanupAbandonedStats();
-
+void LoadingDataCollector::CleanupAbandonedNavigations() {
   static const base::TimeDelta max_navigation_age =
-      base::TimeDelta::FromSeconds(config_.max_navigation_lifetime_seconds);
+      base::Seconds(config_.max_navigation_lifetime_seconds);
 
   base::TimeTicks time_now = base::TimeTicks::Now();
   for (auto it = inflight_navigations_.begin();
        it != inflight_navigations_.end();) {
-    if ((it->first.tab_id == navigation_id.tab_id) ||
-        (time_now - it->first.creation_time > max_navigation_age)) {
-      inflight_navigations_.erase(it++);
+    if (time_now - it->second->navigation_started > max_navigation_age &&
+        !it->second->navigation_committed) {
+      it = inflight_navigations_.erase(it);
     } else {
       ++it;
     }

@@ -1,4 +1,4 @@
-// Copyright (c) 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,21 @@
 
 #include <cstdint>
 
+#include <memory>
+
 #include "cc/paint/paint_export.h"
 #include "cc/paint/transfer_cache_entry.h"
 
 namespace cc {
 
-// Helper interface consumed by cc/paint during OOP raster deserialization.
+// Helper interface consumed by cc/paint during GPU process-side raster
+// deserialization.
 // Provides access to the transfer cache.
 // TODO(ericrk): We should use TransferCacheEntryId, not uint64_t here, but
 // we need to figure out layering. crbug.com/777622
 class CC_PAINT_EXPORT TransferCacheDeserializeHelper {
  public:
-  virtual ~TransferCacheDeserializeHelper() {}
+  virtual ~TransferCacheDeserializeHelper() = default;
 
   // Type safe access to an entry in the transfer cache. Returns null if the
   // entry is missing or of the wrong type.

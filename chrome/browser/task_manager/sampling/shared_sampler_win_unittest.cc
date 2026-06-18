@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,16 @@
 
 #include <windows.h>
 
-#include <memory>
+#include <algorithm>
 #include <numeric>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
-#include "base/sequenced_task_runner.h"
-#include "base/task/post_task.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "chrome/browser/task_manager/sampling/shared_sampler_win_defines.h"
@@ -40,7 +39,9 @@ class SharedSamplerTest : public testing::Test {
                             base::Unretained(this)));
   }
 
-  ~SharedSamplerTest() override {}
+  SharedSamplerTest(const SharedSamplerTest&) = delete;
+  SharedSamplerTest& operator=(const SharedSamplerTest&) = delete;
+  ~SharedSamplerTest() override = default;
 
  protected:
   base::Time start_time() const { return start_time_; }
@@ -75,7 +76,7 @@ class SharedSamplerTest : public testing::Test {
   }
 
   void OnSamplerRefreshDone(
-      base::Optional<SharedSampler::SamplingResult> results) {
+      std::optional<SharedSampler::SamplingResult> results) {
     if (results) {
       idle_wakeups_per_second_ = results->idle_wakeups_per_second;
       start_time_ = results->start_time;
@@ -97,8 +98,6 @@ class SharedSamplerTest : public testing::Test {
   content::BrowserTaskEnvironment task_environment_;
   scoped_refptr<base::SequencedTaskRunner> blocking_pool_runner_;
   scoped_refptr<SharedSampler> shared_sampler_;
-
-  DISALLOW_COPY_AND_ASSIGN(SharedSamplerTest);
 };
 
 // Tests that Idle Wakeups per second value can be obtained from SharedSampler.
@@ -167,42 +166,44 @@ TEST_F(SharedSamplerTest, MultipleRefreshTypes) {
             finished_refresh_type());
 }
 
-static int ReturnZeroThreadProcessInformation(unsigned char* buffer,
-                                              int buffer_size) {
+static int ReturnZeroThreadProcessInformation(base::span<uint8_t> buffer) {
   // Calculate the number of bytes required for the structure, and ImageName.
-  base::string16 image_name =
+  std::wstring image_name =
       base::PathService::CheckedGet(base::FILE_EXE).BaseName().value();
 
-  const int kImageNameBytes = image_name.length() * sizeof(base::char16);
-  const int kRequiredBytes = sizeof(SYSTEM_PROCESS_INFORMATION) +
-                             kImageNameBytes + sizeof(base::char16);
-  if (kRequiredBytes > buffer_size)
-    return kRequiredBytes;
+  const size_t image_name_bytes = image_name.length() * sizeof(char16_t);
+  const size_t required_bytes =
+      sizeof(SYSTEM_PROCESS_INFORMATION) + image_name_bytes + sizeof(char16_t);
+  if (required_bytes > buffer.size()) {
+    return required_bytes;
+  }
 
   // Create a zero'd structure, so that fields such as thread count will be zero
   // by default.
   // Set process handle and image name, so the SharedSampler will match us.
-  memset(buffer, 0, kRequiredBytes);
+  std::ranges::fill(buffer, 0);
   SYSTEM_PROCESS_INFORMATION* process_info =
-      reinterpret_cast<SYSTEM_PROCESS_INFORMATION*>(buffer);
+      reinterpret_cast<SYSTEM_PROCESS_INFORMATION*>(buffer.data());
   process_info->ProcessId = reinterpret_cast<HANDLE>(base::GetCurrentProcId());
   process_info->ImageName.Length = process_info->ImageName.MaximumLength =
-      kImageNameBytes;
-  process_info->ImageName.Buffer = reinterpret_cast<LPWSTR>(process_info + 1);
+      image_name_bytes;
+  auto image_name_buffer =
+      buffer.subspan(sizeof(SYSTEM_PROCESS_INFORMATION), image_name_bytes);
+  process_info->ImageName.Buffer =
+      reinterpret_cast<LPWSTR>(image_name_buffer.data());
   process_info->NumberOfThreads = 0u;
   process_info->WorkingSetPrivateSize = 1024ull;
-  buffer += sizeof(SYSTEM_PROCESS_INFORMATION);
 
-  // Copy the image name into place. The earlier memset() provides null
+  // Copy the image name into place. Buffer is zero-filled what assures null
   // termination.
-  memcpy(buffer, image_name.data(), kImageNameBytes);
+  image_name_buffer.copy_from(base::as_byte_span(image_name));
 
-  return kRequiredBytes;
+  return required_bytes;
 }
 
 // Verifies that the SharedSampler copes with zero-thread processes.
 TEST_F(SharedSamplerTest, ZeroThreadProcess) {
-  SharedSampler::SetQuerySystemInformationForTest(
+  SharedSampler::SetQuerySystemInformationForTesting(
       ReturnZeroThreadProcessInformation);
 
   StartRefresh(REFRESH_TYPE_IDLE_WAKEUPS | REFRESH_TYPE_START_TIME |
@@ -212,7 +213,7 @@ TEST_F(SharedSamplerTest, ZeroThreadProcess) {
                 REFRESH_TYPE_CPU_TIME,
             finished_refresh_type());
 
-  SharedSampler::SetQuerySystemInformationForTest(nullptr);
+  SharedSampler::SetQuerySystemInformationForTesting(nullptr);
 }
 
 }  // namespace task_manager

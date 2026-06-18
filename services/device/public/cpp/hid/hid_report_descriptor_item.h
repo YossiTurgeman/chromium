@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,8 @@
 #include <stdint.h>
 
 #include <memory>
+
+#include "base/containers/span.h"
 
 namespace device {
 
@@ -123,34 +125,17 @@ class HidReportDescriptorItem {
                 "incorrect report info size");
 
  private:
-  HidReportDescriptorItem(const uint8_t* bytes,
-                          size_t size,
-                          HidReportDescriptorItem* previous);
+  explicit HidReportDescriptorItem(base::span<const uint8_t> bytes);
 
  public:
   ~HidReportDescriptorItem() {}
 
-  static std::unique_ptr<HidReportDescriptorItem>
-  Create(const uint8_t* bytes, size_t size, HidReportDescriptorItem* previous) {
+  static std::unique_ptr<HidReportDescriptorItem> Create(
+      base::span<const uint8_t> bytes) {
     return std::unique_ptr<HidReportDescriptorItem>(
-        new HidReportDescriptorItem(bytes, size, previous));
+        new HidReportDescriptorItem(bytes));
   }
 
-  // Previous element in report descriptor.
-  // Owned by descriptor instance.
-  HidReportDescriptorItem* previous() const { return previous_; }
-  // Next element in report descriptor.
-  // Owned by descriptor instance.
-  HidReportDescriptorItem* next() const { return next_; }
-  // Parent element in report descriptor.
-  // Owned by descriptor instance.
-  // Can be NULL.
-  HidReportDescriptorItem* parent() const { return parent_; }
-  // Level in Parent-Children relationship tree.
-  // 0 for top-level items (parent()==NULL).
-  // 1 if parent() is top-level.
-  // 2 if parent() has a top-level parent. Etc.
-  size_t GetDepth() const;
   Tag tag() const { return tag_; }
   // Returns true for a long item, false otherwise.
   bool IsLong() const;
@@ -159,14 +144,12 @@ class HidReportDescriptorItem {
   uint32_t GetShortData() const;
   // Size of this item in bytes, including the header.
   size_t GetSize() const;
+  // Size of this item in bytes, excluding the header.
+  size_t payload_size() const { return payload_size_; }
 
  private:
   size_t GetHeaderSize() const;
-  size_t payload_size() const { return payload_size_; }
 
-  HidReportDescriptorItem* previous_;
-  HidReportDescriptorItem* next_;
-  HidReportDescriptorItem* parent_;
   Tag tag_;
   uint32_t shortData_;
   size_t payload_size_;

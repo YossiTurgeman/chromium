@@ -1,11 +1,12 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEVICE_GAMEPAD_GAMEPAD_STANDARD_MAPPINGS_H_
 #define DEVICE_GAMEPAD_GAMEPAD_STANDARD_MAPPINGS_H_
 
-#include "base/strings/string_piece.h"
+#include <string_view>
+
 #include "device/gamepad/public/cpp/gamepad.h"
 
 namespace device {
@@ -20,6 +21,8 @@ enum GamepadBusType {
   GAMEPAD_BUS_BLUETOOTH
 };
 
+enum GamepadDriver { kGamepadDriverUnknown, kGamepadDriverXpad };
+
 typedef void (*GamepadStandardMappingFunction)(const Gamepad& original,
                                                Gamepad* mapped);
 
@@ -31,12 +34,13 @@ typedef void (*GamepadStandardMappingFunction)(const Gamepad& original,
 // number reported by the device (bcdDevice). |bus_type| is the transport
 // used to connect to this device, or GAMEPAD_BUS_UNKNOWN if unknown.
 GamepadStandardMappingFunction GetGamepadStandardMappingFunction(
-    const base::StringPiece product_name,
+    std::string_view product_name,
     const uint16_t vendor_id,
     const uint16_t product_id,
     const uint16_t hid_specification_version,
     const uint16_t version_number,
-    GamepadBusType bus_type);
+    GamepadBusType bus_type,
+    GamepadDriver driver);
 
 // This defines our canonical mapping order for gamepad-like devices. If these
 // items cannot all be satisfied, it is a case-by-case judgement as to whether
@@ -68,6 +72,12 @@ enum CanonicalButtonIndex {
   BUTTON_INDEX_COUNT
 };
 
+// Xbox Series X has an extra share button.
+enum XboxSeriesXButtons {
+  XBOX_SERIES_X_BUTTON_SHARE = CanonicalButtonIndex::BUTTON_INDEX_COUNT,
+  XBOX_SERIES_X_BUTTON_COUNT
+};
+
 // A Java counterpart will be generated for this enum.
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.device.gamepad
 // GENERATED_JAVA_PREFIX_TO_STRIP: AXIS_INDEX_
@@ -79,6 +89,27 @@ enum CanonicalAxisIndex {
   AXIS_INDEX_COUNT
 };
 
+// The Switch Pro controller has a Capture button that has no equivalent in the
+// Standard Gamepad.
+enum SwitchProButtons {
+  SWITCH_PRO_BUTTON_CAPTURE = BUTTON_INDEX_COUNT,
+  SWITCH_PRO_BUTTON_COUNT
+};
+
+// The DualSense controller has a Touchpad button that has no
+// equivalent in the Standard Gamepad.
+enum DualSenseButtons {
+  DUAL_SENSE_BUTTON_TOUCHPAD = BUTTON_INDEX_COUNT,
+  DUAL_SENSE_BUTTON_COUNT
+};
+
+// The DualShock 4 controller has a Touchpad button that has no
+// equivalent in the Standard Gamepad.
+enum Dualshock4Buttons {
+  DUALSHOCK_BUTTON_TOUCHPAD = BUTTON_INDEX_COUNT,
+  DUALSHOCK_BUTTON_COUNT
+};
+
 // Common mapping functions
 GamepadButton AxisToButton(float input);
 GamepadButton AxisNegativeAsButton(float input);
@@ -87,6 +118,12 @@ GamepadButton ButtonFromButtonAndAxis(GamepadButton button, float axis);
 GamepadButton NullButton();
 void DpadFromAxis(Gamepad* mapped, float dir);
 float RenormalizeAndClampAxis(float value, float min, float max);
+
+// Gamepad common mapping functions
+void MapperSwitchPro(const Gamepad& input, Gamepad* mapped);
+void MapperSwitchJoyCon(const Gamepad& input, Gamepad* mapped);
+void MapperSwitchComposite(const Gamepad& input, Gamepad* mapped);
+void Mapper2Axes8Keys(const Gamepad& input, Gamepad* mapped);
 
 }  // namespace device
 

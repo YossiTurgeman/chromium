@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,15 @@
 #include <stdint.h>
 
 #include <memory>
+#include <utility>
 
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/traced_value.h"
+#include "base/trace_event/typed_macros.h"
 #include "cc/base/base_export.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 
 namespace cc {
 namespace devtools_instrumentation {
@@ -32,15 +35,18 @@ CC_BASE_EXPORT extern const char kFrameId[];
 CC_BASE_EXPORT extern const char kLayerId[];
 CC_BASE_EXPORT extern const char kLayerTreeId[];
 CC_BASE_EXPORT extern const char kPixelRefId[];
+CC_BASE_EXPORT extern const char kFrameSequenceNumber[];
+CC_BASE_EXPORT extern const char kHasPartialUpdate[];
 
 CC_BASE_EXPORT extern const char kImageDecodeTask[];
 CC_BASE_EXPORT extern const char kBeginFrame[];
 CC_BASE_EXPORT extern const char kNeedsBeginFrameChanged[];
 CC_BASE_EXPORT extern const char kActivateLayerTree[];
 CC_BASE_EXPORT extern const char kRequestMainThreadFrame[];
+CC_BASE_EXPORT extern const char kDroppedFrame[];
 CC_BASE_EXPORT extern const char kBeginMainThreadFrame[];
 CC_BASE_EXPORT extern const char kDrawFrame[];
-CC_BASE_EXPORT extern const char kCompositeLayers[];
+CC_BASE_EXPORT extern const char kCommit[];
 }  // namespace internal
 
 extern const char kPaintSetup[];
@@ -66,7 +72,17 @@ class CC_BASE_EXPORT ScopedLayerTask {
 
 class CC_BASE_EXPORT ScopedImageTask {
  public:
-  enum ImageType { kAvif, kBmp, kGif, kIco, kJpeg, kPng, kWebP, kOther };
+  enum class ImageType {
+    kAvif,
+    kBmp,
+    kGif,
+    kIco,
+    kJpeg,
+    kJxl,
+    kPng,
+    kWebP,
+    kOther
+  };
 
   explicit ScopedImageTask(ImageType image_type)
       : image_type_(image_type), start_time_(base::TimeTicks::Now()) {}
@@ -85,8 +101,8 @@ class CC_BASE_EXPORT ScopedImageTask {
 
   // UMA histogram parameters
   const uint32_t bucket_count_ = 50;
-  base::TimeDelta hist_min_ = base::TimeDelta::FromMicroseconds(1);
-  base::TimeDelta hist_max_ = base::TimeDelta::FromMilliseconds(1000);
+  base::TimeDelta hist_min_ = base::Microseconds(1);
+  base::TimeDelta hist_max_ = base::Milliseconds(1000);
 };
 
 class CC_BASE_EXPORT ScopedImageUploadTask : public ScopedImageTask {
@@ -100,8 +116,8 @@ class CC_BASE_EXPORT ScopedImageUploadTask : public ScopedImageTask {
 
 class CC_BASE_EXPORT ScopedImageDecodeTask : public ScopedImageTask {
  public:
-  enum TaskType { kInRaster, kOutOfRaster };
-  enum DecodeType { kSoftware, kGpu };
+  enum class TaskType { kInRaster, kOutOfRaster };
+  enum class DecodeType { kSoftware, kGpu };
 
   ScopedImageDecodeTask(const void* image_ptr,
                         DecodeType decode_type,
@@ -140,56 +156,82 @@ class CC_BASE_EXPORT ScopedLayerTreeTask {
 
 struct CC_BASE_EXPORT ScopedCommitTrace {
  public:
-  explicit ScopedCommitTrace(int layer_tree_host_id) {
-    TRACE_EVENT_BEGIN1(internal::CategoryName::kTimeline,
-                       internal::kCompositeLayers, internal::kLayerTreeId,
-                       layer_tree_host_id);
+  explicit ScopedCommitTrace(int layer_tree_host_id, uint64_t sequence_number) {
+    TRACE_EVENT_BEGIN2(internal::CategoryName::kTimeline, internal::kCommit,
+                       internal::kLayerTreeId, layer_tree_host_id,
+                       internal::kFrameSequenceNumber, sequence_number);
   }
   ScopedCommitTrace(const ScopedCommitTrace&) = delete;
   ~ScopedCommitTrace() {
-    TRACE_EVENT_END0(internal::CategoryName::kTimeline,
-                     internal::kCompositeLayers);
+    TRACE_EVENT_END0(internal::CategoryName::kTimeline, internal::kCommit);
   }
 
   ScopedCommitTrace& operator=(const ScopedCommitTrace&) = delete;
 };
 
-struct CC_BASE_EXPORT ScopedLayerObjectTracker
-    : public base::trace_event::
-          TraceScopedTrackableObject<int, internal::CategoryName::kTimeline> {
-  explicit ScopedLayerObjectTracker(int layer_id)
-      : base::trace_event::
-            TraceScopedTrackableObject<int, internal::CategoryName::kTimeline>(
-                internal::kLayerId,
-                layer_id) {}
+class CC_BASE_EXPORT ScopedLayerObjectTracker {
+ public:
+  explicit ScopedLayerObjectTracker(int layer_id) : layer_id_(layer_id) {
+    TRACE_EVENT_INSTANT(internal::CategoryName::kTimeline, "Layer:created",
+                        perfetto::Flow::ProcessScoped(
+                            static_cast<uint64_t>(layer_id_), "Layer"));
+  }
   ScopedLayerObjectTracker(const ScopedLayerObjectTracker&) = delete;
+  ~ScopedLayerObjectTracker() {
+    TRACE_EVENT_INSTANT(internal::CategoryName::kTimeline, "Layer:deleted",
+                        perfetto::TerminatingFlow::ProcessScoped(
+                            static_cast<uint64_t>(layer_id_), "Layer"));
+  }
+
   ScopedLayerObjectTracker& operator=(const ScopedLayerObjectTracker&) = delete;
+
+ private:
+  int layer_id_;
 };
 
 inline void CC_BASE_EXPORT DidActivateLayerTree(int layer_tree_host_id,
                                                 int frame_id) {
-  TRACE_EVENT_INSTANT2(internal::CategoryName::kTimelineFrame,
-                       internal::kActivateLayerTree, TRACE_EVENT_SCOPE_THREAD,
-                       internal::kLayerTreeId, layer_tree_host_id,
-                       internal::kFrameId, frame_id);
+  TRACE_EVENT_INSTANT(internal::CategoryName::kTimelineFrame,
+                      perfetto::StaticString(internal::kActivateLayerTree),
+                      internal::kLayerTreeId, layer_tree_host_id,
+                      internal::kFrameId, frame_id);
 }
 
-inline void CC_BASE_EXPORT DidBeginFrame(int layer_tree_host_id) {
-  TRACE_EVENT_INSTANT1(internal::CategoryName::kTimelineFrame,
-                       internal::kBeginFrame, TRACE_EVENT_SCOPE_THREAD,
-                       internal::kLayerTreeId, layer_tree_host_id);
+inline void CC_BASE_EXPORT DidBeginFrame(int layer_tree_host_id,
+                                         base::TimeTicks begin_frame_timestamp,
+                                         uint64_t sequence_number) {
+  TRACE_EVENT_INSTANT(internal::CategoryName::kTimelineFrame,
+                      perfetto::StaticString(internal::kBeginFrame),
+                      begin_frame_timestamp, internal::kLayerTreeId,
+                      layer_tree_host_id, internal::kFrameSequenceNumber,
+                      sequence_number);
 }
 
-inline void CC_BASE_EXPORT DidDrawFrame(int layer_tree_host_id) {
-  TRACE_EVENT_INSTANT1(internal::CategoryName::kTimelineFrame,
-                       internal::kDrawFrame, TRACE_EVENT_SCOPE_THREAD,
-                       internal::kLayerTreeId, layer_tree_host_id);
+inline void CC_BASE_EXPORT DidDrawFrame(int layer_tree_host_id,
+                                        uint64_t sequence_number) {
+  TRACE_EVENT_INSTANT(internal::CategoryName::kTimelineFrame,
+                      perfetto::StaticString(internal::kDrawFrame),
+                      internal::kLayerTreeId, layer_tree_host_id,
+                      internal::kFrameSequenceNumber, sequence_number);
 }
 
 inline void CC_BASE_EXPORT DidRequestMainThreadFrame(int layer_tree_host_id) {
-  TRACE_EVENT_INSTANT1(
-      internal::CategoryName::kTimelineFrame, internal::kRequestMainThreadFrame,
-      TRACE_EVENT_SCOPE_THREAD, internal::kLayerTreeId, layer_tree_host_id);
+  TRACE_EVENT_INSTANT(internal::CategoryName::kTimelineFrame,
+                      perfetto::StaticString(internal::kRequestMainThreadFrame),
+                      internal::kLayerTreeId, layer_tree_host_id);
+}
+
+inline void CC_BASE_EXPORT
+DidDropSmoothnessFrame(int layer_tree_host_id,
+                       base::TimeTicks dropped_frame_timestamp,
+                       uint64_t sequence_number,
+                       bool has_partial_update) {
+  TRACE_EVENT_INSTANT(internal::CategoryName::kTimelineFrame,
+                      perfetto::StaticString(internal::kDroppedFrame),
+                      dropped_frame_timestamp, internal::kLayerTreeId,
+                      layer_tree_host_id, internal::kFrameSequenceNumber,
+                      sequence_number, internal::kHasPartialUpdate,
+                      has_partial_update);
 }
 
 inline std::unique_ptr<base::trace_event::ConvertableToTraceFormat>
@@ -202,10 +244,10 @@ BeginMainThreadFrameData(int frame_id) {
 
 inline void CC_BASE_EXPORT WillBeginMainThreadFrame(int layer_tree_host_id,
                                                     int frame_id) {
-  TRACE_EVENT_INSTANT2(
-      internal::CategoryName::kTimelineFrame, internal::kBeginMainThreadFrame,
-      TRACE_EVENT_SCOPE_THREAD, internal::kLayerTreeId, layer_tree_host_id,
-      internal::kData, BeginMainThreadFrameData(frame_id));
+  TRACE_EVENT_INSTANT(internal::CategoryName::kTimelineFrame,
+                      perfetto::StaticString(internal::kBeginMainThreadFrame),
+                      internal::kLayerTreeId, layer_tree_host_id,
+                      internal::kData, BeginMainThreadFrameData(frame_id));
 }
 
 inline std::unique_ptr<base::trace_event::ConvertableToTraceFormat>
@@ -218,10 +260,10 @@ NeedsBeginFrameData(bool needs_begin_frame) {
 
 inline void CC_BASE_EXPORT NeedsBeginFrameChanged(int layer_tree_host_id,
                                                   bool new_value) {
-  TRACE_EVENT_INSTANT2(
-      internal::CategoryName::kTimelineFrame, internal::kNeedsBeginFrameChanged,
-      TRACE_EVENT_SCOPE_THREAD, internal::kLayerTreeId, layer_tree_host_id,
-      internal::kData, NeedsBeginFrameData(new_value));
+  TRACE_EVENT_INSTANT(internal::CategoryName::kTimelineFrame,
+                      perfetto::StaticString(internal::kNeedsBeginFrameChanged),
+                      internal::kLayerTreeId, layer_tree_host_id,
+                      internal::kData, NeedsBeginFrameData(new_value));
 }
 
 }  // namespace devtools_instrumentation

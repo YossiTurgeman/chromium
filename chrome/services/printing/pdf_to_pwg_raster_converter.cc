@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -48,16 +48,22 @@ base::ReadOnlySharedMemoryRegion RenderPdfPagesToPwgRaster(
   pwg_data = pwg_encoder::PwgEncoder::GetDocumentHeader();
   pwg_encoder::BitmapImage image(settings.area.size(),
                                  pwg_encoder::BitmapImage::BGRA);
+  const chrome_pdf::RenderOptions options = {
+      .stretch_to_bounds = false,
+      .keep_aspect_ratio = true,
+      .autorotate = settings.autorotate,
+      .use_color = settings.use_color,
+      .render_device_type = chrome_pdf::RenderDeviceType::kPrinter,
+  };
   for (int i = 0; i < total_page_count; ++i) {
     int page_number = i;
 
     if (bitmap_settings.reverse_page_order)
       page_number = total_page_count - 1 - page_number;
 
-    if (!chrome_pdf::RenderPDFPageToBitmap(
-            pdf_data, page_number, image.pixel_data(), image.size().width(),
-            image.size().height(), settings.dpi.width(), settings.dpi.height(),
-            false, true, settings.autorotate, settings.use_color)) {
+    if (!chrome_pdf::RenderPDFPageToBitmap(pdf_data, page_number,
+                                           image.pixels().data(), image.size(),
+                                           settings.dpi, options)) {
       return invalid_pwg_region;
     }
 
@@ -71,7 +77,6 @@ base::ReadOnlySharedMemoryRegion RenderPdfPagesToPwgRaster(
     switch (bitmap_settings.duplex_mode) {
       case mojom::DuplexMode::kUnknownDuplexMode:
         NOTREACHED();
-        break;
       case mojom::DuplexMode::kSimplex:
         // Already defaults to false/false.
         break;
@@ -120,7 +125,7 @@ base::ReadOnlySharedMemoryRegion RenderPdfPagesToPwgRaster(
     return invalid_pwg_region;
 
   *page_count = total_page_count;
-  memcpy(region_mapping.mapping.memory(), pwg_data.data(), pwg_data.size());
+  region_mapping.mapping.GetMemoryAsSpan<char>().copy_prefix_from(pwg_data);
   return std::move(region_mapping.region);
 }
 
@@ -128,7 +133,7 @@ base::ReadOnlySharedMemoryRegion RenderPdfPagesToPwgRaster(
 
 PdfToPwgRasterConverter::PdfToPwgRasterConverter() = default;
 
-PdfToPwgRasterConverter::~PdfToPwgRasterConverter() {}
+PdfToPwgRasterConverter::~PdfToPwgRasterConverter() = default;
 
 void PdfToPwgRasterConverter::Convert(
     base::ReadOnlySharedMemoryRegion pdf_region,
@@ -139,6 +144,10 @@ void PdfToPwgRasterConverter::Convert(
   base::ReadOnlySharedMemoryRegion region = RenderPdfPagesToPwgRaster(
       std::move(pdf_region), pdf_settings, pwg_raster_settings, &page_count);
   std::move(callback).Run(std::move(region), page_count);
+}
+
+void PdfToPwgRasterConverter::SetUseSkiaRendererPolicy(bool use_skia) {
+  chrome_pdf::SetUseSkiaRendererPolicy(use_skia);
 }
 
 }  // namespace printing

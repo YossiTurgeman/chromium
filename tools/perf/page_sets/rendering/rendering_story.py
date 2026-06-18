@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -22,9 +22,8 @@ class _MetaRenderingStory(type):
     return cls.__dict__.get('ABSTRACT_STORY', False)
 
 
-class RenderingStory(page.Page):
+class RenderingStory(page.Page, metaclass=_MetaRenderingStory):
   """Abstract base class for Rendering user stories."""
-  __metaclass__ = _MetaRenderingStory
 
   BASE_NAME = NotImplemented
   URL = NotImplemented
@@ -33,6 +32,8 @@ class RenderingStory(page.Page):
   TAGS =[]
   PLATFORM_SPECIFIC = False
   YEAR = None
+  DISABLE_TRACING = False
+  EXTRA_BROWSER_ARGUMENTS = None
 
   def __init__(self,
                page_set,
@@ -40,7 +41,8 @@ class RenderingStory(page.Page):
                name_suffix='',
                extra_browser_args=None,
                make_javascript_deterministic=True,
-               base_dir=None):
+               base_dir=None,
+               perform_final_navigation=True):
     tags = []
     for t in self.TAGS:
       assert t in story_tags.ALL_TAGS
@@ -57,4 +59,9 @@ class RenderingStory(page.Page):
         shared_page_state_class=shared_page_state_class,
         extra_browser_args=extra_browser_args,
         make_javascript_deterministic=make_javascript_deterministic,
-        base_dir=base_dir)
+        base_dir=base_dir,
+        perform_final_navigation=perform_final_navigation)
+
+  def WillStartTracing(self, chrome_trace_config):
+    chrome_trace_config.category_filter.AddIncludedCategory('benchmark')
+    chrome_trace_config.category_filter.AddIncludedCategory('v8')

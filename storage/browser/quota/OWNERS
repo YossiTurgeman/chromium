@@ -1,11 +1,6 @@
-# Primary
-jarrydg@chromium.org
+file://storage/OWNERS
 
-# Secondary
-jsbell@chromium.org
-kinuko@chromium.org
-nhiroki@chromium.org
-pwnall@chromium.org
+evanstade@microsoft.com
 
-# TEAM: storage-dev@chromium.org
-# COMPONENT: Blink>Storage>Quota
+per-file *.mojom=set noparent
+per-file *.mojom=file://ipc/SECURITY_OWNERS

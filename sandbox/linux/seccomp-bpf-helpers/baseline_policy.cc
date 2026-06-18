@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -20,6 +21,7 @@
 #include "sandbox/linux/seccomp-bpf-helpers/syscall_sets.h"
 #include "sandbox/linux/seccomp-bpf/sandbox_bpf.h"
 #include "sandbox/linux/services/syscall_wrappers.h"
+#include "sandbox/linux/system_headers/linux_stat.h"
 #include "sandbox/linux/system_headers/linux_syscalls.h"
 
 #if !defined(SO_PEEK_OFF)
@@ -40,13 +42,14 @@ namespace sandbox {
 namespace {
 
 bool IsBaselinePolicyAllowed(int sysno) {
+  // clang-format off
   return SyscallSets::IsAllowedAddressSpaceAccess(sysno) ||
          SyscallSets::IsAllowedBasicScheduler(sysno) ||
          SyscallSets::IsAllowedEpoll(sysno) ||
+         SyscallSets::IsEventFd(sysno) ||
          SyscallSets::IsAllowedFileSystemAccessViaFd(sysno) ||
          SyscallSets::IsAllowedFutex(sysno) ||
          SyscallSets::IsAllowedGeneralIo(sysno) ||
-         SyscallSets::IsAllowedGetOrModifySocket(sysno) ||
          SyscallSets::IsAllowedGettime(sysno) ||
          SyscallSets::IsAllowedProcessStartOrDeath(sysno) ||
          SyscallSets::IsAllowedSignalHandling(sysno) ||
@@ -59,6 +62,7 @@ bool IsBaselinePolicyAllowed(int sysno) {
          SyscallSets::IsMipsPrivate(sysno) ||
 #endif
          SyscallSets::IsAllowedOperationOnFd(sysno);
+  // clang-format on
 }
 
 // System calls that will trigger the crashing SIGSYS handler.
@@ -68,7 +72,6 @@ bool IsBaselinePolicyWatched(int sysno) {
          SyscallSets::IsAdvancedTimer(sysno) ||
          SyscallSets::IsAsyncIo(sysno) ||
          SyscallSets::IsDebug(sysno) ||
-         SyscallSets::IsEventFd(sysno) ||
          SyscallSets::IsExtendedAttributes(sysno) ||
          SyscallSets::IsFaNotify(sysno) ||
          SyscallSets::IsFsControl(sysno) ||
@@ -111,19 +114,9 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
     return RestrictIoctl();
   }
 
-  if (sysno == __NR_sched_getaffinity) {
-    return Allow();
-  }
-
   // Used when RSS limiting is enabled in sanitizers.
   if (sysno == __NR_getrusage) {
     return RestrictGetrusage();
-  }
-
-  if (sysno == __NR_sigaltstack) {
-    // Required for better stack overflow detection in ASan. Disallowed in
-    // non-ASan builds.
-    return Allow();
   }
 #endif  // defined(ADDRESS_SANITIZER) || defined(THREAD_SANITIZER) ||
         // defined(MEMORY_SANITIZER)
@@ -138,17 +131,27 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
   }
 #endif
 
+  if (sysno == __NR_uname) {
+    return Allow();
+  }
+
+  // Return -EPERM rather than killing the process with SIGSYS. This happens
+  // because if a sandboxed process attempts to use sendfile(2) it should be
+  // allowed to fall back to read(2)/write(2).
+  if (SyscallSets::IsSendfile(sysno)) {
+    return Error(EPERM);
+  }
+
   if (IsBaselinePolicyAllowed(sysno)) {
     return Allow();
   }
 
-#if defined(OS_ANDROID)
-  // Needed for thread creation.
-  if (sysno == __NR_sigaltstack)
-    return Allow();
-#endif
 
-#if defined(__NR_rseq) && !defined(OS_ANDROID)
+  if (SyscallSets::IsSockSendOneMsg(sysno)) {
+    return RestrictSockSendFlags(sysno);
+  }
+
+#if defined(__NR_rseq) && !BUILDFLAG(IS_ANDROID)
   // See https://crbug.com/1104160. Rseq can only be disabled right before an
   // execve, because glibc registers it with the kernel and so far it's unclear
   // whether shared libraries (which, during initialization, may observe that
@@ -157,7 +160,16 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
     return Allow();
 #endif
 
-  if (sysno == __NR_clock_gettime || sysno == __NR_clock_nanosleep) {
+  // V8 uses PKU (a.k.a. MPK / PKEY) for protecting code spaces.
+  if (sysno == __NR_pkey_alloc) {
+    return RestrictPkeyAllocFlags();
+  }
+
+  if (sysno == __NR_pkey_free) {
+    return Allow();
+  }
+
+  if (SyscallSets::IsClockApi(sysno)) {
     return RestrictClockID();
   }
 
@@ -165,16 +177,28 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
     return RestrictCloneToThreadsAndEPERMFork();
   }
 
+  // clone3 takes a pointer argument which we cannot examine, so return ENOSYS
+  // to force the libc to use clone. See https://crbug.com/1213452.
+  if (sysno == __NR_clone3) {
+    return Error(ENOSYS);
+  }
+
+  // pidfd_open provides a file descriptor that refers to a process, meant to
+  // replace the pid as the method of identifying processes. For now there is no
+  // reason to support this, so just pretend pidfd_open doesn't exist.
+  if (sysno == __NR_pidfd_open) {
+    return Error(ENOSYS);
+  }
+
   if (sysno == __NR_fcntl)
     return RestrictFcntlCommands();
 
-#if defined(__i386__) || defined(__arm__) || \
-    (defined(ARCH_CPU_MIPS_FAMILY) && defined(ARCH_CPU_32_BITS))
+#if !defined(__LP64__)
   if (sysno == __NR_fcntl64)
     return RestrictFcntlCommands();
 #endif
 
-#if !defined(__aarch64__)
+#if defined(__NR_fork)
   // fork() is never used as a system call (clone() is used instead), but we
   // have seen it in fallback code on Android.
   if (sysno == __NR_fork) {
@@ -184,15 +208,20 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
 
 #if defined(__NR_vfork)
   // vfork() is almost never used as a system call, but some libc versions (e.g.
-  // older versions of bionic) might use it in a posix_spawn() implementation,
-  // which is used by system();
+  // 32-bit versions of bionic) use it in a posix_spawn() implementation,
+  // which is used by system().
   if (sysno == __NR_vfork) {
     return Error(EPERM);
   }
 #endif
 
-  if (sysno == __NR_futex)
+  if (sysno == __NR_futex
+#if !defined(__LP64__)
+      || sysno == __NR_futex_time64
+#endif
+  ) {
     return RestrictFutex();
+  }
 
   if (sysno == __NR_set_robust_list)
     return Error(EPERM);
@@ -200,44 +229,57 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
   if (sysno == __NR_getpriority || sysno ==__NR_setpriority)
     return RestrictGetSetpriority(current_pid);
 
+  // The scheduling syscalls are used in threading libraries and also heavily in
+  // abseil. See for example https://crbug.com/1370394.
+  if (sysno == __NR_sched_getaffinity || sysno == __NR_sched_getparam ||
+      sysno == __NR_sched_getscheduler || sysno == __NR_sched_setscheduler) {
+    return RestrictSchedTarget(current_pid, sysno);
+  }
+
   if (sysno == __NR_getrandom) {
     return RestrictGetRandom();
   }
 
   if (sysno == __NR_madvise) {
-    // Only allow MADV_DONTNEED, MADV_RANDOM, MADV_NORMAL and MADV_FREE.
+    // Only allow MADV_DONTNEED, MADV_WILLNEED, MADV_RANDOM, MADV_REMOVE,
+    // MADV_NORMAL, and MADV_FREE.
     const Arg<int> advice(2);
-    return If(AnyOf(advice == MADV_DONTNEED,
-                    advice == MADV_RANDOM,
+    return If(AnyOf(advice == MADV_DONTNEED, advice == MADV_WILLNEED,
+                    advice == MADV_RANDOM, advice == MADV_REMOVE,
                     advice == MADV_NORMAL
 #if defined(MADV_FREE)
                     // MADV_FREE was introduced in Linux 4.5 and started being
                     // defined in glibc 2.24.
-                    , advice == MADV_FREE
+                    ,
+                    advice == MADV_FREE
 #endif
-                    ), Allow()).Else(Error(EPERM));
+                    ),
+              Allow())
+        .Else(Error(EPERM));
   }
 
+  // TODO(crbug.com/40528912): should i386 really be in this list?
 #if defined(__i386__) || defined(__x86_64__) || defined(__mips__) || \
     defined(__aarch64__)
   if (sysno == __NR_mmap)
     return RestrictMmapFlags();
 #endif
 
-#if defined(__i386__) || defined(__arm__) || \
-    (defined(ARCH_CPU_MIPS_FAMILY) && defined(ARCH_CPU_32_BITS))
+#if !defined(__LP64__)
   if (sysno == __NR_mmap2)
     return RestrictMmapFlags();
 #endif
 
-  if (sysno == __NR_mprotect)
+  if (sysno == __NR_mprotect || sysno == __NR_pkey_mprotect) {
+    // pkey_mprotect is identical to mprotect except for the additional (last)
+    // parameter, which can be ignored here.
     return RestrictMprotectFlags();
+  }
 
   if (sysno == __NR_prctl)
     return RestrictPrctl();
 
-#if defined(__x86_64__) || defined(__arm__) || defined(__mips__) || \
-    defined(__aarch64__)
+  // (Note that i386 may also use socketcall() for this, handled below.)
   if (sysno == __NR_socketpair) {
     // Only allow AF_UNIX, PF_UNIX. Crash if anything else is seen.
     static_assert(AF_UNIX == PF_UNIX,
@@ -245,7 +287,6 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
     const Arg<int> domain(0);
     return If(domain == AF_UNIX, Allow()).Else(CrashSIGSYS());
   }
-#endif
 
   // On Android, for https://crbug.com/701137.
   // On Desktop, for https://crbug.com/741984.
@@ -256,6 +297,46 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
   if (SyscallSets::IsKill(sysno)) {
     return RestrictKillTarget(current_pid, sysno);
   }
+
+  // memfd_create is considered a file system syscall which below will be denied
+  // with fs_denied_errno, we need memfd_create for Mojo shared memory channels
+  // and general shared memory.
+  if (sysno == __NR_memfd_create) {
+    return RestrictMemfdCreate();
+  }
+
+  // The fstatat syscalls are file system syscalls, which will be denied below
+  // with fs_denied_errno. However some allowed fstat syscalls are rewritten by
+  // libc implementations to fstatat syscalls, and we need to rewrite them back.
+  if (sysno == __NR_fstatat_default) {
+    return RewriteFstatatSIGSYS(fs_denied_errno);
+  }
+
+  // The statx syscall is a filesystem syscall, which will be denied below with
+  // fs_denied_errno. However, on some platforms, glibc will default to statx
+  // for normal stat-family calls. Unfortunately there's no way to rewrite statx
+  // to something safe using a signal handler. Returning ENOSYS will cause glibc
+  // to fallback to old stat paths.
+  if (sysno == __NR_statx) {
+    const Arg<int> mask(3);
+    return If(mask == STATX_BASIC_STATS, Error(ENOSYS))
+        .Else(Error(fs_denied_errno));
+  }
+
+#if defined(__NR_prlimit64)
+  if (sysno == __NR_prlimit64) {
+    // glibc falls back to prlimit64 for getrlimit() on some architectures.
+    return RestrictPrlimitToGetrlimit(current_pid);
+  }
+#endif
+
+#if defined(__NR_setitimer)
+  if (sysno == __NR_setitimer) {
+    // glibc uses setitimer(ITIMER_REAL) to implement alarm().
+    const Arg<int> which(0);
+    return If(which == ITIMER_REAL, Allow()).Else(Error(EPERM));
+  }
+#endif
 
   if (SyscallSets::IsFileSystem(sysno) ||
       SyscallSets::IsCurrentDirectory(sysno)) {
@@ -282,15 +363,34 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
     return RestrictSocketcallCommand();
 #endif
 
-#if !defined(__i386__)
   if (sysno == __NR_getsockopt || sysno ==__NR_setsockopt) {
     // Used by Mojo EDK to catch a message pipe being sent over itself.
+    // TODO(crbug.com/40528912): is this still needed?
     const Arg<int> level(1);
     const Arg<int> optname(2);
     return If(AllOf(level == SOL_SOCKET, optname == SO_PEEK_OFF), Allow())
         .Else(CrashSIGSYS());
   }
+
+  // https://crbug.com/644759
+  // https://chromium-review.googlesource.com/c/crashpad/crashpad/+/3278691
+  if (sysno == __NR_rt_tgsigqueueinfo) {
+    const Arg<pid_t> tgid(0);
+    return If(tgid == current_pid, Allow())
+           .Else(Error(EPERM));
+  }
+
+  // Allow creating pipes, but don't allow weird flags to pipe2().
+  // O_NOTIFICATION_PIPE (== O_EXCL) can be used to create
+  // "notification pipes", which are rarely used.
+#if defined(__NR_pipe)
+  if (sysno == __NR_pipe) {
+    return Allow();
+  }
 #endif
+  if (sysno == __NR_pipe2) {
+    return RestrictPipe2();
+  }
 
   if (IsBaselinePolicyWatched(sysno)) {
     // Previously unseen syscalls. TODO(jln): some of these should
@@ -304,13 +404,12 @@ ResultExpr EvaluateSyscallImpl(int fs_denied_errno,
 
 }  // namespace.
 
-BaselinePolicy::BaselinePolicy() : BaselinePolicy(EPERM) {
-  // Allocate crash keys set by Seccomp signal handlers.
-  AllocateCrashKeys();
-}
+BaselinePolicy::BaselinePolicy() : BaselinePolicy(EPERM) {}
 
 BaselinePolicy::BaselinePolicy(int fs_denied_errno)
     : fs_denied_errno_(fs_denied_errno), policy_pid_(sys_getpid()) {
+  // Allocate crash keys set by Seccomp signal handlers.
+  AllocateCrashKeys();
 }
 
 BaselinePolicy::~BaselinePolicy() {

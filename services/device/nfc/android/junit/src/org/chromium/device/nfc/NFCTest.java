@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -28,21 +29,25 @@ import android.nfc.NfcAdapter;
 import android.nfc.NfcAdapter.ReaderCallback;
 import android.nfc.NfcManager;
 import android.nfc.Tag;
-import android.nfc.tech.TagTechnology;
+import android.nfc.TagLostException;
 import android.os.Bundle;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
 import org.chromium.base.ApiCompatibilityUtils;
 import org.chromium.base.Callback;
 import org.chromium.base.ContextUtils;
+import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.base.test.util.Feature;
 import org.chromium.device.mojom.NdefError;
 import org.chromium.device.mojom.NdefErrorType;
@@ -50,47 +55,33 @@ import org.chromium.device.mojom.NdefMessage;
 import org.chromium.device.mojom.NdefRecord;
 import org.chromium.device.mojom.NdefRecordTypeCategory;
 import org.chromium.device.mojom.NdefWriteOptions;
-import org.chromium.device.mojom.Nfc.CancelAllWatchesResponse;
-import org.chromium.device.mojom.Nfc.CancelPushResponse;
-import org.chromium.device.mojom.Nfc.CancelWatchResponse;
-import org.chromium.device.mojom.Nfc.PushResponse;
-import org.chromium.device.mojom.Nfc.WatchResponse;
+import org.chromium.device.mojom.Nfc.MakeReadOnly_Response;
+import org.chromium.device.mojom.Nfc.Push_Response;
+import org.chromium.device.mojom.Nfc.Watch_Response;
 import org.chromium.device.mojom.NfcClient;
-import org.chromium.testing.local.LocalRobolectricTestRunner;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * Unit tests for NfcImpl and NdefMessageUtils classes.
- */
-@RunWith(LocalRobolectricTestRunner.class)
-@Config(sdk = 21, manifest = Config.NONE)
+/** Unit tests for NfcImpl and NdefMessageUtils classes. */
+@RunWith(BaseRobolectricTestRunner.class)
+@Config(manifest = Config.NONE)
 public class NFCTest {
     private TestNfcDelegate mDelegate;
     private int mNextWatchId;
-    @Mock
-    private Context mContext;
-    @Mock
-    private NfcManager mNfcManager;
-    @Mock
-    private NfcAdapter mNfcAdapter;
-    @Mock
-    private Activity mActivity;
-    @Mock
-    private NfcClient mNfcClient;
-    @Mock
-    private NfcTagHandler mNfcTagHandler;
-    @Captor
-    private ArgumentCaptor<NdefError> mErrorCaptor;
-    @Captor
-    private ArgumentCaptor<int[]> mOnWatchCallbackCaptor;
+    @Mock private Context mContext;
+    @Mock private NfcManager mNfcManager;
+    @Mock private NfcAdapter mNfcAdapter;
+    @Mock private Activity mActivity;
+    @Mock private NfcClient mNfcClient;
+    @Mock private NfcTagHandler mNfcTagHandler;
+    @Captor private ArgumentCaptor<NdefError> mErrorCaptor;
+    @Captor private ArgumentCaptor<int[]> mOnWatchCallbackCaptor;
 
     // Constants used for the test.
     private static final String DUMMY_EXTERNAL_TYPE = "abc.com:xyz";
@@ -105,9 +96,7 @@ public class NFCTest {
     private static final String ENCODING_UTF16 = "utf-16";
     private static final String LANG_EN_US = "en-US";
 
-    /**
-     * Class that is used test NfcImpl implementation
-     */
+    /** Class that is used test NfcImpl implementation */
     private static class TestNfcImpl extends NfcImpl {
         public TestNfcImpl(Context context, NfcDelegate delegate) {
             super(0, delegate, null);
@@ -119,12 +108,13 @@ public class NFCTest {
     }
 
     private static class TestNfcDelegate implements NfcDelegate {
-        Activity mActivity;
+        final Activity mActivity;
         Callback<Activity> mCallback;
 
         public TestNfcDelegate(Activity activity) {
             mActivity = activity;
         }
+
         @Override
         public void trackActivityForHost(int hostId, Callback<Activity> callback) {
             mCallback = callback;
@@ -138,9 +128,10 @@ public class NFCTest {
         public void stopTrackingActivityForHost(int hostId) {}
     }
 
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mDelegate = new TestNfcDelegate(mActivity);
         doReturn(mNfcManager).when(mContext).getSystemService(Context.NFC_SERVICE);
         doReturn(mNfcAdapter).when(mNfcManager).getDefaultAdapter();
@@ -150,41 +141,39 @@ public class NFCTest {
                 .checkPermission(anyString(), anyInt(), anyInt());
         doNothing()
                 .when(mNfcAdapter)
-                .enableReaderMode(any(Activity.class), any(ReaderCallback.class), anyInt(),
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
                         (Bundle) isNull());
         doNothing().when(mNfcAdapter).disableReaderMode(any(Activity.class));
         // Tag handler overrides used to mock connected tag.
-        doReturn(true).when(mNfcTagHandler).isConnected();
         doReturn(false).when(mNfcTagHandler).isTagOutOfRange();
         try {
             doNothing().when(mNfcTagHandler).connect();
             doNothing().when(mNfcTagHandler).write(any(android.nfc.NdefMessage.class));
+            doReturn(true).when(mNfcTagHandler).makeReadOnly();
             doReturn(createNdefMessageWithRecordId(DUMMY_RECORD_ID)).when(mNfcTagHandler).read();
-            doNothing().when(mNfcTagHandler).close();
         } catch (IOException | FormatException e) {
         }
-        NfcBlocklist.overrideNfcBlocklistForTests(null /* serverProvidedValues */);
+        NfcBlocklist.overrideNfcBlocklistForTests(/* serverProvidedValues= */ null);
         ContextUtils.initApplicationContextForTests(mContext);
     }
 
-    /**
-     * Test that error with type NOT_SUPPORTED is returned if NFC is not supported.
-     */
+    /** Test that error with type NOT_SUPPORTED is returned if NFC is not supported. */
     @Test
     @Feature({"NFCTest"})
     public void testNFCNotSupported() {
         doReturn(null).when(mNfcManager).getDefaultAdapter();
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        CancelAllWatchesResponse mockCallback = mock(CancelAllWatchesResponse.class);
-        nfc.cancelAllWatches(mockCallback);
+        Watch_Response mockCallback = mock(Watch_Response.class);
+        nfc.watch(mNextWatchId, mockCallback);
         verify(mockCallback).call(mErrorCaptor.capture());
         assertEquals(NdefErrorType.NOT_SUPPORTED, mErrorCaptor.getValue().errorType);
     }
 
-    /**
-     * Test that error with type SECURITY is returned if permission to use NFC is not granted.
-     */
+    /** Test that error with type SECURITY is returned if permission to use NFC is not granted. */
     @Test
     @Feature({"NFCTest"})
     public void testNFCIsNotPermitted() {
@@ -192,35 +181,33 @@ public class NFCTest {
                 .when(mContext)
                 .checkPermission(anyString(), anyInt(), anyInt());
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
-        CancelAllWatchesResponse mockCallback = mock(CancelAllWatchesResponse.class);
-        nfc.cancelAllWatches(mockCallback);
+        Watch_Response mockCallback = mock(Watch_Response.class);
+        nfc.watch(mNextWatchId, mockCallback);
         verify(mockCallback).call(mErrorCaptor.capture());
         assertEquals(NdefErrorType.NOT_ALLOWED, mErrorCaptor.getValue().errorType);
     }
 
-    /**
-     * Test that method can be invoked successfully if NFC is supported and adapter is enabled.
-     */
+    /** Test that method can be invoked successfully if NFC is supported and adapter is enabled. */
     @Test
     @Feature({"NFCTest"})
     public void testNFCIsSupported() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        WatchResponse mockCallback = mock(WatchResponse.class);
+        Watch_Response mockCallback = mock(Watch_Response.class);
         nfc.watch(mNextWatchId, mockCallback);
         verify(mockCallback).call(mErrorCaptor.capture());
         assertNull(mErrorCaptor.getValue());
     }
 
-    /**
-     * Test conversion from NdefMessage to mojo NdefMessage.
-     */
+    /** Test conversion from NdefMessage to mojo NdefMessage. */
     @Test
     @Feature({"NFCTest"})
     public void testNdefToMojoConversion() throws UnsupportedEncodingException {
         // Test EMPTY record conversion.
-        android.nfc.NdefMessage emptyNdefMessage = new android.nfc.NdefMessage(
-                new android.nfc.NdefRecord(android.nfc.NdefRecord.TNF_EMPTY, null, null, null));
+        android.nfc.NdefMessage emptyNdefMessage =
+                new android.nfc.NdefMessage(
+                        new android.nfc.NdefRecord(
+                                android.nfc.NdefRecord.TNF_EMPTY, null, null, null));
         NdefMessage emptyMojoNdefMessage = NdefMessageUtils.toNdefMessage(emptyNdefMessage);
         assertEquals(1, emptyMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.STANDARDIZED, emptyMojoNdefMessage.data[0].category);
@@ -233,9 +220,11 @@ public class NFCTest {
 
         // Test url record conversion.
         android.nfc.NdefMessage urlNdefMessage =
-                new android.nfc.NdefMessage(NdefMessageUtils.createPlatformUrlRecord(
-                        ApiCompatibilityUtils.getBytesUtf8(TEST_URL), DUMMY_RECORD_ID,
-                        false /* isAbsUrl */));
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformUrlRecord(
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_URL),
+                                DUMMY_RECORD_ID,
+                                /* isAbsUrl= */ false));
         NdefMessage urlMojoNdefMessage = NdefMessageUtils.toNdefMessage(urlNdefMessage);
         assertEquals(1, urlMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.STANDARDIZED, urlMojoNdefMessage.data[0].category);
@@ -248,22 +237,29 @@ public class NFCTest {
 
         // Test absolute-url record conversion.
         android.nfc.NdefMessage absUrlNdefMessage =
-                new android.nfc.NdefMessage(NdefMessageUtils.createPlatformUrlRecord(
-                        ApiCompatibilityUtils.getBytesUtf8(TEST_URL), DUMMY_RECORD_ID,
-                        true /* isAbsUrl */));
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformUrlRecord(
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_URL),
+                                DUMMY_RECORD_ID,
+                                /* isAbsUrl= */ true));
         NdefMessage absUrlMojoNdefMessage = NdefMessageUtils.toNdefMessage(absUrlNdefMessage);
         assertEquals(1, absUrlMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.STANDARDIZED, absUrlMojoNdefMessage.data[0].category);
-        assertEquals(NdefMessageUtils.RECORD_TYPE_ABSOLUTE_URL,
+        assertEquals(
+                NdefMessageUtils.RECORD_TYPE_ABSOLUTE_URL,
                 absUrlMojoNdefMessage.data[0].recordType);
         assertEquals(null, absUrlMojoNdefMessage.data[0].mediaType);
         assertEquals(DUMMY_RECORD_ID, absUrlMojoNdefMessage.data[0].id);
         assertEquals(TEST_URL, new String(absUrlMojoNdefMessage.data[0].data));
 
         // Test text record conversion for UTF-8 content.
-        android.nfc.NdefMessage utf8TextNdefMessage = new android.nfc.NdefMessage(
-                NdefMessageUtils.createPlatformTextRecord(DUMMY_RECORD_ID, LANG_EN_US,
-                        ENCODING_UTF8, ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
+        android.nfc.NdefMessage utf8TextNdefMessage =
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformTextRecord(
+                                DUMMY_RECORD_ID,
+                                LANG_EN_US,
+                                ENCODING_UTF8,
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
         NdefMessage utf8TextMojoNdefMessage = NdefMessageUtils.toNdefMessage(utf8TextNdefMessage);
         assertEquals(1, utf8TextMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.STANDARDIZED, utf8TextMojoNdefMessage.data[0].category);
@@ -272,14 +268,17 @@ public class NFCTest {
         assertEquals(DUMMY_RECORD_ID, utf8TextMojoNdefMessage.data[0].id);
         assertEquals(ENCODING_UTF8, utf8TextMojoNdefMessage.data[0].encoding);
         assertEquals(LANG_EN_US, utf8TextMojoNdefMessage.data[0].lang);
-        assertEquals(TEST_TEXT, new String(utf8TextMojoNdefMessage.data[0].data, "UTF-8"));
+        assertEquals(
+                TEST_TEXT,
+                new String(utf8TextMojoNdefMessage.data[0].data, StandardCharsets.UTF_8));
 
         // Test text record conversion for UTF-16 content.
         byte[] textBytes = TEST_TEXT.getBytes(StandardCharsets.UTF_16BE);
         byte[] languageCodeBytes = LANG_EN_US.getBytes(StandardCharsets.US_ASCII);
         android.nfc.NdefMessage utf16TextNdefMessage =
-                new android.nfc.NdefMessage(NdefMessageUtils.createPlatformTextRecord(
-                        DUMMY_RECORD_ID, LANG_EN_US, ENCODING_UTF16, textBytes));
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformTextRecord(
+                                DUMMY_RECORD_ID, LANG_EN_US, ENCODING_UTF16, textBytes));
         NdefMessage utf16TextMojoNdefMessage = NdefMessageUtils.toNdefMessage(utf16TextNdefMessage);
         assertEquals(1, utf16TextMojoNdefMessage.data.length);
         assertEquals(
@@ -290,12 +289,17 @@ public class NFCTest {
         assertEquals(DUMMY_RECORD_ID, utf16TextMojoNdefMessage.data[0].id);
         assertEquals(ENCODING_UTF16, utf16TextMojoNdefMessage.data[0].encoding);
         assertEquals(LANG_EN_US, utf16TextMojoNdefMessage.data[0].lang);
-        assertEquals(TEST_TEXT, new String(utf16TextMojoNdefMessage.data[0].data, "UTF-16"));
+        assertEquals(
+                TEST_TEXT,
+                new String(utf16TextMojoNdefMessage.data[0].data, StandardCharsets.UTF_16));
 
         // Test mime record conversion with "text/plain" mime type.
         android.nfc.NdefMessage mimeNdefMessage =
-                new android.nfc.NdefMessage(NdefMessageUtils.createPlatformMimeRecord(
-                        TEXT_MIME, DUMMY_RECORD_ID, ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformMimeRecord(
+                                TEXT_MIME,
+                                DUMMY_RECORD_ID,
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
         NdefMessage mimeMojoNdefMessage = NdefMessageUtils.toNdefMessage(mimeNdefMessage);
         assertEquals(1, mimeMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.STANDARDIZED, mimeMojoNdefMessage.data[0].category);
@@ -308,8 +312,11 @@ public class NFCTest {
 
         // Test mime record conversion with "application/json" mime type.
         android.nfc.NdefMessage jsonNdefMessage =
-                new android.nfc.NdefMessage(NdefMessageUtils.createPlatformMimeRecord(
-                        JSON_MIME, DUMMY_RECORD_ID, ApiCompatibilityUtils.getBytesUtf8(TEST_JSON)));
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformMimeRecord(
+                                JSON_MIME,
+                                DUMMY_RECORD_ID,
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_JSON)));
         NdefMessage jsonMojoNdefMessage = NdefMessageUtils.toNdefMessage(jsonNdefMessage);
         assertEquals(1, jsonMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.STANDARDIZED, jsonMojoNdefMessage.data[0].category);
@@ -321,10 +328,13 @@ public class NFCTest {
         assertEquals(TEST_JSON, new String(jsonMojoNdefMessage.data[0].data));
 
         // Test unknown record conversion.
-        android.nfc.NdefMessage unknownNdefMessage = new android.nfc.NdefMessage(
-                new android.nfc.NdefRecord(android.nfc.NdefRecord.TNF_UNKNOWN, null,
-                        ApiCompatibilityUtils.getBytesUtf8(DUMMY_RECORD_ID),
-                        ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
+        android.nfc.NdefMessage unknownNdefMessage =
+                new android.nfc.NdefMessage(
+                        new android.nfc.NdefRecord(
+                                android.nfc.NdefRecord.TNF_UNKNOWN,
+                                null,
+                                ApiCompatibilityUtils.getBytesUtf8(DUMMY_RECORD_ID),
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
         NdefMessage unknownMojoNdefMessage = NdefMessageUtils.toNdefMessage(unknownNdefMessage);
         assertEquals(1, unknownMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.STANDARDIZED, unknownMojoNdefMessage.data[0].category);
@@ -336,9 +346,13 @@ public class NFCTest {
         assertEquals(TEST_TEXT, new String(unknownMojoNdefMessage.data[0].data));
 
         // Test external record conversion.
-        android.nfc.NdefMessage extNdefMessage = new android.nfc.NdefMessage(
-                NdefMessageUtils.createPlatformExternalRecord(DUMMY_EXTERNAL_TYPE, DUMMY_RECORD_ID,
-                        ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT), null /* payloadMessage */));
+        android.nfc.NdefMessage extNdefMessage =
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformExternalRecord(
+                                DUMMY_EXTERNAL_TYPE,
+                                DUMMY_RECORD_ID,
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT),
+                                /* payloadMessage= */ null));
         NdefMessage extMojoNdefMessage = NdefMessageUtils.toNdefMessage(extNdefMessage);
         assertEquals(1, extMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.EXTERNAL, extMojoNdefMessage.data[0].category);
@@ -350,13 +364,18 @@ public class NFCTest {
         assertEquals(TEST_TEXT, new String(extMojoNdefMessage.data[0].data));
 
         // Test conversion for external records with the payload being a ndef message.
-        android.nfc.NdefMessage payloadMessage = new android.nfc.NdefMessage(
-                android.nfc.NdefRecord.createTextRecord(LANG_EN_US, TEST_TEXT));
+        android.nfc.NdefMessage payloadMessage =
+                new android.nfc.NdefMessage(
+                        android.nfc.NdefRecord.createTextRecord(LANG_EN_US, TEST_TEXT));
         byte[] payloadBytes = payloadMessage.toByteArray();
         // Put |payloadBytes| as payload of an external record.
-        android.nfc.NdefMessage extNdefMessage1 = new android.nfc.NdefMessage(
-                NdefMessageUtils.createPlatformExternalRecord(DUMMY_EXTERNAL_TYPE, DUMMY_RECORD_ID,
-                        payloadBytes, null /* payloadMessage */));
+        android.nfc.NdefMessage extNdefMessage1 =
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformExternalRecord(
+                                DUMMY_EXTERNAL_TYPE,
+                                DUMMY_RECORD_ID,
+                                payloadBytes,
+                                /* payloadMessage= */ null));
         NdefMessage extMojoNdefMessage1 = NdefMessageUtils.toNdefMessage(extNdefMessage1);
         assertEquals(1, extMojoNdefMessage1.data.length);
         assertEquals(NdefRecordTypeCategory.EXTERNAL, extMojoNdefMessage1.data[0].category);
@@ -424,9 +443,13 @@ public class NFCTest {
         assertEquals(TEST_TEXT, new String(payloadMojoMessage.data[6].data));
 
         // Test local record conversion.
-        android.nfc.NdefMessage localNdefMessage = new android.nfc.NdefMessage(
-                NdefMessageUtils.createPlatformLocalRecord("xyz", DUMMY_RECORD_ID,
-                        ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT), null /* payloadMessage */));
+        android.nfc.NdefMessage localNdefMessage =
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformLocalRecord(
+                                "xyz",
+                                DUMMY_RECORD_ID,
+                                ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT),
+                                /* payloadMessage= */ null));
         NdefMessage localMojoNdefMessage = NdefMessageUtils.toNdefMessage(localNdefMessage);
         assertEquals(1, localMojoNdefMessage.data.length);
         assertEquals(NdefRecordTypeCategory.LOCAL, localMojoNdefMessage.data[0].category);
@@ -439,13 +462,15 @@ public class NFCTest {
         assertEquals(TEST_TEXT, new String(localMojoNdefMessage.data[0].data));
 
         // Test conversion for local records with the payload being a ndef message.
-        payloadMessage = new android.nfc.NdefMessage(
-                android.nfc.NdefRecord.createTextRecord(LANG_EN_US, TEST_TEXT));
+        payloadMessage =
+                new android.nfc.NdefMessage(
+                        android.nfc.NdefRecord.createTextRecord(LANG_EN_US, TEST_TEXT));
         payloadBytes = payloadMessage.toByteArray();
         // Put |payloadBytes| as payload of a local record.
         android.nfc.NdefMessage localNdefMessage1 =
-                new android.nfc.NdefMessage(NdefMessageUtils.createPlatformLocalRecord(
-                        "xyz", DUMMY_RECORD_ID, payloadBytes, null /* payloadMessage */));
+                new android.nfc.NdefMessage(
+                        NdefMessageUtils.createPlatformLocalRecord(
+                                "xyz", DUMMY_RECORD_ID, payloadBytes, /* payloadMessage= */ null));
         NdefMessage localMojoNdefMessage1 = NdefMessageUtils.toNdefMessage(localNdefMessage1);
         assertEquals(1, localMojoNdefMessage1.data.length);
         assertEquals(NdefRecordTypeCategory.LOCAL, localMojoNdefMessage1.data[0].category);
@@ -463,9 +488,7 @@ public class NFCTest {
         assertEquals(TEST_TEXT, new String(payloadMojoMessage.data[0].data));
     }
 
-    /**
-     * Test conversion from mojo NdefMessage to android NdefMessage.
-     */
+    /** Test conversion from mojo NdefMessage to android NdefMessage. */
     @Test
     @Feature({"NFCTest"})
     public void testMojoToNdefConversion()
@@ -481,7 +504,8 @@ public class NFCTest {
         assertEquals(1, urlNdefMessage.getRecords().length);
         assertEquals(
                 android.nfc.NdefRecord.TNF_WELL_KNOWN, urlNdefMessage.getRecords()[0].getTnf());
-        assertEquals(new String(android.nfc.NdefRecord.RTD_URI),
+        assertEquals(
+                new String(android.nfc.NdefRecord.RTD_URI),
                 new String(urlNdefMessage.getRecords()[0].getType()));
         assertEquals(DUMMY_RECORD_ID, new String(urlNdefMessage.getRecords()[0].getId()));
         assertEquals(TEST_URL, urlNdefMessage.getRecords()[0].toUri().toString());
@@ -496,7 +520,8 @@ public class NFCTest {
         android.nfc.NdefMessage absUrlNdefMessage =
                 NdefMessageUtils.toNdefMessage(absUrlMojoNdefMessage);
         assertEquals(1, absUrlNdefMessage.getRecords().length);
-        assertEquals(android.nfc.NdefRecord.TNF_ABSOLUTE_URI,
+        assertEquals(
+                android.nfc.NdefRecord.TNF_ABSOLUTE_URI,
                 absUrlNdefMessage.getRecords()[0].getTnf());
         assertEquals(DUMMY_RECORD_ID, new String(absUrlNdefMessage.getRecords()[0].getId()));
         assertEquals(TEST_URL, absUrlNdefMessage.getRecords()[0].toUri().toString());
@@ -513,13 +538,15 @@ public class NFCTest {
         android.nfc.NdefMessage utf8TextNdefMessage =
                 NdefMessageUtils.toNdefMessage(utf8TextMojoNdefMessage);
         assertEquals(1, utf8TextNdefMessage.getRecords().length);
-        assertEquals(android.nfc.NdefRecord.TNF_WELL_KNOWN,
+        assertEquals(
+                android.nfc.NdefRecord.TNF_WELL_KNOWN,
                 utf8TextNdefMessage.getRecords()[0].getTnf());
         assertEquals(DUMMY_RECORD_ID, new String(utf8TextNdefMessage.getRecords()[0].getId()));
         {
             byte[] languageCodeBytes = LANG_EN_US.getBytes(StandardCharsets.US_ASCII);
-            ByteBuffer expectedPayload = ByteBuffer.allocate(
-                    1 + languageCodeBytes.length + utf8TextMojoNdefRecord.data.length);
+            ByteBuffer expectedPayload =
+                    ByteBuffer.allocate(
+                            1 + languageCodeBytes.length + utf8TextMojoNdefRecord.data.length);
             byte status = (byte) languageCodeBytes.length;
             expectedPayload.put(status);
             expectedPayload.put(languageCodeBytes);
@@ -535,18 +562,20 @@ public class NFCTest {
         utf16TextMojoNdefRecord.id = DUMMY_RECORD_ID;
         utf16TextMojoNdefRecord.encoding = ENCODING_UTF16;
         utf16TextMojoNdefRecord.lang = LANG_EN_US;
-        utf16TextMojoNdefRecord.data = TEST_TEXT.getBytes(Charset.forName("UTF-16"));
+        utf16TextMojoNdefRecord.data = TEST_TEXT.getBytes(StandardCharsets.UTF_16);
         NdefMessage utf16TextMojoNdefMessage = createMojoNdefMessage(utf16TextMojoNdefRecord);
         android.nfc.NdefMessage utf16TextNdefMessage =
                 NdefMessageUtils.toNdefMessage(utf16TextMojoNdefMessage);
         assertEquals(1, utf16TextNdefMessage.getRecords().length);
-        assertEquals(android.nfc.NdefRecord.TNF_WELL_KNOWN,
+        assertEquals(
+                android.nfc.NdefRecord.TNF_WELL_KNOWN,
                 utf16TextNdefMessage.getRecords()[0].getTnf());
         assertEquals(DUMMY_RECORD_ID, new String(utf16TextNdefMessage.getRecords()[0].getId()));
         {
             byte[] languageCodeBytes = LANG_EN_US.getBytes(StandardCharsets.US_ASCII);
-            ByteBuffer expectedPayload = ByteBuffer.allocate(
-                    1 + languageCodeBytes.length + utf16TextMojoNdefRecord.data.length);
+            ByteBuffer expectedPayload =
+                    ByteBuffer.allocate(
+                            1 + languageCodeBytes.length + utf16TextMojoNdefRecord.data.length);
             byte status = (byte) languageCodeBytes.length;
             status |= (byte) (1 << 7);
             expectedPayload.put(status);
@@ -651,7 +680,8 @@ public class NFCTest {
         assertEquals(1, payloadMessage.getRecords().length);
         assertEquals(
                 android.nfc.NdefRecord.TNF_WELL_KNOWN, payloadMessage.getRecords()[0].getTnf());
-        assertEquals(new String(android.nfc.NdefRecord.RTD_URI),
+        assertEquals(
+                new String(android.nfc.NdefRecord.RTD_URI),
                 new String(payloadMessage.getRecords()[0].getType()));
         assertEquals(DUMMY_RECORD_ID, new String(payloadMessage.getRecords()[0].getId()));
         assertEquals(TEST_URL, payloadMessage.getRecords()[0].toUri().toString());
@@ -663,14 +693,16 @@ public class NFCTest {
         // testNdefToMojoConversion(), i.e. |spMojoNdefMessage|.is valid and its smart-poster record
         // contains those sub records corresponding to those created by
         // createSmartPosterNdefRecord().
-        NdefMessage spMojoNdefMessage = NdefMessageUtils.toNdefMessage(
-                new android.nfc.NdefMessage(createSmartPosterNdefRecord()));
+        NdefMessage spMojoNdefMessage =
+                NdefMessageUtils.toNdefMessage(
+                        new android.nfc.NdefMessage(createSmartPosterNdefRecord()));
         assertNotNull(spMojoNdefMessage.data[0].payloadMessage);
         // Do the conversion.
         android.nfc.NdefMessage spNdefMessage = NdefMessageUtils.toNdefMessage(spMojoNdefMessage);
         assertEquals(1, spNdefMessage.getRecords().length);
         assertEquals(android.nfc.NdefRecord.TNF_WELL_KNOWN, spNdefMessage.getRecords()[0].getTnf());
-        assertEquals(new String(android.nfc.NdefRecord.RTD_SMART_POSTER),
+        assertEquals(
+                new String(android.nfc.NdefRecord.RTD_SMART_POSTER),
                 new String(spNdefMessage.getRecords()[0].getType()));
         assertEquals(DUMMY_RECORD_ID, new String(spNdefMessage.getRecords()[0].getId()));
         // The payload raw bytes of the smart-poster record should be able to construct an
@@ -682,7 +714,8 @@ public class NFCTest {
         // The url record.
         assertEquals(
                 android.nfc.NdefRecord.TNF_WELL_KNOWN, payloadMessage.getRecords()[0].getTnf());
-        assertEquals(new String(android.nfc.NdefRecord.RTD_URI),
+        assertEquals(
+                new String(android.nfc.NdefRecord.RTD_URI),
                 new String(payloadMessage.getRecords()[0].getType()));
         assertEquals(DUMMY_RECORD_ID, new String(payloadMessage.getRecords()[0].getId()));
         assertEquals(TEST_URL, payloadMessage.getRecords()[0].toUri().toString());
@@ -691,7 +724,8 @@ public class NFCTest {
                 android.nfc.NdefRecord.TNF_WELL_KNOWN, payloadMessage.getRecords()[1].getTnf());
         assertEquals("s", new String(payloadMessage.getRecords()[1].getType()));
         assertEquals(4, payloadMessage.getRecords()[1].getPayload().length);
-        assertEquals(4096,
+        assertEquals(
+                4096,
                 ByteBuffer.allocate(4).put(payloadMessage.getRecords()[1].getPayload()).getInt(0));
         // The type record.
         assertEquals(
@@ -707,7 +741,8 @@ public class NFCTest {
         // The title record.
         assertEquals(
                 android.nfc.NdefRecord.TNF_WELL_KNOWN, payloadMessage.getRecords()[4].getTnf());
-        assertEquals(new String(android.nfc.NdefRecord.RTD_TEXT),
+        assertEquals(
+                new String(android.nfc.NdefRecord.RTD_TEXT),
                 new String(payloadMessage.getRecords()[4].getType()));
         // The icon record.
         assertEquals(
@@ -764,7 +799,8 @@ public class NFCTest {
         assertEquals(1, payloadMessage.getRecords().length);
         assertEquals(
                 android.nfc.NdefRecord.TNF_WELL_KNOWN, payloadMessage.getRecords()[0].getTnf());
-        assertEquals(new String(android.nfc.NdefRecord.RTD_URI),
+        assertEquals(
+                new String(android.nfc.NdefRecord.RTD_URI),
                 new String(payloadMessage.getRecords()[0].getType()));
         assertEquals(DUMMY_RECORD_ID, new String(payloadMessage.getRecords()[0].getId()));
         assertEquals(TEST_URL, payloadMessage.getRecords()[0].toUri().toString());
@@ -780,9 +816,7 @@ public class NFCTest {
         assertEquals(android.nfc.NdefRecord.TNF_EMPTY, emptyNdefMessage.getRecords()[0].getTnf());
     }
 
-    /**
-     * Test external record conversion with invalid custom type.
-     */
+    /** Test external record conversion with invalid custom type. */
     @Test
     @Feature({"NFCTest"})
     public void testInvalidExternalRecordType() {
@@ -812,7 +846,8 @@ public class NFCTest {
             }
             assertNotNull(extNdefMessage);
             assertEquals(1, extNdefMessage.getRecords().length);
-            assertEquals(android.nfc.NdefRecord.TNF_EXTERNAL_TYPE,
+            assertEquals(
+                    android.nfc.NdefRecord.TNF_EXTERNAL_TYPE,
                     extNdefMessage.getRecords()[0].getTnf());
             assertEquals("abc~123.com:xyz", new String(extNdefMessage.getRecords()[0].getType()));
             assertEquals(DUMMY_RECORD_ID, new String(extNdefMessage.getRecords()[0].getId()));
@@ -891,9 +926,7 @@ public class NFCTest {
         }
     }
 
-    /**
-     * Test local type record conversion with invalid local type.
-     */
+    /** Test local type record conversion with invalid local type. */
     @Test
     @Feature({"NFCTest"})
     public void testInvalidLocalRecordType() {
@@ -949,17 +982,16 @@ public class NFCTest {
         }
     }
 
-    /**
-     * Test smart-poster record conversion with invalid sub records.
-     */
+    /** Test smart-poster record conversion with invalid sub records. */
     @Test
     @Feature({"NFCTest"})
     public void testInvalidSmartPosterRecord() {
         // Prepare a Mojo NdefMessage |spMojoNdefMessage| that contains the smart-poster record.
         NdefMessage spMojoNdefMessage = null;
         try {
-            spMojoNdefMessage = NdefMessageUtils.toNdefMessage(
-                    new android.nfc.NdefMessage(createSmartPosterNdefRecord()));
+            spMojoNdefMessage =
+                    NdefMessageUtils.toNdefMessage(
+                            new android.nfc.NdefMessage(createSmartPosterNdefRecord()));
         } catch (UnsupportedEncodingException e) {
         }
         assertNotNull(spMojoNdefMessage);
@@ -1074,24 +1106,20 @@ public class NFCTest {
         assertNull(convertedMessage);
     }
 
-    /**
-     * Test that invalid NdefMessage is rejected with INVALID_MESSAGE error code.
-     */
+    /** Test that invalid NdefMessage is rejected with INVALID_MESSAGE error code. */
     @Test
     @Feature({"NFCTest"})
     public void testInvalidNdefMessage() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        PushResponse mockCallback = mock(PushResponse.class);
+        Push_Response mockCallback = mock(Push_Response.class);
         nfc.push(new NdefMessage(), createNdefWriteOptions(), mockCallback);
         nfc.processPendingOperationsForTesting(mNfcTagHandler);
         verify(mockCallback).call(mErrorCaptor.capture());
         assertEquals(NdefErrorType.INVALID_MESSAGE, mErrorCaptor.getValue().errorType);
     }
 
-    /**
-     * Test that Nfc.suspendNfcOperations() and Nfc.resumeNfcOperations() work correctly.
-     */
+    /** Test that Nfc.suspendNfcOperations() and Nfc.resumeNfcOperations() work correctly. */
     @Test
     @Feature({"NFCTest"})
     public void testResumeSuspend() {
@@ -1102,14 +1130,17 @@ public class NFCTest {
 
         mDelegate.invokeCallback();
         nfc.setClient(mNfcClient);
-        WatchResponse mockCallback = mock(WatchResponse.class);
+        Watch_Response mockCallback = mock(Watch_Response.class);
         nfc.watch(mNextWatchId, mockCallback);
         nfc.suspendNfcOperations();
         verify(mNfcAdapter, times(1)).disableReaderMode(mActivity);
         nfc.resumeNfcOperations();
         // 1. Enable after watch is called, 2. after resumeNfcOperations is called.
         verify(mNfcAdapter, times(2))
-                .enableReaderMode(any(Activity.class), any(ReaderCallback.class), anyInt(),
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
                         (Bundle) isNull());
 
         nfc.processPendingOperationsForTesting(mNfcTagHandler);
@@ -1119,51 +1150,180 @@ public class NFCTest {
 
         // Check that client was notified and watch with correct id was triggered.
         verify(mNfcClient, times(1))
-                .onWatch(mOnWatchCallbackCaptor.capture(), nullable(String.class),
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
                         any(NdefMessage.class));
         assertEquals(mNextWatchId, mOnWatchCallbackCaptor.getValue()[0]);
     }
 
-    /**
-     * Test that Nfc.push() successful when NFC tag is connected.
-     */
+    /** Test that NFC.watch() is not triggered when NFC operations are suspended. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testWatchWhenOperationsAreSuspended() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        nfc.suspendNfcOperations();
+        mDelegate.invokeCallback();
+        nfc.setClient(mNfcClient);
+        Watch_Response mockCallback = mock(Watch_Response.class);
+        nfc.watch(mNextWatchId, mockCallback);
+
+        // Check that watch request was completed successfully even if NFC operations are suspended.
+        verify(mockCallback).call(mErrorCaptor.capture());
+        assertNull(mErrorCaptor.getValue());
+
+        // Check that watch is not triggered when NFC tag is in proximity.
+        nfc.processPendingOperationsForTesting(mNfcTagHandler);
+        verify(mNfcClient, times(0))
+                .onWatch(any(int[].class), nullable(String.class), any(NdefMessage.class));
+
+        nfc.resumeNfcOperations();
+        verify(mNfcAdapter, times(1))
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
+                        (Bundle) isNull());
+
+        // Check that client was notified and watch with correct id was triggered.
+        nfc.processPendingOperationsForTesting(mNfcTagHandler);
+        verify(mNfcClient, times(1))
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
+                        any(NdefMessage.class));
+        assertEquals(mNextWatchId, mOnWatchCallbackCaptor.getValue()[0]);
+    }
+
+    /** Test that Nfc.push() fails if NFC operations are already suspended. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testPushWhenOperationsAreSuspended() throws IOException, FormatException {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        nfc.suspendNfcOperations();
+        mDelegate.invokeCallback();
+        Push_Response mockCallback = mock(Push_Response.class);
+        nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback);
+
+        // Check that push request was cancelled with OPERATION_CANCELLED.
+        verify(mockCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+
+        // Check that push is not triggered when NFC tag is in proximity.
+        nfc.processPendingOperationsForTesting(mNfcTagHandler);
+        verify(mNfcTagHandler, never()).write(any(android.nfc.NdefMessage.class));
+    }
+
+    /** Test that Nfc.suspendNfcOperations() cancels pending push operation. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testSuspendNfcOperationsCancelPush() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+        Push_Response mockPushCallback = mock(Push_Response.class);
+        nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockPushCallback);
+        nfc.suspendNfcOperations();
+
+        // Check that push request was cancelled with OPERATION_CANCELLED.
+        verify(mockPushCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+    }
+
+    /** Test that Nfc.push() successful when NFC tag is connected. */
     @Test
     @Feature({"NFCTest"})
     public void testPush() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        PushResponse mockCallback = mock(PushResponse.class);
+        Push_Response mockCallback = mock(Push_Response.class);
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback);
         nfc.processPendingOperationsForTesting(mNfcTagHandler);
         verify(mockCallback).call(mErrorCaptor.capture());
         assertNull(mErrorCaptor.getValue());
     }
 
-    /**
-     * Test that Nfc.cancelPush() cancels pending push opration and completes successfully.
-     */
+    /** Test that Nfc.cancelPush() cancels pending push operation. */
     @Test
     @Feature({"NFCTest"})
     public void testCancelPush() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        PushResponse mockPushCallback = mock(PushResponse.class);
-        CancelPushResponse mockCancelPushCallback = mock(CancelPushResponse.class);
+        Push_Response mockPushCallback = mock(Push_Response.class);
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockPushCallback);
-        nfc.cancelPush(mockCancelPushCallback);
+        nfc.cancelPush();
 
         // Check that push request was cancelled with OPERATION_CANCELLED.
         verify(mockPushCallback).call(mErrorCaptor.capture());
         assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+    }
 
-        // Check that cancel request was successfuly completed.
-        verify(mockCancelPushCallback).call(mErrorCaptor.capture());
+    /** Test that Nfc.makeReadOnly() fails if NFC operations are already suspended. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testMakeReadOnlyWhenOperationsAreSuspended() throws IOException {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        nfc.suspendNfcOperations();
+        mDelegate.invokeCallback();
+        MakeReadOnly_Response mockCallback = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockCallback);
+
+        // Check that makeReadOnly request was cancelled with OPERATION_CANCELLED.
+        verify(mockCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+
+        // Check that makeReadOnly is not triggered when NFC tag is in proximity.
+        nfc.processPendingOperationsForTesting(mNfcTagHandler);
+        verify(mNfcTagHandler, never()).makeReadOnly();
+    }
+
+    /** Test that Nfc.suspendNfcOperations() cancels pending makeReadOnly operation. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testSuspendNfcOperationsCancelMakeReadOnly() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+        MakeReadOnly_Response mockMakeReadOnlyCallback = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockMakeReadOnlyCallback);
+        nfc.suspendNfcOperations();
+
+        // Check that makeReadOnly request was cancelled with OPERATION_CANCELLED.
+        verify(mockMakeReadOnlyCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+    }
+
+    /** Test that Nfc.makeReadOnly() successful when NFC tag is connected. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testMakeReadOnly() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+        MakeReadOnly_Response mockCallback = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockCallback);
+        nfc.processPendingOperationsForTesting(mNfcTagHandler);
+        verify(mockCallback).call(mErrorCaptor.capture());
         assertNull(mErrorCaptor.getValue());
     }
 
-    /**
-     * Test that Nfc.watch() works correctly and client is notified.
-     */
+    /** Test that Nfc.cancelMakeReadOnly() cancels pending makeReadOnly operation. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testCancelMakeReadOnly() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+        MakeReadOnly_Response mockMakeReadOnlyCallback = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockMakeReadOnlyCallback);
+        nfc.cancelMakeReadOnly();
+
+        // Check that MakeReadOnly request was cancelled with OPERATION_CANCELLED.
+        verify(mockMakeReadOnlyCallback).call(mErrorCaptor.capture());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+    }
+
+    /** Test that Nfc.watch() works correctly and client is notified. */
     @Test
     @Feature({"NFCTest"})
     public void testWatch() {
@@ -1171,7 +1331,7 @@ public class NFCTest {
         mDelegate.invokeCallback();
         nfc.setClient(mNfcClient);
         int watchId1 = mNextWatchId++;
-        WatchResponse mockWatchCallback1 = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback1 = mock(Watch_Response.class);
         nfc.watch(watchId1, mockWatchCallback1);
 
         // Check that watch requests were completed successfully.
@@ -1179,7 +1339,7 @@ public class NFCTest {
         assertNull(mErrorCaptor.getValue());
 
         int watchId2 = mNextWatchId++;
-        WatchResponse mockWatchCallback2 = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback2 = mock(Watch_Response.class);
         nfc.watch(watchId2, mockWatchCallback2);
         verify(mockWatchCallback2).call(mErrorCaptor.capture());
         assertNull(mErrorCaptor.getValue());
@@ -1189,15 +1349,15 @@ public class NFCTest {
 
         // Check that client was notified and correct watch ids were provided.
         verify(mNfcClient, times(1))
-                .onWatch(mOnWatchCallbackCaptor.capture(), nullable(String.class),
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
                         any(NdefMessage.class));
         assertEquals(watchId1, mOnWatchCallbackCaptor.getValue()[0]);
         assertEquals(watchId2, mOnWatchCallbackCaptor.getValue()[1]);
     }
 
-    /**
-     * Test that Nfc.watch() notifies client when tag is not formatted.
-     */
+    /** Test that Nfc.watch() notifies client when tag is not formatted. */
     @Test
     @Feature({"NFCTest"})
     public void testWatchNotFormattedTag() throws IOException, FormatException {
@@ -1205,7 +1365,7 @@ public class NFCTest {
         mDelegate.invokeCallback();
         nfc.setClient(mNfcClient);
         int watchId = mNextWatchId++;
-        WatchResponse mockWatchCallback = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback = mock(Watch_Response.class);
         nfc.watch(watchId, mockWatchCallback);
         verify(mockWatchCallback).call(mErrorCaptor.capture());
         assertNull(mErrorCaptor.getValue());
@@ -1216,31 +1376,26 @@ public class NFCTest {
 
         // Check that client was notified and correct watch id was provided.
         verify(mNfcClient, times(1))
-                .onWatch(mOnWatchCallbackCaptor.capture(), nullable(String.class),
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
                         any(NdefMessage.class));
         assertEquals(watchId, mOnWatchCallbackCaptor.getValue()[0]);
     }
 
-    /**
-     * Test that Nfc.watch() can be cancelled with Nfc.cancelWatch().
-     */
+    /** Test that Nfc.watch() can be cancelled with Nfc.cancelWatch(). */
     @Test
     @Feature({"NFCTest"})
     public void testCancelWatch() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        WatchResponse mockWatchCallback = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback = mock(Watch_Response.class);
         nfc.watch(mNextWatchId, mockWatchCallback);
 
         verify(mockWatchCallback).call(mErrorCaptor.capture());
         assertNull(mErrorCaptor.getValue());
 
-        CancelWatchResponse mockCancelWatchCallback = mock(CancelWatchResponse.class);
-        nfc.cancelWatch(mNextWatchId, mockCancelWatchCallback);
-
-        // Check that cancel request was successfuly completed.
-        verify(mockCancelWatchCallback).call(mErrorCaptor.capture());
-        assertNull(mErrorCaptor.getValue());
+        nfc.cancelWatch(mNextWatchId);
 
         // Check that watch is not triggered when NFC tag is in proximity.
         nfc.processPendingOperationsForTesting(mNfcTagHandler);
@@ -1249,71 +1404,9 @@ public class NFCTest {
     }
 
     /**
-     * Test that Nfc.cancelAllWatches() cancels all pending watch operations.
-     */
-    @Test
-    @Feature({"NFCTest"})
-    public void testCancelAllWatches() {
-        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
-        mDelegate.invokeCallback();
-        WatchResponse mockWatchCallback1 = mock(WatchResponse.class);
-        WatchResponse mockWatchCallback2 = mock(WatchResponse.class);
-        nfc.watch(mNextWatchId++, mockWatchCallback1);
-        verify(mockWatchCallback1).call(mErrorCaptor.capture());
-        assertNull(mErrorCaptor.getValue());
-
-        nfc.watch(mNextWatchId++, mockWatchCallback2);
-        verify(mockWatchCallback2).call(mErrorCaptor.capture());
-        assertNull(mErrorCaptor.getValue());
-
-        CancelAllWatchesResponse mockCallback = mock(CancelAllWatchesResponse.class);
-        nfc.cancelAllWatches(mockCallback);
-
-        // Check that cancel request was successfuly completed.
-        verify(mockCallback).call(mErrorCaptor.capture());
-        assertNull(mErrorCaptor.getValue());
-    }
-
-    /**
-     * Test that Nfc.cancelWatch() with invalid id is failing with NOT_FOUND error.
-     */
-    @Test
-    @Feature({"NFCTest"})
-    public void testCancelWatchInvalidId() {
-        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
-        mDelegate.invokeCallback();
-        WatchResponse mockWatchCallback = mock(WatchResponse.class);
-        nfc.watch(mNextWatchId, mockWatchCallback);
-
-        verify(mockWatchCallback).call(mErrorCaptor.capture());
-        assertNull(mErrorCaptor.getValue());
-
-        CancelWatchResponse mockCancelWatchCallback = mock(CancelWatchResponse.class);
-        nfc.cancelWatch(mNextWatchId + 1, mockCancelWatchCallback);
-
-        verify(mockCancelWatchCallback).call(mErrorCaptor.capture());
-        assertEquals(NdefErrorType.NOT_FOUND, mErrorCaptor.getValue().errorType);
-    }
-
-    /**
-     * Test that Nfc.cancelAllWatches() is failing with NOT_FOUND error if there are no active
-     * watch opeartions.
-     */
-    @Test
-    @Feature({"NFCTest"})
-    public void testCancelAllWatchesWithNoWathcers() {
-        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
-        mDelegate.invokeCallback();
-        CancelAllWatchesResponse mockCallback = mock(CancelAllWatchesResponse.class);
-        nfc.cancelAllWatches(mockCallback);
-
-        verify(mockCallback).call(mErrorCaptor.capture());
-        assertEquals(NdefErrorType.NOT_FOUND, mErrorCaptor.getValue().errorType);
-    }
-
-    /**
      * Test that when the tag in proximity is found to be not NDEF compatible, an error event will
-     * be dispatched to the client and the pending push operation will also be ended with an error.
+     * be dispatched to the client and the pending push and makeReadOnly operations will also be
+     * ended with an error.
      */
     @Test
     @Feature({"NFCTest"})
@@ -1322,11 +1415,14 @@ public class NFCTest {
         mDelegate.invokeCallback();
         nfc.setClient(mNfcClient);
         // Prepare at least one watcher, otherwise the error won't be notified.
-        WatchResponse mockWatchCallback = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback = mock(Watch_Response.class);
         nfc.watch(mNextWatchId, mockWatchCallback);
         // Start a push.
-        PushResponse mockCallback = mock(PushResponse.class);
-        nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback);
+        Push_Response mockPushCallback = mock(Push_Response.class);
+        nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockPushCallback);
+        // Start a makeReadOnly.
+        MakeReadOnly_Response mockMakeReadOnlyCallback = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockMakeReadOnlyCallback);
 
         // Pass null tag handler to simulate that the tag is not NDEF compatible.
         nfc.processPendingOperationsForTesting(null);
@@ -1337,18 +1433,26 @@ public class NFCTest {
         assertEquals(NdefErrorType.NOT_SUPPORTED, mErrorCaptor.getValue().errorType);
         // No watch.
         verify(mNfcClient, times(0))
-                .onWatch(mOnWatchCallbackCaptor.capture(), nullable(String.class),
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
                         any(NdefMessage.class));
 
         // The pending push failed with the correct error.
-        verify(mockCallback).call(mErrorCaptor.capture());
+        verify(mockPushCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.NOT_SUPPORTED, mErrorCaptor.getValue().errorType);
+
+        // The pending makeReadOnly failed with the correct error.
+        verify(mockMakeReadOnlyCallback).call(mErrorCaptor.capture());
         assertNotNull(mErrorCaptor.getValue());
         assertEquals(NdefErrorType.NOT_SUPPORTED, mErrorCaptor.getValue().errorType);
     }
 
     /**
      * Test that when the tag in proximity is found to be blocked, an error event will
-     * be dispatched to the client and the pending push operation will also be ended with an error.
+     * be dispatched to the client and the pending push and makeReadOnly operations will also be
+     * ended with an error.
      */
     @Test
     @Feature({"NFCTest"})
@@ -1357,16 +1461,18 @@ public class NFCTest {
         mDelegate.invokeCallback();
         nfc.setClient(mNfcClient);
         // Prepare at least one watcher, otherwise the error won't be notified.
-        WatchResponse mockWatchCallback = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback = mock(Watch_Response.class);
         nfc.watch(mNextWatchId, mockWatchCallback);
         // Start a push.
-        PushResponse mockCallback = mock(PushResponse.class);
-        nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback);
+        Push_Response mockPushCallback = mock(Push_Response.class);
+        nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockPushCallback);
+        // Start a makeReadOnly.
+        MakeReadOnly_Response mockMakeReadOnlyCallback = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockMakeReadOnlyCallback);
 
         // Mocks blocked 'NFC tag found' event.
         NfcBlocklist.getInstance().setIsTagBlockedForTesting(true);
-        Tag tag = Tag.createMockTag(
-                new byte[] {0x00}, new int[] {TagTechnology.NDEF}, new Bundle[] {});
+        Tag tag = mock(Tag.class);
         NfcTagHandler nfcTagHandler = NfcTagHandler.create(tag);
         nfc.processPendingOperationsForTesting(nfcTagHandler);
 
@@ -1376,14 +1482,22 @@ public class NFCTest {
         assertEquals(NdefErrorType.NOT_SUPPORTED, mErrorCaptor.getValue().errorType);
         // No watch.
         verify(mNfcClient, times(0))
-                .onWatch(mOnWatchCallbackCaptor.capture(), nullable(String.class),
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
                         any(NdefMessage.class));
 
         // The pending push failed with the correct error.
-        verify(mockCallback).call(mErrorCaptor.capture());
+        verify(mockPushCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.NOT_SUPPORTED, mErrorCaptor.getValue().errorType);
+
+        // The pending makeReadOnly failed with the correct error.
+        verify(mockMakeReadOnlyCallback).call(mErrorCaptor.capture());
         assertNotNull(mErrorCaptor.getValue());
         assertEquals(NdefErrorType.NOT_SUPPORTED, mErrorCaptor.getValue().errorType);
     }
+
     /**
      * Test that when the tag in proximity is found to be not NDEF compatible, an error event will
      * not be dispatched to the client if there is no watcher present.
@@ -1402,7 +1516,9 @@ public class NFCTest {
         verify(mNfcClient, times(0)).onError(mErrorCaptor.capture());
         // No watch.
         verify(mNfcClient, times(0))
-                .onWatch(mOnWatchCallbackCaptor.capture(), nullable(String.class),
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
                         any(NdefMessage.class));
     }
 
@@ -1415,7 +1531,7 @@ public class NFCTest {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
         nfc.setClient(mNfcClient);
-        WatchResponse mockWatchCallback = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback = mock(Watch_Response.class);
         nfc.watch(mNextWatchId, mockWatchCallback);
 
         // Force read operation to fail
@@ -1426,7 +1542,9 @@ public class NFCTest {
 
         // Check that the watch was not triggered but an error was dispatched to the client.
         verify(mNfcClient, times(0))
-                .onWatch(mOnWatchCallbackCaptor.capture(), nullable(String.class),
+                .onWatch(
+                        mOnWatchCallbackCaptor.capture(),
+                        nullable(String.class),
                         any(NdefMessage.class));
         verify(mNfcClient, times(1)).onError(mErrorCaptor.capture());
         assertNotNull(mErrorCaptor.getValue());
@@ -1441,7 +1559,7 @@ public class NFCTest {
     public void testTagDisconnectedDuringWrite() throws IOException, FormatException {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        PushResponse mockCallback = mock(PushResponse.class);
+        Push_Response mockCallback = mock(Push_Response.class);
 
         // Force write operation to fail
         doThrow(IllegalStateException.class)
@@ -1457,21 +1575,69 @@ public class NFCTest {
     }
 
     /**
-     * Test that multiple Nfc.push() invocations do not disable reader mode.
+     * Test that when tag is disconnected during makeReadOnly operation, TagLostException is
+     * handled.
      */
+    @Test
+    @Feature({"NFCTest"})
+    public void testTagDisconnectedDuringMakeReadOnly() throws IOException, FormatException {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+        MakeReadOnly_Response mockCallback = mock(MakeReadOnly_Response.class);
+
+        // Force makeReadOnly operation to fail
+        doThrow(TagLostException.class).when(mNfcTagHandler).makeReadOnly();
+        nfc.makeReadOnly(mockCallback);
+        nfc.processPendingOperationsForTesting(mNfcTagHandler);
+        verify(mockCallback).call(mErrorCaptor.capture());
+
+        // Test that correct error is returned.
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.IO_ERROR, mErrorCaptor.getValue().errorType);
+    }
+
+    /** Test that multiple Nfc.push() invocations do not disable reader mode. */
     @Test
     @Feature({"NFCTest"})
     public void testPushMultipleInvocations() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
 
-        PushResponse mockCallback1 = mock(PushResponse.class);
-        PushResponse mockCallback2 = mock(PushResponse.class);
+        Push_Response mockCallback1 = mock(Push_Response.class);
+        Push_Response mockCallback2 = mock(Push_Response.class);
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback1);
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback2);
 
         verify(mNfcAdapter, times(1))
-                .enableReaderMode(any(Activity.class), any(ReaderCallback.class), anyInt(),
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
+                        (Bundle) isNull());
+        verify(mNfcAdapter, times(0)).disableReaderMode(mActivity);
+
+        verify(mockCallback1).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+    }
+
+    /** Test that multiple Nfc.makeReadOnly() invocations do not disable reader mode. */
+    @Test
+    @Feature({"NFCTest"})
+    public void testMakeReadOnlyMultipleInvocations() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+
+        MakeReadOnly_Response mockCallback1 = mock(MakeReadOnly_Response.class);
+        MakeReadOnly_Response mockCallback2 = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockCallback1);
+        nfc.makeReadOnly(mockCallback2);
+
+        verify(mNfcAdapter, times(1))
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
                         (Bundle) isNull());
         verify(mNfcAdapter, times(0)).disableReaderMode(mActivity);
 
@@ -1488,16 +1654,51 @@ public class NFCTest {
     public void testPushInvocationWithCancel() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        PushResponse mockCallback = mock(PushResponse.class);
+        Push_Response mockCallback = mock(Push_Response.class);
 
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback);
 
         verify(mNfcAdapter, times(1))
-                .enableReaderMode(any(Activity.class), any(ReaderCallback.class), anyInt(),
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
                         (Bundle) isNull());
 
-        CancelPushResponse mockCancelPushCallback = mock(CancelPushResponse.class);
-        nfc.cancelPush(mockCancelPushCallback);
+        nfc.cancelPush();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+
+        // Reader mode is disabled.
+        verify(mNfcAdapter, times(1)).disableReaderMode(mActivity);
+
+        // Test that correct error is returned.
+        verify(mockCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+    }
+
+    /**
+     * Test that reader mode is disabled and makeReadOnly operation is cancelled with correct error
+     * code.
+     */
+    @Test
+    @Feature({"NFCTest"})
+    public void testMakeReadOnlyInvocationWithCancel() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+        MakeReadOnly_Response mockCallback = mock(MakeReadOnly_Response.class);
+
+        nfc.makeReadOnly(mockCallback);
+
+        verify(mNfcAdapter, times(1))
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
+                        (Bundle) isNull());
+
+        nfc.cancelMakeReadOnly();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
 
         // Reader mode is disabled.
         verify(mNfcAdapter, times(1)).disableReaderMode(mActivity);
@@ -1518,13 +1719,16 @@ public class NFCTest {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
 
-        PushResponse mockCallback1 = mock(PushResponse.class);
-        PushResponse mockCallback2 = mock(PushResponse.class);
+        Push_Response mockCallback1 = mock(Push_Response.class);
+        Push_Response mockCallback2 = mock(Push_Response.class);
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback1);
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockCallback2);
 
         verify(mNfcAdapter, times(1))
-                .enableReaderMode(any(Activity.class), any(ReaderCallback.class), anyInt(),
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
                         (Bundle) isNull());
 
         // The second push should cancel the first push.
@@ -1533,8 +1737,8 @@ public class NFCTest {
         assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
 
         // Cancel the second push.
-        CancelPushResponse mockCancelPushCallback = mock(CancelPushResponse.class);
-        nfc.cancelPush(mockCancelPushCallback);
+        nfc.cancelPush();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
 
         // Reader mode is disabled after cancelPush is invoked.
         verify(mNfcAdapter, times(1)).disableReaderMode(mActivity);
@@ -1546,26 +1750,68 @@ public class NFCTest {
     }
 
     /**
+     * Test that reader mode is disabled and two makeReadOnly operations are cancelled with correct
+     * error code.
+     */
+    @Test
+    @Feature({"NFCTest"})
+    public void testTwoMakeReadOnlyInvocationsWithCancel() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+
+        MakeReadOnly_Response mockCallback1 = mock(MakeReadOnly_Response.class);
+        MakeReadOnly_Response mockCallback2 = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockCallback1);
+        nfc.makeReadOnly(mockCallback2);
+
+        verify(mNfcAdapter, times(1))
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
+                        (Bundle) isNull());
+
+        // The second makeReadOnly should cancel the first makeReadOnly.
+        verify(mockCallback1).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+
+        // Cancel the second makeReadOnly.
+        nfc.cancelMakeReadOnly();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+
+        // Reader mode is disabled after cancelMakeReadOnly is invoked.
+        verify(mNfcAdapter, times(1)).disableReaderMode(mActivity);
+
+        // Test that correct error is returned.
+        verify(mockCallback2).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+    }
+
+    /**
      * Test that reader mode is not disabled when there is an active watch operation and push
-     * operation operation is cancelled.
+     * operation is cancelled.
      */
     @Test
     @Feature({"NFCTest"})
     public void testCancelledPushDontDisableReaderMode() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        WatchResponse mockWatchCallback = mock(WatchResponse.class);
+        Watch_Response mockWatchCallback = mock(Watch_Response.class);
         nfc.watch(mNextWatchId, mockWatchCallback);
 
-        PushResponse mockPushCallback = mock(PushResponse.class);
+        Push_Response mockPushCallback = mock(Push_Response.class);
         nfc.push(createMojoNdefMessage(), createNdefWriteOptions(), mockPushCallback);
 
         verify(mNfcAdapter, times(1))
-                .enableReaderMode(any(Activity.class), any(ReaderCallback.class), anyInt(),
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
                         (Bundle) isNull());
 
-        CancelPushResponse mockCancelPushCallback = mock(CancelPushResponse.class);
-        nfc.cancelPush(mockCancelPushCallback);
+        nfc.cancelPush();
 
         // Push was cancelled with OPERATION_CANCELLED.
         verify(mockPushCallback).call(mErrorCaptor.capture());
@@ -1574,26 +1820,58 @@ public class NFCTest {
 
         verify(mNfcAdapter, times(0)).disableReaderMode(mActivity);
 
-        CancelAllWatchesResponse mockCancelCallback = mock(CancelAllWatchesResponse.class);
-        nfc.cancelAllWatches(mockCancelCallback);
-
-        // Check that cancel request was successfuly completed.
-        verify(mockCancelCallback).call(mErrorCaptor.capture());
-        assertNull(mErrorCaptor.getValue());
+        nfc.cancelWatch(mNextWatchId);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
 
         // Reader mode is disabled when there are no pending push / watch operations.
         verify(mNfcAdapter, times(1)).disableReaderMode(mActivity);
     }
 
     /**
-     * Test that Nfc.push() succeeds for NFC messages with EMPTY records.
+     * Test that reader mode is not disabled when there is an active watch operation and
+     * makeReadOnly operation is cancelled.
      */
+    @Test
+    @Feature({"NFCTest"})
+    public void testCancelledMakeReadOnlyDontDisableReaderMode() {
+        TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
+        mDelegate.invokeCallback();
+        Watch_Response mockWatchCallback = mock(Watch_Response.class);
+        nfc.watch(mNextWatchId, mockWatchCallback);
+
+        MakeReadOnly_Response mockMakeReadOnlyCallback = mock(MakeReadOnly_Response.class);
+        nfc.makeReadOnly(mockMakeReadOnlyCallback);
+
+        verify(mNfcAdapter, times(1))
+                .enableReaderMode(
+                        any(Activity.class),
+                        any(ReaderCallback.class),
+                        anyInt(),
+                        (Bundle) isNull());
+
+        nfc.cancelMakeReadOnly();
+
+        // MakeReadOnly was cancelled with OPERATION_CANCELLED.
+        verify(mockMakeReadOnlyCallback).call(mErrorCaptor.capture());
+        assertNotNull(mErrorCaptor.getValue());
+        assertEquals(NdefErrorType.OPERATION_CANCELLED, mErrorCaptor.getValue().errorType);
+
+        verify(mNfcAdapter, times(0)).disableReaderMode(mActivity);
+
+        nfc.cancelWatch(mNextWatchId);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+
+        // Reader mode is disabled when there are no pending makeReadOnly / watch operations.
+        verify(mNfcAdapter, times(1)).disableReaderMode(mActivity);
+    }
+
+    /** Test that Nfc.push() succeeds for NFC messages with EMPTY records. */
     @Test
     @Feature({"NFCTest"})
     public void testPushWithEmptyRecord() {
         TestNfcImpl nfc = new TestNfcImpl(mContext, mDelegate);
         mDelegate.invokeCallback();
-        PushResponse mockCallback = mock(PushResponse.class);
+        Push_Response mockCallback = mock(Push_Response.class);
 
         // Create message with empty record.
         NdefRecord emptyNdefRecord = new NdefRecord();
@@ -1607,9 +1885,7 @@ public class NFCTest {
         assertNull(mErrorCaptor.getValue());
     }
 
-    /**
-     * Creates NdefWriteOptions with default values.
-     */
+    /** Creates NdefWriteOptions with default values. */
     private NdefWriteOptions createNdefWriteOptions() {
         NdefWriteOptions pushOptions = new NdefWriteOptions();
         pushOptions.overwrite = true;
@@ -1639,42 +1915,67 @@ public class NFCTest {
 
     private android.nfc.NdefMessage createNdefMessageWithRecordId(String id)
             throws UnsupportedEncodingException {
-        return new android.nfc.NdefMessage(NdefMessageUtils.createPlatformUrlRecord(
-                ApiCompatibilityUtils.getBytesUtf8(TEST_URL), id, false /* isAbsUrl */));
+        return new android.nfc.NdefMessage(
+                NdefMessageUtils.createPlatformUrlRecord(
+                        ApiCompatibilityUtils.getBytesUtf8(TEST_URL), id, /* isAbsUrl= */ false));
     }
 
     private android.nfc.NdefRecord createSmartPosterNdefRecord()
             throws UnsupportedEncodingException {
         List<android.nfc.NdefRecord> records = new ArrayList<android.nfc.NdefRecord>();
         // The single mandatory url record.
-        records.add(NdefMessageUtils.createPlatformUrlRecord(
-                ApiCompatibilityUtils.getBytesUtf8(TEST_URL), DUMMY_RECORD_ID,
-                false /* isAbsUrl */));
+        records.add(
+                NdefMessageUtils.createPlatformUrlRecord(
+                        ApiCompatibilityUtils.getBytesUtf8(TEST_URL),
+                        DUMMY_RECORD_ID,
+                        /* isAbsUrl= */ false));
         // Zero or one size record.
-        records.add(NdefMessageUtils.createPlatformLocalRecord("s", null /* id */,
-                ByteBuffer.allocate(4).putInt(4096).array(), null /* payloadMessage */));
+        records.add(
+                NdefMessageUtils.createPlatformLocalRecord(
+                        "s",
+                        /* id= */ null,
+                        ByteBuffer.allocate(4).putInt(4096).array(),
+                        /* payloadMessage= */ null));
         // Zero or one type record.
-        records.add(NdefMessageUtils.createPlatformLocalRecord("t", null /* id */,
-                ApiCompatibilityUtils.getBytesUtf8(OCTET_STREAM_MIME), null /* payloadMessage */));
+        records.add(
+                NdefMessageUtils.createPlatformLocalRecord(
+                        "t",
+                        /* id= */ null,
+                        ApiCompatibilityUtils.getBytesUtf8(OCTET_STREAM_MIME),
+                        /* payloadMessage= */ null));
         // Zero or one action record.
-        records.add(NdefMessageUtils.createPlatformLocalRecord("act", null /* id */,
-                ByteBuffer.allocate(1).put((byte) 0x01).array(), null /* payloadMessage */));
+        records.add(
+                NdefMessageUtils.createPlatformLocalRecord(
+                        "act",
+                        /* id= */ null,
+                        ByteBuffer.allocate(1).put((byte) 0x01).array(),
+                        /* payloadMessage= */ null));
         // Zero or more title record.
-        records.add(NdefMessageUtils.createPlatformTextRecord(null /* id */, LANG_EN_US,
-                ENCODING_UTF8, ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
+        records.add(
+                NdefMessageUtils.createPlatformTextRecord(
+                        /* id= */ null,
+                        LANG_EN_US,
+                        ENCODING_UTF8,
+                        ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT)));
         // Zero or more icon record.
-        records.add(NdefMessageUtils.createPlatformMimeRecord(
-                "image/png", null /* id */, new byte[8182]));
+        records.add(
+                NdefMessageUtils.createPlatformMimeRecord(
+                        "image/png", /* id= */ null, new byte[8182]));
         // Other application-specific records, e.g. an external type record.
         records.add(
-                NdefMessageUtils.createPlatformExternalRecord(DUMMY_EXTERNAL_TYPE, null /* id */,
-                        ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT), null /* payloadMessage */));
+                NdefMessageUtils.createPlatformExternalRecord(
+                        DUMMY_EXTERNAL_TYPE,
+                        /* id= */ null,
+                        ApiCompatibilityUtils.getBytesUtf8(TEST_TEXT),
+                        /* payloadMessage= */ null));
 
         android.nfc.NdefRecord[] ndefRecords = new android.nfc.NdefRecord[records.size()];
         records.toArray(ndefRecords);
         android.nfc.NdefMessage payloadMessage = new android.nfc.NdefMessage(ndefRecords);
-        return new android.nfc.NdefRecord(android.nfc.NdefRecord.TNF_WELL_KNOWN,
+        return new android.nfc.NdefRecord(
+                android.nfc.NdefRecord.TNF_WELL_KNOWN,
                 android.nfc.NdefRecord.RTD_SMART_POSTER,
-                ApiCompatibilityUtils.getBytesUtf8(DUMMY_RECORD_ID), payloadMessage.toByteArray());
+                ApiCompatibilityUtils.getBytesUtf8(DUMMY_RECORD_ID),
+                payloadMessage.toByteArray());
     }
 }

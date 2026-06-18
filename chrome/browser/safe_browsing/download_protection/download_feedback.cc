@@ -1,18 +1,16 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/safe_browsing/download_protection/download_feedback.h"
 
-#include "base/bind.h"
 #include "base/files/file_util.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
-#include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/task_runner.h"
-#include "chrome/browser/safe_browsing/download_protection/two_phase_uploader.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
+#include "base/task/task_runner.h"
+#include "base/task/thread_pool.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/multipart_uploader.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
 #include "content/public/browser/browser_thread.h"
 #include "net/base/net_errors.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
@@ -21,33 +19,23 @@ namespace safe_browsing {
 
 namespace {
 
-// This enum is used by histograms.  Do not change the ordering or remove items.
-enum UploadResultType {
-  UPLOAD_SUCCESS = 0,
-  UPLOAD_CANCELLED = 1,
-  UPLOAD_METADATA_NET_ERROR = 2,
-  UPLOAD_METADATA_RESPONSE_ERROR = 3,
-  UPLOAD_FILE_NET_ERROR = 4,
-  UPLOAD_FILE_RESPONSE_ERROR = 5,
-  UPLOAD_COMPLETE_RESPONSE_ERROR = 6,
-  // Memory space for histograms is determined by the max.
-  // ALWAYS ADD NEW VALUES BEFORE THIS ONE.
-  UPLOAD_RESULT_MAX = 7
-};
-
 // Handles the uploading of a single downloaded binary to the safebrowsing
 // download feedback service.
 class DownloadFeedbackImpl : public DownloadFeedback {
  public:
   DownloadFeedbackImpl(
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
-      base::TaskRunner* file_task_runner,
       const base::FilePath& file_path,
+      uint64_t file_size,
       const std::string& ping_request,
       const std::string& ping_response);
+
+  DownloadFeedbackImpl(const DownloadFeedbackImpl&) = delete;
+  DownloadFeedbackImpl& operator=(const DownloadFeedbackImpl&) = delete;
+
   ~DownloadFeedbackImpl() override;
 
-  void Start(const base::Closure& finish_callback) override;
+  void Start(base::OnceClosure finish_callback) override;
 
   const std::string& GetPingRequestForTesting() const override {
     return ping_request_;
@@ -60,40 +48,32 @@ class DownloadFeedbackImpl : public DownloadFeedback {
  private:
   // Callback for TwoPhaseUploader completion.  Relays the result to the
   // |finish_callback|.
-  void FinishedUpload(base::Closure finish_callback,
-                      TwoPhaseUploader::State state,
-                      int net_error,
+  void FinishedUpload(base::OnceClosure finish_callback,
+                      bool success,
                       int response_code,
                       const std::string& response);
 
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
-  scoped_refptr<base::TaskRunner> file_task_runner_;
   const base::FilePath file_path_;
-  int64_t file_size_;
+  uint64_t file_size_;
 
   // The safebrowsing request and response of checking that this binary is
   // unsafe.
   std::string ping_request_;
   std::string ping_response_;
 
-  std::unique_ptr<TwoPhaseUploader> uploader_;
-
-  // The time at which we started uploading. Used for metrics.
-  base::Time uploader_start_time_;
-
-  DISALLOW_COPY_AND_ASSIGN(DownloadFeedbackImpl);
+  std::unique_ptr<enterprise_connectors::ConnectorUploadRequest> uploader_;
 };
 
 DownloadFeedbackImpl::DownloadFeedbackImpl(
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
-    base::TaskRunner* file_task_runner,
     const base::FilePath& file_path,
+    uint64_t file_size,
     const std::string& ping_request,
     const std::string& ping_response)
     : url_loader_factory_(url_loader_factory),
-      file_task_runner_(file_task_runner),
       file_path_(file_path),
-      file_size_(-1),
+      file_size_(file_size),
       ping_request_(ping_request),
       ping_response_(ping_response) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
@@ -110,13 +90,19 @@ DownloadFeedbackImpl::~DownloadFeedbackImpl() {
     uploader_.reset();
   }
 
-  file_task_runner_->PostTask(
-      FROM_HERE, base::BindOnce(base::GetDeleteFileCallback(), file_path_));
+  base::ThreadPool::CreateSequencedTaskRunner(
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT})
+      ->PostTask(FROM_HERE, base::GetDeleteFileCallback(file_path_));
 }
 
-void DownloadFeedbackImpl::Start(const base::Closure& finish_callback) {
+void DownloadFeedbackImpl::Start(base::OnceClosure finish_callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   DCHECK(!uploader_);
+
+  if (!url_loader_factory_) {
+    std::move(finish_callback).Run();
+    return;
+  }
 
   ClientDownloadReport report_metadata;
 
@@ -126,7 +112,6 @@ void DownloadFeedbackImpl::Start(const base::Closure& finish_callback) {
   r = report_metadata.mutable_download_response()->ParseFromString(
       ping_response_);
   DCHECK(r);
-  file_size_ = report_metadata.download_request().length();
 
   std::string metadata_string;
   bool ok = report_metadata.SerializeToString(&metadata_string);
@@ -166,30 +151,24 @@ void DownloadFeedbackImpl::Start(const base::Closure& finish_callback) {
           }
         })");
 
-  uploader_ = TwoPhaseUploader::Create(
-      url_loader_factory_, file_task_runner_.get(), GURL(kSbFeedbackURL),
-      metadata_string, file_path_,
-      base::Bind(&DownloadFeedbackImpl::FinishedUpload, base::Unretained(this),
-                 finish_callback),
-      traffic_annotation);
+  uploader_ = MultipartUploadRequest::CreateFileRequest(
+      url_loader_factory_, GURL(kSbFeedbackURL), metadata_string, file_path_,
+      file_size_, false, "DownloadFeedback", traffic_annotation,
+      base::BindOnce(&DownloadFeedbackImpl::FinishedUpload,
+                     base::Unretained(this), std::move(finish_callback)),
+      content::GetUIThreadTaskRunner({}));
   uploader_->Start();
-  uploader_start_time_ = base::Time::Now();
 }
 
-void DownloadFeedbackImpl::FinishedUpload(base::Closure finish_callback,
-                                          TwoPhaseUploader::State state,
-                                          int net_error,
+void DownloadFeedbackImpl::FinishedUpload(base::OnceClosure finish_callback,
+                                          bool success,
                                           int response_code,
                                           const std::string& response_data) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  DVLOG(1) << __func__ << " " << state << " rlen=" << response_data.size();
-
-  UMA_HISTOGRAM_LONG_TIMES("SBDownloadFeedback.UploadDuration",
-                           base::Time::Now() - uploader_start_time_);
 
   uploader_.reset();
 
-  finish_callback.Run();
+  std::move(finish_callback).Run();
   // We may be deleted here.
 }
 
@@ -208,18 +187,16 @@ DownloadFeedbackFactory* DownloadFeedback::factory_ = nullptr;
 // static
 std::unique_ptr<DownloadFeedback> DownloadFeedback::Create(
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
-    base::TaskRunner* file_task_runner,
     const base::FilePath& file_path,
+    uint64_t file_size,
     const std::string& ping_request,
     const std::string& ping_response) {
   if (!factory_) {
-    return base::WrapUnique(
-        new DownloadFeedbackImpl(url_loader_factory, file_task_runner,
-                                 file_path, ping_request, ping_response));
+    return base::WrapUnique(new DownloadFeedbackImpl(
+        url_loader_factory, file_path, file_size, ping_request, ping_response));
   }
   return DownloadFeedback::factory_->CreateDownloadFeedback(
-      url_loader_factory, file_task_runner, file_path, ping_request,
-      ping_response);
+      url_loader_factory, file_path, file_size, ping_request, ping_response);
 }
 
 }  // namespace safe_browsing

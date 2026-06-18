@@ -8,10 +8,10 @@
 'use strict';
 
 idl_test(
-    ['idle-detection.tentative'],
+    ['idle-detection'],
     ['dom', 'html'],
     async (idl_array, t) => {
-      await test_driver.set_permission({ name: 'idle-detection' }, 'granted', false);
+      await test_driver.set_permission({ name: 'idle-detection' }, 'granted');
 
       self.idle = new IdleDetector();
       let watcher = new EventWatcher(t, self.idle, ["change"]);

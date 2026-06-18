@@ -1,12 +1,12 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/exported/web_input_method_controller_impl.h"
 
-#include "third_party/blink/public/platform/web_rect.h"
+#include <vector>
+
 #include "third_party/blink/public/platform/web_string.h"
-#include "third_party/blink/public/platform/web_vector.h"
 #include "third_party/blink/public/web/web_plugin.h"
 #include "third_party/blink/public/web/web_range.h"
 #include "third_party/blink/renderer/core/dom/document.h"
@@ -54,14 +54,15 @@ void WebInputMethodControllerImpl::SetVirtualKeyboardVisibilityRequest(
 
 bool WebInputMethodControllerImpl::SetComposition(
     const WebString& text,
-    const WebVector<ui::ImeTextSpan>& ime_text_spans,
+    const std::vector<ui::ImeTextSpan>& ime_text_spans,
     const WebRange& replacement_range,
     int selection_start,
-    int selection_end) {
+    int selection_end,
+    mojom::blink::ImeState ime_state) {
   if (IsEditContextActive()) {
     return GetInputMethodController().GetActiveEditContext()->SetComposition(
-        text, ime_text_spans, replacement_range, selection_start,
-        selection_end);
+        text, ime_text_spans, replacement_range, selection_start, selection_end,
+        ime_state);
   }
 
   if (WebPlugin* plugin = FocusedPluginIfInputMethodSupported()) {
@@ -79,7 +80,8 @@ bool WebInputMethodControllerImpl::SetComposition(
   if (!replacement_range.IsNull()) {
     web_frame_->SelectRange(replacement_range,
                             WebLocalFrame::kHideSelectionHandle,
-                            blink::mojom::SelectionMenuBehavior::kHide);
+                            blink::mojom::SelectionMenuBehavior::kHide,
+                            WebLocalFrame::kSelectionSetFocus);
   }
 
   // We should verify the parent node of this IME composition node are
@@ -91,19 +93,32 @@ bool WebInputMethodControllerImpl::SetComposition(
   if (range.IsNotNull()) {
     Node* node = range.StartPosition().ComputeContainerNode();
     GetFrame()->GetDocument()->UpdateStyleAndLayoutTree();
-    if (!node || !HasEditableStyle(*node))
+    if (!node || !IsEditable(*node))
       return false;
   }
 
-  LocalFrame::NotifyUserActivation(
-      GetFrame(), mojom::blink::UserActivationNotificationType::kInteraction);
+  if (!text.IsEmpty()) {
+    LocalFrame::NotifyUserActivation(
+        GetFrame(), mojom::blink::UserActivationNotificationType::kInteraction);
+  }
 
   GetInputMethodController().SetComposition(
       String(text), ImeTextSpanVectorBuilder::Build(ime_text_spans),
-      selection_start, selection_end);
+      selection_start, selection_end, ime_state);
 
   return text.IsEmpty() ||
          (GetFrame() && GetInputMethodController().HasComposition());
+}
+
+bool WebInputMethodControllerImpl::SetComposition(
+    const WebString& text,
+    const std::vector<ui::ImeTextSpan>& ime_text_spans,
+    const WebRange& replacement_range,
+    int selection_start,
+    int selection_end) {
+  return SetComposition(text, ime_text_spans, replacement_range,
+                        selection_start, selection_end,
+                        mojom::blink::ImeState::kNone);
 }
 
 bool WebInputMethodControllerImpl::FinishComposingText(
@@ -136,11 +151,13 @@ bool WebInputMethodControllerImpl::FinishComposingText(
 
 bool WebInputMethodControllerImpl::CommitText(
     const WebString& text,
-    const WebVector<ui::ImeTextSpan>& ime_text_spans,
+    const std::vector<ui::ImeTextSpan>& ime_text_spans,
     const WebRange& replacement_range,
     int relative_caret_position) {
-  LocalFrame::NotifyUserActivation(
-      GetFrame(), mojom::blink::UserActivationNotificationType::kInteraction);
+  if (!text.IsEmpty()) {
+    LocalFrame::NotifyUserActivation(
+        GetFrame(), mojom::blink::UserActivationNotificationType::kInteraction);
+  }
 
   if (IsEditContextActive()) {
     return GetInputMethodController().GetActiveEditContext()->CommitText(
@@ -157,9 +174,10 @@ bool WebInputMethodControllerImpl::CommitText(
   GetFrame()->GetDocument()->UpdateStyleAndLayout(DocumentUpdateReason::kInput);
 
   if (!replacement_range.IsNull()) {
-    return GetInputMethodController().ReplaceText(
-        text, PlainTextRange(replacement_range.StartOffset(),
-                             replacement_range.EndOffset()));
+    return GetInputMethodController().ReplaceTextAndKeepSelection(
+        text, ImeTextSpanVectorBuilder::Build(ime_text_spans),
+        PlainTextRange(replacement_range.StartOffset(),
+                       replacement_range.EndOffset()));
   }
 
   return GetInputMethodController().CommitText(
@@ -181,27 +199,16 @@ int WebInputMethodControllerImpl::ComputeWebTextInputNextPreviousFlags() {
 }
 
 WebTextInputType WebInputMethodControllerImpl::TextInputType() {
-  if (IsEditContextActive())
-    return GetInputMethodController().GetActiveEditContext()->TextInputType();
-
   return GetFrame()->GetInputMethodController().TextInputType();
 }
 
-void WebInputMethodControllerImpl::GetLayoutBounds(WebRect* control_bounds,
-                                                   WebRect* selection_bounds) {
+void WebInputMethodControllerImpl::GetLayoutBounds(
+    gfx::Rect* control_bounds,
+    gfx::Rect* selection_bounds) {
   GetInputMethodController().GetLayoutBounds(control_bounds, selection_bounds);
 }
 
-bool WebInputMethodControllerImpl::IsVirtualKeyboardPolicyManual() const {
-  if (IsEditContextActive()) {
-    return GetInputMethodController()
-        .GetActiveEditContext()
-        ->IsVirtualKeyboardPolicyManual();
-  }
-  return false;  // Default should always be automatic.
-}
-
-WebRange WebInputMethodControllerImpl::CompositionRange() {
+WebRange WebInputMethodControllerImpl::CompositionRange() const {
   if (IsEditContextActive()) {
     return GetInputMethodController()
         .GetActiveEditContext()
@@ -216,6 +223,9 @@ WebRange WebInputMethodControllerImpl::CompositionRange() {
 
   Element* editable =
       GetFrame()->Selection().RootEditableElementOrDocumentElement();
+  if (!editable) {
+    return WebRange();
+  }
 
   editable->GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kInput);
 
@@ -223,27 +233,30 @@ WebRange WebInputMethodControllerImpl::CompositionRange() {
 }
 
 bool WebInputMethodControllerImpl::GetCompositionCharacterBounds(
-    WebVector<WebRect>& bounds) {
-  if (IsEditContextActive())
-    return false;
+    std::vector<gfx::Rect>& bounds) {
+  if (IsEditContextActive()) {
+    return GetInputMethodController()
+        .GetActiveEditContext()
+        ->GetCompositionCharacterBounds(bounds);
+  }
 
   WebRange range = CompositionRange();
   if (range.IsEmpty())
     return false;
 
-  size_t character_count = range.length();
-  size_t offset = range.StartOffset();
-  WebVector<WebRect> result(character_count);
-  WebRect webrect;
-  for (size_t i = 0; i < character_count; ++i) {
-    if (!web_frame_->FirstRectForCharacterRange(offset + i, 1, webrect)) {
+  int character_count = range.length();
+  int offset = range.StartOffset();
+  std::vector<gfx::Rect> result(static_cast<size_t>(character_count));
+  gfx::Rect rect;
+  for (int i = 0; i < character_count; ++i) {
+    if (!web_frame_->FirstRectForCharacterRange(offset + i, 1, rect)) {
       DLOG(ERROR) << "Could not retrieve character rectangle at " << i;
       return false;
     }
-    result[i] = webrect;
+    result[i] = rect;
   }
 
-  bounds.Swap(result);
+  bounds.swap(result);
   return true;
 }
 

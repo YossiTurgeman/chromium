@@ -25,8 +25,10 @@
 
 #include "third_party/blink/renderer/modules/indexeddb/idb_key_path.h"
 
-#include "third_party/blink/public/common/indexeddb/web_idb_types.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
+#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_string_stringsequence.h"
+#include "third_party/blink/renderer/platform/bindings/script_state.h"
+#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
 #include "third_party/blink/renderer/platform/wtf/dtoa.h"
 #include "third_party/blink/renderer/platform/wtf/text/ascii_ctype.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
@@ -38,26 +40,24 @@ namespace {
 
 // The following correspond to grammar in ECMA-262.
 const uint32_t kUnicodeLetter =
-    WTF::unicode::kLetter_Uppercase | WTF::unicode::kLetter_Lowercase |
-    WTF::unicode::kLetter_Titlecase | WTF::unicode::kLetter_Modifier |
-    WTF::unicode::kLetter_Other | WTF::unicode::kNumber_Letter;
+    unicode::kLetter_Uppercase | unicode::kLetter_Lowercase |
+    unicode::kLetter_Titlecase | unicode::kLetter_Modifier |
+    unicode::kLetter_Other | unicode::kNumber_Letter;
 const uint32_t kUnicodeCombiningMark =
-    WTF::unicode::kMark_NonSpacing | WTF::unicode::kMark_SpacingCombining;
-const uint32_t kUnicodeDigit = WTF::unicode::kNumber_DecimalDigit;
-const uint32_t kUnicodeConnectorPunctuation =
-    WTF::unicode::kPunctuation_Connector;
+    unicode::kMark_NonSpacing | unicode::kMark_SpacingCombining;
+const uint32_t kUnicodeDigit = unicode::kNumber_DecimalDigit;
+const uint32_t kUnicodeConnectorPunctuation = unicode::kPunctuation_Connector;
 
 static inline bool IsIdentifierStartCharacter(UChar c) {
-  return (WTF::unicode::Category(c) & kUnicodeLetter) || (c == '$') ||
-         (c == '_');
+  return (unicode::Category(c) & kUnicodeLetter) || (c == '$') || (c == '_');
 }
 
 static inline bool IsIdentifierCharacter(UChar c) {
-  return (WTF::unicode::Category(c) &
+  return (unicode::Category(c) &
           (kUnicodeLetter | kUnicodeCombiningMark | kUnicodeDigit |
            kUnicodeConnectorPunctuation)) ||
-         (c == '$') || (c == '_') || (c == kZeroWidthNonJoinerCharacter) ||
-         (c == kZeroWidthJoinerCharacter);
+         (c == '$') || (c == '_') || (c == uchar::kZeroWidthNonJoiner) ||
+         (c == uchar::kZeroWidthJoiner);
 }
 
 bool IsIdentifier(const String& s) {
@@ -87,12 +87,12 @@ void IDBParseKeyPath(const String& key_path,
                      IDBKeyPathParseError& error) {
   // IDBKeyPath ::= EMPTY_STRING | identifier ('.' identifier)*
 
-  if (key_path.IsEmpty()) {
+  if (key_path.empty()) {
     error = kIDBKeyPathParseErrorNone;
     return;
   }
 
-  key_path.Split('.', /*allow_empty_entries=*/true, elements);
+  elements = key_path.Split('.');
   for (const auto& element : elements) {
     if (!IsIdentifier(element)) {
       error = kIDBKeyPathParseErrorIdentifier;
@@ -115,21 +115,26 @@ IDBKeyPath::IDBKeyPath(const Vector<class String>& array)
 #endif
 }
 
-IDBKeyPath::IDBKeyPath(const StringOrStringSequence& key_path) {
-  if (key_path.IsNull()) {
+IDBKeyPath::IDBKeyPath(const V8UnionStringOrStringSequence* key_path) {
+  if (!key_path) {
     type_ = mojom::IDBKeyPathType::Null;
-  } else if (key_path.IsString()) {
-    type_ = mojom::IDBKeyPathType::String;
-    string_ = key_path.GetAsString();
-    DCHECK(!string_.IsNull());
-  } else {
-    DCHECK(key_path.IsStringSequence());
-    type_ = mojom::IDBKeyPathType::Array;
-    array_ = key_path.GetAsStringSequence();
+    return;
+  }
+
+  switch (key_path->GetContentType()) {
+    case V8UnionStringOrStringSequence::ContentType::kString:
+      type_ = mojom::IDBKeyPathType::String;
+      string_ = key_path->GetAsString();
+      DCHECK(!string_.IsNull());
+      break;
+    case V8UnionStringOrStringSequence::ContentType::kStringSequence:
+      type_ = mojom::IDBKeyPathType::Array;
+      array_ = key_path->GetAsStringSequence();
 #if DCHECK_IS_ON()
-    for (const auto& element : array_)
-      DCHECK(!element.IsNull());
+      for (const auto& element : array_)
+        DCHECK(!element.IsNull());
 #endif
+      break;
   }
 }
 
@@ -142,7 +147,7 @@ bool IDBKeyPath::IsValid() const {
       return IDBIsValidKeyPath(string_);
 
     case mojom::IDBKeyPathType::Array:
-      if (array_.IsEmpty())
+      if (array_.empty())
         return false;
       for (const auto& element : array_) {
         if (!IDBIsValidKeyPath(element))
@@ -151,7 +156,19 @@ bool IDBKeyPath::IsValid() const {
       return true;
   }
   NOTREACHED();
-  return false;
+}
+
+v8::Local<v8::Value> IDBKeyPath::ToV8(ScriptState* script_state) const {
+  v8::Isolate* isolate = script_state->GetIsolate();
+  switch (type_) {
+    case mojom::IDBKeyPathType::Null:
+      return v8::Null(isolate);
+    case mojom::IDBKeyPathType::String:
+      return V8String(isolate, GetString());
+    case mojom::IDBKeyPathType::Array:
+      return ToV8Traits<IDLSequence<IDLString>>::ToV8(script_state, Array());
+  }
+  NOTREACHED();
 }
 
 bool IDBKeyPath::operator==(const IDBKeyPath& other) const {
@@ -167,7 +184,6 @@ bool IDBKeyPath::operator==(const IDBKeyPath& other) const {
       return array_ == other.array_;
   }
   NOTREACHED();
-  return false;
 }
 
 }  // namespace blink

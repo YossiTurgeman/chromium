@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,7 @@ SecurityStateClient* GetSecurityStateClient();
 class SecurityStateClient {
  public:
   SecurityStateClient() = default;
-  ~SecurityStateClient() = default;
+  virtual ~SecurityStateClient() = default;
 
   // Create a SecurityStateModelDelegate. This can return a nullptr.
   virtual std::unique_ptr<SecurityStateModelDelegate>

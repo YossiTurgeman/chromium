@@ -1,10 +1,12 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/omnibox/alternate_nav_infobar_delegate.h"
 
+#include "base/test/scoped_feature_list.h"
 #include "chrome/browser/ui/test/test_infobar.h"
+#include "chrome/browser/ui/ui_features.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/infobars/core/infobar_delegate.h"
 #include "components/omnibox/browser/autocomplete_match.h"
@@ -15,11 +17,13 @@ namespace {
 
 class AlternateNavInfoBarDelegateTest : public TestInfoBar {
  public:
-  AlternateNavInfoBarDelegateTest() = default;
   AlternateNavInfoBarDelegateTest(const AlternateNavInfoBarDelegateTest&) =
       delete;
   AlternateNavInfoBarDelegateTest& operator=(
       const AlternateNavInfoBarDelegateTest&) = delete;
+
+ protected:
+  AlternateNavInfoBarDelegateTest() = default;
   ~AlternateNavInfoBarDelegateTest() override = default;
 
  private:
@@ -30,12 +34,28 @@ class AlternateNavInfoBarDelegateTest : public TestInfoBar {
     AutocompleteMatch match;
     match.destination_url = GURL("http://intranetsite/");
     AlternateNavInfoBarDelegate::CreateForOmniboxNavigation(
-        GetWebContents(), base::string16(), match, GURL("http://example.com/"));
+        GetWebContents(), std::u16string(), match, GURL("http://example.com/"));
   }
+};
+
+class AlternateNavInfoBarDelegateInlineLinksTest
+    : public AlternateNavInfoBarDelegateTest {
+ protected:
+  AlternateNavInfoBarDelegateInlineLinksTest() {
+    feature_list_.InitAndEnableFeature(features::kInfoBarInlineLinks);
+  }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
 };
 
 }  // namespace
 
 IN_PROC_BROWSER_TEST_F(AlternateNavInfoBarDelegateTest, InvokeUi_default) {
+  ShowAndVerifyUi();
+}
+
+IN_PROC_BROWSER_TEST_F(AlternateNavInfoBarDelegateInlineLinksTest,
+                       InvokeUi_InlineLinks) {
   ShowAndVerifyUi();
 }

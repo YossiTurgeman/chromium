@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 #include <sstream>
 #include <string>
 
-#include "base/bind.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/timer/timer.h"
@@ -16,22 +16,22 @@
 
 namespace {
 
-constexpr base::TimeDelta kDefaultTimeout = base::TimeDelta::FromSeconds(30);
+constexpr base::TimeDelta kDefaultTimeout = base::Seconds(30);
 
 base::TimeDelta GetTimeoutFromCommandLineOrDefault() {
   if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
-          "sync-status-change-checker-timeout")) {
+          switches::kStatusChangeCheckerTimeoutInSeconds)) {
     return kDefaultTimeout;
   }
   std::string timeout_string(
       base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
-          "sync-status-change-checker-timeout"));
+          switches::kStatusChangeCheckerTimeoutInSeconds));
   int timeout_in_seconds = 0;
   if (!base::StringToInt(timeout_string, &timeout_in_seconds)) {
     LOG(FATAL) << "Timeout value \"" << timeout_string << "\" was parsed as "
                << timeout_in_seconds;
   }
-  return base::TimeDelta::FromSeconds(timeout_in_seconds);
+  return base::Seconds(timeout_in_seconds);
 }
 
 }  // namespace
@@ -42,7 +42,11 @@ StatusChangeChecker::StatusChangeChecker()
 
 StatusChangeChecker::~StatusChangeChecker() = default;
 
-bool StatusChangeChecker::Wait() {
+void StatusChangeChecker::WillStartWaiting() {}
+
+bool StatusChangeChecker::Wait(const base::Location& location) {
+  WillStartWaiting();
+
   std::ostringstream s;
   if (IsExitConditionSatisfied(&s)) {
     DVLOG(1) << "Already satisfied: " << s.str();
@@ -50,7 +54,7 @@ bool StatusChangeChecker::Wait() {
     WaitDone();
   } else {
     DVLOG(1) << "Blocking: " << s.str();
-    StartBlockingWait();
+    StartBlockingWait(location);
   }
   return !TimedOut();
 }
@@ -86,25 +90,28 @@ void StatusChangeChecker::CheckExitCondition() {
   }
 }
 
-void StatusChangeChecker::StartBlockingWait() {
+void StatusChangeChecker::StartBlockingWait(const base::Location& location) {
   DCHECK(!run_loop_.running());
 
   base::OneShotTimer timer;
-  timer.Start(
-      FROM_HERE, timeout_,
-      base::BindOnce(&StatusChangeChecker::OnTimeout, base::Unretained(this)));
+  timer.Start(FROM_HERE, timeout_,
+              base::BindOnce(&StatusChangeChecker::OnTimeout,
+                             base::Unretained(this), location));
 
   run_loop_.Run();
 }
 
-void StatusChangeChecker::OnTimeout() {
+void StatusChangeChecker::OnTimeout(const base::Location& location) {
   timed_out_ = true;
 
   std::ostringstream s;
   if (IsExitConditionSatisfied(&s)) {
-    ADD_FAILURE() << "Await -> Timed out despite conditions being satisfied.";
+    ADD_FAILURE() << "Await -> Timed out despite conditions being satisfied, "
+                     "triggered from "
+                  << location.ToString();
   } else {
-    ADD_FAILURE() << "Await -> Timed out: " << s.str();
+    ADD_FAILURE() << "Await -> Timed out: " << s.str() << ", triggered from "
+                  << location.ToString();
   }
 
   StopWaiting();

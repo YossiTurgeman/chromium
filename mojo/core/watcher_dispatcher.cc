@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include "base/compiler_specific.h"
 #include "base/debug/alias.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
 #include "mojo/core/watch.h"
 
@@ -23,8 +22,9 @@ void WatcherDispatcher::NotifyHandleState(Dispatcher* dispatcher,
                                           const HandleSignalsState& state) {
   base::AutoLock lock(lock_);
   auto it = watched_handles_.find(dispatcher);
-  if (it == watched_handles_.end())
+  if (it == watched_handles_.end()) {
     return;
+  }
 
   // Maybe fire a notification to the watch associated with this dispatcher,
   // provided we're armed and it cares about the new state.
@@ -43,8 +43,9 @@ void WatcherDispatcher::NotifyHandleClosed(Dispatcher* dispatcher) {
   {
     base::AutoLock lock(lock_);
     auto it = watched_handles_.find(dispatcher);
-    if (it == watched_handles_.end())
+    if (it == watched_handles_.end()) {
       return;
+    }
 
     watch = std::move(it->second);
 
@@ -87,8 +88,9 @@ void WatcherDispatcher::InvokeWatchCallback(uintptr_t context,
     // This guarantee is sufficient to make safe, synchronized, per-context
     // state management possible in user code.
     base::AutoLock lock(lock_);
-    if (closed_ && result != MOJO_RESULT_CANCELLED)
+    if (closed_ && result != MOJO_RESULT_CANCELLED) {
       return;
+    }
   }
 
   handler_(&event);
@@ -104,8 +106,9 @@ MojoResult WatcherDispatcher::Close() {
   base::flat_map<uintptr_t, scoped_refptr<Watch>> watches;
   {
     base::AutoLock lock(lock_);
-    if (closed_)
+    if (closed_) {
       return MOJO_RESULT_INVALID_ARGUMENT;
+    }
     closed_ = true;
     std::swap(watches, watches_);
     watched_handles_.clear();
@@ -130,11 +133,13 @@ MojoResult WatcherDispatcher::WatchDispatcher(
   // after we've updated all our own relevant state and released |lock_|.
   {
     base::AutoLock lock(lock_);
-    if (closed_)
+    if (closed_) {
       return MOJO_RESULT_INVALID_ARGUMENT;
+    }
 
-    if (watches_.count(context) || watched_handles_.count(dispatcher.get()))
+    if (watches_.count(context) || watched_handles_.count(dispatcher.get())) {
       return MOJO_RESULT_ALREADY_EXISTS;
+    }
 
     scoped_refptr<Watch> watch =
         new Watch(this, dispatcher, context, signals, condition);
@@ -163,8 +168,9 @@ MojoResult WatcherDispatcher::WatchDispatcher(
     base::AutoLock lock(lock_);
     remove_now = closed_;
   }
-  if (remove_now)
+  if (remove_now) {
     dispatcher->RemoveWatcherRef(this, context);
+  }
 
   return MOJO_RESULT_OK;
 }
@@ -175,11 +181,13 @@ MojoResult WatcherDispatcher::CancelWatch(uintptr_t context) {
   scoped_refptr<Watch> watch;
   {
     base::AutoLock lock(lock_);
-    if (closed_)
+    if (closed_) {
       return MOJO_RESULT_INVALID_ARGUMENT;
+    }
     auto it = watches_.find(context);
-    if (it == watches_.end())
+    if (it == watches_.end()) {
       return MOJO_RESULT_NOT_FOUND;
+    }
     watch = it->second;
     watches_.erase(it);
   }
@@ -198,8 +206,9 @@ MojoResult WatcherDispatcher::CancelWatch(uintptr_t context) {
 
     // If another thread races to close this watcher handler, |watched_handles_|
     // may have been cleared by the time we reach this section.
-    if (handle_it == watched_handles_.end())
+    if (handle_it == watched_handles_.end()) {
       return MOJO_RESULT_OK;
+    }
 
     ready_watches_.erase(handle_it->second.get());
     watched_handles_.erase(handle_it);
@@ -211,13 +220,16 @@ MojoResult WatcherDispatcher::CancelWatch(uintptr_t context) {
 MojoResult WatcherDispatcher::Arm(uint32_t* num_blocking_events,
                                   MojoTrapEvent* blocking_events) {
   base::AutoLock lock(lock_);
-  if (num_blocking_events && !blocking_events)
+  if (num_blocking_events && !blocking_events) {
     return MOJO_RESULT_INVALID_ARGUMENT;
-  if (closed_)
+  }
+  if (closed_) {
     return MOJO_RESULT_INVALID_ARGUMENT;
+  }
 
-  if (watched_handles_.empty())
+  if (watched_handles_.empty()) {
     return MOJO_RESULT_NOT_FOUND;
+  }
 
   if (ready_watches_.empty()) {
     // Fast path: No watches are ready to notify, so we're done.
@@ -234,27 +246,35 @@ MojoResult WatcherDispatcher::Arm(uint32_t* num_blocking_events,
     if (last_watch_to_block_arming_) {
       // Find the next watch to notify in simple round-robin order on the
       // |ready_watches_| map, wrapping around to the beginning if necessary.
-      next_ready_iter = ready_watches_.find(last_watch_to_block_arming_);
-      if (next_ready_iter != ready_watches_.end())
+      next_ready_iter = ready_watches_.find(
+          reinterpret_cast<const Watch*>(last_watch_to_block_arming_));
+      if (next_ready_iter != ready_watches_.end()) {
         ++next_ready_iter;
-      if (next_ready_iter == ready_watches_.end())
+      }
+      if (next_ready_iter == ready_watches_.end()) {
         next_ready_iter = ready_watches_.begin();
+      }
     }
 
     for (size_t i = 0; i < *num_blocking_events; ++i) {
       const Watch* const watch = *next_ready_iter;
-      if (blocking_events[i].struct_size < sizeof(*blocking_events))
+      if (UNSAFE_TODO(blocking_events[i]).struct_size <
+          sizeof(*blocking_events)) {
         return MOJO_RESULT_INVALID_ARGUMENT;
-      blocking_events[i].flags = MOJO_TRAP_EVENT_FLAG_WITHIN_API_CALL;
-      blocking_events[i].trigger_context = watch->context();
-      blocking_events[i].result = watch->last_known_result();
-      blocking_events[i].signals_state = watch->last_known_signals_state();
+      }
+      UNSAFE_TODO(blocking_events[i]).flags =
+          MOJO_TRAP_EVENT_FLAG_WITHIN_API_CALL;
+      UNSAFE_TODO(blocking_events[i]).trigger_context = watch->context();
+      UNSAFE_TODO(blocking_events[i]).result = watch->last_known_result();
+      UNSAFE_TODO(blocking_events[i]).signals_state =
+          watch->last_known_signals_state();
 
       // Iterate and wrap around.
-      last_watch_to_block_arming_ = watch;
+      last_watch_to_block_arming_ = reinterpret_cast<uintptr_t>(watch);
       ++next_ready_iter;
-      if (next_ready_iter == ready_watches_.end())
+      if (next_ready_iter == ready_watches_.end()) {
         next_ready_iter = ready_watches_.begin();
+      }
     }
   }
 

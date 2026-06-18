@@ -1,16 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/time/time.h"
 #include "chrome/browser/sync/test/integration/bookmarks_helper.h"
 #include "chrome/browser/sync/test/integration/encryption_helper.h"
-#include "chrome/browser/sync/test/integration/profile_sync_service_harness.h"
 #include "chrome/browser/sync/test/integration/sync_integration_test_util.h"
+#include "chrome/browser/sync/test/integration/sync_service_impl_harness.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
 #include "chrome/browser/sync/test/integration/updated_progress_marker_checker.h"
 #include "chrome/browser/sync/test/integration/user_events_helper.h"
 #include "chrome/browser/sync/user_event_service_factory.h"
+#include "components/bookmarks/browser/bookmark_model.h"
 #include "components/sync/protocol/user_event_specifics.pb.h"
 #include "components/sync_user_events/user_event_service.h"
 #include "content/public/test/browser_test.h"
@@ -18,15 +19,27 @@
 
 namespace {
 
-using sync_pb::UserEventSpecifics;
+using bookmarks_helper::BookmarksMatchChecker;
+using bookmarks_helper::CountBookmarksWithUrlsMatching;
+using bookmarks_helper::StoreType;
 
 const int kEncryptingClientId = 0;
 const int kDecryptingClientId = 1;
 
-class TwoClientUserEventsSyncTest : public SyncTest {
+const char kTestBookmarkURL[] = "https://google.com/synced-bookmark-1";
+
+class TwoClientUserEventsSyncTest
+    : public SyncTest,
+      public testing::WithParamInterface<SyncTest::SetupSyncMode> {
  public:
-  TwoClientUserEventsSyncTest() : SyncTest(TWO_CLIENT) {}
-  ~TwoClientUserEventsSyncTest() override {}
+  TwoClientUserEventsSyncTest() : SyncTest(TWO_CLIENT) {
+    if (GetSetupSyncMode() == SetupSyncMode::kSyncTransportOnly) {
+      scoped_feature_list_.InitAndEnableFeature(
+          syncer::kReplaceSyncPromosWithSignInPromos);
+    }
+  }
+
+  ~TwoClientUserEventsSyncTest() override = default;
 
   bool ExpectNoUserEvent(int index) {
     return UserEventEqualityChecker(GetSyncService(index), GetFakeServer(),
@@ -34,29 +47,38 @@ class TwoClientUserEventsSyncTest : public SyncTest {
         .Wait();
   }
 
-  bool WaitForPassphraseRequiredState(int index, bool desired_state) {
-    return PassphraseRequiredStateChecker(GetSyncService(index), desired_state)
-        .Wait();
+  void AddTestBookmarkToClient(int index) {
+    StoreType store_type =
+        GetSetupSyncMode() == SyncTest::SetupSyncMode::kSyncTransportOnly
+            ? StoreType::kAccountStore
+            : StoreType::kLocalOrSyncableStore;
+    ASSERT_TRUE(bookmarks_helper::AddURL(index, 0,
+                                         u"What are you syncing about?",
+                                         GURL(kTestBookmarkURL), store_type));
   }
 
-  bool WaitForBookmarksToMatchVerifier() {
-    return bookmarks_helper::BookmarksMatchVerifierChecker().Wait();
-  }
-
-  void AddTestBookmarksToClient(int index) {
-    ASSERT_TRUE(
-        bookmarks_helper::AddURL(index, 0, "What are you syncing about?",
-                                 GURL("https://google.com/synced-bookmark-1")));
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return GetParam();
   }
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(TwoClientUserEventsSyncTest);
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-IN_PROC_BROWSER_TEST_F(TwoClientUserEventsSyncTest,
+INSTANTIATE_TEST_SUITE_P(,
+                         TwoClientUserEventsSyncTest,
+                         GetSyncTestModes(),
+                         testing::PrintToStringParamName());
+
+IN_PROC_BROWSER_TEST_P(TwoClientUserEventsSyncTest,
                        SetPassphraseAndRecordEventAndThenSetupSync) {
   ASSERT_TRUE(SetupClients());
-  ASSERT_TRUE(GetClient(kEncryptingClientId)->SetupSync());
+  if (GetSetupSyncMode() == SetupSyncMode::kSyncTheFeature) {
+    ASSERT_TRUE(GetClient(kEncryptingClientId)->SetupSync());
+  } else {
+    ASSERT_TRUE(GetClient(kEncryptingClientId)->SignInNoWaitForCompletion());
+    ASSERT_TRUE(GetClient(kEncryptingClientId)->AwaitSyncTransportActive());
+  }
 
   // Set up a sync client with custom passphrase to get the data encrypted on
   // the server.
@@ -74,14 +96,19 @@ IN_PROC_BROWSER_TEST_F(TwoClientUserEventsSyncTest,
   // knowing it will be encrypted). This event should not get recorded while
   // starting up sync because the user has custom passphrase setup.
   syncer::UserEventService* event_service =
-      browser_sync::UserEventServiceFactory::GetForProfile(GetProfile(0));
-  event_service->RecordUserEvent(user_events_helper::CreateTestEvent(
-      base::Time() + base::TimeDelta::FromMicroseconds(1)));
+      browser_sync::UserEventServiceFactory::GetForProfile(
+          GetProfile(kDecryptingClientId));
+  event_service->RecordUserEvent(std::make_unique<sync_pb::UserEventSpecifics>(
+      user_events_helper::CreateTestEvent(base::Time() +
+                                          base::Microseconds(1))));
 
   // Set up sync on the second client.
-  ASSERT_TRUE(GetClient(kDecryptingClientId)
-                  ->SetupSyncNoWaitForCompletion(
-                      GetRegisteredSelectableTypes(kDecryptingClientId)));
+  if (GetSetupSyncMode() == SetupSyncMode::kSyncTheFeature) {
+    ASSERT_TRUE(GetClient(kDecryptingClientId)->SetupSyncNoWaitForCompletion());
+  } else {
+    ASSERT_TRUE(GetClient(kDecryptingClientId)->SignInNoWaitForCompletion());
+    ASSERT_TRUE(GetClient(kDecryptingClientId)->AwaitSyncTransportActive());
+  }
   // The second client asks the user to provide a password for decryption.
   ASSERT_TRUE(
       PassphraseRequiredChecker(GetSyncService(kDecryptingClientId)).Wait());
@@ -92,14 +119,22 @@ IN_PROC_BROWSER_TEST_F(TwoClientUserEventsSyncTest,
   // Check it is accepted and finish the setup.
   ASSERT_TRUE(
       PassphraseAcceptedChecker(GetSyncService(kDecryptingClientId)).Wait());
-  GetClient(kDecryptingClientId)->FinishSyncSetup();
+  if (GetSetupSyncMode() == SetupSyncMode::kSyncTheFeature) {
+    GetClient(kDecryptingClientId)->FinishSyncSetup();
+  } else {
+    ASSERT_TRUE(GetClient(kDecryptingClientId)->AwaitSyncTransportActive());
+  }
 
   // Just checking that we don't see the recorded test event isn't very
   // convincing yet, because it may simply not have reached the server yet. So
   // let's send something else on the second client through the system that we
   // can wait on before checking. Bookmark data was picked fairly arbitrarily.
-  AddTestBookmarksToClient(kDecryptingClientId);
-  ASSERT_TRUE(WaitForBookmarksToMatchVerifier());
+  AddTestBookmarkToClient(kDecryptingClientId);
+  ASSERT_TRUE(BookmarksMatchChecker().Wait());
+
+  // Double check that the encrypting client has the bookmark.
+  ASSERT_EQ(1u, CountBookmarksWithUrlsMatching(kEncryptingClientId,
+                                               GURL(kTestBookmarkURL)));
 
   // Finally, make sure no user event got sent to the server.
   EXPECT_TRUE(ExpectNoUserEvent(kDecryptingClientId));

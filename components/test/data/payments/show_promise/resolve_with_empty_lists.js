@@ -1,17 +1,22 @@
 /*
- * Copyright 2019 The Chromium Authors. All rights reserved.
+ * Copyright 2019 The Chromium Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
 
 /**
- * Launch PaymentRequest by resolving the promised passed into the shoe() method
+ * Launch PaymentRequest by resolving the promised passed into the show() method
  * with empty lists of display items, modifiers, and shipping options.
+ * @param {string} supportedMethods - The payment method identifier.
  */
-function buy() { // eslint-disable-line no-unused-vars
+function buy(supportedMethods) {
+  if (!supportedMethods) {
+    print('supportedMethods required');
+    return;
+  }
   try {
-    var request = new PaymentRequest(
-        [{supportedMethods: 'basic-card'}], {
+    const request = new PaymentRequest(
+        [{supportedMethods}], {
           total: {label: 'Total', amount: {currency: 'USD', value: '1.00'}},
           displayItems: [{
             label: 'PENDING DISPLAY ITEM',
@@ -19,7 +24,7 @@ function buy() { // eslint-disable-line no-unused-vars
             amount: {currency: 'USD', value: '99.99'},
           }],
           modifiers: [{
-            supportedMethods: 'basic-card',
+            supportedMethods,
             additionalDisplayItems: [{
               label: 'PENDING ADDITIONAL DISPLAY ITEM',
               pending: true,

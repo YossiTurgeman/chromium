@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,17 +9,16 @@
 #include <stdint.h>
 
 #include <memory>
+#include <string>
 
-#include "base/macros.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string16.h"
 #include "services/device/geolocation/wifi_data_provider.h"
 #include "services/device/geolocation/wifi_polling_policy.h"
 
 namespace device {
 
 // Converts a MAC address stored as an array of uint8_t to a string.
-base::string16 MacAddressAsString16(const uint8_t mac_as_int[6]);
+std::string MacAddressAsString(base::span<const uint8_t, 6> mac_as_int);
 
 // Base class to promote code sharing between platform specific wifi data
 // providers. It's optional for specific platforms to derive this, but if they
@@ -33,17 +32,24 @@ class WifiDataProviderCommon : public WifiDataProvider {
   class WlanApiInterface {
    public:
     virtual ~WlanApiInterface() {}
-    // Gets wifi data for all visible access points.
-    virtual bool GetAccessPointData(WifiData::AccessPointDataSet* data) = 0;
+    // Gets wifi data for all visible access points. The callback will receive a
+    // nullptr on failure, or a (potentially empty) data set on success.
+    virtual void GetAccessPointData(
+        base::OnceCallback<void(std::unique_ptr<WifiData::AccessPointDataSet>)>
+            callback) = 0;
   };
 
   WifiDataProviderCommon();
+
+  WifiDataProviderCommon(const WifiDataProviderCommon&) = delete;
+  WifiDataProviderCommon& operator=(const WifiDataProviderCommon&) = delete;
 
   // WifiDataProvider implementation
   void StartDataProvider() override;
   void StopDataProvider() override;
   bool DelayedByPolicy() override;
   bool GetData(WifiData* data) override;
+  void ForceRescan() override;
 
  protected:
   ~WifiDataProviderCommon() override;
@@ -56,6 +62,10 @@ class WifiDataProviderCommon : public WifiDataProvider {
  private:
   // Runs a scan. Calls the callbacks if new data is found.
   void DoWifiScanTask();
+
+  // The callback for when the scan is complete.
+  void OnWifiScanTaskDone(
+      std::unique_ptr<WifiData::AccessPointDataSet> new_access_point_data);
 
   // Will schedule a scan; i.e. enqueue DoWifiScanTask deferred task.
   void ScheduleNextScan(int interval);
@@ -73,8 +83,6 @@ class WifiDataProviderCommon : public WifiDataProvider {
 
   // Holder for delayed tasks; takes care of cleanup.
   base::WeakPtrFactory<WifiDataProviderCommon> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(WifiDataProviderCommon);
 };
 
 }  // namespace device

@@ -1,10 +1,10 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "extensions/renderer/bindings/binding_access_checker.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "extensions/renderer/bindings/api_binding_test.h"
 #include "gin/converter.h"
 
@@ -12,7 +12,8 @@ namespace extensions {
 
 namespace {
 
-bool IsAvailable(v8::Local<v8::Context> context, const std::string& full_name) {
+bool APIIsAvailable(v8::Local<v8::Context> context,
+                    const std::string& full_name) {
   EXPECT_TRUE(full_name == "available" || full_name == "unavailable")
       << full_name;
   return full_name == "available";
@@ -25,7 +26,7 @@ using BindingAccessCheckerTest = APIBindingTest;
 TEST_F(BindingAccessCheckerTest, TestHasAccess) {
   v8::HandleScope handle_scope(isolate());
 
-  BindingAccessChecker checker(base::BindRepeating(&IsAvailable));
+  BindingAccessChecker checker(base::BindRepeating(&APIIsAvailable));
 
   v8::Local<v8::Context> context = MainContext();
   EXPECT_TRUE(checker.HasAccess(context, "available"));
@@ -35,7 +36,7 @@ TEST_F(BindingAccessCheckerTest, TestHasAccess) {
 TEST_F(BindingAccessCheckerTest, TestHasAccessOrThrowError) {
   v8::HandleScope handle_scope(isolate());
 
-  BindingAccessChecker checker(base::BindRepeating(&IsAvailable));
+  BindingAccessChecker checker(base::BindRepeating(&APIIsAvailable));
 
   v8::Local<v8::Context> context = MainContext();
   {

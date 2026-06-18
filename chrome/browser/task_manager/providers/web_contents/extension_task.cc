@@ -1,23 +1,31 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/task_manager/providers/web_contents/extension_task.h"
 
+#include <memory>
+
+#include "base/notimplemented.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/chrome_pages.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/web_contents.h"
 #include "extensions/browser/process_manager.h"
-#include "extensions/browser/view_type_utils.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest_handlers/icons_handler.h"
-#include "extensions/common/view_type.h"
 #include "extensions/grit/extensions_browser_resources.h"
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/browser/extensions/browser_window_util.h"
+#include "chrome/browser/extensions/extension_util.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
+#include "chrome/browser/ui/chrome_pages.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
+#endif
 
 namespace task_manager {
 
@@ -25,7 +33,7 @@ gfx::ImageSkia* ExtensionTask::s_icon_ = nullptr;
 
 ExtensionTask::ExtensionTask(content::WebContents* web_contents,
                              const extensions::Extension* extension,
-                             extensions::ViewType view_type)
+                             extensions::mojom::ViewType view_type)
     : RendererTask(GetExtensionTitle(web_contents, extension, view_type),
                    FetchIcon(IDR_EXTENSIONS_FAVICON, &s_icon_),
                    web_contents),
@@ -33,8 +41,7 @@ ExtensionTask::ExtensionTask(content::WebContents* web_contents,
   LoadExtensionIcon(extension);
 }
 
-ExtensionTask::~ExtensionTask() {
-}
+ExtensionTask::~ExtensionTask() = default;
 
 void ExtensionTask::UpdateTitle() {
   // The title of the extension should not change as a result of title change
@@ -47,14 +54,16 @@ void ExtensionTask::UpdateFavicon() {
 }
 
 void ExtensionTask::Activate() {
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   // This task represents the extension view of (for example) a background page
   // or browser action button, so there is no top-level window to bring to the
   // front. Instead, when this task is double-clicked, we bring up the
   // chrome://extensions page in a tab, and highlight the details for this
   // extension.
   //
-  // TODO(nick): For extensions::VIEW_TYPE_APP_WINDOW, and maybe others, there
-  // may actually be a window we could focus. Special case those here as needed.
+  // TODO(nick): For extensions::mojom::ViewType::kAppWindow, and maybe others,
+  // there may actually be a window we could focus. Special case those here as
+  // needed.
   const extensions::Extension* extension =
       extensions::ProcessManager::Get(web_contents()->GetBrowserContext())
           ->GetExtensionForWebContents(web_contents());
@@ -62,14 +71,28 @@ void ExtensionTask::Activate() {
   if (!extension)
     return;
 
-  Browser* browser = chrome::FindTabbedBrowser(
-      Profile::FromBrowserContext(web_contents()->GetBrowserContext()), true);
+  Profile* profile =
+      Profile::FromBrowserContext(web_contents()->GetBrowserContext());
+  CHECK(profile);
+  BrowserWindowInterface* browser =
+      extensions::browser_window_util::GetLastActiveNormalBrowserWithProfile(
+          *profile, /*include_incognito_or_parent=*/true);
 
   // If an existing browser isn't found, don't create a new one.
   if (!browser)
     return;
 
+#if BUILDFLAG(IS_ANDROID)
+  // TODO(crbug.com/417512763): Consolidate this with chrome::ShowExtensions()
+  // when it works on Android.
+  GURL url = extensions::util::GetExtensionsPageUrl(extension->id());
+  NavigateParams params(browser, url, ui::PAGE_TRANSITION_LINK);
+  params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
+  Navigate(&params);
+#else
   chrome::ShowExtensions(browser, extension->id());
+#endif  // BUILDFLAG(IS_ANDROID)
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 }
 
 Task::Type ExtensionTask::GetType() const {
@@ -77,7 +100,7 @@ Task::Type ExtensionTask::GetType() const {
 }
 
 int ExtensionTask::GetKeepaliveCount() const {
-  if (view_type_ != extensions::VIEW_TYPE_EXTENSION_BACKGROUND_PAGE)
+  if (view_type_ != extensions::mojom::ViewType::kExtensionBackgroundPage)
     return -1;
 
   const extensions::Extension* extension =
@@ -97,18 +120,18 @@ void ExtensionTask::OnExtensionIconImageChanged(extensions::IconImage* image) {
     set_icon(image->image_skia());
 }
 
-base::string16 ExtensionTask::GetExtensionTitle(
+std::u16string ExtensionTask::GetExtensionTitle(
     content::WebContents* web_contents,
     const extensions::Extension* extension,
-    extensions::ViewType view_type) const {
+    extensions::mojom::ViewType view_type) const {
   DCHECK(web_contents);
 
-  base::string16 title = extension ?
-      base::UTF8ToUTF16(extension->name()) :
-      RendererTask::GetTitleFromWebContents(web_contents);
+  std::u16string title =
+      extension ? base::UTF8ToUTF16(extension->name())
+                : RendererTask::GetTitleFromWebContents(web_contents);
 
   bool is_background =
-      view_type == extensions::VIEW_TYPE_EXTENSION_BACKGROUND_PAGE;
+      view_type == extensions::mojom::ViewType::kExtensionBackgroundPage;
 
   return RendererTask::PrefixRendererTitle(
       title,
@@ -122,13 +145,10 @@ void ExtensionTask::LoadExtensionIcon(const extensions::Extension* extension) {
   if (!extension)
     return;
 
-  extension_icon_.reset(
-      new extensions::IconImage(web_contents()->GetBrowserContext(),
-                                extension,
-                                extensions::IconsInfo::GetIcons(extension),
-                                extension_misc::EXTENSION_ICON_SMALL,
-                                icon(),
-                                this));
+  extension_icon_ = std::make_unique<extensions::IconImage>(
+      web_contents()->GetBrowserContext(), extension,
+      extensions::IconsInfo::GetIcons(extension),
+      extension_misc::EXTENSION_ICON_SMALL, icon(), this);
 
   // Triggers actual image loading with 1x resources.
   extension_icon_->image_skia().GetRepresentation(1.0f);

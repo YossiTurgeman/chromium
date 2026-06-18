@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,10 +8,11 @@ import time
 
 from absl import app, flags
 from selenium import webdriver
+from selenium.webdriver.common.by import By
 from pywinauto.application import Application
 from pywinauto.findwindows import ElementNotFoundError
 
-import test_util
+from test_util import create_chrome_webdriver
 
 encrypted_file_url = "https://storage.googleapis.com/testfiles-webprotect/malware_file_encrypted.zip"
 large_file_url = "https://storage.googleapis.com/testfiles-webprotect/large_file.bin"
@@ -41,7 +42,7 @@ def main(argv):
   options.add_argument("--force-renderer-accessibility")
   options.add_experimental_option("excludeSwitches", exclude_switches)
   os.environ["CHROME_LOG_FILE"] = r"c:\temp\chrome_log.txt"
-  driver = test_util.create_chrome_webdriver(chrome_options=options)
+  driver = create_chrome_webdriver(chrome_options=options)
 
   app = Application(backend="uia")
   app.connect(title_re='.*Chrome|.*Chromium')
@@ -51,7 +52,7 @@ def main(argv):
   # Click reload policy to pull cloud policies from the server side
   policy_url = "chrome://policy"
   driver.get(policy_url)
-  driver.find_element_by_id('reload-policies').click
+  driver.find_element(By.ID, 'reload-policies').click
 
   download_file_from_url(driver, encrypted_file_url, encrypted_block_text, 30,
                          "Button", "Encrypted blocked")

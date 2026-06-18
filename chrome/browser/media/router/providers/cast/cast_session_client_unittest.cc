@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,38 +8,40 @@
 #include <tuple>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/run_loop.h"
 #include "base/test/mock_log.h"
 #include "base/test/values_test_util.h"
-#include "chrome/browser/media/router/data_decoder_util.h"
 #include "chrome/browser/media/router/providers/cast/cast_activity_manager.h"
 #include "chrome/browser/media/router/providers/cast/cast_internal_message_util.h"
 #include "chrome/browser/media/router/providers/cast/cast_session_client_impl.h"
 #include "chrome/browser/media/router/providers/cast/mock_app_activity.h"
 #include "chrome/browser/media/router/providers/cast/test_util.h"
-#include "chrome/browser/media/router/providers/common/buffered_message_sender.h"
 #include "chrome/browser/media/router/test/mock_mojo_media_router.h"
-#include "chrome/browser/media/router/test/test_helper.h"
-#include "components/cast_channel/cast_test_util.h"
+#include "chrome/browser/media/router/test/provider_test_helpers.h"
+#include "components/media_router/common/mojom/debugger.mojom.h"
+#include "components/media_router/common/mojom/logger.mojom.h"
+#include "components/media_router/common/providers/cast/channel/cast_test_util.h"
 #include "components/media_router/common/test/test_helper.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/test/browser_task_environment.h"
 #include "mojo/public/cpp/bindings/receiver.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "services/data_decoder/public/cpp/test_support/in_process_data_decoder.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 using base::test::IsJson;
-using base::test::ParseJson;
+using base::test::ParseJsonDict;
 using blink::mojom::PresentationConnectionCloseReason;
 using testing::_;
 using testing::AllOf;
 using testing::AnyNumber;
 using testing::HasSubstr;
 using testing::IsEmpty;
+using testing::NiceMock;
 using testing::Not;
 using testing::Return;
 using testing::WithArg;
@@ -47,7 +49,7 @@ using testing::WithArg;
 namespace media_router {
 
 namespace {
-constexpr int kTabId = 213;
+constexpr content::FrameTreeNodeId kTabId = content::FrameTreeNodeId(213);
 
 class MockPresentationConnection : public blink::mojom::PresentationConnection {
  public:
@@ -55,6 +57,9 @@ class MockPresentationConnection : public blink::mojom::PresentationConnection {
       mojom::RoutePresentationConnectionPtr connections)
       : connection_receiver_(this,
                              std::move(connections->connection_receiver)) {}
+
+  MockPresentationConnection(MockPresentationConnection&) = delete;
+  MockPresentationConnection& operator=(MockPresentationConnection&) = delete;
 
   ~MockPresentationConnection() override = default;
 
@@ -66,16 +71,14 @@ class MockPresentationConnection : public blink::mojom::PresentationConnection {
   // NOTE: This member doesn't look like it's used for anything, but it needs to
   // exist in order for Mojo magic to work correctly.
   mojo::Receiver<blink::mojom::PresentationConnection> connection_receiver_;
-
-  DISALLOW_COPY_AND_ASSIGN(MockPresentationConnection);
 };
 
 }  // namespace
 
-#define EXPECT_ERROR_LOG(matcher)                                \
-  if (DLOG_IS_ON(ERROR)) {                                       \
-    EXPECT_CALL(log_, Log(logging::LOG_ERROR, _, _, _, matcher)) \
-        .WillOnce(Return(true)); /* suppress logging */          \
+#define EXPECT_ERROR_LOG(matcher)                                    \
+  if (DLOG_IS_ON(ERROR)) {                                           \
+    EXPECT_CALL(log_, Log(logging::LOGGING_ERROR, _, _, _, matcher)) \
+        .WillOnce(Return(true)); /* suppress logging */              \
   }
 
 class CastSessionClientImplTest : public testing::Test {
@@ -100,14 +103,18 @@ class CastSessionClientImplTest : public testing::Test {
                                               origin_,
                                               kTabId,
                                               AutoJoinPolicy::kPageScoped,
-                                              &activity_);
+                                              &activity_,
+                                              logger_,
+                                              debugger_);
   std::unique_ptr<MockPresentationConnection> mock_connection_ =
-      std::make_unique<MockPresentationConnection>(client_->Init());
+      std::make_unique<NiceMock<MockPresentationConnection>>(client_->Init());
   base::test::MockLog log_;
+  mojo::Remote<mojom::Logger> logger_;
+  mojo::Remote<mojom::Debugger> debugger_;
 };
 
 TEST_F(CastSessionClientImplTest, OnInvalidJson) {
-  // TODO(crbug.com/905002): Check UMA calls instead of logging (here and
+  // TODO(crbug.com/41426190): Check UMA calls instead of logging (here and
   // below).
   EXPECT_ERROR_LOG(HasSubstr("Failed to parse Cast client message"));
 
@@ -159,6 +166,39 @@ TEST_F(CastSessionClientImplTest, OnMessageWrongSessionId) {
       })"));
 }
 
+TEST_F(CastSessionClientImplTest, NullFieldsAreRemoved) {
+  EXPECT_CALL(activity_, SendMediaRequestToReceiver)
+      .WillOnce([](const auto& message) {
+        // TODO(crbug.com/41457655): Use IsCastInternalMessage as argument to
+        // SendMediaRequestToReceiver when bug is fixed.
+        EXPECT_THAT(message, IsCastInternalMessage(R"({
+          "type": "v2_message",
+          "clientId": "theClientId",
+          "sequenceNumber": 123,
+          "message": {
+             "sessionId": "theSessionId",
+             "type": "MEDIA_GET_STATUS",
+             "array": [{"in_array": true}]
+          }
+        })"));
+        return 0;
+      });
+
+  client_->OnMessage(
+      blink::mojom::PresentationConnectionMessage::NewMessage(R"({
+        "type": "v2_message",
+        "clientId": "theClientId",
+        "sequenceNumber": 123,
+        "message": {
+          "sessionId": "theSessionId",
+          "type": "MEDIA_GET_STATUS",
+          "array": [{"in_array": true, "is_null": null}],
+          "dummy": null
+        }
+      })"));
+  RunUntilIdle();
+}
+
 TEST_F(CastSessionClientImplTest, AppMessageFromClient) {
   EXPECT_CALL(activity_, SendAppMessageToReceiver)
       .WillOnce(Return(cast_channel::Result::kOk));
@@ -179,7 +219,7 @@ TEST_F(CastSessionClientImplTest, AppMessageFromClient) {
 TEST_F(CastSessionClientImplTest, OnMediaStatusUpdatedWithPendingRequest) {
   EXPECT_CALL(activity_, SendMediaRequestToReceiver)
       .WillOnce([](const auto& message) {
-        // TODO(crbug.com/961081): Use IsCastInternalMessage as argument to
+        // TODO(crbug.com/41457655): Use IsCastInternalMessage as argument to
         // SendSetVolumeRequestToReceiver when bug is fixed.
         EXPECT_THAT(message, IsCastInternalMessage(R"({
           "type": "v2_message",
@@ -210,13 +250,13 @@ TEST_F(CastSessionClientImplTest, OnMediaStatusUpdatedWithPendingRequest) {
     "timeoutMillis": 0,
     "type": "v2_message"
   })")));
-  client_->SendMediaStatusToClient(ParseJson(R"({"foo": "bar"})"), 123);
+  client_->SendMediaMessageToClient(ParseJsonDict(R"({"foo": "bar"})"), 123);
 }
 
 TEST_F(CastSessionClientImplTest, SendSetVolumeCommandToReceiver) {
   EXPECT_CALL(activity_, SendSetVolumeRequestToReceiver)
       .WillOnce([](const auto& message, auto callback) {
-        // TODO(crbug.com/961081): Use IsCastInternalMessage as argument to
+        // TODO(crbug.com/41457655): Use IsCastInternalMessage as argument to
         // SendSetVolumeRequestToReceiver when bug is fixed.
         EXPECT_THAT(message, IsCastInternalMessage(R"({
           "type": "v2_message",
@@ -269,12 +309,16 @@ TEST_F(CastSessionClientImplTest, SendStopSessionCommandToReceiver) {
 }
 
 TEST_F(CastSessionClientImplTest, CloseConnection) {
-  EXPECT_CALL(activity_, CloseConnectionOnReceiver("theClientId"));
+  EXPECT_CALL(activity_,
+              CloseConnectionOnReceiver(
+                  "theClientId", PresentationConnectionCloseReason::CLOSED));
   client_->CloseConnection(PresentationConnectionCloseReason::CLOSED);
 }
 
 TEST_F(CastSessionClientImplTest, DidCloseConnection) {
-  EXPECT_CALL(activity_, CloseConnectionOnReceiver("theClientId"));
+  EXPECT_CALL(activity_,
+              CloseConnectionOnReceiver(
+                  "theClientId", PresentationConnectionCloseReason::WENT_AWAY));
   client_->DidClose(PresentationConnectionCloseReason::WENT_AWAY);
 }
 

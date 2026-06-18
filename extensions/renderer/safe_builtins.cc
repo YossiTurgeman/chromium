@@ -1,15 +1,24 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "extensions/renderer/safe_builtins.h"
 
 #include "base/check.h"
-#include "base/notreached.h"
-#include "base/stl_util.h"
+#include "base/compiler_specific.h"
 #include "base/strings/stringprintf.h"
 #include "extensions/renderer/script_context.h"
 #include "extensions/renderer/v8_helpers.h"
+#include "v8/include/v8-context.h"
+#include "v8/include/v8-exception.h"
+#include "v8/include/v8-extension.h"
+#include "v8/include/v8-function.h"
+#include "v8/include/v8-isolate.h"
+#include "v8/include/v8-microtask-queue.h"
+#include "v8/include/v8-object.h"
+#include "v8/include/v8-primitive-object.h"
+#include "v8/include/v8-primitive.h"
+#include "v8/include/v8-template.h"
 
 namespace extensions {
 
@@ -68,19 +77,20 @@ const char kScript[] =
     "// Save only what is needed by the extension modules.\n"
     "saveBuiltin(Object,\n"
     "            ['hasOwnProperty'],\n"
-    "            ['create', 'defineProperty', 'freeze',\n"
+    "            ['assign', 'create', 'defineProperty', 'entries', 'freeze',\n"
     "             'getOwnPropertyDescriptor', 'getPrototypeOf', 'keys',\n"
-    "             'assign', 'setPrototypeOf']);\n"
+    "             'setPrototypeOf']);\n"
     "saveBuiltin(Function,\n"
     "            ['apply', 'bind', 'call']);\n"
     "saveBuiltin(Array,\n"
-    "            ['concat', 'forEach', 'indexOf', 'join', 'push', 'slice',\n"
-    "             'splice', 'map', 'filter', 'shift', 'unshift', 'pop',\n"
-    "             'reverse'],\n"
+    "            ['concat', 'forEach', 'includes', 'indexOf', 'join', 'push',\n"
+    "             'slice', 'splice', 'map', 'filter', 'shift', 'unshift',\n"
+    "             'pop', 'push', 'reverse', 'find'],\n"
     "            ['from', 'isArray']);\n"
     "saveBuiltin(String,\n"
     "            ['indexOf', 'slice', 'split', 'substr', 'toLowerCase',\n"
-    "             'toUpperCase', 'replace']);\n"
+    "             'toUpperCase', 'replace'],\n"
+    "            ['fromCharCode']);\n"
     "// Use exec rather than test to defend against clobbering in the\n"
     "// presence of ES2015 semantics, which read RegExp.prototype.exec.\n"
     "saveBuiltin(RegExp,\n"
@@ -89,7 +99,11 @@ const char kScript[] =
     "            [],\n"
     "            ['captureStackTrace']);\n"
     "saveBuiltin(Promise,\n"
-    "            ['then', 'catch']);\n"
+    "            ['then', 'catch'],\n"
+    "            ['race', 'resolve']);\n"
+    "Save('Symbol', {\n"
+    "  toStringTag: Symbol.toStringTag\n"
+    "});\n"
     "\n"
     "// JSON is trickier because extensions can override toJSON in\n"
     "// incompatible ways, and we need to prevent that.\n"
@@ -142,14 +156,14 @@ void SaveImpl(const char* name,
               v8::Local<v8::Context> context) {
   CHECK(!value.IsEmpty() && value->IsObject()) << name;
   context->Global()
-      ->SetPrivate(context, MakeKey(name, context->GetIsolate()), value)
+      ->SetPrivate(context, MakeKey(name, v8::Isolate::GetCurrent()), value)
       .FromJust();
 }
 
 v8::Local<v8::Object> Load(const char* name, v8::Local<v8::Context> context) {
   v8::Local<v8::Value> value =
       context->Global()
-          ->GetPrivate(context, MakeKey(name, context->GetIsolate()))
+          ->GetPrivate(context, MakeKey(name, v8::Isolate::GetCurrent()))
           .ToLocalChecked();
   CHECK(value->IsObject()) << name;
   return v8::Local<v8::Object>::Cast(value);
@@ -168,7 +182,6 @@ class ExtensionImpl : public v8::Extension {
     if (name->StringEquals(v8_helpers::ToV8StringUnsafe(isolate, "Save")))
       return v8::FunctionTemplate::New(isolate, Save);
     NOTREACHED() << *v8::String::Utf8Value(isolate, name);
-    return v8::Local<v8::FunctionTemplate>();
   }
 
   static void Apply(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -177,6 +190,10 @@ class ExtensionImpl : public v8::Extension {
           info[2]->IsObject() &&  // args
           info[3]->IsInt32() &&   // first_arg_index
           info[4]->IsInt32());    // args_length
+    v8::Local<v8::Context> context = info.GetIsolate()->GetCurrentContext();
+    v8::MicrotasksScope microtasks(info.GetIsolate(),
+                                   context->GetMicrotaskQueue(),
+                                   v8::MicrotasksScope::kDoNotRunMicrotasks);
     v8::Local<v8::Function> function = info[0].As<v8::Function>();
     v8::Local<v8::Object> recv;
     if (info[1]->IsObject()) {
@@ -196,7 +213,6 @@ class ExtensionImpl : public v8::Extension {
     int first_arg_index = info[3].As<v8::Int32>()->Value();
     int args_length = info[4].As<v8::Int32>()->Value();
 
-    v8::Local<v8::Context> context = info.GetIsolate()->GetCurrentContext();
     int argc = args_length - first_arg_index;
     std::unique_ptr<v8::Local<v8::Value>[]> argv(
         new v8::Local<v8::Value>[argc]);
@@ -204,12 +220,11 @@ class ExtensionImpl : public v8::Extension {
       CHECK(v8_helpers::IsTrue(args->Has(context, i + first_arg_index)));
       // Getting a property value could throw an exception.
       if (!v8_helpers::GetProperty(context, args, i + first_arg_index,
-                                   &argv[i]))
+                                   UNSAFE_TODO(&argv[i]))) {
         return;
+      }
     }
 
-    v8::MicrotasksScope microtasks(
-        info.GetIsolate(), v8::MicrotasksScope::kDoNotRunMicrotasks);
     v8::Local<v8::Value> return_value;
     if (function->Call(context, recv, argc, argv.get()).ToLocal(&return_value))
       info.GetReturnValue().Set(return_value);
@@ -231,7 +246,7 @@ std::unique_ptr<v8::Extension> SafeBuiltins::CreateV8Extension() {
 
 SafeBuiltins::SafeBuiltins(ScriptContext* context) : context_(context) {}
 
-SafeBuiltins::~SafeBuiltins() {}
+SafeBuiltins::~SafeBuiltins() = default;
 
 v8::Local<v8::Object> SafeBuiltins::GetArray() const {
   return Load("Array", context_->v8_context());
@@ -263,6 +278,10 @@ v8::Local<v8::Object> SafeBuiltins::GetError() const {
 
 v8::Local<v8::Object> SafeBuiltins::GetPromise() const {
   return Load("Promise", context_->v8_context());
+}
+
+v8::Local<v8::Object> SafeBuiltins::GetSymbol() const {
+  return Load("Symbol", context_->v8_context());
 }
 
 }  //  namespace extensions

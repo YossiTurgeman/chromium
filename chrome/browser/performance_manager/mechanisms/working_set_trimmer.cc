@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,7 @@
 #include "base/no_destructor.h"
 #include "build/build_config.h"
 
-#if defined(OS_WIN)
-#include "chrome/browser/performance_manager/mechanisms/working_set_trimmer_win.h"
-#elif defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/performance_manager/mechanisms/working_set_trimmer_chromeos.h"
 #endif
 
@@ -26,15 +24,13 @@ class NoOpWorkingSetTrimmer : public WorkingSetTrimmer {
 
   // WorkingSetTrimmer implementation:
   bool PlatformSupportsWorkingSetTrim() override { return false; }
-  bool TrimWorkingSet(const ProcessNode* node) override { return false; }
+  void TrimWorkingSet(const ProcessNode* node) override {}
 };
 
 }  // namespace
 
 WorkingSetTrimmer* WorkingSetTrimmer::GetInstance() {
-#if defined(OS_WIN)
-  static base::NoDestructor<WorkingSetTrimmerWin> trimmer;
-#elif defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   static base::NoDestructor<WorkingSetTrimmerChromeOS> trimmer;
 #else
   static base::NoDestructor<NoOpWorkingSetTrimmer> trimmer;

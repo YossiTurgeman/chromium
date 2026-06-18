@@ -1,18 +1,23 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include <memory>
+#include <tuple>
+
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/run_loop.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/test/run_until.h"
 #include "base/test/test_timeouts.h"
 #include "build/build_config.h"
 #include "cc/base/switches.h"
-#include "content/browser/renderer_host/input/synthetic_gesture.h"
-#include "content/browser/renderer_host/input/synthetic_smooth_scroll_gesture.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
+#include "content/common/input/synthetic_gesture.h"
 #include "content/common/input/synthetic_gesture_params.h"
+#include "content/common/input/synthetic_smooth_scroll_gesture.h"
 #include "content/common/input/synthetic_smooth_scroll_gesture_params.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
@@ -31,15 +36,18 @@ namespace content {
 
 class SyntheticInputTest : public ContentBrowserTest {
  public:
-  SyntheticInputTest() {}
+  SyntheticInputTest() = default;
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    command_line->AppendSwitch(cc::switches::kEnableGpuBenchmarking);
+    command_line->AppendSwitch(switches::kEnableGpuBenchmarking);
   }
 
   RenderWidgetHostImpl* GetRenderWidgetHost() const {
-    return RenderWidgetHostImpl::From(
-        shell()->web_contents()->GetRenderViewHost()->GetWidget());
+    return RenderWidgetHostImpl::From(shell()
+                                          ->web_contents()
+                                          ->GetPrimaryMainFrame()
+                                          ->GetRenderViewHost()
+                                          ->GetWidget());
   }
 
   void LoadURL(const char* url) {
@@ -50,9 +58,9 @@ class SyntheticInputTest : public ContentBrowserTest {
     HitTestRegionObserver observer(GetRenderWidgetHost()->GetFrameSinkId());
     host->GetView()->SetSize(gfx::Size(400, 400));
 
-    base::string16 ready_title(base::ASCIIToUTF16("ready"));
+    std::u16string ready_title(u"ready");
     TitleWatcher watcher(shell()->web_contents(), ready_title);
-    ignore_result(watcher.WaitAndGetTitle());
+    std::ignore = watcher.WaitAndGetTitle();
 
     // Wait for the hit test data to be ready after initiating URL loading
     // before returning
@@ -70,7 +78,9 @@ class SyntheticInputTest : public ContentBrowserTest {
 
 class GestureScrollObserver : public RenderWidgetHost::InputEventObserver {
  public:
-  void OnInputEvent(const blink::WebInputEvent& event) override {
+  void OnInputEvent(const RenderWidgetHost& widget,
+                    const blink::WebInputEvent& event,
+                    InputEventSource source) override {
     if (event.GetType() == blink::WebInputEvent::Type::kGestureScrollBegin)
       gesture_scroll_seen_ = true;
   }
@@ -98,18 +108,20 @@ IN_PROC_BROWSER_TEST_F(SyntheticInputTest, DestroyWidgetWithOngoingGesture) {
              "chrome.gpuBenchmarking.smoothScrollByXY(0, 10000, ()=>{}, "
              "100, 100, chrome.gpuBenchmarking.TOUCH_INPUT);"));
 
-  while (!gesture_observer.HasSeenGestureScrollBegin()) {
-    base::RunLoop run_loop;
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-        FROM_HERE, run_loop.QuitClosure(), TestTimeouts::tiny_timeout());
-    run_loop.Run();
-  }
+  EXPECT_TRUE(base::test::RunUntil(
+      [&]() { return gesture_observer.HasSeenGestureScrollBegin(); }));
 
   shell()->Close();
 }
 
 // This test ensures that synthetic wheel scrolling works on all platforms.
-IN_PROC_BROWSER_TEST_F(SyntheticInputTest, SmoothScrollWheel) {
+// Disabled for flakiness on Android (crbug.com/1103731).
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_SmoothScrollWheel DISABLED_SmoothScrollWheel
+#else
+#define MAYBE_SmoothScrollWheel SmoothScrollWheel
+#endif  // BUILDFLAG(IS_ANDROID)
+IN_PROC_BROWSER_TEST_F(SyntheticInputTest, MAYBE_SmoothScrollWheel) {
   LoadURL(R"HTML(
     data:text/html;charset=utf-8,
     <!DOCTYPE html>
@@ -125,13 +137,14 @@ IN_PROC_BROWSER_TEST_F(SyntheticInputTest, SmoothScrollWheel) {
     </script>
   )HTML");
 
-  SyntheticSmoothScrollGestureParams params;
-  params.gesture_source_type = SyntheticGestureParams::MOUSE_INPUT;
-  params.anchor = gfx::PointF(1, 1);
-
   // Note: 256 is precisely chosen since Android's minimum granularity is 64px.
   // All other platforms can specify the delta per-pixel.
-  params.distances.push_back(gfx::Vector2d(0, -256));
+  const int scroll_delta = 256;
+
+  SyntheticSmoothScrollGestureParams params;
+  params.gesture_source_type = content::mojom::GestureSourceType::kMouseInput;
+  params.anchor = gfx::PointF(1, 1);
+  params.distances.push_back(gfx::Vector2d(0, -scroll_delta));
 
   // Use a speed that's fast enough that the entire scroll occurs in a single
   // GSU, avoiding precision loss. SyntheticGestures can lose delta over time
@@ -141,7 +154,7 @@ IN_PROC_BROWSER_TEST_F(SyntheticInputTest, SmoothScrollWheel) {
   // Use PrecisePixel to avoid animating.
   params.granularity = ui::ScrollGranularity::kScrollByPrecisePixel;
 
-  runner_.reset(new base::RunLoop());
+  runner_ = std::make_unique<base::RunLoop>();
 
   std::unique_ptr<SyntheticSmoothScrollGesture> gesture(
       new SyntheticSmoothScrollGesture(params));
@@ -154,8 +167,8 @@ IN_PROC_BROWSER_TEST_F(SyntheticInputTest, SmoothScrollWheel) {
   runner_->Run();
   runner_.reset();
 
-  EXPECT_EQ(256, EvalJs(shell()->web_contents(),
-                        "document.scrollingElement.scrollTop"));
+  EXPECT_EQ(scroll_delta, EvalJs(shell()->web_contents(),
+                                 "document.scrollingElement.scrollTop"));
 }
 
 // This test ensures that slow synthetic wheel scrolling does not lose precision
@@ -179,13 +192,14 @@ IN_PROC_BROWSER_TEST_F(SyntheticInputTest, DISABLED_SlowSmoothScrollWheel) {
     </script>
   )HTML");
 
-  SyntheticSmoothScrollGestureParams params;
-  params.gesture_source_type = SyntheticGestureParams::MOUSE_INPUT;
-  params.anchor = gfx::PointF(1, 1);
-
   // Note: 1024 is precisely chosen since Android's minimum granularity is 64px.
   // All other platforms can specify the delta per-pixel.
-  params.distances.push_back(gfx::Vector2d(0, -1024));
+  const int scroll_delta = 1024;
+
+  SyntheticSmoothScrollGestureParams params;
+  params.gesture_source_type = content::mojom::GestureSourceType::kMouseInput;
+  params.anchor = gfx::PointF(1, 1);
+  params.distances.push_back(gfx::Vector2d(0, -scroll_delta));
 
   // Use a speed that's slow enough that it requires the browser to require
   // multiple wheel-events to be dispatched, so that precision is needed to
@@ -208,10 +222,10 @@ IN_PROC_BROWSER_TEST_F(SyntheticInputTest, DISABLED_SlowSmoothScrollWheel) {
   float device_scale_factor =
       web_contents->GetRenderWidgetHostView()->GetDeviceScaleFactor();
   scroll_offset_wait.WaitForScrollOffset(
-      gfx::Vector2dF(0.f, 1024.f * device_scale_factor));
+      gfx::PointF(0.f, ((float)scroll_delta) * device_scale_factor));
 
-  EXPECT_EQ(1024, EvalJs(shell()->web_contents(),
-                         "document.scrollingElement.scrollTop"));
+  EXPECT_EQ(scroll_delta, EvalJs(shell()->web_contents(),
+                                 "document.scrollingElement.scrollTop"));
 }
 
 }  // namespace content

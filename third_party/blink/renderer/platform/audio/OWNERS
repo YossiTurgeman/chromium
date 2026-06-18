@@ -1,4 +1,1 @@
-hongchan@chromium.org
-rtoy@chromium.org
-
-# COMPONENT: Blink>WebAudio
+file://third_party/blink/renderer/modules/webaudio/OWNERS

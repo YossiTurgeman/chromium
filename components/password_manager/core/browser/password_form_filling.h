@@ -1,24 +1,28 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_PASSWORD_FORM_FILLING_H_
 #define COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_PASSWORD_FORM_FILLING_H_
 
-#include <vector>
-
-#include "base/memory/weak_ptr.h"
-#include "base/strings/string16.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
+#include "components/autofill/core/common/unique_ids.h"
 
 namespace autofill {
-struct PasswordForm;
 struct PasswordFormFillData;
 }  // namespace autofill
 
+namespace url {
+class Origin;
+}  // namespace url
+
 namespace password_manager {
+class PasswordFormMetricsRecorder;
 class PasswordManagerClient;
 class PasswordManagerDriver;
-class PasswordFormMetricsRecorder;
+struct StoredCredential;
+struct PasswordForm;
 
 // Enum detailing the browser process' best belief what kind of credential
 // filling is used in the renderer for a given password form.
@@ -42,21 +46,25 @@ enum class LikelyFormFilling {
 LikelyFormFilling SendFillInformationToRenderer(
     PasswordManagerClient* client,
     PasswordManagerDriver* driver,
-    const autofill::PasswordForm& observed_form,
-    const std::vector<const autofill::PasswordForm*>& best_matches,
-    const std::vector<const autofill::PasswordForm*>& federated_matches,
-    const autofill::PasswordForm* preferred_match,
-    PasswordFormMetricsRecorder* metrics_recorder);
+    const PasswordForm& observed_form,
+    base::span<const StoredCredential> best_matches,
+    base::span<const StoredCredential> federated_matches,
+    const StoredCredential* preferred_match,
+    PasswordFormMetricsRecorder* metrics_recorder,
+    bool webauthn_suggestions_available,
+    base::span<autofill::FieldRendererId> suggestion_banned_fields);
 
 // Create a PasswordFormFillData structure in preparation for filling a form
 // identified by |form_on_page|, with credentials from |preferred_match| and
 // |matches|. |preferred_match| should equal to one of matches.
 // If |wait_for_username| is true then fill on account select will be used.
 autofill::PasswordFormFillData CreatePasswordFormFillData(
-    const autofill::PasswordForm& form_on_page,
-    const std::vector<const autofill::PasswordForm*>& matches,
-    const autofill::PasswordForm& preferred_match,
-    bool wait_for_username);
+    const PasswordForm& form_on_page,
+    base::span<const StoredCredential> best_matches,
+    const StoredCredential* preferred_match,
+    const url::Origin& main_frame_origin,
+    bool wait_for_username,
+    base::span<const autofill::FieldRendererId> suggestion_banned_fields);
 
 }  // namespace password_manager
 

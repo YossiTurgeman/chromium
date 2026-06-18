@@ -1,14 +1,18 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+
+import * as Application from 'devtools/panels/application/application.js';
 
 function dumpBackgroundServiceGrid() {
   TestRunner.addResult('Grid Entries:');
 
-  const treeElement = UI.panels.resources._sidebar.backgroundFetchTreeElement;
+    const treeElement = Application.ResourcesPanel.ResourcesPanel.instance().sidebar.backgroundFetchTreeElement;
   treeElement.onselect(false);
 
-  const dataGrid = treeElement._view._dataGrid;
+  const dataGrid = treeElement.view.dataGrid;
   if (!dataGrid.rootNode().children.length) {
     TestRunner.addResult('    [empty]');
     return;
@@ -29,20 +33,18 @@ function dumpBackgroundServiceGrid() {
 };
 
 function setOriginCheckbox(value) {
-  const treeElement = UI.panels.resources._sidebar.backgroundFetchTreeElement;
+  const treeElement = Application.ResourcesPanel.ResourcesPanel.instance().sidebar.backgroundFetchTreeElement;
   treeElement.onselect(false);
-  treeElement._view._originCheckbox.setChecked(value);
+  treeElement.view.originCheckbox.setChecked(value);
   // Simulate click.
-  treeElement._view._refreshView();
+  treeElement.view.refreshView();
 }
 
 (async function() {
-  Root.Runtime.experiments.setEnabled('backgroundServices', true);
-
   TestRunner.addResult(`Tests that the grid shows information as expected.\n`);
   await TestRunner.showPanel('resources');
 
-  const backgroundServiceModel = TestRunner.mainTarget.model(Resources.BackgroundServiceModel);
+  const backgroundServiceModel = TestRunner.mainTarget.model(Application.BackgroundServiceModel.BackgroundServiceModel);
   backgroundServiceModel.enable(Protocol.BackgroundService.ServiceName.BackgroundFetch);
   backgroundServiceModel.enable(Protocol.BackgroundService.ServiceName.BackgroundSync);
 
@@ -51,37 +53,46 @@ function setOriginCheckbox(value) {
 
   // Grid should have an entry now.
   backgroundServiceModel.backgroundServiceEventReceived({
-    timestamp: 1556889085,  // 2019-05-03 14:11:25.000.
-    origin: 'http://127.0.0.1:8000/',
-    serviceWorkerRegistrationId: 42,  // invalid.
-    service: Protocol.BackgroundService.ServiceName.BackgroundFetch,
-    eventName: 'Event1',
-    instanceId: 'Instance1',
-    eventMetadata: [],
+    backgroundServiceEvent: {
+      timestamp: 1556889085,  // 2019-05-03 14:11:25.000.
+      origin: 'http://127.0.0.1:8000/',
+      serviceWorkerRegistrationId: 42,  // invalid.
+      service: Protocol.BackgroundService.ServiceName.BackgroundFetch,
+      eventName: 'Event1',
+      instanceId: 'Instance1',
+      eventMetadata: [],
+      storageKey: 'testKey',
+    },
   });
   dumpBackgroundServiceGrid();
 
   // Event from a different service is ignored.
   backgroundServiceModel.backgroundServiceEventReceived({
-    timestamp: 1556889085,  // 2019-05-03 14:11:25.000.
-    origin: 'http://127.0.0.1:8000/',
-    serviceWorkerRegistrationId: 42,  // invalid.
-    service: Protocol.BackgroundService.ServiceName.BackgroundSync,
-    eventName: 'Event1',
-    instanceId: 'Instance2',
-    eventMetadata: [],
+    backgroundServiceEvent: {
+      timestamp: 1556889085,  // 2019-05-03 14:11:25.000.
+      origin: 'http://127.0.0.1:8000/',
+      serviceWorkerRegistrationId: 42,  // invalid.
+      service: Protocol.BackgroundService.ServiceName.BackgroundSync,
+      eventName: 'Event1',
+      instanceId: 'Instance2',
+      eventMetadata: [],
+      storageKey: 'testKey',
+    },
   });
   dumpBackgroundServiceGrid();
 
   // Event from a different origin is ignored.
   backgroundServiceModel.backgroundServiceEventReceived({
-    timestamp: 1556889085,  // 2019-05-03 14:11:25.000.
-    origin: 'http://127.0.0.1:8080/',
-    serviceWorkerRegistrationId: 42,  // invalid.
-    service: Protocol.BackgroundService.ServiceName.BackgroundFetch,
-    eventName: 'Event2',
-    instanceId: 'Instance1',
-    eventMetadata: [],
+    backgroundServiceEvent: {
+      timestamp: 1556889085,  // 2019-05-03 14:11:25.000.
+      origin: 'http://127.0.0.1:8080/',
+      serviceWorkerRegistrationId: 42,  // invalid.
+      service: Protocol.BackgroundService.ServiceName.BackgroundFetch,
+      eventName: 'Event2',
+      instanceId: 'Instance1',
+      eventMetadata: [],
+      storageKey: 'testKey',
+    },
   });
   dumpBackgroundServiceGrid();
 
@@ -94,7 +105,7 @@ function setOriginCheckbox(value) {
   dumpBackgroundServiceGrid();
 
   // Simulate clicking the clear button.
-  UI.panels.resources._sidebar.backgroundFetchTreeElement._view._clearEvents();
+  Application.ResourcesPanel.ResourcesPanel.instance().sidebar.backgroundFetchTreeElement.view.clearEvents();
   dumpBackgroundServiceGrid();
 
   TestRunner.completeTest();

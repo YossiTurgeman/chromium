@@ -1,4 +1,4 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -27,6 +27,14 @@ def GetChromiumSrcDir():
       os.path.dirname(__file__), '..', '..', '..'))
 
 
+def GetAndroidDeviceInteractionToPath():
+  return os.path.join(GetChromiumSrcDir(), 'third_party', 'catapult', 'devil')
+
+
+def GetBuildUtilDir():
+  return os.path.join(GetChromiumSrcDir(), 'build', 'util')
+
+
 def GetTelemetryDir():
   return os.path.join(
       GetChromiumSrcDir(), 'third_party', 'catapult', 'telemetry')
@@ -40,6 +48,10 @@ def GetTracingDir():
 def GetPyUtilsDir():
   return os.path.join(
       GetChromiumSrcDir(), 'third_party', 'catapult', 'common', 'py_utils')
+
+
+def GetCrossBenchDir():
+  return os.path.join(GetChromiumSrcDir(), 'third_party', 'crossbench')
 
 
 def GetPerfDir():
@@ -66,6 +78,22 @@ def GetVariationsDir():
   return os.path.join(GetChromiumSrcDir(), 'tools', 'variations')
 
 
+def GetDashboardDir():
+  return os.path.join(GetChromiumSrcDir(), 'third_party', 'catapult',
+                      'dashboard')
+
+def AddAndroidDeviceInteractionToPath():
+  device_interaction_path = GetAndroidDeviceInteractionToPath()
+  if device_interaction_path not in sys.path:
+    sys.path.insert(1, device_interaction_path)
+
+
+def AddBuildUtilToPath():
+  build_util_path = GetBuildUtilDir()
+  if build_util_path not in sys.path:
+    sys.path.insert(1, build_util_path)
+
+
 def AddTelemetryToPath():
   telemetry_path = GetTelemetryDir()
   if telemetry_path not in sys.path:
@@ -89,6 +117,11 @@ def AddAndroidPylibToPath():
   if android_pylib_path not in sys.path:
     sys.path.insert(1, android_pylib_path)
 
+
+def AddDashboardToPath():
+  dashboard_path = GetDashboardDir()
+  if dashboard_path not in sys.path:
+    sys.path.insert(1, dashboard_path)
 
 def GetExpectationsPath():
   return os.path.join(GetPerfDir(), 'expectations.config')

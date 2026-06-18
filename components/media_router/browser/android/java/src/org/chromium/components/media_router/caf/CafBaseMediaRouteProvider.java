@@ -1,13 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.media_router.caf;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.os.Handler;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.mediarouter.media.MediaRouteSelector;
 import androidx.mediarouter.media.MediaRouter;
 import androidx.mediarouter.media.MediaRouter.RouteInfo;
@@ -16,12 +16,15 @@ import com.google.android.gms.cast.framework.CastSession;
 import com.google.android.gms.cast.framework.SessionManagerListener;
 
 import org.chromium.base.Log;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.media_router.DiscoveryCallback;
 import org.chromium.components.media_router.DiscoveryDelegate;
 import org.chromium.components.media_router.FlingingController;
 import org.chromium.components.media_router.MediaRoute;
 import org.chromium.components.media_router.MediaRouteManager;
 import org.chromium.components.media_router.MediaRouteProvider;
+import org.chromium.components.media_router.MediaRouterClient;
 import org.chromium.components.media_router.MediaSink;
 import org.chromium.components.media_router.MediaSource;
 
@@ -33,22 +36,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * A base provider containing common implementation for CAF-based {@link MediaRouteProvider}s.
- */
+/** A base provider containing common implementation for CAF-based {@link MediaRouteProvider}s. */
+@NullMarked
 public abstract class CafBaseMediaRouteProvider
         implements MediaRouteProvider, DiscoveryDelegate, SessionManagerListener<CastSession> {
     private static final String TAG = "CafMR";
 
     protected static final List<MediaSink> NO_SINKS = Collections.emptyList();
-    private final @NonNull MediaRouter mAndroidMediaRouter;
+    private final MediaRouter mAndroidMediaRouter;
     protected final MediaRouteManager mManager;
-    protected final Map<String, DiscoveryCallback> mDiscoveryCallbacks =
-            new HashMap<String, DiscoveryCallback>();
-    protected final Map<String, MediaRoute> mRoutes = new HashMap<String, MediaRoute>();
+    protected final Map<String, DiscoveryCallback> mDiscoveryCallbacks = new HashMap<>();
+    protected final Map<String, MediaRoute> mRoutes = new HashMap<>();
     protected Handler mHandler = new Handler();
 
-    private CreateRouteRequestInfo mPendingCreateRouteRequestInfo;
+    private @Nullable CreateRouteRequestInfo mPendingCreateRouteRequestInfo;
 
     protected CafBaseMediaRouteProvider(MediaRouter androidMediaRouter, MediaRouteManager manager) {
         mAndroidMediaRouter = androidMediaRouter;
@@ -59,24 +60,22 @@ public abstract class CafBaseMediaRouteProvider
      * @return A MediaSource object constructed from |sourceId|, or null if the derived class does
      * not support the source.
      */
-    @Nullable
-    protected abstract MediaSource getSourceFromId(@NonNull String sourceId);
+    protected abstract @Nullable MediaSource getSourceFromId(String sourceId);
 
-    /**
-     * Forward the sinks back to the native counterpart.
-     */
-    private final void onSinksReceivedInternal(String sourceId, @NonNull List<MediaSink> sinks) {
+    /** Forward the sinks back to the native counterpart. */
+    private void onSinksReceivedInternal(String sourceId, List<MediaSink> sinks) {
         Log.d(TAG, "Reporting %d sinks for source: %s", sinks.size(), sourceId);
         mManager.onSinksReceived(sourceId, this, sinks);
     }
 
-    /**
-     * {@link DiscoveryDelegate} implementation.
-     */
+    /** {@link DiscoveryDelegate} implementation. */
     @Override
-    public final void onSinksReceived(String sourceId, @NonNull List<MediaSink> sinks) {
+    public final void onSinksReceived(String sourceId, List<MediaSink> sinks) {
         Log.d(TAG, "Received %d sinks for sourceId: %s", sinks.size(), sourceId);
-        mHandler.post(() -> { onSinksReceivedInternal(sourceId, sinks); });
+        mHandler.post(
+                () -> {
+                    onSinksReceivedInternal(sourceId, sinks);
+                });
     }
 
     @Override
@@ -85,7 +84,7 @@ public abstract class CafBaseMediaRouteProvider
     }
 
     @Override
-    public final void startObservingMediaSinks(String sourceId) {
+    public final void startObservingMediaSinks(String sourceId, String origin) {
         Log.d(TAG, "startObservingMediaSinks: " + sourceId);
 
         MediaSource source = getSourceFromId(sourceId);
@@ -96,9 +95,12 @@ public abstract class CafBaseMediaRouteProvider
             return;
         }
 
-        // No-op, if already monitoring the application for this source.
         String applicationId = source.getApplicationId();
         DiscoveryCallback callback = mDiscoveryCallbacks.get(applicationId);
+
+        updateSessionMediaSourceIfNeeded(callback, source, origin);
+
+        // No-op, if already monitoring the application for this source.
         if (callback != null) {
             callback.addSourceUrn(sourceId);
             return;
@@ -111,30 +113,50 @@ public abstract class CafBaseMediaRouteProvider
             return;
         }
 
-        List<MediaSink> knownSinks = new ArrayList<MediaSink>();
-        for (RouteInfo route : mAndroidMediaRouter.getRoutes()) {
-            if (route.matchesSelector(routeSelector)) {
-                knownSinks.add(MediaSink.fromRoute(route));
-            }
-        }
-
-        callback = new DiscoveryCallback(sourceId, knownSinks, this, routeSelector);
-        mAndroidMediaRouter.addCallback(
-                routeSelector, callback, MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY);
+        // Construct a DiscoveryCallback and add it to mDiscoveryCallbacks so that we don't
+        // create duplicate DiscoveryCallback for the same application id.
+        callback = new DiscoveryCallback(sourceId, this, routeSelector);
         mDiscoveryCallbacks.put(applicationId, callback);
+
+        // Use deferred task here because it's likely that we need to initialize the
+        // GlobalMediaRouter, which is slow and might block the main thread.
+        // More details in crbug.com/1368805.
+        assumeNonNull(MediaRouterClient.getInstance())
+                .addDeferredTask(
+                        () -> {
+                            DiscoveryCallback discoveryCallback =
+                                    mDiscoveryCallbacks.get(applicationId);
+                            if (discoveryCallback == null) {
+                                return;
+                            }
+
+                            // Query Android media router for sinks that have been discovered and
+                            // send sink updates to the browser.
+                            List<MediaSink> knownSinks =
+                                    getKnownSinksFromAndroidMediaRouter(routeSelector);
+                            discoveryCallback.setAndUpdateSinks(knownSinks);
+                            mAndroidMediaRouter.addCallback(
+                                    routeSelector,
+                                    discoveryCallback,
+                                    MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY);
+                        });
     }
 
     @Override
     public final void stopObservingMediaSinks(String sourceId) {
-        Log.d(TAG, "startObservingMediaSinks: " + sourceId);
+        Log.d(TAG, "stopObservingMediaSinks: " + sourceId);
 
         MediaSource source = getSourceFromId(sourceId);
-        if (source == null) return;
+        if (source == null) {
+            return;
+        }
 
         // No-op, if not monitoring the application for this source.
         String applicationId = source.getApplicationId();
         DiscoveryCallback callback = mDiscoveryCallbacks.get(applicationId);
-        if (callback == null) return;
+        if (callback == null) {
+            return;
+        }
 
         callback.removeSourceUrn(sourceId);
 
@@ -145,8 +167,14 @@ public abstract class CafBaseMediaRouteProvider
     }
 
     @Override
-    public final void createRoute(String sourceId, String sinkId, String presentationId,
-            String origin, int tabId, boolean isOffTheRecord, int nativeRequestId) {
+    public final void createRoute(
+            String sourceId,
+            String sinkId,
+            String presentationId,
+            String origin,
+            int tabId,
+            boolean isOffTheRecord,
+            int nativeRequestId) {
         Log.d(TAG, "createRoute");
         if (sessionController().isConnected()) {
             // If there is an active session or a pending create route request, force end the
@@ -161,32 +189,41 @@ public abstract class CafBaseMediaRouteProvider
 
         MediaSink sink = MediaSink.fromSinkId(sinkId, mAndroidMediaRouter);
         if (sink == null) {
-            mManager.onRouteRequestError("No sink", nativeRequestId);
+            mManager.onCreateRouteRequestError("No sink", nativeRequestId);
             return;
         }
 
         MediaSource source = getSourceFromId(sourceId);
         if (source == null) {
-            mManager.onRouteRequestError("Unsupported source URL", nativeRequestId);
+            mManager.onCreateRouteRequestError("Unsupported source URL", nativeRequestId);
             return;
         }
 
         MediaRouter.RouteInfo targetRouteInfo = null;
-        for (MediaRouter.RouteInfo routeInfo : getAndroidMediaRouter().getRoutes()) {
+        for (MediaRouter.RouteInfo routeInfo : mAndroidMediaRouter.getRoutes()) {
             if (routeInfo.getId().equals(sink.getId())) {
                 targetRouteInfo = routeInfo;
                 break;
             }
         }
         if (targetRouteInfo == null) {
-            mManager.onRouteRequestError("The sink does not exist", nativeRequestId);
+            mManager.onCreateRouteRequestError("The sink does not exist", nativeRequestId);
         }
 
-        CastUtils.getCastContext().getSessionManager().addSessionManagerListener(
-                this, CastSession.class);
+        CastUtils.getCastContext()
+                .getSessionManager()
+                .addSessionManagerListener(this, CastSession.class);
 
-        mPendingCreateRouteRequestInfo = new CreateRouteRequestInfo(source, sink, presentationId,
-                origin, tabId, isOffTheRecord, nativeRequestId, targetRouteInfo);
+        mPendingCreateRouteRequestInfo =
+                new CreateRouteRequestInfo(
+                        source,
+                        sink,
+                        presentationId,
+                        origin,
+                        tabId,
+                        isOffTheRecord,
+                        nativeRequestId,
+                        targetRouteInfo);
 
         sessionController().requestSessionLaunch();
     }
@@ -194,7 +231,9 @@ public abstract class CafBaseMediaRouteProvider
     @Override
     public void closeRoute(String routeId) {
         MediaRoute route = mRoutes.get(routeId);
-        if (route == null) return;
+        if (route == null) {
+            return;
+        }
 
         if (!hasSession()) {
             removeRoute(routeId, /* error= */ null);
@@ -278,13 +317,21 @@ public abstract class CafBaseMediaRouteProvider
     protected void handleSessionStart(CastSession session, String sessionId) {
         sessionController().attachToCastSession(session);
         sessionController().onSessionStarted();
+        assumeNonNull(mPendingCreateRouteRequestInfo);
 
         MediaSink sink = mPendingCreateRouteRequestInfo.sink;
-        MediaSource source = mPendingCreateRouteRequestInfo.source;
-        MediaRoute route = new MediaRoute(
-                sink.getId(), source.getSourceId(), mPendingCreateRouteRequestInfo.presentationId);
-        addRoute(route, mPendingCreateRouteRequestInfo.origin, mPendingCreateRouteRequestInfo.tabId,
-                mPendingCreateRouteRequestInfo.nativeRequestId, /* wasLaunched= */ true);
+        MediaSource source = mPendingCreateRouteRequestInfo.getMediaSource();
+        MediaRoute route =
+                new MediaRoute(
+                        sink.getId(),
+                        source.getSourceId(),
+                        mPendingCreateRouteRequestInfo.presentationId);
+        addRoute(
+                route,
+                mPendingCreateRouteRequestInfo.origin,
+                mPendingCreateRouteRequestInfo.tabId,
+                mPendingCreateRouteRequestInfo.nativeRequestId,
+                /* wasLaunched= */ true);
 
         mPendingCreateRouteRequestInfo = null;
     }
@@ -299,20 +346,33 @@ public abstract class CafBaseMediaRouteProvider
         }
         sessionController().onSessionEnded();
         sessionController().detachFromCastSession();
-        getAndroidMediaRouter().selectRoute(getAndroidMediaRouter().getDefaultRoute());
+        mAndroidMediaRouter.selectRoute(mAndroidMediaRouter.getDefaultRoute());
         terminateAllRoutes();
-        CastUtils.getCastContext().getSessionManager().removeSessionManagerListener(
-                this, CastSession.class);
+        CastUtils.getCastContext()
+                .getSessionManager()
+                .removeSessionManagerListener(this, CastSession.class);
     }
 
     private void cancelPendingRequest(String error) {
-        if (mPendingCreateRouteRequestInfo == null) return;
+        if (mPendingCreateRouteRequestInfo == null) {
+            return;
+        }
 
-        mManager.onRouteRequestError(error, mPendingCreateRouteRequestInfo.nativeRequestId);
+        mManager.onCreateRouteRequestError(error, mPendingCreateRouteRequestInfo.nativeRequestId);
         mPendingCreateRouteRequestInfo = null;
     }
 
-    public @NonNull MediaRouter getAndroidMediaRouter() {
+    private List<MediaSink> getKnownSinksFromAndroidMediaRouter(MediaRouteSelector routeSelector) {
+        List<MediaSink> knownSinks = new ArrayList<>();
+        for (RouteInfo route : mAndroidMediaRouter.getRoutes()) {
+            if (route.matchesSelector(routeSelector)) {
+                knownSinks.add(MediaSink.fromRoute(route));
+            }
+        }
+        return knownSinks;
+    }
+
+    public MediaRouter getAndroidMediaRouter() {
         return mAndroidMediaRouter;
     }
 
@@ -327,6 +387,12 @@ public abstract class CafBaseMediaRouteProvider
             MediaRoute route, String origin, int tabId, int nativeRequestId, boolean wasLaunched) {
         mRoutes.put(route.id, route);
         mManager.onRouteCreated(route.id, route.sinkId, nativeRequestId, this, wasLaunched);
+    }
+
+    /** Updates the media source for the route identified by @param routeId */
+    public void updateRouteMediaSource(String routeId, String sourceId) {
+        assumeNonNull(mRoutes.get(routeId)).setSourceId(sourceId);
+        mManager.onRouteMediaSourceUpdated(routeId, sourceId);
     }
 
     /**
@@ -376,12 +442,14 @@ public abstract class CafBaseMediaRouteProvider
     }
 
     @Override
-    @Nullable
-    public FlingingController getFlingingController(String routeId) {
+    public @Nullable FlingingController getFlingingController(String routeId) {
         return null;
     }
 
-    public CreateRouteRequestInfo getPendingCreateRouteRequestInfo() {
+    public @Nullable CreateRouteRequestInfo getPendingCreateRouteRequestInfo() {
         return mPendingCreateRouteRequestInfo;
     }
+
+    protected void updateSessionMediaSourceIfNeeded(
+            @Nullable DiscoveryCallback callback, MediaSource source, String origin) {}
 }

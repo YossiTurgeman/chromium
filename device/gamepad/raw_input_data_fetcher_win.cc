@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,19 @@
 
 #include <stddef.h>
 
-#include "base/bind.h"
-#include "base/stl_util.h"
-#include "base/strings/stringprintf.h"
+#include <memory>
+
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/trace_event/trace_event.h"
 #include "device/gamepad/gamepad_standard_mappings.h"
 #include "device/gamepad/gamepad_uma.h"
 #include "device/gamepad/nintendo_controller.h"
+#include "device/gamepad/public/cpp/gamepad_features.h"
 
 namespace device {
 
@@ -40,21 +45,18 @@ GamepadSource RawInputDataFetcher::source() {
   return Factory::static_source();
 }
 
-void RawInputDataFetcher::OnAddedToProvider() {
-  hid_functions_ = std::make_unique<HidDllFunctionsWin>();
-  rawinput_available_ = hid_functions_->IsValid();
-}
-
-RAWINPUTDEVICE* RawInputDataFetcher::GetRawInputDevices(DWORD flags) {
-  size_t usage_count = base::size(DeviceUsages);
-  std::unique_ptr<RAWINPUTDEVICE[]> devices(new RAWINPUTDEVICE[usage_count]);
+base::HeapArray<RAWINPUTDEVICE> RawInputDataFetcher::GetRawInputDevices(
+    DWORD flags) {
+  size_t usage_count = std::size(DeviceUsages);
+  auto devices = base::HeapArray<RAWINPUTDEVICE>::Uninit(usage_count);
+  const auto device_usages_span = base::span(DeviceUsages);
   for (size_t i = 0; i < usage_count; ++i) {
     devices[i].dwFlags = flags;
     devices[i].usUsagePage = 1;
-    devices[i].usUsage = DeviceUsages[i];
+    devices[i].usUsage = device_usages_span[i];
     devices[i].hwndTarget = (flags & RIDEV_REMOVE) ? 0 : window_->hwnd();
   }
-  return devices.release();
+  return devices;
 }
 
 void RawInputDataFetcher::PauseHint(bool pause) {
@@ -65,11 +67,11 @@ void RawInputDataFetcher::PauseHint(bool pause) {
 }
 
 void RawInputDataFetcher::StartMonitor() {
-  if (!rawinput_available_ || events_monitored_)
+  if (events_monitored_)
     return;
 
   if (!window_) {
-    window_.reset(new base::win::MessageWindow());
+    window_ = std::make_unique<base::win::MessageWindow>();
     if (!window_->Create(base::BindRepeating(
             &RawInputDataFetcher::HandleMessage, base::Unretained(this)))) {
       PLOG(ERROR) << "Failed to create the raw input window";
@@ -79,9 +81,8 @@ void RawInputDataFetcher::StartMonitor() {
   }
 
   // Register to receive raw HID input.
-  std::unique_ptr<RAWINPUTDEVICE[]> devices(
-      GetRawInputDevices(RIDEV_INPUTSINK));
-  if (!::RegisterRawInputDevices(devices.get(), base::size(DeviceUsages),
+  auto devices = GetRawInputDevices(RIDEV_INPUTSINK);
+  if (!::RegisterRawInputDevices(devices.data(), std::size(DeviceUsages),
                                  sizeof(RAWINPUTDEVICE))) {
     PLOG(ERROR) << "RegisterRawInputDevices() failed for RIDEV_INPUTSINK";
     window_.reset();
@@ -92,14 +93,13 @@ void RawInputDataFetcher::StartMonitor() {
 }
 
 void RawInputDataFetcher::StopMonitor() {
-  if (!rawinput_available_ || !events_monitored_)
+  if (!events_monitored_)
     return;
 
   // Stop receiving raw input.
   DCHECK(window_);
-  std::unique_ptr<RAWINPUTDEVICE[]> devices(GetRawInputDevices(RIDEV_REMOVE));
-
-  if (!::RegisterRawInputDevices(devices.get(), base::size(DeviceUsages),
+  auto devices = GetRawInputDevices(RIDEV_INPUTSINK);
+  if (!::RegisterRawInputDevices(devices.data(), std::size(DeviceUsages),
                                  sizeof(RAWINPUTDEVICE))) {
     PLOG(INFO) << "RegisterRawInputDevices() failed for RIDEV_REMOVE";
   }
@@ -126,9 +126,6 @@ void RawInputDataFetcher::ClearControllers() {
 }
 
 void RawInputDataFetcher::GetGamepadData(bool devices_changed_hint) {
-  if (!rawinput_available_)
-    return;
-
   if (devices_changed_hint)
     EnumerateDevices();
 
@@ -152,9 +149,8 @@ void RawInputDataFetcher::EnumerateDevices() {
   }
   DCHECK_EQ(0u, result);
 
-  std::unique_ptr<RAWINPUTDEVICELIST[]> device_list(
-      new RAWINPUTDEVICELIST[count]);
-  result = ::GetRawInputDeviceList(device_list.get(), &count,
+  auto device_list = base::HeapArray<RAWINPUTDEVICELIST>::Uninit(count);
+  result = ::GetRawInputDeviceList(device_list.data(), &count,
                                    sizeof(RAWINPUTDEVICELIST));
   if (result == static_cast<UINT>(-1)) {
     PLOG(ERROR) << "GetRawInputDeviceList() failed";
@@ -174,7 +170,7 @@ void RawInputDataFetcher::EnumerateDevices() {
       } else {
         int source_id = ++last_source_id_;
         auto new_device = std::make_unique<RawInputGamepadDeviceWin>(
-            device_handle, source_id, hid_functions_.get());
+            device_handle, source_id);
         if (!new_device->IsValid()) {
           new_device->Shutdown();
           continue;
@@ -206,9 +202,17 @@ void RawInputDataFetcher::EnumerateDevices() {
         // path handle it.
         // http://msdn.microsoft.com/en-us/library/windows/desktop/ee417014.aspx
         const std::wstring device_name = new_device->GetDeviceName();
-        if (filter_xinput_ && device_name.find(L"IG_") != std::wstring::npos) {
+        if (filter_xinput_ && device_name.contains(L"IG_")) {
           new_device->Shutdown();
           continue;
+        }
+
+        if (base::FeatureList::IsEnabled(
+                features::kClaimDuplicateGamepadsProductIdentifier)) {
+          // Claim HID gamepads enumerated by this data fetcher to avoid
+          // double-enumeration in WgiDataFetcherWin.
+          ClaimProductIdentifier(
+              GamepadIdList::GetProductIdentifier(vendor_int, product_int));
         }
 
         PadState* state = GetPadState(source_id, is_recognized);
@@ -230,7 +234,7 @@ void RawInputDataFetcher::EnumerateDevices() {
         state->mapper = GetGamepadStandardMappingFunction(
             product_string, vendor_int, product_int,
             /*hid_specification_version=*/0, version_number,
-            GAMEPAD_BUS_UNKNOWN);
+            GAMEPAD_BUS_UNKNOWN, kGamepadDriverUnknown);
         state->axis_mask = 0;
         state->button_mask = 0;
 
@@ -323,9 +327,9 @@ LRESULT RawInputDataFetcher::OnInput(HRAWINPUT input_handle) {
   DCHECK_EQ(0u, result);
 
   // Retrieve the input record.
-  std::unique_ptr<uint8_t[]> buffer(new uint8_t[size]);
-  RAWINPUT* input = reinterpret_cast<RAWINPUT*>(buffer.get());
-  result = ::GetRawInputData(input_handle, RID_INPUT, buffer.get(), &size,
+  auto buffer = base::HeapArray<uint8_t>::Uninit(size);
+  RAWINPUT* input = reinterpret_cast<RAWINPUT*>(buffer.data());
+  result = ::GetRawInputData(input_handle, RID_INPUT, buffer.data(), &size,
                              sizeof(RAWINPUTHEADER));
   if (result == static_cast<UINT>(-1)) {
     PLOG(ERROR) << "GetRawInputData() failed";

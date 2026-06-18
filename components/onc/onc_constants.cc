@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,6 +24,7 @@ const char kRemove[] = "Remove";
 
 // Top Level Configuration
 namespace toplevel_config {
+const char kAdminAPNList[] = "AdminAPNList";
 const char kCertificates[] = "Certificates";
 const char kEncryptedConfiguration[] = "EncryptedConfiguration";
 const char kNetworkConfigurations[] = "NetworkConfigurations";
@@ -35,6 +36,7 @@ const char kUnencryptedConfiguration[] = "UnencryptedConfiguration";
 // Network Configuration
 namespace network_config {
 const char kCellular[] = "Cellular";
+const char kCheckCaptivePortal[] = "CheckCaptivePortal";
 const char kConnectable[] = "Connectable";
 const char kConnectionState[] = "ConnectionState";
 const char kDevice[] = "Device";
@@ -61,6 +63,7 @@ const char kSourceUserPolicy[] = "UserPolicy";
 const char kSource[] = "Source";
 const char kStaticIPConfig[] = "StaticIPConfig";
 const char kTether[] = "Tether";
+const char kTrafficCounterResetTime[] = "TrafficCounterResetTime";
 const char kType[] = "Type";
 const char kVPN[] = "VPN";
 const char kWiFi[] = "WiFi";
@@ -95,6 +98,12 @@ const char kWimaxDeprecated[] = "WiMAX";
 const char kWireless[] = "Wireless";
 }  // namespace network_type
 
+namespace check_captive_portal {
+const char kFalse[] = "False";
+const char kHTTPOnly[] = "HTTPOnly";
+const char kTrue[] = "True";
+}  // namespace check_captive_portal
+
 namespace cellular {
 const char kActivationState[] = "ActivationState";
 const char kActivated[] = "Activated";
@@ -103,19 +112,24 @@ const char kAutoConnect[] = "AutoConnect";
 const char kNotActivated[] = "NotActivated";
 const char kPartiallyActivated[] = "PartiallyActivated";
 const char kActivationType[] = "ActivationType";
+const char kAdminAssignedAPNIds[] = "AdminAssignedAPNIds";
 const char kAllowRoaming[] = "AllowRoaming";
 const char kAPN[] = "APN";
 const char kAPNList[] = "APNList";
-const char kCarrier[] = "Carrier";
+const char kCustomAPNList[] = "CustomAPNList";
 const char kESN[] = "ESN";
 const char kFamily[] = "Family";
 const char kFirmwareRevision[] = "FirmwareRevision";
 const char kFoundNetworks[] = "FoundNetworks";
 const char kHardwareRevision[] = "HardwareRevision";
 const char kHomeProvider[] = "HomeProvider";
+const char kEID[] = "EID";
 const char kICCID[] = "ICCID";
 const char kIMEI[] = "IMEI";
 const char kIMSI[] = "IMSI";
+const char kLastConnectedAttachApnProperty[] = "LastConnectedAttachApnProperty";
+const char kLastConnectedDefaultApnProperty[] =
+    "LastConnectedDefaultApnProperty";
 const char kLastGoodAPN[] = "LastGoodAPN";
 const char kManufacturer[] = "Manufacturer";
 const char kMDN[] = "MDN";
@@ -133,6 +147,8 @@ const char kServingOperator[] = "ServingOperator";
 const char kSignalStrength[] = "SignalStrength";
 const char kSIMLockStatus[] = "SIMLockStatus";
 const char kSIMPresent[] = "SIMPresent";
+const char kSMDPAddress[] = "SMDPAddress";
+const char kSMDSAddress[] = "SMDSAddress";
 const char kSupportNetworkScan[] = "SupportNetworkScan";
 const char kTechnologyCdma1Xrtt[] = "CDMA1XRTT";
 const char kTechnologyEdge[] = "EDGE";
@@ -144,6 +160,10 @@ const char kTechnologyHspaPlus[] = "HSPAPlus";
 const char kTechnologyLte[] = "LTE";
 const char kTechnologyLteAdvanced[] = "LTEAdvanced";
 const char kTechnologyUmts[] = "UMTS";
+const char kTechnology5gNr[] = "5GNR";
+const char kTextMessagesAllow[] = "Allow";
+const char kTextMessagesSuppress[] = "Suppress";
+const char kTextMessagesUnset[] = "Unset";
 }  // namespace cellular
 
 namespace cellular_provider {
@@ -160,6 +180,28 @@ const char kPassword[] = "Password";
 const char kAuthentication[] = "Authentication";
 const char kLocalizedName[] = "LocalizedName";
 const char kLanguage[] = "Language";
+const char kAttach[] = "Attach";
+const char kId[] = "Id";
+const char kState[] = "State";
+const char kStateEnabled[] = "Enabled";
+const char kStateDisabled[] = "Disabled";
+const char kAuthenticationAutomatic[] = "";
+const char kAuthenticationPap[] = "PAP";
+const char kAuthenticationChap[] = "CHAP";
+const char kIpType[] = "IpType";
+const char kIpTypeAutomatic[] = "";
+const char kIpTypeIpv4[] = "IPv4";
+const char kIpTypeIpv6[] = "IPv6";
+const char kIpTypeIpv4Ipv6[] = "IPv4orIPv6";
+const char kApnTypes[] = "ApnTypes";
+const char kApnTypeDefault[] = "Default";
+const char kApnTypeAttach[] = "Attach";
+const char kApnTypeTether[] = "Tether";
+const char kSource[] = "Source";
+const char kSourceModem[] = "Modem";
+const char kSourceModb[] = "Modb";
+const char kSourceUi[] = "Ui";
+const char kSourceAdmin[] = "Admin";
 }  // namespace cellular_apn
 
 namespace cellular_found_network {
@@ -214,12 +256,15 @@ const char kIncludedRoutes[] = "IncludedRoutes";
 const char kExcludedRoutes[] = "ExcludedRoutes";
 const char kType[] = "Type";
 const char kWebProxyAutoDiscoveryUrl[] = "WebProxyAutoDiscoveryUrl";
+const char kMTU[] = "MTU";
 }  // namespace ipconfig
 
 namespace wifi {
 const char kAllowGatewayARPPolling[] = "AllowGatewayARPPolling";
 const char kAutoConnect[] = "AutoConnect";
 const char kBSSID[] = "BSSID";
+const char kBSSIDAllowlist[] = "BSSIDAllowlist";
+const char kBSSIDRequested[] = "BSSIDRequested";
 const char kEAP[] = "EAP";
 const char kFrequency[] = "Frequency";
 const char kFrequencyList[] = "FrequencyList";
@@ -230,12 +275,14 @@ const char kSSID[] = "SSID";
 const char kSecurity[] = "Security";
 const char kSecurityNone[] = "None";
 const char kSignalStrength[] = "SignalStrength";
-const char kTetheringState[] = "TetheringState";
+const char kSignalStrengthRssi[] = "SignalStrengthRssi";
 const char kWEP_8021X[] = "WEP-8021X";
 const char kWEP_PSK[] = "WEP-PSK";
 const char kWPA_EAP[] = "WPA-EAP";
 const char kWPA_PSK[] = "WPA-PSK";
 const char kWPA2_PSK[] = "WPA2-PSK";
+const char kPasspointId[] = "PasspointId";
+const char kPasspointMatchType[] = "PasspointMatchType";
 }  // namespace wifi
 
 // Deprecated, properties exist for ignoring old ONC config entries.
@@ -247,6 +294,8 @@ const char kEAP[] = "EAP";
 namespace client_cert {
 const char kClientCertPattern[] = "ClientCertPattern";
 const char kClientCertPKCS11Id[] = "ClientCertPKCS11Id";
+const char kClientCertProvisioningProfileId[] =
+    "ClientCertProvisioningProfileId";
 const char kClientCertRef[] = "ClientCertRef";
 const char kClientCertType[] = "ClientCertType";
 const char kClientCertTypeNone[] = "None";
@@ -260,6 +309,7 @@ const char kLocality[] = "Locality";
 const char kOrganization[] = "Organization";
 const char kOrganizationalUnit[] = "OrganizationalUnit";
 const char kPattern[] = "Pattern";
+const char kProvisioningProfileId[] = "ProvisioningProfileId";
 const char kPKCS11Id[] = "PKCS11Id";
 const char kRef[] = "Ref";
 const char kSubject[] = "Subject";
@@ -302,6 +352,8 @@ const char kStretch[] = "Stretch";
 namespace eap {
 const char kAnonymousIdentity[] = "AnonymousIdentity";
 const char kAutomatic[] = "Automatic";
+const char kCHAP[] = "CHAP";
+const char kDomainSuffixMatch[] = "DomainSuffixMatch";
 const char kEAP_AKA[] = "EAP-AKA";
 const char kEAP_FAST[] = "EAP-FAST";
 const char kEAP_SIM[] = "EAP-SIM";
@@ -338,6 +390,7 @@ const char kURI[] = "URI";
 }  // namespace eap_subject_alternative_name_match
 
 namespace vpn {
+const char kArcVpn[] = "ARCVPN";
 const char kAutoConnect[] = "AutoConnect";
 const char kHost[] = "Host";
 const char kIPsec[] = "IPsec";
@@ -346,10 +399,10 @@ const char kOpenVPN[] = "OpenVPN";
 const char kPassword[] = "Password";
 const char kSaveCredentials[] = "SaveCredentials";
 const char kThirdPartyVpn[] = "ThirdPartyVPN";
-const char kArcVpn[] = "ARCVPN";
 const char kTypeL2TP_IPsec[] = "L2TP-IPsec";
 const char kType[] = "Type";
 const char kUsername[] = "Username";
+const char kWireGuard[] = "WireGuard";
 }  // namespace vpn
 
 namespace ipsec {
@@ -358,7 +411,9 @@ const char kCert[] = "Cert";
 const char kEAP[] = "EAP";
 const char kGroup[] = "Group";
 const char kIKEVersion[] = "IKEVersion";
+const char kLocalIdentity[] = "LocalIdentity";
 const char kPSK[] = "PSK";
+const char kRemoteIdentity[] = "RemoteIdentity";
 const char kServerCAPEMs[] = "ServerCAPEMs";
 const char kServerCARef[] = "ServerCARef";
 const char kServerCARefs[] = "ServerCARefs";
@@ -429,12 +484,25 @@ const char kPassword[] = "Password";
 const char kPasswordAndOTP[] = "PasswordAndOTP";
 }  // openvpn_user_auth_type
 
+namespace wireguard {
+const char kAllowedIPs[] = "AllowedIPs";
+const char kEndpoint[] = "Endpoint";
+const char kIPAddresses[] = "IPAddresses";
+const char kPeers[] = "Peers";
+const char kPersistentKeepalive[] = "PersistentKeepalive";
+const char kPresharedKey[] = "PresharedKey";
+const char kPrivateKey[] = "PrivateKey";
+const char kPublicKey[] = "PublicKey";
+}  // namespace wireguard
+
 namespace third_party_vpn {
 const char kExtensionID[] = "ExtensionID";
 const char kProviderName[] = "ProviderName";
 }  // third_party_vpn
 
 namespace arc_vpn {
+// Deprecated. Property left here for ONC backward compatibility. See
+// b/185202698 for details.
 const char kTunnelChrome[] = "TunnelChrome";
 }  // namespace arc_vpn
 
@@ -482,15 +550,38 @@ const char kPasswordPlaceholderVerbatim[] = "${PASSWORD}";
 }  // namespace substitutes
 
 namespace global_network_config {
+const char kAllowAPNModification[] = "AllowAPNModification";
+const char kAllowCellularSimLock[] = "AllowCellularSimLock";
+const char kAllowCellularHotspot[] = "AllowCellularHotspot";
+const char kAllowOnlyPolicyCellularNetworks[] =
+    "AllowOnlyPolicyCellularNetworks";
 const char kAllowOnlyPolicyNetworksToAutoconnect[] =
     "AllowOnlyPolicyNetworksToAutoconnect";
 const char kAllowOnlyPolicyNetworksToConnect[] =
     "AllowOnlyPolicyNetworksToConnect";
 const char kAllowOnlyPolicyNetworksToConnectIfAvailable[] =
     "AllowOnlyPolicyNetworksToConnectIfAvailable";
+// AllowOnlyPolicyNetworksToConnect and
+// AllowOnlyPolicyNetworksToConnectIfAvailable field are currently only applied
+// to WiFi networks. TODO(crbug.com/1234561): Fix this when ONC field is
+// updated.
+const char* const kAllowOnlyPolicyWiFiToConnect =
+    kAllowOnlyPolicyNetworksToConnect;
+const char* const kAllowOnlyPolicyWiFiToConnectIfAvailable =
+    kAllowOnlyPolicyNetworksToConnectIfAvailable;
+const char* const kAllowTextMessages = "AllowTextMessages";
+
 const char kBlacklistedHexSSIDs[] = "BlacklistedHexSSIDs";  // Deprecated
 const char kBlockedHexSSIDs[] = "BlockedHexSSIDs";
 const char kDisableNetworkTypes[] = "DisableNetworkTypes";
+const char kPSIMAdminAssignedAPNIds[] = "PSIMAdminAssignedAPNIds";
+const char kPSIMAdminAssignedAPNs[] = "PSIMAdminAssignedAPNs";
+const char kRecommendedValuesAreEphemeral[] = "RecommendedValuesAreEphemeral";
+const char kUserCreatedNetworkConfigurationsAreEphemeral[] =
+    "UserCreatedNetworkConfigurationsAreEphemeral";
+const char kDisconnectWiFiOnEthernet[] = "DisconnectWiFiOnEthernet";
+const char kDisconnectWiFiOnEthernetWhenConnected[] = "WhenConnected";
+const char kDisconnectWiFiOnEthernetWhenOnline[] = "WhenOnline";
 }  // global_network_config
 
 namespace device_state {
@@ -499,11 +590,5 @@ const char kDisabled[] = "Disabled";
 const char kEnabling[] = "Enabling";
 const char kEnabled[] = "Enabled";
 }  // device_state
-
-namespace tethering_state {
-const char kTetheringConfirmedState[] = "Confirmed";
-const char kTetheringNotDetectedState[] = "NotDetected";
-const char kTetheringSuspectedState[] = "Suspected";
-}  // namespace tethering_state
 
 }  // namespace onc

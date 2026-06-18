@@ -1,13 +1,19 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_LOGIN_UI_LOGIN_PIN_INPUT_VIEW_H_
 #define ASH_LOGIN_UI_LOGIN_PIN_INPUT_VIEW_H_
 
+#include <string_view>
+
 #include "ash/ash_export.h"
 #include "ash/login/ui/access_code_input.h"
 #include "ash/login/ui/non_accessible_view.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/compositor/layer_animation_observer.h"
 #include "ui/views/view.h"
 
 namespace ash {
@@ -29,10 +35,15 @@ class LoginPinInput;
 // When the length changes (e.g.: selecting a user with a different pin length)
 // the internal view `code_input_` is destroyed and a new one is inserted.
 //
-class ASH_EXPORT LoginPinInputView : public views::View {
+class ASH_EXPORT LoginPinInputView : public views::View,
+                                     public ui::ImplicitAnimationObserver {
+  METADATA_HEADER(LoginPinInputView, views::View)
+
  public:
-  using OnPinSubmit = base::RepeatingCallback<void(const base::string16& pin)>;
+  using OnPinSubmit = base::RepeatingCallback<void(std::u16string_view pin)>;
   using OnPinChanged = base::RepeatingCallback<void(bool is_empty)>;
+
+  static const int kDefaultLength;
 
   class ASH_EXPORT TestApi {
    public:
@@ -40,15 +51,20 @@ class ASH_EXPORT LoginPinInputView : public views::View {
     ~TestApi();
 
     views::View* code_input();
+    std::optional<std::string> GetCode();
+    bool IsEmpty();
 
    private:
-    LoginPinInputView* const view_;
+    const raw_ptr<LoginPinInputView> view_;
   };
 
-  LoginPinInputView();
+  explicit LoginPinInputView();
   LoginPinInputView& operator=(const LoginPinInputView&) = delete;
   LoginPinInputView(const LoginPinInputView&) = delete;
   ~LoginPinInputView() override;
+
+  // ui::ImplicitAnimationObserver:
+  void OnImplicitAnimationsCompleted() override;
 
   // Checks whether PIN auto submit is supported for the given length.
   static bool IsAutosubmitSupported(int length);
@@ -61,6 +77,10 @@ class ASH_EXPORT LoginPinInputView : public views::View {
   // Updates the length of the field. Used when switching users.
   void UpdateLength(const size_t pin_length);
 
+  // When set, hitting return will attempt an unlock with an empty PIN.
+  // LoginAuthUserView interprets such attempts as a SmartLock unlock.
+  void SetAuthenticateWithEmptyPinOnReturnKey(bool enabled);
+
   void Reset();
   void Backspace();
   void InsertDigit(int digit);
@@ -68,26 +88,40 @@ class ASH_EXPORT LoginPinInputView : public views::View {
   // Sets the field as read only. The field is made read only during an
   // authentication request.
   void SetReadOnly(bool read_only);
-
+  bool IsReadOnly() const;
   // views::View
-  gfx::Size CalculatePreferredSize() const override;
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& available_size) const override;
   void RequestFocus() override;
+  bool OnKeyPressed(const ui::KeyEvent& event) override;
+
+  base::WeakPtr<LoginPinInputView> AsWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
  private:
   // The code input will call this when all digits are in.
-  void SubmitPin(const base::string16& pin);
+  void SubmitPin(std::u16string_view pin);
 
   // Called by the inner view whenever the fields change.
   void OnChanged(bool is_empty);
 
   // Current field length.
-  size_t length_;
+  size_t length_ = kDefaultLength;
+
+  // Whether the field is read only.
+  bool is_read_only_ = false;
 
   // The input field owned by this view.
-  LoginPinInput* code_input_ = nullptr;
+  raw_ptr<LoginPinInput, DanglingUntriaged> code_input_ = nullptr;
+
+  // Whether the 'Return' key should trigger an unlock with an empty PIN.
+  bool authenticate_with_empty_pin_on_return_key_ = false;
 
   OnPinSubmit on_submit_;
   OnPinChanged on_changed_;
+
+  base::WeakPtrFactory<LoginPinInputView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

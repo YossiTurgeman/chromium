@@ -1,12 +1,13 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/cocoa/history_menu_cocoa_controller.h"
 
 #include <memory>
+#include <set>
+#include <utility>
 
-#include "base/mac/scoped_nsobject.h"
 #include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
 #include "chrome/app/chrome_command_ids.h"
@@ -18,22 +19,15 @@
 
 @interface FakeHistoryMenuController : HistoryMenuCocoaController {
  @public
-  BOOL _opened[3];
+  // ivars are initialized to zero, so these all start out as NO.
+  std::set<SessionID::id_type> _opened;
 }
 @end
 
 @implementation FakeHistoryMenuController
 
-- (id)initTest {
-  if ((self = [super init])) {
-    _opened[1] = NO;
-    _opened[2] = NO;
-  }
-  return self;
-}
-
 - (void)openURLForItem:(const HistoryMenuBridge::HistoryItem*)item {
-  _opened[item->session_id.id()] = YES;
+  _opened.insert(item->session_id.id());
 }
 
 @end  // FakeHistoryMenuController
@@ -45,29 +39,36 @@ class HistoryMenuCocoaControllerTest : public BrowserWithTestWindowTest {
     ASSERT_TRUE(profile());
 
     bridge_ = std::make_unique<HistoryMenuBridge>(profile());
-    bridge_->controller_.reset(
-        [[FakeHistoryMenuController alloc] initWithBridge:bridge_.get()]);
-    [controller() initTest];
+    bridge_->controller_ =
+        [[FakeHistoryMenuController alloc] initWithBridge:bridge_.get()];
+  }
+
+  void TearDown() override {
+    bridge_.reset();
+    BrowserWithTestWindowTest::TearDown();
   }
 
   void CreateItems(NSMenu* menu) {
-    HistoryMenuBridge::HistoryItem* item = new HistoryMenuBridge::HistoryItem();
+    auto item = std::make_unique<HistoryMenuBridge::HistoryItem>();
     item->url = GURL("http://google.com");
     item->session_id = SessionID::FromSerializedValue(1);
-    bridge_->AddItemToMenu(item, menu, HistoryMenuBridge::kVisited, 0);
+    bridge_->AddItemToMenu(std::move(item), menu, HistoryMenuBridge::kVisited,
+                           0);
 
-    item = new HistoryMenuBridge::HistoryItem();
+    item = std::make_unique<HistoryMenuBridge::HistoryItem>();
     item->url = GURL("http://apple.com");
     item->session_id = SessionID::FromSerializedValue(2);
-    bridge_->AddItemToMenu(item, menu, HistoryMenuBridge::kVisited, 1);
+    bridge_->AddItemToMenu(std::move(item), menu, HistoryMenuBridge::kVisited,
+                           1);
   }
 
-  std::map<NSMenuItem*, HistoryMenuBridge::HistoryItem*>& menu_item_map() {
+  std::map<NSMenuItem*, std::unique_ptr<HistoryMenuBridge::HistoryItem>>&
+  menu_item_map() {
     return bridge_->menu_item_map_;
   }
 
   FakeHistoryMenuController* controller() {
-    return static_cast<FakeHistoryMenuController*>(bridge_->controller_.get());
+    return static_cast<FakeHistoryMenuController*>(bridge_->controller_);
   }
 
  private:
@@ -76,18 +77,15 @@ class HistoryMenuCocoaControllerTest : public BrowserWithTestWindowTest {
 };
 
 TEST_F(HistoryMenuCocoaControllerTest, OpenURLForItem) {
-  base::scoped_nsobject<NSMenu> menu([[NSMenu alloc] initWithTitle:@"History"]);
-  CreateItems(menu.get());
+  NSMenu* menu = [[NSMenu alloc] initWithTitle:@"History"];
+  CreateItems(menu);
 
-  std::map<NSMenuItem*, HistoryMenuBridge::HistoryItem*>& items =
-      menu_item_map();
-  std::map<NSMenuItem*, HistoryMenuBridge::HistoryItem*>::iterator it =
-      items.begin();
-
-  for ( ; it != items.end(); ++it) {
-    HistoryMenuBridge::HistoryItem* item = it->second;
-    EXPECT_FALSE(controller()->_opened[item->session_id.id()]);
-    [controller() openHistoryMenuItem:it->first];
-    EXPECT_TRUE(controller()->_opened[item->session_id.id()]);
+  std::map<NSMenuItem*, std::unique_ptr<HistoryMenuBridge::HistoryItem>>&
+      items = menu_item_map();
+  for (const auto& pair : items) {
+    HistoryMenuBridge::HistoryItem* item = pair.second.get();
+    EXPECT_FALSE(controller()->_opened.count(item->session_id.id()));
+    [controller() openHistoryMenuItem:pair.first];
+    EXPECT_TRUE(controller()->_opened.count(item->session_id.id()));
   }
 }

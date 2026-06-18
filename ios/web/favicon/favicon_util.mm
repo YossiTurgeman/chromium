@@ -1,57 +1,48 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "ios/web/favicon/favicon_util.h"
 
-#include <CoreFoundation/CoreFoundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <WebKit/WebKit.h>
 
-#include "base/logging.h"
-#include "base/strings/string_number_conversions.h"
-#include "base/strings/string_split.h"
-#include "base/strings/string_util.h"
-#include "base/values.h"
+#import <string_view>
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "base/logging.h"
+#import "base/strings/string_number_conversions.h"
+#import "base/strings/string_split.h"
+#import "base/strings/string_util.h"
 
 namespace web {
 
-bool ExtractFaviconURL(const base::DictionaryValue* favicon_url_message,
+bool ExtractFaviconURL(const base::ListValue& favicons,
                        const GURL& page_origin,
                        std::vector<web::FaviconURL>* urls) {
-  const base::Value* favicons_value = favicon_url_message->FindKey("favicons");
-  if (!favicons_value || !favicons_value->is_list()) {
-    DLOG(WARNING) << "JS message parameter not found: favicons";
-    return false;
-  }
   BOOL has_favicon = NO;
-  for (const base::Value& favicon : favicons_value->GetList()) {
-    if (!favicon.is_dict())
+  for (const base::Value& favicon : favicons) {
+    if (!favicon.is_dict()) {
       return false;
+    }
 
-    const base::Value* href_value =
-        favicon.FindKeyOfType("href", base::Value::Type::STRING);
+    const base::DictValue& favicon_dict = favicon.GetDict();
+    const std::string* href_value = favicon_dict.FindString("href");
     if (!href_value) {
       DLOG(WARNING) << "JS message parameter not found: href";
       return false;
     }
-    auto href = href_value->GetString();
+    auto href = *href_value;
 
-    const base::Value* rel_value =
-        favicon.FindKeyOfType("rel", base::Value::Type::STRING);
+    const std::string* rel_value = favicon_dict.FindString("rel");
     if (!rel_value) {
       DLOG(WARNING) << "JS message parameter not found: rel";
       return false;
     }
-    auto rel = rel_value->GetString();
+    auto rel = *rel_value;
 
     std::vector<gfx::Size> sizes;
-    if (const base::Value* size_value =
-            favicon.FindKeyOfType("sizes", base::Value::Type::STRING)) {
-      auto sizes_string = size_value->GetString();
+    if (const std::string* size_value = favicon_dict.FindString("sizes")) {
+      auto sizes_string = *size_value;
       // Parse the sizes attribute. It should consist of one or multiple
       // elements of the form "76x76", separated by a whitespace. So "76x76" or
       // "120x120 192x192" are legit.
@@ -59,7 +50,7 @@ bool ExtractFaviconURL(const base::DictionaryValue* favicon_url_message,
           sizes_string, base::kWhitespaceASCII, base::TRIM_WHITESPACE,
           base::SPLIT_WANT_NONEMPTY);
       for (const auto& cut : split_sizes) {
-        std::vector<base::StringPiece> pieces = base::SplitStringPiece(
+        std::vector<std::string_view> pieces = base::SplitStringPiece(
             cut, "x", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
         int width = 0, height = 0;
         if (pieces.size() != 2 || !base::StringToInt(pieces[0], &width) ||
@@ -68,19 +59,21 @@ bool ExtractFaviconURL(const base::DictionaryValue* favicon_url_message,
           continue;
         }
 
-        if (width > 0 && height > 0)
+        if (width > 0 && height > 0) {
           sizes.push_back(gfx::Size(width, height));
+        }
       }
     }
 
     BOOL is_apple_touch = YES;
     web::FaviconURL::IconType icon_type = web::FaviconURL::IconType::kFavicon;
-    if (rel == "apple-touch-icon")
+    if (rel == "apple-touch-icon") {
       icon_type = web::FaviconURL::IconType::kTouchIcon;
-    else if (rel == "apple-touch-icon-precomposed")
+    } else if (rel == "apple-touch-icon-precomposed") {
       icon_type = web::FaviconURL::IconType::kTouchPrecomposedIcon;
-    else
+    } else {
       is_apple_touch = NO;
+    }
     GURL url(href);
     if (url.is_valid()) {
       urls->push_back(web::FaviconURL(url, icon_type, sizes));

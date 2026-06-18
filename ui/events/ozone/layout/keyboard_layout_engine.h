@@ -1,20 +1,22 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef UI_OZONE_PUBLIC_KEYBOARD_LAYOUT_ENGINE_H_
-#define UI_OZONE_PUBLIC_KEYBOARD_LAYOUT_ENGINE_H_
+#ifndef UI_EVENTS_OZONE_LAYOUT_KEYBOARD_LAYOUT_ENGINE_H_
+#define UI_EVENTS_OZONE_LAYOUT_KEYBOARD_LAYOUT_ENGINE_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/component_export.h"
-#include "base/strings/string16.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_forward.h"
 #include "ui/events/keycodes/dom/dom_key.h"
 #include "ui/events/keycodes/keyboard_codes.h"
 
 namespace ui {
 
-enum class DomCode;
+enum class DomCode : uint32_t;
 
 // A KeyboardLayoutEngine provides a platform-independent interface to
 // key mapping. Key mapping provides a meaning (DomKey and character,
@@ -29,13 +31,19 @@ class COMPONENT_EXPORT(EVENTS_OZONE_LAYOUT) KeyboardLayoutEngine {
   KeyboardLayoutEngine() {}
   virtual ~KeyboardLayoutEngine() {}
 
+  // Returns the current layout name.
+  virtual std::string_view GetLayoutName() const = 0;
+
   // Returns true if it is possible to change the current layout.
   virtual bool CanSetCurrentLayout() const = 0;
 
   // Sets the current layout; returns true on success.
   // Drop-in replacement for ImeKeyboard::SetCurrentKeyboardLayoutByName();
   // the argument string is defined by that interface (crbug.com/362698).
-  virtual bool SetCurrentLayoutByName(const std::string& layout_name) = 0;
+  // Calls the callback once the layout is initialized after being set.
+  virtual void SetCurrentLayoutByName(
+      const std::string& layout_name,
+      base::OnceCallback<void(bool success)> callback) = 0;
 
   // Sets the current layout given a memory location and the buffer size in
   // bytes, that represent keyboard mapping description; returns true on
@@ -71,8 +79,13 @@ class COMPONENT_EXPORT(EVENTS_OZONE_LAYOUT) KeyboardLayoutEngine {
                       int event_flags,
                       DomKey* dom_key,
                       KeyboardCode* key_code) const = 0;
+
+  // Tests may need to wait for the keyboard layout to be fully initialised.
+  // The implementation should run |closure| when it is ready to handle calls to
+  // Lookup().
+  virtual void SetInitCallbackForTest(base::OnceClosure closure) = 0;
 };
 
 }  // namespace ui
 
-#endif  // UI_OZONE_PUBLIC_KEYBOARD_LAYOUT_ENGINE_H_
+#endif  // UI_EVENTS_OZONE_LAYOUT_KEYBOARD_LAYOUT_ENGINE_H_

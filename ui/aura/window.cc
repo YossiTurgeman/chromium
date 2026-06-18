@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,23 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <sstream>
 #include <utility>
 
-#include "base/auto_reset.h"
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/callback.h"
+#include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/containers/adapters.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
-#include "base/macros.h"
-#include "base/stl_util.h"
+#include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
+#include "base/observer_list.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/utf_string_conversions.h"
 #include "cc/mojo_embedder/async_layer_tree_frame_sink.h"
 #include "cc/trees/layer_tree_frame_sink.h"
 #include "components/viz/common/features.h"
@@ -46,10 +51,13 @@
 #include "ui/aura/window_tracker.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/layout.h"
+#include "ui/base/metadata/base_type_conversion.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/ui_base_features.h"
 #include "ui/compositor/compositor.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animator.h"
+#include "ui/compositor/layer_type.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/events/event_target_iterator.h"
@@ -57,9 +65,68 @@
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/scoped_canvas.h"
 
+DEFINE_ENUM_CONVERTERS(
+    aura::client::WindowType,
+    {aura::client::WINDOW_TYPE_UNKNOWN, u"WINDOW_TYPE_UNKNOWN"},
+    {aura::client::WINDOW_TYPE_NORMAL, u"WINDOW_TYPE_NORMAL"},
+    {aura::client::WINDOW_TYPE_POPUP, u"WINDOW_TYPE_POPUP"},
+    {aura::client::WINDOW_TYPE_CONTROL, u"WINDOW_TYPE_CONTROL"},
+    {aura::client::WINDOW_TYPE_MENU, u"WINDOW_TYPE_MENU"},
+    {aura::client::WINDOW_TYPE_TOOLTIP, u"WINDOW_TYPE_TOOLTIP"})
+
+DEFINE_ENUM_CONVERTERS(aura::Window::OcclusionState,
+                       {aura::Window::OcclusionState::UNKNOWN, u"UNKNOWN"},
+                       {aura::Window::OcclusionState::VISIBLE, u"VISIBLE"},
+                       {aura::Window::OcclusionState::OCCLUDED, u"OCCLUDED"},
+                       {aura::Window::OcclusionState::HIDDEN, u"HIDDEN"})
+
+namespace ui {
+namespace metadata {
+
+template <>
+struct TypeConverter<viz::SurfaceId> : public BaseTypeConverter<true> {
+  static std::u16string ToString(const viz::SurfaceId& source_value);
+  static std::optional<viz::SurfaceId> FromString(
+      const std::u16string& source_value);
+  static ValidStrings GetValidStrings();
+};
+
+// static
+std::u16string TypeConverter<viz::SurfaceId>::ToString(
+    const viz::SurfaceId& source_value) {
+  return source_value.is_valid() ? base::UTF8ToUTF16(source_value.ToString())
+                                 : u"<none>";
+}
+
+// static
+std::optional<viz::SurfaceId> TypeConverter<viz::SurfaceId>::FromString(
+    const std::u16string& source_value) {
+  return std::nullopt;
+}
+
+// static
+ValidStrings TypeConverter<viz::SurfaceId>::GetValidStrings() {
+  return ValidStrings();
+}
+
+}  // namespace metadata
+}  // namespace ui
+
+namespace {
+
+// This enum is used to construct a unique property changed callback key from
+// the address of the `bounds_` field by using these values as an offset.
+enum BoundsCallbackIndex : int {
+  kBoundsX,
+  kBoundsY,
+  kBoundsWidth,
+  kBoundsHeight,
+};
+
+}  // namespace
+
 namespace aura {
 namespace {
-static const char* kExo = "Exo";
 
 class ScopedCursorHider {
  public:
@@ -76,6 +143,10 @@ class ScopedCursorHider {
       hid_cursor_ = true;
     }
   }
+
+  ScopedCursorHider(const ScopedCursorHider&) = delete;
+  ScopedCursorHider& operator=(const ScopedCursorHider&) = delete;
+
   ~ScopedCursorHider() {
     if (!window_->IsRootWindow())
       return;
@@ -86,7 +157,7 @@ class ScopedCursorHider {
       client::CursorClient* cursor_client = client::GetCursorClient(window_);
       if (cursor_client) {
         const display::Display& display =
-            display::Screen::GetScreen()->GetDisplayNearestWindow(window_);
+            display::Screen::Get()->GetDisplayNearestWindow(window_);
         cursor_client->SetDisplay(display);
         cursor_client->ShowCursor();
       }
@@ -94,10 +165,8 @@ class ScopedCursorHider {
   }
 
  private:
-  Window* window_;
+  raw_ptr<Window> window_;
   bool hid_cursor_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedCursorHider);
 };
 
 }  // namespace
@@ -117,6 +186,12 @@ Window::Window(WindowDelegate* delegate, client::WindowType type)
 }
 
 Window::~Window() {
+  CHECK_EQ(delete_block_count_, 0u);
+
+  // TODO(crbug.com/461127606): Crash on re-entrant destruction.
+  // TODO(crbug.com/497548912): Continue crashing on re-entrant destruction
+  // on Chrome M149 or newer.
+  CHECK(!is_destroying_);
   is_destroying_ = true;
   WindowOcclusionTracker::ScopedPause pause_occlusion_tracking;
 
@@ -142,6 +217,12 @@ Window::~Window() {
   WindowTreeHost* host = GetHost();
   if (host)
     host->dispatcher()->OnPostNotifiedWindowDestroying(this);
+
+  // Once pre-destruction phase is completed, the window is technically defunct
+  // and should not be used except for accessors (id, name) or getting
+  // information using properties. `GetToplevelWindow()` is also banned because
+  // it will no longer return a correct value.
+  is_destroyed_ = true;
 
   // The window should have already had its state cleaned up in
   // WindowEventDispatcher::OnWindowHidden(), but there have been some crashes
@@ -183,25 +264,45 @@ Window::~Window() {
   if (frame_sink_id_.is_valid() && !embeds_external_client_) {
     auto* context_factory = Env::GetInstance()->context_factory();
     auto* host_frame_sink_manager = context_factory->GetHostFrameSinkManager();
-    host_frame_sink_manager->InvalidateFrameSinkId(frame_sink_id_);
+    host_frame_sink_manager->InvalidateFrameSinkId(frame_sink_id_, this, {});
   }
 }
 
 void Window::Init(ui::LayerType layer_type) {
+  CHECK(!layer()) << "Window is already initialized";
+
   WindowOcclusionTracker::ScopedPause pause_occlusion_tracking;
 
   SetLayer(std::make_unique<ui::Layer>(layer_type));
   layer()->SetVisible(false);
   layer()->set_delegate(this);
   UpdateLayerName();
-  layer()->SetFillsBoundsOpaquely(!transparent_);
   Env::GetInstance()->NotifyWindowInitialized(this);
+}
+
+int Window::GetId() const {
+  return id_;
+}
+
+void Window::SetId(int id) {
+  if (id == id_)
+    return;
+  id_ = id;
+  TriggerChangedCallback(&id_);
+}
+
+client::WindowType Window::GetType() const {
+  return type_;
 }
 
 void Window::SetType(client::WindowType type) {
   // Cannot change type after the window is initialized.
   DCHECK(!layer());
+  if (type == type_)
+    return;
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   type_ = type;
+  TriggerChangedCallback(&type_);
 }
 
 const std::string& Window::GetName() const {
@@ -212,17 +313,19 @@ const std::string& Window::GetName() const {
 void Window::SetName(const std::string& name) {
   if (name == GetName())
     return;
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   SetProperty(client::kNameKey, name);
   if (layer())
     UpdateLayerName();
+  TriggerChangedCallback(client::kNameKey);
 }
 
-const base::string16& Window::GetTitle() const {
-  base::string16* title = GetProperty(client::kTitleKey);
+const std::u16string& Window::GetTitle() const {
+  std::u16string* title = GetProperty(client::kTitleKey);
   return title ? *title : base::EmptyString16();
 }
 
-void Window::SetTitle(const base::string16& title) {
+void Window::SetTitle(const std::u16string& title) {
   if (title == GetTitle())
     return;
   SetProperty(client::kTitleKey, title);
@@ -230,15 +333,26 @@ void Window::SetTitle(const base::string16& title) {
     observer.OnWindowTitleChanged(this);
 }
 
+bool Window::GetTransparent() const {
+  return transparent_;
+}
+
 void Window::SetTransparent(bool transparent) {
+  CHECK(layer());
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   if (transparent == transparent_)
     return;
   transparent_ = transparent;
-  if (layer())
+
+  if (layer()->type() != ui::LAYER_SOLID_COLOR) {
     layer()->SetFillsBoundsOpaquely(!transparent_);
+  }
+  TriggerChangedCallback(&transparent_);
 }
 
 void Window::SetFillsBoundsCompletely(bool fills_bounds) {
+  CHECK(layer());
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   layer()->SetFillsBoundsCompletely(fills_bounds);
 }
 
@@ -258,40 +372,71 @@ WindowTreeHost* Window::GetHost() {
 
 const WindowTreeHost* Window::GetHost() const {
   const Window* root_window = GetRootWindow();
-  return root_window ? root_window->host_ : nullptr;
+  return root_window ? root_window->host_.get() : nullptr;
 }
 
 void Window::Show() {
-  DCHECK_EQ(visible_, layer()->GetTargetVisibility());
+  CHECK(layer());
+  DUMP_WILL_BE_CHECK(!is_destroying_);
+  CHECK_EQ(visible_, layer()->GetTargetVisibility());
+
   // It is not allowed that a window is visible but the layers alpha is fully
   // transparent since the window would still be considered to be active but
   // could not be seen.
   DCHECK(!visible_ || layer()->GetTargetOpacity() > 0.0f);
-  SetVisible(true);
+  SetVisibleInternal(true);
 }
 
 void Window::Hide() {
+  CHECK(layer());
+
   // RootWindow::OnVisibilityChanged will call ReleaseCapture.
-  SetVisible(false);
+  SetVisibleInternal(false);
 }
 
 bool Window::IsVisible() const {
+  CHECK(layer());
+
   // Layer visibility can be inconsistent with window visibility, for example
   // when a Window is hidden, we want this function to return false immediately
   // after, even though the client may decide to animate the hide effect (and
   // so the layer will be visible for some time after Hide() is called).
-  return visible_ ? layer()->IsDrawn() : false;
+  return visible_ ? layer()->IsVisible() : false;
+}
+
+Window::OcclusionState Window::GetOcclusionState() const {
+  return occlusion_state_;
+}
+
+ScopedWindowCaptureRequest Window::MakeWindowCapturable() {
+  DCHECK(!IsRootWindow()) << "Root windows can already be captured using their "
+                             "FrameSinkId; no need to call this.";
+
+  return ScopedWindowCaptureRequest(this);
 }
 
 gfx::Rect Window::GetBoundsInRootWindow() const {
-  // TODO(beng): There may be a better way to handle this, and the existing code
-  //             is likely wrong anyway in a multi-display world, but this will
-  //             do for now.
   if (!GetRootWindow())
     return bounds();
   gfx::Rect bounds_in_root(bounds().size());
   ConvertRectToTarget(this, GetRootWindow(), &bounds_in_root);
   return bounds_in_root;
+}
+
+gfx::Rect Window::GetActualBoundsInRootWindow() const {
+  if (!GetRootWindow())
+    return bounds();
+  gfx::Rect bounds_in_root(bounds().size());
+  gfx::PointF origin_f = gfx::PointF(bounds_in_root.origin());
+  ui::Layer::ConvertPointToLayer(layer(), GetRootWindow()->layer(),
+                                 /*use_target_transform=*/false, &origin_f);
+  bounds_in_root.set_origin(gfx::ToFlooredPoint(origin_f));
+  return bounds_in_root;
+}
+
+const gfx::Transform& Window::transform() const {
+  CHECK(layer());
+  return layer()->transform();
 }
 
 gfx::Rect Window::GetBoundsInScreen() const {
@@ -309,29 +454,33 @@ gfx::Rect Window::GetBoundsInScreen() const {
   return bounds;
 }
 
+gfx::Rect Window::GetActualBoundsInScreen() const {
+  gfx::Rect bounds(GetActualBoundsInRootWindow());
+  const Window* root = GetRootWindow();
+  if (root) {
+    gfx::Point origin_in_screen = root->GetBoundsInScreen().origin();
+    origin_in_screen += bounds.OffsetFromOrigin();
+    bounds.set_origin(origin_in_screen);
+  }
+  return bounds;
+}
+
 void Window::SetTransform(const gfx::Transform& transform) {
+  CHECK(layer());
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   WindowOcclusionTracker::ScopedPause pause_occlusion_tracking;
   for (WindowObserver& observer : observers_)
     observer.OnWindowTargetTransformChanging(this, transform);
   layer()->SetTransform(transform);
 }
 
-void Window::SetLayoutManager(LayoutManager* layout_manager) {
-  if (layout_manager == layout_manager_.get())
-    return;
-  layout_manager_.reset(layout_manager);
-  if (!layout_manager)
-    return;
-  // If we're changing to a new layout manager, ensure it is aware of all the
-  // existing child windows.
-  for (Windows::const_iterator it = children_.begin();
-       it != children_.end();
-       ++it)
-    layout_manager_->OnWindowAddedToLayout(*it);
+void Window::SetLayoutManager(std::nullptr_t) {
+  SetLayoutManagerImpl(nullptr);
 }
 
 std::unique_ptr<WindowTargeter> Window::SetEventTargeter(
     std::unique_ptr<WindowTargeter> targeter) {
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   std::unique_ptr<WindowTargeter> old_targeter = std::move(targeter_);
   if (old_targeter)
     old_targeter->OnInstalled(nullptr);
@@ -342,6 +491,8 @@ std::unique_ptr<WindowTargeter> Window::SetEventTargeter(
 }
 
 void Window::SetBounds(const gfx::Rect& new_bounds) {
+  CHECK(layer());
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   if (parent_ && parent_->layout_manager()) {
     parent_->layout_manager()->SetChildBounds(this, new_bounds);
   } else {
@@ -359,14 +510,13 @@ void Window::SetBounds(const gfx::Rect& new_bounds) {
 
 void Window::SetBoundsInScreen(const gfx::Rect& new_bounds_in_screen,
                                const display::Display& dst_display) {
-  aura::client::ScreenPositionClient* screen_position_client = nullptr;
-  Window* root = GetRootWindow();
-  if (root)
-    screen_position_client = aura::client::GetScreenPositionClient(root);
-  if (screen_position_client)
+  CHECK(layer());
+  if (auto* screen_position_client =
+          aura::client::GetScreenPositionClient(GetRootWindow())) {
     screen_position_client->SetBounds(this, new_bounds_in_screen, dst_display);
-  else
+  } else {
     SetBounds(new_bounds_in_screen);
+  }
 }
 
 gfx::Rect Window::GetTargetBounds() const {
@@ -374,10 +524,12 @@ gfx::Rect Window::GetTargetBounds() const {
 }
 
 void Window::ScheduleDraw() {
+  CHECK(layer());
   layer()->ScheduleDraw();
 }
 
 void Window::SchedulePaintInRect(const gfx::Rect& rect) {
+  CHECK(layer());
   layer()->SchedulePaint(rect);
 }
 
@@ -415,7 +567,7 @@ void Window::AddChild(Window* child) {
 
   Window* old_root = child->GetRootWindow();
 
-  DCHECK(!base::Contains(children_, child));
+  DCHECK(!std::ranges::contains(children_, child));
   if (child->parent())
     child->parent()->RemoveChildImpl(child, this);
 
@@ -470,7 +622,7 @@ Window* Window::GetChildById(int id) {
 const Window* Window::GetChildById(int id) const {
   Windows::const_iterator i;
   for (i = children_.begin(); i != children_.end(); ++i) {
-    if ((*i)->id() == id)
+    if ((*i)->GetId() == id)
       return *i;
     const Window* result = (*i)->GetChildById(id);
     if (result)
@@ -498,7 +650,35 @@ void Window::ConvertPointToTarget(const Window* source,
     if (target_client)
       target_client->ConvertPointFromScreen(target, point);
   } else {
-    ui::Layer::ConvertPointToLayer(source->layer(), target->layer(), point);
+#if BUILDFLAG(IS_CHROMEOS)
+    // TODO(b/319939913): Remove this log when the issue is fixed.
+    auto get_root = [](const ui::Layer* layer) {
+      const ui::Layer* root = layer;
+      while (root->parent()) {
+        root = root->parent();
+      }
+      return root;
+    };
+    auto chain_name = [](const aura::Window* window) {
+      std::ostringstream out;
+      out << "[";
+      out << window->GetName();
+      while (window->parent()) {
+        window = window->parent();
+        out << "]-[" << window->GetName();
+      }
+      out << "]";
+      return out.str();
+    };
+    if (get_root(source->layer()) != get_root(target->layer())) {
+      LOG(ERROR) << "Root layer in source and target window are different. "
+                    "source chain="
+                 << chain_name(source)
+                 << ", target chain=" << chain_name(target);
+    }
+#endif
+    ui::Layer::ConvertPointToLayer(source->layer(), target->layer(),
+                                   /*use_target_transform=*/true, point);
   }
 }
 
@@ -553,7 +733,8 @@ void Window::MoveCursorTo(const gfx::Point& point_in_window) {
 }
 
 gfx::NativeCursor Window::GetCursor(const gfx::Point& point) const {
-  return delegate_ ? delegate_->GetCursor(point) : gfx::kNullCursor;
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
+  return delegate_ ? delegate_->GetCursor(point) : gfx::NativeCursor{};
 }
 
 void Window::AddObserver(WindowObserver* observer) {
@@ -569,6 +750,9 @@ bool Window::HasObserver(const WindowObserver* observer) const {
 }
 
 void Window::SetEventTargetingPolicy(EventTargetingPolicy policy) {
+  CHECK(layer());
+  DUMP_WILL_BE_CHECK(!is_destroying_);
+
   // If the event targeting is blocked on the window, do not allow change event
   // targeting policy until all event targeting blockers are removed from the
   // window.
@@ -609,24 +793,22 @@ bool Window::ContainsPoint(const gfx::Point& local_point) const {
 }
 
 Window* Window::GetEventHandlerForPoint(const gfx::Point& local_point) {
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
+
   if (!IsVisible())
     return nullptr;
 
   if (!HitTest(local_point))
     return nullptr;
 
-  for (Windows::const_reverse_iterator it = children_.rbegin(),
-                                       rend = children_.rend();
-       it != rend; ++it) {
-    Window* child = *it;
-
+  for (Window* child : base::Reversed(children_)) {
     if (child->event_targeting_policy_ == EventTargetingPolicy::kNone) {
       continue;
     }
 
     // The client may not allow events to be processed by certain subtrees.
     client::EventClient* client = client::GetEventClient(GetRootWindow());
-    if (client && !client->CanProcessEventsWithinSubtree(child))
+    if (client && !client->GetCanProcessEventsWithinSubtree(child))
       continue;
 
     if (delegate_ && !delegate_->ShouldDescendIntoChildForEventHandling(
@@ -660,6 +842,9 @@ Window* Window::GetEventHandlerForPoint(const gfx::Point& local_point) {
 }
 
 Window* Window::GetToplevelWindow() {
+  // Once the window is destroyed and removed from the tree, this method returns
+  // the incorrect value.
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
   Window* topmost_window_with_delegate = nullptr;
   for (aura::Window* window = this; window != nullptr;
        window = window->parent()) {
@@ -684,6 +869,12 @@ bool Window::CanFocus() const {
   if (IsRootWindow())
     return IsVisible();
 
+  if (is_destroying_) {
+    return false;
+  }
+
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
+
   // NOTE: as part of focusing the window the ActivationClient may make the
   // window visible (by way of making a hidden ancestor visible). For this
   // reason we can't check visibility here and assume the client is doing it.
@@ -693,7 +884,7 @@ bool Window::CanFocus() const {
   // The client may forbid certain windows from receiving focus at a given point
   // in time.
   client::EventClient* client = client::GetEventClient(GetRootWindow());
-  if (client && !client->CanProcessEventsWithinSubtree(this))
+  if (client && !client->GetCanProcessEventsWithinSubtree(this))
     return false;
 
   return parent_->CanFocus();
@@ -709,6 +900,7 @@ void Window::SetCapture() {
   client::CaptureClient* capture_client = client::GetCaptureClient(root_window);
   if (!capture_client)
     return;
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   capture_client->SetCapture(this);
 }
 
@@ -731,7 +923,7 @@ bool Window::HasCapture() {
 }
 
 std::unique_ptr<ScopedKeyboardHook> Window::CaptureSystemKeyEvents(
-    base::Optional<base::flat_set<ui::DomCode>> dom_codes) {
+    std::optional<base::flat_set<ui::DomCode>> dom_codes) {
   Window* root_window = GetRootWindow();
   if (!root_window)
     return nullptr;
@@ -746,23 +938,27 @@ std::unique_ptr<ScopedKeyboardHook> Window::CaptureSystemKeyEvents(
 // {Set,Get,Clear}Property are implemented in class_property.h.
 
 void Window::SetNativeWindowProperty(const char* key, void* value) {
+  // Updating properties is necessary during the deletion to notify
+  // observers.
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
   SetPropertyInternal(key, key, nullptr, reinterpret_cast<int64_t>(value), 0);
 }
 
 void* Window::GetNativeWindowProperty(const char* key) const {
-  return reinterpret_cast<void*>(GetPropertyInternal(key, 0));
+  return reinterpret_cast<void*>(GetPropertyInternal(key, 0,
+                                                     /*search_parent=*/false));
 }
 
 void Window::OnDeviceScaleFactorChanged(float old_device_scale_factor,
                                         float new_device_scale_factor) {
+  DUMP_WILL_BE_CHECK(!is_destroying_);
+
   if (!IsRootWindow() && last_device_scale_factor_ != new_device_scale_factor &&
       IsEmbeddingExternalContent()) {
     last_device_scale_factor_ = new_device_scale_factor;
     parent_local_surface_id_allocator_->GenerateId();
-    if (frame_sink_) {
-      frame_sink_->SetLocalSurfaceId(
-          GetCurrentLocalSurfaceIdAllocation().local_surface_id());
-    }
+    if (frame_sink_)
+      frame_sink_->SetLocalSurfaceId(GetCurrentLocalSurfaceId());
   }
 
   ScopedCursorHider hider(this);
@@ -773,34 +969,78 @@ void Window::OnDeviceScaleFactorChanged(float old_device_scale_factor,
 }
 
 void Window::UpdateVisualState() {
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   if (delegate_)
     delegate_->UpdateVisualState();
 }
 
-#if DCHECK_IS_ON()
-std::string Window::GetDebugInfo() const {
-  std::string name = GetName();
+void Window::GetDebugInfo(const aura::Window* active_window,
+                          const aura::Window* focused_window,
+                          const aura::Window* capture_window,
+                          std::ostringstream* out) const {
+  std::string name(GetName());
   if (name.empty())
-    name = "Unknown";
-  std::string layer_state = "NoLayer";
-  if (layer()) {
-    layer_state = base::StringPrintf(
-        "%s opacity=%.1f",
-        layer()->GetTargetVisibility() ? "LayerVisible" : "LayerHidden",
-        layer()->opacity());
+    name = "\"\"";
+  const gfx::Vector2dF& subpixel_position_offset = layer()->GetSubpixelOffset();
+  bool can_occlude_others = aura::Env::GetInstance()
+                                ->GetWindowOcclusionTracker()
+                                ->VisibleWindowCanOccludeOtherWindows(this);
+  bool has_opaque_regions = !opaque_regions_for_occlusion().empty();
+  *out << " " << name << "<" << GetId() << ">";
+  *out << " (" << this << ")"
+       << " type=" << aura::Window::WindowTypeToString(GetType());
+  *out << ((this == active_window) ? " [active]" : "")
+       << ((this == focused_window) ? " [focused]" : "")
+       << ((this == capture_window) ? " [capture]" : "")
+       << (GetTransparent() ? " [transparent]" : "")
+       << (IsVisible() ? " [visible]" : "")
+       << (has_opaque_regions ? " [opaque_regions]" : "")
+       << (can_occlude_others ? " [occlude others]" : "")
+       << (GetOcclusionState() != aura::Window::OcclusionState::UNKNOWN
+               ? (" " + base::UTF16ToUTF8(aura::Window::OcclusionStateToString(
+                            GetOcclusionState())))
+                     .c_str()
+               : "")
+       << " " << bounds().ToString()
+       << " scale=" + transform().To2dScale().ToString();
+
+  if (!subpixel_position_offset.IsZero()) {
+    *out << " subpixel offset=" + subpixel_position_offset.ToString();
   }
-  return base::StringPrintf(
-      "%s<%d> bounds=%s %s %s occlusion_state=%s", name.c_str(), id(),
-      bounds().ToString().c_str(), visible_ ? "WindowVisible" : "WindowHidden",
-      layer_state.c_str(), OcclusionStateToString(occlusion_state_));
+  *out << base::StringPrintf(" opacity=%.1f", layer()->opacity());
+
+  switch (layer()->type()) {
+    case ui::LAYER_NOT_DRAWN:
+      *out << " layer(not_drawn ";
+      break;
+    case ui::LAYER_TEXTURED:
+      *out << " layer(textured ";
+      if (layer()->fills_bounds_opaquely()) {
+        *out << " opaque ";
+      }
+      break;
+    case ui::LAYER_SOLID_COLOR:
+      *out << " layer(solid ";
+      break;
+    case ui::LAYER_NINE_PATCH:
+      *out << " layer(nine_patch ";
+      break;
+  }
+
+  *out << (layer()->GetTargetVisibility() ? " visible)" : " hidden)");
 }
 
+#if DCHECK_IS_ON()
 std::string Window::GetWindowHierarchy(int depth) const {
-  std::string hierarchy =
-      base::StringPrintf("%*s%s\n", depth * 2, "", GetDebugInfo().c_str());
-  for (Window* child : children_)
-    hierarchy += child->GetWindowHierarchy(depth + 1);
-  return hierarchy;
+  std::ostringstream out;
+  std::string indent_str(depth * 2, ' ');
+  out << indent_str;
+  GetDebugInfo(nullptr, nullptr, nullptr, &out);
+  out << std::endl;
+  for (Window* child : children_) {
+    out << child->GetWindowHierarchy(depth + 1);
+  }
+  return out.str();
 }
 
 void Window::PrintWindowHierarchy(int depth) const {
@@ -814,7 +1054,7 @@ void Window::RemoveOrDestroyChildren() {
     if (child->owned_by_parent_) {
       delete child;
       // Deleting the child so remove it from out children_ list.
-      DCHECK(!base::Contains(children_, child));
+      DCHECK(!std::ranges::contains(children_, child));
     } else {
       // Even if we can't delete the child, we still need to remove it from the
       // parent so that relevant bookkeeping (parent_ back-pointers etc) are
@@ -825,6 +1065,7 @@ void Window::RemoveOrDestroyChildren() {
 }
 
 void Window::AfterPropertyChange(const void* key, int64_t old_value) {
+  ScopedDeleteBlocker blocker(this);
   for (WindowObserver& observer : observers_)
     observer.OnWindowPropertyChanged(this, key, old_value);
 }
@@ -833,14 +1074,25 @@ void Window::AfterPropertyChange(const void* key, int64_t old_value) {
 // Window, private:
 
 void Window::SetEmbedFrameSinkIdImpl(const viz::FrameSinkId& frame_sink_id) {
+  if (frame_sink_id_ == frame_sink_id) {
+    return;
+  }
+
+  DUMP_WILL_BE_CHECK(!is_destroying_);
+
   UnregisterFrameSinkId();
 
-  DCHECK(frame_sink_id.is_valid());
   frame_sink_id_ = frame_sink_id;
+  if (!frame_sink_id_.is_valid()) {
+    return;
+  }
+
   RegisterFrameSinkId();
 }
 
 bool Window::HitTest(const gfx::Point& local_point) {
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
+
   gfx::Rect local_bounds(bounds().size());
   if (!delegate_ || !delegate_->HasHitTestMask())
     return local_bounds.Contains(local_point);
@@ -857,6 +1109,7 @@ bool Window::HitTest(const gfx::Point& local_point) {
 }
 
 void Window::SetBoundsInternal(const gfx::Rect& new_bounds) {
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   gfx::Rect old_bounds = GetTargetBounds();
 
   // Always need to set the layer's bounds -- even if it is to the same thing.
@@ -872,28 +1125,37 @@ void Window::SetBoundsInternal(const gfx::Rect& new_bounds) {
   }
 }
 
-void Window::SetVisible(bool visible) {
+void Window::SetVisibleInternal(bool visible) {
   if (visible == layer()->GetTargetVisibility())
     return;  // No change.
 
   WindowOcclusionTracker::ScopedPause pause_occlusion_tracking;
 
-  for (WindowObserver& observer : observers_)
-    observer.OnWindowVisibilityChanging(this, visible);
+  {
+    // Delegate methods called in this block should not delete the window.
+    ScopedDeleteBlocker blocker(this);
 
-  client::VisibilityClient* visibility_client =
-      client::GetVisibilityClient(this);
-  if (visibility_client)
-    visibility_client->UpdateLayerVisibility(this, visible);
-  else
-    layer()->SetVisible(visible);
-  visible_ = visible;
-  SchedulePaint();
-  if (parent_ && parent_->layout_manager_)
-    parent_->layout_manager_->OnChildWindowVisibilityChanged(this, visible);
+    for (WindowObserver& observer : observers_) {
+      observer.OnWindowVisibilityChanging(this, visible);
+    }
 
-  if (delegate_)
-    delegate_->OnWindowTargetVisibilityChanged(visible);
+    client::VisibilityClient* visibility_client =
+        client::GetVisibilityClient(this);
+    if (visibility_client) {
+      visibility_client->UpdateLayerVisibility(this, visible);
+    } else {
+      layer()->SetVisible(visible);
+    }
+    visible_ = visible;
+    SchedulePaint();
+    if (parent_ && parent_->layout_manager_) {
+      parent_->layout_manager_->OnChildWindowVisibilityChanged(this, visible);
+    }
+
+    if (delegate_) {
+      delegate_->OnWindowTargetVisibilityChanged(visible);
+    }
+  }
 
   NotifyWindowVisibilityChanged(this, visible);
 }
@@ -904,10 +1166,15 @@ void Window::SetOcclusionInfo(OcclusionState occlusion_state,
       occluded_region_in_root_ == occluded_region) {
     return;
   }
+
+  DUMP_WILL_BE_CHECK(!is_destroying_);
+  OcclusionState old_occlusion_state = occlusion_state_;
   occlusion_state_ = occlusion_state;
   occluded_region_in_root_ = occluded_region;
+
+  ScopedDeleteBlocker blocker(this);
   if (delegate_)
-    delegate_->OnWindowOcclusionChanged(occlusion_state);
+    delegate_->OnWindowOcclusionChanged(old_occlusion_state, occlusion_state);
 
   for (WindowObserver& observer : observers_)
     observer.OnWindowOcclusionChanged(this);
@@ -918,6 +1185,7 @@ void Window::SchedulePaint() {
 }
 
 void Window::Paint(const ui::PaintContext& context) {
+  DUMP_WILL_BE_CHECK(!is_destroying_);
   if (delegate_)
     delegate_->OnPaint(context);
 }
@@ -935,8 +1203,8 @@ void Window::RemoveChildImpl(Window* child, Window* new_parent) {
   if (child->OwnsLayer())
     layer()->Remove(child->layer());
   child->parent_ = nullptr;
-  auto i = std::find(children_.begin(), children_.end(), child);
-  DCHECK(i != children_.end());
+  auto i = std::ranges::find(children_, child);
+  CHECK(i != children_.end());
   children_.erase(i);
   child->OnParentChanged();
   if (layout_manager_)
@@ -953,6 +1221,7 @@ void Window::OnParentChanged() {
 void Window::StackChildRelativeTo(Window* child,
                                   Window* target,
                                   StackDirection direction) {
+  ScopedDeleteBlocker blocker(this);
   DCHECK_NE(child, target);
   DCHECK(child);
   DCHECK(target);
@@ -968,9 +1237,9 @@ void Window::StackChildRelativeTo(Window* child,
     return;
 
   const size_t child_i =
-      std::find(children_.begin(), children_.end(), child) - children_.begin();
+      std::ranges::find(children_, child) - children_.begin();
   const size_t target_i =
-      std::find(children_.begin(), children_.end(), target) - children_.begin();
+      std::ranges::find(children_, target) - children_.begin();
 
   DCHECK_LT(child_i, children_.size()) << "Child was not in list of children!";
   DCHECK_LT(target_i, children_.size())
@@ -1004,34 +1273,41 @@ void Window::StackChildLayerRelativeTo(Window* child,
 }
 
 void Window::OnStackingChanged() {
+  ScopedDeleteBlocker blocker(this);
   for (WindowObserver& observer : observers_)
     observer.OnWindowStackingChanged(this);
 }
 
 void Window::NotifyRemovingFromRootWindow(Window* new_root) {
+  ScopedDeleteBlocker blocker(this);
   if (frame_sink_id_.is_valid())
     UnregisterFrameSinkId();
   for (WindowObserver& observer : observers_)
     observer.OnWindowRemovingFromRootWindow(this, new_root);
-  for (Window::Windows::const_iterator it = children_.begin();
-       it != children_.end(); ++it) {
-    (*it)->NotifyRemovingFromRootWindow(new_root);
+
+  WindowTracker tracker(children_);
+  while (!tracker.windows().empty()) {
+    tracker.Pop()->NotifyRemovingFromRootWindow(new_root);
   }
 }
 
 void Window::NotifyAddedToRootWindow() {
+  ScopedDeleteBlocker blocker(this);
   if (frame_sink_id_.is_valid())
     RegisterFrameSinkId();
   for (WindowObserver& observer : observers_)
     observer.OnWindowAddedToRootWindow(this);
-  for (Window::Windows::const_iterator it = children_.begin();
-       it != children_.end(); ++it) {
-    (*it)->NotifyAddedToRootWindow();
+
+  WindowTracker tracker(children_);
+  while (!tracker.windows().empty()) {
+    tracker.Pop()->NotifyAddedToRootWindow();
   }
 }
 
 void Window::NotifyWindowHierarchyChange(
     const WindowObserver::HierarchyChangeParams& params) {
+  ScopedDeleteBlocker blocker(this);
+
   params.target->NotifyWindowHierarchyChangeDown(params);
   switch (params.phase) {
     case WindowObserver::HierarchyChangeParams::HIERARCHY_CHANGING:
@@ -1048,9 +1324,9 @@ void Window::NotifyWindowHierarchyChange(
 void Window::NotifyWindowHierarchyChangeDown(
     const WindowObserver::HierarchyChangeParams& params) {
   NotifyWindowHierarchyChangeAtReceiver(params);
-  for (Window::Windows::const_iterator it = children_.begin();
-       it != children_.end(); ++it) {
-    (*it)->NotifyWindowHierarchyChangeDown(params);
+  WindowTracker tracker(children_);
+  while (!tracker.windows().empty()) {
+    tracker.Pop()->NotifyWindowHierarchyChangeDown(params);
   }
 }
 
@@ -1089,11 +1365,14 @@ bool Window::NotifyWindowVisibilityChangedAtReceiver(aura::Window* target,
   // |this| may be deleted during a call to OnWindowVisibilityChanged() on one
   // of the observers. We create an local observer for that. In that case we
   // exit without further access to any members.
-  WindowTracker tracker;
-  tracker.Add(this);
-  for (WindowObserver& observer : observers_)
+  auto weak_this = GetWeakPtr();
+  for (WindowObserver& observer : observers_) {
     observer.OnWindowVisibilityChanged(target, visible);
-  return tracker.Contains(this);
+    if (!weak_this) {
+      break;
+    }
+  }
+  return !!weak_this;
 }
 
 bool Window::NotifyWindowVisibilityChangedDown(aura::Window* target,
@@ -1101,17 +1380,17 @@ bool Window::NotifyWindowVisibilityChangedDown(aura::Window* target,
   if (!NotifyWindowVisibilityChangedAtReceiver(target, visible))
     return false;  // |this| was deleted.
 
-  WindowTracker this_tracker;
-  this_tracker.Add(this);
+  auto weak_this = GetWeakPtr();
+
   // Copy |children_| in case iterating mutates |children_|, or destroys an
   // existing child.
   WindowTracker children(children_);
 
-  while (!this_tracker.windows().empty() && !children.windows().empty())
+  while (weak_this && !children.windows().empty()) {
     children.Pop()->NotifyWindowVisibilityChangedDown(target, visible);
+  }
 
-  const bool this_still_valid = !this_tracker.windows().empty();
-  return this_still_valid;
+  return !!weak_this;
 }
 
 void Window::NotifyWindowVisibilityChangedUp(aura::Window* target,
@@ -1120,20 +1399,28 @@ void Window::NotifyWindowVisibilityChangedUp(aura::Window* target,
   // in NotifyWindowVisibilityChangedDown.
   for (Window* window = parent(); window; window = window->parent()) {
     bool ret = window->NotifyWindowVisibilityChangedAtReceiver(target, visible);
-    DCHECK(ret);
+    CHECK(ret);
   }
 }
 
 bool Window::CleanupGestureState() {
-  // If it's in the process already, nothing has to be done. Reentrant can
+  // If it's in the process already, clean up the consumer state. Reentrant can
   // happen through some event handlers for CancelActiveTouches().
-  if (cleaning_up_gesture_state_)
-    return false;
-
-  base::AutoReset<bool> in_cleanup(&cleaning_up_gesture_state_, true);
-  bool state_modified = false;
   Env* env = Env::GetInstance();
+  if (cleaning_up_gesture_state_) {
+    return env->gesture_recognizer()->CleanupStateForConsumer(this);
+  }
+  cleaning_up_gesture_state_ = true;
+
+  // Cancelling active touches may end up destroying this window. We use a
+  // tracker to detect this.
+  WindowTracker tracking_this({this});
+
+  bool state_modified = false;
   state_modified |= env->gesture_recognizer()->CancelActiveTouches(this);
+  if (!tracking_this.Contains(this))
+    return state_modified;
+
   state_modified |= env->gesture_recognizer()->CleanupStateForConsumer(this);
   // Potentially event handlers for CancelActiveTouches() within
   // CleanupGestureState may change the window hierarchy (or reorder the
@@ -1144,6 +1431,7 @@ bool Window::CleanupGestureState() {
     Window* child = children.Pop();
     state_modified |= child->CleanupGestureState();
   }
+  cleaning_up_gesture_state_ = false;
   return state_modified;
 }
 
@@ -1174,18 +1462,15 @@ std::unique_ptr<cc::LayerTreeFrameSink> Window::CreateLayerTreeFrameSink() {
       frame_sink_id_, std::move(sink_receiver), std::move(client_remote));
 
   cc::mojo_embedder::AsyncLayerTreeFrameSink::InitParams params;
-  params.gpu_memory_buffer_manager =
-      Env::GetInstance()->context_factory()->GetGpuMemoryBufferManager();
   params.pipes.compositor_frame_sink_remote = std::move(sink_remote);
   params.pipes.client_receiver = std::move(client_receiver);
-  params.client_name = kExo;
   auto frame_sink =
       std::make_unique<cc::mojo_embedder::AsyncLayerTreeFrameSink>(
-          nullptr /* context_provider */, nullptr /* worker_context_provider */,
-          &params);
+          /*context_provider=*/nullptr, /*worker_context_provider=*/nullptr,
+          /*shared_image_interface=*/nullptr, &params);
   frame_sink_ = frame_sink->GetWeakPtr();
   AllocateLocalSurfaceId();
-  DCHECK(GetLocalSurfaceIdAllocation().local_surface_id().is_valid());
+  DCHECK(GetLocalSurfaceId().is_valid());
 #if DCHECK_IS_ON()
   created_layer_tree_frame_sink_ = true;
 #endif
@@ -1193,8 +1478,11 @@ std::unique_ptr<cc::LayerTreeFrameSink> Window::CreateLayerTreeFrameSink() {
 }
 
 viz::SurfaceId Window::GetSurfaceId() {
-  return viz::SurfaceId(GetFrameSinkId(),
-                        GetLocalSurfaceIdAllocation().local_surface_id());
+  return viz::SurfaceId(GetFrameSinkId(), GetLocalSurfaceId());
+}
+
+viz::SurfaceId Window::GetSurfaceId() const {
+  return const_cast<Window*>(this)->GetSurfaceId();
 }
 
 void Window::AllocateLocalSurfaceId() {
@@ -1212,24 +1500,25 @@ viz::ScopedSurfaceIdAllocator Window::GetSurfaceIdAllocator(
                                        std::move(allocation_task));
 }
 
-const viz::LocalSurfaceIdAllocation& Window::GetLocalSurfaceIdAllocation() {
+const viz::LocalSurfaceId& Window::GetLocalSurfaceId() {
   if (!parent_local_surface_id_allocator_)
     AllocateLocalSurfaceId();
-  return GetCurrentLocalSurfaceIdAllocation();
+  return GetCurrentLocalSurfaceId();
 }
 
-void Window::InvalidateLocalSurfaceId() {
+void Window::InvalidateLocalSurfaceId(bool also_invalidate_allocation_group) {
   if (!parent_local_surface_id_allocator_)
     return;
-  parent_local_surface_id_allocator_->Invalidate();
+  parent_local_surface_id_allocator_->Invalidate(
+      also_invalidate_allocation_group);
 }
 
 void Window::UpdateLocalSurfaceIdFromEmbeddedClient(
-    const base::Optional<viz::LocalSurfaceIdAllocation>&
-        embedded_client_local_surface_id_allocation) {
-  if (embedded_client_local_surface_id_allocation) {
+    const std::optional<viz::LocalSurfaceId>&
+        embedded_client_local_surface_id) {
+  if (embedded_client_local_surface_id) {
     parent_local_surface_id_allocator_->UpdateFromChild(
-        *embedded_client_local_surface_id_allocation);
+        *embedded_client_local_surface_id);
     UpdateLocalSurfaceId();
   } else {
     AllocateLocalSurfaceId();
@@ -1255,37 +1544,61 @@ void Window::TrackOcclusionState() {
   Env::GetInstance()->GetWindowOcclusionTracker()->Track(this);
 }
 
+void Window::UntrackOcclusionState() {
+  Env::GetInstance()->GetWindowOcclusionTracker()->Untrack(this);
+}
+
 bool Window::RequiresDoubleTapGestureEvents() const {
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
   return delegate_ && delegate_->RequiresDoubleTapGestureEvents();
 }
 
 // static
-const char* Window::OcclusionStateToString(OcclusionState state) {
-#define CASE_TYPE(t) \
-  case t:            \
-    return #t
+const std::u16string Window::OcclusionStateToString(OcclusionState state) {
+  return ui::metadata::TypeConverter<OcclusionState>::ToString(state);
+}
 
-  switch (state) {
-    CASE_TYPE(OcclusionState::UNKNOWN);
-    CASE_TYPE(OcclusionState::VISIBLE);
-    CASE_TYPE(OcclusionState::OCCLUDED);
-    CASE_TYPE(OcclusionState::HIDDEN);
+// static
+std::string_view Window::WindowTypeToString(client::WindowType type) {
+  switch (type) {
+    case client::WINDOW_TYPE_UNKNOWN:
+      return "unknown";
+    case client::WINDOW_TYPE_NORMAL:
+      return "normal";
+    case client::WINDOW_TYPE_POPUP:
+      return "popup";
+    case client::WINDOW_TYPE_CONTROL:
+      return "control";
+    case client::WINDOW_TYPE_MENU:
+      return "menu";
+    case client::WINDOW_TYPE_TOOLTIP:
+      return "tooltip";
   }
-#undef CASE_TYPE
-
-  NOTREACHED();
-  return "";
 }
 
 void Window::SetOpaqueRegionsForOcclusion(
     const std::vector<gfx::Rect>& opaque_regions_for_occlusion) {
-  // Only transparent windows should try to set opaque regions for occlusion.
-  DCHECK(transparent() || opaque_regions_for_occlusion.empty());
+  DUMP_WILL_BE_CHECK(!is_destroying_);
+  // Opaque regions for occlusion do not apply to opaque windows, so only
+  // allow opaque regions for occlusion to be set for them if they are the
+  // same as the window bounds size.
+  DCHECK(GetTransparent() || layer()->type() == ui::LAYER_NOT_DRAWN ||
+         opaque_regions_for_occlusion.empty() ||
+         (opaque_regions_for_occlusion.size() == 1 &&
+          opaque_regions_for_occlusion[0] == gfx::Rect(bounds().size())));
   if (opaque_regions_for_occlusion == opaque_regions_for_occlusion_)
     return;
   opaque_regions_for_occlusion_ = opaque_regions_for_occlusion;
   for (auto& observer : observers_)
     observer.OnWindowOpaqueRegionsForOcclusionChanged(this);
+}
+
+base::WeakPtr<ui::GestureConsumer> Window::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
+}
+
+base::WeakPtr<aura::Window> Window::GetWeakPtrAsWindow() {
+  return weak_factory_.GetWeakPtr();
 }
 
 void Window::NotifyResizeLoopStarted() {
@@ -1298,13 +1611,26 @@ void Window::NotifyResizeLoopEnded() {
     observer.OnResizeLoopEnded(this);
 }
 
+void Window::NotifyMoveLoopStarted() {
+  observers_.Notify(&WindowObserver::OnMoveLoopStarted, this);
+}
+
+void Window::NotifyMoveLoopEnded() {
+  observers_.Notify(&WindowObserver::OnMoveLoopEnded, this);
+}
+
 void Window::OnPaintLayer(const ui::PaintContext& context) {
   Paint(context);
 }
 
 void Window::OnLayerBoundsChanged(const gfx::Rect& old_bounds,
                                   ui::PropertyChangeReason reason) {
+  // This may still be called while finishing animation during destruction.
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
+
   WindowOcclusionTracker::ScopedPause pause_occlusion_tracking;
+
+  ScopedDeleteBlocker blocker(this);
 
   bounds_ = layer()->bounds();
 
@@ -1312,8 +1638,7 @@ void Window::OnLayerBoundsChanged(const gfx::Rect& old_bounds,
       IsEmbeddingExternalContent()) {
     parent_local_surface_id_allocator_->GenerateId();
     if (frame_sink_) {
-      frame_sink_->SetLocalSurfaceId(
-          GetCurrentLocalSurfaceIdAllocation().local_surface_id());
+      frame_sink_->SetLocalSurfaceId(GetCurrentLocalSurfaceId());
     }
   }
 
@@ -1323,6 +1648,24 @@ void Window::OnLayerBoundsChanged(const gfx::Rect& old_bounds,
     delegate_->OnBoundsChanged(old_bounds, bounds_);
   for (auto& observer : observers_)
     observer.OnWindowBoundsChanged(this, old_bounds, bounds_, reason);
+
+  // Trigger the changed notification for each of the bounds "properties".
+  if (old_bounds.x() != bounds_.x()) {
+    TriggerChangedCallback(
+        ui::metadata::MakeUniquePropertyKey(&bounds_, kBoundsX));
+  }
+  if (old_bounds.y() != bounds_.y()) {
+    TriggerChangedCallback(
+        ui::metadata::MakeUniquePropertyKey(&bounds_, kBoundsY));
+  }
+  if (old_bounds.width() != bounds_.width()) {
+    TriggerChangedCallback(
+        ui::metadata::MakeUniquePropertyKey(&bounds_, kBoundsWidth));
+  }
+  if (old_bounds.height() != bounds_.height()) {
+    TriggerChangedCallback(
+        ui::metadata::MakeUniquePropertyKey(&bounds_, kBoundsHeight));
+  }
 }
 
 void Window::OnLayerOpacityChanged(ui::PropertyChangeReason reason) {
@@ -1344,8 +1687,11 @@ void Window::OnLayerFillsBoundsOpaquelyChanged(
   WindowOcclusionTracker::ScopedPause pause_occlusion_tracking;
 
   // Non-transparent windows should not have opaque regions for occlusion set.
-  if (!transparent())
+#if DCHECK_IS_ON()
+  if (!GetTransparent() && layer()->type() != ui::LAYER_NOT_DRAWN) {
     DCHECK(opaque_regions_for_occlusion_.empty());
+  }
+#endif
 
   for (WindowObserver& observer : observers_)
     observer.OnWindowTransparentChanged(this, reason);
@@ -1362,7 +1708,7 @@ bool Window::CanAcceptEvent(const ui::Event& event) {
   // The client may forbid certain windows from receiving events at a given
   // point in time.
   client::EventClient* client = client::GetEventClient(GetRootWindow());
-  if (client && !client->CanProcessEventsWithinSubtree(this))
+  if (client && !client->GetCanProcessEventsWithinSubtree(this))
     return false;
 
   // We need to make sure that a touch cancel event and any gesture events it
@@ -1417,6 +1763,18 @@ gfx::PointF Window::GetScreenLocationF(const ui::LocatedEvent& event) const {
   return screen_location;
 }
 
+std::unique_ptr<ui::Layer> Window::ReleaseLayer() {
+  if (number_of_capture_requests_) {
+    // Before we release our own layer, if this window was marked for capture,
+    // we need to reset the SubtreeCaptureId on that layer as it will no longer
+    // be associated with us.
+    DCHECK(subtree_capture_id_.is_valid());
+    if (layer())
+      layer()->SetSubtreeCaptureId(viz::SubtreeCaptureId());
+  }
+  return LayerOwner::ReleaseLayer();
+}
+
 std::unique_ptr<ui::Layer> Window::RecreateLayer() {
   WindowOcclusionTracker::ScopedPause pause_occlusion_tracking;
 
@@ -1433,6 +1791,12 @@ std::unique_ptr<ui::Layer> Window::RecreateLayer() {
   // by a frame sent to the frame sink.
   if (GetFrameSinkId().is_valid() && old_layer)
     AllocateLocalSurfaceId();
+
+  // The old layer subtree must no longer be capturable.
+  // Note that we don't need to worry about the newly recreated layer since
+  // Window::SetLayer() will have taken care of it already.
+  if (number_of_capture_requests_ && old_layer)
+    old_layer->SetSubtreeCaptureId(viz::SubtreeCaptureId());
 
   // Observers are guaranteed to be notified when an opacity or transform
   // animation ends.
@@ -1455,6 +1819,20 @@ std::unique_ptr<ui::Layer> Window::RecreateLayer() {
   return old_layer;
 }
 
+void Window::SetLayer(std::unique_ptr<ui::Layer> alayer) {
+  // A layer maybe recreated in destroying phase.
+  DUMP_WILL_BE_CHECK(!is_destroyed_);
+
+  LayerOwner::SetLayer(std::move(alayer));
+  if (number_of_capture_requests_) {
+    // If this window was marked for capture before, then the new layer that we
+    // own now should be given the current SubtreeCaptureId that we have.
+    DCHECK(subtree_capture_id_.is_valid());
+    if (layer())
+      layer()->SetSubtreeCaptureId(subtree_capture_id_);
+  }
+}
+
 void Window::OnFirstSurfaceActivation(const viz::SurfaceInfo& surface_info) {
   DCHECK_EQ(surface_info.id().frame_sink_id(), GetFrameSinkId());
   layer()->SetShowSurface(surface_info.id(), bounds().size(), SK_ColorWHITE,
@@ -1462,10 +1840,10 @@ void Window::OnFirstSurfaceActivation(const viz::SurfaceInfo& surface_info) {
                           false /* stretch_content_to_fill_bounds */);
 }
 
-void Window::OnFrameTokenChanged(uint32_t frame_token) {}
+void Window::OnFrameTokenChanged(uint32_t frame_token,
+                                 base::TimeTicks activation_time) {}
 
 void Window::UpdateLayerName() {
-#if DCHECK_IS_ON()
   DCHECK(layer());
 
   std::string layer_name(GetName());
@@ -1476,7 +1854,6 @@ void Window::UpdateLayerName() {
     layer_name += " " + base::NumberToString(id_);
 
   layer()->SetName(layer_name);
-#endif
 }
 
 void Window::RegisterFrameSinkId() {
@@ -1500,19 +1877,140 @@ void Window::UnregisterFrameSinkId() {
 void Window::UpdateLocalSurfaceId() {
   last_device_scale_factor_ = ui::GetScaleFactorForNativeView(this);
   if (frame_sink_) {
-    frame_sink_->SetLocalSurfaceId(
-        GetCurrentLocalSurfaceIdAllocation().local_surface_id());
+    frame_sink_->SetLocalSurfaceId(GetCurrentLocalSurfaceId());
   }
 }
 
-const viz::LocalSurfaceIdAllocation&
-Window::GetCurrentLocalSurfaceIdAllocation() const {
-  return parent_local_surface_id_allocator_
-      ->GetCurrentLocalSurfaceIdAllocation();
+const viz::LocalSurfaceId& Window::GetCurrentLocalSurfaceId() const {
+  return parent_local_surface_id_allocator_->GetCurrentLocalSurfaceId();
 }
 
 bool Window::IsEmbeddingExternalContent() const {
   return parent_local_surface_id_allocator_.get() != nullptr;
 }
+
+void Window::OnScopedWindowCaptureRequestAdded() {
+  if (++number_of_capture_requests_ == 1) {
+    DCHECK(!subtree_capture_id_.is_valid());
+    DCHECK(!layer() || !layer()->GetSubtreeCaptureId().is_valid());
+
+    subtree_capture_id_ =
+        Env::GetInstance()->context_factory()->AllocateSubtreeCaptureId();
+    if (layer())
+      layer()->SetSubtreeCaptureId(subtree_capture_id_);
+  }
+
+  DCHECK(subtree_capture_id_.is_valid());
+}
+
+void Window::OnScopedWindowCaptureRequestRemoved() {
+  DCHECK(subtree_capture_id_.is_valid());
+  DCHECK(number_of_capture_requests_);
+
+  --number_of_capture_requests_;
+  DCHECK_GE(number_of_capture_requests_, 0);
+
+  if (number_of_capture_requests_ == 0) {
+    subtree_capture_id_ = viz::SubtreeCaptureId();
+    if (layer())
+      layer()->SetSubtreeCaptureId(subtree_capture_id_);
+  }
+}
+
+int Window::GetHeight() const {
+  return bounds().height();
+}
+
+int Window::GetWidth() const {
+  return bounds().width();
+}
+
+int Window::GetX() const {
+  return bounds().x();
+}
+
+int Window::GetY() const {
+  return bounds().y();
+}
+
+void Window::SetHeight(int height) {
+  if (height == bounds().height())
+    return;
+  // Bounds changed notification is done within OnLayerBoundsChanged.
+  // Here and below.
+  SetBounds({bounds().x(), bounds().y(), bounds().width(), height});
+}
+
+void Window::SetWidth(int width) {
+  if (width == bounds().width())
+    return;
+  SetBounds({bounds().x(), bounds().y(), width, bounds().height()});
+}
+
+void Window::SetX(int x) {
+  if (x == bounds().x())
+    return;
+  SetBounds({x, bounds().y(), bounds().width(), bounds().height()});
+}
+
+void Window::SetY(int y) {
+  if (y == bounds().y())
+    return;
+  SetBounds({bounds().x(), y, bounds().width(), bounds().height()});
+}
+
+void Window::SetLayoutManagerImpl(
+    std::unique_ptr<LayoutManager> layout_manager) {
+  layout_manager_ = std::move(layout_manager);
+  if (!layout_manager_)
+    return;
+
+  DUMP_WILL_BE_CHECK(!is_destroying_);
+  // If we're changing to a new layout manager, ensure it is aware of all the
+  // existing child windows.
+  for (Windows::const_iterator it = children_.begin(); it != children_.end();
+       ++it)
+    layout_manager_->OnWindowAddedToLayout(*it);
+}
+
+bool Window::GetCapture() const {
+  return const_cast<Window*>(this)->HasCapture();
+}
+
+bool Window::GetVisible() const {
+  return IsVisible();
+}
+
+void Window::SetVisible(bool visible) {
+  CHECK(layer());
+
+  if (visible == IsVisible())
+    return;
+  if (visible)
+    Show();
+  else
+    Hide();
+  // Changed notification is handled in SetVisibleInternal().
+}
+
+BEGIN_METADATA_BASE(Window)
+ADD_READONLY_PROPERTY_METADATA(gfx::Rect, ActualBoundsInRootWindow)
+ADD_READONLY_PROPERTY_METADATA(gfx::Rect, ActualBoundsInScreen)
+ADD_READONLY_PROPERTY_METADATA(gfx::Rect, BoundsInRootWindow)
+ADD_READONLY_PROPERTY_METADATA(gfx::Rect, BoundsInScreen)
+ADD_READONLY_PROPERTY_METADATA(bool, Capture)
+ADD_PROPERTY_METADATA(int, Height)
+ADD_PROPERTY_METADATA(int, Width)
+ADD_PROPERTY_METADATA(int, X)
+ADD_PROPERTY_METADATA(int, Y)
+ADD_READONLY_PROPERTY_METADATA(Window::OcclusionState, OcclusionState)
+ADD_READONLY_PROPERTY_METADATA(viz::SurfaceId, SurfaceId)
+ADD_PROPERTY_METADATA(int, Id)
+ADD_PROPERTY_METADATA(std::string, Name)
+ADD_PROPERTY_METADATA(std::u16string, Title)
+ADD_PROPERTY_METADATA(bool, Transparent)
+ADD_PROPERTY_METADATA(client::WindowType, Type)
+ADD_PROPERTY_METADATA(bool, Visible)
+END_METADATA
 
 }  // namespace aura

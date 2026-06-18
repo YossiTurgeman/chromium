@@ -1,60 +1,32 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/common/profiler/thread_profiler_configuration.h"
 
+#include <variant>
+
+#include "base/check.h"
 #include "base/command_line.h"
-#include "base/lazy_instance.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/no_destructor.h"
+#include "base/notreached.h"
+#include "base/numerics/ranges.h"
+#include "base/profiler/stack_sampler.h"
 #include "base/rand_util.h"
 #include "build/branding_buildflags.h"
-#include "build/build_config.h"
 #include "chrome/common/channel_info.h"
 #include "chrome/common/chrome_switches.h"
+#include "chrome/common/profiler/core_unwinders.h"
+#include "chrome/common/profiler/process_type.h"
+#include "chrome/common/profiler/thread_profiler_platform_configuration.h"
+#include "components/sampling_profiler/process_type.h"
 #include "components/version_info/version_info.h"
-#include "content/public/common/content_switches.h"
-#include "extensions/buildflags/buildflags.h"
-#include "sandbox/policy/sandbox.h"
-
-#if defined(OS_ANDROID)
-#include "chrome/android/modules/stack_unwinder/public/module.h"
-#endif
-
-#if defined(OS_WIN)
-#include "base/win/static_constants.h"
-#endif
-
-#if defined(OS_MAC)
-#include "base/mac/mac_util.h"
-#endif
-
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-#include "extensions/common/switches.h"
-#endif
 
 namespace {
 
-base::LazyInstance<ThreadProfilerConfiguration>::Leaky g_configuration =
-    LAZY_INSTANCE_INITIALIZER;
-
 // Returns true if the current execution is taking place in the browser process.
-bool IsBrowserProcess() {
-  const base::CommandLine* command_line =
-      base::CommandLine::ForCurrentProcess();
-  std::string process_type =
-      command_line->GetSwitchValueASCII(switches::kProcessType);
-  return process_type.empty();
-}
-
-// True if the command line corresponds to an extension renderer process.
-bool IsExtensionRenderer(const base::CommandLine& command_line) {
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-  return command_line.HasSwitch(extensions::switches::kExtensionProcess);
-#else
-  return false;
-#endif
-}
-
 // Allows the profiler to be run in a special browser test mode for testing that
 // profiles are collected as expected, by providing a switch value. The test
 // mode reduces the profiling duration to ensure the startup profiles complete
@@ -66,206 +38,240 @@ bool IsBrowserTestModeEnabled() {
          switches::kStartStackProfilerBrowserTest;
 }
 
-bool IsProfilerEnabledForChannel() {
-#if defined(OS_ANDROID)
-  // Profiling is only enable in it's own dedicated browser tests on Android.
-  // TODO(crbug.com/1004855): Remove this logic to launch profiler.
-  return IsBrowserTestModeEnabled();
-#elif BUILDFLAG(GOOGLE_CHROME_BRANDING)
-  // Only run on canary and dev.
-  const version_info::Channel channel = chrome::GetChannel();
-  return channel == version_info::Channel::CANARY ||
-         channel == version_info::Channel::DEV;
+// Returns the channel if this is a Chrome release, otherwise returns nullopt. A
+// build is considered to be a Chrome release if it's official and has Chrome
+// branding.
+std::optional<version_info::Channel> GetReleaseChannel() {
+#if defined(OFFICIAL_BUILD) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+  return chrome::GetChannel();
 #else
-  return true;
+  return std::nullopt;
 #endif
-}
-
-bool ShouldEnableProfilerForNextRendererProcess() {
-  // Ensure deterministic behavior for testing the profiler itself.
-  if (IsBrowserTestModeEnabled())
-    return true;
-
-  // Enable for every N-th renderer process, where N = 5.
-  return base::RandInt(0, 4) == 0;
 }
 
 }  // namespace
 
-ThreadProfilerConfiguration::ThreadProfilerConfiguration()
-    : configuration_(GenerateConfiguration()) {}
+// static
+ThreadProfilerConfiguration* ThreadProfilerConfiguration::Get() {
+  static base::NoDestructor<ThreadProfilerConfiguration>
+      thread_profiler_configuration;
+  return thread_profiler_configuration.get();
+}
 
 base::StackSamplingProfiler::SamplingParams
 ThreadProfilerConfiguration::GetSamplingParams() const {
   base::StackSamplingProfiler::SamplingParams params;
-  params.initial_delay = base::TimeDelta::FromMilliseconds(0);
+  params.initial_delay = base::Milliseconds(0);
   // Trim the sampling duration when testing the profiler using browser tests.
   // The standard 30 second duration risks flaky timeouts since it's close to
   // the test timeout of 45 seconds.
   const base::TimeDelta duration =
-      base::TimeDelta::FromSeconds(IsBrowserTestModeEnabled() ? 1 : 30);
-  params.sampling_interval = base::TimeDelta::FromMilliseconds(100);
+      base::Seconds(IsBrowserTestModeEnabled() ? 1 : 30);
+  params.sampling_interval = base::Milliseconds(100);
   params.samples_per_profile = duration / params.sampling_interval;
 
   return params;
 }
 
 bool ThreadProfilerConfiguration::IsProfilerEnabledForCurrentProcess() const {
-  if (IsBrowserProcess()) {
-    return configuration_ == PROFILE_ENABLED ||
-           configuration_ == PROFILE_CONTROL;
+  if (const ChildProcessConfiguration* child_process_configuration =
+          std::get_if<ChildProcessConfiguration>(&configuration_)) {
+    return *child_process_configuration == kChildProcessProfileEnabled;
   }
 
-  DCHECK_EQ(PROFILE_FROM_COMMAND_LINE, configuration_);
-  // This is a child process. The |kStartStackProfiler| switch passed by the
-  // browser process determines whether the profiler is enabled for the process.
-  const base::CommandLine* command_line =
-      base::CommandLine::ForCurrentProcess();
-  return command_line->HasSwitch(switches::kStartStackProfiler);
+  const auto& config = std::get<BrowserProcessConfiguration>(configuration_);
+  return EnableForVariationGroup(config.variation_group) &&
+         IsProcessGloballyEnabled(
+             config,
+             GetProfilerProcessType(*base::CommandLine::ForCurrentProcess()));
+}
+
+bool ThreadProfilerConfiguration::IsProfilerEnabledForCurrentProcessAndThread(
+    sampling_profiler::ProfilerThreadType thread) const {
+  return IsProfilerEnabledForCurrentProcess() &&
+         platform_configuration_->IsEnabledForThread(
+             GetProfilerProcessType(*base::CommandLine::ForCurrentProcess()),
+             thread, GetReleaseChannel());
 }
 
 bool ThreadProfilerConfiguration::GetSyntheticFieldTrial(
     std::string* trial_name,
     std::string* group_name) const {
-  DCHECK(IsBrowserProcess());
+  DCHECK(std::holds_alternative<BrowserProcessConfiguration>(configuration_));
+  const auto& config = std::get<BrowserProcessConfiguration>(configuration_);
 
-  if (!base::StackSamplingProfiler::IsSupported())
+  if (!config.variation_group.has_value()) {
     return false;
-  if (!IsProfilerEnabledForChannel())
-    return false;
+  }
 
   *trial_name = "SyntheticStackProfilingConfiguration";
   *group_name = std::string();
-  switch (configuration_) {
-    case PROFILE_DISABLED:
+  switch (*config.variation_group) {
+    case kProfileDisabled:
       *group_name = "Disabled";
       break;
 
-    case PROFILE_DISABLED_MODULE_NOT_INSTALLED:
+    case kProfileDisabledModuleNotInstalled:
       *group_name = "DisabledModuleNotInstalled";
       break;
 
-    case PROFILE_CONTROL:
+    case kProfileControl:
       *group_name = "Control";
       break;
 
-    case PROFILE_ENABLED:
+    case kProfileEnabled:
       *group_name = "Enabled";
       break;
-
-    case PROFILE_FROM_COMMAND_LINE:
-      NOTREACHED();
+    case kProfileDisabledOutsideOfExperiment:
+      *group_name = "DisabledOutsideOfExperiment";
       break;
   }
 
-  return !group_name->empty();
+  return true;
+}
+
+bool ThreadProfilerConfiguration::IsProfilerEnabledForChildProcess(
+    sampling_profiler::ProfilerProcessType child_process) const {
+  const auto& config = std::get<BrowserProcessConfiguration>(configuration_);
+
+  const double enable_fraction =
+      platform_configuration_->GetChildProcessPerExecutionEnableFraction(
+          child_process);
+  const bool in_enabled_fraction = base::RandDouble() < enable_fraction;
+
+  return EnableForVariationGroup(config.variation_group) &&
+         IsProcessGloballyEnabled(config, child_process) && in_enabled_fraction;
 }
 
 void ThreadProfilerConfiguration::AppendCommandLineSwitchForChildProcess(
-    const std::string& process_type,
-    base::CommandLine* command_line) const {
-  DCHECK(IsBrowserProcess());
-
-  bool enable =
-      configuration_ == PROFILE_ENABLED || configuration_ == PROFILE_CONTROL;
-  if (!enable)
+    base::CommandLine* child_process_command_line) const {
+  DCHECK(std::holds_alternative<BrowserProcessConfiguration>(configuration_));
+  if (!IsProfilerEnabledForChildProcess(
+          GetProfilerProcessType(*child_process_command_line))) {
     return;
-  if (process_type == switches::kGpuProcess ||
-      (process_type == switches::kUtilityProcess &&
-       // The network service is the only utility process that is profiled for
-       // now.
-       sandbox::policy::SandboxTypeFromCommandLine(*command_line) ==
-           sandbox::policy::SandboxType::kNetwork) ||
-      (process_type == switches::kRendererProcess &&
-       // Do not start the profiler for extension processes since profiling the
-       // compositor thread in them is not useful.
-       !IsExtensionRenderer(*command_line) &&
-       ShouldEnableProfilerForNextRendererProcess())) {
-    if (IsBrowserTestModeEnabled()) {
-      // Propagate the browser test mode switch argument to the child processes.
-      command_line->AppendSwitchASCII(switches::kStartStackProfiler,
-                                      switches::kStartStackProfilerBrowserTest);
-    } else {
-      command_line->AppendSwitch(switches::kStartStackProfiler);
-    }
+  }
+
+  if (IsBrowserTestModeEnabled()) {
+    // Propagate the browser test mode switch argument to the child processes.
+    child_process_command_line->AppendSwitchASCII(
+        switches::kStartStackProfiler,
+        switches::kStartStackProfilerBrowserTest);
+  } else {
+    child_process_command_line->AppendSwitch(switches::kStartStackProfiler);
   }
 }
 
-// static
-ThreadProfilerConfiguration* ThreadProfilerConfiguration::Get() {
-  return g_configuration.Pointer();
+
+ThreadProfilerConfiguration::ThreadProfilerConfiguration()
+    : platform_configuration_(ThreadProfilerPlatformConfiguration::Create(
+          IsBrowserTestModeEnabled())),
+      configuration_(GenerateConfiguration(
+          GetProfilerProcessType(*base::CommandLine::ForCurrentProcess()),
+          *platform_configuration_)) {
 }
 
 // static
-ThreadProfilerConfiguration::ProfileConfiguration
-ThreadProfilerConfiguration::ChooseConfiguration(
-    const std::vector<Variation>& variations) {
-  int total_weight = 0;
+bool ThreadProfilerConfiguration::EnableForVariationGroup(
+    std::optional<VariationGroup> variation_group) {
+  // Enable if assigned to a variation group, and the group is one of the groups
+  // that are to be enabled.
+  return variation_group.has_value() &&
+         (*variation_group == kProfileEnabled ||
+          *variation_group == kProfileControl);
+}
+
+// static
+bool ThreadProfilerConfiguration::IsProcessGloballyEnabled(
+    const ThreadProfilerConfiguration::BrowserProcessConfiguration& config,
+    sampling_profiler::ProfilerProcessType process) {
+  return !config.process_type_to_sample.has_value() ||
+         process == *config.process_type_to_sample;
+}
+
+// static
+ThreadProfilerConfiguration::VariationGroup
+ThreadProfilerConfiguration::ChooseVariationGroup(
+    base::span<const Variation> variations,
+    double randValue) {
+  double total_weight = 0;
   for (const Variation& variation : variations)
     total_weight += variation.weight;
-  DCHECK_EQ(100, total_weight);
+  DCHECK(base::IsApproximatelyEqual(total_weight, 100.0, 0.0001));
 
-  int chosen = base::RandInt(0, total_weight - 1);  // Max is inclusive.
-  int cumulative_weight = 0;
-  for (const auto& variation : variations) {
-    if (chosen >= cumulative_weight &&
-        chosen < cumulative_weight + variation.weight) {
-      return variation.config;
-    }
+  double chosen = randValue * total_weight;  // Max is inclusive.
+  double cumulative_weight = 0;
+  for (const Variation& variation : variations) {
     cumulative_weight += variation.weight;
+    if (chosen < cumulative_weight) {
+      return variation.group;
+    }
   }
-  NOTREACHED();
-  return PROFILE_DISABLED;
+  return variations.back().group;
 }
 
 // static
-ThreadProfilerConfiguration::ProfileConfiguration
-ThreadProfilerConfiguration::GenerateConfiguration() {
-  if (!IsBrowserProcess())
-    return PROFILE_FROM_COMMAND_LINE;
+ThreadProfilerConfiguration::BrowserProcessConfiguration
+ThreadProfilerConfiguration::GenerateBrowserProcessConfiguration(
+    const ThreadProfilerPlatformConfiguration& platform_configuration) {
+  const base::CommandLine* command_line =
+      base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch(switches::kDisableStackProfiler))
+    return {std::nullopt, std::nullopt};
 
-  if (!base::StackSamplingProfiler::IsSupported())
-    return PROFILE_DISABLED;
-  if (!IsProfilerEnabledForChannel())
-    return PROFILE_DISABLED;
+  const std::optional<version_info::Channel> release_channel =
+      GetReleaseChannel();
 
-#if defined(OS_ANDROID)
-  // Allow profiling if the Android Java/native unwinder module is available at
-  // initialization time. Otherwise request that it be installed for use on the
-  // next run of Chrome and disable profiling.
-  if (!stack_unwinder::Module::IsInstalled()) {
-#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-    // We only want to incur the cost of universally downloading the module in
-    // early channels, where profiling will occur over substantially all of the
-    // population. When supporting later channels in the future we will enable
-    // profiling for only a fraction of users and only download for those users.
-    const version_info::Channel channel = chrome::GetChannel();
-    if (channel == version_info::Channel::CANARY ||
-        channel == version_info::Channel::DEV) {
-      stack_unwinder::Module::RequestInstallation();
-    }
-#else
-    // This is a development build. The module is only available in the Play
-    // Store for releases so don't try to install it.
-#endif
-    return PROFILE_DISABLED_MODULE_NOT_INSTALLED;
+  if (!platform_configuration.IsSupported(release_channel))
+    return {std::nullopt, std::nullopt};
+
+  // We pass `version_info::Channel::UNKNOWN` instead of `std::nullopt` here
+  // because `AreUnwindPrerequisitesAvailable` accounts for official build
+  // status internally.
+  if (!AreUnwindPrerequisitesAvailable(
+          release_channel.value_or(version_info::Channel::UNKNOWN))) {
+    return {kProfileDisabledModuleNotInstalled, std::nullopt};
   }
-#endif
 
-  switch (chrome::GetChannel()) {
-    // Enable the profiler unconditionally for development/waterfall builds.
-    case version_info::Channel::UNKNOWN:
-      return PROFILE_ENABLED;
+  ThreadProfilerPlatformConfiguration::RelativePopulations
+      relative_populations =
+          platform_configuration.GetEnableRates(release_channel);
 
-#if (defined(OS_WIN) && defined(ARCH_CPU_X86_64)) || defined(OS_MAC)
-    case version_info::Channel::CANARY:
-    case version_info::Channel::DEV:
-      return ChooseConfiguration({{PROFILE_ENABLED, 80},
-                                  {PROFILE_CONTROL, 10},
-                                  {PROFILE_DISABLED, 10}});
-#endif
+  const std::optional<sampling_profiler::ProfilerProcessType>
+      process_type_to_sample = platform_configuration.ChooseEnabledProcess();
 
-    default:
-      return PROFILE_DISABLED;
+  return {ChooseVariationGroup(
+              {
+                  {kProfileDisabledOutsideOfExperiment,
+                   relative_populations.disabled},
+                  {kProfileEnabled, relative_populations.enabled},
+                  {kProfileControl, relative_populations.experiment / 2.0},
+                  {kProfileDisabled, relative_populations.experiment / 2.0},
+              },
+              base::RandDouble()),
+          process_type_to_sample};
+}
+
+// static
+ThreadProfilerConfiguration::ChildProcessConfiguration
+ThreadProfilerConfiguration::GenerateChildProcessConfiguration(
+    const base::CommandLine& command_line) {
+  // In a child process the |kStartStackProfiler| switch passed by the
+  // browser process determines whether the profiler is enabled for the
+  // process.
+  return command_line.HasSwitch(switches::kStartStackProfiler)
+             ? kChildProcessProfileEnabled
+             : kChildProcessProfileDisabled;
+}
+
+// static
+ThreadProfilerConfiguration::Configuration
+ThreadProfilerConfiguration::GenerateConfiguration(
+    sampling_profiler::ProfilerProcessType process,
+    const ThreadProfilerPlatformConfiguration& platform_configuration) {
+  if (process == sampling_profiler::ProfilerProcessType::kBrowser) {
+    return GenerateBrowserProcessConfiguration(platform_configuration);
   }
+
+  return GenerateChildProcessConfiguration(
+      *base::CommandLine::ForCurrentProcess());
 }

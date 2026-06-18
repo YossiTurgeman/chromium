@@ -29,20 +29,14 @@
 #include <memory>
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_model_object.h"
 #include "third_party/blink/renderer/core/layout/svg/svg_marker_data.h"
-#include "third_party/blink/renderer/platform/geometry/float_rect.h"
 #include "third_party/blink/renderer/platform/transforms/affine_transform.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
+#include "ui/gfx/geometry/rect_f.h"
 
 namespace blink {
 
 class PointerEventsHitRules;
 class SVGGeometryElement;
-
-enum ShapeGeometryCodePath {
-  kPathGeometry,
-  kRectGeometryFastPath,
-  kEllipseGeometryFastPath
-};
 
 struct LayoutSVGShapeRareData {
   USING_FAST_MALLOC(LayoutSVGShapeRareData);
@@ -59,91 +53,139 @@ class LayoutSVGShape : public LayoutSVGModelObject {
  public:
   ~LayoutSVGShape() override;
 
-  void SetNeedsShapeUpdate() { needs_shape_update_ = true; }
-  void SetNeedsBoundariesUpdate() final { needs_boundaries_update_ = true; }
-  void SetNeedsTransformUpdate() final { needs_transform_update_ = true; }
+  void SetNeedsShapeUpdate() {
+    NOT_DESTROYED();
+    needs_shape_update_ = true;
+  }
+  void SetNeedsBoundariesUpdate() final {
+    NOT_DESTROYED();
+    needs_boundaries_update_ = true;
+  }
+  void SetNeedsTransformUpdate() final {
+    NOT_DESTROYED();
+    needs_transform_update_ = true;
+  }
 
   Path& GetPath() const {
+    NOT_DESTROYED();
     DCHECK(path_);
     return *path_;
   }
-  bool HasPath() const { return path_.get(); }
+  bool HasPath() const {
+    NOT_DESTROYED();
+    return path_.get();
+  }
   float DashScaleFactor() const;
 
-  // This method is sometimes (rarely) called with a null path and crashes. The
-  // code managing the path enforces the necessary invariants to ensure a valid
-  // path but somehow that fails. The assert and check for hasPath() are
-  // intended to detect and prevent crashes.
-  virtual bool IsShapeEmpty() const {
-    DCHECK(path_);
-    return !HasPath() || GetPath().IsEmpty();
+  enum class GeometryType : uint8_t {
+    kEmpty,
+
+    kPath,
+    kLine,
+
+    kRectangle,
+    kRoundedRectangle,
+
+    kEllipse,
+    kCircle,
+  };
+  GeometryType GetGeometryType() const {
+    NOT_DESTROYED();
+    return geometry_type_;
+  }
+  bool IsShapeEmpty() const {
+    NOT_DESTROYED();
+    return GetGeometryType() == GeometryType::kEmpty;
   }
 
   bool HasNonScalingStroke() const {
-    return StyleRef().SvgStyle().VectorEffect() == VE_NON_SCALING_STROKE;
+    NOT_DESTROYED();
+    return StyleRef().VectorEffect() == EVectorEffect::kNonScalingStroke;
   }
   const Path& NonScalingStrokePath() const {
+    NOT_DESTROYED();
     DCHECK(HasNonScalingStroke());
     DCHECK(rare_data_);
     return rare_data_->non_scaling_stroke_path_;
   }
   const AffineTransform& NonScalingStrokeTransform() const {
+    NOT_DESTROYED();
     DCHECK(HasNonScalingStroke());
     DCHECK(rare_data_);
     return rare_data_->non_scaling_stroke_transform_;
   }
 
+  enum class NonScalingStrokeTransformMode {
+    kClearTranslation,
+    kPreserveTranslation
+  };
+
   AffineTransform ComputeRootTransform() const;
-  AffineTransform ComputeNonScalingStrokeTransform() const;
-  AffineTransform LocalSVGTransform() const final { return local_transform_; }
+  AffineTransform ComputeNonScalingStrokeTransform(
+      NonScalingStrokeTransformMode mode) const;
+  AffineTransform LocalSVGTransform() const final {
+    NOT_DESTROYED();
+    return local_transform_;
+  }
 
   virtual const Vector<MarkerPosition>* MarkerPositions() const {
+    NOT_DESTROYED();
     return nullptr;
   }
 
   float StrokeWidth() const;
   float StrokeWidthForMarkerUnits() const;
 
-  virtual ShapeGeometryCodePath GeometryCodePath() const {
-    return kPathGeometry;
+  gfx::RectF ObjectBoundingBox() const final {
+    NOT_DESTROYED();
+    return fill_bounding_box_;
   }
 
-  FloatRect ObjectBoundingBox() const final { return fill_bounding_box_; }
-
-  const char* GetName() const override { return "LayoutSVGShape"; }
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutSVGShape";
+  }
 
  protected:
-  // Description of the geometry of the shape for stroking.
-  enum StrokeGeometryClass : uint8_t {
-    kComplex,   // We don't know anything about the geometry => use the generic
-                // approximation.
-    kNoMiters,  // We know that the shape will not have any joins, so no miters
-                // will be generated. This means we can use an approximation
-                // that does not factor in miters (and thus get tighter
-                // approximated bounds.)
-    kSimple,    // We know that the geometry is convex and has no acute angles
-                // (rect, rounded rect, circle, ellipse) => use the simple
-                // approximation.
-  };
-  LayoutSVGShape(SVGGeometryElement*, StrokeGeometryClass);
+  explicit LayoutSVGShape(SVGGeometryElement*);
 
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const StyleChangeContext&) override;
   void WillBeDestroyed() override;
 
   RasterEffectOutset VisualRectOutsetForRasterEffects() const override;
 
   void ClearPath();
   void CreatePath();
+  const Path& EnsurePath() {
+    NOT_DESTROYED();
+    if (!HasPath()) {
+      CreatePath();
+    }
+    return GetPath();
+  }
+
+  void SetGeometryType(GeometryType geometry_type) {
+    NOT_DESTROYED();
+    geometry_type_ = geometry_type;
+  }
+
+  void SetGeometryDependsOnViewport(bool depends_on_viewport) {
+    NOT_DESTROYED();
+    geometry_depends_on_viewport_ = depends_on_viewport;
+  }
 
   // Update (cached) shape data and the (object) bounding box.
-  virtual void UpdateShapeFromElement();
-  FloatRect CalculateStrokeBoundingBox() const;
+  virtual gfx::RectF UpdateShapeFromElement() = 0;
+  virtual void UpdateMarkerBounds() { NOT_DESTROYED(); }
   virtual bool ShapeDependentStrokeContains(const HitTestLocation&);
   virtual bool ShapeDependentFillContains(const HitTestLocation&,
                                           const WindRule) const;
 
-  FloatRect fill_bounding_box_;
-  FloatRect stroke_bounding_box_;
+  gfx::RectF fill_bounding_box_;
+  gfx::RectF decorated_bounding_box_;
+  AffineTransform local_transform_;
 
   LayoutSVGShapeRareData& EnsureRareData() const;
 
@@ -154,36 +196,48 @@ class LayoutSVGShape : public LayoutSVGModelObject {
                     const WindRule fill_rule = RULE_NONZERO);
   bool StrokeContains(const HitTestLocation&, bool requires_stroke = true);
 
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectSVGShape ||
-           LayoutSVGModelObject::IsOfType(type);
+  bool IsSVGShape() const final {
+    NOT_DESTROYED();
+    return true;
   }
-  void UpdateLayout() final;
+
+  SVGLayoutResult UpdateSVGLayout(const SVGLayoutInfo&) final;
+  // Update LayoutObject state after layout has completed. Returns true if
+  // boundaries needs to be propagated (because of a change to the transform).
+  bool UpdateAfterSVGLayout(const SVGLayoutInfo&, bool bbox_changed);
+
   void Paint(const PaintInfo&) const final;
 
   bool NodeAtPoint(HitTestResult&,
                    const HitTestLocation&,
                    const PhysicalOffset& accumulated_offset,
-                   HitTestAction) final;
+                   HitTestPhase) final;
   bool HitTestShape(const HitTestRequest&,
                     const HitTestLocation&,
                     PointerEventsHitRules);
 
-  FloatRect StrokeBoundingBox() const final { return stroke_bounding_box_; }
+  // Calculates the tight stroke bounding box of the shape excluding any dash
+  // pattern.
+  gfx::RectF StrokeBoundingBox() const final;
+
+  gfx::RectF DecoratedBoundingBox() const final {
+    NOT_DESTROYED();
+    return decorated_bounding_box_;
+  }
 
   // Calculates an inclusive bounding box of this shape as if this shape has a
   // stroke. If this shape has a stroke, then |stroke_bounding_box_| is
   // returned; otherwise, estimates a bounding box (not necessarily tight) that
   // would include this shape's stroke bounding box if it had a stroke.
-  FloatRect HitTestStrokeBoundingBox() const;
+  gfx::RectF HitTestStrokeBoundingBox() const;
   // Compute an approximation of the bounding box that this stroke geometry
   // would generate when applied to the shape.
-  FloatRect ApproximateStrokeBoundingBox(const FloatRect& shape_bounds) const;
-  FloatRect CalculateNonScalingStrokeBoundingBox() const;
+  gfx::RectF ApproximateStrokeBoundingBox(const gfx::RectF& shape_bounds) const;
+  gfx::RectF CalculateStrokeBoundingBox() const;
+  gfx::RectF CalculateNonScalingStrokeBoundingBox() const;
   void UpdateNonScalingStrokeData();
 
  private:
-  AffineTransform local_transform_;
   // TODO(fmalita): the Path is now cached in SVGPath; while this additional
   // cache is just a shallow copy, it certainly has a complexity/state
   // management cost (plus allocation & storage overhead) - so we should look
@@ -192,15 +246,21 @@ class LayoutSVGShape : public LayoutSVGModelObject {
   mutable std::unique_ptr<LayoutSVGShapeRareData> rare_data_;
   std::unique_ptr<Path> stroke_path_cache_;
 
-  StrokeGeometryClass geometry_class_;
+  GeometryType geometry_type_;
+  bool geometry_depends_on_viewport_ : 1 = false;
   bool needs_boundaries_update_ : 1;
   bool needs_shape_update_ : 1;
   bool needs_transform_update_ : 1;
   bool transform_uses_reference_box_ : 1;
 };
 
-DEFINE_LAYOUT_OBJECT_TYPE_CASTS(LayoutSVGShape, IsSVGShape());
+template <>
+struct DowncastTraits<LayoutSVGShape> {
+  static bool AllowFrom(const LayoutObject& object) {
+    return object.IsSVGShape();
+  }
+};
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_SHAPE_H_

@@ -1,10 +1,10 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/apps/app_info_dialog/app_info_header_panel.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/extensions/chrome_app_icon.h"
 #include "chrome/browser/extensions/chrome_app_icon_service.h"
@@ -19,25 +19,24 @@
 #include "extensions/browser/image_loader.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
-#include "extensions/common/extension_icon_set.h"
 #include "extensions/common/extension_resource.h"
+#include "extensions/common/icons/extension_icon_set.h"
 #include "extensions/common/manifest_handlers/icons_handler.h"
-#include "extensions/common/manifest_url_handlers.h"
+#include "extensions/common/manifest_handlers/manifest_url_handlers.h"
 #include "net/base/url_util.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/image/image_skia_rep.h"
-#include "ui/gfx/native_widget_types.h"
 #include "ui/gfx/text_constants.h"
 #include "ui/views/controls/image_view.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/controls/link.h"
 #include "ui/views/layout/box_layout.h"
-#include "ui/views/layout/grid_layout.h"
 #include "ui/views/view.h"
 
 namespace {
@@ -60,11 +59,10 @@ AppInfoHeaderPanel::AppInfoHeaderPanel(Profile* profile,
   CreateControls();
 }
 
-AppInfoHeaderPanel::~AppInfoHeaderPanel() {
-}
+AppInfoHeaderPanel::~AppInfoHeaderPanel() = default;
 
 void AppInfoHeaderPanel::OnIconUpdated(extensions::ChromeAppIcon* icon) {
-  app_icon_view_->SetImage(icon->image_skia());
+  app_icon_view_->SetImage(ui::ImageModel::FromImageSkia(icon->image_skia()));
 }
 
 void AppInfoHeaderPanel::CreateControls() {
@@ -96,7 +94,7 @@ void AppInfoHeaderPanel::CreateControls() {
         vertical_info_container_ptr->AddChildView(std::make_unique<views::Link>(
             l10n_util::GetStringUTF16(IDS_APPLICATION_INFO_WEB_STORE_LINK)));
     view_in_store_link->SetHorizontalAlignment(gfx::ALIGN_LEFT);
-    view_in_store_link->set_callback(base::BindRepeating(
+    view_in_store_link->SetCallback(base::BindRepeating(
         &AppInfoHeaderPanel::ShowAppInWebStore, base::Unretained(this)));
     view_in_store_link->SetFocusBehavior(views::View::FocusBehavior::ALWAYS);
   } else {
@@ -121,5 +119,8 @@ bool AppInfoHeaderPanel::CanShowAppInWebStore() const {
   // Also hide Shared Modules because they are automatically installed
   // by Chrome when dependent Apps are installed.
   return app_->from_webstore() && !app_->was_installed_by_default() &&
-      !app_->is_shared_module();
+         !app_->is_shared_module();
 }
+
+BEGIN_METADATA(AppInfoHeaderPanel)
+END_METADATA

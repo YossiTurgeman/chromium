@@ -31,12 +31,9 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_SHARED_WORKER_CLIENT_HOLDER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_SHARED_WORKER_CLIENT_HOLDER_H_
 
-#include <memory>
-
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "services/metrics/public/cpp/ukm_source_id.h"
 #include "third_party/blink/public/mojom/blob/blob_url_store.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/worker/shared_worker_client.mojom-blink.h"
 #include "third_party/blink/public/mojom/worker/shared_worker_connector.mojom-blink.h"
@@ -70,15 +67,22 @@ class CORE_EXPORT SharedWorkerClientHolder final
   static SharedWorkerClientHolder* From(LocalDOMWindow&);
 
   explicit SharedWorkerClientHolder(LocalDOMWindow&);
-  virtual ~SharedWorkerClientHolder() = default;
+  SharedWorkerClientHolder(const SharedWorkerClientHolder&) = delete;
+  SharedWorkerClientHolder& operator=(const SharedWorkerClientHolder&) = delete;
+  ~SharedWorkerClientHolder() = default;
 
   // Establishes a connection with SharedWorkerHost in the browser process.
+  // `connector_override` is used to force creation of the shared worker on
+  // a custom worker pool instead of the default pool `connector_`.
   void Connect(SharedWorker*,
                MessagePortChannel,
                const KURL&,
                mojo::PendingRemote<mojom::blink::BlobURLToken>,
                mojom::blink::WorkerOptionsPtr options,
-               ukm::SourceId client_ukm_source_id);
+               mojom::blink::SharedWorkerSameSiteCookies same_site_cookies,
+               const HeapMojoRemote<mojom::blink::SharedWorkerConnector>*
+                   connector_override,
+               bool extended_lifetime);
 
   void Trace(Visitor* visitor) const override;
 
@@ -87,8 +91,6 @@ class CORE_EXPORT SharedWorkerClientHolder final
   HeapMojoUniqueReceiverSet<mojom::blink::SharedWorkerClient> client_receivers_;
 
   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
-
-  DISALLOW_COPY_AND_ASSIGN(SharedWorkerClientHolder);
 };
 
 }  // namespace blink

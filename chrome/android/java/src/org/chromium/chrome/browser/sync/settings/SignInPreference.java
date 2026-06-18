@@ -1,261 +1,249 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.sync.settings;
 
-import android.content.Context;
-import android.util.AttributeSet;
+import static org.chromium.build.NullUtil.assumeNonNull;
 
-import androidx.annotation.IntDef;
-import androidx.annotation.Nullable;
+import android.content.Context;
+import android.content.Intent;
+import android.util.AttributeSet;
+import android.view.View;
+import android.widget.ImageView;
+
 import androidx.appcompat.content.res.AppCompatResources;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceViewHolder;
 
 import org.chromium.base.metrics.RecordUserAction;
+import org.chromium.base.supplier.SupplierUtils;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.firstrun.FirstRunSignInProcessor;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
-import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
+import org.chromium.chrome.browser.preferences.Pref;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.signin.DisplayableProfileData;
-import org.chromium.chrome.browser.signin.IdentityServicesProvider;
-import org.chromium.chrome.browser.signin.PersonalizedSigninPromoView;
-import org.chromium.chrome.browser.signin.ProfileDataCache;
-import org.chromium.chrome.browser.signin.SigninManager.SignInAllowedObserver;
-import org.chromium.chrome.browser.signin.SigninPromoController;
-import org.chromium.chrome.browser.signin.SigninPromoUtil;
-import org.chromium.chrome.browser.signin.SigninUtils;
-import org.chromium.chrome.browser.sync.AndroidSyncSettings;
-import org.chromium.chrome.browser.sync.ProfileSyncService;
-import org.chromium.chrome.browser.sync.ProfileSyncService.SyncStateChangedListener;
+import org.chromium.chrome.browser.settings.search.ChromeBaseSearchIndexProvider;
+import org.chromium.chrome.browser.signin.SigninAndHistorySyncActivityLauncherImpl;
+import org.chromium.chrome.browser.signin.services.DisplayableProfileData;
+import org.chromium.chrome.browser.signin.services.IdentityServicesProvider;
+import org.chromium.chrome.browser.signin.services.ProfileDataCache;
+import org.chromium.chrome.browser.signin.services.SigninManager;
+import org.chromium.chrome.browser.signin.services.SigninManager.SignInStateObserver;
+import org.chromium.chrome.browser.sync.SyncServiceFactory;
+import org.chromium.chrome.browser.ui.signin.BottomSheetSigninAndHistorySyncConfig;
+import org.chromium.chrome.browser.ui.signin.BottomSheetSigninAndHistorySyncConfig.NoAccountSigninMode;
+import org.chromium.chrome.browser.ui.signin.BottomSheetSigninAndHistorySyncConfig.WithAccountSigninMode;
+import org.chromium.chrome.browser.ui.signin.BottomSheetSigninAndHistorySyncCoordinator;
+import org.chromium.chrome.browser.ui.signin.account_picker.AccountPickerBottomSheetStrings;
+import org.chromium.chrome.browser.ui.signin.history_sync.HistorySyncConfig;
 import org.chromium.components.browser_ui.settings.ManagedPreferencesUtils;
+import org.chromium.components.browser_ui.settings.search.SettingsIndexData;
+import org.chromium.components.prefs.PrefService;
 import org.chromium.components.signin.AccountManagerFacade;
-import org.chromium.components.signin.AccountManagerFacadeProvider;
 import org.chromium.components.signin.AccountsChangeObserver;
+import org.chromium.components.signin.SigninFeatureMap;
 import org.chromium.components.signin.base.CoreAccountInfo;
-import org.chromium.components.signin.identitymanager.ConsentLevel;
 import org.chromium.components.signin.metrics.SigninAccessPoint;
+import org.chromium.components.sync.SyncService;
+import org.chromium.components.sync.UserActionableError;
+import org.chromium.components.user_prefs.UserPrefs;
+import org.chromium.google_apis.gaia.CoreAccountId;
 import org.chromium.ui.base.ViewUtils;
 
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
-import java.util.Collections;
+import java.util.function.Supplier;
 
 /**
- * A preference that displays "Sign in to Chrome" when the user is not sign in, and displays
- * the user's name, email, profile image and sync error icon if necessary when the user is signed
- * in.
+ * A preference that displays "Sign in to Chrome" when the user is not sign in, and displays the
+ * user's name, email, profile image and sync error icon if necessary when the user is signed in.
  */
-public class SignInPreference
-        extends Preference implements SignInAllowedObserver, ProfileDataCache.Observer,
-                                      AndroidSyncSettings.AndroidSyncSettingsObserver,
-                                      SyncStateChangedListener, AccountsChangeObserver {
-    @IntDef({State.SIGNIN_DISABLED, State.GENERIC_PROMO, State.PERSONALIZED_PROMO, State.SIGNED_IN})
-    @Retention(RetentionPolicy.SOURCE)
-    public @interface State {
-        int SIGNIN_DISABLED = 0;
-        int GENERIC_PROMO = 1;
-        int PERSONALIZED_PROMO = 2;
-        int SIGNED_IN = 3;
-    }
-
-    private boolean mPersonalizedPromoEnabled = true;
+@NullMarked
+public class SignInPreference extends Preference
+        implements SignInStateObserver,
+                ProfileDataCache.Observer,
+                SyncService.SyncStateChangedListener,
+                AccountsChangeObserver,
+                BottomSheetSigninAndHistorySyncCoordinator.Delegate {
     private boolean mWasGenericSigninPromoDisplayed;
     private boolean mViewEnabled;
-    private @Nullable SigninPromoController mSigninPromoController;
-    private final ProfileDataCache mProfileDataCache;
-    private final AccountManagerFacade mAccountManagerFacade;
-    private @State int mState;
-    private @Nullable Runnable mStateChangedCallback;
-    private boolean mObserversAdded;
+    private boolean mIsShowingSigninPromo;
+    private boolean mShowAlertIcon;
 
-    /**
-     * Constructor for inflating from XML.
-     */
+    private Profile mProfile;
+    private PrefService mPrefService;
+    private ProfileDataCache mProfileDataCache;
+    private AccountManagerFacade mAccountManagerFacade;
+    private @Nullable SyncService mSyncService;
+    private SigninManager mSigninManager;
+    // TODO(crbug.com/469772349): Remove @Nullable after activity-less sign-in launch.
+    private Supplier<@Nullable BottomSheetSigninAndHistorySyncCoordinator>
+            mSigninCoordinatorSupplier;
+
+    public ProfileDataCache getProfileDataCache() {
+        return mProfileDataCache;
+    }
+
+    /** Constructor for inflating from XML. */
     public SignInPreference(Context context, AttributeSet attrs) {
         super(context, attrs);
-
-        int imageSize = context.getResources().getDimensionPixelSize(R.dimen.user_picture_size);
-        mProfileDataCache = new ProfileDataCache(context, imageSize);
-        mAccountManagerFacade = AccountManagerFacadeProvider.getInstance();
-
-        // State will be updated in registerForUpdates.
-        mState = State.SIGNED_IN;
+        setLayoutResource(R.layout.account_management_account_row);
+        setViewId(R.id.account_management_account_row);
+        mIsShowingSigninPromo = false;
     }
 
     /**
-     * Starts listening for updates to the sign-in and sync state.
+     * Initialize the dependencies for the SignInPreference.
+     *
+     * <p>Must be called before the preference is attached, which is called from the containing
+     * settings screen's onViewCreated method.
      */
-    public void registerForUpdates() {
+    @Initializer
+    public void initialize(
+            Profile profile,
+            ProfileDataCache profileDataCache,
+            AccountManagerFacade accountManagerFacade,
+            Supplier<@Nullable BottomSheetSigninAndHistorySyncCoordinator>
+                    signinCoordinatorSupplier) {
+        mProfile = profile;
+        mProfileDataCache = profileDataCache;
+        mAccountManagerFacade = accountManagerFacade;
+        mSigninCoordinatorSupplier = signinCoordinatorSupplier;
+        mPrefService = UserPrefs.get(mProfile);
+        mSyncService = SyncServiceFactory.getForProfile(mProfile);
+        mSigninManager = assumeNonNull(IdentityServicesProvider.get().getSigninManager(mProfile));
+    }
+
+    @Override
+    public void onAttached() {
+        super.onAttached();
+
         mAccountManagerFacade.addObserver(this);
-        IdentityServicesProvider.get()
-                .getSigninManager(Profile.getLastUsedRegularProfile())
-                .addSignInAllowedObserver(this);
+        mSigninManager.addSignInStateObserver(this);
         mProfileDataCache.addObserver(this);
-        FirstRunSignInProcessor.updateSigninManagerFirstRunCheckDone();
-        AndroidSyncSettings.get().registerObserver(this);
-        ProfileSyncService syncService = ProfileSyncService.get();
-        if (syncService != null) {
-            syncService.addSyncStateChangedListener(this);
+        if (mSyncService != null) {
+            mSyncService.addSyncStateChangedListener(this);
         }
-        mObserversAdded = true;
 
         update();
     }
 
-    /**
-     * Stops listening for updates to the sign-in and sync state. Every call to registerForUpdates()
-     * must be matched with a call to this method.
-     */
-    public void unregisterForUpdates() {
+    @Override
+    public void onDetached() {
+        super.onDetached();
+
         mAccountManagerFacade.removeObserver(this);
-        IdentityServicesProvider.get()
-                .getSigninManager(Profile.getLastUsedRegularProfile())
-                .removeSignInAllowedObserver(this);
+        mSigninManager.removeSignInStateObserver(this);
         mProfileDataCache.removeObserver(this);
-        AndroidSyncSettings.get().unregisterObserver(this);
-        ProfileSyncService syncService = ProfileSyncService.get();
-        if (syncService != null) {
-            syncService.removeSyncStateChangedListener(this);
+        if (mSyncService != null) {
+            mSyncService.removeSyncStateChangedListener(this);
         }
-        mObserversAdded = false;
     }
 
     /**
-     * Should be called when the {@link PreferenceFragmentCompat} which used {@link
-     * SignInPreference} gets destroyed. Used to record "ImpressionsTilDismiss" histogram.
+     * Sets whether Personalized Signin Promo is being shown in {@link
+     * org.chromium.chrome.browser.settings.MainSettings} page
      */
-    public void onPreferenceFragmentDestroyed() {
-        if (mSigninPromoController != null) {
-            mSigninPromoController.onPromoDestroyed();
-        }
-    }
-
-    private void setState(@State int state) {
-        if (mState == state) return;
-        mState = state;
-        if (mStateChangedCallback != null) {
-            mStateChangedCallback.run();
-        }
-    }
-
-    /** Enables/disables personalized promo mode. */
-    public void setPersonalizedPromoEnabled(boolean personalizedPromoEnabled) {
-        if (mPersonalizedPromoEnabled == personalizedPromoEnabled) return;
-        mPersonalizedPromoEnabled = personalizedPromoEnabled;
-        // Can't update until observers are added.
-        if (mObserversAdded) update();
-    }
-
-    /** Returns the state of the preference. Not valid until registerForUpdates is called. */
-    @State
-    public int getState() {
-        return mState;
-    }
-
-    /** Sets callback to be notified of changes to the preference state. See {@link #getState}. */
-    public void setOnStateChangedCallback(@Nullable Runnable stateChangedCallback) {
-        mStateChangedCallback = stateChangedCallback;
+    public void setIsShowingPersonalizedSigninPromo(boolean isShowingSigninPromo) {
+        mIsShowingSigninPromo = isShowingSigninPromo;
+        update();
     }
 
     /** Updates the title, summary, and image based on the current sign-in state. */
     private void update() {
-        if (IdentityServicesProvider.get()
-                        .getSigninManager(Profile.getLastUsedRegularProfile())
-                        .isSigninDisabledByPolicy()) {
-            setupSigninDisabled();
+        setVisible(!mIsShowingSigninPromo);
+        if (!mPrefService.getBoolean(Pref.SIGNIN_ALLOWED)) {
+            if (mPrefService.isManagedPreference(Pref.SIGNIN_ALLOWED)) {
+                setupSigninDisabledByPolicy();
+            } else {
+                setupSigninDisallowed();
+                assert !mIsShowingSigninPromo
+                        : "Signin Promo should not be shown when signin is not allowed";
+                setVisible(false);
+            }
             return;
         }
 
-        @ConsentLevel
-        int consentLevel =
-                ChromeFeatureList.isEnabled(ChromeFeatureList.MOBILE_IDENTITY_CONSISTENCY)
-                ? ConsentLevel.NOT_REQUIRED
-                : ConsentLevel.SYNC;
-        CoreAccountInfo accountInfo =
-                IdentityServicesProvider.get()
-                        .getIdentityManager(Profile.getLastUsedRegularProfile())
-                        .getPrimaryAccountInfo(consentLevel);
-        if (accountInfo != null) {
-            setupSignedIn(accountInfo.getEmail());
-            return;
-        }
-
-        boolean personalizedPromoDismissed = SharedPreferencesManager.getInstance().readBoolean(
-                ChromePreferenceKeys.SIGNIN_PROMO_SETTINGS_PERSONALIZED_DISMISSED, false);
-        if (!mPersonalizedPromoEnabled || personalizedPromoDismissed) {
+        if (isSignedIn(mProfile)) {
+            setupSignedIn(assumeNonNull(getAccountInfo(mProfile)).getId());
+        } else {
             setupGenericPromo();
-            return;
         }
-
-        if (mSigninPromoController != null) {
-            // Don't change the promo type if the new promo is already being shown.
-            setupPersonalizedPromo();
-            return;
-        }
-
-        if (SigninPromoController.hasNotReachedImpressionLimit(SigninAccessPoint.SETTINGS)) {
-            setupPersonalizedPromo();
-            return;
-        }
-
-        setupGenericPromo();
     }
 
-    private void setupSigninDisabled() {
-        setState(State.SIGNIN_DISABLED);
-        setLayoutResource(R.layout.account_management_account_row);
-        setTitle(R.string.sign_in_to_chrome);
-        setSummary(R.string.sign_in_to_chrome_disabled_summary);
+    /** Returns whether Chrome is signed in. */
+    public static boolean isSignedIn(Profile profile) {
+        return getAccountInfo(profile) != null;
+    }
+
+    private static @Nullable CoreAccountInfo getAccountInfo(Profile profile) {
+        var identityManager =
+                assumeNonNull(IdentityServicesProvider.get().getIdentityManager(profile));
+        return identityManager.getPrimaryAccountInfo();
+    }
+
+    private void setupSigninDisabledByPolicy() {
         setFragment(null);
-        setIcon(ManagedPreferencesUtils.getManagedByEnterpriseIconId());
-        setWidgetLayoutResource(0);
-        setViewEnabled(false);
-        setOnPreferenceClickListener(pref -> {
-            ManagedPreferencesUtils.showManagedByAdministratorToast(getContext());
-            return true;
-        });
-        mSigninPromoController = null;
+        setTitle(R.string.signin_settings_title);
+        setSummary(R.string.settings_signin_disabled_by_administrator);
+        setIcon(R.drawable.ic_business_small_with_bg);
+        setViewEnabledAndShowAlertIcon(/* enabled= */ false, /* alertIconVisible= */ false);
+        setOnPreferenceClickListener(
+                pref -> {
+                    ManagedPreferencesUtils.showManagedByAdministratorToast(getContext());
+                    return true;
+                });
         mWasGenericSigninPromoDisplayed = false;
     }
 
-    private void setupPersonalizedPromo() {
-        setState(State.PERSONALIZED_PROMO);
-        setLayoutResource(R.layout.personalized_signin_promo_view_settings);
-        setTitle("");
-        setSummary("");
-        setFragment(null);
-        setIcon(null);
-        setWidgetLayoutResource(0);
-        setViewEnabled(true);
-        setOnPreferenceClickListener(null);
-
-        if (mSigninPromoController == null) {
-            mSigninPromoController = new SigninPromoController(SigninAccessPoint.SETTINGS);
-        }
-
+    private void setupSigninDisallowed() {
         mWasGenericSigninPromoDisplayed = false;
-        notifyChanged();
     }
 
     private void setupGenericPromo() {
-        setState(State.GENERIC_PROMO);
-        setLayoutResource(R.layout.account_management_account_row);
-        setTitle(R.string.sign_in_to_chrome);
-
-        setSummary(R.string.signin_pref_summary);
+        setTitle(R.string.signin_settings_title);
+        setSummary(R.string.signin_settings_subtitle);
 
         setFragment(null);
-        setIcon(AppCompatResources.getDrawable(getContext(), R.drawable.logo_avatar_anonymous));
-        setWidgetLayoutResource(0);
-        setViewEnabled(true);
-        setOnPreferenceClickListener(pref
-                -> SigninUtils.startSigninActivityIfAllowed(
-                        getContext(), SigninAccessPoint.SETTINGS));
-        mSigninPromoController = null;
+        setIcon(AppCompatResources.getDrawable(getContext(), R.drawable.account_circle_with_bg));
+        setViewEnabledAndShowAlertIcon(/* enabled= */ true, /* alertIconVisible= */ false);
+        OnPreferenceClickListener clickListener =
+                pref -> {
+                    AccountPickerBottomSheetStrings bottomSheetStrings =
+                            new AccountPickerBottomSheetStrings.Builder(
+                                            getContext()
+                                                    .getString(
+                                                            R.string
+                                                                    .signin_account_picker_bottom_sheet_title))
+                                    .build();
+                    BottomSheetSigninAndHistorySyncConfig config =
+                            new BottomSheetSigninAndHistorySyncConfig.Builder(
+                                            bottomSheetStrings,
+                                            NoAccountSigninMode.BOTTOM_SHEET,
+                                            WithAccountSigninMode.DEFAULT_ACCOUNT_BOTTOM_SHEET,
+                                            HistorySyncConfig.OptInMode.OPTIONAL,
+                                            getContext().getString(R.string.history_sync_title),
+                                            getContext().getString(R.string.history_sync_subtitle))
+                                    .build();
+                    if (SigninFeatureMap.getInstance().isActivitylessSigninAllEntryPointEnabled()) {
+                        SupplierUtils.asNonNull(mSigninCoordinatorSupplier)
+                                .get()
+                                .startSigninFlow(config);
+                    } else {
+                        @Nullable Intent intent =
+                                SigninAndHistorySyncActivityLauncherImpl.get()
+                                        .createBottomSheetSigninIntentOrShowError(
+                                                getContext(),
+                                                mProfile,
+                                                config,
+                                                SigninAccessPoint.SETTINGS);
+                        if (intent != null) {
+                            getContext().startActivity(intent);
+                        }
+                    }
+                    return true;
+                };
+        setOnPreferenceClickListener(clickListener);
 
         if (!mWasGenericSigninPromoDisplayed) {
             RecordUserAction.record("Signin_Impression_FromSettings");
@@ -264,31 +252,36 @@ public class SignInPreference
         mWasGenericSigninPromoDisplayed = true;
     }
 
-    private void setupSignedIn(String accountName) {
-        setState(State.SIGNED_IN);
-        mProfileDataCache.update(Collections.singletonList(accountName));
-        DisplayableProfileData profileData = mProfileDataCache.getProfileDataOrDefault(accountName);
-
-        setLayoutResource(R.layout.account_management_account_row);
-        setTitle(profileData.getFullNameOrEmail());
-        setSummary(accountName);
-        setFragment(AccountManagementFragment.class.getName());
+    private void setupSignedIn(CoreAccountId accountId) {
+        assert isSignedIn(mProfile);
+        DisplayableProfileData profileData = mProfileDataCache.getById(accountId);
+        final boolean canShowEmailAddress = profileData.hasDisplayableEmailAddress();
+        setSummary(canShowEmailAddress ? profileData.getAccountEmail() : "");
+        setTitle(
+                SyncSettingsUtils.getDisplayableFullNameOrEmailWithPreference(
+                        profileData, getContext(), SyncSettingsUtils.TitlePreference.FULL_NAME));
+        setFragment(ManageSyncSettings.class.getName());
         setIcon(profileData.getImage());
-        setWidgetLayoutResource(0);
-        setViewEnabled(true);
+        setViewEnabledAndShowAlertIcon(
+                /* enabled= */ true,
+                /* alertIconVisible= */ SyncSettingsUtils.getSyncError(mProfile)
+                        != UserActionableError.NONE);
         setOnPreferenceClickListener(null);
 
-        mSigninPromoController = null;
         mWasGenericSigninPromoDisplayed = false;
     }
 
     // This just changes visual representation. Actual enabled flag in preference stays
-    // always true to receive clicks (necessary to show "Managed by administrator" toast).
-    private void setViewEnabled(boolean enabled) {
-        if (mViewEnabled == enabled) {
+    // always true to receive clicks (necessary to show "Managed by administrator" toast). This also
+    // sets the visibility of the alert icon.
+    private void setViewEnabledAndShowAlertIcon(boolean enabled, boolean alertIconVisible) {
+        assert enabled || !alertIconVisible
+                : "Alert icon should not be made visible if the view is disabled.";
+        if (mViewEnabled == enabled && mShowAlertIcon == alertIconVisible) {
             return;
         }
         mViewEnabled = enabled;
+        mShowAlertIcon = alertIconVisible;
         notifyChanged();
     }
 
@@ -297,22 +290,11 @@ public class SignInPreference
         super.onBindViewHolder(holder);
         ViewUtils.setEnabledRecursive(holder.itemView, mViewEnabled);
 
-        if (mSigninPromoController == null) {
-            return;
-        }
-
-        PersonalizedSigninPromoView signinPromoView =
-                (PersonalizedSigninPromoView) holder.findViewById(R.id.signin_promo_view_container);
-        SigninPromoUtil.setupSigninPromoViewFromCache(
-                mSigninPromoController, mProfileDataCache, signinPromoView, () -> {
-                    SharedPreferencesManager.getInstance().writeBoolean(
-                            ChromePreferenceKeys.SIGNIN_PROMO_SETTINGS_PERSONALIZED_DISMISSED,
-                            true);
-                    update();
-                });
+        ImageView alertIcon = (ImageView) holder.findViewById(R.id.alert_icon);
+        alertIcon.setVisibility(mShowAlertIcon ? View.VISIBLE : View.GONE);
     }
 
-    // ProfileSyncServiceListener implementation.
+    // SyncService.SyncStateChangedListener implementation.
     @Override
     public void syncStateChanged() {
         update();
@@ -326,13 +308,7 @@ public class SignInPreference
 
     // ProfileDataCache.Observer implementation.
     @Override
-    public void onProfileDataUpdated(String accountId) {
-        update();
-    }
-
-    // AndroidSyncSettings.AndroidSyncSettingsObserver implementation.
-    @Override
-    public void androidSyncSettingsChanged() {
+    public void onProfileDataUpdated(DisplayableProfileData profileData) {
         update();
     }
 
@@ -341,4 +317,22 @@ public class SignInPreference
     public void onAccountsChanged() {
         update();
     }
+
+    public static final ChromeBaseSearchIndexProvider SEARCH_INDEX_DATA_PROVIDER =
+            new ChromeBaseSearchIndexProvider(SignInPreference.class.getName(), 0) {
+
+                @Override
+                public int getXmlRes(Profile profile) {
+                    if (!isSignedIn(profile)) return 0;
+
+                    return ManageSyncSettings.SEARCH_INDEX_DATA_PROVIDER.getXmlRes(profile);
+                }
+
+                @Override
+                public void updateDynamicPreferences(
+                        Context context, SettingsIndexData indexData, Profile profile) {
+                    ManageSyncSettings.SEARCH_INDEX_DATA_PROVIDER.updateDynamicPreferences(
+                            context, indexData, profile);
+                }
+            };
 }

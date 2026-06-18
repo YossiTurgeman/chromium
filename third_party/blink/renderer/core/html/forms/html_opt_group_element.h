@@ -25,6 +25,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_FORMS_HTML_OPT_GROUP_ELEMENT_H_
 
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/dom/events/simulated_click_options.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 
 namespace blink {
@@ -37,31 +38,41 @@ class CORE_EXPORT HTMLOptGroupElement final : public HTMLElement {
 
  public:
   explicit HTMLOptGroupElement(Document&);
+  ~HTMLOptGroupElement() override;
+
+  ElementType GetElementType() const final {
+    return ElementType::kHTMLOptGroupElement;
+  }
 
   bool IsDisabledFormControl() const override;
   String DefaultToolTip() const override;
-  HTMLSelectElement* OwnerSelectElement() const;
+  HTMLSelectElement* OwnerSelectElement(bool skip_check = false) const;
 
   String GroupLabelText() const;
   HTMLDivElement& OptGroupLabelElement() const;
 
-  // Used for slot assignment.
-  static bool CanAssignToOptGroupSlot(const Node&);
+  void ManuallyAssignSlots() override;
+
+  void Trace(Visitor*) const override;
 
  private:
-  ~HTMLOptGroupElement() override;
-
-  bool SupportsFocus() const override;
+  FocusableState SupportsFocus(UpdateBehavior update_behavior) const override;
   void ChildrenChanged(const ChildrenChange& change) override;
   bool ChildrenChangedAllChildrenRemovedNeedsList() const override;
   void ParseAttribute(const AttributeModificationParams&) override;
-  void AccessKeyAction(bool send_mouse_events) override;
+  void AccessKeyAction(SimulatedClickCreationScope creation_scope) override;
   void DidAddUserAgentShadowRoot(ShadowRoot&) override;
   bool MatchesEnabledPseudoClass() const override;
+  bool MatchesDisabledPseudoClass() const override;
   InsertionNotificationRequest InsertedInto(ContainerNode&) override;
   void RemovedFrom(ContainerNode&) override;
 
+  String LabelAttributeText() const;
   void UpdateGroupLabel();
+
+  Member<HTMLSlotElement> opt_group_slot_;
+  Member<HTMLDivElement> label_;
+  Member<HTMLSelectElement> owner_select_;
 };
 
 }  // namespace blink

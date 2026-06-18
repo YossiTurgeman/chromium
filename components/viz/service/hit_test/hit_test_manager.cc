@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "components/viz/service/hit_test/hit_test_aggregator.h"
+#include "components/viz/service/hit_test/hit_test_manager.h"
+
+#include <utility>
+#include <vector>
 
 #include "components/viz/common/hit_test/aggregated_hit_test_region.h"
+#include "components/viz/service/hit_test/hit_test_aggregator.h"
 #include "components/viz/service/surfaces/latest_local_surface_id_lookup_delegate.h"
 #include "components/viz/service/surfaces/surface.h"
 
@@ -26,29 +30,10 @@ bool FlagsAndAsyncReasonsMatch(uint32_t flags,
 
 }  // namespace
 
-HitTestManager::HitTestAsyncQueriedDebugRegion::
-    HitTestAsyncQueriedDebugRegion() = default;
-HitTestManager::HitTestAsyncQueriedDebugRegion::HitTestAsyncQueriedDebugRegion(
-    base::flat_set<FrameSinkId> regions)
-    : regions(std::move(regions)) {}
-HitTestManager::HitTestAsyncQueriedDebugRegion::
-    ~HitTestAsyncQueriedDebugRegion() = default;
-
-HitTestManager::HitTestAsyncQueriedDebugRegion::HitTestAsyncQueriedDebugRegion(
-    HitTestAsyncQueriedDebugRegion&&) = default;
-HitTestManager::HitTestAsyncQueriedDebugRegion&
-HitTestManager::HitTestAsyncQueriedDebugRegion::operator=(
-    HitTestAsyncQueriedDebugRegion&&) = default;
-
 HitTestManager::HitTestManager(SurfaceManager* surface_manager)
     : surface_manager_(surface_manager) {}
 
 HitTestManager::~HitTestManager() = default;
-
-bool HitTestManager::OnSurfaceDamaged(const SurfaceId& surface_id,
-                                      const BeginFrameAck& ack) {
-  return false;
-}
 
 void HitTestManager::OnSurfaceDestroyed(const SurfaceId& surface_id) {
   hit_test_region_lists_.erase(surface_id);
@@ -63,7 +48,7 @@ void HitTestManager::OnSurfaceActivated(const SurfaceId& surface_id) {
 
   Surface* surface = surface_manager_->GetSurfaceForId(surface_id);
   DCHECK(surface);
-  uint64_t frame_index = surface->GetActiveFrameIndex();
+  uint32_t frame_index = surface->GetActiveFrameIndex();
 
   auto& frame_index_map = search->second;
   for (auto it = frame_index_map.begin(); it != frame_index_map.end();) {
@@ -74,15 +59,15 @@ void HitTestManager::OnSurfaceActivated(const SurfaceId& surface_id) {
   }
 }
 
-void HitTestManager::SubmitHitTestRegionList(
+bool HitTestManager::SubmitHitTestRegionList(
     const SurfaceId& surface_id,
-    const uint64_t frame_index,
-    base::Optional<HitTestRegionList> hit_test_region_list) {
+    const uint32_t frame_index,
+    std::optional<HitTestRegionList> hit_test_region_list) {
   if (!hit_test_region_list) {
     auto& frame_index_map = hit_test_region_lists_[surface_id];
     if (!frame_index_map.empty()) {
       // We will reuse the last submitted hit-test data.
-      uint64_t last_frame_index = frame_index_map.rbegin()->first;
+      uint32_t last_frame_index = frame_index_map.rbegin()->first;
 
       HitTestRegionList last_hit_test_region_list =
           std::move(frame_index_map[last_frame_index]);
@@ -90,10 +75,10 @@ void HitTestManager::SubmitHitTestRegionList(
       frame_index_map[frame_index] = std::move(last_hit_test_region_list);
       frame_index_map.erase(last_frame_index);
     }
-    return;
+    return true;
   }
   if (!ValidateHitTestRegionList(surface_id, &*hit_test_region_list))
-    return;
+    return false;
   ++submit_hit_test_region_list_index_;
 
   // TODO(gklassen): Runtime validation that hit_test_region_list is valid.
@@ -101,12 +86,13 @@ void HitTestManager::SubmitHitTestRegionList(
   // TODO(gklassen): FrameSink needs to inform the host of a difficult renderer.
   hit_test_region_lists_[surface_id][frame_index] =
       std::move(*hit_test_region_list);
+  return true;
 }
 
 const HitTestRegionList* HitTestManager::GetActiveHitTestRegionList(
     LatestLocalSurfaceIdLookupDelegate* delegate,
     const FrameSinkId& frame_sink_id,
-    uint64_t* store_active_frame_index) const {
+    uint32_t* store_active_frame_index) const {
   if (!delegate)
     return nullptr;
 
@@ -122,7 +108,7 @@ const HitTestRegionList* HitTestManager::GetActiveHitTestRegionList(
 
   Surface* surface = surface_manager_->GetSurfaceForId(surface_id);
   DCHECK(surface);
-  uint64_t frame_index = surface->GetActiveFrameIndex();
+  uint32_t frame_index = surface->GetActiveFrameIndex();
   if (store_active_frame_index)
     *store_active_frame_index = frame_index;
 
@@ -136,27 +122,7 @@ const HitTestRegionList* HitTestManager::GetActiveHitTestRegionList(
 
 int64_t HitTestManager::GetTraceId(const SurfaceId& id) const {
   Surface* surface = surface_manager_->GetSurfaceForId(id);
-  return surface->GetActiveFrame().metadata.begin_frame_ack.trace_id;
-}
-
-const base::flat_set<FrameSinkId>*
-HitTestManager::GetHitTestAsyncQueriedDebugRegions(
-    const FrameSinkId& root_frame_sink_id) const {
-  auto it = hit_test_async_queried_debug_regions_.find(root_frame_sink_id);
-  if (it == hit_test_async_queried_debug_regions_.end() ||
-      it->second.timer.Elapsed().InMilliseconds() > 2000) {
-    return nullptr;
-  }
-  return &it->second.regions;
-}
-
-void HitTestManager::SetHitTestAsyncQueriedDebugRegions(
-    const FrameSinkId& root_frame_sink_id,
-    const std::vector<FrameSinkId>& hit_test_async_queried_debug_queue) {
-  hit_test_async_queried_debug_regions_[root_frame_sink_id] =
-      HitTestAsyncQueriedDebugRegion(base::flat_set<FrameSinkId>(
-          hit_test_async_queried_debug_queue.begin(),
-          hit_test_async_queried_debug_queue.end()));
+  return surface->GetActiveFrameMetadata().begin_frame_ack.trace_id;
 }
 
 bool HitTestManager::ValidateHitTestRegionList(
@@ -170,8 +136,10 @@ bool HitTestManager::ValidateHitTestRegionList(
     return false;
   }
   for (auto& region : hit_test_region_list->regions) {
-    // TODO(gklassen): Ensure that |region->frame_sink_id| is a child of
-    // |frame_sink_id|.
+    // We cannot determine if the region is a child of |frame_sink_id|. As the
+    // hierarchy arrives asynchronously from the Viz host, submitted to
+    // FrameSinkManagerImpl. While the HitTestRegionList arrive from Clients
+    // during SubmitCompositorFrame. Validation will occur during Aggregation.
     if (region.frame_sink_id.client_id() == 0) {
       region.frame_sink_id = FrameSinkId(surface_id.frame_sink_id().client_id(),
                                          region.frame_sink_id.sink_id());

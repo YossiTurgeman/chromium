@@ -27,7 +27,6 @@
 #include "third_party/blink/renderer/core/dom/events/add_event_listener_options_resolved.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/dom/events/event_listener.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -37,7 +36,9 @@ RegisteredEventListener::RegisteredEventListener()
       once_(false),
       blocked_event_warning_emitted_(false),
       passive_forced_for_document_target_(false),
-      passive_specified_(false) {}
+      passive_specified_(false),
+      removed_(false),
+      animation_trigger_(false) {}
 
 RegisteredEventListener::RegisteredEventListener(
     EventListener* listener,
@@ -49,10 +50,9 @@ RegisteredEventListener::RegisteredEventListener(
       blocked_event_warning_emitted_(false),
       passive_forced_for_document_target_(
           options->PassiveForcedForDocumentTarget()),
-      passive_specified_(options->PassiveSpecified()) {}
-
-RegisteredEventListener& RegisteredEventListener::operator=(
-    const RegisteredEventListener& that) = default;
+      passive_specified_(options->PassiveSpecified()),
+      removed_(false),
+      animation_trigger_(options->IsAnimationTrigger()) {}
 
 void RegisteredEventListener::Trace(Visitor* visitor) const {
   visitor->Trace(callback_);
@@ -66,6 +66,7 @@ AddEventListenerOptionsResolved* RegisteredEventListener::Options() const {
       passive_forced_for_document_target_);
   result->setOnce(once_);
   result->SetPassiveSpecified(passive_specified_);
+  result->SetAnimationTrigger(animation_trigger_);
   return result;
 }
 
@@ -73,28 +74,26 @@ void RegisteredEventListener::SetCallback(EventListener* listener) {
   callback_ = listener;
 }
 
-bool RegisteredEventListener::Matches(
-    const EventListener* listener,
-    const EventListenerOptions* options) const {
+bool RegisteredEventListener::Matches(const EventListener* listener,
+                                      const OptionsForMatching& options) const {
   // Equality is soley based on the listener and useCapture flags.
   DCHECK(callback_);
   DCHECK(listener);
-  return callback_->Matches(*listener) &&
-         static_cast<bool>(use_capture_) == options->capture();
+  return callback_->Matches(*listener) && options == GetOptionsForMatching();
 }
 
 bool RegisteredEventListener::ShouldFire(const Event& event) const {
   if (event.FireOnlyCaptureListenersAtTarget()) {
-    DCHECK_EQ(event.eventPhase(), Event::kAtTarget);
+    DCHECK_EQ(event.eventPhase(), Event::PhaseType::kAtTarget);
     return Capture();
   }
   if (event.FireOnlyNonCaptureListenersAtTarget()) {
-    DCHECK_EQ(event.eventPhase(), Event::kAtTarget);
+    DCHECK_EQ(event.eventPhase(), Event::PhaseType::kAtTarget);
     return !Capture();
   }
-  if (event.eventPhase() == Event::kCapturingPhase)
+  if (event.eventPhase() == Event::PhaseType::kCapturingPhase)
     return Capture();
-  if (event.eventPhase() == Event::kBubblingPhase)
+  if (event.eventPhase() == Event::PhaseType::kBubblingPhase)
     return !Capture();
   return true;
 }

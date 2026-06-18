@@ -1,10 +1,12 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.contextualsearch;
 
 import static org.junit.Assert.assertEquals;
+
+import androidx.annotation.Nullable;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -13,11 +15,10 @@ import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.base.test.util.Feature;
+import org.chromium.content_public.browser.SelectAroundCaretResult;
 import org.chromium.content_public.browser.SelectionClient;
 
-/**
- * Unit tests for the {@link SelectionClientManager}.
- */
+/** Unit tests for the {@link SelectionClientManager}. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class SelectionClientManagerTest {
@@ -32,9 +33,7 @@ public class SelectionClientManagerTest {
     // Counters for calls to all of the above clients.
     int mCallsToAllClients;
 
-    /**
-     * A SelectionClient for testing that tracks whether a method used by all clients was called.
-     */
+    /** A SelectionClient for testing that tracks whether a method used by all clients was called. */
     private class SelectionClientStub implements SelectionClient {
         @Override
         public void onSelectionChanged(String selection) {
@@ -50,7 +49,7 @@ public class SelectionClientManagerTest {
         public void onSelectionEvent(int eventType, float posXPix, float posYPix) {}
 
         @Override
-        public void selectWordAroundCaretAck(boolean didSelect, int startAdjust, int endAdjust) {}
+        public void selectAroundCaretAck(@Nullable SelectAroundCaretResult result) {}
 
         @Override
         public void cancelAllRequests() {}

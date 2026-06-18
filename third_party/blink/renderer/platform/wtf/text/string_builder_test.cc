@@ -31,29 +31,19 @@
 
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
-#include "base/stl_util.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_impl.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
-namespace WTF {
+namespace blink {
 
 namespace {
 
-void ExpectBuilderContent(const String& expected,
-                          const StringBuilder& builder) {
-  // Not using builder.toString() because it changes internal state of builder.
-  if (builder.Is8Bit())
-    EXPECT_EQ(expected, String(builder.Characters8(), builder.length()));
-  else
-    EXPECT_EQ(expected, String(builder.Characters16(), builder.length()));
-}
-
 void ExpectEmpty(const StringBuilder& builder) {
   EXPECT_EQ(0U, builder.length());
-  EXPECT_TRUE(builder.IsEmpty());
-  EXPECT_EQ(nullptr, builder.Characters8());
+  EXPECT_TRUE(builder.empty());
+  EXPECT_EQ(nullptr, builder.Span8().data());
 }
 
 }  // namespace
@@ -66,35 +56,36 @@ TEST(StringBuilderTest, DefaultConstructor) {
 TEST(StringBuilderTest, Append) {
   StringBuilder builder;
   builder.Append(String("0123456789"));
-  ExpectBuilderContent("0123456789", builder);
+  EXPECT_EQ(String("0123456789"), StringView(builder));
   builder.Append("abcd");
-  ExpectBuilderContent("0123456789abcd", builder);
-  builder.Append("efgh", 3);
-  ExpectBuilderContent("0123456789abcdefg", builder);
+  EXPECT_EQ(String("0123456789abcd"), StringView(builder));
+  builder.Append(base::byte_span_from_cstring("efgh").first(3u));
+  EXPECT_EQ(String("0123456789abcdefg"), StringView(builder));
   builder.Append("");
-  ExpectBuilderContent("0123456789abcdefg", builder);
+  EXPECT_EQ(String("0123456789abcdefg"), StringView(builder));
   builder.Append('#');
-  ExpectBuilderContent("0123456789abcdefg#", builder);
+  EXPECT_EQ(String("0123456789abcdefg#"), StringView(builder));
 
   builder.ToString();  // Test after reifyString().
   StringBuilder builder1;
-  builder.Append("", 0);
-  ExpectBuilderContent("0123456789abcdefg#", builder);
-  builder1.Append(builder.Characters8(), builder.length());
+  builder.Append("");
+  EXPECT_EQ(String("0123456789abcdefg#"), StringView(builder));
+  builder1.Append(builder.Span8());
   builder1.Append("XYZ");
-  builder.Append(builder1.Characters8(), builder1.length());
-  ExpectBuilderContent("0123456789abcdefg#0123456789abcdefg#XYZ", builder);
+  builder.Append(builder1.Span8());
+  EXPECT_EQ(String("0123456789abcdefg#0123456789abcdefg#XYZ"),
+            StringView(builder));
 
   StringBuilder builder2;
   builder2.ReserveCapacity(100);
   builder2.Append("xyz");
-  const LChar* characters = builder2.Characters8();
+  base::span<const LChar> characters = builder2.Span8();
   builder2.Append("0123456789");
-  EXPECT_EQ(characters, builder2.Characters8());
+  EXPECT_EQ(characters.data(), builder2.Span8().data());
 
   StringBuilder builder3;
   builder3.Append("xyz", 1, 2);
-  ExpectBuilderContent("yz", builder3);
+  EXPECT_EQ(String("yz"), StringView(builder3));
 
   StringBuilder builder4;
   builder4.Append("abc", 5, 3);
@@ -102,13 +93,13 @@ TEST(StringBuilderTest, Append) {
 
   StringBuilder builder5;
   builder5.Append(StringView(StringView("def"), 1, 1));
-  ExpectBuilderContent("e", builder5);
+  EXPECT_EQ(String("e"), StringView(builder5));
 
   // append() has special code paths for String backed StringView instead of
   // just char* backed ones.
   StringBuilder builder6;
   builder6.Append(String("ghi"), 1, 2);
-  ExpectBuilderContent("hi", builder6);
+  EXPECT_EQ(String("hi"), StringView(builder6));
 
   // Test appending UChar32 characters to StringBuilder.
   StringBuilder builder_for_u_char32_append;
@@ -121,8 +112,38 @@ TEST(StringBuilderTest, Append) {
   EXPECT_EQ(3U, builder_for_u_char32_append.length());
   const UChar result_array[] = {U16_LEAD(fraktur_a_char),
                                 U16_TRAIL(fraktur_a_char), 'A'};
-  ExpectBuilderContent(String(result_array, base::size(result_array)),
-                       builder_for_u_char32_append);
+  EXPECT_EQ(StringView(base::span(result_array)),
+            StringView(builder_for_u_char32_append));
+}
+
+TEST(StringBuilderTest, AppendSpan) {
+  StringBuilder builder;
+
+  // Append an empty span
+  builder.Append(base::as_byte_span(base::span_from_cstring("")));
+  EXPECT_EQ(0u, builder.length());
+  builder.Append(base::span_from_cstring(u""));
+  EXPECT_EQ(0u, builder.length());
+
+  // Append to an 8-bit builder.
+  builder.Append("a");
+  builder.Append(base::as_byte_span(base::span_from_cstring("b")));
+  EXPECT_TRUE(builder.Is8Bit());
+  EXPECT_EQ(2u, builder.length());
+  builder.Append(base::span_from_cstring(u"U"));
+  EXPECT_TRUE(builder.Is8Bit());
+  EXPECT_EQ(3u, builder.length());
+  builder.Append(base::span_from_cstring(u"VV"));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(5u, builder.length());
+
+  // Append to a 16-bit builder.
+  builder.Append(base::as_byte_span(base::span_from_cstring("c")));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(6u, builder.length());
+  builder.Append(base::span_from_cstring(u"W"));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(7u, builder.length());
 }
 
 TEST(StringBuilderTest, AppendSharingImpl) {
@@ -175,6 +196,37 @@ TEST(StringBuilderTest, ToString) {
   EXPECT_EQ(String("0123456789abcdefghijklmnopqrstuvwxyzABC"), string1);
 }
 
+TEST(StringBuilderTest, ReleaseString) {
+  StringBuilder builder;
+  builder.Append("0123456789");
+  String string = builder.ReleaseString();
+  EXPECT_EQ(String("0123456789"), string);
+
+  ExpectEmpty(builder);
+
+  // The builder can be reused after release.
+  builder.Append("ABCDEFGH");
+  String string2 = builder.ToString();
+  EXPECT_EQ(String("ABCDEFGH"), string2);
+
+  // Each call to ToString adds 1 to the ref count.
+#if DCHECK_IS_ON()
+  EXPECT_EQ(string2.Impl()->RefCountChangeCountForTesting(), 1u);
+  String string3 = builder.ToString();
+  EXPECT_EQ(string3.Impl()->RefCountChangeCountForTesting(), 2u);
+  unsigned refcount = string2.Impl()->RefCountChangeCountForTesting();
+#endif
+
+  // StringImpl of the copied and released string should match
+  String released = builder.ReleaseString();
+  EXPECT_EQ(string2.Impl(), released.Impl());
+
+  // Calling release doesn't increase the ref count.
+#if DCHECK_IS_ON()
+  EXPECT_EQ(refcount, released.Impl()->RefCountChangeCountForTesting());
+#endif
+}
+
 TEST(StringBuilderTest, Clear) {
   StringBuilder builder;
   builder.Append("0123456789");
@@ -197,15 +249,15 @@ TEST(StringBuilderTest, Resize) {
   builder.Append("0123456789");
   builder.Resize(10);
   EXPECT_EQ(10U, builder.length());
-  ExpectBuilderContent("0123456789", builder);
+  EXPECT_EQ("0123456789", StringView(builder));
   builder.Resize(8);
   EXPECT_EQ(8U, builder.length());
-  ExpectBuilderContent("01234567", builder);
+  EXPECT_EQ("01234567", StringView(builder));
 
   builder.ToString();
   builder.Resize(7);
   EXPECT_EQ(7U, builder.length());
-  ExpectBuilderContent("0123456", builder);
+  EXPECT_EQ("0123456", StringView(builder));
   builder.Resize(0);
   ExpectEmpty(builder);
 }
@@ -215,10 +267,10 @@ TEST(StringBuilderTest, Erase) {
   builder.Append(String("01234"));
   // Erase from String.
   builder.erase(3);
-  ExpectBuilderContent("0124", builder);
+  EXPECT_EQ("0124", StringView(builder));
   // Erase from buffer.
   builder.erase(1);
-  ExpectBuilderContent("024", builder);
+  EXPECT_EQ("024", StringView(builder));
 }
 
 TEST(StringBuilderTest, Erase16) {
@@ -226,24 +278,23 @@ TEST(StringBuilderTest, Erase16) {
   builder.Append(String(u"\uFF10\uFF11\uFF12\uFF13\uFF14"));
   // Erase from String.
   builder.erase(3);
-  ExpectBuilderContent(u"\uFF10\uFF11\uFF12\uFF14", builder);
+  EXPECT_EQ(u"\uFF10\uFF11\uFF12\uFF14", StringView(builder));
   // Erase from buffer.
   builder.erase(1);
-  ExpectBuilderContent(u"\uFF10\uFF12\uFF14", builder);
+  EXPECT_EQ(u"\uFF10\uFF12\uFF14", StringView(builder));
 }
 
 TEST(StringBuilderTest, EraseLast) {
   StringBuilder builder;
   builder.Append("01234");
   builder.erase(4);
-  ExpectBuilderContent("0123", builder);
+  EXPECT_EQ("0123", StringView(builder));
 }
 
 TEST(StringBuilderTest, Equal) {
   StringBuilder builder1;
   StringBuilder builder2;
   EXPECT_TRUE(builder1 == builder2);
-  EXPECT_TRUE(Equal(builder1, static_cast<LChar*>(nullptr), 0));
   EXPECT_TRUE(builder1 == String());
   EXPECT_TRUE(String() == builder1);
   EXPECT_TRUE(builder1 != String("abc"));
@@ -328,7 +379,7 @@ TEST(StringBuilderTest, ToAtomicStringOnEmpty) {
   }
   {  // AtomicString constructed from an empty char* string.
     StringBuilder builder;
-    builder.Append("", 0);
+    builder.Append("");
     AtomicString atomic_string = builder.ToAtomicString();
     EXPECT_EQ(g_empty_atom, atomic_string);
   }
@@ -359,12 +410,81 @@ TEST(StringBuilderTest, Substring) {
 TEST(StringBuilderTest, AppendNumberDoubleUChar) {
   const double kSomeNumber = 1.2345;
   StringBuilder reference;
-  reference.Append(kReplacementCharacter);  // Make it UTF-16.
+  reference.Append(blink::uchar::kReplacementCharacter);  // Make it UTF-16.
   reference.Append(String::Number(kSomeNumber));
   StringBuilder test;
-  test.Append(kReplacementCharacter);
+  test.Append(blink::uchar::kReplacementCharacter);
   test.AppendNumber(kSomeNumber);
   EXPECT_EQ(reference, test);
 }
 
-}  // namespace WTF
+TEST(StringBuilderTest, ReserveCapacity) {
+  StringBuilder builder;
+  builder.ReserveCapacity(100);
+  EXPECT_LE(100u, builder.Capacity());
+
+  builder.Append(0x202B);
+  ASSERT_FALSE(builder.Is8Bit());
+  EXPECT_LE(100u, builder.Capacity());
+}
+
+TEST(StringBuilderTest, ReserveCapacityAfterEnsure16Bit) {
+  StringBuilder builder;
+  // |Ensure16Bit()| creates an inline buffer, so the subsequent
+  // |ReserveCapacity()| should be an expansion.
+  builder.Ensure16Bit();
+  builder.ReserveCapacity(100);
+  EXPECT_LE(100u, builder.Capacity());
+}
+
+TEST(StringBuilderTest, Reserve16BitCapacity) {
+  StringBuilder builder;
+  builder.Reserve16BitCapacity(100);
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_LE(100u, builder.Capacity());
+}
+
+TEST(StringBuilderTest, ReserveCapacityTwice) {
+  StringBuilder builder;
+  builder.ReserveCapacity(100);
+  EXPECT_LE(100u, builder.Capacity());
+
+  builder.ReserveCapacity(400);
+  EXPECT_LE(400u, builder.Capacity());
+}
+
+TEST(StringBuilderTest, ReserveCapacityTwice16) {
+  StringBuilder builder;
+  builder.Ensure16Bit();
+  builder.ReserveCapacity(100);
+  EXPECT_LE(100u, builder.Capacity());
+
+  builder.ReserveCapacity(400);
+  EXPECT_LE(400u, builder.Capacity());
+}
+
+TEST(StringBuilderTest, DoesAppendCauseOverflow) {
+  constexpr wtf_size_t kMaxLength = static_cast<wtf_size_t>(1) << 30;
+
+  {
+    StringBuilder builder;
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(0));
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(1));
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(
+        base::checked_cast<unsigned>(kMaxLength)));
+    EXPECT_TRUE(builder.DoesAppendCauseOverflow(
+        base::checked_cast<unsigned>(kMaxLength + 1)));
+  }
+
+  {
+    // 16-bit strings have the same character count limit.
+    StringBuilder builder;
+    builder.Ensure16Bit();
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(
+        base::checked_cast<unsigned>(kMaxLength)));
+    EXPECT_TRUE(builder.DoesAppendCauseOverflow(
+        base::checked_cast<unsigned>(kMaxLength + 1)));
+  }
+}
+
+}  // namespace blink

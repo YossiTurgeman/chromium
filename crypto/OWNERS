@@ -1,6 +1,6 @@
+set noparent
 agl@chromium.org
 davidben@chromium.org
-rsleevi@chromium.org
+mattm@chromium.org
 
-# TEAM: net-dev@chromium.org
-# COMPONENT: Internals>Network>SSL
+file://CRYPTO_OWNERS

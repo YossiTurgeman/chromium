@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,10 @@
 #include <string>
 
 #include "ash/app_menu/app_menu_export.h"
-#include "base/callback.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/time/time.h"
+#include "ui/base/mojom/menu_source_type.mojom-forward.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/views/controls/menu/menu_model_adapter.h"
 #include "ui/views/controls/menu/menu_types.h"
@@ -33,9 +36,13 @@ class APP_MENU_EXPORT AppMenuModelAdapter : public views::MenuModelAdapter {
   AppMenuModelAdapter(const std::string& app_id,
                       std::unique_ptr<ui::SimpleMenuModel> model,
                       views::Widget* widget_owner,
-                      ui::MenuSourceType source_type,
+                      ui::mojom::MenuSourceType source_type,
                       base::OnceClosure on_menu_closed_callback,
                       bool is_tablet_mode);
+
+  AppMenuModelAdapter(const AppMenuModelAdapter&) = delete;
+  AppMenuModelAdapter& operator=(const AppMenuModelAdapter&) = delete;
+
   ~AppMenuModelAdapter() override;
 
   // Builds the view tree and shows the menu.
@@ -54,9 +61,14 @@ class APP_MENU_EXPORT AppMenuModelAdapter : public views::MenuModelAdapter {
 
   base::TimeTicks GetClosingEventTime();
 
-  // Overridden from views::MenuModelAdapter:
+  // Gets the widget associated with the submenu. May return nullptr.
+  views::Widget* GetSubmenuWidget();
+
+  // views::MenuModelAdapter:
   void ExecuteCommand(int id, int mouse_event_flags) override;
   void OnMenuClosed(views::MenuItemView* menu) override;
+  bool ShouldExecuteCommandWithoutClosingMenu(int id,
+                                              const ui::Event& event) override;
 
   ui::SimpleMenuModel* model() { return model_.get(); }
   views::MenuItemView* root_for_testing() { return root_; }
@@ -64,7 +76,7 @@ class APP_MENU_EXPORT AppMenuModelAdapter : public views::MenuModelAdapter {
  protected:
   const std::string& app_id() const { return app_id_; }
   base::TimeTicks menu_open_time() const { return menu_open_time_; }
-  ui::MenuSourceType source_type() const { return source_type_; }
+  ui::mojom::MenuSourceType source_type() const { return source_type_; }
   bool is_tablet_mode() const { return is_tablet_mode_; }
 
   // Helper method to record ExecuteCommand() histograms.
@@ -86,20 +98,20 @@ class APP_MENU_EXPORT AppMenuModelAdapter : public views::MenuModelAdapter {
   std::unique_ptr<NotificationMenuController> notification_menu_controller_;
 
   // The parent widget of the context menu.
-  views::Widget* widget_owner_;
+  raw_ptr<views::Widget> widget_owner_;
 
   // The event type which was used to show the menu.
-  const ui::MenuSourceType source_type_;
+  const ui::mojom::MenuSourceType source_type_;
 
   // The callback which is triggered when the menu is closed.
   base::OnceClosure on_menu_closed_callback_;
 
-  // The root MenuItemView which contains all child MenuItemViews. Owned by
-  // |menu_runner_|.
-  views::MenuItemView* root_ = nullptr;
-
   // Used to show the menu.
   std::unique_ptr<views::MenuRunner> menu_runner_;
+
+  // The root MenuItemView which contains all child MenuItemViews. Owned by
+  // `menu_runner_`.
+  raw_ptr<views::MenuItemView> root_ = nullptr;
 
   // The timestamp taken when the menu is opened. Used in metrics.
   base::TimeTicks menu_open_time_;
@@ -107,7 +119,7 @@ class APP_MENU_EXPORT AppMenuModelAdapter : public views::MenuModelAdapter {
   // Whether tablet mode is active.
   bool is_tablet_mode_;
 
-  DISALLOW_COPY_AND_ASSIGN(AppMenuModelAdapter);
+  base::WeakPtrFactory<AppMenuModelAdapter> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

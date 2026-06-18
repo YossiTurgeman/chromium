@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,17 +19,14 @@ struct EnumTraits<blink::mojom::ClipboardBuffer, ui::ClipboardBuffer> {
     return blink::mojom::ClipboardBuffer::kStandard;
   }
 
-  static bool FromMojom(blink::mojom::ClipboardBuffer buffer,
-                        ui::ClipboardBuffer* out) {
+  static ui::ClipboardBuffer FromMojom(blink::mojom::ClipboardBuffer buffer) {
     switch (buffer) {
       case blink::mojom::ClipboardBuffer::kStandard:
-        *out = ui::ClipboardBuffer::kCopyPaste;
-        return true;
+        return ui::ClipboardBuffer::kCopyPaste;
       case blink::mojom::ClipboardBuffer::kSelection:
-        *out = ui::ClipboardBuffer::kSelection;
-        return true;
+        return ui::ClipboardBuffer::kSelection;
     }
-    return false;
+    NOTREACHED();
   }
 };
 

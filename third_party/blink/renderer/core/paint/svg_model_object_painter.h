@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_model_object.h"
 #include "third_party/blink/renderer/platform/graphics/paint/drawing_recorder.h"
+#include "ui/gfx/geometry/rect_conversions.h"
 
 namespace blink {
 
@@ -16,21 +17,23 @@ class SVGModelObjectPainter {
   STACK_ALLOCATED();
 
  public:
-  // Expands the bounds of the current paint chunk for hit test, and records
-  // special touch action if any. This should be called when painting the
-  // background even if there is no other painted content. SVG backgrounds are
-  // painted in the kForeground paint phase.
+  // See ObjectPainter::RecordHitTestData().
   static void RecordHitTestData(const LayoutObject& svg_object,
                                 const PaintInfo&);
+
+  // Records region capture bounds for the current paint chunk. This should
+  // be called when painting the background even if there is no other painted
+  // content.
+  static void RecordRegionCaptureData(const LayoutObject& svg_object,
+                                      const PaintInfo&);
 
   explicit SVGModelObjectPainter(
       const LayoutSVGModelObject& layout_svg_model_object)
       : layout_svg_model_object_(layout_svg_model_object) {}
 
-  // If the object is outside the cull rect, painting can be skipped in most
-  // cases. An important exception is when there is a transform style: see the
-  // comment in the implementation.
-  bool CullRectSkipsPainting(const PaintInfo&);
+  // Should we use an infinite cull rect when painting an object with the
+  // specified style.
+  static bool CanUseCullRect(const ComputedStyle&);
 
   void PaintOutline(const PaintInfo&);
 
@@ -53,7 +56,7 @@ class SVGDrawingRecorder : public DrawingRecorder {
             context,
             object,
             type,
-            EnclosingIntRect(object.VisualRectInLocalSVGCoordinates())) {
+            gfx::ToEnclosingRect(object.VisualRectInLocalSVGCoordinates())) {
     DCHECK(object.IsSVGChild());
     // We should not use this for SVG containers which paint effects only,
     // while VisualRectInLocalSVGCoordinates() contains visual rects from

@@ -1,14 +1,14 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/blocked_content/blocked_window_params.h"
 
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
-#include "content/public/browser/render_frame_host.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
+#include "third_party/blink/public/mojom/window_features/window_features.mojom.h"
 #include "url/gurl.h"
 
 BlockedWindowParams::BlockedWindowParams(
@@ -37,9 +37,10 @@ BlockedWindowParams::BlockedWindowParams(const BlockedWindowParams& other) =
 BlockedWindowParams::~BlockedWindowParams() = default;
 
 NavigateParams BlockedWindowParams::CreateNavigateParams(
+    content::RenderProcessHost* opener_process,
     content::WebContents* web_contents) const {
   GURL popup_url(target_url_);
-  web_contents->GetMainFrame()->GetProcess()->FilterURL(false, &popup_url);
+  opener_process->FilterURL(false, &popup_url);
   NavigateParams nav_params(
       Profile::FromBrowserContext(web_contents->GetBrowserContext()), popup_url,
       ui::PAGE_TRANSITION_LINK);
@@ -48,20 +49,11 @@ NavigateParams BlockedWindowParams::CreateNavigateParams(
   nav_params.referrer = referrer_;
   nav_params.frame_name = frame_name_;
   nav_params.source_contents = web_contents;
-  nav_params.is_renderer_initiated = true;
-  nav_params.window_action = NavigateParams::SHOW_WINDOW;
+  nav_params.is_renderer_initiated = false;
+  nav_params.window_action = NavigateParams::WindowAction::kShowWindow;
   nav_params.user_gesture = user_gesture_;
-  nav_params.created_with_opener = !opener_suppressed_;
-  nav_params.window_bounds = web_contents->GetContainerBounds();
-  if (features_.has_x)
-    nav_params.window_bounds.set_x(features_.x);
-  if (features_.has_y)
-    nav_params.window_bounds.set_y(features_.y);
-  if (features_.has_width)
-    nav_params.window_bounds.set_width(features_.width);
-  if (features_.has_height)
-    nav_params.window_bounds.set_height(features_.height);
-
+  nav_params.opened_by_another_window = !opener_suppressed_;
+  nav_params.window_features = features_;
   nav_params.disposition = disposition_;
 
   return nav_params;

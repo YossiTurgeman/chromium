@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <string>
 
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
-#include "base/stl_util.h"
 #include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "net/ntlm/ntlm.h"
@@ -16,8 +16,7 @@
 #include "net/ntlm/ntlm_test_data.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace net {
-namespace ntlm {
+namespace net::ntlm {
 
 namespace {
 
@@ -25,8 +24,8 @@ std::vector<uint8_t> GenerateAuthMsg(const NtlmClient& client,
                                      base::span<const uint8_t> challenge_msg) {
   return client.GenerateAuthenticateMessage(
       test::kNtlmDomain, test::kUser, test::kPassword, test::kHostnameAscii,
-      test::kChannelBindings, test::kNtlmSpn, test::kClientTimestamp,
-      test::kClientChallenge, challenge_msg);
+      reinterpret_cast<const char*>(test::kChannelBindings), test::kNtlmSpn,
+      test::kClientTimestamp, test::kClientChallenge, challenge_msg);
 }
 
 std::vector<uint8_t> GenerateAuthMsg(const NtlmClient& client,
@@ -39,11 +38,20 @@ bool GetAuthMsgResult(const NtlmClient& client,
   return !GenerateAuthMsg(client, challenge_writer).empty();
 }
 
+bool ReadBytesFrom(NtlmBufferReader* reader,
+                   const SecurityBuffer& sec_buf,
+                   base::span<uint8_t> buffer) {
+  CHECK_EQ(sec_buf.length, buffer.size());
+  NtlmBufferReader portion_reader;
+  return reader->ReadPayloadAsBufferReader(sec_buf, &portion_reader) &&
+         portion_reader.ReadBytes(buffer);
+}
+
 bool ReadBytesPayload(NtlmBufferReader* reader, base::span<uint8_t> buffer) {
   SecurityBuffer sec_buf;
   return reader->ReadSecurityBuffer(&sec_buf) &&
          (sec_buf.length == buffer.size()) &&
-         reader->ReadBytesFrom(sec_buf, buffer);
+         ReadBytesFrom(reader, sec_buf, buffer);
 }
 
 // Reads bytes from a payload and assigns them to a string. This makes
@@ -53,10 +61,8 @@ bool ReadStringPayload(NtlmBufferReader* reader, std::string* str) {
   if (!reader->ReadSecurityBuffer(&sec_buf))
     return false;
 
-  if (!reader->ReadBytesFrom(
-          sec_buf,
-          base::as_writable_bytes(base::make_span(
-              base::WriteInto(str, sec_buf.length + 1), sec_buf.length)))) {
+  str->resize(sec_buf.length);
+  if (!ReadBytesFrom(reader, sec_buf, base::as_writable_byte_span(*str))) {
     return false;
   }
 
@@ -66,14 +72,15 @@ bool ReadStringPayload(NtlmBufferReader* reader, std::string* str) {
 // Reads bytes from a payload and assigns them to a string16. This makes
 // no assumptions about the underlying encoding. This will fail if there
 // are an odd number of bytes in the payload.
-bool ReadString16Payload(NtlmBufferReader* reader, base::string16* str) {
+bool ReadString16Payload(NtlmBufferReader* reader, std::u16string* str) {
   SecurityBuffer sec_buf;
   if (!reader->ReadSecurityBuffer(&sec_buf) || (sec_buf.length % 2 != 0))
     return false;
 
   std::vector<uint8_t> raw(sec_buf.length);
-  if (!reader->ReadBytesFrom(sec_buf, raw))
+  if (!ReadBytesFrom(reader, sec_buf, raw)) {
     return false;
+  }
 
 #if defined(ARCH_CPU_BIG_ENDIAN)
   for (size_t i = 0; i < raw.size(); i += 2) {
@@ -81,9 +88,35 @@ bool ReadString16Payload(NtlmBufferReader* reader, base::string16* str) {
   }
 #endif
 
-  str->assign(reinterpret_cast<const base::char16*>(raw.data()),
-              raw.size() / 2);
+  str->resize(raw.size() / 2);
+  base::as_writable_byte_span(*str).copy_from(raw);
   return true;
+}
+
+void MakeV2ChallengeMessage(size_t target_info_len, std::vector<uint8_t>* out) {
+  static const size_t kChallengeV2HeaderLen = 56;
+
+  // Leave room for the AV_PAIR header and the EOL pair.
+  size_t server_name_len = target_info_len - kAvPairHeaderLen * 2;
+
+  // See [MS-NLP] Section 2.2.1.2.
+  NtlmBufferWriter challenge(kChallengeV2HeaderLen + target_info_len);
+  ASSERT_TRUE(challenge.WriteMessageHeader(MessageType::kChallenge));
+  ASSERT_TRUE(
+      challenge.WriteSecurityBuffer(SecurityBuffer(0, 0)));  // target name
+  ASSERT_TRUE(challenge.WriteFlags(NegotiateFlags::kTargetInfo));
+  ASSERT_TRUE(challenge.WriteZeros(kChallengeLen));  // server challenge
+  ASSERT_TRUE(challenge.WriteZeros(8));              // reserved
+  ASSERT_TRUE(challenge.WriteSecurityBuffer(
+      SecurityBuffer(kChallengeV2HeaderLen, target_info_len)));  // target info
+  ASSERT_TRUE(challenge.WriteZeros(8));                          // version
+  ASSERT_EQ(kChallengeV2HeaderLen, challenge.GetCursor());
+  ASSERT_TRUE(challenge.WriteAvPair(
+      AvPair(TargetInfoAvId::kServerName,
+             std::vector<uint8_t>(server_name_len, 'a'))));
+  ASSERT_TRUE(challenge.WriteAvPairTerminator());
+  ASSERT_TRUE(challenge.IsEndOfBuffer());
+  *out = challenge.Pass();
 }
 
 }  // namespace
@@ -102,16 +135,15 @@ TEST(NtlmClientTest, VerifyNegotiateMessageV1) {
   std::vector<uint8_t> result = client.GetNegotiateMessage();
 
   ASSERT_EQ(kNegotiateMessageLen, result.size());
-  ASSERT_EQ(0, memcmp(test::kExpectedNegotiateMsg, result.data(),
-                      kNegotiateMessageLen));
+  ASSERT_EQ(base::span(test::kExpectedNegotiateMsg), base::span(result));
 }
 
 TEST(NtlmClientTest, MinimalStructurallyValidChallenge) {
   NtlmClient client(NtlmFeatures(false));
 
   NtlmBufferWriter writer(kMinChallengeHeaderLen);
-  ASSERT_TRUE(writer.WriteBytes(base::make_span(test::kMinChallengeMessage)
-                                    .subspan<0, kMinChallengeHeaderLen>()));
+  ASSERT_TRUE(writer.WriteBytes(
+      base::span(test::kMinChallengeMessage).first<kMinChallengeHeaderLen>()));
 
   ASSERT_TRUE(GetAuthMsgResult(client, writer));
 }
@@ -125,7 +157,8 @@ TEST(NtlmClientTest, MinimalStructurallyValidChallengeZeroOffset) {
   // In reality the offset should always be ignored if the length is zero.
   // Also implementations often just write zeros.
   uint8_t raw[kMinChallengeHeaderLen];
-  memcpy(raw, test::kMinChallengeMessage, kMinChallengeHeaderLen);
+  base::span(raw).copy_from(
+      base::span(test::kMinChallengeMessage).first(kMinChallengeHeaderLen));
   // Modify the default valid message to overwrite the offset to zero.
   ASSERT_NE(0x00, raw[16]);
   raw[16] = 0x00;
@@ -141,8 +174,8 @@ TEST(NtlmClientTest, ChallengeMsgTooShort) {
 
   // Fail because the minimum size valid message is 32 bytes.
   NtlmBufferWriter writer(kMinChallengeHeaderLen - 1);
-  ASSERT_TRUE(writer.WriteBytes(base::make_span(test::kMinChallengeMessage)
-                                    .subspan<0, kMinChallengeHeaderLen - 1>()));
+  ASSERT_TRUE(writer.WriteBytes(base::span(test::kMinChallengeMessage)
+                                    .first<kMinChallengeHeaderLen - 1>()));
   ASSERT_FALSE(GetAuthMsgResult(client, writer));
 }
 
@@ -151,7 +184,8 @@ TEST(NtlmClientTest, ChallengeMsgNoSig) {
 
   // Fail because the first 8 bytes don't match "NTLMSSP\0"
   uint8_t raw[kMinChallengeHeaderLen];
-  memcpy(raw, test::kMinChallengeMessage, kMinChallengeHeaderLen);
+  base::span(raw).copy_from(
+      base::span(test::kMinChallengeMessage).first(kMinChallengeHeaderLen));
   // Modify the default valid message to overwrite the last byte of the
   // signature.
   ASSERT_NE(0xff, raw[7]);
@@ -167,7 +201,8 @@ TEST(NtlmClientTest, ChallengeMsgWrongMessageType) {
   // Fail because the message type should be MessageType::kChallenge
   // (0x00000002)
   uint8_t raw[kMinChallengeHeaderLen];
-  memcpy(raw, test::kMinChallengeMessage, kMinChallengeHeaderLen);
+  base::span(raw).copy_from(
+      base::span(test::kMinChallengeMessage).first(kMinChallengeHeaderLen));
   // Modify the message type.
   ASSERT_NE(0x03, raw[8]);
   raw[8] = 0x03;
@@ -187,7 +222,8 @@ TEST(NtlmClientTest, ChallengeWithNoTargetName) {
   // In reality the offset should always be ignored if the length is zero.
   // Also implementations often just write zeros.
   uint8_t raw[kMinChallengeHeaderLen];
-  memcpy(raw, test::kMinChallengeMessage, kMinChallengeHeaderLen);
+  base::span(raw).copy_from(
+      base::span(test::kMinChallengeMessage).first(kMinChallengeHeaderLen));
   // Modify the default valid message to overwrite the offset to zero.
   ASSERT_NE(0x00, raw[16]);
   raw[16] = 0x00;
@@ -203,7 +239,8 @@ TEST(NtlmClientTest, Type2MessageWithTargetName) {
 
   // One extra byte is provided for target name.
   uint8_t raw[kMinChallengeHeaderLen + 1];
-  memcpy(raw, test::kMinChallengeMessage, kMinChallengeHeaderLen);
+  base::span(raw).copy_prefix_from(
+      base::span(test::kMinChallengeMessage).first(kMinChallengeHeaderLen));
   // Put something in the target name.
   raw[kMinChallengeHeaderLen] = 'Z';
 
@@ -225,7 +262,8 @@ TEST(NtlmClientTest, NoTargetNameOverflowFromOffset) {
   NtlmClient client(NtlmFeatures(false));
 
   uint8_t raw[kMinChallengeHeaderLen];
-  memcpy(raw, test::kMinChallengeMessage, kMinChallengeHeaderLen);
+  base::span(raw).copy_from(
+      base::span(test::kMinChallengeMessage).first(kMinChallengeHeaderLen));
   // Modify the default valid message to claim that the target name field is 1
   // byte long overrunning the end of the message message.
   ASSERT_NE(0x01, raw[12]);
@@ -250,7 +288,8 @@ TEST(NtlmClientTest, NoTargetNameOverflowFromLength) {
   // Message has 1 extra byte of space after the header for the target name.
   // One extra byte is provided for target name.
   uint8_t raw[kMinChallengeHeaderLen + 1];
-  memcpy(raw, test::kMinChallengeMessage, kMinChallengeHeaderLen);
+  base::span(raw).copy_prefix_from(
+      base::span(test::kMinChallengeMessage).first(kMinChallengeHeaderLen));
   // Put something in the target name.
   raw[kMinChallengeHeaderLen] = 'Z';
 
@@ -278,18 +317,18 @@ TEST(NtlmClientTest, Type3UnicodeWithSessionSecuritySpecTest) {
   std::vector<uint8_t> result = GenerateAuthMsg(client, test::kChallengeMsgV1);
 
   ASSERT_FALSE(result.empty());
-  ASSERT_EQ(base::size(test::kExpectedAuthenticateMsgSpecResponseV1),
+  ASSERT_EQ(std::size(test::kExpectedAuthenticateMsgSpecResponseV1),
             result.size());
-  ASSERT_EQ(0, memcmp(test::kExpectedAuthenticateMsgSpecResponseV1,
-                      result.data(), result.size()));
+  ASSERT_EQ(base::span(test::kExpectedAuthenticateMsgSpecResponseV1),
+            base::span(result));
 }
 
 TEST(NtlmClientTest, Type3WithoutUnicode) {
   NtlmClient client(NtlmFeatures(false));
 
-  std::vector<uint8_t> result = GenerateAuthMsg(
-      client, base::make_span(test::kMinChallengeMessageNoUnicode)
-                  .subspan<0, kMinChallengeHeaderLen>());
+  std::vector<uint8_t> result =
+      GenerateAuthMsg(client, base::span(test::kMinChallengeMessageNoUnicode)
+                                  .first<kMinChallengeHeaderLen>());
   ASSERT_FALSE(result.empty());
 
   NtlmBufferReader reader(result);
@@ -302,10 +341,10 @@ TEST(NtlmClientTest, Type3WithoutUnicode) {
   ASSERT_TRUE(ReadBytesPayload(&reader, actual_lm_response));
   ASSERT_TRUE(ReadBytesPayload(&reader, actual_ntlm_response));
 
-  ASSERT_EQ(0, memcmp(test::kExpectedLmResponseWithV1SS, actual_lm_response,
-                      kResponseLenV1));
-  ASSERT_EQ(0, memcmp(test::kExpectedNtlmResponseWithV1SS, actual_ntlm_response,
-                      kResponseLenV1));
+  ASSERT_EQ(base::span(test::kExpectedLmResponseWithV1SS),
+            base::span(actual_lm_response));
+  ASSERT_EQ(base::span(test::kExpectedNtlmResponseWithV1SS),
+            base::span(actual_ntlm_response));
 
   std::string domain;
   std::string username;
@@ -332,8 +371,8 @@ TEST(NtlmClientTest, ClientDoesNotDowngradeSessionSecurity) {
   NtlmClient client(NtlmFeatures(false));
 
   std::vector<uint8_t> result =
-      GenerateAuthMsg(client, base::make_span(test::kMinChallengeMessageNoSS)
-                                  .subspan<0, kMinChallengeHeaderLen>());
+      GenerateAuthMsg(client, base::span(test::kMinChallengeMessageNoSS)
+                                  .first<kMinChallengeHeaderLen>());
   ASSERT_FALSE(result.empty());
 
   NtlmBufferReader reader(result);
@@ -349,14 +388,14 @@ TEST(NtlmClientTest, ClientDoesNotDowngradeSessionSecurity) {
   // The important part of this test is that even though the
   // server told the client to drop session security. The client
   // DID NOT drop it.
-  ASSERT_EQ(0, memcmp(test::kExpectedLmResponseWithV1SS, actual_lm_response,
-                      kResponseLenV1));
-  ASSERT_EQ(0, memcmp(test::kExpectedNtlmResponseWithV1SS, actual_ntlm_response,
-                      kResponseLenV1));
+  ASSERT_EQ(base::span(test::kExpectedLmResponseWithV1SS),
+            base::span(actual_lm_response));
+  ASSERT_EQ(base::span(test::kExpectedNtlmResponseWithV1SS),
+            base::span(actual_ntlm_response));
 
-  base::string16 domain;
-  base::string16 username;
-  base::string16 hostname;
+  std::u16string domain;
+  std::u16string username;
+  std::u16string hostname;
   ASSERT_TRUE(ReadString16Payload(&reader, &domain));
   ASSERT_EQ(test::kNtlmDomain, domain);
   ASSERT_TRUE(ReadString16Payload(&reader, &username));
@@ -393,9 +432,8 @@ TEST(NtlmClientTest, VerifyNegotiateMessageV2) {
 
   std::vector<uint8_t> result = client.GetNegotiateMessage();
   ASSERT_FALSE(result.empty());
-  ASSERT_EQ(base::size(test::kExpectedNegotiateMsg), result.size());
-  ASSERT_EQ(0,
-            memcmp(test::kExpectedNegotiateMsg, result.data(), result.size()));
+  ASSERT_EQ(std::size(test::kExpectedNegotiateMsg), result.size());
+  ASSERT_EQ(base::span(test::kExpectedNegotiateMsg), base::span(result));
 }
 
 TEST(NtlmClientTest, VerifyAuthenticateMessageV2) {
@@ -405,10 +443,10 @@ TEST(NtlmClientTest, VerifyAuthenticateMessageV2) {
   std::vector<uint8_t> result =
       GenerateAuthMsg(client, test::kChallengeMsgFromSpecV2);
   ASSERT_FALSE(result.empty());
-  ASSERT_EQ(base::size(test::kExpectedAuthenticateMsgSpecResponseV2),
+  ASSERT_EQ(std::size(test::kExpectedAuthenticateMsgSpecResponseV2),
             result.size());
-  ASSERT_EQ(0, memcmp(test::kExpectedAuthenticateMsgSpecResponseV2,
-                      result.data(), result.size()));
+  ASSERT_EQ(base::span(test::kExpectedAuthenticateMsgSpecResponseV2),
+            base::span(result));
 }
 
 TEST(NtlmClientTest,
@@ -422,11 +460,27 @@ TEST(NtlmClientTest,
   std::vector<uint8_t> result = GenerateAuthMsg(client, test::kChallengeMsgV1);
   ASSERT_FALSE(result.empty());
 
-  ASSERT_EQ(base::size(test::kExpectedAuthenticateMsgToOldV1ChallegeV2),
+  ASSERT_EQ(std::size(test::kExpectedAuthenticateMsgToOldV1ChallegeV2),
             result.size());
-  ASSERT_EQ(0, memcmp(test::kExpectedAuthenticateMsgToOldV1ChallegeV2,
-                      result.data(), result.size()));
+  ASSERT_EQ(base::span(test::kExpectedAuthenticateMsgToOldV1ChallegeV2),
+            base::span(result));
 }
 
-}  // namespace ntlm
-}  // namespace net
+// When the challenge message's target info is maximum size, adding new AV_PAIRs
+// to the response will overflow SecurityBuffer. Test that we handle this.
+TEST(NtlmClientTest, AvPairsOverflow) {
+  {
+    NtlmClient client(NtlmFeatures(/*enable_NTLMv2=*/true));
+    std::vector<uint8_t> short_challenge;
+    ASSERT_NO_FATAL_FAILURE(MakeV2ChallengeMessage(0xfff, &short_challenge));
+    EXPECT_FALSE(GenerateAuthMsg(client, short_challenge).empty());
+  }
+  {
+    NtlmClient client(NtlmFeatures(/*enable_NTLMv2=*/true));
+    std::vector<uint8_t> long_challenge;
+    ASSERT_NO_FATAL_FAILURE(MakeV2ChallengeMessage(0xffff, &long_challenge));
+    EXPECT_TRUE(GenerateAuthMsg(client, long_challenge).empty());
+  }
+}
+
+}  // namespace net::ntlm

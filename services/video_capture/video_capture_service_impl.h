@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,18 +8,32 @@
 #include <memory>
 
 #include "base/memory/scoped_refptr.h"
+#include "base/sequence_checker.h"
+#include "base/system/system_monitor.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread.h"
+#include "build/build_config.h"
+#include "media/media_buildflags.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
-#include "mojo/public/cpp/bindings/receiver_set.h"
-#include "services/video_capture/public/mojom/device_factory.mojom.h"
 #include "services/video_capture/public/mojom/video_capture_service.mojom.h"
 
-#if defined(OS_CHROMEOS)
-#include "media/capture/video/chromeos/camera_app_device_bridge_impl.h"
+#if BUILDFLAG(IS_CHROMEOS)
 #include "media/capture/video/chromeos/mojom/camera_app.mojom.h"
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+#include "services/viz/public/cpp/gpu/gpu.h"
+#endif  // BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+
+#if BUILDFLAG(IS_MAC)
+#include "media/device_monitors/device_monitor_mac.h"
+#endif
+
+#if BUILDFLAG(IS_WIN)
+#include "media/device_monitors/system_message_window_win.h"
+#endif
 
 namespace video_capture {
 
@@ -28,27 +42,34 @@ class VideoSourceProviderImpl;
 
 class VideoCaptureServiceImpl : public mojom::VideoCaptureService {
  public:
-  explicit VideoCaptureServiceImpl(
+  VideoCaptureServiceImpl(
       mojo::PendingReceiver<mojom::VideoCaptureService> receiver,
-      scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner);
+      scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner,
+      bool create_system_monitor);
+
+  VideoCaptureServiceImpl(const VideoCaptureServiceImpl&) = delete;
+  VideoCaptureServiceImpl& operator=(const VideoCaptureServiceImpl&) = delete;
+
   ~VideoCaptureServiceImpl() override;
 
   // mojom::VideoCaptureService implementation.
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   void InjectGpuDependencies(mojo::PendingRemote<mojom::AcceleratorFactory>
                                  accelerator_factory) override;
   void ConnectToCameraAppDeviceBridge(
       mojo::PendingReceiver<cros::mojom::CameraAppDeviceBridge> receiver)
       override;
-#endif  // defined(OS_CHROMEOS)
-  void ConnectToDeviceFactory(
-      mojo::PendingReceiver<mojom::DeviceFactory> receiver) override;
+#endif  // BUILDFLAG(IS_CHROMEOS)
   void ConnectToVideoSourceProvider(
       mojo::PendingReceiver<mojom::VideoSourceProvider> receiver) override;
-  void SetRetryCount(int32_t count) override;
   void BindControlsForTesting(
       mojo::PendingReceiver<mojom::TestingControls> receiver) override;
-
+#if BUILDFLAG(IS_WIN)
+  void OnGpuInfoUpdate(const CHROME_LUID& luid) override;
+#endif
+#if BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+  void SetVizGpu(std::unique_ptr<viz::Gpu> viz_gpu);
+#endif  // BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
  private:
   class GpuDependenciesContext;
 
@@ -56,21 +77,36 @@ class VideoCaptureServiceImpl : public mojom::VideoCaptureService {
   void LazyInitializeDeviceFactory();
   void LazyInitializeVideoSourceProvider();
   void OnLastSourceProviderClientDisconnected();
+  // Initializes a platform-specific device monitor for device-change
+  // notifications. If the client uses the DeviceNotifier interface to get
+  // notifications this function should be called before the DeviceMonitor is
+  // created. If the client uses base::SystemMonitor to get notifications,
+  // this function should be called on service startup.
+  void InitializeDeviceMonitor();
+
+#if BUILDFLAG(IS_MAC)
+  std::unique_ptr<media::DeviceMonitorMac> video_capture_device_monitor_mac_;
+#endif
+#if BUILDFLAG(IS_WIN)
+  std::unique_ptr<media::SystemMessageWindowWin>
+      video_capture_system_message_window_win_;
+#endif
 
   mojo::Receiver<mojom::VideoCaptureService> receiver_;
-  mojo::ReceiverSet<mojom::DeviceFactory> factory_receivers_;
+  std::unique_ptr<base::SystemMonitor> system_monitor_;
   std::unique_ptr<VirtualDeviceEnabledDeviceFactory> device_factory_;
   std::unique_ptr<VideoSourceProviderImpl> video_source_provider_;
   std::unique_ptr<GpuDependenciesContext> gpu_dependencies_context_;
 
-#if defined(OS_CHROMEOS)
-  // Bridge for Chrome OS camera app and camera devices.
-  std::unique_ptr<media::CameraAppDeviceBridgeImpl> camera_app_device_bridge_;
-#endif  // defined(OS_CHROMEOS)
+#if BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+  class VizGpuContextProvider;
+  std::unique_ptr<VizGpuContextProvider> viz_gpu_context_provider_;
+  std::unique_ptr<viz::Gpu> viz_gpu_;
+#endif  // BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
 
   scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner_;
 
-  DISALLOW_COPY_AND_ASSIGN(VideoCaptureServiceImpl);
+  SEQUENCE_CHECKER(sequence_checker_);
 };
 
 }  // namespace video_capture

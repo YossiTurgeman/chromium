@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,9 @@
 #include <algorithm>
 
 #include "base/check.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/singleton.h"
-#include "base/stl_util.h"
 #include "ui/base/win/touch_input.h"
 #include "ui/gfx/win/hwnd_util.h"
 
@@ -49,6 +48,9 @@ class HWNDSubclass::HWNDSubclassFactory {
         base::LeakySingletonTraits<HWNDSubclassFactory>>::get();
   }
 
+  HWNDSubclassFactory(const HWNDSubclassFactory&) = delete;
+  HWNDSubclassFactory& operator=(const HWNDSubclassFactory&) = delete;
+
   // Returns a non-null HWNDSubclass corresponding to the HWND |target|. Creates
   // one if none exists. Retains ownership of the returned pointer.
   HWNDSubclass* GetHwndSubclassForTarget(HWND target) {
@@ -72,8 +74,6 @@ class HWNDSubclass::HWNDSubclassFactory {
   HWNDSubclassFactory() {}
 
   std::vector<std::unique_ptr<HWNDSubclass>> hwnd_subclasses_;
-
-  DISALLOW_COPY_AND_ASSIGN(HWNDSubclassFactory);
 };
 
 // static
@@ -96,13 +96,14 @@ HWNDSubclass* HWNDSubclass::GetHwndSubclassForTarget(HWND target) {
 
 void HWNDSubclass::AddFilter(HWNDMessageFilter* filter) {
   DCHECK(filter);
-  if (!base::Contains(filters_, filter))
+  if (!std::ranges::contains(filters_, filter)) {
     filters_.push_back(filter);
+  }
 }
 
 void HWNDSubclass::RemoveFilter(HWNDMessageFilter* filter) {
-  std::vector<HWNDMessageFilter*>::iterator it =
-      std::find(filters_.begin(), filters_.end(), filter);
+  std::vector<raw_ptr<HWNDMessageFilter, VectorExperimental>>::iterator it =
+      std::ranges::find(filters_, filter);
   if (it != filters_.end())
     filters_.erase(it);
 }
@@ -139,8 +140,9 @@ LRESULT HWNDSubclass::OnWndProc(HWND hwnd,
     }
   }
 
-  for (std::vector<HWNDMessageFilter*>::iterator it = filters_.begin();
-      it != filters_.end(); ++it) {
+  for (std::vector<raw_ptr<HWNDMessageFilter, VectorExperimental>>::iterator
+           it = filters_.begin();
+       it != filters_.end(); ++it) {
     LRESULT l_result = 0;
     if ((*it)->FilterMessage(hwnd, message, w_param, l_param, &l_result))
       return l_result;

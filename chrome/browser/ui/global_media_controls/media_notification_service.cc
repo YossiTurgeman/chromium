@@ -1,789 +1,614 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/global_media_controls/media_notification_service.h"
 
+#include <algorithm>
+#include <memory>
+
 #include "base/callback_list.h"
-#include "base/metrics/field_trial_params.h"
+#include "base/functional/bind.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/ranges/algorithm.h"
+#include "base/unguessable_token.h"
+#include "chrome/browser/feature_engagement/tracker_factory.h"
+#include "chrome/browser/glic/host/guest_util.h"
 #include "chrome/browser/media/router/media_router_feature.h"
-#include "chrome/browser/media/router/presentation/start_presentation_context.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_list.h"
-#include "chrome/browser/ui/global_media_controls/media_dialog_delegate.h"
-#include "chrome/browser/ui/global_media_controls/media_notification_container_impl.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/browser/ui/global_media_controls/cast_device_list_host.h"
 #include "chrome/browser/ui/global_media_controls/media_notification_device_provider_impl.h"
-#include "chrome/browser/ui/global_media_controls/media_notification_service_observer.h"
-#include "chrome/browser/ui/global_media_controls/overlay_media_notification.h"
+#include "chrome/browser/ui/global_media_controls/presentation_request_notification_producer.h"
+#include "chrome/browser/ui/media_router/cast_dialog_controller.h"
 #include "chrome/browser/ui/media_router/media_router_ui.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/common/buildflags.h"
+#include "components/feature_engagement/public/tracker.h"
+#include "components/global_media_controls/public/media_dialog_delegate.h"
+#include "components/global_media_controls/public/media_item_manager.h"
+#include "components/global_media_controls/public/media_item_producer.h"
 #include "components/media_message_center/media_notification_item.h"
-#include "components/media_message_center/media_notification_util.h"
-#include "components/media_message_center/media_session_notification_item.h"
-#include "components/ukm/content/source_url_recorder.h"
+#include "components/media_router/browser/media_router_factory.h"
+#include "components/media_router/browser/presentation/start_presentation_context.h"
+#include "components/media_router/browser/presentation/web_contents_presentation_manager.h"
+#include "components/sessions/content/session_tab_helper.h"
 #include "content/public/browser/audio_service.h"
 #include "content/public/browser/media_session.h"
 #include "content/public/browser/media_session_service.h"
+#include "content/public/browser/render_frame_host.h"
 #include "media/base/media_switches.h"
+#include "media/remoting/device_capability_checker.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "services/media_session/public/mojom/media_session.mojom.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 #include "services/metrics/public/cpp/ukm_recorder.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/session/session_controller_impl.h"
+#include "ash/shell.h"
+#include "ash/system/media/media_notification_provider.h"
+#include "ash/system/media/media_tray.h"
+#include "ash/system/status_area_widget.h"
+#include "ash/system/unified/unified_system_tray.h"
+#include "ash/system/unified/unified_system_tray_bubble.h"
+#include "ash/system/unified/unified_system_tray_controller.h"
+#endif
+
+namespace mojom {
+using global_media_controls::mojom::DeviceListClient;
+using global_media_controls::mojom::DeviceListHost;
+}  // namespace mojom
 
 namespace {
 
 // The maximum number of actions we will record to UKM for a specific source.
 constexpr int kMaxActionsRecordedToUKM = 100;
 
-constexpr int kAutoDismissTimerInMinutesDefault = 60;  // minutes
-
-constexpr const char kAutoDismissTimerInMinutesParamName[] = "timer_in_minutes";
-
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum class MediaNotificationClickSource {
-  kMedia = 0,
-  kPresentation,
-  kMediaFling,
-  kMaxValue = kMediaFling
-};
-
-// Returns the time value to be used for the auto-dismissing of the
-// notifications after they are inactive.
-// If the feature (auto-dismiss) is disabled, the returned value will be
-// TimeDelta::Max() which is the largest int64 possible.
-base::TimeDelta GetAutoDismissTimerValue() {
-  if (!base::FeatureList::IsEnabled(media::kGlobalMediaControlsAutoDismiss))
-    return base::TimeDelta::Max();
-
-  return base::TimeDelta::FromMinutes(base::GetFieldTrialParamByFeatureAsInt(
-      media::kGlobalMediaControlsAutoDismiss,
-      kAutoDismissTimerInMinutesParamName, kAutoDismissTimerInMinutesDefault));
+void CancelRequest(
+    std::unique_ptr<media_router::StartPresentationContext> context,
+    const std::string& message) {
+  context->InvokeErrorCallback(blink::mojom::PresentationError(
+      blink::mojom::PresentationErrorType::PRESENTATION_REQUEST_CANCELLED,
+      message));
 }
 
-// Here we check to see if the WebContents is focused. Note that since Session
-// is a WebContentsObserver, we could in theory listen for
-// |OnWebContentsFocused()| and |OnWebContentsLostFocus()|. However, this won't
-// actually work since focusing the MediaDialogView causes the WebContents to
-// "lose focus", so we'd never be focused.
+// Here we check to see if the WebContents is focused. Note that we can't just
+// use |WebContentsObserver::OnWebContentsFocused()| and
+// |WebContentsObserver::OnWebContentsLostFocus()| because focusing the
+// MediaDialogView causes the WebContents to "lose focus", so we'd never be
+// focused.
 bool IsWebContentsFocused(content::WebContents* web_contents) {
   DCHECK(web_contents);
-  Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
-  if (!browser)
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
+  if (!browser) {
     return false;
-
+  }
   // If the given WebContents is not in the focused window, then it's not
   // focused. Note that we know a Browser is focused because otherwise the user
   // could not interact with the MediaDialogView.
-  if (BrowserList::GetInstance()->GetLastActive() != browser)
+  if (GetLastActiveBrowserWindowInterfaceWithAnyProfile() != browser) {
     return false;
-
-  return browser->tab_strip_model()->GetActiveWebContents() == web_contents;
+  }
+  return browser->GetTabStripModel()->GetActiveWebContents() == web_contents;
 }
 
-base::WeakPtr<media_router::WebContentsPresentationManager>
-GetPresentationManager(content::WebContents* web_contents) {
-  return web_contents
-             ? media_router::WebContentsPresentationManager::Get(web_contents)
-             : nullptr;
-}
-
-}  // anonymous namespace
-
-MediaNotificationService::Session::Session(
-    MediaNotificationService* owner,
-    const std::string& id,
-    std::unique_ptr<media_message_center::MediaSessionNotificationItem> item,
+bool ShouldInitializeWithRemotePlaybackSource(
     content::WebContents* web_contents,
-    mojo::Remote<media_session::mojom::MediaController> controller)
-    : content::WebContentsObserver(web_contents),
-      owner_(owner),
-      id_(id),
-      item_(std::move(item)),
-      presentation_manager_(GetPresentationManager(web_contents)) {
-  DCHECK(owner_);
-  DCHECK(item_);
-
-  SetController(std::move(controller));
-  if (presentation_manager_)
-    presentation_manager_->AddObserver(this);
-}
-
-MediaNotificationService::Session::~Session() {
-  if (presentation_manager_)
-    presentation_manager_->RemoveObserver(this);
-
-  // If we've been marked inactive, then we've already recorded inactivity as
-  // the dismiss reason.
-  if (is_marked_inactive_)
-    return;
-
-  RecordDismissReason(dismiss_reason_.value_or(
-      GlobalMediaControlsDismissReason::kMediaSessionStopped));
-}
-
-void MediaNotificationService::Session::WebContentsDestroyed() {
-  // If the WebContents is destroyed, then we should just remove the item
-  // instead of freezing it.
-  set_dismiss_reason(GlobalMediaControlsDismissReason::kTabClosed);
-  owner_->RemoveItem(id_);
-}
-
-void MediaNotificationService::Session::MediaSessionInfoChanged(
-    media_session::mojom::MediaSessionInfoPtr session_info) {
-  is_playing_ =
-      session_info && session_info->playback_state ==
-                          media_session::mojom::MediaPlaybackState::kPlaying;
-
-  // If we've started playing, we don't want the inactive timer to be running.
-  if (is_playing_) {
-    if (inactive_timer_.IsRunning() || is_marked_inactive_) {
-      MarkActiveIfNecessary();
-      RecordInteractionDelayAfterPause();
-      inactive_timer_.Stop();
-    }
-    return;
+    media_session::mojom::RemotePlaybackMetadataPtr remote_playback_metadata) {
+  if (!base::FeatureList::IsEnabled(media::kMediaRemotingWithoutFullscreen)) {
+    return false;
   }
 
-  // If we're in an overlay, then we don't want to count the session as
-  // inactive.
-  // TODO(https://crbug.com/1032841): This means we won't record interaction
-  // delays. Consider changing to record them.
-  if (is_in_overlay_)
-    return;
-
-  // If the timer is already running, we don't need to do anything.
-  if (inactive_timer_.IsRunning())
-    return;
-
-  last_interaction_time_ = base::TimeTicks::Now();
-  StartInactiveTimer();
-}
-
-void MediaNotificationService::Session::MediaSessionActionsChanged(
-    const std::vector<media_session::mojom::MediaSessionAction>& actions) {
-  bool is_audio_device_switching_supported =
-      base::ranges::find(
-          actions,
-          media_session::mojom::MediaSessionAction::kSwitchAudioDevice) !=
-      actions.end();
-  if (is_audio_device_switching_supported !=
-      is_audio_device_switching_supported_) {
-    is_audio_device_switching_supported_ = is_audio_device_switching_supported;
-    is_audio_device_switching_supported_callback_list_.Notify(
-        is_audio_device_switching_supported_);
+  // Do not initialize MediaRouterUI with RemotePlayback media source when there
+  // exists default presentation request.
+  base::WeakPtr<media_router::WebContentsPresentationManager>
+      presentation_manager =
+          media_router::WebContentsPresentationManager::Get(web_contents);
+  if (presentation_manager &&
+      presentation_manager->HasDefaultPresentationRequest()) {
+    return false;
   }
-}
 
-void MediaNotificationService::Session::MediaSessionPositionChanged(
-    const base::Optional<media_session::MediaPosition>& position) {
-  OnSessionInteractedWith();
-}
-
-void MediaNotificationService::Session::OnMediaRoutesChanged(
-    const std::vector<media_router::MediaRoute>& routes) {
-  if (!routes.empty())
-    item_->Dismiss();
-}
-
-void MediaNotificationService::Session::SetController(
-    mojo::Remote<media_session::mojom::MediaController> controller) {
-  if (controller.is_bound()) {
-    observer_receiver_.reset();
-    controller->AddObserver(observer_receiver_.BindNewPipeAndPassRemote());
-    controller_ = std::move(controller);
+  if (!remote_playback_metadata) {
+    return false;
   }
-}
 
-void MediaNotificationService::Session::set_dismiss_reason(
-    GlobalMediaControlsDismissReason reason) {
-  DCHECK(!dismiss_reason_.has_value());
-  dismiss_reason_ = reason;
-}
-
-void MediaNotificationService::Session::OnSessionInteractedWith() {
-  // If we're not currently tracking inactive time, then no action is needed.
-  if (!inactive_timer_.IsRunning() && !is_marked_inactive_)
-    return;
-
-  MarkActiveIfNecessary();
-
-  RecordInteractionDelayAfterPause();
-  last_interaction_time_ = base::TimeTicks::Now();
-
-  // Otherwise, reset the timer.
-  inactive_timer_.Stop();
-  StartInactiveTimer();
-}
-
-void MediaNotificationService::Session::OnSessionOverlayStateChanged(
-    bool is_in_overlay) {
-  is_in_overlay_ = is_in_overlay;
-
-  if (is_in_overlay_) {
-    // If we enter an overlay, then we don't want the session to be marked
-    // inactive.
-    if (inactive_timer_.IsRunning()) {
-      RecordInteractionDelayAfterPause();
-      inactive_timer_.Stop();
-    }
-  } else if (!is_playing_ && !inactive_timer_.IsRunning()) {
-    // If we exit an overlay and the session is paused, then the session is
-    // inactive.
-    StartInactiveTimer();
+  if (media::remoting::ParseVideoCodec(remote_playback_metadata->video_codec) ==
+          media::VideoCodec::kUnknown ||
+      media::remoting::ParseAudioCodec(remote_playback_metadata->audio_codec) ==
+          media::AudioCodec::kUnknown) {
+    return false;
   }
+
+  return true;
 }
 
-bool MediaNotificationService::Session::IsPlaying() {
-  return is_playing_;
-}
-
-void MediaNotificationService::Session::SetAudioSinkId(const std::string& id) {
-  controller_->SetAudioSinkId(id);
-}
-
-std::unique_ptr<base::RepeatingCallbackList<void(bool)>::Subscription>
-MediaNotificationService::Session::
-    RegisterIsAudioDeviceSwitchingSupportedCallback(
-        base::RepeatingCallback<void(bool)> callback) {
-  callback.Run(is_audio_device_switching_supported_);
-  return is_audio_device_switching_supported_callback_list_.Add(
-      std::move(callback));
-}
-
-// static
-void MediaNotificationService::Session::RecordDismissReason(
-    GlobalMediaControlsDismissReason reason) {
-  base::UmaHistogramEnumeration("Media.GlobalMediaControls.DismissReason",
-                                reason);
-}
-
-void MediaNotificationService::Session::StartInactiveTimer() {
-  DCHECK(!inactive_timer_.IsRunning());
-
-  // Using |base::Unretained()| here is okay since |this| owns
-  // |inactive_timer_|.
-  // If the feature is disabled, the timer will run forever, in order for the
-  // rest of the code to continue running as expected.
-  inactive_timer_.Start(
-      FROM_HERE, GetAutoDismissTimerValue(),
-      base::BindOnce(&MediaNotificationService::Session::OnInactiveTimerFired,
-                     base::Unretained(this)));
-}
-
-void MediaNotificationService::Session::OnInactiveTimerFired() {
-  // Overlay notifications should never be marked as inactive.
-  DCHECK(!is_in_overlay_);
-
-  // If the session has been paused and inactive for long enough, then mark it
-  // as inactive.
-  is_marked_inactive_ = true;
-  RecordDismissReason(GlobalMediaControlsDismissReason::kInactiveTimeout);
-  owner_->OnSessionBecameInactive(id_);
-}
-
-void MediaNotificationService::Session::RecordInteractionDelayAfterPause() {
-  base::TimeDelta time_since_last_interaction =
-      base::TimeTicks::Now() - last_interaction_time_;
-  base::UmaHistogramCustomTimes(
-      "Media.GlobalMediaControls.InteractionDelayAfterPause",
-      time_since_last_interaction, base::TimeDelta::FromMinutes(1),
-      base::TimeDelta::FromDays(1), 100);
-}
-
-void MediaNotificationService::Session::MarkActiveIfNecessary() {
-  if (!is_marked_inactive_)
-    return;
-  is_marked_inactive_ = false;
-
-  owner_->OnSessionBecameActive(id_);
-}
+}  // namespace
 
 MediaNotificationService::MediaNotificationService(Profile* profile,
                                                    bool show_from_all_profiles)
-    : overlay_media_notifications_manager_(this) {
-  if (base::FeatureList::IsEnabled(media::kGlobalMediaControlsForCast) &&
-      media_router::MediaRouterEnabled(profile)) {
-    cast_notification_provider_ =
-        std::make_unique<CastMediaNotificationProvider>(
-            profile, this,
-            base::BindRepeating(
-                &MediaNotificationService::OnCastNotificationsChanged,
-                base::Unretained(this)));
+    : profile_(profile), receiver_(this) {
+  item_manager_ = global_media_controls::MediaItemManager::Create();
+
+#if BUILDFLAG(IS_CHROMEOS)
+  if (auto* provider = ash::MediaNotificationProvider::Get(); provider) {
+    provider_observation_.Observe(provider);
   }
-  if (media_router::GlobalMediaControlsCastStartStopEnabled()) {
-    presentation_request_notification_provider_ =
-        std::make_unique<PresentationRequestNotificationProvider>(this);
+#endif
+
+  std::optional<base::UnguessableToken> source_id;
+  if (!show_from_all_profiles) {
+    source_id = content::MediaSession::GetSourceId(profile);
   }
+
+  mojo::Remote<media_session::mojom::AudioFocusManager> audio_focus_remote;
+  mojo::Remote<media_session::mojom::MediaControllerManager>
+      controller_manager_remote;
+
+  // Connect to receive audio focus events.
+  content::GetMediaSessionService().BindAudioFocusManager(
+      audio_focus_remote.BindNewPipeAndPassReceiver());
 
   // Connect to the controller manager so we can create media controllers for
   // media sessions.
   content::GetMediaSessionService().BindMediaControllerManager(
-      controller_manager_remote_.BindNewPipeAndPassReceiver());
+      controller_manager_remote.BindNewPipeAndPassReceiver());
 
-  // Connect to receive audio focus events.
-  content::GetMediaSessionService().BindAudioFocusManager(
-      audio_focus_remote_.BindNewPipeAndPassReceiver());
+  media_session_item_producer_ =
+      std::make_unique<global_media_controls::MediaSessionItemProducer>(
+          std::move(audio_focus_remote), std::move(controller_manager_remote),
+          item_manager_.get(), source_id);
 
-  if (show_from_all_profiles) {
-    audio_focus_remote_->AddObserver(
-        audio_focus_observer_receiver_.BindNewPipeAndPassRemote());
+  // It is safe to use `base::Unretained` here because
+  // `media_session_item_producer_` is owned by `this`.
+  media_session_item_producer_->SetIsIdBlockedCallback(base::BindRepeating(
+      &MediaNotificationService::IsIdBlocked, base::Unretained(this)));
 
-    audio_focus_remote_->GetFocusRequests(
-        base::BindOnce(&MediaNotificationService::OnReceivedAudioFocusRequests,
-                       weak_ptr_factory_.GetWeakPtr()));
-  } else {
-    const base::UnguessableToken& source_id =
-        content::MediaSession::GetSourceId(profile);
+  media_session_item_producer_->AddObserver(this);
+  item_manager_->AddItemProducer(media_session_item_producer_.get());
 
-    audio_focus_remote_->AddSourceObserver(
-        source_id, audio_focus_observer_receiver_.BindNewPipeAndPassRemote());
+  if (!media_router::MediaRouterEnabled(profile)) {
+    return;
+  }
+  // CastMediaNotificationProducer is owned by
+  // CastMediaNotificationProducerKeyedService in Ash.
+#if !BUILDFLAG(IS_CHROMEOS)
+  // base::Unretained() is safe here because `cast_notification_producer_` is
+  // deleted before `item_manager_`.
+  cast_notification_producer_ = std::make_unique<CastMediaNotificationProducer>(
+      profile, item_manager_.get());
+  item_manager_->AddItemProducer(cast_notification_producer_.get());
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
-    audio_focus_remote_->GetSourceFocusRequests(
-        source_id,
-        base::BindOnce(&MediaNotificationService::OnReceivedAudioFocusRequests,
-                       weak_ptr_factory_.GetWeakPtr()));
+  presentation_request_notification_producer_ =
+      std::make_unique<PresentationRequestNotificationProducer>(
+          base::BindRepeating(
+              &MediaNotificationService::HasActiveNotificationsForWebContents,
+              base::Unretained(this)),
+          content::MediaSession::GetSourceId(profile));
+
+  auto* item_manager = GetMediaItemManagerForSupplementalDevicePickerProducer();
+  if (item_manager) {
+    supplemental_device_picker_producer_ = std::make_unique<
+        global_media_controls::SupplementalDevicePickerProducer>(item_manager);
+    item_manager->AddItemProducer(supplemental_device_picker_producer_.get());
+    SetDevicePickerProvider(supplemental_device_picker_producer_->PassRemote());
   }
 }
+
+#if BUILDFLAG(IS_CHROMEOS)
+void MediaNotificationService::ShowDialogAsh(
+    std::unique_ptr<media_router::StartPresentationContext> context) {
+  auto* web_contents = content::WebContents::FromRenderFrameHost(
+      content::RenderFrameHost::FromID(
+          context->presentation_request().render_frame_host_id));
+  OnStartPresentationContextCreated(std::move(context));
+  auto routes = media_router::WebContentsPresentationManager::Get(web_contents)
+                    ->GetMediaRoutes();
+  std::string item_id;
+  if (!routes.empty()) {
+    // When `routes` is not empty, we'd ideally set `item_id` to be the ID of a
+    // MediaRoute so that we'd only show the corresponding notification item.
+    item_id = routes.begin()->media_route_id();
+  } else {
+    item_id = content::MediaSession::GetRequestIdFromWebContents(web_contents)
+                  .ToString();
+  }
+
+  // Keep Media Tray pinned to use a separate widget in kiosk sessions because
+  // the Unified System Tray bubble is not available.
+  if (ash::Shell::Get()->session_controller()->IsRunningInAppMode()) {
+    ash::MediaTray::SetPinnedToShelf(true);
+  }
+
+  if (ash::MediaTray::IsPinnedToShelf()) {
+    ash::StatusAreaWidget::ForWindow(ash::Shell::Get()->GetPrimaryRootWindow())
+        ->media_tray()
+        ->ShowBubbleWithItem(item_id);
+  } else {
+    ash::UnifiedSystemTray* tray =
+        ash::StatusAreaWidget::ForWindow(
+            ash::Shell::Get()->GetPrimaryRootWindow())
+            ->unified_system_tray();
+    tray->ShowBubble();
+    tray->bubble()
+        ->unified_system_tray_controller()
+        ->ShowMediaControlsDetailedView(
+            global_media_controls::GlobalMediaControlsEntryPoint::kPresentation,
+            item_id);
+  }
+}
+
+void MediaNotificationService::OnMediaNotificationProviderWillBeDestroyed() {
+  if (supplemental_device_picker_producer_) {
+    if (auto* item_manager =
+            GetMediaItemManagerForSupplementalDevicePickerProducer()) {
+      item_manager->RemoveItemProducer(
+          supplemental_device_picker_producer_.get());
+    }
+    supplemental_device_picker_producer_.reset();
+  }
+  provider_observation_.Reset();
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 MediaNotificationService::~MediaNotificationService() {
-  for (auto container_pair : observed_containers_)
-    container_pair.second->RemoveObserver(this);
-}
+  media_session_item_producer_->RemoveObserver(this);
+  item_manager_->RemoveItemProducer(media_session_item_producer_.get());
 
-void MediaNotificationService::AddObserver(
-    MediaNotificationServiceObserver* observer) {
-  observers_.AddObserver(observer);
-}
-
-void MediaNotificationService::RemoveObserver(
-    MediaNotificationServiceObserver* observer) {
-  observers_.RemoveObserver(observer);
-}
-
-void MediaNotificationService::OnFocusGained(
-    media_session::mojom::AudioFocusRequestStatePtr session) {
-  const std::string id = session->request_id->ToString();
-
-  // If we have an existing unfrozen item then this is a duplicate call and
-  // we should ignore it.
-  auto it = sessions_.find(id);
-  if (it != sessions_.end() && !it->second.item()->frozen())
-    return;
-
-  mojo::Remote<media_session::mojom::MediaController> item_controller;
-  mojo::Remote<media_session::mojom::MediaController> session_controller;
-
-  controller_manager_remote_->CreateMediaControllerForSession(
-      item_controller.BindNewPipeAndPassReceiver(), *session->request_id);
-  controller_manager_remote_->CreateMediaControllerForSession(
-      session_controller.BindNewPipeAndPassReceiver(), *session->request_id);
-
-  if (it != sessions_.end()) {
-    // If the notification was previously frozen then we should reset the
-    // controller because the mojo pipe would have been reset.
-    it->second.SetController(std::move(session_controller));
-    it->second.item()->SetController(std::move(item_controller),
-                                     std::move(session->session_info));
-  } else {
-    sessions_.emplace(
-        std::piecewise_construct, std::forward_as_tuple(id),
-        std::forward_as_tuple(
-            this, id,
-            std::make_unique<
-                media_message_center::MediaSessionNotificationItem>(
-                this, id, session->source_name.value_or(std::string()),
-                std::move(item_controller), std::move(session->session_info)),
-            content::MediaSession::GetWebContentsFromRequestId(
-                *session->request_id),
-            std::move(session_controller)));
+  if (supplemental_device_picker_producer_) {
+    if (auto* item_manager =
+            GetMediaItemManagerForSupplementalDevicePickerProducer()) {
+      item_manager->RemoveItemProducer(
+          supplemental_device_picker_producer_.get());
+    }
   }
 }
 
-void MediaNotificationService::OnFocusLost(
-    media_session::mojom::AudioFocusRequestStatePtr session) {
-  const std::string id = session->request_id->ToString();
-
-  auto it = sessions_.find(id);
-  if (it == sessions_.end())
-    return;
-
-  // If we're not currently showing this item, then we can just remove it.
-  if (!base::Contains(active_controllable_session_ids_, id) &&
-      !base::Contains(frozen_session_ids_, id) &&
-      !base::Contains(dragged_out_session_ids_, id)) {
-    RemoveItem(id);
-    return;
+void MediaNotificationService::Shutdown() {
+  shutdown_has_started_ = true;
+  // `cast_notification_producer_`,
+  // `presentation_request_notification_producer_` and `host_receivers_`
+  // depend on MediaRouter, which is another keyed service. So they must be
+  // destroyed here.
+  if (cast_notification_producer_) {
+    item_manager_->RemoveItemProducer(cast_notification_producer_.get());
   }
-
-  // Otherwise, freeze it in case it regains focus quickly.
-  it->second.item()->Freeze(base::BindOnce(
-      &MediaNotificationService::OnItemUnfrozen, base::Unretained(this), id));
-  active_controllable_session_ids_.erase(id);
-  frozen_session_ids_.insert(id);
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
-}
-
-void MediaNotificationService::ShowNotification(const std::string& id) {
-  // If the notification is currently hidden because it's inactive or because
-  // it's in an overlay notification, then do nothing.
-  if (base::Contains(dragged_out_session_ids_, id) ||
-      base::Contains(inactive_session_ids_, id)) {
-    return;
-  }
-
-  active_controllable_session_ids_.insert(id);
-
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
-
-  if (!dialog_delegate_)
-    return;
-
-  base::WeakPtr<media_message_center::MediaNotificationItem> item =
-      GetNotificationItem(id);
-  MediaNotificationContainerImpl* container =
-      dialog_delegate_->ShowMediaSession(id, item);
-
-  // Observe the container for dismissal.
-  if (container) {
-    container->AddObserver(this);
-    observed_containers_[id] = container;
+  cast_notification_producer_.reset();
+  presentation_request_notification_producer_.reset();
+  for (const auto& host : host_receivers_) {
+    if (host.second) {
+      host.second->Close();
+    }
   }
 }
 
-void MediaNotificationService::HideNotification(const std::string& id) {
-  active_controllable_session_ids_.erase(id);
-  frozen_session_ids_.erase(id);
+void MediaNotificationService::OnAudioSinkChosen(const std::string& item_id,
+                                                 const std::string& sink_id) {
+  media_session_item_producer_->SetAudioSinkId(item_id, sink_id);
+}
 
-  if (base::Contains(dragged_out_session_ids_, id)) {
-    overlay_media_notifications_manager_.CloseOverlayNotification(id);
-    dragged_out_session_ids_.erase(id);
+base::CallbackListSubscription
+MediaNotificationService::RegisterAudioOutputDeviceDescriptionsCallback(
+    MediaNotificationDeviceProvider::GetOutputDevicesCallback callback) {
+  if (!device_provider_) {
+    device_provider_ = std::make_unique<MediaNotificationDeviceProviderImpl>(
+        content::CreateAudioSystemForAudioService());
   }
+  return device_provider_->RegisterOutputDeviceDescriptionsCallback(
+      std::move(callback));
+}
 
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
+base::CallbackListSubscription
+MediaNotificationService::RegisterIsAudioOutputDeviceSwitchingSupportedCallback(
+    const std::string& id,
+    base::RepeatingCallback<void(bool)> callback) {
+  return media_session_item_producer_
+      ->RegisterIsAudioOutputDeviceSwitchingSupportedCallback(
+          id, std::move(callback));
+}
 
-  if (!dialog_delegate_)
+void MediaNotificationService::OnMediaRemotingRequested(
+    const std::string& item_id) {
+  auto item = media_session_item_producer_->GetMediaItem(item_id);
+  if (!item) {
     return;
-
-  dialog_delegate_->HideMediaSession(id);
-}
-
-scoped_refptr<base::SequencedTaskRunner>
-MediaNotificationService::GetTaskRunner() const {
-  return nullptr;
-}
-
-void MediaNotificationService::RemoveItem(const std::string& id) {
-  active_controllable_session_ids_.erase(id);
-  frozen_session_ids_.erase(id);
-  inactive_session_ids_.erase(id);
-
-  if (base::Contains(dragged_out_session_ids_, id)) {
-    overlay_media_notifications_manager_.CloseOverlayNotification(id);
-    dragged_out_session_ids_.erase(id);
   }
 
-  sessions_.erase(id);
-
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
+  item->RequestMediaRemoting();
+  auto* web_contents =
+      content::MediaSession::GetWebContentsFromRequestId(item_id);
+  if (web_contents && web_contents->GetLastCommittedURL().SchemeIsFile()) {
+    feature_engagement::TrackerFactory::GetForBrowserContext(profile_)
+        ->NotifyEvent("media_route_started_from_gmc");
+  }
 }
 
-void MediaNotificationService::LogMediaSessionActionButtonPressed(
+void MediaNotificationService::OnSinksDiscovered(const std::string& item_id) {
+  auto item = media_session_item_producer_->GetMediaItem(item_id);
+  auto* web_contents =
+      content::MediaSession::GetWebContentsFromRequestId(item_id);
+
+  if (web_contents) {
+    should_show_cast_local_media_iph_ =
+        web_contents->GetLastCommittedURL().SchemeIsFile();
+  }
+}
+
+void MediaNotificationService::OnMediaSessionActionButtonPressed(
     const std::string& id,
     media_session::mojom::MediaSessionAction action) {
-  auto it = sessions_.find(id);
-  if (it == sessions_.end())
+  auto* web_contents = content::MediaSession::GetWebContentsFromRequestId(id);
+  if (!web_contents) {
     return;
-
-  content::WebContents* web_contents = it->second.web_contents();
-  if (!web_contents)
-    return;
-
+  }
   base::UmaHistogramBoolean("Media.GlobalMediaControls.UserActionFocus",
                             IsWebContentsFocused(web_contents));
 
   ukm::UkmRecorder* recorder = ukm::UkmRecorder::Get();
   ukm::SourceId source_id =
-      ukm::GetSourceIdForWebContentsDocument(web_contents);
+      web_contents->GetPrimaryMainFrame()->GetPageUkmSourceId();
 
-  if (++actions_recorded_to_ukm_[source_id] > kMaxActionsRecordedToUKM)
+  if (++actions_recorded_to_ukm_[source_id] > kMaxActionsRecordedToUKM) {
     return;
-
+  }
   ukm::builders::Media_GlobalMediaControls_ActionButtonPressed(source_id)
       .SetMediaSessionAction(static_cast<int64_t>(action))
       .Record(recorder);
 }
 
-void MediaNotificationService::OnContainerClicked(const std::string& id) {
-  auto it = sessions_.find(id);
-  if (it == sessions_.end())
-    return;
+void MediaNotificationService::SetDialogDelegateForWebContents(
+    global_media_controls::MediaDialogDelegate* delegate,
+    content::WebContents* contents) {
+  DCHECK(delegate);
+  DCHECK(contents);
 
-  it->second.OnSessionInteractedWith();
+  // When the dialog is opened by a PresentationRequest, there should be only
+  // one notification, in the following priority order:
+  // 1. A cast presentation session associated with `contents`.
+  // 2. A local media session associated with `contents`. This media session
+  // might potentially be associated with a Remote Playback route.
+  // 3. A supplemental notification populated using the PresentationRequest.
+  std::string item_id;
 
-  content::WebContents* web_contents = it->second.web_contents();
-  if (!web_contents)
-    return;
-
-  content::WebContentsDelegate* delegate = web_contents->GetDelegate();
-  if (!delegate)
-    return;
-
-  base::UmaHistogramEnumeration("Media.Notification.Click",
-                                MediaNotificationClickSource::kMedia);
-
-  delegate->ActivateContents(web_contents);
-}
-
-void MediaNotificationService::OnContainerDismissed(const std::string& id) {
-  // If the notification is dragged out, then dismissing should just close the
-  // overlay notification.
-  if (base::Contains(dragged_out_session_ids_, id)) {
-    overlay_media_notifications_manager_.CloseOverlayNotification(id);
-    return;
-  }
-
-  Session* session = GetSession(id);
-  if (!session) {
-    auto item = GetNonSessionNotificationItem(id);
-    if (item)
-      item->Dismiss();
-    return;
-  }
-
-  session->set_dismiss_reason(
-      GlobalMediaControlsDismissReason::kUserDismissedNotification);
-  session->item()->Dismiss();
-}
-
-void MediaNotificationService::OnContainerDestroyed(const std::string& id) {
-  auto iter = observed_containers_.find(id);
-  DCHECK(iter != observed_containers_.end());
-
-  iter->second->RemoveObserver(this);
-  observed_containers_.erase(iter);
-}
-
-void MediaNotificationService::OnContainerDraggedOut(const std::string& id,
-                                                     gfx::Rect bounds) {
-  // If the session has been destroyed, no action is needed.
-  auto it = sessions_.find(id);
-  if (it == sessions_.end())
-    return;
-
-  // Inform the Session that it's in an overlay so should not timeout as
-  // inactive.
-  it->second.OnSessionOverlayStateChanged(/*is_in_overlay=*/true);
-
-  if (!dialog_delegate_)
-    return;
-
-  std::unique_ptr<OverlayMediaNotification> overlay_notification =
-      dialog_delegate_->PopOut(id, bounds);
-  if (!overlay_notification)
-    return;
-
-  overlay_media_notifications_manager_.ShowOverlayNotification(
-      id, std::move(overlay_notification));
-  active_controllable_session_ids_.erase(id);
-  dragged_out_session_ids_.insert(id);
-
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
-}
-
-void MediaNotificationService::OnAudioSinkChosen(const std::string& id,
-                                                 const std::string& sink_id) {
-  auto it = sessions_.find(id);
-  DCHECK(it != sessions_.end());
-  it->second.SetAudioSinkId(sink_id);
-}
-
-void MediaNotificationService::Shutdown() {
-  // |cast_notification_provider_| and
-  // |presentation_request_notification_provider_| depend on MediaRouter, which
-  // is another keyed service.
-  cast_notification_provider_.reset();
-  presentation_request_notification_provider_.reset();
-}
-
-void MediaNotificationService::OnOverlayNotificationClosed(
-    const std::string& id) {
-  // If the session has been destroyed, no action is needed.
-  auto it = sessions_.find(id);
-  if (it == sessions_.end())
-    return;
-
-  it->second.OnSessionOverlayStateChanged(/*is_in_overlay=*/false);
-
-  // Since the overlay is closing, we no longer need to observe the associated
-  // container.
-  auto observed_iter = observed_containers_.find(id);
-  if (observed_iter != observed_containers_.end()) {
-    observed_iter->second->RemoveObserver(this);
-    observed_containers_.erase(observed_iter);
-  }
-
-  // Otherwise, if it's a non-frozen item, then it's now an active one.
-  if (!base::Contains(frozen_session_ids_, id))
-    active_controllable_session_ids_.insert(id);
-  dragged_out_session_ids_.erase(id);
-
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
-
-  // If there's a dialog currently open, then we should show the item in the
-  // dialog.
-  if (!dialog_delegate_)
-    return;
-
-  MediaNotificationContainerImpl* container =
-      dialog_delegate_->ShowMediaSession(id, it->second.item()->GetWeakPtr());
-
-  if (container) {
-    container->AddObserver(this);
-    observed_containers_[id] = container;
-  }
-}
-
-void MediaNotificationService::OnCastNotificationsChanged() {
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
-}
-
-void MediaNotificationService::SetDialogDelegate(
-    MediaDialogDelegate* delegate) {
-  DCHECK(!delegate || !dialog_delegate_);
-  dialog_delegate_ = delegate;
-
-  if (dialog_delegate_) {
-    for (auto& observer : observers_)
-      observer.OnMediaDialogOpened();
-  } else {
-    for (auto& observer : observers_)
-      observer.OnMediaDialogClosed();
-  }
-
-  if (!dialog_delegate_)
-    return;
-
-  std::list<std::string> sorted_session_ids;
-  for (const std::string& id : active_controllable_session_ids_) {
-    if (sessions_.find(id)->second.IsPlaying())
-      sorted_session_ids.push_front(id);
-    else
-      sorted_session_ids.push_back(id);
-  }
-
-  for (const std::string& id : sorted_session_ids) {
-    base::WeakPtr<media_message_center::MediaNotificationItem> item =
-        GetNotificationItem(id);
-    MediaNotificationContainerImpl* container =
-        dialog_delegate_->ShowMediaSession(id, item);
-
-    // Observe the container for dismissal.
-    if (container) {
-      container->AddObserver(this);
-      observed_containers_[id] = container;
+  // Find the cast presentation route associated with `contents`.
+  // WebContentsPresentationManager manages all presentation routes including
+  // Cast and Remote Playback presentations. For the sake of displaying media
+  // routes in the GMC dialog, Cast presentation routes should be shown as Cast
+  // notification items and Remote Playback presentation routes should be shown
+  // as media session notification items.
+  std::optional<std::string> cast_presentation_route_id;
+  for (const auto& route :
+       media_router::WebContentsPresentationManager::Get(contents)
+           ->GetMediaRoutes()) {
+    if (route.media_source().IsCastPresentationUrl()) {
+      cast_presentation_route_id = route.media_route_id();
+      break;
     }
   }
 
-  media_message_center::RecordConcurrentNotificationCount(
-      active_controllable_session_ids_.size());
-
-  if (cast_notification_provider_) {
-    media_message_center::RecordConcurrentCastNotificationCount(
-        cast_notification_provider_->GetItemCount());
+  if (cast_presentation_route_id.has_value()) {
+    // It is possible for a sender page to connect to two routes. For the
+    // sake of the Zenith dialog, only one notification is needed.
+    item_id = cast_presentation_route_id.value();
+  } else if (HasActiveControllableSessionForWebContents(contents)) {
+    item_id = GetActiveControllableSessionForWebContents(contents);
+  } else {
+    const global_media_controls::SupplementalDevicePickerItem&
+        supplemental_item =
+            supplemental_device_picker_producer_->GetOrCreateNotificationItem(
+                content::MediaSession::GetSourceId(profile_));
+    item_id = supplemental_item.id();
+    DCHECK(presentation_request_notification_producer_->GetWebContents() ==
+           contents);
   }
+
+  item_manager_->SetDialogDelegateForId(delegate, item_id);
 }
 
-bool MediaNotificationService::HasActiveNotifications() const {
-  return !active_controllable_session_ids_.empty();
+bool MediaNotificationService::HasActiveNotificationsForWebContents(
+    content::WebContents* web_contents) const {
+  bool has_media_session =
+      HasActiveControllableSessionForWebContents(web_contents);
+  return HasCastNotificationsForWebContents(web_contents) || has_media_session;
 }
 
-bool MediaNotificationService::HasFrozenNotifications() const {
-  return !frozen_session_ids_.empty();
-}
-
-bool MediaNotificationService::HasOpenDialog() const {
-  return !!dialog_delegate_;
-}
-
-void MediaNotificationService::OnSessionBecameActive(const std::string& id) {
-  DCHECK(base::Contains(inactive_session_ids_, id));
-
-  auto it = sessions_.find(id);
-  DCHECK(it != sessions_.end());
-
-  inactive_session_ids_.erase(id);
-
-  if (it->second.item()->frozen())
-    frozen_session_ids_.insert(id);
-  else
-    active_controllable_session_ids_.insert(id);
-
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
-
-  // If there's a dialog currently open, then we should show the item in the
-  // dialog.
-  if (!dialog_delegate_)
-    return;
-
-  MediaNotificationContainerImpl* container =
-      dialog_delegate_->ShowMediaSession(id, it->second.item()->GetWeakPtr());
-
-  if (container) {
-    container->AddObserver(this);
-    observed_containers_[id] = container;
-  }
-}
-
-void MediaNotificationService::OnSessionBecameInactive(const std::string& id) {
-  // If this session is already marked inactive, then there's nothing to do.
-  if (base::Contains(inactive_session_ids_, id))
-    return;
-
-  inactive_session_ids_.insert(id);
-
-  HideNotification(id);
-}
-
-std::unique_ptr<
-    MediaNotificationDeviceProvider::GetOutputDevicesCallbackList::Subscription>
-MediaNotificationService::RegisterAudioOutputDeviceDescriptionsCallback(
-    MediaNotificationDeviceProvider::GetOutputDevicesCallback callback) {
-  if (!device_provider_)
-    device_provider_ = std::make_unique<MediaNotificationDeviceProviderImpl>(
-        content::CreateAudioSystemForAudioService());
-  return device_provider_->RegisterOutputDeviceDescriptionsCallback(
-      std::move(callback));
-}
-
-std::unique_ptr<base::RepeatingCallbackList<void(bool)>::Subscription>
-MediaNotificationService::RegisterIsAudioOutputDeviceSwitchingSupportedCallback(
-    const std::string& id,
-    base::RepeatingCallback<void(bool)> callback) {
-  auto it = sessions_.find(id);
-  DCHECK(it != sessions_.end());
-
-  return it->second.RegisterIsAudioDeviceSwitchingSupportedCallback(
-      std::move(callback));
+bool MediaNotificationService::HasLocalCastNotifications() const {
+  return cast_notification_producer_
+             ? cast_notification_producer_->HasLocalMediaRoute()
+             : false;
 }
 
 void MediaNotificationService::OnStartPresentationContextCreated(
     std::unique_ptr<media_router::StartPresentationContext> context) {
-  if (presentation_request_notification_provider_) {
-    presentation_request_notification_provider_
-        ->OnStartPresentationContextCreated(std::move(context));
+  auto* web_contents = content::WebContents::FromRenderFrameHost(
+      content::RenderFrameHost::FromID(
+          context->presentation_request().render_frame_host_id));
+  if (!web_contents) {
+    CancelRequest(std::move(context), "The web page is closed.");
+    return;
   }
+
+  // If there exists a cast notification associated with `web_contents`, delete
+  // `context` because users should not start a new presentation at this time.
+  if (HasCastNotificationsForWebContents(web_contents)) {
+    CancelRequest(std::move(context), "A presentation has already started.");
+  } else if (HasActiveControllableSessionForWebContents(web_contents)) {
+    // If there exists a media session notification and a tab mirroring session,
+    // both, associated with `web_contents`, delete `context` because users
+    // should not start a new presentation at this time.
+    if (HasTabMirroringSessionForWebContents(web_contents)) {
+      CancelRequest(std::move(context),
+                    "A tab mirroring session has already started.");
+      return;
+    }
+
+    // If there exists a media session notification associated with
+    // |web_contents|, hold onto the context for later use.
+    context_ = std::move(context);
+
+    // When a media session item is associated with PresentationRequest, we
+    // must show the origin associated with the request rather than that for
+    // the top frame.
+    std::string item_id =
+        GetActiveControllableSessionForWebContents(web_contents);
+    media_session_item_producer_->UpdateMediaItemSourceOrigin(
+        item_id, context_->presentation_request().frame_origin);
+#if BUILDFLAG(IS_CHROMEOS)
+    if (auto* provider = ash::MediaNotificationProvider::Get(); provider) {
+      provider->UpdateMediaItemSourceOrigin(
+          item_id, context_->presentation_request().frame_origin);
+    }
+#endif
+  } else if (presentation_request_notification_producer_) {
+    // If there do not exist active notifications, pass |context| to
+    // |presentation_request_notification_producer_| to create a dummy
+    // notification.
+    presentation_request_notification_producer_
+        ->OnStartPresentationContextCreated(std::move(context));
+  } else {
+    CancelRequest(std::move(context), "Unable to start presentation.");
+  }
+}
+
+void MediaNotificationService::GetDeviceListHostForSession(
+    const std::string& session_id,
+    mojo::PendingReceiver<mojom::DeviceListHost> host_receiver,
+    mojo::PendingRemote<mojom::DeviceListClient> client_remote) {
+  std::optional<std::string> remoting_session_id;
+  // `remoting_session_id` is used to construct the MediaRemotingCallback for
+  // CastDeviceListHost to request Media Remoting for a MediaSession. This is
+  // used for Media Remoting sessions started from the GMC dialog. However, when
+  // the dialog is opened for RemotePlayback#prompt() (when there is a matching
+  // presentation context), the Remote Playback API on the blink side handles
+  // sending the Media Remoting request and there's no need for requesting Media
+  // Remoting from MNS.
+  if (!HasPresentationContextForSession(session_id)) {
+    remoting_session_id = session_id;
+  }
+  CreateCastDeviceListHost(CreateCastDialogControllerForSession(session_id),
+                           std::move(host_receiver), std::move(client_remote),
+                           remoting_session_id);
+}
+
+void MediaNotificationService::GetDeviceListHostForPresentation(
+    mojo::PendingReceiver<mojom::DeviceListHost> host_receiver,
+    mojo::PendingRemote<mojom::DeviceListClient> client_remote) {
+  CreateCastDeviceListHost(CreateCastDialogControllerForPresentationRequest(),
+                           std::move(host_receiver), std::move(client_remote),
+                           std::nullopt);
+}
+
+void MediaNotificationService::SetDevicePickerProvider(
+    mojo::PendingRemote<global_media_controls::mojom::DevicePickerProvider>
+        provider_remote) {
+  presentation_request_notification_producer_->BindProvider(
+      std::move(provider_remote));
+}
+
+std::unique_ptr<media_router::CastDialogController>
+MediaNotificationService::CreateCastDialogControllerForSession(
+    const std::string& id) {
+  auto* web_contents = content::MediaSession::GetWebContentsFromRequestId(id);
+  if (!web_contents) {
+    return nullptr;
+  }
+
+  if (HasPresentationContextForSession(id)) {
+    return media_router::MediaRouterUI::CreateWithStartPresentationContext(
+        web_contents, std::move(context_));
+  }
+
+  auto remote_playback_metadata =
+      media_session_item_producer_->GetRemotePlaybackMetadataFromItem(id);
+  if (ShouldInitializeWithRemotePlaybackSource(
+          web_contents, remote_playback_metadata.Clone())) {
+    return media_router::MediaRouterUI::CreateWithMediaSessionRemotePlayback(
+        web_contents,
+        media::remoting::ParseVideoCodec(remote_playback_metadata->video_codec),
+        media::remoting::ParseAudioCodec(
+            remote_playback_metadata->audio_codec));
+  }
+
+  return media_router::MediaRouterUI::CreateWithDefaultMediaSource(
+      web_contents);
+}
+
+std::unique_ptr<media_router::CastDialogController>
+MediaNotificationService::CreateCastDialogControllerForPresentationRequest() {
+  auto* web_contents =
+      presentation_request_notification_producer_->GetWebContents();
+  if (!web_contents) {
+    return nullptr;
+  }
+  if (!presentation_request_notification_producer_->GetNotificationItem()
+           ->is_default_presentation_request()) {
+    return media_router::MediaRouterUI::CreateWithStartPresentationContext(
+        web_contents,
+        presentation_request_notification_producer_->GetNotificationItem()
+            ->PassContext());
+  }
+  return media_router::MediaRouterUI::CreateWithDefaultMediaSource(
+      web_contents);
+}
+
+void MediaNotificationService::CreateCastDeviceListHost(
+    std::unique_ptr<media_router::CastDialogController> dialog_controller,
+    mojo::PendingReceiver<mojom::DeviceListHost> host_pending_receiver,
+    mojo::PendingRemote<mojom::DeviceListClient> client_remote,
+    std::optional<std::string> remoting_session_id) {
+  if (!dialog_controller) {
+    // We discard the PendingReceiver/Remote here, and if they have disconnect
+    // handlers set, those get called.
+    return;
+  }
+  auto media_remoting_callback_ =
+      remoting_session_id.has_value()
+          ? base::BindRepeating(
+                &MediaNotificationService::OnMediaRemotingRequested,
+                weak_ptr_factory_.GetWeakPtr(), remoting_session_id.value())
+          : base::DoNothing();
+  auto on_sinks_discovered_callback =
+      remoting_session_id.has_value()
+          ? base::BindRepeating(&MediaNotificationService::OnSinksDiscovered,
+                                weak_ptr_factory_.GetWeakPtr(),
+                                remoting_session_id.value())
+          : base::DoNothing();
+  auto host = std::make_unique<CastDeviceListHost>(
+      std::move(dialog_controller), std::move(client_remote),
+      std::move(media_remoting_callback_),
+      base::BindRepeating(&global_media_controls::MediaItemManager::HideDialog,
+                          item_manager_->GetWeakPtr()),
+      std::move(on_sinks_discovered_callback));
+  int host_id = host->id();
+  mojo::SelfOwnedReceiverRef<global_media_controls::mojom::DeviceListHost>
+      host_receiver = mojo::MakeSelfOwnedReceiver(
+          std::move(host), std::move(host_pending_receiver));
+  host_receiver->set_connection_error_handler(
+      base::BindOnce(&MediaNotificationService::RemoveDeviceListHost,
+                     weak_ptr_factory_.GetWeakPtr(), host_id));
+  host_receivers_.emplace(host_id, std::move(host_receiver));
+}
+
+bool MediaNotificationService::HasPresentationContextForSession(
+    const std::string& session_id) {
+  if (!context_) {
+    return false;
+  }
+  auto* initiator_rfh = content::RenderFrameHost::FromID(
+      context_->presentation_request().render_frame_host_id);
+  if (!initiator_rfh || !initiator_rfh->IsActive()) {
+    context_.reset();
+    return false;
+  }
+  auto* web_contents =
+      content::MediaSession::GetWebContentsFromRequestId(session_id);
+  return web_contents && content::WebContents::FromRenderFrameHost(
+                             initiator_rfh) == web_contents;
 }
 
 void MediaNotificationService::set_device_provider_for_testing(
@@ -791,63 +616,84 @@ void MediaNotificationService::set_device_provider_for_testing(
   device_provider_ = std::move(device_provider);
 }
 
-std::unique_ptr<media_router::CastDialogController>
-MediaNotificationService::CreateCastDialogControllerForSession(
-    const std::string& session_id) {
-  auto it = sessions_.find(session_id);
-  if (it != sessions_.end()) {
-    auto ui = std::make_unique<media_router::MediaRouterUI>(
-        it->second.web_contents());
-    ui->InitWithDefaultMediaSource();
-    return ui;
-  }
-  return nullptr;
+bool MediaNotificationService::HasCastNotificationsForWebContents(
+    content::WebContents* web_contents) const {
+  return !media_router::WebContentsPresentationManager::Get(web_contents)
+              ->GetMediaRoutes()
+              .empty();
 }
 
-void MediaNotificationService::OnItemUnfrozen(const std::string& id) {
-  frozen_session_ids_.erase(id);
-
-  if (!base::Contains(dragged_out_session_ids_, id))
-    active_controllable_session_ids_.insert(id);
-
-  for (auto& observer : observers_)
-    observer.OnNotificationListChanged();
-}
-
-void MediaNotificationService::OnReceivedAudioFocusRequests(
-    std::vector<media_session::mojom::AudioFocusRequestStatePtr> sessions) {
-  for (auto& session : sessions)
-    OnFocusGained(std::move(session));
-}
-
-base::WeakPtr<media_message_center::MediaNotificationItem>
-MediaNotificationService::GetNotificationItem(const std::string& id) {
-  Session* session = GetSession(id);
-  if (session)
-    return session->item()->GetWeakPtr();
-  return GetNonSessionNotificationItem(id);
-}
-
-MediaNotificationService::Session* MediaNotificationService::GetSession(
-    const std::string& id) {
-  auto it = sessions_.find(id);
-  return it == sessions_.end() ? nullptr : &it->second;
-}
-
-base::WeakPtr<media_message_center::MediaNotificationItem>
-MediaNotificationService::GetNonSessionNotificationItem(const std::string& id) {
-  if (cast_notification_provider_) {
-    auto item = cast_notification_provider_->GetNotificationItem(id);
-    if (item)
-      return item;
+bool MediaNotificationService::HasTabMirroringSessionForWebContents(
+    content::WebContents* web_contents) const {
+  if (!base::FeatureList::IsEnabled(
+          media_router::kFallbackToAudioTabMirroring)) {
+    return false;
   }
 
-  if (presentation_request_notification_provider_) {
-    auto item =
-        presentation_request_notification_provider_->GetNotificationItem(id);
-    if (item)
-      return item;
+  // Return true if there exists a tab mirroring session associated with
+  // `web_contents`.
+  const int item_tab_id =
+      sessions::SessionTabHelper::IdForTab(web_contents).id();
+  for (const auto& route :
+       media_router::MediaRouterFactory::GetApiForBrowserContext(
+           web_contents->GetBrowserContext())
+           ->GetCurrentRoutes()) {
+    media_router::MediaSource media_source = route.media_source();
+    if (media_source.IsTabMirroringSource() &&
+        media_source.TabId().has_value() &&
+        media_source.TabId().value() == item_tab_id) {
+      return true;
+    }
   }
+  return false;
+}
 
-  return nullptr;
+bool MediaNotificationService::HasActiveControllableSessionForWebContents(
+    content::WebContents* web_contents) const {
+  DCHECK(web_contents);
+  auto item_ids = media_session_item_producer_->GetActiveControllableItemIds();
+  return std::ranges::any_of(item_ids, [web_contents](const auto& item_id) {
+    return web_contents ==
+           content::MediaSession::GetWebContentsFromRequestId(item_id);
+  });
+}
+
+std::string
+MediaNotificationService::GetActiveControllableSessionForWebContents(
+    content::WebContents* web_contents) const {
+  DCHECK(web_contents);
+  for (const auto& item_id :
+       media_session_item_producer_->GetActiveControllableItemIds()) {
+    if (web_contents ==
+        content::MediaSession::GetWebContentsFromRequestId(item_id)) {
+      return item_id;
+    }
+  }
+  return "";
+}
+
+void MediaNotificationService::RemoveDeviceListHost(int host_id) {
+  // If shutdown has started, then we may currently be iterating through
+  // `host_receivers_` so we should not erase from it. `host_receivers_` will
+  // get destroyed soon anyways.
+  if (!shutdown_has_started_) {
+    host_receivers_.erase(host_id);
+  }
+}
+
+bool MediaNotificationService::IsIdBlocked(
+    const std::string& request_id) const {
+  return glic::IsMediaRequestFromGlic(profile_, request_id);
+}
+
+global_media_controls::MediaItemManager* MediaNotificationService::
+    GetMediaItemManagerForSupplementalDevicePickerProducer() {
+#if BUILDFLAG(IS_CHROMEOS)
+  auto* media_notification_provider = ash::MediaNotificationProvider::Get();
+  return media_notification_provider
+             ? media_notification_provider->GetMediaItemManager()
+             : nullptr;
+#else
+  return item_manager_.get();
+#endif
 }

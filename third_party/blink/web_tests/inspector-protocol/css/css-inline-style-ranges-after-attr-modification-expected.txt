@@ -3,7 +3,7 @@ Verify inline style reports proper ranges after attr modification
 {
     cssProperties : [
     ]
-    cssText : 
+    cssText :
     range : {
         endColumn : 0
         endLine : 0
@@ -28,6 +28,10 @@ Verify inline style reports proper ranges after attr modification
                 startLine : 0
             }
             text : color: blue;
+            value : blue
+        }
+        [1] : {
+            name : color
             value : blue
         }
     ]

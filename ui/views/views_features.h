@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,18 +9,16 @@
 #include "build/build_config.h"
 #include "ui/views/views_export.h"
 
-namespace views {
-namespace features {
+namespace views::features {
 
 // Please keep alphabetized.
+VIEWS_EXPORT BASE_DECLARE_FEATURE(kAllowWindowCaptureExclusionInRemoteSessions);
+VIEWS_EXPORT BASE_DECLARE_FEATURE(kApplyInitialUrlToWebContents);
+VIEWS_EXPORT BASE_DECLARE_FEATURE(kDeferHWNDMessageHandlerDestruction);
+VIEWS_EXPORT BASE_DECLARE_FEATURE(kEnableInputProtection);
+VIEWS_EXPORT BASE_DECLARE_FEATURE(kEnableTouchDragCursorSync);
+VIEWS_EXPORT BASE_DECLARE_FEATURE(kKeyboardAccessibleTooltipInViews);
 
-VIEWS_EXPORT extern const base::Feature kEnableMDRoundedCornersOnDialogs;
-VIEWS_EXPORT extern const base::Feature kEnablePlatformHighContrastInkDrop;
-VIEWS_EXPORT extern const base::Feature kEnableViewPaintOptimization;
-VIEWS_EXPORT extern const base::Feature kTextfieldFocusOnTapUp;
-VIEWS_EXPORT extern const base::Feature kEnableNewBadgeOnMenuItems;
-
-}  // namespace features
-}  // namespace views
+}  // namespace views::features
 
 #endif  // UI_VIEWS_VIEWS_FEATURES_H_

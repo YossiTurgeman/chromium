@@ -1,11 +1,16 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_EXTENSIONS_SETTINGS_OVERRIDDEN_DIALOG_CONTROLLER_H_
 #define CHROME_BROWSER_UI_EXTENSIONS_SETTINGS_OVERRIDDEN_DIALOG_CONTROLLER_H_
 
-#include "base/strings/string16.h"
+#include <optional>
+#include <string>
+
+#include "base/memory/raw_ptr.h"
+#include "ui/base/models/image_model.h"
+#include "ui/gfx/image/image.h"
 
 namespace gfx {
 struct VectorIcon;
@@ -16,15 +21,42 @@ struct VectorIcon;
 // the result of the dialog (i.e., the user input).
 class SettingsOverriddenDialogController {
  public:
+  // Describes the visual elements (texts, icon) of a selectable option in the
+  // dialog.
+  struct SettingOption {
+    // The primary text of the option.
+    std::u16string text;
+
+    // Additional subtext describing the option.
+    std::u16string description;
+
+    // An icon pertaining to the option.
+    ui::ImageModel image;
+  };
+
   // A struct describing the contents to be displayed in the dialog.
   struct ShowParams {
-    base::string16 dialog_title;
-    base::string16 message;
+    ShowParams();
+    ~ShowParams();
+    ShowParams(const SettingsOverriddenDialogController::ShowParams& params);
+    ShowParams(std::u16string dialog_title,
+               std::u16string dialog_message,
+               const gfx::VectorIcon* icon);
+
+    std::u16string dialog_title;
+    std::u16string message;
 
     // The icon to display, if any. If non-null, the VectorIcon should have
     // all its colors fully specified; otherwise a placehold grey color will
     // be used.
-    const gfx::VectorIcon* icon = nullptr;
+    raw_ptr<const gfx::VectorIcon> icon = nullptr;
+
+    // If present, the dialog will present a radio-button-based choice as to
+    // whether to use the new setting or previous, rather than a
+    // keep-or-go-back presentation. The dialog will issue the same dialog
+    // result, either way.
+    std::optional<SettingOption> previous_setting;
+    std::optional<SettingOption> new_setting;
   };
 
   // The result (i.e., user input) from the dialog being shown.

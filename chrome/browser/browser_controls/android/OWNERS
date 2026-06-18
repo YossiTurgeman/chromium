@@ -3,5 +3,8 @@ file://chrome/android/OWNERS
 jinsukkim@chromium.org
 mdjones@chromium.org
 twellington@chromium.org
+peilinwang@google.com
 
-# COMPONENT: UI>Browser>Mobile
+per-file BottomControlsStacker*=clhager@google.com
+per-file BottomControlsLayer.java=clhager@google.com
+

@@ -1,17 +1,21 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_PUBLIC_COMMON_INPUT_WEB_GESTURE_EVENT_H_
 #define THIRD_PARTY_BLINK_PUBLIC_COMMON_INPUT_WEB_GESTURE_EVENT_H_
 
+#include <memory>
+
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
 #include "cc/paint/element_id.h"
 #include "third_party/blink/public/common/input/web_gesture_device.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
 #include "third_party/blink/public/common/input/web_pointer_properties.h"
 #include "third_party/blink/public/mojom/input/gesture_event.mojom-shared.h"
+#include "ui/events/types/scroll_input_type.h"
 #include "ui/events/types/scroll_types.h"
 #include "ui/gfx/geometry/point_f.h"
 #include "ui/gfx/geometry/size_f.h"
@@ -24,19 +28,22 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
  public:
   using InertialPhaseState = mojom::InertialPhaseState;
 
-  bool is_source_touch_event_set_non_blocking = false;
+  bool is_source_touch_event_set_blocking = false;
 
   // The pointer type for the first touch point in the gesture.
   WebPointerProperties::PointerType primary_pointer_type =
       WebPointerProperties::PointerType::kUnknown;
+  // The unique_touch_event id of the first touch in the gesture sequence
+  uint32_t primary_unique_touch_event_id = 0;
 
   // If the WebGestureEvent has source_device ==
   // mojom::GestureDevice::kTouchscreen, this field contains the unique
   // identifier for the touch event that released this event at
   // TouchDispositionGestureFilter. If the WebGestureEvents was not released
-  // through a touch event (e.g. timer-released gesture events or gesture events
-  // with source_device != mojom::GestureDevice::kTouchscreen), the field
-  // contains 0. See crbug.com/618738.
+  // through a touch event (e.g. synthesized gesture events and pinches
+  // or gesture events with source_device !=
+  // mojom::GestureDevice::kTouchscreen), the field contains 0. See
+  // crbug.com/618738.
   uint32_t unique_touch_event_id = 0;
 
   union {
@@ -52,6 +59,7 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
     } tap;
 
     struct {
+      int tap_down_count;
       float width;
       float height;
     } tap_down;
@@ -61,7 +69,7 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       float height;
     } show_press;
 
-    // This is used for both GestureLongPress and GestureLongTap.
+    // This is used for GestureShortPress , GestureLongPress and GestureLongTap.
     struct {
       float width;
       float height;
@@ -81,8 +89,11 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       // this is used in scroll unification to perform a main thread hit test,
       // in which case |main_thread_hit_tested| is true, it is also used in
       // other cases like scroll events reinjected for scrollbar scrolling.
-      cc::ElementIdType scrollable_area_element_id;
-      // Initial motion that triggered the scroll.
+      // Using `cc::ElementId::InternalValue` because  `cc::ElementId` has a
+      // non-trivial constructor and is not allowed in a union.
+      cc::ElementId::InternalValue scrollable_area_element_id;
+      // Initial motion that triggered the scroll. See deltas in ScrollUpdate
+      // for how to interpret these.
       float delta_x_hint;
       float delta_y_hint;
       // number of pointers down.
@@ -96,27 +107,34 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       // If true, this event will skip hit testing to find a scroll
       // target and instead just scroll the viewport.
       bool target_viewport;
-      // True if this event is generated from a wheel event with synthetic
-      // phase.
+      // True if this event is generated from a mousewheel or scrollbar.
+      // Synthetic GSB(s) are ignored by the blink::ElasticOverscrollController.
       bool synthetic;
-      // If true, this event has been hit tested by the main thread and the
+      // If true, this event will be used for cursor control instead of
+      // scrolling. the entire scroll sequence will be used for cursor control.
+      bool cursor_control;
+      // If nonzero, this event has been hit tested by the main thread and the
       // result is stored in scrollable_area_element_id. Used only in scroll
       // unification when the event is sent back the the compositor for a
       // second time after the main thread hit test is complete.
-      bool main_thread_hit_tested;
+      uint32_t main_thread_hit_tested_reasons;
     } scroll_begin;
 
     struct {
+      // These values run positive in the up and left direction of scrolling.
+      // Notably, this is the reverse as used in Blink, CC, and WebAPIs.
       float delta_x;
       float delta_y;
-      float velocity_x;
-      float velocity_y;
       InertialPhaseState inertial_phase;
       // Default initialized to kScrollByPrecisePixel.
       ui::ScrollGranularity delta_units;
     } scroll_update;
 
     struct {
+      // The scroll delta that is compensated for latency i.e. the scroll delta
+      // that was not sent to the renderer as scroll updates.
+      float delta_x_compensated;
+      float delta_y_compensated;
       // The original delta units the ScrollBegin and ScrollUpdates
       // were sent as.
       ui::ScrollGranularity delta_units;
@@ -195,11 +213,21 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       int modifiers,
       base::TimeTicks time_stamp,
       mojom::GestureDevice device = mojom::GestureDevice::kUninitialized)
-      : WebInputEvent(type, modifiers, time_stamp), source_device_(device) {
-    memset(&data, 0, sizeof(data));
+      : WebInputEvent(type,
+                      Type::kGestureTypeFirst,
+                      Type::kGestureTypeLast,
+                      modifiers,
+                      time_stamp),
+        source_device_(device) {
+    UNSAFE_TODO(memset(&data, 0, sizeof(data)));
   }
 
-  WebGestureEvent() { memset(&data, 0, sizeof(data)); }
+  WebGestureEvent()
+      : WebInputEvent(Type::kUndefined,
+                      Type::kGestureTypeFirst,
+                      Type::kGestureTypeLast) {
+    UNSAFE_TODO(memset(&data, 0, sizeof(data)));
+  }
 
   const gfx::PointF& PositionInWidget() const { return position_in_widget_; }
   const gfx::PointF& PositionInScreen() const { return position_in_screen_; }
@@ -207,7 +235,10 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
   std::unique_ptr<WebInputEvent> Clone() const override;
   bool CanCoalesce(const WebInputEvent& event) const override;
   void Coalesce(const WebInputEvent& event) override;
-  base::Optional<ui::ScrollInputType> GetScrollInputType() const override;
+
+  // Returns the input type of a scroll event. Should not be called on
+  // non-scroll events.
+  ui::ScrollInputType GetScrollInputType() const;
 
   void SetPositionInWidget(const gfx::PointF& point) {
     position_in_widget_ = point;
@@ -227,11 +258,9 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
   InertialPhaseState InertialPhase() const;
   bool Synthetic() const;
 
-  float VelocityX() const;
-  float VelocityY() const;
-
   gfx::SizeF TapAreaInRootFrame() const;
   int TapCount() const;
+  int TapDownCount() const;
 
   void ApplyTouchAdjustment(const gfx::PointF& root_frame_coords);
 
@@ -256,12 +285,13 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       case Type::kGestureShowPress:
       case Type::kGestureTapCancel:
       case Type::kGestureTwoFingerTap:
+      case Type::kGestureShortPress:
       case Type::kGestureLongPress:
       case Type::kGestureLongTap:
+      case Type::kGestureDoubleTap:
         return false;
       default:
         NOTREACHED();
-        return false;
     }
   }
 
@@ -299,7 +329,6 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
         return data.tap.needs_wheel_event;
       default:
         NOTREACHED();
-        return false;
     }
   }
 
@@ -326,10 +355,11 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
   // Coalesce the |new_event| with |last_event| and optionally
   // |second_last_event|. Scroll and pinch are two separate gestures so they
   // would need separate events that is why this method returns a pair.
-  static std::pair<WebGestureEvent, WebGestureEvent> CoalesceScrollAndPinch(
-      const WebGestureEvent* second_last_event,
-      const WebGestureEvent& last_event,
-      const WebGestureEvent& new_event);
+  static std::pair<std::unique_ptr<WebGestureEvent>,
+                   std::unique_ptr<WebGestureEvent>>
+  CoalesceScrollAndPinch(const WebGestureEvent* second_last_event,
+                         const WebGestureEvent& last_event,
+                         const WebGestureEvent& new_event);
 
   // Whether |event_in_queue| is a touchscreen GesturePinchUpdate or
   // GestureScrollUpdate and has the same modifiers/source as the new
@@ -338,16 +368,15 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
   static bool IsCompatibleScrollorPinch(const WebGestureEvent& new_event,
                                         const WebGestureEvent& event_in_queue);
 
-  // Generate a scroll gesture event (begin, update, or end), based on the
-  // parameters passed in. Populates the data field of the created
-  // WebGestureEvent based on the type.
-  static std::unique_ptr<blink::WebGestureEvent> GenerateInjectedScrollGesture(
-      WebInputEvent::Type type,
-      base::TimeTicks timestamp,
-      WebGestureDevice device,
-      gfx::PointF position_in_widget,
-      gfx::Vector2dF scroll_delta,
-      ui::ScrollGranularity granularity);
+  // For a scrollbar gesture, generate a scroll gesture event (begin, update,
+  // or end), based on the parameters passed in. Populates the data field of
+  // the created WebGestureEvent based on the type.
+  static std::unique_ptr<blink::WebGestureEvent>
+  GenerateInjectedScrollbarGestureScroll(WebInputEvent::Type type,
+                                         base::TimeTicks timestamp,
+                                         gfx::PointF position_in_widget,
+                                         gfx::Vector2dF scroll_delta,
+                                         ui::ScrollGranularity granularity);
 };
 
 }  // namespace blink

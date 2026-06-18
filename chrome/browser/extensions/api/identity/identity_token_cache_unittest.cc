@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,10 @@
 #include <string>
 
 #include "base/test/task_environment.h"
+#include "extensions/buildflags/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -23,17 +26,15 @@ class IdentityTokenCacheTest : public testing::Test {
   void SetAccessToken(const std::string& ext_id,
                       const std::string& token_string,
                       const std::set<std::string>& scopes) {
-    SetAccessTokenInternal(ext_id, token_string, scopes,
-                           base::TimeDelta::FromSeconds(3600));
+    SetAccessTokenInternal(ext_id, token_string, scopes, base::Seconds(3600));
   }
 
   void SetExpiredAccessToken(const std::string& ext_id,
                              const std::string& token_string,
                              const std::set<std::string>& scopes) {
     // Token must not be expired at the insertion moment.
-    SetAccessTokenInternal(ext_id, token_string, scopes,
-                           base::TimeDelta::FromMilliseconds(1));
-    task_environment_.FastForwardBy(base::TimeDelta::FromMilliseconds(2));
+    SetAccessTokenInternal(ext_id, token_string, scopes, base::Milliseconds(1));
+    task_environment_.FastForwardBy(base::Milliseconds(2));
   }
 
   void SetRemoteConsentApprovedToken(const std::string& ext_id,
@@ -83,7 +84,7 @@ TEST_F(IdentityTokenCacheTest, AccessTokenCacheHit) {
 }
 
 // The cache should return NOTFOUND status when a token expires.
-// Regression test for https://crbug.com/1127187.
+// Regression test for https://crbug.com/40718910.
 TEST_F(IdentityTokenCacheTest, ExpiredAccessTokenCacheHit) {
   std::string token_string = "token";
   std::set<std::string> scopes = {"foo", "bar"};
@@ -211,6 +212,32 @@ TEST_F(IdentityTokenCacheTest, EraseAllTokens) {
             GetToken(ext_1, scopes_1).status());
   EXPECT_EQ(IdentityTokenCacheValue::CACHE_STATUS_NOTFOUND,
             GetToken(ext_2, scopes_2).status());
+}
+
+TEST_F(IdentityTokenCacheTest, EraseAllTokensForExtension) {
+  std::string token_string = "token";
+  std::set<std::string> scopes_1 = {"foo", "bar"};
+  SetAccessToken(kDefaultExtensionId, token_string, scopes_1);
+
+  std::string remote_consent = "approved";
+  std::set<std::string> scopes_2 = {"foo", "foobar"};
+  SetRemoteConsentApprovedToken(kDefaultExtensionId, remote_consent, scopes_2);
+
+  std::string unrelated_extension = "ext_unrelated";
+  SetAccessToken(unrelated_extension, token_string, scopes_1);
+  SetRemoteConsentApprovedToken(unrelated_extension, remote_consent, scopes_2);
+
+  cache().EraseAllTokensForExtension(kDefaultExtensionId);
+
+  EXPECT_EQ(IdentityTokenCacheValue::CACHE_STATUS_NOTFOUND,
+            GetToken(kDefaultExtensionId, scopes_1).status());
+  EXPECT_EQ(IdentityTokenCacheValue::CACHE_STATUS_NOTFOUND,
+            GetToken(kDefaultExtensionId, scopes_2).status());
+
+  EXPECT_EQ(IdentityTokenCacheValue::CACHE_STATUS_TOKEN,
+            GetToken(unrelated_extension, scopes_1).status());
+  EXPECT_EQ(IdentityTokenCacheValue::CACHE_STATUS_REMOTE_CONSENT_APPROVED,
+            GetToken(unrelated_extension, scopes_2).status());
 }
 
 TEST_F(IdentityTokenCacheTest, GetAccessTokens) {

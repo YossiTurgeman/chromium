@@ -1,46 +1,73 @@
-#!/usr/bin/python
-# Copyright 2016 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import argparse
+import configparser
 import convert_gn_xcodeproj
 import errno
+import io
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
-try:
-  import configparser
-except ImportError:
-  import ConfigParser as configparser
 
-try:
-  import StringIO as io
-except ImportError:
-  import io
+SUPPORTED_TARGETS = ('appletvos', 'appletvsimulator', 'iphoneos',
+                     'iphonesimulator', 'maccatalyst')
+SUPPORTED_CONFIGS = ('Debug', 'Release', 'Profile', 'Official')
+ADDITIONAL_FILE_ROOTS = ('//ios', '//ios_internal', '//docs', '//components')
+ADDITIONAL_FILES_PATTERNS = ('*.md', '*_google_chrome_*.grd', 'OWNERS', 'DEPS')
+
+# Pattern matching lines from ~/.lldbinit that must not be copied to the
+# generated .lldbinit file. They match what the user were told to add to
+# their global ~/.lldbinit file before setup-gn.py was updated to generate
+# a project specific file and thus must not be copied as they would cause
+# the settings to be overwritten.
+LLDBINIT_SKIP_PATTERNS = (
+    re.compile('^script sys.path\\[:0\\] = \\[\'.*/src/tools/lldb\'\\]$'),
+    re.compile('^script import lldbinit$'),
+    re.compile('^settings append target.source-map .* /google/src/.*$'),
+)
 
 
-SUPPORTED_TARGETS = ('iphoneos', 'iphonesimulator')
-SUPPORTED_CONFIGS = ('Debug', 'Release', 'Profile', 'Official', 'Coverage')
+def HostCpuArch():
+  '''Returns the arch of the host cpu for GN.'''
+  HOST_CPU_ARCH = {
+    'arm64': '"arm64"',
+    'x86_64': '"x64"',
+  }
+  return HOST_CPU_ARCH[platform.machine()]
 
 
-class ConfigParserWithStringInterpolation(configparser.SafeConfigParser):
+class ConfigParserWithStringInterpolation(configparser.ConfigParser):
 
   '''A .ini file parser that supports strings and environment variables.'''
 
   ENV_VAR_PATTERN = re.compile(r'\$([A-Za-z0-9_]+)')
 
   def values(self, section):
-    return map(
-        lambda kv: self._UnquoteString(self._ExpandEnvVar(kv[1])),
-        configparser.ConfigParser.items(self, section))
+    return filter(
+        lambda val: val != '',
+        map(lambda kv: self._UnquoteString(self._ExpandEnvVar(kv[1])),
+            configparser.ConfigParser.items(self, section)))
 
-  def getstring(self, section, option):
-    return self._UnquoteString(self._ExpandEnvVar(self.get(section, option)))
+  def getstring(self, section, option, fallback=''):
+    try:
+      raw_value = self.get(section, option)
+    except configparser.NoOptionError:
+      return fallback
+    return self._UnquoteString(self._ExpandEnvVar(raw_value))
+
+  def getboolean(self, section, option, fallback=False):
+    try:
+      return super().getboolean(section, option)
+    except configparser.NoOptionError:
+      return fallback
 
   def _UnquoteString(self, string):
     if not string or string[0] != '"' or string[-1] != '"':
@@ -55,6 +82,7 @@ class ConfigParserWithStringInterpolation(configparser.SafeConfigParser):
     prefix, suffix = value[:begin], self._ExpandEnvVar(value[end:])
     return prefix + os.environ.get(name, '') + suffix
 
+
 class GnGenerator(object):
 
   '''Holds configuration for a build and method to generate gn default files.'''
@@ -62,14 +90,27 @@ class GnGenerator(object):
   FAT_BUILD_DEFAULT_ARCH = '64-bit'
 
   TARGET_CPU_VALUES = {
-    'iphoneos': {
-      '32-bit': '"arm"',
-      '64-bit': '"arm64"',
-    },
-    'iphonesimulator': {
-      '32-bit': '"x86"',
-      '64-bit': '"x64"',
-    }
+    'appletvos': '"arm64"',
+    'appletvsimulator': HostCpuArch(),
+    'iphoneos': '"arm64"',
+    'iphonesimulator': HostCpuArch(),
+    'maccatalyst': HostCpuArch(),
+  }
+
+  TARGET_ENVIRONMENT_VALUES = {
+    'appletvos': '"device"',
+    'appletvsimulator': '"simulator"',
+    'iphoneos': '"device"',
+    'iphonesimulator': '"simulator"',
+    'maccatalyst': '"catalyst"'
+  }
+
+  TARGET_PLATFORM_VALUES = {
+    'appletvos': '"tvos"',
+    'appletvsimulator': '"tvos"',
+    'iphoneos': '"iphoneos"',
+    'iphonesimulator': '"iphoneos"',
+    'maccatalyst': '"iphoneos"'
   }
 
   def __init__(self, settings, config, target):
@@ -88,37 +129,42 @@ class GnGenerator(object):
     """
     args = []
 
-    # build/config/ios/ios_sdk.gni asserts that goma is not enabled when
-    # building Official, so ignore the value of goma.enabled when creating
-    # args.gn for Official.
-    if self._config != 'Official':
-      if self._settings.getboolean('goma', 'enabled'):
-        args.append(('use_goma', True))
-        goma_dir = self._settings.getstring('goma', 'install')
-        if goma_dir:
-          args.append(('goma_dir', '"%s"' % os.path.expanduser(goma_dir)))
+    is_debug = self._config == 'Debug'
+    official = self._config == 'Official'
+    is_optim = self._config in ('Profile', 'Official')
 
-    args.append(('is_debug', self._config in ('Debug', 'Coverage')))
-    args.append(('enable_dsyms', self._config in ('Profile', 'Official')))
-    args.append(('enable_stripping', 'enable_dsyms'))
-    args.append(('is_official_build', self._config == 'Official'))
-    args.append(('is_chrome_branded', 'is_official_build'))
-    args.append(('use_xcode_clang', 'false'))
-    args.append(('use_clang_coverage', self._config == 'Coverage'))
-    args.append(('is_component_build', False))
+    args.append(('target_os', '"ios"'))
+    args.append(('is_debug', is_debug))
+    args.append(('enable_dsyms', is_optim))
+    args.append(('enable_stripping', is_optim))
+    args.append(('is_official_build', is_optim))
+    args.append(('is_chrome_branded', official))
 
     if os.environ.get('FORCE_MAC_TOOLCHAIN', '0') == '1':
       args.append(('use_system_xcode', False))
 
-    cpu_values = self.TARGET_CPU_VALUES[self._target]
-    build_arch = self._settings.getstring('build', 'arch')
-    if build_arch == 'fat':
-      target_cpu = cpu_values[self.FAT_BUILD_DEFAULT_ARCH]
-      args.append(('target_cpu', target_cpu))
-      args.append(('additional_target_cpus',
-          [cpu for cpu in cpu_values.itervalues() if cpu != target_cpu]))
-    else:
-      args.append(('target_cpu', cpu_values[build_arch]))
+    if os.environ.get('ENABLE_SWIFT_CXX_INTEROP', '0') == '1':
+      args.append(('enable_swift_cxx_interop', True))
+
+    target_cpu = self.TARGET_CPU_VALUES[self._target];
+    if (self._target == 'iphoneos' and
+        self._settings.getboolean('build', 'use_arm64e')):
+      target_cpu = '"arm64e"'
+
+    args.append(('target_cpu', target_cpu))
+    args.append(
+        ('target_environment', self.TARGET_ENVIRONMENT_VALUES[self._target]))
+    args.append(('target_platform', self.TARGET_PLATFORM_VALUES[self._target]))
+
+    use_blink = self._settings.getboolean('gn_args', 'use_blink')
+
+    if self.TARGET_PLATFORM_VALUES[self._target] == '"tvos"' and not use_blink:
+      args.append(('use_blink', True))
+      use_blink = True
+
+    has_symbol_level = self._settings.has_option('gn_args', 'symbol_level')
+    if use_blink and is_optim and not has_symbol_level:
+      args.append(('symbol_level', 1))
 
     # Add user overrides after the other configurations so that they can
     # refer to them and override them.
@@ -126,30 +172,32 @@ class GnGenerator(object):
     return args
 
 
-  def Generate(self, gn_path, root_path, build_dir):
-    self.WriteArgsGn(build_dir)
-    subprocess.check_call(
-        self.GetGnCommand(gn_path, root_path, build_dir, True))
+  def Generate(self, gn_path, proj_name, root_path, build_dir):
+    self.WriteArgsGn(build_dir, xcode_project_name=proj_name)
+    subprocess.check_call(self.GetGnCommand(
+        gn_path, root_path, build_dir, xcode_project_name=proj_name))
 
   def CreateGnRules(self, gn_path, root_path, build_dir):
-    gn_command = self.GetGnCommand(gn_path, root_path, build_dir, False)
+    gn_command = self.GetGnCommand(gn_path, root_path, build_dir)
     self.WriteArgsGn(build_dir)
     self.WriteBuildNinja(gn_command, build_dir)
     self.WriteBuildNinjaDeps(build_dir)
 
-  def WriteArgsGn(self, build_dir):
+  def WriteArgsGn(self, build_dir, xcode_project_name=None):
     with open(os.path.join(build_dir, 'args.gn'), 'w') as stream:
       stream.write('# This file was generated by setup-gn.py. Do not edit\n')
       stream.write('# but instead use ~/.setup-gn or $repo/.setup-gn files\n')
       stream.write('# to configure settings.\n')
       stream.write('\n')
 
-      if self._settings.has_section('$imports$'):
-        for import_rule in self._settings.values('$imports$'):
-          stream.write('import("%s")\n' % import_rule)
-        stream.write('\n')
+      if self._target != 'maccatalyst':
+        if self._settings.has_section('$imports$'):
+          for import_rule in self._settings.values('$imports$'):
+            stream.write('import("%s")\n' % import_rule)
+          stream.write('\n')
 
       gn_args = self._GetGnArgs()
+
       for name, value in gn_args:
         if isinstance(value, bool):
           stream.write('%s = %s\n' % (name, str(value).lower()))
@@ -182,21 +230,35 @@ class GnGenerator(object):
       stream.write('  command = %s\n' % NinjaEscapeCommand(gn_command))
       stream.write('  description = Regenerating ninja files\n')
       stream.write('\n')
-      stream.write('build build.ninja: gn\n')
+      stream.write('build build.ninja.stamp: gn\n')
       stream.write('  generator = 1\n')
       stream.write('  depfile = build.ninja.d\n')
+      stream.write('\n')
+      stream.write('build build.ninja: phony build.ninja.stamp\n')
+      stream.write('  generator = 1\n')
+      stream.write('\n')
 
   def WriteBuildNinjaDeps(self, build_dir):
     with open(os.path.join(build_dir, 'build.ninja.d'), 'w') as stream:
       stream.write('build.ninja: nonexistant_file.gn\n')
 
-  def GetGnCommand(self, gn_path, src_path, out_path, generate_xcode_project):
+  def GetGnCommand(self, gn_path, src_path, out_path, xcode_project_name=None):
     gn_command = [ gn_path, '--root=%s' % os.path.realpath(src_path), '-q' ]
-    if generate_xcode_project:
+    if xcode_project_name is not None:
       gn_command.append('--ide=xcode')
-      gn_command.append('--root-target=gn_all')
       gn_command.append('--ninja-executable=autoninja')
-      if self._settings.has_section('filters'):
+      gn_command.append('--xcode-build-system=new')
+      gn_command.append('--enumerate-files-with-git')
+      gn_command.append('--xcode-project=%s' % xcode_project_name)
+      gn_command.append('--xcode-additional-files-patterns=' +
+                        ';'.join(ADDITIONAL_FILES_PATTERNS))
+      gn_command.append(
+          '--xcode-additional-files-roots=' + ';'.join(ADDITIONAL_FILE_ROOTS))
+      gn_command.append('--xcode-configs=' + ';'.join(SUPPORTED_CONFIGS))
+      gn_command.append('--xcode-config-build-dir='
+                        '//out/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}')
+      use_blink = self._settings.getboolean('gn_args', 'use_blink')
+      if self._settings.has_section('filters') and not use_blink:
         target_filters = self._settings.values('filters')
         if target_filters:
           gn_command.append('--filters=%s' % ';'.join(target_filters))
@@ -235,23 +297,62 @@ def FindGn():
   return None
 
 
-def GenerateXcodeProject(gn_path, root_dir, out_dir, settings):
-  '''Convert GN generated Xcode project into multi-configuration Xcode
-  project.'''
-
-  temp_path = tempfile.mkdtemp(prefix=os.path.abspath(
-      os.path.join(out_dir, '_temp')))
+def GenerateXcodeProject(gn_path, root_dir, proj_name, out_dir, settings):
+  '''Generate Xcode project with Xcode and convert to multi-configurations.'''
+  prefix = os.path.abspath(os.path.join(out_dir, '_temp'))
+  temp_path = tempfile.mkdtemp(prefix=prefix)
   try:
     generator = GnGenerator(settings, 'Debug', 'iphonesimulator')
-    generator.Generate(gn_path, root_dir, temp_path)
+    generator.Generate(gn_path, proj_name, root_dir, temp_path)
     convert_gn_xcodeproj.ConvertGnXcodeProject(
         root_dir,
+        '%s.xcodeproj' % proj_name,
         os.path.join(temp_path),
         os.path.join(out_dir, 'build'),
         SUPPORTED_CONFIGS)
   finally:
     if os.path.exists(temp_path):
       shutil.rmtree(temp_path)
+
+def CreateLLDBInitFile(root_dir, out_dir, settings):
+  '''
+  Generate an .lldbinit file for the project that fixes the mapping of source files.
+  '''
+  absolute_root_dir = os.path.abspath(root_dir)
+  with open(os.path.join(out_dir, 'build', '.lldbinit'), 'w') as lldbinit:
+    lldbinit.write(f'settings set target.env-vars CHROMIUM_LLDBINIT_SOURCED=1\n')
+    lldbinit.write(f'settings set target.source-map ../.. {absolute_root_dir}\n')
+
+    workspace_name = settings.getstring(
+        'gn_args',
+        'ios_internal_citc_workspace_name')
+
+    if workspace_name != '':
+      username = os.environ['USER']
+      for shortname in ('googlemac', 'third_party', 'blaze-out'):
+        lldbinit.write('settings append target.source-map %s %s\n' % (
+            shortname,
+            '/google/src/cloud/%s/%s/google3/%s' % (
+                username, workspace_name, shortname)))
+
+    # Append the content of //ios/build/tools/lldbinit.defaults if it exists.
+    tools_dir = os.path.join(root_dir, 'ios', 'build', 'tools')
+    defaults_lldbinit_path = os.path.join(tools_dir, 'lldbinit.defaults')
+    if os.path.isfile(defaults_lldbinit_path):
+      with open(defaults_lldbinit_path) as defaults_lldbinit:
+        for line in defaults_lldbinit:
+          lldbinit.write(line)
+
+    # Append the content of ~/.lldbinit if it exists. Line that look like they
+    # are trying to configure source mapping are skipped as they probably date
+    # back from when setup-gn.py was not generating an .lldbinit file.
+    global_lldbinit_path = os.path.join(os.environ['HOME'], '.lldbinit')
+    if os.path.isfile(global_lldbinit_path):
+      with open(global_lldbinit_path) as global_lldbinit:
+        for line in global_lldbinit:
+          if any(pattern.match(line) for pattern in LLDBINIT_SKIP_PATTERNS):
+            continue
+          lldbinit.write(line)
 
 
 def GenerateGnBuildRules(gn_path, root_dir, out_dir, settings):
@@ -284,13 +385,30 @@ def Main(args):
   parser.add_argument(
       '--build-dir', default='out',
       help='path where the build should be created (default: %(default)s)')
+  parser.add_argument(
+      '--config-path', default=os.path.expanduser('~/.setup-gn'),
+      help='path to the user config file (default: %(default)s)')
+  parser.add_argument(
+      '--project-config-path', default=os.path.join(default_root, os.pardir,
+          '.setup-gn'),
+      help='path to the project config file (default: %(default)s)')
+  parser.add_argument(
+      '--system-config-path', default=os.path.splitext(__file__)[0] + '.config',
+      help='path to the default config file (default: %(default)s)')
+  parser.add_argument(
+      '--project-name', default='all', dest='proj_name',
+      help='name of the generated Xcode project (default: %(default)s)')
+  parser.add_argument(
+      '--no-xcode-project', action='store_true', default=False,
+      help='do not generate the build directory with Xcode project')
   args = parser.parse_args(args)
 
   # Load configuration (first global and then any user overrides).
   settings = ConfigParserWithStringInterpolation()
   settings.read([
-      os.path.splitext(__file__)[0] + '.config',
-      os.path.expanduser('~/.setup-gn'),
+      args.system_config_path,
+      args.config_path,
+      args.project_config_path,
   ])
 
   # Add private sections corresponding to --import argument.
@@ -321,7 +439,9 @@ def Main(args):
   if not os.path.isdir(out_dir):
     os.makedirs(out_dir)
 
-  GenerateXcodeProject(gn_path, args.root, out_dir, settings)
+  if not args.no_xcode_project:
+    GenerateXcodeProject(gn_path, args.root, args.proj_name, out_dir, settings)
+    CreateLLDBInitFile(args.root, out_dir, settings)
   GenerateGnBuildRules(gn_path, args.root, out_dir, settings)
 
 

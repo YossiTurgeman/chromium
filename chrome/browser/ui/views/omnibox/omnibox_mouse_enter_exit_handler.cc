@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,13 @@
 #include "ui/views/view.h"
 
 OmniboxMouseEnterExitHandler::OmniboxMouseEnterExitHandler(
-    base::Closure enter_exit_callback)
+    base::RepeatingClosure enter_exit_callback)
     : enter_exit_callback_(enter_exit_callback) {}
 
 OmniboxMouseEnterExitHandler::~OmniboxMouseEnterExitHandler() {
-  for (views::View* view : observed_views_)
+  for (views::View* view : observed_views_) {
     view->RemovePreTargetHandler(this);
+  }
 }
 
 void OmniboxMouseEnterExitHandler::ObserveMouseEnterExitOn(views::View* view) {
@@ -22,8 +23,8 @@ void OmniboxMouseEnterExitHandler::ObserveMouseEnterExitOn(views::View* view) {
 }
 
 void OmniboxMouseEnterExitHandler::OnMouseEvent(ui::MouseEvent* event) {
-  if (event->type() == ui::ET_MOUSE_ENTERED ||
-      event->type() == ui::ET_MOUSE_EXITED) {
+  if (event->type() == ui::EventType::kMouseEntered ||
+      event->type() == ui::EventType::kMouseExited) {
     enter_exit_callback_.Run();
   }
 }

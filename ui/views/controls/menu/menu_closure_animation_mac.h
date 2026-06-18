@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
 #include "ui/gfx/animation/animation.h"
@@ -32,9 +32,8 @@ class SubmenuView;
 // This class also supports animating a menu away without animating the
 // selection effect, which is achieved by passing nullptr for the item to
 // animate. In this case, the animation skips straight to step 3 above.
-class VIEWS_EXPORT MenuClosureAnimationMac
-    : public gfx::AnimationDelegate,
-      public base::SupportsWeakPtr<MenuClosureAnimationMac> {
+class VIEWS_EXPORT MenuClosureAnimationMac final
+    : public gfx::AnimationDelegate {
  public:
   // After this closure animation is done, |callback| is run to finish
   // dismissing the menu. If |item| is given, this will animate the item being
@@ -43,6 +42,10 @@ class VIEWS_EXPORT MenuClosureAnimationMac
   MenuClosureAnimationMac(MenuItemView* item,
                           SubmenuView* menu,
                           base::OnceClosure callback);
+
+  MenuClosureAnimationMac(const MenuClosureAnimationMac&) = delete;
+  MenuClosureAnimationMac& operator=(const MenuClosureAnimationMac&) = delete;
+
   ~MenuClosureAnimationMac() override;
 
   // Start the animation.
@@ -80,11 +83,10 @@ class VIEWS_EXPORT MenuClosureAnimationMac
   base::OnceClosure callback_;
   base::OneShotTimer timer_;
   std::unique_ptr<gfx::Animation> fade_animation_;
-  MenuItemView* item_;
-  SubmenuView* menu_;
-  AnimationStep step_;
-
-  DISALLOW_COPY_AND_ASSIGN(MenuClosureAnimationMac);
+  raw_ptr<MenuItemView> item_;
+  raw_ptr<SubmenuView> menu_;
+  AnimationStep step_ = AnimationStep::kStart;
+  base::WeakPtrFactory<MenuClosureAnimationMac> weak_ptr_factory_{this};
 };
 
 }  // namespace views

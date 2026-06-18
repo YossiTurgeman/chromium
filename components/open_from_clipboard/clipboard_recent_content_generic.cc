@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,20 @@
 
 #include <string>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/strings/string_util.h"
-#include "third_party/skia/include/core/SkBitmap.h"
+#include "build/build_config.h"
 #include "ui/base/clipboard/clipboard.h"
+#include "ui/base/data_transfer_policy/data_transfer_endpoint.h"
+#include "url/url_util.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "ui/base/clipboard/clipboard_android.h"
+#endif
 
 namespace {
 // Schemes appropriate for suggestion by ClipboardRecentContent.
-const char* kAuthorizedSchemes[] = {
+constexpr const char* kAuthorizedSchemes[] = {
     url::kAboutScheme, url::kDataScheme, url::kHttpScheme, url::kHttpsScheme,
     // TODO(mpearson): add support for chrome:// URLs.  Right now the scheme
     // for that lives in content and is accessible via
@@ -23,13 +29,13 @@ const char* kAuthorizedSchemes[] = {
 
 void OnGetRecentImageFromClipboard(
     ClipboardRecentContent::GetRecentImageCallback callback,
-    const SkBitmap& sk_bitmap) {
-  if (sk_bitmap.empty()) {
-    std::move(callback).Run(base::nullopt);
+    const std::vector<uint8_t>& png_data) {
+  if (png_data.empty()) {
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
-  std::move(callback).Run(gfx::Image::CreateFrom1xBitmap(sk_bitmap));
+  std::move(callback).Run(gfx::Image::CreateFrom1xPNGBytes(png_data));
 }
 
 }  // namespace
@@ -37,121 +43,163 @@ void OnGetRecentImageFromClipboard(
 ClipboardRecentContentGeneric::ClipboardRecentContentGeneric() = default;
 ClipboardRecentContentGeneric::~ClipboardRecentContentGeneric() = default;
 
-base::Optional<GURL>
-ClipboardRecentContentGeneric::GetRecentURLFromClipboard() {
-  if (GetClipboardContentAge() > MaximumAgeOfClipboard())
-    return base::nullopt;
+void ClipboardRecentContentGeneric::GetRecentURLFromClipboard(
+    GetRecentURLCallback callback) {
+  if (GetClipboardContentAge() > MaximumAgeOfClipboard()) {
+    std::move(callback).Run(std::nullopt);
+    return;
+  }
 
-  // Get and clean up the clipboard before processing.
-  std::string gurl_string;
-  ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
-  clipboard->ReadAsciiText(ui::ClipboardBuffer::kCopyPaste,
-                           /* data_dst = */ nullptr, &gurl_string);
+  ui::DataTransferEndpoint data_dst = ui::DataTransferEndpoint(
+      ui::EndpointType::kDefault, {.notify_if_restricted = false});
+
+#if BUILDFLAG(IS_ANDROID)
+  ui::Clipboard::GetForCurrentThread()->ReadURL(
+      std::move(data_dst),
+      base::BindOnce(&ClipboardRecentContentGeneric::OnReadURL,
+                     weak_factory_.GetWeakPtr(), std::move(callback)));
+#else
+  ui::Clipboard::GetForCurrentThread()->ReadAsciiText(
+      ui::ClipboardBuffer::kCopyPaste, std::move(data_dst),
+      base::BindOnce(&ClipboardRecentContentGeneric::OnReadURLAsAsciiText,
+                     weak_factory_.GetWeakPtr(), std::move(callback)));
+#endif  // BUILDFLAG(IS_ANDROID)
+}
+
+void ClipboardRecentContentGeneric::OnReadURLAsAsciiText(
+    GetRecentURLCallback callback,
+    std::string gurl_string) {
   base::TrimWhitespaceASCII(gurl_string, base::TrimPositions::TRIM_ALL,
                             &gurl_string);
 
-  // Interpret the clipboard as a URL if possible.
-  GURL url;
   // If there is mid-string whitespace, don't attempt to interpret the string
   // as a URL.  (Otherwise gurl will happily try to convert
   // "http://example.com extra words" into "http://example.com%20extra%20words",
   // which is not likely to be a useful or intended destination.)
-  if (gurl_string.find_first_of(base::kWhitespaceASCII) != std::string::npos)
-    return base::nullopt;
-  if (!gurl_string.empty()) {
+  GURL url;
+  if (!gurl_string.empty() &&
+      gurl_string.find_first_of(base::kWhitespaceASCII) == std::string::npos) {
     url = GURL(gurl_string);
-  } else {
-    // Fall back to unicode / UTF16, as some URLs may use international domain
-    // names, not punycode.
-    base::string16 gurl_string16;
-    clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste,
-                        /* data_dst = */ nullptr, &gurl_string16);
-    base::TrimWhitespace(gurl_string16, base::TrimPositions::TRIM_ALL,
-                         &gurl_string16);
-    if (gurl_string16.find_first_of(base::kWhitespaceUTF16) !=
-        std::string::npos)
-      return base::nullopt;
-    if (!gurl_string16.empty())
-      url = GURL(gurl_string16);
   }
-  if (!url.is_valid() || !IsAppropriateSuggestion(url)) {
-    return base::nullopt;
-  }
-  return url;
+
+  OnReadURL(std::move(callback),
+            ui::ClipboardUrlInfo{.url = std::move(url), .title = u""});
 }
 
-base::Optional<base::string16>
-ClipboardRecentContentGeneric::GetRecentTextFromClipboard() {
-  if (GetClipboardContentAge() > MaximumAgeOfClipboard())
-    return base::nullopt;
+void ClipboardRecentContentGeneric::OnReadText(GetRecentURLCallback callback,
+                                               std::u16string gurl_string16) {
+  base::TrimWhitespace(gurl_string16, base::TrimPositions::TRIM_ALL,
+                       &gurl_string16);
+  if (!gurl_string16.empty() &&
+      gurl_string16.find_first_of(base::kWhitespaceUTF16) ==
+          std::string::npos) {
+    GURL url(gurl_string16);
+    if (url.is_valid() && IsAppropriateSuggestion(url)) {
+      std::move(callback).Run(std::move(url));
+      return;
+    }
+  }
+  std::move(callback).Run(std::nullopt);
+}
 
-  base::string16 text_from_clipboard;
-  ui::Clipboard::GetForCurrentThread()->ReadText(
-      ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-      &text_from_clipboard);
-  base::TrimWhitespace(text_from_clipboard, base::TrimPositions::TRIM_ALL,
-                       &text_from_clipboard);
-  if (text_from_clipboard.empty()) {
-    return base::nullopt;
+void ClipboardRecentContentGeneric::GetRecentTextFromClipboard(
+    GetRecentTextCallback callback) {
+  if (GetClipboardContentAge() > MaximumAgeOfClipboard()) {
+    std::move(callback).Run(std::nullopt);
+    return;
   }
 
-  return text_from_clipboard;
+  ui::DataTransferEndpoint data_dst = ui::DataTransferEndpoint(
+      ui::EndpointType::kDefault, {.notify_if_restricted = false});
+  ui::Clipboard::GetForCurrentThread()->ReadText(
+      ui::ClipboardBuffer::kCopyPaste, std::move(data_dst),
+      base::BindOnce(
+          [](GetRecentTextCallback callback, std::u16string text) {
+            base::TrimWhitespace(text, base::TrimPositions::TRIM_ALL, &text);
+            if (text.empty()) {
+              std::move(callback).Run(std::nullopt);
+            } else {
+              std::move(callback).Run(std::move(text));
+            }
+          },
+          std::move(callback)));
 }
 
 void ClipboardRecentContentGeneric::GetRecentImageFromClipboard(
     GetRecentImageCallback callback) {
-  if (GetClipboardContentAge() > MaximumAgeOfClipboard())
+  if (GetClipboardContentAge() > MaximumAgeOfClipboard()) {
+    std::move(callback).Run(std::nullopt);
     return;
+  }
 
-  ui::Clipboard::GetForCurrentThread()->ReadImage(
-      ui::ClipboardBuffer::kCopyPaste,
-      /* data_dst = */ nullptr,
+  ui::DataTransferEndpoint data_dst = ui::DataTransferEndpoint(
+      ui::EndpointType::kDefault, {.notify_if_restricted = false});
+  ui::Clipboard::GetForCurrentThread()->ReadPng(
+      ui::ClipboardBuffer::kCopyPaste, data_dst,
       base::BindOnce(&OnGetRecentImageFromClipboard, std::move(callback)));
 }
 
-bool ClipboardRecentContentGeneric::HasRecentImageFromClipboard() {
-  if (GetClipboardContentAge() > MaximumAgeOfClipboard())
-    return false;
+void ClipboardRecentContentGeneric::HasRecentImageFromClipboard(
+    base::OnceCallback<void(bool)> callback) {
+  if (GetClipboardContentAge() > MaximumAgeOfClipboard()) {
+    std::move(callback).Run(false);
+    return;
+  }
 
-  return ui::Clipboard::GetForCurrentThread()->IsFormatAvailable(
-      ui::ClipboardFormatType::GetBitmapType(), ui::ClipboardBuffer::kCopyPaste,
-      /* data_dst = */ nullptr);
+  ui::DataTransferEndpoint data_dst = ui::DataTransferEndpoint(
+      ui::EndpointType::kDefault, {.notify_if_restricted = false});
+  ui::Clipboard::GetForCurrentThread()->GetAllAvailableFormats(
+      ui::ClipboardBuffer::kCopyPaste, data_dst,
+      base::BindOnce(
+          [](base::OnceCallback<void(bool)> callback,
+             base::flat_set<ui::ClipboardFormatType> formats) {
+            std::move(callback).Run(
+                formats.contains(ui::ClipboardFormatType::PngType()));
+          },
+          std::move(callback)));
 }
 
 void ClipboardRecentContentGeneric::HasRecentContentFromClipboard(
     std::set<ClipboardContentType> types,
     HasDataCallback callback) {
-  std::set<ClipboardContentType> matching_types;
-  for (ClipboardContentType type : types) {
-    switch (type) {
-      case ClipboardContentType::URL:
-        if (GetRecentURLFromClipboard()) {
-          matching_types.insert(ClipboardContentType::URL);
-        }
-        break;
-      case ClipboardContentType::Text:
-        if (GetRecentTextFromClipboard()) {
-          matching_types.insert(ClipboardContentType::Text);
-        }
-        break;
-      case ClipboardContentType::Image:
-        if (HasRecentImageFromClipboard()) {
-          matching_types.insert(ClipboardContentType::Image);
-        }
-        break;
-    }
+  if (GetClipboardContentAge() > MaximumAgeOfClipboard()) {
+    std::move(callback).Run({});
+    return;
   }
-  std::move(callback).Run(matching_types);
-}
 
-void ClipboardRecentContentGeneric::GetRecentURLFromClipboard(
-    GetRecentURLCallback callback) {
-  std::move(callback).Run(GetRecentURLFromClipboard());
-}
-
-void ClipboardRecentContentGeneric::GetRecentTextFromClipboard(
-    GetRecentTextCallback callback) {
-  std::move(callback).Run(GetRecentTextFromClipboard());
+  ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
+  ui::DataTransferEndpoint data_dst = ui::DataTransferEndpoint(
+      ui::EndpointType::kDefault, {.notify_if_restricted = false});
+  clipboard->GetAllAvailableFormats(
+      ui::ClipboardBuffer::kCopyPaste, data_dst,
+      base::BindOnce(
+          [](std::set<ClipboardContentType> types, HasDataCallback callback,
+             base::flat_set<ui::ClipboardFormatType> formats) {
+            std::set<ClipboardContentType> matching_types;
+            for (ClipboardContentType type : types) {
+              switch (type) {
+                case ClipboardContentType::URL:
+                  if (formats.contains(ui::ClipboardFormatType::UrlType())) {
+                    matching_types.insert(ClipboardContentType::URL);
+                  }
+                  break;
+                case ClipboardContentType::Text:
+                  if (formats.contains(
+                          ui::ClipboardFormatType::PlainTextType())) {
+                    matching_types.insert(ClipboardContentType::Text);
+                  }
+                  break;
+                case ClipboardContentType::Image:
+                  if (formats.contains(ui::ClipboardFormatType::PngType()) ||
+                      formats.contains(ui::ClipboardFormatType::BitmapType())) {
+                    matching_types.insert(ClipboardContentType::Image);
+                  }
+                  break;
+              }
+            }
+            std::move(callback).Run(matching_types);
+          },
+          std::move(types), std::move(callback)));
 }
 
 base::TimeDelta ClipboardRecentContentGeneric::GetClipboardContentAge() const {
@@ -184,6 +232,30 @@ bool ClipboardRecentContentGeneric::IsAppropriateSuggestion(const GURL& url) {
       return true;
   }
 
+  // Check if the schemes is an application-defined scheme.
+  std::vector<std::string> standard_schemes = url::GetStandardSchemes();
+  for (const auto& standard_scheme : standard_schemes) {
+    if (url.SchemeIs(standard_scheme))
+      return true;
+  }
+
   // Not a scheme we're allowed to return.
   return false;
+}
+
+void ClipboardRecentContentGeneric::OnReadURL(GetRecentURLCallback callback,
+                                              ui::ClipboardUrlInfo url_info) {
+  if (url_info.url.is_valid() && IsAppropriateSuggestion(url_info.url)) {
+    std::move(callback).Run(std::move(url_info.url));
+    return;
+  }
+
+  // Fall back to unicode / UTF16, as some URLs may use international domain
+  // names, not punycode.
+  ui::DataTransferEndpoint data_dst = ui::DataTransferEndpoint(
+      ui::EndpointType::kDefault, {.notify_if_restricted = false});
+  ui::Clipboard::GetForCurrentThread()->ReadText(
+      ui::ClipboardBuffer::kCopyPaste, std::move(data_dst),
+      base::BindOnce(&ClipboardRecentContentGeneric::OnReadText,
+                     weak_factory_.GetWeakPtr(), std::move(callback)));
 }

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,34 +6,57 @@
 #define CHROMEOS_COMPONENTS_QUICK_ANSWERS_UTILS_LANGUAGE_DETECTOR_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
-namespace chrome_lang_id {
-class NNetLanguageIdentifier;
-}  // namespace chrome_lang_id
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "chromeos/services/machine_learning/public/mojom/text_classifier.mojom.h"
 
-namespace chromeos {
 namespace quick_answers {
 
 // Utility class for language detection.
-// TODO(b/168541952): Cleanup this class after the new language detection API
-// becomes stable.
 class LanguageDetector {
  public:
-  LanguageDetector();
+  using DetectLanguageCallback =
+      base::OnceCallback<void(std::optional<std::string>)>;
+
+  explicit LanguageDetector(
+      chromeos::machine_learning::mojom::TextClassifier* text_classifier);
+
   LanguageDetector(const LanguageDetector&) = delete;
   LanguageDetector& operator=(const LanguageDetector&) = delete;
-  virtual ~LanguageDetector();
 
-  // Returns the ISO 639 language code of the specified |text|, or empty string
-  // if it failed. Virtual for testing.
-  virtual std::string DetectLanguage(const std::string& text);
+  ~LanguageDetector();
+
+  // Returns language code of the specified |selected_text|.
+  // Fall back to language code of |surrounding_text| if the confidence level is
+  // not high enough.
+  // Returns no value if no language can be detected.
+  void DetectLanguage(const std::string& surrounding_text,
+                      const std::string& selected_text,
+                      DetectLanguageCallback callback);
 
  private:
-  std::unique_ptr<chrome_lang_id::NNetLanguageIdentifier> lang_id_;
+  void FindLanguagesForSelectedTextCallback(
+      const std::string& surrounding_text,
+      DetectLanguageCallback callback,
+      std::vector<chromeos::machine_learning::mojom::TextLanguagePtr>
+          languages);
+
+  void FindLanguagesForSurroundingTextCallback(
+      DetectLanguageCallback callback,
+      std::vector<chromeos::machine_learning::mojom::TextLanguagePtr>
+          languages);
+
+  // Owned by IntentGenerator.
+  raw_ptr<chromeos::machine_learning::mojom::TextClassifier> text_classifier_ =
+      nullptr;
+
+  base::WeakPtrFactory<LanguageDetector> weak_factory_{this};
 };
 
 }  // namespace quick_answers
-}  // namespace chromeos
 
 #endif  // CHROMEOS_COMPONENTS_QUICK_ANSWERS_UTILS_LANGUAGE_DETECTOR_H_

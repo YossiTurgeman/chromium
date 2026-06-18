@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,16 @@
 #define CHROME_BROWSER_ANDROID_TAB_WEB_CONTENTS_DELEGATE_ANDROID_H_
 
 #include <memory>
+#include <optional>
 
-#include "base/files/file_path.h"
-#include "base/macros.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_multi_source_observation.h"
 #include "components/embedder_support/android/delegate/web_contents_delegate_android.h"
 #include "components/find_in_page/find_result_observer.h"
 #include "components/find_in_page/find_tab_helper.h"
 #include "components/paint_preview/buildflags/buildflags.h"
-#include "content/public/browser/bluetooth_chooser.h"
-#include "printing/buildflags/buildflags.h"
+#include "content/public/browser/immersive_playback_options.h"
 #include "third_party/blink/public/mojom/frame/blocked_navigation_types.mojom.h"
+#include "url/origin.h"
 
 namespace content {
 struct FileChooserParams;
@@ -41,28 +40,21 @@ class TabWebContentsDelegateAndroid
     : public web_contents_delegate_android::WebContentsDelegateAndroid,
       public find_in_page::FindResultObserver {
  public:
-  TabWebContentsDelegateAndroid(JNIEnv* env, jobject obj);
+  TabWebContentsDelegateAndroid(JNIEnv* env,
+                                const jni_zero::JavaRef<jobject>& obj);
+
+  TabWebContentsDelegateAndroid(const TabWebContentsDelegateAndroid&) = delete;
+  TabWebContentsDelegateAndroid& operator=(
+      const TabWebContentsDelegateAndroid&) = delete;
+
   ~TabWebContentsDelegateAndroid() override;
 
-  void PortalWebContentsCreated(content::WebContents* portal_contents) override;
   void RunFileChooser(content::RenderFrameHost* render_frame_host,
                       scoped_refptr<content::FileSelectListener> listener,
                       const blink::mojom::FileChooserParams& params) override;
-  std::unique_ptr<content::BluetoothChooser> RunBluetoothChooser(
-      content::RenderFrameHost* frame,
-      const content::BluetoothChooser::EventHandler& event_handler) override;
-  void CreateSmsPrompt(content::RenderFrameHost*,
-                       const url::Origin&,
-                       const std::string& one_time_code,
-                       base::OnceClosure on_confirm,
-                       base::OnceClosure on_cancel) override;
-  std::unique_ptr<content::BluetoothScanningPrompt> ShowBluetoothScanningPrompt(
-      content::RenderFrameHost* frame,
-      const content::BluetoothScanningPrompt::EventHandler& event_handler)
-      override;
   bool ShouldFocusLocationBarByDefault(content::WebContents* source) override;
-  blink::mojom::DisplayMode GetDisplayMode(
-      const content::WebContents* web_contents) override;
+  void NavigationStateChanged(content::WebContents* source,
+                              content::InvalidateTypes changed_flags) override;
   void FindReply(content::WebContents* web_contents,
                  int request_id,
                  int number_of_matches,
@@ -73,63 +65,76 @@ class TabWebContentsDelegateAndroid
                            int version,
                            const std::vector<gfx::RectF>& rects,
                            const gfx::RectF& active_rect) override;
+  bool IsWebContentsCreationOverridden(
+      content::RenderFrameHost* opener,
+      content::SiteInstance* source_site_instance,
+      content::mojom::WindowContainerType window_container_type,
+      const GURL& opener_url,
+      const std::string& frame_name,
+      const GURL& target_url) override;
+  content::WebContents* CreateCustomWebContents(
+      content::RenderFrameHost* opener,
+      content::SiteInstance* source_site_instance,
+      bool is_new_browsing_instance,
+      const GURL& opener_url,
+      const std::string& frame_name,
+      const GURL& target_url,
+      WindowOpenDisposition disposition,
+      const blink::mojom::WindowFeatures& window_features,
+      const content::StoragePartitionConfig& partition_config,
+      content::SessionStorageNamespace* session_storage_namespace) override;
   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
       content::WebContents* source) override;
-  void AdjustPreviewsStateForNavigation(
-      content::WebContents* web_contents,
-      blink::PreviewsState* previews_state) override;
   void RequestMediaAccessPermission(
       content::WebContents* web_contents,
       const content::MediaStreamRequest& request,
       content::MediaResponseCallback callback) override;
   bool CheckMediaAccessPermission(content::RenderFrameHost* render_frame_host,
-                                  const GURL& security_origin,
+                                  const url::Origin& security_origin,
                                   blink::mojom::MediaStreamType type) override;
   void SetOverlayMode(bool use_overlay_mode) override;
-  void RequestPpapiBrokerPermission(
-      content::WebContents* web_contents,
-      const GURL& url,
-      const base::FilePath& plugin_path,
-      base::OnceCallback<void(bool)> callback) override;
   content::WebContents* OpenURLFromTab(
       content::WebContents* source,
-      const content::OpenURLParams& params) override;
+      const content::OpenURLParams& params,
+      base::OnceCallback<void(content::NavigationHandle&)>
+          navigation_handle_callback) override;
   bool ShouldResumeRequestsForCreatedWindow() override;
-  void AddNewContents(content::WebContents* source,
-                      std::unique_ptr<content::WebContents> new_contents,
-                      const GURL& target_url,
-                      WindowOpenDisposition disposition,
-                      const gfx::Rect& initial_rect,
-                      bool user_gesture,
-                      bool* was_blocked) override;
-  blink::SecurityStyle GetSecurityStyle(
-      content::WebContents* web_contents,
-      content::SecurityStyleExplanations* security_style_explanations) override;
+  content::WebContents* AddNewContents(
+      content::WebContents* source,
+      std::unique_ptr<content::WebContents> new_contents,
+      const GURL& target_url,
+      WindowOpenDisposition disposition,
+      const blink::mojom::WindowFeatures& window_features,
+      bool user_gesture,
+      bool* was_blocked) override;
   void OnDidBlockNavigation(
       content::WebContents* web_contents,
       const GURL& blocked_url,
       const GURL& initiator_url,
+      const url::Origin& initiator_origin,
       blink::mojom::NavigationBlockedReason reason) override;
   void UpdateUserGestureCarryoverInfo(
       content::WebContents* web_contents) override;
   content::PictureInPictureResult EnterPictureInPicture(
-      content::WebContents* web_contents,
-      const viz::SurfaceId&,
-      const gfx::Size&) override;
+      content::WebContents* web_contents) override;
   void ExitPictureInPicture() override;
-  std::unique_ptr<content::WebContents> ActivatePortalWebContents(
-      content::WebContents* predecessor_contents,
-      std::unique_ptr<content::WebContents> portal_contents) override;
+  bool IsBackForwardCacheSupported(content::WebContents& web_contents) override;
+  content::PreloadingEligibility IsPrerender2Supported(
+      content::WebContents& web_contents,
+      content::PreloadingTriggerType trigger_type) override;
   device::mojom::GeolocationContext* GetInstalledWebappGeolocationContext()
       override;
-
-#if BUILDFLAG(ENABLE_PRINTING)
-  void PrintCrossProcessSubframe(
+  content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
+      content::WebContents* source,
+      const input::NativeWebKeyboardEvent& event) override;
+  void RequestPointerLock(content::WebContents* web_contents,
+                          bool user_gesture,
+                          bool last_unlocked_by_target) override;
+  void LostPointerLock() override;
+  void GetAIPageContent(
       content::WebContents* web_contents,
-      const gfx::Rect& rect,
-      int document_cookie,
-      content::RenderFrameHost* subframe_host) const override;
-#endif
+      bool include_actionable_elements,
+      base::OnceCallback<void(const std::string&)> callback) override;
 
 #if BUILDFLAG(ENABLE_PAINT_PREVIEW)
   void CapturePaintPreviewOfSubframe(
@@ -144,8 +149,8 @@ class TabWebContentsDelegateAndroid
   void OnFindTabHelperDestroyed(find_in_page::FindTabHelper* helper) override;
 
   bool ShouldEnableEmbeddedMediaExperience() const;
-  bool IsPictureInPictureEnabled() const;
-  bool IsNightModeEnabled() const;
+  bool IsDocumentPictureInPictureBlockedBySystem() const override;
+  bool IsPictureInPictureEnabled() const override;
   bool CanShowAppBanners() const;
 
   // Returns true if this tab is currently presented in the context of custom
@@ -154,15 +159,33 @@ class TabWebContentsDelegateAndroid
   bool IsCustomTab() const;
   const GURL GetManifestScope() const;
   bool IsInstalledWebappDelegateGeolocation() const;
+  bool IsModalContextMenu() const;
+  bool IsDynamicSafeAreaInsetsEnabled() const;
+
+  void DraggableRegionsChanged(
+      const std::vector<blink::mojom::DraggableRegionPtr>& regions,
+      content::WebContents* contents) override;
+
+  bool IsImmersivePlaybackEnabled() const override;
+  void RequestImmersivePlaybackConfirmation(
+      base::OnceCallback<void(content::ImmersivePlaybackConfirmationResult)>
+          callback) override;
 
  private:
   std::unique_ptr<device::mojom::GeolocationContext>
       installed_webapp_geolocation_context_;
 
-  ScopedObserver<find_in_page::FindTabHelper, find_in_page::FindResultObserver>
-      find_result_observer_{this};
+  base::ScopedMultiSourceObservation<find_in_page::FindTabHelper,
+                                     find_in_page::FindResultObserver>
+      find_result_observations_{this};
 
-  DISALLOW_COPY_AND_ASSIGN(TabWebContentsDelegateAndroid);
+  // Timestamp when the user last successfully escaped from a lock request.
+  base::TimeTicks pointer_lock_last_user_escape_time_;
+
+  void NavigationStateChangedDeferred(content::WebContents* source,
+                                      content::InvalidateTypes changed_flags);
+
+  base::WeakPtrFactory<TabWebContentsDelegateAndroid> weak_ptr_factory_{this};
 };
 
 }  // namespace android

@@ -1,9 +1,8 @@
-# Copyright 2016 The Chromium Authors. All rights reserved.
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Presubmit for android_webview/tools."""
-
 
 def _GetPythonUnitTests(input_api, output_api):
   return input_api.canned_checks.GetUnitTestsRecursively(
@@ -25,6 +24,9 @@ def CommonChecks(input_api, output_api):
           input_api,
           output_api,
           pylintrc='pylintrc',
+          disabled_warnings=[
+              'R0801',  # suppress pylint duplicate code false positive
+          ],
           # Allows pylint to find dependencies imported by scripts in this
           # directory.
           extra_paths_list=[
@@ -34,7 +36,8 @@ def CommonChecks(input_api, output_api):
                                      'common', 'py_utils'),
               input_api.os_path.join(src_root, 'third_party', 'catapult',
                                      'devil'),
-          ]))
+          ],
+          version='2.7'))
   checks.extend(_GetPythonUnitTests(input_api, output_api))
   return input_api.RunTests(checks, False)
 

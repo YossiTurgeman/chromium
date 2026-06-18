@@ -1,10 +1,11 @@
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Checks C++ and Objective-C files for illegal includes."""
 
-import codecs
+
+
 import os
 import re
 
@@ -22,9 +23,6 @@ class CppChecker(object):
       '.mm',
   ]
 
-  # The maximum number of non-include lines we can see before giving up.
-  _MAX_UNINTERESTING_LINES = 50
-
   # The maximum line length, this is to be efficient in the case of very long
   # lines (which can't be #includes).
   _MAX_LINE_LENGTH = 128
@@ -32,7 +30,7 @@ class CppChecker(object):
   # This regular expression will be used to extract filenames from include
   # statements.
   _EXTRACT_INCLUDE_PATH = re.compile(
-      '[ \t]*#[ \t]*(?:include|import)[ \t]+"(.*)"')
+      r'[ \t]*#[ \t]*(?:include|import)[ \t]*"(.*)"')
 
   def __init__(self, verbose, resolve_dotdot=False, root_dir=''):
     self._verbose = verbose
@@ -64,13 +62,16 @@ class CppChecker(object):
       # Don't fail when no directory is specified. We may want to be more
       # strict about this in the future.
       if self._verbose:
-        print ' WARNING: include specified with no directory: ' + include_path
+        print(' WARNING: include specified with no directory: ' + include_path)
       return True, None
 
     if self._resolve_dotdot and '../' in include_path:
       dependee_dir = os.path.dirname(dependee_path)
       include_path = os.path.join(dependee_dir, include_path)
       include_path = os.path.relpath(include_path, self._root_dir)
+      # Normalize to use forward slashes, since all rules are specified
+      # in terms of forward slashes.
+      include_path = include_path.replace(os.path.sep, '/')
 
     rule = rules.RuleApplyingTo(include_path, dependee_path)
     if (rule.allow == Rule.DISALLOW or
@@ -80,17 +81,15 @@ class CppChecker(object):
 
   def CheckFile(self, rules, filepath):
     if self._verbose:
-      print 'Checking: ' + filepath
+      print('Checking: ' + filepath)
 
     dependee_status = results.DependeeStatus(filepath)
     ret_val = ''  # We'll collect the error messages in here
     last_include = 0
-    with codecs.open(filepath, encoding='utf-8') as f:
+
+    with open(filepath, encoding='utf-8') as f:
       in_if0 = 0
       for line_num, line in enumerate(f):
-        if line_num - last_include > self._MAX_UNINTERESTING_LINES:
-          break
-
         line = line.strip()
 
         # Check to see if we're at / inside an #if 0 block

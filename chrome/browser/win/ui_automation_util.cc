@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,24 +10,25 @@
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/win/scoped_safearray.h"
 #include "base/win/scoped_variant.h"
 
-base::string16 GetCachedBstrValue(IUIAutomationElement* element,
-                                  PROPERTYID property_id) {
+std::wstring GetCachedBstrValue(IUIAutomationElement* element,
+                                PROPERTYID property_id) {
   HRESULT result = S_OK;
   base::win::ScopedVariant var;
 
   result = element->GetCachedPropertyValueEx(property_id, TRUE, var.Receive());
   if (FAILED(result))
-    return base::string16();
+    return std::wstring();
 
   if (V_VT(var.ptr()) != VT_BSTR) {
     LOG_IF(ERROR, V_VT(var.ptr()) != VT_UNKNOWN)
         << __func__ << " property is not a BSTR: " << V_VT(var.ptr());
-    return base::string16();
+    return std::wstring();
   }
 
-  return base::string16(V_BSTR(var.ptr()));
+  return std::wstring(V_BSTR(var.ptr()));
 }
 
 bool GetCachedBoolValue(IUIAutomationElement* element, PROPERTYID property_id) {
@@ -90,19 +91,15 @@ std::vector<int32_t> GetCachedInt32ArrayValue(IUIAutomationElement* element,
     return values;
   }
 
-  SAFEARRAY* array = V_ARRAY(var.ptr());
-  if (SafeArrayGetDim(array) != 1)
+  // Convert to ScopedSafearray for convenient access to the data.
+  base::win::ScopedSafearray scoped_array(var.Release().parray);
+
+  auto lock_scope = scoped_array.CreateLockScope<VT_I4>();
+  if (!lock_scope) {
     return values;
-  long lower_bound = 0;
-  long upper_bound = 0;
-  SafeArrayGetLBound(array, 1, &lower_bound);
-  SafeArrayGetUBound(array, 1, &upper_bound);
-  if (lower_bound || upper_bound <= lower_bound)
-    return values;
-  int32_t* data = nullptr;
-  SafeArrayAccessData(array, reinterpret_cast<void**>(&data));
-  values.assign(data, data + upper_bound + 1);
-  SafeArrayUnaccessData(array);
+  }
+
+  values.assign(lock_scope->begin(), lock_scope->end());
 #endif  // DCHECK_IS_ON()
   return values;
 }
@@ -110,9 +107,9 @@ std::vector<int32_t> GetCachedInt32ArrayValue(IUIAutomationElement* element,
 std::string IntArrayToString(const std::vector<int32_t>& values) {
 #if DCHECK_IS_ON()
   std::vector<std::string> value_strings;
-  std::transform(values.begin(), values.end(),
-                 std::back_inserter(value_strings),
-                 [](int32_t value) { return base::NumberToString(value); });
+  std::ranges::transform(
+      values, std::back_inserter(value_strings),
+      [](int32_t value) { return base::NumberToString(value); });
   return base::JoinString(value_strings, ", ");
 #else   // DCHECK_IS_ON()
   return std::string();
@@ -190,6 +187,8 @@ const char* GetEventName(EVENTID event_id) {
       return "UIA_TextEdit_TextChangedEventId";
     case UIA_TextEdit_ConversionTargetChangedEventId:
       return "UIA_TextEdit_ConversionTargetChangedEventId";
+    case UIA_ActiveTextPositionChangedEventId:
+      return "UIA_ActiveTextPositionChangedEventId";
   }
 #endif  // DCHECK_IS_ON()
   return "";

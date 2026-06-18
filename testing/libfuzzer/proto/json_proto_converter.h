@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@ namespace json_proto {
 
 class JsonProtoConverter {
  public:
+  std::string Convert(const JsonValue& json_value);
   std::string Convert(const json_proto::JsonObject&);
   std::string Convert(const json_proto::ArrayValue&);
 

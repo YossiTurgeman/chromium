@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,14 @@
 
 #include <stddef.h>
 
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animation_observer.h"
 #include "ui/compositor/layer_animation_sequence.h"
 #include "ui/compositor/layer_animator.h"
 #include "ui/compositor/layer_observer.h"
+#include "ui/compositor/scoped_layer_request.h"
 
 namespace ui {
 
@@ -18,27 +21,30 @@ namespace {
 
 const int kScopedLayerAnimationDefaultTransitionDurationMs = 200;
 
-template <typename Trait>
+template <typename LockType>
 class ScopedLayerAnimationObserver : public ui::ImplicitAnimationObserver,
                                      public ui::LayerObserver {
  public:
-  ScopedLayerAnimationObserver(ui::Layer* layer) : layer_(layer) {
-    layer_->AddObserver(this);
-    Trait::AddRequest(layer_);
+  explicit ScopedLayerAnimationObserver(ui::Layer* layer) {
+    layer_observation_.Observe(layer);
+    lock_.emplace(layer);
   }
-  ~ScopedLayerAnimationObserver() override {
-    if (layer_)
-      layer_->RemoveObserver(this);
-  }
+
+  ScopedLayerAnimationObserver(const ScopedLayerAnimationObserver&) = delete;
+  ScopedLayerAnimationObserver& operator=(const ScopedLayerAnimationObserver&) =
+      delete;
+
+  ~ScopedLayerAnimationObserver() override = default;
 
   // ui::ImplicitAnimationObserver overrides:
   void OnImplicitAnimationsCompleted() override {
-    // If animation finishes before |layer_| is destoyed, we will remove the
-    // request applied on the layer and remove |this| from the |layer_|
-    // observer list when deleting |this|.
-    if (layer_) {
-      Trait::RemoveRequest(layer_);
-      layer_->GetAnimator()->RemoveAndDestroyOwnedObserver(this);
+    // If the animation finishes before the layer is destroyed, we will release
+    // the lock and destroy `this`.
+    lock_.reset();
+    if (layer_observation_.IsObserving()) {
+      layer_observation_.GetSource()
+          ->GetAnimator()
+          ->RemoveAndDestroyOwnedObserver(this);
     }
   }
 
@@ -46,47 +52,23 @@ class ScopedLayerAnimationObserver : public ui::ImplicitAnimationObserver,
   void LayerDestroyed(ui::Layer* layer) override {
     // If the animation is still going past layer destruction then we want the
     // layer to keep the request until the animation has finished. We will defer
-    // deleting |this| until the animation finishes.
-    layer_->RemoveObserver(this);
-    layer_ = nullptr;
+    // deleting `this` until the animation finishes.
+    layer_observation_.Reset();
   }
 
  private:
-  ui::Layer* layer_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedLayerAnimationObserver);
+  std::optional<LockType> lock_;
+  base::ScopedObservation<ui::Layer, ui::LayerObserver> layer_observation_{
+      this};
 };
 
-struct RenderSurfaceCachingTrait {
-  static void AddRequest(ui::Layer* layer) {
-    layer->AddCacheRenderSurfaceRequest();
-  }
-  static void RemoveRequest(ui::Layer* layer) {
-    layer->RemoveCacheRenderSurfaceRequest();
-  }
-};
 using ScopedRenderSurfaceCaching =
-    ScopedLayerAnimationObserver<RenderSurfaceCachingTrait>;
+    ScopedLayerAnimationObserver<ScopedCacheRenderSurfaceLock>;
 
-struct DeferredPaintingTrait {
-  static void AddRequest(ui::Layer* layer) { layer->AddDeferredPaintRequest(); }
-  static void RemoveRequest(ui::Layer* layer) {
-    layer->RemoveDeferredPaintRequest();
-  }
-};
-using ScopedDeferredPainting =
-    ScopedLayerAnimationObserver<DeferredPaintingTrait>;
+using ScopedDeferredPainting = ScopedLayerAnimationObserver<ScopedPaintLock>;
 
-struct TrilinearFilteringTrait {
-  static void AddRequest(ui::Layer* layer) {
-    layer->AddTrilinearFilteringRequest();
-  }
-  static void RemoveRequest(ui::Layer* layer) {
-    layer->RemoveTrilinearFilteringRequest();
-  }
-};
 using ScopedTrilinearFiltering =
-    ScopedLayerAnimationObserver<TrilinearFilteringTrait>;
+    ScopedLayerAnimationObserver<ScopedTrilinearFilteringLock>;
 
 void AddObserverToSettings(
     ui::ScopedLayerAnimationSettings* settings,
@@ -100,8 +82,9 @@ void AddScopedDeferredPaintingObserverRecursive(
     ui::ScopedLayerAnimationSettings* settings) {
   auto observer = std::make_unique<ScopedDeferredPainting>(layer);
   AddObserverToSettings(settings, std::move(observer));
-  for (auto* child : layer->children())
+  for (ui::Layer* child : layer->children()) {
     AddScopedDeferredPaintingObserverRecursive(child, settings);
+  }
 }
 
 }  // namespace
@@ -115,19 +98,18 @@ ScopedLayerAnimationSettings::ScopedLayerAnimationSettings(
       old_transition_duration_(animator->GetTransitionDuration()),
       old_tween_type_(animator->tween_type()),
       old_preemption_strategy_(animator->preemption_strategy()) {
-  SetTransitionDuration(base::TimeDelta::FromMilliseconds(
-      kScopedLayerAnimationDefaultTransitionDurationMs));
+  SetTransitionDuration(
+      base::Milliseconds(kScopedLayerAnimationDefaultTransitionDurationMs));
 }
 
 ScopedLayerAnimationSettings::~ScopedLayerAnimationSettings() {
-  animator_->set_animation_metrics_reporter(nullptr);
   animator_->is_transition_duration_locked_ =
       old_is_transition_duration_locked_;
   animator_->SetTransitionDuration(old_transition_duration_);
   animator_->set_tween_type(old_tween_type_);
   animator_->set_preemption_strategy(old_preemption_strategy_);
 
-  for (auto* observer : observers_) {
+  for (ImplicitAnimationObserver* observer : observers_) {
     // Directly remove |observer| from |LayerAnimator::observers_| rather than
     // calling LayerAnimator::RemoveObserver(), to avoid removing it from the
     // observer list of LayerAnimationSequences that have already been
@@ -141,11 +123,6 @@ void ScopedLayerAnimationSettings::AddObserver(
     ImplicitAnimationObserver* observer) {
   observers_.insert(observer);
   animator_->AddObserver(observer);
-}
-
-void ScopedLayerAnimationSettings::SetAnimationMetricsReporter(
-    AnimationMetricsReporter* reporter) {
-  animator_->set_animation_metrics_reporter(reporter);
 }
 
 void ScopedLayerAnimationSettings::SetTransitionDuration(

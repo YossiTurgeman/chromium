@@ -1,4 +1,4 @@
-// Copyright (c) 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 
 #include <string>
 
+
 namespace content {
 
 // static
@@ -20,7 +21,7 @@ TtsPlatform* TtsPlatform::GetInstance() {
     return result;
 #endif
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   // On Chrome OS, the platform TTS definition is provided by the content
   // client.
   //
@@ -29,15 +30,12 @@ TtsPlatform* TtsPlatform::GetInstance() {
   // is not provided, that's probably not intended. It's not important
   // if this is hit in something like a content-only unit test.
   NOTREACHED();
-  return nullptr;
 #else
   return TtsPlatformImpl::GetInstance();
 #endif
 }
 
-bool TtsPlatformImpl::LoadBuiltInTtsEngine(BrowserContext* browser_context) {
-  return false;
-}
+void TtsPlatformImpl::LoadBuiltInTtsEngine(BrowserContext* browser_context) {}
 
 void TtsPlatformImpl::WillSpeakUtteranceWithVoice(TtsUtterance* utterance,
                                                   const VoiceData& voice_data) {
@@ -54,5 +52,9 @@ void TtsPlatformImpl::ClearError() {
 void TtsPlatformImpl::SetError(const std::string& error) {
   error_ = error;
 }
+
+void TtsPlatformImpl::Shutdown() {}
+
+void TtsPlatformImpl::FinalizeVoiceOrdering(std::vector<VoiceData>& voices) {}
 
 }  // namespace content

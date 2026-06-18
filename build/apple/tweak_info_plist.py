@@ -1,6 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -20,7 +20,6 @@
 # by the time the app target is done, the info.plist is correct.
 #
 
-from __future__ import print_function
 
 import optparse
 import os
@@ -32,11 +31,30 @@ import tempfile
 
 TOP = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
+assert sys.version_info.major >= 3, "Requires python 3.0 or higher."
 
-def _ConvertPlist(source_plist, output_plist, fmt):
-  """Convert |source_plist| to |fmt| and save as |output_plist|."""
-  return subprocess.call(
-      ['plutil', '-convert', fmt, '-o', output_plist, source_plist])
+
+def _WritePlistIfChanged(plist, output_path, fmt):
+  """Write a plist file.
+
+  Write `plist` to `output_path` in `fmt`. If `output_path` already exist,
+  the file is only overwritten if its content would be different. This allows
+  ninja to consider all dependent step to be considered as unnecessary (see
+  "restat" in ninja documentation).
+  """
+  if os.path.isfile(output_path):
+    with open(output_path, 'rb') as f:
+      try:
+        exising_plist = plistlib.load(f)
+        if exising_plist == plist:
+          return
+      except plistlib.InvalidFileException:
+        # If the file cannot be parsed by plistlib, then overwrite it.
+        pass
+
+  with open(output_path, 'wb') as f:
+    plist_format = {'binary1': plistlib.FMT_BINARY, 'xml1': plistlib.FMT_XML}
+    plistlib.dump(plist, f, fmt=plist_format[fmt])
 
 
 def _GetOutput(args):
@@ -171,6 +189,12 @@ def _RemoveBreakpadKeys(plist):
               'BreakpadSendAndExit', 'BreakpadSkipConfirm')
 
 
+def _IsValidBundleId(bundle_identifier):
+  # Based on apple developer documentation, see
+  # https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleidentifier
+  return re.match(r'^[0-9a-zA-Z-.]+$', bundle_identifier) is not None
+
+
 def _TagSuffixes():
   # Keep this list sorted in the order that tag suffix components are to
   # appear in a tag value. That is to say, it should be sorted per ASCII.
@@ -189,7 +213,7 @@ def _TagSuffixes():
   return tag_suffixes
 
 
-def _AddKeystoneKeys(plist, bundle_identifier):
+def _AddKeystoneKeys(plist, bundle_identifier, base_tag):
   """Adds the Keystone keys. This must be called AFTER _AddVersionKeys() and
   also requires the |bundle_identifier| argument (com.example.product)."""
   plist['KSVersion'] = plist['CFBundleShortVersionString']
@@ -197,19 +221,84 @@ def _AddKeystoneKeys(plist, bundle_identifier):
   plist['KSUpdateURL'] = 'https://tools.google.com/service/update2'
 
   _RemoveKeys(plist, 'KSChannelID')
+  if base_tag != '':
+    plist['KSChannelID'] = base_tag
   for tag_suffix in _TagSuffixes():
     if tag_suffix:
-      plist['KSChannelID' + tag_suffix] = tag_suffix
+      plist['KSChannelID' + tag_suffix] = base_tag + tag_suffix
 
 
 def _RemoveKeystoneKeys(plist):
   """Removes any set Keystone keys."""
   _RemoveKeys(plist, 'KSVersion', 'KSProductID', 'KSUpdateURL')
 
-  tag_keys = []
+  tag_keys = ['KSChannelID']
   for tag_suffix in _TagSuffixes():
     tag_keys.append('KSChannelID' + tag_suffix)
   _RemoveKeys(plist, *tag_keys)
+
+
+def _AddGTMKeys(plist, platform):
+  """Adds the GTM metadata keys. This must be called AFTER _AddVersionKeys()."""
+  plist['GTMUserAgentID'] = plist['CFBundleName']
+  if platform == 'ios':
+    plist['GTMUserAgentVersion'] = plist['CFBundleVersion']
+  else:
+    plist['GTMUserAgentVersion'] = plist['CFBundleShortVersionString']
+
+
+def _RemoveGTMKeys(plist):
+  """Removes any set GTM metadata keys."""
+  _RemoveKeys(plist, 'GTMUserAgentID', 'GTMUserAgentVersion')
+
+
+def _AddPrivilegedHelperId(plist, privileged_helper_id):
+  plist['SMPrivilegedExecutables'] = {
+      privileged_helper_id: f'identifier "{privileged_helper_id}"'
+  }
+
+
+def _RemovePrivilegedHelperId(plist):
+  _RemoveKeys(plist, 'SMPrivilegedExecutables')
+
+
+def _SetDirectLaunchUrlScheme(plist, bundle_identifier):
+  """Sets the direct launch URL scheme in the plist."""
+  if not bundle_identifier:
+    return
+
+  scheme = None
+  if bundle_identifier == 'com.google.Chrome':
+    scheme = 'google-chrome'
+    # This logic should match shell_integration::GetDirectLaunchUrlScheme()
+    # in chrome/browser/shell_integration_mac.mm.
+    # Note: chrome/installer/mac/signing/modification.py handles removing
+    # this scheme for non-stable channels during signing.
+  elif bundle_identifier == 'org.chromium.Chromium':
+    scheme = 'chromium'
+
+  url_types = plist.get('CFBundleURLTypes')
+  if not url_types:
+    return
+
+  placeholder = '%DIRECT_LAUNCH_URL_SCHEME%'
+  new_url_types = []
+
+  for url_type in url_types:
+    schemes = url_type.get('CFBundleURLSchemes')
+    if schemes and placeholder in schemes:
+      if len(schemes) != 1:
+        raise Exception(f'Placeholder {placeholder} must be the only scheme.')
+
+      if scheme is not None:
+        schemes[0] = scheme
+        new_url_types.append(url_type)
+      # Else: scheme is None, so we drop this url_type.
+    else:
+      # This url_type does not contain the placeholder, so keep it as is.
+      new_url_types.append(url_type)
+
+  plist['CFBundleURLTypes'] = new_url_types
 
 
 def Main(argv):
@@ -241,6 +330,9 @@ def Main(argv):
                     type='int',
                     default=False,
                     help='Enable Keystone [1 or 0]')
+  parser.add_option('--keystone-base-tag',
+                    default='',
+                    help='Base Keystone tag to set')
   parser.add_option('--scm',
                     dest='add_scm_info',
                     action='store',
@@ -260,9 +352,15 @@ def Main(argv):
                     default=None,
                     help='The bundle id of the binary')
   parser.add_option('--platform',
-                    choices=('ios', 'mac'),
+                    choices=('ios', 'mac', 'watchos'),
                     default='mac',
                     help='The target platform of the bundle')
+  parser.add_option('--add-gtm-metadata',
+                    dest='add_gtm_info',
+                    action='store',
+                    type='int',
+                    default=False,
+                    help='Add GTM metadata [1 or 0]')
   parser.add_option(
       '--version-overrides',
       action='append',
@@ -270,7 +368,7 @@ def Main(argv):
       'like key=value (can be passed multiple time to configure '
       'more than one override)')
   parser.add_option('--format',
-                    choices=('binary1', 'xml1', 'json'),
+                    choices=('binary1', 'xml1'),
                     default='xml1',
                     help='Format to use when writing property list '
                     '(default: %(default)s)')
@@ -280,6 +378,12 @@ def Main(argv):
                     type='string',
                     default=None,
                     help='The version string [major.minor.build.patch]')
+  parser.add_option('--privileged_helper_id',
+                    dest='privileged_helper_id',
+                    action='store',
+                    type='string',
+                    default=None,
+                    help='The id of the privileged helper executable.')
   (options, args) = parser.parse_args(argv)
 
   if len(args) > 0:
@@ -290,13 +394,9 @@ def Main(argv):
     print('No --plist specified.', file=sys.stderr)
     return 1
 
-  # Read the plist into its parsed format. Convert the file to 'xml1' as
-  # plistlib only supports that format in Python 2.7.
-  with tempfile.NamedTemporaryFile() as temp_info_plist:
-    retcode = _ConvertPlist(options.plist_path, temp_info_plist.name, 'xml1')
-    if retcode != 0:
-      return retcode
-    plist = plistlib.readPlist(temp_info_plist.name)
+  # Read the plist into its parsed format.
+  with open(options.plist_path, 'rb') as f:
+    plist = plistlib.load(f)
 
   # Convert overrides.
   overrides = {}
@@ -360,7 +460,11 @@ def Main(argv):
     if options.bundle_identifier is None:
       print('Use of Keystone requires the bundle id.', file=sys.stderr)
       return 1
-    _AddKeystoneKeys(plist, options.bundle_identifier)
+    if not _IsValidBundleId(options.bundle_identifier):
+      print(f'Invalid bundle id: {options.bundle_identifier}', file=sys.stderr)
+      return 1
+    _AddKeystoneKeys(plist, options.bundle_identifier,
+                     options.keystone_base_tag)
   else:
     _RemoveKeystoneKeys(plist)
 
@@ -368,18 +472,37 @@ def Main(argv):
   if not _DoSCMKeys(plist, options.add_scm_info):
     return 3
 
+  # Add GTM metadata keys.
+  if options.add_gtm_info:
+    _AddGTMKeys(plist, options.platform)
+  else:
+    _RemoveGTMKeys(plist)
+
+  # Add SMPrivilegedExecutables keys.
+  if options.privileged_helper_id:
+    if not _IsValidBundleId(options.privileged_helper_id):
+      print(f'Invalid privileged helper id: {options.privileged_helper_id}',
+            file=sys.stderr)
+      return 1
+    _AddPrivilegedHelperId(plist, options.privileged_helper_id)
+  else:
+    _RemovePrivilegedHelperId(plist)
+
+  _SetDirectLaunchUrlScheme(plist, options.bundle_identifier)
+
   output_path = options.plist_path
   if options.plist_output is not None:
     output_path = options.plist_output
 
   # Now that all keys have been mutated, rewrite the file.
-  with tempfile.NamedTemporaryFile() as temp_info_plist:
-    plistlib.writePlist(plist, temp_info_plist.name)
-
-    # Convert Info.plist to the format requested by the --format flag. Any
-    # format would work on Mac but iOS requires specific format.
-    return _ConvertPlist(temp_info_plist.name, output_path, options.format)
+  # Convert Info.plist to the format requested by the --format flag. Any
+  # format would work on Mac but iOS requires specific format.
+  _WritePlistIfChanged(plist, output_path, options.format)
 
 
 if __name__ == '__main__':
+  # TODO(crbug.com/40618161): Temporary workaround until all scripts use
+  # python3 by default.
+  if sys.version_info[0] < 3:
+    os.execvp('python3', ['python3'] + sys.argv)
   sys.exit(Main(sys.argv[1:]))

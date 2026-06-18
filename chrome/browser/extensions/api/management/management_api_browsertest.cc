@@ -1,54 +1,88 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "extensions/browser/api/management/management_api.h"
+
+#include "base/auto_reset.h"
 #include "base/files/file_path.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/strings/pattern.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
-#include "base/test/metrics/histogram_tester.h"
+#include "base/strings/to_string.h"
 #include "build/build_config.h"
+#include "build/chromeos_buildflags.h"
+#include "chrome/browser/extensions/chrome_app_deprecation.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
-#include "chrome/browser/extensions/extension_function_test_utils.h"
-#include "chrome/browser/extensions/extension_service.h"
-#include "chrome/browser/extensions/install_verifier.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "content/public/browser/notification_service.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/common/url_constants.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_utils.h"
-#include "extensions/browser/api/management/management_api.h"
 #include "extensions/browser/api/management/management_api_constants.h"
+#include "extensions/browser/api_test_utils.h"
 #include "extensions/browser/extension_dialog_auto_confirm.h"
 #include "extensions/browser/extension_host.h"
+#include "extensions/browser/extension_host_test_helper.h"
 #include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
-#include "extensions/browser/notification_types.h"
+#include "extensions/browser/install_verifier.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension_builder.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/test/extension_test_message_listener.h"
 
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/chromeos/login/demo_mode/demo_session.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/apps/app_service/chrome_app_deprecation/chrome_app_deprecation.h"
 #endif
 
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+#include "chrome/browser/ui/browser.h"
+#endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
 namespace keys = extension_management_api_constants;
-namespace test_utils = extension_function_test_utils;
 
 namespace extensions {
+namespace {
+
+#if !BUILDFLAG(IS_ANDROID)
+// This function is unused on Android.
+bool ExpectChromeAppsDefaultEnabled() {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  return false;
+#else
+  return true;
+#endif
+}
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+}  // namespace
+
+namespace test_utils = api_test_utils;
 
 class ExtensionManagementApiBrowserTest : public ExtensionBrowserTest {
+ public:
+  ExtensionManagementApiBrowserTest() = default;
+  ~ExtensionManagementApiBrowserTest() override = default;
+  ExtensionManagementApiBrowserTest(const ExtensionManagementApiBrowserTest&) =
+      delete;
+  ExtensionManagementApiBrowserTest& operator=(
+      const ExtensionManagementApiBrowserTest&) = delete;
+
  protected:
-  bool CrashEnabledExtension(const std::string& extension_id) {
+  bool CrashEnabledExtension(const ExtensionId& extension_id) {
     ExtensionHost* background_host =
-        ProcessManager::Get(browser()->profile())
-            ->GetBackgroundHostForExtension(extension_id);
-    if (!background_host)
+        ProcessManager::Get(profile())->GetBackgroundHostForExtension(
+            extension_id);
+    if (!background_host) {
       return false;
+    }
     content::CrashTab(background_host->host_contents());
     return true;
   }
@@ -57,124 +91,187 @@ class ExtensionManagementApiBrowserTest : public ExtensionBrowserTest {
   ScopedInstallVerifierBypassForTest install_verifier_bypass_;
 };
 
+class ExtensionManagementApiTestWithBackgroundType
+    : public ExtensionManagementApiBrowserTest {
+ public:
+  ExtensionManagementApiTestWithBackgroundType() {
+#if !BUILDFLAG(IS_ANDROID)
+    // Android does not support Chrome apps and does not have access to the
+    // variable g_enable_chrome_apps_for_testing.
+    enable_chrome_apps_ = std::make_unique<base::AutoReset<bool>>(
+        &extensions::testing::g_enable_chrome_apps_for_testing, true);
+#endif
+#if BUILDFLAG(IS_CHROMEOS)
+    scoped_feature_list_.InitAndEnableFeature(
+        apps::chrome_app_deprecation::kAllowUserInstalledChromeApps);
+#endif
+  }
+  ~ExtensionManagementApiTestWithBackgroundType() override = default;
+  ExtensionManagementApiTestWithBackgroundType(
+      const ExtensionManagementApiTestWithBackgroundType&) = delete;
+  ExtensionManagementApiTestWithBackgroundType& operator=(
+      const ExtensionManagementApiTestWithBackgroundType&) = delete;
+
+ private:
+  std::unique_ptr<base::AutoReset<bool>> enable_chrome_apps_;
+#if BUILDFLAG(IS_CHROMEOS)
+  base::test::ScopedFeatureList scoped_feature_list_;
+#endif
+};
+
 // We test this here instead of in an ExtensionApiTest because normal extensions
 // are not allowed to call the install function.
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest, InstallEvent) {
-  ExtensionTestMessageListener listener1("ready", false);
-  ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("management/install_event")));
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
+                       InstallEvent) {
+  ExtensionTestMessageListener listener1("ready");
+  ASSERT_TRUE(
+      LoadExtension(test_data_dir_.AppendASCII("management/install_event")));
   ASSERT_TRUE(listener1.WaitUntilSatisfied());
 
-  ExtensionTestMessageListener listener2("got_event", false);
+  ExtensionTestMessageListener listener2("got_event");
   ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("api_test/management/enabled_extension")));
+      test_data_dir_.AppendASCII("api_test/management/enabled_extension"),
+      {.context_type = ContextType::kFromManifest}));
   ASSERT_TRUE(listener2.WaitUntilSatisfied());
 }
 
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest, LaunchApp) {
-  ExtensionTestMessageListener listener1("app_launched", false);
-  ExtensionTestMessageListener listener2("got_expected_error", false);
-  ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("management/simple_extension")));
-  ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("management/packaged_app")));
-  ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("management/launch_app")));
+#if !BUILDFLAG(IS_ANDROID)
+// Android does not support Chrome apps.
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
+                       LaunchApp) {
+  ExtensionTestMessageListener listener1("app_launched");
+  ExtensionTestMessageListener listener2("got_expected_error");
+  ASSERT_TRUE(
+      LoadExtension(test_data_dir_.AppendASCII("management/simple_extension"),
+                    {.context_type = ContextType::kFromManifest}));
+  ASSERT_TRUE(
+      LoadExtension(test_data_dir_.AppendASCII("management/packaged_app"),
+                    {.context_type = ContextType::kFromManifest}));
+  ASSERT_TRUE(
+      LoadExtension(test_data_dir_.AppendASCII("management/launch_app")));
   ASSERT_TRUE(listener1.WaitUntilSatisfied());
   ASSERT_TRUE(listener2.WaitUntilSatisfied());
 }
 
-#if defined(OS_CHROMEOS)
+// Android does not support Chrome apps.
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
+                       NoLaunchAppDeprecated) {
+  extensions::testing::g_enable_chrome_apps_for_testing = false;
+  const Extension* packaged_app =
+      LoadExtension(test_data_dir_.AppendASCII("management/packaged_app"),
+                    {.context_type = ContextType::kFromManifest});
+  ASSERT_TRUE(packaged_app);
+  EXPECT_TRUE(packaged_app->is_app());
 
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
-                       NoDemoModeAppLaunchSourceReported) {
-  EXPECT_FALSE(chromeos::DemoSession::IsDeviceInDemoMode());
-
-  base::HistogramTester histogram_tester;
-  // Should see 0 apps launched from the API in the histogram at first.
-  histogram_tester.ExpectTotalCount("DemoMode.AppLaunchSource", 0);
-
-  ExtensionTestMessageListener app_launched_listener("app_launched", false);
-  ASSERT_TRUE(
-      LoadExtension(test_data_dir_.AppendASCII("management/packaged_app")));
-  ASSERT_TRUE(
-      LoadExtension(test_data_dir_.AppendASCII("management/launch_app")));
-  ASSERT_TRUE(app_launched_listener.WaitUntilSatisfied());
-
-  // Should still see 0 apps launched from the API in the histogram.
-  histogram_tester.ExpectTotalCount("DemoMode.AppLaunchSource", 0);
-}
-
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
-                       DemoModeAppLaunchSourceReported) {
-  chromeos::DemoSession::SetDemoConfigForTesting(
-      chromeos::DemoSession::DemoModeConfig::kOnline);
-  EXPECT_TRUE(chromeos::DemoSession::IsDeviceInDemoMode());
-
-  base::HistogramTester histogram_tester;
-  // Should see 0 apps launched from the Launcher in the histogram at first.
-  histogram_tester.ExpectTotalCount("DemoMode.AppLaunchSource", 0);
-
-  ExtensionTestMessageListener app_launched_listener("app_launched", false);
-  ASSERT_TRUE(
-      LoadExtension(test_data_dir_.AppendASCII("management/packaged_app")));
+  ExtensionTestMessageListener error("got_chrome_apps_error");
+  ExtensionTestMessageListener launched("app_launched");
   ASSERT_TRUE(
       LoadExtension(test_data_dir_.AppendASCII("management/launch_app")));
-  ASSERT_TRUE(app_launched_listener.WaitUntilSatisfied());
-
-  // Should see 1 app launched from the highlights app  in the histogram.
-  histogram_tester.ExpectUniqueSample(
-      "DemoMode.AppLaunchSource",
-      chromeos::DemoSession::AppLaunchSource::kExtensionApi, 1);
+  if (ExpectChromeAppsDefaultEnabled()) {
+    EXPECT_TRUE(launched.WaitUntilSatisfied());
+    EXPECT_FALSE(error.was_satisfied());
+  } else {
+    EXPECT_TRUE(error.WaitUntilSatisfied());
+    EXPECT_FALSE(launched.was_satisfied());
+  }
 }
 
-#endif
-
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
+// Android does not support Chrome apps.
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
                        LaunchAppFromBackground) {
-  ExtensionTestMessageListener listener1("success", false);
-  ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("management/packaged_app")));
+  ExtensionTestMessageListener listener1("success");
+  ASSERT_TRUE(
+      LoadExtension(test_data_dir_.AppendASCII("management/packaged_app"),
+                    {.context_type = ContextType::kFromManifest}));
   ASSERT_TRUE(LoadExtension(
       test_data_dir_.AppendASCII("management/launch_app_from_background")));
   ASSERT_TRUE(listener1.WaitUntilSatisfied());
 }
 
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
+// Android does not support Chrome apps.
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
+                       NoLaunchAppFromBackgroundDeprecated) {
+  extensions::testing::g_enable_chrome_apps_for_testing = false;
+  const Extension* packaged_app =
+      LoadExtension(test_data_dir_.AppendASCII("management/packaged_app"),
+                    {.context_type = ContextType::kFromManifest});
+  ASSERT_TRUE(packaged_app);
+  EXPECT_TRUE(packaged_app->is_app());
+
+  // Also verify launching from background does not work. This helper is not an
+  // app.
+  ExtensionTestMessageListener error("got_chrome_apps_error");
+  ExtensionTestMessageListener launched_failure("not_launched");
+  ExtensionTestMessageListener success("success");
+  ASSERT_TRUE(LoadExtension(
+      test_data_dir_.AppendASCII("management/launch_app_from_background")));
+  if (ExpectChromeAppsDefaultEnabled()) {
+    EXPECT_TRUE(success.WaitUntilSatisfied());
+    EXPECT_FALSE(error.was_satisfied());
+    EXPECT_FALSE(launched_failure.was_satisfied());
+  } else {
+    EXPECT_TRUE(error.WaitUntilSatisfied());
+    EXPECT_TRUE(launched_failure.WaitUntilSatisfied());
+    EXPECT_FALSE(success.was_satisfied());
+  }
+}
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
                        SelfUninstall) {
-  ExtensionTestMessageListener listener1("success", false);
+  // Wait for the helper script to finish before loading the primary
+  // extension. This ensures that the onUninstall event listener is
+  // added before we proceed to the uninstall step.
+  ExtensionTestMessageListener listener1("ready");
   ASSERT_TRUE(LoadExtension(
       test_data_dir_.AppendASCII("management/self_uninstall_helper")));
-  ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("management/self_uninstall")));
   ASSERT_TRUE(listener1.WaitUntilSatisfied());
+  ExtensionTestMessageListener listener2("success");
+  ASSERT_TRUE(
+      LoadExtension(test_data_dir_.AppendASCII("management/self_uninstall")));
+  ASSERT_TRUE(listener2.WaitUntilSatisfied());
 }
 
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
                        SelfUninstallNoPermissions) {
-  ExtensionTestMessageListener listener1("success", false);
+  // Wait for the helper script to finish before loading the primary
+  // extension. This ensures that the onUninstall event listener is
+  // added before we proceed to the uninstall step.
+  ExtensionTestMessageListener listener1("ready");
   ASSERT_TRUE(LoadExtension(
       test_data_dir_.AppendASCII("management/self_uninstall_helper")));
+  ASSERT_TRUE(listener1.WaitUntilSatisfied());
+  ExtensionTestMessageListener listener2("success");
   ASSERT_TRUE(LoadExtension(
       test_data_dir_.AppendASCII("management/self_uninstall_noperm")));
-  ASSERT_TRUE(listener1.WaitUntilSatisfied());
+  ASSERT_TRUE(listener2.WaitUntilSatisfied());
 }
 
-IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType, Get) {
+  ExtensionTestMessageListener listener("success");
+  ASSERT_TRUE(
+      LoadExtension(test_data_dir_.AppendASCII("management/simple_extension"),
+                    {.context_type = ContextType::kFromManifest}));
+  ASSERT_TRUE(LoadExtension(test_data_dir_.AppendASCII("management/get")));
+  ASSERT_TRUE(listener.WaitUntilSatisfied());
+}
+
+IN_PROC_BROWSER_TEST_F(ExtensionManagementApiTestWithBackgroundType,
                        GetSelfNoPermissions) {
-  ExtensionTestMessageListener listener1("success", false);
-  ASSERT_TRUE(LoadExtension(
-      test_data_dir_.AppendASCII("management/get_self")));
+  ExtensionTestMessageListener listener1("success");
+  ASSERT_TRUE(LoadExtension(test_data_dir_.AppendASCII("management/get_self")));
   ASSERT_TRUE(listener1.WaitUntilSatisfied());
 }
 
+#if !BUILDFLAG(IS_ANDROID)
+// Android does not support Chrome apps.
 IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
                        CreateAppShortcutConfirmDialog) {
   const Extension* app = InstallExtension(
       test_data_dir_.AppendASCII("api_test/management/packaged_app"), 1);
   ASSERT_TRUE(app);
 
-  const std::string app_id = app->id();
+  const extensions::ExtensionId app_id = app->id();
 
   scoped_refptr<ManagementCreateAppShortcutFunction> create_shortcut_function(
       new ManagementCreateAppShortcutFunction());
@@ -182,7 +279,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
   ManagementCreateAppShortcutFunction::SetAutoConfirmForTest(true);
   test_utils::RunFunctionAndReturnSingleResult(
       create_shortcut_function.get(),
-      base::StringPrintf("[\"%s\"]", app_id.c_str()), browser());
+      base::StringPrintf("[\"%s\"]", app_id.c_str()), profile());
 
   create_shortcut_function = new ManagementCreateAppShortcutFunction();
   create_shortcut_function->set_user_gesture(true);
@@ -190,15 +287,16 @@ IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
   EXPECT_TRUE(base::MatchPattern(
       test_utils::RunFunctionAndReturnError(
           create_shortcut_function.get(),
-          base::StringPrintf("[\"%s\"]", app_id.c_str()), browser()),
+          base::StringPrintf("[\"%s\"]", app_id.c_str()), profile()),
       keys::kCreateShortcutCanceledError));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
                        GetAllIncludesTerminated) {
   // Load an extension with a background page, so that we know it has a process
   // running.
-  ExtensionTestMessageListener listener("ready", false);
+  ExtensionTestMessageListener listener("ready");
   const Extension* extension = LoadExtension(
       test_data_dir_.AppendASCII("management/install_event"));
   ASSERT_TRUE(extension);
@@ -206,22 +304,21 @@ IN_PROC_BROWSER_TEST_F(ExtensionManagementApiBrowserTest,
 
   // The management API should list this extension.
   scoped_refptr<ManagementGetAllFunction> function =
-      new ManagementGetAllFunction();
-  std::unique_ptr<base::Value> result(
+      base::MakeRefCounted<ManagementGetAllFunction>();
+  std::optional<base::Value> result =
       test_utils::RunFunctionAndReturnSingleResult(function.get(), "[]",
-                                                   browser()));
-  base::ListValue* list;
-  ASSERT_TRUE(result->GetAsList(&list));
-  EXPECT_EQ(1U, list->GetSize());
+                                                   profile());
+  ASSERT_TRUE(result->is_list());
+  EXPECT_EQ(1U, result->GetList().size());
 
   // And it should continue to do so even after it crashes.
   ASSERT_TRUE(CrashEnabledExtension(extension->id()));
 
-  function = new ManagementGetAllFunction();
-  result.reset(test_utils::RunFunctionAndReturnSingleResult(function.get(),
-                                                            "[]", browser()));
-  ASSERT_TRUE(result->GetAsList(&list));
-  EXPECT_EQ(1U, list->GetSize());
+  function = base::MakeRefCounted<ManagementGetAllFunction>();
+  result = test_utils::RunFunctionAndReturnSingleResult(function.get(), "[]",
+                                                        profile());
+  ASSERT_TRUE(result->is_list());
+  EXPECT_EQ(1U, result->GetList().size());
 }
 
 class ExtensionManagementApiEscalationTest :
@@ -252,8 +349,8 @@ class ExtensionManagementApiEscalationTest :
     EXPECT_FALSE(UpdateExtension(kId, path_v2, -1));
     EXPECT_FALSE(extension_registry()->enabled_extensions().GetByID(kId));
     EXPECT_TRUE(extension_registry()->disabled_extensions().GetByID(kId));
-    EXPECT_TRUE(ExtensionPrefs::Get(browser()->profile())
-                    ->DidExtensionEscalatePermissions(kId));
+    EXPECT_TRUE(
+        ExtensionPrefs::Get(profile())->DidExtensionEscalatePermissions(kId));
   }
 
   void SetEnabled(bool enabled,
@@ -263,14 +360,14 @@ class ExtensionManagementApiEscalationTest :
     scoped_refptr<ManagementSetEnabledFunction> function(
         new ManagementSetEnabledFunction);
     function->set_extension(extension);
-    const char* const enabled_string = enabled ? "true" : "false";
-    if (user_gesture)
+    if (user_gesture) {
       function->set_user_gesture(true);
-    function->SetRenderFrameHost(browser()->tab_strip_model()->
-        GetActiveWebContents()->GetMainFrame());
+    }
+    function->SetRenderFrameHost(GetActiveWebContents()->GetPrimaryMainFrame());
     bool response = test_utils::RunFunction(
-        function.get(), base::StringPrintf("[\"%s\", %s]", kId, enabled_string),
-        browser(), api_test_utils::NONE);
+        function.get(),
+        base::StringPrintf("[\"%s\", %s]", kId, base::ToString(enabled)),
+        profile(), api_test_utils::FunctionMode::kNone);
     if (expected_error.empty()) {
       EXPECT_EQ(true, response);
     } else {
@@ -291,15 +388,12 @@ IN_PROC_BROWSER_TEST_F(ExtensionManagementApiEscalationTest,
                        DisabledReason) {
   scoped_refptr<ManagementGetFunction> function =
       new ManagementGetFunction();
-  std::unique_ptr<base::Value> result(
-      test_utils::RunFunctionAndReturnSingleResult(
-          function.get(), base::StringPrintf("[\"%s\"]", kId), browser()));
-  ASSERT_TRUE(result.get() != NULL);
-  ASSERT_TRUE(result->is_dict());
-  base::DictionaryValue* dict =
-      static_cast<base::DictionaryValue*>(result.get());
-  std::string reason;
-  EXPECT_TRUE(dict->GetStringASCII(keys::kDisabledReasonKey, &reason));
+  base::DictValue dict =
+      test_utils::ToDict(test_utils::RunFunctionAndReturnSingleResult(
+          function.get(), base::StringPrintf("[\"%s\"]", kId), profile()));
+  std::string reason =
+      api_test_utils::GetString(dict, keys::kDisabledReasonKey);
+  EXPECT_TRUE(base::IsStringASCII(reason));
   EXPECT_EQ(reason, std::string(keys::kDisabledReasonPermissionsIncrease));
 }
 
@@ -320,17 +414,13 @@ IN_PROC_BROWSER_TEST_F(ExtensionManagementApiEscalationTest,
   }
 
   {
-    // This should succeed when user accepts dialog. We must wait for the
-    // process to connect *and* for the channel to finish initializing before
-    // trying to crash it. (NOTIFICATION_RENDERER_PROCESS_CREATED does not wait
-    // for the latter and can cause KillProcess to fail on Windows.)
-    content::WindowedNotificationObserver observer(
-        extensions::NOTIFICATION_EXTENSION_HOST_CREATED,
-        content::NotificationService::AllSources());
+    // The extension should load when the user accepts the dialog, triggering
+    // a new ExtensionHost creation.
+    ExtensionHostTestHelper host_helper(profile(), kId);
     ScopedTestDialogAutoConfirm auto_confirm(
         ScopedTestDialogAutoConfirm::ACCEPT);
     SetEnabled(true, true, std::string(), source_extension);
-    observer.Wait();
+    host_helper.WaitForRenderProcessReady();
   }
 
   {
@@ -342,7 +432,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionManagementApiEscalationTest,
     // Register the target extension with extension service.
     scoped_refptr<const Extension> target_extension =
         ExtensionBuilder("TargetExtension").SetID(kId).Build();
-    extension_service()->AddExtension(target_extension.get());
+    extension_registrar()->AddExtension(target_extension);
     SetEnabled(false, true, std::string(), source_extension);
     SetEnabled(true, true, std::string(), source_extension);
     EXPECT_TRUE(extension_registry()->enabled_extensions().GetByID(kId));

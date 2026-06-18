@@ -1,20 +1,27 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/services/util_win/processor_metrics.h"
 
 #include <objbase.h>
-#include <wbemidl.h>
+
+#include <sysinfoapi.h>
 #include <wrl/client.h>
 
+#include <string_view>
+
 #include "base/metrics/histogram_functions.h"
-#include "base/strings/string_util.h"
+#include "base/strings/strcat.h"
 #include "base/threading/scoped_blocking_call.h"
-#include "base/win/com_init_util.h"
 #include "base/win/scoped_bstr.h"
+#include "base/win/scoped_com_initializer.h"
 #include "base/win/scoped_variant.h"
+#include "base/win/wbemidl_shim.h"
 #include "base/win/wmi.h"
+#include "chrome/services/util_win/public/mojom/util_win.mojom.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/receiver.h"
 
 using base::win::ScopedBstr;
 using base::win::ScopedVariant;
@@ -94,14 +101,88 @@ void RecordProcessorMetricsFromWMI(const ComPtr<IWbemServices>& services) {
   }
 }
 
+// TODO(crbug.com/40152192) Can be removed once CET support is stable.
+void RecordCetAvailability() {
+  bool available = false;
+  auto is_user_cet_available_in_environment =
+      reinterpret_cast<decltype(&IsUserCetAvailableInEnvironment)>(
+          ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"),
+                           "IsUserCetAvailableInEnvironment"));
+
+  if (is_user_cet_available_in_environment) {
+    available = is_user_cet_available_in_environment(
+        USER_CET_ENVIRONMENT_WIN32_PROCESS);
+  }
+  base::UmaHistogramBoolean("Windows.CetAvailable", available);
+
+  if (available) {
+    PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY policy = {0};
+    if (::GetProcessMitigationPolicy(GetCurrentProcess(),
+                                     ProcessUserShadowStackPolicy, &policy,
+                                     sizeof(policy))) {
+      base::UmaHistogramBoolean("Windows.CetEnabled",
+                                policy.EnableUserShadowStack);
+    }
+  }
+}
+
+void RecordEnclaveAvailabilityInternal(std::string_view type,
+                                       DWORD enclave_type) {
+  // This API does not appear to be exported from kernel32.dll on
+  // Windows 10.0.10240.
+  static auto is_enclave_type_supported_func =
+      reinterpret_cast<decltype(&IsEnclaveTypeSupported)>(::GetProcAddress(
+          ::GetModuleHandleW(L"kernel32.dll"), "IsEnclaveTypeSupported"));
+
+  bool is_supported = false;
+
+  if (is_enclave_type_supported_func) {
+    is_supported = is_enclave_type_supported_func(enclave_type);
+  }
+
+  base::UmaHistogramBoolean(
+      base::StrCat({"Windows.Enclave.", type, ".Available"}), is_supported);
+}
+
+void RecordEnclaveAvailability() {
+  RecordEnclaveAvailabilityInternal("SGX", ENCLAVE_TYPE_SGX);
+  RecordEnclaveAvailabilityInternal("SGX2", ENCLAVE_TYPE_SGX2);
+  RecordEnclaveAvailabilityInternal("VBS", ENCLAVE_TYPE_VBS);
+  RecordEnclaveAvailabilityInternal("VBSBasic", ENCLAVE_TYPE_VBS_BASIC);
+}
+
+void RecordProcessorMetricsImpl() {
+  // These metrics do not require a WMI connection.
+  RecordCetAvailability();
+  RecordEnclaveAvailability();
+
+  if (base::win::ScopedCOMInitializer scoped_com_initializer(
+          base::win::ScopedCOMInitializer::kMTA);
+      scoped_com_initializer.Succeeded()) {
+    base::ScopedBlockingCall scoped_blocking_call(
+        FROM_HERE, base::BlockingType::MAY_BLOCK);
+    ComPtr<IWbemServices> wmi_services;
+    if (base::win::CreateLocalWmiConnection(true, &wmi_services)) {
+      RecordProcessorMetricsFromWMI(wmi_services);
+      RecordHypervStatusFromWMI(wmi_services);
+    }
+  }
+}
+
 }  // namespace
 
-void RecordProcessorMetrics() {
-  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
-                                                base::BlockingType::MAY_BLOCK);
-  ComPtr<IWbemServices> wmi_services;
-  if (!base::win::CreateLocalWmiConnection(true, &wmi_services))
-    return;
-  RecordProcessorMetricsFromWMI(wmi_services);
-  RecordHypervStatusFromWMI(wmi_services);
+void RecordProcessorMetricsForTesting() {
+  RecordProcessorMetricsImpl();
+}
+
+ProcessorMetricsImpl::ProcessorMetricsImpl(
+    mojo::PendingReceiver<chrome::mojom::ProcessorMetrics> receiver)
+    : receiver_(this, std::move(receiver)) {}
+
+ProcessorMetricsImpl::~ProcessorMetricsImpl() = default;
+
+void ProcessorMetricsImpl::RecordProcessorMetrics(
+    RecordProcessorMetricsCallback callback) {
+  RecordProcessorMetricsImpl();
+  std::move(callback).Run();
 }

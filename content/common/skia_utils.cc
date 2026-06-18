@@ -1,18 +1,24 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/common/skia_utils.h"
 
 #include "base/command_line.h"
+#include "base/feature_list.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/system/sys_info.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/memory_dump_manager.h"
 #include "build/build_config.h"
 #include "content/public/common/content_switches.h"
 #include "skia/ext/event_tracer_impl.h"
+#include "skia/ext/font_utils.h"
 #include "skia/ext/skia_memory_dump_provider.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/skia/include/core/SkGraphics.h"
+#include "third_party/skia/include/private/chromium/SkCodecsICCProfileChromium.h"
+#include "third_party/skia/include/private/chromium/SkExifChromium.h"
 
 namespace content {
 namespace {
@@ -21,11 +27,42 @@ namespace {
 // require pre-scaling. Skia will fallback to a filter that doesn't
 // require pre-scaling if the default filter would require an
 // allocation that exceeds this limit.
-const size_t kImageCacheSingleAllocationByteLimit = 64 * 1024 * 1024;
+constexpr size_t kImageCacheSingleAllocationByteLimit = 64 * 1024 * 1024;
 
 }  // namespace
 
+namespace {
+
+void ConfigureSkiaKillSwitches() {
+  // Configure the ICC profile parser kill-switch early, before any image
+  // decoding occurs. When the feature is enabled, this forces skcms to be
+  // used instead of the Rust-based ICC parser.
+  // TODO(crbug.com/463653726): Remove this once the feature is validated in
+  // Stable.
+  SkCodecs::ICCProfileChromium::ForceSkcms(
+      base::FeatureList::IsEnabled(blink::features::kForceSkcmsICCParsing));
+
+  // Configure the EXIF parser kill-switch early, before any image decoding
+  // occurs. When the feature is enabled, this forces the C++ SkExif parser to
+  // be used instead of the Rust-based EXIF parser.
+  // TODO(crbug.com/463653726): Remove this once the feature is validated in
+  // Stable.
+  SkExif::ForceSkExif(
+      base::FeatureList::IsEnabled(blink::features::kForceSkExifCppParsing));
+}
+
+}  // namespace
+
+void InitializeSkiaLite() {
+  ConfigureSkiaKillSwitches();
+  InitSkiaEventTracer();
+  base::trace_event::MemoryDumpManager::GetInstance()->RegisterDumpProvider(
+      skia::SkiaMemoryDumpProvider::GetInstance(), "Skia", nullptr);
+}
+
 void InitializeSkia() {
+  ConfigureSkiaKillSwitches();
+
   // Make sure that any switches used here are propagated to the renderer and
   // GPU processes.
   const base::CommandLine& cmd = *base::CommandLine::ForCurrentProcess();
@@ -33,12 +70,15 @@ void InitializeSkia() {
     SkGraphics::Init();
   }
 
-  const int kMB = 1024 * 1024;
+  constexpr int kMB = 1024 * 1024;
+
+  // Could also reduce the maximum number of cached strikes, but the intent
+  // being to reduce memory usage, only control cache memory usage.
+  SkGraphics::SetFontCacheLimit(kMB);
+  skia::InitializeFontRendering();
+
+#if !BUILDFLAG(IS_ANDROID)
   size_t font_cache_limit;
-#if defined(OS_ANDROID)
-  font_cache_limit = base::SysInfo::IsLowEndDevice() ? kMB : 8 * kMB;
-  SkGraphics::SetFontCacheLimit(font_cache_limit);
-#else
   if (cmd.HasSwitch(switches::kSkiaFontCacheLimitMb)) {
     if (base::StringToSizeT(
             cmd.GetSwitchValueASCII(switches::kSkiaFontCacheLimitMb),

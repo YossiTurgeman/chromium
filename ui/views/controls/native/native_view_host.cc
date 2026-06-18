@@ -1,29 +1,31 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/controls/native/native_view_host.h"
 
-#include <memory>
 #include <utility>
 
 #include "base/check.h"
+#include "build/buildflag.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/base/cursor/cursor.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/gfx/canvas.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/controls/native/native_view_host_wrapper.h"
 #include "ui/views/painter.h"
+#include "ui/views/view_utils.h"
 #include "ui/views/widget/widget.h"
 
 namespace views {
 
-// static
-const char kWidgetNativeViewHostKey[] = "WidgetNativeViewHost";
-
 ////////////////////////////////////////////////////////////////////////////////
 // NativeViewHost, public:
 
-NativeViewHost::NativeViewHost() = default;
+NativeViewHost::NativeViewHost() {
+  set_suppress_default_focus_handling();
+}
 
 NativeViewHost::~NativeViewHost() {
   // As part of deleting NativeViewHostWrapper the native view is unparented.
@@ -41,12 +43,14 @@ void NativeViewHost::Attach(gfx::NativeView native_view) {
   // updates the visibility of the NativeView. The call to Layout() only happens
   // if |this| is drawn. Call hide if not drawn as otherwise the NativeView
   // could be visible when |this| is not.
-  if (!IsDrawn())
+  if (!IsDrawn()) {
     native_wrapper_->HideWidget();
+  }
 
   Widget* widget = Widget::GetWidgetForNativeView(native_view);
-  if (widget)
+  if (widget) {
     widget->SetNativeWindowProperty(kWidgetNativeViewHostKey, this);
+  }
 }
 
 void NativeViewHost::Detach() {
@@ -54,16 +58,24 @@ void NativeViewHost::Detach() {
 }
 
 void NativeViewHost::SetParentAccessible(gfx::NativeViewAccessible accessible) {
+  if (!native_wrapper_) {
+    return;
+  }
   native_wrapper_->SetParentAccessible(accessible);
 }
 
-bool NativeViewHost::SetCornerRadii(const gfx::RoundedCornersF& corner_radii) {
-  return native_wrapper_->SetCornerRadii(corner_radii);
+gfx::NativeViewAccessible NativeViewHost::GetParentAccessible() {
+  if (!native_wrapper_) {
+    return gfx::NativeViewAccessible();
+  }
+  return native_wrapper_->GetParentAccessible();
 }
 
-bool NativeViewHost::SetCustomMask(std::unique_ptr<ui::LayerOwner> mask) {
-  DCHECK(native_wrapper_);
-  return native_wrapper_->SetCustomMask(std::move(mask));
+bool NativeViewHost::SetCornerRadii(const gfx::RoundedCornersF& corner_radii) {
+  if (!native_wrapper_) {
+    return false;
+  }
+  return native_wrapper_->SetCornerRadii(corner_radii);
 }
 
 void NativeViewHost::SetHitTestTopInset(int top_inset) {
@@ -75,14 +87,16 @@ int NativeViewHost::GetHitTestTopInset() const {
 }
 
 void NativeViewHost::SetNativeViewSize(const gfx::Size& size) {
-  if (native_view_size_ == size)
+  if (native_view_size_ == size) {
     return;
+  }
   native_view_size_ = size;
   InvalidateLayout();
 }
 
 gfx::NativeView NativeViewHost::GetNativeViewContainer() const {
-  return native_view_ ? native_wrapper_->GetNativeViewContainer() : nullptr;
+  return native_view_ ? native_wrapper_->GetNativeViewContainer()
+                      : gfx::NativeView();
 }
 
 void NativeViewHost::NativeViewDestroyed() {
@@ -91,16 +105,27 @@ void NativeViewHost::NativeViewDestroyed() {
   Detach(true);
 }
 
+void NativeViewHost::SetBackgroundColorWhenClipped(
+    std::optional<SkColor> color) {
+  background_color_when_clipped_ = color;
+}
+
+ui::Layer* NativeViewHost::GetUILayer() {
+  return native_wrapper_->GetUILayer();
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // NativeViewHost, View overrides:
 
-void NativeViewHost::Layout() {
-  if (!native_view_ || !native_wrapper_.get())
+void NativeViewHost::Layout(PassKey) {
+  if (!native_view_ || !native_wrapper_.get()) {
     return;
+  }
 
   gfx::Rect vis_bounds = GetVisibleBounds();
   bool visible = !vis_bounds.IsEmpty();
 
+#if !BUILDFLAG(IS_MAC)
   if (visible && !fast_resize_) {
     if (vis_bounds.size() != size()) {
       // Only a portion of the Widget is really visible.
@@ -114,7 +139,7 @@ void NativeViewHost::Layout() {
       native_wrapper_->UninstallClip();
     }
   }
-
+#endif
   if (visible) {
     // Since widgets know nothing about the View hierarchy (they are direct
     // children of the Widget that hosts our View hierarchy) they need to be
@@ -149,16 +174,26 @@ void NativeViewHost::OnPaint(gfx::Canvas* canvas) {
   // view background color doesn't show up), we need to cover that blackness
   // with something so that fast resizes don't result in black flash.
   //
-  // It would be nice if this used some approximation of the page's
-  // current background color.
-  if (native_wrapper_->HasInstalledClip())
-    canvas->FillRect(GetLocalBounds(), SK_ColorWHITE);
+  // Affected views should set the desired color using
+  // SetBackgroundColorWhenClipped(), otherwise the background is left
+  // transparent to let the lower layers show through.
+  if (native_wrapper_->HasInstalledClip()) {
+    if (background_color_when_clipped_) {
+      canvas->FillRect(GetLocalBounds(), *background_color_when_clipped_);
+    }
+  }
 }
 
 void NativeViewHost::VisibilityChanged(View* starting_from, bool is_visible) {
-  // This does not use InvalidateLayout() to ensure the visibility state is
-  // correctly set (if this View isn't visible, Layout() won't be called).
-  Layout();
+  if (is_visible) {
+    // This does not use InvalidateLayout() to ensure the visibility state is
+    // correctly set.
+    DeprecatedLayoutImmediately();
+  } else {
+    if (native_view_ && native_wrapper_) {
+      native_wrapper_->HideWidget();
+    }
+  }
 }
 
 bool NativeViewHost::GetNeedsNotificationWhenVisibleBoundsChange() const {
@@ -188,8 +223,9 @@ void NativeViewHost::ViewHierarchyChanged(
   }
 
   if (details.is_add && this_widget) {
-    if (!native_wrapper_.get())
+    if (!native_wrapper_.get()) {
       native_wrapper_.reset(NativeViewHostWrapper::CreateWrapper(this));
+    }
     native_wrapper_->AddedToWidget();
   } else if (!details.is_add && native_wrapper_) {
     native_wrapper_->RemovedFromWidget();
@@ -197,30 +233,47 @@ void NativeViewHost::ViewHierarchyChanged(
 }
 
 void NativeViewHost::OnFocus() {
-  if (native_view_)
+  if (native_view_) {
     native_wrapper_->SetFocus();
-  NotifyAccessibilityEvent(ax::mojom::Event::kFocus, true);
+  }
+  NotifyAccessibilityEventDeprecated(ax::mojom::Event::kFocus, true);
 }
 
 gfx::NativeViewAccessible NativeViewHost::GetNativeViewAccessible() {
   if (native_wrapper_.get()) {
     gfx::NativeViewAccessible accessible_view =
         native_wrapper_->GetNativeViewAccessible();
-    if (accessible_view)
+    if (accessible_view) {
       return accessible_view;
+    }
   }
 
   return View::GetNativeViewAccessible();
 }
 
-gfx::NativeCursor NativeViewHost::GetCursor(const ui::MouseEvent& event) {
+ui::Cursor NativeViewHost::GetCursor(const ui::MouseEvent& event) {
   return native_wrapper_->GetCursor(event.x(), event.y());
 }
 
 void NativeViewHost::SetVisible(bool visible) {
-  if (native_view_)
+  if (native_view_) {
     native_wrapper_->SetVisible(visible);
+  }
   View::SetVisible(visible);
+}
+
+bool NativeViewHost::OnMousePressed(const ui::MouseEvent& event) {
+  // In the typical case the attached NativeView receives the events directly
+  // from the system and this function is not called. There are scenarios
+  // where that may not happen. For example, if the NativeView is configured
+  // not to receive events, then this function will be called. An additional
+  // scenario is if the WidgetDelegate overrides
+  // ShouldDescendIntoChildForEventHandling(). In that case the NativeView
+  // will not receive the events, and this function will be called. Regardless,
+  // this function does not need to forward to the NativeView, because it is
+  // expected to be done by the system, and the only cases where this is called
+  // is if the NativeView should not receive events.
+  return View::OnMousePressed(event);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -230,30 +283,32 @@ void NativeViewHost::Detach(bool destroyed) {
   if (native_view_) {
     if (!destroyed) {
       Widget* widget = Widget::GetWidgetForNativeView(native_view_);
-      if (widget)
+      if (widget) {
         widget->SetNativeWindowProperty(kWidgetNativeViewHostKey, nullptr);
+      }
       ClearFocus();
     }
     native_wrapper_->NativeViewDetaching(destroyed);
-    native_view_ = nullptr;
+    native_view_ = gfx::NativeView();
   }
 }
 
 void NativeViewHost::ClearFocus() {
   FocusManager* focus_manager = GetFocusManager();
-  if (!focus_manager || !focus_manager->GetFocusedView())
+  if (!focus_manager || !focus_manager->GetFocusedView()) {
     return;
+  }
 
-  Widget::Widgets widgets;
-  Widget::GetAllChildWidgets(native_view(), &widgets);
-  for (auto* widget : widgets) {
+  Widget::Widgets widgets = Widget::GetAllChildWidgets(native_view());
+  for (Widget* widget : widgets) {
     focus_manager->ViewRemoved(widget->GetRootView());
-    if (!focus_manager->GetFocusedView())
+    if (!focus_manager->GetFocusedView()) {
       return;
+    }
   }
 }
 
-BEGIN_METADATA(NativeViewHost, View)
+BEGIN_METADATA(NativeViewHost)
 END_METADATA
 
 }  // namespace views

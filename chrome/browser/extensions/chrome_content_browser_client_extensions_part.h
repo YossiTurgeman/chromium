@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,27 +6,41 @@
 #define CHROME_BROWSER_EXTENSIONS_CHROME_CONTENT_BROWSER_CLIENT_EXTENSIONS_PART_H_
 
 #include <memory>
+#include <vector>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/auto_reset.h"
+#include "base/gtest_prod_util.h"
 #include "chrome/browser/chrome_content_browser_client_parts.h"
-#include "content/public/browser/browser_or_resource_context.h"
-#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "extensions/buildflags/buildflags.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
 #include "services/network/public/mojom/url_loader_factory.mojom-forward.h"
 #include "ui/base/page_transition_types.h"
 
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
 namespace content {
 class RenderFrameHost;
 class RenderProcessHost;
-class ResourceContext;
+class SecurityPrincipal;
 class VpnServiceProxy;
+class WebContents;
 }
 
 namespace url {
 class Origin;
 }
+
+namespace blink {
+class AssociatedInterfaceRegistry;
+}
+
+namespace service_manager {
+template <typename...>
+class BinderRegistryWithArgs;
+using BinderRegistry = BinderRegistryWithArgs<>;
+}  // namespace service_manager
+
+class Profile;
 
 namespace extensions {
 
@@ -35,46 +49,57 @@ class ChromeContentBrowserClientExtensionsPart
     : public ChromeContentBrowserClientParts {
  public:
   ChromeContentBrowserClientExtensionsPart();
+
+  ChromeContentBrowserClientExtensionsPart(
+      const ChromeContentBrowserClientExtensionsPart&) = delete;
+  ChromeContentBrowserClientExtensionsPart& operator=(
+      const ChromeContentBrowserClientExtensionsPart&) = delete;
+
   ~ChromeContentBrowserClientExtensionsPart() override;
 
   // Corresponds to the ChromeContentBrowserClient function of the same name.
-  static GURL GetEffectiveURL(Profile* profile, const GURL& url);
+  static std::optional<GURL> GetEffectiveURL(Profile* profile, const GURL& url);
   static bool ShouldCompareEffectiveURLsForSiteInstanceSelection(
       content::BrowserContext* browser_context,
       content::SiteInstance* candidate_site_instance,
-      bool is_main_frame,
+      bool is_outermost_main_frame,
       const GURL& candidate_url,
       const GURL& destination_url);
-  static bool ShouldUseProcessPerSite(Profile* profile, const GURL& site_url);
+  static bool ShouldUseProcessPerSite(
+      Profile* profile,
+      const content::SecurityPrincipal& security_principal);
   static bool ShouldUseSpareRenderProcessHost(Profile* profile,
                                               const GURL& site_url);
   static bool DoesSiteRequireDedicatedProcess(
       content::BrowserContext* browser_context,
       const GURL& effective_site_url);
-  static bool ShouldLockProcess(content::BrowserContext* browser_context,
-                                const GURL& effective_site_url);
+  static bool ShouldAllowCrossProcessSandboxedFrameForPrecursor(
+      content::BrowserContext* browser_context,
+      const GURL& precursor,
+      const GURL& url);
   static bool CanCommitURL(content::RenderProcessHost* process_host,
                            const GURL& url);
-  static bool IsSuitableHost(Profile* profile,
-                             content::RenderProcessHost* process_host,
-                             const GURL& site_url);
-  static bool ShouldTryToUseExistingProcessHost(Profile* profile,
-                                                const GURL& url);
-  static bool ShouldSubframesTryToReuseExistingProcess(
-      content::RenderFrameHost* main_frame);
+  static bool IsSuitableHost(
+      Profile* profile,
+      content::RenderProcessHost* process_host,
+      const content::SecurityPrincipal& security_principal);
+  static size_t GetProcessCountToIgnoreForLimit();
+  static bool ShouldEmbeddedFramesTryToReuseExistingProcess(
+      content::RenderFrameHost* outermost_main_frame);
   static bool ShouldSwapBrowsingInstancesForNavigation(
       content::SiteInstance* site_instance,
       const GURL& current_effective_url,
       const GURL& destination_effective_url);
-  // TODO(crbug.com/824858): Remove the OnIO method.
-  static bool AllowServiceWorkerOnIO(const GURL& scope,
-                                     const GURL& first_party_url,
-                                     const GURL& script_url,
-                                     content::ResourceContext* context);
-  static bool AllowServiceWorkerOnUI(const GURL& scope,
-                                     const GURL& first_party_url,
-                                     const GURL& script_url,
-                                     content::BrowserContext* context);
+  static bool AllowServiceWorker(const GURL& scope,
+                                 const GURL& first_party_url,
+                                 const GURL& script_url,
+                                 content::BrowserContext* context);
+  static bool MayDeleteServiceWorkerRegistration(
+      const GURL& scope,
+      content::BrowserContext* browser_context);
+  static bool ShouldTryToUpdateServiceWorkerRegistration(
+      const GURL& scope,
+      content::BrowserContext* browser_context);
   static std::vector<url::Origin> GetOriginsRequiringDedicatedProcess();
 
   // Helper function to call InfoMap::SetSigninProcess().
@@ -89,21 +114,39 @@ class ChromeContentBrowserClientExtensionsPart
       content::BrowserContext* browser_context,
       const url::Origin& origin,
       bool is_for_isolated_world,
+      bool is_for_service_worker,
       network::mojom::URLLoaderFactoryParams* factory_params);
 
+  // Checks if the component is a loaded component extension or the ODFS
+  // external component extension.
   static bool IsBuiltinComponent(content::BrowserContext* browser_context,
                                  const url::Origin& origin);
+
+  // Checks if the given context support extensions, based on the profile type.
+  static bool AreExtensionsDisabledForProfile(
+      content::BrowserContext* browser_context);
+
+  // Temporarily allows unregistration of the service worker with the given
+  // `scope` for testing purposes; unregistration is allowed while the returned
+  // AutoReset remains in scope.
+  static base::AutoReset<const GURL*>
+  AllowServiceWorkerUnregistrationForScopeForTesting(const GURL* scope);
 
  private:
   FRIEND_TEST_ALL_PREFIXES(ChromeContentBrowserClientExtensionsPartTest,
                            IsolatedOriginsAndHostedAppWebExtents);
 
   // ChromeContentBrowserClientParts:
-  void RenderProcessWillLaunch(content::RenderProcessHost* host) override;
-  void SiteInstanceGotProcess(content::SiteInstance* site_instance) override;
-  void SiteInstanceDeleting(content::SiteInstance* site_instance) override;
-  void OverrideWebkitPrefs(content::RenderViewHost* rvh,
-                           blink::web_pref::WebPreferences* web_prefs) override;
+  void SiteInstanceGotProcessAndSite(
+      content::SiteInstance* site_instance) override;
+  void OverrideWebPreferences(
+      content::WebContents* web_contents,
+      content::SiteInstance& main_frame_site,
+      blink::web_pref::WebPreferences* web_prefs) override;
+  bool OverrideWebPreferencesAfterNavigation(
+      content::WebContents* web_contents,
+      content::SiteInstance& main_frame_site,
+      blink::web_pref::WebPreferences* web_prefs) override;
   void BrowserURLHandlerCreated(content::BrowserURLHandler* handler) override;
   void GetAdditionalAllowedSchemesForFileSystem(
       std::vector<std::string>* additional_allowed_schemes) override;
@@ -116,10 +159,17 @@ class ChromeContentBrowserClientExtensionsPart
           additional_backends) override;
   void AppendExtraRendererCommandLineSwitches(
       base::CommandLine* command_line,
-      content::RenderProcessHost* process,
-      Profile* profile) override;
-
-  DISALLOW_COPY_AND_ASSIGN(ChromeContentBrowserClientExtensionsPart);
+      content::RenderProcessHost& process) override;
+  void ExposeInterfacesToRenderer(
+      service_manager::BinderRegistry* registry,
+      blink::AssociatedInterfaceRegistry* associated_registry,
+      content::RenderProcessHost* render_process_host) override;
+  void ExposeInterfacesToRendererForServiceWorker(
+      const content::ServiceWorkerVersionBaseInfo& service_worker_version_info,
+      blink::AssociatedInterfaceRegistry& associated_registry) override;
+  void ExposeInterfacesToRendererForRenderFrameHost(
+      content::RenderFrameHost& frame_host,
+      blink::AssociatedInterfaceRegistry& associated_registry) override;
 };
 
 }  // namespace extensions

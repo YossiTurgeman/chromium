@@ -1,17 +1,22 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/enterprise/reporting/extension_info.h"
 
+#include <algorithm>
 #include <string>
 
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/extensions/manifest_handlers/app_launch_info.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/common/extension_set.h"
-#include "extensions/common/manifest_url_handlers.h"
+#include "extensions/common/manifest.h"
+#include "extensions/common/manifest_handlers/manifest_url_handlers.h"
+#include "extensions/common/manifest_handlers/permissions_parser.h"
 #include "extensions/common/permissions/permissions_data.h"
+
+using extensions::mojom::ManifestLocation;
 
 namespace em = ::enterprise_management;
 
@@ -20,44 +25,64 @@ namespace enterprise_reporting {
 namespace {
 
 em::Extension_InstallType GetExtensionInstallType(
-    extensions::Manifest::Location extension_location) {
+    ManifestLocation extension_location) {
   switch (extension_location) {
-    case extensions::Manifest::INTERNAL:
+    case ManifestLocation::kInternal:
       return em::Extension_InstallType_TYPE_NORMAL;
-    case extensions::Manifest::UNPACKED:
-    case extensions::Manifest::COMMAND_LINE:
+    case ManifestLocation::kUnpacked:
+    case ManifestLocation::kCommandLine:
       return em::Extension_InstallType_TYPE_DEVELOPMENT;
-    case extensions::Manifest::EXTERNAL_PREF:
-    case extensions::Manifest::EXTERNAL_REGISTRY:
-    case extensions::Manifest::EXTERNAL_PREF_DOWNLOAD:
+    case ManifestLocation::kExternalPref:
+    case ManifestLocation::kExternalRegistry:
+    case ManifestLocation::kExternalPrefDownload:
       return em::Extension_InstallType_TYPE_SIDELOAD;
-    case extensions::Manifest::EXTERNAL_POLICY:
-    case extensions::Manifest::EXTERNAL_POLICY_DOWNLOAD:
+    case ManifestLocation::kExternalPolicy:
+    case ManifestLocation::kExternalPolicyDownload:
       return em::Extension_InstallType_TYPE_ADMIN;
-    case extensions::Manifest::NUM_LOCATIONS:
-      NOTREACHED();
-      FALLTHROUGH;
-    case extensions::Manifest::INVALID_LOCATION:
-    case extensions::Manifest::COMPONENT:
-    case extensions::Manifest::EXTERNAL_COMPONENT:
+    case ManifestLocation::kInvalidLocation:
+    case ManifestLocation::kComponent:
+    case ManifestLocation::kExternalComponent:
       return em::Extension_InstallType_TYPE_OTHER;
+    default:
+      NOTREACHED();
   }
 }
 
 void AddPermission(const extensions::Extension* extension,
                    em::Extension* extension_info) {
-  for (const std::string& permission :
-       extension->permissions_data()->active_permissions().GetAPIsAsStrings()) {
+  auto add_permission = [extension_info](const std::string& permission) {
     extension_info->add_permissions(permission);
-  }
+  };
+
+  std::ranges::for_each(
+      extensions::PermissionsParser::GetRequiredPermissions(extension)
+          .GetAPIsAsStrings(),
+      add_permission);
+
+  std::ranges::for_each(
+      extensions::PermissionsParser::GetOptionalPermissions(extension)
+          .GetAPIsAsStrings(),
+      add_permission);
+  return;
 }
 
 void AddHostPermission(const extensions::Extension* extension,
                        em::Extension* extension_info) {
-  for (const auto& url :
-       extension->permissions_data()->active_permissions().explicit_hosts()) {
+  auto add_permission = [extension_info](const URLPattern& url) {
     extension_info->add_host_permissions(url.GetAsString());
-  }
+  };
+
+  std::ranges::for_each(
+      extensions::PermissionsParser::GetRequiredPermissions(extension)
+          .explicit_hosts(),
+      add_permission);
+
+  std::ranges::for_each(
+      extensions::PermissionsParser::GetOptionalPermissions(extension)
+          .explicit_hosts(),
+      add_permission);
+
+  return;
 }
 
 void AddExtensions(const extensions::ExtensionSet& extensions,
@@ -65,8 +90,9 @@ void AddExtensions(const extensions::ExtensionSet& extensions,
                    bool enabled) {
   for (const auto& extension : extensions) {
     // Skip the component extension.
-    if (!extension->ShouldExposeViaManagementAPI())
+    if (extensions::Manifest::IsComponentLocation(extension->location())) {
       continue;
+    }
 
     auto* extension_info = profile_info->add_extensions();
     extension_info->set_id(extension->id());
@@ -83,6 +109,7 @@ void AddExtensions(const extensions::ExtensionSet& extensions,
     AddPermission(extension.get(), extension_info);
     AddHostPermission(extension.get(), extension_info);
     extension_info->set_from_webstore(extension->from_webstore());
+    extension_info->set_manifest_version(extension->manifest_version());
   }
 }
 
@@ -91,26 +118,27 @@ void AddExtensions(const extensions::ExtensionSet& extensions,
 em::Extension_ExtensionType ConvertExtensionTypeToProto(
     extensions::Manifest::Type extension_type) {
   switch (extension_type) {
-    case extensions::Manifest::TYPE_UNKNOWN:
-    case extensions::Manifest::TYPE_SHARED_MODULE:
+    case extensions::Manifest::Type::kUnknown:
+    case extensions::Manifest::Type::kSharedModule:
       return em::Extension_ExtensionType_TYPE_UNKNOWN;
-    case extensions::Manifest::TYPE_EXTENSION:
+    case extensions::Manifest::Type::kExtension:
       return em::Extension_ExtensionType_TYPE_EXTENSION;
-    case extensions::Manifest::TYPE_THEME:
+    case extensions::Manifest::Type::kTheme:
       return em::Extension_ExtensionType_TYPE_THEME;
-    case extensions::Manifest::TYPE_USER_SCRIPT:
+    case extensions::Manifest::Type::kUserScript:
       return em::Extension_ExtensionType_TYPE_USER_SCRIPT;
-    case extensions::Manifest::TYPE_HOSTED_APP:
+    case extensions::Manifest::Type::kHostedApp:
       return em::Extension_ExtensionType_TYPE_HOSTED_APP;
-    case extensions::Manifest::TYPE_LEGACY_PACKAGED_APP:
+    case extensions::Manifest::Type::kLegacyPackagedApp:
       return em::Extension_ExtensionType_TYPE_LEGACY_PACKAGED_APP;
-    case extensions::Manifest::TYPE_PLATFORM_APP:
+    case extensions::Manifest::Type::kPlatformApp:
       return em::Extension_ExtensionType_TYPE_PLATFORM_APP;
-    case extensions::Manifest::TYPE_LOGIN_SCREEN_EXTENSION:
+    case extensions::Manifest::Type::kLoginScreenExtension:
       return em::Extension_ExtensionType_TYPE_LOGIN_SCREEN_EXTENSION;
-    case extensions::Manifest::NUM_LOAD_TYPES:
+    case extensions::Manifest::Type::kChromeOSSystemExtension:
+      return em::Extension_ExtensionType_TYPE_CHROMEOS_SYSTEM_EXTENSION;
+    case extensions::Manifest::Type::kNumLoadTypes:
       NOTREACHED();
-      return em::Extension_ExtensionType_TYPE_UNKNOWN;
   }
 }
 

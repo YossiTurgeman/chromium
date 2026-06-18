@@ -1,15 +1,12 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_CHROMEOS_EXTENSIONS_LOGIN_SCREEN_LOGIN_STATE_SESSION_STATE_CHANGED_EVENT_DISPATCHER_H_
 #define CHROME_BROWSER_CHROMEOS_EXTENSIONS_LOGIN_SCREEN_LOGIN_STATE_SESSION_STATE_CHANGED_EVENT_DISPATCHER_H_
 
-#include <memory>
-
-#include "base/macros.h"
-#include "base/scoped_observer.h"
-#include "chrome/common/extensions/api/login_state.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "components/session_manager/core/session_manager.h"
 #include "components/session_manager/core/session_manager_observer.h"
 #include "extensions/browser/browser_context_keyed_api_factory.h"
@@ -23,9 +20,8 @@ namespace extensions {
 
 class EventRouter;
 
-// |SessionStateChangedEventDispatcher| observes changes in the session state
-// and dispatches them to extensions listening on the
-// |loginState.onSessionStateChanged| event.
+// |SessionStateChangedEventDispatcher| dispatches changes in the session state
+// to extensions listening on the |loginState.onSessionStateChanged| event.
 class SessionStateChangedEventDispatcher
     : public session_manager::SessionManagerObserver,
       public BrowserContextKeyedAPI {
@@ -36,13 +32,19 @@ class SessionStateChangedEventDispatcher
   void Shutdown() override;
 
   explicit SessionStateChangedEventDispatcher(
-      content::BrowserContext* browser_context_);
+      content::BrowserContext* browser_context);
+
+  SessionStateChangedEventDispatcher(
+      const SessionStateChangedEventDispatcher&) = delete;
+  SessionStateChangedEventDispatcher& operator=(
+      const SessionStateChangedEventDispatcher&) = delete;
+
   ~SessionStateChangedEventDispatcher() override;
 
-  // SessionManagerObserver implementation.
-  void OnSessionStateChanged() override;
-
   void SetEventRouterForTesting(EventRouter* event_router);
+
+  // session_manager::SessionManagerObserver:
+  void OnSessionStateChanged() override;
 
  private:
   // Needed for BrowserContextKeyedAPI implementation.
@@ -55,14 +57,12 @@ class SessionStateChangedEventDispatcher
   }
   static const bool kServiceIsNULLWhileTesting = true;
 
-  ScopedObserver<session_manager::SessionManager,
-                 session_manager::SessionManagerObserver>
-      session_manager_observer_;
-  content::BrowserContext* browser_context_;
-  EventRouter* event_router_;
-  api::login_state::SessionState session_state_;
+  raw_ptr<content::BrowserContext, DanglingUntriaged> browser_context_;
+  raw_ptr<EventRouter, DanglingUntriaged> event_router_;
 
-  DISALLOW_COPY_AND_ASSIGN(SessionStateChangedEventDispatcher);
+  base::ScopedObservation<session_manager::SessionManager,
+                          session_manager::SessionManagerObserver>
+      session_manager_observation_{this};
 };
 
 template <>

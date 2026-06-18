@@ -1,16 +1,14 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_CREDENTIAL_PROVIDER_GAIACP_GAIA_CREDENTIAL_PROVIDER_MODULE_H_
 #define CHROME_CREDENTIAL_PROVIDER_GAIACP_GAIA_CREDENTIAL_PROVIDER_MODULE_H_
 
-// Due to windows include file ordering, this needs to remain first.
-#include "chrome/credential_provider/gaiacp/stdafx.h"
-
-#include "chrome/credential_provider/gaiacp/gaia_credential_provider_i.h"
-
 #include "base/at_exit.h"
+#include "base/win/atl.h"
+#include "chrome/credential_provider/gaiacp/gaia_credential_provider_i.h"
+#include "chrome/credential_provider/gaiacp/scoped_handle.h"
 
 namespace base {
 class AtExitManager;
@@ -43,6 +41,10 @@ class CGaiaCredentialProviderModule
   // validity is up to date.
   void RefreshTokenHandleValidity();
 
+  // Fires a thread and checks the status of GCPW extension and runs it if not
+  // running.
+  void CheckGCPWExtension();
+
   // Initializes the crash reporting for the module. Initialization happens only
   // once even if the function is called multiple times.
   void InitializeCrashReporting();
@@ -54,6 +56,8 @@ class CGaiaCredentialProviderModule
   std::unique_ptr<base::AtExitManager> exit_manager_;
   bool is_testing_ = false;
   bool token_handle_validity_refreshed_ = false;
+  base::win::ScopedHandle::Handle gcpw_extension_checker_thread_handle_;
+  volatile long gcpw_extension_check_performed_;
   volatile long crashpad_initialized_ = 0;
 };
 

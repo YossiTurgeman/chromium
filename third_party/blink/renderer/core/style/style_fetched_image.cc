@@ -23,59 +23,70 @@
 
 #include "third_party/blink/renderer/core/style/style_fetched_image.h"
 
-#include "third_party/blink/public/web/web_local_frame_client.h"
 #include "third_party/blink/renderer/core/css/css_image_value.h"
+#include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
-#include "third_party/blink/renderer/core/frame/local_frame.h"
-#include "third_party/blink/renderer/core/frame/local_frame_client.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/loader/resource/image_resource_content.h"
-#include "third_party/blink/renderer/core/paint/image_element_timing.h"
+#include "third_party/blink/renderer/core/paint/timing/image_element_timing.h"
+#include "third_party/blink/renderer/core/paint/timing/paint_timing.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
-#include "third_party/blink/renderer/core/svg/graphics/svg_image.h"
 #include "third_party/blink/renderer/core/svg/graphics/svg_image_for_container.h"
-#include "third_party/blink/renderer/platform/geometry/layout_size.h"
 #include "third_party/blink/renderer/platform/graphics/bitmap_image.h"
-#include "third_party/blink/renderer/platform/graphics/placeholder_image.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
-StyleFetchedImage::StyleFetchedImage(const Document& document,
-                                     FetchParameters& params,
-                                     bool is_lazyload_possibly_deferred)
-    : document_(&document),
-      url_(params.Url()),
-      origin_clean_(!params.IsFromOriginDirtyStyleSheet()),
-      is_ad_related_(params.GetResourceRequest().IsAdResource()) {
+StyleFetchedImage::StyleFetchedImage(ImageResourceContent* image,
+                                     const CSSUrlData& url_data,
+                                     const Document& document,
+                                     const KURL& url,
+                                     const float override_image_resolution)
+    : url_data_(url_data),
+      document_(document),
+      url_(url),
+      override_image_resolution_(override_image_resolution) {
   is_image_resource_ = true;
-  is_lazyload_possibly_deferred_ = is_lazyload_possibly_deferred;
 
-  image_ = ImageResourceContent::Fetch(params, document_->Fetcher());
+  image_ = image;
   image_->AddObserver(this);
-  // ResourceFetcher is not determined from StyleFetchedImage and it is
-  // impossible to send a request for refetching.
-  image_->SetNotRefetchableDataFromDiskCache();
 }
 
 StyleFetchedImage::~StyleFetchedImage() = default;
 
-void StyleFetchedImage::Dispose() {
-  image_->RemoveObserver(this);
+void StyleFetchedImage::Prefinalize() {
+  image_->DidRemoveObserver();
   image_ = nullptr;
 }
 
 bool StyleFetchedImage::IsEqual(const StyleImage& other) const {
-  if (!other.IsImageResource())
+  if (other.IsPendingImage()) {
+    // Ignore pending status when comparing; as long as the values are
+    // equal, the same, the images should be considered equal, too.
+    return base::ValuesEquivalent(CssValue(), other.CssValue());
+  }
+  if (!other.IsImageResource()) {
     return false;
+  }
   const auto& other_image = To<StyleFetchedImage>(other);
-  if (image_ != other_image.image_)
-    return false;
-  return url_ == other_image.url_;
+  return image_ == other_image.image_ && *url_data_ == *other_image.url_data_ &&
+         EqualResolutions(override_image_resolution_,
+                          other_image.override_image_resolution_);
 }
 
 WrappedImagePtr StyleFetchedImage::Data() const {
   return image_.Get();
+}
+
+float StyleFetchedImage::ImageScaleFactor() const {
+  if (override_image_resolution_ > 0.0f) {
+    return override_image_resolution_;
+  }
+
+  if (image_->HasDevicePixelRatioHeaderValue()) {
+    return image_->DevicePixelRatioHeaderValue();
+  }
+
+  return 1.0f;
 }
 
 ImageResourceContent* StyleFetchedImage::CachedImage() const {
@@ -84,47 +95,103 @@ ImageResourceContent* StyleFetchedImage::CachedImage() const {
 
 CSSValue* StyleFetchedImage::CssValue() const {
   return MakeGarbageCollected<CSSImageValue>(
-      AtomicString(url_.GetString()), url_, Referrer(),
-      origin_clean_ ? OriginClean::kTrue : OriginClean::kFalse, is_ad_related_,
-      const_cast<StyleFetchedImage*>(this));
+      *url_data_->MakeComputed(), const_cast<StyleFetchedImage*>(this));
 }
 
 CSSValue* StyleFetchedImage::ComputedCSSValue(const ComputedStyle&,
-                                              bool allow_visited_style) const {
+                                              bool allow_visited_style,
+                                              CSSValuePhase value_phase) const {
   return CssValue();
 }
 
 bool StyleFetchedImage::CanRender() const {
-  return !image_->ErrorOccurred() && !image_->GetImage()->IsNull();
+  return image_->HasImage() && !image_->ErrorOccurred();
 }
 
 bool StyleFetchedImage::IsLoaded() const {
   return image_->IsLoaded();
 }
 
+bool StyleFetchedImage::IsLoading() const {
+  return image_->IsLoading();
+}
+
 bool StyleFetchedImage::ErrorOccurred() const {
   return image_->ErrorOccurred();
 }
 
-FloatSize StyleFetchedImage::ImageSize(
-    const Document&,
-    float multiplier,
-    const FloatSize& default_object_size,
-    RespectImageOrientationEnum respect_orientation) const {
-  Image* image = image_->GetImage();
-  if (image_->HasDevicePixelRatioHeaderValue()) {
+bool StyleFetchedImage::IsCorsSameOrigin() const {
+  if (!image_->IsLoaded() && image_->GetImage() &&
+      image_->GetImage()->IsSVGImage()) {
+    return false;
+  }
+  return image_->IsCorsSameOrigin();
+}
+
+float StyleFetchedImage::ApplyImageResolution(float multiplier) const {
+  const Image& image = *image_->GetImage();
+  if (image.IsBitmapImage() && override_image_resolution_ > 0.0f) {
+    multiplier /= override_image_resolution_;
+  } else if (image_->HasDevicePixelRatioHeaderValue()) {
     multiplier /= image_->DevicePixelRatioHeaderValue();
   }
-  if (auto* svg_image = DynamicTo<SVGImage>(image)) {
-    return ImageSizeForSVGImage(svg_image, multiplier, default_object_size);
-  }
+  return multiplier;
+}
 
-  FloatSize size(image->Size(respect_orientation));
+gfx::SizeF StyleFetchedImage::ImageSize(
+    float multiplier,
+    const gfx::SizeF& default_object_size,
+    RespectImageOrientationEnum respect_orientation) const {
+  multiplier = ApplyImageResolution(multiplier);
+
+  Image& image = *image_->GetImage();
+  gfx::SizeF size;
+  if (auto* svg_image = DynamicTo<SVGImage>(image)) {
+    const SVGImageViewInfo* view_info =
+        SVGImageForContainer::CreateViewInfo(*svg_image, url_);
+    const gfx::SizeF unzoomed_default_object_size =
+        gfx::ScaleSize(default_object_size, 1 / multiplier);
+    size = SVGImageForContainer::ConcreteObjectSize(
+        *svg_image, view_info, unzoomed_default_object_size);
+  } else {
+    size = gfx::SizeF(
+        image.Size(ForceOrientationIfNecessary(respect_orientation)));
+  }
   return ApplyZoom(size, multiplier);
 }
 
+NaturalSizingInfo StyleFetchedImage::GetNaturalSizingInfo(
+    float multiplier,
+    RespectImageOrientationEnum respect_orientation) const {
+  Image& image = *image_->GetImage();
+  NaturalSizingInfo sizing_info;
+  if (auto* svg_image = DynamicTo<SVGImage>(image)) {
+    const SVGImageViewInfo* view_info =
+        SVGImageForContainer::CreateViewInfo(*svg_image, url_);
+    sizing_info =
+        SVGImageForContainer::GetNaturalDimensions(*svg_image, view_info)
+            .value_or(NaturalSizingInfo::None());
+  } else {
+    gfx::SizeF size(
+        image.Size(ForceOrientationIfNecessary(respect_orientation)));
+    sizing_info = NaturalSizingInfo::MakeFixed(size);
+  }
+
+  multiplier = ApplyImageResolution(multiplier);
+  sizing_info.size = ApplyZoom(sizing_info.size, multiplier);
+  return sizing_info;
+}
+
 bool StyleFetchedImage::HasIntrinsicSize() const {
-  return image_->GetImage()->HasIntrinsicSize();
+  Image& image = *image_->GetImage();
+  if (auto* svg_image = DynamicTo<SVGImage>(image)) {
+    const SVGImageViewInfo* view_info =
+        SVGImageForContainer::CreateViewInfo(*svg_image, url_);
+    std::optional<NaturalSizingInfo> natural_sizing_info =
+        SVGImageForContainer::GetNaturalDimensions(*svg_image, view_info);
+    return natural_sizing_info && !natural_sizing_info->IsNone();
+  }
+  return image.HasIntrinsicSize();
 }
 
 void StyleFetchedImage::AddClient(ImageResourceObserver* observer) {
@@ -136,17 +203,25 @@ void StyleFetchedImage::RemoveClient(ImageResourceObserver* observer) {
 }
 
 void StyleFetchedImage::ImageNotifyFinished(ImageResourceContent*) {
+  if (!document_) {
+    return;
+  }
+
   if (image_ && image_->HasImage()) {
     Image& image = *image_->GetImage();
 
-    auto* svg_image = DynamicTo<SVGImage>(image);
-    if (document_ && svg_image)
-      svg_image->UpdateUseCounters(*document_);
+    if (auto* svg_image = DynamicTo<SVGImage>(image)) {
+      // Check that the SVGImage has completed loading (i.e the 'load' event
+      // has been dispatched in the SVG document).
+      svg_image->CheckLoaded();
+      svg_image->UpdateUseCountersAfterLoad(*document_);
+      svg_image->MaybeRecordSvgImageProcessingTime(*document_);
+    }
+    image_->RecordDecodedImageType(document_->GetExecutionContext());
   }
 
-  if (document_) {
-    if (LocalDOMWindow* window = document_->domWindow())
-      ImageElementTiming::From(*window).NotifyBackgroundImageFinished(this);
+  if (LocalDOMWindow* window = document_->domWindow()) {
+    ImageElementTiming::From(*window).NotifyBackgroundImageFinished(this);
   }
 
   // Oilpan: do not prolong the Document's lifetime.
@@ -155,40 +230,29 @@ void StyleFetchedImage::ImageNotifyFinished(ImageResourceContent*) {
 
 scoped_refptr<Image> StyleFetchedImage::GetImage(
     const ImageResourceObserver&,
-    const Document&,
+    const Node& node,
     const ComputedStyle& style,
-    const FloatSize& target_size) const {
+    const gfx::SizeF& target_size) const {
   Image* image = image_->GetImage();
-  if (image->IsPlaceholderImage()) {
-    static_cast<PlaceholderImage*>(image)->SetIconAndTextScaleFactor(
-        style.EffectiveZoom());
-  }
-
   auto* svg_image = DynamicTo<SVGImage>(image);
-  if (!svg_image)
+  if (!svg_image) {
     return image;
-  return SVGImageForContainer::Create(svg_image, target_size,
-                                      style.EffectiveZoom(), url_);
+  }
+  const SVGImageViewInfo* view_info =
+      SVGImageForContainer::CreateViewInfo(*svg_image, url_);
+  return SVGImageForContainer::Create(
+      *svg_image, target_size, style.EffectiveZoom(), view_info,
+      node.GetDocument().GetStyleEngine().ResolveColorSchemeForEmbedding(
+          &style));
 }
 
 bool StyleFetchedImage::KnownToBeOpaque(const Document&,
                                         const ComputedStyle&) const {
-  return image_->GetImage()->CurrentFrameKnownToBeOpaque();
-}
-
-void StyleFetchedImage::LoadDeferredImage(const Document& document) {
-  DCHECK(is_lazyload_possibly_deferred_);
-  is_lazyload_possibly_deferred_ = false;
-  document_ = &document;
-  if (document.GetFrame() && document.GetFrame()->Client()) {
-    document.GetFrame()->Client()->DidObserveLazyLoadBehavior(
-        WebLocalFrameClient::LazyLoadBehavior::kLazyLoadedImage);
-  }
-  image_->LoadDeferredImage(document_->Fetcher());
+  return image_->GetImage()->IsOpaque();
 }
 
 bool StyleFetchedImage::GetImageAnimationPolicy(
-    web_pref::ImageAnimationPolicy& policy) {
+    mojom::blink::ImageAnimationPolicy& policy) {
   if (!document_ || !document_->GetSettings()) {
     return false;
   }
@@ -196,10 +260,16 @@ bool StyleFetchedImage::GetImageAnimationPolicy(
   return true;
 }
 
+bool StyleFetchedImage::CanBeSpeculativelyDecoded() const {
+  return false;
+}
+
 void StyleFetchedImage::Trace(Visitor* visitor) const {
   visitor->Trace(image_);
+  visitor->Trace(url_data_);
   visitor->Trace(document_);
   StyleImage::Trace(visitor);
+  ImageResourceObserver::Trace(visitor);
 }
 
 }  // namespace blink

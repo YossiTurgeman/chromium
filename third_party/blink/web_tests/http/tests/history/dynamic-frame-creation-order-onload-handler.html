@@ -19,6 +19,7 @@
         right: 3em;
       }
     </style>
+    <script src="/resources/prevent-bfcache.js"></script>
     <script>
       function addFinalFrameURL(className) {
         var frame = document.getElementsByClassName(className)[0]
@@ -65,9 +66,11 @@
       function addLeftFrame() { addFrame('resources/red.html', 'left'); }
       function addRightFrame() { addFrame('resources/green.html', 'right'); }
 
-      function onLoad() {
-        if (!sessionStorage.pageLoadCount)
+      async function onLoad() {
+        await preventBFCache();
+        if (!sessionStorage.pageLoadCount) {
           sessionStorage.pageLoadCount = 0;
+        }
         sessionStorage.pageLoadCount = parseInt(sessionStorage.pageLoadCount) + 1;
 
         if ((sessionStorage.pageLoadCount % 2) == 0) {
@@ -97,6 +100,10 @@
     The tricky part is that the order of subframe creation changes at each load
     (via sessionStorage.pageLoadCount).  This can confuse the browser into restoring
     (after back navigation) green.htm into left frame and red.htm into right frame.
+    </p>
+
+    <p>This test expects to reset and reload iframes on main frame's back
+    navigation. Back-forward cache needs to be disabled to run this test.
     </p>
 
     <hr>

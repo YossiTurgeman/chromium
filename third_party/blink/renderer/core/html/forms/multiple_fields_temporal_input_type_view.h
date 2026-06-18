@@ -58,6 +58,8 @@ class MultipleFieldsTemporalInputTypeView final
 
   wtf_size_t FocusedFieldIndex() const override;
 
+  bool IsMultipleFieldsTemporal() const override { return true; }
+
  private:
   // DateTimeEditElement::EditControlOwner functions
   void DidBlurFromControl(mojom::blink::FocusType) final;
@@ -85,7 +87,7 @@ class MultipleFieldsTemporalInputTypeView final
   Element& PickerOwnerElement() const final;
   bool SetupDateTimeChooserParameters(DateTimeChooserParameters&) final;
   void DidEndChooser() final;
-  String AriaRoleForPickerIndicator() const final;
+  String AriaLabelForPickerIndicator() const final;
 
   // ClearButtonElement::ClearButtonOwner functions.
   void FocusAndSelectClearButtonOwner() override;
@@ -94,9 +96,12 @@ class MultipleFieldsTemporalInputTypeView final
 
   // InputTypeView functions
   void Blur() final;
+  AppearanceValue AutoAppearance() const override;
+  void OpenPopupView() override;
   void ClosePopupView() override;
   bool HasOpenedPopup() const override;
-  void CustomStyleForLayoutObject(ComputedStyle& style) override;
+  bool IsPickerVisible() const override;
+  void AdjustStyle(ComputedStyleBuilder&) override;
   void CreateShadowSubtree() final;
   void DestroyShadowSubtree() final;
   void DisabledAttributeChanged() final;
@@ -105,6 +110,7 @@ class MultipleFieldsTemporalInputTypeView final
   void HandleFocusInEvent(Element* old_focused_element,
                           mojom::blink::FocusType) final;
   void HandleKeydownEvent(KeyboardEvent&) final;
+  void AccessKeyAction(SimulatedClickCreationScope creation_scope) final;
   bool HasBadInput() const override;
   bool HasCustomFocusLogic() const final;
   void MinOrMaxAttributeChanged() final;
@@ -122,6 +128,8 @@ class MultipleFieldsTemporalInputTypeView final
   AXObject* PopupRootAXObject() final;
 
   DateTimeEditElement* GetDateTimeEditElement() const;
+  // Similar to GetDateTimeEditElement(), but does not force creation.
+  DateTimeEditElement* GetDateTimeEditElementIfCreated() const;
   SpinButtonElement* GetSpinButtonElement() const;
   ClearButtonElement* GetClearButtonElement() const;
   PickerIndicatorElement* GetPickerIndicatorElement() const;

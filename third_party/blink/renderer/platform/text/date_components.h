@@ -32,10 +32,11 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_DATE_COMPONENTS_H_
 
 #include <limits>
+
+#include "base/time/time.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
-#include "third_party/blink/renderer/platform/wtf/text/unicode.h"
 
 namespace blink {
 
@@ -82,7 +83,7 @@ class PLATFORM_EXPORT DateComponents {
   int Week() const { return week_; }
   Type GetType() const { return type_; }
 
-  enum SecondFormat {
+  enum class SecondFormat {
     kNone,  // Suppress the second part and the millisecond part if they are 0.
     kSecond,  // Always show the second part, and suppress the millisecond part
               // if it is 0.
@@ -92,7 +93,7 @@ class PLATFORM_EXPORT DateComponents {
   // Returns an ISO 8601 representation for this instance.
   // The format argument is valid for kDateTime, kDateTimeLocal, and
   // kTime types.
-  String ToString(SecondFormat format = kNone) const;
+  String ToString(SecondFormat format = SecondFormat::kNone) const;
 
   // Parse*() and SetMillisecondsSince*() functions are initializers for an
   // DateComponents instance. If these functions return false, the instance
@@ -190,10 +191,10 @@ class PLATFORM_EXPORT DateComponents {
   int MaxWeekNumberInYear() const;
   bool ParseYear(const String&, unsigned start, unsigned& end);
   // Helper for MillisecondsSinceEpoch().
-  double MillisecondsSinceEpochForTime() const;
+  base::TimeDelta MillisecondsSinceEpochForTime() const;
   // Helpers for SetMillisecondsSinceEpochFor*().
   bool SetMillisecondsSinceEpochForDateInternal(double ms);
-  void SetMillisecondsSinceMidnightInternal(double ms);
+  void SetMillisecondsSinceMidnightInternal(int ms_in_day);
   // Helper for ToString().
   String ToStringForTime(SecondFormat) const;
 

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,23 +11,33 @@
 
 namespace blink {
 
-class CORE_EXPORT CSSDefaultNonInterpolableValue : public NonInterpolableValue {
+class CORE_EXPORT CSSDefaultNonInterpolableValue final
+    : public NonInterpolableValue {
  public:
+  using AttrTainted = base::StrongAlias<class AttrTaintedTag, bool>;
+  explicit CSSDefaultNonInterpolableValue(const CSSValue*,
+                                          AttrTainted is_attr_tainted);
   ~CSSDefaultNonInterpolableValue() final = default;
 
-  static scoped_refptr<CSSDefaultNonInterpolableValue> Create(
-      const CSSValue* css_value) {
-    return base::AdoptRef(new CSSDefaultNonInterpolableValue(css_value));
+  void Trace(Visitor* visitor) const override {
+    NonInterpolableValue::Trace(visitor);
+    visitor->Trace(css_value_);
   }
 
   const CSSValue* CssValue() const { return css_value_.Get(); }
 
+  bool IsAttrTainted() const { return is_attr_tainted_; }
+
   DECLARE_NON_INTERPOLABLE_VALUE_TYPE();
 
  private:
-  CSSDefaultNonInterpolableValue(const CSSValue*);
-
-  Persistent<const CSSValue> css_value_;
+  Member<const CSSValue> css_value_;
+  // Currently, only non-interpolable <string> types can be used within <url>
+  // types in CSS. If interpolable types (e.g., <integer>) become usable within
+  // <url> types in the future (perhaps via a hypothetical 'concat()' function),
+  // we will need to add an `is_attr_tainted_` flag to other InterpolableValue
+  // types as well.
+  bool is_attr_tainted_;
 };
 
 template <>
@@ -44,40 +54,44 @@ struct DowncastTraits<CSSDefaultNonInterpolableValue> {
 // A catch all default for CSSValue interpolation.
 class CSSDefaultInterpolationType : public InterpolationType {
  public:
-  CSSDefaultInterpolationType(PropertyHandle property)
+  explicit CSSDefaultInterpolationType(PropertyHandle property)
       : InterpolationType(property) {
     DCHECK(property.IsCSSProperty());
   }
 
   InterpolationValue MaybeConvertSingle(const PropertySpecificKeyframe&,
-                                        const InterpolationEnvironment&,
+                                        const CSSInterpolationEnvironment&,
                                         const InterpolationValue& underlying,
                                         ConversionCheckers&) const override;
 
   PairwiseInterpolationValue MaybeConvertPairwise(
       const PropertySpecificKeyframe& start_keyframe,
       const PropertySpecificKeyframe& end_keyframe,
-      const InterpolationEnvironment&,
+      const CSSInterpolationEnvironment&,
       const InterpolationValue& underlying,
       ConversionCheckers&) const final {
     return nullptr;
   }
 
   InterpolationValue MaybeConvertUnderlyingValue(
-      const InterpolationEnvironment&) const final {
+      const CSSInterpolationEnvironment&) const final {
     return nullptr;
   }
 
-  void Composite(UnderlyingValueOwner& underlying_value_owner,
-                 double underlying_fraction,
-                 const InterpolationValue& value,
-                 double interpolation_fraction) const final {
-    underlying_value_owner.Set(*this, value);
+  PairwiseInterpolationValue MaybeMergeSingles(
+      InterpolationValue&& start,
+      InterpolationValue&& end) const override {
+    return nullptr;
   }
+
+  void Composite(UnderlyingValueOwner&,
+                 double underlying_fraction,
+                 const InterpolationValue&,
+                 double interpolation_fraction) const final;
 
   void Apply(const InterpolableValue&,
              const NonInterpolableValue*,
-             InterpolationEnvironment&) const final;
+             CSSInterpolationEnvironment&) const final;
 };
 
 }  // namespace blink

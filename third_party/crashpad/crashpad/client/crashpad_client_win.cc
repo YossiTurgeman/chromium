@@ -1,4 +1,4 @@
-// Copyright 2015 The Crashpad Authors. All rights reserved.
+// Copyright 2015 The Crashpad Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,20 +16,25 @@
 
 #include <windows.h>
 
+// Must be after windows.h.
+#include <versionhelpers.h>
+#include <werapi.h>
+
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
 
+#include <atomic>
 #include <memory>
+#include <string_view>
 
-#include "base/atomicops.h"
+#include "base/check_op.h"
 #include "base/logging.h"
-#include "base/macros.h"
 #include "base/scoped_generic.h"
-#include "base/strings/string16.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/synchronization/lock.h"
+#include "build/build_config.h"
 #include "util/file/file_io.h"
 #include "util/misc/capture_context.h"
 #include "util/misc/from_pointer_cast.h"
@@ -38,6 +43,7 @@
 #include "util/win/command_line.h"
 #include "util/win/context_wrappers.h"
 #include "util/win/critical_section_with_debug_info.h"
+#include "util/win/exception_codes.h"
 #include "util/win/get_function.h"
 #include "util/win/handle.h"
 #include "util/win/initial_client_data.h"
@@ -62,18 +68,24 @@ HANDLE g_signal_exception = INVALID_HANDLE_VALUE;
 // Where we store the exception information that the crash handler reads.
 ExceptionInformation g_crash_exception_information;
 
-// These handles are never closed. g_signal_non_crash_dump is used to signal to
-// the server to take a dump (not due to an exception), and the server will
-// signal g_non_crash_dump_done when the dump is completed.
-HANDLE g_signal_non_crash_dump = INVALID_HANDLE_VALUE;
-HANDLE g_non_crash_dump_done = INVALID_HANDLE_VALUE;
-
-// Guards multiple simultaneous calls to DumpWithoutCrash(). This is leaked.
+// Guards multiple simultaneous calls to DumpWithoutCrash() in the client.
+// This is leaked.
 base::Lock* g_non_crash_dump_lock;
 
 // Where we store a pointer to the context information when taking a non-crash
 // dump.
 ExceptionInformation g_non_crash_exception_information;
+
+// Context for the out-of-process exception handler module and holds non-crash
+// dump handles. Handles are never closed once created.
+WerRegistration g_wer_registration = {WerRegistration::kWerRegistrationVersion,
+                                      INVALID_HANDLE_VALUE,
+                                      INVALID_HANDLE_VALUE,
+                                      false,
+                                      nullptr,
+                                      {0},
+                                      {0},
+                                      {0}};
 
 enum class StartupState : int {
   kNotReady = 0,  // This must be value 0 because it is the initial value of a
@@ -86,7 +98,7 @@ enum class StartupState : int {
 // when the handler is known to have started successfully, or failed to start
 // the value will be updated. The unhandled exception filter will not proceed
 // until one of those two cases happens.
-base::subtle::AtomicWord g_handler_startup_state;
+std::atomic<StartupState> g_handler_startup_state;
 
 // A CRITICAL_SECTION initialized with
 // RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO to force it to be allocated with a
@@ -97,20 +109,18 @@ CRITICAL_SECTION g_critical_section_with_debug_info;
 
 void SetHandlerStartupState(StartupState state) {
   DCHECK(state == StartupState::kSucceeded || state == StartupState::kFailed);
-  base::subtle::Release_Store(&g_handler_startup_state,
-                              static_cast<base::subtle::AtomicWord>(state));
+  g_handler_startup_state.store(state, std::memory_order_release);
 }
 
 StartupState BlockUntilHandlerStartedOrFailed() {
   // Wait until we know the handler has either succeeded or failed to start.
-  base::subtle::AtomicWord startup_state;
-  while (
-      (startup_state = base::subtle::Acquire_Load(&g_handler_startup_state)) ==
-      static_cast<int>(StartupState::kNotReady)) {
+  StartupState startup_state;
+  while ((startup_state = g_handler_startup_state.load(
+              std::memory_order_acquire)) == StartupState::kNotReady) {
     Sleep(1);
   }
 
-  return static_cast<StartupState>(startup_state);
+  return startup_state;
 }
 
 #if defined(ADDRESS_SANITIZER)
@@ -137,7 +147,7 @@ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_pointers) {
   // Otherwise, we know the handler startup has succeeded, and we can continue.
 
   // Tracks whether a thread has already entered UnhandledExceptionHandler.
-  static base::subtle::AtomicWord have_crashed;
+  static std::atomic<bool> have_crashed;
 
   // This is a per-process handler. While this handler is being invoked, other
   // threads are still executing as usual, so multiple threads could enter at
@@ -151,7 +161,7 @@ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_pointers) {
   // that we won't save the exception pointers from the second and further
   // crashes, but contention here is very unlikely, and we'll still have a stack
   // that's blocked at this location.
-  if (base::subtle::Barrier_AtomicIncrement(&have_crashed, 1) > 1) {
+  if (have_crashed.exchange(true)) {
     SleepEx(INFINITE, false);
   }
 
@@ -180,6 +190,17 @@ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_pointers) {
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
+#if !defined(ADDRESS_SANITIZER)
+LONG WINAPI HandleHeapCorruption(EXCEPTION_POINTERS* exception_pointers) {
+  if (exception_pointers->ExceptionRecord->ExceptionCode ==
+      STATUS_HEAP_CORRUPTION) {
+    return UnhandledExceptionHandler(exception_pointers);
+  }
+
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 void HandleAbortSignal(int signum) {
   DCHECK_EQ(signum, SIGABRT);
 
@@ -200,7 +221,7 @@ void HandleAbortSignal(int signum) {
 
 std::wstring FormatArgumentString(const std::string& name,
                                   const std::wstring& value) {
-  return std::wstring(L"--") + base::UTF8ToUTF16(name) + L"=" + value;
+  return std::wstring(L"--") + base::UTF8ToWide(name) + L"=" + value;
 }
 
 struct ScopedProcThreadAttributeListTraits {
@@ -282,7 +303,7 @@ void CreatePipe(std::wstring* pipe_name, ScopedFileHANDLE* pipe_instance) {
 #endif
       GetCurrentProcessId());
   do {
-    *pipe_name = base::UTF8ToUTF16(pipe_name_base + RandomString());
+    *pipe_name = base::UTF8ToWide(pipe_name_base + RandomString());
 
     pipe_instance->reset(CreateNamedPipeInstance(*pipe_name, true));
 
@@ -340,6 +361,11 @@ class ScopedCallSetHandlerStartupState {
  public:
   ScopedCallSetHandlerStartupState() : successful_(false) {}
 
+  ScopedCallSetHandlerStartupState(const ScopedCallSetHandlerStartupState&) =
+      delete;
+  ScopedCallSetHandlerStartupState& operator=(
+      const ScopedCallSetHandlerStartupState&) = delete;
+
   ~ScopedCallSetHandlerStartupState() {
     SetHandlerStartupState(successful_ ? StartupState::kSucceeded
                                        : StartupState::kFailed);
@@ -349,8 +375,6 @@ class ScopedCallSetHandlerStartupState {
 
  private:
   bool successful_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedCallSetHandlerStartupState);
 };
 
 bool StartHandlerProcess(
@@ -362,7 +386,7 @@ bool StartHandlerProcess(
   std::wstring command_line;
   AppendCommandLineArgument(data->handler.value(), &command_line);
   for (const std::string& argument : data->arguments) {
-    AppendCommandLineArgument(base::UTF8ToUTF16(argument), &command_line);
+    AppendCommandLineArgument(base::UTF8ToWide(argument), &command_line);
   }
   if (!data->database.value().empty()) {
     AppendCommandLineArgument(
@@ -376,13 +400,13 @@ bool StartHandlerProcess(
   }
   if (!data->url.empty()) {
     AppendCommandLineArgument(
-        FormatArgumentString("url", base::UTF8ToUTF16(data->url)),
+        FormatArgumentString("url", base::UTF8ToWide(data->url)),
         &command_line);
   }
   for (const auto& kv : data->annotations) {
     AppendCommandLineArgument(
         FormatArgumentString("annotation",
-                             base::UTF8ToUTF16(kv.first + '=' + kv.second)),
+                             base::UTF8ToWide(kv.first + '=' + kv.second)),
         &command_line);
   }
   for (const base::FilePath& attachment : data->attachments) {
@@ -400,22 +424,23 @@ bool StartHandlerProcess(
 
   InitialClientData initial_client_data(
       g_signal_exception,
-      g_signal_non_crash_dump,
-      g_non_crash_dump_done,
+      g_wer_registration.dump_without_crashing,
+      g_wer_registration.dump_completed,
       data->ipc_pipe_handle.get(),
       this_process.get(),
       FromPointerCast<WinVMAddress>(&g_crash_exception_information),
       FromPointerCast<WinVMAddress>(&g_non_crash_exception_information),
       FromPointerCast<WinVMAddress>(&g_critical_section_with_debug_info));
   AppendCommandLineArgument(
-      base::UTF8ToUTF16(std::string("--initial-client-data=") +
-                        initial_client_data.StringRepresentation()),
+      base::UTF8ToWide(std::string("--initial-client-data=") +
+                       initial_client_data.StringRepresentation()),
       &command_line);
 
   BOOL rv;
   DWORD creation_flags;
   STARTUPINFOEX startup_info = {};
-  startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  startup_info.StartupInfo.dwFlags =
+      STARTF_USESTDHANDLES | STARTF_FORCEOFFFEEDBACK;
   startup_info.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   startup_info.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
   startup_info.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
@@ -465,8 +490,8 @@ bool StartHandlerProcess(
 
     handle_list.reserve(8);
     handle_list.push_back(g_signal_exception);
-    handle_list.push_back(g_signal_non_crash_dump);
-    handle_list.push_back(g_non_crash_dump_done);
+    handle_list.push_back(g_wer_registration.dump_without_crashing);
+    handle_list.push_back(g_wer_registration.dump_completed);
     handle_list.push_back(data->ipc_pipe_handle.get());
     handle_list.push_back(this_process.get());
     AddHandleToListIfValidAndInheritable(&handle_list,
@@ -495,7 +520,7 @@ bool StartHandlerProcess(
   // invalid command line where the first argument needed by rundll32 is not in
   // the correct format as required in:
   // https://support.microsoft.com/en-ca/help/164787/info-windows-rundll-and-rundll32-interface
-  const base::StringPiece16 kRunDll32Exe(L"rundll32.exe");
+  const std::wstring_view kRunDll32Exe(L"rundll32.exe");
   bool is_embedded_in_dll = false;
   if (data->handler.value().size() >= kRunDll32Exe.size() &&
       _wcsicmp(data->handler.value()
@@ -567,35 +592,10 @@ void CommonInProcessInitialization() {
   g_non_crash_dump_lock = new base::Lock();
 }
 
-void RegisterHandlers() {
-  SetUnhandledExceptionFilter(&UnhandledExceptionHandler);
-
-  // The Windows CRT's signal.h lists:
-  // - SIGINT
-  // - SIGILL
-  // - SIGFPE
-  // - SIGSEGV
-  // - SIGTERM
-  // - SIGBREAK
-  // - SIGABRT
-  // SIGILL and SIGTERM are documented as not being generated. SIGBREAK and
-  // SIGINT are for Ctrl-Break and Ctrl-C, and aren't something for which
-  // capturing a dump is warranted. SIGFPE and SIGSEGV are captured as regular
-  // exceptions through the unhandled exception filter. This leaves SIGABRT. In
-  // the standard CRT, abort() is implemented as a synchronous call to the
-  // SIGABRT signal handler if installed, but after doing so, the unhandled
-  // exception filter is not triggered (it instead __fastfail()s). So, register
-  // to handle SIGABRT to catch abort() calls, as client code might use this and
-  // expect it to cause a crash dump. This will only work when the abort()
-  // that's called in client code is the same (or has the same behavior) as the
-  // one in use here.
-  void (*rv)(int) = signal(SIGABRT, HandleAbortSignal);
-  DCHECK_NE(rv, SIG_ERR);
-}
-
 }  // namespace
 
-CrashpadClient::CrashpadClient() : ipc_pipe_(), handler_start_thread_() {}
+CrashpadClient::CrashpadClient()
+    : ipc_pipe_(), handler_start_thread_(), vectored_handler_() {}
 
 CrashpadClient::~CrashpadClient() {}
 
@@ -623,9 +623,9 @@ bool CrashpadClient::StartHandler(
 
   g_signal_exception =
       CreateEvent(&security_attributes, false /* auto reset */, false, nullptr);
-  g_signal_non_crash_dump =
+  g_wer_registration.dump_without_crashing =
       CreateEvent(&security_attributes, false /* auto reset */, false, nullptr);
-  g_non_crash_dump_done =
+  g_wer_registration.dump_completed =
       CreateEvent(&security_attributes, false /* auto reset */, false, nullptr);
 
   CommonInProcessInitialization();
@@ -669,6 +669,42 @@ bool CrashpadClient::StartHandler(
   }
 }
 
+void CrashpadClient::RegisterHandlers() {
+  SetUnhandledExceptionFilter(&UnhandledExceptionHandler);
+
+  // Windows swallows heap corruption failures but we can intercept them with
+  // a vectored exception handler. Note that a vectored exception handler is
+  // not compatible with or generally helpful in ASAN builds (ASAN inserts a
+  // bad dereference at the beginning of the handler, leading to recursive
+  // invocation of the handler).
+#if !defined(ADDRESS_SANITIZER)
+  PVOID handler = AddVectoredExceptionHandler(true, HandleHeapCorruption);
+  vectored_handler_.reset(handler);
+#endif
+
+  // The Windows CRT's signal.h lists:
+  // - SIGINT
+  // - SIGILL
+  // - SIGFPE
+  // - SIGSEGV
+  // - SIGTERM
+  // - SIGBREAK
+  // - SIGABRT
+  // SIGILL and SIGTERM are documented as not being generated. SIGBREAK and
+  // SIGINT are for Ctrl-Break and Ctrl-C, and aren't something for which
+  // capturing a dump is warranted. SIGFPE and SIGSEGV are captured as regular
+  // exceptions through the unhandled exception filter. This leaves SIGABRT. In
+  // the standard CRT, abort() is implemented as a synchronous call to the
+  // SIGABRT signal handler if installed, but after doing so, the unhandled
+  // exception filter is not triggered (it instead __fastfail()s). So, register
+  // to handle SIGABRT to catch abort() calls, as client code might use this and
+  // expect it to cause a crash dump. This will only work when the abort()
+  // that's called in client code is the same (or has the same behavior) as the
+  // one in use here.
+  void (*rv)(int) = signal(SIGABRT, HandleAbortSignal);
+  DCHECK_NE(rv, SIG_ERR);
+}
+
 bool CrashpadClient::SetHandlerIPCPipe(const std::wstring& ipc_pipe) {
   DCHECK(ipc_pipe_.empty());
   DCHECK(!ipc_pipe.empty());
@@ -677,8 +713,8 @@ bool CrashpadClient::SetHandlerIPCPipe(const std::wstring& ipc_pipe) {
 
   DCHECK(!ipc_pipe_.empty());
   DCHECK_EQ(g_signal_exception, INVALID_HANDLE_VALUE);
-  DCHECK_EQ(g_signal_non_crash_dump, INVALID_HANDLE_VALUE);
-  DCHECK_EQ(g_non_crash_dump_done, INVALID_HANDLE_VALUE);
+  DCHECK_EQ(g_wer_registration.dump_without_crashing, INVALID_HANDLE_VALUE);
+  DCHECK_EQ(g_wer_registration.dump_completed, INVALID_HANDLE_VALUE);
   DCHECK(!g_critical_section_with_debug_info.DebugInfo);
   DCHECK(!g_non_crash_dump_lock);
 
@@ -710,9 +746,9 @@ bool CrashpadClient::SetHandlerIPCPipe(const std::wstring& ipc_pipe) {
   // The server returns these already duplicated to be valid in this process.
   g_signal_exception =
       IntToHandle(response.registration.request_crash_dump_event);
-  g_signal_non_crash_dump =
+  g_wer_registration.dump_without_crashing =
       IntToHandle(response.registration.request_non_crash_dump_event);
-  g_non_crash_dump_done =
+  g_wer_registration.dump_completed =
       IntToHandle(response.registration.non_crash_dump_completed_event);
 
   return true;
@@ -747,10 +783,29 @@ bool CrashpadClient::WaitForHandlerStart(unsigned int timeout_ms) {
   return exit_code == 0;
 }
 
+bool CrashpadClient::RegisterWerModule(const std::wstring& path) {
+  if (g_wer_registration.dump_completed == INVALID_HANDLE_VALUE ||
+      g_wer_registration.dump_without_crashing == INVALID_HANDLE_VALUE) {
+    LOG(ERROR) << "not connected";
+    return false;
+  }
+  // We cannot point (*context).exception_pointers to our pointers yet as it
+  // might get used for other non-crash dumps.
+  g_wer_registration.crashpad_exception_info =
+      &g_non_crash_exception_information;
+  // we can point these as we are the only users.
+  g_wer_registration.pointers.ExceptionRecord = &g_wer_registration.exception;
+  g_wer_registration.pointers.ContextRecord = &g_wer_registration.context;
+
+  HRESULT res =
+      WerRegisterRuntimeExceptionModule(path.c_str(), &g_wer_registration);
+  return res == S_OK;
+}
+
 // static
 void CrashpadClient::DumpWithoutCrash(const CONTEXT& context) {
-  if (g_signal_non_crash_dump == INVALID_HANDLE_VALUE ||
-      g_non_crash_dump_done == INVALID_HANDLE_VALUE) {
+  if (g_wer_registration.dump_without_crashing == INVALID_HANDLE_VALUE ||
+      g_wer_registration.dump_completed == INVALID_HANDLE_VALUE) {
     LOG(ERROR) << "not connected";
     return;
   }
@@ -758,7 +813,7 @@ void CrashpadClient::DumpWithoutCrash(const CONTEXT& context) {
   if (BlockUntilHandlerStartedOrFailed() == StartupState::kFailed) {
     // If we know for certain that the handler has failed to start, then abort
     // here, as we would otherwise wait indefinitely for the
-    // g_non_crash_dump_done event that would never be signalled.
+    // g_wer_registration.dump_completed event that would never be signalled.
     LOG(ERROR) << "crash server failed to launch, no dump captured";
     return;
   }
@@ -796,11 +851,14 @@ void CrashpadClient::DumpWithoutCrash(const CONTEXT& context) {
   g_non_crash_exception_information.exception_pointers =
       FromPointerCast<WinVMAddress>(&exception_pointers);
 
-  bool set_event_result = !!SetEvent(g_signal_non_crash_dump);
+  g_wer_registration.in_dump_without_crashing = true;
+  bool set_event_result = !!SetEvent(g_wer_registration.dump_without_crashing);
   PLOG_IF(ERROR, !set_event_result) << "SetEvent";
 
-  DWORD wfso_result = WaitForSingleObject(g_non_crash_dump_done, INFINITE);
+  DWORD wfso_result =
+      WaitForSingleObject(g_wer_registration.dump_completed, INFINITE);
   PLOG_IF(ERROR, wfso_result != WAIT_OBJECT_0) << "WaitForSingleObject";
+  g_wer_registration.in_dump_without_crashing = false;
 }
 
 // static
@@ -822,10 +880,7 @@ void CrashpadClient::DumpAndCrash(EXCEPTION_POINTERS* exception_pointers) {
 bool CrashpadClient::DumpAndCrashTargetProcess(HANDLE process,
                                                HANDLE blame_thread,
                                                DWORD exception_code) {
-  // Confirm we're on Vista or later.
-  const DWORD version = GetVersion();
-  const DWORD major_version = LOBYTE(LOWORD(version));
-  if (major_version < 6) {
+  if (!IsWindowsVistaOrGreater()) {
     LOG(ERROR) << "unavailable before Vista";
     return false;
   }
@@ -925,7 +980,7 @@ bool CrashpadClient::DumpAndCrashTargetProcess(HANDLE process,
 
     // ecx = kTriggeredExceptionCode for dwExceptionCode.
     data_to_write.push_back(0xb9);
-    AddUint32(&data_to_write, kTriggeredExceptionCode);
+    AddUint32(&data_to_write, ExceptionCodes::kTriggeredExceptionCode);
 
     // jmp to RaiseException() via rax.
     data_to_write.push_back(0x48);  // mov rax, imm.

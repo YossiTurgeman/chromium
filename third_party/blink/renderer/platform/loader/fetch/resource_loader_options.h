@@ -32,7 +32,8 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_RESOURCE_LOADER_OPTIONS_H_
 
 #include "base/memory/scoped_refptr.h"
-#include "base/util/type_safety/strong_alias.h"
+#include "base/memory/stack_allocated.h"
+#include "base/types/strong_alias.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/network/public/mojom/content_security_policy.mojom-blink-forward.h"
 #include "services/network/public/mojom/url_loader_factory.mojom-blink-forward.h"
@@ -41,16 +42,12 @@
 #include "third_party/blink/renderer/platform/loader/fetch/integrity_metadata.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
+#include "third_party/blink/renderer/platform/wtf/gc_plugin.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
 enum DataBufferingPolicy : uint8_t { kBufferData, kDoNotBufferData };
-
-enum RequestInitiatorContext : uint8_t {
-  kDocumentContext,
-  kWorkerContext,
-};
 
 enum SynchronousPolicy : uint8_t {
   kRequestSynchronously,
@@ -66,36 +63,30 @@ enum CacheAwareLoadingEnabled : uint8_t {
   kIsCacheAwareLoadingEnabled
 };
 
-// https://github.com/WICG/cross-origin-embedder-policy/pull/13
-// When true, a response is blocked unless it has
-// cross-origin-embedder-policy: require-corp.
-using RejectCoepUnsafeNone =
-    util::StrongAlias<class RejectCoepUnsafeNoneTag, bool>;
-
 // This class is thread-bound. Do not copy/pass an instance across threads.
-struct PLATFORM_EXPORT ResourceLoaderOptions {
-  USING_FAST_MALLOC(ResourceLoaderOptions);
+struct PLATFORM_EXPORT ResourceLoaderOptions final {
+  DISALLOW_NEW();
 
  public:
   // We define constructors, destructor, and assignment operator in
   // resource_loader_options.cc because they require the full definition of
   // URLLoaderFactory for |url_loader_factory| data member, and we'd like
   // to avoid to include huge url_loader_factory.mojom-blink.h.
-  explicit ResourceLoaderOptions(scoped_refptr<const DOMWrapperWorld> world);
+  explicit ResourceLoaderOptions(const DOMWrapperWorld* world);
   ResourceLoaderOptions(const ResourceLoaderOptions& other);
   ResourceLoaderOptions& operator=(const ResourceLoaderOptions& other);
+  ResourceLoaderOptions(ResourceLoaderOptions&& other);
+  ResourceLoaderOptions& operator=(ResourceLoaderOptions&& other);
   ~ResourceLoaderOptions();
+
+  void Trace(Visitor* visitor) const { visitor->Trace(world_for_csp); }
 
   FetchInitiatorInfo initiator_info;
 
   DataBufferingPolicy data_buffering_policy;
 
   network::mojom::CSPDisposition content_security_policy_option;
-  RequestInitiatorContext request_initiator_context;
   SynchronousPolicy synchronous_policy;
-
-  // TODO(crbug.com/1064920): Remove this once PlzDedicatedWorker ships.
-  RejectCoepUnsafeNone reject_coep_unsafe_none = RejectCoepUnsafeNone(false);
 
   String content_security_policy_nonce;
   IntegrityMetadataSet integrity_metadata;
@@ -104,14 +95,18 @@ struct PLATFORM_EXPORT ResourceLoaderOptions {
 
   // The world in which this request initiated. This will be used for CSP checks
   // if specified. If null, the CSP bound to the FetchContext is used.
-  scoped_refptr<const DOMWrapperWorld> world_for_csp;
+  Member<const DOMWrapperWorld> world_for_csp;
 
   // If not null, this URLLoaderFactory should be used to load this resource
   // rather than whatever factory the system might otherwise use.
-  // Used for example for loading blob: URLs and for prefetch loading.
+  // Used for example for loading blob: URLs.
   scoped_refptr<base::RefCountedData<
       mojo::PendingRemote<network::mojom::blink::URLLoaderFactory>>>
       url_loader_factory;
+
+  // Used by DevTools to emulate unsupported image types. See crbug.com/1130556.
+  scoped_refptr<base::RefCountedData<HashSet<String>>>
+      unsupported_image_mime_types;
 };
 
 }  // namespace blink

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,9 @@
 #include <string>
 #include <vector>
 
-#include "base/gtest_prod_util.h"
 #include "base/json/json_reader.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/singleton.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/metrics/user_metrics.h"
 #include "base/observer_list.h"
 #include "base/values.h"
@@ -23,24 +21,32 @@
 #include "content/public/browser/tts_controller.h"
 #include "content/public/browser/tts_platform.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "net/base/network_change_notifier.h"
 #include "services/data_decoder/public/cpp/data_decoder.h"
 #include "url/gurl.h"
 
 namespace content {
 class BrowserContext;
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 class TtsControllerDelegate;
 #endif
 
 // Singleton class that manages text-to-speech for all TTS engines and
 // APIs, maintaining a queue of pending utterances and keeping
 // track of all state.
-class CONTENT_EXPORT TtsControllerImpl : public TtsController,
-                                         public WebContentsObserver {
+class CONTENT_EXPORT TtsControllerImpl
+    : public TtsController,
+      public WebContentsObserver,
+      public net::NetworkChangeNotifier::NetworkChangeObserver {
  public:
   // Get the single instance of this class.
   static TtsControllerImpl* GetInstance();
+
+  TtsControllerImpl(const TtsControllerImpl&) = delete;
+  TtsControllerImpl& operator=(const TtsControllerImpl&) = delete;
+
+  static void SkipAddNetworkChangeObserverForTests(bool enabled);
 
   void SetStopSpeakingWhenHidden(bool value);
 
@@ -51,12 +57,35 @@ class CONTENT_EXPORT TtsControllerImpl : public TtsController,
   void Stop(const GURL& source_url) override;
   void Pause() override;
   void Resume() override;
+  void UpdateLanguageStatus(BrowserContext* browser_context,
+                            const std::string& lang,
+                            LanguageInstallStatus install_status,
+                            const std::string& error) override;
+  void AddUpdateLanguageStatusDelegate(
+      UpdateLanguageStatusDelegate* delegate) override;
+  void RemoveUpdateLanguageStatusDelegate(
+      UpdateLanguageStatusDelegate* delegate) override;
+  void UninstallLanguageRequest(content::BrowserContext* browser_context,
+                                const std::string& lang,
+                                const std::string& client_id,
+                                int source,
+                                bool uninstall_immediately) override;
+  void InstallLanguageRequest(BrowserContext* browser_context,
+                              const std::string& lang,
+                              const std::string& client_id,
+                              int source) override;
+  void LanguageStatusRequest(BrowserContext* browser_context,
+                             const std::string& lang,
+                             const std::string& client_id,
+                             int source) override;
   void OnTtsEvent(int utterance_id,
                   TtsEventType event_type,
                   int char_index,
                   int length,
                   const std::string& error_message) override;
+  void OnTtsUtteranceBecameInvalid(int utterance_id) override;
   void GetVoices(BrowserContext* browser_context,
+                 const GURL& source_url,
                  std::vector<VoiceData>* out_voices) override;
   void VoicesChanged() override;
   void AddVoicesChangedDelegate(VoicesChangedDelegate* delegate) override;
@@ -64,6 +93,9 @@ class CONTENT_EXPORT TtsControllerImpl : public TtsController,
   void RemoveUtteranceEventDelegate(UtteranceEventDelegate* delegate) override;
   void SetTtsEngineDelegate(TtsEngineDelegate* delegate) override;
   TtsEngineDelegate* GetTtsEngineDelegate() override;
+  void RefreshVoices() override;
+
+  void Shutdown();
 
   // Called directly by ~BrowserContext, because a raw BrowserContext pointer
   // is stored in an Utterance.
@@ -82,18 +114,23 @@ class CONTENT_EXPORT TtsControllerImpl : public TtsController,
   TtsControllerImpl();
   ~TtsControllerImpl() override;
 
- private:
-  friend class TtsControllerTestHelper;
-  FRIEND_TEST_ALL_PREFIXES(TtsControllerTest, TestTtsControllerShutdown);
-  FRIEND_TEST_ALL_PREFIXES(TtsControllerTest, TestGetMatchingVoice);
-  FRIEND_TEST_ALL_PREFIXES(TtsControllerTest,
-                           TestTtsControllerUtteranceDefaults);
-  FRIEND_TEST_ALL_PREFIXES(TtsControllerTest, TestBrowserContextRemoved);
+  // Exposed for unittest.
+  bool IsPausedForTesting() const { return paused_; }
 
+ private:
+  friend class TestTtsControllerImpl;
   friend struct base::DefaultSingletonTraits<TtsControllerImpl>;
 
   // Get the platform TTS implementation (or injected mock).
   TtsPlatform* GetTtsPlatform();
+
+  // Whether the platform implementation is supported and completed its
+  // initialization.
+  bool TtsPlatformReady();
+
+  // Whether the platform implementation is supported, but still being
+  // initialized.
+  bool TtsPlatformLoading();
 
   // Start speaking the given utterance. Will either take ownership of
   // |utterance| or delete it if there's an error. Returns true on success.
@@ -106,6 +143,17 @@ class CONTENT_EXPORT TtsControllerImpl : public TtsController,
   // Stops the current utterance if it matches |source_url|. Returns true on
   // success, false if the current utterance does not match |source_url|.
   bool StopCurrentUtteranceIfMatches(const GURL& source_url);
+
+  // Stops the current utterance.
+  void StopCurrentUtterance();
+
+  // Removes the utterance matching |utterance_id|, and stops the current
+  // utterance if it matches |utterance_id|.
+  void RemoveUtteranceAndStopIfNeeded(int utterance_id);
+
+  // Stops the current utterance if it matches |utterance_id|. Returns true on
+  // success, false if the current utterance does not match |utterance_id|.
+  bool StopCurrentUtteranceIfMatches(int utterance_id);
 
   // Clear the utterance queue. If send_events is true, will send
   // TTS_EVENT_CANCELLED events on each one.
@@ -147,20 +195,30 @@ class CONTENT_EXPORT TtsControllerImpl : public TtsController,
 
   // WebContentsObserver methods
   void WebContentsDestroyed() override;
+  void PrimaryPageChanged(Page& page) override;
   void OnVisibilityChanged(Visibility visibility) override;
 
-#if defined(OS_CHROMEOS)
-  TtsControllerDelegate* GetTtsControllerDelegate();
+  // net::NetworkChangeNotifier::NetworkChangeObserver
+  void OnNetworkChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
-  TtsControllerDelegate* delegate_ = nullptr;
+#if BUILDFLAG(IS_CHROMEOS)
+  TtsControllerDelegate* GetTtsControllerDelegate();
+  void SetTtsControllerDelegateForTesting(TtsControllerDelegate* delegate);
+  raw_ptr<TtsControllerDelegate, DanglingUntriaged> delegate_ = nullptr;
 #endif
 
-  TtsEngineDelegate* engine_delegate_ = nullptr;
+  raw_ptr<TtsEngineDelegate, DanglingUntriaged> engine_delegate_ = nullptr;
 
   bool stop_speaking_when_hidden_ = false;
 
   // A set of delegates that want to be notified when the voices change.
   base::ObserverList<VoicesChangedDelegate> voices_changed_delegates_;
+
+  // A set of delegates to be notified when a voice status for a language
+  // changes.
+  base::ObserverList<UpdateLanguageStatusDelegate>
+      update_language_status_delegates_;
 
   // The current utterance being spoken.
   std::unique_ptr<TtsUtterance> current_utterance_;
@@ -170,12 +228,17 @@ class CONTENT_EXPORT TtsControllerImpl : public TtsController,
 
   // A pointer to the platform implementation of text-to-speech, for
   // dependency injection.
-  TtsPlatform* tts_platform_ = nullptr;
+  raw_ptr<TtsPlatform, DanglingUntriaged> tts_platform_ = nullptr;
 
   // A queue of utterances to speak after the current one finishes.
   std::list<std::unique_ptr<TtsUtterance>> utterance_list_;
 
-  DISALLOW_COPY_AND_ASSIGN(TtsControllerImpl);
+  // Whether to allow remote voices.
+  bool allow_remote_voices_ = false;
+
+  // Skip |AddNetworkChangeObserver| call during the creation of tts_controller
+  // for unittests as network change notifier wouldn't have been created.
+  static bool skip_add_network_change_observer_for_tests_;
 };
 
 }  // namespace content

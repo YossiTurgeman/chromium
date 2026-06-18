@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,7 @@
 
 #include <memory>
 #include <utility>
-#include <vector>
 
-#include "base/compiler_specific.h"
-#include "base/files/scoped_temp_dir.h"
 #include "chrome/test/base/testing_profile.h"
 #include "content/public/test/test_renderer_host.h"
 
@@ -39,13 +36,10 @@ class ChromeRenderViewHostTestHarness
   virtual TestingProfile::TestingFactories GetTestingFactories() const;
 
   // Creates a TestingProfile to use as the browser context.
-  std::unique_ptr<TestingProfile> CreateTestingProfile();
+  virtual std::unique_ptr<TestingProfile> CreateTestingProfile();
 
   // content::RenderViewHostTestHarness.
   std::unique_ptr<content::BrowserContext> CreateBrowserContext() final;
-
- private:
-  std::vector<std::unique_ptr<base::ScopedTempDir>> temp_dirs_;
 };
 
 #endif  // CHROME_TEST_BASE_CHROME_RENDER_VIEW_HOST_TEST_HARNESS_H_

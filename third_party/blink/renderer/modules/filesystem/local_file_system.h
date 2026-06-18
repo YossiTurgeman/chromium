@@ -33,12 +33,11 @@
 
 #include <memory>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "third_party/blink/public/mojom/filesystem/file_system.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/platform/bindings/name_client.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/supplementable.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
@@ -60,6 +59,11 @@ class LocalFileSystem final : public GarbageCollected<LocalFileSystem>,
 
   explicit LocalFileSystem(ExecutionContext&);
 
+  LocalFileSystem(const LocalFileSystem&) = delete;
+  LocalFileSystem& operator=(const LocalFileSystem&) = delete;
+
+  ~LocalFileSystem() final = default;
+
   void ResolveURL(const KURL&,
                   std::unique_ptr<ResolveURICallbacks>,
                   SynchronousType sync_type);
@@ -70,7 +74,9 @@ class LocalFileSystem final : public GarbageCollected<LocalFileSystem>,
 
   static LocalFileSystem* From(ExecutionContext&);
 
-  const char* NameInHeapSnapshot() const override { return "LocalFileSystem"; }
+  const char* GetHumanReadableName() const override {
+    return "LocalFileSystem";
+  }
 
  private:
   void ResolveURLCallback(const KURL& file_system_url,
@@ -90,8 +96,6 @@ class LocalFileSystem final : public GarbageCollected<LocalFileSystem>,
   void ResolveURLInternal(const KURL&,
                           std::unique_ptr<ResolveURICallbacks>,
                           SynchronousType sync_type);
-
-  DISALLOW_COPY_AND_ASSIGN(LocalFileSystem);
 };
 
 }  // namespace blink

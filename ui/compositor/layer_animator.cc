@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,10 @@
 #include <stddef.h>
 
 #include <memory>
+#include <vector>
 
 #include "base/check_op.h"
-#include "base/stl_util.h"
+#include "base/observer_list.h"
 #include "base/trace_event/trace_event.h"
 #include "cc/animation/animation.h"
 #include "cc/animation/animation_host.h"
@@ -46,15 +47,7 @@ const int kLayerAnimatorDefaultTransitionDurationMs = 120;
 // LayerAnimator public --------------------------------------------------------
 
 LayerAnimator::LayerAnimator(base::TimeDelta transition_duration)
-    : delegate_(nullptr),
-      preemption_strategy_(IMMEDIATELY_SET_NEW_TARGET),
-      is_transition_duration_locked_(false),
-      transition_duration_(transition_duration),
-      tween_type_(gfx::Tween::LINEAR),
-      is_started_(false),
-      disable_timer_for_test_(false),
-      adding_animations_(false),
-      animation_metrics_reporter_(nullptr) {
+    : transition_duration_(transition_duration) {
   animation_ =
       cc::Animation::Create(cc::AnimationIdProvider::NextAnimationId());
 }
@@ -70,14 +63,14 @@ LayerAnimator::~LayerAnimator() {
 }
 
 // static
-LayerAnimator* LayerAnimator::CreateDefaultAnimator() {
-  return new LayerAnimator(base::TimeDelta::FromMilliseconds(0));
+scoped_refptr<LayerAnimator> LayerAnimator::CreateDefaultAnimator() {
+  return base::MakeRefCounted<LayerAnimator>(base::Milliseconds(0));
 }
 
 // static
-LayerAnimator* LayerAnimator::CreateImplicitAnimator() {
-  return new LayerAnimator(base::TimeDelta::FromMilliseconds(
-      kLayerAnimatorDefaultTransitionDurationMs));
+scoped_refptr<LayerAnimator> LayerAnimator::CreateImplicitAnimator() {
+  return base::MakeRefCounted<LayerAnimator>(
+      base::Milliseconds(kLayerAnimatorDefaultTransitionDurationMs));
 }
 
 // This macro provides the implementation for the setter and getter (well,
@@ -91,7 +84,11 @@ LayerAnimator* LayerAnimator::CreateImplicitAnimator() {
     base::TimeDelta duration = GetTransitionDuration();                \
     if (duration.is_zero() && delegate() &&                            \
         (preemption_strategy_ != ENQUEUE_NEW_ANIMATION)) {             \
+      /* Stopping an animation may result in destruction of `this`. */ \
+      const auto weak_ptr = weak_ptr_factory_.GetWeakPtr();            \
       StopAnimatingProperty(LayerAnimationElement::property);          \
+      if (!weak_ptr || !delegate())                                    \
+        return;                                                        \
       delegate()->Set##name##FromAnimation(                            \
           value, PropertyChangeReason::NOT_FROM_ANIMATION);            \
       return;                                                          \
@@ -118,13 +115,18 @@ ANIMATED_PROPERTY(float, OPACITY, Opacity, float, opacity)
 ANIMATED_PROPERTY(bool, VISIBILITY, Visibility, bool, visibility)
 ANIMATED_PROPERTY(float, BRIGHTNESS, Brightness, float, brightness)
 ANIMATED_PROPERTY(float, GRAYSCALE, Grayscale, float, grayscale)
-ANIMATED_PROPERTY(SkColor, COLOR, Color, SkColor, color)
+ANIMATED_PROPERTY(SkColor4f, COLOR, Color, SkColor4f, color)
 ANIMATED_PROPERTY(const gfx::Rect&, CLIP, ClipRect, gfx::Rect, clip_rect)
 ANIMATED_PROPERTY(const gfx::RoundedCornersF&,
                   ROUNDED_CORNERS,
                   RoundedCorners,
                   gfx::RoundedCornersF,
                   rounded_corners)
+ANIMATED_PROPERTY(const gfx::LinearGradient&,
+                  GRADIENT_MASK,
+                  GradientMask,
+                  gfx::LinearGradient,
+                  gradient_mask)
 
 #undef ANIMATED_PROPERTY
 
@@ -214,8 +216,6 @@ cc::Animation* LayerAnimator::GetAnimationForTesting() const {
 
 void LayerAnimator::StartAnimation(LayerAnimationSequence* animation) {
   scoped_refptr<LayerAnimator> retain(this);
-  if (animation_metrics_reporter_)
-    animation->SetAnimationMetricsReporter(animation_metrics_reporter_);
   OnScheduled(animation);
   if (!StartSequenceImmediately(animation)) {
     // Attempt to preempt a running animation.
@@ -289,7 +289,8 @@ void LayerAnimator::StartTogether(
 
   bool wait_for_group_start = false;
   for (iter = animations.begin(); iter != animations.end(); ++iter)
-    wait_for_group_start |= (*iter)->IsFirstElementThreaded(delegate_);
+    wait_for_group_start |=
+        delegate_ && (*iter)->IsFirstElementThreaded(delegate_);
   int group_id = cc::AnimationIdProvider::NextGroupId();
 
   // These animations (provided they don't animate any common properties) will
@@ -326,7 +327,8 @@ void LayerAnimator::ScheduleTogether(
 
   bool wait_for_group_start = false;
   for (iter = animations.begin(); iter != animations.end(); ++iter)
-    wait_for_group_start |= (*iter)->IsFirstElementThreaded(delegate_);
+    wait_for_group_start |=
+        delegate_ && (*iter)->IsFirstElementThreaded(delegate_);
 
   int group_id = cc::AnimationIdProvider::NextGroupId();
 
@@ -397,10 +399,16 @@ void LayerAnimator::AddOwnedObserver(
 
 void LayerAnimator::RemoveAndDestroyOwnedObserver(
     ImplicitAnimationObserver* animation_observer) {
-  base::EraseIf(owned_observer_list_,[animation_observer](
-      const std::unique_ptr<ImplicitAnimationObserver>& other) {
-    return other.get() == animation_observer;
-  });
+  std::erase_if(owned_observer_list_,
+                [animation_observer](
+                    const std::unique_ptr<ImplicitAnimationObserver>& other) {
+                  return other.get() == animation_observer;
+                });
+}
+
+base::CallbackListSubscription LayerAnimator::AddSequenceScheduledCallback(
+    SequenceScheduledCallback callback) {
+  return sequence_scheduled_callbacks_.Add(std::move(callback));
 }
 
 void LayerAnimator::OnThreadedAnimationStarted(
@@ -445,6 +453,7 @@ void LayerAnimator::OnThreadedAnimationStarted(
 }
 
 void LayerAnimator::AddToCollection(LayerAnimatorCollection* collection) {
+  DCHECK_EQ(collection, GetLayerAnimatorCollection());
   if (is_animating() && !is_started_) {
     collection->StartAnimator(this);
     is_started_ = true;
@@ -452,10 +461,13 @@ void LayerAnimator::AddToCollection(LayerAnimatorCollection* collection) {
 }
 
 void LayerAnimator::RemoveFromCollection(LayerAnimatorCollection* collection) {
+  DCHECK_EQ(collection, GetLayerAnimatorCollection());
   if (is_started_) {
     collection->StopAnimator(this);
     is_started_ = false;
   }
+  DCHECK(!animation_->element_animations() ||
+         !animation_->element_animations()->HasTickingKeyframeEffect());
 }
 
 // LayerAnimator protected -----------------------------------------------------
@@ -575,6 +587,12 @@ LayerAnimationSequence* LayerAnimator::RemoveAnimation(
       break;
     }
   }
+
+  // Do not continue and attempt to start other sequences if the delegate is
+  // nullptr.
+  // TODO(crbug.com/40790139): Guard other uses of delegate_ in this class.
+  if (!delegate())
+    return to_return.release();
 
   if (!to_return.get() || !to_return->waiting_for_group_start() ||
       !to_return->IsFirstElementThreaded(delegate_))
@@ -906,6 +924,7 @@ void LayerAnimator::GetTargetValue(
 }
 
 void LayerAnimator::OnScheduled(LayerAnimationSequence* sequence) {
+  sequence_scheduled_callbacks_.Notify(sequence);
   for (LayerAnimationObserver& observer : observers_)
     sequence->AddObserver(&observer);
   sequence->OnScheduled();

@@ -25,13 +25,15 @@
 
 #include "third_party/blink/renderer/platform/fonts/unicode_range_set.h"
 
+#include <unicode/utf16.h>
+
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
-UnicodeRangeSet::UnicodeRangeSet(const Vector<UnicodeRange>& ranges)
-    : ranges_(ranges) {
-  if (ranges_.IsEmpty())
+UnicodeRangeSet::UnicodeRangeSet(HeapVector<UnicodeRange>&& ranges)
+    : ranges_(std::move(ranges)) {
+  if (ranges_.empty())
     return;
 
   std::sort(ranges_.begin(), ranges_.end());
@@ -56,13 +58,13 @@ UnicodeRangeSet::UnicodeRangeSet(const Vector<UnicodeRange>& ranges)
 bool UnicodeRangeSet::Contains(UChar32 c) const {
   if (IsEntireRange())
     return true;
-  Vector<UnicodeRange>::const_iterator it =
+  HeapVector<UnicodeRange>::const_iterator it =
       std::lower_bound(ranges_.begin(), ranges_.end(), c);
   return it != ranges_.end() && it->Contains(c);
 }
 
 bool UnicodeRangeSet::IntersectsWith(const String& text) const {
-  if (text.IsEmpty())
+  if (text.empty())
     return false;
   if (IsEntireRange())
     return true;
@@ -71,7 +73,7 @@ bool UnicodeRangeSet::IntersectsWith(const String& text) const {
 
   unsigned index = 0;
   while (index < text.length()) {
-    UChar32 c = text.CharacterStartingAt(index);
+    UChar32 c = text.CodePointAtOrZero(index);
     index += U16_LENGTH(c);
     if (Contains(c))
       return true;

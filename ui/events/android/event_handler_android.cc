@@ -1,8 +1,10 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/events/android/event_handler_android.h"
+
+#include "ui/gfx/geometry/rect.h"
 
 namespace ui {
 
@@ -50,10 +52,18 @@ bool EventHandlerAndroid::ScrollTo(float x, float y) {
 void EventHandlerAndroid::OnSizeChanged() {}
 
 void EventHandlerAndroid::OnPhysicalBackingSizeChanged(
-    base::Optional<base::TimeDelta> deadline_override) {}
+    std::optional<base::TimeDelta> deadline_override) {}
 
 void EventHandlerAndroid::OnBrowserControlsHeightChanged() {}
 
 void EventHandlerAndroid::OnControlsResizeViewChanged() {}
 
+void EventHandlerAndroid::OnWindowPositionChanged() {}
+
+void EventHandlerAndroid::NotifyVirtualKeyboardOverlayRect(
+    const gfx::Rect& keyboard_rect) {}
+
+void EventHandlerAndroid::ShowInterestInElement(int) {}
+
+void EventHandlerAndroid::OnPointerLockRelease() {}
 }  // namespace ui

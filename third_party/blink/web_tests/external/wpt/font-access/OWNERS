@@ -1,5 +1,1 @@
-# TEAM: storage-dev@chromium.org
-# COMPONENT: Blink>Storage>FontAccess
-# WPT-NOTIFY: true
-oyiptong@chromium.org
-jsbell@chromium.org
+file://content/browser/font_access/OWNERS

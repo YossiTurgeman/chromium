@@ -28,6 +28,7 @@
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/forms/html_field_set_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
+#include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
 
 namespace blink {
@@ -35,23 +36,30 @@ namespace blink {
 HTMLLegendElement::HTMLLegendElement(Document& document)
     : HTMLElement(html_names::kLegendTag, document) {}
 
-HTMLFormElement* HTMLLegendElement::form() const {
+HTMLElement* HTMLLegendElement::formForBinding() const {
   // According to the specification, If the legend has a fieldset element as
   // its parent, then the form attribute must return the same value as the
   // form attribute on that fieldset element. Otherwise, it must return null.
   if (auto* fieldset = DynamicTo<HTMLFieldSetElement>(parentNode()))
-    return fieldset->formOwner();
+    return fieldset->formForBinding();
   return nullptr;
 }
 
-LayoutObject* HTMLLegendElement::CreateLayoutObject(const ComputedStyle& style,
-                                                    LegacyLayout legacy) {
+void HTMLLegendElement::DetachLayoutTree(bool performing_reattach) {
+  LayoutObject* object = GetLayoutObject();
+  if (!performing_reattach && object && object->IsRenderedLegend())
+    object->Parent()->GetNode()->SetForceReattachLayoutTree();
+  HTMLElement::DetachLayoutTree(performing_reattach);
+}
+
+LayoutObject* HTMLLegendElement::CreateLayoutObject(
+    const ComputedStyle& style) {
   // Count text-align property which does not mapped from 'align' content
   // attribute. See crbug.com/880822 and |HTMLElement::
   // CollectStyleForPresentationAttribute()|.
   bool should_count;
   const AtomicString& align_value =
-      FastGetAttribute(html_names::kAlignAttr).LowerASCII();
+      FastGetAttribute(html_names::kAlignAttr).ToAsciiLower();
   switch (style.GetTextAlign()) {
     case ETextAlign::kLeft:
       should_count = align_value != "left";
@@ -70,7 +78,7 @@ LayoutObject* HTMLLegendElement::CreateLayoutObject(const ComputedStyle& style,
   if (should_count)
     UseCounter::Count(GetDocument(), WebFeature::kTextAlignSpecifiedToLegend);
 
-  return HTMLElement::CreateLayoutObject(style, legacy);
+  return HTMLElement::CreateLayoutObject(style);
 }
 
 }  // namespace blink

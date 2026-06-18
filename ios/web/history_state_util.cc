@@ -1,4 +1,4 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,18 +16,21 @@ bool IsHistoryStateChangeValid(const GURL& current_url, const GURL& to_url) {
   CHECK(current_url.is_valid());
   CHECK(to_url.is_valid());
 
-  return to_url.GetOrigin() == current_url.GetOrigin();
+  return to_url.DeprecatedGetOriginAsURL() ==
+         current_url.DeprecatedGetOriginAsURL();
 }
 
 GURL GetHistoryStateChangeUrl(const GURL& current_url,
                               const GURL& base_url,
-                              const std::string& destination) {
-  if (!base_url.is_valid())
+                              std::string_view destination) {
+  if (!base_url.is_valid()) {
     return GURL();
+  }
   GURL to_url = base_url.Resolve(destination);
 
-  if (!to_url.is_valid() || !IsHistoryStateChangeValid(current_url, to_url))
+  if (!to_url.is_valid() || !IsHistoryStateChangeValid(current_url, to_url)) {
     return GURL();
+  }
 
   return to_url;
 }

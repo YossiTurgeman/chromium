@@ -25,6 +25,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_FORMS_HTML_LABEL_ELEMENT_H_
 
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/dom/events/simulated_click_options.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 
 namespace blink {
@@ -35,16 +36,38 @@ class CORE_EXPORT HTMLLabelElement final : public HTMLElement {
  public:
   explicit HTMLLabelElement(Document&);
 
-  HTMLElement* control() const;
-  HTMLFormElement* form() const;
+  ElementType GetElementType() const final {
+    return ElementType::kHTMLLabelElement;
+  }
+
+  HTMLElement* controlForBinding() const;
+  HTMLElement* Control() const;
+  HTMLElement* formForBinding() const override;
 
   bool WillRespondToMouseClickEvents() override;
 
+  // Similar to Node::textContent(), but excludes the text from
+  // labelable descendants (See HTMLElement::IsLabelable()).
+  //
+  // This is useful if you want the label text without including
+  // the text content of any implicitly associated form controls.
+  //
+  // For example, this function will return just "LABEL:"
+  // for the following:
+  //
+  //   <label>LABEL:<select><option>OPTION</option></label>
+  //
+  // If you use Node::textContent() instead, it will return "LABEL:OPTION".
+  String TextContentExcludingLabelable() const;
+
  private:
+  // TODO(crbug.com/452084024): Remove this when the
+  // LabelInteractiveContentCheckBeforeHandler flag is removed
   bool IsInInteractiveContent(Node*) const;
+  bool IsInInteractiveContent(Event&) const;
 
   bool IsInteractiveContent() const override;
-  void AccessKeyAction(bool send_mouse_events) override;
+  void AccessKeyAction(SimulatedClickCreationScope creation_scope) override;
 
   // Overridden to update the hover/active state of the corresponding control.
   void SetActive(bool active) override;
@@ -52,9 +75,10 @@ class CORE_EXPORT HTMLLabelElement final : public HTMLElement {
 
   // Overridden to either click() or focus() the corresponding control.
   void DefaultEventHandler(Event&) override;
+  void DefaultEventHandlerInternal(Event&);
   bool HasActivationBehavior() const override;
 
-  void focus(const FocusParams&) override;
+  void Focus(const FocusParams&) override;
 
   bool processing_click_;
 };

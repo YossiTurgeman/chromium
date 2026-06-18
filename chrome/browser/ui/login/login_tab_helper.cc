@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,39 +6,20 @@
 
 #include "base/feature_list.h"
 #include "chrome/browser/ui/login/login_handler.h"
-#include "chrome/common/chrome_features.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/login_delegate.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
+#include "net/http/http_response_headers.h"
 #include "net/http/http_status_code.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 
-LoginTabHelper::~LoginTabHelper() {}
-
-std::unique_ptr<content::LoginDelegate>
-LoginTabHelper::CreateAndStartMainFrameLoginDelegate(
-    const net::AuthChallengeInfo& auth_info,
-    content::WebContents* web_contents,
-    const content::GlobalRequestID& request_id,
-    const GURL& url,
-    scoped_refptr<net::HttpResponseHeaders> response_headers,
-    LoginAuthRequiredCallback auth_required_callback) {
-  std::unique_ptr<LoginHandler> login_handler = LoginHandler::Create(
-      auth_info, web_contents, std::move(auth_required_callback));
-  login_handler->StartMainFrame(
-      request_id, url, response_headers,
-      // The caller owns the created LoginHandler, and there's no guarantee that
-      // |this| outlives it, so use a weak pointer to receive a callback when an
-      // extension has cancelled the auth request for a navigation.
-      base::BindOnce(&LoginTabHelper::RegisterExtensionCancelledNavigation,
-                     weak_ptr_factory_.GetWeakPtr()));
-  return login_handler;
-}
+LoginTabHelper::~LoginTabHelper() = default;
 
 void LoginTabHelper::DidStartNavigation(
     content::NavigationHandle* navigation_handle) {
@@ -49,20 +30,17 @@ void LoginTabHelper::DidStartNavigation(
   // these could happen in the case of 401/407 error pages that have fancy
   // response bodies that have subframes or can trigger same-document
   // navigations.
-  if (!navigation_handle->IsInMainFrame() ||
-      navigation_handle->IsSameDocument())
+  if (!navigation_handle->IsInPrimaryMainFrame() ||
+      navigation_handle->IsSameDocument()) {
     return;
-
-  if (!login_handler_)
-    return;
+  }
 
   login_handler_.reset();
-  url_for_login_handler_ = GURL();
 }
 
 void LoginTabHelper::DidFinishNavigation(
     content::NavigationHandle* navigation_handle) {
-  if (!navigation_handle->IsInMainFrame() ||
+  if (!navigation_handle->IsInPrimaryMainFrame() ||
       navigation_handle->IsSameDocument()) {
     return;
   }
@@ -99,24 +77,20 @@ void LoginTabHelper::DidFinishNavigation(
     return;
   }
 
-  // Show a login prompt with the navigation's AuthChallengeInfo on FTP
-  // navigations and on HTTP 401/407 responses.
-  if (!navigation_handle->GetURL().SchemeIs(url::kFtpScheme)) {
-    int response_code =
-        navigation_handle->GetResponseHeaders()->response_code();
-    if (response_code !=
-            net::HttpStatusCode::HTTP_PROXY_AUTHENTICATION_REQUIRED &&
-        response_code != net::HttpStatusCode::HTTP_UNAUTHORIZED) {
-      return;
-    }
+  // Show a login prompt with the navigation's AuthChallengeInfo on HTTP 401/407
+  // responses.
+  int response_code = navigation_handle->GetResponseHeaders()->response_code();
+  if (response_code !=
+          net::HttpStatusCode::HTTP_PROXY_AUTHENTICATION_REQUIRED &&
+      response_code != net::HttpStatusCode::HTTP_UNAUTHORIZED) {
+    return;
   }
 
   challenge_ = navigation_handle->GetAuthChallengeInfo().value();
-  network_isolation_key_ =
-      navigation_handle->GetIsolationInfo().network_isolation_key();
+  network_anonymization_key_ =
+      navigation_handle->GetIsolationInfo().network_anonymization_key();
 
-  url_for_login_handler_ = navigation_handle->GetURL();
-  login_handler_ = LoginHandler::Create(
+  login_handler_ = CreateLoginHandler(
       navigation_handle->GetAuthChallengeInfo().value(),
       navigation_handle->GetWebContents(),
       base::BindOnce(
@@ -125,7 +99,7 @@ void LoginTabHelper::DidFinishNavigation(
           // callback, it's safe to use base::Unretained here; the
           // |login_handler_| cannot outlive its owning LoginTabHelper.
           base::Unretained(this)));
-  login_handler_->ShowLoginPromptAfterCommit(navigation_handle->GetURL());
+  login_handler_->ShowLoginPrompt(navigation_handle->GetURL());
 
   // If the challenge comes from a proxy, the URL should be hidden in the
   // omnibox to avoid origin confusion. Call DidChangeVisibleSecurityState() to
@@ -163,6 +137,21 @@ LoginTabHelper::WillProcessMainFrameUnauthorizedResponse(
     // because the navigation entry ID will change once the refresh finishes.
     navigation_handle_id_with_cancelled_prompt_ =
         navigation_handle->GetNavigationId();
+
+    int response_code =
+        navigation_handle->GetResponseHeaders()->response_code();
+    // For HTTPS navigations with 407 responses, we want to show an empty
+    // page. We need to cancel the navigation and commit an empty error
+    // page directly here, because otherwise the HttpErrorNavigationThrottle
+    // will see that the response body is empty (because the network stack
+    // refuses to read the response body) and will try to commit a generic
+    // non-empty error page instead.
+    if (navigation_handle->GetURL().SchemeIs(url::kHttpsScheme) &&
+        response_code ==
+            net::HttpStatusCode::HTTP_PROXY_AUTHENTICATION_REQUIRED) {
+      return {content::NavigationThrottle::CANCEL,
+              net::ERR_INVALID_AUTH_CREDENTIALS, "<html></html>"};
+    }
     return content::NavigationThrottle::PROCEED;
   }
 
@@ -177,19 +166,13 @@ LoginTabHelper::WillProcessMainFrameUnauthorizedResponse(
   // cancelling auth. If so, remember the navigation handle ID so as to be able
   // to suppress a prompt for this navigation when it finishes in
   // DidFinishNavigation().
-  if (navigation_handle->GetGlobalRequestID().request_id ==
-      request_id_for_extension_cancelled_navigation_.request_id) {
-    // Navigation requests are always initiated in the browser process. Due to a
-    // bug (https://crbug.com/1078216), different |child_id|s are used in
-    // different places to represent the browser process. Therefore, we don't
-    // compare the two GlobalRequestIDs directly here but rather check that they
-    // each have the expected |child_id| value signifying the browser process
-    // initiated the request.
-    CHECK_EQ(request_id_for_extension_cancelled_navigation_.child_id, 0);
-    CHECK_EQ(navigation_handle->GetGlobalRequestID().child_id, -1);
+  if (navigation_handle->GetGlobalRequestID() ==
+      request_id_for_extension_cancelled_navigation_) {
+    // Navigation requests are always initiated in the browser process.
+    CHECK(request_id_for_extension_cancelled_navigation_.child_id.is_browser());
     navigation_handle_id_for_extension_cancelled_navigation_ =
         navigation_handle->GetNavigationId();
-    request_id_for_extension_cancelled_navigation_ = {0, -1};
+    request_id_for_extension_cancelled_navigation_.request_id = -1;
     return content::NavigationThrottle::PROCEED;
   }
 
@@ -200,23 +183,30 @@ LoginTabHelper::WillProcessMainFrameUnauthorizedResponse(
 }
 
 LoginTabHelper::LoginTabHelper(content::WebContents* web_contents)
-    : content::WebContentsObserver(web_contents) {}
+    : content::WebContentsObserver(web_contents),
+      content::WebContentsUserData<LoginTabHelper>(*web_contents) {}
+
+std::unique_ptr<LoginHandler> LoginTabHelper::CreateLoginHandler(
+    const net::AuthChallengeInfo& auth_info,
+    content::WebContents* web_contents,
+    content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
+  return LoginHandler::Create(auth_info, web_contents,
+                              std::move(auth_required_callback));
+}
 
 void LoginTabHelper::HandleCredentials(
-    const base::Optional<net::AuthCredentials>& credentials) {
+    const std::optional<net::AuthCredentials>& credentials) {
   login_handler_.reset();
-  url_for_login_handler_ = GURL();
 
   if (credentials.has_value()) {
     content::StoragePartition* storage_partition =
-        content::BrowserContext::GetStoragePartition(
-            web_contents()->GetBrowserContext(),
+        web_contents()->GetBrowserContext()->GetStoragePartition(
             web_contents()->GetSiteInstance());
     // Pass a weak pointer for the callback, as the WebContents (and thus this
     // LoginTabHelper) could be destroyed while the network service is
     // processing the new cache entry.
     storage_partition->GetNetworkContext()->AddAuthCacheEntry(
-        challenge_, network_isolation_key_, credentials.value(),
+        challenge_, network_anonymization_key_, credentials.value(),
         base::BindOnce(&LoginTabHelper::Reload,
                        weak_ptr_factory_.GetWeakPtr()));
   }
@@ -254,4 +244,4 @@ void LoginTabHelper::Reload() {
                                          false /* check_for_repost */);
 }
 
-WEB_CONTENTS_USER_DATA_KEY_IMPL(LoginTabHelper)
+WEB_CONTENTS_USER_DATA_KEY_IMPL(LoginTabHelper);

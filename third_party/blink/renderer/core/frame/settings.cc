@@ -26,78 +26,13 @@
 
 #include "third_party/blink/renderer/core/frame/settings.h"
 
-#include <memory>
-
-#include "base/feature_list.h"
-#include "base/memory/ptr_util.h"
-#include "build/build_config.h"
-#include "third_party/blink/public/common/features.h"
-#include "third_party/blink/renderer/platform/graphics/dark_mode_settings.h"
-
 namespace blink {
 
-// NOTEs
-//  1) EditingMacBehavior comprises builds on Mac;
-//  2) EditingWindowsBehavior comprises builds on Windows;
-//  3) EditingUnixBehavior comprises all unix-based systems, but
-//     Darwin/MacOS/Android (and then abusing the terminology);
-//  4) EditingAndroidBehavior comprises Android builds.
-// 99) MacEditingBehavior is used a fallback.
-static web_pref::EditingBehaviorType EditingBehaviorTypeForPlatform() {
-  return
-#if defined(OS_MAC)
-      web_pref::kEditingMacBehavior
-#elif defined(OS_WIN)
-      web_pref::kEditingWindowsBehavior
-#elif defined(OS_ANDROID)
-      web_pref::kEditingAndroidBehavior
-#elif defined(OS_CHROMEOS)
-      base::FeatureList::IsEnabled(features::kCrOSAutoSelect)
-          ? web_pref::kEditingChromeOSBehavior
-          : web_pref::kEditingUnixBehavior
-#else  // Rest of the UNIX-like systems
-      web_pref::kEditingUnixBehavior
-#endif
-      ;
-}
+Settings::Settings() = default;
 
-#if defined(OS_WIN)
-static const bool kDefaultSelectTrailingWhitespaceEnabled = true;
-#else
-static const bool kDefaultSelectTrailingWhitespaceEnabled = false;
-#endif
-
-Settings::Settings()
-    : text_autosizing_enabled_(false) SETTINGS_INITIALIZER_LIST {}
-
-SETTINGS_SETTER_BODIES
-
-void Settings::SetDelegate(SettingsDelegate* delegate) {
-  delegate_ = delegate;
-}
-
-void Settings::Invalidate(SettingsDelegate::ChangeType change_type) {
-  if (delegate_)
-    delegate_->SettingsChanged(change_type);
-}
-
-void Settings::SetTextAutosizingEnabled(bool text_autosizing_enabled) {
-  if (text_autosizing_enabled_ == text_autosizing_enabled)
-    return;
-
-  text_autosizing_enabled_ = text_autosizing_enabled;
-  Invalidate(SettingsDelegate::kTextAutosizingChange);
-}
-
-// TODO: Move to Settings.json5 once make_settings can understand IntSize.
-void Settings::SetTextAutosizingWindowSizeOverride(
-    const IntSize& text_autosizing_window_size_override) {
-  if (text_autosizing_window_size_override_ ==
-      text_autosizing_window_size_override)
-    return;
-
-  text_autosizing_window_size_override_ = text_autosizing_window_size_override;
-  Invalidate(SettingsDelegate::kTextAutosizingChange);
+void Settings::SetPreferCompositingToLCDTextForTesting(bool enabled) {
+  SetLCDTextPreference(enabled ? LCDTextPreference::kIgnored
+                               : LCDTextPreference::kStronglyPreferred);
 }
 
 }  // namespace blink

@@ -1,11 +1,16 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/dom_distiller/core/distiller_url_fetcher.h"
 
-#include "base/bind.h"
+#include <optional>
+#include <string>
+#include <utility>
+
+#include "base/functional/bind.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
+#include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "url/gurl.h"
@@ -16,7 +21,7 @@ DistillerURLFetcherFactory::DistillerURLFetcherFactory(
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
     : url_loader_factory_(url_loader_factory) {}
 
-DistillerURLFetcherFactory::~DistillerURLFetcherFactory() {}
+DistillerURLFetcherFactory::~DistillerURLFetcherFactory() = default;
 
 DistillerURLFetcher* DistillerURLFetcherFactory::CreateDistillerURLFetcher()
     const {
@@ -27,7 +32,7 @@ DistillerURLFetcher::DistillerURLFetcher(
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
     : url_loader_factory_(url_loader_factory) {}
 
-DistillerURLFetcher::~DistillerURLFetcher() {}
+DistillerURLFetcher::~DistillerURLFetcher() = default;
 
 void DistillerURLFetcher::FetchURL(const std::string& url,
                                    URLFetcherCallback callback) {
@@ -77,6 +82,7 @@ std::unique_ptr<network::SimpleURLLoader> DistillerURLFetcher::CreateURLFetcher(
   auto resource_request = std::make_unique<network::ResourceRequest>();
   resource_request->url = GURL(url);
   resource_request->method = "GET";
+  resource_request->site_for_cookies = net::SiteForCookies::FromUrl(GURL(url));
 
   auto url_loader = network::SimpleURLLoader::Create(
       std::move(resource_request), traffic_annotation);
@@ -88,17 +94,13 @@ std::unique_ptr<network::SimpleURLLoader> DistillerURLFetcher::CreateURLFetcher(
 }
 
 void DistillerURLFetcher::OnURLLoadComplete(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   // The loader is not needed at this point anymore.
   url_loader_.reset();
 
-  std::string response;
-  if (response_body) {
-    // Only copy over the data if the request was successful. Insert
-    // an empty string into the proto otherwise.
-    response = std::move(*response_body);
-  }
-  std::move(callback_).Run(response);
+  // Only use the data if the request was successful. Insert an empty string
+  // into the proto otherwise.
+  std::move(callback_).Run(std::move(response_body).value_or(""));
 }
 
 }  // namespace dom_distiller

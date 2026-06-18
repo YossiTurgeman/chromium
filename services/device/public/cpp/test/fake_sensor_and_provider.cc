@@ -1,15 +1,17 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #include "services/device/public/cpp/test/fake_sensor_and_provider.h"
 
 #include <memory>
 #include <utility>
 
-#include "base/notreached.h"
+#include "base/notimplemented.h"
 #include "base/time/time.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+#include "services/device/public/cpp/generic_sensor/sensor_reading_shared_buffer.h"
 #include "services/device/public/cpp/generic_sensor/sensor_traits.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -24,9 +26,34 @@ const uint64_t kSharedBufferSizeInBytes =
 
 namespace device {
 
-FakeSensor::FakeSensor(mojom::SensorType sensor_type,
-                       SensorReadingSharedBuffer* buffer)
-    : sensor_type_(sensor_type), buffer_(buffer) {}
+bool WaiterHelper::Wait() {
+  bool result = WaitInternal();
+  event_received_ = false;
+  return result;
+}
+
+void WaiterHelper::OnEvent() {
+  event_received_ = true;
+  run_loop_.Quit();
+}
+
+bool WaiterHelper::WaitInternal() {
+  if (event_received_) {
+    return true;
+  }
+  run_loop_.Run();
+  return event_received_;
+}
+
+FakeSensor::FakeSensor(
+    mojom::SensorType sensor_type,
+    SensorReadingSharedBuffer* buffer,
+    mojo::PendingRemote<mojom::SensorConnectionWatcher> watcher)
+    : sensor_type_(sensor_type), buffer_(buffer) {
+  if (watcher.is_valid()) {
+    watcher_.Bind(std::move(watcher));
+  }
+}
 
 FakeSensor::~FakeSensor() = default;
 
@@ -45,9 +72,20 @@ void FakeSensor::GetDefaultConfiguration(
 void FakeSensor::RemoveConfiguration(
     const PlatformSensorConfiguration& configuration) {}
 
-void FakeSensor::Suspend() {}
+void FakeSensor::Suspend() {
+  suspend_waiter_.OnEvent();
+}
 
-void FakeSensor::Resume() {}
+void FakeSensor::Resume() {
+  resume_waiter_.OnEvent();
+}
+
+bool FakeSensor::WaitForSuspend(bool suspend) {
+  if (suspend) {
+    return suspend_waiter_.Wait();
+  }
+  return resume_waiter_.Wait();
+}
 
 void FakeSensor::ConfigureReadingChangeNotifications(bool enabled) {
   reading_notification_enabled_ = enabled;
@@ -74,7 +112,7 @@ mojo::PendingReceiver<mojom::SensorClient> FakeSensor::GetClient() {
 }
 
 uint64_t FakeSensor::GetBufferOffset() {
-  return SensorReadingSharedBuffer::GetOffset(sensor_type_);
+  return GetSensorReadingSharedBufferOffset(sensor_type_);
 }
 
 void FakeSensor::SetReading(SensorReading reading) {
@@ -96,12 +134,18 @@ FakeSensorProvider::FakeSensorProvider() = default;
 
 FakeSensorProvider::~FakeSensorProvider() = default;
 
-void FakeSensorProvider::GetSensor(mojom::SensorType type,
-                                   GetSensorCallback callback) {
+void FakeSensorProvider::GetSensor(
+    mojom::SensorType type,
+    mojo::PendingRemote<mojom::SensorConnectionWatcher> watcher,
+    GetSensorCallback callback) {
   if (!CreateSharedBufferIfNeeded()) {
     std::move(callback).Run(mojom::SensorCreationResult::ERROR_NOT_AVAILABLE,
                             nullptr);
     return;
+  }
+
+  if (sensor_requested_callback_) {
+    std::move(sensor_requested_callback_).Run(type);
   }
 
   SensorReadingSharedBuffer* buffer = GetSensorReadingSharedBufferForType(type);
@@ -112,7 +156,7 @@ void FakeSensorProvider::GetSensor(mojom::SensorType type,
     case mojom::SensorType::AMBIENT_LIGHT:
       if (ambient_light_sensor_is_available_) {
         sensor = std::make_unique<FakeSensor>(mojom::SensorType::AMBIENT_LIGHT,
-                                              buffer);
+                                              buffer, std::move(watcher));
         ambient_light_sensor_ = sensor.get();
         ambient_light_sensor_->SetReading(ambient_light_sensor_reading_);
       }
@@ -120,7 +164,7 @@ void FakeSensorProvider::GetSensor(mojom::SensorType type,
     case mojom::SensorType::ACCELEROMETER:
       if (accelerometer_is_available_) {
         sensor = std::make_unique<FakeSensor>(mojom::SensorType::ACCELEROMETER,
-                                              buffer);
+                                              buffer, std::move(watcher));
         accelerometer_ = sensor.get();
         accelerometer_->SetReading(accelerometer_reading_);
       }
@@ -128,16 +172,24 @@ void FakeSensorProvider::GetSensor(mojom::SensorType type,
     case mojom::SensorType::LINEAR_ACCELERATION:
       if (linear_acceleration_sensor_is_available_) {
         sensor = std::make_unique<FakeSensor>(
-            mojom::SensorType::LINEAR_ACCELERATION, buffer);
+            mojom::SensorType::LINEAR_ACCELERATION, buffer, std::move(watcher));
         linear_acceleration_sensor_ = sensor.get();
         linear_acceleration_sensor_->SetReading(
             linear_acceleration_sensor_reading_);
       }
       break;
+    case mojom::SensorType::GRAVITY:
+      if (gravity_sensor_is_available_) {
+        sensor = std::make_unique<FakeSensor>(mojom::SensorType::GRAVITY,
+                                              buffer, std::move(watcher));
+        gravity_sensor_ = sensor.get();
+        gravity_sensor_->SetReading(gravity_sensor_reading_);
+      }
+      break;
     case mojom::SensorType::GYROSCOPE:
       if (gyroscope_is_available_) {
-        sensor =
-            std::make_unique<FakeSensor>(mojom::SensorType::GYROSCOPE, buffer);
+        sensor = std::make_unique<FakeSensor>(mojom::SensorType::GYROSCOPE,
+                                              buffer, std::move(watcher));
         gyroscope_ = sensor.get();
         gyroscope_->SetReading(gyroscope_reading_);
       }
@@ -145,7 +197,8 @@ void FakeSensorProvider::GetSensor(mojom::SensorType type,
     case mojom::SensorType::RELATIVE_ORIENTATION_EULER_ANGLES:
       if (relative_orientation_sensor_is_available_) {
         sensor = std::make_unique<FakeSensor>(
-            mojom::SensorType::RELATIVE_ORIENTATION_EULER_ANGLES, buffer);
+            mojom::SensorType::RELATIVE_ORIENTATION_EULER_ANGLES, buffer,
+            std::move(watcher));
         relative_orientation_sensor_ = sensor.get();
         relative_orientation_sensor_->SetReading(
             relative_orientation_sensor_reading_);
@@ -154,7 +207,8 @@ void FakeSensorProvider::GetSensor(mojom::SensorType type,
     case mojom::SensorType::ABSOLUTE_ORIENTATION_EULER_ANGLES:
       if (absolute_orientation_sensor_is_available_) {
         sensor = std::make_unique<FakeSensor>(
-            mojom::SensorType::ABSOLUTE_ORIENTATION_EULER_ANGLES, buffer);
+            mojom::SensorType::ABSOLUTE_ORIENTATION_EULER_ANGLES, buffer,
+            std::move(watcher));
         absolute_orientation_sensor_ = sensor.get();
         absolute_orientation_sensor_->SetReading(
             absolute_orientation_sensor_reading_);
@@ -167,8 +221,7 @@ void FakeSensorProvider::GetSensor(mojom::SensorType type,
   if (sensor) {
     auto init_params = mojom::SensorInitParams::New();
     init_params->client_receiver = sensor->GetClient();
-    init_params->memory = shared_buffer_handle_->Clone(
-        mojo::SharedBufferHandle::AccessMode::READ_ONLY);
+    init_params->memory = mapped_region_.region.Duplicate();
     init_params->buffer_offset = sensor->GetBufferOffset();
     init_params->default_configuration = sensor->GetDefaultConfiguration();
     init_params->maximum_frequency = sensor->GetMaximumSupportedFrequency();
@@ -188,6 +241,10 @@ void FakeSensorProvider::GetSensor(mojom::SensorType type,
 void FakeSensorProvider::Bind(
     mojo::PendingReceiver<mojom::SensorProvider> receiver) {
   receivers_.Add(this, std::move(receiver));
+}
+
+bool FakeSensorProvider::is_bound() const {
+  return !receivers_.empty();
 }
 
 void FakeSensorProvider::SetAmbientLightSensorData(double value) {
@@ -212,6 +269,14 @@ void FakeSensorProvider::SetLinearAccelerationSensorData(double x,
   linear_acceleration_sensor_reading_.accel.x = x;
   linear_acceleration_sensor_reading_.accel.y = y;
   linear_acceleration_sensor_reading_.accel.z = z;
+}
+
+void FakeSensorProvider::SetGravitySensorData(double x, double y, double z) {
+  gravity_sensor_reading_.raw.timestamp =
+      (base::TimeTicks::Now() - base::TimeTicks()).InSecondsF();
+  gravity_sensor_reading_.accel.x = x;
+  gravity_sensor_reading_.accel.y = y;
+  gravity_sensor_reading_.accel.z = z;
 }
 
 void FakeSensorProvider::SetGyroscopeData(double x, double y, double z) {
@@ -262,6 +327,12 @@ void FakeSensorProvider::UpdateLinearAccelerationSensorData(double x,
   linear_acceleration_sensor_->SetReading(linear_acceleration_sensor_reading_);
 }
 
+void FakeSensorProvider::UpdateGravitySensorData(double x, double y, double z) {
+  SetGravitySensorData(x, y, z);
+  EXPECT_TRUE(gravity_sensor_);
+  gravity_sensor_->SetReading(gravity_sensor_reading_);
+}
+
 void FakeSensorProvider::UpdateGyroscopeData(double x, double y, double z) {
   SetGyroscopeData(x, y, z);
   EXPECT_TRUE(gyroscope_);
@@ -287,32 +358,56 @@ void FakeSensorProvider::UpdateAbsoluteOrientationSensorData(double alpha,
 }
 
 bool FakeSensorProvider::CreateSharedBufferIfNeeded() {
-  if (shared_buffer_mapping_.get())
+  if (mapped_region_.IsValid())
     return true;
 
-  if (!shared_buffer_handle_.is_valid()) {
-    shared_buffer_handle_ =
-        mojo::SharedBufferHandle::Create(kSharedBufferSizeInBytes);
-    if (!shared_buffer_handle_.is_valid())
-      return false;
-  }
-
-  // Create read/write mapping now, to ensure it is kept writable
-  // after the region is sealed read-only on Android.
-  shared_buffer_mapping_ = shared_buffer_handle_->Map(kSharedBufferSizeInBytes);
-  return shared_buffer_mapping_.get() != nullptr;
+  mapped_region_ =
+      base::ReadOnlySharedMemoryRegion::Create(kSharedBufferSizeInBytes);
+  return mapped_region_.IsValid();
 }
 
 SensorReadingSharedBuffer*
 FakeSensorProvider::GetSensorReadingSharedBufferForType(
     mojom::SensorType type) {
-  auto* ptr = static_cast<char*>(shared_buffer_mapping_.get());
-  if (!ptr)
+  base::span<SensorReadingSharedBuffer> buffers =
+      mapped_region_.mapping.GetMemoryAsSpan<SensorReadingSharedBuffer>();
+  if (buffers.empty()) {
     return nullptr;
+  }
 
-  ptr += SensorReadingSharedBuffer::GetOffset(type);
-  memset(ptr, 0, kReadingBufferSize);
-  return reinterpret_cast<SensorReadingSharedBuffer*>(ptr);
+  size_t offset = GetSensorReadingSharedBufferOffset(type);
+  CHECK(offset % sizeof(SensorReadingSharedBuffer) == 0);
+
+  SensorReadingSharedBuffer& buffer =
+      buffers[offset / sizeof(SensorReadingSharedBuffer)];
+  std::ranges::fill(base::byte_span_from_ref(base::allow_nonunique_obj, buffer),
+                    0);
+  return &buffer;
+}
+
+bool FakeSensorProvider::WaitForAccelerometerSuspend(bool suspend) {
+  CHECK(accelerometer_is_available_);
+  return accelerometer_->WaitForSuspend(suspend);
+}
+
+bool FakeSensorProvider::WaitForAmbientLightSensorSuspend(bool suspend) {
+  CHECK(ambient_light_sensor_is_available_);
+  return ambient_light_sensor_->WaitForSuspend(suspend);
+}
+
+bool FakeSensorProvider::WaitForLinearAccelerationSensorSuspend(bool suspend) {
+  CHECK(linear_acceleration_sensor_is_available_);
+  return linear_acceleration_sensor_->WaitForSuspend(suspend);
+}
+
+bool FakeSensorProvider::WaitForGravitySensorSuspend(bool suspend) {
+  CHECK(gravity_sensor_is_available_);
+  return gravity_sensor_->WaitForSuspend(suspend);
+}
+
+bool FakeSensorProvider::WaitForGyroscopeSuspend(bool suspend) {
+  CHECK(gyroscope_is_available_);
+  return gyroscope_->WaitForSuspend(suspend);
 }
 
 }  // namespace device

@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2016 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -32,7 +32,7 @@ def ParseArgs():
                       help='optional prefix to prepend, e.g. --prefix=lldb')
   parser.add_argument(
       '--compiler',
-      help='compiler to override the compiler specied in the compile db')
+      help='compiler to override the compiler specified in the compile db')
   parser.add_argument('--suffix',
                       help='optional suffix to append, e.g.' +
                       ' --suffix="-Xclang -ast-dump -fsyntax-only"')
@@ -50,8 +50,8 @@ def BuildIt(record, prefix, compiler, suffix):
   """
   raw_args = shlex.split(record['command'])
   # The compile command might have some goop in front of it, e.g. if the build
-  # is using goma, so shift arguments off the front until raw_args[0] looks like
-  # a clang invocation.
+  # is using reclient, so shift arguments off the front until raw_args[0] looks
+  # like a clang invocation.
   while raw_args:
     if _PROBABLY_CLANG_RE.search(raw_args[0]):
       break

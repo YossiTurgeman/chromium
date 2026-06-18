@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,29 +13,30 @@
 #include <tuple>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
 #include "base/win/windows_version.h"
 #include "chrome/common/importer/edge_importer_utils_win.h"
-#include "chrome/common/importer/imported_bookmark_entry.h"
 #include "chrome/common/importer/importer_bridge.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/utility/importer/edge_database_reader_win.h"
-#include "chrome/utility/importer/favicon_reencode.h"
+#include "components/user_data_importer/common/imported_bookmark_entry.h"
+#include "components/user_data_importer/content/favicon_reencode.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "url/gurl.h"
 
 namespace {
 
 // Toolbar favorites are placed under this special folder name.
-const base::char16 kFavoritesBarTitle[] = L"_Favorites_Bar_";
-const base::char16 kSpartanDatabaseFile[] = L"spartan.edb";
+const char16_t kFavoritesBarTitle[] = u"_Favorites_Bar_";
+const wchar_t kSpartanDatabaseFile[] = L"spartan.edb";
 
 struct EdgeFavoriteEntry {
   EdgeFavoriteEntry()
@@ -44,7 +45,7 @@ struct EdgeFavoriteEntry {
         item_id(GUID_NULL),
         parent_id(GUID_NULL) {}
 
-  base::string16 title;
+  std::u16string title;
   GURL url;
   base::FilePath favicon_file;
   bool is_folder;
@@ -53,12 +54,12 @@ struct EdgeFavoriteEntry {
   GUID item_id;
   GUID parent_id;
 
-  std::vector<const EdgeFavoriteEntry*> children;
+  std::vector<raw_ptr<const EdgeFavoriteEntry, VectorExperimental>> children;
 
-  ImportedBookmarkEntry ToBookmarkEntry(
+  user_data_importer::ImportedBookmarkEntry ToBookmarkEntry(
       bool in_toolbar,
-      const std::vector<base::string16>& path) const {
-    ImportedBookmarkEntry entry;
+      const std::vector<std::u16string>& path) const {
+    user_data_importer::ImportedBookmarkEntry entry;
     entry.in_toolbar = in_toolbar;
     entry.is_folder = is_folder;
     entry.url = url;
@@ -100,32 +101,32 @@ base::FilePath FindSpartanDatabase(const base::FilePath& profile_path) {
 
 struct GuidComparator {
   bool operator()(const GUID& a, const GUID& b) const {
-    return memcmp(&a, &b, sizeof(a)) < 0;
+    return base::byte_span_from_ref(a) < base::byte_span_from_ref(b);
   }
 };
 
-bool ReadFaviconData(const base::FilePath& file,
-                     std::vector<unsigned char>* data) {
-  std::string image_data;
-  if (!base::ReadFileToString(file, &image_data))
-    return false;
+std::optional<std::vector<uint8_t>> ReadFaviconData(
+    const base::FilePath& file) {
+  std::optional<std::vector<uint8_t>> image_data = base::ReadFileToBytes(file);
+  if (!image_data) {
+    return std::nullopt;
+  }
 
-  const unsigned char* ptr =
-      reinterpret_cast<const unsigned char*>(image_data.c_str());
-  return importer::ReencodeFavicon(ptr, image_data.size(), data);
+  return importer::ReencodeFavicon(image_data.value());
 }
 
-void BuildBookmarkEntries(const EdgeFavoriteEntry& current_entry,
-                          bool is_toolbar,
-                          std::vector<ImportedBookmarkEntry>* bookmarks,
-                          favicon_base::FaviconUsageDataList* favicons,
-                          std::vector<base::string16>* path) {
+void BuildBookmarkEntries(
+    const EdgeFavoriteEntry& current_entry,
+    bool is_toolbar,
+    std::vector<user_data_importer::ImportedBookmarkEntry>* bookmarks,
+    favicon_base::FaviconUsageDataList* favicons,
+    std::vector<std::u16string>* path) {
   for (const EdgeFavoriteEntry* entry : current_entry.children) {
     if (entry->is_folder) {
       // If the favorites bar then load all children as toolbar items.
       if (base::EqualsCaseInsensitiveASCII(entry->title, kFavoritesBarTitle)) {
         // Replace name with Links similar to IE.
-        path->push_back(L"Links");
+        path->push_back(u"Links");
         BuildBookmarkEntries(*entry, true, bookmarks, favicons, path);
         path->pop_back();
       } else {
@@ -136,15 +137,19 @@ void BuildBookmarkEntries(const EdgeFavoriteEntry& current_entry,
     } else {
       bookmarks->push_back(entry->ToBookmarkEntry(is_toolbar, *path));
       favicon_base::FaviconUsageData favicon;
-      if (entry->url.is_valid() && !entry->favicon_file.empty() &&
-          ReadFaviconData(entry->favicon_file, &favicon.png_data)) {
-        // As the database doesn't provide us a favicon URL we'll fake one.
-        GURL::Replacements path_replace;
-        path_replace.SetPathStr("/favicon.ico");
-        favicon.favicon_url =
-            entry->url.GetWithEmptyPath().ReplaceComponents(path_replace);
-        favicon.urls.insert(entry->url);
-        favicons->push_back(favicon);
+      if (entry->url.is_valid() && !entry->favicon_file.empty()) {
+        std::optional<std::vector<uint8_t>> png_data =
+            ReadFaviconData(entry->favicon_file);
+        if (png_data) {
+          favicon.png_data = std::move(png_data).value();
+          // As the database doesn't provide us a favicon URL we'll fake one.
+          GURL::Replacements path_replace;
+          path_replace.SetPathStr("/favicon.ico");
+          favicon.favicon_url =
+              entry->url.GetWithEmptyPath().ReplaceComponents(path_replace);
+          favicon.urls.insert(entry->url);
+          favicons->push_back(favicon);
+        }
       }
     }
   }
@@ -152,32 +157,33 @@ void BuildBookmarkEntries(const EdgeFavoriteEntry& current_entry,
 
 }  // namespace
 
-EdgeImporter::EdgeImporter() {}
+EdgeImporter::EdgeImporter() = default;
 
-void EdgeImporter::StartImport(const importer::SourceProfile& source_profile,
-                               uint16_t items,
-                               ImporterBridge* bridge) {
+void EdgeImporter::StartImport(
+    const user_data_importer::SourceProfile& source_profile,
+    uint16_t items,
+    ImporterBridge* bridge) {
   bridge_ = bridge;
   bridge_->NotifyStarted();
   source_path_ = source_profile.source_path;
 
-  if ((items & importer::FAVORITES) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::FAVORITES);
+  if ((items & user_data_importer::FAVORITES) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::FAVORITES);
     ImportFavorites();
-    bridge_->NotifyItemEnded(importer::FAVORITES);
+    bridge_->NotifyItemEnded(user_data_importer::FAVORITES);
   }
   bridge_->NotifyEnded();
 }
 
-EdgeImporter::~EdgeImporter() {}
+EdgeImporter::~EdgeImporter() = default;
 
 void EdgeImporter::ImportFavorites() {
-  std::vector<ImportedBookmarkEntry> bookmarks;
+  std::vector<user_data_importer::ImportedBookmarkEntry> bookmarks;
   favicon_base::FaviconUsageDataList favicons;
   ParseFavoritesDatabase(&bookmarks, &favicons);
 
   if (!bookmarks.empty() && !cancelled()) {
-    const base::string16& first_folder_name =
+    const std::u16string& first_folder_name =
         l10n_util::GetStringUTF16(IDS_BOOKMARK_GROUP_FROM_EDGE);
     bridge_->AddBookmarks(bookmarks, first_folder_name);
   }
@@ -204,7 +210,7 @@ void EdgeImporter::ImportFavorites() {
 // Title                LongText
 // URL                  LongText
 void EdgeImporter::ParseFavoritesDatabase(
-    std::vector<ImportedBookmarkEntry>* bookmarks,
+    std::vector<user_data_importer::ImportedBookmarkEntry>* bookmarks,
     favicon_base::FaviconUsageDataList* favicons) {
   base::FilePath database_path = FindSpartanDatabase(source_path_);
   if (database_path.empty())
@@ -218,8 +224,8 @@ void EdgeImporter::ParseFavoritesDatabase(
   // attribute, as the open database operation will fail in such cases.
   // The log folder will usually not be present when running the unit tests.
   if (base::PathExists(log_folder))
-    database.set_log_folder(log_folder.value());
-  if (!database.OpenDatabase(database_path.value())) {
+    database.set_log_folder(log_folder);
+  if (!database.OpenDatabase(database_path)) {
     DVLOG(1) << "Error opening database " << database.GetErrorMessage();
     return;
   }
@@ -248,7 +254,7 @@ void EdgeImporter::ParseFavoritesDatabase(
       continue;
     if (!enumerator->RetrieveColumn(L"IsFolder", &entry.is_folder))
       continue;
-    base::string16 url;
+    std::u16string url;
     if (!enumerator->RetrieveColumn(L"URL", &url))
       continue;
     entry.url = GURL(url);
@@ -256,11 +262,13 @@ void EdgeImporter::ParseFavoritesDatabase(
       continue;
     if (!enumerator->RetrieveColumn(L"Title", &entry.title))
       continue;
-    base::string16 favicon_file;
+    std::u16string favicon_file;
     if (!enumerator->RetrieveColumn(L"FaviconFile", &favicon_file))
       continue;
-    if (!favicon_file.empty())
-      entry.favicon_file = favicon_base.Append(favicon_file);
+    if (!favicon_file.empty()) {
+      entry.favicon_file =
+          favicon_base.Append(base::FilePath::FromUTF16Unsafe(favicon_file));
+    }
     if (!enumerator->RetrieveColumn(L"ParentId", &entry.parent_id))
       continue;
     if (!enumerator->RetrieveColumn(L"ItemId", &entry.item_id))
@@ -292,6 +300,6 @@ void EdgeImporter::ParseFavoritesDatabase(
     std::sort(entry.second.children.begin(), entry.second.children.end(),
               EdgeFavoriteEntryComparator());
   }
-  std::vector<base::string16> path;
+  std::vector<std::u16string> path;
   BuildBookmarkEntries(root_entry, false, bookmarks, favicons, &path);
 }

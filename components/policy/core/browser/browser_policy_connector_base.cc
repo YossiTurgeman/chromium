@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,11 @@
 #include <vector>
 
 #include "base/check.h"
+#include "base/memory/raw_ptr.h"
 #include "components/policy/core/common/chrome_schema.h"
 #include "components/policy/core/common/configuration_policy_provider.h"
 #include "components/policy/core/common/policy_namespace.h"
+#include "components/policy/core/common/policy_service.h"
 #include "components/policy/core/common/policy_service_impl.h"
 #include "ui/base/resource/resource_bundle.h"
 
@@ -22,6 +24,7 @@ namespace {
 // Used in BrowserPolicyConnectorBase::SetPolicyProviderForTesting.
 bool g_created_policy_service = false;
 ConfigurationPolicyProvider* g_testing_provider = nullptr;
+PolicyService* g_testing_policy_service = nullptr;
 
 }  // namespace
 
@@ -37,8 +40,13 @@ BrowserPolicyConnectorBase::BrowserPolicyConnectorBase(
   // of the policy providers in subclasses.
   const Schema& chrome_schema = policy::GetChromeSchema();
   handler_list_ = handler_list_factory.Run(chrome_schema);
-  schema_registry_.RegisterComponent(PolicyNamespace(POLICY_DOMAIN_CHROME, ""),
-                                     chrome_schema);
+  schema_registry_.RegisterComponent(
+      PolicyNamespace(POLICY_DOMAIN_CHROME, std::string()), chrome_schema);
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+  schema_registry_.RegisterComponent(
+      PolicyNamespace(POLICY_DOMAIN_EXTENSION_INSTALL, std::string()),
+      extension_install_policy_schema_);
+#endif
 }
 
 BrowserPolicyConnectorBase::~BrowserPolicyConnectorBase() {
@@ -68,11 +76,19 @@ const Schema& BrowserPolicyConnectorBase::GetChromeSchema() const {
   return policy::GetChromeSchema();
 }
 
+const Schema& BrowserPolicyConnectorBase::GetExtensionInstallPolicySchema()
+    const {
+  return extension_install_policy_schema_;
+}
+
 CombinedSchemaRegistry* BrowserPolicyConnectorBase::GetSchemaRegistry() {
   return &schema_registry_;
 }
 
 PolicyService* BrowserPolicyConnectorBase::GetPolicyService() {
+  if (g_testing_policy_service)
+    return g_testing_policy_service;
+
   if (policy_service_)
     return policy_service_.get();
 
@@ -88,9 +104,15 @@ PolicyService* BrowserPolicyConnectorBase::GetPolicyService() {
     provider->Init(GetSchemaRegistry());
 
   g_created_policy_service = true;
-  policy_service_ =
-      std::make_unique<PolicyServiceImpl>(GetProvidersForPolicyService());
+  policy_service_ = std::make_unique<PolicyServiceImpl>(
+      GetProvidersForPolicyService(),
+      PolicyServiceImpl::ScopeForMetrics::kMachine,
+      std::vector<std::unique_ptr<PolicyMigrator>>());
   return policy_service_.get();
+}
+
+bool BrowserPolicyConnectorBase::HasPolicyService() {
+  return g_testing_policy_service || policy_service_;
 }
 
 const ConfigurationPolicyHandlerList*
@@ -116,6 +138,12 @@ void BrowserPolicyConnectorBase::SetPolicyProviderForTesting(
   g_testing_provider = provider;
 }
 
+// static
+void BrowserPolicyConnectorBase::SetPolicyServiceForTesting(
+    PolicyService* policy_service) {
+  g_testing_policy_service = policy_service;
+}
+
 void BrowserPolicyConnectorBase::NotifyWhenResourceBundleReady(
     base::OnceClosure closure) {
   DCHECK(!ui::ResourceBundle::HasSharedInstance());
@@ -128,9 +156,10 @@ BrowserPolicyConnectorBase::GetPolicyProviderForTesting() {
   return g_testing_provider;
 }
 
-std::vector<ConfigurationPolicyProvider*>
+std::vector<raw_ptr<ConfigurationPolicyProvider, VectorExperimental>>
 BrowserPolicyConnectorBase::GetProvidersForPolicyService() {
-  std::vector<ConfigurationPolicyProvider*> providers;
+  std::vector<raw_ptr<ConfigurationPolicyProvider, VectorExperimental>>
+      providers;
   if (g_testing_provider) {
     providers.push_back(g_testing_provider);
     return providers;

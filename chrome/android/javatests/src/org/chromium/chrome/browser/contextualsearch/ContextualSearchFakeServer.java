@@ -1,50 +1,50 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.contextualsearch;
 
-import android.net.Uri;
-
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
+import androidx.test.platform.app.InstrumentationRegistry;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.junit.Assert;
 
 import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayContentDelegate;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayContentProgressObserver;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayPanelContent;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayPanelContentFactory;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanelContent;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanelContentDelegate;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanelContentFactory;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanelContentProgressObserver;
+import org.chromium.chrome.browser.compositor.overlay_panel.contextualsearch.ContextualSearchPanel;
+import org.chromium.chrome.browser.profiles.ProfileProvider;
+import org.chromium.content_public.browser.Visibility;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.content_public.browser.WebContentsObserver;
+import org.chromium.url.GURL;
 
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Implements a fake Contextual Search server, for testing purposes.
- * TODO(donnd): add more functionality to this class once the overall approach has been validated.
- * TODO(donnd): rename this class when we refactor and rename the interface it implements.  Should
- *              be something like ContextualSearchFakeEnvironment.
+ * Implements a fake Contextual Search server, for testing purposes. TODO(donnd): rename this class
+ * when we refactor and rename the interface it implements. Should be something like
+ * ContextualSearchFakeEnvironment.
  */
 @VisibleForTesting
 class ContextualSearchFakeServer
         implements ContextualSearchNetworkCommunicator, OverlayPanelContentFactory {
-    static final long LOGGED_EVENT_ID = 1L << 50; // Arbitrary value larger than 32 bits.
-
     private final ContextualSearchPolicy mPolicy;
 
-    private final ContextualSearchManagerTest mManagerTest;
+    private final ContextualSearchTestHost mTestHost;
     private final ContextualSearchNetworkCommunicator mBaseManager;
 
-    private final OverlayContentDelegate mContentDelegate;
-    private final OverlayContentProgressObserver mProgressObserver;
+    private final OverlayPanelContentDelegate mContentDelegate;
+    private final OverlayPanelContentProgressObserver mProgressObserver;
     private final ChromeActivity mActivity;
-
-    private final ArrayList<String> mRemovedUrls = new ArrayList<String>();
 
     private final Map<String, FakeResolveSearch> mFakeResolveSearches = new HashMap<>();
     private final Map<String, FakeNonResolveSearch> mFakeNonResolveSearches = new HashMap<>();
@@ -54,19 +54,68 @@ class ContextualSearchFakeServer
 
     private String mLoadedUrl;
     private int mLoadedUrlCount;
-    private boolean mUseInvalidLowPriorityPath;
 
     private String mSearchTermRequested;
-    private boolean mIsOnline = true;
     private boolean mIsExactResolve;
+    private ContextualSearchContext mSearchContext;
 
-    private boolean mDidEverCallWebContentsOnShow;
+    private boolean mDidEverShowWebContents;
+
+    /** An expected search, to be returned by this fake server when non-null. */
+    private FakeResolveSearch mExpectedFakeResolveSearch;
+
+    /**
+     * Provides access to the test host so this fake server can drive actions when simulating a
+     * search.
+     */
+    interface ContextualSearchTestHost {
+        /**
+         * Simulates a non-resolve trigger on the given node and waits for the panel to peek.
+         *
+         * @param nodeId A string containing the node ID.
+         */
+        void triggerNonResolve(String nodeId) throws TimeoutException;
+
+        /**
+         * Simulates a resolving trigger on the given node but does not wait for the panel to peek.
+         *
+         * @param nodeId A string containing the node ID.
+         */
+        void triggerResolve(String nodeId) throws TimeoutException;
+
+        /**
+         * Waits for the selected text string to be the given string, and asserts.
+         *
+         * @param text The string to wait for the selection to become.
+         */
+        void waitForSelectionToBe(final String text);
+
+        /**
+         * Waits for the Search Term Resolution to become ready.
+         *
+         * @param search A given FakeResolveSearch.
+         */
+        void waitForSearchTermResolutionToStart(final FakeResolveSearch search);
+
+        /**
+         * Waits for the Search Term Resolution to finish.
+         *
+         * @param search A given FakeResolveSearch.
+         */
+        void waitForSearchTermResolutionToFinish(final FakeResolveSearch search);
+
+        /**
+         * @return The {@link ContextualSearchPanel}.
+         */
+        ContextualSearchPanel getPanel();
+    }
 
     private class ContentsObserver extends WebContentsObserver {
         private boolean mIsVisible;
 
         private ContentsObserver(WebContents webContents) {
             super(webContents);
+            onVisibilityChanged(webContents.getVisibility());
         }
 
         private boolean isVisible() {
@@ -74,16 +123,11 @@ class ContextualSearchFakeServer
         }
 
         @Override
-        public void wasShown() {
-            mIsVisible = true;
-            mDidEverCallWebContentsOnShow = true;
+        public void onVisibilityChanged(@Visibility int visibility) {
+            mIsVisible = visibility == Visibility.VISIBLE;
+            mDidEverShowWebContents |= mIsVisible;
         }
-
-        @Override
-        public void wasHidden() {
-            mIsVisible = false;
-        }
-    };
+    }
 
     private ContentsObserver mContentsObserver;
 
@@ -91,14 +135,16 @@ class ContextualSearchFakeServer
         return mContentsObserver.isVisible();
     }
 
-    //============================================================================================
-    // FakeSearch
-    //============================================================================================
+    WebContentsObserver getContentsObserver() {
+        return mContentsObserver;
+    }
 
-    /**
-     * Abstract class that represents a fake contextual search.
-     */
-    public abstract class FakeSearch {
+    // ============================================================================================
+    // FakeSearch
+    // ============================================================================================
+
+    /** Abstract class that represents a fake contextual search. */
+    public abstract static class FakeSearch {
         private final String mNodeId;
 
         /**
@@ -108,12 +154,7 @@ class ContextualSearchFakeServer
             mNodeId = nodeId;
         }
 
-        /**
-         * Simulates a fake search.
-         *
-         * @throws InterruptedException
-         * @throws TimeoutException
-         */
+        /** Simulates a fake search. */
         public abstract void simulate() throws InterruptedException, TimeoutException;
 
         /**
@@ -129,13 +170,13 @@ class ContextualSearchFakeServer
         }
     }
 
-    //============================================================================================
+    // ============================================================================================
     // FakeNonResolveSearch
-    //============================================================================================
+    // ============================================================================================
 
     /**
-     * Class that represents a fake non-resolve triggered contextual search.
-     * Historically this was a long-press triggered search.
+     * Class that represents a fake non-resolve triggered contextual search. Historically this was a
+     * long-press triggered search.
      */
     public class FakeNonResolveSearch extends FakeSearch {
         private final String mSearchTerm;
@@ -152,8 +193,8 @@ class ContextualSearchFakeServer
 
         @Override
         public void simulate() throws InterruptedException, TimeoutException {
-            mManagerTest.triggerNonResolve(getNodeId());
-            mManagerTest.waitForSelectionToBe(mSearchTerm);
+            mTestHost.triggerNonResolve(getNodeId());
+            mTestHost.waitForSelectionToBe(mSearchTerm);
         }
 
         @Override
@@ -162,13 +203,11 @@ class ContextualSearchFakeServer
         }
     }
 
-    //============================================================================================
+    // ============================================================================================
     // FakeResolveSearch
-    //============================================================================================
+    // ============================================================================================
 
-    /**
-     * Class that represents a fake resolve-triggered contextual search.
-     */
+    /** Class that represents a fake resolve-triggered contextual search. */
     public class FakeResolveSearch extends FakeSearch {
         protected final ResolvedSearchTerm mResolvedSearchTerm;
 
@@ -176,9 +215,9 @@ class ContextualSearchFakeServer
         boolean mDidFinishResolution;
 
         /**
-         * @param nodeId                The id of the node where the touch event will be simulated.
-         * @param resolvedSearchTerm    The details of the server's Resolve request response, which
-         *                              tells us what to search for.
+         * @param nodeId The id of the node where the touch event will be simulated.
+         * @param resolvedSearchTerm The details of the server's Resolve request response, which
+         *     tells us what to search for.
          */
         FakeResolveSearch(String nodeId, ResolvedSearchTerm resolvedSearchTerm) {
             super(nodeId);
@@ -187,26 +226,32 @@ class ContextualSearchFakeServer
         }
 
         /**
-         * @param nodeId                The id of the node where the touch event will be simulated.
-         * @param searchTerm            The resolved search term.
+         * @param nodeId The id of the node where the touch event will be simulated.
+         * @param searchTerm The resolved search term.
          */
         FakeResolveSearch(String nodeId, String searchTerm) {
-            this(nodeId,
+            this(
+                    nodeId,
                     new ResolvedSearchTerm.Builder(false, 200, searchTerm, searchTerm).build());
         }
 
         /**
-         * @param nodeId                The id of the node where the touch event will be simulated.
-         * @param isNetworkUnavailable  Whether the network is unavailable.
-         * @param responseCode          The HTTP response code of the resolution.
-         * @param searchTerm            The resolved search term.
-         * @param displayText           The display text.
+         * @param nodeId The id of the node where the touch event will be simulated.
+         * @param isNetworkUnavailable Whether the network is unavailable.
+         * @param responseCode The HTTP response code of the resolution.
+         * @param searchTerm The resolved search term.
+         * @param displayText The display text.
          */
-        FakeResolveSearch(String nodeId, boolean isNetworkUnavailable, int responseCode,
-                String searchTerm, String displayText) {
-            this(nodeId,
-                    new ResolvedSearchTerm
-                            .Builder(isNetworkUnavailable, responseCode, searchTerm, displayText)
+        FakeResolveSearch(
+                String nodeId,
+                boolean isNetworkUnavailable,
+                int responseCode,
+                String searchTerm,
+                String displayText) {
+            this(
+                    nodeId,
+                    new ResolvedSearchTerm.Builder(
+                                    isNetworkUnavailable, responseCode, searchTerm, displayText)
                             .build());
         }
 
@@ -219,18 +264,22 @@ class ContextualSearchFakeServer
             mDidStartResolution = false;
             mDidFinishResolution = false;
 
-            mManagerTest.triggerResolve(getNodeId());
-            mManagerTest.waitForSelectionToBe(getSearchTerm());
+            if (mPolicy.shouldPreviousGestureResolve()) {
+                mTestHost.triggerResolve(getNodeId());
+            } else {
+                mTestHost.triggerNonResolve(getNodeId());
+            }
+            mTestHost.waitForSelectionToBe(getSearchTerm());
 
             if (mPolicy.shouldPreviousGestureResolve()) {
                 // Now wait for the Search Term Resolution to start.
-                mManagerTest.waitForSearchTermResolutionToStart(this);
+                mTestHost.waitForSearchTermResolutionToStart(this);
 
                 // Simulate a Search Term Resolution.
                 simulateSearchTermResolution();
 
                 // Now wait for the simulated Search Term Resolution to finish.
-                mManagerTest.waitForSearchTermResolutionToFinish(this);
+                mTestHost.waitForSearchTermResolutionToFinish(this);
             } else {
                 mDidFinishResolution = true;
             }
@@ -241,9 +290,7 @@ class ContextualSearchFakeServer
             return mResolvedSearchTerm.searchTerm();
         }
 
-        /**
-         * Notifies that a Search Term Resolution has started.
-         */
+        /** Notifies that a Search Term Resolution has started. */
         public void notifySearchTermResolutionStarted() {
             mDidStartResolution = true;
         }
@@ -262,28 +309,17 @@ class ContextualSearchFakeServer
             return mDidFinishResolution;
         }
 
-        /**
-         * Simulates a Search Term Resolution.
-         */
+        /** Simulates a Search Term Resolution. */
         protected void simulateSearchTermResolution() {
-            mManagerTest.runOnMainSync(getRunnable());
-        }
+            InstrumentationRegistry.getInstrumentation()
+                    .runOnMainSync(
+                            () -> {
+                                assert didStartSearchTermResolution();
+                                handleSearchTermResolutionResponse(mResolvedSearchTerm);
 
-        /**
-         * @return A Runnable to handle the fake Search Term Resolution.
-         */
-        private Runnable getRunnable() {
-            return new Runnable() {
-                @Override
-                public void run() {
-                    if (!mDidFinishResolution) {
-                        handleSearchTermResolutionResponse(mResolvedSearchTerm);
-
-                        mActiveResolveSearch = null;
-                        mDidFinishResolution = true;
-                    }
-                }
-            };
+                                mActiveResolveSearch = null;
+                                mDidFinishResolution = true;
+                            });
         }
 
         ResolvedSearchTerm getResolvedSearchTerm() {
@@ -291,35 +327,38 @@ class ContextualSearchFakeServer
         }
     }
 
-    //============================================================================================
+    // ============================================================================================
     // FakeResolveSearch
-    //============================================================================================
+    // ============================================================================================
 
-    /**
-     * Class that represents a fake resolve-triggered contextual search that is slow to resolve.
-     */
+    /** Class that represents a fake resolve-triggered contextual search that is slow to resolve. */
     public class FakeSlowResolveSearch extends FakeResolveSearch {
         /**
-         * @param nodeId                The id of the node where the touch event will be simulated.
-         * @param resolvedSearchTerm    The details of the server's Resolve request response, which
-         *                              tells us what to search for.
+         * @param nodeId The id of the node where the touch event will be simulated.
+         * @param resolvedSearchTerm The details of the server's Resolve request response, which
+         *     tells us what to search for.
          */
         FakeSlowResolveSearch(String nodeId, ResolvedSearchTerm resolvedSearchTerm) {
             super(nodeId, resolvedSearchTerm);
         }
 
         /**
-         * @param nodeId                The id of the node where the touch event will be simulated.
-         * @param isNetworkUnavailable  Whether the network is unavailable.
-         * @param responseCode          The HTTP response code of the resolution.
-         * @param searchTerm            The resolved search term.
-         * @param displayText           The display text.
+         * @param nodeId The id of the node where the touch event will be simulated.
+         * @param isNetworkUnavailable Whether the network is unavailable.
+         * @param responseCode The HTTP response code of the resolution.
+         * @param searchTerm The resolved search term.
+         * @param displayText The display text.
          */
-        FakeSlowResolveSearch(String nodeId, boolean isNetworkUnavailable, int responseCode,
-                String searchTerm, String displayText) {
-            this(nodeId,
-                    new ResolvedSearchTerm
-                            .Builder(isNetworkUnavailable, responseCode, searchTerm, displayText)
+        FakeSlowResolveSearch(
+                String nodeId,
+                boolean isNetworkUnavailable,
+                int responseCode,
+                String searchTerm,
+                String displayText) {
+            this(
+                    nodeId,
+                    new ResolvedSearchTerm.Builder(
+                                    isNetworkUnavailable, responseCode, searchTerm, displayText)
                             .build());
         }
 
@@ -332,99 +371,81 @@ class ContextualSearchFakeServer
             mDidStartResolution = false;
             mDidFinishResolution = false;
 
-            mManagerTest.triggerResolve(getNodeId());
-            mManagerTest.waitForSelectionToBe(getSearchTerm());
+            mTestHost.triggerResolve(getNodeId());
+            mTestHost.waitForSelectionToBe(getSearchTerm());
 
             if (mPolicy.shouldPreviousGestureResolve()) {
                 // Now wait for the Search Term Resolution to start.
-                mManagerTest.waitForSearchTermResolutionToStart(this);
+                mTestHost.waitForSearchTermResolutionToStart(this);
             } else {
-                throw new RuntimeException("Tried to simulate a slow resolving search when "
-                        + "not resolving!");
+                throw new RuntimeException(
+                        "Tried to simulate a slow resolving search when " + "not resolving!");
             }
         }
 
-        /**
-         * Finishes the resolving of a slow-resolving search.
-         * @throws InterruptedException
-         * @throws TimeoutException
-         */
+        /** Finishes the resolving of a slow-resolving search. */
         void finishResolve() throws InterruptedException, TimeoutException {
             // Simulate a Search Term Resolution.
             simulateSearchTermResolution();
 
             // Now wait for the simulated Search Term Resolution to finish.
-            mManagerTest.waitForSearchTermResolutionToFinish(this);
+            mTestHost.waitForSearchTermResolutionToFinish(this);
         }
     }
 
-    //============================================================================================
+    // ============================================================================================
     // OverlayPanelContentWrapper
-    //============================================================================================
+    // ============================================================================================
 
-    /**
-     * A wrapper around OverlayPanelContent to be used during tests.
-     */
+    /** A wrapper around OverlayPanelContent to be used during tests. */
     public class OverlayPanelContentWrapper extends OverlayPanelContent {
-        OverlayPanelContentWrapper(OverlayContentDelegate contentDelegate,
-                OverlayContentProgressObserver progressObserver, ChromeActivity activity,
+        OverlayPanelContentWrapper(
+                OverlayPanelContentDelegate contentDelegate,
+                OverlayPanelContentProgressObserver progressObserver,
+                ChromeActivity activity,
                 float barHeight) {
-            super(contentDelegate, progressObserver, activity, false, barHeight);
+            super(
+                    contentDelegate,
+                    progressObserver,
+                    activity,
+                    ProfileProvider.getOrCreateProfile(
+                            activity.getProfileProviderSupplier().get(), false),
+                    barHeight,
+                    activity.getCompositorViewHolderForTesting(),
+                    activity.getWindowAndroid(),
+                    activity::getActivityTab);
         }
 
         @Override
         public void loadUrl(String url, boolean shouldLoadImmediately) {
-            if (mUseInvalidLowPriorityPath && isLowPriorityUrl(url)) {
-                url = makeInvalidUrl(url);
-            }
             mLoadedUrl = url;
             mLoadedUrlCount++;
+
             super.loadUrl(url, shouldLoadImmediately);
             mContentsObserver = new ContentsObserver(getWebContents());
         }
-
-        @Override
-        public void removeLastHistoryEntry(String url, long timeInMs) {
-            // Override to prevent call to native code.
-            mRemovedUrls.add(url);
-        }
-
-        /**
-         * Creates an invalid version of the given URL.
-         * @param baseUrl The URL to build upon / modify.
-         * @return The same URL but with an invalid path.
-         */
-        private String makeInvalidUrl(String baseUrl) {
-            return Uri.parse(baseUrl).buildUpon().appendPath("invalid").build().toString();
-        }
-
-        /**
-         * @return Whether the given URL is a low-priority URL.
-         */
-        private boolean isLowPriorityUrl(String url) {
-            // Just check if it's set up to prefetch.
-            return url.contains("&pf=c");
-        }
     }
 
-    //============================================================================================
+    // ============================================================================================
     // ContextualSearchFakeServer
-    //============================================================================================
+    // ============================================================================================
 
     /**
      * Constructs a fake Contextual Search server that will callback to the given baseManager.
+     *
      * @param baseManager The manager to call back to for server responses.
      */
     @VisibleForTesting
-    ContextualSearchFakeServer(ContextualSearchPolicy policy,
-            ContextualSearchManagerTest managerTest,
+    ContextualSearchFakeServer(
+            ContextualSearchPolicy policy,
+            ContextualSearchTestHost testHost,
             ContextualSearchNetworkCommunicator baseManager,
-            OverlayContentDelegate contentDelegate,
-            OverlayContentProgressObserver progressObserver,
+            OverlayPanelContentDelegate contentDelegate,
+            OverlayPanelContentProgressObserver progressObserver,
             ChromeActivity activity) {
         mPolicy = policy;
 
-        mManagerTest = managerTest;
+        mTestHost = testHost;
         mBaseManager = baseManager;
 
         mContentDelegate = contentDelegate;
@@ -434,8 +455,11 @@ class ContextualSearchFakeServer
 
     @Override
     public OverlayPanelContent createNewOverlayPanelContent() {
-        return new OverlayPanelContentWrapper(mContentDelegate, mProgressObserver, mActivity,
-                mManagerTest.getPanel().getBarHeight());
+        return new OverlayPanelContentWrapper(
+                mContentDelegate,
+                mProgressObserver,
+                mActivity,
+                mTestHost.getPanel().getBarHeight());
     }
 
     /**
@@ -467,44 +491,18 @@ class ContextualSearchFakeServer
      */
     @VisibleForTesting
     boolean didEverCallWebContentsOnShow() {
-        return mDidEverCallWebContentsOnShow;
+        return mDidEverShowWebContents;
     }
 
-    /**
-     * Sets whether the device is currently online or not.
-     */
-    @VisibleForTesting
-    void setIsOnline(boolean isOnline) {
-        mIsOnline = isOnline;
-    }
-
-    /**
-     * Resets the fake server's member data.
-     */
+    /** Resets the fake server's member data. */
     @VisibleForTesting
     void reset() {
         mLoadedUrl = null;
         mSearchTermRequested = null;
-        mIsOnline = true;
         mLoadedUrlCount = 0;
-        mUseInvalidLowPriorityPath = false;
         mIsExactResolve = false;
-    }
-
-    /**
-     * Sets a flag to build low-priority paths that are invalid in order to test failover.
-     */
-    @VisibleForTesting
-    void setLowPriorityPathInvalid() {
-        mUseInvalidLowPriorityPath = true;
-    }
-
-    /**
-     * @return Whether the most recent loadUrl was on an invalid path.
-     */
-    @VisibleForTesting
-    boolean didAttemptLoadInvalidUrl() {
-        return mUseInvalidLowPriorityPath && mLoadedUrl.contains("invalid");
+        mSearchContext = null;
+        mExpectedFakeResolveSearch = null;
     }
 
     @VisibleForTesting
@@ -512,27 +510,33 @@ class ContextualSearchFakeServer
         return mIsExactResolve;
     }
 
-    //============================================================================================
-    // History Removal Helpers
-    //============================================================================================
-
-    /**
-     * @param url The URL to be checked.
-     * @return Whether the given URL was removed from history.
-     */
-    public boolean hasRemovedUrl(String url) {
-        return mRemovedUrls.contains(url);
+    @VisibleForTesting
+    ContextualSearchContext getSearchContext() {
+        return mSearchContext;
     }
 
-    //============================================================================================
+    /**
+     * Sets the result of the resolve request that this fake server is expected to return.
+     *
+     * @param nodeId the node that will trigger this resolve when selected.
+     * @param resolvedSearchTermResponse the response from this fake server to return from the fake
+     *     resolve request.
+     */
+    void setExpectations(String nodeId, ResolvedSearchTerm resolvedSearchTermResponse) {
+        mExpectedFakeResolveSearch = new FakeResolveSearch(nodeId, resolvedSearchTermResponse);
+    }
+
+    // ============================================================================================
     // ContextualSearchNetworkCommunicator
-    //============================================================================================
+    // ============================================================================================
 
     @Override
-    public void startSearchTermResolutionRequest(String selection, boolean isExactResolve) {
+    public void startSearchTermResolutionRequest(
+            String selection, boolean isExactResolve, ContextualSearchContext searchContext) {
         mLoadedUrl = null;
         mSearchTermRequested = selection;
         mIsExactResolve = isExactResolve;
+        mSearchContext = searchContext;
 
         if (mActiveResolveSearch != null) {
             mActiveResolveSearch.notifySearchTermResolutionStarted();
@@ -545,11 +549,6 @@ class ContextualSearchFakeServer
     }
 
     @Override
-    public boolean isOnline() {
-        return mIsOnline;
-    }
-
-    @Override
     public void stopPanelContentsNavigation() {
         // Stub out stop() of the WebContents.
         // Navigation of the content in the overlay may have been faked in tests,
@@ -557,44 +556,39 @@ class ContextualSearchFakeServer
     }
 
     @Override
-    @Nullable
-    public URL getBasePageUrl() {
-        URL baseUrl = mBaseManager.getBasePageUrl();
+    public @Nullable GURL getBasePageUrl() {
+        GURL baseUrl = mBaseManager.getBasePageUrl();
         if (baseUrl != null) {
-            try {
-                // Return plain HTTP URLs so we can test that we don't give them our legacy privacy
-                // exceptions.
-                return new URL(baseUrl.toString().replace("https://", "http://"));
-            } catch (MalformedURLException e) {
-                // TODO(donnd): Replace Auto-generated catch block
-                e.printStackTrace();
-            }
+            // Return plain HTTP URLs so we can test that we don't give them our legacy privacy
+            // exceptions.
+            return new GURL(baseUrl.getSpec().replace("https://", "http://"));
         }
         return baseUrl;
     }
 
-    //============================================================================================
+    // ============================================================================================
     // Fake Searches Helpers
-    //============================================================================================
+    // ============================================================================================
 
     /**
      * Register fake searches that can be used in tests. Each fake search takes a node ID, which
-     * represents the DOM node that will be touched. The node ID is also used as an ID for the
-     * fake search of a given type (LongPress or Tap). This means that if you need different
-     * behaviors you need to add new DOM nodes with different IDs in the test's HTML file.
+     * represents the DOM node that will be touched. The node ID is also used as an ID for the fake
+     * search of a given type (LongPress or Tap). This means that if you need different behaviors
+     * you need to add new DOM nodes with different IDs in the test's HTML file.
      */
-    public void registerFakeSearches() {
+    public void registerFakeSearches() throws Exception {
         registerFakeNonResolveSearch(new FakeNonResolveSearch("search", "Search"));
         registerFakeNonResolveSearch(new FakeNonResolveSearch("term", "Term"));
         registerFakeNonResolveSearch(new FakeNonResolveSearch("resolution", "Resolution"));
 
-        registerFakeResolveSearch(new FakeResolveSearch("intelligence", "Intelligence"));
         registerFakeResolveSearch(new FakeResolveSearch("states", "States"));
         //     registerFakeResolveSearch(new FakeResolveSearch("states-near""StatesNear"));
         registerFakeResolveSearch(new FakeResolveSearch("search", "Search"));
         registerFakeResolveSearch(new FakeResolveSearch("term", "Term"));
         registerFakeResolveSearch(new FakeResolveSearch("resolution", "Resolution"));
 
+        // These resolved searches are effectively deprecated.
+        // Use setExpectations() instead.
         ResolvedSearchTerm germanSearchTerm =
                 new ResolvedSearchTerm.Builder(false, 200, "Deutsche", "Deutsche")
                         .setContextLanguage("de")
@@ -602,14 +596,17 @@ class ContextualSearchFakeServer
         FakeResolveSearch germanFakeTapSearch = new FakeResolveSearch("german", germanSearchTerm);
         registerFakeResolveSearch(germanFakeTapSearch);
 
-        registerFakeResolveSearch(new FakeResolveSearch("intelligence", "Intelligence"));
+        // Setup the "intelligence" node to return Related Searches along with the usual result.
+        ResolvedSearchTerm intelligenceWithRelatedSearches =
+                buildResolvedSearchTermWithRelatedSearches("Intelligence");
+        FakeResolveSearch fakeSearchWithRelatedSearches =
+                new FakeResolveSearch("intelligence", intelligenceWithRelatedSearches);
+        registerFakeResolveSearch(fakeSearchWithRelatedSearches);
 
         // Register a fake tap search that will fake a logged event ID from the server, when
         // a fake tap is done on the intelligence-logged-event-id element in the test file.
         ResolvedSearchTerm searchTermWithId =
-                new ResolvedSearchTerm.Builder(false, 200, "Intelligence", "Intelligence")
-                        .setLoggedEventId(LOGGED_EVENT_ID)
-                        .build();
+                new ResolvedSearchTerm.Builder(false, 200, "Intelligence", "Intelligence").build();
         FakeResolveSearch loggedIdFakeTapSearch =
                 new FakeResolveSearch("intelligence-logged-event-id", searchTermWithId);
         registerFakeResolveSearch(loggedIdFakeTapSearch);
@@ -624,8 +621,9 @@ class ContextualSearchFakeServer
         registerFakeSlowResolveSearch(expandingStatesTapSearch);
         registerFakeSlowResolveSearch(
                 new FakeSlowResolveSearch("search", false, 200, "Search", "Search"));
-        registerFakeSlowResolveSearch(new FakeSlowResolveSearch(
-                "intelligence", false, 200, "Intelligence", "Intelligence"));
+        registerFakeSlowResolveSearch(
+                new FakeSlowResolveSearch(
+                        "intelligence", false, 200, "Intelligence", "Intelligence"));
     }
 
     /**
@@ -641,7 +639,53 @@ class ContextualSearchFakeServer
      * @return The FakeResolveSearch with the given ID.
      */
     public FakeResolveSearch getFakeResolveSearch(String id) {
-        return mFakeResolveSearches.get(id);
+        if (mExpectedFakeResolveSearch != null) {
+            Assert.assertEquals(
+                    "The expectations node ID does not match the given node!",
+                    mExpectedFakeResolveSearch.getNodeId(),
+                    id);
+            return mExpectedFakeResolveSearch;
+        } else {
+            return mFakeResolveSearches.get(id);
+        }
+    }
+
+    /**
+     * Returns a {@link ResolvedSearchTerm} build to include sample Related Searches that uses the
+     * given string for the Search Term.
+     *
+     * @param searchTerm The string to use for the Search Term and Display Text.
+     * @return a {@link ResolvedSearchTerm} that includes some sample Related Searches of all types.
+     */
+    public ResolvedSearchTerm buildResolvedSearchTermWithRelatedSearches(String searchTerm)
+            throws JSONException {
+        JSONObject rSearch1 = new JSONObject();
+        rSearch1.put("title", "Related Search 1");
+        JSONObject rSearch2 = new JSONObject();
+        rSearch2.put("title", "Related Search 2");
+        JSONObject rSearch3 = new JSONObject();
+        rSearch3.put("title", "Related Search 3");
+        JSONArray rSearches = new JSONArray();
+        rSearches.put(rSearch1);
+        rSearches.put(rSearch2);
+        rSearches.put(rSearch3);
+        JSONObject suggestions = new JSONObject();
+        suggestions.put("content", rSearches);
+        // Also add selection suggestions, which are shown in the Bar, so we can exercise that code.
+        JSONObject rBar1 = new JSONObject();
+        rBar1.put("title", "Selection Related 1");
+        JSONObject rBar2 = new JSONObject();
+        rBar2.put("title", "Selection Related 2");
+        JSONObject rBar3 = new JSONObject();
+        rBar3.put("title", "Selection Related 3");
+        JSONArray selectionSearches = new JSONArray();
+        selectionSearches.put(rBar1);
+        selectionSearches.put(rBar2);
+        selectionSearches.put(rBar3);
+        suggestions.put("selection", selectionSearches);
+        return new ResolvedSearchTerm.Builder(false, 200, searchTerm, searchTerm)
+                .setRelatedSearchesJson(suggestions.toString())
+                .build();
     }
 
     /**
@@ -654,6 +698,7 @@ class ContextualSearchFakeServer
 
     /**
      * Register the FakeNonResolveSearch.
+     *
      * @param fakeSearch The FakeNonResolveSearch to be registered.
      */
     private void registerFakeNonResolveSearch(FakeNonResolveSearch fakeSearch) {
@@ -662,6 +707,7 @@ class ContextualSearchFakeServer
 
     /**
      * Register the FakeResolveSearch.
+     *
      * @param fakeSearch The FakeResolveSearch to be registered.
      */
     private void registerFakeResolveSearch(FakeResolveSearch fakeSearch) {
@@ -670,6 +716,7 @@ class ContextualSearchFakeServer
 
     /**
      * Register the FakeSlowResolveSearch.
+     *
      * @param fakeSlowResolveSearch The {@code FakeSlowResolveSearch} to be registered.
      */
     private void registerFakeSlowResolveSearch(FakeSlowResolveSearch fakeSlowResolveSearch) {

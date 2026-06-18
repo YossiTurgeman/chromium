@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,9 @@
 #include <winnt.h>
 #include <wrl/implements.h>
 
+#include <optional>
+
 #include "base/base_export.h"
-#include "base/optional.h"
 #include "base/threading/thread_checker.h"
 #include "base/win/windows_types.h"
 
@@ -62,7 +63,7 @@ class BASE_EXPORT ComInitBalancer
   // call made to CoInitialize or CoUninitialize.
   DWORD reference_count_ = 0;
 
-  base::Optional<ULARGE_INTEGER> spy_cookie_;
+  std::optional<ULARGE_INTEGER> spy_cookie_;
   THREAD_CHECKER(thread_checker_);
 };
 

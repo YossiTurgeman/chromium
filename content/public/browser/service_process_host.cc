@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "content/public/common/content_client.h"
+#include "media/media_buildflags.h"
 
 namespace content {
 
@@ -22,7 +23,7 @@ ServiceProcessHost::Options& ServiceProcessHost::Options::WithDisplayName(
 }
 
 ServiceProcessHost::Options& ServiceProcessHost::Options::WithDisplayName(
-    const base::string16& name) {
+    const std::u16string& name) {
   display_name = name;
   return *this;
 }
@@ -30,6 +31,12 @@ ServiceProcessHost::Options& ServiceProcessHost::Options::WithDisplayName(
 ServiceProcessHost::Options& ServiceProcessHost::Options::WithDisplayName(
     int resource_id) {
   display_name = GetContentClient()->GetLocalizedString(resource_id);
+  return *this;
+}
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithSite(
+    const GURL& url) {
+  site = url;
   return *this;
 }
 
@@ -43,6 +50,45 @@ ServiceProcessHost::Options&
 ServiceProcessHost::Options::WithExtraCommandLineSwitches(
     std::vector<std::string> switches) {
   extra_switches = std::move(switches);
+  return *this;
+}
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithProcessCallback(
+    base::OnceCallback<void(const base::Process&)> callback) {
+  process_callback = std::move(callback);
+  return *this;
+}
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithObserver(
+    base::WeakPtr<Observer> obs) {
+  CHECK(!observer) << "Only one per-instance observer may be registered. "
+                      "Use a service-specific manager to fan out to multiple "
+                      "observers.";
+  observer = std::move(obs);
+  return *this;
+}
+
+#if BUILDFLAG(IS_WIN)
+ServiceProcessHost::Options&
+ServiceProcessHost::Options::WithPreloadedLibraries(
+    std::vector<base::FilePath> preloads,
+    base::PassKey<ServiceProcessHostPreloadLibraries> passkey) {
+  preload_libraries = std::move(preloads);
+  return *this;
+}
+#endif  // #if BUILDFLAG(IS_WIN)
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithGpuClient(
+    base::PassKey<ServiceProcessHostGpuClient> passkey) {
+#if BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+  allow_gpu_client = true;
+#endif  // BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+  return *this;
+}
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithPriority(
+    base::Process::Priority pri) {
+  priority = pri;
   return *this;
 }
 

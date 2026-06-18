@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,20 +6,23 @@
 
 #include <utility>
 
-#include "base/bind.h"
 #include "base/files/file.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/macros.h"
-#include "base/single_thread_task_runner.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/memory/raw_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
 #include "components/download/public/common/download_item.h"
 #include "components/download/public/common/download_stats.h"
-#include "content/browser/web_contents/web_contents_impl.h"
+#include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/download_request_utils.h"
+#include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/render_process_host.h"
+#include "content/public/browser/weak_document_ptr.h"
+#include "content/public/browser/web_contents.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 
 namespace content {
@@ -34,28 +37,31 @@ using OnCompleted = base::OnceCallback<void(bool)>;
 class DragDownloadFile::DragDownloadFileUI
     : public download::DownloadItem::Observer {
  public:
-  DragDownloadFileUI(const GURL& url,
+  DragDownloadFileUI(WeakDocumentPtr source_document,
+                     const GURL& url,
                      const Referrer& referrer,
                      const std::string& referrer_encoding,
-                     WebContents* web_contents,
                      OnCompleted on_completed)
       : on_completed_(std::move(on_completed)),
+        source_document_(std::move(source_document)),
         url_(url),
         referrer_(referrer),
-        referrer_encoding_(referrer_encoding),
-        web_contents_(web_contents) {
+        referrer_encoding_(referrer_encoding) {
     DCHECK(on_completed_);
-    DCHECK(web_contents_);
     // May be called on any thread.
     // Do not call weak_ptr_factory_.GetWeakPtr() outside the UI thread.
   }
+
+  DragDownloadFileUI(const DragDownloadFileUI&) = delete;
+  DragDownloadFileUI& operator=(const DragDownloadFileUI&) = delete;
 
   void InitiateDownload(base::File file,
                         const base::FilePath& file_path) {
     DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
-    // TODO(https://crbug.com/614134) This should use the frame actually
-    // containing the link being dragged rather than the main frame of the tab.
+    RenderFrameHost* host = source_document_.AsRenderFrameHostIfValid();
+    if (!host)
+      return;
     net::NetworkTrafficAnnotationTag traffic_annotation =
         net::DefineNetworkTrafficAnnotation("drag_download_file", R"(
         semantics {
@@ -79,20 +85,21 @@ class DragDownloadFile::DragDownloadFileUI
             }
           }
         })");
-    std::unique_ptr<download::DownloadUrlParameters> params(
-        DownloadRequestUtils::CreateDownloadForWebContentsMainFrame(
-            web_contents_, url_, traffic_annotation));
+    auto params = host->CreateDownloadUrlParameters(url_, traffic_annotation);
     params->set_referrer(referrer_.url);
     params->set_referrer_policy(
         Referrer::ReferrerPolicyForUrlRequest(referrer_.policy));
     params->set_referrer_encoding(referrer_encoding_);
+
+    params->set_initiator(host->GetLastCommittedOrigin());
+
     params->set_callback(base::BindOnce(&DragDownloadFileUI::OnDownloadStarted,
                                         weak_ptr_factory_.GetWeakPtr()));
     params->set_file_path(file_path);
     params->set_file(std::move(file));  // Nulls file.
     params->set_download_source(download::DownloadSource::DRAG_AND_DROP);
-    BrowserContext::GetDownloadManager(web_contents_->GetBrowserContext())
-        ->DownloadUrl(std::move(params));
+    host->GetBrowserContext()->GetDownloadManager()->DownloadUrl(
+        std::move(params));
   }
 
   void Cancel() {
@@ -162,28 +169,26 @@ class DragDownloadFile::DragDownloadFileUI
   }
 
   OnCompleted on_completed_;
+  WeakDocumentPtr source_document_;
   GURL url_;
   Referrer referrer_;
   std::string referrer_encoding_;
-  WebContents* web_contents_;
-  download::DownloadItem* download_item_ = nullptr;
+  raw_ptr<download::DownloadItem> download_item_ = nullptr;
 
   // Only used in the callback from DownloadManager::DownloadUrl().
   base::WeakPtrFactory<DragDownloadFileUI> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(DragDownloadFileUI);
 };
 
-DragDownloadFile::DragDownloadFile(const base::FilePath& file_path,
+DragDownloadFile::DragDownloadFile(WeakDocumentPtr source_document,
+                                   const base::FilePath& file_path,
                                    base::File file,
                                    const GURL& url,
                                    const Referrer& referrer,
-                                   const std::string& referrer_encoding,
-                                   WebContents* web_contents)
+                                   const std::string& referrer_encoding)
     : file_path_(file_path), file_(std::move(file)) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   drag_ui_ = new DragDownloadFileUI(
-      url, referrer, referrer_encoding, web_contents,
+      std::move(source_document), url, referrer, referrer_encoding,
       base::BindOnce(&DragDownloadFile::DownloadCompleted,
                      weak_ptr_factory_.GetWeakPtr()));
   DCHECK(!file_path_.empty());

@@ -1,29 +1,43 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/browser_sync/browser_sync_switches.h"
 
+#include "base/feature_list.h"
+#include "build/build_config.h"
+
 namespace switches {
 
-// Disables syncing one or more sync data types that are on by default.
-// See sync/base/model_type.h for possible types. Types
-// should be comma separated, and follow the naming convention for string
-// representation of model types, e.g.:
-// --disable-synctypes='Typed URLs, Bookmarks, Autofill Profiles'
-const char kDisableSyncTypes[] = "disable-sync-types";
+BASE_FEATURE(kMigrateSyncingUserToSignedIn,
+#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID)
+             base::FEATURE_ENABLED_BY_DEFAULT);
+#else
+             base::FEATURE_DISABLED_BY_DEFAULT);
+#endif
 
-// Enabled the local sync backend implemented by the LoopbackServer.
-const char kEnableLocalSyncBackend[] = "enable-local-sync-backend";
+BASE_FEATURE_PARAM(base::TimeDelta,
+                   kMinDelayToMigrateSyncPaused,
+                   &switches::kMigrateSyncingUserToSignedIn,
+                   "min_delay_to_migrate_sync_paused",
+                   base::Days(7));
 
-// Specifies the local sync backend directory. The name is chosen to mimic
-// user-data-dir etc. This flag only matters if the enable-local-sync-backend
-// flag is present.
-const char kLocalSyncBackendDir[] = "local-sync-backend-dir";
+BASE_FEATURE(kUndoMigrationOfSyncingUserToSignedIn,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
-#if defined(OS_ANDROID)
-const base::Feature kSyncUseSessionsUnregisterDelay{
-    "SyncUseSessionsUnregisterDelay", base::FEATURE_DISABLED_BY_DEFAULT};
-#endif  // defined(OS_ANDROID)
+BASE_FEATURE(kForceMigrateSyncingUserToSignedIn,
+#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID)
+             base::FEATURE_ENABLED_BY_DEFAULT);
+#else
+             base::FEATURE_DISABLED_BY_DEFAULT);
+#endif
+
+BASE_FEATURE(kForceMigrateNoopForDebugging,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+#if !BUILDFLAG(IS_CHROMEOS)
+BASE_FEATURE(kMigrateOutOfSyncSetupIncompleteState,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace switches

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,15 @@
 
 #include <jni.h>
 
-#include "base/base_jni_headers/ApplicationStatus_jni.h"
+#include "base/functional/callback.h"
 #include "base/lazy_instance.h"
 #include "base/metrics/user_metrics.h"
 #include "base/observer_list_threadsafe.h"
-#include "base/trace_event/base_tracing.h"
+#include "base/trace_event/application_state_proto_android.h"
+#include "base/trace_event/trace_event.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "base/tasks_jni/ApplicationStatus_jni.h"
 
 namespace base {
 namespace android {
@@ -59,8 +63,9 @@ class ApplicationStatusListenerImpl : public ApplicationStatusListener {
   }
 
   void Notify(ApplicationState state) override {
-    if (callback_)
+    if (callback_) {
       callback_.Run(state);
+    }
   }
 
  private:
@@ -81,7 +86,7 @@ std::unique_ptr<ApplicationStatusListener> ApplicationStatusListener::New(
 // static
 void ApplicationStatusListener::NotifyApplicationStateChange(
     ApplicationState state) {
-  TRACE_COUNTER1("browser", "ApplicationState", static_cast<int>(state));
+  TRACE_APPLICATION_STATE(state);
   switch (state) {
     case APPLICATION_STATE_UNKNOWN:
     case APPLICATION_STATE_HAS_DESTROYED_ACTIVITIES:
@@ -108,9 +113,8 @@ ApplicationState ApplicationStatusListener::GetState() {
 
 static void JNI_ApplicationStatus_OnApplicationStateChange(
     JNIEnv* env,
-    jint new_state) {
-  ApplicationState application_state = static_cast<ApplicationState>(new_state);
-  ApplicationStatusListener::NotifyApplicationStateChange(application_state);
+    ApplicationState new_state) {
+  ApplicationStatusListener::NotifyApplicationStateChange(new_state);
 }
 
 // static
@@ -120,3 +124,5 @@ bool ApplicationStatusListener::HasVisibleActivities() {
 
 }  // namespace android
 }  // namespace base
+
+DEFINE_JNI(ApplicationStatus)

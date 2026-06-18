@@ -59,8 +59,8 @@ class UnzipProcessor : public ZipExtractorProcessor {
 
   virtual ~UnzipProcessor() {}
 
-  virtual void Process(const char* filename, const u4 attr,
-                       const u1* data, const size_t size);
+  virtual void Process(const char *filename, u4 attr, const u1 *data,
+                       size_t size);
   virtual bool Accept(const char* filename, const u4 attr) {
     // All entry files are accepted by default.
     if (file_names.empty()) {
@@ -80,21 +80,26 @@ class UnzipProcessor : public ZipExtractorProcessor {
 };
 
 // Concatene 2 path, path1 and path2, using / as a directory separator and
-// puting the result in "out". "size" specify the size of the output buffer
-void concat_path(char* out, const size_t size,
-                 const char *path1, const char *path2) {
+// putting the result in "out". "size" specify the size of the output buffer. If
+// the result would overflow the output buffer, print an error message and
+// return false.
+bool concat_path(char *out, const size_t size, const char *path1,
+                 const char *path2) {
   int len1 = strlen(path1);
   size_t l = len1;
   strncpy(out, path1, size - 1);
-  out[size-1] = 0;
+  out[size - 1] = 0;
   if (l < size - 1 && path1[len1] != '/' && path2[0] != '/') {
     out[l] = '/';
     l++;
     out[l] = 0;
   }
-  if (l < size - 1) {
-    strncat(out, path2, size - 1 - l);
+  if (l >= size - 1) {
+    fprintf(stderr, "paths too long to concat: %s + %s", path1, path2);
+    return false;
   }
+  strncat(out, path2, size - 1 - l);
+  return true;
 }
 
 void UnzipProcessor::Process(const char* filename, const u4 attr,
@@ -123,8 +128,8 @@ void UnzipProcessor::Process(const char* filename, const u4 attr,
   }
   if (extract_) {
     char path[PATH_MAX];
-    concat_path(path, PATH_MAX, output_root_, output_file_name);
-    if (!make_dirs(path, perm) ||
+    if (!concat_path(path, sizeof(path), output_root_, output_file_name) ||
+        !make_dirs(path, perm) ||
         (!isdir && !write_file(path, perm, data, size))) {
       abort();
     }
@@ -140,8 +145,8 @@ void basename(const char *path, char *output, size_t output_size) {
   } else {
     pointer++;  // Skip the leading slash.
   }
-  strncpy(output, pointer, output_size);
-  output[output_size-1] = 0;
+  strncpy(output, pointer, output_size - 1);
+  output[output_size - 1] = 0;
 }
 
 // Execute the extraction (or just listing if just v is provided)
@@ -152,11 +157,16 @@ int extract(char *zipfile, char *exdir, char **files, bool verbose,
     return -1;
   }
 
-  char output_root[PATH_MAX];
+  char output_root[PATH_MAX + 1];
   if (exdir != NULL) {
-    concat_path(output_root, PATH_MAX, cwd.c_str(), exdir);
+    if (!concat_path(output_root, sizeof(output_root), cwd.c_str(), exdir)) {
+      return -1;
+    }
+  } else if (cwd.length() >= sizeof(output_root)) {
+    fprintf(stderr, "current working directory path too long");
+    return -1;
   } else {
-    strncpy(output_root, cwd.c_str(), PATH_MAX);
+    memcpy(output_root, cwd.c_str(), cwd.length() + 1);
   }
 
   UnzipProcessor processor(output_root, files, verbose, extract, flatten);
@@ -244,9 +254,13 @@ char **read_filelist(char *filename) {
   }
 
   int nb_entries = 1;
-  for (int i = 0; i < file_stat.total_size; i++) {
+  for (u8 i = 0; i < file_stat.total_size; i++) {
     if (data[i] == '\n') {
       nb_entries++;
+    }
+    if (nb_entries == INT_MAX) {
+      fprintf(stderr, "too many input files");
+      return NULL;
     }
   }
 
@@ -261,7 +275,7 @@ char **read_filelist(char *filename) {
   // Create the corresponding array
   int j = 1;
   filelist[0] = content;
-  for (int i = 0; i < file_stat.total_size; i++) {
+  for (u8 i = 0; i < file_stat.total_size; i++) {
     if (content[i] == '\n') {
       content[i] = 0;
       if (i + 1 < file_stat.total_size) {

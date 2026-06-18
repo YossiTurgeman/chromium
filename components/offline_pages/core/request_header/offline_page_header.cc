@@ -1,8 +1,10 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/offline_pages/core/request_header/offline_page_header.h"
+
+#include <string_view>
 
 #include "base/base64.h"
 #include "base/notreached.h"
@@ -37,16 +39,17 @@ bool ParseOfflineHeaderValue(const std::string& header_value,
   if (header_value.empty())
     return false;
 
+  // TODO(dcheng): Use net::HttpUtil::NameValuePairsIterator instead?
   bool token_found = false;
   base::StringTokenizer tokenizer(header_value, ", ");
   while (tokenizer.GetNext()) {
     token_found = true;
-    std::string pair = tokenizer.token();
+    std::string_view pair = tokenizer.token_piece();
     std::size_t pos = pair.find('=');
     if (pos == std::string::npos)
       return false;
     std::string key = base::ToLowerASCII(pair.substr(0, pos));
-    std::string value = pair.substr(pos + 1);
+    std::string_view value = pair.substr(pos + 1);
     std::string lower_value = base::ToLowerASCII(value);
     if (key == kOfflinePageHeaderPersistKey) {
       if (lower_value == "1")
@@ -77,7 +80,7 @@ bool ParseOfflineHeaderValue(const std::string& header_value,
       else
         return false;
     } else if (key == kOfflinePageHeaderIDKey) {
-      *id = value;
+      *id = std::string(value);
     } else if (key == kOfflinePageHeaderIntentUrlKey) {
       std::string decoded_url;
       if (!base::Base64Decode(value, &decoded_url))
@@ -85,7 +88,7 @@ bool ParseOfflineHeaderValue(const std::string& header_value,
       GURL url = GURL(decoded_url);
       if (!url.is_valid())
         return false;
-      *intent_url = url;
+      *intent_url = std::move(url);
     } else {
       return false;
     }
@@ -118,7 +121,6 @@ std::string ReasonToString(OfflinePageHeader::Reason reason) {
       break;
   }
   NOTREACHED();
-  return "";
 }
 
 }  // namespace
@@ -139,7 +141,7 @@ OfflinePageHeader::OfflinePageHeader(const std::string& header_value)
   }
 }
 
-OfflinePageHeader::~OfflinePageHeader() {}
+OfflinePageHeader::~OfflinePageHeader() = default;
 
 std::string OfflinePageHeader::GetCompleteHeaderString() const {
   std::string key = GetHeaderKeyString();
@@ -180,9 +182,7 @@ std::string OfflinePageHeader::GetHeaderValueString() const {
     value += " ";
     value += kOfflinePageHeaderIntentUrlKey;
     value += "=";
-    std::string encoded_intent_url;
-    base::Base64Encode(intent_url.spec(), &encoded_intent_url);
-    value += encoded_intent_url;
+    value += base::Base64Encode(intent_url.spec());
   }
 
   return value;

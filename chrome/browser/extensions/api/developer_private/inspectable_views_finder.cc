@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,23 +6,30 @@
 
 #include <set>
 
-#include "chrome/browser/devtools/chrome_devtools_manager_delegate.h"
+#include "chrome/browser/devtools/devtools_availability_checker.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/extensions/api/developer_private.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
-#include "extensions/browser/app_window/app_window.h"
-#include "extensions/browser/app_window/app_window_registry.h"
 #include "extensions/browser/extension_host.h"
 #include "extensions/browser/extension_util.h"
 #include "extensions/browser/process_manager.h"
 #include "extensions/browser/view_type_utils.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest_handlers/background_info.h"
 #include "extensions/common/manifest_handlers/incognito_info.h"
+#include "extensions/common/mojom/view_type.mojom.h"
 #include "url/gurl.h"
+
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+#include "extensions/browser/app_window/app_window.h"
+#include "extensions/browser/app_window/app_window_registry.h"
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -30,53 +37,73 @@ InspectableViewsFinder::InspectableViewsFinder(Profile* profile)
     : profile_(profile) {
 }
 
-InspectableViewsFinder::~InspectableViewsFinder() {
+InspectableViewsFinder::~InspectableViewsFinder() = default;
+
+api::developer_private::ViewType ConvertViewType(const mojom::ViewType type) {
+  api::developer_private::ViewType developer_private_type =
+      api::developer_private::ViewType::kNone;
+  switch (type) {
+    case mojom::ViewType::kAppWindow:
+      developer_private_type = api::developer_private::ViewType::kAppWindow;
+      break;
+    case mojom::ViewType::kBackgroundContents:
+      developer_private_type =
+          api::developer_private::ViewType::kBackgroundContents;
+      break;
+    case mojom::ViewType::kComponent:
+      developer_private_type = api::developer_private::ViewType::kComponent;
+      break;
+    case mojom::ViewType::kExtensionBackgroundPage:
+      developer_private_type =
+          api::developer_private::ViewType::kExtensionBackgroundPage;
+      break;
+    case mojom::ViewType::kExtensionGuest:
+      developer_private_type =
+          api::developer_private::ViewType::kExtensionGuest;
+      break;
+    case mojom::ViewType::kExtensionPopup:
+      developer_private_type =
+          api::developer_private::ViewType::kExtensionPopup;
+      break;
+    case mojom::ViewType::kTabContents:
+      developer_private_type = api::developer_private::ViewType::kTabContents;
+      break;
+    case mojom::ViewType::kOffscreenDocument:
+      developer_private_type =
+          api::developer_private::ViewType::kOffscreenDocument;
+      break;
+    case mojom::ViewType::kExtensionSidePanel:
+      developer_private_type =
+          api::developer_private::ViewType::kExtensionSidePanel;
+      break;
+    case mojom::ViewType::kDeveloperTools:
+      developer_private_type =
+          api::developer_private::ViewType::kDeveloperTools;
+      break;
+    case mojom::ViewType::kInvalid:
+      NOTREACHED();
+  }
+  DCHECK(developer_private_type != api::developer_private::ViewType::kNone);
+  return developer_private_type;
 }
 
 // static
 InspectableViewsFinder::View InspectableViewsFinder::ConstructView(
     const GURL& url,
     int render_process_id,
-    int render_frame_id,
+    int render_view_id,
     bool incognito,
     bool is_iframe,
-    ViewType type) {
+    api::developer_private::ViewType type) {
   api::developer_private::ExtensionView view;
   view.url = url.spec();
   view.render_process_id = render_process_id;
   // NOTE(devlin): This is called "render_view_id" in the api for legacy
   // reasons, but it's not a high priority to change.
-  view.render_view_id = render_frame_id;
+  view.render_view_id = render_view_id;
   view.incognito = incognito;
   view.is_iframe = is_iframe;
-  switch (type) {
-    case VIEW_TYPE_APP_WINDOW:
-      view.type = api::developer_private::VIEW_TYPE_APP_WINDOW;
-      break;
-    case VIEW_TYPE_BACKGROUND_CONTENTS:
-      view.type = api::developer_private::VIEW_TYPE_BACKGROUND_CONTENTS;
-      break;
-    case VIEW_TYPE_COMPONENT:
-      view.type = api::developer_private::VIEW_TYPE_COMPONENT;
-      break;
-    case VIEW_TYPE_EXTENSION_BACKGROUND_PAGE:
-      view.type = api::developer_private::VIEW_TYPE_EXTENSION_BACKGROUND_PAGE;
-      break;
-    case VIEW_TYPE_EXTENSION_DIALOG:
-      view.type = api::developer_private::VIEW_TYPE_EXTENSION_DIALOG;
-      break;
-    case VIEW_TYPE_EXTENSION_GUEST:
-      view.type = api::developer_private::VIEW_TYPE_EXTENSION_GUEST;
-      break;
-    case VIEW_TYPE_EXTENSION_POPUP:
-      view.type = api::developer_private::VIEW_TYPE_EXTENSION_POPUP;
-      break;
-    case VIEW_TYPE_TAB_CONTENTS:
-      view.type = api::developer_private::VIEW_TYPE_TAB_CONTENTS;
-      break;
-    default:
-      NOTREACHED();
-  }
+  view.type = type;
   return view;
 }
 
@@ -84,13 +111,15 @@ InspectableViewsFinder::ViewList InspectableViewsFinder::GetViewsForExtension(
     const Extension& extension,
     bool is_enabled) {
   ViewList result;
-  if (!ChromeDevToolsManagerDelegate::AllowInspection(profile_, &extension))
+  if (!IsInspectionAllowed(profile_, &extension)) {
     return result;
+  }
   GetViewsForExtensionForProfile(
       extension, profile_, is_enabled, false, &result);
   if (profile_->HasPrimaryOTRProfile()) {
-    GetViewsForExtensionForProfile(extension, profile_->GetPrimaryOTRProfile(),
-                                   is_enabled, true, &result);
+    GetViewsForExtensionForProfile(
+        extension, profile_->GetPrimaryOTRProfile(/*create_if_needed=*/true),
+        is_enabled, true, &result);
   }
 
   return result;
@@ -109,8 +138,9 @@ void InspectableViewsFinder::GetViewsForExtensionForProfile(
                               is_incognito,
                               result);
   // Get app window views, if not incognito.
-  if (!is_incognito)
+  if (!is_incognito) {
     GetAppWindowViewsForExtension(extension, result);
+  }
   // Include a link to start the lazy background page, if applicable.
   bool include_lazy_background = true;
   // Don't include the lazy background page for incognito if the extension isn't
@@ -120,17 +150,23 @@ void InspectableViewsFinder::GetViewsForExtensionForProfile(
        !IncognitoInfo::IsSplitMode(&extension))) {
     include_lazy_background = false;
   }
-  if (include_lazy_background &&
-      BackgroundInfo::HasLazyBackgroundPage(&extension) &&
-      is_enabled &&
+
+  // Get inactive backgrounds.
+  if (!include_lazy_background || !is_enabled) {
+    return;
+  }
+  if (BackgroundInfo::HasLazyBackgroundPage(&extension) &&
       !process_manager->GetBackgroundHostForExtension(extension.id())) {
     result->push_back(ConstructView(
-        BackgroundInfo::GetBackgroundURL(&extension),
-        -1,
-        -1,
-        is_incognito,
-        false,
-        VIEW_TYPE_EXTENSION_BACKGROUND_PAGE));
+        BackgroundInfo::GetBackgroundURL(&extension), -1, -1, is_incognito,
+        false, api::developer_private::ViewType::kExtensionBackgroundPage));
+  }
+  if (BackgroundInfo::IsServiceWorkerBased(&extension) &&
+      process_manager->GetServiceWorkersForExtension(extension.id()).empty()) {
+    result->push_back(ConstructView(
+        BackgroundInfo::GetBackgroundServiceWorkerScriptURL(&extension), -1, -1,
+        is_incognito, false,
+        api::developer_private::ViewType::kExtensionServiceWorkerBackground));
   }
 }
 
@@ -144,11 +180,10 @@ void InspectableViewsFinder::GetViewsForExtensionProcess(
   for (content::RenderFrameHost* host : hosts) {
     content::WebContents* web_contents =
         content::WebContents::FromRenderFrameHost(host);
-    ViewType host_type = GetViewType(web_contents);
-    if (host_type == VIEW_TYPE_INVALID ||
-        host_type == VIEW_TYPE_EXTENSION_POPUP ||
-        host_type == VIEW_TYPE_EXTENSION_DIALOG ||
-        host_type == VIEW_TYPE_APP_WINDOW) {
+    mojom::ViewType host_type = GetViewType(web_contents);
+    if (host_type == mojom::ViewType::kInvalid ||
+        host_type == mojom::ViewType::kExtensionPopup ||
+        host_type == mojom::ViewType::kAppWindow) {
       continue;
     }
 
@@ -157,24 +192,38 @@ void InspectableViewsFinder::GetViewsForExtensionProcess(
     // committed (or visible) url yet. In this case, use the initial url.
     if (url.is_empty()) {
       ExtensionHost* extension_host =
-          process_manager->GetExtensionHostForRenderFrameHost(host);
-      if (extension_host)
+          process_manager->GetBackgroundHostForRenderFrameHost(host);
+      if (extension_host) {
         url = extension_host->initial_url();
+      }
     }
 
-    bool is_iframe = web_contents->GetMainFrame() != host;
     content::RenderProcessHost* process = host->GetProcess();
-    result->push_back(ConstructView(url, process->GetID(), host->GetRoutingID(),
-                                    is_incognito, is_iframe, host_type));
+    result->push_back(ConstructView(
+        url, process->GetDeprecatedID(), host->GetRoutingID(), is_incognito,
+        !host->IsInPrimaryMainFrame(), ConvertViewType(host_type)));
+  }
+
+  std::vector<WorkerId> service_worker_ids =
+      process_manager->GetServiceWorkersForExtension(extension.id());
+  for (const WorkerId& service_worker_id : service_worker_ids) {
+    result->push_back(ConstructView(
+        BackgroundInfo::GetBackgroundServiceWorkerScriptURL(&extension),
+        service_worker_id.render_process_id.GetUnsafeValue(),
+        /*render_view_id=*/-1, is_incognito,
+        /*is_iframe=*/false,
+        api::developer_private::ViewType::kExtensionServiceWorkerBackground));
   }
 }
 
 void InspectableViewsFinder::GetAppWindowViewsForExtension(
     const Extension& extension,
     ViewList* result) {
+#if BUILDFLAG(ENABLE_EXTENSIONS)
   AppWindowRegistry* registry = AppWindowRegistry::Get(profile_);
-  if (!registry)
+  if (!registry) {
     return;
+  }
 
   AppWindowRegistry::AppWindowList windows =
       registry->GetAppWindowsForApp(extension.id());
@@ -185,14 +234,17 @@ void InspectableViewsFinder::GetAppWindowViewsForExtension(
     // If the window just opened, there might not be a committed (or visible)
     // url yet. In this case, use the initial url.
     GURL url = web_contents->GetLastCommittedURL();
-    if (url.is_empty())
+    if (url.is_empty()) {
       url = window->initial_url();
+    }
 
-    content::RenderFrameHost* main_frame = web_contents->GetMainFrame();
-    result->push_back(ConstructView(url, main_frame->GetProcess()->GetID(),
-                                    main_frame->GetRoutingID(), false, false,
-                                    GetViewType(web_contents)));
+    content::RenderFrameHost* main_frame = web_contents->GetPrimaryMainFrame();
+    result->push_back(
+        ConstructView(url, main_frame->GetProcess()->GetDeprecatedID(),
+                      main_frame->GetRoutingID(), false, false,
+                      ConvertViewType(GetViewType(web_contents))));
   }
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
 }
 
 }  // namespace extensions

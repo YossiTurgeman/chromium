@@ -1,11 +1,13 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/gmock_callback_support.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/simple_test_clock.h"
 #include "base/test/test_mock_time_task_runner.h"
@@ -18,14 +20,17 @@
 #include "chrome/browser/media/media_engagement_preloaded_list.h"
 #include "chrome/browser/media/media_engagement_service.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
-#include "chrome/browser/prerender/prerender_manager_factory.h"
-#include "chrome/browser/prerender/prerender_test_utils.h"
+#include "chrome/browser/preloading/prefetch/no_state_prefetch/no_state_prefetch_manager_factory.h"
+#include "chrome/browser/preloading/prefetch/no_state_prefetch/no_state_prefetch_test_utils.h"
+#include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+#include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sessions/session_restore.h"
 #include "chrome/browser/sessions/session_restore_test_helper.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/recently_audible_helper.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -33,25 +38,33 @@
 #include "components/component_updater/component_updater_service.h"
 #include "components/keep_alive_registry/keep_alive_types.h"
 #include "components/keep_alive_registry/scoped_keep_alive.h"
-#include "components/prerender/browser/prerender_handle.h"
-#include "components/prerender/browser/prerender_manager.h"
-#include "components/prerender/common/prerender_final_status.h"
+#include "components/no_state_prefetch/browser/no_state_prefetch_handle.h"
+#include "components/no_state_prefetch/browser/no_state_prefetch_manager.h"
+#include "components/no_state_prefetch/common/no_state_prefetch_final_status.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "content/public/test/fenced_frame_test_util.h"
+#include "content/public/test/prerender_test_util.h"
 #include "media/base/media_switches.h"
+#include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "testing/gmock/include/gmock/gmock.h"
+#include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
+#include "third_party/blink/public/mojom/autoplay/autoplay.mojom-test-utils.h"
+#include "third_party/blink/public/mojom/autoplay/autoplay.mojom.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/sessions/session_service_factory.h"
 #include "chrome/browser/sessions/session_service_test_helper.h"
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace {
 
 const char* kMediaEngagementTestDataPath = "chrome/test/data/media/engagement";
 
-const base::string16 kReadyTitle = base::ASCIIToUTF16("Ready");
+const std::u16string kReadyTitle = u"Ready";
 
 // Watches WasRecentlyAudible changes on a WebContents, blocking until the
 // tab is audible. The audio stream monitor runs at 15Hz so we need have
@@ -64,12 +77,17 @@ class WasRecentlyAudibleWatcher {
   // entire lifetime of |this|.
   explicit WasRecentlyAudibleWatcher(content::WebContents* web_contents)
       : audible_helper_(RecentlyAudibleHelper::FromWebContents(web_contents)) {}
+
+  WasRecentlyAudibleWatcher(const WasRecentlyAudibleWatcher&) = delete;
+  WasRecentlyAudibleWatcher& operator=(const WasRecentlyAudibleWatcher&) =
+      delete;
+
   ~WasRecentlyAudibleWatcher() = default;
 
   // Waits until WasRecentlyAudible is true.
   void WaitForWasRecentlyAudible() {
     if (!audible_helper_->WasRecentlyAudible()) {
-      timer_.Start(FROM_HERE, base::TimeDelta::FromMicroseconds(100),
+      timer_.Start(FROM_HERE, base::Microseconds(100),
                    base::BindRepeating(
                        &WasRecentlyAudibleWatcher::TestWasRecentlyAudible,
                        base::Unretained(this)));
@@ -86,12 +104,10 @@ class WasRecentlyAudibleWatcher {
     }
   }
 
-  RecentlyAudibleHelper* const audible_helper_;
+  const raw_ptr<RecentlyAudibleHelper, DanglingUntriaged> audible_helper_;
 
   base::RepeatingTimer timer_;
   std::unique_ptr<base::RunLoop> run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(WasRecentlyAudibleWatcher);
 };
 
 }  // namespace
@@ -124,7 +140,6 @@ class MediaEngagementBrowserTest : public InProcessBrowserTest {
     command_line->AppendSwitchASCII(
         switches::kAutoplayPolicy,
         switches::autoplay::kNoUserGestureRequiredPolicy);
-    InProcessBrowserTest::SetUpCommandLine(command_line);
   }
 
   void LoadTestPage(const GURL& url) {
@@ -132,7 +147,7 @@ class MediaEngagementBrowserTest : public InProcessBrowserTest {
     // need it before the page navigates.
     InjectTimerTaskRunner();
 
-    ui_test_utils::NavigateToURL(browser(), url);
+    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   }
 
   void LoadTestPageAndWaitForPlay(const GURL& url, bool web_contents_muted) {
@@ -216,7 +231,7 @@ class MediaEngagementBrowserTest : public InProcessBrowserTest {
   }
 
   void ExecuteScript(const std::string& script) {
-    EXPECT_TRUE(content::ExecuteScript(GetWebContents(), script));
+    EXPECT_TRUE(content::ExecJs(GetWebContents(), script));
   }
 
   void OpenTabAsLink() {
@@ -227,7 +242,9 @@ class MediaEngagementBrowserTest : public InProcessBrowserTest {
   }
 
   void CloseTab() {
-    EXPECT_TRUE(browser()->tab_strip_model()->CloseWebContentsAt(0, 0));
+    const int previous_tab_count = browser()->tab_strip_model()->count();
+    browser()->tab_strip_model()->CloseWebContentsAt(0, 0);
+    EXPECT_EQ(previous_tab_count - 1, browser()->tab_strip_model()->count());
   }
 
   void LoadSubFrame(const GURL& url) {
@@ -247,7 +264,7 @@ class MediaEngagementBrowserTest : public InProcessBrowserTest {
   void EraseHistory() {
     history::URLRows urls;
     urls.push_back(history::URLRow(http_server_.GetURL("/")));
-    GetService()->OnURLsDeleted(
+    GetService()->OnHistoryDeletions(
         nullptr, history::DeletionInfo::ForUrls(urls, std::set<GURL>()));
   }
 
@@ -256,7 +273,8 @@ class MediaEngagementBrowserTest : public InProcessBrowserTest {
     // need it before the page navigates.
     InjectTimerTaskRunner();
 
-    ui_test_utils::NavigateToURL(browser(), http_server_origin2_.GetURL("/"));
+    ASSERT_TRUE(ui_test_utils::NavigateToURL(
+        browser(), http_server_origin2_.GetURL("/engagement_test.html")));
   }
 
   const net::EmbeddedTestServer& http_server() const { return http_server_; }
@@ -304,7 +322,7 @@ class MediaEngagementBrowserTest : public InProcessBrowserTest {
 
   const base::TimeDelta kMaxWaitingTime =
       MediaEngagementContentsObserver::kSignificantMediaPlaybackTime +
-      base::TimeDelta::FromSeconds(2);
+      base::Seconds(2);
 };
 
 // Class used to test the MEI preload component.
@@ -332,8 +350,8 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, RecordEngagement) {
   ExpectScores(1, 1);
 }
 
-// Flaky tests on CrOS: http://crbug.com/1020131.
-#if defined(OS_CHROMEOS)
+// Flaky tests on CrOS: http://crbug.com/40656329.
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_RecordEngagement_AudioOnly DISABLED_RecordEngagement_AudioOnly
 #else
 #define MAYBE_RecordEngagement_AudioOnly RecordEngagement_AudioOnly
@@ -349,13 +367,13 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
                        DoNotRecordEngagement_NotTime) {
   LoadTestPageAndWaitForPlayAndAudible("engagement_test.html", false);
-  Advance(base::TimeDelta::FromSeconds(1));
+  Advance(base::Seconds(1));
   CloseTab();
   ExpectScores(1, 0);
 }
 
-// Flaky tests on CrOS: http://crbug.com/1019671.
-#if defined(OS_CHROMEOS)
+// Flaky tests on CrOS: http://crbug.com/40656092.
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_DoNotRecordEngagement_NotTime_AudioOnly \
   DISABLED_DoNotRecordEngagement_NotTime_AudioOnly
 #else
@@ -365,7 +383,7 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
                        MAYBE_DoNotRecordEngagement_NotTime_AudioOnly) {
   LoadTestPageAndWaitForPlayAndAudible("engagement_test_audio.html", false);
-  Advance(base::TimeDelta::FromSeconds(1));
+  Advance(base::Seconds(1));
   CloseTab();
   ExpectScores(1, 0);
 }
@@ -378,8 +396,8 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(1, 0);
 }
 
-// Flaky tests on CrOS: http://crbug.com/1019671.
-#if defined(OS_CHROMEOS)
+// Flaky tests on CrOS: http://crbug.com/40656092.
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_DoNotRecordEngagement_TabMuted_AudioOnly \
   DISABLED_DoNotRecordEngagement_TabMuted_AudioOnly
 #else
@@ -412,18 +430,19 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(1, 0);
 }
 
+// TODO(crbug.com/40748282) Re-enable test
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
-                       DoNotRecordEngagement_PlaybackStopped) {
+                       DISABLED_DoNotRecordEngagement_PlaybackStopped) {
   LoadTestPageAndWaitForPlayAndAudible("engagement_test.html", false);
-  Advance(base::TimeDelta::FromSeconds(1));
+  Advance(base::Seconds(1));
   ExecuteScript("document.getElementById(\"media\").pause();");
   AdvanceMeaningfulPlaybackTime();
   CloseTab();
   ExpectScores(1, 0);
 }
 
-// Flaky tests on CrOS: http://crbug.com/1019671.
-#if defined(OS_CHROMEOS)
+// Flaky tests on CrOS: http://crbug.com/40656092.
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_DoNotRecordEngagement_PlaybackStopped_AudioOnly \
   DISABLED_DoNotRecordEngagement_PlaybackStopped_AudioOnly
 #else
@@ -433,7 +452,7 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
                        MAYBE_DoNotRecordEngagement_PlaybackStopped_AudioOnly) {
   LoadTestPageAndWaitForPlayAndAudible("engagement_test_audio.html", false);
-  Advance(base::TimeDelta::FromSeconds(1));
+  Advance(base::Seconds(1));
   ExecuteScript("document.getElementById(\"media\").pause();");
   AdvanceMeaningfulPlaybackTime();
   CloseTab();
@@ -449,8 +468,8 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(1, 1);
 }
 
-// Flaky tests on CrOS: http://crbug.com/1019671.
-#if defined(OS_CHROMEOS)
+// Flaky tests on CrOS: http://crbug.com/40656092.
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_RecordEngagement_NotVisible_AudioOnly \
   DISABLED_RecordEngagement_NotVisible_AudioOnly
 #else
@@ -502,9 +521,9 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, RecordVisitOnBrowserClose) {
   ExpectScores(1, 0);
 }
 
-#if defined(OS_WIN) || defined(OS_LINUX) || defined(OS_CHROMEOS) || \
-    defined(OS_MAC)
-// Flaky timeout. https://crbug.com/1014229
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
+    BUILDFLAG(IS_MAC)
+// Flaky timeout. https://crbug.com/40653059
 #define MAYBE_RecordSingleVisitOnSameOrigin \
   DISABLED_RecordSingleVisitOnSameOrigin
 #else
@@ -525,8 +544,8 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(1, 0);
 }
 
-#if defined(OS_WIN) || defined(OS_LINUX) || defined(OS_CHROMEOS)
-// Flaky: https://crbug.com/1115238
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+// Flaky: https://crbug.com/40144269
 #define MAYBE_RecordVisitOnNewOrigin DISABLED_RecordVisitOnNewOrigin
 #else
 #define MAYBE_RecordVisitOnNewOrigin RecordVisitOnNewOrigin
@@ -541,8 +560,8 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(1, 0);
 }
 
-// Flaky tests on CrOS: http://crbug.com/1019671.
-#if defined(OS_CHROMEOS)
+// Flaky tests on CrOS: http://crbug.com/40656092.
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_DoNotRecordEngagement_SilentAudioTrack_AudioOnly \
   DISABLED_DoNotRecordEngagement_SilentAudioTrack_AudioOnly
 #else
@@ -596,8 +615,8 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(1, 1);
 }
 
-// Flaky tests on CrOS: http://crbug.com/1019671.
-#if defined(OS_CHROMEOS)
+// Flaky tests on CrOS: http://crbug.com/40656092.
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_MultipleElements DISABLED_MultipleElements
 #else
 #define MAYBE_MultipleElements MultipleElements
@@ -612,13 +631,19 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, MAYBE_MultipleElements) {
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
                        RecordAudibleBasedOnShortTime) {
   LoadTestPageAndWaitForPlayAndAudible("engagement_test.html", false);
-  Advance(base::TimeDelta::FromSeconds(4));
+  Advance(base::Seconds(4));
   CloseTab();
   ExpectScores(1, 0);
 }
 
+#if BUILDFLAG(IS_MAC)
+// https://crbug.com/40187393
+#define MAYBE_SessionNewTabNavigateSameURL DISABLED_SessionNewTabNavigateSameURL
+#else
+#define MAYBE_SessionNewTabNavigateSameURL SessionNewTabNavigateSameURL
+#endif
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
-                       SessionNewTabNavigateSameURL) {
+                       MAYBE_SessionNewTabNavigateSameURL) {
   const GURL& url = http_server().GetURL("/engagement_test.html");
 
   LoadTestPageAndWaitForPlayAndAudible(url, false);
@@ -633,7 +658,13 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(2, 2);
 }
 
-IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, SessionNewTabSameURL) {
+#if BUILDFLAG(IS_MAC)
+// https://crbug.com/40187393
+#define MAYBE_SessionNewTabSameURL DISABLED_SessionNewTabSameURL
+#else
+#define MAYBE_SessionNewTabSameURL SessionNewTabSameURL
+#endif
+IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, MAYBE_SessionNewTabSameURL) {
   const GURL& url = http_server().GetURL("/engagement_test.html");
 
   LoadTestPageAndWaitForPlayAndAudible(url, false);
@@ -647,7 +678,14 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, SessionNewTabSameURL) {
   ExpectScores(1, 1);
 }
 
-IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, SessionNewTabSameOrigin) {
+#if BUILDFLAG(IS_MAC)
+// https://crbug.com/40187393
+#define MAYBE_SessionNewTabSameOrigin DISABLED_SessionNewTabSameOrigin
+#else
+#define MAYBE_SessionNewTabSameOrigin SessionNewTabSameOrigin
+#endif
+IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
+                       MAYBE_SessionNewTabSameOrigin) {
   const GURL& url = http_server().GetURL("/engagement_test.html");
   const GURL& other_url = http_server().GetURL("/engagement_test_audio.html");
 
@@ -678,8 +716,15 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest, SessionNewTabCrossOrigin) {
   ExpectScores(http_server_origin2().base_url(), 1, 1);
 }
 
+#if BUILDFLAG(IS_MAC)
+// TODO(crbug.com/40939686) Flaky on Mac.
+#define MAYBE_SessionMultipleTabsClosingParent \
+  DISABLED_SessionMultipleTabsClosingParent
+#else
+#define MAYBE_SessionMultipleTabsClosingParent SessionMultipleTabsClosingParent
+#endif
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
-                       SessionMultipleTabsClosingParent) {
+                       MAYBE_SessionMultipleTabsClosingParent) {
   const GURL& url = http_server().GetURL("/engagement_test.html");
   const GURL& other_url = http_server().GetURL("/engagement_test_audio.html");
 
@@ -711,8 +756,16 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementPreloadBrowserTest,
   EXPECT_TRUE(MediaEngagementPreloadedList::GetInstance()->loaded());
 }
 
+#if BUILDFLAG(IS_MAC)
+// https://crbug.com/40187393
+#define MAYBE_SessionNewTabNavigateSameURLWithOpener_Typed \
+  DISABLED_SessionNewTabNavigateSameURLWithOpener_Typed
+#else
+#define MAYBE_SessionNewTabNavigateSameURLWithOpener_Typed \
+  SessionNewTabNavigateSameURLWithOpener_Typed
+#endif
 IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
-                       SessionNewTabNavigateSameURLWithOpener_Typed) {
+                       MAYBE_SessionNewTabNavigateSameURLWithOpener_Typed) {
   const GURL& url = http_server().GetURL("/engagement_test.html");
 
   LoadTestPageAndWaitForPlayAndAudible(url, false);
@@ -730,48 +783,44 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementBrowserTest,
   ExpectScores(2, 2);
 }
 
-class MediaEngagementPrerenderBrowserTest : public MediaEngagementBrowserTest {
+class MediaEngagementPreThirdPartyCookieDeprecationBrowserTest
+    : public MediaEngagementBrowserTest {
  public:
-  void SetUpOnMainThread() override {
-    MediaEngagementBrowserTest::SetUpOnMainThread();
-
-    prerender::PrerenderManager::SetMode(
-        prerender::PrerenderManager::PRERENDER_MODE_NOSTATE_PREFETCH);
+  MediaEngagementPreThirdPartyCookieDeprecationBrowserTest() {
   }
 };
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #define MAYBE_Ignored DISABLED_Ignored
 #else
 #define MAYBE_Ignored Ignored
 #endif
-IN_PROC_BROWSER_TEST_F(MediaEngagementPrerenderBrowserTest, MAYBE_Ignored) {
+IN_PROC_BROWSER_TEST_F(MediaEngagementPreThirdPartyCookieDeprecationBrowserTest,
+                       MAYBE_Ignored) {
   const GURL& url = http_server().GetURL("/engagement_test.html");
 
-  prerender::PrerenderManager* prerender_manager =
-      prerender::PrerenderManagerFactory::GetForBrowserContext(
+  prerender::NoStatePrefetchManager* no_state_prefetch_manager =
+      prerender::NoStatePrefetchManagerFactory::GetForBrowserContext(
           browser()->profile());
-  ASSERT_TRUE(prerender_manager);
+  ASSERT_TRUE(no_state_prefetch_manager);
 
-  prerender::test_utils::TestPrerenderContentsFactory*
-      prerender_contents_factory =
-          new prerender::test_utils::TestPrerenderContentsFactory();
-  prerender_manager->SetPrerenderContentsFactoryForTest(
-      prerender_contents_factory);
-
-  content::SessionStorageNamespace* storage_namespace =
-      GetWebContents()->GetController().GetDefaultSessionStorageNamespace();
-  ASSERT_TRUE(storage_namespace);
+  prerender::test_utils::TestNoStatePrefetchContentsFactory*
+      no_state_prefetch_contents_factory =
+          new prerender::test_utils::TestNoStatePrefetchContentsFactory();
+  no_state_prefetch_manager->SetNoStatePrefetchContentsFactoryForTest(
+      no_state_prefetch_contents_factory);
 
   std::unique_ptr<prerender::test_utils::TestPrerender> test_prerender =
-      prerender_contents_factory->ExpectPrerenderContents(
+      no_state_prefetch_contents_factory->ExpectNoStatePrefetchContents(
           prerender::FINAL_STATUS_NOSTATE_PREFETCH_FINISHED);
 
-  std::unique_ptr<prerender::PrerenderHandle> prerender_handle =
-      prerender_manager->AddPrerenderFromOmnibox(url, storage_namespace,
-                                                 gfx::Size(640, 480));
+  std::unique_ptr<prerender::NoStatePrefetchHandle> no_state_prefetch_handle =
+      no_state_prefetch_manager->StartPrefetchingFromLinkRelPrerender(
+          /*process_id=*/-1, /*route_id=*/-1, url,
+          blink::mojom::PrerenderTriggerType::kLinkRelPrerender,
+          content::Referrer(), url::Origin::Create(url), gfx::Size(640, 480));
 
-  ASSERT_EQ(prerender_handle->contents(), test_prerender->contents());
+  ASSERT_EQ(no_state_prefetch_handle->contents(), test_prerender->contents());
 
   EXPECT_EQ(nullptr, GetService()->GetContentsObserverFor(
                          test_prerender->contents()->web_contents()));
@@ -784,31 +833,32 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementPrerenderBrowserTest, MAYBE_Ignored) {
 class MediaEngagementSessionRestoreBrowserTest
     : public MediaEngagementBrowserTest {
  public:
-  Browser* QuitBrowserAndRestore() {
-    Profile* profile = browser()->profile();
+  BrowserWindowInterface* QuitBrowserAndRestore() {
+    Profile* const profile = browser()->profile();
 
     SessionStartupPref::SetStartupPref(
         profile, SessionStartupPref(SessionStartupPref::LAST));
-#if defined(OS_CHROMEOS)
-    SessionServiceTestHelper helper(
-        SessionServiceFactory::GetForProfile(profile));
+#if BUILDFLAG(IS_CHROMEOS)
+    SessionServiceTestHelper helper(profile);
     helper.SetForceBrowserNotAliveWithNoWindows(true);
-    helper.ReleaseService();
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
     std::unique_ptr<ScopedKeepAlive> keep_alive(new ScopedKeepAlive(
         KeepAliveOrigin::SESSION_RESTORE, KeepAliveRestartOption::DISABLED));
+    std::unique_ptr<ScopedProfileKeepAlive> profile_keep_alive(
+        new ScopedProfileKeepAlive(profile,
+                                   ProfileKeepAliveOrigin::kBrowserWindow));
     CloseBrowserSynchronously(browser());
 
     chrome::NewEmptyWindow(profile);
     SessionRestoreTestHelper().Wait();
-    return BrowserList::GetInstance()->GetLastActive();
+    return GetLastActiveBrowserWindowInterfaceWithAnyProfile();
   }
 
-  void WaitForTabsToLoad(Browser* browser) {
-    for (int i = 0; i < browser->tab_strip_model()->count(); ++i) {
-      content::WebContents* web_contents =
-          browser->tab_strip_model()->GetWebContentsAt(i);
+  void WaitForTabsToLoad(TabStripModel* tab_strip_model) {
+    for (int i = 0; i < tab_strip_model->count(); ++i) {
+      content::WebContents* const web_contents =
+          tab_strip_model->GetWebContentsAt(i);
       web_contents->GetController().LoadIfNecessary();
       ASSERT_TRUE(content::WaitForLoadStop(web_contents));
     }
@@ -821,12 +871,13 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementSessionRestoreBrowserTest,
 
   LoadTestPage(url);
 
-  Browser* new_browser = QuitBrowserAndRestore();
-  ASSERT_NO_FATAL_FAILURE(WaitForTabsToLoad(new_browser));
+  BrowserWindowInterface* const browser = QuitBrowserAndRestore();
+  TabStripModel* const tab_strip_model = browser->GetTabStripModel();
+  ASSERT_NO_FATAL_FAILURE(WaitForTabsToLoad(tab_strip_model));
 
-  new_browser->tab_strip_model()->CloseAllTabs();
+  tab_strip_model->CloseAllTabs();
 
-  ExpectScores(MediaEngagementService::Get(new_browser->profile()), url, 1, 0);
+  ExpectScores(MediaEngagementService::Get(browser->GetProfile()), url, 1, 0);
 }
 
 IN_PROC_BROWSER_TEST_F(MediaEngagementSessionRestoreBrowserTest,
@@ -836,21 +887,271 @@ IN_PROC_BROWSER_TEST_F(MediaEngagementSessionRestoreBrowserTest,
   LoadTestPageAndWaitForPlayAndAudible(url, false);
   AdvanceMeaningfulPlaybackTime();
 
-  Browser* new_browser = QuitBrowserAndRestore();
+  BrowserWindowInterface* const browser = QuitBrowserAndRestore();
+  TabStripModel* const tab_strip_model = browser->GetTabStripModel();
 
   MediaEngagementService* new_service =
-      MediaEngagementService::Get(new_browser->profile());
+      MediaEngagementService::Get(browser->GetProfile());
   InjectTimerTaskRunnerToService(new_service);
 
-  ASSERT_NO_FATAL_FAILURE(WaitForTabsToLoad(new_browser));
+  ASSERT_NO_FATAL_FAILURE(WaitForTabsToLoad(tab_strip_model));
 
-  WasRecentlyAudibleWatcher watcher(
-      new_browser->tab_strip_model()->GetActiveWebContents());
+  WasRecentlyAudibleWatcher watcher(tab_strip_model->GetActiveWebContents());
   watcher.WaitForWasRecentlyAudible();
 
   AdvanceMeaningfulPlaybackTime();
 
-  new_browser->tab_strip_model()->CloseAllTabs();
+  tab_strip_model->CloseAllTabs();
 
   ExpectScores(new_service, url, 2, 2);
+}
+
+class MockAutoplayConfigurationClient
+    : public blink::mojom::AutoplayConfigurationClientInterceptorForTesting {
+ public:
+  MockAutoplayConfigurationClient() = default;
+  ~MockAutoplayConfigurationClient() override = default;
+
+  MockAutoplayConfigurationClient(const MockAutoplayConfigurationClient&) =
+      delete;
+  MockAutoplayConfigurationClient& operator=(
+      const MockAutoplayConfigurationClient&) = delete;
+
+  AutoplayConfigurationClient* GetForwardingInterface() override {
+    return this;
+  }
+
+  void BindReceiver(mojo::ScopedInterfaceEndpointHandle handle) {
+    receiver_.reset();
+    receiver_.Bind(
+        mojo::PendingAssociatedReceiver<
+            blink::mojom::AutoplayConfigurationClient>(std::move(handle)));
+  }
+
+  MOCK_METHOD2(AddAutoplayFlags, void(const url::Origin&, const int32_t));
+
+ private:
+  mojo::AssociatedReceiver<blink::mojom::AutoplayConfigurationClient> receiver_{
+      this};
+};
+
+class MediaEngagementContentsObserverMPArchBrowserTest
+    : public MediaEngagementBrowserTest {
+ public:
+  MediaEngagementContentsObserverMPArchBrowserTest() = default;
+  ~MediaEngagementContentsObserverMPArchBrowserTest() override = default;
+  MediaEngagementContentsObserverMPArchBrowserTest(
+      const MediaEngagementContentsObserverMPArchBrowserTest&) = delete;
+
+  MediaEngagementContentsObserverMPArchBrowserTest& operator=(
+      const MediaEngagementContentsObserverMPArchBrowserTest&) = delete;
+
+  void OverrideInterface(content::RenderFrameHost* render_frame_host,
+                         MockAutoplayConfigurationClient* client) {
+    render_frame_host->GetRemoteAssociatedInterfaces()
+        ->OverrideBinderForTesting(
+            blink::mojom::AutoplayConfigurationClient::Name_,
+            base::BindRepeating(&MockAutoplayConfigurationClient::BindReceiver,
+                                base::Unretained(client)));
+  }
+
+  void SetScores(const url::Origin& origin, int visits, int media_playbacks) {
+    MediaEngagementScore score = GetService()->CreateEngagementScore(origin);
+    score.SetVisits(visits);
+    score.SetMediaPlaybacks(media_playbacks);
+    score.Commit();
+  }
+};
+
+class MediaEngagementContentsObserverPrerenderBrowserTest
+    : public MediaEngagementContentsObserverMPArchBrowserTest {
+ public:
+  MediaEngagementContentsObserverPrerenderBrowserTest() = default;
+  ~MediaEngagementContentsObserverPrerenderBrowserTest() override = default;
+
+  void SetUpOnMainThread() override {
+    prerender_helper_->RegisterServerRequestMonitor(embedded_test_server());
+    MediaEngagementContentsObserverMPArchBrowserTest::SetUpOnMainThread();
+  }
+
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    MediaEngagementContentsObserverMPArchBrowserTest::SetUpCommandLine(
+        command_line);
+    // |prerender_helper_| has a ScopedFeatureList so we needed to delay its
+    // creation until now because MediaEngagementBrowserTest also uses a
+    // ScopedFeatureList and initialization order matters.
+    prerender_helper_ = std::make_unique<
+        content::test::PrerenderTestHelper>(base::BindRepeating(
+        &MediaEngagementContentsObserverPrerenderBrowserTest::GetWebContents,
+        base::Unretained(this)));
+  }
+
+  content::test::PrerenderTestHelper& prerender_helper() {
+    return *prerender_helper_;
+  }
+
+ private:
+  std::unique_ptr<content::test::PrerenderTestHelper> prerender_helper_;
+  base::test::ScopedFeatureList feature_list_;
+};
+
+// Flaky on Linux: http://crbug.com/325530046
+#if BUILDFLAG(IS_LINUX)
+#define MAYBE_DoNotSendEngagementLevelToRenderFrameInPrerendering \
+  DISABLED_DoNotSendEngagementLevelToRenderFrameInPrerendering
+#else
+#define MAYBE_DoNotSendEngagementLevelToRenderFrameInPrerendering \
+  DoNotSendEngagementLevelToRenderFrameInPrerendering
+#endif
+IN_PROC_BROWSER_TEST_F(
+    MediaEngagementContentsObserverPrerenderBrowserTest,
+    MAYBE_DoNotSendEngagementLevelToRenderFrameInPrerendering) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  const GURL& initial_url = embedded_test_server()->GetURL("/empty.html");
+  SetScores(url::Origin::Create(initial_url), 24, 20);
+
+  content::TestNavigationManager navigation_manager(GetWebContents(),
+                                                    initial_url);
+
+  content::NavigationController::LoadURLParams params(initial_url);
+  params.transition_type = ui::PAGE_TRANSITION_LINK;
+  params.frame_tree_node_id =
+      GetWebContents()->GetPrimaryMainFrame()->GetFrameTreeNodeId();
+  GetWebContents()->GetController().LoadURLWithParams(params);
+
+  EXPECT_TRUE(navigation_manager.WaitForResponse());
+
+  MockAutoplayConfigurationClient client;
+  OverrideInterface(
+      navigation_manager.GetNavigationHandle()->GetRenderFrameHost(), &client);
+  // AddAutoplayFlags should be called once after navigating |initial_url| in
+  // the main frame.
+  EXPECT_CALL(client, AddAutoplayFlags(testing::_, testing::_)).Times(1);
+
+  navigation_manager.ResumeNavigation();
+  EXPECT_TRUE(navigation_manager.WaitForNavigationFinished());
+
+  // Loads a page in a prerendered page.
+  GURL prerender_url = embedded_test_server()->GetURL("/title1.html");
+  const content::PrerenderHostId host_id =
+      prerender_helper().AddPrerender(prerender_url);
+  content::RenderFrameHost* prerender_rfh =
+      prerender_helper().GetPrerenderedMainFrameHost(host_id);
+  MockAutoplayConfigurationClient prerendered_client;
+  OverrideInterface(prerender_rfh, &prerendered_client);
+  // AddAutoplayFlags should not be called in prerendering, but it should be
+  // called when the prerendered page is activated.
+  EXPECT_CALL(prerendered_client, AddAutoplayFlags(testing::_, testing::_))
+      .Times(1);
+
+  // Activate the prerendered page.
+  prerender_helper().NavigatePrimaryPage(prerender_url);
+
+  base::RunLoop().RunUntilIdle();
+}
+
+class MediaEngagementContentsObserverFencedFrameBrowserTest
+    : public MediaEngagementContentsObserverMPArchBrowserTest {
+ public:
+  MediaEngagementContentsObserverFencedFrameBrowserTest() = default;
+  ~MediaEngagementContentsObserverFencedFrameBrowserTest() override = default;
+  MediaEngagementContentsObserverFencedFrameBrowserTest(
+      const MediaEngagementContentsObserverFencedFrameBrowserTest&) = delete;
+
+  MediaEngagementContentsObserverFencedFrameBrowserTest& operator=(
+      const MediaEngagementContentsObserverFencedFrameBrowserTest&) = delete;
+
+  void SetUpOnMainThread() override {
+    host_resolver()->AddRule("*", "127.0.0.1");
+    MediaEngagementContentsObserverMPArchBrowserTest::SetUpOnMainThread();
+  }
+
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    MediaEngagementBrowserTest::SetUpCommandLine(command_line);
+    // |fenced_frame_helper_| has a ScopedFeatureList so we needed to delay its
+    // creation until now because MediaEngagementBrowserTest also uses a
+    // ScopedFeatureList and initialization order matters.
+    fenced_frame_helper_ =
+        std::make_unique<content::test::FencedFrameTestHelper>();
+  }
+
+  content::test::FencedFrameTestHelper& fenced_frame_test_helper() {
+    return *fenced_frame_helper_;
+  }
+
+ private:
+  std::unique_ptr<content::test::FencedFrameTestHelper> fenced_frame_helper_;
+};
+
+// TODO(crbug.com/349253812): Flaky on Linux.
+#if BUILDFLAG(IS_LINUX)
+#define MAYBE_SendEngagementLevelToRenderFrameOnFencedFrame \
+  DISABLED_SendEngagementLevelToRenderFrameOnFencedFrame
+#else
+#define MAYBE_SendEngagementLevelToRenderFrameOnFencedFrame \
+  SendEngagementLevelToRenderFrameOnFencedFrame
+#endif
+IN_PROC_BROWSER_TEST_F(MediaEngagementContentsObserverFencedFrameBrowserTest,
+                       MAYBE_SendEngagementLevelToRenderFrameOnFencedFrame) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  const GURL& initial_url =
+      embedded_test_server()->GetURL("a.com", "/empty.html");
+  SetScores(url::Origin::Create(initial_url), 24, 20);
+  content::TestNavigationManager navigation_manager(GetWebContents(),
+                                                    initial_url);
+
+  content::NavigationController::LoadURLParams params(initial_url);
+  params.transition_type = ui::PAGE_TRANSITION_LINK;
+  params.frame_tree_node_id =
+      GetWebContents()->GetPrimaryMainFrame()->GetFrameTreeNodeId();
+  GetWebContents()->GetController().LoadURLWithParams(params);
+
+  EXPECT_TRUE(navigation_manager.WaitForResponse());
+
+  MockAutoplayConfigurationClient client;
+  OverrideInterface(
+      navigation_manager.GetNavigationHandle()->GetRenderFrameHost(), &client);
+  // AddAutoplayFlags should be called once after navigating |initial_url| in
+  // the main frame.
+  EXPECT_CALL(client, AddAutoplayFlags(testing::_, testing::_)).Times(1);
+
+  navigation_manager.ResumeNavigation();
+  EXPECT_TRUE(navigation_manager.WaitForNavigationFinished());
+
+  // Create a fenced frame.
+  GURL fenced_frame_url =
+      embedded_test_server()->GetURL("b.com", "/fenced_frames/title1.html");
+  content::RenderFrameHost* fenced_frame_host =
+      fenced_frame_test_helper().CreateFencedFrame(
+          GetWebContents()->GetPrimaryMainFrame(), fenced_frame_url);
+  EXPECT_NE(nullptr, fenced_frame_host);
+
+  // AddAutoplayFlags should be called on the fenced frame.
+  GURL fenced_frame_navigate_url =
+      embedded_test_server()->GetURL("b.com", "/fenced_frames/title2.html");
+  content::TestNavigationManager navigation_manager2(GetWebContents(),
+                                                     fenced_frame_navigate_url);
+  EXPECT_TRUE(ExecJs(
+      fenced_frame_host,
+      content::JsReplace("location.href = $1;", fenced_frame_navigate_url)));
+
+  EXPECT_TRUE(navigation_manager2.WaitForResponse());
+  MockAutoplayConfigurationClient fenced_frame_client;
+  OverrideInterface(
+      navigation_manager2.GetNavigationHandle()->GetRenderFrameHost(),
+      &fenced_frame_client);
+  // AddAutoplayFlags should be called once after navigating |initial_url| in
+  // the main frame.
+  base::RunLoop run_loop;
+  EXPECT_CALL(fenced_frame_client,
+              AddAutoplayFlags(url::Origin::Create(fenced_frame_navigate_url),
+                               testing::_))
+      .Times(1)
+      .WillOnce(base::test::RunClosure(run_loop.QuitClosure()));
+
+  navigation_manager2.ResumeNavigation();
+  EXPECT_TRUE(navigation_manager2.WaitForNavigationFinished());
+  run_loop.Run();
 }

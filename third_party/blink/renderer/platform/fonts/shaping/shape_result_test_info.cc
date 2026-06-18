@@ -1,11 +1,11 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/fonts/shaping/shape_result_test_info.h"
 
 #include "third_party/blink/renderer/platform/fonts/font.h"
-#include "third_party/blink/renderer/platform/fonts/shaping/shape_result_inline_headers.h"
+#include "third_party/blink/renderer/platform/fonts/shaping/shape_result_run.h"
 
 namespace blink {
 
@@ -13,7 +13,7 @@ unsigned ShapeResultTestInfo::NumberOfRunsForTesting() const {
   return runs_.size();
 }
 
-ShapeResult::RunInfo& ShapeResultTestInfo::RunInfoForTesting(
+ShapeResultRun& ShapeResultTestInfo::RunInfoForTesting(
     unsigned run_index) const {
   return *runs_[run_index];
 }
@@ -54,7 +54,7 @@ float ShapeResultTestInfo::AdvanceForTesting(unsigned run_index,
 
 SimpleFontData* ShapeResultTestInfo::FontDataForTesting(
     unsigned run_index) const {
-  return runs_[run_index]->font_data_.get();
+  return runs_[run_index]->font_data_.Get();
 }
 
 Vector<unsigned> ShapeResultTestInfo::CharacterIndexesForTesting() const {
@@ -71,7 +71,7 @@ Vector<unsigned> ShapeResultTestInfo::CharacterIndexesForTesting() const {
 void AddGlyphInfo(void* context,
                   unsigned character_index,
                   Glyph glyph,
-                  FloatSize glyph_offset,
+                  gfx::Vector2dF glyph_offset,
                   float advance,
                   bool is_horizontal,
                   CanvasRotationInVertical rotation,

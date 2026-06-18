@@ -1,19 +1,22 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_BROWSER_DEVTOOLS_DEVTOOLS_URL_LOADER_INTERCEPTOR_H_
 #define CONTENT_BROWSER_DEVTOOLS_DEVTOOLS_URL_LOADER_INTERCEPTOR_H_
 
-#include "base/callback.h"
+#include <optional>
+
+#include "base/containers/enum_set.h"
 #include "base/containers/flat_set.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/unguessable_token.h"
 #include "content/browser/devtools/protocol/network.h"
+#include "content/public/browser/global_request_id.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 #include "net/base/auth.h"
 #include "net/base/net_errors.h"
@@ -29,13 +32,14 @@ class HttpResponseHeaders;
 namespace network {
 namespace mojom {
 class URLLoaderFactoryOverride;
+class TrustedURLLoaderHeaderClient;
 }
 }  // namespace network
 
 namespace content {
 
 class InterceptionJob;
-class RenderProcessHost;
+class StoragePartition;
 struct CreateLoaderParameters;
 
 struct InterceptedRequestInfo {
@@ -50,9 +54,10 @@ struct InterceptedRequestInfo {
   std::unique_ptr<protocol::Network::Request> network_request;
   std::unique_ptr<net::AuthChallengeInfo> auth_challenge;
   scoped_refptr<net::HttpResponseHeaders> response_headers;
-  protocol::Maybe<bool> is_download;
-  protocol::Maybe<protocol::String> redirect_url;
-  protocol::Maybe<protocol::String> renderer_request_id;
+  std::optional<bool> is_download;
+  std::optional<protocol::String> redirect_url;
+  std::optional<protocol::String> renderer_request_id;
+  std::optional<protocol::String> redirected_request_id;
 };
 
 class DevToolsURLLoaderInterceptor {
@@ -76,13 +81,14 @@ class DevToolsURLLoaderInterceptor {
     };
 
     explicit AuthChallengeResponse(ResponseType response_type);
-    AuthChallengeResponse(const base::string16& username,
-                          const base::string16& password);
+    AuthChallengeResponse(const std::u16string& username,
+                          const std::u16string& password);
+
+    AuthChallengeResponse(const AuthChallengeResponse&) = delete;
+    AuthChallengeResponse& operator=(const AuthChallengeResponse&) = delete;
 
     const ResponseType response_type;
     const net::AuthCredentials credentials;
-
-    DISALLOW_COPY_AND_ASSIGN(AuthChallengeResponse);
   };
 
   struct Modifications {
@@ -94,25 +100,26 @@ class DevToolsURLLoaderInterceptor {
         std::unique_ptr<AuthChallengeResponse> auth_challenge_response);
     Modifications(scoped_refptr<net::HttpResponseHeaders> response_headers,
                   scoped_refptr<base::RefCountedMemory> response_body);
-    Modifications(protocol::Maybe<std::string> modified_url,
-                  protocol::Maybe<std::string> modified_method,
-                  protocol::Maybe<protocol::Binary> modified_post_data,
-                  std::unique_ptr<HeadersVector> modified_headers);
+    Modifications(std::optional<std::string> modified_url,
+                  std::optional<std::string> modified_method,
+                  std::optional<protocol::Binary> modified_post_data,
+                  std::unique_ptr<HeadersVector> modified_headers,
+                  std::optional<bool> intercept_response);
     Modifications(
-        base::Optional<net::Error> error_reason,
+        std::optional<net::Error> error_reason,
         scoped_refptr<net::HttpResponseHeaders> response_headers,
         scoped_refptr<base::RefCountedMemory> response_body,
         size_t body_offset,
-        protocol::Maybe<std::string> modified_url,
-        protocol::Maybe<std::string> modified_method,
-        protocol::Maybe<protocol::Binary> modified_post_data,
+        std::optional<std::string> modified_url,
+        std::optional<std::string> modified_method,
+        std::optional<protocol::Binary> modified_post_data,
         std::unique_ptr<HeadersVector> modified_headers,
         std::unique_ptr<AuthChallengeResponse> auth_challenge_response);
     ~Modifications();
 
     // If none of the following are set then the request will be allowed to
     // continue unchanged.
-    base::Optional<net::Error> error_reason;  // Finish with error.
+    std::optional<net::Error> error_reason;  // Finish with error.
     // If either of the below fields is set, complete the request by
     // responding with the provided headers and body.
     scoped_refptr<net::HttpResponseHeaders> response_headers;
@@ -120,21 +127,20 @@ class DevToolsURLLoaderInterceptor {
     size_t body_offset = 0;
 
     // Optionally modify before sending to network.
-    protocol::Maybe<std::string> modified_url;
-    protocol::Maybe<std::string> modified_method;
-    protocol::Maybe<protocol::Binary> modified_post_data;
+    std::optional<std::string> modified_url;
+    std::optional<std::string> modified_method;
+    std::optional<protocol::Binary> modified_post_data;
     std::unique_ptr<HeadersVector> modified_headers;
+    std::optional<bool> intercept_response;
     // AuthChallengeResponse is mutually exclusive with the above.
     std::unique_ptr<AuthChallengeResponse> auth_challenge_response;
   };
 
   enum InterceptionStage {
-    DONT_INTERCEPT = 0,
-    REQUEST = (1 << 0),
-    RESPONSE = (1 << 1),
-    // Note: Both is not sent from front-end. It is used if both Request
-    // and HeadersReceived was found it upgrades it to Both.
-    BOTH = (REQUEST | RESPONSE),
+    kRequest,
+    kResponse,
+    kMinValue = kRequest,
+    kMaxValue = kResponse,
   };
 
   struct Pattern {
@@ -158,26 +164,35 @@ class DevToolsURLLoaderInterceptor {
                 std::vector<Pattern> patterns,
                 RequestInterceptedCallback callback);
     FilterEntry(FilterEntry&&);
+
+    FilterEntry(const FilterEntry&) = delete;
+    FilterEntry& operator=(const FilterEntry&) = delete;
+
     ~FilterEntry();
 
     const base::UnguessableToken target_id;
     std::vector<Pattern> patterns;
     const RequestInterceptedCallback callback;
-
-    DISALLOW_COPY_AND_ASSIGN(FilterEntry);
   };
 
   using HandleAuthRequestCallback =
       base::OnceCallback<void(bool use_fallback,
-                              const base::Optional<net::AuthCredentials>&)>;
+                              const std::optional<net::AuthCredentials>&)>;
+  using CheckCookieAccessCallback =
+      base::RepeatingCallback<bool(const net::CanonicalCookie&)>;
   // Can only be called on the IO thread.
-  static void HandleAuthRequest(int32_t process_id,
-                                int32_t routing_id,
-                                int32_t request_id,
+  static void HandleAuthRequest(GlobalRequestID req_id,
                                 const net::AuthChallengeInfo& auth_info,
                                 HandleAuthRequestCallback callback);
 
-  explicit DevToolsURLLoaderInterceptor(RequestInterceptedCallback callback);
+  explicit DevToolsURLLoaderInterceptor(
+      RequestInterceptedCallback callback,
+      CheckCookieAccessCallback cookie_access_callback = {});
+
+  DevToolsURLLoaderInterceptor(const DevToolsURLLoaderInterceptor&) = delete;
+  DevToolsURLLoaderInterceptor& operator=(const DevToolsURLLoaderInterceptor&) =
+      delete;
+
   ~DevToolsURLLoaderInterceptor();
 
   void SetPatterns(std::vector<Pattern> patterns, bool handle_auth);
@@ -193,28 +208,35 @@ class DevToolsURLLoaderInterceptor {
       std::unique_ptr<ContinueInterceptedRequestCallback> callback);
 
   bool CreateProxyForInterception(
-      RenderProcessHost* rph,
+      int process_id,
+      StoragePartition* storage_partition,
       const base::UnguessableToken& frame_token,
       bool is_navigation,
       bool is_download,
-      network::mojom::URLLoaderFactoryOverride* intercepting_factory);
+      network::mojom::URLLoaderFactoryOverride* intercepting_factory,
+      mojo::PendingRemote<network::mojom::TrustedURLLoaderHeaderClient>*
+          header_client);
 
  private:
   friend class InterceptionJob;
   friend class DevToolsURLLoaderFactoryProxy;
 
+  using InterceptionStages = base::EnumSet<InterceptionStage,
+                                           InterceptionStage::kMinValue,
+                                           InterceptionStage::kMaxValue>;
+
   void CreateJob(
       const base::UnguessableToken& frame_token,
       int32_t process_id,
       bool is_download,
-      const base::Optional<std::string>& renderer_request_id,
+      const std::optional<std::string>& renderer_request_id,
       std::unique_ptr<CreateLoaderParameters> create_params,
       mojo::PendingReceiver<network::mojom::URLLoader> loader_receiver,
       mojo::PendingRemote<network::mojom::URLLoaderClient> client,
       mojo::PendingRemote<network::mojom::URLLoaderFactory> target_factory,
       mojo::PendingRemote<network::mojom::CookieManager> cookie_manager);
 
-  InterceptionStage GetInterceptionStage(
+  InterceptionStages GetInterceptionStages(
       const GURL& url,
       blink::mojom::ResourceType resource_type) const;
 
@@ -229,59 +251,36 @@ class DevToolsURLLoaderInterceptor {
     return nullptr;
   }
 
-  void RemoveJob(const std::string& id) { jobs_.erase(id); }
-  void AddJob(const std::string& id, InterceptionJob* job) {
+  InterceptionJob* FindJobByRequestId(int32_t request_id) {
+    auto it = network_request_id_to_interception_id_.find(request_id);
+    if (it == network_request_id_to_interception_id_.end()) {
+      return nullptr;
+    }
+
+    auto job_it = jobs_.find(it->second);
+    CHECK(job_it != jobs_.end());
+    return job_it->second;
+  }
+
+  void RemoveJob(int32_t request_id, const std::string& id) {
+    network_request_id_to_interception_id_.erase(request_id);
+    jobs_.erase(id);
+  }
+  void AddJob(int32_t request_id, const std::string& id, InterceptionJob* job) {
     jobs_.emplace(id, job);
+    network_request_id_to_interception_id_.emplace(request_id, id);
   }
 
   const RequestInterceptedCallback request_intercepted_callback_;
+  const CheckCookieAccessCallback cookie_access_callback_;
 
   std::vector<Pattern> patterns_;
   bool handle_auth_ = false;
-  std::map<std::string, InterceptionJob*> jobs_;
+  std::map<std::string, raw_ptr<InterceptionJob, CtnExperimental>> jobs_;
+  std::map<int32_t, std::string> network_request_id_to_interception_id_;
 
   base::WeakPtrFactory<DevToolsURLLoaderInterceptor> weak_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(DevToolsURLLoaderInterceptor);
 };
-
-// The purpose of this class is to have a thin wrapper around
-// InterfacePtr<URLLoaderFactory> that is held by the client as
-// unique_ptr<network::mojom::URLLoaderFactory>, since this is the
-// way some clients pass the factory. We prefer wrapping a mojo proxy
-// rather than exposing original DevToolsURLLoaderFactoryProxy because
-// this takes care of thread hopping when necessary.
-class DevToolsURLLoaderFactoryAdapter
-    : public network::mojom::URLLoaderFactory {
- public:
-  DevToolsURLLoaderFactoryAdapter() = delete;
-  explicit DevToolsURLLoaderFactoryAdapter(
-      mojo::PendingRemote<network::mojom::URLLoaderFactory> factory);
-  ~DevToolsURLLoaderFactoryAdapter() override;
-
- private:
-  // network::mojom::URLLoaderFactory implementation
-  void CreateLoaderAndStart(
-      mojo::PendingReceiver<network::mojom::URLLoader> loader,
-      int32_t routing_id,
-      int32_t request_id,
-      uint32_t options,
-      const network::ResourceRequest& request,
-      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
-      const net::MutableNetworkTrafficAnnotationTag& traffic_annotation)
-      override;
-  void Clone(mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver)
-      override;
-
-  mojo::Remote<network::mojom::URLLoaderFactory> factory_;
-};
-
-inline DevToolsURLLoaderInterceptor::InterceptionStage& operator|=(
-    DevToolsURLLoaderInterceptor::InterceptionStage& a,
-    const DevToolsURLLoaderInterceptor::InterceptionStage& b) {
-  a = static_cast<DevToolsURLLoaderInterceptor::InterceptionStage>(a | b);
-  return a;
-}
 
 }  // namespace content
 

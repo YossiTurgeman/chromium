@@ -30,9 +30,17 @@
 
 #include "third_party/blink/renderer/platform/loader/fetch/memory_cache.h"
 
+#include <string_view>
+#include <variant>
+
+#include "base/memory_coordinator/test_memory_consumer_registry.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/thread_state.h"
 #include "third_party/blink/renderer/platform/loader/fetch/raw_resource.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_loader_options.h"
@@ -41,8 +49,9 @@
 #include "third_party/blink/renderer/platform/loader/testing/mock_resource_client.h"
 #include "third_party/blink/renderer/platform/loader/testing/test_loader_factory.h"
 #include "third_party/blink/renderer/platform/loader/testing/test_resource_fetcher_properties.h"
+#include "third_party/blink/renderer/platform/scheduler/test/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/mock_context_lifecycle_notifier.h"
-#include "third_party/blink/renderer/platform/testing/testing_platform_support_with_mock_scheduler.h"
+#include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 
@@ -61,8 +70,9 @@ class FakeDecodedResource final : public Resource {
                       const ResourceLoaderOptions& options)
       : Resource(request, ResourceType::kMock, options) {}
 
-  void AppendData(const char* data, size_t len) override {
-    Resource::AppendData(data, len);
+  void AppendData(
+      std::variant<SegmentedBuffer, base::span<const char>> data) override {
+    Resource::AppendData(std::move(data));
     SetDecodedSize(this->size());
   }
 
@@ -86,6 +96,8 @@ class MemoryCacheTest : public testing::Test {
  public:
   class FakeResource final : public Resource {
    public:
+    static constexpr size_t kInitialDecodedSize = 42;
+
     FakeResource(const char* url, ResourceType type)
         : FakeResource(KURL(url), type) {}
     FakeResource(const KURL& url, ResourceType type)
@@ -95,46 +107,45 @@ class MemoryCacheTest : public testing::Test {
     FakeResource(const ResourceRequest& request,
                  ResourceType type,
                  const ResourceLoaderOptions& options)
-        : Resource(request, type, options) {}
+        : Resource(request, type, options) {
+      SetDecodedSize(kInitialDecodedSize);
+    }
+
+    void DestroyDecodedDataIfPossible() override { SetDecodedSize(0u); }
   };
+
+  MemoryCacheTest()
+      : scoped_memory_cache_(MakeGarbageCollected<MemoryCache>(
+            task_environment_.GetMainThreadTaskRunner())) {}
 
  protected:
   void SetUp() override {
-    // Save the global memory cache to restore it upon teardown.
-    global_memory_cache_ = ReplaceMemoryCacheForTesting(
-        MakeGarbageCollected<MemoryCache>(platform_->test_task_runner()));
     auto* properties = MakeGarbageCollected<TestResourceFetcherProperties>();
+    lifecycle_notifier_ = MakeGarbageCollected<MockContextLifecycleNotifier>();
     fetcher_ = MakeGarbageCollected<ResourceFetcher>(ResourceFetcherInit(
         properties->MakeDetachable(), MakeGarbageCollected<MockFetchContext>(),
         base::MakeRefCounted<scheduler::FakeTaskRunner>(),
-        MakeGarbageCollected<TestLoaderFactory>(),
-        MakeGarbageCollected<MockContextLifecycleNotifier>()));
+        base::MakeRefCounted<scheduler::FakeTaskRunner>(),
+        MakeGarbageCollected<TestLoaderFactory>(), lifecycle_notifier_,
+        nullptr /* back_forward_cache_loader_helper */));
   }
 
-  void TearDown() override {
-    ReplaceMemoryCacheForTesting(global_memory_cache_.Release());
-  }
-
-  Persistent<MemoryCache> global_memory_cache_;
+  test::TaskEnvironmentWithMainThreadScheduler task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+  base::TestMemoryConsumerRegistry test_memory_consumer_registry_;
   Persistent<ResourceFetcher> fetcher_;
-  ScopedTestingPlatformSupport<TestingPlatformSupportWithMockScheduler>
-      platform_;
+  Persistent<MockContextLifecycleNotifier> lifecycle_notifier_;
+  ScopedTestingPlatformSupport<TestingPlatformSupport> platform_;
+  ScopedMemoryCacheForTesting scoped_memory_cache_;
+
+ private:
 };
 
-// Verifies that setters and getters for cache capacities work correcty.
-TEST_F(MemoryCacheTest, CapacityAccounting) {
-  const size_t kSizeMax = ~static_cast<size_t>(0);
-  const size_t kTotalCapacity = kSizeMax / 4;
-  GetMemoryCache()->SetCapacity(kTotalCapacity);
-  EXPECT_EQ(kTotalCapacity, GetMemoryCache()->Capacity());
-}
 
 TEST_F(MemoryCacheTest, VeryLargeResourceAccounting) {
   const size_t kSizeMax = ~static_cast<size_t>(0);
-  const size_t kTotalCapacity = kSizeMax / 4;
   const size_t kResourceSize1 = kSizeMax / 16;
   const size_t kResourceSize2 = kSizeMax / 20;
-  GetMemoryCache()->SetCapacity(kTotalCapacity);
   Persistent<MockResourceClient> client =
       MakeGarbageCollected<MockResourceClient>();
   // Here and below, use an image MIME type. This is because on Android
@@ -148,117 +159,24 @@ TEST_F(MemoryCacheTest, VeryLargeResourceAccounting) {
       FakeDecodedResource::Fetch(params, fetcher_, client);
   cached_resource->FakeEncodedSize(kResourceSize1);
 
-  EXPECT_TRUE(GetMemoryCache()->Contains(cached_resource));
-  EXPECT_EQ(cached_resource->size(), GetMemoryCache()->size());
+  EXPECT_TRUE(MemoryCache::Get()->Contains(cached_resource));
+  EXPECT_EQ(cached_resource->size(), MemoryCache::Get()->size());
 
   client->RemoveAsClient();
-  EXPECT_EQ(cached_resource->size(), GetMemoryCache()->size());
+  EXPECT_EQ(cached_resource->size(), MemoryCache::Get()->size());
 
   cached_resource->FakeEncodedSize(kResourceSize2);
-  EXPECT_EQ(cached_resource->size(), GetMemoryCache()->size());
-}
-
-static void RunTask(Resource* resource1, Resource* resource2) {
-  // The resource size has to be nonzero for this test to be meaningful, but
-  // we do not rely on it having any particular value.
-  EXPECT_GT(resource1->size(), 0u);
-  EXPECT_GT(resource2->size(), 0u);
-
-  EXPECT_EQ(0u, GetMemoryCache()->size());
-
-  GetMemoryCache()->Add(resource1);
-  GetMemoryCache()->Add(resource2);
-
-  size_t total_size = resource1->size() + resource2->size();
-  EXPECT_EQ(total_size, GetMemoryCache()->size());
-  EXPECT_GT(resource1->DecodedSize(), 0u);
-  EXPECT_GT(resource2->DecodedSize(), 0u);
-
-  // We expect actual pruning doesn't occur here synchronously but deferred,
-  // due to the previous pruning invoked in TestResourcePruningLater().
-  GetMemoryCache()->Prune();
-  EXPECT_EQ(total_size, GetMemoryCache()->size());
-  EXPECT_GT(resource1->DecodedSize(), 0u);
-  EXPECT_GT(resource2->DecodedSize(), 0u);
-}
-
-static void TestResourcePruningLater(ResourceFetcher* fetcher,
-                                     const String& identifier1,
-                                     const String& identifier2) {
-  auto* platform = static_cast<TestingPlatformSupportWithMockScheduler*>(
-      Platform::Current());
-
-  GetMemoryCache()->SetDelayBeforeLiveDecodedPrune(base::TimeDelta());
-
-  // Enforce pruning by adding |dummyResource| and then call prune().
-  Resource* dummy_resource = RawResource::CreateForTest(
-      KURL("http://dummy"), SecurityOrigin::CreateUniqueOpaque(),
-      ResourceType::kRaw);
-  GetMemoryCache()->Add(dummy_resource);
-  EXPECT_GT(GetMemoryCache()->size(), 1u);
-  const unsigned kTotalCapacity = 1;
-  GetMemoryCache()->SetCapacity(kTotalCapacity);
-  GetMemoryCache()->Prune();
-  GetMemoryCache()->Remove(dummy_resource);
-  EXPECT_EQ(0u, GetMemoryCache()->size());
-
-  const char kData[6] = "abcde";
-  FetchParameters params1 = FetchParameters::CreateForTest(
-      ResourceRequest("data:image/jpeg,resource1"));
-  Resource* resource1 = FakeDecodedResource::Fetch(params1, fetcher, nullptr);
-  GetMemoryCache()->Remove(resource1);
-  if (!identifier1.IsEmpty())
-    resource1->SetCacheIdentifier(identifier1);
-  resource1->AppendData(kData, 3u);
-  resource1->FinishForTest();
-  FetchParameters params2 = FetchParameters::CreateForTest(
-      ResourceRequest("data:image/jpeg,resource2"));
-  Persistent<MockResourceClient> client =
-      MakeGarbageCollected<MockResourceClient>();
-  Resource* resource2 = FakeDecodedResource::Fetch(params2, fetcher, client);
-  GetMemoryCache()->Remove(resource2);
-  if (!identifier2.IsEmpty())
-    resource2->SetCacheIdentifier(identifier2);
-  resource2->AppendData(kData, 4u);
-  resource2->FinishForTest();
-
-  platform->test_task_runner()->PostTask(
-      FROM_HERE, WTF::Bind(&RunTask, WrapPersistent(resource1),
-                           WrapPersistent(resource2)));
-  platform->RunUntilIdle();
-
-  // Now, the resources was pruned.
-  unsigned size_without_decode =
-      resource1->EncodedSize() + resource1->OverheadSize() +
-      resource2->EncodedSize() + resource2->OverheadSize();
-  EXPECT_EQ(size_without_decode, GetMemoryCache()->size());
-}
-
-// Verified that when ordering a prune in a runLoop task, the prune is deferred.
-TEST_F(MemoryCacheTest, ResourcePruningLater_Basic) {
-  TestResourcePruningLater(fetcher_, "", "");
-}
-
-TEST_F(MemoryCacheTest, ResourcePruningLater_MultipleResourceMaps) {
-  {
-    TestResourcePruningLater(fetcher_, "foo", "");
-    GetMemoryCache()->EvictResources();
-  }
-  {
-    TestResourcePruningLater(fetcher_, "foo", "bar");
-    GetMemoryCache()->EvictResources();
-  }
+  EXPECT_EQ(cached_resource->size(), MemoryCache::Get()->size());
 }
 
 // Verifies that
-// - Resources are not pruned synchronously when ResourceClient is removed.
 // - size() is updated appropriately when Resources are added to MemoryCache
 //   and garbage collected.
+// -
 static void TestClientRemoval(ResourceFetcher* fetcher,
                               const String& identifier1,
                               const String& identifier2) {
-  GetMemoryCache()->SetCapacity(0);
-  const char kData[6] = "abcde";
+  const std::string_view kData = "abcde";
   Persistent<MockResourceClient> client1 =
       MakeGarbageCollected<MockResourceClient>();
   Persistent<MockResourceClient> client2 =
@@ -269,55 +187,47 @@ static void TestClientRemoval(ResourceFetcher* fetcher,
   FetchParameters params2 =
       FetchParameters::CreateForTest(ResourceRequest("data:image/jpeg,bar"));
   Resource* resource2 = FakeDecodedResource::Fetch(params2, fetcher, client2);
-  resource1->AppendData(kData, 4u);
-  resource2->AppendData(kData, 4u);
+  resource1->AppendData(kData.substr(0u, 4u));
+  resource2->AppendData(kData.substr(0u, 4u));
 
-  GetMemoryCache()->SetCapacity(0);
   // Remove and re-Add the resources, with proper cache identifiers.
-  GetMemoryCache()->Remove(resource1);
-  GetMemoryCache()->Remove(resource2);
-  if (!identifier1.IsEmpty())
+  MemoryCache::Get()->Remove(resource1);
+  MemoryCache::Get()->Remove(resource2);
+  if (!identifier1.empty())
     resource1->SetCacheIdentifier(identifier1);
-  if (!identifier2.IsEmpty())
+  if (!identifier2.empty())
     resource2->SetCacheIdentifier(identifier2);
-  GetMemoryCache()->Add(resource1);
-  GetMemoryCache()->Add(resource2);
+  MemoryCache::Get()->Add(resource1);
+  MemoryCache::Get()->Add(resource2);
 
   size_t original_total_size = resource1->size() + resource2->size();
 
-  // Call prune. There is nothing to prune, but this will initialize
-  // the prune timestamp, allowing future prunes to be deferred.
-  GetMemoryCache()->Prune();
-  EXPECT_GT(resource1->DecodedSize(), 0u);
-  EXPECT_GT(resource2->DecodedSize(), 0u);
-  EXPECT_EQ(original_total_size, GetMemoryCache()->size());
-
-  // Removing the client from resource1 should not trigger pruning.
+  // Removing the client from resource1 should not affect the size.
   client1->RemoveAsClient();
   EXPECT_GT(resource1->DecodedSize(), 0u);
   EXPECT_GT(resource2->DecodedSize(), 0u);
-  EXPECT_EQ(original_total_size, GetMemoryCache()->size());
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource1));
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource2));
+  EXPECT_EQ(original_total_size, MemoryCache::Get()->size());
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource1));
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource2));
 
-  // Removing the client from resource2 should not trigger pruning.
+  // Removing the client from resource2 should not affect the size.
   client2->RemoveAsClient();
   EXPECT_GT(resource1->DecodedSize(), 0u);
   EXPECT_GT(resource2->DecodedSize(), 0u);
-  EXPECT_EQ(original_total_size, GetMemoryCache()->size());
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource1));
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource2));
+  EXPECT_EQ(original_total_size, MemoryCache::Get()->size());
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource1));
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource2));
 
   WeakPersistent<Resource> resource1_weak = resource1;
   WeakPersistent<Resource> resource2_weak = resource2;
 
+  // Garabage collection should cause resources without clients to be collected
+  // and removed from the cache. The size should be updated accordingly.
   ThreadState::Current()->CollectAllGarbageForTesting(
-      BlinkGC::kNoHeapPointersOnStack);
-  // Resources are garbage-collected (WeakMemoryCache) and thus removed
-  // from MemoryCache.
+      ThreadState::StackState::kNoHeapPointers);
   EXPECT_FALSE(resource1_weak);
   EXPECT_FALSE(resource2_weak);
-  EXPECT_EQ(0u, GetMemoryCache()->size());
+  EXPECT_EQ(0u, MemoryCache::Get()->size());
 }
 
 TEST_F(MemoryCacheTest, ClientRemoval_Basic) {
@@ -327,105 +237,369 @@ TEST_F(MemoryCacheTest, ClientRemoval_Basic) {
 TEST_F(MemoryCacheTest, ClientRemoval_MultipleResourceMaps) {
   {
     TestClientRemoval(fetcher_, "foo", "");
-    GetMemoryCache()->EvictResources();
+    MemoryCache::Get()->EvictResources();
   }
   {
     TestClientRemoval(fetcher_, "", "foo");
-    GetMemoryCache()->EvictResources();
+    MemoryCache::Get()->EvictResources();
   }
   {
     TestClientRemoval(fetcher_, "foo", "bar");
-    GetMemoryCache()->EvictResources();
+    MemoryCache::Get()->EvictResources();
   }
 }
 
 TEST_F(MemoryCacheTest, RemoveDuringRevalidation) {
   auto* resource1 = MakeGarbageCollected<FakeResource>("http://test/resource",
                                                        ResourceType::kRaw);
-  GetMemoryCache()->Add(resource1);
+  MemoryCache::Get()->Add(resource1);
 
   auto* resource2 = MakeGarbageCollected<FakeResource>("http://test/resource",
                                                        ResourceType::kRaw);
-  GetMemoryCache()->Remove(resource1);
-  GetMemoryCache()->Add(resource2);
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource2));
-  EXPECT_FALSE(GetMemoryCache()->Contains(resource1));
+  MemoryCache::Get()->Remove(resource1);
+  MemoryCache::Get()->Add(resource2);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource2));
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource1));
 
   auto* resource3 = MakeGarbageCollected<FakeResource>("http://test/resource",
                                                        ResourceType::kRaw);
-  GetMemoryCache()->Remove(resource2);
-  GetMemoryCache()->Add(resource3);
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource3));
-  EXPECT_FALSE(GetMemoryCache()->Contains(resource2));
+  MemoryCache::Get()->Remove(resource2);
+  MemoryCache::Get()->Add(resource3);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource3));
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource2));
 }
 
 TEST_F(MemoryCacheTest, ResourceMapIsolation) {
   auto* resource1 = MakeGarbageCollected<FakeResource>("http://test/resource",
                                                        ResourceType::kRaw);
-  GetMemoryCache()->Add(resource1);
+  MemoryCache::Get()->Add(resource1);
 
   auto* resource2 = MakeGarbageCollected<FakeResource>("http://test/resource",
                                                        ResourceType::kRaw);
   resource2->SetCacheIdentifier("foo");
-  GetMemoryCache()->Add(resource2);
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource1));
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource2));
+  MemoryCache::Get()->Add(resource2);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource1));
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource2));
 
   const KURL url = KURL("http://test/resource");
-  EXPECT_EQ(resource1, GetMemoryCache()->ResourceForURL(url));
-  EXPECT_EQ(resource1, GetMemoryCache()->ResourceForURL(
-                           url, GetMemoryCache()->DefaultCacheIdentifier()));
-  EXPECT_EQ(resource2, GetMemoryCache()->ResourceForURL(url, "foo"));
-  EXPECT_EQ(nullptr, GetMemoryCache()->ResourceForURL(NullURL()));
+  EXPECT_EQ(resource1, MemoryCache::Get()->ResourceForURLForTesting(url));
+  EXPECT_EQ(resource1, MemoryCache::Get()->ResourceForURL(
+                           url, MemoryCache::Get()->DefaultCacheIdentifier()));
+  EXPECT_EQ(resource2, MemoryCache::Get()->ResourceForURL(url, "foo"));
+  EXPECT_EQ(nullptr, MemoryCache::Get()->ResourceForURLForTesting(NullUrl()));
 
   auto* resource3 = MakeGarbageCollected<FakeResource>("http://test/resource",
                                                        ResourceType::kRaw);
   resource3->SetCacheIdentifier("foo");
-  GetMemoryCache()->Remove(resource2);
-  GetMemoryCache()->Add(resource3);
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource1));
-  EXPECT_FALSE(GetMemoryCache()->Contains(resource2));
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource3));
+  MemoryCache::Get()->Remove(resource2);
+  MemoryCache::Get()->Add(resource3);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource1));
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource2));
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource3));
 
   HeapVector<Member<Resource>> resources =
-      GetMemoryCache()->ResourcesForURL(url);
+      MemoryCache::Get()->ResourcesForURL(url);
   EXPECT_EQ(2u, resources.size());
 
-  GetMemoryCache()->EvictResources();
-  EXPECT_FALSE(GetMemoryCache()->Contains(resource1));
-  EXPECT_FALSE(GetMemoryCache()->Contains(resource3));
+  MemoryCache::Get()->EvictResources();
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource1));
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource3));
 }
 
 TEST_F(MemoryCacheTest, FragmentIdentifier) {
   const KURL url1 = KURL("http://test/resource#foo");
   auto* resource = MakeGarbageCollected<FakeResource>(url1, ResourceType::kRaw);
-  GetMemoryCache()->Add(resource);
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource));
+  MemoryCache::Get()->Add(resource);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource));
 
-  EXPECT_EQ(resource, GetMemoryCache()->ResourceForURL(url1));
+  EXPECT_EQ(resource, MemoryCache::Get()->ResourceForURLForTesting(url1));
 
   const KURL url2 = MemoryCache::RemoveFragmentIdentifierIfNeeded(url1);
-  EXPECT_EQ(resource, GetMemoryCache()->ResourceForURL(url2));
+  EXPECT_EQ(resource, MemoryCache::Get()->ResourceForURLForTesting(url2));
 }
 
 TEST_F(MemoryCacheTest, RemoveURLFromCache) {
   const KURL url1 = KURL("http://test/resource1");
   Persistent<FakeResource> resource1 =
       MakeGarbageCollected<FakeResource>(url1, ResourceType::kRaw);
-  GetMemoryCache()->Add(resource1);
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource1));
+  MemoryCache::Get()->Add(resource1);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource1));
 
-  GetMemoryCache()->RemoveURLFromCache(url1);
-  EXPECT_FALSE(GetMemoryCache()->Contains(resource1));
+  MemoryCache::Get()->RemoveURLFromCache(url1);
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource1));
 
   const KURL url2 = KURL("http://test/resource2#foo");
   auto* resource2 =
       MakeGarbageCollected<FakeResource>(url2, ResourceType::kRaw);
-  GetMemoryCache()->Add(resource2);
-  EXPECT_TRUE(GetMemoryCache()->Contains(resource2));
+  MemoryCache::Get()->Add(resource2);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource2));
 
-  GetMemoryCache()->RemoveURLFromCache(url2);
-  EXPECT_FALSE(GetMemoryCache()->Contains(resource2));
+  MemoryCache::Get()->RemoveURLFromCache(url2);
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource2));
+}
+
+class MemoryCacheStrongReferenceTest : public MemoryCacheTest {
+ public:
+  void SetUp() override {
+    std::vector<base::test::FeatureRef> enable_features = {
+      features::kMemoryCacheStrongReference
+    };
+    scoped_feature_list_.InitWithFeatures(enable_features, {});
+    MemoryCacheTest::SetUp();
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+TEST_F(MemoryCacheStrongReferenceTest, ResourceTimeout) {
+  const KURL url = KURL("http://test/resource1");
+  Member<FakeResource> resource =
+      MakeGarbageCollected<FakeResource>(url, ResourceType::kRaw);
+
+  ASSERT_EQ(MemoryCache::Get()->strong_references_.size(), 0u);
+  MemoryCache::Get()->strong_references_prune_duration_ = base::Milliseconds(1);
+  MemoryCache::Get()->SaveStrongReference(resource);
+  ASSERT_EQ(MemoryCache::Get()->strong_references_.size(), 1u);
+
+  (*MemoryCache::Get()->strong_references_.begin())
+      ->memory_cache_last_accessed_ = base::TimeTicks();
+  task_environment_.FastForwardBy(base::Minutes(5) + base::Seconds(1));
+  ASSERT_EQ(MemoryCache::Get()->strong_references_.size(), 0u);
+}
+
+TEST_F(MemoryCacheStrongReferenceTest, LRU) {
+  const KURL url1 = KURL("http://test/resource1");
+  const KURL url2 = KURL("http://test/resource1");
+  Member<FakeResource> resource1 =
+      MakeGarbageCollected<FakeResource>(url1, ResourceType::kRaw);
+  Member<FakeResource> resource2 =
+      MakeGarbageCollected<FakeResource>(url2, ResourceType::kRaw);
+  MemoryCache::Get()->SaveStrongReference(resource1);
+  MemoryCache::Get()->SaveStrongReference(resource2);
+  MemoryCache::Get()->SaveStrongReference(resource1);
+  ASSERT_EQ(MemoryCache::Get()->strong_references_.size(), 2u);
+  ASSERT_EQ(*MemoryCache::Get()->strong_references_.begin(), resource2.Get());
+}
+
+TEST_F(MemoryCacheStrongReferenceTest, ClearStrongReferences) {
+  const KURL kURL("http://test/resource1");
+  Member<FakeResource> resource =
+      MakeGarbageCollected<FakeResource>(kURL, ResourceType::kRaw);
+  MemoryCache::Get()->SaveStrongReference(resource);
+  EXPECT_EQ(MemoryCache::Get()->strong_references_.size(), 1u);
+  MemoryCache::Get()->ClearStrongReferences();
+  EXPECT_EQ(MemoryCache::Get()->strong_references_.size(), 0u);
+}
+
+TEST_F(MemoryCacheStrongReferenceTest, ChangeMemoryCacheSize) {
+  // Memory cache has a non-null max size, but is empty.
+  EXPECT_NE(MemoryCache::Get()->strong_references_max_size_, 0u);
+  EXPECT_EQ(MemoryCache::Get()->strong_references_.size(), 0u);
+
+  // Add a resource.
+  const KURL kURL("http://test/resource1");
+  Member<FakeResource> resource =
+      MakeGarbageCollected<FakeResource>(kURL, ResourceType::kRaw);
+  MemoryCache::Get()->SaveStrongReference(resource);
+
+  EXPECT_NE(MemoryCache::Get()->strong_references_max_size_, 0u);
+  EXPECT_EQ(MemoryCache::Get()->strong_references_.size(), 1u);
+
+  // Change the memory limit. This will reduce the max size to zero, but not
+  // clear anything yet.
+  test_memory_consumer_registry_.NotifyUpdateMemoryLimitAsync(
+      0, task_environment_.QuitClosure());
+  task_environment_.RunUntilQuit();
+  EXPECT_EQ(MemoryCache::Get()->strong_references_max_size_, 0u);
+  EXPECT_EQ(MemoryCache::Get()->strong_references_.size(), 1u);
+
+  // ReleaseMemory notification. This actually calls PruneStrongReferences();
+  test_memory_consumer_registry_.NotifyReleaseMemoryAsync(
+      task_environment_.QuitClosure());
+  task_environment_.RunUntilQuit();
+  EXPECT_EQ(MemoryCache::Get()->strong_references_max_size_, 0u);
+  EXPECT_EQ(MemoryCache::Get()->strong_references_.size(), 0u);
+}
+
+class MemoryCacheDataURIStrongReferenceTest : public MemoryCacheTest {
+ public:
+  void SetUp() override {
+    scoped_feature_list_.InitWithFeatures({features::kDataURIMemoryCache}, {});
+    MemoryCacheTest::SetUp();
+  }
+
+  void TearDown() override {
+    // Explicitly clear data URI strong references before fixture destruction.
+    // On Android, conservative GC stack scanning may keep the test's
+    // MemoryCache alive past ScopedMemoryCacheForTesting destruction, causing
+    // it to be collected after infrastructure teardown.
+    MemoryCache::Get()->EvictResources();
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+TEST_F(MemoryCacheDataURIStrongReferenceTest, DataURIStrongReference) {
+  const KURL url("data:image/svg+xml,<svg></svg>");
+  Member<FakeResource> resource =
+      MakeGarbageCollected<FakeResource>(url, ResourceType::kImage);
+
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 0u);
+  MemoryCache::Get()->SaveDataURIStrongReference(resource);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 1u);
+  EXPECT_TRUE(
+      MemoryCache::Get()->data_uri_strong_references_.Contains(resource.Get()));
+}
+
+TEST_F(MemoryCacheDataURIStrongReferenceTest, DataURILRU) {
+  const KURL url1("data:image/svg+xml,<svg><text>1</text></svg>");
+  const KURL url2("data:image/svg+xml,<svg><text>2</text></svg>");
+  Member<FakeResource> resource1 =
+      MakeGarbageCollected<FakeResource>(url1, ResourceType::kImage);
+  Member<FakeResource> resource2 =
+      MakeGarbageCollected<FakeResource>(url2, ResourceType::kImage);
+
+  MemoryCache::Get()->SaveDataURIStrongReference(resource1);
+  MemoryCache::Get()->SaveDataURIStrongReference(resource2);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 2u);
+  // resource1 is at front (oldest).
+  EXPECT_EQ(*MemoryCache::Get()->data_uri_strong_references_.begin(),
+            resource1.Get());
+
+  // Touching resource1 moves it to the back.
+  MemoryCache::Get()->SaveDataURIStrongReference(resource1);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 2u);
+  EXPECT_EQ(*MemoryCache::Get()->data_uri_strong_references_.begin(),
+            resource2.Get());
+}
+
+TEST_F(MemoryCacheDataURIStrongReferenceTest, DataURIClearStrongReferences) {
+  const KURL url("data:image/svg+xml,<svg></svg>");
+  Member<FakeResource> resource =
+      MakeGarbageCollected<FakeResource>(url, ResourceType::kImage);
+
+  MemoryCache::Get()->SaveDataURIStrongReference(resource);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 1u);
+
+  // ClearStrongReferences does NOT clear data URI refs (they should survive
+  // memory pressure).
+  MemoryCache::Get()->ClearStrongReferences();
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 1u);
+
+  // ClearDataURIStrongReferences clears them explicitly.
+  MemoryCache::Get()->ClearDataURIStrongReferences();
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 0u);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_total_bytes_, 0u);
+}
+
+TEST_F(MemoryCacheDataURIStrongReferenceTest,
+       DataURIRemovedFromStrongRefsOnRemove) {
+  const KURL url("data:image/svg+xml,<svg></svg>");
+  Member<FakeResource> resource =
+      MakeGarbageCollected<FakeResource>(url, ResourceType::kImage);
+
+  MemoryCache::Get()->Add(resource);
+  MemoryCache::Get()->SaveDataURIStrongReference(resource);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 1u);
+  EXPECT_TRUE(MemoryCache::Get()->Contains(resource));
+
+  MemoryCache::Get()->Remove(resource);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 0u);
+  EXPECT_FALSE(MemoryCache::Get()->Contains(resource));
+}
+
+class MemoryCacheDataURIEvictionTest : public MemoryCacheTest {
+ public:
+  void SetUp() override {
+    // Probe the size of a single FakeResource so we can set a threshold that
+    // holds exactly 2. Resource overhead varies across platforms.
+    FakeResource* probe = MakeGarbageCollected<FakeResource>(
+        KURL("data:image/svg+xml,<svg><text>0</text></svg>"),
+        ResourceType::kImage);
+    // Threshold = 2.5× a single resource: holds 2, but not 3.
+    threshold_bytes_ = probe->size() * 5 / 2;
+
+    scoped_feature_list_.InitWithFeaturesAndParameters(
+        {{features::kDataURIMemoryCache,
+          {{"data_uri_memory_cache_total_size_threshold",
+            base::NumberToString(threshold_bytes_)}}}},
+        {});
+    MemoryCacheTest::SetUp();
+  }
+
+  void TearDown() override { MemoryCache::Get()->EvictResources(); }
+
+  size_t threshold_bytes_ = 0;
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+TEST_F(MemoryCacheDataURIEvictionTest, EvictsOldestWhenOverCapacity) {
+  const KURL url1("data:image/svg+xml,<svg><text>1</text></svg>");
+  const KURL url2("data:image/svg+xml,<svg><text>2</text></svg>");
+  const KURL url3("data:image/svg+xml,<svg><text>3</text></svg>");
+  Member<FakeResource> resource1 =
+      MakeGarbageCollected<FakeResource>(url1, ResourceType::kImage);
+  Member<FakeResource> resource2 =
+      MakeGarbageCollected<FakeResource>(url2, ResourceType::kImage);
+  Member<FakeResource> resource3 =
+      MakeGarbageCollected<FakeResource>(url3, ResourceType::kImage);
+
+  // Verify that 2 resources fit within the threshold but 3 do not.
+  const size_t single_size = resource1->size();
+  ASSERT_GT(single_size, 0u);
+  ASSERT_LE(single_size * 2, threshold_bytes_)
+      << "Threshold too small to hold 2 resources";
+  ASSERT_GT(single_size * 3, threshold_bytes_)
+      << "Threshold too large: 3 resources should exceed it";
+
+  MemoryCache::Get()->SaveDataURIStrongReference(resource1);
+  MemoryCache::Get()->SaveDataURIStrongReference(resource2);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 2u);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_total_bytes_,
+            single_size * 2);
+
+  // Adding a third should evict the oldest (resource1) to stay within budget.
+  MemoryCache::Get()->SaveDataURIStrongReference(resource3);
+  EXPECT_FALSE(
+      MemoryCache::Get()->data_uri_strong_references_.Contains(resource1));
+  EXPECT_TRUE(
+      MemoryCache::Get()->data_uri_strong_references_.Contains(resource2));
+  EXPECT_TRUE(
+      MemoryCache::Get()->data_uri_strong_references_.Contains(resource3));
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_.size(), 2u);
+  EXPECT_EQ(MemoryCache::Get()->data_uri_strong_references_total_bytes_,
+            single_size * 2);
+}
+
+TEST_F(MemoryCacheDataURIEvictionTest, LRUTouchPreventsEviction) {
+  const KURL url1("data:image/svg+xml,<svg><text>1</text></svg>");
+  const KURL url2("data:image/svg+xml,<svg><text>2</text></svg>");
+  const KURL url3("data:image/svg+xml,<svg><text>3</text></svg>");
+  Member<FakeResource> resource1 =
+      MakeGarbageCollected<FakeResource>(url1, ResourceType::kImage);
+  Member<FakeResource> resource2 =
+      MakeGarbageCollected<FakeResource>(url2, ResourceType::kImage);
+  Member<FakeResource> resource3 =
+      MakeGarbageCollected<FakeResource>(url3, ResourceType::kImage);
+
+  MemoryCache::Get()->SaveDataURIStrongReference(resource1);
+  MemoryCache::Get()->SaveDataURIStrongReference(resource2);
+
+  // Touch resource1 to move it to the back (most recently used).
+  MemoryCache::Get()->SaveDataURIStrongReference(resource1);
+
+  // Adding resource3 should evict resource2 (now the oldest), not resource1.
+  MemoryCache::Get()->SaveDataURIStrongReference(resource3);
+  EXPECT_TRUE(
+      MemoryCache::Get()->data_uri_strong_references_.Contains(resource1));
+  EXPECT_FALSE(
+      MemoryCache::Get()->data_uri_strong_references_.Contains(resource2));
+  EXPECT_TRUE(
+      MemoryCache::Get()->data_uri_strong_references_.Contains(resource3));
 }
 
 }  // namespace blink

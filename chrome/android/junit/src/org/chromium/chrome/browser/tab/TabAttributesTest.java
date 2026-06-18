@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,29 +6,29 @@ package org.chromium.chrome.browser.tab;
 
 import static org.mockito.Mockito.when;
 
-import android.support.test.filters.SmallTest;
+import androidx.test.filters.SmallTest;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
 import org.chromium.base.UserDataHost;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
-/**
- * Tests for {@link TabAttributes}.
- */
+/** Tests for {@link TabAttributes}. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class TabAttributesTest {
     private static final String ATTR1 = "attr1";
 
-    @Mock
-    private Tab mTab;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private Tab mTab;
 
     private final UserDataHost mUserDataHost = new UserDataHost();
 
@@ -37,7 +37,6 @@ public class TabAttributesTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         when(mTab.getUserDataHost()).thenReturn(mUserDataHost);
     }
 
@@ -48,7 +47,7 @@ public class TabAttributesTest {
         Assert.assertNull(TabAttributes.from(mTab).get(ATTR1));
 
         // |get| with a default value returns the given default.
-        Assert.assertFalse(TabAttributes.from(mTab).get(ATTR1, Boolean.FALSE));
+        Assert.assertFalse(TabAttributes.from(mTab).get(ATTR1, false));
 
         // |get| returns the stored attribute.
         TabAttributes.from(mTab).set(ATTR1, true);

@@ -1,25 +1,26 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "ios/web/webui/mojo_facade.h"
 
-#include <memory>
+#import <memory>
 
-#include "base/bind.h"
-#include "base/run_loop.h"
-#include "base/strings/string_number_conversions.h"
-#include "base/strings/sys_string_conversions.h"
+#import "base/functional/bind.h"
+#import "base/memory/raw_ptr.h"
+#import "base/run_loop.h"
+#import "base/strings/string_number_conversions.h"
+#import "base/strings/stringprintf.h"
+#import "base/strings/sys_string_conversions.h"
+#import "base/strings/utf_string_conversions.h"
 #import "base/test/ios/wait_util.h"
-#import "ios/web/public/test/fakes/test_web_state.h"
-#include "ios/web/public/test/web_test.h"
-#include "ios/web/test/mojo_test.mojom.h"
-#include "ios/web/web_state/web_state_impl.h"
+#import "ios/web/public/test/fakes/fake_web_frame.h"
+#import "ios/web/public/test/fakes/fake_web_frames_manager.h"
+#import "ios/web/public/test/fakes/fake_web_state.h"
+#import "ios/web/public/test/web_test.h"
+#import "ios/web/test/mojo_test.test-mojom.h"
+#import "ios/web/web_state/web_state_impl.h"
 #import "testing/gtest_mac.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 using base::test::ios::kWaitForJSCompletionTimeout;
 using base::test::ios::WaitUntilConditionOrTimeout;
@@ -28,17 +29,18 @@ namespace web {
 
 namespace {
 
-// Serializes the given |object| to JSON string.
+// Serializes the given `object` to JSON string.
 std::string GetJson(id object) {
-  NSData* json_as_data =
-      [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
+  NSData* json_as_data = [NSJSONSerialization dataWithJSONObject:object
+                                                         options:0
+                                                           error:nil];
   NSString* json_as_string =
       [[NSString alloc] initWithData:json_as_data
                             encoding:NSUTF8StringEncoding];
   return base::SysNSStringToUTF8(json_as_string);
 }
 
-// Deserializes the given |json| to an object.
+// Deserializes the given `json` to an object.
 id GetObject(const std::string& json) {
   NSData* json_as_data =
       [base::SysUTF8ToNSString(json) dataUsingEncoding:NSUTF8StringEncoding];
@@ -47,33 +49,13 @@ id GetObject(const std::string& json) {
                                            error:nil];
 }
 
-class FakeWebState : public TestWebState {
+class FakeWebStateWithInterfaceBinder : public FakeWebState {
  public:
-  void SetWatchId(int watch_id) { watch_id_ = watch_id; }
-
-  void SetFacade(MojoFacade* facade) { facade_ = facade; }
-
-  void ExecuteJavaScript(const base::string16& javascript) override {
-    TestWebState::ExecuteJavaScript(javascript);
-    // Cancel the watch immediately to ensure there are no additional
-    // notifications.
-    // NOTE: This must be done as a side effect of executing the JavaScript.
-    NSDictionary* cancel_watch = @{
-      @"name" : @"MojoWatcher.cancel",
-      @"args" : @{
-        @"watchId" : @(watch_id_),
-      },
-    };
-    EXPECT_TRUE(facade_->HandleMojoMessage(GetJson(cancel_watch)).empty());
-  }
-
   InterfaceBinder* GetInterfaceBinderForMainFrame() override {
     return &interface_binder_;
   }
 
  private:
-  int watch_id_;
-  MojoFacade* facade_;  // weak
   InterfaceBinder interface_binder_{this};
 };
 
@@ -84,11 +66,20 @@ class MojoFacadeTest : public WebTest {
  protected:
   MojoFacadeTest() {
     facade_ = std::make_unique<MojoFacade>(&web_state_);
-    web_state_.SetFacade(facade_.get());
+
+    auto web_frames_manager = std::make_unique<web::FakeWebFramesManager>();
+    frames_manager_ = web_frames_manager.get();
+    web_state_.SetWebFramesManager(std::move(web_frames_manager));
+
+    auto main_frame = FakeWebFrame::Create("frameID", /*is_main_frame=*/true);
+
+    main_frame_ = main_frame.get();
+    frames_manager_->AddWebFrame(std::move(main_frame));
   }
 
-  FakeWebState* web_state() { return &web_state_; }
+  FakeWebFrame* main_frame() { return main_frame_; }
   MojoFacade* facade() { return facade_.get(); }
+  FakeWebStateWithInterfaceBinder& web_state() { return web_state_; }
 
   void CreateMessagePipe(uint32_t* handle0, uint32_t* handle1) {
     NSDictionary* create = @{
@@ -118,8 +109,81 @@ class MojoFacadeTest : public WebTest {
     EXPECT_TRUE(result.empty());
   }
 
+  NSDictionary* ReadMessage(uint32_t handle) {
+    // Read the message from the pipe.
+    NSDictionary* read = @{
+      @"name" : @"MojoHandle.readMessage",
+      @"args" : @{
+        @"handle" : @(handle),
+      },
+    };
+    NSDictionary* message =
+        GetObject(facade()->HandleMojoMessage(GetJson(read)));
+    EXPECT_TRUE([message isKindOfClass:[NSDictionary class]]);
+    return message;
+  }
+
+  int WatchHandle(uint32_t handle, int callback_id) {
+    NSDictionary* watch = @{
+      @"name" : @"MojoHandle.watch",
+      @"args" : @{
+        @"handle" : @(handle),
+        @"signals" : @(MOJO_HANDLE_SIGNAL_READABLE),
+        @"callbackId" : @(callback_id),
+      },
+    };
+    const std::string watch_id_as_string =
+        facade()->HandleMojoMessage(GetJson(watch));
+    EXPECT_FALSE(watch_id_as_string.empty());
+    int watch_id = 0;
+    EXPECT_TRUE(base::StringToInt(watch_id_as_string, &watch_id));
+    return watch_id;
+  }
+
+  void CancelWatch(uint32_t handle, int watch_id) {
+    NSDictionary* cancel_watch = @{
+      @"name" : @"MojoWatcher.cancel",
+      @"args" : @{
+        @"watchId" : @(watch_id),
+      },
+    };
+    EXPECT_TRUE(facade_->HandleMojoMessage(GetJson(cancel_watch)).empty());
+  }
+
+  void WriteMessage(uint32_t handle, NSString* buffer) {
+    NSDictionary* write = @{
+      @"name" : @"MojoHandle.writeMessage",
+      @"args" : @{@"handle" : @(handle), @"handles" : @[], @"buffer" : buffer},
+    };
+    const std::string result_as_string =
+        facade()->HandleMojoMessage(GetJson(write));
+    EXPECT_FALSE(result_as_string.empty());
+    unsigned result = 0u;
+    EXPECT_TRUE(base::StringToUint(result_as_string, &result));
+    EXPECT_EQ(MOJO_RESULT_OK, result);
+  }
+
+  std::string WaitForLastJavaScriptCall() {
+    EXPECT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
+      // Flush any pending tasks. Don't RunUntilIdle() because
+      // RunUntilIdle() is incompatible with mojo::SimpleWatcher's
+      // automatic arming behavior, which Mojo JS still depends upon.
+      base::RunLoop loop;
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, loop.QuitClosure());
+      loop.Run();
+      return !main_frame()->GetLastJavaScriptCall().empty();
+    }));
+
+    const auto last_js_call = main_frame()->GetLastJavaScriptCall();
+    main_frame()->ClearJavaScriptCallHistory();
+    return base::UTF16ToUTF8(last_js_call);
+  }
+
  private:
-  FakeWebState web_state_;
+  FakeWebStateWithInterfaceBinder web_state_;
+  raw_ptr<web::FakeWebFramesManager> frames_manager_;
+  raw_ptr<FakeWebFrame> main_frame_;
   std::unique_ptr<MojoFacade> facade_;
 };
 
@@ -159,46 +223,88 @@ TEST_F(MojoFacadeTest, Watch) {
   CreateMessagePipe(&handle0, &handle1);
 
   // Start watching one end of the pipe.
-  int callback_id = 99;
-  NSDictionary* watch = @{
-    @"name" : @"MojoHandle.watch",
-    @"args" : @{
-      @"handle" : @(handle0),
-      @"signals" : @(MOJO_HANDLE_SIGNAL_READABLE),
-      @"callbackId" : @(callback_id),
-    },
-  };
-  std::string watch_id_as_string = facade()->HandleMojoMessage(GetJson(watch));
-  EXPECT_FALSE(watch_id_as_string.empty());
-  int watch_id = 0;
-  EXPECT_TRUE(base::StringToInt(watch_id_as_string, &watch_id));
-
-  web_state()->SetWatchId(watch_id);
+  const int kCallbackId = 99;
+  WatchHandle(handle0, kCallbackId);
 
   // Write to the other end of the pipe.
-  NSDictionary* write = @{
-    @"name" : @"MojoHandle.writeMessage",
-    @"args" :
-        @{@"handle" : @(handle1), @"handles" : @[], @"buffer" : @{@"0" : @0}},
-  };
-  std::string result_as_string = facade()->HandleMojoMessage(GetJson(write));
-  EXPECT_FALSE(result_as_string.empty());
-  int result = 0;
-  EXPECT_TRUE(base::StringToInt(result_as_string, &result));
-  EXPECT_EQ(MOJO_RESULT_OK, static_cast<MojoResult>(result));
+  WriteMessage(handle1, @"QUJDRA==");  // "ABCD" in base-64
 
-  EXPECT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
-    base::RunLoop().RunUntilIdle();
-    return !web_state()->GetLastExecutedJavascript().empty();
-  }));
+  const auto expected_script = base::StringPrintf(
+      "Mojo.internal.watchCallbacksHolder.callCallback(%d, %d)", kCallbackId,
+      MOJO_RESULT_OK);
+  EXPECT_EQ(expected_script, WaitForLastJavaScriptCall());
 
-  NSString* expected_script =
-      [NSString stringWithFormat:
-                    @"Mojo.internal.watchCallbacksHolder.callCallback(%d, %d)",
-                    callback_id, MOJO_RESULT_OK];
+  CloseHandle(handle0);
+  CloseHandle(handle1);
+}
 
-  EXPECT_EQ(base::SysNSStringToUTF16(expected_script),
-            web_state()->GetLastExecutedJavascript());
+TEST_F(MojoFacadeTest, WatcherRearming) {
+  uint32_t handle0, handle1;
+  CreateMessagePipe(&handle0, &handle1);
+
+  // Start watching one end of the pipe.
+  const int kCallbackId = 99;
+  WatchHandle(handle0, kCallbackId);
+  const auto expected_script = base::StringPrintf(
+      "Mojo.internal.watchCallbacksHolder.callCallback(%d, %d)", kCallbackId,
+      MOJO_RESULT_OK);
+
+  // Write to the other end of the pipe.
+  WriteMessage(handle1, @"QUJDRA==");  // "ABCD" in base-64
+
+  EXPECT_EQ(expected_script, WaitForLastJavaScriptCall());
+
+  // Read the pipe until MOJO_RESULT_SHOULD_WAIT is returned
+  // (the usual watcher behavior).
+  EXPECT_EQ([ReadMessage(handle0)[@"result"] unsignedIntValue], MOJO_RESULT_OK);
+  EXPECT_EQ([ReadMessage(handle0)[@"result"] unsignedIntValue],
+            MOJO_RESULT_SHOULD_WAIT);
+
+  // Write to the other end of the pipe.
+  WriteMessage(handle1, @"QUJDRA==");  // "ABCD" in base-64
+
+  // Check the watcher was reamed and works.
+  EXPECT_EQ(expected_script, WaitForLastJavaScriptCall());
+
+  CloseHandle(handle0);
+  CloseHandle(handle1);
+}
+
+TEST_F(MojoFacadeTest, CancelWatch) {
+  uint32_t handle0, handle1;
+  CreateMessagePipe(&handle0, &handle1);
+
+  // Make 2 watchers on one end of the pipe.
+  const int kCallbackId1 = 99;
+  const int kCallbackId2 = 101;
+  WatchHandle(handle0, kCallbackId1);
+  const int watch_id2 = WatchHandle(handle0, kCallbackId2);
+  const auto expected_script1 = base::StringPrintf(
+      "Mojo.internal.watchCallbacksHolder.callCallback(%d, %d)", kCallbackId1,
+      MOJO_RESULT_OK);
+  const auto expected_script2 = base::StringPrintf(
+      "Mojo.internal.watchCallbacksHolder.callCallback(%d, %d)", kCallbackId2,
+      MOJO_RESULT_OK);
+
+  // Write to the other end of the pipe.
+  WriteMessage(handle1, @"QUJDRA==");  // "ABCD" in base-64
+
+  // `expected_script1` is also called, but GetLastJavaScriptCall() will store
+  // only the last one.
+  EXPECT_EQ(expected_script2, WaitForLastJavaScriptCall());
+
+  // Read the pipe until MOJO_RESULT_SHOULD_WAIT is returned
+  // (the usual watcher behavior).
+  EXPECT_EQ([ReadMessage(handle0)[@"result"] unsignedIntValue], MOJO_RESULT_OK);
+  EXPECT_EQ([ReadMessage(handle0)[@"result"] unsignedIntValue],
+            MOJO_RESULT_SHOULD_WAIT);
+
+  // Cancel the second watcher and write again.
+  CancelWatch(handle0, watch_id2);
+  WriteMessage(handle1, @"QUJDRA==");  // "ABCD" in base-64
+
+  // Only the second watcher should be notified.
+  EXPECT_EQ(expected_script1, WaitForLastJavaScriptCall());
 
   CloseHandle(handle0);
   CloseHandle(handle1);
@@ -210,37 +316,35 @@ TEST_F(MojoFacadeTest, ReadWrite) {
   CreateMessagePipe(&handle0, &handle1);
 
   // Write to the other end of the pipe.
-  NSDictionary* write = @{
-    @"name" : @"MojoHandle.writeMessage",
-    @"args" : @{
-      @"handle" : @(handle1),
-      @"handles" : @[],
-      @"buffer" : @{@"0" : @9, @"1" : @2, @"2" : @2008}
-    },
-  };
-  std::string result_as_string = facade()->HandleMojoMessage(GetJson(write));
-  EXPECT_FALSE(result_as_string.empty());
-  int result = 0;
-  EXPECT_TRUE(base::StringToInt(result_as_string, &result));
-  EXPECT_EQ(MOJO_RESULT_OK, static_cast<MojoResult>(result));
+  WriteMessage(handle1, @"QUJDRA==");  // "ABCD" in base-64
 
   // Read the message from the pipe.
-  NSDictionary* read = @{
-    @"name" : @"MojoHandle.readMessage",
-    @"args" : @{
-      @"handle" : @(handle0),
-    },
-  };
-  NSDictionary* message = GetObject(facade()->HandleMojoMessage(GetJson(read)));
-  EXPECT_TRUE([message isKindOfClass:[NSDictionary class]]);
-  EXPECT_TRUE(message);
-  NSArray* expected_message = @[ @9, @2, @216 ];  // 2008 does not fit 8-bit.
+  NSDictionary* message = ReadMessage(handle0);
+  NSArray* expected_message =
+      @[ @65, @66, @67, @68 ];  // ASCII values for A, B, C, D
   EXPECT_NSEQ(expected_message, message[@"buffer"]);
   EXPECT_FALSE([message[@"handles"] count]);
   EXPECT_EQ(MOJO_RESULT_OK, [message[@"result"] unsignedIntValue]);
 
   CloseHandle(handle0);
   CloseHandle(handle1);
+}
+
+// Tests that HasRegisteredInterfaces() correctly reflects registered
+// interfaces.
+TEST_F(MojoFacadeTest, HasRegisteredInterfaces) {
+  WebState::InterfaceBinder* binder =
+      web_state().GetInterfaceBinderForMainFrame();
+  EXPECT_FALSE(binder->HasRegisteredInterfaces());
+
+  binder->AddInterface("FakeInterface",
+                       base::BindRepeating([](mojo::GenericPendingReceiver*) {
+                         // Do nothing.
+                       }));
+  EXPECT_TRUE(binder->HasRegisteredInterfaces());
+
+  binder->RemoveInterface("FakeInterface");
+  EXPECT_FALSE(binder->HasRegisteredInterfaces());
 }
 
 }  // namespace web

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,10 @@
 
 #include <stddef.h>
 
-#include "base/bind.h"
 #include "base/files/file_path.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/single_thread_task_runner.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/sync_file_system/file_change.h"
 #include "chrome/browser/sync_file_system/sync_file_metadata.h"
 #include "chrome/browser/sync_file_system/syncable_file_system_util.h"
@@ -20,15 +19,13 @@
 
 namespace sync_file_system {
 
-FakeRemoteChangeProcessor::FakeRemoteChangeProcessor() {
-}
+FakeRemoteChangeProcessor::FakeRemoteChangeProcessor() = default;
 
-FakeRemoteChangeProcessor::~FakeRemoteChangeProcessor() {
-}
+FakeRemoteChangeProcessor::~FakeRemoteChangeProcessor() = default;
 
 void FakeRemoteChangeProcessor::PrepareForProcessRemoteChange(
     const storage::FileSystemURL& url,
-    const PrepareChangeCallback& callback) {
+    PrepareChangeCallback callback) {
   SyncFileMetadata local_metadata;
 
   if (storage::VirtualPath::IsRootPath(url.path())) {
@@ -59,16 +56,16 @@ void FakeRemoteChangeProcessor::PrepareForProcessRemoteChange(
   if (found_list != local_changes_.end())
     change_list = found_list->second;
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE,
-      base::BindOnce(callback, SYNC_STATUS_OK, local_metadata, change_list));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(callback), SYNC_STATUS_OK,
+                                local_metadata, change_list));
 }
 
 void FakeRemoteChangeProcessor::ApplyRemoteChange(
     const FileChange& change,
     const base::FilePath& local_path,
     const storage::FileSystemURL& url,
-    const SyncStatusCallback& callback) {
+    SyncStatusCallback callback) {
   SyncStatusCode status = SYNC_STATUS_UNKNOWN;
   base::FilePath ancestor = storage::VirtualPath::DirName(url.path());
   while (true) {
@@ -96,24 +93,25 @@ void FakeRemoteChangeProcessor::ApplyRemoteChange(
     applied_changes_[url].push_back(change);
     status = SYNC_STATUS_OK;
   }
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE, base::BindOnce(callback, status));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(callback), status));
 }
 
 void FakeRemoteChangeProcessor::FinalizeRemoteSync(
     const storage::FileSystemURL& url,
     bool clear_local_changes,
-    const base::Closure& completion_callback) {
-  base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, completion_callback);
+    base::OnceClosure completion_callback) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, std::move(completion_callback));
 }
 
 void FakeRemoteChangeProcessor::RecordFakeLocalChange(
     const storage::FileSystemURL& url,
     const FileChange& change,
-    const SyncStatusCallback& callback) {
+    SyncStatusCallback callback) {
   local_changes_[url].Update(change);
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE, base::BindOnce(callback, SYNC_STATUS_OK));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(callback), SYNC_STATUS_OK));
 }
 
 void FakeRemoteChangeProcessor::UpdateLocalFileMetadata(

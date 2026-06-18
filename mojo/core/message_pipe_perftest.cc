@@ -1,17 +1,19 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "mojo/public/cpp/system/message_pipe.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/check_op.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/stringprintf.h"
 #include "base/test/perf_time_logger.h"
 #include "base/threading/thread.h"
@@ -19,9 +21,7 @@
 #include "mojo/core/handle_signals_state.h"
 #include "mojo/core/test/mojo_test_base.h"
 #include "mojo/core/test/test_utils.h"
-#include "mojo/core/test_utils.h"
 #include "mojo/public/c/system/functions.h"
-#include "mojo/public/cpp/system/message_pipe.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace mojo {
@@ -31,6 +31,9 @@ namespace {
 class MessagePipePerfTest : public test::MojoTestBase {
  public:
   MessagePipePerfTest() : message_count_(0), message_size_(0) {}
+
+  MessagePipePerfTest(const MessagePipePerfTest&) = delete;
+  MessagePipePerfTest& operator=(const MessagePipePerfTest&) = delete;
 
   void SetUpMeasurement(int message_count, size_t message_size) {
     message_count_ = message_count;
@@ -69,8 +72,9 @@ class MessagePipePerfTest : public test::MojoTestBase {
                            static_cast<unsigned>(message_size_));
     base::PerfTimeLogger logger(test_name.c_str());
 
-    for (int i = 0; i < message_count_; ++i)
+    for (int i = 0; i < message_count_; ++i) {
       WriteWaitThenRead(mp);
+    }
 
     logger.Done();
   }
@@ -78,8 +82,8 @@ class MessagePipePerfTest : public test::MojoTestBase {
  protected:
   void RunPingPongServer(MojoHandle mp) {
     // This values are set to align with one at ipc_pertests.cc for comparison.
-    const size_t kMsgSize[5] = {12, 144, 1728, 20736, 248832};
-    const int kMessageCount[5] = {50000, 50000, 50000, 12000, 1000};
+    const std::array<size_t, 5> kMsgSize = {12, 144, 1728, 20736, 248832};
+    const std::array<int, 5> kMessageCount = {50000, 50000, 50000, 12000, 1000};
 
     for (size_t i = 0; i < 5; i++) {
       SetUpMeasurement(kMessageCount[i], kMsgSize[i]);
@@ -106,8 +110,9 @@ class MessagePipePerfTest : public test::MojoTestBase {
                MOJO_RESULT_OK);
 
       // Empty message indicates quit.
-      if (buffer.empty())
+      if (buffer.empty()) {
         break;
+      }
 
       CHECK_EQ(
           WriteMessageRaw(MessagePipeHandle(mp), buffer.data(), buffer.size(),
@@ -124,8 +129,6 @@ class MessagePipePerfTest : public test::MojoTestBase {
   std::string payload_;
   std::vector<uint8_t> read_buffer_;
   std::unique_ptr<base::PerfTimeLogger> perf_logger_;
-
-  DISALLOW_COPY_AND_ASSIGN(MessagePipePerfTest);
 };
 
 TEST_F(MessagePipePerfTest, PingPong) {

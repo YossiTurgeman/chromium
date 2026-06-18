@@ -1,4 +1,4 @@
-// Copyright (c) 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,7 @@ class FakeResourceListener : public webrtc::ResourceListener {
 
   // webrtc::ResourceListener implementation.
   void OnResourceUsageStateMeasured(
-      rtc::scoped_refptr<webrtc::Resource> resource,
+      webrtc::scoped_refptr<webrtc::Resource> resource,
       webrtc::ResourceUsageState usage_state) override;
 
  private:

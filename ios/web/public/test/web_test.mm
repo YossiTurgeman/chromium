@@ -1,16 +1,15 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ios/web/public/test/web_test.h"
+#import "ios/web/public/test/web_test.h"
 
-#include "base/memory/ptr_util.h"
-#include "ios/web/public/deprecated/global_web_state_observer.h"
-#import "ios/web/public/test/fakes/test_web_client.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "base/check.h"
+#import "base/memory/ptr_util.h"
+#import "ios/web/public/test/fakes/fake_browser_state.h"
+#import "ios/web/public/test/fakes/fake_web_client.h"
+#import "ios/web/public/test/js_test_util.h"
+#import "ios/web/web_state/deprecated/global_web_state_observer.h"
 
 namespace web {
 
@@ -24,23 +23,41 @@ class WebTestRenderProcessCrashObserver : public GlobalWebStateObserver {
   }
 };
 
-WebTest::WebTest(WebTaskEnvironment::Options options)
-    : WebTest(base::WrapUnique(new TestWebClient), options) {}
+WebTest::WebTest(WebTaskEnvironment::MainThreadType main_thread_type)
+    : WebTest(std::make_unique<FakeWebClient>(), main_thread_type) {}
 
 WebTest::WebTest(std::unique_ptr<web::WebClient> web_client,
-                 WebTaskEnvironment::Options options)
+                 WebTaskEnvironment::MainThreadType main_thread_type)
     : web_client_(std::move(web_client)),
-      task_environment_(options),
+      task_environment_(main_thread_type),
       crash_observer_(std::make_unique<WebTestRenderProcessCrashObserver>()) {}
 
 WebTest::~WebTest() {}
+
+void WebTest::SetUp() {
+  PlatformTest::SetUp();
+
+  DCHECK(!browser_state_);
+  browser_state_ = CreateBrowserState();
+  DCHECK(browser_state_);
+}
+
+std::unique_ptr<BrowserState> WebTest::CreateBrowserState() {
+  return std::make_unique<FakeBrowserState>();
+}
+
+void WebTest::OverrideJavaScriptFeatures(
+    std::vector<JavaScriptFeature*> features) {
+  web::test::OverrideJavaScriptFeatures(GetBrowserState(), features);
+}
 
 web::WebClient* WebTest::GetWebClient() {
   return web_client_.Get();
 }
 
 BrowserState* WebTest::GetBrowserState() {
-  return &browser_state_;
+  DCHECK(browser_state_);
+  return browser_state_.get();
 }
 
 void WebTest::SetIgnoreRenderProcessCrashesDuringTesting(bool allow) {
@@ -49,12 +66,6 @@ void WebTest::SetIgnoreRenderProcessCrashesDuringTesting(bool allow) {
   } else {
     crash_observer_ = std::make_unique<WebTestRenderProcessCrashObserver>();
   }
-}
-
-void WebTest::SetSharedURLLoaderFactory(
-    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory) {
-  browser_state_.SetSharedURLLoaderFactory(
-      std::move(shared_url_loader_factory));
 }
 
 }  // namespace web

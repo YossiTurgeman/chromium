@@ -1,12 +1,12 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/gfx/font_render_params.h"
 
-#include "base/macros.h"
-#include "base/no_destructor.h"
-#include "base/notreached.h"
+#include "base/feature_list.h"
+#include "base/notimplemented.h"
+#include "ui/base/ui_base_features.h"
 
 namespace gfx {
 
@@ -18,8 +18,8 @@ FontRenderParams LoadDefaults() {
   params.antialiasing = true;
   params.autohinter = false;
   params.use_bitmaps = true;
-  params.subpixel_rendering = FontRenderParams::SUBPIXEL_RENDERING_RGB;
   params.subpixel_positioning = true;
+  params.subpixel_rendering = FontRenderParams::SUBPIXEL_RENDERING_RGB;
   params.hinting = FontRenderParams::HINTING_MEDIUM;
 
   return params;
@@ -32,8 +32,8 @@ FontRenderParams GetFontRenderParams(const FontRenderParamsQuery& query,
   if (family_out)
     NOTIMPLEMENTED();
   // TODO: Query the OS for font render settings instead of returning defaults.
-  static const base::NoDestructor<gfx::FontRenderParams> params(LoadDefaults());
-  return *params;
+  static const gfx::FontRenderParams params(LoadDefaults());
+  return params;
 }
 
 float GetFontRenderParamsDeviceScaleFactor() {

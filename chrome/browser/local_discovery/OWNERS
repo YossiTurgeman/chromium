@@ -1,3 +1,5 @@
-file://cloud_print/OWNERS
+# For Cast.
+mfoltz@chromium.org
 
-# COMPONENT: Services>CloudPrint
+# For printing or document scanning.
+file://chromeos/printing/OWNERS

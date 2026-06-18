@@ -1,4 +1,4 @@
-mlamouri@chromium.org
+file://components/browser_ui/media/OWNERS
 
-# TEAM: media-dev@chromium.org
-# COMPONENT: Internals>Media>UI
+per-file ...*PictureInPicture*.java=file://chrome/browser/picture_in_picture/OWNERS
+per-file ...*Pip*.java=file://chrome/browser/picture_in_picture/OWNERS

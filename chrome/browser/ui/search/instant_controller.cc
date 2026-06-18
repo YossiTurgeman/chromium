@@ -1,4 +1,4 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <stddef.h>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/search/instant_service.h"
 #include "chrome/browser/search/instant_service_factory.h"
@@ -21,8 +21,14 @@
 
 class InstantController::TabObserver : public content::WebContentsObserver {
  public:
-  TabObserver(content::WebContents* web_contents, const base::Closure& callback)
-      : content::WebContentsObserver(web_contents), callback_(callback) {}
+  TabObserver(content::WebContents* web_contents,
+              base::RepeatingClosure callback)
+      : content::WebContentsObserver(web_contents),
+        callback_(std::move(callback)) {}
+
+  TabObserver(const TabObserver&) = delete;
+  TabObserver& operator=(const TabObserver&) = delete;
+
   ~TabObserver() override = default;
 
  private:
@@ -34,9 +40,7 @@ class InstantController::TabObserver : public content::WebContentsObserver {
     }
   }
 
-  base::Closure callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(TabObserver);
+  base::RepeatingClosure callback_;
 };
 
 InstantController::InstantController(Profile* profile,
@@ -51,21 +55,25 @@ void InstantController::OnTabStripModelChanged(
     TabStripModel* tab_strip_model,
     const TabStripModelChange& change,
     const TabStripSelectionChange& selection) {
-  if (tab_strip_model->empty() || !selection.active_tab_changed())
+  if (tab_strip_model->empty() || !selection.active_tab_changed()) {
     return;
+  }
 
-  if (selection.old_contents)
+  if (selection.old_contents) {
     StopWatchingTab(selection.old_contents);
+  }
 
-  if (selection.new_contents)
+  if (selection.new_contents) {
     StartWatchingTab(selection.new_contents);
+  }
 }
 
 void InstantController::StartWatchingTab(content::WebContents* web_contents) {
   if (!tab_observer_ || tab_observer_->web_contents() != web_contents) {
     tab_observer_ = std::make_unique<TabObserver>(
-        web_contents, base::Bind(&InstantController::UpdateInfoForInstantTab,
-                                 base::Unretained(this)));
+        web_contents,
+        base::BindRepeating(&InstantController::UpdateInfoForInstantTab,
+                            base::Unretained(this)));
     // If this tab is an NTP, immediately send it the required info.
     if (search::IsInstantNTP(web_contents)) {
       UpdateInfoForInstantTab();

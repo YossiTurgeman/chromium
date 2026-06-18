@@ -1,11 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_overlay_play_button_element.h"
 
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/public/platform/web_size.h"
+#include "third_party/blink/public/platform/user_metrics_action.h"
 #include "third_party/blink/public/strings/grit/blink_strings.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
@@ -13,8 +13,9 @@
 #include "third_party/blink/renderer/core/input_type_names.h"
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_elements_helper.h"
 #include "third_party/blink/renderer/modules/media_controls/media_controls_impl.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
+#include "ui/gfx/geometry/size.h"
+#include "ui/strings/grit/ax_strings.h"
 
 namespace {
 
@@ -42,7 +43,8 @@ MediaControlOverlayPlayButtonElement::MediaControlOverlayPlayButtonElement(
   SetShadowPseudoId(AtomicString("-webkit-media-controls-overlay-play-button"));
 
   internal_button_ = MediaControlElementsHelper::CreateDiv(
-      "-internal-media-controls-overlay-play-button-internal", GetShadowRoot());
+      AtomicString("-internal-media-controls-overlay-play-button-internal"),
+      GetShadowRoot());
 }
 
 void MediaControlOverlayPlayButtonElement::UpdateDisplayType() {
@@ -51,7 +53,7 @@ void MediaControlOverlayPlayButtonElement::UpdateDisplayType() {
   int state = MediaElement().paused() ? IDS_AX_MEDIA_PLAY_BUTTON
                                       : IDS_AX_MEDIA_PAUSE_BUTTON;
   setAttribute(html_names::kAriaLabelAttr,
-               WTF::AtomicString(GetLocale().QueryString(state)));
+               AtomicString(GetLocale().QueryString(state)));
 
   MediaControlInputElement::UpdateDisplayType();
 }
@@ -99,11 +101,11 @@ bool MediaControlOverlayPlayButtonElement::KeepEventInNode(
   return MediaControlElementsHelper::IsUserInteractionEvent(event);
 }
 
-WebSize MediaControlOverlayPlayButtonElement::GetSizeOrDefault() const {
+gfx::Size MediaControlOverlayPlayButtonElement::GetSizeOrDefault() const {
   // The size should come from the internal button which actually displays the
   // button.
   return MediaControlElementsHelper::GetSizeOrDefault(
-      *internal_button_, WebSize(kInnerButtonSize, kInnerButtonSize));
+      *internal_button_, gfx::Size(kInnerButtonSize, kInnerButtonSize));
 }
 
 void MediaControlOverlayPlayButtonElement::SetIsDisplayed(bool displayed) {

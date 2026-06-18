@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,8 +29,7 @@ aura::Window* GetNextWindow(aura::Window* current_window) {
       }
       const aura::Window::Windows transient_siblings =
           ::wm::GetTransientChildren(parent);
-      auto iter = std::find(transient_siblings.begin(),
-                            transient_siblings.end(), current_window);
+      auto iter = std::ranges::find(transient_siblings, current_window);
       ++iter;
       if (iter != transient_siblings.end()) {
         current_window = *iter;
@@ -86,6 +85,9 @@ bool WindowTransientDescendantIterator::operator!=(
 aura::Window* WindowTransientDescendantIterator::operator*() const {
   return current_window_;
 }
+
+WindowTransientDescendantIterator& WindowTransientDescendantIterator::operator=(
+    const WindowTransientDescendantIterator& other) = default;
 
 WindowTransientDescendantIteratorRange::WindowTransientDescendantIteratorRange(
     const WindowTransientDescendantIterator& begin)

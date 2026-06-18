@@ -30,26 +30,28 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_REVERB_INPUT_BUFFER_H_
 
 #include <atomic>
-#include "base/macros.h"
+
+#include "base/containers/span.h"
 #include "third_party/blink/renderer/platform/audio/audio_array.h"
-#include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
 namespace blink {
 
 // ReverbInputBuffer is used to buffer input samples for deferred processing by
 // the background threads.
-class PLATFORM_EXPORT ReverbInputBuffer {
+class ReverbInputBuffer final {
   DISALLOW_NEW();
 
  public:
-  ReverbInputBuffer(size_t length);
+  explicit ReverbInputBuffer(size_t length);
+  ReverbInputBuffer(const ReverbInputBuffer&) = delete;
+  ReverbInputBuffer& operator=(const ReverbInputBuffer&) = delete;
 
   // The realtime audio thread keeps writing samples here.
   // The assumption is that the buffer's length is evenly divisible by
   // numberOfFrames (for nearly all cases this will be fine).
   // FIXME: remove numberOfFrames restriction...
-  void Write(const float* source_p, size_t number_of_frames);
+  void Write(base::span<const float> source, size_t number_of_frames);
 
   // Background threads can call this to check if there's anything to read...
   size_t WriteIndex() const {
@@ -62,7 +64,8 @@ class PLATFORM_EXPORT ReverbInputBuffer {
   // The assumption is that the buffer's length is evenly divisible by
   // numberOfFrames.
   // FIXME: remove numberOfFrames restriction...
-  float* DirectReadFrom(int* read_index, size_t number_of_frames);
+  base::span<const float> DirectReadFrom(size_t* read_index,
+                                         size_t number_of_frames);
 
   void Reset();
 
@@ -77,8 +80,6 @@ class PLATFORM_EXPORT ReverbInputBuffer {
   // the getter and setter to access it atomically.  Don't access
   // directly!
   std::atomic_size_t write_index_;
-
-  DISALLOW_COPY_AND_ASSIGN(ReverbInputBuffer);
 };
 
 }  // namespace blink

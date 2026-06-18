@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,11 +29,11 @@ AmbientModeTopic::AmbientModeTopic(const AmbientModeTopic&) = default;
 AmbientModeTopic& AmbientModeTopic::operator=(const AmbientModeTopic&) =
     default;
 
-AmbientModeTopic::~AmbientModeTopic() = default;
+AmbientModeTopic::AmbientModeTopic(AmbientModeTopic&&) = default;
 
-std::string AmbientModeTopic::GetUrl() const {
-  return portrait_image_url.value_or(url);
-}
+AmbientModeTopic& AmbientModeTopic::operator=(AmbientModeTopic&&) = default;
+
+AmbientModeTopic::~AmbientModeTopic() = default;
 
 // WeatherInfo------------------------------------------------------------------
 WeatherInfo::WeatherInfo() = default;

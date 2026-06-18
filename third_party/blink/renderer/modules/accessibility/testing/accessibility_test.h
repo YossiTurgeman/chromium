@@ -1,16 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_ACCESSIBILITY_TESTING_ACCESSIBILITY_TEST_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_ACCESSIBILITY_TESTING_ACCESSIBILITY_TEST_H_
 
-#include <ostream>
-#include <sstream>
 #include <string>
 
 #include "third_party/blink/renderer/core/accessibility/ax_context.h"
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
 namespace blink {
@@ -25,6 +24,7 @@ class AccessibilityTest : public RenderingTest {
 
  public:
   AccessibilityTest(LocalFrameClient* local_frame_client = nullptr);
+  static std::string PrintAXTree(Document& document);
 
  protected:
   void SetUp() override;
@@ -42,32 +42,19 @@ class AccessibilityTest : public RenderingTest {
   // Returns the object with the accessibility focus.
   AXObject* GetAXFocusedObject() const;
 
-  AXObject* GetAXObjectByElementId(const char* id) const;
+  AXObject* GetAXObjectByElementId(const char* id,
+                                   PseudoId = kPseudoIdNone) const;
 
-  std::string PrintAXTree() const;
-
- protected:
   std::unique_ptr<AXContext> ax_context_;
 
  private:
-  std::ostringstream& PrintAXTreeHelper(std::ostringstream&,
-                                        const AXObject* root,
-                                        size_t level) const;
+  static void PrintAXTreeHelper(std::string& out,
+                                const AXObject* root,
+                                size_t level);
+
+  ScopedAccessibilityUseAXPositionForDocumentMarkersForTest use_ax_position{
+      true};
 };
-
-class ParameterizedAccessibilityTest : public testing::WithParamInterface<bool>,
-                                       private ScopedLayoutNGForTest,
-                                       public AccessibilityTest {
- public:
-  ParameterizedAccessibilityTest() : ScopedLayoutNGForTest(GetParam()) {}
-
- protected:
-  bool LayoutNGEnabled() const {
-    return RuntimeEnabledFeatures::LayoutNGEnabled();
-  }
-};
-
-INSTANTIATE_TEST_SUITE_P(All, ParameterizedAccessibilityTest, testing::Bool());
 
 }  // namespace blink
 

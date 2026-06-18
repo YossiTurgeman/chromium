@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,6 @@
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
 #include "components/zucchini/buffer_view.h"
 
 namespace zucchini {
@@ -24,6 +23,8 @@ namespace zucchini {
 class OutlierDetector {
  public:
   OutlierDetector();
+  OutlierDetector(const OutlierDetector&) = delete;
+  const OutlierDetector& operator=(const OutlierDetector&) = delete;
   ~OutlierDetector();
 
   // Incorporates |sample| into mean and standard deviation.
@@ -47,8 +48,6 @@ class OutlierDetector {
   double sum_of_squares_ = 0;
   double mean_ = 0;
   double standard_deviation_ = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(OutlierDetector);
 };
 
 // A class to compute similarity score between binary data. The heuristic here
@@ -58,6 +57,8 @@ class OutlierDetector {
 class BinaryDataHistogram {
  public:
   BinaryDataHistogram();
+  BinaryDataHistogram(const BinaryDataHistogram&) = delete;
+  const BinaryDataHistogram& operator=(const BinaryDataHistogram&) = delete;
   ~BinaryDataHistogram();
 
   // Attempts to compute the histogram, returns true iff successful.
@@ -80,10 +81,9 @@ class BinaryDataHistogram {
 
   // 2^16 buckets holding counts of all 2-byte sequences in the data. The counts
   // are stored as signed values to simplify computing the distance between two
-  // histograms.
+  // histograms. Note that HeapArray is intentionally not used due to its
+  // overhead being unacceptable (see crbug.com/381332105).
   std::unique_ptr<int32_t[]> histogram_;
-
-  DISALLOW_COPY_AND_ASSIGN(BinaryDataHistogram);
 };
 
 }  // namespace zucchini

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,16 @@
 #include <cups/cups.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "printing/printing_export.h"
+#include "base/component_export.h"
 
 namespace printing {
 
 // Represents the status of a printer containing the properties printer-state,
 // printer-state-reasons, and printer-state-message.
-struct PRINTING_EXPORT PrinterStatus {
+struct COMPONENT_EXPORT(PRINTING_BASE) PrinterStatus {
   struct PrinterReason {
     // This enum is used to record UMA histogram values and should not be
     // reordered. Please keep in sync with PrinterStatusReasons in
@@ -56,7 +57,8 @@ struct PRINTING_EXPORT PrinterStatus {
       kDeveloperLow = 31,
       kDeveloperEmpty = 32,
       kInterpreterResourceUnavailable = 33,
-      kMaxValue = kInterpreterResourceUnavailable
+      kCupsPkiExpired = 34,
+      kMaxValue = kCupsPkiExpired
     };
 
     // Severity of the state-reason.
@@ -69,6 +71,9 @@ struct PRINTING_EXPORT PrinterStatus {
 
     Reason reason;
     Severity severity;
+
+    std::string_view ReasonName() const;
+    std::string_view SeverityName() const;
   };
 
   PrinterStatus();
@@ -81,6 +86,8 @@ struct PRINTING_EXPORT PrinterStatus {
   std::vector<PrinterReason> reasons;
   // printer-state-message
   std::string message;
+
+  std::string AllReasonsAsString() const;
 };
 
 }  // namespace printing

@@ -1,11 +1,11 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/display/screen_ash.h"
 
+#include "ash/constants/ash_switches.h"
 #include "ash/display/window_tree_host_manager.h"
-#include "ash/public/cpp/ash_switches.h"
 #include "ash/public/cpp/window_finder.h"
 #include "ash/root_window_controller.h"
 #include "ash/root_window_settings.h"
@@ -15,6 +15,7 @@
 #include "base/check.h"
 #include "base/command_line.h"
 #include "base/notreached.h"
+#include "chromeos/dbus/power_manager/backlight.pb.h"
 #include "ui/aura/client/screen_position_client.h"
 #include "ui/aura/env.h"
 #include "ui/aura/window.h"
@@ -42,7 +43,11 @@ class ScreenForShutdown : public display::Screen {
       : display_list_(screen_ash->GetAllDisplays()),
         primary_display_(screen_ash->GetPrimaryDisplay()) {
     SetDisplayForNewWindows(primary_display_.id());
+    set_shutdown(true);
   }
+
+  ScreenForShutdown(const ScreenForShutdown&) = delete;
+  ScreenForShutdown& operator=(const ScreenForShutdown&) = delete;
 
   // display::Screen overrides:
   gfx::Point GetCursorScreenPoint() override { return gfx::Point(); }
@@ -85,23 +90,34 @@ class ScreenForShutdown : public display::Screen {
  private:
   const std::vector<display::Display> display_list_;
   const display::Display primary_display_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScreenForShutdown);
 };
 
 }  // namespace
 
-ScreenAsh::ScreenAsh() = default;
+ScreenAsh::ScreenAsh() {
+  auto* power_manager = chromeos::PowerManagerClient::Get();
+  if (power_manager)
+    power_manager->AddObserver(this);
+}
 
-ScreenAsh::~ScreenAsh() = default;
+ScreenAsh::~ScreenAsh() {
+  auto* power_manager = chromeos::PowerManagerClient::Get();
+  if (power_manager)
+    power_manager->RemoveObserver(this);
+}
+
+void ScreenAsh::ScreenBrightnessChanged(
+    const power_manager::BacklightBrightnessChange& change) {
+  GetDisplayManager()->OnScreenBrightnessChanged(change.percent());
+}
 
 gfx::Point ScreenAsh::GetCursorScreenPoint() {
   return aura::Env::GetInstance()->last_mouse_location();
 }
 
 bool ScreenAsh::IsWindowUnderCursor(gfx::NativeWindow window) {
-  return window->Contains(GetWindowAtScreenPoint(
-      display::Screen::GetScreen()->GetCursorScreenPoint()));
+  return window->Contains(
+      GetWindowAtScreenPoint(display::Screen::Get()->GetCursorScreenPoint()));
 }
 
 gfx::NativeWindow ScreenAsh::GetWindowAtScreenPoint(const gfx::Point& point) {
@@ -136,12 +152,14 @@ display::Display ScreenAsh::GetDisplayNearestWindow(
     return GetPrimaryDisplay();
 
   const aura::Window* root_window = window->GetRootWindow();
-  if (!root_window)
+  if (!root_window || root_window->is_destroying()) {
     return GetPrimaryDisplay();
+  }
   const RootWindowSettings* rws = GetRootWindowSettings(root_window);
+  CHECK(rws) << "Missing RootWindowSettings : window=" << window->GetName()
+             << ", root=" << root_window->GetName();
   int64_t id = rws->display_id;
-  // if id is |kInvaildDisplayID|, it's being deleted.
-  DCHECK(id != display::kInvalidDisplayId);
+  // if id is |kInvalidDisplayId|, it's being deleted.
   if (id == display::kInvalidDisplayId)
     return GetPrimaryDisplay();
 
@@ -153,6 +171,13 @@ display::Display ScreenAsh::GetDisplayNearestWindow(
   if (mirroring_display.is_valid())
     return mirroring_display;
   return display_manager->GetDisplayForId(id);
+}
+
+void ScreenAsh::SetDisplayForNewWindows(int64_t display_id) {
+  if (display_id_for_new_windows() == display_id)
+    return;
+  Screen::SetDisplayForNewWindows(display_id);
+  Shell::Get()->NotifyDisplayForNewWindowsChanged();
 }
 
 display::Display ScreenAsh::GetDisplayNearestPoint(
@@ -196,42 +221,47 @@ display::Display ScreenAsh::GetPrimaryDisplay() const {
 }
 
 void ScreenAsh::AddObserver(display::DisplayObserver* observer) {
-  GetDisplayManager()->AddObserver(observer);
+  GetDisplayManager()->AddDisplayObserver(observer);
 }
 
 void ScreenAsh::RemoveObserver(display::DisplayObserver* observer) {
-  GetDisplayManager()->RemoveObserver(observer);
+  GetDisplayManager()->RemoveDisplayObserver(observer);
+}
+
+display::TabletState ScreenAsh::GetTabletState() const {
+  return GetDisplayManager()->GetTabletState();
 }
 
 // static
-display::DisplayManager* ScreenAsh::CreateDisplayManager() {
-  std::unique_ptr<ScreenAsh> screen(new ScreenAsh);
+std::unique_ptr<display::DisplayManager> ScreenAsh::CreateDisplayManager() {
+  auto screen = std::make_unique<ScreenAsh>();
 
-  display::Screen* current = display::Screen::GetScreen();
+  display::Screen* current = display::Screen::Get();
   // If there is no native, or the native was for shutdown,
   // use ash's screen.
   if (!current || current == screen_for_shutdown)
     display::Screen::SetScreenInstance(screen.get());
-  display::DisplayManager* manager =
-      new display::DisplayManager(std::move(screen));
+  auto manager = std::make_unique<display::DisplayManager>(std::move(screen));
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kAshEnableTabletMode)) {
     manager->set_internal_display_has_accelerometer(true);
   }
+
   return manager;
 }
 
 // static
 void ScreenAsh::CreateScreenForShutdown() {
   delete screen_for_shutdown;
-  screen_for_shutdown = new ScreenForShutdown(display::Screen::GetScreen());
+  screen_for_shutdown = new ScreenForShutdown(display::Screen::Get());
   display::Screen::SetScreenInstance(screen_for_shutdown);
 }
 
 // static
 void ScreenAsh::DeleteScreenForShutdown() {
-  if (display::Screen::GetScreen() == screen_for_shutdown)
+  if (display::Screen::Get() == screen_for_shutdown) {
     display::Screen::SetScreenInstance(nullptr);
+  }
   delete screen_for_shutdown;
   screen_for_shutdown = nullptr;
 }

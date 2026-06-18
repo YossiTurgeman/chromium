@@ -1,24 +1,18 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef NET_SSL_SSL_INFO_H_
 #define NET_SSL_SSL_INFO_H_
 
-#include <stdint.h>
-
-#include <vector>
-
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "net/base/hash_value.h"
 #include "net/base/net_export.h"
 #include "net/cert/cert_status_flags.h"
 #include "net/cert/ct_policy_status.h"
-#include "net/cert/ct_verify_result.h"
-#include "net/cert/ocsp_verify_result.h"
 #include "net/cert/sct_status_flags.h"
 #include "net/cert/signed_certificate_timestamp_and_status.h"
-#include "net/cert/x509_cert_types.h"
-#include "net/ssl/ssl_config.h"
+#include "net/net_buildflags.h"
 
 namespace net {
 
@@ -38,22 +32,12 @@ class NET_EXPORT SSLInfo {
 
   SSLInfo();
   SSLInfo(const SSLInfo& info);
-  ~SSLInfo();
+  SSLInfo(SSLInfo&& info);
   SSLInfo& operator=(const SSLInfo& info);
-
-  void Reset();
+  SSLInfo& operator=(SSLInfo&& info);
+  ~SSLInfo();
 
   bool is_valid() const { return cert.get() != nullptr; }
-
-  // Adds the SignedCertificateTimestamps and policy compliance details
-  // from ct_verify_result to |signed_certificate_timestamps| and
-  // |ct_policy_compliance_details|. SCTs are held in three separate
-  // vectors in ct_verify_result, each vetor representing a particular
-  // verification state, this method associates each of the SCTs with
-  // the corresponding SCTVerifyStatus as it adds it to the
-  // |signed_certificate_timestamps| list.
-  void UpdateCertificateTransparencyInfo(
-      const ct::CTVerifyResult& ct_verify_result);
 
   // The SSL certificate.
   scoped_refptr<X509Certificate> cert;
@@ -99,16 +83,21 @@ class NET_EXPORT SSLInfo {
   // set for server sockets.
   bool early_data_received = false;
 
+  // True if early data was accepted. For server sockets, this means the server
+  // accepted early data from the client. For client sockets, this means the
+  // client sent early data and it was accepted by the server.
+  bool early_data_accepted = false;
+
+  // True if the connection negotiated the Encrypted ClientHello extension.
+  bool encrypted_client_hello = false;
+
   HandshakeType handshake_type = HANDSHAKE_UNKNOWN;
 
-  // The hashes, in several algorithms, of the SubjectPublicKeyInfos from
-  // each certificate in the chain.
-  HashValueVector public_key_hashes;
-
-  // pinning_failure_log contains a message produced by
-  // TransportSecurityState::PKPState::CheckPublicKeyPins in the event of a
-  // pinning failure. It is a (somewhat) human-readable string.
-  std::string pinning_failure_log;
+  // If the certificate was successfully verified, contains the hashes of the
+  // SubjectPublicKeyInfo from each certificate in the verified chain. The
+  // ordering of the hashes matches the order of the verified chain (leaf to
+  // root).
+  std::vector<SHA256HashValue> public_key_hashes;
 
   // List of SignedCertificateTimestamps and their corresponding validation
   // status.
@@ -119,17 +108,25 @@ class NET_EXPORT SSLInfo {
   ct::CTPolicyCompliance ct_policy_compliance =
       ct::CTPolicyCompliance::CT_POLICY_COMPLIANCE_DETAILS_NOT_AVAILABLE;
 
-  // True if the connection was required to comply with the CT cert policy. Only
-  // meaningful if |ct_policy_compliance| is not
-  // COMPLIANCE_DETAILS_NOT_AVAILABLE.
-  bool ct_policy_compliance_required = false;
-
-  // OCSP stapling details.
-  OCSPVerifyResult ocsp_result;
-
   // True if there was a certificate error which should be treated as fatal,
   // and false otherwise.
   bool is_fatal_cert_error = false;
+
+#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+  // The stable identifier of the root of the chain of `verified_cert`, or one
+  // of the special values in CertVerifyResult::CrsRootIdSpecialValues.
+  // May be nullopt in builds where CRS is optionally supported but was not
+  // used, or when the SSLInfo was loaded from cache.
+  std::optional<int32_t> crs_root_id;
+#endif
+
+  // True if the client requested padding through the server padding extension.
+  // This field is only set for client sockets.
+  bool server_padding_requested = false;
+
+  // True if the server sent the requested padding to the client.
+  // This field is only set for client sockets.
+  bool server_padding_received = false;
 };
 
 }  // namespace net

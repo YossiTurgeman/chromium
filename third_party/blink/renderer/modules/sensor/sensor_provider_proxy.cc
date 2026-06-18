@@ -1,32 +1,28 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/sensor/sensor_provider_proxy.h"
 
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/modules/sensor/sensor_proxy_impl.h"
-#include "third_party/blink/renderer/modules/sensor/sensor_proxy_inspector_impl.h"
-#include "third_party/blink/renderer/platform/mojo/mojo_helper.h"
 
 namespace blink {
 
 // SensorProviderProxy
 SensorProviderProxy::SensorProviderProxy(LocalDOMWindow& window)
-    : Supplement<LocalDOMWindow>(window),
-      sensor_provider_(&window),
-      inspector_mode_(false) {}
+    : Supplement<LocalDOMWindow>(window), sensor_provider_(&window) {}
 
 void SensorProviderProxy::InitializeIfNeeded() {
-  if (IsInitialized())
+  if (sensor_provider_.is_bound())
     return;
 
   GetSupplementable()->GetBrowserInterfaceBroker().GetInterface(
       sensor_provider_.BindNewPipeAndPassReceiver(
           GetSupplementable()->GetTaskRunner(TaskType::kSensor)));
   sensor_provider_.set_disconnect_handler(
-      WTF::Bind(&SensorProviderProxy::OnSensorProviderConnectionError,
-                WrapWeakPersistent(this)));
+      BindOnce(&SensorProviderProxy::OnSensorProviderConnectionError,
+               WrapWeakPersistent(this)));
 }
 
 // static
@@ -41,7 +37,6 @@ SensorProviderProxy* SensorProviderProxy::From(LocalDOMWindow* window) {
     provider_proxy = MakeGarbageCollected<SensorProviderProxy>(*window);
     Supplement<LocalDOMWindow>::ProvideTo(*window, provider_proxy);
   }
-  provider_proxy->InitializeIfNeeded();
   return provider_proxy;
 }
 
@@ -58,13 +53,8 @@ SensorProxy* SensorProviderProxy::CreateSensorProxy(
     Page* page) {
   DCHECK(!GetSensorProxy(type));
 
-  SensorProxy* sensor =
-      inspector_mode_
-          ? static_cast<SensorProxy*>(
-                MakeGarbageCollected<SensorProxyInspectorImpl>(type, this,
-                                                               page))
-          : static_cast<SensorProxy*>(
-                MakeGarbageCollected<SensorProxyImpl>(type, this, page));
+  SensorProxy* sensor = static_cast<SensorProxy*>(
+      MakeGarbageCollected<SensorProxyImpl>(type, this, page));
   sensor_proxies_.insert(sensor);
 
   return sensor;
@@ -92,6 +82,14 @@ void SensorProviderProxy::OnSensorProviderConnectionError() {
 void SensorProviderProxy::RemoveSensorProxy(SensorProxy* proxy) {
   DCHECK(sensor_proxies_.Contains(proxy));
   sensor_proxies_.erase(proxy);
+}
+
+void SensorProviderProxy::GetSensor(
+    device::mojom::blink::SensorType type,
+    bool user_gesture,
+    mojom::blink::WebSensorProviderProxy::GetSensorCallback callback) {
+  InitializeIfNeeded();
+  sensor_provider_->GetSensor(type, user_gesture, std::move(callback));
 }
 
 }  // namespace blink

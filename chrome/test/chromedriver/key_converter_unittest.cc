@@ -1,24 +1,25 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
+#include "chrome/test/chromedriver/key_converter.h"
+
 #include <stddef.h>
 
+#include <array>
 #include <string>
 
-#include "base/stl_util.h"
-#include "base/strings/string16.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "chrome/test/chromedriver/chrome/status.h"
 #include "chrome/test/chromedriver/chrome/ui_events.h"
-#include "chrome/test/chromedriver/key_converter.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/events/test/keyboard_layout.h"
 
 namespace {
 
-void CheckEvents(const base::string16& keys,
+void CheckEvents(const std::u16string& keys,
                  const std::vector<KeyEvent>& expected_events,
                  bool release_modifiers,
                  int expected_modifiers) {
@@ -42,7 +43,7 @@ void CheckEvents(const base::string16& keys,
   EXPECT_EQ(expected_modifiers, modifiers);
 }
 
-void CheckEventsReleaseModifiers(const base::string16& keys,
+void CheckEventsReleaseModifiers(const std::u16string& keys,
                                  const std::vector<KeyEvent>& expected_events) {
   CheckEvents(keys, expected_events, true /* release_modifier */,
       0 /* expected_modifiers */);
@@ -130,8 +131,7 @@ TEST(KeyConverter, WebDriverSpecialChar) {
   KeyEventBuilder builder;
   std::vector<KeyEvent> key_events;
   builder.SetKeyCode(ui::VKEY_SPACE)->SetText(" ", " ")->Generate(&key_events);
-  base::string16 keys;
-  keys.push_back(static_cast<base::char16>(0xE00DU));
+  std::u16string keys = u"\uE00D";
   CheckEventsReleaseModifiers(keys, key_events);
 }
 
@@ -139,21 +139,11 @@ TEST(KeyConverter, WebDriverSpecialNonCharKey) {
   KeyEventBuilder builder;
   std::vector<KeyEvent> key_events;
   builder.SetKeyCode(ui::VKEY_F1)->Generate(&key_events);
-  base::string16 keys;
-  keys.push_back(static_cast<base::char16>(0xE031U));
+  std::u16string keys = u"\uE031";
   CheckEventsReleaseModifiers(keys, key_events);
 }
 
-TEST(KeyConverter, FrenchKeyOnEnglishLayout) {
-  ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
-  KeyEventBuilder builder;
-  std::string e_acute = base::WideToUTF8(L"\u00E9");
-  std::vector<KeyEvent> key_events;
-  builder.SetText(e_acute, e_acute)->Generate(&key_events);
-  CheckEventsReleaseModifiers(base::WideToUTF16(L"\u00E9"), key_events);
-}
-
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 TEST(KeyConverter, NeedsCtrlAndAlt) {
   KeyEventBuilder ctrl_builder;
   ctrl_builder.SetKeyCode(ui::VKEY_CONTROL);
@@ -223,9 +213,7 @@ TEST(KeyConverter, UppercaseCharUsesShiftOnlyIfNecessary) {
   builder.SetKeyCode(ui::VKEY_C)->SetText("c", "C")->Generate(&key_events);
   key_events.push_back(
       shift_builder.SetType(kKeyUpEventType)->SetModifiers(0)->Build());
-  base::string16 keys;
-  keys.push_back(static_cast<base::char16>(0xE008U));
-  keys.append(base::UTF8ToUTF16("aBc"));
+  std::u16string keys = u"\uE008aBc";
   CheckEventsReleaseModifiers(keys, key_events);
 }
 
@@ -256,48 +244,12 @@ TEST(KeyConverter, ToggleModifiers) {
                            ->Build());
   key_events.push_back(
       builder.SetType(kKeyUpEventType)->SetModifiers(0)->Build());
-  base::string16 keys;
-  keys.push_back(static_cast<base::char16>(0xE008U));
-  keys.push_back(static_cast<base::char16>(0xE008U));
-  keys.push_back(static_cast<base::char16>(0xE009U));
-  keys.push_back(static_cast<base::char16>(0xE009U));
-  keys.push_back(static_cast<base::char16>(0xE00AU));
-  keys.push_back(static_cast<base::char16>(0xE00AU));
-  keys.push_back(static_cast<base::char16>(0xE03DU));
-  keys.push_back(static_cast<base::char16>(0xE03DU));
+  std::u16string keys = u"\uE008\uE008\uE009\uE009\uE00A\uE00A\uE03D\uE03D";
   CheckEventsReleaseModifiers(keys, key_events);
 }
 
-TEST(KeyConverter, AllShorthandKeys) {
-  ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
-  KeyEventBuilder builder;
-  std::vector<KeyEvent> key_events;
-  builder.SetKeyCode(ui::VKEY_RETURN)
-      ->SetText("\r", "\r")
-      ->Generate(&key_events);
-  builder.Generate(&key_events);
-  builder.SetKeyCode(ui::VKEY_TAB);
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
-  builder.SetText("\t", "\t")->Generate(&key_events);
-#else
-  builder.SetText(std::string(), std::string());
-  key_events.push_back(builder.SetType(kRawKeyDownEventType)->Build());
-  key_events.push_back(builder.SetType(kKeyUpEventType)->Build());
-#endif
-  builder.SetKeyCode(ui::VKEY_BACK);
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
-  builder.SetText("\b", "\b")->Generate(&key_events);
-#else
-  builder.SetText(std::string(), std::string());
-  key_events.push_back(builder.SetType(kRawKeyDownEventType)->Build());
-  key_events.push_back(builder.SetType(kKeyUpEventType)->Build());
-#endif
-  builder.SetKeyCode(ui::VKEY_SPACE)->SetText(" ", " ")->Generate(&key_events);
-  CheckEventsReleaseModifiers("\n\r\n\t\b ", key_events);
-}
-
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
-// Fails on bots: crbug.com/174962
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+// Fails on bots: crbug.com/40301345
 #define MAYBE_AllEnglishKeyboardSymbols DISABLED_AllEnglishKeyboardSymbols
 #else
 #define MAYBE_AllEnglishKeyboardSymbols AllEnglishKeyboardSymbols
@@ -305,8 +257,8 @@ TEST(KeyConverter, AllShorthandKeys) {
 
 TEST(KeyConverter, MAYBE_AllEnglishKeyboardSymbols) {
   ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
-  base::string16 keys;
-  const ui::KeyboardCode kSymbolKeyCodes[] = {
+  std::u16string keys;
+  const auto kSymbolKeyCodes = std::to_array<ui::KeyboardCode>({
       ui::VKEY_OEM_3,
       ui::VKEY_OEM_MINUS,
       ui::VKEY_OEM_PLUS,
@@ -317,7 +269,8 @@ TEST(KeyConverter, MAYBE_AllEnglishKeyboardSymbols) {
       ui::VKEY_OEM_7,
       ui::VKEY_OEM_COMMA,
       ui::VKEY_OEM_PERIOD,
-      ui::VKEY_OEM_2};
+      ui::VKEY_OEM_2,
+  });
   std::string kLowerSymbols = "`-=[]\\;',./";
   std::string kUpperSymbols = "~_+{}|:\"<>?";
   for (size_t i = 0; i < kLowerSymbols.length(); ++i)
@@ -352,21 +305,22 @@ TEST(KeyConverter, AllEnglishKeyboardTextChars) {
 
 TEST(KeyConverter, AllSpecialWebDriverKeysOnEnglishKeyboard) {
   ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
-  const char kTextForKeys[] = {
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
-      0, 0, 0, 0, '\t', 0, '\r', '\r', 0, 0, 0, 0, 0,
+  const auto kTextForKeys = std::to_array<char>({
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+      0,   0,   0,   0,   '\t', 0,   '\r', '\r', 0,   0,   0,   0,   0,
 #else
-      0, 0, 0, 0, 0, 0, '\r', '\r', 0, 0, 0, 0, 0,
+      0,   0,   0,   0,   0,   0,   '\r', '\r', 0,   0,   0,   0,   0,
 #endif
-      ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ';', '=',
-      '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-      '*', '+', ',', '-', '.', '/'};
+      ' ', 0,   0,   0,   0,    0,   0,    0,    0,   0,   0,   ';', '=',
+      '0', '1', '2', '3', '4',  '5', '6',  '7',  '8', '9', '*', '+', ',',
+      '-', '.', '/',
+  });
   for (size_t i = 0; i <= 0x3D; ++i) {
     if (i > 0x29 && i < 0x31)
       continue;
-    base::string16 keys;
+    std::u16string keys;
     int modifiers = 0;
-    keys.push_back(0xE000U + i);
+    keys.push_back(u'\uE000' + i);
     std::vector<KeyEvent> events;
     EXPECT_EQ(kOk, ConvertKeysToKeyEvents(keys,
                                           true /* release_modifiers */,
@@ -374,7 +328,7 @@ TEST(KeyConverter, AllSpecialWebDriverKeysOnEnglishKeyboard) {
         << "Index: " << i;
     if (i == 0) {
       EXPECT_EQ(0u, events.size()) << "Index: " << i;
-    } else if (i >= base::size(kTextForKeys) || kTextForKeys[i] == 0) {
+    } else if (i >= std::size(kTextForKeys) || kTextForKeys[i] == 0) {
       EXPECT_EQ(2u, events.size()) << "Index: " << i;
     } else {
       ASSERT_EQ(3u, events.size()) << "Index: " << i;
@@ -404,11 +358,7 @@ TEST(KeyConverter, ModifiersState) {
                            ->AddModifiers(kMetaKeyModifierMask)
                            ->Build());
 
-  base::string16 keys;
-  keys.push_back(static_cast<base::char16>(0xE008U));
-  keys.push_back(static_cast<base::char16>(0xE009U));
-  keys.push_back(static_cast<base::char16>(0xE00AU));
-  keys.push_back(static_cast<base::char16>(0xE03DU));
+  std::u16string keys = u"\uE008\uE009\uE00A\uE03D";
 
   CheckEvents(keys, key_events, false /* release_modifiers */,
               kShiftKeyModifierMask | kControlKeyModifierMask |
@@ -430,9 +380,25 @@ TEST(KeyConverter, ReleaseModifiers) {
                            ->SetModifiers(0)
                            ->Build());
   key_events.push_back(builder.SetKeyCode(ui::VKEY_CONTROL)->Build());
-  base::string16 keys;
-  keys.push_back(static_cast<base::char16>(0xE008U));
-  keys.push_back(static_cast<base::char16>(0xE009U));
+  std::u16string keys = u"\uE008\uE009";
 
   CheckEvents(keys, key_events, true /* release_modifiers */, 0);
+}
+
+TEST(KeyConverter, CommandA) {
+  // This is a regression test for chromedriver:4263
+  ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
+  std::vector<KeyEvent> key_events;
+  KeyEventBuilder meta_builder;
+  key_events.push_back(meta_builder.SetType(kRawKeyDownEventType)
+                           ->SetKeyCode(ui::VKEY_COMMAND)
+                           ->SetModifiers(kMetaKeyModifierMask)
+                           ->Build());
+  KeyEventBuilder builder;
+  builder.SetModifiers(kMetaKeyModifierMask);
+  builder.SetKeyCode(ui::VKEY_A)->SetText("a", "a")->Generate(&key_events);
+  key_events.push_back(
+      meta_builder.SetType(kKeyUpEventType)->SetModifiers(0)->Build());
+  std::u16string keys = u"\uE03Da";
+  CheckEventsReleaseModifiers(keys, key_events);
 }

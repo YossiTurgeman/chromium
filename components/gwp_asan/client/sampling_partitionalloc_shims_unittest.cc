@@ -1,20 +1,20 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/gwp_asan/client/sampling_partitionalloc_shims.h"
 
 #include <stdlib.h>
+
 #include <algorithm>
 #include <iterator>
 #include <set>
 #include <string>
 
-#include "base/allocator/partition_allocator/partition_alloc.h"
-#include "base/bind_helpers.h"
+#include "base/compiler_specific.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
-#include "base/partition_alloc_buildflags.h"
-#include "base/process/process_metrics.h"
+#include "base/memory/page_size.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/test/gtest_util.h"
 #include "base/test/multiprocess_test.h"
@@ -22,7 +22,10 @@
 #include "build/build_config.h"
 #include "components/crash/core/common/crash_key.h"
 #include "components/gwp_asan/client/guarded_page_allocator.h"
+#include "components/gwp_asan/client/gwp_asan.h"
 #include "components/gwp_asan/common/crash_key_name.h"
+#include "partition_alloc/partition_alloc.h"
+#include "partition_alloc/partition_root.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/multiprocess_func_list.h"
 
@@ -50,6 +53,12 @@ constexpr size_t kLoopIterations = kSamplingFrequency * 4;
 
 constexpr int kSuccess = 0;
 constexpr int kFailure = 1;
+constexpr int kSamplingMaxSize = 16;
+
+static constexpr size_t kMaxMetadata = 2048;
+static constexpr size_t kMaxRequestedSlots = 8192;
+
+constexpr partition_alloc::PartitionOptions kAllocatorOptions = {};
 
 static void HandleOOM(size_t unused_size) {
   LOG(FATAL) << "Out of memory.";
@@ -59,10 +68,30 @@ class SamplingPartitionAllocShimsTest : public base::MultiProcessTest {
  public:
   static void multiprocessTestSetup() {
     crash_reporter::InitializeCrashKeys();
-    base::PartitionAllocGlobalInit(HandleOOM);
-    InstallPartitionAllocHooks(
-        AllocatorState::kMaxMetadata, AllocatorState::kMaxMetadata,
-        AllocatorState::kMaxSlots, kSamplingFrequency, base::DoNothing());
+    partition_alloc::PartitionAllocGlobalInit(HandleOOM);
+    CHECK(InstallPartitionAllocHooks(
+        AllocatorSettings{
+            .max_allocated_pages = kMaxMetadata,
+            .num_metadata = kMaxMetadata,
+            .total_pages = kMaxRequestedSlots,
+            .sampling_frequency = kSamplingFrequency,
+            .sampling_min_size = 1,
+            .sampling_max_size = std::numeric_limits<int>::max(),
+        },
+        base::DoNothing()));
+  }
+
+  static void multiprocessTestSetupWithSamplingMaxSize() {
+    crash_reporter::InitializeCrashKeys();
+    partition_alloc::PartitionAllocGlobalInit(HandleOOM);
+    CHECK(InstallPartitionAllocHooks(
+        AllocatorSettings{.max_allocated_pages = kMaxMetadata,
+                          .num_metadata = kMaxMetadata,
+                          .total_pages = kMaxRequestedSlots,
+                          .sampling_frequency = kSamplingFrequency,
+                          .sampling_min_size = 1,
+                          .sampling_max_size = kSamplingMaxSize},
+        base::DoNothing()));
   }
 
  protected:
@@ -78,8 +107,8 @@ class SamplingPartitionAllocShimsTest : public base::MultiProcessTest {
 MULTIPROCESS_TEST_MAIN_WITH_SETUP(
     BasicFunctionality,
     SamplingPartitionAllocShimsTest::multiprocessTestSetup) {
-  base::PartitionAllocator allocator;
-  allocator.init();
+  partition_alloc::PartitionAllocator allocator;
+  allocator.init(kAllocatorOptions);
   for (size_t i = 0; i < kLoopIterations; i++) {
     void* ptr = allocator.root()->Alloc(1, kFakeType);
     if (GetPartitionAllocGpaForTesting().PointerIsMine(ptr))
@@ -98,14 +127,14 @@ TEST_F(SamplingPartitionAllocShimsTest, BasicFunctionality) {
 MULTIPROCESS_TEST_MAIN_WITH_SETUP(
     Realloc,
     SamplingPartitionAllocShimsTest::multiprocessTestSetup) {
-  base::PartitionAllocator allocator;
-  allocator.init();
+  partition_alloc::PartitionAllocator allocator;
+  allocator.init(kAllocatorOptions);
 
   void* alloc = GetPartitionAllocGpaForTesting().Allocate(base::GetPageSize());
   CHECK_NE(alloc, nullptr);
 
   constexpr unsigned char kFillChar = 0xff;
-  memset(alloc, kFillChar, base::GetPageSize());
+  UNSAFE_TODO(memset(alloc, kFillChar, base::GetPageSize()));
 
   unsigned char* new_alloc = static_cast<unsigned char*>(
       allocator.root()->Realloc(alloc, base::GetPageSize() + 1, kFakeType));
@@ -113,7 +142,7 @@ MULTIPROCESS_TEST_MAIN_WITH_SETUP(
   CHECK_EQ(GetPartitionAllocGpaForTesting().PointerIsMine(new_alloc), false);
 
   for (size_t i = 0; i < base::GetPageSize(); i++)
-    CHECK_EQ(new_alloc[i], kFillChar);
+    UNSAFE_TODO(CHECK_EQ(new_alloc[i], kFillChar));
 
   allocator.root()->Free(new_alloc);
   return kSuccess;
@@ -127,11 +156,12 @@ TEST_F(SamplingPartitionAllocShimsTest, Realloc) {
 MULTIPROCESS_TEST_MAIN_WITH_SETUP(
     DifferentTypesDontOverlap,
     SamplingPartitionAllocShimsTest::multiprocessTestSetup) {
-  base::PartitionAllocator allocator;
-  allocator.init();
+  partition_alloc::PartitionAllocator allocator;
+  allocator.init(kAllocatorOptions);
 
   std::set<void*> type1, type2;
-  for (size_t i = 0; i < kLoopIterations * AllocatorState::kMaxSlots; i++) {
+  for (size_t i = 0; i < kLoopIterations * kMaxRequestedSlots;
+       i++) {
     void* ptr1 = allocator.root()->Alloc(1, kFakeType);
     void* ptr2 = allocator.root()->Alloc(1, kFakeType2);
 
@@ -176,6 +206,27 @@ TEST_F(SamplingPartitionAllocShimsTest, CrashKey) {
   runTest("CrashKey");
 }
 #endif  // !defined(COMPONENT_BUILD)
+
+MULTIPROCESS_TEST_MAIN_WITH_SETUP(
+    SamplingRange,
+    SamplingPartitionAllocShimsTest::multiprocessTestSetupWithSamplingMaxSize) {
+  partition_alloc::PartitionAllocator allocator;
+  allocator.init(kAllocatorOptions);
+
+  for (size_t i = 0; i < kLoopIterations; i++) {
+    void* ptr = allocator.root()->Alloc(kSamplingMaxSize * 2, kFakeType);
+    if (GetPartitionAllocGpaForTesting().PointerIsMine(ptr)) {
+      return kFailure;
+    }
+    allocator.root()->Free(ptr);
+  }
+
+  return kSuccess;
+}
+
+TEST_F(SamplingPartitionAllocShimsTest, SamplingRange) {
+  runTest("SamplingRange");
+}
 
 }  // namespace
 

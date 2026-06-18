@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,122 +8,121 @@
 #include <stdint.h>
 
 #include <memory>
+#include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/sequenced_task_runner.h"
-#include "base/single_thread_task_runner.h"
 #include "base/threading/thread_checker.h"
+#include "remoting/base/constants.h"
 #include "remoting/base/session_options.h"
-#include "remoting/codec/webrtc_video_encoder.h"
-#include "remoting/codec/webrtc_video_encoder_selector.h"
-#include "remoting/protocol/host_video_stats_dispatcher.h"
+#include "remoting/protocol/desktop_capturer.h"
+#include "remoting/protocol/video_channel_state_observer.h"
 #include "remoting/protocol/video_stream.h"
+#include "remoting/protocol/webrtc_video_track_source.h"
+#include "third_party/webrtc/api/rtp_transceiver_interface.h"
 #include "third_party/webrtc/api/scoped_refptr.h"
 #include "third_party/webrtc/api/video_codecs/sdp_video_format.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capturer.h"
+
+namespace base {
+class SingleThreadTaskRunner;
+}  // namespace base
 
 namespace webrtc {
 class PeerConnectionInterface;
 }  // namespace webrtc
 
-namespace remoting {
-namespace protocol {
+namespace remoting::protocol {
 
 class HostVideoStatsDispatcher;
-class WebrtcFrameScheduler;
+class WebrtcVideoEncoderFactory;
 class WebrtcTransport;
 
-class WebrtcVideoStream : public VideoStream,
-                          public webrtc::DesktopCapturer::Callback,
-                          public HostVideoStatsDispatcher::EventHandler {
+class WebrtcVideoStream : public VideoStream, public VideoChannelStateObserver {
  public:
   explicit WebrtcVideoStream(const SessionOptions& options);
+
+  WebrtcVideoStream(const WebrtcVideoStream&) = delete;
+  WebrtcVideoStream& operator=(const WebrtcVideoStream&) = delete;
+
   ~WebrtcVideoStream() override;
 
-  void Start(std::unique_ptr<webrtc::DesktopCapturer> desktop_capturer,
-             WebrtcTransport* webrtc_transport,
-             scoped_refptr<base::SequencedTaskRunner> encode_task_runner);
+  void set_video_stats_dispatcher(
+      base::WeakPtr<HostVideoStatsDispatcher> video_stats_dispatcher) {
+    video_stats_dispatcher_ = video_stats_dispatcher;
+  }
 
-  // VideoStream interface.
+  // |screen_id| should be kFullDesktopScreenId for single-stream mode, or
+  // the screen being captured for multi-stream mode.
+  void Start(webrtc::ScreenId screen_id,
+             std::unique_ptr<DesktopCapturer> desktop_capturer,
+             WebrtcTransport* webrtc_transport,
+             WebrtcVideoEncoderFactory* video_encoder_factory);
+
   void SetEventTimestampsSource(scoped_refptr<InputEventTimestampsSource>
                                     event_timestamps_source) override;
   void Pause(bool pause) override;
-  void SetLosslessEncode(bool want_lossless) override;
-  void SetLosslessColor(bool want_lossless) override;
   void SetObserver(Observer* observer) override;
-  void SelectSource(int id) override;
+  void SelectSource(webrtc::ScreenId id) override;
+  void SetComposeEnabled(bool enabled) override;
+  void SetMouseCursor(
+      std::unique_ptr<webrtc::MouseCursor> mouse_cursor) override;
+  void SetMouseCursorPosition(const webrtc::DesktopVector& position) override;
+  void SetTargetFramerate(int framerate) override;
+  void BoostFramerate(base::TimeDelta capture_interval,
+                      base::TimeDelta boost_duration) override;
+
+  // Returns the stream name corresponding to the initial `screen_id` passed to
+  // Start(). Used for sending VideoLayout messages to the client, which
+  // include the stream-name for each display.
+  static std::string StreamNameForId(webrtc::ScreenId id);
+
+  // VideoChannelStateObserver interface.
+  void OnEncodedFrameSent(
+      webrtc::EncodedImageCallback::Result result,
+      const WebrtcVideoEncoder::EncodedFrame& frame) override;
 
  private:
+  class Core;
   struct FrameStats;
 
-  // webrtc::DesktopCapturer::Callback interface.
-  void OnCaptureResult(webrtc::DesktopCapturer::Result result,
-                       std::unique_ptr<webrtc::DesktopFrame> frame) override;
+  // Called by |video_track_source_|.
+  void OnSinkAddedOrUpdated(const webrtc::VideoSinkWants& wants);
 
-  // HostVideoStatsDispatcher::EventHandler interface.
-  void OnChannelInitialized(ChannelDispatcherBase* channel_dispatcher) override;
-  void OnChannelClosed(ChannelDispatcherBase* channel_dispatcher) override;
+  // Called from |core_|.
+  void OnVideoSizeChanged(webrtc::DesktopSize frame_size,
+                          webrtc::DesktopVector frame_dpi);
+  void SendCapturedFrame(
+      std::unique_ptr<webrtc::DesktopFrame> desktop_frame,
+      std::unique_ptr<WebrtcVideoEncoder::FrameStats> frame_stats);
 
-  // Called by the |scheduler_|.
-  void CaptureNextFrame();
+  // Store the target framerate so we can set it on the RTP Sender when the SDP
+  // is renegotiated (such as when the codec or codec profile is changed).
+  int target_framerate_ = kTargetFrameRate;
 
-  void OnFrameEncoded(WebrtcVideoEncoder::EncodeResult encode_result,
-                      std::unique_ptr<WebrtcVideoEncoder::EncodedFrame> frame);
+  // Used to send captured frames to the encoder.
+  webrtc::scoped_refptr<WebrtcVideoTrackSource> video_track_source_;
 
-  void OnEncoderCreated(webrtc::VideoCodecType codec_type,
-                        const webrtc::SdpVideoFormat::Parameters& parameters);
-
-  // Helper functions to create software encoders that run on the encode thread.
-  std::unique_ptr<WebrtcVideoEncoder> CreateVP8Encoder();
-  std::unique_ptr<WebrtcVideoEncoder> CreateVP9Encoder(bool lossless_color);
-
-  // Capturer used to capture the screen.
-  std::unique_ptr<webrtc::DesktopCapturer> capturer_;
-  // Used to send across encoded frames.
-  WebrtcTransport* webrtc_transport_ = nullptr;
-  // Task runner used by software encoders.
-  scoped_refptr<base::SequencedTaskRunner> encode_task_runner_;
-  // Used to encode captured frames.
-  std::unique_ptr<WebrtcVideoEncoder> encoder_;
-
-  scoped_refptr<InputEventTimestampsSource> event_timestamps_source_;
+  // The transceiver created for this video-stream.
+  webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver_;
 
   scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
 
-  HostVideoStatsDispatcher video_stats_dispatcher_;
+  base::WeakPtr<HostVideoStatsDispatcher> video_stats_dispatcher_;
 
-  // Stats of the frame that's being captured.
-  std::unique_ptr<FrameStats> current_frame_stats_;
-
-  std::unique_ptr<WebrtcFrameScheduler> scheduler_;
-
-  webrtc::DesktopSize frame_size_;
-  webrtc::DesktopVector frame_dpi_;
-  Observer* observer_ = nullptr;
-
-  WebrtcVideoEncoderSelector encoder_selector_;
-
-  base::ThreadChecker thread_checker_;
+  raw_ptr<Observer> observer_ = nullptr;
 
   const SessionOptions session_options_;
 
-  // Settings that are received from video-control messages. These are stored
-  // here in case a message is received before the encoder is created.
-  // Lossless-color is not stored here because, for VP9 encoder, WebRTC handles
-  // it via an SDP codec parameter, "profile-id=1". Changing it requires a
-  // new SDP offer/answer exchange, and therefore it cannot be changed directly
-  // via video-control message.
-  bool lossless_encode_ = false;
+  std::unique_ptr<Core> core_;
+  scoped_refptr<base::SingleThreadTaskRunner> core_task_runner_;
+
+  THREAD_CHECKER(thread_checker_);
 
   base::WeakPtrFactory<WebrtcVideoStream> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(WebrtcVideoStream);
 };
 
-}  // namespace protocol
-}  // namespace remoting
+}  // namespace remoting::protocol
 
 #endif  // REMOTING_PROTOCOL_WEBRTC_VIDEO_STREAM_H_

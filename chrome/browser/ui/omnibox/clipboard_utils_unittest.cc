@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,10 @@
 
 #include <string>
 
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
@@ -20,6 +20,12 @@
 using base::ASCIIToUTF16;
 
 namespace {
+
+std::u16string GetClipboardTextSync(bool notify_if_restricted) {
+  base::test::TestFuture<std::u16string> future;
+  GetClipboardText(notify_if_restricted, future.GetCallback());
+  return future.Take();
+}
 
 class ClipboardUtilsTest : public PlatformTest {
  public:
@@ -45,7 +51,7 @@ class ClipboardUtilsTest : public PlatformTest {
 TEST_F(ClipboardUtilsTest, GetClipboardText) {
   ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
 
-  const base::string16 kPlainText(ASCIIToUTF16("test text"));
+  const std::u16string kPlainText(u"test text");
   const std::string kURL("http://www.example.com/");
 
   // Can we pull straight text off the clipboard?
@@ -53,66 +59,72 @@ TEST_F(ClipboardUtilsTest, GetClipboardText) {
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
     clipboard_writer.WriteText(kPlainText);
   }
-  EXPECT_EQ(kPlainText, GetClipboardText());
+  EXPECT_EQ(kPlainText, GetClipboardTextSync(/*notify_if_restricted=*/false));
 
   // Can we pull a string consists of white-space?
-  const base::string16 kSpace6(ASCIIToUTF16("      "));
-  const base::string16 kSpace1(ASCIIToUTF16(" "));
+  const std::u16string kSpace6(u"      ");
+  const std::u16string kSpace1(u" ");
   {
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
     clipboard_writer.WriteText(kSpace6);
   }
-  EXPECT_EQ(kSpace1, GetClipboardText());
+  EXPECT_EQ(kSpace1, GetClipboardTextSync(/*notify_if_restricted=*/false));
 
   // Does an empty clipboard get empty text?
   clipboard->Clear(ui::ClipboardBuffer::kCopyPaste);
-  EXPECT_EQ(base::string16(), GetClipboardText());
+  EXPECT_EQ(std::u16string(),
+            GetClipboardTextSync(/*notify_if_restricted=*/false));
 
 // Bookmark clipboard apparently not supported on Linux.
 // See TODO on ClipboardText.BookmarkTest.
-#if !defined(OS_POSIX) || defined(OS_MAC)
-  const base::string16 kTitle(ASCIIToUTF16("The Example Company"));
+#if !BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_MAC)
+  const std::u16string kTitle(u"The Example Company");
   // Can we pull a bookmark off the clipboard?
   {
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
-    clipboard_writer.WriteBookmark(kTitle, kURL);
+    clipboard_writer.WriteURL(ui::ClipboardUrlInfo{
+        .url = GURL(kURL), .title = std::u16string(kTitle)});
   }
-  EXPECT_EQ(ASCIIToUTF16(kURL), GetClipboardText());
+  EXPECT_EQ(ASCIIToUTF16(kURL),
+            GetClipboardTextSync(/*notify_if_restricted=*/false));
 
   // Do we pull text in preference to a bookmark?
   {
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
     clipboard_writer.WriteText(kPlainText);
-    clipboard_writer.WriteBookmark(kTitle, kURL);
+    clipboard_writer.WriteURL(ui::ClipboardUrlInfo{
+        .url = GURL(kURL), .title = std::u16string(kTitle)});
   }
-  EXPECT_EQ(kPlainText, GetClipboardText());
+  EXPECT_EQ(kPlainText, GetClipboardTextSync(/*notify_if_restricted=*/false));
 #endif
 
   // Do we get nothing if there is neither text nor a bookmark?
   {
-    const base::string16 kMarkup(ASCIIToUTF16("<strong>Hi!</string>"));
+    const std::u16string kMarkup(u"<strong>Hi!</string>");
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
     clipboard_writer.WriteHTML(kMarkup, kURL);
   }
-  EXPECT_TRUE(GetClipboardText().empty());
+  EXPECT_TRUE(GetClipboardTextSync(/*notify_if_restricted=*/false).empty());
 }
 
 TEST_F(ClipboardUtilsTest, TruncateLongText) {
-  const base::string16 almost_long_text =
+  const std::u16string almost_long_text =
       base::ASCIIToUTF16(std::string(kMaxClipboardTextLength, '.'));
   {
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
     clipboard_writer.WriteText(almost_long_text);
   }
-  EXPECT_EQ(almost_long_text, GetClipboardText());
+  EXPECT_EQ(almost_long_text,
+            GetClipboardTextSync(/*notify_if_restricted=*/false));
 
-  const base::string16 long_text =
+  const std::u16string long_text =
       base::ASCIIToUTF16(std::string(kMaxClipboardTextLength + 1, '.'));
   {
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
     clipboard_writer.WriteText(long_text);
   }
-  EXPECT_EQ(almost_long_text, GetClipboardText());
+  EXPECT_EQ(almost_long_text,
+            GetClipboardTextSync(/*notify_if_restricted=*/false));
 }
 
 }  // namespace

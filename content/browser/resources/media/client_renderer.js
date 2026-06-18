@@ -1,32 +1,110 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var ClientRenderer = (function() {
-  var ClientRenderer = function() {
+import {$} from 'chrome://resources/js/util.js';
+
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+import {millisecondsToString} from './util.js';
+import '/strings.m.js';
+
+
+/**
+ * CSS classes added / removed in JS to trigger styling changes.
+ * @enum {string}
+ */
+const ClientRendererCss = {
+  NO_PLAYERS_SELECTED: 'no-players-selected',
+  NO_COMPONENTS_SELECTED: 'no-components-selected',
+  SELECTABLE_BUTTON: 'selectable-button',
+  ERRORED_PLAYER: 'errored-player',
+  ENDED_PLAYER: 'ended-player',
+  ACTIVE_PLAYER: 'active-player',
+};
+
+function removeChildren(element) {
+  while (element.hasChildNodes()) {
+    element.removeChild(element.lastChild);
+  }
+}
+
+function createSelectableButton(
+    id, groupName, buttonLabel, selectCb, playerState) {
+  // For CSS styling.
+  const radioButton = document.createElement('input');
+  radioButton.classList.add(ClientRendererCss.SELECTABLE_BUTTON);
+  radioButton.type = 'radio';
+  radioButton.id = id;
+  radioButton.name = groupName;
+
+  buttonLabel.classList.add(ClientRendererCss.SELECTABLE_BUTTON);
+  if (playerState === 'errored') {
+    buttonLabel.classList.add(ClientRendererCss.ERRORED_PLAYER);
+  } else if (playerState === 'ended') {
+    buttonLabel.classList.add(ClientRendererCss.ENDED_PLAYER);
+  } else {
+    buttonLabel.classList.add(ClientRendererCss.ACTIVE_PLAYER);
+  }
+  buttonLabel.setAttribute('for', radioButton.id);
+
+  const fragment = document.createDocumentFragment();
+  fragment.appendChild(radioButton);
+  fragment.appendChild(buttonLabel);
+
+  // Listen to 'change' rather than 'click' to keep styling in sync with
+  // button behavior.
+  radioButton.addEventListener('change', selectCb);
+
+  return fragment;
+}
+
+function selectSelectableButton(id) {
+  // |id| is usually not a valid selector for querySelector so we cannot use $
+  // here.
+  const element = document.getElementById(id);
+  if (!element) {
+    console.error('failed to select button with id: ' + id);
+    return;
+  }
+
+  element.checked = true;
+}
+
+function downloadLog(text) {
+  const file = new Blob([text], {type: 'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file);
+  a.download = 'media-internals.txt';
+  a.click();
+}
+
+export class ClientRenderer {
+  constructor() {
     this.playerListElement = $('player-list');
-    var audioTableElement = $('audio-property-table');
+    const audioTableElement = $('audio-property-table');
     if (audioTableElement) {
       this.audioPropertiesTable = audioTableElement.querySelector('tbody');
     }
-    var playerTableElement = $('player-property-table');
+    const playerTableElement = $('player-property-table');
     if (playerTableElement) {
       this.playerPropertiesTable = playerTableElement.querySelector('tbody');
     }
-    var logElement = $('log');
+    const logElement = $('log');
     if (logElement) {
       this.logTable = logElement.querySelector('tbody');
     }
     this.graphElement = $('graphs');
     this.audioPropertyName = $('audio-property-name');
     this.audioFocusSessionListElement_ = $('audio-focus-session-list');
-    var generalAudioInformationTableElement = $('general-audio-info-table');
+    this.cdmListElement_ =  $('cdm-list');
+    const generalAudioInformationTableElement = $('general-audio-info-table');
     if (generalAudioInformationTableElement) {
       this.generalAudioInformationTable =
           generalAudioInformationTableElement.querySelector('tbody');
     }
 
-    this.players = null;
+    this.players = {};
+    this.registeredCdms = [];
     this.selectedPlayer = null;
     this.selectedAudioComponentType = null;
     this.selectedAudioComponentId = null;
@@ -39,19 +117,18 @@ var ClientRenderer = (function() {
     };
     this.filterText = $('filter-text');
     if (this.filterText) {
-      this.filterText.onkeyup = this.onTextChange_.bind(this);
+      this.filterText.addEventListener('input', this.onTextChange_.bind(this));
     }
-    this.clipboardDialog = $('clipboard-dialog');
 
-    this.clipboardTextarea = $('clipboard-textarea');
-    if (this.clipboardTextarea) {
-      this.clipboardTextarea.onblur = this.hideClipboard_.bind(this);
+    this.playerFilterText = $('player-filter-text');
+    if (this.playerFilterText) {
+      this.playerFilterText.addEventListener(
+          'input', this.onPlayerFilterChange_.bind(this));
     }
-    var clipboardButtons = document.getElementsByClassName('copy-button');
-    if (clipboardButtons) {
-      for (var i = 0; i < clipboardButtons.length; i++) {
-        clipboardButtons[i].onclick = this.copyToClipboard_.bind(this);
-      }
+
+    this.copyLogButton = $('copy-log-button');
+    if (this.copyLogButton) {
+      this.copyLogButton.onclick = this.copyLog_.bind(this);
     }
 
     this.saveLogButton = $('save-log-button');
@@ -59,500 +136,658 @@ var ClientRenderer = (function() {
       this.saveLogButton.onclick = this.saveLog_.bind(this);
     }
 
-    this.hiddenKeys = ['component_id', 'component_type', 'owner_id'];
+    this.copyCdmsButton = $('copy-cdm-button');
+    if (this.copyCdmsButton) {
+      this.copyCdmsButton.onclick = this.copyCdms_.bind(this);
+    }
 
-    // Tell CSS to hide certain content prior to making selections.
-    document.body.classList.add(ClientRenderer.Css_.NO_PLAYERS_SELECTED);
-    document.body.classList.add(ClientRenderer.Css_.NO_COMPONENTS_SELECTED);
-  };
+    this.closePlayerViewButton = $('close-player-view-button');
+    if (this.closePlayerViewButton) {
+      this.closePlayerViewButton.onclick = () => {
+        $('main-container').classList.remove('mobile-player-view-active');
+        document.body.classList.add(ClientRendererCss.NO_PLAYERS_SELECTED);
+        if (this.selectedPlayer) {
+          const element = this.playerListElement.querySelector(
+              `.tree-item[data-id="${this.selectedPlayer.id}"]`);
+          if (element) {
+            element.classList.remove('selected');
+          }
+          this.selectedPlayer = null;
+          const titleElement = $('player-details-title');
+          if (titleElement) {
+            titleElement.textContent = 'Player Properties';
+            titleElement.title = '';
+          }
+        }
+      };
+    }
+
+    this.hiddenKeys = ['component_id', 'component_type', 'owner_id'];
+    this.revision = loadTimeData.getString('revision');
+
+    document.body.classList.add(ClientRendererCss.NO_PLAYERS_SELECTED);
+  }
 
   /**
-   * CSS classes added / removed in JS to trigger styling changes.
-   * @private @enum {string}
+   * Called to set general audio information.
+   * @param audioInfo The map of information.
    */
-  ClientRenderer.Css_ = {
-    NO_PLAYERS_SELECTED: 'no-players-selected',
-    NO_COMPONENTS_SELECTED: 'no-components-selected',
-    SELECTABLE_BUTTON: 'selectable-button',
-    DESTRUCTED_PLAYER: 'destructed-player',
-  };
+  generalAudioInformationSet(audioInfo) {
+    this.drawProperties_(audioInfo, this.generalAudioInformationTable);
+  }
 
-  function removeChildren(element) {
-    while (element.hasChildNodes()) {
-      element.removeChild(element.lastChild);
+  /**
+   * Called when an audio component is added to the collection.
+   * @param componentType Integer AudioComponent enum value; must match values
+   * from the AudioLogFactory::AudioComponent enum.
+   * @param components The entire map of components (name -> dict).
+   */
+  audioComponentAdded(componentType, components) {
+    this.redrawAudioComponentList_(componentType, components);
+
+    // Redraw the component if it's currently selected.
+    if (this.selectedAudioComponentType === componentType &&
+        this.selectedAudioComponentId &&
+        this.selectedAudioComponentId in components) {
+      // TODO(chcunningham): This path is used both for adding and updating
+      // the components. Split this up to have a separate update method.
+      // At present, this selectAudioComponent call is key to *updating* the
+      // the property table for existing audio components.
+      this.selectAudioComponent_(
+          componentType, this.selectedAudioComponentId,
+          components[this.selectedAudioComponentId]);
     }
   }
 
-  function createSelectableButton(
-      id, groupName, buttonLabel, select_cb, isDestructed) {
-    // For CSS styling.
-    var radioButton = document.createElement('input');
-    radioButton.classList.add(ClientRenderer.Css_.SELECTABLE_BUTTON);
-    radioButton.type = 'radio';
-    radioButton.id = id;
-    radioButton.name = groupName;
+  /**
+   * Called when the list of audio focus sessions has changed.
+   * @param sessions A list of media sessions that contain the current state.
+   */
+  audioFocusSessionUpdated(sessions) {
+    removeChildren(this.audioFocusSessionListElement_);
 
-    buttonLabel.classList.add(ClientRenderer.Css_.SELECTABLE_BUTTON);
-    if (isDestructed) {
-      buttonLabel.classList.add(ClientRenderer.Css_.DESTRUCTED_PLAYER);
-    }
-    buttonLabel.setAttribute('for', radioButton.id);
+    sessions.forEach(session => {
+      this.audioFocusSessionListElement_.appendChild(
+          this.createAudioFocusSessionRow_(session));
+    });
+  }
 
-    var fragment = document.createDocumentFragment();
-    fragment.appendChild(radioButton);
-    fragment.appendChild(buttonLabel);
+  /**
+   * Called when the list of CDM info has changed.
+   * @param sessions A list of CDM info that contain the current state.
+   */
+  updateRegisteredCdms(cdms) {
+    this.registeredCdms = cdms || [];
+    const fragment = document.createDocumentFragment();
 
-    // Listen to 'change' rather than 'click' to keep styling in sync with
-    // button behavior.
-    radioButton.addEventListener('change', function() {
-      select_cb();
+    this.registeredCdms.forEach(cdm => {
+      fragment.appendChild(this.createCdmRow_(cdm));
     });
 
-    return fragment;
+    removeChildren(this.cdmListElement_);
+    this.cdmListElement_.appendChild(fragment);
+
+    if (this.copyCdmsButton) {
+      this.copyCdmsButton.disabled = this.registeredCdms.length === 0;
+    }
   }
 
-  function selectSelectableButton(id) {
-    var element = $(id);
-    if (!element) {
-      console.error('failed to select button with id: ' + id);
+  /**
+   * Called when an audio component is removed from the collection.
+   * @param componentType Integer AudioComponent enum value; must match values
+   * from the AudioLogFactory::AudioComponent enum.
+   * @param components The entire map of components (name -> dict).
+   */
+  audioComponentRemoved(componentType, components) {
+    this.redrawAudioComponentList_(componentType, components);
+  }
+
+  /**
+   * Called when a player is added to the collection.
+   * @param players The entire map of id -> player.
+   * @param player_added The player that is added.
+   */
+  playerAdded(players, playerAdded) {
+    this.redrawPlayerList_(players);
+  }
+
+  /**
+   * Called when a player is removed from the collection.
+   * @param players The entire map of id -> player.
+   * @param playerRemoved The player that was removed.
+   */
+  playerRemoved(players, playerRemoved) {
+    if (playerRemoved === this.selectedPlayer) {
+      removeChildren(this.playerPropertiesTable);
+      removeChildren(this.logTable);
+      removeChildren(this.graphElement);
+      document.body.classList.add(ClientRendererCss.NO_PLAYERS_SELECTED);
+      this.selectedPlayer = null;
+      const titleElement = $('player-details-title');
+      if (titleElement) {
+        titleElement.textContent = 'Player Properties';
+        titleElement.title = '';
+      }
+    }
+    this.redrawPlayerList_(players);
+  }
+
+  /**
+   * Called when a property on a player is changed.
+   * @param players The entire map of id -> player.
+   * @param player The player that had its property changed.
+   * @param key The name of the property that was changed.
+   * @param value The new value of the property.
+   */
+  playerUpdated(players, player, key, value) {
+    if (player === this.selectedPlayer) {
+      this.drawProperties_(player.properties, this.playerPropertiesTable);
+      this.drawLog_();
+    }
+    if (key === 'error') {
+      player.playerState = 'errored';
+    } else if (
+        key === 'event' && value === 'kWebMediaPlayerDestroyed' &&
+        player.playerState !== 'errored') {
+      player.playerState = 'ended';
+    } else if (key === 'url') {
+      player.loweredUrl = value.toLowerCase();
+    }
+    if ([
+          'url',
+          'frame_url',
+          'frame_title',
+          'audio_codec_name',
+          'video_codec_name',
+          'width',
+          'height',
+          'event',
+          'error',
+        ].includes(key)) {
+      this.redrawPlayerList_(players);
+    }
+  }
+
+  createVideoCaptureFormatTable(formats) {
+    if (!formats || formats.length === 0) {
+      return document.createTextNode('No formats');
+    }
+
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const theadRow = document.createElement('tr');
+    for (const key in formats[0]) {
+      const th = document.createElement('th');
+      th.appendChild(document.createTextNode(key));
+      theadRow.appendChild(th);
+    }
+    thead.appendChild(theadRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (let i = 0; i < formats.length; ++i) {
+      const tr = document.createElement('tr');
+      for (const key in formats[i]) {
+        const td = document.createElement('td');
+        td.appendChild(document.createTextNode(formats[i][key]));
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    table.classList.add('video-capture-formats-table');
+    return table;
+  }
+
+  redrawVideoCaptureCapabilities(videoCaptureCapabilities, keys) {
+    const copyButtonElement = $('video-capture-capabilities-copy-button');
+    copyButtonElement.onclick = function() {
+      this.renderClipboard(
+          JSON.stringify(videoCaptureCapabilities, null, 2), copyButtonElement);
+    }.bind(this);
+
+    const videoTableBodyElement = $('video-capture-capabilities-tbody');
+    removeChildren(videoTableBodyElement);
+
+    for (const component in videoCaptureCapabilities) {
+      const tableRow = document.createElement('tr');
+      const device = videoCaptureCapabilities[component];
+      for (const i in keys) {
+        const value = device[keys[i]];
+        const tableCell = document.createElement('td');
+        let cellElement;
+        if ((typeof value) === (typeof[])) {
+          cellElement = this.createVideoCaptureFormatTable(value);
+        } else {
+          cellElement = document.createTextNode(
+              ((typeof value) === 'undefined') ? 'n/a' : value);
+        }
+        tableCell.appendChild(cellElement);
+        tableRow.appendChild(tableCell);
+      }
+      videoTableBodyElement.appendChild(tableRow);
+    }
+  }
+
+  getAudioComponentName_(componentType, id) {
+    let baseName;
+    switch (componentType) {
+      case 0:
+      case 1:
+        baseName = 'Controller';
+        break;
+      case 2:
+        baseName = 'Stream';
+        break;
+      default:
+        baseName = 'UnknownType';
+        console.error('Unrecognized component type: ' + componentType);
+        break;
+    }
+    return baseName + ' ' + id;
+  }
+
+  getListElementForAudioComponent_(componentType) {
+    let listElement;
+    switch (componentType) {
+      case 0:
+        listElement = $('audio-input-controller-list');
+        break;
+      case 1:
+        listElement = $('audio-output-controller-list');
+        break;
+      case 2:
+        listElement = $('audio-output-stream-list');
+        break;
+      default:
+        console.error('Unrecognized component type: ' + componentType);
+        listElement = null;
+        break;
+    }
+    return listElement;
+  }
+
+  redrawAudioComponentList_(componentType, components) {
+    const listElement = this.getListElementForAudioComponent_(componentType);
+    if (!listElement) {
+      console.error(
+          'Failed to find list element for component type: ' + componentType);
       return;
     }
 
-    element.checked = true;
-  }
+    const fragment = document.createDocumentFragment();
+    for (const id in components) {
+      const component = components[id];
 
-  function downloadLog(text) {
-    var file = new Blob([text], {type: 'text/plain'});
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(file);
-    a.download = 'media-internals.txt';
-    a.click();
-  }
+      const treeItem = document.createElement('div');
+      treeItem.classList.add('tree-item');
+      treeItem.dataset.id = id;
+      treeItem.classList.add(ClientRendererCss.ACTIVE_PLAYER);
 
-  ClientRenderer.prototype = {
-    /**
-     * Called to set general audio information.
-     @param audioInfo The map of information.
-     */
-    generalAudioInformationSet: function(audioInfo) {
-      this.drawProperties_(audioInfo, this.generalAudioInformationTable);
-    },
+      const treeItemHeader = document.createElement('div');
+      treeItemHeader.classList.add('tree-item-header');
+      treeItemHeader.textContent =
+          this.getAudioComponentName_(componentType, id);
+      treeItem.appendChild(treeItemHeader);
 
-    /**
-     * Called when an audio component is added to the collection.
-     * @param componentType Integer AudioComponent enum value; must match values
-     * from the AudioLogFactory::AudioComponent enum.
-     * @param components The entire map of components (name -> dict).
-     */
-    audioComponentAdded: function(componentType, components) {
-      this.redrawAudioComponentList_(componentType, components);
+      const children = document.createElement('div');
+      children.classList.add('tree-item-children');
+      treeItem.appendChild(children);
 
-      // Redraw the component if it's currently selected.
-      if (this.selectedAudioComponentType === componentType &&
-          this.selectedAudioComponentId &&
-          this.selectedAudioComponentId in components) {
-        // TODO(chcunningham): This path is used both for adding and updating
-        // the components. Split this up to have a separate update method.
-        // At present, this selectAudioComponent call is key to *updating* the
-        // the property table for existing audio components.
-        this.selectAudioComponent_(
-            componentType, this.selectedAudioComponentId,
-            components[this.selectedAudioComponentId]);
-      }
-    },
-
-    /**
-     * Called when the list of audio focus sessions has changed.
-     * @param sessions A list of media sessions that contain the current state.
-     */
-    audioFocusSessionUpdated: function(sessions) {
-      removeChildren(this.audioFocusSessionListElement_);
-
-      sessions.forEach(session => {
-        this.audioFocusSessionListElement_.appendChild(
-            this.createAudioFocusSessionRow_(session));
+      treeItemHeader.addEventListener('click', (e) => {
+        treeItem.classList.toggle('expanded');
+        this.selectAudioComponent_(componentType, id, component);
       });
-    },
 
-    /**
-     * Called when an audio component is removed from the collection.
-     * @param componentType Integer AudioComponent enum value; must match values
-     * from the AudioLogFactory::AudioComponent enum.
-     * @param components The entire map of components (name -> dict).
-     */
-    audioComponentRemoved: function(componentType, components) {
-      this.redrawAudioComponentList_(componentType, components);
-    },
+      fragment.appendChild(treeItem);
+    }
+    removeChildren(listElement);
+    listElement.appendChild(fragment);
 
-    /**
-     * Called when a player is added to the collection.
-     * @param players The entire map of id -> player.
-     * @param player_added The player that is added.
-     */
-    playerAdded: function(players, playerAdded) {
-      this.redrawPlayerList_(players);
-    },
-
-    /**
-     * Called when a player is removed from the collection.
-     * @param players The entire map of id -> player.
-     * @param playerRemoved The player that was removed.
-     */
-    playerRemoved: function(players, playerRemoved) {
-      if (playerRemoved === this.selectedPlayer) {
-        removeChildren(this.playerPropertiesTable);
-        removeChildren(this.logTable);
-        removeChildren(this.graphElement);
-        document.body.classList.add(ClientRenderer.Css_.NO_PLAYERS_SELECTED);
+    if (this.selectedAudioComponentType &&
+        this.selectedAudioComponentType === componentType &&
+        this.selectedAudioComponentId in components) {
+      // Re-select the selected component since the button was just recreated.
+      const element = listElement.querySelector(
+          `.tree-item[data-id="${this.selectedAudioComponentId}"]`);
+      if (element) {
+        element.classList.add('selected');
       }
-      this.redrawPlayerList_(players);
-    },
+    }
+  }
 
-    /**
-     * Called when a property on a player is changed.
-     * @param players The entire map of id -> player.
-     * @param player The player that had its property changed.
-     * @param key The name of the property that was changed.
-     * @param value The new value of the property.
-     */
-    playerUpdated: function(players, player, key, value) {
-      if (player === this.selectedPlayer) {
-        this.drawProperties_(player.properties, this.playerPropertiesTable);
-        this.drawLog_();
+  selectAudioComponent_(componentType, componentId, componentData) {
+    const audioWrapper = $('audio-component-list-wrapper');
+    if (audioWrapper) {
+      const previouslySelected =
+          audioWrapper.querySelector('.tree-item.selected');
+      if (previouslySelected) {
+        previouslySelected.classList.remove('selected');
       }
-      if (key === 'event' && value === 'WEBMEDIAPLAYER_DESTROYED') {
-        player.destructed = true;
-      }
-      if ([
-            'url', 'frame_url', 'frame_title', 'audio_codec_name',
-            'video_codec_name', 'width', 'height', 'event'
-          ].includes(key)) {
-        this.redrawPlayerList_(players);
-      }
-    },
+    }
 
-    createVideoCaptureFormatTable: function(formats) {
-      if (!formats || formats.length === 0) {
-        return document.createTextNode('No formats');
+    const listElement = this.getListElementForAudioComponent_(componentType);
+    if (listElement) {
+      const element =
+          listElement.querySelector(`.tree-item[data-id="${componentId}"]`);
+      if (element) {
+        element.classList.add('selected');
+      }
+    }
+
+    this.selectedAudioComponentType = componentType;
+    this.selectedAudioComponentId = componentId;
+    this.selectedAudioCompontentData = componentData;
+    this.drawProperties_(componentData, this.audioPropertiesTable);
+
+    removeChildren(this.audioPropertyName);
+    this.audioPropertyName.appendChild(document.createTextNode(
+        this.getAudioComponentName_(componentType, componentId)));
+  }
+
+  redrawPlayerList_(players) {
+    this.players = players;
+
+    const fragment = document.createDocumentFragment();
+    for (const id in players) {
+      const player = players[id];
+      const p = player.properties;
+
+      if (!player.loweredUrl) {
+        player.loweredUrl = (p.url || 'Player ' + player.id).toLowerCase();
       }
 
-      var table = document.createElement('table');
-      var thead = document.createElement('thead');
-      var theadRow = document.createElement('tr');
-      for (var key in formats[0]) {
-        var th = document.createElement('th');
-        th.appendChild(document.createTextNode(key));
-        theadRow.appendChild(th);
+      const url = p.url || 'Player ' + player.id;
+
+      const treeItem = document.createElement('div');
+      treeItem.classList.add('tree-item');
+      if (player.playerState === 'errored') {
+        treeItem.classList.add(ClientRendererCss.ERRORED_PLAYER);
+      } else if (player.playerState === 'ended') {
+        treeItem.classList.add(ClientRendererCss.ENDED_PLAYER);
+      } else {
+        treeItem.classList.add(ClientRendererCss.ACTIVE_PLAYER);
       }
-      thead.appendChild(theadRow);
-      table.appendChild(thead);
-      var tbody = document.createElement('tbody');
-      for (var i = 0; i < formats.length; ++i) {
-        var tr = document.createElement('tr');
-        for (var key in formats[i]) {
-          var td = document.createElement('td');
-          td.appendChild(document.createTextNode(formats[i][key]));
-          tr.appendChild(td);
-        }
-        tbody.appendChild(tr);
+      treeItem.dataset.id = id;
+
+      const treeItemHeader = document.createElement('div');
+      treeItemHeader.classList.add('tree-item-header');
+      treeItemHeader.classList.add('selectable-button');
+
+      const playerName = document.createElement('div');
+      playerName.classList.add('player-name');
+      if (url.length > 64) {
+        playerName.textContent = url.substring(0, 61) + '...';
+      } else {
+        playerName.textContent = url;
       }
-      table.appendChild(tbody);
-      table.classList.add('video-capture-formats-table');
-      return table;
-    },
+      playerName.title = url;
+      treeItemHeader.appendChild(playerName);
 
-    redrawVideoCaptureCapabilities: function(videoCaptureCapabilities, keys) {
-      var copyButtonElement = $('video-capture-capabilities-copy-button');
-      copyButtonElement.onclick = function() {
-        this.showClipboard(JSON.stringify(videoCaptureCapabilities, null, 2));
-      }.bind(this);
-
-      var videoTableBodyElement = $('video-capture-capabilities-tbody');
-      removeChildren(videoTableBodyElement);
-
-      for (var component in videoCaptureCapabilities) {
-        var tableRow = document.createElement('tr');
-        var device = videoCaptureCapabilities[component];
-        for (var i in keys) {
-          var value = device[keys[i]];
-          var tableCell = document.createElement('td');
-          var cellElement;
-          if ((typeof value) === (typeof[])) {
-            cellElement = this.createVideoCaptureFormatTable(value);
-          } else {
-            cellElement = document.createTextNode(
-                ((typeof value) === 'undefined') ? 'n/a' : value);
-          }
-          tableCell.appendChild(cellElement);
-          tableRow.appendChild(tableCell);
-        }
-        videoTableBodyElement.appendChild(tableRow);
-      }
-    },
-
-    getAudioComponentName_: function(componentType, id) {
-      var baseName;
-      switch (componentType) {
-        case 0:
-        case 1:
-          baseName = 'Controller';
+      let lastEvent = '';
+      for (let i = player.allEvents.length - 1; i >= 0; i--) {
+        if (player.allEvents[i].key === 'event') {
+          lastEvent = player.allEvents[i].value;
           break;
-        case 2:
-          baseName = 'Stream';
-          break;
-        default:
-          baseName = 'UnknownType';
-          console.error('Unrecognized component type: ' + componentType);
-          break;
-      }
-      return baseName + ' ' + id;
-    },
-
-    getListElementForAudioComponent_: function(componentType) {
-      var listElement;
-      switch (componentType) {
-        case 0:
-          listElement = $('audio-input-controller-list');
-          break;
-        case 1:
-          listElement = $('audio-output-controller-list');
-          break;
-        case 2:
-          listElement = $('audio-output-stream-list');
-          break;
-        default:
-          console.error('Unrecognized component type: ' + componentType);
-          listElement = null;
-          break;
-      }
-      return listElement;
-    },
-
-    redrawAudioComponentList_: function(componentType, components) {
-      // Group name imposes rule that only one component can be selected
-      // (and have its properties displayed) at a time.
-      var buttonGroupName = 'audio-components';
-
-      var listElement = this.getListElementForAudioComponent_(componentType);
-      if (!listElement) {
-        console.error(
-            'Failed to find list element for component type: ' + componentType);
-        return;
+        }
       }
 
-      var fragment = document.createDocumentFragment();
-      for (var id in components) {
-        var li = document.createElement('li');
-        var buttonCb = this.selectAudioComponent_.bind(
-            this, componentType, id, components[id]);
-        var friendlyName = this.getAudioComponentName_(componentType, id);
-        var label = document.createElement('label');
-        label.appendChild(document.createTextNode(friendlyName));
-        li.appendChild(
-            createSelectableButton(id, buttonGroupName, label, buttonCb));
-        fragment.appendChild(li);
+      if (lastEvent) {
+        const playerFrame = document.createElement('div');
+        playerFrame.classList.add('player-frame');
+        playerFrame.textContent =
+            lastEvent === 'kWebMediaPlayerDestroyed' ? 'Destroyed' : lastEvent;
+        treeItemHeader.appendChild(playerFrame);
       }
-      removeChildren(listElement);
-      listElement.appendChild(fragment);
+      treeItem.appendChild(treeItemHeader);
 
-      if (this.selectedAudioComponentType &&
-          this.selectedAudioComponentType === componentType &&
-          this.selectedAudioComponentId in components) {
-        // Re-select the selected component since the button was just recreated.
-        selectSelectableButton(this.selectedAudioComponentId);
+      const children = document.createElement('div');
+      children.classList.add('tree-item-children');
+      treeItem.appendChild(children);
+
+      treeItemHeader.addEventListener('click', (e) => {
+        treeItem.classList.toggle('expanded');
+        this.selectPlayer_(player);
+      });
+
+      fragment.appendChild(treeItem);
+    }
+    removeChildren(this.playerListElement);
+    this.playerListElement.appendChild(fragment);
+
+    this.applyPlayerFilter_();
+
+    if (this.selectedPlayer && this.selectedPlayer.id in players) {
+      // Re-select the selected player since the button was just recreated.
+      const element = this.playerListElement.querySelector(
+          `.tree-item[data-id="${this.selectedPlayer.id}"]`);
+      if (element) {
+        element.classList.add('selected');
       }
-    },
+    }
+  }
 
-    selectAudioComponent_: function(componentType, componentId, componentData) {
-      document.body.classList.remove(
-          ClientRenderer.Css_.NO_COMPONENTS_SELECTED);
-
-      this.selectedAudioComponentType = componentType;
-      this.selectedAudioComponentId = componentId;
-      this.selectedAudioCompontentData = componentData;
-      this.drawProperties_(componentData, this.audioPropertiesTable);
-
-      removeChildren(this.audioPropertyName);
-      this.audioPropertyName.appendChild(document.createTextNode(
-          this.getAudioComponentName_(componentType, componentId)));
-    },
-
-    redrawPlayerList_: function(players) {
-      this.players = players;
-
-      // Group name imposes rule that only one component can be selected
-      // (and have its properties displayed) at a time.
-      var buttonGroupName = 'player-buttons';
-
-      var hasPlayers = false;
-      var fragment = document.createDocumentFragment();
-      for (var id in players) {
-        hasPlayers = true;
-        var player = players[id];
-        var p = player.properties;
-        var label = document.createElement('label');
-
-        var nameText = p.url || 'Player ' + player.id;
-        var nameNode = document.createElement('div');
-        nameNode.appendChild(document.createTextNode(nameText));
-        nameNode.className = 'player-name';
-        label.appendChild(nameNode);
-
-        var frame = [];
-        if (p.frame_title) {
-          frame.push(p.frame_title);
-        }
-        if (p.frame_url) {
-          frame.push(p.frame_url);
-        }
-        var frameText = frame.join(' - ');
-        if (frameText) {
-          var frameNode = document.createElement('div');
-          frameNode.className = 'player-frame';
-          frameNode.appendChild(document.createTextNode(frameText));
-          label.appendChild(frameNode);
-        }
-
-        var desc = [];
-        if (p.width && p.height) {
-          desc.push(p.width + 'x' + p.height);
-        }
-        if (p.video_codec_name) {
-          desc.push(p.video_codec_name);
-        }
-        if (p.video_codec_name && p.audio_codec_name) {
-          desc.push('+');
-        }
-        if (p.audio_codec_name) {
-          desc.push(p.audio_codec_name);
-        }
-        if (p.event) {
-          desc.push('(' + p.event + ')');
-        }
-        var descText = desc.join(' ');
-        if (descText) {
-          var descNode = document.createElement('div');
-          descNode.className = 'player-desc';
-          descNode.appendChild(document.createTextNode(descText));
-          label.appendChild(descNode);
-        }
-
-        var li = document.createElement('li');
-        var buttonCb = this.selectPlayer_.bind(this, player);
-        li.appendChild(createSelectableButton(
-            id, buttonGroupName, label, buttonCb, player.destructed));
-        fragment.appendChild(li);
+  applyPlayerFilter_() {
+    const filterText =
+        this.playerFilterText ? this.playerFilterText.value.toLowerCase() : '';
+    const items = this.playerListElement.querySelectorAll('.tree-item');
+    for (const item of items) {
+      const id = item.dataset.id;
+      const player = this.players[id];
+      if (filterText && player && player.loweredUrl &&
+          !player.loweredUrl.includes(filterText)) {
+        item.hidden = true;
+      } else {
+        item.hidden = false;
       }
-      removeChildren(this.playerListElement);
-      this.playerListElement.appendChild(fragment);
+    }
+  }
 
-      if (this.selectedPlayer && this.selectedPlayer.id in players) {
-        // Re-select the selected player since the button was just recreated.
-        selectSelectableButton(this.selectedPlayer.id);
+  selectPlayer_(player) {
+    if (window.innerWidth <= 768) {
+      $('main-container').classList.add('mobile-player-view-active');
+    }
+
+    document.body.classList.remove(ClientRendererCss.NO_PLAYERS_SELECTED);
+
+    const previouslySelected =
+        this.playerListElement.querySelector('.tree-item.selected');
+    if (previouslySelected) {
+      previouslySelected.classList.remove('selected');
+    }
+
+    const element = this.playerListElement.querySelector(
+        `.tree-item[data-id="${player.id}"]`);
+    if (element) {
+      element.classList.add('selected');
+    }
+
+    this.selectedPlayer = player;
+    this.selectedPlayerLogIndex = 0;
+    this.selectedAudioComponentType = null;
+    this.selectedAudioComponentId = null;
+    this.selectedAudioCompontentData = null;
+    this.drawProperties_(player.properties, this.playerPropertiesTable);
+
+    removeChildren(this.logTable);
+    removeChildren(this.graphElement);
+    this.drawLog_();
+
+    const titleElement = $('player-details-title');
+    if (titleElement) {
+      const playerName = player.properties.url || 'Player ' + player.id;
+      titleElement.textContent = playerName;
+      titleElement.title = playerName;
+    }
+  }
+
+  drawProperties_(propertyMap, propertiesTable) {
+    removeChildren(propertiesTable);
+    const sortedKeys = Object.keys(propertyMap).sort();
+    for (let i = 0; i < sortedKeys.length; ++i) {
+      const key = sortedKeys[i];
+      if (this.hiddenKeys.indexOf(key) >= 0) {
+        continue;
       }
 
-      this.saveLogButton.style.display = hasPlayers ? 'inline-block' : 'none';
-    },
+      const value = propertyMap[key];
+      const row = propertiesTable.insertRow(-1);
+      const keyCell = row.insertCell(-1);
+      const valueCell = row.insertCell(-1);
 
-    selectPlayer_: function(player) {
-      document.body.classList.remove(ClientRenderer.Css_.NO_PLAYERS_SELECTED);
+      keyCell.appendChild(document.createTextNode(key));
+      valueCell.appendChild(this.createValueCellContent_(key, value));
+    }
+  }
 
-      this.selectedPlayer = player;
-      this.selectedPlayerLogIndex = 0;
-      this.selectedAudioComponentType = null;
-      this.selectedAudioComponentId = null;
-      this.selectedAudioCompontentData = null;
-      this.drawProperties_(player.properties, this.playerPropertiesTable);
+  applyCodeSearchLinkage_(status_obj) {
+    if (status_obj.hasOwnProperty('stack')) {
+      status_obj['stack'] = status_obj['stack'].map(e => {
+        if (typeof(e) === 'string') return e;
+        return '~{' + e['file'] + '%' + e['line'] + '}~';
+      });
+    }
+    if (status_obj.hasOwnProperty('cause')) {
+      status_obj['cause'] = this.applyCodeSearchLinkage_(status_obj['cause']);
+    }
+    return status_obj;
+  }
 
-      removeChildren(this.logTable);
-      removeChildren(this.graphElement);
-      this.drawLog_();
-    },
+  createValueCellContent_(key, value) {
+    // This is a bit of a hack, but it's the only way to get the stack trace
+    // to link to the code search.
+    const urlPrefix = 'https://source.chromium.org/chromium/chromium/src/+/main:';
 
-    drawProperties_: function(propertyMap, propertiesTable) {
-      removeChildren(propertiesTable);
-      var sortedKeys = Object.keys(propertyMap).sort();
-      for (var i = 0; i < sortedKeys.length; ++i) {
-        var key = sortedKeys[i];
-        if (this.hiddenKeys.indexOf(key) >= 0) {
-          continue;
+    const re = new RegExp('~{([^%]*)%([0-9]+)}~', 'g');
+    try {
+      if (key === 'kHlsBufferedRanges') {
+        return document.createTextNode(JSON.stringify(value));
+      }
+      const pre = document.createElement('pre');
+      const text = JSON.stringify(this.applyCodeSearchLinkage_(value), null, 2);
+      let lastIndex = 0;
+      for (const match of text.matchAll(re)) {
+        if (match.index > lastIndex) {
+          pre.appendChild(
+              document.createTextNode(text.substring(lastIndex, match.index)));
+        }
+        const a = document.createElement('a');
+        a.href = urlPrefix + match[1] + ';l=' + match[2];
+
+        // Building locally gives a commit hash of 80 zeros separated in the
+        // middle by a dash.
+        if (!this.revision.startsWith('0000000')) {
+          a.href += ';drc=' + this.revision;
         }
 
-        var value = propertyMap[key];
-        var row = propertiesTable.insertRow(-1);
-        var keyCell = row.insertCell(-1);
-        var valueCell = row.insertCell(-1);
-
-        keyCell.appendChild(document.createTextNode(key));
-        valueCell.appendChild(document.createTextNode(JSON.stringify(value)));
+        a.textContent = match[1] + '#' + match[2];
+        a.target = '_blank';
+        a.rel = 'noopener';
+        pre.appendChild(a);
+        lastIndex = match.index + match[0].length;
       }
-    },
-
-    appendEventToLog_: function(event) {
-      if (this.filterFunction(event.key)) {
-        var row = this.logTable.insertRow(-1);
-
-        var timestampCell = row.insertCell(-1);
-        timestampCell.classList.add('timestamp');
-        timestampCell.appendChild(
-            document.createTextNode(util.millisecondsToString(event.time)));
-        row.insertCell(-1).appendChild(document.createTextNode(event.key));
-        row.insertCell(-1).appendChild(
-            document.createTextNode(JSON.stringify(event.value)));
+      if (lastIndex < text.length) {
+        pre.appendChild(document.createTextNode(text.substring(lastIndex)));
       }
-    },
+      return pre;
+    } catch (e) {
+      return document.createTextNode(JSON.stringify(value));
+    }
+  }
 
-    drawLog_: function() {
-      var toDraw =
-          this.selectedPlayer.allEvents.slice(this.selectedPlayerLogIndex);
-      toDraw.forEach(this.appendEventToLog_.bind(this));
-      this.selectedPlayerLogIndex = this.selectedPlayer.allEvents.length;
-    },
+  appendEventToLog_(event) {
+    const row = this.logTable.insertRow(-1);
+    row.classList.add('log-entry');
+    row.dataset.key = event.key;
 
-    saveLog_: function() {
-      var strippedPlayers = [];
-      for (var id in this.players) {
-        var p = this.players[id];
-        strippedPlayers.push({properties: p.properties, events: p.allEvents});
-      }
-      downloadLog(JSON.stringify(strippedPlayers, null, 2));
-    },
+    const timestampCell = row.insertCell(-1);
+    timestampCell.classList.add('log-timestamp');
+    timestampCell.textContent = millisecondsToString(event.time);
 
-    showClipboard: function(string) {
-      this.clipboardTextarea.value = string;
-      this.clipboardDialog.showModal();
-      this.clipboardTextarea.focus();
-      this.clipboardTextarea.select();
-    },
+    const propertyCell = row.insertCell(-1);
+    propertyCell.classList.add('log-property');
+    propertyCell.textContent = event.key;
 
-    hideClipboard_: function() {
-      if (this.clipboardDialog.open) {
-        this.clipboardDialog.close();
-      }
-    },
+    const valueCell = row.insertCell(-1);
+    valueCell.classList.add('log-value');
+    valueCell.appendChild(this.createValueCellContent_(event.key, event.value));
 
-    copyToClipboard_: function() {
-      if (!this.selectedPlayer && !this.selectedAudioCompontentData) {
-        return;
-      }
-      var properties =
-          this.selectedAudioCompontentData || this.selectedPlayer.properties;
-      var stringBuffer = [];
+    if (event.key.toLowerCase().includes('error')) {
+      row.classList.add('log-error');
+    } else if (event.key.toLowerCase().includes('warning')) {
+      row.classList.add('log-warning');
+    }
 
-      for (var key in properties) {
-        var value = properties[key];
-        stringBuffer.push(key.toString());
-        stringBuffer.push(': ');
-        stringBuffer.push(value.toString());
-        stringBuffer.push('\n');
-      }
+    if (!this.filterFunction(event.key)) {
+      row.hidden = true;
+    }
+  }
 
-      this.showClipboard(stringBuffer.join(''));
-    },
+  drawLog_() {
+    const toDraw =
+        this.selectedPlayer.allEvents.slice(this.selectedPlayerLogIndex);
+    toDraw.forEach(this.appendEventToLog_.bind(this));
+    this.selectedPlayerLogIndex = this.selectedPlayer.allEvents.length;
+  }
 
-    onTextChange_: function(event) {
-      var text = this.filterText.value.toLowerCase();
-      var parts = text.split(',')
+  saveLog_() {
+    const strippedPlayers = [];
+    for (const id in this.players) {
+      const p = this.players[id];
+      strippedPlayers.push({properties: p.properties, events: p.allEvents});
+    }
+    downloadLog(JSON.stringify(strippedPlayers, null, 2));
+  }
+
+  copyLog_() {
+    if (!this.selectedPlayer) {
+      return;
+    }
+
+    // Copy both properties and events for convenience since both are useful
+    // in bug reports.
+    const p = this.selectedPlayer;
+    const playerLog = {properties: p.properties, events: p.allEvents};
+
+    this.renderClipboard(
+        JSON.stringify(playerLog, null, 2), this.copyLogButton);
+  }
+
+  copyCdms_() {
+    if (!this.registeredCdms || this.registeredCdms.length === 0) {
+      return;
+    }
+
+    const orderedCdms = this.registeredCdms.map(cdm => {
+      return {
+        name: cdm.name || '',
+        version: cdm.version || '',
+        status: cdm.status || '',
+        key_system: cdm.key_system || '',
+        robustness: cdm.robustness || '',
+        path: cdm.path || '',
+        capability: cdm.capability || {},
+      };
+    });
+    this.renderClipboard(
+        JSON.stringify(orderedCdms, null, 2), this.copyCdmsButton);
+  }
+
+  renderClipboard(string, feedbackElement) {
+    navigator.clipboard.writeText(string);
+    if (feedbackElement) {
+      const originalText = feedbackElement.textContent;
+      feedbackElement.textContent = 'Copied!';
+      feedbackElement.disabled = true;
+      setTimeout(() => {
+        feedbackElement.textContent = originalText;
+        feedbackElement.disabled = false;
+      }, 1000);
+    }
+  }
+
+  onTextChange_(event) {
+    const text = this.filterText.value.toLowerCase();
+    const parts = text.split(',')
                       .map(function(part) {
                         return part.trim();
                       })
@@ -560,29 +795,67 @@ var ClientRenderer = (function() {
                         return part.trim().length > 0;
                       });
 
-      this.filterFunction = function(text) {
-        text = text.toLowerCase();
-        return parts.length === 0 || parts.some(function(part) {
-          return text.indexOf(part) !== -1;
-        });
-      };
+    this.filterFunction = function(text) {
+      text = text.toLowerCase();
+      return parts.length === 0 || parts.some(function(part) {
+        return text.indexOf(part) !== -1;
+      });
+    };
 
-      if (this.selectedPlayer) {
-        removeChildren(this.logTable);
-        this.selectedPlayerLogIndex = 0;
-        this.drawLog_();
+    this.applyLogFilter_();
+  }
+
+  applyLogFilter_() {
+    for (const row of this.logTable.children) {
+      if (this.filterFunction(row.dataset.key)) {
+        row.hidden = false;
+      } else {
+        row.hidden = true;
       }
-    },
+    }
+  }
 
-    createAudioFocusSessionRow_: function(session) {
-      const template = $('audio-focus-session-row');
-      const span = template.content.querySelectorAll('span');
-      span[0].textContent = session.name;
-      span[1].textContent = session.owner;
-      span[2].textContent = session.state;
-      return document.importNode(template.content, true);
-    },
-  };
+  onPlayerFilterChange_(event) {
+    this.applyPlayerFilter_();
+  }
 
-  return ClientRenderer;
-})();
+  createAudioFocusSessionRow_(session) {
+    const template = $('audio-focus-session-row');
+    const span = template.content.querySelectorAll('span');
+    span[0].textContent = session.name;
+    span[1].textContent = session.owner;
+    span[2].textContent = session.state;
+    return document.importNode(template.content, true);
+  }
+
+  createCdmRow_(cdm) {
+    const template = $('cdm-row');
+    const clone = document.importNode(template.content, true);
+    const tableBody = clone.querySelector('tbody');
+
+
+    const addRow = (key, value) => {
+      const row = tableBody.insertRow(-1);
+      const keyCell = row.insertCell(-1);
+      const valueCell = row.insertCell(-1);
+      keyCell.textContent = key;
+      if (typeof value === 'object') {
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(value, null, 2);
+        valueCell.appendChild(pre);
+      } else {
+        valueCell.textContent = value;
+      }
+    };
+
+    addRow('Key System', cdm.key_system);
+    addRow('Robustness', cdm.robustness);
+    addRow('Name', cdm.name);
+    addRow('Version', cdm.version);
+    addRow('Path', cdm.path);
+    addRow('Status', cdm.status);
+    addRow('Capabilities', cdm.capability);
+
+    return clone;
+  }
+}

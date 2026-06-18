@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -9,10 +9,14 @@ from __future__ import print_function
 import ast
 import os
 import re
+import sys
 import xml.etree.cElementTree as ElementTree
 
+if sys.version_info.major != 2:
+  basestring = str  # pylint: disable=redefined-builtin
 
-class GRDFile(object):
+
+class GRDFile:
   """Class representing a grd xml file.
 
   Attributes:
@@ -64,7 +68,7 @@ class GRDFile(object):
 
 
 def get_translatable_grds(repo_root, all_grd_paths,
-                          translation_expectations_path):
+                          translation_expectations_path, is_cog):
   """Returns all the grds that should be translated as a list of GRDFiles.
 
   This verifies that every grd file that appears translatable is listed in
@@ -76,26 +80,41 @@ def get_translatable_grds(repo_root, all_grd_paths,
     all_grd_paths: All grd paths in the repository relative to repo_root.
     translation_expectations_path: The path to the translation expectations
         file, which specifies which grds to translate and into which languages.
+    is_cog: Whether the repository is a cog workspace (go/cog).
   """
   parsed_expectations = _parse_translation_expectations(
       translation_expectations_path)
   grd_to_langs, untranslated_grds, internal_grds = parsed_expectations
+  grds_with_expectations = set(grd_to_langs.keys()).union(untranslated_grds)
 
   errors = []
-  # Make sure that grds in internal_grds aren't processed, since they might
-  # contain pieces not available publicly.
-  for internal_grd in internal_grds:
-    try:
-      all_grd_paths.remove(internal_grd)
-    except ValueError:
-      errors.append(
-          '%s is listed in translation expectations as an internal file to be '
-          'ignored, but this grd file does not exist.' % internal_grd)
+  if is_cog and not all_grd_paths:
+    # Cog doesn't support git, so all_grd_paths will be an empty list.  We can
+    # still check that the expected grds exist, though.
+    all_grd_paths = [
+       p for p in grds_with_expectations
+       if os.path.exists(os.path.join(repo_root, p))
+    ]
+    for internal_grd in internal_grds:
+      if not os.path.exists(os.path.join(repo_root, internal_grd)):
+        errors.append(
+            '%s is listed in translation expectations as an internal file to '
+            'be ignored, but this grd file does not exist.' % internal_grd)
+  else:
+    # Make sure that grds in internal_grds aren't processed, since they might
+    # contain pieces not available publicly.
+    for internal_grd in internal_grds:
+      try:
+        all_grd_paths.remove(internal_grd)
+      except ValueError:
+        errors.append(
+            '%s is listed in translation expectations as an internal file to '
+            'be ignored, but this grd file does not exist.' % internal_grd)
+
   # Check that every grd that appears translatable is listed in
-  # the translation expectations.
-  grds_with_expectations = set(grd_to_langs.keys()).union(untranslated_grds)
+  # the translation expectations.  This is a no-op for Cog workspaces.
   all_grds = {p: GRDFile(os.path.join(repo_root, p)) for p in all_grd_paths}
-  for path, grd in all_grds.iteritems():
+  for path, grd in all_grds.items():
     if grd.appears_translatable:
       if path not in grds_with_expectations:
         errors.append('%s appears to be translatable (because it contains '
@@ -113,7 +132,7 @@ def get_translatable_grds(repo_root, all_grd_paths,
                     (translation_expectations_path, '\n - '.join(errors)))
 
   translatable_grds = []
-  for path, expected_languages_list in grd_to_langs.iteritems():
+  for path, expected_languages_list in grd_to_langs.items():
     grd = all_grds[path]
     grd.expected_languages = expected_languages_list
     grd._populate_lang_to_xtb_path(errors)
@@ -201,7 +220,7 @@ def _parse_translation_expectations(path):
     not be read by this helper (since they might contain parts not
     available publicly).
   """
-  with open(path) as f:
+  with open(path, encoding='utf-8') as f:
     file_contents = f.read()
 
   def assert_list_of_strings(l, name):

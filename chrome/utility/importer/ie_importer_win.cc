@@ -1,12 +1,14 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/utility/importer/ie_importer_win.h"
 
 #include <objbase.h>
+
 #include <ole2.h>
-#include <intshcut.h>  // Needs to come after ole2.h
+
+#include <intshcut.h>
 #include <shlobj.h>
 #include <stddef.h>
 #include <urlhist.h>
@@ -18,13 +20,12 @@
 #include <string>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
-#include "base/macros.h"
-#include "base/stl_util.h"
-#include "base/strings/string16.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -35,13 +36,13 @@
 #include "base/win/scoped_propvariant.h"
 #include "chrome/common/importer/edge_importer_utils_win.h"
 #include "chrome/common/importer/ie_importer_utils_win.h"
-#include "chrome/common/importer/imported_bookmark_entry.h"
 #include "chrome/common/importer/importer_bridge.h"
-#include "chrome/common/importer/importer_data_types.h"
-#include "chrome/common/importer/importer_url_row.h"
 #include "chrome/common/importer/pstore_declarations.h"
 #include "chrome/grit/generated_resources.h"
-#include "chrome/utility/importer/favicon_reencode.h"
+#include "components/user_data_importer/common/imported_bookmark_entry.h"
+#include "components/user_data_importer/common/importer_data_types.h"
+#include "components/user_data_importer/common/importer_url_row.h"
+#include "components/user_data_importer/content/favicon_reencode.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
@@ -49,31 +50,26 @@
 namespace {
 
 // Registry key paths from which we import IE settings.
-const base::char16 kSearchScopePath[] =
+const wchar_t kSearchScopePath[] =
     L"Software\\Microsoft\\Internet Explorer\\SearchScopes";
 
 // NTFS stream name of favicon image data.
-const base::char16 kFaviconStreamName[] = L":favicon:$DATA";
-
-// A struct that hosts the information of AutoComplete data in PStore.
-struct AutoCompleteInfo {
-  base::string16 key;
-  std::vector<base::string16> data;
-  bool is_url;
-};
+const wchar_t kFaviconStreamName[] = L":favicon:$DATA";
 
 // Gets the creation time of the given file or directory.
-base::Time GetFileCreationTime(const base::string16& file) {
+base::Time GetFileCreationTime(const base::FilePath& file) {
   base::Time creation_time;
   base::win::ScopedHandle file_handle(CreateFile(
-      file.c_str(), GENERIC_READ,
+      file.value().c_str(), GENERIC_READ,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL));
   FILETIME creation_filetime;
-  if (!file_handle.IsValid())
+  if (!file_handle.is_valid()) {
     return creation_time;
-  if (GetFileTime(file_handle.Get(), &creation_filetime, NULL, NULL))
+  }
+  if (GetFileTime(file_handle.get(), &creation_filetime, NULL, NULL)) {
     creation_time = base::Time::FromFileTime(creation_filetime);
+  }
   return creation_time;
 }
 
@@ -82,7 +78,7 @@ template <typename T>
 bool BinaryRead(T* data, size_t offset, const std::vector<uint8_t>& blob) {
   if (offset + sizeof(T) > blob.size())
     return false;
-  memcpy(data, &blob[offset], sizeof(T));
+  UNSAFE_TODO(memcpy(data, &blob[offset], sizeof(T)));
   return true;
 }
 
@@ -111,16 +107,18 @@ LPCITEMIDLIST BinaryReadItemIDList(size_t offset,
 // Compares the two bookmarks in the order of IE's Favorites menu.
 // Returns true if rhs should come later than lhs (lhs < rhs).
 struct IEOrderBookmarkComparator {
-  bool operator()(const ImportedBookmarkEntry& lhs,
-                  const ImportedBookmarkEntry& rhs) const {
+  bool operator()(const user_data_importer::ImportedBookmarkEntry& lhs,
+                  const user_data_importer::ImportedBookmarkEntry& rhs) const {
     static const uint32_t kNotSorted = 0xfffffffb;  // IE uses this magic value.
     base::FilePath lhs_prefix;
     base::FilePath rhs_prefix;
     for (size_t i = 0; i <= lhs.path.size() && i <= rhs.path.size(); ++i) {
       const base::FilePath::StringType lhs_i =
-          (i < lhs.path.size() ? lhs.path[i] : lhs.title + L".url");
+          (i < lhs.path.size() ? base::AsWString(lhs.path[i])
+                               : base::AsWString(lhs.title) + L".url");
       const base::FilePath::StringType rhs_i =
-          (i < rhs.path.size() ? rhs.path[i] : rhs.title + L".url");
+          (i < rhs.path.size() ? base::AsWString(rhs.path[i])
+                               : base::AsWString(rhs.title) + L".url");
       lhs_prefix = lhs_prefix.Append(lhs_i);
       rhs_prefix = rhs_prefix.Append(rhs_i);
       if (lhs_i == rhs_i)
@@ -141,7 +139,7 @@ struct IEOrderBookmarkComparator {
     }
     return lhs.path.size() < rhs.path.size();
   }
-  const std::map<base::FilePath, uint32_t>* sort_index_;
+  raw_ptr<const std::map<base::FilePath, uint32_t>> sort_index_;
 };
 
 // IE stores the order of the Favorites menu in registry under:
@@ -161,20 +159,11 @@ struct IEOrderBookmarkComparator {
 //   };
 // where each item_id should correspond to a favorites link file (*.url) in
 // the current folder.
-// gcc, in its infinite wisdom, only allows WARN_UNUSED_RESULT for prototypes.
-// Clang, to be compatible with gcc, warns if WARN_UNUSED_RESULT is used in a
-// non-gcc compatible manner (-Wgcc-compat). So even though gcc isn't used to
-// build on Windows, declare some prototypes anyway to satisfy Clang's gcc
-// compatibility warnings.
-bool ParseFavoritesOrderBlob(const Importer* importer,
-                             const std::vector<uint8_t>& blob,
-                             const base::FilePath& path,
-                             std::map<base::FilePath, uint32_t>* sort_index)
-    WARN_UNUSED_RESULT;
-bool ParseFavoritesOrderBlob(const Importer* importer,
-                             const std::vector<uint8_t>& blob,
-                             const base::FilePath& path,
-                             std::map<base::FilePath, uint32_t>* sort_index) {
+[[nodiscard]] bool ParseFavoritesOrderBlob(
+    const Importer* importer,
+    const std::vector<uint8_t>& blob,
+    const base::FilePath& path,
+    std::map<base::FilePath, uint32_t>* sort_index) {
   static const int kItemCountOffset = 16;
   static const int kItemListStartOffset = 20;
 
@@ -218,11 +207,11 @@ bool ParseFavoritesOrderBlob(const Importer* importer,
   return true;
 }
 
-bool ParseFavoritesOrderRegistryTree(
+[[nodiscard]] bool ParseFavoritesOrderRegistryTree(
     const Importer* importer,
     const base::win::RegKey& key,
     const base::FilePath& path,
-    std::map<base::FilePath, uint32_t>* sort_index) WARN_UNUSED_RESULT;
+    std::map<base::FilePath, uint32_t>* sort_index);
 bool ParseFavoritesOrderRegistryTree(
     const Importer* importer,
     const base::win::RegKey& key,
@@ -255,12 +244,12 @@ bool ParseFavoritesOrderRegistryTree(
   return true;
 }
 
-bool ParseFavoritesOrderInfo(const Importer* importer,
-                             std::map<base::FilePath, uint32_t>* sort_index)
-    WARN_UNUSED_RESULT;
+[[nodiscard]] bool ParseFavoritesOrderInfo(
+    const Importer* importer,
+    std::map<base::FilePath, uint32_t>* sort_index);
 bool ParseFavoritesOrderInfo(const Importer* importer,
                              std::map<base::FilePath, uint32_t>* sort_index) {
-  base::string16 key_path(importer::GetIEFavoritesOrderKey());
+  std::wstring key_path(importer::GetIEFavoritesOrderKey());
   base::win::RegKey key(HKEY_CURRENT_USER, key_path.c_str(), KEY_READ);
   if (!key.Valid())
     return false;
@@ -270,8 +259,9 @@ bool ParseFavoritesOrderInfo(const Importer* importer,
 
 // Reads the sort order from registry. If failed, we don't touch the list
 // and use the default (alphabetical) order.
-void SortBookmarksInIEOrder(const Importer* importer,
-                            std::vector<ImportedBookmarkEntry>* bookmarks) {
+void SortBookmarksInIEOrder(
+    const Importer* importer,
+    std::vector<user_data_importer::ImportedBookmarkEntry>* bookmarks) {
   std::map<base::FilePath, uint32_t> sort_index;
   if (!ParseFavoritesOrderInfo(importer, &sort_index))
     return;
@@ -282,7 +272,7 @@ void SortBookmarksInIEOrder(const Importer* importer,
 // Reads an internet shortcut (*.url) |file| and returns a COM object
 // representing it.
 bool LoadInternetShortcut(
-    const base::string16& file,
+    const base::FilePath& file,
     Microsoft::WRL::ComPtr<IUniformResourceLocator>* shortcut) {
   Microsoft::WRL::ComPtr<IUniformResourceLocator> url_locator;
   if (FAILED(::CoCreateInstance(CLSID_InternetShortcut, NULL,
@@ -295,7 +285,7 @@ bool LoadInternetShortcut(
     return false;
 
   // Loads the Internet Shortcut from persistent storage.
-  if (FAILED(persist_file->Load(file.c_str(), STGM_READ)))
+  if (FAILED(persist_file->Load(file.value().c_str(), STGM_READ)))
     return false;
 
   std::swap(url_locator, *shortcut);
@@ -306,7 +296,9 @@ bool LoadInternetShortcut(
 GURL ReadURLFromInternetShortcut(IUniformResourceLocator* url_locator) {
   base::win::ScopedCoMem<wchar_t> url;
   // GetURL can return S_FALSE (FAILED(S_FALSE) is false) when url == NULL.
-  return (FAILED(url_locator->GetURL(&url)) || !url) ? GURL() : GURL(url.get());
+  return (FAILED(url_locator->GetURL(&url)) || !url)
+             ? GURL()
+             : GURL(base::as_u16cstr(url));
 }
 
 // Reads the URL of the favicon of the internet shortcut.
@@ -331,57 +323,62 @@ GURL ReadFaviconURLFromInternetShortcut(IUniformResourceLocator* url_locator) {
   if (FAILED(property_storage->ReadMultiple(1, properties, output.Receive())) ||
       output.get().vt != VT_LPWSTR)
     return GURL();
-  return GURL(output.get().pwszVal);
+  return GURL(base::as_u16cstr(output.get().pwszVal));
 }
 
 // Reads the favicon imaga data in an NTFS alternate data stream. This is where
 // IE7 and above store the data.
-bool ReadFaviconDataFromInternetShortcut(const base::string16& file,
-                                         std::string* data) {
-  return base::ReadFileToString(base::FilePath(file + kFaviconStreamName),
-                                data);
+std::optional<std::vector<uint8_t>> ReadFaviconDataFromInternetShortcut(
+    const base::FilePath& file) {
+  // Do not use .Append() here, since we don't want a separator added into the
+  // filename.
+  return base::ReadFileToBytes(
+      base::FilePath(file.value() + kFaviconStreamName));
 }
 
 // Reads the favicon imaga data in the Internet cache. IE6 doesn't hold the data
 // explicitly, but it might be found in the cache.
-bool ReadFaviconDataFromCache(const GURL& favicon_url, std::string* data) {
+std::optional<std::vector<uint8_t>> ReadFaviconDataFromCache(
+    const GURL& favicon_url) {
   std::wstring url_wstring(base::UTF8ToWide(favicon_url.spec()));
   DWORD info_size = 0;
   GetUrlCacheEntryInfoEx(url_wstring.c_str(), NULL, &info_size, NULL, NULL,
                          NULL, 0);
-  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-    return false;
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    return std::nullopt;
+  }
 
   std::vector<char> buf(info_size);
   INTERNET_CACHE_ENTRY_INFO* cache =
       reinterpret_cast<INTERNET_CACHE_ENTRY_INFO*>(&buf[0]);
   if (!GetUrlCacheEntryInfoEx(url_wstring.c_str(), cache, &info_size, NULL,
                               NULL, NULL, 0)) {
-    return false;
+    return std::nullopt;
   }
-  return base::ReadFileToString(base::FilePath(cache->lpszLocalFileName), data);
+  return base::ReadFileToBytes(base::FilePath(cache->lpszLocalFileName));
 }
 
 // Reads the binary image data of favicon of an internet shortcut file |file|.
 // |favicon_url| read by ReadFaviconURLFromInternetShortcut is also needed to
 // examine the IE cache.
-bool ReadReencodedFaviconData(const base::string16& file,
-                              const GURL& favicon_url,
-                              std::vector<unsigned char>* data) {
-  std::string image_data;
-  if (!ReadFaviconDataFromInternetShortcut(file, &image_data) &&
-      !ReadFaviconDataFromCache(favicon_url, &image_data)) {
-    return false;
+std::optional<std::vector<uint8_t>> ReadReencodedFaviconData(
+    const base::FilePath& file,
+    const GURL& favicon_url) {
+  std::optional<std::vector<uint8_t>> image_data =
+      ReadFaviconDataFromInternetShortcut(file);
+  if (!image_data) {
+    image_data = ReadFaviconDataFromCache(favicon_url);
+    if (!image_data) {
+      return std::nullopt;
+    }
   }
 
-  const unsigned char* ptr =
-      reinterpret_cast<const unsigned char*>(image_data.c_str());
-  return importer::ReencodeFavicon(ptr, image_data.size(), data);
+  return importer::ReencodeFavicon(image_data.value());
 }
 
 // Loads favicon image data and registers to |favicon_map|.
 void UpdateFaviconMap(
-    const base::string16& url_file,
+    const base::FilePath& url_file,
     const GURL& url,
     IUniformResourceLocator* url_locator,
     std::map<GURL, favicon_base::FaviconUsageData>* favicon_map) {
@@ -396,8 +393,11 @@ void UpdateFaviconMap(
     it->second.urls.insert(url);
   } else {
     // New favicon URL. Read the image data and store.
-    favicon_base::FaviconUsageData usage;
-    if (ReadReencodedFaviconData(url_file, favicon_url, &usage.png_data)) {
+    std::optional<std::vector<uint8_t>> png_data =
+        ReadReencodedFaviconData(url_file, favicon_url);
+    if (png_data) {
+      favicon_base::FaviconUsageData usage;
+      usage.png_data = std::move(png_data).value();
       usage.favicon_url = favicon_url;
       usage.urls.insert(url);
       favicon_map->insert(std::make_pair(favicon_url, usage));
@@ -423,47 +423,49 @@ const GUID IEImporter::kUnittestGUID = {
 
 IEImporter::IEImporter() : edge_import_mode_(false) {}
 
-void IEImporter::StartImport(const importer::SourceProfile& source_profile,
-                             uint16_t items,
-                             ImporterBridge* bridge) {
-  edge_import_mode_ = source_profile.importer_type == importer::TYPE_EDGE;
+void IEImporter::StartImport(
+    const user_data_importer::SourceProfile& source_profile,
+    uint16_t items,
+    ImporterBridge* bridge) {
+  edge_import_mode_ =
+      source_profile.importer_type == user_data_importer::TYPE_EDGE;
   bridge_ = bridge;
 
   if (edge_import_mode_) {
     // When using for Edge imports we only support Favorites.
-    DCHECK_EQ(items, importer::FAVORITES);
+    DCHECK_EQ(items, user_data_importer::FAVORITES);
     // As coming from untrusted source ensure items is correct.
-    items = importer::FAVORITES;
+    items = user_data_importer::FAVORITES;
   }
   source_path_ = source_profile.source_path;
 
   bridge_->NotifyStarted();
 
-  if ((items & importer::HOME_PAGE) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::HOME_PAGE);
+  if ((items & user_data_importer::HOME_PAGE) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::HOME_PAGE);
     ImportHomepage();  // Doesn't have a UI item.
-    bridge_->NotifyItemEnded(importer::HOME_PAGE);
+    bridge_->NotifyItemEnded(user_data_importer::HOME_PAGE);
   }
   // The order here is important!
-  if ((items & importer::HISTORY) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::HISTORY);
+  if ((items & user_data_importer::HISTORY) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::HISTORY);
     ImportHistory();
-    bridge_->NotifyItemEnded(importer::HISTORY);
+    bridge_->NotifyItemEnded(user_data_importer::HISTORY);
   }
-  if ((items & importer::FAVORITES) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::FAVORITES);
+  if ((items & user_data_importer::FAVORITES) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::FAVORITES);
     ImportFavorites();
-    bridge_->NotifyItemEnded(importer::FAVORITES);
+    bridge_->NotifyItemEnded(user_data_importer::FAVORITES);
   }
-  if ((items & importer::SEARCH_ENGINES) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::SEARCH_ENGINES);
+  if ((items & user_data_importer::SEARCH_ENGINES) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::SEARCH_ENGINES);
     ImportSearchEngines();
-    bridge_->NotifyItemEnded(importer::SEARCH_ENGINES);
+    bridge_->NotifyItemEnded(user_data_importer::SEARCH_ENGINES);
   }
   bridge_->NotifyEnded();
 }
 
-IEImporter::~IEImporter() {}
+IEImporter::~IEImporter() = default;
 
 void IEImporter::ImportFavorites() {
   FavoritesInfo info;
@@ -475,7 +477,7 @@ void IEImporter::ImportFavorites() {
   ParseFavoritesFolder(info, &bookmarks, &favicons);
 
   if (!bookmarks.empty() && !cancelled()) {
-    const base::string16& first_folder_name =
+    const std::u16string& first_folder_name =
         edge_import_mode_
             ? l10n_util::GetStringUTF16(IDS_BOOKMARK_GROUP_FROM_EDGE)
             : l10n_util::GetStringUTF16(IDS_BOOKMARK_GROUP_FROM_IE);
@@ -497,7 +499,7 @@ void IEImporter::ImportHistory() {
   }
   Microsoft::WRL::ComPtr<IEnumSTATURL> enum_url;
   if (SUCCEEDED(url_history_stg2->EnumUrls(&enum_url))) {
-    std::vector<ImporterURLRow> rows;
+    std::vector<user_data_importer::ImporterURLRow> rows;
     STATURL stat_url;
 
     // IEnumSTATURL::Next() doesn't fill STATURL::dwFlags by default. Need to
@@ -508,24 +510,26 @@ void IEImporter::ImportHistory() {
     // So need to pass an empty string here to get all history items.
     enum_url->SetFilter(L"", STATURL_QUERYFLAG_TOPLEVEL);
     while (!cancelled() && enum_url->Next(1, &stat_url, NULL) == S_OK) {
-      base::string16 url_string;
+      std::wstring url_string;
       if (stat_url.pwcsUrl) {
         url_string = stat_url.pwcsUrl;
         CoTaskMemFree(stat_url.pwcsUrl);
       }
-      base::string16 title_string;
+      std::wstring title_string;
       if (stat_url.pwcsTitle) {
         title_string = stat_url.pwcsTitle;
         CoTaskMemFree(stat_url.pwcsTitle);
       }
 
-      GURL url(url_string);
+      GURL url(base::AsStringPiece16(url_string));
       // Skips the URLs that are invalid or have other schemes.
-      if (!url.is_valid() || !base::Contains(kSchemes, url.scheme()))
+      if (!url.is_valid() ||
+          !std::ranges::contains(kSchemes, url.GetScheme())) {
         continue;
+      }
 
-      ImporterURLRow row(url);
-      row.title = title_string;
+      user_data_importer::ImporterURLRow row(url);
+      row.title = base::AsString16(title_string);
       row.last_visit = base::Time::FromFileTime(stat_url.ftLastVisited);
       if (stat_url.dwFlags == STATURLFLAG_ISTOPLEVEL) {
         row.visit_count = 1;
@@ -541,7 +545,8 @@ void IEImporter::ImportHistory() {
     }
 
     if (!cancelled()) {
-      bridge_->SetHistoryItems(rows, importer::VISIT_SOURCE_IE_IMPORTED);
+      bridge_->SetHistoryItems(rows,
+                               user_data_importer::VISIT_SOURCE_IE_IMPORTED);
     }
   }
 }
@@ -551,16 +556,16 @@ void IEImporter::ImportSearchEngines() {
   // Software\Microsoft\Internet Explorer\SearchScopes
   // Each key represents a search engine. The URL value contains the URL and
   // the DisplayName the name.
-  typedef std::map<std::string, base::string16> SearchEnginesMap;
+  typedef std::map<std::string, std::u16string> SearchEnginesMap;
   SearchEnginesMap search_engines_map;
   for (base::win::RegistryKeyIterator key_iter(HKEY_CURRENT_USER,
                                                kSearchScopePath);
        key_iter.Valid(); ++key_iter) {
-    base::string16 sub_key_name = kSearchScopePath;
+    std::wstring sub_key_name = kSearchScopePath;
     sub_key_name.append(L"\\").append(key_iter.Name());
     base::win::RegKey sub_key(HKEY_CURRENT_USER, sub_key_name.c_str(),
                               KEY_READ);
-    base::string16 wide_url;
+    std::wstring wide_url;
     if ((sub_key.ReadValue(L"URL", &wide_url) != ERROR_SUCCESS) ||
         wide_url.empty()) {
       VLOG(1) << "No URL for IE search engine at " << key_iter.Name();
@@ -569,7 +574,7 @@ void IEImporter::ImportSearchEngines() {
     // For the name, we try the default value first (as Live Search uses a
     // non displayable name in DisplayName, and the readable name under the
     // default value).
-    base::string16 name;
+    std::wstring name;
     if ((sub_key.ReadValue(NULL, &name) != ERROR_SUCCESS) || name.empty()) {
       // Try the displayable name.
       if ((sub_key.ReadValue(L"DisplayName", &name) != ERROR_SUCCESS) ||
@@ -584,16 +589,15 @@ void IEImporter::ImportSearchEngines() {
     if (t_iter == search_engines_map.end()) {
       // First time we see that URL.
       GURL gurl(url);
-      if (gurl.is_valid()) {
-        t_iter = search_engines_map.insert(std::make_pair(url, name)).first;
-      }
+      if (gurl.is_valid())
+        t_iter = search_engines_map.emplace(url, base::AsString16(name)).first;
     }
   }
   // ProfileWriter::AddKeywords() requires a vector and we have a map.
-  std::vector<importer::SearchEngineInfo> search_engines;
+  std::vector<user_data_importer::SearchEngineInfo> search_engines;
   for (SearchEnginesMap::iterator i = search_engines_map.begin();
        i != search_engines_map.end(); ++i) {
-    importer::SearchEngineInfo search_engine_info;
+    user_data_importer::SearchEngineInfo search_engine_info;
     search_engine_info.url = base::UTF8ToUTF16(i->first);
     search_engine_info.display_name = i->second;
     search_engines.push_back(search_engine_info);
@@ -605,24 +609,24 @@ void IEImporter::ImportHomepage() {
   static constexpr wchar_t kIEHomepage[] = L"Start Page";
   static constexpr wchar_t kIEDefaultHomepage[] = L"Default_Page_URL";
 
-  base::string16 key_path(importer::GetIESettingsKey());
+  std::wstring key_path(importer::GetIESettingsKey());
 
   base::win::RegKey key(HKEY_CURRENT_USER, key_path.c_str(), KEY_READ);
-  base::string16 homepage_url;
+  std::wstring homepage_url;
   if (key.ReadValue(kIEHomepage, &homepage_url) != ERROR_SUCCESS ||
       homepage_url.empty())
     return;
 
-  GURL homepage = GURL(homepage_url);
+  GURL homepage = GURL(base::AsStringPiece16(homepage_url));
   if (!homepage.is_valid())
     return;
 
   // Check to see if this is the default website and skip import.
   base::win::RegKey keyDefault(HKEY_LOCAL_MACHINE, key_path.c_str(), KEY_READ);
-  base::string16 default_homepage_url;
+  std::wstring default_homepage_url;
   LONG result = keyDefault.ReadValue(kIEDefaultHomepage, &default_homepage_url);
   if (result == ERROR_SUCCESS && !default_homepage_url.empty()) {
-    if (homepage.spec() == GURL(default_homepage_url).spec())
+    if (homepage.spec() == GURL(base::AsString16(default_homepage_url)).spec())
       return;
   }
   bridge_->AddHomePage(homepage);
@@ -633,7 +637,7 @@ bool IEImporter::GetFavoritesInfo(IEImporter::FavoritesInfo* info) {
     // Source path exists during testing as well as when importing from Edge.
     info->path = source_path_;
     info->path = info->path.AppendASCII("Favorites");
-    info->links_folder = L"Links";
+    info->links_folder = u"Links";
     return true;
   }
 
@@ -649,7 +653,7 @@ bool IEImporter::GetFavoritesInfo(IEImporter::FavoritesInfo* info) {
   // under Favorites folder since it looks like there is not name different in
   // every language version of Windows.
   info->path = base::FilePath(buffer);
-  info->links_folder = L"Links";
+  info->links_folder = u"Links";
 
   return true;
 }
@@ -680,12 +684,12 @@ void IEImporter::ParseFavoritesFolder(
   for (std::vector<base::FilePath::StringType>::iterator it = file_list.begin();
        it != file_list.end(); ++it) {
     base::FilePath shortcut(*it);
-    if (!base::LowerCaseEqualsASCII(shortcut.Extension(), ".url"))
+    if (!base::EqualsCaseInsensitiveASCII(shortcut.Extension(), ".url"))
       continue;
 
     // Skip the bookmark with invalid URL.
     Microsoft::WRL::ComPtr<IUniformResourceLocator> url_locator;
-    if (!LoadInternetShortcut(*it, &url_locator))
+    if (!LoadInternetShortcut(shortcut, &url_locator))
       continue;
     GURL url = ReadURLFromInternetShortcut(url_locator.Get());
     if (!url.is_valid())
@@ -695,10 +699,11 @@ void IEImporter::ParseFavoritesFolder(
     // which URLs IE has as default, to some another sites.
     // We expect that users will never themselves create bookmarks having this
     // hostname.
-    if (url.host() == "go.microsoft.com")
+    if (url.GetHost() == "go.microsoft.com") {
       continue;
+    }
     // Read favicon.
-    UpdateFaviconMap(*it, url, url_locator.Get(), &favicon_map);
+    UpdateFaviconMap(shortcut, url, url_locator.Get(), &favicon_map);
 
     // Make the relative path from the Favorites folder, without the basename.
     // ex. Suppose that the Favorites folder is C:\Users\Foo\Favorites.
@@ -711,13 +716,16 @@ void IEImporter::ParseFavoritesFolder(
       relative_string = relative_string.substr(1);
     base::FilePath relative_path(relative_string);
 
-    ImportedBookmarkEntry entry;
+    user_data_importer::ImportedBookmarkEntry entry;
     // Remove the dot, the file extension, and the directory path.
-    entry.title = shortcut.RemoveExtension().BaseName().value();
+    entry.title = shortcut.RemoveExtension().BaseName().AsUTF16Unsafe();
     entry.url = url;
-    entry.creation_time = GetFileCreationTime(*it);
-    if (!relative_path.empty())
-      relative_path.GetComponents(&entry.path);
+    entry.creation_time = GetFileCreationTime(shortcut);
+    if (!relative_path.empty()) {
+      std::vector<std::wstring> wide_components = relative_path.GetComponents();
+      std::ranges::transform(wide_components, std::back_inserter(entry.path),
+                             &base::AsString16);
+    }
 
     // Add the bookmark.
     if (!entry.path.empty() && entry.path[0] == info.links_folder) {

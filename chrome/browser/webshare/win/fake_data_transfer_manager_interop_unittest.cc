@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <wrl/event.h>
 #include <wrl/implements.h>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
 #include "base/win/core_winrt_util.h"
 #include "content/public/test/browser_task_environment.h"
@@ -54,14 +54,7 @@ class DataRequestedTestCallback {
 
 class FakeDataTransferManagerInteropTest : public ::testing::Test {
  protected:
-  bool IsSupportedEnvironment() {
-    return base::win::ResolveCoreWinRTDelayload() &&
-           base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
-  }
-
   void SetUp() override {
-    if (!IsSupportedEnvironment())
-      return;
     fake_data_transfer_manager_interop_ =
         Microsoft::WRL::Make<FakeDataTransferManagerInterop>();
   }
@@ -73,9 +66,6 @@ class FakeDataTransferManagerInteropTest : public ::testing::Test {
 };
 
 TEST_F(FakeDataTransferManagerInteropTest, GetDataRequestedInvoker) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Verify failure when called without a listener in place
   base::OnceClosure invoker;
   EXPECT_NONFATAL_FAILURE(
@@ -107,9 +97,6 @@ TEST_F(FakeDataTransferManagerInteropTest, GetDataRequestedInvoker) {
 }
 
 TEST_F(FakeDataTransferManagerInteropTest, HasDataRequestedListener) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Verify values before any listeners are attached
   ASSERT_FALSE(
       fake_data_transfer_manager_interop_->HasDataRequestedListener(hwnd_1_));
@@ -177,9 +164,6 @@ TEST_F(FakeDataTransferManagerInteropTest, HasDataRequestedListener) {
 
 TEST_F(FakeDataTransferManagerInteropTest,
        ShowShareUIForWindow_FailImmediately) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Set up a listener for |hwnd_1_|
   ComPtr<IDataTransferManager> data_transfer_manager;
   ASSERT_HRESULT_SUCCEEDED(fake_data_transfer_manager_interop_->GetForWindow(
@@ -205,9 +189,6 @@ TEST_F(FakeDataTransferManagerInteropTest,
 
 TEST_F(FakeDataTransferManagerInteropTest,
        ShowShareUIForWindow_InvokeEventSynchronously) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Set up a listener for |hwnd_1_|
   ComPtr<IDataTransferManager> data_transfer_manager;
   ASSERT_HRESULT_SUCCEEDED(fake_data_transfer_manager_interop_->GetForWindow(
@@ -231,9 +212,6 @@ TEST_F(FakeDataTransferManagerInteropTest,
 
 TEST_F(FakeDataTransferManagerInteropTest,
        ShowShareUIForWindow_InvokeEventSynchronouslyAndReturnFailure) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Set up a listener for |hwnd_1_|
   ComPtr<IDataTransferManager> data_transfer_manager;
   ASSERT_HRESULT_SUCCEEDED(fake_data_transfer_manager_interop_->GetForWindow(
@@ -257,9 +235,6 @@ TEST_F(FakeDataTransferManagerInteropTest,
 }
 
 TEST_F(FakeDataTransferManagerInteropTest, ShowShareUIForWindow_ScheduleEvent) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Set up a listener for |hwnd_1_|
   ComPtr<IDataTransferManager> data_transfer_manager;
   ASSERT_HRESULT_SUCCEEDED(fake_data_transfer_manager_interop_->GetForWindow(
@@ -286,9 +261,6 @@ TEST_F(FakeDataTransferManagerInteropTest, ShowShareUIForWindow_ScheduleEvent) {
 
 TEST_F(FakeDataTransferManagerInteropTest,
        ShowShareUIForWindow_SucceedWithoutAction) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Set up a listener for |hwnd_1_|
   ComPtr<IDataTransferManager> data_transfer_manager;
   ASSERT_HRESULT_SUCCEEDED(fake_data_transfer_manager_interop_->GetForWindow(
@@ -314,9 +286,6 @@ TEST_F(FakeDataTransferManagerInteropTest,
 
 TEST_F(FakeDataTransferManagerInteropTest,
        ShowShareUIForWindow_WithoutListener) {
-  if (!IsSupportedEnvironment())
-    return;
-
   // Validate that ShowShareUIForWindow fails and causes a test failure when
   // called without a listener
   ASSERT_NO_FATAL_FAILURE(

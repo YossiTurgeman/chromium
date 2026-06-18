@@ -1,13 +1,22 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
 
 #ifndef DEVICE_BASE_SYNCHRONIZATION_ONE_WRITER_SEQLOCK_H_
 #define DEVICE_BASE_SYNCHRONIZATION_ONE_WRITER_SEQLOCK_H_
 
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
 #include "base/atomicops.h"
-#include "base/macros.h"
-#include "base/threading/platform_thread.h"
+#include "base/check_op.h"
 
 namespace device {
 
@@ -36,17 +45,20 @@ namespace device {
 class OneWriterSeqLock {
  public:
   OneWriterSeqLock();
+
+  OneWriterSeqLock(const OneWriterSeqLock&) = delete;
+  OneWriterSeqLock& operator=(const OneWriterSeqLock&) = delete;
+
   // ReadBegin returns |sequence_| when it is even, or when it has retried
   // |max_retries| times. Omitting |max_retries| results in ReadBegin not
   // returning until |sequence_| is even.
-  base::subtle::Atomic32 ReadBegin(uint32_t max_retries = UINT32_MAX) const;
-  bool ReadRetry(base::subtle::Atomic32 version) const;
+  int32_t ReadBegin(uint32_t max_retries = UINT32_MAX) const;
+  bool ReadRetry(int32_t version) const;
   void WriteBegin();
   void WriteEnd();
 
  private:
-  base::subtle::Atomic32 sequence_;
-  DISALLOW_COPY_AND_ASSIGN(OneWriterSeqLock);
+  std::atomic<int32_t> sequence_;
 };
 
 }  // namespace device

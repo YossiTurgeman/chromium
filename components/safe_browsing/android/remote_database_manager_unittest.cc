@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,110 +8,211 @@
 #include <memory>
 
 #include "base/metrics/field_trial.h"
+#include "base/metrics/field_trial_params.h"
 #include "base/run_loop.h"
-#include "base/strings/stringprintf.h"
+#include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/test/test_future.h"
 #include "base/time/time.h"
-#include "components/safe_browsing/android/safe_browsing_api_handler.h"
+#include "components/safe_browsing/android/safe_browsing_api_handler_bridge.h"
+#include "components/safe_browsing/android/safe_browsing_api_handler_test_util.h"
+#include "components/safe_browsing/core/browser/db/database_manager.h"
+#include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
+#include "components/safe_browsing/core/browser/db/v4_test_util.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "components/variations/variations_associated_data.h"
 #include "content/public/test/browser_task_environment.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
+#include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
 
 namespace safe_browsing {
 
 namespace {
 
-class TestSafeBrowsingApiHandler : public SafeBrowsingApiHandler {
+// Used to override response from SafeBrowsingApiHandlerBridge.
+class TestUrlCheckInterceptor : public safe_browsing::UrlCheckInterceptor {
  public:
-  void StartURLCheck(std::unique_ptr<URLCheckCallbackMeta> callback,
-                     const GURL& url,
-                     const SBThreatTypeSet& threat_types) override {}
-  bool StartCSDAllowlistCheck(const GURL& url) override { return false; }
-  bool StartHighConfidenceAllowlistCheck(const GURL& url) override {
-    return false;
+  TestUrlCheckInterceptor() = default;
+  ~TestUrlCheckInterceptor() override = default;
+
+  // Checks the threat type of |url| previously set by
+  // |SetSafeBrowsingThreatTypeForUrl|. It crashes if the threat type of |url|
+  // is not set in advance.
+  void CheckBySafeBrowsing(
+      SafeBrowsingApiHandlerBridge::ResponseCallback callback,
+      const GURL& gurl) override {
+    std::string url = gurl.spec();
+    DCHECK(urls_safebrowsing_threat_type_.contains(url));
+    std::move(callback).Run(urls_safebrowsing_threat_type_[url],
+                            ThreatMetadata());
   }
+
+  void SetSafeBrowsingThreatTypeForUrl(const GURL& url,
+                                       SBThreatType threat_type) {
+    urls_safebrowsing_threat_type_[url.spec()] = threat_type;
+  }
+
+ private:
+  base::flat_map<std::string, SBThreatType> urls_safebrowsing_threat_type_;
+};
+
+// Used to verify the result returned from RemoteDatabaseManager is expected.
+class TestClient : public SafeBrowsingDatabaseManager::Client {
+ public:
+  TestClient(scoped_refptr<RemoteSafeBrowsingDatabaseManager> db,
+             const GURL& expected_url,
+             SBThreatType expected_threat_type)
+      : SafeBrowsingDatabaseManager::Client(GetPassKeyForTesting()),
+        db_(db),
+        expected_url_(expected_url),
+        expected_threat_type_(expected_threat_type) {}
+
+  ~TestClient() override { db_->CancelCheck(this); }
+
+  void OnCheckBrowseUrlResult(const GURL& url,
+                              SBThreatType threat_type,
+                              const ThreatMetadata& metadata) override {
+    EXPECT_EQ(expected_url_, url);
+    EXPECT_EQ(expected_threat_type_, threat_type);
+    is_callback_called_ = true;
+  }
+
+  bool IsCallbackCalled() { return is_callback_called_; }
+
+ private:
+  scoped_refptr<RemoteSafeBrowsingDatabaseManager> db_;
+  GURL expected_url_;
+  SBThreatType expected_threat_type_;
+  bool is_callback_called_ = false;
 };
 
 }  // namespace
 
-class RemoteDatabaseManagerTest : public testing::Test {
+class RemoteDatabaseManagerTest
+    : public testing::Test,
+      public safe_browsing::test::WithMockSafeBrowsingApiHandler {
  protected:
-  RemoteDatabaseManagerTest() {}
+  using enum SBThreatType;
+
+  RemoteDatabaseManagerTest() = default;
 
   void SetUp() override {
-    SafeBrowsingApiHandler::SetInstance(&api_handler_);
+    safe_browsing::test::WithMockSafeBrowsingApiHandler::SetUp();
+    test_shared_loader_factory_ =
+        base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
+            &test_url_loader_factory_);
     db_ = new RemoteSafeBrowsingDatabaseManager();
+    db_->StartOnUIThread(test_shared_loader_factory_,
+                         GetTestV4ProtocolConfig());
+
+    url_interceptor_ = std::make_unique<TestUrlCheckInterceptor>();
+    SafeBrowsingApiHandlerBridge::GetInstance().SetInterceptorForTesting(
+        url_interceptor_.get());
   }
 
   void TearDown() override {
+    db_->StopOnUIThread(/*shutdown=*/false);
     db_ = nullptr;
-    base::RunLoop().RunUntilIdle();
-  }
-
-  // Setup the two field trial params.  These are read in db_'s ctor.
-  void SetFieldTrialParams(const std::string types_to_check_val) {
-    variations::testing::ClearAllVariationIDs();
-    variations::testing::ClearAllVariationParams();
-
-    const std::string group_name = "GroupFoo";  // Value not used
-    const std::string experiment_name = "SafeBrowsingAndroid";
-    ASSERT_TRUE(
-        base::FieldTrialList::CreateFieldTrial(experiment_name, group_name));
-
-    std::map<std::string, std::string> params;
-    if (!types_to_check_val.empty())
-      params["types_to_check"] = types_to_check_val;
-
-    ASSERT_TRUE(variations::AssociateVariationParams(experiment_name,
-                                                     group_name, params));
+    safe_browsing::test::WithMockSafeBrowsingApiHandler::TearDown();
   }
 
   content::BrowserTaskEnvironment task_environment_;
-  TestSafeBrowsingApiHandler api_handler_;
+  std::unique_ptr<TestUrlCheckInterceptor> url_interceptor_;
+  network::TestURLLoaderFactory test_url_loader_factory_;
+  scoped_refptr<network::SharedURLLoaderFactory> test_shared_loader_factory_;
   scoped_refptr<RemoteSafeBrowsingDatabaseManager> db_;
+  base::HistogramTester histogram_tester_;
 };
 
-TEST_F(RemoteDatabaseManagerTest, DisabledViaNull) {
-  EXPECT_TRUE(db_->IsSupported());
+TEST_F(RemoteDatabaseManagerTest, CheckBrowseUrl_HashDatabase) {
+  GURL url("https://example.com");
+  url_interceptor_->SetSafeBrowsingThreatTypeForUrl(
+      url, SB_THREAT_TYPE_URL_PHISHING);
+  TestClient client(db_, /*expected_url=*/url,
+                    /*expected_threat_type=*/SB_THREAT_TYPE_URL_PHISHING);
 
-  SafeBrowsingApiHandler::SetInstance(nullptr);
-  EXPECT_FALSE(db_->IsSupported());
+  db_->CheckBrowseUrl(url, {SB_THREAT_TYPE_URL_PHISHING}, &client,
+                      CheckBrowseUrlType::kHashDatabase);
+
+  task_environment_.RunUntilIdle();
+  EXPECT_TRUE(client.IsCallbackCalled());
+  histogram_tester_.ExpectUniqueSample("SB2.RemoteCall.CanCheckUrl",
+                                       /*sample=*/true,
+                                       /*expected_bucket_count=*/1);
+  histogram_tester_.ExpectUniqueSample(
+      "SB2.RemoteCall.CanCheckUrl.HashDatabase",
+      /*sample=*/true,
+      /*expected_bucket_count=*/1);
+  histogram_tester_.ExpectTotalCount("SB2.RemoteCall.CanCheckUrl.HashRealTime",
+                                     /*expected_count=*/0);
 }
 
-TEST_F(RemoteDatabaseManagerTest, TypesToCheckDefault) {
-  // Most are true, a few are false.
-  for (int t_int = 0;
-       t_int <= static_cast<int>(blink::mojom::ResourceType::kMaxValue);
-       t_int++) {
-    blink::mojom::ResourceType t =
-        static_cast<blink::mojom::ResourceType>(t_int);
-    switch (t) {
-      case blink::mojom::ResourceType::kStylesheet:
-      case blink::mojom::ResourceType::kImage:
-      case blink::mojom::ResourceType::kFontResource:
-      case blink::mojom::ResourceType::kFavicon:
-        EXPECT_FALSE(db_->CanCheckResourceType(t));
-        break;
-      default:
-        EXPECT_TRUE(db_->CanCheckResourceType(t));
-        break;
-    }
+TEST_F(RemoteDatabaseManagerTest, CheckBrowseUrl_HashRealtime) {
+  GURL url("https://example.com");
+  url_interceptor_->SetSafeBrowsingThreatTypeForUrl(
+      url, SB_THREAT_TYPE_URL_PHISHING);
+  TestClient client(db_, /*expected_url=*/url,
+                    /*expected_threat_type=*/SB_THREAT_TYPE_URL_PHISHING);
+
+  db_->CheckBrowseUrl(url, {SB_THREAT_TYPE_URL_PHISHING}, &client,
+                      CheckBrowseUrlType::kHashRealTime);
+
+  task_environment_.RunUntilIdle();
+  EXPECT_TRUE(client.IsCallbackCalled());
+  histogram_tester_.ExpectUniqueSample("SB2.RemoteCall.CanCheckUrl",
+                                       /*sample=*/true,
+                                       /*expected_bucket_count=*/1);
+  histogram_tester_.ExpectUniqueSample(
+      "SB2.RemoteCall.CanCheckUrl.HashRealTime",
+      /*sample=*/true,
+      /*expected_bucket_count=*/1);
+  histogram_tester_.ExpectTotalCount("SB2.RemoteCall.CanCheckUrl.HashDatabase",
+                                     /*expected_count=*/0);
+}
+
+TEST_F(RemoteDatabaseManagerTest, ThreatSource) {
+  EXPECT_EQ(ThreatSource::ANDROID_SAFEBROWSING,
+            db_->GetBrowseUrlThreatSource(CheckBrowseUrlType::kHashDatabase));
+  EXPECT_EQ(ThreatSource::ANDROID_SAFEBROWSING_REAL_TIME,
+            db_->GetBrowseUrlThreatSource(CheckBrowseUrlType::kHashRealTime));
+}
+
+TEST_F(RemoteDatabaseManagerTest, MatchDownloadAllowlistUrl) {
+  GURL allowlisted_url{"https://www.example.test"};
+  AddLocalAllowlistEntry(allowlisted_url, /*is_download_allowlist=*/true,
+                         /*is_match=*/true);
+
+  // Allowlisted URL should match.
+  {
+    base::test::TestFuture<bool> result_future;
+    db_->MatchDownloadAllowlistUrl(allowlisted_url,
+                                   result_future.GetCallback());
+    EXPECT_TRUE(result_future.Get());
   }
-}
 
-TEST_F(RemoteDatabaseManagerTest, TypesToCheckFromTrial) {
-  SetFieldTrialParams("1,2,blah, 9");
-  db_ = new RemoteSafeBrowsingDatabaseManager();
-  EXPECT_TRUE(db_->CanCheckResourceType(
-      blink::mojom::ResourceType::kMainFrame));  // defaulted
-  EXPECT_TRUE(db_->CanCheckResourceType(blink::mojom::ResourceType::kSubFrame));
-  EXPECT_TRUE(
-      db_->CanCheckResourceType(blink::mojom::ResourceType::kStylesheet));
-  EXPECT_FALSE(db_->CanCheckResourceType(blink::mojom::ResourceType::kScript));
-  EXPECT_FALSE(db_->CanCheckResourceType(blink::mojom::ResourceType::kImage));
-  // ...
-  EXPECT_FALSE(db_->CanCheckResourceType(blink::mojom::ResourceType::kMedia));
-  EXPECT_TRUE(db_->CanCheckResourceType(blink::mojom::ResourceType::kWorker));
+  // Not on the allowlist.
+  {
+    GURL url{"https://www.notexample.test"};
+    base::test::TestFuture<bool> result_future;
+    db_->MatchDownloadAllowlistUrl(url, result_future.GetCallback());
+    EXPECT_FALSE(result_future.Get());
+  }
+
+  // Not checked because of URL scheme.
+  {
+    GURL url{"data:,Hello%2C%20World%21"};
+    base::test::TestFuture<bool> result_future;
+    db_->MatchDownloadAllowlistUrl(url, result_future.GetCallback());
+    EXPECT_FALSE(result_future.Get());
+  }
+  {
+    GURL url{"file:///usr/home/foo"};
+    base::test::TestFuture<bool> result_future;
+    db_->MatchDownloadAllowlistUrl(url, result_future.GetCallback());
+    EXPECT_FALSE(result_future.Get());
+  }
 }
 
 }  // namespace safe_browsing

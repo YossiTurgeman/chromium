@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,18 +14,26 @@ class GURL;
 
 namespace signin {
 
+enum class Tribool;
+
+// Name of the cookie used by Chrome sign-in to inform GAIA that an
+// authenticating user is already signed in to Chrome. Because it is not
+// possible to intercept headers from iOS WKWebView, Chrome requires this cookie
+// to communicate its signed-in state with GAIA.
+extern const char kChromeConnectedCookieName[];
+
 // SigninHeaderHelper implementation managing the "X-Chrome-Connected" header.
 class ChromeConnectedHeaderHelper : public SigninHeaderHelper {
  public:
   explicit ChromeConnectedHeaderHelper(
       AccountConsistencyMethod account_consistency);
-  ~ChromeConnectedHeaderHelper() override {}
+  ~ChromeConnectedHeaderHelper() override = default;
 
   // Returns the Chrome-Connected cookie, or an empty string if it should not be
   // added to the request to |url|.
   static std::string BuildRequestCookieIfPossible(
       const GURL& url,
-      const std::string& gaia_id,
+      const GaiaId& gaia_id,
       AccountConsistencyMethod account_consistency,
       const content_settings::CookieSettings* cookie_settings,
       int profile_mode_mask);
@@ -39,15 +47,22 @@ class ChromeConnectedHeaderHelper : public SigninHeaderHelper {
   // empty string, in this case the header must not be added.
   std::string BuildRequestHeader(bool is_header_request,
                                  const GURL& url,
-                                 const std::string& gaia_id,
+                                 const GaiaId& gaia_id,
+                                 Tribool is_child_account,
                                  int profile_mode_mask,
                                  const std::string& source,
                                  bool force_account_consistency);
 
-  // SigninHeaderHelper implementation:
   bool ShouldBuildRequestHeader(
       const GURL& url,
-      const content_settings::CookieSettings* cookie_settings) override;
+      const content_settings::CookieSettings* cookie_settings);
+
+  // `check_only_gaia_url` is used for a special case on ChromeOS, where the
+  // check for `google.com` cookies should be omitted.
+  virtual bool ShouldBuildRequestHeader(
+      const GURL& url,
+      const content_settings::CookieSettings* cookie_settings,
+      bool check_only_gaia_url);
 
   // SigninHeaderHelper implementation:
   bool IsUrlEligibleForRequestHeader(const GURL& url) override;

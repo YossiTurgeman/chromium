@@ -27,12 +27,14 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_INDEXEDDB_IDB_ANY_H_
 
 #include <memory>
+#include <optional>
 
-#include "third_party/blink/renderer/core/dom/dom_string_list.h"
 #include "third_party/blink/renderer/modules/indexeddb/idb_key.h"
+#include "third_party/blink/renderer/modules/indexeddb/idb_record_array.h"
 #include "third_party/blink/renderer/modules/indexeddb/idb_value.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
+#include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -47,8 +49,8 @@ class IDBObjectStore;
 // IDBAny is used for:
 //  * source of IDBCursor (IDBObjectStore or IDBIndex)
 //  * source of IDBRequest (IDBObjectStore, IDBIndex, IDBCursor, or null)
-//  * result of IDBRequest (IDBDatabase, IDBCursor, DOMStringList, undefined,
-//    integer, key or value)
+//  * result of IDBRequest (IDBDatabase, IDBCursor, undefined, integer,
+//    key, value, array of values or array of records)
 //
 // This allows for lazy conversion to script values (via IDBBindingUtilities),
 // and avoids the need for many dedicated union types.
@@ -58,24 +60,24 @@ class MODULES_EXPORT IDBAny final : public GarbageCollected<IDBAny> {
   enum Type {
     kUndefinedType = 0,
     kNullType,
-    kDOMStringListType,
     kIDBCursorType,
     kIDBCursorWithValueType,
     kIDBDatabaseType,
     kIntegerType,
     kKeyType,
     kIDBValueType,
-    kIDBValueArrayType
+    kIDBValueArrayType,
+    kIDBRecordArrayType,
   };
 
   explicit IDBAny(Type);
-  explicit IDBAny(DOMStringList*);
   explicit IDBAny(IDBCursor*);
   explicit IDBAny(IDBDatabase*);
   explicit IDBAny(std::unique_ptr<IDBKey>);
   explicit IDBAny(Vector<std::unique_ptr<IDBValue>>);
   explicit IDBAny(std::unique_ptr<IDBValue>);
   explicit IDBAny(int64_t);
+  explicit IDBAny(IDBRecordArray);
   ~IDBAny();
 
   void Trace(Visitor*) const;
@@ -83,25 +85,32 @@ class MODULES_EXPORT IDBAny final : public GarbageCollected<IDBAny> {
 
   Type GetType() const { return type_; }
   // Use type() to figure out which one of these you're allowed to call.
-  DOMStringList* DomStringList() const;
   IDBCursor* IdbCursor() const;
   IDBCursorWithValue* IdbCursorWithValue() const;
   IDBDatabase* IdbDatabase() const;
   IDBValue* Value() const;
   const Vector<std::unique_ptr<IDBValue>>& Values() const;
+  const IDBRecordArray& Records() const;
   int64_t Integer() const;
   const IDBKey* Key() const;
+
+  // IDBAny is a variant type used to hold the values produced by the |result|
+  // attribute of IDBRequest and (as a convenience) the |source| attribute of
+  // IDBRequest and IDBCursor.
+  // TODO(jsbell): Replace the use of IDBAny for |source| attributes (which are
+  // ScriptWrappable types) using unions per IDL.
+  v8::Local<v8::Value> ToV8(ScriptState* script_state);
 
  private:
   const Type type_;
 
   // Only one of the following should ever be in use at any given time.
-  const Member<DOMStringList> dom_string_list_;
   const Member<IDBCursor> idb_cursor_;
   const Member<IDBDatabase> idb_database_;
   const std::unique_ptr<IDBKey> idb_key_;
   const std::unique_ptr<IDBValue> idb_value_;
   const Vector<std::unique_ptr<IDBValue>> idb_values_;
+  std::optional<IDBRecordArray> idb_records_;
   const int64_t integer_ = 0;
 };
 

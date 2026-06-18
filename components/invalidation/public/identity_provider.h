@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,10 @@
 
 #include <string>
 
-#include "base/callback.h"
 #include "base/compiler_specific.h"
+#include "base/functional/callback.h"
 #include "base/observer_list.h"
+#include "base/time/time.h"
 #include "base/values.h"
 #include "google_apis/gaia/core_account_id.h"
 #include "google_apis/gaia/google_service_auth_error.h"
@@ -87,14 +88,8 @@ class IdentityProvider {
       const OAuth2AccessTokenManager::ScopeSet& scopes,
       const std::string& access_token) = 0;
 
-  // Set the account id that should be registered for invalidations.
-  virtual void SetActiveAccountId(const CoreAccountId& account_id) = 0;
-
   void AddObserver(Observer* observer);
   void RemoveObserver(Observer* observer);
-
-  void RequestDetailedStatus(
-      base::RepeatingCallback<void(const base::DictionaryValue&)> caller) const;
 
  protected:
   IdentityProvider();
@@ -103,10 +98,6 @@ class IdentityProvider {
   // |account_id| is the active account.
   void ProcessRefreshTokenUpdateForAccount(const CoreAccountId& account_id);
 
-  // Processes a refresh token removal, firing the observer callback if
-  // |account_id| is the active account.
-  void ProcessRefreshTokenRemovalForAccount(const CoreAccountId& account_id);
-
   // Fires an OnActiveAccountLogin notification.
   void FireOnActiveAccountLogin();
 
@@ -114,18 +105,6 @@ class IdentityProvider {
   void FireOnActiveAccountLogout();
 
  private:
-  struct Diagnostics {
-    Diagnostics();
-
-    // Collect all the internal variables in a single readable dictionary.
-    base::DictionaryValue CollectDebugData() const;
-
-    int token_removal_for_not_active_account_count = 0;
-    int token_update_for_not_active_account_count = 0;
-    base::Time account_token_updated;
-  };
-
-  Diagnostics diagnostic_info_;
   base::ObserverList<Observer, true>::Unchecked observers_;
 };
 

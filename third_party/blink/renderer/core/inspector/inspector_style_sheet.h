@@ -27,31 +27,45 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECTOR_STYLE_SHEET_H_
 
 #include <memory>
-#include "base/memory/scoped_refptr.h"
+
+#include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/css/css_font_face_rule.h"
+#include "third_party/blink/renderer/core/css/css_font_feature_values_rule.h"
+#include "third_party/blink/renderer/core/css/css_font_palette_values_rule.h"
 #include "third_party/blink/renderer/core/css/css_property_source_data.h"
+#include "third_party/blink/renderer/core/css/css_scope_rule.h"
 #include "third_party/blink/renderer/core/css/css_style_declaration.h"
-#include "third_party/blink/renderer/core/inspector/protocol/CSS.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/core/inspector/inspector_css_parser_observer.h"
+#include "third_party/blink/renderer/core/inspector/inspector_diff.h"
+#include "third_party/blink/renderer/core/inspector/protocol/css.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
 namespace blink {
 
+class CSSCounterStyleRule;
 class CSSKeyframeRule;
 class CSSMediaRule;
+class CSSContainerRule;
+class CSSNavigationRule;
+class CSSPositionTryRule;
+class CSSPropertySourceData;
+class CSSPropertyRule;
 class CSSStyleDeclaration;
 class CSSStyleRule;
 class CSSStyleSheet;
+class CSSSupportsRule;
 class Document;
 class Element;
 class ExceptionState;
 class InspectorNetworkAgent;
 class InspectorResourceContainer;
 class InspectorStyleSheetBase;
+class SourceRange;
 
 typedef HeapVector<Member<CSSRule>> CSSRuleVector;
-typedef Vector<unsigned> LineEndings;
 
 class InspectorStyle final : public GarbageCollected<InspectorStyle> {
  public:
@@ -63,7 +77,10 @@ class InspectorStyle final : public GarbageCollected<InspectorStyle> {
   InspectorStyleSheetBase* InspectorStyleSheet() {
     return parent_style_sheet_.Get();
   }
-  std::unique_ptr<protocol::CSS::CSSStyle> BuildObjectForStyle();
+  std::unique_ptr<protocol::CSS::CSSStyle> BuildObjectForStyle(
+      Element* element = nullptr,
+      PseudoId pseudo_id = kPseudoIdNone,
+      const AtomicString& pseudo_argument = g_null_atom);
   bool StyleText(String* result);
   bool TextForRange(const SourceRange&, String* result);
 
@@ -71,8 +88,18 @@ class InspectorStyle final : public GarbageCollected<InspectorStyle> {
 
  private:
   void PopulateAllProperties(Vector<CSSPropertySourceData>& result);
-  std::unique_ptr<protocol::CSS::CSSStyle> StyleWithProperties();
+  bool CheckRegisteredPropertySyntaxWithVarSubstitution(
+      Element* element,
+      const CSSPropertySourceData& property,
+      PseudoId pseudo_id = kPseudoIdNone,
+      const AtomicString& pseudo_argument = g_null_atom) const;
+  std::unique_ptr<protocol::CSS::CSSStyle> StyleWithProperties(
+      Element* element,
+      PseudoId pseudo_id = kPseudoIdNone,
+      const AtomicString& pseudo_argument = g_null_atom);
   String ShorthandValue(const String& shorthand_property);
+  std::unique_ptr<protocol::Array<protocol::CSS::CSSProperty>>
+  LonghandProperties(const CSSPropertySourceData& property_entry);
 
   Member<CSSStyleDeclaration> style_;
   Member<CSSRuleSourceData> source_data_;
@@ -99,7 +126,10 @@ class InspectorStyleSheetBase
   virtual const Document* GetDocument() = 0;
 
   std::unique_ptr<protocol::CSS::CSSStyle> BuildObjectForStyle(
-      CSSStyleDeclaration*);
+      CSSStyleDeclaration*,
+      Element* element,
+      PseudoId pseudo_id = kPseudoIdNone,
+      const AtomicString& pseudo_argument = g_null_atom);
   std::unique_ptr<protocol::CSS::SourceRange> BuildSourceRangeObject(
       const SourceRange&);
   bool LineNumberAndColumnToOffset(unsigned line_number,
@@ -108,7 +138,7 @@ class InspectorStyleSheetBase
   virtual bool IsInlineStyle() = 0;
 
  protected:
-  explicit InspectorStyleSheetBase(Listener*);
+  explicit InspectorStyleSheetBase(Listener*, String id);
 
   Listener* GetListener() { return listener_; }
   void OnStyleSheetTextChanged();
@@ -138,6 +168,7 @@ class InspectorStyleSheet : public InspectorStyleSheetBase {
 
   String FinalURL();
   bool SetText(const String&, ExceptionState&) override;
+  void CSSOMStyleSheetTextReplaced(const String&);
   bool GetText(String* result) override;
   void MarkForSync() { marked_for_sync_ = true; }
   void SyncTextIfNeeded();
@@ -152,16 +183,47 @@ class InspectorStyleSheet : public InspectorStyleSheetBase {
                                   SourceRange* new_range,
                                   String* old_text,
                                   ExceptionState&);
+  CSSPropertyRule* SetPropertyName(const SourceRange&,
+                                   const String& text,
+                                   SourceRange* new_range,
+                                   String* old_text,
+                                   ExceptionState&);
   CSSRule* SetStyleText(const SourceRange&,
                         const String& text,
                         SourceRange* new_range,
                         String* old_selector,
+                        StyleRuleFontFeature::FeatureType* font_feature_type,
                         ExceptionState&);
   CSSMediaRule* SetMediaRuleText(const SourceRange&,
-                                 const String& selector,
+                                 const String& text,
                                  SourceRange* new_range,
-                                 String* old_selector,
+                                 String* old_text,
                                  ExceptionState&);
+  CSSContainerRule* SetContainerRuleText(const SourceRange&,
+                                         const String& text,
+                                         SourceRange* new_range,
+                                         String* old_text,
+                                         ExceptionState&);
+  CSSContainerRule* SetContainerRuleConditionText(const SourceRange&,
+                                                  const String& text,
+                                                  SourceRange* new_range,
+                                                  String* old_text,
+                                                  ExceptionState&);
+  CSSScopeRule* SetScopeRuleText(const SourceRange&,
+                                 const String& text,
+                                 SourceRange* new_range,
+                                 String* old_text,
+                                 ExceptionState&);
+  CSSSupportsRule* SetSupportsRuleText(const SourceRange&,
+                                       const String& text,
+                                       SourceRange* new_range,
+                                       String* old_text,
+                                       ExceptionState&);
+  CSSNavigationRule* SetNavigationRuleText(const SourceRange&,
+                                           const String& text,
+                                           SourceRange* new_range,
+                                           String* old_text,
+                                           ExceptionState&);
   CSSStyleRule* AddRule(const String& rule_text,
                         const SourceRange& location,
                         SourceRange* added_range,
@@ -169,18 +231,39 @@ class InspectorStyleSheet : public InspectorStyleSheetBase {
   bool DeleteRule(const SourceRange&, ExceptionState&);
   std::unique_ptr<protocol::Array<String>> CollectClassNames();
   CSSStyleSheet* PageStyleSheet() { return page_style_sheet_.Get(); }
+  String Origin() { return origin_; }
+  bool CanBindOrigin();
 
   std::unique_ptr<protocol::CSS::CSSStyleSheetHeader>
   BuildObjectForStyleSheetInfo();
-  std::unique_ptr<protocol::CSS::CSSRule> BuildObjectForRuleWithoutMedia(
-      CSSStyleRule*);
+  std::unique_ptr<protocol::CSS::CSSRule> BuildObjectForRuleWithoutAncestorData(
+      CSSStyleRule*,
+      Element* element,
+      PseudoId pseudo_id = kPseudoIdNone,
+      const AtomicString& pseudo_argument = g_null_atom);
   std::unique_ptr<protocol::CSS::RuleUsage> BuildObjectForRuleUsage(CSSRule*,
                                                                     bool);
+  std::unique_ptr<protocol::CSS::CSSPositionTryRule>
+  BuildObjectForPositionTryRule(CSSPositionTryRule*, bool active);
+  std::unique_ptr<protocol::CSS::CSSAtRule>
+  BuildAtRuleObjectForFontPaletteValuesRule(CSSFontPaletteValuesRule*);
+  std::unique_ptr<protocol::CSS::CSSAtRule> BuildAtRuleObjectForFontFaceRule(
+      CSSFontFaceRule*);
+  std::unique_ptr<protocol::CSS::CSSStyle> BuildStyleObjectForFontFeatureRule(
+      CSSFontFeatureValuesRule*,
+      StyleRuleFontFeature::FeatureType);
+  std::unique_ptr<protocol::CSS::CSSAtRule>
+  BuildAtRuleObjectForFontFeatureValuesRule(CSSFontFeatureValuesRule*,
+                                            StyleRuleFontFeature::FeatureType);
+  std::unique_ptr<protocol::CSS::CSSAtRule>
+  BuildAtRuleObjectForCounterStyleRule(CSSCounterStyleRule*);
+  std::unique_ptr<protocol::CSS::CSSPropertyRule> BuildObjectForPropertyRule(
+      CSSPropertyRule*);
   std::unique_ptr<protocol::CSS::CSSKeyframeRule> BuildObjectForKeyframeRule(
-      CSSKeyframeRule*);
+      CSSKeyframeRule*,
+      Element*);
   std::unique_ptr<protocol::CSS::SelectorList> BuildObjectForSelectorList(
       CSSStyleRule*);
-
   std::unique_ptr<protocol::CSS::SourceRange> RuleHeaderSourceRange(CSSRule*);
   std::unique_ptr<protocol::CSS::SourceRange> MediaQueryExpValueSourceRange(
       CSSRule*,
@@ -198,8 +281,11 @@ class InspectorStyleSheet : public InspectorStyleSheetBase {
  private:
   CSSRuleSourceData* RuleSourceDataAfterSourceRange(const SourceRange&);
   CSSRuleSourceData* FindRuleByHeaderRange(const SourceRange&);
-  CSSRuleSourceData* FindRuleByBodyRange(const SourceRange&);
+  CSSRuleSourceData* FindRuleByDeclarationsRange(const SourceRange&);
   CSSRule* RuleForSourceData(CSSRuleSourceData*);
+  CSSContainerRule* ContainerRuleFromSourceData(const String& query_text,
+                                                CSSRuleSourceData*,
+                                                ExceptionState&);
   CSSStyleRule* InsertCSSOMRuleInStyleSheet(CSSRule* insert_before,
                                             const String& rule_text,
                                             ExceptionState&);
@@ -213,14 +299,14 @@ class InspectorStyleSheet : public InspectorStyleSheetBase {
   String SourceURL();
   void RemapSourceDataToCSSOMIfNecessary();
   void MapSourceDataToCSSOM();
-  bool ResourceStyleSheetText(String* result);
+  bool ResourceStyleSheetText(String* result, bool* loadingFailed);
   bool InlineStyleSheetText(String* result);
   bool InspectorStyleSheetText(String* result);
   String CollectStyleSheetRules();
   bool CSSOMStyleSheetText(String* result);
-  std::unique_ptr<protocol::Array<protocol::CSS::Value>> SelectorsFromSource(
-      CSSRuleSourceData*,
-      const String&);
+  std::unique_ptr<protocol::Array<protocol::CSS::Value>>
+  SelectorsFromSource(CSSRuleSourceData*, const String&, CSSStyleRule*);
+  Vector<const CSSSelector*> SelectorsFromRule(CSSStyleRule* rule);
   String Url();
   bool HasSourceURL();
   bool StartsAtZero();
@@ -243,18 +329,14 @@ class InspectorStyleSheet : public InspectorStyleSheetBase {
   Member<CSSStyleSheet> page_style_sheet_;
   String origin_;
   String document_url_;
-  Member<CSSRuleSourceDataList> source_data_;
+  Member<GCedCSSRuleSourceDataList> source_data_;
   String text_;
   CSSRuleVector cssom_flat_rules_;
   CSSRuleVector parsed_flat_rules_;
-  typedef HashMap<unsigned,
-                  unsigned,
-                  WTF::IntHash<unsigned>,
-                  WTF::UnsignedWithZeroKeyHashTraits<unsigned>>
-      IndexMap;
-  IndexMap rule_to_source_data_;
-  IndexMap source_data_to_rule_;
+  InspectorIndexMap rule_to_source_data_;
+  InspectorIndexMap source_data_to_rule_;
   String source_url_;
+  std::optional<bool> request_failed_to_load_;
   // True means that CSSOM rules are to be synced with the original source text.
   bool marked_for_sync_;
 };
@@ -287,4 +369,4 @@ class InspectorStyleSheetForInlineStyle final : public InspectorStyleSheetBase {
 
 }  // namespace blink
 
-#endif  // !defined(InspectorStyleSheet_h)
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECTOR_STYLE_SHEET_H_

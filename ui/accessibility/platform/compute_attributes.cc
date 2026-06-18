@@ -1,12 +1,12 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/accessibility/platform/compute_attributes.h"
 
 #include <cstddef>
+#include <optional>
 
-#include "base/optional.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/accessibility/ax_node_data.h"
 #include "ui/accessibility/platform/ax_platform_node_delegate.h"
@@ -14,9 +14,8 @@
 namespace ui {
 namespace {
 
-base::Optional<int32_t> GetCellAttribute(
-    const ui::AXPlatformNodeDelegate* delegate,
-    ax::mojom::IntAttribute attribute) {
+std::optional<int32_t> GetCellAttribute(const AXPlatformNodeDelegate* delegate,
+                                        ax::mojom::IntAttribute attribute) {
   switch (attribute) {
     case ax::mojom::IntAttribute::kAriaCellColumnIndex:
       return delegate->GetTableCellAriaColIndex();
@@ -31,22 +30,20 @@ base::Optional<int32_t> GetCellAttribute(
     case ax::mojom::IntAttribute::kTableCellRowSpan:
       return delegate->GetTableCellRowSpan();
     default:
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
-base::Optional<int32_t> GetRowAttribute(
-    const ui::AXPlatformNodeDelegate* delegate,
-    ax::mojom::IntAttribute attribute) {
+std::optional<int32_t> GetRowAttribute(const AXPlatformNodeDelegate* delegate,
+                                       ax::mojom::IntAttribute attribute) {
   if (attribute == ax::mojom::IntAttribute::kTableRowIndex) {
     return delegate->GetTableRowRowIndex();
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
-base::Optional<int32_t> GetTableAttribute(
-    const ui::AXPlatformNodeDelegate* delegate,
-    ax::mojom::IntAttribute attribute) {
+std::optional<int32_t> GetTableAttribute(const AXPlatformNodeDelegate* delegate,
+                                         ax::mojom::IntAttribute attribute) {
   switch (attribute) {
     case ax::mojom::IntAttribute::kTableColumnCount:
       return delegate->GetTableColCount();
@@ -57,12 +54,12 @@ base::Optional<int32_t> GetTableAttribute(
     case ax::mojom::IntAttribute::kAriaRowCount:
       return delegate->GetTableAriaRowCount();
     default:
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
-base::Optional<int> GetOrderedSetItemAttribute(
-    const ui::AXPlatformNodeDelegate* delegate,
+std::optional<int> GetOrderedSetItemAttribute(
+    const AXPlatformNodeDelegate* delegate,
     ax::mojom::IntAttribute attribute) {
   switch (attribute) {
     case ax::mojom::IntAttribute::kPosInSet:
@@ -70,36 +67,42 @@ base::Optional<int> GetOrderedSetItemAttribute(
     case ax::mojom::IntAttribute::kSetSize:
       return delegate->GetSetSize();
     default:
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
-base::Optional<int> GetOrderedSetAttribute(
-    const ui::AXPlatformNodeDelegate* delegate,
+std::optional<int> GetOrderedSetAttribute(
+    const AXPlatformNodeDelegate* delegate,
     ax::mojom::IntAttribute attribute) {
   switch (attribute) {
     case ax::mojom::IntAttribute::kSetSize:
       return delegate->GetSetSize();
     default:
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
-base::Optional<int32_t> GetFromData(const ui::AXPlatformNodeDelegate* delegate,
-                                    ax::mojom::IntAttribute attribute) {
+std::optional<int32_t> GetFromData(const AXPlatformNodeDelegate* delegate,
+                                   ax::mojom::IntAttribute attribute) {
   int32_t value;
-  if (delegate->GetData().GetIntAttribute(attribute, &value)) {
+  if (delegate->GetIntAttribute(attribute, &value)) {
     return value;
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace
 
-base::Optional<int32_t> ComputeAttribute(
-    const ui::AXPlatformNodeDelegate* delegate,
-    ax::mojom::IntAttribute attribute) {
-  base::Optional<int32_t> maybe_value = base::nullopt;
+std::optional<int32_t> ComputeAttribute(const AXPlatformNodeDelegate* delegate,
+                                        ax::mojom::IntAttribute attribute) {
+  std::optional<int32_t> maybe_value = std::nullopt;
+
+  // Color-related attributes.
+  if (attribute == ax::mojom::IntAttribute::kColor)
+    return delegate->GetColor();
+  else if (attribute == ax::mojom::IntAttribute::kBackgroundColor)
+    return delegate->GetBackgroundColor();
+
   // Table-related nodes.
   if (delegate->IsTableCellOrHeader())
     maybe_value = GetCellAttribute(delegate, attribute);

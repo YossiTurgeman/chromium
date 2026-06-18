@@ -1,17 +1,19 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/media/webrtc/webrtc_event_log_history.h"
 
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "chrome/browser/media/webrtc/webrtc_event_log_manager_common.h"
@@ -31,7 +33,7 @@ const char kUploadIdLinePrefix[] = "Upload ID: ";
 // No need to use \r\n for Windows; better have a consistent file format
 // between platforms.
 const char kEOL[] = "\n";
-static_assert(base::size(kEOL) == 1 + 1 /* +1 for the implicit \0. */,
+static_assert(std::size(kEOL) == 1 + 1 /* +1 for the implicit \0. */,
               "SplitString relies on this being a single character.");
 
 // |time| must *not* be earlier than UNIX epoch start. If it is, the empty
@@ -60,8 +62,7 @@ base::Time StringToTime(const std::string& time) {
     return base::Time();
   }
 
-  return base::Time::UnixEpoch() +
-         base::TimeDelta::FromSeconds(seconds_from_epoch);
+  return base::Time::UnixEpoch() + base::Seconds(seconds_from_epoch);
 }
 
 // Convert a history file's timestamp, which is the number of seconds since
@@ -139,7 +140,7 @@ bool WebRtcEventLogHistoryFileWriter::Init() {
 
   // Attempt to create the file.
   constexpr int file_flags = base::File::FLAG_CREATE | base::File::FLAG_WRITE |
-                             base::File::FLAG_EXCLUSIVE_WRITE;
+                             base::File::FLAG_WIN_EXCLUSIVE_WRITE;
   file_.Initialize(path_, file_flags);
   if (!file_.IsValid() || !file_.created()) {
     LOG(WARNING) << "Couldn't create history file.";
@@ -234,8 +235,7 @@ bool WebRtcEventLogHistoryFileWriter::Write(const std::string& str) {
   DCHECK(!str.empty());
   DCHECK_LE(str.length(), static_cast<size_t>(std::numeric_limits<int>::max()));
 
-  const int written = file_.WriteAtCurrentPos(str.c_str(), str.length());
-  if (written != static_cast<int>(str.length())) {
+  if (!file_.WriteAtCurrentPosAndCheck(base::as_byte_span(str))) {
     LOG(WARNING) << "Writing to history file failed.";
     valid_ = false;
     return false;
@@ -311,13 +311,13 @@ bool WebRtcEventLogHistoryFileReader::Init() {
 
   std::string file_contents;
   file_contents.resize(kMaxHistoryFileSizeBytes);
-  const int read_bytes = file.Read(0, &file_contents[0], file_contents.size());
-  if (read_bytes < 0) {
+  const std::optional<size_t> read_bytes =
+      file.Read(0, base::as_writable_byte_span(file_contents));
+  if (!read_bytes) {
     LOG(WARNING) << "Couldn't read contents of history file.";
     return false;
   }
-  DCHECK_LE(static_cast<size_t>(read_bytes), file_contents.size());
-  file_contents.resize(static_cast<size_t>(read_bytes));
+  file_contents.resize(*read_bytes);
   // Note: In excessively long files, the rest of the file will be ignored; the
   // beginning of the file will encounter a parse error.
 

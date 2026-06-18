@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 package org.chromium.android_webview.nonembedded;
@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
 
@@ -14,12 +15,15 @@ import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 
 import org.chromium.android_webview.common.services.IMetricsBridgeService;
+import org.chromium.android_webview.common.services.ServiceHelper;
 import org.chromium.android_webview.common.services.ServiceNames;
 import org.chromium.android_webview.proto.MetricsBridgeRecords.HistogramRecord;
 import org.chromium.android_webview.proto.MetricsBridgeRecords.HistogramRecord.Metadata;
 import org.chromium.android_webview.proto.MetricsBridgeRecords.HistogramRecord.RecordType;
+import org.chromium.base.Callback;
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
+import org.chromium.base.metrics.HistogramBucket;
 import org.chromium.base.metrics.UmaRecorder;
 
 import java.util.ArrayList;
@@ -37,8 +41,7 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
 
     // Arbitrary limit to avoid adding records indefinitely if there is a problem connecting to the
     // service.
-    @VisibleForTesting
-    public static final int MAX_PENDING_RECORDS_COUNT = 512;
+    @VisibleForTesting public static final int MAX_PENDING_RECORDS_COUNT = 512;
 
     private final RecordingDelegate mRecordingDelegate;
 
@@ -134,7 +137,7 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
 
     /**
      * Records a user action. Action names must be documented in {@code actions.xml}. See {@link
-     * https://source.chromium.org/chromium/chromium/src/+/master:tools/metrics/actions/README.md}
+     * https://source.chromium.org/chromium/chromium/src/+/main:tools/metrics/actions/README.md}
      *
      * @param name Name of the user action.
      * @param elapsedRealtimeMillis Value of {@link android.os.SystemClock.elapsedRealtime()} when
@@ -142,16 +145,43 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
      */
     @Override
     public void recordUserAction(String name, long elapsedRealtimeMillis) {
-        HistogramRecord record = HistogramRecord.newBuilder()
-                                         .setRecordType(RecordType.USER_ACTION)
-                                         .setHistogramName(name)
-                                         .setElapsedRealtimeMillis(elapsedRealtimeMillis)
-                                         .build();
+        HistogramRecord record =
+                HistogramRecord.newBuilder()
+                        .setRecordType(RecordType.USER_ACTION)
+                        .setHistogramName(name)
+                        .setElapsedRealtimeMillis(elapsedRealtimeMillis)
+                        .build();
 
         recordHistogram(record);
     }
 
+    @Override
+    public int getHistogramValueCountForTesting(String name, int sample) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int getHistogramTotalCountForTesting(String name) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public List<HistogramBucket> getHistogramSamplesForTesting(String name) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void addUserActionCallbackForTesting(Callback<String> callback) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void removeUserActionCallbackForTesting(Callback<String> callback) {
+        throw new UnsupportedOperationException();
+    }
+
     private final Object mLock = new Object();
+
     // Service stub object
     @GuardedBy("mLock")
     @Nullable
@@ -162,25 +192,26 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
     @GuardedBy("mLock")
     private final List<HistogramRecord> mPendingRecordsList = new ArrayList<>();
 
-    private final ServiceConnection mServiceConnection = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(ComponentName className, IBinder service) {
-            synchronized (mLock) {
-                mServiceStub = IMetricsBridgeService.Stub.asInterface(service);
-                for (HistogramRecord record : mPendingRecordsList) {
-                    sendToServiceLocked(record);
+    private final ServiceConnection mServiceConnection =
+            new ServiceConnection() {
+                @Override
+                public void onServiceConnected(ComponentName className, IBinder service) {
+                    synchronized (mLock) {
+                        mServiceStub = IMetricsBridgeService.Stub.asInterface(service);
+                        for (HistogramRecord record : mPendingRecordsList) {
+                            sendToServiceLocked(record);
+                        }
+                        mPendingRecordsList.clear();
+                    }
                 }
-                mPendingRecordsList.clear();
-            }
-        }
 
-        @Override
-        public void onServiceDisconnected(ComponentName className) {
-            synchronized (mLock) {
-                mServiceStub = null;
-            }
-        }
-    };
+                @Override
+                public void onServiceDisconnected(ComponentName className) {
+                    synchronized (mLock) {
+                        mServiceStub = null;
+                    }
+                }
+            };
 
     /**
      * Send a record to the metrics service, assumes that {@code mLock} is held by the current
@@ -188,6 +219,8 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
      */
     @GuardedBy("mLock")
     private void sendToServiceLocked(HistogramRecord record) {
+        // Clear the calling identity for cases when this is called locally in the same process.
+        long token = Binder.clearCallingIdentity();
         try {
             // We are not punting this to a background thread since the cost of IPC itself
             // should be relatively cheap, and the remote method does its work
@@ -195,6 +228,8 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
             mServiceStub.recordMetrics(record.toByteArray());
         } catch (RemoteException e) {
             Log.e(TAG, "Remote Exception calling IMetricsBridgeService#recordMetrics", e);
+        } finally {
+            Binder.restoreCallingIdentity(token);
         }
     }
 
@@ -217,7 +252,9 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
         final Context appContext = ContextUtils.getApplicationContext();
         final Intent intent = new Intent();
         intent.setClassName(appContext, mRecordingDelegate.getServiceName());
-        mIsBound = appContext.bindService(intent, mServiceConnection, Context.BIND_AUTO_CREATE);
+        mIsBound =
+                ServiceHelper.bindService(
+                        appContext, intent, mServiceConnection, Context.BIND_AUTO_CREATE);
         if (!mIsBound) {
             Log.w(TAG, "Could not bind to MetricsBridgeService " + intent);
         }
@@ -245,9 +282,7 @@ public class AwNonembeddedUmaRecorder implements UmaRecorder {
         }
     }
 
-    /**
-     * A delegate class that allows customizing some actions for testing.
-     */
+    /** A delegate class that allows customizing some actions for testing. */
     @VisibleForTesting
     public static class RecordingDelegate {
         /**

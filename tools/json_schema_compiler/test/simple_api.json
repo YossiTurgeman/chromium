@@ -9,6 +9,11 @@
         "enum": ["one", "two", "three"]
       },
       {
+        "id": "3D",
+        "type": "string",
+        "enum": ["yes", "no"]
+      },
+      {
         "id": "TestType",
         "type": "object",
         "properties": {
@@ -54,11 +59,14 @@
     "manifest_keys": {
       "key_string": {
         "type": "string",
-        "description": "String key."
+        "description": "String key.",
+        "optional": true
+
       },
       "key_ref": {
         "$ref": "TestType",
-        "description": "Reference key"
+        "description": "Reference key",
+        "optional": true
       },
       "key_obj": {
         "type": "object",
@@ -69,11 +77,30 @@
           },
           "obj_bool": {
             "type": "boolean"
+          },
+          "obj_optional_enum_array": {
+            "optional": true,
+            "type": "array",
+            "items": {
+              "$ref": "enums.Enumeration"
+            }
           }
         }
       },
       "key_enum": {
-        "$ref": "TestEnum"
+        "$ref": "TestEnum",
+        "optional": true
+      },
+      "key_enum_array": {
+        "type": "array",
+        "items": {
+          "$ref": "TestEnum"
+        },
+        "optional": true
+      },
+      "3d_key": {
+        "optional": true,
+        "$ref": "3D"
       }
     },
     "functions": [
@@ -85,19 +112,18 @@
           {
             "name": "num",
             "type": "integer"
-          },
-          {
-            "name": "callback",
-            "type": "function",
-            "parameters": [
-              {
-                "name": "result",
-                "type": "integer",
-                "description": "The incremented value."
-              }
-            ]
           }
-        ]
+        ],
+        "returns_async": {
+          "name": "callback",
+          "parameters": [
+            {
+              "name": "result",
+              "type": "integer",
+              "description": "The incremented value."
+            }
+          ]
+        }
       },
       {
         "name": "optionalString",
@@ -108,13 +134,12 @@
             "name": "str",
             "type": "string",
             "optional": true
-          },
-          {
-            "name": "callback",
-            "type": "function",
-            "parameters": []
           }
-        ]
+        ],
+        "returns_async": {
+          "name": "callback",
+          "parameters": []
+        }
       },
       {
         "name": "optionalBeforeRequired",
@@ -129,11 +154,26 @@
           {
             "name": "second",
             "type": "string"
-          },
+          }
+        ],
+        "returns_async": {
+          "name": "callback",
+          "parameters": []
+        }
+      },
+      {
+        "name": "requiredFunctionParameter",
+        "type": "function",
+        "description": "Takes a required function parameter which is not a trailing callback.",
+        "parameters": [
           {
-            "name": "callback",
+            "name": "functionParameter",
             "type": "function",
             "parameters": []
+          },
+          {
+            "name": "second",
+            "type": "string"
           }
         ]
       },
@@ -141,37 +181,33 @@
         "name": "optionalCallbackParams",
         "type": "function",
         "description": "Gives back a string. Or not.",
-        "parameters": [
-          {
-            "name": "callback",
-            "type": "function",
-            "parameters": [
-              {
-                "name": "result",
-                "$ref": "TestType",
-                "description": "True if the extension has the specified permissions."
-              }
-            ]
-          }
-        ]
+        "parameters": [],
+        "returns_async": {
+          "name": "callback",
+          "parameters": [
+            {
+              "name": "result",
+              "$ref": "TestType",
+              "description": "True if the extension has the specified permissions."
+            }
+          ]
+        }
       },
       {
         "name": "getTestType",
         "type": "function",
         "description": "Return a TestType.",
-        "parameters": [
-          {
-            "name": "callback",
-            "type": "function",
-            "parameters": [
-              {
-                "name": "result",
-                "$ref": "TestType",
-                "description": "A TestType."
-              }
-            ]
-          }
-        ]
+        "parameters": [],
+        "returns_async": {
+          "name": "callback",
+          "parameters": [
+            {
+              "name": "result",
+              "$ref": "TestType",
+              "description": "A TestType."
+            }
+          ]
+        }
       }
     ],
     "events": [

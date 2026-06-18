@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -12,14 +12,39 @@ group("android") {
 
 source_set("reading_list") {
   sources = [
-    "reading_list_manager.cc",
     "reading_list_manager.h",
+    "reading_list_manager_impl.cc",
+    "reading_list_manager_impl.h",
   ]
 
-  # This target should not depend on anything in //chrome/* except the proto library.
+  # This target should not depend on the whole //chrome/browser target.
   deps = [
     "//base",
+    "//chrome/app:generated_resources",
+    "//chrome/browser/notifications/scheduler/public",
+    "//components/bookmarks/browser",
     "//components/keyed_service/core",
     "//components/reading_list/core",
+    "//skia",
+    "//ui/base",
+    "//url",
+  ]
+}
+
+source_set("unit_tests") {
+  testonly = true
+  sources = [ "reading_list_manager_impl_unittest.cc" ]
+  deps = [
+    ":android",
+    "//base/test:test_support",
+    "//chrome/browser/notifications/scheduler/test:test_support",
+    "//components/bookmarks/browser",
+    "//components/reading_list/core",
+    "//components/reading_list/core:test_support",
+    "//components/sync",
+    "//components/sync:test_support",
+    "//skia",
+    "//testing/gmock",
+    "//testing/gtest",
   ]
 }

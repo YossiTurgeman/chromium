@@ -1,11 +1,10 @@
-#!/usr/bin/env python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 '''Unit tests for grit.node.custom.filename'''
 
-from __future__ import print_function
 
 import os
 import sys
@@ -15,6 +14,7 @@ if __name__ == '__main__':
 import unittest
 from grit.node.custom import filename
 from grit import clique
+from grit import constants
 from grit import tclib
 
 
@@ -26,8 +26,10 @@ class WindowsFilenameUnittest(unittest.TestCase):
     c = factory.MakeClique(msg)
     c.SetCustomType(filename.WindowsFilename())
     translation = tclib.Translation(id=msg.GetId(), text='Bilingo bolongo:')
-    c.AddTranslation(translation, 'fr')
-    self.failUnless(c.MessageForLanguage('fr').GetRealContent() == 'Bilingo bolongo ')
+    c.AddTranslation(translation, 'fr', constants.DEFAULT_GENDER)
+    self.assertTrue(
+        c.MessageForLanguageAndGender('fr', constants.DEFAULT_GENDER).
+        GetRealContent() == 'Bilingo bolongo ')
 
 
 if __name__ == '__main__':

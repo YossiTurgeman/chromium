@@ -26,19 +26,29 @@
 
 #include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
 
-#include "base/metrics/histogram_macros.h"
+#include "base/feature_list.h"
+#include "base/notreached.h"
+#include "base/types/pass_key.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
+#include "net/base/features.h"
+#include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
 #include "third_party/blink/public/common/blob/blob_utils.h"
 #include "third_party/blink/public/mojom/blob/blob_registry.mojom-blink.h"
+#include "third_party/blink/public/mojom/blob/blob_url_store.mojom-blink.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/fileapi/url_registry.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/workers/worker_global_scope.h"
+#include "third_party/blink/renderer/core/workers/worklet_global_scope.h"
 #include "third_party/blink/renderer/platform/blob/blob_data.h"
 #include "third_party/blink/renderer/platform/blob/blob_url.h"
 #include "third_party/blink/renderer/platform/blob/blob_url_null_origin_map.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/scheduler/main_thread/task_type_names.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+#include "third_party/blink/renderer/platform/wtf/casting.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
 namespace blink {
@@ -53,42 +63,116 @@ static void RemoveFromNullOriginMapIfNecessary(const KURL& blob_url) {
 
 }  // namespace
 
-PublicURLManager::PublicURLManager(ExecutionContext* context)
-    : ExecutionContextLifecycleObserver(context),
-      is_stopped_(false),
-      url_store_(context) {
-  BlobDataHandle::GetBlobRegistry()->URLStoreForOrigin(
-      context->GetSecurityOrigin(),
-      url_store_.BindNewEndpointAndPassReceiver(
-          context->GetTaskRunner(TaskType::kFileReading)));
+PublicURLManager::PublicURLManager(ExecutionContext* execution_context)
+    : ExecutionContextLifecycleObserver(execution_context),
+      frame_url_store_(execution_context),
+      worker_url_store_(execution_context) {
+  if (auto* window = DynamicTo<LocalDOMWindow>(execution_context)) {
+    LocalFrame* frame = window->GetFrame();
+    if (!frame) {
+      is_stopped_ = true;
+      return;
+    }
+
+    frame->GetRemoteNavigationAssociatedInterfaces()->GetInterface(
+        frame_url_store_.BindNewEndpointAndPassReceiver(
+            execution_context->GetTaskRunner(TaskType::kFileReading)));
+
+  } else if (auto* worker_global_scope =
+                 DynamicTo<WorkerGlobalScope>(execution_context)) {
+    if (worker_global_scope->IsClosing()) {
+      is_stopped_ = true;
+      return;
+    }
+
+    worker_global_scope->GetBrowserInterfaceBroker().GetInterface(
+        worker_url_store_.BindNewPipeAndPassReceiver(
+            execution_context->GetTaskRunner(TaskType::kFileReading)));
+
+  } else if (auto* worklet_global_scope =
+                 DynamicTo<WorkletGlobalScope>(execution_context)) {
+    if (worklet_global_scope->IsClosing()) {
+      is_stopped_ = true;
+      return;
+    }
+
+    if (worklet_global_scope->IsMainThreadWorkletGlobalScope()) {
+      LocalFrame* frame = worklet_global_scope->GetFrame();
+      if (!frame) {
+        is_stopped_ = true;
+        return;
+      }
+
+      frame->GetRemoteNavigationAssociatedInterfaces()->GetInterface(
+          frame_url_store_.BindNewEndpointAndPassReceiver(
+              execution_context->GetTaskRunner(TaskType::kFileReading)));
+    } else {
+      // For threaded worklets we don't have a frame accessible here, so
+      // instead we'll use a PendingRemote provided by the frame that created
+      // this worklet.
+      mojo::PendingRemote<mojom::blink::BlobURLStore> pending_remote =
+          worklet_global_scope->TakeBlobUrlStorePendingRemote();
+      DCHECK(pending_remote.is_valid());
+      worker_url_store_.Bind(
+          std::move(pending_remote),
+          execution_context->GetTaskRunner(TaskType::kFileReading));
+    }
+  } else {
+    NOTREACHED();
+  }
+}
+
+PublicURLManager::PublicURLManager(
+    base::PassKey<GlobalStorageAccessHandle>,
+    ExecutionContext* execution_context,
+    mojo::PendingAssociatedRemote<mojom::blink::BlobURLStore>
+        frame_url_store_remote)
+    : ExecutionContextLifecycleObserver(execution_context),
+      frame_url_store_(execution_context),
+      worker_url_store_(execution_context) {
+  frame_url_store_.Bind(
+      std::move(frame_url_store_remote),
+      execution_context->GetTaskRunner(TaskType::kFileReading));
+}
+
+mojom::blink::BlobURLStore& PublicURLManager::GetBlobURLStore() {
+  DCHECK_NE(frame_url_store_.is_bound(), worker_url_store_.is_bound());
+  if (frame_url_store_.is_bound()) {
+    return *frame_url_store_.get();
+  } else {
+    return *worker_url_store_.get();
+  }
 }
 
 String PublicURLManager::RegisterURL(URLRegistrable* registrable) {
   if (is_stopped_)
     return String();
 
-  SecurityOrigin* origin = GetExecutionContext()->GetMutableSecurityOrigin();
-  const KURL& url = BlobURL::CreatePublicURL(origin);
+  const KURL& url =
+      BlobURL::CreatePublicURL(GetExecutionContext()->GetSecurityOrigin());
   DCHECK(!url.IsEmpty());
   const String& url_string = url.GetString();
 
   if (registrable->IsMojoBlob()) {
-    // Measure how much jank the following synchronous IPC introduces.
-    SCOPED_UMA_HISTOGRAM_TIMER("Storage.Blob.RegisterPublicURLTime");
     mojo::PendingRemote<mojom::blink::Blob> blob_remote;
     mojo::PendingReceiver<mojom::blink::Blob> blob_receiver =
         blob_remote.InitWithNewPipeAndPassReceiver();
-    url_store_->Register(std::move(blob_remote), url);
+
+    GetBlobURLStore().Register(std::move(blob_remote), url);
+
     mojo_urls_.insert(url_string);
     registrable->CloneMojoBlob(std::move(blob_receiver));
   } else {
     URLRegistry* registry = &registrable->Registry();
-    registry->RegisterURL(origin, url, registrable);
+    registry->RegisterURL(url, registrable);
     url_to_registry_.insert(url_string, registry);
   }
 
-  if (origin->SerializesAsNull())
-    BlobURLNullOriginMap::GetInstance()->Add(url, origin);
+  SecurityOrigin* mutable_origin =
+      GetExecutionContext()->GetMutableSecurityOrigin();
+  if (mutable_origin->SerializesAsNull()) {
+    BlobURLNullOriginMap::GetInstance()->Add(url, mutable_origin);
+  }
 
   return url_string;
 }
@@ -104,7 +188,7 @@ void PublicURLManager::Revoke(const KURL& url) {
           GetExecutionContext()->GetSecurityOrigin()))
     return;
 
-  url_store_->Revoke(url);
+  GetBlobURLStore().Revoke(url);
   mojo_urls_.erase(url.GetString());
 
   RemoveFromNullOriginMapIfNecessary(url);
@@ -123,17 +207,21 @@ void PublicURLManager::Resolve(
     return;
 
   DCHECK(url.ProtocolIs("blob"));
-  url_store_->ResolveAsURLLoaderFactory(url, std::move(factory_receiver));
+
+  GetBlobURLStore().ResolveAsURLLoaderFactory(url, std::move(factory_receiver));
 }
 
-void PublicURLManager::Resolve(
+void PublicURLManager::ResolveAsBlobURLToken(
     const KURL& url,
-    mojo::PendingReceiver<mojom::blink::BlobURLToken> token_receiver) {
+    mojo::PendingReceiver<mojom::blink::BlobURLToken> token_receiver,
+    bool is_top_level_navigation) {
   if (is_stopped_)
     return;
 
   DCHECK(url.ProtocolIs("blob"));
-  url_store_->ResolveForNavigation(url, std::move(token_receiver));
+
+  GetBlobURLStore().ResolveAsBlobURLToken(url, std::move(token_receiver),
+                                          is_top_level_navigation);
 }
 
 void PublicURLManager::ContextDestroyed() {
@@ -153,7 +241,8 @@ void PublicURLManager::ContextDestroyed() {
 }
 
 void PublicURLManager::Trace(Visitor* visitor) const {
-  visitor->Trace(url_store_);
+  visitor->Trace(frame_url_store_);
+  visitor->Trace(worker_url_store_);
   ExecutionContextLifecycleObserver::Trace(visitor);
 }
 

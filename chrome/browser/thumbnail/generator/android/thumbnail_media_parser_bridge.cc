@@ -1,33 +1,35 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/thumbnail/generator/android/thumbnail_media_parser_bridge.h"
 #include "base/android/callback_android.h"
 #include "base/android/jni_string.h"
-#include "base/bind.h"
 #include "base/files/file_path.h"
-#include "base/task/post_task.h"
-#include "chrome/browser/thumbnail/generator/test_support_jni_headers/ThumbnailMediaData_jni.h"
-#include "chrome/browser/thumbnail/generator/test_support_jni_headers/ThumbnailMediaParserBridge_jni.h"
+#include "base/functional/bind.h"
+#include "chrome/browser/thumbnail/generator/android/thumbnail_media_parser.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/gfx/android/java_bitmap.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/browser/thumbnail/generator/test_support_jni_headers/ThumbnailMediaData_jni.h"
+#include "chrome/browser/thumbnail/generator/test_support_jni_headers/ThumbnailMediaParserBridge_jni.h"
 
 using base::android::ConvertUTF8ToJavaString;
 
 namespace {
 
-void OnMediaParsed(const base::android::ScopedJavaGlobalRef<jobject> jcallback,
+void OnMediaParsed(ThumbnailMediaParser*,
+                   const base::android::ScopedJavaGlobalRef<jobject> jcallback,
                    bool success,
                    chrome::mojom::MediaMetadataPtr metadata,
                    SkBitmap thumbnail_bitmap) {
-  JNIEnv* env = base::android::AttachCurrentThread();
+  JNIEnv* env = jni_zero::AttachCurrentThread();
   DCHECK(metadata);
 
   // Copy the thumbnail bitmap to a Java Bitmap object.
   base::android::ScopedJavaLocalRef<jobject> java_bitmap;
   if (!thumbnail_bitmap.isNull())
-    java_bitmap = gfx::ConvertToJavaBitmap(&thumbnail_bitmap);
+    java_bitmap = gfx::ConvertToJavaBitmap(thumbnail_bitmap);
 
   base::android::ScopedJavaLocalRef<jobject> media_data;
   if (success) {
@@ -42,37 +44,23 @@ void OnMediaParsed(const base::android::ScopedJavaGlobalRef<jobject> jcallback,
 }  // namespace
 
 // static
-jlong JNI_ThumbnailMediaParserBridge_Init(
+static void JNI_ThumbnailMediaParserBridge_Parse(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& jcaller,
-    const base::android::JavaParamRef<jstring>& jmime_type,
-    const base::android::JavaParamRef<jstring>& jfile_path,
-    const base::android::JavaParamRef<jobject>& jcallback) {
+    const base::android::JavaRef<jstring>& jmime_type,
+    const base::android::JavaRef<jstring>& jfile_path,
+    const base::android::JavaRef<jobject>& jcallback) {
   base::FilePath file_path(
       base::android::ConvertJavaStringToUTF8(env, jfile_path));
   std::string mime_type =
       base::android::ConvertJavaStringToUTF8(env, jmime_type);
 
-  auto* bridge = new ThumbnailMediaParserBridge(
-      mime_type, file_path,
-      base::BindOnce(&OnMediaParsed,
+  // Deletes self
+  ThumbnailMediaParser* parser =
+      ThumbnailMediaParser::Create(mime_type, file_path).release();
+  parser->Start(
+      base::BindOnce(&OnMediaParsed, base::Owned(parser),
                      base::android::ScopedJavaGlobalRef<jobject>(jcallback)));
-  return reinterpret_cast<intptr_t>(bridge);
 }
 
-ThumbnailMediaParserBridge::ThumbnailMediaParserBridge(
-    const std::string& mime_type,
-    const base::FilePath& file_path,
-    ThumbnailMediaParser::ParseCompleteCB parse_complete_cb)
-    : parser_(ThumbnailMediaParser::Create(mime_type, file_path)),
-      parse_complete_cb_(std::move(parse_complete_cb)) {}
-
-ThumbnailMediaParserBridge::~ThumbnailMediaParserBridge() = default;
-
-void ThumbnailMediaParserBridge::Destroy(JNIEnv* env, jobject obj) {
-  delete this;
-}
-
-void ThumbnailMediaParserBridge::Start(JNIEnv* env, jobject obj) {
-  parser_->Start(std::move(parse_complete_cb_));
-}
+DEFINE_JNI(ThumbnailMediaData)
+DEFINE_JNI(ThumbnailMediaParserBridge)

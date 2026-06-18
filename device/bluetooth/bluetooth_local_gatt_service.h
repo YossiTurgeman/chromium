@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,13 @@
 #define DEVICE_BLUETOOTH_BLUETOOTH_LOCAL_GATT_SERVICE_H_
 
 #include <stdint.h>
+
+#include <optional>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/callback_forward.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/weak_ptr.h"
-#include "device/bluetooth/bluetooth_adapter.h"
 #include "device/bluetooth/bluetooth_export.h"
 #include "device/bluetooth/bluetooth_gatt_characteristic.h"
 #include "device/bluetooth/bluetooth_gatt_service.h"
@@ -22,6 +22,7 @@ namespace device {
 
 class BluetoothLocalGattCharacteristic;
 class BluetoothLocalGattDescriptor;
+class BluetoothDevice;
 
 // BluetoothLocalGattService represents a local GATT service.
 //
@@ -45,28 +46,28 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothLocalGattService
   class Delegate {
    public:
     // Callbacks used for communicating GATT request responses.
-    using ValueCallback = base::OnceCallback<void(const std::vector<uint8_t>&)>;
+    using ValueCallback = base::OnceCallback<void(
+        std::optional<BluetoothGattService::GattErrorCode> error_code,
+        const std::vector<uint8_t>&)>;
     using ErrorCallback = base::OnceClosure;
 
     // Called when a remote device |device| requests to read the value of the
-    // characteristic |characteristic| starting at offset |offset|.
-    // This method is only called if the characteristic was specified as
-    // readable and any authentication and authorization challenges were
-    // satisfied by the remote device.
+    // characteristic |characteristic| starting at offset |offset|. To respond
+    // to the request with failure (e.g. if an invalid offset was given),
+    // delegates must invoke |callback| with the appropriate error code. If
+    // |callback| is not invoked, the request will time out resulting in an
+    // error. Therefore, delegates MUST invoke |callback| regardless of success
+    // or failure.
     //
     // To respond to the request with success and return the requested value,
-    // the delegate must invoke |callback| with the value. Doing so will
-    // automatically update the value property of |characteristic|. To respond
-    // to the request with failure (e.g. if an invalid offset was given),
-    // delegates must invoke |error_callback|. If neither callback parameter is
-    // invoked, the request will time out and result in an error. Therefore,
-    // delegates MUST invoke either |callback| or |error_callback|.
+    // the delegate must invoke |callback| with the value (and without an error
+    // code). Doing so will automatically update the value property of
+    // |characteristic|.
     virtual void OnCharacteristicReadRequest(
         const BluetoothDevice* device,
         const BluetoothLocalGattCharacteristic* characteristic,
         int offset,
-        ValueCallback callback,
-        ErrorCallback error_callback) = 0;
+        ValueCallback callback) = 0;
 
     // Called when a remote device |device| requests to write the value of the
     // characteristic |characteristic| starting at offset |offset|.
@@ -113,24 +114,22 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothLocalGattService
         ErrorCallback error_callback) = 0;
 
     // Called when a remote device |device| requests to read the value of the
-    // descriptor |descriptor| starting at offset |offset|.
-    // This method is only called if the descriptor was specified as
-    // readable and any authentication and authorization challenges were
-    // satisfied by the remote device.
+    // descriptor |descriptor| starting at offset |offset|. To respond
+    // to the request with failure (e.g. if an invalid offset was given),
+    // delegates must invoke |callback| with the appropriate error code. If
+    // |callback| is not invoked, the request will time out resulting in an
+    // error. Therefore, delegates MUST invoke |callback| regardless of success
+    // or failure.
     //
     // To respond to the request with success and return the requested value,
-    // the delegate must invoke |callback| with the value. Doing so will
-    // automatically update the value property of |descriptor|. To respond
-    // to the request with failure (e.g. if an invalid offset was given),
-    // delegates must invoke |error_callback|. If neither callback parameter is
-    // invoked, the request will time out and result in an error. Therefore,
-    // delegates MUST invoke either |callback| or |error_callback|.
+    // the delegate must invoke |callback| with the value (and without an error
+    // code). Doing so will automatically update the value property of
+    // |descriptor|.
     virtual void OnDescriptorReadRequest(
         const BluetoothDevice* device,
         const BluetoothLocalGattDescriptor* descriptor,
         int offset,
-        ValueCallback callback,
-        ErrorCallback error_callback) = 0;
+        ValueCallback callback) = 0;
 
     // Called when a remote device |devie| requests to write the value of the
     // descriptor |descriptor| starting at offset |offset|.
@@ -168,18 +167,10 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothLocalGattService
         const BluetoothLocalGattCharacteristic* characteristic) = 0;
   };
 
-  // Creates a local GATT service to be used with |adapter| (which will own
-  // the created service object).  A service can register or unregister itself
-  // at any time by calling its Register/Unregister methods. |delegate|
-  // receives read/write requests for characteristic/descriptor values. It
-  // needs to outlive this object.
-  // TODO(rkc): Implement included services.
-  static base::WeakPtr<BluetoothLocalGattService> Create(
-      BluetoothAdapter* adapter,
-      const BluetoothUUID& uuid,
-      bool is_primary,
-      BluetoothLocalGattService* included_service,
-      BluetoothLocalGattService::Delegate* delegate);
+  BluetoothLocalGattService(const BluetoothLocalGattService&) = delete;
+  BluetoothLocalGattService& operator=(const BluetoothLocalGattService&) =
+      delete;
+  ~BluetoothLocalGattService() override = default;
 
   // Registers this GATT service. Calling Register will make this service and
   // all of its associated attributes available on the local adapters GATT
@@ -202,12 +193,21 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothLocalGattService
   virtual BluetoothLocalGattCharacteristic* GetCharacteristic(
       const std::string& identifier) = 0;
 
- protected:
-  BluetoothLocalGattService();
-  ~BluetoothLocalGattService() override;
+  // Constructs a BluetoothLocalGattCharacteristic associated with a local GATT
+  // service when the adapter is in the peripheral role.
+  //
+  // This method constructs a characteristic with UUID |uuid|,
+  // properties |properties|, and permissions |permissions|. The service
+  // instance will contain this characteristic.
+  // TODO(rkc): Investigate how to handle |PROPERTY_EXTENDED_PROPERTIES|
+  // correctly.
+  virtual base::WeakPtr<BluetoothLocalGattCharacteristic> CreateCharacteristic(
+      const BluetoothUUID& uuid,
+      BluetoothGattCharacteristic::Properties properties,
+      BluetoothGattCharacteristic::Permissions permissions) = 0;
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(BluetoothLocalGattService);
+ protected:
+  BluetoothLocalGattService() = default;
 };
 
 }  // namespace device

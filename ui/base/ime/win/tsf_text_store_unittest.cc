@@ -1,6 +1,11 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
 
 #include "ui/base/ime/win/tsf_text_store.h"
 
@@ -8,18 +13,24 @@
 
 #include <InputScope.h>
 #include <OleCtl.h>
+#include <tsattrs.h>
 #include <wrl/client.h>
 
 #include <vector>
 
 #include "base/memory/ref_counted.h"
-#include "base/stl_util.h"
+#include "base/memory/weak_ptr.h"
+#include "base/notreached.h"
+#include "base/strings/utf_string_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/win/scoped_com_initializer.h"
 #include "base/win/scoped_variant.h"
 #include "build/build_config.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/ime/text_input_client.h"
+#include "ui/base/ime/text_input_flags.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/events/event.h"
 #include "ui/events/event_dispatcher.h"
 #include "ui/gfx/geometry/rect.h"
@@ -33,11 +44,17 @@ namespace {
 
 class MockTextInputClient : public TextInputClient {
  public:
-  ~MockTextInputClient() {}
+  ~MockTextInputClient() override {}
+  base::WeakPtr<TextInputClient> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
   MOCK_METHOD1(SetCompositionText, void(const ui::CompositionText&));
-  MOCK_METHOD1(ConfirmCompositionText, uint32_t(bool));
+  MOCK_METHOD1(ConfirmCompositionText, size_t(bool));
   MOCK_METHOD0(ClearCompositionText, void());
-  MOCK_METHOD1(InsertText, void(const base::string16&));
+  MOCK_METHOD2(
+      InsertText,
+      void(const std::u16string&,
+           ui::TextInputClient::InsertTextCursorBehavior cursor_behavior));
   MOCK_METHOD1(InsertChar, void(const ui::KeyEvent&));
   MOCK_CONST_METHOD0(GetTextInputType, ui::TextInputType());
   MOCK_CONST_METHOD0(GetTextInputMode, ui::TextInputMode());
@@ -45,7 +62,13 @@ class MockTextInputClient : public TextInputClient {
   MOCK_CONST_METHOD0(GetTextInputFlags, int());
   MOCK_CONST_METHOD0(CanComposeInline, bool());
   MOCK_CONST_METHOD0(GetCaretBounds, gfx::Rect());
-  MOCK_CONST_METHOD2(GetCompositionCharacterBounds, bool(uint32_t, gfx::Rect*));
+  MOCK_CONST_METHOD0(GetSelectionBoundingBox, gfx::Rect());
+  MOCK_CONST_METHOD1(GetProximateCharacterBounds,
+                     std::optional<gfx::Rect>(const gfx::Range&));
+  MOCK_CONST_METHOD2(GetProximateCharacterIndexFromPoint,
+                     std::optional<size_t>(const gfx::Point&,
+                                           IndexFromPointFlags));
+  MOCK_CONST_METHOD2(GetCompositionCharacterBounds, bool(size_t, gfx::Rect*));
   MOCK_CONST_METHOD0(HasCompositionText, bool());
   MOCK_CONST_METHOD0(GetFocusReason, ui::TextInputClient::FocusReason());
   MOCK_METHOD0(ShouldDoLearning, bool());
@@ -55,7 +78,7 @@ class MockTextInputClient : public TextInputClient {
   MOCK_METHOD1(SetEditableSelectionRange, bool(const gfx::Range&));
   MOCK_METHOD1(DeleteRange, bool(const gfx::Range&));
   MOCK_CONST_METHOD2(GetTextFromRange,
-                     bool(const gfx::Range&, base::string16*));
+                     bool(const gfx::Range&, std::u16string*));
   MOCK_METHOD0(OnInputMethodChanged, void());
   MOCK_METHOD1(ChangeTextDirectionAndLayoutAlignment,
                bool(base::i18n::TextDirection));
@@ -67,15 +90,19 @@ class MockTextInputClient : public TextInputClient {
   MOCK_METHOD2(SetCompositionFromExistingText,
                bool(const gfx::Range&, const std::vector<ui::ImeTextSpan>&));
   MOCK_METHOD3(SetActiveCompositionForAccessibility,
-               void(const gfx::Range&, const base::string16&, bool));
+               void(const gfx::Range&, const std::u16string&, bool));
   MOCK_METHOD2(GetActiveTextInputControlLayoutBounds,
-               void(base::Optional<gfx::Rect>* control_bounds,
-                    base::Optional<gfx::Rect>* selection_bounds));
+               void(std::optional<gfx::Rect>* control_bounds,
+                    std::optional<gfx::Rect>* selection_bounds));
+  MOCK_METHOD0(GetTextEditingContext, ui::TextInputClient::EditingContext());
+
+ private:
+  base::WeakPtrFactory<MockTextInputClient> weak_ptr_factory_{this};
 };
 
-class MockInputMethodDelegate : public internal::InputMethodDelegate {
+class MockImeKeyEventDispatcher : public ImeKeyEventDispatcher {
  public:
-  ~MockInputMethodDelegate() {}
+  ~MockImeKeyEventDispatcher() override {}
   MOCK_METHOD1(DispatchKeyEventPostIME, EventDispatchDetails(KeyEvent*));
 };
 
@@ -145,7 +172,7 @@ class TSFTextStoreTest : public testing::Test {
     EXPECT_EQ(S_OK, text_store_->AdviseSink(IID_ITextStoreACPSink, sink_.get(),
                                             TS_AS_ALL_SINKS));
     text_store_->SetFocusedTextInputClient(kWindowHandle, &text_input_client_);
-    text_store_->SetInputMethodDelegate(&input_method_delegate_);
+    text_store_->SetImeKeyEventDispatcher(&ime_key_event_dispatcher_);
   }
 
   void TearDown() override {
@@ -155,14 +182,18 @@ class TSFTextStoreTest : public testing::Test {
   }
 
   // Accessors to the internal state of TSFTextStore.
-  base::string16* string_buffer() {
+  std::u16string* string_buffer() {
     return &text_store_->string_buffer_document_;
   }
   size_t* composition_start() { return &text_store_->composition_start_; }
 
+  void set_is_input_ime_for_testing(bool value) {
+    text_store_->is_input_ime_for_testing_ = value;
+  }
+
   base::win::ScopedCOMInitializer com_initializer_;
   MockTextInputClient text_input_client_;
-  MockInputMethodDelegate input_method_delegate_;
+  MockImeKeyEventDispatcher ime_key_event_dispatcher_;
   scoped_refptr<TSFTextStore> text_store_;
   scoped_refptr<MockStoreACPSink> sink_;
 };
@@ -173,6 +204,10 @@ class TSFTextStoreTestCallback {
       : text_store_(text_store) {
     CHECK(text_store_);
   }
+
+  TSFTextStoreTestCallback(const TSFTextStoreTestCallback&) = delete;
+  TSFTextStoreTestCallback& operator=(const TSFTextStoreTestCallback&) = delete;
+
   virtual ~TSFTextStoreTestCallback() {}
 
   bool HasCompositionText() { return has_composition_text_; }
@@ -181,7 +216,7 @@ class TSFTextStoreTestCallback {
     range->set_end(text_range_.end());
     return true;
   }
-  bool GetTextFromRange(const gfx::Range& range, base::string16* text) {
+  bool GetTextFromRange(const gfx::Range& range, std::u16string* text) {
     *text = text_buffer_.substr(range.GetMin(), range.length());
     return true;
   }
@@ -201,10 +236,10 @@ class TSFTextStoreTestCallback {
   // Accessors to the internal state of TSFTextStore.
   bool* edit_flag() { return &text_store_->edit_flag_; }
   bool* new_text_inserted() { return &text_store_->new_text_inserted_; }
-  base::string16* string_buffer() {
+  std::u16string* string_buffer() {
     return &text_store_->string_buffer_document_;
   }
-  base::string16* string_pending_insertion() {
+  std::u16string* string_pending_insertion() {
     return &text_store_->string_pending_insertion_;
   }
   size_t* composition_start() { return &text_store_->composition_start_; }
@@ -212,8 +247,11 @@ class TSFTextStoreTestCallback {
   ImeTextSpans* text_spans() { return &text_store_->text_spans_; }
   gfx::Range* composition_range() { return &text_store_->composition_range_; }
   bool* has_composition_range() { return &text_store_->has_composition_range_; }
+  bool* on_update_composition_called() {
+    return &text_store_->on_update_composition_called_;
+  }
 
-  void SetInternalState(const base::string16& new_string_buffer,
+  void SetInternalState(const std::u16string& new_string_buffer,
                         LONG new_composition_start,
                         LONG new_selection_start,
                         LONG new_selection_end) {
@@ -254,7 +292,7 @@ class TSFTextStoreTestCallback {
 
   void SetTextTest(LONG acp_start,
                    LONG acp_end,
-                   const base::string16& text,
+                   const std::wstring& text,
                    HRESULT error_code) {
     TS_TEXTCHANGE change = {};
     ASSERT_EQ(error_code,
@@ -269,7 +307,7 @@ class TSFTextStoreTestCallback {
 
   void GetTextTest(LONG acp_start,
                    LONG acp_end,
-                   const base::string16& expected_string,
+                   const std::wstring& expected_string,
                    LONG expected_next_acp) {
     wchar_t buffer[1024] = {};
     ULONG text_buffer_copied = 0;
@@ -281,7 +319,7 @@ class TSFTextStoreTestCallback {
                                          &run_info_buffer_copied, &next_acp));
     ASSERT_EQ(expected_string.size(), text_buffer_copied);
     EXPECT_EQ(expected_string,
-              base::string16(buffer, buffer + text_buffer_copied));
+              std::wstring(buffer, buffer + text_buffer_copied));
     if (text_buffer_copied > 0) {
       EXPECT_EQ(1u, run_info_buffer_copied);
       EXPECT_EQ(expected_string.size(), run_info.uCount);
@@ -363,6 +401,22 @@ class TSFTextStoreTestCallback {
                                                      acp_end, &rect, &clipped));
   }
 
+  void ResetCompositionStateTest() {
+    EXPECT_TRUE(text_store_->previous_composition_string_.empty());
+    EXPECT_EQ(0u, text_store_->previous_composition_start_);
+    EXPECT_EQ(gfx::Range::InvalidRange(),
+              text_store_->previous_composition_selection_range_);
+    EXPECT_TRUE(text_store_->previous_text_spans_.empty());
+
+    EXPECT_TRUE(text_store_->string_pending_insertion_.empty());
+    EXPECT_TRUE(text_store_->composition_range_.is_empty());
+    EXPECT_EQ(text_store_->composition_from_client_.end(),
+              text_store_->selection_.start());
+    EXPECT_EQ(text_store_->composition_from_client_.end(),
+              text_store_->selection_.end());
+    EXPECT_EQ(text_store_->selection_.end(), text_store_->composition_start_);
+  }
+
   void SetHasCompositionText(bool compText) {
     has_composition_text_ = compText;
   }
@@ -382,7 +436,7 @@ class TSFTextStoreTestCallback {
     composition_range_.set_end(end);
   }
 
-  void SetTextBuffer(const wchar_t* buffer) {
+  void SetTextBuffer(const char16_t* buffer) {
     text_buffer_.clear();
     text_buffer_.assign(buffer);
   }
@@ -391,11 +445,8 @@ class TSFTextStoreTestCallback {
   gfx::Range text_range_;
   gfx::Range selection_range_;
   gfx::Range composition_range_;
-  base::string16 text_buffer_ = L"";
+  std::u16string text_buffer_;
   scoped_refptr<TSFTextStore> text_store_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(TSFTextStoreTestCallback);
 };
 
 namespace {
@@ -406,13 +457,45 @@ TEST_F(TSFTextStoreTest, GetStatusTest) {
   TS_STATUS status = {};
   EXPECT_EQ(S_OK, text_store_->GetStatus(&status));
   EXPECT_EQ((ULONG)TS_SD_INPUTPANEMANUALDISPLAYENABLE, status.dwDynamicFlags);
-  EXPECT_EQ((ULONG)(TS_SS_NOHIDDENTEXT), status.dwStaticFlags);
+  EXPECT_EQ((ULONG)(TS_SS_TRANSITORY | TS_SS_NOHIDDENTEXT),
+            status.dwStaticFlags);
+
+  text_store_->UseEmptyTextStore(true);
+  status = {};
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_NONE));
+  EXPECT_EQ(S_OK, text_store_->GetStatus(&status));
+  EXPECT_EQ((ULONG)TS_SD_READONLY, status.dwDynamicFlags & TS_SD_READONLY);
+
+  status = {};
+  text_store_->UseEmptyTextStore(false);
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+  EXPECT_EQ(S_OK, text_store_->GetStatus(&status));
+  EXPECT_EQ((ULONG)0, status.dwDynamicFlags & TS_SD_READONLY);
+}
+
+TEST_F(TSFTextStoreTest, DummyLockTest) {
+  HRESULT result = kInvalidResult;
+  text_store_->UseEmptyTextStore(false);
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+  EXPECT_EQ(S_OK,
+            text_store_->RequestLock(TS_LF_READWRITE | TS_LF_SYNC, &result));
+
+  text_store_->UseEmptyTextStore(true);
+  EXPECT_EQ(E_FAIL,
+            text_store_->RequestLock(TS_LF_READWRITE | TS_LF_SYNC, &result));
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_NONE));
+  EXPECT_EQ(E_FAIL,
+            text_store_->RequestLock(TS_LF_READWRITE | TS_LF_SYNC, &result));
 }
 
 TEST_F(TSFTextStoreTest, QueryInsertTest) {
   LONG result_start = 0;
   LONG result_end = 0;
-  *string_buffer() = L"";
+  *string_buffer() = std::u16string();
   *composition_start() = 0;
   EXPECT_EQ(E_INVALIDARG,
             text_store_->QueryInsert(0, 0, 0, nullptr, &result_end));
@@ -422,7 +505,7 @@ TEST_F(TSFTextStoreTest, QueryInsertTest) {
             text_store_->QueryInsert(0, 0, 0, &result_start, &result_end));
   EXPECT_EQ(0, result_start);
   EXPECT_EQ(0, result_end);
-  *string_buffer() = L"1234";
+  *string_buffer() = u"1234";
   *composition_start() = 1;
   EXPECT_EQ(S_OK,
             text_store_->QueryInsert(0, 1, 0, &result_start, &result_end));
@@ -448,12 +531,23 @@ TEST_F(TSFTextStoreTest, QueryInsertTest) {
             text_store_->QueryInsert(3, 5, 0, &result_start, &result_end));
   EXPECT_EQ(3, result_start);
   EXPECT_EQ(4, result_end);
+
+  *string_buffer() = u"";
+  *composition_start() = 2;
+  EXPECT_EQ(S_OK,
+            text_store_->QueryInsert(0, 2, 5, &result_start, &result_end));
+  EXPECT_EQ(0, result_start);
+  EXPECT_EQ(5, result_end);
 }
 
 class SyncRequestLockTestCallback : public TSFTextStoreTestCallback {
  public:
   explicit SyncRequestLockTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  SyncRequestLockTestCallback(const SyncRequestLockTestCallback&) = delete;
+  SyncRequestLockTestCallback& operator=(const SyncRequestLockTestCallback&) =
+      delete;
 
   HRESULT LockGranted1(DWORD flags) {
     EXPECT_TRUE(HasReadLock());
@@ -504,12 +598,11 @@ class SyncRequestLockTestCallback : public TSFTextStoreTestCallback {
     EXPECT_EQ(TS_E_SYNCHRONOUS, result);
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SyncRequestLockTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, SynchronousRequestLockTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   SyncRequestLockTestCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback, &SyncRequestLockTestCallback::LockGranted1))
@@ -547,6 +640,10 @@ class AsyncRequestLockTestCallback : public TSFTextStoreTestCallback {
  public:
   explicit AsyncRequestLockTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store), state_(0) {}
+
+  AsyncRequestLockTestCallback(const AsyncRequestLockTestCallback&) = delete;
+  AsyncRequestLockTestCallback& operator=(const AsyncRequestLockTestCallback&) =
+      delete;
 
   HRESULT LockGranted1(DWORD flags) {
     EXPECT_EQ(0, state_);
@@ -607,11 +704,11 @@ class AsyncRequestLockTestCallback : public TSFTextStoreTestCallback {
 
  private:
   int state_;
-
-  DISALLOW_COPY_AND_ASSIGN(AsyncRequestLockTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, AsynchronousRequestLockTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   AsyncRequestLockTestCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback, &AsyncRequestLockTestCallback::LockGranted1))
@@ -630,6 +727,11 @@ class RequestLockTextChangeTestCallback : public TSFTextStoreTestCallback {
   explicit RequestLockTextChangeTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store), state_(0) {}
 
+  RequestLockTextChangeTestCallback(const RequestLockTextChangeTestCallback&) =
+      delete;
+  RequestLockTextChangeTestCallback& operator=(
+      const RequestLockTextChangeTestCallback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     EXPECT_EQ(0, state_);
     state_ = 1;
@@ -637,16 +739,18 @@ class RequestLockTextChangeTestCallback : public TSFTextStoreTestCallback {
     EXPECT_TRUE(HasReadWriteLock());
 
     *edit_flag() = true;
-    SetInternalState(L"012345", 6, 6, 6);
+    SetInternalState(u"012345", 6, 6, 6);
     text_spans()->clear();
 
     state_ = 2;
     return S_OK;
   }
 
-  void InsertText(const base::string16& text) {
+  void InsertText(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
     EXPECT_EQ(2, state_);
-    EXPECT_EQ(L"012345", text);
+    EXPECT_EQ(u"012345", text);
     state_ = 3;
   }
 
@@ -656,8 +760,8 @@ class RequestLockTextChangeTestCallback : public TSFTextStoreTestCallback {
     return true;
   }
 
-  bool GetTextFromRange(const gfx::Range& range, base::string16* text) const {
-    base::string16 string_buffer = L"012345";
+  bool GetTextFromRange(const gfx::Range& range, std::u16string* text) const {
+    std::u16string string_buffer = u"012345";
     *text = string_buffer.substr(range.GetMin(), range.length());
     return true;
   }
@@ -689,11 +793,11 @@ class RequestLockTextChangeTestCallback : public TSFTextStoreTestCallback {
 
  private:
   int state_;
-
-  DISALLOW_COPY_AND_ASSIGN(RequestLockTextChangeTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, RequestLockOnTextChangeTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RequestLockTextChangeTestCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(
@@ -704,7 +808,7 @@ TEST_F(TSFTextStoreTest, RequestLockOnTextChangeTest) {
   EXPECT_CALL(*sink_, OnSelectionChange())
       .WillOnce(Invoke(&callback,
                        &RequestLockTextChangeTestCallback::OnSelectionChange));
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(
           Invoke(&callback, &RequestLockTextChangeTestCallback::InsertText));
   EXPECT_CALL(text_input_client_, GetEditableSelectionRange(_))
@@ -733,12 +837,12 @@ class SelectionTestCallback : public TSFTextStoreTestCallback {
       : TSFTextStoreTestCallback(text_store) {}
 
   HRESULT ReadLockGranted(DWORD flags) {
-    SetInternalState(L"", 0, 0, 0);
+    SetInternalState(std::u16string(), 0, 0, 0);
 
     GetSelectionTest(0, 0);
     SetSelectionTest(0, 0, TF_E_NOLOCK);
 
-    SetInternalState(L"012345", 0, 0, 3);
+    SetInternalState(u"012345", 0, 0, 3);
 
     GetSelectionTest(0, 3);
     SetSelectionTest(0, 0, TF_E_NOLOCK);
@@ -747,7 +851,7 @@ class SelectionTestCallback : public TSFTextStoreTestCallback {
   }
 
   HRESULT ReadWriteLockGranted(DWORD flags) {
-    SetInternalState(L"", 0, 0, 0);
+    SetInternalState(std::u16string(), 0, 0, 0);
 
     SetSelectionTest(0, 0, S_OK);
     GetSelectionTest(0, 0);
@@ -755,7 +859,7 @@ class SelectionTestCallback : public TSFTextStoreTestCallback {
     SetSelectionTest(1, 0, TF_E_INVALIDPOS);
     SetSelectionTest(1, 1, TF_E_INVALIDPOS);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetSelectionTest(0, 0, S_OK);
     SetSelectionTest(0, 1, S_OK);
@@ -804,6 +908,8 @@ class SelectionTestCallback : public TSFTextStoreTestCallback {
 };
 
 TEST_F(TSFTextStoreTest, SetGetSelectionTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   SelectionTestCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback, &SelectionTestCallback::ReadLockGranted))
@@ -825,6 +931,9 @@ class SetGetTextTestCallback : public TSFTextStoreTestCallback {
   explicit SetGetTextTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  SetGetTextTestCallback(const SetGetTextTestCallback&) = delete;
+  SetGetTextTestCallback& operator=(const SetGetTextTestCallback&) = delete;
+
   HRESULT ReadLockGranted(DWORD flags) {
     SetTextTest(0, 0, L"", TF_E_NOLOCK);
 
@@ -832,7 +941,7 @@ class SetGetTextTestCallback : public TSFTextStoreTestCallback {
     GetTextTest(0, 0, L"", 0);
     GetTextErrorTest(0, 1, TF_E_INVALIDPOS);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     GetTextErrorTest(-1, -1, TF_E_INVALIDPOS);
     GetTextErrorTest(-1, 0, TF_E_INVALIDPOS);
@@ -894,13 +1003,13 @@ class SetGetTextTestCallback : public TSFTextStoreTestCallback {
   }
 
   HRESULT ReadWriteLockGranted(DWORD flags) {
-    SetInternalState(L"", 0, 0, 0);
+    SetInternalState(std::u16string(), 0, 0, 0);
     SetTextTest(0, 0, L"", S_OK);
 
-    SetInternalState(L"", 0, 0, 0);
+    SetInternalState(std::u16string(), 0, 0, 0);
     SetTextTest(0, 1, L"", TS_E_INVALIDPOS);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetTextTest(0, 0, L"", S_OK);
     SetTextTest(0, 1, L"", S_OK);
@@ -922,17 +1031,17 @@ class SetGetTextTestCallback : public TSFTextStoreTestCallback {
     SetTextTest(3, 3, L"", TS_E_INVALIDPOS);
     GetTextTest(0, -1, L"4", 1);
     GetSelectionTest(1, 1);
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetTextTest(3, 6, L"", S_OK);
     GetTextTest(0, -1, L"0126", 4);
     GetSelectionTest(3, 3);
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetTextTest(3, 7, L"", S_OK);
     GetTextTest(0, -1, L"012", 3);
     GetSelectionTest(3, 3);
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetTextTest(3, 8, L"", TS_E_INVALIDPOS);
 
@@ -943,12 +1052,12 @@ class SetGetTextTestCallback : public TSFTextStoreTestCallback {
     SetTextTest(6, 6, L"", S_OK);
     GetTextTest(0, -1, L"0123456", 7);
     GetSelectionTest(6, 6);
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetTextTest(6, 7, L"", S_OK);
     GetTextTest(0, -1, L"012345", 6);
     GetSelectionTest(6, 6);
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetTextTest(6, 8, L"", TS_E_INVALIDPOS);
 
@@ -960,48 +1069,47 @@ class SetGetTextTestCallback : public TSFTextStoreTestCallback {
     SetTextTest(7, 7, L"", S_OK);
     GetTextTest(0, -1, L"0123456", 7);
     GetSelectionTest(7, 7);
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
 
     SetTextTest(7, 8, L"", TS_E_INVALIDPOS);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
     SetTextTest(3, 3, L"abc", S_OK);
     GetTextTest(0, -1, L"012abc3456", 10);
     GetSelectionTest(3, 6);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
     SetTextTest(3, 6, L"abc", S_OK);
     GetTextTest(0, -1, L"012abc6", 7);
     GetSelectionTest(3, 6);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
     SetTextTest(3, 7, L"abc", S_OK);
     GetTextTest(0, -1, L"012abc", 6);
     GetSelectionTest(3, 6);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
     SetTextTest(6, 6, L"abc", S_OK);
     GetTextTest(0, -1, L"012345abc6", 10);
     GetSelectionTest(6, 9);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
     SetTextTest(6, 7, L"abc", S_OK);
     GetTextTest(0, -1, L"012345abc", 9);
     GetSelectionTest(6, 9);
 
-    SetInternalState(L"0123456", 3, 3, 3);
+    SetInternalState(u"0123456", 3, 3, 3);
     SetTextTest(7, 7, L"abc", S_OK);
     GetTextTest(0, -1, L"0123456abc", 10);
     GetSelectionTest(7, 10);
 
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SetGetTextTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, SetGetTextTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   SetGetTextTestCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback, &SetGetTextTestCallback::ReadLockGranted))
@@ -1029,15 +1137,20 @@ class InsertTextAtSelectionTestCallback : public TSFTextStoreTestCallback {
   explicit InsertTextAtSelectionTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  InsertTextAtSelectionTestCallback(const InsertTextAtSelectionTestCallback&) =
+      delete;
+  InsertTextAtSelectionTestCallback& operator=(
+      const InsertTextAtSelectionTestCallback&) = delete;
+
   HRESULT ReadLockGranted(DWORD flags) {
     const wchar_t kBuffer[] = L"0123456789";
 
-    SetInternalState(L"abcedfg", 0, 0, 0);
+    SetInternalState(u"abcedfg", 0, 0, 0);
     InsertTextAtSelectionQueryOnlyTest(kBuffer, 10, 0, 0);
     GetSelectionTest(0, 0);
     InsertTextAtSelectionQueryOnlyTest(kBuffer, 0, 0, 0);
 
-    SetInternalState(L"abcedfg", 0, 2, 5);
+    SetInternalState(u"abcedfg", 0, 2, 5);
     InsertTextAtSelectionQueryOnlyTest(kBuffer, 10, 2, 5);
     GetSelectionTest(2, 5);
     InsertTextAtSelectionQueryOnlyTest(kBuffer, 0, 2, 5);
@@ -1051,46 +1164,45 @@ class InsertTextAtSelectionTestCallback : public TSFTextStoreTestCallback {
   }
 
   HRESULT ReadWriteLockGranted(DWORD flags) {
-    SetInternalState(L"abcedfg", 0, 0, 0);
+    SetInternalState(u"abcedfg", 0, 0, 0);
 
     const wchar_t kBuffer[] = L"0123456789";
     InsertTextAtSelectionQueryOnlyTest(kBuffer, 10, 0, 0);
     GetSelectionTest(0, 0);
     InsertTextAtSelectionQueryOnlyTest(kBuffer, 0, 0, 0);
 
-    SetInternalState(L"", 0, 0, 0);
+    SetInternalState(std::u16string(), 0, 0, 0);
     InsertTextAtSelectionTest(kBuffer, 10, 0, 10, 0, 0, 10);
     GetSelectionTest(0, 10);
     GetTextTest(0, -1, L"0123456789", 10);
 
-    SetInternalState(L"abcedfg", 0, 0, 0);
+    SetInternalState(u"abcedfg", 0, 0, 0);
     InsertTextAtSelectionTest(kBuffer, 10, 0, 10, 0, 0, 10);
     GetSelectionTest(0, 10);
     GetTextTest(0, -1, L"0123456789abcedfg", 17);
 
-    SetInternalState(L"abcedfg", 0, 0, 3);
+    SetInternalState(u"abcedfg", 0, 0, 3);
     InsertTextAtSelectionTest(kBuffer, 0, 0, 0, 0, 3, 0);
     GetSelectionTest(0, 0);
     GetTextTest(0, -1, L"edfg", 4);
 
-    SetInternalState(L"abcedfg", 0, 3, 7);
+    SetInternalState(u"abcedfg", 0, 3, 7);
     InsertTextAtSelectionTest(kBuffer, 10, 3, 13, 3, 7, 13);
     GetSelectionTest(3, 13);
     GetTextTest(0, -1, L"abc0123456789", 13);
 
-    SetInternalState(L"abcedfg", 0, 7, 7);
+    SetInternalState(u"abcedfg", 0, 7, 7);
     InsertTextAtSelectionTest(kBuffer, 10, 7, 17, 7, 7, 17);
     GetSelectionTest(7, 17);
     GetTextTest(0, -1, L"abcedfg0123456789", 17);
 
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(InsertTextAtSelectionTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, InsertTextAtSelectionTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   InsertTextAtSelectionTestCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback,
@@ -1110,6 +1222,9 @@ class ScenarioTestCallback : public TSFTextStoreTestCallback {
  public:
   explicit ScenarioTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  ScenarioTestCallback(const ScenarioTestCallback&) = delete;
+  ScenarioTestCallback& operator=(const ScenarioTestCallback&) = delete;
 
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"abc", S_OK);
@@ -1139,7 +1254,7 @@ class ScenarioTestCallback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"axyzc", composition.text);
+    EXPECT_EQ(u"axyzc", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(5u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -1173,10 +1288,14 @@ class ScenarioTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText2(const base::string16& text) { EXPECT_EQ(L"axy", text); }
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"axy", text);
+  }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"ZCPc", composition.text);
+    EXPECT_EQ(u"ZCPc", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(4u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -1197,8 +1316,10 @@ class ScenarioTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText3(const base::string16& text) {
-    EXPECT_EQ(L"ZCPc", text);
+  void InsertText3(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"ZCPc", text);
     has_composition_text_ = false;
   }
 
@@ -1226,7 +1347,7 @@ class ScenarioTestCallback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText4(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"EFGH", composition.text);
+    EXPECT_EQ(u"EFGH", composition.text);
     EXPECT_EQ(4u, composition.selection.start());
     EXPECT_EQ(4u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -1257,7 +1378,7 @@ class ScenarioTestCallback : public TSFTextStoreTestCallback {
   // still need to call into TextInputClient to set composition text
   // to update selection range even though composition text is unchanged.
   void SetCompositionText5(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"EFGH", composition.text);
+    EXPECT_EQ(u"EFGH", composition.text);
     EXPECT_EQ(2u, composition.selection.start());
     EXPECT_EQ(2u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -1267,10 +1388,11 @@ class ScenarioTestCallback : public TSFTextStoreTestCallback {
 
  private:
   bool has_composition_text_;
-  DISALLOW_COPY_AND_ASSIGN(ScenarioTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, ScenarioTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   ScenarioTestCallback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(Invoke(&callback, &ScenarioTestCallback::SetCompositionText1))
@@ -1278,7 +1400,7 @@ TEST_F(TSFTextStoreTest, ScenarioTest) {
       .WillOnce(Invoke(&callback, &ScenarioTestCallback::SetCompositionText4))
       .WillOnce(Invoke(&callback, &ScenarioTestCallback::SetCompositionText5));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &ScenarioTestCallback::InsertText2))
       .WillOnce(Invoke(&callback, &ScenarioTestCallback::InsertText3));
 
@@ -1316,8 +1438,11 @@ class GetTextExtTestCallback : public TSFTextStoreTestCallback {
       : TSFTextStoreTestCallback(text_store),
         layout_prepared_character_num_(0) {}
 
+  GetTextExtTestCallback(const GetTextExtTestCallback&) = delete;
+  GetTextExtTestCallback& operator=(const GetTextExtTestCallback&) = delete;
+
   HRESULT LockGranted(DWORD flags) {
-    SetInternalState(L"0123456789012", 0, 0, 0);
+    SetInternalState(u"0123456789012", 0, 0, 0);
     layout_prepared_character_num_ = 13;
     has_composition_text_ = true;
 
@@ -1343,24 +1468,16 @@ class GetTextExtTestCallback : public TSFTextStoreTestCallback {
     has_composition_text_ = false;
     GetTextExtTest(view_cookie, 0, 0, 1, 2, 4, 6);
 
-    SetInternalState(L"", 0, 0, 0);
+    SetInternalState(std::u16string(), 0, 0, 0);
     GetTextExtTest(view_cookie, 0, 0, 1, 2, 4, 6);
 
     // Last character is not available due to timing issue of async API.
     // In this case, we will get first character bounds instead of whole text
     // bounds.
-    SetInternalState(L"abc", 0, 0, 3);
+    SetInternalState(u"abc", 0, 0, 3);
     layout_prepared_character_num_ = 2;
     has_composition_text_ = true;
     GetTextExtTest(view_cookie, 0, 0, 11, 12, 11, 20);
-
-    // TODO(nona, kinaba): Remove following test case after PPAPI supporting
-    // GetCompositionCharacterBounds.
-    SetInternalState(L"a", 0, 0, 1);
-    layout_prepared_character_num_ = 0;
-    GetTextExtTest(view_cookie, 0, 1, 1, 2, 4, 6);
-    SetInternalState(L"abc", 0, 0, 3);
-    GetTextExtNoLayoutTest(view_cookie, 2, 3);
 
     return S_OK;
   }
@@ -1382,11 +1499,11 @@ class GetTextExtTestCallback : public TSFTextStoreTestCallback {
  private:
   uint32_t layout_prepared_character_num_;
   bool has_composition_text_;
-
-  DISALLOW_COPY_AND_ASSIGN(GetTextExtTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, GetTextExtTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   GetTextExtTestCallback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, GetCaretBounds())
       .WillRepeatedly(
@@ -1409,22 +1526,42 @@ TEST_F(TSFTextStoreTest, GetTextExtTest) {
 }
 
 TEST_F(TSFTextStoreTest, RequestSupportedAttrs) {
+  ui::TextInputClient::EditingContext expected_editing_context;
+  expected_editing_context.page_url = GURL("http://example.com");
   EXPECT_CALL(text_input_client_, GetTextInputType())
       .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   EXPECT_CALL(text_input_client_, GetTextInputMode())
       .WillRepeatedly(Return(TEXT_INPUT_MODE_DEFAULT));
+  EXPECT_CALL(text_input_client_, GetTextEditingContext())
+      .WillOnce(Return(ui::TextInputClient::EditingContext()))
+      .WillOnce(Return(expected_editing_context));
 
   EXPECT_HRESULT_FAILED(text_store_->RequestSupportedAttrs(0, 1, nullptr));
 
   const TS_ATTRID kUnknownAttributes[] = {GUID_NULL};
-  EXPECT_HRESULT_FAILED(text_store_->RequestSupportedAttrs(
-      0, base::size(kUnknownAttributes), kUnknownAttributes))
-      << "Must fail for unknown attributes";
+  EXPECT_HRESULT_SUCCEEDED(text_store_->RequestSupportedAttrs(
+      0, std::size(kUnknownAttributes), kUnknownAttributes))
+      << "Mustn't fail for unknown attributes";
 
   const TS_ATTRID kAttributes[] = {GUID_NULL, GUID_PROP_INPUTSCOPE, GUID_NULL};
-  EXPECT_EQ(S_OK, text_store_->RequestSupportedAttrs(0, base::size(kAttributes),
+  EXPECT_EQ(S_OK, text_store_->RequestSupportedAttrs(0, std::size(kAttributes),
                                                      kAttributes))
       << "InputScope must be supported";
+  const TS_ATTRID urlAttributes[] = {GUID_PROP_URL};
+  ui::TextInputClient::EditingContext actual_editing_context =
+      text_input_client_.GetTextEditingContext();
+  EXPECT_TRUE(actual_editing_context.page_url.is_empty());
+  EXPECT_EQ(S_OK, text_store_->RequestSupportedAttrs(
+                      0, std::size(urlAttributes), urlAttributes))
+      << "Should return S_OK even if URL not supported";
+
+  actual_editing_context = text_input_client_.GetTextEditingContext();
+  EXPECT_TRUE(!actual_editing_context.page_url.is_empty());
+  EXPECT_TRUE(actual_editing_context.page_url.spec().compare(
+                  expected_editing_context.page_url.spec()) == 0);
+  EXPECT_EQ(S_OK, text_store_->RequestSupportedAttrs(
+                      0, std::size(urlAttributes), urlAttributes))
+      << "Expect URL to be supported";
 
   {
     SCOPED_TRACE("Check if RequestSupportedAttrs fails while focus is lost");
@@ -1432,25 +1569,32 @@ TEST_F(TSFTextStoreTest, RequestSupportedAttrs) {
     text_store_->SetFocusedTextInputClient(nullptr, nullptr);
     EXPECT_HRESULT_FAILED(text_store_->RequestSupportedAttrs(0, 0, nullptr));
     EXPECT_HRESULT_FAILED(text_store_->RequestSupportedAttrs(
-        0, base::size(kAttributes), kAttributes));
+        0, std::size(kAttributes), kAttributes));
   }
 }
 
 TEST_F(TSFTextStoreTest, RetrieveRequestedAttrs) {
+  ui::TextInputClient::EditingContext expected_editing_context;
+  expected_editing_context.page_url = GURL("http://example.com");
   EXPECT_CALL(text_input_client_, GetTextInputType())
       .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   EXPECT_CALL(text_input_client_, GetTextInputMode())
       .WillRepeatedly(Return(TEXT_INPUT_MODE_DEFAULT));
+  EXPECT_CALL(text_input_client_, GetTextEditingContext())
+      .WillRepeatedly(Return(expected_editing_context));
 
   ULONG num_copied = 0xfffffff;
   EXPECT_HRESULT_FAILED(
       text_store_->RetrieveRequestedAttrs(1, nullptr, &num_copied));
 
   {
-    SCOPED_TRACE("Make sure if InputScope is supported");
+    SCOPED_TRACE("Make sure that InputScope is supported");
     TS_ATTRVAL buffer[2] = {};
     num_copied = 0xfffffff;
-    ASSERT_EQ(S_OK, text_store_->RetrieveRequestedAttrs(base::size(buffer),
+    const TS_ATTRID kAttributes[] = {GUID_PROP_INPUTSCOPE};
+    ASSERT_EQ(S_OK, text_store_->RequestSupportedAttrs(
+                        0, std::size(kAttributes), kAttributes));
+    ASSERT_EQ(S_OK, text_store_->RetrieveRequestedAttrs(std::size(buffer),
                                                         buffer, &num_copied));
     bool input_scope_found = false;
     for (size_t i = 0; i < num_copied; ++i) {
@@ -1469,20 +1613,117 @@ TEST_F(TSFTextStoreTest, RetrieveRequestedAttrs) {
     EXPECT_TRUE(input_scope_found);
   }
   {
+    SCOPED_TRACE("Verify URL support");
+    TS_ATTRVAL buffer[2] = {};
+    num_copied = 0xfffffff;
+    base::win::ScopedVariant variant;
+    const TS_ATTRID urlAttributes[] = {GUID_PROP_URL};
+
+    // This call should have a valid URL so the URL property should be returned
+    // and is expected to match the test_url value set above.
+    ASSERT_EQ(S_OK, text_store_->RequestSupportedAttrs(
+                        0, std::size(urlAttributes), urlAttributes));
+    ASSERT_EQ(S_OK, text_store_->RetrieveRequestedAttrs(std::size(buffer),
+                                                        buffer, &num_copied));
+    EXPECT_EQ(num_copied, 1U) << "Expect only URL property to be supported";
+    EXPECT_TRUE(IsEqualGUID(buffer[0].idAttr, GUID_PROP_URL));
+    std::swap(*variant.Receive(), buffer[0].varValue);
+    EXPECT_EQ(VT_BSTR, variant.type());
+    std::string url_string = base::WideToUTF8(std::wstring(
+        variant.ptr()->bstrVal, SysStringLen(variant.ptr()->bstrVal)));
+    EXPECT_EQ(expected_editing_context.page_url.spec(), url_string)
+        << "Expected url strings to match";
+  }
+  {
+    SCOPED_TRACE("Verify URL and InputScope support");
+    TS_ATTRVAL buffer[2] = {};
+    num_copied = 0xfffffff;
+    const TS_ATTRID inputScopeAndUrlAttributes[] = {GUID_PROP_INPUTSCOPE,
+                                                    GUID_PROP_URL};
+
+    // This call should have a valid URL so the URL property should be returned
+    // and is expected to match the test_url value set above.
+    ASSERT_EQ(S_OK, text_store_->RequestSupportedAttrs(
+                        0, std::size(inputScopeAndUrlAttributes),
+                        inputScopeAndUrlAttributes));
+    ASSERT_EQ(S_OK, text_store_->RetrieveRequestedAttrs(std::size(buffer),
+                                                        buffer, &num_copied));
+    EXPECT_EQ(num_copied, 2U)
+        << "Expect both URL & InputScope properties to be supported";
+    for (size_t i = 0; i < num_copied; ++i) {
+      base::win::ScopedVariant variant;
+      // Move ownership from |buffer[i].varValue| to |variant|.
+      std::swap(*variant.Receive(), buffer[i].varValue);
+      if (IsEqualGUID(buffer[i].idAttr, GUID_PROP_INPUTSCOPE)) {
+        EXPECT_EQ(VT_UNKNOWN, variant.type());
+        Microsoft::WRL::ComPtr<ITfInputScope> input_scope;
+        EXPECT_HRESULT_SUCCEEDED(variant.AsInput()->punkVal->QueryInterface(
+            IID_PPV_ARGS(&input_scope)));
+      }
+      if (IsEqualGUID(buffer[i].idAttr, GUID_PROP_URL)) {
+        EXPECT_EQ(VT_BSTR, variant.type());
+        std::string url_string = base::WideToUTF8(std::wstring(
+            variant.ptr()->bstrVal, SysStringLen(variant.ptr()->bstrVal)));
+        EXPECT_EQ(expected_editing_context.page_url.spec(), url_string)
+            << "Expected url strings to match";
+      }
+      // we do not break here to clean up all the retrieved VARIANTs.
+    }
+  }
+
+  {
+    SCOPED_TRACE("Verify TSATTRID_Text_VerticalWriting support");
+    TS_ATTRVAL buffer[2] = {};
+    num_copied = 0xfffffff;
+    const TS_ATTRID attributes[] = {TSATTRID_Text_VerticalWriting};
+
+    ASSERT_EQ(S_OK, text_store_->RequestSupportedAttrs(0, std::size(attributes),
+                                                       attributes));
+
+    EXPECT_CALL(text_input_client_, GetTextInputFlags()).WillOnce(Return(0));
+    ASSERT_EQ(S_OK, text_store_->RetrieveRequestedAttrs(std::size(buffer),
+                                                        buffer, &num_copied));
+    EXPECT_EQ(num_copied, 1U);
+    EXPECT_TRUE(IsEqualGUID(buffer[0].idAttr, TSATTRID_Text_VerticalWriting));
+    EXPECT_EQ(VT_BOOL, buffer[0].varValue.vt);
+    EXPECT_FALSE(buffer[0].varValue.boolVal);
+
+    EXPECT_CALL(text_input_client_, GetTextInputFlags())
+        .WillOnce(Return(ui::TEXT_INPUT_FLAG_VERTICAL));
+    ASSERT_EQ(S_OK, text_store_->RetrieveRequestedAttrs(std::size(buffer),
+                                                        buffer, &num_copied));
+    EXPECT_EQ(num_copied, 1U);
+    EXPECT_TRUE(IsEqualGUID(buffer[0].idAttr, TSATTRID_Text_VerticalWriting));
+    EXPECT_EQ(VT_BOOL, buffer[0].varValue.vt);
+    EXPECT_TRUE(buffer[0].varValue.boolVal);
+  }
+
+  {
     SCOPED_TRACE("Check if RetrieveRequestedAttrs fails while focus is lost");
     // Emulate focus lost
     text_store_->SetFocusedTextInputClient(nullptr, nullptr);
     num_copied = 0xfffffff;
     TS_ATTRVAL buffer[2] = {};
     EXPECT_HRESULT_FAILED(text_store_->RetrieveRequestedAttrs(
-        base::size(buffer), buffer, &num_copied));
+        std::size(buffer), buffer, &num_copied));
   }
+}
+
+TEST_F(TSFTextStoreTest, SendOnUrlChanged) {
+  text_store_->UseEmptyTextStore(true);
+  EXPECT_TRUE(text_store_->MaybeSendOnUrlChanged());
+
+  text_store_->UseEmptyTextStore(false);
+  EXPECT_FALSE(text_store_->MaybeSendOnUrlChanged());
 }
 
 class KeyEventTestCallback : public TSFTextStoreTestCallback {
  public:
   explicit KeyEventTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  KeyEventTestCallback(const KeyEventTestCallback&) = delete;
+  KeyEventTestCallback& operator=(const KeyEventTestCallback&) = delete;
 
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"a", S_OK);
@@ -1510,7 +1751,7 @@ class KeyEventTestCallback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -1525,7 +1766,7 @@ class KeyEventTestCallback : public TSFTextStoreTestCallback {
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME1(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_PRESSED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyPressed, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
@@ -1553,13 +1794,15 @@ class KeyEventTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText2(const base::string16& text) {
-    EXPECT_EQ(L"a", text);
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"a", text);
     SetHasCompositionText(false);
   }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"B", composition.text);
+    EXPECT_EQ(u"B", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -1572,13 +1815,13 @@ class KeyEventTestCallback : public TSFTextStoreTestCallback {
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME2(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_RELEASED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyReleased, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME3a(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_PRESSED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyPressed, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
@@ -1596,13 +1839,15 @@ class KeyEventTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText3(const base::string16& text) {
-    EXPECT_EQ(L"B", text);
+  void InsertText3(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"B", text);
     SetHasCompositionText(false);
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME3b(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_RELEASED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyReleased, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
@@ -1611,22 +1856,21 @@ class KeyEventTestCallback : public TSFTextStoreTestCallback {
     text_store_->OnKeyTraceUp(66u, 3145729u);
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(KeyEventTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, KeyEventTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   KeyEventTestCallback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(Invoke(&callback, &KeyEventTestCallback::SetCompositionText1))
       .WillOnce(Invoke(&callback, &KeyEventTestCallback::SetCompositionText2));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &KeyEventTestCallback::InsertText2))
       .WillOnce(Invoke(&callback, &KeyEventTestCallback::InsertText3));
 
-  EXPECT_CALL(input_method_delegate_, DispatchKeyEventPostIME(_))
+  EXPECT_CALL(ime_key_event_dispatcher_, DispatchKeyEventPostIME(_))
       .WillOnce(
           Invoke(&callback, &KeyEventTestCallback::DispatchKeyEventPostIME1))
       .WillOnce(
@@ -1666,6 +1910,11 @@ class AccessibilityEventTestCallback : public TSFTextStoreTestCallback {
   explicit AccessibilityEventTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  AccessibilityEventTestCallback(const AccessibilityEventTestCallback&) =
+      delete;
+  AccessibilityEventTestCallback& operator=(
+      const AccessibilityEventTestCallback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"a", S_OK);
 
@@ -1691,7 +1940,7 @@ class AccessibilityEventTestCallback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -1707,18 +1956,17 @@ class AccessibilityEventTestCallback : public TSFTextStoreTestCallback {
 
   void SetActiveCompositionForAccessibility1(
       const gfx::Range& range,
-      const base::string16& active_composition_text,
+      const std::u16string& active_composition_text,
       bool committed_composition) {
-    EXPECT_EQ(L"a", active_composition_text);
+    EXPECT_EQ(u"a", active_composition_text);
     EXPECT_EQ(0u, range.start());
     EXPECT_EQ(1u, range.end());
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(AccessibilityEventTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, AccessibilityEventTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   AccessibilityEventTestCallback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(Invoke(&callback,
@@ -1761,12 +2009,16 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
   explicit DiffingAlgorithmTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  DiffingAlgorithmTestCallback(const DiffingAlgorithmTestCallback&) = delete;
+  DiffingAlgorithmTestCallback& operator=(const DiffingAlgorithmTestCallback&) =
+      delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"", S_OK);
     GetTextTest(0, -1, L"", 0);
 
     SetTextRange(0, 1);
-    SetTextBuffer(L"a");
+    SetTextBuffer(u"a");
     SetSelectionRange(1, 1);
     *composition_start() = 1;
     return S_OK;
@@ -1811,16 +2063,18 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText2(const base::string16& text) {
-    EXPECT_EQ(L"bcde", text);
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"bcde", text);
     SetTextRange(0, 5);
     SetSelectionRange(5, 5);
-    SetTextBuffer(L"abcde");
+    SetTextBuffer(u"abcde");
   }
 
   HRESULT LockGranted3(DWORD flags) {
     SetTextRange(0, 5);
-    SetTextBuffer(L"about");
+    SetTextBuffer(u"about");
     SetSelectionRange(0, 5);
     return S_OK;
   }
@@ -1856,7 +2110,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
 
   HRESULT LockGranted4(DWORD flags) {
     SetTextRange(0, 5);
-    SetTextBuffer(L"abFGt");
+    SetTextBuffer(u"abFGt");
     SetSelectionRange(3, 4);
     return S_OK;
   }
@@ -1892,7 +2146,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
 
   HRESULT LockGranted5(DWORD flags) {
     SetTextRange(0, 3);
-    SetTextBuffer(L"aHI");
+    SetTextBuffer(u"aHI");
     SetSelectionRange(3, 3);
     return S_OK;
   }
@@ -1928,7 +2182,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
 
   HRESULT LockGranted6(DWORD flags) {
     SetTextRange(0, 5);
-    SetTextBuffer(L"JKLMN");
+    SetTextBuffer(u"JKLMN");
     SetSelectionRange(2, 5);
     return S_OK;
   }
@@ -1964,7 +2218,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
 
   HRESULT LockGranted7(DWORD flags) {
     SetTextRange(0, 0);
-    SetTextBuffer(L"");
+    SetTextBuffer(u"");
     SetSelectionRange(0, 0);
     return S_OK;
   }
@@ -2000,7 +2254,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
 
   HRESULT LockGranted8(DWORD flags) {
     SetTextRange(0, 3);
-    SetTextBuffer(L"OPQ");
+    SetTextBuffer(u"OPQ");
     SetSelectionRange(0, 2);
     return S_OK;
   }
@@ -2036,7 +2290,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
 
   HRESULT LockGranted9(DWORD flags) {
     SetTextRange(0, 3);
-    SetTextBuffer(L"OPR");
+    SetTextBuffer(u"OPR");
     SetSelectionRange(2, 3);
     return S_OK;
   }
@@ -2072,7 +2326,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
 
   HRESULT LockGranted10(DWORD flags) {
     SetTextRange(0, 3);
-    SetTextBuffer(L"SPR");
+    SetTextBuffer(u"SPR");
     SetSelectionRange(0, 1);
     return S_OK;
   }
@@ -2108,7 +2362,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
   // 11. renderer proc changes buffer from "SPR" to "STPR".
   HRESULT LockGranted11(DWORD flags) {
     SetTextRange(0, 4);
-    SetTextBuffer(L"STPR");
+    SetTextBuffer(u"STPR");
     SetSelectionRange(2, 2);
     return S_OK;
   }
@@ -2145,7 +2399,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
   // 12. renderer proc changes buffer from "STPR" to "PR".
   HRESULT LockGranted12(DWORD flags) {
     SetTextRange(0, 2);
-    SetTextBuffer(L"PR");
+    SetTextBuffer(u"PR");
     SetSelectionRange(0, 0);
     return S_OK;
   }
@@ -2182,7 +2436,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
   // 13. renderer proc changes buffer from "PR" to "UPR".
   HRESULT LockGranted13(DWORD flags) {
     SetTextRange(0, 3);
-    SetTextBuffer(L"UPR");
+    SetTextBuffer(u"UPR");
     SetSelectionRange(1, 1);
     return S_OK;
   }
@@ -2219,7 +2473,7 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
   // 14. renderer proc changes buffer from "UPR" to "UPVWR".
   HRESULT LockGranted14(DWORD flags) {
     SetTextRange(0, 5);
-    SetTextBuffer(L"UPVWR");
+    SetTextBuffer(u"UPVWR");
     SetSelectionRange(4, 4);
     return S_OK;
   }
@@ -2252,12 +2506,11 @@ class DiffingAlgorithmTestCallback : public TSFTextStoreTestCallback {
     GetSelectionTest(4, 4);
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(DiffingAlgorithmTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, DiffingAlgorithmTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   DiffingAlgorithmTestCallback callback(text_store_.get());
 
   EXPECT_CALL(*sink_, OnTextChange(_, _))
@@ -2308,7 +2561,7 @@ TEST_F(TSFTextStoreTest, DiffingAlgorithmTest) {
       .WillOnce(Invoke(&callback,
                        &DiffingAlgorithmTestCallback::OnSelectionChange14));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &DiffingAlgorithmTestCallback::InsertText2));
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
@@ -2437,6 +2690,9 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
   explicit RegressionTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  RegressionTestCallback(const RegressionTestCallback&) = delete;
+  RegressionTestCallback& operator=(const RegressionTestCallback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"a", S_OK);
     GetTextTest(0, -1, L"a", 1);
@@ -2461,13 +2717,13 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME1(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_PRESSED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyPressed, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -2506,24 +2762,26 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME2a(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_RELEASED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyReleased, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME2b(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_PRESSED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyPressed, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
 
-  void InsertText2(const base::string16& text) {
-    EXPECT_EQ(L"a", text);
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"a", text);
     SetHasCompositionText(false);
   }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -2549,8 +2807,10 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText3(const base::string16& text) {
-    EXPECT_EQ(L"a", text);
+  void InsertText3(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"a", text);
     SetHasCompositionText(false);
   }
 
@@ -2572,7 +2832,7 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME4(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_RELEASED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyReleased, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
@@ -2580,12 +2840,16 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
   // We expect this call since the composition was started and committed during
   // same edit session.
   void SetCompositionText4(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"c", composition.text);
+    EXPECT_EQ(u"c", composition.text);
     ASSERT_EQ(1u, composition.ime_text_spans.size());
     ASSERT_EQ(gfx::Range(1, 1), composition.selection);
   }
 
-  void InsertText4(const base::string16& text) { EXPECT_EQ(L"c", text); }
+  void InsertText4(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"c", text);
+  }
 
   HRESULT LockGranted5(DWORD flags) {
     GetTextTest(0, -1, L"aac", 3);
@@ -2614,13 +2878,13 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
   }
 
   ui::EventDispatchDetails DispatchKeyEventPostIME5(KeyEvent* key) {
-    EXPECT_EQ(ui::ET_KEY_PRESSED, key->type());
+    EXPECT_EQ(ui::EventType::kKeyPressed, key->type());
     EXPECT_EQ(VKEY_PROCESSKEY, key->key_code());
     return ui::EventDispatchDetails();
   }
 
   void SetCompositionText5(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"d", composition.text);
+    EXPECT_EQ(u"d", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -2649,16 +2913,17 @@ class RegressionTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText6(const base::string16& text) {
-    EXPECT_EQ(L"e", text);
+  void InsertText6(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"e", text);
     SetHasCompositionText(false);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTestCallback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(Invoke(&callback, &RegressionTestCallback::SetCompositionText1))
@@ -2667,7 +2932,7 @@ TEST_F(TSFTextStoreTest, RegressionTest) {
       .WillOnce(
           Invoke(&callback, &RegressionTestCallback::SetCompositionText5));
 
-  EXPECT_CALL(input_method_delegate_, DispatchKeyEventPostIME(_))
+  EXPECT_CALL(ime_key_event_dispatcher_, DispatchKeyEventPostIME(_))
       .WillOnce(
           Invoke(&callback, &RegressionTestCallback::DispatchKeyEventPostIME1))
       .WillOnce(
@@ -2679,7 +2944,7 @@ TEST_F(TSFTextStoreTest, RegressionTest) {
       .WillOnce(
           Invoke(&callback, &RegressionTestCallback::DispatchKeyEventPostIME5));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &RegressionTestCallback::InsertText2))
       .WillOnce(Invoke(&callback, &RegressionTestCallback::InsertText3))
       .WillOnce(Invoke(&callback, &RegressionTestCallback::InsertText4))
@@ -2725,6 +2990,9 @@ class RegressionTest2Callback : public TSFTextStoreTestCallback {
   explicit RegressionTest2Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  RegressionTest2Callback(const RegressionTest2Callback&) = delete;
+  RegressionTest2Callback& operator=(const RegressionTest2Callback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"abc", S_OK);
     SetSelectionTest(3, 3, S_OK);
@@ -2758,7 +3026,7 @@ class RegressionTest2Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"DE", composition.text);
+    EXPECT_EQ(u"DE", composition.text);
     EXPECT_EQ(2u, composition.selection.start());
     EXPECT_EQ(2u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -2785,22 +3053,23 @@ class RegressionTest2Callback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText3(const base::string16& text) {
-    EXPECT_EQ(L"DE", text);
+  void InsertText3(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"DE", text);
     SetHasCompositionText(false);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest2Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest2) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest2Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
           Invoke(&callback, &RegressionTest2Callback::SetCompositionText2));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &RegressionTest2Callback::InsertText3));
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
@@ -2830,6 +3099,9 @@ class RegressionTest3Callback : public TSFTextStoreTestCallback {
   explicit RegressionTest3Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  RegressionTest3Callback(const RegressionTest3Callback&) = delete;
+  RegressionTest3Callback& operator=(const RegressionTest3Callback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     GetTextTest(0, -1, L"", 0);
     SetTextTest(0, 0, L"a", S_OK);
@@ -2855,7 +3127,7 @@ class RegressionTest3Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -2886,17 +3158,16 @@ class RegressionTest3Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"", composition.text);
+    EXPECT_EQ(std::u16string(), composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(0u, composition.selection.end());
     ASSERT_EQ(0u, composition.ime_text_spans.size());
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest3Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest3) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest3Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
@@ -2904,7 +3175,7 @@ TEST_F(TSFTextStoreTest, RegressionTest3) {
       .WillOnce(
           Invoke(&callback, &RegressionTest3Callback::SetCompositionText2));
 
-  EXPECT_CALL(text_input_client_, InsertText(_)).Times(0);
+  EXPECT_CALL(text_input_client_, InsertText(_, _)).Times(0);
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback, &RegressionTest3Callback::LockGranted1))
@@ -2929,6 +3200,9 @@ class RegressionTest4Callback : public TSFTextStoreTestCallback {
  public:
   explicit RegressionTest4Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest4Callback(const RegressionTest4Callback&) = delete;
+  RegressionTest4Callback& operator=(const RegressionTest4Callback&) = delete;
 
   HRESULT LockGranted1(DWORD flags) {
     GetTextTest(0, -1, L"", 0);
@@ -2955,7 +3229,7 @@ class RegressionTest4Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -2983,22 +3257,23 @@ class RegressionTest4Callback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText2(const base::string16& text) {
-    EXPECT_EQ(L"a", text);
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"a", text);
     SetHasCompositionText(false);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest4Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest4) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest4Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
           Invoke(&callback, &RegressionTest4Callback::SetCompositionText1));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &RegressionTest4Callback::InsertText2));
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
@@ -3017,7 +3292,6 @@ TEST_F(TSFTextStoreTest, RegressionTest4) {
   EXPECT_EQ(S_OK, result);
 }
 
-// regression tests for crbug.com/1006067.
 // We should call |TextInputClient::SetCompositionText()| if ImeTextSpans are
 // changed from previous edit session during same composition even though
 // composition string and composition selection remain unchanged.
@@ -3025,6 +3299,9 @@ class RegressionTest5Callback : public TSFTextStoreTestCallback {
  public:
   explicit RegressionTest5Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest5Callback(const RegressionTest5Callback&) = delete;
+  RegressionTest5Callback& operator=(const RegressionTest5Callback&) = delete;
 
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"aa", S_OK);
@@ -3047,6 +3324,7 @@ class RegressionTest5Callback : public TSFTextStoreTestCallback {
     text_span_2.background_color = SK_ColorTRANSPARENT;
     text_spans()->push_back(text_span_2);
     *edit_flag() = true;
+    *on_update_composition_called() = true;
     *composition_start() = 0;
     composition_range()->set_start(0);
     composition_range()->set_end(2);
@@ -3057,7 +3335,7 @@ class RegressionTest5Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"aa", composition.text);
+    EXPECT_EQ(u"aa", composition.text);
     EXPECT_EQ(2u, composition.selection.start());
     EXPECT_EQ(2u, composition.selection.end());
     ASSERT_EQ(2u, composition.ime_text_spans.size());
@@ -3068,8 +3346,8 @@ class RegressionTest5Callback : public TSFTextStoreTestCallback {
     SetHasCompositionText(true);
   }
 
-  // Only change underline thickness in IME spans. Other states (composition
-  // string, selection) remain unchanged.
+  // Only change underline thickness in IME spans and `OnUpdateComposition` is
+  // called. Other states (composition string, selection) remain unchanged.
   HRESULT LockGranted2(DWORD flags) {
     GetTextTest(0, -1, L"aa", 2);
 
@@ -3090,6 +3368,7 @@ class RegressionTest5Callback : public TSFTextStoreTestCallback {
     text_spans()->push_back(text_span_2);
 
     *edit_flag() = true;
+    *on_update_composition_called() = true;
     *composition_start() = 0;
     composition_range()->set_start(0);
     composition_range()->set_end(2);
@@ -3100,7 +3379,7 @@ class RegressionTest5Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"aa", composition.text);
+    EXPECT_EQ(u"aa", composition.text);
     EXPECT_EQ(2u, composition.selection.start());
     EXPECT_EQ(2u, composition.selection.end());
     ASSERT_EQ(2u, composition.ime_text_spans.size());
@@ -3125,16 +3404,57 @@ class RegressionTest5Callback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText3(const base::string16& text) {
-    EXPECT_EQ(L"aa", text);
+  void InsertText3(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"aa", text);
     SetHasCompositionText(false);
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest5Callback);
+  // Only change underline thickness in IME spans but `OnUpdateComposition` is
+  // not called. Other states (composition string, selection) remain unchanged.
+  HRESULT LockGranted4(DWORD flags) {
+    GetTextTest(0, -1, L"aa", 2);
+
+    text_spans()->clear();
+    ImeTextSpan text_span_1;
+    text_span_1.start_offset = 0;
+    text_span_1.end_offset = 1;
+    text_span_1.underline_color = SK_ColorBLACK;
+    text_span_1.thickness = ImeTextSpan::Thickness::kThin;
+    text_span_1.underline_style = ImeTextSpan::UnderlineStyle::kDot;
+    text_span_1.background_color = SK_ColorTRANSPARENT;
+    text_spans()->push_back(text_span_1);
+    ImeTextSpan text_span_2;
+    text_span_2.start_offset = 1;
+    text_span_2.end_offset = 2;
+    text_span_2.underline_color = SK_ColorBLACK;
+    text_span_2.thickness = ImeTextSpan::Thickness::kThick;
+    text_span_2.underline_style = ImeTextSpan::UnderlineStyle::kDot;
+    text_span_2.background_color = SK_ColorTRANSPARENT;
+    text_spans()->push_back(text_span_2);
+
+    // When only `OnEndEdit` was called and `OnUpdateComposition` was not called
+    // during `ITextStoreACPSink::OnLockGranted`.
+    *edit_flag() = true;
+    *composition_start() = 0;
+    composition_range()->set_start(0);
+    composition_range()->set_end(2);
+
+    text_store_->OnKeyTraceUp(65u, 1966081u);
+    text_store_->OnKeyTraceDown(65u, 1966081u);
+    return S_OK;
+  }
+
+  void SetCompositionText4(const ui::CompositionText& composition) {
+    NOTREACHED() << "SetCompositionText4 should not be called.";
+  }
 };
 
+// regression test for crbug.com/1006067.
 TEST_F(TSFTextStoreTest, RegressionTest5) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest5Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
@@ -3142,7 +3462,7 @@ TEST_F(TSFTextStoreTest, RegressionTest5) {
       .WillOnce(
           Invoke(&callback, &RegressionTest5Callback::SetCompositionText2));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &RegressionTest5Callback::InsertText3));
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
@@ -3165,6 +3485,33 @@ TEST_F(TSFTextStoreTest, RegressionTest5) {
   EXPECT_EQ(S_OK, result);
 }
 
+// regression test for crbug.com/426433182.
+// Test that we do not call `TextInputClient::SetCompositionText` if only
+// ImeTextSpans are changed from previous edit session during same composition
+// but `TSFTextStore::OnUpdateComposition` was not called during
+// `ITextStoreACPSink::OnLockGranted`.
+TEST_F(TSFTextStoreTest, RegressionTest5WithoutOnUpdateComposition) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+  RegressionTest5Callback callback(text_store_.get());
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(&callback, &RegressionTest5Callback::LockGranted1))
+      .WillOnce(Invoke(&callback, &RegressionTest5Callback::LockGranted4));
+
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  ON_CALL(text_input_client_, SetCompositionText(_))
+      .WillByDefault(
+          Invoke(&callback, &RegressionTest5Callback::SetCompositionText4));
+
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+}
+
 // regression tests for crbug.com/1013472.
 // We should reset |new_text_inserted_| at the end of
 // |TSFTextStore::RequestLock| since the text should have been already
@@ -3173,6 +3520,9 @@ class RegressionTest6Callback : public TSFTextStoreTestCallback {
  public:
   explicit RegressionTest6Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest6Callback(const RegressionTest6Callback&) = delete;
+  RegressionTest6Callback& operator=(const RegressionTest6Callback&) = delete;
 
   HRESULT LockGranted1(DWORD flags) {
     EXPECT_EQ(false, *new_text_inserted());
@@ -3199,7 +3549,7 @@ class RegressionTest6Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(1u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -3222,22 +3572,23 @@ class RegressionTest6Callback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText2(const base::string16& text) {
-    EXPECT_EQ(L"a", text);
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"a", text);
     SetHasCompositionText(false);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest6Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest6) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest6Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
           Invoke(&callback, &RegressionTest6Callback::SetCompositionText1));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &RegressionTest6Callback::InsertText2));
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
@@ -3260,6 +3611,10 @@ class UnderlineStyleTestCallback : public TSFTextStoreTestCallback {
  public:
   explicit UnderlineStyleTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  UnderlineStyleTestCallback(const UnderlineStyleTestCallback&) = delete;
+  UnderlineStyleTestCallback& operator=(const UnderlineStyleTestCallback&) =
+      delete;
 
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"a", S_OK);
@@ -3287,7 +3642,7 @@ class UnderlineStyleTestCallback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -3302,12 +3657,11 @@ class UnderlineStyleTestCallback : public TSFTextStoreTestCallback {
               composition.ime_text_spans[0].underline_style);
     SetHasCompositionText(true);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(UnderlineStyleTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, UnderlineStyleTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   UnderlineStyleTestCallback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
@@ -3331,6 +3685,9 @@ class RegressionTest7Callback : public TSFTextStoreTestCallback {
  public:
   explicit RegressionTest7Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest7Callback(const RegressionTest7Callback&) = delete;
+  RegressionTest7Callback& operator=(const RegressionTest7Callback&) = delete;
 
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"aaaa", S_OK);
@@ -3387,23 +3744,24 @@ class RegressionTest7Callback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText3(const base::string16& text) {
-    EXPECT_EQ(L"a", text);
+  void InsertText3(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"a", text);
     SetHasCompositionText(false);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest7Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest7) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest7Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionFromExistingText(_, _))
       .WillOnce(
           Invoke(&callback,
                  &RegressionTest7Callback::SetCompositionFromExistingText2));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &RegressionTest7Callback::InsertText3));
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
@@ -3433,6 +3791,9 @@ class RegressionTest8Callback : public TSFTextStoreTestCallback {
   explicit RegressionTest8Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  RegressionTest8Callback(const RegressionTest8Callback&) = delete;
+  RegressionTest8Callback& operator=(const RegressionTest8Callback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"bbbb", S_OK);
     SetSelectionTest(0, 4, S_OK);
@@ -3457,7 +3818,7 @@ class RegressionTest8Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"bbbb", composition.text);
+    EXPECT_EQ(u"bbbb", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(4u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -3482,12 +3843,11 @@ class RegressionTest8Callback : public TSFTextStoreTestCallback {
   }
 
   void ClearCompositionText2() { EXPECT_EQ(false, *has_composition_range()); }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest8Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest8) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest8Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
@@ -3520,6 +3880,9 @@ class RegressionTest9Callback : public TSFTextStoreTestCallback {
   explicit RegressionTest9Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  RegressionTest9Callback(const RegressionTest9Callback&) = delete;
+  RegressionTest9Callback& operator=(const RegressionTest9Callback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"a", S_OK);
     SetSelectionTest(1, 1, S_OK);
@@ -3551,7 +3914,7 @@ class RegressionTest9Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"bbbb", composition.text);
+    EXPECT_EQ(u"bbbb", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(4u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -3583,7 +3946,7 @@ class RegressionTest9Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText3(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"bbcc", composition.text);
+    EXPECT_EQ(u"bbcc", composition.text);
     EXPECT_EQ(2u, composition.selection.start());
     EXPECT_EQ(4u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -3607,8 +3970,10 @@ class RegressionTest9Callback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText4(const base::string16& text) {
-    EXPECT_EQ(L"bbcc", text);
+  void InsertText4(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"bbcc", text);
     SetHasCompositionText(false);
   }
 
@@ -3616,12 +3981,11 @@ class RegressionTest9Callback : public TSFTextStoreTestCallback {
     GetTextTest(0, -1, L"abbcc", 5);
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest9Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest9) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest9Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
@@ -3629,7 +3993,7 @@ TEST_F(TSFTextStoreTest, RegressionTest9) {
       .WillOnce(
           Invoke(&callback, &RegressionTest9Callback::SetCompositionText3));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback, &RegressionTest9Callback::InsertText4));
 
   EXPECT_CALL(*sink_, OnLockGranted(_))
@@ -3666,6 +4030,9 @@ class RegressionTest10Callback : public TSFTextStoreTestCallback {
   explicit RegressionTest10Callback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  RegressionTest10Callback(const RegressionTest10Callback&) = delete;
+  RegressionTest10Callback& operator=(const RegressionTest10Callback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"abcd", S_OK);
     SetSelectionTest(0, 4, S_OK);
@@ -3689,7 +4056,7 @@ class RegressionTest10Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"abcd", composition.text);
+    EXPECT_EQ(u"abcd", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(4u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -3731,7 +4098,7 @@ class RegressionTest10Callback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText2(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"abcd", composition.text);
+    EXPECT_EQ(u"abcd", composition.text);
     EXPECT_EQ(2u, composition.selection.start());
     EXPECT_EQ(2u, composition.selection.end());
     ASSERT_EQ(2u, composition.ime_text_spans.size());
@@ -3754,12 +4121,11 @@ class RegressionTest10Callback : public TSFTextStoreTestCallback {
     GetSelectionTest(4, 4);
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RegressionTest10Callback);
 };
 
 TEST_F(TSFTextStoreTest, RegressionTest10) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   RegressionTest10Callback callback(text_store_.get());
   EXPECT_CALL(text_input_client_, SetCompositionText(_))
       .WillOnce(
@@ -3810,15 +4176,387 @@ TEST_F(TSFTextStoreTest, RegressionTest10) {
   EXPECT_EQ(S_OK, result);
 }
 
+// |CancelComposition| should reset all tracking composition state.
+class RegressionTest11Callback : public TSFTextStoreTestCallback {
+ public:
+  explicit RegressionTest11Callback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest11Callback(const RegressionTest11Callback&) = delete;
+  RegressionTest11Callback& operator=(const RegressionTest11Callback&) = delete;
+
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"abcd", S_OK);
+    SetSelectionTest(0, 4, S_OK);
+
+    text_spans()->clear();
+    ImeTextSpan text_span;
+    text_span.start_offset = 0;
+    text_span.end_offset = 4;
+    text_span.underline_color = SK_ColorBLACK;
+    text_span.thickness = ImeTextSpan::Thickness::kThin;
+    text_span.background_color = SK_ColorTRANSPARENT;
+    text_spans()->push_back(text_span);
+    *edit_flag() = true;
+    *composition_start() = 0;
+    composition_range()->set_start(0);
+    composition_range()->set_end(4);
+    text_store_->OnKeyTraceDown(65u, 1966081u);
+    *has_composition_range() = true;
+
+    return S_OK;
+  }
+
+  void SetCompositionText(const ui::CompositionText& composition) {
+    EXPECT_EQ(u"abcd", composition.text);
+    EXPECT_EQ(0u, composition.selection.start());
+    EXPECT_EQ(4u, composition.selection.end());
+    ASSERT_EQ(1u, composition.ime_text_spans.size());
+    EXPECT_EQ(0u, composition.ime_text_spans[0].start_offset);
+    EXPECT_EQ(4u, composition.ime_text_spans[0].end_offset);
+    SetHasCompositionText(true);
+    SetCompositionTextRange(0, 4);
+  }
+
+  HRESULT LockGranted2(DWORD flags) {
+    *edit_flag() = false;
+    return S_OK;
+  }
+
+  HRESULT LockGranted3(DWORD flags) {
+    ResetCompositionStateTest();
+    return S_OK;
+  }
+};
+
+TEST_F(TSFTextStoreTest, RegressionTest11) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+  RegressionTest11Callback callback(text_store_.get());
+  EXPECT_CALL(text_input_client_, SetCompositionText(_))
+      .WillOnce(
+          Invoke(&callback, &RegressionTest11Callback::SetCompositionText));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(&callback, &RegressionTest11Callback::LockGranted1))
+      .WillOnce(Invoke(&callback, &RegressionTest11Callback::LockGranted2))
+      .WillOnce(Invoke(&callback, &RegressionTest11Callback::LockGranted3));
+
+  ON_CALL(text_input_client_, GetCompositionTextRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetCompositionTextRange));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  text_store_->CancelComposition();
+
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+}
+
+// regression tests for crbug.com/1156612.
+// We should remove selected text even if there is no new composition and IME
+// ask us to delete a previously inserted text.
+class RegressionTest12Callback : public TSFTextStoreTestCallback {
+ public:
+  explicit RegressionTest12Callback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest12Callback(const RegressionTest12Callback&) = delete;
+  RegressionTest12Callback& operator=(const RegressionTest12Callback&) = delete;
+
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"a", S_OK);
+    SetSelectionTest(1, 1, S_OK);
+    return S_OK;
+  }
+
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"a", 1);
+    SetTextTest(0, 1, L"", S_OK);
+
+    text_spans()->clear();
+    *edit_flag() = true;
+
+    return S_OK;
+  }
+
+  HRESULT LockGranted3(DWORD flags) {
+    GetTextTest(0, -1, L"", 0);
+
+    return S_OK;
+  }
+};
+
+TEST_F(TSFTextStoreTest, RegressionTest12) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+  RegressionTest12Callback callback(text_store_.get());
+
+  EXPECT_CALL(text_input_client_, ExtendSelectionAndDelete(_, _)).Times(1);
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(&callback, &RegressionTest12Callback::LockGranted1))
+      .WillOnce(Invoke(&callback, &RegressionTest12Callback::LockGranted2))
+      .WillOnce(Invoke(&callback, &RegressionTest12Callback::LockGranted3));
+
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+}
+
+// regression tests for crbug.com/1225896.
+// Some IMEs (e.g. voice typing panel) may remove text before active
+// composition. We should delete text before inserting new text.
+class RegressionTest13Callback : public TSFTextStoreTestCallback {
+ public:
+  explicit RegressionTest13Callback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest13Callback(const RegressionTest13Callback&) = delete;
+  RegressionTest13Callback& operator=(const RegressionTest13Callback&) = delete;
+
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"text ", S_OK);
+    SetTextTest(4, 5, L"", S_OK);
+    SetTextTest(4, 4, L" delete that ", S_OK);
+    SetSelectionTest(17, 17, S_OK);
+
+    text_spans()->clear();
+    ImeTextSpan text_span;
+    text_span.start_offset = 4;
+    text_span.end_offset = 17;
+    text_span.underline_color = SK_ColorBLACK;
+    text_span.thickness = ImeTextSpan::Thickness::kThin;
+    text_span.background_color = SK_ColorTRANSPARENT;
+    text_spans()->push_back(text_span);
+    *edit_flag() = true;
+    *composition_start() = 4;
+    composition_range()->set_start(4);
+    composition_range()->set_end(17);
+    // text_store_->OnKeyTraceDown(65u, 1966081u);
+    *has_composition_range() = true;
+
+    return S_OK;
+  }
+
+  void SetCompositionText1(const ui::CompositionText& composition) {
+    EXPECT_EQ(u" delete that ", composition.text);
+    EXPECT_EQ(13u, composition.selection.start());
+    EXPECT_EQ(13u, composition.selection.end());
+    ASSERT_EQ(1u, composition.ime_text_spans.size());
+    EXPECT_EQ(0u, composition.ime_text_spans[0].start_offset);
+    EXPECT_EQ(13u, composition.ime_text_spans[0].end_offset);
+    SetHasCompositionText(true);
+    SetTextRange(0, 17);
+    SetTextBuffer(u"text delete that ");
+    SetSelectionRange(17, 17);
+  }
+
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"text delete that ", 17);
+    SetTextTest(4, 17, L"", S_OK);
+    GetTextTest(0, -1, L"text", 4);
+    SetTextTest(0, 4, L"", S_OK);
+    GetTextTest(0, -1, L"", 0);
+    SetSelectionTest(0, 0, S_OK);
+
+    text_spans()->clear();
+    *edit_flag() = true;
+    *composition_start() = 3;
+    composition_range()->set_start(0);
+    composition_range()->set_end(0);
+    *has_composition_range() = false;
+
+    return S_OK;
+  }
+
+  HRESULT LockGranted3(DWORD flags) {
+    GetTextTest(0, -1, L"", 0);
+
+    return S_OK;
+  }
+};
+
+TEST_F(TSFTextStoreTest, RegressionTest13) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+  RegressionTest13Callback callback(text_store_.get());
+  EXPECT_CALL(text_input_client_, ExtendSelectionAndDelete(_, _)).Times(1);
+  EXPECT_CALL(text_input_client_, InsertText(_, _)).Times(0);
+  EXPECT_CALL(text_input_client_, SetCompositionText(_))
+      .WillOnce(
+          Invoke(&callback, &RegressionTest13Callback::SetCompositionText1));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(&callback, &RegressionTest13Callback::LockGranted1))
+      .WillOnce(Invoke(&callback, &RegressionTest13Callback::LockGranted2))
+      .WillOnce(Invoke(&callback, &RegressionTest13Callback::LockGranted3));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+}
+
+// regression tests for crbug.com/1295578.
+// Some IMEs (e.g. voice typing panel) may select text before active
+// composition. We should select text after composition end.
+class RegressionTest14Callback : public TSFTextStoreTestCallback {
+ public:
+  explicit RegressionTest14Callback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  RegressionTest14Callback(const RegressionTest14Callback&) = delete;
+  RegressionTest14Callback& operator=(const RegressionTest14Callback&) = delete;
+
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"text ", S_OK);
+    SetTextTest(4, 5, L"", S_OK);
+    SetTextTest(4, 4, L" select that ", S_OK);
+    SetSelectionTest(17, 17, S_OK);
+
+    text_spans()->clear();
+    ImeTextSpan text_span;
+    text_span.start_offset = 4;
+    text_span.end_offset = 17;
+    text_span.underline_color = SK_ColorBLACK;
+    text_span.thickness = ImeTextSpan::Thickness::kThin;
+    text_span.background_color = SK_ColorTRANSPARENT;
+    text_spans()->push_back(text_span);
+    *edit_flag() = true;
+    *composition_start() = 4;
+    composition_range()->set_start(4);
+    composition_range()->set_end(17);
+    *has_composition_range() = true;
+
+    return S_OK;
+  }
+
+  void SetCompositionText1(const ui::CompositionText& composition) {
+    EXPECT_EQ(u" select that ", composition.text);
+    EXPECT_EQ(13u, composition.selection.start());
+    EXPECT_EQ(13u, composition.selection.end());
+    ASSERT_EQ(1u, composition.ime_text_spans.size());
+    EXPECT_EQ(0u, composition.ime_text_spans[0].start_offset);
+    EXPECT_EQ(13u, composition.ime_text_spans[0].end_offset);
+    SetHasCompositionText(true);
+    SetTextRange(0, 17);
+    SetTextBuffer(u"text select that ");
+    SetSelectionRange(17, 17);
+  }
+
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"text select that ", 17);
+    SetTextTest(4, 17, L"", S_OK);
+    GetTextTest(0, -1, L"text", 4);
+    SetSelectionTest(0, 4, S_OK);
+
+    text_spans()->clear();
+    *edit_flag() = true;
+    *composition_start() = 0;
+    composition_range()->set_start(0);
+    composition_range()->set_end(0);
+    *has_composition_range() = false;
+
+    return S_OK;
+  }
+
+  bool SetEditableSelectionRange2(const gfx::Range& range) {
+    EXPECT_EQ(range.GetMin(), 0u);
+    EXPECT_EQ(range.length(), 4u);
+    return true;
+  }
+
+  HRESULT LockGranted3(DWORD flags) {
+    GetTextTest(0, -1, L"text", 4);
+    GetSelectionTest(0, 4);
+
+    return S_OK;
+  }
+};
+
+TEST_F(TSFTextStoreTest, RegressionTest14) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+  RegressionTest14Callback callback(text_store_.get());
+  EXPECT_CALL(text_input_client_, InsertText(_, _)).Times(0);
+  EXPECT_CALL(text_input_client_, SetCompositionText(_))
+      .WillOnce(
+          Invoke(&callback, &RegressionTest14Callback::SetCompositionText1));
+  EXPECT_CALL(text_input_client_, SetEditableSelectionRange(_))
+      .WillOnce(Invoke(&callback,
+                       &RegressionTest14Callback::SetEditableSelectionRange2));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(&callback, &RegressionTest14Callback::LockGranted1))
+      .WillOnce(Invoke(&callback, &RegressionTest14Callback::LockGranted2))
+      .WillOnce(Invoke(&callback, &RegressionTest14Callback::LockGranted3));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+}
+
 // Test multiple |SetText| call in one edit session.
 class MultipleSetTextCallback : public TSFTextStoreTestCallback {
  public:
   explicit MultipleSetTextCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  MultipleSetTextCallback(const MultipleSetTextCallback&) = delete;
+  MultipleSetTextCallback& operator=(const MultipleSetTextCallback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextRange(0, 6);
-    SetTextBuffer(L"123456");
+    SetTextBuffer(u"123456");
     SetTextTest(0, 0, L"123456", S_OK);
     SetSelectionRange(6, 6);
     *composition_start() = 1;
@@ -3858,12 +4596,11 @@ class MultipleSetTextCallback : public TSFTextStoreTestCallback {
     *composition_start() = 5;
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(MultipleSetTextCallback);
 };
 
 TEST_F(TSFTextStoreTest, MultipleSetText) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   MultipleSetTextCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback, &MultipleSetTextCallback::LockGranted1))
@@ -3903,6 +4640,11 @@ class TextInputClientReentrancyTestCallback : public TSFTextStoreTestCallback {
   explicit TextInputClientReentrancyTestCallback(TSFTextStore* text_store)
       : TSFTextStoreTestCallback(text_store) {}
 
+  TextInputClientReentrancyTestCallback(
+      const TextInputClientReentrancyTestCallback&) = delete;
+  TextInputClientReentrancyTestCallback& operator=(
+      const TextInputClientReentrancyTestCallback&) = delete;
+
   HRESULT LockGranted1(DWORD flags) {
     SetTextTest(0, 0, L"a", S_OK);
     SetSelectionTest(0, 1, S_OK);
@@ -3926,7 +4668,7 @@ class TextInputClientReentrancyTestCallback : public TSFTextStoreTestCallback {
   }
 
   void SetCompositionText1(const ui::CompositionText& composition) {
-    EXPECT_EQ(L"a", composition.text);
+    EXPECT_EQ(u"a", composition.text);
     EXPECT_EQ(0u, composition.selection.start());
     EXPECT_EQ(1u, composition.selection.end());
     ASSERT_EQ(1u, composition.ime_text_spans.size());
@@ -3934,7 +4676,7 @@ class TextInputClientReentrancyTestCallback : public TSFTextStoreTestCallback {
     EXPECT_EQ(1u, composition.ime_text_spans[0].end_offset);
     SetHasCompositionText(true);
     SetTextRange(0, 1);
-    SetTextBuffer(L"a");
+    SetTextBuffer(u"a");
     SetSelectionRange(0, 1);
   }
 
@@ -3951,11 +4693,13 @@ class TextInputClientReentrancyTestCallback : public TSFTextStoreTestCallback {
     return S_OK;
   }
 
-  void InsertText2(const base::string16& text) {
-    EXPECT_EQ(L"a", text);
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"a", text);
     SetHasCompositionText(false);
     SetSelectionRange(1, 1);
-    SetTextBuffer(L"b");
+    SetTextBuffer(u"b");
     HRESULT result = kInvalidResult;
     EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
     EXPECT_EQ(S_OK, result);
@@ -3972,12 +4716,11 @@ class TextInputClientReentrancyTestCallback : public TSFTextStoreTestCallback {
     *edit_flag() = false;
     return S_OK;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(TextInputClientReentrancyTestCallback);
 };
 
 TEST_F(TSFTextStoreTest, TextInputClientReentrancTest) {
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
   TextInputClientReentrancyTestCallback callback(text_store_.get());
   EXPECT_CALL(*sink_, OnLockGranted(_))
       .WillOnce(Invoke(&callback,
@@ -3989,7 +4732,7 @@ TEST_F(TSFTextStoreTest, TextInputClientReentrancTest) {
       .WillOnce(Invoke(&callback,
                        &TextInputClientReentrancyTestCallback::LockGranted4));
 
-  EXPECT_CALL(text_input_client_, InsertText(_))
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
       .WillOnce(Invoke(&callback,
                        &TextInputClientReentrancyTestCallback::InsertText2));
 
@@ -4027,6 +4770,762 @@ TEST_F(TSFTextStoreTest, TextInputClientReentrancTest) {
   result = kInvalidResult;
   EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
   EXPECT_EQ(S_OK, result);
+}
+
+// The Windows touch keyboard performs autocorrect by replacing
+// already-committed text in a separate TSF lock cycle (no composition active).
+// When the HTML element has autocorrect="off", the replacement should be
+// reverted. This test simulates: user types "truf " (committed), then touch KB
+// replaces "truf" with "true" via SetText in a new lock. With autocorrect off,
+// the buffer should revert to "truf " and InsertText should NOT be called.
+class AutocorrectOffRevertTestCallback : public TSFTextStoreTestCallback {
+ public:
+  explicit AutocorrectOffRevertTestCallback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  AutocorrectOffRevertTestCallback(const AutocorrectOffRevertTestCallback&) =
+      delete;
+  AutocorrectOffRevertTestCallback& operator=(
+      const AutocorrectOffRevertTestCallback&) = delete;
+
+  // Lock 1: Simulate committed text "truf " already in the buffer.
+  // This represents the state after the user finishes typing a word and space.
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"truf ", S_OK);
+    SetSelectionTest(5, 5, S_OK);
+    *edit_flag() = true;
+    *composition_start() = 0;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText1(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"truf ", text);
+    // Sync callback state to reflect committed text for subsequent locks.
+    SetTextRange(0, 5);
+    SetSelectionRange(5, 5);
+    SetTextBuffer(u"truf ");
+  }
+
+  // Lock 2: Touch keyboard autocorrects "truf" -> "true" via SetText.
+  // No composition is active — this is a post-commit replacement.
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"truf ", 5);
+    // Replace "truf" (0-4) with "true", keeping the trailing space.
+    SetTextTest(0, 4, L"true", S_OK);
+    GetTextTest(0, -1, L"true ", 5);
+    SetSelectionTest(5, 5, S_OK);
+    *edit_flag() = true;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+};
+
+TEST_F(TSFTextStoreTest, AutocorrectOffRevertsReplacement) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kTSFHonorAutocorrectOff);
+
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+
+  // Return TEXT_INPUT_FLAG_AUTOCORRECT_OFF for GetTextInputFlags.
+  EXPECT_CALL(text_input_client_, GetTextInputFlags())
+      .WillRepeatedly(Return(TEXT_INPUT_FLAG_AUTOCORRECT_OFF));
+
+  AutocorrectOffRevertTestCallback callback(text_store_.get());
+
+  // InsertText is called for the first lock (committing "truf "), but should
+  // NOT be called for the second lock (the autocorrect should be reverted).
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOffRevertTestCallback::InsertText1));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOffRevertTestCallback::LockGranted1))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOffRevertTestCallback::LockGranted2));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  // Lock 1: Commit "truf ".
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Lock 2: Touch keyboard tries to replace "truf" with "true".
+  // With autocorrect off, the fix should revert the buffer.
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Verify the buffer was reverted to the pre-lock state.
+  EXPECT_EQ(u"truf ", *string_buffer());
+}
+
+// When autocorrect is ON (default), touch keyboard autocorrect should be
+// allowed through. The buffer should contain the corrected text and InsertText
+// should be called with the replacement.
+class AutocorrectOnAllowTestCallback : public TSFTextStoreTestCallback {
+ public:
+  explicit AutocorrectOnAllowTestCallback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  AutocorrectOnAllowTestCallback(const AutocorrectOnAllowTestCallback&) =
+      delete;
+  AutocorrectOnAllowTestCallback& operator=(
+      const AutocorrectOnAllowTestCallback&) = delete;
+
+  // Lock 1: Commit "vegen " into the buffer.
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"vegen ", S_OK);
+    SetSelectionTest(6, 6, S_OK);
+    *edit_flag() = true;
+    *composition_start() = 0;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText1(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"vegen ", text);
+    // Sync callback state to reflect committed text for subsequent locks.
+    SetTextRange(0, 6);
+    SetSelectionRange(6, 6);
+    SetTextBuffer(u"vegen ");
+  }
+
+  // Lock 2: Touch keyboard autocorrects "vegen" -> "vegan" via SetText.
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"vegen ", 6);
+    SetTextTest(0, 5, L"vegan", S_OK);
+    GetTextTest(0, -1, L"vegan ", 6);
+    SetSelectionTest(6, 6, S_OK);
+    *edit_flag() = true;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"vegan", text);
+  }
+};
+
+TEST_F(TSFTextStoreTest, AutocorrectOnAllowsReplacement) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kTSFHonorAutocorrectOff);
+
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+
+  // Return 0 for GetTextInputFlags (autocorrect is ON by default).
+  EXPECT_CALL(text_input_client_, GetTextInputFlags())
+      .WillRepeatedly(Return(0));
+
+  AutocorrectOnAllowTestCallback callback(text_store_.get());
+
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
+      .WillOnce(Invoke(&callback, &AutocorrectOnAllowTestCallback::InsertText1))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOnAllowTestCallback::InsertText2));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOnAllowTestCallback::LockGranted1))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOnAllowTestCallback::LockGranted2));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  // Lock 1: Commit "vegen ".
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Lock 2: Touch keyboard autocorrects "vegen" -> "vegan".
+  // With autocorrect on, the replacement should go through.
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Verify the buffer contains the corrected text.
+  EXPECT_EQ(u"vegan ", *string_buffer());
+}
+
+// When the feature flag kTSFHonorAutocorrectOff is disabled (kill switch),
+// autocorrect should go through even when autocorrect="off" is set.
+TEST_F(TSFTextStoreTest, AutocorrectOffFeatureDisabledAllowsReplacement) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(features::kTSFHonorAutocorrectOff);
+
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+
+  // autocorrect="off" is set, but the feature flag is disabled.
+  EXPECT_CALL(text_input_client_, GetTextInputFlags())
+      .WillRepeatedly(Return(TEXT_INPUT_FLAG_AUTOCORRECT_OFF));
+
+  // Reuses AutocorrectOnAllowTestCallback because the expected behavior is
+  // identical: the replacement should go through (not be reverted).
+  AutocorrectOnAllowTestCallback callback(text_store_.get());
+
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
+      .WillOnce(Invoke(&callback, &AutocorrectOnAllowTestCallback::InsertText1))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOnAllowTestCallback::InsertText2));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOnAllowTestCallback::LockGranted1))
+      .WillOnce(
+          Invoke(&callback, &AutocorrectOnAllowTestCallback::LockGranted2));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  // Lock 1: Commit "vegen ".
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Lock 2: Touch keyboard autocorrects "vegen" -> "vegan".
+  // Even though autocorrect="off", the flag is disabled so replacement
+  // should go through.
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Verify the replacement was NOT reverted.
+  EXPECT_EQ(u"vegan ", *string_buffer());
+}
+
+// When autocorrect is OFF, normal typing (appending text without modifying
+// existing content) should NOT be blocked. Only replacement of existing text
+// should be reverted.
+class AutocorrectOffNormalTypingTestCallback : public TSFTextStoreTestCallback {
+ public:
+  explicit AutocorrectOffNormalTypingTestCallback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  AutocorrectOffNormalTypingTestCallback(
+      const AutocorrectOffNormalTypingTestCallback&) = delete;
+  AutocorrectOffNormalTypingTestCallback& operator=(
+      const AutocorrectOffNormalTypingTestCallback&) = delete;
+
+  // Lock 1: Commit initial text "hel".
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"hel", S_OK);
+    SetSelectionTest(3, 3, S_OK);
+    *edit_flag() = true;
+    *composition_start() = 0;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText1(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"hel", text);
+    // Sync callback state to reflect committed text for subsequent locks.
+    SetTextRange(0, 3);
+    SetSelectionRange(3, 3);
+    SetTextBuffer(u"hel");
+  }
+
+  // Lock 2: Normal typing appends "lo" — no replacement of existing text.
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"hel", 3);
+    SetTextTest(3, 3, L"lo", S_OK);
+    GetTextTest(0, -1, L"hello", 5);
+    SetSelectionTest(5, 5, S_OK);
+    *edit_flag() = true;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"lo", text);
+  }
+};
+
+TEST_F(TSFTextStoreTest, AutocorrectOffAllowsNormalTyping) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kTSFHonorAutocorrectOff);
+
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+
+  // Return TEXT_INPUT_FLAG_AUTOCORRECT_OFF for GetTextInputFlags.
+  EXPECT_CALL(text_input_client_, GetTextInputFlags())
+      .WillRepeatedly(Return(TEXT_INPUT_FLAG_AUTOCORRECT_OFF));
+
+  AutocorrectOffNormalTypingTestCallback callback(text_store_.get());
+
+  // InsertText should be called for BOTH locks — normal typing is not blocked.
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
+      .WillOnce(Invoke(&callback,
+                       &AutocorrectOffNormalTypingTestCallback::InsertText1))
+      .WillOnce(Invoke(&callback,
+                       &AutocorrectOffNormalTypingTestCallback::InsertText2));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(&callback,
+                       &AutocorrectOffNormalTypingTestCallback::LockGranted1))
+      .WillOnce(Invoke(&callback,
+                       &AutocorrectOffNormalTypingTestCallback::LockGranted2));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  // Lock 1: Commit "hel".
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Lock 2: Normal append of "lo" — should go through even with autocorrect
+  // off.
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Verify the buffer contains the full text.
+  EXPECT_EQ(u"hello", *string_buffer());
+}
+
+// When autocorrect is OFF but there is an ACTIVE COMPOSITION (IME input),
+// text replacement should be ALLOWED. This ensures legitimate IME operations
+// (e.g., Chinese/Japanese character composition) are not blocked by the
+// autocorrect fix. The fix specifically checks for no-composition to
+// distinguish touch keyboard autocorrect from IME composition.
+class AutocorrectOffWithCompositionTestCallback
+    : public TSFTextStoreTestCallback {
+ public:
+  explicit AutocorrectOffWithCompositionTestCallback(TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  AutocorrectOffWithCompositionTestCallback(
+      const AutocorrectOffWithCompositionTestCallback&) = delete;
+  AutocorrectOffWithCompositionTestCallback& operator=(
+      const AutocorrectOffWithCompositionTestCallback&) = delete;
+
+  // Lock 1: Start composition with initial text "ni" (e.g., pinyin input).
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"ni", S_OK);
+    SetSelectionTest(2, 2, S_OK);
+    *edit_flag() = true;
+    *composition_start() = 0;
+    *has_composition_range() = true;  // Active composition!
+    composition_range()->set_start(0);
+    composition_range()->set_end(2);
+    return S_OK;
+  }
+
+  void SetCompositionText1(const ui::CompositionText& composition) {
+    EXPECT_EQ(u"ni", composition.text);
+    // Sync state for next lock.
+    SetTextRange(0, 2);
+    SetSelectionRange(2, 2);
+    SetTextBuffer(u"ni");
+    SetCompositionTextRange(0, 2);
+  }
+
+  // Lock 2: IME refines composition "ni" -> "你" (Chinese character).
+  // This is a replacement during ACTIVE composition — should be allowed.
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"ni", 2);
+    // Replace "ni" with Chinese character — this is IME composition, not
+    // autocorrect.
+    SetTextTest(0, 2, L"\u4F60", S_OK);  // 你 = U+4F60
+    GetTextTest(0, -1, L"\u4F60", 1);
+    SetSelectionTest(1, 1, S_OK);
+    *edit_flag() = true;
+    *has_composition_range() = true;  // Still composing!
+    composition_range()->set_start(0);
+    composition_range()->set_end(1);
+    return S_OK;
+  }
+
+  void SetCompositionText2(const ui::CompositionText& composition) {
+    // IME replaced "ni" with Chinese character — this should go through.
+    EXPECT_EQ(u"\u4F60", composition.text);
+  }
+};
+
+TEST_F(TSFTextStoreTest, AutocorrectOffAllowsCompositionReplacement) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kTSFHonorAutocorrectOff);
+
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+
+  // Autocorrect is OFF, but IME composition should still work.
+  EXPECT_CALL(text_input_client_, GetTextInputFlags())
+      .WillRepeatedly(Return(TEXT_INPUT_FLAG_AUTOCORRECT_OFF));
+
+  AutocorrectOffWithCompositionTestCallback callback(text_store_.get());
+
+  // SetCompositionText should be called for BOTH locks — IME is not blocked.
+  EXPECT_CALL(text_input_client_, SetCompositionText(_))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffWithCompositionTestCallback::SetCompositionText1))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffWithCompositionTestCallback::SetCompositionText2));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(
+          &callback, &AutocorrectOffWithCompositionTestCallback::LockGranted1))
+      .WillOnce(Invoke(
+          &callback, &AutocorrectOffWithCompositionTestCallback::LockGranted2));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  ON_CALL(text_input_client_, GetCompositionTextRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetCompositionTextRange));
+
+  // Lock 1: Start composition with "ni".
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Lock 2: IME replaces "ni" with Chinese character.
+  // Even though autocorrect is off, this should go through because
+  // composition was active at lock start.
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Verify the buffer contains the Chinese character (replacement allowed).
+  EXPECT_EQ(u"\u4F60", *string_buffer());
+}
+
+// When autocorrect is OFF and a Korean IME starts a new composition in the
+// middle of existing committed Korean text (no composition before the lock,
+// but composition created during the lock), the IME input should be allowed.
+// The autocorrect detection checks both `had_composition_at_lock_start` and
+// `has_composition_range_` to ensure it only reverts text modifications that
+// occur entirely outside of any composition.
+class AutocorrectOffIMENewCompositionMidTextTestCallback
+    : public TSFTextStoreTestCallback {
+ public:
+  explicit AutocorrectOffIMENewCompositionMidTextTestCallback(
+      TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  AutocorrectOffIMENewCompositionMidTextTestCallback(
+      const AutocorrectOffIMENewCompositionMidTextTestCallback&) = delete;
+  AutocorrectOffIMENewCompositionMidTextTestCallback& operator=(
+      const AutocorrectOffIMENewCompositionMidTextTestCallback&) = delete;
+
+  // Lock 1: Commit Korean text "\uD55C\uAD6D" (한국) into the buffer.
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"\uD55C\uAD6D", S_OK);
+    SetSelectionTest(2, 2, S_OK);
+    *edit_flag() = true;
+    *composition_start() = 0;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText1(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"\uD55C\uAD6D", text);  // 한국
+    SetTextRange(0, 2);
+    SetSelectionRange(2, 2);
+    SetTextBuffer(u"\uD55C\uAD6D");
+  }
+
+  // Lock 2: Korean IME starts a NEW composition in the middle of "한국" at
+  // position 1. The user placed the cursor between 한 and 국 and typed a
+  // Korean consonant ㄴ (U+3134). No composition existed before, but one is
+  // created during this lock. The buffer changes from "한국" to "한ㄴ국",
+  // which breaks the prefix check. This should NOT be reverted.
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"\uD55C\uAD6D", 2);
+    // Move selection to middle of text (cursor after 한).
+    SetSelectionTest(1, 1, S_OK);
+    // Korean IME inserts ㄴ at position 1 — starts composition.
+    SetTextTest(1, 1, L"\u3134", S_OK);  // ㄴ
+    GetTextTest(0, -1, L"\uD55C\u3134\uAD6D", 3);
+    SetSelectionTest(2, 2, S_OK);
+    *edit_flag() = true;
+    // Composition was created during this lock — this is the key difference
+    // from autocorrect.
+    *has_composition_range() = true;
+    composition_range()->set_start(1);
+    composition_range()->set_end(2);
+    *composition_start() = 1;
+    return S_OK;
+  }
+
+  void SetCompositionText1(const ui::CompositionText& composition) {
+    // Korean IME composition ㄴ should go through.
+    EXPECT_EQ(u"\u3134", composition.text);
+  }
+};
+
+TEST_F(TSFTextStoreTest, AutocorrectOffAllowsIMENewCompositionMidText) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kTSFHonorAutocorrectOff);
+
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+
+  // Autocorrect is OFF, but Korean IME new composition in middle should still
+  // work.
+  EXPECT_CALL(text_input_client_, GetTextInputFlags())
+      .WillRepeatedly(Return(TEXT_INPUT_FLAG_AUTOCORRECT_OFF));
+
+  AutocorrectOffIMENewCompositionMidTextTestCallback callback(
+      text_store_.get());
+
+  // InsertText for lock 1 (commit "한국"), SetCompositionText for lock 2
+  // (Korean IME composition).
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffIMENewCompositionMidTextTestCallback::InsertText1));
+
+  EXPECT_CALL(text_input_client_, SetCompositionText(_))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffIMENewCompositionMidTextTestCallback::
+              SetCompositionText1));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffIMENewCompositionMidTextTestCallback::LockGranted1))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffIMENewCompositionMidTextTestCallback::LockGranted2));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  ON_CALL(text_input_client_, GetCompositionTextRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetCompositionTextRange));
+
+  // Lock 1: Commit "한국".
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Lock 2: Korean IME starts new composition in middle of "한국".
+  // This should NOT be reverted — the composition created during the lock
+  // distinguishes this from autocorrect.
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  // Verify the buffer contains "한ㄴ국" (Korean IME insertion preserved, not
+  // reverted).
+  EXPECT_EQ(u"\uD55C\u3134\uAD6D", *string_buffer());
+}
+
+// Japanese IME inserts full-width space (U+3000) without composition.
+// Regression test for crbug.com/521644696.
+class AutocorrectOffFullWidthSpaceNoCompositionTestCallback
+    : public TSFTextStoreTestCallback {
+ public:
+  explicit AutocorrectOffFullWidthSpaceNoCompositionTestCallback(
+      TSFTextStore* text_store)
+      : TSFTextStoreTestCallback(text_store) {}
+
+  AutocorrectOffFullWidthSpaceNoCompositionTestCallback(
+      const AutocorrectOffFullWidthSpaceNoCompositionTestCallback&) = delete;
+  AutocorrectOffFullWidthSpaceNoCompositionTestCallback& operator=(
+      const AutocorrectOffFullWidthSpaceNoCompositionTestCallback&) = delete;
+
+  HRESULT LockGranted1(DWORD flags) {
+    SetTextTest(0, 0, L"hello", S_OK);
+    SetSelectionTest(5, 5, S_OK);
+    *edit_flag() = true;
+    *composition_start() = 0;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText1(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"hello", text);
+    SetTextRange(0, 5);
+    SetSelectionRange(5, 5);
+    SetTextBuffer(u"hello");
+  }
+
+  // IME inserts U+3000 at position 2 without composition.
+  HRESULT LockGranted2(DWORD flags) {
+    GetTextTest(0, -1, L"hello", 5);
+    SetSelectionTest(2, 2, S_OK);
+    SetTextTest(2, 2, L"\u3000", S_OK);
+    GetTextTest(0, -1, L"he\u3000llo", 6);
+    SetSelectionTest(3, 3, S_OK);
+    *edit_flag() = true;
+    *has_composition_range() = false;
+    return S_OK;
+  }
+
+  void InsertText2(
+      const std::u16string& text,
+      ui::TextInputClient::InsertTextCursorBehavior cursor_behavior) {
+    EXPECT_EQ(u"\u3000", text);
+    SetTextRange(0, 6);
+    SetSelectionRange(3, 3);
+    SetTextBuffer(u"he\u3000llo");
+  }
+};
+
+TEST_F(TSFTextStoreTest, AutocorrectOffAllowsFullWidthSpaceWithoutComposition) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kTSFHonorAutocorrectOff);
+
+  // Simulate Japanese IME being active.
+  set_is_input_ime_for_testing(true);
+
+  EXPECT_CALL(text_input_client_, GetTextInputType())
+      .WillRepeatedly(Return(TEXT_INPUT_TYPE_TEXT));
+
+  EXPECT_CALL(text_input_client_, GetTextInputFlags())
+      .WillRepeatedly(Return(TEXT_INPUT_FLAG_AUTOCORRECT_OFF));
+
+  AutocorrectOffFullWidthSpaceNoCompositionTestCallback callback(
+      text_store_.get());
+
+  EXPECT_CALL(text_input_client_, InsertText(_, _))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffFullWidthSpaceNoCompositionTestCallback::InsertText1))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffFullWidthSpaceNoCompositionTestCallback::InsertText2));
+
+  EXPECT_CALL(*sink_, OnLockGranted(_))
+      .WillOnce(Invoke(
+          &callback,
+          &AutocorrectOffFullWidthSpaceNoCompositionTestCallback::LockGranted1))
+      .WillOnce(Invoke(&callback,
+                       &AutocorrectOffFullWidthSpaceNoCompositionTestCallback::
+                           LockGranted2));
+
+  ON_CALL(text_input_client_, HasCompositionText())
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::HasCompositionText));
+
+  ON_CALL(text_input_client_, GetTextRange(_))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextRange));
+
+  ON_CALL(text_input_client_, GetTextFromRange(_, _))
+      .WillByDefault(
+          Invoke(&callback, &TSFTextStoreTestCallback::GetTextFromRange));
+
+  ON_CALL(text_input_client_, GetEditableSelectionRange(_))
+      .WillByDefault(Invoke(
+          &callback, &TSFTextStoreTestCallback::GetEditableSelectionRange));
+
+  HRESULT result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  result = kInvalidResult;
+  EXPECT_EQ(S_OK, text_store_->RequestLock(TS_LF_READWRITE, &result));
+  EXPECT_EQ(S_OK, result);
+
+  EXPECT_EQ(u"he\u3000llo", *string_buffer());
 }
 
 }  // namespace

@@ -1,11 +1,10 @@
-#!/usr/bin/env python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 '''Unit tests for grit.gather.chrome_html'''
 
-from __future__ import print_function
 
 import os
 import re
@@ -15,12 +14,11 @@ if __name__ == '__main__':
 
 import unittest
 
-from grit import lazy_re
 from grit import util
 from grit.gather import chrome_html
 
 
-_NEW_LINE = lazy_re.compile('(\r\n|\r|\n)', re.MULTILINE)
+_NEW_LINE = re.compile('(\r\n|\r|\n)', re.MULTILINE)
 
 
 def StandardizeHtml(text):
@@ -31,6 +29,10 @@ def StandardizeHtml(text):
 
 class ChromeHtmlUnittest(unittest.TestCase):
   '''Unit tests for ChromeHtml.'''
+
+  @classmethod
+  def setUpClass(cls):
+    os.environ["root_gen_dir"] = "gen"
 
   def testFileResources(self):
     '''Tests inlined image file resources with available high DPI assets.'''
@@ -65,14 +67,14 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '1.4x,1.8x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       <!DOCTYPE HTML>
       <html>
         <head>
           <style>
       .image {
-        background: -webkit-image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MS40eCBQTkcgREFUQQ==') 1.4x, url('data:image/png;base64,MS44eCBQTkcgREFUQQ==') 1.8x);
+        background: image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MS40eCBQTkcgREFUQQ==') 1.4x, url('data:image/png;base64,MS44eCBQTkcgREFUQQ==') 1.8x);
       }
       </style>
         </head>
@@ -106,12 +108,12 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       <!DOCTYPE HTML>
       <html>
         <body>
-          <img id="foo" src="data:image/png;base64,UE5HIERBVEE=" style="content: -webkit-image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MnggUE5HIERBVEE=') 2x);">
+          <img id="foo" src="data:image/png;base64,UE5HIERBVEE=" style="content: image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MnggUE5HIERBVEE=') 2x);">
         </body>
       </html>
       '''))
@@ -138,10 +140,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '1.4x,1.8x'})
     html.SetAttributes({'flattenhtml': 'false'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url('test.png') 1x, url('1.4x/test.png') 1.4x, url('1.8x/test.png') 1.8x);
+        background: image-set(url('test.png') 1x, url('1.4x/test.png') 1.4x, url('1.8x/test.png') 1.8x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -167,10 +169,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '1.4x,1.8x'})
     html.SetAttributes({'flattenhtml': 'false'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url('sub/test.png') 1x, url('sub/1.4x/test.png') 1.4x, url('sub/1.8x/test.png') 1.8x);
+        background: image-set(url('sub/test.png') 1x, url('sub/1.4x/test.png') 1.4x, url('sub/1.8x/test.png') 1.8x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -197,10 +199,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '1.4x,1.8x'})
     html.SetAttributes({'flattenhtml': 'false', 'preprocess': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url('test.png') 1x, url('1.4x/test.png') 1.4x, url('1.8x/test.png') 1.8x);
+        background: image-set(url('test.png') 1x, url('1.4x/test.png') 1.4x, url('1.8x/test.png') 1.8x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -224,10 +226,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url("data:image/png;base64,UE5HIERBVEE=") 1x, url("data:image/png;base64,MnggUE5HIERBVEE=") 2x);
+        background: image-set(url("data:image/png;base64,UE5HIERBVEE=") 1x, url("data:image/png;base64,MnggUE5HIERBVEE=") 2x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -251,10 +253,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
+        background: image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -278,10 +280,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MnggUE5HIERBVEE=') 2x);
+        background: image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MnggUE5HIERBVEE=') 2x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -315,7 +317,7 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       <!DOCTYPE HTML>
       <html>
@@ -352,10 +354,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x), -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
+        background: image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x), image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -380,11 +382,11 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x),
-                    -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
+        background: image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x),
+                    image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -411,11 +413,11 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x),
-          -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
+        background: image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x),
+          image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -440,10 +442,10 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       .image {
-        background: -webkit-image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
+        background: image-set(url(data:image/png;base64,UE5HIERBVEE=) 1x, url(data:image/png;base64,MnggUE5HIERBVEE=) 2x);
       }
       '''))
     tmp_dir.CleanUp()
@@ -476,15 +478,15 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '2x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       <!DOCTYPE HTML>
       <html>
         <head>
           <style>
       .image {
-        background: -webkit-image-set(url('chrome://theme/IDR_RESOURCE_NAME') 1x, url('chrome://theme/IDR_RESOURCE_NAME@2x') 2x);
-        content: -webkit-image-set(url('chrome://theme/IDR_RESOURCE_NAME_WITH_Q?$1') 1x, url('chrome://theme/IDR_RESOURCE_NAME_WITH_Q@2x?$1') 2x);
+        background: image-set(url('chrome://theme/IDR_RESOURCE_NAME') 1x, url('chrome://theme/IDR_RESOURCE_NAME@2x') 2x);
+        content: image-set(url('chrome://theme/IDR_RESOURCE_NAME_WITH_Q?$1') 1x, url('chrome://theme/IDR_RESOURCE_NAME_WITH_Q@2x?$1') 2x);
       }
       </style>
         </head>
@@ -530,14 +532,14 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetDefines({'scale_factors': '1.8x'})
     html.SetAttributes({'flattenhtml': 'true'})
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       <!DOCTYPE HTML>
       <html>
         <head>
           <style>
       .image {
-        background: -webkit-image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x,
+        background: image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x,
                                       url('data:image/png;base64,MS44eCBQTkcgREFUQQ==') 1.8x);
       }
       </style>
@@ -587,14 +589,14 @@ class ChromeHtmlUnittest(unittest.TestCase):
     html.SetAttributes({'flattenhtml': 'true'})
     html.SetFilenameExpansionFunction(replacer('WHICH', '1'));
     html.Parse()
-    self.failUnlessEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
+    self.assertEqual(StandardizeHtml(html.GetData('en', 'utf-8')),
                          StandardizeHtml('''
       <!DOCTYPE HTML>
       <html>
         <head>
           <style>
       .image {
-        background: -webkit-image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MS40eCBQTkcgREFUQQ==') 1.4x, url('data:image/png;base64,MS44eCBQTkcgREFUQQ==') 1.8x);
+        background: image-set(url('data:image/png;base64,UE5HIERBVEE=') 1x, url('data:image/png;base64,MS40eCBQTkcgREFUQQ==') 1.4x, url('data:image/png;base64,MS44eCBQTkcgREFUQQ==') 1.8x);
       }
       </style>
         </head>

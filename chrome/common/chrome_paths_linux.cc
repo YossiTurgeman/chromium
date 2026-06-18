@@ -1,14 +1,15 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/common/chrome_paths.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/base_paths.h"
 #include "base/environment.h"
-#include "base/files/file_util.h"
+#include "base/files/file_path.h"
 #include "base/nix/xdg_util.h"
 #include "base/path_service.h"
 #include "base/strings/string_util.h"
@@ -35,7 +36,7 @@ const char kVideosDir[] = "Videos";
 bool GetUserMediaDirectory(const std::string& xdg_name,
                            const std::string& fallback_name,
                            base::FilePath* result) {
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   // No local media directories on CrOS.
   return false;
 #else
@@ -79,16 +80,19 @@ bool GetUserMediaDirectory(const std::string& xdg_name,
 bool GetDefaultUserDataDirectory(base::FilePath* result) {
   std::unique_ptr<base::Environment> env(base::Environment::Create());
   base::FilePath config_dir;
-  std::string chrome_config_home_str;
-  if (env->GetVar("CHROME_CONFIG_HOME", &chrome_config_home_str) &&
-      base::IsStringUTF8(chrome_config_home_str)) {
-    config_dir = base::FilePath::FromUTF8Unsafe(chrome_config_home_str);
+  std::optional<std::string> chrome_config_home_str =
+      env->GetVar("CHROME_CONFIG_HOME");
+  if (chrome_config_home_str.has_value() &&
+      base::IsStringUTF8(chrome_config_home_str.value())) {
+    config_dir = base::FilePath::FromUTF8Unsafe(chrome_config_home_str.value());
   } else {
     config_dir =
         GetXDGDirectory(env.get(), kXdgConfigHomeEnvVar, kDotConfigDir);
   }
 
-#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+  std::string data_dir_basename = "google-chrome-for-testing";
+#elif BUILDFLAG(GOOGLE_CHROME_BRANDING)
   std::string data_dir_basename = "google-chrome";
 #else
   std::string data_dir_basename = "chromium";

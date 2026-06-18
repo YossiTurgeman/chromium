@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,12 @@
 #define CHROME_BROWSER_UI_VIEWS_STATUS_ICONS_STATUS_ICON_WIN_H_
 
 #include <windows.h>
+
 #include <shellapi.h>
 
 #include <memory>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/win/scoped_gdi_object.h"
 #include "chrome/browser/status_icons/status_icon.h"
 
@@ -29,6 +29,10 @@ class StatusIconWin : public StatusIcon {
  public:
   // Constructor which provides this icon's unique ID and messaging window.
   StatusIconWin(StatusTrayWin* tray, UINT id, HWND window, UINT message);
+
+  StatusIconWin(const StatusIconWin&) = delete;
+  StatusIconWin& operator=(const StatusIconWin&) = delete;
+
   ~StatusIconWin() override;
 
   // Handles a click event from the user - if |left_button_click| is true and
@@ -48,10 +52,10 @@ class StatusIconWin : public StatusIcon {
 
   // Overridden from StatusIcon:
   void SetImage(const gfx::ImageSkia& image) override;
-  void SetToolTip(const base::string16& tool_tip) override;
+  void SetToolTip(const std::u16string& tool_tip) override;
   void DisplayBalloon(const gfx::ImageSkia& icon,
-                      const base::string16& title,
-                      const base::string16& contents,
+                      const std::u16string& title,
+                      const std::u16string& contents,
                       const message_center::NotifierId& notifier_id) override;
   void ForceVisible() override;
 
@@ -60,10 +64,10 @@ class StatusIconWin : public StatusIcon {
   void UpdatePlatformContextMenu(StatusIconMenuModel* menu) override;
 
  private:
-  void InitIconData(NOTIFYICONDATA* icon_data);
+  NOTIFYICONDATA InitIconData() const;
 
   // The tray that owns us.  Weak.
-  StatusTrayWin* tray_;
+  raw_ptr<StatusTrayWin> tray_;
 
   // The unique ID corresponding to this icon.
   UINT icon_id_;
@@ -75,18 +79,16 @@ class StatusIconWin : public StatusIcon {
   UINT message_id_;
 
   // The currently-displayed icon for the window.
-  base::win::ScopedHICON icon_;
+  base::win::ScopedGDIObject<HICON> icon_;
 
   // The currently-displayed icon for the notification balloon.
-  base::win::ScopedHICON balloon_icon_;
+  base::win::ScopedGDIObject<HICON> balloon_icon_;
 
   // Not owned.
-  ui::MenuModel* menu_model_ = nullptr;
+  raw_ptr<ui::MenuModel> menu_model_ = nullptr;
 
   // Context menu associated with this icon (if any).
   std::unique_ptr<views::MenuRunner> menu_runner_;
-
-  DISALLOW_COPY_AND_ASSIGN(StatusIconWin);
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_STATUS_ICONS_STATUS_ICON_WIN_H_

@@ -1,9 +1,10 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/events/blink/web_input_event_builders_win.h"
 #include "base/command_line.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/time/time.h"
 #include "base/win/windows_version.h"
@@ -31,7 +32,7 @@ TEST(WebInputEventBuilderTest, TestMouseEventScale) {
   // Synthesize a mouse move with x = 300 and y = 200.
   WebMouseEvent mouse_move = ui::WebMouseEventBuilder::Build(
       ::GetDesktopWindow(), WM_MOUSEMOVE, 0, MAKELPARAM(300, 200),
-      base::TimeTicks() + base::TimeDelta::FromSeconds(100),
+      base::TimeTicks() + base::Seconds(100),
       blink::WebPointerProperties::PointerType::kMouse);
 
   // The WebMouseEvent.position field should be in pixels on return and hence
@@ -49,43 +50,6 @@ TEST(WebInputEventBuilderTest, TestMouseEventScale) {
 
   command_line->AppendSwitchASCII(switches::kForceDeviceScaleFactor, "1");
   display::Display::ResetForceDeviceScaleFactorForTesting();
-}
-
-TEST(WebInputEventBuilderTest, TestPercentMouseWheelScroll) {
-  base::test::ScopedFeatureList scoped_feature_list;
-  scoped_feature_list.InitAndEnableFeature(features::kPercentBasedScrolling);
-
-  // We must discount the system scroll settings from the test, as we don't them
-  // failing if the test machine has different settings.
-  unsigned long system_scroll_lines = 3;
-  unsigned long system_scroll_chars = 1;
-  SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &system_scroll_lines, 0);
-  SystemParametersInfo(SPI_GETWHEELSCROLLCHARS, 0, &system_scroll_chars, 0);
-
-  WebMouseWheelEvent mouse_wheel = WebMouseWheelEventBuilder::Build(
-      ::GetDesktopWindow(), WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA),
-      MAKELPARAM(0, 0), base::TimeTicks() + base::TimeDelta::FromSeconds(100),
-      blink::WebPointerProperties::PointerType::kMouse);
-  EXPECT_EQ(ui::ScrollGranularity::kScrollByPercentage,
-            mouse_wheel.delta_units);
-  EXPECT_FLOAT_EQ(0.f, mouse_wheel.delta_x);
-  EXPECT_FLOAT_EQ(
-      -0.05f, mouse_wheel.delta_y / static_cast<float>(system_scroll_lines));
-  EXPECT_FLOAT_EQ(0.f, mouse_wheel.wheel_ticks_x);
-  EXPECT_FLOAT_EQ(-1.f, mouse_wheel.wheel_ticks_y);
-
-  // For a horizontal scroll, Windows is <- -/+ ->, WebKit <- +/- ->.
-  mouse_wheel = WebMouseWheelEventBuilder::Build(
-      ::GetDesktopWindow(), WM_MOUSEHWHEEL, MAKEWPARAM(0, -WHEEL_DELTA),
-      MAKELPARAM(0, 0), base::TimeTicks() + base::TimeDelta::FromSeconds(100),
-      blink::WebPointerProperties::PointerType::kMouse);
-  EXPECT_EQ(ui::ScrollGranularity::kScrollByPercentage,
-            mouse_wheel.delta_units);
-  EXPECT_FLOAT_EQ(
-      0.05f, mouse_wheel.delta_x / static_cast<float>(system_scroll_chars));
-  EXPECT_FLOAT_EQ(0.f, mouse_wheel.delta_y);
-  EXPECT_FLOAT_EQ(1.f, mouse_wheel.wheel_ticks_x);
-  EXPECT_FLOAT_EQ(0.f, mouse_wheel.wheel_ticks_y);
 }
 
 }  // namespace ui

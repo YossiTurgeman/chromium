@@ -1,12 +1,13 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/dom_distiller/core/task_tracker.h"
 
+#include <memory>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/test/gmock_move_support.h"
 #include "base/test/task_environment.h"
@@ -162,7 +163,8 @@ TEST_F(DomDistillerTaskTrackerTest, TestViewerNotifiedOnDistillationComplete) {
   EXPECT_CALL(viewer_delegate, OnArticleReady(_));
 
   task_tracker.StartDistiller(&distiller_factory,
-                              std::unique_ptr<DistillerPage>());
+                              std::unique_ptr<DistillerPage>(),
+                              /* use_cache */ true);
   base::RunLoop().RunUntilIdle();
 
   EXPECT_FALSE(cancel_callback.Cancelled());
@@ -186,9 +188,9 @@ TEST_F(DomDistillerTaskTrackerTest, TestDistillerFails) {
   EXPECT_CALL(viewer_delegate, OnArticleReady(_));
 
   task_tracker.StartDistiller(&distiller_factory,
-                              std::unique_ptr<DistillerPage>());
-  distiller->RunDistillerCallback(
-      std::unique_ptr<DistilledArticleProto>(new DistilledArticleProto));
+                              std::unique_ptr<DistillerPage>(),
+                              /* use_cache */ true);
+  distiller->RunDistillerCallback(std::make_unique<DistilledArticleProto>());
   base::RunLoop().RunUntilIdle();
 
   EXPECT_FALSE(cancel_callback.Cancelled());
@@ -212,7 +214,8 @@ TEST_F(DomDistillerTaskTrackerTest,
   EXPECT_CALL(save_callback, Save(_, _, _));
 
   task_tracker.StartDistiller(&distiller_factory,
-                              std::unique_ptr<DistillerPage>());
+                              std::unique_ptr<DistillerPage>(),
+                              /* use_cache */ true);
   base::RunLoop().RunUntilIdle();
 
   EXPECT_TRUE(cancel_callback.Cancelled());
@@ -288,7 +291,8 @@ TEST_F(DomDistillerTaskTrackerTest, TestBlobFetcherFinishesFirst) {
       .WillOnce(testing::Assign(&distiller_destroyed, true));
 
   task_tracker.StartDistiller(&distiller_factory,
-                              std::unique_ptr<DistillerPage>());
+                              std::unique_ptr<DistillerPage>(),
+                              /* use_cache */ true);
   task_tracker.StartBlobFetcher();
   base::RunLoop().RunUntilIdle();
 
@@ -323,7 +327,8 @@ TEST_F(DomDistillerTaskTrackerTest, TestBlobFetcherWithoutBlob) {
 
   task_tracker.StartBlobFetcher();
   task_tracker.StartDistiller(&distiller_factory,
-                              std::unique_ptr<DistillerPage>());
+                              std::unique_ptr<DistillerPage>(),
+                              /* use_cache */ true);
 
   // OnArticleReady shouldn't be called until distillation finishes (i.e. the
   // blob fetcher shouldn't return distilled content).
@@ -359,19 +364,18 @@ TEST_F(DomDistillerTaskTrackerTest, TestDistillerFailsFirst) {
       .WillOnce(MoveArg<1>(&content_store_load_callback));
 
   task_tracker.StartDistiller(&distiller_factory,
-                              std::unique_ptr<DistillerPage>());
+                              std::unique_ptr<DistillerPage>(),
+                              /* use_cache */ true);
   task_tracker.StartBlobFetcher();
 
   EXPECT_CALL(viewer_delegate, OnArticleReady(_)).Times(0);
-  distiller->RunDistillerCallback(
-      std::unique_ptr<DistilledArticleProto>(new DistilledArticleProto));
+  distiller->RunDistillerCallback(std::make_unique<DistilledArticleProto>());
   base::RunLoop().RunUntilIdle();
 
   EXPECT_CALL(viewer_delegate, OnArticleReady(_));
   std::move(content_store_load_callback)
-      .Run(true,
-           std::unique_ptr<DistilledArticleProto>(new DistilledArticleProto(
-               CreateDistilledArticleForEntry(entry))));
+      .Run(true, std::make_unique<DistilledArticleProto>(
+                     CreateDistilledArticleForEntry(entry)));
   base::RunLoop().RunUntilIdle();
 
   EXPECT_FALSE(cancel_callback.Cancelled());
@@ -402,11 +406,12 @@ TEST_F(DomDistillerTaskTrackerTest, ContentIsSaved) {
       .WillOnce(testing::SaveArg<1>(&stored_distilled_article));
 
   task_tracker.StartDistiller(&distiller_factory,
-                              std::unique_ptr<DistillerPage>());
+                              std::unique_ptr<DistillerPage>(),
+                              /* use_cache */ true);
 
   EXPECT_CALL(viewer_delegate, OnArticleReady(_));
-  distiller->RunDistillerCallback(std::unique_ptr<DistilledArticleProto>(
-      new DistilledArticleProto(distilled_article)));
+  distiller->RunDistillerCallback(
+      std::make_unique<DistilledArticleProto>(distilled_article));
   base::RunLoop().RunUntilIdle();
 
   ASSERT_EQ(stored_distilled_article.SerializeAsString(),

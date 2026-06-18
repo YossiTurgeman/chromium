@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,10 @@
 #include <stdint.h>
 
 #include "base/memory/weak_ptr.h"
+#include "build/build_config.h"
 #include "content/public/browser/browser_thread.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/display/output_protection_delegate.h"
 #endif
 
@@ -51,7 +52,7 @@ class OutputProtectionProxy {
   int render_process_id_;
   int render_frame_id_;
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   ash::OutputProtectionDelegate output_protection_delegate_;
 #endif
 

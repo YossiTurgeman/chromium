@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,29 +6,34 @@
 #define SERVICES_AUDIO_SERVICE_H_
 
 #include <memory>
-#include <string>
+#include <optional>
 
-#include "base/macros.h"
-#include "base/optional.h"
 #include "base/threading/thread_checker.h"
 #include "build/build_config.h"
+#include "media/mojo/mojom/audio_stream_factory.mojom.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/receiver.h"
 #include "services/audio/public/mojom/audio_service.mojom.h"
 #include "services/audio/public/mojom/debug_recording.mojom.h"
 #include "services/audio/public/mojom/device_notifications.mojom.h"
 #include "services/audio/public/mojom/log_factory_manager.mojom.h"
-#include "services/audio/public/mojom/stream_factory.mojom.h"
+#include "services/audio/public/mojom/ml_model_manager.mojom.h"
 #include "services/audio/public/mojom/system_info.mojom.h"
 #include "services/audio/public/mojom/testing_api.mojom.h"
 #include "services/audio/stream_factory.h"
 #include "services/audio/testing_api_binder.h"
 
+#if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
+#include "services/audio/ml_model_manager.h"
+#endif
+
 namespace base {
 class DeferredSequencedTaskRunner;
 class SystemMonitor;
-}
+}  // namespace base
 
 namespace media {
+class AecdumpRecordingManager;
 class AudioDeviceListenerMac;
 class AudioManager;
 class AudioLogFactory;
@@ -38,10 +43,9 @@ namespace audio {
 class DebugRecording;
 class DeviceNotifier;
 class LogFactoryManager;
-class ServiceMetrics;
 class SystemInfo;
 
-class Service : public mojom::AudioService {
+class Service final : public mojom::AudioService {
  public:
   // Abstracts AudioManager ownership. Lives and must be accessed on a thread
   // its created on, and that thread must be AudioManager main thread.
@@ -69,6 +73,10 @@ class Service : public mojom::AudioService {
   Service(std::unique_ptr<AudioManagerAccessor> audio_manager_accessor,
           bool enable_remote_client_support,
           mojo::PendingReceiver<mojom::AudioService> receiver);
+
+  Service(const Service&) = delete;
+  Service& operator=(const Service&) = delete;
+
   ~Service() final;
 
   // Returns a DeferredSequencedTaskRunner to be used to run the audio service
@@ -89,14 +97,16 @@ class Service : public mojom::AudioService {
       mojo::PendingReceiver<mojom::SystemInfo> receiver) override;
   void BindDebugRecording(
       mojo::PendingReceiver<mojom::DebugRecording> receiver) override;
-  void BindStreamFactory(
-      mojo::PendingReceiver<mojom::StreamFactory> receiver) override;
+  void BindStreamFactory(mojo::PendingReceiver<media::mojom::AudioStreamFactory>
+                             receiver) override;
   void BindDeviceNotifier(
       mojo::PendingReceiver<mojom::DeviceNotifier> receiver) override;
   void BindLogFactoryManager(
       mojo::PendingReceiver<mojom::LogFactoryManager> receiver) override;
   void BindTestingApi(
       mojo::PendingReceiver<mojom::TestingApi> receiver) override;
+  void BindMlModelManager(
+      mojo::PendingReceiver<mojom::MlModelManager> receiver) override;
 
   // Initializes a platform-specific device monitor for device-change
   // notifications. If the client uses the DeviceNotifier interface to get
@@ -112,20 +122,28 @@ class Service : public mojom::AudioService {
   base::RepeatingClosure quit_closure_;
 
   mojo::Receiver<mojom::AudioService> receiver_;
+
+#if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
+  // Manages Machine Learning models used within the audio
+  // service. It must outlive `stream_factory_`.
+  MlModelManagerImpl ml_model_manager_;
+#endif
   std::unique_ptr<AudioManagerAccessor> audio_manager_accessor_;
   const bool enable_remote_client_support_;
   std::unique_ptr<base::SystemMonitor> system_monitor_;
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   std::unique_ptr<media::AudioDeviceListenerMac> audio_device_listener_mac_;
 #endif
   std::unique_ptr<SystemInfo> system_info_;
+
+  // Manages starting / stopping of diagnostic audio processing recordings. Must
+  // outlive |debug_recording_| and |stream_factory_|, if instantiated.
+  std::unique_ptr<media::AecdumpRecordingManager> aecdump_recording_manager_;
+
   std::unique_ptr<DebugRecording> debug_recording_;
-  base::Optional<StreamFactory> stream_factory_;
+  std::optional<StreamFactory> stream_factory_;
   std::unique_ptr<DeviceNotifier> device_notifier_;
   std::unique_ptr<LogFactoryManager> log_factory_manager_;
-  std::unique_ptr<ServiceMetrics> metrics_;
-
-  DISALLOW_COPY_AND_ASSIGN(Service);
 };
 
 }  // namespace audio

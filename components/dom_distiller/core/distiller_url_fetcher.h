@@ -1,13 +1,14 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_DOM_DISTILLER_CORE_DISTILLER_URL_FETCHER_H_
 #define COMPONENTS_DOM_DISTILLER_CORE_DISTILLER_URL_FETCHER_H_
 
+#include <optional>
 #include <string>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 
 namespace network {
 class SharedURLLoaderFactory;
@@ -53,7 +54,7 @@ class DistillerURLFetcher {
       const std::string& url);
 
  private:
-  void OnURLLoadComplete(std::unique_ptr<std::string> response_body);
+  void OnURLLoadComplete(std::optional<std::string> response_body);
 
   std::unique_ptr<network::SimpleURLLoader> url_loader_;
   URLFetcherCallback callback_;

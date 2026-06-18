@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,10 @@
 
 #include <stddef.h>
 
-#include "base/bind.h"
+#include "base/containers/to_vector.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/values.h"
@@ -48,6 +49,11 @@ class BluetoothGattCharacteristicClientImpl
       public dbus::ObjectManager::Interface {
  public:
   BluetoothGattCharacteristicClientImpl() : object_manager_(nullptr) {}
+
+  BluetoothGattCharacteristicClientImpl(
+      const BluetoothGattCharacteristicClientImpl&) = delete;
+  BluetoothGattCharacteristicClientImpl& operator=(
+      const BluetoothGattCharacteristicClientImpl&) = delete;
 
   ~BluetoothGattCharacteristicClientImpl() override {
     object_manager_->UnregisterInterface(
@@ -100,22 +106,19 @@ class BluetoothGattCharacteristicClientImpl
 
     // Append empty option dict
     dbus::MessageWriter writer(&method_call);
-    base::DictionaryValue dict;
-    dbus::AppendValueData(&writer, dict);
+    dbus::AppendValueData(&writer, base::DictValue());
 
-    object_proxy->CallMethodWithErrorCallback(
+    object_proxy->CallMethodWithErrorResponse(
         &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnValueSuccess,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnError,
-                       weak_ptr_factory_.GetWeakPtr(),
+        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnValueResponse,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        std::move(error_callback)));
   }
 
   // BluetoothGattCharacteristicClient override.
   void WriteValue(const dbus::ObjectPath& object_path,
-                  const std::vector<uint8_t>& value,
-                  base::StringPiece type_option,
+                  base::span<const uint8_t> value,
+                  std::string_view type_option,
                   base::OnceClosure callback,
                   ErrorCallback error_callback) override {
     dbus::ObjectProxy* object_proxy =
@@ -129,29 +132,26 @@ class BluetoothGattCharacteristicClientImpl
         bluetooth_gatt_characteristic::kBluetoothGattCharacteristicInterface,
         bluetooth_gatt_characteristic::kWriteValue);
     dbus::MessageWriter writer(&method_call);
-    writer.AppendArrayOfBytes(value.data(), value.size());
+    writer.AppendArrayOfBytes(value);
 
     // Append option dict
-    base::DictionaryValue dict;
+    base::DictValue dict;
     if (!type_option.empty()) {
       // NB: the "type" option was added in BlueZ 5.51. Older versions of BlueZ
       // will ignore this option.
-      dict.SetStringKey(bluetooth_gatt_characteristic::kOptionType,
-                        type_option);
+      dict.Set(bluetooth_gatt_characteristic::kOptionType, type_option);
     }
     dbus::AppendValueData(&writer, dict);
 
-    object_proxy->CallMethodWithErrorCallback(
+    object_proxy->CallMethodWithErrorResponse(
         &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnSuccess,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnError,
-                       weak_ptr_factory_.GetWeakPtr(),
+        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnMethodResponse,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        std::move(error_callback)));
   }
 
   void PrepareWriteValue(const dbus::ObjectPath& object_path,
-                         const std::vector<uint8_t>& value,
+                         base::span<const uint8_t> value,
                          base::OnceClosure callback,
                          ErrorCallback error_callback) override {
     dbus::ObjectProxy* object_proxy =
@@ -165,26 +165,23 @@ class BluetoothGattCharacteristicClientImpl
         bluetooth_gatt_characteristic::kBluetoothGattCharacteristicInterface,
         bluetooth_gatt_characteristic::kPrepareWriteValue);
     dbus::MessageWriter writer(&method_call);
-    writer.AppendArrayOfBytes(value.data(), value.size());
+    writer.AppendArrayOfBytes(value);
 
-    base::DictionaryValue dict;
-    dbus::AppendValueData(&writer, dict);
+    dbus::AppendValueData(&writer, base::DictValue());
 
-    object_proxy->CallMethodWithErrorCallback(
+    object_proxy->CallMethodWithErrorResponse(
         &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnSuccess,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnError,
-                       weak_ptr_factory_.GetWeakPtr(),
+        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnMethodResponse,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        std::move(error_callback)));
   }
 
   // BluetoothGattCharacteristicClient override.
   void StartNotify(
       const dbus::ObjectPath& object_path,
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
       device::BluetoothGattCharacteristic::NotificationType notification_type,
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
       base::OnceClosure callback,
       ErrorCallback error_callback) override {
     dbus::ObjectProxy* object_proxy =
@@ -197,17 +194,15 @@ class BluetoothGattCharacteristicClientImpl
     dbus::MethodCall method_call(
         bluetooth_gatt_characteristic::kBluetoothGattCharacteristicInterface,
         bluetooth_gatt_characteristic::kStartNotify);
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     dbus::MessageWriter writer(&method_call);
     writer.AppendByte(static_cast<uint8_t>(notification_type));
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
-    object_proxy->CallMethodWithErrorCallback(
+    object_proxy->CallMethodWithErrorResponse(
         &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnSuccess,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnError,
-                       weak_ptr_factory_.GetWeakPtr(),
+        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnMethodResponse,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        std::move(error_callback)));
   }
 
@@ -226,12 +221,10 @@ class BluetoothGattCharacteristicClientImpl
         bluetooth_gatt_characteristic::kBluetoothGattCharacteristicInterface,
         bluetooth_gatt_characteristic::kStopNotify);
 
-    object_proxy->CallMethodWithErrorCallback(
+    object_proxy->CallMethodWithErrorResponse(
         &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnSuccess,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
-        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnError,
-                       weak_ptr_factory_.GetWeakPtr(),
+        base::BindOnce(&BluetoothGattCharacteristicClientImpl::OnMethodResponse,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        std::move(error_callback)));
   }
 
@@ -288,30 +281,33 @@ class BluetoothGattCharacteristicClientImpl
       observer.GattCharacteristicPropertyChanged(object_path, property_name);
   }
 
-  // Called when a response for successful method call is received.
-  void OnSuccess(base::OnceClosure callback, dbus::Response* response) {
-    DCHECK(response);
-    std::move(callback).Run();
+  void OnMethodResponse(base::OnceClosure callback,
+                        ErrorCallback error_callback,
+                        dbus::Response* response,
+                        dbus::ErrorResponse* error_response) {
+    if (response) {
+      std::move(callback).Run();
+    } else {
+      OnError(std::move(error_callback), error_response);
+    }
   }
 
-  // Called when a characteristic value response for a successful method call
-  // is received.
-  void OnValueSuccess(ValueCallback callback, dbus::Response* response) {
-    DCHECK(response);
+  void OnValueResponse(ValueCallback callback,
+                       ErrorCallback error_callback,
+                       dbus::Response* response,
+                       dbus::ErrorResponse* error_response) {
+    if (!response) {
+      OnError(std::move(error_callback), error_response);
+      return;
+    }
+
     dbus::MessageReader reader(response);
-
-    const uint8_t* bytes = NULL;
-    size_t length = 0;
-
-    if (!reader.PopArrayOfBytes(&bytes, &length))
+    base::span<const uint8_t> bytes;
+    if (!reader.PopArrayOfBytes(&bytes)) {
       DVLOG(2) << "Error reading array of bytes in ValueCallback";
+    }
 
-    std::vector<uint8_t> value;
-
-    if (bytes)
-      value.assign(bytes, bytes + length);
-
-    std::move(callback).Run(value);
+    std::move(callback).Run(/*error_code=*/std::nullopt, base::ToVector(bytes));
   }
 
   // Called when a response for a failed method call is received.
@@ -330,7 +326,7 @@ class BluetoothGattCharacteristicClientImpl
     std::move(error_callback).Run(error_name, error_message);
   }
 
-  dbus::ObjectManager* object_manager_;
+  raw_ptr<dbus::ObjectManager> object_manager_;
 
   // List of observers interested in event notifications from us.
   base::ObserverList<BluetoothGattCharacteristicClient::Observer>::Unchecked
@@ -342,8 +338,6 @@ class BluetoothGattCharacteristicClientImpl
   // invalidate its weak pointers before any other members are destroyed.
   base::WeakPtrFactory<BluetoothGattCharacteristicClientImpl> weak_ptr_factory_{
       this};
-
-  DISALLOW_COPY_AND_ASSIGN(BluetoothGattCharacteristicClientImpl);
 };
 
 BluetoothGattCharacteristicClient::BluetoothGattCharacteristicClient() =

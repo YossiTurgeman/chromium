@@ -1,4 +1,4 @@
-# Copyright (c) 2011 The Chromium Authors. All rights reserved.
+# Copyright 2011 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """GDB support for Chrome types.
@@ -99,9 +99,9 @@ class String16Printer(StringPrinter):
     return blink.ustring_to_string(self.val['_M_dataplus']['_M_p'])
 
 
-pp_set.add_printer(
-    'string16', '^string16|std::basic_string<(unsigned short|base::char16).*>$',
-    String16Printer)
+pp_set.add_printer('string16',
+                   '^string16|std::basic_string<(unsigned short|char16_t).*>$',
+                   String16Printer)
 
 
 class GURLPrinter(StringPrinter):
@@ -184,7 +184,10 @@ class CallbackPrinter(Printer):
     return '...'
 
 
-pp_set.add_printer('base::Callback', '^base::Callback<.*>$', CallbackPrinter)
+pp_set.add_printer('base::OnceCallback', '^base::OnceCallback<.*>$',
+                   CallbackPrinter)
+pp_set.add_printer('base::RepeatingCallback', '^base::RepeatingCallback<.*>$',
+                   CallbackPrinter)
 
 
 class LocationPrinter(Printer):
@@ -228,23 +231,37 @@ class LockPrinter(Printer):
 pp_set.add_printer('base::Lock', '^base::Lock$', LockPrinter)
 
 
-class BaseOptionalPrinter(Printer):
+class AbslOptionalPrinter(Printer):
 
   def to_string(self):
-    if self.val['storage_']['is_populated_']:
-      return "%s: %s" % (str(self.val.type.tag), self.val['storage_']['value_'])
+    if self.val['engaged_']:
+      return "%s: %s" % (str(self.val.type.tag), self.val['data_'])
     else:
       return "%s: is empty" % str(self.val.type.tag)
 
 
-pp_set.add_printer('base::Optional', '^base::Optional<.*>$',
-                   BaseOptionalPrinter)
+pp_set.add_printer('absl::optional', '^absl::optional<.*>$',
+                   AbslOptionalPrinter)
+
+
+class StdOptionalPrinter(Printer):
+
+  def to_string(self):
+    if self.val['__engaged_']:
+      return "%s: %s" % (str(self.val.type.tag), self.val['__val_'])
+    else:
+      return "%s: is empty" % str(self.val.type.tag)
+
+
+pp_set.add_printer('std::optional', '^std::__Cr::optional<.*>$',
+                   StdOptionalPrinter)
 
 
 class TimeDeltaPrinter(object):
 
   def __init__(self, val):
-    self._timedelta = datetime.timedelta(microseconds=int(val['delta_']))
+    self._timedelta = datetime.timedelta(
+        microseconds=int(val['delta_']['value_']))
 
   def timedelta(self):
     return self._timedelta
@@ -259,7 +276,7 @@ pp_set.add_printer('base::TimeDelta', '^base::TimeDelta$', TimeDeltaPrinter)
 class TimeTicksPrinter(TimeDeltaPrinter):
 
   def __init__(self, val):
-    self._timedelta = datetime.timedelta(microseconds=int(val['us_']))
+    self._timedelta = datetime.timedelta(microseconds=int(val['us_']['value_']))
 
 
 pp_set.add_printer('base::TimeTicks', '^base::TimeTicks$', TimeTicksPrinter)
@@ -270,8 +287,8 @@ class TimePrinter(object):
   def __init__(self, val):
     timet_offset = gdb.parse_and_eval('base::Time::kTimeTToMicrosecondsOffset')
     self._datetime = (
-        datetime.datetime.fromtimestamp(0) +
-        datetime.timedelta(microseconds=int(val['us_'] - timet_offset)))
+        datetime.datetime.fromtimestamp(0) + datetime.timedelta(
+            microseconds=int(val['us_']['value_']) - int(timet_offset)))
 
   def datetime(self):
     return self._datetime
@@ -294,7 +311,7 @@ class FlatTreePrinter(object):
     # Python is much more complicated and this output is reasonable.
     # (Without this printer, a flat_map will output 7 lines of internal
     # template goop before the vector contents.)
-    return 'base::flat_tree with ' + str(self.val['impl_']['body_'])
+    return 'base::flat_tree with ' + str(self.val['body_'])
 
 
 pp_set.add_printer('base::flat_map', '^base::flat_map<.*>$', FlatTreePrinter)
@@ -365,30 +382,6 @@ class IpcMessagePrinter(Printer):
 
 
 pp_set.add_printer('IPC::Message', '^IPC::Message$', IpcMessagePrinter)
-
-
-class NotificationRegistrarPrinter(Printer):
-
-  def to_string(self):
-    try:
-      registrations = self.val['registered_']
-      vector_finish = registrations['_M_impl']['_M_finish']
-      vector_start = registrations['_M_impl']['_M_start']
-      if vector_start == vector_finish:
-        return 'Not watching notifications'
-      if vector_start.dereference().type.sizeof == 0:
-        # Incomplete type: b/8242773
-        return 'Watching some notifications'
-      return ('Watching %s notifications; '
-              'print %s->registered_ for details') % (int(
-                  vector_finish - vector_start), typed_ptr(self.val.address))
-    except gdb.error:
-      return 'NotificationRegistrar'
-
-
-pp_set.add_printer('content::NotificationRegistrar',
-                   '^content::NotificationRegistrar$',
-                   NotificationRegistrarPrinter)
 
 
 class SiteInstanceImplPrinter(object):
@@ -462,7 +455,7 @@ class AtomicPrinter(Printer):
     return self.val['__a_']['__a_value']
 
 
-pp_set.add_printer('std::__Cr::atomic', '^std::__Cr::atomic<.*>$',
+pp_set.add_printer('std::__Cr::__atomic', '^std::__Cr::(__)?atomic<.*>$',
                    AtomicPrinter)
 
 gdb.printing.register_pretty_printer(gdb, pp_set, replace=_DEBUGGING)
@@ -499,11 +492,10 @@ class ReverseCallback(gdb.Command):
 
     # Find the stack frame which extracts the bind state from the task.
     bind_state_frame = find_nearest_frame_matching(
-        gdb.selected_frame(),
-        lambda frame : frame.function() and
-            re.match('^base::internal::Invoker<base::internal::BindState<.*>' +
-                     '::RunOnce\(base::internal::BindStateBase\*\)$',
-                     frame.function().name))
+        gdb.selected_frame(), lambda frame: frame.function() and re.match(
+            '^base::internal::Invoker<.*>' +
+            r'::RunOnce\(base::internal::BindStateBase\*\)$',
+            frame.function().name))
     if bind_state_frame is None:
       raise Exception(
           'base::internal::Invoker frame not found; are you in a callback?')

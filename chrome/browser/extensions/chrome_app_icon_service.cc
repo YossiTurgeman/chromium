@@ -1,13 +1,18 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/extensions/chrome_app_icon_service.h"
 
-#include "base/bind.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/task/single_thread_task_runner.h"
+#include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/chrome_app_icon.h"
 #include "chrome/browser/extensions/chrome_app_icon_service_factory.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -20,18 +25,18 @@ ChromeAppIconService* ChromeAppIconService::Get(
 
 ChromeAppIconService::ChromeAppIconService(content::BrowserContext* context)
     : context_(context) {
-#if defined(OS_CHROMEOS)
-  app_updater_ = std::make_unique<LauncherExtensionAppUpdater>(
+#if BUILDFLAG(IS_CHROMEOS)
+  app_updater_ = std::make_unique<ShelfExtensionAppUpdater>(
       this, context, false /* extensions_only */);
 #endif
 
-  observer_.Add(ExtensionRegistry::Get(context_));
+  observation_.Observe(ExtensionRegistry::Get(context_));
 }
 
 ChromeAppIconService::~ChromeAppIconService() = default;
 
 void ChromeAppIconService::Shutdown() {
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   app_updater_.reset();
 #endif
 }
@@ -43,8 +48,8 @@ std::unique_ptr<ChromeAppIcon> ChromeAppIconService::CreateIcon(
     const ResizeFunction& resize_function) {
   std::unique_ptr<ChromeAppIcon> icon = std::make_unique<ChromeAppIcon>(
       delegate, context_,
-      base::Bind(&ChromeAppIconService::OnIconDestroyed,
-                 weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(&ChromeAppIconService::OnIconDestroyed,
+                     weak_ptr_factory_.GetWeakPtr()),
       app_id, resource_size_in_dip, resize_function);
 
   icon_map_[icon->app_id()].insert(icon.get());
@@ -71,10 +76,14 @@ void ChromeAppIconService::OnExtensionUnloaded(
   OnAppUpdated(extension->id());
 }
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 void ChromeAppIconService::OnAppUpdated(
     content::BrowserContext* browser_context,
-    const std::string& app_id) {
+    const std::string& app_id,
+    bool reload_icon) {
+  if (!reload_icon)
+    return;
+
   OnAppUpdated(app_id);
 }
 #endif
@@ -84,8 +93,9 @@ void ChromeAppIconService::OnAppUpdated(const std::string& app_id) {
   if (it == icon_map_.end())
     return;
   // Set can be updated during the UpdateIcon call.
-  const std::set<ChromeAppIcon*> icons_to_update = it->second;
-  for (auto* icon : icons_to_update) {
+  const std::set<raw_ptr<ChromeAppIcon, SetExperimental>> icons_to_update =
+      it->second;
+  for (ChromeAppIcon* icon : icons_to_update) {
     if (it->second.count(icon))
       icon->UpdateIcon();
   }
@@ -94,10 +104,10 @@ void ChromeAppIconService::OnAppUpdated(const std::string& app_id) {
 void ChromeAppIconService::OnIconDestroyed(ChromeAppIcon* icon) {
   DCHECK(icon);
   auto it = icon_map_.find(icon->app_id());
-  DCHECK(it != icon_map_.end());
+  CHECK(it != icon_map_.end());
   it->second.erase(icon);
   if (it->second.empty()) {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(&ChromeAppIconService::MaybeCleanupIconSet,
                        weak_ptr_factory_.GetWeakPtr(), icon->app_id()));

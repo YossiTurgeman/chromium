@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,7 @@
 #include <vector>
 
 #include "base/containers/flat_map.h"
-#include "base/macros.h"
-#include "base/memory/weak_ptr.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/task_manager/providers/task_provider.h"
 #include "content/public/browser/browser_child_process_observer.h"
 
@@ -30,6 +29,8 @@ class ChildProcessTaskProvider
       public content::BrowserChildProcessObserver {
  public:
   ChildProcessTaskProvider();
+  ChildProcessTaskProvider(const ChildProcessTaskProvider&) = delete;
+  ChildProcessTaskProvider& operator=(const ChildProcessTaskProvider&) = delete;
   ~ChildProcessTaskProvider() override;
 
   // task_manager::TaskProvider:
@@ -48,13 +49,6 @@ class ChildProcessTaskProvider
   void StartUpdating() override;
   void StopUpdating() override;
 
-  // The pre-existing child processes data will be collected on the IO thread.
-  // When that is done, we will be notified on the UI thread by receiving a call
-  // to this method.
-  void ChildProcessDataCollected(
-      std::unique_ptr<const std::vector<content::ChildProcessData>>
-          child_processes);
-
   // Creates a ChildProcessTask from the given |data| and notifies the observer
   // of its addition.
   void CreateTask(const content::ChildProcessData& data);
@@ -72,13 +66,8 @@ class ChildProcessTaskProvider
       tasks_by_processid_;
 
   // A map to track ChildProcessTask's by their child process unique ids.
-  base::flat_map<int, ChildProcessTask*> tasks_by_child_id_;
-
-  // Always keep this the last member of this class to make sure it's the
-  // first thing to be destructed.
-  base::WeakPtrFactory<ChildProcessTaskProvider> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ChildProcessTaskProvider);
+  base::flat_map<int, raw_ptr<ChildProcessTask, CtnExperimental>>
+      tasks_by_child_id_;
 };
 
 }  // namespace task_manager

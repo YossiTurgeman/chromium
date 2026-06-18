@@ -1,18 +1,16 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/plugins/navigator_plugins.h"
 
-#include "third_party/blink/public/common/privacy_budget/identifiability_metric_builder.h"
-#include "third_party/blink/public/common/privacy_budget/identifiability_study_settings.h"
-#include "third_party/blink/public/common/privacy_budget/identifiable_token_builder.h"
-#include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/navigator.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
+#include "third_party/blink/renderer/modules/plugins/dom_mime_type.h"
 #include "third_party/blink/renderer/modules/plugins/dom_mime_type_array.h"
 #include "third_party/blink/renderer/modules/plugins/dom_plugin_array.h"
-#include "third_party/blink/renderer/platform/privacy_budget/identifiability_digest_helpers.h"
 
 namespace blink {
 
@@ -39,12 +37,18 @@ const char NavigatorPlugins::kSupplementName[] = "NavigatorPlugins";
 
 // static
 DOMPluginArray* NavigatorPlugins::plugins(Navigator& navigator) {
-  return NavigatorPlugins::From(navigator).plugins(navigator.GetFrame());
+  return NavigatorPlugins::From(navigator).plugins(navigator.DomWindow());
 }
 
 // static
 DOMMimeTypeArray* NavigatorPlugins::mimeTypes(Navigator& navigator) {
-  return NavigatorPlugins::From(navigator).mimeTypes(navigator.GetFrame());
+  return NavigatorPlugins::From(navigator).mimeTypes(navigator.DomWindow());
+}
+
+// static
+bool NavigatorPlugins::pdfViewerEnabled(Navigator& navigator) {
+  return NavigatorPlugins::From(navigator).pdfViewerEnabled(
+      navigator.DomWindow());
 }
 
 // static
@@ -52,48 +56,24 @@ bool NavigatorPlugins::javaEnabled(Navigator& navigator) {
   return false;
 }
 
-namespace {
-
-void RecordPlugins(LocalFrame* frame, DOMPluginArray* plugins) {
-  if (!IdentifiabilityStudySettings::Get()->IsActive() || !frame)
-    return;
-  if (Document* document = frame->GetDocument()) {
-    IdentifiableTokenBuilder builder;
-    for (unsigned i = 0; i < plugins->length(); i++) {
-      DOMPlugin* plugin = plugins->item(i);
-      builder.AddToken(IdentifiabilityBenignStringToken(plugin->name()));
-      builder.AddToken(IdentifiabilityBenignStringToken(plugin->description()));
-      builder.AddToken(IdentifiabilityBenignStringToken(plugin->filename()));
-      for (unsigned j = 0; j < plugin->length(); j++) {
-        DOMMimeType* mimeType = plugin->item(j);
-        builder.AddToken(IdentifiabilityBenignStringToken(mimeType->type()));
-        builder.AddToken(
-            IdentifiabilityBenignStringToken(mimeType->description()));
-        builder.AddToken(
-            IdentifiabilityBenignStringToken(mimeType->suffixes()));
-      }
-    }
-    IdentifiabilityMetricBuilder(document->UkmSourceID())
-        .SetWebfeature(WebFeature::kNavigatorPlugins, builder.GetToken())
-        .Record(document->UkmRecorder());
+DOMPluginArray* NavigatorPlugins::plugins(LocalDOMWindow* window) const {
+  if (!plugins_) {
+    plugins_ = MakeGarbageCollected<DOMPluginArray>(window);
   }
-}
-
-}  // namespace
-
-DOMPluginArray* NavigatorPlugins::plugins(LocalFrame* frame) const {
-  if (!plugins_)
-    plugins_ = MakeGarbageCollected<DOMPluginArray>(frame);
 
   DOMPluginArray* result = plugins_.Get();
-  RecordPlugins(frame, result);
   return result;
 }
 
-DOMMimeTypeArray* NavigatorPlugins::mimeTypes(LocalFrame* frame) const {
-  if (!mime_types_)
-    mime_types_ = MakeGarbageCollected<DOMMimeTypeArray>(frame);
+DOMMimeTypeArray* NavigatorPlugins::mimeTypes(LocalDOMWindow* window) const {
+  if (!mime_types_) {
+    mime_types_ = MakeGarbageCollected<DOMMimeTypeArray>(window);
+  }
   return mime_types_.Get();
+}
+
+bool NavigatorPlugins::pdfViewerEnabled(LocalDOMWindow* window) const {
+  return plugins(window)->IsPdfViewerAvailable();
 }
 
 void NavigatorPlugins::Trace(Visitor* visitor) const {

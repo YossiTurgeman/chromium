@@ -1,5 +1,5 @@
-#!/usr/bin/env vpython
-# Copyright 2018 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -15,6 +15,8 @@ import shutil
 import sys
 import tempfile
 import textwrap
+
+import cross_device_test_config
 
 from core import path_util
 path_util.AddTelemetryToPath()
@@ -43,7 +45,9 @@ files may not match with the true state of world.
 def GetParser():
   parser = argparse.ArgumentParser(
       description=_SCRIPT_USAGE, formatter_class=argparse.RawTextHelpFormatter)
-  subparsers = parser.add_subparsers()
+
+  subparsers = parser.add_subparsers(
+      required=True, metavar='{update,update-timing,deschedule,validate}')
 
   parser_update = subparsers.add_parser(
       'update',
@@ -108,26 +112,20 @@ def _AddBuilderPlatformSelectionArgs(parser):
 
 
 def _DumpJson(data, output_path):
-  with open(output_path, 'w') as output_file:
+  with open(output_path, 'w', newline='') as output_file:
     json.dump(data, output_file, indent=4, separators=(',', ': '))
+    output_file.write('\n')
 
 
 def _LoadTimingData(args):
   builder, timing_file_path = args
   data = retrieve_story_timing.FetchAverageStoryTimingData(
       configurations=[builder.name], num_last_days=5)
-  # Running against a reference build doubles our runtime.
-  # Double the expected duration of each story to account
-  # for this. Note that gtest perf tests can't run against
-  # reference builds, so this does not apply to them.
-  if builder.run_reference_build:
-    for story in data:
-      story['duration'] = unicode(float(story['duration']) * 2.0)
   for executable in builder.executables:
-    data.append({unicode('duration'): unicode(
-                    float(executable.estimated_runtime)),
-                 unicode('name'): unicode(
-                     executable.name + '/' + bot_platforms.GTEST_STORY_NAME)})
+    data.append({
+        'duration': str(float(executable.estimated_runtime)),
+        'name': executable.name + '/' + bot_platforms.GTEST_STORY_NAME
+    })
   _DumpJson(data, timing_file_path)
   print('Finished retrieving story timing data for %s' % repr(builder.name))
 
@@ -136,18 +134,25 @@ def _source_filepath(posix_path):
   return os.path.join(path_util.GetChromiumSrcDir(), *posix_path.split('/'))
 
 
-def _GenerateShardMap(
-    builder, num_of_shards, output_path, debug):
+def GenerateShardMap(builder, num_of_shards, debug=False):
   timing_data = []
   if builder:
     with open(builder.timing_file_path) as f:
       timing_data = json.load(f)
-  benchmarks_to_shard = (
-      list(builder.benchmark_configs) + list(builder.executables))
+  benchmarks_to_shard = (list(builder.benchmark_configs) +
+                         list(builder.executables) + list(builder.crossbench))
+  repeat_config = cross_device_test_config.TARGET_DEVICES.get(builder.name, {})
   sharding_map = sharding_map_generator.generate_sharding_map(
-      benchmarks_to_shard, timing_data,
+      benchmarks_to_shard,
+      timing_data,
       num_shards=num_of_shards,
-      debug=debug)
+      debug=debug,
+      repeat_config=repeat_config)
+  return sharding_map
+
+
+def _GenerateShardMapJson(builder, num_of_shards, output_path, debug):
+  sharding_map = GenerateShardMap(builder, num_of_shards, debug)
   _DumpJson(sharding_map, output_path)
 
 
@@ -165,7 +170,7 @@ def _PromptWarning():
              'false regressions in your CL '
              'description')
   print(textwrap.fill(message, 70), '\n')
-  answer = raw_input("Enter 'y' to continue: ")
+  answer = input("Enter 'y' to continue: ")
   if answer != 'y':
     print('Abort updating shard maps for benchmarks on perf waterfall')
     sys.exit(0)
@@ -185,7 +190,7 @@ def _FilterTimingData(builder, output_path=None):
     timing_dataset = json.load(f)
   story_full_names = set()
   for benchmark_config in builder.benchmark_configs:
-    for story in benchmark_config.stories:
+    for story in benchmark_config.exhaustive_stories:
       story_full_names.add('/'.join([benchmark_config.name, story]))
   # When benchmarks are abridged or stories are removed, we want that
   # to be reflected in the timing data right away.
@@ -215,12 +220,13 @@ def _GetBuilderPlatforms(builders, waterfall):
   if builders:
     return {b for b in bot_platforms.ALL_PLATFORMS if b.name in
                 builders}
-  elif waterfall == 'perf':
-    return bot_platforms.OFFICIAL_PLATFORMS
+  if waterfall == 'perf':
+    platforms = bot_platforms.OFFICIAL_PLATFORMS
   elif waterfall == 'perf-fyi':
-    return bot_platforms.FYI_PLATFORMS
+    platforms = bot_platforms.FYI_PLATFORMS
   else:
-    return bot_platforms.ALL_PLATFORMS
+    platforms = bot_platforms.ALL_PLATFORMS
+  return {p for p in platforms if not p.pinpoint_only}
 
 
 def _UpdateShardsForBuilders(args):
@@ -229,8 +235,7 @@ def _UpdateShardsForBuilders(args):
   if not args.use_existing_timing_data:
     _UpdateTimingData(builders)
   for b in builders:
-    _GenerateShardMap(
-        b, b.num_shards, b.shards_map_file_path, args.debug)
+    _GenerateShardMapJson(b, b.num_shards, b.shards_map_file_path, args.debug)
     print('Updated sharding map for %s' % repr(b.name))
 
 
@@ -250,7 +255,7 @@ def _DescheduleBenchmark(args):
         if shard == 'extra_infos':
           break
         benchmarks = shard_map.get('benchmarks', dict())
-        for benchmark in benchmarks.keys():
+        for benchmark in list(benchmarks.keys()):
           if benchmark not in benchmarks_to_keep:
             del benchmarks[benchmark]
         executables = shard_map.get('executables', dict())
@@ -269,15 +274,16 @@ def _ParseBenchmarks(shard_map_path):
   all_benchmarks = set()
   with open(shard_map_path) as f:
     shard_map = json.load(f)
-  for shard, benchmarks_in_shard in shard_map.iteritems():
+  for shard, benchmarks_in_shard in shard_map.items():
     if "extra_infos" in shard:
       continue
-    if benchmarks_in_shard.get('benchmarks'):
-      all_benchmarks |= set(benchmarks_in_shard['benchmarks'].keys())
-    if benchmarks_in_shard.get('executables'):
-      all_benchmarks |= set(benchmarks_in_shard['executables'].keys())
+    if benchmarks := benchmarks_in_shard.get('benchmarks'):
+      all_benchmarks |= set(benchmarks.keys())
+    if executables := benchmarks_in_shard.get('executables'):
+      all_benchmarks |= set(executables.keys())
+    if crossbench := benchmarks_in_shard.get('crossbench'):
+      all_benchmarks |= set(crossbench.keys())
   return frozenset(all_benchmarks)
-
 
 def _ValidateShardMaps(args):
   """Validate that the shard maps, csv files, etc. are consistent."""
@@ -301,47 +307,34 @@ def _ValidateShardMaps(args):
 
   # Check that bot_platforms.py matches the actual shard maps
   for platform in bot_platforms.ALL_PLATFORMS:
-    platform_benchmark_names = set(
-        b.name for b in platform.benchmark_configs) | set(
-            e.name for e in platform.executables)
+    if platform.pinpoint_only:
+      continue
+    platform_benchmark_names = {
+        b.name
+        for b in (platform.benchmark_configs | platform.executables
+                  | platform.crossbench)
+    }
     shard_map_benchmark_names = _ParseBenchmarks(platform.shards_map_file_path)
-    for benchmark in platform_benchmark_names - shard_map_benchmark_names:
+    new_benchmarks = platform_benchmark_names - shard_map_benchmark_names
+    for benchmark in new_benchmarks:
       errors.append(
-          'Benchmark {benchmark} is supposed to be scheduled on platform '
-          '{platform} according to '
-          'bot_platforms.py, but it is not yet scheduled. If this is a new '
-          'benchmark, please rename it to UNSCHEDULED_{benchmark}, and then '
-          'contact '
-          'Telemetry and Chrome Client Infra team to schedule the benchmark. '
-          'You can email chrome-benchmarking-request@ to get started.'.format(
-              benchmark=benchmark, platform=platform.name))
-    for benchmark in shard_map_benchmark_names - platform_benchmark_names:
-      errors.append(
-          'Benchmark {benchmark} is scheduled on shard map {path}, but '
-          'bot_platforms.py '
-          'says that it should not be on that shard map. This could be because '
-          'the benchmark was deleted. If that is the case, you can use '
-          '`generate_perf_sharding deschedule` to deschedule the benchmark '
-          'from the shard map.'.format(
-              benchmark=benchmark, path=platform.shards_map_file_path))
-
-  # Check that every official benchmark is scheduled on some shard map.
-  # TODO(crbug.com/963614): Note that this check can be deleted if we
-  # find some way other than naming the benchmark with prefix "UNSCHEDULED_"
-  # to make it clear that a benchmark is not running.
-  scheduled_benchmarks = set()
-  for platform in bot_platforms.ALL_PLATFORMS:
-    scheduled_benchmarks = scheduled_benchmarks | _ParseBenchmarks(
-        platform.shards_map_file_path)
-  for benchmark in (
-      bot_platforms.OFFICIAL_BENCHMARK_NAMES - scheduled_benchmarks):
-    errors.append(
-        'Benchmark {benchmark} is an official benchmark, but it is not '
-        'scheduled to run anywhere. please rename it to '
-        'UNSCHEDULED_{benchmark}'.format(benchmark=benchmark))
+          f'Benchmark {benchmark} is supposed to be scheduled on platform '
+          f'{platform.name} according to '
+          f'schedule/{benchmark}.csv, but it is not yet scheduled.'
+          f'Please regenerate the shard map {platform.shards_map_file_path}'
+          f'with `{__file__} update`')
+    stale_benchmarks = shard_map_benchmark_names - platform_benchmark_names
+    for benchmark in stale_benchmarks:
+      errors.append(f'Benchmark {benchmark} is scheduled on shard map '
+                    f'{platform.shards_map_file_path}, but '
+                    f'schedule/{benchmark}.csv, '
+                    'says that it should not be on that shard map. '
+                    'If that is the case, you can use '
+                    f'`{__file__} deschedule` to deschedule the benchmark '
+                    'from the shard map.')
 
   for error in errors:
-    print('*', textwrap.fill(error, 70), '\n', file=sys.stderr)
+    print('*', error, '\n', file=sys.stderr)
   if errors:
     return 1
   return 0

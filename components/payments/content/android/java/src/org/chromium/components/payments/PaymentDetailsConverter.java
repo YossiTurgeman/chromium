@@ -1,9 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.payments;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.payments.mojom.PaymentDetails;
 import org.chromium.payments.mojom.PaymentHandlerMethodData;
 import org.chromium.payments.mojom.PaymentHandlerModifier;
@@ -16,6 +17,7 @@ import java.util.ArrayList;
  * Redacts and converts the payment details update from the merchant into a data structure to be
  * sent to the invoked payment handler.
  */
+@NullMarked
 public class PaymentDetailsConverter {
     /**
      * To be implemented by the object that can check whether the invoked payment instrument is
@@ -26,14 +28,14 @@ public class PaymentDetailsConverter {
          * Checks whether the invoked payment instrument is valid for the given payment method
          * identifier.
          * @param methodName Payment method identifier.
+         * @param invokedPaymentApp The invoked payment instrument (app).
          * @return Whether the invoked instrument is valid for the given payment method identifier.
          */
-        boolean isInvokedInstrumentValidForPaymentMethodIdentifier(String methodName);
+        boolean isInvokedInstrumentValidForPaymentMethodIdentifier(
+                String methodName, PaymentApp invokedPaymentApp);
     }
 
-    /**
-     * This class has only static methods.
-     */
+    /** This class has only static methods. */
     private PaymentDetailsConverter() {}
 
     /**
@@ -41,18 +43,20 @@ public class PaymentDetailsConverter {
      * sent to the payment handler.
      * @param details       The pre-validated payment details update from the merchant. Should not
      *                      be null.
-     * @param handlesShipping The shipping related information should get redacted when
-     *         handlesShipping is false.
      * @param methodChecker The object that can check whether the invoked payment instrument is
      *                      valid for the given payment method identifier. Should not be null.
+     * @param invokedPaymentApp The invoked payment app.
      * @return The data structure that can be sent to the invoked payment handler.
      */
     public static PaymentRequestDetailsUpdate convertToPaymentRequestDetailsUpdate(
-            PaymentDetails details, boolean handlesShipping, MethodChecker methodChecker) {
+            PaymentDetails details,
+            MethodChecker methodChecker,
+            PaymentApp invokedPaymentApp) {
         // Keep in sync with components/payments/content/payment_details_converter.cc.
         assert details != null;
         assert methodChecker != null;
 
+        boolean handlesShipping = invokedPaymentApp.handlesShippingAddress();
         PaymentRequestDetailsUpdate response = new PaymentRequestDetailsUpdate();
         response.error = details.error;
         response.stringifiedPaymentMethodErrors = details.stringifiedPaymentMethodErrors;
@@ -65,7 +69,7 @@ public class PaymentDetailsConverter {
 
             for (int i = 0; i < details.modifiers.length; i++) {
                 if (!methodChecker.isInvokedInstrumentValidForPaymentMethodIdentifier(
-                            details.modifiers[i].methodData.supportedMethod)) {
+                        details.modifiers[i].methodData.supportedMethod, invokedPaymentApp)) {
                     continue;
                 }
 

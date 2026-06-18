@@ -1,15 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#import <ranges>
+
+#import "base/strings/sys_string_conversions.h"
+#import "components/autofill/core/browser/form_structure.h"
+#import "components/autofill/core/common/dense_set.h"
 #import "ios/web_view/internal/autofill/cwv_autofill_form_internal.h"
-
-#include "base/strings/sys_string_conversions.h"
-#include "components/autofill/core/browser/form_structure.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 @implementation CWVAutofillForm
 
@@ -20,18 +18,24 @@
     _name = base::SysUTF16ToNSString(formStructure.form_name());
 
     _type = CWVAutofillFormTypeUnknown;
-    std::set<autofill::FormType> formTypes = formStructure.GetFormTypes();
-    if (formTypes.find(autofill::ADDRESS_FORM) != formTypes.end()) {
+    autofill::DenseSet<autofill::FormType> formTypes =
+        formStructure.GetFormTypes(
+            autofill::AutocompleteUnrecognizedBehavior::kSuggestionsSuppressed);
+    if (formTypes.contains(autofill::FormType::kAddressForm)) {
       _type |= CWVAutofillFormTypeAddresses;
     }
-    if (formTypes.find(autofill::CREDIT_CARD_FORM) != formTypes.end()) {
+    if (formTypes.contains(autofill::FormType::kCreditCardForm)) {
       _type |= CWVAutofillFormTypeCreditCards;
     }
     // Underlying autofill code does not parse password fields because it does
     // not consider password forms as autofillable. In other words, |formTypes|
     // will never contain PASSWORD_FORM. Luckily, it already provides a function
     // to check if it has any password fields.
-    if (formStructure.has_password_field()) {
+    auto isPasswordField = [](const auto& field) {
+      return field->form_control_type() ==
+             autofill::FormControlType::kInputPassword;
+    };
+    if (std::ranges::any_of(formStructure.fields(), isPasswordField)) {
       _type |= CWVAutofillFormTypePasswords;
     }
   }

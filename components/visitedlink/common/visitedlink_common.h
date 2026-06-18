@@ -1,4 +1,4 @@
-// Copyright (c) 2006-2008 The Chromium Authors. All rights reserved.
+// Copyright 2006-2008 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,27 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
+#include <string_view>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/compiler_specific.h"
+#include "base/memory/raw_ptr.h"
+#include "components/visitedlink/core/visited_link.h"
 
 class GURL;
 
+namespace net {
+class SchemefulSite;
+}
+
+namespace url {
+class Origin;
+}
+
 namespace visitedlink {
 
-// number of bytes in the salt
-#define LINK_SALT_LENGTH 8
+using LinkSalt = std::array<uint8_t, 8>;
 
 // A multiprocess-safe database of the visited links for the browser. There
 // should be exactly one process that has write access (implemented by
@@ -55,23 +66,32 @@ class VisitedLinkCommon {
   typedef int32_t Hash;
 
   // A fingerprint or hash value that does not exist
-  static const Fingerprint null_fingerprint_;
-  static const Hash null_hash_;
+  static constexpr Fingerprint kNullFingerprint = 0;
+  static constexpr Hash kNullHash = -1;
 
   VisitedLinkCommon();
+
+  VisitedLinkCommon(const VisitedLinkCommon&) = delete;
+  VisitedLinkCommon& operator=(const VisitedLinkCommon&) = delete;
+
   virtual ~VisitedLinkCommon();
 
   // Returns the fingerprint for the given URL.
-  Fingerprint ComputeURLFingerprint(const char* canonical_url,
-                                    size_t url_len) const {
-    return ComputeURLFingerprint(canonical_url, url_len, salt_);
+  Fingerprint ComputeURLFingerprint(std::string_view canonical_url) const {
+    return ComputeURLFingerprint(canonical_url, salt_);
   }
 
-  // Looks up the given key in the table. The fingerprint for the URL is
-  // computed if you call one with the string argument. Returns true if found.
-  // Does not modify the hastable.
-  bool IsVisited(const char* canonical_url, size_t url_len) const;
+  // Looks up the given key in the table. Returns true if found. Does not
+  // modify the hashtable.
+  bool IsVisited(std::string_view canonical_url) const;
   bool IsVisited(const GURL& url) const;
+  // To check if a link is visited in a partitioned table, callers MUST
+  // provide <link url, top-level site, frame origin> AND the origin salt.
+  bool IsVisited(const VisitedLink& link, uint64_t salt);
+  bool IsVisited(const GURL& link_url,
+                 const net::SchemefulSite& top_level_site,
+                 const url::Origin& frame_origin,
+                 uint64_t salt);
   bool IsVisited(Fingerprint fingerprint) const;
 
 #ifdef UNIT_TEST
@@ -84,39 +104,75 @@ class VisitedLinkCommon {
 #endif
 
  protected:
-  // This structure is at the beginning of the shared memory so that the readers
-  // can get stats on the table
+  // This structure is at the beginning of the unpartitioned shared memory so
+  // that the readers can get stats on the table.
   struct SharedHeader {
     // see goes into table_length_
     uint32_t length;
 
     // goes into salt_
-    uint8_t salt[LINK_SALT_LENGTH];
+    LinkSalt salt;
+
+    // Padding to ensure the Fingerprint table is aligned. Without this, reading
+    // from the table causes unaligned reads.
+    uint8_t padding[4];
   };
+
+  static_assert(sizeof(SharedHeader) % alignof(Fingerprint) == 0,
+                "Fingerprint must be aligned when placed after SharedHeader");
+
+  // This structure is at the beginning of the partitioned shared memory so that
+  // the readers can get stats on the table. We do not include a salt in this
+  // shared header, as the salts are generated per-origin for the partitioned
+  // table. Readers will receive their salts via the
+  // VisitedLinkNavigationThrottle or via the VisitedLinkNotificationSink IPC.
+  struct PartitionedSharedHeader {
+    // see goes into table_length_
+    uint32_t length;
+
+    // Padding to ensure the Fingerprint table is aligned. Without this, reading
+    // from the table causes unaligned reads.
+    uint8_t padding[4];
+  };
+
+  static_assert(
+      sizeof(PartitionedSharedHeader) % alignof(Fingerprint) == 0,
+      "Fingerprint must be aligned when placed after PartitionedSharedHeader");
 
   // Returns the fingerprint at the given index into the URL table. This
   // function should be called instead of accessing the table directly to
   // contain endian issues.
   Fingerprint FingerprintAt(int32_t table_offset) const {
     if (!hash_table_)
-      return null_fingerprint_;
-    return hash_table_[table_offset];
+      return kNullFingerprint;
+    return UNSAFE_TODO(hash_table_[table_offset]);
   }
 
   // Computes the fingerprint of the given canonical URL. It is static so the
   // same algorithm can be re-used by the table rebuilder, so you will have to
   // pass the salt as a parameter. See the non-static version above if you
   // want to use the current class' salt.
-  static Fingerprint ComputeURLFingerprint(
-      const char* canonical_url,
-      size_t url_len,
-      const uint8_t salt[LINK_SALT_LENGTH]);
+  static Fingerprint ComputeURLFingerprint(std::string_view canonical_url,
+                                           LinkSalt salt);
+
+  // Computes the fingerprint of the given VisitedLink using the provided
+  // per-origin `salt`.
+  static Fingerprint ComputePartitionedFingerprint(const VisitedLink& link,
+                                                   uint64_t salt);
+
+  // Computes the fingerprint of the given partition key. Used when constructing
+  // the partitioned :visited link hashtable.
+  static Fingerprint ComputePartitionedFingerprint(
+      std::string_view canonical_link_url,
+      const net::SchemefulSite& top_level_site,
+      const url::Origin& frame_origin,
+      uint64_t salt);
 
   // Computes the hash value of the given fingerprint, this is used as a lookup
   // into the hashtable.
   static Hash HashFingerprint(Fingerprint fingerprint, int32_t table_length) {
     if (table_length == 0)
-      return null_hash_;
+      return kNullHash;
     return static_cast<Hash>(fingerprint % table_length);
   }
   // Uses the current hashtable.
@@ -125,16 +181,16 @@ class VisitedLinkCommon {
   }
 
   // pointer to the first item
-  VisitedLinkCommon::Fingerprint* hash_table_;
+  // May temporarily point to an old unmapped region during update.
+  raw_ptr<VisitedLinkCommon::Fingerprint,
+          DisableDanglingPtrDetection | AllowPtrArithmetic>
+      hash_table_ = nullptr;
 
   // the number of items in the hash table
-  int32_t table_length_;
+  int32_t table_length_ = 0;
 
   // salt used for each URL when computing the fingerprint
-  uint8_t salt_[LINK_SALT_LENGTH];
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(VisitedLinkCommon);
+  LinkSalt salt_ = {};
 };
 
 }  // namespace visitedlink

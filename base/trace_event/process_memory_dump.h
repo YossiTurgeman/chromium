@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,23 +8,26 @@
 #include <stddef.h>
 
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
 #include "base/base_export.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/compiler_specific.h"
+#include "base/gtest_prod_util.h"
 #include "base/trace_event/heap_profiler_allocation_context.h"
 #include "base/trace_event/memory_allocator_dump.h"
 #include "base/trace_event/memory_allocator_dump_guid.h"
 #include "base/trace_event/memory_dump_request_args.h"
 #include "build/build_config.h"
 
-// Define COUNT_RESIDENT_BYTES_SUPPORTED if platform supports counting of the
-// resident memory.
-#if !defined(OS_NACL)
-#define COUNT_RESIDENT_BYTES_SUPPORTED
-#endif
+namespace perfetto {
+namespace protos {
+namespace pbzero {
+class MemoryTrackerSnapshot;
+}
+}  // namespace protos
+}  // namespace perfetto
 
 namespace base {
 
@@ -39,8 +42,8 @@ class TracedValue;
 class BASE_EXPORT ProcessMemoryDump {
  public:
   struct BASE_EXPORT MemoryAllocatorDumpEdge {
-    bool operator==(const MemoryAllocatorDumpEdge&) const;
-    bool operator!=(const MemoryAllocatorDumpEdge&) const;
+    friend bool operator==(const MemoryAllocatorDumpEdge&,
+                           const MemoryAllocatorDumpEdge&) = default;
 
     MemoryAllocatorDumpGuid source;
     MemoryAllocatorDumpGuid target;
@@ -57,7 +60,6 @@ class BASE_EXPORT ProcessMemoryDump {
   using AllocatorDumpEdgesMap =
       std::map<MemoryAllocatorDumpGuid, MemoryAllocatorDumpEdge>;
 
-#if defined(COUNT_RESIDENT_BYTES_SUPPORTED)
   // Returns the number of bytes in a kernel memory page. Some platforms may
   // have a different value for kernel page sizes from user page sizes. It is
   // important to use kernel memory page sizes for resident bytes calculation.
@@ -68,17 +70,21 @@ class BASE_EXPORT ProcessMemoryDump {
   // |start_address| and |mapped_size|. |mapped_size| is specified in bytes. The
   // value returned is valid only if the given range is currently mmapped by the
   // process. The |start_address| must be page-aligned.
-  static size_t CountResidentBytes(void* start_address, size_t mapped_size);
+  static std::optional<size_t> CountResidentBytes(void* start_address,
+                                                  size_t mapped_size);
 
   // The same as above, but the given mapped range should belong to the
   // shared_memory's mapped region.
-  static base::Optional<size_t> CountResidentBytesInSharedMemory(
+  static std::optional<size_t> CountResidentBytesInSharedMemory(
       void* start_address,
       size_t mapped_size);
-#endif
 
   explicit ProcessMemoryDump(const MemoryDumpArgs& dump_args);
   ProcessMemoryDump(ProcessMemoryDump&&);
+
+  ProcessMemoryDump(const ProcessMemoryDump&) = delete;
+  ProcessMemoryDump& operator=(const ProcessMemoryDump&) = delete;
+
   ~ProcessMemoryDump();
 
   ProcessMemoryDump& operator=(ProcessMemoryDump&&);
@@ -134,7 +140,9 @@ class BASE_EXPORT ProcessMemoryDump {
       const MemoryAllocatorDumpGuid& guid) const;
 
   // Returns the map of the MemoryAllocatorDumps added to this dump.
-  const AllocatorDumpsMap& allocator_dumps() const { return allocator_dumps_; }
+  const AllocatorDumpsMap& allocator_dumps() const LIFETIME_BOUND {
+    return allocator_dumps_;
+  }
 
   AllocatorDumpsMap* mutable_allocator_dumps_for_serialization() const {
     // Mojo takes a const input argument even for move-only types that can be
@@ -147,14 +155,6 @@ class BASE_EXPORT ProcessMemoryDump {
   // Only for mojo serialization.
   std::vector<MemoryAllocatorDumpEdge> GetAllEdgesForSerialization() const;
   void SetAllEdgesForSerialization(const std::vector<MemoryAllocatorDumpEdge>&);
-
-  // Dumps heap usage with |allocator_name|.
-  void DumpHeapUsage(
-      const std::unordered_map<base::trace_event::AllocationContext,
-                               base::trace_event::AllocationMetrics>&
-          metrics_by_context,
-      base::trace_event::TraceEventMemoryOverhead& overhead,
-      const char* allocator_name);
 
   // Adds an ownership relationship between two MemoryAllocatorDump(s) with the
   // semantics: |source| owns |target|, and has the effect of attributing
@@ -196,7 +196,7 @@ class BASE_EXPORT ProcessMemoryDump {
       const UnguessableToken& shared_memory_guid,
       int importance);
 
-  const AllocatorDumpEdgesMap& allocator_dumps_edges() const {
+  const AllocatorDumpEdgesMap& allocator_dumps_edges() const LIFETIME_BOUND {
     return allocator_dumps_edges_;
   }
 
@@ -224,7 +224,11 @@ class BASE_EXPORT ProcessMemoryDump {
   // dumps.
   void SerializeAllocatorDumpsInto(TracedValue* value) const;
 
-  const MemoryDumpArgs& dump_args() const { return dump_args_; }
+  void SerializeAllocatorDumpsInto(
+      perfetto::protos::pbzero::MemoryTrackerSnapshot* memory_snapshot,
+      const base::ProcessId pid) const;
+
+  const MemoryDumpArgs& dump_args() const LIFETIME_BOUND { return dump_args_; }
 
  private:
   FRIEND_TEST_ALL_PREFIXES(ProcessMemoryDumpTest, BackgroundModeTest);
@@ -237,7 +241,9 @@ class BASE_EXPORT ProcessMemoryDump {
   // A per-process token, valid throughout all the lifetime of the current
   // process, used to disambiguate dumps with the same name generated in
   // different processes.
-  const UnguessableToken& process_token() const { return process_token_; }
+  const UnguessableToken& process_token() const LIFETIME_BOUND {
+    return process_token_;
+  }
   void set_process_token_for_testing(UnguessableToken token) {
     process_token_ = token;
   }
@@ -253,7 +259,7 @@ class BASE_EXPORT ProcessMemoryDump {
       int importance,
       bool is_weak);
 
-  MemoryAllocatorDump* GetBlackHoleMad();
+  MemoryAllocatorDump* GetBlackHoleMad(const std::string& absolute_name);
 
   UnguessableToken process_token_;
   AllocatorDumpsMap allocator_dumps_;
@@ -272,8 +278,6 @@ class BASE_EXPORT ProcessMemoryDump {
   // When set to true, the DCHECK(s) for invalid dump creations on the
   // background mode are disabled for testing.
   static bool is_black_hole_non_fatal_for_testing_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProcessMemoryDump);
 };
 
 }  // namespace trace_event

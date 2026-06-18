@@ -1,142 +1,106 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_ENTERPRISE_CONNECTORS_CONNECTORS_MANAGER_H_
 #define CHROME_BROWSER_ENTERPRISE_CONNECTORS_CONNECTORS_MANAGER_H_
 
-#include <set>
+#include <optional>
 
-#include "base/callback_forward.h"
-#include "base/feature_list.h"
-#include "base/optional.h"
-#include "chrome/browser/enterprise/connectors/analysis_service_settings.h"
-#include "chrome/browser/enterprise/connectors/common.h"
-#include "chrome/browser/enterprise/connectors/reporting_service_settings.h"
-#include "chrome/browser/enterprise/connectors/service_provider_config.h"
+#include "base/memory/raw_ptr.h"
+#include "build/build_config.h"
+#include "chrome/browser/enterprise/connectors/analysis/analysis_service_settings.h"
+#include "components/enterprise/buildflags/buildflags.h"
+#include "components/enterprise/connectors/core/analysis_settings.h"
+#include "components/enterprise/connectors/core/connectors_manager_base.h"
+#include "components/enterprise/connectors/core/reporting_service_settings.h"
+#include "components/enterprise/connectors/core/service_provider_config.h"
 #include "components/prefs/pref_change_registrar.h"
+#include "components/prefs/pref_service.h"
 #include "url/gurl.h"
 
-namespace base {
-template <typename T>
-class NoDestructor;
+#if BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
+#include "base/scoped_observation.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"  // nogncheck crbug.com/40147906
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"  // nogncheck crbug.com/40147906
+#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"  // nogncheck crbug.com/40147906
+#endif  // BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
+
+class BrowserWindowInterface;
+class GlobalBrowserCollection;
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "content/public/browser/browser_context.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+namespace storage {
+class FileSystemURL;
 }
 
 namespace enterprise_connectors {
 
-// Controls whether the Enterprise Connectors policies should be read by
-// ConnectorsManager. Legacy policies will be read as a fallback if this feature
-// is disabled.
-extern const base::Feature kEnterpriseConnectorsEnabled;
+// This class overrides `ConnectorsManagerBase` for desktop and Android usage.
+// It manages access to Reporting and Analysis Connector policies for a given
+// profile.
+#if BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
+class ConnectorsManager : public ConnectorsManagerBase,
+                          public BrowserCollectionObserver,
+                          public TabStripModelObserver {
+#else
+class ConnectorsManager : public ConnectorsManagerBase {
+#endif  // BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
 
-// For the moment, service provider configurations are static and only support
-// google endpoints.  Therefore the configurtion is placed here directly.
-// Once the configuation becomes more dynamic this static string will be
-// removed and replaced with a service to keep it up to date.
-extern const char kServiceProviderConfig[];
-
-// Manages access to Connector policies. This class is responsible for caching
-// the Connector policies, validate them against approved service providers and
-// provide a simple interface to them.
-class ConnectorsManager {
  public:
-  // Maps used to cache connectors settings.
-  using AnalysisConnectorsSettings =
-      std::map<AnalysisConnector, std::vector<AnalysisServiceSettings>>;
-  using ReportingConnectorsSettings =
-      std::map<ReportingConnector, std::vector<ReportingServiceSettings>>;
+  using ConnectorsManagerBase::AnalysisConnectorsSettings;
+  using ConnectorsManagerBase::GetAnalysisSettings;
 
-  static ConnectorsManager* GetInstance();
+  ConnectorsManager(PrefService* pref_service,
+                    const ServiceProviderConfig* config,
+                    bool observe_prefs = true);
+  ~ConnectorsManager() override;
 
-  // Validates which settings should be applied to a reporting event
-  // against cached policies. Cache the policy value the first time this is
-  // called for every different connector.
-  base::Optional<ReportingSettings> GetReportingSettings(
-      ReportingConnector connector);
-
-  // Validates which settings should be applied to an analysis connector event
-  // against cached policies. This function will prioritize new connector
-  // policies over legacy ones if they are set.
-  base::Optional<AnalysisSettings> GetAnalysisSettings(
-      const GURL& url,
+#if BUILDFLAG(IS_CHROMEOS)
+  std::optional<AnalysisSettings> GetAnalysisSettings(
+      content::BrowserContext* context,
+      const storage::FileSystemURL& source_url,
+      const storage::FileSystemURL& destination_url,
       AnalysisConnector connector);
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
-  // Checks if the corresponding connector is enabled.
-  bool IsConnectorEnabled(AnalysisConnector connector) const;
-  bool IsConnectorEnabled(ReportingConnector connector) const;
-
-  bool DelayUntilVerdict(AnalysisConnector connector);
-
-  // Public testing functions.
-  const AnalysisConnectorsSettings& GetAnalysisConnectorsSettingsForTesting()
-      const;
-  const ReportingConnectorsSettings& GetReportingConnectorsSettingsForTesting()
-      const;
-
-  // Helpers to reset the ConnectorManager instance across test since it would
-  // otherwise persist its state.
-  void SetUpForTesting();
-  void TearDownForTesting();
-  void ClearCacheForTesting();
+#if BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
+  // Check if the corresponding connector is enabled for any local agent.
+  bool IsConnectorEnabledForLocalAgent(AnalysisConnector connector) const;
+#endif
 
  private:
-  friend class base::NoDestructor<ConnectorsManager>;
+#if BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
+  // BrowserCollectionObserver overrides:
+  void OnBrowserCreated(BrowserWindowInterface* browser) override;
 
-  // Constructor and destructor are declared as private so callers use
-  // GetInstance instead.
-  ConnectorsManager();
-  ~ConnectorsManager();
+  // TabStripModelObserver overrides:
+  void OnTabStripModelChanged(
+      TabStripModel* tab_strip_model,
+      const TabStripModelChange& change,
+      const TabStripSelectionChange& selection) override;
+#endif  // BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
 
-  // Validates which settings should be applied to an analysis connector event
-  // against connector policies. Cache the policy value the first time this is
-  // called for every different connector.
-  base::Optional<AnalysisSettings> GetAnalysisSettingsFromConnectorPolicy(
-      const GURL& url,
-      AnalysisConnector connector);
+  void CacheAnalysisConnectorPolicy(AnalysisConnector connector) const override;
 
-  // Read and cache the policy corresponding to |connector|.
-  void CacheAnalysisConnectorPolicy(AnalysisConnector connector);
-  void CacheReportingConnectorPolicy(ReportingConnector connector);
+  // Get data location region from policy.
+  DataRegion GetDataRegion(AnalysisConnector connector) const override;
 
-  // Sets up |pref_change_registrar_| if kEnterpriseConntorsEnabled is true.
-  // Used by the constructor and SetUpForTesting.
-  void StartObservingPrefs();
-  void StartObservingPref(AnalysisConnector connector);
-  void StartObservingPref(ReportingConnector connector);
+#if BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
+  // Close connection with local agent if all the relevant connectors are turned
+  // off for it.
+  void MaybeCloseLocalContentAnalysisAgentConnection();
 
-  // Private legacy functions.
-  // These functions are used to interact with legacy policies and should stay
-  // private. They should be removed once legacy policies are deprecated.
+  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
+      browser_collection_observation_{this};
+#endif  // BUILDFLAG(ENTERPRISE_LOCAL_CONTENT_ANALYSIS)
 
-  // Returns analysis settings based on legacy policies.
-  base::Optional<AnalysisSettings> GetAnalysisSettingsFromLegacyPolicies(
-      const GURL& url,
-      AnalysisConnector connector) const;
-
-  BlockUntilVerdict LegacyBlockUntilVerdict(bool upload) const;
-  bool LegacyBlockPasswordProtectedFiles(bool upload) const;
-  bool LegacyBlockLargeFiles(bool upload) const;
-  bool LegacyBlockUnsupportedFileTypes(bool upload) const;
-
-  // Functions that check a url against the corresponding URL patterns policies.
-  bool MatchURLAgainstLegacyDlpPolicies(const GURL& url, bool upload) const;
-  bool MatchURLAgainstLegacyMalwarePolicies(const GURL& url, bool upload) const;
-  std::set<std::string> MatchURLAgainstLegacyPolicies(const GURL& url,
-                                                      bool upload) const;
-
-  // Cached values of available service providers. This information validates
-  // the Connector policies have a valid provider.
-  ServiceProviderConfig service_provider_config_ =
-      ServiceProviderConfig(kServiceProviderConfig);
-
-  // Cached values of the connector policies. Updated when a connector is first
-  // used or when a policy is updated.
-  AnalysisConnectorsSettings analysis_connector_settings_;
-  ReportingConnectorsSettings reporting_connector_settings_;
-
-  // Used to track changes of connector policies and propagate them in
-  // |connector_settings_|.
-  PrefChangeRegistrar pref_change_registrar_;
+  // Re-cache analysis connector policy and update local agent connection if
+  // needed.
+  void OnAnalysisPrefChanged(AnalysisConnector connector) override;
 };
 
 }  // namespace enterprise_connectors

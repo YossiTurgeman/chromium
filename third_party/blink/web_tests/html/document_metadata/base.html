@@ -5,11 +5,9 @@
 <script>
 
 if (window.testRunner) {
-    // FIXME: setCanOpenWindows needs the test to be async or the Apple port crashes.
-    // https://bugs.webkit.org/show_bug.cgi?id=99465
     window.jsTestIsAsync = true;
     testRunner.waitUntilDone();
-    testRunner.setCanOpenWindows();
+    testRunner.setPopupBlockingEnabled(false);
 }
 
 function endsWith(string, substring)
@@ -31,7 +29,7 @@ shouldBeTrue("endsWith(document.querySelector('base').href, '/null')");
 var documentWithoutAView = document.implementation.createHTMLDocument('');
 base = documentWithoutAView.head.appendChild(documentWithoutAView.createElement('base'));
 base.setAttribute('href', 'foo/bar/');
-shouldBeTrue("endsWith(documentWithoutAView.querySelector('base').href, 'foo/bar/')");
+shouldBeTrue("endsWith(documentWithoutAView.querySelector('base').href, '')");
 base.setAttribute('href', 'http://webkit.org/');
 shouldBeEqualToString("documentWithoutAView.querySelector('base').href", 'http://webkit.org/');
 
@@ -45,7 +43,7 @@ shouldBeTrue("endsWith(iframe.contentDocument.querySelector('base').href, 'foo/b
 var newWindow = window.open('about:blank');
 base = newWindow.document.head.appendChild(newWindow.document.createElement('base'));
 base.setAttribute('href', 'foo/bar/');
-shouldBeEqualToString("newWindow.document.querySelector('base').href", '');
+shouldBeTrue("endsWith(iframe.contentDocument.querySelector('base').href, 'foo/bar/')");
 newWindow.close();
 
 </script>

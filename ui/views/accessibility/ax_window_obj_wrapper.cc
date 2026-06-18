@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
 #include "ui/accessibility/aura/aura_window_properties.h"
 #include "ui/accessibility/ax_action_data.h"
@@ -16,6 +17,10 @@
 #include "ui/accessibility/ax_node_data.h"
 #include "ui/accessibility/ax_tree_id.h"
 #include "ui/aura/client/focus_client.h"
+#include "ui/aura/window_tree_host.h"
+#include "ui/aura/window_tree_host_platform.h"
+#include "ui/base/ime/text_input_client.h"
+#include "ui/compositor/layer.h"
 #include "ui/views/accessibility/ax_aura_obj_cache.h"
 #include "ui/views/widget/widget.h"
 
@@ -24,8 +29,9 @@ namespace {
 
 Widget* GetWidgetForWindow(aura::Window* window) {
   Widget* widget = Widget::GetWidgetForNativeView(window);
-  if (!widget)
+  if (!widget) {
     return nullptr;
+  }
 
   // Under mus/mash both the WindowTreeHost's root aura::Window and the content
   // aura::Window will return the same Widget for GetWidgetForNativeView(). Only
@@ -51,8 +57,9 @@ void FireEventOnWindowChildWidgetAndRootView(aura::Window* window,
     cache->FireEvent(cache->GetOrCreate(widget), event);
 
     views::View* root_view = widget->GetRootView();
-    if (root_view)
-      root_view->NotifyAccessibilityEvent(event, true);
+    if (root_view) {
+      root_view->NotifyAccessibilityEventDeprecated(event, true);
+    }
   }
 }
 
@@ -63,14 +70,16 @@ void FireLocationChangesRecursively(aura::Window* window,
   FireEventOnWindowChildWidgetAndRootView(
       window, ax::mojom::Event::kLocationChanged, cache);
 
-  for (auto* child : window->children())
+  for (aura::Window* child : window->children()) {
     FireLocationChangesRecursively(child, cache);
+  }
 }
 
 std::string GetWindowName(aura::Window* window) {
   std::string class_name = window->GetName();
-  if (class_name.empty())
+  if (class_name.empty()) {
     class_name = "aura::Window";
+  }
   return class_name;
 }
 
@@ -81,10 +90,20 @@ AXWindowObjWrapper::AXWindowObjWrapper(AXAuraObjCache* aura_obj_cache,
     : AXAuraObjWrapper(aura_obj_cache),
       window_(window),
       is_root_window_(window->IsRootWindow()) {
-  observer_.Add(window);
+  observation_.Observe(window);
 
-  if (is_root_window_)
+  if (is_root_window_) {
     aura_obj_cache_->OnRootWindowObjCreated(window);
+  }
+
+  // This is a top level root window.
+  if (window->IsRootWindow() && !window->parent()) {
+    // On desktop aura there is one WindowTreeHost per top-level window.
+    aura::WindowTreeHost* window_tree_host = window->GetHost();
+    if (window_tree_host) {
+      ime_observation_.Observe(window_tree_host->GetInputMethod());
+    }
+  }
 }
 
 AXWindowObjWrapper::~AXWindowObjWrapper() = default;
@@ -98,70 +117,112 @@ bool AXWindowObjWrapper::HandleAccessibleAction(
   return false;
 }
 
-bool AXWindowObjWrapper::IsIgnored() {
-  return false;
-}
-
 AXAuraObjWrapper* AXWindowObjWrapper::GetParent() {
   aura::Window* parent = window_->parent();
-  if (!parent)
+  if (!parent) {
     return nullptr;
+  }
+
+  if (parent->GetProperty(ui::kChildAXTreeID) &&
+      ui::AXTreeID::FromString(*(parent->GetProperty(ui::kChildAXTreeID))) !=
+          ui::AXTreeIDUnknown()) {
+    return nullptr;
+  }
 
   return aura_obj_cache_->GetOrCreate(parent);
 }
 
 void AXWindowObjWrapper::GetChildren(
-    std::vector<AXAuraObjWrapper*>* out_children) {
-  for (auto* child : window_->children())
+    std::vector<raw_ptr<AXAuraObjWrapper, VectorExperimental>>* out_children) {
+  // Ignore this window's descendants if it has a child tree.
+  if (window_->GetProperty(ui::kChildAXTreeID) &&
+      ui::AXTreeID::FromString(*(window_->GetProperty(ui::kChildAXTreeID))) !=
+          ui::AXTreeIDUnknown()) {
+    return;
+  }
+
+  // Ignore this window's children if it is forced to be invisible.
+  if (window_->GetProperty(ui::kAXConsiderInvisibleAndIgnoreChildren)) {
+    return;
+  }
+
+  for (aura::Window* child : window_->children()) {
     out_children->push_back(aura_obj_cache_->GetOrCreate(child));
+  }
 
   // Also consider any associated widgets as children.
   Widget* widget = GetWidgetForWindow(window_);
-  if (widget && widget->IsVisible())
+  if (widget && widget->IsVisible()) {
     out_children->push_back(aura_obj_cache_->GetOrCreate(widget));
+  }
 }
 
 void AXWindowObjWrapper::Serialize(ui::AXNodeData* out_node_data) {
+  if (window_->IsRootWindow() && !window_->parent() && window_->GetHost()) {
+    ui::TextInputClient* client =
+        window_->GetHost()->GetInputMethod()->GetTextInputClient();
+    // Only set caret bounds if input caret is in an editable node.
+    if (client && client->GetTextInputType() != ui::TEXT_INPUT_TYPE_NONE) {
+      gfx::Rect caret_bounds_in_screen = client->GetCaretBounds();
+      out_node_data->AddIntListAttribute(
+          ax::mojom::IntListAttribute::kCaretBounds,
+          {caret_bounds_in_screen.x(), caret_bounds_in_screen.y(),
+           caret_bounds_in_screen.width(), caret_bounds_in_screen.height()});
+    }
+  }
+
   out_node_data->id = GetUniqueId();
   ax::mojom::Role role = window_->GetProperty(ui::kAXRoleOverride);
-  if (role != ax::mojom::Role::kNone)
+  if (role != ax::mojom::Role::kNone) {
     out_node_data->role = role;
-  else
+  } else {
     out_node_data->role = ax::mojom::Role::kWindow;
+  }
   out_node_data->AddStringAttribute(ax::mojom::StringAttribute::kName,
                                     base::UTF16ToUTF8(window_->GetTitle()));
-  if (!window_->IsVisible())
+  if (!window_->IsVisible() ||
+      window_->GetProperty(ui::kAXConsiderInvisibleAndIgnoreChildren)) {
     out_node_data->AddState(ax::mojom::State::kInvisible);
+  }
 
   out_node_data->relative_bounds.bounds =
       gfx::RectF(window_->GetBoundsInScreen());
-  std::string* child_ax_tree_id_ptr = window_->GetProperty(ui::kChildAXTreeID);
-  if (child_ax_tree_id_ptr && ui::AXTreeID::FromString(*child_ax_tree_id_ptr) !=
-                                  ui::AXTreeIDUnknown()) {
-    // Most often, child AX trees are parented to Views. We need to handle
-    // the case where they're not here, but we don't want the same AX tree
-    // to be a child of two different parents.
-    //
-    // To avoid this double-parenting, only add the child tree ID of this
-    // window if the top-level window doesn't have an associated Widget.
-    //
-    // Also, if this window is not visible, its child tree should also be
-    // non-visible so prune it.
-    if (!window_->GetToplevelWindow() ||
-        GetWidgetForWindow(window_->GetToplevelWindow()) ||
-        !window_->IsVisible()) {
-      return;
-    }
-
-    out_node_data->AddStringAttribute(ax::mojom::StringAttribute::kChildTreeId,
-                                      *child_ax_tree_id_ptr);
-  }
 
   out_node_data->AddStringAttribute(ax::mojom::StringAttribute::kClassName,
                                     GetWindowName(window_));
+
+  std::string* child_ax_tree_id_ptr = window_->GetProperty(ui::kChildAXTreeID);
+  if (child_ax_tree_id_ptr) {
+    ui::AXTreeID child_ax_tree_id =
+        ui::AXTreeID::FromString(*child_ax_tree_id_ptr);
+    if (child_ax_tree_id != ui::AXTreeIDUnknown()) {
+      // Most often, child AX trees are parented to Views. We need to handle
+      // the case where they're not here, but we don't want the same AX tree
+      // to be a child of two different parents.
+      //
+      // To avoid this double-parenting, only add the child tree ID of this
+      // window if the top-level window doesn't have an associated Widget.
+      //
+      // Also, if this window is not visible, its child tree should also be
+      // non-visible so prune it.
+      if (!window_->GetToplevelWindow() ||
+          GetWidgetForWindow(window_->GetToplevelWindow()) ||
+          !window_->IsVisible() ||
+          window_->GetProperty(ui::kAXConsiderInvisibleAndIgnoreChildren)) {
+        return;
+      }
+
+      out_node_data->AddChildTreeId(child_ax_tree_id);
+
+      const float scale_factor =
+          window_->GetToplevelWindow()->layer()->device_scale_factor();
+      out_node_data->AddFloatAttribute(
+          ax::mojom::FloatAttribute::kChildTreeScale, scale_factor);
+    }
+  }
 }
 
-int32_t AXWindowObjWrapper::GetUniqueId() const {
+ui::AXNodeID AXWindowObjWrapper::GetUniqueId() const {
   return unique_id_.Get();
 }
 
@@ -169,26 +230,30 @@ std::string AXWindowObjWrapper::ToString() const {
   return GetWindowName(window_);
 }
 
+void AXWindowObjWrapper::OnCaretBoundsChanged(
+    const ui::TextInputClient* client) {
+  FireEvent(ax::mojom::Event::kTreeChanged);
+}
+
 void AXWindowObjWrapper::OnWindowDestroyed(aura::Window* window) {
+  if (is_root_window_) {
+    aura_obj_cache_->OnRootWindowObjDestroyed(window_);
+  }
+
   aura_obj_cache_->Remove(window, nullptr);
 }
 
 void AXWindowObjWrapper::OnWindowDestroying(aura::Window* window) {
-  if (window == window_)
-    window_destroying_ = true;
-
-  Widget* widget = GetWidgetForWindow(window);
-  if (widget)
-    aura_obj_cache_->Remove(widget);
-
-  if (is_root_window_)
-    aura_obj_cache_->OnRootWindowObjDestroyed(window_);
+  DCHECK_EQ(window, window_);
+  window_destroying_ = true;
 }
 
 void AXWindowObjWrapper::OnWindowHierarchyChanged(
     const HierarchyChangeParams& params) {
-  if (params.phase == WindowObserver::HierarchyChangeParams::HIERARCHY_CHANGED)
+  if (params.phase ==
+      WindowObserver::HierarchyChangeParams::HIERARCHY_CHANGED) {
     aura_obj_cache_->Remove(params.target, params.old_parent);
+  }
 }
 
 void AXWindowObjWrapper::OnWindowBoundsChanged(
@@ -196,43 +261,52 @@ void AXWindowObjWrapper::OnWindowBoundsChanged(
     const gfx::Rect& old_bounds,
     const gfx::Rect& new_bounds,
     ui::PropertyChangeReason reason) {
-  if (window_destroying_)
+  if (window_destroying_) {
     return;
+  }
 
-  if (window == window_)
+  if (window == window_) {
     FireLocationChangesRecursively(window_, aura_obj_cache_);
+  }
 }
 
 void AXWindowObjWrapper::OnWindowPropertyChanged(aura::Window* window,
                                                  const void* key,
                                                  intptr_t old) {
-  if (window_destroying_)
+  if (window_destroying_ || window != window_) {
     return;
+  }
 
-  if (window == window_ && key == ui::kChildAXTreeID)
+  if (key == ui::kChildAXTreeID ||
+      key == ui::kAXConsiderInvisibleAndIgnoreChildren) {
     FireEvent(ax::mojom::Event::kChildrenChanged);
+  }
 }
 
 void AXWindowObjWrapper::OnWindowVisibilityChanged(aura::Window* window,
                                                    bool visible) {
-  if (window_destroying_)
+  if (window_destroying_) {
     return;
+  }
 
   FireEvent(ax::mojom::Event::kStateChanged);
 }
 
 void AXWindowObjWrapper::OnWindowTransformed(aura::Window* window,
                                              ui::PropertyChangeReason reason) {
-  if (window_destroying_)
+  if (window_destroying_) {
     return;
+  }
 
-  if (window == window_)
+  if (window == window_) {
     FireLocationChangesRecursively(window_, aura_obj_cache_);
+  }
 }
 
 void AXWindowObjWrapper::OnWindowTitleChanged(aura::Window* window) {
-  if (window_destroying_)
+  if (window_destroying_) {
     return;
+  }
 
   FireEventOnWindowChildWidgetAndRootView(
       window_, ax::mojom::Event::kTreeChanged, aura_obj_cache_);

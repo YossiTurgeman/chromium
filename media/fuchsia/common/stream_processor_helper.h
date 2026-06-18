@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,14 +8,15 @@
 #include <fuchsia/media/cpp/fidl.h>
 #include <fuchsia/sysmem/cpp/fidl.h>
 
-#include "base/callback.h"
-#include "base/callback_helpers.h"
+#include <forward_list>
+
 #include "base/containers/flat_map.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
+#include "media/base/media_export.h"
 
 namespace media {
 
@@ -23,29 +24,21 @@ namespace media {
 // 1. Data validation check.
 // 2. Stream/Buffer life time management.
 // 3. Configure StreamProcessor and input/output buffer settings.
-class StreamProcessorHelper {
+class MEDIA_EXPORT StreamProcessorHelper {
  public:
-  class IoPacket {
+  class MEDIA_EXPORT IoPacket {
    public:
-    static IoPacket CreateInput(size_t index,
-                                size_t size,
-                                base::TimeDelta timestamp,
-                                bool unit_end,
-                                base::OnceClosure destroy_cb);
-
-    static IoPacket CreateOutput(size_t index,
-                                 size_t offset,
-                                 size_t size,
-                                 base::TimeDelta timestamp,
-                                 bool unit_end,
-                                 base::OnceClosure destroy_cb);
-
     IoPacket(size_t index,
              size_t offset,
              size_t size,
              base::TimeDelta timestamp,
              bool unit_end,
+             bool key_frame,
              base::OnceClosure destroy_cb);
+
+    IoPacket(const IoPacket&) = delete;
+    IoPacket& operator=(const IoPacket&) = delete;
+
     ~IoPacket();
 
     IoPacket(IoPacket&&);
@@ -56,10 +49,14 @@ class StreamProcessorHelper {
     size_t size() const { return size_; }
     base::TimeDelta timestamp() const { return timestamp_; }
     bool unit_end() const { return unit_end_; }
+    bool key_frame() const { return key_frame_; }
+    const fuchsia::media::FormatDetails& format() const { return format_; }
     void set_format(fuchsia::media::FormatDetails format) {
       format_ = std::move(format);
     }
-    const fuchsia::media::FormatDetails& format() const { return format_; }
+
+    // Adds a |closure| that will be called when the packet is destroyed.
+    void AddOnDestroyClosure(base::OnceClosure closure);
 
    private:
     size_t index_;
@@ -67,39 +64,44 @@ class StreamProcessorHelper {
     size_t size_;
     base::TimeDelta timestamp_;
     bool unit_end_;
+    bool key_frame_;
     fuchsia::media::FormatDetails format_;
-    base::ScopedClosureRunner destroy_cb_;
-
-    DISALLOW_COPY_AND_ASSIGN(IoPacket);
+    std::forward_list<base::OnceClosure> destroy_callbacks_;
   };
 
   class Client {
    public:
-    // Allocate input/output buffers with the given constraints. Client should
-    // call ProvideInput/OutputBufferCollectionToken to finish the buffer
-    // allocation flow.
-    virtual void AllocateInputBuffers(
-        const fuchsia::media::StreamBufferConstraints& stream_constraints) = 0;
-    virtual void AllocateOutputBuffers(
+    // Allocate input buffers with the given constraints. Clients should call
+    // SetInputBufferCollectionToken to finish the buffer allocation flow.
+    // Implementing this method is optional if a client chooses to allocate
+    // input buffers before input constraints are returned from the
+    // StreamProcessor.
+    virtual void OnStreamProcessorAllocateInputBuffers(
+        const fuchsia::media::StreamBufferConstraints& stream_constraints) {}
+
+    // Allocate output buffers with the given constraints. Client should call
+    // CompleteOutputBuffersAllocation to finish the buffer allocation flow.
+    virtual void OnStreamProcessorAllocateOutputBuffers(
         const fuchsia::media::StreamBufferConstraints& stream_constraints) = 0;
 
     // Called when all the pushed packets are processed.
-    virtual void OnProcessEos() = 0;
+    virtual void OnStreamProcessorEndOfStream() = 0;
 
     // Called when output format is available.
-    virtual void OnOutputFormat(fuchsia::media::StreamOutputFormat format) = 0;
+    virtual void OnStreamProcessorOutputFormat(
+        fuchsia::media::StreamOutputFormat format) = 0;
 
     // Called when output packet is available. Deleting |packet| will notify
     // StreamProcessor the output buffer is available to be re-used. Client
     // should delete |packet| on the same thread as this function.
-    virtual void OnOutputPacket(IoPacket packet) = 0;
+    virtual void OnStreamProcessorOutputPacket(IoPacket packet) = 0;
 
     // Only available for decryption, which indicates currently the
     // StreamProcessor doesn't have the content key to process.
-    virtual void OnNoKey() = 0;
+    virtual void OnStreamProcessorNoKey() = 0;
 
     // Called when any fatal errors happens.
-    virtual void OnError() = 0;
+    virtual void OnStreamProcessorError() = 0;
 
    protected:
     virtual ~Client() = default;
@@ -107,6 +109,10 @@ class StreamProcessorHelper {
 
   StreamProcessorHelper(fuchsia::media::StreamProcessorPtr processor,
                         Client* client);
+
+  StreamProcessorHelper(const StreamProcessorHelper&) = delete;
+  StreamProcessorHelper& operator=(const StreamProcessorHelper&) = delete;
+
   ~StreamProcessorHelper();
 
   // Process one packet. Caller can reuse the underlying buffer when the
@@ -117,15 +123,18 @@ class StreamProcessorHelper {
   // StreamProcessor without calling Reset.
   void ProcessEos();
 
-  // Provide input/output BufferCollectionToken to finish StreamProcessor buffer
-  // setup flow.
-  void CompleteInputBuffersAllocation(
-      fuchsia::sysmem::BufferCollectionTokenPtr token);
-  void CompleteOutputBuffersAllocation(
-      size_t num_buffers_for_client,
-      size_t num_buffers_for_server,
-      fuchsia::sysmem::BufferCollectionTokenPtr token);
+  // Sets buffer collection tocken to use for input buffers.
+  void SetInputBufferCollectionToken(
+      fuchsia::sysmem2::BufferCollectionTokenPtr token);
 
+  // Provide output BufferCollectionToken to finish StreamProcessor buffer
+  // setup flow. Should be called only after AllocateOutputBuffers.
+  void CompleteOutputBuffersAllocation(
+      fuchsia::sysmem2::BufferCollectionTokenPtr token);
+
+  // Closes the current stream and starts a new one. After that all packets
+  // passed to Process() will be sent with a new |stream_lifetime_ordinal|
+  // value.
   void Reset();
 
  private:
@@ -155,10 +164,6 @@ class StreamProcessorHelper {
   // stream_lifetime_ordinal_.
   bool active_stream_ = false;
 
-  // Input buffers.
-  uint64_t input_buffer_lifetime_ordinal_ = 1;
-  fuchsia::media::StreamBufferConstraints input_buffer_constraints_;
-
   // Map from packet index to corresponding input IoPacket. IoPacket should be
   // owned by this class until StreamProcessor released the buffer.
   base::flat_map<size_t, IoPacket> input_packets_;
@@ -168,15 +173,13 @@ class StreamProcessorHelper {
   fuchsia::media::StreamBufferConstraints output_buffer_constraints_;
 
   fuchsia::media::StreamProcessorPtr processor_;
-  Client* const client_;
+  const raw_ptr<Client> client_;
 
   // FIDL interfaces are thread-affine (see crbug.com/1012875).
   THREAD_CHECKER(thread_checker_);
 
   base::WeakPtr<StreamProcessorHelper> weak_this_;
   base::WeakPtrFactory<StreamProcessorHelper> weak_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(StreamProcessorHelper);
 };
 
 }  // namespace media

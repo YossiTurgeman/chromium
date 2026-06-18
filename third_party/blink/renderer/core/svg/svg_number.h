@@ -31,7 +31,7 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_NUMBER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_NUMBER_H_
 
-#include "third_party/blink/renderer/core/svg/properties/svg_property_helper.h"
+#include "third_party/blink/renderer/core/svg/properties/svg_listable_property.h"
 #include "third_party/blink/renderer/core/svg/svg_parsing_error.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
 
@@ -39,7 +39,7 @@ namespace blink {
 
 class SVGNumberTearOff;
 
-class SVGNumber : public SVGPropertyHelper<SVGNumber> {
+class SVGNumber : public SVGListablePropertyBase {
  public:
   // SVGNumber has a tear-off type, but SVGAnimatedNumber uses primitive type.
   typedef SVGNumberTearOff TearOffType;
@@ -55,7 +55,7 @@ class SVGNumber : public SVGPropertyHelper<SVGNumber> {
   String ValueAsString() const override;
   virtual SVGParsingError SetValueAsString(const String&);
 
-  void Add(const SVGPropertyBase*, const SVGElement*) override;
+  bool Add(const SVGPropertyBase*, const SVGElement*) override;
   void CalculateAnimatedValue(
       const SMILAnimationEffectParameters&,
       float percentage,
@@ -68,13 +68,14 @@ class SVGNumber : public SVGPropertyHelper<SVGNumber> {
                           const SVGElement* context_element) const override;
 
   static AnimatedPropertyType ClassType() { return kAnimatedNumber; }
+  AnimatedPropertyType GetType() const override { return ClassType(); }
 
   void SetInitial(unsigned value) { SetValue(value); }
   static constexpr int kInitialValueBits = 2;
 
  protected:
   template <typename CharType>
-  SVGParsingError Parse(const CharType* ptr, const CharType* end);
+  SVGParsingError Parse(base::span<const CharType> span);
 
   float value_;
 };

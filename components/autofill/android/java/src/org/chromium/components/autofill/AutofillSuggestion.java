@@ -1,101 +1,116 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.autofill;
 
-import org.chromium.ui.DropdownItemBase;
+import android.text.TextUtils;
 
-/**
- * Autofill suggestion container used to store information needed for each Autofill popup entry.
- */
-public class AutofillSuggestion extends DropdownItemBase {
-    private final String mLabel;
+import androidx.annotation.VisibleForTesting;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.url.GURL;
+
+import java.util.Objects;
+
+/** A container representing a single entry in an Autofill UI (e.g. keyboard accessory). */
+@NullMarked
+public class AutofillSuggestion {
+    private final @Nullable String mLabel;
+    private final @Nullable String mSecondaryLabel;
     private final String mSublabel;
-    private final String mItemTag;
+    private final @Nullable String mSecondarySublabel;
+    private final @Nullable String mVoiceOver;
     private final int mIconId;
-    private final boolean mIsIconAtStart;
-    private final int mSuggestionId;
+    private final @SuggestionType int mSuggestionType;
     private final boolean mIsDeletable;
-    private final boolean mIsMultilineLabel;
-    private final boolean mIsBoldLabel;
+    private final boolean mApplyDeactivatedStyle;
+    private final @Nullable String mFeatureForIph;
+    private final @Nullable String mIphDescriptionText;
+    private final @Nullable GURL mCustomIconUrl;
+    private final boolean mShowLoadingOnAcceptance;
+    private final @Nullable Payload mPayload;
+
+    public sealed interface Payload permits AutofillProfilePayload, PaymentsPayload {}
 
     /**
-     * Constructs a Autofill suggestion container.
+     * Constructs a Autofill suggestion container. Use the {@link AutofillSuggestion.Builder}
+     * instead.
      *
      * @param label The main label of the Autofill suggestion.
      * @param sublabel The describing sublabel of the Autofill suggestion.
-     * @param itemTag The tag for the autofill suggestion.
-     * @param iconId The resource ID for the icon associated with the suggestion, or
-     *               {@code DropdownItem.NO_ICON} for no icon.
-     * @param isIconAtStart {@code true} if {@code iconId} is displayed before {@code label}.
-     * @param suggestionId The type of suggestion.
+     * @param voiceOver Voice over text read for the Autofill suggestion.
+     * @param iconId The resource ID for the icon associated with the suggestion, or {@code
+     *     DropdownItem.NO_ICON} for no icon.
+     * @param suggestionType The type of suggestion.
      * @param isDeletable Whether the item can be deleted by the user.
-     * @param isMultilineLabel Whether the label is displayed over multiple lines.
-     * @param isBoldLabel Whether the label is displayed in {@code Typeface.BOLD}.
+     * @param applyDeactivatedStyle Whether to apply deactivated style to the suggestion.
+     * @param featureForIph The IPH feature for the autofill suggestion. If present, it'll be
+     *     attempted to be shown in the keyboard accessory.
+     * @param customIconUrl The {@link GURL} for the custom icon, if any.
+     * @param showLoadingOnAcceptance Whether accepting this suggestion should show a loading UI
+     *     (e.g., if it requires a fetch from the server).
+     * @param payload Additional data passed with the suggestion.
      */
-    public AutofillSuggestion(String label, String sublabel, String itemTag, int iconId,
-            boolean isIconAtStart, int suggestionId, boolean isDeletable, boolean isMultilineLabel,
-            boolean isBoldLabel) {
+    @VisibleForTesting
+    public AutofillSuggestion(
+            @Nullable String label,
+            @Nullable String secondaryLabel,
+            String sublabel,
+            @Nullable String secondarySublabel,
+            @Nullable String voiceOver,
+            int iconId,
+            @SuggestionType int suggestionType,
+            boolean isDeletable,
+            boolean applyDeactivatedStyle,
+            @Nullable String featureForIph,
+            @Nullable String iphDescriptionText,
+            @Nullable GURL customIconUrl,
+            boolean showLoadingOnAcceptance,
+            @Nullable Payload payload) {
         mLabel = label;
+        mSecondaryLabel = secondaryLabel;
         mSublabel = sublabel;
-        mItemTag = itemTag;
+        mSecondarySublabel = secondarySublabel;
+        mVoiceOver = voiceOver;
         mIconId = iconId;
-        mIsIconAtStart = isIconAtStart;
-        mSuggestionId = suggestionId;
+        mSuggestionType = suggestionType;
         mIsDeletable = isDeletable;
-        mIsMultilineLabel = isMultilineLabel;
-        mIsBoldLabel = isBoldLabel;
+        mApplyDeactivatedStyle = applyDeactivatedStyle;
+        mFeatureForIph = featureForIph;
+        mIphDescriptionText = iphDescriptionText;
+        mCustomIconUrl = customIconUrl;
+        mShowLoadingOnAcceptance = showLoadingOnAcceptance;
+        mPayload = payload;
     }
 
-    @Override
-    public String getLabel() {
+    public @Nullable String getLabel() {
         return mLabel;
     }
 
-    @Override
+    public @Nullable String getSecondaryLabel() {
+        return mSecondaryLabel;
+    }
+
     public String getSublabel() {
         return mSublabel;
     }
 
-    @Override
-    public String getItemTag() {
-        return mItemTag;
+    public @Nullable String getSecondarySublabel() {
+        return mSecondarySublabel;
     }
 
-    @Override
     public int getIconId() {
         return mIconId;
     }
 
-    @Override
-    public boolean isMultilineLabel() {
-        return mIsMultilineLabel;
+    public @Nullable GURL getCustomIconUrl() {
+        return mCustomIconUrl;
     }
 
-    @Override
-    public boolean isBoldLabel() {
-        return mIsBoldLabel;
-    }
-
-    @Override
-    public int getLabelFontColorResId() {
-        if (mSuggestionId == PopupItemId.ITEM_ID_INSECURE_CONTEXT_PAYMENT_DISABLED_MESSAGE) {
-            return R.color.insecure_context_payment_disabled_message_text;
-        }
-        return super.getLabelFontColorResId();
-    }
-
-    @Override
-    public boolean isIconAtStart() {
-        if (mIsIconAtStart) {
-            return true;
-        }
-        return super.isIconAtStart();
-    }
-
-    public int getSuggestionId() {
-        return mSuggestionId;
+    public @SuggestionType int getSuggestionType() {
+        return mSuggestionType;
     }
 
     public boolean isDeletable() {
@@ -103,8 +118,196 @@ public class AutofillSuggestion extends DropdownItemBase {
     }
 
     public boolean isFillable() {
-        // Negative suggestion ID indiciates a tool like "settings" or "scan credit card."
-        // Non-negative suggestion ID indicates suggestions that can be filled into the form.
-        return mSuggestionId >= 0;
+        return mSuggestionType == SuggestionType.ADDRESS_ENTRY
+                || mSuggestionType == SuggestionType.CREDIT_CARD_ENTRY;
+    }
+
+    public boolean applyDeactivatedStyle() {
+        return mApplyDeactivatedStyle;
+    }
+
+    public @Nullable String getFeatureForIph() {
+        return mFeatureForIph;
+    }
+
+    public @Nullable String getIphDescriptionText() {
+        return mIphDescriptionText;
+    }
+
+    public @Nullable String getVoiceOver() {
+        return mVoiceOver;
+    }
+
+    /**
+     * Returns whether accepting this suggestion should show a loading UI (e.g., if it requires a
+     * fetch from the server).
+     */
+    public boolean showLoadingOnAcceptance() {
+        return mShowLoadingOnAcceptance;
+    }
+
+    public @Nullable AutofillProfilePayload getAutofillProfilePayload() {
+        if (mPayload instanceof AutofillProfilePayload) {
+            return (AutofillProfilePayload) mPayload;
+        }
+        return null;
+    }
+
+    public @Nullable PaymentsPayload getPaymentsPayload() {
+        if (mPayload instanceof PaymentsPayload) {
+            return (PaymentsPayload) mPayload;
+        }
+        return null;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof AutofillSuggestion other)) {
+            return false;
+        }
+        return Objects.equals(this.mLabel, other.mLabel)
+                && Objects.equals(this.mSecondaryLabel, other.mSecondaryLabel)
+                && this.mSublabel.equals(other.mSublabel)
+                && Objects.equals(this.mSecondarySublabel, other.mSecondarySublabel)
+                && this.mIconId == other.mIconId
+                && this.mSuggestionType == other.mSuggestionType
+                && this.mIsDeletable == other.mIsDeletable
+                && this.mApplyDeactivatedStyle == other.mApplyDeactivatedStyle
+                && Objects.equals(this.mFeatureForIph, other.mFeatureForIph)
+                && Objects.equals(this.mIphDescriptionText, other.mIphDescriptionText)
+                && Objects.equals(this.mCustomIconUrl, other.mCustomIconUrl)
+                && this.mShowLoadingOnAcceptance == other.mShowLoadingOnAcceptance
+                && Objects.equals(this.mPayload, other.mPayload);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(
+                this.mLabel,
+                this.mSecondaryLabel,
+                this.mSublabel,
+                this.mSecondarySublabel,
+                this.mIconId,
+                this.mSuggestionType,
+                this.mIsDeletable,
+                this.mApplyDeactivatedStyle,
+                this.mFeatureForIph,
+                this.mIphDescriptionText,
+                this.mCustomIconUrl,
+                this.mShowLoadingOnAcceptance,
+                this.mPayload);
+    }
+
+    /** Builder for the {@link AutofillSuggestion}. */
+    public static final class Builder {
+        private int mIconId;
+        private @Nullable GURL mCustomIconUrl;
+        private boolean mIsDeletable;
+        private boolean mApplyDeactivatedStyle;
+        private @Nullable String mFeatureForIph;
+        private @Nullable String mIphDescriptionText;
+        private @Nullable String mLabel;
+        private @Nullable String mSecondaryLabel;
+        private @Nullable String mSubLabel;
+        private @Nullable String mSecondarySubLabel;
+        private @Nullable String mVoiceOver;
+        private int mSuggestionType;
+        private boolean mShowLoadingOnAcceptance;
+        private @Nullable Payload mPayload;
+
+        public Builder setIconId(int iconId) {
+            this.mIconId = iconId;
+            return this;
+        }
+
+        public Builder setCustomIconUrl(GURL customIconUrl) {
+            this.mCustomIconUrl = customIconUrl;
+            return this;
+        }
+
+        public Builder setIsDeletable(boolean isDeletable) {
+            this.mIsDeletable = isDeletable;
+            return this;
+        }
+
+        public Builder setApplyDeactivatedStyle(boolean applyDeactivatedStyle) {
+            this.mApplyDeactivatedStyle = applyDeactivatedStyle;
+            return this;
+        }
+
+        public Builder setFeatureForIph(String featureForIph) {
+            this.mFeatureForIph = featureForIph;
+            return this;
+        }
+
+        public Builder setIphDescriptionText(String iphDescriptionText) {
+            this.mIphDescriptionText = iphDescriptionText;
+            return this;
+        }
+
+        public Builder setLabel(String label) {
+            this.mLabel = label;
+            return this;
+        }
+
+        public Builder setSecondaryLabel(String secondaryLabel) {
+            this.mSecondaryLabel = secondaryLabel;
+            return this;
+        }
+
+        public Builder setSubLabel(String subLabel) {
+            this.mSubLabel = subLabel;
+            return this;
+        }
+
+        public Builder setSecondarySubLabel(String secondarySubLabel) {
+            this.mSecondarySubLabel = secondarySubLabel;
+            return this;
+        }
+
+        public Builder setSuggestionType(int suggestionType) {
+            this.mSuggestionType = suggestionType;
+            return this;
+        }
+
+        public Builder setVoiceOver(String voiceOver) {
+            this.mVoiceOver = voiceOver;
+            return this;
+        }
+
+        public Builder setShowLoadingOnAcceptance(boolean showLoadingOnAcceptance) {
+            this.mShowLoadingOnAcceptance = showLoadingOnAcceptance;
+            return this;
+        }
+
+        public Builder setPayload(Payload payload) {
+            this.mPayload = payload;
+            return this;
+        }
+
+        public AutofillSuggestion build() {
+            assert mSuggestionType == SuggestionType.SEPARATOR || !TextUtils.isEmpty(mLabel)
+                    : "Only separators may have an empty label.";
+            assert (mSubLabel != null)
+                    : "The AutofillSuggestion sublabel can be empty but never null.";
+            return new AutofillSuggestion(
+                    mLabel,
+                    mSecondaryLabel,
+                    mSubLabel,
+                    mSecondarySubLabel,
+                    mVoiceOver,
+                    mIconId,
+                    mSuggestionType,
+                    mIsDeletable,
+                    mApplyDeactivatedStyle,
+                    mFeatureForIph,
+                    mIphDescriptionText,
+                    mCustomIconUrl,
+                    mShowLoadingOnAcceptance,
+                    mPayload);
+        }
     }
 }

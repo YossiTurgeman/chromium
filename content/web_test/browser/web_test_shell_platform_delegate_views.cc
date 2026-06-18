@@ -1,13 +1,13 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-#include "content/web_test/browser/web_test_shell_platform_delegate.h"
 
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/browser/shell_platform_data_aura.h"
+#include "content/web_test/browser/web_test_shell_platform_delegate.h"
+#include "ui/events/platform/platform_event_source.h"
 
 namespace content {
 
@@ -32,6 +32,11 @@ void WebTestShellPlatformDelegate::Initialize(
     web_test_platform_ = std::make_unique<WebTestPlatformData>();
     web_test_platform_->aura =
         std::make_unique<ShellPlatformDataAura>(default_window_size);
+
+    // This suppresses mousemove events from WindowEventDispatcher, which
+    // matches Mac behavior (AppKit will send a mousemove to a new
+    // RenderWidgetHostView when it is onscreen, but not when headless).
+    ui::PlatformEventSource::SetIgnoreNativePlatformEvents(true);
   }
 }
 
@@ -43,7 +48,7 @@ void WebTestShellPlatformDelegate::CreatePlatformWindow(
     return;
   }
 
-  DCHECK(!base::Contains(web_test_shell_data_map_, shell));
+  DCHECK(!web_test_shell_data_map_.contains(shell));
   WebTestShellData& shell_data = web_test_shell_data_map_[shell];
 
   shell_data.content_size = initial_size;
@@ -56,7 +61,6 @@ gfx::NativeWindow WebTestShellPlatformDelegate::GetNativeWindow(Shell* shell) {
     return ShellPlatformDelegate::GetNativeWindow(shell);
 
   NOTREACHED();
-  return {};
 }
 
 void WebTestShellPlatformDelegate::CleanUp(Shell* shell) {
@@ -65,7 +69,7 @@ void WebTestShellPlatformDelegate::CleanUp(Shell* shell) {
     return;
   }
 
-  DCHECK(base::Contains(web_test_shell_data_map_, shell));
+  DCHECK(web_test_shell_data_map_.contains(shell));
   web_test_shell_data_map_.erase(shell);
 }
 
@@ -75,7 +79,7 @@ void WebTestShellPlatformDelegate::SetContents(Shell* shell) {
     return;
   }
 
-  DCHECK(base::Contains(web_test_shell_data_map_, shell));
+  DCHECK(web_test_shell_data_map_.contains(shell));
   WebTestShellData& shell_data = web_test_shell_data_map_[shell];
 
   aura::Window* content = shell->web_contents()->GetNativeView();
@@ -110,15 +114,17 @@ void WebTestShellPlatformDelegate::SetAddressBarURL(Shell* shell,
 }
 
 void WebTestShellPlatformDelegate::SetTitle(Shell* shell,
-                                            const base::string16& title) {
+                                            const std::u16string& title) {
   if (!IsHeadless())
     ShellPlatformDelegate::SetTitle(shell, title);
   // Nothing in headless mode.
 }
 
-void WebTestShellPlatformDelegate::RenderViewReady(Shell* shell) {
+void WebTestShellPlatformDelegate::MainFrameCreated(
+    Shell* shell,
+    RenderFrameHost* main_frame) {
   // No difference in headless mode.
-  ShellPlatformDelegate::RenderViewReady(shell);
+  ShellPlatformDelegate::MainFrameCreated(shell, main_frame);
 }
 
 bool WebTestShellPlatformDelegate::DestroyShell(Shell* shell) {

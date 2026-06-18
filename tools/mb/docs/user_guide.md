@@ -27,7 +27,7 @@ a list of files (e.g., the list of files in a patch on a trybot):
 mb analyze -c chromium_linux_rel //out/Release input.json output.json
 ```
 
-Either the `-c/--config` flag or the `-m/--master` and `-b/--builder` flags
+Either the `-c/--config` flag or the `--builder-group` and `-b/--builder` flags
 must be specified so that `mb` can figure out which config to use.
 
 The first positional argument must be a GN-style "source-absolute" path
@@ -43,7 +43,7 @@ a single object with the following fields:
     no tests that will be run.
   * `additional_compile_targets`: an array of (ninja) build targets that
     reflect the stuff we might want to build *in addition to* the list
-    passed in `test_targets`. Targets in this list will be treated 
+    passed in `test_targets`. Targets in this list will be treated
     specially, in the following way: if a given target is a "meta"
     (GN: group) target like 'blink_tests' or or even the
     ninja-specific 'all' target, then only the *dependencies* of the
@@ -65,7 +65,7 @@ fields:
   * `compile_targets`: the list of ninja targets that should be passed
     directly to the corresponding ninja / compile.py invocation. This
     list may contain entries that are *not* listed in the input (see
-    the description of `additional_compile_targets` above and 
+    the description of `additional_compile_targets` above and
     [design_spec.md](the design spec) for how this works).
   * `invalid_targets`: a list of any targets that were passed in
     either of the input lists that weren't actually found in the graph.
@@ -90,7 +90,7 @@ differences can be subtle.  We won't even go into how the `targets` and
 `build_targets` differ from each other or from `compile_targets` and
 `test_targets`.
 
-The `-b/--builder`, `-c/--config`, `-f/--config-file`, `-m/--master`,
+The `-b/--builder`, `-c/--config`, `-f/--config-file`, `--builder-group`,
 `-q/--quiet`, and `-v/--verbose` flags work as documented for `mb gen`.
 
 ### mb gen
@@ -104,7 +104,7 @@ specify a build config and a directory, then runs GN as appropriate:
 % mb gen -c linux_rel_trybot //out/Release
 ```
 
-Either the `-c/--config` flag or the `-m/--master` and `-b/--builder` flags
+Either the `-c/--config` flag or the `--builder-group` and `-b/--builder` flags
 must be specified so that `mb` can figure out which config to use. The
 `--phase` flag must also be used with builders that have multiple
 build/compile steps (and only with those builders).
@@ -124,10 +124,6 @@ You can pass the `-q/--quiet` flag to get mb to be silent unless there is an
 error, and pass the `-v/--verbose` flag to get mb to log all of the files
 that are read and written, and all the commands that are run.
 
-If the build config will use the Goma distributed-build system, you can pass
-the path to your Goma client in the `-g/--goma-dir` flag, and it will be
-incorporated into the appropriate flags for GN as needed.
-
 ### mb help
 
 Produces help output on the other subcommands
@@ -144,7 +140,7 @@ swarming. See below for more information on isolates and swarming.
 Prints what command will be run by `mb gen` (like `mb gen -n` but does
 not require you to specify a path).
 
-The `-b/--builder`, `-c/--config`, `-f/--config-file`, `-m/--master`,
+The `-b/--builder`, `-c/--config`, `-f/--config-file`, `--builder-group`,
 `--phase`, `-q/--quiet`, and `-v/--verbose` flags work as documented for
 `mb gen`.
 
@@ -165,25 +161,6 @@ information on isolates and swarming.
 
 In either case, any flags past `--` will be passed on to the command
 to be run inside the isolate.
-
-### mb try
-
-Tries your change on the trybots. Right now this is essentially a fancy tryjob,
-like one you could trigger via `git cl try` or via CQ dry runs. Basic usage is
-
-`mb.py try -m tryserver.chromium.linux -b linux-rel base_unittests`
-
-Your change must be uploaded to Gerrit. Local changes will not be uploaded for
-you. It uses the gerrit CL associated with your given git branch.
-
-You still have to specify the mastername (`-m`) and buildername (`-b`) arguments.
-See [trybots.py](https://cs.chromium.org/chromium/build/scripts/slave/recipe_modules/chromium_tests/trybots.py)
-for a mapping of which bots are on which tryservers, and what those bots mirror.
-Any trybot in `trybots.py` is supported; you can test your code on windows, for
-example. The tryjob will compile and run your code on windows.
-
-The target (`base_unittests`) in the example is a ninja build target. Most ninja
-unittest targets can be put here which currently runs on the bots.
 
 ### mb validate
 
@@ -224,7 +201,7 @@ to a file called `runtime_deps` in the build directory, and pass that to
 
 Once GN has computed the lists of runtime dependencies, MB will then
 look up the command line for each target (currently this is hard-coded
-in [mb.py](https://source.chromium.org/chromium/chromium/src/+/master:tools/mb/mb.py;l=1370)), and write out the
+in [mb.py](https://source.chromium.org/chromium/chromium/src/+/main:tools/mb/mb.py;l=1370)), and write out the
 matching `.isolate` and `.isolated.gen.json` files.
 
 ## The mb_config.pyl config file
@@ -236,11 +213,11 @@ listed here, and so by using the configs in this file you can avoid
 having to juggle long lists of gn args by hand.
 
 `mb_config.pyl` is structured as a file containing a single PYthon Literal
-expression: a dictionary with three main keys, `masters`, `configs` and
+expression: a dictionary with three main keys, `builder_groups`, `configs` and
 `mixins`.
 
-The `masters` key contains a nested series of dicts containing mappings
-of master -> builder -> config . This allows us to isolate the buildbot
+The `builder_groups` key contains a nested series of dicts containing mappings
+of builder_group -> builder -> config . This allows us to isolate the builder
 recipes from the actual details of the configs. The config should either
 be a single string value representing a key in the `configs` dictionary,
 or a list of strings, each of which is a key in the `configs` dictionary;
@@ -279,7 +256,7 @@ For example, if you had:
   }
   'mixins': {
     'bot': {
-      'gn_args': 'use_goma=true dcheck_always_on=false',
+      'gn_args': 'use_remoteexec=true dcheck_always_on=false',
     },
     'debug': {
       'gn_args': 'is_debug=true',
@@ -301,7 +278,7 @@ For example, if you had:
 ```
 
 and you ran `mb gen -c linux_release_trybot //out/Release`, it would
-translate into a call to `gn --args="use_goma=true dcheck_always_on=false dcheck_always_on=true"`.
+translate into a call to `gn --args="use_remoteexec=true dcheck_always_on=false dcheck_always_on=true"`.
 
 (From that you can see that mb is intentionally dumb and does not
 attempt to de-dup the flags, it lets GN do that).
@@ -319,5 +296,3 @@ If you hit weirder things than that, add some print statements to the
 python script, send a question to gn-dev@chromium.org, or
 [file a bug](https://crbug.com/new) with the label
 'mb' and cc: dpranke@chromium.org.
-
-

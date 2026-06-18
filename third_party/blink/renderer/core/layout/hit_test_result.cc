@@ -21,34 +21,78 @@
 
 #include "third_party/blink/renderer/core/layout/hit_test_result.h"
 
+#include <variant>
+
+#include "cc/base/region.h"
+#include "third_party/blink/renderer/core/display_lock/display_lock_utilities.h"
 #include "third_party/blink/renderer/core/dom/flat_tree_traversal.h"
 #include "third_party/blink/renderer/core/dom/pseudo_element.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/frame_selection.h"
 #include "third_party/blink/renderer/core/editing/position_with_affinity.h"
+#include "third_party/blink/renderer/core/editing/text_affinity.h"
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/visual_viewport.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
 #include "third_party/blink/renderer/core/html/html_area_element.h"
+#include "third_party/blink/renderer/core/html/html_embed_element.h"
 #include "third_party/blink/renderer/core/html/html_image_element.h"
 #include "third_party/blink/renderer/core/html/html_map_element.h"
+#include "third_party/blink/renderer/core/html/html_object_element.h"
 #include "third_party/blink/renderer/core/html/media/html_media_element.h"
+#include "third_party/blink/renderer/core/html/media/media_source_handle.h"
 #include "third_party/blink/renderer/core/html/parser/html_parser_idioms.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
+#include "third_party/blink/renderer/core/layout/hit_test_location.h"
 #include "third_party/blink/renderer/core/layout/layout_block.h"
+#include "third_party/blink/renderer/core/layout/layout_embedded_content.h"
 #include "third_party/blink/renderer/core/layout/layout_image.h"
+#include "third_party/blink/renderer/core/layout/layout_view.h"
+#include "third_party/blink/renderer/core/layout/physical_box_fragment.h"
+#include "third_party/blink/renderer/core/layout/svg/layout_svg_image.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/page/scrolling/top_document_root_scroller_controller.h"
 #include "third_party/blink/renderer/core/scroll/scrollbar.h"
 #include "third_party/blink/renderer/core/svg/svg_element.h"
-#include "third_party/blink/renderer/platform/geometry/region.h"
 #include "third_party/blink/renderer/platform/mediastream/media_stream_descriptor.h"
+#include "ui/gfx/geometry/rect_conversions.h"
 
 namespace blink {
+
+using mojom::blink::FormControlType;
+
+namespace {
+
+bool HasImageSourceURL(const Node& node) {
+  // Always return a url for image elements and input elements with type=image,
+  // even if they don't have a LayoutImage (e.g. because the image didn't load
+  // and we are using an alt container). For other elements we don't create alt
+  // containers so ensure they contain a loaded image.
+  auto* html_input_element = DynamicTo<HTMLInputElement>(node);
+  if (IsA<HTMLImageElement>(node) ||
+      (html_input_element &&
+       html_input_element->FormControlType() == FormControlType::kInputImage)) {
+    return true;
+  }
+  const LayoutObject* layout_object = node.GetLayoutObject();
+  if (!layout_object) {
+    return false;
+  }
+  if (layout_object->IsImage() &&
+      (IsA<HTMLEmbedElement>(node) || IsA<HTMLObjectElement>(node))) {
+    return true;
+  }
+  if (layout_object->IsSVGImage()) {
+    return true;
+  }
+  return false;
+}
+
+}  // namespace
 
 HitTestResult::HitTestResult()
     : hit_test_request_(HitTestRequest::kReadOnly | HitTestRequest::kActive),
@@ -66,7 +110,6 @@ HitTestResult::HitTestResult(const HitTestResult& other)
     : hit_test_request_(other.hit_test_request_),
       cacheable_(other.cacheable_),
       inner_node_(other.InnerNode()),
-      inert_node_(other.InertNode()),
       inner_element_(other.InnerElement()),
       inner_possibly_pseudo_node_(other.inner_possibly_pseudo_node_),
       point_in_inner_node_frame_(other.point_in_inner_node_frame_),
@@ -74,7 +117,8 @@ HitTestResult::HitTestResult(const HitTestResult& other)
       inner_url_element_(other.URLElement()),
       scrollbar_(other.GetScrollbar()),
       is_over_embedded_content_view_(other.IsOverEmbeddedContentView()),
-      canvas_region_id_(other.CanvasRegionId()) {
+      is_over_resizer_(other.is_over_resizer_),
+      is_over_scroll_corner_(other.is_over_scroll_corner_) {
   // Only copy the NodeSet in case of list hit test.
   list_based_test_result_ =
       other.list_based_test_result_
@@ -93,7 +137,7 @@ HitTestResult& HitTestResult::operator=(const HitTestResult& other) {
 
 bool HitTestResult::EqualForCacheability(const HitTestResult& other) const {
   return hit_test_request_.EqualForCacheability(other.hit_test_request_) &&
-         inner_node_ == other.InnerNode() && inert_node_ == other.InertNode() &&
+         inner_node_ == other.InnerNode() &&
          inner_element_ == other.InnerElement() &&
          inner_possibly_pseudo_node_ == other.InnerPossiblyPseudoNode() &&
          point_in_inner_node_frame_ == other.point_in_inner_node_frame_ &&
@@ -110,16 +154,17 @@ void HitTestResult::CacheValues(const HitTestResult& other) {
 
 void HitTestResult::PopulateFromCachedResult(const HitTestResult& other) {
   inner_node_ = other.InnerNode();
-  inert_node_ = other.InertNode();
   inner_element_ = other.InnerElement();
   inner_possibly_pseudo_node_ = other.InnerPossiblyPseudoNode();
   point_in_inner_node_frame_ = other.point_in_inner_node_frame_;
   local_point_ = other.LocalPoint();
   inner_url_element_ = other.URLElement();
   scrollbar_ = other.GetScrollbar();
+
   is_over_embedded_content_view_ = other.IsOverEmbeddedContentView();
   cacheable_ = other.cacheable_;
-  canvas_region_id_ = other.CanvasRegionId();
+  is_over_resizer_ = other.IsOverResizer();
+  is_over_scroll_corner_ = other.IsOverScrollCorner();
 
   // Only copy the NodeSet in case of list hit test.
   list_based_test_result_ =
@@ -129,8 +174,8 @@ void HitTestResult::PopulateFromCachedResult(const HitTestResult& other) {
 }
 
 void HitTestResult::Trace(Visitor* visitor) const {
+  visitor->Trace(hit_test_request_);
   visitor->Trace(inner_node_);
-  visitor->Trace(inert_node_);
   visitor->Trace(inner_element_);
   visitor->Trace(inner_possibly_pseudo_node_);
   visitor->Trace(inner_url_element_);
@@ -138,25 +183,103 @@ void HitTestResult::Trace(Visitor* visitor) const {
   visitor->Trace(list_based_test_result_);
 }
 
+void HitTestResult::SetNodeAndPosition(Node* node,
+                                       const PhysicalBoxFragment* box_fragment,
+                                       const PhysicalOffset& position) {
+  if (box_fragment) {
+    local_point_ = position + box_fragment->OffsetFromOwnerLayoutBox();
+  } else {
+    local_point_ = position;
+  }
+  SetInnerNode(node);
+}
+
+void HitTestResult::OverrideNodeAndPosition(Node* node,
+                                            PhysicalOffset position) {
+  local_point_ = position;
+  SetInnerNode(node);
+}
+
 PositionWithAffinity HitTestResult::GetPosition() const {
-  if (!inner_possibly_pseudo_node_)
+  const Node* node = inner_possibly_pseudo_node_;
+  if (!node)
     return PositionWithAffinity();
-  LayoutObject* layout_object = GetLayoutObject();
+  // |LayoutObject::PositionForPoint()| requires |kPrePaintClean|.
+  DCHECK_GE(node->GetDocument().Lifecycle().GetState(),
+            DocumentLifecycle::kPrePaintClean);
+  LayoutObject* layout_object = node->GetLayoutObject();
   if (!layout_object)
     return PositionWithAffinity();
-  if (inner_possibly_pseudo_node_->IsPseudoElement() &&
-      inner_possibly_pseudo_node_->GetPseudoId() == kPseudoIdBefore) {
-    return PositionWithAffinity(MostForwardCaretPosition(
-        Position(inner_node_, PositionAnchorType::kBeforeChildren)));
+
+  // We should never have a layout object that is within a locked subtree.
+  CHECK(!DisplayLockUtilities::LockedAncestorPreventingPaint(*layout_object));
+
+  // If the layout object is blocked by display lock, we return the beginning of
+  // the node as the position. This is because we don't paint contents of the
+  // element. Furthermore, any caret adjustments below can access layout-dirty
+  // state in the subtree of this object.
+  if (layout_object->ChildPaintBlockedByDisplayLock())
+    return PositionWithAffinity(Position(*node, 0), TextAffinity::kDefault);
+
+  if (node->IsPseudoElement()) {
+    // Pseudo-elements can't serve as caret anchors.
+    switch (node->GetPseudoId()) {
+      case kPseudoIdBefore:
+      case kPseudoIdMarker: {
+        // Map to the beginning of the originating element.
+        const Node* originating =
+            &To<PseudoElement>(node)->UltimateOriginatingElement();
+        return PositionWithAffinity(MostForwardCaretPosition(
+            Position::FirstPositionInNode(*originating)));
+      }
+      case kPseudoIdAfter: {
+        // Map to the end of the originating element.
+        const Node* originating =
+            &To<PseudoElement>(node)->UltimateOriginatingElement();
+        return PositionWithAffinity(MostBackwardCaretPosition(
+            Position::LastPositionInNode(*originating)));
+      }
+      case kPseudoIdCheckMark:
+        return PositionWithAffinity(MostForwardCaretPosition(
+            Position::FirstPositionInNode(*inner_node_)));
+      default:
+        break;
+    }
   }
+
   return layout_object->PositionForPoint(LocalPoint());
 }
 
-LayoutObject* HitTestResult::GetLayoutObject() const {
-  return inner_node_ ? inner_node_->GetLayoutObject() : nullptr;
+PositionWithAffinity HitTestResult::GetPositionForInnerNodeOrImageMapImage()
+    const {
+  Node* node = InnerPossiblyPseudoNode();
+  if (node && !node->IsPseudoElement())
+    node = InnerNodeOrImageMapImage();
+  if (!node)
+    return PositionWithAffinity();
+  // |LayoutObject::PositionForPoint()| requires |kPrePaintClean|.
+  DCHECK_GE(node->GetDocument().Lifecycle().GetState(),
+            DocumentLifecycle::kPrePaintClean);
+  LayoutObject* layout_object = node->GetLayoutObject();
+  if (!layout_object)
+    return PositionWithAffinity();
+  // We should never have a layout object that is within a locked subtree.
+  CHECK(!DisplayLockUtilities::LockedAncestorPreventingPaint(*layout_object));
+
+  // If the layout object is blocked by display lock, we return the beginning of
+  // the node as the position. This is because we don't paint contents of the
+  // element. Furthermore, any caret adjustments below can access layout-dirty
+  // state in the subtree of this object.
+  if (layout_object->ChildPaintBlockedByDisplayLock())
+    return PositionWithAffinity(Position(*node, 0), TextAffinity::kDefault);
+
+  PositionWithAffinity position = layout_object->PositionForPoint(LocalPoint());
+  if (position.IsNull())
+    return PositionWithAffinity(FirstPositionInOrBeforeNode(*node));
+  return position;
 }
 
-void HitTestResult::SetToShadowHostIfInRestrictedShadowRoot() {
+void HitTestResult::SetToShadowHostIfInUAShadowRoot() {
   Node* node = InnerNode();
   if (!node)
     return;
@@ -166,41 +289,28 @@ void HitTestResult::SetToShadowHostIfInRestrictedShadowRoot() {
 
   // Consider a closed shadow tree of SVG's <use> element as a special
   // case so that a toolip title in the shadow tree works.
-  while (containing_shadow_root &&
-         (containing_shadow_root->IsUserAgent() ||
-          IsA<SVGUseElement>(containing_shadow_root->host()))) {
+  while (containing_shadow_root && containing_shadow_root->IsUserAgent()) {
     shadow_host = &containing_shadow_root->host();
     containing_shadow_root = shadow_host->ContainingShadowRoot();
-    SetInnerNode(node->OwnerShadowHost());
+    // TODO(layout-dev): Not updating local_point_ here seems like a mistake?
+    OverrideNodeAndPosition(node->OwnerShadowHost(), local_point_);
   }
 
+  // TODO(layout-dev): Not updating local_point_ here seems like a mistake?
   if (shadow_host)
-    SetInnerNode(shadow_host);
+    OverrideNodeAndPosition(shadow_host, local_point_);
 }
 
 CompositorElementId HitTestResult::GetScrollableContainer() const {
-  DCHECK(InnerNode());
-  LayoutBox* cur_box = InnerNode()->GetLayoutObject()->EnclosingBox();
-
-  // Scrolling propagates along the containing block chain and ends at the
-  // RootScroller node. The RootScroller node will have a custom applyScroll
-  // callback that performs scrolling as well as associated "root" actions like
-  // browser control movement and overscroll glow.
-  while (cur_box) {
-    if (cur_box->IsGlobalRootScroller() ||
-        cur_box->NeedsScrollNode(CompositingReason::kNone)) {
-      return CompositorElementIdFromUniqueObjectId(
-          cur_box->UniqueId(), CompositorElementIdNamespace::kScroll);
-    }
-
-    cur_box = cur_box->ContainingBlock();
+  ScrollableAreaTraversal scrollers(InnerNode());
+  auto iter = scrollers.begin();
+  if (iter != scrollers.end()) {
+    return iter->GetScrollElementId();
   }
 
-  return InnerNode()
-      ->GetDocument()
-      .GetPage()
-      ->GetVisualViewport()
-      .GetScrollElementId();
+  // If no node was found, return an invalid element ID, which we check for in
+  // InputHandlerProxy::ContinueScrollBeginAfterMainThreadHitTest.
+  return CompositorElementId();
 }
 
 HTMLAreaElement* HitTestResult::ImageAreaForImage() const {
@@ -212,16 +322,13 @@ HTMLAreaElement* HitTestResult::ImageAreaForImage() const {
           DynamicTo<HTMLImageElement>(inner_node_->OwnerShadowHost());
     }
   }
-
-  if (!image_element || !image_element->GetLayoutObject() ||
-      !image_element->GetLayoutObject()->IsBox())
+  if (!image_element || !IsA<LayoutBox>(image_element->GetLayoutObject())) {
     return nullptr;
-
-  HTMLMapElement* map = image_element->GetTreeScope().GetImageMap(
-      image_element->FastGetAttribute(html_names::kUsemapAttr));
-  if (!map)
+  }
+  HTMLMapElement* map = image_element->GetImageMap();
+  if (!map) {
     return nullptr;
-
+  }
   return map->AreaForPoint(LocalPoint(), image_element->GetLayoutObject());
 }
 
@@ -233,23 +340,14 @@ void HitTestResult::SetInnerNode(Node* n) {
     return;
   }
 
-  if (RuntimeEnabledFeatures::InertAttributeEnabled()) {
-    if (GetHitTestRequest().RetargetForInert()) {
-      if (n->IsInert()) {
-        if (!inert_node_)
-          inert_node_ = n;
-
-        return;
-      }
-
-      if (inert_node_ && n != inert_node_ &&
-          !n->IsShadowIncludingInclusiveAncestorOf(*inert_node_)) {
-        return;
-      }
-    }
-  }
-
   inner_possibly_pseudo_node_ = n;
+  // InnerNodeForHitTesting() always resolves to the originating DOM element for
+  // any pseudo-element (including activation-behavior pseudos like
+  // ::scroll-marker). inner_node_ is therefore always a non-pseudo Element,
+  // which is required for editing/selection (IsEditable, CanStartSelection,
+  // GetPosition).
+  // The raw pseudo is kept in inner_possibly_pseudo_node_ and exposed via
+  // InnerPossiblyPseudoElement() for hover/active state and event dispatch.
   if (auto* pseudo_element = DynamicTo<PseudoElement>(n))
     n = pseudo_element->InnerNodeForHitTesting();
   inner_node_ = n;
@@ -263,12 +361,13 @@ void HitTestResult::SetInnerNode(Node* n) {
     inner_element_ = FlatTreeTraversal::ParentElement(*inner_node_);
 }
 
-void HitTestResult::SetInertNode(Node* n) {
-  // Don't overwrite an existing value for inert_node_
-  if (inert_node_)
-    DCHECK(n == inert_node_);
-
-  inert_node_ = n;
+Element* HitTestResult::InnerPossiblyPseudoElement() const {
+  if (auto* pseudo =
+          DynamicTo<PseudoElement>(inner_possibly_pseudo_node_.Get());
+      pseudo && pseudo->SupportsHitTesting()) {
+    return pseudo;
+  }
+  return inner_element_.Get();
 }
 
 void HitTestResult::SetURLElement(Element* n) {
@@ -299,11 +398,17 @@ String HitTestResult::Title(TextDirection& dir) const {
   // Find the title in the nearest enclosing DOM node.
   // For <area> tags in image maps, walk the tree for the <area>, not the <img>
   // using it.
-  if (inner_node_.Get())
-    inner_node_->UpdateDistributionForFlatTreeTraversal();
   for (Node* title_node = inner_node_.Get(); title_node;
        title_node = FlatTreeTraversal::Parent(*title_node)) {
-    if (auto* element = DynamicTo<Element>(title_node)) {
+    if (auto* html_element = DynamicTo<HTMLElement>(title_node)) {
+      TextDirection title_dir;
+      const AtomicString& title = html_element->GetDirectionalAttribute(
+          html_names::kTitleAttr, title_dir);
+      if (!title.IsNull()) {
+        dir = title_dir;
+        return title;
+      }
+    } else if (auto* element = DynamicTo<Element>(title_node)) {
       String title = element->title();
       if (!title.IsNull()) {
         if (LayoutObject* layout_object = title_node->GetLayoutObject())
@@ -330,57 +435,46 @@ const AtomicString& HitTestResult::AltDisplayString() const {
 }
 
 Image* HitTestResult::GetImage() const {
-  Node* inner_node_or_image_map_image = InnerNodeOrImageMapImage();
-  if (!inner_node_or_image_map_image)
-    return nullptr;
+  return GetImage(InnerNodeOrImageMapImage());
+}
 
-  LayoutObject* layout_object =
-      inner_node_or_image_map_image->GetLayoutObject();
-  if (layout_object && layout_object->IsImage()) {
-    LayoutImage* image = ToLayoutImage(layout_object);
-    if (image->CachedImage() && !image->CachedImage()->ErrorOccurred())
-      return image->CachedImage()->GetImage();
+Image* HitTestResult::GetImage(const Node* node) {
+  const ImageResourceContent* image_content = GetImageContent(node);
+  if (image_content && !image_content->ErrorOccurred() &&
+      image_content->HasImage()) {
+    return image_content->GetImage();
   }
-
   return nullptr;
 }
 
-IntRect HitTestResult::ImageRect() const {
+gfx::Rect HitTestResult::ImageRect() const {
   if (!GetImage())
-    return IntRect();
-  return InnerNodeOrImageMapImage()
-      ->GetLayoutBox()
-      ->AbsoluteContentQuad()
-      .EnclosingBoundingBox();
+    return gfx::Rect();
+  return gfx::ToEnclosingRect(InnerNodeOrImageMapImage()
+                                  ->GetLayoutBox()
+                                  ->AbsoluteContentQuad()
+                                  .BoundingBox());
+}
+
+KURL HitTestResult::AbsoluteImageURL(const Node* node) {
+  if (!node || !HasImageSourceURL(*node)) {
+    return KURL();
+  }
+  const ImageResourceContent* image_content = GetImageContent(node);
+  if (image_content && image_content->IsAutomaticUpgrade()) {
+    return image_content->Url();
+  }
+
+  AtomicString url_string = To<Element>(*node).ImageSourceURL();
+  if (url_string.empty()) {
+    return KURL();
+  }
+  return node->GetDocument().CompleteURL(
+      StripLeadingAndTrailingHtmlSpaces(url_string));
 }
 
 KURL HitTestResult::AbsoluteImageURL() const {
-  Node* inner_node_or_image_map_image = InnerNodeOrImageMapImage();
-  if (!inner_node_or_image_map_image)
-    return KURL();
-
-  AtomicString url_string;
-  // Always return a url for image elements and input elements with type=image,
-  // even if they don't have a LayoutImage (e.g. because the image didn't load
-  // and we are using an alt container). For other elements we don't create alt
-  // containers so ensure they contain a loaded image.
-  auto* html_input_element =
-      DynamicTo<HTMLInputElement>(inner_node_or_image_map_image);
-  if (IsA<HTMLImageElement>(*inner_node_or_image_map_image) ||
-      (html_input_element &&
-       html_input_element->type() == input_type_names::kImage))
-    url_string = To<Element>(*inner_node_or_image_map_image).ImageSourceURL();
-  else if ((inner_node_or_image_map_image->GetLayoutObject() &&
-            inner_node_or_image_map_image->GetLayoutObject()->IsImage()) &&
-           (IsA<HTMLEmbedElement>(*inner_node_or_image_map_image) ||
-            IsA<HTMLObjectElement>(*inner_node_or_image_map_image) ||
-            IsA<SVGImageElement>(*inner_node_or_image_map_image)))
-    url_string = To<Element>(*inner_node_or_image_map_image).ImageSourceURL();
-  if (url_string.IsEmpty())
-    return KURL();
-
-  return inner_node_or_image_map_image->GetDocument().CompleteURL(
-      StripLeadingAndTrailingHTMLSpaces(url_string));
+  return AbsoluteImageURL(InnerNodeOrImageMapImage());
 }
 
 KURL HitTestResult::AbsoluteMediaURL() const {
@@ -390,8 +484,26 @@ KURL HitTestResult::AbsoluteMediaURL() const {
 }
 
 MediaStreamDescriptor* HitTestResult::GetMediaStreamDescriptor() const {
-  if (HTMLMediaElement* media_elt = MediaElement())
-    return media_elt->GetSrcObject();
+  if (HTMLMediaElement* media_elt = MediaElement()) {
+    auto variant = media_elt->GetSrcObjectVariant();
+    if (std::holds_alternative<MediaStreamDescriptor*>(variant)) {
+      // It might be nullptr-valued variant, too, here, but we return nullptr
+      // for that, regardless.
+      return std::get<MediaStreamDescriptor*>(variant);
+    }
+  }
+  return nullptr;
+}
+
+MediaSourceHandle* HitTestResult::GetMediaSourceHandle() const {
+  if (HTMLMediaElement* media_elt = MediaElement()) {
+    auto variant = media_elt->GetSrcObjectVariant();
+    if (std::holds_alternative<MediaSourceHandle*>(variant)) {
+      // It might be a nullptr-valued MediaStreamDescriptor* variant, here, but
+      // we return nullptr for that, regardless.
+      return std::get<MediaSourceHandle*>(variant);
+    }
+  }
   return nullptr;
 }
 
@@ -441,29 +553,64 @@ bool HitTestResult::IsContentEditable() const {
   if (auto* input = DynamicTo<HTMLInputElement>(*inner_node_))
     return !input->IsDisabledOrReadOnly() && input->IsTextField();
 
-  return HasEditableStyle(*inner_node_);
+  return IsEditable(*inner_node_);
+}
+
+std::tuple<bool, ListBasedHitTestBehavior>
+HitTestResult::AddNodeToListBasedTestResultInternal(
+    Node* node,
+    const HitTestLocation& location) {
+  // If not a list-based test, stop testing because the hit has been found.
+  if (!GetHitTestRequest().ListBased())
+    return std::make_tuple(false, kStopHitTesting);
+
+  if (!node)
+    return std::make_tuple(false, kContinueHitTesting);
+
+  MutableListBasedTestResult().insert(node);
+  if (GetHitTestRequest().PenetratingList()) {
+    ListBasedHitTestBehavior behavior = kContinueHitTesting;
+    if (GetHitTestRequest().UseHitNodeCb()) {
+      LocalFrameView::InvalidationDisallowedScope invalidation_disallowed(
+          *node->GetDocument().View());
+      behavior = GetHitTestRequest().RunHitNodeCb(*node);
+    }
+    return std::make_tuple(false, behavior);
+  }
+
+  // The second argument will be ignored.
+  return std::make_tuple(true, kContinueHitTesting);
+}
+
+const ImageResourceContent* HitTestResult::GetImageContent(const Node* node) {
+  if (!node) {
+    return nullptr;
+  }
+  const LayoutObject* layout_object = node->GetLayoutObject();
+  if (!layout_object) {
+    return nullptr;
+  }
+  const LayoutImageResource* layout_image_resource = nullptr;
+  if (const auto* layout_image = DynamicTo<LayoutImage>(layout_object)) {
+    layout_image_resource = layout_image->ImageResource();
+  } else if (const auto* svg_image = DynamicTo<LayoutSVGImage>(layout_object)) {
+    layout_image_resource = svg_image->ImageResource();
+  }
+  const ImageResourceContent* image_content =
+      layout_image_resource ? layout_image_resource->CachedImage() : nullptr;
+  return image_content;
 }
 
 ListBasedHitTestBehavior HitTestResult::AddNodeToListBasedTestResult(
     Node* node,
     const HitTestLocation& location,
     const PhysicalRect& rect) {
-  // If we are in the process of retargeting for `inert`, continue.
-  if (GetHitTestRequest().RetargetForInert() && InertNode() && !InnerNode())
-    return kContinueHitTesting;
-
-  // If not a list-based test, stop testing because the hit has been found.
-  if (!GetHitTestRequest().ListBased())
-    return kStopHitTesting;
-
-  if (!node)
-    return kContinueHitTesting;
-
-  MutableListBasedTestResult().insert(node);
-
-  if (GetHitTestRequest().PenetratingList())
-    return kContinueHitTesting;
-
+  bool should_check_containment;
+  ListBasedHitTestBehavior behavior;
+  std::tie(should_check_containment, behavior) =
+      AddNodeToListBasedTestResultInternal(node, location);
+  if (!should_check_containment)
+    return behavior;
   return rect.Contains(location.BoundingBox()) ? kStopHitTesting
                                                : kContinueHitTesting;
 }
@@ -471,25 +618,30 @@ ListBasedHitTestBehavior HitTestResult::AddNodeToListBasedTestResult(
 ListBasedHitTestBehavior HitTestResult::AddNodeToListBasedTestResult(
     Node* node,
     const HitTestLocation& location,
-    const Region& region) {
-  // If we are in the process of retargeting for `inert`, continue.
-  if (GetHitTestRequest().RetargetForInert() && InertNode() && !InnerNode())
-    return kContinueHitTesting;
+    const gfx::QuadF& quad) {
+  bool should_check_containment;
+  ListBasedHitTestBehavior behavior;
+  std::tie(should_check_containment, behavior) =
+      AddNodeToListBasedTestResultInternal(node, location);
+  if (!should_check_containment)
+    return behavior;
+  return quad.ContainsQuad(gfx::QuadF(gfx::RectF(location.BoundingBox())))
+             ? kStopHitTesting
+             : kContinueHitTesting;
+}
 
-  // If not a list-based test, stop testing because the hit has been found.
-  if (!GetHitTestRequest().ListBased())
-    return kStopHitTesting;
-
-  if (!node)
-    return kContinueHitTesting;
-
-  MutableListBasedTestResult().insert(node);
-
-  if (GetHitTestRequest().PenetratingList())
-    return kContinueHitTesting;
-
-  return region.Contains(location.EnclosingIntRect()) ? kStopHitTesting
-                                                      : kContinueHitTesting;
+ListBasedHitTestBehavior HitTestResult::AddNodeToListBasedTestResult(
+    Node* node,
+    const HitTestLocation& location,
+    const cc::Region& region) {
+  bool should_check_containment;
+  ListBasedHitTestBehavior behavior;
+  std::tie(should_check_containment, behavior) =
+      AddNodeToListBasedTestResultInternal(node, location);
+  if (!should_check_containment)
+    return behavior;
+  return region.Contains(location.ToEnclosingRect()) ? kStopHitTesting
+                                                     : kContinueHitTesting;
 }
 
 void HitTestResult::Append(const HitTestResult& other) {
@@ -507,11 +659,9 @@ void HitTestResult::Append(const HitTestResult& other) {
     point_in_inner_node_frame_ = other.point_in_inner_node_frame_;
     inner_url_element_ = other.URLElement();
     is_over_embedded_content_view_ = other.IsOverEmbeddedContentView();
-    canvas_region_id_ = other.CanvasRegionId();
+    is_over_resizer_ = other.IsOverResizer();
+    is_over_scroll_corner_ = other.is_over_scroll_corner_;
   }
-
-  if (!inert_node_ && other.InertNode())
-    SetInertNode(other.InertNode());
 
   if (other.list_based_test_result_) {
     NodeSet& set = MutableListBasedTestResult();

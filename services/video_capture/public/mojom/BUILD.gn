@@ -1,4 +1,4 @@
-# Copyright 2016 The Chromium Authors. All rights reserved.
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,10 +7,8 @@ import("//mojo/public/tools/bindings/mojom.gni")
 mojom("mojom") {
   sources = [
     "device.mojom",
-    "device_factory.mojom",
     "devices_changed_observer.mojom",
     "producer.mojom",
-    "scoped_access_permission.mojom",
     "testing_controls.mojom",
     "video_capture_service.mojom",
     "video_frame_handler.mojom",
@@ -25,6 +23,8 @@ mojom("mojom") {
     "//media/mojo/mojom",
     "//ui/gfx/geometry/mojom",
   ]
+
+  public_deps = [ "//sandbox/policy/mojom" ]
 
   if (is_chromeos) {
     deps += [

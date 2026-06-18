@@ -26,38 +26,48 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_V8_PER_ISOLATE_DATA_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_V8_PER_ISOLATE_DATA_H_
 
+#include <array>
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
-#include "base/macros.h"
 #include "gin/public/gin_embedders.h"
 #include "gin/public/isolate_holder.h"
-#include "third_party/blink/renderer/platform/bindings/active_script_wrappable_manager.h"
 #include "third_party/blink/renderer/platform/bindings/runtime_call_stats.h"
-#include "third_party/blink/renderer/platform/bindings/scoped_persistent.h"
-#include "third_party/blink/renderer/platform/bindings/v8_global_value_map.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
-#include "v8/include/v8.h"
+#include "third_party/blink/renderer/platform/wtf/vector.h"
+#include "v8/include/v8-callbacks.h"
+#include "v8/include/v8-forward.h"
+#include "v8/include/v8-isolate.h"
+#include "v8/include/v8-local-handle.h"
+#include "v8/include/v8-persistent-handle.h"
 
 namespace base {
 class SingleThreadTaskRunner;
-}
+}  // namespace base
+
+namespace blink::scheduler {
+class TaskAttributionTracker;
+}  // namespace blink::scheduler
 
 namespace blink {
 
+class DictionaryConversionContext;
 class DOMWrapperWorld;
 class ScriptState;
 class StringCache;
+class ThreadDebugger;
 class V8PrivateProperty;
 struct WrapperTypeInfo;
+class ScriptRegexp;
 
 // Used to hold data that is associated with a single v8::Isolate object, and
 // has a 1:1 relationship with v8::Isolate.
-class PLATFORM_EXPORT V8PerIsolateData {
+class PLATFORM_EXPORT V8PerIsolateData final {
   USING_FAST_MALLOC(V8PerIsolateData);
 
  public:
@@ -92,26 +102,13 @@ class PLATFORM_EXPORT V8PerIsolateData {
     const bool original_use_counter_disabled_;
   };
 
-  // Use this class to abstract away types of members that are pointers to core/
-  // objects, which are simply owned and released by V8PerIsolateData (see
-  // m_threadDebugger for an example).
-  class PLATFORM_EXPORT Data {
-   public:
-    virtual ~Data() = default;
-  };
-
-  // Pointers to core/ objects that are garbage collected. Receives callback
-  // when V8PerIsolateData will be destroyed.
-  class PLATFORM_EXPORT GarbageCollectedData
-      : public GarbageCollected<GarbageCollectedData> {
-   public:
-    virtual ~GarbageCollectedData() = default;
-    virtual void WillBeDestroyed() {}
-    virtual void Trace(Visitor*) const {}
-  };
-
   static v8::Isolate* Initialize(scoped_refptr<base::SingleThreadTaskRunner>,
-                                 V8ContextSnapshotMode);
+                                 scoped_refptr<base::SingleThreadTaskRunner>,
+                                 scoped_refptr<base::SingleThreadTaskRunner>,
+                                 V8ContextSnapshotMode,
+                                 v8::CreateHistogramCallback,
+                                 v8::AddHistogramSampleCallback,
+                                 std::unique_ptr<v8::CppHeap>);
 
   static V8PerIsolateData* From(v8::Isolate* isolate) {
     DCHECK(isolate);
@@ -120,12 +117,17 @@ class PLATFORM_EXPORT V8PerIsolateData {
         isolate->GetData(gin::kEmbedderBlink));
   }
 
+  V8PerIsolateData(const V8PerIsolateData&) = delete;
+  V8PerIsolateData& operator=(const V8PerIsolateData&) = delete;
+
   static void WillBeDestroyed(v8::Isolate*);
   static void Destroy(v8::Isolate*);
-  static v8::Isolate* MainThreadIsolate();
 
   static void EnableIdleTasks(v8::Isolate*,
                               std::unique_ptr<gin::V8IdleTaskRunner>);
+
+  // No hash-map / tree-map look-up when it's the main world.
+  DOMWrapperWorld& GetMainWorld() { return *main_world_; }
 
   v8::Isolate* GetIsolate() { return isolate_holder_.isolate(); }
 
@@ -144,12 +146,23 @@ class PLATFORM_EXPORT V8PerIsolateData {
 
   V8PrivateProperty* PrivateProperty() { return private_property_.get(); }
 
-  // Accessors to the cache of interface templates.
-  v8::Local<v8::FunctionTemplate> FindInterfaceTemplate(const DOMWrapperWorld&,
-                                                        const void* key);
-  void SetInterfaceTemplate(const DOMWrapperWorld&,
-                            const void* key,
-                            v8::Local<v8::FunctionTemplate>);
+  // Accessors to the cache of v8::Templates.
+  v8::Local<v8::Template> FindV8Template(const DOMWrapperWorld& world,
+                                         const void* key);
+  void AddV8Template(const DOMWrapperWorld& world,
+                     const void* key,
+                     v8::Local<v8::Template> value);
+
+  v8::MaybeLocal<v8::DictionaryTemplate> FindV8DictionaryTemplate(
+      const void* key);
+  void AddV8DictionaryTemplate(const void* key,
+                               v8::Local<v8::DictionaryTemplate> value);
+
+  bool HasInstance(const WrapperTypeInfo* wrapper_type_info,
+                   v8::Local<v8::Value> untrusted_value);
+  bool HasInstanceOfUntrustedType(
+      const WrapperTypeInfo* untrusted_wrapper_type_info,
+      v8::Local<v8::Value> untrusted_value);
 
   // When v8::SnapshotCreator::CreateBlob() is called, we must not have
   // persistent handles in Blink. This method clears them.
@@ -161,20 +174,6 @@ class PLATFORM_EXPORT V8PerIsolateData {
   V8ContextSnapshotMode GetV8ContextSnapshotMode() const {
     return v8_context_snapshot_mode_;
   }
-  void BailoutAndDisableV8ContextSnapshot() {
-    DCHECK_EQ(V8ContextSnapshotMode::kUseSnapshot, v8_context_snapshot_mode_);
-    v8_context_snapshot_mode_ = V8ContextSnapshotMode::kDontUseSnapshot;
-  }
-
-  // Accessor to the cache of cross-origin accessible operation's templates.
-  // Created templates get automatically cached.
-  v8::Local<v8::FunctionTemplate> FindOrCreateOperationTemplate(
-      const DOMWrapperWorld&,
-      const void* key,
-      v8::FunctionCallback,
-      v8::Local<v8::Value> data,
-      v8::Local<v8::Signature>,
-      int length);
 
   // Obtains a pointer to an array of names, given a lookup key. If it does not
   // yet exist, it is created from the given array of strings. Once created,
@@ -182,83 +181,139 @@ class PLATFORM_EXPORT V8PerIsolateData {
   // compile-time list of related names, such as IDL dictionary keys.
   const base::span<const v8::Eternal<v8::Name>> FindOrCreateEternalNameCache(
       const void* lookup_key,
-      const base::span<const char* const>& names);
-
-  bool HasInstance(const WrapperTypeInfo* untrusted, v8::Local<v8::Value>);
-  v8::Local<v8::Object> FindInstanceInPrototypeChain(const WrapperTypeInfo*,
-                                                     v8::Local<v8::Value>);
+      base::span<const std::string_view> names);
 
   v8::Local<v8::Context> EnsureScriptRegexpContext();
   void ClearScriptRegexpContext();
 
-  // EndOfScopeTasks are run when control is returning
-  // to C++ from script, after executing a script task (e.g. callback,
-  // event) or microtasks (e.g. promise). This is explicitly needed for
-  // Indexed DB transactions per spec, but should in general be avoided.
-  void AddEndOfScopeTask(base::OnceClosure);
-  void RunEndOfScopeTasks();
-  void ClearEndOfScopeTasks();
+  ThreadDebugger* GetThreadDebugger() const { return thread_debugger_.get(); }
+  void SetThreadDebugger(std::unique_ptr<ThreadDebugger> thread_debugger);
 
-  void SetThreadDebugger(std::unique_ptr<Data>);
-  Data* ThreadDebugger();
+  void SetPasswordRegexp(ScriptRegexp*);
+  ScriptRegexp* GetPasswordRegexp();
 
-  void SetProfilerGroup(V8PerIsolateData::GarbageCollectedData*);
-  V8PerIsolateData::GarbageCollectedData* ProfilerGroup();
+  // Set the factory function used to initialize task attribution for the
+  // isolate upon creating main thread `V8PerIsolateData`. This should be set
+  // once per process before creating any isolates.
+  using TaskAttributionTrackerFactoryPtr =
+      std::unique_ptr<scheduler::TaskAttributionTracker> (*)(v8::Isolate*);
+  static void SetTaskAttributionTrackerFactory(
+      TaskAttributionTrackerFactoryPtr factory);
 
-  ActiveScriptWrappableManager* GetActiveScriptWrappableManager() const {
-    DCHECK(active_script_wrappable_manager_);
-    return active_script_wrappable_manager_;
+  // If not on the main thread,`task_attribution_tracker_` can be initialized
+  // lazily on selected threads.
+  void InitializeTaskAttributionTrackerOnWorkerThread();
+
+  // Returns the `scheduler::TaskAttributionTracker` associated with the
+  // associated `v8::Isolate`. Returns null if the
+  // TaskAttributionInfrastructureDisabledForTesting feature is enabled.
+  scheduler::TaskAttributionTracker* GetTaskAttributionTracker() {
+    return task_attribution_tracker_.get();
   }
 
-  void SetActiveScriptWrappableManager(ActiveScriptWrappableManager* manager) {
-    DCHECK(manager);
-    active_script_wrappable_manager_ = manager;
+  // Pointers to objects that are garbage collected that are logically
+  // associated with an Isolate. Receives callback when V8PerIsolateData
+  // will be destroyed.
+  class PLATFORM_EXPORT UserData : public GarbageCollected<UserData> {
+   public:
+    enum class Key : uint32_t {
+      kProfileGroup,
+      kCanvasResourceTracker,
+      kNumberOfKeys
+    };
+
+    virtual ~UserData() = default;
+    virtual void WillBeDestroyed() {}
+    virtual void Trace(Visitor*) const {}
+  };
+
+  UserData* GetUserData(UserData::Key key) const {
+    // SAFETY: user_data_ size based upon UserData::Key::kNumberOfKeys.
+    return UNSAFE_BUFFERS(user_data_[static_cast<size_t>(key)]);
   }
 
-  void SetGCCallbacks(v8::Isolate* isolate,
-                      v8::Isolate::GCCallback prologue_callback,
-                      v8::Isolate::GCCallback epilogue_callback);
+  void SetUserData(UserData::Key key, UserData* data) {
+    // SAFETY: user_data_ size based upon UserData::Key::kNumberOfKeys.
+    UNSAFE_BUFFERS(user_data_[static_cast<size_t>(key)]) = data;
+  }
+
+  void SetTopOfDictionaryStack(DictionaryConversionContext* top) {
+    top_of_dictionary_stack_ = top;
+  }
+  DictionaryConversionContext* TopOfDictionaryStack() const {
+    return top_of_dictionary_stack_;
+  }
+
+  void SetOmitExceptionContextInformation(bool omit) {
+    CHECK_NE(omit_exception_context_information_, omit);
+    omit_exception_context_information_ = omit;
+  }
+  bool OmitExceptionContextInformation() const {
+    return omit_exception_context_information_;
+  }
+
+  void EnterWrapperConstructor() {
+    DCHECK(!is_in_wrapper_constructor_);
+    is_in_wrapper_constructor_ = true;
+  }
+
+  void LeaveWrapperConstructor() {
+    DCHECK(is_in_wrapper_constructor_);
+    is_in_wrapper_constructor_ = false;
+  }
+
+  bool InWrapperConstructor() const { return is_in_wrapper_constructor_; }
 
  private:
   V8PerIsolateData(scoped_refptr<base::SingleThreadTaskRunner>,
-                   V8ContextSnapshotMode);
-  V8PerIsolateData();
+                   scoped_refptr<base::SingleThreadTaskRunner>,
+                   scoped_refptr<base::SingleThreadTaskRunner>,
+                   V8ContextSnapshotMode,
+                   v8::CreateHistogramCallback,
+                   v8::AddHistogramSampleCallback,
+                   std::unique_ptr<v8::CppHeap>);
   ~V8PerIsolateData();
 
   // A really simple hash function, which makes lookups faster. The set of
   // possible keys for this is relatively small and fixed at compile time, so
   // collisions are less of a worry than they would otherwise be.
-  struct SimplePtrHash : WTF::PtrHash<const void> {
+  struct SimplePtrHashTraits : public GenericHashTraits<const void*> {
     static unsigned GetHash(const void* key) {
       uintptr_t k = reinterpret_cast<uintptr_t>(key);
       return static_cast<unsigned>(k ^ (k >> 8));
     }
   };
-  using V8FunctionTemplateMap =
-      HashMap<const void*, v8::Eternal<v8::FunctionTemplate>, SimplePtrHash>;
-  V8FunctionTemplateMap& SelectInterfaceTemplateMap(const DOMWrapperWorld&);
-  V8FunctionTemplateMap& SelectOperationTemplateMap(const DOMWrapperWorld&);
-  bool HasInstance(const WrapperTypeInfo* untrusted,
-                   v8::Local<v8::Value>,
-                   V8FunctionTemplateMap&);
-  v8::Local<v8::Object> FindInstanceInPrototypeChain(const WrapperTypeInfo*,
-                                                     v8::Local<v8::Value>,
-                                                     V8FunctionTemplateMap&);
+  using V8TemplateMap =
+      HashMap<const void*, v8::Eternal<v8::Template>, SimplePtrHashTraits>;
+  V8TemplateMap& SelectV8TemplateMap(const DOMWrapperWorld&);
+  bool HasInstance(const WrapperTypeInfo* wrapper_type_info,
+                   v8::Local<v8::Value> untrusted_value,
+                   const V8TemplateMap& map);
+  bool HasInstanceOfUntrustedType(
+      const WrapperTypeInfo* untrusted_wrapper_type_info,
+      v8::Local<v8::Value> untrusted_value,
+      const V8TemplateMap& map);
 
   V8ContextSnapshotMode v8_context_snapshot_mode_;
+
+  // The thread_debugger_ has to be destructed after the IsolateHolder, and
+  // therefore has to be defined before the IsolateHolder. The reason is that
+  // when the IsolateHolder gets destructed, all objects allocated on the
+  // CppHeap get deallocated. AsyncTaskContext objects are allocated on the
+  // CppHeap, and these objects load the ThreadDebugger from the
+  // V8PerIsolateData in its destructor.
+  std::unique_ptr<ThreadDebugger> thread_debugger_;
+
   // This isolate_holder_ must be initialized before initializing some other
   // members below.
   gin::IsolateHolder isolate_holder_;
 
-  // interface_template_map_for_{,non_}main_world holds function templates for
-  // the inerface objects.
-  V8FunctionTemplateMap interface_template_map_for_main_world_;
-  V8FunctionTemplateMap interface_template_map_for_non_main_world_;
+  // v8::Template cache of interface objects, namespace objects, etc.
+  V8TemplateMap v8_template_map_for_main_world_;
+  V8TemplateMap v8_template_map_for_non_main_worlds_;
 
-  // m_operationTemplateMapFor{,Non}MainWorld holds function templates for
-  // the cross-origin accessible DOM operations.
-  V8FunctionTemplateMap operation_template_map_for_main_world_;
-  V8FunctionTemplateMap operation_template_map_for_non_main_world_;
+  HashMap<const void*, v8::Eternal<v8::DictionaryTemplate>, SimplePtrHashTraits>
+      v8_dict_template_map_;
 
   // Contains lists of eternal names, such as dictionary keys.
   HashMap<const void*, Vector<v8::Eternal<v8::Name>>> eternal_name_cache_;
@@ -267,27 +322,38 @@ class PLATFORM_EXPORT V8PerIsolateData {
   std::unique_ptr<V8PrivateProperty> private_property_;
   Persistent<ScriptState> script_regexp_script_state_;
 
-  bool constructor_mode_;
-  friend class ConstructorMode;
+  bool is_in_wrapper_constructor_ = false;
 
-  bool use_counter_disabled_;
+  bool use_counter_disabled_ = false;
   friend class UseCounterDisabledScope;
 
-  bool is_handling_recursion_level_error_;
+  bool is_handling_recursion_level_error_ = false;
 
-  Vector<base::OnceClosure> end_of_scope_tasks_;
-  std::unique_ptr<Data> thread_debugger_;
-  Persistent<GarbageCollectedData> profiler_group_;
-
-  Persistent<ActiveScriptWrappableManager> active_script_wrappable_manager_;
+  Persistent<ScriptRegexp> password_regexp_;
+  std::array<Persistent<UserData>,
+             static_cast<size_t>(UserData::Key::kNumberOfKeys)>
+      user_data_;
 
   RuntimeCallStats runtime_call_stats_;
 
-  v8::Isolate::GCCallback prologue_callback_;
-  v8::Isolate::GCCallback epilogue_callback_;
+  Persistent<DOMWrapperWorld> main_world_;
 
-  DISALLOW_COPY_AND_ASSIGN(V8PerIsolateData);
+  std::unique_ptr<scheduler::TaskAttributionTracker> task_attribution_tracker_;
+
+  raw_ptr<DictionaryConversionContext> top_of_dictionary_stack_ = nullptr;
+  bool omit_exception_context_information_ = false;
 };
+
+// Creates a histogram for V8. The returned value is a base::Histogram, but
+// typed to void* for v8.
+PLATFORM_EXPORT void* CreateHistogram(const char* name,
+                                      int min,
+                                      int max,
+                                      size_t buckets);
+
+// Adds an entry to the supplied histogram. `hist` was previously returned from
+// CreateHistogram().
+PLATFORM_EXPORT void AddHistogramSample(void* hist, int sample);
 
 }  // namespace blink
 

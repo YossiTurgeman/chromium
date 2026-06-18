@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,28 @@
 
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
+#include "components/feed/core/proto/v2/store.pb.h"
+#include "components/feed/core/proto/v2/wire/eventid.pb.h"
+#include "components/feed/core/v2/feedstore_util.h"
 #include "components/feed/core/v2/proto_util.h"
 #include "components/feed/core/v2/protocol_translator.h"
+#include "google_apis/gaia/gaia_id.h"
 
 namespace feed {
+namespace {
+void AddContentHashes(const feedstore::Content& content,
+                      feedstore::StreamData& stream_data) {
+  for (auto& metadata : content.prefetch_metadata()) {
+    stream_data.add_content_hashes()->add_hashes(
+        feedstore::ContentHashFromPrefetchMetadata(metadata));
+  }
+}
+}  // namespace
 
-const base::Time kTestTimeEpoch = base::Time::UnixEpoch();
+base::Time kTestTimeEpoch = base::Time::UnixEpoch();
+AccountInfo TestAccountInfo() {
+  return {GaiaId("gaia"), "user@foo"};
+}
 
 ContentId MakeContentId(ContentId::Type type,
                         std::string content_domain,
@@ -33,12 +49,22 @@ ContentId MakeContentContentId(int id_number) {
   return MakeContentId(ContentId::FEATURE, "stories", id_number);
 }
 
+ContentId MakeNoticeCardContentContentId(int id_number) {
+  return MakeContentId(ContentId::FEATURE, "privacynoticecard.f", id_number);
+}
+
 ContentId MakeSharedStateContentId(int id_number) {
   return MakeContentId(ContentId::TYPE_UNDEFINED, "shared", id_number);
 }
 
 ContentId MakeRootId(int id_number) {
   return MakeContentId(ContentId::TYPE_UNDEFINED, "root", id_number);
+}
+
+std::string MakeRootEventId(int id_number) {
+  feedwire::EventIdMessage id;
+  id.set_time_usec(id_number);
+  return id.SerializeAsString();
 }
 
 ContentId MakeSharedStateId(int id_number) {
@@ -49,13 +75,24 @@ feedstore::StreamStructure MakeStream(int id_number) {
   feedstore::StreamStructure result;
   result.set_type(feedstore::StreamStructure::STREAM);
   result.set_operation(feedstore::StreamStructure::UPDATE_OR_APPEND);
+  result.set_is_root(true);
   *result.mutable_content_id() = MakeRootId(id_number);
   return result;
 }
 
 feedstore::StreamStructure MakeCluster(int id_number, ContentId parent) {
   feedstore::StreamStructure result;
-  result.set_type(feedstore::StreamStructure::CLUSTER);
+  result.set_type(feedstore::StreamStructure::GROUP);
+  result.set_operation(feedstore::StreamStructure::UPDATE_OR_APPEND);
+  *result.mutable_content_id() = MakeClusterId(id_number);
+  *result.mutable_parent_id() = parent;
+  return result;
+}
+
+feedstore::StreamStructure MakeNoticeCardCluster(int id_number,
+                                                 ContentId parent) {
+  feedstore::StreamStructure result;
+  result.set_type(feedstore::StreamStructure::GROUP);
   result.set_operation(feedstore::StreamStructure::UPDATE_OR_APPEND);
   *result.mutable_content_id() = MakeClusterId(id_number);
   *result.mutable_parent_id() = parent;
@@ -67,6 +104,16 @@ feedstore::StreamStructure MakeContentNode(int id_number, ContentId parent) {
   result.set_type(feedstore::StreamStructure::CONTENT);
   result.set_operation(feedstore::StreamStructure::UPDATE_OR_APPEND);
   *result.mutable_content_id() = MakeContentContentId(id_number);
+  *result.mutable_parent_id() = parent;
+  return result;
+}
+
+feedstore::StreamStructure MakeNoticeCardContentNode(int id_number,
+                                                     ContentId parent) {
+  feedstore::StreamStructure result;
+  result.set_type(feedstore::StreamStructure::CONTENT);
+  result.set_operation(feedstore::StreamStructure::UPDATE_OR_APPEND);
+  *result.mutable_content_id() = MakeNoticeCardContentContentId(id_number);
   *result.mutable_parent_id() = parent;
   return result;
 }
@@ -106,6 +153,13 @@ feedstore::Content MakeContent(int id_number) {
   prefetch_metadata.set_image_url("http://image" + suffix);
   prefetch_metadata.set_favicon_url("http://favicon" + suffix);
   prefetch_metadata.set_badge_id("app/badge" + suffix);
+  return result;
+}
+
+feedstore::Content MakeNoticeCardContent(int id_number) {
+  feedstore::Content result;
+  *result.mutable_content_id() = MakeNoticeCardContentContentId(id_number);
+  result.set_frame("f:" + base::NumberToString(0));
   return result;
 }
 
@@ -158,48 +212,83 @@ std::vector<feedstore::DataOperation> MakeTypicalStreamOperations() {
   };
 }
 
-std::unique_ptr<StreamModelUpdateRequest> MakeTypicalInitialModelState(
-    int first_cluster_id,
-    base::Time last_added_time,
-    bool signed_in,
-    bool logging_enabled,
-    bool privacy_notice_fulfilled) {
+StreamModelUpdateRequestGenerator::StreamModelUpdateRequestGenerator() =
+    default;
+StreamModelUpdateRequestGenerator::~StreamModelUpdateRequestGenerator() =
+    default;
+
+std::unique_ptr<StreamModelUpdateRequest>
+StreamModelUpdateRequestGenerator::MakeFirstPage(int first_cluster_id,
+                                                 int num_cards) const {
+  std::vector<int> id_numbers;
+  for (int i = first_cluster_id; i < first_cluster_id + num_cards; ++i) {
+    id_numbers.push_back(i);
+  }
+  return MakeFirstPageWithSpecificContents(id_numbers);
+}
+
+std::unique_ptr<StreamModelUpdateRequest>
+StreamModelUpdateRequestGenerator::MakeFirstPageWithSpecificContents(
+    const std::vector<int>& id_numbers) const {
   auto initial_update = std::make_unique<StreamModelUpdateRequest>();
-  const int i = first_cluster_id;
-  const int j = first_cluster_id + 1;
   initial_update->source =
       StreamModelUpdateRequest::Source::kInitialLoadFromStore;
-  initial_update->content.push_back(MakeContent(i));
-  initial_update->content.push_back(MakeContent(j));
-  initial_update->stream_structures = {MakeClearAll(),
-                                       MakeStream(),
-                                       MakeCluster(i, MakeRootId()),
-                                       MakeContentNode(i, MakeClusterId(i)),
-                                       MakeCluster(j, MakeRootId()),
-                                       MakeContentNode(j, MakeClusterId(j))};
+  initial_update->stream_structures = {MakeClearAll(), MakeStream()};
 
-  initial_update->shared_states.push_back(MakeSharedState(i));
+  if (!id_numbers.empty()) {
+    int first_cluster_id = id_numbers.front();
+    bool include_notice_card =
+        (privacy_notice_fulfilled && first_cluster_id == 0);
+
+    for (const auto i : id_numbers) {
+      if (include_notice_card && i == first_cluster_id) {
+        initial_update->content.push_back(MakeNoticeCardContent(i));
+        initial_update->stream_structures.push_back(
+            MakeNoticeCardCluster(i, MakeRootId()));
+        initial_update->stream_structures.push_back(
+            MakeNoticeCardContentNode(i, MakeClusterId(i)));
+      } else {
+        initial_update->content.push_back(MakeContent(i));
+        initial_update->stream_structures.push_back(
+            MakeCluster(i, MakeRootId()));
+        initial_update->stream_structures.push_back(
+            MakeContentNode(i, MakeClusterId(i)));
+      }
+    }
+
+    initial_update->shared_states.push_back(MakeSharedState(first_cluster_id));
+    *initial_update->stream_data.add_shared_state_ids() =
+        MakeSharedStateId(first_cluster_id);
+  }
+
   *initial_update->stream_data.mutable_content_id() = MakeRootId();
-  *initial_update->stream_data.mutable_shared_state_id() = MakeSharedStateId(i);
+  initial_update->stream_data.set_root_event_id(
+      MakeRootEventId(event_id_number));
   initial_update->stream_data.set_next_page_token("page-2");
   initial_update->stream_data.set_signed_in(signed_in);
+  if (signed_in) {
+    initial_update->stream_data.set_email(account_info.email);
+    initial_update->stream_data.set_gaia(account_info.gaia.ToString());
+  }
   initial_update->stream_data.set_logging_enabled(logging_enabled);
   initial_update->stream_data.set_privacy_notice_fulfilled(
       privacy_notice_fulfilled);
-  SetLastAddedTime(last_added_time, initial_update->stream_data);
+  initial_update->stream_data.set_stream_key(stream_key);
+
+  for (size_t i = 0; i < id_numbers.size(); ++i) {
+    AddContentHashes(initial_update->content[i], initial_update->stream_data);
+  }
+  feedstore::SetLastAddedTime(last_added_time, initial_update->stream_data);
 
   return initial_update;
 }
 
-std::unique_ptr<StreamModelUpdateRequest> MakeTypicalNextPageState(
+std::unique_ptr<StreamModelUpdateRequest>
+StreamModelUpdateRequestGenerator::MakeNextPage(
     int page_number,
-    base::Time last_added_time,
-    bool signed_in,
-    bool logging_enabled,
-    bool privacy_notice_fulfilled) {
+    StreamModelUpdateRequest::Source source) const {
   auto initial_update = std::make_unique<StreamModelUpdateRequest>();
-  initial_update->source =
-      StreamModelUpdateRequest::Source::kInitialLoadFromStore;
+  initial_update->source = source;
   // Each page has two pieces of content, get their indices.
   const int i = 2 * page_number - 2;
   const int j = i + 1;
@@ -210,18 +299,86 @@ std::unique_ptr<StreamModelUpdateRequest> MakeTypicalNextPageState(
       MakeContentNode(i, MakeClusterId(i)), MakeCluster(j, MakeRootId()),
       MakeContentNode(j, MakeClusterId(j))};
 
-  initial_update->shared_states.push_back(MakeSharedState(0));
+  initial_update->shared_states.push_back(MakeSharedState(page_number));
   *initial_update->stream_data.mutable_content_id() = MakeRootId();
-  *initial_update->stream_data.mutable_shared_state_id() = MakeSharedStateId(0);
+  // This is a different event ID than the first page.
+  initial_update->stream_data.set_root_event_id(
+      MakeRootEventId(1000 + page_number));
+  *initial_update->stream_data.add_shared_state_ids() =
+      MakeSharedStateId(page_number);
   initial_update->stream_data.set_next_page_token(
       "page-" + base::NumberToString(page_number + 1));
   initial_update->stream_data.set_signed_in(signed_in);
+  if (signed_in) {
+    initial_update->stream_data.set_email(account_info.email);
+    initial_update->stream_data.set_gaia(account_info.gaia.ToString());
+  }
   initial_update->stream_data.set_logging_enabled(logging_enabled);
   initial_update->stream_data.set_privacy_notice_fulfilled(
       privacy_notice_fulfilled);
-  SetLastAddedTime(last_added_time, initial_update->stream_data);
+
+  AddContentHashes(MakeContent(i), initial_update->stream_data);
+  AddContentHashes(MakeContent(j), initial_update->stream_data);
+
+  feedstore::SetLastAddedTime(last_added_time, initial_update->stream_data);
 
   return initial_update;
 }
 
+std::unique_ptr<StreamModelUpdateRequest> MakeEmptyModelState() {
+  StreamModelUpdateRequestGenerator generator;
+  generator.last_added_time = kTestTimeEpoch;
+  generator.signed_in = true;
+  generator.logging_enabled = true;
+  generator.privacy_notice_fulfilled = false;
+  generator.stream_key = feedstore::StreamKey(StreamType(StreamKind::kForYou));
+
+  return generator.MakeFirstPage(/*first_cluster_id=*/0, /*num_cards=*/0);
+}
+
+std::unique_ptr<StreamModelUpdateRequest> MakeTypicalInitialModelState(
+    int first_cluster_id,
+    base::Time last_added_time,
+    bool signed_in,
+    bool logging_enabled,
+    bool privacy_notice_fulfilled,
+    std::string stream_key) {
+  StreamModelUpdateRequestGenerator generator;
+  generator.last_added_time = last_added_time;
+  generator.signed_in = signed_in;
+  generator.logging_enabled = logging_enabled;
+  generator.privacy_notice_fulfilled = privacy_notice_fulfilled;
+  generator.stream_key = stream_key;
+
+  return generator.MakeFirstPage(first_cluster_id);
+}
+
+std::unique_ptr<StreamModelUpdateRequest> MakeTypicalRefreshModelState(
+    int first_cluster_id,
+    base::Time last_added_time,
+    bool signed_in,
+    bool logging_enabled) {
+  StreamModelUpdateRequestGenerator generator;
+  generator.last_added_time = last_added_time;
+  generator.signed_in = signed_in;
+  generator.logging_enabled = logging_enabled;
+  generator.privacy_notice_fulfilled = false;
+  generator.event_id_number = 456;  // Refreshes will have a new event id.
+  return generator.MakeFirstPage(first_cluster_id, /*num_cards=*/3);
+}
+
+std::unique_ptr<StreamModelUpdateRequest> MakeTypicalNextPageState(
+    int page_number,
+    base::Time last_added_time,
+    bool signed_in,
+    bool logging_enabled,
+    bool privacy_notice_fulfilled,
+    StreamModelUpdateRequest::Source source) {
+  StreamModelUpdateRequestGenerator generator;
+  generator.last_added_time = last_added_time;
+  generator.signed_in = signed_in;
+  generator.logging_enabled = logging_enabled;
+  generator.privacy_notice_fulfilled = privacy_notice_fulfilled;
+  return generator.MakeNextPage(page_number, source);
+}
 }  // namespace feed

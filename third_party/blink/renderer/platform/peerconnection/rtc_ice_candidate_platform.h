@@ -31,8 +31,9 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_PEERCONNECTION_RTC_ICE_CANDIDATE_PLATFORM_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_PEERCONNECTION_RTC_ICE_CANDIDATE_PLATFORM_H_
 
-#include "base/optional.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include <optional>
+
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -41,59 +42,57 @@ namespace blink {
 class PLATFORM_EXPORT RTCIceCandidatePlatform final
     : public GarbageCollected<RTCIceCandidatePlatform> {
  public:
-  // Creates a new RTCIceCandidatePlatform using |candidate|, |sdp_mid| and
-  // |sdp_m_line_index|. If |sdp_m_line_index| is negative, it is
-  // considered as having no value.
-  RTCIceCandidatePlatform(String candidate,
-                          String sdp_mid,
-                          base::Optional<uint16_t> sdp_m_line_index);
-
   // Creates a new RTCIceCandidatePlatform using |candidate|, |sdp_mid|,
-  // |sdp_m_line_index|, and |username_fragment|.
+  // |sdp_m_line_index|, |username_fragment| and |url|.
   RTCIceCandidatePlatform(String candidate,
                           String sdp_mid,
-                          base::Optional<uint16_t> sdp_m_line_index,
-                          String username_fragment);
+                          std::optional<uint16_t> sdp_m_line_index,
+                          String username_fragment,
+                          String url);
+  RTCIceCandidatePlatform(const RTCIceCandidatePlatform&) = delete;
+  RTCIceCandidatePlatform& operator=(const RTCIceCandidatePlatform&) = delete;
   ~RTCIceCandidatePlatform() = default;
 
   const String& Candidate() const { return candidate_; }
   const String& SdpMid() const { return sdp_mid_; }
-  const base::Optional<uint16_t>& SdpMLineIndex() const {
+  const std::optional<uint16_t>& SdpMLineIndex() const {
     return sdp_m_line_index_;
   }
   const String& Foundation() const { return foundation_; }
   const String& Component() const { return component_; }
-  const base::Optional<uint32_t>& Priority() const { return priority_; }
+  const std::optional<uint32_t>& Priority() const { return priority_; }
   const String& Address() const { return address_; }
   const String Protocol() const { return protocol_; }
-  const base::Optional<uint16_t>& Port() const { return port_; }
+  const std::optional<uint16_t>& Port() const { return port_; }
   const String& Type() const { return type_; }
-  const base::Optional<String>& TcpType() const { return tcp_type_; }
+  const String& TcpType() const { return tcp_type_; }
   const String& RelatedAddress() const { return related_address_; }
-  const base::Optional<uint16_t>& RelatedPort() const { return related_port_; }
+  const std::optional<uint16_t>& RelatedPort() const { return related_port_; }
   const String& UsernameFragment() const { return username_fragment_; }
+  const String& RelayProtocol() const { return relay_protocol_; }
+  const String& Url() const { return url_; }
 
   void Trace(Visitor*) const {}
 
  private:
-  void PopulateFields(bool use_username_from_candidate);
+  void PopulateFields();
 
   String candidate_;
   String sdp_mid_;
-  base::Optional<uint16_t> sdp_m_line_index_;
+  std::optional<uint16_t> sdp_m_line_index_;
   String foundation_;
   String component_;
-  base::Optional<uint32_t> priority_;
+  std::optional<uint32_t> priority_;
   String address_;
   String protocol_;
-  base::Optional<uint16_t> port_;
+  std::optional<uint16_t> port_;
   String type_;
-  base::Optional<String> tcp_type_;
+  String tcp_type_;
   String related_address_;
-  base::Optional<uint16_t> related_port_;
+  std::optional<uint16_t> related_port_;
   String username_fragment_;
-
-  DISALLOW_COPY_AND_ASSIGN(RTCIceCandidatePlatform);
+  String url_;
+  String relay_protocol_;
 };
 
 }  // namespace blink

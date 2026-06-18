@@ -14,12 +14,17 @@
 
 #include "absl/random/distributions.h"
 
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
-#include <random>
+#include <limits>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "absl/meta/type_traits.h"
+#include "absl/numeric/int128.h"
 #include "absl/random/internal/distribution_test_util.h"
 #include "absl/random/random.h"
 
@@ -28,7 +33,6 @@ namespace {
 constexpr int kSize = 400000;
 
 class RandomDistributionsTest : public testing::Test {};
-
 
 struct Invalid {};
 
@@ -76,32 +80,30 @@ Invalid InferredTaggedUniformReturnT(...);
 template <typename A, typename B, typename Expect>
 void CheckArgsInferType() {
   static_assert(
-      absl::conjunction<
+      std::conjunction_v<
           std::is_same<Expect, decltype(InferredUniformReturnT<A, B>(0))>,
-          std::is_same<Expect,
-                       decltype(InferredUniformReturnT<B, A>(0))>>::value,
+          std::is_same<Expect, decltype(InferredUniformReturnT<B, A>(0))>>,
       "");
   static_assert(
-      absl::conjunction<
+      std::conjunction_v<
           std::is_same<Expect, decltype(InferredTaggedUniformReturnT<
                                         absl::IntervalOpenOpenTag, A, B>(0))>,
-          std::is_same<Expect,
-                       decltype(InferredTaggedUniformReturnT<
-                                absl::IntervalOpenOpenTag, B, A>(0))>>::value,
+          std::is_same<Expect, decltype(InferredTaggedUniformReturnT<
+                                        absl::IntervalOpenOpenTag, B, A>(0))>>,
       "");
 }
 
 template <typename A, typename B, typename ExplicitRet>
-auto ExplicitUniformReturnT(int) -> decltype(
-    absl::Uniform<ExplicitRet>(*std::declval<absl::InsecureBitGen*>(),
-                               std::declval<A>(), std::declval<B>()));
+auto ExplicitUniformReturnT(int) -> decltype(absl::Uniform<ExplicitRet>(
+    std::declval<absl::InsecureBitGen&>(), std::declval<A>(),
+    std::declval<B>()));
 
 template <typename, typename, typename ExplicitRet>
 Invalid ExplicitUniformReturnT(...);
 
 template <typename TagType, typename A, typename B, typename ExplicitRet>
 auto ExplicitTaggedUniformReturnT(int) -> decltype(absl::Uniform<ExplicitRet>(
-    std::declval<TagType>(), *std::declval<absl::InsecureBitGen*>(),
+    std::declval<TagType>(), std::declval<absl::InsecureBitGen&>(),
     std::declval<A>(), std::declval<B>()));
 
 template <typename, typename, typename, typename ExplicitRet>
@@ -117,22 +119,30 @@ Invalid ExplicitTaggedUniformReturnT(...);
 template <typename A, typename B, typename Expect>
 void CheckArgsReturnExpectedType() {
   static_assert(
-      absl::conjunction<
+      std::conjunction_v<
           std::is_same<Expect,
                        decltype(ExplicitUniformReturnT<A, B, Expect>(0))>,
-          std::is_same<Expect, decltype(ExplicitUniformReturnT<B, A, Expect>(
-                                   0))>>::value,
+          std::is_same<Expect,
+                       decltype(ExplicitUniformReturnT<B, A, Expect>(0))>>,
       "");
   static_assert(
-      absl::conjunction<
+      std::conjunction_v<
           std::is_same<Expect,
                        decltype(ExplicitTaggedUniformReturnT<
                                 absl::IntervalOpenOpenTag, A, B, Expect>(0))>,
-          std::is_same<Expect, decltype(ExplicitTaggedUniformReturnT<
-                                        absl::IntervalOpenOpenTag, B, A,
-                                        Expect>(0))>>::value,
+          std::is_same<Expect,
+                       decltype(ExplicitTaggedUniformReturnT<
+                                absl::IntervalOpenOpenTag, B, A, Expect>(0))>>,
       "");
 }
+
+// Takes the type of `absl::Uniform<R>(gen)` if valid or `Invalid` otherwise.
+template <typename R>
+auto UniformNoBoundsReturnT(int)
+    -> decltype(absl::Uniform<R>(std::declval<absl::InsecureBitGen&>()));
+
+template <typename>
+Invalid UniformNoBoundsReturnT(...);
 
 TEST_F(RandomDistributionsTest, UniformTypeInference) {
   // Infers common types.
@@ -219,11 +229,53 @@ TEST_F(RandomDistributionsTest, UniformNoBounds) {
   absl::Uniform<uint16_t>(gen);
   absl::Uniform<uint32_t>(gen);
   absl::Uniform<uint64_t>(gen);
+  absl::Uniform<absl::uint128>(gen);
+
+  // Compile-time validity tests.
+
+  // Allows unsigned ints.
+  testing::StaticAssertTypeEq<uint8_t,
+                              decltype(UniformNoBoundsReturnT<uint8_t>(0))>();
+  testing::StaticAssertTypeEq<uint16_t,
+                              decltype(UniformNoBoundsReturnT<uint16_t>(0))>();
+  testing::StaticAssertTypeEq<uint32_t,
+                              decltype(UniformNoBoundsReturnT<uint32_t>(0))>();
+  testing::StaticAssertTypeEq<uint64_t,
+                              decltype(UniformNoBoundsReturnT<uint64_t>(0))>();
+  testing::StaticAssertTypeEq<
+      absl::uint128, decltype(UniformNoBoundsReturnT<absl::uint128>(0))>();
+
+  // Disallows signed ints.
+  testing::StaticAssertTypeEq<Invalid,
+                              decltype(UniformNoBoundsReturnT<int8_t>(0))>();
+  testing::StaticAssertTypeEq<Invalid,
+                              decltype(UniformNoBoundsReturnT<int16_t>(0))>();
+  testing::StaticAssertTypeEq<Invalid,
+                              decltype(UniformNoBoundsReturnT<int32_t>(0))>();
+  testing::StaticAssertTypeEq<Invalid,
+                              decltype(UniformNoBoundsReturnT<int64_t>(0))>();
+  testing::StaticAssertTypeEq<
+      Invalid, decltype(UniformNoBoundsReturnT<absl::int128>(0))>();
+
+  // Disallows float types.
+  testing::StaticAssertTypeEq<Invalid,
+                              decltype(UniformNoBoundsReturnT<float>(0))>();
+  testing::StaticAssertTypeEq<Invalid,
+                              decltype(UniformNoBoundsReturnT<double>(0))>();
 }
 
 TEST_F(RandomDistributionsTest, UniformNonsenseRanges) {
   // The ranges used in this test are undefined behavior.
   // The results are arbitrary and subject to future changes.
+
+#if (defined(__i386__) || defined(_M_IX86)) && FLT_EVAL_METHOD != 0
+  // We're using an x87-compatible FPU, and intermediate operations can be
+  // performed with 80-bit floats. This produces slightly different results from
+  // what we expect below.
+  GTEST_SKIP()
+      << "Skipping the test because we detected x87 floating-point semantics";
+#endif
+
   absl::InsecureBitGen gen;
 
   // <uint>
@@ -414,6 +466,13 @@ TEST_F(RandomDistributionsTest, Zipf) {
   const auto moments =
       absl::random_internal::ComputeDistributionMoments(values);
   EXPECT_NEAR(6.5944, moments.mean, 2000) << moments;
+}
+
+TEST_F(RandomDistributionsTest, ZipfWithZeroMax) {
+  absl::InsecureBitGen gen;
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_EQ(0, absl::Zipf(gen, 0));
+  }
 }
 
 TEST_F(RandomDistributionsTest, Gaussian) {

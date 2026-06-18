@@ -1,12 +1,13 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/task/thread_pool/pooled_single_thread_task_runner_manager.h"
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/synchronization/atomic_flag.h"
 #include "base/synchronization/lock.h"
 #include "base/task/task_traits.h"
@@ -15,8 +16,9 @@
 #include "base/task/thread_pool/environment_config.h"
 #include "base/task/thread_pool/task_tracker.h"
 #include "base/task/thread_pool/test_utils.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "base/test/gtest_util.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/test_timeouts.h"
 #include "base/test/test_waitable_event.h"
 #include "base/threading/platform_thread.h"
@@ -26,22 +28,26 @@
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include <windows.h>
 
 #include "base/win/com_init_util.h"
 #include "base/win/current_module.h"
-#endif  // defined(OS_WIN)
+#endif  // BUILDFLAG(IS_WIN)
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
 namespace {
 
 class PooledSingleThreadTaskRunnerManagerTest : public testing::Test {
+ public:
+  PooledSingleThreadTaskRunnerManagerTest(
+      const PooledSingleThreadTaskRunnerManagerTest&) = delete;
+  PooledSingleThreadTaskRunnerManagerTest& operator=(
+      const PooledSingleThreadTaskRunnerManagerTest&) = delete;
+
  protected:
-  PooledSingleThreadTaskRunnerManagerTest()
-      : service_thread_("ThreadPoolServiceThread") {}
+  PooledSingleThreadTaskRunnerManagerTest() = default;
 
   void SetUp() override {
     service_thread_.Start();
@@ -53,13 +59,15 @@ class PooledSingleThreadTaskRunnerManagerTest : public testing::Test {
   }
 
   void TearDown() override {
-    if (single_thread_task_runner_manager_)
+    if (single_thread_task_runner_manager_) {
       TearDownSingleThreadTaskRunnerManager();
+    }
+    delayed_task_manager_.Shutdown();
     service_thread_.Stop();
   }
 
   virtual void StartSingleThreadTaskRunnerManagerFromSetUp() {
-    single_thread_task_runner_manager_->Start();
+    single_thread_task_runner_manager_->Start(service_thread_.task_runner());
   }
 
   virtual void TearDownSingleThreadTaskRunnerManager() {
@@ -67,14 +75,11 @@ class PooledSingleThreadTaskRunnerManagerTest : public testing::Test {
     single_thread_task_runner_manager_.reset();
   }
 
-  Thread service_thread_;
-  TaskTracker task_tracker_{"Test"};
+  Thread service_thread_{"ThreadPoolServiceThread"};
+  TaskTracker task_tracker_;
   DelayedTaskManager delayed_task_manager_;
   std::unique_ptr<PooledSingleThreadTaskRunnerManager>
       single_thread_task_runner_manager_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(PooledSingleThreadTaskRunnerManagerTest);
 };
 
 void CaptureThreadRef(PlatformThreadRef* thread_ref) {
@@ -174,7 +179,7 @@ TEST_F(PooledSingleThreadTaskRunnerManagerTest, RunsTasksInCurrentSequence) {
 
 TEST_F(PooledSingleThreadTaskRunnerManagerTest,
        SharedWithBaseSyncPrimitivesDCHECKs) {
-  testing::GTEST_FLAG(death_test_style) = "threadsafe";
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
   EXPECT_DCHECK_DEATH({
     single_thread_task_runner_manager_->CreateSingleThreadTaskRunner(
         {WithBaseSyncPrimitives()}, SingleThreadTaskRunnerThreadMode::SHARED);
@@ -193,7 +198,7 @@ TEST_F(PooledSingleThreadTaskRunnerManagerTest,
       ->CreateSingleThreadTaskRunner(
           {TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
           SingleThreadTaskRunnerThreadMode::SHARED)
-      ->PostTask(FROM_HERE, base::BindLambdaForTesting([&]() {
+      ->PostTask(FROM_HERE, base::BindLambdaForTesting([&] {
                    task_has_started.Signal();
                    task_can_continue.Wait();
                  }));
@@ -221,45 +226,64 @@ namespace {
 
 class PooledSingleThreadTaskRunnerManagerCommonTest
     : public PooledSingleThreadTaskRunnerManagerTest,
-      public ::testing::WithParamInterface<SingleThreadTaskRunnerThreadMode> {
+      public ::testing::WithParamInterface<
+          std::tuple<SingleThreadTaskRunnerThreadMode,
+                     bool /* enable_utility_threads */>> {
  public:
-  PooledSingleThreadTaskRunnerManagerCommonTest() = default;
+  PooledSingleThreadTaskRunnerManagerCommonTest() {
+    if (std::get<1>(GetParam())) {
+      feature_list_.InitWithFeatures({kUseUtilityThreadGroup}, {});
+    }
+  }
+  PooledSingleThreadTaskRunnerManagerCommonTest(
+      const PooledSingleThreadTaskRunnerManagerCommonTest&) = delete;
+  PooledSingleThreadTaskRunnerManagerCommonTest& operator=(
+      const PooledSingleThreadTaskRunnerManagerCommonTest&) = delete;
 
   scoped_refptr<SingleThreadTaskRunner> CreateTaskRunner(
       TaskTraits traits = {}) {
     return single_thread_task_runner_manager_->CreateSingleThreadTaskRunner(
-        traits, GetParam());
+        traits, GetSingleThreadTaskRunnerThreadMode());
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(PooledSingleThreadTaskRunnerManagerCommonTest);
+  SingleThreadTaskRunnerThreadMode GetSingleThreadTaskRunnerThreadMode() const {
+    return std::get<0>(GetParam());
+  }
+
+ protected:
+  const bool use_utility_thread_group_ =
+      CanUseUtilityThreadTypeForWorkerThread() && std::get<1>(GetParam());
+  base::test::ScopedFeatureList feature_list_;
 };
 
 }  // namespace
 
-TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, PrioritySetCorrectly) {
+TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, ThreadTypeSetCorrectly) {
   const struct {
     TaskTraits traits;
-    ThreadPriority expected_thread_priority;
+    ThreadType expected_thread_type;
   } test_cases[] = {
       {{TaskPriority::BEST_EFFORT},
-       CanUseBackgroundPriorityForWorkerThread() ? ThreadPriority::BACKGROUND
-                                                 : ThreadPriority::NORMAL},
+       CanUseBackgroundThreadTypeForWorkerThread() ? ThreadType::kBackground
+       : use_utility_thread_group_                 ? ThreadType::kUtility
+                                                   : ThreadType::kDefault},
       {{TaskPriority::BEST_EFFORT, ThreadPolicy::PREFER_BACKGROUND},
-       CanUseBackgroundPriorityForWorkerThread() ? ThreadPriority::BACKGROUND
-                                                 : ThreadPriority::NORMAL},
+       CanUseBackgroundThreadTypeForWorkerThread() ? ThreadType::kBackground
+       : use_utility_thread_group_                 ? ThreadType::kUtility
+                                                   : ThreadType::kDefault},
       {{TaskPriority::BEST_EFFORT, ThreadPolicy::MUST_USE_FOREGROUND},
-       ThreadPriority::NORMAL},
-      {{TaskPriority::USER_VISIBLE}, ThreadPriority::NORMAL},
+       ThreadType::kDefault},
+      {{TaskPriority::USER_VISIBLE},
+       use_utility_thread_group_ ? ThreadType::kUtility : ThreadType::kDefault},
       {{TaskPriority::USER_VISIBLE, ThreadPolicy::PREFER_BACKGROUND},
-       ThreadPriority::NORMAL},
+       use_utility_thread_group_ ? ThreadType::kUtility : ThreadType::kDefault},
       {{TaskPriority::USER_VISIBLE, ThreadPolicy::MUST_USE_FOREGROUND},
-       ThreadPriority::NORMAL},
-      {{TaskPriority::USER_BLOCKING}, ThreadPriority::NORMAL},
+       ThreadType::kDefault},
+      {{TaskPriority::USER_BLOCKING}, ThreadType::kDefault},
       {{TaskPriority::USER_BLOCKING, ThreadPolicy::PREFER_BACKGROUND},
-       ThreadPriority::NORMAL},
+       ThreadType::kDefault},
       {{TaskPriority::USER_BLOCKING, ThreadPolicy::MUST_USE_FOREGROUND},
-       ThreadPriority::NORMAL}};
+       ThreadType::kDefault}};
 
   // Why are events used here instead of the task tracker?
   // Shutting down can cause priorities to get raised. This means we have to use
@@ -267,9 +291,9 @@ TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, PrioritySetCorrectly) {
   for (auto& test_case : test_cases) {
     TestWaitableEvent event;
     CreateTaskRunner(test_case.traits)
-        ->PostTask(FROM_HERE, BindLambdaForTesting([&]() {
-                     EXPECT_EQ(test_case.expected_thread_priority,
-                               PlatformThread::GetCurrentThreadPriority());
+        ->PostTask(FROM_HERE, BindLambdaForTesting([&] {
+                     EXPECT_EQ(test_case.expected_thread_type,
+                               PlatformThread::GetCurrentThreadType());
                      event.Signal();
                    }));
     event.Wait();
@@ -278,16 +302,22 @@ TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, PrioritySetCorrectly) {
 
 TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, ThreadNamesSet) {
   const std::string maybe_shared(
-      GetParam() == SingleThreadTaskRunnerThreadMode::DEDICATED ? ""
-                                                                : "Shared");
+      GetSingleThreadTaskRunnerThreadMode() ==
+              SingleThreadTaskRunnerThreadMode::DEDICATED
+          ? ""
+          : "Shared");
   const std::string background =
-      "^ThreadPoolSingleThread" + maybe_shared + "Background\\d+$";
+      "ThreadPoolSingleThread" + maybe_shared + "Background";
+  const std::string utility =
+      "ThreadPoolSingleThread" + maybe_shared + "Utility";
   const std::string foreground =
-      "^ThreadPoolSingleThread" + maybe_shared + "Foreground\\d+$";
+      "ThreadPoolSingleThread" + maybe_shared + "Foreground";
   const std::string background_blocking =
-      "^ThreadPoolSingleThread" + maybe_shared + "BackgroundBlocking\\d+$";
+      "ThreadPoolSingleThread" + maybe_shared + "BackgroundBlocking";
+  const std::string utility_blocking =
+      "ThreadPoolSingleThread" + maybe_shared + "UtilityBlocking";
   const std::string foreground_blocking =
-      "^ThreadPoolSingleThread" + maybe_shared + "ForegroundBlocking\\d+$";
+      "ThreadPoolSingleThread" + maybe_shared + "ForegroundBlocking";
 
   const struct {
     TaskTraits traits;
@@ -295,14 +325,19 @@ TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, ThreadNamesSet) {
   } test_cases[] = {
       // Non-MayBlock()
       {{TaskPriority::BEST_EFFORT},
-       CanUseBackgroundPriorityForWorkerThread() ? background : foreground},
+       CanUseBackgroundThreadTypeForWorkerThread() ? background
+       : use_utility_thread_group_                 ? utility
+                                                   : foreground},
       {{TaskPriority::BEST_EFFORT, ThreadPolicy::PREFER_BACKGROUND},
-       CanUseBackgroundPriorityForWorkerThread() ? background : foreground},
+       CanUseBackgroundThreadTypeForWorkerThread() ? background
+       : use_utility_thread_group_                 ? utility
+                                                   : foreground},
       {{TaskPriority::BEST_EFFORT, ThreadPolicy::MUST_USE_FOREGROUND},
        foreground},
-      {{TaskPriority::USER_VISIBLE}, foreground},
+      {{TaskPriority::USER_VISIBLE},
+       use_utility_thread_group_ ? utility : foreground},
       {{TaskPriority::USER_VISIBLE, ThreadPolicy::PREFER_BACKGROUND},
-       foreground},
+       use_utility_thread_group_ ? utility : foreground},
       {{TaskPriority::USER_VISIBLE, ThreadPolicy::MUST_USE_FOREGROUND},
        foreground},
       {{TaskPriority::USER_BLOCKING}, foreground},
@@ -313,18 +348,21 @@ TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, ThreadNamesSet) {
 
       // MayBlock()
       {{TaskPriority::BEST_EFFORT, MayBlock()},
-       CanUseBackgroundPriorityForWorkerThread() ? background_blocking
-                                                 : foreground_blocking},
+       CanUseBackgroundThreadTypeForWorkerThread() ? background_blocking
+       : use_utility_thread_group_                 ? utility_blocking
+                                                   : foreground_blocking},
       {{TaskPriority::BEST_EFFORT, ThreadPolicy::PREFER_BACKGROUND, MayBlock()},
-       CanUseBackgroundPriorityForWorkerThread() ? background_blocking
-                                                 : foreground_blocking},
+       CanUseBackgroundThreadTypeForWorkerThread() ? background_blocking
+       : use_utility_thread_group_                 ? utility_blocking
+                                                   : foreground_blocking},
       {{TaskPriority::BEST_EFFORT, ThreadPolicy::MUST_USE_FOREGROUND,
         MayBlock()},
        foreground_blocking},
-      {{TaskPriority::USER_VISIBLE, MayBlock()}, foreground_blocking},
+      {{TaskPriority::USER_VISIBLE, MayBlock()},
+       use_utility_thread_group_ ? utility_blocking : foreground_blocking},
       {{TaskPriority::USER_VISIBLE, ThreadPolicy::PREFER_BACKGROUND,
         MayBlock()},
-       foreground_blocking},
+       use_utility_thread_group_ ? utility_blocking : foreground_blocking},
       {{TaskPriority::USER_VISIBLE, ThreadPolicy::MUST_USE_FOREGROUND,
         MayBlock()},
 
@@ -340,10 +378,9 @@ TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, ThreadNamesSet) {
   for (auto& test_case : test_cases) {
     TestWaitableEvent event;
     CreateTaskRunner(test_case.traits)
-        ->PostTask(FROM_HERE, BindLambdaForTesting([&]() {
-                     EXPECT_THAT(PlatformThread::GetName(),
-                                 ::testing::MatchesRegex(
-                                     test_case.expected_thread_name));
+        ->PostTask(FROM_HERE, BindLambdaForTesting([&] {
+                     EXPECT_EQ(PlatformThread::GetName(),
+                               test_case.expected_thread_name);
                      event.Signal();
                    }));
     event.Wait();
@@ -367,7 +404,6 @@ TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, PostDelayedTask) {
       FROM_HERE, BindOnce(&TestWaitableEvent::Signal, Unretained(&task_ran)));
   task_ran.Wait();
   ASSERT_TRUE(!task_ran.IsSignaled());
-
 
   // Post a task with a short delay.
   const TimeTicks start_time = TimeTicks::Now();
@@ -422,18 +458,23 @@ TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, CanRunPolicyLoad) {
 INSTANTIATE_TEST_SUITE_P(
     SharedAndDedicated,
     PooledSingleThreadTaskRunnerManagerCommonTest,
-    ::testing::Values(SingleThreadTaskRunnerThreadMode::SHARED,
-                      SingleThreadTaskRunnerThreadMode::DEDICATED));
+    ::testing::Combine(
+        ::testing::Values(SingleThreadTaskRunnerThreadMode::SHARED,
+                          SingleThreadTaskRunnerThreadMode::DEDICATED),
+        ::testing::Values(false, true)));
 
 namespace {
 
 class CallJoinFromDifferentThread : public SimpleThread {
  public:
-  CallJoinFromDifferentThread(
+  explicit CallJoinFromDifferentThread(
       PooledSingleThreadTaskRunnerManager* manager_to_join)
       : SimpleThread("PooledSingleThreadTaskRunnerManagerJoinThread"),
         manager_to_join_(manager_to_join) {}
 
+  CallJoinFromDifferentThread(const CallJoinFromDifferentThread&) = delete;
+  CallJoinFromDifferentThread& operator=(const CallJoinFromDifferentThread&) =
+      delete;
   ~CallJoinFromDifferentThread() override = default;
 
   void Run() override {
@@ -444,16 +485,18 @@ class CallJoinFromDifferentThread : public SimpleThread {
   void WaitForRunToStart() { run_started_event_.Wait(); }
 
  private:
-  PooledSingleThreadTaskRunnerManager* const manager_to_join_;
+  const raw_ptr<PooledSingleThreadTaskRunnerManager> manager_to_join_;
   TestWaitableEvent run_started_event_;
-
-  DISALLOW_COPY_AND_ASSIGN(CallJoinFromDifferentThread);
 };
 
 class PooledSingleThreadTaskRunnerManagerJoinTest
     : public PooledSingleThreadTaskRunnerManagerTest {
  public:
   PooledSingleThreadTaskRunnerManagerJoinTest() = default;
+  PooledSingleThreadTaskRunnerManagerJoinTest(
+      const PooledSingleThreadTaskRunnerManagerJoinTest&) = delete;
+  PooledSingleThreadTaskRunnerManagerJoinTest& operator=(
+      const PooledSingleThreadTaskRunnerManagerJoinTest&) = delete;
   ~PooledSingleThreadTaskRunnerManagerJoinTest() override = default;
 
  protected:
@@ -461,9 +504,6 @@ class PooledSingleThreadTaskRunnerManagerJoinTest
     // The tests themselves are responsible for calling JoinForTesting().
     single_thread_task_runner_manager_.reset();
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(PooledSingleThreadTaskRunnerManagerJoinTest);
 };
 
 }  // namespace
@@ -483,8 +523,7 @@ TEST_F(PooledSingleThreadTaskRunnerManagerJoinTest, ConcurrentJoin) {
         FROM_HERE,
         BindOnce(&TestWaitableEvent::Signal, Unretained(&task_running))));
     EXPECT_TRUE(task_runner->PostTask(
-        FROM_HERE,
-        BindOnce(&TestWaitableEvent::Wait, Unretained(&task_blocking))));
+        FROM_HERE, task_blocking.GetWaitCallbackForTesting()));
   }
 
   task_running.Wait();
@@ -512,8 +551,7 @@ TEST_F(PooledSingleThreadTaskRunnerManagerJoinTest,
         FROM_HERE,
         BindOnce(&TestWaitableEvent::Signal, Unretained(&task_running))));
     EXPECT_TRUE(task_runner->PostTask(
-        FROM_HERE,
-        BindOnce(&TestWaitableEvent::Wait, Unretained(&task_blocking))));
+        FROM_HERE, task_blocking.GetWaitCallbackForTesting()));
     EXPECT_TRUE(task_runner->PostTask(FROM_HERE, DoNothing()));
   }
 
@@ -526,12 +564,13 @@ TEST_F(PooledSingleThreadTaskRunnerManagerJoinTest,
   join_from_different_thread.Join();
 }
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 
 TEST_P(PooledSingleThreadTaskRunnerManagerCommonTest, COMSTAInitialized) {
   scoped_refptr<SingleThreadTaskRunner> com_task_runner =
       single_thread_task_runner_manager_->CreateCOMSTATaskRunner(
-          {TaskShutdownBehavior::BLOCK_SHUTDOWN}, GetParam());
+          {TaskShutdownBehavior::BLOCK_SHUTDOWN},
+          GetSingleThreadTaskRunnerThreadMode());
 
   com_task_runner->PostTask(FROM_HERE, BindOnce(&win::AssertComApartmentType,
                                                 win::ComApartmentType::STA));
@@ -572,6 +611,10 @@ class PooledSingleThreadTaskRunnerManagerTestWin
     : public PooledSingleThreadTaskRunnerManagerTest {
  public:
   PooledSingleThreadTaskRunnerManagerTestWin() = default;
+  PooledSingleThreadTaskRunnerManagerTestWin(
+      const PooledSingleThreadTaskRunnerManagerTestWin&) = delete;
+  PooledSingleThreadTaskRunnerManagerTestWin& operator=(
+      const PooledSingleThreadTaskRunnerManagerTestWin&) = delete;
 
   void SetUp() override {
     PooledSingleThreadTaskRunnerManagerTest::SetUp();
@@ -580,8 +623,9 @@ class PooledSingleThreadTaskRunnerManagerTestWin
   }
 
   void TearDown() override {
-    if (register_class_succeeded_)
+    if (register_class_succeeded_) {
       ::UnregisterClass(kTestWindowClassName, CURRENT_MODULE());
+    }
 
     PooledSingleThreadTaskRunnerManagerTest::TearDown();
   }
@@ -602,8 +646,6 @@ class PooledSingleThreadTaskRunnerManagerTestWin
   }
 
   bool register_class_succeeded_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(PooledSingleThreadTaskRunnerManagerTestWin);
 };
 
 }  // namespace
@@ -636,7 +678,7 @@ TEST_F(PooledSingleThreadTaskRunnerManagerTestWin, PumpsMessages) {
   test::ShutdownTaskTracker(&task_tracker_);
 }
 
-#endif  // defined(OS_WIN)
+#endif  // BUILDFLAG(IS_WIN)
 
 namespace {
 
@@ -644,13 +686,15 @@ class PooledSingleThreadTaskRunnerManagerStartTest
     : public PooledSingleThreadTaskRunnerManagerTest {
  public:
   PooledSingleThreadTaskRunnerManagerStartTest() = default;
+  PooledSingleThreadTaskRunnerManagerStartTest(
+      const PooledSingleThreadTaskRunnerManagerStartTest&) = delete;
+  PooledSingleThreadTaskRunnerManagerStartTest& operator=(
+      const PooledSingleThreadTaskRunnerManagerStartTest&) = delete;
 
  private:
   void StartSingleThreadTaskRunnerManagerFromSetUp() override {
     // Start() is called in the test body rather than in SetUp().
   }
-
-  DISALLOW_COPY_AND_ASSIGN(PooledSingleThreadTaskRunnerManagerStartTest);
 };
 
 }  // namespace
@@ -678,11 +722,10 @@ TEST_F(PooledSingleThreadTaskRunnerManagerStartTest, PostTaskBeforeStart) {
   // flaky if the tested code allows that to happen.
   PlatformThread::Sleep(TestTimeouts::tiny_timeout());
   manager_started.Set();
-  single_thread_task_runner_manager_->Start();
+  single_thread_task_runner_manager_->Start(service_thread_.task_runner());
 
   // Wait for the task to complete to keep |manager_started| alive.
   task_finished.Wait();
 }
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal

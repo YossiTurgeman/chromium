@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,15 @@
 #include <unicode/utypes.h>
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 
 namespace blink {
 
-// ICUError provides the unified way to handle ICU errors in Blink.
-class PLATFORM_EXPORT ICUError {
+// IcuError provides the unified way to handle ICU errors in Blink.
+class PLATFORM_EXPORT IcuError {
   STACK_ALLOCATED();
 
  public:
-  ~ICUError() { CrashIfCritical(); }
+  ~IcuError() { CrashIfCritical(); }
 
   UErrorCode* operator&() { return &error_; }
   operator UErrorCode() const { return error_; }
@@ -34,7 +33,7 @@ class PLATFORM_EXPORT ICUError {
   void HandleFailure();
 };
 
-inline void ICUError::CrashIfCritical() {
+inline void IcuError::CrashIfCritical() {
   if (U_FAILURE(error_))
     HandleFailure();
 }

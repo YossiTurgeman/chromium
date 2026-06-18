@@ -33,7 +33,7 @@
 
 #include "third_party/blink/renderer/core/editing/commands/selection_for_undo_step.h"
 #include "third_party/blink/renderer/core/events/input_event.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -44,14 +44,17 @@ class UndoStep final : public GarbageCollected<UndoStep> {
   UndoStep(Document*,
            const SelectionForUndoStep& starting_selection,
            const SelectionForUndoStep& ending_selection,
-           InputEvent::InputType);
+           const SelectionForUndoStep& starting_dom_selection,
+           const SelectionForUndoStep& ending_dom_selection);
 
+  // Returns true if is owned by |element|
+  bool IsOwnedBy(const Element& element) const;
   void Unapply();
   void Reapply();
-  InputEvent::InputType GetInputType() const;
   void Append(SimpleEditCommand*);
   void Append(UndoStep*);
 
+  Document& GetDocument() const { return *document_; }
   const SelectionForUndoStep& StartingSelection() const {
     return starting_selection_;
   }
@@ -61,32 +64,44 @@ class UndoStep final : public GarbageCollected<UndoStep> {
   bool SelectionIsDirectional() const { return selection_is_directional_; }
   void SetStartingSelection(const SelectionForUndoStep&);
   void SetEndingSelection(const SelectionForUndoStep&);
+
+  // Raw-DOM lane mirroring starting_/ending_selection_ without VP
+  // canonicalization. See CompositeEditCommand for rationale.
+  const SelectionForUndoStep& StartingDomSelection() const {
+    return starting_dom_selection_;
+  }
+  const SelectionForUndoStep& EndingDomSelection() const {
+    return ending_dom_selection_;
+  }
+  void SetStartingDomSelection(const SelectionForUndoStep&);
+  void SetEndingDomSelection(const SelectionForUndoStep&);
   void SetSelectionIsDirectional(bool is_directional) {
     selection_is_directional_ = is_directional;
   }
   Element* StartingRootEditableElement() const {
-    return starting_root_editable_element_.Get();
+    return starting_selection_.RootEditableElement();
   }
   Element* EndingRootEditableElement() const {
-    return ending_root_editable_element_.Get();
+    return ending_selection_.RootEditableElement();
   }
 
   uint64_t SequenceNumber() const { return sequence_number_; }
 
   void Trace(Visitor*) const;
 
+  String ToString() const;
+
  private:
   Member<Document> document_;
   SelectionForUndoStep starting_selection_;
   SelectionForUndoStep ending_selection_;
+  SelectionForUndoStep starting_dom_selection_;
+  SelectionForUndoStep ending_dom_selection_;
   HeapVector<Member<SimpleEditCommand>> commands_;
-  Member<Element> starting_root_editable_element_;
-  Member<Element> ending_root_editable_element_;
-  InputEvent::InputType input_type_;
   const uint64_t sequence_number_;
   bool selection_is_directional_ = false;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_UNDO_STEP_H_

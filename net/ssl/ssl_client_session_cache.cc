@@ -1,6 +1,7 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #include "net/ssl/ssl_client_session_cache.h"
 
@@ -8,10 +9,12 @@
 #include <utility>
 
 #include "base/containers/flat_set.h"
-#include "base/strings/stringprintf.h"
+#include "base/memory_coordinator/memory_coordinator_features.h"
+#include "base/memory_coordinator/traits.h"
+#include "base/memory_coordinator/utils.h"
 #include "base/time/clock.h"
 #include "base/time/default_clock.h"
-#include "base/trace_event/process_memory_dump.h"
+#include "net/base/features.h"
 #include "third_party/boringssl/src/include/openssl/ssl.h"
 
 namespace net {
@@ -20,9 +23,20 @@ namespace {
 
 // Returns a tuple of references to fields of |key|, for comparison purposes.
 auto TieKeyFields(const SSLClientSessionCache::Key& key) {
-  return std::tie(key.server, key.dest_ip_addr, key.network_isolation_key,
-                  key.privacy_mode, key.disable_legacy_crypto);
+  return std::tie(key.server, key.dest_ip_addr, key.network_anonymization_key,
+                  key.privacy_mode, key.session_usage, key.proxy_chain,
+                  key.proxy_chain_index);
 }
+
+constexpr base::MemoryConsumerTraits kSSLClientSessionCacheTraits(
+    // Bounded capacity of sessions; way under 10MB.
+    base::MemoryConsumerTraits::EstimatedMemoryUsage::kSmall,
+    // Iterates base::LRUCache and triggers BoringSSL session frees.
+    base::MemoryConsumerTraits::ReleaseMemoryCost::kRequiresTraversal,
+    // Full handshake can be done if not cached.
+    base::MemoryConsumerTraits::InformationRetention::kLossless,
+    // Cache trimming runs synchronously on the calling thread.
+    base::MemoryConsumerTraits::ExecutionType::kSynchronous);
 
 }  // namespace
 
@@ -47,11 +61,13 @@ SSLClientSessionCache::SSLClientSessionCache(const Config& config)
     : clock_(base::DefaultClock::GetInstance()),
       config_(config),
       cache_(config.max_entries),
-      lookups_since_flush_(0) {
-  memory_pressure_listener_ = std::make_unique<base::MemoryPressureListener>(
-      FROM_HERE, base::BindRepeating(&SSLClientSessionCache::OnMemoryPressure,
-                                     base::Unretained(this)));
-}
+      memory_consumer_registration_(
+          "SSLClientSessionCache",
+          kSSLClientSessionCacheTraits,
+          this,
+          base::AsyncMemoryConsumerRegistration::CheckUnregister::kDisabled,
+          base::AsyncMemoryConsumerRegistration::CheckRegistryExists::
+              kDisabled) {}
 
 SSLClientSessionCache::~SSLClientSessionCache() {
   Flush();
@@ -59,6 +75,10 @@ SSLClientSessionCache::~SSLClientSessionCache() {
 
 size_t SSLClientSessionCache::size() const {
   return cache_.size();
+}
+
+size_t SSLClientSessionCache::max_size() const {
+  return cache_.max_size();
 }
 
 bssl::UniquePtr<SSL_SESSION> SSLClientSessionCache::Lookup(
@@ -85,11 +105,22 @@ bssl::UniquePtr<SSL_SESSION> SSLClientSessionCache::Lookup(
   return session;
 }
 
-void SSLClientSessionCache::Insert(const Key& cache_key,
+void SSLClientSessionCache::Insert(uint64_t generation_number,
+                                   const Key& cache_key,
                                    bssl::UniquePtr<SSL_SESSION> session) {
+  if (generation_number != generation_number_) {
+    return;
+  }
   auto iter = cache_.Get(cache_key);
-  if (iter == cache_.end())
+  if (iter == cache_.end()) {
     iter = cache_.Put(cache_key, Entry());
+  }
+
+  // Insertion can fail if the max size was zero due to memory pressure.
+  if (iter == cache_.end()) {
+    CHECK_EQ(cache_.max_size(), 0U);
+    return;
+  }
   iter->second.Push(std::move(session));
 }
 
@@ -104,10 +135,20 @@ void SSLClientSessionCache::ClearEarlyData(const Key& cache_key) {
   }
 }
 
-void SSLClientSessionCache::FlushForServer(const HostPortPair& server) {
+void SSLClientSessionCache::FlushForServers(
+    const base::flat_set<HostPortPair>& servers) {
+  // The generation number is incremented here, which affects all hosts, even
+  // though this flush only applies to those matching `servers`. Only the
+  // sessions related to `servers` are cleared, so any other already cached
+  // sessions will remain valid despite the generation number changing. It
+  // could prevent sessions unrelated to `servers` that are in-flight at the
+  // time of this flush from being cached. That is not optimal but is a
+  // trade-off for implementation simplicity.
+  ++generation_number_;
+
   auto iter = cache_.begin();
   while (iter != cache_.end()) {
-    if (iter->first.server == server) {
+    if (servers.contains(iter->first.server)) {
       iter = cache_.Erase(iter);
     } else {
       ++iter;
@@ -116,6 +157,7 @@ void SSLClientSessionCache::FlushForServer(const HostPortPair& server) {
 }
 
 void SSLClientSessionCache::Flush() {
+  ++generation_number_;
   cache_.Clear();
 }
 
@@ -134,59 +176,6 @@ bool SSLClientSessionCache::IsExpired(SSL_SESSION* session, time_t now) {
   return now_u64 < SSL_SESSION_get_time(session) - 1 ||
          now_u64 >=
              SSL_SESSION_get_time(session) + SSL_SESSION_get_timeout(session);
-}
-
-void SSLClientSessionCache::DumpMemoryStats(
-    base::trace_event::ProcessMemoryDump* pmd,
-    const std::string& parent_absolute_name) const {
-  std::string name = parent_absolute_name + "/ssl_client_session_cache";
-  base::trace_event::MemoryAllocatorDump* cache_dump =
-      pmd->CreateAllocatorDump(name);
-  size_t cert_size = 0;
-  size_t cert_count = 0;
-  size_t undeduped_cert_size = 0;
-  size_t undeduped_cert_count = 0;
-  for (const auto& pair : cache_) {
-    for (const auto& session : pair.second.sessions) {
-      if (!session)
-        continue;
-      undeduped_cert_count += sk_CRYPTO_BUFFER_num(
-          SSL_SESSION_get0_peer_certificates(session.get()));
-    }
-  }
-  // Use a flat_set here to avoid malloc upon insertion.
-  base::flat_set<const CRYPTO_BUFFER*> crypto_buffer_set;
-  crypto_buffer_set.reserve(undeduped_cert_count);
-  for (const auto& pair : cache_) {
-    for (const auto& session : pair.second.sessions) {
-      if (!session)
-        continue;
-      for (const CRYPTO_BUFFER* cert :
-           SSL_SESSION_get0_peer_certificates(session.get())) {
-        undeduped_cert_size += CRYPTO_BUFFER_len(cert);
-        auto result = crypto_buffer_set.insert(cert);
-        if (!result.second)
-          continue;
-        cert_size += CRYPTO_BUFFER_len(cert);
-        cert_count++;
-      }
-    }
-  }
-  cache_dump->AddScalar(base::trace_event::MemoryAllocatorDump::kNameSize,
-                        base::trace_event::MemoryAllocatorDump::kUnitsBytes,
-                        cert_size);
-  cache_dump->AddScalar("cert_size",
-                        base::trace_event::MemoryAllocatorDump::kUnitsBytes,
-                        cert_size);
-  cache_dump->AddScalar("cert_count",
-                        base::trace_event::MemoryAllocatorDump::kUnitsObjects,
-                        cert_count);
-  cache_dump->AddScalar("undeduped_cert_size",
-                        base::trace_event::MemoryAllocatorDump::kUnitsBytes,
-                        undeduped_cert_size);
-  cache_dump->AddScalar("undeduped_cert_count",
-                        base::trace_event::MemoryAllocatorDump::kUnitsObjects,
-                        undeduped_cert_count);
 }
 
 SSLClientSessionCache::Entry::Entry() = default;
@@ -240,17 +229,41 @@ void SSLClientSessionCache::FlushExpiredSessions() {
   }
 }
 
-void SSLClientSessionCache::OnMemoryPressure(
-    base::MemoryPressureListener::MemoryPressureLevel memory_pressure_level) {
-  switch (memory_pressure_level) {
-    case base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_NONE:
-      break;
-    case base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_MODERATE:
-      FlushExpiredSessions();
-      break;
-    case base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_CRITICAL:
-      Flush();
-      break;
+void SSLClientSessionCache::OnUpdateMemoryLimit() {
+  if (!base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    return;
+  }
+
+  size_t target_size =
+      base::ScaleByMemoryLimit(config_.max_entries, memory_limit());
+
+  // IMPORTANT: Ensure no memory is released during this call.
+  // By using std::max, we ensure the new limit is at least the current size,
+  // preventing growth without triggering immediate eviction.
+  cache_.UpdateMaxSize(std::max(cache_.size(), target_size));
+}
+
+void SSLClientSessionCache::OnReleaseMemory() {
+  if (base::FeatureList::IsEnabled(
+          features::kIgnoreMemoryPressureForSslClientSessionCache)) {
+    // We don't want to clear the SSL session cache because the entries in it
+    // are highly likely to be used again soon, and it causes more
+    // fragmentation and increases user latency to clear it, then spend
+    // additional roundtrips replacing all of the entries.
+    return;
+  }
+  if (base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    // Now we actually evict entries to reach the target size.
+    cache_.UpdateMaxSize(
+        base::ScaleByMemoryLimit(config_.max_entries, memory_limit()));
+    return;
+  }
+
+  // Preserve the traditional "one-shot" logic for legacy memory pressure.
+  if (memory_limit() <= base::kCriticalMemoryPressureThreshold) {
+    Flush();
+  } else if (memory_limit() <= base::kModerateMemoryPressureThreshold) {
+    FlushExpiredSessions();
   }
 }
 

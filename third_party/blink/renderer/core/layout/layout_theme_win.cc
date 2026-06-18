@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 #include <windows.h>
 
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/web_test_support.h"
+#include "ui/color/color_provider.h"
 
 namespace blink {
 
@@ -21,52 +21,12 @@ LayoutTheme& LayoutTheme::NativeTheme() {
   return *layout_theme;
 }
 
-Color LayoutThemeWin::SystemColor(CSSValueID css_value_id,
-                                  ColorScheme color_scheme) const {
-  blink::WebThemeEngine::SystemThemeColor theme_color;
-  switch (css_value_id) {
-    case CSSValueID::kActivetext:
-    case CSSValueID::kLinktext:
-    case CSSValueID::kVisitedtext:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kHotlight;
-      break;
-    case CSSValueID::kButtonface:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kButtonFace;
-      break;
-    case CSSValueID::kButtontext:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kButtonText;
-      break;
-    case CSSValueID::kGraytext:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kGrayText;
-      break;
-    case CSSValueID::kHighlight:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kHighlight;
-      break;
-    case CSSValueID::kHighlighttext:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kHighlightText;
-      break;
-    case CSSValueID::kWindow:
-    case CSSValueID::kCanvas:
-    case CSSValueID::kField:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kWindow;
-      break;
-    case CSSValueID::kWindowtext:
-    case CSSValueID::kCanvastext:
-    case CSSValueID::kFieldtext:
-      theme_color = blink::WebThemeEngine::SystemThemeColor::kWindowText;
-      break;
-    default:
-      return LayoutThemeDefault::SystemColor(css_value_id, color_scheme);
-  }
-
-  if (!WebTestSupport::IsRunningWebTest() && Platform::Current() &&
-      Platform::Current()->ThemeEngine()) {
-    const base::Optional<SkColor> system_color =
-        Platform::Current()->ThemeEngine()->GetSystemColor(theme_color);
-    if (system_color)
-      return Color(system_color.value());
-  }
-  return LayoutThemeDefault::SystemColor(css_value_id, color_scheme);
+Color LayoutThemeWin::SystemHighlightFromColorProvider(
+    mojom::blink::ColorScheme color_scheme,
+    const ui::ColorProvider* color_provider) const {
+  SkColor system_highlight_color =
+      color_provider->GetColor(ui::kColorCssSystemHighlight);
+  return Color::FromSkColor(system_highlight_color);
 }
 
 }  // namespace blink

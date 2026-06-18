@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,8 @@
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/rect.h"
 
+struct SkPoint;
+
 namespace gfx {
 class Canvas;
 }
@@ -22,24 +24,34 @@ namespace hud_display {
 
 class Graph {
  public:
-  // Graph screen size (that is used in Layout()) should match (ring buffer
+  // Graph screen size (that is used during layout) should match (ring buffer
   // size - 1) to prevent scaling, because RingBuffer always keeps one element
   // unused.
-  using Data = base::RingBuffer<float, kDefaultGraphWidth + 1>;
+  using Data = base::RingBuffer<float, kHUDGraphWidth + 1>;
 
   enum class Baseline {
-    BASELINE_BOTTOM,  // Positive values will be drawn from the bottom border
+    kBaselineBottom,  // Positive values will be drawn from the bottom border
                       // up.
-    BASELINE_TOP,     // Positive values will be drawn from the top border down.
+    kBaselineTop,     // Positive values will be drawn from the top border down.
   };
 
   // Whether to draw the graph as a filled polygon.
   enum class Fill {
-    NONE,
-    SOLID,
+    kNone,
+    kSolid,
   };
 
-  Graph(Baseline baseline, Fill fill, SkColor color);
+  enum class Style {
+    kLines,
+    kSkyline,
+  };
+
+  // |max_data_points| must be less than the ring buffer size.
+  Graph(size_t max_data_points,
+        Baseline baseline,
+        Fill fill,
+        Style style,
+        SkColor color);
   ~Graph();
 
   Graph(const Graph&) = delete;
@@ -47,15 +59,33 @@ class Graph {
 
   // |value| must be normalized to [0,1]. When graphs are drawn stacked,
   // the full stack must be normalized.
-  void AddValue(float value);
+  // |unscaled_value| is used to label graph values to the user.
+  void AddValue(float value, float unscaled_value);
   void Layout(const gfx::Rect& graph_bounds, const Graph* base);
   void Draw(gfx::Canvas* canvas) const;
+  void UpdateLastValue(float value, float unscaled_value);
 
   const std::vector<SkPoint>& top_path() const { return top_path_; }
 
-  size_t GetDataBufferSize() const { return data_.BufferSize(); }
+  // Returns number of data points displayed on the graph.
+  size_t max_data_points() const { return max_data_points_; }
 
   SkColor color() const { return color_; }
+
+  // Returns value from |unscaled_data_|.
+  // |index| is always interpreted as "negative", i.e. "0" - current data, "1"
+  // - previous graph data, 2 - two steps "ago". I.e. it's number of graph
+  // points from the right graph edge.
+  float GetUnscaledValueAt(size_t index) const;
+
+  // Returns true if |data_| is populated at the given index.
+  // |index| is always interpreted as "negative", i.e. "0" - current data, "1"
+  // - previous graph data, 2 - two steps ago. I.e. it's number of graph
+  // points from the right graph edge.
+  bool IsFilledIndex(size_t index) const;
+
+  // Reset the data.
+  void Reset();
 
 #if !defined(NDEBUG)
   // Returns string representation os this object for debug.
@@ -65,6 +95,7 @@ class Graph {
  private:
   const Baseline baseline_;
   const Fill fill_;
+  const Style style_;
   const SkColor color_;
 
   // Result of last Layout() call.
@@ -72,13 +103,17 @@ class Graph {
 
   // Paths are measured from the top left corner.
   // Partial graph is assumed to be right-justified.
-  // For BASELINE_BOTTOM |top_path_| has y values that are less than
-  // |bottom_path_|. (And opposite for the BASELINE_TOP.)
+  // For kBaselineBottom |top_path_| has y values that are less than
+  // |bottom_path_|. (And opposite for the kBaselineTop.)
   // Paths are calculated by Layout() from the |data_|.
   std::vector<SkPoint> top_path_;
   std::vector<SkPoint> bottom_path_;
+  // Bottom path style should follow base graph style.
+  Style bottom_path_style_ = Style::kLines;
 
   Data data_;
+  Data unscaled_data_;
+  size_t max_data_points_ = 0;
 };
 
 }  // namespace hud_display

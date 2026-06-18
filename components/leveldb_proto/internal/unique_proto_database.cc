@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <utility>
 
 #include "base/logging.h"
-#include "base/sequenced_task_runner.h"
+#include "base/task/sequenced_task_runner.h"
 #include "components/leveldb_proto/internal/leveldb_database.h"
 #include "components/leveldb_proto/internal/proto_leveldb_wrapper.h"
 
@@ -132,6 +132,13 @@ void UniqueProtoDatabase::LoadKeysAndEntriesInRange(
   db_wrapper_->LoadKeysAndEntriesInRange(start, end, std::move(callback));
 }
 
+void UniqueProtoDatabase::LoadKeysAndEntriesWhile(
+    const std::string& start,
+    const KeyIteratorController& controller,
+    typename Callbacks::LoadKeysAndEntriesCallback callback) {
+  db_wrapper_->LoadKeysAndEntriesWhile(start, controller, std::move(callback));
+}
+
 void UniqueProtoDatabase::LoadKeys(Callbacks::LoadKeysCallback callback) {
   db_wrapper_->LoadKeys(std::move(callback));
 }
@@ -155,10 +162,6 @@ void UniqueProtoDatabase::RemoveKeysForTesting(
     const std::string& target_prefix,
     Callbacks::UpdateCallback callback) {
   db_wrapper_->RemoveKeys(key_filter, target_prefix, std::move(callback));
-}
-
-bool UniqueProtoDatabase::GetApproximateMemoryUse(uint64_t* approx_mem_use) {
-  return db_wrapper_->GetApproximateMemoryUse(approx_mem_use);
 }
 
 void UniqueProtoDatabase::SetMetricsId(const std::string& id) {

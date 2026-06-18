@@ -12,7 +12,9 @@ function putImage() {
     header("Content-Type: image/png");
     header("Content-Length: " . filesize($image));
     header("Access-Control-Allow-Origin: *");
-    ob_clean();
+    if (ob_get_length() > 0) {
+        ob_clean();
+    }
     flush();
     readfile($image);
 }
@@ -22,7 +24,9 @@ function putFont() {
     header("Content-Type: font/truetype");
     header("Content-Length: " . filesize($font));
     header("Access-Control-Allow-Origin: *");
-    ob_clean();
+    if (ob_get_length() > 0) {
+        ob_clean();
+    }
     flush();
     readfile($font);
 }
@@ -31,7 +35,7 @@ $expectedReferrerPaths = array(
     "document" => "/css/css-resources-referrer.html",
     "sheet" => "/css/resources/css-resources-referrer.css",
     "importedSheet" => "/css/resources/css-resources-referrer-import.css",
-    "iframe" => "/from/iframe.html"
+    "iframe" => "/css/css-resources-referrer-srcdoc.html"
 );
 
 $from = $_GET["from"];

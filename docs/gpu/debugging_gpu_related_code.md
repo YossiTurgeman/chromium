@@ -76,7 +76,7 @@ Change that `#if 0` to `#if 1`, build a debug build, then run in a debugger.
 The debugger will break when any renderer code sees a GL error, and you should
 be able to examine the call stack to find the issue.
 
-[gles2_implementation.h]: https://chromium.googlesource.com/chromium/src/+/master/gpu/command_buffer/client/gles2_implementation.h
+[gles2_implementation.h]: https://chromium.googlesource.com/chromium/src/+/main/gpu/command_buffer/client/gles2_implementation.h
 
 ### Labeling your calls
 
@@ -218,24 +218,46 @@ after that. All of them go through `gpu::gles2::GLES2DecoderImpl::DoCommand`.
 
 To actually debug the GPU process:
 
-On Linux this works for me:
+On Linux, gdb can be automatically attached via the `--gpu-launcher` argument:
 
-*   `out/Debug/chromium --no-sandbox --gpu-launcher="xterm -e gdb --args"
+*   `out/Debug/chromium --no-sandbox --no-zygote
+    --gpu-launcher="xterm -e gdb --args"
     http://localhost:8000/page-to-repro.html`
 
-On OSX this works for me:
+Similarly, gdb can be attached with the same argument on OSX:
 
 *   `out/Debug/Chromium.app/Contents/MacOSX/Chromium --no-sandbox
     --gpu-launcher="xterm -e gdb --args"
     http://localhost:8000/page-to-repro.html`
 
-On Windows I use `--gpu-startup-dialog` and then connect to the listed process.
+On Windows, `--gpu-launcher` used with `windbg` does not appear to work
+properly, as the browser process will always fail to start the GPU process.
+Instead, you have two alternative options:
+
+1. Use `--gpu-startup-dialog`, which will cause a dialog window to be shown on
+   GPU process startup with the PID that you can attach to. This should work for
+   most use cases, but since it will add at least several seconds of delay, it
+   is possible to change behavior if the issue being debugged is timing related.
+2. Run the browser process through `windbg` and automatically attach to child
+   processes via `windbg -g -G -o <command to start Chrome>`.
+
+Similar approaches are likely possible with other debuggers, but the specifics
+are not listed here.
 
 ### `GPU PARSE ERROR`
 
 If you see this message in `about:gpu` or your console and you didn't cause it
 directly (by calling `glLoseContextCHROMIUM`) and it's something other than 5
 that means there's likely a bug. Please file an issue at <http://crbug.com/new>.
+
+## Tracing OpenGL calls
+
+Passing the command line flag `--enable-gpu-service-tracing` causes
+the GPU process to emit one trace event per OpenGL API call. (See
+"Debugging Performance", below.) This is useful when trying to
+understand where the expensive operations are in a given set of work
+sent from a renderer process to the GPU process, and processed
+underneath `CommandBufferService::PutChanged`.
 
 ## Debugging Performance
 
@@ -253,4 +275,10 @@ printf("elapsedTime = %f\n", end - start);
 
 **will not** give you meaningful results.
 
-[See Trace Event Profiling for details]: https://sites.google.com/a/chromium.org/dev/developers/how-tos/trace-event-profiling-tool
+[Trace Event Profiling]: https://sites.google.com/a/chromium.org/dev/developers/how-tos/trace-event-profiling-tool
+
+When diagnosing a specific regressed benchmark, the `tools/perf/run_benchmark`
+script can be configured to collect profile data for the gpu process that then
+can be visualized/analyzed with pprof.
+See [Catapult's docs](https://source.chromium.org/chromium/chromium/src/+/main:third_party/catapult/telemetry/docs/cpu_profiling.md)
+for more.

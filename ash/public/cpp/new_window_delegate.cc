@@ -1,9 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/public/cpp/new_window_delegate.h"
 
+#include "base/check.h"
 #include "base/check_op.h"
 
 namespace ash {
@@ -17,12 +18,12 @@ NewWindowDelegate* NewWindowDelegate::GetInstance() {
 }
 
 NewWindowDelegate::NewWindowDelegate() {
-  DCHECK(!g_new_window_delegate);
+  CHECK(!g_new_window_delegate);
   g_new_window_delegate = this;
 }
 
 NewWindowDelegate::~NewWindowDelegate() {
-  DCHECK_EQ(g_new_window_delegate, this);
+  CHECK_EQ(this, g_new_window_delegate);
   g_new_window_delegate = nullptr;
 }
 

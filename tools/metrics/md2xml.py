@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -53,11 +53,10 @@ import sys
 import time
 import xml.dom.minidom
 
-sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
-import path_util
+import setup_modules  # pylint: disable=unused-import
 
-sys.path.append(os.path.join(os.path.dirname(__file__), 'histograms'))
-import pretty_print
+import chromium_src.tools.metrics.common.path_util as path_util
+import chromium_src.tools.metrics.histograms.pretty_print as pretty_print
 
 SupportedTags = [
     "added",

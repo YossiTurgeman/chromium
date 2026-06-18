@@ -1,19 +1,23 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.browser_ui.media;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.graphics.Bitmap;
 import android.graphics.Rect;
-import android.text.TextUtils;
 
 import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.FileUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.content_public.browser.ImageDownloadCallback;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.services.media_session.MediaImage;
+import org.chromium.url.GURL;
 
 import java.util.Iterator;
 import java.util.List;
@@ -43,6 +47,7 @@ import java.util.List;
  *   - The aspect ratio score lies in [0, 1] and is computed by dividing the short edge length by
  *     the long edge.
  */
+@NullMarked
 public class MediaImageManager implements ImageDownloadCallback {
     // The default score of unknown image size.
     private static final double DEFAULT_IMAGE_SIZE_SCORE = 0.4;
@@ -54,10 +59,9 @@ public class MediaImageManager implements ImageDownloadCallback {
     private static final double TYPE_SCORE_XICON = 0.4;
     private static final double TYPE_SCORE_GIF = 0.3;
 
-    @VisibleForTesting
-    static final int MAX_BITMAP_SIZE_FOR_DOWNLOAD = 2048;
+    @VisibleForTesting static final int MAX_BITMAP_SIZE_FOR_DOWNLOAD = 2048;
 
-    private WebContents mWebContents;
+    private @Nullable WebContents mWebContents;
     // The minimum image size. Images that are smaller than |mMinimumSize| will be ignored.
     final int mMinimumSize;
     // The ideal image size. Images that are too large than |mIdealSize| will be ignored.
@@ -67,13 +71,13 @@ public class MediaImageManager implements ImageDownloadCallback {
     // {@link #clearRequests()} is called.
     private int mRequestId;
     // The callback to be called when the pending download image request completes.
-    private MediaImageCallback mCallback;
+    private @Nullable MediaImageCallback mCallback;
 
     // The last image src for download, used for avoiding fetching the same src when artwork is set
     // multiple times but the same src is chosen.
     //
     // Will be reset when initiating a new download request.
-    private String mLastImageSrc;
+    private @Nullable GURL mLastImageSrc;
 
     /**
      * MediaImageManager constructor.
@@ -90,7 +94,7 @@ public class MediaImageManager implements ImageDownloadCallback {
      * Called when the WebContent changes.
      * @param contents The new WebContents.
      */
-    public void setWebContents(WebContents contents) {
+    public void setWebContents(@Nullable WebContents contents) {
         mWebContents = contents;
         clearRequests();
     }
@@ -113,18 +117,20 @@ public class MediaImageManager implements ImageDownloadCallback {
         }
 
         // Avoid fetching the same image twice.
-        if (TextUtils.equals(image.getSrc(), mLastImageSrc)) return;
+        if (image.getSrc().equals(mLastImageSrc)) return;
         mLastImageSrc = image.getSrc();
 
         // Limit |maxBitmapSize| to |MAX_BITMAP_SIZE_FOR_DOWNLOAD| to avoid passing huge bitmaps
         // through JNI. |maxBitmapSize| does not prevent huge images to be downloaded. It is used to
         // filter/rescale the download images. See documentation of
         // {@link WebContents#downloadImage()} for details.
-        mRequestId = mWebContents.downloadImage(image.getSrc(), // url
-                false, // isFavicon
-                MAX_BITMAP_SIZE_FOR_DOWNLOAD, // maxBitmapSize
-                false, // bypassCache
-                this); // callback
+        mRequestId =
+                mWebContents.downloadImage(
+                        image.getSrc(), // url
+                        false, // isFavicon
+                        MAX_BITMAP_SIZE_FOR_DOWNLOAD, // maxBitmapSize
+                        false, // bypassCache
+                        this); // callback
     }
 
     /**
@@ -133,8 +139,12 @@ public class MediaImageManager implements ImageDownloadCallback {
      * corresponding to a previous request, it will be ignored.
      */
     @Override
-    public void onFinishDownloadImage(int id, int httpStatusCode, String imageUrl,
-            List<Bitmap> bitmaps, List<Rect> originalImageSizes) {
+    public void onFinishDownloadImage(
+            int id,
+            int httpStatusCode,
+            GURL imageUrl,
+            List<Bitmap> bitmaps,
+            List<Rect> originalImageSizes) {
         if (id != mRequestId) return;
 
         Iterator<Bitmap> iterBitmap = bitmaps.iterator();
@@ -151,6 +161,7 @@ public class MediaImageManager implements ImageDownloadCallback {
                 bestScore = newScore;
             }
         }
+        assumeNonNull(mCallback);
         mCallback.onImageDownloaded(bestBitmap);
         clearRequests();
     }
@@ -159,7 +170,7 @@ public class MediaImageManager implements ImageDownloadCallback {
      * Select the best image from the |images|.
      * @param images The list of images to select from. Null is equivalent to empty list.
      */
-    private MediaImage selectImage(List<MediaImage> images) {
+    private @Nullable MediaImage selectImage(List<MediaImage> images) {
         if (images == null) return null;
 
         MediaImage selectedImage = null;
@@ -215,8 +226,8 @@ public class MediaImageManager implements ImageDownloadCallback {
         return shortEdge / longEdge;
     }
 
-    private double getImageTypeScore(String url, String type) {
-        String extension = FileUtils.getExtension(url);
+    private double getImageTypeScore(GURL url, String type) {
+        String extension = FileUtils.getExtension(url.getSpec());
 
         if ("bmp".equals(extension) || "image/bmp".equals(type)) {
             return TYPE_SCORE_BMP;
@@ -226,7 +237,8 @@ public class MediaImageManager implements ImageDownloadCallback {
             return TYPE_SCORE_XICON;
         } else if ("png".equals(extension) || "image/png".equals(type)) {
             return TYPE_SCORE_PNG;
-        } else if ("jpeg".equals(extension) || "jpg".equals(extension)
+        } else if ("jpeg".equals(extension)
+                || "jpg".equals(extension)
                 || "image/jpeg".equals(type)) {
             return TYPE_SCORE_JPEG;
         }

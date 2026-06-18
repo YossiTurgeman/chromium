@@ -1,4 +1,2 @@
-sky@chromium.org
-skuhne@chromium.org
 
-# COMPONENT: Services>Sync
+per-file BUILD.gn=dljames@chromium.org

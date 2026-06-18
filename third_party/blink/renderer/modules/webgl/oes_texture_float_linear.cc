@@ -25,9 +25,12 @@
 
 #include "third_party/blink/renderer/modules/webgl/oes_texture_float_linear.h"
 
+#include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+
 namespace blink {
 
-OESTextureFloatLinear::OESTextureFloatLinear(WebGLRenderingContextBase* context)
+OESTextureFloatLinear::OESTextureFloatLinear(WebGLRenderingContextBase* context,
+                                             ExecutionContext*)
     : WebGLExtension(context) {
   context->ExtensionsUtil()->EnsureExtensionEnabled(
       "GL_OES_texture_float_linear");

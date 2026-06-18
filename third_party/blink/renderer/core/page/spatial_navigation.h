@@ -39,7 +39,7 @@ constexpr double kMaxDistance = std::numeric_limits<double>::max();
 
 CORE_EXPORT bool IsSpatialNavigationEnabled(const LocalFrame*);
 
-struct FocusCandidate {
+struct CORE_EXPORT FocusCandidate {
   STACK_ALLOCATED();
 
  public:
@@ -64,15 +64,20 @@ struct FocusCandidate {
 };
 
 CORE_EXPORT bool HasRemoteFrame(const Node*);
-CORE_EXPORT bool IsFragmentedInline(Node& node);
-CORE_EXPORT FloatRect RectInViewport(const Node&);
+CORE_EXPORT int LineBoxes(const LayoutObject& layout_object);
+CORE_EXPORT
+bool IsFragmentedInline(const LayoutObject& layout_object);
+CORE_EXPORT gfx::RectF RectInViewport(const Node&);
 CORE_EXPORT bool IsOffscreen(const Node*);
 CORE_EXPORT bool IsUnobscured(const FocusCandidate&);
 bool ScrollInDirection(Node* container, SpatialNavigationDirection);
-CORE_EXPORT bool IsScrollableNode(const Node* node);
-CORE_EXPORT bool IsScrollableAreaOrDocument(const Node*);
-CORE_EXPORT Node* ScrollableAreaOrDocumentOf(Node*);
-bool CanScrollInDirection(const Node* container, SpatialNavigationDirection);
+// Note this function might trigger UpdateStyleAndLayout.
+CORE_EXPORT bool IsScrollableNode(const Node*, SpatialNavigationDirection);
+CORE_EXPORT bool IsScrollableAreaOrDocument(const Node*,
+                                            SpatialNavigationDirection);
+CORE_EXPORT Node* ScrollableAreaOrDocumentOf(Node*, SpatialNavigationDirection);
+bool CanScrollInDirection(const Node* container,
+                          SpatialNavigationDirection direction);
 bool CanScrollInDirection(const LocalFrame*, SpatialNavigationDirection);
 
 double ComputeDistanceDataForNode(SpatialNavigationDirection,
@@ -86,6 +91,12 @@ CORE_EXPORT PhysicalRect RootViewport(const LocalFrame*);
 PhysicalRect StartEdgeForAreaElement(const HTMLAreaElement&,
                                      SpatialNavigationDirection);
 HTMLFrameOwnerElement* FrameOwnerElement(const FocusCandidate&);
+
+CORE_EXPORT PhysicalRect
+ShrinkInlineBoxToLineBox(const LayoutObject& layout_object,
+                         PhysicalRect visible_part,
+                         int line_boxes = -1);
+
 CORE_EXPORT PhysicalRect
 SearchOriginFragment(const PhysicalRect& visible_part,
                      const LayoutObject& fragmented,

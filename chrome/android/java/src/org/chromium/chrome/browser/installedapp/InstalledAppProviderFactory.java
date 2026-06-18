@@ -1,47 +1,33 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.installedapp;
 
-import org.chromium.chrome.browser.instantapps.InstantAppsHandler;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.components.installedapp.InstalledAppProviderImpl;
 import org.chromium.content_public.browser.RenderFrameHost;
+import org.chromium.content_public.browser.WebContentsStatics;
 import org.chromium.installedapp.mojom.InstalledAppProvider;
 import org.chromium.services.service_manager.InterfaceFactory;
-import org.chromium.url.GURL;
 
 /** Factory to create instances of the InstalledAppProvider Mojo service. */
-public class InstalledAppProviderFactory implements InterfaceFactory<InstalledAppProvider> {
-    private final FrameUrlDelegateImpl mFrameUrlDelegate;
-
-    private static final class FrameUrlDelegateImpl
-            implements InstalledAppProviderImpl.FrameUrlDelegate {
-        private final RenderFrameHost mRenderFrameHost;
-
-        public FrameUrlDelegateImpl(RenderFrameHost renderFrameHost) {
-            mRenderFrameHost = renderFrameHost;
-        }
-
-        @Override
-        public GURL getUrl() {
-            String url = mRenderFrameHost.getLastCommittedURL();
-            if (url == null) return GURL.emptyGURL();
-            return new GURL(url);
-        }
-
-        @Override
-        public boolean isIncognito() {
-            return mRenderFrameHost.isIncognito();
-        }
-    }
+@NullMarked
+public class InstalledAppProviderFactory
+        implements InterfaceFactory<@Nullable InstalledAppProvider> {
+    private final RenderFrameHost mRenderFrameHost;
 
     public InstalledAppProviderFactory(RenderFrameHost renderFrameHost) {
-        mFrameUrlDelegate = new FrameUrlDelegateImpl(renderFrameHost);
+        mRenderFrameHost = renderFrameHost;
     }
 
     @Override
     public InstalledAppProvider createImpl() {
-        return new InstalledAppProviderImpl(
-                mFrameUrlDelegate, new PackageManagerDelegate(), InstantAppsHandler.getInstance());
+        Profile profile =
+                Profile.fromWebContents(WebContentsStatics.fromRenderFrameHost(mRenderFrameHost));
+        assert profile != null;
+        return new InstalledAppProviderImpl(profile, mRenderFrameHost);
     }
 }

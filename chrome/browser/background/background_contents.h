@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,8 @@
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "content/public/browser/site_instance.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -30,7 +31,7 @@ class ExtensionHostDelegate;
 
 // This class maintains a WebContents used in the background. It can host a
 // renderer, but does not have any visible display.
-// TODO(atwilson): Unify this with background pages; http://crbug.com/77790
+// TODO(atwilson): Unify this with background pages; http://crbug.com/41351554
 class BackgroundContents : public extensions::DeferredStartRenderHost,
                            public content::WebContentsDelegate,
                            public content::WebContentsObserver {
@@ -45,7 +46,7 @@ class BackgroundContents : public extensions::DeferredStartRenderHost,
         std::unique_ptr<content::WebContents> new_contents,
         const GURL& target_url,
         WindowOpenDisposition disposition,
-        const gfx::Rect& initial_rect,
+        const blink::mojom::WindowFeatures& window_features,
         bool* was_blocked) = 0;
 
     // Informs the delegate of lifetime events.
@@ -56,7 +57,7 @@ class BackgroundContents : public extensions::DeferredStartRenderHost,
     virtual void OnBackgroundContentsClosed(BackgroundContents* contents) = 0;
 
    protected:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
   };
 
   BackgroundContents(
@@ -64,31 +65,39 @@ class BackgroundContents : public extensions::DeferredStartRenderHost,
       content::RenderFrameHost* opener,
       bool is_new_browsing_instance,
       Delegate* delegate,
-      const std::string& partition_id,
+      const content::StoragePartitionConfig& partition_config,
       content::SessionStorageNamespace* session_storage_namespace);
+
+  BackgroundContents(const BackgroundContents&) = delete;
+  BackgroundContents& operator=(const BackgroundContents&) = delete;
+
   ~BackgroundContents() override;
 
   content::WebContents* web_contents() const { return web_contents_.get(); }
   virtual const GURL& GetURL() const;
 
-  // Adds this BackgroundContents to the queue of RenderViews to create.
-  void CreateRenderViewSoon(const GURL& url);
+  // Adds this BackgroundContents to the queue of renderer main frames to create
+  // and navigate.
+  void CreateRendererSoon(const GURL& url);
 
   // content::WebContentsDelegate implementation:
   void CloseContents(content::WebContents* source) override;
   bool ShouldSuppressDialogs(content::WebContents* source) override;
-  void DidNavigateMainFramePostCommit(content::WebContents* tab) override;
-  void AddNewContents(content::WebContents* source,
-                      std::unique_ptr<content::WebContents> new_contents,
-                      const GURL& target_url,
-                      WindowOpenDisposition disposition,
-                      const gfx::Rect& initial_rect,
-                      bool user_gesture,
-                      bool* was_blocked) override;
-  bool IsNeverComposited(content::WebContents* web_contents) override;
+  content::WebContents* AddNewContents(
+      content::WebContents* source,
+      std::unique_ptr<content::WebContents> new_contents,
+      const GURL& target_url,
+      WindowOpenDisposition disposition,
+      const blink::mojom::WindowFeatures& window_features,
+      bool user_gesture,
+      bool* was_blocked) override;
 
   // content::WebContentsObserver implementation:
-  void RenderProcessGone(base::TerminationStatus status) override;
+  void PrimaryMainFrameRenderProcessGone(
+      base::TerminationStatus status) override;
+  void PrimaryPageChanged(content::Page& page) override;
+
+  const GURL& GetInitialURLForTesting() const { return initial_url_; }
 
  protected:
   // Exposed for testing.
@@ -96,33 +105,31 @@ class BackgroundContents : public extensions::DeferredStartRenderHost,
 
  private:
   // extensions::DeferredStartRenderHost implementation:
-  void CreateRenderViewNow() override;
+  void CreateRendererNow() override;
 
   // The delegate for this BackgroundContents.
-  Delegate* delegate_;
+  raw_ptr<Delegate> delegate_;
 
   // Delegate for choosing an ExtensionHostQueue.
   std::unique_ptr<extensions::ExtensionHostDelegate> extension_host_delegate_;
 
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
   std::unique_ptr<content::WebContents> web_contents_;
 
   // The initial URL to load.
   GURL initial_url_;
-
-  DISALLOW_COPY_AND_ASSIGN(BackgroundContents);
 };
 
 // This is the data sent out as the details with BACKGROUND_CONTENTS_OPENED.
 struct BackgroundContentsOpenedDetails {
   // The BackgroundContents object that has just been opened.
-  BackgroundContents* contents;
+  raw_ptr<BackgroundContents, DanglingUntriaged> contents;
 
   // The name of the parent frame for these contents.
-  const std::string& frame_name;
+  const raw_ref<const std::string> frame_name;
 
   // The ID of the parent application (if any).
-  const std::string& application_id;
+  const raw_ref<const std::string> application_id;
 };
 
 #endif  // CHROME_BROWSER_BACKGROUND_BACKGROUND_CONTENTS_H_

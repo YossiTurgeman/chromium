@@ -30,21 +30,25 @@
 
 #include "third_party/blink/renderer/platform/graphics/gpu/drawing_buffer.h"
 
+#include <array>
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/stl_util.h"
-#include "components/viz/common/resources/single_release_callback.h"
+#include "base/test/task_environment.h"
+#include "components/viz/common/resources/release_callback.h"
 #include "components/viz/common/resources/transferable_resource.h"
-#include "components/viz/test/test_gpu_memory_buffer_manager.h"
+#include "components/viz/test/test_context_provider.h"
 #include "gpu/command_buffer/client/gles2_interface_stub.h"
 #include "gpu/command_buffer/common/mailbox.h"
 #include "gpu/command_buffer/common/sync_token.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/platform/graphics/canvas_color_params.h"
+#include "third_party/blink/renderer/platform/graphics/gpu/canvas_utils.h"
 #include "third_party/blink/renderer/platform/graphics/gpu/drawing_buffer_test_helpers.h"
-#include "third_party/blink/renderer/platform/graphics/test/gpu_memory_buffer_test_platform.h"
+#include "third_party/blink/renderer/platform/graphics/test/gpu_compositing_test_platform.h"
+#include "third_party/blink/renderer/platform/graphics/test/gpu_test_utils.h"
+#include "third_party/blink/renderer/platform/graphics/test/test_webgraphics_shared_image_interface_provider.h"
 #include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 #include "ui/gl/gpu_preference.h"
 #include "v8/include/v8.h"
@@ -63,16 +67,21 @@ class DrawingBufferTest : public Test {
   void SetUp() override { Init(kDisableMultisampling); }
 
   void Init(UseMultisampling use_multisampling) {
-    IntSize initial_size(kInitialWidth, kInitialHeight);
+    test_context_provider_ = viz::TestContextProvider::CreateRaster();
+    InitializeSharedGpuContext(test_context_provider_.get());
+
+    gfx::Size initial_size(kInitialWidth, kInitialHeight);
     auto gl = std::make_unique<GLES2InterfaceForTests>();
     auto provider =
         std::make_unique<WebGraphicsContext3DProviderForTests>(std::move(gl));
     GLES2InterfaceForTests* gl_ =
         static_cast<GLES2InterfaceForTests*>(provider->ContextGL());
-    bool gpu_compositing = true;
+    Platform::WebGLContextInfo context_info;
+    context_info.using_gpu_compositing = true;
     drawing_buffer_ = DrawingBufferForTests::Create(
-        std::move(provider), gpu_compositing, gl_, initial_size,
-        DrawingBuffer::kPreserve, use_multisampling);
+        std::move(provider), /*shared_image_interface_provider_for_sw=*/nullptr,
+        context_info, gl_, initial_size, DrawingBuffer::kPreserve,
+        use_multisampling);
     CHECK(drawing_buffer_);
     SetAndSaveRestoreState(false);
   }
@@ -83,10 +92,10 @@ class DrawingBufferTest : public Test {
   void SetAndSaveRestoreState(bool invert) {
     GLES2InterfaceForTests* gl_ = drawing_buffer_->ContextGLForTests();
     GLboolean scissor_enabled = !invert;
-    GLfloat clear_color[4] = {0.1, 0.2, 0.3, 0.4};
+    std::array<GLfloat, 4> clear_color = {0.1, 0.2, 0.3, 0.4};
     GLfloat clear_depth = 0.8;
     GLint clear_stencil = 37;
-    GLboolean color_mask[4] = {invert, !invert, !invert, invert};
+    std::array<GLboolean, 4> color_mask = {invert, !invert, !invert, invert};
     GLboolean depth_mask = invert;
     GLboolean stencil_mask = invert;
     GLint pack_alignment = 7;
@@ -123,6 +132,10 @@ class DrawingBufferTest : public Test {
     gl_->VerifyStateHasNotChangedSinceSave();
   }
 
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+  ScopedTestingPlatformSupport<GpuCompositingTestPlatform> platform_;
+  scoped_refptr<viz::TestContextProvider> test_context_provider_;
   scoped_refptr<DrawingBufferForTests> drawing_buffer_;
 };
 
@@ -137,7 +150,7 @@ TEST_F(DrawingBufferTestMultisample, verifyMultisampleResolve) {
   EXPECT_TRUE(drawing_buffer_->ExplicitResolveOfMultisampleData());
 
   // Resolve the multisample buffer
-  drawing_buffer_->ResolveAndBindForReadAndDraw();
+  EXPECT_TRUE(drawing_buffer_->ResolveAndBindForReadAndDraw());
 
   // After resolve, acknowledge new content
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
@@ -148,58 +161,58 @@ TEST_F(DrawingBufferTestMultisample, verifyMultisampleResolve) {
 }
 
 TEST_F(DrawingBufferTest, VerifyResizingProperlyAffectsResources) {
-  viz::TestSharedImageInterface* sii =
+  gpu::TestSharedImageInterface* sii =
       drawing_buffer_->SharedImageInterfaceForTests();
 
   VerifyStateWasRestored();
   viz::TransferableResource resource;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback;
+  viz::ReleaseCallback release_callback;
 
-  IntSize initial_size(kInitialWidth, kInitialHeight);
-  IntSize alternate_size(kInitialWidth, kAlternateHeight);
+  gfx::Size initial_size(kInitialWidth, kInitialHeight);
+  gfx::Size alternate_size(kInitialWidth, kAlternateHeight);
 
   // Produce one resource at size 100x100.
   EXPECT_FALSE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
   VerifyStateWasRestored();
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), sii->MostRecentSize());
+  EXPECT_EQ(initial_size, sii->MostRecentSize());
 
   // Resize to 100x50.
   drawing_buffer_->Resize(alternate_size);
   VerifyStateWasRestored();
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
   VerifyStateWasRestored();
 
   // Produce a resource at this size.
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
-  EXPECT_EQ(static_cast<gfx::Size>(alternate_size), sii->MostRecentSize());
+  EXPECT_EQ(alternate_size, sii->MostRecentSize());
   VerifyStateWasRestored();
 
   // Reset to initial size.
   drawing_buffer_->Resize(initial_size);
   VerifyStateWasRestored();
   SetAndSaveRestoreState(true);
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
   VerifyStateWasRestored();
 
   // Prepare another resource and verify that it's the correct size.
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), sii->MostRecentSize());
+  EXPECT_EQ(initial_size, sii->MostRecentSize());
   VerifyStateWasRestored();
 
   // Prepare one final resource and verify that it's the correct size.
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
   VerifyStateWasRestored();
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), sii->MostRecentSize());
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  EXPECT_EQ(initial_size, sii->MostRecentSize());
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
   drawing_buffer_->BeginDestruction();
 }
 
@@ -207,40 +220,43 @@ TEST_F(DrawingBufferTest, VerifySharedImagesReleasedAfterReleaseCallback) {
   auto* sii = drawing_buffer_->SharedImageInterfaceForTests();
 
   viz::TransferableResource resource1;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback1;
+  viz::ReleaseCallback release_callback1;
   viz::TransferableResource resource2;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback2;
+  viz::ReleaseCallback release_callback2;
   viz::TransferableResource resource3;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback3;
+  viz::ReleaseCallback release_callback3;
 
   // Produce resources.
   EXPECT_FALSE(drawing_buffer_->MarkContentsChanged());
   drawing_buffer_->ClearFramebuffers(GL_STENCIL_BUFFER_BIT);
   VerifyStateWasRestored();
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource1,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource1,
                                                            &release_callback1));
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
   drawing_buffer_->ClearFramebuffers(GL_DEPTH_BUFFER_BIT);
   VerifyStateWasRestored();
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource2,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource2,
                                                            &release_callback2));
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
   drawing_buffer_->ClearFramebuffers(GL_COLOR_BUFFER_BIT);
   VerifyStateWasRestored();
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource3,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource3,
                                                            &release_callback3));
 
   EXPECT_EQ(sii->shared_image_count(), 4u);
 
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  release_callback1->Run(gpu::SyncToken(), true /* lostResource */);
+  std::move(release_callback1).Run(gpu::SyncToken(), true /* lostResource */);
+  resource1 = viz::TransferableResource();
   EXPECT_EQ(sii->shared_image_count(), 3u);
 
-  release_callback2->Run(gpu::SyncToken(), true /* lostResource */);
+  std::move(release_callback2).Run(gpu::SyncToken(), true /* lostResource */);
+  resource2 = viz::TransferableResource();
   EXPECT_EQ(sii->shared_image_count(), 2u);
 
   // The resource is not marked lost so it's recycled after the callback.
-  release_callback3->Run(gpu::SyncToken(), false /* lostResource */);
+  std::move(release_callback3).Run(gpu::SyncToken(), false /* lostResource */);
+  resource3 = viz::TransferableResource();
   EXPECT_EQ(sii->shared_image_count(), 2u);
 
   drawing_buffer_->BeginDestruction();
@@ -249,37 +265,35 @@ TEST_F(DrawingBufferTest, VerifySharedImagesReleasedAfterReleaseCallback) {
 TEST_F(DrawingBufferTest, VerifyCachedRecycledResourcesAreKept) {
   const size_t kNumResources = DrawingBuffer::kDefaultColorBufferCacheLimit + 1;
   std::vector<viz::TransferableResource> resources(kNumResources);
-  std::vector<std::unique_ptr<viz::SingleReleaseCallback>> release_callbacks(
-      kNumResources);
+  std::vector<viz::ReleaseCallback> release_callbacks(kNumResources);
 
   // Produce resources.
   for (size_t i = 0; i < kNumResources; ++i) {
     drawing_buffer_->MarkContentsChanged();
     EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(
-        nullptr, &resources[i], &release_callbacks[i]));
+        &resources[i], &release_callbacks[i]));
   }
 
   // Release resources.
   for (auto& release_callback : release_callbacks) {
     drawing_buffer_->MarkContentsChanged();
-    release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+    std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
   }
 
-  std::vector<std::unique_ptr<viz::SingleReleaseCallback>>
-      recycled_release_callbacks(DrawingBuffer::kDefaultColorBufferCacheLimit);
+  std::vector<viz::ReleaseCallback> recycled_release_callbacks(
+      DrawingBuffer::kDefaultColorBufferCacheLimit);
 
   // The first recycled resource must be from the cache
   for (size_t i = 0; i < DrawingBuffer::kDefaultColorBufferCacheLimit; ++i) {
     viz::TransferableResource recycled_resource;
-    std::unique_ptr<viz::SingleReleaseCallback> recycled_release_callback;
+    viz::ReleaseCallback recycled_release_callback;
     drawing_buffer_->MarkContentsChanged();
     EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(
-        nullptr, &recycled_resource, &recycled_release_callbacks[i]));
+        &recycled_resource, &recycled_release_callbacks[i]));
 
     bool recycled = false;
     for (auto& resource : resources) {
-      if (recycled_resource.mailbox_holder.mailbox ==
-          resource.mailbox_holder.mailbox) {
+      if (recycled_resource.mailbox() == resource.mailbox()) {
         recycled = true;
         break;
       }
@@ -289,20 +303,19 @@ TEST_F(DrawingBufferTest, VerifyCachedRecycledResourcesAreKept) {
 
   // The next recycled resource must be a new resource.
   viz::TransferableResource next_recycled_resource;
-  std::unique_ptr<viz::SingleReleaseCallback> next_recycled_release_callback;
+  viz::ReleaseCallback next_recycled_release_callback;
   drawing_buffer_->MarkContentsChanged();
   EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(
-      nullptr, &next_recycled_resource, &next_recycled_release_callback));
+      &next_recycled_resource, &next_recycled_release_callback));
   for (auto& resource : resources) {
-    EXPECT_NE(resource.mailbox_holder.mailbox,
-              next_recycled_resource.mailbox_holder.mailbox);
+    EXPECT_NE(resource.mailbox(), next_recycled_resource.mailbox());
   }
   recycled_release_callbacks.push_back(
       std::move(next_recycled_release_callback));
 
   // Cleanup
   for (auto& release_cb : recycled_release_callbacks) {
-    release_cb->Run(gpu::SyncToken(), false /* lostResource */);
+    std::move(release_cb).Run(gpu::SyncToken(), false /* lostResource */);
   }
   drawing_buffer_->BeginDestruction();
 }
@@ -310,11 +323,11 @@ TEST_F(DrawingBufferTest, VerifyCachedRecycledResourcesAreKept) {
 TEST_F(DrawingBufferTest, verifyInsertAndWaitSyncTokenCorrectly) {
   GLES2InterfaceForTests* gl_ = drawing_buffer_->ContextGLForTests();
   viz::TransferableResource resource;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback;
+  viz::ReleaseCallback release_callback;
 
   // Produce resources.
   EXPECT_FALSE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
 
   // Pretend to release the resource. We should not wait for the sync token yet
@@ -323,7 +336,7 @@ TEST_F(DrawingBufferTest, verifyInsertAndWaitSyncTokenCorrectly) {
   gl_->GenSyncTokenCHROMIUM(wait_sync_token.GetData());
   EXPECT_CALL(*gl_, WaitSyncTokenCHROMIUMMock(SyncTokenEq(wait_sync_token)))
       .Times(0);
-  release_callback->Run(wait_sync_token, false /* lostResource */);
+  std::move(release_callback).Run(wait_sync_token, false /* lostResource */);
   testing::Mock::VerifyAndClearExpectations(gl_);
 
   // The returned buffer will be recycled in PrepareTransferrableResource. Make
@@ -331,7 +344,7 @@ TEST_F(DrawingBufferTest, verifyInsertAndWaitSyncTokenCorrectly) {
   EXPECT_CALL(*gl_, WaitSyncTokenCHROMIUMMock(SyncTokenEq(wait_sync_token)))
       .Times(1);
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
   testing::Mock::VerifyAndClearExpectations(gl_);
 
@@ -341,60 +354,60 @@ TEST_F(DrawingBufferTest, verifyInsertAndWaitSyncTokenCorrectly) {
   gl_->GenSyncTokenCHROMIUM(wait_sync_token.GetData());
   EXPECT_CALL(*gl_, WaitSyncTokenCHROMIUMMock(SyncTokenEq(wait_sync_token)))
       .Times(0);
-  release_callback->Run(wait_sync_token, false /* lostResource */);
+  std::move(release_callback).Run(wait_sync_token, false /* lostResource */);
   drawing_buffer_->BeginDestruction();
   testing::Mock::VerifyAndClearExpectations(gl_);
 }
 
-class DrawingBufferImageChromiumTest : public DrawingBufferTest,
-                                       private ScopedWebGLImageChromiumForTest {
- public:
-  DrawingBufferImageChromiumTest() : ScopedWebGLImageChromiumForTest(true) {}
+TEST_F(DrawingBufferTest, TransferableResourcesAreNotOverlayCandidates) {
+  viz::TransferableResource resource;
+  viz::ReleaseCallback release_callback;
 
- protected:
-  void SetUp() override {
-    platform_.reset(
-        new ScopedTestingPlatformSupport<GpuMemoryBufferTestPlatform>);
+  // Produce a resource. The created resource should not be an overlay
+  // candidate.
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
+                                                           &release_callback));
+  EXPECT_FALSE(resource.GetIsOverlayCandidate());
 
-    IntSize initial_size(kInitialWidth, kInitialHeight);
-    auto gl = std::make_unique<GLES2InterfaceForTests>();
-    auto provider =
-        std::make_unique<WebGraphicsContext3DProviderForTests>(std::move(gl));
-    GLES2InterfaceForTests* gl_ =
-        static_cast<GLES2InterfaceForTests*>(provider->ContextGL());
-    EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
-    bool gpu_compositing = true;
-    drawing_buffer_ = DrawingBufferForTests::Create(
-        std::move(provider), gpu_compositing, gl_, initial_size,
-        DrawingBuffer::kPreserve, kDisableMultisampling);
-    CHECK(drawing_buffer_);
-    SetAndSaveRestoreState(true);
-    testing::Mock::VerifyAndClearExpectations(gl_);
-  }
+  drawing_buffer_->BeginDestruction();
+}
 
-  void TearDown() override {
-    platform_.reset();
-  }
+TEST_F(
+    DrawingBufferTest,
+    TransferableResourcesAreOverlayCandidatesWhenUseOverlaysForWebGLIsEnabled) {
+  ScopedCanvasUtils scoped_canvas_utils;
+  SetUseOverlaysForWebGLForTesting(true);
+  viz::TransferableResource resource;
+  viz::ReleaseCallback release_callback;
 
-  GLuint image_id0_;
-  std::unique_ptr<ScopedTestingPlatformSupport<GpuMemoryBufferTestPlatform>>
-      platform_;
-};
+  // Produce a resource. The created resource should be an overlay candidate.
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
+                                                           &release_callback));
+#if BUILDFLAG(IS_WIN)
+  // Note: On Windows, DrawingBuffer does not query UseOverlaysForWebGL() at
+  // all but adds SCANOUT only via directly querying whether swapchain-backed
+  // SIs are supported when low-latency is enabled.
+  EXPECT_FALSE(resource.GetIsOverlayCandidate());
+#else
+  EXPECT_TRUE(resource.GetIsOverlayCandidate());
+#endif
 
-TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
+  drawing_buffer_->BeginDestruction();
+}
+
+TEST_F(DrawingBufferTest, VerifyResizingReallocatesImages) {
   GLES2InterfaceForTests* gl_ = drawing_buffer_->ContextGLForTests();
-  viz::TestSharedImageInterface* sii =
+  gpu::TestSharedImageInterface* sii =
       drawing_buffer_->SharedImageInterfaceForTests();
 
   viz::TransferableResource resource;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback;
+  viz::ReleaseCallback release_callback;
 
-  IntSize initial_size(kInitialWidth, kInitialHeight);
-  IntSize alternate_size(kInitialWidth, kAlternateHeight);
+  gfx::Size initial_size(kInitialWidth, kInitialHeight);
+  gfx::Size alternate_size(kInitialWidth, kAlternateHeight);
 
   // There should be currently one back buffer and therefore one SharedImage.
-  gpu::Mailbox mailbox1;
-  mailbox1.SetName(gl_->last_imported_shared_image()->name);
+  gpu::Mailbox mailbox1 = gl_->last_imported_shared_image();
   EXPECT_EQ(1u, sii->shared_image_count());
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox1));
 
@@ -402,27 +415,24 @@ TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
   // therefore another SharedImage.
   EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
   EXPECT_FALSE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), sii->MostRecentSize());
-  EXPECT_TRUE(resource.is_overlay_candidate);
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), resource.size);
+  EXPECT_EQ(initial_size, sii->MostRecentSize());
+  EXPECT_EQ(initial_size, resource.GetSize());
   testing::Mock::VerifyAndClearExpectations(gl_);
   VerifyStateWasRestored();
-  gpu::Mailbox mailbox2;
-  mailbox2.SetName(gl_->last_imported_shared_image()->name);
+  gpu::Mailbox mailbox2 = gl_->last_imported_shared_image();
   EXPECT_EQ(2u, sii->shared_image_count());
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox1));
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox2));
-  EXPECT_EQ(mailbox2, resource.mailbox_holder.mailbox);
+  EXPECT_EQ(mailbox2, resource.mailbox());
 
   // Resize to 100x50. The current backbuffer must be destroyed. The exported
   // resource should stay alive. A new backbuffer must be created.
   EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
   drawing_buffer_->Resize(alternate_size);
   VerifyStateWasRestored();
-  gpu::Mailbox mailbox3;
-  mailbox3.SetName(gl_->last_imported_shared_image()->name);
+  gpu::Mailbox mailbox3 = gl_->last_imported_shared_image();
   EXPECT_EQ(2u, sii->shared_image_count());
   EXPECT_FALSE(sii->CheckSharedImageExists(mailbox1));
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox2));
@@ -430,7 +440,8 @@ TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
   testing::Mock::VerifyAndClearExpectations(gl_);
 
   // Return the exported resource. Now it should get destroyed too.
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
+  resource = viz::TransferableResource();
   VerifyStateWasRestored();
   EXPECT_EQ(1u, sii->shared_image_count());
   EXPECT_FALSE(sii->CheckSharedImageExists(mailbox1));
@@ -440,17 +451,15 @@ TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
   // Produce a resource at the new size.
   EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
-  EXPECT_EQ(static_cast<gfx::Size>(alternate_size), sii->MostRecentSize());
-  EXPECT_TRUE(resource.is_overlay_candidate);
-  EXPECT_EQ(static_cast<gfx::Size>(alternate_size), resource.size);
-  gpu::Mailbox mailbox4;
-  mailbox4.SetName(gl_->last_imported_shared_image()->name);
+  EXPECT_EQ(alternate_size, sii->MostRecentSize());
+  EXPECT_EQ(alternate_size, resource.GetSize());
+  gpu::Mailbox mailbox4 = gl_->last_imported_shared_image();
   EXPECT_EQ(2u, sii->shared_image_count());
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox3));
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox4));
-  EXPECT_EQ(mailbox4, resource.mailbox_holder.mailbox);
+  EXPECT_EQ(mailbox4, resource.mailbox());
   testing::Mock::VerifyAndClearExpectations(gl_);
 
   // Reset to initial size. The exported resource has to stay alive, but the
@@ -459,8 +468,7 @@ TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
   EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
   drawing_buffer_->Resize(initial_size);
   VerifyStateWasRestored();
-  gpu::Mailbox mailbox5;
-  mailbox5.SetName(gl_->last_imported_shared_image()->name);
+  gpu::Mailbox mailbox5 = gl_->last_imported_shared_image();
   EXPECT_EQ(2u, sii->shared_image_count());
   EXPECT_FALSE(sii->CheckSharedImageExists(mailbox3));
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox4));
@@ -468,7 +476,8 @@ TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
   testing::Mock::VerifyAndClearExpectations(gl_);
 
   // Return the exported resource. Now it will be destroyed too.
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
+  resource = viz::TransferableResource();
   VerifyStateWasRestored();
   EXPECT_EQ(1u, sii->shared_image_count());
   EXPECT_FALSE(sii->CheckSharedImageExists(mailbox3));
@@ -478,14 +487,12 @@ TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
   // Prepare another resource and verify that it's the correct size.
   EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), sii->MostRecentSize());
-  EXPECT_TRUE(resource.is_overlay_candidate);
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), resource.size);
+  EXPECT_EQ(initial_size, sii->MostRecentSize());
+  EXPECT_EQ(initial_size, resource.GetSize());
   testing::Mock::VerifyAndClearExpectations(gl_);
-  gpu::Mailbox mailbox6;
-  mailbox6.SetName(gl_->last_imported_shared_image()->name);
+  gpu::Mailbox mailbox6 = gl_->last_imported_shared_image();
   EXPECT_EQ(2u, sii->shared_image_count());
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox5));
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox6));
@@ -493,86 +500,21 @@ TEST_F(DrawingBufferImageChromiumTest, VerifyResizingReallocatesImages) {
   // Prepare one final resource and verify that it's the correct size. We should
   // recycle the previously exported resource and avoid allocating a new
   // SharedImage.
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
   EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), sii->MostRecentSize());
-  EXPECT_TRUE(resource.is_overlay_candidate);
-  EXPECT_EQ(static_cast<gfx::Size>(initial_size), resource.size);
-  release_callback->Run(gpu::SyncToken(), false /* lostResource */);
+  EXPECT_EQ(initial_size, sii->MostRecentSize());
+  EXPECT_EQ(initial_size, resource.GetSize());
+  std::move(release_callback).Run(gpu::SyncToken(), false /* lostResource */);
   EXPECT_EQ(2u, sii->shared_image_count());
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox5));
   EXPECT_TRUE(sii->CheckSharedImageExists(mailbox6));
 
   drawing_buffer_->BeginDestruction();
   testing::Mock::VerifyAndClearExpectations(sii);
+  resource = viz::TransferableResource();
   EXPECT_EQ(0u, sii->shared_image_count());
-}
-
-TEST_F(DrawingBufferImageChromiumTest, AllocationFailure) {
-  GLES2InterfaceForTests* gl_ = drawing_buffer_->ContextGLForTests();
-  viz::TestGpuMemoryBufferManager* gmb_manager =
-      static_cast<viz::TestGpuMemoryBufferManager*>(
-          Platform::Current()->GetGpuMemoryBufferManager());
-  viz::TestSharedImageInterface* sii =
-      drawing_buffer_->SharedImageInterfaceForTests();
-
-  viz::TransferableResource resource1;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback1;
-  viz::TransferableResource resource2;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback2;
-  viz::TransferableResource resource3;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback3;
-
-  // Request a resource. A SharedImage should already be created. Everything
-  // works as expected.
-  EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
-  EXPECT_FALSE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource1,
-                                                           &release_callback1));
-  EXPECT_TRUE(resource1.is_overlay_candidate);
-  gpu::Mailbox mailbox1;
-  mailbox1.SetName(gl_->last_imported_shared_image()->name);
-  EXPECT_TRUE(sii->CheckSharedImageExists(mailbox1));
-  testing::Mock::VerifyAndClearExpectations(gl_);
-  VerifyStateWasRestored();
-
-  // Force GpuMemoryBuffer creation failure. Request another resource. It should
-  // still be provided, but this time with allowOverlay = false.
-  EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
-  gmb_manager->SetFailOnCreate(true);
-  EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource2,
-                                                           &release_callback2));
-  EXPECT_FALSE(resource2.is_overlay_candidate);
-  gpu::Mailbox mailbox2;
-  mailbox2.SetName(gl_->last_imported_shared_image()->name);
-  EXPECT_TRUE(sii->CheckSharedImageExists(mailbox2));
-  VerifyStateWasRestored();
-
-  // Check that if GpuMemoryBuffer allocation starts working again, resources
-  // are correctly created with allowOverlay = true.
-  EXPECT_CALL(*gl_, CreateAndTexStorage2DSharedImageCHROMIUMMock(_)).Times(1);
-  gmb_manager->SetFailOnCreate(false);
-  EXPECT_TRUE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource3,
-                                                           &release_callback3));
-  EXPECT_TRUE(resource3.is_overlay_candidate);
-  gpu::Mailbox mailbox3;
-  mailbox3.SetName(gl_->last_imported_shared_image()->name);
-  EXPECT_TRUE(sii->CheckSharedImageExists(mailbox3));
-  testing::Mock::VerifyAndClearExpectations(gl_);
-  VerifyStateWasRestored();
-
-  release_callback1->Run(gpu::SyncToken(), false /* lostResource */);
-  release_callback2->Run(gpu::SyncToken(), false /* lostResource */);
-  release_callback3->Run(gpu::SyncToken(), false /* lostResource */);
-
-  drawing_buffer_->BeginDestruction();
-  EXPECT_FALSE(sii->CheckSharedImageExists(mailbox1));
-  EXPECT_FALSE(sii->CheckSharedImageExists(mailbox2));
-  EXPECT_FALSE(sii->CheckSharedImageExists(mailbox3));
 }
 
 class DepthStencilTrackingGLES2Interface
@@ -594,7 +536,6 @@ class DepthStencilTrackingGLES2Interface
         break;
       default:
         NOTREACHED();
-        break;
     }
   }
 
@@ -618,7 +559,7 @@ class DepthStencilTrackingGLES2Interface
 
   void GenRenderbuffers(GLsizei n, GLuint* renderbuffers) override {
     for (GLsizei i = 0; i < n; ++i)
-      renderbuffers[i] = next_gen_renderbuffer_id_++;
+      UNSAFE_TODO(renderbuffers[i]) = next_gen_renderbuffer_id_++;
   }
 
   GLuint StencilAttachment() const { return stencil_attachment_; }
@@ -657,15 +598,15 @@ struct DepthStencilTestCase {
 // defined by WebGL. We always allocate a packed buffer in this case since many
 // desktop OpenGL drivers that support this extension do not consider a
 // framebuffer with only a depth or a stencil buffer attached to be complete.
-TEST(DrawingBufferDepthStencilTest, packedDepthStencilSupported) {
-  DepthStencilTestCase cases[] = {
+TEST_F(DrawingBufferTest, packedDepthStencilSupported) {
+  auto cases = std::to_array<DepthStencilTestCase>({
       DepthStencilTestCase(false, false, 0, "neither"),
       DepthStencilTestCase(true, false, 1, "stencil only"),
       DepthStencilTestCase(false, true, 1, "depth only"),
       DepthStencilTestCase(true, true, 1, "both"),
-  };
+  });
 
-  for (size_t i = 0; i < base::size(cases); i++) {
+  for (size_t i = 0; i < std::size(cases); i++) {
     SCOPED_TRACE(cases[i].test_case_name);
     auto gl = std::make_unique<DepthStencilTrackingGLES2Interface>();
     DepthStencilTrackingGLES2Interface* tracking_gl = gl.get();
@@ -673,20 +614,20 @@ TEST(DrawingBufferDepthStencilTest, packedDepthStencilSupported) {
         std::make_unique<WebGraphicsContext3DProviderForTests>(std::move(gl));
     DrawingBuffer::PreserveDrawingBuffer preserve = DrawingBuffer::kPreserve;
 
+    Platform::WebGLContextInfo context_info;
+    context_info.using_gpu_compositing = true;
     bool premultiplied_alpha = false;
     bool want_alpha_channel = true;
     bool want_depth_buffer = cases[i].request_depth;
     bool want_stencil_buffer = cases[i].request_stencil;
     bool want_antialiasing = false;
-    bool gpu_compositing = true;
-    bool using_swap_chain = false;
+    bool desynchronized = false;
     scoped_refptr<DrawingBuffer> drawing_buffer = DrawingBuffer::Create(
-        std::move(provider), gpu_compositing, using_swap_chain, nullptr,
-        IntSize(10, 10), premultiplied_alpha, want_alpha_channel,
-        want_depth_buffer, want_stencil_buffer, want_antialiasing, preserve,
-        DrawingBuffer::kWebGL1, DrawingBuffer::kAllowChromiumImage,
-        kLow_SkFilterQuality, CanvasColorParams(),
-        gl::GpuPreference::kHighPerformance);
+        std::move(provider), context_info, nullptr, gfx::Size(10, 10),
+        premultiplied_alpha, want_alpha_channel, want_depth_buffer,
+        want_stencil_buffer, want_antialiasing, desynchronized, preserve,
+        Platform::kWebGL1ContextType, /*is_offscreen_canvas=*/false,
+        PredefinedColorSpace::kSRGB, gl::GpuPreference::kHighPerformance);
 
     // When we request a depth or a stencil buffer, we will get both.
     EXPECT_EQ(cases[i].request_depth || cases[i].request_stencil,
@@ -705,7 +646,7 @@ TEST(DrawingBufferDepthStencilTest, packedDepthStencilSupported) {
       EXPECT_EQ(0u, tracking_gl->StencilAttachment());
     }
 
-    drawing_buffer->Resize(IntSize(10, 20));
+    drawing_buffer->Resize(gfx::Size(10, 20));
     EXPECT_EQ(cases[i].request_depth || cases[i].request_stencil,
               drawing_buffer->HasDepthBuffer());
     EXPECT_EQ(cases[i].request_depth || cases[i].request_stencil,
@@ -724,16 +665,17 @@ TEST(DrawingBufferDepthStencilTest, packedDepthStencilSupported) {
 
     drawing_buffer->BeginDestruction();
   }
+  drawing_buffer_->BeginDestruction();
 }
 
 TEST_F(DrawingBufferTest, VerifySetIsHiddenProperlyAffectsMailboxes) {
   GLES2InterfaceForTests* gl_ = drawing_buffer_->ContextGLForTests();
   viz::TransferableResource resource;
-  std::unique_ptr<viz::SingleReleaseCallback> release_callback;
+  viz::ReleaseCallback release_callback;
 
   // Produce resources.
   EXPECT_FALSE(drawing_buffer_->MarkContentsChanged());
-  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(nullptr, &resource,
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
                                                            &release_callback));
 
   gpu::SyncToken wait_sync_token;
@@ -742,7 +684,7 @@ TEST_F(DrawingBufferTest, VerifySetIsHiddenProperlyAffectsMailboxes) {
   // m_drawingBuffer deletes resource immediately when hidden.
   EXPECT_CALL(*gl_, WaitSyncTokenCHROMIUMMock(SyncTokenEq(wait_sync_token)))
       .Times(0);
-  release_callback->Run(wait_sync_token, false /* lostResource */);
+  std::move(release_callback).Run(wait_sync_token, false /* lostResource */);
   testing::Mock::VerifyAndClearExpectations(gl_);
 
   drawing_buffer_->BeginDestruction();
@@ -750,16 +692,74 @@ TEST_F(DrawingBufferTest, VerifySetIsHiddenProperlyAffectsMailboxes) {
 
 TEST_F(DrawingBufferTest,
        VerifyTooBigDrawingBufferExceedingV8MaxSizeFailsToCreate) {
-  IntSize too_big_size(1, (v8::TypedArray::kMaxLength / 4) + 1);
-  bool gpu_compositing = true;
+  constexpr size_t kBytesPerPixel = 4;
+  constexpr size_t kMaxSize = v8::TypedArray::kMaxByteLength / kBytesPerPixel;
+
+  // Statically compute a width and height such that the product is above
+  // kMaxSize.
+  constexpr int kWidth = 1 << 30;
+  constexpr int kHeight = (kMaxSize / kWidth) + 1;
+  static_assert(size_t{kWidth} * (kHeight - 1) <= kMaxSize);
+  static_assert(size_t{kWidth} * kHeight > kMaxSize);
+
+  gfx::Size too_big_size(kWidth, kHeight);
+  Platform::WebGLContextInfo context_info;
+  context_info.using_gpu_compositing = true;
   scoped_refptr<DrawingBuffer> too_big_drawing_buffer = DrawingBuffer::Create(
-      nullptr, gpu_compositing, false /* using_swap_chain */, nullptr,
-      too_big_size, false, false, false, false, false, DrawingBuffer::kDiscard,
-      DrawingBuffer::kWebGL1, DrawingBuffer::kAllowChromiumImage,
-      kLow_SkFilterQuality, CanvasColorParams(),
-      gl::GpuPreference::kHighPerformance);
+      nullptr, context_info, nullptr, too_big_size, false, false, false, false,
+      false,
+      /*desynchronized=*/false, DrawingBuffer::kDiscard,
+      Platform::kWebGL1ContextType, /*is_offscreen_canvas=*/false,
+      PredefinedColorSpace::kSRGB, gl::GpuPreference::kHighPerformance);
   EXPECT_EQ(too_big_drawing_buffer, nullptr);
   drawing_buffer_->BeginDestruction();
+}
+
+TEST_F(DrawingBufferTest, VerifyLowLatencyRenderingIsNotSetByDefault) {
+  viz::TransferableResource resource;
+  viz::ReleaseCallback release_callback;
+
+  EXPECT_TRUE(drawing_buffer_->PrepareTransferableResource(&resource,
+                                                           &release_callback));
+  EXPECT_FALSE(resource.is_low_latency_rendering);
+
+  drawing_buffer_->BeginDestruction();
+}
+
+TEST_F(
+    DrawingBufferTest,
+    VerifyLowLatencyRenderingIsSetWhenDesynchronizedIsTrueAndLowLatencyUsageIsSupportedForWebGL) {
+  ScopedCanvasUtils scoped_canvas_utils;
+  SetLowLatencyUsageSupportedForWebGLForTesting(true);
+
+  gfx::Size initial_size(kInitialWidth, kInitialHeight);
+  auto gl = std::make_unique<GLES2InterfaceForTests>();
+  auto provider =
+      std::make_unique<WebGraphicsContext3DProviderForTests>(std::move(gl));
+  GLES2InterfaceForTests* gl_ =
+      static_cast<GLES2InterfaceForTests*>(provider->ContextGL());
+
+  Platform::WebGLContextInfo context_info;
+  context_info.using_gpu_compositing = true;
+
+  scoped_refptr<DrawingBufferForTests> drawing_buffer =
+      DrawingBufferForTests::Create(
+          std::move(provider),
+          /*shared_image_interface_provider_for_sw=*/nullptr, context_info,
+          gl_, initial_size, DrawingBuffer::kPreserve, kDisableMultisampling,
+          /*desynchronized=*/true);
+
+  viz::TransferableResource resource;
+  viz::ReleaseCallback release_callback;
+
+  EXPECT_FALSE(resource.is_low_latency_rendering);
+  EXPECT_TRUE(drawing_buffer->PrepareTransferableResource(&resource,
+                                                          &release_callback));
+  EXPECT_TRUE(resource.is_low_latency_rendering);
+
+  drawing_buffer->BeginDestruction();
+  drawing_buffer_->BeginDestruction();
+  testing::Mock::VerifyAndClearExpectations(gl_);
 }
 
 }  // namespace blink

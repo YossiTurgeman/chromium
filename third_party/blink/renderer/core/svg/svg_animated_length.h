@@ -34,7 +34,7 @@
 #include "third_party/blink/renderer/core/svg/properties/svg_animated_property.h"
 #include "third_party/blink/renderer/core/svg/svg_length_tear_off.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -56,10 +56,7 @@ class SVGAnimatedLength : public ScriptWrappable,
             static_cast<unsigned>(initial_value)) {}
 
   SVGParsingError AttributeChanged(const String&) override;
-
-  const CSSValue& CssValue() const {
-    return CurrentValue()->AsCSSPrimitiveValue();
-  }
+  const CSSValue* CssValue() const final;
 
   void Trace(Visitor*) const override;
 };

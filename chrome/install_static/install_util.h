@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,12 @@
 #ifndef CHROME_INSTALL_STATIC_INSTALL_UTIL_H_
 #define CHROME_INSTALL_STATIC_INSTALL_UTIL_H_
 
-#include <windows.h>
-
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "base/win/windows_types.h"
 
 namespace version_info {
 enum class Channel;
@@ -36,9 +38,6 @@ extern const wchar_t kRegValueChromeStatsSample[];
 // https://crbug.com/604923
 // Unify these constants with env_vars.h.
 extern const wchar_t kHeadless[];
-extern const wchar_t kShowRestart[];
-extern const wchar_t kRestartInfo[];
-extern const wchar_t kRtlLocale[];
 
 // TODO(ananta)
 // https://crbug.com/604923
@@ -113,6 +112,12 @@ const IID& GetElevatorIid();
 std::wstring GetElevationServiceName();
 std::wstring GetElevationServiceDisplayName();
 
+// Returns the Tracing Service CLSID, IID, Name, and Display Name respectively.
+const CLSID& GetTracingServiceClsid();
+const IID& GetTracingServiceIid();
+std::wstring GetTracingServiceName();
+std::wstring GetTracingServiceDisplayName();
+
 // Returns the unsuffixed application name of this program. This is the base of
 // the name registered with Default Programs. IMPORTANT: This must only be
 // called by the installer.
@@ -134,29 +139,39 @@ const wchar_t* GetBaseAppId();
 // We define |suffix| as a fixed-length 26-character alphanumeric identifier,
 // therefore the return value of this function must have a maximum length of
 // 39 - 1(null-term) - 26(|suffix|) - 1(dot separator) = 11 characters.
-const wchar_t* GetProgIdPrefix();
+const wchar_t* GetBrowserProgIdPrefix();
 
 // Returns the browser's ProgId description.
-const wchar_t* GetProgIdDescription();
+const wchar_t* GetBrowserProgIdDescription();
+
+// Returns the URL scheme for direct launches.
+// Returns an empty string if direct launch isn't supported for a specific mode.
+const char* GetDirectLaunchUrlScheme();
+
+// Returns the browser's PDF viewer ProgID prefix (e.g., ChromePDF or
+// ChromiumPDF). See GetBrowserProgIdPrefix() comments for ProgID constraints.
+const wchar_t* GetPDFProgIdPrefix();
+
+// Returns the PDF document ProgId description.
+const wchar_t* GetPDFProgIdDescription();
 
 // Returns the path to the Active Setup registry entries
 // (e.g., Software\Microsoft\Active Setup\Installed Components\[guid]).
 std::wstring GetActiveSetupPath();
 
-// Returns the legacy CommandExecuteImpl CLSID, or an empty string if the
-// install mode never included a DelegateExecute verb handler.
-std::wstring GetLegacyCommandExecuteImplClsid();
-
 // Returns true if this mode supports in-product mechanisms to make the browser
 // the user's chosen default browser.
 bool SupportsSetAsDefaultBrowser();
 
-// Returns true if this mode supports user retention experiments run by the
-// installer following updates.
-bool SupportsRetentionExperiments();
+// Returns the index of the app icon resource in the main executable for the
+// mode.
+int GetAppIconResourceIndex();
 
-// Returns the index of the icon resource in the main executable for the mode.
-int GetIconResourceIndex();
+// Returns the index of the HTML icon resource for .html and related files.
+int GetHTMLIconResourceIndex();
+
+// Returns the index of the PDF icon resource for pdf files.
+int GetPDFIconResourceIndex();
 
 // Get sandbox id of current install mode.
 const wchar_t* GetSandboxSidPrefix();
@@ -194,9 +209,8 @@ void InitializeProcessType();
 // Returns true if the process type is initialized. False otherwise.
 bool IsProcessTypeInitialized();
 
-// Returns true if invoked in a Chrome process other than the main browser
-// process. False otherwise.
-bool IsNonBrowserProcess();
+// Returns true if invoked in the main browser process; false, otherwise.
+bool IsBrowserProcess();
 
 // Returns true if invoked in a Crashpad handler process. False otherwise.
 bool IsCrashpadHandlerProcess();
@@ -216,48 +230,45 @@ std::wstring GetCrashDumpLocation();
 // block of the calling process. Returns an empty string if the variable does
 // not exist.
 std::string GetEnvironmentString(const std::string& variable_name);
-std::wstring GetEnvironmentString16(const wchar_t* variable_name);
+std::wstring GetEnvironmentString(const wchar_t* variable_name);
 
 // Sets the environment variable identified by |variable_name| to the value
 // identified by |new_value|.
 bool SetEnvironmentString(const std::string& variable_name,
                           const std::string& new_value);
-bool SetEnvironmentString16(const std::wstring& variable_name,
-                            const std::wstring& new_value);
+bool SetEnvironmentString(const std::wstring& variable_name,
+                          const std::wstring& new_value);
 
 // Returns true if the environment variable identified by |variable_name|
 // exists.
 bool HasEnvironmentVariable(const std::string& variable_name);
-bool HasEnvironmentVariable16(const std::wstring& variable_name);
+bool HasEnvironmentVariable(const std::wstring& variable_name);
 
 // Gets the exe version details like the |product_name|, |version|,
-// |special_build|, |channel_name|, etc. Most of this information is read
-// from the version resource. |exe_path| is the path of chrome.exe.
-// TODO(ananta)
-// http://crbug.com/604923
-// Unify this with the Browser Distribution code.
+// |special_build|, and |channel_name| from the browser executable at
+// |exe_path|. |channel_name| will be "extended" for clients that follow the
+// extended stable update channel.
 void GetExecutableVersionDetails(const std::wstring& exe_path,
                                  std::wstring* product_name,
                                  std::wstring* version,
                                  std::wstring* special_build,
                                  std::wstring* channel_name);
 
-// Gets the channel or channel name for the current Chrome process.
+// Gets the channel for the current Chrome process.
 version_info::Channel GetChromeChannel();
-std::wstring GetChromeChannelName();
 
-// Returns true if the |source| string matches the |pattern|. The pattern
-// may contain wildcards like '?', which matches one character or a '*'
-// which matches 0 or more characters.
-// Please note that pattern matches the whole string. If you want to find
-// something in the middle of the string then you need to specify the pattern
-// as '*xyz*'.
-bool MatchPattern(const std::wstring& source, const std::wstring& pattern);
+// Gets the channel for the current Chrome process. Unless
+// `with_extended_stable` is true, extended stable will be reported as regular
+// stable (i.e., an empty string).
+std::wstring GetChromeChannelName(bool with_extended_stable);
 
-// UTF8 to UTF16 and vice versa conversion helpers.
-std::wstring UTF8ToUTF16(const std::string& source);
+// Returns true if the current Chrome process is on the extended stable channel.
+bool IsExtendedStableChannel();
 
-std::string UTF16ToUTF8(const std::wstring& source);
+// UTF8 to Wide and vice versa conversion helpers.
+std::wstring UTF8ToWide(const std::string& source);
+
+std::string WideToUTF8(const std::wstring& source);
 
 // Tokenizes a string |str| based on single character delimiter.
 // The tokens are returned in a vector. The |trim_spaces| parameter indicates
@@ -265,22 +276,29 @@ std::string UTF16ToUTF8(const std::wstring& source);
 std::vector<std::string> TokenizeString(const std::string& str,
                                         char delimiter,
                                         bool trim_spaces);
-std::vector<std::wstring> TokenizeString16(const std::wstring& str,
-                                           wchar_t delimiter,
-                                           bool trim_spaces);
+std::vector<std::wstring> TokenizeString(const std::wstring& str,
+                                         wchar_t delimiter,
+                                         bool trim_spaces);
 
 // Tokenizes |command_line| in the same way as CommandLineToArgvW() in
 // shell32.dll, handling quoting, spacing etc. Normally only used from
-// GetSwitchValueFromCommandLine(), but exposed for testing.
+// GetCommandLineSwitch(), but exposed for testing.
 std::vector<std::wstring> TokenizeCommandLineToArray(
     const std::wstring& command_line);
 
 // Returns the value of a switch of the form "--<switch name>=<switch value>" in
-// |command_line|. An empty switch in |command_line| ("--") denotes the end of
-// switches and the beginning of args. Anything of the form --<switch
-// name>=<switch value> following "--" is ignored.
-std::wstring GetSwitchValueFromCommandLine(const std::wstring& command_line,
-                                           const std::wstring& switch_name);
+// |command_line|. If the switch has no value, returns an empty string. If the
+// switch is not present returns std::nullopt. An empty switch in |command_line|
+// ("--") denotes the end of switches and the beginning of args. Anything
+// following the "--" switch is ignored.
+std::optional<std::wstring> GetCommandLineSwitch(
+    const std::wstring& command_line,
+    std::wstring_view switch_name);
+
+// Returns the value of the specified switch or an empty string if there is no
+// such switch in |command_line| or the switch has no value.
+std::wstring GetCommandLineSwitchValue(const std::wstring& command_line,
+                                       std::wstring_view switch_name);
 
 // Ensures that the given |full_path| exists, and that the tail component is a
 // directory. If the directory does not already exist, it will be created.
@@ -288,17 +306,27 @@ std::wstring GetSwitchValueFromCommandLine(const std::wstring& command_line,
 // failure to create a directory.
 bool RecursiveDirectoryCreate(const std::wstring& full_path);
 
+// Creates a new directory with the unique name in the format of
+// <prefix>[Chrome|Chromium]<random number> in the default %TEMP% folder.
+// If the directory cannot be created, returns an empty string.
+std::wstring CreateUniqueTempDirectory(std::wstring_view prefix);
+
 struct DetermineChannelResult {
   std::wstring channel_name;
   ChannelOrigin origin;
+
+  // True if this client follows the extended stable update channel. May only be
+  // true if `channel_name` is "" and `origin` is kPolicy.
+  bool is_extended_stable;
 };
 
-// Returns the unadorned channel name and its origin based on the channel
-// strategy for the install mode. |channel_override|, if not empty is the
-// channel to return if |mode| supports non-fixed channels. |update_ap|, if not
-// null, is set to the raw "ap" value read from Chrome's ClientState key in the
-// registry. |update_cohort_name|, if not null, is set to the raw "cohort\name"
-// value read from Chrome's ClientState key in the registry.
+// Returns the unadorned channel name, its origin, and an indication of whether
+// or not a stable ("") channel is truly the extended stable channel based on
+// the channel strategy for the install mode. |channel_override|, if not empty
+// is the channel to return if |mode| supports non-fixed channels. |update_ap|,
+// if not null, is set to the raw "ap" value read from Chrome's ClientState key
+// in the registry. |update_cohort_name|, if not null, is set to the raw
+// "cohort\name" value read from Chrome's ClientState key in the registry.
 DetermineChannelResult DetermineChannel(const InstallConstants& mode,
                                         bool system_level,
                                         const wchar_t* channel_override,

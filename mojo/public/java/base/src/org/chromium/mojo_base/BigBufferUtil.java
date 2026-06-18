@@ -1,8 +1,9 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.mojo_base;
+import org.chromium.build.annotations.NullMarked;
 
 import org.chromium.mojo.system.Core;
 import org.chromium.mojo.system.SharedBufferHandle;
@@ -11,12 +12,39 @@ import org.chromium.mojo_base.mojom.BigBuffer;
 import org.chromium.mojo_base.mojom.BigBufferSharedMemoryRegion;
 
 import java.nio.ByteBuffer;
+import org.chromium.build.annotations.Nullable;
 
-/**
- * Static helper methods for working with the mojom BigBuffer type.
- */
+/** Static helper methods for working with the mojom BigBuffer type. */
+@NullMarked
 public final class BigBufferUtil {
     public static final int MAX_INLINE_ARRAY_SIZE = 64 * 1024;
+
+    /**
+     * A mapping to a BigBuffer.
+     *
+     * If it is backed by shared memory, this will be a direct mapping which must be closed and will
+     * be invalid thereafter. The simplest way to do this is by using try-with-resources.
+     */
+    public static class Mapping implements AutoCloseable {
+        private final @Nullable SharedBufferHandle mHandle;
+        private final ByteBuffer mBuffer;
+
+        Mapping(@Nullable SharedBufferHandle handle, ByteBuffer buffer) {
+            mHandle = handle;
+            mBuffer = buffer;
+        }
+
+        public ByteBuffer getBuffer() {
+            return mBuffer;
+        }
+
+        @Override
+        public void close() {
+            if (mHandle != null) {
+                mHandle.unmap(mBuffer);
+            }
+        }
+    }
 
     // Retrives a copy of the buffer's contents regardless of what type was backing it (i.e. array
     // or shared memory).
@@ -29,7 +57,22 @@ public final class BigBufferUtil {
                     region.bufferHandle.map(0, region.size, SharedBufferHandle.MapFlags.NONE);
             byte[] bytes = new byte[region.size];
             byteBuffer.get(bytes);
+            region.bufferHandle.unmap(byteBuffer);
             return bytes;
+        }
+    }
+
+    // Opens a mapping to an existing buffer for direct reading, without a copy.
+    // This must be used with a try-with-resources so that close is called to prevent a leak.
+    // The direct buffer must not be used after close is called.
+    public static Mapping map(BigBuffer buffer) {
+        if (buffer.which() == BigBuffer.Tag.Bytes) {
+            return new Mapping(null, ByteBuffer.wrap(buffer.getBytes()));
+        } else {
+            BigBufferSharedMemoryRegion region = buffer.getSharedMemory();
+            ByteBuffer byteBuffer =
+                    region.bufferHandle.map(0, region.size, SharedBufferHandle.MapFlags.NONE);
+            return new Mapping(region.bufferHandle, byteBuffer);
         }
     }
 
@@ -49,6 +92,7 @@ public final class BigBufferUtil {
         ByteBuffer mappedRegion =
                 region.bufferHandle.map(0, bytes.length, SharedBufferHandle.MapFlags.NONE);
         mappedRegion.put(bytes);
+        region.bufferHandle.unmap(mappedRegion);
         buffer.setSharedMemory(region);
         return buffer;
     }

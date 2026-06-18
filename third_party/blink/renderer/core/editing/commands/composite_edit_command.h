@@ -26,6 +26,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_COMPOSITE_EDIT_COMMAND_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_COMPOSITE_EDIT_COMMAND_H_
 
+#include <utility>
+
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/css_property_names.h"
 #include "third_party/blink/renderer/core/editing/commands/edit_command.h"
@@ -37,7 +39,9 @@
 
 namespace blink {
 
+class DataTransfer;
 class DeleteSelectionOptions;
+class DocumentFragment;
 class EditingStyle;
 class Element;
 class HTMLBRElement;
@@ -59,15 +63,32 @@ class CORE_EXPORT CompositeEditCommand : public EditCommand {
     return ending_selection_;
   }
 
+  // Raw-DOM lane: never VP-canonicalized at command birth. Migrated
+  // commands prefer these accessors under EditingUseDomPositionApi so
+  // they see the selection as the user authored it, not the layout-
+  // canonicalized form. Unmigrated commands keep using the legacy
+  // accessors above and observe no behavior change.
+  const SelectionForUndoStep& StartingDomSelection() const {
+    return starting_dom_selection_;
+  }
+  const SelectionForUndoStep& EndingDomSelection() const {
+    return ending_dom_selection_;
+  }
+
   void SetStartingSelection(const SelectionForUndoStep&);
   void SetEndingSelection(const SelectionForUndoStep&);
+
+  // Raw-DOM lane setters. Migrated commands call these to update the
+  // dom lane without going through the legacy (VP-aware) setter path.
+  void SetStartingDomSelection(const SelectionForUndoStep&);
+  void SetEndingDomSelection(const SelectionForUndoStep&);
 
   void SetParent(CompositeEditCommand*) override;
 
   // Returns |false| if the command failed.  e.g. It's aborted.
   bool Apply();
   bool IsFirstCommand(EditCommand* command) {
-    return !commands_.IsEmpty() && commands_.front() == command;
+    return !commands_.empty() && commands_.front() == command;
   }
   UndoStep* GetUndoStep() { return undo_step_.Get(); }
   UndoStep* EnsureUndoStep();
@@ -85,7 +106,7 @@ class CORE_EXPORT CompositeEditCommand : public EditCommand {
   void Trace(Visitor*) const override;
 
  protected:
-  explicit CompositeEditCommand(Document&);
+  explicit CompositeEditCommand(Document&, DataTransfer* = nullptr);
 
   VisibleSelection EndingVisibleSelection() const;
   //
@@ -106,18 +127,25 @@ class CORE_EXPORT CompositeEditCommand : public EditCommand {
   virtual void DeleteTextFromNode(Text*, unsigned offset, unsigned count);
   bool IsRemovableBlock(const Node*);
   void InsertNodeAfter(Node*, Node* ref_child, EditingState*);
+  // Insert nodes starting `insert_first_child` after `ref_child`.
+  void InsertNodeListAfter(Node& insert_first_child,
+                           Node& ref_child,
+                           EditingState* editing_state);
   void InsertNodeAt(Node*, const Position&, EditingState*);
   void InsertNodeAtTabSpanPosition(Node*, const Position&, EditingState*);
   void InsertNodeBefore(Node*,
                         Node* ref_child,
                         EditingState*,
                         ShouldAssumeContentIsAlwaysEditable =
-                            kDoNotAssumeContentIsAlwaysEditable);
+                            ShouldAssumeContentIsAlwaysEditable(false));
   void InsertParagraphSeparator(
       EditingState*,
       bool use_default_paragraph_element = false,
       bool paste_blockqutoe_into_unquoted_area = false);
-  void InsertTextIntoNode(Text*, unsigned offset, const String& text);
+  void InsertTextIntoNode(Text*,
+                          unsigned offset,
+                          const String& text,
+                          PasswordEchoBehavior);
   void MergeIdenticalElements(Element*, Element*, EditingState*);
   void RebalanceWhitespace();
   void RebalanceWhitespaceAt(const Position&);
@@ -127,25 +155,29 @@ class CORE_EXPORT CompositeEditCommand : public EditCommand {
   void PrepareWhitespaceAtPositionForSplit(Position&);
   void ReplaceCollapsibleWhitespaceWithNonBreakingSpaceIfNeeded(
       const VisiblePosition&);
+  void ReplaceCollapsibleWhitespaceWithNonBreakingSpaceIfNeeded(
+      const Position&);
   bool CanRebalance(const Position&) const;
-  void RemoveCSSProperty(Element*, CSSPropertyID);
+  void RemoveCssProperty(Element*, CSSPropertyID);
   void RemoveElementAttribute(Element*, const QualifiedName& attribute);
   // Remove all children if possible
-  void RemoveAllChildrenIfPossible(ContainerNode*,
-                                   EditingState*,
-                                   ShouldAssumeContentIsAlwaysEditable =
-                                       kDoNotAssumeContentIsAlwaysEditable);
+  void RemoveAllChildrenIfPossible(
+      ContainerNode*,
+      EditingState*,
+      ShouldAssumeContentIsAlwaysEditable =
+          ShouldAssumeContentIsAlwaysEditable(false));
   void RemoveChildrenInRange(Node*, unsigned from, unsigned to, EditingState*);
   virtual void RemoveNode(Node*,
                           EditingState*,
                           ShouldAssumeContentIsAlwaysEditable =
-                              kDoNotAssumeContentIsAlwaysEditable);
+                              ShouldAssumeContentIsAlwaysEditable(false));
   HTMLSpanElement* ReplaceElementWithSpanPreservingChildrenAndAttributes(
       HTMLElement*);
-  void RemoveNodePreservingChildren(Node*,
-                                    EditingState*,
-                                    ShouldAssumeContentIsAlwaysEditable =
-                                        kDoNotAssumeContentIsAlwaysEditable);
+  void RemoveNodePreservingChildren(
+      Node*,
+      EditingState*,
+      ShouldAssumeContentIsAlwaysEditable =
+          ShouldAssumeContentIsAlwaysEditable(false));
   void RemoveNodeAndPruneAncestors(Node*,
                                    EditingState*,
                                    Node* exclude_node = nullptr);
@@ -158,8 +190,9 @@ class CORE_EXPORT CompositeEditCommand : public EditCommand {
   void ReplaceTextInNode(Text*,
                          unsigned offset,
                          unsigned count,
-                         const String& replacement_text);
-  Position ReplaceSelectedTextInNode(const String&);
+                         const String& replacement_text,
+                         PasswordEchoBehavior);
+  Position ReplaceSelectedTextInNode(const String&, PasswordEchoBehavior);
   Position PositionOutsideTabSpan(const Position&);
   void SetNodeAttribute(Element*,
                         const QualifiedName& attribute,
@@ -212,6 +245,7 @@ class CORE_EXPORT CompositeEditCommand : public EditCommand {
                                      Element* block_element,
                                      EditingState*);
   void CleanupAfterDeletion(EditingState*, VisiblePosition destination);
+  void CleanupAfterDeletion(EditingState*, const Position& destination);
   void CleanupAfterDeletion(EditingState*);
 
   bool BreakOutOfEmptyListItem(EditingState*);
@@ -225,12 +259,73 @@ class CORE_EXPORT CompositeEditCommand : public EditCommand {
   static bool IsNodeVisiblyContainedWithin(Node&, const EphemeralRange&);
 
   HeapVector<Member<EditCommand>> commands_;
+  // The data transfer will be used for the input event
+  // on contenteditables.
+  Member<DataTransfer> data_transfer_;
 
  private:
+  // Inserts a placeholder <br> at |before_paragraph| when pruning collapsed
+  // adjacent paragraphs onto the same line. Canonicalizes the boundary
+  // positions through VisiblePosition before testing paragraph boundaries.
+  void InsertPlaceholderBrIfPruningCollapsed(const Position& before_paragraph,
+                                             const Position& after_paragraph,
+                                             EditingState* editing_state);
+
+  // Returns true when the move may proceed to the paste phase. With the
+  // `PartialCompletionNotAllowedInMoveParagraphs` flag enabled, verifies that
+  // both `destination` and the post-delete ending selection still have
+  // editable roots; returns false (without aborting) to signal the caller to
+  // bail out silently.
+  bool DestinationStillEditableForPaste(const VisiblePosition& destination);
+
+  // Returns the plain-text offset of `destination` from the document root,
+  // selecting the TextIteratorBehavior based on the EnterInOpenShadowRoots
+  // flag. Requires clean layout.
+  int ComputeDestinationIndex(const VisiblePosition& destination);
+
+  // Sets the ending selection to `destination` (mirroring into the raw-DOM
+  // lane when EditingUseDomPositionApi is enabled) and runs the
+  // ReplaceSelectionCommand for `fragment`. Returns false when the caller
+  // should return early; `editing_state` is aborted in the cases that
+  // previously called ABORT_EDITING_COMMAND_IF or editing_state->Abort()
+  // inline.
+  bool SetDestinationSelectionAndPasteFragment(
+      const VisiblePosition& destination,
+      DocumentFragment* fragment,
+      ShouldPreserveStyle should_preserve_style,
+      EditingState* editing_state);
+
+  // Restores the final ending selection from plain-text offsets
+  // `destination_index + start_index` and `destination_index + end_index`
+  // relative to `document_element`. Silently no-ops when either offset
+  // cannot be reconstituted (collapsed-whitespace edge cases). Mirrors into
+  // the raw-DOM lane when EditingUseDomPositionApi is enabled.
+  void RestoreSelectionFromPlainText(int destination_index,
+                                     int start_index,
+                                     int end_index,
+                                     Element& document_element);
+
   bool IsCompositeEditCommand() const final { return true; }
+
+  // Helpers extracted from MoveParagraphs. VP callers compute the inputs
+  // (Position via `.DeepEquivalent()`).
+  std::pair<Position, Position> ComputeNormalizedMoveRange(
+      const Position& start_of_paragraph,
+      const Position& end_of_paragraph);
+  EditingStyle* CaptureStyleInEmptyParagraph(
+      const Position& start_of_paragraph);
+  // Sets the ending selection to the delete range [start, end]. Mirrors into
+  // the raw-DOM lane when EditingUseDomPositionApi is enabled.
+  void SetEndingSelectionToDelete(const Position& start, const Position& end);
 
   SelectionForUndoStep starting_selection_;
   SelectionForUndoStep ending_selection_;
+  // Raw-DOM lane mirroring starting_/ending_selection_. Seeded from
+  // FrameSelection::GetSelectionInDomTree() at command birth (no VP
+  // canonicalization). Updated via SetStartingDomSelection /
+  // SetEndingDomSelection. Inherited from parent in SetParent.
+  SelectionForUndoStep starting_dom_selection_;
+  SelectionForUndoStep ending_dom_selection_;
   Member<UndoStep> undo_step_;
 };
 

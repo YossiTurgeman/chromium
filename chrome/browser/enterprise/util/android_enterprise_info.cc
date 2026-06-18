@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,23 @@
 #include <jni.h>
 
 #include "base/android/jni_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
 #include "chrome/browser/enterprise/util/jni_headers/EnterpriseInfo_jni.h"
 
-namespace chrome {
+// Forward declaration
+static void JNI_EnterpriseInfo_UpdateNativeOwnedState(JNIEnv* env,
+                                                      bool hasDeviceOwnerApp,
+                                                      bool hasProfileOwnerApp);
+
 namespace enterprise_util {
 AndroidEnterpriseInfo::AndroidEnterpriseInfo() = default;
 AndroidEnterpriseInfo::~AndroidEnterpriseInfo() = default;
+
+AndroidEnterpriseInfo* AndroidEnterpriseInfo::GetInstance() {
+  static base::NoDestructor<AndroidEnterpriseInfo> instance;
+  return instance.get();
+}
 
 void AndroidEnterpriseInfo::GetAndroidEnterpriseInfoState(
     EnterpriseInfoCallback callback) {
@@ -32,8 +43,8 @@ void AndroidEnterpriseInfo::GetAndroidEnterpriseInfoState(
       base::android::AttachCurrentThread());
 }
 
-void AndroidEnterpriseInfo::ServiceCallbacks(bool profile_owned,
-                                             bool device_owned) {
+void AndroidEnterpriseInfo::ServiceCallbacks(bool device_owned,
+                                             bool profile_owned) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   // Move the queue to a local so that we can handle re-entrancy.
@@ -41,14 +52,14 @@ void AndroidEnterpriseInfo::ServiceCallbacks(bool profile_owned,
   local_queue.swap(callback_queue_);
 
   while (local_queue.size() > 0) {
-    std::move(local_queue.front()).Run(profile_owned, device_owned);
+    std::move(local_queue.front()).Run(device_owned, profile_owned);
     local_queue.pop();
   }
 }
 
 // JNI_EnterpriseInfo_UpdateNativeOwnedState() is static function, this makes
 // friending it a hassle because it must be declared in the file that the friend
-// declaration is in, but it's declaration can't be included in multiple places
+// declaration is in, but its declaration can't be included in multiple places
 // or things get messy and the linker gets mad. This helper class exists only to
 // friend the JNI function and is, in turn, friended by AndroidEnterpriseInfo
 // which allows for the private ServiceCallbacks() to be reached.
@@ -56,22 +67,22 @@ class AndroidEnterpriseInfoFriendHelper {
  private:
   friend void ::JNI_EnterpriseInfo_UpdateNativeOwnedState(
       JNIEnv* env,
-      jboolean hasProfileOwnerApp,
-      jboolean hasDeviceOwnerApp);
+      bool hasDeviceOwnerApp,
+      bool hasProfileOwnerApp);
 
-  static void ForwardToServiceCallbacks(bool profile_owned, bool device_owned) {
-    AndroidEnterpriseInfo::GetInstance()->ServiceCallbacks(profile_owned,
-                                                           device_owned);
+  static void ForwardToServiceCallbacks(bool device_owned, bool profile_owned) {
+    AndroidEnterpriseInfo::GetInstance()->ServiceCallbacks(device_owned,
+                                                           profile_owned);
   }
 };
 
 }  // namespace enterprise_util
-}  // namespace chrome
 
-void JNI_EnterpriseInfo_UpdateNativeOwnedState(JNIEnv* env,
-                                               jboolean hasProfileOwnerApp,
-                                               jboolean hasDeviceOwnerApp) {
-  chrome::enterprise_util::AndroidEnterpriseInfoFriendHelper::
-      ForwardToServiceCallbacks(static_cast<bool>(hasProfileOwnerApp),
-                                static_cast<bool>(hasDeviceOwnerApp));
+static void JNI_EnterpriseInfo_UpdateNativeOwnedState(JNIEnv* env,
+                                                      bool hasDeviceOwnerApp,
+                                                      bool hasProfileOwnerApp) {
+  enterprise_util::AndroidEnterpriseInfoFriendHelper::ForwardToServiceCallbacks(
+      hasDeviceOwnerApp, hasProfileOwnerApp);
 }
+
+DEFINE_JNI(EnterpriseInfo)

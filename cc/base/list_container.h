@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,12 @@
 
 #include <stddef.h>
 
+#include <iterator>
 #include <memory>
+#include <optional>
+#include <utility>
 
 #include "base/check.h"
-#include "base/optional.h"
 #include "cc/base/list_container_helper.h"
 
 namespace cc {
@@ -26,6 +28,8 @@ namespace cc {
 template <class BaseElementType>
 class ListContainer {
  public:
+  using value_type = const BaseElementType*;
+
   // This constructor reserves the requested memory up front so only single
   // allocation is needed. When num_of_elements_to_reserve_for is zero, use the
   // default size.
@@ -134,7 +138,7 @@ class ListContainer {
   Iterator InsertBeforeAndInvalidateAllPointers(
       Iterator at,
       size_t count,
-      const base::Optional<DerivedElementType> source = base::nullopt) {
+      const std::optional<DerivedElementType> source = std::nullopt) {
     helper_.InsertBeforeAndInvalidateAllPointers(&at, count);
     Iterator result = at;
     for (size_t i = 0; i < count; ++i) {
@@ -189,6 +193,8 @@ class ListContainer {
     // This class is only defined to forward iterate through
     // CharAllocator.
    public:
+    constexpr Iterator() = default;
+
     Iterator(ListContainerHelper::CharAllocator* container,
              size_t vector_ind,
              char* item_iter,
@@ -234,6 +240,8 @@ class ListContainer {
     // This class is only defined to forward iterate through
     // CharAllocator.
    public:
+    constexpr ConstIterator() = default;
+
     ConstIterator(ListContainerHelper::CharAllocator* container,
                   size_t vector_ind,
                   char* item_iter,
@@ -282,6 +290,8 @@ class ListContainer {
     // This class is only defined to reverse iterate through
     // CharAllocator.
    public:
+    constexpr ReverseIterator() = default;
+
     ReverseIterator(ListContainerHelper::CharAllocator* container,
                     size_t vector_ind,
                     char* item_iter,
@@ -326,6 +336,8 @@ class ListContainer {
     // This class is only defined to reverse iterate through
     // CharAllocator.
    public:
+    constexpr ConstReverseIterator() = default;
+
     ConstReverseIterator(ListContainerHelper::CharAllocator* container,
                          size_t vector_ind,
                          char* item_iter,

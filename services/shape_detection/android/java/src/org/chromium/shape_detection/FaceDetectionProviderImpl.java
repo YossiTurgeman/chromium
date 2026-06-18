@@ -1,22 +1,20 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.shape_detection;
-
-import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.common.GoogleApiAvailability;
+import org.chromium.build.annotations.NullMarked;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.gms.ChromiumPlayServicesAvailability;
 import org.chromium.mojo.bindings.InterfaceRequest;
 import org.chromium.mojo.system.MojoException;
 import org.chromium.shape_detection.mojom.FaceDetection;
 import org.chromium.shape_detection.mojom.FaceDetectionProvider;
 import org.chromium.shape_detection.mojom.FaceDetectorOptions;
 
-/**
- * Service provider to create FaceDetection services
- */
+/** Service provider to create FaceDetection services */
+@NullMarked
 public class FaceDetectionProviderImpl implements FaceDetectionProvider {
     public FaceDetectionProviderImpl() {}
 
@@ -24,9 +22,8 @@ public class FaceDetectionProviderImpl implements FaceDetectionProvider {
     public void createFaceDetection(
             InterfaceRequest<FaceDetection> request, FaceDetectorOptions options) {
         final boolean isGmsCoreSupported =
-                GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(
-                        ContextUtils.getApplicationContext())
-                == ConnectionResult.SUCCESS;
+                ChromiumPlayServicesAvailability.isGooglePlayServicesAvailable(
+                        ContextUtils.getApplicationContext());
 
         if (isGmsCoreSupported) {
             FaceDetection.MANAGER.bind(new FaceDetectionImplGmsCore(options), request);

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include "ash/public/cpp/ash_public_export.h"
 #include "ash/public/cpp/ime_controller_client.h"
 #include "ash/public/cpp/ime_info.h"
-#include "base/strings/string16.h"
 
 namespace gfx {
 class Rect;
@@ -21,6 +20,16 @@ namespace ash {
 // Interface for ash client (e.g. Chrome) to send input method info to ash.
 class ASH_PUBLIC_EXPORT ImeController {
  public:
+  class Observer {
+   public:
+    // Called when the caps lock state has changed.
+    virtual void OnCapsLockChanged(bool enabled) = 0;
+
+    // Called when the keyboard layout name has changed.
+    virtual void OnKeyboardLayoutNameChanged(
+        const std::string& layout_name) = 0;
+  };
+
   // Sets the global ImeController instance returned by ImeController::Get().
   // Use this when you need to override existing ImeController instances.
   static void SetInstanceForTest(ImeController* controller);
@@ -28,6 +37,9 @@ class ASH_PUBLIC_EXPORT ImeController {
   virtual ~ImeController();
 
   static ImeController* Get();
+
+  virtual void AddObserver(Observer* observer) = 0;
+  virtual void RemoveObserver(Observer* observer) = 0;
 
   // Sets the client interface.
   virtual void SetClient(ImeControllerClient* client) = 0;
@@ -72,7 +84,10 @@ class ASH_PUBLIC_EXPORT ImeController {
   // The view fades out after a delay and close itself.
   // The anchor bounds is in the universal screen coordinates in DIP.
   virtual void ShowModeIndicator(const gfx::Rect& anchor_bounds,
-                                 const base::string16& ime_short_name) = 0;
+                                 const std::u16string& ime_short_name) = 0;
+
+  // Synchronously returns the cached caps lock state.
+  virtual bool IsCapsLockEnabled() const = 0;
 
  protected:
   ImeController();

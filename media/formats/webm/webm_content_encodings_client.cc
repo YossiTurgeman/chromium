@@ -1,8 +1,10 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/formats/webm/webm_content_encodings_client.h"
+
+#include <memory>
 
 #include "base/logging.h"
 #include "media/formats/webm/webm_constants.h"
@@ -10,7 +12,7 @@
 namespace media {
 
 WebMContentEncodingsClient::WebMContentEncodingsClient(MediaLog* media_log)
-    : media_log_(media_log),
+    : media_log_(MediaLog::CloneSafely(media_log)),
       content_encryption_encountered_(false),
       content_encodings_ready_(false) {}
 
@@ -33,7 +35,7 @@ WebMParserClient* WebMContentEncodingsClient::OnListStart(int id) {
   if (id == kWebMIdContentEncoding) {
     DCHECK(!cur_content_encoding_.get());
     DCHECK(!content_encryption_encountered_);
-    cur_content_encoding_.reset(new ContentEncoding());
+    cur_content_encoding_ = std::make_unique<ContentEncoding>();
     return this;
   }
 
@@ -41,7 +43,7 @@ WebMParserClient* WebMContentEncodingsClient::OnListStart(int id) {
     DCHECK(cur_content_encoding_.get());
     if (content_encryption_encountered_) {
       MEDIA_LOG(ERROR, media_log_) << "Unexpected multiple ContentEncryption.";
-      return NULL;
+      return nullptr;
     }
     content_encryption_encountered_ = true;
     return this;
@@ -53,7 +55,7 @@ WebMParserClient* WebMContentEncodingsClient::OnListStart(int id) {
   }
 
   MEDIA_LOG(ERROR, media_log_) << "Unsupported element " << id;
-  return NULL;
+  return nullptr;
 }
 
 // Mandatory occurrence restriction is checked in this function. Multiple

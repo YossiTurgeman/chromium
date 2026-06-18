@@ -28,7 +28,8 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_RESOURCE_ERROR_H_
 
 #include <iosfwd>
-#include "base/optional.h"
+#include <optional>
+
 #include "net/dns/public/resolve_error_info.h"
 #include "services/network/public/cpp/cors/cors_error_status.h"
 #include "services/network/public/mojom/blocked_by_response_reason.mojom-blink.h"
@@ -64,12 +65,13 @@ class PLATFORM_EXPORT ResourceError final {
   static ResourceError CacheMissError(const KURL&);
   static ResourceError TimeoutError(const KURL&);
   static ResourceError Failure(const KURL&);
+  static ResourceError HttpError(const KURL&);
 
   ResourceError() = delete;
   // |error_code| must not be 0.
   ResourceError(int error_code,
                 const KURL& failing_url,
-                base::Optional<network::CorsErrorStatus>);
+                std::optional<network::CorsErrorStatus>);
   ResourceError(const KURL& failing_url,
                 const network::CorsErrorStatus& status);
   explicit ResourceError(const WebURLError&);
@@ -79,6 +81,8 @@ class PLATFORM_EXPORT ResourceError final {
   const String& LocalizedDescription() const { return localized_description_; }
 
   bool IsCancellation() const;
+
+  bool IsTrustTokenCacheHit() const;
 
   // Returns true if the error was the outcome of a Trust Tokens operation and
   // the error does *not* represent an actionable failure:
@@ -97,13 +101,18 @@ class PLATFORM_EXPORT ResourceError final {
   bool IsTimeout() const;
   bool IsCacheMiss() const;
   bool WasBlockedByResponse() const;
-  bool ShouldCollapseInitiator() const;
-  base::Optional<ResourceRequestBlockedReason> GetResourceRequestBlockedReason()
+  bool WasBlockedByORB() const;
+  bool ShouldCollapseInitiator() const { return should_collapse_inititator_; }
+  bool IsCancelledFromHttpError() const {
+    return is_cancelled_from_http_error_;
+  }
+
+  std::optional<ResourceRequestBlockedReason> GetResourceRequestBlockedReason()
       const;
-  base::Optional<network::mojom::BlockedByResponseReason>
+  std::optional<network::mojom::BlockedByResponseReason>
   GetBlockedByResponseReason() const;
 
-  base::Optional<network::CorsErrorStatus> CorsErrorStatus() const {
+  std::optional<network::CorsErrorStatus> CorsErrorStatus() const {
     return cors_error_status_;
   }
 
@@ -126,10 +135,11 @@ class PLATFORM_EXPORT ResourceError final {
   String localized_description_;
   bool is_access_check_ = false;
   bool has_copy_in_cache_ = false;
-  bool blocked_by_subresource_filter_ = false;
-  base::Optional<network::CorsErrorStatus> cors_error_status_;
+  std::optional<network::CorsErrorStatus> cors_error_status_;
+  bool should_collapse_inititator_ = false;
+  bool is_cancelled_from_http_error_ = false;
 
-  base::Optional<network::mojom::BlockedByResponseReason>
+  std::optional<network::mojom::BlockedByResponseReason>
       blocked_by_response_reason_;
 
   // Refer to the member comment in WebURLError.
@@ -140,9 +150,6 @@ class PLATFORM_EXPORT ResourceError final {
 
 inline bool operator==(const ResourceError& a, const ResourceError& b) {
   return ResourceError::Compare(a, b);
-}
-inline bool operator!=(const ResourceError& a, const ResourceError& b) {
-  return !(a == b);
 }
 
 PLATFORM_EXPORT std::ostream& operator<<(std::ostream&, const ResourceError&);

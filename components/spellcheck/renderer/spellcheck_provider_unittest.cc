@@ -1,24 +1,28 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "components/spellcheck/renderer/spellcheck_provider_test.h"
+#include <vector>
 
+#include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/run_until.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "components/spellcheck/common/spellcheck_features.h"
+#include "components/spellcheck/common/spellcheck_result.h"
 #include "components/spellcheck/renderer/spellcheck.h"
+#include "components/spellcheck/renderer/spellcheck_provider_test.h"
 #include "components/spellcheck/spellcheck_buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/platform/web_runtime_features.h"
 #include "third_party/blink/public/platform/web_string.h"
-#include "third_party/blink/public/platform/web_vector.h"
 #include "third_party/blink/public/web/web_text_checking_result.h"
 #include "third_party/blink/public/web/web_text_decoration_type.h"
 
 namespace {
 
-#if defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 struct HybridSpellCheckTestCase {
   size_t language_count;
   size_t enabled_language_count;
@@ -32,7 +36,7 @@ struct CombineSpellCheckResultsTestCase {
   const wchar_t* text;
   std::vector<SpellCheckResult> browser_results;
   bool use_spelling_service;
-  blink::WebVector<blink::WebTextCheckingResult> expected_results;
+  std::vector<blink::WebTextCheckingResult> expected_results;
 };
 
 std::ostream& operator<<(std::ostream& out,
@@ -43,7 +47,7 @@ std::ostream& operator<<(std::ostream& out,
       << "\", use_spelling_service=" << test_case.use_spelling_service;
   return out;
 }
-#endif  // defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 
 class SpellCheckProviderCacheTest : public SpellCheckProviderTest {
  protected:
@@ -57,43 +61,18 @@ class SpellCheckProviderCacheTest : public SpellCheckProviderTest {
   }
 };
 
-#if defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 // Test fixture for testing hybrid check cases.
 class HybridSpellCheckTest
     : public testing::TestWithParam<HybridSpellCheckTestCase> {
  public:
   HybridSpellCheckTest() : provider_(&embedder_provider_) {}
-  ~HybridSpellCheckTest() override {}
-
-  void SetUp() override {
-    // Don't delay initialization of the SpellcheckService on browser launch.
-    feature_list_.InitWithFeatures(
-        /*enabled_features=*/{spellcheck::kWinUseBrowserSpellChecker},
-        /*disabled_features=*/{spellcheck::kWinDelaySpellcheckServiceInit});
-  }
-
-  void RunShouldUseBrowserSpellCheckOnlyWhenNeededTest();
+  ~HybridSpellCheckTest() override = default;
 
  protected:
-  base::test::ScopedFeatureList feature_list_;
   base::test::SingleThreadTaskEnvironment task_environment_;
   spellcheck::EmptyLocalInterfaceProvider embedder_provider_;
   TestingSpellCheckProvider provider_;
-};
-
-// Test fixture for testing hybrid check cases with delayed initialization of
-// the spellcheck service.
-class HybridSpellCheckTestDelayInit : public HybridSpellCheckTest {
- public:
-  HybridSpellCheckTestDelayInit() = default;
-
-  void SetUp() override {
-    // Don't initialize the SpellcheckService on browser launch.
-    feature_list_.InitWithFeatures(
-        /*enabled_features=*/{spellcheck::kWinUseBrowserSpellChecker,
-                              spellcheck::kWinDelaySpellcheckServiceInit},
-        /*disabled_features=*/{});
-  }
 };
 
 // Test fixture for testing combining results from both the native spell checker
@@ -102,23 +81,22 @@ class CombineSpellCheckResultsTest
     : public testing::TestWithParam<CombineSpellCheckResultsTestCase> {
  public:
   CombineSpellCheckResultsTest() : provider_(&embedder_provider_) {}
-  ~CombineSpellCheckResultsTest() override {}
+  ~CombineSpellCheckResultsTest() override = default;
 
  protected:
   base::test::SingleThreadTaskEnvironment task_environment_;
   spellcheck::EmptyLocalInterfaceProvider embedder_provider_;
   TestingSpellCheckProvider provider_;
 };
-#endif  // defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 
 TEST_F(SpellCheckProviderCacheTest, SubstringWithoutMisspellings) {
   FakeTextCheckingResult result;
   FakeTextCheckingCompletion completion(&result);
 
-  blink::WebVector<blink::WebTextCheckingResult> last_results;
-  provider_.SetLastResults(base::ASCIIToUTF16("This is a test"), last_results);
-  EXPECT_TRUE(provider_.SatisfyRequestFromCache(base::ASCIIToUTF16("This is a"),
-                                                &completion));
+  std::vector<blink::WebTextCheckingResult> last_results;
+  provider_.SetLastResults(u"This is a test", last_results);
+  EXPECT_TRUE(provider_.SatisfyRequestFromCache(u"This is a", &completion));
   EXPECT_EQ(result.completion_count_, 1U);
 }
 
@@ -126,15 +104,11 @@ TEST_F(SpellCheckProviderCacheTest, SubstringWithMisspellings) {
   FakeTextCheckingResult result;
   FakeTextCheckingCompletion completion(&result);
 
-  blink::WebVector<blink::WebTextCheckingResult> last_results;
-  std::vector<blink::WebTextCheckingResult> results;
-  results.push_back(
+  std::vector<blink::WebTextCheckingResult> last_results = {
       blink::WebTextCheckingResult(blink::kWebTextDecorationTypeSpelling, 5, 3,
-                                   std::vector<blink::WebString>({"isq"})));
-  last_results.Assign(results);
-  provider_.SetLastResults(base::ASCIIToUTF16("This isq a test"), last_results);
-  EXPECT_TRUE(provider_.SatisfyRequestFromCache(
-      base::ASCIIToUTF16("This isq a"), &completion));
+                                   std::vector<blink::WebString>({"isq"}))};
+  provider_.SetLastResults(u"This isq a test", last_results);
+  EXPECT_TRUE(provider_.SatisfyRequestFromCache(u"This isq a", &completion));
   EXPECT_EQ(result.completion_count_, 1U);
 }
 
@@ -142,10 +116,9 @@ TEST_F(SpellCheckProviderCacheTest, ShorterTextNotSubstring) {
   FakeTextCheckingResult result;
   FakeTextCheckingCompletion completion(&result);
 
-  blink::WebVector<blink::WebTextCheckingResult> last_results;
-  provider_.SetLastResults(base::ASCIIToUTF16("This is a test"), last_results);
-  EXPECT_FALSE(provider_.SatisfyRequestFromCache(
-      base::ASCIIToUTF16("That is a"), &completion));
+  std::vector<blink::WebTextCheckingResult> last_results;
+  provider_.SetLastResults(u"This is a test", last_results);
+  EXPECT_FALSE(provider_.SatisfyRequestFromCache(u"That is a", &completion));
   EXPECT_EQ(result.completion_count_, 0U);
 }
 
@@ -153,27 +126,50 @@ TEST_F(SpellCheckProviderCacheTest, ResetCacheOnCustomDictionaryUpdate) {
   FakeTextCheckingResult result;
   FakeTextCheckingCompletion completion(&result);
 
-  blink::WebVector<blink::WebTextCheckingResult> last_results;
-  provider_.SetLastResults(base::ASCIIToUTF16("This is a test"), last_results);
+  std::vector<blink::WebTextCheckingResult> last_results;
+  provider_.SetLastResults(u"This is a test", last_results);
 
   UpdateCustomDictionary();
 
-  EXPECT_FALSE(provider_.SatisfyRequestFromCache(
-      base::ASCIIToUTF16("This is a"), &completion));
+  EXPECT_FALSE(provider_.SatisfyRequestFromCache(u"This is a", &completion));
   EXPECT_EQ(result.completion_count_, 0U);
 }
 
-#if defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+TEST_F(SpellCheckProviderCacheTest,
+       ResetCacheOnSpellCheckCustomDictionaryUpdate) {
+  blink::WebRuntimeFeatures::EnableFeatureFromString(
+      "SpellCheckCustomDictionaryAPI", true);
+
+  FakeTextCheckingResult result;
+  FakeTextCheckingCompletion completion(&result);
+
+  std::vector<blink::WebTextCheckingResult> last_results;
+  provider_.SetLastResults(u"This is a test", last_results);
+
+  SpellCheck* spellcheck = provider_.spellcheck();
+  EXPECT_NE(spellcheck, nullptr);
+
+  provider_.spellcheck()->InitializeSpellCheckWithLanguage();
+  static_cast<blink::WebTextCheckClient*>(&provider_)
+      ->SpellCheckCustomDictionaryChanged({}, {});
+
+  EXPECT_FALSE(provider_.SatisfyRequestFromCache(u"This is a", &completion));
+  EXPECT_EQ(result.completion_count_, 0U);
+}
+
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 // Tests that the SpellCheckProvider does not call into the native spell checker
 // on Windows when the native spell checker flags are disabled.
 TEST_F(SpellCheckProviderTest, ShouldNotUseBrowserSpellCheck) {
-  base::test::ScopedFeatureList local_feature;
-  local_feature.InitAndDisableFeature(spellcheck::kWinUseBrowserSpellChecker);
+  spellcheck::ScopedDisableBrowserSpellCheckerForTesting
+      disable_browser_spell_checker;
 
   FakeTextCheckingResult completion;
-  base::string16 text = base::ASCIIToUTF16("This is a test");
+  std::u16string text = u"This is a test";
   provider_.RequestTextChecking(
-      text, std::make_unique<FakeTextCheckingCompletion>(&completion));
+      text, /*spelling_markers=*/{},
+      blink::WebTextCheckClient::ShouldForceRefreshTextCheckService::kNo,
+      std::make_unique<FakeTextCheckingCompletion>(&completion));
 
   EXPECT_EQ(provider_.spelling_service_call_count_, 1U);
   EXPECT_EQ(provider_.text_check_requests_.size(), 0U);
@@ -205,21 +201,15 @@ INSTANTIATE_TEST_SUITE_P(
     testing::ValuesIn(kSpellCheckProviderHybridTestsParams));
 
 TEST_P(HybridSpellCheckTest, ShouldUseBrowserSpellCheckOnlyWhenNeeded) {
-  RunShouldUseBrowserSpellCheckOnlyWhenNeededTest();
-}
-
-void HybridSpellCheckTest::RunShouldUseBrowserSpellCheckOnlyWhenNeededTest() {
-  if (!spellcheck::WindowsVersionSupportsSpellchecker()) {
-    return;
-  }
-
   const auto& test_case = GetParam();
 
   FakeTextCheckingResult completion;
   provider_.spellcheck()->SetFakeLanguageCounts(
       test_case.language_count, test_case.enabled_language_count);
   provider_.RequestTextChecking(
-      base::ASCIIToUTF16("This is a test"),
+      u"This is a test",
+      /*spelling_markers=*/{},
+      blink::WebTextCheckClient::ShouldForceRefreshTextCheckService::kNo,
       std::make_unique<FakeTextCheckingCompletion>(&completion));
 
   EXPECT_EQ(provider_.spelling_service_call_count_,
@@ -229,20 +219,6 @@ void HybridSpellCheckTest::RunShouldUseBrowserSpellCheckOnlyWhenNeededTest() {
   EXPECT_EQ(completion.completion_count_,
             test_case.expected_text_check_requests_count > 0u ? 0u : 1u);
   EXPECT_EQ(completion.cancellation_count_, 0U);
-}
-
-// Tests that the SpellCheckProvider calls into the native spell checker only
-// when needed when the code path through
-// SpellCheckProvider::RequestTextChecking is that used when the spellcheck
-// service is initialized on demand.
-INSTANTIATE_TEST_SUITE_P(
-    SpellCheckProviderHybridTests,
-    HybridSpellCheckTestDelayInit,
-    testing::ValuesIn(kSpellCheckProviderHybridTestsParams));
-
-TEST_P(HybridSpellCheckTestDelayInit,
-       ShouldUseBrowserSpellCheckOnlyWhenNeeded) {
-  RunShouldUseBrowserSpellCheckOnlyWhenNeededTest();
 }
 
 // Tests that the SpellCheckProvider can correctly combine results from the
@@ -264,16 +240,16 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             "",
             L"Tihs has soem misspellings",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               9,
                               4,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             false,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -295,32 +271,32 @@ INSTANTIATE_TEST_SUITE_P(
             L"\x0930\x093E\x091C\x0927\x093E\x0928 words in different "
             L"character sets "
             L"(Japanese, Chinese, Korean, Hindi)",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               9,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               14,
                               5,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               20,
                               2,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               23,
                               5,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               29,
                               6,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             false,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -337,16 +313,16 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             "",
             L"Tihs has soem misspellings",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               9,
                               4,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             true,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -364,16 +340,16 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             "",
             L"Tihs has soem misspellings",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::GRAMMAR,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::GRAMMAR,
                               9,
                               4,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             true,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -398,16 +374,16 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             "en-US",
             L"Tihs has soem misspellings",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               9,
                               4,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             false,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -426,25 +402,25 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             L"Tihs has soem misspellings",
             {
-                SpellCheckResult(SpellCheckResult::SPELLING,
+                SpellCheckResult(spellcheck::Decoration::SPELLING,
                                  0,
                                  4,
-                                 {base::ASCIIToUTF16("foo")}),
-                SpellCheckResult(SpellCheckResult::SPELLING,
+                                 {std::u16string(u"foo")}),
+                SpellCheckResult(spellcheck::Decoration::SPELLING,
                                  5,
                                  3,
-                                 {base::ASCIIToUTF16("foo")}),
-                SpellCheckResult(SpellCheckResult::SPELLING,
+                                 {std::u16string(u"foo")}),
+                SpellCheckResult(spellcheck::Decoration::SPELLING,
                                  9,
                                  4,
-                                 {base::ASCIIToUTF16("foo")}),
-                SpellCheckResult(SpellCheckResult::SPELLING,
+                                 {std::u16string(u"foo")}),
+                SpellCheckResult(spellcheck::Decoration::SPELLING,
                                  14,
                                  12,
-                                 {base::ASCIIToUTF16("foo")}),
+                                 {std::u16string(u"foo")}),
             },
             false,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -462,16 +438,16 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             "en-US",
             L"Tihs has soem misspellings",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               5,
                               3,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               14,
                               12,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             false,
-            blink::WebVector<blink::WebTextCheckingResult>()},
+            std::vector<blink::WebTextCheckingResult>()},
 
         // Hybrid check, no spelling service, browser results with some that
         // that are in character set that does not have dictionary support (so
@@ -481,20 +457,20 @@ INSTANTIATE_TEST_SUITE_P(
             "fr",
             L"Tihs mot is misspelled in Russian: "
             L"\x043C\x0438\x0440\x0432\x043E\x0439",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               5,
                               3,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               35,
                               6,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             false,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 std::vector<blink::WebTextCheckingResult>(
                     {blink::WebTextCheckingResult(
                         blink::WebTextDecorationType::
@@ -509,20 +485,20 @@ INSTANTIATE_TEST_SUITE_P(
             "ru",
             L"Tihs \x0432\x0441\x0435\x0445 is misspelled in Russian: "
             L"\x043C\x0438\x0440\x0432\x043E\x0439",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               5,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               36,
                               6,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             false,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -540,16 +516,16 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             "en-US",
             L"Tihs has soem misspellings",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::GRAMMAR,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::GRAMMAR,
                               9,
                               4,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             true,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(
                      blink::WebTextDecorationType::
                          kWebTextDecorationTypeSpelling,
@@ -567,16 +543,16 @@ INSTANTIATE_TEST_SUITE_P(
             "en-US",
             "en-US",
             L"This has soem misspellings",
-            {SpellCheckResult(SpellCheckResult::SPELLING,
+            {SpellCheckResult(spellcheck::Decoration::SPELLING,
                               0,
                               4,
-                              {base::ASCIIToUTF16("foo")}),
-             SpellCheckResult(SpellCheckResult::SPELLING,
+                              {std::u16string(u"foo")}),
+             SpellCheckResult(spellcheck::Decoration::SPELLING,
                               9,
                               4,
-                              {base::ASCIIToUTF16("foo")})},
+                              {std::u16string(u"foo")})},
             true,
-            blink::WebVector<blink::WebTextCheckingResult>(
+            std::vector<blink::WebTextCheckingResult>(
                 {blink::WebTextCheckingResult(blink::WebTextDecorationType::
                                                   kWebTextDecorationTypeGrammar,
                                               0,
@@ -588,13 +564,7 @@ INSTANTIATE_TEST_SUITE_P(
                      4)})}));
 
 TEST_P(CombineSpellCheckResultsTest, ShouldCorrectlyCombineHybridResults) {
-  if (!spellcheck::WindowsVersionSupportsSpellchecker()) {
-    return;
-  }
-
   const auto& test_case = GetParam();
-  base::test::ScopedFeatureList local_features;
-  local_features.InitAndEnableFeature(spellcheck::kWinUseBrowserSpellChecker);
   const bool has_browser_check = !test_case.browser_locale.empty();
   const bool has_renderer_check = !test_case.renderer_locale.empty();
 
@@ -621,7 +591,7 @@ TEST_P(CombineSpellCheckResultsTest, ShouldCorrectlyCombineHybridResults) {
 
   int check_id = provider_.AddCompletionForTest(
       std::make_unique<FakeTextCheckingCompletion>(&completion), request_info);
-  provider_.OnRespondTextCheck(check_id, test_case.text,
+  provider_.OnRespondTextCheck(check_id, base::WideToUTF16(test_case.text),
                                test_case.browser_results);
 
   // Should have called the completion callback without cancellation, and should
@@ -652,6 +622,85 @@ TEST_P(CombineSpellCheckResultsTest, ShouldCorrectlyCombineHybridResults) {
     }
   }
 }
-#endif  // defined(OS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+
+#if BUILDFLAG(USE_BROWSER_SPELLCHECKER) && !BUILDFLAG(IS_WIN)
+// Verifies that a word added through the SpellCheckCustomDictionary web API is
+// dropped from results returned by the browser-side platform spell checker
+// (NSSpellChecker on macOS). Without the post-filter, the API would have no
+// effect on these platforms because the platform spell checker has no
+// knowledge of the per-document custom word set.
+TEST_F(SpellCheckProviderTest, DocumentCustomDictionaryFiltersPlatformResults) {
+  blink::WebRuntimeFeatures::EnableFeatureFromString(
+      "SpellCheckCustomDictionaryAPI", true);
+
+  // Push a custom word through the per-frame web API entry point.
+  static_cast<blink::WebTextCheckClient*>(&provider_)
+      ->SpellCheckCustomDictionaryChanged({"Pikachu"}, {});
+
+  FakeTextCheckingResult completion_result;
+  provider_.RequestTextChecking(
+      u"i love Pikachu", /*spelling_markers=*/{},
+      blink::WebTextCheckClient::ShouldForceRefreshTextCheckService::kNo,
+      std::make_unique<FakeTextCheckingCompletion>(&completion_result));
+
+  // The fake SpellCheckHost recorded the platform-spellcheck mojo request.
+  ASSERT_EQ(provider_.text_check_requests_.size(), 1u);
+
+  // Simulate the platform spell checker reporting "Pikachu" (offset 7,
+  // length 7 in "i love Pikachu") as a misspelling.
+  std::vector<SpellCheckResult> platform_results = {
+      SpellCheckResult(spellcheck::Decoration::SPELLING, /*loc=*/7, /*len=*/7)};
+  std::move(std::get<2>(provider_.text_check_requests_.back()))
+      .Run(platform_results);
+
+  // The mojo response callback posts back to this thread; wait for the
+  // completion to fire before inspecting it.
+  ASSERT_TRUE(base::test::RunUntil(
+      [&] { return completion_result.completion_count_ > 0; }));
+
+  // The post-filter dropped "Pikachu", so Blink sees no misspellings.
+  EXPECT_EQ(completion_result.completion_count_, 1u);
+  EXPECT_EQ(completion_result.cancellation_count_, 0u);
+  EXPECT_TRUE(completion_result.results_.empty());
+}
+
+// Verifies that committing a new document drops the per-frame custom word
+// set, so a word added before the navigation no longer suppresses platform
+// misspellings reported for the next document.
+TEST_F(SpellCheckProviderTest,
+       DidCreateNewDocumentClearsDocumentCustomDictionary) {
+  blink::WebRuntimeFeatures::EnableFeatureFromString(
+      "SpellCheckCustomDictionaryAPI", true);
+
+  // Push a custom word, then simulate the RenderFrame creating a new document.
+  static_cast<blink::WebTextCheckClient*>(&provider_)
+      ->SpellCheckCustomDictionaryChanged({"Pikachu"}, {});
+  provider_.DidCreateNewDocument();
+
+  FakeTextCheckingResult completion_result;
+  provider_.RequestTextChecking(
+      u"i love Pikachu", /*spelling_markers=*/{},
+      blink::WebTextCheckClient::ShouldForceRefreshTextCheckService::kNo,
+      std::make_unique<FakeTextCheckingCompletion>(&completion_result));
+
+  ASSERT_EQ(provider_.text_check_requests_.size(), 1u);
+
+  // Platform spell checker flags "Pikachu" as misspelled.
+  std::vector<SpellCheckResult> platform_results = {
+      SpellCheckResult(spellcheck::Decoration::SPELLING, /*loc=*/7, /*len=*/7)};
+  std::move(std::get<2>(provider_.text_check_requests_.back()))
+      .Run(platform_results);
+
+  ASSERT_TRUE(base::test::RunUntil(
+      [&] { return completion_result.completion_count_ > 0; }));
+
+  // The custom word set was cleared on the new document, so the filter no
+  // longer suppresses "Pikachu" and the misspelling reaches Blink.
+  EXPECT_EQ(completion_result.completion_count_, 1u);
+  EXPECT_EQ(completion_result.cancellation_count_, 0u);
+  EXPECT_EQ(completion_result.results_.size(), 1u);
+}
+#endif  // BUILDFLAG(USE_BROWSER_SPELLCHECKER) && !BUILDFLAG(IS_WIN)
 
 }  // namespace

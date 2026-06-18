@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,26 +13,38 @@ MockLanguageModel::GetLanguages() {
   return {MockLanguageModel::LanguageDetails("en", 1.0)};
 }
 
+void MockTranslateInfoBarDelegate::SetTranslateLanguagesForTest(
+    std::vector<std::pair<std::string, std::u16string>> languages) {
+  for (auto pair : languages) {
+    languages_.push_back(pair);
+  }
+}
+
+void MockTranslateInfoBarDelegate::SetContentLanguagesCodesForTest(
+    std::vector<std::string> languages) {
+  for (auto& entry : languages) {
+    content_languages_.push_back(entry);
+  }
+}
+
 MockTranslateInfoBarDelegate::MockTranslateInfoBarDelegate(
     const base::WeakPtr<translate::TranslateManager>& translate_manager,
-    bool is_off_the_record,
     translate::TranslateStep step,
-    const std::string& original_language,
+    const std::string& source_language,
     const std::string& target_language,
-    translate::TranslateErrors::Type error_type,
+    translate::TranslateErrors error_type,
     bool triggered_from_menu)
     : translate::TranslateInfoBarDelegate(translate_manager,
-                                          is_off_the_record,
                                           step,
-                                          original_language,
+                                          source_language,
                                           target_language,
                                           error_type,
                                           triggered_from_menu) {}
 
-MockTranslateInfoBarDelegate::~MockTranslateInfoBarDelegate() {}
+MockTranslateInfoBarDelegate::~MockTranslateInfoBarDelegate() = default;
 
 MockTranslateInfoBarDelegateFactory::MockTranslateInfoBarDelegateFactory(
-    const std::string& original_language,
+    const std::string& source_language,
     const std::string& target_language) {
   pref_service_ =
       std::make_unique<sync_preferences::TestingPrefServiceSyncable>();
@@ -47,21 +59,22 @@ MockTranslateInfoBarDelegateFactory::MockTranslateInfoBarDelegateFactory(
   manager_ = std::make_unique<translate::TranslateManager>(
       client_.get(), ranker_.get(), language_model_.get());
   delegate_ = std::make_unique<MockTranslateInfoBarDelegate>(
-      manager_->GetWeakPtr(), false,
+      manager_->GetWeakPtr(),
       translate::TranslateStep::TRANSLATE_STEP_BEFORE_TRANSLATE,
-      original_language, target_language,
-      translate::TranslateErrors::Type::NONE, false);
+      source_language, target_language, translate::TranslateErrors::NONE,
+      false);
 }
 
-MockTranslateInfoBarDelegateFactory::~MockTranslateInfoBarDelegateFactory() {}
+MockTranslateInfoBarDelegateFactory::~MockTranslateInfoBarDelegateFactory() =
+    default;
 
 // static
 std::unique_ptr<MockTranslateInfoBarDelegate>
 MockTranslateInfoBarDelegateFactory::CreateMockTranslateInfoBarDelegate(
     translate::TranslateStep step) {
   return std::make_unique<MockTranslateInfoBarDelegate>(
-      manager_->GetWeakPtr(), false, step, "fr", "en",
-      translate::TranslateErrors::Type::NONE, false);
+      manager_->GetWeakPtr(), step, "fr", "en",
+      translate::TranslateErrors::NONE, false);
 }
 
 }  // namespace testing

@@ -1,14 +1,18 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/display/display_alignment_controller.h"
 
+#include <algorithm>
+
 #include "ash/display/display_alignment_indicator.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/timer/timer.h"
+#include "ui/display/manager/display_manager.h"
 #include "ui/events/event.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/geometry/rect.h"
@@ -21,10 +25,9 @@ namespace {
 constexpr int kTriggerThresholdCount = 2;
 // Time between last time the mouse leaves a screen edge and the counter
 // resetting.
-constexpr base::TimeDelta kCounterResetTime = base::TimeDelta::FromSeconds(1);
+constexpr base::TimeDelta kCounterResetTime = base::Seconds(1);
 // How long the indicators are visible for.
-constexpr base::TimeDelta kIndicatorVisibilityDuration =
-    base::TimeDelta::FromSeconds(2);
+constexpr base::TimeDelta kIndicatorVisibilityDuration = base::Seconds(2);
 
 // Returns true if |screen_location| is on the edge of |display|. |display| must
 // be valid.
@@ -60,7 +63,7 @@ DisplayAlignmentController::DisplayAlignmentController()
   Shell* shell = Shell::Get();
   shell->AddPreTargetHandler(this);
   shell->session_controller()->AddObserver(this);
-  shell->window_tree_host_manager()->AddObserver(this);
+  shell->display_manager()->AddDisplayManagerObserver(this);
 
   is_locked_ = shell->session_controller()->IsScreenLocked();
 
@@ -69,12 +72,12 @@ DisplayAlignmentController::DisplayAlignmentController()
 
 DisplayAlignmentController::~DisplayAlignmentController() {
   Shell* shell = Shell::Get();
-  shell->window_tree_host_manager()->RemoveObserver(this);
+  shell->display_manager()->RemoveDisplayManagerObserver(this);
   shell->session_controller()->RemoveObserver(this);
   shell->RemovePreTargetHandler(this);
 }
 
-void DisplayAlignmentController::OnDisplayConfigurationChanged() {
+void DisplayAlignmentController::OnDidApplyDisplayChanges() {
   RefreshState();
 }
 
@@ -84,7 +87,7 @@ void DisplayAlignmentController::OnDisplaysInitialized() {
 
 void DisplayAlignmentController::OnMouseEvent(ui::MouseEvent* event) {
   if (current_state_ == DisplayAlignmentState::kDisabled ||
-      event->type() != ui::ET_MOUSE_MOVED) {
+      event->type() != ui::EventType::kMouseMoved) {
     return;
   }
 
@@ -146,7 +149,7 @@ void DisplayAlignmentController::DisplayDragged(int64_t display_id,
                                                 int32_t delta_y) {
   if (current_state_ != DisplayAlignmentState::kLayoutPreview) {
     // Clear existing indicators. They are all regenerated via
-    // OnDisplayConfigurationChanged() after dragging ends.
+    // OnDidApplyDisplayChanges() after dragging ends.
     ResetState();
 
     dragged_display_id_ = display_id;
@@ -281,11 +284,8 @@ void DisplayAlignmentController::ComputePreviewIndicators() {
     const bool are_neighbors = display::ComputeBoundary(
         bounds, peer.bounds(), &source_edge, &peer_edge);
 
-    const auto& existing_indicator_it =
-        std::find_if(active_indicators_.begin(), active_indicators_.end(),
-                     [id = peer.id()](const auto& indicator) {
-                       return id == indicator->display_id();
-                     });
+    const auto& existing_indicator_it = std::ranges::find(
+        active_indicators_, peer.id(), &DisplayAlignmentIndicator::display_id);
 
     const bool indicator_exists =
         existing_indicator_it != active_indicators_.end();

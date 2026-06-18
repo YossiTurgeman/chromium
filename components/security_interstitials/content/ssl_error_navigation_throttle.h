@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,16 @@
 #include <memory>
 
 #include "base/memory/weak_ptr.h"
-#include "components/security_interstitials/content/ssl_cert_reporter.h"
 #include "content/public/browser/certificate_request_result_type.h"
 #include "content/public/browser/navigation_throttle.h"
+#include "net/base/net_errors.h"
 #include "net/ssl/ssl_info.h"
 
-class SSLCertReporter;
+class GURL;
 
 namespace content {
 class NavigationHandle;
+class NavigationThrottleRegistry;
 class WebContents;
 }  // namespace content
 
@@ -34,10 +35,9 @@ class SSLErrorNavigationThrottle : public content::NavigationThrottle {
  public:
   typedef base::OnceCallback<void(
       content::WebContents* web_contents,
-      int cert_error,
+      net::Error cert_error,
       const net::SSLInfo& ssl_info,
       const GURL& request_url,
-      std::unique_ptr<SSLCertReporter> ssl_cert_reporter,
       base::OnceCallback<void(
           std::unique_ptr<security_interstitials::SecurityInterstitialPage>)>
           blocking_page_ready_callback)>
@@ -52,11 +52,15 @@ class SSLErrorNavigationThrottle : public content::NavigationThrottle {
   typedef base::OnceCallback<bool(content::WebContents* web_contents)>
       IsInHostedAppCallback;
 
-  explicit SSLErrorNavigationThrottle(
-      content::NavigationHandle* handle,
-      std::unique_ptr<SSLCertReporter> ssl_cert_reporter,
+  typedef base::OnceCallback<bool(content::NavigationHandle* handle)>
+      ShouldIgnoreInterstitialBecauseNavigationDefaultedToHttpsCallback;
+
+  SSLErrorNavigationThrottle(
+      content::NavigationThrottleRegistry& registry,
       HandleSSLErrorCallback handle_ssl_error_callback,
-      IsInHostedAppCallback is_in_hosted_app_callback);
+      IsInHostedAppCallback is_in_hosted_app_callback,
+      ShouldIgnoreInterstitialBecauseNavigationDefaultedToHttpsCallback
+          should_ignore_interstitial_because_navigation_defaulted_to_https_callback);
   ~SSLErrorNavigationThrottle() override;
 
   // content::NavigationThrottle:
@@ -65,22 +69,21 @@ class SSLErrorNavigationThrottle : public content::NavigationThrottle {
   const char* GetNameForLogging() override;
 
  private:
-  void QueueShowInterstitial(
-      HandleSSLErrorCallback handle_ssl_error_callback,
-      content::WebContents* web_contents,
-      int net_error,
-      int cert_status,
-      const net::SSLInfo& ssl_info,
-      const GURL& request_url,
-      std::unique_ptr<SSLCertReporter> ssl_cert_reporter);
+  void QueueShowInterstitial(HandleSSLErrorCallback handle_ssl_error_callback,
+                             content::WebContents* web_contents,
+                             net::Error net_error,
+                             int cert_status,
+                             const net::SSLInfo& ssl_info,
+                             const GURL& request_url);
   void ShowInterstitial(
-      int net_error,
+      net::Error net_error,
       std::unique_ptr<security_interstitials::SecurityInterstitialPage>
           blocking_page);
 
-  std::unique_ptr<SSLCertReporter> ssl_cert_reporter_;
   HandleSSLErrorCallback handle_ssl_error_callback_;
   IsInHostedAppCallback is_in_hosted_app_callback_;
+  ShouldIgnoreInterstitialBecauseNavigationDefaultedToHttpsCallback
+      should_ignore_interstitial_because_navigation_defaulted_to_https_callback_;
   base::WeakPtrFactory<SSLErrorNavigationThrottle> weak_ptr_factory_{this};
 };
 

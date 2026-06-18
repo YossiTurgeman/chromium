@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,9 @@
 #include <limits>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/callback_helpers.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/strings/stringprintf.h"
@@ -31,8 +31,8 @@ namespace bluez {
 
 namespace {
 
-// Stream operator for logging vector<uint8_t>.
-std::ostream& operator<<(std::ostream& out, const std::vector<uint8_t> bytes) {
+// Stream operator for logging span<uint8_t>.
+std::ostream& operator<<(std::ostream& out, base::span<const uint8_t> bytes) {
   out << "[";
   for (auto iter = bytes.begin(); iter != bytes.end(); ++iter) {
     out << base::StringPrintf("%02X", *iter);
@@ -154,8 +154,7 @@ bool BluetoothRemoteGattCharacteristicBlueZ::IsNotifying() const {
 }
 
 void BluetoothRemoteGattCharacteristicBlueZ::ReadRemoteCharacteristic(
-    ValueCallback callback,
-    ErrorCallback error_callback) {
+    ValueCallback callback) {
   DVLOG(1) << "Sending GATT characteristic read request to characteristic: "
            << GetIdentifier() << ", UUID: " << GetUUID().canonical_value()
            << ".";
@@ -163,17 +162,18 @@ void BluetoothRemoteGattCharacteristicBlueZ::ReadRemoteCharacteristic(
   DCHECK_GE(num_of_characteristic_value_read_in_progress_, 0);
   ++num_of_characteristic_value_read_in_progress_;
 
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
   bluez::BluezDBusManager::Get()
       ->GetBluetoothGattCharacteristicClient()
       ->ReadValue(
-          object_path(), std::move(callback),
+          object_path(), std::move(split_callback.first),
           base::BindOnce(&BluetoothRemoteGattCharacteristicBlueZ::OnReadError,
                          weak_ptr_factory_.GetWeakPtr(),
-                         std::move(error_callback)));
+                         std::move(split_callback.second)));
 }
 
 void BluetoothRemoteGattCharacteristicBlueZ::WriteRemoteCharacteristic(
-    const std::vector<uint8_t>& value,
+    base::span<const uint8_t> value,
     WriteType write_type,
     base::OnceClosure callback,
     ErrorCallback error_callback) {
@@ -203,7 +203,7 @@ void BluetoothRemoteGattCharacteristicBlueZ::WriteRemoteCharacteristic(
 }
 
 void BluetoothRemoteGattCharacteristicBlueZ::
-    DeprecatedWriteRemoteCharacteristic(const std::vector<uint8_t>& value,
+    DeprecatedWriteRemoteCharacteristic(base::span<const uint8_t> value,
                                         base::OnceClosure callback,
                                         ErrorCallback error_callback) {
   DVLOG(1) << "Sending GATT characteristic write request to characteristic: "
@@ -219,9 +219,9 @@ void BluetoothRemoteGattCharacteristicBlueZ::
                          std::move(error_callback)));
 }
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 void BluetoothRemoteGattCharacteristicBlueZ::PrepareWriteRemoteCharacteristic(
-    const std::vector<uint8_t>& value,
+    base::span<const uint8_t> value,
     base::OnceClosure callback,
     ErrorCallback error_callback) {
   DVLOG(1) << "Sending GATT characteristic prepare write request to "
@@ -237,22 +237,22 @@ void BluetoothRemoteGattCharacteristicBlueZ::PrepareWriteRemoteCharacteristic(
                          weak_ptr_factory_.GetWeakPtr(),
                          std::move(error_callback)));
 }
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 void BluetoothRemoteGattCharacteristicBlueZ::SubscribeToNotifications(
     device::BluetoothRemoteGattDescriptor* ccc_descriptor,
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     NotificationType notification_type,
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
     base::OnceClosure callback,
     ErrorCallback error_callback) {
   bluez::BluezDBusManager::Get()
       ->GetBluetoothGattCharacteristicClient()
       ->StartNotify(
           object_path(),
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
           notification_type,
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
           base::BindOnce(
               &BluetoothRemoteGattCharacteristicBlueZ::OnStartNotifySuccess,
               weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
@@ -265,23 +265,23 @@ void BluetoothRemoteGattCharacteristicBlueZ::UnsubscribeFromNotifications(
     device::BluetoothRemoteGattDescriptor* ccc_descriptor,
     base::OnceClosure callback,
     ErrorCallback error_callback) {
-  auto repeating_callback =
-      base::AdaptCallbackForRepeating(std::move(callback));
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
   bluez::BluezDBusManager::Get()
       ->GetBluetoothGattCharacteristicClient()
       ->StopNotify(
           object_path(),
           base::BindOnce(
               &BluetoothRemoteGattCharacteristicBlueZ::OnStopNotifySuccess,
-              weak_ptr_factory_.GetWeakPtr(), repeating_callback),
+              weak_ptr_factory_.GetWeakPtr(), std::move(split_callback.first)),
           base::BindOnce(
               &BluetoothRemoteGattCharacteristicBlueZ::OnStopNotifyError,
-              weak_ptr_factory_.GetWeakPtr(), repeating_callback));
+              weak_ptr_factory_.GetWeakPtr(),
+              std::move(split_callback.second)));
 }
 
 void BluetoothRemoteGattCharacteristicBlueZ::GattDescriptorAdded(
     const dbus::ObjectPath& object_path) {
-  if (descriptors_.find(object_path.value()) != descriptors_.end()) {
+  if (descriptors_.contains(object_path.value())) {
     DVLOG(1) << "Remote GATT characteristic descriptor already exists: "
              << object_path.value();
     return;
@@ -402,15 +402,17 @@ void BluetoothRemoteGattCharacteristicBlueZ::OnStopNotifyError(
 }
 
 void BluetoothRemoteGattCharacteristicBlueZ::OnReadError(
-    ErrorCallback error_callback,
+    ValueCallback callback,
     const std::string& error_name,
     const std::string& error_message) {
   DVLOG(1) << "Operation failed: " << error_name
            << ", message: " << error_message;
   --num_of_characteristic_value_read_in_progress_;
   DCHECK_GE(num_of_characteristic_value_read_in_progress_, 0);
-  std::move(error_callback)
-      .Run(BluetoothGattServiceBlueZ::DBusErrorToServiceError(error_name));
+  std::move(callback).Run(
+      std::make_optional(
+          BluetoothGattServiceBlueZ::DBusErrorToServiceError(error_name)),
+      /*value=*/std::vector<uint8_t>());
 }
 
 void BluetoothRemoteGattCharacteristicBlueZ::OnWriteError(

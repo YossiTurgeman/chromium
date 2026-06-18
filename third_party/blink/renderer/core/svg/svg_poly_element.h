@@ -23,10 +23,11 @@
 
 #include "third_party/blink/renderer/core/svg/svg_geometry_element.h"
 #include "third_party/blink/renderer/core/svg_names.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
+class PathBuilder;
 class SVGAnimatedPointList;
 class SVGPointListTearOff;
 
@@ -42,19 +43,18 @@ class SVGPolyElement : public SVGGeometryElement {
  protected:
   SVGPolyElement(const QualifiedName&, Document&);
 
-  Path AsPathFromPoints() const;
+  PathBuilder AsPathFromPoints() const;
 
  private:
-  void SvgAttributeChanged(const QualifiedName&) final;
+  void SvgAttributeChanged(const SvgAttributeChangedParams&) final;
 
- private:
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
+
   Member<SVGAnimatedPointList> points_;
 };
 
-template <>
-inline bool IsElementOfType<const SVGPolyElement>(const Node& node) {
-  return IsA<SVGPolyElement>(node);
-}
 template <>
 struct DowncastTraits<SVGPolyElement> {
   static bool AllowFrom(const Node& node) {
@@ -69,4 +69,4 @@ struct DowncastTraits<SVGPolyElement> {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_POLY_ELEMENT_H_

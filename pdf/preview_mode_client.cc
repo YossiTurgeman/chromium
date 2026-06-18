@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,18 +10,28 @@
 #include <string>
 #include <utility>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/notreached.h"
+#include "base/time/time.h"
+#include "pdf/buildflags.h"
 #include "pdf/document_layout.h"
-#include "pdf/ppapi_migration/url_loader.h"
+#include "pdf/loader/url_loader.h"
+#include "third_party/skia/include/core/SkColor.h"
+#include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
 
 namespace chrome_pdf {
 
 PreviewModeClient::PreviewModeClient(Client* client) : client_(client) {}
 
+PreviewModeClient::~PreviewModeClient() = default;
+
 void PreviewModeClient::ProposeDocumentLayout(const DocumentLayout& layout) {
   // This will be invoked if the PreviewModeClient is used, which currently
   // occurs if and only if loading a non-PDF document with more than 1 page.
+}
+
+bool PreviewModeClient::UseSkiaPremultipliedAlpha() {
+  NOTREACHED();
 }
 
 void PreviewModeClient::Invalidate(const gfx::Rect& rect) {
@@ -32,12 +42,13 @@ void PreviewModeClient::DidScroll(const gfx::Vector2d& point) {
   NOTREACHED();
 }
 
-void PreviewModeClient::ScrollToX(int x_in_screen_coords) {
+void PreviewModeClient::ScrollToX(int x_in_screen_coords,
+                                  bool force_smooth_scroll) {
   NOTREACHED();
 }
 
 void PreviewModeClient::ScrollToY(int y_in_screen_coords,
-                                  bool compensate_for_toolbar) {
+                                  bool force_smooth_scroll) {
   NOTREACHED();
 }
 
@@ -54,7 +65,7 @@ void PreviewModeClient::NavigateTo(const std::string& url,
   NOTREACHED();
 }
 
-void PreviewModeClient::UpdateCursor(PP_CursorType_Dev cursor) {
+void PreviewModeClient::UpdateCursor(ui::mojom::CursorType cursor_type) {
   NOTREACHED();
 }
 
@@ -68,8 +79,8 @@ void PreviewModeClient::NotifyNumberOfFindResultsChanged(int total,
   NOTREACHED();
 }
 
-void PreviewModeClient::NotifySelectedFindResultChanged(
-    int current_find_index) {
+void PreviewModeClient::NotifySelectedFindResultChanged(int current_find_index,
+                                                        bool final_result) {
   NOTREACHED();
 }
 
@@ -84,18 +95,15 @@ void PreviewModeClient::Alert(const std::string& message) {
 
 bool PreviewModeClient::Confirm(const std::string& message) {
   NOTREACHED();
-  return false;
 }
 
 std::string PreviewModeClient::Prompt(const std::string& question,
                                       const std::string& default_answer) {
   NOTREACHED();
-  return std::string();
 }
 
 std::string PreviewModeClient::GetURL() {
   NOTREACHED();
-  return std::string();
 }
 
 void PreviewModeClient::Email(const std::string& to,
@@ -111,26 +119,26 @@ void PreviewModeClient::Print() {
 }
 
 void PreviewModeClient::SubmitForm(const std::string& url,
-                                   const void* data,
-                                   int length) {
+                                   base::span<const uint8_t> data) {
   NOTREACHED();
 }
 
 std::unique_ptr<UrlLoader> PreviewModeClient::CreateUrlLoader() {
   NOTREACHED();
-  return nullptr;
 }
 
-std::vector<PDFEngine::Client::SearchStringResult>
-PreviewModeClient::SearchString(const base::char16* string,
-                                const base::char16* term,
+v8::Isolate* PreviewModeClient::GetIsolate() {
+  NOTREACHED();
+}
+
+std::vector<PDFiumEngineClient::SearchStringResult>
+PreviewModeClient::SearchString(const std::u16string& needle,
+                                const std::u16string& haystack,
                                 bool case_sensitive) {
   NOTREACHED();
-  return std::vector<SearchStringResult>();
 }
 
-void PreviewModeClient::DocumentLoadComplete(
-    const PDFEngine::DocumentFeatures& document_features) {
+void PreviewModeClient::DocumentLoadComplete() {
   client_->PreviewDocumentLoadComplete();
 }
 
@@ -138,30 +146,59 @@ void PreviewModeClient::DocumentLoadFailed() {
   client_->PreviewDocumentLoadFailed();
 }
 
-pp::Instance* PreviewModeClient::GetPluginInstance() {
-  return nullptr;
-}
-
 void PreviewModeClient::DocumentHasUnsupportedFeature(
     const std::string& feature) {
   NOTREACHED();
 }
 
-void PreviewModeClient::FormTextFieldFocusChange(bool in_focus) {
+void PreviewModeClient::FormFieldFocusChange(
+    PDFiumEngineClient::FocusFieldType type) {
   NOTREACHED();
 }
 
-bool PreviewModeClient::IsPrintPreview() {
+bool PreviewModeClient::IsPrintPreview() const {
   return true;
 }
 
-float PreviewModeClient::GetToolbarHeightInScreenCoords() {
-  return 0.0f;
+SkColor PreviewModeClient::GetBackgroundColor() const {
+  NOTREACHED();
 }
 
-uint32_t PreviewModeClient::GetBackgroundColor() {
+void PreviewModeClient::SetSelectedText(const std::string& selected_text) {
   NOTREACHED();
-  return 0;
 }
+
+void PreviewModeClient::SetLinkUnderCursor(
+    const std::string& link_under_cursor) {
+  NOTREACHED();
+}
+
+bool PreviewModeClient::IsValidLink(const std::string& url) {
+  NOTREACHED();
+}
+
+void PreviewModeClient::OnNewTextFragmentsSearchStarted() {
+  NOTREACHED();
+}
+
+#if BUILDFLAG(ENABLE_PDF_INK2)
+bool PreviewModeClient::IsInAnnotationMode() const {
+  NOTREACHED();
+}
+#endif  // BUILDFLAG(ENABLE_PDF_INK2)
+
+#if BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)
+void PreviewModeClient::OnSearchifyStateChange(bool busy) {
+  NOTREACHED();
+}
+
+void PreviewModeClient::OnHasSearchifyText() {
+  NOTREACHED();
+}
+
+void PreviewModeClient::MaybeShowSearchifyInProgress() {
+  NOTREACHED();
+}
+#endif
 
 }  // namespace chrome_pdf

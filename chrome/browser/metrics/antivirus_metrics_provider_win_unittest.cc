@@ -1,21 +1,23 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/metrics/antivirus_metrics_provider_win.h"
 
+#include <optional>
+#include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/optional.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "base/threading/thread_checker.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/version.h"
-#include "base/win/windows_version.h"
+#include "base/win/scoped_com_initializer.h"
 #include "chrome/services/util_win/util_win_impl.h"
 #include "components/variations/hashing.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -25,41 +27,40 @@ namespace {
 void VerifySystemProfileData(const metrics::SystemProfileProto& system_profile,
                              bool expect_unhashed_value,
                              bool second_run) {
-  if (base::win::GetVersion() < base::win::Version::WIN8)
-    return;
-
   // The name of Windows Defender changed sometime in Windows 10, so any of the
   // following is possible.
   constexpr char kWindowsDefender[] = "Windows Defender";
   constexpr char kWindowsDefenderAntivirus[] = "Windows Defender Antivirus";
+  constexpr char kMicrosoftDefenderAntivirus[] = "Microsoft Defender Antivirus";
 
-  if (base::win::GetVersion() >= base::win::Version::WIN8) {
-    bool defender_found = false;
-    uint32_t last_hash = 0xdeadbeef;
-    for (const auto& av : system_profile.antivirus_product()) {
-      if (av.has_product_name_hash())
-        last_hash = av.product_name_hash();
-      if (av.product_name_hash() ==
-          variations::HashName(kWindowsDefender) ||
-          av.product_name_hash() ==
-          variations::HashName(kWindowsDefenderAntivirus)) {
-        defender_found = true;
-        if (expect_unhashed_value) {
-          EXPECT_TRUE(av.has_product_name());
-          EXPECT_TRUE(av.product_name() == kWindowsDefender ||
-                      av.product_name() == kWindowsDefenderAntivirus);
-        } else {
-          EXPECT_FALSE(av.has_product_name());
-        }
-        break;
-      }
+  bool defender_found = false;
+  uint32_t last_hash = 0xdeadbeef;
+  for (const auto& av : system_profile.antivirus_product()) {
+    if (av.has_product_name_hash()) {
+      last_hash = av.product_name_hash();
     }
-    EXPECT_TRUE(defender_found)
-        << "expect_unhashed_value = " << expect_unhashed_value
-        << ", second_run = " << second_run << ", "
-        << system_profile.antivirus_product().size()
-        << " antivirus products found. Last hash is " << last_hash << ".";
+    if (av.product_name_hash() == variations::HashName(kWindowsDefender) ||
+        av.product_name_hash() ==
+            variations::HashName(kWindowsDefenderAntivirus) ||
+        av.product_name_hash() ==
+            variations::HashName(kMicrosoftDefenderAntivirus)) {
+      defender_found = true;
+      if (expect_unhashed_value) {
+        EXPECT_TRUE(av.has_product_name());
+        EXPECT_TRUE(av.product_name() == kWindowsDefender ||
+                    av.product_name() == kWindowsDefenderAntivirus ||
+                    av.product_name() == kMicrosoftDefenderAntivirus);
+      } else {
+        EXPECT_FALSE(av.has_product_name());
+      }
+      break;
+    }
   }
+  EXPECT_TRUE(defender_found)
+      << "expect_unhashed_value = " << expect_unhashed_value
+      << ", second_run = " << second_run << ", "
+      << system_profile.antivirus_product().size()
+      << " antivirus products found. Last hash is " << last_hash << ".";
 }
 
 }  // namespace
@@ -72,6 +73,10 @@ class AntiVirusMetricsProviderTest : public ::testing::TestWithParam<bool> {
     util_win_impl_.emplace(remote.InitWithNewPipeAndPassReceiver());
     provider_.SetRemoteUtilWinForTesting(std::move(remote));
   }
+
+  AntiVirusMetricsProviderTest(const AntiVirusMetricsProviderTest&) = delete;
+  AntiVirusMetricsProviderTest& operator=(const AntiVirusMetricsProviderTest&) =
+      delete;
 
   void GetMetricsCallback() {
     // Check that the callback runs on the main loop.
@@ -95,30 +100,28 @@ class AntiVirusMetricsProviderTest : public ::testing::TestWithParam<bool> {
   // enabled or not.
   void SetFullNamesFeatureEnabled(bool enabled) {
     if (enabled) {
-      scoped_feature_list_.InitAndEnableFeature(
-          AntiVirusMetricsProvider::kReportNamesFeature);
+      scoped_feature_list_.InitAndEnableFeature(kReportFullAVProductDetails);
     } else {
-      scoped_feature_list_.InitAndDisableFeature(
-          AntiVirusMetricsProvider::kReportNamesFeature);
+      scoped_feature_list_.InitAndDisableFeature(kReportFullAVProductDetails);
     }
   }
 
   bool got_results_;
   bool expect_unhashed_value_;
-  base::test::TaskEnvironment task_environment_;
-  base::Optional<UtilWinImpl> util_win_impl_;
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::MainThreadType::UI};
+  std::optional<UtilWinImpl> util_win_impl_;
   AntiVirusMetricsProvider provider_;
   base::test::ScopedFeatureList scoped_feature_list_;
   base::ThreadCheckerImpl thread_checker_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(AntiVirusMetricsProviderTest);
+  base::HistogramTester histogram_tester_;
 };
 
-// TODO(crbug.com/682286): Flaky on Windows 10.
-TEST_P(AntiVirusMetricsProviderTest, DISABLED_GetMetricsFullName) {
+TEST_P(AntiVirusMetricsProviderTest, GetMetricsFullName) {
   base::ScopedAllowBlockingForTesting scoped_allow_blocking_;
+  base::win::ScopedCOMInitializer com_initializer;
 
+  ASSERT_TRUE(com_initializer.Succeeded());
   ASSERT_TRUE(thread_checker_.CalledOnValidThread());
   SetFullNamesFeatureEnabled(expect_unhashed_value_);
 
@@ -129,6 +132,7 @@ TEST_P(AntiVirusMetricsProviderTest, DISABLED_GetMetricsFullName) {
                      base::Unretained(this)));
   task_environment_.RunUntilIdle();
   EXPECT_TRUE(got_results_);
+  histogram_tester_.ExpectTotalCount("UMA.AntiVirusMetricsProvider.Latency", 1);
 }
 
 INSTANTIATE_TEST_SUITE_P(, AntiVirusMetricsProviderTest, ::testing::Bool());

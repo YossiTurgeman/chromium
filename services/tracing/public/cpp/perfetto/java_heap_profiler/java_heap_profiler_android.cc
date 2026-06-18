@@ -1,18 +1,22 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/tracing/public/cpp/perfetto/java_heap_profiler/java_heap_profiler_android.h"
 
 #include "base/android/java_heap_dump_generator.h"
+#include "base/check_op.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/logging.h"
+#include "base/no_destructor.h"
 #include "services/tracing/public/cpp/perfetto/java_heap_profiler/hprof_parser_android.h"
+#include "services/tracing/public/cpp/perfetto/perfetto_data_source_names.h"
 #include "services/tracing/public/cpp/perfetto/perfetto_traced_process.h"
 
 namespace tracing {
 
 JavaHeapProfiler::JavaHeapProfiler()
-    : DataSourceBase(mojom::kJavaHeapProfilerSourceName) {}
+    : DataSourceBase(kJavaHeapProfilerSourceName) {}
 
 // static
 JavaHeapProfiler* JavaHeapProfiler::GetInstance() {
@@ -20,8 +24,7 @@ JavaHeapProfiler* JavaHeapProfiler::GetInstance() {
   return instance.get();
 }
 
-void JavaHeapProfiler::StartTracing(
-    PerfettoProducer* producer,
+void JavaHeapProfiler::StartTracingImpl(
     const perfetto::DataSourceConfig& data_source_config) {
   base::ScopedTempDir temp_dir;
   if (!temp_dir.CreateUniqueTempDir()) {
@@ -39,8 +42,8 @@ void JavaHeapProfiler::StartTracing(
             HprofParser::ParseResult::PARSE_SUCCESS);
 }
 
-void JavaHeapProfiler::StopTracing(base::OnceClosure stop_complete_callback) {
-  producer_ = nullptr;
+void JavaHeapProfiler::StopTracingImpl(
+    base::OnceClosure stop_complete_callback) {
   std::move(stop_complete_callback).Run();
 }
 

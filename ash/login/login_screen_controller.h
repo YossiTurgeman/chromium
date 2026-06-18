@@ -1,10 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_LOGIN_LOGIN_SCREEN_CONTROLLER_H_
 #define ASH_LOGIN_LOGIN_SCREEN_CONTROLLER_H_
 
+#include <optional>
 #include <vector>
 
 #include "ash/ash_export.h"
@@ -13,17 +14,18 @@
 #include "ash/public/cpp/kiosk_app_menu.h"
 #include "ash/public/cpp/login_accelerators.h"
 #include "ash/public/cpp/login_screen.h"
-#include "ash/public/cpp/system_tray_focus_observer.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "ash/public/cpp/management_disclosure_client.h"
+#include "ash/system/tray/system_tray_observer.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 class PrefRegistrySimple;
 
 namespace ash {
 
 class SystemTrayNotifier;
+enum class ParentCodeValidationResult;
 enum class SupervisedAction;
 
 // LoginScreenController implements LoginScreen and wraps the LoginScreenClient
@@ -33,29 +35,30 @@ enum class SupervisedAction;
 // LoginScreen interface.
 class ASH_EXPORT LoginScreenController : public LoginScreen,
                                          public KioskAppMenu,
-                                         public SystemTrayFocusObserver {
+                                         public SystemTrayObserver {
  public:
-  // The current authentication stage. Used to get more verbose logging.
-  enum class AuthenticationStage {
-    kIdle,
-    kDoAuthenticate,
-    kUserCallback,
-  };
 
   using OnShownCallback = base::OnceCallback<void(bool did_show)>;
   // Callback for authentication checks. |success| is nullopt if an
   // authentication check did not run, otherwise it is true/false if auth
   // succeeded/failed.
   using OnAuthenticateCallback =
-      base::OnceCallback<void(base::Optional<bool> success)>;
+      base::OnceCallback<void(std::optional<bool> success)>;
 
   explicit LoginScreenController(SystemTrayNotifier* system_tray_notifier);
+
+  LoginScreenController(const LoginScreenController&) = delete;
+  LoginScreenController& operator=(const LoginScreenController&) = delete;
+
   ~LoginScreenController() override;
 
   static void RegisterProfilePrefs(PrefRegistrySimple* registry, bool for_test);
 
   // Check to see if an authentication attempt is in-progress.
   bool IsAuthenticating() const;
+
+  // Check to see if an authentication callback is executing.
+  bool IsAuthenticationCallbackExecuting() const;
 
   // Hash the password and send AuthenticateUser request to LoginScreenClient.
   // LoginScreenClient (in the chrome process) will do the authentication and
@@ -68,20 +71,18 @@ class ASH_EXPORT LoginScreenController : public LoginScreen,
   void AuthenticateUserWithEasyUnlock(const AccountId& account_id);
   void AuthenticateUserWithChallengeResponse(const AccountId& account_id,
                                              OnAuthenticateCallback callback);
-  bool ValidateParentAccessCode(const AccountId& account_id,
-                                base::Time validation_time,
-                                const std::string& code);
+  ParentCodeValidationResult ValidateParentAccessCode(
+      const AccountId& account_id,
+      base::Time validation_time,
+      const std::string& code);
   bool GetSecurityTokenPinRequestCanceled() const;
-  void HardlockPod(const AccountId& account_id);
   void OnFocusPod(const AccountId& account_id);
-  void OnNoPodFocused();
-  void LoadWallpaper(const AccountId& account_id);
-  void SignOutUser();
   void CancelAddUser();
-  void LoginAsGuest();
+  void ShowGuestTosScreen();
   void OnMaxIncorrectPasswordAttempted(const AccountId& account_id);
-  void FocusLockScreenApps(bool reverse);
   void ShowGaiaSignin(const AccountId& prefilled_account);
+  void StartUserRecovery(const AccountId& account_to_recover);
+  void ShowOsInstallScreen();
   void OnRemoveUserWarningShown();
   void RemoveUser(const AccountId& account_id);
   void LaunchPublicSession(const AccountId& account_id,
@@ -91,10 +92,9 @@ class ASH_EXPORT LoginScreenController : public LoginScreen,
                                            const std::string& locale);
   void HandleAccelerator(ash::LoginAcceleratorAction action);
   void ShowAccountAccessHelpApp(gfx::NativeWindow parent_window);
-  void ShowParentAccessHelpApp(gfx::NativeWindow parent_window);
+  void ShowParentAccessHelpApp();
   void ShowLockScreenNotificationSettings();
   void FocusOobeDialog();
-  void NotifyUserActivity();
 
   // Enable or disable authentication for the debug overlay.
   enum class ForceFailAuth { kOff, kImmediate, kDelayed };
@@ -112,22 +112,22 @@ class ASH_EXPORT LoginScreenController : public LoginScreen,
   bool IsReadyForPassword() override;
   void EnableAddUserButton(bool enable) override;
   void EnableShutdownButton(bool enable) override;
-  void ShowGuestButtonInOobe(bool show) override;
+  void EnableShelfButtons(bool enable) override;
+  void SetIsFirstSigninStep(bool is_first) override;
   void ShowParentAccessButton(bool show) override;
   void SetAllowLoginAsGuest(bool allow_guest) override;
+  void SetManagementDisclosureClient(
+      ManagementDisclosureClient* client) override;
   std::unique_ptr<ScopedGuestButtonBlocker> GetScopedGuestButtonBlocker()
       override;
 
   void RequestSecurityTokenPin(SecurityTokenPinRequest request) override;
   void ClearSecurityTokenPinRequest() override;
-  bool SetLoginShelfGestureHandler(const base::string16& nudge_text,
-                                   const base::RepeatingClosure& fling_callback,
-                                   base::OnceClosure exit_callback) override;
-  void ClearLoginShelfGestureHandler() override;
+  views::Widget* GetLoginWindowWidget() override;
 
   // KioskAppMenu:
-  void SetKioskApps(
-      const std::vector<KioskAppMenuEntry>& kiosk_apps,
+  void SetKioskApps(const std::vector<KioskAppMenuEntry>& kiosk_apps) override;
+  void ConfigureKioskCallbacks(
       const base::RepeatingCallback<void(const KioskAppMenuEntry&)>& launch_app,
       const base::RepeatingClosure& on_show_menu) override;
 
@@ -135,9 +135,19 @@ class ASH_EXPORT LoginScreenController : public LoginScreen,
     return authentication_stage_;
   }
 
+  // Set authentication stage. Also notifies the observers.
+  void SetAuthenticationStage(AuthenticationStage authentication_stage);
+
+  // Called when Login or Lock screen is destroyed.
+  void OnLockScreenDestroyed();
+
   LoginDataDispatcher* data_dispatcher() { return &login_data_dispatcher_; }
 
   void NotifyLoginScreenShown();
+
+  // Management disclosure client is used to communicate with chrome for
+  // LockScreen disclosure.
+  ManagementDisclosureClient* GetManagementDisclosureClient();
 
  private:
   void OnAuthenticateComplete(OnAuthenticateCallback callback, bool success);
@@ -145,25 +155,27 @@ class ASH_EXPORT LoginScreenController : public LoginScreen,
   // Common code that is called when the login/lock screen is shown.
   void OnShow();
 
-  // SystemTrayFocusObserver:
+  // SystemTrayObserver:
   void OnFocusLeavingSystemTray(bool reverse) override;
+  void OnSystemTrayBubbleShown() override;
 
   LoginDataDispatcher login_data_dispatcher_;
 
-  LoginScreenClient* client_ = nullptr;
+  raw_ptr<LoginScreenClient, DanglingUntriaged> client_ = nullptr;
 
   AuthenticationStage authentication_stage_ = AuthenticationStage::kIdle;
 
-  SystemTrayNotifier* system_tray_notifier_;
+  raw_ptr<SystemTrayNotifier> system_tray_notifier_;
 
   SecurityTokenRequestController security_token_request_controller_;
 
   // If set to false, all auth requests will forcibly fail.
   ForceFailAuth force_fail_auth_for_debug_overlay_ = ForceFailAuth::kOff;
 
-  base::WeakPtrFactory<LoginScreenController> weak_factory_{this};
+  // Client to communicate with chrome for displaying the management disclosure.
+  raw_ptr<ManagementDisclosureClient> management_disclosure_client_ = nullptr;
 
-  DISALLOW_COPY_AND_ASSIGN(LoginScreenController);
+  base::WeakPtrFactory<LoginScreenController> weak_factory_{this};
 };
 
 }  // namespace ash

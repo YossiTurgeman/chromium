@@ -1,13 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_PUBLIC_CPP_WINDOW_BACKDROP_H_
 #define ASH_PUBLIC_CPP_WINDOW_BACKDROP_H_
 
-#include "ash/public/cpp/ash_constants.h"
 #include "ash/public/cpp/ash_public_export.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
+#include "third_party/skia/include/core/SkColor.h"
 
 namespace aura {
 class Window;
@@ -74,7 +75,7 @@ class ASH_PUBLIC_EXPORT WindowBackdrop {
 
   // The window that this WindowBackdrop associates with. Will be valid during
   // this WindowBackdrop's lifetime.
-  aura::Window* window_;
+  raw_ptr<aura::Window> window_;
 
   BackdropMode mode_ = BackdropMode::kAuto;
   BackdropType type_ = BackdropType::kOpaque;

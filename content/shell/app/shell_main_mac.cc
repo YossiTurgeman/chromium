@@ -1,6 +1,11 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/390223051): Remove C-library calls to fix the errors.
+#pragma allow_unsafe_libc_calls
+#endif
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -11,6 +16,8 @@
 #include <string.h>
 
 #include <memory>
+
+#include "base/allocator/early_zone_registration_apple.h"
 
 #if defined(HELPER_EXECUTABLE)
 #include "sandbox/mac/seatbelt_exec.h"  // nogncheck
@@ -23,6 +30,8 @@ using ContentMainPtr = int (*)(int, char**);
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  partition_alloc::EarlyMallocZoneRegistration();
+
   uint32_t exec_path_size = 0;
   int rv = _NSGetExecutablePath(NULL, &exec_path_size);
   if (rv != -1) {

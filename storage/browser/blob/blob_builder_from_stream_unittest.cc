@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,15 @@
 
 #include <algorithm>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/rand_util.h"
 #include "base/run_loop.h"
-#include "base/task/post_task.h"
 #include "base/task/thread_pool.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
@@ -85,13 +84,16 @@ class BlobBuilderFromStreamTestWithDelayedLimits
         return actual_size / 2;
     }
     NOTREACHED();
-    return 0;
   }
 
   std::unique_ptr<BlobDataHandle> BuildFromString(
       std::string data,
       bool initial_allocation_should_succeed = true) {
-    mojo::DataPipe pipe;
+    mojo::ScopedDataPipeProducerHandle producer_handle;
+    mojo::ScopedDataPipeConsumerHandle consumer_handle;
+    EXPECT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+              MOJO_RESULT_OK);
+
     base::RunLoop loop;
     std::unique_ptr<BlobDataHandle> result;
     uint64_t length_hint = GetLengthHint(data.length());
@@ -104,7 +106,7 @@ class BlobBuilderFromStreamTestWithDelayedLimits
           result = std::move(blob);
           loop.Quit();
         }));
-    builder.Start(length_hint, std::move(pipe.consumer_handle),
+    builder.Start(length_hint, std::move(consumer_handle),
                   mojo::NullAssociatedRemote());
 
     // Make sure the initial memory allocation done by the builder matches the
@@ -117,8 +119,8 @@ class BlobBuilderFromStreamTestWithDelayedLimits
           << ", disk_usage: " << context_->memory_controller().disk_usage();
     }
 
-    mojo::BlockingCopyFromString(data, pipe.producer_handle);
-    pipe.producer_handle.reset();
+    mojo::BlockingCopyFromString(data, producer_handle);
+    producer_handle.reset();
 
     loop.Run();
     EXPECT_EQ(&builder, finished_builder);
@@ -154,7 +156,7 @@ class BlobBuilderFromStreamTestWithDelayedLimits
         std::string file_contents;
         EXPECT_TRUE(base::ReadFileToString(item->path(), &file_contents));
         EXPECT_EQ(item->length(), file_contents.size());
-        auto file_bytes = base::as_bytes(base::make_span(file_contents));
+        auto file_bytes = base::as_byte_span(file_contents);
         EXPECT_TRUE(
             std::equal(on_disk_data.begin() + next_file_offset,
                        on_disk_data.begin() + next_file_offset + item->length(),
@@ -195,7 +197,10 @@ class BlobBuilderFromStreamTest
 };
 
 TEST_P(BlobBuilderFromStreamTest, CallbackCalledOnAbortBeforeDeletion) {
-  mojo::DataPipe pipe;
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
   base::RunLoop loop;
   BlobBuilderFromStream* builder_ptr = nullptr;
@@ -208,7 +213,7 @@ TEST_P(BlobBuilderFromStreamTest, CallbackCalledOnAbortBeforeDeletion) {
         loop.Quit();
       }));
   builder_ptr = builder.get();
-  builder->Start(GetLengthHint(16), std::move(pipe.consumer_handle),
+  builder->Start(GetLengthHint(16), std::move(consumer_handle),
                  mojo::NullAssociatedRemote());
   builder->Abort();
   builder.reset();
@@ -249,8 +254,8 @@ TEST_P(BlobBuilderFromStreamTest, SmallStream) {
   EXPECT_EQ(0u, context_->memory_controller().disk_usage());
 
   // Verify blob contents.
-  VerifyBlobContents(base::as_bytes(base::make_span(kData)),
-                     base::span<const uint8_t>(), *result->CreateSnapshot());
+  VerifyBlobContents(base::as_byte_span(kData), base::span<const uint8_t>(),
+                     *result->CreateSnapshot());
 }
 
 TEST_P(BlobBuilderFromStreamTest, MediumStream) {
@@ -275,10 +280,10 @@ TEST_P(BlobBuilderFromStreamTest, MediumStream) {
   }
 
   // Verify blob contents.
-  auto data_span = base::as_bytes(base::make_span(kData));
+  auto data_span = base::as_byte_span(kData);
   if (GetParam() == LengthHintTestType::kUnknownSize) {
     VerifyBlobContents(
-        data_span.subspan(0, 2 * kTestBlobStorageMaxBytesDataItemSize),
+        data_span.first(2 * kTestBlobStorageMaxBytesDataItemSize),
         data_span.subspan(2 * kTestBlobStorageMaxBytesDataItemSize),
         *result->CreateSnapshot());
   } else {
@@ -317,15 +322,14 @@ TEST_P(BlobBuilderFromStreamTest, LargeStream) {
   }
 
   // Verify blob contents.
-  auto data_span = base::as_bytes(base::make_span(kData));
+  auto data_span = base::as_byte_span(kData);
   if (GetParam() == LengthHintTestType::kUnknownSize) {
     VerifyBlobContents(
-        data_span.subspan(0, 2 * kTestBlobStorageMaxBytesDataItemSize),
+        data_span.first(2 * kTestBlobStorageMaxBytesDataItemSize),
         data_span.subspan(2 * kTestBlobStorageMaxBytesDataItemSize),
         *result->CreateSnapshot());
   } else {
-    VerifyBlobContents(base::span<const uint8_t>(),
-                       base::as_bytes(base::make_span(kData)),
+    VerifyBlobContents(base::span<const uint8_t>(), base::as_byte_span(kData),
                        *result->CreateSnapshot());
   }
 }
@@ -364,7 +368,11 @@ TEST_P(BlobBuilderFromStreamTest, TooLargeForQuotaAndNoDisk) {
 TEST_F(BlobBuilderFromStreamTest, HintTooLargeForQuota) {
   const uint64_t kLengthHint =
       kTestBlobStorageMaxDiskSpace + kTestBlobStorageMaxBlobMemorySize + 1;
-  mojo::DataPipe pipe;
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
+
   base::RunLoop loop;
   std::unique_ptr<BlobDataHandle> result;
   BlobBuilderFromStream builder(
@@ -374,9 +382,9 @@ TEST_F(BlobBuilderFromStreamTest, HintTooLargeForQuota) {
             result = std::move(blob);
             loop.Quit();
           }));
-  builder.Start(kLengthHint, std::move(pipe.consumer_handle),
+  builder.Start(kLengthHint, std::move(consumer_handle),
                 mojo::NullAssociatedRemote());
-  pipe.producer_handle.reset();
+  producer_handle.reset();
   loop.Run();
 
   EXPECT_FALSE(result);
@@ -388,7 +396,10 @@ TEST_F(BlobBuilderFromStreamTest, HintTooLargeForQuotaAndNoDisk) {
   context_->DisableFilePagingForTesting();
 
   const uint64_t kLengthHint = kTestBlobStorageMaxBlobMemorySize + 1;
-  mojo::DataPipe pipe;
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
   base::RunLoop loop;
   std::unique_ptr<BlobDataHandle> result;
   BlobBuilderFromStream builder(
@@ -398,9 +409,9 @@ TEST_F(BlobBuilderFromStreamTest, HintTooLargeForQuotaAndNoDisk) {
             result = std::move(blob);
             loop.Quit();
           }));
-  builder.Start(kLengthHint, std::move(pipe.consumer_handle),
+  builder.Start(kLengthHint, std::move(consumer_handle),
                 mojo::NullAssociatedRemote());
-  pipe.producer_handle.reset();
+  producer_handle.reset();
   loop.Run();
 
   EXPECT_FALSE(result);
@@ -418,7 +429,10 @@ TEST_P(BlobBuilderFromStreamTest, ProgressEvents) {
       &progress_client,
       progress_client_remote.BindNewEndpointAndPassDedicatedReceiver());
 
-  mojo::DataPipe pipe;
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
   base::RunLoop loop;
   std::unique_ptr<BlobDataHandle> result;
   BlobBuilderFromStream builder(
@@ -428,10 +442,10 @@ TEST_P(BlobBuilderFromStreamTest, ProgressEvents) {
             result = std::move(blob);
             loop.Quit();
           }));
-  builder.Start(GetLengthHint(kData.size()), std::move(pipe.consumer_handle),
+  builder.Start(GetLengthHint(kData.size()), std::move(consumer_handle),
                 progress_client_remote.Unbind());
-  mojo::BlockingCopyFromString(kData, pipe.producer_handle);
-  pipe.producer_handle.reset();
+  mojo::BlockingCopyFromString(kData, producer_handle);
+  producer_handle.reset();
 
   loop.Run();
   progress_receiver.FlushForTesting();
@@ -453,7 +467,10 @@ TEST_F(BlobBuilderFromStreamTestWithDelayedLimits, LargeStream) {
   limits_.desired_max_disk_space = kDefaultMinPageFileSize * 2;
   limits_.effective_max_disk_space = kDefaultMinPageFileSize * 2;
 
-  mojo::DataPipe pipe;
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
   base::RunLoop loop;
   std::unique_ptr<BlobDataHandle> result;
   BlobBuilderFromStream builder(
@@ -463,22 +480,19 @@ TEST_F(BlobBuilderFromStreamTestWithDelayedLimits, LargeStream) {
         result = std::move(blob);
         loop.Quit();
       }));
-  builder.Start(kData.size(), std::move(pipe.consumer_handle),
+  builder.Start(kData.size(), std::move(consumer_handle),
                 mojo::NullAssociatedRemote());
 
   context_->set_limits_for_testing(limits_);
   auto data_producer =
-      std::make_unique<mojo::DataPipeProducer>(std::move(pipe.producer_handle));
+      std::make_unique<mojo::DataPipeProducer>(std::move(producer_handle));
   auto* producer_ptr = data_producer.get();
   producer_ptr->Write(
       std::make_unique<mojo::StringDataSource>(
           kData, mojo::StringDataSource::AsyncWritingMode::
                      STRING_STAYS_VALID_UNTIL_COMPLETION),
-      base::BindOnce(
-          base::DoNothing::Once<std::unique_ptr<mojo::DataPipeProducer>,
-                                MojoResult>(),
-          std::move(data_producer)));
-  pipe.producer_handle.reset();
+      base::BindOnce([](std::unique_ptr<mojo::DataPipeProducer>, MojoResult) {},
+                     std::move(data_producer)));
   loop.Run();
 
   ASSERT_TRUE(result);

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,13 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/files/file_path.h"
-#include "base/guid.h"
+#include "base/functional/bind.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
 #include "base/threading/thread_restrictions.h"
+#include "base/uuid.h"
+#include "build/build_config.h"
 #include "content/browser/browser_main_loop.h"
 #include "content/browser/child_process_security_policy_impl.h"
 #include "content/browser/renderer_host/media/media_stream_manager.h"
@@ -22,7 +23,6 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
-#include "content/public/browser/notification_source.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_paths.h"
@@ -34,10 +34,10 @@
 #include "net/base/filename_util.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "ui/views/test/desktop_window_tree_host_win_test_api.h"  // nogncheck
 #include "ui/views/widget/desktop_aura/desktop_window_tree_host_win.h"
-#endif  // defined(OS_WIN)
+#endif  // BUILDFLAG(IS_WIN)
 
 namespace content {
 
@@ -54,11 +54,14 @@ GURL GetTestUrl(const char* dir, const char* file) {
   return net::FilePathToFileURL(GetTestFilePath(dir, file));
 }
 
-void NavigateToURLBlockUntilNavigationsComplete(Shell* window,
-                                                const GURL& url,
-                                                int number_of_navigations) {
+void NavigateToURLBlockUntilNavigationsComplete(
+    Shell* window,
+    const GURL& url,
+    int number_of_navigations,
+    bool ignore_uncommitted_navigations) {
   NavigateToURLBlockUntilNavigationsComplete(window->web_contents(), url,
-                                             number_of_navigations);
+                                             number_of_navigations,
+                                             ignore_uncommitted_navigations);
 }
 
 void ReloadBlockUntilNavigationsComplete(Shell* window,
@@ -92,57 +95,50 @@ bool NavigateToURL(Shell* window,
   return NavigateToURL(window->web_contents(), url, expected_commit_url);
 }
 
-bool NavigateToURLFromRenderer(const ToRenderFrameHost& adapter,
-                               const GURL& url) {
-  return NavigateToURLFromRenderer(adapter, url, url);
-}
-
-bool NavigateToURLFromRenderer(const ToRenderFrameHost& adapter,
-                               const GURL& url,
-                               const GURL& expected_commit_url) {
-  RenderFrameHost* rfh = adapter.render_frame_host();
-  TestFrameNavigationObserver nav_observer(rfh);
-  if (!ExecJs(rfh, JsReplace("location = $1", url)))
-    return false;
-  nav_observer.Wait();
-  return nav_observer.last_committed_url() == expected_commit_url &&
-         nav_observer.last_navigation_succeeded();
-}
-
-bool NavigateToURLFromRendererWithoutUserGesture(
-    const ToRenderFrameHost& adapter,
-    const GURL& url) {
-  RenderFrameHost* rfh = adapter.render_frame_host();
-  TestFrameNavigationObserver nav_observer(rfh);
-  if (!ExecJs(rfh, JsReplace("location = $1", url),
-              EXECUTE_SCRIPT_NO_USER_GESTURE)) {
-    return false;
-  }
-  nav_observer.Wait();
-  return nav_observer.last_committed_url() == url;
-}
-
 bool NavigateToURLAndExpectNoCommit(Shell* window, const GURL& url) {
   NavigationEntry* old_entry =
       window->web_contents()->GetController().GetLastCommittedEntry();
-  NavigateToURLBlockUntilNavigationsComplete(window, url, 1);
+  NavigateToURLBlockUntilNavigationsComplete(
+      window->web_contents(), url,
+      /*number_of_navigations=*/1,
+      /*ignore_uncommitted_navigations=*/false);
   NavigationEntry* new_entry =
       window->web_contents()->GetController().GetLastCommittedEntry();
   return old_entry == new_entry;
 }
 
-void WaitForAppModalDialog(Shell* window) {
+AppModalDialogWaiter::AppModalDialogWaiter(Shell* shell) : shell_(shell) {
+  Restart();
+}
+
+void AppModalDialogWaiter::Restart() {
+  was_dialog_request_callback_called_ = false;
   ShellJavaScriptDialogManager* dialog_manager =
       static_cast<ShellJavaScriptDialogManager*>(
-          window->GetJavaScriptDialogManager(window->web_contents()));
+          shell_->GetJavaScriptDialogManager(shell_->web_contents()));
+  dialog_manager->set_dialog_request_callback(base::BindOnce(
+      &AppModalDialogWaiter::EarlyCallback, base::Unretained(this)));
+}
 
-  base::RunLoop runner;
-  dialog_manager->set_dialog_request_callback(runner.QuitClosure());
-  runner.Run();
+void AppModalDialogWaiter::Wait() {
+  if (!was_dialog_request_callback_called_) {
+    ShellJavaScriptDialogManager* dialog_manager =
+        static_cast<ShellJavaScriptDialogManager*>(
+            shell_->GetJavaScriptDialogManager(shell_->web_contents()));
+
+    base::RunLoop runner;
+    dialog_manager->set_dialog_request_callback(runner.QuitClosure());
+    runner.Run();
+    was_dialog_request_callback_called_ = true;
+  }
+}
+
+void AppModalDialogWaiter::EarlyCallback() {
+  was_dialog_request_callback_called_ = true;
 }
 
 RenderFrameHost* ConvertToRenderFrameHost(Shell* shell) {
-  return shell->web_contents()->GetMainFrame();
+  return shell->web_contents()->GetPrimaryMainFrame();
 }
 
 void LookupAndLogNameAndIdOfFirstCamera() {
@@ -158,8 +154,14 @@ void LookupAndLogNameAndIdOfFirstCamera() {
             media_stream_manager->video_capture_manager()->EnumerateDevices(
                 base::BindOnce(
                     [](base::OnceClosure quit_closure,
+                       media::mojom::DeviceEnumerationResult result,
                        const media::VideoCaptureDeviceDescriptors&
                            descriptors) {
+                      if (result !=
+                          media::mojom::DeviceEnumerationResult::kSuccess) {
+                        LOG(WARNING) << "Camera enumeration failed";
+                        return;
+                      }
                       if (descriptors.empty()) {
                         LOG(WARNING) << "No camera found";
                         return;
@@ -208,8 +210,16 @@ void IsolateOriginsForTesting(
         url::Origin::Create(GURL(std::string("http://") + hostname + "/")));
   }
 
+  IsolateOriginsForTesting(embedded_test_server, web_contents,
+                           origins_to_isolate);
+}
+
+void IsolateOriginsForTesting(
+    net::test_server::EmbeddedTestServer* embedded_test_server,
+    WebContents* web_contents,
+    std::vector<url::Origin> origins_to_isolate) {
   auto* policy = ChildProcessSecurityPolicyImpl::GetInstance();
-  policy->AddIsolatedOrigins(
+  policy->AddFutureIsolatedOrigins(
       origins_to_isolate,
       ChildProcessSecurityPolicy::IsolatedOriginSource::TEST);
 
@@ -219,13 +229,14 @@ void IsolateOriginsForTesting(
   scoped_refptr<SiteInstanceImpl> new_site_instance;
   do {
     old_site_instance = static_cast<SiteInstanceImpl*>(
-        web_contents->GetMainFrame()->GetSiteInstance());
-    std::string cross_site_hostname = base::GenerateGUID() + ".com";
+        web_contents->GetPrimaryMainFrame()->GetSiteInstance());
+    std::string cross_site_hostname =
+        base::Uuid::GenerateRandomV4().AsLowercaseString() + ".com";
     EXPECT_TRUE(NavigateToURL(
         web_contents,
         embedded_test_server->GetURL(cross_site_hostname, "/title1.html")));
     new_site_instance = static_cast<SiteInstanceImpl*>(
-        web_contents->GetMainFrame()->GetSiteInstance());
+        web_contents->GetPrimaryMainFrame()->GetSiteInstance());
 
     // The navigation might need to be repeated until we actually swap the
     // SiteInstance (no swap might happen when navigating away from the initial,
@@ -235,13 +246,15 @@ void IsolateOriginsForTesting(
       new_site_instance->IsRelatedSiteInstance(old_site_instance.get()));
   for (const url::Origin& origin : origins_to_isolate) {
     EXPECT_FALSE(policy->IsIsolatedOrigin(
-        old_site_instance->GetIsolationContext(), origin));
+        old_site_instance->GetIsolationContext(), origin,
+        false /* origin_requests_isolation */));
     EXPECT_TRUE(policy->IsIsolatedOrigin(
-        new_site_instance->GetIsolationContext(), origin));
+        new_site_instance->GetIsolationContext(), origin,
+        false /* origin_requests_isolation */));
   }
 }
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 
 void SetMockCursorPositionForTesting(WebContents* web_contents,
                                      const gfx::Point& position) {
@@ -251,6 +264,6 @@ void SetMockCursorPositionForTesting(WebContents* web_contents,
   host.SetMockCursorPositionForTesting(position);
 }
 
-#endif  // defined(OS_WIN)
+#endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace content

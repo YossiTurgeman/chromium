@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,22 +7,22 @@
 #include <windows.h>
 
 #include <memory>
+#include <string>
 
-#include "base/bind.h"
 #include "base/check.h"
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/notreached.h"
 #include "base/process/launch.h"
 #include "base/process/process.h"
 #include "base/process/process_handle.h"
-#include "base/stl_util.h"
-#include "base/strings/string16.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/string_number_conversions_win.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/multiprocess_test.h"
+#include "base/time/time.h"
 #include "base/win/scoped_handle.h"
 #include "base/win/wrapped_window_proc.h"
 #include "chrome/browser/win/chrome_process_finder.h"
@@ -39,12 +39,11 @@ const char kContinueEventNameFlag[] = "continue_event_name";
 const char kCreateWindowFlag[] = "create_window";
 const int kErrorResultCode = 0x345;
 
-bool NotificationCallback(const base::CommandLine& command_line,
+bool NotificationCallback(base::CommandLine command_line,
                           const base::FilePath& current_directory) {
   // This is never called in this test, but would signal that the singleton
   // notification was successfully handled.
   NOTREACHED();
-  return true;
 }
 
 // The ProcessSingleton kills hung browsers with no visible windows without user
@@ -55,6 +54,10 @@ bool NotificationCallback(const base::CommandLine& command_line,
 class ScopedVisibleWindow {
  public:
   ScopedVisibleWindow() : class_(0), window_(NULL) {}
+
+  ScopedVisibleWindow(const ScopedVisibleWindow&) = delete;
+  ScopedVisibleWindow& operator=(const ScopedVisibleWindow&) = delete;
+
   ~ScopedVisibleWindow() {
     if (window_)
       ::DestroyWindow(window_);
@@ -92,8 +95,6 @@ class ScopedVisibleWindow {
  private:
   ATOM class_;
   HWND window_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedVisibleWindow);
 };
 
 MULTIPROCESS_TEST_MAIN(ProcessSingletonTestProcessMain) {
@@ -103,21 +104,23 @@ MULTIPROCESS_TEST_MAIN(ProcessSingletonTestProcessMain) {
   if (user_data_dir.empty())
     return kErrorResultCode;
 
-  base::string16 ready_event_name =
+  std::wstring ready_event_name =
       cmd_line->GetSwitchValueNative(kReadyEventNameFlag);
 
   base::win::ScopedHandle ready_event(
       ::OpenEvent(EVENT_MODIFY_STATE, FALSE, ready_event_name.c_str()));
-  if (!ready_event.IsValid())
+  if (!ready_event.is_valid()) {
     return kErrorResultCode;
+  }
 
-  base::string16 continue_event_name =
+  std::wstring continue_event_name =
       cmd_line->GetSwitchValueNative(kContinueEventNameFlag);
 
   base::win::ScopedHandle continue_event(
       ::OpenEvent(SYNCHRONIZE, FALSE, continue_event_name.c_str()));
-  if (!continue_event.IsValid())
+  if (!continue_event.is_valid()) {
     return kErrorResultCode;
+  }
 
   ScopedVisibleWindow visible_window;
   if (cmd_line->HasSwitch(kCreateWindowFlag)) {
@@ -133,11 +136,13 @@ MULTIPROCESS_TEST_MAIN(ProcessSingletonTestProcessMain) {
     return kErrorResultCode;
 
   // Signal ready and block for the continue event.
-  if (!::SetEvent(ready_event.Get()))
+  if (!::SetEvent(ready_event.get())) {
     return kErrorResultCode;
+  }
 
-  if (::WaitForSingleObject(continue_event.Get(), INFINITE) != WAIT_OBJECT_0)
+  if (::WaitForSingleObject(continue_event.get(), INFINITE) != WAIT_OBJECT_0) {
     return kErrorResultCode;
+  }
 
   return 0;
 }
@@ -146,25 +151,29 @@ MULTIPROCESS_TEST_MAIN(ProcessSingletonTestProcessMain) {
 // of rendezvous, specifically the ones where the singleton-owning process
 // is hung.
 class ProcessSingletonTest : public base::MultiProcessTest {
+ public:
+  ProcessSingletonTest(const ProcessSingletonTest&) = delete;
+  ProcessSingletonTest& operator=(const ProcessSingletonTest&) = delete;
+
  protected:
-  enum WindowOption { WITH_WINDOW, NO_WINDOW };
+  enum WindowOption { kWithWindow, kNoWindow };
 
   ProcessSingletonTest()
-      : window_option_(NO_WINDOW), should_kill_called_(false) {}
+      : window_option_(kNoWindow), should_kill_called_(false) {}
 
   void SetUp() override {
     ASSERT_NO_FATAL_FAILURE(base::MultiProcessTest::SetUp());
 
     // Drop the process finder notification timeout to one second for testing.
-    old_notification_timeout_ = chrome::SetNotificationTimeoutForTesting(
-        base::TimeDelta::FromSeconds(1));
+    old_notification_timeout_ =
+        SetNotificationTimeoutForTesting(base::Seconds(1));
   }
 
   void TearDown() override {
-    chrome::SetNotificationTimeoutForTesting(old_notification_timeout_);
+    SetNotificationTimeoutForTesting(old_notification_timeout_);
 
     if (browser_victim_.IsValid()) {
-      EXPECT_TRUE(::SetEvent(continue_event_.Get()));
+      EXPECT_TRUE(::SetEvent(continue_event_.get()));
       EXPECT_TRUE(browser_victim_.WaitForExit(nullptr));
     }
 
@@ -177,17 +186,17 @@ class ProcessSingletonTest : public base::MultiProcessTest {
 
     // Create the named "ready" event, this is unique to our process.
     ready_event_name_ =
-        base::StringPrintf(L"ready-event-%d", base::GetCurrentProcId());
+        L"ready-event-" + base::NumberToWString(base::GetCurrentProcId());
     base::win::ScopedHandle ready_event(
         ::CreateEvent(NULL, TRUE, FALSE, ready_event_name_.c_str()));
-    ASSERT_TRUE(ready_event.IsValid());
+    ASSERT_TRUE(ready_event.is_valid());
 
     // Create the named "continue" event, this is unique to our process.
     continue_event_name_ =
-        base::StringPrintf(L"continue-event-%d", base::GetCurrentProcId());
+        L"continue-event-" + base::NumberToWString(base::GetCurrentProcId());
     continue_event_.Set(
         ::CreateEvent(NULL, TRUE, FALSE, continue_event_name_.c_str()));
-    ASSERT_TRUE(continue_event_.IsValid());
+    ASSERT_TRUE(continue_event_.is_valid());
 
     window_option_ = window_option;
 
@@ -197,11 +206,11 @@ class ProcessSingletonTest : public base::MultiProcessTest {
         SpawnChildWithOptions("ProcessSingletonTestProcessMain", options);
 
     // Wait for the ready event (or process exit).
-    HANDLE handles[] = {ready_event.Get(), browser_victim_.Handle()};
+    HANDLE handles[] = {ready_event.get(), browser_victim_.Handle()};
     // The wait should always return because either |ready_event| is signaled or
     // |browser_victim_| died unexpectedly or exited on error.
     DWORD result =
-        ::WaitForMultipleObjects(base::size(handles), handles, FALSE, INFINITE);
+        ::WaitForMultipleObjects(std::size(handles), handles, FALSE, INFINITE);
     ASSERT_EQ(WAIT_OBJECT_0, result);
   }
 
@@ -211,8 +220,9 @@ class ProcessSingletonTest : public base::MultiProcessTest {
     cmd_line.AppendSwitchPath(switches::kUserDataDir, user_data_dir_.GetPath());
     cmd_line.AppendSwitchNative(kReadyEventNameFlag, ready_event_name_);
     cmd_line.AppendSwitchNative(kContinueEventNameFlag, continue_event_name_);
-    if (window_option_ == WITH_WINDOW)
+    if (window_option_ == kWithWindow) {
       cmd_line.AppendSwitch(kCreateWindowFlag);
+    }
 
     return cmd_line;
   }
@@ -222,8 +232,8 @@ class ProcessSingletonTest : public base::MultiProcessTest {
 
     // The ready event has been signalled - the process singleton is held by
     // the hung sub process.
-    test_singleton_.reset(new ProcessSingleton(
-        user_data_dir(), base::BindRepeating(&NotificationCallback)));
+    test_singleton_ = std::make_unique<ProcessSingleton>(
+        user_data_dir(), base::BindRepeating(&NotificationCallback));
 
     test_singleton_->OverrideShouldKillRemoteProcessCallbackForTesting(
         base::BindRepeating(&ProcessSingletonTest::MockShouldKillRemoteProcess,
@@ -247,8 +257,8 @@ class ProcessSingletonTest : public base::MultiProcessTest {
     return allow_kill;
   }
 
-  base::string16 ready_event_name_;
-  base::string16 continue_event_name_;
+  std::wstring ready_event_name_;
+  std::wstring continue_event_name_;
 
   WindowOption window_option_;
   base::ScopedTempDir user_data_dir_;
@@ -260,14 +270,12 @@ class ProcessSingletonTest : public base::MultiProcessTest {
   base::TimeDelta old_notification_timeout_;
   bool should_kill_called_;
   base::HistogramTester histogram_tester_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProcessSingletonTest);
 };
 
 }  // namespace
 
 TEST_F(ProcessSingletonTest, KillsHungBrowserWithNoWindows) {
-  ASSERT_NO_FATAL_FAILURE(PrepareTest(NO_WINDOW, false));
+  ASSERT_NO_FATAL_FAILURE(PrepareTest(kNoWindow, false));
 
   // As the hung browser has no visible window, it'll be killed without
   // user interaction.
@@ -288,8 +296,6 @@ TEST_F(ProcessSingletonTest, KillsHungBrowserWithNoWindows) {
   histogram_tester().ExpectTotalCount(
       "Chrome.ProcessSingleton.TerminateProcessTime", 1u);
   histogram_tester().ExpectUniqueSample(
-      "Chrome.ProcessSingleton.TerminateProcessErrorCode.Windows", 0, 1u);
-  histogram_tester().ExpectUniqueSample(
       "Chrome.ProcessSingleton.TerminationWaitErrorCode.Windows", 0, 1u);
   histogram_tester().ExpectUniqueSample(
       "Chrome.ProcessSingleton.RemoteHungProcessTerminateReason",
@@ -304,7 +310,7 @@ TEST_F(ProcessSingletonTest, KillsHungBrowserWithNoWindows) {
 }
 
 TEST_F(ProcessSingletonTest, DoesntKillWithoutUserPermission) {
-  ASSERT_NO_FATAL_FAILURE(PrepareTest(WITH_WINDOW, false));
+  ASSERT_NO_FATAL_FAILURE(PrepareTest(kWithWindow, false));
 
   // As the hung browser has a visible window, this should query the user
   // before killing the hung process.
@@ -327,7 +333,7 @@ TEST_F(ProcessSingletonTest, DoesntKillWithoutUserPermission) {
 }
 
 TEST_F(ProcessSingletonTest, KillWithUserPermission) {
-  ASSERT_NO_FATAL_FAILURE(PrepareTest(WITH_WINDOW, true));
+  ASSERT_NO_FATAL_FAILURE(PrepareTest(kWithWindow, true));
 
   // As the hung browser has a visible window, this should query the user
   // before killing the hung process.
@@ -347,8 +353,6 @@ TEST_F(ProcessSingletonTest, KillWithUserPermission) {
       ProcessSingleton::TERMINATE_SUCCEEDED, 1u);
   histogram_tester().ExpectTotalCount(
       "Chrome.ProcessSingleton.TerminateProcessTime", 1u);
-  histogram_tester().ExpectUniqueSample(
-      "Chrome.ProcessSingleton.TerminateProcessErrorCode.Windows", 0, 1u);
   histogram_tester().ExpectUniqueSample(
       "Chrome.ProcessSingleton.TerminationWaitErrorCode.Windows", 0, 1u);
   histogram_tester().ExpectUniqueSample(

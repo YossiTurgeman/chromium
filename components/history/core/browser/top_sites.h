@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "base/observer_list.h"
 #include "components/history/core/browser/history_types.h"
 #include "components/history/core/browser/top_sites_observer.h"
@@ -24,7 +23,7 @@ namespace history {
 struct PrepopulatedPage {
   PrepopulatedPage();
   PrepopulatedPage(const GURL& url,
-                   const base::string16& title,
+                   const std::u16string& title,
                    int favicon_id,
                    SkColor color);
 
@@ -44,6 +43,9 @@ typedef std::vector<PrepopulatedPage> PrepopulatedPageList;
 class TopSites : public RefcountedKeyedService {
  public:
   TopSites();
+
+  TopSites(const TopSites&) = delete;
+  TopSites& operator=(const TopSites&) = delete;
 
   using GetMostVisitedURLsCallback =
       base::OnceCallback<void(const MostVisitedURLList&)>;
@@ -76,6 +78,9 @@ class TopSites : public RefcountedKeyedService {
   // Removes all blocked urls. Should be called from the UI thread.
   virtual void ClearBlockedUrls() = 0;
 
+  // Returns the number of blocked URLs.
+  virtual int NumBlockedSites() const = 0;
+
   // Returns true if the top sites list is full (i.e. we already have the
   // maximum number of top sites).  This function also returns false if TopSites
   // isn't loaded yet.
@@ -86,7 +91,7 @@ class TopSites : public RefcountedKeyedService {
   // Returns the set of prepopulated pages.
   virtual PrepopulatedPageList GetPrepopulatedPages() = 0;
 
-  // Called when user has navigated to |url|.
+  // Called when user has navigated to `url`.
   virtual void OnNavigationCommitted(const GURL& url) = 0;
 
   // Add Observer to the list.
@@ -104,8 +109,6 @@ class TopSites : public RefcountedKeyedService {
   friend class base::RefCountedThreadSafe<TopSites>;
 
   base::ObserverList<TopSitesObserver, true>::Unchecked observer_list_;
-
-  DISALLOW_COPY_AND_ASSIGN(TopSites);
 };
 
 }  // namespace history

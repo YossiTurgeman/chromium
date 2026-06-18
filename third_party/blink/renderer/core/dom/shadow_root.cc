@@ -27,55 +27,91 @@
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 
 #include "third_party/blink/public/platform/platform.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_css_style_sheet.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_observable_array_css_style_sheet.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_set_html_unsafe_options.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_shadow_root_mode.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_slot_assignment_mode.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_stringlegacynulltoemptystring_trustedhtml.h"
+#include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
 #include "third_party/blink/renderer/core/css/resolver/style_resolver.h"
 #include "third_party/blink/renderer/core/css/style_change_reason.h"
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/css/style_sheet_list.h"
+#include "third_party/blink/renderer/core/dom/document_fragment.h"
 #include "third_party/blink/renderer/core/dom/element_traversal.h"
 #include "third_party/blink/renderer/core/dom/events/event_dispatch_forbidden_scope.h"
-#include "third_party/blink/renderer/core/dom/shadow_root_v0.h"
+#include "third_party/blink/renderer/core/dom/id_target_observer.h"
+#include "third_party/blink/renderer/core/dom/id_target_observer_registry.h"
+#include "third_party/blink/renderer/core/dom/parser_content_policy.h"
 #include "third_party/blink/renderer/core/dom/slot_assignment.h"
 #include "third_party/blink/renderer/core/dom/slot_assignment_engine.h"
+#include "third_party/blink/renderer/core/dom/space_split_string.h"
 #include "third_party/blink/renderer/core/dom/text.h"
-#include "third_party/blink/renderer/core/dom/v0_insertion_point.h"
 #include "third_party/blink/renderer/core/dom/whitespace_attacher.h"
 #include "third_party/blink/renderer/core/editing/serializers/serialization.h"
-#include "third_party/blink/renderer/core/html/html_content_element.h"
-#include "third_party/blink/renderer/core/html/html_shadow_element.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/web_feature.h"
+#include "third_party/blink/renderer/core/html/custom/custom_element_registry.h"
 #include "third_party/blink/renderer/core/html/html_slot_element.h"
-#include "third_party/blink/renderer/core/layout/layout_object.h"
+#include "third_party/blink/renderer/core/html/parser/fragment_parser.h"
+#include "third_party/blink/renderer/core/loader/modulescript/module_script_creation_params.h"
+#include "third_party/blink/renderer/core/loader/modulescript/module_script_fetch_request.h"
+#include "third_party/blink/renderer/core/sanitizer/sanitizer_api.h"
+#include "third_party/blink/renderer/core/script/modulator.h"
+#include "third_party/blink/renderer/core/script/module_script.h"
+#include "third_party/blink/renderer/core/script/value_wrapper_synthetic_module_script.h"
+#include "third_party/blink/renderer/core/trustedtypes/trusted_parser_options.h"
+#include "third_party/blink/renderer/core/trustedtypes/trusted_types_names.h"
 #include "third_party/blink/renderer/core/trustedtypes/trusted_types_util.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/size_assertions.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 
 namespace blink {
 
-void ShadowRoot::Distribute() {
-  if (!IsV1())
-    V0().Distribute();
-}
+class ReferenceTargetIdObserver : public IdTargetObserver {
+ public:
+  ReferenceTargetIdObserver(const AtomicString& id, ShadowRoot* root)
+      : IdTargetObserver(root->EnsureIdTargetObserverRegistry(), id),
+        root_(root) {}
 
-struct SameSizeAsShadowRoot : public DocumentFragment, public TreeScope {
-  Member<void*> member[3];
+  using IdTargetObserver::Id;
+
+  void Trace(Visitor* visitor) const override {
+    visitor->Trace(root_);
+    IdTargetObserver::Trace(visitor);
+  }
+
+  void IdTargetChanged() override { root_->ReferenceTargetChanged(); }
+
+ private:
+  Member<ShadowRoot> root_;
+};
+
+struct SameSizeAsShadowRoot : public DocumentFragment,
+                              public TreeScope,
+                              public NodeRareDataField {
+  Member<void*> member[2];
+  AtomicString string_member;
   unsigned flags[1];
 };
 
 ASSERT_SIZE(ShadowRoot, SameSizeAsShadowRoot);
 
-ShadowRoot::ShadowRoot(Document& document, ShadowRootType type)
+ShadowRoot::ShadowRoot(Document& document,
+                       ShadowRootMode mode,
+                       SlotAssignmentMode assignment_mode)
     : DocumentFragment(nullptr, kCreateShadowRoot),
       TreeScope(*this, document),
-      style_sheet_list_(nullptr),
       child_shadow_root_count_(0),
-      type_(static_cast<unsigned>(type)),
+      mode_(static_cast<unsigned>(mode)),
       registered_with_parent_shadow_root_(false),
       delegates_focus_(false),
-      slot_assignment_mode_(static_cast<unsigned>(SlotAssignmentMode::kAuto)),
-      needs_distribution_recalc_(false),
-      unused_(0) {
-  if (IsV0())
-    shadow_root_v0_ = MakeGarbageCollected<ShadowRootV0>(*this);
-}
+      slot_assignment_mode_(static_cast<unsigned>(assignment_mode)),
+      has_focusgroup_attribute_on_descendant_(false) {}
 
 ShadowRoot::~ShadowRoot() = default;
 
@@ -92,7 +128,6 @@ HTMLSlotElement* ShadowRoot::AssignedSlotFor(const Node& node) {
 }
 
 void ShadowRoot::DidAddSlot(HTMLSlotElement& slot) {
-  DCHECK(IsV1());
   EnsureSlotAssignment().DidAddSlot(slot);
 }
 
@@ -103,31 +138,162 @@ void ShadowRoot::DidChangeHostChildSlotName(const AtomicString& old_value,
   slot_assignment_->DidChangeHostChildSlotName(old_value, new_value);
 }
 
-Node* ShadowRoot::Clone(Document&, CloneChildrenFlag) const {
+Node* ShadowRoot::Clone(Document&,
+                        NodeCloningData&,
+                        ContainerNode*,
+                        CustomElementRegistry*,
+                        ExceptionState&) const {
   NOTREACHED() << "ShadowRoot nodes are not clonable.";
-  return nullptr;
 }
 
-void ShadowRoot::SetSlotAssignmentMode(SlotAssignmentMode assignment_mode) {
-  slot_assignment_mode_ = static_cast<unsigned>(assignment_mode);
-}
-
-String ShadowRoot::innerHTML() const {
+String ShadowRoot::GetInnerHTMLString() const {
   return CreateMarkup(this, kChildrenOnly);
 }
 
-void ShadowRoot::setInnerHTML(const String& markup,
-                              ExceptionState& exception_state) {
-  if (DocumentFragment* fragment = CreateFragmentForInnerOuterHTML(
-          markup, &host(), kAllowScriptingContent, "innerHTML",
-          exception_state))
+String ShadowRoot::innerHTML() const {
+  return GetInnerHTMLString();
+}
+
+void ShadowRoot::SetInnerHTMLWithoutTrustedTypes(
+    const String& html,
+    ExceptionState& exception_state) {
+  SetInnerHTMLInternal(
+      html, FragmentParserOptions(), Sanitizer::Mode::kUnsafe,
+      FragmentParserConfig::ParseDeclarativeShadowRoots::kDontParse,
+      FragmentParserConfig::ForceHtml::kDontForce,
+      trusted_types_names::kInnerHTML, exception_state);
+}
+
+void ShadowRoot::setInnerHTML(
+    const V8UnionStringLegacyNullToEmptyStringOrTrustedHTML* html,
+    ExceptionState& exception_state) {
+  auto [compliant_string, resolved_options] =
+      TrustedTypesCheckForLegacyFragment(
+          html, GetExecutionContext(), trusted_types_names::kShadowRoot,
+          trusted_types_names::kInnerHTML, exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  SetInnerHTMLInternal(
+      compliant_string, resolved_options, Sanitizer::Mode::kUnsafe,
+      FragmentParserConfig::ParseDeclarativeShadowRoots::kDontParse,
+      FragmentParserConfig::ForceHtml::kDontForce,
+      trusted_types_names::kInnerHTML, exception_state);
+}
+
+void ShadowRoot::setHTMLUnsafe(const V8UnionStringOrTrustedHTML* html,
+                               ExceptionState& exception_state) {
+  UseCounter::Count(GetDocument(), WebFeature::kHTMLUnsafeMethods);
+  FragmentParserOptions resolved_options;
+  String compliant_string = TrustedTypesCheckForFragment(
+      html, resolved_options, GetExecutionContext(),
+      trusted_types_names::kShadowRoot, trusted_types_names::kSetHTMLUnsafe,
+      exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  SetInnerHTMLInternal(
+      compliant_string, resolved_options, Sanitizer::Mode::kUnsafe,
+      FragmentParserConfig::ParseDeclarativeShadowRoots::kParse,
+      FragmentParserConfig::ForceHtml::kForce,
+      trusted_types_names::kSetHTMLUnsafe, exception_state);
+}
+
+// TODO(nrosenthal): merge these calls once all the flags are merged.
+void ShadowRoot::setHTMLUnsafe(const V8UnionStringOrTrustedHTML* html,
+                               SetHTMLUnsafeOptions* options,
+                               ExceptionState& exception_state) {
+  UseCounter::Count(GetDocument(), WebFeature::kHTMLUnsafeMethods);
+  FragmentParserOptions resolved_options(options);
+  String compliant_string = TrustedTypesCheckForFragment(
+      html, resolved_options, GetExecutionContext(),
+      trusted_types_names::kShadowRoot, trusted_types_names::kSetHTMLUnsafe,
+      exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  SetInnerHTMLInternal(
+      compliant_string, resolved_options, Sanitizer::Mode::kUnsafe,
+      FragmentParserConfig::ParseDeclarativeShadowRoots::kParse,
+      FragmentParserConfig::ForceHtml::kForce,
+      trusted_types_names::kSetHTMLUnsafe, exception_state);
+}
+
+void ShadowRoot::setHTMLUnsafe(const V8UnionStringOrTrustedHTML* html,
+                               TrustedParserOptions* options,
+                               ExceptionState& exception_state) {
+  UseCounter::Count(GetDocument(), WebFeature::kHTMLUnsafeMethods);
+  FragmentParserOptions resolved_options(options);
+  String compliant_string = TrustedTypesCheckForFragment(
+      html, resolved_options, GetExecutionContext(),
+      trusted_types_names::kShadowRoot, trusted_types_names::kSetHTMLUnsafe,
+      exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  SetInnerHTMLInternal(
+      compliant_string, resolved_options, Sanitizer::Mode::kUnsafe,
+      FragmentParserConfig::ParseDeclarativeShadowRoots::kParse,
+      FragmentParserConfig::ForceHtml::kForce,
+      trusted_types_names::kSetHTMLUnsafe, exception_state);
+}
+
+void ShadowRoot::SetInnerHTMLInternal(
+    const String& html,
+    FragmentParserOptions options,
+    Sanitizer::Mode sanitizer_mode,
+    FragmentParserConfig::ParseDeclarativeShadowRoots parse_shadow_roots,
+    FragmentParserConfig::ForceHtml force_html,
+    const AtomicString& property_name,
+    ExceptionState& exception_state) {
+  if (exception_state.HadException()) {
+    return;
+  }
+
+  if (DocumentFragment* fragment = ParseHTMLFragment(
+          html,
+          {
+              .sanitizer_mode = sanitizer_mode,
+              .parse_declarative_shadows = parse_shadow_roots,
+              .force_html = force_html,
+              .interface_name = trusted_types_names::kShadowRoot,
+              .property_name = property_name,
+              .context_element = &host(),
+              .registry = customElementRegistry(),
+          },
+          options, exception_state)) {
     ReplaceChildrenWithFragment(this, fragment, exception_state);
+  }
+}
+
+void ShadowRoot::setHTML(const String& html,
+                         SetHTMLOptions* options,
+                         ExceptionState& exception_state) {
+  SetInnerHTMLInternal(
+      html, FragmentParserOptions(options), Sanitizer::Mode::kSafe,
+      FragmentParserConfig::ParseDeclarativeShadowRoots::kParse,
+      FragmentParserConfig::ForceHtml::kForce, trusted_types_names::kSetHTML,
+      exception_state);
 }
 
 void ShadowRoot::RebuildLayoutTree(WhitespaceAttacher& whitespace_attacher) {
   DCHECK(!NeedsReattachLayoutTree());
   DCHECK(!ChildNeedsReattachLayoutTree());
   RebuildChildrenLayoutTrees(whitespace_attacher);
+}
+
+void ShadowRoot::DetachLayoutTree(bool performing_reattach) {
+  ContainerNode::DetachLayoutTree(performing_reattach);
+
+  // Shadow host may contain unassigned light dom children that need detaching.
+  // Assigned nodes are detached by the slot element.
+  for (Node& child : NodeTraversal::ChildrenOf(host())) {
+    if (!child.IsSlotable() || child.AssignedSlotWithoutRecalc())
+      continue;
+
+    if (child.GetDocument() == GetDocument())
+      child.DetachLayoutTree(performing_reattach);
+  }
 }
 
 Node::InsertionNotificationRequest ShadowRoot::InsertedInto(
@@ -175,8 +341,127 @@ void ShadowRoot::RemovedFrom(ContainerNode& insertion_point) {
   DocumentFragment::RemovedFrom(insertion_point);
 }
 
+V8ShadowRootMode ShadowRoot::mode() const {
+  switch (GetMode()) {
+    case ShadowRootMode::kOpen:
+      return V8ShadowRootMode(V8ShadowRootMode::Enum::kOpen);
+    case ShadowRootMode::kClosed:
+      return V8ShadowRootMode(V8ShadowRootMode::Enum::kClosed);
+    case ShadowRootMode::kUserAgent:
+      // UA ShadowRoot should not be exposed to the Web.
+      break;
+  }
+  NOTREACHED();
+}
+
+V8SlotAssignmentMode ShadowRoot::slotAssignment() const {
+  return V8SlotAssignmentMode(IsManualSlotting()
+                                  ? V8SlotAssignmentMode::Enum::kManual
+                                  : V8SlotAssignmentMode::Enum::kNamed);
+}
+
+HeapVector<Member<CSSStyleSheet>> ShadowRoot::ResolveAdoptedStyleSheets(
+    const AtomicString& shadowrootadoptedstylesheets_attribute_value) {
+  CHECK(RuntimeEnabledFeatures::ShadowRootAdoptedStyleSheetEnabled(
+      GetDocument().GetExecutionContext()));
+
+  // Early exit if `domWindow` isn't available. This won't work in contexts such
+  // as `Document.parseHTMLUnsafe`. This is probably fine, as adopted
+  // stylesheets are cleared when moving between documents (so it wouldn't be
+  // able to render the adopted styles anyways). Also,
+  // `Document.parseHTMLUnsafe` cannot execute scripts, so this isn't a
+  // limitation compared to the imperative version.
+  // TODO(448174611): confirm this behavior is correct with the WHATWG.
+  LocalDOMWindow* window = GetDocument().domWindow();
+  if (!window) {
+    return {};
+  }
+
+  Modulator* modulator =
+      Modulator::From(ToScriptStateForMainWorld(window->GetFrame()));
+  v8::Isolate* isolate = modulator->GetScriptState()->GetIsolate();
+  CHECK(isolate);
+
+  // Several operations below require a HandleScope.
+  v8::HandleScope handle_scope(isolate);
+
+  HeapVector<Member<CSSStyleSheet>> sheets;
+  SpaceSplitString specifiers(shadowrootadoptedstylesheets_attribute_value);
+  sheets.ReserveInitialCapacity(specifiers.size());
+
+  for (const auto& specifier : specifiers) {
+    // Resolve the specifier to ensure import maps are accounted for.
+    const KURL resolved_url = modulator->ResolveModuleSpecifier(
+        specifier, window->BaseURL(), /*failure_reason=*/nullptr);
+    if (resolved_url.IsValid()) {
+      // Synchronously fetch dataURI's. These will be processed immediately and
+      // available synchronously per https://fetch.spec.whatwg.org/#data-urls.
+      // We don't need to do this for Blob URL's generated from a <style
+      // type="module"> because they have already been added to the module map.
+      // TODO(crbug.com/448174611) - should RequestContextType and
+      // RequestDestination be script or style?
+      if (resolved_url.ProtocolIsData()) {
+        ScriptFetchOptions options;
+        ModuleScriptFetchRequest module_request(
+            resolved_url, ModuleType::kCSS,
+            mojom::blink::RequestContextType::SCRIPT,
+            network::mojom::RequestDestination::kScript, options,
+            Referrer::ClientReferrerString(), TextPosition::MinimumPosition(),
+            ModuleImportPhase::kEvaluation);
+        modulator->FetchSingle(module_request, window->Fetcher(),
+                               ModuleGraphLevel::kTopLevelModuleFetch,
+                               ModuleScriptCustomFetchType::kNone, nullptr);
+      }
+
+      // If the module is not yet in the module map, initiate a fetch. This
+      // pre-creates an empty CSSStyleSheet wrapped in a module on the entry.
+      // FetchSingle is a no-op if the entry already exists.
+      const ModuleScript* module_script =
+          modulator->GetFetchedModuleScript(resolved_url, ModuleType::kCSS);
+      if (!module_script) {
+        ScriptFetchOptions options;
+        ModuleScriptFetchRequest module_request(
+            resolved_url, ModuleType::kCSS,
+            mojom::blink::RequestContextType::STYLE,
+            network::mojom::RequestDestination::kStyle, options,
+            Referrer::ClientReferrerString(), TextPosition::MinimumPosition(),
+            ModuleImportPhase::kEvaluation);
+        modulator->FetchSingle(module_request, window->Fetcher(),
+                               ModuleGraphLevel::kTopLevelModuleFetch,
+                               ModuleScriptCustomFetchType::kNone, nullptr);
+        module_script =
+            modulator->GetFetchedModuleScript(resolved_url, ModuleType::kCSS);
+      }
+
+      // If the module map already has a finished failed entry for this URL,
+      // there is no pre-created sheet to adopt, so skip this specifier.
+      // TODO(crbug.com/448174611): Add devtools message for this scenario.
+      if (!module_script) {
+        continue;
+      }
+      CSSStyleSheet* sheet = V8CSSStyleSheet::ToWrappable(
+          isolate,
+          static_cast<const ValueWrapperSyntheticModuleScript*>(module_script)
+              ->GetExport(isolate));
+      CHECK_EQ(sheet->ConstructorDocument(), GetDocument());
+      sheets.push_back(*sheet);
+    }
+  }
+  return sheets;
+}
+
+void ShadowRoot::ProcessAdoptedStylesheetAttribute(
+    AtomicString value) {
+  CHECK(RuntimeEnabledFeatures::ShadowRootAdoptedStyleSheetEnabled(
+      GetDocument().GetExecutionContext()));
+  adopted_stylesheets_attr_value_ = value;
+  if (!value.empty()) {
+    UseCounter::Count(GetDocument(), WebFeature::kShadowRootAdoptedStyleSheets);
+    AppendAdoptedStyleSheets(ResolveAdoptedStyleSheets(value));
+  }
+}
+
 void ShadowRoot::SetNeedsAssignmentRecalc() {
-  DCHECK(IsV1());
   if (!slot_assignment_)
     return;
   return slot_assignment_->SetNeedsAssignmentRecalc();
@@ -189,57 +474,105 @@ bool ShadowRoot::NeedsSlotAssignmentRecalc() const {
 void ShadowRoot::ChildrenChanged(const ChildrenChange& change) {
   ContainerNode::ChildrenChanged(change);
 
-  if (change.IsChildElementChange()) {
+  if (change.type ==
+      ChildrenChangeType::kFinishedBuildingDocumentFragmentTree) {
+    // No need to call CheckForSiblingStyleChanges() as at this point the
+    // node is not in the active document (CheckForSiblingStyleChanges() does
+    // nothing when not in the active document).
+    DCHECK(!InActiveDocument());
+  } else if (change.IsChildElementChange()) {
+    Element* changed_element = To<Element>(change.sibling_changed);
+    bool removed = change.type == ChildrenChangeType::kElementRemoved;
     CheckForSiblingStyleChanges(
-        change.type == ChildrenChangeType::kElementRemoved
-            ? kSiblingElementRemoved
-            : kSiblingElementInserted,
-        To<Element>(change.sibling_changed), change.sibling_before_change,
+        removed ? kSiblingElementRemoved : kSiblingElementInserted,
+        changed_element, change.sibling_before_change,
         change.sibling_after_change);
+    GetDocument()
+        .GetStyleEngine()
+        .ScheduleInvalidationsForHasPseudoAffectedByInsertionOrRemoval(
+            this, change.sibling_before_change, *changed_element, removed);
+  }
+
+  // In the case of input types like button where the child element is not
+  // in a container, we need to explicit adjust directionality.
+  if (TextControlElement* text_element =
+          HTMLElement::ElementIfAutoDirectionalityFormAssociatedOrNull(
+              &host())) {
+    text_element->AdjustDirectionalityIfNeededAfterChildrenChanged(change);
   }
 }
 
-StyleSheetList& ShadowRoot::StyleSheets() {
-  if (!style_sheet_list_)
-    SetStyleSheets(MakeGarbageCollected<StyleSheetList>(this));
-  return *style_sheet_list_;
-}
-
-void ShadowRoot::SetNeedsDistributionRecalcWillBeSetNeedsAssignmentRecalc() {
-  if (IsV1())
-    SetNeedsAssignmentRecalc();
-  else
-    SetNeedsDistributionRecalc();
-}
-
-void ShadowRoot::SetNeedsDistributionRecalc() {
-  DCHECK(!IsV1());
-  if (needs_distribution_recalc_)
+void ShadowRoot::setReferenceTarget(const AtomicString& reference_target) {
+  if (!RuntimeEnabledFeatures::ShadowRootReferenceTargetEnabled(
+          GetDocument().GetExecutionContext())) {
     return;
-  needs_distribution_recalc_ = true;
-  host().MarkAncestorsWithChildNeedsDistributionRecalc();
+  }
+
+  UseCounter::CountWebDXFeature(GetDocument(), WebDXFeature::kReferencetarget);
+
+  if (referenceTarget() == reference_target) {
+    return;
+  }
+
+  const Element* previous_reference_target_element = referenceTargetElement();
+
+  if (reference_target_id_observer_) {
+    reference_target_id_observer_->Unregister();
+  }
+
+  reference_target_id_observer_ =
+      reference_target ? MakeGarbageCollected<ReferenceTargetIdObserver>(
+                             reference_target, this)
+                       : nullptr;
+
+  if (previous_reference_target_element != referenceTargetElement()) {
+    ReferenceTargetChanged();
+  }
+}
+
+const AtomicString& ShadowRoot::referenceTarget() const {
+  return reference_target_id_observer_ ? reference_target_id_observer_->Id()
+                                       : g_null_atom;
+}
+
+Element* ShadowRoot::referenceTargetElement() const {
+  return getElementById(referenceTarget());
+}
+
+void ShadowRoot::ReferenceTargetChanged() {
+  // When this ShadowRoot's reference target changes, notify anything observing
+  // the host element's ID, since they may have been referring to the reference
+  // target instead.
+  if (const auto& id = host().GetIdAttribute()) {
+    if (auto* registry = host().GetTreeScope().GetIdTargetObserverRegistry()) {
+      registry->NotifyObservers(id);
+    }
+  }
+
+  if (host().isConnected()) {
+    if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache()) {
+      cache->HandleReferenceTargetChanged(host());
+    }
+  }
 }
 
 void ShadowRoot::Trace(Visitor* visitor) const {
-  visitor->Trace(style_sheet_list_);
   visitor->Trace(slot_assignment_);
-  visitor->Trace(shadow_root_v0_);
+  visitor->Trace(reference_target_id_observer_);
+  NodeRareDataField::Trace(visitor);
   TreeScope::Trace(visitor);
   DocumentFragment::Trace(visitor);
 }
 
-std::ostream& operator<<(std::ostream& ostream, const ShadowRootType& type) {
-  switch (type) {
-    case ShadowRootType::kUserAgent:
+std::ostream& operator<<(std::ostream& ostream, const ShadowRootMode& mode) {
+  switch (mode) {
+    case ShadowRootMode::kUserAgent:
       ostream << "UserAgent";
       break;
-    case ShadowRootType::V0:
-      ostream << "V0";
-      break;
-    case ShadowRootType::kOpen:
+    case ShadowRootMode::kOpen:
       ostream << "Open";
       break;
-    case ShadowRootType::kClosed:
+    case ShadowRootMode::kClosed:
       ostream << "Closed";
       break;
   }

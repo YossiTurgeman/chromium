@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,24 +9,12 @@
 #include "third_party/blink/renderer/core/dom/node.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/html/html_link_element.h"
-#include "third_party/blink/renderer/core/html/imports/html_import_child.h"
-#include "third_party/blink/renderer/core/html/imports/html_import_loader.h"
 
 namespace blink {
 
-CustomElementUpgradeSorter::CustomElementUpgradeSorter()
-    : elements_(MakeGarbageCollected<HeapHashSet<Member<Element>>>()),
-      parent_child_map_(MakeGarbageCollected<ParentChildMap>()) {}
-
-static HTMLLinkElement* GetLinkElementForImport(const Document& import) {
-  if (HTMLImportLoader* loader = import.ImportLoader())
-    return loader->FirstImport()->Link();
-  return nullptr;
-}
-
 CustomElementUpgradeSorter::AddResult
 CustomElementUpgradeSorter::AddToParentChildMap(Node* parent, Node* child) {
-  ParentChildMap::AddResult result = parent_child_map_->insert(parent, nullptr);
+  ParentChildMap::AddResult result = parent_child_map_.insert(parent, nullptr);
   if (!result.is_new_entry) {
     result.stored_value->value->insert(child);
     // The entry for the parent exists; so must its parents.
@@ -40,23 +28,12 @@ CustomElementUpgradeSorter::AddToParentChildMap(Node* parent, Node* child) {
 }
 
 void CustomElementUpgradeSorter::Add(Element* element) {
-  elements_->insert(element);
+  elements_.insert(element);
 
   for (Node *n = element, *parent = n->ParentOrShadowHostNode(); parent;
        n = parent, parent = parent->ParentOrShadowHostNode()) {
     if (AddToParentChildMap(parent, n) == kParentAlreadyExistsInMap)
       break;
-
-    // Create parent-child link between <link rel="import"> and its imported
-    // document so that the content of the imported document be visited as if
-    // the imported document were inserted in the link element.
-    if (auto* document = DynamicTo<Document>(parent)) {
-      Element* link = GetLinkElementForImport(*document);
-      if (!link ||
-          AddToParentChildMap(link, parent) == kParentAlreadyExistsInMap)
-        break;
-      parent = link;
-    }
   }
 }
 
@@ -66,17 +43,19 @@ void CustomElementUpgradeSorter::Visit(HeapVector<Member<Element>>* result,
   if (it == children.end())
     return;
   auto* element = DynamicTo<Element>(it->Get());
-  if (element && elements_->Contains(element))
+  if (element && elements_.Contains(element)) {
     result->push_back(*element);
+  }
   Sorted(result, *it);
   children.erase(it);
 }
 
 void CustomElementUpgradeSorter::Sorted(HeapVector<Member<Element>>* result,
                                         Node* parent) {
-  ParentChildMap::iterator children_iterator = parent_child_map_->find(parent);
-  if (children_iterator == parent_child_map_->end())
+  ParentChildMap::iterator children_iterator = parent_child_map_.find(parent);
+  if (children_iterator == parent_child_map_.end()) {
     return;
+  }
 
   ChildSet* children = children_iterator->value.Get();
 
@@ -100,7 +79,7 @@ void CustomElementUpgradeSorter::Sorted(HeapVector<Member<Element>>* result,
   if (children->size() == 1)
     Visit(result, *children, children->begin());
 
-  DCHECK(children->IsEmpty());
+  DCHECK(children->empty());
 }
 
 }  // namespace blink

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,10 +24,10 @@ JavaScriptTabModalDialogManagerDelegateAndroid::
 base::WeakPtr<javascript_dialogs::TabModalDialogView>
 JavaScriptTabModalDialogManagerDelegateAndroid::CreateNewDialog(
     content::WebContents* alerting_web_contents,
-    const base::string16& title,
+    const std::u16string& title,
     content::JavaScriptDialogType dialog_type,
-    const base::string16& message_text,
-    const base::string16& default_prompt_text,
+    const std::u16string& message_text,
+    const std::u16string& default_prompt_text,
     content::JavaScriptDialogManager::DialogClosedCallback
         callback_on_button_clicked,
     base::OnceClosure callback_on_cancelled) {
@@ -47,7 +47,7 @@ void JavaScriptTabModalDialogManagerDelegateAndroid::SetTabNeedsAttention(
 bool JavaScriptTabModalDialogManagerDelegateAndroid::IsWebContentsForemost() {
   TabModel* tab_model = TabModelList::GetTabModelForWebContents(web_contents_);
   if (tab_model) {
-    return tab_model->IsCurrentModel() &&
+    return tab_model->IsActiveModel() &&
            tab_model->GetActiveWebContents() == web_contents_;
   } else {
     // If tab model is not found (e.g. single tab model), fall back to check
@@ -59,4 +59,8 @@ bool JavaScriptTabModalDialogManagerDelegateAndroid::IsWebContentsForemost() {
 
 bool JavaScriptTabModalDialogManagerDelegateAndroid::IsApp() {
   return false;
+}
+
+bool JavaScriptTabModalDialogManagerDelegateAndroid::CanShowModalUI() {
+  return true;
 }

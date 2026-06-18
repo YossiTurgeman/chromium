@@ -1,11 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as Console from 'devtools/panels/console/console.js';
 
 (async function() {
   TestRunner.addResult(`Tests that console dir makes messages expandable only when necessary.\n`);
 
-  await TestRunner.loadModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   await TestRunner.evaluateInPagePromise(`
@@ -19,8 +23,8 @@
     //# sourceURL=console-dir-primitives.js
   `);
 
-  var consoleView = Console.ConsoleView.instance();
-  var viewMessages = consoleView._visibleViewMessages;
+  var consoleView = Console.ConsoleView.ConsoleView.instance();
+  var viewMessages = consoleView.visibleViewMessages;
   for (var i = 0; i < viewMessages.length; ++i) {
     var messageElement = viewMessages[i].element();
     // Console messages contain live locations.

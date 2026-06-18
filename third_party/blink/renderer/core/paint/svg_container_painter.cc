@@ -1,10 +1,11 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/paint/svg_container_painter.h"
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/core/layout/layout_box_model_object.h"
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_container.h"
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_foreign_object.h"
@@ -12,57 +13,88 @@
 #include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
 #include "third_party/blink/renderer/core/paint/object_painter.h"
 #include "third_party/blink/renderer/core/paint/paint_info.h"
+#include "third_party/blink/renderer/core/paint/paint_layer.h"
+#include "third_party/blink/renderer/core/paint/paint_layer_painter.h"
 #include "third_party/blink/renderer/core/paint/scoped_svg_paint_state.h"
-#include "third_party/blink/renderer/core/paint/svg_foreign_object_painter.h"
 #include "third_party/blink/renderer/core/paint/svg_model_object_painter.h"
+#include "third_party/blink/renderer/core/paint/svg_object_painter.h"
 #include "third_party/blink/renderer/core/svg/svg_svg_element.h"
+#include "third_party/blink/renderer/core/svg/svg_use_element.h"
 
 namespace blink {
 
-void SVGContainerPainter::Paint(const PaintInfo& paint_info) {
-  // Spec: groups w/o children still may render filter content.
-  if (!layout_svg_container_.FirstChild() &&
-      !layout_svg_container_.SelfWillPaint())
-    return;
+namespace {
 
+// TODO(crbug.com/41464114): Remove this function when removing the
+// SvgFilterPaintsForHiddenContentEnabled() feature flag.
+bool HasReferenceFilterEffect(const ObjectPaintProperties& properties) {
+  return properties.Filter() && properties.Filter()->HasReferenceFilter();
+}
+
+}  // namespace
+
+bool SVGContainerPainter::CanUseCullRect() const {
+  // LayoutSVGHiddenContainer's visual rect is always empty but we need to
+  // paint its descendants so we cannot skip painting.
+  if (layout_svg_container_.IsSVGHiddenContainer())
+    return false;
+
+  if (layout_svg_container_.SVGDescendantMayHaveTransformRelatedOperations()) {
+    return false;
+  }
+
+  return SVGModelObjectPainter::CanUseCullRect(
+      layout_svg_container_.StyleRef());
+}
+
+void SVGContainerPainter::Paint(const PaintInfo& paint_info) {
   // Spec: An empty viewBox on the <svg> element disables rendering.
   DCHECK(layout_svg_container_.GetElement());
-  auto* svg_svg_element =
-      DynamicTo<SVGSVGElement>(*layout_svg_container_.GetElement());
-  if (svg_svg_element && svg_svg_element->HasEmptyViewBox())
-    return;
-
-  if (SVGModelObjectPainter(layout_svg_container_)
-          .CullRectSkipsPainting(paint_info)) {
+  auto* viewport_container_element = DynamicTo<SVGViewportContainerElement>(
+      *layout_svg_container_.GetElement());
+  if (viewport_container_element &&
+      viewport_container_element->HasEmptyViewBox()) {
     return;
   }
 
-  // We do not apply cull rect optimizations across transforms for two reasons:
-  //   1) Performance: We can optimize transform changes by not repainting.
-  //   2) Complexity: Difficulty updating clips when ancestor transforms change.
-  // This is why we use an infinite cull rect if there is a transform. Non-svg
-  // content, does this in PaintLayerPainter::PaintSingleFragment.
+  auto paint_behavior = ScopedSVGPaintState::ComputePaintBehavior(
+      layout_svg_container_, paint_info,
+      !RuntimeEnabledFeatures::SvgFilterPaintsForHiddenContentEnabled() ||
+          layout_svg_container_.FirstChild());
+
+  if (paint_behavior.empty()) {
+    return;
+  }
+
+  const auto* properties =
+      layout_svg_container_.FirstFragment().PaintProperties();
   PaintInfo paint_info_before_filtering(paint_info);
-  if (layout_svg_container_.StyleRef().HasTransform()) {
+  if (CanUseCullRect()) {
+    // CanUseCullRect returns false if there is a pixel moving filter, which
+    // includes reference filters. So execution should never reach here if
+    // painting only due to a reference filter.
+    CHECK(paint_behavior.Has(ScopedSVGPaintState::PaintComponent::kContent));
+    if (!paint_info.GetCullRect().IntersectsTransformed(
+            layout_svg_container_.LocalToSVGParentTransform(),
+            layout_svg_container_.VisualRectInLocalSVGCoordinates()))
+      return;
+    if (properties) {
+      // TODO(https://crbug.com/1278452): Also consider Translate, Rotate,
+      // Scale, and Offset, probably via a single transform operation to
+      // FirstFragment().PreTransform().
+      if (const auto* transform = properties->Transform())
+        paint_info_before_filtering.TransformCullRect(*transform);
+    }
+  } else {
     paint_info_before_filtering.ApplyInfiniteCullRect();
-  } else if (const auto* properties =
-                 layout_svg_container_.FirstFragment().PaintProperties()) {
-    if (const auto* transform = properties->Transform())
-      paint_info_before_filtering.TransformCullRect(*transform);
   }
 
-  ScopedSVGTransformState transform_state(
-      paint_info_before_filtering, layout_svg_container_,
-      layout_svg_container_.LocalToSVGParentTransform());
+  ScopedSVGTransformState transform_state(paint_info_before_filtering,
+                                          layout_svg_container_);
   {
-    base::Optional<ScopedPaintChunkProperties> scoped_paint_chunk_properties;
+    std::optional<ScopedPaintChunkProperties> scoped_paint_chunk_properties;
     if (layout_svg_container_.IsSVGViewportContainer() &&
         SVGLayoutSupport::IsOverflowHidden(layout_svg_container_)) {
-      const auto* fragment =
-          paint_info_before_filtering.FragmentToPaint(layout_svg_container_);
-      if (!fragment)
-        return;
-      const auto* properties = fragment->PaintProperties();
       // TODO(crbug.com/814815): The condition should be a DCHECK, but for now
       // we may paint the object for filters during PrePaint before the
       // properties are ready.
@@ -74,27 +106,50 @@ void SVGContainerPainter::Paint(const PaintInfo& paint_info) {
       }
     }
 
-    ScopedSVGPaintState paint_state(layout_svg_container_,
-                                    paint_info_before_filtering);
-    bool continue_rendering = true;
-    if (paint_state.GetPaintInfo().phase == PaintPhase::kForeground)
-      continue_rendering = paint_state.ApplyEffects();
+    ScopedSVGPaintState paint_state(
+        layout_svg_container_, paint_info_before_filtering, paint_behavior);
+    // When a filter applies to the container we need to make sure
+    // that it is applied even if nothing is painted.
+    if (paint_info_before_filtering.phase == PaintPhase::kForeground &&
+        properties && HasReferenceFilterEffect(*properties) &&
+        !RuntimeEnabledFeatures::SvgFilterPaintsForHiddenContentEnabled()) {
+      paint_info_before_filtering.context.GetPaintController().EnsureChunk();
+    }
+    if (paint_behavior.Has(ScopedSVGPaintState::PaintComponent::kContent)) {
+      PaintInfo& child_paint_info = transform_state.ContentPaintInfo();
+      std::optional<SvgContextPaints> child_context_paints;
+      if (IsA<SVGUseElement>(layout_svg_container_.GetElement())) {
+        SVGObjectPainter object_painter(layout_svg_container_,
+                                        child_paint_info.GetSvgContextPaints());
+        // Note that this discards child_paint_info.svg_context_paints_'s
+        // transform, which is correct because <use> establishes a new
+        // coordinate space for context paints.
+        child_context_paints.emplace(
+            object_painter.ResolveContextPaint(
+                layout_svg_container_.StyleRef().FillPaint()),
+            object_painter.ResolveContextPaint(
+                layout_svg_container_.StyleRef().StrokePaint()));
+        child_paint_info.SetSvgContextPaints(&(*child_context_paints));
+      }
 
-    if (continue_rendering) {
       for (LayoutObject* child = layout_svg_container_.FirstChild(); child;
            child = child->NextSibling()) {
-        if (auto* foreign_object = DynamicTo<LayoutSVGForeignObject>(*child)) {
-          SVGForeignObjectPainter(*foreign_object)
-              .PaintLayer(paint_state.GetPaintInfo());
+        if (auto* foreign_object = DynamicTo<LayoutSVGForeignObject>(child)) {
+          PaintLayerPainter(*foreign_object->Layer())
+              .PaintLayerForReplacedNormalFlowStackingContext(
+                  paint_info_before_filtering);
         } else {
-          child->Paint(paint_state.GetPaintInfo());
+          child->Paint(child_paint_info);
         }
       }
     }
   }
 
-  SVGModelObjectPainter(layout_svg_container_)
-      .PaintOutline(paint_info_before_filtering);
+  // Only paint an outline if there are children.
+  if (layout_svg_container_.FirstChild()) {
+    SVGModelObjectPainter(layout_svg_container_)
+        .PaintOutline(paint_info_before_filtering);
+  }
 
   if (paint_info_before_filtering.ShouldAddUrlMetadata() &&
       paint_info_before_filtering.phase == PaintPhase::kForeground) {

@@ -1,6 +1,11 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
 
 // The file contains the implementation of the mini_installer re-versioner.
 // The main function (GenerateNextVersion) does the following in a temp dir:
@@ -36,6 +41,7 @@
 #include <vector>
 
 #include "base/command_line.h"
+#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
@@ -45,8 +51,6 @@
 #include "base/path_service.h"
 #include "base/process/launch.h"
 #include "base/process/process_handle.h"
-#include "base/stl_util.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
@@ -60,30 +64,34 @@
 
 namespace {
 
-const base::char16 k7zaExe[] = L"7za.exe";
-const base::char16 k7zaPathRelative[] =
-    L"..\\..\\third_party\\lzma_sdk\\Executable";
-const base::char16 kB7[] = L"B7";
-const base::char16 kBl[] = L"BL";
-const base::char16 kChromeBin[] = L"Chrome-bin";
-const base::char16 kChromePacked7z[] = L"CHROME.PACKED.7Z";
-const base::char16 kChrome7z[] = L"CHROME.7Z";
-const base::char16 kExe[] = L"exe";
-const base::char16 kExpandExe[] = L"expand.exe";
-const base::char16 kExtDll[] = L".dll";
-const base::char16 kExtExe[] = L".exe";
-const base::char16 kMakeCab[] = L"makecab.exe";
-const base::char16 kSetupEx_[] = L"setup.ex_";
-const base::char16 kSetupExe[] = L"setup.exe";
+const wchar_t k7zaExe[] = L"7za.exe";
+const wchar_t k7zaPathRelative[] = L"..\\..\\third_party\\lzma_sdk\\bin\\win64";
+const wchar_t kB7[] = L"B7";
+const wchar_t kBl[] = L"BL";
+const wchar_t kBN[] = L"BN";
+const wchar_t kChromeBin[] = L"Chrome-bin";
+const wchar_t kChromePacked7z[] = L"CHROME.PACKED.7Z";
+const wchar_t kChrome7z[] = L"CHROME.7Z";
+const wchar_t kExe[] = L"exe";
+const wchar_t kExpandExe[] = L"expand.exe";
+const wchar_t kExtDll[] = L".dll";
+const wchar_t kExtExe[] = L".exe";
+const wchar_t kMakeCab[] = L"makecab.exe";
+const wchar_t kSetupEx_[] = L"setup.ex_";
+const wchar_t kSetupExe[] = L"setup.exe";
 const char kSwitch7zaPath[] = "7za_path";
-const base::char16 kTempDirPrefix[] = L"mini_installer_test_temp";
+const wchar_t kTempDirPrefix[] = L"mini_installer_test_temp";
 
 // A helper class for creating and cleaning a temporary directory.  A temporary
 // directory is created in Initialize and destroyed (along with all of its
 // contents) when the guard instance is destroyed.
 class ScopedTempDirectory {
  public:
-  ScopedTempDirectory() {}
+  ScopedTempDirectory() = default;
+
+  ScopedTempDirectory(const ScopedTempDirectory&) = delete;
+  ScopedTempDirectory& operator=(const ScopedTempDirectory&) = delete;
+
   ~ScopedTempDirectory() {
     if (!directory_.empty() && !base::DeletePathRecursively(directory_)) {
       LOG(DFATAL) << "Failed deleting temporary directory \""
@@ -106,7 +114,6 @@ class ScopedTempDirectory {
 
  private:
   base::FilePath directory_;
-  DISALLOW_COPY_AND_ASSIGN(ScopedTempDirectory);
 };  // class ScopedTempDirectory
 
 // A helper class for manipulating a Chrome product version.
@@ -126,7 +133,7 @@ class ChromeVersion {
                          static_cast<ULONGLONG>(c[3]));
   }
 
-  ChromeVersion() {}
+  ChromeVersion() = default;
   explicit ChromeVersion(ULONGLONG value) : version_(value) {}
   WORD major() const { return static_cast<WORD>(version_ >> 48); }
   WORD minor() const { return static_cast<WORD>(version_ >> 32); }
@@ -136,36 +143,35 @@ class ChromeVersion {
   DWORD low() const { return static_cast<DWORD>(version_); }
   ULONGLONG value() const { return version_; }
   void set_value(ULONGLONG value) { version_ = value; }
-  base::string16 ToString() const;
+  std::wstring ToString() const;
   std::string ToASCII() const;
 
  private:
   ULONGLONG version_;
 };  // class ChromeVersion
 
-base::string16 ChromeVersion::ToString() const {
-  base::char16 buffer[24];
-  int string_len =
-      swprintf_s(&buffer[0], base::size(buffer), L"%hu.%hu.%hu.%hu", major(),
-                 minor(), build(), patch());
+std::wstring ChromeVersion::ToString() const {
+  wchar_t buffer[24];
+  int string_len = swprintf_s(&buffer[0], std::size(buffer), L"%hu.%hu.%hu.%hu",
+                              major(), minor(), build(), patch());
   DCHECK_NE(-1, string_len);
-  DCHECK_GT(static_cast<int>(base::size(buffer)), string_len);
-  return base::string16(&buffer[0], string_len);
+  DCHECK_GT(static_cast<int>(std::size(buffer)), string_len);
+  return std::wstring(&buffer[0], string_len);
 }
 
 std::string ChromeVersion::ToASCII() const {
   char buffer[24];
-  int string_len = sprintf_s(&buffer[0], base::size(buffer), "%hu.%hu.%hu.%hu",
+  int string_len = sprintf_s(&buffer[0], std::size(buffer), "%hu.%hu.%hu.%hu",
                              major(), minor(), build(), patch());
   DCHECK_NE(-1, string_len);
-  DCHECK_GT(static_cast<int>(base::size(buffer)), string_len);
+  DCHECK_GT(static_cast<int>(std::size(buffer)), string_len);
   return std::string(&buffer[0], string_len);
 }
 
 // Calls CreateProcess with good default parameters and waits for the process
 // to terminate returning the process exit code.
-bool RunProcessAndWait(const base::char16* exe_path,
-                       const base::string16& cmdline,
+bool RunProcessAndWait(const wchar_t* exe_path,
+                       const std::wstring& cmdline,
                        int* exit_code) {
   bool result = true;
   base::LaunchOptions options;
@@ -242,8 +248,9 @@ bool ReplaceAll(uint8_t* dest_first,
   bool changed = false;
   do {
     dest_first = std::search(dest_first, dest_last, src_first, src_last);
-    if (dest_first == dest_last)
+    if (dest_first == dest_last) {
       break;
+    }
     changed = true;
     if (memcpy_s(dest_first, dest_last - dest_first, replacement_first,
                  src_last - src_first) != 0) {
@@ -253,8 +260,9 @@ bool ReplaceAll(uint8_t* dest_first,
     dest_first += (src_last - src_first);
   } while (true);
 
-  if (replacements_made != nullptr)
+  if (replacements_made != nullptr) {
     *replacements_made = changed;
+  }
 
   return result;
 }
@@ -262,9 +270,9 @@ bool ReplaceAll(uint8_t* dest_first,
 // A context structure in support of our EnumResource_Fn callback.
 struct VisitResourceContext {
   ChromeVersion current_version;
-  base::string16 current_version_str;
+  std::wstring current_version_str;
   ChromeVersion new_version;
-  base::string16 new_version_str;
+  std::wstring new_version_str;
 };  // struct VisitResourceContext
 
 // Replaces the old version with the new in a resource.  A first pass is made to
@@ -320,8 +328,9 @@ bool UpdateVersionInData(base::win::PEImage* image,
             context->new_version_str.size());
   IMAGE_SECTION_HEADER* rdata_header =
       image->GetImageSectionHeaderByName(".rdata");
-  if (!rdata_header)
+  if (!rdata_header) {
     return true;  // Nothing to update.
+  }
 
   size_t size = rdata_header->SizeOfRawData;
   uint8_t* data = reinterpret_cast<uint8_t*>(image->module()) +
@@ -330,7 +339,7 @@ bool UpdateVersionInData(base::win::PEImage* image,
   // Replace all wide string occurrences of |current_version| with
   // |new_version|. No attempt is made to ensure that the modified bytes are
   // truly part of a wide string.
-  const base::string16& current_version_str = context->current_version_str;
+  const std::wstring& current_version_str = context->current_version_str;
   ReplaceAll(data, data + size,
              reinterpret_cast<const uint8_t*>(&current_version_str[0]),
              reinterpret_cast<const uint8_t*>(
@@ -360,8 +369,9 @@ bool UpdateVersionIfMatch(const base::FilePath& image_file,
   }
 
   uint32_t flags = base::File::FLAG_OPEN | base::File::FLAG_READ |
-                   base::File::FLAG_WRITE | base::File::FLAG_EXCLUSIVE_READ |
-                   base::File::FLAG_EXCLUSIVE_WRITE;
+                   base::File::FLAG_WRITE |
+                   base::File::FLAG_WIN_EXCLUSIVE_READ |
+                   base::File::FLAG_WIN_EXCLUSIVE_WRITE;
   base::File file(image_file, flags);
   // It turns out that the underlying CreateFile can fail due to unhelpful
   // security software locking the newly created DLL. So add a few brief
@@ -388,7 +398,7 @@ bool UpdateVersionIfMatch(const base::FilePath& image_file,
   }
 
   base::win::PEImageAsData image(
-      reinterpret_cast<HMODULE>(image_mapping.data()));
+      reinterpret_cast<HMODULE>(image_mapping.mutable_bytes().data()));
   // PEImage class does not support other-architecture images. Skip over such
   // files.
   if (image.GetNTHeaders()->OptionalHeader.Magic !=
@@ -410,8 +420,9 @@ bool UpdateVersionIfMatch(const base::FilePath& image_file,
 bool UpdateManifestVersion(const base::FilePath& manifest,
                            VisitResourceContext* context) {
   std::string contents;
-  if (!base::ReadFileToString(manifest, &contents))
+  if (!base::ReadFileToString(manifest, &contents)) {
     return false;
+  }
   std::string old_version(context->current_version.ToASCII());
   std::string new_version(context->new_version.ToASCII());
   bool modified = false;
@@ -423,9 +434,7 @@ bool UpdateManifestVersion(const base::FilePath& manifest,
     return false;
   }
   DCHECK(modified);
-  int written = base::WriteFile(manifest, &contents[0],
-                                static_cast<int>(contents.size()));
-  return written != -1 && static_cast<size_t>(written) == contents.size();
+  return base::WriteFile(manifest, contents);
 }
 
 bool IncrementNewVersion(upgrade_test::Direction direction,
@@ -455,23 +464,26 @@ bool IncrementNewVersion(upgrade_test::Direction direction,
 // on success.
 bool ApplyAlternateVersion(const base::FilePath& work_dir,
                            upgrade_test::Direction direction,
-                           base::string16* original_version,
-                           base::string16* new_version) {
+                           std::wstring* original_version,
+                           std::wstring* new_version) {
   VisitResourceContext ctx;
-  if (!GetSetupExeVersion(work_dir, &ctx.current_version))
+  if (!GetSetupExeVersion(work_dir, &ctx.current_version)) {
     return false;
+  }
   ctx.current_version_str = ctx.current_version.ToString();
 
-  if (!IncrementNewVersion(direction, &ctx))
+  if (!IncrementNewVersion(direction, &ctx)) {
     return false;
+  }
 
   // Modify all .dll and .exe files with the current version.
   base::FileEnumerator all_files(work_dir, true, base::FileEnumerator::FILES);
   while (true) {
     base::FilePath file = all_files.Next();
-    if (file.empty())
+    if (file.empty()) {
       break;
-    base::string16 extension = file.Extension();
+    }
+    std::wstring extension = file.Extension();
     if ((extension == &kExtExe[0] || extension == &kExtDll[0]) &&
         !UpdateVersionIfMatch(file, &ctx)) {
       return false;
@@ -485,7 +497,7 @@ bool ApplyAlternateVersion(const base::FilePath& work_dir,
     return false;
   }
 
-  // Update the manifest (revise post-XP; see https://crbug.com/581133).
+  // Update the manifest (revise post-XP; see https://crbug.com/41236592).
   base::FilePath current_manifest =
       chrome_bin.Append(ctx.new_version_str)
           .Append(ctx.current_version_str + L".manifest");
@@ -499,10 +511,12 @@ bool ApplyAlternateVersion(const base::FilePath& work_dir,
   }
 
   // Report the version numbers if requested.
-  if (original_version)
+  if (original_version) {
     original_version->assign(ctx.current_version_str);
-  if (new_version)
+  }
+  if (new_version) {
     new_version->assign(ctx.new_version_str);
+  }
 
   return true;
 }
@@ -518,8 +532,9 @@ base::FilePath Get7zaPath() {
           &kSwitch7zaPath[0]);
   if (l7za_path.empty()) {
     base::FilePath dir_exe;
-    if (!base::PathService::Get(base::DIR_EXE, &dir_exe))
+    if (!base::PathService::Get(base::DIR_EXE, &dir_exe)) {
       LOG(DFATAL) << "Failed getting directory of host executable";
+    }
     l7za_path = dir_exe.Append(&k7zaPathRelative[0]);
   }
   return l7za_path;
@@ -532,7 +547,7 @@ bool CreateArchive(const base::FilePath& output_file,
                                        compression_level <= 9 &&
                                        (compression_level & 0x01) != 0);
 
-  base::string16 command_line(1, L'"');
+  std::wstring command_line(1, L'"');
   command_line.append(Get7zaPath().Append(&k7zaExe[0]).value())
       .append(L"\" a -bd -t7z \"")
       .append(output_file.value())
@@ -541,8 +556,9 @@ bool CreateArchive(const base::FilePath& output_file,
       .append(L"\" -mx")
       .append(1, L'0' + compression_level);
   int exit_code;
-  if (!RunProcessAndWait(nullptr, command_line, &exit_code))
+  if (!RunProcessAndWait(nullptr, command_line, &exit_code)) {
     return false;
+  }
   if (exit_code != 0) {
     LOG(DFATAL) << Get7zaPath().Append(&k7zaExe[0]).value()
                 << " exited with code " << exit_code << " while creating "
@@ -559,12 +575,13 @@ namespace upgrade_test {
 bool GenerateAlternateVersion(const base::FilePath& original_installer_path,
                               const base::FilePath& target_path,
                               Direction direction,
-                              base::string16* original_version,
-                              base::string16* new_version) {
+                              std::wstring* original_version,
+                              std::wstring* new_version) {
   // Create a temporary directory in which we'll do our work.
   ScopedTempDirectory work_dir;
-  if (!work_dir.Initialize())
+  if (!work_dir.Initialize()) {
     return false;
+  }
 
   // Copy the original mini_installer.
   base::FilePath mini_installer =
@@ -575,36 +592,32 @@ bool GenerateAlternateVersion(const base::FilePath& original_installer_path,
     return false;
   }
 
-  base::FilePath setup_ex_ = work_dir.directory().Append(&kSetupEx_[0]);
-  base::FilePath chrome_packed_7z;  // Empty for component builds.
+  // Setup for compressed builds:
+  base::FilePath setup_ex_;
+  // Setup for uncompressed builds:
+  base::FilePath setup_exe = work_dir.directory().Append(&kSetupExe[0]);
+  const wchar_t* setup_resource_name = nullptr;
+  base::FilePath chrome_packed_7z;  // Empty for uncompressed builds.
   base::FilePath chrome_7z;
-  const base::char16* archive_resource_name = nullptr;
+  const wchar_t* archive_resource_name = nullptr;
   base::FilePath* archive_file = nullptr;
+
   // Load the original file and extract setup.ex_ and chrome.packed.7z
   {
     ResourceLoader resource_loader;
     std::pair<const uint8_t*, DWORD> resource_data;
 
-    if (!resource_loader.Initialize(mini_installer))
-      return false;
-
-    // Write out setup.ex_
-    if (!resource_loader.Load(&kSetupEx_[0], &kBl[0], &resource_data))
-      return false;
-    int written = base::WriteFile(
-        setup_ex_, reinterpret_cast<const char*>(resource_data.first),
-        static_cast<int>(resource_data.second));
-    if (written != static_cast<int>(resource_data.second)) {
-      LOG(DFATAL) << "Failed writing \"" << setup_ex_.value() << "\"";
+    if (!resource_loader.Initialize(mini_installer)) {
       return false;
     }
 
-    // Write out chrome.packed.7z (static build) or chrome.7z (component build)
+    // Write out chrome.packed.7z (compressed builds) or chrome.7z (uncompressed
+    // builds).
     if (resource_loader.Load(&kChromePacked7z[0], &kB7[0], &resource_data)) {
       archive_resource_name = &kChromePacked7z[0];
       chrome_packed_7z = work_dir.directory().Append(archive_resource_name);
       archive_file = &chrome_packed_7z;
-    } else if (resource_loader.Load(&kChrome7z[0], &kB7[0], &resource_data)) {
+    } else if (resource_loader.Load(&kChrome7z[0], &kBN[0], &resource_data)) {
       archive_resource_name = &kChrome7z[0];
       chrome_7z = work_dir.directory().Append(archive_resource_name);
       archive_file = &chrome_7z;
@@ -614,34 +627,56 @@ bool GenerateAlternateVersion(const base::FilePath& original_installer_path,
     DCHECK(archive_resource_name);
     DCHECK(!chrome_packed_7z.empty() || !chrome_7z.empty());
     DCHECK(archive_file);
-    written = base::WriteFile(
-        *archive_file, reinterpret_cast<const char*>(resource_data.first),
-        static_cast<int>(resource_data.second));
-    if (written != static_cast<int>(resource_data.second)) {
+    if (!base::WriteFile(*archive_file, base::span(resource_data.first,
+                                                   resource_data.second))) {
       LOG(DFATAL) << "Failed writing \"" << archive_file->value() << "\"";
+      return false;
+    }
+
+    // Write out setup.ex_ (compressed builds) or
+    // setup.exe (uncompressed builds).
+    if (resource_loader.Load(&kSetupEx_[0], &kBl[0], &resource_data)) {
+      setup_ex_ = work_dir.directory().Append(&kSetupEx_[0]);
+      setup_resource_name = &kSetupEx_[0];
+      if (!base::WriteFile(setup_ex_, base::span(resource_data.first,
+                                                 resource_data.second))) {
+        LOG(DFATAL) << "Failed writing \"" << setup_ex_.value() << "\"";
+        return false;
+      }
+    } else if (resource_loader.Load(&kSetupExe[0], &kBN[0], &resource_data)) {
+      setup_resource_name = &kSetupExe[0];
+      if (!base::WriteFile(setup_exe, base::span(resource_data.first,
+                                                 resource_data.second))) {
+        LOG(DFATAL) << "Failed writing \"" << setup_exe.value() << "\"";
+        return false;
+      }
+    } else {
       return false;
     }
   }
 
-  // Expand setup.ex_
-  base::FilePath setup_exe = setup_ex_.ReplaceExtension(&kExe[0]);
-  base::string16 command_line;
-  command_line.append(1, L'"')
-      .append(&kExpandExe[0])
-      .append(L"\" \"")
-      .append(setup_ex_.value())
-      .append(L"\" \"")
-      .append(setup_exe.value())
-      .append(1, L'\"');
-  int exit_code;
-  if (!RunProcessAndWait(nullptr, command_line, &exit_code))
-    return false;
-  if (exit_code != 0) {
-    LOG(DFATAL) << &kExpandExe[0] << " exited with code " << exit_code;
-    return false;
+  // If a compressed setup was found..
+  if (!setup_ex_.empty()) {
+    // Expand setup.ex_
+    setup_exe = setup_ex_.ReplaceExtension(&kExe[0]);
+    std::wstring command_line(1, L'"');
+    command_line.append(&kExpandExe[0])
+        .append(L"\" \"")
+        .append(setup_ex_.value())
+        .append(L"\" \"")
+        .append(setup_exe.value())
+        .append(1, L'\"');
+    int exit_code = 0;
+    if (!RunProcessAndWait(nullptr, command_line, &exit_code)) {
+      return false;
+    }
+    if (exit_code != 0) {
+      LOG(DFATAL) << &kExpandExe[0] << " exited with code " << exit_code;
+      return false;
+    }
   }
 
-  // Unpack chrome.packed.7z (static build only).
+  // Unpack chrome.packed.7z (compressed builds only).
   if (!chrome_packed_7z.empty()) {
     if (UnPackArchive(chrome_packed_7z, work_dir.directory(), &chrome_7z) !=
         UNPACK_NO_ERROR) {
@@ -665,43 +700,51 @@ bool GenerateAlternateVersion(const base::FilePath& original_installer_path,
     LOG(DFATAL) << "Failed deleting intermediate files";
     return false;
   }
-
   // Increment the version in all files.
   ApplyAlternateVersion(work_dir.directory(), direction, original_version,
                         new_version);
 
   // Pack up files into chrome.7z
-  if (!CreateArchive(chrome_7z, work_dir.directory().Append(&kChromeBin[0]), 0))
+  if (!CreateArchive(chrome_7z, work_dir.directory().Append(&kChromeBin[0]),
+                     0)) {
     return false;
+  }
 
-  // Compress chrome.7z into chrome.packed.7z for static builds.
+  // Compress chrome.7z into chrome.packed.7z for compressed builds.
   if (!chrome_packed_7z.empty() &&
       !CreateArchive(chrome_packed_7z, chrome_7z, 9)) {
     return false;
   }
 
-  // Compress setup.exe into setup.ex_
-  command_line.assign(1, L'"')
-      .append(&kMakeCab[0])
-      .append(L"\" /D CompressionType=LZX /L \"")
-      .append(work_dir.directory().value())
-      .append(L"\" \"")
-      .append(setup_exe.value());
-  if (!RunProcessAndWait(nullptr, command_line, &exit_code))
-    return false;
-  if (exit_code != 0) {
-    LOG(DFATAL) << &kMakeCab[0] << " exited with code " << exit_code;
-    return false;
+  // Compress setup.exe into setup.ex_ for compressed builds.
+  if (!setup_ex_.empty()) {
+    std::wstring command_line(1, L'"');
+    command_line.append(&kMakeCab[0])
+        .append(L"\" /D CompressionType=LZX /L \"")
+        .append(work_dir.directory().value())
+        .append(L"\" \"")
+        .append(setup_exe.value());
+    int exit_code = 0;
+    if (!RunProcessAndWait(nullptr, command_line, &exit_code)) {
+      return false;
+    }
+    if (exit_code != 0) {
+      LOG(DFATAL) << &kMakeCab[0] << " exited with code " << exit_code;
+      return false;
+    }
   }
 
-  // Replace the mini_installer's setup.ex_ and chrome.packed.7z (or chrome.7z
-  // in component builds) resources.
+  // Replace the mini_installer's setup.ex_ (or setup.exe for an uncompressed
+  // mini_installer) and chrome.packed.7z (or chrome.7z in component and
+  // non-debug builds) resources.
   ResourceUpdater updater;
   if (!updater.Initialize(mini_installer) ||
-      !updater.Update(&kSetupEx_[0], &kBl[0],
+      !updater.Update(setup_resource_name,
+                      (!setup_ex_.empty() ? &kBl[0] : &kBN[0]),
                       MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
-                      setup_ex_) ||
-      !updater.Update(archive_resource_name, &kB7[0],
+                      (!setup_ex_.empty() ? setup_ex_ : setup_exe)) ||
+      !updater.Update(archive_resource_name,
+                      (!chrome_packed_7z.empty() ? &kB7[0] : &kBN[0]),
                       MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
                       *archive_file) ||
       !updater.Commit()) {
@@ -715,22 +758,21 @@ bool GenerateAlternateVersion(const base::FilePath& original_installer_path,
   return base::Move(mini_installer, target_path);
 }
 
-base::string16 GenerateAlternatePEFileVersion(
-    const base::FilePath& original_file,
-    const base::FilePath& target_file,
-    Direction direction) {
+std::wstring GenerateAlternatePEFileVersion(const base::FilePath& original_file,
+                                            const base::FilePath& target_file,
+                                            Direction direction) {
   VisitResourceContext ctx;
   if (!GetFileVersion(original_file, &ctx.current_version)) {
     LOG(DFATAL) << "Failed reading version from \"" << original_file.value()
                 << "\"";
-    return base::string16();
+    return std::wstring();
   }
   ctx.current_version_str = ctx.current_version.ToString();
 
   if (!IncrementNewVersion(direction, &ctx)) {
     LOG(DFATAL) << "Failed to increment version from \""
                 << original_file.value() << "\"";
-    return base::string16();
+    return std::wstring();
   }
 
   DCHECK_EQ(ctx.current_version_str.size(), ctx.new_version_str.size());
@@ -738,11 +780,12 @@ base::string16 GenerateAlternatePEFileVersion(
   if (!base::CopyFile(original_file, target_file)) {
     LOG(DFATAL) << "Failed copying \"" << original_file.value() << "\" to \""
                 << target_file.value() << "\"";
-    return base::string16();
+    return std::wstring();
   }
 
-  if (!UpdateVersionIfMatch(target_file, &ctx))
-    return base::string16();
+  if (!UpdateVersionIfMatch(target_file, &ctx)) {
+    return std::wstring();
+  }
 
   return ctx.new_version_str;
 }

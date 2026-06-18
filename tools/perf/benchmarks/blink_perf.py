@@ -1,4 +1,4 @@
-# Copyright 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -13,6 +13,7 @@ from core import perf_benchmark
 
 from telemetry import benchmark
 from telemetry import page as page_module
+from telemetry.core import exceptions
 from telemetry.core import memory_cache_http_server
 from telemetry.page import legacy_page_test
 from telemetry.page import shared_page_state
@@ -46,11 +47,14 @@ def StoryNameFromUrl(url, prefix):
     baseName += "_" + query # So that queried page-names don't collide
   return "{b}.{e}".format(b=baseName, e=extension)
 
-def CreateStorySetFromPath(path, skipped_file,
-                           shared_page_state_class=(
-                               shared_page_state.SharedPageState),
-                           append_query=None,
-                           extra_tags=None):
+
+def CreateStorySetFromPath(
+    path,
+    skipped_file,
+    shared_page_state_class=(shared_page_state.SharedPageState),
+    append_query=None,
+    extra_tags=None,
+    page_class=_BlinkPerfPage):
   assert os.path.exists(path)
 
   page_urls = []
@@ -59,7 +63,7 @@ def CreateStorySetFromPath(path, skipped_file,
   def _AddPage(path):
     if not path.endswith('.html'):
       return
-    if '../' in open(path, 'r').read():
+    if b'../' in open(path, 'rb').read():
       # If the page looks like it references its parent dir, include it.
       serving_dirs.add(os.path.dirname(os.path.dirname(path)))
     page_url = 'file://' + path.replace('\\', '/')
@@ -98,12 +102,23 @@ def CreateStorySetFromPath(path, skipped_file,
   common_prefix = os.path.dirname(os.path.commonprefix(all_urls))
   for url in sorted(page_urls):
     name = StoryNameFromUrl(url, common_prefix)
-    ps.AddStory(_BlinkPerfPage(
-        url, ps, ps.base_dir,
-        shared_page_state_class=shared_page_state_class,
-        name=name,
-        tags=extra_tags))
+    ps.AddStory(
+        page_class(
+            url,
+            ps,
+            ps.base_dir,
+            shared_page_state_class=shared_page_state_class,
+            name=name,
+            tags=extra_tags))
   return ps
+
+
+def AddScriptToPage(page, script):
+  if page.script_to_evaluate_on_commit is None:
+    page.script_to_evaluate_on_commit = script
+  else:
+    page.script_to_evaluate_on_commit += script
+
 
 def _CreateMergedEventsBoundaries(events, max_start_time):
   """ Merge events with the given |event_name| and return a list of MergedEvent
@@ -255,7 +270,7 @@ class _BlinkPerfMeasurement(legacy_page_test.LegacyPageTest):
 
   def WillNavigateToPage(self, page, tab):
     del tab  # unused
-    page.script_to_evaluate_on_commit = self._blink_perf_js
+    AddScriptToPage(page, self._blink_perf_js)
 
   def DidNavigateToPage(self, page, tab):
     tab.WaitForJavaScriptCondition('testRunner.isWaitingForTelemetry')
@@ -303,7 +318,7 @@ class _BlinkPerfMeasurement(legacy_page_test.LegacyPageTest):
   def PrintAndCollectTraceEventMetrics(self, trace_cpu_time_metrics, results):
     unit = 'ms'
     print()
-    for trace_event_name, cpu_times in trace_cpu_time_metrics.iteritems():
+    for trace_event_name, cpu_times in trace_cpu_time_metrics.items():
       print('CPU times of trace event "%s":' % trace_event_name)
       cpu_times_string = ', '.join(['{0:.10f}'.format(t) for t in cpu_times])
       print('values %s %s' % (cpu_times_string, unit))
@@ -365,7 +380,10 @@ class _BlinkPerfBenchmark(perf_benchmark.PerfBenchmark):
                                   extra_tags=self.TAGS)
 
 
-@benchmark.Info(emails=['dmazzoni@chromium.org'],
+@benchmark.Info(emails=[
+                    'gregoryd@google.com',
+                    'lucasradaelli@google.com'
+                ],
                 component='Blink>Accessibility',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfAccessibility(_BlinkPerfBenchmark):
@@ -377,16 +395,15 @@ class BlinkPerfAccessibility(_BlinkPerfBenchmark):
     return 'blink_perf.accessibility'
 
   def SetExtraBrowserOptions(self, options):
-    options.AppendExtraBrowserArgs([
-        '--force-renderer-accessibility',
-    ])
+    options.AppendExtraBrowserArgs(['--force-renderer-accessibility=complete'])
 
 
-@benchmark.Info(
-    component='Blink>Bindings',
-    emails=['jbroman@chromium.org', 'yukishiino@chromium.org',
-            'haraken@chromium.org'],
-    documentation_url='https://bit.ly/blink-perf-benchmarks')
+@benchmark.Info(component='Blink>Bindings',
+                emails=[
+                    'jbroman@chromium.org', 'japhet@chromium.org',
+                    'haraken@chromium.org'
+                ],
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfBindings(_BlinkPerfBenchmark):
   SUBDIR = 'bindings'
   TAGS = _BlinkPerfBenchmark.TAGS + ['all']
@@ -396,34 +413,82 @@ class BlinkPerfBindings(_BlinkPerfBenchmark):
     return 'blink_perf.bindings'
 
 
+class _ServiceWorkerPerfPage(page_module.Page):
+  def RunPageInteractions(self, action_runner):
+    action_runner.ExecuteJavaScript('testRunner.scheduleTestRun()')
+
+    # If |serviceWorkerPerfTools| is enabled in the test, some actions are
+    # performed for each iteration.
+    perf_tools_enabled = False
+    try:
+      perf_tools_enabled = action_runner.EvaluateJavaScript(
+          'serviceWorkerPerfTools.enabled')
+    except exceptions.EvaluateException:
+      pass
+
+    if perf_tools_enabled:
+      done = False
+      while not done:
+        action_runner.WaitForJavaScriptCondition(
+            'serviceWorkerPerfTools.actionRequired')
+        action = action_runner.EvaluateJavaScript(
+            'serviceWorkerPerfTools.action')
+        if action == 'stop-workers':
+          action_runner.tab.StopAllServiceWorkers()
+        elif action == 'quit':
+          done = True
+        else:
+          raise Exception(
+              'Not supported ServiceWorkerPerfTools action: {}'.format(action))
+        action_runner.EvaluateJavaScript(
+            'serviceWorkerPerfTools.notifyActionDone()')
+    action_runner.WaitForJavaScriptCondition('testRunner.isDone', timeout=600)
+
+
 class ServiceWorkerRequestHandler(
     memory_cache_http_server.MemoryCacheDynamicHTTPRequestHandler):
   """This handler returns dynamic responses for service worker perf tests.
   """
+  _request_count = 0
   _SIZE_1K = 1024
   _SIZE_10K = 10240
   _SIZE_1M = 1048576
   _FILE_NAME_PATTERN_1K =\
       re.compile('.*/service_worker/resources/data/1K_[0-9]+\\.txt')
+  _WORKER_NAME_PATTERN = re.compile(\
+      '.*/service_worker/resources/service-worker-[0-9]+\\.generated\\.js')
+  _CHANGING_WORKER_NAME_PATTERN = re.compile(\
+      '.*/service_worker/resources/changing-service-worker\\.generated\\.js')
+  _WORKER_BODY = '''
+      self.addEventListener('fetch', (event) => {
+        event.respondWith(new Response('hello'));
+      });'''
 
   def ResponseFromHandler(self, path):
+    self._request_count += 1
     # normalize the path by replacing backslashes with slashes.
     normpath = path.replace('\\', '/')
     if normpath.endswith('/service_worker/resources/data/10K.txt'):
       return self.MakeResponse('c' * self._SIZE_10K, 'text/plain', False)
-    elif normpath.endswith('/service_worker/resources/data/1M.txt'):
+    if normpath.endswith('/service_worker/resources/data/1M.txt'):
       return self.MakeResponse('c' * self._SIZE_1M, 'text/plain', False)
-    elif self._FILE_NAME_PATTERN_1K.match(normpath):
+    if self._FILE_NAME_PATTERN_1K.match(normpath):
       return self.MakeResponse('c' * self._SIZE_1K, 'text/plain', False)
+    if self._WORKER_NAME_PATTERN.match(normpath):
+      return self.MakeResponse(self._WORKER_BODY, 'text/javascript', False)
+    if self._CHANGING_WORKER_NAME_PATTERN.match(normpath):
+      # Return different script content for each request.
+      new_body = self._WORKER_BODY + '//' + str(self._request_count)
+      return self.MakeResponse(new_body, 'text/javascript', False)
     return None
 
 
-@benchmark.Info(
-    component='Blink>ServiceWorker',
-    emails=[
-        'shimazu@chromium.org', 'falken@chromium.org', 'ting.shao@intel.com'
-    ],
-    documentation_url='https://bit.ly/blink-perf-benchmarks')
+@benchmark.Info(component='Blink>ServiceWorker',
+                emails=[
+                    'yyanagisawa@chromium.org',
+                    'chrome-worker@google.com',
+                ],
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfServiceWorker(_BlinkPerfBenchmark):
   SUBDIR = 'service_worker'
 
@@ -432,9 +497,32 @@ class BlinkPerfServiceWorker(_BlinkPerfBenchmark):
     return 'UNSCHEDULED_blink_perf.service_worker'
 
   def CreateStorySet(self, options):
-    story_set = super(BlinkPerfServiceWorker, self).CreateStorySet(options)
+    path = os.path.join(BLINK_PERF_BASE_DIR, self.SUBDIR)
+    story_set = CreateStorySetFromPath(
+        path,
+        SKIPPED_FILE,
+        extra_tags=self.TAGS,
+        page_class=_ServiceWorkerPerfPage)
     story_set.SetRequestHandlerClass(ServiceWorkerRequestHandler)
+    with open(
+        os.path.join(os.path.dirname(__file__), 'service_worker_perf.js'),
+        'r') as f:
+      service_worker_perf_js = f.read()
+      for page in story_set.stories:
+        AddScriptToPage(page, service_worker_perf_js)
     return story_set
+
+
+@benchmark.Info(emails=['csharrison@chromium.org'],
+                component='Blink>Internals>WTF',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfBase64(_BlinkPerfBenchmark):
+  SUBDIR = 'base64'
+  TAGS = _BlinkPerfBenchmark.TAGS + ['all']
+
+  @classmethod
+  def Name(cls):
+    return 'UNSCHEDULED_blink_perf.base64'
 
 
 @benchmark.Info(emails=['futhark@chromium.org', 'andruud@chromium.org'],
@@ -448,7 +536,8 @@ class BlinkPerfCSS(_BlinkPerfBenchmark):
   def Name(cls):
     return 'blink_perf.css'
 
-@benchmark.Info(emails=['masonfreed@chromium.org'],
+
+@benchmark.Info(emails=['masonf@chromium.org'],
                 component='Blink>DOM',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfDOM(_BlinkPerfBenchmark):
@@ -460,7 +549,7 @@ class BlinkPerfDOM(_BlinkPerfBenchmark):
     return 'blink_perf.dom'
 
 
-@benchmark.Info(emails=['masonfreed@chromium.org'],
+@benchmark.Info(emails=['masonf@chromium.org'],
                 component='Blink>DOM',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfEvents(_BlinkPerfBenchmark):
@@ -471,13 +560,8 @@ class BlinkPerfEvents(_BlinkPerfBenchmark):
   def Name(cls):
     return 'blink_perf.events'
 
-  # TODO(yoichio): Migrate EventsDispatching tests to V1 and remove this flags
-  # crbug.com/937716.
-  def SetExtraBrowserOptions(self, options):
-    options.AppendExtraBrowserArgs(['--enable-blink-features=ShadowDOMV0'])
 
-
-@benchmark.Info(emails=['cblume@chromium.org'],
+@benchmark.Info(emails=['dalecurtis@chromium.org', 'vmpstr@chromium.org'],
                 component='Internals>Images>Codecs',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfImageDecoder(_BlinkPerfBenchmark):
@@ -507,7 +591,19 @@ class BlinkPerfLayout(_BlinkPerfBenchmark):
     return 'blink_perf.layout'
 
 
-@benchmark.Info(emails=['dmurph@chromium.org'],
+@benchmark.Info(emails=['pmeenan@chromium.org', 'kouhei@chromium.org'],
+                component='Blink>Loader',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfLoading(_BlinkPerfBenchmark):
+  SUBDIR = 'loading'
+  TAGS = _BlinkPerfBenchmark.TAGS + ['all']
+
+  @classmethod
+  def Name(cls):
+    return 'UNSCHEDULED_blink_perf.loading'
+
+
+@benchmark.Info(emails=['ayui@chromium.org'],
                 component='Blink>Storage',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfOWPStorage(_BlinkPerfBenchmark):
@@ -518,13 +614,16 @@ class BlinkPerfOWPStorage(_BlinkPerfBenchmark):
   def Name(cls):
     return 'blink_perf.owp_storage'
 
-  # This ensures that all blobs >= 20MB will be transported by files.
   def SetExtraBrowserOptions(self, options):
     options.AppendExtraBrowserArgs([
+        # This ensures that all blobs >= 20MB will be transported by files.
+        # TODO(crbug.com/517803856): Fix switch names and the above comment.
         '--blob-transport-by-file-trigger=307300',
         '--blob-transport-min-file-size=2048',
         '--blob-transport-max-file-size=10240',
-        '--blob-transport-shared-memory-max-size=30720'
+        '--blob-transport-shared-memory-max-size=30720',
+        # Enables tests to optionally exercise database cold-open.
+        '--idb-expedite-backing-store-shutdown',
     ])
 
 
@@ -540,10 +639,20 @@ class BlinkPerfPaint(_BlinkPerfBenchmark):
     return 'blink_perf.paint'
 
 
-@benchmark.Info(component='Blink>Bindings',
-                emails=['jbroman@chromium.org',
-                         'yukishiino@chromium.org',
-                         'haraken@chromium.org'],
+@benchmark.Info(emails=['sullivan@chromium.org'],
+                component='Blink>PerformanceAPIs',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfPerformanceAPIs(_BlinkPerfBenchmark):
+  SUBDIR = 'performance_apis'
+  TAGS = _BlinkPerfBenchmark.TAGS + ['all']
+
+  @classmethod
+  def Name(cls):
+    return 'UNSCHEDULED_blink_perf.performance_apis'
+
+
+@benchmark.Info(emails=['masonf@chromium.org'],
+                component='Blink>HTML>Parser',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfParser(_BlinkPerfBenchmark):
   SUBDIR = 'parser'
@@ -566,7 +675,7 @@ class BlinkPerfSVG(_BlinkPerfBenchmark):
     return 'blink_perf.svg'
 
 
-@benchmark.Info(emails=['masonfreed@chromium.org'],
+@benchmark.Info(emails=['masonf@chromium.org'],
                 component='Blink>DOM>ShadowDOM',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfShadowDOM(_BlinkPerfBenchmark):
@@ -577,12 +686,8 @@ class BlinkPerfShadowDOM(_BlinkPerfBenchmark):
   def Name(cls):
     return 'blink_perf.shadow_dom'
 
-  # TODO(yoichio): Migrate shadow-style-share tests to V1 and remove this flags
-  # crbug.com/937716.
-  def SetExtraBrowserOptions(self, options):
-    options.AppendExtraBrowserArgs(['--enable-blink-features=ShadowDOMV0'])
 
-@benchmark.Info(emails=['vmpstr@chromium.org'],
+@benchmark.Info(emails=['vmpstr@chromium.org', 'pdr@chromium.org'],
                 component='Blink>Paint',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfDisplayLocking(_BlinkPerfBenchmark):
@@ -591,13 +696,14 @@ class BlinkPerfDisplayLocking(_BlinkPerfBenchmark):
 
   @classmethod
   def Name(cls):
-    return 'blink_perf.display_locking'
+    return 'UNSCHEDULED_blink_perf.display_locking'
 
   def SetExtraBrowserOptions(self, options):
     options.AppendExtraBrowserArgs(
       ['--enable-blink-features=DisplayLocking,CSSContentSize'])
 
-@benchmark.Info(emails=['hongchan@chromium.org', 'rtoy@chromium.org'],
+
+@benchmark.Info(emails=['hongchan@chromium.org', 'mjwilson@chromium.org'],
                 component='Blink>WebAudio',
                 documentation_url='https://bit.ly/blink-perf-benchmarks')
 class BlinkPerfWebAudio(_BlinkPerfBenchmark):
@@ -607,3 +713,110 @@ class BlinkPerfWebAudio(_BlinkPerfBenchmark):
   @classmethod
   def Name(cls):
     return 'blink_perf.webaudio'
+
+
+@benchmark.Info(emails=['media-dev@chromium.org', 'eugene@chromium.org'],
+                component='Blink>WebCodecs',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfWebCodecs(_BlinkPerfBenchmark):
+  SUBDIR = 'webcodecs'
+  TAGS = _BlinkPerfBenchmark.TAGS + ['all']
+
+  @classmethod
+  def Name(cls):
+    return 'blink_perf.webcodecs'
+
+
+@benchmark.Info(emails=[
+    'kbr@chromium.org',
+    'kainino@chromium.org',
+    'webgl-team@google.com',
+],
+                component='Blink>WebGL',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfWebGL(_BlinkPerfBenchmark):
+  SUBDIR = 'webgl'
+
+  @classmethod
+  def Name(cls):
+    return 'blink_perf.webgl'
+
+
+@benchmark.Info(emails=[
+    'kainino@chromium.org',
+    'cwallez@chromium.org',
+    'webgpu-dev-team@google.com',
+],
+                component='Blink>WebGPU',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfWebGPU(_BlinkPerfBenchmark):
+  # Run the WebGPU perf tests ONLY on core-capable adapters.
+  SUBDIR = 'webgpu'
+
+  @classmethod
+  def Name(cls):
+    return 'blink_perf.webgpu'
+
+  def SetExtraBrowserOptionsWithBrowser(self, options, possible_browser):
+    # Make sure WebGPU is enabled if possible, even if not shipped.
+    # The test itself ensures it won't use a fallback (software) backend.
+    options.AppendExtraBrowserArgs(['--enable-unsafe-webgpu'])
+
+    if possible_browser.platform.GetOSName() == 'linux':
+      # Flags to make sure Chromium is in the correct mode to run WebGPU.
+      # TODO(442791440): TODO(40218893): Remove these flags and switch to
+      # testing the backend we get by default. Or, if needed, test both.
+      options.AppendExtraBrowserArgs([
+          '--enable-features=Vulkan,VulkanFromANGLE',
+          '--use-angle=vulkan',
+          '--ozone-platform=x11',
+      ])
+
+
+@benchmark.Info(emails=[
+    'kainino@chromium.org',
+    'cwallez@chromium.org',
+    'webgpu-dev-team@google.com',
+],
+                component='Blink>WebGPU',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfWebGPUCompat(_BlinkPerfBenchmark):
+  # Run the WebGPU perf tests ONLY on core-INcapable adapters.
+  SUBDIR = 'webgpu'
+  # Currently, Android is the only production target platform for WebGPU
+  # Compat's core-incapable backend(s). Enable other Compat configs as needed.
+  SUPPORTED_PLATFORMS = [story.expectations.ALL_ANDROID]
+
+  @classmethod
+  def Name(cls):
+    return 'blink_perf.webgpu_compat'
+
+  def CreateStorySet(self, options):
+    path = os.path.join(BLINK_PERF_BASE_DIR, self.SUBDIR)
+    return CreateStorySetFromPath(path,
+                                  SKIPPED_FILE,
+                                  extra_tags=self.TAGS,
+                                  append_query='compatonly')
+
+  def SetExtraBrowserOptionsWithBrowser(self, options, possible_browser):
+    # Make sure WebGPU is enabled if possible, even if not shipped.
+    # The test itself ensures it won't use a fallback (software) backend.
+    options.AppendExtraBrowserArgs(['--enable-unsafe-webgpu'])
+
+    # Make sure we're only using the GLES backend. Change this if different
+    # flags are needed on other Core-incapable configs.
+    options.AppendExtraBrowserArgs(['--use-webgpu-adapter=opengles'])
+
+
+@benchmark.Info(emails=[
+    'bokan@chromium.org', 'khushalsagar@chromium.org', 'vmpstr@chromium.org'
+],
+                component='Blink>ViewTransitions',
+                documentation_url='https://bit.ly/blink-perf-benchmarks')
+class BlinkPerfViewTransitions(_BlinkPerfBenchmark):
+  SUBDIR = 'view_transitions'
+  TAGS = _BlinkPerfBenchmark.TAGS + ['all']
+
+  @classmethod
+  def Name(cls):
+    return 'UNSCHEDULED_blink_perf.view_transitions'

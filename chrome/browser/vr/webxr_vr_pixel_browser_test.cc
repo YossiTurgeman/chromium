@@ -1,6 +1,9 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include <atomic>
+#include <memory>
 
 #include "base/environment.h"
 #include "base/files/file.h"
@@ -12,45 +15,26 @@
 #include "chrome/browser/vr/test/ui_utils.h"
 #include "chrome/browser/vr/test/webxr_vr_browser_test.h"
 
-#include <memory>
-
 namespace vr {
 
 class MyXRMock : public MockXRDeviceHookBase {
  public:
-  void OnFrameSubmitted(
-      device_test::mojom::SubmittedFrameDataPtr frame_data,
-      device_test::mojom::XRTestHook::OnFrameSubmittedCallback callback) final;
+  void ProcessSubmittedFrameUnlocked(
+      const std::vector<device::ViewData>& views,
+      const std::vector<device::LayerData>& layers) final;
 
-  void WaitForFrame() {
-    DCHECK(!wait_loop_);
-    if (num_submitted_frames_ > 0)
-      return;
-
-    wait_loop_ = new base::RunLoop(base::RunLoop::Type::kNestableTasksAllowed);
-    wait_loop_->Run();
-    delete wait_loop_;
-    wait_loop_ = nullptr;
-  }
-
-  device_test::mojom::ColorPtr last_submitted_color_ = {};
-  unsigned int num_submitted_frames_ = 0;
-
- private:
-  base::RunLoop* wait_loop_ = nullptr;
+  base::Lock color_lock;
+  device::Color last_submitted_color_ GUARDED_BY(color_lock);
 };
 
-void MyXRMock::OnFrameSubmitted(
-    device_test::mojom::SubmittedFrameDataPtr frame_data,
-    device_test::mojom::XRTestHook::OnFrameSubmittedCallback callback) {
-  last_submitted_color_ = std::move(frame_data->color);
-  num_submitted_frames_++;
-
-  if (wait_loop_) {
-    wait_loop_->Quit();
-  }
-
-  std::move(callback).Run();
+void MyXRMock::ProcessSubmittedFrameUnlocked(
+    const std::vector<device::ViewData>& views,
+    const std::vector<device::LayerData>& layers) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(mock_device_sequence_);
+  base::AutoLock lock(color_lock);
+  // Since we clear the entire context to a single color (see onXRFrame() in
+  // webxr_boilerplate.js), every view in the frame has the same color.
+  last_submitted_color_ = views[0].color;
 }
 
 // Pixel test for WebXR - start presentation, submit frames, get data back
@@ -58,7 +42,7 @@ void MyXRMock::OnFrameSubmitted(
 void TestPresentationPixelsImpl(WebXrVrBrowserTestBase* t,
                                 std::string filename) {
   // Disable frame-timeout UI to test what WebXR renders.
-  UiUtils::DisableFrameTimeoutForTesting();
+  UiUtils::DisableOverlayForTesting();
   MyXRMock my_mock;
 
   // Load the test page, and enter presentation.
@@ -74,16 +58,17 @@ void TestPresentationPixelsImpl(WebXrVrBrowserTestBase* t,
   t->ExecuteStepAndWait("finishTest()");
   t->EndTest();
 
-  my_mock.WaitForFrame();
+  my_mock.WaitForTotalFrameCount(1);
 
-  auto expected = device_test::mojom::Color::New(0, 0, 255, 255);
-  EXPECT_EQ(expected->r, my_mock.last_submitted_color_->r)
+  base::AutoLock lock(my_mock.color_lock);
+  device::Color expected(0, 0, 255, 255);
+  EXPECT_EQ(expected.r, my_mock.last_submitted_color_.r)
       << "Red channel of submitted color does not match expectation";
-  EXPECT_EQ(expected->g, my_mock.last_submitted_color_->g)
+  EXPECT_EQ(expected.g, my_mock.last_submitted_color_.g)
       << "Green channel of submitted color does not match expectation";
-  EXPECT_EQ(expected->b, my_mock.last_submitted_color_->b)
+  EXPECT_EQ(expected.b, my_mock.last_submitted_color_.b)
       << "Blue channel of submitted color does not match expectation";
-  EXPECT_EQ(expected->a, my_mock.last_submitted_color_->a)
+  EXPECT_EQ(expected.a, my_mock.last_submitted_color_.a)
       << "Alpha channel of submitted color does not match expectation";
 }
 

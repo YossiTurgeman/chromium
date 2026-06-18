@@ -1,20 +1,18 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/devtools/device/tcp_device_provider.h"
 
+#include <algorithm>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
-#include "base/single_thread_task_runner.h"
-#include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/devtools/device/adb/adb_client_socket.h"
 #include "chrome/browser/net/system_network_context_manager.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -22,6 +20,7 @@
 #include "net/base/completion_repeating_callback.h"
 #include "net/base/net_errors.h"
 #include "net/base/network_isolation_key.h"
+#include "net/dns/public/host_resolver_results.h"
 #include "net/dns/public/resolve_error_info.h"
 #include "net/log/net_log_source.h"
 #include "net/log/net_log_with_source.h"
@@ -34,18 +33,17 @@ namespace {
 const char kDeviceModel[] = "Remote Target";
 const char kBrowserName[] = "Target";
 
-static void RunSocketCallback(
-    const AndroidDeviceManager::SocketCallback& callback,
-    std::unique_ptr<net::StreamSocket> socket,
-    int result) {
-  callback.Run(result, std::move(socket));
+static void RunSocketCallback(AndroidDeviceManager::SocketCallback callback,
+                              std::unique_ptr<net::StreamSocket> socket,
+                              int result) {
+  std::move(callback).Run(result, std::move(socket));
 }
 
 class ResolveHostAndOpenSocket final : public network::ResolveHostClientBase {
  public:
   ResolveHostAndOpenSocket(const net::HostPortPair& address,
-                           const AdbClientSocket::SocketCallback& callback)
-      : callback_(callback) {
+                           AndroidDeviceManager::SocketCallback callback)
+      : callback_(std::move(callback)) {
     mojo::Remote<network::mojom::HostResolver> resolver;
     content::GetUIThreadTaskRunner({})->PostTask(
         FROM_HERE, base::BindOnce(
@@ -53,19 +51,22 @@ class ResolveHostAndOpenSocket final : public network::ResolveHostClientBase {
                               pending_receiver) {
                          g_browser_process->system_network_context_manager()
                              ->GetContext()
-                             ->CreateHostResolver(base::nullopt,
+                             ->CreateHostResolver(std::nullopt,
                                                   std::move(pending_receiver));
                        },
                        resolver.BindNewPipeAndPassReceiver()));
-    // Fine to use a transient NetworkIsolationKey here - this is for debugging,
-    // so performance doesn't matter, and it doesn't need to share a DNS cache
-    // with anything else.
-    resolver->ResolveHost(address, net::NetworkIsolationKey::CreateTransient(),
-                          nullptr, receiver_.BindNewPipeAndPassRemote());
-    receiver_.set_disconnect_handler(
-        base::BindOnce(&ResolveHostAndOpenSocket::OnComplete,
-                       base::Unretained(this), net::ERR_NAME_NOT_RESOLVED,
-                       net::ResolveErrorInfo(net::ERR_FAILED), base::nullopt));
+    // Intentionally using a HostPortPair because scheme isn't specified.
+    // Fine to use a transient NetworkAnonymizationKey here - this is for
+    // debugging, so performance doesn't matter, and it doesn't need to share a
+    // DNS cache with anything else.
+    resolver->ResolveHost(
+        network::mojom::HostResolverHost::NewHostPortPair(address),
+        net::NetworkAnonymizationKey::CreateTransient(), nullptr,
+        receiver_.BindNewPipeAndPassRemote());
+    receiver_.set_disconnect_handler(base::BindOnce(
+        &ResolveHostAndOpenSocket::OnComplete, base::Unretained(this),
+        net::ERR_NAME_NOT_RESOLVED, net::ResolveErrorInfo(net::ERR_FAILED),
+        net::AddressList(), net::HostResolverEndpointResults()));
   }
 
  private:
@@ -73,26 +74,27 @@ class ResolveHostAndOpenSocket final : public network::ResolveHostClientBase {
   void OnComplete(
       int result,
       const net::ResolveErrorInfo& resolve_error_info,
-      const base::Optional<net::AddressList>& resolved_addresses) override {
+      const net::AddressList& resolved_addresses,
+      const net::HostResolverEndpointResults& alternative_endpoints) override {
     if (result != net::OK) {
-      RunSocketCallback(callback_, nullptr, resolve_error_info.error);
+      RunSocketCallback(std::move(callback_), nullptr,
+                        resolve_error_info.error);
       delete this;
       return;
     }
-    std::unique_ptr<net::StreamSocket> socket(
-        new net::TCPClientSocket(resolved_addresses.value(), nullptr, nullptr,
-                                 nullptr, net::NetLogSource()));
+    std::unique_ptr<net::StreamSocket> socket(new net::TCPClientSocket(
+        resolved_addresses, nullptr, nullptr, nullptr, net::NetLogSource()));
     net::StreamSocket* socket_ptr = socket.get();
-    net::CompletionRepeatingCallback on_connect =
-        base::AdaptCallbackForRepeating(
-            base::BindOnce(&RunSocketCallback, callback_, std::move(socket)));
-    result = socket_ptr->Connect(on_connect);
-    if (result != net::ERR_IO_PENDING)
-      on_connect.Run(result);
+    auto split_callback = base::SplitOnceCallback(base::BindOnce(
+        &RunSocketCallback, std::move(callback_), std::move(socket)));
+    result = socket_ptr->Connect(std::move(split_callback.first));
+    if (result != net::ERR_IO_PENDING) {
+      std::move(split_callback.second).Run(result);
+    }
     delete this;
   }
 
-  AdbClientSocket::SocketCallback callback_;
+  AndroidDeviceManager::SocketCallback callback_;
   mojo::Receiver<network::mojom::ResolveHostClient> receiver_{this};
 };
 
@@ -109,22 +111,27 @@ TCPDeviceProvider::TCPDeviceProvider(const HostPortSet& targets)
     : targets_(targets) {
 }
 
-void TCPDeviceProvider::QueryDevices(const SerialsCallback& callback) {
-  std::vector<std::string> result;
+void TCPDeviceProvider::QueryDevices(SerialsCallback callback) {
+  std::vector<
+      std::pair<std::string, AndroidDeviceManager::DeviceInfo::ConnectedState>>
+      result;
   for (const net::HostPortPair& target : targets_) {
-    const std::string& host = target.host();
-    if (base::Contains(result, host))
+    const std::pair<std::string,
+                    AndroidDeviceManager::DeviceInfo::ConnectedState>
+        host = {target.host(), AndroidDeviceManager::DeviceInfo::kUnknown};
+    if (std::ranges::contains(result, host)) {
       continue;
+    }
     result.push_back(host);
   }
-  callback.Run(result);
+  std::move(callback).Run(std::move(result));
 }
 
 void TCPDeviceProvider::QueryDeviceInfo(const std::string& serial,
-                                        const DeviceInfoCallback& callback) {
+                                        DeviceInfoCallback callback) {
   AndroidDeviceManager::DeviceInfo device_info;
   device_info.model = kDeviceModel;
-  device_info.connected = true;
+  device_info.connected_state = AndroidDeviceManager::DeviceInfo::kConnected;
 
   for (const net::HostPortPair& target : targets_) {
     if (serial != target.host())
@@ -137,29 +144,29 @@ void TCPDeviceProvider::QueryDeviceInfo(const std::string& serial,
     device_info.browser_info.push_back(browser_info);
   }
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE, base::BindOnce(callback, device_info));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(callback), device_info));
 }
 
 void TCPDeviceProvider::OpenSocket(const std::string& serial,
                                    const std::string& socket_name,
-                                   const SocketCallback& callback) {
+                                   SocketCallback callback) {
   // Use plain socket for remote debugging and port forwarding on Desktop
   // (debugging purposes).
   int port;
   base::StringToInt(socket_name, &port);
-  new ResolveHostAndOpenSocket(net::HostPortPair(serial, port), callback);
+  new ResolveHostAndOpenSocket(net::HostPortPair(serial, port),
+                               std::move(callback));
 }
 
 void TCPDeviceProvider::ReleaseDevice(const std::string& serial) {
   if (!release_callback_.is_null())
-    release_callback_.Run();
+    std::move(release_callback_).Run();
 }
 
 void TCPDeviceProvider::set_release_callback_for_test(
-    const base::Closure& callback) {
-  release_callback_ = callback;
+    base::OnceClosure callback) {
+  release_callback_ = std::move(callback);
 }
 
-TCPDeviceProvider::~TCPDeviceProvider() {
-}
+TCPDeviceProvider::~TCPDeviceProvider() = default;

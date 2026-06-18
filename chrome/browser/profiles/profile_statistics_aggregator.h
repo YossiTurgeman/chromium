@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,28 @@
 #include <memory>
 #include <vector>
 
-#include "base/callback_forward.h"
-#include "base/files/file_path.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/profiles/profile_statistics_common.h"
+#include "components/autofill/core/browser/webdata/autofill_webdata_service.h"
 #include "components/browsing_data/core/counters/browsing_data_counter.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
+#include "device/fido/platform_credential_store.h"
 
-class Profile;
+class PrefService;
+
+namespace autofill {
+class EntityDataManager;
+class PersonalDataManager;
+}  // namespace autofill
+
+namespace bookmarks {
+class BookmarkModel;
+}  // namespace bookmarks
+
+namespace history {
+class HistoryService;
+}  // namespace history
 
 class ProfileStatisticsAggregator {
   // This class is used internally by ProfileStatistics
@@ -23,15 +39,25 @@ class ProfileStatisticsAggregator {
   // logins and sites with autofill forms are counted.
 
  public:
-  ProfileStatisticsAggregator(Profile* profile,
-                              const base::Closure& done_callback);
+  ProfileStatisticsAggregator(
+      scoped_refptr<autofill::AutofillWebDataService> autofill_web_data_service,
+      autofill::PersonalDataManager* personal_data_manager,
+      const autofill::EntityDataManager* entity_data_manager,
+      bookmarks::BookmarkModel* bookmark_model,
+      history::HistoryService* history_service,
+      scoped_refptr<password_manager::PasswordStoreInterface>
+          profile_password_store,
+      PrefService* pref_service,
+      std::unique_ptr<device::fido::PlatformCredentialStore>
+          platform_credential_store,
+      base::OnceClosure done_callback);
   ProfileStatisticsAggregator(const ProfileStatisticsAggregator&) = delete;
   ProfileStatisticsAggregator& operator=(const ProfileStatisticsAggregator&) =
       delete;
   ~ProfileStatisticsAggregator();
 
   void AddCallbackAndStartAggregator(
-      const profiles::ProfileStatisticsCallback& stats_callback);
+      profiles::ProfileStatisticsCallback stats_callback);
 
  private:
   // Start gathering statistics. Also cancels existing statistics tasks.
@@ -49,8 +75,19 @@ class ProfileStatisticsAggregator {
   // Registers, initializes and starts a BrowsingDataCounter.
   void AddCounter(std::unique_ptr<browsing_data::BrowsingDataCounter> counter);
 
-  Profile* profile_;
-  base::FilePath profile_path_;
+  const scoped_refptr<autofill::AutofillWebDataService>
+      autofill_web_data_service_;
+  const raw_ptr<autofill::PersonalDataManager> personal_data_manager_;
+  const raw_ptr<const autofill::EntityDataManager> entity_data_manager_;
+  const raw_ptr<bookmarks::BookmarkModel> bookmark_model_;
+  const raw_ptr<history::HistoryService> history_service_;
+  const scoped_refptr<password_manager::PasswordStoreInterface>
+      profile_password_store_;
+  const raw_ptr<PrefService> pref_service_;
+
+  std::unique_ptr<device::fido::PlatformCredentialStore>
+      platform_credential_store_;
+
   profiles::ProfileCategoryStats profile_category_stats_;
 
   // Callback function to be called when results arrive. Will be called
@@ -58,7 +95,7 @@ class ProfileStatisticsAggregator {
   std::vector<profiles::ProfileStatisticsCallback> stats_callbacks_;
 
   // Callback function to be called when all statistics are calculated.
-  base::Closure done_callback_;
+  base::OnceClosure done_callback_;
 
   std::vector<std::unique_ptr<browsing_data::BrowsingDataCounter>> counters_;
 };

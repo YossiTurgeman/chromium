@@ -23,13 +23,14 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/editing/commands/editing_commands_utilities.h"
 
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
+#include "third_party/blink/public/web/web_local_frame_client.h"
+#include "third_party/blink/renderer/core/clipboard/data_transfer.h"
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/commands/selection_for_undo_step.h"
 #include "third_party/blink/renderer/core/editing/commands/typing_command.h"
@@ -41,12 +42,17 @@
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame_client.h"
 #include "third_party/blink/renderer/core/frame/web_feature_forward.h"
+#include "third_party/blink/renderer/core/html/custom/custom_element_registry.h"
 #include "third_party/blink/renderer/core/html/html_body_element.h"
+#include "third_party/blink/renderer/core/html/html_frame_set_element.h"
+#include "third_party/blink/renderer/core/html/html_head_element.h"
 #include "third_party/blink/renderer/core/html/html_html_element.h"
+#include "third_party/blink/renderer/core/html/html_olist_element.h"
+#include "third_party/blink/renderer/core/html/html_ulist_element.h"
 #include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/layout/layout_text.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 
 namespace blink {
@@ -93,15 +99,33 @@ bool IsNodeRendered(const Node& node) {
   if (!layout_object)
     return false;
 
-  return layout_object->Style()->Visibility() == EVisibility::kVisible;
+  return layout_object->StyleRef().Visibility() == EVisibility::kVisible;
 }
 
-bool IsInline(const Node* node) {
-  if (!node)
+bool IsInlineElement(const Node* node) {
+  const Element* element = DynamicTo<Element>(node);
+  if (!element) {
     return false;
+  }
+  const ComputedStyle* style = element->GetComputedStyle();
+  // Should we apply IsDisplayInlineType()?
+  return style && (style->Display() == EDisplay::kInline ||
+                   style->Display() == EDisplay::kRuby);
+}
 
-  const ComputedStyle* style = node->GetComputedStyle();
-  return style && style->Display() == EDisplay::kInline;
+bool IsInlineNode(const Node* node) {
+  if (!node) {
+    return false;
+  }
+
+  if (IsInlineElement(node)) {
+    return true;
+  }
+
+  if (LayoutObject* layout_object = node->GetLayoutObject()) {
+    return layout_object->IsInline();
+  }
+  return false;
 }
 
 // FIXME: This method should not need to call
@@ -140,7 +164,7 @@ bool AreIdenticalElements(const Node& first, const Node& second) {
   if (!first_element->HasEquivalentAttributes(*second_element))
     return false;
 
-  return HasEditableStyle(*first_element) && HasEditableStyle(*second_element);
+  return IsEditable(*first_element) && IsEditable(*second_element);
 }
 
 // FIXME: need to dump this
@@ -155,8 +179,9 @@ static bool IsSpecialHTMLElement(const Node& n) {
   if (!layout_object)
     return false;
 
-  if (layout_object->Style()->IsDisplayTableBox())
+  if (layout_object->StyleRef().IsDisplayTable()) {
     return true;
+  }
 
   if (layout_object->IsFloating())
     return true;
@@ -253,8 +278,10 @@ bool LineBreakExistsAtPosition(const Position& position) {
     return false;
 
   const auto* text_node = DynamicTo<Text>(position.AnchorNode());
-  if (!text_node || !text_node->GetLayoutObject()->Style()->PreserveNewline())
+  if (!text_node ||
+      text_node->GetLayoutObject()->StyleRef().ShouldCollapseBreaks()) {
     return false;
+  }
 
   unsigned offset = position.OffsetInContainerNode();
   return offset < text_node->length() && text_node->data()[offset] == '\n';
@@ -321,13 +348,14 @@ Position LeadingCollapsibleWhitespacePosition(const Position& position,
     return Position();
   if (option == kNotConsiderNonCollapsibleWhitespace &&
       anchor_node->GetLayoutObject() &&
-      !anchor_node->GetLayoutObject()->Style()->CollapseWhiteSpace())
+      anchor_node->GetLayoutObject()->StyleRef().ShouldPreserveWhiteSpaces()) {
     return Position();
+  }
   const String& string = anchor_text_node->data();
   const UChar previous_character = string[prev.ComputeOffsetInContainerNode()];
   const bool is_space = option == kConsiderNonCollapsibleWhitespace
-                            ? (IsSpaceOrNewline(previous_character) ||
-                               previous_character == kNoBreakSpaceCharacter)
+                            ? (unicode::IsSpaceOrNewline(previous_character) ||
+                               previous_character == uchar::kNoBreakSpace)
                             : IsCollapsibleWhitespace(previous_character);
   if (!is_space || !IsEditablePosition(prev))
     return Position();
@@ -352,7 +380,8 @@ HTMLElement* CreateHTMLElement(Document& document, const QualifiedName& name) {
   DCHECK_EQ(name.NamespaceURI(), html_names::xhtmlNamespaceURI)
       << "Unexpected namespace: " << name;
   return To<HTMLElement>(document.CreateElement(
-      name, CreateElementFlags::ByCloneNode(), g_null_atom));
+      name, CreateElementFlags::ByCloneNode(), g_null_atom,
+      CustomElementRegistry::DefaultRegistry(document)));
 }
 
 HTMLElement* EnclosingList(const Node* node) {
@@ -383,9 +412,9 @@ Node* EnclosingListChild(const Node* node) {
   // instead of node->parentNode()
   for (Node* n = const_cast<Node*>(node); n && n->parentNode();
        n = n->parentNode()) {
-    if (IsA<HTMLLIElement>(*n) ||
-        (IsHTMLListElement(n->parentNode()) && n != root))
+    if ((IsListItemTag(n) || IsListElementTag(n->parentNode())) && n != root) {
       return n;
+    }
     if (n == root || IsTableCell(n))
       return nullptr;
   }
@@ -425,8 +454,8 @@ bool CanMergeLists(const Element& first_list, const Element& second_list) {
   return first_list.HasTagName(
              second_list
                  .TagQName())  // make sure the list types match (ol vs. ul)
-         && HasEditableStyle(first_list) &&
-         HasEditableStyle(second_list)  // both lists are editable
+         && IsEditable(first_list) &&
+         IsEditable(second_list)  // both lists are editable
          &&
          RootEditableElement(first_list) ==
              RootEditableElement(second_list)  // don't cross editing boundaries
@@ -456,13 +485,13 @@ VisibleSelection SelectionForParagraphIteration(
           PreviousPositionOf(end_of_selection, kCannotCrossEditingBoundary);
       if (new_end.IsNotNull()) {
         new_selection = CreateVisibleSelection(
-            SelectionInDOMTree::Builder()
+            SelectionInDomTree::Builder()
                 .Collapse(start_of_selection.ToPositionWithAffinity())
                 .Extend(new_end.DeepEquivalent())
                 .Build());
       } else {
         new_selection = CreateVisibleSelection(
-            SelectionInDOMTree::Builder()
+            SelectionInDomTree::Builder()
                 .Collapse(start_of_selection.ToPositionWithAffinity())
                 .Build());
       }
@@ -480,13 +509,13 @@ VisibleSelection SelectionForParagraphIteration(
           NextPositionOf(start_of_selection, kCannotCrossEditingBoundary);
       if (new_start.IsNotNull()) {
         new_selection = CreateVisibleSelection(
-            SelectionInDOMTree::Builder()
+            SelectionInDomTree::Builder()
                 .Collapse(new_start.ToPositionWithAffinity())
                 .Extend(end_of_selection.DeepEquivalent())
                 .Build());
       } else {
         new_selection = CreateVisibleSelection(
-            SelectionInDOMTree::Builder()
+            SelectionInDomTree::Builder()
                 .Collapse(end_of_selection.ToPositionWithAffinity())
                 .Build());
       }
@@ -498,7 +527,7 @@ VisibleSelection SelectionForParagraphIteration(
 
 const String& NonBreakingSpaceString() {
   DEFINE_STATIC_LOCAL(String, non_breaking_space_string,
-                      (&kNoBreakSpaceCharacter, 1));
+                      (base::span_from_ref(uchar::kNoBreakSpace)));
   return non_breaking_space_string;
 }
 
@@ -506,12 +535,11 @@ const String& NonBreakingSpaceString() {
 // which assumes a document has a valid HTML structure. We should make the
 // editing code more robust, and should remove this hack. crbug.com/580941.
 void TidyUpHTMLStructure(Document& document) {
-  // hasEditableStyle() needs up-to-date ComputedStyle.
+  // IsEditable() needs up-to-date ComputedStyle.
   document.UpdateStyleAndLayoutTree();
   const bool needs_valid_structure =
-      HasEditableStyle(document) ||
-      (document.documentElement() &&
-       HasEditableStyle(*document.documentElement()));
+      IsEditable(document) ||
+      (document.documentElement() && IsEditable(*document.documentElement()));
   if (!needs_valid_structure)
     return;
 
@@ -581,11 +609,11 @@ InputEvent::InputType DeletionInputTypeFromTextGranularity(
 void DispatchEditableContentChangedEvents(Element* start_root,
                                           Element* end_root) {
   if (start_root) {
-    start_root->DispatchEvent(
+    start_root->DefaultEventHandler(
         *Event::Create(event_type_names::kWebkitEditableContentChanged));
   }
   if (end_root && end_root != start_root) {
-    end_root->DispatchEvent(
+    end_root->DefaultEventHandler(
         *Event::Create(event_type_names::kWebkitEditableContentChanged));
   }
 }
@@ -593,13 +621,23 @@ void DispatchEditableContentChangedEvents(Element* start_root,
 static void DispatchInputEvent(Element* target,
                                InputEvent::InputType input_type,
                                const String& data,
-                               InputEvent::EventIsComposing is_composing) {
+                               InputEvent::EventIsComposing is_composing,
+                               DataTransfer* data_transfer) {
   if (!target)
     return;
+
   // TODO(editing-dev): Pass appreciate |ranges| after it's defined on spec.
   // http://w3c.github.io/editing/input-events.html#dom-inputevent-inputtype
+
+  // If the parent node is a textarea or input, we should not use dataTransfer
+  // but data as defined on spec.
+  // https://www.w3.org/TR/input-events-1/#overview
+  bool use_data_transfer = data_transfer && !EnclosingTextControl(target);
   InputEvent* const input_event =
-      InputEvent::CreateInput(input_type, data, is_composing, nullptr);
+      use_data_transfer
+          ? InputEvent::CreateInput(input_type, data_transfer, is_composing,
+                                    nullptr)
+          : InputEvent::CreateInput(input_type, data, is_composing, nullptr);
   target->DispatchScopedEvent(*input_event);
 }
 
@@ -608,31 +646,40 @@ void DispatchInputEventEditableContentChanged(
     Element* end_root,
     InputEvent::InputType input_type,
     const String& data,
-    InputEvent::EventIsComposing is_composing) {
-  if (start_root)
-    DispatchInputEvent(start_root, input_type, data, is_composing);
+    InputEvent::EventIsComposing is_composing,
+    DataTransfer* data_transfer) {
+  if (start_root) {
+    DispatchInputEvent(start_root, input_type, data, is_composing,
+                       data_transfer);
+  }
   if (end_root && end_root != start_root)
-    DispatchInputEvent(end_root, input_type, data, is_composing);
+    DispatchInputEvent(end_root, input_type, data, is_composing, data_transfer);
 }
 
-SelectionInDOMTree CorrectedSelectionAfterCommand(
+SelectionInDomTree CorrectedSelectionAfterCommand(
     const SelectionForUndoStep& passed_selection,
-    const Document* document) {
-  if (!passed_selection.Base().IsValidFor(*document) ||
-      !passed_selection.Extent().IsValidFor(*document))
-    return SelectionInDOMTree();
-  return passed_selection.AsSelection();
+    Document* document) {
+  if (!passed_selection.Anchor().IsValidFor(*document) ||
+      !passed_selection.Focus().IsValidFor(*document)) {
+    return SelectionInDomTree();
+  }
+  if (RuntimeEnabledFeatures::RemoveVisibleSelectionInDOMSelectionEnabled()) {
+    document->UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+    return CreateVisibleSelection(passed_selection.AsSelection()).AsSelection();
+  } else {
+    return passed_selection.AsSelection();
+  }
 }
 
 void ChangeSelectionAfterCommand(LocalFrame* frame,
-                                 const SelectionInDOMTree& new_selection,
+                                 const SelectionInDomTree& new_selection,
                                  const SetSelectionOptions& options) {
   if (new_selection.IsNone())
     return;
   // See <rdar://problem/5729315> Some shouldChangeSelectedDOMRange contain
   // Ranges for selections that are no longer valid
   const bool selection_did_not_change_dom_position =
-      new_selection == frame->Selection().GetSelectionInDOMTree() &&
+      new_selection == frame->Selection().GetSelectionInDomTree() &&
       options.IsDirectional() == frame->Selection().IsDirectional();
   const bool handle_visible =
       frame->Selection().IsHandleVisible() && new_selection.IsRange();
@@ -655,7 +702,8 @@ void ChangeSelectionAfterCommand(LocalFrame* frame,
   if (!selection_did_not_change_dom_position)
     return;
   frame->Client()->DidChangeSelection(
-      frame->Selection().GetSelectionInDOMTree().Type() != kRangeSelection);
+      !frame->Selection().GetSelectionInDomTree().IsRange(),
+      blink::SyncCondition::kNotForced);
 }
 
 InputEvent::EventIsComposing IsComposingFromCommand(
@@ -705,6 +753,42 @@ bool IsEndOfBlock(const VisiblePosition& pos) {
   return pos.IsNotNull() &&
          pos.DeepEquivalent() ==
              EndOfBlock(pos, kCanCrossEditingBoundary).DeepEquivalent();
+}
+
+// Position-based block overloads.
+
+Position StartOfBlock(const Position& position,
+                      EditingBoundaryCrossingRule rule) {
+  if (position.IsNull())
+    return Position();
+  Element* start_block =
+      position.ComputeContainerNode()
+          ? EnclosingBlock(position.ComputeContainerNode(), rule)
+          : nullptr;
+  return start_block ? Position::FirstPositionInNode(*start_block) : Position();
+}
+
+Position EndOfBlock(const Position& position,
+                    EditingBoundaryCrossingRule rule) {
+  if (position.IsNull())
+    return Position();
+  Element* end_block =
+      position.ComputeContainerNode()
+          ? EnclosingBlock(position.ComputeContainerNode(), rule)
+          : nullptr;
+  return end_block ? Position::LastPositionInNode(*end_block) : Position();
+}
+
+bool IsStartOfBlock(const Position& pos) {
+  if (pos.IsNull())
+    return false;
+  return pos == StartOfBlock(pos, kCanCrossEditingBoundary);
+}
+
+bool IsEndOfBlock(const Position& pos) {
+  if (pos.IsNull())
+    return false;
+  return pos == EndOfBlock(pos, kCanCrossEditingBoundary);
 }
 
 }  // namespace blink

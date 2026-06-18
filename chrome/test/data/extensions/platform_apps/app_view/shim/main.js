@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -72,8 +72,8 @@ function testAppViewWithUndefinedDataShouldSucceed(appToEmbed) {
   var appview = new AppView();
   LOG('appToEmbed  ' + appToEmbed);
   document.body.appendChild(appview);
-  // Step 1: Attempt to connect to a non-existant app.
-  LOG('attempting to connect to non-existant app.');
+  // Step 1: Attempt to connect to a non-existent app.
+  LOG('attempting to connect to non-existent app.');
   appview.connect('abc123', undefined, function(success) {
     // Make sure we fail.
     if (success) {
@@ -81,7 +81,7 @@ function testAppViewWithUndefinedDataShouldSucceed(appToEmbed) {
       embedder.test.fail();
       return;
     }
-    LOG('failed to connect to non-existant app.');
+    LOG('failed to connect to non-existent app.');
     LOG('attempting to connect to known app.');
     // Step 2: Attempt to connect to an app we know exists.
     appview.connect(appToEmbed, undefined, function(success) {
@@ -207,6 +207,36 @@ function testAppViewEmbedSelfShouldFail(appToEmbed) {
   });
 };
 
+function testCloseWithPendingEmbedRequest(appToEmbed) {
+  let appview = new AppView();
+  document.body.appendChild(appview);
+  appview.connect(appToEmbed, { 'deferRequest': true });
+  // The test continues on the C++ side.
+  embedder.test.succeed();
+};
+
+function testFocusWebViewInAppView(appToEmbed) {
+  let appview = new AppView();
+  appview.style.border = 'solid';
+  document.body.appendChild(appview);
+  appview.connect(
+      appToEmbed, {'runWebViewInAppViewFocusTest': true}, (success) => {
+        embedder.test.assertTrue(success);
+        appview.focus();
+        // The test continues on the C++ side.
+        embedder.test.succeed();
+      });
+};
+
+function testBasicConnect(appToEmbed) {
+  let appview = new AppView();
+  document.body.appendChild(appview);
+  appview.connect(appToEmbed, {}, (success) => {
+    embedder.test.assertTrue(success);
+    embedder.test.succeed();
+  });
+}
+
 embedder.test.testList = {
   'testAppViewWithUndefinedDataShouldSucceed':
       testAppViewWithUndefinedDataShouldSucceed,
@@ -215,7 +245,10 @@ embedder.test.testList = {
   'testAppViewMultipleConnects': testAppViewMultipleConnects,
   'testAppViewConnectFollowingPreviousConnect':
       testAppViewConnectFollowingPreviousConnect,
-  'testAppViewEmbedSelfShouldFail': testAppViewEmbedSelfShouldFail
+  'testAppViewEmbedSelfShouldFail': testAppViewEmbedSelfShouldFail,
+  'testCloseWithPendingEmbedRequest': testCloseWithPendingEmbedRequest,
+  'testFocusWebViewInAppView': testFocusWebViewInAppView,
+  'testBasicConnect': testBasicConnect,
 };
 
 onload = function() {

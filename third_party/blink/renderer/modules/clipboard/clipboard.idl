@@ -1,32 +1,48 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // https://w3c.github.io/clipboard-apis/#clipboard-interface
+
+dictionary ClipboardReadOptions {
+  // https://chromestatus.com/feature/5203433409871872
+  // If types is provided, only the specified MIME types will be fetched.
+  // If `types` is an empty sequence (e.g. []), no clipboard read operation will be
+  // performed. If `types` is undefined, all available MIME types will be
+  // read.
+  [RuntimeEnabled=SelectiveClipboardFormatRead] sequence<DOMString>? types;
+  sequence<DOMString> unsanitized;
+};
 
 [
     SecureContext,
     Exposed=Window
 ] interface Clipboard : EventTarget {
     [MeasureAs=AsyncClipboardAPIRead,
-     CallWith=ScriptState
+     CallWith=ScriptState,
+     RaisesException
     ] Promise<sequence<ClipboardItem>> read();
 
-    [MeasureAs=AsyncClipboardAPIRead,
+    [MeasureAs=AsyncClipboardAPIUnsanitizedRead,
      CallWith=ScriptState,
-     RuntimeEnabled=RawClipboard
-    ] Promise<sequence<ClipboardItem>> read(ClipboardItemOptions options);
+     RaisesException
+    ] Promise<sequence<ClipboardItem>> read(ClipboardReadOptions options);
 
     [MeasureAs=AsyncClipboardAPIReadText,
-     CallWith=ScriptState
+     CallWith=ScriptState,
+     RaisesException
     ] Promise<DOMString> readText();
 
 
     [MeasureAs=AsyncClipboardAPIWrite,
-     CallWith=ScriptState
-    ] Promise<void> write(sequence<ClipboardItem> data);
+     CallWith=ScriptState,
+     RaisesException
+    ] Promise<undefined> write(sequence<ClipboardItem> data);
 
     [MeasureAs=AsyncClipboardAPIWriteText,
-     CallWith=ScriptState
-    ] Promise<void> writeText(DOMString data);
+     CallWith=ScriptState,
+     RaisesException
+    ] Promise<undefined> writeText(DOMString data);
+
+    attribute EventHandler onclipboardchange;
 };

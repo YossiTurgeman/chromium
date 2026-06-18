@@ -1,8 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.content.browser.sms;
+
+import static org.chromium.build.NullUtil.assumeNonNull;
 
 import android.app.Activity;
 import android.content.BroadcastReceiver;
@@ -10,42 +12,33 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 
-import androidx.annotation.VisibleForTesting;
-
 import com.google.android.gms.auth.api.phone.SmsRetriever;
+import com.google.android.gms.auth.api.phone.SmsRetrieverClient;
 import com.google.android.gms.common.api.CommonStatusCodes;
 import com.google.android.gms.common.api.Status;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.Task;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.base.IntentUtils;
 import org.chromium.base.Log;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNIAdditionalImport;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.ui.base.WindowAndroid;
 
-/**
- * Simple proxy that provides C++ code with a pathway to the Android SMS
- * Retriever to access the SMS User Consent API.
- */
-@JNINamespace("content")
-@JNIAdditionalImport(Wrappers.class)
+/** Encapsulates logic to retrieve OTP code via SMS User Consent API. */
+@NullMarked
 public class SmsUserConsentReceiver extends BroadcastReceiver {
     private static final String TAG = "SmsUserConsentRcvr";
     private static final boolean DEBUG = false;
-    private final long mSmsProviderAndroid;
+    private final SmsProviderGms mProvider;
     private boolean mDestroyed;
-    private Wrappers.SmsRetrieverClientWrapper mClient;
-    private Wrappers.SmsReceiverContext mContext;
-    private WindowAndroid mWindowAndroid;
+    private final Wrappers.WebOTPServiceContext mContext;
 
-    private SmsUserConsentReceiver(long smsProviderAndroid) {
+    public SmsUserConsentReceiver(SmsProviderGms provider, Wrappers.WebOTPServiceContext context) {
         mDestroyed = false;
-        mSmsProviderAndroid = smsProviderAndroid;
-
-        mContext = new Wrappers.SmsReceiverContext(ContextUtils.getApplicationContext());
+        mProvider = provider;
+        mContext = context;
 
         // A broadcast receiver is registered upon the creation of this class
         // which happens when the SMS Retriever API is used for the first time
@@ -57,17 +50,16 @@ public class SmsUserConsentReceiver extends BroadcastReceiver {
         if (DEBUG) Log.d(TAG, "Registering intent filters.");
         IntentFilter filter = new IntentFilter();
         filter.addAction(SmsRetriever.SMS_RETRIEVED_ACTION);
-        mContext.registerReceiver(this, filter);
+        ContextUtils.registerExportedBroadcastReceiver(
+                mContext, this, filter, SmsRetriever.SEND_PERMISSION);
     }
 
-    @CalledByNative
-    private static SmsUserConsentReceiver create(long smsProviderAndroid) {
-        if (DEBUG) Log.d(TAG, "Creating SmsUserConsentReceiver.");
-        return new SmsUserConsentReceiver(smsProviderAndroid);
+    public SmsRetrieverClient createClient() {
+        return SmsRetriever.getClient(mContext);
     }
 
-    @CalledByNative
-    private void destroy() {
+    public void destroy() {
+        if (mDestroyed) return;
         if (DEBUG) Log.d(TAG, "Destroying SmsUserConsentReceiver.");
         mDestroyed = true;
         mContext.unregisterReceiver(this);
@@ -75,8 +67,6 @@ public class SmsUserConsentReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        assert mWindowAndroid != null;
-
         if (DEBUG) Log.d(TAG, "Received something!");
 
         if (mDestroyed) {
@@ -91,75 +81,51 @@ public class SmsUserConsentReceiver extends BroadcastReceiver {
             return;
         }
 
-        final Status status;
-
-        try {
-            status = (Status) intent.getParcelableExtra(SmsRetriever.EXTRA_STATUS);
-        } catch (Throwable e) {
-            if (DEBUG) Log.d(TAG, "Error getting parceable.");
+        final Status status = IntentUtils.safeGetParcelableExtra(intent, SmsRetriever.EXTRA_STATUS);
+        if (status == null) {
             return;
         }
 
         switch (status.getStatusCode()) {
             case CommonStatusCodes.SUCCESS:
+                assert mProvider.getWindow() != null;
+
                 Intent consentIntent =
                         intent.getExtras().getParcelable(SmsRetriever.EXTRA_CONSENT_INTENT);
                 try {
-                    mWindowAndroid.showIntent(consentIntent,
-                            (window, resultCode, data) -> onConsentResult(resultCode, data), null);
+                    mProvider.getWindow().showIntent(consentIntent, this::onConsentResult, null);
                 } catch (android.content.ActivityNotFoundException e) {
                     if (DEBUG) Log.d(TAG, "Error starting activity for result.");
                 }
                 break;
             case CommonStatusCodes.TIMEOUT:
                 if (DEBUG) Log.d(TAG, "Timeout");
-                SmsUserConsentReceiverJni.get().onTimeout(mSmsProviderAndroid);
+                mProvider.onTimeout();
                 break;
         }
     }
 
-    void onConsentResult(int resultCode, Intent data) {
+    void onConsentResult(int resultCode, @Nullable Intent data) {
         if (resultCode == Activity.RESULT_OK) {
+            assumeNonNull(data);
             String message = data.getStringExtra(SmsRetriever.EXTRA_SMS_MESSAGE);
-            SmsUserConsentReceiverJni.get().onReceive(mSmsProviderAndroid, message);
+            mProvider.onReceive(message, GmsBackend.USER_CONSENT);
         } else if (resultCode == Activity.RESULT_CANCELED) {
             if (DEBUG) Log.d(TAG, "Activity result cancelled.");
+            mProvider.onCancel();
         }
     }
 
-    @CalledByNative
-    private void listen(WindowAndroid windowAndroid) {
-        mWindowAndroid = windowAndroid;
-        Task<Void> task = getClient().startSmsUserConsent(null);
+    public void listen(WindowAndroid windowAndroid) {
+        Task<Void> task = mProvider.getClient().startSmsUserConsent(null);
 
-        task.addOnFailureListener(new OnFailureListener() {
-            @Override
-            public void onFailure(Exception e) {
-                Log.e(TAG, "Task failed to start", e);
-            }
-        });
+        task.addOnFailureListener(
+                new OnFailureListener() {
+                    @Override
+                    public void onFailure(Exception e) {
+                        Log.e(TAG, "Task failed to start", e);
+                    }
+                });
         if (DEBUG) Log.d(TAG, "Installed task");
-    }
-
-    private Wrappers.SmsRetrieverClientWrapper getClient() {
-        if (mClient != null) return mClient;
-        mClient = new Wrappers.SmsRetrieverClientWrapper(SmsRetriever.getClient(mContext));
-        return mClient;
-    }
-
-    @VisibleForTesting
-    public void setClientForTesting(
-            Wrappers.SmsRetrieverClientWrapper client, WindowAndroid windowAndroid) {
-        assert mClient == null;
-        assert mWindowAndroid == null;
-        mWindowAndroid = windowAndroid;
-        mClient = client;
-        mClient.setContext(mContext);
-    }
-
-    @NativeMethods
-    interface Natives {
-        void onReceive(long nativeSmsProviderGmsUserConsent, String sms);
-        void onTimeout(long nativeSmsProviderGmsUserConsent);
     }
 }

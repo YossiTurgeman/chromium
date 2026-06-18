@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html>
+<meta name=fuzzy content="maxDifference=0-3; totalPixels=0-1000">
     <script src="../../../resources/testharness.js"></script>
     <script src="../../../resources/testharnessreport.js"></script>
     <!--Comment the line below when testing locally in the browser -->
     <script src="file:///gen/third_party/blink/renderer/core/html/forms/resources/color_picker.js"></script>
     <!--Uncomment the line below when testing locally in the browser -->
     <!-- <script src="../../../../../renderer/core/html/forms/resources/color_picker.js"></script> -->
-<body>
+
 <script>
 /*
  * The included color_picker.js file contains the JS code that powers the color picker popup
@@ -84,7 +84,7 @@ test(() => {
 test(() => {
   resetContainerValues(hexValueContainer);
   setContainerValue(hexValueContainer, '4287f5');
-  assert_equals(hexValueContainer.channelValue_, '7effc9');
+  assert_equals(hexValueContainer.channelValue_, '4287f5');
 }, 'hexValueContainer onValueChange_ hex value without \'#\'');
 
 test(() => {
@@ -248,10 +248,8 @@ test(() => {
 test(() => {
   resetContainerValues(sValueContainer, lValueContainer);
   setContainerValue(sValueContainer, '97');
-  assert_equals(sValueContainer.channelValue_, 100);
+  assert_equals(sValueContainer.channelValue_, 97);
   setContainerValue(lValueContainer, '34');
-  assert_equals(lValueContainer.channelValue_, 75);
+  assert_equals(lValueContainer.channelValue_, 34);
 }, 'slValueContainers onValueChange_ without \'%\'');
 </script>
-</body>
-</html>

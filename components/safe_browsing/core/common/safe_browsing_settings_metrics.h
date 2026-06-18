@@ -1,4 +1,4 @@
-// Copyright (c) 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,15 @@ enum class SettingsAccessPoint : int {
   kParentSettings = 1,
   // From Settings > Safety check.
   kSafetyCheck = 2,
-  kMaxValue = kSafetyCheck
+  // From PromoSlinger on Surface Explorer on Android.
+  kSurfaceExplorerPromoSlinger = 3,
+  // From security interstitial.
+  kSecurityInterstitial = 4,
+  // From UX shown due to the Tailored Security setting changing.
+  kTailoredSecurity = 5,
+  // From Tips Notifications bottom sheet promo.
+  kTipsNotificationsPromo = 6,
+  kMaxValue = kTipsNotificationsPromo
 };
 
 // Enum representing actions taken by users visiting the
@@ -57,6 +65,10 @@ enum class UserAction : int {
   kDisableSafeBrowsingDialogDenied = 7,
   kMaxValue = kDisableSafeBrowsingDialogDenied
 };
+
+// Records the user action when the user navigates to the Enhanced Protection
+// page.
+void LogShowEnhancedProtectionAction();
 
 }  // namespace safe_browsing
 

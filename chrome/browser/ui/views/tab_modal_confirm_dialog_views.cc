@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,15 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser_dialogs.h"
-#include "chrome/browser/ui/browser_list.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/common/chrome_switches.h"
 #include "components/constrained_window/constrained_window_views.h"
 #include "content/public/browser/web_contents.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/base/window_open_disposition.h"
+#include "ui/base/window_open_disposition_utils.h"
 #include "ui/views/controls/button/label_button.h"
 #include "ui/views/controls/message_box_view.h"
 #include "ui/views/widget/widget.h"
@@ -33,8 +34,10 @@ TabModalConfirmDialogViews::TabModalConfirmDialogViews(
     content::WebContents* web_contents)
     : delegate_(std::move(delegate)) {
   SetButtons(delegate_->GetDialogButtons());
-  SetButtonLabel(ui::DIALOG_BUTTON_OK, delegate_->GetAcceptButtonTitle());
-  SetButtonLabel(ui::DIALOG_BUTTON_CANCEL, delegate_->GetCancelButtonTitle());
+  SetButtonLabel(ui::mojom::DialogButton::kOk,
+                 delegate_->GetAcceptButtonTitle());
+  SetButtonLabel(ui::mojom::DialogButton::kCancel,
+                 delegate_->GetCancelButtonTitle());
 
   SetAcceptCallback(base::BindOnce(&TabModalConfirmDialogDelegate::Accept,
                                    base::Unretained(delegate_.get())));
@@ -42,18 +45,20 @@ TabModalConfirmDialogViews::TabModalConfirmDialogViews(
                                    base::Unretained(delegate_.get())));
   SetCloseCallback(base::BindOnce(&TabModalConfirmDialogDelegate::Close,
                                   base::Unretained(delegate_.get())));
-  SetOwnedByWidget(true);
+  SetModalType(ui::mojom::ModalType::kChild);
+  SetOwnedByWidget(OwnedByWidgetPassKey());
 
-  base::Optional<int> default_button = delegate_->GetDefaultDialogButton();
-  if (bool(default_button))
+  std::optional<int> default_button = delegate_->GetDefaultDialogButton();
+  if (bool(default_button)) {
     SetDefaultButton(*default_button);
+  }
 
   message_box_view_ = new views::MessageBoxView(delegate_->GetDialogMessage());
   message_box_view_->SetInterRowVerticalSpacing(
       ChromeLayoutProvider::Get()->GetDistanceMetric(
           views::DISTANCE_UNRELATED_CONTROL_VERTICAL));
 
-  base::string16 link_text(delegate_->GetLinkText());
+  std::u16string link_text(delegate_->GetLinkText());
   if (!link_text.empty()) {
     message_box_view_->SetLink(
         link_text, base::BindRepeating(&TabModalConfirmDialogViews::LinkClicked,
@@ -62,10 +67,9 @@ TabModalConfirmDialogViews::TabModalConfirmDialogViews(
 
   constrained_window::ShowWebModalDialogViews(this, web_contents);
   delegate_->set_close_delegate(this);
-  chrome::RecordDialogCreation(chrome::DialogIdentifier::TAB_MODAL_CONFIRM);
 }
 
-base::string16 TabModalConfirmDialogViews::GetWindowTitle() const {
+std::u16string TabModalConfirmDialogViews::GetWindowTitle() const {
   return delegate_->GetTitle();
 }
 
@@ -80,15 +84,11 @@ views::View* TabModalConfirmDialogViews::GetContentsView() {
 }
 
 views::Widget* TabModalConfirmDialogViews::GetWidget() {
-  return message_box_view_->GetWidget();
+  return message_box_view_ ? message_box_view_->GetWidget() : nullptr;
 }
 
 const views::Widget* TabModalConfirmDialogViews::GetWidget() const {
-  return message_box_view_->GetWidget();
-}
-
-ui::ModalType TabModalConfirmDialogViews::GetModalType() const {
-  return ui::MODAL_TYPE_CHILD;
+  return message_box_view_ ? message_box_view_->GetWidget() : nullptr;
 }
 
 TabModalConfirmDialogViews::~TabModalConfirmDialogViews() = default;
@@ -110,14 +110,16 @@ void TabModalConfirmDialogViews::LinkClicked(const ui::Event& event) {
 }
 
 views::View* TabModalConfirmDialogViews::GetInitiallyFocusedView() {
-  base::Optional<int> focused_button = delegate_->GetInitiallyFocusedButton();
+  std::optional<int> focused_button = delegate_->GetInitiallyFocusedButton();
   if (!focused_button) {
     return DialogDelegate::GetInitiallyFocusedView();
   }
 
-  if (*focused_button == ui::DIALOG_BUTTON_OK)
+  if (*focused_button == static_cast<int>(ui::mojom::DialogButton::kOk)) {
     return GetOkButton();
-  if (*focused_button == ui::DIALOG_BUTTON_CANCEL)
+  }
+  if (*focused_button == static_cast<int>(ui::mojom::DialogButton::kCancel)) {
     return GetCancelButton();
+  }
   return nullptr;
 }

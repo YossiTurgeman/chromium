@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,22 +8,36 @@
 #include "ash/login/ui/login_pin_view.h"
 #include "ash/login/ui/pin_request_widget.h"
 #include "ash/public/cpp/shelf_config.h"
+#include "ash/public/cpp/style/color_provider.h"
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
-#include "ash/style/ash_color_provider.h"
+#include "ash/style/icon_button.h"
+#include "ash/style/system_shadow.h"
 #include "ash/wallpaper/wallpaper_controller_impl.h"
+#include "base/functional/bind.h"
+#include "base/strings/strcat.h"
+#include "base/task/single_thread_task_runner.h"
+#include "chromeos/constants/chromeos_features.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/accessibility/ax_node_data.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/models/image_model.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/chromeos/styles/cros_tokens_color_mappings.h"
+#include "ui/compositor/layer.h"
+#include "ui/display/screen.h"
+#include "ui/display/tablet_state.h"
 #include "ui/gfx/canvas.h"
-#include "ui/gfx/color_analysis.h"
-#include "ui/gfx/color_utils.h"
 #include "ui/gfx/paint_vector_icon.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/background.h"
 #include "ui/views/controls/button/label_button.h"
 #include "ui/views/controls/focus_ring.h"
 #include "ui/views/controls/label.h"
+#include "ui/views/highlight_border.h"
 #include "ui/views/layout/box_layout.h"
 #include "ui/views/layout/fill_layout.h"
 #include "ui/views/vector_icons.h"
@@ -74,17 +88,6 @@ constexpr int kPinRequestViewMinimumHeightDp =
     kAccessCodeToPinKeyboardDistanceDp + kPinKeyboardToFooterDistanceDp +
     kArrowButtonSizeDp + kPinRequestViewMainHorizontalInsetDp;  // = 266
 
-constexpr int kAlpha70Percent = 178;
-constexpr int kAlpha74Percent = 189;
-
-constexpr SkColor kTextColor = SK_ColorWHITE;
-constexpr SkColor kErrorColor = gfx::kGoogleRed300;
-constexpr SkColor kArrowButtonColor = SkColorSetARGB(0x2B, 0xFF, 0xFF, 0xFF);
-
-bool IsTabletMode() {
-  return Shell::Get()->tablet_mode_controller()->InTabletMode();
-}
-
 }  // namespace
 
 PinRequest::PinRequest() = default;
@@ -94,18 +97,23 @@ PinRequest::~PinRequest() = default;
 
 // Label button that displays focus ring.
 class PinRequestView::FocusableLabelButton : public views::LabelButton {
+  METADATA_HEADER(FocusableLabelButton, views::LabelButton)
+
  public:
-  FocusableLabelButton(views::ButtonListener* listener,
-                       const base::string16& text)
-      : views::LabelButton(listener, text) {
+  FocusableLabelButton(PressedCallback callback, const std::u16string& text)
+      : views::LabelButton(std::move(callback), text) {
     SetInstallFocusRingOnFocus(true);
-    focus_ring()->SetColor(ShelfConfig::Get()->shelf_focus_border_color());
+    views::FocusRing::Get(this)->SetColorId(ui::kColorAshFocusRing);
+    SetFocusBehavior(FocusBehavior::ALWAYS);
   }
 
   FocusableLabelButton(const FocusableLabelButton&) = delete;
   FocusableLabelButton& operator=(const FocusableLabelButton&) = delete;
   ~FocusableLabelButton() override = default;
 };
+
+BEGIN_METADATA(PinRequestView, FocusableLabelButton)
+END_METADATA
 
 PinRequestView::TestApi::TestApi(PinRequestView* view) : view_(view) {
   DCHECK(view_);
@@ -133,7 +141,7 @@ views::LabelButton* PinRequestView::TestApi::help_button() {
   return view_->help_button_;
 }
 
-ArrowButtonView* PinRequestView::TestApi::submit_button() {
+views::Button* PinRequestView::TestApi::submit_button() {
   return view_->submit_button_;
 }
 
@@ -151,26 +159,7 @@ PinRequestViewState PinRequestView::TestApi::state() const {
   return view_->state_;
 }
 
-// static
-SkColor PinRequestView::GetChildUserDialogColor(bool using_blur) {
-  SkColor color = AshColorProvider::Get()->GetBaseLayerColor(
-      AshColorProvider::BaseLayerType::kOpaque);
-
-  SkColor extracted_color =
-      Shell::Get()->wallpaper_controller()->GetProminentColor(
-          color_utils::ColorProfile(color_utils::LumaRange::DARK,
-                                    color_utils::SaturationRange::MUTED));
-
-  if (extracted_color != kInvalidWallpaperColor &&
-      extracted_color != SK_ColorTRANSPARENT) {
-    color = color_utils::GetResultingPaintColor(
-        SkColorSetA(SK_ColorBLACK, kAlpha70Percent), extracted_color);
-  }
-
-  return using_blur ? SkColorSetA(color, kAlpha74Percent) : color;
-}
-
-// TODO(crbug.com/1061008): Make dialog look good on small screens with high
+// TODO(crbug.com/40679369): Make dialog look good on small screens with high
 // zoom factor.
 PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
     : delegate_(delegate),
@@ -181,28 +170,41 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
       default_accessible_title_(request.accessible_title.empty()
                                     ? request.title
                                     : request.accessible_title) {
-  // MODAL_TYPE_SYSTEM is used to get a semi-transparent background behind the
+  // ModalType::kSystem is used to get a semi-transparent background behind the
   // pin request view, when it is used directly on a widget. The overlay
   // consumes all the inputs from the user, so that they can only interact with
   // the pin request view while it is visible.
-  SetModalType(ui::MODAL_TYPE_SYSTEM);
+  SetModalType(ui::mojom::ModalType::kSystem);
 
   // Main view contains all other views aligned vertically and centered.
   auto layout = std::make_unique<views::BoxLayout>(
       views::BoxLayout::Orientation::kVertical,
-      gfx::Insets(kPinRequestViewVerticalInsetDp,
-                  kPinRequestViewHorizontalInsetDp),
+      gfx::Insets::VH(kPinRequestViewVerticalInsetDp,
+                      kPinRequestViewHorizontalInsetDp),
       0);
   layout->set_main_axis_alignment(views::BoxLayout::MainAxisAlignment::kStart);
   layout->set_cross_axis_alignment(
       views::BoxLayout::CrossAxisAlignment::kCenter);
   SetLayoutManager(std::move(layout));
-
   SetPaintToLayer();
-  layer()->SetFillsBoundsOpaquely(false);
-  layer()->SetRoundedCornerRadius(
-      gfx::RoundedCornersF(kPinRequestViewRoundedCornerRadiusDp));
-  layer()->SetBackgroundBlur(ShelfConfig::Get()->shelf_blur_radius());
+  if (chromeos::features::IsSystemBlurEnabled()) {
+    layer()->SetBackgroundBlur(ShelfConfig::Get()->shelf_blur_radius());
+    layer()->SetBackdropFilterQuality(ColorProvider::kBackgroundBlurQuality);
+  }
+
+  const ui::ColorId background_color_id =
+      chromeos::features::IsSystemBlurEnabled()
+          ? cros_tokens::kCrosSysSystemBaseElevated
+          : cros_tokens::kCrosSysSystemBaseElevatedOpaque;
+  SetBackground(views::CreateRoundedRectBackground(
+      background_color_id, kPinRequestViewRoundedCornerRadiusDp));
+
+  SetBorder(std::make_unique<views::HighlightBorder>(
+      kPinRequestViewRoundedCornerRadiusDp,
+      views::HighlightBorder::Type::kHighlightBorderOnShadow));
+  shadow_ = SystemShadow::CreateShadowOnNinePatchLayerForView(
+      this, SystemShadow::Type::kElevation12);
+  shadow_->SetRoundedCornerRadius(kPinRequestViewRoundedCornerRadiusDp);
 
   const int child_view_width =
       kPinRequestViewWidthDp - 2 * kPinRequestViewMainHorizontalInsetDp;
@@ -230,9 +232,11 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
   header->AddChildView(icon_view);
 
   views::ImageView* icon = new views::ImageView();
-  icon->SetPreferredSize(gfx::Size(kLockIconSizeDp, kLockIconSizeDp));
-  icon->SetImage(gfx::CreateVectorIcon(kPinRequestLockIcon, SK_ColorWHITE));
-  icon_view->AddChildView(icon);
+
+  const ui::ColorId icon_color_id = cros_tokens::kCrosSysOnSurface;
+  icon->SetImage(ui::ImageModel::FromVectorIcon(
+      kPinRequestLockIcon, icon_color_id, kLockIconSizeDp));
+  icon_view->AddChildViewRaw(icon);
 
   // Back button. Note that it should be the last view added to |header| in
   // order to be clickable.
@@ -250,20 +254,22 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
   back_button_view->SetLayoutManager(std::move(back_button_layout));
   header->AddChildView(back_button_view);
 
-  back_button_ = new LoginButton(this);
+  back_button_ = new LoginButton(
+      base::BindRepeating(&PinRequestView::OnBack, base::Unretained(this)));
   back_button_->SetPreferredSize(
       gfx::Size(kBackButtonSizeDp, kBackButtonSizeDp));
-  back_button_->SetBackground(
-      views::CreateSolidBackground(SK_ColorTRANSPARENT));
-  back_button_->SetImage(
+  back_button_->SetImageModel(
       views::Button::STATE_NORMAL,
-      gfx::CreateVectorIcon(views::kIcCloseIcon, kCrossSizeDp, SK_ColorWHITE));
+      ui::ImageModel::FromVectorIcon(::features::IsRoundedIconsEnabled()
+                                         ? views::kCloseIcon
+                                         : views::kIcCloseOldIcon,
+                                     icon_color_id, kCrossSizeDp));
   back_button_->SetImageHorizontalAlignment(views::ImageButton::ALIGN_CENTER);
   back_button_->SetImageVerticalAlignment(views::ImageButton::ALIGN_MIDDLE);
-  back_button_->SetAccessibleName(
+  back_button_->GetViewAccessibility().SetName(
       l10n_util::GetStringUTF16(IDS_ASH_LOGIN_BACK_BUTTON_ACCESSIBLE_NAME));
   back_button_->SetFocusBehavior(FocusBehavior::ALWAYS);
-  back_button_view->AddChildView(back_button_);
+  back_button_view->AddChildViewRaw(back_button_.get());
 
   auto add_spacer = [&](int height) {
     auto* spacer = new NonAccessibleView();
@@ -276,7 +282,8 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
   auto decorate_label = [](views::Label* label) {
     label->SetSubpixelRenderingEnabled(false);
     label->SetAutoColorReadabilityEnabled(false);
-    label->SetEnabledColor(kTextColor);
+
+    label->SetEnabledColor(cros_tokens::kCrosSysOnSurface);
     label->SetFocusBehavior(FocusBehavior::ACCESSIBLE_ONLY);
   };
 
@@ -290,7 +297,8 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
   title_label_->SetFontList(gfx::FontList().Derive(
       kTitleFontSizeDeltaDp, gfx::Font::NORMAL, gfx::Font::Weight::MEDIUM));
   decorate_label(title_label_);
-  AddChildView(title_label_);
+  title_label_->SetEnabledColor(cros_tokens::kCrosSysOnSurface);
+  AddChildViewRaw(title_label_.get());
 
   add_spacer(kTitleToDescriptionDistanceDp);
 
@@ -305,8 +313,9 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
   description_label_->SetFontList(
       gfx::FontList().Derive(kDescriptionFontSizeDeltaDp, gfx::Font::NORMAL,
                              gfx::Font::Weight::NORMAL));
+  description_label_->SetEnabledColor(cros_tokens::kCrosSysOnSurface);
   decorate_label(description_label_);
-  AddChildView(description_label_);
+  AddChildViewRaw(description_label_.get());
 
   add_spacer(kDescriptionToAccessCodeDistanceDp);
 
@@ -330,7 +339,7 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
                             base::Unretained(this)),
         base::BindRepeating(&PinRequestView::OnBack, base::Unretained(this)),
         request.obscure_pin);
-    flex_code_input->SetAccessibleName(default_accessible_title_);
+    flex_code_input->SetAccessibleNameOnTextfield(default_accessible_title_);
     access_code_view_ = AddChildView(std::move(flex_code_input));
   }
 
@@ -338,16 +347,16 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
 
   // Pin keyboard. Note that the keyboard's own submit button is disabled via
   // passing a null |on_submit| callback.
-  pin_keyboard_view_ = new LoginPinView(
-      LoginPinView::Style::kAlphanumeric, CreateDefaultLoginPalette(),
-      base::BindRepeating(&AccessCodeInput::InsertDigit,
-                          base::Unretained(access_code_view_)),
-      base::BindRepeating(&AccessCodeInput::Backspace,
-                          base::Unretained(access_code_view_)),
-      /*on_submit=*/LoginPinView::OnPinSubmit());
+  pin_keyboard_view_ =
+      new LoginPinView(LoginPinView::Style::kAlphanumeric,
+                       base::BindRepeating(&AccessCodeInput::InsertDigit,
+                                           base::Unretained(access_code_view_)),
+                       base::BindRepeating(&AccessCodeInput::Backspace,
+                                           base::Unretained(access_code_view_)),
+                       /*on_submit=*/LoginPinView::OnPinSubmit());
   // Backspace key is always enabled and |access_code_| field handles it.
   pin_keyboard_view_->OnPasswordTextChanged(false);
-  AddChildView(pin_keyboard_view_);
+  AddChildViewRaw(pin_keyboard_view_.get());
 
   add_spacer(kPinKeyboardToFooterDistanceDp);
 
@@ -361,54 +370,47 @@ PinRequestView::PinRequestView(PinRequest request, Delegate* delegate)
   AddChildView(footer);
 
   help_button_ = new FocusableLabelButton(
-      this, l10n_util::GetStringUTF16(IDS_ASH_LOGIN_PIN_REQUEST_HELP));
+      base::BindRepeating(
+          [](PinRequestView* view) { view->delegate_->OnHelp(); }, this),
+      l10n_util::GetStringUTF16(IDS_ASH_LOGIN_PIN_REQUEST_HELP));
   help_button_->SetPaintToLayer();
   help_button_->layer()->SetFillsBoundsOpaquely(false);
   help_button_->SetTextSubpixelRenderingEnabled(false);
-  help_button_->SetEnabledTextColors(kTextColor);
-  help_button_->SetFocusBehavior(FocusBehavior::ALWAYS);
+  help_button_->SetEnabledTextColors(cros_tokens::kCrosSysSecondary);
   help_button_->SetVisible(request.help_button_enabled);
-  footer->AddChildView(help_button_);
+  footer->AddChildViewRaw(help_button_.get());
 
   auto* horizontal_spacer = new NonAccessibleView();
   footer->AddChildView(horizontal_spacer);
   bottom_layout->SetFlexForView(horizontal_spacer, 1);
 
-  submit_button_ = new ArrowButtonView(this, kArrowButtonSizeDp);
-  submit_button_->SetBackgroundColor(kArrowButtonColor);
-  submit_button_->SetPreferredSize(
-      gfx::Size(kArrowButtonSizeDp, kArrowButtonSizeDp));
+  submit_button_ = new IconButton(
+      base::BindRepeating(&PinRequestView::SubmitCode, base::Unretained(this)),
+      IconButton::Type::kMediumFloating, &kLockScreenArrowIcon,
+      IDS_ASH_LOGIN_SUBMIT_BUTTON_ACCESSIBLE_NAME,
+      /*togglable=*/true, /*has_border=*/false);
+  static_cast<IconButton*>(submit_button_)->SetToggled(true);
   submit_button_->SetEnabled(false);
-  submit_button_->SetAccessibleName(
-      l10n_util::GetStringUTF16(IDS_ASH_LOGIN_SUBMIT_BUTTON_ACCESSIBLE_NAME));
   submit_button_->SetFocusBehavior(FocusBehavior::ALWAYS);
-  footer->AddChildView(submit_button_);
+  footer->AddChildViewRaw(submit_button_.get());
   add_spacer(kSubmitButtonBottomMarginDp);
 
   pin_keyboard_view_->SetVisible(PinKeyboardVisible());
 
-  tablet_mode_observer_.Add(Shell::Get()->tablet_mode_controller());
-
   SetPreferredSize(GetPinRequestViewSize());
+
+  GetViewAccessibility().SetRole(ax::mojom::Role::kDialog);
+  GetViewAccessibility().SetName(default_accessible_title_);
 }
 
 PinRequestView::~PinRequestView() = default;
-
-void PinRequestView::OnPaint(gfx::Canvas* canvas) {
-  views::View::OnPaint(canvas);
-
-  cc::PaintFlags flags;
-  flags.setStyle(cc::PaintFlags::kFill_Style);
-  flags.setColor(GetChildUserDialogColor(true));
-  canvas->DrawRoundRect(GetContentsBounds(),
-                        kPinRequestViewRoundedCornerRadiusDp, flags);
-}
 
 void PinRequestView::RequestFocus() {
   access_code_view_->RequestFocus();
 }
 
-gfx::Size PinRequestView::CalculatePreferredSize() const {
+gfx::Size PinRequestView::CalculatePreferredSize(
+    const views::SizeBounds& available_size) const {
   return GetPinRequestViewSize();
 }
 
@@ -416,48 +418,27 @@ views::View* PinRequestView::GetInitiallyFocusedView() {
   return access_code_view_;
 }
 
-base::string16 PinRequestView::GetAccessibleWindowTitle() const {
+std::u16string PinRequestView::GetAccessibleWindowTitle() const {
   return default_accessible_title_;
 }
 
-void PinRequestView::ButtonPressed(views::Button* sender,
-                                   const ui::Event& event) {
-  if (sender == back_button_) {
-    OnBack();
-  } else if (sender == help_button_) {
-    delegate_->OnHelp(GetWidget()->GetNativeWindow());
-  } else if (sender == submit_button_) {
-    SubmitCode();
+void PinRequestView::OnDisplayTabletStateChanged(display::TabletState state) {
+  if (pin_keyboard_always_enabled_) {
+    return;
   }
-}
-
-void PinRequestView::OnTabletModeStarted() {
-  if (!pin_keyboard_always_enabled_) {
-    VLOG(1) << "Showing PIN keyboard in PinRequestView";
-    pin_keyboard_view_->SetVisible(true);
-    // This will trigger ChildPreferredSizeChanged in parent view and Layout()
-    // in view. As the result whole hierarchy will go through re-layout.
+  const bool show_pin_keyboard = state == display::TabletState::kInTabletMode;
+  if (show_pin_keyboard || state == display::TabletState::kInClamshellMode) {
+    VLOG(1) << base::StrCat({show_pin_keyboard ? "Showing" : "Hiding",
+                             " PIN keyboard in PinRequestView"});
+    pin_keyboard_view_->SetVisible(show_pin_keyboard);
+    // This will trigger ChildPreferredSizeChanged() in the parent view, which
+    // in turn triggers layout for the whole hierarchy.
     UpdatePreferredSize();
   }
-}
-
-void PinRequestView::OnTabletModeEnded() {
-  if (!pin_keyboard_always_enabled_) {
-    VLOG(1) << "Hiding PIN keyboard in PinRequestView";
-    DCHECK(pin_keyboard_view_);
-    pin_keyboard_view_->SetVisible(false);
-    // This will trigger ChildPreferredSizeChanged in parent view and Layout()
-    // in view. As the result whole hierarchy will go through re-layout.
-    UpdatePreferredSize();
-  }
-}
-
-void PinRequestView::OnTabletControllerDestroyed() {
-  tablet_mode_observer_.RemoveAll();
 }
 
 void PinRequestView::SubmitCode() {
-  base::Optional<std::string> code = access_code_view_->GetCode();
+  std::optional<std::string> code = access_code_view_->GetCode();
   DCHECK(code.has_value());
 
   SubmissionResult result = delegate_->OnPinSubmitted(*code);
@@ -486,23 +467,27 @@ void PinRequestView::OnBack() {
 }
 
 void PinRequestView::UpdateState(PinRequestViewState state,
-                                 const base::string16& title,
-                                 const base::string16& description) {
+                                 const std::u16string& title,
+                                 const std::u16string& description) {
   state_ = state;
   title_label_->SetText(title);
   description_label_->SetText(description);
   UpdatePreferredSize();
+
   switch (state_) {
     case PinRequestViewState::kNormal: {
-      access_code_view_->SetInputColor(kTextColor);
-      title_label_->SetEnabledColor(kTextColor);
+      const ui::ColorId normal_color_id = cros_tokens::kCrosSysOnSurface;
+      access_code_view_->SetInputColorId(normal_color_id);
+      title_label_->SetEnabledColor(normal_color_id);
       return;
     }
     case PinRequestViewState::kError: {
-      access_code_view_->SetInputColor(kErrorColor);
-      title_label_->SetEnabledColor(kErrorColor);
+      const ui::ColorId error_color_id = cros_tokens::kCrosSysError;
+      access_code_view_->SetInputColorId(error_color_id);
+      title_label_->SetEnabledColor(error_color_id);
       // Read out the error.
-      title_label_->NotifyAccessibilityEvent(ax::mojom::Event::kAlert, true);
+      title_label_->NotifyAccessibilityEventDeprecated(ax::mojom::Event::kAlert,
+                                                       true);
       return;
     }
   }
@@ -517,9 +502,10 @@ void PinRequestView::SetInputEnabled(bool input_enabled) {
 }
 
 void PinRequestView::UpdatePreferredSize() {
-  SetPreferredSize(CalculatePreferredSize());
-  if (GetWidget())
+  SetPreferredSize(CalculatePreferredSize({}));
+  if (GetWidget()) {
     GetWidget()->CenterWindow(GetPreferredSize());
+  }
 }
 
 void PinRequestView::FocusSubmitButton() {
@@ -543,33 +529,30 @@ void PinRequestView::OnInputChange(bool last_field_active, bool complete) {
 
     // Moving focus is delayed by using PostTask to allow for proper
     // a11y announcements.
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&PinRequestView::FocusSubmitButton,
                                   weak_ptr_factory_.GetWeakPtr()));
   }
 }
 
-void PinRequestView::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  views::View::GetAccessibleNodeData(node_data);
-  node_data->role = ax::mojom::Role::kDialog;
-  node_data->SetName(default_accessible_title_);
-}
-
 // If |pin_keyboard_always_enabled_| is not set, pin keyboard is only shown in
 // tablet mode.
 bool PinRequestView::PinKeyboardVisible() const {
-  return pin_keyboard_always_enabled_ || IsTabletMode();
+  return pin_keyboard_always_enabled_ || display::Screen::Get()->InTabletMode();
 }
 
 gfx::Size PinRequestView::GetPinRequestViewSize() const {
-  int height = kPinRequestViewMinimumHeightDp +
-               std::min(int{title_label_->GetRequiredLines()}, kTitleMaxLines) *
-                   kTitleLineHeightDp +
-               std::min(int{description_label_->GetRequiredLines()},
-                        kDescriptionMaxLines) *
-                   kDescriptionTextLineHeightDp;
-  if (PinKeyboardVisible())
+  int height =
+      kPinRequestViewMinimumHeightDp +
+      std::min(static_cast<int>(title_label_->GetRequiredLines()),
+               kTitleMaxLines) *
+          kTitleLineHeightDp +
+      std::min(static_cast<int>(description_label_->GetRequiredLines()),
+               kDescriptionMaxLines) *
+          kDescriptionTextLineHeightDp;
+  if (PinKeyboardVisible()) {
     height += kPinKeyboardHeightDp;
+  }
   return gfx::Size(kPinRequestViewWidthDp, height);
 }
 

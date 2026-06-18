@@ -1,12 +1,13 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/extensions/api/image_writer_private/write_from_file_operation.h"
 
-#include "base/bind.h"
 #include "base/files/file_util.h"
-#include "chrome/browser/extensions/api/image_writer_private/error_messages.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
+#include "chrome/browser/extensions/api/image_writer_private/error_constants.h"
 #include "content/public/browser/browser_thread.h"
 
 namespace extensions {
@@ -24,7 +25,7 @@ WriteFromFileOperation::WriteFromFileOperation(
   image_path_ = user_file_path;
 }
 
-WriteFromFileOperation::~WriteFromFileOperation() {}
+WriteFromFileOperation::~WriteFromFileOperation() = default;
 
 void WriteFromFileOperation::StartImpl() {
   DCHECK(IsRunningInCorrectSequence());
@@ -35,11 +36,12 @@ void WriteFromFileOperation::StartImpl() {
   }
 
   PostTask(base::BindOnce(
-      &WriteFromFileOperation::Unzip, this,
-      base::Bind(
+      &WriteFromFileOperation::Extract, this,
+      base::BindOnce(
           &WriteFromFileOperation::Write, this,
-          base::Bind(&WriteFromFileOperation::VerifyWrite, this,
-                     base::Bind(&WriteFromFileOperation::Finish, this)))));
+          base::BindOnce(
+              &WriteFromFileOperation::VerifyWrite, this,
+              base::BindOnce(&WriteFromFileOperation::Finish, this)))));
 }
 
 }  // namespace image_writer

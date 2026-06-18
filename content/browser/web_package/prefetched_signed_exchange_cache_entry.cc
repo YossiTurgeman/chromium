@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/web_package/prefetched_signed_exchange_cache_entry.h"
 
 #include "net/base/hash_value.h"
+#include "net/http/http_response_headers.h"
 #include "storage/browser/blob/blob_data_handle.h"
 
 namespace content {

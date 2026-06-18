@@ -1,5 +1,5 @@
-#!/usr/bin/env vpython
-# Copyright 2020 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """
@@ -33,15 +33,18 @@ Google Cloud console https://console.cloud.google.com/ (see drop-down menu in
 the top left corner).
 """
 
+from __future__ import print_function
+
 import argparse
 import json
 import re
 import subprocess
 
+# pylint: disable=line-too-long
 # Schemas:
 # - go/buildbucket-bq and go/buildbucket-proto/build.proto
 # - go/luci/cq/bq and
-#   https://source.chromium.org/chromium/infra/infra/+/master:go/src/go.chromium.org/luci/cv/api/bigquery/v1/attempt.proto
+#   https://source.chromium.org/chromium/infra/infra/+/main:go/src/go.chromium.org/luci/cv/api/bigquery/v1/attempt.proto
 #
 # Original author: maruel@
 QUERY_TEMPLATE = """\
@@ -77,12 +80,13 @@ builds AS (
 
 SELECT * FROM builds ORDER BY patchset DESC, critical, builder, start_time
 """
+# pylint: enable=line-too-long
 
 GERRIT_URL_REGEX = re.compile(r'^\s*Reviewed-on: (?P<gerrit_url>.*)$',
                               re.MULTILINE)
 
 
-class ChangeList(object):
+class ChangeList():
   """Class for storing relevant information for a CL."""
 
   def __init__(self):
@@ -104,7 +108,7 @@ class ChangeList(object):
     assert self.gerrit_url is not None
     assert self.largest_patchset is not None
     assert self.ran_trybot is not None
-    s = '%s (%s)' % (self.revision, self.gerrit_url)
+    s = f'{self.revision} ({self.gerrit_url})'
     if not self.ran_trybot:
       s += ' <<<< Did not run trybot'
     return s
@@ -126,12 +130,12 @@ def QueryTrybotsForCl(cl_number, project):
       'bq',
       'query',
       '--format=json',
-      '--project_id=%s' % project,
+      f'--project_id={project}',
       '--max_rows=500',
       '--use_legacy_sql=false',
       query,
   ]
-  with open('/dev/null', 'w') as devnull:
+  with open('/dev/null', 'w', encoding='utf-8') as devnull:
     stdout = subprocess.check_output(cmd, stderr=devnull)
   return json.loads(stdout)
 
@@ -146,7 +150,7 @@ def FillTrybotRuns(blamelist, trybot, project):
   """
   total_cls = len(blamelist)
   for i, entry in enumerate(blamelist):
-    print 'Getting data for CL %s/%s' % (i + 1, total_cls)
+    print(f'Getting data for CL {i + 1}/{total_cls}')
     largest_patchset = 0
     all_trybots = QueryTrybotsForCl(entry.cl_number, project)
     assert all_trybots
@@ -155,8 +159,7 @@ def FillTrybotRuns(blamelist, trybot, project):
     # into a dict doesn't preserve ordering, so find the largest patchset now.
     for tryjob in all_trybots:
       patchset = int(tryjob['patchset'])
-      if patchset > largest_patchset:
-        largest_patchset = patchset
+      largest_patchset = max(largest_patchset, patchset)
     entry.largest_patchset = largest_patchset
 
     for tryjob in all_trybots:
@@ -208,7 +211,7 @@ def GetBlamelist(start_revision, end_revision):
       'git',
       'log',
       '--pretty=oneline',
-      '%s~1..%s' % (start_revision, end_revision),
+      f'{start_revision}~1..{end_revision}',
   ]
   stdout = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
 
@@ -244,9 +247,9 @@ def main():
   blamelist = GetBlamelist(args.start_revision, args.end_revision)
   FillGerritUrls(blamelist)
   FillTrybotRuns(blamelist, args.trybot, args.project)
-  print '\n\nBlamelist (latest first):\n'
+  print('\n\nBlamelist (latest first):\n')
   for entry in blamelist:
-    print entry
+    print(entry)
 
 
 if __name__ == '__main__':

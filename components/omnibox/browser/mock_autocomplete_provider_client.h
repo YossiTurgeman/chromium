@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,19 +10,35 @@
 #include <utility>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "components/history/core/browser/top_sites.h"
+#include "components/omnibox/browser/actions/omnibox_pedal_provider.h"
 #include "components/omnibox/browser/autocomplete_provider_client.h"
 #include "components/omnibox/browser/autocomplete_scheme_classifier.h"
 #include "components/omnibox/browser/document_suggestions_service.h"
-#include "components/omnibox/browser/omnibox_pedal_provider.h"
+#include "components/omnibox/browser/keyword_extensions_delegate.h"
+#include "components/omnibox/browser/mock_tab_matcher.h"
 #include "components/omnibox/browser/remote_suggestions_service.h"
-#include "components/search_engines/template_url_service.h"
+#include "components/omnibox/browser/shortcuts_backend.h"
+#include "components/omnibox/browser/unscoped_extension_provider_delegate.h"
+#include "components/omnibox/browser/zero_suggest_cache_service.h"
+#include "components/saved_tab_groups/public/tab_group_sync_service.h"
+#include "components/saved_tab_groups/test_support/mock_tab_group_sync_service.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
+namespace sync_sessions {
+class SessionSyncService;
+}  // namespace sync_sessions
+
+class AutocompleteScoringModelService;
+class OnDeviceTailModelService;
+class OmniboxTriggeredFeatureService;
+
 struct AutocompleteMatch;
+struct ProviderStateService;
 
 class MockAutocompleteProviderClient
     : public testing::NiceMock<AutocompleteProviderClient> {
@@ -35,7 +51,9 @@ class MockAutocompleteProviderClient
       const MockAutocompleteProviderClient&) = delete;
 
   // AutocompleteProviderClient:
-  MOCK_METHOD0(GetPrefs, PrefService*());
+  MOCK_CONST_METHOD0(GetPrefs, PrefService*());
+  MOCK_METHOD0(GetLocalState, PrefService*());
+  MOCK_CONST_METHOD0(GetApplicationLocale, std::string());
   MOCK_CONST_METHOD0(GetSchemeClassifier,
                      const AutocompleteSchemeClassifier&());
   MOCK_METHOD0(GetAutocompleteClassifier, AutocompleteClassifier*());
@@ -52,18 +70,20 @@ class MockAutocompleteProviderClient
   MOCK_METHOD0(GetInMemoryURLIndex, InMemoryURLIndex*());
 
   TemplateURLService* GetTemplateURLService() override {
-    return template_url_service_.get();
+    return template_url_service_;
   }
   const TemplateURLService* GetTemplateURLService() const override {
-    return template_url_service_.get();
+    return template_url_service_;
   }
   RemoteSuggestionsService* GetRemoteSuggestionsService(
       bool create_if_necessary) const override {
     return remote_suggestions_service_.get();
   }
-  DocumentSuggestionsService* GetDocumentSuggestionsService(
-      bool create_if_necessary) const override {
-    return document_suggestions_service_.get();
+  ZeroSuggestCacheService* GetZeroSuggestCacheService() override {
+    return zero_suggest_cache_service_.get();
+  }
+  const ZeroSuggestCacheService* GetZeroSuggestCacheService() const override {
+    return zero_suggest_cache_service_.get();
   }
   OmniboxPedalProvider* GetPedalProvider() const override {
     return pedal_provider_.get();
@@ -80,67 +100,157 @@ class MockAutocompleteProviderClient
       KeywordProvider* keyword_provider) override {
     return nullptr;
   }
-  query_tiles::TileService* GetQueryTileService() const override {
+  std::unique_ptr<UnscopedExtensionProviderDelegate>
+  GetUnscopedExtensionProviderDelegate(
+      UnscopedExtensionProvider* unscoped_extension_provider) override {
+    return std::move(unscoped_extension_provider_delegate_);
+  }
+  OmniboxTriggeredFeatureService* GetOmniboxTriggeredFeatureService()
+      const override {
+    return omnibox_triggered_feature_service_.get();
+  }
+  component_updater::ComponentUpdateService* GetComponentUpdateService()
+      override {
+    return nullptr;
+  }
+  const TabMatcher& GetTabMatcher() const override { return tab_matcher_; }
+
+  signin::IdentityManager* GetIdentityManager() const override {
+    return identity_manager_;
+  }
+
+  AutocompleteScoringModelService* GetAutocompleteScoringModelService()
+      const override {
     return nullptr;
   }
 
-  component_updater::ComponentUpdateService* GetComponentUpdateService()
-      override {
+  OnDeviceTailModelService* GetOnDeviceTailModelService() const override {
+    return nullptr;
+  }
+
+  ProviderStateService* GetProviderStateService() const override {
+    return provider_state_service_.get();
+  }
+
+  bool in_background_state() const override { return in_background_state_; }
+
+  void set_in_background_state(bool in_background_state) override {
+    in_background_state_ = in_background_state;
+  }
+
+  tab_groups::TabGroupSyncService* GetTabGroupSyncService() const override {
+    return mock_tab_group_sync_service_.get();
+  }
+
+  sync_sessions::SessionSyncService* GetSessionSyncService() const override {
+    return session_sync_service_;
+  }
+
+  AimEligibilityService* GetAimEligibilityService() const override {
     return nullptr;
   }
 
   MOCK_CONST_METHOD0(GetAcceptLanguages, std::string());
   MOCK_CONST_METHOD0(GetEmbedderRepresentationOfAboutScheme, std::string());
-  MOCK_METHOD0(GetBuiltinURLs, std::vector<base::string16>());
-  MOCK_METHOD0(GetBuiltinsToProvideAsUserTypes, std::vector<base::string16>());
+  MOCK_METHOD0(GetBuiltinURLs, std::vector<std::u16string>());
+  MOCK_METHOD0(GetBuiltinsToProvideAsUserTypes, std::vector<std::u16string>());
   MOCK_CONST_METHOD0(IsOffTheRecord, bool());
+  MOCK_CONST_METHOD0(IsIncognitoProfile, bool());
+  MOCK_CONST_METHOD0(IsGuestSession, bool());
   MOCK_CONST_METHOD0(SearchSuggestEnabled, bool());
+  MOCK_CONST_METHOD0(IsUrlDataCollectionActive, bool());
   MOCK_CONST_METHOD0(IsPersonalizedUrlDataCollectionActive, bool());
   MOCK_CONST_METHOD0(IsAuthenticated, bool());
-  MOCK_CONST_METHOD0(IsSyncActive, bool());
+  MOCK_CONST_METHOD0(IsHistoryEmbeddingsEnabled, bool());
+  MOCK_CONST_METHOD0(IsHistoryEmbeddingsSettingVisible, bool());
+  MOCK_CONST_METHOD0(IsLensEnabled, bool());
+  MOCK_CONST_METHOD0(AreLensEntrypointsVisible, bool());
+  MOCK_CONST_METHOD0(IsPagePaywalled, std::optional<bool>());
+  MOCK_METHOD(bool, ShouldSendContextualUrlSuggestParam, (), (const));
+  MOCK_METHOD(bool, ShouldSendPageTitleSuggestParam, (), (const));
+  MOCK_CONST_METHOD1(GetLensSuggestInputsWhenReady,
+                     base::CallbackListSubscription(
+                         LensOverlaySuggestInputsCallback callback));
+  MOCK_METHOD(bool, IsAimEligible, (), (const));
+  MOCK_METHOD(bool,
+              IsOmniboxNextFeatureParamEnabled,
+              (const std::string&),
+              (const));
 
   MOCK_METHOD6(
       Classify,
-      void(const base::string16& text,
+      void(const std::u16string& text,
            bool prefer_keyword,
            bool allow_exact_keyword_match,
            metrics::OmniboxEventProto::PageClassification page_classification,
            AutocompleteMatch* match,
            GURL* alternate_nav_url));
   MOCK_METHOD2(DeleteMatchingURLsForKeywordFromHistory,
-               void(history::KeywordID keyword_id, const base::string16& term));
+               void(history::KeywordID keyword_id, const std::u16string& term));
   MOCK_METHOD1(PrefetchImage, void(const GURL& url));
 
-  bool IsTabOpenWithURL(const GURL& url,
-                        const AutocompleteInput* input) override {
-    return false;
+  void set_pedal_provider(
+      std::unique_ptr<OmniboxPedalProvider> pedal_provider) {
+    pedal_provider_ = std::move(pedal_provider);
   }
 
-  void set_template_url_service(std::unique_ptr<TemplateURLService> service) {
-    template_url_service_ = std::move(service);
+  void set_unscoped_extension_provider_delegate(
+      std::unique_ptr<UnscopedExtensionProviderDelegate> delegate) {
+    unscoped_extension_provider_delegate_ = std::move(delegate);
+  }
+
+  void set_template_url_service(TemplateURLService* template_url_service) {
+    template_url_service_ = template_url_service;
+  }
+
+  void set_identity_manager(signin::IdentityManager* identity_manager) {
+    identity_manager_ = identity_manager;
+  }
+
+  void set_session_sync_service(
+      sync_sessions::SessionSyncService* session_sync_service) {
+    session_sync_service_ = session_sync_service;
   }
 
   network::TestURLLoaderFactory* test_url_loader_factory() {
     return &test_url_loader_factory_;
   }
 
-  bool IsBrowserUpdateAvailable() const override {
-    return browser_update_available_;
-  }
-
-  void set_browser_update_available(bool browser_update_available) {
-    browser_update_available_ = browser_update_available;
-  }
+  MOCK_METHOD0(OpenSharingHub, void());
+  MOCK_METHOD0(NewIncognitoWindow, void());
+  MOCK_METHOD0(OpenIncognitoClearBrowsingDataDialog, void());
+  MOCK_METHOD0(CloseIncognitoWindows, void());
+  MOCK_METHOD0(PromptPageTranslation, void());
+  MOCK_METHOD1(OpenLensOverlay, void(bool));
+  MOCK_METHOD(bool, ShouldOpenCoBrowsePanel, (), (const, override));
+  MOCK_METHOD(void, OpenCoBrowsePanel, (), (override));
+  MOCK_METHOD3(IssueContextualSearchRequest,
+               void(const GURL& destination_url,
+                    AutocompleteMatchType::Type match_type,
+                    bool is_zero_prefix_suggestion));
 
  private:
   network::TestURLLoaderFactory test_url_loader_factory_;
   scoped_refptr<network::SharedURLLoaderFactory> shared_factory_;
 
-  std::unique_ptr<RemoteSuggestionsService> remote_suggestions_service_;
+  bool in_background_state_ = false;
+
+  raw_ptr<TemplateURLService> template_url_service_;
   std::unique_ptr<DocumentSuggestionsService> document_suggestions_service_;
+  std::unique_ptr<RemoteSuggestionsService> remote_suggestions_service_;
+  std::unique_ptr<ZeroSuggestCacheService> zero_suggest_cache_service_;
   std::unique_ptr<OmniboxPedalProvider> pedal_provider_;
-  std::unique_ptr<TemplateURLService> template_url_service_;
-  bool browser_update_available_;
+  std::unique_ptr<OmniboxTriggeredFeatureService>
+      omnibox_triggered_feature_service_;
+  std::unique_ptr<ProviderStateService> provider_state_service_;
+  std::unique_ptr<UnscopedExtensionProviderDelegate>
+      unscoped_extension_provider_delegate_;
+  MockTabMatcher tab_matcher_;
+  raw_ptr<signin::IdentityManager> identity_manager_ = nullptr;  // Not owned.
+  raw_ptr<sync_sessions::SessionSyncService> session_sync_service_ =
+      nullptr;  // Not owned.
+  std::unique_ptr<tab_groups::MockTabGroupSyncService>
+      mock_tab_group_sync_service_;
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_MOCK_AUTOCOMPLETE_PROVIDER_CLIENT_H_

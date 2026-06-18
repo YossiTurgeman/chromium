@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,19 +6,20 @@
 
 #include <map>
 #include <memory>
+#include <string_view>
 
-#include "base/command_line.h"
+#include "base/containers/map_util.h"
 #include "base/debug/alias.h"
-#include "base/lazy_instance.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/memory/ptr_util.h"
+#include "base/no_destructor.h"
+#include "base/strings/span_printf.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/trace_event/trace_event.h"
-#include "content/public/common/content_switches.h"
 #include "extensions/common/extensions_client.h"
 #include "extensions/common/features/feature.h"
-#include "extensions/common/switches.h"
 
 namespace extensions {
 
@@ -30,15 +31,15 @@ namespace {
 // The prefix "e::" is used so that the crash can be quickly located.
 //
 // This is provided in feature_util because for some reason features are prone
-// to mysterious crashes in named map lookups. For example see crbug.com/365192
-// and crbug.com/461915.
+// to mysterious crashes in named map lookups. For example see
+// crbug.com/40361738 and crbug.com/40407279.
 #define CRASH_WITH_MINIDUMP(message)                                  \
   {                                                                   \
     std::string message_copy(message);                                \
     char minidump[BUFSIZ];                                            \
     base::debug::Alias(&minidump);                                    \
-    base::snprintf(minidump, base::size(minidump), "e::%s:%d:\"%s\"", \
-                   __FILE__, __LINE__, message_copy.c_str());         \
+    base::SpanPrintf(minidump, "e::%s:%d:\"%s\"", __FILE__, __LINE__, \
+                     message_copy.c_str());                           \
     LOG(FATAL) << message_copy;                                       \
   }
 
@@ -47,7 +48,6 @@ class FeatureProviderStatic {
   FeatureProviderStatic() {
     TRACE_EVENT0("startup",
                  "extensions::FeatureProvider::FeatureProviderStatic");
-    base::Time begin_time = base::Time::Now();
 
     ExtensionsClient* client = ExtensionsClient::Get();
     feature_providers_["api"] = client->CreateFeatureProvider("api");
@@ -55,44 +55,34 @@ class FeatureProviderStatic {
     feature_providers_["permission"] =
         client->CreateFeatureProvider("permission");
     feature_providers_["behavior"] = client->CreateFeatureProvider("behavior");
-
-    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-    std::string process_type =
-        command_line->GetSwitchValueASCII(::switches::kProcessType);
-
-    // Measure time only for browser process. This method gets called by the
-    // browser process on startup, as well as on renderer and extension
-    // processes throughout the execution of the browser. We are more
-    // interested in how long this takes as a startup cost, so we are
-    // just measuring the time in the browser process.
-    if (process_type == std::string()) {
-      UMA_HISTOGRAM_TIMES("Extensions.FeatureProviderStaticInitTime",
-                          base::Time::Now() - begin_time);
-    }
   }
 
-  FeatureProvider* GetFeatures(const std::string& name) const {
-    auto it = feature_providers_.find(name);
-    if (it == feature_providers_.end())
+  FeatureProviderStatic(const FeatureProviderStatic&) = delete;
+  FeatureProviderStatic& operator=(const FeatureProviderStatic&) = delete;
+
+  const FeatureProvider* GetFeatures(const std::string& name) const {
+    auto* provider = base::FindPtrOrNull(feature_providers_, name);
+    if (!provider) {
       CRASH_WITH_MINIDUMP("FeatureProvider \"" + name + "\" not found");
-    return it->second.get();
+    }
+    return provider;
   }
 
  private:
   std::map<std::string, std::unique_ptr<FeatureProvider>> feature_providers_;
-
-  DISALLOW_COPY_AND_ASSIGN(FeatureProviderStatic);
 };
 
-base::LazyInstance<FeatureProviderStatic>::Leaky g_feature_provider_static =
-    LAZY_INSTANCE_INITIALIZER;
+const FeatureProviderStatic& GetFeatureProviderStatic() {
+  static base::NoDestructor<FeatureProviderStatic> instance;
+  return *instance;
+}
 
 const Feature* GetFeatureFromProviderByName(const std::string& provider_name,
                                             const std::string& feature_name) {
   const Feature* feature =
       FeatureProvider::GetByName(provider_name)->GetFeature(feature_name);
   // We should always refer to existing features, but we can't CHECK here
-  // due to flaky JSONReader fails, see: crbug.com/176381, crbug.com/602936
+  // due to flaky JSONReader fails, see: crbug.com/40302033, crbug.com/41248827
   DCHECK(feature) << "Feature \"" << feature_name << "\" not found in "
                   << "FeatureProvider \"" << provider_name << "\"";
   return feature;
@@ -100,12 +90,12 @@ const Feature* GetFeatureFromProviderByName(const std::string& provider_name,
 
 }  // namespace
 
-FeatureProvider::FeatureProvider() {}
-FeatureProvider::~FeatureProvider() {}
+FeatureProvider::FeatureProvider() = default;
+FeatureProvider::~FeatureProvider() = default;
 
 // static
 const FeatureProvider* FeatureProvider::GetByName(const std::string& name) {
-  return g_feature_provider_static.Get().GetFeatures(name);
+  return GetFeatureProviderStatic().GetFeatures(name);
 }
 
 // static
@@ -149,18 +139,14 @@ const Feature* FeatureProvider::GetBehaviorFeature(const std::string& name) {
 }
 
 const Feature* FeatureProvider::GetFeature(const std::string& name) const {
-  auto iter = features_.find(name);
-  if (iter != features_.end())
-    return iter->second.get();
-  else
-    return nullptr;
+  return base::FindPtrOrNull(features_, name);
 }
 
 const Feature* FeatureProvider::GetParent(const Feature& feature) const {
   if (feature.no_parent())
     return nullptr;
 
-  std::vector<base::StringPiece> split = base::SplitStringPiece(
+  std::vector<std::string_view> split = base::SplitStringPiece(
       feature.name(), ".", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
   if (split.size() < 2)
     return nullptr;
@@ -194,13 +180,23 @@ const FeatureMap& FeatureProvider::GetAllFeatures() const {
   return features_;
 }
 
-void FeatureProvider::AddFeature(base::StringPiece name,
+void FeatureProvider::AddFeature(std::string_view name,
                                  std::unique_ptr<Feature> feature) {
-  features_[name.as_string()] = std::move(feature);
+  DCHECK(feature);
+  const auto& map =
+      ExtensionsClient::Get()->GetFeatureDelegatedAvailabilityCheckMap();
+  if (!map.empty() && feature->RequiresDelegatedAvailabilityCheck()) {
+    auto* handler = base::FindOrNull(map, feature->name());
+    if (handler && !handler->is_null()) {
+      feature->SetDelegatedAvailabilityCheckHandler(*handler);
+    }
+  }
+
+  features_[std::string(name)] = std::move(feature);
 }
 
-void FeatureProvider::AddFeature(base::StringPiece name, Feature* feature) {
-  features_[name.as_string()] = std::unique_ptr<Feature>(feature);
+void FeatureProvider::AddFeature(std::string_view name, Feature* feature) {
+  AddFeature(name, base::WrapUnique(feature));
 }
 
 }  // namespace extensions

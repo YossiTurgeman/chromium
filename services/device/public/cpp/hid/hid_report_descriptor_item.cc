@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,9 @@
 #include <string.h>
 
 #include "base/check.h"
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/logging.h"
 
 namespace device {
 
@@ -22,59 +25,23 @@ struct Header {
 }  // namespace
 
 HidReportDescriptorItem::HidReportDescriptorItem(
-    const uint8_t* bytes,
-    size_t size,
-    HidReportDescriptorItem* previous)
-    : previous_(previous),
-      next_(nullptr),
-      parent_(nullptr),
-      shortData_(0),
-      payload_size_(0) {
-  Header* header = (Header*)&bytes[0];
-  tag_ = (Tag)(header->tag << 2 | header->type);
+    base::span<const uint8_t> bytes)
+    : shortData_(0), payload_size_(0) {
+  const auto* header = reinterpret_cast<const Header*>(bytes.data());
+  tag_ = static_cast<Tag>(header->tag << 2 | header->type);
 
   if (IsLong()) {
     // In a long item, payload size is the second byte.
-    if (size >= 2)
+    if (bytes.size() >= 2)
       payload_size_ = bytes[1];
   } else {
     // As per HID spec, a bSize value of 3 means 4 bytes.
     payload_size_ = header->size == 0x3 ? 4 : header->size;
-    DCHECK(payload_size_ <= sizeof(shortData_));
-    if (GetHeaderSize() + payload_size() <= size)
-      memcpy(&shortData_, &bytes[GetHeaderSize()], payload_size());
+    DCHECK_LE(payload_size_, sizeof(shortData_));
+    if (GetHeaderSize() + payload_size() <= bytes.size())
+      UNSAFE_TODO(
+          memcpy(&shortData_, bytes.data() + GetHeaderSize(), payload_size()));
   }
-
-  if (previous) {
-    DCHECK(!previous->next_);
-    previous->next_ = this;
-    switch (previous->tag()) {
-      case kTagCollection:
-        parent_ = previous;
-        break;
-      default:
-        break;
-    }
-    if (!parent_) {
-      switch (tag()) {
-        case kTagEndCollection:
-          if (previous->parent()) {
-            parent_ = previous->parent()->parent();
-          }
-          break;
-        default:
-          parent_ = previous->parent();
-          break;
-      }
-    }
-  }
-}
-
-size_t HidReportDescriptorItem::GetDepth() const {
-  HidReportDescriptorItem* parent_item = parent();
-  if (parent_item)
-    return parent_item->GetDepth() + 1;
-  return 0;
 }
 
 bool HidReportDescriptorItem::IsLong() const {

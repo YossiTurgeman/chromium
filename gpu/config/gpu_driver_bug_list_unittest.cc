@@ -1,11 +1,13 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "gpu/config/gpu_driver_bug_list.h"
 
 #include <vector>
 
 #include "base/command_line.h"
-#include "gpu/config/gpu_driver_bug_list.h"
+#include "build/build_config.h"
 #include "gpu/config/gpu_driver_bug_workaround_type.h"
 #include "gpu/config/gpu_info.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -18,15 +20,15 @@ class GpuDriverBugListTest : public testing::Test {
   ~GpuDriverBugListTest() override = default;
 };
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 TEST_F(GpuDriverBugListTest, CurrentListForARM) {
   std::unique_ptr<GpuDriverBugList> list = GpuDriverBugList::Create();
   GPUInfo gpu_info;
   gpu_info.gl_vendor = "ARM";
   gpu_info.gl_renderer = "MALi_T604";
   gpu_info.gl_version = "OpenGL ES 2.0";
-  std::set<int> bugs = list->MakeDecision(
-      GpuControlList::kOsAndroid, "4.1", gpu_info);
+  std::set<int> bugs =
+      list->MakeDecision(GpuControlList::kOsAndroid, "4.1", gpu_info, {});
   EXPECT_EQ(1u, bugs.count(USE_CLIENT_SIDE_ARRAYS_FOR_STREAM_BUFFERS));
 }
 
@@ -36,11 +38,11 @@ TEST_F(GpuDriverBugListTest, CurrentListForImagination) {
   gpu_info.gl_vendor = "Imagination Technologies";
   gpu_info.gl_renderer = "PowerVR SGX 540";
   gpu_info.gl_version = "OpenGL ES 2.0";
-  std::set<int> bugs = list->MakeDecision(
-      GpuControlList::kOsAndroid, "4.1", gpu_info);
+  std::set<int> bugs =
+      list->MakeDecision(GpuControlList::kOsAndroid, "4.1", gpu_info, {});
   EXPECT_EQ(1u, bugs.count(USE_CLIENT_SIDE_ARRAYS_FOR_STREAM_BUFFERS));
 }
-#endif  // OS_ANDROID
+#endif  // BUILDFLAG(IS_ANDROID)
 
 TEST_F(GpuDriverBugListTest, AppendSingleWorkaround) {
   base::CommandLine command_line(0, nullptr);
@@ -48,7 +50,7 @@ TEST_F(GpuDriverBugListTest, AppendSingleWorkaround) {
       DISABLE_CHROMIUM_FRAMEBUFFER_MULTISAMPLE));
   std::set<int> workarounds;
   workarounds.insert(EXIT_ON_CONTEXT_LOST);
-  workarounds.insert(INIT_VERTEX_ATTRIBUTES);
+  workarounds.insert(GL_CLEAR_BROKEN);
   EXPECT_EQ(2u, workarounds.size());
   GpuDriverBugList::AppendWorkaroundsFromCommandLine(
       &workarounds, command_line);

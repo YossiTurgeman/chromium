@@ -1,6 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env vpython3
 #
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -13,7 +13,7 @@ Typical Usage:
 """
 
 import argparse
-import cgi
+import html
 import logging
 import os
 import re
@@ -22,6 +22,7 @@ import sys
 
 sys.path.append(os.path.join(
     os.path.dirname(__file__), os.pardir, os.pardir, 'build', 'android'))
+# pylint: disable=wrong-import-position,import-error
 import devil_chromium
 from devil.android import apk_helper
 from devil.android import device_errors
@@ -38,7 +39,7 @@ _SUPPORTED_ARCH_DICT = {
 }
 
 
-class StackAddressInterpreter(object):
+class StackAddressInterpreter:
   """A class to interpret addresses in simpleperf using stack script."""
   def __init__(self, args, tmp_dir):
     self.args = args
@@ -61,7 +62,7 @@ class StackAddressInterpreter(object):
     cmd = ['third_party/android_platform/development/scripts/stack',
            '--output-directory', output_dir,
            stack_input_path]
-    return subprocess.check_output(cmd).splitlines()
+    return subprocess.check_output(cmd, universal_newlines=True).splitlines()
 
   @staticmethod
   def _ConvertAddressToFakeTraceLine(address, lib_path):
@@ -117,7 +118,7 @@ class StackAddressInterpreter(object):
     return address_function_pairs
 
 
-class SimplePerfRunner(object):
+class SimplePerfRunner:
   """A runner for simpleperf and its postprocessing."""
 
   def __init__(self, device, args, tmp_dir, address_interpreter):
@@ -140,7 +141,7 @@ class SimplePerfRunner(object):
   def GetWebViewLibraryNameAndPath(self, package_name):
     """Get WebView library name and path on the device."""
     apk_path = self._GetWebViewApkPath(package_name)
-    logging.debug('WebView APK path:' + apk_path)
+    logging.debug('WebView APK path: %s', apk_path)
     # TODO(changwan): check if we need support for bundle.
     tmp_apk_path = os.path.join(self.tmp_dir, 'base.apk')
     self.device.adb.Pull(apk_path, tmp_apk_path)
@@ -152,7 +153,8 @@ class SimplePerfRunner(object):
         lib_name = value
 
     lib_path = os.path.join(apk_path, 'lib', self._GetFormattedArch(), lib_name)
-    logging.debug("WebView's library path on the device should be:" + lib_path)
+    logging.debug("WebView's library path on the device should be: %s",
+                  lib_path)
     return lib_name, lib_path
 
   def Run(self):
@@ -183,9 +185,10 @@ class SimplePerfRunner(object):
   @staticmethod
   def RunSimplePerf(perf_data_path, args):
     """Runs the simple perf commandline."""
-    cmd = ['third_party/android_ndk/simpleperf/app_profiler.py',
-           '--perf_data_path', perf_data_path,
-           '--skip_collect_binaries']
+    cmd = [
+        'third_party/android_toolchain/ndk/simpleperf/app_profiler.py',
+        '--perf_data_path', perf_data_path, '--skip_collect_binaries'
+    ]
     if args.system_wide:
       cmd.append('--system_wide')
     else:
@@ -219,10 +222,11 @@ class SimplePerfRunner(object):
   @staticmethod
   def GetOriginalReportHtml(perf_data_path, report_html_path):
     """Gets the original report.html from running simpleperf."""
-    cmd = ['third_party/android_ndk/simpleperf/report_html.py',
-           '--record_file', perf_data_path,
-           '--report_path', report_html_path,
-           '--no_browser']
+    cmd = [
+        'third_party/android_toolchain/ndk/simpleperf/report_html.py',
+        '--record_file', perf_data_path, '--report_path', report_html_path,
+        '--no_browser'
+    ]
     subprocess.check_call(cmd)
     lines = []
     with open(report_html_path, 'r') as f:
@@ -266,7 +270,7 @@ class SimplePerfRunner(object):
     # than using a double loop (by the order of 1,000).
     # '+address' will be replaced by function name.
     address_function_dict = {
-        '+' + k: cgi.escape(v)
+        '+' + k: html.escape(v, quote=False)
         for k, v in address_function_pairs
     }
     # Look behind the lib_name and '[' which will not be substituted. Note that
@@ -277,8 +281,7 @@ class SimplePerfRunner(object):
       address = match.group(0)
       if address in address_function_dict:
         return address_function_dict[address]
-      else:
-        return address
+      return address
 
     # Line-by-line assignment to avoid creating a temp list.
     for i, line in enumerate(lines):

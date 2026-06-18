@@ -1,35 +1,39 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/notifications/chrome_ash_message_center_client.h"
 
+#include <memory>
 #include <string>
 #include <utility>
 
 #include "ash/public/cpp/notifier_metadata.h"
 #include "ash/public/cpp/notifier_settings_observer.h"
-#include "base/bind.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "chrome/browser/chromeos/login/users/fake_chrome_user_manager.h"
+#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/test_extension_system.h"
-#include "chrome/browser/permissions/permission_manager_factory.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
 #include "components/content_settings/core/common/content_settings_types.h"
-#include "components/permissions/permission_manager.h"
-#include "components/permissions/permission_result.h"
+#include "components/permissions/test/permission_test_util.h"
 #include "components/user_manager/scoped_user_manager.h"
+#include "content/public/browser/permission_controller.h"
+#include "content/public/browser/permission_descriptor_util.h"
+#include "content/public/browser/permission_result.h"
 #include "content/public/test/browser_task_environment.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_builder.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/permissions/permission_utils.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notifier_id.h"
 
@@ -46,7 +50,7 @@ class ChromeAshMessageCenterClientTest : public testing::Test,
  protected:
   ChromeAshMessageCenterClientTest()
       : testing_profile_manager_(TestingBrowserProcess::GetGlobal()) {}
-  ~ChromeAshMessageCenterClientTest() override {}
+  ~ChromeAshMessageCenterClientTest() override = default;
 
   // testing::Test:
   void SetUp() override {
@@ -54,7 +58,7 @@ class ChromeAshMessageCenterClientTest : public testing::Test,
 
     // Initialize the UserManager singleton to a fresh FakeUserManager instance.
     user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::make_unique<chromeos::FakeChromeUserManager>());
+        std::make_unique<ash::FakeChromeUserManager>());
 
     message_center::MessageCenter::Initialize();
   }
@@ -90,7 +94,7 @@ class ChromeAshMessageCenterClientTest : public testing::Test,
   }
 
   void CreateClient() {
-    client_.reset(new ChromeAshMessageCenterClient(nullptr));
+    client_ = std::make_unique<ChromeAshMessageCenterClient>(nullptr);
     client_->AddNotifierSettingsObserver(this);
   }
 
@@ -104,8 +108,8 @@ class ChromeAshMessageCenterClientTest : public testing::Test,
   std::vector<ash::NotifierMetadata> notifiers_;
 
  private:
-  chromeos::FakeChromeUserManager* GetFakeUserManager() {
-    return static_cast<chromeos::FakeChromeUserManager*>(
+  ash::FakeChromeUserManager* GetFakeUserManager() {
+    return static_cast<ash::FakeChromeUserManager*>(
         user_manager::UserManager::Get());
   }
 
@@ -124,10 +128,9 @@ TEST_F(ChromeAshMessageCenterClientTest, NotifierSortOrder) {
       static_cast<extensions::TestExtensionSystem*>(
           extensions::ExtensionSystem::Get(profile));
   base::CommandLine command_line(base::CommandLine::NO_PROGRAM);
-  extensions::ExtensionService* extension_service =
-      test_extension_system->CreateExtensionService(
-          &command_line, base::FilePath() /* install_directory */,
-          false /* autoupdate_enabled*/);
+  test_extension_system->CreateExtensionService(
+      &command_line, base::FilePath() /* install_directory */,
+      false /* autoupdate_enabled*/);
 
   extensions::ExtensionBuilder foo_app;
   // Foo is an app with name Foo and should appear second.
@@ -144,86 +147,62 @@ TEST_F(ChromeAshMessageCenterClientTest, NotifierSortOrder) {
   const std::string kBafId = "dddddddddddddddddddddddddddddddd";
 
   foo_app.SetManifest(
-      extensions::DictionaryBuilder()
+      base::DictValue()
           .Set("name", "Foo")
           .Set("version", "1.0.0")
           .Set("manifest_version", 2)
-          .Set("app", extensions::DictionaryBuilder()
-                          .Set("background",
-                               extensions::DictionaryBuilder()
-                                   .Set("scripts", extensions::ListBuilder()
-                                                       .Append("background.js")
-                                                       .Build())
-                                   .Build())
-                          .Build())
-          .Set("permissions",
-               extensions::ListBuilder().Append("notifications").Build())
-          .Build());
+          .Set("app", base::DictValue().Set(
+                          "background", base::DictValue().Set(
+                                            "scripts", base::ListValue().Append(
+                                                           "background.js"))))
+          .Set("permissions", base::ListValue().Append("notifications")));
   foo_app.SetID(kFooId);
-  extension_service->AddExtension(foo_app.Build().get());
+  extensions::ExtensionRegistrar::Get(profile)->AddExtension(foo_app.Build());
 
   extensions::ExtensionBuilder bar_app;
   bar_app.SetManifest(
-      extensions::DictionaryBuilder()
+      base::DictValue()
           .Set("name", "Bar")
           .Set("version", "1.0.0")
           .Set("manifest_version", 2)
-          .Set("app", extensions::DictionaryBuilder()
-                          .Set("background",
-                               extensions::DictionaryBuilder()
-                                   .Set("scripts", extensions::ListBuilder()
-                                                       .Append("background.js")
-                                                       .Build())
-                                   .Build())
-                          .Build())
-          .Set("permissions",
-               extensions::ListBuilder().Append("notifications").Build())
-          .Build());
+          .Set("app", base::DictValue().Set(
+                          "background", base::DictValue().Set(
+                                            "scripts", base::ListValue().Append(
+                                                           "background.js"))))
+          .Set("permissions", base::ListValue().Append("notifications")));
   bar_app.SetID(kBarId);
-  extension_service->AddExtension(bar_app.Build().get());
+  extensions::ExtensionRegistrar::Get(profile)->AddExtension(bar_app.Build());
 
   extensions::ExtensionBuilder baz_app;
   baz_app.SetManifest(
-      extensions::DictionaryBuilder()
+      base::DictValue()
           .Set("name", "baz")
           .Set("version", "1.0.0")
           .Set("manifest_version", 2)
-          .Set("app", extensions::DictionaryBuilder()
-                          .Set("background",
-                               extensions::DictionaryBuilder()
-                                   .Set("scripts", extensions::ListBuilder()
-                                                       .Append("background.js")
-                                                       .Build())
-                                   .Build())
-                          .Build())
-          .Build());
+          .Set("app", base::DictValue().Set(
+                          "background", base::DictValue().Set(
+                                            "scripts", base::ListValue().Append(
+                                                           "background.js")))));
   baz_app.SetID(kBazId);
-  extension_service->AddExtension(baz_app.Build().get());
+  extensions::ExtensionRegistrar::Get(profile)->AddExtension(baz_app.Build());
 
   extensions::ExtensionBuilder baf_app;
   baf_app.SetManifest(
-      extensions::DictionaryBuilder()
+      base::DictValue()
           .Set("name", "baf")
           .Set("version", "1.0.0")
           .Set("manifest_version", 2)
           .Set("app",
-               extensions::DictionaryBuilder()
-                   .Set("urls", extensions::ListBuilder()
-                                    .Append("http://localhost/extensions/"
-                                            "hosted_app/main.html")
-                                    .Build())
-                   .Build())
+               base::DictValue().Set("urls", base::ListValue().Append(
+                                                 "http://localhost/extensions/"
+                                                 "hosted_app/main.html")))
           .Set("launch",
-               extensions::DictionaryBuilder()
-                   .Set("urls", extensions::ListBuilder()
-                                    .Append("http://localhost/extensions/"
-                                            "hosted_app/main.html")
-                                    .Build())
-                   .Build())
-          .Build());
+               base::DictValue().Set("urls", base::ListValue().Append(
+                                                 "http://localhost/extensions/"
+                                                 "hosted_app/main.html"))));
 
   baf_app.SetID(kBafId);
-  extension_service->AddExtension(baf_app.Build().get());
+  extensions::ExtensionRegistrar::Get(profile)->AddExtension(baf_app.Build());
   CreateClient();
 
   RefreshNotifierList();
@@ -233,7 +212,10 @@ TEST_F(ChromeAshMessageCenterClientTest, NotifierSortOrder) {
 }
 
 TEST_F(ChromeAshMessageCenterClientTest, SetWebPageNotifierEnabled) {
-  Profile* profile = CreateProfile("myprofile@gmail.com");
+  TestingProfile* profile = CreateProfile("myprofile@gmail.com");
+  const auto notification_permission_descriptor = content::
+      PermissionDescriptorUtil::CreatePermissionDescriptorForPermissionType(
+          blink::PermissionType::NOTIFICATIONS);
   CreateClient();
 
   GURL origin("https://example.com/");
@@ -242,27 +224,30 @@ TEST_F(ChromeAshMessageCenterClientTest, SetWebPageNotifierEnabled) {
 
   ContentSetting default_setting =
       HostContentSettingsMapFactory::GetForProfile(profile)
-          ->GetDefaultContentSetting(ContentSettingsType::NOTIFICATIONS, NULL);
+          ->GetDefaultContentSetting(ContentSettingsType::NOTIFICATIONS,
+                                     nullptr);
   ASSERT_EQ(CONTENT_SETTING_ASK, default_setting);
 
-  permissions::PermissionManager* permission_manager =
-      PermissionManagerFactory::GetForProfile(profile);
+  profile->SetPermissionControllerDelegate(
+      permissions::GetPermissionControllerDelegate(profile));
 
   // (1) Enable the permission when the default is to ask (expected to set).
   message_center_client()->SetNotifierEnabled(notifier_id, true);
-  EXPECT_EQ(CONTENT_SETTING_ALLOW,
-            permission_manager
-                ->GetPermissionStatus(ContentSettingsType::NOTIFICATIONS,
-                                      origin, origin)
-                .content_setting);
+  EXPECT_EQ(
+      blink::mojom::PermissionStatus::GRANTED,
+      profile->GetPermissionController()
+          ->GetPermissionResultForOriginWithoutContext(
+              notification_permission_descriptor, url::Origin::Create(origin))
+          .status);
 
   // (2) Disable the permission when the default is to ask (expected to clear).
   message_center_client()->SetNotifierEnabled(notifier_id, false);
-  EXPECT_EQ(CONTENT_SETTING_ASK,
-            permission_manager
-                ->GetPermissionStatus(ContentSettingsType::NOTIFICATIONS,
-                                      origin, origin)
-                .content_setting);
+  EXPECT_EQ(
+      blink::mojom::PermissionStatus::ASK,
+      profile->GetPermissionController()
+          ->GetPermissionResultForOriginWithoutContext(
+              notification_permission_descriptor, url::Origin::Create(origin))
+          .status);
 
   // Change the default content setting vaule for notifications to ALLOW.
   HostContentSettingsMapFactory::GetForProfile(profile)
@@ -271,19 +256,22 @@ TEST_F(ChromeAshMessageCenterClientTest, SetWebPageNotifierEnabled) {
 
   // (3) Disable the permission when the default is allowed (expected to set).
   message_center_client()->SetNotifierEnabled(notifier_id, false);
-  EXPECT_EQ(CONTENT_SETTING_BLOCK,
-            permission_manager
-                ->GetPermissionStatus(ContentSettingsType::NOTIFICATIONS,
-                                      origin, origin)
-                .content_setting);
+  EXPECT_EQ(
+      blink::mojom::PermissionStatus::DENIED,
+      profile->GetPermissionController()
+          ->GetPermissionResultForOriginWithoutContext(
+              notification_permission_descriptor, url::Origin::Create(origin))
+          .status);
 
   // (4) Enable the permission when the default is allowed (expected to clear).
   message_center_client()->SetNotifierEnabled(notifier_id, true);
-  EXPECT_EQ(CONTENT_SETTING_ALLOW,
-            permission_manager
-                ->GetPermissionStatus(ContentSettingsType::NOTIFICATIONS,
-                                      origin, origin)
-                .content_setting);
+
+  EXPECT_EQ(
+      blink::mojom::PermissionStatus::GRANTED,
+      profile->GetPermissionController()
+          ->GetPermissionResultForOriginWithoutContext(
+              notification_permission_descriptor, url::Origin::Create(origin))
+          .status);
 
   // Now change the default content setting value to BLOCK.
   HostContentSettingsMapFactory::GetForProfile(profile)
@@ -292,19 +280,21 @@ TEST_F(ChromeAshMessageCenterClientTest, SetWebPageNotifierEnabled) {
 
   // (5) Enable the permission when the default is blocked (expected to set).
   message_center_client()->SetNotifierEnabled(notifier_id, true);
-  EXPECT_EQ(CONTENT_SETTING_ALLOW,
-            permission_manager
-                ->GetPermissionStatus(ContentSettingsType::NOTIFICATIONS,
-                                      origin, origin)
-                .content_setting);
+  EXPECT_EQ(
+      blink::mojom::PermissionStatus::GRANTED,
+      profile->GetPermissionController()
+          ->GetPermissionResultForOriginWithoutContext(
+              notification_permission_descriptor, url::Origin::Create(origin))
+          .status);
 
   // (6) Disable the permission when the default is blocked (expected to clear).
   message_center_client()->SetNotifierEnabled(notifier_id, false);
-  EXPECT_EQ(CONTENT_SETTING_BLOCK,
-            permission_manager
-                ->GetPermissionStatus(ContentSettingsType::NOTIFICATIONS,
-                                      origin, origin)
-                .content_setting);
+  EXPECT_EQ(
+      blink::mojom::PermissionStatus::DENIED,
+      profile->GetPermissionController()
+          ->GetPermissionResultForOriginWithoutContext(
+              notification_permission_descriptor, url::Origin::Create(origin))
+          .status);
 }
 
 }  // namespace

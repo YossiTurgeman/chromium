@@ -1,4 +1,4 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,18 @@
 #define COMPONENTS_VIZ_COMMON_QUADS_COMPOSITOR_FRAME_H_
 
 #include <memory>
+#include <string>
+#include <vector>
 
-#include "base/macros.h"
 #include "components/viz/common/quads/compositor_frame_metadata.h"
 #include "components/viz/common/quads/compositor_render_pass.h"
 #include "components/viz/common/resources/transferable_resource.h"
+#include "components/viz/common/surfaces/region_capture_bounds.h"
 #include "components/viz/common/viz_common_export.h"
+
+namespace base::trace_event {
+class TracedValue;
+}  // namespace base::trace_event
 
 namespace viz {
 
@@ -26,6 +32,10 @@ class VIZ_COMMON_EXPORT CompositorFrame {
  public:
   CompositorFrame();
   CompositorFrame(CompositorFrame&& other);
+
+  CompositorFrame(const CompositorFrame&) = delete;
+  CompositorFrame& operator=(const CompositorFrame&) = delete;
+
   ~CompositorFrame();
 
   CompositorFrame& operator=(CompositorFrame&& other);
@@ -39,15 +49,15 @@ class VIZ_COMMON_EXPORT CompositorFrame {
 
   bool HasCopyOutputRequests() const;
 
+  void AsValueInto(base::trace_event::TracedValue* value) const;
+  std::string ToString() const;
+
   CompositorFrameMetadata metadata;
   std::vector<TransferableResource> resource_list;
   // This list is in the order that each CompositorRenderPass will be drawn.
   // The last one is the "root" CompositorRenderPass that all others are
   // directly or indirectly drawn into.
   CompositorRenderPassList render_pass_list;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(CompositorFrame);
 };
 
 }  // namespace viz

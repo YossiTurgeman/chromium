@@ -1,9 +1,16 @@
-#!/usr/bin/env python
-# Copyright 2014 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+
+import os
 import unittest
+
+import sys
+
+sys.path.append(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from pylib.base import base_test_result
 from pylib.gtest import gtest_test_instance
@@ -99,10 +106,10 @@ class GtestTestInstanceTests(unittest.TestCase):
       '[       OK ] FooTest.Bar (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('FooTest.Bar', actual[0].GetName())
-    self.assertEquals(1, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.PASS, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.PASS, actual[0].GetType())
 
   def testParseGTestOutput_fail(self):
     raw_output = [
@@ -110,10 +117,10 @@ class GtestTestInstanceTests(unittest.TestCase):
       '[   FAILED ] FooTest.Bar (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('FooTest.Bar', actual[0].GetName())
-    self.assertEquals(1, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.FAIL, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.FAIL, actual[0].GetType())
 
   def testParseGTestOutput_crash(self):
     raw_output = [
@@ -121,10 +128,10 @@ class GtestTestInstanceTests(unittest.TestCase):
       '[  CRASHED ] FooTest.Bar (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('FooTest.Bar', actual[0].GetName())
-    self.assertEquals(1, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.CRASH, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.CRASH, actual[0].GetType())
 
   def testParseGTestOutput_errorCrash(self):
     raw_output = [
@@ -132,20 +139,64 @@ class GtestTestInstanceTests(unittest.TestCase):
       '[ERROR:blah] Currently running: FooTest.Bar',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('FooTest.Bar', actual[0].GetName())
-    self.assertEquals(0, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.CRASH, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertIsNone(actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.CRASH, actual[0].GetType())
+
+  def testParseGTestOutput_fatalDcheck(self):
+    raw_output = [
+        '[ RUN      ] FooTest.Bar',
+        '[0324/183029.116334:FATAL:test_timeouts.cc(103)] Check failed: !init',
+    ]
+    actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
+    self.assertEqual(1, len(actual))
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertIsNone(actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.CRASH, actual[0].GetType())
+
+  def testParseGTestOutput_crashWithoutCheckOrErrorMessage(self):
+    """Regression test for https://crbug.com/355630342."""
+    raw_output = [
+        '>>ScopedMainEntryLogger',
+        '[ RUN      ] FooTest.WillCrashSuddenly',
+        'BrowserTestBase received signal: Segmentation fault. Backtrace:',
+        '<fake backtrace line>',
+        '>>ScopedMainEntryLogger',
+        'Note: Google Test filter = FooTest.DoNotConsume',
+        '[ RUN      ] FooTest.DoNotConsume',
+        '[       OK ] FooTest.DoNotConsume (1 ms)',
+        '<<ScopedMainEntryLogger',
+    ]
+    actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
+    self.assertEqual(2, len(actual))
+
+    self.assertEqual('FooTest.WillCrashSuddenly', actual[0].GetName())
+    self.assertIsNone(actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.CRASH, actual[0].GetType())
+    self.assertEqual([
+        '[ RUN      ] FooTest.WillCrashSuddenly',
+        'BrowserTestBase received signal: Segmentation fault. Backtrace:',
+        '<fake backtrace line>',
+    ], actual[0].GetLog().splitlines())
+
+    self.assertEqual('FooTest.DoNotConsume', actual[1].GetName())
+    self.assertEqual(1, actual[1].GetDuration())
+    self.assertEqual(base_test_result.ResultType.PASS, actual[1].GetType())
+    self.assertEqual([
+        '[ RUN      ] FooTest.DoNotConsume',
+        '[       OK ] FooTest.DoNotConsume (1 ms)',
+    ], actual[1].GetLog().splitlines())
 
   def testParseGTestOutput_unknown(self):
     raw_output = [
       '[ RUN      ] FooTest.Bar',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('FooTest.Bar', actual[0].GetName())
-    self.assertEquals(0, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.UNKNOWN, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertEqual(0, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.CRASH, actual[0].GetType())
 
   def testParseGTestOutput_nonterminalUnknown(self):
     raw_output = [
@@ -154,15 +205,15 @@ class GtestTestInstanceTests(unittest.TestCase):
       '[       OK ] FooTest.Baz (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(2, len(actual))
+    self.assertEqual(2, len(actual))
 
-    self.assertEquals('FooTest.Bar', actual[0].GetName())
-    self.assertEquals(0, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.UNKNOWN, actual[0].GetType())
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertEqual(0, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.CRASH, actual[0].GetType())
 
-    self.assertEquals('FooTest.Baz', actual[1].GetName())
-    self.assertEquals(1, actual[1].GetDuration())
-    self.assertEquals(base_test_result.ResultType.PASS, actual[1].GetType())
+    self.assertEqual('FooTest.Baz', actual[1].GetName())
+    self.assertEqual(1, actual[1].GetDuration())
+    self.assertEqual(base_test_result.ResultType.PASS, actual[1].GetType())
 
   def testParseGTestOutput_deathTestCrashOk(self):
     raw_output = [
@@ -171,11 +222,11 @@ class GtestTestInstanceTests(unittest.TestCase):
       '[       OK ] FooTest.Bar (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
+    self.assertEqual(1, len(actual))
 
-    self.assertEquals('FooTest.Bar', actual[0].GetName())
-    self.assertEquals(1, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.PASS, actual[0].GetType())
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.PASS, actual[0].GetType())
 
   def testParseGTestOutput_typeParameterized(self):
     raw_output = [
@@ -183,10 +234,10 @@ class GtestTestInstanceTests(unittest.TestCase):
         '[   FAILED ] Baz/FooTest.Bar/0, where TypeParam =  (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('Baz/FooTest.Bar/0', actual[0].GetName())
-    self.assertEquals(1, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.FAIL, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('Baz/FooTest.Bar/0', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.FAIL, actual[0].GetType())
 
   def testParseGTestOutput_valueParameterized(self):
     raw_output = [
@@ -195,10 +246,10 @@ class GtestTestInstanceTests(unittest.TestCase):
         ' where GetParam() = 4-byte object <00-00 00-00> (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('Baz/FooTest.Bar/0', actual[0].GetName())
-    self.assertEquals(1, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.FAIL, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('Baz/FooTest.Bar/0', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.FAIL, actual[0].GetType())
 
   def testParseGTestOutput_typeAndValueParameterized(self):
     raw_output = [
@@ -207,18 +258,29 @@ class GtestTestInstanceTests(unittest.TestCase):
         ' where TypeParam =  and GetParam() =  (1 ms)',
     ]
     actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('Baz/FooTest.Bar/0', actual[0].GetName())
-    self.assertEquals(1, actual[0].GetDuration())
-    self.assertEquals(base_test_result.ResultType.FAIL, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('Baz/FooTest.Bar/0', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.FAIL, actual[0].GetType())
+
+  def testParseGTestOutput_skippedTest(self):
+    raw_output = [
+        '[ RUN      ] FooTest.Bar',
+        '[  SKIPPED ] FooTest.Bar (1 ms)',
+    ]
+    actual = gtest_test_instance.ParseGTestOutput(raw_output, None, None)
+    self.assertEqual(1, len(actual))
+    self.assertEqual('FooTest.Bar', actual[0].GetName())
+    self.assertEqual(1, actual[0].GetDuration())
+    self.assertEqual(base_test_result.ResultType.SKIP, actual[0].GetType())
 
   def testParseGTestXML_none(self):
     actual = gtest_test_instance.ParseGTestXML(None)
-    self.assertEquals([], actual)
+    self.assertEqual([], actual)
 
   def testParseGTestJSON_none(self):
     actual = gtest_test_instance.ParseGTestJSON(None)
-    self.assertEquals([], actual)
+    self.assertEqual([], actual)
 
   def testParseGTestJSON_example(self):
     raw_json = """
@@ -253,10 +315,86 @@ class GtestTestInstanceTests(unittest.TestCase):
         }
       }"""
     actual = gtest_test_instance.ParseGTestJSON(raw_json)
-    self.assertEquals(1, len(actual))
-    self.assertEquals('mojom_tests.parse.ast_unittest.ASTTest.testNodeBase',
-                      actual[0].GetName())
-    self.assertEquals(base_test_result.ResultType.PASS, actual[0].GetType())
+    self.assertEqual(1, len(actual))
+    self.assertEqual('mojom_tests.parse.ast_unittest.ASTTest.testNodeBase',
+                     actual[0].GetName())
+    self.assertEqual(base_test_result.ResultType.PASS, actual[0].GetType())
+
+  def testParseGTestJSON_skippedTest_example(self):
+    raw_json = """
+      {
+        "tests": {
+          "mojom_tests": {
+            "parse": {
+              "ast_unittest": {
+                "ASTTest": {
+                  "testNodeBase": {
+                    "expected": "SKIP",
+                    "actual": "SKIP"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "interrupted": false,
+        "path_delimiter": ".",
+        "version": 3,
+        "seconds_since_epoch": 1406662283.764424,
+        "num_failures_by_type": {
+          "SKIP": 1
+        }
+      }"""
+    actual = gtest_test_instance.ParseGTestJSON(raw_json)
+    self.assertEqual(1, len(actual))
+    self.assertEqual('mojom_tests.parse.ast_unittest.ASTTest.testNodeBase',
+                     actual[0].GetName())
+    self.assertEqual(base_test_result.ResultType.SKIP, actual[0].GetType())
+
+  def testParseGTestListTestsJSON_example(self):
+    actual = gtest_test_instance.ParseGTestListTestsJSON(None)
+    self.assertEqual({}, actual)
+
+    actual = gtest_test_instance.ParseGTestListTestsJSON('invalid json')
+    self.assertEqual({}, actual)
+
+    raw_json = """
+      {
+        "testsuites": [
+          {
+            "name": "SuiteOne",
+            "testsuite": [
+              {
+                "name": "TestOne",
+                "file": "../../path/to/file_one.cc",
+                "line": 10
+              },
+              {
+                "name": "TestTwo",
+                "file": "path/to/file_two.cc",
+                "line": 20
+              }
+            ]
+          },
+          {
+            "name": "SuiteTwo",
+            "testsuite": [
+              {
+                "name": "TestThree",
+                "file": "../../path/to/file_three.cc",
+                "line": 30
+              }
+            ]
+          }
+        ]
+      }"""
+    actual = gtest_test_instance.ParseGTestListTestsJSON(raw_json)
+    expected = {
+        'SuiteOne.TestOne': '//path/to/file_one.cc',
+        'SuiteOne.TestTwo': 'path/to/file_two.cc',
+        'SuiteTwo.TestThree': '//path/to/file_three.cc',
+    }
+    self.assertEqual(expected, actual)
 
   def testTestNameWithoutDisabledPrefix_disabled(self):
     test_name_list = [
@@ -265,10 +403,9 @@ class GtestTestInstanceTests(unittest.TestCase):
       'DISABLED_A.DISABLED_B',
     ]
     for test_name in test_name_list:
-      actual = gtest_test_instance \
-          .TestNameWithoutDisabledPrefix(test_name)
+      actual = gtest_test_instance.TestNameWithoutDisabledPrefix(test_name)
       expected = 'A.B'
-      self.assertEquals(expected, actual)
+      self.assertEqual(expected, actual)
 
   def testTestNameWithoutDisabledPrefix_flaky(self):
     test_name_list = [
@@ -277,17 +414,82 @@ class GtestTestInstanceTests(unittest.TestCase):
       'FLAKY_A.FLAKY_B',
     ]
     for test_name in test_name_list:
-      actual = gtest_test_instance \
-          .TestNameWithoutDisabledPrefix(test_name)
+      actual = gtest_test_instance.TestNameWithoutDisabledPrefix(test_name)
       expected = 'A.B'
-      self.assertEquals(expected, actual)
+      self.assertEqual(expected, actual)
 
   def testTestNameWithoutDisabledPrefix_notDisabledOrFlaky(self):
     test_name = 'A.B'
-    actual = gtest_test_instance \
-        .TestNameWithoutDisabledPrefix(test_name)
+    actual = gtest_test_instance.TestNameWithoutDisabledPrefix(test_name)
     expected = 'A.B'
-    self.assertEquals(expected, actual)
+    self.assertEqual(expected, actual)
+
+  def testTestNameWithoutPrefix(self):
+    test_name_list = [
+        'A.DISABLED_B',
+        'DISABLED_A.B',
+        'DISABLED_A.DISABLED_B',
+        'A.FLAKY_B',
+        'FLAKY_A.B',
+        'FLAKY_A.FLAKY_B',
+        'A.PRE_B',
+        'A.PRE_PRE_B',
+        'A.DISABLED_PRE_B',
+        'A.DISABLED_PRE_PRE_B',
+        'DISABLED_A.DISABLED_PRE_B',
+        'DISABLED_A.DISABLED_PRE_PRE_B',
+    ]
+    for test_name in test_name_list:
+      actual = gtest_test_instance.TestNameWithoutPrefixes(test_name)
+      expected = 'A.B'
+      self.assertEqual(expected, actual)
+
+  def testTestNameWithPrePrefix(self):
+    test_data = [
+        ('A.B', 'A.PRE_B'),
+        ('A.PRE_B', 'A.PRE_PRE_B'),
+        ('A.DISABLED_B', 'A.PRE_B'),
+        ('A.DISABLED_PRE_B', 'A.PRE_PRE_B'),
+    ]
+    for test_name, expected in test_data:
+      actual = gtest_test_instance.TestNameWithPrePrefix(test_name)
+      self.assertEqual(expected, actual)
+
+  def testIsPreTest(self):
+    test_data = [
+        ('A.PRE_B', True),
+        ('A.PRE_PRE_B', True),
+        ('A.DISABLED_PRE_B', True),
+        ('A.DISABLED_PRE_PRE_B', True),
+        ('A.B', False),
+        ('A.DISABLED_B', False),
+    ]
+    for test_name, expected in test_data:
+      actual = gtest_test_instance.IsPreTest(test_name)
+      self.assertEqual(expected, actual)
+
+  def testFilterTestNames_withPrePrefixStripping(self):
+    test_list = [
+        'Suite.Test',
+        'Suite.PRE_Test',
+        'Suite.PRE_PRE_Test',
+        'Other.Test',
+    ]
+    actual = gtest_test_instance.unittest_util.FilterTestNames(
+        test_list, 'Suite.Test', gtest_test_instance.TestNameWithoutPrefixes)
+    expected = ['Suite.Test', 'Suite.PRE_Test', 'Suite.PRE_PRE_Test']
+    self.assertEqual(expected, actual)
+
+    actual = gtest_test_instance.unittest_util.FilterTestNames(
+        test_list, 'Suite.PRE_Test',
+        gtest_test_instance.TestNameWithoutPrefixes)
+    expected = ['Suite.PRE_Test']
+    self.assertEqual(expected, actual)
+
+    actual = gtest_test_instance.unittest_util.FilterTestNames(
+        test_list, '-Suite.Test', gtest_test_instance.TestNameWithoutPrefixes)
+    expected = ['Other.Test']
+    self.assertEqual(expected, actual)
 
 
 if __name__ == '__main__':

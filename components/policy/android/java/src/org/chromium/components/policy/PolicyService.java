@@ -1,17 +1,17 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.policy;
 
-import org.chromium.base.CollectionUtil;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeClassQualifiedName;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.NativeClassQualifiedName;
+import org.jni_zero.NativeMethods;
 
-import java.util.HashSet;
-import java.util.Set;
+import org.chromium.base.Log;
+import org.chromium.base.ObserverList;
+import org.chromium.build.annotations.NullMarked;
 
 /**
  * Wrapper of the native PolicyService class in the Java layer.
@@ -26,33 +26,48 @@ import java.util.Set;
  * functions will be added once needed.
  */
 @JNINamespace("policy::android")
+@NullMarked
 public class PolicyService {
-    private long mNativePolicyService;
-    private final Set<Observer> mObservers = new HashSet<Observer>();
+    private static final String TAG = "PolicyService";
+
+    private final long mNativePolicyService;
+    private final ObserverList<Observer> mObservers = new ObserverList<Observer>();
 
     /**
      * Observer interface for observing PolicyService change for Chrome policy
      * domain.
+     *
+     * The default method below may increase method count with Desugar. If there
+     * are more than 10+ observer implementations, please consider use
+     * EmptyObserver instead for default behavior.
      */
     public interface Observer {
+        /**
+         * Invoked when Chrome policy is modified. The native class of both
+         * |previous| and |current| become invalid once the method
+         * returns. Do not use their references outside the method.
+         * @param previous PolicyMap contains values before the update.
+         * @param current PolicyMap contains values after the update.
+         */
+        default void onPolicyUpdated(PolicyMap previous, PolicyMap current) {}
+
         /**
          * Invoked when Chome policy domain is initialized. Observer must be
          * added before the naitve PolicyService initialization being finished.
          * Use {@link #isInitializationComplete} to check the initialization
          * state before listening to this event.
          */
-        void onPolicyServiceInitialized();
+        default void onPolicyServiceInitialized() {}
     }
 
     /**
-     * @param observer The {@link Observer} to be notified for Chrome policy
-     * update.
+     * @param observer The {@link Observer} to be notified for Chrome policy update.
      */
     public void addObserver(Observer observer) {
         if (mObservers.isEmpty()) {
-            PolicyServiceJni.get().addObserver(mNativePolicyService, PolicyService.this);
+            PolicyServiceJni.get().addObserver(mNativePolicyService);
         }
-        mObservers.add(observer);
+        mObservers.addObserver(observer);
     }
 
     /**
@@ -60,26 +75,37 @@ public class PolicyService {
      * policy update.
      */
     public void removeObserver(Observer observer) {
-        mObservers.remove(observer);
+        mObservers.removeObserver(observer);
         if (mObservers.isEmpty()) {
-            PolicyServiceJni.get().removeObserver(mNativePolicyService, PolicyService.this);
+            PolicyServiceJni.get().removeObserver(mNativePolicyService);
         }
     }
 
-    /**
-     * Returns true if Chrome policy domain has been initialized.
-     */
+    /** Returns true if Chrome policy domain has been initialized. */
     public boolean isInitializationComplete() {
-        return PolicyServiceJni.get().isInitializationComplete(
-                mNativePolicyService, PolicyService.this);
+        return PolicyServiceJni.get().isInitializationComplete(mNativePolicyService);
     }
 
-    /**
-     * Pass the onPolicyServiceInitialized event to the |mObservers|.
-     */
+    /** Returns {@link PolicyMap} that contains all Chrome policies. */
+    public PolicyMap getPolicies() {
+        return PolicyServiceJni.get().getPolicies(mNativePolicyService);
+    }
+
+    /** Pass the onPolicyServiceInitialized event to the |mObservers|. */
     @CalledByNative
     private void onPolicyServiceInitialized() {
-        CollectionUtil.forEach(mObservers, observer -> observer.onPolicyServiceInitialized());
+        Log.i(TAG, "#onPolicyServiceInitialized()");
+        for (Observer observer : mObservers) {
+            observer.onPolicyServiceInitialized();
+        }
+    }
+
+    /** Pass the onPolicyUpdated event to the |mObservers|. */
+    @CalledByNative
+    private void onPolicyUpdated(PolicyMap previous, PolicyMap current) {
+        for (Observer observer : mObservers) {
+            observer.onPolicyUpdated(previous, current);
+        }
     }
 
     @CalledByNative
@@ -90,10 +116,15 @@ public class PolicyService {
     @NativeMethods
     public interface Natives {
         @NativeClassQualifiedName("PolicyServiceAndroid")
-        void addObserver(long nativePolicyService, PolicyService caller);
+        void addObserver(long nativePolicyService);
+
         @NativeClassQualifiedName("PolicyServiceAndroid")
-        void removeObserver(long nativePolicyService, PolicyService caller);
+        void removeObserver(long nativePolicyService);
+
         @NativeClassQualifiedName("PolicyServiceAndroid")
-        boolean isInitializationComplete(long nativePolicyService, PolicyService caller);
+        boolean isInitializationComplete(long nativePolicyService);
+
+        @NativeClassQualifiedName("PolicyServiceAndroid")
+        PolicyMap getPolicies(long nativePolicyService);
     }
 }

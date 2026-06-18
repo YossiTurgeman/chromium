@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium Authors. All rights reserved.
+// Copyright 2010 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,10 @@
 
 #include <windows.h>
 
+#include <ostream>
+#include <string_view>
+
 #include "base/check_op.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 
@@ -15,7 +17,7 @@ namespace {
 
 using GetPreferredUILanguages_Fn = decltype(::GetSystemPreferredUILanguages)*;
 
-constexpr base::WStringPiece kNullTerminator{L"\0", 1};
+constexpr std::wstring_view kNullTerminator{L"\0", 1};
 
 bool GetPreferredUILanguageList(GetPreferredUILanguages_Fn function,
                                 ULONG flags,
@@ -31,7 +33,7 @@ bool GetPreferredUILanguageList(GetPreferredUILanguages_Fn function,
   }
 
   std::wstring buffer(buffer_length, '\0');
-  if (!function(call_flags, &language_count, base::data(buffer),
+  if (!function(call_flags, &language_count, std::data(buffer),
                 &buffer_length) ||
       !language_count) {
     DPCHECK(!language_count) << "Failed getting preferred UI languages.";

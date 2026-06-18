@@ -1,15 +1,19 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/gpu/test/video_player/video_player_test_environment.h"
 
+#include <algorithm>
+#include <iterator>
 #include <utility>
 
 #include "base/system/sys_info.h"
+#include "media/base/media_switches.h"
 #include "media/base/video_types.h"
-#include "media/gpu/test/video.h"
-#include "media/gpu/test/video_player/video_decoder_client.h"
+#include "media/gpu/buildflags.h"
+#include "media/gpu/test/video_bitstream.h"
+#include "media/gpu/test/video_player/decoder_wrapper.h"
 
 namespace media {
 namespace test {
@@ -22,78 +26,70 @@ constexpr base::FilePath::CharType kDefaultTestVideoPath[] =
 VideoPlayerTestEnvironment* VideoPlayerTestEnvironment::Create(
     const base::FilePath& video_path,
     const base::FilePath& video_metadata_path,
-    bool enable_validator,
+    ValidatorType validator_type,
     const DecoderImplementation implementation,
+    bool linear_output,
     const base::FilePath& output_folder,
-    const FrameOutputConfig& frame_output_config) {
-  auto video = std::make_unique<media::test::Video>(
+    const FrameOutputConfig& frame_output_config,
+    const std::vector<base::test::FeatureRef>& enabled_features,
+    const std::vector<base::test::FeatureRef>& disabled_features,
+    const bool need_task_environment) {
+  auto video = VideoBitstream::Create(
       video_path.empty() ? base::FilePath(kDefaultTestVideoPath) : video_path,
       video_metadata_path);
-  if (!video->Load()) {
+  if (!video) {
     LOG(ERROR) << "Failed to load " << video_path;
     return nullptr;
   }
 
-  return new VideoPlayerTestEnvironment(std::move(video), enable_validator,
-                                        implementation, output_folder,
-                                        frame_output_config);
+  return new VideoPlayerTestEnvironment(
+      std::move(video), validator_type, implementation, linear_output,
+      output_folder, frame_output_config, enabled_features, disabled_features,
+      need_task_environment);
 }
 
 VideoPlayerTestEnvironment::VideoPlayerTestEnvironment(
-    std::unique_ptr<media::test::Video> video,
-    bool enable_validator,
+    std::unique_ptr<media::test::VideoBitstream> video,
+    ValidatorType validator_type,
     const DecoderImplementation implementation,
+    bool linear_output,
     const base::FilePath& output_folder,
-    const FrameOutputConfig& frame_output_config)
-    : video_(std::move(video)),
-      enable_validator_(enable_validator),
+    const FrameOutputConfig& frame_output_config,
+    const std::vector<base::test::FeatureRef>& enabled_features,
+    const std::vector<base::test::FeatureRef>& disabled_features,
+    const bool need_task_environment)
+    : VideoTestEnvironment(enabled_features,
+                           disabled_features,
+                           need_task_environment),
+      video_(std::move(video)),
+      validator_type_(validator_type),
       implementation_(implementation),
+      linear_output_(linear_output),
       frame_output_config_(frame_output_config),
-      output_folder_(output_folder),
-      gpu_memory_buffer_factory_(
-          gpu::GpuMemoryBufferFactory::CreateNativeType(nullptr)) {}
+      output_folder_(output_folder) {}
 
 VideoPlayerTestEnvironment::~VideoPlayerTestEnvironment() = default;
 
-void VideoPlayerTestEnvironment::SetUp() {
-  VideoTestEnvironment::SetUp();
-
-  // TODO(dstaessens): Remove this check once all platforms support import mode.
-  // Some older platforms do not support importing buffers, but need to allocate
-  // buffers internally in the decoder.
-  // Note: buddy, guado and rikku support import mode for H.264 and VP9, but for
-  // VP8 they use a different video decoder (V4L2 instead of VAAPI) and don't
-  // support import mode.
-#if defined(OS_CHROMEOS)
-  constexpr const char* kImportModeBlocklist[] = {
-      "buddy",      "guado",      "guado-cfm", "guado-kernelnext", "nyan_big",
-      "nyan_blaze", "nyan_kitty", "rikku",     "rikku-cfm"};
-  const std::string board = base::SysInfo::GetLsbReleaseBoard();
-  import_supported_ = (std::find(std::begin(kImportModeBlocklist),
-                                 std::end(kImportModeBlocklist),
-                                 board) == std::end(kImportModeBlocklist));
-#endif  // defined(OS_CHROMEOS)
-
-  // VideoDecoders always require import mode to be supported.
-  DCHECK(import_supported_ || implementation_ == DecoderImplementation::kVDA);
-}
-
-const media::test::Video* VideoPlayerTestEnvironment::Video() const {
+const media::test::VideoBitstream* VideoPlayerTestEnvironment::Video() const {
   return video_.get();
 }
 
-gpu::GpuMemoryBufferFactory*
-VideoPlayerTestEnvironment::GetGpuMemoryBufferFactory() const {
-  return gpu_memory_buffer_factory_.get();
+bool VideoPlayerTestEnvironment::IsValidatorEnabled() const {
+  return validator_type_ != ValidatorType::kNone;
 }
 
-bool VideoPlayerTestEnvironment::IsValidatorEnabled() const {
-  return enable_validator_;
+VideoPlayerTestEnvironment::ValidatorType
+VideoPlayerTestEnvironment::GetValidatorType() const {
+  return validator_type_;
 }
 
 DecoderImplementation VideoPlayerTestEnvironment::GetDecoderImplementation()
     const {
   return implementation_;
+}
+
+bool VideoPlayerTestEnvironment::ShouldOutputLinearBuffers() const {
+  return linear_output_;
 }
 
 FrameOutputMode VideoPlayerTestEnvironment::GetFrameOutputMode() const {
@@ -111,10 +107,6 @@ uint64_t VideoPlayerTestEnvironment::GetFrameOutputLimit() const {
 
 const base::FilePath& VideoPlayerTestEnvironment::OutputFolder() const {
   return output_folder_;
-}
-
-bool VideoPlayerTestEnvironment::ImportSupported() const {
-  return import_supported_;
 }
 
 }  // namespace test

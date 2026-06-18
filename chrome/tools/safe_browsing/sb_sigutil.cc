@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -16,7 +16,7 @@
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
 #include "chrome/common/safe_browsing/binary_feature_extractor.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
 
 // Command-line switch for the executable to extract a signature from.
 static const char kExecutable[] = "executable";
@@ -44,11 +44,8 @@ int main(int argc, char* argv[]) {
                             &signature_info);
 
   std::string serialized_info = signature_info.SerializeAsString();
-  int bytes_written = base::WriteFile(
-      cmd_line->GetSwitchValuePath(kOutputFile),
-      serialized_info.data(),
-      serialized_info.size());
-  if (bytes_written != static_cast<int>(serialized_info.size())) {
+  if (!base::WriteFile(cmd_line->GetSwitchValuePath(kOutputFile),
+                       serialized_info)) {
     LOG(ERROR) << "Error writing output file";
     return 1;
   }

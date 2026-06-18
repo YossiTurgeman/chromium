@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -22,3 +22,11 @@ class ARIAReader(object):
 
     def attributes_list(self):
         return {'data': [item[u'name'] for item in self._data['attributes']]}
+
+    def attributes(self):
+        """Return list of ARIA attribute property dictionaries."""
+        return self._data['attributes']
+
+    def roles(self):
+        """Return list of all ARIA roles."""
+        return self._data['roles']

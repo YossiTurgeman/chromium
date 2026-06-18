@@ -32,33 +32,47 @@ class LayoutSVGHiddenContainer : public LayoutSVGContainer {
  public:
   explicit LayoutSVGHiddenContainer(SVGElement*);
 
-  const char* GetName() const override { return "LayoutSVGHiddenContainer"; }
+  void SetNeedsTransformUpdate() override { NOT_DESTROYED(); }
+
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutSVGHiddenContainer";
+  }
 
  protected:
-  void UpdateLayout() override;
+  SVGLayoutResult UpdateSVGLayout(const SVGLayoutInfo&) override;
 
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectSVGHiddenContainer ||
-           LayoutSVGContainer::IsOfType(type);
+  bool IsSVGHiddenContainer() const final {
+    NOT_DESTROYED();
+    return true;
   }
 
  private:
   // LayoutSVGHiddenContainer paints nothing.
-  void Paint(const PaintInfo&) const final {}
-  PhysicalRect VisualRectInDocument(VisualRectFlags) const final {
-    return PhysicalRect();
+  void Paint(const PaintInfo&) const final { NOT_DESTROYED(); }
+  gfx::RectF VisualRectInLocalSVGCoordinates() const final {
+    NOT_DESTROYED();
+    return gfx::RectF();
   }
-  FloatRect VisualRectInLocalSVGCoordinates() const final {
-    return FloatRect();
+  void QuadsInAncestorInternal(Vector<gfx::QuadF>&,
+                               const LayoutBoxModelObject* ancestor,
+                               MapCoordinatesFlags) const final {
+    NOT_DESTROYED();
   }
-  void AbsoluteQuads(Vector<FloatQuad>&,
-                     MapCoordinatesFlags mode = 0) const final {}
 
   bool NodeAtPoint(HitTestResult&,
                    const HitTestLocation&,
                    const PhysicalOffset& accumulated_offset,
-                   HitTestAction) final;
+                   HitTestPhase) final;
 };
+
+template <>
+struct DowncastTraits<LayoutSVGHiddenContainer> {
+  static bool AllowFrom(const LayoutObject& object) {
+    return object.IsSVGHiddenContainer();
+  }
+};
+
 }  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_HIDDEN_CONTAINER_H_

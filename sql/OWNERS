@@ -1,8 +1,6 @@
-# Primary:
-pwnall@chromium.org
+set noparent
 
-# Secondary:
-cmumford@google.com
-
-# TEAM: storage-dev@chromium.org
-# COMPONENT: Internals>Storage
+evanstade@microsoft.com
+etienneb@chromium.org
+grt@chromium.org
+olivierli@chromium.org

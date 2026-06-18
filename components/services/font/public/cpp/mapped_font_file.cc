@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <utility>
 
-#include "base/files/file_util.h"
 #include "base/threading/thread_restrictions.h"
+#include "base/trace_event/trace_event.h"
 #include "skia/ext/skia_utils_base.h"
 #include "third_party/skia/include/core/SkData.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
@@ -16,11 +16,10 @@
 namespace font_service {
 namespace internal {
 
-MappedFontFile::MappedFontFile(uint32_t font_id)
-    : font_id_(font_id), observer_(nullptr) {}
+MappedFontFile::MappedFontFile(uint32_t font_id) : font_id_(font_id) {}
 
 bool MappedFontFile::Initialize(base::File file) {
-  base::ThreadRestrictions::ScopedAllowIO allow_mmap;
+  base::ScopedAllowBlocking allow_mmap;
   return mapped_font_file_.Initialize(std::move(file));
 }
 
@@ -36,13 +35,13 @@ SkMemoryStream* MappedFontFile::CreateMemoryStream() {
 }
 
 MappedFontFile::~MappedFontFile() {
-  if (observer_)
-    observer_->OnMappedFontFileDestroyed(this);
+  TRACE_EVENT1("fonts", "MappedFontFile::~MappedFontFile", "identity",
+               font_id_);
 }
 
 // static
 void MappedFontFile::ReleaseProc(const void* ptr, void* context) {
-  base::ThreadRestrictions::ScopedAllowIO allow_munmap;
+  base::ScopedAllowBlocking allow_munmap;
   static_cast<MappedFontFile*>(context)->Release();
 }
 

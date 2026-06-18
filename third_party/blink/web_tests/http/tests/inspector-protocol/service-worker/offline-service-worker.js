@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   var {page, session, dp} = await testRunner.startBlank(
       `Verifies that Network.emulateNetworkConditions stops requests when offline is enabled for service workers.`);
   const swHelper = (await testRunner.loadScript('resources/service-worker-helper.js'))(dp, session);
@@ -14,9 +14,10 @@
 
   const serviceWorkerSession = session.createChild(attachedToTarget.params.sessionId);
   const swdp = serviceWorkerSession.protocol;
-  await swdp.Network.enable();
 
-  await swdp.Runtime.runIfWaitingForDebugger();
+  const networkPromise = swdp.Network.enable();
+  swdp.Runtime.runIfWaitingForDebugger();
+  await networkPromise;
 
   // Wait for the main request to complete before going offline.
   await swdp.Network.onceLoadingFinished();

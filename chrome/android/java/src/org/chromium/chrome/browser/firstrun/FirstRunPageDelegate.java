@@ -1,25 +1,27 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.firstrun;
 
-import android.os.Bundle;
+import org.chromium.base.Promise;
+import org.chromium.base.supplier.OneshotSupplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.profiles.ProfileProvider;
+import org.chromium.chrome.browser.ui.signin.fullscreen_signin.FullscreenSigninMediator;
+import org.chromium.ui.base.WindowAndroid;
 
-/**
- * Defines the host interface for First Run Experience pages.
- */
+/** Defines the host interface for First Run Experience pages. */
+@NullMarked
 public interface FirstRunPageDelegate {
     /**
-     * Returns FRE properties bundle.
+     * Advances the First Run Experience to the next page. Successfully finishes FRE if the current
+     * page is the last page.
+     *
+     * @return Whether advancing to the next page succeeded.
      */
-    Bundle getProperties();
-
-    /**
-     * Advances the First Run Experience to the next page.
-     * Successfully finishes FRE if the current page is the last page.
-     */
-    void advanceToNextPage();
+    boolean advanceToNextPage();
 
     /**
      * Unsuccessfully aborts the First Run Experience.
@@ -38,35 +40,22 @@ public interface FirstRunPageDelegate {
      * run activity and start the main activity without setting any of the preferences tracking
      * whether first run has been completed.
      *
-     * Exposing this function is intended for use in scenarios where FRE is partially or completely
-     * skipped. (e.g. in accordance with Enterprise polices)
+     * <p>Exposing this function is intended for use in scenarios where FRE is partially or
+     * completely skipped. (e.g. in accordance with Enterprise polices)
      */
     void exitFirstRun();
 
-    /**
-     * Notifies that the user refused to sign in (e.g. "NO, THANKS").
-     */
-    void refuseSignIn();
-
-    /**
-     * Notifies that the user accepted to be signed in.
-     * @param accountName An account to be signed in to.
-     * @param isDefaultAccount Whether this account is the default choice for the user.
-     * @param openSettings Whether the settings page should be opened after signing in.
-     */
-    void acceptSignIn(String accountName, boolean isDefaultAccount, boolean openSettings);
-
-    /**
-     * @return Whether the user has accepted Chrome Terms of Service.
-     */
-    boolean didAcceptTermsOfService();
+    /** Returns whether chrome is launched as a custom tab. */
+    boolean isLaunchedFromCct();
 
     /**
      * Notifies all interested parties that the user has accepted Chrome Terms of Service.
-     * Must be called only after native has been initialized.
-     * @param allowCrashUpload True if the user allows to upload crash dumps and collect stats.
+     * Must be called only after the delegate has fully initialized.
+     * Does not automatically advance to the next page, call {@link #advanceToNextPage()} directly.
+     * @param allowMetricsAndCrashUploading True if the user allows to upload crash dumps and
+     *         collect stats.
      */
-    void acceptTermsOfService(boolean allowCrashUpload);
+    void acceptTermsOfService(boolean allowMetricsAndCrashUploading);
 
     /**
      * Show an informational web page. The page doesn't show navigation control.
@@ -74,6 +63,56 @@ public interface FirstRunPageDelegate {
      */
     void showInfoPage(int url);
 
-    /** Returns the provider of whether the device has app restrictions. */
-    FirstRunAppRestrictionInfo getFirstRunAppRestrictionInfo();
+    /**
+     * Records the FRE progress histogram MobileFre.Progress.
+     *
+     * @param state FRE state to record.
+     */
+    void recordFreProgressHistogram(@MobileFreProgress int state);
+
+    /** Records MobileFre.FromLaunch.NativeAndPoliciesLoaded histogram. */
+    void recordLoadCompletedHistograms(@FullscreenSigninMediator.LoadPoint int slowestLoadPoint);
+
+    /** Records MobileFre.FromLaunch.NativeInitialized histogram. */
+    void recordNativeInitializedHistogram();
+
+    /**
+     * @return The supplier that provides the Profile (when available).
+     */
+    OneshotSupplier<ProfileProvider> getProfileProviderSupplier();
+
+    /**
+     * The supplier that supplies whether reading policy value is necessary. See {@link
+     * PolicyLoadListener} for details.
+     */
+    OneshotSupplier<Boolean> getPolicyLoadListener();
+
+    /** Returns the supplier that supplies child account status. */
+    OneshotSupplier<Boolean> getChildAccountStatusSupplier();
+
+    /**
+     * Returns the promise that provides information about native initialization. Callers can use
+     * {@link Promise#isFulfilled()} to check whether the native has already been initialized.
+     */
+    Promise<@Nullable Void> getNativeInitializationPromise();
+
+    /** Return the {@link WindowAndroid} for the FirstRunActivity. */
+    WindowAndroid getWindowAndroid();
+
+    // TODO(crbug.com/494980777): Implement a generalized state restoration mechanism for
+    // FirstRunFragments. Currently, FirstRunActivity suppresses fragment restoration via
+    // #transformSavedInstanceStateForOnCreate, requiring fragments to manually coordinate state via
+    // this delegate.
+
+    /** Returns whether the Role Manager Dialog has been triggered. */
+    boolean getPromoRoleManagerDialogTriggered();
+
+    /** Sets whether the Role Manager Dialog has been triggered. */
+    void setPromoRoleManagerDialogTriggered(boolean triggered);
+
+    /** Returns whether the History Sync screen has been completed. */
+    boolean getHistorySyncStepCompleted();
+
+    /** Sets whether the History Sync screen has been completed. */
+    void setHistorySyncStepCompleted(boolean completed);
 }

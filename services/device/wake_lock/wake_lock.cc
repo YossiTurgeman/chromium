@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,17 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/check.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
+#include "base/task/single_thread_task_runner.h"
+#include "build/build_config.h"
+#include "services/device/wake_lock/wake_lock_features.h"
+
+#if BUILDFLAG(IS_ANDROID)
 #include "services/device/wake_lock/wake_lock_context.h"
+#include "ui/gfx/native_ui_types.h"
+#endif
 
 namespace device {
 
@@ -17,18 +26,16 @@ WakeLock::WakeLock(mojo::PendingReceiver<mojom::WakeLock> receiver,
                    const std::string& description,
                    int context_id,
                    WakeLockContextCallback native_view_getter,
-                   scoped_refptr<base::SingleThreadTaskRunner> file_task_runner,
                    Observer* observer)
     : num_lock_requests_(0),
       type_(type),
       reason_(reason),
       description_(std::make_unique<std::string>(description)),
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
       context_id_(context_id),
       native_view_getter_(native_view_getter),
 #endif
-      main_task_runner_(base::ThreadTaskRunnerHandle::Get()),
-      file_task_runner_(std::move(file_task_runner)),
+      main_task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       observer_(observer) {
   DCHECK(observer_);
   AddClient(std::move(receiver));
@@ -36,7 +43,16 @@ WakeLock::WakeLock(mojo::PendingReceiver<mojom::WakeLock> receiver,
       &WakeLock::OnConnectionError, base::Unretained(this)));
 }
 
-WakeLock::~WakeLock() {}
+WakeLock::~WakeLock() {
+  // A race condition may cause the WakeLock to be destroyed before it has been
+  // removed. In this case, it should still be reset and observers notified.
+  if (base::FeatureList::IsEnabled(features::kRemoveWakeLockInDestructor)) {
+    if (wake_lock_) {
+      RemoveWakeLock();
+      CHECK(!wake_lock_);
+    }
+  }
+}
 
 void WakeLock::AddClient(mojo::PendingReceiver<mojom::WakeLock> receiver) {
   DCHECK(main_task_runner_->RunsTasksInCurrentSequence());
@@ -64,7 +80,7 @@ void WakeLock::CancelWakeLock() {
   DCHECK(main_task_runner_->RunsTasksInCurrentSequence());
   DCHECK(receiver_set_.current_context());
 
-  // TODO(crbug.com/935063): Calling CancelWakeLock befoe RequestWakeLock
+  // TODO(crbug.com/41443051): Calling CancelWakeLock befoe RequestWakeLock
   // shouldn't be allowed.
   if (!(*receiver_set_.current_context()))
     return;
@@ -79,7 +95,7 @@ void WakeLock::ChangeType(mojom::WakeLockType type,
                           ChangeTypeCallback callback) {
   DCHECK(main_task_runner_->RunsTasksInCurrentSequence());
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   LOG(ERROR) << "WakeLock::ChangeType() has no effect on Android.";
   std::move(callback).Run(false);
 #else
@@ -121,14 +137,14 @@ void WakeLock::UpdateWakeLock() {
 void WakeLock::CreateWakeLock() {
   DCHECK(!wake_lock_);
 
-  wake_lock_ = std::make_unique<PowerSaveBlocker>(
-      type_, reason_, *description_, main_task_runner_, file_task_runner_);
+  wake_lock_ = std::make_unique<PowerSaveBlocker>(type_, reason_, *description_,
+                                                  main_task_runner_);
   observer_->OnWakeLockActivated(type_);
 
   if (type_ != mojom::WakeLockType::kPreventDisplaySleep)
     return;
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   if (context_id_ == WakeLockContext::WakeLockInvalidContextId) {
     LOG(ERROR) << "Client must pass a valid context_id when requests wake lock "
                   "on Android.";
@@ -153,7 +169,7 @@ void WakeLock::SwapWakeLock() {
   // PowerSaveBlocker is unblocked while the new PowerSaveBlocker is not
   // created.
   auto new_wake_lock = std::make_unique<PowerSaveBlocker>(
-      type_, reason_, *description_, main_task_runner_, file_task_runner_);
+      type_, reason_, *description_, main_task_runner_);
   wake_lock_.swap(new_wake_lock);
 }
 

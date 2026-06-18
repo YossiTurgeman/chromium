@@ -1,14 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_VIZ_SERVICE_SURFACES_SURFACE_DEPENDENCY_DEADLINE_H_
 #define COMPONENTS_VIZ_SERVICE_SURFACES_SURFACE_DEPENDENCY_DEADLINE_H_
 
-#include "base/optional.h"
-#include "base/time/time.h"
+#include <optional>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/time/time.h"
 #include "components/viz/service/viz_service_export.h"
 
 namespace base {
@@ -22,6 +22,11 @@ class FrameDeadline;
 class VIZ_SERVICE_EXPORT SurfaceDependencyDeadline {
  public:
   explicit SurfaceDependencyDeadline(const base::TickClock* tick_clock);
+
+  SurfaceDependencyDeadline(const SurfaceDependencyDeadline&) = delete;
+  SurfaceDependencyDeadline& operator=(const SurfaceDependencyDeadline&) =
+      delete;
+
   ~SurfaceDependencyDeadline();
 
   // Sets up a deadline in wall time where
@@ -33,26 +38,21 @@ class VIZ_SERVICE_EXPORT SurfaceDependencyDeadline {
 
   // If a deadline had been set, then cancel the deadline and return the
   // the duration of the event tracked by this object. If there was no
-  // deadline set, then return base::nullopt.
-  base::Optional<base::TimeDelta> Cancel();
+  // deadline set, then return std::nullopt.
+  std::optional<base::TimeDelta> Cancel();
 
   bool has_deadline() const { return deadline_.has_value(); }
 
-  base::Optional<base::TimeTicks> deadline_for_testing() const {
+  std::optional<base::TimeTicks> deadline_for_testing() const {
     return deadline_;
   }
 
   bool operator==(const SurfaceDependencyDeadline& other) const;
-  bool operator!=(const SurfaceDependencyDeadline& other) const {
-    return !(*this == other);
-  }
 
  private:
-  const base::TickClock* tick_clock_;
+  raw_ptr<const base::TickClock> tick_clock_;
   base::TimeTicks start_time_;
-  base::Optional<base::TimeTicks> deadline_;
-
-  DISALLOW_COPY_AND_ASSIGN(SurfaceDependencyDeadline);
+  std::optional<base::TimeTicks> deadline_;
 };
 
 }  // namespace viz

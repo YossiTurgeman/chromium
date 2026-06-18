@@ -1,5 +1,5 @@
-#!/usr/bin/python
-# Copyright 2018 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """This script is used to update local profiles (AFDO, PGO or orderfiles)
@@ -20,7 +20,7 @@ import contextlib
 import os
 import subprocess
 import sys
-import urllib2
+import requests
 
 GS_HTTP_URL = 'https://storage.googleapis.com'
 
@@ -47,7 +47,10 @@ def WriteLocalProfileName(name, local_profile_name_path):
 
 
 def CheckCallOrExit(cmd):
-  proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  proc = subprocess.Popen(cmd,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,
+                          encoding='utf-8')
   stdout, stderr = proc.communicate()
   exit_code = proc.wait()
   if not exit_code:
@@ -80,13 +83,11 @@ def RetrieveProfile(desired_profile_name, out_path, gs_url_base):
   else:
     gs_url = '/'.join([GS_HTTP_URL, desired_profile_name[len(gs_prefix):]])
 
-  with contextlib.closing(urllib2.urlopen(gs_url)) as u:
+  with requests.get(gs_url, stream=True, timeout=120) as r:
+    r.raise_for_status()
     with open(out_path, 'wb') as f:
-      while True:
-        buf = u.read(4096)
-        if not buf:
-          break
-        f.write(buf)
+      for chunk in r.iter_content(chunk_size=64 * 1024):
+        f.write(chunk)
 
   if ext == '.bz2':
     # NOTE: we can't use Python's bzip module, since it doesn't support

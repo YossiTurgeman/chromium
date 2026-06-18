@@ -1,11 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/credential_provider/extension/service.h"
 
-#include "base/logging.h"
+#include "base/run_loop.h"
+#include "base/task/single_thread_task_executor.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/credential_provider/extension/os_service_manager.h"
+#include "chrome/credential_provider/extension/task_manager.h"
 #include "chrome/credential_provider/gaiacp/logging.h"
 
 namespace credential_provider {
@@ -30,19 +33,17 @@ DWORD Service::Run() {
 Service::Service()
     : run_routine_(&Service::RunAsService),
       service_status_(),
-      service_status_handle_(nullptr),
-      stop_event_(base::WaitableEvent::ResetPolicy::AUTOMATIC,
-                  base::WaitableEvent::InitialState::NOT_SIGNALED) {
+      service_status_handle_(nullptr) {
   service_status_.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   service_status_.dwCurrentState = SERVICE_STOPPED;
   service_status_.dwControlsAccepted =
       SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN;
 }
 
-Service::~Service() {}
+Service::~Service() = default;
 
 DWORD Service::RunAsService() {
-  LOGFN(INFO);
+  LOGFN(VERBOSE);
 
   DWORD error_code =
       extension::OSServiceManager::Get()->StartServiceCtrlDispatcher(
@@ -58,6 +59,14 @@ DWORD Service::RunAsService() {
 }
 
 void Service::StartMain() {
+  base::SingleThreadTaskExecutor main_task_executor;
+
+  scoped_refptr<base::SingleThreadTaskRunner> main_task_runner =
+      main_task_executor.task_runner();
+
+  base::RunLoop run_loop;
+  quit_closure_ = run_loop.QuitClosure();
+
   DWORD error_code = extension::OSServiceManager::Get()->RegisterCtrlHandler(
       &Service::ServiceControlHandler, &service_status_handle_);
   if (error_code != ERROR_SUCCESS) {
@@ -76,7 +85,9 @@ void Service::StartMain() {
     return;
   }
 
-  stop_event_.Wait();
+  TaskManager::Get()->RunTasks(main_task_runner);
+
+  run_loop.Run();
 
   service_status_.dwCurrentState = SERVICE_STOPPED;
   service_status_.dwControlsAccepted = 0;
@@ -91,7 +102,7 @@ void Service::StartMain() {
 // static
 VOID WINAPI Service::ServiceMain(DWORD argc /*unused*/,
                                  WCHAR* argv[] /*unused*/) {
-  LOGFN(INFO);
+  LOGFN(VERBOSE);
 
   Service* self = Service::Get();
 
@@ -101,7 +112,7 @@ VOID WINAPI Service::ServiceMain(DWORD argc /*unused*/,
 
 // static
 VOID WINAPI Service::ServiceControlHandler(DWORD control) {
-  LOGFN(INFO);
+  LOGFN(VERBOSE);
 
   Service* self = Service::Get();
   switch (control) {
@@ -111,7 +122,7 @@ VOID WINAPI Service::ServiceControlHandler(DWORD control) {
 
       extension::OSServiceManager::Get()->SetServiceStatus(
           self->service_status_handle_, self->service_status_);
-      self->stop_event_.Signal();
+      std::move(self->quit_closure_).Run();
 
       break;
     default:

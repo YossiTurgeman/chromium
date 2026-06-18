@@ -1,14 +1,17 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/metrics/perf/windowed_incognito_observer.h"
 
-#include "base/macros.h"
+#include <tuple>
+
 #include "base/no_destructor.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "content/public/browser/browser_thread.h"
 
 namespace metrics {
@@ -30,7 +33,7 @@ bool WindowedIncognitoObserver::IncognitoActive() const {
 
 // static
 void WindowedIncognitoMonitor::Init() {
-  ignore_result(WindowedIncognitoMonitor::Get());
+  std::ignore = WindowedIncognitoMonitor::Get();
 }
 
 // static
@@ -63,11 +66,17 @@ void WindowedIncognitoMonitor::RegisterInstance() {
   // access to it.
   if (running_sessions_++)
     return;
-  BrowserList::AddObserver(this);
 
-  for (auto* window : *BrowserList::GetInstance())
-    if (window->profile()->IsOffTheRecord())
-      num_active_incognito_windows_++;
+  browser_collection_observation_.Observe(
+      GlobalBrowserCollection::GetInstance());
+
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [this](BrowserWindowInterface* browser) {
+        if (browser->GetProfile()->IsOffTheRecord()) {
+          num_active_incognito_windows_++;
+        }
+        return true;
+      });
 }
 
 void WindowedIncognitoMonitor::UnregisterInstance() {
@@ -75,8 +84,9 @@ void WindowedIncognitoMonitor::UnregisterInstance() {
   // and UnregisterInstance. Therefore, we don't need to explicitly synchronize
   // access to it.
   DCHECK_GT(running_sessions_, 0);
-  if (!--running_sessions_)
-    BrowserList::RemoveObserver(this);
+  if (!--running_sessions_) {
+    browser_collection_observation_.Reset();
+  }
 }
 
 std::unique_ptr<WindowedIncognitoObserver>
@@ -99,22 +109,26 @@ bool WindowedIncognitoMonitor::IncognitoLaunched(
   return prev_num_incognito_opened < num_incognito_window_opened_;
 }
 
-void WindowedIncognitoMonitor::OnBrowserAdded(Browser* browser) {
+void WindowedIncognitoMonitor::OnBrowserCreated(
+    BrowserWindowInterface* browser) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!browser->profile()->IsOffTheRecord())
+  if (!browser->GetProfile()->IsOffTheRecord()) {
     return;
+  }
 
   base::AutoLock lock(lock_);
   num_active_incognito_windows_++;
   num_incognito_window_opened_++;
 }
 
-void WindowedIncognitoMonitor::OnBrowserRemoved(Browser* browser) {
+void WindowedIncognitoMonitor::OnBrowserClosed(
+    BrowserWindowInterface* browser) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!browser->profile()->IsOffTheRecord())
+  if (!browser->GetProfile()->IsOffTheRecord()) {
     return;
+  }
 
   base::AutoLock lock(lock_);
   DCHECK(num_active_incognito_windows_ > 0);

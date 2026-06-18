@@ -1,32 +1,68 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/mediasource/media_source_attachment_supplement.h"
 
-#include "third_party/blink/renderer/modules/mediasource/media_source.h"
-#include "third_party/blink/renderer/modules/mediasource/same_thread_media_source_tracer.h"
+#include "base/notimplemented.h"
 
 namespace blink {
 
-MediaSourceAttachmentSupplement::MediaSourceAttachmentSupplement(
-    MediaSource* media_source)
-    : registered_media_source_(media_source) {}
+MediaSourceAttachmentSupplement::MediaSourceAttachmentSupplement() = default;
 
 MediaSourceAttachmentSupplement::~MediaSourceAttachmentSupplement() = default;
 
-void MediaSourceAttachmentSupplement::Unregister() {
-  DVLOG(1) << __func__ << " this=" << this;
+void MediaSourceAttachmentSupplement::AddMainThreadAudioTrackToMediaElement(
+    String /* id */,
+    String /* kind */,
+    String /* label */,
+    String /* language */,
+    bool /* enabled */) {
+  // TODO(https::/crbug.com/878133): Remove this once cross-thread
+  // implementation supports creation of worker-thread tracks.
+  NOTIMPLEMENTED();
+}
 
-  // The only expected caller is a MediaSourceRegistryImpl on the main thread.
-  DCHECK(IsMainThread());
+void MediaSourceAttachmentSupplement::AddMainThreadVideoTrackToMediaElement(
+    String /* id */,
+    String /* kind */,
+    String /* label */,
+    String /* language */,
+    bool /* selected */) {
+  // TODO(https::/crbug.com/878133): Remove this once cross-thread
+  // implementation supports creation of worker-thread tracks.
+  NOTIMPLEMENTED();
+}
 
-  // Release our strong reference to the MediaSource. Note that revokeObjectURL
-  // of the url associated with this attachment could commonly follow this path
-  // while the MediaSource (and any attachment to an HTMLMediaElement) may still
-  // be alive/active.
-  DCHECK(registered_media_source_);
-  registered_media_source_ = nullptr;
+bool MediaSourceAttachmentSupplement::RunExclusively(
+    bool /* abort_if_not_fully_attached */,
+    RunExclusivelyCB cb) {
+  std::move(cb).Run(ExclusiveKey());
+  return true;  // Indicates that we ran |cb|.
+}
+
+bool MediaSourceAttachmentSupplement::FullyAttachedOrSameThread(
+    SourceBufferPassKey) const {
+  return true;
+}
+
+void MediaSourceAttachmentSupplement::
+    AssertCrossThreadMutexIsAcquiredForDebugging() {
+  DCHECK(false)
+      << "This should only be called on a CrossThreadMediaSourceAttachment";
+}
+
+void MediaSourceAttachmentSupplement::SendUpdatedInfoToMainThreadCache() {
+  // No-op for the default implementation that is used by same-thread
+  // attachments. Cross-thread attachments will override this. Same-thread
+  // attachments will just directly calculate buffered and seekable when the
+  // media element needs that info.
+}
+
+// protected
+MediaSourceAttachmentSupplement::ExclusiveKey
+MediaSourceAttachmentSupplement::GetExclusiveKey() const {
+  return ExclusiveKey();
 }
 
 }  // namespace blink

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,13 @@
 #include <algorithm>
 #include <utility>
 
-#include "base/allocator/partition_allocator/partition_alloc.h"
-#include "base/partition_alloc_buildflags.h"
 #include "components/crash/core/common/crash_key.h"
 #include "components/gwp_asan/client/export.h"
 #include "components/gwp_asan/client/guarded_page_allocator.h"
 #include "components/gwp_asan/client/sampling_state.h"
 #include "components/gwp_asan/common/crash_key_name.h"
+#include "partition_alloc/flags.h"
+#include "partition_alloc/partition_alloc_hooks.h"
 
 namespace gwp_asan {
 namespace internal {
@@ -27,13 +27,20 @@ SamplingState<PARTITIONALLOC> sampling_state;
 // for every access.
 GuardedPageAllocator* gpa = nullptr;
 
-bool AllocationHook(void** out, int flags, size_t size, const char* type_name) {
-  if (UNLIKELY(sampling_state.Sample())) {
+bool AllocationHook(void** out,
+                    partition_alloc::AllocFlags flags,
+                    size_t size,
+                    const char* type_name) {
+  if (sampling_state.Sample(size)) [[unlikely]] {
     // Ignore allocation requests with unknown flags.
-    constexpr int kKnownFlags =
-        base::PartitionAllocReturnNull | base::PartitionAllocZeroFill;
-    if (flags & ~kKnownFlags)
+    // TODO(crbug.com/40277643): Add support for memory tagging in GWP-Asan.
+    constexpr auto kKnownFlags = partition_alloc::AllocFlags::kReturnNull |
+                                 partition_alloc::AllocFlags::kZeroFill;
+    if (!ContainsFlags(kKnownFlags, flags)) {
+      // Skip if |flags| is not a subset of |kKnownFlags|.
+      // i.e. if we find an unknown flag.
       return false;
+    }
 
     if (void* allocation = gpa->Allocate(size, 0, type_name)) {
       *out = allocation;
@@ -44,7 +51,7 @@ bool AllocationHook(void** out, int flags, size_t size, const char* type_name) {
 }
 
 bool FreeHook(void* address) {
-  if (UNLIKELY(gpa->PointerIsMine(address))) {
+  if (gpa->PointerIsMine(address)) [[unlikely]] {
     gpa->Deallocate(address);
     return true;
   }
@@ -52,7 +59,7 @@ bool FreeHook(void* address) {
 }
 
 bool ReallocHook(size_t* out, void* address) {
-  if (UNLIKELY(gpa->PointerIsMine(address))) {
+  if (gpa->PointerIsMine(address)) [[unlikely]] {
     *out = gpa->GetRequestedSize(address);
     return true;
   }
@@ -66,23 +73,24 @@ GWP_ASAN_EXPORT GuardedPageAllocator& GetPartitionAllocGpaForTesting() {
   return *gpa;
 }
 
-void InstallPartitionAllocHooks(
-    size_t max_allocated_pages,
-    size_t num_metadata,
-    size_t total_pages,
-    size_t sampling_frequency,
+bool InstallPartitionAllocHooks(
+    const AllocatorSettings& settings,
     GuardedPageAllocator::OutOfMemoryCallback callback) {
   static crash_reporter::CrashKeyString<24> pa_crash_key(
       kPartitionAllocCrashKey);
   gpa = new GuardedPageAllocator();
-  gpa->Init(max_allocated_pages, num_metadata, total_pages, std::move(callback),
-            true);
+  if (!gpa->Init(settings, std::move(callback), true)) {
+    return false;
+  }
   pa_crash_key.Set(gpa->GetCrashKey());
-  sampling_state.Init(sampling_frequency);
+  sampling_state.Init(settings.sampling_frequency);
+  sampling_state.SetSampleSizeRestriction(settings.sampling_min_size,
+                                          settings.sampling_max_size);
   // TODO(vtsyrklevich): Allow SetOverrideHooks to be passed in so we can hook
   // PDFium's PartitionAlloc fork.
-  base::PartitionAllocHooks::SetOverrideHooks(&AllocationHook, &FreeHook,
-                                              &ReallocHook);
+  partition_alloc::PartitionAllocHooks::SetOverrideHooks(
+      &AllocationHook, &FreeHook, &ReallocHook);
+  return true;
 }
 
 }  // namespace internal

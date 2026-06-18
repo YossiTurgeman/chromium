@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,16 @@
 
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/values.h"
 #include "chrome/browser/task_manager/task_manager_observer.h"
 #include "extensions/browser/browser_context_keyed_api_factory.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/extension_event_histogram_value.h"
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 class ProcessesApiTest;
 
@@ -23,6 +27,10 @@ namespace extensions {
 class ProcessesEventRouter : public task_manager::TaskManagerObserver {
  public:
   explicit ProcessesEventRouter(content::BrowserContext* context);
+
+  ProcessesEventRouter(const ProcessesEventRouter&) = delete;
+  ProcessesEventRouter& operator=(const ProcessesEventRouter&) = delete;
+
   ~ProcessesEventRouter() override;
 
   // Called when an extension process wants to listen to process events.
@@ -44,14 +52,14 @@ class ProcessesEventRouter : public task_manager::TaskManagerObserver {
 
   void DispatchEvent(events::HistogramValue histogram_value,
                      const std::string& event_name,
-                     std::unique_ptr<base::ListValue> event_args) const;
+                     base::ListValue event_args) const;
 
   // Determines whether there is a registered listener for the specified event.
   // It helps to avoid collecting data if no one is interested in it.
   bool HasEventListeners(const std::string& event_name) const;
 
-  // Returns true if the task with the given |id| should be reported as created
-  // or removed. |out_child_process_host_id| will be filled with the valid ID of
+  // Returns true if the task with the given `id` should be reported as created
+  // or removed. `out_child_process_host_id` will be filled with the valid ID of
   // the process to report in the event.
   bool ShouldReportOnCreatedOrOnExited(task_manager::TaskId id,
                                        int* out_child_process_host_id) const;
@@ -60,12 +68,10 @@ class ProcessesEventRouter : public task_manager::TaskManagerObserver {
   // events are being listened to by extensions.
   void UpdateRefreshTypesFlagsBasedOnListeners();
 
-  content::BrowserContext* browser_context_;
+  raw_ptr<content::BrowserContext> browser_context_;
 
   // Count of listeners, so we avoid sending updates if no one is interested.
   int listeners_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProcessesEventRouter);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -74,6 +80,10 @@ class ProcessesAPI : public BrowserContextKeyedAPI,
                      public EventRouter::Observer {
  public:
   explicit ProcessesAPI(content::BrowserContext* context);
+
+  ProcessesAPI(const ProcessesAPI&) = delete;
+  ProcessesAPI& operator=(const ProcessesAPI&) = delete;
+
   ~ProcessesAPI() override;
 
   // BrowserContextKeyedAPI:
@@ -99,12 +109,10 @@ class ProcessesAPI : public BrowserContextKeyedAPI,
   static const bool kServiceRedirectedInIncognito = true;
   static const bool kServiceIsNULLWhileTesting = true;
 
-  content::BrowserContext* browser_context_;
+  raw_ptr<content::BrowserContext> browser_context_;
 
   // Created lazily on first access.
   std::unique_ptr<ProcessesEventRouter> processes_event_router_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProcessesAPI);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -119,7 +127,7 @@ class ProcessesGetProcessIdForTabFunction : public ExtensionFunction {
                              PROCESSES_GETPROCESSIDFORTAB)
 
  private:
-  ~ProcessesGetProcessIdForTabFunction() override {}
+  ~ProcessesGetProcessIdForTabFunction() override = default;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -136,14 +144,14 @@ class ProcessesTerminateFunction : public ExtensionFunction {
   DECLARE_EXTENSION_FUNCTION("processes.terminate", PROCESSES_TERMINATE)
 
  private:
-  ~ProcessesTerminateFunction() override {}
+  ~ProcessesTerminateFunction() override = default;
 
   // Functions to get the process handle on the IO thread and post it back to
   // the UI thread from processing.
   base::ProcessHandle GetProcessHandleOnIO(int child_process_host_id) const;
   void OnProcessHandleOnUI(base::ProcessHandle handle);
 
-  // Terminates the process with |handle| if it's valid and is allowed to be
+  // Terminates the process with `handle` if it's valid and is allowed to be
   // terminated. Returns the response value of this extension function to be
   // sent.
   ExtensionFunction::ResponseValue TerminateIfAllowed(
@@ -181,7 +189,7 @@ class ProcessesGetProcessInfoFunction
 
   // Since we don't report optional process data like CPU usage in the results
   // of this function, the only background calculations we want to watch is
-  // memory usage (which will be requested only when |include_memory_| is true).
+  // memory usage (which will be requested only when `include_memory_` is true).
   // This function will be called by either OnTasksRefreshed() or
   // OnTasksRefreshedWithBackgroundCalculations() depending on whether memory is
   // requested.

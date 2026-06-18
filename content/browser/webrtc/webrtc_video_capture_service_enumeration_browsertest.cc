@@ -1,8 +1,9 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/command_line.h"
+#include "base/strings/stringprintf.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_thread.h"
@@ -20,30 +21,19 @@
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "services/video_capture/public/cpp/mock_producer.h"
-#include "services/video_capture/public/mojom/device_factory.mojom.h"
 #include "services/video_capture/public/mojom/devices_changed_observer.mojom.h"
 #include "services/video_capture/public/mojom/producer.mojom.h"
+#include "services/video_capture/public/mojom/video_capture_service.mojom.h"
 #include "services/video_capture/public/mojom/video_source_provider.mojom.h"
 #include "services/video_capture/public/mojom/virtual_device.mojom.h"
 
 namespace content {
 
-// The mediadevices.ondevicechange event is currently not supported on Android.
-#if defined(OS_ANDROID)
-#define MAYBE_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange \
-  DISABLED_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange
-#else
-#define MAYBE_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange \
-  AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange
-#endif
-
 namespace {
 
-enum class ServiceApi { kSingleClient, kMultiClient };
 enum class VirtualDeviceType { kSharedMemory, kTexture };
 
 struct TestParams {
-  ServiceApi api_to_use;
   VirtualDeviceType device_type;
 };
 
@@ -67,9 +57,12 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
       public testing::WithParamInterface<TestParams>,
       public video_capture::mojom::DevicesChangedObserver {
  public:
-  WebRtcVideoCaptureServiceEnumerationBrowserTest() {
-    scoped_feature_list_.InitAndEnableFeature(features::kMojoVideoCapture);
-  }
+  WebRtcVideoCaptureServiceEnumerationBrowserTest() = default;
+
+  WebRtcVideoCaptureServiceEnumerationBrowserTest(
+      const WebRtcVideoCaptureServiceEnumerationBrowserTest&) = delete;
+  WebRtcVideoCaptureServiceEnumerationBrowserTest& operator=(
+      const WebRtcVideoCaptureServiceEnumerationBrowserTest&) = delete;
 
   ~WebRtcVideoCaptureServiceEnumerationBrowserTest() override {}
 
@@ -77,22 +70,11 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
     mojo::PendingRemote<video_capture::mojom::DevicesChangedObserver> observer;
     devices_changed_observer_receiver_.Bind(
         observer.InitWithNewPipeAndPassReceiver());
-    switch (GetParam().api_to_use) {
-      case ServiceApi::kSingleClient:
-        GetVideoCaptureService().ConnectToDeviceFactory(
-            factory_.BindNewPipeAndPassReceiver());
-        factory_->RegisterVirtualDevicesChangedObserver(
-            std::move(observer),
-            false /*raise_event_if_virtual_devices_already_present*/);
-        break;
-      case ServiceApi::kMultiClient:
-        GetVideoCaptureService().ConnectToVideoSourceProvider(
-            video_source_provider_.BindNewPipeAndPassReceiver());
-        video_source_provider_->RegisterVirtualDevicesChangedObserver(
-            std::move(observer),
-            false /*raise_event_if_virtual_devices_already_present*/);
-        break;
-    }
+    GetVideoCaptureService().ConnectToVideoSourceProvider(
+        video_source_provider_.BindNewPipeAndPassReceiver());
+    video_source_provider_->RegisterVirtualDevicesChangedObserver(
+        std::move(observer),
+        false /*raise_event_if_virtual_devices_already_present*/);
   }
 
   void AddVirtualDevice(const std::string& device_id) {
@@ -110,18 +92,9 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
         mojo::PendingRemote<video_capture::mojom::Producer> producer;
         auto mock_producer = std::make_unique<video_capture::MockProducer>(
             producer.InitWithNewPipeAndPassReceiver());
-        switch (GetParam().api_to_use) {
-          case ServiceApi::kSingleClient:
-            factory_->AddSharedMemoryVirtualDevice(
-                info, std::move(producer), false,
-                virtual_device.InitWithNewPipeAndPassReceiver());
-            break;
-          case ServiceApi::kMultiClient:
-            video_source_provider_->AddSharedMemoryVirtualDevice(
-                info, std::move(producer), false,
-                virtual_device.InitWithNewPipeAndPassReceiver());
-            break;
-        }
+        video_source_provider_->AddSharedMemoryVirtualDevice(
+            info, std::move(producer),
+            virtual_device.InitWithNewPipeAndPassReceiver());
         shared_memory_devices_by_id_.insert(std::make_pair(
             device_id, std::make_pair(std::move(virtual_device),
                                       std::move(mock_producer))));
@@ -130,16 +103,8 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
       case VirtualDeviceType::kTexture: {
         mojo::PendingRemote<video_capture::mojom::TextureVirtualDevice>
             virtual_device;
-        switch (GetParam().api_to_use) {
-          case ServiceApi::kSingleClient:
-            factory_->AddTextureVirtualDevice(
-                info, virtual_device.InitWithNewPipeAndPassReceiver());
-            break;
-          case ServiceApi::kMultiClient:
-            video_source_provider_->AddTextureVirtualDevice(
-                info, virtual_device.InitWithNewPipeAndPassReceiver());
-            break;
-        }
+        video_source_provider_->AddTextureVirtualDevice(
+            info, virtual_device.InitWithNewPipeAndPassReceiver());
         texture_devices_by_id_.insert(
             std::make_pair(device_id, std::move(virtual_device)));
         break;
@@ -165,34 +130,25 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
     wait_loop.Run();
   }
 
-  void DisconnectFromService() {
-    factory_.reset();
-    video_source_provider_.reset();
-  }
+  void DisconnectFromService() { video_source_provider_.reset(); }
 
   void EnumerateDevicesInRendererAndVerifyDeviceCount(
       int expected_device_count) {
     const std::string javascript_to_execute = base::StringPrintf(
         kEnumerateVideoCaptureDevicesAndVerify, expected_device_count);
-    std::string result;
-    ASSERT_TRUE(
-        ExecuteScriptAndExtractString(shell(), javascript_to_execute, &result));
-    ASSERT_EQ("OK", result);
+    ASSERT_TRUE(ExecJs(shell(), javascript_to_execute));
   }
 
   void RegisterForDeviceChangeEventInRenderer() {
-    ASSERT_TRUE(ExecuteScript(shell(), kRegisterForDeviceChangeEvent));
+    ASSERT_TRUE(ExecJs(shell(), kRegisterForDeviceChangeEvent));
   }
 
   void WaitForDeviceChangeEventInRenderer() {
-    std::string result;
-    ASSERT_TRUE(ExecuteScriptAndExtractString(
-        shell(), kWaitForDeviceChangeEvent, &result));
-    ASSERT_EQ("OK", result);
+    ASSERT_TRUE(ExecJs(shell(), kWaitForDeviceChangeEvent));
   }
 
   void ResetHasReceivedChangedEventFlag() {
-    ASSERT_TRUE(ExecuteScript(shell(), kResetHasReceivedChangedEventFlag));
+    ASSERT_TRUE(ExecJs(shell(), kResetHasReceivedChangedEventFlag));
   }
 
   // Implementation of video_capture::mojom::DevicesChangedObserver:
@@ -234,13 +190,9 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
  private:
   mojo::Receiver<video_capture::mojom::DevicesChangedObserver>
       devices_changed_observer_receiver_{this};
-  base::test::ScopedFeatureList scoped_feature_list_;
-  mojo::Remote<video_capture::mojom::DeviceFactory> factory_;
   mojo::Remote<video_capture::mojom::VideoSourceProvider>
       video_source_provider_;
   base::OnceClosure closure_to_be_called_on_devices_changed_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebRtcVideoCaptureServiceEnumerationBrowserTest);
 };
 
 IN_PROC_BROWSER_TEST_P(WebRtcVideoCaptureServiceEnumerationBrowserTest,
@@ -257,8 +209,17 @@ IN_PROC_BROWSER_TEST_P(WebRtcVideoCaptureServiceEnumerationBrowserTest,
   DisconnectFromService();
 }
 
+// TODO(https://crbug.com/352672009): Flaky on Mac.
+// TODO(https://crbug.com/352092989): Flaky on Windows.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+#define MAYBE_RemoveVirtualDeviceAfterItHasBeenEnumerated \
+  DISABLED_RemoveVirtualDeviceAfterItHasBeenEnumerated
+#else
+#define MAYBE_RemoveVirtualDeviceAfterItHasBeenEnumerated \
+  RemoveVirtualDeviceAfterItHasBeenEnumerated
+#endif
 IN_PROC_BROWSER_TEST_P(WebRtcVideoCaptureServiceEnumerationBrowserTest,
-                       RemoveVirtualDeviceAfterItHasBeenEnumerated) {
+                       MAYBE_RemoveVirtualDeviceAfterItHasBeenEnumerated) {
   Initialize();
   ConnectToService();
 
@@ -274,12 +235,24 @@ IN_PROC_BROWSER_TEST_P(WebRtcVideoCaptureServiceEnumerationBrowserTest,
   DisconnectFromService();
 }
 
+// The mediadevices.ondevicechange event is currently not supported on Android.
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange \
+  DISABLED_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange
+#else
+#define MAYBE_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange \
+  AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange
+#endif
+
 IN_PROC_BROWSER_TEST_P(
     WebRtcVideoCaptureServiceEnumerationBrowserTest,
     MAYBE_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange) {
   Initialize();
   ConnectToService();
   RegisterForDeviceChangeEventInRenderer();
+  // Waiting for enumeration ensures that the browser everything is primed for
+  // device change events.
+  EnumerateDevicesInRendererAndVerifyDeviceCount(0);
 
   // Exercise
   AddVirtualDevice("test");
@@ -297,10 +270,7 @@ IN_PROC_BROWSER_TEST_P(
 INSTANTIATE_TEST_SUITE_P(
     All,
     WebRtcVideoCaptureServiceEnumerationBrowserTest,
-    ::testing::Values(
-        TestParams{ServiceApi::kSingleClient, VirtualDeviceType::kSharedMemory},
-        TestParams{ServiceApi::kSingleClient, VirtualDeviceType::kTexture},
-        TestParams{ServiceApi::kMultiClient, VirtualDeviceType::kSharedMemory},
-        TestParams{ServiceApi::kMultiClient, VirtualDeviceType::kTexture}));
+    ::testing::Values(TestParams{VirtualDeviceType::kSharedMemory},
+                      TestParams{VirtualDeviceType::kTexture}));
 
 }  // namespace content

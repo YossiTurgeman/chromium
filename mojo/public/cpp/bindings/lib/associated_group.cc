@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,10 +25,13 @@ AssociatedGroup& AssociatedGroup::operator=(const AssociatedGroup& other) =
     default;
 
 AssociatedGroupController* AssociatedGroup::GetController() {
-  if (controller_)
+  if (controller_) {
     return controller_.get();
-
-  return controller_getter_.Run();
+  }
+  if (controller_getter_) {
+    return controller_getter_.Run();
+  }
+  return nullptr;
 }
 
 }  // namespace mojo

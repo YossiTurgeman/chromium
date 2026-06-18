@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -101,22 +101,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/check_op.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/location.h"
-#include "base/macros.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/ref_counted.h"
 #include "base/notreached.h"
 #include "base/sequence_checker.h"
-#include "base/sequenced_task_runner.h"
-#include "base/stl_util.h"
 #include "base/synchronization/lock.h"
-#include "base/threading/sequenced_task_runner_handle.h"
+#include "base/task/sequenced_task_runner.h"
 
 namespace chromecast {
 
@@ -133,6 +132,8 @@ class Observer {
  public:
   Observer(const Observer& other);
 
+  Observer& operator=(const Observer&) = delete;
+
   ~Observer();
 
   void SetOnUpdateCallback(base::RepeatingClosure callback) {
@@ -141,7 +142,7 @@ class Observer {
 
   const T& GetValue() const {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    return value_;
+    return *value_;
   }
 
  private:
@@ -155,11 +156,9 @@ class Observer {
   const scoped_refptr<subtle::ObservableInternals<T>> internals_;
   // Note: value_ is a const ref to the value copy for this sequence, stored in
   // SequenceOwnedInfo.
-  const T& value_;
+  const raw_ref<const T> value_;
   base::RepeatingClosure on_update_callback_;
   SEQUENCE_CHECKER(sequence_checker_);
-
-  DISALLOW_ASSIGN(Observer);
 };
 
 template <typename T>
@@ -171,6 +170,10 @@ class Observable {
 
  public:
   explicit Observable(const T& initial_value);
+
+  Observable(const Observable&) = delete;
+  Observable& operator=(const Observable&) = delete;
+
   Observer<T> Observe();
 
   void SetValue(const T& new_value);
@@ -181,8 +184,6 @@ class Observable {
   // By using a refcounted object to store the value and observer list, we can
   // avoid tying the lifetime of Observable to its Observers or vice versa.
   const scoped_refptr<subtle::ObservableInternals<T>> internals_;
-
-  DISALLOW_COPY_AND_ASSIGN(Observable);
 };
 
 namespace subtle {
@@ -193,6 +194,9 @@ class ObservableInternals
  public:
   explicit ObservableInternals(const T& initial_value)
       : value_(initial_value) {}
+
+  ObservableInternals(const ObservableInternals&) = delete;
+  ObservableInternals& operator=(const ObservableInternals&) = delete;
 
   void SetValue(const T& new_value) {
     base::AutoLock lock(lock_);
@@ -212,8 +216,8 @@ class ObservableInternals
 
   const T& AddObserver(Observer<T>* observer) {
     DCHECK(observer);
-    DCHECK(base::SequencedTaskRunnerHandle::IsSet());
-    auto task_runner = base::SequencedTaskRunnerHandle::Get();
+    DCHECK(base::SequencedTaskRunner::HasCurrentDefault());
+    auto task_runner = base::SequencedTaskRunner::GetCurrentDefault();
 
     base::AutoLock lock(lock_);
     auto it = per_sequence_.begin();
@@ -230,8 +234,8 @@ class ObservableInternals
 
   void RemoveObserver(Observer<T>* observer) {
     DCHECK(observer);
-    DCHECK(base::SequencedTaskRunnerHandle::IsSet());
-    auto task_runner = base::SequencedTaskRunnerHandle::Get();
+    DCHECK(base::SequencedTaskRunner::HasCurrentDefault());
+    auto task_runner = base::SequencedTaskRunner::GetCurrentDefault();
 
     base::AutoLock lock(lock_);
     for (size_t i = 0; i < per_sequence_.size(); ++i) {
@@ -259,6 +263,9 @@ class ObservableInternals
    public:
     explicit SequenceOwnedInfo(const T& value) : value_(value) {}
 
+    SequenceOwnedInfo(const SequenceOwnedInfo&) = delete;
+    SequenceOwnedInfo& operator=(const SequenceOwnedInfo&) = delete;
+
     const T& value() const {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
       return value_;
@@ -267,17 +274,15 @@ class ObservableInternals
     void AddObserver(Observer<T>* observer) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
       DCHECK(observer);
-      DCHECK(!base::Contains(observers_, observer));
+      DCHECK(!std::ranges::contains(observers_, observer));
       observers_.push_back(observer);
     }
 
     void RemoveObserver(Observer<T>* observer) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
       DCHECK(observer);
-      DCHECK(base::Contains(observers_, observer));
-      observers_.erase(
-          std::remove(observers_.begin(), observers_.end(), observer),
-          observers_.end());
+      DCHECK(std::ranges::contains(observers_, observer));
+      std::erase(observers_, observer);
     }
 
     bool Empty() const {
@@ -301,8 +306,6 @@ class ObservableInternals
     std::vector<Observer<T>*> observers_;
     T value_;
     SEQUENCE_CHECKER(sequence_checker_);
-
-    DISALLOW_COPY_AND_ASSIGN(SequenceOwnedInfo);
   };
 
   class PerSequenceInfo {
@@ -371,8 +374,6 @@ class ObservableInternals
   mutable base::Lock lock_;
   T value_;
   std::vector<PerSequenceInfo> per_sequence_;
-
-  DISALLOW_COPY_AND_ASSIGN(ObservableInternals);
 };
 
 }  // namespace subtle

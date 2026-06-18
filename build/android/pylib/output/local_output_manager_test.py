@@ -1,5 +1,5 @@
-#! /usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+#! /usr/bin/env vpython3
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -23,8 +23,9 @@ class LocalOutputManagerTest(output_manager_test_case.OutputManagerTestCase):
 
   def testUsableTempFile(self):
     self.assertUsableTempFile(
-        self._output_manager._CreateArchivedFile(
-            'test_file', 'test_subdir', output_manager.Datatype.TEXT))
+        self._output_manager._CreateArchivedFile('test_file', 'test_subdir',
+                                                 output_manager.Datatype.TEXT,
+                                                 None))
 
   def tearDown(self):
     shutil.rmtree(self._output_dir)

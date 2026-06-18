@@ -1,10 +1,16 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as Platform from 'devtools/core/platform/platform.js';
+import * as UI from 'devtools/ui/legacy/legacy.js';
+import * as Elements from 'devtools/panels/elements/elements.js';
+
 (async function() {
   TestRunner.addResult(`Tests that the styles sidebar can be used with a mouse.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
     <style>
@@ -17,8 +23,8 @@
   `);
   await new Promise(x => ElementsTestRunner.selectNodeAndWaitForStyles('inspected', x));
 
-  var stylesPane = UI.panels.elements._stylesWidget;
-  var firstRule = stylesPane._sectionBlocks[0].sections[1].propertiesTreeOutline;
+  var stylesPane = Elements.ElementsPanel.ElementsPanel.instance().stylesWidget;
+  var firstRule = stylesPane.sectionBlocks[0].sections[1].propertiesTreeOutline;
   var blueElement = () => firstRule.firstChild().valueElement;
   var colorElement = () => firstRule.firstChild().nameElement;
   var listItemElement = () => firstRule.firstChild().listItemElement;
@@ -65,11 +71,11 @@
   TestRunner.completeTest();
 
   function dumpEditingState() {
-    if (!stylesPane._isEditingStyle) {
+    if (!stylesPane.isEditingStyle) {
       TestRunner.addResult('Not editing');
       return;
     }
-    TestRunner.addResult('Editing: "' + TestRunner.textContentWithoutStyles(document.deepActiveElement()) + '"');
+    TestRunner.addResult('Editing: "' + TestRunner.textContentWithoutStyles(UI.DOMUtilities.deepActiveElement(document)) + '"');
   }
 
   function mouseDown(element, offset = 0) {

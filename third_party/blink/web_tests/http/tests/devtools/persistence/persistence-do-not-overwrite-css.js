@@ -1,12 +1,17 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {BindingsTestRunner} from 'bindings_test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+
+import * as TextUtils from 'devtools/models/text_utils/text_utils.js';
+import * as BindingsModule from 'devtools/models/bindings/bindings.js';
 
 (async function() {
   TestRunner.addResult(
       `Verify that persistence does not overwrite CSS files when CSS model reports error on getStyleSheetText.\n`);
-  await TestRunner.loadModule('bindings_test_runner');
-  await TestRunner.loadModule('sources_test_runner');
   await TestRunner.loadHTML(`
       <style>
       body {
@@ -22,11 +27,12 @@
   TestRunner.runTestSuite([
     function initializeTestFileSystem(next) {
       TestRunner.waitForUISourceCode('simple.css')
-          .then(uiSourceCode => uiSourceCode.requestContent())
+          .then(uiSourceCode => uiSourceCode.requestContentData())
+          .then(TextUtils.ContentData.ContentData.asDeferredContent)
           .then(onCSSContent);
 
       function onCSSContent({ content, error, isEncoded }) {
-        fs = new BindingsTestRunner.TestFileSystem('file:///var/www');
+        fs = new BindingsTestRunner.TestFileSystem('/var/www');
         BindingsTestRunner.addFiles(fs, {
           'simple.css': {content: content},
         });
@@ -40,7 +46,9 @@
 
       function onBinding(binding) {
         fsUISourceCode = binding.fileSystem;
-        fsUISourceCode.requestContent().then(onContent);
+        fsUISourceCode.requestContentData()
+            .then(TextUtils.ContentData.ContentData.asDeferredContent)
+            .then(onContent);
       }
 
       function onContent({ content, error, isEncoded }) {
@@ -57,16 +65,16 @@
       var styleSheet =
           TestRunner.cssModel.styleSheetHeaders().find(header => header.contentURL().endsWith('simple.css'));
       // Make CSSModel constantly return errors on all getStyleSheetText requests.
-      TestRunner.override(TestRunner.cssModel._agent, 'getStyleSheetText', throwProtocolError, true);
+      TestRunner.override(TestRunner.cssModel.agent, 'invoke_getStyleSheetText', throwProtocolError, true);
       // Set a new stylesheet text
       TestRunner.cssModel.setStyleSheetText(styleSheet.id, 'body {color: blue}');
       // Expect StylesSourceMapping to sync styleSheet with network UISourceCode.
       // Persistence acts synchronously.
-      TestRunner.addSniffer(Bindings.StyleFile.prototype, '_styleFileSyncedForTest', next);
+      TestRunner.addSniffer(BindingsModule.StylesSourceMapping.StyleFile.prototype, 'styleFileSyncedForTest', next);
 
       function throwProtocolError(styleSheetId) {
         TestRunner.addResult('Protocol Error: FAKE PROTOCOL ERROR');
-        return Promise.resolve(null);
+        return Promise.resolve({ getError: () => 'FAKE PROTOCOL ERROR'});
       }
     },
 

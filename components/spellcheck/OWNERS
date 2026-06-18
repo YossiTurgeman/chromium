@@ -1,14 +1,1 @@
-jds@chromium.org
-
-# Windows
-gujen@google.com
-
-# Emeritus
-groby@chromium.org
-rouslan@chromium.org
-
-# Android, component, refactoring
-timvolodine@chromium.org
-
-# TEAM: language@chromium.org
-# COMPONENT: UI>Browser>Spellcheck
+file://chromeos/ash/components/input_method/OWNERS

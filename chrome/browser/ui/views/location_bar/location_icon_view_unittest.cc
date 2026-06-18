@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,16 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
+#include "build/build_config.h"
+#include "chrome/grit/generated_resources.h"
 #include "chrome/test/views/chrome_views_test_base.h"
 #include "components/omnibox/browser/location_bar_model.h"
 #include "components/omnibox/browser/test_location_bar_model.h"
+#include "components/strings/grit/components_strings.h"
+#include "ui/base/l10n/l10n_util.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/widget/widget.h"
 
 namespace {
@@ -40,8 +46,7 @@ class TestLocationIconDelegate : public IconLabelBubbleView::Delegate,
   const LocationBarModel* GetLocationBarModel() const override {
     return location_bar_model_;
   }
-  ui::ImageModel GetLocationIcon(
-      IconFetchedCallback on_icon_fetched) const override {
+  ui::ImageModel GetLocationIcon(IconFetchedCallback on_icon_fetched) override {
     return ui::ImageModel();
   }
 
@@ -50,7 +55,7 @@ class TestLocationIconDelegate : public IconLabelBubbleView::Delegate,
   }
 
  private:
-  LocationBarModel* location_bar_model_;
+  raw_ptr<LocationBarModel> location_bar_model_;
   bool is_editing_or_empty_ = false;
 };
 
@@ -61,9 +66,11 @@ class LocationIconViewTest : public ChromeViewsTestBase {
   // ChromeViewsTestBase:
   void SetUp() override {
     ChromeViewsTestBase::SetUp();
+
     gfx::FontList font_list;
 
-    widget_ = CreateTestWidget();
+    widget_ =
+        CreateTestWidget(views::Widget::InitParams::CLIENT_OWNS_WIDGET);
 
     location_bar_model_ = std::make_unique<TestLocationBarModel>();
     delegate_ =
@@ -89,10 +96,11 @@ class LocationIconViewTest : public ChromeViewsTestBase {
   void SetSecurityLevel(security_state::SecurityLevel level) {
     location_bar_model()->set_security_level(level);
 
-    base::string16 secure_display_text = base::string16();
+    std::u16string secure_display_text = std::u16string();
     if (level == security_state::SecurityLevel::DANGEROUS ||
-        level == security_state::SecurityLevel::WARNING)
-      secure_display_text = base::ASCIIToUTF16("Insecure");
+        level == security_state::SecurityLevel::WARNING) {
+      secure_display_text = u"Insecure";
+    }
 
     location_bar_model()->set_secure_display_text(secure_display_text);
   }
@@ -103,7 +111,7 @@ class LocationIconViewTest : public ChromeViewsTestBase {
  private:
   std::unique_ptr<TestLocationBarModel> location_bar_model_;
   std::unique_ptr<TestLocationIconDelegate> delegate_;
-  LocationIconView* view_;
+  raw_ptr<LocationIconView, DanglingUntriaged> view_;
   std::unique_ptr<views::Widget> widget_;
 };
 
@@ -148,38 +156,38 @@ TEST_F(LocationIconViewTest, ShouldNotAnimateWarningToDangerous) {
   EXPECT_FALSE(view()->is_animating_label());
 }
 
-// Whenever InkDropMode is set a new InkDrop is created, which will reset any
-// animations on the drop, so we should only set the InkDropMode when it has
-// actually changed.
-TEST_F(LocationIconViewTest, ShouldNotRecreateInkDropNeedlessly) {
-  delegate()->set_is_editing_or_empty(false);
-  view()->Update(false);
-
-  const views::InkDrop* drop = view()->get_ink_drop_for_testing();
-  view()->Update(/*suppress_animations=*/false);
-
-  // The InkDropMode has not changed (is ON), so our InkDrop should remain the
-  // same.
-  EXPECT_EQ(drop, view()->get_ink_drop_for_testing());
+TEST_F(LocationIconViewTest, IconViewAccessibleNameAndRole) {
+  ui::AXNodeData data;
+  view()->GetViewAccessibility().GetAccessibleNodeData(&data);
+  EXPECT_EQ(view()->GetViewAccessibility().GetCachedName(),
+            l10n_util::GetStringUTF16(IDS_TOOLTIP_LOCATION_ICON));
+  EXPECT_EQ(data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+            l10n_util::GetStringUTF16(IDS_TOOLTIP_LOCATION_ICON));
+  EXPECT_EQ(view()->GetViewAccessibility().GetCachedRole(),
+            ax::mojom::Role::kPopUpButton);
+  EXPECT_EQ(data.role, ax::mojom::Role::kPopUpButton);
 
   delegate()->set_is_editing_or_empty(true);
-  view()->Update(/*suppress_animations=*/false);
-
-  // The InkDropMode has changed (ON --> OFF), so a new InkDrop will have been
-  // created.
-  EXPECT_NE(drop, view()->get_ink_drop_for_testing());
-
-  drop = view()->get_ink_drop_for_testing();
-  view()->Update(/*suppress_animations=*/false);
-
-  // The InkDropMode has not changed (is OFF), so the InkDrop should remain the
-  // same.
-  EXPECT_EQ(drop, view()->get_ink_drop_for_testing());
+  view()->Update(/*suppress_animations=*/true);
+  data = ui::AXNodeData();
+  view()->GetViewAccessibility().GetAccessibleNodeData(&data);
+  EXPECT_EQ(view()->GetViewAccessibility().GetCachedName(),
+            l10n_util::GetStringUTF16(IDS_ACC_SEARCH_ICON));
+  EXPECT_EQ(data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+            l10n_util::GetStringUTF16(IDS_ACC_SEARCH_ICON));
+  EXPECT_EQ(view()->GetViewAccessibility().GetCachedRole(),
+            ax::mojom::Role::kImage);
+  EXPECT_EQ(data.role, ax::mojom::Role::kImage);
 
   delegate()->set_is_editing_or_empty(false);
-  view()->Update(/*suppress_animations=*/false);
-
-  // The InkDrop mode has changed (OFF --> ON), so a new InkDrop will have been
-  // created.
-  EXPECT_NE(drop, view()->get_ink_drop_for_testing());
+  SetSecurityLevel(security_state::SecurityLevel::WARNING);
+  view()->Update(/*suppress_animations=*/true);
+  data = ui::AXNodeData();
+  view()->GetViewAccessibility().GetAccessibleNodeData(&data);
+  EXPECT_EQ(view()->GetViewAccessibility().GetCachedName(), u"Insecure");
+  EXPECT_EQ(data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+            u"Insecure");
+  EXPECT_EQ(view()->GetViewAccessibility().GetCachedRole(),
+            ax::mojom::Role::kPopUpButton);
+  EXPECT_EQ(data.role, ax::mojom::Role::kPopUpButton);
 }

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,9 @@
 
 #include "components/page_info/page_info_ui.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/base/interaction/element_identifier.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 
 namespace content {
@@ -19,13 +21,14 @@ class Rect;
 }  // namespace gfx
 
 namespace views {
-class View;
 class Widget;
 }  // namespace views
 
 // Common class to |PageInfoBubbleView| and |InternalPageInfoBubbleView|.
 class PageInfoBubbleViewBase : public views::BubbleDialogDelegateView,
                                public content::WebContentsObserver {
+  METADATA_HEADER(PageInfoBubbleViewBase, views::BubbleDialogDelegateView)
+
  public:
   // Type of the bubble being displayed.
   enum BubbleType {
@@ -35,8 +38,13 @@ class PageInfoBubbleViewBase : public views::BubbleDialogDelegateView,
     // Custom bubble for internal pages like chrome:// and chrome-extensions://.
     BUBBLE_INTERNAL_PAGE,
     // Custom bubble for displaying safety tips.
-    BUBBLE_SAFETY_TIP
+    BUBBLE_SAFETY_TIP,
   };
+
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kPageInfoBubbleElementIdentifier);
+
+  PageInfoBubbleViewBase(const PageInfoBubbleViewBase&) = delete;
+  PageInfoBubbleViewBase& operator=(const PageInfoBubbleViewBase&) = delete;
 
   // Returns the type of the bubble being shown. For testing only.
   static BubbleType GetShownBubbleType();
@@ -45,7 +53,7 @@ class PageInfoBubbleViewBase : public views::BubbleDialogDelegateView,
   static views::BubbleDialogDelegateView* GetPageInfoBubbleForTesting();
 
  protected:
-  PageInfoBubbleViewBase(views::View* anchor_view,
+  PageInfoBubbleViewBase(views::BubbleAnchor anchor,
                          const gfx::Rect& anchor_rect,
                          gfx::NativeView parent_window,
                          BubbleType type,
@@ -54,11 +62,8 @@ class PageInfoBubbleViewBase : public views::BubbleDialogDelegateView,
   // views::BubbleDialogDelegateView:
   void OnWidgetDestroying(views::Widget* widget) override;
 
-  PageInfoUI::SecurityDescriptionType GetSecurityDescriptionType() const;
-  void set_security_description_type(
-      const PageInfoUI::SecurityDescriptionType& type) {
-    security_description_type_ = type;
-  }
+  // WebContentsObserver:
+  void WebContentsDestroyed() override;
 
  private:
   friend class SafetyTipPageInfoBubbleViewBrowserTest;
@@ -66,13 +71,8 @@ class PageInfoBubbleViewBase : public views::BubbleDialogDelegateView,
   // WebContentsObserver:
   void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
   void OnVisibilityChanged(content::Visibility visibility) override;
-  void DidStartNavigation(content::NavigationHandle* handle) override;
+  void PrimaryPageChanged(content::Page& page) override;
   void DidChangeVisibleSecurityState() override;
-
-  PageInfoUI::SecurityDescriptionType security_description_type_ =
-      PageInfoUI::SecurityDescriptionType::CONNECTION;
-
-  DISALLOW_COPY_AND_ASSIGN(PageInfoBubbleViewBase);
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_PAGE_INFO_PAGE_INFO_BUBBLE_VIEW_BASE_H_

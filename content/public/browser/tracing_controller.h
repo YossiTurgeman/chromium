@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,13 +11,18 @@
 #include <set>
 #include <string>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
 #include "base/task/task_traits.h"
-#include "base/trace_event/trace_event.h"
-#include "base/values.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/tracing_delegate.h"
+
+namespace base {
+namespace trace_event {
+class TraceConfig;
+}
+class FilePath;
+}  // namespace base
 
 namespace content {
 
@@ -72,6 +77,10 @@ class TracingController {
       GetCategoriesDoneCallback;
   virtual bool GetCategories(GetCategoriesDoneCallback callback) = 0;
 
+  // Return a descriptor for all available tracing categories as serialized
+  // perfetto.protos.TrackEventDescriptor.
+  virtual std::vector<uint8_t> GetTrackEventDescriptor() = 0;
+
   // Start tracing (recording traces) on all processes.
   //
   // Tracing begins immediately locally, and asynchronously on child processes
@@ -91,8 +100,12 @@ class TracingController {
   //
   // |trace_config| controls what kind of tracing is enabled.
   typedef base::OnceCallback<void()> StartTracingDoneCallback;
-  virtual bool StartTracing(const base::trace_event::TraceConfig& trace_config,
-                            StartTracingDoneCallback callback) = 0;
+  bool StartTracing(const base::trace_event::TraceConfig& trace_config,
+                    StartTracingDoneCallback callback,
+                    bool privacy_filtering_enabled = false) {
+    return StartTracingImpl(trace_config, std::move(callback),
+                            privacy_filtering_enabled);
+  }
 
   // Stop tracing (recording traces) on all processes.
   //
@@ -114,8 +127,7 @@ class TracingController {
       const scoped_refptr<TraceDataEndpoint>& trace_data_endpoint) = 0;
   virtual bool StopTracing(
       const scoped_refptr<TraceDataEndpoint>& trace_data_endpoint,
-      const std::string& agent_label,
-      bool privacy_filtering_enabled = false) = 0;
+      const std::string& agent_label) = 0;
 
   // Get the maximum across processes of trace buffer percent full state.
   // When the TraceBufferUsage value is determined, the callback is
@@ -128,6 +140,11 @@ class TracingController {
 
  protected:
   virtual ~TracingController() {}
+
+  virtual bool StartTracingImpl(
+      const base::trace_event::TraceConfig& trace_config,
+      StartTracingDoneCallback callback,
+      bool privacy_filtering_enabled) = 0;
 };
 
 }  // namespace content

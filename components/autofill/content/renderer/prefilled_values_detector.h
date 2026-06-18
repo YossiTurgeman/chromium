@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,16 @@
 #define COMPONENTS_AUTOFILL_CONTENT_RENDERER_PREFILLED_VALUES_DETECTOR_H_
 
 #include <string>
+#include <string_view>
 
-#include "base/containers/flat_set.h"
+#include "base/containers/span.h"
 
 namespace autofill {
 
-// Returns a set of known username placeholders, all guaranteed to be lower
+// Returns a list of known username placeholders, all guaranteed to be lower
 // case.
 // This is only exposed for testing.
-const base::flat_set<std::string, std::less<>>& KnownUsernamePlaceholders();
+base::span<const std::string_view> KnownUsernamePlaceholders();
 
 // Checks if the prefilled value of the username element is one of the known
 // values possibly used as placeholders. The list of possible placeholder
@@ -28,7 +29,7 @@ const base::flat_set<std::string, std::less<>>& KnownUsernamePlaceholders();
 // https://www.example.com, there is a chance that the website prefills
 // the username field with "@example.com".
 //
-// TODO(crbug.com/832622): Remove this once a stable solution is in place.
+// TODO(crbug.com/41383074): Remove this once a stable solution is in place.
 bool PossiblePrefilledUsernameValue(const std::string& username_value,
                                     const std::string& possible_email_domain);
 

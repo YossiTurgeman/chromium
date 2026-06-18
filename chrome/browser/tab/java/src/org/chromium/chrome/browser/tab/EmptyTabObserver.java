@@ -1,31 +1,35 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.tab;
 
 import android.graphics.Bitmap;
-import android.view.ContextMenu;
 
-import androidx.annotation.Nullable;
-
+import org.chromium.base.Token;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.cc.input.BrowserControlsState;
+import org.chromium.chrome.browser.browser_controls.BrowserControlsOffsetTagsInfo;
+import org.chromium.chrome.browser.tab.Tab.LoadUrlResult;
 import org.chromium.components.find_in_page.FindMatchRectsDetails;
 import org.chromium.components.find_in_page.FindNotificationDetails;
 import org.chromium.content_public.browser.LoadUrlParams;
 import org.chromium.content_public.browser.NavigationHandle;
-import org.chromium.content_public.browser.WebContents;
 import org.chromium.net.NetError;
-import org.chromium.ui.base.WindowAndroid;
+import org.chromium.ui.mojom.VirtualKeyboardMode;
+import org.chromium.url.GURL;
 
 /**
  * An implementation of the {@link TabObserver} which has empty implementations of all methods.
  *
- * Note: Do not replace this with TabObserver with default interface methods as it inadvertently
- * bloats the number of methods. See https://crbug.com/781359.
+ * <p>Note: Do not replace this with TabObserver with default interface methods as it inadvertently
+ * bloats the number of methods. See https://crbug.com/40548063.
  */
+@NullMarked
 public class EmptyTabObserver implements TabObserver {
     @Override
-    public void onInitialized(Tab tab, String appId, Boolean hasThemeColor, int themeColor) {}
+    public void onInitialized(Tab tab, @Nullable String appId) {}
 
     @Override
     public void onShown(Tab tab, @TabSelectionType int type) {}
@@ -43,13 +47,13 @@ public class EmptyTabObserver implements TabObserver {
     public void onContentChanged(Tab tab) {}
 
     @Override
-    public void onLoadUrl(Tab tab, LoadUrlParams params, int loadType) {}
+    public void onLoadUrl(Tab tab, LoadUrlParams params, LoadUrlResult loadUrlResult) {}
 
     @Override
-    public void onPageLoadStarted(Tab tab, String url) {}
+    public void onPageLoadStarted(Tab tab, GURL url) {}
 
     @Override
-    public void onPageLoadFinished(Tab tab, String url) {}
+    public void onPageLoadFinished(Tab tab, GURL url) {}
 
     @Override
     public void onPageLoadFailed(Tab tab, @NetError int errorCode) {}
@@ -61,7 +65,10 @@ public class EmptyTabObserver implements TabObserver {
     public void onRestoreFailed(Tab tab) {}
 
     @Override
-    public void onFaviconUpdated(Tab tab, Bitmap icon) {}
+    public void onFaviconUpdated(Tab tab, @Nullable Bitmap icon, @Nullable GURL iconUrl) {}
+
+    @Override
+    public void onMediaStateChanged(Tab tab, @MediaState int mediaState) {}
 
     @Override
     public void onTitleUpdated(Tab tab) {}
@@ -76,13 +83,7 @@ public class EmptyTabObserver implements TabObserver {
     public void onCrash(Tab tab) {}
 
     @Override
-    public void webContentsWillSwap(Tab tab) {}
-
-    @Override
-    public void onWebContentsSwapped(Tab tab, boolean didStartLoad, boolean didFinishLoad) {}
-
-    @Override
-    public void onContextMenuShown(Tab tab, ContextMenu menu) {}
+    public void onContextMenuShown(Tab tab) {}
 
     @Override
     public void onCloseContents(Tab tab) {}
@@ -97,19 +98,21 @@ public class EmptyTabObserver implements TabObserver {
     public void onLoadProgressChanged(Tab tab, float progress) {}
 
     @Override
-    public void onUpdateUrl(Tab tab, String url) {}
+    public void onUpdateTargetUrl(Tab tab, GURL url) {}
 
     @Override
-    public void onDidFailLoad(Tab tab, boolean isMainFrame, int errorCode, String failingUrl) {}
-
-    @Override
-    public void onDidStartNavigation(Tab tab, NavigationHandle navigationHandle) {}
+    public void onDidStartNavigationInPrimaryMainFrame(
+            Tab tab, NavigationHandle navigationHandle) {}
 
     @Override
     public void onDidRedirectNavigation(Tab tab, NavigationHandle navigationHandle) {}
 
     @Override
-    public void onDidFinishNavigation(Tab tab, NavigationHandle navigationHandle) {}
+    public void onDidFinishNavigationInPrimaryMainFrame(
+            Tab tab, NavigationHandle navigationHandle) {}
+
+    @Override
+    public void onDidFinishNavigationEnd() {}
 
     @Override
     public void didFirstVisuallyNonEmptyPaint(Tab tab) {}
@@ -121,18 +124,16 @@ public class EmptyTabObserver implements TabObserver {
     public void onBackgroundColorChanged(Tab tab, int color) {}
 
     @Override
-    public void webContentsCreated(Tab tab, WebContents sourceWebContents,
-            long openerRenderProcessId, long openerRenderFrameId, String frameName,
-            String targetUrl, WebContents newWebContents) {}
-
-    @Override
-    public void onActivityAttachmentChanged(Tab tab, @Nullable WindowAndroid window) {}
+    public void onVirtualKeyboardModeChanged(Tab tab, @VirtualKeyboardMode.EnumType int mode) {}
 
     @Override
     public void onInteractabilityChanged(Tab tab, boolean isInteractable) {}
 
     @Override
     public void onRendererResponsiveStateChanged(Tab tab, boolean isResponsive) {}
+
+    @Override
+    public void onNavigationEntriesAppended(Tab tab) {}
 
     @Override
     public void onNavigationEntriesDeleted(Tab tab) {}
@@ -144,10 +145,57 @@ public class EmptyTabObserver implements TabObserver {
     public void onFindMatchRectsAvailable(FindMatchRectsDetails result) {}
 
     @Override
-    public void onBrowserControlsOffsetChanged(Tab tab, int topControlsOffsetY,
-            int bottomControlsOffsetY, int contentOffsetY, int topControlsMinHeightOffsetY,
+    public void onBrowserControlsOffsetChanged(
+            Tab tab,
+            int topControlsOffsetY,
+            int bottomControlsOffsetY,
+            int contentOffsetY,
+            int topControlsMinHeightOffsetY,
             int bottomControlsMinHeightOffsetY) {}
 
     @Override
+    public void onOffsetTagsInfoChanged(
+            Tab tab,
+            BrowserControlsOffsetTagsInfo oldOffsetTagsInfo,
+            BrowserControlsOffsetTagsInfo offsetTagsInfo,
+            @BrowserControlsState int constraints) {}
+
+    @Override
+    public void onWillShowBrowserControls(Tab tab, boolean viewTransitionOptIn) {}
+
+    @Override
     public void onContentViewScrollingStateChanged(boolean scrolling) {}
+
+    @Override
+    public void onNavigationStateChanged() {}
+
+    @Override
+    public void onDidChangeCloseSignalInterceptStatus() {}
+
+    @Override
+    public void onRootIdChanged(Tab tab, int newRootId) {}
+
+    @Override
+    public void onTabGroupIdChanged(Tab tab, @Nullable Token tabGroupId) {}
+
+    @Override
+    public void onGestureBegin() {}
+
+    @Override
+    public void onGestureEnd() {}
+
+    @Override
+    public void onTouchDown() {}
+
+    @Override
+    public void onTouchUp() {}
+
+    @Override
+    public void didBackForwardTransitionAnimationChange(Tab tab) {}
+
+    @Override
+    public void onTabContentSensitivityChanged(Tab tab, boolean contentIsSensitive) {}
+
+    @Override
+    public void onTabUnarchived(Tab tab) {}
 }

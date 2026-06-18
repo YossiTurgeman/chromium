@@ -1,13 +1,13 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_BASE_OVERLAY_INFO_H_
 #define MEDIA_BASE_OVERLAY_INFO_H_
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include <optional>
+
+#include "base/functional/callback_forward.h"
 #include "base/unguessable_token.h"
 #include "media/base/media_export.h"
 
@@ -16,10 +16,11 @@ namespace media {
 struct MEDIA_EXPORT OverlayInfo {
   // An unset routing token indicates "do not use any routing token".  A null
   // routing token isn't serializable, else we'd probably use that instead.
-  using RoutingToken = base::Optional<base::UnguessableToken>;
+  using RoutingToken = std::optional<base::UnguessableToken>;
 
   OverlayInfo();
   OverlayInfo(const OverlayInfo&);
+  OverlayInfo& operator=(const OverlayInfo&);
 
   // Convenience functions to return true if and only if this specifies a
   // surface ID / routing token that is not kNoSurfaceID / empty.  I.e., if we
@@ -45,7 +46,7 @@ struct MEDIA_EXPORT OverlayInfo {
 // WebMediaPlayerImpl::OnOverlayInfoRequested).
 using ProvideOverlayInfoCB = base::RepeatingCallback<void(const OverlayInfo&)>;
 using RequestOverlayInfoCB =
-    base::RepeatingCallback<void(bool, ProvideOverlayInfoCB)>;
+    base::RepeatingCallback<void(ProvideOverlayInfoCB)>;
 
 }  // namespace media
 

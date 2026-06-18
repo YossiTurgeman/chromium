@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,10 @@
 
 #include <utility>
 
+#include "base/trace_event/trace_event.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/public/platform/web_string.h"
@@ -40,23 +41,25 @@ MIDIDispatcher::MIDIDispatcher(ExecutionContext* execution_context)
           execution_context->GetTaskRunner(blink::TaskType::kMiscPlatformAPI)),
       receiver_.BindNewPipeAndPassRemote(
           execution_context->GetTaskRunner(blink::TaskType::kMiscPlatformAPI)));
+  receiver_.set_disconnect_handler(blink::BindOnce(
+      &MIDIDispatcher::OnConnectionError, WrapWeakPersistent(this)));
 }
 
 MIDIDispatcher::~MIDIDispatcher() = default;
 
 void MIDIDispatcher::SendMIDIData(uint32_t port,
-                                  const uint8_t* data,
-                                  wtf_size_t length,
+                                  base::span<const uint8_t> data,
                                   base::TimeTicks timestamp) {
-  if ((kMaxUnacknowledgedBytesSent - unacknowledged_bytes_sent_) < length) {
+  if ((kMaxUnacknowledgedBytesSent - unacknowledged_bytes_sent_) <
+      data.size()) {
     // TODO(toyoshim): buffer up the data to send at a later time.
     // For now we're just dropping these bytes on the floor.
     return;
   }
 
-  unacknowledged_bytes_sent_ += length;
+  unacknowledged_bytes_sent_ += data.size();
   Vector<uint8_t> v;
-  v.Append(data, length);
+  v.append_range(data);
   midi_session_->SendData(port, std::move(v), timestamp);
 }
 
@@ -101,8 +104,13 @@ void MIDIDispatcher::SetOutputPortState(uint32_t port,
 void MIDIDispatcher::SessionStarted(midi::mojom::blink::Result result) {
   TRACE_EVENT0("midi", "MIDIDispatcher::OnSessionStarted");
 
+  // We always have a valid instance in `client_` in the production code, but
+  // just in case to be robust for mojo injections and code changes in the
+  // future. Other methods protect accesses to `client_` by `initialized_` flag
+  // that is set below.
+  SECURITY_CHECK(client_);
+
   DCHECK(!initialized_);
-  DCHECK(client_);
   initialized_ = true;
 
   if (result == midi::mojom::blink::Result::OK) {
@@ -131,16 +139,23 @@ void MIDIDispatcher::DataReceived(uint32_t port,
                                   base::TimeTicks timestamp) {
   DCHECK(client_);
   TRACE_EVENT0("midi", "MIDIDispatcher::DataReceived");
-  DCHECK(!data.IsEmpty());
+  DCHECK(!data.empty());
 
   if (initialized_)
-    client_->DidReceiveMIDIData(port, &data[0], data.size(), timestamp);
+    client_->DidReceiveMIDIData(port, data, timestamp);
 }
 
 void MIDIDispatcher::Trace(Visitor* visitor) const {
+  visitor->Trace(client_);
   visitor->Trace(midi_session_);
   visitor->Trace(receiver_);
   visitor->Trace(midi_session_provider_);
+}
+
+void MIDIDispatcher::OnConnectionError() {
+  if (client_) {
+    client_->OnSessionStartFailed();
+  }
 }
 
 }  // namespace blink

@@ -1,11 +1,9 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "base/ios/crb_protocol_observers.h"
 
-#include "base/ios/weak_nsobject.h"
-#include "base/mac/scoped_nsobject.h"
 #include "base/notreached.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/gtest_mac.h"
@@ -27,12 +25,12 @@
 @end
 
 // Implements only the required methods in the TestObserver protocol.
-@interface TestPartialObserver : NSObject<TestObserver>
+@interface TestPartialObserver : NSObject <TestObserver>
 @property(nonatomic, readonly) BOOL requiredMethodInvoked;
 @end
 
 // Implements all the methods in the TestObserver protocol.
-@interface TestCompleteObserver : TestPartialObserver<TestObserver>
+@interface TestCompleteObserver : TestPartialObserver <TestObserver>
 @property(nonatomic, readonly) BOOL optionalMethodInvoked;
 @end
 
@@ -42,35 +40,41 @@
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+@interface TestCircularObserver : NSObject <TestObserver>
+- (void)setObservers:(CRBProtocolObservers*)observer;
+@end
+
 namespace {
 
 class CRBProtocolObserversTest : public PlatformTest {
  public:
-  CRBProtocolObserversTest() {}
+  CRBProtocolObserversTest() = default;
 
  protected:
   void SetUp() override {
     PlatformTest::SetUp();
 
-    observers_.reset([[CRBProtocolObservers observersWithProtocol:
-        @protocol(TestObserver)] retain]);
+    observers_ = (CRBProtocolObservers<TestObserver>*)[CRBProtocolObservers
+        observersWithProtocol:@protocol(TestObserver)];
 
-    partial_observer_.reset([[TestPartialObserver alloc] init]);
+    partial_observer_ = [[TestPartialObserver alloc] init];
     EXPECT_FALSE([partial_observer_ requiredMethodInvoked]);
 
-    complete_observer_.reset([[TestCompleteObserver alloc] init]);
+    complete_observer_ = [[TestCompleteObserver alloc] init];
     EXPECT_FALSE([complete_observer_ requiredMethodInvoked]);
     EXPECT_FALSE([complete_observer_ optionalMethodInvoked]);
 
-    mutate_observer_.reset(
-        [[TestMutateObserver alloc] initWithObserver:observers_.get()]);
+    mutate_observer_ = [[TestMutateObserver alloc] initWithObserver:observers_];
     EXPECT_FALSE([mutate_observer_ requiredMethodInvoked]);
+
+    circular_observer_ = [[TestCircularObserver alloc] init];
   }
 
-  base::scoped_nsobject<id> observers_;
-  base::scoped_nsobject<TestPartialObserver> partial_observer_;
-  base::scoped_nsobject<TestCompleteObserver> complete_observer_;
-  base::scoped_nsobject<TestMutateObserver> mutate_observer_;
+  CRBProtocolObservers<TestObserver>* observers_;
+  TestPartialObserver* partial_observer_;
+  TestCompleteObserver* complete_observer_;
+  TestMutateObserver* mutate_observer_;
+  TestCircularObserver* circular_observer_;
 };
 
 // Verifies basic functionality of -[CRBProtocolObservers addObserver:] and
@@ -116,22 +120,16 @@ TEST_F(CRBProtocolObserversTest, OptionalMethods) {
 // Verifies that CRBProtocolObservers only holds a weak reference to an
 // observer.
 TEST_F(CRBProtocolObserversTest, WeakReference) {
-  base::WeakNSObject<TestPartialObserver> weak_observer(
-      partial_observer_);
+  __weak TestPartialObserver* weak_observer = partial_observer_;
   EXPECT_TRUE(weak_observer);
 
   [observers_ addObserver:partial_observer_];
 
-  // Need an autorelease pool here, because
-  // -[CRBProtocolObservers forwardInvocation:] creates a temporary
-  // autoreleased array that holds all the observers.
-  @autoreleasepool {
-    [observers_ requiredMethod];
-    EXPECT_TRUE([partial_observer_ requiredMethodInvoked]);
-  }
+  [observers_ requiredMethod];
+  EXPECT_TRUE([partial_observer_ requiredMethodInvoked]);
+  partial_observer_ = nil;
 
-  partial_observer_.reset();
-  EXPECT_FALSE(weak_observer.get());
+  EXPECT_FALSE(weak_observer);
 }
 
 // Verifies that an observer can safely remove itself as observer while being
@@ -214,6 +212,35 @@ TEST_F(CRBProtocolObserversTest, NestedMutateObservers) {
   EXPECT_FALSE([partial_observer_ requiredMethodInvoked]);
 }
 
+// Verifies that CRBProtocolObservers works if an observer deallocs.
+TEST_F(CRBProtocolObserversTest, IgnoresDeallocedObservers) {
+  __weak TestPartialObserver* weak_observer = partial_observer_;
+  EXPECT_TRUE(weak_observer);
+
+  [observers_ addObserver:partial_observer_];
+
+  [observers_ requiredMethod];
+  EXPECT_TRUE([partial_observer_ requiredMethodInvoked]);
+  partial_observer_ = nil;
+
+  EXPECT_FALSE(weak_observer);
+  // This shouldn't crash.
+  [observers_ requiredMethod];
+}
+
+// Verifies that CRBProtocolObservers does not extend lifetime of the
+// observers when calling methods.
+TEST_F(CRBProtocolObserversTest, InvokingMethodDoesNotRetainObservers) {
+  __weak TestCircularObserver* weak_observer = circular_observer_;
+  EXPECT_TRUE(weak_observer);
+
+  [circular_observer_ setObservers:observers_];
+  circular_observer_ = nil;
+
+  EXPECT_FALSE(weak_observer);
+  [observers_ requiredMethod];
+}
+
 }  // namespace
 
 @implementation TestPartialObserver {
@@ -254,7 +281,7 @@ TEST_F(CRBProtocolObserversTest, NestedMutateObservers) {
 @end
 
 @implementation TestMutateObserver {
-  id _observers;  // weak
+  __weak id _observers;
 }
 
 - (instancetype)initWithObserver:(CRBProtocolObservers*)observers {
@@ -267,7 +294,6 @@ TEST_F(CRBProtocolObserversTest, NestedMutateObservers) {
 
 - (instancetype)init {
   NOTREACHED();
-  return nil;
 }
 
 - (void)mutateByAddingObserver:(id<TestObserver>)observer {
@@ -284,6 +310,33 @@ TEST_F(CRBProtocolObserversTest, NestedMutateObservers) {
 
 - (void)nestedMutateByRemovingObserver:(id<TestObserver>)observer {
   [_observers mutateByRemovingObserver:observer];
+}
+
+@end
+
+@implementation TestCircularObserver {
+  id _observers;
+}
+
+- (void)setObservers:(CRBProtocolObservers*)observer {
+  if (_observers) {
+    [_observers removeObserver:self];
+  }
+  _observers = observer;
+  if (_observers) {
+    [_observers addObserver:self];
+    [_observers requiredMethod];
+  }
+}
+
+- (void)requiredMethod {
+  if (_observers) {
+    [self reset];
+  }
+}
+
+- (void)reset {
+  [_observers removeObserver:self];
 }
 
 @end

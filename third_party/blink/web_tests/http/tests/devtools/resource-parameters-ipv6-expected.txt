@@ -2,13 +2,14 @@ Tests that resources panel shows form data parameters.
 
 http://[::1]:8000/devtools/resources/post-target.cgi?queryParam1=queryValue1&queryParam2=
 {
+    _connectionId : <string>
     _initiator : <object>
     _priority : <string>
     _resourceType : "document"
     cache : {
     }
     connection : <string>
-    pageref : "page_1"
+    pageref : "page_2"
     request : {
         bodySize : <number>
         cookies : [
@@ -44,6 +45,12 @@ http://[::1]:8000/devtools/resources/post-target.cgi?queryParam1=queryValue1&que
         url : "http://[::1]:8000/devtools/resources/post-target.cgi?queryParam1=queryValue1&queryParam2="
     }
     response : {
+        _fetchedViaServiceWorker : false
+        _responseCacheStorageCacheName : undefined
+        _serviceWorkerResponseSource : undefined
+        _serviceWorkerRouterActualSourceType : undefined
+        _serviceWorkerRouterMatchedSourceType : undefined
+        _serviceWorkerRouterRuleIdMatched : undefined
         _transferSize : <number>
         bodySize : <number>
         content : {

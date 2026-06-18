@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,19 +8,21 @@
 #include <map>
 #include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list_types.h"
+#include "base/scoped_observation_traits.h"
 #include "build/build_config.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_namespace.h"
+#include "components/policy/core/common/policy_types.h"
 #include "components/policy/policy_export.h"
 
 namespace policy {
 
 class ConfigurationPolicyProvider;
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 namespace android {
 class PolicyServiceAndroid;
 }
@@ -35,7 +37,7 @@ class PolicyServiceAndroid;
 // BrowserProcess as a global singleton.
 class POLICY_EXPORT PolicyService {
  public:
-  class POLICY_EXPORT Observer {
+  class POLICY_EXPORT Observer : public base::CheckedObserver {
    public:
     // Invoked whenever policies for the given |ns| namespace are modified.
     // This is only invoked for changes that happen after AddObserver is called.
@@ -48,27 +50,36 @@ class POLICY_EXPORT PolicyService {
     // Invoked at most once for each |domain|, when the PolicyService becomes
     // ready. If IsInitializationComplete() is false, then this will be invoked
     // once all the policy providers have finished loading their policies for
-    // |domain|.
+    // |domain|. This does not handle failure to load policies from some
+    // providers, so it is possible for the policy service to be initialised
+    // if the providers failed for example to load its policies cache.
     virtual void OnPolicyServiceInitialized(PolicyDomain domain) {}
 
-   protected:
-    virtual ~Observer() {}
+    // Invoked at most once for each |domain|, when the PolicyService becomes
+    // ready. If IsFirstPolicyLoadComplete() is false, then this will be invoked
+    // once all the policy providers have finished loading their policies for
+    // |domain|. The difference from |OnPolicyServiceInitialized| is that this
+    // will wait for cloud policies to be fetched when the local cache is not
+    // available, which may take some time depending on user's network.
+    virtual void OnFirstPoliciesLoaded(PolicyDomain domain) {}
   };
 
   class POLICY_EXPORT ProviderUpdateObserver : public base::CheckedObserver {
    public:
-    // Invoked when a policy update signaled by |provider| has been propagated
-    // to the PolicyService's Observers and its contents are now available
-    // through PolicyService::GetPolicies. This is intentionally also called if
-    // the policy update signaled by |provider| did not change the effective
-    // policy values. Note that multiple policy updates by |provider| can result
-    // in a single call to this function, e.g. if a subsequent policy update is
-    // signaled before the previous one has been processed by the PolicyService.
+    // Invoked when the contents of a policy update signaled by |provider| are
+    // available through PolicyService::GetPolicies.
+    // This is intentionally also called if the policy update signaled by
+    // |provider| did not change the effective policy values. Note that multiple
+    // policy updates by |provider| can result in a single call to this
+    // function, e.g. if a subsequent policy update is signaled before the
+    // previous one has been processed by the PolicyService.
+    // Also note that when this is called, PolicyService's Observers may not
+    // have been called with the update that triggered this call yet.
     virtual void OnProviderUpdatePropagated(
         ConfigurationPolicyProvider* provider) = 0;
   };
 
-  virtual ~PolicyService() {}
+  virtual ~PolicyService() = default;
 
   // Observes changes to all components of the given |domain|.
   virtual void AddObserver(PolicyDomain domain, Observer* observer) = 0;
@@ -88,7 +99,7 @@ class POLICY_EXPORT PolicyService {
 
   // The PolicyService loads policy from several sources, and some require
   // asynchronous loads. IsInitializationComplete() returns true once all
-  // sources have loaded their policies for the given |domain|.
+  // sources have been initialized for the given |domain|.
   // It is safe to read policy from the PolicyService even if
   // IsInitializationComplete() is false; there will be an OnPolicyUpdated()
   // notification once new policies become available.
@@ -100,15 +111,32 @@ class POLICY_EXPORT PolicyService {
   // OnPolicyServiceInitialized() notification.
   virtual bool IsInitializationComplete(PolicyDomain domain) const = 0;
 
+  // The PolicyService loads policy from several sources, and some require
+  // asynchronous loads. IsFirstPolicyLoadComplete() returns true once all
+  // sources have loaded their initial policies for the given |domain|.
+  // It is safe to read policy from the PolicyService even if
+  // IsFirstPolicyLoadComplete() is false; there will be an OnPolicyUpdated()
+  // notification once new policies become available.
+  //
+  // OnFirstPoliciesLoaded() is called when IsFirstPolicyLoadComplete()
+  // becomes true, which happens at most once for each domain.
+  // If IsFirstPolicyLoadComplete() is already true for |domain| when an
+  // Observer is registered, then that Observer will not receive an
+  // OnFirstPoliciesLoaded() notification.
+  virtual bool IsFirstPolicyLoadComplete(PolicyDomain domain) const = 0;
+
   // Asks the PolicyService to reload policy from all available policy sources.
   // |callback| is invoked once every source has reloaded its policies, and
   // GetPolicies() is guaranteed to return the updated values at that point.
-  virtual void RefreshPolicies(base::OnceClosure callback) = 0;
+  virtual void RefreshPolicies(base::OnceClosure callback,
+                               PolicyFetchReason reason) = 0;
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   // Get the PolicyService JNI bridge instance.
   virtual android::PolicyServiceAndroid* GetPolicyServiceAndroid() = 0;
 #endif
+  virtual void UseLocalTestPolicyProvider(
+      ConfigurationPolicyProvider* provider) = 0;
 };
 
 // A registrar that only observes changes to particular policies within the
@@ -124,6 +152,8 @@ class POLICY_EXPORT PolicyChangeRegistrar : public PolicyService::Observer {
   // outlive |this|.
   PolicyChangeRegistrar(PolicyService* policy_service,
                         const PolicyNamespace& ns);
+  PolicyChangeRegistrar(const PolicyChangeRegistrar&) = delete;
+  PolicyChangeRegistrar& operator=(const PolicyChangeRegistrar&) = delete;
 
   ~PolicyChangeRegistrar() override;
 
@@ -141,13 +171,30 @@ class POLICY_EXPORT PolicyChangeRegistrar : public PolicyService::Observer {
  private:
   typedef std::map<std::string, UpdateCallback> CallbackMap;
 
-  PolicyService* policy_service_;
+  raw_ptr<PolicyService> policy_service_;
   PolicyNamespace ns_;
   CallbackMap callback_map_;
-
-  DISALLOW_COPY_AND_ASSIGN(PolicyChangeRegistrar);
 };
 
 }  // namespace policy
+
+namespace base {
+
+template <>
+struct ScopedObservationTraits<policy::PolicyService,
+                               policy::PolicyService::ProviderUpdateObserver> {
+  static void AddObserver(
+      policy::PolicyService* source,
+      policy::PolicyService::ProviderUpdateObserver* observer) {
+    source->AddProviderUpdateObserver(observer);
+  }
+  static void RemoveObserver(
+      policy::PolicyService* source,
+      policy::PolicyService::ProviderUpdateObserver* observer) {
+    source->RemoveProviderUpdateObserver(observer);
+  }
+};
+
+}  // namespace base
 
 #endif  // COMPONENTS_POLICY_CORE_COMMON_POLICY_SERVICE_H_

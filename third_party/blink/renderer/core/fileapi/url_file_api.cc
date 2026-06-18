@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,7 +41,7 @@ void URLFileAPI::revokeObjectURL(ExecutionContext* execution_context,
                                  const String& url_string) {
   DCHECK(execution_context);
 
-  KURL url(NullURL(), url_string);
+  KURL url(NullUrl(), url_string);
   execution_context->RemoveURLFromMemoryCache(url);
   execution_context->GetPublicURLManager().Revoke(url);
 }

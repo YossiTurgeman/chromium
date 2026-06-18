@@ -31,7 +31,6 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_THREAD_SPECIFIC_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_THREAD_SPECIFIC_H_
 
-#include "base/macros.h"
 #include "base/threading/thread_local_storage.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -41,7 +40,7 @@
 #include "third_party/blink/renderer/platform/wtf/wtf.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_export.h"
 
-namespace WTF {
+namespace blink {
 
 template <typename T>
 class ThreadSpecific {
@@ -49,6 +48,8 @@ class ThreadSpecific {
 
  public:
   ThreadSpecific() : slot_(&Destroy) {}
+  ThreadSpecific(const ThreadSpecific&) = delete;
+  ThreadSpecific& operator=(const ThreadSpecific&) = delete;
   bool
   IsSet();  // Useful as a fast check to see if this thread has set this value.
   T* operator->();
@@ -76,8 +77,6 @@ class ThreadSpecific {
   // This member must only be accessed or modified on the main thread.
   T* main_thread_storage_ = nullptr;
   base::ThreadLocalStorage::Slot slot_;
-
-  DISALLOW_COPY_AND_ASSIGN(ThreadSpecific);
 };
 
 template <typename T>
@@ -86,8 +85,9 @@ inline void ThreadSpecific<T>::Destroy(void* ptr) {
   // longer has a graceful shutdown sequence. Be careful to call this function
   // (which can be re-entrant) while the pointer is still set, to avoid lazily
   // allocating Threading after it is destroyed.
-  if (IsMainThread())
+  if (blink::IsMainThread()) {
     return;
+  }
 
   // The memory was allocated via Partitions::FastZeroedMalloc, and then the
   // object was placement-newed. To destroy, we must call the delete expression,
@@ -105,16 +105,16 @@ inline bool ThreadSpecific<T>::IsSet() {
 template <typename T>
 inline ThreadSpecific<T>::operator T*() {
   T* off_thread_ptr;
-#if defined(__GLIBC__) || defined(OS_ANDROID) || defined(OS_FREEBSD)
+#if defined(__GLIBC__) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FREEBSD)
   // TLS is fast on these platforms.
   // TODO(csharrison): Qualify this statement for Android.
-  const bool kMainThreadAlwaysChecksTLS = true;
+  const bool kMainThreadAlwaysChecksTls = true;
   T** ptr = &off_thread_ptr;
   off_thread_ptr = static_cast<T*>(Get());
 #else
-  const bool kMainThreadAlwaysChecksTLS = false;
+  const bool kMainThreadAlwaysChecksTls = false;
   T** ptr = &main_thread_storage_;
-  if (UNLIKELY(MayNotBeMainThread())) {
+  if (MayNotBeMainThread()) [[unlikely]] {
     off_thread_ptr = static_cast<T*>(Get());
     ptr = &off_thread_ptr;
   }
@@ -122,19 +122,19 @@ inline ThreadSpecific<T>::operator T*() {
   // Set up thread-specific value's memory pointer before invoking constructor,
   // in case any function it calls needs to access the value, to avoid
   // recursion.
-  if (UNLIKELY(!*ptr)) {
+  if (!*ptr) [[unlikely]] {
     *ptr = static_cast<T*>(Partitions::FastZeroedMalloc(
         sizeof(T), WTF_HEAP_PROFILER_TYPE_NAME(T)));
 
     // Even if we didn't realize we're on the main thread, we might still be.
     // We need to double-check so that |main_thread_storage_| is populated.
-    if (!kMainThreadAlwaysChecksTLS && UNLIKELY(ptr != &main_thread_storage_) &&
-        IsMainThread()) {
+    if (!kMainThreadAlwaysChecksTls && ptr != &main_thread_storage_ &&
+        IsMainThread()) [[unlikely]] {
       main_thread_storage_ = *ptr;
     }
 
     Set(*ptr);
-    new (NotNull, *ptr) T;
+    ::new (base::NotNullTag::kNotNull, *ptr) T;
   }
   return *ptr;
 }
@@ -149,8 +149,6 @@ inline T& ThreadSpecific<T>::operator*() {
   return *operator T*();
 }
 
-}  // namespace WTF
-
-using WTF::ThreadSpecific;
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_THREAD_SPECIFIC_H_

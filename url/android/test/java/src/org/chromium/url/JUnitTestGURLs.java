@@ -1,62 +1,39 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.url;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
-
-/**
- * A Helper class for JUnit tests to be able to use GURLs without requiring native initialization.
- * This should be used sparingly, when converting junit tests to Batched Instrumentation tests is
- * not feasible.
- *
- * If any more complex GURL behaviour is tested, like comparing Origins, the test should be written
- * as an Instrumentation test instead - you should never mock GURL.
- */
+/** A collection of test GURLs. */
 public class JUnitTestGURLs {
-    // In order to add a test URL:
-    // 1. Add the URL String as a constant here.
-    // 2. Add the constant to the map below, with a placeholder string for the GURL serialization.
-    // 3. Run JUnitTestGURLsTest (eg. './tools/autotest.py -C out/Debug JUnitTestGURLsTest').
-    // 4. Check logcat output or test exception for the correct serialization String, and place it
-    //    in the map.
-    public static final String EXAMPLE_URL = "https://www.example.com";
-    public static final String URL_1 = "https://www.one.com";
-    public static final String URL_2 = "https://www.two.com";
-
-    // Map of URL string to GURL serialization.
-    /* package */ static final Map<String, String> sGURLMap;
-    static {
-        Map<String, String> map = new HashMap<>();
-        map.put(EXAMPLE_URL,
-                "82,1,true,0,5,0,-1,0,-1,8,15,0,-1,23,1,0,-1,0,-1,"
-                        + "false,false,https://www.example.com/");
-        map.put(URL_1,
-                "78,1,true,0,5,0,-1,0,-1,8,11,0,-1,19,1,0,-1,0,-1,"
-                        + "false,false,https://www.one.com/");
-        map.put(URL_2,
-                "78,1,true,0,5,0,-1,0,-1,8,11,0,-1,19,1,0,-1,0,-1,"
-                        + "false,false,https://www.two.com/");
-        sGURLMap = Collections.unmodifiableMap(map);
-    }
-
-    /**
-     * @return the GURL resulting from parsing the provided url. Must be registered in |sGURLMap|.
-     */
-    public static GURL getGURL(String url) {
-        String serialized = sGURLMap.get(url);
-        if (serialized == null) {
-            throw new IllegalArgumentException("URL " + url + " not found");
-        }
-        serialized = serialized.replace(',', GURL.SERIALIZER_DELIMITER);
-        GURL gurl = GURL.deserialize(serialized);
-        // If you're here looking to use an empty GURL, just use GURL.emptyGURL() directly.
-        if (gurl.isEmpty()) {
-            throw new RuntimeException("Could not deserialize: " + serialized);
-        }
-        return gurl;
-    }
+    public static final GURL EXAMPLE_URL = new GURL("https://www.example.com/");
+    public static final GURL HTTP_URL = new GURL("http://www.example.com/");
+    public static final GURL URL_1 = new GURL("https://www.one.com/");
+    public static final GURL URL_1_WITH_PATH = new GURL("https://www.one.com/some_path.html");
+    public static final GURL URL_1_WITH_PDF_PATH = new GURL("https://www.one.com/some_path.pdf");
+    public static final GURL URL_2 = new GURL("https://www.two.com/");
+    public static final GURL URL_3 = new GURL("https://www.three.com/");
+    public static final GURL MAPS_URL = new GURL("https://maps.google.com/");
+    public static final GURL SEARCH_URL = new GURL("https://www.google.com/search?q=test");
+    public static final GURL SEARCH_2_URL = new GURL("https://www.google.com/search?q=query");
+    public static final GURL INITIAL_URL = new GURL("https://initial.com");
+    public static final GURL NTP_URL = new GURL("chrome://newtab/");
+    public static final GURL NTP_NATIVE_URL = new GURL("chrome-native://newtab/");
+    public static final GURL RED_1 = new GURL("https://www.red.com/page1");
+    public static final GURL RED_2 = new GURL("https://www.red.com/page2");
+    public static final GURL RED_3 = new GURL("https://www.red.com/page3");
+    public static final GURL BLUE_1 = new GURL("https://www.blue.com/page1");
+    public static final GURL BLUE_2 = new GURL("https://www.blue.com/page2");
+    public static final GURL BLUE_3 = new GURL("https://www.blue.com/page3");
+    public static final GURL TEXT_FRAGMENT_URL =
+            new GURL("https://www.example.com/#:~:text=selector");
+    public static final GURL INVALID_URL = new GURL("http://0x100.0/");
+    public static final GURL GOOGLE_URL = new GURL("http://www.google.com/");
+    public static final GURL GOOGLE_URL_DOGS = new GURL("http://www.google.com/dogs");
+    public static final GURL GOOGLE_URL_DOG = new GURL("http://www.google.com/dog");
+    public static final GURL GOOGLE_URL_CAT = new GURL("http://www.google.com/cat");
+    public static final GURL ABOUT_BLANK = new GURL("about:blank");
+    public static final GURL CHROME_ABOUT = new GURL("chrome://about");
+    public static final GURL CHROME_DISTILLER_EXAMPLE_URL =
+            new GURL("chrome-distiller://abc123/?url=https://www.example.com");
 }

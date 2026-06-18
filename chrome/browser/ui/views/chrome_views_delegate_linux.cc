@@ -1,10 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/chrome_views_delegate.h"
 
 #include "base/environment.h"
+#include "base/feature_list.h"
 #include "base/nix/xdg_util.h"
 #include "build/branding_buildflags.h"
 #include "chrome/browser/ui/views/native_widget_factory.h"
@@ -12,7 +13,10 @@
 #include "chrome/grit/chrome_unscaled_resources.h"
 #include "components/version_info/channel.h"
 #include "ui/base/resource/resource_bundle.h"
-#include "ui/views/linux_ui/linux_ui.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/linux/linux_ui.h"
+#include "ui/ozone/public/ozone_platform.h"
+#include "ui/views/widget/widget_delegate.h"
 
 namespace {
 
@@ -23,6 +27,7 @@ bool IsDesktopEnvironmentUnity() {
   return desktop_env == base::nix::DESKTOP_ENVIRONMENT_UNITY;
 }
 
+#if BUILDFLAG(IS_LINUX)
 int GetWindowIconResourceId() {
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
   switch (chrome::GetChannel()) {
@@ -36,33 +41,66 @@ int GetWindowIconResourceId() {
 #endif
   return IDR_PRODUCT_LOGO_128;
 }
+#endif  // BUILDFLAG(IS_LINUX)
+
+NativeWidgetType GetNativeWidgetTypeForInitParams(
+    const views::Widget::InitParams& params) {
+  // If this is a security surface, always use a toplevel window,
+  // otherwise it's possible for things like menus to obscure the view.
+  if (params.z_order &&
+      params.z_order.value() == ui::ZOrderLevel::kSecuritySurface) {
+    return NativeWidgetType::kDesktopNativeWidgetAura;
+  }
+
+  const bool default_desktop_bubble =
+      (params.type == views::Widget::InitParams::TYPE_BUBBLE ||
+       params.type == views::Widget::InitParams::TYPE_POPUP) &&
+      base::FeatureList::IsEnabled(features::kOzoneBubblesUsePlatformWidgets) &&
+      ui::OzonePlatform::GetInstance()
+          ->GetPlatformRuntimeProperties()
+          .supports_subwindows_as_accelerated_widgets;
+
+  if (!params.child &&
+      params.use_accelerated_widget_override.value_or(default_desktop_bubble)) {
+    return NativeWidgetType::kDesktopNativeWidgetAura;
+  }
+
+  if (params.delegate && params.delegate->use_desktop_widget_override()) {
+    return NativeWidgetType::kDesktopNativeWidgetAura;
+  }
+
+  return (params.parent &&
+          params.type != views::Widget::InitParams::TYPE_MENU &&
+          params.type != views::Widget::InitParams::TYPE_TOOLTIP)
+             ? NativeWidgetType::kNativeWidgetAura
+             : NativeWidgetType::kDesktopNativeWidgetAura;
+}
 
 }  // namespace
 
 views::NativeWidget* ChromeViewsDelegate::CreateNativeWidget(
     views::Widget::InitParams* params,
     views::internal::NativeWidgetDelegate* delegate) {
-  NativeWidgetType native_widget_type =
-      (params->parent && params->type != views::Widget::InitParams::TYPE_MENU &&
-       params->type != views::Widget::InitParams::TYPE_TOOLTIP)
-          ? NativeWidgetType::NATIVE_WIDGET_AURA
-          : NativeWidgetType::DESKTOP_NATIVE_WIDGET_AURA;
-  return ::CreateNativeWidget(native_widget_type, params, delegate);
+  return ::CreateNativeWidget(GetNativeWidgetTypeForInitParams(*params), params,
+                              delegate);
 }
 
+#if BUILDFLAG(IS_LINUX)
 gfx::ImageSkia* ChromeViewsDelegate::GetDefaultWindowIcon() const {
   ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
   return rb.GetImageSkiaNamed(GetWindowIconResourceId());
 }
+#endif  // BUILDFLAG(IS_LINUX)
 
 bool ChromeViewsDelegate::WindowManagerProvidesTitleBar(bool maximized) {
   // On Ubuntu Unity, the system always provides a title bar for
   // maximized windows.
   //
-  // TODO(thomasanderson,crbug.com/784010): Consider using the
+  // TODO(thomasanderson,crbug.com/40549424): Consider using the
   // _UNITY_SHELL wm hint when support for Ubuntu Trusty is dropped.
-  if (!maximized)
+  if (!maximized) {
     return false;
+  }
   static bool is_desktop_environment_unity = IsDesktopEnvironmentUnity();
   return is_desktop_environment_unity;
 }

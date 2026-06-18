@@ -1,3 +1,7 @@
+
+import {TestRunner} from 'test_runner';
+
+import * as UI from 'devtools/ui/legacy/legacy.js';
 (async function() {
   TestRunner.addResult('Test ListControl rendering for various height items case.');
 
@@ -31,10 +35,10 @@
   }
 
   var delegate = new Delegate();
-  var model = new UI.ListModel();
-  var list = new UI.ListControl(model, delegate, UI.ListMode.VariousHeightItems);
+  var model = new UI.ListModel.ListModel();
+  var list = new UI.ListControl.ListControl(model, delegate, UI.ListControl.ListMode.VariousHeightItems);
   list.element.style.height = '73px';
-  UI.inspectorView.element.appendChild(list.element);
+  UI.InspectorView.InspectorView.instance().element.appendChild(list.element);
 
   function dumpList()
   {
@@ -46,10 +50,10 @@
       var visible = (offsetBottom <= 0 || offsetTop >= height) ? ' ' :
           (offsetTop >= 0 && offsetBottom <= height ? '*' : '+');
       var selected = child.classList.contains('selected') ? ' (selected)' : '';
-      var text = child === list._topElement ? 'top' : (child === list._bottomElement ? 'bottom' : child.textContent);
+      var text = child === list.topElement ? 'top' : (child === list.bottomElement ? 'bottom' : child.textContent);
       TestRunner.addResult(`${visible}[${offsetTop}] ${text}${selected}`);
     }
-    TestRunner.addResult('offsets: ' + list._variableOffsets.join(' '));
+    TestRunner.addResult('offsets: ' + list.variableOffsets.join(' '));
     TestRunner.addResult('');
   }
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@ namespace blink {
 namespace scheduler {
 
 // static
-const char* TaskTypeNames::TaskTypeToString(TaskType task_type) {
+perfetto::StaticString TaskTypeNames::TaskTypeToString(TaskType task_type) {
   // These names are used in finch trials and should not be changed.
   switch (task_type) {
     case TaskType::kDeprecatedNone:
@@ -21,10 +21,14 @@ const char* TaskTypeNames::TaskTypeToString(TaskType task_type) {
       return "UserInteraction";
     case TaskType::kNetworking:
       return "Networking";
-    case TaskType::kNetworkingWithURLLoaderAnnotation:
-      return "NetworkingWithURLLoaderAnnotation";
+    case TaskType::kNetworkingUnfreezable:
+      return "NetworkingUnfreezable";
+    case TaskType::kNetworkingUnfreezableRenderBlockingLoading:
+      return "NetworkingUnfreezableRenderBlockingLoading";
     case TaskType::kNetworkingControl:
       return "NetworkingControl";
+    case TaskType::kLowPriorityScriptExecution:
+      return "LowPriorityScriptExecution";
     case TaskType::kHistoryTraversal:
       return "HistoryTraversal";
     case TaskType::kEmbed:
@@ -35,16 +39,20 @@ const char* TaskTypeNames::TaskTypeToString(TaskType task_type) {
       return "CanvasBlobSerialization";
     case TaskType::kMicrotask:
       return "Microtask";
-    case TaskType::kJavascriptTimerDelayed:
-      return "JavascriptTimerDelayed";
     case TaskType::kJavascriptTimerImmediate:
       return "JavascriptTimerImmediate";
+    case TaskType::kJavascriptTimerDelayedLowNesting:
+      return "JavascriptTimerDelayedLowNesting";
+    case TaskType::kJavascriptTimerDelayedHighNesting:
+      return "JavascriptTimerDelayedHighNesting";
     case TaskType::kRemoteEvent:
       return "RemoteEvent";
     case TaskType::kWebSocket:
       return "WebSocket";
     case TaskType::kPostedMessage:
       return "PostedMessage";
+    case TaskType::kBackForwardCachePostedMessage:
+      return "BackForwardCachePostedMessage";
     case TaskType::kUnshippedPortMessage:
       return "UnshippedPortMessage";
     case TaskType::kFileReading:
@@ -75,6 +83,12 @@ const char* TaskTypeNames::TaskTypeToString(TaskType task_type) {
       return "ServiceWorkerClientMessage";
     case TaskType::kWebLocks:
       return "WebLocks";
+    case TaskType::kStorage:
+      return "Storage";
+    case TaskType::kClipboard:
+      return "Clipboard";
+    case TaskType::kMachineLearning:
+      return "MachineLearning";
     case TaskType::kInternalDefault:
       return "InternalDefault";
     case TaskType::kInternalLoading:
@@ -93,6 +107,10 @@ const char* TaskTypeNames::TaskTypeToString(TaskType task_type) {
       return "InternalInspector";
     case TaskType::kMainThreadTaskQueueV8:
       return "MainThreadTaskQueueV8";
+    case TaskType::kMainThreadTaskQueueV8UserVisible:
+      return "MainThreadTaskQueueV8UserVisible";
+    case TaskType::kMainThreadTaskQueueV8BestEffort:
+      return "MainThreadTaskQueueV8BestEffort";
     case TaskType::kMainThreadTaskQueueCompositor:
       return "MainThreadTaskQueueCompositor";
     case TaskType::kMainThreadTaskQueueDefault:
@@ -129,22 +147,33 @@ const char* TaskTypeNames::TaskTypeToString(TaskType task_type) {
       return "InternalNavigationAssociated";
     case TaskType::kInternalNavigationAssociatedUnfreezable:
       return "InternalNavigationAssociatedUnfreezable";
+    case TaskType::kInternalNavigationCancellation:
+      return "InternalNavigationCancellation";
     case TaskType::kInternalContinueScriptLoading:
       return "InternalContinueScriptLoading";
-    case TaskType::kExperimentalWebScheduling:
-      return "ExperimentalWebScheduling";
+    case TaskType::kWebSchedulingPostedTask:
+      return "WebSchedulingPostedTask";
     case TaskType::kInternalFrameLifecycleControl:
       return "InternalFrameLifecycleControl";
     case TaskType::kInternalFindInPage:
       return "InternalFindInPage";
     case TaskType::kInternalHighPriorityLocalFrame:
       return "InternalHighPriorityLocalFrame";
-    case TaskType::kCount:
-      return "Count";
+    case TaskType::kInternalInputBlocking:
+      return "InternalInputBlocking";
+    case TaskType::kMainThreadTaskQueueIPCTracking:
+      return "MainThreadTaskQueueIPCTracking";
+    case TaskType::kWakeLock:
+      return "WakeLock";
+    case TaskType::kWebGPU:
+      return "WebGPU";
+    case TaskType::kInternalPostMessageForwarding:
+      return "InternalPostMessageForwarding";
+    case TaskType::kInternalAutofill:
+      return "InternalAutofill";
   }
   // FrameSchedulerImpl should not call this for invalid TaskTypes.
   NOTREACHED();
-  return "";
 }
 
 }  // namespace scheduler

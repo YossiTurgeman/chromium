@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,17 @@
 
 #include "ash/accessibility/accessibility_delegate.h"
 #include "ash/ash_export.h"
-#include "base/macros.h"
 
 namespace ash {
 
 class ASH_EXPORT DefaultAccessibilityDelegate : public AccessibilityDelegate {
  public:
   DefaultAccessibilityDelegate();
+
+  DefaultAccessibilityDelegate(const DefaultAccessibilityDelegate&) = delete;
+  DefaultAccessibilityDelegate& operator=(const DefaultAccessibilityDelegate&) =
+      delete;
+
   ~DefaultAccessibilityDelegate() override;
 
   void SetMagnifierEnabled(bool enabled) override;
@@ -21,11 +25,11 @@ class ASH_EXPORT DefaultAccessibilityDelegate : public AccessibilityDelegate {
   bool ShouldShowAccessibilityMenu() const override;
   void SaveScreenMagnifierScale(double scale) override;
   double GetSavedScreenMagnifierScale() override;
+  std::unique_ptr<AccessibilityPrefsCustomAssociator>
+  CreatePrefsCustomAssociator(PrefService* pref_service) override;
 
  private:
   bool screen_magnifier_enabled_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(DefaultAccessibilityDelegate);
 };
 
 }  // namespace ash

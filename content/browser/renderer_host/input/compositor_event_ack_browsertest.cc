@@ -1,22 +1,21 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <tuple>
 #include <utility>
 
 #include "base/auto_reset.h"
-#include "base/bind.h"
 #include "base/command_line.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "content/browser/renderer_host/input/synthetic_smooth_scroll_gesture.h"
+#include "components/input/render_widget_host_input_event_router.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
-#include "content/browser/renderer_host/render_widget_host_input_event_router.h"
 #include "content/browser/renderer_host/render_widget_host_view_base.h"
 #include "content/browser/web_contents/web_contents_impl.h"
-#include "content/common/input_messages.h"
+#include "content/common/input/synthetic_smooth_scroll_gesture.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/common/content_switches.h"
@@ -32,8 +31,6 @@
 #include "ui/events/base_event_utils.h"
 #include "ui/events/event_switches.h"
 #include "ui/latency/latency_info.h"
-
-using blink::WebInputEvent;
 
 namespace {
 
@@ -106,6 +103,42 @@ const char kBlockingTouchStartDataURL[] =
 
 namespace content {
 
+class FlingStartObserver
+    : public content::RenderWidgetHost::InputEventObserver {
+ public:
+  FlingStartObserver(content::RenderWidgetHost* host,
+                     base::OnceClosure quit_closure)
+      : host_(host), quit_closure_(std::move(quit_closure)) {
+    host_->AddInputEventObserver(this);
+  }
+
+  ~FlingStartObserver() override { host_->RemoveInputEventObserver(this); }
+
+  void OnInputEventAck(const RenderWidgetHost&,
+                       blink::mojom::InputEventResultSource source,
+                       blink::mojom::InputEventResultState state,
+                       const blink::WebInputEvent& event) override {
+    if (event.GetType() != blink::WebInputEvent::Type::kGestureScrollUpdate) {
+      return;
+    }
+    const auto& gesture_event =
+        static_cast<const blink::WebGestureEvent&>(event);
+
+    if (gesture_event.data.scroll_update.inertial_phase !=
+        blink::WebGestureEvent::InertialPhaseState::kMomentum) {
+      return;
+    }
+
+    if (quit_closure_) {
+      std::move(quit_closure_).Run();
+    }
+  }
+
+ private:
+  raw_ptr<content::RenderWidgetHost> host_;
+  base::OnceClosure quit_closure_;
+};
+
 // This test will used event listeners which block the renderer's main thread.
 // This test verifies that the compositor sends back an event ack that is not
 // blocked by the main thread. Then that subsequently the compositor will
@@ -113,11 +146,17 @@ namespace content {
 class CompositorEventAckBrowserTest : public ContentBrowserTest {
  public:
   CompositorEventAckBrowserTest() {}
+
+  CompositorEventAckBrowserTest(const CompositorEventAckBrowserTest&) = delete;
+  CompositorEventAckBrowserTest& operator=(
+      const CompositorEventAckBrowserTest&) = delete;
+
   ~CompositorEventAckBrowserTest() override {}
 
   RenderWidgetHostImpl* GetWidgetHost() {
+    auto* main_frame = shell()->web_contents()->GetPrimaryMainFrame();
     return RenderWidgetHostImpl::From(
-        shell()->web_contents()->GetRenderViewHost()->GetWidget());
+        main_frame->GetRenderViewHost()->GetWidget());
   }
 
   void OnSyntheticGestureCompleted(SyntheticGesture::Result result) {
@@ -132,31 +171,41 @@ class CompositorEventAckBrowserTest : public ContentBrowserTest {
     RenderWidgetHostImpl* host = GetWidgetHost();
     host->GetView()->SetSize(gfx::Size(400, 400));
 
-    base::string16 ready_title(base::ASCIIToUTF16("ready"));
+    std::u16string ready_title(u"ready");
     TitleWatcher watcher(shell()->web_contents(), ready_title);
-    ignore_result(watcher.WaitAndGetTitle());
+    std::ignore = watcher.WaitAndGetTitle();
 
-    HitTestRegionObserver observer(host->GetFrameSinkId());
-    observer.WaitForHitTestData();
-  }
+    // SetSize triggers an animation of the size, leading to a a new
+    // viz::LocalSurfaceId being generated. Since this was done right after
+    // navigation Viz could be processing an old surface.
+    //
+    // We want the HitTestData for the post resize surface. So wait until that
+    // surface has submitted a frame.
+    viz::LocalSurfaceId target = host->GetView()->GetLocalSurfaceId();
+    RenderFrameSubmissionObserver rfm_observer(
+        GetWidgetHost()->render_frame_metadata_provider());
+    while (!rfm_observer.LastRenderFrameMetadata()
+                .local_surface_id.value_or(viz::LocalSurfaceId())
+                .is_valid() ||
+           !rfm_observer.LastRenderFrameMetadata()
+                .local_surface_id.value_or(viz::LocalSurfaceId())
+                .IsSameOrNewerThan(target)) {
+      rfm_observer.WaitForMetadataChange();
+    }
 
-  int ExecuteScriptAndExtractInt(const std::string& script) {
-    int value = 0;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractInt(
-        shell(), "domAutomationController.send(" + script + ")", &value));
-    return value;
+    HitTestRegionObserver hit_test_observer(host->GetFrameSinkId());
+    hit_test_observer.WaitForHitTestData();
   }
 
   int GetScrollTop() {
-    return ExecuteScriptAndExtractInt("document.scrollingElement.scrollTop");
+    return EvalJs(shell(), "document.scrollingElement.scrollTop").ExtractInt();
   }
 
   void DoWheelScroll() {
     EXPECT_EQ(0, GetScrollTop());
 
-    int scrollHeight =
-        ExecuteScriptAndExtractInt("document.documentElement.scrollHeight");
-    EXPECT_EQ(kWebsiteHeight, scrollHeight);
+    EXPECT_EQ(kWebsiteHeight,
+              EvalJs(shell(), "document.documentElement.scrollHeight"));
 
     RenderFrameSubmissionObserver observer(
         GetWidgetHost()->render_frame_metadata_provider());
@@ -178,7 +227,7 @@ class CompositorEventAckBrowserTest : public ContentBrowserTest {
 
     // Expect that the compositor scrolled at least one pixel while the
     // main thread was in a busy loop.
-    gfx::Vector2dF default_scroll_offset;
+    gfx::PointF default_scroll_offset;
     while (observer.LastRenderFrameMetadata()
                .root_scroll_offset.value_or(default_scroll_offset)
                .y() <= 0) {
@@ -189,15 +238,14 @@ class CompositorEventAckBrowserTest : public ContentBrowserTest {
   void DoTouchScroll() {
     EXPECT_EQ(0, GetScrollTop());
 
-    int scrollHeight =
-        ExecuteScriptAndExtractInt("document.documentElement.scrollHeight");
-    EXPECT_EQ(kWebsiteHeight, scrollHeight);
+    EXPECT_EQ(kWebsiteHeight,
+              EvalJs(shell(), "document.documentElement.scrollHeight"));
 
     RenderFrameSubmissionObserver observer(
         GetWidgetHost()->render_frame_metadata_provider());
 
     SyntheticSmoothScrollGestureParams params;
-    params.gesture_source_type = SyntheticGestureParams::TOUCH_INPUT;
+    params.gesture_source_type = content::mojom::GestureSourceType::kTouchInput;
     params.anchor = gfx::PointF(50, 50);
     params.distances.push_back(gfx::Vector2d(0, -45));
 
@@ -211,16 +259,13 @@ class CompositorEventAckBrowserTest : public ContentBrowserTest {
 
     // Expect that the compositor scrolled at least one pixel while the
     // main thread was in a busy loop.
-    gfx::Vector2dF default_scroll_offset;
+    gfx::PointF default_scroll_offset;
     while (observer.LastRenderFrameMetadata()
                .root_scroll_offset.value_or(default_scroll_offset)
                .y() <= 0) {
       observer.WaitForMetadataChange();
     }
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(CompositorEventAckBrowserTest);
 };
 
 IN_PROC_BROWSER_TEST_F(CompositorEventAckBrowserTest, MouseWheel) {
@@ -229,7 +274,7 @@ IN_PROC_BROWSER_TEST_F(CompositorEventAckBrowserTest, MouseWheel) {
 }
 
 // Disabled on MacOS because it doesn't support touch input.
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 #define MAYBE_TouchStart DISABLED_TouchStart
 #else
 #define MAYBE_TouchStart TouchStart
@@ -240,7 +285,7 @@ IN_PROC_BROWSER_TEST_F(CompositorEventAckBrowserTest, MAYBE_TouchStart) {
 }
 
 // Disabled on MacOS because it doesn't support touch input.
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 #define MAYBE_TouchStartDuringFling DISABLED_TouchStartDuringFling
 #else
 #define MAYBE_TouchStartDuringFling TouchStartDuringFling
@@ -283,11 +328,16 @@ IN_PROC_BROWSER_TEST_F(CompositorEventAckBrowserTest,
   GetWidgetHost()->ForwardGestureEvent(gesture_fling_start);
   RenderFrameSubmissionObserver observer(
       GetWidgetHost()->render_frame_metadata_provider());
-  gfx::Vector2dF default_scroll_offset;
+  gfx::PointF default_scroll_offset;
   while (observer.LastRenderFrameMetadata()
              .root_scroll_offset.value_or(default_scroll_offset)
              .y() <= 0)
     observer.WaitForMetadataChange();
+
+  // Wait for the fling to start on the compositor thread.
+  base::RunLoop run_loop;
+  FlingStartObserver fling_observer(GetWidgetHost(), run_loop.QuitClosure());
+  run_loop.Run();
 
   touch_event.ReleasePoint(0);
   //  TODO(wjmaclean): Figure out why we can send two touch events with the same
@@ -303,7 +353,7 @@ IN_PROC_BROWSER_TEST_F(CompositorEventAckBrowserTest,
   // test will timeout if the touch start event is cancelable since there is a
   // busy loop in the blocking touch start event listener.
   InputEventAckWaiter touch_start_ack_observer(
-      GetWidgetHost(), WebInputEvent::Type::kTouchStart);
+      GetWidgetHost(), blink::WebInputEvent::Type::kTouchStart);
   touch_event.PressPoint(50, 50);
   touch_event.SetTimeStamp(ui::EventTimeForNow());
   input_event_router->RouteTouchEvent(root_view, &touch_event,
@@ -312,7 +362,7 @@ IN_PROC_BROWSER_TEST_F(CompositorEventAckBrowserTest,
 }
 
 // Disabled on MacOS because it doesn't support touch input.
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 #define MAYBE_PassiveTouchStartBlockingTouchEnd \
   DISABLED_PassiveTouchStartBlockingTouchEnd
 #else

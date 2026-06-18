@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,6 @@
 #define GPU_GLES2_GL2CHROMIUM_H_
 
 #include <GLES2/gl2platform.h>
-
-#define GL_CONTEXT_LOST 0x300E
 
 #if defined(GLES2_USE_MOJO)
 #define GLES2_GET_FUN(name) MojoGLES2gl ## name

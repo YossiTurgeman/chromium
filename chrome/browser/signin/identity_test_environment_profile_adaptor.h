@@ -1,11 +1,9 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_SIGNIN_IDENTITY_TEST_ENVIRONMENT_PROFILE_ADAPTOR_H_
 #define CHROME_BROWSER_SIGNIN_IDENTITY_TEST_ENVIRONMENT_PROFILE_ADAPTOR_H_
-
-#include <string>
 
 #include "chrome/test/base/testing_profile.h"
 #include "components/signin/public/identity_manager/identity_test_environment.h"
@@ -30,7 +28,7 @@ class IdentityTestEnvironmentProfileAdaptor {
   // |input_factories|.
   static std::unique_ptr<TestingProfile>
   CreateProfileForIdentityTestEnvironment(
-      const TestingProfile::TestingFactories& input_factories);
+      TestingProfile::TestingFactories input_factories);
 
   // Creates and returns a TestingProfile that has been configured with the
   // given |builder| and the set of testing factories that
@@ -46,16 +44,17 @@ class IdentityTestEnvironmentProfileAdaptor {
       content::BrowserContext* browser_context);
 
   // Appends the set of testing factories that signin::IdentityTestEnvironment
-  // requires to |factories_to_append_to|, which should be the set of testing
-  // factories supplied to TestingProfile (via one of the various mechanisms for
-  // doing so). Prefer the above API if possible, as it is less fragile. This
-  // API is primarily for use in tests that do not create the TestingProfile
-  // internally but rather simply supply the set of TestingFactories to some
-  // external facility (e.g., a superclass).
+  // requires to |testing_factories| and return the set of factories, which
+  // should be the set of testing factories supplied to TestingProfile (via one
+  // of the various mechanisms for doing so). Prefer the above API if possible,
+  // as it is less fragile. This API is primarily for use in tests that do not
+  // create the TestingProfile internally but rather simply supply the set of
+  // TestingFactories to some external facility (e.g., a superclass).
   // See CreateProfileForIdentityTestEnvironment() for comments on common
   // parameters.
-  static void AppendIdentityTestEnvironmentFactories(
-      TestingProfile::TestingFactories* factories_to_append_to);
+  static TestingProfile::TestingFactories
+  GetIdentityTestEnvironmentFactoriesWithAppendedFactories(
+      TestingProfile::TestingFactories testing_factories);
 
   // Returns the set of testing factories that signin::IdentityTestEnvironment
   // requires, which can be useful to configure profiles for services that do
@@ -67,11 +66,17 @@ class IdentityTestEnvironmentProfileAdaptor {
   // |profile| must have been configured with the IdentityTestEnvironment
   // testing factories, either because it was created via
   // CreateProfileForIdentityTestEnvironment() or because
-  // AppendIdentityTestEnvironmentFactories() was invoked on the set of
-  // factories supplied to it.
+  // GetIdentityTestEnvironmentFactoriesWithAppendedFactories() was invoked
+  // on the set of factories supplied to it.
   // |profile| must outlive this object.
   explicit IdentityTestEnvironmentProfileAdaptor(Profile* profile);
-  ~IdentityTestEnvironmentProfileAdaptor() {}
+
+  IdentityTestEnvironmentProfileAdaptor(
+      const IdentityTestEnvironmentProfileAdaptor&) = delete;
+  IdentityTestEnvironmentProfileAdaptor& operator=(
+      const IdentityTestEnvironmentProfileAdaptor&) = delete;
+
+  ~IdentityTestEnvironmentProfileAdaptor() = default;
 
   // Returns the IdentityTestEnvironment associated with this object (and
   // implicitly with the Profile passed to this object's constructor).
@@ -86,8 +91,6 @@ class IdentityTestEnvironmentProfileAdaptor {
       content::BrowserContext* context);
 
   signin::IdentityTestEnvironment identity_test_env_;
-
-  DISALLOW_COPY_AND_ASSIGN(IdentityTestEnvironmentProfileAdaptor);
 };
 
 #endif  // CHROME_BROWSER_SIGNIN_IDENTITY_TEST_ENVIRONMENT_PROFILE_ADAPTOR_H_

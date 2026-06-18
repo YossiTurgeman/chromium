@@ -1,9 +1,10 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/metrics/tab_footprint_aggregator.h"
 
+#include <algorithm>
 #include <limits>
 #include <numeric>
 #include <utility>
@@ -96,12 +97,12 @@ void TabFootprintAggregator::AssociateFrame(ukm::SourceId sid,
       << "Can't associate multiple SourceIds to a single PageId.";
 
   std::vector<PageId>& pages = process_to_pages_[pid];
-  DCHECK(!std::count(pages.begin(), pages.end(), page_id))
+  DCHECK(!std::ranges::contains(pages, page_id))
       << "Can't duplicate associations between a process and a page.";
   pages.push_back(page_id);
 
   std::vector<base::ProcessId>& processes = page_to_processes_[page_id];
-  DCHECK(!std::count(processes.begin(), processes.end(), pid))
+  DCHECK(!std::ranges::contains(processes, pid))
       << "Can't duplicate associations between a page and a process.";
   processes.push_back(pid);
 

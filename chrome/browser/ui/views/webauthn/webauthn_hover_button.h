@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,13 @@
 #define CHROME_BROWSER_UI_VIEWS_WEBAUTHN_WEBAUTHN_HOVER_BUTTON_H_
 
 #include <memory>
+#include <string>
 
-#include "base/strings/string16.h"
-#include "chrome/browser/ui/views/hover_button.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ui/views/controls/hover_button.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 
 namespace views {
-class ButtonListener;
 class ImageView;
 class Label;
 class View;
@@ -21,6 +22,8 @@ class View;
 // title and subtitle, and a secondary right-hand icon (usually a submenu
 // arrow). Icons and subtitle are optional.
 class WebAuthnHoverButton : public HoverButton {
+  METADATA_HEADER(WebAuthnHoverButton, HoverButton)
+
  public:
   // Creates a hoverable button with the given elements, like so:
   //
@@ -36,21 +39,21 @@ class WebAuthnHoverButton : public HoverButton {
   //
   // |icon| and |secondary_icon| are also optional. If either is null, the
   // middle column resizes to fill the space.
-  WebAuthnHoverButton(views::ButtonListener* listener,
+  WebAuthnHoverButton(PressedCallback callback,
                       std::unique_ptr<views::ImageView> icon,
-                      const base::string16& title,
-                      const base::string16& subtitle,
+                      const std::u16string& title,
+                      const std::u16string& subtitle,
                       std::unique_ptr<views::View> secondary_icon,
-                      bool force_two_line = false);
+                      bool enabled);
   WebAuthnHoverButton(const WebAuthnHoverButton&) = delete;
   WebAuthnHoverButton& operator=(const WebAuthnHoverButton&) = delete;
   ~WebAuthnHoverButton() override = default;
 
  private:
-  views::Label* title_ = nullptr;
-  views::Label* subtitle_ = nullptr;
-  views::View* icon_view_ = nullptr;
-  views::View* secondary_icon_view_ = nullptr;
+  raw_ptr<views::Label> title_ = nullptr;
+  raw_ptr<views::Label> subtitle_ = nullptr;
+  raw_ptr<views::View> icon_view_ = nullptr;
+  raw_ptr<views::View> secondary_icon_view_ = nullptr;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_WEBAUTHN_WEBAUTHN_HOVER_BUTTON_H_

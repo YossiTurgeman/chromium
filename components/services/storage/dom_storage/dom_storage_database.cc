@@ -1,112 +1,52 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/services/storage/dom_storage/dom_storage_database.h"
 
-#include <utility>
-
+#include "base/debug/leak_annotations.h"
+#include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
-#include "base/strings/utf_string_conversions.h"
-#include "base/task/post_task.h"
-#include "base/task/task_traits.h"
-#include "base/threading/sequenced_task_runner_handle.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
+#include "base/strings/stringprintf.h"
+#include "base/task/thread_pool.h"
 #include "base/trace_event/memory_allocator_dump.h"
-#include "base/trace_event/memory_dump_manager.h"
 #include "base/trace_event/process_memory_dump.h"
-#include "components/services/storage/filesystem_proxy_factory.h"
-#include "third_party/leveldatabase/leveldb_chrome.h"
-#include "third_party/leveldatabase/src/include/leveldb/write_batch.h"
+#include "base/types/expected_macros.h"
+#include "components/services/storage/dom_storage/dom_storage_constants.h"
+#include "components/services/storage/dom_storage/features.h"
+#include "components/services/storage/dom_storage/leveldb/dom_storage_database_leveldb.h"
+#include "components/services/storage/dom_storage/leveldb/local_storage_leveldb.h"
+#include "components/services/storage/dom_storage/leveldb/session_storage_leveldb.h"
+#include "components/services/storage/dom_storage/sqlite/local_storage_sqlite.h"
+#include "components/services/storage/dom_storage/sqlite/session_storage_sqlite.h"
+#include "components/services/storage/dom_storage/sqlite/sqlite_database_utils.h"
+#include "components/services/storage/public/cpp/constants.h"
+#include "sql/database.h"
 
 namespace storage {
-
 namespace {
 
-// IOError message returned whenever a call is made on a DomStorageDatabase
-// which has been invalidated (e.g. by a failed |RewriteDB()| operation).
-const char kInvalidDatabaseMessage[] = "DomStorageDatabase no longer valid.";
+// Constructs an absolute path to the session storage database using
+// `storage_partition_dir`.  For LevelDB, the path is a directory:
+//
+// `storage_partition_dir`/Session Storage
+//
+// When the `kDomStorageSqlite` feature flag is enabled, the path is a file:
+//
+// `storage_partition_dir`/SessionStorage
+base::FilePath GetSessionStorageDatabasePath(
+    const base::FilePath& storage_partition_dir) {
+  CHECK(!storage_partition_dir.empty());
+  CHECK(storage_partition_dir.IsAbsolute());
 
-class DomStorageDatabaseEnv : public leveldb_env::ChromiumEnv {
- public:
-  DomStorageDatabaseEnv()
-      : ChromiumEnv("ChromiumEnv.StorageService", CreateFilesystemProxy()) {}
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(DomStorageDatabaseEnv);
-};
-
-DomStorageDatabaseEnv* GetDomStorageDatabaseEnv() {
-  static base::NoDestructor<DomStorageDatabaseEnv> env;
-  return env.get();
-}
-
-std::string MakeFullPersistentDBName(const base::FilePath& directory,
-                                     const std::string& db_name) {
-  // ChromiumEnv treats DB name strings as UTF-8 file paths.
-  return directory.Append(base::FilePath::FromUTF8Unsafe(db_name))
-      .AsUTF8Unsafe();
-}
-
-leveldb_env::Options CreateDefaultInMemoryOptions() {
-  leveldb_env::Options options;
-  options.create_if_missing = true;
-  options.max_open_files = 0;
-  return options;
-}
-
-leveldb_env::Options AddEnvToOptions(const leveldb_env::Options& options,
-                                     leveldb::Env* env) {
-  leveldb_env::Options new_options = options;
-  new_options.env = env;
-  return new_options;
-}
-
-std::unique_ptr<leveldb::DB> TryOpenDB(
-    const leveldb_env::Options& options,
-    const std::string& name,
-    scoped_refptr<base::SequencedTaskRunner> callback_task_runner,
-    DomStorageDatabase::StatusCallback callback) {
-  std::unique_ptr<leveldb::DB> db;
-  leveldb::Status status = leveldb_env::OpenDB(options, name, &db);
-  callback_task_runner->PostTask(FROM_HERE,
-                                 base::BindOnce(std::move(callback), status));
-  return db;
-}
-
-leveldb::Slice MakeSlice(base::span<const uint8_t> data) {
-  if (data.empty())
-    return leveldb::Slice();
-  return leveldb::Slice(reinterpret_cast<const char*>(data.data()),
-                        data.size());
-}
-
-DomStorageDatabase::KeyValuePair MakeKeyValuePair(const leveldb::Slice& key,
-                                                  const leveldb::Slice& value) {
-  auto key_span = base::make_span(key);
-  auto value_span = base::make_span(value);
-  return DomStorageDatabase::KeyValuePair(
-      DomStorageDatabase::Key(key_span.begin(), key_span.end()),
-      DomStorageDatabase::Value(value_span.begin(), value_span.end()));
-}
-
-template <typename Func>
-DomStorageDatabase::Status ForEachWithPrefix(leveldb::DB* db,
-                                             DomStorageDatabase::KeyView prefix,
-                                             Func function) {
-  // NOTE: We disable filling the cache for bulk scans. Either this is for
-  // deletion (where caching doesn't make sense) or a mass-read, which the user
-  // should be caching or only needing once.
-  leveldb::ReadOptions options;
-  options.fill_cache = false;
-  std::unique_ptr<leveldb::Iterator> iter(db->NewIterator(options));
-  const leveldb::Slice prefix_slice(MakeSlice(prefix));
-  iter->Seek(prefix_slice);
-  for (; iter->Valid(); iter->Next()) {
-    if (!iter->key().starts_with(prefix_slice))
-      break;
-    function(iter->key(), iter->value());
+  if (base::FeatureList::IsEnabled(kDomStorageSqlite)) {
+    return storage_partition_dir.AppendASCII("SessionStorage");
   }
-  return iter->status();
+  return storage_partition_dir.AppendASCII("Session Storage");
 }
 
 }  // namespace
@@ -133,242 +73,334 @@ bool DomStorageDatabase::KeyValuePair::operator==(
   return std::tie(key, value) == std::tie(rhs.key, rhs.value);
 }
 
-DomStorageDatabase::DomStorageDatabase(
-    const base::FilePath& directory,
-    const std::string& name,
-    const leveldb_env::Options& options,
-    const base::Optional<base::trace_event::MemoryAllocatorDumpGuid>&
-        memory_dump_id,
-    scoped_refptr<base::SequencedTaskRunner> callback_task_runner,
-    StatusCallback callback)
-    : DomStorageDatabase(MakeFullPersistentDBName(directory, name),
-                         /*env=*/nullptr,
-                         options,
-                         memory_dump_id,
-                         std::move(callback_task_runner),
-                         std::move(callback)) {}
+DomStorageDatabase::MapLocator::MapLocator(blink::StorageKey storage_key)
+    : storage_key_(storage_key) {}
 
-DomStorageDatabase::DomStorageDatabase(
-    const std::string& tracking_name,
-    const base::Optional<base::trace_event::MemoryAllocatorDumpGuid>&
-        memory_dump_id,
-    scoped_refptr<base::SequencedTaskRunner> callback_task_runner,
-    StatusCallback callback)
-    : DomStorageDatabase("",
-                         leveldb_chrome::NewMemEnv(tracking_name),
-                         CreateDefaultInMemoryOptions(),
-                         memory_dump_id,
-                         std::move(callback_task_runner),
-                         std::move(callback)) {}
+DomStorageDatabase::MapLocator::MapLocator(blink::StorageKey storage_key,
+                                           int64_t map_id)
+    : storage_key_(storage_key), map_id_(map_id) {}
 
-DomStorageDatabase::DomStorageDatabase(
-    const std::string& name,
-    std::unique_ptr<leveldb::Env> env,
-    const leveldb_env::Options& options,
-    const base::Optional<base::trace_event::MemoryAllocatorDumpGuid>
-        memory_dump_id,
-    scoped_refptr<base::SequencedTaskRunner> callback_task_runner,
-    StatusCallback callback)
-    : name_(name),
-      env_(std::move(env)),
-      options_(AddEnvToOptions(options,
-                               env_ ? env_.get() : GetDomStorageDatabaseEnv())),
-      memory_dump_id_(memory_dump_id),
-      db_(TryOpenDB(options_,
-                    name,
-                    std::move(callback_task_runner),
-                    std::move(callback))) {
-  base::trace_event::MemoryDumpManager::GetInstance()
-      ->RegisterDumpProviderWithSequencedTaskRunner(
-          this, "MojoLevelDB", base::SequencedTaskRunnerHandle::Get(),
-          MemoryDumpProvider::Options());
+DomStorageDatabase::MapLocator::MapLocator(std::string session_id,
+                                           blink::StorageKey storage_key)
+    : storage_key_(storage_key) {
+  session_ids_.push_back(std::move(session_id));
 }
 
-DomStorageDatabase::~DomStorageDatabase() {
-  base::trace_event::MemoryDumpManager::GetInstance()->UnregisterDumpProvider(
-      this);
-  if (destruction_callback_)
-    std::move(destruction_callback_).Run();
+DomStorageDatabase::MapLocator::MapLocator(std::string session_id,
+                                           blink::StorageKey storage_key,
+                                           int64_t map_id)
+    : storage_key_(storage_key), map_id_(map_id) {
+  session_ids_.push_back(std::move(session_id));
+}
+
+DomStorageDatabase::MapLocator::~MapLocator() = default;
+
+DomStorageDatabase::MapLocator::MapLocator(MapLocator&&) = default;
+
+DomStorageDatabase::MapLocator& DomStorageDatabase::MapLocator::operator=(
+    MapLocator&&) = default;
+
+const blink::StorageKey& DomStorageDatabase::MapLocator::storage_key() const {
+  return storage_key_;
+}
+
+const std::vector<std::string>& DomStorageDatabase::MapLocator::session_ids()
+    const {
+  return session_ids_;
+}
+
+std::optional<int64_t> DomStorageDatabase::MapLocator::map_id() const {
+  return map_id_;
+}
+
+void DomStorageDatabase::MapLocator::AddSession(std::string session_id) {
+  session_ids_.push_back(std::move(session_id));
+}
+
+void DomStorageDatabase::MapLocator::RemoveSession(
+    const std::string& session_id) {
+  std::erase(session_ids_, session_id);
+}
+
+DomStorageDatabase::MapLocator DomStorageDatabase::MapLocator::Clone() const {
+  MapLocator clone;
+  clone.session_ids_ = session_ids_;
+  clone.storage_key_ = storage_key_;
+  clone.map_id_ = map_id_;
+  return clone;
+}
+
+std::string DomStorageDatabase::MapLocator::ToDebugString() const {
+  std::string sessions = base::JoinString(session_ids_, /*separator=*/":");
+  std::string map_id = map_id_ ? base::NumberToString(*map_id_) : "null";
+
+  return base::StringPrintf("sessions_ids:%s, storage_key:%s, map_id:%s",
+                            sessions, storage_key_.GetDebugString(), map_id);
+}
+
+DomStorageDatabase::MapLocator::MapLocator() = default;
+
+DomStorageDatabase::SharedMapLocator::SharedMapLocator(MapLocator source)
+    : MapLocator(std::move(source)) {}
+
+DomStorageDatabase::SharedMapLocator::~SharedMapLocator() = default;
+
+DomStorageDatabase::Metadata::Metadata() = default;
+
+DomStorageDatabase::Metadata::Metadata(
+    std::vector<MapMetadata> source_map_metadata)
+    : map_metadata(std::move(source_map_metadata)) {}
+
+DomStorageDatabase::Metadata::~Metadata() = default;
+
+DomStorageDatabase::Metadata::Metadata(Metadata&&) = default;
+
+DomStorageDatabase::Metadata& DomStorageDatabase::Metadata::operator=(
+    Metadata&&) = default;
+
+DomStorageDatabase::MapBatchUpdate::MapBatchUpdate(MapLocator map_to_update)
+    : map_locator{std::move(map_to_update)} {}
+
+DomStorageDatabase::MapBatchUpdate::~MapBatchUpdate() = default;
+
+DomStorageDatabase::MapBatchUpdate::MapBatchUpdate(MapBatchUpdate&&) = default;
+
+DomStorageDatabase::MapBatchUpdate&
+DomStorageDatabase::MapBatchUpdate::operator=(MapBatchUpdate&&) = default;
+
+base::FilePath DomStorageDatabase::GetPath(
+    StorageType storage_type,
+    const base::FilePath& storage_partition_dir) {
+  switch (storage_type) {
+    case StorageType::kLocalStorage:
+      return GetLocalStorageDatabasePath(storage_partition_dir);
+    case StorageType::kSessionStorage:
+      return GetSessionStorageDatabasePath(storage_partition_dir);
+  }
+  NOTREACHED();
 }
 
 // static
-void DomStorageDatabase::OpenDirectory(
-    const base::FilePath& directory,
-    const std::string& name,
-    const leveldb_env::Options& options,
-    const base::Optional<base::trace_event::MemoryAllocatorDumpGuid>&
-        memory_dump_id,
-    scoped_refptr<base::SequencedTaskRunner> blocking_task_runner,
-    OpenCallback callback) {
-  DCHECK(directory.IsAbsolute());
-  auto database = std::make_unique<base::SequenceBound<DomStorageDatabase>>();
-  auto* database_ptr = database.get();
-  *database_ptr = base::SequenceBound<DomStorageDatabase>(
-      blocking_task_runner, directory, name, options, memory_dump_id,
-      base::SequencedTaskRunnerHandle::Get(),
-      base::BindOnce(
-          [](std::unique_ptr<base::SequenceBound<DomStorageDatabase>> database,
-             OpenCallback callback, leveldb::Status status) {
-            if (status.ok())
-              std::move(callback).Run(std::move(*database), status);
-            else
-              std::move(callback).Run({}, status);
-          },
-          std::move(database), std::move(callback)));
+DomStorageDatabaseFactory::CreateCallback&
+DomStorageDatabaseFactory::GetCreateCallback() {
+  static base::NoDestructor<CreateCallback> callback(
+      base::BindRepeating(&DomStorageDatabaseFactory::CreateImpl));
+  return *callback;
 }
 
 // static
-void DomStorageDatabase::OpenInMemory(
-    const std::string& name,
-    const base::Optional<base::trace_event::MemoryAllocatorDumpGuid>&
-        memory_dump_id,
-    scoped_refptr<base::SequencedTaskRunner> blocking_task_runner,
-    OpenCallback callback) {
-  auto database = std::make_unique<base::SequenceBound<DomStorageDatabase>>();
-  auto* database_ptr = database.get();
-  *database_ptr = base::SequenceBound<DomStorageDatabase>(
-      blocking_task_runner, name, memory_dump_id,
-      base::SequencedTaskRunnerHandle::Get(),
-      base::BindOnce(
-          [](std::unique_ptr<base::SequenceBound<DomStorageDatabase>> database,
-             OpenCallback callback, leveldb::Status status) {
-            if (status.ok())
-              std::move(callback).Run(std::move(*database), status);
-            else
-              std::move(callback).Run({}, status);
-          },
-          std::move(database), std::move(callback)));
+DomStorageDatabaseFactory::DestroyCallback&
+DomStorageDatabaseFactory::GetDestroyCallback() {
+  static base::NoDestructor<DestroyCallback> callback(
+      base::BindRepeating(&DomStorageDatabaseFactory::DestroyImpl));
+  return *callback;
 }
 
 // static
-void DomStorageDatabase::Destroy(
-    const base::FilePath& directory,
-    const std::string& name,
-    scoped_refptr<base::SequencedTaskRunner> blocking_task_runner,
-    StatusCallback callback) {
-  blocking_task_runner->PostTask(
-      FROM_HERE,
-      base::BindOnce(
-          [](const std::string& db_name,
-             scoped_refptr<base::SequencedTaskRunner> callback_task_runner,
-             StatusCallback callback) {
-            leveldb_env::Options options;
-            options.env = GetDomStorageDatabaseEnv();
-            callback_task_runner->PostTask(
-                FROM_HERE,
-                base::BindOnce(std::move(callback),
-                               leveldb::DestroyDB(db_name, options)));
-          },
-          MakeFullPersistentDBName(directory, name),
-          base::SequencedTaskRunnerHandle::Get(), std::move(callback)));
+base::SequenceBound<DomStorageDatabase> DomStorageDatabaseFactory::Create(
+    StorageType storage_type,
+    bool is_in_memory,
+    scoped_refptr<base::SequencedTaskRunner> blocking_task_runner) {
+  return GetCreateCallback().Run(storage_type, is_in_memory,
+                                 std::move(blocking_task_runner));
 }
 
-DomStorageDatabase::Status DomStorageDatabase::Get(KeyView key,
-                                                   Value* out_value) const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  std::string value;
-  Status status = db_->Get(leveldb::ReadOptions(), MakeSlice(key), &value);
-  *out_value = Value(value.begin(), value.end());
-  return status;
+// static
+base::SequenceBound<DomStorageDatabase> DomStorageDatabaseFactory::CreateImpl(
+    StorageType storage_type,
+    bool is_in_memory,
+    scoped_refptr<base::SequencedTaskRunner> blocking_task_runner) {
+  switch (storage_type) {
+    case StorageType::kLocalStorage: {
+      if (ShouldUseSqliteBackend(is_in_memory)) {
+        return base::SequenceBound<LocalStorageSqlite>(
+            std::move(blocking_task_runner), PassKey());
+      }
+      return base::SequenceBound<LocalStorageLevelDB>(
+          std::move(blocking_task_runner), PassKey());
+    }
+    case StorageType::kSessionStorage: {
+      if (ShouldUseSqliteBackend(is_in_memory)) {
+        return base::SequenceBound<SessionStorageSqlite>(
+            std::move(blocking_task_runner), PassKey());
+      }
+      return base::SequenceBound<SessionStorageLevelDB>(
+          std::move(blocking_task_runner), PassKey());
+    }
+  }
+  NOTREACHED();
 }
 
-DomStorageDatabase::Status DomStorageDatabase::Put(KeyView key,
-                                                   ValueView value) const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  return db_->Put(leveldb::WriteOptions(), MakeSlice(key), MakeSlice(value));
+// static
+void DomStorageDatabaseFactory::Destroy(const base::FilePath& database_path,
+                                        StatusCallback callback) {
+  GetDestroyCallback().Run(database_path, std::move(callback));
 }
 
-DomStorageDatabase::Status DomStorageDatabase::Delete(KeyView key) const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  return db_->Delete(leveldb::WriteOptions(), MakeSlice(key));
+// static
+void DomStorageDatabaseFactory::DestroyImpl(const base::FilePath& database_path,
+                                            StatusCallback callback) {
+  CHECK(!database_path.empty());
+  CHECK(database_path.IsAbsolute());
+
+  scoped_refptr<base::SequencedTaskRunner> blocking_task_runner =
+      GetTaskRunnerForDb(database_path);
+
+  base::OnceCallback<DbStatus()> destroy_database_callback;
+  if (base::FeatureList::IsEnabled(kDomStorageSqlite)) {
+    destroy_database_callback =
+        base::BindOnce(&sqlite::DestroyDatabase, database_path);
+  } else {
+    destroy_database_callback =
+        base::BindOnce(&DomStorageDatabaseLevelDB::Destroy, database_path);
+  }
+  blocking_task_runner->PostTaskAndReplyWithResult(
+      FROM_HERE, std::move(destroy_database_callback), std::move(callback));
 }
 
-DomStorageDatabase::Status DomStorageDatabase::GetPrefixed(
-    KeyView prefix,
-    std::vector<KeyValuePair>* entries) const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  return ForEachWithPrefix(
-      db_.get(), prefix,
-      [&](const leveldb::Slice& key, const leveldb::Slice& value) {
-        entries->push_back(MakeKeyValuePair(key, value));
-      });
+base::PassKey<DomStorageDatabaseFactory>
+DomStorageDatabaseFactory::CreatePassKeyForTesting() {
+  return base::PassKey<DomStorageDatabaseFactory>();
 }
 
-DomStorageDatabase::Status DomStorageDatabase::DeletePrefixed(
-    KeyView prefix,
-    leveldb::WriteBatch* batch) const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  Status status = ForEachWithPrefix(
-      db_.get(), prefix,
-      [&](const leveldb::Slice& key, const leveldb::Slice& value) {
-        batch->Delete(key);
-      });
-  return status;
+scoped_refptr<base::SequencedTaskRunner> GetTaskRunnerForDb(
+    const base::FilePath& database_path) {
+  if (database_path.empty()) {
+    // For the in-memory case, blocking shutdown is only important to avoid
+    // leaking the SequenceBound on shutdown (and triggering ASAN failures).
+    return base::ThreadPool::CreateSequencedTaskRunner(
+        {base::WithBaseSyncPrimitives(),
+         base::TaskShutdownBehavior::BLOCK_SHUTDOWN});
+  }
+
+  //  This will always return the same task runner for a given `database_path`.
+  return base::ThreadPool::CreateSequencedTaskRunnerForResource(
+      {base::MayBlock(), base::WithBaseSyncPrimitives(),
+       base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+      database_path);
 }
 
-DomStorageDatabase::Status DomStorageDatabase::CopyPrefixed(
-    KeyView prefix,
-    KeyView new_prefix,
-    leveldb::WriteBatch* batch) const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  Key new_key(new_prefix.begin(), new_prefix.end());
-  Status status = ForEachWithPrefix(
-      db_.get(), prefix,
-      [&](const leveldb::Slice& key, const leveldb::Slice& value) {
-        DCHECK_GE(key.size(), prefix.size());  // By definition.
-        size_t suffix_length = key.size() - prefix.size();
-        new_key.resize(new_prefix.size() + suffix_length);
-        std::copy(key.data() + prefix.size(), key.data() + key.size(),
-                  new_key.begin() + new_prefix.size());
-        batch->Put(MakeSlice(new_key), value);
-      });
-  return status;
-}
+void ReportDatabaseMemoryUsage(
+    sql::Database* database,
+    const std::optional<base::trace_event::MemoryAllocatorDumpGuid>&
+        memory_dump_id,
+    base::trace_event::ProcessMemoryDump* pmd,
+    std::string dump_name) {
+  if (!database || !memory_dump_id) {
+    return;
+  }
 
-DomStorageDatabase::Status DomStorageDatabase::Commit(
-    leveldb::WriteBatch* batch) const {
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  if (fail_commits_for_testing_)
-    return Status::IOError("Simulated I/O Error");
-  return db_->Write(leveldb::WriteOptions(), batch);
-}
+  int memory_usage = database->GetMemoryUsage();
+  if (memory_usage == 0) {
+    return;
+  }
 
-DomStorageDatabase::Status DomStorageDatabase::RewriteDB() {
-  if (!db_)
-    return Status::IOError(kInvalidDatabaseMessage);
-  Status status = leveldb_env::RewriteDB(options_, name_, &db_);
-  if (!status.ok())
-    db_.reset();
-  return status;
-}
-
-bool DomStorageDatabase::OnMemoryDump(
-    const base::trace_event::MemoryDumpArgs& args,
-    base::trace_event::ProcessMemoryDump* pmd) {
-  auto* dump = leveldb_env::DBTracker::GetOrCreateAllocatorDump(pmd, db_.get());
-  if (!dump)
-    return true;
-  auto* global_dump = pmd->CreateSharedGlobalAllocatorDump(*memory_dump_id_);
-  pmd->AddOwnershipEdge(global_dump->guid(), dump->guid());
-  // Add size to global dump to propagate the size of the database to the
-  // client's dump.
+  auto* db_dump = pmd->CreateAllocatorDump(dump_name);
+  db_dump->AddScalar(base::trace_event::MemoryAllocatorDump::kNameSize,
+                     base::trace_event::MemoryAllocatorDump::kUnitsBytes,
+                     memory_usage);
+  auto* global_dump = pmd->CreateSharedGlobalAllocatorDump(*memory_dump_id);
+  pmd->AddOwnershipEdge(global_dump->guid(), db_dump->guid());
   global_dump->AddScalar(base::trace_event::MemoryAllocatorDump::kNameSize,
                          base::trace_event::MemoryAllocatorDump::kUnitsBytes,
-                         dump->GetSizeInternal());
-  return true;
+                         memory_usage);
+}
+
+DbStatus PurgeOrigins(DomStorageDatabase& database,
+                      std::set<url::Origin> origins) {
+  ASSIGN_OR_RETURN(DomStorageDatabase::Metadata all_metadata,
+                   database.ReadAllMetadata());
+
+  std::vector<blink::StorageKey> metadata_to_delete;
+  std::vector<DomStorageDatabase::MapLocator> maps_to_delete;
+
+  for (const DomStorageDatabase::MapMetadata& metadata :
+       all_metadata.map_metadata) {
+    // Ideally we would be recording last_accessed instead, but there is no
+    // historical data on that. Instead, we will use last_modified as a sanity
+    // check against other data as we try to understand how many 'old' storage
+    // buckets are still in use. This is split into two buckets for greater
+    // resolution on near and far term ages.
+    if (metadata.last_modified && *metadata.last_modified < base::Time::Now()) {
+      const int days_since_last_modified =
+          (base::Time::Now() - *metadata.last_modified).InDays();
+      base::UmaHistogramCustomCounts("LocalStorage.DaysSinceLastModified",
+                                     days_since_last_modified, 1,
+                                     kLocalStorageStaleBucketCutoffInDays, 100);
+    }
+
+    const blink::StorageKey& storage_key = metadata.map_locator.storage_key();
+
+    for (const url::Origin& origin : origins) {
+      if (storage_key.origin() == origin ||
+          (storage_key.IsThirdPartyContext() &&
+           storage_key.top_level_site().IsSameSiteWith(origin))) {
+        metadata_to_delete.push_back(storage_key);
+        maps_to_delete.emplace_back(storage_key);
+        break;
+      }
+    }
+  }
+  return database.DeleteStorageKeysFromSession(/*session_id=*/std::string(),
+                                               std::move(metadata_to_delete),
+                                               std::move(maps_to_delete));
+}
+
+DbStatus MigrateDatabase(DomStorageDatabase& source,
+                         DomStorageDatabase& destination) {
+  ASSIGN_OR_RETURN(DomStorageDatabase::Metadata source_metadata,
+                   source.ReadAllMetadata());
+
+  // Migrate the `next_map_id` metadata.
+  if (source_metadata.next_map_id) {
+    DomStorageDatabase::Metadata map_id_metadata;
+    map_id_metadata.next_map_id = source_metadata.next_map_id;
+    destination.PutMetadata(std::move(map_id_metadata));
+  }
+
+  // Migrate each map in `source_metadata`.
+  for (DomStorageDatabase::MapMetadata& source_map :
+       source_metadata.map_metadata) {
+    // Migrate the map's key/value pairs by reading all entries from
+    // `source_map`.
+    ASSIGN_OR_RETURN((std::map<DomStorageDatabase::Key,
+                               DomStorageDatabase::Value> map_entries),
+                     source.ReadMapKeyValues(source_map.map_locator.Clone()));
+
+    // Then create a batch update to add all key/value pairs to `destination`.
+    DomStorageDatabase::MapBatchUpdate update(source_map.map_locator.Clone());
+    for (auto& [key, value] : map_entries) {
+      update.entries_to_add.emplace_back(std::move(key), std::move(value));
+    }
+
+    // Migrate the map's usage metadata as  part of the batch update.
+    bool has_access_metadata = source_map.last_accessed.has_value();
+    bool has_write_metadata = source_map.last_modified && source_map.total_size;
+    if (has_access_metadata || has_write_metadata) {
+      DomStorageDatabase::MapBatchUpdate::Usage usage;
+      if (has_access_metadata) {
+        usage.SetLastAccessed(*source_map.last_accessed);
+      }
+      if (has_write_metadata) {
+        usage.SetLastModifiedAndTotalSize(*source_map.last_modified,
+                                          *source_map.total_size);
+      }
+      update.map_usage = std::move(usage);
+    } else {
+      // When no usage metadata exists, write the metadata separately to
+      // associate this map's session IDs and storage key with its map ID.
+      DomStorageDatabase::Metadata metadata_to_write;
+      metadata_to_write.map_metadata.push_back(std::move(source_map));
+      DB_RETURN_IF_ERROR(destination.PutMetadata(std::move(metadata_to_write)));
+    }
+
+    // Commit the batch update for `destination`, containing the key/value pairs
+    // and optional usage metadata.
+    std::vector<DomStorageDatabase::MapBatchUpdate> updates;
+    updates.push_back(std::move(update));
+    DB_RETURN_IF_ERROR(destination.UpdateMaps(std::move(updates)));
+  }
+  return DbStatus::OK();
 }
 
 }  // namespace storage

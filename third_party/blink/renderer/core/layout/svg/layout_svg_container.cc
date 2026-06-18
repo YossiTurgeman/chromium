@@ -23,73 +23,120 @@
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_container.h"
 
+#include "third_party/blink/renderer/core/layout/hit_test_location.h"
 #include "third_party/blink/renderer/core/layout/hit_test_result.h"
-#include "third_party/blink/renderer/core/layout/layout_analyzer.h"
+#include "third_party/blink/renderer/core/layout/svg/svg_layout_info.h"
 #include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
 #include "third_party/blink/renderer/core/layout/svg/svg_resources.h"
-#include "third_party/blink/renderer/core/layout/svg/svg_resources_cache.h"
 #include "third_party/blink/renderer/core/layout/svg/transform_helper.h"
 #include "third_party/blink/renderer/core/layout/svg/transformed_hit_test_location.h"
+#include "third_party/blink/renderer/core/paint/clip_path_clipper.h"
 #include "third_party/blink/renderer/core/paint/svg_container_painter.h"
 
 namespace blink {
 
 LayoutSVGContainer::LayoutSVGContainer(SVGElement* node)
     : LayoutSVGModelObject(node),
-      object_bounding_box_valid_(false),
-      needs_boundaries_update_(true),
-      did_screen_scale_factor_change_(false),
+      needs_transform_update_(true),
+      transform_uses_reference_box_(false),
       has_non_isolated_blending_descendants_(false),
       has_non_isolated_blending_descendants_dirty_(false) {}
 
 LayoutSVGContainer::~LayoutSVGContainer() = default;
 
-void LayoutSVGContainer::UpdateLayout() {
-  DCHECK(NeedsLayout());
-  LayoutAnalyzer::Scope analyzer(*this);
+void LayoutSVGContainer::Trace(Visitor* visitor) const {
+  visitor->Trace(content_);
+  LayoutSVGModelObject::Trace(visitor);
+}
 
+SVGLayoutResult LayoutSVGContainer::UpdateSVGLayout(
+    const SVGLayoutInfo& layout_info) {
+  NOT_DESTROYED();
+  DCHECK(NeedsLayout());
+  if (layout_info.viewport_changed && HasViewportDependence() &&
+      IsSVGTransformableContainer()) {
+    // TODO: This will be called if any descendant has a viewport dependency,
+    // not just if this container has one.
+    SetNeedsTransformUpdate();
+  }
+
+  SVGTransformChange transform_change = SVGTransformChange::kNone;
   // Update the local transform in subclasses.
   // At this point our bounding box may be incorrect, so any box relative
   // transforms will be incorrect. Since descendants only require the scaling
   // components to be correct, this should be fine. We update the transform
   // again, if needed, after computing the bounding box below.
-  SVGTransformChange transform_change = CalculateLocalTransform(false);
-  did_screen_scale_factor_change_ =
-      transform_change == SVGTransformChange::kFull ||
-      SVGLayoutSupport::ScreenScaleFactorChanged(Parent());
-
-  // When hasRelativeLengths() is false, no descendants have relative lengths
-  // (hence no one is interested in viewport size changes).
-  bool layout_size_changed =
-      GetElement()->HasRelativeLengths() &&
-      SVGLayoutSupport::LayoutSizeOfNearestViewportChanged(this);
-
-  SVGLayoutSupport::LayoutChildren(FirstChild(), false,
-                                   did_screen_scale_factor_change_,
-                                   layout_size_changed);
-
-  // Invalidate all resources of this client if our layout changed.
-  if (EverHadLayout() && NeedsLayout())
-    SVGResourcesCache::ClientLayoutChanged(*this);
-
-  if (needs_boundaries_update_ ||
-      transform_change != SVGTransformChange::kNone) {
-    UpdateCachedBoundaries();
-    CalculateLocalTransform(needs_boundaries_update_);
-    needs_boundaries_update_ = false;
-
-    // If our bounds changed, notify the parents.
-    LayoutSVGModelObject::SetNeedsBoundariesUpdate();
+  if (needs_transform_update_) {
+    transform_change = UpdateLocalTransform(gfx::RectF());
   }
 
-  DCHECK(!needs_boundaries_update_);
+  SVGLayoutInfo child_layout_info = layout_info;
+  child_layout_info.scale_factor_changed |=
+      transform_change == SVGTransformChange::kFull;
+
+  const SVGLayoutResult content_result = content_.Layout(child_layout_info);
+
+  bool bounds_changed = content_result.bounds_changed;
+  if (UpdateAfterSVGLayout(layout_info, transform_change,
+                           content_result.bounds_changed)) {
+    bounds_changed = true;
+  }
+
+  self_has_viewport_dependence_ =
+      GetElement()->SelfHasRelativeLengths() ||
+      (transform_uses_reference_box_ &&
+       StyleRef().TransformBox() == ETransformBox::kViewBox);
+
+  const bool has_viewport_dependence =
+      content_result.has_viewport_dependence || self_has_viewport_dependence_;
+
+  DCHECK(!needs_transform_update_);
   ClearNeedsLayout();
+  return SVGLayoutResult(bounds_changed, has_viewport_dependence);
+}
+
+bool LayoutSVGContainer::UpdateAfterSVGLayout(
+    const SVGLayoutInfo& layout_info,
+    SVGTransformChange transform_change,
+    bool bbox_changed) {
+  // Invalidate all resources of this client if our reference box changed.
+  if (EverHadLayout() && (SelfNeedsFullLayout() || bbox_changed)) {
+    SVGResourceInvalidator(*this).InvalidateEffects();
+  }
+  if (!needs_transform_update_ && transform_uses_reference_box_) {
+    if (CheckForImplicitTransformChange(layout_info, bbox_changed)) {
+      SetNeedsTransformUpdate();
+    }
+  }
+  if (needs_transform_update_) {
+    const gfx::RectF reference_box =
+        TransformHelper::ComputeReferenceBox(*this);
+    transform_change =
+        std::max(UpdateLocalTransform(reference_box), transform_change);
+    needs_transform_update_ = false;
+  }
+
+  if (!IsSVGHiddenContainer()) {
+    SetTransformAffectsVectorEffect(false);
+    ClearSVGDescendantMayHaveTransformRelatedOperations();
+    for (auto* child = FirstChild(); child; child = child->NextSibling()) {
+      if (child->TransformAffectsVectorEffect())
+        SetTransformAffectsVectorEffect(true);
+      if (child->StyleRef().HasCurrentTransformRelatedAnimation() ||
+          child->SVGDescendantMayHaveTransformRelatedOperations() ||
+          child->StyleRef().HasNonIdentityTransformOperation()) {
+        SetSVGDescendantMayHaveTransformRelatedOperations();
+      }
+    }
+  }
+
+  return transform_change != SVGTransformChange::kNone;
 }
 
 void LayoutSVGContainer::AddChild(LayoutObject* child,
                                   LayoutObject* before_child) {
+  NOT_DESTROYED();
   LayoutSVGModelObject::AddChild(child, before_child);
-  SVGResourcesCache::ClientWasAddedToTree(*child);
 
   bool should_isolate_descendants =
       (child->IsBlendingAllowed() && child->StyleRef().HasBlendMode()) ||
@@ -99,8 +146,10 @@ void LayoutSVGContainer::AddChild(LayoutObject* child,
 }
 
 void LayoutSVGContainer::RemoveChild(LayoutObject* child) {
-  SVGResourcesCache::ClientWillBeRemovedFromTree(*child);
+  NOT_DESTROYED();
   LayoutSVGModelObject::RemoveChild(child);
+
+  content_.MarkBoundsDirtyFromRemovedChild();
 
   bool had_non_isolated_descendants =
       (child->IsBlendingAllowed() && child->StyleRef().HasBlendMode()) ||
@@ -109,40 +158,41 @@ void LayoutSVGContainer::RemoveChild(LayoutObject* child) {
     DescendantIsolationRequirementsChanged(kDescendantIsolationNeedsUpdate);
 }
 
-bool LayoutSVGContainer::SelfWillPaint() const {
-  return SVGLayoutSupport::HasFilterResource(*this);
-}
+void LayoutSVGContainer::StyleDidChange(
+    StyleDifference diff,
+    const ComputedStyle* old_style,
+    const StyleChangeContext& style_change_context) {
+  NOT_DESTROYED();
+  LayoutSVGModelObject::StyleDidChange(diff, old_style, style_change_context);
 
-void LayoutSVGContainer::StyleDidChange(StyleDifference diff,
-                                        const ComputedStyle* old_style) {
-  LayoutSVGModelObject::StyleDidChange(diff, old_style);
+  if (IsSVGHiddenContainer()) {
+    return;
+  }
 
-  bool had_isolation =
-      old_style && !IsSVGHiddenContainer() &&
+  const bool had_isolation =
+      old_style &&
       SVGLayoutSupport::WillIsolateBlendingDescendantsForStyle(*old_style);
+  const bool will_isolate_blending_descendants =
+      SVGLayoutSupport::WillIsolateBlendingDescendantsForStyle(StyleRef());
+  const bool isolation_changed =
+      had_isolation != will_isolate_blending_descendants;
 
-  bool will_isolate_blending_descendants =
-      SVGLayoutSupport::WillIsolateBlendingDescendantsForObject(this);
-
-  bool isolation_changed = had_isolation != will_isolate_blending_descendants;
-
-  if (isolation_changed)
+  if (isolation_changed) {
     SetNeedsPaintPropertyUpdate();
 
-  if (!Parent() || !isolation_changed)
-    return;
-
-  if (HasNonIsolatedBlendingDescendants()) {
-    Parent()->DescendantIsolationRequirementsChanged(
-        will_isolate_blending_descendants ? kDescendantIsolationNeedsUpdate
-                                          : kDescendantIsolationRequired);
+    if (Parent() && HasNonIsolatedBlendingDescendants()) {
+      Parent()->DescendantIsolationRequirementsChanged(
+          will_isolate_blending_descendants ? kDescendantIsolationNeedsUpdate
+                                            : kDescendantIsolationRequired);
+    }
   }
 }
 
 bool LayoutSVGContainer::HasNonIsolatedBlendingDescendants() const {
+  NOT_DESTROYED();
   if (has_non_isolated_blending_descendants_dirty_) {
     has_non_isolated_blending_descendants_ =
-        SVGLayoutSupport::ComputeHasNonIsolatedBlendingDescendants(this);
+        content_.ComputeHasNonIsolatedBlendingDescendants();
     has_non_isolated_blending_descendants_dirty_ = false;
   }
   return has_non_isolated_blending_descendants_;
@@ -150,6 +200,7 @@ bool LayoutSVGContainer::HasNonIsolatedBlendingDescendants() const {
 
 void LayoutSVGContainer::DescendantIsolationRequirementsChanged(
     DescendantIsolationState state) {
+  NOT_DESTROYED();
   switch (state) {
     case kDescendantIsolationRequired:
       has_non_isolated_blending_descendants_ = true;
@@ -161,7 +212,8 @@ void LayoutSVGContainer::DescendantIsolationRequirementsChanged(
       has_non_isolated_blending_descendants_dirty_ = true;
       break;
   }
-  if (SVGLayoutSupport::WillIsolateBlendingDescendantsForObject(this)) {
+  if (!IsSVGHiddenContainer() &&
+      SVGLayoutSupport::WillIsolateBlendingDescendantsForStyle(StyleRef())) {
     SetNeedsPaintPropertyUpdate();
     return;
   }
@@ -170,50 +222,42 @@ void LayoutSVGContainer::DescendantIsolationRequirementsChanged(
 }
 
 void LayoutSVGContainer::Paint(const PaintInfo& paint_info) const {
+  NOT_DESTROYED();
   SVGContainerPainter(*this).Paint(paint_info);
-}
-
-void LayoutSVGContainer::UpdateCachedBoundaries() {
-  auto old_object_bounding_box = object_bounding_box_;
-
-  SVGLayoutSupport::ComputeContainerBoundingBoxes(
-      this, object_bounding_box_, object_bounding_box_valid_,
-      stroke_bounding_box_, local_visual_rect_);
-
-  // Change of object_bounding_box_ may change reference box of resource
-  // effects.
-  if (old_object_bounding_box != object_bounding_box_ &&
-      !IsSVGHiddenContainer() &&
-      SVGResourcesCache::CachedResourcesForLayoutObject(*this))
-    SetShouldDoFullPaintInvalidation();
 }
 
 bool LayoutSVGContainer::NodeAtPoint(HitTestResult& result,
                                      const HitTestLocation& hit_test_location,
                                      const PhysicalOffset& accumulated_offset,
-                                     HitTestAction hit_test_action) {
+                                     HitTestPhase phase) {
+  NOT_DESTROYED();
   DCHECK_EQ(accumulated_offset, PhysicalOffset());
   TransformedHitTestLocation local_location(hit_test_location,
                                             LocalToSVGParentTransform());
   if (!local_location)
     return false;
-  if (!SVGLayoutSupport::IntersectsClipPath(*this, object_bounding_box_,
-                                            *local_location))
+  if (HasClipPath() && !ClipPathClipper::HitTest(*this, *local_location)) {
     return false;
+  }
 
   if (!ChildPaintBlockedByDisplayLock() &&
-      SVGLayoutSupport::HitTestChildren(LastChild(), result, *local_location,
-                                        accumulated_offset, hit_test_action))
+      content_.HitTest(result, *local_location, phase))
     return true;
 
-  // pointer-events: bounding-box makes it possible for containers to be direct
-  // targets.
-  if (StyleRef().PointerEvents() == EPointerEvents::kBoundingBox) {
-    // Check for a valid bounding box because it will be invalid for empty
-    // containers.
-    if (IsObjectBoundingBoxValid() &&
-        local_location->Intersects(ObjectBoundingBox())) {
-      UpdateHitTestResult(result, PhysicalOffset::FromFloatPointRound(
+  if (IsObjectBoundingBoxValid()) {
+    bool is_visual_overflow =
+        result.GetHitTestRequest().IsHitTestVisualOverflow();
+    gfx::RectF bounds = is_visual_overflow
+                            ? SVGLayoutSupport::ApplyFiltersToRect(
+                                  *this, DecoratedBoundingBox())
+                            : ObjectBoundingBox();
+
+    // pointer-events: bounding-box makes it possible for containers to be
+    // direct targets.
+    if ((is_visual_overflow ||
+         StyleRef().UsedPointerEvents() == EPointerEvents::kBoundingBox) &&
+        local_location->Intersects(bounds)) {
+      UpdateHitTestResult(result, PhysicalOffset::FromPointFRound(
                                       local_location->TransformedPoint()));
       if (result.AddNodeToListBasedTestResult(GetElement(), *local_location) ==
           kStopHitTesting)
@@ -226,8 +270,17 @@ bool LayoutSVGContainer::NodeAtPoint(HitTestResult& result,
   return false;
 }
 
-SVGTransformChange LayoutSVGContainer::CalculateLocalTransform(
-    bool bounds_changed) {
+void LayoutSVGContainer::SetNeedsTransformUpdate() {
+  NOT_DESTROYED();
+  // The transform paint property relies on the SVG transform being up-to-date
+  // (see: `FragmentPaintPropertyTreeBuilder::UpdateTransformForSVGChild`).
+  SetNeedsPaintPropertyUpdate();
+  needs_transform_update_ = true;
+}
+
+SVGTransformChange LayoutSVGContainer::UpdateLocalTransform(
+    const gfx::RectF& reference_box) {
+  NOT_DESTROYED();
   return SVGTransformChange::kNone;
 }
 

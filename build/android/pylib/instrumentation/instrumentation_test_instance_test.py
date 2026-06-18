@@ -1,11 +1,12 @@
-#!/usr/bin/env python
-# Copyright 2014 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Unit tests for instrumentation_test_instance."""
 
 # pylint: disable=protected-access
+
 
 import collections
 import tempfile
@@ -21,10 +22,6 @@ _INSTRUMENTATION_TEST_INSTANCE_PATH = (
 
 class InstrumentationTestInstanceTest(unittest.TestCase):
 
-  def setUp(self):
-    options = mock.Mock()
-    options.tool = ''
-
   @staticmethod
   def createTestInstance():
     c = _INSTRUMENTATION_TEST_INSTANCE_PATH % 'InstrumentationTestInstance'
@@ -33,7 +30,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
          mock.patch('%s._initializeDataDependencyAttributes' % c)), (
          mock.patch('%s._initializeTestFilterAttributes' %c)), (
          mock.patch('%s._initializeFlagAttributes' % c)), (
-         mock.patch('%s._initializeDriverAttributes' % c)), (
          mock.patch('%s._initializeTestControlAttributes' % c)), (
          mock.patch('%s._initializeTestCoverageAttributes' % c)), (
          mock.patch('%s._initializeSkiaGoldAttributes' % c)):
@@ -60,36 +56,36 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
     o = self.createTestInstance()
     args = self.createFlagAttributesArgs(command_line_flags=['--foo', '--bar'])
     o._initializeFlagAttributes(args)
-    self.assertEquals(o._flags, ['--enable-test-intents', '--foo', '--bar'])
+    self.assertEqual(o._flags, ['--enable-test-intents', '--foo', '--bar'])
 
   def test_initializeFlagAttributes_deviceFlagsFile(self):
     o = self.createTestInstance()
-    with tempfile.NamedTemporaryFile() as flags_file:
+    with tempfile.NamedTemporaryFile(mode='w') as flags_file:
       flags_file.write('\n'.join(['--foo', '--bar']))
       flags_file.flush()
 
       args = self.createFlagAttributesArgs(device_flags_file=flags_file.name)
       o._initializeFlagAttributes(args)
-      self.assertEquals(o._flags, ['--enable-test-intents', '--foo', '--bar'])
+      self.assertEqual(o._flags, ['--enable-test-intents', '--foo', '--bar'])
 
   def test_initializeFlagAttributes_strictModeOn(self):
     o = self.createTestInstance()
     args = self.createFlagAttributesArgs(strict_mode='on')
     o._initializeFlagAttributes(args)
-    self.assertEquals(o._flags, ['--enable-test-intents', '--strict-mode=on'])
+    self.assertEqual(o._flags, ['--enable-test-intents', '--strict-mode=on'])
 
   def test_initializeFlagAttributes_strictModeOn_coverageOn(self):
     o = self.createTestInstance()
     args = self.createFlagAttributesArgs(
         strict_mode='on', coverage_dir='/coverage/dir')
     o._initializeFlagAttributes(args)
-    self.assertEquals(o._flags, ['--enable-test-intents'])
+    self.assertEqual(o._flags, ['--enable-test-intents'])
 
   def test_initializeFlagAttributes_strictModeOff(self):
     o = self.createTestInstance()
     args = self.createFlagAttributesArgs(strict_mode='off')
     o._initializeFlagAttributes(args)
-    self.assertEquals(o._flags, ['--enable-test-intents'])
+    self.assertEqual(o._flags, ['--enable-test-intents'])
 
   def testGetTests_noFilter(self):
     o = self.createTestInstance()
@@ -130,7 +126,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
         },
         'class': 'org.chromium.test.SampleTest',
         'method': 'testMethod1',
-        'is_junit4': True,
       },
       {
         'annotations': {
@@ -139,7 +134,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
         },
         'class': 'org.chromium.test.SampleTest',
         'method': 'testMethod2',
-        'is_junit4': True,
       },
       {
         'annotations': {
@@ -148,15 +142,13 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
         },
         'class': 'org.chromium.test.SampleTest2',
         'method': 'testMethod1',
-        'is_junit4': True,
       },
     ]
 
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_simpleGtestFilter(self):
     o = self.createTestInstance()
@@ -185,17 +177,148 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'SmallTest': None,
         },
         'class': 'org.chromium.test.SampleTest',
-        'is_junit4': True,
         'method': 'testMethod1',
       },
     ]
 
-    o._test_filter = 'org.chromium.test.SampleTest.testMethod1'
-    o._test_jar = 'path/to/test.jar'
+    o._test_filters = ['org.chromium.test.SampleTest.testMethod1']
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
+
+  def testGetTests_simpleGtestPositiveAndNegativeFilter(self):
+    o = self.createTestInstance()
+    raw_tests = [{
+        'annotations': {
+            'Feature': {
+                'value': ['Foo']
+            }
+        },
+        'class':
+        'org.chromium.test.SampleTest',
+        'superclass':
+        'java.lang.Object',
+        'methods': [
+            {
+                'annotations': {
+                    'SmallTest': None
+                },
+                'method': 'testMethod1',
+            },
+            {
+                'annotations': {
+                    'MediumTest': None
+                },
+                'method': 'testMethod2',
+            },
+        ],
+    }, {
+        'annotations': {
+            'Feature': {
+                'value': ['Foo']
+            }
+        },
+        'class':
+        'org.chromium.test.SampleTest2',
+        'superclass':
+        'java.lang.Object',
+        'methods': [{
+            'annotations': {
+                'SmallTest': None
+            },
+            'method': 'testMethod1',
+        }],
+    }]
+
+    expected_tests = [
+        {
+            'annotations': {
+                'Feature': {
+                    'value': ['Foo']
+                },
+                'SmallTest': None,
+            },
+            'class': 'org.chromium.test.SampleTest',
+            'method': 'testMethod1',
+        },
+    ]
+
+    o._test_filters = [
+        'org.chromium.test.SampleTest.*'\
+          '-org.chromium.test.SampleTest.testMethod2'
+    ]
+    o._junit4_runner_class = 'J4Runner'
+    actual_tests = o.ProcessRawTests(raw_tests)
+
+    self.assertEqual(actual_tests, expected_tests)
+
+  def testGetTests_multipleGtestPositiveAndNegativeFilter(self):
+    o = self.createTestInstance()
+    raw_tests = [{
+        'annotations': {
+            'Feature': {
+                'value': ['Foo']
+            }
+        },
+        'class':
+        'org.chromium.test.SampleTest',
+        'superclass':
+        'java.lang.Object',
+        'methods': [
+            {
+                'annotations': {
+                    'SmallTest': None
+                },
+                'method': 'testMethod1',
+            },
+            {
+                'annotations': {
+                    'MediumTest': None
+                },
+                'method': 'testMethod2',
+            },
+        ],
+    }, {
+        'annotations': {
+            'Feature': {
+                'value': ['Foo']
+            }
+        },
+        'class':
+        'org.chromium.test.SampleTest2',
+        'superclass':
+        'java.lang.Object',
+        'methods': [{
+            'annotations': {
+                'SmallTest': None
+            },
+            'method': 'testMethod1',
+        }],
+    }]
+
+    expected_tests = [
+        {
+            'annotations': {
+                'Feature': {
+                    'value': ['Foo']
+                },
+                'SmallTest': None,
+            },
+            'class': 'org.chromium.test.SampleTest',
+            'method': 'testMethod1',
+        },
+    ]
+
+    o._test_filters = [
+        'org.chromium.test.SampleTest*testMethod1',
+        'org.chromium.test.SampleTest.*'\
+          '-org.chromium.test.SampleTest.testMethod2'
+    ]
+    o._junit4_runner_class = 'J4Runner'
+    actual_tests = o.ProcessRawTests(raw_tests)
+
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_simpleGtestUnqualifiedNameFilter(self):
     o = self.createTestInstance()
@@ -224,17 +347,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'SmallTest': None,
         },
         'class': 'org.chromium.test.SampleTest',
-        'is_junit4': True,
         'method': 'testMethod1',
       },
     ]
 
-    o._test_filter = 'SampleTest.testMethod1'
-    o._test_jar = 'path/to/test.jar'
+    o._test_filters = ['SampleTest.testMethod1']
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_parameterizedTestGtestFilter(self):
     o = self.createTestInstance()
@@ -275,7 +396,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
         },
         'class': 'org.chromium.test.SampleTest',
         'method': 'testMethod1',
-        'is_junit4': True,
       },
       {
         'annotations': {
@@ -284,16 +404,14 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
         },
         'class': 'org.chromium.test.SampleTest',
         'method': 'testMethod1__sandboxed_mode',
-        'is_junit4': True,
       },
     ]
 
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
-    o._test_filter = 'org.chromium.test.SampleTest.testMethod1'
+    o._test_filters = ['org.chromium.test.SampleTest.testMethod1']
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_wildcardGtestFilter(self):
     o = self.createTestInstance()
@@ -333,17 +451,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'SmallTest': None,
         },
         'class': 'org.chromium.test.SampleTest2',
-        'is_junit4': True,
         'method': 'testMethod1',
       },
     ]
 
-    o._test_filter = 'org.chromium.test.SampleTest2.*'
-    o._test_jar = 'path/to/test.jar'
+    o._test_filters = ['org.chromium.test.SampleTest2.*']
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_negativeGtestFilter(self):
     o = self.createTestInstance()
@@ -383,7 +499,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'MediumTest': None,
         },
         'class': 'org.chromium.test.SampleTest',
-        'is_junit4': True,
         'method': 'testMethod2',
       },
       {
@@ -392,17 +507,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'SmallTest': None,
         },
         'class': 'org.chromium.test.SampleTest2',
-        'is_junit4': True,
         'method': 'testMethod1',
       },
     ]
 
-    o._test_filter = '*-org.chromium.test.SampleTest.testMethod1'
-    o._test_jar = 'path/to/test.jar'
+    o._test_filters = ['*-org.chromium.test.SampleTest.testMethod1']
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_annotationFilter(self):
     o = self.createTestInstance()
@@ -442,7 +555,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'SmallTest': None,
         },
         'class': 'org.chromium.test.SampleTest',
-        'is_junit4': True,
         'method': 'testMethod1',
       },
       {
@@ -451,17 +563,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'SmallTest': None,
         },
         'class': 'org.chromium.test.SampleTest2',
-        'is_junit4': True,
         'method': 'testMethod1',
       },
     ]
 
     o._annotations = [('SmallTest', None)]
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_excludedAnnotationFilter(self):
     o = self.createTestInstance()
@@ -503,17 +613,107 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                 'MediumTest': None,
             },
             'class': 'org.chromium.test.SampleTest',
-            'is_junit4': True,
             'method': 'testMethod2',
         },
     ]
 
     o._excluded_annotations = [('SmallTest', None)]
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
+
+  def testGetTests_excludedDoNotReviveAnnotation(self):
+    o = self.createTestInstance()
+    raw_tests = [{
+        'annotations': {
+            'Feature': {
+                'value': ['Foo']
+            }
+        },
+        'class':
+        'org.chromium.test.SampleTest',
+        'superclass':
+        'junit.framework.TestCase',
+        'methods': [
+            {
+                'annotations': {
+                    'DisabledTest': None,
+                    'DoNotRevive': {
+                        'reason': 'sample reason'
+                    },
+                },
+                'method': 'testMethod1',
+            },
+            {
+                'annotations': {
+                    'FlakyTest': None,
+                },
+                'method': 'testMethod2',
+            },
+        ],
+    }, {
+        'annotations': {
+            'Feature': {
+                'value': ['Bar']
+            }
+        },
+        'class':
+        'org.chromium.test.SampleTest2',
+        'superclass':
+        'junit.framework.TestCase',
+        'methods': [
+            {
+                'annotations': {
+                    'FlakyTest': None,
+                    'DoNotRevive': {
+                        'reason': 'sample reason'
+                    },
+                },
+                'method': 'testMethod1',
+            },
+        ],
+    }, {
+        'annotations': {
+            'Feature': {
+                'value': ['Baz']
+            }
+        },
+        'class':
+        'org.chromium.test.SampleTest3',
+        'superclass':
+        'junit.framework.TestCase',
+        'methods': [
+            {
+                'annotations': {
+                    'FlakyTest': None,
+                    'Manual': {
+                        'message': 'sample message'
+                    },
+                },
+                'method': 'testMethod1',
+            },
+        ],
+    }]
+
+    expected_tests = [
+        {
+            'annotations': {
+                'Feature': {
+                    'value': ['Foo']
+                },
+                'FlakyTest': None,
+            },
+            'class': 'org.chromium.test.SampleTest',
+            'method': 'testMethod2',
+        },
+    ]
+
+    o._excluded_annotations = [('DoNotRevive', None), ('Manual', None)]
+    o._junit4_runner_class = 'J4Runner'
+    actual_tests = o.ProcessRawTests(raw_tests)
+
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_annotationSimpleValueFilter(self):
     o = self.createTestInstance()
@@ -565,17 +765,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                 'TestValue': '1',
             },
             'class': 'org.chromium.test.SampleTest',
-            'is_junit4': True,
             'method': 'testMethod1',
         },
     ]
 
     o._annotations = [('TestValue', '1')]
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTests_annotationDictValueFilter(self):
     o = self.createTestInstance()
@@ -615,17 +813,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
           'SmallTest': None,
         },
         'class': 'org.chromium.test.SampleTest2',
-        'is_junit4': True,
         'method': 'testMethod1',
       },
     ]
 
     o._annotations = [('Feature', 'Bar')]
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGetTestName(self):
     test = {
@@ -636,20 +832,17 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                  'timeout': '0'},
                  'UiThreadTest': {}},
       'class': 'org.chromium.TestA',
-      'is_junit4': True,
       'method': 'testSimple'}
     unqualified_class_test = {
       'class': test['class'].split('.')[-1],
       'method': test['method']
     }
 
-    self.assertEquals(
-        instrumentation_test_instance.GetTestName(test, sep='.'),
-        'org.chromium.TestA.testSimple')
-    self.assertEquals(
-        instrumentation_test_instance.GetTestName(
-            unqualified_class_test, sep='.'),
-        'TestA.testSimple')
+    self.assertEqual(instrumentation_test_instance.GetTestName(test, sep='.'),
+                     'org.chromium.TestA.testSimple')
+    self.assertEqual(
+        instrumentation_test_instance.GetTestName(unqualified_class_test,
+                                                  sep='.'), 'TestA.testSimple')
 
   def testGetUniqueTestName(self):
     test = {
@@ -660,14 +853,12 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                  'UiThreadTest': {}},
       'class': 'org.chromium.TestA',
       'flags': ['enable_features=abc'],
-      'is_junit4': True,
       'method': 'testSimple'}
-    self.assertEquals(
-        instrumentation_test_instance.GetUniqueTestName(
-            test, sep='.'),
+    self.assertEqual(
+        instrumentation_test_instance.GetUniqueTestName(test, sep='.'),
         'org.chromium.TestA.testSimple_with_enable_features=abc')
 
-  def testGetTestNameWithoutParameterPostfix(self):
+  def testGetTestNameWithoutParameterSuffix(self):
     test = {
       'annotations': {
         'RunWith': {'value': 'class J4Runner'},
@@ -676,20 +867,17 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                  'UiThreadTest': {}},
       'class': 'org.chromium.TestA__sandbox_mode',
       'flags': 'enable_features=abc',
-      'is_junit4': True,
       'method': 'testSimple'}
     unqualified_class_test = {
       'class': test['class'].split('.')[-1],
       'method': test['method']
     }
-    self.assertEquals(
-        instrumentation_test_instance.GetTestNameWithoutParameterPostfix(
-            test, sep='.'),
-        'org.chromium.TestA')
-    self.assertEquals(
-        instrumentation_test_instance.GetTestNameWithoutParameterPostfix(
-            unqualified_class_test, sep='.'),
-        'TestA')
+    self.assertEqual(
+        instrumentation_test_instance.GetTestNameWithoutParameterSuffix(
+            test, sep='.'), 'org.chromium.TestA')
+    self.assertEqual(
+        instrumentation_test_instance.GetTestNameWithoutParameterSuffix(
+            unqualified_class_test, sep='.'), 'TestA')
 
   def testGetTests_multipleAnnotationValuesRequested(self):
     o = self.createTestInstance()
@@ -734,7 +922,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                 'MediumTest': None,
             },
             'class': 'org.chromium.test.SampleTest',
-            'is_junit4': True,
             'method': 'testMethod2',
         },
         {
@@ -745,17 +932,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                 'SmallTest': None,
             },
             'class': 'org.chromium.test.SampleTest2',
-            'is_junit4': True,
             'method': 'testMethod1',
         },
     ]
 
     o._annotations = [('Feature', 'Bar'), ('Feature', 'Baz')]
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
 
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testGenerateTestResults_noStatus(self):
     results = instrumentation_test_instance.GenerateTestResults(
@@ -778,56 +963,16 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
     self.assertEqual(1, len(results))
     self.assertEqual(base_test_result.ResultType.PASS, results[0].GetType())
 
-  def testGenerateTestResults_testSkipped_true(self):
-    statuses = [
-      (1, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-      (0, {
-        'test_skipped': 'true',
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-      (0, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-    ]
-    results = instrumentation_test_instance.GenerateTestResults(
-        None, None, statuses, 1000, None, None)
-    self.assertEqual(1, len(results))
-    self.assertEqual(base_test_result.ResultType.SKIP, results[0].GetType())
-
-  def testGenerateTestResults_testSkipped_false(self):
-    statuses = [
-      (1, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-      (0, {
-        'test_skipped': 'false',
-      }),
-      (0, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-    ]
-    results = instrumentation_test_instance.GenerateTestResults(
-        None, None, statuses, 1000, None, None)
-    self.assertEqual(1, len(results))
-    self.assertEqual(base_test_result.ResultType.PASS, results[0].GetType())
-
   def testGenerateTestResults_testFailed(self):
     statuses = [
-      (1, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-      (-2, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod',
+        }),
+        (-2, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod',
+        }),
     ]
     results = instrumentation_test_instance.GenerateTestResults(
         None, None, statuses, 1000, None, None)
@@ -837,15 +982,15 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
   def testGenerateTestResults_testUnknownException(self):
     stacktrace = 'long\nstacktrace'
     statuses = [
-      (1, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-      (-1, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-        'stack': stacktrace,
-      }),
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod',
+        }),
+        (-1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod',
+            'stack': stacktrace,
+        }),
     ]
     results = instrumentation_test_instance.GenerateTestResults(
         None, None, statuses, 1000, None, None)
@@ -853,21 +998,94 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
     self.assertEqual(base_test_result.ResultType.FAIL, results[0].GetType())
     self.assertEqual(stacktrace, results[0].GetLog())
 
-  def testGenerateJUnitTestResults_testSkipped_true(self):
+  def testGenerateTestResults_testSkipped_true(self):
     statuses = [
-      (1, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
-      (-3, {
-        'class': 'test.package.TestClass',
-        'test': 'testMethod',
-      }),
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod',
+        }),
+        (-3, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod',
+        }),
     ]
     results = instrumentation_test_instance.GenerateTestResults(
         None, None, statuses, 1000, None, None)
     self.assertEqual(1, len(results))
     self.assertEqual(base_test_result.ResultType.SKIP, results[0].GetType())
+
+  def testGenerateTestResults_beforeClassFailure(self):
+    stacktrace = 'long\nstacktrace'
+    statuses = [
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'null',
+        }),
+        (-2, {
+            'class': 'test.package.TestClass',
+            'test': 'null',
+            'stack': stacktrace,
+        }),
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod1',
+        }),
+        (0, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod1',
+        }),
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod2',
+        }),
+        (0, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod2',
+        }),
+    ]
+    results = instrumentation_test_instance.GenerateTestResults(
+        None, None, statuses, 1000, None, None)
+    self.assertEqual(2, len(results))
+    self.assertEqual(base_test_result.ResultType.FAIL, results[0].GetType())
+    self.assertEqual(base_test_result.ResultType.FAIL, results[1].GetType())
+    self.assertEqual(stacktrace, results[0].GetLog())
+    self.assertEqual(stacktrace, results[1].GetLog())
+
+  def testGenerateTestResults_afterClassFailure(self):
+    stacktrace = 'long\nstacktrace'
+    statuses = [
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod1',
+        }),
+        (0, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod1',
+        }),
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod2',
+        }),
+        (-3, {
+            'class': 'test.package.TestClass',
+            'test': 'testMethod2',
+        }),
+        (1, {
+            'class': 'test.package.TestClass',
+            'test': 'null',
+        }),
+        (-2, {
+            'class': 'test.package.TestClass',
+            'test': 'null',
+            'stack': stacktrace,
+        }),
+    ]
+    results = instrumentation_test_instance.GenerateTestResults(
+        None, None, statuses, 1000, None, None)
+    self.assertEqual(2, len(results))
+    self.assertEqual(base_test_result.ResultType.FAIL, results[0].GetType())
+    self.assertEqual(base_test_result.ResultType.SKIP, results[1].GetType())
+    self.assertEqual(stacktrace, results[0].GetLog())
 
   def testParameterizedCommandLineFlagsSwitches(self):
     o = self.createTestInstance()
@@ -921,26 +1139,22 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
             'flags': ['--enable-features=abc', '--enable-features=def'],
-            'is_junit4': True,
             'method': 'testMethod1'
         },
         {
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
             'flags': ['--enable-features=ghi', '--enable-features=jkl'],
-            'is_junit4': True,
             'method': 'testMethod2'
         },
         {
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
-            'is_junit4': True,
             'method': 'testMethod3'
         },
         {
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
-            'is_junit4': True,
             'method': 'testMethod4'
         },
     ]
@@ -949,10 +1163,9 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
       expected_tests[i]['annotations'].update(
           raw_tests[0]['methods'][i]['annotations'])
 
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testParameterizedCommandLineFlags(self):
     o = self.createTestInstance()
@@ -1028,26 +1241,22 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
             'class': 'org.chromium.test.SampleTest',
             'flags':
             ['--enable-features=abc', '--force-fieldtrials=trial/group'],
-            'is_junit4': True,
             'method': 'testMethod1'
         },
         {
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
             'flags': ['--enable-features=def'],
-            'is_junit4': True,
             'method': 'testMethod2'
         },
         {
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
-            'is_junit4': True,
             'method': 'testMethod3'
         },
         {
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
-            'is_junit4': True,
             'method': 'testMethod4'
         },
         {
@@ -1058,8 +1267,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
                 '--enable-features=abc2',
                 '--force-fieldtrials=trial/group2',
             ],
-            'is_junit4':
-            True,
             'method':
             'testMethod1'
         },
@@ -1072,10 +1279,9 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
     expected_tests[4]['annotations'].update(
         raw_tests[0]['methods'][0]['annotations'])
 
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testDifferentCommandLineParameterizations(self):
     o = self.createTestInstance()
@@ -1118,14 +1324,12 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
             'flags': ['--a1', '--a2'],
-            'is_junit4': True,
             'method': 'testMethod2'
         },
         {
             'annotations': {},
             'class': 'org.chromium.test.SampleTest',
             'flags': ['--b1', '--b2'],
-            'is_junit4': True,
             'method': 'testMethod3'
         },
     ]
@@ -1133,10 +1337,9 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
       expected_tests[i]['annotations'].update(
           raw_tests[0]['methods'][i]['annotations'])
 
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     actual_tests = o.ProcessRawTests(raw_tests)
-    self.assertEquals(actual_tests, expected_tests)
+    self.assertEqual(actual_tests, expected_tests)
 
   def testMultipleCommandLineParameterizations_raises(self):
     o = self.createTestInstance()
@@ -1177,7 +1380,6 @@ class InstrumentationTestInstanceTest(unittest.TestCase):
         },
     ]
 
-    o._test_jar = 'path/to/test.jar'
     o._junit4_runner_class = 'J4Runner'
     self.assertRaises(
         instrumentation_test_instance.CommandLineParameterizationException,

@@ -30,6 +30,7 @@ import optparse
 import unittest
 
 from blinkpy.common.system.system_host_mock import MockSystemHost
+from blinkpy.web_tests.command_line import command_wrapper
 from blinkpy.web_tests.port.base import Port
 from blinkpy.web_tests.port.driver import Driver
 from blinkpy.web_tests.port.driver import coalesce_repeated_switches
@@ -40,19 +41,19 @@ class DriverTest(unittest.TestCase):
 
     # pylint: disable=protected-access
 
-    def make_port(self):
-        return Port(MockSystemHost(), 'test',
-                    optparse.Values({
-                        'configuration': 'Release'
-                    }))
+    def make_port(self, **extra_options):
+        return Port(
+            MockSystemHost(), 'test',
+            optparse.Values({
+                'configuration': 'Release',
+                **extra_options,
+            }))
 
     def _assert_wrapper(self, wrapper_string, expected_wrapper):
-        wrapper = Driver(self.make_port(),
-                         None)._command_wrapper(wrapper_string)
+        wrapper = command_wrapper(wrapper_string)
         self.assertEqual(wrapper, expected_wrapper)
 
     def test_command_wrapper(self):
-        self._assert_wrapper(None, [])
         self._assert_wrapper('valgrind', ['valgrind'])
 
         # Validate that shlex works as expected.
@@ -144,53 +145,53 @@ class DriverTest(unittest.TestCase):
         port = self.make_port()
         driver = Driver(port, 0)
         driver._server_process = MockServerProcess(lines=[
-            'ActualHash: foobar',
-            'Content-Type: my_type',
-            'Content-Transfer-Encoding: none',
-            '#EOF',
+            b'ActualHash: foobar',
+            b'Content-Type: my_type',
+            b'Content-Transfer-Encoding: none',
+            b'#EOF',
         ])
         content_block = driver._read_block(0)
-        self.assertEqual(content_block.content, '')
-        self.assertEqual(content_block.content_type, 'my_type')
-        self.assertEqual(content_block.encoding, 'none')
-        self.assertEqual(content_block.content_hash, 'foobar')
+        self.assertEqual(content_block.content, b'')
+        self.assertEqual(content_block.content_type, b'my_type')
+        self.assertEqual(content_block.encoding, b'none')
+        self.assertEqual(content_block.content_hash, b'foobar')
         driver._server_process = None
 
     def test_read_binary_block(self):
         port = self.make_port()
         driver = Driver(port, 0)
         driver._server_process = MockServerProcess(lines=[
-            'ActualHash: actual',
-            'ExpectedHash: expected',
-            'Content-Type: image/png',
-            'Content-Length: 9',
-            '12345678',
-            '#EOF',
+            b'ActualHash: actual',
+            b'ExpectedHash: expected',
+            b'Content-Type: image/png',
+            b'Content-Length: 9',
+            b'12345678',
+            b'#EOF',
         ])
         content_block = driver._read_block(0)
-        self.assertEqual(content_block.content_type, 'image/png')
-        self.assertEqual(content_block.content_hash, 'actual')
-        self.assertEqual(content_block.content, '12345678\n')
-        self.assertEqual(content_block.decoded_content, '12345678\n')
+        self.assertEqual(content_block.content_type, b'image/png')
+        self.assertEqual(content_block.content_hash, b'actual')
+        self.assertEqual(content_block.content, b'12345678\n')
+        self.assertEqual(content_block.decoded_content, b'12345678\n')
         driver._server_process = None
 
     def test_read_base64_block(self):
         port = self.make_port()
         driver = Driver(port, 0)
         driver._server_process = MockServerProcess(lines=[
-            'ActualHash: actual',
-            'ExpectedHash: expected',
-            'Content-Type: image/png',
-            'Content-Transfer-Encoding: base64',
-            'Content-Length: 12',
-            'MTIzNDU2NzgK#EOF',
+            b'ActualHash: actual',
+            b'ExpectedHash: expected',
+            b'Content-Type: image/png',
+            b'Content-Transfer-Encoding: base64',
+            b'Content-Length: 12',
+            b'MTIzNDU2NzgK#EOF',
         ])
         content_block = driver._read_block(0)
-        self.assertEqual(content_block.content_type, 'image/png')
-        self.assertEqual(content_block.content_hash, 'actual')
-        self.assertEqual(content_block.encoding, 'base64')
-        self.assertEqual(content_block.content, 'MTIzNDU2NzgK')
-        self.assertEqual(content_block.decoded_content, '12345678\n')
+        self.assertEqual(content_block.content_type, b'image/png')
+        self.assertEqual(content_block.content_hash, b'actual')
+        self.assertEqual(content_block.encoding, b'base64')
+        self.assertEqual(content_block.content, b'MTIzNDU2NzgK')
+        self.assertEqual(content_block.decoded_content, b'12345678\n')
 
     def test_no_timeout(self):
         port = self.make_port()
@@ -200,6 +201,14 @@ class DriverTest(unittest.TestCase):
                          '/mock-checkout/out/Release/content_shell')
         self.assertEqual(cmd_line[-1], '-')
         self.assertIn('--no-timeout', cmd_line)
+
+    def test_disable_system_font_check(self):
+        port = self.make_port()
+        driver = Driver(port, 0)
+        self.assertNotIn('--disable-system-font-check', driver.cmd_line([]))
+        port = self.make_port(nocheck_sys_deps=True)
+        driver = Driver(port, 0)
+        self.assertIn('--disable-system-font-check', driver.cmd_line([]))
 
     def test_check_for_driver_crash(self):
         port = self.make_port()
@@ -218,7 +227,10 @@ class DriverTest(unittest.TestCase):
             def has_crashed(self):
                 return self.crashed
 
-            def stop(self, timeout=0.0):
+            def stop(self,
+                     timeout_secs=0.0,
+                     kill_tree=True,
+                     send_sigterm=False):
                 pass
 
         def assert_crash(driver,

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,10 @@ import android.os.Handler;
 
 import org.chromium.base.Callback;
 import org.chromium.base.ThreadUtils;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.tab.Tab;
 
-import java.util.LinkedList;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 
@@ -23,6 +24,7 @@ import java.util.concurrent.Callable;
  * If a capture has not been taken after a long amount of time or when the Tab is hidden, we also
  * capture.
  */
+@NullMarked
 public class NavigationInfoCaptureTrigger {
     private static final int ONLOAD_DELAY_MS = 1000;
     private static final int ONLOAD_LONG_DELAY_MS = 15000;
@@ -31,7 +33,7 @@ public class NavigationInfoCaptureTrigger {
 
     private final Callback<Tab> mCapture;
     private final Handler mUiThreadHandler = new Handler(ThreadUtils.getUiThreadLooper());
-    private final List<Runnable> mPendingRunnables = new LinkedList<>();
+    private final List<Runnable> mPendingRunnables = new ArrayList<>();
 
     private boolean mOnloadTriggered;
     private boolean mFirstMeaningfulPaintTriggered;
@@ -67,8 +69,17 @@ public class NavigationInfoCaptureTrigger {
         captureDelayed(tab, ONHIDE_DELAY_MS);
     }
 
+    /**
+     * Cancels any pending capture Runnables. Should be called when the owning Tab/Activity is being
+     * destroyed to prevent the queued Runnables (which strongly reference {@link Tab} and therefore
+     * the owning Activity) from leaking the Activity until the delay elapses.
+     */
+    public void destroy() {
+        clearPendingRunnables();
+    }
+
     private void clearPendingRunnables() {
-        for (Runnable pendingRunnable: mPendingRunnables) {
+        for (Runnable pendingRunnable : mPendingRunnables) {
             mUiThreadHandler.removeCallbacks(pendingRunnable);
         }
         mPendingRunnables.clear();

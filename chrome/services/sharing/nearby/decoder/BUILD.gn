@@ -1,8 +1,10 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//testing/libfuzzer/fuzzer_test.gni")
+
+assert(is_chromeos)
 
 source_set("decoder") {
   sources = [
@@ -12,11 +14,13 @@ source_set("decoder") {
     "nearby_decoder.h",
   ]
 
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
   public_deps = [
     "//base",
     "//chrome/services/sharing/public/cpp",
-    "//chrome/services/sharing/public/mojom",
     "//chrome/services/sharing/public/proto",
+    "//chromeos/ash/services/nearby/public/mojom",
     "//mojo/public/cpp/bindings",
   ]
 }
@@ -43,6 +47,7 @@ fuzzer_test("nearby_decoder_decode_advertisement_fuzzer") {
     ":decoder",
     "//base",
     "//mojo/core/embedder",
+    "//testing/libfuzzer:libfuzzer_base_wrappers",
   ]
 }
 
@@ -52,5 +57,6 @@ fuzzer_test("nearby_decoder_decode_frame_fuzzer") {
     ":decoder",
     "//base",
     "//mojo/core/embedder",
+    "//testing/libfuzzer:libfuzzer_base_wrappers",
   ]
 }

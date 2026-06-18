@@ -1,31 +1,36 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "sandbox/policy/mac/sandbox_mac.h"
+
 #import <Cocoa/Cocoa.h>
 #import <Foundation/Foundation.h>
+#include <fcntl.h>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/apple/foundation_util.h"
+#include "base/apple/scoped_cftyperef.h"
 #include "base/command_line.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/mac/mac_util.h"
-#include "base/mac/scoped_cftyperef.h"
+#include "base/memory/read_only_shared_memory_region.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/shared_memory_mapping.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/process/kill.h"
+#include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/multiprocess_test.h"
 #include "base/test/test_timeouts.h"
 #include "content/browser/sandbox_parameters_mac.h"
-#include "content/common/mac/font_loader.h"
-#include "crypto/openssl_util.h"
+#include "sandbox/mac/sandbox_serializer.h"
 #include "sandbox/mac/seatbelt.h"
 #include "sandbox/mac/seatbelt_exec.h"
-#include "sandbox/policy/mac/sandbox_mac.h"
+#include "sandbox/policy/mojom/sandbox.mojom.h"
 #include "sandbox/policy/switches.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/multiprocess_func_list.h"
@@ -54,24 +59,28 @@ class SandboxMacTest : public base::MultiProcessTest {
   }
 
   void ExecuteWithParams(const std::string& procname,
-                         sandbox::policy::SandboxType sandbox_type) {
+                         sandbox::mojom::Sandbox sandbox_type) {
     std::string profile =
-        sandbox::policy::SandboxMac::GetSandboxProfile(sandbox_type) +
-        kTempDirSuffix;
-    sandbox::SeatbeltExecClient client;
-    client.SetProfile(profile);
-    SetupSandboxParameters(sandbox_type,
-                           *base::CommandLine::ForCurrentProcess(), &client);
+        sandbox::policy::GetSandboxProfile(sandbox_type) + kTempDirSuffix;
+    sandbox::SandboxSerializer serializer(
+        sandbox::SandboxSerializer::Target::kSource);
 
+    serializer.SetProfile(profile);
+    SetupSandboxParameters(
+        sandbox_type, *base::CommandLine::ForCurrentProcess(), &serializer);
+    std::string error, serialized;
+    CHECK(serializer.SerializePolicy(serialized, error)) << error;
+
+    sandbox::SeatbeltExecClient client;
     pipe_ = client.GetReadFD();
     ASSERT_GE(pipe_, 0);
 
     base::LaunchOptions options;
-    options.fds_to_remap.push_back(std::make_pair(pipe_, pipe_));
+    options.fds_to_remap.emplace_back(pipe_, pipe_);
 
     base::Process process = SpawnChildWithOptions(procname, options);
     ASSERT_TRUE(process.IsValid());
-    ASSERT_TRUE(client.SendProfile());
+    ASSERT_TRUE(client.SendPolicy(serialized));
 
     int rv = -1;
     ASSERT_TRUE(base::WaitForMultiprocessTestChildExit(
@@ -81,15 +90,16 @@ class SandboxMacTest : public base::MultiProcessTest {
 
   void ExecuteInAllSandboxTypes(const std::string& multiprocess_main,
                                 base::RepeatingClosure after_each) {
-    constexpr sandbox::policy::SandboxType kSandboxTypes[] = {
-        sandbox::policy::SandboxType::kAudio,
-        sandbox::policy::SandboxType::kCdm,
-        sandbox::policy::SandboxType::kGpu,
-        sandbox::policy::SandboxType::kNaClLoader,
-        sandbox::policy::SandboxType::kPpapi,
-        sandbox::policy::SandboxType::kPrintCompositor,
-        sandbox::policy::SandboxType::kRenderer,
-        sandbox::policy::SandboxType::kUtility,
+    constexpr sandbox::mojom::Sandbox kSandboxTypes[] = {
+        sandbox::mojom::Sandbox::kAudio,
+        sandbox::mojom::Sandbox::kCdm,
+        sandbox::mojom::Sandbox::kGpu,
+        sandbox::mojom::Sandbox::kPrintBackend,
+        sandbox::mojom::Sandbox::kPrintCompositor,
+        sandbox::mojom::Sandbox::kRenderer,
+        sandbox::mojom::Sandbox::kService,
+        sandbox::mojom::Sandbox::kServiceWithJit,
+        sandbox::mojom::Sandbox::kUtility,
     };
 
     for (const auto type : kSandboxTypes) {
@@ -141,8 +151,7 @@ MULTIPROCESS_TEST_MAIN(RendererWriteProcess) {
 }
 
 TEST_F(SandboxMacTest, RendererCannotWriteHomeDir) {
-  ExecuteWithParams("RendererWriteProcess",
-                    sandbox::policy::SandboxType::kRenderer);
+  ExecuteWithParams("RendererWriteProcess", sandbox::mojom::Sandbox::kRenderer);
 }
 
 MULTIPROCESS_TEST_MAIN(ClipboardAccessProcess) {
@@ -152,7 +161,7 @@ MULTIPROCESS_TEST_MAIN(ClipboardAccessProcess) {
   CHECK(!pasteboard_name.empty());
   CHECK([NSPasteboard pasteboardWithName:base::SysUTF8ToNSString(
                                              pasteboard_name)] == nil);
-  CHECK([NSPasteboard generalPasteboard] == nil);
+  CHECK(NSPasteboard.generalPasteboard == nil);
 
   return 0;
 }
@@ -160,9 +169,9 @@ MULTIPROCESS_TEST_MAIN(ClipboardAccessProcess) {
 TEST_F(SandboxMacTest, ClipboardAccess) {
   scoped_refptr<ui::UniquePasteboard> pb = new ui::UniquePasteboard;
   ASSERT_TRUE(pb->get());
-  EXPECT_EQ([[pb->get() types] count], 0U);
+  EXPECT_EQ(pb->get().types.count, 0U);
 
-  extra_data_ = base::SysNSStringToUTF8([pb->get() name]);
+  extra_data_ = base::SysNSStringToUTF8(pb->get().name);
 
   ExecuteInAllSandboxTypes("ClipboardAccessProcess",
                            base::BindRepeating(
@@ -175,7 +184,6 @@ TEST_F(SandboxMacTest, ClipboardAccess) {
 MULTIPROCESS_TEST_MAIN(SSLProcess) {
   CheckCreateSeatbeltServer();
 
-  crypto::EnsureOpenSSLInit();
   // Ensure that RAND_bytes is functional within the sandbox.
   uint8_t byte;
   CHECK(RAND_bytes(&byte, 1) == 1);
@@ -186,92 +194,15 @@ TEST_F(SandboxMacTest, SSLInitTest) {
   ExecuteInAllSandboxTypes("SSLProcess", base::RepeatingClosure());
 }
 
-MULTIPROCESS_TEST_MAIN(FontLoadingProcess) {
-  // Create a shared memory handle to mimic what the browser process does.
-  std::string font_file_path = GetExtraDataValue();
-  CHECK(!font_file_path.empty());
-
-  std::string font_data;
-  CHECK(base::ReadFileToString(base::FilePath(font_file_path), &font_data));
-
-  size_t font_data_length = font_data.length();
-  CHECK(font_data_length > 0);
-
-  auto font_shmem = mojo::SharedBufferHandle::Create(font_data_length);
-  CHECK(font_shmem.is_valid());
-
-  mojo::ScopedSharedBufferMapping mapping = font_shmem->Map(font_data_length);
-  CHECK(mapping);
-
-  memcpy(mapping.get(), font_data.c_str(), font_data_length);
-
-  // Now init the sandbox.
-  CheckCreateSeatbeltServer();
-
-  mojo::ScopedSharedBufferHandle shmem_handle =
-      font_shmem->Clone(mojo::SharedBufferHandle::AccessMode::READ_ONLY);
-  CHECK(shmem_handle.is_valid());
-
-  base::ScopedCFTypeRef<CTFontDescriptorRef> data_descriptor;
-  CHECK(FontLoader::CTFontDescriptorFromBuffer(
-      std::move(shmem_handle), font_data_length, &data_descriptor));
-  CHECK(data_descriptor);
-
-  base::ScopedCFTypeRef<CTFontRef> sized_ctfont(
-      CTFontCreateWithFontDescriptor(data_descriptor.get(), 16.0, nullptr));
-  CHECK(sized_ctfont);
-
-  // Do something with the font to make sure it's loaded.
-  CGFloat cap_height = CTFontGetCapHeight(sized_ctfont);
-  CHECK(cap_height > 0.0);
-
-  return 0;
-}
-
-TEST_F(SandboxMacTest, FontLoadingTest) {
-  base::FilePath temp_file_path;
-  base::ScopedFILE temp_file =
-      base::CreateAndOpenTemporaryStream(&temp_file_path);
-  ASSERT_TRUE(temp_file);
-
-  std::unique_ptr<FontLoader::ResultInternal> result =
-      FontLoader::LoadFontForTesting(base::ASCIIToUTF16("Geeza Pro"), 16);
-  ASSERT_TRUE(result);
-  ASSERT_TRUE(result->font_data.is_valid());
-  uint64_t font_data_size = result->font_data->GetSize();
-  EXPECT_GT(font_data_size, 0U);
-  EXPECT_GT(result->font_id, 0U);
-
-  mojo::ScopedSharedBufferMapping mapping =
-      result->font_data->Map(font_data_size);
-  ASSERT_TRUE(mapping);
-
-  base::WriteFileDescriptor(fileno(temp_file.get()),
-                            static_cast<const char*>(mapping.get()),
-                            font_data_size);
-
-  extra_data_ = temp_file_path.value();
-  ExecuteWithParams("FontLoadingProcess",
-                    sandbox::policy::SandboxType::kRenderer);
-  temp_file.reset();
-  ASSERT_TRUE(base::DeleteFile(temp_file_path));
-}
-
+// This test checks to make sure that `__builtin_available()` (and therefore the
+// Objective-C equivalent `@available()`) work within a sandbox. When revving
+// the macOS releases supported by Chromium, bump this up. This value
+// specifically matches the oldest macOS release supported by Chromium.
 MULTIPROCESS_TEST_MAIN(BuiltinAvailable) {
   CheckCreateSeatbeltServer();
 
-  if (__builtin_available(macOS 10.10, *)) {
-    // Can't negate a __builtin_available condition. But success!
-  } else {
-    return 10;
-  }
-
-  if (base::mac::IsAtLeastOS10_13()) {
-    if (__builtin_available(macOS 10.13, *)) {
-      // Can't negate a __builtin_available condition. But success!
-    } else {
-      return 13;
-    }
+  if (!__builtin_available(macOS 13, *)) {
+    return 15;
   }
 
   return 0;
@@ -279,6 +210,38 @@ MULTIPROCESS_TEST_MAIN(BuiltinAvailable) {
 
 TEST_F(SandboxMacTest, BuiltinAvailable) {
   ExecuteInAllSandboxTypes("BuiltinAvailable", {});
+}
+
+MULTIPROCESS_TEST_MAIN(NetworkProcessPrefs) {
+  CheckCreateSeatbeltServer();
+
+  const std::string kBundleId(base::apple::BaseBundleID());
+  const std::string kUserName = base::SysNSStringToUTF8(NSUserName());
+  const std::vector<std::string> kPaths = {
+      "/Library/Managed Preferences/.GlobalPreferences.plist",
+      base::StrCat({"/Library/Managed Preferences/", kBundleId, ".plist"}),
+      base::StrCat({"/Library/Managed Preferences/", kUserName,
+                    "/.GlobalPreferences.plist"}),
+      base::StrCat({"/Library/Managed Preferences/", kUserName, "/", kBundleId,
+                    ".plist"}),
+      base::StrCat({"/Library/Preferences/", kBundleId, ".plist"}),
+      base::StrCat({"/Users/", kUserName,
+                    "/Library/Preferences/com.apple.security.plist"}),
+      base::StrCat(
+          {"/Users/", kUserName, "/Library/Preferences/", kBundleId, ".plist"}),
+  };
+
+  for (const auto& path : kPaths) {
+    // Use open rather than stat to test file-read-data rules.
+    base::ScopedFD fd(open(path.c_str(), O_RDONLY));
+    PCHECK(fd.is_valid() || errno == ENOENT) << path;
+  }
+
+  return 0;
+}
+
+TEST_F(SandboxMacTest, NetworkProcessPrefs) {
+  ExecuteWithParams("NetworkProcessPrefs", sandbox::mojom::Sandbox::kNetwork);
 }
 
 }  // namespace content

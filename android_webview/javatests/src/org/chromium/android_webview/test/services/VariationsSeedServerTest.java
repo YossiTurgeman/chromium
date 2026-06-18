@@ -1,10 +1,10 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.android_webview.test.services;
 
-import static org.chromium.android_webview.test.OnlyRunIn.ProcessMode.SINGLE_PROCESS;
+import static org.chromium.android_webview.test.OnlyRunIn.ProcessMode.EITHER_PROCESS;
 
 import android.content.Context;
 import android.content.Intent;
@@ -37,15 +37,16 @@ import java.io.IOException;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Test VariationsSeedServer.
+ * Test VariationsSeedServer. These tests are not batched to make sure all unbinded services are
+ * properly killed between tests.
  */
 @RunWith(AwJUnit4ClassRunner.class)
-@OnlyRunIn(SINGLE_PROCESS)
+@OnlyRunIn(EITHER_PROCESS) // These tests don't use the renderer process
 public class VariationsSeedServerTest {
     private File mTempFile;
 
-    private class StubSeedServerCallback extends IVariationsSeedServerCallback.Stub {
-        public CallbackHelper helper = new CallbackHelper();
+    private static class StubSeedServerCallback extends IVariationsSeedServerCallback.Stub {
+        public final CallbackHelper helper = new CallbackHelper();
         public Bundle metrics;
 
         @Override
@@ -70,15 +71,15 @@ public class VariationsSeedServerTest {
     public void testGetSeed() throws FileNotFoundException, RemoteException {
         final ParcelFileDescriptor file =
                 ParcelFileDescriptor.open(mTempFile, ParcelFileDescriptor.MODE_WRITE_ONLY);
-        Intent intent = new Intent(
-                ContextUtils.getApplicationContext(), VariationsSeedServer.class);
+        Intent intent =
+                new Intent(ContextUtils.getApplicationContext(), VariationsSeedServer.class);
         try (ServiceConnectionHelper helper =
-                        new ServiceConnectionHelper(intent, Context.BIND_AUTO_CREATE)) {
+                new ServiceConnectionHelper(intent, Context.BIND_AUTO_CREATE)) {
             IVariationsSeedServer service =
                     IVariationsSeedServer.Stub.asInterface(helper.getBinder());
             // TODO(paulmiller): Test with various oldSeedDate values, after
             // VariationsSeedServer can write actual seeds (with actual date values).
-            service.getSeed(file, /*oldSeedDate=*/0, new StubSeedServerCallback());
+            service.getSeed(file, /* oldSeedDate= */ 0, new StubSeedServerCallback());
         }
     }
 
@@ -92,28 +93,27 @@ public class VariationsSeedServerTest {
         Context context = ContextUtils.getApplicationContext();
         VariationsServiceMetricsHelper initialMetrics =
                 VariationsServiceMetricsHelper.fromBundle(new Bundle());
-        initialMetrics.setSeedFetchResult(200); // HTTP_OK
-        initialMetrics.setSeedFetchTime(50);
         initialMetrics.setJobInterval(6000);
         initialMetrics.setJobQueueTime(1000);
         initialMetrics.setLastEnqueueTime(4);
         initialMetrics.setLastJobStartTime(7);
-        Assert.assertTrue("Failed to write initial variations SharedPreferences",
+        Assert.assertTrue(
+                "Failed to write initial variations SharedPreferences",
                 initialMetrics.writeMetricsToVariationsSharedPreferences(context));
 
         VariationsSeedServer server = new VariationsSeedServer();
         IBinder binder = server.onBind(null);
         StubSeedServerCallback callback = new StubSeedServerCallback();
-        IVariationsSeedServer.Stub.asInterface(binder).getSeed(
-                ParcelFileDescriptor.open(mTempFile, ParcelFileDescriptor.MODE_WRITE_ONLY),
-                /*oldSeedDate=*/0, callback);
+        IVariationsSeedServer.Stub.asInterface(binder)
+                .getSeed(
+                        ParcelFileDescriptor.open(mTempFile, ParcelFileDescriptor.MODE_WRITE_ONLY),
+                        /* oldSeedDate= */ 0,
+                        callback);
 
         callback.helper.waitForCallback(
                 "Timed out waiting for reportSeedMetrics() to be called", 0);
         VariationsServiceMetricsHelper metrics =
                 VariationsServiceMetricsHelper.fromBundle(callback.metrics);
-        Assert.assertEquals(200, metrics.getSeedFetchResult());
-        Assert.assertEquals(50, metrics.getSeedFetchTime());
         Assert.assertEquals(6000, metrics.getJobInterval());
         Assert.assertEquals(1000, metrics.getJobQueueTime());
     }

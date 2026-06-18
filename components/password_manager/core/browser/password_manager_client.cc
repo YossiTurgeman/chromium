@@ -1,14 +1,22 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/password_manager/core/browser/password_manager_client.h"
+
 #include <utility>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/notimplemented.h"
+#include "components/autofill/core/common/password_generation_util.h"
+#include "components/device_reauth/device_authenticator.h"
+#include "components/password_manager/core/browser/field_info_manager.h"
 #include "components/password_manager/core/browser/http_auth_manager.h"
+#include "components/password_manager/core/browser/leak_detection/leak_detection_request_utils.h"
 #include "components/password_manager/core/browser/password_form_manager_for_ui.h"
-#include "components/password_manager/core/browser/password_manager_client.h"
+#include "components/password_manager/core/browser/password_store/stored_credential.h"
 #include "components/signin/public/base/signin_metrics.h"
+#include "components/version_info/channel.h"
 #include "url/origin.h"
 
 namespace password_manager {
@@ -21,59 +29,59 @@ bool PasswordManagerClient::IsFillingEnabled(const GURL& url) const {
   return true;
 }
 
-bool PasswordManagerClient::IsFillingFallbackEnabled(const GURL& url) const {
-  return true;
-}
-
-bool PasswordManagerClient::RequiresReauthToFill() {
+bool PasswordManagerClient::IsFieldFilledWithOtp(
+    autofill::FormGlobalId form_id,
+    autofill::FieldGlobalId field_id) {
   return false;
 }
 
-void PasswordManagerClient::ShowTouchToFill(PasswordManagerDriver* driver) {}
+bool PasswordManagerClient::IsAutoSignInEnabled() const {
+  return false;
+}
 
-BiometricAuthenticator* PasswordManagerClient::GetBiometricAuthenticator() {
+#if BUILDFLAG(IS_ANDROID)
+void PasswordManagerClient::ShowPasswordManagerErrorMessage(
+    ErrorMessageFlowType flow_type,
+    password_manager::PasswordStoreBackendErrorType error_type) {}
+
+void PasswordManagerClient::ShowKeyboardReplacingSurface(
+    PasswordManagerDriver* driver,
+    const autofill::PasswordSuggestionRequest& request) {}
+#endif
+
+bool PasswordManagerClient::IsReauthBeforeFillingRequired(
+    device_reauth::DeviceAuthenticator*) {
+  return false;
+}
+
+std::unique_ptr<device_reauth::DeviceAuthenticator>
+PasswordManagerClient::GetDeviceAuthenticator() {
   return nullptr;
 }
 
-void PasswordManagerClient::GeneratePassword() {}
+void PasswordManagerClient::GeneratePassword(
+    autofill::password_generation::PasswordGenerationType type) {}
 
 void PasswordManagerClient::UpdateCredentialCache(
     const url::Origin& origin,
-    const std::vector<const autofill::PasswordForm*>& best_matches,
-    bool is_blacklisted) {}
+    base::span<const PasswordForm> best_matches,
+    bool is_blocklisted,
+    std::optional<PasswordStoreBackendError> backend_error) {}
 
 void PasswordManagerClient::PasswordWasAutofilled(
-    const std::vector<const autofill::PasswordForm*>& best_matches,
+    base::span<const StoredCredential> best_matches,
     const url::Origin& origin,
-    const std::vector<const autofill::PasswordForm*>* federated_matches) {}
+    base::span<const StoredCredential> federated_matches,
+    bool was_autofilled_on_pageload) {}
 
 void PasswordManagerClient::AutofillHttpAuth(
-    const autofill::PasswordForm& preferred_match,
+    const PasswordForm& preferred_match,
     const PasswordFormManagerForUI* form_manager) {}
 
 void PasswordManagerClient::NotifyUserCredentialsWereLeaked(
-    password_manager::CredentialLeakType leak_type,
-    password_manager::CompromisedSitesCount saved_sites,
-    const GURL& origin,
-    const base::string16& username) {}
-
-void PasswordManagerClient::TriggerReauthForPrimaryAccount(
-    signin_metrics::ReauthAccessPoint access_point,
-    base::OnceCallback<void(ReauthSucceeded)> reauth_callback) {
-  std::move(reauth_callback).Run(ReauthSucceeded(false));
-}
-
-void PasswordManagerClient::TriggerSignIn(signin_metrics::AccessPoint) {}
-
-SyncState PasswordManagerClient::GetPasswordSyncState() const {
-  return NOT_SYNCING;
-}
+    LeakedPasswordDetails details) {}
 
 bool PasswordManagerClient::WasLastNavigationHTTPError() const {
-  return false;
-}
-
-bool PasswordManagerClient::WasCredentialLeakDialogShown() const {
   return false;
 }
 
@@ -83,16 +91,29 @@ net::CertStatus PasswordManagerClient::GetMainFrameCertStatus() const {
 
 void PasswordManagerClient::PromptUserToEnableAutosignin() {}
 
-bool PasswordManagerClient::IsIncognito() const {
+bool PasswordManagerClient::IsOffTheRecord() const {
   return false;
 }
 
-const PasswordManager* PasswordManagerClient::GetPasswordManager() const {
+password_manager::LeakDetectionInitiator
+PasswordManagerClient::GetLeakDetectionInitiator() {
+  return password_manager::LeakDetectionInitiator::kSignInCheck;
+}
+
+profile_metrics::BrowserProfileType PasswordManagerClient::GetProfileType()
+    const {
+  // This is an abstract interface and thus never instantiated directly,
+  // therefore it is safe to always return |kRegular| here.
+  return profile_metrics::BrowserProfileType::kRegular;
+}
+
+const PasswordManagerInterface* PasswordManagerClient::GetPasswordManager()
+    const {
   return nullptr;
 }
 
-PasswordManager* PasswordManagerClient::GetPasswordManager() {
-  return const_cast<PasswordManager*>(
+PasswordManagerInterface* PasswordManagerClient::GetPasswordManager() {
+  return const_cast<PasswordManagerInterface*>(
       static_cast<const PasswordManagerClient*>(this)->GetPasswordManager());
 }
 
@@ -111,8 +132,12 @@ HttpAuthManager* PasswordManagerClient::GetHttpAuthManager() {
   return nullptr;
 }
 
-autofill::AutofillDownloadManager*
-PasswordManagerClient::GetAutofillDownloadManager() {
+OtpManager* PasswordManagerClient::GetOtpManager() {
+  return nullptr;
+}
+
+autofill::AutofillCrowdsourcingManager*
+PasswordManagerClient::GetAutofillCrowdsourcingManager() {
   return nullptr;
 }
 
@@ -120,14 +145,14 @@ bool PasswordManagerClient::IsCommittedMainFrameSecure() const {
   return false;
 }
 
-const autofill::LogManager* PasswordManagerClient::GetLogManager() const {
+autofill::LogManager* PasswordManagerClient::GetCurrentLogManager() {
   return nullptr;
 }
 
 void PasswordManagerClient::AnnotateNavigationEntry(bool has_password_field) {}
 
-std::string PasswordManagerClient::GetPageLanguage() const {
-  return std::string();
+autofill::LanguageCode PasswordManagerClient::GetPageLanguage() const {
+  return autofill::LanguageCode();
 }
 
 PasswordRequirementsService*
@@ -141,17 +166,55 @@ favicon::FaviconService* PasswordManagerClient::GetFaviconService() {
   return nullptr;
 }
 
+password_manager::FieldInfoManager* PasswordManagerClient::GetFieldInfoManager()
+    const {
+  return nullptr;
+}
+
 network::mojom::NetworkContext* PasswordManagerClient::GetNetworkContext()
     const {
   return nullptr;
 }
 
-bool PasswordManagerClient::IsUnderAdvancedProtection() const {
-  return false;
+WebAuthnCredentialsDelegate*
+PasswordManagerClient::GetWebAuthnCredentialsDelegateForDriver(
+    PasswordManagerDriver* driver) {
+  return nullptr;
 }
 
-AutofillAssistantMode PasswordManagerClient::GetAutofillAssistantMode() const {
-  return GetPasswordManager()->GetAutofillAssistantMode();
+void PasswordManagerClient::TriggerUserPerceptionOfPasswordManagerSurvey(
+    const std::string& filling_assistance) {}
+
+#if BUILDFLAG(IS_ANDROID)
+webauthn::WebAuthnCredManDelegate*
+PasswordManagerClient::GetWebAuthnCredManDelegateForDriver(
+    PasswordManagerDriver* driver) {
+  return nullptr;
+}
+
+void PasswordManagerClient::MarkSharedCredentialsAsNotified(
+    const url::Origin& origin) {}
+
+#endif  // BUILDFLAG(IS_ANDROID)
+
+version_info::Channel PasswordManagerClient::GetChannel() const {
+  return version_info::Channel::UNKNOWN;
+}
+
+void PasswordManagerClient::RefreshPasswordManagerSettingsIfNeeded() const {
+  // For most implementations settings do not need to be refreshed.
+}
+
+void PasswordManagerClient::TriggerSignIn(
+    signin_metrics::AccessPoint access_point) const {}
+
+UndoPasswordChangeController*
+PasswordManagerClient::GetUndoPasswordChangeController() {
+  return nullptr;
+}
+
+bool PasswordManagerClient::IsActorTaskActive() {
+  return false;
 }
 
 }  // namespace password_manager

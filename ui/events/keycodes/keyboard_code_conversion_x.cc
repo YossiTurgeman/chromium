@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <array>
 
 #include "base/logging.h"
-#include "base/stl_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
@@ -19,7 +19,6 @@
 #include "ui/events/keycodes/keysym_to_unicode.h"
 #include "ui/events/keycodes/xkb_keysym.h"
 #include "ui/gfx/x/keysyms/keysyms.h"
-#include "ui/gfx/x/x11.h"
 #include "ui/gfx/x/xinput.h"
 #include "ui/gfx/x/xproto.h"
 #include "ui/gfx/x/xproto_types.h"
@@ -29,6 +28,8 @@
 namespace ui {
 
 namespace {
+
+constexpr int kXkbGroupShift = 13;
 
 // MAP0 - MAP3:
 // These are the generated VKEY code maps from these layout datas on Windows:
@@ -132,8 +133,8 @@ namespace {
 //
 // Please refer to crbug.com/386066.
 //
-const struct MAP0 {
-  KeySym ch0;
+constexpr struct MAP0 {
+  uint32_t ch0;
   uint8_t vk;
   bool operator()(const MAP0& m1, const MAP0& m2) const {
     return m1.ch0 < m2.ch0;
@@ -192,8 +193,8 @@ const struct MAP0 {
     {0x03F3, 0xDC},  // XK_kcedilla: VKEY_OEM_5
 };
 
-const struct MAP1 {
-  KeySym ch0;
+constexpr struct MAP1 {
+  uint32_t ch0;
   unsigned sc;
   uint8_t vk;
   bool operator()(const MAP1& m1, const MAP1& m2) const {
@@ -381,10 +382,10 @@ const struct MAP1 {
     {0x03FE, 0x35, 0x58},  // XK_umacron+AB02: VKEY_X
 };
 
-const struct MAP2 {
-  KeySym ch0;
+constexpr struct MAP2 {
+  uint32_t ch0;
   unsigned sc;
-  KeySym ch1;
+  uint32_t ch1;
   uint8_t vk;
   bool operator()(const MAP2& m1, const MAP2& m2) const {
     if (m1.ch0 == m2.ch0 && m1.sc == m2.sc)
@@ -422,11 +423,11 @@ const struct MAP2 {
     {0x00FC, 0x22, 0x00E8, 0xBA},  // XK_udiaeresis+AD11+XK_egrave: VKEY_OEM_1
 };
 
-const struct MAP3 {
-  KeySym ch0;
+constexpr struct MAP3 {
+  uint32_t ch0;
   unsigned sc;
-  KeySym ch1;
-  KeySym ch2;
+  uint32_t ch1;
+  uint32_t ch2;
   uint8_t vk;
   bool operator()(const MAP3& m1, const MAP3& m2) const {
     if (m1.ch0 == m2.ch0 && m1.sc == m2.sc && m1.ch1 == m2.ch1)
@@ -532,12 +533,13 @@ const struct MAP3 {
      0xBA},  // XK_uogonek+AC10+XK_Uogonek+XK_Tcedilla: VKEY_OEM_1
 };
 
-template <class T_MAP>
-KeyboardCode FindVK(const T_MAP& key, const T_MAP* map, size_t size) {
+template <class T_MAP, size_t n>
+KeyboardCode FindVK(const T_MAP& key, const T_MAP (&map)[n]) {
   T_MAP comp = {0};
-  const T_MAP* p = std::lower_bound(map, map + size, key, comp);
-  if (p != map + size && !comp(*p, key) && !comp(key, *p))
+  const T_MAP* p = std::ranges::lower_bound(map, key, comp);
+  if (p != std::end(map) && !comp(*p, key) && !comp(key, *p)) {
     return static_cast<KeyboardCode>(p->vk);
+  }
   return VKEY_UNKNOWN;
 }
 
@@ -545,10 +547,10 @@ KeyboardCode FindVK(const T_MAP& key, const T_MAP* map, size_t size) {
 // based on KeySym, and never fall back to MAP0~MAP3, since some layouts
 // generate them by applying the Control/AltGr modifier to some other key.
 // e.g. in de(neo), AltGr+V generates XK_Enter.
-bool IsTtyFunctionOrSpaceKey(KeySym keysym) {
-  KeySym keysyms[] = {XK_BackSpace, XK_Tab,    XK_Linefeed,    XK_Clear,
-                      XK_Return,    XK_Pause,  XK_Scroll_Lock, XK_Sys_Req,
-                      XK_Escape,    XK_Delete, XK_space};
+bool IsTtyFunctionOrSpaceKey(uint32_t keysym) {
+  uint32_t keysyms[] = {XK_BackSpace, XK_Tab,    XK_Linefeed,    XK_Clear,
+                        XK_Return,    XK_Pause,  XK_Scroll_Lock, XK_Sys_Req,
+                        XK_Escape,    XK_Delete, XK_space};
 
   for (unsigned long i : keysyms) {
     if (i == keysym)
@@ -557,9 +559,9 @@ bool IsTtyFunctionOrSpaceKey(KeySym keysym) {
   return false;
 }
 
-::KeySym TranslateKey(uint32_t keycode, uint32_t modifiers) {
-  auto* connection = x11::Connection::Get();
-  return static_cast<::KeySym>(connection->KeycodeToKeysym(keycode, modifiers));
+uint32_t TranslateKey(uint32_t keycode, uint32_t modifiers) {
+  return x11::Connection::Get()->KeycodeToKeysym(
+      static_cast<x11::KeyCode>(keycode), modifiers);
 }
 
 void GetKeycodeAndModifiers(const x11::Event& event,
@@ -567,7 +569,7 @@ void GetKeycodeAndModifiers(const x11::Event& event,
                             uint32_t* modifiers) {
   if (auto* dev = event.As<x11::Input::DeviceEvent>()) {
     *keycode = dev->detail;
-    *modifiers = dev->mods.effective;
+    *modifiers = GetXI2StateFromEvent(*dev);
   } else if (auto* key = event.As<x11::KeyEvent>()) {
     *keycode = static_cast<uint32_t>(key->detail);
     *modifiers = static_cast<uint32_t>(key->state);
@@ -632,8 +634,8 @@ KeyboardCode KeyboardCodeFromXKeyEvent(const x11::Event& xev) {
   // If |xkey| has modifiers set, other than NumLock, then determine the
   // un-modified KeySym and use that to map, so that e.g. Ctrl+D correctly
   // generates VKEY_D.
-  if (modifiers & 0xFF & ~Mod2Mask) {
-    modifiers &= (~0xFF | Mod2Mask);
+  if (modifiers & 0xFF & ~static_cast<int>(x11::KeyButMask::Mod2)) {
+    modifiers &= (~0xFF | static_cast<int>(x11::KeyButMask::Mod2));
     keysym = TranslateKey(xkeycode, modifiers);
   }
 
@@ -649,30 +651,30 @@ KeyboardCode KeyboardCodeFromXKeyEvent(const x11::Event& xev) {
       !IsCursorKey(keysym) && !IsPFKey(keysym) && !IsFunctionKey(keysym) &&
       !IsModifierKey(keysym)) {
     MAP0 key0 = {keysym & 0xFFFF, 0};
-    keycode = FindVK(key0, map0, base::size(map0));
+    keycode = FindVK(key0, map0);
     if (keycode != VKEY_UNKNOWN)
       return keycode;
 
     MAP1 key1 = {keysym & 0xFFFF, xkeycode, 0};
-    keycode = FindVK(key1, map1, base::size(map1));
+    keycode = FindVK(key1, map1);
     if (keycode != VKEY_UNKNOWN)
       return keycode;
 
-    KeySym keysym_shift = NoSymbol;
-    modifiers |= ShiftMask;
+    uint32_t keysym_shift{};
+    modifiers |= static_cast<int>(x11::KeyButMask::Shift);
     keysym_shift = TranslateKey(xkeycode, modifiers);
     MAP2 key2 = {keysym & 0xFFFF, xkeycode, keysym_shift & 0xFFFF, 0};
-    keycode = FindVK(key2, map2, base::size(map2));
+    keycode = FindVK(key2, map2);
     if (keycode != VKEY_UNKNOWN)
       return keycode;
 
-    KeySym keysym_altgr = NoSymbol;
-    modifiers &= ~ShiftMask;
-    modifiers |= Mod1Mask;
+    uint32_t keysym_altgr{};
+    modifiers &= ~static_cast<int>(x11::KeyButMask::Shift);
+    modifiers |= static_cast<int>(x11::KeyButMask::Mod1);
     keysym_altgr = TranslateKey(xkeycode, modifiers);
     MAP3 key3 = {keysym & 0xFFFF, xkeycode, keysym_shift & 0xFFFF,
                  keysym_altgr & 0xFFFF, 0};
-    keycode = FindVK(key3, map3, base::size(map3));
+    keycode = FindVK(key3, map3);
     if (keycode != VKEY_UNKNOWN)
       return keycode;
 
@@ -680,11 +682,11 @@ KeyboardCode KeyboardCodeFromXKeyEvent(const x11::Event& xev) {
     // So if cannot find VKEY with (ch0+sc+ch1+ch2) in map3, tries to fallback
     // to just find VKEY with (ch0+sc+ch1). This is the best we could do.
     MAP3 key4 = {keysym & 0xFFFF, xkeycode, keysym_shift & 0xFFFF, 0, 0};
-    const MAP3* p =
-        std::lower_bound(map3, map3 + base::size(map3), key4, MAP3());
-    if (p != map3 + base::size(map3) && p->ch0 == key4.ch0 &&
-        p->sc == key4.sc && p->ch1 == key4.ch1)
+    const MAP3* p = std::ranges::lower_bound(map3, key4, MAP3());
+    if (p != std::end(map3) && p->ch0 == key4.ch0 && p->sc == key4.sc &&
+        p->ch1 == key4.ch1) {
       return static_cast<KeyboardCode>(p->vk);
+    }
   }
 
   keycode = KeyboardCodeFromXKeysym(keysym);
@@ -999,7 +1001,7 @@ uint16_t GetCharacterFromXEvent(const x11::Event& xev) {
   uint32_t xkeycode = 0;
   uint32_t modifiers = 0;
   GetKeycodeAndModifiers(xev, &xkeycode, &modifiers);
-  KeySym keysym = TranslateKey(xkeycode, modifiers);
+  uint32_t keysym = TranslateKey(xkeycode, modifiers);
   return GetUnicodeCharacterFromXKeySym(keysym);
 }
 
@@ -1016,16 +1018,16 @@ DomKey GetDomKeyFromXEvent(const x11::Event& xev) {
   // The solution is to take out ctrl modifier directly, as according to XKB map
   // no keyboard combinations with ctrl key are mapped to printable character.
   // https://crbug.com/633838
-  modifiers &= ~ControlMask;
-  KeySym keysym = TranslateKey(xkeycode, modifiers);
-  base::char16 ch = GetUnicodeCharacterFromXKeySym(keysym);
+  modifiers &= ~static_cast<int>(x11::KeyButMask::Control);
+  uint32_t keysym = TranslateKey(xkeycode, modifiers);
+  char16_t ch = GetUnicodeCharacterFromXKeySym(keysym);
   return XKeySymToDomKey(keysym, ch);
 }
 
 KeyboardCode DefaultKeyboardCodeFromHardwareKeycode(
     unsigned int hardware_code) {
   // This function assumes that X11 is using evdev-based keycodes.
-  static const KeyboardCode kHardwareKeycodeMap[] = {
+  static constexpr auto kHardwareKeycodeMap = std::to_array<KeyboardCode>({
       // Please refer to below links for the table content:
       // http://www.w3.org/TR/DOM-Level-3-Events-code/#keyboard-101
       // https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent.keyCode
@@ -1166,9 +1168,9 @@ KeyboardCode DefaultKeyboardCodeFromHardwareKeycode(
       VKEY_LWIN,               // 0x85: KEY_LEFTMETA         Super_L
       VKEY_RWIN,               // 0x86: KEY_RIGHTMETA        Super_R
       VKEY_COMPOSE,            // 0x87: KEY_COMPOSE          Menu
-  };
+  });
 
-  if (hardware_code >= base::size(kHardwareKeycodeMap)) {
+  if (hardware_code >= std::size(kHardwareKeycodeMap)) {
     // Additional keycodes used by the Chrome OS top row special function keys.
     switch (hardware_code) {
       case 0xA6:  // KEY_BACK
@@ -1178,7 +1180,12 @@ KeyboardCode DefaultKeyboardCodeFromHardwareKeycode(
       case 0xB5:  // KEY_REFRESH
         return VKEY_BROWSER_REFRESH;
       case 0xD4:  // KEY_DASHBOARD
-        return VKEY_MEDIA_LAUNCH_APP2;
+        // This was changed from VKEY_MEDIA_LAUNCH_APP2 when the full screen
+        // key was moved to VKEY_ZOOM with crbug.com/1204710. In order to
+        // maintain existing behavior this was kept consistent but it
+        // seems like this should have been VKEY_MEDIA_LAUNCH_APP1 aka
+        // overview in the first place.
+        return VKEY_ZOOM;
       case 0xE8:  // KEY_BRIGHTNESSDOWN
         return VKEY_BRIGHTNESS_DOWN;
       case 0xE9:  // KEY_BRIGHTNESSUP
@@ -1484,9 +1491,17 @@ unsigned int XKeyCodeForWindowsKeyCode(ui::KeyboardCode key_code,
   // crbug.com/386066 and crbug.com/390263 are examples of problems
   // associated with this.
   //
-  auto keysym =
-      static_cast<x11::KeySym>(XKeysymForWindowsKeyCode(key_code, false));
-  return static_cast<unsigned int>(connection->KeysymToKeycode(keysym));
+  return static_cast<uint8_t>(
+      connection->KeysymToKeycode(XKeysymForWindowsKeyCode(key_code, false)));
+}
+
+uint32_t GetXI2StateFromEvent(const x11::Input::DeviceEvent& xievent) {
+  // XI2 state includes the base modifiers and the effective keyboard group.
+  return xievent.mods.effective | (xievent.group.effective << kXkbGroupShift);
+}
+
+int XkbGroupForCoreState(int state) {
+  return (state >> kXkbGroupShift) & 0x3;
 }
 
 }  // namespace ui

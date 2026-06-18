@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,28 +6,60 @@
 
 #include <memory>
 
-#include "base/notreached.h"
-#include "base/values.h"
-#include "components/version_info/version_info.h"
-#include "content/public/browser/trace_uploader.h"
-#include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "android_webview/browser/aw_browser_process.h"
+#include "base/system/sys_info.h"
+#include "components/metrics/version_utils.h"
+#include "components/tracing/common/background_tracing_metrics_provider.h"
+#include "components/tracing/common/background_tracing_state_manager.h"
+#include "components/tracing/common/background_tracing_utils.h"
+#include "components/tracing/common/pref_names.h"
+#include "components/tracing/common/system_profile_metadata_recorder.h"
+#include "components/version_info/android/channel_getter.h"
 
 namespace android_webview {
 
-AwTracingDelegate::AwTracingDelegate() {}
-AwTracingDelegate::~AwTracingDelegate() {}
+AwTracingDelegate::AwTracingDelegate() = default;
+AwTracingDelegate::~AwTracingDelegate() = default;
 
-std::unique_ptr<content::TraceUploader> AwTracingDelegate::GetTraceUploader(
-    scoped_refptr<network::SharedURLLoaderFactory>) {
-  NOTREACHED();
-  return NULL;
+// static
+void AwTracingDelegate::RegisterPrefs(PrefRegistrySimple* registry) {
+  registry->RegisterDictionaryPref(tracing::kBackgroundTracingSessionState);
 }
 
-std::unique_ptr<base::DictionaryValue>
-AwTracingDelegate::GenerateMetadataDict() {
-  auto metadata_dict = std::make_unique<base::DictionaryValue>();
-  metadata_dict->SetString("revision", version_info::GetLastChange());
-  return metadata_dict;
+bool AwTracingDelegate::IsRecordingAllowed(
+    bool requires_anonymized_data,
+    base::TimeTicks session_start) const {
+  return true;
+}
+
+std::unique_ptr<tracing::BackgroundTracingStateManager>
+AwTracingDelegate::CreateStateManager() {
+  return tracing::BackgroundTracingStateManager::CreateInstance(
+      AwBrowserProcess::GetInstance()->local_state());
+}
+
+std::string AwTracingDelegate::RecordSerializedSystemProfileMetrics() const {
+  metrics::SystemProfileProto system_profile_proto;
+  auto recorder = tracing::BackgroundTracingMetricsProvider::
+      GetSystemProfileMetricsRecorder();
+  if (!recorder) {
+    return std::string();
+  }
+  recorder.Run(system_profile_proto);
+  std::string serialized_system_profile;
+  system_profile_proto.SerializeToString(&serialized_system_profile);
+  return serialized_system_profile;
+}
+
+tracing::MetadataDataSource::BundleRecorder
+AwTracingDelegate::CreateSystemProfileMetadataRecorder() const {
+  return base::BindRepeating(&tracing::RecordSystemProfileMetadata);
+}
+
+tracing::MetadataDataSource::ChromeMetadataRecorder
+AwTracingDelegate::CreateChromeMetadataPacketRecorder() const {
+  return base::BindRepeating(&tracing::FillChromeMetadataPacket,
+                             version_info::android::GetChannel());
 }
 
 }  // namespace android_webview

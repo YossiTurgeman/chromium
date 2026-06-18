@@ -26,6 +26,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_DEVICE_ORIENTATION_DEVICE_MOTION_EVENT_ACCELERATION_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_DEVICE_ORIENTATION_DEVICE_MOTION_EVENT_ACCELERATION_H_
 
+#include <optional>
+
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 
@@ -46,9 +48,9 @@ class MODULES_EXPORT DeviceMotionEventAcceleration final
 
   bool HasAccelerationData() const;
 
-  base::Optional<double> x() const;
-  base::Optional<double> y() const;
-  base::Optional<double> z() const;
+  std::optional<double> x() const;
+  std::optional<double> y() const;
+  std::optional<double> z() const;
 
  private:
   const double x_;

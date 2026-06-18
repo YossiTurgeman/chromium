@@ -1,43 +1,34 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/ukm/content/source_url_recorder.h"
 
+#include <cstdint>
 #include <utility>
 
 #include "base/containers/flat_map.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/field_trial_params.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "content/public/browser/web_contents_receiver_set.h"
 #include "content/public/browser/web_contents_user_data.h"
+#include "net/url_request/url_request.h"
 #include "services/metrics/public/cpp/delegating_ukm_recorder.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 #include "services/metrics/public/cpp/ukm_recorder.h"
 #include "services/metrics/public/cpp/ukm_source_id.h"
-#include "third_party/blink/public/mojom/ukm/ukm.mojom.h"
 #include "url/gurl.h"
 
 namespace ukm {
 
-namespace {
-
-// -1 indicates no max number of same document sources per full source.
-int kUnlimitedSameDocumentSourcesPerFullSource = -1;
-
-// Returns the maximum number of same document sources that are allowed to be
-// recorded for a full source.
-int GetMaxSameDocumentSourcesPerFullSource() {
-  return base::GetFieldTrialParamByFeatureAsInt(
-      kUkmFeature, "MaxSameDocumentSourcesPerFullSource",
-      kUnlimitedSameDocumentSourcesPerFullSource);
-}
-
-}  // namespace
+// Enforce an upper bound on the max number of URLs we record per navigation
+// to prevent a report from growing unbounded in size in extreme cases. For
+// convenience, the upper bound is the same as the max number of redirects
+// supported by URLRequest which hits ERR_TOO_MANY_REDIRECTS before aborting the
+// navigation.
+constexpr size_t kMaxRedirects = net::URLRequest::kMaxRedirects;
 
 namespace internal {
 
@@ -47,19 +38,19 @@ int64_t CreateUniqueTabId() {
 }
 
 // SourceUrlRecorderWebContentsObserver is responsible for recording UKM source
-// URLs, for all (any only) main frame navigations in a given WebContents.
-// SourceUrlRecorderWebContentsObserver records both the final URL for a
-// navigation, and, if the navigation was redirected, the initial URL as well.
+// URLs, for all (and only) main frame navigations in a given WebContents.
+// For a navigation, SourceUrlRecorderWebContentsObserver records the final URL
+// for a navigation, and, in case of redirection, the whole redirect chain up to
+// a length limit.
 class SourceUrlRecorderWebContentsObserver
-    : public blink::mojom::UkmSourceIdFrameHost,
-      public content::WebContentsObserver,
+    : public content::WebContentsObserver,
       public content::WebContentsUserData<
           SourceUrlRecorderWebContentsObserver> {
  public:
-  // Creates a SourceUrlRecorderWebContentsObserver for the given
-  // WebContents. If a SourceUrlRecorderWebContentsObserver is already
-  // associated with the WebContents, this method is a no-op.
-  static void CreateForWebContents(content::WebContents* web_contents);
+  SourceUrlRecorderWebContentsObserver(
+      const SourceUrlRecorderWebContentsObserver&) = delete;
+  SourceUrlRecorderWebContentsObserver& operator=(
+      const SourceUrlRecorderWebContentsObserver&) = delete;
 
   // content::WebContentsObserver:
   void DidStartNavigation(
@@ -79,52 +70,24 @@ class SourceUrlRecorderWebContentsObserver
   ukm::SourceId GetLastCommittedSourceId() const;
   ukm::SourceId GetLastCommittedFullNavigationOrSameDocumentSourceId() const;
 
-  // blink::mojom::UkmSourceIdFrameHost
-  void SetDocumentSourceId(int64_t source_id) override;
-
  private:
   explicit SourceUrlRecorderWebContentsObserver(
       content::WebContents* web_contents);
   friend class content::WebContentsUserData<
       SourceUrlRecorderWebContentsObserver>;
 
-  // Record any pending DocumentCreated events to UKM.
-  void MaybeFlushPendingEvents();
-
   void HandleSameDocumentNavigation(
       content::NavigationHandle* navigation_handle);
   void HandleDifferentDocumentNavigation(
-      content::NavigationHandle* navigation_handle,
-      const GURL& initial_url);
+      content::NavigationHandle* navigation_handle);
 
-  void MaybeRecordUrl(content::NavigationHandle* navigation_handle,
-                      const GURL& initial_url);
+  void MaybeRecordUrl(content::NavigationHandle* navigation_handle);
 
   // Whether URLs should be recorded in UKM Sources.
   bool ShouldRecordURLs() const;
 
-  // Receives document source IDs from the renderer.
-  content::WebContentsFrameReceiverSet<blink::mojom::UkmSourceIdFrameHost>
-      receivers_;
-
   // Map from navigation ID to the initial URL for that navigation.
   base::flat_map<int64_t, GURL> pending_navigations_;
-
-  // Holds pending DocumentCreated events.
-  struct PendingEvent {
-    PendingEvent() = delete;
-    PendingEvent(int64_t source_id,
-                 bool is_main_frame,
-                 bool is_cross_origin_frame)
-        : source_id(source_id),
-          is_main_frame(is_main_frame),
-          is_cross_origin_frame(is_cross_origin_frame) {}
-
-    int64_t source_id;
-    bool is_main_frame;
-    bool is_cross_origin_frame;
-  };
-  std::vector<PendingEvent> pending_document_created_events_;
 
   // The source id of the last committed full navigation (where a full
   // navigation is a non-same-document navigation).
@@ -144,16 +107,15 @@ class SourceUrlRecorderWebContentsObserver
   int num_same_document_sources_for_full_navigation_source_;
 
   WEB_CONTENTS_USER_DATA_KEY_DECL();
-
-  DISALLOW_COPY_AND_ASSIGN(SourceUrlRecorderWebContentsObserver);
 };
 
-WEB_CONTENTS_USER_DATA_KEY_IMPL(SourceUrlRecorderWebContentsObserver)
+WEB_CONTENTS_USER_DATA_KEY_IMPL(SourceUrlRecorderWebContentsObserver);
 
 SourceUrlRecorderWebContentsObserver::SourceUrlRecorderWebContentsObserver(
     content::WebContents* web_contents)
     : content::WebContentsObserver(web_contents),
-      receivers_(web_contents, this),
+      content::WebContentsUserData<SourceUrlRecorderWebContentsObserver>(
+          *web_contents),
       last_committed_full_navigation_source_id_(ukm::kInvalidSourceId),
       last_committed_full_navigation_or_same_document_source_id_(
           ukm::kInvalidSourceId),
@@ -162,7 +124,8 @@ SourceUrlRecorderWebContentsObserver::SourceUrlRecorderWebContentsObserver(
       num_same_document_sources_for_full_navigation_source_(0) {}
 
 bool SourceUrlRecorderWebContentsObserver::ShouldRecordURLs() const {
-  // TODO(crbug/1078349): ensure we only record URLs for tabs in a tab strip.
+  // TODO(crbug.com/40689292): ensure we only record URLs for tabs in a tab
+  // strip.
 
   // If there is an outer WebContents, then this WebContents is embedded into
   // another one (e.g it is a portal or a Chrome App <webview>).
@@ -175,7 +138,7 @@ void SourceUrlRecorderWebContentsObserver::DidStartNavigation(
   // non-main frame navs. Additionally, at least for the time being, we don't
   // track metrics for same-document navigations (e.g. changes in URL fragment,
   // or URL changes due to history.pushState) in UKM.
-  if (!navigation_handle->IsInMainFrame() ||
+  if (!navigation_handle->IsInPrimaryMainFrame() ||
       navigation_handle->IsSameDocument()) {
     return;
   }
@@ -187,15 +150,12 @@ void SourceUrlRecorderWebContentsObserver::DidStartNavigation(
   // in a download.
   pending_navigations_.insert(std::make_pair(
       navigation_handle->GetNavigationId(), navigation_handle->GetURL()));
-
-  // Clear any unassociated pending events.
-  pending_document_created_events_.clear();
 }
 
 void SourceUrlRecorderWebContentsObserver::DidFinishNavigation(
     content::NavigationHandle* navigation_handle) {
   auto it = pending_navigations_.find(navigation_handle->GetNavigationId());
-  if (!navigation_handle->IsInMainFrame()) {
+  if (!navigation_handle->IsInPrimaryMainFrame()) {
     DCHECK(it == pending_navigations_.end());
     return;
   }
@@ -207,9 +167,8 @@ void SourceUrlRecorderWebContentsObserver::DidFinishNavigation(
   }
 
   if (it != pending_navigations_.end()) {
-    GURL initial_url = std::move(it->second);
     pending_navigations_.erase(it);
-    HandleDifferentDocumentNavigation(navigation_handle, initial_url);
+    HandleDifferentDocumentNavigation(navigation_handle);
   }
 }
 
@@ -238,15 +197,7 @@ void SourceUrlRecorderWebContentsObserver::HandleSameDocumentNavigation(
         GetLastCommittedFullNavigationOrSameDocumentSourceId());
   }
 
-  const int max_same_document_sources_per_full_source =
-      GetMaxSameDocumentSourcesPerFullSource();
-
-  if (max_same_document_sources_per_full_source ==
-          kUnlimitedSameDocumentSourcesPerFullSource ||
-      num_same_document_sources_for_full_navigation_source_ <
-          max_same_document_sources_per_full_source) {
-    MaybeRecordUrl(navigation_handle, GURL::EmptyGURL());
-  }
+  MaybeRecordUrl(navigation_handle);
 
   last_committed_full_navigation_or_same_document_source_id_ =
       ukm::ConvertToSourceId(navigation_handle->GetNavigationId(),
@@ -255,8 +206,7 @@ void SourceUrlRecorderWebContentsObserver::HandleSameDocumentNavigation(
 }
 
 void SourceUrlRecorderWebContentsObserver::HandleDifferentDocumentNavigation(
-    content::NavigationHandle* navigation_handle,
-    const GURL& initial_url) {
+    content::NavigationHandle* navigation_handle) {
   // UKM doesn't want to record URLs for navigations that result in downloads.
   if (navigation_handle->IsDownload())
     return;
@@ -273,7 +223,7 @@ void SourceUrlRecorderWebContentsObserver::HandleDifferentDocumentNavigation(
         GetLastCommittedFullNavigationOrSameDocumentSourceId());
   }
 
-  MaybeRecordUrl(navigation_handle, initial_url);
+  MaybeRecordUrl(navigation_handle);
 
   if (navigation_handle->HasCommitted()) {
     last_committed_full_navigation_source_id_ = ukm::ConvertToSourceId(
@@ -282,8 +232,6 @@ void SourceUrlRecorderWebContentsObserver::HandleDifferentDocumentNavigation(
         last_committed_full_navigation_source_id_;
     num_same_document_sources_for_full_navigation_source_ = 0;
   }
-
-  MaybeFlushPendingEvents();
 
   // Reset the opener source id. Only the first source in a tab should have an
   // opener.
@@ -299,11 +247,12 @@ void SourceUrlRecorderWebContentsObserver::DidOpenRequestedURL(
     ui::PageTransition transition,
     bool started_from_context_menu,
     bool renderer_initiated) {
-  auto* new_recorder =
-      SourceUrlRecorderWebContentsObserver::FromWebContents(new_contents);
-  if (!new_recorder)
-    return;
-  new_recorder->opener_source_id_ = GetLastCommittedSourceId();
+  // Ensure that a source recorder exists at this point, since it is possible
+  // that this is called before tab helpers are added in //chrome, especially on
+  // Android. See crbug.com/1024952 for more details.
+  InitializeSourceUrlRecorderForWebContents(new_contents);
+  SourceUrlRecorderWebContentsObserver::FromWebContents(new_contents)
+      ->opener_source_id_ = GetLastCommittedSourceId();
 }
 
 void SourceUrlRecorderWebContentsObserver::WebContentsDestroyed() {
@@ -329,50 +278,12 @@ ukm::SourceId SourceUrlRecorderWebContentsObserver::
   return last_committed_full_navigation_or_same_document_source_id_;
 }
 
-void SourceUrlRecorderWebContentsObserver::SetDocumentSourceId(
-    int64_t source_id) {
-  content::RenderFrameHost* main_frame = web_contents()->GetMainFrame();
-  content::RenderFrameHost* current_frame = receivers_.GetCurrentTargetFrame();
-  bool is_main_frame = main_frame == current_frame;
-  bool is_cross_origin_frame =
-      is_main_frame ? false
-                    : !main_frame->GetLastCommittedOrigin().IsSameOriginWith(
-                          current_frame->GetLastCommittedOrigin());
-
-  pending_document_created_events_.emplace_back(
-      source_id, !receivers_.GetCurrentTargetFrame()->GetParent(),
-      is_cross_origin_frame);
-  MaybeFlushPendingEvents();
-}
-
-void SourceUrlRecorderWebContentsObserver::MaybeFlushPendingEvents() {
-  if (!last_committed_full_navigation_source_id_)
-    return;
-
-  ukm::DelegatingUkmRecorder* ukm_recorder = ukm::DelegatingUkmRecorder::Get();
-  if (!ukm_recorder)
-    return;
-
-  while (!pending_document_created_events_.empty()) {
-    auto record = pending_document_created_events_.back();
-
-    ukm::builders::DocumentCreated(record.source_id)
-        .SetNavigationSourceId(last_committed_full_navigation_source_id_)
-        .SetIsMainFrame(record.is_main_frame)
-        .SetIsCrossOriginFrame(record.is_cross_origin_frame)
-        .Record(ukm_recorder);
-
-    pending_document_created_events_.pop_back();
-  }
-}
-
 void SourceUrlRecorderWebContentsObserver::MaybeRecordUrl(
-    content::NavigationHandle* navigation_handle,
-    const GURL& initial_url) {
-  DCHECK(navigation_handle->IsInMainFrame());
+    content::NavigationHandle* navigation_handle) {
+  DCHECK(navigation_handle->IsInPrimaryMainFrame());
 
-  // TODO(crbug/1078355): If ShouldRecordURLs is false, we should still create a
-  // UKM source, but not add any URLs to it.
+  // TODO(crbug.com/40689295): If ShouldRecordURLs is false, we should still
+  // create a UKM source, but not add any URLs to it.
   if (!ShouldRecordURLs())
     return;
 
@@ -381,17 +292,34 @@ void SourceUrlRecorderWebContentsObserver::MaybeRecordUrl(
     return;
 
   UkmSource::NavigationData navigation_data;
-  const GURL& final_url = navigation_handle->GetURL();
-  // TODO(crbug.com/869123): This check isn't quite correct, as self redirecting
-  // is possible. This may also be changed to include the entire redirect chain.
-  // Additionally, since same-document navigations don't have initial URLs,
-  // ignore empty initial URLs.
-  if (!initial_url.is_empty() && final_url != initial_url)
-    navigation_data.urls = {initial_url};
-  navigation_data.urls.push_back(final_url);
+  const std::vector<GURL>& url_chain = navigation_handle->GetRedirectChain();
+  // Copy over the list of the URL redirects that occurred on the way to the
+  // landing page. The landing page is the last one in the list. When there's no
+  // redirect, there is only one URL in the list.
+  navigation_data.urls.assign(
+      url_chain.begin(),
+      url_chain.begin() + std::min(url_chain.size(), kMaxRedirects));
 
   navigation_data.is_same_document_navigation =
       navigation_handle->IsSameDocument();
+
+  navigation_data.same_origin_status = UkmSource::NavigationData::
+      SourceSameOriginStatus::SOURCE_SAME_ORIGIN_STATUS_UNSET;
+  // Only set the same origin flag for committed non-error,
+  // non-same-document navigations.
+  if (navigation_handle->HasCommitted() && !navigation_handle->IsErrorPage() &&
+      !navigation_handle->IsSameDocument()) {
+    navigation_data.same_origin_status =
+        navigation_handle->IsSameOrigin()
+            ? UkmSource::NavigationData::SourceSameOriginStatus::
+                  SOURCE_SAME_ORIGIN
+            : UkmSource::NavigationData::SourceSameOriginStatus::
+                  SOURCE_CROSS_ORIGIN;
+  }
+  navigation_data.is_renderer_initiated =
+      navigation_handle->IsRendererInitiated();
+  navigation_data.is_error_page = navigation_handle->IsErrorPage();
+
   navigation_data.previous_source_id =
       last_committed_full_navigation_source_id_;
 
@@ -415,31 +343,12 @@ void SourceUrlRecorderWebContentsObserver::MaybeRecordUrl(
   ukm_recorder->RecordNavigation(source_id, navigation_data);
 }
 
-// static
-void SourceUrlRecorderWebContentsObserver::CreateForWebContents(
-    content::WebContents* web_contents) {
-  if (!SourceUrlRecorderWebContentsObserver::FromWebContents(web_contents)) {
-    web_contents->SetUserData(
-        SourceUrlRecorderWebContentsObserver::UserDataKey(),
-        base::WrapUnique(
-            new SourceUrlRecorderWebContentsObserver(web_contents)));
-  }
-}
-
 }  // namespace internal
 
 void InitializeSourceUrlRecorderForWebContents(
     content::WebContents* web_contents) {
   internal::SourceUrlRecorderWebContentsObserver::CreateForWebContents(
       web_contents);
-}
-
-SourceId GetSourceIdForWebContentsDocument(
-    const content::WebContents* web_contents) {
-  const internal::SourceUrlRecorderWebContentsObserver* obs =
-      internal::SourceUrlRecorderWebContentsObserver::FromWebContents(
-          web_contents);
-  return obs ? obs->GetLastCommittedSourceId() : kInvalidSourceId;
 }
 
 }  // namespace ukm

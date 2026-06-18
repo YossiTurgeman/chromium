@@ -1,16 +1,15 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/gfx/x/connection.h"
+
 #include "base/memory/ref_counted_memory.h"
-#include "ui/gfx/x/xproto.h"
-
-#undef Bool
-
-#include <xcb/xcb.h>
-
+#include "base/numerics/safe_conversions.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/gfx/x/event.h"
+#include "ui/gfx/x/future.h"
+#include "ui/gfx/x/xproto.h"
 
 namespace x11 {
 
@@ -36,14 +35,12 @@ Window CreateWindow(Connection* connection) {
 // Connection setup and teardown.
 TEST(X11ConnectionTest, Basic) {
   Connection connection;
-  ASSERT_TRUE(connection.XcbConnection());
-  EXPECT_FALSE(xcb_connection_has_error(connection.XcbConnection()));
+  ASSERT_TRUE(connection.Ready());
 }
 
 TEST(X11ConnectionTest, Request) {
   Connection connection;
-  ASSERT_TRUE(connection.XcbConnection());
-  EXPECT_FALSE(xcb_connection_has_error(connection.XcbConnection()));
+  ASSERT_TRUE(connection.Ready());
 
   Window window = CreateWindow(&connection);
 
@@ -52,7 +49,7 @@ TEST(X11ConnectionTest, Request) {
   EXPECT_EQ(attributes->map_state, MapState::Unmapped);
   EXPECT_TRUE(attributes->override_redirect);
 
-  auto geometry = connection.GetGeometry({window}).Sync();
+  auto geometry = connection.GetGeometry(window).Sync();
   ASSERT_TRUE(geometry);
   EXPECT_EQ(geometry->x, 0);
   EXPECT_EQ(geometry->y, 0);
@@ -62,8 +59,7 @@ TEST(X11ConnectionTest, Request) {
 
 TEST(X11ConnectionTest, Event) {
   Connection connection;
-  ASSERT_TRUE(connection.XcbConnection());
-  EXPECT_FALSE(xcb_connection_has_error(connection.XcbConnection()));
+  ASSERT_TRUE(connection.Ready());
 
   Window window = CreateWindow(&connection);
 
@@ -75,35 +71,88 @@ TEST(X11ConnectionTest, Event) {
 
   std::vector<uint8_t> data{0};
   auto prop_future = connection.ChangeProperty({
-      .window = static_cast<x11::Window>(window),
-      .property = x11::Atom::WM_NAME,
-      .type = x11::Atom::STRING,
+      .window = static_cast<Window>(window),
+      .property = Atom::WM_NAME,
+      .type = Atom::STRING,
       .format = CHAR_BIT,
-      .data_len = 1,
-      .data = base::RefCountedBytes::TakeVector(&data),
+      .data_len = base::checked_cast<uint32_t>(data.size()),
+      .data = base::MakeRefCounted<base::RefCountedBytes>(std::move(data)),
   });
   EXPECT_FALSE(prop_future.Sync().error);
 
   connection.ReadResponses();
   ASSERT_EQ(connection.events().size(), 1u);
-  auto* prop = connection.events().front().As<x11::PropertyNotifyEvent>();
+  auto* prop = connection.events().front().As<PropertyNotifyEvent>();
   ASSERT_TRUE(prop);
-  EXPECT_EQ(prop->atom, x11::Atom::WM_NAME);
+  EXPECT_EQ(prop->atom, Atom::WM_NAME);
   EXPECT_EQ(prop->state, Property::NewValue);
 }
 
 TEST(X11ConnectionTest, Error) {
   Connection connection;
-  ASSERT_TRUE(connection.XcbConnection());
-  EXPECT_FALSE(xcb_connection_has_error(connection.XcbConnection()));
+  ASSERT_TRUE(connection.Ready());
 
   Window invalid_window = connection.GenerateId<Window>();
 
-  auto geometry = connection.GetGeometry({invalid_window}).Sync();
+  auto geometry = connection.GetGeometry(invalid_window).Sync();
   ASSERT_FALSE(geometry);
-  xcb_generic_error_t* error = geometry.error.get();
-  EXPECT_EQ(error->error_code, XCB_DRAWABLE);
-  EXPECT_EQ(error->resource_id, static_cast<uint32_t>(invalid_window));
+  auto* error = geometry.error.get();
+  ASSERT_TRUE(error);
+  // TODO(thomasanderson): Implement As<> for errors, similar to events.
+  auto* drawable_error = reinterpret_cast<DrawableError*>(error);
+  EXPECT_EQ(drawable_error->bad_value, static_cast<uint32_t>(invalid_window));
+}
+
+TEST(X11ConnectionTest, LargeQueryTree) {
+  Connection connection;
+  ASSERT_TRUE(connection.Ready());
+
+  Window root = CreateWindow(&connection);
+  for (size_t i = 0; i < 0x10000; i++) {
+    connection.CreateWindow({
+        .depth = connection.default_root_depth().depth,
+        .wid = connection.GenerateId<Window>(),
+        .parent = root,
+        .width = 1,
+        .height = 1,
+        .override_redirect = Bool32(true),
+    });
+  }
+
+  // Ensure large QueryTree requests don't cause a crash.
+  connection.QueryTree(root).Sync();
+}
+
+TEST(X11ConnectionTest, GetPropertyReplyValidation) {
+  // Simulate a malicious response with format 39.
+  // The reply length is in 4-byte units, starting from after the first 32
+  // bytes. A GetProperty reply has a fixed size of 32 bytes followed by the
+  // value.
+  std::vector<uint8_t> data(32, 0);
+  data[0] = 1;   // response_type: Reply
+  data[1] = 39;  // format: 39 (Invalid, should be 8, 16, or 32)
+  data[10] = 0;  // length: 0
+  data[11] = 0;
+
+  ReadBuffer buf(x11::ThrowAwaySizeRefCountedMemory::From(std::move(data)));
+  auto reply = detail::ReadReply<GetPropertyReply>(&buf);
+  EXPECT_FALSE(reply);
+}
+
+TEST(X11ConnectionTest, GetPropertyReplyValid) {
+  // Simulate a valid response with format 32.
+  std::vector<uint8_t> data(32, 0);
+  data[0] = 1;   // response_type: Reply
+  data[1] = 32;  // format: 32
+  data[10] = 0;  // length: 0
+  data[11] = 0;
+  data[16] = 0;  // type: None
+  data[24] = 0;  // value_len: 0
+
+  ReadBuffer buf(x11::ThrowAwaySizeRefCountedMemory::From(std::move(data)));
+  auto reply = detail::ReadReply<GetPropertyReply>(&buf);
+  ASSERT_TRUE(reply);
+  EXPECT_EQ(reply->format, 32);
 }
 
 }  // namespace x11

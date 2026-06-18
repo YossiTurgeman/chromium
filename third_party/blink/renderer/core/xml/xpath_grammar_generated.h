@@ -1,11 +1,11 @@
 // clang-format off
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_XML_XPATH_GRAMMAR_GENERATED_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_XML_XPATH_GRAMMAR_GENERATED_H_
-// A Bison parser, made by GNU Bison 3.4.2.
+// A Bison parser, made by GNU Bison 3.8.2.
 
 // Skeleton interface for Bison LALR(1) parsers in C++
 
-// Copyright (C) 2002-2015, 2018-2019 Free Software Foundation, Inc.
+// Copyright (C) 2002-2015, 2018-2021 Free Software Foundation, Inc.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // As a special exception, you may create a larger work that contains
 // part or all of the Bison parser skeleton and distribute that work
@@ -41,19 +41,20 @@
 
 // C++ LALR(1) parser skeleton written by Akim Demaille.
 
-// Undocumented macros, especially those whose name start with YY_,
-// are private implementation details.  Do not rely on them.
+// DO NOT RELY ON FEATURES THAT ARE NOT DOCUMENTED in the manual,
+// especially those whose name start with YY_ or yy_.  They are
+// private implementation details that can be changed or removed.
 
 #ifndef YY_YY_THIRD_PARTY_BLINK_RENDERER_CORE_XML_XPATH_GRAMMAR_GENERATED_HH_INCLUDED
 # define YY_YY_THIRD_PARTY_BLINK_RENDERER_CORE_XML_XPATH_GRAMMAR_GENERATED_HH_INCLUDED
-// //                    "%code requires" blocks.
+// "%code requires" blocks.
 #line 46 "third_party/blink/renderer/core/xml/xpath_grammar.y"
 
 
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 
 
-#line 54 "third_party/blink/renderer/core/xml/xpath_grammar_generated.h"
+#line 55 "third_party/blink/renderer/core/xml/xpath_grammar_generated.h"
 
 
 # include <cstdlib> // std::abort
@@ -100,44 +101,43 @@
 #endif
 
 
-#ifndef YYASSERT
-# include <cassert>
-# define YYASSERT assert
-#endif
 
-
-#ifndef YY_ATTRIBUTE
-# if (defined __GNUC__                                               \
-      && (2 < __GNUC__ || (__GNUC__ == 2 && 96 <= __GNUC_MINOR__)))  \
-     || defined __SUNPRO_C && 0x5110 <= __SUNPRO_C
-#  define YY_ATTRIBUTE(Spec) __attribute__(Spec)
+#ifndef YY_ATTRIBUTE_PURE
+# if defined __GNUC__ && 2 < __GNUC__ + (96 <= __GNUC_MINOR__)
+#  define YY_ATTRIBUTE_PURE __attribute__ ((__pure__))
 # else
-#  define YY_ATTRIBUTE(Spec) /* empty */
+#  define YY_ATTRIBUTE_PURE
 # endif
 #endif
 
-#ifndef YY_ATTRIBUTE_PURE
-# define YY_ATTRIBUTE_PURE   YY_ATTRIBUTE ((__pure__))
-#endif
-
 #ifndef YY_ATTRIBUTE_UNUSED
-# define YY_ATTRIBUTE_UNUSED YY_ATTRIBUTE ((__unused__))
+# if defined __GNUC__ && 2 < __GNUC__ + (7 <= __GNUC_MINOR__)
+#  define YY_ATTRIBUTE_UNUSED __attribute__ ((__unused__))
+# else
+#  define YY_ATTRIBUTE_UNUSED
+# endif
 #endif
 
 /* Suppress unused-variable warnings by "using" E.  */
 #if ! defined lint || defined __GNUC__
-# define YYUSE(E) ((void) (E))
+# define YY_USE(E) ((void) (E))
 #else
-# define YYUSE(E) /* empty */
+# define YY_USE(E) /* empty */
 #endif
 
-#if defined __GNUC__ && ! defined __ICC && 407 <= __GNUC__ * 100 + __GNUC_MINOR__
 /* Suppress an incorrect diagnostic about yylval being uninitialized.  */
-# define YY_IGNORE_MAYBE_UNINITIALIZED_BEGIN \
-    _Pragma ("GCC diagnostic push") \
-    _Pragma ("GCC diagnostic ignored \"-Wuninitialized\"")\
+#if defined __GNUC__ && ! defined __ICC && 406 <= __GNUC__ * 100 + __GNUC_MINOR__
+# if __GNUC__ * 100 + __GNUC_MINOR__ < 407
+#  define YY_IGNORE_MAYBE_UNINITIALIZED_BEGIN                           \
+    _Pragma ("GCC diagnostic push")                                     \
+    _Pragma ("GCC diagnostic ignored \"-Wuninitialized\"")
+# else
+#  define YY_IGNORE_MAYBE_UNINITIALIZED_BEGIN                           \
+    _Pragma ("GCC diagnostic push")                                     \
+    _Pragma ("GCC diagnostic ignored \"-Wuninitialized\"")              \
     _Pragma ("GCC diagnostic ignored \"-Wmaybe-uninitialized\"")
-# define YY_IGNORE_MAYBE_UNINITIALIZED_END \
+# endif
+# define YY_IGNORE_MAYBE_UNINITIALIZED_END      \
     _Pragma ("GCC diagnostic pop")
 #else
 # define YY_INITIAL_VALUE(Value) Value
@@ -150,6 +150,27 @@
 # define YY_INITIAL_VALUE(Value) /* Nothing. */
 #endif
 
+#if defined __cplusplus && defined __GNUC__ && ! defined __ICC && 6 <= __GNUC__
+# define YY_IGNORE_USELESS_CAST_BEGIN                          \
+    _Pragma ("GCC diagnostic push")                            \
+    _Pragma ("GCC diagnostic ignored \"-Wuseless-cast\"")
+# define YY_IGNORE_USELESS_CAST_END            \
+    _Pragma ("GCC diagnostic pop")
+#endif
+#ifndef YY_IGNORE_USELESS_CAST_BEGIN
+# define YY_IGNORE_USELESS_CAST_BEGIN
+# define YY_IGNORE_USELESS_CAST_END
+#endif
+
+# ifndef YY_CAST
+#  ifdef __cplusplus
+#   define YY_CAST(Type, Val) static_cast<Type> (Val)
+#   define YY_REINTERPRET_CAST(Type, Val) reinterpret_cast<Type> (Val)
+#  else
+#   define YY_CAST(Type, Val) ((Type) (Val))
+#   define YY_REINTERPRET_CAST(Type, Val) ((Type) (Val))
+#  endif
+# endif
 # ifndef YY_NULLPTR
 #  if defined __cplusplus
 #   if 201103L <= __cplusplus
@@ -167,9 +188,9 @@
 # define YYDEBUG 0
 #endif
 
-#line 69 "third_party/blink/renderer/core/xml/xpath_grammar.y"
+#line 77 "third_party/blink/renderer/core/xml/xpath_grammar.y"
 namespace xpathyy {
-#line 170 "third_party/blink/renderer/core/xml/xpath_grammar_generated.h"
+#line 191 "third_party/blink/renderer/core/xml/xpath_grammar_generated.h"
 
 
 
@@ -178,33 +199,44 @@ namespace xpathyy {
   class YyParser
   {
   public:
-#ifndef YYSTYPE
+#ifdef YYSTYPE
+# ifdef __GNUC__
+#  pragma GCC message "bison: do not #define YYSTYPE in C++, use %define api.value.type"
+# endif
+    typedef YYSTYPE value_type;
+#else
   /// A buffer to store and retrieve objects.
   ///
   /// Sort of a variant, but does not keep track of the nature
   /// of the stored data, since that knowledge is available
   /// via the current parser state.
-  class semantic_type
+  class value_type
   {
   public:
     /// Type of *this.
-    typedef semantic_type self_type;
+    typedef value_type self_type;
 
     /// Empty construction.
-    semantic_type () YY_NOEXCEPT
-      : yybuffer_ ()
+    value_type () YY_NOEXCEPT
+      : yyraw_ ()
     {}
 
     /// Construct and fill.
     template <typename T>
-    semantic_type (YY_RVREF (T) t)
+    value_type (YY_RVREF (T) t)
     {
-      YYASSERT (sizeof (T) <= size);
       new (yyas_<T> ()) T (YY_MOVE (t));
     }
 
+#if 201103L <= YY_CPLUSPLUS
+    /// Non copyable.
+    value_type (const self_type&) = delete;
+    /// Non copyable.
+    self_type& operator= (const self_type&) = delete;
+#endif
+
     /// Destruction, allowed only if empty.
-    ~semantic_type () YY_NOEXCEPT
+    ~value_type () YY_NOEXCEPT
     {}
 
 # if 201103L <= YY_CPLUSPLUS
@@ -326,16 +358,19 @@ namespace xpathyy {
     }
 
   private:
-    /// Prohibit blind copies.
+#if YY_CPLUSPLUS < 201103L
+    /// Non copyable.
+    value_type (const self_type&);
+    /// Non copyable.
     self_type& operator= (const self_type&);
-    semantic_type (const self_type&);
+#endif
 
     /// Accessor to raw memory as \a T.
     template <typename T>
     T*
     yyas_ () YY_NOEXCEPT
     {
-      void *yyp = yybuffer_.yyraw;
+      void *yyp = yyraw_;
       return static_cast<T*> (yyp);
      }
 
@@ -344,28 +379,19 @@ namespace xpathyy {
     const T*
     yyas_ () const YY_NOEXCEPT
     {
-      const void *yyp = yybuffer_.yyraw;
+      const void *yyp = yyraw_;
       return static_cast<const T*> (yyp);
      }
 
     /// An auxiliary type to compute the largest semantic type.
     union union_type
     {
-      // kNodeType
-      // kPI
-      // kFunctionName
-      // kLiteral
-      // kVariableReference
-      // kNumber
-      // kNameTest
-      char dummy1[sizeof (String)];
-
       // ArgumentList
-      char dummy2[sizeof (blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Expression>>>)];
+      char dummy1[sizeof (blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Expression>>>)];
 
       // OptionalPredicateList
       // PredicateList
-      char dummy3[sizeof (blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Predicate>>>)];
+      char dummy2[sizeof (blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Predicate>>>)];
 
       // Expr
       // Predicate
@@ -382,20 +408,29 @@ namespace xpathyy {
       // AdditiveExpr
       // MultiplicativeExpr
       // UnaryExpr
-      char dummy4[sizeof (blink::Persistent<blink::xpath::Expression>)];
+      char dummy3[sizeof (blink::Persistent<blink::xpath::Expression>)];
 
       // LocationPath
       // AbsoluteLocationPath
       // RelativeLocationPath
-      char dummy5[sizeof (blink::Persistent<blink::xpath::LocationPath>)];
+      char dummy4[sizeof (blink::Persistent<blink::xpath::LocationPath>)];
 
       // NodeTest
-      char dummy6[sizeof (blink::Persistent<blink::xpath::Step::NodeTest>)];
+      char dummy5[sizeof (blink::Persistent<blink::xpath::Step::NodeTest>)];
 
       // Step
       // DescendantOrSelf
       // AbbreviatedStep
-      char dummy7[sizeof (blink::Persistent<blink::xpath::Step>)];
+      char dummy6[sizeof (blink::Persistent<blink::xpath::Step>)];
+
+      // kNodeType
+      // kPI
+      // kFunctionName
+      // kLiteral
+      // kVariableReference
+      // kNumber
+      // kNameTest
+      char dummy7[sizeof (blink::String)];
 
       // kEqOp
       // kRelOp
@@ -416,15 +451,16 @@ namespace xpathyy {
     union
     {
       /// Strongest alignment constraints.
-      long double yyalign_me;
+      long double yyalign_me_;
       /// A buffer large enough to store any of the semantic values.
-      char yyraw[size];
-    } yybuffer_;
+      char yyraw_[size];
+    };
   };
 
-#else
-    typedef YYSTYPE semantic_type;
 #endif
+    /// Backward compatibility (Bison 3.8).
+    typedef value_type semantic_type;
+
 
     /// Syntax errors thrown from user actions.
     struct syntax_error : std::runtime_error
@@ -440,48 +476,121 @@ namespace xpathyy {
       ~syntax_error () YY_NOEXCEPT YY_NOTHROW;
     };
 
-    /// Tokens.
+    /// Token kinds.
     struct token
     {
-      enum yytokentype
+      enum token_kind_type
       {
-        kMulOp = 258,
-        kEqOp = 259,
-        kRelOp = 260,
-        kPlus = 261,
-        kMinus = 262,
-        kOr = 263,
-        kAnd = 264,
-        kAxisName = 265,
-        kNodeType = 266,
-        kPI = 267,
-        kFunctionName = 268,
-        kLiteral = 269,
-        kVariableReference = 270,
-        kNumber = 271,
-        kDotDot = 272,
-        kSlashSlash = 273,
-        kNameTest = 274,
-        kXPathError = 275
+        YYEMPTY = -2,
+    YYEOF = 0,                     // "end of file"
+    YYerror = 256,                 // error
+    YYUNDEF = 257,                 // "invalid token"
+    kMulOp = 258,                  // kMulOp
+    kEqOp = 259,                   // kEqOp
+    kRelOp = 260,                  // kRelOp
+    kPlus = 261,                   // kPlus
+    kMinus = 262,                  // kMinus
+    kOr = 263,                     // kOr
+    kAnd = 264,                    // kAnd
+    kAxisName = 265,               // kAxisName
+    kNodeType = 266,               // kNodeType
+    kPI = 267,                     // kPI
+    kFunctionName = 268,           // kFunctionName
+    kLiteral = 269,                // kLiteral
+    kVariableReference = 270,      // kVariableReference
+    kNumber = 271,                 // kNumber
+    kDotDot = 272,                 // kDotDot
+    kSlashSlash = 273,             // kSlashSlash
+    kNameTest = 274,               // kNameTest
+    kXPathError = 275              // kXPathError
+      };
+      /// Backward compatibility alias (Bison 3.6).
+      typedef token_kind_type yytokentype;
+    };
+
+    /// Token kind, as returned by yylex.
+    typedef token::token_kind_type token_kind_type;
+
+    /// Backward compatibility alias (Bison 3.6).
+    typedef token_kind_type token_type;
+
+    /// Symbol kinds.
+    struct symbol_kind
+    {
+      enum symbol_kind_type
+      {
+        YYNTOKENS = 30, ///< Number of tokens.
+        S_YYEMPTY = -2,
+        S_YYEOF = 0,                             // "end of file"
+        S_YYerror = 1,                           // error
+        S_YYUNDEF = 2,                           // "invalid token"
+        S_kMulOp = 3,                            // kMulOp
+        S_kEqOp = 4,                             // kEqOp
+        S_kRelOp = 5,                            // kRelOp
+        S_kPlus = 6,                             // kPlus
+        S_kMinus = 7,                            // kMinus
+        S_kOr = 8,                               // kOr
+        S_kAnd = 9,                              // kAnd
+        S_kAxisName = 10,                        // kAxisName
+        S_kNodeType = 11,                        // kNodeType
+        S_kPI = 12,                              // kPI
+        S_kFunctionName = 13,                    // kFunctionName
+        S_kLiteral = 14,                         // kLiteral
+        S_kVariableReference = 15,               // kVariableReference
+        S_kNumber = 16,                          // kNumber
+        S_kDotDot = 17,                          // kDotDot
+        S_kSlashSlash = 18,                      // kSlashSlash
+        S_kNameTest = 19,                        // kNameTest
+        S_kXPathError = 20,                      // kXPathError
+        S_21_ = 21,                              // '/'
+        S_22_ = 22,                              // '@'
+        S_23_ = 23,                              // '('
+        S_24_ = 24,                              // ')'
+        S_25_ = 25,                              // '['
+        S_26_ = 26,                              // ']'
+        S_27_ = 27,                              // '.'
+        S_28_ = 28,                              // ','
+        S_29_ = 29,                              // '|'
+        S_YYACCEPT = 30,                         // $accept
+        S_Expr = 31,                             // Expr
+        S_LocationPath = 32,                     // LocationPath
+        S_AbsoluteLocationPath = 33,             // AbsoluteLocationPath
+        S_RelativeLocationPath = 34,             // RelativeLocationPath
+        S_Step = 35,                             // Step
+        S_AxisSpecifier = 36,                    // AxisSpecifier
+        S_NodeTest = 37,                         // NodeTest
+        S_OptionalPredicateList = 38,            // OptionalPredicateList
+        S_PredicateList = 39,                    // PredicateList
+        S_Predicate = 40,                        // Predicate
+        S_DescendantOrSelf = 41,                 // DescendantOrSelf
+        S_AbbreviatedStep = 42,                  // AbbreviatedStep
+        S_PrimaryExpr = 43,                      // PrimaryExpr
+        S_FunctionCall = 44,                     // FunctionCall
+        S_ArgumentList = 45,                     // ArgumentList
+        S_Argument = 46,                         // Argument
+        S_UnionExpr = 47,                        // UnionExpr
+        S_PathExpr = 48,                         // PathExpr
+        S_FilterExpr = 49,                       // FilterExpr
+        S_OrExpr = 50,                           // OrExpr
+        S_AndExpr = 51,                          // AndExpr
+        S_EqualityExpr = 52,                     // EqualityExpr
+        S_RelationalExpr = 53,                   // RelationalExpr
+        S_AdditiveExpr = 54,                     // AdditiveExpr
+        S_MultiplicativeExpr = 55,               // MultiplicativeExpr
+        S_UnaryExpr = 56                         // UnaryExpr
       };
     };
 
-    /// (External) token type, as returned by yylex.
-    typedef token::yytokentype token_type;
+    /// (Internal) symbol kind.
+    typedef symbol_kind::symbol_kind_type symbol_kind_type;
 
-    /// Symbol type: an internal symbol number.
-    typedef int symbol_number_type;
-
-    /// The symbol type number to denote an empty symbol.
-    enum { empty_symbol = -2 };
-
-    /// Internal symbol number for tokens (subsumed by symbol_number_type).
-    typedef unsigned char token_number_type;
+    /// The number of tokens.
+    static const symbol_kind_type YYNTOKENS = symbol_kind::YYNTOKENS;
 
     /// A complete symbol.
     ///
-    /// Expects its Base type to provide access to the symbol type
-    /// via type_get ().
+    /// Expects its Base type to provide access to the symbol kind
+    /// via kind ().
     ///
     /// Provide access to semantic value.
     template <typename Base>
@@ -491,19 +600,96 @@ namespace xpathyy {
       typedef Base super_type;
 
       /// Default constructor.
-      basic_symbol ()
+      basic_symbol () YY_NOEXCEPT
         : value ()
       {}
 
 #if 201103L <= YY_CPLUSPLUS
       /// Move constructor.
-      basic_symbol (basic_symbol&& that);
+      basic_symbol (basic_symbol&& that)
+        : Base (std::move (that))
+        , value ()
+      {
+        switch (this->kind ())
+    {
+      case symbol_kind::S_ArgumentList: // ArgumentList
+        value.move< blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Expression>>> > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_OptionalPredicateList: // OptionalPredicateList
+      case symbol_kind::S_PredicateList: // PredicateList
+        value.move< blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Predicate>>> > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_Expr: // Expr
+      case symbol_kind::S_Predicate: // Predicate
+      case symbol_kind::S_PrimaryExpr: // PrimaryExpr
+      case symbol_kind::S_FunctionCall: // FunctionCall
+      case symbol_kind::S_Argument: // Argument
+      case symbol_kind::S_UnionExpr: // UnionExpr
+      case symbol_kind::S_PathExpr: // PathExpr
+      case symbol_kind::S_FilterExpr: // FilterExpr
+      case symbol_kind::S_OrExpr: // OrExpr
+      case symbol_kind::S_AndExpr: // AndExpr
+      case symbol_kind::S_EqualityExpr: // EqualityExpr
+      case symbol_kind::S_RelationalExpr: // RelationalExpr
+      case symbol_kind::S_AdditiveExpr: // AdditiveExpr
+      case symbol_kind::S_MultiplicativeExpr: // MultiplicativeExpr
+      case symbol_kind::S_UnaryExpr: // UnaryExpr
+        value.move< blink::Persistent<blink::xpath::Expression> > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_LocationPath: // LocationPath
+      case symbol_kind::S_AbsoluteLocationPath: // AbsoluteLocationPath
+      case symbol_kind::S_RelativeLocationPath: // RelativeLocationPath
+        value.move< blink::Persistent<blink::xpath::LocationPath> > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_NodeTest: // NodeTest
+        value.move< blink::Persistent<blink::xpath::Step::NodeTest> > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_Step: // Step
+      case symbol_kind::S_DescendantOrSelf: // DescendantOrSelf
+      case symbol_kind::S_AbbreviatedStep: // AbbreviatedStep
+        value.move< blink::Persistent<blink::xpath::Step> > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_kNodeType: // kNodeType
+      case symbol_kind::S_kPI: // kPI
+      case symbol_kind::S_kFunctionName: // kFunctionName
+      case symbol_kind::S_kLiteral: // kLiteral
+      case symbol_kind::S_kVariableReference: // kVariableReference
+      case symbol_kind::S_kNumber: // kNumber
+      case symbol_kind::S_kNameTest: // kNameTest
+        value.move< blink::String > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_kEqOp: // kEqOp
+      case symbol_kind::S_kRelOp: // kRelOp
+        value.move< blink::xpath::EqTestOp::Opcode > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_kMulOp: // kMulOp
+        value.move< blink::xpath::NumericOp::Opcode > (std::move (that.value));
+        break;
+
+      case symbol_kind::S_kAxisName: // kAxisName
+      case symbol_kind::S_AxisSpecifier: // AxisSpecifier
+        value.move< blink::xpath::Step::Axis > (std::move (that.value));
+        break;
+
+      default:
+        break;
+    }
+
+      }
 #endif
 
       /// Copy constructor.
       basic_symbol (const basic_symbol& that);
 
-      /// Constructor for valueless symbols, and symbols from each type.
+      /// Constructors for typed symbols.
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t)
         : Base (t)
@@ -513,39 +699,31 @@ namespace xpathyy {
         : Base (t)
       {}
 #endif
+
 #if 201103L <= YY_CPLUSPLUS
-      basic_symbol (typename Base::kind_type t, String&& v)
+      basic_symbol (typename Base::kind_type t, blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Expression>>>&& v)
         : Base (t)
         , value (std::move (v))
       {}
 #else
-      basic_symbol (typename Base::kind_type t, const String& v)
+      basic_symbol (typename Base::kind_type t, const blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Expression>>>& v)
         : Base (t)
         , value (v)
       {}
 #endif
+
 #if 201103L <= YY_CPLUSPLUS
-      basic_symbol (typename Base::kind_type t, blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Expression>>>&& v)
+      basic_symbol (typename Base::kind_type t, blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Predicate>>>&& v)
         : Base (t)
         , value (std::move (v))
       {}
 #else
-      basic_symbol (typename Base::kind_type t, const blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Expression>>>& v)
+      basic_symbol (typename Base::kind_type t, const blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Predicate>>>& v)
         : Base (t)
         , value (v)
       {}
 #endif
-#if 201103L <= YY_CPLUSPLUS
-      basic_symbol (typename Base::kind_type t, blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Predicate>>>&& v)
-        : Base (t)
-        , value (std::move (v))
-      {}
-#else
-      basic_symbol (typename Base::kind_type t, const blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Predicate>>>& v)
-        : Base (t)
-        , value (v)
-      {}
-#endif
+
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t, blink::Persistent<blink::xpath::Expression>&& v)
         : Base (t)
@@ -557,6 +735,7 @@ namespace xpathyy {
         , value (v)
       {}
 #endif
+
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t, blink::Persistent<blink::xpath::LocationPath>&& v)
         : Base (t)
@@ -568,6 +747,7 @@ namespace xpathyy {
         , value (v)
       {}
 #endif
+
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t, blink::Persistent<blink::xpath::Step::NodeTest>&& v)
         : Base (t)
@@ -579,6 +759,7 @@ namespace xpathyy {
         , value (v)
       {}
 #endif
+
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t, blink::Persistent<blink::xpath::Step>&& v)
         : Base (t)
@@ -590,6 +771,19 @@ namespace xpathyy {
         , value (v)
       {}
 #endif
+
+#if 201103L <= YY_CPLUSPLUS
+      basic_symbol (typename Base::kind_type t, blink::String&& v)
+        : Base (t)
+        , value (std::move (v))
+      {}
+#else
+      basic_symbol (typename Base::kind_type t, const blink::String& v)
+        : Base (t)
+        , value (v)
+      {}
+#endif
+
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t, blink::xpath::EqTestOp::Opcode&& v)
         : Base (t)
@@ -601,6 +795,7 @@ namespace xpathyy {
         , value (v)
       {}
 #endif
+
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t, blink::xpath::NumericOp::Opcode&& v)
         : Base (t)
@@ -612,6 +807,7 @@ namespace xpathyy {
         , value (v)
       {}
 #endif
+
 #if 201103L <= YY_CPLUSPLUS
       basic_symbol (typename Base::kind_type t, blink::xpath::Step::Axis&& v)
         : Base (t)
@@ -630,86 +826,88 @@ namespace xpathyy {
         clear ();
       }
 
+
+
       /// Destroy contents, and record that is empty.
-      void clear ()
+      void clear () YY_NOEXCEPT
       {
         // User destructor.
-        symbol_number_type yytype = this->type_get ();
+        symbol_kind_type yykind = this->kind ();
         basic_symbol<Base>& yysym = *this;
         (void) yysym;
-        switch (yytype)
+        switch (yykind)
         {
        default:
           break;
         }
 
-        // Type destructor.
-switch (yytype)
+        // Value type destructor.
+switch (yykind)
     {
-      case 11: // kNodeType
-      case 12: // kPI
-      case 13: // kFunctionName
-      case 14: // kLiteral
-      case 15: // kVariableReference
-      case 16: // kNumber
-      case 19: // kNameTest
-        value.template destroy< String > ();
+      case symbol_kind::S_ArgumentList: // ArgumentList
+        value.template destroy< blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Expression>>> > ();
         break;
 
-      case 45: // ArgumentList
-        value.template destroy< blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Expression>>> > ();
+      case symbol_kind::S_OptionalPredicateList: // OptionalPredicateList
+      case symbol_kind::S_PredicateList: // PredicateList
+        value.template destroy< blink::Persistent<blink::GCedHeapVector<blink::Member<blink::xpath::Predicate>>> > ();
         break;
 
-      case 38: // OptionalPredicateList
-      case 39: // PredicateList
-        value.template destroy< blink::Persistent<blink::HeapVector<blink::Member<blink::xpath::Predicate>>> > ();
-        break;
-
-      case 31: // Expr
-      case 40: // Predicate
-      case 43: // PrimaryExpr
-      case 44: // FunctionCall
-      case 46: // Argument
-      case 47: // UnionExpr
-      case 48: // PathExpr
-      case 49: // FilterExpr
-      case 50: // OrExpr
-      case 51: // AndExpr
-      case 52: // EqualityExpr
-      case 53: // RelationalExpr
-      case 54: // AdditiveExpr
-      case 55: // MultiplicativeExpr
-      case 56: // UnaryExpr
+      case symbol_kind::S_Expr: // Expr
+      case symbol_kind::S_Predicate: // Predicate
+      case symbol_kind::S_PrimaryExpr: // PrimaryExpr
+      case symbol_kind::S_FunctionCall: // FunctionCall
+      case symbol_kind::S_Argument: // Argument
+      case symbol_kind::S_UnionExpr: // UnionExpr
+      case symbol_kind::S_PathExpr: // PathExpr
+      case symbol_kind::S_FilterExpr: // FilterExpr
+      case symbol_kind::S_OrExpr: // OrExpr
+      case symbol_kind::S_AndExpr: // AndExpr
+      case symbol_kind::S_EqualityExpr: // EqualityExpr
+      case symbol_kind::S_RelationalExpr: // RelationalExpr
+      case symbol_kind::S_AdditiveExpr: // AdditiveExpr
+      case symbol_kind::S_MultiplicativeExpr: // MultiplicativeExpr
+      case symbol_kind::S_UnaryExpr: // UnaryExpr
         value.template destroy< blink::Persistent<blink::xpath::Expression> > ();
         break;
 
-      case 32: // LocationPath
-      case 33: // AbsoluteLocationPath
-      case 34: // RelativeLocationPath
+      case symbol_kind::S_LocationPath: // LocationPath
+      case symbol_kind::S_AbsoluteLocationPath: // AbsoluteLocationPath
+      case symbol_kind::S_RelativeLocationPath: // RelativeLocationPath
         value.template destroy< blink::Persistent<blink::xpath::LocationPath> > ();
         break;
 
-      case 37: // NodeTest
+      case symbol_kind::S_NodeTest: // NodeTest
         value.template destroy< blink::Persistent<blink::xpath::Step::NodeTest> > ();
         break;
 
-      case 35: // Step
-      case 41: // DescendantOrSelf
-      case 42: // AbbreviatedStep
+      case symbol_kind::S_Step: // Step
+      case symbol_kind::S_DescendantOrSelf: // DescendantOrSelf
+      case symbol_kind::S_AbbreviatedStep: // AbbreviatedStep
         value.template destroy< blink::Persistent<blink::xpath::Step> > ();
         break;
 
-      case 4: // kEqOp
-      case 5: // kRelOp
+      case symbol_kind::S_kNodeType: // kNodeType
+      case symbol_kind::S_kPI: // kPI
+      case symbol_kind::S_kFunctionName: // kFunctionName
+      case symbol_kind::S_kLiteral: // kLiteral
+      case symbol_kind::S_kVariableReference: // kVariableReference
+      case symbol_kind::S_kNumber: // kNumber
+      case symbol_kind::S_kNameTest: // kNameTest
+        value.template destroy< blink::String > ();
+        break;
+
+      case symbol_kind::S_kEqOp: // kEqOp
+      case symbol_kind::S_kRelOp: // kRelOp
         value.template destroy< blink::xpath::EqTestOp::Opcode > ();
         break;
 
-      case 3: // kMulOp
+      case symbol_kind::S_kMulOp: // kMulOp
         value.template destroy< blink::xpath::NumericOp::Opcode > ();
         break;
 
-      case 10: // kAxisName
-      case 36: // AxisSpecifier
+      case symbol_kind::S_kAxisName: // kAxisName
+      case symbol_kind::S_AxisSpecifier: // AxisSpecifier
         value.template destroy< blink::xpath::Step::Axis > ();
         break;
 
@@ -720,6 +918,18 @@ switch (yytype)
         Base::clear ();
       }
 
+#if YYDEBUG || 0
+      /// The user-facing name of this symbol.
+      const char *name () const YY_NOEXCEPT
+      {
+        return YyParser::symbol_name (this->kind ());
+      }
+#endif // #if YYDEBUG || 0
+
+
+      /// Backward compatibility (Bison 3.6).
+      symbol_kind_type type_get () const YY_NOEXCEPT;
+
       /// Whether empty.
       bool empty () const YY_NOEXCEPT;
 
@@ -727,7 +937,7 @@ switch (yytype)
       void move (basic_symbol& s);
 
       /// The semantic value.
-      semantic_type value;
+      value_type value;
 
     private:
 #if YY_CPLUSPLUS < 201103L
@@ -737,124 +947,110 @@ switch (yytype)
     };
 
     /// Type access provider for token (enum) based symbols.
-    struct by_type
+    struct by_kind
     {
+      /// The symbol kind as needed by the constructor.
+      typedef token_kind_type kind_type;
+
       /// Default constructor.
-      by_type ();
+      by_kind () YY_NOEXCEPT;
 
 #if 201103L <= YY_CPLUSPLUS
       /// Move constructor.
-      by_type (by_type&& that);
+      by_kind (by_kind&& that) YY_NOEXCEPT;
 #endif
 
       /// Copy constructor.
-      by_type (const by_type& that);
-
-      /// The symbol type as needed by the constructor.
-      typedef token_type kind_type;
+      by_kind (const by_kind& that) YY_NOEXCEPT;
 
       /// Constructor from (external) token numbers.
-      by_type (kind_type t);
+      by_kind (kind_type t) YY_NOEXCEPT;
+
+
 
       /// Record that this symbol is empty.
-      void clear ();
+      void clear () YY_NOEXCEPT;
 
-      /// Steal the symbol type from \a that.
-      void move (by_type& that);
+      /// Steal the symbol kind from \a that.
+      void move (by_kind& that);
 
       /// The (internal) type number (corresponding to \a type).
       /// \a empty when empty.
-      symbol_number_type type_get () const YY_NOEXCEPT;
+      symbol_kind_type kind () const YY_NOEXCEPT;
 
-      /// The token.
-      token_type token () const YY_NOEXCEPT;
+      /// Backward compatibility (Bison 3.6).
+      symbol_kind_type type_get () const YY_NOEXCEPT;
 
-      /// The symbol type.
-      /// \a empty_symbol when empty.
-      /// An int, not token_number_type, to be able to store empty_symbol.
-      int type;
+      /// The symbol kind.
+      /// \a S_YYEMPTY when empty.
+      symbol_kind_type kind_;
     };
 
+    /// Backward compatibility for a private implementation detail (Bison 3.6).
+    typedef by_kind by_type;
+
     /// "External" symbols: returned by the scanner.
-    struct symbol_type : basic_symbol<by_type>
+    struct symbol_type : basic_symbol<by_kind>
     {
       /// Superclass.
-      typedef basic_symbol<by_type> super_type;
+      typedef basic_symbol<by_kind> super_type;
 
       /// Empty symbol.
-      symbol_type () {}
+      symbol_type () YY_NOEXCEPT {}
 
       /// Constructor for valueless symbols, and symbols from each type.
 #if 201103L <= YY_CPLUSPLUS
       symbol_type (int tok)
-        : super_type(token_type (tok))
-      {
-        YYASSERT (tok == 0 || tok == token::kPlus || tok == token::kMinus || tok == token::kOr || tok == token::kAnd || tok == token::kDotDot || tok == token::kSlashSlash || tok == token::kXPathError || tok == 47 || tok == 64 || tok == 40 || tok == 41 || tok == 91 || tok == 93 || tok == 46 || tok == 44 || tok == 124);
-      }
+        : super_type (token_kind_type (tok))
 #else
       symbol_type (int tok)
-        : super_type(token_type (tok))
-      {
-        YYASSERT (tok == 0 || tok == token::kPlus || tok == token::kMinus || tok == token::kOr || tok == token::kAnd || tok == token::kDotDot || tok == token::kSlashSlash || tok == token::kXPathError || tok == 47 || tok == 64 || tok == 40 || tok == 41 || tok == 91 || tok == 93 || tok == 46 || tok == 44 || tok == 124);
-      }
+        : super_type (token_kind_type (tok))
 #endif
+      {}
 #if 201103L <= YY_CPLUSPLUS
-      symbol_type (int tok, String v)
-        : super_type(token_type (tok), std::move (v))
-      {
-        YYASSERT (tok == token::kNodeType || tok == token::kPI || tok == token::kFunctionName || tok == token::kLiteral || tok == token::kVariableReference || tok == token::kNumber || tok == token::kNameTest);
-      }
+      symbol_type (int tok, blink::String v)
+        : super_type (token_kind_type (tok), std::move (v))
 #else
-      symbol_type (int tok, const String& v)
-        : super_type(token_type (tok), v)
-      {
-        YYASSERT (tok == token::kNodeType || tok == token::kPI || tok == token::kFunctionName || tok == token::kLiteral || tok == token::kVariableReference || tok == token::kNumber || tok == token::kNameTest);
-      }
+      symbol_type (int tok, const blink::String& v)
+        : super_type (token_kind_type (tok), v)
 #endif
+      {}
 #if 201103L <= YY_CPLUSPLUS
       symbol_type (int tok, blink::xpath::EqTestOp::Opcode v)
-        : super_type(token_type (tok), std::move (v))
-      {
-        YYASSERT (tok == token::kEqOp || tok == token::kRelOp);
-      }
+        : super_type (token_kind_type (tok), std::move (v))
 #else
       symbol_type (int tok, const blink::xpath::EqTestOp::Opcode& v)
-        : super_type(token_type (tok), v)
-      {
-        YYASSERT (tok == token::kEqOp || tok == token::kRelOp);
-      }
+        : super_type (token_kind_type (tok), v)
 #endif
+      {}
 #if 201103L <= YY_CPLUSPLUS
       symbol_type (int tok, blink::xpath::NumericOp::Opcode v)
-        : super_type(token_type (tok), std::move (v))
-      {
-        YYASSERT (tok == token::kMulOp);
-      }
+        : super_type (token_kind_type (tok), std::move (v))
 #else
       symbol_type (int tok, const blink::xpath::NumericOp::Opcode& v)
-        : super_type(token_type (tok), v)
-      {
-        YYASSERT (tok == token::kMulOp);
-      }
+        : super_type (token_kind_type (tok), v)
 #endif
+      {}
 #if 201103L <= YY_CPLUSPLUS
       symbol_type (int tok, blink::xpath::Step::Axis v)
-        : super_type(token_type (tok), std::move (v))
-      {
-        YYASSERT (tok == token::kAxisName);
-      }
+        : super_type (token_kind_type (tok), std::move (v))
 #else
       symbol_type (int tok, const blink::xpath::Step::Axis& v)
-        : super_type(token_type (tok), v)
-      {
-        YYASSERT (tok == token::kAxisName);
-      }
+        : super_type (token_kind_type (tok), v)
 #endif
+      {}
     };
 
     /// Build a parser object.
     YyParser (blink::xpath::Parser* parser__yyarg);
     virtual ~YyParser ();
+
+#if 201103L <= YY_CPLUSPLUS
+    /// Non copyable.
+    YyParser (const YyParser&) = delete;
+    /// Non copyable.
+    YyParser& operator= (const YyParser&) = delete;
+#endif
 
     /// Parse.  An alias for parse ().
     /// \returns  0 iff parsing succeeded.
@@ -885,7 +1081,59 @@ switch (yytype)
     /// Report a syntax error.
     void error (const syntax_error& err);
 
-    // Implementation of make_symbol for each symbol type.
+#if YYDEBUG || 0
+    /// The user-facing name of the symbol whose (internal) number is
+    /// YYSYMBOL.  No bounds checking.
+    static const char *symbol_name (symbol_kind_type yysymbol);
+#endif // #if YYDEBUG || 0
+
+
+    // Implementation of make_symbol for each token kind.
+#if 201103L <= YY_CPLUSPLUS
+      static
+      symbol_type
+      make_YYEOF ()
+      {
+        return symbol_type (token::YYEOF);
+      }
+#else
+      static
+      symbol_type
+      make_YYEOF ()
+      {
+        return symbol_type (token::YYEOF);
+      }
+#endif
+#if 201103L <= YY_CPLUSPLUS
+      static
+      symbol_type
+      make_YYerror ()
+      {
+        return symbol_type (token::YYerror);
+      }
+#else
+      static
+      symbol_type
+      make_YYerror ()
+      {
+        return symbol_type (token::YYerror);
+      }
+#endif
+#if 201103L <= YY_CPLUSPLUS
+      static
+      symbol_type
+      make_YYUNDEF ()
+      {
+        return symbol_type (token::YYUNDEF);
+      }
+#else
+      static
+      symbol_type
+      make_YYUNDEF ()
+      {
+        return symbol_type (token::YYUNDEF);
+      }
+#endif
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
@@ -1009,14 +1257,14 @@ switch (yytype)
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
-      make_kNodeType (String v)
+      make_kNodeType (blink::String v)
       {
         return symbol_type (token::kNodeType, std::move (v));
       }
 #else
       static
       symbol_type
-      make_kNodeType (const String& v)
+      make_kNodeType (const blink::String& v)
       {
         return symbol_type (token::kNodeType, v);
       }
@@ -1024,14 +1272,14 @@ switch (yytype)
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
-      make_kPI (String v)
+      make_kPI (blink::String v)
       {
         return symbol_type (token::kPI, std::move (v));
       }
 #else
       static
       symbol_type
-      make_kPI (const String& v)
+      make_kPI (const blink::String& v)
       {
         return symbol_type (token::kPI, v);
       }
@@ -1039,14 +1287,14 @@ switch (yytype)
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
-      make_kFunctionName (String v)
+      make_kFunctionName (blink::String v)
       {
         return symbol_type (token::kFunctionName, std::move (v));
       }
 #else
       static
       symbol_type
-      make_kFunctionName (const String& v)
+      make_kFunctionName (const blink::String& v)
       {
         return symbol_type (token::kFunctionName, v);
       }
@@ -1054,14 +1302,14 @@ switch (yytype)
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
-      make_kLiteral (String v)
+      make_kLiteral (blink::String v)
       {
         return symbol_type (token::kLiteral, std::move (v));
       }
 #else
       static
       symbol_type
-      make_kLiteral (const String& v)
+      make_kLiteral (const blink::String& v)
       {
         return symbol_type (token::kLiteral, v);
       }
@@ -1069,14 +1317,14 @@ switch (yytype)
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
-      make_kVariableReference (String v)
+      make_kVariableReference (blink::String v)
       {
         return symbol_type (token::kVariableReference, std::move (v));
       }
 #else
       static
       symbol_type
-      make_kVariableReference (const String& v)
+      make_kVariableReference (const blink::String& v)
       {
         return symbol_type (token::kVariableReference, v);
       }
@@ -1084,14 +1332,14 @@ switch (yytype)
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
-      make_kNumber (String v)
+      make_kNumber (blink::String v)
       {
         return symbol_type (token::kNumber, std::move (v));
       }
 #else
       static
       symbol_type
-      make_kNumber (const String& v)
+      make_kNumber (const blink::String& v)
       {
         return symbol_type (token::kNumber, v);
       }
@@ -1129,14 +1377,14 @@ switch (yytype)
 #if 201103L <= YY_CPLUSPLUS
       static
       symbol_type
-      make_kNameTest (String v)
+      make_kNameTest (blink::String v)
       {
         return symbol_type (token::kNameTest, std::move (v));
       }
 #else
       static
       symbol_type
-      make_kNameTest (const String& v)
+      make_kNameTest (const blink::String& v)
       {
         return symbol_type (token::kNameTest, v);
       }
@@ -1159,89 +1407,92 @@ switch (yytype)
 
 
   private:
-    /// This class is not copyable.
+#if YY_CPLUSPLUS < 201103L
+    /// Non copyable.
     YyParser (const YyParser&);
+    /// Non copyable.
     YyParser& operator= (const YyParser&);
+#endif
 
-    /// State numbers.
-    typedef int state_type;
 
-    /// Generate an error message.
-    /// \param yystate   the state where the error occurred.
-    /// \param yyla      the lookahead token.
-    virtual std::string yysyntax_error_ (state_type yystate,
-                                         const symbol_type& yyla) const;
+    /// Stored state numbers (used for stacks).
+    typedef signed char state_type;
 
     /// Compute post-reduction state.
     /// \param yystate   the current state
     /// \param yysym     the nonterminal to push on the stack
-    state_type yy_lr_goto_state_ (state_type yystate, int yysym);
+    static state_type yy_lr_goto_state_ (state_type yystate, int yysym);
 
     /// Whether the given \c yypact_ value indicates a defaulted state.
     /// \param yyvalue   the value to check
-    static bool yy_pact_value_is_default_ (int yyvalue);
+    static bool yy_pact_value_is_default_ (int yyvalue) YY_NOEXCEPT;
 
     /// Whether the given \c yytable_ value indicates a syntax error.
     /// \param yyvalue   the value to check
-    static bool yy_table_value_is_error_ (int yyvalue);
+    static bool yy_table_value_is_error_ (int yyvalue) YY_NOEXCEPT;
 
     static const signed char yypact_ninf_;
     static const signed char yytable_ninf_;
 
-    /// Convert a scanner token number \a t to a symbol number.
-    static token_number_type yytranslate_ (int t);
+    /// Convert a scanner token kind \a t to a symbol kind.
+    /// In theory \a t should be a token_kind_type, but character literals
+    /// are valid, yet not members of the token_kind_type enum.
+    static symbol_kind_type yytranslate_ (int t) YY_NOEXCEPT;
+
+#if YYDEBUG || 0
+    /// For a symbol, its name in clear.
+    static const char* const yytname_[];
+#endif // #if YYDEBUG || 0
+
 
     // Tables.
-  // YYPACT[STATE-NUM] -- Index in YYTABLE of the portion describing
-  // STATE-NUM.
-  static const signed char yypact_[];
+    // YYPACT[STATE-NUM] -- Index in YYTABLE of the portion describing
+    // STATE-NUM.
+    static const signed char yypact_[];
 
-  // YYDEFACT[STATE-NUM] -- Default reduction number in state STATE-NUM.
-  // Performed when YYTABLE does not specify something else to do.  Zero
-  // means the default is an error.
-  static const unsigned char yydefact_[];
+    // YYDEFACT[STATE-NUM] -- Default reduction number in state STATE-NUM.
+    // Performed when YYTABLE does not specify something else to do.  Zero
+    // means the default is an error.
+    static const signed char yydefact_[];
 
-  // YYPGOTO[NTERM-NUM].
-  static const signed char yypgoto_[];
+    // YYPGOTO[NTERM-NUM].
+    static const signed char yypgoto_[];
 
-  // YYDEFGOTO[NTERM-NUM].
-  static const signed char yydefgoto_[];
+    // YYDEFGOTO[NTERM-NUM].
+    static const signed char yydefgoto_[];
 
-  // YYTABLE[YYPACT[STATE-NUM]] -- What to do in state STATE-NUM.  If
-  // positive, shift that token.  If negative, reduce the rule whose
-  // number is the opposite.  If YYTABLE_NINF, syntax error.
-  static const unsigned char yytable_[];
+    // YYTABLE[YYPACT[STATE-NUM]] -- What to do in state STATE-NUM.  If
+    // positive, shift that token.  If negative, reduce the rule whose
+    // number is the opposite.  If YYTABLE_NINF, syntax error.
+    static const signed char yytable_[];
 
-  static const signed char yycheck_[];
+    static const signed char yycheck_[];
 
-  // YYSTOS[STATE-NUM] -- The (internal number of the) accessing
-  // symbol of state STATE-NUM.
-  static const unsigned char yystos_[];
+    // YYSTOS[STATE-NUM] -- The symbol kind of the accessing symbol of
+    // state STATE-NUM.
+    static const signed char yystos_[];
 
-  // YYR1[YYN] -- Symbol number of symbol that rule YYN derives.
-  static const unsigned char yyr1_[];
+    // YYR1[RULE-NUM] -- Symbol kind of the left-hand side of rule RULE-NUM.
+    static const signed char yyr1_[];
 
-  // YYR2[YYN] -- Number of symbols on the right hand side of rule YYN.
-  static const unsigned char yyr2_[];
+    // YYR2[RULE-NUM] -- Number of symbols on the right-hand side of rule RULE-NUM.
+    static const signed char yyr2_[];
 
 
 #if YYDEBUG
-    /// For a symbol, its name in clear.
-    static const char* const yytname_[];
-
-  // YYRLINE[YYN] -- Source line where rule number YYN was defined.
-  static const unsigned short yyrline_[];
+    // YYRLINE[YYN] -- Source line where rule number YYN was defined.
+    static const short yyrline_[];
     /// Report on the debug stream that the rule \a r is going to be reduced.
-    virtual void yy_reduce_print_ (int r);
+    virtual void yy_reduce_print_ (int r) const;
     /// Print the state stack on the debug stream.
-    virtual void yystack_print_ ();
+    virtual void yy_stack_print_ () const;
 
     /// Debugging level.
     int yydebug_;
     /// Debug stream.
     std::ostream* yycdebug_;
 
-    /// \brief Display a symbol type, value and location.
+    /// \brief Display a symbol kind, value and location.
     /// \param yyo    The output stream.
     /// \param yysym  The symbol.
     template <typename Base>
@@ -1262,7 +1513,7 @@ switch (yytype)
       /// Default constructor.
       by_state () YY_NOEXCEPT;
 
-      /// The symbol type as needed by the constructor.
+      /// The symbol kind as needed by the constructor.
       typedef state_type kind_type;
 
       /// Constructor.
@@ -1274,15 +1525,16 @@ switch (yytype)
       /// Record that this symbol is empty.
       void clear () YY_NOEXCEPT;
 
-      /// Steal the symbol type from \a that.
+      /// Steal the symbol kind from \a that.
       void move (by_state& that);
 
-      /// The (internal) type number (corresponding to \a state).
-      /// \a empty_symbol when empty.
-      symbol_number_type type_get () const YY_NOEXCEPT;
+      /// The symbol kind (corresponding to \a state).
+      /// \a symbol_kind::S_YYEMPTY when empty.
+      symbol_kind_type kind () const YY_NOEXCEPT;
 
       /// The state number used to denote an empty symbol.
-      enum { empty_state = -1 };
+      /// We use the initial state, as it does not have a value.
+      enum { empty_state = 0 };
 
       /// The state.
       /// \a empty when empty.
@@ -1304,6 +1556,10 @@ switch (yytype)
       /// Assignment, needed by push_back by some old implementations.
       /// Moves the contents of that.
       stack_symbol_type& operator= (stack_symbol_type& that);
+
+      /// Assignment, needed by push_back by other implementations.
+      /// Needed by some other old implementations.
+      stack_symbol_type& operator= (const stack_symbol_type& that);
 #endif
     };
 
@@ -1313,48 +1569,38 @@ switch (yytype)
     {
     public:
       // Hide our reversed order.
-      typedef typename S::reverse_iterator iterator;
-      typedef typename S::const_reverse_iterator const_iterator;
+      typedef typename S::iterator iterator;
+      typedef typename S::const_iterator const_iterator;
       typedef typename S::size_type size_type;
+      typedef typename std::ptrdiff_t index_type;
 
-      stack (size_type n = 200)
+      stack (size_type n = 200) YY_NOEXCEPT
         : seq_ (n)
       {}
 
-      /// Random access.
-      ///
-      /// Index 0 returns the topmost element.
-      T&
-      operator[] (size_type i)
-      {
-        return seq_[size () - 1 - i];
-      }
-
-      /// Random access.
-      ///
-      /// Index 0 returns the topmost element.
-      T&
-      operator[] (int i)
-      {
-        return operator[] (size_type (i));
-      }
+#if 201103L <= YY_CPLUSPLUS
+      /// Non copyable.
+      stack (const stack&) = delete;
+      /// Non copyable.
+      stack& operator= (const stack&) = delete;
+#endif
 
       /// Random access.
       ///
       /// Index 0 returns the topmost element.
       const T&
-      operator[] (size_type i) const
+      operator[] (index_type i) const
       {
-        return seq_[size () - 1 - i];
+        return seq_[size_type (size () - 1 - i)];
       }
 
       /// Random access.
       ///
       /// Index 0 returns the topmost element.
-      const T&
-      operator[] (int i) const
+      T&
+      operator[] (index_type i)
       {
-        return operator[] (size_type (i));
+        return seq_[size_type (size () - 1 - i)];
       }
 
       /// Steal the contents of \a t.
@@ -1369,7 +1615,7 @@ switch (yytype)
 
       /// Pop elements from the stack.
       void
-      pop (int n = 1) YY_NOEXCEPT
+      pop (std::ptrdiff_t n = 1) YY_NOEXCEPT
       {
         for (; 0 < n; --n)
           seq_.pop_back ();
@@ -1383,49 +1629,53 @@ switch (yytype)
       }
 
       /// Number of elements on the stack.
-      size_type
+      index_type
       size () const YY_NOEXCEPT
       {
-        return seq_.size ();
+        return index_type (seq_.size ());
       }
 
       /// Iterator on top of the stack (going downwards).
       const_iterator
       begin () const YY_NOEXCEPT
       {
-        return seq_.rbegin ();
+        return seq_.begin ();
       }
 
       /// Bottom of the stack.
       const_iterator
       end () const YY_NOEXCEPT
       {
-        return seq_.rend ();
+        return seq_.end ();
       }
 
       /// Present a slice of the top of a stack.
       class slice
       {
       public:
-        slice (const stack& stack, int range)
+        slice (const stack& stack, index_type range) YY_NOEXCEPT
           : stack_ (stack)
           , range_ (range)
         {}
 
         const T&
-        operator[] (int i) const
+        operator[] (index_type i) const
         {
           return stack_[range_ - i];
         }
 
       private:
         const stack& stack_;
-        int range_;
+        index_type range_;
       };
 
     private:
+#if YY_CPLUSPLUS < 201103L
+      /// Non copyable.
       stack (const stack&);
+      /// Non copyable.
       stack& operator= (const stack&);
+#endif
       /// The wrapped container.
       S seq_;
     };
@@ -1453,30 +1703,26 @@ switch (yytype)
     void yypush_ (const char* m, state_type s, YY_MOVE_REF (symbol_type) sym);
 
     /// Pop \a n symbols from the stack.
-    void yypop_ (int n = 1);
+    void yypop_ (int n = 1) YY_NOEXCEPT;
 
     /// Constants.
     enum
     {
-      yyeof_ = 0,
       yylast_ = 122,     ///< Last index in yytable_.
       yynnts_ = 27,  ///< Number of nonterminal symbols.
-      yyfinal_ = 47, ///< Termination state number.
-      yyterror_ = 1,
-      yyerrcode_ = 256,
-      yyntokens_ = 30  ///< Number of tokens.
+      yyfinal_ = 47 ///< Termination state number.
     };
 
 
     // User arguments.
     blink::xpath::Parser* parser_;
+
   };
 
 
-#line 69 "third_party/blink/renderer/core/xml/xpath_grammar.y"
+#line 77 "third_party/blink/renderer/core/xml/xpath_grammar.y"
 } // xpathyy
-#line 1476 "third_party/blink/renderer/core/xml/xpath_grammar_generated.h"
-
+#line 1723 "third_party/blink/renderer/core/xml/xpath_grammar_generated.h"
 
 
 

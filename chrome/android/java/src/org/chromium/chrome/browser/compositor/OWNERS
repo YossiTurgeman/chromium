@@ -1,6 +1,5 @@
 dtrainor@chromium.org
 mdjones@chromium.org
 
-# COMPONENT: UI>Browser>Mobile>CompositedUI
-# TEAM: chrome-android-app@chromium.org
-# OS: Android
+per-file CompositorViewHolder.java=clhager@google.com
+per-file LayerTitleCache.java=file://chrome/android/java/src/org/chromium/chrome/browser/compositor/overlays/strip/OWNERS

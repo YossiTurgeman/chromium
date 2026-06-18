@@ -1,136 +1,126 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var updateDynamicRules = chrome.declarativeNetRequest.updateDynamicRules;
-var getDynamicRules = chrome.declarativeNetRequest.getDynamicRules;
-var ruleLimit = chrome.declarativeNetRequest.MAX_NUMBER_OF_DYNAMIC_RULES;
-var regexRuleLimit = chrome.declarativeNetRequest.MAX_NUMBER_OF_REGEX_RULES;
-var nextId = 1;
+function updateDynamicRules(options, expectedError) {
+  return new Promise(resolve => {
+    chrome.declarativeNetRequest.updateDynamicRules(options, () => {
+      if (expectedError) {
+        chrome.test.assertLastError(expectedError);
+      } else {
+        chrome.test.assertNoLastError();
+      }
 
-var createRuleWithID = function(id) {
+      resolve();
+    });
+  });
+}
+
+function createRuleWithID(id) {
   return {
-    id: id,
+    id,
     priority: 1,
     condition: {urlFilter: id.toString()},
     action: {type: 'block'},
   };
-};
+}
 
-var createRegexRuleWithID = function(id) {
+function createRegexRuleWithID(id) {
   return {
-    id: id,
+    id,
     priority: 1,
     condition: {regexFilter: id.toString()},
     action: {type: 'block'},
   };
-};
+}
 
-var createLargeRegexRuleWithID = function(id) {
-  var rule = createRegexRuleWithID(id);
+function createLargeRegexRuleWithID(id) {
+  const rule = createRegexRuleWithID(id);
   rule.condition.regexFilter = '.{512}x';
   return rule;
-};
+}
 
 // Verifies the current set of rules. Ensures no error is signalled and proceeds
 // to the next test.
-var verifyCurrentRulesCallback = function() {
+function dynamicRulesEqual(expectedRules, ruleFilter) {
   chrome.test.assertNoLastError();
 
-  getDynamicRules(function(rules) {
-    chrome.test.assertNoLastError();
+  return new Promise(resolve => {
+    chrome.declarativeNetRequest.getDynamicRules(ruleFilter, actualRules => {
+      chrome.test.assertNoLastError();
 
-    var comparator = function(rule1, rule2) {
-      return rule1.id - rule2.id;
-    };
+      // Sort by ID first since assertEq respects order of arrays.
+      const comparator = (rule1, rule2) => rule1.id - rule2.id;
+      actualRules.sort(comparator);
+      expectedRules.sort(comparator);
 
-    // Sort by ID first since assertEq respects order of arrays.
-    rules.sort(comparator)
-    currentRules.sort(comparator);
-    chrome.test.assertEq(currentRules, rules);
+      chrome.test.assertEq(expectedRules, actualRules);
 
-    chrome.test.succeed();
+      resolve();
+    });
   });
-};
-var currentRules = [];
+}
+
+let currentRules = [];
 
 chrome.test.runTests([
-  function getRulesEmpty() {
-    verifyCurrentRulesCallback();
+  async function getRulesEmpty() {
+    await dynamicRulesEqual([]);
+
+    chrome.test.succeed();
   },
 
-  function addRulesEmpty() {
-    updateDynamicRules([], currentRules, verifyCurrentRulesCallback);
+  async function addRulesEmpty() {
+    await updateDynamicRules({});
+    await dynamicRulesEqual([]);
+
+    chrome.test.succeed();
   },
 
-  function addRules() {
+  async function addRules() {
     currentRules =
         [createRuleWithID(1), createRuleWithID(2), createRuleWithID(3)];
-    updateDynamicRules([], currentRules, verifyCurrentRulesCallback);
-    nextId = 4;
+    await updateDynamicRules({addRules: currentRules});
+    await dynamicRulesEqual(currentRules);
+
+    chrome.test.succeed();
   },
 
-  function removeRules() {
+  async function ruleIdsFilter() {
+    await dynamicRulesEqual(
+        currentRules.filter(({id}) => id !== 3), {ruleIds: [1, 2]});
+
+    chrome.test.succeed();
+  },
+
+  async function removeRules() {
     // Remove rule with id 1, 2.
     // Also ensure rule ids which are not present are ignored.
-    currentRules = currentRules.filter(rule => rule.id === 3);
-    updateDynamicRules([4, 5, 2, 1], [], verifyCurrentRulesCallback);
+    currentRules = currentRules.filter(({id}) => id === 3);
+    await updateDynamicRules({addRules: [], removeRuleIds: [4, 5, 2, 1]});
+    await dynamicRulesEqual(currentRules);
+
+    chrome.test.succeed();
   },
 
   // Ensure we fail on adding a rule with a duplicate ID.
-  function duplicateID() {
-    updateDynamicRules(
-        [], [createRegexRuleWithID(3)],
-        chrome.test.callbackFail('Rule with id 3 does not have a unique ID.'));
+  async function duplicateID() {
+    await updateDynamicRules(
+        {addRules: [createRegexRuleWithID(3)]},
+        'Rule with id 3 does not have a unique ID.');
+
+    chrome.test.succeed();
   },
 
   // Ensure we get an error on adding a rule which exceeds the regex memory
   // limit.
-  function largeRegexError() {
-    updateDynamicRules(
-        [], [createLargeRegexRuleWithID(5)],
-        chrome.test.callbackFail(
-            'Rule with id 5 specified a more complex regex than allowed as ' +
-            'part of the "regexFilter" key.'));
+  async function largeRegexError() {
+    await updateDynamicRules(
+        {addRules: [createLargeRegexRuleWithID(5)]},
+        'Rule with id 5 was skipped as the "regexFilter" value exceeded the ' +
+            '2KB memory limit when compiled. Learn more: ' +
+            'https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest#regex-rules');
+
+    chrome.test.succeed();
   },
-
-  // Ensure that an extension can add up to |regexRuleLimit| number of regex
-  // rules.
-  function regexRuleLimitReached() {
-    var numRulesToAdd = regexRuleLimit;
-    var newRules = [];
-    while (newRules.length < regexRuleLimit)
-      newRules.push(createRegexRuleWithID(nextId++));
-
-    currentRules = newRules.concat(currentRules);
-    chrome.test.assertEq(regexRuleLimit + 1, currentRules.length);
-    updateDynamicRules([], newRules, verifyCurrentRulesCallback);
-  },
-
-  // Ensure that adding more regex rules than |regexRuleLimit| causes an error.
-  function regexRuleLimitError() {
-    updateDynamicRules(
-        [], [createRegexRuleWithID(nextId++)],
-        chrome.test.callbackFail(
-          'Dynamic rule count for regex rules exceeded.'));
-  },
-
-  // Ensure we can add up to |ruleLimit| no. of rules.
-  function ruleLimitReached() {
-    var numRulesToAdd = ruleLimit - currentRules.length;
-    var newRules = [];
-    while (newRules.length < numRulesToAdd)
-      newRules.push(createRuleWithID(nextId++));
-
-    currentRules = newRules.concat(currentRules);
-    chrome.test.assertEq(ruleLimit, currentRules.length);
-    updateDynamicRules([], newRules, verifyCurrentRulesCallback);
-  },
-
-  // Ensure we can't add more than |ruleLimit| rules.
-  function ruleLimitError() {
-    updateDynamicRules(
-        [], [createRuleWithID(nextId++)],
-        chrome.test.callbackFail('Dynamic rule count exceeded.'));
-  }
 ]);

@@ -1,14 +1,15 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EXPORTED_WEB_INPUT_METHOD_CONTROLLER_IMPL_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EXPORTED_WEB_INPUT_METHOD_CONTROLLER_IMPL_H_
 
-#include "base/macros.h"
+#include "third_party/blink/public/mojom/input/input_handler.mojom-blink-forward.h"
 #include "third_party/blink/public/web/web_input_method_controller.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
 namespace ui {
@@ -30,16 +31,25 @@ class CORE_EXPORT WebInputMethodControllerImpl
 
  public:
   explicit WebInputMethodControllerImpl(WebLocalFrameImpl& web_frame);
+  WebInputMethodControllerImpl(const WebInputMethodControllerImpl&) = delete;
+  WebInputMethodControllerImpl& operator=(const WebInputMethodControllerImpl&) =
+      delete;
   ~WebInputMethodControllerImpl() override;
 
   // WebInputMethodController overrides.
   bool SetComposition(const WebString& text,
-                      const WebVector<ui::ImeTextSpan>& ime_text_spans,
+                      const std::vector<ui::ImeTextSpan>& ime_text_spans,
+                      const WebRange& replacement_range,
+                      int selection_start,
+                      int selection_end,
+                      mojom::blink::ImeState ime_state) override;
+  bool SetComposition(const WebString& text,
+                      const std::vector<ui::ImeTextSpan>& ime_text_spans,
                       const WebRange& replacement_range,
                       int selection_start,
                       int selection_end) override;
   bool CommitText(const WebString& text,
-                  const WebVector<ui::ImeTextSpan>& ime_text_spans,
+                  const std::vector<ui::ImeTextSpan>& ime_text_spans,
                   const WebRange& replacement_range,
                   int relative_caret_position) override;
   bool FinishComposingText(
@@ -47,14 +57,13 @@ class CORE_EXPORT WebInputMethodControllerImpl
   WebTextInputInfo TextInputInfo() override;
   int ComputeWebTextInputNextPreviousFlags() override;
   WebTextInputType TextInputType() override;
-  WebRange CompositionRange() override;
-  bool GetCompositionCharacterBounds(WebVector<WebRect>& bounds) override;
+  WebRange CompositionRange() const override;
+  bool GetCompositionCharacterBounds(std::vector<gfx::Rect>& bounds) override;
 
   WebRange GetSelectionOffsets() const override;
 
-  void GetLayoutBounds(WebRect* control_bounds,
-                       WebRect* selection_bounds) override;
-  bool IsVirtualKeyboardPolicyManual() const override;
+  void GetLayoutBounds(gfx::Rect* control_bounds,
+                       gfx::Rect* selection_bounds) override;
   bool IsEditContextActive() const override;
   ui::mojom::VirtualKeyboardVisibilityRequest
   GetLastVirtualKeyboardVisibilityRequest() const override;
@@ -70,9 +79,7 @@ class CORE_EXPORT WebInputMethodControllerImpl
   WebPlugin* FocusedPluginIfInputMethodSupported() const;
 
   const Member<WebLocalFrameImpl> web_frame_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebInputMethodControllerImpl);
 };
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_EXPORTED_WEB_INPUT_METHOD_CONTROLLER_IMPL_H_

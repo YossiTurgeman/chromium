@@ -1,11 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.browserservices.ui.splashscreen.webapps;
 
+import android.app.Activity;
 import android.content.Context;
-import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.view.View;
@@ -15,58 +15,48 @@ import android.widget.ImageView;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.FileUtils;
-import org.chromium.base.StrictModeContext;
-import org.chromium.chrome.browser.app.ChromeActivity;
-import org.chromium.chrome.browser.browserservices.BrowserServicesIntentDataProvider;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider;
+import org.chromium.chrome.browser.browserservices.intents.WebappInfo;
 import org.chromium.chrome.browser.browserservices.ui.splashscreen.SplashController;
 import org.chromium.chrome.browser.browserservices.ui.splashscreen.SplashDelegate;
 import org.chromium.chrome.browser.customtabs.content.TabObserverRegistrar;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.webapps.WebApkSplashNetworkErrorObserver;
 import org.chromium.chrome.browser.webapps.WebappDataStorage;
-import org.chromium.chrome.browser.webapps.WebappInfo;
 import org.chromium.chrome.browser.webapps.WebappRegistry;
 import org.chromium.ui.util.ColorUtils;
 import org.chromium.webapk.lib.common.WebApkCommonUtils;
 import org.chromium.webapk.lib.common.splash.SplashLayout;
 
-import javax.inject.Inject;
-
-/**
- * Displays the splash screen for homescreen shortcuts and WebAPKs.
- */
+/** Displays the splash screen for homescreen shortcuts and WebAPKs. */
+@NullMarked
 public class WebappSplashController implements SplashDelegate {
     public static final int HIDE_ANIMATION_DURATION_MS = 300;
 
-    private SplashController mSplashController;
-    private TabObserverRegistrar mTabObserverRegistrar;
-    private WebappInfo mWebappInfo;
+    private final SplashController mSplashController;
+    private final TabObserverRegistrar mTabObserverRegistrar;
+    private final WebappInfo mWebappInfo;
 
-    private WebApkSplashNetworkErrorObserver mWebApkNetworkErrorObserver;
+    private @Nullable WebApkSplashNetworkErrorObserver mWebApkNetworkErrorObserver;
 
-    @Inject
-    public WebappSplashController(SplashController splashController, ChromeActivity<?> activity,
+    public WebappSplashController(
+            Activity activity,
+            SplashController splashController,
             TabObserverRegistrar tabObserverRegistrar,
             BrowserServicesIntentDataProvider intentDataProvider) {
         mSplashController = splashController;
         mTabObserverRegistrar = tabObserverRegistrar;
+
         mWebappInfo = WebappInfo.create(intentDataProvider);
 
-        mSplashController.setConfig(this, HIDE_ANIMATION_DURATION_MS);
+        mSplashController.setConfigAndShowSplash(this, HIDE_ANIMATION_DURATION_MS);
 
         if (mWebappInfo.isForWebApk()) {
-            mWebApkNetworkErrorObserver =
-                    new WebApkSplashNetworkErrorObserver(activity, mWebappInfo.name());
+            mWebApkNetworkErrorObserver = new WebApkSplashNetworkErrorObserver(activity);
             mTabObserverRegistrar.registerTabObserver(mWebApkNetworkErrorObserver);
         }
-    }
-
-    /**
-     * Called once the Activity's main layout is inflated and added to the content view.
-     */
-    public void onInitialLayoutInflationComplete() {
-        // TODO: TWAs do this in onPostInflationStart(). Determine if there is a visual difference.
-        mSplashController.bringSplashBackToFront();
     }
 
     @Override
@@ -101,8 +91,11 @@ public class WebappSplashController implements SplashDelegate {
         splashScreen.setBackgroundColor(backgroundColor);
 
         if (mWebappInfo.isForWebApk()) {
-            initializeWebApkInfoSplashLayout(splashScreen, backgroundColor,
-                    mWebappInfo.splashIcon().bitmap(), mWebappInfo.isSplashIconMaskable());
+            initializeWebApkInfoSplashLayout(
+                    splashScreen,
+                    backgroundColor,
+                    mWebappInfo.splashIcon().bitmap(),
+                    mWebappInfo.isSplashIconMaskable());
             return splashScreen;
         }
 
@@ -113,19 +106,23 @@ public class WebappSplashController implements SplashDelegate {
             return splashScreen;
         }
 
-        storage.getSplashScreenImage(new WebappDataStorage.FetchCallback<Bitmap>() {
-            @Override
-            public void onDataRetrieved(Bitmap splashImage) {
-                initializeWebApkInfoSplashLayout(splashScreen, backgroundColor, splashImage, false);
-            }
-        });
+        storage.getSplashScreenImage(
+                new WebappDataStorage.FetchCallback<>() {
+                    @Override
+                    public void onDataRetrieved(@Nullable Bitmap splashImage) {
+                        initializeWebApkInfoSplashLayout(
+                                splashScreen, backgroundColor, splashImage, false);
+                    }
+                });
         return splashScreen;
     }
 
-    private void initializeWebApkInfoSplashLayout(ViewGroup splashScreen, int backgroundColor,
-            Bitmap splashImage, boolean isSplashIconMaskable) {
+    private void initializeWebApkInfoSplashLayout(
+            ViewGroup splashScreen,
+            int backgroundColor,
+            @Nullable Bitmap splashImage,
+            boolean isSplashIconMaskable) {
         Context context = ContextUtils.getApplicationContext();
-        Resources resources = context.getResources();
 
         Bitmap selectedIcon = splashImage;
         boolean selectedIconGenerated = false;
@@ -135,8 +132,13 @@ public class WebappSplashController implements SplashDelegate {
             selectedIconGenerated = mWebappInfo.isIconGenerated();
             selectedIconAdaptive = mWebappInfo.isIconAdaptive();
         }
-        SplashLayout.createLayout(context, splashScreen, selectedIcon, selectedIconAdaptive,
-                selectedIconGenerated, mWebappInfo.name(),
+        SplashLayout.createLayout(
+                context,
+                splashScreen,
+                selectedIcon,
+                selectedIconAdaptive,
+                selectedIconGenerated,
+                mWebappInfo.name(),
                 ColorUtils.shouldUseLightForegroundOnBackground(backgroundColor));
     }
 
@@ -145,12 +147,12 @@ public class WebappSplashController implements SplashDelegate {
         ImageView splashView = new ImageView(appContext);
         splashView.setBackgroundColor(backgroundColor);
 
-        Bitmap splashBitmap = null;
-        try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
-            splashBitmap = FileUtils.queryBitmapFromContentProvider(appContext,
-                    Uri.parse(WebApkCommonUtils.generateSplashContentProviderUri(
-                            mWebappInfo.webApkPackageName())));
-        }
+        String packageName = mWebappInfo.webApkPackageName();
+        assert packageName != null;
+        Bitmap splashBitmap =
+                FileUtils.queryBitmapFromContentProvider(
+                        appContext,
+                        Uri.parse(WebApkCommonUtils.generateSplashContentProviderUri(packageName)));
         if (splashBitmap != null) {
             splashView.setScaleType(ImageView.ScaleType.FIT_CENTER);
             splashView.setImageBitmap(splashBitmap);

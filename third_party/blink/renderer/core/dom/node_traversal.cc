@@ -27,7 +27,6 @@
 #include "third_party/blink/renderer/core/dom/node_traversal.h"
 
 #include "third_party/blink/renderer/core/dom/container_node.h"
-#include "third_party/blink/renderer/core/dom/range.h"
 
 namespace blink {
 
@@ -47,14 +46,10 @@ Node* NodeTraversal::NextIncludingPseudo(const Node& current,
                                          const Node* stay_within) {
   if (Node* next = current.PseudoAwareFirstChild())
     return next;
-  if (current == stay_within)
-    return nullptr;
-  if (Node* next = current.PseudoAwareNextSibling())
-    return next;
-  for (Node& parent : AncestorsOf(current)) {
-    if (parent == stay_within)
+  for (Node& node : InclusiveAncestorsOf(current)) {
+    if (node == stay_within)
       return nullptr;
-    if (Node* next = parent.PseudoAwareNextSibling())
+    if (Node* next = node.PseudoAwareNextSibling())
       return next;
   }
   return nullptr;
@@ -63,37 +58,35 @@ Node* NodeTraversal::NextIncludingPseudo(const Node& current,
 Node* NodeTraversal::NextIncludingPseudoSkippingChildren(
     const Node& current,
     const Node* stay_within) {
-  if (current == stay_within)
-    return nullptr;
-  if (Node* next = current.PseudoAwareNextSibling())
-    return next;
-  for (Node& parent : AncestorsOf(current)) {
-    if (parent == stay_within)
+  for (Node& node : InclusiveAncestorsOf(current)) {
+    if (node == stay_within)
       return nullptr;
-    if (Node* next = parent.PseudoAwareNextSibling())
+    if (Node* next = node.PseudoAwareNextSibling())
       return next;
   }
   return nullptr;
 }
 
 Node* NodeTraversal::NextAncestorSibling(const Node& current) {
-  DCHECK(!current.nextSibling());
+  DCHECK(!current.HasNextSibling());
   for (Node& parent : AncestorsOf(current)) {
-    if (parent.nextSibling())
+    if (parent.HasNextSibling()) {
       return parent.nextSibling();
+    }
   }
   return nullptr;
 }
 
 Node* NodeTraversal::NextAncestorSibling(const Node& current,
                                          const Node* stay_within) {
-  DCHECK(!current.nextSibling());
+  DCHECK(!current.HasNextSibling());
   DCHECK_NE(current, stay_within);
   for (Node& parent : AncestorsOf(current)) {
     if (parent == stay_within)
       return nullptr;
-    if (parent.nextSibling())
+    if (parent.HasNextSibling()) {
       return parent.nextSibling();
+    }
   }
   return nullptr;
 }
@@ -115,7 +108,7 @@ Node& NodeTraversal::LastWithinOrSelf(Node& current) {
 Node* NodeTraversal::Previous(const Node& current, const Node* stay_within) {
   if (current == stay_within)
     return nullptr;
-  if (current.previousSibling()) {
+  if (current.HasPreviousSibling()) {
     Node* previous = current.previousSibling();
     while (Node* child = previous->lastChild())
       previous = child;
@@ -124,17 +117,26 @@ Node* NodeTraversal::Previous(const Node& current, const Node* stay_within) {
   return current.parentNode();
 }
 
-Node* NodeTraversal::PreviousSkippingChildren(const Node& current,
-                                              const Node* stay_within) {
-  if (current == stay_within)
-    return nullptr;
-  if (current.previousSibling())
-    return current.previousSibling();
-  for (Node& parent : AncestorsOf(current)) {
-    if (parent == stay_within)
+Node* NodeTraversal::PreviousAbsoluteSiblingIncludingPseudo(
+    const Node& current,
+    const Node* stay_within) {
+  for (Node& iter : InclusiveAncestorsOf(current)) {
+    if (iter == stay_within)
       return nullptr;
-    if (parent.previousSibling())
-      return parent.previousSibling();
+    if (Node* result = iter.PseudoAwarePreviousSibling())
+      return result;
+  }
+  return nullptr;
+}
+
+Node* NodeTraversal::PreviousAbsoluteSibling(const Node& current,
+                                             const Node* stay_within) {
+  for (Node& node : InclusiveAncestorsOf(current)) {
+    if (node == stay_within)
+      return nullptr;
+    if (node.HasPreviousSibling()) {
+      return node.previousSibling();
+    }
   }
   return nullptr;
 }
@@ -143,22 +145,39 @@ Node* NodeTraversal::NextPostOrder(const Node& current,
                                    const Node* stay_within) {
   if (current == stay_within)
     return nullptr;
-  if (!current.nextSibling())
+  if (!current.HasNextSibling()) {
     return current.parentNode();
+  }
   Node* next = current.nextSibling();
   while (Node* child = next->firstChild())
     next = child;
   return next;
 }
 
+Node* NodeTraversal::PreviousAncestorSibling(const Node& current,
+                                             const Node* stay_within) {
+  DCHECK(!current.HasPreviousSibling());
+  DCHECK_NE(current, stay_within);
+  for (Node& parent : AncestorsOf(current)) {
+    if (parent == stay_within) {
+      return nullptr;
+    }
+    if (parent.HasPreviousSibling()) {
+      return parent.previousSibling();
+    }
+  }
+  return nullptr;
+}
+
 Node* NodeTraversal::PreviousAncestorSiblingPostOrder(const Node& current,
                                                       const Node* stay_within) {
-  DCHECK(!current.previousSibling());
+  DCHECK(!current.HasPreviousSibling());
   for (Node& parent : NodeTraversal::AncestorsOf(current)) {
     if (parent == stay_within)
       return nullptr;
-    if (parent.previousSibling())
+    if (parent.HasPreviousSibling()) {
       return parent.previousSibling();
+    }
   }
   return nullptr;
 }
@@ -169,13 +188,14 @@ Node* NodeTraversal::PreviousPostOrder(const Node& current,
     return last_child;
   if (current == stay_within)
     return nullptr;
-  if (current.previousSibling())
+  if (current.HasPreviousSibling()) {
     return current.previousSibling();
+  }
   return PreviousAncestorSiblingPostOrder(current, stay_within);
 }
 
 Node* NodeTraversal::CommonAncestor(const Node& node_a, const Node& node_b) {
-  return Range::commonAncestorContainer(&node_a, &node_b);
+  return node_a.CommonAncestor(node_b, NodeTraversal::Parent);
 }
 
 }  // namespace blink

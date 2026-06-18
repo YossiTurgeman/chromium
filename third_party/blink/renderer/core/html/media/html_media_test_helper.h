@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_MEDIA_HTML_MEDIA_TEST_HELPER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_MEDIA_HTML_MEDIA_TEST_HELPER_H_
 
+#include "third_party/blink/public/platform/web_media_player.h"
 #include "third_party/blink/renderer/core/loader/empty_clients.h"
 
 namespace blink {
@@ -19,6 +20,9 @@ class MediaStubLocalFrameClient : public EmptyLocalFrameClient {
   explicit MediaStubLocalFrameClient(std::unique_ptr<WebMediaPlayer>);
   MediaStubLocalFrameClient(std::unique_ptr<WebMediaPlayer>,
                             bool allow_empty_player);
+  MediaStubLocalFrameClient(const MediaStubLocalFrameClient&) = delete;
+  MediaStubLocalFrameClient& operator=(const MediaStubLocalFrameClient&) =
+      delete;
 
   std::unique_ptr<WebMediaPlayer> CreateWebMediaPlayer(
       HTMLMediaElement&,
@@ -28,8 +32,6 @@ class MediaStubLocalFrameClient : public EmptyLocalFrameClient {
  private:
   std::unique_ptr<WebMediaPlayer> player_;
   bool allow_empty_player_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(MediaStubLocalFrameClient);
 };
 
 }  // namespace test

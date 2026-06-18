@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,44 +7,39 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <set>
 #include <string>
 #include <vector>
 
-#include "base/bind.h"
 #include "base/check.h"
 #include "base/command_line.h"
+#include "base/containers/fixed_flat_set.h"
 #include "base/files/file_path.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/process/launch.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/string_util.h"
 #include "base/system/sys_info.h"
-#include "base/task/post_task.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "ui/events/devices/device_data_manager.h"
 #include "ui/events/devices/device_hotplug_event_observer.h"
 #include "ui/events/devices/device_util_linux.h"
 #include "ui/events/devices/input_device.h"
+#include "ui/events/devices/keyboard_device.h"
+#include "ui/events/devices/touchpad_device.h"
 #include "ui/events/devices/touchscreen_device.h"
+#include "ui/gfx/x/atom_cache.h"
+#include "ui/gfx/x/connection.h"
 #include "ui/gfx/x/extension_manager.h"
-#include "ui/gfx/x/x11.h"
-#include "ui/gfx/x/x11_atom_cache.h"
-#include "ui/gfx/x/x11_types.h"
+#include "ui/gfx/x/future.h"
 
 namespace ui {
 
 namespace {
-
-// Names of all known internal devices that should not be considered as
-// keyboards.
-// TODO(rsadam@): Identify these devices using udev rules. (Crbug.com/420728.)
-const char* kKnownInvalidKeyboardDeviceNames[] = {
-    "Power Button", "Sleep Button", "Video Bus",
-    "gpio-keys.5",  "gpio-keys.12", "ROCKCHIP-I2S Headset Jack"};
 
 enum DeviceType {
   DEVICE_TYPE_KEYBOARD,
@@ -55,7 +50,10 @@ enum DeviceType {
 };
 
 using KeyboardDeviceCallback =
-    base::OnceCallback<void(const std::vector<InputDevice>&)>;
+    base::OnceCallback<void(const std::vector<KeyboardDevice>&)>;
+
+using TouchpadDeviceCallback =
+    base::OnceCallback<void(const std::vector<TouchpadDevice>&)>;
 
 using TouchscreenDeviceCallback =
     base::OnceCallback<void(const std::vector<TouchscreenDevice>&)>;
@@ -69,7 +67,7 @@ struct UiCallbacks {
   KeyboardDeviceCallback keyboard_callback;
   TouchscreenDeviceCallback touchscreen_callback;
   InputDeviceCallback mouse_callback;
-  InputDeviceCallback touchpad_callback;
+  TouchpadDeviceCallback touchpad_callback;
   base::OnceClosure hotplug_finished_callback;
 };
 
@@ -160,13 +158,15 @@ struct DisplayState {
 // Returns true if |name| is the name of a known invalid keyboard device. Note,
 // this may return false negatives.
 bool IsKnownInvalidKeyboardDevice(const std::string& name) {
-  std::string trimmed(name);
+  // TODO(https://crbug.com/41135719): Identify these devices using udev rules.
+  constexpr auto kSet = base::MakeFixedFlatSet<std::string_view>(
+      {"Power Button", "Sleep Button", "Video Bus", "gpio-keys.5",
+       "gpio-keys.12", "ROCKCHIP-I2S Headset Jack"});
+
+  std::string trimmed = name;
   base::TrimWhitespaceASCII(name, base::TRIM_TRAILING, &trimmed);
-  for (const char* device_name : kKnownInvalidKeyboardDeviceNames) {
-    if (trimmed == device_name)
-      return true;
-  }
-  return false;
+
+  return kSet.contains(trimmed);
 }
 
 // Returns true if |name| is the name of a known XTEST device. Note, this may
@@ -185,14 +185,15 @@ base::FilePath GetDevicePath(x11::Connection* connection,
 
   // Input device has a property "Device Node" pointing to its dev input node,
   // e.g.   Device Node (250): "/dev/input/event8"
-  x11::Atom device_node = gfx::GetAtom("Device Node");
+  x11::Atom device_node = x11::GetAtom("Device Node");
   if (device_node == x11::Atom::None)
     return base::FilePath();
 
   auto deviceid = static_cast<uint16_t>(device.deviceid);
   if (deviceid > std::numeric_limits<uint8_t>::max())
     return base::FilePath();
-  if (connection->xinput().OpenDevice({deviceid}).Sync().error)
+  uint8_t deviceid_u8 = static_cast<uint8_t>(deviceid);
+  if (connection->xinput().OpenDevice({deviceid_u8}).Sync().error)
     return base::FilePath();
 
   x11::Input::GetDevicePropertyRequest req{
@@ -200,19 +201,19 @@ base::FilePath GetDevicePath(x11::Connection* connection,
       .type = x11::Atom::Any,
       .offset = 0,
       .len = std::numeric_limits<uint32_t>::max(),
-      .device_id = deviceid,
+      .device_id = deviceid_u8,
       .c_delete = false,
   };
   auto reply = connection->xinput().GetDeviceProperty(req).Sync();
   if (!reply || reply->type != x11::Atom::STRING || !reply->data8.has_value()) {
-    connection->xinput().CloseDevice({deviceid});
+    connection->xinput().CloseDevice({deviceid_u8});
     return base::FilePath();
   }
 
   std::string path(reinterpret_cast<char*>(reply->data8->data()),
                    reply->data8->size());
 
-  connection->xinput().CloseDevice({deviceid});
+  connection->xinput().CloseDevice({deviceid_u8});
 
   return base::FilePath(path);
 }
@@ -222,7 +223,7 @@ base::FilePath GetDevicePath(x11::Connection* connection,
 void HandleKeyboardDevicesInWorker(const std::vector<DeviceInfo>& device_infos,
                                    scoped_refptr<base::TaskRunner> reply_runner,
                                    KeyboardDeviceCallback callback) {
-  std::vector<InputDevice> devices;
+  std::vector<KeyboardDevice> devices;
 
   for (const DeviceInfo& device_info : device_infos) {
     if (device_info.type != DEVICE_TYPE_KEYBOARD)
@@ -246,7 +247,18 @@ void HandleMouseDevicesInWorker(const std::vector<DeviceInfo>& device_infos,
                                 scoped_refptr<base::TaskRunner> reply_runner,
                                 InputDeviceCallback callback) {
   std::vector<InputDevice> devices;
+  const DeviceInfo* virtual_pointer = nullptr;
+  bool found_physical_pointer = false;
+
   for (const DeviceInfo& device_info : device_infos) {
+    if (device_info.use == x11::Input::DeviceType::SlavePointer ||
+        device_info.use == x11::Input::DeviceType::FloatingSlave) {
+      found_physical_pointer = true;
+    }
+    if (device_info.use == x11::Input::DeviceType::MasterPointer &&
+        device_info.name == "Virtual core pointer") {
+      virtual_pointer = &device_info;
+    }
     if (device_info.type != DEVICE_TYPE_MOUSE ||
         device_info.use != x11::Input::DeviceType::SlavePointer) {
       continue;
@@ -257,6 +269,12 @@ void HandleMouseDevicesInWorker(const std::vector<DeviceInfo>& device_infos,
                          device_info.name);
   }
 
+  if (!found_physical_pointer && virtual_pointer) {
+    InputDeviceType type = GetInputDeviceTypeFromPath(virtual_pointer->path);
+    devices.emplace_back(static_cast<uint16_t>(virtual_pointer->id), type,
+                         virtual_pointer->name);
+  }
+
   reply_runner->PostTask(FROM_HERE,
                          base::BindOnce(std::move(callback), devices));
 }
@@ -265,8 +283,8 @@ void HandleMouseDevicesInWorker(const std::vector<DeviceInfo>& device_infos,
 // |reply_runner| and |callback| to update the state on the UI thread.
 void HandleTouchpadDevicesInWorker(const std::vector<DeviceInfo>& device_infos,
                                    scoped_refptr<base::TaskRunner> reply_runner,
-                                   InputDeviceCallback callback) {
-  std::vector<InputDevice> devices;
+                                   TouchpadDeviceCallback callback) {
+  std::vector<TouchpadDevice> devices;
   for (const DeviceInfo& device_info : device_infos) {
     if (device_info.type != DEVICE_TYPE_TOUCHPAD ||
         device_info.use != x11::Input::DeviceType::SlavePointer) {
@@ -365,7 +383,7 @@ DeviceHotplugEventObserver* GetHotplugEventObserver() {
   return DeviceDataManager::GetInstance();
 }
 
-void OnKeyboardDevices(const std::vector<InputDevice>& devices) {
+void OnKeyboardDevices(const std::vector<KeyboardDevice>& devices) {
   GetHotplugEventObserver()->OnKeyboardDevicesUpdated(devices);
 }
 
@@ -377,7 +395,7 @@ void OnMouseDevices(const std::vector<InputDevice>& devices) {
   GetHotplugEventObserver()->OnMouseDevicesUpdated(devices);
 }
 
-void OnTouchpadDevices(const std::vector<InputDevice>& devices) {
+void OnTouchpadDevices(const std::vector<TouchpadDevice>& devices) {
   GetHotplugEventObserver()->OnTouchpadDevicesUpdated(devices);
 }
 
@@ -399,7 +417,7 @@ void X11HotplugEventHandler::OnHotplugEvent() {
       DeviceListCacheX11::GetInstance()->GetXI2DeviceList(connection);
 
   const int kMaxDeviceNum = 128;
-  DeviceType device_types[kMaxDeviceNum];
+  std::array<DeviceType, kMaxDeviceNum> device_types;
   for (auto& device_type : device_types)
     device_type = DEVICE_TYPE_OTHER;
 
@@ -408,15 +426,26 @@ void X11HotplugEventHandler::OnHotplugEvent() {
     if (id >= kMaxDeviceNum)
       continue;
 
+    // In XWayland, physical devices are not exposed to X Server, but
+    // rather X11 and Wayland uses wayland protocol to communicate
+    // devices.
+
+    // So, xinput that Chromium uses to enumerate devices prepends
+    // "xwayland-" to each device name. Though, Wayland doesn't expose TOUCHPAD
+    // directly. Instead, it's part of xwayland-pointer.
     x11::Atom type = device.device_type;
-    if (type == gfx::GetAtom("KEYBOARD"))
+    if (type == x11::GetAtom("KEYBOARD") ||
+        type == x11::GetAtom("xwayland-keyboard")) {
       device_types[id] = DEVICE_TYPE_KEYBOARD;
-    else if (type == gfx::GetAtom("MOUSE"))
+    } else if (type == x11::GetAtom("MOUSE") ||
+               type == x11::GetAtom("xwayland-pointer")) {
       device_types[id] = DEVICE_TYPE_MOUSE;
-    else if (type == gfx::GetAtom("TOUCHPAD"))
+    } else if (type == x11::GetAtom("TOUCHPAD")) {
       device_types[id] = DEVICE_TYPE_TOUCHPAD;
-    else if (type == gfx::GetAtom("TOUCHSCREEN"))
+    } else if (type == x11::GetAtom("TOUCHSCREEN") ||
+               type == x11::GetAtom("xwayland-touch")) {
       device_types[id] = DEVICE_TYPE_TOUCHSCREEN;
+    }
   }
 
   std::vector<DeviceInfo> device_infos;
@@ -433,8 +462,8 @@ void X11HotplugEventHandler::OnHotplugEvent() {
 
   // X11 is not thread safe, so first get all the required state.
   DisplayState display_state;
-  display_state.mt_position_x = gfx::GetAtom("Abs MT Position X");
-  display_state.mt_position_y = gfx::GetAtom("Abs MT Position Y");
+  display_state.mt_position_x = x11::GetAtom("Abs MT Position X");
+  display_state.mt_position_y = x11::GetAtom("Abs MT Position Y");
 
   UiCallbacks callbacks;
   callbacks.keyboard_callback = base::BindOnce(&OnKeyboardDevices);
@@ -450,7 +479,7 @@ void X11HotplugEventHandler::OnHotplugEvent() {
       FROM_HERE,
       {base::MayBlock(), base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
       base::BindOnce(&HandleHotplugEventInWorker, device_infos, display_state,
-                     base::ThreadTaskRunnerHandle::Get(),
+                     base::SingleThreadTaskRunner::GetCurrentDefault(),
                      std::move(callbacks)));
 }
 

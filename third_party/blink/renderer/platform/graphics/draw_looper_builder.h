@@ -31,20 +31,18 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_DRAW_LOOPER_BUILDER_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_DRAW_LOOPER_BUILDER_H_
 
-#include <memory>
-
-#include "base/macros.h"
+#include "cc/paint/draw_looper.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
-#include "third_party/skia/include/effects/SkLayerDrawLooper.h"
 
-class SkDrawLooper;
+namespace gfx {
+class Vector2dF;
+}
 
 namespace blink {
 
 class Color;
-class FloatSize;
 
 class PLATFORM_EXPORT DrawLooperBuilder final {
   STACK_ALLOCATED();
@@ -57,25 +55,26 @@ class PLATFORM_EXPORT DrawLooperBuilder final {
   enum ShadowAlphaMode { kShadowRespectsAlpha, kShadowIgnoresAlpha };
 
   DrawLooperBuilder();
+  // Implementing the copy constructor properly would require writing code to
+  // copy the underlying SkLayerDrawLooper::Builder.
+  DrawLooperBuilder(const DrawLooperBuilder&) = delete;
+  DrawLooperBuilder& operator=(const DrawLooperBuilder&) = delete;
+
   ~DrawLooperBuilder();
 
-  // Creates the SkDrawLooper and passes ownership to the caller. The builder
+  // Creates the cc::DrawLooper and passes ownership to the caller. The builder
   // should not be used any more after calling this method.
-  sk_sp<SkDrawLooper> DetachDrawLooper();
+  sk_sp<cc::DrawLooper> DetachDrawLooper();
 
   void AddUnmodifiedContent();
-  void AddShadow(const FloatSize& offset,
-                 float blur,
+  void AddShadow(const gfx::Vector2dF& offset,
+                 float blur_sigma,
                  const Color&,
                  ShadowTransformMode = kShadowRespectsTransforms,
                  ShadowAlphaMode = kShadowRespectsAlpha);
 
  private:
-  SkLayerDrawLooper::Builder sk_draw_looper_builder_;
-
-  // Implementing the copy constructor properly would require writing code to
-  // copy the underlying SkLayerDrawLooper::Builder.
-  DISALLOW_COPY_AND_ASSIGN(DrawLooperBuilder);
+  cc::DrawLooperBuilder draw_looper_builder_;
 };
 
 }  // namespace blink

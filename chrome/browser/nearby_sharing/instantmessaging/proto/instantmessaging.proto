@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,10 +36,41 @@ message IdType {
   }
 }
 
+// TODO(crbug.com/40154496): Replace with LocationStandard message from
+// //third_party/nearby/src/proto/connections/offline_wire_formats.proto if
+// possible.
+message LocationStandard {
+  enum Format {
+    UNKNOWN = 0;
+    // E164 country codes:
+    // https://en.wikipedia.org/wiki/List_of_country_calling_codes
+    // e.g. +1 for USA
+    E164_CALLING = 1;
+
+    // ISO 3166-1 alpha-2 country codes:
+    // https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
+    ISO_3166_1_ALPHA_2 = 2;
+  }
+}
+
+// LocationHint is used to specify a location as well as format.
+// TODO(crbug.com/40154496): Replace with LocationHint message from
+// //third_party/nearby/src/proto/connections/offline_wire_formats.proto if
+// possible.
+message LocationHint {
+  // Location is the location, provided in the format specified by format.
+  string location = 1;
+
+  // the format of location.
+  LocationStandard.Format format = 2;
+}
+
 message Id {
   IdType.Type type = 1;
   string id = 2;
   string app = 3;
+  string country_code = 4 [deprecated = true];
+  LocationHint location_hint = 5;
 }
 
 message ApiVersion {
@@ -92,6 +123,9 @@ message ReceiveMessagesResponse {
   }
 }
 
+// Matches StreamBody definition from the server:
+// google3/google/rpc/stream_body.proto
 message StreamBody {
   repeated bytes messages = 1;
+  repeated bytes noop = 15;
 }

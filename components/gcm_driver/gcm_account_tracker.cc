@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,16 @@
 #include <algorithm>
 #include <vector>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/single_thread_task_runner.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/logging.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "components/gcm_driver/gcm_driver.h"
+#include "components/signin/public/base/oauth_consumer_id.h"
 #include "components/signin/public/identity_manager/access_token_fetcher.h"
 #include "components/signin/public/identity_manager/access_token_info.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
-#include "components/signin/public/identity_manager/scope_set.h"
 #include "google_apis/gaia/google_service_auth_error.h"
 #include "net/base/ip_endpoint.h"
 
@@ -26,12 +26,6 @@ namespace gcm {
 
 namespace {
 
-// Scopes needed by the OAuth2 access tokens.
-const char kGCMGroupServerScope[] = "https://www.googleapis.com/auth/gcm";
-const char kGCMCheckinServerScope[] =
-    "https://www.googleapis.com/auth/android_checkin";
-// Name of the GCM account tracker for fetching access tokens.
-const char kGCMAccountTrackerName[] = "gcm_account_tracker";
 // Minimum token validity when sending to GCM groups server.
 const int64_t kMinimumTokenValidityMs = 500;
 // Token reporting interval, when no account changes are detected.
@@ -98,7 +92,7 @@ void GCMAccountTracker::ScheduleReportTokens() {
            << GetTimeToNextTokenReporting().InSeconds() << " seconds.";
 
   reporting_weak_ptr_factory_.InvalidateWeakPtrs();
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
       base::BindOnce(&GCMAccountTracker::ReportTokens,
                      reporting_weak_ptr_factory_.GetWeakPtr()),
@@ -118,6 +112,7 @@ void GCMAccountTracker::OnAccessTokenFetchCompleteForAccount(
     GoogleServiceAuthError error,
     signin::AccessTokenInfo access_token_info) {
   auto iter = account_infos_.find(account_id);
+  // DCHECK iter!=end() is sensible here as goal is to report missing values.
   DCHECK(iter != account_infos_.end());
   if (iter != account_infos_.end()) {
     DCHECK_EQ(GETTING_TOKEN, iter->second.state);
@@ -215,8 +210,7 @@ void GCMAccountTracker::SanitizeTokens() {
        ++iter) {
     if (iter->second.state == TOKEN_PRESENT &&
         iter->second.expiration_time <
-            base::Time::Now() +
-                base::TimeDelta::FromMilliseconds(kMinimumTokenValidityMs)) {
+            base::Time::Now() + base::Milliseconds(kMinimumTokenValidityMs)) {
       iter->second.access_token.clear();
       iter->second.state = TOKEN_NEEDED;
       iter->second.expiration_time = base::Time();
@@ -252,19 +246,18 @@ bool GCMAccountTracker::IsTokenFetchingRequired() const {
 base::TimeDelta GCMAccountTracker::GetTimeToNextTokenReporting() const {
   base::TimeDelta time_till_next_reporting =
       driver_->GetLastTokenFetchTime() +
-      base::TimeDelta::FromMilliseconds(kTokenReportingIntervalMs) -
-      base::Time::Now();
+      base::Milliseconds(kTokenReportingIntervalMs) - base::Time::Now();
 
   // Case when token fetching is overdue.
-  if (time_till_next_reporting < base::TimeDelta())
+  if (time_till_next_reporting.is_negative())
     return base::TimeDelta();
 
   // Case when calculated period is larger than expected, including the
   // situation when the method is called before GCM driver is completely
   // initialized.
   if (time_till_next_reporting >
-          base::TimeDelta::FromMilliseconds(kTokenReportingIntervalMs)) {
-    return base::TimeDelta::FromMilliseconds(kTokenReportingIntervalMs);
+      base::Milliseconds(kTokenReportingIntervalMs)) {
+    return base::Milliseconds(kTokenReportingIntervalMs);
   }
 
   return time_till_next_reporting;
@@ -279,6 +272,12 @@ void GCMAccountTracker::GetAllNeededTokens() {
   if (!driver_->IsConnected())
     return;
 
+  // Only start fetching access tokens if the user consented for sync.
+  // TODO(crbug.com/40067875): Delete account-tracking code, latest when
+  // ConsentLevel::kSync is cleaned up from the codebase.
+  if (!identity_manager_->HasPrimaryAccount(signin::ConsentLevel::kSync))
+    return;
+
   for (auto iter = account_infos_.begin(); iter != account_infos_.end();
        ++iter) {
     if (iter->second.state == TOKEN_NEEDED)
@@ -289,16 +288,12 @@ void GCMAccountTracker::GetAllNeededTokens() {
 void GCMAccountTracker::GetToken(AccountInfos::iterator& account_iter) {
   DCHECK_EQ(account_iter->second.state, TOKEN_NEEDED);
 
-  signin::ScopeSet scopes;
-  scopes.insert(kGCMGroupServerScope);
-  scopes.insert(kGCMCheckinServerScope);
-
   // NOTE: It is safe to use base::Unretained() here as |token_fetcher| is owned
   // by this object and guarantees that it will not invoke its callback after
   // its destruction.
   std::unique_ptr<signin::AccessTokenFetcher> token_fetcher =
       identity_manager_->CreateAccessTokenFetcherForAccount(
-          account_iter->first, kGCMAccountTrackerName, scopes,
+          account_iter->first, signin::OAuthConsumerId::kGcmAccountTracker,
           base::BindOnce(
               &GCMAccountTracker::OnAccessTokenFetchCompleteForAccount,
               base::Unretained(this), account_iter->first),

@@ -1,48 +1,55 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_PEERCONNECTION_WEBRTC_UTIL_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_PEERCONNECTION_WEBRTC_UTIL_H_
 
-#include "base/optional.h"
+#include <optional>
+
+#include "base/time/time.h"
+#include "media/base/video_codecs.h"
+#include "third_party/blink/renderer/platform/network/parsed_content_type.h"
+#include "third_party/blink/renderer/platform/platform_export.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_view.h"
+#include "third_party/webrtc/api/units/time_delta.h"
+#include "third_party/webrtc/api/units/timestamp.h"
+#include "third_party/webrtc/api/video_codecs/sdp_video_format.h"
 
 namespace blink {
 
-// TODO(crbug.com/787254): Move these template definitions out of the Blink
-// exposed API when all their clients get Onion souped.
-template <typename OptionalT>
-base::Optional<typename OptionalT::value_type> ToBaseOptional(
-    const OptionalT& optional) {
-  return optional ? base::make_optional(*optional) : base::nullopt;
-}
+StringView PLATFORM_EXPORT
+WebrtcCodecNameFromMimeType(const StringView& mime_type,
+                            const StringView& prefix);
+std::map<std::string, std::string> PLATFORM_EXPORT
+ConvertToSdpVideoFormatParameters(
+    const ParsedContentHeaderFieldParameters& parameters);
 
-template <typename OptionalT>
-base::Optional<typename OptionalT::value_type> ToBaseOptional(
-    OptionalT&& optional) {
-  return optional ? base::make_optional(*optional) : base::nullopt;
-}
+base::TimeTicks PLATFORM_EXPORT ConvertToBaseTimeTicks(webrtc::Timestamp time);
 
-template <typename OptionalT>
-absl::optional<typename OptionalT::value_type> ToAbslOptional(
-    const OptionalT& optional) {
-  return optional ? absl::make_optional(*optional) : absl::nullopt;
-}
+base::TimeDelta PLATFORM_EXPORT
+ConvertToBaseTimeDelta(webrtc::TimeDelta time_delta);
 
-template <typename OptionalT>
-absl::optional<typename OptionalT::value_type> ToAbslOptional(
-    OptionalT&& optional) {
-  return optional ? absl::make_optional(*optional) : absl::nullopt;
-}
+std::optional<media::VideoCodecProfile> PLATFORM_EXPORT
+WebRTCFormatToCodecProfile(const webrtc::SdpVideoFormat& sdp);
 
-template <typename OptionalT1, typename OptionalT2>
-bool OptionalEquals(const OptionalT1& lhs, const OptionalT2& rhs) {
-  if (!lhs)
-    return !rhs;
-  if (!rhs)
-    return false;
-  return *lhs == *rhs;
-}
+// Converts an optional webrtc::Timestamp into an optional TimeTicks and
+// optionally adds an offset to the result.
+std::optional<base::TimeTicks> PLATFORM_EXPORT ConvertToOptionalTimeTicks(
+    std::optional<webrtc::Timestamp> time,
+    std::optional<base::TimeTicks> offset = std::nullopt);
+
+// Converts an optional webrtc::TimesDelta into an base::TimeDelta.
+std::optional<base::TimeDelta> PLATFORM_EXPORT
+ConvertToOptionalTimeDelta(std::optional<webrtc::TimeDelta> time_delta);
+
+// Checks if H.264 CBP is available for accelerated encoding on the current
+// platform.
+bool PLATFORM_EXPORT
+IsH264ConstrainedBaselineProfileAvailableForAcceleratedEncoder();
+
+// Checks whether the accelerated H.264 encoder can be used in WebRTC.
+bool PLATFORM_EXPORT UseH264AcceleratedEncoderForWebRTC();
 
 }  // namespace blink
 

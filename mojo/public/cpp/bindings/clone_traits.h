@@ -1,71 +1,70 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MOJO_PUBLIC_CPP_BINDINGS_CLONE_TRAITS_H_
 #define MOJO_PUBLIC_CPP_BINDINGS_CLONE_TRAITS_H_
 
+#include <concepts>
+#include <optional>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "base/containers/flat_map.h"
-#include "base/optional.h"
 #include "mojo/public/cpp/bindings/lib/template_util.h"
 
 namespace mojo {
 
 template <typename T>
-struct HasCloneMethod {
-  template <typename U>
-  static char Test(decltype(&U::Clone));
-  template <typename U>
-  static int Test(...);
-  static const bool value = sizeof(Test<T>(0)) == sizeof(char);
-
- private:
-  internal::EnsureTypeIsComplete<T> check_t_;
-};
-
-template <typename T, bool has_clone_method = HasCloneMethod<T>::value>
-struct CloneTraits;
-
-template <typename T>
 T Clone(const T& input);
 
 template <typename T>
-struct CloneTraits<T, true> {
-  static T Clone(const T& input) { return input.Clone(); }
-};
-
-template <typename T>
-struct CloneTraits<T, false> {
-  static T Clone(const T& input) { return input; }
-};
-
-template <typename T>
-struct CloneTraits<base::Optional<T>, false> {
-  static base::Optional<T> Clone(const base::Optional<T>& input) {
-    if (!input)
-      return base::nullopt;
-
-    return base::Optional<T>(mojo::Clone(*input));
+struct CloneTraits {
+  static_assert(sizeof(T), "T must be a complete type.");
+  static T Clone(const T& input) {
+    if constexpr (requires {
+                    { input.Clone() } -> std::same_as<T>;
+                  }) {
+      return input.Clone();
+    } else if constexpr (std::copyable<T>) {
+      return input;
+    } else {
+      static_assert(
+          false,
+          "T is not copyable and has no Clone() method, so the default "
+          "mojo::CloneTraits cannot be used; please make sure to include the "
+          "header that defines the mojo::CloneTraits<T> specialization");
+    }
   }
 };
 
 template <typename T>
-struct CloneTraits<std::vector<T>, false> {
+struct CloneTraits<std::optional<T>> {
+  static std::optional<T> Clone(const std::optional<T>& input) {
+    if (!input) {
+      return std::nullopt;
+    }
+
+    return std::optional<T>(mojo::Clone(*input));
+  }
+};
+
+template <typename T>
+struct CloneTraits<std::vector<T>> {
   static std::vector<T> Clone(const std::vector<T>& input) {
     std::vector<T> result;
     result.reserve(input.size());
-    for (const auto& element : input)
+    for (const auto& element : input) {
       result.push_back(mojo::Clone(element));
+    }
 
     return result;
   }
 };
 
 template <typename K, typename V>
-struct CloneTraits<base::flat_map<K, V>, false> {
+struct CloneTraits<base::flat_map<K, V>> {
   static base::flat_map<K, V> Clone(const base::flat_map<K, V>& input) {
     base::flat_map<K, V> result;
     for (const auto& element : input) {

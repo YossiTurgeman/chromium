@@ -1,11 +1,12 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "device/gamepad/nintendo_data_fetcher.h"
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/task/sequenced_task_runner.h"
 #include "device/gamepad/gamepad_service.h"
 #include "device/gamepad/gamepad_uma.h"
 
@@ -96,6 +97,12 @@ void NintendoDataFetcher::DeviceRemoved(mojom::HidDeviceInfoPtr device_info) {
   }
 }
 
+void NintendoDataFetcher::DeviceChanged(mojom::HidDeviceInfoPtr device_info) {
+  // Ignore updated device info. NintendoController will retain the old
+  // HidDeviceInfo. This is fine since it does not rely on any HidDeviceInfo
+  // members that could change.
+}
+
 bool NintendoDataFetcher::AddDevice(mojom::HidDeviceInfoPtr device_info) {
   DCHECK(hid_manager_);
   GamepadId gamepad_id = GamepadIdList::Get().GetGamepadId(
@@ -103,9 +110,18 @@ bool NintendoDataFetcher::AddDevice(mojom::HidDeviceInfoPtr device_info) {
       device_info->product_id);
   RecordConnectedGamepad(gamepad_id);
   int source_id = next_source_id_++;
-  auto emplace_result = controllers_.emplace(
-      source_id, NintendoController::Create(source_id, std::move(device_info),
-                                            hid_manager_.get()));
+
+  std::unique_ptr<NintendoController> nintendo_controller =
+      NintendoController::Create(source_id, std::move(device_info),
+                                 hid_manager_.get());
+  // If `nintendo_controller` is nullptr, the device is not a valid Nintendo
+  // device.
+  if (!nintendo_controller) {
+    return false;
+  }
+
+  auto emplace_result =
+      controllers_.emplace(source_id, std::move(nintendo_controller));
   if (emplace_result.second) {
     auto& new_device = emplace_result.first->second;
     DCHECK(new_device);
@@ -170,7 +186,7 @@ NintendoDataFetcher::ExtractAssociatedDevice(const NintendoController* device) {
   if (associated_device) {
     PadState* state = GetPadState(associated_device->GetSourceId());
     if (state)
-      state->source = GAMEPAD_SOURCE_NONE;
+      state->source = GamepadSource::kNone;
   }
 
   return associated_device;

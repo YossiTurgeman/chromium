@@ -1,9 +1,10 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 from __future__ import print_function
 
+import collections
 import fnmatch
 import imp
 import logging
@@ -59,13 +60,26 @@ def FindPythonDependencies(module_path):
     graph = modulegraph.ModuleGraph()
     graph.run_script(module_path)
 
+    # We do a BFS instead of checking all nodes because for some reason it is
+    # possible to have bogus dependencies from the Python installation to other
+    # files (which may not even exist) due to the packagepath, such as to `//-`.
+    # This only appears to occur when run under Python 3. By performing BFS and
+    # simply ignoring anything from the Python installation, we can avoid this
+    # issue.
+    nodes_to_visit = _GetSourceNodes(graph)
+    visited = set()
+
     # Filter for only imports in Chromium.
-    for node in graph.nodes():
+    while nodes_to_visit:
+      node = nodes_to_visit.popleft()
+      if node in visited:
+        continue
+      visited.add(node)
       if not node.filename:
         continue
       module_path = os.path.realpath(node.filename)
 
-      _, incoming_edges = graph.get_edges(node)
+      incoming_edges = graph.getReferers(node)
       message = 'Discovered %s (Imported by: %s)' % (
           node.filename, ', '.join(
               d.filename for d in incoming_edges
@@ -82,6 +96,9 @@ def FindPythonDependencies(module_path):
       if any(path.IsSubpath(module_path, pfx) for pfx in prefixes):
         continue
 
+      for outgoing_edge in graph.getReferences(node):
+        nodes_to_visit.append(outgoing_edge)
+
       yield module_path
       if node.packagepath is not None:
         for p in node.packagepath:
@@ -89,6 +106,15 @@ def FindPythonDependencies(module_path):
 
   finally:
     sys.path = sys_path
+
+
+def _GetSourceNodes(graph):
+  source_nodes = collections.deque()
+  for node in graph.nodes():
+    incoming_edges = list(graph.getReferers(node))
+    if incoming_edges == [None]:
+      source_nodes.append(node)
+  return source_nodes
 
 
 def FindExcludedFiles(files, options):
@@ -112,12 +138,17 @@ def FindExcludedFiles(files, options):
         return True
     return False
 
+  def IsWebPageReplayThirdParty(path_string):
+    normalized_path = path_string.replace('\\', '/')
+    return 'third_party/webpagereplay/third_party/' in normalized_path
+
   # Collect filters we're going to use to exclude files.
   exclude_conditions = [
       IsHidden,
       IsPyc,
       IsInCloudStorage,
       MatchesExcludeOptions,
+      IsWebPageReplayThirdParty,
   ]
 
   # Check all the files against the filters.
@@ -127,6 +158,9 @@ def FindExcludedFiles(files, options):
 
 
 def FindDependencies(target_paths, options):
+  path_util.AddPyUtilsToPath()
+  from py_utils import GetWebPageReplayDir  # pylint: disable=import-outside-toplevel
+
   # Verify arguments.
   for target_path in target_paths:
     if not os.path.exists(target_path):
@@ -145,6 +179,8 @@ def FindDependencies(target_paths, options):
                    'telemetry', 'testing', 'run_tests.py')))
 
   # Add dependencies.
+  dependencies.add(os.path.realpath(GetWebPageReplayDir()))
+
   for target_path in target_paths:
     base_dir = os.path.dirname(os.path.realpath(target_path))
 
@@ -174,7 +210,7 @@ def ZipDependencies(target_paths, dependencies, options):
           os.path.join('telemetry', os.path.basename(target_path)))
       link_info.create_system = 3  # Unix attributes.
       # 010 is regular file, 0111 is the permission bits rwxrwxrwx.
-      link_info.external_attr = 0100777 << 16  # Octal.
+      link_info.external_attr = 0o0100777 << 16  # Octal.
 
       relative_path = os.path.relpath(target_path, base_dir)
       link_script = (
@@ -188,25 +224,31 @@ def ZipDependencies(target_paths, dependencies, options):
       zip_file.writestr(link_info, link_script)
 
 
-class FindDependenciesCommand(command_line.OptparseCommand):
+class FindDependenciesCommand(command_line.Command):
   """Prints all dependencies"""
 
   @classmethod
-  def AddCommandLineArgs(cls, parser, _):
-    parser.add_option(
-        '-v', '--verbose', action='count', dest='verbosity',
-        help='Increase verbosity level (repeat as needed).')
+  def AddCommandLineArgs(cls, parser):
+    parser.add_argument('-v',
+                        '--verbose',
+                        action='count',
+                        dest='verbosity',
+                        default=0,
+                        help='Increase verbosity level (repeat as needed).')
 
-    parser.add_option(
-        '-e', '--exclude', action='append', default=[],
+    parser.add_argument(
+        '-e',
+        '--exclude',
+        action='append',
+        default=[],
         help='Exclude paths matching EXCLUDE. Can be used multiple times.')
 
-    parser.add_option(
-        '-z', '--zip',
-        help='Store files in a zip archive at ZIP.')
+    parser.add_argument('-z',
+                        '--zip',
+                        help='Store files in a zip archive at ZIP.')
 
   @classmethod
-  def ProcessCommandLineArgs(cls, parser, args, _):
+  def ProcessCommandLineArgs(cls, parser, args):
     if args.verbosity >= 2:
       logging.getLogger().setLevel(logging.DEBUG)
     elif args.verbosity:

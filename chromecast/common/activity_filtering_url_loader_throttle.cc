@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,9 +32,7 @@ void ActivityFilteringURLLoaderThrottle::WillRedirectRequest(
     net::RedirectInfo* redirect_info,
     const network::mojom::URLResponseHead& /* response_head */,
     bool* /* defer */,
-    std::vector<std::string>* /* to_be_removed_request_headers */,
-    net::HttpRequestHeaders* /* modified_request_headers */,
-    net::HttpRequestHeaders* /* modified_cors_exempt_request_headers */) {
+    network::HttpRequestHeadersUpdateParams* /* headers_update_params */) {
   FilterURL(redirect_info->new_url);
 }
 

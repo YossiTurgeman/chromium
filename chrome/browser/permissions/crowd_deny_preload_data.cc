@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,14 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/no_destructor.h"
-#include "base/sequenced_task_runner.h"
-#include "base/task/post_task.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
-#include "base/task_runner_util.h"
+#include "components/permissions/permission_uma_util.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
 #include "url/gurl.h"
 #include "url/origin.h"
@@ -47,6 +46,13 @@ DomainToReputationMap LoadAndParseAndIndexPreloadDataFromDisk(
   return DomainToReputationMap(std::move(domain_reputation_pairs));
 }
 
+PendingOrigin::PendingOrigin(
+    url::Origin origin,
+    base::OnceCallback<void(const chrome_browser_crowd_deny::SiteReputation*)>
+        callback)
+    : origin(std::move(origin)), callback(std::move(callback)) {}
+PendingOrigin::~PendingOrigin() = default;
+
 }  // namespace
 
 CrowdDenyPreloadData::CrowdDenyPreloadData() {
@@ -60,6 +66,30 @@ CrowdDenyPreloadData::~CrowdDenyPreloadData() = default;
 CrowdDenyPreloadData* CrowdDenyPreloadData::GetInstance() {
   static base::NoDestructor<CrowdDenyPreloadData> instance;
   return instance.get();
+}
+
+void CrowdDenyPreloadData::GetReputationDataForSiteAsync(
+    const url::Origin& origin,
+    SiteReputationCallback callback) {
+  if (is_ready_to_use_) {
+    std::move(callback).Run(GetReputationDataForSite(origin));
+  } else {
+    origins_pending_verification_.emplace(origin, std::move(callback));
+  }
+}
+
+void CrowdDenyPreloadData::LoadFromDisk(const base::FilePath& proto_path,
+                                        const base::Version& version) {
+  version_on_disk_ = version;
+  is_ready_to_use_ = false;
+  // On failure, LoadAndParseAndIndexPreloadDataFromDisk will return an empty
+  // map. Replace the in-memory state with that regardless, so that the stale
+  // old data will no longer be used.
+  loading_task_runner_->PostTaskAndReplyWithResult(
+      FROM_HERE,
+      base::BindOnce(&LoadAndParseAndIndexPreloadDataFromDisk, proto_path),
+      base::BindOnce(&CrowdDenyPreloadData::SetSiteReputations,
+                     weak_factory_.GetWeakPtr()));
 }
 
 const CrowdDenyPreloadData::SiteReputation*
@@ -85,15 +115,24 @@ CrowdDenyPreloadData::GetReputationDataForSite(
   return nullptr;
 }
 
-void CrowdDenyPreloadData::LoadFromDisk(const base::FilePath& proto_path) {
-  // On failure, LoadAndParseAndIndexPreloadDataFromDisk will return an empty
-  // map. Replace the in-memory state with that regardless, so that the stale
-  // old data will no longer be used.
-  base::PostTaskAndReplyWithResult(
-      loading_task_runner_.get(), FROM_HERE,
-      base::BindOnce(&LoadAndParseAndIndexPreloadDataFromDisk, proto_path),
-      base::BindOnce(&CrowdDenyPreloadData::set_site_reputations,
-                     base::Unretained(this)));
+void CrowdDenyPreloadData::SetSiteReputations(DomainToReputationMap map) {
+  domain_to_reputation_map_ = std::move(map);
+  is_ready_to_use_ = true;
+
+  CheckOriginsPendingVerification();
+}
+
+void CrowdDenyPreloadData::CheckOriginsPendingVerification() {
+  if (origins_pending_verification_.empty())
+    return;
+
+  GetReputationDataForSiteAsync(
+      origins_pending_verification_.front().origin,
+      std::move(origins_pending_verification_.front().callback));
+  origins_pending_verification_.pop();
+  // The |origins_pending_verification_| might not be empty, check the next
+  // item.
+  CheckOriginsPendingVerification();
 }
 
 CrowdDenyPreloadData::DomainToReputationMap
@@ -110,8 +149,7 @@ ScopedCrowdDenyPreloadDataOverride::ScopedCrowdDenyPreloadDataOverride() {
 }
 
 ScopedCrowdDenyPreloadDataOverride::~ScopedCrowdDenyPreloadDataOverride() {
-  CrowdDenyPreloadData::GetInstance()->set_site_reputations(
-      std::move(old_map_));
+  CrowdDenyPreloadData::GetInstance()->SetSiteReputations(std::move(old_map_));
 }
 
 void ScopedCrowdDenyPreloadDataOverride::SetOriginReputation(
@@ -120,7 +158,7 @@ void ScopedCrowdDenyPreloadDataOverride::SetOriginReputation(
   auto* instance = CrowdDenyPreloadData::GetInstance();
   DomainToReputationMap testing_map = instance->TakeSiteReputations();
   testing_map[origin.host()] = std::move(site_reputation);
-  instance->set_site_reputations(std::move(testing_map));
+  instance->SetSiteReputations(std::move(testing_map));
 }
 
 void ScopedCrowdDenyPreloadDataOverride::ClearAllReputations() {

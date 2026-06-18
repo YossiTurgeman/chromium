@@ -26,28 +26,36 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_LAYOUT_IFRAME_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_LAYOUT_IFRAME_H_
 
+#include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/layout/layout_embedded_content.h"
 
 namespace blink {
 
-class LayoutIFrame final : public LayoutEmbeddedContent {
+class CORE_EXPORT LayoutIFrame : public LayoutEmbeddedContent {
  public:
   explicit LayoutIFrame(HTMLFrameOwnerElement*);
 
-  const char* GetName() const override { return "LayoutIFrame"; }
-
- private:
-  bool ShouldComputeSizeAsReplaced() const override;
-  bool IsInlineBlockOrInlineTable() const override;
-
-  void UpdateLayout() override;
-
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectLayoutIFrame ||
-           LayoutEmbeddedContent::IsOfType(type);
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutIFrame";
   }
 
-  PaintLayerType LayerTypeRequired() const override;
+ private:
+  void UpdateAfterLayout() final;
+
+  PhysicalNaturalSizingInfo GetNaturalDimensions() const override;
+
+  bool IsLayoutIFrame() const final {
+    NOT_DESTROYED();
+    return true;
+  }
+};
+
+template <>
+struct DowncastTraits<LayoutIFrame> {
+  static bool AllowFrom(const LayoutObject& object) {
+    return object.IsLayoutIFrame();
+  }
 };
 
 }  // namespace blink

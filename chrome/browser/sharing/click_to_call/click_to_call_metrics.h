@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,25 +11,27 @@ class WebContents;
 
 // Entry point of a Click to Call journey.
 // These values are logged to UKM. Entries should not be renumbered and numeric
-// values should never be reused. Please keep in sync with
-// "SharingClickToCallEntryPoint" in src/tools/metrics/histograms/enums.xml.
+// values should never be reused.
+// LINT.IfChange(SharingClickToCallEntryPoint)
 enum class SharingClickToCallEntryPoint {
   kLeftClickLink = 0,
   kRightClickLink = 1,
   kRightClickSelection = 2,
   kMaxValue = kRightClickSelection,
 };
+// LINT.ThenChange(//tools/metrics/histograms/enums.xml:SharingClickToCallEntryPoint)
 
 // Selection at the end of a Click to Call journey.
 // These values are logged to UKM. Entries should not be renumbered and numeric
-// values should never be reused. Please keep in sync with
-// "SharingClickToCallSelection" in src/tools/metrics/histograms/enums.xml.
+// values should never be reused.
+// LINT.IfChange(SharingClickToCallSelection)
 enum class SharingClickToCallSelection {
   kNone = 0,
   kDevice = 1,
   kApp = 2,
   kMaxValue = kApp,
 };
+// LINT.ThenChange(//tools/metrics/histograms/enums.xml:SharingClickToCallSelection)
 
 // Records a Click to Call selection to UKM. This is logged after a completed
 // action like selecting an app or a device to send the phone number to.

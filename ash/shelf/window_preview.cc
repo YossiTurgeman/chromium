@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,11 @@
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/wm/window_preview_view.h"
 #include "ash/wm/window_util.h"
+#include "base/functional/bind.h"
 #include "ui/aura/window.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/color/color_id.h"
+#include "ui/color/color_provider.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/views/background.h"
@@ -33,29 +37,27 @@ constexpr SkColor kPreviewContainerBgColor =
     SkColorSetA(gfx::kGoogleGrey100, 0x24);
 constexpr int kPreviewBorderRadius = 4;
 
-WindowPreview::WindowPreview(aura::Window* window,
-                             Delegate* delegate,
-                             const ui::NativeTheme* theme)
+WindowPreview::WindowPreview(aura::Window* window, Delegate* delegate)
     : delegate_(delegate) {
-  preview_view_ =
-      new WindowPreviewView(window, /*trilinear_filtering_on_init=*/false);
+  preview_view_ = new WindowPreviewView(window);
   preview_container_view_ = new views::View();
   preview_container_view_->SetBackground(views::CreateRoundedRectBackground(
       kPreviewContainerBgColor, kPreviewBorderRadius));
   title_ = new views::Label(window->GetTitle());
-  close_button_ = new views::ImageButton(this);
+  close_button_ = new views::ImageButton(base::BindRepeating(
+      &WindowPreview::CloseButtonPressed, base::Unretained(this)));
+  close_button_->SetFocusBehavior(FocusBehavior::NEVER);
 
-  AddChildView(preview_container_view_);
-  AddChildView(preview_view_);
-  AddChildView(title_);
-  AddChildView(close_button_);
-
-  SetStyling(theme);
+  AddChildViewRaw(preview_container_view_.get());
+  AddChildViewRaw(preview_view_.get());
+  AddChildViewRaw(title_.get());
+  AddChildViewRaw(close_button_.get());
 }
 
 WindowPreview::~WindowPreview() = default;
 
-gfx::Size WindowPreview::CalculatePreferredSize() const {
+gfx::Size WindowPreview::CalculatePreferredSize(
+    const views::SizeBounds& available_size) const {
   // The preview itself will always be strictly contained within its container,
   // so only the container's size matters to calculate the preferred size.
   const gfx::Size container_size = GetPreviewContainerSize();
@@ -65,10 +67,10 @@ gfx::Size WindowPreview::CalculatePreferredSize() const {
                    container_size.height() + title_height_with_padding);
 }
 
-void WindowPreview::Layout() {
+void WindowPreview::Layout(PassKey) {
   gfx::Rect content_rect = GetContentsBounds();
 
-  gfx::Size title_size = title_->CalculatePreferredSize();
+  gfx::Size title_size = title_->CalculatePreferredSize({});
   int title_height_with_padding =
       kTitleLineHeight + kTitleMarginTop + kTitleMarginBottom;
   int title_width =
@@ -83,7 +85,7 @@ void WindowPreview::Layout() {
                 content_rect.y(), kCloseButtonSize, kCloseButtonSize));
 
   const gfx::Size container_size = GetPreviewContainerSize();
-  gfx::Size mirror_size = preview_view_->CalculatePreferredSize();
+  gfx::Size mirror_size = preview_view_->CalculatePreferredSize({});
   float preview_ratio = static_cast<float>(mirror_size.width()) /
                         static_cast<float>(mirror_size.height());
 
@@ -129,40 +131,22 @@ bool WindowPreview::OnMousePressed(const ui::MouseEvent& event) {
   return true;
 }
 
-const char* WindowPreview::GetClassName() const {
-  return "WindowPreview";
-}
-
-void WindowPreview::ButtonPressed(views::Button* sender,
-                                  const ui::Event& event) {
-  // The close button was pressed.
-  DCHECK_EQ(sender, close_button_);
-  aura::Window* target = preview_view_->window();
-
-  // The window might have been closed in the mean time.
-  // TODO: Use WindowObserver to listen to when previewed windows are
-  // being closed and remove this condition.
-  if (!target)
-    return;
-  window_util::CloseWidgetForWindow(target);
-
-  // This will have the effect of deleting this view.
-  delegate_->OnPreviewDismissed(this);
-}
-
-void WindowPreview::SetStyling(const ui::NativeTheme* theme) {
+void WindowPreview::OnThemeChanged() {
+  views::View::OnThemeChanged();
+  const auto* color_provider = GetColorProvider();
   SkColor background_color =
-      theme->GetSystemColor(ui::NativeTheme::kColorId_TooltipBackground);
+      color_provider->GetColor(ui::kColorTooltipBackground);
   title_->SetEnabledColor(
-      theme->GetSystemColor(ui::NativeTheme::kColorId_TooltipText));
+      color_provider->GetColor(ui::kColorTooltipForeground));
   title_->SetBackgroundColor(background_color);
 
   // The background is not opaque, so we can't do subpixel rendering.
   title_->SetSubpixelRenderingEnabled(false);
 
-  close_button_->SetImage(
+  close_button_->SetImageModel(
       views::Button::STATE_NORMAL,
-      gfx::CreateVectorIcon(kOverviewWindowCloseIcon, kCloseButtonColor));
+      ui::ImageModel::FromVectorIcon(kOverviewWindowCloseIcon,
+                                     kCloseButtonColor));
   close_button_->SetImageHorizontalAlignment(views::ImageButton::ALIGN_CENTER);
   close_button_->SetImageVerticalAlignment(views::ImageButton::ALIGN_MIDDLE);
   close_button_->SetMinimumImageSize(
@@ -177,5 +161,21 @@ gfx::Size WindowPreview::GetPreviewContainerSize() const {
                    ShelfConfig::Get()->shelf_tooltip_preview_max_width())),
       ShelfConfig::Get()->shelf_tooltip_preview_height());
 }
+
+void WindowPreview::CloseButtonPressed() {
+  // The window might have been closed in the mean time.
+  // TODO: Use WindowObserver to listen to when previewed windows are
+  // being closed and remove this condition.
+  aura::Window* target = preview_view_->window();
+  if (!target)
+    return;
+  window_util::CloseWidgetForWindow(target);
+
+  // This will have the effect of deleting this view.
+  delegate_->OnPreviewDismissed(this);
+}
+
+BEGIN_METADATA(WindowPreview)
+END_METADATA
 
 }  // namespace ash

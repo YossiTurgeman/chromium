@@ -1,26 +1,35 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/content_settings/core/browser/content_settings_pref.h"
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 
-#include "base/bind_helpers.h"
-#include "base/stl_util.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/test/gtest_util.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/values.h"
+#include "components/content_settings/core/browser/content_settings_pref_provider.h"
 #include "components/content_settings/core/browser/content_settings_utils.h"
+#include "components/content_settings/core/browser/geolocation_setting_delegate.h"
+#include "components/content_settings/core/browser/permission_settings_registry.h"
+#include "components/content_settings/core/common/content_settings.h"
+#include "components/content_settings/core/common/content_settings_constraints.h"
+#include "components/content_settings/core/common/content_settings_metadata.h"
 #include "components/content_settings/core/common/content_settings_pattern.h"
 #include "components/content_settings/core/common/content_settings_types.h"
 #include "components/content_settings/core/common/content_settings_utils.h"
+#include "components/content_settings/core/common/features.h"
 #include "components/content_settings/core/test/content_settings_test_utils.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/testing_pref_service.h"
-#include "ppapi/buildflags/buildflags.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
@@ -35,6 +44,8 @@ constexpr char kTestPatternNonCanonicalAlpha1[] = "https://%61lpha.com,*";
 constexpr char kTestPatternNonCanonicalAlpha2[] = "https://alph%61.com,*";
 constexpr char kTestPatternCanonicalBeta[] = "https://beta.com,*";
 constexpr char kTestPatternNonCanonicalBeta[] = "https://bet%61.com,*";
+constexpr char kTestPatternCanonicalGamma[] = "https://gamma.com,*";
+constexpr char kTestPatternCanonicalDelta[] = "https://delta.com,*";
 
 constexpr char kTestContentSettingPrefName[] = "content_settings.test";
 
@@ -42,49 +53,9 @@ constexpr char kExpirationKey[] = "expiration";
 constexpr char kLastModifiedKey[] = "last_modified";
 constexpr char kSettingKey[] = "setting";
 constexpr char kTagKey[] = "tag";
-
-#if BUILDFLAG(ENABLE_PLUGINS)
-constexpr char kPluginsContentSettingPrefName[] = "content_settings.plugins";
-constexpr char kPerResourceTag[] = "per_resource";
-
-// Tests that a particular pref has the expected values with and without a
-// resource id
-void LegacyPersistedPluginTests(
-    ContentSettingsPref* content_settings_pref,
-    const std::string& pattern,
-    const GURL& host,
-    const std::string& resource,
-    ContentSetting no_resource_id_perf_expected_value,
-    ContentSetting with_resource_id_perf_expected_value) {
-  auto pattern_pair = ParsePatternString(pattern);
-  // Retrieving the pref without a resource id for pattern works and
-  // its value is the expected one.
-  EXPECT_EQ(no_resource_id_perf_expected_value,
-            content_settings::ValueToContentSetting(
-                content_settings::TestUtils::GetContentSettingValueAndPatterns(
-                    content_settings_pref->GetRuleIterator("", false).get(),
-                    host, GURL(), &(pattern_pair.first), &(pattern_pair.second))
-                    .get()));
-
-  // Retrieving the pref with a resource id will throw.
-  EXPECT_DCHECK_DEATH(
-      content_settings_pref->GetRuleIterator(resource, false)->HasNext());
-
-  // Allow resource ids for testing in order to test that the perf was correctly
-  // loaded from the json. This basically verifies that we did build a correct
-  // json and it was parsed and loaded without any issues.
-  content_settings_pref->set_allow_resource_identifiers_for_testing();
-  EXPECT_EQ(
-      with_resource_id_perf_expected_value,
-      content_settings::ValueToContentSetting(
-          content_settings::TestUtils::GetContentSettingValueAndPatterns(
-              content_settings_pref->GetRuleIterator(resource, false).get(),
-              host, GURL(), &(pattern_pair.first), &(pattern_pair.second))
-              .get()));
-  content_settings_pref->reset_allow_resource_identifiers_for_testing();
-}
-
-#endif  // BUILDFLAG(ENABLE_PLUGINS)
+constexpr char kSessionModelKey[] = "model";
+constexpr char kDecidedByRelatedWebsiteSets[] =
+    "decided_by_related_website_sets";
 
 // Creates a JSON dictionary representing a dummy content setting exception
 // value in preferences. The setting will be marked with the |tag| like so:
@@ -95,36 +66,172 @@ void LegacyPersistedPluginTests(
 //       "tag": "...",
 //     }
 //   }
-base::Value CreateDummyContentSettingValue(base::StringPiece tag,
-                                           bool expired) {
-  base::Value setting(base::Value::Type::DICTIONARY);
-  setting.SetKey(kTagKey, base::Value(tag));
-
-  base::Value pref_value(base::Value::Type::DICTIONARY);
-  pref_value.SetKey(kLastModifiedKey, base::Value("13189876543210000"));
-  pref_value.SetKey(kSettingKey, std::move(setting));
-  pref_value.SetKey(kExpirationKey, expired ? base::Value("13189876543210001")
-                                            : base::Value("0"));
-  return pref_value;
+base::DictValue CreateDummyContentSettingValue(
+    std::string_view tag,
+    bool expired,
+    mojom::SessionModel session_model = mojom::SessionModel::DURABLE,
+    bool decided_by_related_website_sets = false) {
+  return base::DictValue()
+      .Set(kSettingKey, base::DictValue().Set(kTagKey, tag))
+      .Set(kLastModifiedKey, "13189876543210000")
+      .Set(kExpirationKey, expired ? "13189876543210001" : "0")
+      .Set(kSessionModelKey, static_cast<int>(session_model))
+      .Set(kDecidedByRelatedWebsiteSets, decided_by_related_website_sets);
 }
 
 // Given the JSON dictionary representing the "setting" stored under a content
 // setting exception value, returns the tag.
-std::string GetTagFromDummyContentSetting(const base::Value& setting) {
-  const auto* tag = setting.FindKey(kTagKey);
-  return tag ? tag->GetString() : std::string();
+std::string GetTagFromDummyContentSetting(const base::DictValue& setting) {
+  const std::string* tag = setting.FindString(kTagKey);
+  return tag ? *tag : std::string();
 }
 
 // Given the JSON dictionary representing a content setting exception value,
 // returns the tag.
-std::string GetTagFromDummyContentSettingValue(const base::Value& pref_value) {
-  const auto* setting = pref_value.FindKey(kSettingKey);
+std::string GetTagFromDummyContentSettingValue(
+    const base::DictValue& pref_value) {
+  const base::DictValue* setting = pref_value.FindDict(kSettingKey);
   return setting ? GetTagFromDummyContentSetting(*setting) : std::string();
 }
 
 }  // namespace
 
-TEST(ContentSettingsPref, CanonicalizationWhileReadingFromPrefs) {
+class ContentSettingsPrefTest : public testing::Test {
+ public:
+  void SetUp() override {
+    prefs_.registry()->RegisterDictionaryPref(kTestContentSettingPrefName);
+
+    registrar_.Init(&prefs_);
+  }
+
+  std::unique_ptr<ContentSettingsPref> CreateContentSettingsPref(
+      ContentSettingsType type) {
+    return std::make_unique<ContentSettingsPref>(
+        type, &prefs_, &registrar_, kTestContentSettingPrefName, false, false,
+        base::DoNothing());
+  }
+
+  void SetPrefDict(base::DictValue pref_value) {
+    prefs_.SetUserPref(kTestContentSettingPrefName, std::move(pref_value));
+  }
+
+  const base::DictValue* GetPrefDict() {
+    return &prefs_.GetDict(kTestContentSettingPrefName);
+  }
+
+ protected:
+  TestingPrefServiceSimple prefs_;
+  PrefChangeRegistrar registrar_;
+};
+
+TEST_F(ContentSettingsPrefTest, BasicReadWrite) {
+  const char* pattern_pair = "http://example.com,*";
+
+  SetPrefDict(base::DictValue().Set(
+      pattern_pair, base::DictValue().Set(kSettingKey, CONTENT_SETTING_BLOCK)));
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+  auto check_value = [&](ContentSetting expected_value) {
+    auto rule_iterator = content_settings_pref->GetRuleIterator(
+        /*off_the_record=*/false);
+    ASSERT_TRUE(rule_iterator->HasNext());
+    auto rule = rule_iterator->Next();
+    EXPECT_EQ(pattern_pair, CreatePatternString(rule->primary_pattern,
+                                                rule->secondary_pattern));
+    EXPECT_EQ(rule->value.GetInt(), expected_value);
+    EXPECT_FALSE(rule_iterator->HasNext());
+  };
+
+  check_value(CONTENT_SETTING_BLOCK);
+
+  content_settings_pref->SetWebsiteSetting(
+      ContentSettingsPattern::FromString("http://example.com"),
+      ContentSettingsPattern::Wildcard(), base::Value(CONTENT_SETTING_ALLOW),
+      RuleMetaData());
+  check_value(CONTENT_SETTING_ALLOW);
+  // Check that the pref has been updated.
+  auto* pref_value = GetPrefDict();
+  EXPECT_EQ(pref_value->size(), 1ul);
+  auto* setting = pref_value->FindDict(pattern_pair);
+  ASSERT_NE(setting, nullptr);
+  EXPECT_EQ(setting->FindInt(kSettingKey),
+            std::make_optional<int>(CONTENT_SETTING_ALLOW));
+}
+
+TEST_F(ContentSettingsPrefTest, SetWebsiteSettingShouldRemoveSettingIfEmpty) {
+  SetPrefDict(base::DictValue().Set(
+      "http://example.com,*",
+      base::DictValue().Set(kSettingKey, CONTENT_SETTING_BLOCK)));
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+  content_settings_pref->SetWebsiteSetting(
+      ContentSettingsPattern::FromString("http://example.com"),
+      ContentSettingsPattern::Wildcard(), base::Value(), RuleMetaData());
+  EXPECT_EQ(content_settings_pref->GetRuleIterator(/*off_the_record=*/false),
+            nullptr);
+  // Check that the pref is empty.
+  EXPECT_TRUE(GetPrefDict()->empty());
+}
+
+TEST_F(ContentSettingsPrefTest, SetWebsiteSettingWhenEmpty) {
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+  content_settings_pref->SetWebsiteSetting(
+      ContentSettingsPattern::FromString("http://example.com"),
+      ContentSettingsPattern::Wildcard(), base::Value(CONTENT_SETTING_ALLOW),
+      RuleMetaData());
+
+  auto rule_iterator = content_settings_pref->GetRuleIterator(
+      /*off_the_record=*/false);
+  ASSERT_TRUE(rule_iterator->HasNext());
+  auto rule = rule_iterator->Next();
+  EXPECT_EQ(
+      "http://example.com,*",
+      CreatePatternString(rule->primary_pattern, rule->secondary_pattern));
+  EXPECT_EQ(rule->value.GetInt(), CONTENT_SETTING_ALLOW);
+  EXPECT_FALSE(rule_iterator->HasNext());
+
+  // Check pref.
+  auto* pref_value = GetPrefDict();
+  EXPECT_EQ(pref_value->size(), 1ul);
+  auto* setting = pref_value->FindDict("http://example.com,*");
+  ASSERT_NE(setting, nullptr);
+  EXPECT_EQ(setting->FindInt(kSettingKey),
+            std::make_optional<int>(CONTENT_SETTING_ALLOW));
+}
+
+TEST_F(ContentSettingsPrefTest, ClearAllContentSettingsRules) {
+  base::DictValue dummy_pref_value = base::DictValue().Set(
+      kTestPatternCanonicalAlpha,
+      base::DictValue().Set(kSettingKey, CONTENT_SETTING_BLOCK));
+  SetPrefDict(dummy_pref_value.Clone());
+
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+  content_settings_pref->ClearAllContentSettingsRules();
+
+  EXPECT_EQ(content_settings_pref->GetRuleIterator(
+                /*off_the_record=*/false),
+            nullptr);
+
+  EXPECT_TRUE(GetPrefDict()->empty());
+}
+
+TEST_F(ContentSettingsPrefTest, GetNumExceptions) {
+  SetPrefDict(
+      base::DictValue()
+          .Set(kTestPatternCanonicalAlpha,
+               base::DictValue().Set(kSettingKey, CONTENT_SETTING_BLOCK))
+          .Set(kTestPatternCanonicalBeta,
+               base::DictValue().Set(kSettingKey, CONTENT_SETTING_BLOCK)));
+
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+  EXPECT_EQ(content_settings_pref->GetNumExceptions(), 2ul)
+      << "It should count all exceptions in the single pref store";
+}
+
+TEST_F(ContentSettingsPrefTest, CanonicalizationWhileReadingFromPrefs) {
   // Canonical/non-canonical patterns originally in preferences.
   constexpr const char* kTestOriginalPatterns[] = {
       kTestPatternNonCanonicalAlpha1,
@@ -158,34 +265,27 @@ TEST(ContentSettingsPref, CanonicalizationWhileReadingFromPrefs) {
       {kTestPatternCanonicalBeta, kTestPatternCanonicalBeta},
   };
 
-  auto original_pref_value = std::make_unique<base::DictionaryValue>();
+  base::DictValue original_pref_value;
   for (const auto* pattern : kTestOriginalPatterns) {
-    original_pref_value->SetKey(
+    original_pref_value.Set(
         pattern, CreateDummyContentSettingValue(pattern, /*expired=*/false));
   }
 
-  TestingPrefServiceSimple prefs;
-  prefs.registry()->RegisterDictionaryPref(kTestContentSettingPrefName);
-  prefs.SetUserPref(kTestContentSettingPrefName,
-                    std::move(original_pref_value));
-
-  PrefChangeRegistrar registrar;
-  registrar.Init(&prefs);
-  ContentSettingsPref content_settings_pref(
-      ContentSettingsType::MEDIA_ENGAGEMENT, &prefs, &registrar,
-      kTestContentSettingPrefName, false, false, base::DoNothing());
+  SetPrefDict(std::move(original_pref_value));
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::MEDIA_ENGAGEMENT);
 
   // Verify that the |value_map| contains the expected content setting patterns
   // and setting.
 
   std::vector<CanonicalPatternToTag> patterns_to_tags_in_memory;
-  auto rule_iterator = content_settings_pref.GetRuleIterator(
-      std::string() /* resource_identifier */, false /* is_incognito */);
+  auto rule_iterator =
+      content_settings_pref->GetRuleIterator(false /* is_incognito */);
   while (rule_iterator->HasNext()) {
     auto rule = rule_iterator->Next();
     patterns_to_tags_in_memory.emplace_back(
-        CreatePatternString(rule.primary_pattern, rule.secondary_pattern),
-        GetTagFromDummyContentSetting(rule.value));
+        CreatePatternString(rule->primary_pattern, rule->secondary_pattern),
+        GetTagFromDummyContentSetting(rule->value.GetDict()));
   }
 
   EXPECT_THAT(patterns_to_tags_in_memory,
@@ -194,197 +294,195 @@ TEST(ContentSettingsPref, CanonicalizationWhileReadingFromPrefs) {
   // Verify that Preferences do, as well.
 
   std::vector<CanonicalPatternToTag> patterns_to_tags_in_prefs;
-  const auto* canonical_pref_value =
-      prefs.GetUserPref(kTestContentSettingPrefName);
-  ASSERT_TRUE(canonical_pref_value->is_dict());
-  for (const auto& key_value : canonical_pref_value->DictItems()) {
+  for (auto key_value : *GetPrefDict()) {
     patterns_to_tags_in_prefs.emplace_back(
-        key_value.first, GetTagFromDummyContentSettingValue(key_value.second));
+        key_value.first,
+        GetTagFromDummyContentSettingValue(key_value.second.GetDict()));
   }
 
   EXPECT_THAT(patterns_to_tags_in_prefs,
               testing::UnorderedElementsAreArray(kExpectedPatternsToTags));
 }
 
-#if BUILDFLAG(ENABLE_PLUGINS)
-// Test that a legagcy persisted plugin setting does not cause errors and has
-// a sane behaviour.
-TEST(ContentSettingsPref, LegacyPersistedPluginSetting) {
-  const GURL kHost1("http://example.com/");
-  const GURL kHost2("http://other-example.com/");
-  constexpr char kPattern1[] = "http://example.com,*";
-  constexpr char kPattern2[] = "http://other-example.com,*";
-  constexpr char kResource[] = "someplugin";
-
-  TestingPrefServiceSimple prefs;
-  prefs.registry()->RegisterDictionaryPref(kPluginsContentSettingPrefName);
-
-  // Build a json simulating some pre-existing plugin settings situation where
-  // a mix of per_resource and regular settings are present:
-  // "content_settings.plugins": {
-  //   kPattern1: {
-  //    "setting": 1, <-- CONTENT_SETTING_ALLOW
-  //    "per_resource": {
-  //      "someplugin": 2 <-- CONTENT_SETTING_BLOCK
-  //    }
-  //   }
-  //   kPattern2: {
-  //    "per_resource": {
-  //      "someplugin": 1 <-- CONTENT_SETTING_ALLOW
-  //    }
-  //   }
-  // }
-
-  auto original_pref_value = std::make_unique<base::DictionaryValue>();
-
-  base::Value per_resource_value1(base::Value::Type::DICTIONARY);
-  per_resource_value1.SetKey(kResource, base::Value(CONTENT_SETTING_BLOCK));
-
-  base::Value pref_value1(base::Value::Type::DICTIONARY);
-  pref_value1.SetKey(kLastModifiedKey, base::Value("13189876543210000"));
-  pref_value1.SetKey(kSettingKey, base::Value(CONTENT_SETTING_ALLOW));
-  pref_value1.SetKey(kPerResourceTag, std::move(per_resource_value1));
-
-  original_pref_value->SetKey(kPattern1, std::move(pref_value1));
-
-  base::Value per_resource_value2(base::Value::Type::DICTIONARY);
-  per_resource_value2.SetKey(kResource, base::Value(CONTENT_SETTING_ALLOW));
-
-  base::Value pref_value2(base::Value::Type::DICTIONARY);
-  pref_value2.SetKey(kLastModifiedKey, base::Value("13189876543210000"));
-  pref_value2.SetKey(kPerResourceTag, std::move(per_resource_value2));
-
-  original_pref_value->SetKey(kPattern2, std::move(pref_value2));
-
-  prefs.SetUserPref(kPluginsContentSettingPrefName,
-                    std::move(original_pref_value));
-
-  PrefChangeRegistrar registrar;
-  registrar.Init(&prefs);
-  ContentSettingsPref content_settings_pref(
-      ContentSettingsType::PLUGINS, &prefs, &registrar,
-      kPluginsContentSettingPrefName, false, false, base::DoNothing());
-
-  // For kPattern1 retrieving the setting without a resource id returns the
-  // CONTENT_SETTING_ALLOW value and retrieving it with the resource id (after
-  // allowing resource ids for testing) returns CONTENT_SETTING_BLOCK.
-  LegacyPersistedPluginTests(&content_settings_pref, kPattern1, kHost1,
-                             kResource, CONTENT_SETTING_ALLOW,
-                             CONTENT_SETTING_BLOCK);
-
-  // For kPattern2 retrieving the setting without a resource id returns the
-  // CONTENT_SETTING_DEFAULT value since it was not set in the first place and
-  // retrieving it with the resource id (after allowing resource ids for
-  // testing) returns CONTENT_SETTING_ALLOW.
-  LegacyPersistedPluginTests(&content_settings_pref, kPattern2, kHost2,
-                             kResource, CONTENT_SETTING_DEFAULT,
-                             CONTENT_SETTING_ALLOW);
-}
-#endif  // BUILDFLAG(ENABLE_PLUGINS)
-
 // If we are reading from prefs and we have any persistend settings that have
 // expired we should remove these to prevent unbounded growth and bloat.
-TEST(ContentSettingsPref, ExpirationWhileReadingFromPrefs) {
+TEST_F(ContentSettingsPrefTest, ExpirationWhileReadingFromPrefs) {
   // Upon construction, ContentSettingPref reads all content setting exception
   // data stored in Preferences for a given content setting. This process also
   // has the side effect that it clears out expired settings.
 
-  // We should only have our un-expired setting left over.
   using CanonicalPatternToTag = std::pair<std::string, std::string>;
-  const std::vector<CanonicalPatternToTag> kExpectedPatternsToTags = {
+  std::vector<CanonicalPatternToTag> expected_patterns_to_tags = {
       {kTestPatternCanonicalBeta, kTestPatternCanonicalBeta},
+      {kTestPatternCanonicalDelta, kTestPatternCanonicalDelta},
   };
 
-  // Create two pre-existing entries, one that is expired and one that never
-  // expires.
-  auto original_pref_value = std::make_unique<base::DictionaryValue>();
-  original_pref_value->SetKey(
+  // Create pre-existing entries: one that is expired, one that never
+  // expires, one that is non-restorable.
+  base::DictValue original_pref_value;
+  original_pref_value.Set(
       kTestPatternCanonicalAlpha,
       CreateDummyContentSettingValue(kTestPatternCanonicalAlpha,
                                      /*expired=*/true));
-  original_pref_value->SetKey(
+  original_pref_value.Set(
       kTestPatternCanonicalBeta,
       CreateDummyContentSettingValue(kTestPatternCanonicalBeta,
                                      /*expired=*/false));
 
-  TestingPrefServiceSimple prefs;
-  prefs.registry()->RegisterDictionaryPref(kTestContentSettingPrefName);
-  prefs.SetUserPref(kTestContentSettingPrefName,
-                    std::move(original_pref_value));
+  original_pref_value.Set(kTestPatternCanonicalGamma,
+                          CreateDummyContentSettingValue(
+                              kTestPatternCanonicalGamma, /*expired=*/true,
+                              mojom::SessionModel::DURABLE,
+                              /*decided_by_related_website_sets=*/true));
 
-  PrefChangeRegistrar registrar;
-  registrar.Init(&prefs);
-  ContentSettingsPref content_settings_pref(
-      ContentSettingsType::MEDIA_ENGAGEMENT, &prefs, &registrar,
-      kTestContentSettingPrefName, false, false, base::DoNothing());
+  original_pref_value.Set(kTestPatternCanonicalDelta,
+                          CreateDummyContentSettingValue(
+                              kTestPatternCanonicalDelta, /*expired=*/false,
+                              mojom::SessionModel::DURABLE,
+                              /*decided_by_related_website_sets=*/true));
+
+  SetPrefDict(std::move(original_pref_value));
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::MEDIA_ENGAGEMENT);
 
   // Verify that the |value_map| contains the expected content setting patterns
   // and setting.
   std::vector<CanonicalPatternToTag> patterns_to_tags_in_memory;
-  auto rule_iterator = content_settings_pref.GetRuleIterator(
-      std::string() /* resource_identifier */, false /* is_incognito */);
+  auto rule_iterator =
+      content_settings_pref->GetRuleIterator(false /* is_incognito */);
   while (rule_iterator->HasNext()) {
     auto rule = rule_iterator->Next();
     patterns_to_tags_in_memory.emplace_back(
-        CreatePatternString(rule.primary_pattern, rule.secondary_pattern),
-        GetTagFromDummyContentSetting(rule.value));
+        CreatePatternString(rule->primary_pattern, rule->secondary_pattern),
+        GetTagFromDummyContentSetting(rule->value.GetDict()));
   }
 
   EXPECT_THAT(patterns_to_tags_in_memory,
-              testing::UnorderedElementsAreArray(kExpectedPatternsToTags));
+              testing::UnorderedElementsAreArray(expected_patterns_to_tags));
 
   // Verify that Preferences do, as well.
   std::vector<CanonicalPatternToTag> patterns_to_tags_in_prefs;
-  const auto* canonical_pref_value =
-      prefs.GetUserPref(kTestContentSettingPrefName);
-  ASSERT_TRUE(canonical_pref_value->is_dict());
-  for (const auto& key_value : canonical_pref_value->DictItems()) {
+  for (auto key_value : *GetPrefDict()) {
     patterns_to_tags_in_prefs.emplace_back(
-        key_value.first, GetTagFromDummyContentSettingValue(key_value.second));
+        key_value.first,
+        GetTagFromDummyContentSettingValue(key_value.second.GetDict()));
   }
 
   EXPECT_THAT(patterns_to_tags_in_prefs,
-              testing::UnorderedElementsAreArray(kExpectedPatternsToTags));
+              testing::UnorderedElementsAreArray(expected_patterns_to_tags));
 }
 
 // Ensure that any previously set last_modified values using
 // base::Time::ToInternalValue can be read correctly.
-TEST(ContentSettingsPref, LegacyLastModifiedLoad) {
+TEST_F(ContentSettingsPrefTest, LegacyLastModifiedLoad) {
   constexpr char kPatternPair[] = "http://example.com,*";
 
-  auto original_pref_value = std::make_unique<base::DictionaryValue>();
+  base::DictValue original_pref_value;
   const base::Time last_modified =
       base::Time::FromInternalValue(13189876543210000);
 
   // Create a single entry using our old internal value for last_modified.
-  base::Value pref_value(base::Value::Type::DICTIONARY);
-  pref_value.SetKey(
-      kLastModifiedKey,
-      base::Value(base::NumberToString(last_modified.ToInternalValue())));
-  pref_value.SetKey(kSettingKey, base::Value(CONTENT_SETTING_BLOCK));
-  pref_value.SetKey(kExpirationKey, base::Value("0"));
+  base::DictValue pref_value;
+  pref_value.Set(kLastModifiedKey,
+                 base::NumberToString(last_modified.ToInternalValue()));
+  pref_value.Set(kSettingKey, CONTENT_SETTING_BLOCK);
+  pref_value.Set(kExpirationKey, "0");
 
-  original_pref_value->SetKey(kPatternPair, std::move(pref_value));
+  original_pref_value.Set(kPatternPair, std::move(pref_value));
 
-  TestingPrefServiceSimple prefs;
-  prefs.registry()->RegisterDictionaryPref(kTestContentSettingPrefName);
-  prefs.SetUserPref(kTestContentSettingPrefName,
-                    std::move(original_pref_value));
+  SetPrefDict(std::move(original_pref_value));
 
-  PrefChangeRegistrar registrar;
-  registrar.Init(&prefs);
-  ContentSettingsPref content_settings_pref(
-      ContentSettingsType::STORAGE_ACCESS, &prefs, &registrar,
-      kTestContentSettingPrefName, false, false, base::DoNothing());
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
 
   // Ensure that after reading from our JSON/old value the last_modified time is
   // still parsed correctly.
-  base::Time retrieved_last_modified =
-      content_settings_pref.GetWebsiteSettingLastModified(
-          ContentSettingsPattern::FromString("http://example.com"),
-          ContentSettingsPattern::Wildcard(),
-          /*resource_identifier=*/std::string());
+  EXPECT_EQ(content_settings_pref->GetNumExceptions(), 1u);
+  auto it = content_settings_pref->GetRuleIterator(false);
+  base::Time retrieved_last_modified = it->Next()->metadata.last_modified();
   EXPECT_EQ(last_modified, retrieved_last_modified);
+}
+
+// Ensure that decided_by_related_website_sets can be written and read.
+TEST_F(ContentSettingsPrefTest, DecidedByRelatedWebsiteSetsLoad) {
+  // Write pref.
+  {
+    auto content_settings_pref =
+        CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+    RuleMetaData metadata;
+    metadata.set_session_model(mojom::SessionModel::DURABLE);
+    metadata.set_decided_by_related_website_sets(true);
+    content_settings_pref->SetWebsiteSetting(
+        ContentSettingsPattern::FromString("http://example.com"),
+        ContentSettingsPattern::Wildcard(), base::Value(CONTENT_SETTING_ALLOW),
+        std::move(metadata));
+  }
+
+  // Read pref.
+  // Reset is needed because `ReadContentSettingsFromPref()` is called in the
+  // constructor of `ContentSettingsPref` and reusing the registrar causes a
+  // fatal error because it already had the pref registered.
+  registrar_.Reset();
+  registrar_.Init(&prefs_);
+  auto content_settings_pref =
+      CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+  auto rule_iterator = content_settings_pref->GetRuleIterator(
+      /*off_the_record=*/false);
+  ASSERT_TRUE(rule_iterator->HasNext());
+  auto rule = rule_iterator->Next();
+  EXPECT_EQ(
+      "http://example.com,*",
+      CreatePatternString(rule->primary_pattern, rule->secondary_pattern));
+  EXPECT_EQ(rule->value.GetInt(), CONTENT_SETTING_ALLOW);
+  EXPECT_EQ(rule->metadata.session_model(), mojom::SessionModel::DURABLE);
+  EXPECT_EQ(rule->metadata.decided_by_related_website_sets(), true);
+  EXPECT_FALSE(rule_iterator->HasNext());
+}
+
+// Ensure that decided_by_related_website_sets is not written to JSON when it's
+// false.
+TEST_F(ContentSettingsPrefTest,
+       DecidedByRelatedWebsiteSetsFalseNotWrittenToJson) {
+  // Write pref.
+  {
+    auto content_settings_pref =
+        CreateContentSettingsPref(ContentSettingsType::STORAGE_ACCESS);
+    RuleMetaData metadata;
+    metadata.set_session_model(mojom::SessionModel::DURABLE);
+    metadata.set_decided_by_related_website_sets(false);
+    content_settings_pref->SetWebsiteSetting(
+        ContentSettingsPattern::FromString("http://example.com"),
+        ContentSettingsPattern::Wildcard(), base::Value(CONTENT_SETTING_ALLOW),
+        std::move(metadata));
+  }
+
+  // Read pref from dict and make sure `decided_by_related_website_sets` is not
+  // written when it's false.
+  auto& dict = prefs_.GetDict(kTestContentSettingPrefName);
+  EXPECT_EQ(dict.FindDict("http://example.com,*")
+                ->FindBool("decided_by_related_website_sets"),
+            std::nullopt);
+}
+
+TEST_F(ContentSettingsPrefTest, DeletePrefWithDeprecatedSessionModelValue) {
+  // Set the SessionModel to the deprecated value 2.
+  base::DictValue original_pref_value;
+  original_pref_value.Set(kTestPatternCanonicalAlpha,
+                          base::DictValue()
+                              .Set(kSettingKey, CONTENT_SETTING_BLOCK)
+                              .Set(kSessionModelKey, 2));
+  SetPrefDict(std::move(original_pref_value));
+
+  auto content_settings_pref = std::make_unique<ContentSettingsPref>(
+      ContentSettingsType::STORAGE_ACCESS, &prefs_, &registrar_,
+      kTestContentSettingPrefName, false, /*restore_session=*/true,
+      base::DoNothing());
+
+  ASSERT_EQ(content_settings_pref->GetRuleIterator(/*off_the_record=*/false),
+            nullptr);
+
+  // Check that the pref is empty.
+  EXPECT_TRUE(GetPrefDict()->empty());
 }
 
 }  // namespace content_settings

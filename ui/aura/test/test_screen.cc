@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,22 +7,19 @@
 #include <stdint.h>
 
 #include "base/check_op.h"
+#include "base/containers/adapters.h"
 #include "build/build_config.h"
 #include "ui/aura/env.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_event_dispatcher.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/ime/input_method.h"
+#include "ui/compositor/compositor.h"
 #include "ui/display/display_transform.h"
 #include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/geometry/size_conversions.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/platform_window/platform_window_init_properties.h"
-
-#if defined(OS_FUCHSIA)
-#include "ui/ozone/public/ozone_platform.h"  // nogncheck
-#include "ui/platform_window/fuchsia/initialize_presenter_api_view.h"
-#endif
 
 namespace aura {
 
@@ -51,13 +48,6 @@ WindowTreeHost* TestScreen::CreateHostForPrimaryDisplay() {
   DCHECK(!host_);
   ui::PlatformWindowInitProperties properties(
       gfx::Rect(GetPrimaryDisplay().GetSizeInPixel()));
-#if defined(OS_FUCHSIA)
-  if (ui::OzonePlatform::GetInstance()
-          ->GetPlatformProperties()
-          .needs_view_token) {
-    ui::fuchsia::InitializeViewTokenAndPresentView(&properties);
-  }
-#endif
   host_ = WindowTreeHost::Create(std::move(properties)).release();
   // Some tests don't correctly manage window focus/activation states.
   // Makes sure InputMethod is default focused so that IME basics can work.
@@ -83,10 +73,10 @@ void TestScreen::SetDeviceScaleFactor(float device_scale_factor,
 void TestScreen::SetColorSpace(const gfx::ColorSpace& color_space,
                                float sdr_white_level) {
   display::Display display(GetPrimaryDisplay());
-  gfx::DisplayColorSpaces display_color_spaces(color_space,
-                                               gfx::BufferFormat::RGBA_8888);
-  display_color_spaces.SetSDRWhiteLevel(sdr_white_level);
-  display.set_color_spaces(display_color_spaces);
+  gfx::DisplayColorSpaces display_color_spaces(
+      color_space, viz::SinglePlaneFormat::kRGBA_8888);
+  display_color_spaces.SetSDRMaxLuminanceNits(sdr_white_level);
+  display.SetColorSpaces(display_color_spaces);
   display_list().UpdateDisplay(display);
 }
 
@@ -119,6 +109,11 @@ void TestScreen::SetWorkAreaInsets(const gfx::Insets& insets) {
   display::Display display(GetPrimaryDisplay());
   display.UpdateWorkAreaFromInsets(insets);
   display_list().UpdateDisplay(display);
+}
+
+void TestScreen::SetPreferredScaleFactorForWindow(gfx::NativeWindow window,
+                                                  float scale_factor) {
+  preferred_scale_factors_[window] = scale_factor;
 }
 
 gfx::Transform TestScreen::GetRotationTransform() const {
@@ -159,10 +154,41 @@ bool TestScreen::IsWindowUnderCursor(gfx::NativeWindow window) {
   return GetWindowAtScreenPoint(GetCursorScreenPoint()) == window;
 }
 
+gfx::NativeWindow TestScreen::GetWindowForPoint(Window* window,
+                                                const gfx::Point& local_point) {
+  DCHECK(window);
+  if (!window->IsVisible()) {
+    return nullptr;
+  }
+
+  if (!window->HitTest(local_point)) {
+    return nullptr;
+  }
+
+  for (Window* child : base::Reversed(window->children())) {
+    if (child->is_destroying()) {
+      continue;
+    }
+
+    gfx::Point point_in_child_coords(local_point);
+    Window::ConvertPointToTarget(window, child, &point_in_child_coords);
+    Window* match = GetWindowForPoint(child, point_in_child_coords);
+    if (match) {
+      return match;
+    }
+  }
+  return window;
+}
+
 gfx::NativeWindow TestScreen::GetWindowAtScreenPoint(const gfx::Point& point) {
   if (!host_ || !host_->window())
     return nullptr;
-  return host_->window()->GetEventHandlerForPoint(point);
+
+  // GetWindowAtScreenPoint() is designed to return a visible window that
+  // contains the given point within its bounds. Using GetEventHandlerForPoint()
+  // can lead to null returns for windows that don't have an event handler, such
+  // as content_window_ in DesktopNativeWidgetAura.
+  return GetWindowForPoint(host_->window(), point);
 }
 
 gfx::NativeWindow TestScreen::GetLocalProcessWindowAtPoint(
@@ -178,6 +204,15 @@ display::Display TestScreen::GetDisplayNearestWindow(
 
 std::string TestScreen::GetCurrentWorkspace() {
   return {};
+}
+
+std::optional<float> TestScreen::GetPreferredScaleFactorForWindow(
+    gfx::NativeWindow window) const {
+  if (auto it = preferred_scale_factors_.find(window);
+      it != preferred_scale_factors_.end()) {
+    return it->second;
+  }
+  return Screen::GetPreferredScaleFactorForWindow(window);
 }
 
 TestScreen::TestScreen(const gfx::Rect& screen_bounds) {

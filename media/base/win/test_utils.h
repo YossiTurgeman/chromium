@@ -1,15 +1,16 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_BASE_WIN_TEST_UTILS_H_
 #define MEDIA_BASE_WIN_TEST_UTILS_H_
 
-#include <type_traits>
-
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+#include <type_traits>
+
+#include "base/memory/scoped_refptr.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -42,6 +43,9 @@
 
 #define MOCK_STDCALL_METHOD9(Name, Types) \
   MOCK_METHOD9_WITH_CALLTYPE(STDMETHODCALLTYPE, Name, Types)
+
+#define MOCK_STDCALL_METHOD10(Name, Types) \
+  MOCK_METHOD10_WITH_CALLTYPE(STDMETHODCALLTYPE, Name, Types)
 
 // Helper ON_CALL and EXPECT_CALL for Microsoft::WRL::ComPtr, e.g.
 //   COM_EXPECT_CALL(foo_, Bar());
@@ -100,6 +104,16 @@ ACTION_TEMPLATE(SaveComPtr,
 template <typename Interface>
 Microsoft::WRL::ComPtr<Interface> MakeComPtr() {
   return Microsoft::WRL::Make<Interface>();
+}
+
+template <typename T, typename... Args>
+Microsoft::WRL::ComPtr<T> MakeComPtrFromRefCounted(Args&&... args) {
+  // It's safe to use the raw pointer here because the ComPtr is also refcounted
+  // and inside it calls the same AddRef methods from the RefCounted
+  // implementation, while the temporal scoped_refptr object is kept alive until
+  // the end of the statement.
+  return Microsoft::WRL::ComPtr<T>(
+      base::MakeRefCounted<T>(std::forward<Args>(args)...).get());
 }
 
 }  // namespace media

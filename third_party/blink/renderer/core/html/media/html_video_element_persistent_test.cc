@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -38,22 +38,18 @@ class HTMLVideoElementPersistentTest : public PageTestBase {
  protected:
   void SetUp() override {
     chrome_client_ = MakeGarbageCollected<FullscreenMockChromeClient>();
-
-    Page::PageClients clients;
-    FillWithEmptyClients(clients);
-    clients.chrome_client = chrome_client_.Get();
-
-    PageTestBase::SetupPageWithClients(&clients);
-    GetDocument().body()->setInnerHTML(
+    PageTestBase::SetupPageWithClients(chrome_client_);
+    GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(
         "<body><div><video></video></div></body>");
   }
 
   HTMLVideoElement* VideoElement() {
-    return To<HTMLVideoElement>(GetDocument().QuerySelector("video"));
+    return To<HTMLVideoElement>(
+        GetDocument().QuerySelector(AtomicString("video")));
   }
 
   HTMLDivElement* DivElement() {
-    return To<HTMLDivElement>(GetDocument().QuerySelector("div"));
+    return To<HTMLDivElement>(GetDocument().QuerySelector(AtomicString("div")));
   }
 
   Element* FullscreenElement() {
@@ -72,7 +68,7 @@ class HTMLVideoElementPersistentTest : public PageTestBase {
   }
 
   void SimulateBecamePersistentVideo(bool value) {
-    VideoElement()->OnBecamePersistentVideo(value);
+    VideoElement()->SetPersistentState(value);
   }
 
  private:
@@ -196,21 +192,26 @@ TEST_F(HTMLVideoElementPersistentTest, internalPseudoClassOnlyUAStyleSheet) {
   EXPECT_CALL(GetMockChromeClient(), EnterFullscreen(_, _, _)).Times(1);
   EXPECT_CALL(GetMockChromeClient(), ExitFullscreen(_)).Times(0);
 
-  DummyExceptionStateForTesting exception_state;
+  EXPECT_FALSE(DivElement()->matches(AtomicString(":fullscreen")));
 
-  EXPECT_FALSE(DivElement()->matches(":fullscreen"));
-  EXPECT_FALSE(DivElement()->matches(":-internal-video-persistent-ancestor",
-                                     exception_state));
-  EXPECT_TRUE(exception_state.HadException());
-  exception_state.ClearException();
-  EXPECT_FALSE(
-      VideoElement()->matches(":-internal-video-persistent", exception_state));
-  EXPECT_TRUE(exception_state.HadException());
-  exception_state.ClearException();
-  EXPECT_FALSE(VideoElement()->matches(":-internal-video-persistent-ancestor",
-                                       exception_state));
-  EXPECT_TRUE(exception_state.HadException());
-  exception_state.ClearException();
+  {
+    DummyExceptionStateForTesting exception_state;
+    EXPECT_FALSE(DivElement()->matches(
+        AtomicString(":-internal-video-persistent-ancestor"), exception_state));
+    EXPECT_TRUE(exception_state.HadException());
+  }
+  {
+    DummyExceptionStateForTesting exception_state;
+    EXPECT_FALSE(VideoElement()->matches(
+        AtomicString(":-internal-video-persistent"), exception_state));
+    EXPECT_TRUE(exception_state.HadException());
+  }
+  {
+    DummyExceptionStateForTesting exception_state;
+    EXPECT_FALSE(VideoElement()->matches(
+        AtomicString(":-internal-video-persistent-ancestor"), exception_state));
+    EXPECT_TRUE(exception_state.HadException());
+  }
 
   LocalFrame::NotifyUserActivation(
       GetDocument().GetFrame(), mojom::UserActivationNotificationType::kTest);
@@ -223,20 +224,26 @@ TEST_F(HTMLVideoElementPersistentTest, internalPseudoClassOnlyUAStyleSheet) {
   EXPECT_TRUE(DivElement()->ContainsPersistentVideo());
   EXPECT_TRUE(VideoElement()->ContainsPersistentVideo());
 
-  // The :internal-* rules apply only from the UA stylesheet.
-  EXPECT_TRUE(DivElement()->matches(":fullscreen"));
-  EXPECT_FALSE(DivElement()->matches(":-internal-video-persistent-ancestor",
-                                     exception_state));
-  EXPECT_TRUE(exception_state.HadException());
-  exception_state.ClearException();
-  EXPECT_FALSE(
-      VideoElement()->matches(":-internal-video-persistent", exception_state));
-  EXPECT_TRUE(exception_state.HadException());
-  exception_state.ClearException();
-  EXPECT_FALSE(VideoElement()->matches(":-internal-video-persistent-ancestor",
-                                       exception_state));
-  EXPECT_TRUE(exception_state.HadException());
-  exception_state.ClearException();
+  {
+    DummyExceptionStateForTesting exception_state;
+    // The :internal-* rules apply only from the UA stylesheet.
+    EXPECT_TRUE(DivElement()->matches(AtomicString(":fullscreen")));
+    EXPECT_FALSE(DivElement()->matches(
+        AtomicString(":-internal-video-persistent-ancestor"), exception_state));
+    EXPECT_TRUE(exception_state.HadException());
+  }
+  {
+    DummyExceptionStateForTesting exception_state;
+    EXPECT_FALSE(VideoElement()->matches(
+        AtomicString(":-internal-video-persistent"), exception_state));
+    EXPECT_TRUE(exception_state.HadException());
+  }
+  {
+    DummyExceptionStateForTesting exception_state;
+    EXPECT_FALSE(VideoElement()->matches(
+        AtomicString(":-internal-video-persistent-ancestor"), exception_state));
+    EXPECT_TRUE(exception_state.HadException());
+  }
 }
 
 TEST_F(HTMLVideoElementPersistentTest, removeContainerWhilePersisting) {

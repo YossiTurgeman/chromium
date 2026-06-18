@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,32 +6,28 @@
 #define MEDIA_GPU_TEST_IMAGE_PROCESSOR_IMAGE_PROCESSOR_CLIENT_H_
 
 #include <memory>
-#include <string>
 #include <vector>
 
-#include "base/atomicops.h"
-#include "base/macros.h"
 #include "base/synchronization/condition_variable.h"
 #include "base/synchronization/lock.h"
 #include "base/threading/thread.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
-#include "gpu/ipc/service/gpu_memory_buffer_factory.h"
 #include "media/gpu/chromeos/image_processor.h"
 #include "media/gpu/test/video_frame_helpers.h"
 
 namespace base {
-
 class WaitableEvent;
-
 }  // namespace base
 
-namespace media {
+namespace gpu {
+class TestSharedImageInterface;
+}  // namespace gpu
 
+namespace media {
 class VideoFrame;
 
 namespace test {
-
 class Image;
 
 // ImageProcessorClient is a client of ImageProcessor for testing purpose.
@@ -47,11 +43,14 @@ class ImageProcessorClient {
   // validation, writing to file) on each video frame produced by the
   // ImageProcessor.
   static std::unique_ptr<ImageProcessorClient> Create(
+      std::optional<ImageProcessor::CreateBackendCB> create_backend_cb,
       const ImageProcessor::PortConfig& input_config,
       const ImageProcessor::PortConfig& output_config,
       size_t num_buffers,
-      VideoRotation relative_rotation,
       std::vector<std::unique_ptr<VideoFrameProcessor>> frame_processors);
+
+  ImageProcessorClient(const ImageProcessorClient&) = delete;
+  ImageProcessorClient& operator=(const ImageProcessorClient&) = delete;
 
   // Destruct |image_processor_| if it is created.
   ~ImageProcessorClient();
@@ -65,9 +64,8 @@ class ImageProcessorClient {
 
   // Wait until |num_processed| frames are processed. Returns false if
   // |max_wait| is exceeded.
-  bool WaitUntilNumImageProcessed(
-      size_t num_processed,
-      base::TimeDelta max_wait = base::TimeDelta::FromSeconds(5));
+  bool WaitUntilNumImageProcessed(size_t num_processed,
+                                  base::TimeDelta max_wait = base::Seconds(5));
 
   // Get the number of processed VideoFrames.
   size_t GetNumOfProcessedImages() const;
@@ -85,17 +83,19 @@ class ImageProcessorClient {
 
   // Create ImageProcessor with |input_config|, |output_config| and
   // |num_buffers|.
-  bool CreateImageProcessor(const ImageProcessor::PortConfig& input_config,
-                            const ImageProcessor::PortConfig& output_config,
-                            size_t num_buffers,
-                            VideoRotation relative_rotation);
+  bool CreateImageProcessor(
+      std::optional<ImageProcessor::CreateBackendCB> create_backend_cb,
+      const ImageProcessor::PortConfig& input_config,
+      const ImageProcessor::PortConfig& output_config,
+      size_t num_buffers);
 
   // Create |image_processor_| on |my_thread_|.
-  void CreateImageProcessorTask(const ImageProcessor::PortConfig& input_config,
-                                const ImageProcessor::PortConfig& output_config,
-                                size_t num_buffers,
-                                VideoRotation relative_rotation,
-                                base::WaitableEvent* done);
+  void CreateImageProcessorTask(
+      std::optional<ImageProcessor::CreateBackendCB> create_backend_cb,
+      const ImageProcessor::PortConfig& input_config,
+      const ImageProcessor::PortConfig& output_config,
+      size_t num_buffers,
+      base::WaitableEvent* done);
 
   // Call ImageProcessor::Process() on |my_thread_|.
   void ProcessTask(scoped_refptr<VideoFrame> input_frame,
@@ -115,7 +115,7 @@ class ImageProcessorClient {
 
   std::unique_ptr<ImageProcessor> image_processor_;
 
-  std::unique_ptr<gpu::GpuMemoryBufferFactory> gpu_memory_buffer_factory_;
+  scoped_refptr<gpu::TestSharedImageInterface> test_sii_;
 
   // VideoFrameProcessors that will process the video frames produced by
   // |image_processor_|.
@@ -139,7 +139,6 @@ class ImageProcessorClient {
 
   THREAD_CHECKER(image_processor_client_thread_checker_);
   THREAD_CHECKER(test_main_thread_checker_);
-  DISALLOW_COPY_AND_ASSIGN(ImageProcessorClient);
 };
 
 }  // namespace test

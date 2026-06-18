@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,13 @@
 
 #include <stdint.h>
 
-#include <string>
-#include <vector>
-
-#include "base/callback_forward.h"
-#include "base/compiler_specific.h"
-#include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/metrics/field_trial.h"
-#include "base/strings/string16.h"
-#include "base/time/time.h"
-#include "base/version.h"
+#include "base/component_export.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ref.h"
+#include "components/variations/entropy_provider.h"
 #include "components/variations/proto/study.pb.h"
 #include "components/variations/proto/variations_seed.pb.h"
+#include "components/variations/sticky_activation_manager.h"
 
 namespace base {
 class FeatureList;
@@ -27,68 +21,88 @@ class FeatureList;
 
 namespace variations {
 
+namespace internal {
+// The trial group selected when a study specifies a feature that is already
+// associated with another trial. Exposed in the header file for testing.
+COMPONENT_EXPORT(VARIATIONS)
+extern const char kFeatureConflictGroupName[];
+
+// The name of an auto-generated feature parameter for studies that have a
+// non-empty google_groups filter.
+COMPONENT_EXPORT(VARIATIONS)
+extern const char kGoogleGroupFeatureParamName[];
+
+// The separator between multiple Google groups in when serialized into a string
+// for the feature parameter.
+COMPONENT_EXPORT(VARIATIONS)
+extern const char kGoogleGroupFeatureParamSeparator[];
+}  // namespace internal
+
 class ProcessedStudy;
 struct ClientFilterableState;
+class VariationsLayers;
 
 // Helper class to instantiate field trials from a variations seed.
-class VariationsSeedProcessor {
+class COMPONENT_EXPORT(VARIATIONS) VariationsSeedProcessor {
  public:
-  using UIStringOverrideCallback =
-      base::RepeatingCallback<void(uint32_t, const base::string16&)>;
+  // Note: The `sticky_activation_manager` must outlive this class.
+  explicit VariationsSeedProcessor(
+      StickyActivationManager& sticky_activation_manager);
 
-  VariationsSeedProcessor();
+  VariationsSeedProcessor(const VariationsSeedProcessor&) = delete;
+  VariationsSeedProcessor& operator=(const VariationsSeedProcessor&) = delete;
+
   virtual ~VariationsSeedProcessor();
 
-  // Creates field trials from the specified variations |seed|, filtered
-  // according to the client's |client_state|. Any study that should use low
-  // entropy will use |low_entropy_provider| for group selection. These studies
-  // are defined by ShouldStudyUseLowEntropy;
-  void CreateTrialsFromSeed(
-      const VariationsSeed& seed,
-      const ClientFilterableState& client_state,
-      const UIStringOverrideCallback& override_callback,
-      const base::FieldTrial::EntropyProvider* low_entropy_provider,
-      base::FeatureList* feature_list);
+  // Whether the experiment has a `google_web_experiment_id` or a
+  // `google_web_trigger_experiment_id`.
+  static bool HasGoogleWebExperimentId(const Study::Experiment& experiment);
 
-  // If the given |study| should alwoys use low entropy. This is true for any
-  // study that can send data to other Google properties.
-  static bool ShouldStudyUseLowEntropy(const Study& study);
+  // Creates field trials from the specified variations |seed|, filtered
+  // according to the client's |client_state|.
+  void CreateTrialsFromSeed(const VariationsSeed& seed,
+                            const ClientFilterableState& client_state,
+                            const EntropyProviders& entropy_providers,
+                            const VariationsLayers& layers,
+                            base::FeatureList* feature_list);
+
+  scoped_refptr<base::FieldTrial> CreateTrialFromStudyForTesting(
+      const ProcessedStudy& processed_study,
+      const EntropyProviders& entropy_providers,
+      const VariationsLayers& layers,
+      base::FeatureList* feature_list,
+      bool simulated = false);
 
  private:
-  friend class VariationsSeedProcessorTest;
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest,
-                           AllowForceGroupAndVariationId);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest,
-                           AllowVariationIdWithForcingFlag);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest,
-                           ForbidForceGroupWithVariationId);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest, ForceGroupWithFlag1);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest, ForceGroupWithFlag2);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest,
-                           ForceGroup_ChooseFirstGroupWithFlag);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest,
-                           ForceGroup_DontChooseGroupWithFlag);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest, IsStudyExpired);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest, VariationParams);
-  FRIEND_TEST_ALL_PREFIXES(VariationsSeedProcessorTest,
-                           VariationParamsWithForcingFlag);
+  friend void CreateTrialFromStudyFuzzer(const Study& study);
 
   // Check if the |study| is only associated with platform Android/iOS and
   // channel dev/canary. If so, forcing flag and variation id can both be set.
   // (Otherwise, forcing_flag and variation_id are mutually exclusive.)
   bool AllowVariationIdWithForcingFlag(const Study& study);
 
-  // Creates and registers a field trial from the |processed_study| data.
-  // Disables the trial if |processed_study.is_expired| is true. Uses
-  // |low_entropy_provider| if ShouldStudyUseLowEntropy returns true for the
-  // study.
-  void CreateTrialFromStudy(
+  // Creates and registers a field trial from the `processed_study` data. If
+  // the trial is successfully created, returns a pointer to the trial.
+  // Otherwise (e.g. a trial with the same name that does not match the passed
+  // `processed_study` already exists), returns nullptr.
+  // `simulated` can be set to simulate what group would be selected for a given
+  // study. In this case, this function will have no side effects: the trial
+  // created will NOT be registered, `feature_list` will NOT be modified (i.e.
+  // no feature overrides will be registered), no params will be registered,
+  // and no variation IDs will be registered. Since the trial will not be
+  // registered, the caller will have the only pointer to the returned trial
+  // and hence have full ownership (as opposed to when `simulated` is false,
+  // where the trial is registered with FieldTrialList and ownership is shared).
+  scoped_refptr<base::FieldTrial> CreateTrialFromStudy(
       const ProcessedStudy& processed_study,
-      const UIStringOverrideCallback& override_callback,
-      const base::FieldTrial::EntropyProvider* low_entropy_provider,
-      base::FeatureList* feature_list);
+      const EntropyProviders& entropy_providers,
+      const VariationsLayers& layers,
+      base::FeatureList* feature_list,
+      bool simulated = false);
 
-  DISALLOW_COPY_AND_ASSIGN(VariationsSeedProcessor);
+  // Used to manage studies that use sticky activation, to determine which ones
+  // should be activated on startup per their prior state.
+  raw_ref<StickyActivationManager> sticky_activation_manager_;
 };
 
 }  // namespace variations

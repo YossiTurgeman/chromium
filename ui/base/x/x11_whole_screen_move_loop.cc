@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,11 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
-#include "base/stl_util.h"
 #include "base/task/current_thread.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "ui/base/x/x11_pointer_grab.h"
 #include "ui/base/x/x11_util.h"
 #include "ui/events/event.h"
@@ -23,18 +21,16 @@
 #include "ui/events/keycodes/keyboard_code_conversion_x.h"
 #include "ui/events/platform/platform_event_source.h"
 #include "ui/events/platform/scoped_event_dispatcher.h"
-#include "ui/events/platform/x11/x11_event_source.h"
 #include "ui/events/x/events_x_utils.h"
-#include "ui/events/x/x11_window_event_manager.h"
+#include "ui/events/x/x11_event_translation.h"
 #include "ui/gfx/x/connection.h"
-#include "ui/gfx/x/x11.h"
+#include "ui/gfx/x/keysyms/keysyms.h"
+#include "ui/gfx/x/window_event_manager.h"
 #include "ui/gfx/x/xproto.h"
 
 namespace ui {
 
 namespace {
-
-constexpr x11::KeySym kEscKeysym = static_cast<x11::KeySym>(0xff1b);
 
 // XGrabKey requires the modifier mask to explicitly be specified.
 constexpr x11::ModMask kModifiersMasks[] = {
@@ -47,6 +43,22 @@ constexpr x11::ModMask kModifiersMasks[] = {
     x11::ModMask::Lock | x11::ModMask::c_5,
     x11::ModMask::c_2 | x11::ModMask::Lock | x11::ModMask::c_5,
 };
+
+const char* GrabStatusToString(x11::GrabStatus grab_status) {
+  switch (grab_status) {
+    case x11::GrabStatus::Success:
+      return "Success";
+    case x11::GrabStatus::AlreadyGrabbed:
+      return "AlreadyGrabbed";
+    case x11::GrabStatus::InvalidTime:
+      return "InvalidTime";
+    case x11::GrabStatus::NotViewable:
+      return "NotViewable";
+    case x11::GrabStatus::Frozen:
+      return "Frozen";
+  }
+  NOTREACHED();
+}
 
 }  // namespace
 
@@ -61,27 +73,7 @@ X11WholeScreenMoveLoop::~X11WholeScreenMoveLoop() {
   EndMoveLoop();
 }
 
-void X11WholeScreenMoveLoop::DispatchMouseMovement() {
-  if (!last_motion_in_screen_)
-    return;
-  delegate_->OnMouseMovement(last_motion_in_screen_->root_location(),
-                             last_motion_in_screen_->flags(),
-                             last_motion_in_screen_->time_stamp());
-  last_motion_in_screen_.reset();
-}
-
 void X11WholeScreenMoveLoop::PostDispatchIfNeeded(const ui::MouseEvent& event) {
-  bool dispatch_mouse_event = !last_motion_in_screen_;
-  last_motion_in_screen_ = std::make_unique<ui::MouseEvent>(event);
-  if (dispatch_mouse_event) {
-    // Post a task to dispatch mouse movement event when control returns to the
-    // message loop. This allows smoother dragging since the events are
-    // dispatched without waiting for the drag widget updates.
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
-        FROM_HERE,
-        base::BindOnce(&X11WholeScreenMoveLoop::DispatchMouseMovement,
-                       weak_factory_.GetWeakPtr()));
-  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -95,20 +87,32 @@ uint32_t X11WholeScreenMoveLoop::DispatchEvent(const ui::PlatformEvent& event) {
   DCHECK(base::CurrentUIThread::IsSet());
 
   // This method processes all events while the move loop is active.
-  if (!in_move_loop_)
+  if (!in_move_loop_) {
     return ui::POST_DISPATCH_PERFORM_DEFAULT;
+  }
 
   switch (event->type()) {
-    case ui::ET_MOUSE_MOVED:
-    case ui::ET_MOUSE_DRAGGED: {
-      PostDispatchIfNeeded(*event->AsMouseEvent());
+    case ui::EventType::kMouseMoved:
+    case ui::EventType::kMouseDragged: {
+      auto& current_xevent = *x11::Connection::Get()->dispatching_event();
+      x11::Event last_xevent;
+      std::unique_ptr<ui::Event> last_motion;
+      auto* mouse_event = event->AsMouseEvent();
+      if ((current_xevent.As<x11::MotionNotifyEvent>() ||
+           current_xevent.As<x11::Input::DeviceEvent>()) &&
+          ui::CoalescePendingMotionEvents(current_xevent, &last_xevent)) {
+        last_motion = ui::BuildEventFromXEvent(last_xevent);
+        mouse_event = last_motion->AsMouseEvent();
+      }
+      delegate_->OnMouseMovement(mouse_event->root_location(),
+                                 mouse_event->flags(),
+                                 mouse_event->time_stamp());
       return ui::POST_DISPATCH_NONE;
     }
-    case ui::ET_MOUSE_RELEASED: {
+    case ui::EventType::kMouseReleased: {
       if (event->AsMouseEvent()->IsLeftMouseButton()) {
         // Assume that drags are being done with the left mouse button. Only
         // break the drag if the left mouse button was released.
-        DispatchMouseMovement();
         delegate_->OnMouseReleased();
 
         if (!grabbed_pointer_) {
@@ -120,7 +124,7 @@ uint32_t X11WholeScreenMoveLoop::DispatchEvent(const ui::PlatformEvent& event) {
       }
       return ui::POST_DISPATCH_NONE;
     }
-    case ui::ET_KEY_PRESSED:
+    case ui::EventType::kKeyPressed:
       if (event->AsKeyEvent()->key_code() == ui::VKEY_ESCAPE) {
         canceled_ = true;
         EndMoveLoop();
@@ -136,14 +140,16 @@ uint32_t X11WholeScreenMoveLoop::DispatchEvent(const ui::PlatformEvent& event) {
 bool X11WholeScreenMoveLoop::RunMoveLoop(
     bool can_grab_pointer,
     scoped_refptr<ui::X11Cursor> old_cursor,
-    scoped_refptr<ui::X11Cursor> new_cursor) {
+    scoped_refptr<ui::X11Cursor> new_cursor,
+    base::OnceClosure started_callback) {
   DCHECK(!in_move_loop_);  // Can only handle one nested loop at a time.
 
   // Query the mouse cursor prior to the move loop starting so that it can be
   // restored when the move loop finishes.
   initial_cursor_ = old_cursor;
 
-  CreateDragInputWindow(x11::Connection::Get());
+  auto* connection = x11::Connection::Get();
+  CreateDragInputWindow(connection);
 
   // Only grab mouse capture of |grab_input_window_| if |can_grab_pointer| is
   // true aka the source that initiated the move loop doesn't have explicit
@@ -169,6 +175,8 @@ bool X11WholeScreenMoveLoop::RunMoveLoop(
   nested_dispatcher_ =
       ui::PlatformEventSource::GetInstance()->OverrideDispatcher(this);
 
+  std::move(started_callback).Run();
+
   base::WeakPtr<X11WholeScreenMoveLoop> alive(weak_factory_.GetWeakPtr());
 
   in_move_loop_ = true;
@@ -177,44 +185,46 @@ bool X11WholeScreenMoveLoop::RunMoveLoop(
   quit_closure_ = run_loop.QuitClosure();
   run_loop.Run();
 
-  if (!alive)
+  if (!alive) {
     return false;
+  }
 
   nested_dispatcher_ = std::move(old_dispatcher);
   return !canceled_;
 }
 
 void X11WholeScreenMoveLoop::UpdateCursor(scoped_refptr<ui::X11Cursor> cursor) {
-  if (in_move_loop_)
+  if (in_move_loop_) {
     ui::ChangeActivePointerGrabCursor(cursor);
+  }
 }
 
 void X11WholeScreenMoveLoop::EndMoveLoop() {
-  if (!in_move_loop_)
+  if (!in_move_loop_) {
     return;
-
-  // Prevent DispatchMouseMovement from dispatching any posted motion event.
-  last_motion_in_screen_.reset();
+  }
 
   // TODO(erg): Is this ungrab the cause of having to click to give input focus
   // on drawn out windows? Not ungrabbing here screws the X server until I kill
   // the chrome process.
 
   // Ungrab before we let go of the window.
-  if (grabbed_pointer_)
+  if (grabbed_pointer_) {
     ui::UngrabPointer();
-  else
+  } else {
     UpdateCursor(initial_cursor_);
+  }
 
   auto* connection = x11::Connection::Get();
-  auto esc_keycode = connection->KeysymToKeycode(kEscKeysym);
-  for (auto mask : kModifiersMasks)
+  auto esc_keycode = connection->KeysymToKeycode(XK_Escape);
+  for (auto mask : kModifiersMasks) {
     connection->UngrabKey({esc_keycode, grab_input_window_, mask});
+  }
 
   // Restore the previous dispatcher.
   nested_dispatcher_.reset();
   delegate_->OnMoveLoopEnded();
-  grab_input_window_events_.reset();
+  grab_input_window_events_.Reset();
   connection->DestroyWindow({grab_input_window_});
   grab_input_window_ = x11::Window::None;
 
@@ -230,8 +240,7 @@ bool X11WholeScreenMoveLoop::GrabPointer(scoped_refptr<X11Cursor> cursor) {
   auto ret = ui::GrabPointer(grab_input_window_, false, cursor);
   if (ret != x11::GrabStatus::Success) {
     DLOG(ERROR) << "Grabbing pointer for dragging failed: "
-                << ui::GetX11ErrorString(connection->display(),
-                                         static_cast<int>(ret));
+                << GrabStatusToString(ret);
   }
   connection->Flush();
   return ret == x11::GrabStatus::Success;
@@ -239,7 +248,7 @@ bool X11WholeScreenMoveLoop::GrabPointer(scoped_refptr<X11Cursor> cursor) {
 
 void X11WholeScreenMoveLoop::GrabEscKey() {
   auto* connection = x11::Connection::Get();
-  auto esc_keycode = connection->KeysymToKeycode(kEscKeysym);
+  auto esc_keycode = connection->KeysymToKeycode(XK_Escape);
   for (auto mask : kModifiersMasks) {
     connection->GrabKey({false, grab_input_window_, mask, esc_keycode,
                          x11::GrabMode::Async, x11::GrabMode::Async});
@@ -249,7 +258,7 @@ void X11WholeScreenMoveLoop::GrabEscKey() {
 void X11WholeScreenMoveLoop::CreateDragInputWindow(
     x11::Connection* connection) {
   grab_input_window_ = connection->GenerateId<x11::Window>();
-  connection->CreateWindow({
+  connection->CreateWindow(x11::CreateWindowRequest{
       .wid = grab_input_window_,
       .parent = connection->default_root(),
       .x = -100,
@@ -259,13 +268,14 @@ void X11WholeScreenMoveLoop::CreateDragInputWindow(
       .c_class = x11::WindowClass::InputOnly,
       .override_redirect = x11::Bool32(true),
   });
-  uint32_t event_mask = ButtonPressMask | ButtonReleaseMask |
-                        PointerMotionMask | KeyPressMask | KeyReleaseMask |
-                        StructureNotifyMask;
-  grab_input_window_events_ = std::make_unique<ui::XScopedEventSelector>(
-      grab_input_window_, event_mask);
-  connection->MapWindow({grab_input_window_});
-  RaiseWindow(grab_input_window_);
+  auto event_mask =
+      x11::EventMask::ButtonPress | x11::EventMask::ButtonRelease |
+      x11::EventMask::PointerMotion | x11::EventMask::KeyPress |
+      x11::EventMask::KeyRelease | x11::EventMask::StructureNotify;
+  grab_input_window_events_ =
+      connection->ScopedSelectEvent(grab_input_window_, event_mask);
+  connection->MapWindow(grab_input_window_);
+  connection->RaiseWindow(grab_input_window_);
 }
 
 }  // namespace ui

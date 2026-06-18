@@ -1,10 +1,13 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/password_manager/core/browser/credential_manager_pending_prevent_silent_access_task.h"
 
-#include "components/autofill/core/common/password_form.h"
+#include "components/password_manager/core/browser/password_form.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
+#include "components/password_manager/core/browser/password_store/password_store_util.h"
 
 namespace password_manager {
 
@@ -17,36 +20,36 @@ CredentialManagerPendingPreventSilentAccessTask::
     ~CredentialManagerPendingPreventSilentAccessTask() = default;
 
 void CredentialManagerPendingPreventSilentAccessTask::AddOrigin(
-    const PasswordStore::FormDigest& form_digest) {
-  delegate_->GetProfilePasswordStore()->GetLogins(form_digest, this);
+    const PasswordFormDigest& form_digest) {
+  delegate_->GetProfilePasswordStore()->GetLogins(
+      form_digest, weak_ptr_factory_.GetWeakPtr());
   pending_requests_++;
-  if (PasswordStore* account_store = delegate_->GetAccountPasswordStore()) {
-    account_store->GetLogins(form_digest, this);
+  if (PasswordStoreInterface* account_store =
+          delegate_->GetAccountPasswordStore()) {
+    account_store->GetLogins(form_digest, weak_ptr_factory_.GetWeakPtr());
     pending_requests_++;
   }
 }
 
-void CredentialManagerPendingPreventSilentAccessTask::OnGetPasswordStoreResults(
-    std::vector<std::unique_ptr<autofill::PasswordForm>> results) {
-  // This class overrides OnGetPasswordStoreResultsFrom() (the version of this
-  // method that also receives the originating store), so the store-less version
-  // never gets called.
-  NOTREACHED();
-}
-
 void CredentialManagerPendingPreventSilentAccessTask::
-    OnGetPasswordStoreResultsFrom(
-        PasswordStore* store,
-        std::vector<std::unique_ptr<autofill::PasswordForm>> results) {
-  for (const auto& form : results) {
-    if (!form->skip_zero_click) {
-      form->skip_zero_click = true;
-      store->UpdateLogin(*form);
+    OnGetPasswordStoreResultsOrErrorFrom(PasswordStoreInterface* store,
+                                         LoginsResultOrError results_or_error) {
+  LoginsResult results =
+      GetLoginsOrEmptyListOnFailure(std::move(results_or_error));
+  for (auto& form : results) {
+    if (form.match_type == PasswordForm::MatchType::kGrouped ||
+        form.blocked_by_user) {
+      continue;
+    }
+    if (!form.skip_zero_click) {
+      form.skip_zero_click = true;
+      store->UpdateLogin(std::move(form));
     }
   }
   pending_requests_--;
-  if (!pending_requests_)
+  if (!pending_requests_) {
     delegate_->DoneRequiringUserMediation();
+  }
 }
 
 }  // namespace password_manager

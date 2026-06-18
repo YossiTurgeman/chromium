@@ -14,6 +14,9 @@
 
 #include "absl/strings/internal/resize_uninitialized.h"
 
+#include <cstddef>
+#include <limits>
+
 #include "gtest/gtest.h"
 
 namespace {
@@ -23,26 +26,36 @@ int resize_call_count = 0;
 // A mock string class whose only purpose is to track how many times its
 // resize() method has been called.
 struct resizable_string {
+  using value_type = char;
+  using size_type = size_t;
   size_t size() const { return 0; }
-  char& operator[](size_t) {
-    static char c = '\0';
-    return c;
-  }
+  size_t capacity() const { return 0; }
+  char* data() { return buffer; }
+  char& operator[](size_t) { return buffer[0]; }
   void resize(size_t) { resize_call_count += 1; }
+  void reserve(size_t) {}
+  resizable_string& erase(size_t = 0, size_t = 0) { return *this; }
+  size_t max_size() const { return std::numeric_limits<size_t>::max(); }
+  char buffer[1] = {};
 };
 
 int resize_default_init_call_count = 0;
 
 // A mock string class whose only purpose is to track how many times its
-// resize() and __resize_default_init() methods have been called.
-struct resize_default_init_string {
+// resize()/__resize_default_init() methods have been called.
+struct default_init_string {
+  using value_type = char;
+  using size_type = size_t;
   size_t size() const { return 0; }
-  char& operator[](size_t) {
-    static char c = '\0';
-    return c;
-  }
+  size_t capacity() const { return 0; }
+  char* data() { return buffer; }
+  char& operator[](size_t) { return buffer[0]; }
   void resize(size_t) { resize_call_count += 1; }
   void __resize_default_init(size_t) { resize_default_init_call_count += 1; }
+  void reserve(size_t) {}
+  default_init_string& erase(size_t = 0, size_t = 0) { return *this; }
+  size_t max_size() const { return std::numeric_limits<size_t>::max(); }
+  char buffer[1];
 };
 
 TEST(ResizeUninit, WithAndWithout) {
@@ -65,7 +78,7 @@ TEST(ResizeUninit, WithAndWithout) {
   resize_call_count = 0;
   resize_default_init_call_count = 0;
   {
-    resize_default_init_string rus;
+    default_init_string rus;
 
     EXPECT_EQ(resize_call_count, 0);
     EXPECT_EQ(resize_default_init_call_count, 0);
@@ -77,6 +90,19 @@ TEST(ResizeUninit, WithAndWithout) {
     EXPECT_EQ(resize_call_count, 0);
     EXPECT_EQ(resize_default_init_call_count, 1);
   }
+}
+
+TEST(ResizeUninit, Amortized) {
+  std::string str;
+  size_t prev_cap = str.capacity();
+  int cap_increase_count = 0;
+  for (int i = 0; i < 1000; ++i) {
+    absl::strings_internal::STLStringResizeUninitializedAmortized(&str, i);
+    size_t new_cap = str.capacity();
+    if (new_cap > prev_cap) ++cap_increase_count;
+    prev_cap = new_cap;
+  }
+  EXPECT_LT(cap_increase_count, 50);
 }
 
 }  // namespace

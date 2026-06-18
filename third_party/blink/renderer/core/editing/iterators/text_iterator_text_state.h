@@ -26,16 +26,19 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_ITERATORS_TEXT_ITERATOR_TEXT_STATE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_ITERATORS_TEXT_ITERATOR_TEXT_STATE_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/iterators/text_iterator_behavior.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
+#include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
 class ContainerNode;
 class HTMLElement;
+class Node;
 class Text;
 
 class CORE_EXPORT TextIteratorTextState {
@@ -43,15 +46,15 @@ class CORE_EXPORT TextIteratorTextState {
 
  public:
   explicit TextIteratorTextState(const TextIteratorBehavior&);
+  TextIteratorTextState(const TextIteratorTextState&) = delete;
+  TextIteratorTextState& operator=(const TextIteratorTextState&) = delete;
 
   // Return properties of the current text.
   unsigned length() const { return text_length_; }
   UChar CharacterAt(unsigned index) const;
   // TODO(xiaochengh): Rename to |GetText()| as it's used in production code.
   String GetTextForTesting() const;
-  void AppendTextToStringBuilder(StringBuilder&,
-                                 unsigned position = 0,
-                                 unsigned max_length = UINT_MAX) const;
+  void AppendTextToStringBuilder(StringBuilder&) const;
 
   // Emits code unit relative to |node|.
   void EmitChar16AfterNode(UChar code_unit, const Node& node);
@@ -148,16 +151,14 @@ class CORE_EXPORT TextIteratorTextState {
   const Node* position_node_ = nullptr;
   // |Text| node when |position_node_type_ == kInText| or |ContainerNode|.
   mutable const Node* position_container_node_ = nullptr;
-  mutable base::Optional<unsigned> position_start_offset_;
-  mutable base::Optional<unsigned> position_end_offset_;
+  mutable std::optional<unsigned> position_start_offset_;
+  mutable std::optional<unsigned> position_end_offset_;
   PositionNodeType position_node_type_ = PositionNodeType::kNone;
 
   // Used when deciding whether to emit a "positioning" (e.g. newline) before
   // any other content
   bool has_emitted_ = false;
   UChar last_character_ = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(TextIteratorTextState);
 };
 
 }  // namespace blink

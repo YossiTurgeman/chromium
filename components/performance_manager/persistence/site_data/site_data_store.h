@@ -1,15 +1,15 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PERFORMANCE_MANAGER_PERSISTENCE_SITE_DATA_SITE_DATA_STORE_H_
 #define COMPONENTS_PERFORMANCE_MANAGER_PERSISTENCE_SITE_DATA_SITE_DATA_STORE_H_
 
+#include <optional>
 #include <vector>
 
-#include "base/callback_forward.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/byte_size.h"
+#include "base/functional/callback_forward.h"
 #include "components/performance_manager/persistence/site_data/site_data.pb.h"
 #include "url/origin.h"
 
@@ -21,16 +21,16 @@ namespace performance_manager {
 class SiteDataStore {
  public:
   // Callback to call once the initialization from the store has completed,
-  // |site_data_proto| should be equal to base::nullopt if the initialization
+  // |site_data_proto| should be equal to std::nullopt if the initialization
   // has failed.
   using ReadSiteDataFromStoreCallback =
-      base::OnceCallback<void(base::Optional<SiteDataProto> site_data_proto)>;
+      base::OnceCallback<void(std::optional<SiteDataProto> site_data_proto)>;
   using GetStoreSizeCallback =
-      base::OnceCallback<void(base::Optional<int64_t> num_rows,
-                              base::Optional<int64_t> on_disk_size_kb)>;
+      base::OnceCallback<void(std::optional<int64_t> num_rows,
+                              std::optional<base::ByteSize> on_disk_size)>;
 
   SiteDataStore() = default;
-  virtual ~SiteDataStore() {}
+  virtual ~SiteDataStore() = default;
 
   // Checks the if there's an entry with the key |origin| and if pass the
   // corresponding proto to |callback|.

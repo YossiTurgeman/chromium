@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_BROWSER_DEVTOOLS_PROTOCOL_DEVTOOLS_MHTML_HELPER_H_
 #define CONTENT_BROWSER_DEVTOOLS_PROTOCOL_DEVTOOLS_MHTML_HELPER_H_
 
+#include "base/memory/ref_counted.h"
 #include "content/browser/devtools/protocol/page_handler.h"
 #include "storage/browser/blob/shareable_file_reference.h"
 
@@ -15,12 +16,12 @@ class DevToolsMHTMLHelper
     : public base::RefCountedThreadSafe<DevToolsMHTMLHelper> {
  public:
   static void Capture(
-      base::WeakPtr<PageHandler> page_handler,
+      const WebContents::Getter& web_contents_getter,
       std::unique_ptr<PageHandler::CaptureSnapshotCallback> callback);
 
  private:
   DevToolsMHTMLHelper(
-      base::WeakPtr<PageHandler> page_handler,
+      const WebContents::Getter& web_contents_getter,
       std::unique_ptr<PageHandler::CaptureSnapshotCallback> callback);
   ~DevToolsMHTMLHelper();
 
@@ -32,7 +33,7 @@ class DevToolsMHTMLHelper
   void ReportFailure(const std::string& message);
   void ReportSuccess(std::unique_ptr<std::string> mhtml_snapshot);
 
-  base::WeakPtr<PageHandler> page_handler_;
+  WebContents::Getter web_contents_getter_;
   std::unique_ptr<PageHandler::CaptureSnapshotCallback> callback_;
   scoped_refptr<storage::ShareableFileReference> mhtml_file_;
   base::FilePath mhtml_snapshot_path_;

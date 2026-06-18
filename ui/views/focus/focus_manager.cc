@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@
 #include "base/auto_reset.h"
 #include "base/check_op.h"
 #include "base/i18n/rtl.h"
+#include "base/observer_list.h"
 #include "build/build_config.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/ime/input_method.h"
@@ -18,9 +19,10 @@
 #include "ui/events/event.h"
 #include "ui/events/keycodes/keyboard_codes.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
+#include "ui/views/cascading_property.h"
 #include "ui/views/focus/focus_manager_delegate.h"
 #include "ui/views/focus/focus_search.h"
-#include "ui/views/focus/widget_focus_manager.h"
+#include "ui/views/focus/native_view_focus_manager.h"
 #include "ui/views/view.h"
 #include "ui/views/view_class_properties.h"
 #include "ui/views/view_tracker.h"
@@ -29,8 +31,6 @@
 #include "ui/views/widget/widget_delegate.h"
 
 namespace views {
-
-bool FocusManager::arrow_key_traversal_enabled_ = false;
 
 FocusManager::FocusManager(Widget* widget,
                            std::unique_ptr<FocusManagerDelegate> delegate)
@@ -41,27 +41,34 @@ FocusManager::FocusManager(Widget* widget,
 }
 
 FocusManager::~FocusManager() {
-  if (focused_view_)
+  if (focused_view_) {
     focused_view_->RemoveObserver(this);
+  }
+  focus_change_listeners_.Notify(&FocusChangeListener::OnFocusManagerDestroying,
+                                 this);
 }
 
 bool FocusManager::OnKeyEvent(const ui::KeyEvent& event) {
-  const int key_code = event.key_code();
+  const ui::KeyboardCode key_code = event.key_code();
 
-  if (event.type() != ui::ET_KEY_PRESSED && event.type() != ui::ET_KEY_RELEASED)
+  if (event.type() != ui::EventType::kKeyPressed &&
+      event.type() != ui::EventType::kKeyReleased) {
     return false;
+  }
 
-  if (shortcut_handling_suspended())
+  if (shortcut_handling_suspended()) {
     return true;
+  }
 
   ui::Accelerator accelerator(event);
 
-  if (event.type() == ui::ET_KEY_PRESSED) {
-    // If the focused view wants to process the key event as is, let it be.
-    if (focused_view_ && focused_view_->SkipDefaultKeyEventProcessing(event) &&
-        !accelerator_manager_.HasPriorityHandler(accelerator))
-      return true;
+  // If the focused view wants to process the key event as is, let it be.
+  if (focused_view_ && focused_view_->SkipDefaultKeyEventProcessing(event) &&
+      !accelerator_manager_.HasPriorityHandler(accelerator)) {
+    return true;
+  }
 
+  if (event.type() == ui::EventType::kKeyPressed) {
     // Intercept Tab related messages for focus traversal.
     // Note that we don't do focus traversal if the root window is not part of
     // the active window hierarchy as this would mean we have no focused view
@@ -71,8 +78,7 @@ bool FocusManager::OnKeyEvent(const ui::KeyEvent& event) {
       return false;
     }
 
-    if ((arrow_key_traversal_enabled_ ||
-         arrow_key_traversal_enabled_for_widget_) &&
+    if (IsArrowKeyTraversalEnabledForWidget() &&
         ProcessArrowKeyTraversal(event)) {
       return false;
     }
@@ -84,18 +90,44 @@ bool FocusManager::OnKeyEvent(const ui::KeyEvent& event) {
         (is_left || is_right)) {
       bool next = is_right;
       View::Views views;
-      focused_view_->parent()->GetViewsInGroup(focused_view_->GetGroup(),
-                                               &views);
-      View::Views::const_iterator i(
-          std::find(views.begin(), views.end(), focused_view_));
+
+      View* group_owner = nullptr;
+      // Search for the owner in the focused view's hierarchy.
+      for (View* potential_owner = focused_view_->parent();
+           potential_owner != nullptr;
+           potential_owner = potential_owner->parent()) {
+        if (potential_owner->GetOwnedGroup() == focused_view_->GetGroup()) {
+          group_owner = potential_owner;
+          break;
+        }
+      }
+      if (!group_owner) {
+        if (View* parent_group_view =
+                GetCascadingRadioGroupView(focused_view_)) {
+          group_owner = parent_group_view;
+        }
+      }
+      // Default to the parent if no other owner is found.
+      if (!group_owner) {
+        group_owner = focused_view_->parent();
+      }
+
+      group_owner->GetViewsInGroup(focused_view_->GetGroup(), &views);
+      // Remove any views except current, which are disabled or hidden.
+      std::erase_if(views, [this](View* v) {
+        return v != focused_view_ &&
+               !v->GetViewAccessibility().IsAccessibilityFocusable();
+      });
+      View::Views::const_iterator i = std::ranges::find(views, focused_view_);
       DCHECK(i != views.end());
-      size_t index = i - views.begin();
-      if (next && index == views.size() - 1)
+      auto index = static_cast<size_t>(i - views.begin());
+      if (next && index == views.size() - 1) {
         index = 0;
-      else if (!next && index == 0)
+      } else if (!next && index == 0) {
         index = views.size() - 1;
-      else
-        index += next ? 1 : -1;
+      } else {
+        index = next ? (index + 1) : (index - 1);
+      }
       SetFocusedViewWithReason(views[index],
                                FocusChangeReason::kFocusTraversal);
       return false;
@@ -132,8 +164,9 @@ void FocusManager::AdvanceFocus(bool reverse) {
     v->AboutToRequestFocusFromTabTraversal(reverse);
     // AboutToRequestFocusFromTabTraversal() may have changed focus. If it did,
     // don't change focus again.
-    if (focused_view != focused_view_)
+    if (focused_view != focused_view_) {
       return;
+    }
 
     // Note that GetNextFocusableView may have returned a View in a different
     // FocusManager.
@@ -145,8 +178,9 @@ void FocusManager::AdvanceFocus(bool reverse) {
     // the top-level widget may report IsActive()==true because it's
     // active even though it isn't focused. Explicitly activate the
     // widget to ensure that case is handled.
-    if (v->GetWidget()->GetFocusManager() != this)
+    if (v->GetWidget()->GetFocusManager() != this) {
       v->GetWidget()->Activate();
+    }
   }
 }
 
@@ -157,63 +191,9 @@ void FocusManager::ClearNativeFocus() {
 
 bool FocusManager::RotatePaneFocus(Direction direction,
                                    FocusCycleWrapping wrapping) {
-  // Get the list of all accessible panes.
-  std::vector<View*> panes;
-  widget_->widget_delegate()->GetAccessiblePanes(&panes);
-
-  // Count the number of panes and set the default index if no pane
-  // is initially focused.
-  if (panes.empty())
-    return false;
-  int count = int{panes.size()};
-
-  // Initialize |index| to an appropriate starting index if nothing is
-  // focused initially.
-  int index = direction == kBackward ? 0 : count - 1;
-
-  // Check to see if a pane already has focus and update the index accordingly.
-  const views::View* focused_view = GetFocusedView();
-  if (focused_view) {
-    const auto i = std::find_if(panes.cbegin(), panes.cend(),
-                                [focused_view](const auto* pane) {
-                                  return pane && pane->Contains(focused_view);
-                                });
-    if (i != panes.cend())
-      index = i - panes.cbegin();
-  }
-
-  // Rotate focus.
-  int start_index = index;
-  for (;;) {
-    if (direction == kBackward)
-      index--;
-    else
-      index++;
-
-    if (wrapping == FocusCycleWrapping::kDisabled &&
-        (index >= count || index < 0))
-      return false;
-    index = (index + count) % count;
-
-    // Ensure that we don't loop more than once.
-    if (index == start_index)
-      break;
-
-    views::View* pane = panes[index];
-    DCHECK(pane);
-
-    if (!pane->GetVisible())
-      continue;
-
-    pane->RequestFocus();
-    // |pane| may be in a different widget, so don't assume its focus manager
-    // is |this|.
-    focused_view = pane->GetWidget()->GetFocusManager()->GetFocusedView();
-    if (pane == focused_view || pane->Contains(focused_view))
-      return true;
-  }
-
-  return false;
+  return widget_->widget_delegate()->RotatePaneFocusFromView(
+      GetFocusedView(), direction == Direction::kForward,
+      wrapping == FocusCycleWrapping::kEnabled);
 }
 
 View* FocusManager::GetNextFocusableView(View* original_starting_view,
@@ -261,14 +241,15 @@ View* FocusManager::GetNextFocusableView(View* original_starting_view,
       }
     }
   } else {
-    Widget* widget = starting_widget ? starting_widget : widget_;
+    Widget* widget = starting_widget ? starting_widget : widget_.get();
     focus_traversable = widget->GetFocusTraversable();
   }
 
   // Traverse the FocusTraversable tree down to find the focusable view.
   View* v = FindFocusableView(focus_traversable, starting_view, reverse);
-  if (v)
+  if (v) {
     return v;
+  }
 
   // Let's go up in the FocusTraversable tree.
   FocusTraversable* parent_focus_traversable =
@@ -296,8 +277,9 @@ View* FocusManager::GetNextFocusableView(View* original_starting_view,
       v = FindFocusableView(new_focus_traversable, nullptr, reverse);
     }
 
-    if (v)
+    if (v) {
       return v;
+    }
 
     starting_view = focus_traversable->GetFocusTraversableParentView();
     parent_focus_traversable =
@@ -307,22 +289,25 @@ View* FocusManager::GetNextFocusableView(View* original_starting_view,
   // If we get here, we have reached the end of the focus hierarchy, let's
   // loop. Make sure there was at least a view to start with, to prevent
   // infinitely looping in empty windows.
-  if (dont_loop || !original_starting_view)
+  if (dont_loop || !original_starting_view) {
     return nullptr;
+  }
 
   // Easy, just clear the selection and press tab again.
   // By calling with nullptr as the starting view, we'll start from either
   // the starting views widget or |widget_|.
   Widget* widget = starting_view ? starting_view->GetWidget()
                                  : original_starting_view->GetWidget();
-  if (widget->widget_delegate()->focus_traverses_out())
+  if (widget->widget_delegate()->focus_traverses_out()) {
     widget = widget_;
+  }
   return GetNextFocusableView(nullptr, widget, reverse, true);
 }
 
 void FocusManager::SetKeyboardAccessible(bool keyboard_accessible) {
-  if (keyboard_accessible == keyboard_accessible_)
+  if (keyboard_accessible == keyboard_accessible_) {
     return;
+  }
 
   keyboard_accessible_ = keyboard_accessible;
   // Disabling keyboard accessibility may cause the focused view to become not
@@ -330,18 +315,23 @@ void FocusManager::SetKeyboardAccessible(bool keyboard_accessible) {
   AdvanceFocusIfNecessary();
 }
 
+bool FocusManager::IsSettingFocusedView() const {
+  return setting_focused_view_entrance_count_ > 0;
+}
+
 void FocusManager::SetFocusedViewWithReason(View* view,
                                             FocusChangeReason reason) {
-  if (focused_view_ == view)
+  if (focused_view_ == view) {
     return;
+  }
 
   // TODO(oshima|achuith): This is to diagnose crbug.com/687232.
   // Change this to DCHECK once it's resolved.
   CHECK(!view || ContainsView(view));
 
-#if !defined(OS_APPLE)
+#if !BUILDFLAG(IS_MAC)
   // TODO(warx): There are some AccessiblePaneViewTest failed on macosx.
-  // crbug.com/650859. Remove !defined(OS_APPLE) once that is fixed.
+  // crbug.com/650859. Remove !BUILDFLAG(IS_MAC) once that is fixed.
   //
   // If the widget isn't active store the focused view and then attempt to
   // activate the widget. If activation succeeds |view| will be focused.
@@ -357,35 +347,42 @@ void FocusManager::SetFocusedViewWithReason(View* view,
   // Update the reason for the focus change (since this is checked by
   // some listeners), then notify all listeners.
   focus_change_reason_ = reason;
-  for (FocusChangeListener& observer : focus_change_listeners_)
-    observer.OnWillChangeFocus(focused_view_, view);
+  focus_change_listeners_.Notify(&FocusChangeListener::OnWillChangeFocus,
+                                 focused_view_, view);
 
-  View* old_focused_view = focused_view_;
+  // Actions below like `Blur()` can destroy `focused_view_`.
+  ViewTracker old_focused_view_tracker(focused_view_);
   focused_view_ = view;
-  if (old_focused_view) {
-    old_focused_view->RemoveObserver(this);
-    old_focused_view->Blur();
+  base::AutoReset<int> entrance_count_resetter(
+      &setting_focused_view_entrance_count_,
+      setting_focused_view_entrance_count_ + 1);
+
+  if (old_focused_view_tracker.view()) {
+    old_focused_view_tracker.view()->RemoveObserver(this);
+    old_focused_view_tracker.view()->Blur();
   }
   // Also make |focused_view_| the stored focus view. This way the stored focus
   // view is remembered if focus changes are requested prior to a show or while
   // hidden.
   SetStoredFocusView(focused_view_);
   if (focused_view_) {
-    focused_view_->AddObserver(this);
+    // TODO(40763787): Remove this once reentrant callsites have been addressed.
+    if (!focused_view_->HasObserver(this)) {
+      focused_view_->AddObserver(this);
+    }
     focused_view_->Focus();
   }
 
-  for (FocusChangeListener& observer : focus_change_listeners_)
-    observer.OnDidChangeFocus(old_focused_view, focused_view_);
-
-  if (delegate_)
-    delegate_->OnDidChangeFocus(old_focused_view, focused_view_);
+  focus_change_listeners_.Notify(&FocusChangeListener::OnDidChangeFocus,
+                                 old_focused_view_tracker.view(),
+                                 focused_view_);
 }
 
 void FocusManager::SetFocusedView(View* view) {
   FocusChangeReason reason = FocusChangeReason::kDirectFocusChange;
-  if (in_restoring_focused_view_)
+  if (in_restoring_focused_view_) {
     reason = FocusChangeReason::kFocusRestore;
+  }
 
   SetFocusedViewWithReason(view, reason);
 }
@@ -402,15 +399,17 @@ void FocusManager::ClearFocus() {
 void FocusManager::AdvanceFocusIfNecessary() {
   // If widget is inactive, there is no focused view to check. The stored view
   // will also be checked for focusability when it is being restored.
-  if (!widget_->IsActive())
+  if (!widget_->IsActive()) {
     return;
+  }
 
   // If widget is active and focused view is not focusable, advance focus or,
   // if not possible, clear focus.
   if (focused_view_ && !IsFocusable(focused_view_)) {
     AdvanceFocus(false);
-    if (focused_view_ && !IsFocusable(focused_view_))
+    if (focused_view_ && !IsFocusable(focused_view_)) {
       ClearFocus();
+    }
   }
 }
 
@@ -418,16 +417,17 @@ void FocusManager::StoreFocusedView(bool clear_native_focus) {
   View* focused_view = focused_view_;
   // Don't do anything if no focused view. Storing the view (which is nullptr),
   // in this case, would clobber the view that was previously saved.
-  if (!focused_view_)
+  if (!focused_view_) {
     return;
+  }
 
   View* v = focused_view_;
 
   if (clear_native_focus) {
     // Temporarily disable notification.  ClearFocus() will set the focus to the
     // main browser window.  This extra focus bounce which happens during
-    // deactivation can confuse registered WidgetFocusListeners, as the focus
-    // is not changing due to a user-initiated event.
+    // deactivation can confuse registered NativeViewFocusListeners, as the
+    // focus is not changing due to a user-initiated event.
     AutoNativeNotificationDisabler local_notification_disabler;
     // ClearFocus() also stores the focused view.
     ClearFocus();
@@ -436,15 +436,17 @@ void FocusManager::StoreFocusedView(bool clear_native_focus) {
     SetStoredFocusView(focused_view);
   }
 
-  if (v)
+  if (v) {
     v->SchedulePaint();  // Remove focus border.
+  }
 }
 
 bool FocusManager::RestoreFocusedView() {
   View* view = GetStoredFocusView();
   if (view) {
     if (ContainsView(view)) {
-      if (!view->IsFocusable() && view->IsAccessibilityFocusable()) {
+      if (!view->IsFocusable() &&
+          view->GetViewAccessibility().IsAccessibilityFocusable()) {
         // RequestFocus would fail, but we want to restore focus to controls
         // that had focus in accessibility mode.
         SetFocusedViewWithReason(view, FocusChangeReason::kFocusRestore);
@@ -478,31 +480,25 @@ View* FocusManager::FindFocusableView(FocusTraversable* focus_traversable,
                                       bool reverse) {
   FocusTraversable* new_focus_traversable = nullptr;
   View* new_starting_view = nullptr;
-  auto can_go_into_anchored_dialog =
+  const FocusSearch::AnchoredDialogPolicy can_go_into_anchored_dialog =
       FocusSearch::AnchoredDialogPolicy::kCanGoIntoAnchoredDialog;
-  View* v = focus_traversable->GetFocusSearch()->FindNextFocusableView(
-      starting_view,
+  const FocusSearch::SearchDirection search_direction =
       reverse ? FocusSearch::SearchDirection::kBackwards
-              : FocusSearch::SearchDirection::kForwards,
-      FocusSearch::TraversalDirection::kDown,
-      FocusSearch::StartingViewPolicy::kSkipStartingView,
-      can_go_into_anchored_dialog, &new_focus_traversable, &new_starting_view);
+              : FocusSearch::SearchDirection::kForwards;
+  View* v = nullptr;
 
   // Let's go down the FocusTraversable tree as much as we can.
-  while (new_focus_traversable) {
-    DCHECK(!v);
-    focus_traversable = new_focus_traversable;
-    new_focus_traversable = nullptr;
-    starting_view = nullptr;
+  do {
     v = focus_traversable->GetFocusSearch()->FindNextFocusableView(
-        starting_view,
-        reverse ? FocusSearch::SearchDirection::kBackwards
-                : FocusSearch::SearchDirection::kForwards,
-        FocusSearch::TraversalDirection::kDown,
+        starting_view, search_direction, FocusSearch::TraversalDirection::kDown,
         FocusSearch::StartingViewPolicy::kSkipStartingView,
         can_go_into_anchored_dialog, &new_focus_traversable,
         &new_starting_view);
-  }
+    DCHECK(!new_focus_traversable || !v);
+    focus_traversable = std::exchange(new_focus_traversable, nullptr);
+    starting_view = nullptr;
+  } while (focus_traversable);
+
   return v;
 }
 
@@ -523,18 +519,20 @@ void FocusManager::UnregisterAccelerators(ui::AcceleratorTarget* target) {
 }
 
 bool FocusManager::ProcessAccelerator(const ui::Accelerator& accelerator) {
-  if (accelerator_manager_.Process(accelerator))
+  if (accelerator_manager_.Process(accelerator)) {
     return true;
-  if (delegate_ && delegate_->ProcessAccelerator(accelerator))
+  }
+  if (delegate_ && delegate_->ProcessAccelerator(accelerator)) {
     return true;
+  }
 
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_MAC)
   // On MacOS accelerators are processed when a bubble is opened without
   // manual redirection to bubble anchor widget. Including redirect on MacOS
   // breaks processing accelerators by the bubble itself.
   return false;
 #else
-  return RedirectAcceleratorToBubbleAnchorWidget(accelerator);
+  return RedirectAcceleratorToParentWidget(accelerator);
 #endif
 }
 
@@ -560,8 +558,9 @@ void FocusManager::ViewRemoved(View* removed) {
   // (and in turn ClearNativeFocus()) here because ViewRemoved() can
   // be called while the top level widget is being destroyed.
   DCHECK(removed);
-  if (removed->Contains(focused_view_))
+  if (removed->Contains(focused_view_)) {
     SetFocusedView(nullptr);
+  }
 }
 
 void FocusManager::AddFocusChangeListener(FocusChangeListener* listener) {
@@ -574,12 +573,17 @@ void FocusManager::RemoveFocusChangeListener(FocusChangeListener* listener) {
 
 bool FocusManager::ProcessArrowKeyTraversal(const ui::KeyEvent& event) {
   if (event.IsShiftDown() || event.IsControlDown() || event.IsAltDown() ||
-      event.IsAltGrDown())
+      event.IsAltGrDown()) {
     return false;
+  }
 
   const ui::KeyboardCode key = event.key_code();
   if (key != ui::VKEY_UP && key != ui::VKEY_DOWN && key != ui::VKEY_LEFT &&
       key != ui::VKEY_RIGHT) {
+    return false;
+  }
+
+  if (focused_view_ && focused_view_->GetGroup() != -1) {
     return false;
   }
 
@@ -593,11 +597,12 @@ bool FocusManager::IsFocusable(View* view) const {
   DCHECK(view);
 
 // |keyboard_accessible_| is only used on Mac.
-#if defined(OS_APPLE)
-  return keyboard_accessible_ ? view->IsAccessibilityFocusable()
-                              : view->IsFocusable();
+#if BUILDFLAG(IS_MAC)
+  return keyboard_accessible_
+             ? view->GetViewAccessibility().IsAccessibilityFocusable()
+             : view->IsFocusable();
 #else
-  return view->IsAccessibilityFocusable();
+  return view->GetViewAccessibility().IsAccessibilityFocusable();
 #endif
 }
 
@@ -609,35 +614,37 @@ void FocusManager::OnViewIsDeleting(View* view) {
   SetFocusedView(nullptr);
 }
 
-bool FocusManager::RedirectAcceleratorToBubbleAnchorWidget(
+bool FocusManager::RedirectAcceleratorToParentWidget(
     const ui::Accelerator& accelerator) {
-  views::BubbleDialogDelegate* widget_delegate =
-      widget_->widget_delegate()->AsBubbleDialogDelegate();
-  Widget* anchor_widget =
-      widget_delegate ? widget_delegate->anchor_widget() : nullptr;
-  if (!anchor_widget)
+  Widget* parent_widget = widget_->parent();
+  if (!parent_widget || !widget_->widget_delegate()) {
     return false;
+  }
 
-  FocusManager* focus_manager = anchor_widget->GetFocusManager();
-  if (!focus_manager->IsAcceleratorRegistered(accelerator))
+  FocusManager* focus_manager = parent_widget->GetFocusManager();
+  if (!focus_manager->IsAcceleratorRegistered(accelerator)) {
     return false;
+  }
 
-#if defined(OS_LINUX) && !defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX)
   // Processing an accelerator can delete things. Because we
   // need these objects afterwards on Linux, save widget_ as weak pointer and
   // save the close_on_deactivate property value of widget_delegate in a
   // variable.
   base::WeakPtr<Widget> widget_weak_ptr = widget_->GetWeakPtr();
   const bool close_widget_on_deactivate =
-      widget_delegate->close_on_deactivate();
+      widget_->widget_delegate()->AsBubbleDialogDelegate() &&
+      widget_->widget_delegate()
+          ->AsBubbleDialogDelegate()
+          ->ShouldCloseOnDeactivate();
 #endif
 
   // The parent view must be focused for it to process events.
-  focus_manager->SetFocusedView(anchor_widget->GetRootView());
+  focus_manager->SetFocusedView(parent_widget->GetRootView());
   const bool accelerator_processed =
       focus_manager->ProcessAccelerator(accelerator);
 
-#if defined(OS_LINUX) && !defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX)
   // Need to manually close the bubble widget on Linux. On Linux when the
   // bubble is shown, the main widget remains active. Because of that when
   // focus is set to the main widget to process accelerator, the main widget
@@ -648,6 +655,18 @@ bool FocusManager::RedirectAcceleratorToBubbleAnchorWidget(
 #endif
 
   return accelerator_processed;
+}
+
+bool FocusManager::IsArrowKeyTraversalEnabledForWidget() const {
+  if (delegate_ && delegate_->IsArrowKeyTraversalEnabled()) {
+    return true;
+  }
+
+  Widget* const widget = (focused_view_ && focused_view_->GetWidget())
+                             ? focused_view_->GetWidget()
+                             : widget_.get();
+  return widget && widget->widget_delegate() &&
+         widget->widget_delegate()->enable_arrow_key_traversal();
 }
 
 }  // namespace views

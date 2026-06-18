@@ -1,14 +1,21 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/optional.h"
+#include <optional>
+
+#include "base/test/bind.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extensions_client.h"
 #include "extensions/common/features/complex_feature.h"
 #include "extensions/common/features/feature.h"
 #include "extensions/common/features/feature_provider.h"
 #include "extensions/common/features/simple_feature.h"
+#include "extensions/common/mojom/context_type.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "tools/json_schema_compiler/test/features_compiler_test.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -23,8 +30,22 @@ void ExpectVectorsEqual(std::vector<T> expected,
   EXPECT_EQ(expected, actual) << name;
 }
 
+template <typename T>
+void ExpectOptionalVectorsEqual(const std::optional<std::vector<T>>& expected,
+                                const std::optional<std::vector<T>>& actual,
+                                const std::string& name) {
+  if (expected.has_value() != actual.has_value()) {
+    ADD_FAILURE() << "Mismatched optional vectors for " << name << ": "
+                  << expected.has_value() << " vs " << actual.has_value();
+    return;
+  }
+  if (expected.has_value())
+    ExpectVectorsEqual(*expected, *actual, name);
+}
+
 const bool kDefaultAutoGrant = true;
 const bool kDefaultInternal = false;
+const bool kDefaultRequiresDelegatedAvailabilityCheck = false;
 
 }  // namespace
 
@@ -41,28 +62,31 @@ struct FeatureComparator {
   std::vector<std::string> allowlist;
   std::vector<std::string> dependencies;
   std::vector<Manifest::Type> extension_types;
-  std::vector<Feature::Context> contexts;
+  std::optional<std::vector<mojom::ContextType>> contexts;
   std::vector<Feature::Platform> platforms;
 
   URLPatternSet matches;
 
-  base::Optional<SimpleFeature::Location> location;
-  base::Optional<int> min_manifest_version;
-  base::Optional<int> max_manifest_version;
-  base::Optional<std::string> command_line_switch;
-  base::Optional<version_info::Channel> channel;
+  std::optional<SimpleFeature::Location> location;
+  std::optional<int> min_manifest_version;
+  std::optional<int> max_manifest_version;
+  std::optional<std::string> command_line_switch;
+  std::optional<version_info::Channel> channel;
 
   std::string alias;
   std::string source;
 
   bool component_extensions_auto_granted;
   bool internal;
+  bool requires_delegated_availability_check;
 };
 
 FeatureComparator::FeatureComparator(const std::string& name)
     : name(name),
       component_extensions_auto_granted(kDefaultAutoGrant),
-      internal(kDefaultInternal) {}
+      internal(kDefaultInternal),
+      requires_delegated_availability_check(
+          kDefaultRequiresDelegatedAvailabilityCheck) {}
 
 FeatureComparator::~FeatureComparator() = default;
 
@@ -73,7 +97,7 @@ void FeatureComparator::CompareFeature(const SimpleFeature* feature) {
   ExpectVectorsEqual(allowlist, feature->allowlist(), name);
   ExpectVectorsEqual(dependencies, feature->dependencies(), name);
   ExpectVectorsEqual(extension_types, feature->extension_types(), name);
-  ExpectVectorsEqual(contexts, feature->contexts(), name);
+  ExpectOptionalVectorsEqual(contexts, feature->contexts(), name);
   ExpectVectorsEqual(platforms, feature->platforms(), name);
   EXPECT_EQ(matches, feature->matches()) << name;
   EXPECT_EQ(location, feature->location()) << name;
@@ -87,9 +111,22 @@ void FeatureComparator::CompareFeature(const SimpleFeature* feature) {
   EXPECT_EQ(internal, feature->IsInternal()) << name;
   EXPECT_EQ(alias, feature->alias()) << name;
   EXPECT_EQ(source, feature->source()) << name;
+  EXPECT_EQ(requires_delegated_availability_check,
+            feature->RequiresDelegatedAvailabilityCheck())
+      << name;
 }
 
 TEST(FeaturesGenerationTest, FeaturesTest) {
+  Feature::FeatureDelegatedAvailabilityCheckMap map;
+  map.emplace("requires_delegated_availability_check",
+              base::BindLambdaForTesting(
+                  [&](const std::string& api_full_name,
+                      const Extension* extension, mojom::ContextType context,
+                      const GURL& url, Feature::Platform platform,
+                      int context_id, bool check_developer_mode,
+                      const ContextData& context_data) { return false; }));
+  ExtensionsClient::Get()->SetFeatureDelegatedAvailabilityCheckMap(
+      std::move(map));
   FeatureProvider provider;
   CompilerTestAddFeaturesMethod(&provider);
 
@@ -112,7 +149,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
     const SimpleFeature* feature = GetAsSimpleFeature("alpha");
     FeatureComparator comparator("alpha");
     comparator.dependencies = {"permission:alpha"};
-    comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kPrivilegedExtension});
     comparator.channel = version_info::Channel::STABLE;
     comparator.max_manifest_version = 1;
     comparator.CompareFeature(feature);
@@ -120,11 +158,12 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
   {
     const SimpleFeature* feature = GetAsSimpleFeature("beta");
     FeatureComparator comparator("beta");
-    comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kPrivilegedExtension});
     comparator.channel = version_info::Channel::DEV;
-    comparator.extension_types = {Manifest::TYPE_EXTENSION,
-                                  Manifest::TYPE_PLATFORM_APP};
-    comparator.location = SimpleFeature::COMPONENT_LOCATION;
+    comparator.extension_types = {Manifest::Type::kExtension,
+                                  Manifest::Type::kPlatformApp};
+    comparator.location = SimpleFeature::Location::kComponent;
     comparator.allowlist = {"ABCDEF0123456789ABCDEF0123456789ABCDEF01",
                             "10FEDCBA9876543210FEDCBA9876543210FEDCBA"};
     comparator.blocklist = {"0123456789ABCDEF0123456789ABCDEF01234567",
@@ -137,9 +176,10 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
     FeatureComparator comparator("gamma");
     comparator.channel = version_info::Channel::BETA;
     comparator.platforms = {Feature::WIN_PLATFORM, Feature::MACOSX_PLATFORM};
-    comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kPrivilegedExtension});
     comparator.dependencies = {"permission:gamma"};
-    comparator.extension_types = {Manifest::TYPE_EXTENSION};
+    comparator.extension_types = {Manifest::Type::kExtension};
     comparator.internal = true;
     comparator.CompareFeature(feature);
 
@@ -158,7 +198,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
     const SimpleFeature* feature = GetAsSimpleFeature("gamma.unparented");
     FeatureComparator comparator("gamma.unparented");
     comparator.blocklist = {"0123456789ABCDEF0123456789ABCDEF01234567"};
-    comparator.contexts = {Feature::UNBLESSED_EXTENSION_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kUnprivilegedExtension});
     comparator.channel = version_info::Channel::DEV;
     comparator.CompareFeature(feature);
   }
@@ -166,7 +207,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
     const ComplexFeature* complex_feature =
         GetAsComplexFeature("gamma.complex_unparented");
     FeatureComparator comparator("gamma.complex_unparented");
-    comparator.contexts = {Feature::UNBLESSED_EXTENSION_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kUnprivilegedExtension});
     comparator.channel = version_info::Channel::STABLE;
     // We cheat and have both children exactly the same for ease of comparing;
     // complex features are tested more thoroughly below.
@@ -176,8 +218,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
   {
     const SimpleFeature* feature = GetAsSimpleFeature("delta");
     FeatureComparator comparator("delta");
-    comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT,
-                           Feature::WEBUI_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kPrivilegedExtension, mojom::ContextType::kWebUi});
     comparator.channel = version_info::Channel::DEV;
     comparator.matches.AddPattern(
         URLPattern(URLPattern::SCHEME_ALL, "*://example.com/*"));
@@ -187,7 +229,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
   {
     const SimpleFeature* feature = GetAsSimpleFeature("pi");
     FeatureComparator comparator("pi");
-    comparator.contexts = {Feature::WEBUI_UNTRUSTED_CONTEXT};
+    comparator.contexts =
+        std::vector<mojom::ContextType>({mojom::ContextType::kUntrustedWebUi});
     comparator.channel = version_info::Channel::STABLE;
     comparator.matches.AddPattern(
         URLPattern(URLPattern::SCHEME_ALL, "chrome-untrusted://foo/*"));
@@ -196,21 +239,22 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
   {
     const SimpleFeature* feature = GetAsSimpleFeature("allEnum");
     FeatureComparator comparator("allEnum");
-    comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT,
-                           Feature::BLESSED_WEB_PAGE_CONTEXT,
-                           Feature::CONTENT_SCRIPT_CONTEXT,
-                           Feature::LOCK_SCREEN_EXTENSION_CONTEXT,
-                           Feature::WEB_PAGE_CONTEXT,
-                           Feature::WEBUI_CONTEXT,
-                           Feature::WEBUI_UNTRUSTED_CONTEXT,
-                           Feature::UNBLESSED_EXTENSION_CONTEXT};
-    comparator.extension_types = {Manifest::TYPE_EXTENSION,
-                                  Manifest::TYPE_HOSTED_APP,
-                                  Manifest::TYPE_LEGACY_PACKAGED_APP,
-                                  Manifest::TYPE_PLATFORM_APP,
-                                  Manifest::TYPE_SHARED_MODULE,
-                                  Manifest::TYPE_THEME,
-                                  Manifest::TYPE_LOGIN_SCREEN_EXTENSION};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kPrivilegedExtension,
+         mojom::ContextType::kPrivilegedWebPage,
+         mojom::ContextType::kContentScript,
+         mojom::ContextType::kOffscreenExtension,
+         mojom::ContextType::kUserScript, mojom::ContextType::kWebPage,
+         mojom::ContextType::kWebUi, mojom::ContextType::kUntrustedWebUi,
+         mojom::ContextType::kUnprivilegedExtension});
+    comparator.extension_types = {Manifest::Type::kExtension,
+                                  Manifest::Type::kHostedApp,
+                                  Manifest::Type::kLegacyPackagedApp,
+                                  Manifest::Type::kPlatformApp,
+                                  Manifest::Type::kSharedModule,
+                                  Manifest::Type::kTheme,
+                                  Manifest::Type::kLoginScreenExtension,
+                                  Manifest::Type::kChromeOSSystemExtension};
     comparator.channel = version_info::Channel::BETA;
     comparator.CompareFeature(feature);
   }
@@ -218,7 +262,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
     // Omega is imported from a second .json file.
     const SimpleFeature* feature = GetAsSimpleFeature("omega");
     FeatureComparator comparator("omega");
-    comparator.contexts = {Feature::WEB_PAGE_CONTEXT};
+    comparator.contexts =
+        std::vector<mojom::ContextType>({mojom::ContextType::kWebPage});
     comparator.channel = version_info::Channel::DEV;
     comparator.min_manifest_version = 2;
     comparator.CompareFeature(feature);
@@ -256,8 +301,9 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
       // Check the default parent.
       FeatureComparator comparator("complex");
       comparator.channel = version_info::Channel::STABLE;
-      comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT};
-      comparator.extension_types = {Manifest::TYPE_EXTENSION};
+      comparator.contexts = std::vector<mojom::ContextType>(
+          {mojom::ContextType::kPrivilegedExtension});
+      comparator.extension_types = {Manifest::Type::kExtension};
       comparator.CompareFeature(default_parent);
       // Check the child of the complex feature. It should inherit its
       // properties from the default parent.
@@ -271,8 +317,9 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
       // Finally, check the branch of the complex feature.
       FeatureComparator comparator("complex");
       comparator.channel = version_info::Channel::BETA;
-      comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT};
-      comparator.extension_types = {Manifest::TYPE_EXTENSION};
+      comparator.contexts = std::vector<mojom::ContextType>(
+          {mojom::ContextType::kPrivilegedExtension});
+      comparator.extension_types = {Manifest::Type::kExtension};
       comparator.allowlist = {"0123456789ABCDEF0123456789ABCDEF01234567"};
       comparator.CompareFeature(other_parent);
     }
@@ -282,7 +329,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
   {
     const SimpleFeature* feature = GetAsSimpleFeature("alias");
     FeatureComparator comparator("alias");
-    comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kPrivilegedExtension});
     comparator.channel = version_info::Channel::STABLE;
     comparator.source = "alias_source";
     comparator.CompareFeature(feature);
@@ -290,7 +338,8 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
   {
     const SimpleFeature* feature = GetAsSimpleFeature("alias_source");
     FeatureComparator comparator("alias_source");
-    comparator.contexts = {Feature::BLESSED_EXTENSION_CONTEXT};
+    comparator.contexts = std::vector<mojom::ContextType>(
+        {mojom::ContextType::kPrivilegedExtension});
     comparator.channel = version_info::Channel::STABLE;
     comparator.alias = "alias";
     comparator.CompareFeature(feature);
@@ -329,6 +378,23 @@ TEST(FeaturesGenerationTest, FeaturesTest) {
     const Feature* feature = provider.GetFeature("alias_parent.child");
     ASSERT_EQ("", feature->alias());
     ASSERT_EQ("child_source", feature->source());
+  }
+  {
+    const SimpleFeature* feature = GetAsSimpleFeature("empty_contexts");
+    FeatureComparator comparator("empty_contexts");
+    comparator.channel = version_info::Channel::BETA;
+    comparator.contexts = std::vector<mojom::ContextType>();
+    comparator.CompareFeature(feature);
+  }
+  {
+    const SimpleFeature* feature =
+        GetAsSimpleFeature("requires_delegated_availability_check");
+    FeatureComparator comparator("requires_delegated_availability_check");
+    comparator.channel = version_info::Channel::BETA;
+    comparator.contexts =
+        std::vector<mojom::ContextType>{mojom::ContextType::kWebPage};
+    comparator.requires_delegated_availability_check = true;
+    comparator.CompareFeature(feature);
   }
 }
 

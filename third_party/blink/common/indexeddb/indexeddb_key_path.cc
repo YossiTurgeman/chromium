@@ -1,8 +1,10 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/public/common/indexeddb/indexeddb_key_path.h"
+
+#include <utility>
 
 #include "base/check.h"
 #include "base/notreached.h"
@@ -12,11 +14,11 @@ namespace blink {
 
 IndexedDBKeyPath::IndexedDBKeyPath() : type_(mojom::IDBKeyPathType::Null) {}
 
-IndexedDBKeyPath::IndexedDBKeyPath(const base::string16& string)
-    : type_(mojom::IDBKeyPathType::String), string_(string) {}
+IndexedDBKeyPath::IndexedDBKeyPath(std::u16string string)
+    : type_(mojom::IDBKeyPathType::String), string_(std::move(string)) {}
 
-IndexedDBKeyPath::IndexedDBKeyPath(const std::vector<base::string16>& array)
-    : type_(mojom::IDBKeyPathType::Array), array_(array) {}
+IndexedDBKeyPath::IndexedDBKeyPath(std::vector<std::u16string> array)
+    : type_(mojom::IDBKeyPathType::Array), array_(std::move(array)) {}
 
 IndexedDBKeyPath::IndexedDBKeyPath(const IndexedDBKeyPath& other) = default;
 IndexedDBKeyPath::IndexedDBKeyPath(IndexedDBKeyPath&& other) = default;
@@ -26,12 +28,12 @@ IndexedDBKeyPath& IndexedDBKeyPath::operator=(const IndexedDBKeyPath& other) =
 IndexedDBKeyPath& IndexedDBKeyPath::operator=(IndexedDBKeyPath&& other) =
     default;
 
-const std::vector<base::string16>& IndexedDBKeyPath::array() const {
+const std::vector<std::u16string>& IndexedDBKeyPath::array() const {
   DCHECK(type_ == blink::mojom::IDBKeyPathType::Array);
   return array_;
 }
 
-const base::string16& IndexedDBKeyPath::string() const {
+const std::u16string& IndexedDBKeyPath::string() const {
   DCHECK(type_ == blink::mojom::IDBKeyPathType::String);
   return string_;
 }
@@ -49,7 +51,6 @@ bool IndexedDBKeyPath::operator==(const IndexedDBKeyPath& other) const {
       return array_ == other.array_;
   }
   NOTREACHED();
-  return false;
 }
 
 }  // namespace blink

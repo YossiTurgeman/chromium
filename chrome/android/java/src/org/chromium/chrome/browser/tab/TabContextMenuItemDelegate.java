@@ -1,15 +1,19 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.tab;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.net.MailTo;
 import android.net.Uri;
 import android.provider.Browser;
 import android.provider.ContactsContract;
+import android.text.TextUtils;
 
 import androidx.browser.customtabs.CustomTabsIntent;
 
@@ -17,66 +21,121 @@ import org.chromium.base.ContextUtils;
 import org.chromium.base.IntentUtils;
 import org.chromium.base.PackageManagerUtils;
 import org.chromium.base.metrics.RecordUserAction;
-import org.chromium.base.supplier.Supplier;
-import org.chromium.chrome.browser.DefaultBrowserInfo;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.IntentHandler;
-import org.chromium.chrome.browser.compositor.bottombar.ephemeraltab.EphemeralTabCoordinator;
-import org.chromium.chrome.browser.contextmenu.ContextMenuItemDelegate;
+import org.chromium.chrome.browser.bookmarks.BookmarkManagerOpenerImpl;
+import org.chromium.chrome.browser.bookmarks.BookmarkModel;
+import org.chromium.chrome.browser.bookmarks.BookmarkUtils;
 import org.chromium.chrome.browser.document.ChromeLauncherActivity;
-import org.chromium.chrome.browser.download.ChromeDownloadDelegate;
+import org.chromium.chrome.browser.download.DownloadUtils;
+import org.chromium.chrome.browser.ephemeraltab.EphemeralTabCoordinator;
+import org.chromium.chrome.browser.feature_engagement.TrackerFactory;
+import org.chromium.chrome.browser.flags.ActivityType;
 import org.chromium.chrome.browser.incognito.IncognitoUtils;
+import org.chromium.chrome.browser.multiwindow.MultiInstanceOrchestratorFactory;
 import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
-import org.chromium.chrome.browser.net.spdyproxy.DataReductionProxySettings;
-import org.chromium.chrome.browser.tab.state.CriticalPersistedTabData;
+import org.chromium.chrome.browser.offlinepages.OfflinePageBridge;
+import org.chromium.chrome.browser.offlinepages.RequestCoordinatorBridge;
+import org.chromium.chrome.browser.preferences.Pref;
+import org.chromium.chrome.browser.price_tracking.PriceDropNotificationManagerFactory;
+import org.chromium.chrome.browser.printing.TabPrinter;
+import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
-import org.chromium.chrome.browser.tabmodel.document.TabDelegate;
-import org.chromium.components.embedder_support.util.UrlConstants;
+import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
+import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
+import org.chromium.components.embedder_support.contextmenu.ContextMenuItemDelegate;
 import org.chromium.components.embedder_support.util.UrlUtilities;
+import org.chromium.components.feature_engagement.EventConstants;
+import org.chromium.components.user_prefs.UserPrefs;
+import org.chromium.content_public.browser.AdditionalNavigationParams;
 import org.chromium.content_public.browser.LoadUrlParams;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.content_public.common.Referrer;
+import org.chromium.printing.PrintManagerDelegateImpl;
+import org.chromium.printing.PrintingController;
+import org.chromium.printing.PrintingControllerImpl;
 import org.chromium.ui.base.Clipboard;
 import org.chromium.ui.base.PageTransition;
-import org.chromium.url.URI;
+import org.chromium.ui.base.WindowAndroid;
+import org.chromium.url.GURL;
 
-import java.util.Locale;
+import java.util.function.Supplier;
 
 /**
  * A default {@link ContextMenuItemDelegate} that supports the context menu functionality in Tab.
  */
+@NullMarked
 public class TabContextMenuItemDelegate implements ContextMenuItemDelegate {
+    private final Activity mActivity;
+    private final @ActivityType int mActivityType;
     private final TabImpl mTab;
     private final TabModelSelector mTabModelSelector;
-    private boolean mLoadOriginalImageRequestedForPageLoad;
-    private EmptyTabObserver mDataReductionProxyContextMenuTabObserver;
-    private final Supplier<EphemeralTabCoordinator> mEphemeralTabCoordinatorSupplier;
+    private final Supplier<@Nullable EphemeralTabCoordinator> mEphemeralTabCoordinatorSupplier;
+    private final Runnable mContextMenuCopyLinkObserver;
+    private final Supplier<SnackbarManager> mSnackbarManagerSupplier;
+    private final Supplier<BottomSheetController> mBottomSheetControllerSupplier;
 
-    /**
-     * Builds a {@link TabContextMenuItemDelegate} instance.
-     */
-    public TabContextMenuItemDelegate(Tab tab, TabModelSelector tabModelSelector,
-            Supplier<EphemeralTabCoordinator> ephemeralTabCoordinatorSupplier) {
+    /** Builds a {@link TabContextMenuItemDelegate} instance. */
+    public TabContextMenuItemDelegate(
+            Activity activity,
+            @ActivityType int activityType,
+            Tab tab,
+            TabModelSelector tabModelSelector,
+            Supplier<@Nullable EphemeralTabCoordinator> ephemeralTabCoordinatorSupplier,
+            Runnable contextMenuCopyLinkObserver,
+            Supplier<SnackbarManager> snackbarManagerSupplier,
+            Supplier<BottomSheetController> bottomSheetControllerSupplier) {
+        mActivity = activity;
+        mActivityType = activityType;
         mTab = (TabImpl) tab;
         mTabModelSelector = tabModelSelector;
         mEphemeralTabCoordinatorSupplier = ephemeralTabCoordinatorSupplier;
-
-        mDataReductionProxyContextMenuTabObserver = new EmptyTabObserver() {
-            @Override
-            public void onPageLoadStarted(Tab tab, String url) {
-                mLoadOriginalImageRequestedForPageLoad = false;
-            }
-        };
-        mTab.addObserver(mDataReductionProxyContextMenuTabObserver);
+        mContextMenuCopyLinkObserver = contextMenuCopyLinkObserver;
+        mSnackbarManagerSupplier = snackbarManagerSupplier;
+        mBottomSheetControllerSupplier = bottomSheetControllerSupplier;
     }
 
     @Override
-    public void onDestroy() {
-        mTab.removeObserver(mDataReductionProxyContextMenuTabObserver);
+    public void onDestroy() {}
+
+    @Override
+    public boolean supportsOpenImageInNewTab() {
+        return mActivityType == ActivityType.TABBED;
+    }
+
+    @Override
+    public boolean supportsOpenInEphemeralTab() {
+        return mActivityType == ActivityType.TABBED || mActivityType == ActivityType.CUSTOM_TAB;
+    }
+
+    @Override
+    public boolean supportsSaveImage() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsSearchByImage() {
+        return mActivityType == ActivityType.TABBED || mActivityType == ActivityType.CUSTOM_TAB;
+    }
+
+    @Override
+    public boolean supportsInspectElement() {
+        return true;
+    }
+
+    @Override
+    public String getPageTitle() {
+        return mTab.getTitle();
     }
 
     @Override
     public WebContents getWebContents() {
-        return mTab.getWebContents();
+        return assumeNonNull(mTab.getWebContents());
+    }
+
+    public Tab getTab() {
+        return mTab;
     }
 
     @Override
@@ -86,29 +145,49 @@ public class TabContextMenuItemDelegate implements ContextMenuItemDelegate {
 
     @Override
     public boolean isIncognitoSupported() {
-        return IncognitoUtils.isIncognitoModeEnabled();
+        return IncognitoUtils.isIncognitoModeEnabled(mTab.getProfile());
+    }
+
+    @Override
+    public boolean isPrintSupported() {
+        return UserPrefs.get(mTab.getProfile()).getBoolean(Pref.PRINTING_ENABLED);
     }
 
     @Override
     public boolean isOpenInOtherWindowSupported() {
-        return MultiWindowUtils.getInstance().isOpenInOtherWindowSupported(
-                TabUtils.getActivity(mTab));
+        Activity activity = TabUtils.getActivity(mTab);
+        return activity != null
+                && MultiWindowUtils.getInstance().isLinkNavigationToOtherWindowSupported(activity);
     }
 
     @Override
-    public boolean isDataReductionProxyEnabledForURL(String url) {
-        return isSpdyProxyEnabledForUrl(url);
+    public boolean startDownload(GURL url, boolean isLink) {
+        return true;
     }
 
     @Override
-    public boolean startDownload(String url, boolean isLink) {
-        return !isLink
-                || !ChromeDownloadDelegate.from(mTab).shouldInterceptContextMenuDownload(url);
+    public void startDownloadPage(Context context) {
+        DownloadUtils.downloadOfflinePage(context, mTab, false);
+    }
+
+    @Override
+    public void startPrint() {
+        WindowAndroid windowAndroid = mTab.getWindowAndroid();
+        if (windowAndroid != null) {
+            PrintingController printingController =
+                    PrintingControllerImpl.getInstance(windowAndroid);
+            printingController.startPrint(
+                    new TabPrinter(mTab), new PrintManagerDelegateImpl(mActivity));
+        }
     }
 
     @Override
     public void onSaveToClipboard(String text, int clipboardType) {
         Clipboard.getInstance().setText(text);
+        if (clipboardType == ClipboardType.LINK_URL) {
+            // TODO(crbug.com/40732234): Find a better way of passing event for IPH.
+            mContextMenuCopyLinkObserver.run();
+        }
     }
 
     @Override
@@ -120,14 +199,14 @@ public class TabContextMenuItemDelegate implements ContextMenuItemDelegate {
     public boolean supportsCall() {
         Intent intent = new Intent(Intent.ACTION_VIEW);
         intent.setData(Uri.parse("tel:"));
-        return mTab.getWindowAndroid().canResolveActivity(intent);
+        return mTab.getWindowAndroidChecked().canResolveActivity(intent);
     }
 
     @Override
-    public void onCall(String uri) {
+    public void onCall(GURL url) {
         Intent intent = new Intent(Intent.ACTION_VIEW);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        intent.setData(Uri.parse(uri));
+        intent.setData(Uri.parse(url.getSpec()));
         IntentUtils.safeStartActivity(mTab.getContext(), intent);
     }
 
@@ -135,14 +214,14 @@ public class TabContextMenuItemDelegate implements ContextMenuItemDelegate {
     public boolean supportsSendEmailMessage() {
         Intent intent = new Intent(Intent.ACTION_VIEW);
         intent.setData(Uri.parse("mailto:test@example.com"));
-        return mTab.getWindowAndroid().canResolveActivity(intent);
+        return mTab.getWindowAndroidChecked().canResolveActivity(intent);
     }
 
     @Override
-    public void onSendEmailMessage(String url) {
+    public void onSendEmailMessage(GURL url) {
         Intent intent = new Intent(Intent.ACTION_VIEW);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        intent.setData(Uri.parse(url));
+        intent.setData(Uri.parse(url.getSpec()));
         IntentUtils.safeStartActivity(mTab.getContext(), intent);
     }
 
@@ -150,11 +229,11 @@ public class TabContextMenuItemDelegate implements ContextMenuItemDelegate {
     public boolean supportsSendTextMessage() {
         Intent intent = new Intent(Intent.ACTION_VIEW);
         intent.setData(Uri.parse("sms:"));
-        return mTab.getWindowAndroid().canResolveActivity(intent);
+        return mTab.getWindowAndroidChecked().canResolveActivity(intent);
     }
 
     @Override
-    public void onSendTextMessage(String url) {
+    public void onSendTextMessage(GURL url) {
         Intent intent = new Intent(Intent.ACTION_VIEW);
         intent.setData(Uri.parse("sms:" + UrlUtilities.getTelNumber(url)));
         IntentUtils.safeStartActivity(mTab.getContext(), intent);
@@ -164,117 +243,275 @@ public class TabContextMenuItemDelegate implements ContextMenuItemDelegate {
     public boolean supportsAddToContacts() {
         Intent intent = new Intent(Intent.ACTION_INSERT);
         intent.setType(ContactsContract.Contacts.CONTENT_TYPE);
-        return mTab.getWindowAndroid().canResolveActivity(intent);
+        return mTab.getWindowAndroidChecked().canResolveActivity(intent);
     }
 
     @Override
-    public void onAddToContacts(String url) {
+    public void onAddToContacts(GURL url) {
         Intent intent = new Intent(Intent.ACTION_INSERT);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         intent.setType(ContactsContract.Contacts.CONTENT_TYPE);
-        if (MailTo.isMailTo(url)) {
+        if (MailTo.isMailTo(url.getSpec())) {
             intent.putExtra(
-                    ContactsContract.Intents.Insert.EMAIL, MailTo.parse(url).getTo().split(",")[0]);
+                    ContactsContract.Intents.Insert.EMAIL,
+                    MailTo.parse(url.getSpec()).getTo().split(",")[0]);
         } else if (UrlUtilities.isTelScheme(url)) {
             intent.putExtra(ContactsContract.Intents.Insert.PHONE, UrlUtilities.getTelNumber(url));
         }
         IntentUtils.safeStartActivity(mTab.getContext(), intent);
     }
 
-    @Override
-    public void onOpenInOtherWindow(String url, Referrer referrer) {
-        TabDelegate tabDelegate = new TabDelegate(mTab.isIncognito());
-        LoadUrlParams loadUrlParams = new LoadUrlParams(url);
-        loadUrlParams.setReferrer(referrer);
-        tabDelegate.createTabInOtherWindow(loadUrlParams, TabUtils.getActivity(mTab),
-                CriticalPersistedTabData.from(mTab).getParentId());
+    public boolean canCurrentTabGoBack() {
+        Tab tab = mTabModelSelector.getCurrentTab();
+        assert tab != null;
+        return tab.canGoBack();
+    }
+
+    public boolean canCurrentTabGoForward() {
+        Tab tab = mTabModelSelector.getCurrentTab();
+        assert tab != null;
+        return tab.canGoForward();
+    }
+
+    public void onCurrentTabGoBack() {
+        Tab tab = mTabModelSelector.getCurrentTab();
+        if (tab != null && tab.canGoBack()) {
+            tab.goBack();
+        }
+    }
+
+    public void onCurrentTabGoForward() {
+        Tab tab = mTabModelSelector.getCurrentTab();
+        if (tab != null && tab.canGoForward()) {
+            tab.goForward();
+        }
     }
 
     @Override
-    public void onOpenInNewTab(String url, Referrer referrer) {
+    public void onReloadCurrentTab() {
+        Tab tab = mTabModelSelector.getCurrentTab();
+        if (tab != null) {
+            tab.reload();
+        }
+    }
+
+    /**
+     * Opens a URL in a new or existing window.
+     *
+     * @param url The URL to open.
+     * @param referrer The referrer to use when opening the URL.
+     * @param isIncognito Whether the other window should be incognito.
+     * @param preferNew Whether the URL should be opened in a new window.
+     */
+    public void openInOtherWindow(
+            GURL url, @Nullable Referrer referrer, boolean isIncognito, boolean preferNew) {
+        LoadUrlParams loadUrlParams = new LoadUrlParams(url.getSpec());
+        if (!isIncognito) {
+            loadUrlParams.setReferrer(referrer);
+        }
+        MultiInstanceOrchestratorFactory.getInstance()
+                .openUrlInOtherWindow(
+                        mActivity,
+                        loadUrlParams,
+                        mTab.getParentId(),
+                        preferNew,
+                        mTab.isIncognitoBranded());
+    }
+
+    /**
+     * Opens a URL in an incognito window.
+     *
+     * @param url The URL to open.
+     */
+    public void openInIncognitoWindow(GURL url) {
+        LoadUrlParams loadUrlParams = new LoadUrlParams(url.getSpec());
+        MultiInstanceOrchestratorFactory.getInstance()
+                .openUrlInOtherWindow(
+                        mActivity,
+                        loadUrlParams,
+                        mTab.getParentId(),
+                        /* preferNew= */ false,
+                        /* isIncognito= */ true);
+    }
+
+    /**
+     * Called when the {@code url} should be opened in a new page with the same incognito state as
+     * the current page.
+     *
+     * @param url The URL to open.
+     * @param referrer The attribution impression to associate with the navigation.
+     * @param navigateToTab Whether or not to navigate to the new page.
+     * @param additionalNavigationParams Additional information that needs to be passed to the
+     *     navigation request.
+     */
+    public void onOpenInNewTab(
+            GURL url,
+            @Nullable Referrer referrer,
+            boolean navigateToTab,
+            @Nullable AdditionalNavigationParams additionalNavigationParams) {
         RecordUserAction.record("MobileNewTabOpened");
         RecordUserAction.record("LinkOpenedInNewTab");
-        LoadUrlParams loadUrlParams = new LoadUrlParams(url);
+        LoadUrlParams loadUrlParams = new LoadUrlParams(url.getSpec());
+        loadUrlParams.setReferrer(referrer);
+        loadUrlParams.setAdditionalNavigationParams(additionalNavigationParams);
+        mTabModelSelector.openNewTab(
+                loadUrlParams,
+                navigateToTab
+                        ? TabLaunchType.FROM_LONGPRESS_FOREGROUND
+                        : TabLaunchType.FROM_LONGPRESS_BACKGROUND,
+                mTab,
+                isIncognito());
+    }
+
+    /**
+     * Called when {@code url} should be opened in a new page in the same group as the current page.
+     *
+     * @param url The URL to open.
+     */
+    public void onOpenInNewTabInGroup(GURL url, @Nullable Referrer referrer) {
+        RecordUserAction.record("MobileNewTabOpened");
+        RecordUserAction.record("LinkOpenedInNewTab");
+        LoadUrlParams loadUrlParams = new LoadUrlParams(url.getSpec());
         loadUrlParams.setReferrer(referrer);
         mTabModelSelector.openNewTab(
-                loadUrlParams, TabLaunchType.FROM_LONGPRESS_BACKGROUND, mTab, isIncognito());
+                loadUrlParams,
+                TabLaunchType.FROM_LONGPRESS_BACKGROUND_IN_GROUP,
+                mTab,
+                isIncognito());
     }
 
-    @Override
-    public void onLoadOriginalImage() {
-        mLoadOriginalImageRequestedForPageLoad = true;
-        mTab.loadOriginalImage();
-    }
-
-    @Override
-    public boolean wasLoadOriginalImageRequestedForPageLoad() {
-        return mLoadOriginalImageRequestedForPageLoad;
-    }
-
-    @Override
-    public void onOpenInNewIncognitoTab(String url) {
+    /**
+     * Called when the {@code url} should be opened in a new incognito page.
+     *
+     * @param url The URL to open.
+     */
+    public void onOpenInNewIncognitoTab(GURL url) {
         RecordUserAction.record("MobileNewTabOpened");
         mTabModelSelector.openNewTab(
-                new LoadUrlParams(url), TabLaunchType.FROM_LONGPRESS_FOREGROUND, mTab, true);
+                new LoadUrlParams(url.getSpec()),
+                TabLaunchType.FROM_LONGPRESS_FOREGROUND,
+                mTab,
+                true);
     }
 
     @Override
-    public String getPageUrl() {
-        return mTab.getUrlString();
+    public GURL getPageUrl() {
+        return mTab.getUrl();
     }
 
-    @Override
-    public void onOpenImageUrl(String url, Referrer referrer) {
-        LoadUrlParams loadUrlParams = new LoadUrlParams(url);
+    /**
+     * Called when the {@code url} is of an image and should be opened in the same page.
+     *
+     * @param url The image URL to open.
+     */
+    public void onOpenImageUrl(GURL url, @Nullable Referrer referrer) {
+        LoadUrlParams loadUrlParams = new LoadUrlParams(url.getSpec());
         loadUrlParams.setTransitionType(PageTransition.LINK);
         loadUrlParams.setReferrer(referrer);
         mTab.loadUrl(loadUrlParams);
     }
 
+    /**
+     * Called when the {@code url} is of an image and should be opened in a new page.
+     *
+     * @param url The image URL to open.
+     */
     @Override
-    public void onOpenImageInNewTab(String url, Referrer referrer) {
-        LoadUrlParams loadUrlParams = new LoadUrlParams(url);
+    public void onOpenImageInNewTab(GURL url, @Nullable Referrer referrer) {
+        LoadUrlParams loadUrlParams = new LoadUrlParams(url.getSpec());
         loadUrlParams.setReferrer(referrer);
         mTabModelSelector.openNewTab(
                 loadUrlParams, TabLaunchType.FROM_LONGPRESS_BACKGROUND, mTab, isIncognito());
     }
 
+    /**
+     * Called when the {@code url} should be opened in an ephemeral page.
+     *
+     * @param url The URL to open.
+     * @param title The title text to show on top control.
+     */
     @Override
-    public void onOpenInEphemeralTab(String url, String title) {
-        if (mEphemeralTabCoordinatorSupplier == null
-                || mEphemeralTabCoordinatorSupplier.get() == null) {
+    public void onOpenInEphemeralTab(GURL url, String title) {
+        EphemeralTabCoordinator ephemeralTabCoordinator = mEphemeralTabCoordinatorSupplier.get();
+        if (ephemeralTabCoordinator == null) {
             return;
         }
-        mEphemeralTabCoordinatorSupplier.get().requestOpenSheet(url, title, mTab.isIncognito());
+        var initiatorOrigin = getWebContents().getMainFrame().getLastCommittedOrigin();
+        ephemeralTabCoordinator.requestOpenSheet(
+                url,
+                /* fullPageUrl= */ null,
+                title,
+                mTab.getProfile(),
+                /* canPromoteToNewTab= */ mActivityType == ActivityType.TABBED
+                        || mActivityType == ActivityType.CUSTOM_TAB,
+                /* shouldHaveContextMenu= */ true,
+                initiatorOrigin,
+                () -> {});
     }
 
-    @Override
-    public void onOpenInChrome(String linkUrl, String pageUrl) {
+    /**
+     * Called when Read Later was selected from the context menu.
+     *
+     * @param url The URL to be saved to the reading list.
+     * @param title The title text to be shown for this item in the reading list.
+     */
+    public void onReadLater(GURL url, String title) {
+        if (url == null || url.isEmpty()) return;
+        assert url.isValid();
+
+        Profile profile = mTab.getProfile().getOriginalProfile();
+        BookmarkModel bookmarkModel = BookmarkModel.getForProfile(profile);
+        bookmarkModel.finishLoadingBookmarkModel(
+                () -> {
+                    // Add to reading list.
+                    BookmarkUtils.addToReadingList(
+                            mActivity,
+                            bookmarkModel,
+                            title,
+                            url,
+                            mSnackbarManagerSupplier.get(),
+                            mTab.getProfile(),
+                            mBottomSheetControllerSupplier.get(),
+                            new BookmarkManagerOpenerImpl(),
+                            PriceDropNotificationManagerFactory.create(mTab.getProfile()));
+                    TrackerFactory.getTrackerForProfile(profile)
+                            .notifyEvent(EventConstants.READ_LATER_CONTEXT_MENU_TAPPED);
+
+                    // Add to offline pages.
+                    assumeNonNull(RequestCoordinatorBridge.getForProfile(profile))
+                            .savePageLater(
+                                    url.getSpec(),
+                                    OfflinePageBridge.BOOKMARK_NAMESPACE,
+                                    /* userRequested= */ true);
+                });
+    }
+
+    /**
+     * Called when a link should be opened in the main Chrome browser.
+     *
+     * @param linkUrl URL that should be opened.
+     * @param pageUrl URL of the current page.
+     */
+    public void onOpenInChrome(GURL linkUrl, GURL pageUrl) {
         Context applicationContext = ContextUtils.getApplicationContext();
-        Intent chromeIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(linkUrl));
+        Intent chromeIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(linkUrl.getSpec()));
         chromeIntent.setPackage(applicationContext.getPackageName());
         chromeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 
-        if (PackageManagerUtils.queryIntentActivities(chromeIntent, 0).isEmpty()) {
+        if (!PackageManagerUtils.canResolveActivity(chromeIntent)) {
             // If Chrome can't handle intent fallback to using any other VIEW handlers.
             chromeIntent.setPackage(null);
 
             // Query again without the package name set and if there are still no handlers for the
             // URI fail gracefully, and do nothing, since this will still cause a crash if launched.
-            if (PackageManagerUtils.queryIntentActivities(chromeIntent, 0).isEmpty()) return;
+            if (!PackageManagerUtils.canResolveActivity(chromeIntent)) return;
         }
 
         boolean activityStarted = false;
         if (pageUrl != null) {
-            try {
-                URI pageUri = URI.create(pageUrl);
-                if (UrlUtilities.isInternalScheme(pageUri)) {
-                    IntentHandler.startChromeLauncherActivityForTrustedIntent(chromeIntent);
-                    activityStarted = true;
-                }
-            } catch (IllegalArgumentException ex) {
-                // Ignore the exception for creating the URI and launch the intent
-                // without the trusted intent extras.
+            if (UrlUtilities.isInternalScheme(pageUrl)) {
+                IntentHandler.startChromeLauncherActivityForTrustedIntent(chromeIntent);
+                activityStarted = true;
             }
         }
 
@@ -284,46 +521,39 @@ public class TabContextMenuItemDelegate implements ContextMenuItemDelegate {
         }
     }
 
-    @Override
-    public void onOpenInNewChromeTabFromCCT(String linkUrl, boolean isIncognito) {
-        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(linkUrl));
+    /**
+     * Called when the {@code url} should be opened in a new Chrome page from CCT.
+     *
+     * @param linkUrl The URL to open.
+     * @param isIncognito true if the {@code url} should be opened in a new incognito page.
+     */
+    public void onOpenInNewChromeTabFromCct(GURL linkUrl, boolean isIncognito) {
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(linkUrl.getSpec()));
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         intent.setClass(ContextUtils.getApplicationContext(), ChromeLauncherActivity.class);
         if (isIncognito) {
             intent.putExtra(IntentHandler.EXTRA_OPEN_NEW_INCOGNITO_TAB, true);
-            intent.putExtra(Browser.EXTRA_APPLICATION_ID,
+            intent.putExtra(
+                    Browser.EXTRA_APPLICATION_ID,
                     ContextUtils.getApplicationContext().getPackageName());
-            IntentHandler.addTrustedIntentExtras(intent);
+            IntentUtils.addTrustedIntentExtras(intent);
             IntentHandler.setTabLaunchType(intent, TabLaunchType.FROM_EXTERNAL_APP);
         }
         IntentUtils.safeStartActivity(mTab.getContext(), intent);
     }
 
     @Override
-    public String getTitleForOpenTabInExternalApp() {
-        return DefaultBrowserInfo.getTitleOpenInDefaultBrowser(false);
-    }
+    public void onOpenInDefaultBrowser(GURL url) {
+        // Most browsers (including Chrome) do not advertise support for data scheme URIs
+        // and so cannot handle data scheme view Intents. Use the browser backing the currently
+        // running CCT.
+        if (TextUtils.equals("data", url.getScheme())) {
+            onOpenInNewChromeTabFromCct(url, false);
+            return;
+        }
 
-    @Override
-    public void onOpenInDefaultBrowser(String url) {
-        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url.getSpec()));
         CustomTabsIntent.setAlwaysUseBrowserUI(intent);
         IntentUtils.safeStartActivity(mTab.getContext(), intent);
     }
-
-    /**
-     * Checks if spdy proxy is enabled for input url.
-     * @param url Input url to check for spdy setting.
-     * @return true if url is enabled for spdy proxy.
-    */
-    private boolean isSpdyProxyEnabledForUrl(String url) {
-        if (DataReductionProxySettings.getInstance().isDataReductionProxyEnabled()
-                && url != null && !url.toLowerCase(Locale.US).startsWith(
-                        UrlConstants.HTTPS_URL_PREFIX)
-                && !isIncognito()) {
-            return true;
-        }
-        return false;
-    }
-
 }

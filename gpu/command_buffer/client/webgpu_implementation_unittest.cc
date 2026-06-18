@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,10 @@
 
 #include "gpu/command_buffer/client/webgpu_implementation.h"
 
+#include <memory>
+
+#include "base/compiler_specific.h"
+#include "base/memory/raw_ptr.h"
 #include "gpu/command_buffer/client/client_test_helper.h"
 #include "gpu/command_buffer/client/mock_transfer_buffer.h"
 #include "gpu/command_buffer/client/shared_memory_limits.h"
@@ -45,16 +49,16 @@ class WebGPUImplementationTest : public testing::Test {
 
   bool Initialize() {
     SharedMemoryLimits limits = SharedMemoryLimitsForTesting();
-    command_buffer_.reset(new StrictMock<MockClientCommandBuffer>());
+    command_buffer_ = std::make_unique<StrictMock<MockClientCommandBuffer>>();
 
-    transfer_buffer_.reset(
-        new MockTransferBuffer(command_buffer_.get(), kTransferBufferSize,
-                               ImplementationBase::kStartingOffset,
-                               ImplementationBase::kAlignment, false));
+    transfer_buffer_ = std::make_unique<MockTransferBuffer>(
+        command_buffer_.get(), kTransferBufferSize,
+        ImplementationBase::kStartingOffset, ImplementationBase::kAlignment,
+        false);
 
-    helper_.reset(new WebGPUCmdHelper(command_buffer_.get()));
+    helper_ = std::make_unique<WebGPUCmdHelper>(command_buffer_.get());
     helper_->Initialize(limits.command_buffer_size);
-    gpu_control_.reset(new StrictMock<MockClientGpuControl>());
+    gpu_control_ = std::make_unique<StrictMock<MockClientGpuControl>>();
 
     EXPECT_CALL(*gpu_control_, GetCapabilities())
         .WillOnce(ReturnRef(capabilities_));
@@ -62,8 +66,8 @@ class WebGPUImplementationTest : public testing::Test {
     {
       InSequence sequence;
 
-      gl_.reset(new WebGPUImplementation(helper_.get(), transfer_buffer_.get(),
-                                         gpu_control_.get()));
+      gl_ = std::make_unique<WebGPUImplementation>(
+          helper_.get(), transfer_buffer_.get(), gpu_control_.get());
     }
 
     // The client should be set to something non-null.
@@ -76,8 +80,9 @@ class WebGPUImplementationTest : public testing::Test {
     Mock::VerifyAndClearExpectations(gl_.get());
 
     scoped_refptr<Buffer> ring_buffer = helper_->get_ring_buffer();
-    commands_ = static_cast<CommandBufferEntry*>(ring_buffer->memory()) +
-                command_buffer_->GetServicePutOffset();
+    commands_ =
+        UNSAFE_TODO(static_cast<CommandBufferEntry*>(ring_buffer->memory()) +
+                    command_buffer_->GetServicePutOffset());
     ClearCommands();
     EXPECT_TRUE(transfer_buffer_->InSync());
 
@@ -87,7 +92,8 @@ class WebGPUImplementationTest : public testing::Test {
 
   void ClearCommands() {
     scoped_refptr<Buffer> ring_buffer = helper_->get_ring_buffer();
-    memset(ring_buffer->memory(), kInitialValue, ring_buffer->size());
+    UNSAFE_TODO(
+        memset(ring_buffer->memory(), kInitialValue, ring_buffer->size()));
   }
 
   void SetUp() override { ASSERT_TRUE(Initialize()); }
@@ -118,11 +124,10 @@ class WebGPUImplementationTest : public testing::Test {
   std::unique_ptr<WebGPUCmdHelper> helper_;
   std::unique_ptr<MockTransferBuffer> transfer_buffer_;
   std::unique_ptr<WebGPUImplementation> gl_;
-  CommandBufferEntry* commands_ = nullptr;
+  raw_ptr<CommandBufferEntry> commands_ = nullptr;
   Capabilities capabilities_;
 };
 
-#include "base/macros.h"
 #include "gpu/command_buffer/client/webgpu_implementation_unittest_autogen.h"
 
 }  // namespace webgpu

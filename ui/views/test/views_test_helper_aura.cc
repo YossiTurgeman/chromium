@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,6 +29,7 @@ ViewsTestHelperAura::ViewsTestHelperAura() {
                           : std::make_unique<aura::test::AuraTestHelper>();
 }
 
+#if DCHECK_IS_ON() && !BUILDFLAG(IS_CHROMEOS)
 ViewsTestHelperAura::~ViewsTestHelperAura() {
   // Ensure all Widgets (and Windows) are closed in unit tests.
   //
@@ -51,15 +52,16 @@ ViewsTestHelperAura::~ViewsTestHelperAura() {
   // children were these sorts of things and not warn, but doing so while
   // avoiding layering violations is challenging, and since this is just a
   // convenience check anyway, skip it.
-#if DCHECK_IS_ON() && !defined(OS_CHROMEOS)
   gfx::NativeWindow root_window = GetContext();
   if (root_window) {
     DCHECK(root_window->children().empty())
         << "Not all windows were closed:\n"
         << root_window->GetWindowHierarchy(0);
   }
-#endif
 }
+#else
+ViewsTestHelperAura::~ViewsTestHelperAura() = default;
+#endif
 
 std::unique_ptr<TestViewsDelegate>
 ViewsTestHelperAura::GetFallbackTestViewsDelegate() {

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,21 +6,19 @@
 
 #include <stdint.h>
 #include <wrl/client.h>
+#include <wrl/implements.h>
 
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/sequence_checker.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
-#include "base/task/post_task.h"
 #include "base/task/thread_pool.h"
-#include "base/win/atl.h"
 #include "base/win/scoped_variant.h"
 #include "chrome/browser/win/ui_automation_util.h"
-#include "ui/base/win/atl_module.h"
 
 namespace {
 
@@ -48,6 +46,9 @@ class RefCountedDelegate : public base::RefCounted<RefCountedDelegate> {
   explicit RefCountedDelegate(
       std::unique_ptr<AutomationController::Delegate> delegate);
 
+  RefCountedDelegate(const RefCountedDelegate&) = delete;
+  RefCountedDelegate& operator=(const RefCountedDelegate&) = delete;
+
   // These are forwarded to |delegate_|.
   void OnInitialized(HRESULT result);
   void ConfigureCacheRequest(IUIAutomationCacheRequest* cache_request);
@@ -62,8 +63,6 @@ class RefCountedDelegate : public base::RefCounted<RefCountedDelegate> {
   ~RefCountedDelegate();
 
   const std::unique_ptr<AutomationController::Delegate> delegate_;
-
-  DISALLOW_COPY_AND_ASSIGN(RefCountedDelegate);
 };
 
 RefCountedDelegate::RefCountedDelegate(
@@ -101,6 +100,9 @@ class AutomationController::Context {
   // Returns a new instance ready for initialization and use in another
   // sequence.
   static base::WeakPtr<Context> Create();
+
+  Context(const Context&) = delete;
+  Context& operator=(const Context&) = delete;
 
   // Deletes the instance.
   void DeleteInAutomationSequence();
@@ -145,22 +147,20 @@ class AutomationController::Context {
 
   // Weak pointers to the context are given to event handlers.
   base::WeakPtrFactory<Context> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(Context);
 };
 
-class AutomationController::Context::EventHandler
-    : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
-      public IUIAutomationEventHandler,
-      public IUIAutomationFocusChangedEventHandler {
+class AutomationController::Context::EventHandler final
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          IUIAutomationEventHandler,
+          IUIAutomationFocusChangedEventHandler> {
  public:
-  BEGIN_COM_MAP(AutomationController::Context::EventHandler)
-  COM_INTERFACE_ENTRY(IUIAutomationEventHandler)
-  COM_INTERFACE_ENTRY(IUIAutomationFocusChangedEventHandler)
-  END_COM_MAP()
+  EventHandler() = default;
 
-  EventHandler();
-  ~EventHandler();
+  EventHandler(const EventHandler&) = delete;
+  EventHandler& operator=(const EventHandler&) = delete;
+
+  ~EventHandler() override = default;
 
   // Initializes the object. Events will be dispatched back to |context| via
   // |context_runner|.
@@ -179,13 +179,7 @@ class AutomationController::Context::EventHandler
 
   // Pointer to the delegate.
   scoped_refptr<RefCountedDelegate> ref_counted_delegate_;
-
-  DISALLOW_COPY_AND_ASSIGN(EventHandler);
 };
-
-AutomationController::Context::EventHandler::EventHandler() = default;
-
-AutomationController::Context::EventHandler::~EventHandler() = default;
 
 void AutomationController::Context::EventHandler::Initialize(
     Microsoft::WRL::ComPtr<IUIAutomation> automation,
@@ -194,7 +188,8 @@ void AutomationController::Context::EventHandler::Initialize(
   ref_counted_delegate_ = std::move(ref_counted_delegate);
 }
 
-HRESULT AutomationController::Context::EventHandler::HandleAutomationEvent(
+STDMETHODIMP
+AutomationController::Context::EventHandler::HandleAutomationEvent(
     IUIAutomationElement* sender,
     EVENTID event_id) {
   DVLOG(1)
@@ -217,7 +212,8 @@ HRESULT AutomationController::Context::EventHandler::HandleAutomationEvent(
   return S_OK;
 }
 
-HRESULT AutomationController::Context::EventHandler::HandleFocusChangedEvent(
+STDMETHODIMP
+AutomationController::Context::EventHandler::HandleFocusChangedEvent(
     IUIAutomationElement* sender) {
   DVLOG(1)
       << "focus changed for automation id: "
@@ -293,12 +289,10 @@ Microsoft::WRL::ComPtr<IUnknown>
 AutomationController::Context::GetEventHandler() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (!event_handler_) {
-    ATL::CComObject<EventHandler>* obj = nullptr;
-    HRESULT result = ATL::CComObject<EventHandler>::CreateInstance(&obj);
-    if (SUCCEEDED(result)) {
-      obj->Initialize(automation_, ref_counted_delegate_);
-      obj->QueryInterface(IID_PPV_ARGS(&event_handler_));
-    }
+    Microsoft::WRL::ComPtr<EventHandler> obj =
+        Microsoft::WRL::Make<EventHandler>();
+    obj->Initialize(automation_, ref_counted_delegate_);
+    obj.As(&event_handler_);
   }
   return event_handler_;
 }
@@ -353,8 +347,6 @@ HRESULT AutomationController::Context::InstallObservers() {
 // AutomationController --------------------------------------------------------
 
 AutomationController::AutomationController(std::unique_ptr<Delegate> delegate) {
-  ui::win::CreateATLModuleIfNeeded();
-
   // Create the task runner on which the automation client lives.
   automation_task_runner_ = base::ThreadPool::CreateSequencedTaskRunner(
       {base::TaskPriority::USER_VISIBLE,

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <map>
 #include <string>
 
-#include "base/macros.h"
 #include "components/gcm_driver/common/gcm_driver_export.h"
 
 namespace gcm {
@@ -35,7 +34,11 @@ struct GCM_DRIVER_EXPORT OutgoingMessage {
 struct GCM_DRIVER_EXPORT IncomingMessage {
   IncomingMessage();
   IncomingMessage(const IncomingMessage& other);
+  IncomingMessage(IncomingMessage&& other);
   ~IncomingMessage();
+
+  IncomingMessage& operator=(const IncomingMessage& other);
+  IncomingMessage& operator=(IncomingMessage&& other);
 
   MessageData data;
   std::string collapse_key;

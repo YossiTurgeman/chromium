@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,34 +7,29 @@
 #include <utility>
 #include <vector>
 
+#include "base/check.h"
 #include "base/lazy_instance.h"
+#include "base/logging.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/values.h"
 #include "chrome/browser/extensions/extension_service.h"
+#include "chrome/common/extensions/api/mdns.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
 #include "extensions/browser/extension_function.h"
 #include "extensions/browser/extension_host.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
+#include "extensions/common/mojom/event_dispatcher.mojom.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 namespace mdns = api::mdns;
-
-namespace {
-
-// Allowlisted mDNS service types.
-const char kCastServiceType[] = "_googlecast._tcp.local";
-const char kPrivetServiceType[] = "_privet._tcp.local";
-const char kTestServiceType[] = "_testing._tcp.local";
-
-bool IsServiceTypeAllowlisted(const std::string& service_type) {
-  return service_type == kCastServiceType ||
-         service_type == kPrivetServiceType ||
-         service_type == kTestServiceType;
-}
-
-}  // namespace
 
 using DnsSdRegistry = media_router::DnsSdRegistry;
 
@@ -46,11 +41,7 @@ MDnsAPI::MDnsAPI(content::BrowserContext* context)
   event_router->RegisterObserver(this, mdns::OnServiceList::kEventName);
 }
 
-MDnsAPI::~MDnsAPI() {
-  if (dns_sd_registry_) {
-    dns_sd_registry_->RemoveObserver(this);
-  }
-}
+MDnsAPI::~MDnsAPI() = default;
 
 // static
 MDnsAPI* MDnsAPI::Get(content::BrowserContext* context) {
@@ -65,10 +56,17 @@ BrowserContextKeyedAPIFactory<MDnsAPI>* MDnsAPI::GetFactoryInstance() {
   return g_mdns_api_factory.Pointer();
 }
 
+void MDnsAPI::Shutdown() {
+  if (dns_sd_registry_) {
+    dns_sd_registry_->RemoveObserver(this);
+  }
+}
+
 void MDnsAPI::SetDnsSdRegistryForTesting(DnsSdRegistry* dns_sd_registry) {
   dns_sd_registry_ = dns_sd_registry;
-  if (dns_sd_registry_)
+  if (dns_sd_registry_) {
     dns_sd_registry_->AddObserver(this);
+  }
 }
 
 void MDnsAPI::ForceDiscovery() {
@@ -171,11 +169,11 @@ void MDnsAPI::OnDnsSdEvent(const std::string& service_type,
     args.push_back(std::move(mdns_service));
   }
 
-  std::unique_ptr<base::ListValue> results = mdns::OnServiceList::Create(args);
+  auto results = mdns::OnServiceList::Create(args);
   auto event = std::make_unique<Event>(events::MDNS_ON_SERVICE_LIST,
                                        mdns::OnServiceList::kEventName,
                                        std::move(results), browser_context_);
-  event->filter_info.service_type = service_type;
+  event->filter_info->service_type = service_type;
 
   // TODO(justinlin): To avoid having listeners without filters getting all
   // events, modify API to have this event require filters.
@@ -191,41 +189,43 @@ const extensions::EventListenerMap::ListenerList& MDnsAPI::GetEventListeners() {
       .GetEventListenersByName(mdns::OnServiceList::kEventName);
 }
 
-bool MDnsAPI::IsMDnsAllowed(const std::string& extension_id,
-                            const std::string& service_type) const {
+bool MDnsAPI::IsMDnsAllowed(const ExtensionId& extension_id) const {
   const extensions::Extension* extension =
       ExtensionRegistry::Get(browser_context_)
           ->enabled_extensions()
           .GetByID(extension_id);
-  return (extension && (extension->is_platform_app() ||
-                        IsServiceTypeAllowlisted(service_type)));
+  return extension;
 }
 
 void MDnsAPI::GetValidOnServiceListListeners(
     const std::string& service_type_filter,
-    std::set<std::string>* extension_ids,
+    std::set<ExtensionId>* extension_ids,
     ServiceTypeCounts* service_type_counts) {
   for (const auto& listener : GetEventListeners()) {
-    base::DictionaryValue* filter = listener->filter();
+    const base::DictValue* filter = listener->filter();
 
-    std::string service_type;
-    filter->GetStringASCII(kEventFilterServiceTypeKey, &service_type);
-    if (service_type.empty())
+    const std::string* service_type =
+        filter->FindString(kEventFilterServiceTypeKey);
+    if (!service_type || service_type->empty() ||
+        !base::IsStringASCII(*service_type)) {
       continue;
+    }
 
     // Match service type when filter isn't ""
-    if (!service_type_filter.empty() && service_type_filter != service_type)
+    if (!service_type_filter.empty() && service_type_filter != *service_type) {
       continue;
+    }
 
-    // Don't listen for services associated only with disabled extensions
-    // or non-allowlisted, non-platform-app extensions.
-    if (!IsMDnsAllowed(listener->extension_id(), service_type))
+    // Don't listen for services associated only with disabled extensions.
+    if (!IsMDnsAllowed(listener->extension_id())) {
       continue;
+    }
 
-    if (extension_ids)
+    if (extension_ids) {
       extension_ids->insert(listener->extension_id());
+    }
     if (service_type_counts) {
-      (*service_type_counts)[service_type]++;
+      (*service_type_counts)[*service_type]++;
     }
   }
 }
@@ -235,7 +235,7 @@ void MDnsAPI::WriteToConsole(const std::string& service_type,
                              const std::string& message) {
   // Get all the extensions with an onServiceList listener for a particular
   // service type.
-  std::set<std::string> extension_ids;
+  std::set<ExtensionId> extension_ids;
   ServiceTypeCounts counts;
   GetValidOnServiceListListeners(service_type, &extension_ids,
                                  nullptr /* service_type_counts */);
@@ -246,24 +246,19 @@ void MDnsAPI::WriteToConsole(const std::string& service_type,
   // TODO(devlin): It's a little weird to log to the background pages,
   // especially when it might be dormant. We should probably just log to a place
   // like the ErrorConsole instead.
-  for (const std::string& extension_id : extension_ids) {
+  for (const ExtensionId& extension_id : extension_ids) {
     extensions::ExtensionHost* host =
         extensions::ProcessManager::Get(browser_context_)
-        ->GetBackgroundHostForExtension(extension_id);
-    content::RenderFrameHost* rfh =
-        host ? host->host_contents()->GetMainFrame() : nullptr;
-    if (rfh)
-      rfh->AddMessageToConsole(level, logged_message);
+            ->GetBackgroundHostForExtension(extension_id);
+    content::RenderFrameHost* render_frame_host =
+        host ? host->host_contents()->GetPrimaryMainFrame() : nullptr;
+    if (render_frame_host) {
+      render_frame_host->AddMessageToConsole(level, logged_message);
+    }
   }
 }
 
-MdnsForceDiscoveryFunction::MdnsForceDiscoveryFunction() {
-}
-
-MdnsForceDiscoveryFunction::~MdnsForceDiscoveryFunction() {
-}
-
-AsyncApiFunction::ResponseAction MdnsForceDiscoveryFunction::Run() {
+ExtensionFunction::ResponseAction MdnsForceDiscoveryFunction::Run() {
   MDnsAPI* api = MDnsAPI::Get(browser_context());
   if (!api) {
     return RespondNow(Error("Unknown error."));

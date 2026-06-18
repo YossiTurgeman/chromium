@@ -31,10 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_PROPERTIES_SVG_PROPERTY_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_PROPERTIES_SVG_PROPERTY_H_
 
-#include "base/macros.h"
+#include <concepts>
+
 #include "third_party/blink/renderer/core/svg/properties/svg_property_info.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
-#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/wtf/forward.h"
 
 namespace blink {
 
@@ -46,12 +47,10 @@ class SVGPropertyBase : public GarbageCollected<SVGPropertyBase> {
   // Properties do not have a primitive type by default
   typedef void PrimitiveType;
 
-  virtual ~SVGPropertyBase() = default;
+  SVGPropertyBase(const SVGPropertyBase&) = delete;
+  SVGPropertyBase& operator=(const SVGPropertyBase&) = delete;
 
-  // FIXME: remove this in WebAnimations transition.
-  // This is used from SVGAnimatedNewPropertyAnimator for its animate-by-string
-  // implementation.
-  virtual SVGPropertyBase* CloneForAnimation(const String&) const = 0;
+  virtual ~SVGPropertyBase() = default;
 
   virtual String ValueAsString() const = 0;
 
@@ -63,7 +62,8 @@ class SVGPropertyBase : public GarbageCollected<SVGPropertyBase> {
 
   // FIXME: remove below and just have this inherit AnimatableValue in
   // WebAnimations transition.
-  virtual void Add(const SVGPropertyBase*, const SVGElement*) = 0;
+  // Returns false if addition fails (e.g. structurally incompatible values).
+  virtual bool Add(const SVGPropertyBase*, const SVGElement*) = 0;
   virtual void CalculateAnimatedValue(
       const SMILAnimationEffectParameters&,
       float percentage,
@@ -77,27 +77,16 @@ class SVGPropertyBase : public GarbageCollected<SVGPropertyBase> {
 
   virtual AnimatedPropertyType GetType() const = 0;
 
-  SVGPropertyBase* OwnerList() const { return owner_list_; }
-
-  void SetOwnerList(SVGPropertyBase* owner_list) {
-    // Previous owner list must be cleared before setting new owner list.
-    DCHECK((!owner_list && owner_list_) || (owner_list && !owner_list_));
-
-    owner_list_ = owner_list;
-  }
-
   virtual void Trace(Visitor* visitor) const {}
 
  protected:
-  SVGPropertyBase() : owner_list_(nullptr) {}
+  SVGPropertyBase() = default;
+};
 
- private:
-  // Oilpan: the back reference to the owner should be a Member, but this can
-  // create cycles when SVG properties meet the off-heap InterpolationValue
-  // hierarchy.  Not tracing it is safe, albeit an undesirable state of affairs.
-  // See http://crbug.com/528275 for the detail.
-  UntracedMember<SVGPropertyBase> owner_list_;
-  DISALLOW_COPY_AND_ASSIGN(SVGPropertyBase);
+template <typename T>
+  requires(std::derived_from<T, SVGPropertyBase>)
+struct ThreadingTrait<T> {
+  static constexpr ThreadAffinity kAffinity = kMainThreadOnly;
 };
 
 }  // namespace blink

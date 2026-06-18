@@ -1,4 +1,4 @@
-# Copyright 2016 The Chromium Authors. All rights reserved.
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -28,9 +28,10 @@ from benchmarks import system_health
 
 
 def GetSystemHealthBenchmarksToSmokeTest():
-  sh_benchmark_classes = discover.DiscoverClassesInModule(
-      system_health, perf_benchmark.PerfBenchmark,
-      index_by_class_name=True).values()
+  sh_benchmark_classes = list(
+      discover.DiscoverClassesInModule(system_health,
+                                       perf_benchmark.PerfBenchmark,
+                                       index_by_class_name=True).values())
   return list(b for b in sh_benchmark_classes if
               b.Name().startswith('system_health.memory'))
 
@@ -38,10 +39,6 @@ def GetSystemHealthBenchmarksToSmokeTest():
 _DISABLED_TESTS = frozenset({
     # crbug.com/983326 - flaky.
     'system_health.memory_desktop/browse_accessibility:media:youtube',
-
-    # crbug.com/878390 - These stories are already covered by their 2018 or
-    # 2019 versions and will later be removed.
-    'system_health.memory_desktop/multitab:misc:typical24',
 
     # crbug.com/637230
     'system_health.memory_desktop/browse:news:cnn',
@@ -52,16 +49,13 @@ _DISABLED_TESTS = frozenset({
     'system_health.memory_desktop/long_running:tools:gmail-background',
 
     # crbug.com/885320
-    'system_health.memory_desktop/browse:search:google:2018',
-
-    # crbug.com/893615
-    'system_health.memory_desktop/multitab:misc:typical24:2018',
+    'system_health.memory_desktop/browse:search:google:2020',
 
     # crbug.com/903849
     'system_health.memory_mobile/browse:news:cnn:2018',
 
     # crbug.com/978358
-    'system_health.memory_desktop/browse:news:flipboard:2018',
+    'system_health.memory_desktop/browse:news:flipboard:2020',
 
     # crbug.com/1008001
     'system_health.memory_desktop/browse:tools:sheets:2019',
@@ -69,7 +63,32 @@ _DISABLED_TESTS = frozenset({
 
     # crbug.com/1014661
     'system_health.memory_desktop/browse:social:tumblr_infinite_scroll:2018',
-    'system_health.memory_desktop/browse:search:google_india:2018',
+    'system_health.memory_desktop/browse:search:google_india:2021',
+
+    # crbug.com/1224874
+    'system_health.memory_desktop/load:social:instagram:2018',
+    'system_health.memory_desktop/load:social:pinterest:2019',
+
+    # crbug.com/1428625
+    'system_health.memory_mobile/browse:news:cnn:2021',
+
+    # crbug.com/1442448
+    'system_health.memory_desktop/load:media:facebook_feed:desktop:2020',
+    'system_health.memory_desktop/load:games:miniclip:2018',
+
+    # crbug.com/418717796 - flaky
+    'system_health.memory_desktop/load:media:youtubelivingroom:2020',
+
+    # crbug.com/422824099
+    'system_health.memory_desktop/browse:news:nytimes:2020',
+    'system_health.memory_desktop/browse:tools:gmail-labelclick:2020',
+    'system_health.memory_desktop/load:games:lazors',
+    'system_health.memory_desktop/load:media:youtube:2018',
+    'system_health.memory_desktop/load:search:ebay:2018',
+    'system_health.memory_desktop/load:tools:gmail:2019',
+
+    # crbug.com/509294498, crashing on Linux dbg
+    'system_health.memory_desktop/load_accessibility:shopping:amazon:2018',
 
     # The following tests are disabled because they are disabled on the perf
     # waterfall (using tools/perf/expectations.config) on one platform or
@@ -85,13 +104,15 @@ _DISABLED_TESTS = frozenset({
     # crbug.com/934885
     'system_health.memory_desktop/load_accessibility:media:wikipedia:2018',
     # crbug.com/942952
-    'system_health.memory_desktop/browse:news:hackernews:2018',
+    'system_health.memory_desktop/browse:news:hackernews:2020',
     # crbug.com/992436
     'system_health.memory_desktop/browse:social:twitter:2018',
     # crbug.com/1060068
     'system_health.memory_desktop/browse:tech:discourse_infinite_scroll:2018',
     # crbug.com/1091274
     'system_health.memory_desktop/browse:media:tumblr:2018',
+    # crbug.com/1194256
+    'system_health.memory_desktop/browse:news:cnn:2021',
     # ]
 })
 
@@ -103,19 +124,23 @@ _DISABLED_TESTS = frozenset({
 MAX_VALUES_PER_TEST_CASE = 1000
 
 
+class SystemHealthBenchmarkSmokeTest(unittest.TestCase):
+  pass
+
+
 def _GenerateSmokeTestCase(benchmark_class, story_to_smoke_test):
 
-  # NOTE TO SHERIFFS: DO NOT DISABLE THIS TEST.
+  # NOTE TO GARDENERS: DO NOT DISABLE THIS TEST.
   #
   # This smoke test dynamically tests all system health user stories. So
   # disabling it for one failing or flaky benchmark would disable a much
   # wider swath of coverage  than is usally intended. Instead, if a test is
   # failing, disable it by putting it into the _DISABLED_TESTS list above.
   @decorators.Disabled('chromeos')  # crbug.com/351114
+  @decorators.Disabled('mac')  # crbug.com/1277277
   def RunTest(self):
     class SinglePageBenchmark(benchmark_class):  # pylint: disable=no-init
       def CreateStorySet(self, options):
-        # pylint: disable=super-on-old-class
         story_set = super(SinglePageBenchmark, self).CreateStorySet(options)
         stories_to_remove = [s for s in story_set.stories if s !=
                              story_to_smoke_test]
@@ -129,9 +154,9 @@ def _GenerateSmokeTestCase(benchmark_class, story_to_smoke_test):
       options = GenerateBenchmarkOptions(
           output_dir=temp_dir,
           benchmark_cls=SinglePageBenchmark)
-      simplified_test_name = self.id().replace(
-          'benchmarks.system_health_smoke_test.SystemHealthBenchmarkSmokeTest.',
-          '')
+      replacement_string = ('benchmarks.system_health_smoke_test.'
+                            'SystemHealthBenchmarkSmokeTest.')
+      simplified_test_name = self.id().replace(replacement_string, '')
       # Sanity check to ensure that that substring removal was effective.
       assert len(simplified_test_name) < len(self.id())
 
@@ -140,14 +165,14 @@ def _GenerateSmokeTestCase(benchmark_class, story_to_smoke_test):
         self.skipTest('Test is explicitly disabled')
       single_page_benchmark = SinglePageBenchmark()
       return_code = single_page_benchmark.Run(options)
-      # TODO(crbug.com/1019139): Make 111 be the exit code that means
+      # TODO(crbug.com/40105219): Make 111 be the exit code that means
       # "no stories were run.".
       if return_code in (-1, 111):
         self.skipTest('The benchmark was not run.')
       self.assertEqual(
           return_code, 0,
           msg='Benchmark run failed: %s' % benchmark_class.Name())
-      return_code = results_processor.ProcessResults(options)
+      return_code = results_processor.ProcessResults(options, is_unittest=True)
       self.assertEqual(
           return_code, 0,
           msg='Result processing failed: %s' % benchmark_class.Name())
@@ -158,8 +183,10 @@ def _GenerateSmokeTestCase(benchmark_class, story_to_smoke_test):
   test_method_name = '%s/%s' % (
       benchmark_class.Name(), story_to_smoke_test.name)
 
-  class SystemHealthBenchmarkSmokeTest(unittest.TestCase):
-    pass
+  # Set real_test_func as benchmark_class to make typ
+  # write benchmark_class source filepath to trace instead of
+  # path to this file
+  RunTest.real_test_func = benchmark_class
 
   setattr(SystemHealthBenchmarkSmokeTest, test_method_name, RunTest)
 
@@ -169,7 +196,6 @@ def _GenerateSmokeTestCase(benchmark_class, story_to_smoke_test):
 def GenerateBenchmarkOptions(output_dir, benchmark_cls):
   options = testing.GetRunOptions(
       output_dir=output_dir, benchmark_cls=benchmark_cls,
-      overrides={'run_full_story_set': True},
       environment=chromium_config.GetDefaultChromiumConfig())
   options.pageset_repeat = 1  # For smoke testing only run each page once.
   options.output_formats = ['histograms']
@@ -179,6 +205,8 @@ def GenerateBenchmarkOptions(output_dir, benchmark_cls):
   # all crashes and hence remove the need to enable logging in actual perf
   # benchmarks.
   options.browser_options.logging_verbosity = 'non-verbose'
+  options.browser_options.environment = \
+      chromium_config.GetDefaultChromiumConfig()
   options.target_platforms = benchmark_cls.GetSupportedPlatformNames(
       benchmark_cls.SUPPORTED_PLATFORMS)
   results_processor.ProcessOptions(options)
@@ -233,8 +261,6 @@ def validate_smoke_test_name_versions():
         'You can use crbug.com/878390 for the disabling reference.'
         '[StoryName] : [StoryVersion1],[StoryVersion2]...\n%s' % (msg))
 
-  return
-
 
 def load_tests(loader, standard_tests, pattern):
   del loader, standard_tests, pattern  # unused
@@ -288,7 +314,7 @@ def find_multi_version_stories(stories, disabled):
       else:
         prefix = name
     prefixes[prefix].append(name)
-  for prefix, stories in prefixes.items():
-    if len(stories) == 1:
-      prefixes.pop(prefix)
-  return prefixes
+  return {
+      prefix: stories
+      for prefix, stories in prefixes.items() if len(stories) != 1
+  }

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "build/buildflag.h"
 #include "extensions/buildflags/buildflags.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
@@ -33,10 +33,10 @@ class PrefService;
 // associated with the profile.
 class ProxyConfigMonitor : public net::ProxyConfigService::Observer,
                            public network::mojom::ProxyConfigPollerClient
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
     ,
                            public network::mojom::ProxyErrorClient
-#endif
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
 {
  public:
@@ -49,6 +49,9 @@ class ProxyConfigMonitor : public net::ProxyConfigService::Observer,
   // |local_state|, for use with NetworkContexts not
   // associated with a profile. Must be destroyed before |local_state|.
   explicit ProxyConfigMonitor(PrefService* local_state);
+
+  ProxyConfigMonitor(const ProxyConfigMonitor&) = delete;
+  ProxyConfigMonitor& operator=(const ProxyConfigMonitor&) = delete;
 
   ~ProxyConfigMonitor() override;
 
@@ -73,12 +76,12 @@ class ProxyConfigMonitor : public net::ProxyConfigService::Observer,
   // network::mojom::ProxyConfigPollerClient implementation:
   void OnLazyProxyConfigPoll() override;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   // network::mojom::ProxyErrorClient implementation:
   void OnPACScriptError(int32_t line_number,
                         const std::string& details) override;
   void OnRequestMaybeFailedDueToProxySettings(int32_t net_error) override;
-#endif
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
   std::unique_ptr<net::ProxyConfigService> proxy_config_service_;
   // Monitors global and Profile prefs related to proxy configuration.
@@ -89,12 +92,10 @@ class ProxyConfigMonitor : public net::ProxyConfigService::Observer,
 
   mojo::RemoteSet<network::mojom::ProxyConfigClient> proxy_config_client_set_;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   mojo::ReceiverSet<network::mojom::ProxyErrorClient> error_receiver_set_;
-  Profile* profile_ = nullptr;
-#endif
-
-  DISALLOW_COPY_AND_ASSIGN(ProxyConfigMonitor);
+  raw_ptr<Profile> profile_ = nullptr;
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 };
 
 #endif  // CHROME_BROWSER_NET_PROXY_CONFIG_MONITOR_H_

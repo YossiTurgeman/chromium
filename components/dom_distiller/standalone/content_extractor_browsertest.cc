@@ -1,29 +1,30 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stddef.h>
+
 #include <memory>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/command_line.h"
 #include "base/containers/id_map.h"
+#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/path_service.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
-#include "base/task/post_task.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_restrictions.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "components/dom_distiller/content/browser/distiller_javascript_utils.h"
 #include "components/dom_distiller/content/browser/distiller_page_web_contents.h"
+#include "components/dom_distiller/content/browser/test/test_util.h"
 #include "components/dom_distiller/core/article_entry.h"
 #include "components/dom_distiller/core/distilled_page_prefs.h"
 #include "components/dom_distiller/core/distiller.h"
@@ -44,16 +45,10 @@
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include "net/dns/mock_host_resolver.h"
 #include "third_party/dom_distiller_js/dom_distiller.pb.h"
-#include "ui/base/resource/resource_bundle.h"
 
 using content::ContentBrowserTest;
 
 namespace dom_distiller {
-
-namespace {
-
-typedef std::unordered_map<std::string, std::string> FileToUrlMap;
-}
 
 // Factory for creating a Distiller that creates different DomDistillerOptions
 // for different URLs, i.e. a specific kOriginalUrl option for each URL.
@@ -61,22 +56,15 @@ class TestDistillerFactoryImpl : public DistillerFactory {
  public:
   TestDistillerFactoryImpl(
       std::unique_ptr<DistillerURLFetcherFactory> distiller_url_fetcher_factory,
-      const dom_distiller::proto::DomDistillerOptions& dom_distiller_options,
-      const FileToUrlMap& file_to_url_map)
+      const dom_distiller::proto::DomDistillerOptions& dom_distiller_options)
       : distiller_url_fetcher_factory_(
             std::move(distiller_url_fetcher_factory)),
-        dom_distiller_options_(dom_distiller_options),
-        file_to_url_map_(file_to_url_map) {}
+        dom_distiller_options_(dom_distiller_options) {}
 
-  ~TestDistillerFactoryImpl() override {}
+  ~TestDistillerFactoryImpl() override = default;
 
-  std::unique_ptr<Distiller> CreateDistillerForUrl(const GURL& url) override {
+  std::unique_ptr<Distiller> CreateDistiller() override {
     dom_distiller::proto::DomDistillerOptions options;
-    options = dom_distiller_options_;
-    FileToUrlMap::const_iterator it = file_to_url_map_.find(url.spec());
-    if (it != file_to_url_map_.end()) {
-      options.set_original_url(it->second);
-    }
     return std::make_unique<DistillerImpl>(*distiller_url_fetcher_factory_,
                                            options);
   }
@@ -84,7 +72,6 @@ class TestDistillerFactoryImpl : public DistillerFactory {
  private:
   std::unique_ptr<DistillerURLFetcherFactory> distiller_url_fetcher_factory_;
   dom_distiller::proto::DomDistillerOptions dom_distiller_options_;
-  FileToUrlMap file_to_url_map_;
 };
 
 namespace {
@@ -111,9 +98,6 @@ const char* kExtractTextOnly = "extract-text-only";
 // Indicates to include debug output.
 const char* kDebugLevel = "debug-level";
 
-// The original URL of the page if |kUrlSwitch| is a file.
-const char* kOriginalUrl = "original-url";
-
 // A semi-colon-separated (i.e. ';') list of original URLs corresponding to
 // "kUrlsSwitch".
 const char* kOriginalUrls = "original-urls";
@@ -126,8 +110,7 @@ const int kMaxExtractorTasks = 8;
 
 std::unique_ptr<DomDistillerService> CreateDomDistillerService(
     content::BrowserContext* context,
-    sync_preferences::TestingPrefServiceSyncable* pref_service,
-    const FileToUrlMap& file_to_url_map) {
+    sync_preferences::TestingPrefServiceSyncable* pref_service) {
   // Setting up PrefService for DistilledPagePrefs.
   DistilledPagePrefs::RegisterProfilePrefs(pref_service->registry());
 
@@ -135,7 +118,7 @@ std::unique_ptr<DomDistillerService> CreateDomDistillerService(
       std::make_unique<DistillerPageWebContentsFactory>(context);
   auto distiller_url_fetcher_factory =
       std::make_unique<DistillerURLFetcherFactory>(
-          content::BrowserContext::GetDefaultStoragePartition(context)
+          context->GetDefaultStoragePartition()
               ->GetURLLoaderFactoryForBrowserProcess());
 
   dom_distiller::proto::DomDistillerOptions options;
@@ -161,22 +144,12 @@ std::unique_ptr<DomDistillerService> CreateDomDistillerService(
   }
 
   auto distiller_factory = std::make_unique<TestDistillerFactoryImpl>(
-      std::move(distiller_url_fetcher_factory), options, file_to_url_map);
+      std::move(distiller_url_fetcher_factory), options);
 
   return std::make_unique<DomDistillerService>(
       std::move(distiller_factory), std::move(distiller_page_factory),
       std::make_unique<DistilledPagePrefs>(pref_service),
       /* distiller_ui_handle */ nullptr);
-}
-
-void AddComponentsTestResources() {
-  base::FilePath pak_file;
-  base::FilePath pak_dir;
-  base::PathService::Get(base::DIR_MODULE, &pak_dir);
-  pak_file =
-      pak_dir.Append(FILE_PATH_LITERAL("components_tests_resources.pak"));
-  ui::ResourceBundle::GetSharedInstance().AddDataPackFromPath(
-      pak_file, ui::SCALE_FACTOR_NONE);
 }
 
 bool WriteProtobufWithSize(
@@ -185,7 +158,7 @@ bool WriteProtobufWithSize(
   google::protobuf::io::CodedOutputStream coded_output(output_stream);
 
   // Write the size.
-  const int size = message.ByteSize();
+  const int size = message.ByteSizeLong();
   coded_output.WriteLittleEndian32(size);
   message.SerializeWithCachedSizes(&coded_output);
   return !coded_output.HadError();
@@ -239,8 +212,7 @@ class ContentExtractionRequest : public ViewRequestDelegate {
   }
 
   static std::vector<std::unique_ptr<ContentExtractionRequest>>
-  CreateForCommandLine(const base::CommandLine& command_line,
-                       FileToUrlMap* file_to_url_map) {
+  CreateForCommandLine(const base::CommandLine& command_line) {
     std::vector<std::unique_ptr<ContentExtractionRequest>> requests;
     if (command_line.HasSwitch(kUrlSwitch)) {
       GURL url;
@@ -248,10 +220,6 @@ class ContentExtractionRequest : public ViewRequestDelegate {
       url = GURL(url_string);
       if (url.is_valid()) {
         requests.push_back(std::make_unique<ContentExtractionRequest>(url));
-        if (command_line.HasSwitch(kOriginalUrl)) {
-          (*file_to_url_map)[url.spec()] =
-              command_line.GetSwitchValueASCII(kOriginalUrl);
-        }
       }
     } else if (command_line.HasSwitch(kUrlsSwitch)) {
       std::string urls_string = command_line.GetSwitchValueASCII(kUrlsSwitch);
@@ -274,10 +242,6 @@ class ContentExtractionRequest : public ViewRequestDelegate {
         GURL url(urls[i]);
         if (url.is_valid()) {
           requests.push_back(std::make_unique<ContentExtractionRequest>(url));
-          // Only regard non-empty original urls.
-          if (!original_urls.empty() && !original_urls[i].empty()) {
-              (*file_to_url_map)[url.spec()] = original_urls[i];
-          }
         } else {
           ADD_FAILURE() << "Bad url";
         }
@@ -296,11 +260,11 @@ class ContentExtractionRequest : public ViewRequestDelegate {
   void OnArticleReady(const DistilledArticleProto* article_proto) override {
     article_proto_ = article_proto;
     CHECK(article_proto->pages_size()) << "Failed extracting " << url_;
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, std::move(finished_callback_));
   }
 
-  const DistilledArticleProto* article_proto_;
+  raw_ptr<const DistilledArticleProto> article_proto_;
   std::unique_ptr<ViewerHandle> viewer_handle_;
   GURL url_;
   base::OnceClosure finished_callback_;
@@ -323,7 +287,7 @@ class ContentExtractor : public ContentBrowserTest {
     if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kDisableDnsSwitch)) {
       EnableDNSLookupForThisTest();
     }
-    AddComponentsTestResources();
+    AddComponentsResources();
   }
 
   void TearDownOnMainThread() override { DisableDNSLookupForThisTest(); }
@@ -331,19 +295,17 @@ class ContentExtractor : public ContentBrowserTest {
  protected:
   // Creates the DomDistillerService and creates and starts the extraction
   // request.
-  void Start() {
+  void Start(base::OnceClosure quit_closure) {
+    quit_closure_ = std::move(quit_closure);
     const base::CommandLine& command_line =
         *base::CommandLine::ForCurrentProcess();
-    FileToUrlMap file_to_url_map;
-    requests_ = ContentExtractionRequest::CreateForCommandLine(
-        command_line, &file_to_url_map);
+    requests_ = ContentExtractionRequest::CreateForCommandLine(command_line);
     content::BrowserContext* context =
         shell()->web_contents()->GetBrowserContext();
     pref_service_ =
         std::make_unique<sync_preferences::TestingPrefServiceSyncable>();
 
-    service_ = CreateDomDistillerService(context, pref_service_.get(),
-                                         file_to_url_map);
+    service_ = CreateDomDistillerService(context, pref_service_.get());
     PumpQueue();
   }
 
@@ -399,9 +361,7 @@ class ContentExtractor : public ContentBrowserTest {
 
     if (command_line.HasSwitch(kOutputFile)) {
       base::FilePath filename = command_line.GetSwitchValuePath(kOutputFile);
-      ASSERT_EQ(
-          (int)output_data_.size(),
-          base::WriteFile(filename, output_data_.c_str(), output_data_.size()));
+      ASSERT_TRUE(base::WriteFile(filename, output_data_));
     } else {
       VLOG(0) << output_data_;
     }
@@ -411,8 +371,8 @@ class ContentExtractor : public ContentBrowserTest {
     DoArticleOutput();
     requests_.clear();
     service_.reset();
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
-        FROM_HERE, base::RunLoop::QuitCurrentWhenIdleClosureDeprecated());
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, std::move(quit_closure_));
   }
 
   size_t pending_tasks_;
@@ -428,12 +388,15 @@ class ContentExtractor : public ContentBrowserTest {
   std::string output_data_;
   std::unique_ptr<google::protobuf::io::StringOutputStream>
       protobuf_output_stream_;
+
+  base::OnceClosure quit_closure_;
 };
 
 IN_PROC_BROWSER_TEST_F(ContentExtractor, MANUAL_ExtractUrl) {
+  base::RunLoop loop;
   SetDistillerJavaScriptWorldId(content::ISOLATED_WORLD_ID_CONTENT_END);
-  Start();
-  base::RunLoop().Run();
+  Start(loop.QuitWhenIdleClosure());
+  loop.Run();
 }
 
 }  // namespace dom_distiller

@@ -1,18 +1,21 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/win/jumplist_updater.h"
 
-#include <windows.h>
 #include <objbase.h>
-#include <propkey.h>
+
 #include <shobjidl.h>
+#include <windows.h>
+
+#include <propkey.h>
 
 #include "base/command_line.h"
 #include "base/files/file_path.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/path_service.h"
+#include "base/strings/string_util.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/win/win_util.h"
 #include "chrome/common/chrome_switches.h"
 #include "content/public/common/content_switches.h"
@@ -24,7 +27,7 @@ namespace {
 // requires three items: the absolute path to an application, an argument
 // string, and a title string.
 bool AddShellLink(Microsoft::WRL::ComPtr<IObjectCollection> collection,
-                  const base::string16& application_path,
+                  const base::FilePath& application_path,
                   scoped_refptr<ShellLinkItem> item) {
   // Create an IShellLink object.
   Microsoft::WRL::ComPtr<IShellLink> link;
@@ -36,7 +39,7 @@ bool AddShellLink(Microsoft::WRL::ComPtr<IObjectCollection> collection,
   // Set the application path.
   // We should exit this function when this call fails because it doesn't make
   // any sense to add a shortcut that we cannot execute.
-  result = link->SetPath(application_path.c_str());
+  result = link->SetPath(application_path.value().c_str());
   if (FAILED(result))
     return false;
 
@@ -44,7 +47,7 @@ bool AddShellLink(Microsoft::WRL::ComPtr<IObjectCollection> collection,
   // arguments and set it as the arguments of this IShellLink object.
   // We also exit this function when this call fails because it isn't useful to
   // add a shortcut that cannot open the given page.
-  base::string16 arguments(item->GetArguments());
+  std::wstring arguments(item->GetArguments());
   if (!arguments.empty()) {
     result = link->SetArguments(arguments.c_str());
     if (FAILED(result))
@@ -54,8 +57,10 @@ bool AddShellLink(Microsoft::WRL::ComPtr<IObjectCollection> collection,
   // Attach the given icon path to this IShellLink object.
   // Since an icon is an optional item for an IShellLink object, so we don't
   // have to exit even when it fails.
-  if (!item->icon_path().empty())
-    link->SetIconLocation(item->icon_path().c_str(), item->icon_index());
+  if (!item->icon_path().empty()) {
+    link->SetIconLocation(item->icon_path().value().c_str(),
+                          item->icon_index());
+  }
 
   // Set the title of the IShellLink object.
   // The IShellLink interface does not have any functions which update its
@@ -68,9 +73,7 @@ bool AddShellLink(Microsoft::WRL::ComPtr<IObjectCollection> collection,
     return false;
 
   if (!base::win::SetStringValueForPropertyStore(
-          property_store.Get(),
-          PKEY_Title,
-          item->title().c_str())) {
+          property_store.Get(), PKEY_Title, base::UTF16ToWide(item->title()))) {
     return false;
   }
 
@@ -87,9 +90,9 @@ ShellLinkItem::ShellLinkItem()
     : command_line_(base::CommandLine::NO_PROGRAM), icon_index_(0) {
 }
 
-ShellLinkItem::~ShellLinkItem() {}
+ShellLinkItem::~ShellLinkItem() = default;
 
-base::string16 ShellLinkItem::GetArguments() const {
+std::wstring ShellLinkItem::GetArguments() const {
   return command_line_.GetArgumentsString();
 }
 
@@ -100,15 +103,14 @@ base::CommandLine* ShellLinkItem::GetCommandLine() {
 
 // JumpListUpdater
 
-JumpListUpdater::JumpListUpdater(const base::string16& app_user_model_id)
+JumpListUpdater::JumpListUpdater(const std::wstring& app_user_model_id)
     : app_user_model_id_(app_user_model_id), user_max_items_(0) {}
 
-JumpListUpdater::~JumpListUpdater() {
-}
+JumpListUpdater::~JumpListUpdater() = default;
 
 // static
 bool JumpListUpdater::IsEnabled() {
-  // Do not create custom JumpLists in tests. See http://crbug.com/389375.
+  // Do not create custom JumpLists in tests. See http://crbug.com/40372575.
   return !base::CommandLine::ForCurrentProcess()->HasSwitch(
       switches::kTestType);
 }
@@ -178,7 +180,7 @@ bool JumpListUpdater::AddTasks(const ShellLinkItemList& link_items) {
   // Add items to the "Task" category.
   for (ShellLinkItemList::const_iterator it = link_items.begin();
        it != link_items.end(); ++it) {
-    if (!AddShellLink(collection, application_path.value(), *it))
+    if (!AddShellLink(collection, application_path, *it))
       return false;
   }
 
@@ -194,7 +196,7 @@ bool JumpListUpdater::AddTasks(const ShellLinkItemList& link_items) {
   return SUCCEEDED(destination_list_->AddUserTasks(object_array.Get()));
 }
 
-bool JumpListUpdater::AddCustomCategory(const base::string16& category_name,
+bool JumpListUpdater::AddCustomCategory(const std::u16string& category_name,
                                         const ShellLinkItemList& link_items,
                                         size_t max_items) {
   if (!destination_list_.Get())
@@ -223,7 +225,7 @@ bool JumpListUpdater::AddCustomCategory(const base::string16& category_name,
 
   for (ShellLinkItemList::const_iterator item = link_items.begin();
        item != link_items.end() && max_items > 0; ++item, --max_items) {
-    if (!AddShellLink(collection, application_path.value(), *item))
+    if (!AddShellLink(collection, application_path, *item))
       return false;
   }
 
@@ -239,12 +241,12 @@ bool JumpListUpdater::AddCustomCategory(const base::string16& category_name,
   if (FAILED(result))
     return false;
 
-  return SUCCEEDED(destination_list_->AppendCategory(category_name.c_str(),
-                                                     object_array.Get()));
+  return SUCCEEDED(destination_list_->AppendCategory(
+      base::as_wcstr(category_name), object_array.Get()));
 }
 
 // static
-bool JumpListUpdater::DeleteJumpList(const base::string16& app_user_model_id) {
+bool JumpListUpdater::DeleteJumpList(const std::wstring& app_user_model_id) {
   if (!JumpListUpdater::IsEnabled() || app_user_model_id.empty())
     return false;
 

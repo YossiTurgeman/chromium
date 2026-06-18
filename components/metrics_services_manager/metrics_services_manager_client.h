@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,12 @@
 
 #include <memory>
 
-#include "base/callback_forward.h"
 #include "base/memory/scoped_refptr.h"
 
+class PrefService;
+
 namespace metrics {
+class EnabledStateProvider;
 class MetricsServiceClient;
 class MetricsStateManager;
 }
@@ -19,12 +21,9 @@ namespace network {
 class SharedURLLoaderFactory;
 }
 
-namespace rappor {
-class RapporServiceImpl;
-}
-
 namespace variations {
 class VariationsService;
+class SyntheticTrialRegistry;
 }
 
 namespace metrics_services_manager {
@@ -33,29 +32,28 @@ namespace metrics_services_manager {
 // MetricsServicesManager to interact with its embedder.
 class MetricsServicesManagerClient {
  public:
-  virtual ~MetricsServicesManagerClient() {}
+  virtual ~MetricsServicesManagerClient() = default;
 
   // Methods that create the various services in the context of the embedder.
-  virtual std::unique_ptr<rappor::RapporServiceImpl>
-  CreateRapporServiceImpl() = 0;
   virtual std::unique_ptr<variations::VariationsService>
   CreateVariationsService() = 0;
   virtual std::unique_ptr<metrics::MetricsServiceClient>
-  CreateMetricsServiceClient() = 0;
+  CreateMetricsServiceClient(
+      variations::SyntheticTrialRegistry* synthetic_trial_registry) = 0;
 
   // Gets the MetricsStateManager, creating it if it has not already been
   // created.
   virtual metrics::MetricsStateManager* GetMetricsStateManager() = 0;
 
+  // Gets the local state.
+  virtual PrefService* GetLocalState() = 0;
+
   // Returns the URL loader factory which the metrics services should use.
   virtual scoped_refptr<network::SharedURLLoaderFactory>
   GetURLLoaderFactory() = 0;
 
-  // Returns whether metrics reporting is enabled.
-  virtual bool IsMetricsReportingEnabled() = 0;
-
-  // Returns whether metrics consent is given.
-  virtual bool IsMetricsConsentGiven() = 0;
+  // Returns the accessor for checking the metrics enabled state.
+  virtual const metrics::EnabledStateProvider& GetEnabledStateProvider() = 0;
 
   // Returns whether there are any OffTheRecord browsers/tabs open.
   virtual bool IsOffTheRecordSessionActive() = 0;
@@ -63,6 +61,9 @@ class MetricsServicesManagerClient {
   // Update the running state of metrics services managed by the embedder, for
   // example, crash reporting.
   virtual void UpdateRunningServices(bool may_record, bool may_upload) {}
+
+  // Called when a document starts loading for the first time.
+  virtual void OnPageLoadStarted() {}
 };
 
 }  // namespace metrics_services_manager

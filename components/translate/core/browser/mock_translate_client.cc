@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@ namespace translate {
 
 namespace testing {
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 const char* preferred_languages_prefs = "settings.language.preferred_languages";
 #else
 const char* preferred_languages_prefs = nullptr;
@@ -22,7 +22,7 @@ MockTranslateClient::MockTranslateClient(TranslateDriver* driver,
                                          PrefService* prefs)
     : driver_(driver), prefs_(prefs) {}
 
-MockTranslateClient::~MockTranslateClient() {}
+MockTranslateClient::~MockTranslateClient() = default;
 
 TranslateDriver* MockTranslateClient::GetTranslateDriver() {
   return driver_;
@@ -33,8 +33,7 @@ PrefService* MockTranslateClient::GetPrefs() {
 }
 
 std::unique_ptr<TranslatePrefs> MockTranslateClient::GetTranslatePrefs() {
-  return std::make_unique<TranslatePrefs>(prefs_, accept_languages_prefs,
-                                          preferred_languages_prefs);
+  return std::make_unique<TranslatePrefs>(prefs_);
 }
 
 }  // namespace testing

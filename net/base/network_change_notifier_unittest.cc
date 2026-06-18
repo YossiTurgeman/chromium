@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include "build/build_config.h"
 #include "net/base/mock_network_change_notifier.h"
 #include "net/base/network_interfaces.h"
+#include "net/test/test_connection_cost_observer.h"
 #include "net/test/test_with_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -53,6 +54,11 @@ TEST(NetworkChangeNotifierTest, NetMaxBandwidthRange) {
     case NetworkChangeNotifier::CONNECTION_4G:
       EXPECT_GE(100.0, max_bandwidth);
       EXPECT_LE(100.0, max_bandwidth);
+      break;
+    case NetworkChangeNotifier::CONNECTION_5G:
+      // TODO(crbug.com/40148439): Expect proper bounds once we have introduced
+      // subtypes for 5G connections.
+      EXPECT_EQ(std::numeric_limits<double>::infinity(), max_bandwidth);
       break;
     case NetworkChangeNotifier::CONNECTION_NONE:
       EXPECT_EQ(0.0, max_bandwidth);
@@ -100,7 +106,7 @@ TEST(NetworkChangeNotifierTest, IgnoreTeredoOnWindows) {
   interface_teredo.friendly_name = "Teredo Tunneling Pseudo-Interface";
   list.push_back(interface_teredo);
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   EXPECT_EQ(NetworkChangeNotifier::CONNECTION_NONE,
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #else
@@ -117,10 +123,10 @@ TEST(NetworkChangeNotifierTest, IgnoreAirdropOnMac) {
   interface_airdrop.friendly_name = "awdl0";
   interface_airdrop.address =
       // Link-local IPv6 address
-      IPAddress({0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4});
+      IPAddress(0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4);
   list.push_back(interface_airdrop);
 
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_APPLE)
   EXPECT_EQ(NetworkChangeNotifier::CONNECTION_NONE,
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #else
@@ -137,10 +143,10 @@ TEST(NetworkChangeNotifierTest, IgnoreTunnelsOnMac) {
   interface_tunnel.friendly_name = "utun0";
   interface_tunnel.address =
       // Link-local IPv6 address
-      IPAddress({0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 2, 1});
+      IPAddress(0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 2, 1);
   list.push_back(interface_tunnel);
 
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_APPLE)
   EXPECT_EQ(NetworkChangeNotifier::CONNECTION_NONE,
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #else
@@ -157,10 +163,10 @@ TEST(NetworkChangeNotifierTest, IgnoreDisconnectedEthernetOnMac) {
   interface_ethernet.friendly_name = "en5";
   interface_ethernet.address =
       // Link-local IPv6 address
-      IPAddress({0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2, 3});
+      IPAddress(0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2, 3);
   list.push_back(interface_ethernet);
 
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_APPLE)
   EXPECT_EQ(NetworkChangeNotifier::CONNECTION_NONE,
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #else
@@ -193,7 +199,7 @@ TEST(NetworkChangeNotifierTest, GetConnectionSubtype) {
 }
 
 class NetworkChangeNotifierMockedTest : public TestWithTaskEnvironment {
- private:
+ protected:
   test::ScopedMockNetworkChangeNotifier mock_notifier_;
 };
 
@@ -219,6 +225,74 @@ TEST_F(NetworkChangeNotifierMockedTest, TriggerNonSystemDnsChange) {
   EXPECT_EQ(1, observer.dns_changed_calls());
 
   NetworkChangeNotifier::RemoveDNSObserver(&observer);
+}
+
+TEST_F(NetworkChangeNotifierMockedTest, TriggerConnectionCostChange) {
+  TestConnectionCostObserver observer;
+  NetworkChangeNotifier::AddConnectionCostObserver(&observer);
+
+  ASSERT_EQ(0u, observer.cost_changed_calls());
+
+  NetworkChangeNotifier::NotifyObserversOfConnectionCostChangeForTests(
+      NetworkChangeNotifier::CONNECTION_COST_METERED);
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(1u, observer.cost_changed_calls());
+  EXPECT_EQ(NetworkChangeNotifier::CONNECTION_COST_METERED,
+            observer.cost_changed_inputs()[0]);
+
+  NetworkChangeNotifier::RemoveConnectionCostObserver(&observer);
+  NetworkChangeNotifier::NotifyObserversOfConnectionCostChangeForTests(
+      NetworkChangeNotifier::CONNECTION_COST_UNMETERED);
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(1u, observer.cost_changed_calls());
+}
+
+TEST_F(NetworkChangeNotifierMockedTest, ConnectionCostDefaultsToCellular) {
+  mock_notifier_.mock_network_change_notifier()
+      ->SetUseDefaultConnectionCostImplementation(true);
+
+  mock_notifier_.mock_network_change_notifier()->SetConnectionType(
+      NetworkChangeNotifier::CONNECTION_4G);
+  EXPECT_TRUE(NetworkChangeNotifier::IsConnectionCellular(
+      NetworkChangeNotifier::GetConnectionType()));
+  EXPECT_EQ(NetworkChangeNotifier::CONNECTION_COST_METERED,
+            NetworkChangeNotifier::GetConnectionCost());
+
+  mock_notifier_.mock_network_change_notifier()->SetConnectionType(
+      NetworkChangeNotifier::CONNECTION_WIFI);
+  EXPECT_FALSE(NetworkChangeNotifier::IsConnectionCellular(
+      NetworkChangeNotifier::GetConnectionType()));
+  EXPECT_EQ(NetworkChangeNotifier::CONNECTION_COST_UNMETERED,
+            NetworkChangeNotifier::GetConnectionCost());
+}
+
+class NetworkChangeNotifierConnectionCostTest : public TestWithTaskEnvironment {
+ public:
+  void SetUp() override {
+    network_change_notifier_ = NetworkChangeNotifier::CreateIfNeeded();
+  }
+
+ private:
+  // Allows creating a new NetworkChangeNotifier.  Must be created before
+  // |network_change_notifier_| and destroyed after it to avoid DCHECK failures.
+  NetworkChangeNotifier::DisableForTest disable_for_test_;
+  std::unique_ptr<NetworkChangeNotifier> network_change_notifier_;
+};
+
+TEST_F(NetworkChangeNotifierConnectionCostTest, GetConnectionCost) {
+  EXPECT_NE(NetworkChangeNotifier::ConnectionCost::CONNECTION_COST_UNKNOWN,
+            NetworkChangeNotifier::GetConnectionCost());
+}
+
+TEST_F(NetworkChangeNotifierConnectionCostTest, AddObserver) {
+  TestConnectionCostObserver observer;
+  EXPECT_NO_FATAL_FAILURE(
+      NetworkChangeNotifier::AddConnectionCostObserver(&observer));
+  // RunUntilIdle because the secondary work resulting from adding an observer
+  // may be posted to a task queue.
+  base::RunLoop().RunUntilIdle();
 }
 
 }  // namespace net

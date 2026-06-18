@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,16 +7,19 @@
 
 // This is the allocator that is used for allocations that are not on the
 // traced, garbage collected heap. It uses FastMalloc for collections,
-// but uses the partition allocator for the backing store of the collections.
+// but uses the PartitionAlloc for the backing store of the collections.
 
 #include <string.h>
-#include "base/allocator/partition_allocator/partition_alloc_constants.h"
+
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "partition_alloc/partition_alloc_constants.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 #include "third_party/blink/renderer/platform/wtf/type_traits.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_export.h"
 
-namespace WTF {
+namespace blink {
 
 class WTF_EXPORT PartitionAllocator {
  public:
@@ -24,21 +27,25 @@ class WTF_EXPORT PartitionAllocator {
 
   template <typename T>
   static size_t MaxElementCountInBackingStore() {
-    return base::MaxDirectMapped() / sizeof(T);
+    return partition_alloc::MaxDirectMapped() / sizeof(T);
   }
 
   template <typename T>
   static size_t QuantizedSize(size_t count) {
     CHECK_LE(count, MaxElementCountInBackingStore<T>());
-    return WTF::Partitions::BufferActualSize(count * sizeof(T));
+    return Partitions::BufferPotentialCapacity(count * sizeof(T));
   }
+
   template <typename T>
   static T* AllocateVectorBacking(size_t size) {
     return reinterpret_cast<T*>(
         AllocateBacking(size, WTF_HEAP_PROFILER_TYPE_NAME(T)));
   }
-  static void FreeVectorBacking(void* address);
+
+  static void FreeVectorBacking(void* address) { FreeBacking(address); }
+
   static inline bool ExpandVectorBacking(void*, size_t) { return false; }
+
   static inline bool ShrinkVectorBacking(void* address,
                                          size_t quantized_current_size,
                                          size_t quantized_shrunk_size) {
@@ -52,22 +59,35 @@ class WTF_EXPORT PartitionAllocator {
     return reinterpret_cast<T*>(
         AllocateBacking(size, WTF_HEAP_PROFILER_TYPE_NAME(T)));
   }
+
   template <typename T, typename HashTable>
   static T* AllocateZeroedHashTableBacking(size_t size) {
     void* result = AllocateBacking(size, WTF_HEAP_PROFILER_TYPE_NAME(T));
-    memset(result, 0, size);
+    // SAFETY: AllocateBacking should ensure the size of `result` is `size`.
+    UNSAFE_BUFFERS(memset(result, 0, size));
     return reinterpret_cast<T*>(result);
   }
-  static void FreeHashTableBacking(void* address);
+
+  template <typename T, typename HashTable>
+  static void FreeHashTableBacking(void* address) {
+    FreeBacking(address);
+  }
 
   template <typename Return, typename Metadata>
   static Return Malloc(size_t size, const char* type_name) {
-    return reinterpret_cast<Return>(
-        WTF::Partitions::FastMalloc(size, type_name));
+    return reinterpret_cast<Return>(Partitions::FastMalloc(size, type_name));
   }
 
-  static inline bool ExpandHashTableBacking(void*, size_t) { return false; }
-  static void Free(void* address) { WTF::Partitions::FastFree(address); }
+  template <typename T, typename HashTable>
+  static inline bool ExpandHashTableBacking(void*, size_t) {
+    return false;
+  }
+  template <typename Traits>
+  static inline bool CanReuseHashTableDeletedBucket() {
+    return true;
+  }
+
+  static void Free(void* address) { Partitions::FastFree(address); }
   template <typename T>
   static void* NewArray(size_t bytes) {
     return Malloc<void*, void>(bytes, WTF_HEAP_PROFILER_TYPE_NAME(T));
@@ -76,15 +96,12 @@ class WTF_EXPORT PartitionAllocator {
     Free(ptr);  // Not the system free, the one from this class.
   }
 
-  static void TraceBackingStoreIfMarked(const void*) {}
+  template <typename T>
+  static void TraceBackingStoreIfMarked(T*) {}
   template <typename T>
   static void BackingWriteBarrier(T**) {}
-  template <typename, typename T>
-  static void BackingWriteBarrierForHashTable(T**) {}
 
   static bool IsAllocationAllowed() { return true; }
-  static bool IsObjectResurrectionForbidden() { return false; }
-  static bool IsSweepForbidden() { return false; }
   static bool IsIncrementalMarking() { return false; }
 
   static void EnterGCForbiddenScope() {}
@@ -94,10 +111,11 @@ class WTF_EXPORT PartitionAllocator {
   static void NotifyNewObject(T* object) {}
 
   template <typename T, typename Traits>
-  static void NotifyNewObjects(T* array, size_t len) {}
+  static void NotifyNewObjects(base::span<T>) {}
 
  private:
   static void* AllocateBacking(size_t, const char* type_name);
+  static void FreeBacking(void*);
 };
 
 // Specializations for heap profiling, so type profiling of |char| is possible
@@ -106,26 +124,32 @@ class WTF_EXPORT PartitionAllocator {
 template <>
 WTF_EXPORT char* PartitionAllocator::AllocateVectorBacking<char>(size_t);
 
-}  // namespace WTF
+}  // namespace blink
 
-#define USE_ALLOCATOR(ClassName, Allocator)                       \
- public:                                                          \
-  void* operator new(size_t size) {                               \
-    return Allocator::template Malloc<void*, ClassName>(          \
-        size, WTF_HEAP_PROFILER_TYPE_NAME(ClassName));            \
-  }                                                               \
-  void operator delete(void* p) { Allocator::Free(p); }           \
-  void* operator new[](size_t size) {                             \
-    return Allocator::template NewArray<ClassName>(size);         \
-  }                                                               \
-  void operator delete[](void* p) { Allocator::DeleteArray(p); }  \
-  void* operator new(size_t, NotNullTag, void* location) {        \
-    DCHECK(location);                                             \
-    return location;                                              \
-  }                                                               \
-  void* operator new(size_t, void* location) { return location; } \
-                                                                  \
- private:                                                         \
+#define USE_ALLOCATOR(ClassName, Allocator)                      \
+ public:                                                         \
+  void* operator new(size_t size) {                              \
+    return Allocator::template Malloc<void*, ClassName>(         \
+        size, WTF_HEAP_PROFILER_TYPE_NAME(ClassName));           \
+  }                                                              \
+  void operator delete(void* p) {                                \
+    Allocator::Free(p);                                          \
+  }                                                              \
+  void* operator new[](size_t size) {                            \
+    return Allocator::template NewArray<ClassName>(size);        \
+  }                                                              \
+  void operator delete[](void* p) {                              \
+    Allocator::DeleteArray(p);                                   \
+  }                                                              \
+  void* operator new(size_t, base::NotNullTag, void* location) { \
+    DCHECK(location);                                            \
+    return location;                                             \
+  }                                                              \
+  void* operator new(size_t, void* location) {                   \
+    return location;                                             \
+  }                                                              \
+                                                                 \
+ private:                                                        \
   typedef int __thisIsHereToForceASemicolonAfterThisMacro
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_ALLOCATOR_PARTITION_ALLOCATOR_H_

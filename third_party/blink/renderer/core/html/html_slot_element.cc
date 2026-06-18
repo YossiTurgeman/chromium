@@ -30,13 +30,13 @@
 
 #include "third_party/blink/renderer/core/html/html_slot_element.h"
 
+#include "base/containers/adapters.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_assigned_nodes_options.h"
 #include "third_party/blink/renderer/core/css/style_change_reason.h"
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/dom/flat_tree_node_data.h"
 #include "third_party/blink/renderer/core/dom/mutation_observer.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/node_traversal.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/dom/slot_assignment.h"
@@ -46,27 +46,12 @@
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
-#include "third_party/blink/renderer/platform/bindings/microtask.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 
 namespace blink {
 
 namespace {
 constexpr size_t kLCSTableSizeLimit = 16;
-}
-
-HTMLSlotElement* HTMLSlotElement::CreateUserAgentDefaultSlot(
-    Document& document) {
-  HTMLSlotElement* slot = MakeGarbageCollected<HTMLSlotElement>(document);
-  slot->setAttribute(html_names::kNameAttr, UserAgentDefaultSlotName());
-  return slot;
-}
-
-HTMLSlotElement* HTMLSlotElement::CreateUserAgentCustomAssignSlot(
-    Document& document) {
-  HTMLSlotElement* slot = MakeGarbageCollected<HTMLSlotElement>(document);
-  slot->setAttribute(html_names::kNameAttr, UserAgentCustomAssignSlotName());
-  return slot;
 }
 
 HTMLSlotElement::HTMLSlotElement(Document& document)
@@ -76,7 +61,7 @@ HTMLSlotElement::HTMLSlotElement(Document& document)
 
 // static
 AtomicString HTMLSlotElement::NormalizeSlotName(const AtomicString& name) {
-  return (name.IsNull() || name.IsEmpty()) ? g_empty_atom : name;
+  return (name.IsNull() || name.empty()) ? g_empty_atom : name;
 }
 
 // static
@@ -95,7 +80,7 @@ const AtomicString& HTMLSlotElement::UserAgentCustomAssignSlotName() {
 
 const HeapVector<Member<Node>>& HTMLSlotElement::AssignedNodes() const {
   if (!SupportsAssignment()) {
-    DCHECK(assigned_nodes_.IsEmpty());
+    DCHECK(assigned_nodes_.empty());
     return assigned_nodes_;
   }
   ContainingShadowRoot()->GetSlotAssignment().RecalcAssignment();
@@ -110,13 +95,13 @@ HeapVector<Member<Node>> CollectFlattenedAssignedNodes(
 
   const HeapVector<Member<Node>>& assigned_nodes = slot.AssignedNodes();
   HeapVector<Member<Node>> nodes;
-  if (assigned_nodes.IsEmpty()) {
+  if (assigned_nodes.empty()) {
     // Fallback contents.
     for (auto& child : NodeTraversal::ChildrenOf(slot)) {
       if (!child.IsSlotable())
         continue;
       if (auto* child_slot = ToHTMLSlotElementIfSupportsAssignmentOrNull(child))
-        nodes.AppendVector(CollectFlattenedAssignedNodes(*child_slot));
+        nodes.append_range(CollectFlattenedAssignedNodes(*child_slot));
       else
         nodes.push_back(child);
     }
@@ -125,7 +110,7 @@ HeapVector<Member<Node>> CollectFlattenedAssignedNodes(
       DCHECK(node->IsSlotable());
       if (auto* assigned_node_slot =
               ToHTMLSlotElementIfSupportsAssignmentOrNull(*node))
-        nodes.AppendVector(CollectFlattenedAssignedNodes(*assigned_node_slot));
+        nodes.append_range(CollectFlattenedAssignedNodes(*assigned_node_slot));
       else
         nodes.push_back(node);
     }
@@ -135,9 +120,40 @@ HeapVector<Member<Node>> CollectFlattenedAssignedNodes(
 
 }  // namespace
 
+bool HTMLSlotElement::HasFlattenedAssignedNodesNoRecalc() const {
+  if (!SupportsAssignment()) {
+    DCHECK(assigned_nodes_.empty());
+    return false;
+  }
+
+  auto has_flattened = [](const Node& node) -> bool {
+    if (auto* slot = ToHTMLSlotElementIfSupportsAssignmentOrNull(node)) {
+      return slot->HasFlattenedAssignedNodesNoRecalc();
+    }
+    return true;
+  };
+
+  if (assigned_nodes_.empty()) {
+    for (auto& child : NodeTraversal::ChildrenOf(*this)) {
+      if (child.IsSlotable() && has_flattened(child)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  for (auto& node : assigned_nodes_) {
+    DCHECK(node->IsSlotable());
+    if (has_flattened(*node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const HeapVector<Member<Node>> HTMLSlotElement::FlattenedAssignedNodes() {
   if (!SupportsAssignment()) {
-    DCHECK(assigned_nodes_.IsEmpty());
+    DCHECK(assigned_nodes_.empty());
     return assigned_nodes_;
   }
   return CollectFlattenedAssignedNodes(*this);
@@ -169,97 +185,100 @@ const HeapVector<Member<Element>> HTMLSlotElement::AssignedElementsForBinding(
   return elements;
 }
 
-bool HTMLSlotElement::CheckNodesValidity(HeapVector<Member<Node>> nodes,
-                                         ExceptionState& exception_state) {
-  auto* host = OwnerShadowHost();
-  for (auto& node : nodes) {
-    if (node->parentNode() != host) {
-      exception_state.ThrowDOMException(
-          DOMExceptionCode::kNotAllowedError,
-          "Node:  '" + node->nodeName() +
-              "' is invalid for manual slot assignment.");
-      return false;
+void HTMLSlotElement::assign(HeapVector<Member<V8UnionElementOrText>>& js_nodes,
+                             ExceptionState&) {
+  UseCounter::Count(GetDocument(), WebFeature::kSlotAssignNode);
+  if (js_nodes.empty() && manually_assigned_nodes_.empty())
+    return;
+
+  HeapVector<Member<Node>> nodes;
+  for (V8UnionElementOrText* union_node : js_nodes) {
+    Node* node = nullptr;
+    switch (union_node->GetContentType()) {
+      case V8UnionElementOrText::ContentType::kText:
+        node = union_node->GetAsText();
+        break;
+      case V8UnionElementOrText::ContentType::kElement:
+        node = union_node->GetAsElement();
+        break;
     }
+    nodes.push_back(*node);
   }
-  return true;
+  Assign(nodes);
 }
 
-void HTMLSlotElement::assign(HeapVector<Member<Node>> nodes,
-                             ExceptionState& exception_state) {
-  if (!SupportsAssignment() || !ContainingShadowRoot()->IsManualSlotting()) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kNotAllowedError,
-        "This shadow root does not support manual slot assignment.");
-    return;
-  }
-
-  if (!CheckNodesValidity(nodes, exception_state))
+void HTMLSlotElement::Assign(const HeapVector<Member<Node>>& nodes) {
+  if (nodes.empty() && manually_assigned_nodes_.empty())
     return;
 
-  UseCounter::Count(GetDocument(), WebFeature::kSlotAssignNode);
-  ContainingShadowRoot()->GetSlotAssignment().ClearCandidateNodes(
-      assigned_nodes_candidates_);
-  HeapLinkedHashSet<Member<Node>> candidates;
   bool updated = false;
-  for (auto& node : nodes) {
-    // Before assignment, see if this node belongs to another slot.
-    updated |= ContainingShadowRoot()
-                   ->GetSlotAssignment()
-                   .UpdateCandidateNodeAssignedSlot(*node, *this);
-    candidates.AppendOrMoveToLast(node);
+  HeapHashSet<Member<HTMLSlotElement>> changed_slots;
+  HeapLinkedHashSet<WeakMember<Node>> added_nodes;
+  for (Node* node : nodes) {
+    added_nodes.insert(node);
+    if (auto* previous_slot = node->ManuallyAssignedSlot()) {
+      if (previous_slot == this)
+        continue;
+      previous_slot->manually_assigned_nodes_.erase(node);
+      if (previous_slot->SupportsAssignment())
+        changed_slots.insert(previous_slot);
+    }
+    updated = true;
+    node->SetManuallyAssignedSlot(this);
   }
 
-  bool candidates_changed =
-      (updated || (candidates.size() != assigned_nodes_candidates_.size()));
-  if (!candidates_changed) {
-    for (auto it1 = candidates.begin(),
-              it2 = assigned_nodes_candidates_.begin();
-         it1 != candidates.end(); ++it1, ++it2) {
+  HeapLinkedHashSet<WeakMember<Node>> removed_nodes;
+  for (Node* node : manually_assigned_nodes_) {
+    if (!added_nodes.Contains(node)) {
+      removed_nodes.insert(node);
+    }
+  }
+
+  updated |= added_nodes.size() != manually_assigned_nodes_.size();
+  if (!updated) {
+    for (auto it1 = added_nodes.begin(), it2 = manually_assigned_nodes_.begin();
+         it1 != added_nodes.end(); ++it1, ++it2) {
       if (!(*it1 == *it2)) {
-        candidates_changed = true;
+        updated = true;
         break;
       }
     }
   }
+  DCHECK(updated || removed_nodes.empty());
 
-  if (candidates_changed) {
-    assigned_nodes_candidates_.Swap(candidates);
-    ContainingShadowRoot()->GetSlotAssignment().SetNeedsAssignmentRecalc();
-    DidSlotChange(SlotChangeType::kSignalSlotChangeEvent);
+  ShadowRoot* shadow_root = ContainingShadowRoot();
+  if (updated) {
+    for (auto removed_node : removed_nodes)
+      removed_node->SetManuallyAssignedSlot(nullptr);
+    manually_assigned_nodes_.Swap(added_nodes);
+    // The slot might not be located in a shadow root yet.
+    if (shadow_root) {
+      SetShadowRootNeedsAssignmentRecalc();
+      changed_slots.insert(this);
+    }
   }
+
+  if (!changed_slots.empty()) {
+    for (HTMLSlotElement& slot :
+         Traversal<HTMLSlotElement>::DescendantsOf(*shadow_root)) {
+      if (changed_slots.Contains(&slot)) {
+        slot.DidSlotChange(SlotChangeType::kSignalSlotChangeEvent);
+      }
+    }
+  }
+}
+
+void HTMLSlotElement::Assign(Node* node) {
+  VectorOf<Node> nodes;
+  if (node) {
+    nodes.push_back(node);
+  }
+  Assign(nodes);
 }
 
 void HTMLSlotElement::AppendAssignedNode(Node& host_child) {
   DCHECK(host_child.IsSlotable());
   assigned_nodes_.push_back(&host_child);
-}
-
-void HTMLSlotElement::UpdateManuallyAssignedNodesOrdering() {
-  if (assigned_nodes_.IsEmpty() || assigned_nodes_candidates_.IsEmpty())
-    return;
-
-  // TODO: (1067153) Add perf benchmark test for large assigned list.
-  HeapHashSet<Member<Node>> prev_nodes;
-  for (auto& node : assigned_nodes_) {
-    prev_nodes.insert(node);
-  }
-  assigned_nodes_.clear();
-  for (auto& node : assigned_nodes_candidates_) {
-    if (prev_nodes.Contains(node))
-      assigned_nodes_.push_back(node);
-  }
-}
-
-void HTMLSlotElement::RemoveAssignedNodeCandidate(Node& node) {
-  auto it = assigned_nodes_candidates_.find(&node);
-  if (it != assigned_nodes_candidates_.end()) {
-    assigned_nodes_candidates_.erase(it);
-    DidSlotChange(SlotChangeType::kSignalSlotChangeEvent);
-  }
-}
-
-void HTMLSlotElement::ClearAssignedNodesCandidates() {
-  assigned_nodes_candidates_.clear();
 }
 
 void HTMLSlotElement::ClearAssignedNodes() {
@@ -274,10 +293,24 @@ void HTMLSlotElement::ClearAssignedNodesAndFlatTreeChildren() {
 void HTMLSlotElement::UpdateFlatTreeNodeDataForAssignedNodes() {
   Node* previous = nullptr;
   for (auto& current : assigned_nodes_) {
-    bool flat_tree_parent_changed = false;
-    if (!current->NeedsStyleRecalc() && !current->GetComputedStyle()) {
-      if (auto* node_data = current->GetFlatTreeNodeData())
-        flat_tree_parent_changed = !node_data->AssignedSlot();
+    bool mark_parent_slot_changed = false;
+    if (!current->NeedsStyleRecalc() && !current->GetLayoutObject()) {
+      if (current->IsTextNode() ||
+          !To<Element>(current.Get())->GetComputedStyle()) {
+        if (FlatTreeNodeData* node_data = current->GetFlatTreeNodeData()) {
+          // This invalidation is covering the case where the node did not
+          // change assignment, but between the assignment recalcs:
+          //
+          // 1. The node was removed from the host.
+          // 2. The node was inserted into a different parent.
+          // 3. The node was then re-inserted into the original host.
+          //
+          // In this case the AssignedSlot() and ComputedStyle and were cleared,
+          // which means the node still needs to be marked for style recalc, but
+          // the diffing in RecalcFlatTreeChildren() can not detect this.
+          mark_parent_slot_changed = !node_data->AssignedSlot();
+        }
+      }
     }
     FlatTreeNodeData& flat_tree_node_data = current->EnsureFlatTreeNodeData();
     flat_tree_node_data.SetAssignedSlot(this);
@@ -287,12 +320,32 @@ void HTMLSlotElement::UpdateFlatTreeNodeDataForAssignedNodes() {
       previous->GetFlatTreeNodeData()->SetNextInAssignedNodes(current);
     }
     previous = current;
-    if (flat_tree_parent_changed)
-      current->FlatTreeParentChanged();
+    if (mark_parent_slot_changed) {
+      current->ParentSlotChanged();
+    }
   }
   if (previous) {
     DCHECK(previous->GetFlatTreeNodeData());
     previous->GetFlatTreeNodeData()->SetNextInAssignedNodes(nullptr);
+  }
+}
+
+void HTMLSlotElement::DetachDisplayLockedAssignedNodesLayoutTreeIfNeeded() {
+  // If the assigned node is now under a display locked subtree and its layout
+  // is in 'forced reattach' mode, it means that this node potentially changed
+  // slots into a display locked subtree. We would normally update its layout
+  // tree during a layout tree update phase, but that is skipped in display
+  // locked subtrees. In order to avoid a corrupt layout tree as a result, we
+  // detach the node's layout tree.
+  StyleEngine& style_engine = GetDocument().GetStyleEngine();
+  StyleEngine::DetachLayoutTreeScope detach_scope(style_engine);
+  for (auto& current : assigned_nodes_) {
+    if (current->GetForceReattachLayoutTree()) {
+      current->DetachLayoutTree();
+      // Restore the force-reattach state for when it's no longer display
+      // locked.
+      current->SetForceReattachLayoutTree();
+    }
   }
 }
 
@@ -302,7 +355,7 @@ void HTMLSlotElement::RecalcFlatTreeChildren() {
   HeapVector<Member<Node>> old_flat_tree_children;
   old_flat_tree_children.swap(flat_tree_children_);
 
-  if (assigned_nodes_.IsEmpty()) {
+  if (assigned_nodes_.empty()) {
     // Use children as fallback
     for (auto& child : NodeTraversal::ChildrenOf(*this)) {
       if (child.IsSlotable())
@@ -323,7 +376,8 @@ void HTMLSlotElement::RecalcFlatTreeChildren() {
 }
 
 void HTMLSlotElement::DispatchSlotChangeEvent() {
-  DCHECK(!IsInUserAgentShadowRoot());
+  DCHECK(!IsInUserAgentShadowRoot() ||
+         ContainingShadowRoot()->IsNamedSlotting());
   Event* event = Event::CreateBubble(event_type_names::kSlotchange);
   event->SetTarget(this);
   DispatchScopedEvent(*event);
@@ -333,33 +387,29 @@ AtomicString HTMLSlotElement::GetName() const {
   return NormalizeSlotName(FastGetAttribute(html_names::kNameAttr));
 }
 
-void HTMLSlotElement::AttachLayoutTree(AttachContext& context) {
-  HTMLElement::AttachLayoutTree(context);
-
-  if (SupportsAssignment()) {
-    LayoutObject* layout_object = GetLayoutObject();
-    AttachContext children_context(context);
-    const ComputedStyle* style = GetComputedStyle();
-    AdjustForceLegacyLayout(style, &children_context.force_legacy_layout);
-    if (layout_object || !style || style->IsEnsuredInDisplayNone()) {
-      children_context.previous_in_flow = nullptr;
-      children_context.parent = layout_object;
-      children_context.next_sibling = nullptr;
-      children_context.next_sibling_valid = true;
-    }
-
-    for (auto& node : AssignedNodes())
-      node->AttachLayoutTree(children_context);
-    if (children_context.previous_in_flow)
-      context.previous_in_flow = children_context.previous_in_flow;
+void HTMLSlotElement::AttachLayoutTreeForSlotChildren(AttachContext& context) {
+  for (Node* child : flat_tree_children_) {
+    child->AttachLayoutTree(context);
   }
 }
 
 void HTMLSlotElement::DetachLayoutTree(bool performing_reattach) {
   if (SupportsAssignment()) {
-    const HeapVector<Member<Node>>& flat_tree_children = assigned_nodes_;
+    auto* host = OwnerShadowHost();
+    // Defensive copy to prevent UAF from sync recalc. See crbug.com/497830330.
+    const HeapVector<Member<Node>> flat_tree_children = assigned_nodes_;
     for (auto& node : flat_tree_children) {
-      if (node->GetDocument() == GetDocument())
+      // Don't detach the assigned node if the node is no longer a child of the
+      // host.
+      //
+      // 1. It's no long a direct flat-tree child of this slot.
+      // 2. It was already detached when removed from the host.
+      // 3. It might already have been inserted in a different part of the DOM,
+      //    or a new document tree and been attached.
+      // 4. It might have been marked style-dirty in its new location and
+      //    calling DetachLayoutTree here would have incorrectly cleared those
+      //    dirty bits.
+      if (host == node->parentNode())
         node->DetachLayoutTree(performing_reattach);
     }
   }
@@ -372,9 +422,8 @@ void HTMLSlotElement::RebuildDistributedChildrenLayoutTrees(
 
   // This loop traverses the nodes from right to left for the same reason as the
   // one described in ContainerNode::RebuildChildrenLayoutTrees().
-  for (auto it = flat_tree_children_.rbegin(); it != flat_tree_children_.rend();
-       ++it) {
-    RebuildLayoutTreeForChild(*it, whitespace_attacher);
+  for (const auto& child : base::Reversed(flat_tree_children_)) {
+    RebuildLayoutTreeForChild(child, whitespace_attacher);
   }
 }
 
@@ -382,7 +431,7 @@ void HTMLSlotElement::AttributeChanged(
     const AttributeModificationParams& params) {
   if (params.name == html_names::kNameAttr) {
     if (ShadowRoot* root = ContainingShadowRoot()) {
-      if (root->IsV1() && params.old_value != params.new_value) {
+      if (params.old_value != params.new_value) {
         root->GetSlotAssignment().DidRenameSlot(
             NormalizeSlotName(params.old_value), *this);
       }
@@ -391,13 +440,21 @@ void HTMLSlotElement::AttributeChanged(
   HTMLElement::AttributeChanged(params);
 }
 
+// When the result of `SupportsAssignment()` changes, the behavior of a
+// <slot> element for ancestors with dir=auto changes.
+void HTMLSlotElement::UpdateDirAutoAncestorsForSupportsAssignmentChange() {
+  if (SelfOrAncestorHasDirAutoAttribute()) {
+    UpdateAncestorWithDirAuto(UpdateAncestorTraversal::ExcludeSelf);
+  }
+}
+
 Node::InsertionNotificationRequest HTMLSlotElement::InsertedInto(
     ContainerNode& insertion_point) {
   HTMLElement::InsertedInto(insertion_point);
+  UpdateDirAutoAncestorsForSupportsAssignmentChange();
   if (SupportsAssignment()) {
     ShadowRoot* root = ContainingShadowRoot();
     DCHECK(root);
-    DCHECK(root->IsV1());
     if (root == insertion_point.ContainingShadowRoot()) {
       // This slot is inserted into the same tree of |insertion_point|
       root->DidAddSlot(*this);
@@ -420,13 +477,14 @@ void HTMLSlotElement::RemovedFrom(ContainerNode& insertion_point) {
   // `removedFrom` is called after the node is removed from the tree.
   // That means:
   // 1. If this slot is still in a tree scope, it means the slot has been in a
-  // shadow tree. An inclusive shadow-including ancestor of the shadow host was
-  // originally removed from its parent.
+  //    shadow tree. An inclusive shadow-including ancestor of the shadow host
+  //    was originally removed from its parent. See slot s2 below.
   // 2. Or (this slot is not in a tree scope), this slot's inclusive
-  // ancestor was orginally removed from its parent (== insertion point). This
-  // slot and the originally removed node was in the same tree before removal.
+  //    ancestor was orginally removed from its parent (== insertion point).
+  //    This slot and the originally removed node was in the same tree before
+  //    removal. See slot s1 below.
 
-  // For exmaple, given the following trees, (srN: = shadow root, sN: = slot)
+  // For example, given the following trees, (srN: = shadow root, sN: = slot)
   // a
   // |- b --sr1
   // |- c   |--d
@@ -455,7 +513,7 @@ void HTMLSlotElement::RemovedFrom(ContainerNode& insertion_point) {
       // We don't need to clear |assigned_nodes_| here. That's an important
       // optimization.
     }
-  } else if (insertion_point.IsInV1ShadowTree()) {
+  } else if (insertion_point.IsInShadowTree()) {
     // This slot was in a shadow tree and got disconnected from the shadow tree.
     // In the above example, (this slot == s1), (insertion point == d)
     // and (insertion_point->ContainingShadowRoot == sr1).
@@ -463,19 +521,21 @@ void HTMLSlotElement::RemovedFrom(ContainerNode& insertion_point) {
         *this);
     ClearAssignedNodesAndFlatTreeChildren();
   } else {
-    DCHECK(assigned_nodes_.IsEmpty());
+    DCHECK(assigned_nodes_.empty());
   }
 
+  UpdateDirAutoAncestorsForSupportsAssignmentChange();
   HTMLElement::RemovedFrom(insertion_point);
 }
 
 void HTMLSlotElement::RecalcStyleForSlotChildren(
-    const StyleRecalcChange change) {
+    const StyleRecalcChange change,
+    const StyleRecalcContext& style_recalc_context) {
   for (auto& node : flat_tree_children_) {
     if (!change.TraverseChild(*node))
       continue;
     if (auto* element = DynamicTo<Element>(node.Get()))
-      element->RecalcStyle(change);
+      element->RecalcStyle(change, style_recalc_context);
     else if (auto* text_node = DynamicTo<Text>(node.Get()))
       text_node->RecalcTextStyle(change);
   }
@@ -505,13 +565,13 @@ void HTMLSlotElement::NotifySlottedNodesOfFlatTreeChangeByDynamicProgramming(
     if (backtrack == std::make_pair(r - 1, c - 1)) {
       DCHECK_EQ(old_slotted[r - 1], new_slotted[c - 1]);
     } else if (backtrack == std::make_pair(r, c - 1)) {
-      new_slotted[c - 1]->FlatTreeParentChanged();
+      new_slotted[c - 1]->ParentSlotChanged();
     }
     std::tie(r, c) = backtrack;
   }
   if (c > 0) {
     for (wtf_size_t i = 0; i < c; ++i)
-      new_slotted[i]->FlatTreeParentChanged();
+      new_slotted[i]->ParentSlotChanged();
   }
 }
 
@@ -527,7 +587,7 @@ void HTMLSlotElement::NotifySlottedNodesOfFlatTreeChange(
   // correctness of the rendering,
   //
   // for (auto& node: new_slotted) {
-  //   node->FlatTreeParentChanged();
+  //   node->ParentSlotChanged();
   // }
   //
   // However, reattaching all ndoes is not good in terms of performance.
@@ -568,7 +628,7 @@ void HTMLSlotElement::DidSlotChangeAfterRemovedFromShadowTree() {
 void HTMLSlotElement::DidSlotChangeAfterRenaming() {
   DCHECK(SupportsAssignment());
   EnqueueSlotChangeEvent();
-  SetNeedsDistributionRecalcWillBeSetNeedsAssignmentRecalc();
+  SetShadowRootNeedsAssignmentRecalc();
   CheckSlotChange(SlotChangeType::kSuppressSlotChangeEvent);
 }
 
@@ -673,25 +733,26 @@ void HTMLSlotElement::NotifySlottedNodesOfFlatTreeChangeNaive(
   // Reattach nodes
   if (forward_result.size() <= backward_result.size()) {
     for (auto& node : forward_result) {
-      node->FlatTreeParentChanged();
+      node->ParentSlotChanged();
     }
   } else {
     for (auto& node : backward_result) {
-      node->FlatTreeParentChanged();
+      node->ParentSlotChanged();
     }
   }
 }
 
-void HTMLSlotElement::
-    SetNeedsDistributionRecalcWillBeSetNeedsAssignmentRecalc() {
+void HTMLSlotElement::SetShadowRootNeedsAssignmentRecalc() {
+  DCHECK(ContainingShadowRoot());
   ContainingShadowRoot()->GetSlotAssignment().SetNeedsAssignmentRecalc();
 }
 
 void HTMLSlotElement::DidSlotChange(SlotChangeType slot_change_type) {
   DCHECK(SupportsAssignment());
+  PseudoStateChanged(CSSSelector::kPseudoHasSlotted);
   if (slot_change_type == SlotChangeType::kSignalSlotChangeEvent)
     EnqueueSlotChangeEvent();
-  SetNeedsDistributionRecalcWillBeSetNeedsAssignmentRecalc();
+  SetShadowRootNeedsAssignmentRecalc();
   // Check slotchange recursively since this slotchange may cause another
   // slotchange.
   CheckSlotChange(SlotChangeType::kSuppressSlotChangeEvent);
@@ -701,7 +762,7 @@ void HTMLSlotElement::CheckFallbackAfterInsertedIntoShadowTree() {
   DCHECK(SupportsAssignment());
   if (HasSlotableChild()) {
     // We use kSuppress here because a slotchange event shouldn't be
-    // dispatched if a slot being inserted don't get any assigned
+    // dispatched if a slot being inserted doesn't get any assigned
     // node, but has a slotable child, according to DOM Standard.
     DidSlotChange(SlotChangeType::kSuppressSlotChangeEvent);
   }
@@ -726,11 +787,12 @@ bool HTMLSlotElement::HasSlotableChild() const {
 }
 
 void HTMLSlotElement::EnqueueSlotChangeEvent() {
-  // TODO(kochi): This suppresses slotchange event on user-agent shadows,
-  // but could be improved further by not running change detection logic
-  // in SlotAssignment::Did{Add,Remove}SlotInternal etc., although naive
-  // skipping turned out breaking fallback content handling.
-  if (IsInUserAgentShadowRoot())
+  // TODO(kochi): This suppresses slotchange event on user-agent shadows that
+  // don't support name based slot assignment, but could be improved further by
+  // not running change detection logic in
+  // SlotAssignment::Did{Add,Remove}SlotInternal etc., although naive skipping
+  // turned out breaking fallback content handling.
+  if (IsInUserAgentShadowRoot() && !ContainingShadowRoot()->IsNamedSlotting())
     return;
   if (slotchange_event_enqueued_)
     return;
@@ -740,18 +802,38 @@ void HTMLSlotElement::EnqueueSlotChangeEvent() {
 
 bool HTMLSlotElement::HasAssignedNodesSlow() const {
   ShadowRoot* root = ContainingShadowRoot();
-  DCHECK(root);
-  DCHECK(root->IsV1());
+  DCHECK(root) << "This should only be called on slots inside a shadow tree";
   SlotAssignment& assignment = root->GetSlotAssignment();
   if (assignment.FindSlotByName(GetName()) != this)
     return false;
   return assignment.FindHostChildBySlotName(GetName());
 }
 
+void HTMLSlotElement::ChildrenChanged(const ChildrenChange& change) {
+  HTMLElement::ChildrenChanged(change);
+  if (SupportsAssignment())
+    SetShadowRootNeedsAssignmentRecalc();
+}
+
+bool HTMLSlotElement::CalculateAndAdjustAutoDirectionality() {
+  if (SupportsAssignment() &&
+      ContainingShadowRoot()->GetSlotAssignment().NeedsAssignmentRecalc()) {
+    // It might not be safe to do an auto directionality update right now
+    // since it might run RecalcAssignment at a bad time; we should wait until
+    // RecalcAssignment runs.  RecalcAssignment needs to update directionality
+    // anyway, so we don't need to invalidate anything.
+
+    // This dependency on NeedsAssignmentRecalc() is a little bit ugly, but it
+    // seems far less problematic than other solutions.
+    return false;
+  }
+  return HTMLElement::CalculateAndAdjustAutoDirectionality();
+}
+
 void HTMLSlotElement::Trace(Visitor* visitor) const {
   visitor->Trace(assigned_nodes_);
   visitor->Trace(flat_tree_children_);
-  visitor->Trace(assigned_nodes_candidates_);
+  visitor->Trace(manually_assigned_nodes_);
   HTMLElement::Trace(visitor);
 }
 

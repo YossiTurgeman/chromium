@@ -1,4 +1,2 @@
 file://components/autofill/OWNERS
-
-# COMPONENT: UI>Browser>Autofill>UI
-# OS: Android
+file://components/autofill/android/OWNERS

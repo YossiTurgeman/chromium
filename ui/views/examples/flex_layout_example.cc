@@ -1,12 +1,12 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/examples/flex_layout_example.h"
 
 #include <memory>
+#include <string>
 
-#include "base/strings/string16.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "third_party/skia/include/core/SkColor.h"
@@ -25,64 +25,17 @@
 #include "ui/views/view.h"
 #include "ui/views/view_class_properties.h"
 
-namespace views {
-namespace examples {
+namespace views::examples {
 
 FlexLayoutExample::FlexLayoutExample() : LayoutExampleBase("Flex Layout") {}
 
-FlexLayoutExample::~FlexLayoutExample() = default;
-
-void FlexLayoutExample::CreateAdditionalControls(int vertical_pos) {
-  static const char* const orientation_values[2] = {"Horizontal", "Vertical"};
-  static const char* const main_axis_values[3] = {"Start", "Center", "End"};
-  static const char* const cross_axis_values[4] = {"Stretch", "Start", "Center",
-                                                   "End"};
-
-  orientation_ = CreateAndAddCombobox(base::ASCIIToUTF16("Orientation"),
-                                      orientation_values, 2, &vertical_pos);
-  main_axis_alignment_ = CreateAndAddCombobox(
-      base::ASCIIToUTF16("Main axis"), main_axis_values, 3, &vertical_pos);
-  cross_axis_alignment_ = CreateAndAddCombobox(
-      base::ASCIIToUTF16("Cross axis"), cross_axis_values, 4, &vertical_pos);
-
-  CreateMarginsTextFields(base::ASCIIToUTF16("Interior margin"),
-                          &interior_margin_, &vertical_pos);
-
-  CreateMarginsTextFields(base::ASCIIToUTF16("Default margins"),
-                          &default_child_margins_, &vertical_pos);
-
-  collapse_margins_ = CreateAndAddCheckbox(
-      base::ASCIIToUTF16("Collapse margins"), &vertical_pos);
-
-  ignore_default_main_axis_margins_ = CreateAndAddCheckbox(
-      base::ASCIIToUTF16("Ignore main axis margins"), &vertical_pos);
-
-  layout_ = layout_panel()->SetLayoutManager(std::make_unique<FlexLayout>());
-}
-
-void FlexLayoutExample::OnPerformAction(Combobox* combobox) {
-  static const LayoutOrientation orientations[2] = {
-      LayoutOrientation::kHorizontal, LayoutOrientation::kVertical};
-  static const LayoutAlignment main_axis_alignments[3] = {
-      LayoutAlignment::kStart, LayoutAlignment::kCenter, LayoutAlignment::kEnd};
-  static const LayoutAlignment cross_axis_alignments[4] = {
-      LayoutAlignment::kStretch, LayoutAlignment::kStart,
-      LayoutAlignment::kCenter, LayoutAlignment::kEnd};
-
-  if (combobox == orientation_) {
-    layout_->SetOrientation(orientations[combobox->GetSelectedIndex()]);
-  } else if (combobox == main_axis_alignment_) {
-    layout_->SetMainAxisAlignment(
-        main_axis_alignments[combobox->GetSelectedIndex()]);
-  } else if (combobox == cross_axis_alignment_) {
-    layout_->SetCrossAxisAlignment(
-        cross_axis_alignments[combobox->GetSelectedIndex()]);
-  }
-  RefreshLayoutPanel(false);
+FlexLayoutExample::~FlexLayoutExample() {
+  interior_margin_.ResetControllers();
+  default_child_margins_.ResetControllers();
 }
 
 void FlexLayoutExample::ContentsChanged(Textfield* sender,
-                                        const base::string16& new_contents) {
+                                        const std::u16string& new_contents) {
   layout_->SetInteriorMargin(
       LayoutExampleBase::TextfieldsToInsets(interior_margin_));
   layout_->SetDefault(views::kMarginsKey, LayoutExampleBase::TextfieldsToInsets(
@@ -90,24 +43,62 @@ void FlexLayoutExample::ContentsChanged(Textfield* sender,
   RefreshLayoutPanel(false);
 }
 
-void FlexLayoutExample::ButtonPressedImpl(Button* sender) {
-  if (sender == collapse_margins_) {
-    layout_->SetCollapseMargins(collapse_margins_->GetChecked());
-  } else if (sender == ignore_default_main_axis_margins_) {
-    layout_->SetIgnoreDefaultMainAxisMargins(
-        ignore_default_main_axis_margins_->GetChecked());
-  }
-  RefreshLayoutPanel(false);
+void FlexLayoutExample::CreateAdditionalControls() {
+  constexpr auto kOrientationValues =
+      std::to_array<const char* const>({"Horizontal", "Vertical"});
+  orientation_ = CreateAndAddCombobox(
+      u"Orientation", kOrientationValues,
+      base::BindRepeating(&FlexLayoutExample::OrientationChanged,
+                          base::Unretained(this)));
+
+  constexpr auto kMainAxisValues =
+      std::to_array<const char* const>({"Start", "Center", "End"});
+  main_axis_alignment_ = CreateAndAddCombobox(
+      u"Main axis", kMainAxisValues,
+      base::BindRepeating(&FlexLayoutExample::MainAxisAlignmentChanged,
+                          base::Unretained(this)));
+
+  constexpr auto kCrossAxisValues =
+      std::to_array<const char* const>({"Stretch", "Start", "Center", "End"});
+  cross_axis_alignment_ = CreateAndAddCombobox(
+      u"Cross axis", kCrossAxisValues,
+      base::BindRepeating(&FlexLayoutExample::CrossAxisAlignmentChanged,
+                          base::Unretained(this)));
+
+  CreateMarginsTextFields(u"Interior margin", &interior_margin_);
+
+  CreateMarginsTextFields(u"Default margins", &default_child_margins_);
+
+  collapse_margins_ = CreateAndAddCheckbox(
+      u"Collapse margins", base::BindRepeating(
+                               [](FlexLayoutExample* example) {
+                                 example->layout_->SetCollapseMargins(
+                                     example->collapse_margins_->GetChecked());
+                                 example->RefreshLayoutPanel(false);
+                               },
+                               base::Unretained(this)));
+
+  ignore_default_main_axis_margins_ = CreateAndAddCheckbox(
+      u"Ignore main axis margins",
+      base::BindRepeating(
+          [](FlexLayoutExample* example) {
+            example->layout_->SetIgnoreDefaultMainAxisMargins(
+                example->ignore_default_main_axis_margins_->GetChecked());
+            example->RefreshLayoutPanel(false);
+          },
+          base::Unretained(this)));
+
+  layout_ = layout_panel()->SetLayoutManager(std::make_unique<FlexLayout>());
 }
 
 void FlexLayoutExample::UpdateLayoutManager() {
   for (View* child : layout_panel()->children()) {
-    ChildPanel* panel = static_cast<ChildPanel*>(child);
-    int flex = panel->GetFlex();
-    if (flex < 0)
-      panel->ClearProperty(views::kFlexBehaviorKey);
-    else
-      panel->SetProperty(views::kFlexBehaviorKey, GetFlexSpecification(flex));
+    const int flex = static_cast<ChildPanel*>(child)->GetFlex();
+    if (flex < 0) {
+      child->ClearProperty(views::kFlexBehaviorKey);
+    } else {
+      child->SetProperty(views::kFlexBehaviorKey, GetFlexSpecification(flex));
+    }
   }
 }
 
@@ -121,5 +112,30 @@ FlexSpecification FlexLayoutExample::GetFlexSpecification(int weight) const {
                    .WithWeight(0);
 }
 
-}  // namespace examples
-}  // namespace views
+void FlexLayoutExample::OrientationChanged() {
+  constexpr auto kOrientations = std::to_array<LayoutOrientation>(
+      {LayoutOrientation::kHorizontal, LayoutOrientation::kVertical});
+  layout_->SetOrientation(
+      kOrientations[orientation_->GetSelectedIndex().value()]);
+  RefreshLayoutPanel(false);
+}
+
+void FlexLayoutExample::MainAxisAlignmentChanged() {
+  constexpr auto kMainAxisAlignments = std::to_array<LayoutAlignment>(
+      {LayoutAlignment::kStart, LayoutAlignment::kCenter,
+       LayoutAlignment::kEnd});
+  layout_->SetMainAxisAlignment(
+      kMainAxisAlignments[main_axis_alignment_->GetSelectedIndex().value()]);
+  RefreshLayoutPanel(false);
+}
+
+void FlexLayoutExample::CrossAxisAlignmentChanged() {
+  constexpr auto kCrossAxisAlignments = std::to_array<LayoutAlignment>(
+      {LayoutAlignment::kStretch, LayoutAlignment::kStart,
+       LayoutAlignment::kCenter, LayoutAlignment::kEnd});
+  layout_->SetCrossAxisAlignment(
+      kCrossAxisAlignments[cross_axis_alignment_->GetSelectedIndex().value()]);
+  RefreshLayoutPanel(false);
+}
+
+}  // namespace views::examples

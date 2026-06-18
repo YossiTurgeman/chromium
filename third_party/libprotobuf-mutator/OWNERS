@@ -1,6 +1,2 @@
-kcc@chromium.org
-metzman@chromium.org
-mmoroz@chromium.org
+file://testing/libfuzzer/OWNERS
 vitalybuka@chromium.org
-# COMPONENT: Tools>Stability>ClusterFuzz
-# TEAM: chrome-security-bugs--@chromium.org

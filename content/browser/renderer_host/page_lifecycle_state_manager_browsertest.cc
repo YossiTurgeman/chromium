@@ -1,15 +1,18 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/command_line.h"
 #include "base/location.h"
 #include "base/strings/string_number_conversions.h"
+#include "build/build_config.h"
 #include "content/browser/renderer_host/frame_tree_node.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/renderer_host/render_view_host_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/site_isolation_policy.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
@@ -31,9 +34,8 @@ class PageLifecycleStateManagerBrowserTest : public ContentBrowserTest {
   }
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    ContentBrowserTest::SetUpCommandLine(command_line);
-    base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
-        switches::kEnableBlinkFeatures, "VisibilityStateEntry");
+    command_line->AppendSwitchASCII(switches::kEnableBlinkFeatures,
+                                    "VisibilityStateEntry");
   }
 
   WebContentsImpl* web_contents() const {
@@ -58,7 +60,8 @@ class PageLifecycleStateManagerBrowserTest : public ContentBrowserTest {
   }
 
   void StartPerformanceObserver(RenderFrameHostImpl* rfh, int numEntries) {
-    EXPECT_TRUE(ExecJs(rfh, R"(
+    EXPECT_TRUE(ExecJs(rfh,
+                       R"(
       window.performanceObserverEntries = [];
       window.performanceObserverPromise = new Promise(resolve => {
         new PerformanceObserver(entries => {
@@ -67,15 +70,16 @@ class PageLifecycleStateManagerBrowserTest : public ContentBrowserTest {
             window.performanceObserverEntries.push(e.name);
           });
           if (window.performanceObserverEntries.length === )" +
-                                base::NumberToString(numEntries) + R"()
+                           base::NumberToString(numEntries) + R"()
             resolve(true);
         }).observe({type: 'visibility-state', buffered: true});
       });
-    )"));
+    )",
+                       EXECUTE_SCRIPT_NO_RESOLVE_PROMISES));
   }
 
   void MatchEventList(RenderFrameHostImpl* rfh,
-                      base::ListValue list,
+                      base::Value list,
                       base::Location location = base::Location::Current()) {
     EXPECT_EQ(list, EvalJs(rfh, "window.testObservedEvents"))
         << location.ToString();
@@ -83,13 +87,13 @@ class PageLifecycleStateManagerBrowserTest : public ContentBrowserTest {
 
   RenderViewHostImpl* render_view_host() {
     return static_cast<RenderViewHostImpl*>(
-        shell()->web_contents()->GetRenderViewHost());
+        shell()->web_contents()->GetPrimaryMainFrame()->GetRenderViewHost());
   }
 
   RenderFrameHostImpl* current_frame_host() {
     return static_cast<WebContentsImpl*>(shell()->web_contents())
-        ->GetFrameTree()
-        ->root()
+        ->GetPrimaryFrameTree()
+        .root()
         ->current_frame_host();
   }
 };
@@ -128,17 +132,22 @@ IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest, SetVisibility) {
 
   MatchEventList(rfh, ListValueOf("document.visibilitychange"));
 
-  EXPECT_TRUE(
-      EvalJs(
-          rfh,
-          "(async () => { return await window.performanceObserverPromise;})()")
-          .value.GetBool());
+  EXPECT_EQ(true, EvalJs(rfh,
+                         "(async () => { return await "
+                         "window.performanceObserverPromise;})()"));
   EXPECT_EQ(ListValueOf("visible", "hidden"),
             EvalJs(rfh, "window.performanceObserverEntries"));
 }
 
+// TODO(crbug.com/40786254): Test is flaky on Win
+#if BUILDFLAG(IS_WIN)
+#define MAYBE_CrossProcessIframeHiddenAnFrozen \
+  DISABLED_CrossProcessIframeHiddenAnFrozen
+#else
+#define MAYBE_CrossProcessIframeHiddenAnFrozen CrossProcessIframeHiddenAnFrozen
+#endif
 IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest,
-                       CrossProcessIframeHiddenAnFrozen) {
+                       MAYBE_CrossProcessIframeHiddenAnFrozen) {
   EXPECT_TRUE(embedded_test_server()->Start());
   // Load a page with a cross-process iframe.
   GURL url_a_b(embedded_test_server()->GetURL(
@@ -212,8 +221,8 @@ IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest,
   Shell* popup = OpenPopup(rfh_a, url_a, "");
   EXPECT_EQ(2u, rfh_a->GetSiteInstance()->GetRelatedActiveContentsCount());
 
-  RenderFrameHostImpl* popup_frame =
-      static_cast<RenderFrameHostImpl*>(popup->web_contents()->GetMainFrame());
+  RenderFrameHostImpl* popup_frame = static_cast<RenderFrameHostImpl*>(
+      popup->web_contents()->GetPrimaryMainFrame());
   StartRecordingEvents(popup_frame);
 
   popup->web_contents()->WasHidden();
@@ -223,6 +232,37 @@ IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest,
 
   MatchEventList(popup_frame, ListValueOf("document.visibilitychange",
                                           "document.visibilitychange"));
+}
+
+IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest,
+                       MicrotaskRunnableDuringResumeEvent) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL test_url = embedded_test_server()->GetURL("/empty.html");
+  ASSERT_TRUE(NavigateToURL(shell(), test_url));
+  RenderFrameHostImpl* rfh = current_frame_host();
+  // 1. Register a resume listener that schedules a microtask (Promise.then).
+  // If the context is frozen during the event, the microtask will be blocked.
+  ASSERT_TRUE(ExecJs(rfh, R"(
+    window.resumeMicrotaskRan = false;
+    document.addEventListener('resume', () => {
+      Promise.resolve().then(() => {
+        window.resumeMicrotaskRan = true;
+      });
+    });
+  )",
+                     EXECUTE_SCRIPT_NO_RESOLVE_PROMISES));
+
+  // 2. Hide and freeze the page.
+  shell()->web_contents()->WasHidden();
+  EXPECT_EQ(PageVisibilityState::kHidden, rfh->GetVisibilityState());
+  shell()->web_contents()->SetPageFrozen(true);
+
+  // 3. Resume the page.
+  shell()->web_contents()->SetPageFrozen(false);
+
+  // 4. Assert that the microtask was allowed to run.
+  // EvalJs will execute and implicitly run the microtask checkpoint if needed.
+  EXPECT_EQ(true, EvalJs(rfh, "window.resumeMicrotaskRan"));
 }
 
 }  // namespace content

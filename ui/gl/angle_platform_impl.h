@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,14 +8,17 @@
 // Implements the ANGLE platform interface, for functionality like
 // histograms and trace profiling.
 
-#include "base/callback_forward.h"
-#include "ui/gl/gl_context_egl.h"
+#include "ui/gl/gl_bindings.h"
 #include "ui/gl/gl_export.h"
+
+typedef void* EGLDisplay;
 
 namespace angle {
 
-GL_EXPORT bool InitializePlatform(EGLDisplay display);
-GL_EXPORT void ResetPlatform(EGLDisplay display);
+GL_EXPORT bool InitializePlatform(EGLDisplay display,
+                                  GLGetProcAddressProc get_proc_address);
+GL_EXPORT void ResetPlatform(EGLDisplay display,
+                             GLGetProcAddressProc get_proc_address);
 
 }  // namespace angle
 

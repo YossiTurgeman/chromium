@@ -39,24 +39,48 @@ class LayoutSVGFilterPrimitive final : public LayoutObject {
 
  private:
   bool IsChildAllowed(LayoutObject*, const ComputedStyle&) const override {
+    NOT_DESTROYED();
     return false;
   }
 
-  void StyleDidChange(StyleDifference, const ComputedStyle*) override;
-  void UpdateLayout() override;
+  void WillBeDestroyed() override;
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle*,
+                      const StyleChangeContext&) override;
+  SVGLayoutResult UpdateSVGLayout(const SVGLayoutInfo&) override;
 
-  const char* GetName() const override { return "LayoutSVGFilterPrimitive"; }
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectSVG ||
-           type == kLayoutObjectSVGFilterPrimitive ||
-           LayoutObject::IsOfType(type);
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutSVGFilterPrimitive";
   }
-  FloatRect ObjectBoundingBox() const override { return FloatRect(); }
-  FloatRect VisualRectInLocalSVGCoordinates() const override {
-    return FloatRect();
+  bool IsSVG() const final {
+    NOT_DESTROYED();
+    return true;
   }
-  FloatRect LocalBoundingBoxRectForAccessibility() const override {
-    return FloatRect();
+  bool IsSVGFilterPrimitive() const final {
+    NOT_DESTROYED();
+    return true;
+  }
+  gfx::RectF ObjectBoundingBox() const override {
+    NOT_DESTROYED();
+    return gfx::RectF();
+  }
+  gfx::RectF StrokeBoundingBox() const override {
+    NOT_DESTROYED();
+    return gfx::RectF();
+  }
+  gfx::RectF VisualRectInLocalSVGCoordinates() const override {
+    NOT_DESTROYED();
+    return gfx::RectF();
+  }
+  gfx::RectF LocalBoundingBoxRectForAccessibility(
+      IncludeDescendants include_descendants) const override {
+    NOT_DESTROYED();
+    return gfx::RectF();
+  }
+  gfx::RectF DecoratedBoundingBox() const override {
+    NOT_DESTROYED();
+    return gfx::RectF();
   }
 };
 

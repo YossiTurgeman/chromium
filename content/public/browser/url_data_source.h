@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,10 @@
 #include <memory>
 #include <string>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
-#include "base/single_thread_task_runner.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/browser/web_ui_data_source.h"
-#include "ui/base/template_expressions.h"
 
 class GURL;
 
@@ -70,7 +67,7 @@ class CONTENT_EXPORT URLDataSource {
 
   // Return the mimetype that should be sent with this response, or empty
   // string to specify no mime type.
-  virtual std::string GetMimeType(const std::string& path) = 0;
+  virtual std::string GetMimeType(const GURL& url) = 0;
 
   // Returns true if the URLDataSource should replace an existing URLDataSource
   // with the same name that has already been registered. The default is true.
@@ -98,6 +95,13 @@ class CONTENT_EXPORT URLDataSource {
   //  - "script-src chrome://resources 'self';"
   virtual std::string GetContentSecurityPolicy(
       network::mojom::CSPDirectiveName directive);
+
+  // By default, neither of these headers are set. Override to change this.
+  // TODO(crbug.com/40755309): Consider setting COOP:same-origin and
+  // COEP:require-corp as the default instead.
+  virtual std::string GetCrossOriginOpenerPolicy();
+  virtual std::string GetCrossOriginEmbedderPolicy();
+  virtual std::string GetCrossOriginResourcePolicy();
 
   // By default, the "X-Frame-Options: DENY" header is sent. To stop this from
   // happening, return false. It is OK to return false as needed.
@@ -127,9 +131,6 @@ class CONTENT_EXPORT URLDataSource {
   // Default implementation returns an empty string.
   virtual std::string GetAccessControlAllowOriginForOrigin(
       const std::string& origin);
-
-  // Replacements for i18n or null if no replacements are desired.
-  virtual const ui::TemplateReplacements* GetReplacements();
 
   // Whether i18n template expression replacement should be allowed in HTML
   // templates within JS files.

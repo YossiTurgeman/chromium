@@ -32,19 +32,24 @@
 #include "third_party/blink/renderer/core/editing/commands/editing_commands_utilities.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/editor.h"
+#include "third_party/blink/renderer/core/editing/relocatable_position.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
 #include "third_party/blink/renderer/core/editing/visible_position.h"
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/html/html_span_element.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
-InsertTextCommand::InsertTextCommand(Document& document,
-                                     const String& text,
-                                     RebalanceType rebalance_type)
+InsertTextCommand::InsertTextCommand(
+    Document& document,
+    const String& text,
+    PasswordEchoBehavior password_echo_behavior,
+    RebalanceType rebalance_type)
     : CompositeEditCommand(document),
       text_(text),
+      password_echo_behavior_(password_echo_behavior),
       rebalance_type_(rebalance_type) {}
 
 String InsertTextCommand::TextDataForInputEvent() const {
@@ -82,11 +87,17 @@ void InsertTextCommand::SetEndingSelectionWithoutValidation(
   // We could have inserted a part of composed character sequence,
   // so we are basically treating ending selection as a range to avoid
   // validation. <http://bugs.webkit.org/show_bug.cgi?id=15781>
-  SetEndingSelection(SelectionForUndoStep::From(
-      SelectionInDOMTree::Builder()
-          .Collapse(start_position)
-          .Extend(end_position)
-          .Build()));
+  SetEndingSelection(SelectionForUndoStep::From(SelectionInDomTree::Builder()
+                                                    .Collapse(start_position)
+                                                    .Extend(end_position)
+                                                    .Build()));
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    SetEndingDomSelection(
+        SelectionForUndoStep::From(SelectionInDomTree::Builder()
+                                       .Collapse(start_position)
+                                       .Extend(end_position)
+                                       .Build()));
+  }
 }
 
 // This avoids the expense of a full fledged delete operation, and avoids a
@@ -95,62 +106,78 @@ bool InsertTextCommand::PerformTrivialReplace(const String& text) {
   // We may need to manipulate neighboring whitespace if we're deleting text.
   // This case is tested in
   // InsertTextCommandTest_InsertEmptyTextAfterWhitespaceThatNeedsFixup.
-  if (text.IsEmpty())
+  if (text.empty())
     return false;
 
   if (!EndingSelection().IsRange())
     return false;
 
-  if (text.Contains('\t') || text.Contains(' ') || text.Contains('\n'))
+  if (text.contains('\t') || text.contains(' ') || text.contains('\n')) {
     return false;
+  }
 
-  Position start = EndingVisibleSelection().Start();
-  Position end_position = ReplaceSelectedTextInNode(text);
+  // Also if the text is surrounded by a hyperlink and all the contents of the
+  // link are selected, then we shouldn't be retaining the link with just one
+  // character because the user wouldn't be able to edit the link if it has only
+  // one character.
+  Position start = RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()
+                       ? EndingSelection().Start()
+                       : EndingVisibleSelection().Start();
+  Element* enclosing_anchor = EnclosingAnchorElement(start);
+  if (enclosing_anchor && text.length() <= 1) {
+    VisiblePosition first_in_anchor =
+        VisiblePosition::FirstPositionInNode(*enclosing_anchor);
+    VisiblePosition last_in_anchor =
+        VisiblePosition::LastPositionInNode(*enclosing_anchor);
+    Position end = RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()
+                       ? EndingSelection().End()
+                       : EndingVisibleSelection().End();
+    if (first_in_anchor.DeepEquivalent() == start &&
+        last_in_anchor.DeepEquivalent() == end)
+      return false;
+  }
+
+  RelocatablePosition* relocatable_start =
+      MakeGarbageCollected<RelocatablePosition>(start);
+  Position end_position =
+      ReplaceSelectedTextInNode(text, password_echo_behavior_);
   if (end_position.IsNull())
     return false;
 
-  SetEndingSelectionWithoutValidation(start, end_position);
+  SetEndingSelectionWithoutValidation(relocatable_start->GetPosition(),
+                                      end_position);
   SetEndingSelection(SelectionForUndoStep::From(
-      SelectionInDOMTree::Builder()
-          .Collapse(EndingVisibleSelection().End())
+      SelectionInDomTree::Builder()
+          .Collapse(RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()
+                        ? EndingSelection().End()
+                        : EndingVisibleSelection().End())
           .Build()));
-  return true;
-}
-
-bool InsertTextCommand::PerformOverwrite(const String& text) {
-  Position start = EndingVisibleSelection().Start();
-  auto* text_node = DynamicTo<Text>(start.ComputeContainerNode());
-  if (start.IsNull() || !start.IsOffsetInAnchor() || !text_node)
-    return false;
-
-  unsigned count = std::min(
-      text.length(), text_node->length() - start.OffsetInContainerNode());
-  if (!count)
-    return false;
-
-  ReplaceTextInNode(text_node, start.OffsetInContainerNode(), count, text);
-
-  Position end_position =
-      Position(text_node, start.OffsetInContainerNode() + text.length());
-  SetEndingSelectionWithoutValidation(start, end_position);
-  if (EndingSelection().IsNone())
-    return true;
-  SetEndingSelection(SelectionForUndoStep::From(
-      SelectionInDOMTree::Builder()
-          .Collapse(EndingVisibleSelection().End())
-          .Build()));
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    SetEndingDomSelection(
+        SelectionForUndoStep::From(SelectionInDomTree::Builder()
+                                       .Collapse(EndingVisibleSelection().End())
+                                       .Build()));
+  }
   return true;
 }
 
 void InsertTextCommand::DoApply(EditingState* editing_state) {
-  DCHECK_EQ(text_.find('\n'), kNotFound);
+  DCHECK(!text_.contains('\n'));
 
   // TODO(editing-dev): We shouldn't construct an InsertTextCommand with none or
   // invalid selection.
-  const VisibleSelection& visible_selection = EndingVisibleSelection();
-  if (visible_selection.IsNone() ||
-      !visible_selection.IsValidFor(GetDocument()))
-    return;
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    const SelectionForUndoStep& selection = EndingSelection();
+    if (selection.IsNone() || !selection.IsValidFor(GetDocument())) {
+      return;
+    }
+  } else {
+    const VisibleSelection& visible_selection = EndingVisibleSelection();
+    if (visible_selection.IsNone() ||
+        !visible_selection.IsValidFor(GetDocument())) {
+      return;
+    }
+  }
 
   // Delete the current selection.
   // FIXME: This delete operation blows away the typing style.
@@ -158,8 +185,14 @@ void InsertTextCommand::DoApply(EditingState* editing_state) {
     if (PerformTrivialReplace(text_))
       return;
     GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
-    bool end_of_selection_was_at_start_of_block =
-        IsStartOfBlock(EndingVisibleSelection().VisibleEnd());
+    bool end_of_selection_was_at_start_of_block;
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      end_of_selection_was_at_start_of_block =
+          IsStartOfBlock(EndingSelection().End());
+    } else {
+      end_of_selection_was_at_start_of_block =
+          IsStartOfBlock(EndingVisibleSelection().VisibleEnd());
+    }
     if (!DeleteSelection(editing_state, DeleteSelectionOptions::Builder()
                                             .SetMergeBlocksAfterDelete(true)
                                             .Build()))
@@ -178,40 +211,33 @@ void InsertTextCommand::DoApply(EditingState* editing_state) {
             GetDocument().GetExecutionContext());
       }
     }
-  } else if (GetDocument().GetFrame()->GetEditor().IsOverwriteModeEnabled()) {
-    if (PerformOverwrite(text_))
-      return;
   }
 
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
 
-  // Reached by InsertTextCommandTest.NoVisibleSelectionAfterDeletingSelection
-  ABORT_EDITING_COMMAND_IF(EndingVisibleSelection().IsNone());
-
-  Position start_position(EndingVisibleSelection().Start());
-
-  Position placeholder;
-  // We want to remove preserved newlines and brs that will collapse (and thus
-  // become unnecessary) when content is inserted just before them.
-  // FIXME: We shouldn't really have to do this, but removing placeholders is a
-  // workaround for 9661.
-  // If the caret is just before a placeholder, downstream will normalize the
-  // caret to it.
-  Position downstream(MostForwardCaretPosition(start_position));
-  if (LineBreakExistsAtPosition(downstream)) {
-    // FIXME: This doesn't handle placeholders at the end of anonymous blocks.
-    VisiblePosition caret = CreateVisiblePosition(start_position);
-    if (IsEndOfBlock(caret) && IsStartOfParagraph(caret))
-      placeholder = downstream;
-    // Don't remove the placeholder yet, otherwise the block we're inserting
-    // into would collapse before we get a chance to insert into it.  We check
-    // for a placeholder now, though, because doing so requires the creation of
-    // a VisiblePosition, and if we did that post-insertion it would force a
-    // layout.
+  // When the flag is turned on, `CanonicalPosition` directly returns the
+  // visually equivalent position, no need for this check.
+  // See https://issues.chromium.org/issues/40547104 for more details.
+  if (!RuntimeEnabledFeatures::
+          UsePositionIfIsVisuallyEquivalentCandidateEnabled()) {
+    // Reached by InsertTextCommandTest.NoVisibleSelectionAfterDeletingSelection
+    ABORT_EDITING_COMMAND_IF(
+        RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()
+            ? EndingSelection().IsNone()
+            : EndingVisibleSelection().IsNone());
   }
 
+  Position start_position(
+      RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()
+          ? EndingSelection().Start()
+          : EndingVisibleSelection().Start());
+
+  Position placeholder = ComputePlaceholderToCollapseAt(start_position);
+
   // Insert the character at the leftmost candidate.
-  start_position = MostBackwardCaretPosition(start_position);
+  if (!RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    start_position = MostBackwardCaretPosition(start_position);
+  }
 
   // It is possible for the node that contains startPosition to contain only
   // unrendered whitespace, and so deleteInsignificantText could remove it.
@@ -219,8 +245,21 @@ void InsertTextCommand::DoApply(EditingState* editing_state) {
   DCHECK(start_position.ComputeContainerNode()) << start_position;
   Position position_before_start_node(
       Position::InParentBeforeNode(*start_position.ComputeContainerNode()));
-  DeleteInsignificantText(start_position,
-                          MostForwardCaretPosition(start_position));
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    // Sweep unrendered whitespace on both sides of the caret without
+    // canonicalizing start_position. MostBackward/MostForward only define
+    // the cleanup range; RelocatablePosition recovers start_position after
+    // deletions so the user's insertion point is preserved.
+    Position cleanup_start = MostBackwardCaretPosition(start_position);
+    Position cleanup_end = MostForwardCaretPosition(start_position);
+    auto* relocatable_start =
+        MakeGarbageCollected<RelocatablePosition>(start_position);
+    DeleteInsignificantText(cleanup_start, cleanup_end);
+    start_position = relocatable_start->GetPosition();
+  } else {
+    DeleteInsignificantText(start_position,
+                            MostForwardCaretPosition(start_position));
+  }
 
   // TODO(editing-dev): Use of UpdateStyleAndLayout()
   // needs to be audited.  See http://crbug.com/590369 for more details.
@@ -228,8 +267,11 @@ void InsertTextCommand::DoApply(EditingState* editing_state) {
 
   if (!start_position.IsConnected())
     start_position = position_before_start_node;
-  if (!IsVisuallyEquivalentCandidate(start_position))
-    start_position = MostForwardCaretPosition(start_position);
+  if (!RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    if (!IsVisuallyEquivalentCandidate(start_position)) {
+      start_position = MostForwardCaretPosition(start_position);
+    }
+  }
 
   start_position =
       PositionAvoidingSpecialElementBoundary(start_position, editing_state);
@@ -260,7 +302,7 @@ void InsertTextCommand::DoApply(EditingState* editing_state) {
     auto* text_node = To<Text>(start_position.ComputeContainerNode());
     const unsigned offset = start_position.OffsetInContainerNode();
 
-    InsertTextIntoNode(text_node, offset, text_);
+    InsertTextIntoNode(text_node, offset, text_, password_echo_behavior_);
     end_position = Position(text_node, offset + text_.length());
 
     if (rebalance_type_ == kRebalanceLeadingAndTrailingWhitespaces) {
@@ -294,12 +336,32 @@ void InsertTextCommand::DoApply(EditingState* editing_state) {
     }
   }
 
-  SelectionInDOMTree::Builder builder;
-  const VisibleSelection& selection = EndingVisibleSelection();
-  builder.SetAffinity(selection.Affinity());
-  if (selection.End().IsNotNull())
-    builder.Collapse(selection.End());
+  TextAffinity selection_affinity;
+  Position selection_end;
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    const SelectionForUndoStep& end_selection = EndingSelection();
+    selection_affinity = end_selection.Affinity();
+    selection_end = end_selection.End();
+  } else {
+    const VisibleSelection& selection = EndingVisibleSelection();
+    selection_affinity = selection.Affinity();
+    selection_end = selection.End();
+  }
+
+  SelectionInDomTree::Builder builder;
+  if (RuntimeEnabledFeatures::CaretWithTextAffinityUpstreamEnabled() &&
+      text_ == " " && !IsRichlyEditablePosition(start_position)) {
+    builder.SetAffinity(TextAffinity::kUpstreamIfPossible);
+  } else {
+    builder.SetAffinity(selection_affinity);
+  }
+  if (selection_end.IsNotNull()) {
+    builder.Collapse(selection_end);
+  }
   SetEndingSelection(SelectionForUndoStep::From(builder.Build()));
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    SetEndingDomSelection(SelectionForUndoStep::From(builder.Build()));
+  }
 }
 
 Position InsertTextCommand::InsertTab(const Position& pos,
@@ -316,7 +378,8 @@ Position InsertTextCommand::InsertTab(const Position& pos,
 
   // keep tabs coalesced in tab span
   if (IsTabHTMLSpanElementTextNode(node)) {
-    InsertTextIntoNode(text_node, offset, "\t");
+    InsertTextIntoNode(text_node, offset, "\t",
+                       PasswordEchoBehavior::kDoNotEcho);
     return Position(text_node, offset + 1);
   }
 

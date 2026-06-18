@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 
 #include <stdint.h>
 
-#include <list>
-
+#include "base/time/time.h"
 #include "cc/cc_export.h"
+#include "cc/input/main_thread_scrolling_reason.h"
 #include "cc/trees/property_tree.h"
 #include "ui/events/types/scroll_types.h"
 
@@ -19,6 +19,7 @@ class CC_EXPORT ScrollStateData {
  public:
   ScrollStateData();
   ScrollStateData(const ScrollStateData& other);
+  ScrollStateData& operator=(const ScrollStateData& other);
 
   // Scroll delta in viewport coordinates (DIP).
   double delta_x;
@@ -31,9 +32,6 @@ class CC_EXPORT ScrollStateData {
   // Pointer (i.e. cursor/touch point) position in viewport coordinates (DIP).
   int position_x;
   int position_y;
-  // Scroll velocity in DIP/seconds.
-  double velocity_x;
-  double velocity_y;
 
   bool is_beginning;
   bool is_in_inertial_phase;
@@ -47,6 +45,8 @@ class CC_EXPORT ScrollStateData {
   // True if the user interacts directly with the display, e.g., via
   // touch.
   bool is_direct_manipulation;
+  // True if the scroll is the result of a scrollbar interaction.
+  bool is_scrollbar_interaction;
 
   // Granularity units for the scroll delta.
   ui::ScrollGranularity delta_granularity;
@@ -71,9 +71,14 @@ class CC_EXPORT ScrollStateData {
   void set_current_native_scrolling_element(ElementId element_id);
 
   // Used in scroll unification to specify that a scroll state has been hit
-  // tested on the main thread. If this is true, the hit test result will be
+  // tested on the main thread. If this is nonzero, the hit test result will be
   // placed in the current_native_scrolling_element_.
-  bool is_main_thread_hit_tested;
+  uint32_t main_thread_hit_tested_reasons =
+      MainThreadScrollingReason::kNotScrollingOnMain;
+
+  // Performance Scroll Timing API: hardware timestamp of the originating
+  // input event. Null when not set by the caller.
+  base::TimeTicks event_timestamp;
 
  private:
   // The id of the last native element to respond to a scroll, or 0 if none

@@ -1,38 +1,44 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import unittest
-
-import expand_owners
 import os
 import shutil
 import tempfile
+import unittest
 import xml.dom.minidom
+from pathlib import Path
 
-_DEFAULT_COMPONENT = '# COMPONENT: Default>Component'
+import mock  # type: ignore
+import setup_modules  # pylint: disable=unused-import
 
+from chromium_src.tools.metrics.common.path_util import CHROMIUM_SRC_PATH, METRICS_TOOLS_PATH
+import chromium_src.tools.metrics.histograms.expand_owners as expand_owners
 
 def _GetFileDirective(path):
   """Returns a file directive line.
 
   Args:
-    path: An absolute path, e.g. '/some/directory/chromium/src/tools/OWNERS'.
+    path: An absolute path, e.g. '/some/directory/subdirectory/tools/OWNERS'.
 
   Returns:
     A file directive that can be used in an OWNERS file, e.g.
     file://tools/OWNERS.
   """
-  return ''.join(['file://', path.split('src/')[1]])
+  return ''.join(['file://', path[len(str(CHROMIUM_SRC_PATH)) + 1:]])
 
 
 def _GetSrcRelativePath(path):
   """Returns a(n) src-relative path for the given file path.
 
   Args:
-    path: An absolute path, e.g. '/some/directory/chromium/src/tools/OWNERS'.
+    path: An absolute path, e.g. '/some/directory/subdirectory/tools/OWNERS'.
+
+  Returns:
+    A src-relative path, e.g.'src/tools/OWNERS'.
   """
-  return path.split('chromium/')[1]
+  assert path.startswith(str(CHROMIUM_SRC_PATH))
+  return expand_owners.SRC + path[len(str(CHROMIUM_SRC_PATH)) + 1:]
 
 
 def _MakeOwnersFile(filename, directory):
@@ -46,7 +52,7 @@ def _MakeOwnersFile(filename, directory):
     The temporary file's absolute path.
   """
   if not directory:
-    directory = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+    directory = str(METRICS_TOOLS_PATH / 'histograms')
   owners_file = tempfile.NamedTemporaryFile(suffix=filename, dir=directory)
   return os.path.abspath(owners_file.name)
 
@@ -55,21 +61,88 @@ class ExpandOwnersTest(unittest.TestCase):
 
   def setUp(self):
     super(ExpandOwnersTest, self).setUp()
-    self.temp_dir = tempfile.mkdtemp(
-        dir=os.path.abspath(os.path.join(os.path.dirname(__file__))))
+    self.temp_dir = tempfile.mkdtemp(dir=str(METRICS_TOOLS_PATH / 'histograms'))
+
+    # The below construction is used rather than __file__.endswith() because
+    # the file extension could be .py or .pyc.
+    assert os.sep.join(
+        ['tools', 'metrics', 'histograms',
+         'expand_owners_unittest.py']) in __file__
 
   def tearDown(self):
     super(ExpandOwnersTest, self).tearDown()
     shutil.rmtree(self.temp_dir)
 
-  def testExpandOwnersWithSimpleOWNERSFilePath(self):
+  def testExpandOwnersUsesMetadataOverOwners(self):
+    """Checks that DIR_METADATA is used if available"""
+    with open(os.path.join(self.temp_dir, 'DIR_METADATA'), 'w+') as md:
+      md.write('\n'.join([
+          'monorail {', 'component: "Bees"', '}', 'buganizer_public {',
+          'component_id:123456', '}'
+      ]))
+    absolute_path = _MakeOwnersFile('simple_OWNERS', self.temp_dir)
+    with open(absolute_path, 'w') as owners_file:
+      owners_file.write('\n'.join(['amy@chromium.org', 'rae@chromium.org']))
+    self.maxDiff = None
+    src_relative_path = _GetSrcRelativePath(absolute_path)
+    histograms = xml.dom.minidom.parseString("""
+<histograms>
+
+<histogram name="Caffeination" units="mg">
+  <owner>joe@chromium.org</owner>
+  <owner>{path}</owner>
+  <summary>I like coffee.</summary>
+</histogram>
+
+<histogram name="Maple.Syrup" units="units">
+  <owner>joe@chromium.org</owner>
+  <owner>{path}</owner>
+  <owner>kim@chromium.org</owner>
+  <summary>I like maple syrup, too.</summary>
+</histogram>
+
+</histograms>
+""".format(path=src_relative_path))
+
+    expected_histograms = xml.dom.minidom.parseString("""
+<histograms>
+
+<histogram name="Caffeination" units="mg">
+  <owner>joe@chromium.org</owner>
+  <owner>amy@chromium.org</owner>
+  <owner>rae@chromium.org</owner>
+  <summary>I like coffee.</summary>
+  <component>123456</component>
+</histogram>
+
+<histogram name="Maple.Syrup" units="units">
+  <owner>joe@chromium.org</owner>
+  <owner>amy@chromium.org</owner>
+  <owner>rae@chromium.org</owner>
+  <owner>kim@chromium.org</owner>
+  <summary>I like maple syrup, too.</summary>
+  <component>123456</component>
+</histogram>
+
+</histograms>
+""")
+
+    expand_owners.ExpandHistogramsOWNERS(histograms)
+    self.assertMultiLineEqual(histograms.toxml(), expected_histograms.toxml())
+
+  @mock.patch(
+      'chromium_src.tools.metrics.histograms.' \
+      'expand_owners.ExtractComponentViaDirmd'
+  )
+  def testExpandOwnersWithSimpleOWNERSFilePath(self, mock_dirmd_extract):
     """Checks that OWNERS files are expanded."""
+    mock_dirmd_extract.return_value = None
     absolute_path = _MakeOwnersFile('simple_OWNERS', self.temp_dir)
     src_relative_path = _GetSrcRelativePath(absolute_path)
 
     with open(absolute_path, 'w') as owners_file:
       owners_file.write('\n'.join(
-          ['amy@chromium.org', _DEFAULT_COMPONENT, 'rae@chromium.org']))
+          ['amy@chromium.org', 'rae@chromium.org']))
 
     histograms = xml.dom.minidom.parseString("""
 <histograms>
@@ -98,7 +171,6 @@ class ExpandOwnersTest(unittest.TestCase):
   <owner>amy@chromium.org</owner>
   <owner>rae@chromium.org</owner>
   <summary>I like coffee.</summary>
-  <component>Default&gt;Component</component>
 </histogram>
 
 <histogram name="Maple.Syrup" units="units">
@@ -107,7 +179,6 @@ class ExpandOwnersTest(unittest.TestCase):
   <owner>rae@chromium.org</owner>
   <owner>kim@chromium.org</owner>
   <summary>I like maple syrup, too.</summary>
-  <component>Default&gt;Component</component>
 </histogram>
 
 </histograms>
@@ -116,16 +187,23 @@ class ExpandOwnersTest(unittest.TestCase):
     expand_owners.ExpandHistogramsOWNERS(histograms)
     self.assertMultiLineEqual(histograms.toxml(), expected_histograms.toxml())
 
-  def testExpandOwnersWithLongFilePath(self):
+  @mock.patch(
+      'chromium_src.tools.metrics.histograms.' \
+      'expand_owners.ExtractComponentViaDirmd'
+  )
+  def testExpandOwnersWithLongFilePath(self, mock_dirmd_extract):
+    """Checks that long OWNERS file paths are supported.
+
+    Most OWNERS file paths appear between owners tags on the same line, e.g.
+    <owner>src/chrome/browser</owner>. However, especially long paths may appear
+    on their own line between the tags.
     """
-    Check that long file path which forces <owner> tags to separate lines is
-    supported.
-    """
+    mock_dirmd_extract.return_value = None
     absolute_path = _MakeOwnersFile('simple_OWNERS', self.temp_dir)
     src_relative_path = _GetSrcRelativePath(absolute_path)
 
     with open(absolute_path, 'w') as owners_file:
-      owners_file.write('\n'.join(['amy@chromium.org', _DEFAULT_COMPONENT]))
+      owners_file.write('\n'.join(['amy@chromium.org']))
 
     histograms = xml.dom.minidom.parseString("""
 <histograms>
@@ -148,7 +226,6 @@ class ExpandOwnersTest(unittest.TestCase):
   <owner>joe@chromium.org</owner>
   <owner>amy@chromium.org</owner>
   <summary>I like coffee.</summary>
-  <component>Default&gt;Component</component>
 </histogram>
 
 </histograms>
@@ -157,14 +234,19 @@ class ExpandOwnersTest(unittest.TestCase):
     expand_owners.ExpandHistogramsOWNERS(histograms)
     self.assertMultiLineEqual(histograms.toxml(), expected_histograms.toxml())
 
-  def testExpandOwnersWithDuplicateOwners(self):
+  @mock.patch(
+      'chromium_src.tools.metrics.histograms.' \
+      'expand_owners.ExtractComponentViaDirmd'
+  )
+  def testExpandOwnersWithDuplicateOwners(self, mock_dirmd_extract):
     """Checks that owners are unique."""
+    mock_dirmd_extract.return_value = None
     absolute_path = _MakeOwnersFile('simple_OWNERS', self.temp_dir)
     src_relative_path = _GetSrcRelativePath(absolute_path)
 
     with open(absolute_path, 'w') as owners_file:
       owners_file.write('\n'.join(
-          ['amy@chromium.org', _DEFAULT_COMPONENT, 'rae@chromium.org']))
+          ['amy@chromium.org', 'rae@chromium.org']))
 
     histograms = xml.dom.minidom.parseString("""
 <histograms>
@@ -185,7 +267,6 @@ class ExpandOwnersTest(unittest.TestCase):
   <owner>rae@chromium.org</owner>
   <owner>amy@chromium.org</owner>
   <summary>I like coffee.</summary>
-  <component>Default&gt;Component</component>
 </histogram>
 
 </histograms>
@@ -194,8 +275,13 @@ class ExpandOwnersTest(unittest.TestCase):
     expand_owners.ExpandHistogramsOWNERS(histograms)
     self.assertMultiLineEqual(histograms.toxml(), expected_histograms.toxml())
 
-  def testExpandOwnersWithFileDirectiveOWNERSFilePath(self):
+  @mock.patch(
+      'chromium_src.tools.metrics.histograms.' \
+      'expand_owners.ExtractComponentViaDirmd'
+  )
+  def testExpandOwnersWithFileDirectiveOWNERSFilePath(self, mock_dirmd_extract):
     """Checks that OWNERS files with file directives are expanded."""
+    mock_dirmd_extract.return_value = None
     simple_absolute_path = _MakeOwnersFile('simple_OWNERS', self.temp_dir)
 
     with open(simple_absolute_path, 'w') as owners_file:
@@ -209,7 +295,7 @@ class ExpandOwnersTest(unittest.TestCase):
     directive = _GetFileDirective(simple_absolute_path)
     with open(file_directive_absolute_path, 'w') as owners_file:
       owners_file.write('\n'.join([
-          'amy@chromium.org', directive, 'rae@chromium.org', _DEFAULT_COMPONENT
+          'amy@chromium.org', directive, 'rae@chromium.org',
       ]))
 
     histograms = xml.dom.minidom.parseString("""
@@ -233,7 +319,6 @@ class ExpandOwnersTest(unittest.TestCase):
   <owner>naz@chromium.org</owner>
   <owner>rae@chromium.org</owner>
   <summary>I like coffee.</summary>
-  <component>Default&gt;Component</component>
 </histogram>
 
 </histograms>
@@ -242,13 +327,19 @@ class ExpandOwnersTest(unittest.TestCase):
     expand_owners.ExpandHistogramsOWNERS(histograms)
     self.assertEqual(histograms.toxml(), expected_histograms.toxml())
 
-  def testExpandOwnersForOWNERSFileWithDuplicateComponents(self):
+  @mock.patch(
+      'chromium_src.tools.metrics.histograms.' \
+      'expand_owners.ExtractComponentViaDirmd'
+  )
+  def testExpandOwnersForOWNERSFileWithDuplicateComponents(
+      self, mock_dirmd_extract):
     """Checks that only one component tag is added if there are duplicates."""
+    mock_dirmd_extract.return_value = None
     absolute_path = _MakeOwnersFile('OWNERS', self.temp_dir)
     src_relative_path = _GetSrcRelativePath(absolute_path)
 
     with open(absolute_path, 'w') as owners_file:
-      owners_file.write('\n'.join(['amy@chromium.org', _DEFAULT_COMPONENT]))
+      owners_file.write('\n'.join(['amy@chromium.org']))
 
     duplicate_owner_absolute_path = (
         _MakeOwnersFile('duplicate_owner_OWNERS', self.temp_dir))
@@ -256,7 +347,7 @@ class ExpandOwnersTest(unittest.TestCase):
         _GetSrcRelativePath(duplicate_owner_absolute_path))
 
     with open(duplicate_owner_absolute_path, 'w') as owners_file:
-      owners_file.write('\n'.join(['rae@chromium.org', _DEFAULT_COMPONENT]))
+      owners_file.write('\n'.join(['rae@chromium.org']))
 
     histograms = xml.dom.minidom.parseString("""
 <histograms>
@@ -266,7 +357,6 @@ class ExpandOwnersTest(unittest.TestCase):
   <owner>{}</owner>
   <owner>{}</owner>
   <summary>I like coffee.</summary>
-  <component>Default&gt;Component</component>
 </histogram>
 
 </histograms>
@@ -280,7 +370,6 @@ class ExpandOwnersTest(unittest.TestCase):
   <owner>amy@chromium.org</owner>
   <owner>rae@chromium.org</owner>
   <summary>I like coffee.</summary>
-  <component>Default&gt;Component</component>
 </histogram>
 
 </histograms>
@@ -324,10 +413,10 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """)
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         expand_owners.Error,
-        'The histogram Caffeination must have a valid first owner, i.e. a '
-        'person with an @google.com or @chromium.org email address.'):
+        'The histogram Caffeination must have a valid primary owner, i.e. a '
+        'Googler with an @google.com or @chromium.org email address.'):
       expand_owners.ExpandHistogramsOWNERS(histograms_without_valid_first_owner)
 
   def testExpandOwnersWithoutValidPrimaryOwner_TeamEmail(self):
@@ -347,10 +436,10 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """)
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         expand_owners.Error,
-        'The histogram Caffeination must have a valid first owner, i.e. a '
-        'person with an @google.com or @chromium.org email address.'):
+        'The histogram Caffeination must have a valid primary owner, i.e. a '
+        'Googler with an @google.com or @chromium.org email address.'):
       expand_owners.ExpandHistogramsOWNERS(histograms_without_valid_first_owner)
 
   def testExpandOwnersWithoutValidPrimaryOwner_InvalidEmail(self):
@@ -370,10 +459,10 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """)
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         expand_owners.Error,
-        'The histogram Caffeination must have a valid first owner, i.e. a '
-        'person with an @google.com or @chromium.org email address.'):
+        'The histogram Caffeination must have a valid primary owner, i.e. a '
+        'Googler with an @google.com or @chromium.org email address.'):
       expand_owners.ExpandHistogramsOWNERS(histograms_without_valid_first_owner)
 
   def testExpandOwnersWithFakeFilePath(self):
@@ -390,9 +479,8 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """)
 
-    with self.assertRaisesRegexp(
-        expand_owners.Error,
-        r'The file at .*src/medium/medium/roast/OWNERS does not exist\.'):
+    with self.assertRaisesRegex(
+        expand_owners.Error, r'The file at .*medium.*OWNERS does not exist\.'):
       expand_owners.ExpandHistogramsOWNERS(histograms_with_fake_file_path)
 
   def testExpandOwnersWithoutOwnersFromFile(self):
@@ -415,15 +503,10 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """.format(src_relative_path))
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         expand_owners.Error,
         r'No emails could be derived from .*empty_OWNERS\.'):
       expand_owners.ExpandHistogramsOWNERS(histograms_without_owners_from_file)
-
-    with self.assertRaisesRegexp(
-        expand_owners.Error,
-        r'The file at .*src/medium/medium/roast/OWNERS does not exist\.'):
-      expand_owners.ExpandHistogramsOWNERS(histograms_with_fake_file_path)
 
   def testExpandOwnersWithSameOwners(self):
     """
@@ -449,8 +532,7 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """.format(src_relative_path))
 
-    self.assertEqual(
-        expand_owners.ExpandHistogramsOWNERS(histograms_string), [])
+    self.assertIsNone(expand_owners.ExpandHistogramsOWNERS(histograms_string))
 
   def testExpandOwnersWithoutOWNERSPathPrefix(self):
     """Checks that an error is raised when the path is not well-formatted."""
@@ -466,7 +548,7 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """)
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         expand_owners.Error,
         r'The given path latte/OWNERS is not well-formatted.*\.'):
       expand_owners.ExpandHistogramsOWNERS(histograms_without_src_prefix)
@@ -485,7 +567,7 @@ class ExpandOwnersTest(unittest.TestCase):
 </histograms>
 """)
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         expand_owners.Error,
         r'The given path src/latte/file is not well-formatted.*\.'):
       expand_owners.ExpandHistogramsOWNERS(histograms_without_owners_suffix)
@@ -509,8 +591,7 @@ class ExpandOwnersTest(unittest.TestCase):
     ]
 
     with open(absolute_path, 'w') as owners_file:
-      owners_file.write('\n'.join([joe + '  # Words.', _DEFAULT_COMPONENT] +
-                                  unsupported_symbols))
+      owners_file.write('\n'.join([joe + '  # Words.'] + unsupported_symbols))
 
     self.assertEqual(
         expand_owners._ExtractEmailAddressesFromOWNERS(absolute_path), [joe])
@@ -523,34 +604,27 @@ class ExpandOwnersTest(unittest.TestCase):
     with open(file_directive_absolute_path, 'w') as owners_file:
       owners_file.write(directive)
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         expand_owners.Error,
         r'.*The path.*loop_OWNERS may be part of an OWNERS loop\.'):
       expand_owners._ExtractEmailAddressesFromOWNERS(
           file_directive_absolute_path)
 
+  def testGetHigherLevelPath(self):
+    """Checks that higher directories are recursively checked for OWNERS.
 
-class GetHigherLevelOwnersFilePathTest(unittest.TestCase):
-
-  def testGetHigherLevelPathDerivedPathInSrcDirectory(self):
-    """Checks that higher directories are recursively checked for OWNERS."""
-    path = expand_owners._GetOwnersFilePath('src/banana/chocolate/OWNERS')
-    self.assertRegexpMatches(
-        expand_owners._GetHigherLevelOwnersFilePath(path), r'.*src/OWNERS')
-
-  def testGetHigherLevelPathGivenPathInSrcDirectory(self):
-    """Checks that '' is returned when the last directory is reached.
-
-    If the directory above the tools directory is src, then receiving
-    'src/OWNERS' is the point at which recursion stops. However, this directory
-    may not always be src.
+    Also, checks that there isn't a recursive loop.
     """
-    path_to_chromium_directory = [
-        os.path.dirname(__file__), '..', '..', '..', '..'
-    ]
-    path = os.path.abspath(
-        os.path.join(*(path_to_chromium_directory + ['src/OWNERS'])))
-    self.assertEqual(expand_owners._GetHigherLevelOwnersFilePath(path), '')
+    path = expand_owners._GetOwnersFilePath('src/banana/chocolate/OWNERS')
+    result = expand_owners._GetHigherLevelOwnersFilePath(path)
+
+    # The condition is true when the tools directory's parent directory is src,
+    # which is generally the case locally. However, the parent directory is not
+    # always src, e.g. on various testing bots.
+    if os.path.basename(str(CHROMIUM_SRC_PATH)) == 'src':
+      self.assertRegex(result, r'.*OWNERS')
+    else:
+      self.assertEqual(result, '')
 
 
 if __name__ == '__main__':

@@ -1,30 +1,35 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_ENTERPRISE_BROWSER_REPORTING_REPORT_SCHEDULER_H_
 #define COMPONENTS_ENTERPRISE_BROWSER_REPORTING_REPORT_SCHEDULER_H_
 
-#include <stdint.h>
 #include <memory>
+#include <string>
+#include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/observer_list_types.h"
 #include "base/time/time.h"
-#include "base/util/timer/wall_clock_timer.h"
-#include "components/enterprise/browser/reporting/report_generator.h"
+#include "base/timer/wall_clock_timer.h"
 #include "components/enterprise/browser/reporting/report_uploader.h"
+#include "components/enterprise/browser/reporting/report_util.h"
+#include "components/enterprise/browser/reporting/user_security_signals_service.h"
+#include "components/policy/core/common/cloud/dm_token.h"
 #include "components/prefs/pref_change_registrar.h"
 
 namespace policy {
 class CloudPolicyClient;
+class DMToken;
 }  // namespace policy
 
 namespace enterprise_reporting {
 
-class ReportingDelegateFactory;
+class ChromeProfileRequestGenerator;
+class RealTimeReportController;
+class ReportGenerator;
 
 // Schedules report generation and upload every 24 hours (and upon browser
 // update for desktop Chrome) while cloud reporting is enabled via
@@ -33,15 +38,6 @@ class ReportingDelegateFactory;
 // completes.
 class ReportScheduler {
  public:
-  // The trigger leading to report generation. Values are bitmasks in the
-  // |pending_triggers_| bitfield.
-  enum ReportTrigger : uint32_t {
-    kTriggerNone = 0,              // No trigger.
-    kTriggerTimer = 1U << 0,       // The periodic timer expired.
-    kTriggerUpdate = 1U << 1,      // An update was detected.
-    kTriggerNewVersion = 1U << 2,  // A new version is running.
-  };
-
   using ReportTriggerCallback = base::RepeatingCallback<void(ReportTrigger)>;
 
   class Delegate {
@@ -54,49 +50,91 @@ class ReportScheduler {
 
     void SetReportTriggerCallback(ReportTriggerCallback callback);
 
-    virtual PrefService* GetLocalState() = 0;
+    virtual PrefService* GetPrefService() = 0;
+
+    // Run once after initialization of the scheduler is complete.
+    virtual void OnInitializationCompleted();
+
+    // Browser version
     virtual void StartWatchingUpdatesIfNeeded(
         base::Time last_upload,
         base::TimeDelta upload_interval) = 0;
     virtual void StopWatchingUpdates() = 0;
-    virtual void SaveLastUploadVersion() = 0;
+    virtual void OnBrowserVersionUploaded() = 0;
+
+    virtual policy::DMToken GetProfileDMToken() = 0;
+    virtual std::string GetProfileClientId() = 0;
+
+    // Security signals
+    virtual bool AreSecurityReportsEnabled();
+    virtual bool UseCookiesInUploads();
+    // Invoked when security signals was uploaded by a report.
+    virtual void OnSecuritySignalsUploaded();
 
    protected:
     ReportTriggerCallback trigger_report_callback_;
+    // Only set for Profile-level schedulers.
+    std::unique_ptr<UserSecuritySignalsService> user_security_signals_service_;
   };
 
-  ReportScheduler(policy::CloudPolicyClient* client,
-                  std::unique_ptr<ReportGenerator> report_generator,
-                  ReportingDelegateFactory* delegate_factory);
+  struct CreateParams {
+    CreateParams();
+    CreateParams(const CreateParams&) = delete;
+    CreateParams& operator=(const CreateParams&) = delete;
+    CreateParams(CreateParams&& other);
+    CreateParams& operator=(CreateParams&& other);
+    ~CreateParams();
 
-  ReportScheduler(policy::CloudPolicyClient* client,
-                  std::unique_ptr<ReportGenerator> report_generator,
-                  std::unique_ptr<ReportScheduler::Delegate> delegate);
+    raw_ptr<policy::CloudPolicyClient> client;
+    std::unique_ptr<ReportGenerator> report_generator;
+    std::unique_ptr<RealTimeReportController> real_time_report_controller;
+    std::unique_ptr<ChromeProfileRequestGenerator> profile_request_generator;
+    std::unique_ptr<ReportScheduler::Delegate> delegate;
+    bool require_policy_fetch_with_profile_id = false;
+  };
+
+  explicit ReportScheduler(CreateParams params);
+
+  ReportScheduler(const ReportScheduler&) = delete;
+  ReportScheduler& operator=(const ReportScheduler&) = delete;
 
   ~ReportScheduler();
 
   // Returns true if cloud reporting is enabled.
   bool IsReportingEnabled() const;
+  // Returns true if security signals reporting is enabled.
+  bool AreSecurityReportsEnabled() const;
 
   // Returns true if next report has been scheduled. The report will be
   // scheduled only if the previous report is uploaded successfully and the
   // reporting policy is still enabled.
   bool IsNextReportScheduledForTesting() const;
 
-  void SetReportUploaderForTesting(std::unique_ptr<ReportUploader> uploader);
+  ReportTrigger GetActiveTriggerForTesting() const;
+  ReportGenerationConfig GetActiveGenerationConfigForTesting() const;
+
+  void QueueReportUploaderForTesting(std::unique_ptr<ReportUploader> uploader);
+  Delegate* GetDelegateForTesting();
 
   void OnDMTokenUpdated();
 
+  void UploadReport(base::OnceClosure on_report_uploaded);
+
  private:
   // Observes CloudReportingEnabled policy.
-  void RegisterPrefObserver();
+  void RegisterPrefObservers();
 
-  // Handles kCloudReportingEnabled policy value change, including the first
-  // policy value check during startup.
+  // Handles policy value changes for both kCloudReportingEnabled and
+  // kUserSecuritySignalsReporting, including the first policy value check
+  // during startup.
   void OnReportEnabledPrefChanged();
 
   // Stops the periodic timer and the update observer.
   void Stop();
+
+  // Stop the timer if there is any and reschedule the next report based on
+  // latest report frequency.
+  void RestartReportTimer();
 
   // Register |cloud_policy_client_| with dm token and client id for desktop
   // browser only. (Chrome OS doesn't need this step here.)
@@ -108,9 +146,10 @@ class ReportScheduler {
   // Starts report generation in response to |trigger|.
   void GenerateAndUploadReport(ReportTrigger trigger);
 
-  // Continues processing a report (contained in the |requests| collection) by
+  // Continues processing a report (contained in the |result| collection) by
   // sending it to the uploader.
-  void OnReportGenerated(ReportGenerator::ReportRequests requests);
+  void OnReportGenerated(
+      base::expected<ReportRequestQueue, ReportGenerationError> result);
 
   // Finishes processing following report upload. |status| indicates the result
   // of the attempted upload.
@@ -120,33 +159,55 @@ class ReportScheduler {
   // of another report.
   void RunPendingTriggers();
 
-  // Records that |trigger| was responsible for an upload attempt.
-  static void RecordUploadTrigger(ReportTrigger trigger);
+  // Records that `active_trigger_` was responsible for an upload attempt.
+  void RecordUploadTrigger();
+
+  ReportType TriggerToReportType(ReportTrigger trigger);
+
+  policy::DMToken GetDMToken();
 
   std::unique_ptr<Delegate> delegate_;
 
   // Policy value watcher
   PrefChangeRegistrar pref_change_registrar_;
 
-  policy::CloudPolicyClient* cloud_policy_client_;
+  raw_ptr<policy::CloudPolicyClient, DanglingUntriaged> cloud_policy_client_;
 
-  util::WallClockTimer request_timer_;
+  base::WallClockTimer request_timer_;
 
   std::unique_ptr<ReportUploader> report_uploader_;
 
   std::unique_ptr<ReportGenerator> report_generator_;
+  std::unique_ptr<ChromeProfileRequestGenerator> profile_request_generator_;
+  std::unique_ptr<RealTimeReportController> real_time_report_controller_;
 
-  // The trigger responsible for initiating active report generation.
-  ReportTrigger active_trigger_ = kTriggerNone;
+  // The configuration for  active report generation.
+  // If the configuration has `kTriggerNone` as its trigger, it means there is
+  // no active report generation/upload in progress.
+  ReportGenerationConfig active_report_generation_config_ =
+      ReportGenerationConfig(ReportTrigger::kTriggerNone);
+
+  // The start time of the active report generation/upload process.
+  base::TimeTicks report_generation_start_time_;
 
   // The set of triggers that have fired while processing a report (a bitfield
   // of ReportTrigger values). They will be handled following completion of the
   // in-process report.
   uint32_t pending_triggers_ = 0;
 
-  base::WeakPtrFactory<ReportScheduler> weak_ptr_factory_{this};
+  std::string reporting_pref_name_;
 
-  DISALLOW_COPY_AND_ASSIGN(ReportScheduler);
+  // If true, only schedule reports if the kPoliciesEverFetchedWithProfileId
+  // pref is true.
+  bool require_policy_fetch_with_profile_id_;
+
+  ReportType status_report_type_;
+
+  std::vector<std::unique_ptr<ReportUploader>> report_uploaders_for_test_;
+
+  base::OnceClosure on_manual_report_uploaded_;
+
+  base::WeakPtrFactory<ReportScheduler> weak_ptr_factory_{this};
 };
 
 }  // namespace enterprise_reporting

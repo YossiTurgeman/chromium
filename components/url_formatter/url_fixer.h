@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 #define COMPONENTS_URL_FORMATTER_URL_FIXER_H_
 
 #include <string>
+#include <string_view>
 
-#include "base/strings/string16.h"
 #include "url/gurl.h"
 
 namespace base {
@@ -17,12 +17,15 @@ class FilePath;
 namespace url {
 struct Component;
 struct Parsed;
-}
+}  // namespace url
 
-// This object is designed to convert various types of input into URLs that we
-// know are valid. For example, user typing in the URL bar or command line
-// options. This is NOT the place for converting between different types of URLs
-// or parsing them, see net_util.h for that.
+// These methods process user typed input that is meant to be a URL - like user
+// typing in the URL bar or command line switches. The output is NOT guaranteed
+// to be a valid URL.
+//
+// This is NOT the place for converting between different types of URLs or
+// parsing them, see net_util.h for that. These methods should only be used on
+// user typed input, NOT untrusted strings sourced from the web or elsewhere.
 namespace url_formatter {
 
 // Segments the given text string into parts of a URL. This is most useful for
@@ -30,16 +33,18 @@ namespace url_formatter {
 // segments. Currently does not segment "file" schemes.
 // Returns the canonicalized scheme, or the empty string when |text| is only
 // whitespace.
-std::string SegmentURL(const std::string& text, url::Parsed* parts);
-base::string16 SegmentURL(const base::string16& text, url::Parsed* parts);
+std::string SegmentURL(std::string_view text, url::Parsed* parts);
+std::u16string SegmentURL(std::u16string_view text, url::Parsed* parts);
 
-// Converts |text| to a fixed-up URL and returns it. Attempts to make some
-// "smart" adjustments to obviously-invalid input where possible.
-// |text| may be an absolute path to a file, which will get converted to a
-// "file:" URL.
+// Attempts to fix common problems in user-typed text, making some "smart"
+// adjustments to obviously-invalid input where possible.
 //
-// The result will be a "more" valid URL than the input. It may still not be
-// valid, so check the return value's validity or use possibly_invalid_spec().
+// The result can still be invalid, so check the return value's validity or
+// use possibly_invalid_spec(). DO NOT USE this method on untrusted strings
+// from the web or elsewhere. Only use this for user-typed input.
+//
+// If |text| may be an absolute path to a file, it will get converted to a
+// "file:" URL.
 //
 // Schemes "about" and "chrome" are normalized to "chrome://", with slashes.
 // "about:blank" is unaltered, as Webkit allows frames to access about:blank.
@@ -52,7 +57,7 @@ base::string16 SegmentURL(const base::string16& text, url::Parsed* parts);
 // |desired_tld| to the domain and prepend "www." (unless it, or a scheme, are
 // already present.)  This TLD should not have a leading '.' (use "com" instead
 // of ".com").
-GURL FixupURL(const std::string& text, const std::string& desired_tld);
+GURL FixupURL(const std::string& text, const std::string& desired_tld = "");
 
 // Converts |text| to a fixed-up URL, allowing it to be a relative path on the
 // local filesystem. Begin searching in |base_dir|; if empty, use the current

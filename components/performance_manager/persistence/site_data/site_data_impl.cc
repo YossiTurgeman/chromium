@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,9 @@
 
 #include <algorithm>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/strings/stringprintf.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/strings/strcat.h"
 
 namespace performance_manager {
 namespace internal {
@@ -43,8 +41,7 @@ std::vector<SiteDataFeatureProto*> GetAllFeaturesFromProto(
 
 // Observations windows have a default value of 2 hours, 95% of backgrounded
 // tabs don't use any of these features in this time window.
-static constexpr base::TimeDelta kObservationWindowLength =
-    base::TimeDelta::FromHours(2);
+static constexpr base::TimeDelta kObservationWindowLength = base::Hours(2);
 
 }  // namespace
 
@@ -83,6 +80,7 @@ void SiteDataImpl::NotifySiteUnloaded(TabVisibility tab_visibility) {
 }
 
 void SiteDataImpl::NotifyLoadedSiteBackgrounded() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (loaded_tabs_in_background_count_ == 0)
     background_session_begin_ = base::TimeTicks::Now();
 
@@ -96,22 +94,27 @@ void SiteDataImpl::NotifyLoadedSiteForegrounded() {
 }
 
 SiteFeatureUsage SiteDataImpl::UpdatesFaviconInBackground() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return GetFeatureUsage(site_characteristics_.updates_favicon_in_background());
 }
 
 SiteFeatureUsage SiteDataImpl::UpdatesTitleInBackground() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return GetFeatureUsage(site_characteristics_.updates_title_in_background());
 }
 
 SiteFeatureUsage SiteDataImpl::UsesAudioInBackground() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return GetFeatureUsage(site_characteristics_.uses_audio_in_background());
 }
 
 bool SiteDataImpl::DataLoaded() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return fully_initialized_;
 }
 
 void SiteDataImpl::RegisterDataLoadedCallback(base::OnceClosure&& callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (fully_initialized_) {
     std::move(callback).Run();
     return;
@@ -120,31 +123,33 @@ void SiteDataImpl::RegisterDataLoadedCallback(base::OnceClosure&& callback) {
 }
 
 void SiteDataImpl::NotifyUpdatesFaviconInBackground() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   NotifyFeatureUsage(
-      site_characteristics_.mutable_updates_favicon_in_background(),
-      "FaviconUpdateInBackground");
+      site_characteristics_.mutable_updates_favicon_in_background());
 }
 
 void SiteDataImpl::NotifyUpdatesTitleInBackground() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   NotifyFeatureUsage(
-      site_characteristics_.mutable_updates_title_in_background(),
-      "TitleUpdateInBackground");
+      site_characteristics_.mutable_updates_title_in_background());
 }
 
 void SiteDataImpl::NotifyUsesAudioInBackground() {
-  NotifyFeatureUsage(site_characteristics_.mutable_uses_audio_in_background(),
-                     "AudioUsageInBackground");
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  NotifyFeatureUsage(site_characteristics_.mutable_uses_audio_in_background());
 }
 
 void SiteDataImpl::NotifyLoadTimePerformanceMeasurement(
     base::TimeDelta load_duration,
     base::TimeDelta cpu_usage_estimate,
-    uint64_t private_footprint_kb_estimate) {
+    base::ByteSize private_footprint_estimate) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   is_dirty_ = true;
 
   load_duration_.AppendDatum(load_duration.InMicroseconds());
   cpu_usage_estimate_.AppendDatum(cpu_usage_estimate.InMicroseconds());
-  private_footprint_kb_estimate_.AppendDatum(private_footprint_kb_estimate);
+  private_footprint_kb_estimate_.AppendDatum(
+      private_footprint_estimate.InKiBF());
 }
 
 void SiteDataImpl::ExpireAllObservationWindowsForTesting() {
@@ -159,7 +164,7 @@ SiteDataImpl::GetFeatureObservationWindowLengthForTesting() {
 }
 
 SiteDataImpl::SiteDataImpl(const url::Origin& origin,
-                           OnDestroyDelegate* delegate,
+                           base::WeakPtr<OnDestroyDelegate> delegate,
                            SiteDataStore* data_store)
     : load_duration_(kSampleWeightFactor),
       cpu_usage_estimate_(kSampleWeightFactor),
@@ -188,13 +193,23 @@ SiteDataImpl::~SiteDataImpl() {
   DCHECK(!IsLoaded());
   DCHECK_EQ(0U, loaded_tabs_in_background_count_);
 
-  DCHECK(delegate_);
-  delegate_->OnSiteDataImplDestroyed(this);
+  // Make sure not to dispatch a notification to a deleted delegate, and gate
+  // the DB write on it too, as the delegate and the data store have the
+  // same lifetime.
+  // TODO(crbug.com/40056631): Fix this properly and restore the end of
+  //     life write here.
+  if (delegate_) {
+    delegate_->OnSiteDataImplDestroyed(this);
 
-  // TODO(sebmarchand): Some data might be lost here if the read operation has
-  // not completed, add some metrics to measure if this is really an issue.
-  if (is_dirty_ && fully_initialized_)
-    data_store_->WriteSiteDataIntoStore(origin_, FlushStateToProto());
+    // TODO(sebmarchand): Some data might be lost here if the read operation has
+    // not completed, add some metrics to measure if this is really an issue.
+    if (is_dirty_ && fully_initialized_) {
+      // SiteDataImpl is only created from SiteDataCacheImpl, not from the
+      // NonRecordingSiteDataCache that's used for OTR profiles, so this should
+      // always be logged.
+      data_store_->WriteSiteDataIntoStore(origin_, FlushStateToProto());
+    }
+  }
 }
 
 base::TimeDelta SiteDataImpl::FeatureObservationDuration(
@@ -265,10 +280,6 @@ SiteFeatureUsage SiteDataImpl::GetFeatureUsage(
     const SiteDataFeatureProto& feature_proto) const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  UMA_HISTOGRAM_BOOLEAN(
-      "ResourceCoordinator.LocalDB.ReadHasCompletedBeforeQuery",
-      fully_initialized_);
-
   // Checks if this feature has already been observed.
   // TODO(sebmarchand): Check the timestamp and reset features that haven't been
   // observed in a long time, https://crbug.com/826446.
@@ -281,23 +292,10 @@ SiteFeatureUsage SiteDataImpl::GetFeatureUsage(
   return SiteFeatureUsage::kSiteFeatureUsageUnknown;
 }
 
-void SiteDataImpl::NotifyFeatureUsage(SiteDataFeatureProto* feature_proto,
-                                      const char* feature_name) {
+void SiteDataImpl::NotifyFeatureUsage(SiteDataFeatureProto* feature_proto) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(IsLoaded());
   DCHECK_GT(loaded_tabs_in_background_count_, 0U);
-
-  // Report the observation time if this is the first time this feature is
-  // observed.
-  if (feature_proto->observation_duration() != 0) {
-    base::UmaHistogramCustomTimes(
-        base::StringPrintf(
-            "ResourceCoordinator.LocalDB.ObservationTimeBeforeFirstUse.%s",
-            feature_name),
-        InternalRepresentationToTimeDelta(
-            feature_proto->observation_duration()),
-        base::TimeDelta::FromSeconds(1), base::TimeDelta::FromDays(1), 100);
-  }
 
   feature_proto->Clear();
   feature_proto->set_use_timestamp(
@@ -305,7 +303,7 @@ void SiteDataImpl::NotifyFeatureUsage(SiteDataFeatureProto* feature_proto,
 }
 
 void SiteDataImpl::OnInitCallback(
-    base::Optional<SiteDataProto> db_site_characteristics) {
+    std::optional<SiteDataProto> db_site_characteristics) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // Check if the initialization has succeeded.
   if (db_site_characteristics) {
@@ -407,6 +405,7 @@ void SiteDataImpl::FlushFeaturesObservationDurationToProto() {
 }
 
 void SiteDataImpl::TransitionToFullyInitialized() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   fully_initialized_ = true;
   for (size_t i = 0; i < data_loaded_callbacks_.size(); ++i)
     std::move(data_loaded_callbacks_[i]).Run();

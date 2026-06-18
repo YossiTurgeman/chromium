@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,46 +7,37 @@
 
 #include <stddef.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
-#include "base/macros.h"
-#include "base/scoped_observer.h"
-#include "base/strings/string16.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "chrome/browser/profiles/profile_attributes_storage.h"
-#include "chrome/browser/profiles/profile_metrics.h"
 #include "chrome/common/buildflags.h"
-#include "content/public/browser/web_contents.h"
-#include "content/public/browser/web_contents_observer.h"
+#include "components/supervised_user/core/browser/supervised_user_service.h"
+#include "components/supervised_user/core/browser/supervised_user_service_observer.h"
 #include "ui/gfx/image/image.h"
 
-#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
-#include "chrome/browser/supervised_user/supervised_user_service.h"
-#include "chrome/browser/supervised_user/supervised_user_service_observer.h"
-#endif
-
-class AvatarMenuActions;
 class AvatarMenuObserver;
 class Browser;
+class BrowserWindowInterface;
 class ProfileAttributesStorage;
-class ProfileList;
+class ProfileListDesktop;
 
 // This class represents the menu-like interface used to select profiles,
 // such as the bubble that appears when the avatar icon is clicked in the
 // browser window frame. This class will notify its observer when the backend
 // data changes, and the view for this model should forward actions
 // back to it in response to user events.
-class AvatarMenu :
-#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
-    public SupervisedUserServiceObserver,
-#endif
-    public ProfileAttributesStorage::Observer {
+class AvatarMenu : public SupervisedUserServiceObserver,
+                   public ProfileAttributesStorage::Observer {
  public:
   // Represents an item in the menu.
   struct Item {
-    Item(size_t menu_index, const base::FilePath& profile_path,
+    Item(size_t menu_index,
+         const base::FilePath& profile_path,
          const gfx::Image& icon);
     Item(const Item& other);
     ~Item();
@@ -58,26 +49,14 @@ class AvatarMenu :
     bool active;
 
     // The name of this profile.
-    base::string16 name;
+    std::u16string name;
 
     // A string representing the username of the profile, if signed in.  Empty
     // when not signed in.
-    base::string16 username;
-
-    // Whether or not the current profile is signed in. If true, |sync_state| is
-    // expected to be the email of the signed in user.
-    bool signed_in;
+    std::u16string username;
 
     // Whether or not the current profile requires sign-in before use.
     bool signin_required;
-
-    // Whether or not the current profile is a legacy supervised user profile
-    // (see SupervisedUserService).
-    bool legacy_supervised;
-
-    // Whether or not the profile is associated with a child account
-    // (see SupervisedUserService).
-    bool child_account;
 
     // The index in the menu of this profile, used by views to refer to
     // profiles.
@@ -108,14 +87,18 @@ class AvatarMenu :
   AvatarMenu(ProfileAttributesStorage* profile_storage,
              AvatarMenuObserver* observer,
              Browser* browser);
+
+  AvatarMenu(const AvatarMenu&) = delete;
+  AvatarMenu& operator=(const AvatarMenu&) = delete;
+
   ~AvatarMenu() override;
 
   // Sets |image| to the avatar corresponding to the profile at |profile_path|.
-  // For built-in profile avatars, returns the non-high res version. Returns the
-  // image load status.
+  // Returns the image load status.
   static ImageLoadStatus GetImageForMenuButton(
       const base::FilePath& profile_path,
-      gfx::Image* image);
+      gfx::Image* image,
+      int preferred_size);
 
   // Opens a Browser with the specified profile in response to the user
   // selecting an item. If |always_create| is true then a new window is created
@@ -123,7 +106,7 @@ class AvatarMenu :
   void SwitchToProfile(size_t index, bool always_create);
 
   // Creates a new profile.
-  void AddNewProfile(ProfileMetrics::ProfileAdd type);
+  void AddNewProfile();
 
   // Opens the profile settings in response to clicking the edit button next to
   // an item.
@@ -141,34 +124,31 @@ class AvatarMenu :
   const Item& GetItemAt(size_t index) const;
 
   // Gets the index in this menu for which profile_path is equal to |path|.
-  size_t GetIndexOfItemWithProfilePath(const base::FilePath& path);
+  size_t GetIndexOfItemWithProfilePathForTesting(
+      const base::FilePath& path) const;
 
-  // Returns the index of the active profile.
-  size_t GetActiveProfileIndex();
-
-  // Returns information about a supervised user which will be displayed in the
-  // avatar menu. If the profile does not belong to a supervised user, an empty
-  // string will be returned.
-  base::string16 GetSupervisedUserInformation() const;
+  // Returns the index of the active profile or `std::nullopt` if there is no
+  // active profile.
+  std::optional<size_t> GetActiveProfileIndex() const;
 
   // This menu is also used for the always-present Mac and Linux system menubar.
   // If the last active browser changes, the menu will need to reference that
   // browser.
-  void ActiveBrowserChanged(Browser* browser);
+  void ActiveBrowserChanged(BrowserWindowInterface* browser);
 
-  // Returns true if the add profile link should be shown.
+  // Returns true if the add profile link should be shown/enabled.
   bool ShouldShowAddNewProfileLink() const;
 
-  // Returns true if the edit profile link should be shown.
+  // Returns true if the edit profile link should be shown/enabled.
   bool ShouldShowEditProfileLink() const;
 
  private:
   // ProfileAttributesStorage::Observer:
   void OnProfileAdded(const base::FilePath& profile_path) override;
   void OnProfileWasRemoved(const base::FilePath& profile_path,
-      const base::string16& profile_name) override;
+                           const std::u16string& profile_name) override;
   void OnProfileNameChanged(const base::FilePath& profile_path,
-      const base::string16& old_profile_name) override;
+                            const std::u16string& old_profile_name) override;
   void OnProfileAuthInfoChanged(const base::FilePath& profile_path) override;
   void OnProfileAvatarChanged(const base::FilePath& profile_path) override;
   void OnProfileHighResAvatarLoaded(
@@ -177,36 +157,28 @@ class AvatarMenu :
       const base::FilePath& profile_path) override;
   void OnProfileIsOmittedChanged(const base::FilePath& profile_path) override;
 
-#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
   // SupervisedUserServiceObserver:
   void OnCustodianInfoChanged() override;
-#endif
 
-  // Rebuilds the menu and notifies any observers that an update occured.
+  // Rebuilds the menu and notifies any observers that an update occurred.
   void Update();
 
   // The model that provides the list of menu items.
-  std::unique_ptr<ProfileList> profile_list_;
+  std::unique_ptr<ProfileListDesktop> profile_list_;
 
-  // The controller for avatar menu actions.
-  std::unique_ptr<AvatarMenuActions> menu_actions_;
-
-#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
   // Observes changes to a supervised user's custodian info.
-  ScopedObserver<SupervisedUserService, SupervisedUserServiceObserver>
-      supervised_user_observer_{this};
-#endif
+  base::ScopedObservation<supervised_user::SupervisedUserService,
+                          SupervisedUserServiceObserver>
+      supervised_user_observation_{this};
 
   // The storage that provides the profile attributes.
   base::WeakPtr<ProfileAttributesStorage> profile_storage_;
 
   // The observer of this model, which is notified of changes. Weak.
-  AvatarMenuObserver* observer_;
+  raw_ptr<AvatarMenuObserver, DanglingUntriaged> observer_;
 
   // Browser in which this avatar menu resides. Weak.
-  Browser* browser_;
-
-  DISALLOW_COPY_AND_ASSIGN(AvatarMenu);
+  raw_ptr<BrowserWindowInterface, AcrossTasksDanglingUntriaged> browser_;
 };
 
 #endif  // CHROME_BROWSER_PROFILES_AVATAR_MENU_H_

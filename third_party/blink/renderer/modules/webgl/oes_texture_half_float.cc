@@ -25,9 +25,12 @@
 
 #include "third_party/blink/renderer/modules/webgl/oes_texture_half_float.h"
 
+#include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+
 namespace blink {
 
-OESTextureHalfFloat::OESTextureHalfFloat(WebGLRenderingContextBase* context)
+OESTextureHalfFloat::OESTextureHalfFloat(WebGLRenderingContextBase* context,
+                                         ExecutionContext*)
     : WebGLExtension(context) {
   context->ExtensionsUtil()->EnsureExtensionEnabled(
       "GL_OES_texture_half_float");

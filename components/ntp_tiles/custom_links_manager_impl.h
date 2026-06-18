@@ -1,21 +1,23 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_NTP_TILES_CUSTOM_LINKS_MANAGER_IMPL_H_
 #define COMPONENTS_NTP_TILES_CUSTOM_LINKS_MANAGER_IMPL_H_
 
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_observation.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/history_service_observer.h"
+#include "components/ntp_tiles/constants.h"
 #include "components/ntp_tiles/custom_links_manager.h"
 #include "components/ntp_tiles/custom_links_store.h"
+#include "components/ntp_tiles/most_visited_sites.h"
 #include "components/ntp_tiles/ntp_tile.h"
 #include "components/prefs/pref_change_registrar.h"
 
@@ -31,10 +33,18 @@ namespace ntp_tiles {
 class CustomLinksManagerImpl : public CustomLinksManager,
                                public history::HistoryServiceObserver {
  public:
+  struct Options {
+    raw_ptr<PrefService> prefs = nullptr;
+    // Can be nullptr in unittests.
+    raw_ptr<history::HistoryService> history_service = nullptr;
+    size_t max_links = ntp_tiles::kMaxNumCustomLinks;
+  };
+
   // Restores the previous state of |current_links_| from prefs.
-  CustomLinksManagerImpl(PrefService* prefs,
-                         // Can be nullptr in unittests.
-                         history::HistoryService* history_service);
+  explicit CustomLinksManagerImpl(const Options& options);
+
+  CustomLinksManagerImpl(const CustomLinksManagerImpl&) = delete;
+  CustomLinksManagerImpl& operator=(const CustomLinksManagerImpl&) = delete;
 
   ~CustomLinksManagerImpl() override;
 
@@ -44,17 +54,21 @@ class CustomLinksManagerImpl : public CustomLinksManager,
   bool IsInitialized() const override;
 
   const std::vector<Link>& GetLinks() const override;
+  size_t GetMaxLinks() const override;
 
-  bool AddLink(const GURL& url, const base::string16& title) override;
+  bool AddLinkTo(const GURL& url,
+                 const std::u16string& title,
+                 size_t pos) override;
+  bool AddLink(const GURL& url, const std::u16string& title) override;
   bool UpdateLink(const GURL& url,
                   const GURL& new_url,
-                  const base::string16& new_title) override;
+                  const std::u16string& new_title) override;
   bool ReorderLink(const GURL& url, size_t new_pos) override;
   bool DeleteLink(const GURL& url) override;
   bool UndoAction() override;
 
-  std::unique_ptr<base::CallbackList<void()>::Subscription>
-  RegisterCallbackForOnChanged(base::RepeatingClosure callback) override;
+  base::CallbackListSubscription RegisterCallbackForOnChanged(
+      base::RepeatingClosure callback) override;
 
   // Register preferences used by this class.
   static void RegisterProfilePrefs(
@@ -67,36 +81,39 @@ class CustomLinksManagerImpl : public CustomLinksManager,
   // |OnPreferenceChanged|.
   void StoreLinks();
 
-  // Returns an iterator into |custom_links_|.
-  std::vector<Link>::iterator FindLinkWithUrl(const GURL& url);
+  // Checks during instantiation to remove custom shortcut links
+  // created through preinstalled apps.
+  void RemoveCustomLinksForPreinstalledApps();
 
   // history::HistoryServiceObserver implementation.
   // Deletes any Most Visited links whose URL is in |deletion_info|. Clears
   // |previous_links_|. Does not delete entries expired by HistoryService.
-  void OnURLsDeleted(history::HistoryService* history_service,
-                     const history::DeletionInfo& deletion_info) override;
+  void OnHistoryDeletions(history::HistoryService* history_service,
+                          const history::DeletionInfo& deletion_info) override;
   void HistoryServiceBeingDeleted(
       history::HistoryService* history_service) override;
 
   // Called when the current list of links and/or initialization state in
   // PrefService is modified. Saves the new set of links in |current_links_|
-  // and notifies |callback_list_|.
+  // and notifies |closure_list_|.
   void OnPreferenceChanged();
 
-  PrefService* const prefs_;
+  const raw_ptr<PrefService> prefs_;
+  const size_t max_links_;
   CustomLinksStore store_;
   std::vector<Link> current_links_;
   // The state of the current list of links before the last action was
   // performed.
-  base::Optional<std::vector<Link>> previous_links_;
+  std::optional<std::vector<Link>> previous_links_;
 
-  // List of callbacks to be invoked when custom links are updated by outside
+  // List of closures to be invoked when custom links are updated by outside
   // sources.
-  base::CallbackList<void()> callback_list_;
+  base::RepeatingClosureList closure_list_;
 
   // Observer for the HistoryService.
-  ScopedObserver<history::HistoryService, history::HistoryServiceObserver>
-      history_service_observer_;
+  base::ScopedObservation<history::HistoryService,
+                          history::HistoryServiceObserver>
+      history_service_observation_{this};
 
   // Observer for Chrome sync changes to |prefs::kCustomLinksList| and
   // |prefs::kCustomLinksInitialized|.
@@ -106,8 +123,6 @@ class CustomLinksManagerImpl : public CustomLinksManager,
   bool updating_preferences_ = false;
 
   base::WeakPtrFactory<CustomLinksManagerImpl> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(CustomLinksManagerImpl);
 };
 
 }  // namespace ntp_tiles

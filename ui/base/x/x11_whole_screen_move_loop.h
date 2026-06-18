@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,23 +9,25 @@
 
 #include <memory>
 
-#include "base/callback.h"
-#include "base/compiler_specific.h"
 #include "base/component_export.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "ui/base/x/x11_move_loop.h"
 #include "ui/base/x/x11_move_loop_delegate.h"
 #include "ui/events/platform/platform_event_dispatcher.h"
 #include "ui/gfx/geometry/vector2d_f.h"
 #include "ui/gfx/image/image_skia.h"
-#include "ui/gfx/native_widget_types.h"
-#include "ui/gfx/x/x11_types.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/gfx/x/connection.h"
+
+namespace x11 {
+class ScopedEventSelector;
+}
 
 namespace ui {
 class MouseEvent;
 class ScopedEventDispatcher;
-class XScopedEventSelector;
 
 // Runs a nested run loop and grabs the mouse. This is used to implement
 // dragging.
@@ -34,6 +36,10 @@ class COMPONENT_EXPORT(UI_BASE_X) X11WholeScreenMoveLoop
       public ui::PlatformEventDispatcher {
  public:
   explicit X11WholeScreenMoveLoop(X11MoveLoopDelegate* delegate);
+
+  X11WholeScreenMoveLoop(const X11WholeScreenMoveLoop&) = delete;
+  X11WholeScreenMoveLoop& operator=(const X11WholeScreenMoveLoop&) = delete;
+
   ~X11WholeScreenMoveLoop() override;
 
   // ui:::PlatformEventDispatcher:
@@ -43,7 +49,8 @@ class COMPONENT_EXPORT(UI_BASE_X) X11WholeScreenMoveLoop
   // X11MoveLoop:
   bool RunMoveLoop(bool can_grab_pointer,
                    scoped_refptr<ui::X11Cursor> old_cursor,
-                   scoped_refptr<ui::X11Cursor> new_cursor) override;
+                   scoped_refptr<ui::X11Cursor> new_cursor,
+                   base::OnceClosure started_callback) override;
   void UpdateCursor(scoped_refptr<ui::X11Cursor> cursor) override;
   void EndMoveLoop() override;
 
@@ -57,12 +64,9 @@ class COMPONENT_EXPORT(UI_BASE_X) X11WholeScreenMoveLoop
   // Creates an input-only window to be used during the drag.
   void CreateDragInputWindow(x11::Connection* connection);
 
-  // Dispatch mouse movement event to |delegate_| in a posted task.
-  void DispatchMouseMovement();
-
   void PostDispatchIfNeeded(const ui::MouseEvent& event);
 
-  X11MoveLoopDelegate* delegate_;
+  raw_ptr<X11MoveLoopDelegate> delegate_;
 
   // Are we running a nested run loop from RunMoveLoop()?
   bool in_move_loop_;
@@ -70,14 +74,14 @@ class COMPONENT_EXPORT(UI_BASE_X) X11WholeScreenMoveLoop
 
   // Cursor in use prior to the move loop starting. Restored when the move loop
   // quits.
-  scoped_refptr<X11Cursor> initial_cursor_ = nullptr;
+  scoped_refptr<X11Cursor> initial_cursor_;
 
   // An invisible InputOnly window. Keyboard grab and sometimes mouse grab
   // are set on this window.
   x11::Window grab_input_window_;
 
   // Events selected on |grab_input_window_|.
-  std::unique_ptr<ui::XScopedEventSelector> grab_input_window_events_;
+  x11::ScopedEventSelector grab_input_window_events_;
 
   // Whether the pointer was grabbed on |grab_input_window_|.
   bool grabbed_pointer_;
@@ -88,10 +92,7 @@ class COMPONENT_EXPORT(UI_BASE_X) X11WholeScreenMoveLoop
   // pressing escape).
   bool canceled_;
 
-  std::unique_ptr<ui::MouseEvent> last_motion_in_screen_;
   base::WeakPtrFactory<X11WholeScreenMoveLoop> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(X11WholeScreenMoveLoop);
 };
 
 }  // namespace ui

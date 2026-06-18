@@ -26,16 +26,23 @@
 #include "third_party/blink/renderer/modules/indexeddb/idb_cursor_with_value.h"
 
 #include <memory>
+#include <utility>
+
 #include "third_party/blink/renderer/modules/indexeddb/idb_key.h"
 
 namespace blink {
 
-IDBCursorWithValue::IDBCursorWithValue(std::unique_ptr<WebIDBCursor> backend,
-                                       mojom::IDBCursorDirection direction,
-                                       IDBRequest* request,
-                                       const Source& source,
-                                       IDBTransaction* transaction)
-    : IDBCursor(std::move(backend), direction, request, source, transaction) {}
+IDBCursorWithValue::IDBCursorWithValue(
+    mojo::PendingAssociatedRemote<mojom::blink::IDBCursor> pending_cursor,
+    mojom::IDBCursorDirection direction,
+    IDBRequest* request,
+    const Source* source,
+    IDBTransaction* transaction)
+    : IDBCursor(std::move(pending_cursor),
+                direction,
+                request,
+                source,
+                transaction) {}
 
 IDBCursorWithValue::~IDBCursorWithValue() = default;
 

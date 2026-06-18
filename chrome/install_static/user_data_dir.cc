@@ -1,11 +1,15 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/install_static/user_data_dir.h"
 
-#include <assert.h>
 #include <windows.h>
+
+#include <assert.h>
+#include <stdlib.h>
+
+#include <optional>
 
 #include "chrome/chrome_elf/nt_registry/nt_registry.h"
 #include "chrome/install_static/install_details.h"
@@ -18,6 +22,7 @@ namespace {
 
 std::wstring* g_user_data_dir;
 std::wstring* g_invalid_user_data_dir;
+bool g_temp_user_data_dir_created_for_headless = false;
 
 // Retrieves a registry policy for the user data directory from the registry, if
 // one is set. If there's none set in either HKLM or HKCU, |user_data_dir| will
@@ -57,14 +62,13 @@ std::wstring MakeAbsoluteFilePath(const std::wstring& input) {
 
 // The same as GetUserDataDirectory(), but directly queries the global command
 // line object for the --user-data-dir flag. This is the more commonly used
-// function, where GetUserDataDirectory() is used primiarily for testing.
+// function, where GetUserDataDirectory() is used primarily for testing.
 bool GetUserDataDirectoryUsingProcessCommandLine(
     const InstallConstants& mode,
     std::wstring* result,
     std::wstring* invalid_supplied_directory) {
-  return GetUserDataDirectoryImpl(
-      GetSwitchValueFromCommandLine(::GetCommandLine(), kUserDataDirSwitch),
-      mode, result, invalid_supplied_directory);
+  return GetUserDataDirectoryImpl(::GetCommandLine(), mode, result,
+                                  invalid_supplied_directory);
 }
 
 // Populates |result| with the default User Data directory for the current
@@ -76,7 +80,7 @@ bool GetDefaultUserDataDirectory(const InstallConstants& mode,
                                  std::wstring* result) {
   // This environment variable should be set on Windows Vista and later
   // (https://msdn.microsoft.com/library/windows/desktop/dd378457.aspx).
-  std::wstring user_data_dir = GetEnvironmentString16(L"LOCALAPPDATA");
+  std::wstring user_data_dir = GetEnvironmentString(L"LOCALAPPDATA");
 
   if (user_data_dir.empty()) {
     // LOCALAPPDATA was not set; fallback to the temporary files path.
@@ -99,19 +103,39 @@ bool GetDefaultUserDataDirectory(const InstallConstants& mode,
   return true;
 }
 
+// Returns true if the |command_line| contains --headless switch.
+bool IsHeadlessMode(const std::wstring& command_line) {
+  return GetCommandLineSwitch(command_line, L"headless").has_value();
+}
+
 }  // namespace
 
-bool GetUserDataDirectoryImpl(
-    const std::wstring& user_data_dir_from_command_line,
-    const InstallConstants& mode,
-    std::wstring* result,
-    std::wstring* invalid_supplied_directory) {
-  std::wstring user_data_dir = user_data_dir_from_command_line;
+bool GetUserDataDirectoryImpl(const std::wstring& command_line,
+                              const InstallConstants& mode,
+                              std::wstring* result,
+                              std::wstring* invalid_supplied_directory) {
+  std::wstring user_data_dir =
+      GetCommandLineSwitchValue(command_line, kUserDataDirSwitch);
 
   GetUserDataDirFromRegistryPolicyIfSet(mode, &user_data_dir);
 
+  // Headless Chrome instances are expected to run in parallel with the headful
+  // Chrome and other headless Chrome instances. In order to do so, headless
+  // Chrome needs a dedicated user data directory for each headless instance.
+  // Provide one here unless user data directory is explicitly specified.
+  g_temp_user_data_dir_created_for_headless = false;
+  if (user_data_dir.empty() && IsHeadlessMode(command_line)) {
+    // Avoid calling IsBrowserProcess() here because process type may not be
+    // initialized yet at this point. This happens in unit tests.
+    assert(GetCommandLineSwitchValue(command_line, kProcessType).empty());
+    user_data_dir = CreateUniqueTempDirectory(L"Headless");
+    if (!user_data_dir.empty()) {
+      g_temp_user_data_dir_created_for_headless = true;
+    }
+  }
+
   // On Windows, trailing separators leave Chrome in a bad state. See
-  // crbug.com/464616.
+  // crbug.com/41161181.
   while (!user_data_dir.empty() &&
          (user_data_dir.back() == '\\' || user_data_dir.back() == '/')) {
     user_data_dir.pop_back();
@@ -151,6 +175,10 @@ bool GetUserDataDirectory(std::wstring* user_data_dir,
   if (invalid_user_data_dir)
     *invalid_user_data_dir = *g_invalid_user_data_dir;
   return true;
+}
+
+bool IsTemporaryUserDataDirectoryCreatedForHeadless() {
+  return g_temp_user_data_dir_created_for_headless;
 }
 
 }  // namespace install_static

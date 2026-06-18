@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <windows.h>
 
-#include "base/macros.h"
-#include "base/synchronization/waitable_event.h"
+#include "base/functional/callback.h"
 
 namespace credential_provider {
 namespace extension {
@@ -19,6 +18,9 @@ class Service {
  public:
   // Gets the singleton instance of the service.
   static Service* Get();
+
+  Service(const Service&) = delete;
+  Service& operator=(const Service&) = delete;
 
   // Invoke the chosen action routine. By default service runs as a service,
   // but the action routine can support running in console for testing purposes.
@@ -59,10 +61,8 @@ class Service {
   // The service status handle which is used with SetServiceStatus API.
   SERVICE_STATUS_HANDLE service_status_handle_;
 
-  // Primitive that controls when to finish running service main.
-  base::WaitableEvent stop_event_;
-
-  DISALLOW_COPY_AND_ASSIGN(Service);
+  // Callback to end running periodic tasks.
+  base::OnceClosure quit_closure_;
 };
 
 }  // namespace extension

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <map>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/time/time.h"
@@ -20,9 +20,13 @@ namespace bluetooth {
 
 class BleNotificationLogger : public GattClientManager::Observer {
  public:
-  static constexpr auto kMinLogInterval = base::TimeDelta::FromMinutes(1);
+  static constexpr auto kMinLogInterval = base::Minutes(1);
 
   explicit BleNotificationLogger(GattClientManager* gcm);
+
+  BleNotificationLogger(const BleNotificationLogger&) = delete;
+  BleNotificationLogger& operator=(const BleNotificationLogger&) = delete;
+
   ~BleNotificationLogger() override;
 
   // GattClientManager::Observer implementation:
@@ -39,7 +43,7 @@ class BleNotificationLogger : public GattClientManager::Observer {
 
   SEQUENCE_CHECKER(sequence_checker_);
 
-  GattClientManager* const gcm_;
+  const raw_ptr<GattClientManager> gcm_;
 
   base::TimeTicks last_log_time_;
   base::OneShotTimer log_timer_;
@@ -47,7 +51,6 @@ class BleNotificationLogger : public GattClientManager::Observer {
   // Key: Device address, Value: Map[Key: Characteristic UUID, Value: count]
   std::map<Addr, std::map<Uuid, int32_t>> device_to_char_uuid_to_count_;
   base::WeakPtrFactory<BleNotificationLogger> weak_factory_;
-  DISALLOW_COPY_AND_ASSIGN(BleNotificationLogger);
 };
 
 }  // namespace bluetooth

@@ -1,10 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+
+import * as UIModule from 'devtools/ui/legacy/legacy.js';
+import * as SDK from 'devtools/core/sdk/sdk.js';
+
 (async function() {
   TestRunner.addResult(`Tests separate compilation and run.\n`);
-  await TestRunner.loadModule('sources_test_runner');
   await TestRunner.showPanel('sources');
 
   function printExceptionDetails(exceptionDetails) {
@@ -28,7 +33,7 @@
     }
   }
 
-  var contextId = UI.context.flavor(SDK.ExecutionContext).id;
+  var contextId = UIModule.Context.Context.instance().flavor(SDK.RuntimeModel.ExecutionContext).id;
   SourcesTestRunner.runDebuggerTestSuite([
     async function testSuccessfulCompileAndRun(next) {
       var expression = 'var a = 1; var b = 2; a + b; ';
@@ -36,14 +41,14 @@
       var response = await TestRunner.RuntimeAgent.invoke_compileScript(
           {expression, sourceURL: 'test.js', persistScript: true, executionContextId: contextId});
 
-      TestRunner.assertTrue(!response[Protocol.Error]);
+      TestRunner.assertTrue(!response.getError());
       TestRunner.assertTrue(!response.exceptionDetails);
       TestRunner.assertTrue(!!response.scriptId);
 
       TestRunner.addResult('Running script');
       response = await TestRunner.RuntimeAgent.invoke_runScript(
           {scriptId: response.scriptId, executionContextId: contextId, objectGroup: 'console', silent: false});
-      TestRunner.assertTrue(!response[Protocol.Error]);
+      TestRunner.assertTrue(!response.getError());
       TestRunner.assertTrue(!response.exceptionDetails);
       TestRunner.addResult('Script result: ' + response.result.value);
       next();
@@ -54,14 +59,14 @@
       TestRunner.addResult('Compiling script');
       var response = await TestRunner.RuntimeAgent.invoke_compileScript(
           {expression, sourceURL: 'test.js', persistScript: true, executionContextId: contextId});
-      TestRunner.assertTrue(!response[Protocol.Error]);
+      TestRunner.assertTrue(!response.getError());
       TestRunner.assertTrue(!response.exceptionDetails);
       TestRunner.assertTrue(!!response.scriptId);
 
       TestRunner.addResult('Running script');
       response = await TestRunner.RuntimeAgent.invoke_runScript(
           {scriptId: response.scriptId, executionContextId: contextId, objectGroup: 'console', silent: false});
-      TestRunner.assertTrue(!response[Protocol.Error]);
+      TestRunner.assertTrue(!response.getError());
       TestRunner.assertTrue(!!response.exceptionDetails);
       printExceptionDetails(response.exceptionDetails);
       next();
@@ -72,7 +77,7 @@
       TestRunner.addResult('Compiling script');
       var response = await TestRunner.RuntimeAgent.invoke_compileScript(
           {expression, sourceURL: 'test.js', persistScript: true, executionContextId: contextId});
-      TestRunner.assertTrue(!response[Protocol.Error]);
+      TestRunner.assertTrue(!response.getError());
       TestRunner.assertTrue(!!response.exceptionDetails);
       TestRunner.assertTrue(!response.scriptId);
       printExceptionDetails(response.exceptionDetails);

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,12 @@
 #include <vector>
 
 #include "base/test/task_environment.h"
-#include "mojo/public/cpp/bindings/lib/fixed_buffer.h"
+#include "mojo/public/cpp/bindings/lib/message_fragment.h"
 #include "mojo/public/cpp/bindings/lib/serialization.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
-#include "mojo/public/interfaces/bindings/tests/test_data_view.mojom.h"
+#include "mojo/public/interfaces/bindings/tests/test_data_view.test-mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace mojo {
@@ -29,17 +29,16 @@ class DataViewTest : public testing::Test {
 struct DataViewHolder {
   std::unique_ptr<TestStructDataView> data_view;
   mojo::Message message;
-  mojo::internal::SerializationContext context;
 };
 
 std::unique_ptr<DataViewHolder> SerializeTestStruct(TestStructPtr input) {
   auto result = std::make_unique<DataViewHolder>();
   result->message = Message(0, 0, 0, 0, nullptr);
-  internal::TestStruct_Data::BufferWriter writer;
-  mojo::internal::Serialize<TestStructDataView>(
-      input, result->message.payload_buffer(), &writer, &result->context);
+  mojo::internal::MessageFragment<internal::TestStruct_Data> fragment(
+      result->message);
+  mojo::internal::Serialize<TestStructDataView>(input, fragment);
   result->data_view =
-      std::make_unique<TestStructDataView>(writer.data(), &result->context);
+      std::make_unique<TestStructDataView>(fragment.data(), &result->message);
   return result;
 }
 
@@ -71,8 +70,7 @@ TEST_F(DataViewTest, String) {
   data_view.GetFStringDataView(&string_data_view);
 
   ASSERT_FALSE(string_data_view.is_null());
-  EXPECT_EQ(std::string("hello"),
-            std::string(string_data_view.storage(), string_data_view.size()));
+  EXPECT_EQ(std::string("hello"), string_data_view.value());
 }
 
 TEST_F(DataViewTest, NestedStruct) {
@@ -159,7 +157,6 @@ TEST_F(DataViewTest, EnumArray) {
   ASSERT_EQ(2u, array_data_view.size());
   EXPECT_EQ(TestEnum::VALUE_1, array_data_view[0]);
   EXPECT_EQ(TestEnum::VALUE_0, array_data_view[1]);
-  EXPECT_EQ(TestEnum::VALUE_0, *(array_data_view.data() + 1));
 
   TestEnum output;
   ASSERT_TRUE(array_data_view.Read(0, &output));
@@ -269,16 +266,16 @@ TEST_F(DataViewTest, Map) {
   ASSERT_TRUE(map_data_view.ReadValues(&values));
 
   std::unordered_map<std::string, int32_t> map;
-  for (size_t i = 0; i < 2; ++i)
+  for (size_t i = 0; i < 2; ++i) {
     map[keys[i]] = values[i];
+  }
 
   EXPECT_EQ(1, map["1"]);
   EXPECT_EQ(2, map["2"]);
 }
 
 TEST_F(DataViewTest, UnionArray) {
-  TestUnionPtr union_ptr(TestUnion::New());
-  union_ptr->set_f_int32(1024);
+  TestUnionPtr union_ptr = TestUnion::NewFInt32(1024);
 
   TestStructPtr obj(TestStruct::New());
   obj->f_union_array.push_back(std::move(union_ptr));

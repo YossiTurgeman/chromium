@@ -1,8 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/performance_manager/policies/working_set_trimmer_policy.h"
+
+#include <memory>
 
 #include "components/performance_manager/graph/process_node_impl.h"
 #include "components/performance_manager/test_support/graph_test_harness.h"
@@ -14,21 +16,33 @@ namespace policies {
 
 class MockWorkingSetTrimmerPolicy : public WorkingSetTrimmerPolicy {
  public:
-  MockWorkingSetTrimmerPolicy() {}
-  ~MockWorkingSetTrimmerPolicy() override {}
+  MockWorkingSetTrimmerPolicy() = default;
 
-  MOCK_METHOD1(TrimWorkingSet, bool(const ProcessNode*));
+  MockWorkingSetTrimmerPolicy(const MockWorkingSetTrimmerPolicy&) = delete;
+  MockWorkingSetTrimmerPolicy& operator=(const MockWorkingSetTrimmerPolicy&) =
+      delete;
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(MockWorkingSetTrimmerPolicy);
+  ~MockWorkingSetTrimmerPolicy() override = default;
+
+  MOCK_METHOD1(TrimWorkingSet, void(const ProcessNode*));
 };
 
 class WorkingSetTrimmerPolicyTest : public GraphTestHarness {
  public:
-  WorkingSetTrimmerPolicyTest() {}
-  ~WorkingSetTrimmerPolicyTest() override {}
+  using Super = GraphTestHarness;
 
-  void SetUp() override { policy_.reset(new WorkingSetTrimmerPolicy); }
+  WorkingSetTrimmerPolicyTest() = default;
+
+  WorkingSetTrimmerPolicyTest(const WorkingSetTrimmerPolicyTest&) = delete;
+  WorkingSetTrimmerPolicyTest& operator=(const WorkingSetTrimmerPolicyTest&) =
+      delete;
+
+  ~WorkingSetTrimmerPolicyTest() override = default;
+
+  void SetUp() override {
+    Super::SetUp();
+    policy_ = std::make_unique<WorkingSetTrimmerPolicy>();
+  }
 
   void SetLastTrimTime(const ProcessNode* node, base::TimeTicks time) {
     policy_->SetLastTrimTime(node, time);
@@ -40,9 +54,6 @@ class WorkingSetTrimmerPolicyTest : public GraphTestHarness {
 
  protected:
   std::unique_ptr<WorkingSetTrimmerPolicy> policy_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(WorkingSetTrimmerPolicyTest);
 };
 
 // Validate that we can set and get the last trim time on a ProcessNode.

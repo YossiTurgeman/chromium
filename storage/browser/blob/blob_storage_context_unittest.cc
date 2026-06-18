@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,21 +8,21 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/compiler_specific.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/memory/ref_counted.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_simple_task_runner.h"
 #include "base/threading/thread_restrictions.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "base/time/time.h"
 #include "net/base/io_buffer.h"
 #include "net/base/test_completion_callback.h"
@@ -31,6 +31,7 @@
 #include "storage/browser/blob/blob_data_item.h"
 #include "storage/browser/blob/blob_data_snapshot.h"
 #include "storage/browser/blob/blob_impl.h"
+#include "storage/browser/quota/quota_manager_proxy.h"
 #include "storage/browser/test/fake_blob_data_handle.h"
 #include "storage/browser/test/test_file_system_context.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -78,16 +79,16 @@ class BlobStorageContextTest : public testing::Test {
 
   void SetUp() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-    base::ThreadRestrictions::SetIOAllowed(false);
+    disallow_blocking_.emplace();
     context_ = std::make_unique<BlobStorageContext>();
-    file_system_context_ =
-        CreateFileSystemContextForTesting(nullptr, base::FilePath());
+    file_system_context_ = CreateFileSystemContextForTesting(
+        /*quota_manager_proxy=*/nullptr, base::FilePath());
   }
 
   void TearDown() override {
     base::RunLoop().RunUntilIdle();
     RunFileTasks();
-    base::ThreadRestrictions::SetIOAllowed(true);
+    disallow_blocking_.reset();
     ASSERT_TRUE(temp_dir_.Delete());
   }
 
@@ -139,6 +140,7 @@ class BlobStorageContextTest : public testing::Test {
 
   std::vector<FileCreationInfo> files_;
   base::ScopedTempDir temp_dir_;
+  std::optional<base::ScopedDisallowBlocking> disallow_blocking_;
   scoped_refptr<TestSimpleTaskRunner> file_runner_ = new TestSimpleTaskRunner();
   scoped_refptr<FileSystemContext> file_system_context_;
 
@@ -171,7 +173,8 @@ TEST_F(BlobStorageContextTest, BuildBlobAsync) {
 
   EXPECT_EQ(10u, context_->memory_controller().memory_usage());
 
-  future_data.Populate(base::as_bytes(base::make_span("abcdefghij", 10)), 0);
+  future_data.Populate(base::as_bytes(base::span_from_cstring("abcdefghij")),
+                       0u);
   context_->NotifyTransportComplete(kId);
 
   // Check we're done.
@@ -730,9 +733,11 @@ void PopulateDataInBuilder(
     size_t index,
     base::TaskRunner* file_runner) {
   if (index % 2 != 0) {
-    (*future_datas)[0].Populate(base::as_bytes(base::make_span("abcde", 5)), 0);
+    (*future_datas)[0].Populate(
+        base::as_bytes(base::span_from_cstring("abcde")), 0);
     if (index % 3 == 0) {
-      (*future_datas)[1].Populate(base::as_bytes(base::make_span("1", 1)), 0);
+      (*future_datas)[1].Populate(base::as_bytes(base::span_from_cstring("1")),
+                                  0);
     }
   } else if (index % 3 == 0) {
     scoped_refptr<ShareableFileReference> file_ref =
@@ -786,7 +791,8 @@ TEST_F(BlobStorageContextTest, BuildBlobCombinations) {
     std::unique_ptr<BlobDataHandle> handle = context_->BuildBlob(
         std::move(builder),
         has_pending_memory
-            ? base::BindOnce(&SaveBlobStatusAndFiles, &statuses[0] + i, &files_)
+            ? base::BindOnce(&SaveBlobStatusAndFiles,
+                             UNSAFE_TODO(&statuses[0] + i), &files_)
             : BlobStorageContext::TransportAllowedCallback());
     handle->RunOnConstructionComplete(
         base::BindOnce(&IncrementNumber, &total_finished_blobs));

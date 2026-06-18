@@ -29,13 +29,11 @@
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/layout/layout_image_resource.h"
 #include "third_party/blink/renderer/core/layout/layout_replaced.h"
-#include "third_party/blink/renderer/platform/loader/fetch/resource_client.h"
+#include "third_party/blink/renderer/core/layout/natural_sizing_info.h"
 
 namespace blink {
 
 class HTMLAreaElement;
-class HTMLMapElement;
-class SVGImage;
 
 // LayoutImage is used to display any image type.
 //
@@ -50,34 +48,50 @@ class CORE_EXPORT LayoutImage : public LayoutReplaced {
  public:
   LayoutImage(Element*);
   ~LayoutImage() override;
+  void Trace(Visitor*) const override;
 
-  static LayoutImage* CreateAnonymous(PseudoElement&);
+  static LayoutImage* CreateAnonymous(Document&);
+
+  bool IsUnsizedImage() const;
 
   void SetImageResource(LayoutImageResource*);
 
-  LayoutImageResource* ImageResource() { return image_resource_.Get(); }
+  LayoutImageResource* ImageResource() {
+    NOT_DESTROYED();
+    return image_resource_.Get();
+  }
   const LayoutImageResource* ImageResource() const {
+    NOT_DESTROYED();
     return image_resource_.Get();
   }
   ImageResourceContent* CachedImage() const {
+    NOT_DESTROYED();
     return image_resource_ ? image_resource_->CachedImage() : nullptr;
   }
 
-  HTMLMapElement* ImageMap() const;
   void AreaElementFocusChanged(HTMLAreaElement*);
 
   void SetIsGeneratedContent(bool generated = true) {
+    NOT_DESTROYED();
     is_generated_content_ = generated;
   }
 
-  bool IsGeneratedContent() const { return is_generated_content_; }
+  bool IsGeneratedContent() const {
+    NOT_DESTROYED();
+    return is_generated_content_;
+  }
 
   inline void SetImageDevicePixelRatio(float factor) {
+    NOT_DESTROYED();
     image_device_pixel_ratio_ = factor;
   }
-  float ImageDevicePixelRatio() const { return image_device_pixel_ratio_; }
+  float ImageDevicePixelRatio() const {
+    NOT_DESTROYED();
+    return image_device_pixel_ratio_;
+  }
 
-  void IntrinsicSizeChanged() override {
+  void NaturalSizeChanged() override {
+    NOT_DESTROYED();
     // The replaced content transform depends on the intrinsic size (see:
     // FragmentPaintPropertyTreeBuilder::UpdateReplacedContentTransform).
     SetNeedsPaintPropertyUpdate();
@@ -85,58 +99,88 @@ class CORE_EXPORT LayoutImage : public LayoutReplaced {
       ImageChanged(image_resource_->ImagePtr(), CanDeferInvalidation::kNo);
   }
 
-  const char* GetName() const override { return "LayoutImage"; }
+  ResourcePriority ComputeResourcePriority() const final;
+  std::optional<ResourcePriority> CachedResourcePriority() const final;
+  gfx::Size ComputeSpeculativeDecodeSize() const final;
+  gfx::Size CachedSpeculativeDecodeSize() const final;
+  InterpolationQuality ComputeSpeculativeDecodeQuality() const final;
+  InterpolationQuality CachedSpeculativeDecodeQuality() const final;
 
-  void UpdateAfterLayout() override;
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutImage";
+  }
+
+  class MutableForPainting : public LayoutObject::MutableForPainting {
+   public:
+    void UpdatePaintedRect(const PhysicalRect& paint_rect);
+
+   private:
+    friend class LayoutImage;
+    explicit MutableForPainting(const LayoutImage& image)
+        : LayoutObject::MutableForPainting(image) {}
+  };
+  MutableForPainting GetMutableForPainting() const {
+    NOT_DESTROYED();
+    return MutableForPainting(*this);
+  }
 
  protected:
-  bool NeedsPreferredWidthsRecalculation() const final;
-  SVGImage* EmbeddedSVGImage() const;
-  void ComputeIntrinsicSizingInfo(IntrinsicSizingInfo&) const override;
+  PhysicalNaturalSizingInfo GetNaturalDimensions() const override;
 
   void ImageChanged(WrappedImagePtr, CanDeferInvalidation) override;
 
   void Paint(const PaintInfo&) const final;
 
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectLayoutImage || LayoutReplaced::IsOfType(type);
+  bool IsLayoutImage() const final {
+    NOT_DESTROYED();
+    return true;
   }
 
   void WillBeDestroyed() override;
 
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const StyleChangeContext&) override;
 
-  bool CanBeSelectionLeafInternal() const final { return true; }
+  void InsertedIntoTree() override;
 
- private:
-  bool IsImage() const override { return true; }
+  bool CanBeSelectionLeafInternal() const final {
+    NOT_DESTROYED();
+    return true;
+  }
 
   void PaintReplaced(const PaintInfo&,
                      const PhysicalOffset& paint_offset) const override;
+
+ private:
+  bool IsImage() const override {
+    NOT_DESTROYED();
+    return true;
+  }
 
   bool ForegroundIsKnownToBeOpaqueInRect(
       const PhysicalRect& local_rect,
       unsigned max_depth_to_test) const final;
   bool ComputeBackgroundIsKnownToBeObscured() const final;
 
-  bool BackgroundShouldAlwaysBeClipped() const override { return true; }
+  bool BackgroundShouldAlwaysBeClipped() const override {
+    NOT_DESTROYED();
+    return true;
+  }
 
-  LayoutUnit MinimumReplacedHeight() const override;
-
-  void ImageNotifyFinished(ImageResourceContent*) final;
   bool NodeAtPoint(HitTestResult&,
                    const HitTestLocation&,
                    const PhysicalOffset& accumulated_offset,
-                   HitTestAction) final;
+                   HitTestPhase) final;
 
-  void InvalidatePaintAndMarkForLayoutIfNeeded(CanDeferInvalidation);
-  void UpdateIntrinsicSizeIfNeeded(const LayoutSize&);
-  bool NeedsLayoutOnIntrinsicSizeChange() const;
-  // Override intrinsic sizing info to default if "unsized-media"
-  // is disabled and the element has no sizing info.
-  bool OverrideIntrinsicSizingInfo(IntrinsicSizingInfo&) const;
-  bool HasOverriddenIntrinsicSize() const;
-  FloatSize ImageSizeOverriddenByIntrinsicSize(float multiplier) const;
+  void InvalidatePaintWithoutLayoutChange(CanDeferInvalidation);
+  bool UpdateNaturalSizeIfNeeded();
+  bool NeedsLayoutOnNaturalSizeChange() const;
+  bool InvalidateLayoutOnNaturalSizeChange();
+
+  // The natural dimensions for the image.
+  PhysicalNaturalSizingInfo natural_dimensions_;
 
   // This member wraps the associated decoded image.
   //
@@ -147,15 +191,29 @@ class CORE_EXPORT LayoutImage : public LayoutReplaced {
   // * For generated content, the resource is loaded during style resolution
   // and thus is stored in ComputedStyle (see ContentData::image) that gets
   // propagated to the anonymous LayoutImage in LayoutObject::createObject.
-  Persistent<LayoutImageResource> image_resource_;
-  bool did_increment_visually_non_empty_pixel_count_;
+  Member<LayoutImageResource> image_resource_;
+  float image_device_pixel_ratio_ = 1.0f;
+  bool did_increment_visually_non_empty_pixel_count_ = false;
 
   // This field stores whether this image is generated with 'content'.
-  bool is_generated_content_;
-  float image_device_pixel_ratio_;
+  bool is_generated_content_ = false;
+
+  friend class MutableForPainting;
+  PhysicalRect last_paint_rect_;
+
+  mutable struct {
+    std::optional<ResourcePriority> cached_resource_priority;
+    gfx::Size cached_speculative_decode_size;
+    InterpolationQuality cached_speculative_decode_quality;
+  } speculative_decode_parameters_;
 };
 
-DEFINE_LAYOUT_OBJECT_TYPE_CASTS(LayoutImage, IsLayoutImage());
+template <>
+struct DowncastTraits<LayoutImage> {
+  static bool AllowFrom(const LayoutObject& object) {
+    return object.IsLayoutImage();
+  }
+};
 
 }  // namespace blink
 

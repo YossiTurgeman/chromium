@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,18 @@
 #include <fuchsia/sysmem/cpp/fidl.h>
 #include <lib/sys/cpp/component_context.h>
 
+#include "base/compiler_specific.h"
+#include "base/fuchsia/fuchsia_logging.h"
 #include "base/fuchsia/process_context.h"
 #include "base/memory/platform_shared_memory_region.h"
 #include "base/memory/writable_shared_memory_region.h"
+#include "base/process/process_handle.h"
 #include "base/task/current_thread.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace media {
 
 namespace {
-
-constexpr uint64_t kDefaultFakeDeviceId = 42;
 
 constexpr uint8_t kYPlaneSalt = 1;
 constexpr uint8_t kUPlaneSalt = 2;
@@ -43,7 +44,7 @@ void FillPlane(uint8_t* data,
       orientation == fuchsia::camera3::Orientation::RIGHT_FLIPPED ||
       orientation == fuchsia::camera3::Orientation::LEFT_FLIPPED) {
     // Move the origin to the top right corner and flip the X axis.
-    data += (size.width() - 1) * x_step;
+    UNSAFE_TODO(data += (size.width() - 1)) * x_step;
     x_step = -x_step;
   }
 
@@ -56,7 +57,8 @@ void FillPlane(uint8_t* data,
     case fuchsia::camera3::Orientation::DOWN_FLIPPED:
       // Move |data| to point to the bottom right corner and reverse direction
       // of both axes.
-      data += (size.width() - 1) * x_step + (size.height() - 1) * y_step;
+      UNSAFE_TODO(data += (size.width() - 1)) * x_step +
+          (size.height() - 1) * y_step;
       x_step = -x_step;
       y_step = -y_step;
       break;
@@ -65,7 +67,7 @@ void FillPlane(uint8_t* data,
     case fuchsia::camera3::Orientation::LEFT_FLIPPED:
       // Rotate 90 degrees clockwise by moving |data| to point to the right top
       // corner, swapping the axes and reversing direction of the Y axis.
-      data += (size.width() - 1) * x_step;
+      UNSAFE_TODO(data += (size.width() - 1)) * x_step;
       size = gfx::Size(size.height(), size.width());
       std::swap(x_step, y_step);
       y_step = -y_step;
@@ -76,7 +78,7 @@ void FillPlane(uint8_t* data,
       // Rotate 90 degrees counter-clockwise by moving |data| to point to the
       // bottom left corner, swapping the axes and reversing direction of the X
       // axis.
-      data += (size.height() - 1) * y_step;
+      UNSAFE_TODO(data += (size.height() - 1)) * y_step;
       size = gfx::Size(size.height(), size.width());
       std::swap(x_step, y_step);
       x_step = -x_step;
@@ -85,7 +87,8 @@ void FillPlane(uint8_t* data,
 
   for (int y = 0; y < size.height(); ++y) {
     for (int x = 0; x < size.width(); ++x) {
-      data[x * x_step + y * y_step] = GetTestFrameValue(size, x, y, salt);
+      UNSAFE_TODO(data[x * x_step + y * y_step]) =
+          GetTestFrameValue(size, x, y, salt);
     }
   }
 }
@@ -98,8 +101,8 @@ void ValidatePlane(const uint8_t* data,
   for (int y = 0; y < size.height(); ++y) {
     for (int x = 0; x < size.width(); ++x) {
       SCOPED_TRACE(testing::Message() << "x=" << x << " y=" << y);
-      EXPECT_EQ(data[x * x_step + y * y_step],
-                GetTestFrameValue(size, x, y, salt));
+      UNSAFE_TODO(EXPECT_EQ(data[x * x_step + y * y_step],
+                            GetTestFrameValue(size, x, y, salt)));
     }
   }
 }
@@ -122,13 +125,14 @@ void FakeCameraStream::ValidateFrameData(const uint8_t* data,
   }
 
   gfx::Size uv_size(size.width() / 2, size.height() / 2);
-  const uint8_t* u_plane = y_plane + size.width() * size.height();
+  const uint8_t* u_plane = UNSAFE_TODO(y_plane + size.width()) * size.height();
   {
     SCOPED_TRACE("U plane");
     ValidatePlane(u_plane, uv_size, 1, uv_size.width(), salt + kUPlaneSalt);
   }
 
-  const uint8_t* v_plane = u_plane + uv_size.width() * uv_size.height();
+  const uint8_t* v_plane =
+      UNSAFE_TODO(u_plane + uv_size.width()) * uv_size.height();
   {
     SCOPED_TRACE("V plane");
     ValidatePlane(v_plane, uv_size, 1, uv_size.width(), salt + kVPlaneSalt);
@@ -153,7 +157,12 @@ FakeCameraStream::FakeCameraStream()
     : binding_(this),
       sysmem_allocator_(base::ComponentContextForProcess()
                             ->svc()
-                            ->Connect<fuchsia::sysmem::Allocator>()) {}
+                            ->Connect<fuchsia::sysmem2::Allocator>()) {
+  sysmem_allocator_->SetDebugClientInfo(
+      std::move(fuchsia::sysmem2::AllocatorSetDebugClientInfoRequest{}
+                    .set_name("ChromiumFakeCameraStream")
+                    .set_id(base::GetCurrentProcId())));
+}
 
 FakeCameraStream::~FakeCameraStream() = default;
 
@@ -233,10 +242,11 @@ void FakeCameraStream::ProduceFrame(base::TimeTicks timestamp, uint8_t salt) {
 
   // Fill UV plane.
   gfx::Size uv_size(coded_size.width() / 2, coded_size.height() / 2);
-  uint8_t* uv_plane = y_plane + kMaxFrameSize.width() * kMaxFrameSize.height();
+  uint8_t* uv_plane =
+      UNSAFE_TODO(y_plane + kMaxFrameSize.width()) * kMaxFrameSize.height();
   FillPlane(uv_plane, uv_size, /*x_step=*/2, /*y_step=*/stride, orientation_,
             salt + kUPlaneSalt);
-  FillPlane(uv_plane + 1, uv_size, /*x_step=*/2, /*y_step=*/stride,
+  FillPlane(UNSAFE_TODO(uv_plane + 1), uv_size, /*x_step=*/2, /*y_step=*/stride,
             orientation_, salt + kVPlaneSalt);
 
   // Create FrameInfo.
@@ -270,88 +280,76 @@ void FakeCameraStream::WatchOrientation(WatchOrientationCallback callback) {
   SendOrientation();
 }
 
+// temporary until other chromium code switches to sysmem2 tokens only
 void FakeCameraStream::SetBufferCollection(
     fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>
+        token_handle) {
+  SetBufferCollection2(
+      fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>(
+          token_handle.TakeChannel()));
+}
+
+void FakeCameraStream::SetBufferCollection2(
+    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
         token_handle) {
   EXPECT_TRUE(token_handle);
 
   // Drop old buffers.
   buffers_.clear();
   if (buffer_collection_) {
-    buffer_collection_->Close();
+    buffer_collection_->Release();
     buffer_collection_.Unbind();
   }
 
-  // Use a SyncPtr to be able to wait for Sync() synchronously.
-  fuchsia::sysmem::BufferCollectionTokenSyncPtr token;
-  token.Bind(std::move(token_handle));
-
-  // Duplicate the token to access from the stream.
-  fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken> local_token;
-  zx_status_t status =
-      token->Duplicate(/*rights_attenuation_mask=*/0, local_token.NewRequest());
-  EXPECT_EQ(status, ZX_OK);
-
-  fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken> failed_token;
-  if (first_buffer_collection_fail_mode_ == SysmemFailMode::kFailSync) {
-    // Create an additional token that's dropped before this method returns.
-    // This will cause sysmem to fail the collection, so the future attempt to
-    // Sync() the collection from the production code will fail as well.
-    zx_status_t status = token->Duplicate(/*rights_attenuation_mask=*/0,
-                                          failed_token.NewRequest());
-    EXPECT_EQ(status, ZX_OK);
-  }
-
-  status = token->Sync();
-  EXPECT_EQ(status, ZX_OK);
-
-  // Return the token back to the client.
-  new_buffer_collection_token_ = token.Unbind();
-  SendBufferCollection();
-
-  // Initialize the new collection using |local_token|.
-  sysmem_allocator_->BindSharedCollection(std::move(local_token),
-                                          buffer_collection_.NewRequest());
-  EXPECT_EQ(status, ZX_OK);
-
-  buffer_collection_.set_error_handler(
+  new_buffer_collection_token_.Bind(std::move(token_handle));
+  new_buffer_collection_token_.set_error_handler(
       fit::bind_member(this, &FakeCameraStream::OnBufferCollectionError));
 
-  fuchsia::sysmem::BufferCollectionConstraints constraints;
-  constraints.usage.cpu =
-      fuchsia::sysmem::cpuUsageRead | fuchsia::sysmem::cpuUsageWrite;
+  // Duplicate the token to access from the stream.
+  fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
+      token_for_client;
+  new_buffer_collection_token_->Duplicate(
+      std::move(fuchsia::sysmem2::BufferCollectionTokenDuplicateRequest{}
+                    .set_rights_attenuation_mask(ZX_RIGHT_SAME_RIGHTS)
+                    .set_token_request(token_for_client.NewRequest())));
 
-  // The client is expected to request buffers it may need. We don't need to
-  // reserve any for the server side.
-  constraints.min_buffer_count_for_camping = 0;
-
-  // Initialize image format.
-  constraints.image_format_constraints_count = 1;
-  constraints.image_format_constraints[0].pixel_format.type =
-      fuchsia::sysmem::PixelFormatType::NV12;
-  constraints.image_format_constraints[0].color_spaces_count = 1;
-  constraints.image_format_constraints[0].color_space[0].type =
-      fuchsia::sysmem::ColorSpaceType::REC601_NTSC;
-  constraints.image_format_constraints[0].required_max_coded_width =
-      kMaxFrameSize.width();
-  constraints.image_format_constraints[0].required_max_coded_height =
-      kMaxFrameSize.height();
-
-  if (first_buffer_collection_fail_mode_ == SysmemFailMode::kFailAllocation) {
-    // Set color space to SRGB to trigger sysmem collection failure (SRGB is not
-    // compatible with NV12 pixel type).
-    constraints.image_format_constraints[0].color_space[0].type =
-        fuchsia::sysmem::ColorSpaceType::SRGB;
+  fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> failed_token;
+  if (first_buffer_collection_fail_mode_ == SysmemFailMode::kFailSync) {
+    // Create an additional token that's dropped in OnBufferCollectionSyncDone()
+    // before buffers are allocated. This will cause sysmem to fail the
+    // collection, so the future attempt to Sync() the collection from the
+    // production code will fail as well.
+    new_buffer_collection_token_->Duplicate(
+        std::move(fuchsia::sysmem2::BufferCollectionTokenDuplicateRequest{}
+                      .set_rights_attenuation_mask(0)
+                      .set_token_request(failed_token.NewRequest())));
   }
 
-  buffer_collection_->SetConstraints(/*has_constraints=*/true,
-                                     std::move(constraints));
-  buffer_collection_->WaitForBuffersAllocated(
-      fit::bind_member(this, &FakeCameraStream::OnBufferCollectionAllocated));
+  new_buffer_collection_token_->Sync(
+      [this, token_for_client = std::move(token_for_client),
+       failed_token = std::move(failed_token)](
+          fuchsia::sysmem2::Node_Sync_Result sync_result) mutable {
+        OnBufferCollectionSyncDone(std::move(token_for_client),
+                                   std::move(failed_token));
+      });
 }
 
+// temporary until other chromium code switches to sysmem2 tokens only
 void FakeCameraStream::WatchBufferCollection(
     WatchBufferCollectionCallback callback) {
+  WatchBufferCollection2(
+      [callback = std::move(callback)](
+          fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
+              sysmem2_token) mutable {
+        auto sysmem1_token =
+            fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>(
+                sysmem2_token.TakeChannel());
+        callback(std::move(sysmem1_token));
+      });
+}
+
+void FakeCameraStream::WatchBufferCollection2(
+    WatchBufferCollection2Callback callback) {
   EXPECT_FALSE(watch_buffer_collection_callback_);
   watch_buffer_collection_callback_ = std::move(callback);
   SendBufferCollection();
@@ -367,14 +365,66 @@ void FakeCameraStream::NotImplemented_(const std::string& name) {
   ADD_FAILURE() << "NotImplemented_: " << name;
 }
 
+void FakeCameraStream::OnBufferCollectionSyncDone(
+    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
+        token_for_client,
+    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
+        failed_token) {
+  // Return the token back to the client.
+  new_buffer_collection_token_for_client_ = std::move(token_for_client);
+  SendBufferCollection();
+
+  // Initialize the new collection using |local_token|.
+  sysmem_allocator_->BindSharedCollection(std::move(
+      fuchsia::sysmem2::AllocatorBindSharedCollectionRequest{}
+          .set_token(std::move(new_buffer_collection_token_))
+          .set_buffer_collection_request(buffer_collection_.NewRequest())));
+
+  buffer_collection_.set_error_handler(
+      fit::bind_member(this, &FakeCameraStream::OnBufferCollectionError));
+
+  fuchsia::sysmem2::BufferCollectionConstraints constraints;
+  constraints.mutable_usage()->set_cpu(fuchsia::sysmem2::CPU_USAGE_READ |
+                                       fuchsia::sysmem2::CPU_USAGE_WRITE);
+
+  // The client is expected to request buffers it may need. We don't need to
+  // reserve any for the server side.
+
+  // Initialize image format.
+  auto& image_constraints =
+      constraints.mutable_image_format_constraints()->emplace_back();
+  image_constraints.set_pixel_format(fuchsia::images2::PixelFormat::NV12);
+  image_constraints.mutable_color_spaces()->emplace_back(
+      fuchsia::images2::ColorSpace::REC601_NTSC);
+  image_constraints.set_required_max_size(
+      fuchsia::math::SizeU{
+        static_cast<uint32_t>(kMaxFrameSize.width()),
+        static_cast<uint32_t>(kMaxFrameSize.height())});
+
+  if (first_buffer_collection_fail_mode_ == SysmemFailMode::kFailAllocation) {
+    // Set color space to SRGB to trigger sysmem collection failure (SRGB is not
+    // compatible with NV12 pixel type).
+    image_constraints.mutable_color_spaces()->at(0) =
+        fuchsia::images2::ColorSpace::SRGB;
+  }
+
+  buffer_collection_->SetConstraints(std::move(
+      fuchsia::sysmem2::BufferCollectionSetConstraintsRequest{}.set_constraints(
+          std::move(constraints))));
+  buffer_collection_->WaitForAllBuffersAllocated(
+      fit::bind_member(this, &FakeCameraStream::OnBufferCollectionAllocated));
+}
+
 void FakeCameraStream::OnBufferCollectionError(zx_status_t status) {
   if (first_buffer_collection_fail_mode_ != SysmemFailMode::kNone) {
     first_buffer_collection_fail_mode_ = SysmemFailMode::kNone;
 
     // Create a new buffer collection to retry buffer allocation.
-    fuchsia::sysmem::BufferCollectionTokenPtr token;
-    sysmem_allocator_->AllocateSharedCollection(token.NewRequest());
-    SetBufferCollection(std::move(token));
+    fuchsia::sysmem2::BufferCollectionTokenPtr token;
+    sysmem_allocator_->AllocateSharedCollection(
+        std::move(fuchsia::sysmem2::AllocatorAllocateSharedCollectionRequest{}
+                      .set_token_request(token.NewRequest())));
+    SetBufferCollection2(std::move(token));
     return;
   }
 
@@ -386,27 +436,30 @@ void FakeCameraStream::OnBufferCollectionError(zx_status_t status) {
 }
 
 void FakeCameraStream::OnBufferCollectionAllocated(
-    zx_status_t status,
-    fuchsia::sysmem::BufferCollectionInfo_2 buffer_collection_info) {
-  if (status != ZX_OK) {
-    OnBufferCollectionError(status);
+    fuchsia::sysmem2::BufferCollection_WaitForAllBuffersAllocated_Result
+        wait_result) {
+  if (wait_result.is_err()) {
+    OnBufferCollectionError(ZX_ERR_INTERNAL);
     return;
   }
+  auto buffer_collection_info =
+      std::move(*wait_result.response().mutable_buffer_collection_info());
 
   EXPECT_TRUE(buffers_.empty());
-  EXPECT_TRUE(buffer_collection_info.settings.has_image_format_constraints);
-  EXPECT_EQ(buffer_collection_info.settings.image_format_constraints
-                .pixel_format.type,
-            fuchsia::sysmem::PixelFormatType::NV12);
+  EXPECT_TRUE(buffer_collection_info.settings().has_image_format_constraints());
+  EXPECT_EQ(buffer_collection_info.settings()
+                .image_format_constraints()
+                .pixel_format(),
+            fuchsia::images2::PixelFormat::NV12);
 
   size_t buffer_size =
-      buffer_collection_info.settings.buffer_settings.size_bytes;
-  for (size_t i = 0; i < buffer_collection_info.buffer_count; ++i) {
-    auto& buffer = buffer_collection_info.buffers[i];
-    EXPECT_EQ(buffer.vmo_usable_start, 0U);
+      buffer_collection_info.settings().buffer_settings().size_bytes();
+  for (size_t i = 0; i < buffer_collection_info.buffers().size(); ++i) {
+    auto& buffer = buffer_collection_info.mutable_buffers()->at(i);
+    EXPECT_EQ(buffer.vmo_usable_start(), 0U);
     auto region = base::WritableSharedMemoryRegion::Deserialize(
         base::subtle::PlatformSharedMemoryRegion::Take(
-            std::move(buffer.vmo),
+            std::move(*buffer.mutable_vmo()),
             base::subtle::PlatformSharedMemoryRegion::Mode::kWritable,
             buffer_size, base::UnguessableToken::Create()));
     auto mapping = region.Map();
@@ -435,12 +488,14 @@ void FakeCameraStream::SendOrientation() {
 }
 
 void FakeCameraStream::SendBufferCollection() {
-  if (!watch_buffer_collection_callback_ || !new_buffer_collection_token_)
+  if (!watch_buffer_collection_callback_ ||
+      !new_buffer_collection_token_for_client_) {
     return;
+  }
   watch_buffer_collection_callback_(
-      std::move(new_buffer_collection_token_.value()));
+      std::move(*new_buffer_collection_token_for_client_));
   watch_buffer_collection_callback_ = {};
-  new_buffer_collection_token_.reset();
+  new_buffer_collection_token_for_client_.reset();
 }
 
 void FakeCameraStream::SendNextFrame() {
@@ -471,9 +526,7 @@ void FakeCameraStream::OnZxHandleSignalled(zx_handle_t handle,
   if (wait_free_buffer_run_loop_)
     wait_free_buffer_run_loop_->Quit();
 }
-FakeCameraDevice::FakeCameraDevice(FakeCameraStream* stream)
-    : stream_(stream) {}
-
+FakeCameraDevice::FakeCameraDevice() = default;
 FakeCameraDevice::~FakeCameraDevice() = default;
 
 void FakeCameraDevice::Bind(
@@ -481,7 +534,18 @@ void FakeCameraDevice::Bind(
   bindings_.AddBinding(this, std::move(request));
 }
 
+void FakeCameraDevice::SetGetIdentifierHandler(
+    base::RepeatingCallback<void(GetIdentifierCallback)>
+        get_identifier_handler) {
+  get_identifier_handler_ = std::move(get_identifier_handler);
+}
+
 void FakeCameraDevice::GetIdentifier(GetIdentifierCallback callback) {
+  if (get_identifier_handler_) {
+    get_identifier_handler_.Run(std::move(callback));
+    return;
+  }
+
   callback("Fake Camera");
 }
 
@@ -502,7 +566,7 @@ void FakeCameraDevice::ConnectToStream(
     uint32_t index,
     fidl::InterfaceRequest<fuchsia::camera3::Stream> request) {
   EXPECT_EQ(index, 0U);
-  stream_->Bind(std::move(request));
+  stream_.Bind(std::move(request));
 }
 
 void FakeCameraDevice::NotImplemented_(const std::string& name) {
@@ -511,11 +575,25 @@ void FakeCameraDevice::NotImplemented_(const std::string& name) {
 
 FakeCameraDeviceWatcher::FakeCameraDeviceWatcher(
     sys::OutgoingDirectory* outgoing_directory) {
-  outgoing_directory->AddPublicService<fuchsia::camera3::DeviceWatcher>(
-      [this](fidl::InterfaceRequest<fuchsia::camera3::DeviceWatcher> request) {
-        bindings_.AddBinding(std::make_unique<Client>(&device_),
-                             std::move(request));
-      });
+  zx_status_t status =
+      outgoing_directory->AddPublicService<fuchsia::camera3::DeviceWatcher>(
+          [this](
+              fidl::InterfaceRequest<fuchsia::camera3::DeviceWatcher> request) {
+            auto client = std::make_unique<Client>(this);
+
+            // Queue events for all existing devices.
+            for (auto& device : devices_) {
+              fuchsia::camera3::WatchDevicesEvent event;
+              event.set_added(device.first);
+              client->QueueEvent(std::move(event));
+            }
+
+            bindings_.AddBinding(std::move(client), std::move(request));
+          });
+  ZX_CHECK(status == ZX_OK, status) << "AddPublicService failed";
+
+  devices_.insert(
+      std::make_pair(next_device_id_++, std::make_unique<FakeCameraDevice>()));
 }
 
 FakeCameraDeviceWatcher::~FakeCameraDeviceWatcher() = default;
@@ -524,27 +602,60 @@ void FakeCameraDeviceWatcher::DisconnectClients() {
   bindings_.CloseAll();
 }
 
-FakeCameraDeviceWatcher::Client::Client(FakeCameraDevice* device)
-    : device_(device) {}
+std::unique_ptr<FakeCameraDevice> FakeCameraDeviceWatcher::RemoveDevice(
+    uint64_t device_id) {
+  auto device_it = devices_.find(device_id);
+  CHECK(device_it != devices_.end());
+
+  // Queue an event for each client to inform about the device removal.
+  for (auto& binding : bindings_.bindings()) {
+    fuchsia::camera3::WatchDevicesEvent event;
+    event.set_removed(device_id);
+    binding->impl()->QueueEvent(std::move(event));
+  }
+
+  std::unique_ptr<FakeCameraDevice> device = std::move(device_it->second);
+  devices_.erase(device_it);
+
+  return device;
+}
+
+FakeCameraDeviceWatcher::Client::Client(FakeCameraDeviceWatcher* device_watcher)
+    : device_watcher_(device_watcher) {}
 FakeCameraDeviceWatcher::Client::~Client() {}
+
+void FakeCameraDeviceWatcher::Client::QueueEvent(
+    fuchsia::camera3::WatchDevicesEvent event) {
+  event_queue_.push_back(std::move(event));
+
+  if (watch_devices_callback_) {
+    watch_devices_callback_(std::move(event_queue_));
+    event_queue_.clear();
+    watch_devices_callback_ = {};
+  }
+}
 
 void FakeCameraDeviceWatcher::Client::WatchDevices(
     WatchDevicesCallback callback) {
-  if (devices_sent_)
+  DCHECK(!watch_devices_callback_);
+
+  if (initial_list_sent_ && event_queue_.empty()) {
+    watch_devices_callback_ = std::move(callback);
     return;
+  }
 
-  std::vector<fuchsia::camera3::WatchDevicesEvent> events(1);
-  events[0].set_added(kDefaultFakeDeviceId);
-  callback(std::move(events));
-
-  devices_sent_ = true;
+  callback(std::move(event_queue_));
+  event_queue_.clear();
+  initial_list_sent_ = true;
 }
 
 void FakeCameraDeviceWatcher::Client::ConnectToDevice(
     uint64_t id,
     fidl::InterfaceRequest<fuchsia::camera3::Device> request) {
-  if (id == kDefaultFakeDeviceId)
-    device_->Bind(std::move(request));
+  auto it = device_watcher_->devices().find(id);
+  if (it == device_watcher_->devices().end())
+    return;
+  it->second->Bind(std::move(request));
 }
 
 void FakeCameraDeviceWatcher::Client::NotImplemented_(const std::string& name) {

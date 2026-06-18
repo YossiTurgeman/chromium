@@ -1,4 +1,4 @@
-# Copyright 2016 The Chromium Authors. All rights reserved.
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Script that helps run the fuzzer locally and in ClusterFuzz.
@@ -55,7 +55,10 @@ def RetrieveResources():
         print('\'resources\' folder already exists. Clearing it...')
         filelist = glob.glob(os.path.join(resources_path, '*'))
         for f in filelist:
-            os.remove(f)
+            if os.path.isdir(f):
+                shutil.rmtree(f)
+            else:
+                os.remove(f)
 
     # Copy necessary files.
     for r in RESOURCES:

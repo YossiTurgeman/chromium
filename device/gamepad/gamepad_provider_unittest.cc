@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,20 +6,30 @@
 
 #include <memory>
 
-#include "base/bind.h"
-#include "base/macros.h"
+#include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread.h"
 #include "build/build_config.h"
 #include "device/gamepad/gamepad_data_fetcher.h"
+#include "device/gamepad/gamepad_pad_state_provider.h"
 #include "device/gamepad/gamepad_test_helpers.h"
+#include "device/gamepad/public/cpp/gamepad_features.h"
+#include "device/gamepad/public/cpp/gamepad_switches.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace device {
 
 namespace {
+
+constexpr int64_t kInitialTimeStamp = 0;
+constexpr int64_t kUserGestureTimeStamp = 1;
+constexpr int64_t kPollTimeStamp = 2;
 
 // Helper class to generate and record user gesture callbacks.
 class UserGestureListener {
@@ -31,23 +41,42 @@ class UserGestureListener {
                           weak_factory_.GetWeakPtr());
   }
 
+  void WaitForUserGesture() {
+    if (has_user_gesture_) {
+      return;
+    }
+
+    base::RunLoop run_loop;
+    quit_closure_ = run_loop.QuitClosure();
+    run_loop.Run();
+  }
+
   bool has_user_gesture() const { return has_user_gesture_; }
 
  private:
-  void GotUserGesture() { has_user_gesture_ = true; }
+  void GotUserGesture() {
+    has_user_gesture_ = true;
+    if (quit_closure_) {
+      std::move(quit_closure_).Run();
+    }
+  }
 
   bool has_user_gesture_;
+  base::OnceClosure quit_closure_;
   base::WeakPtrFactory<UserGestureListener> weak_factory_{this};
 };
 
 // Main test fixture
 class GamepadProviderTest : public testing::Test, public GamepadTestHelper {
  public:
+  GamepadProviderTest(const GamepadProviderTest&) = delete;
+  GamepadProviderTest& operator=(const GamepadProviderTest&) = delete;
+
   GamepadProvider* CreateProvider(const Gamepads& test_data) {
     auto fetcher = std::make_unique<MockGamepadDataFetcher>(test_data);
     mock_data_fetcher_ = fetcher.get();
     provider_ = std::make_unique<GamepadProvider>(
-        /*connection_change_client=*/nullptr, std::move(fetcher),
+        /*gamepad_change_client=*/nullptr, std::move(fetcher),
         /*polling_thread=*/nullptr);
     return provider_.get();
   }
@@ -58,10 +87,10 @@ class GamepadProviderTest : public testing::Test, public GamepadTestHelper {
   // the buffer is not in a consistent state, so we also require that the value
   // is even before continuing.
   void WaitForData(const GamepadHardwareBuffer* buffer) {
-    const base::subtle::Atomic32 initial_version = buffer->seqlock.ReadBegin();
-    base::subtle::Atomic32 current_version;
+    const int32_t initial_version = buffer->seqlock.ReadBegin();
+    int32_t current_version;
     do {
-      base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(10));
+      base::PlatformThread::Sleep(base::Milliseconds(10));
       current_version = buffer->seqlock.ReadBegin();
     } while (current_version % 2 || current_version == initial_version);
   }
@@ -76,36 +105,122 @@ class GamepadProviderTest : public testing::Test, public GamepadTestHelper {
 
   void ReadGamepadHardwareBuffer(const GamepadHardwareBuffer* buffer,
                                  Gamepads* output) {
-    memset(output, 0, sizeof(Gamepads));
-    base::subtle::Atomic32 version;
+    UNSAFE_TODO(memset(output, 0, sizeof(Gamepads)));
+    int32_t version;
     do {
       version = buffer->seqlock.ReadBegin();
-      memcpy(output, &buffer->data, sizeof(Gamepads));
+      UNSAFE_TODO(memcpy(output, &buffer->data, sizeof(Gamepads)));
     } while (buffer->seqlock.ReadRetry(version));
+  }
+
+  void EnableRawInputChangeDetection() {
+    scoped_feature_list_.InitAndEnableFeature(
+        features::kGamepadRawInputChangeEvent);
+  }
+
+  void SetInitialStateForRawInputChange(Gamepads& data, int64_t timestamp) {
+    data.items[0] = {};
+    data.items[0].connected = true;
+    data.items[0].timestamp = timestamp;
+    data.items[0].buttons_length = 4;
+    data.items[0].axes_length = 2;
+    data.items[0].touch_events_length = 2;
+    data.items[0].supports_touch_events_ = true;
+    data.items[0].touch_events[0].touch_id = 1;
+    data.items[0].touch_events[1].touch_id = 2;
+  }
+
+  void SetUserGestureForRawInputChange(Gamepads& data, int64_t timestamp) {
+    // Always set the first button as pressed for user gesture.
+    data.items[0].timestamp = timestamp;
+    data.items[0].buttons[0].value = 1.0f;
+    data.items[0].buttons[0].pressed = true;
+  }
+
+  // Helper method to test raw input change detection for different input types.
+  void TestRawInputChangeDetection(
+      const std::string& test_name,
+      base::OnceCallback<void(Gamepads&)> setup_input_change_data,
+      base::OnceCallback<void(const Gamepads&)> verify_final_state) {
+    // Setup initial gamepad state.
+    Gamepads test_data = {};
+    SetInitialStateForRawInputChange(test_data, kInitialTimeStamp);
+    GamepadProvider* provider = CreateProvider(test_data);
+    provider->SetSanitizationEnabled(false);
+    provider->Resume();
+
+    UserGestureListener listener;
+    provider->RegisterForUserGesture(listener.GetClosure());
+
+    // Get shared memory buffer.
+    base::ReadOnlySharedMemoryRegion region =
+        provider->DuplicateSharedMemoryRegion();
+    base::ReadOnlySharedMemoryMapping mapping = region.Map();
+    EXPECT_TRUE(mapping.IsValid());
+    const GamepadHardwareBuffer* buffer =
+        static_cast<const GamepadHardwareBuffer*>(mapping.memory());
+
+    // Wait for initial data and verify no input change detected yet.
+    WaitForData(buffer);
+    EXPECT_FALSE(provider->HasInputChangedForTesting())
+        << "Initial state should show no input change for " << test_name;
+
+    // Trigger user gesture.
+    Gamepads user_gesture_data = test_data;
+    SetUserGestureForRawInputChange(user_gesture_data, kUserGestureTimeStamp);
+    mock_data_fetcher_->SetTestData(user_gesture_data);
+    WaitForDataAndCallbacksIssued(buffer);
+    listener.WaitForUserGesture();
+
+    EXPECT_TRUE(listener.has_user_gesture())
+        << "User gesture should be detected for " << test_name;
+
+    // Setup input change data (the actual change we want to test).
+    Gamepads input_change_data = user_gesture_data;
+    input_change_data.items[0].timestamp = kPollTimeStamp;
+    std::move(setup_input_change_data).Run(input_change_data);
+
+    // Apply the input change that should be detected.
+    mock_data_fetcher_->SetTestData(input_change_data);
+    WaitForDataAndCallbacksIssued(buffer);
+
+    // Verify the result.
+    Gamepads output;
+    ReadGamepadHardwareBuffer(buffer, &output);
+    std::move(verify_final_state).Run(output);
+
+    if (user_gesture_data.items[0].timestamp !=
+        input_change_data.items[0].timestamp) {
+      EXPECT_TRUE(provider->HasInputChangedForTesting())
+          << "Input change should be detected for " << test_name;
+    } else {
+      EXPECT_FALSE(provider->HasInputChangedForTesting())
+          << "Input change should NOT be detected for " << test_name;
+    }
   }
 
  protected:
   GamepadProviderTest() = default;
 
+  base::test::ScopedFeatureList scoped_feature_list_;
+
   std::unique_ptr<GamepadProvider> provider_;
 
   // Pointer owned by the provider.
-  MockGamepadDataFetcher* mock_data_fetcher_;
-
-  DISALLOW_COPY_AND_ASSIGN(GamepadProviderTest);
+  raw_ptr<MockGamepadDataFetcher> mock_data_fetcher_;
 };
 
 TEST_F(GamepadProviderTest, PollingAccess) {
   Gamepads test_data;
-  memset(&test_data, 0, sizeof(Gamepads));
+  UNSAFE_TODO(memset(&test_data, 0, sizeof(Gamepads)));
   test_data.items[0].connected = true;
   test_data.items[0].timestamp = 0;
   test_data.items[0].buttons_length = 1;
   test_data.items[0].axes_length = 2;
-  test_data.items[0].buttons[0].value = 1.f;
+  test_data.items[0].buttons[0].value = 1.0f;
   test_data.items[0].buttons[0].pressed = true;
-  test_data.items[0].axes[0] = -1.f;
-  test_data.items[0].axes[1] = .5f;
+  test_data.items[0].axes[0] = -1.0f;
+  test_data.items[0].axes[1] = 0.5f;
 
   GamepadProvider* provider = CreateProvider(test_data);
   provider->SetSanitizationEnabled(false);
@@ -128,11 +243,11 @@ TEST_F(GamepadProviderTest, PollingAccess) {
   Gamepads output;
   ReadGamepadHardwareBuffer(buffer, &output);
 
-  EXPECT_EQ(1u, output.items[0].buttons_length);
-  EXPECT_EQ(1.f, output.items[0].buttons[0].value);
+  ASSERT_EQ(1u, output.items[0].buttons_length);
+  EXPECT_EQ(1.0f, output.items[0].buttons[0].value);
   EXPECT_EQ(true, output.items[0].buttons[0].pressed);
-  EXPECT_EQ(2u, output.items[0].axes_length);
-  EXPECT_EQ(-1.f, output.items[0].axes[0]);
+  ASSERT_EQ(2u, output.items[0].axes_length);
+  EXPECT_EQ(-1.0f, output.items[0].axes[0]);
   EXPECT_EQ(0.5f, output.items[0].axes[1]);
 }
 
@@ -141,21 +256,21 @@ TEST_F(GamepadProviderTest, ConnectDisconnectMultiple) {
   test_data.items[0].connected = true;
   test_data.items[0].timestamp = 0;
   test_data.items[0].axes_length = 2;
-  test_data.items[0].axes[0] = -1.f;
-  test_data.items[0].axes[1] = .5f;
+  test_data.items[0].axes[0] = -1.0f;
+  test_data.items[0].axes[1] = 0.5f;
 
   test_data.items[1].connected = true;
   test_data.items[1].timestamp = 0;
   test_data.items[1].axes_length = 2;
-  test_data.items[1].axes[0] = 1.f;
-  test_data.items[1].axes[1] = -.5f;
+  test_data.items[1].axes[0] = 1.0f;
+  test_data.items[1].axes[1] = -0.5f;
 
   Gamepads test_data_onedisconnected;
   test_data_onedisconnected.items[1].connected = true;
   test_data_onedisconnected.items[1].timestamp = 0;
   test_data_onedisconnected.items[1].axes_length = 2;
-  test_data_onedisconnected.items[1].axes[0] = 1.f;
-  test_data_onedisconnected.items[1].axes[1] = -.5f;
+  test_data_onedisconnected.items[1].axes[0] = 1.0f;
+  test_data_onedisconnected.items[1].axes[1] = -0.5f;
 
   GamepadProvider* provider = CreateProvider(test_data);
   provider->SetSanitizationEnabled(false);
@@ -178,11 +293,11 @@ TEST_F(GamepadProviderTest, ConnectDisconnectMultiple) {
   Gamepads output;
   ReadGamepadHardwareBuffer(buffer, &output);
 
-  EXPECT_EQ(2u, output.items[0].axes_length);
-  EXPECT_EQ(-1.f, output.items[0].axes[0]);
+  ASSERT_EQ(2u, output.items[0].axes_length);
+  EXPECT_EQ(-1.0f, output.items[0].axes[0]);
   EXPECT_EQ(0.5f, output.items[0].axes[1]);
-  EXPECT_EQ(2u, output.items[1].axes_length);
-  EXPECT_EQ(1.f, output.items[1].axes[0]);
+  ASSERT_EQ(2u, output.items[1].axes_length);
+  EXPECT_EQ(1.0f, output.items[1].axes[0]);
   EXPECT_EQ(-0.5f, output.items[1].axes[1]);
 
   mock_data_fetcher_->SetTestData(test_data_onedisconnected);
@@ -192,8 +307,8 @@ TEST_F(GamepadProviderTest, ConnectDisconnectMultiple) {
   ReadGamepadHardwareBuffer(buffer, &output);
 
   EXPECT_EQ(0u, output.items[0].axes_length);
-  EXPECT_EQ(2u, output.items[1].axes_length);
-  EXPECT_EQ(1.f, output.items[1].axes[0]);
+  ASSERT_EQ(2u, output.items[1].axes_length);
+  EXPECT_EQ(1.0f, output.items[1].axes[0]);
   EXPECT_EQ(-0.5f, output.items[1].axes[1]);
 }
 
@@ -204,13 +319,13 @@ TEST_F(GamepadProviderTest, UserGesture) {
   no_button_data.items[0].timestamp = 0;
   no_button_data.items[0].buttons_length = 1;
   no_button_data.items[0].axes_length = 2;
-  no_button_data.items[0].buttons[0].value = 0.f;
+  no_button_data.items[0].buttons[0].value = 0.0f;
   no_button_data.items[0].buttons[0].pressed = false;
-  no_button_data.items[0].axes[0] = 0.f;
-  no_button_data.items[0].axes[1] = .4f;
+  no_button_data.items[0].axes[0] = 0.0f;
+  no_button_data.items[0].axes[1] = 0.4f;
 
   Gamepads button_down_data = no_button_data;
-  button_down_data.items[0].buttons[0].value = 1.f;
+  button_down_data.items[0].buttons[0].value = 1.0f;
   button_down_data.items[0].buttons[0].pressed = true;
 
   UserGestureListener listener;
@@ -256,18 +371,18 @@ TEST_F(GamepadProviderTest, Sanitization) {
   active_data.items[0].timestamp = 0;
   active_data.items[0].buttons_length = 1;
   active_data.items[0].axes_length = 1;
-  active_data.items[0].buttons[0].value = 1.f;
+  active_data.items[0].buttons[0].value = 1.0f;
   active_data.items[0].buttons[0].pressed = true;
-  active_data.items[0].axes[0] = -1.f;
+  active_data.items[0].axes[0] = -1.0f;
 
   Gamepads zero_data;
   zero_data.items[0].connected = true;
   zero_data.items[0].timestamp = 0;
   zero_data.items[0].buttons_length = 1;
   zero_data.items[0].axes_length = 1;
-  zero_data.items[0].buttons[0].value = 0.f;
+  zero_data.items[0].buttons[0].value = 0.0f;
   zero_data.items[0].buttons[0].pressed = false;
-  zero_data.items[0].axes[0] = 0.f;
+  zero_data.items[0].axes[0] = 0.0f;
 
   UserGestureListener listener;
   GamepadProvider* provider = CreateProvider(active_data);
@@ -280,7 +395,7 @@ TEST_F(GamepadProviderTest, Sanitization) {
   base::ReadOnlySharedMemoryRegion region =
       provider->DuplicateSharedMemoryRegion();
   base::ReadOnlySharedMemoryMapping mapping = region.Map();
-  EXPECT_TRUE(mapping.IsValid());
+  ASSERT_TRUE(mapping.IsValid());
 
   const GamepadHardwareBuffer* buffer =
       static_cast<const GamepadHardwareBuffer*>(mapping.memory());
@@ -293,11 +408,11 @@ TEST_F(GamepadProviderTest, Sanitization) {
 
   // Initial data should all be zeroed out due to sanitization, even though the
   // gamepad reported input
-  EXPECT_EQ(1u, output.items[0].buttons_length);
-  EXPECT_EQ(0.f, output.items[0].buttons[0].value);
+  ASSERT_EQ(1u, output.items[0].buttons_length);
+  EXPECT_EQ(0.0f, output.items[0].buttons[0].value);
   EXPECT_FALSE(output.items[0].buttons[0].pressed);
-  EXPECT_EQ(1u, output.items[0].axes_length);
-  EXPECT_EQ(0.f, output.items[0].axes[0]);
+  ASSERT_EQ(1u, output.items[0].axes_length);
+  EXPECT_EQ(0.0f, output.items[0].axes[0]);
 
   // Zero out the inputs
   mock_data_fetcher_->SetTestData(zero_data);
@@ -308,11 +423,11 @@ TEST_F(GamepadProviderTest, Sanitization) {
   ReadGamepadHardwareBuffer(buffer, &output);
 
   // Should still read zero, which is now an accurate reflection of the data
-  EXPECT_EQ(1u, output.items[0].buttons_length);
-  EXPECT_EQ(0.f, output.items[0].buttons[0].value);
+  ASSERT_EQ(1u, output.items[0].buttons_length);
+  EXPECT_EQ(0.0f, output.items[0].buttons[0].value);
   EXPECT_FALSE(output.items[0].buttons[0].pressed);
-  EXPECT_EQ(1u, output.items[0].axes_length);
-  EXPECT_EQ(0.f, output.items[0].axes[0]);
+  ASSERT_EQ(1u, output.items[0].axes_length);
+  EXPECT_EQ(0.0f, output.items[0].axes[0]);
 
   // Re-set the active inputs
   mock_data_fetcher_->SetTestData(active_data);
@@ -323,11 +438,101 @@ TEST_F(GamepadProviderTest, Sanitization) {
   ReadGamepadHardwareBuffer(buffer, &output);
 
   // Should now accurately reflect the reported data.
-  EXPECT_EQ(1u, output.items[0].buttons_length);
-  EXPECT_EQ(1.f, output.items[0].buttons[0].value);
+  ASSERT_EQ(1u, output.items[0].buttons_length);
+  EXPECT_EQ(1.0f, output.items[0].buttons[0].value);
   EXPECT_TRUE(output.items[0].buttons[0].pressed);
-  EXPECT_EQ(1u, output.items[0].axes_length);
-  EXPECT_EQ(-1.f, output.items[0].axes[0]);
+  ASSERT_EQ(1u, output.items[0].axes_length);
+  EXPECT_EQ(-1.0f, output.items[0].axes[0]);
+}
+
+TEST_F(GamepadProviderTest, HasInputChangedDetectsButtonChanges) {
+  EnableRawInputChangeDetection();
+  TestRawInputChangeDetection(
+      "button changes",
+      // Setup input change data.
+      base::BindOnce([](Gamepads& data) {
+        data.items[0].buttons[0].value = 1.0f;
+        data.items[0].buttons[0].pressed = false;
+      }),
+      // Verify final state.
+      base::BindOnce([](const Gamepads& output) {
+        EXPECT_EQ(1.0f, output.items[0].buttons[0].value);
+        EXPECT_EQ(false, output.items[0].buttons[0].pressed);
+      }));
+}
+
+TEST_F(GamepadProviderTest, HasInputChangedDetectsAxisChanges) {
+  EnableRawInputChangeDetection();
+  TestRawInputChangeDetection("axis changes",
+                              // Setup input change data.
+                              base::BindOnce([](Gamepads& data) {
+                                data.items[0].axes[0] = -1.0f;
+                                data.items[0].axes[1] = 0.3f;
+                              }),
+                              // Verify final state.
+                              base::BindOnce([](const Gamepads& output) {
+                                EXPECT_EQ(-1.0f, output.items[0].axes[0]);
+                                EXPECT_EQ(0.3f, output.items[0].axes[1]);
+                              }));
+}
+
+TEST_F(GamepadProviderTest, HasInputChangedDetectsTouchChanges) {
+  EnableRawInputChangeDetection();
+  TestRawInputChangeDetection(
+      "touch changes",
+      // Setup input change data (change touch events after user gesture).
+      base::BindOnce([](Gamepads& data) {
+        data.items[0].touch_events[0].x = -0.2f;
+        data.items[0].touch_events[0].y = 0.8f;
+        data.items[0].touch_events[1].x = 1.0f;
+        data.items[0].touch_events[1].y = -0.4f;
+      }),
+      // Verify final state.
+      base::BindOnce([](const Gamepads& output) {
+        EXPECT_EQ(-0.2f, output.items[0].touch_events[0].x);
+        EXPECT_EQ(0.8f, output.items[0].touch_events[0].y);
+        EXPECT_EQ(1.0f, output.items[0].touch_events[1].x);
+        EXPECT_EQ(-0.4f, output.items[0].touch_events[1].y);
+      }));
+}
+
+TEST_F(GamepadProviderTest, NoInputChangeDetectedWithUnchangedTimestamp) {
+  EnableRawInputChangeDetection();
+  TestRawInputChangeDetection(
+      "unchanged timestamp",
+      // Setup input change data (the actual change we want to test).
+      base::BindOnce([](Gamepads& data) {
+        data.items[0].timestamp = kUserGestureTimeStamp;
+        data.items[0].buttons[0].value = 0.5f;
+      }),
+      // Verify final state.
+      base::BindOnce([](const Gamepads& output) {
+        EXPECT_EQ(0.5f, output.items[0].buttons[0].value);
+      }));
+}
+
+TEST_F(GamepadProviderTest, ClaimProductIdentifier) {
+  scoped_feature_list_.InitAndEnableFeature(
+      features::kClaimDuplicateGamepadsProductIdentifier);
+
+  static constexpr char kTestProductIdentifier[] = "Wireless Controller";
+  GamepadProvider* provider = CreateProvider({});
+
+  EXPECT_TRUE(provider->GetPadState(GamepadSource::kTest, /*source_id=*/0,
+                                    /*new_gamepad_recognized=*/true,
+                                    kTestProductIdentifier));
+  EXPECT_TRUE(provider->GetPadState(GamepadSource::kSimulated, /*source_id=*/0,
+                                    /*new_gamepad_recognized=*/true,
+                                    kTestProductIdentifier));
+
+  provider->ClaimProductIdentifierForSource(GamepadSource::kTest,
+                                            kTestProductIdentifier);
+  EXPECT_TRUE(provider->GetPadState(GamepadSource::kTest, /*source_id=*/0,
+                                    /*new_gamepad_recognized=*/true,
+                                    kTestProductIdentifier));
+  EXPECT_FALSE(provider->GetPadState(GamepadSource::kSimulated, /*source_id=*/0,
+                                     /*new_gamepad_recognized=*/true,
+                                     kTestProductIdentifier));
 }
 
 }  // namespace

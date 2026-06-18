@@ -1,4 +1,4 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,16 +7,17 @@
 
 #include <memory>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
 #include "base/observer_list.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
 
 class BrowserView;
+class BrowserWindowInterface;
+class WindowFeatureController;
 
 namespace gfx {
 class Rect;
 class Size;
-}
+}  // namespace gfx
 
 namespace views {
 class Widget;
@@ -27,23 +28,22 @@ class Widget;
 // See ImmersiveModeController::GetRevealedLock for details.
 class ImmersiveRevealedLock {
  public:
-  virtual ~ImmersiveRevealedLock() {}
+  virtual ~ImmersiveRevealedLock() = default;
 
  protected:
-  ImmersiveRevealedLock() {}
+  ImmersiveRevealedLock() = default;
 };
 
 // Controller for an "immersive mode" similar to MacOS presentation mode where
 // the top-of-window views are hidden until the mouse hits the top of the
 // screen. The tab strip is optionally painted with miniature "tab indicator"
 // rectangles.
-// Currently, immersive mode is only available for Chrome OS.
+// Currently, immersive mode is only available for Chrome OS and macOS.
 class ImmersiveModeController {
  public:
-  enum AnimateReveal {
-    ANIMATE_REVEAL_YES,
-    ANIMATE_REVEAL_NO
-  };
+  DECLARE_USER_DATA(ImmersiveModeController);
+
+  enum AnimateReveal { ANIMATE_REVEAL_YES, ANIMATE_REVEAL_NO };
 
   class Observer {
    public:
@@ -56,15 +56,26 @@ class ImmersiveModeController {
     // Called when the immersive mode controller has been destroyed.
     virtual void OnImmersiveModeControllerDestroyed() {}
 
+    // Called when immersive mode is entered.
+    virtual void OnImmersiveFullscreenEntered() {}
+
     // Called when immersive mode is exited.
     virtual void OnImmersiveFullscreenExited() {}
 
    protected:
-    virtual ~Observer() {}
+    virtual ~Observer() = default;
   };
 
-  ImmersiveModeController();
+  explicit ImmersiveModeController(ui::UnownedUserDataHost& host);
+
+  ImmersiveModeController(const ImmersiveModeController&) = delete;
+  ImmersiveModeController& operator=(const ImmersiveModeController&) = delete;
+
   virtual ~ImmersiveModeController();
+
+  static ImmersiveModeController* From(BrowserWindowInterface* browser);
+  static const ImmersiveModeController* From(
+      const BrowserWindowInterface* browser);
 
   // Must initialize after browser view has a Widget and native window.
   virtual void Init(BrowserView* browser_view) = 0;
@@ -72,9 +83,6 @@ class ImmersiveModeController {
   // Enables or disables immersive mode.
   virtual void SetEnabled(bool enabled) = 0;
   virtual bool IsEnabled() const = 0;
-
-  // True when the top views are hidden due to immersive mode.
-  virtual bool ShouldHideTopViews() const = 0;
 
   // True when the top views are fully or partially visible.
   virtual bool IsRevealed() const = 0;
@@ -96,14 +104,13 @@ class ImmersiveModeController {
   // mode is enabled. The lock's lifetime can span immersive mode being
   // enabled / disabled.
   // If acquiring the lock causes a reveal, the top-of-window views will animate
-  // according to |animate_reveal|.
-  // The caller takes ownership of the returned lock.
+  // according to `animate_reveal`.
   // This is currently only supported on Ash.
-  virtual ImmersiveRevealedLock* GetRevealedLock(
-      AnimateReveal animate_reveal) WARN_UNUSED_RESULT = 0;
+  virtual std::unique_ptr<ImmersiveRevealedLock> GetRevealedLock(
+      AnimateReveal animate_reveal) = 0;
 
   // Called by the find bar to indicate that its visible bounds have changed.
-  // |new_visible_bounds_in_screen| should be empty if the find bar is not
+  // `new_visible_bounds_in_screen` should be empty if the find bar is not
   // visible.
   virtual void OnFindBarVisibleBoundsChanged(
       const gfx::Rect& new_visible_bounds_in_screen) = 0;
@@ -113,27 +120,43 @@ class ImmersiveModeController {
   // in which case we should stay in immersive mode.
   virtual bool ShouldStayImmersiveAfterExitingFullscreen() = 0;
 
-  // Called by browser view to indicate the widget activation has changed.
-  // Immersive mode should be enabled/disabled if the widget is
-  // active/nonactive when the auto hide title bars in tablet mode feature is
-  // on.
-  virtual void OnWidgetActivationChanged(views::Widget* widget,
-                                         bool active) = 0;
+  // Returns the minimum y-offset for the web contents. Used on Mac to prevent
+  // find results from hiding under the top chrome when the find bar is in use.
+  virtual int GetMinimumContentOffset() const = 0;
+
+  // Returns an offset to add to the vertical origin of the infobar while
+  // laying out the browser view. Used on Mac to ensure the infobar stays
+  // visible when revealing topchrome.
+  virtual int GetExtraInfobarOffset() const = 0;
+
+  // Called when entering or exiting content fullscreen.
+  // Content fullscreen is distinct from browser fullscreen. Content fullscreen
+  // is when a single tab enters fullscreen, where browser fullscreen is when
+  // the entire browser window, including toolbar, is fullscreen.
+  // This is currently only used on macOS.
+  virtual void OnContentFullscreenChanged(bool is_content_fullscreen) = 0;
 
   virtual void AddObserver(Observer* observer);
   virtual void RemoveObserver(Observer* observer);
 
  protected:
-  base::ObserverList<Observer>::Unchecked observers_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ImmersiveModeController);
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/false,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
+      observers_;
+  ui::ScopedUnownedUserData<ImmersiveModeController> scoped_unowned_user_data_;
 };
+
+class BrowserView;
 
 namespace chrome {
 
 // Implemented in immersive_mode_controller_factory.cc.
-std::unique_ptr<ImmersiveModeController> CreateImmersiveModeController();
+std::unique_ptr<ImmersiveModeController> CreateImmersiveModeController(
+    WindowFeatureController* window_feature_controller,
+    ui::UnownedUserDataHost& host);
 
 }  // namespace chrome
 

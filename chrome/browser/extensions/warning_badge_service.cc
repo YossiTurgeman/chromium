@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,11 @@
 
 #include <memory>
 
-#include "base/stl_util.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/extensions/warning_badge_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/global_error/global_error.h"
 #include "chrome/browser/ui/global_error/global_error_service.h"
@@ -36,7 +37,7 @@ class ErrorBadge : public GlobalError {
   // Implementation for GlobalError:
   bool HasMenuItem() override;
   int MenuItemCommandID() override;
-  base::string16 MenuItemLabel() override;
+  std::u16string MenuItemLabel() override;
   void ExecuteMenuItem(Browser* browser) override;
 
   bool HasBubbleView() override;
@@ -47,15 +48,14 @@ class ErrorBadge : public GlobalError {
   static int GetMenuItemCommandID();
 
  private:
-  WarningBadgeService* badge_service_;
+  raw_ptr<WarningBadgeService, DanglingUntriaged> badge_service_;
 };
 
 ErrorBadge::ErrorBadge(WarningBadgeService* badge_service)
     : badge_service_(badge_service) {
 }
 
-ErrorBadge::~ErrorBadge() {
-}
+ErrorBadge::~ErrorBadge() = default;
 
 bool ErrorBadge::HasMenuItem() {
   return true;
@@ -65,7 +65,7 @@ int ErrorBadge::MenuItemCommandID() {
   return GetMenuItemCommandID();
 }
 
-base::string16 ErrorBadge::MenuItemLabel() {
+std::u16string ErrorBadge::MenuItemLabel() {
   return l10n_util::GetStringUTF16(IDS_EXTENSION_WARNINGS_WRENCH_MENU_ITEM);
 }
 
@@ -90,7 +90,7 @@ void ErrorBadge::ShowBubbleView(Browser* browser) {
 }
 
 GlobalErrorBubbleViewBase* ErrorBadge::GetBubbleView() {
-  return NULL;
+  return nullptr;
 }
 
 // static
@@ -100,10 +100,9 @@ int ErrorBadge::GetMenuItemCommandID() {
 
 }  // namespace
 
-WarningBadgeService::WarningBadgeService(Profile* profile)
-    : profile_(profile), warning_service_observer_(this) {
+WarningBadgeService::WarningBadgeService(Profile* profile) : profile_(profile) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  warning_service_observer_.Add(WarningService::Get(profile_));
+  warning_service_observation_.Observe(WarningService::Get(profile_));
 }
 
 WarningBadgeService::~WarningBadgeService() {
@@ -141,7 +140,7 @@ void WarningBadgeService::UpdateBadgeStatus() {
   const std::set<Warning>& warnings = GetCurrentWarnings();
   bool non_suppressed_warnings_exist = false;
   for (auto i = warnings.begin(); i != warnings.end(); ++i) {
-    if (!base::Contains(suppressed_warnings_, *i)) {
+    if (!suppressed_warnings_.contains(*i)) {
       non_suppressed_warnings_exist = true;
       break;
     }

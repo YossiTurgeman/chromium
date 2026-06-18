@@ -1,7 +1,12 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   var {page, session, dp} = await testRunner.startURL(
       'resources/background-services.html',
       `Tests that background service events are received when appropriate.`);
+
+  await dp.Browser.grantPermissions({
+    origin: location.origin,
+    permissions: ['backgroundFetch'],
+  });
 
   await session.evaluateAsync('installSW()');
 

@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,24 @@
 #include <stdint.h>
 
 #include <memory>
+#include <utility>
 
 #include "base/check_op.h"
 #include "base/notreached.h"
 #include "base/numerics/checked_math.h"
+#include "build/build_config.h"
+#include "gpu/config/gpu_finch_features.h"
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
 #include "third_party/skia/include/core/SkMallocPixelRef.h"
 #include "third_party/skia/include/core/SkPixelRef.h"
+#include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/GrRecordingContext.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/device_info.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 
 namespace cc {
 namespace {
@@ -30,7 +41,6 @@ UIResourceBitmap::UIResourceFormat SkColorTypeToUIResourceFormat(
       break;
     default:
       NOTREACHED() << "Invalid SkColorType for UIResourceBitmap: " << sk_type;
-      break;
   }
   return format;
 }
@@ -55,8 +65,25 @@ void UIResourceBitmap::DrawToCanvas(SkCanvas* canvas, SkPaint* paint) {
   SkBitmap bitmap;
   bitmap.setInfo(info_, pixel_ref_.get()->rowBytes());
   bitmap.setPixelRef(pixel_ref_, 0, 0);
-  canvas->drawBitmap(bitmap, 0, 0, paint);
-  canvas->flush();
+  canvas->drawImage(bitmap.asImage(), 0, 0, SkSamplingOptions(), paint);
+  if (GrDirectContext* direct_context =
+          GrAsDirectContext(canvas->recordingContext())) {
+    direct_context->flushAndSubmit();
+  }
+}
+
+base::span<const uint8_t> UIResourceBitmap::GetPixels() const {
+  if (!pixel_ref_) {
+    return {};
+  }
+  // TODO(crbug.com/40285824): Check if this is guaranteed safe. The pixel
+  // memory must be at least row_bytes * height but it's not well defined if
+  // memory past the end of the last row is allocated when row_bytes > width *
+  // bytes_per_pixel. UIResourceBitmap has an implicit assumption that row_bytes
+  // == width * bytes_per_pixel but if that assumption is violated this span
+  // could be too large.
+  return UNSAFE_TODO(base::span(
+      static_cast<const uint8_t*>(pixel_ref_->pixels()), SizeInBytes()));
 }
 
 size_t UIResourceBitmap::SizeInBytes() const {
@@ -70,9 +97,43 @@ size_t UIResourceBitmap::SizeInBytes() const {
 UIResourceBitmap::UIResourceBitmap(const SkBitmap& skbitmap) {
   DCHECK(skbitmap.isImmutable());
 
-  sk_sp<SkPixelRef> pixel_ref = sk_ref_sp(skbitmap.pixelRef());
-  Create(std::move(pixel_ref), skbitmap.info(),
-         SkColorTypeToUIResourceFormat(skbitmap.colorType()));
+  const SkBitmap* target = &skbitmap;
+#if BUILDFLAG(IS_ANDROID)
+  SkBitmap copy;
+  if (features::ShouldEnableDrDc() ||
+      base::android::device_info::is_desktop()) {
+    // On android desktop, where JavaBitmap ensures 4 byte alignment, uploading
+    // ALPHA_8 to angle_vulkan_image_backing may fail because it expects 1 byte
+    // alignment stride. Workaround via copying it to N32.
+    // TODO(https://crbug.com/485286876): Remove this workaround once stride
+    // information is passed along with pixel_data to shared_image.
+
+    // If GpuFeatureInfo is available, replace ShouldEnableDrDc() with
+    // IsDrDcEnabled(gpu_feature_info) which is set after checking drdc
+    // workarounds;
+
+    // TODO(vikassoni): Forcing everything to N32 while android backing cannot
+    // support some other formats. Note that DrDc is disabled on some gl
+    // renderers and hence gpus via gpu driver bug workaround. That workaround
+    // is not applied here and so on those disable gpus, everything will still
+    // be forced to N32 even though drdc is disabled. This should be fine for
+    // now and would be fixed later. crbug.com/1354201.
+    if (skbitmap.colorType() != kN32_SkColorType) {
+      SkImageInfo new_info = skbitmap.info().makeColorType(kN32_SkColorType);
+      copy.allocPixels(new_info, new_info.minRowBytes());
+      SkCanvas copy_canvas(copy);
+      copy_canvas.drawImage(skbitmap.asImage(), 0, 0, SkSamplingOptions(),
+                            nullptr);
+      copy.setImmutable();
+      target = &copy;
+    }
+    DCHECK_EQ(target->width(), target->rowBytesAsPixels());
+    DCHECK(target->isImmutable());
+  }
+#endif
+  sk_sp<SkPixelRef> pixel_ref = sk_ref_sp(target->pixelRef());
+  Create(std::move(pixel_ref), target->info(),
+         SkColorTypeToUIResourceFormat(target->colorType()));
 }
 
 UIResourceBitmap::UIResourceBitmap(const gfx::Size& size, bool is_opaque) {
@@ -97,4 +158,12 @@ UIResourceBitmap::UIResourceBitmap(sk_sp<SkPixelRef> pixel_ref,
 UIResourceBitmap::UIResourceBitmap(const UIResourceBitmap& other) = default;
 
 UIResourceBitmap::~UIResourceBitmap() = default;
+
+SkBitmap UIResourceBitmap::GetBitmapForTesting() const {
+  SkBitmap bitmap;
+  bitmap.setInfo(info_);
+  bitmap.setPixelRef(pixel_ref_, 0, 0);
+  return bitmap;
+}
+
 }  // namespace cc

@@ -28,20 +28,17 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "third_party/blink/public/web/web_associated_url_loader.h"
-
 #include <memory>
 
-#include "base/memory/ptr_util.h"
-#include "base/stl_util.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/platform/web_url.h"
-#include "third_party/blink/public/platform/web_url_loader_mock_factory.h"
 #include "third_party/blink/public/platform/web_url_request.h"
 #include "third_party/blink/public/platform/web_url_response.h"
+#include "third_party/blink/public/web/web_associated_url_loader.h"
 #include "third_party/blink/public/web/web_associated_url_loader_client.h"
 #include "third_party/blink/public/web/web_associated_url_loader_options.h"
 #include "third_party/blink/public/web/web_frame.h"
@@ -49,7 +46,9 @@
 #include "third_party/blink/renderer/core/frame/frame_test_helpers.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
 #include "third_party/blink/renderer/platform/scheduler/public/thread.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
+#include "third_party/blink/renderer/platform/testing/url_loader_mock_factory.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -66,7 +65,6 @@ class WebAssociatedURLLoaderTest : public testing::Test,
         did_send_data_(false),
         did_receive_response_(false),
         did_receive_data_(false),
-        did_receive_cached_metadata_(false),
         did_finish_loading_(false),
         did_fail_(false) {
     // Reuse one of the test files from WebFrameTest.
@@ -80,8 +78,7 @@ class WebAssociatedURLLoaderTest : public testing::Test,
         full_url, file_path, response);
   }
 
-  KURL RegisterMockedUrl(const std::string& url_root,
-                         const WTF::String& filename) {
+  KURL RegisterMockedUrl(const std::string& url_root, const String& filename) {
     WebURLResponse response;
     response.SetMimeType("text/html");
     KURL url = ToKURL(url_root + filename.Utf8());
@@ -100,8 +97,8 @@ class WebAssociatedURLLoaderTest : public testing::Test,
         "visible_iframe.html",
         "zero_sized_iframe.html",
     };
-    for (size_t i = 0; i < base::size(iframe_support_files); ++i) {
-      RegisterMockedUrl(url_root, iframe_support_files[i]);
+    for (const auto*& iframe_support_file : iframe_support_files) {
+      RegisterMockedUrl(url_root, iframe_support_file);
     }
 
     frame_test_helpers::LoadFrame(MainFrame(), url.GetString().Utf8().c_str());
@@ -118,7 +115,7 @@ class WebAssociatedURLLoaderTest : public testing::Test,
   std::unique_ptr<WebAssociatedURLLoader> CreateAssociatedURLLoader(
       const WebAssociatedURLLoaderOptions options =
           WebAssociatedURLLoaderOptions()) {
-    return base::WrapUnique(MainFrame()->CreateAssociatedURLLoader(options));
+    return MainFrame()->CreateAssociatedURLLoader(options);
   }
 
   // WebAssociatedURLLoaderClient implementation.
@@ -152,14 +149,10 @@ class WebAssociatedURLLoaderTest : public testing::Test,
     did_download_data_ = true;
   }
 
-  void DidReceiveData(const char* data, int data_length) override {
+  void DidReceiveData(base::span<const char> data) override {
     did_receive_data_ = true;
-    EXPECT_TRUE(data);
-    EXPECT_GT(data_length, 0);
-  }
-
-  void DidReceiveCachedMetadata(const char* data, int data_length) override {
-    did_receive_cached_metadata_ = true;
+    EXPECT_TRUE(data.data());
+    EXPECT_GT(data.size(), 0u);
   }
 
   void DidFinishLoading() override { did_finish_loading_ = true; }
@@ -170,7 +163,7 @@ class WebAssociatedURLLoaderTest : public testing::Test,
     WebURLRequest request(ToKURL("http://www.test.com/success.html"));
     request.SetMode(network::mojom::RequestMode::kSameOrigin);
     request.SetCredentialsMode(network::mojom::CredentialsMode::kOmit);
-    request.SetHttpMethod(WebString::FromUTF8(unsafe_method));
+    request.SetHttpMethod(WebString::FromUtf8(unsafe_method));
     WebAssociatedURLLoaderOptions options;
     options.untrusted_http = true;
     CheckFails(request, options);
@@ -184,12 +177,12 @@ class WebAssociatedURLLoaderTest : public testing::Test,
     WebURLRequest request(ToKURL("http://www.test.com/success.html"));
     request.SetMode(network::mojom::RequestMode::kSameOrigin);
     request.SetCredentialsMode(network::mojom::CredentialsMode::kOmit);
-    if (EqualIgnoringASCIICase(WebString::FromUTF8(header_field), "referer")) {
-      request.SetReferrerString(WebString::FromUTF8(header_value));
+    if (EqualIgnoringAsciiCase(WebString::FromUtf8(header_field), "referer")) {
+      request.SetReferrerString(WebString::FromUtf8(header_value));
       request.SetReferrerPolicy(network::mojom::ReferrerPolicy::kDefault);
     } else {
-      request.SetHttpHeaderField(WebString::FromUTF8(header_field),
-                                 WebString::FromUTF8(header_value));
+      request.SetHttpHeaderField(WebString::FromUtf8(header_field),
+                                 WebString::FromUtf8(header_value));
     }
 
     WebAssociatedURLLoaderOptions options;
@@ -224,7 +217,7 @@ class WebAssociatedURLLoaderTest : public testing::Test,
     request.SetMode(network::mojom::RequestMode::kCors);
     request.SetCredentialsMode(network::mojom::CredentialsMode::kOmit);
 
-    WebString header_name_string(WebString::FromUTF8(header_name));
+    WebString header_name_string(WebString::FromUtf8(header_name));
     expected_response_ = WebURLResponse();
     expected_response_.SetMimeType("text/html");
     expected_response_.SetHttpStatusCode(200);
@@ -254,6 +247,7 @@ class WebAssociatedURLLoaderTest : public testing::Test,
   }
 
  protected:
+  test::TaskEnvironment task_environment_;
   String frame_file_path_;
   frame_test_helpers::WebViewHelper helper_;
 
@@ -267,7 +261,6 @@ class WebAssociatedURLLoaderTest : public testing::Test,
   bool did_receive_response_;
   bool did_download_data_;
   bool did_receive_data_;
-  bool did_receive_cached_metadata_;
   bool did_finish_loading_;
   bool did_fail_;
 };
@@ -311,7 +304,7 @@ TEST_F(WebAssociatedURLLoaderTest, CrossOriginSuccess) {
   WebURLRequest request(url);
   // No-CORS requests (CrossOriginRequestPolicyAllow) aren't allowed for the
   // default context. So we set the context as Script here.
-  request.SetRequestContext(mojom::RequestContextType::SCRIPT);
+  request.SetRequestContext(mojom::blink::RequestContextType::SCRIPT);
   request.SetCredentialsMode(network::mojom::CredentialsMode::kOmit);
 
   expected_response_ = WebURLResponse();
@@ -463,7 +456,7 @@ TEST_F(WebAssociatedURLLoaderTest, UntrustedCheckMethods) {
 }
 
 // This test is flaky on Windows and Android. See <http://crbug.com/471645>.
-#if defined(OS_WIN) || defined(OS_ANDROID)
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
 #define MAYBE_UntrustedCheckHeaders DISABLED_UntrustedCheckHeaders
 #else
 #define MAYBE_UntrustedCheckHeaders UntrustedCheckHeaders
@@ -539,7 +532,7 @@ TEST_F(WebAssociatedURLLoaderTest, CrossOriginHeaderAllowResponseHeaders) {
   request.SetMode(network::mojom::RequestMode::kCors);
   request.SetCredentialsMode(network::mojom::CredentialsMode::kOmit);
 
-  WebString header_name_string(WebString::FromUTF8("non-safelisted"));
+  WebString header_name_string(WebString("non-safelisted"));
   expected_response_ = WebURLResponse();
   expected_response_.SetMimeType("text/html");
   expected_response_.SetHttpStatusCode(200);
@@ -566,7 +559,7 @@ TEST_F(WebAssociatedURLLoaderTest, AccessCheckForLocalURL) {
   KURL url = ToKURL("file://test.pdf");
 
   WebURLRequest request(url);
-  request.SetRequestContext(mojom::RequestContextType::PLUGIN);
+  request.SetRequestContext(mojom::blink::RequestContextType::PLUGIN);
   request.SetMode(network::mojom::RequestMode::kNoCors);
   request.SetCredentialsMode(network::mojom::CredentialsMode::kOmit);
 
@@ -593,7 +586,7 @@ TEST_F(WebAssociatedURLLoaderTest, BypassAccessCheckForLocalURL) {
   KURL url = ToKURL("file://test.pdf");
 
   WebURLRequest request(url);
-  request.SetRequestContext(mojom::RequestContextType::PLUGIN);
+  request.SetRequestContext(mojom::blink::RequestContextType::PLUGIN);
   request.SetMode(network::mojom::RequestMode::kNoCors);
   request.SetCredentialsMode(network::mojom::CredentialsMode::kOmit);
 

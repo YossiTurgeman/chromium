@@ -31,8 +31,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_SLOT_ELEMENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_SLOT_ELEMENT_H_
 
+#include "base/check_op.h"
+#include "base/numerics/safe_conversions.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_element_text.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_linked_hash_set.h"
 
 namespace blink {
 
@@ -42,10 +46,11 @@ class CORE_EXPORT HTMLSlotElement final : public HTMLElement {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
-  static HTMLSlotElement* CreateUserAgentDefaultSlot(Document&);
-  static HTMLSlotElement* CreateUserAgentCustomAssignSlot(Document&);
-
   HTMLSlotElement(Document&);
+
+  ElementType GetElementType() const final {
+    return ElementType::kHTMLSlotElement;
+  }
 
   const HeapVector<Member<Node>>& AssignedNodes() const;
   const HeapVector<Member<Node>> AssignedNodesForBinding(
@@ -56,11 +61,11 @@ class CORE_EXPORT HTMLSlotElement final : public HTMLElement {
 
   Node* FirstAssignedNode() const {
     auto& nodes = AssignedNodes();
-    return nodes.IsEmpty() ? nullptr : nodes.front().Get();
+    return nodes.empty() ? nullptr : nodes.front().Get();
   }
   Node* LastAssignedNode() const {
     auto& nodes = AssignedNodes();
-    return nodes.IsEmpty() ? nullptr : nodes.back().Get();
+    return nodes.empty() ? nullptr : nodes.back().Get();
   }
 
   Node* AssignedNodeNextTo(const Node&) const;
@@ -72,13 +77,14 @@ class CORE_EXPORT HTMLSlotElement final : public HTMLElement {
   const HeapVector<Member<Node>> FlattenedAssignedNodes();
 
   void WillRecalcAssignedNodes() { ClearAssignedNodes(); }
-  void DidRecalcAssignedNodes() {
-    UpdateManuallyAssignedNodesOrdering();
+  void DidRecalcAssignedNodes(bool display_locked_subtree) {
     UpdateFlatTreeNodeDataForAssignedNodes();
     RecalcFlatTreeChildren();
+    if (display_locked_subtree)
+      DetachDisplayLockedAssignedNodesLayoutTreeIfNeeded();
   }
 
-  void AttachLayoutTree(AttachContext&) final;
+  void AttachLayoutTreeForSlotChildren(AttachContext&);
   void DetachLayoutTree(bool performing_reattach) final;
   void RebuildDistributedChildrenLayoutTrees(WhitespaceAttacher&);
 
@@ -91,7 +97,17 @@ class CORE_EXPORT HTMLSlotElement final : public HTMLElement {
   // dirty.  e.g. To detect a slotchange event in DOM mutations.
   bool HasAssignedNodesSlow() const;
 
-  bool SupportsAssignment() const { return IsInV1ShadowTree(); }
+  // Returns true if the slot has assigned nodes, without doing assignment
+  // recalc. Used by FlatTreeParentForChildDirty() which needs to avoid doing
+  // slot assignments while marking the tree style-dirty.
+  bool HasAssignedNodesNoRecalc() const { return !assigned_nodes_.empty(); }
+
+  // Returns true if FlattenedAssignedNodes() would be non-empty, without
+  // doing assignment recalc. Used for :has-slotted matching during style
+  // resolution.
+  bool HasFlattenedAssignedNodesNoRecalc() const;
+
+  bool SupportsAssignment() const { return IsInShadowTree(); }
 
   void CheckFallbackAfterInsertedIntoShadowTree();
   void CheckFallbackAfterRemovedFromShadowTree();
@@ -104,25 +120,35 @@ class CORE_EXPORT HTMLSlotElement final : public HTMLElement {
 
   static AtomicString NormalizeSlotName(const AtomicString&);
 
-  void RecalcStyleForSlotChildren(const StyleRecalcChange);
+  void RecalcStyleForSlotChildren(const StyleRecalcChange,
+                                  const StyleRecalcContext&);
 
   // For User-Agent Shadow DOM
   static const AtomicString& UserAgentCustomAssignSlotName();
   static const AtomicString& UserAgentDefaultSlotName();
 
   // For imperative Shadow DOM distribution APIs
-  void assign(HeapVector<Member<Node>> nodes, ExceptionState&);
-  const HeapLinkedHashSet<Member<Node>>& AssignedNodesCandidates() const {
-    return assigned_nodes_candidates_;
+  // IDL assign() implementation.
+  void assign(HeapVector<Member<V8UnionElementOrText>>& nodes, ExceptionState&);
+  // assign() c++ implementation.
+  void Assign(const HeapVector<Member<Node>>& nodes);
+  void Assign(Node* node);
+
+  const HeapLinkedHashSet<WeakMember<Node>>& ManuallyAssignedNodes() const {
+    return manually_assigned_nodes_;
   }
-  void ClearAssignedNodesCandidates();
-  void RemoveAssignedNodeCandidate(Node&);
+  void RemoveManuallyAssignedNode(Node&);
+
+  // Override in order to defer this work when needed.
+  bool CalculateAndAdjustAutoDirectionality() final;
 
   void Trace(Visitor*) const override;
 
  private:
   InsertionNotificationRequest InsertedInto(ContainerNode&) final;
   void RemovedFrom(ContainerNode&) final;
+
+  void ChildrenChanged(const ChildrenChange&) override;
 
   void EnqueueSlotChangeEvent();
 
@@ -138,23 +164,23 @@ class CORE_EXPORT HTMLSlotElement final : public HTMLElement {
       const HeapVector<Member<Node>>& old_slotted,
       const HeapVector<Member<Node>>& new_slotted);
 
-  void SetNeedsDistributionRecalcWillBeSetNeedsAssignmentRecalc();
+  void SetShadowRootNeedsAssignmentRecalc();
   bool CheckNodesValidity(HeapVector<Member<Node>> nodes, ExceptionState&);
 
-  // SlotAssignnment:recalc runs in tree order. Update to assigned order.
-  void UpdateManuallyAssignedNodesOrdering();
   void RecalcFlatTreeChildren();
   void UpdateFlatTreeNodeDataForAssignedNodes();
   void ClearAssignedNodesAndFlatTreeChildren();
+  void DetachDisplayLockedAssignedNodesLayoutTreeIfNeeded();
+
+  void UpdateDirAutoAncestorsForSupportsAssignmentChange();
 
   HeapVector<Member<Node>> assigned_nodes_;
   HeapVector<Member<Node>> flat_tree_children_;
 
   bool slotchange_event_enqueued_ = false;
 
-  // For imperative Shadow DOM distribution APIs.
-  // LinkedHashSet because candidates are ordered.
-  HeapLinkedHashSet<Member<Node>> assigned_nodes_candidates_;
+  // Imperative Shadow DOM distribution API.
+  HeapLinkedHashSet<WeakMember<Node>> manually_assigned_nodes_;
 
   template <typename T, wtf_size_t S>
   struct LCSArray {
@@ -172,8 +198,8 @@ class CORE_EXPORT HTMLSlotElement final : public HTMLElement {
       const Container& seq2,
       LCSTable& lcs_table,
       BacktrackTable& backtrack_table) {
-    const wtf_size_t rows = SafeCast<wtf_size_t>(seq1.size());
-    const wtf_size_t columns = SafeCast<wtf_size_t>(seq2.size());
+    const wtf_size_t rows = base::checked_cast<wtf_size_t>(seq1.size());
+    const wtf_size_t columns = base::checked_cast<wtf_size_t>(seq2.size());
 
     DCHECK_GT(lcs_table.size(), rows);
     DCHECK_GT(lcs_table[0].size(), columns);

@@ -1,23 +1,23 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/wm/overview/overview_grid_event_handler.h"
 
-#include "ash/home_screen/home_screen_controller.h"
-#include "ash/public/cpp/ash_features.h"
+#include "ash/app_list/app_list_controller_impl.h"
 #include "ash/root_window_controller.h"
 #include "ash/shell.h"
-#include "ash/wallpaper/wallpaper_view.h"
-#include "ash/wallpaper/wallpaper_widget_controller.h"
+#include "ash/wallpaper/views/wallpaper_view.h"
+#include "ash/wallpaper/views/wallpaper_widget_controller.h"
+#include "ash/wm/gestures/wm_fling_handler.h"
 #include "ash/wm/overview/overview_controller.h"
 #include "ash/wm/overview/overview_grid.h"
 #include "ash/wm/overview/overview_utils.h"
 #include "ash/wm/splitview/split_view_controller.h"
-#include "ui/compositor/compositor.h"
+#include "base/functional/bind.h"
 #include "ui/display/screen.h"
 #include "ui/events/event.h"
-#include "ui/events/gestures/fling_curve.h"
+#include "ui/gfx/geometry/vector2d_f.h"
 #include "ui/views/widget/widget.h"
 
 namespace ash {
@@ -48,7 +48,7 @@ OverviewGridEventHandler::OverviewGridEventHandler(OverviewGrid* grid)
 }
 
 OverviewGridEventHandler::~OverviewGridEventHandler() {
-  EndFling();
+  OnFlingEnd();
   grid_->EndScroll();
 
   auto* wallpaper_view = GetWallpaperViewForRoot(grid_->root_window());
@@ -62,16 +62,18 @@ void OverviewGridEventHandler::OnMouseEvent(ui::MouseEvent* event) {
   // case, so just exit overview. Note that this is done here instead of on
   // release like usual, because pressing the mouse while dragging sends out a
   // ui::GESTURE_END_EVENT which may cause a bad state.
-  if (event->type() == ui::ET_MOUSE_PRESSED &&
+  if (event->type() == ui::EventType::kMousePressed &&
       !overview_session_->CanProcessEvent()) {
-    Shell::Get()->overview_controller()->EndOverview();
+    OverviewController::Get()->EndOverview(
+        OverviewEndAction::kClickingOutsideWindowsInOverview);
     event->StopPropagation();
     event->SetHandled();
     return;
   }
 
-  if (event->type() == ui::ET_MOUSE_RELEASED)
+  if (event->type() == ui::EventType::kMouseReleased) {
     HandleClickOrTap(event);
+  }
 }
 
 void OverviewGridEventHandler::OnGestureEvent(ui::GestureEvent* event) {
@@ -81,33 +83,40 @@ void OverviewGridEventHandler::OnGestureEvent(ui::GestureEvent* event) {
     return;
   }
 
-  switch (event->type()) {
-    case ui::ET_GESTURE_TAP: {
-      HandleClickOrTap(event);
-      break;
-    }
-    case ui::ET_SCROLL_FLING_START: {
-      if (!ShouldUseTabletModeGridLayout())
-        return;
+  // TODO(crbug.com/1341128): Enable context menu via long-press in library page
+  // `SavedDeskLibraryView` will take over gesture event if it's active. When
+  // it's `EventType::kGestureTap`, here it does not set event to handled, and
+  // thus `HandleClickOrTap()` would be executed from
+  // `SavedDeskLibraryView::OnLocatedEvent()`.
+  if (grid_->IsShowingSavedDeskLibrary()) {
+    return;
+  }
 
+  if (event->type() == ui::EventType::kGestureTap) {
+    HandleClickOrTap(event);
+    return;
+  }
+
+  // The following events are for scrolling the overview scroll layout, which is
+  // tablet only.
+  if (!display::Screen::Get()->InTabletMode()) {
+    return;
+  }
+
+  switch (event->type()) {
+    case ui::EventType::kScrollFlingStart: {
       HandleFlingScroll(event);
       event->SetHandled();
       break;
     }
-    case ui::ET_GESTURE_SCROLL_BEGIN: {
-      if (!ShouldUseTabletModeGridLayout())
-        return;
-
+    case ui::EventType::kGestureScrollBegin: {
       scroll_offset_x_cumulative_ = 0.f;
-      EndFling();
+      OnFlingEnd();
       grid_->StartScroll();
       event->SetHandled();
       break;
     }
-    case ui::ET_GESTURE_SCROLL_UPDATE: {
-      if (!ShouldUseTabletModeGridLayout())
-        return;
-
+    case ui::EventType::kGestureScrollUpdate: {
       // Only forward the scrolls to grid once they have exceeded the threshold.
       const float scroll_offset_x = event->details().scroll_x();
       scroll_offset_x_cumulative_ += scroll_offset_x;
@@ -118,10 +127,7 @@ void OverviewGridEventHandler::OnGestureEvent(ui::GestureEvent* event) {
       event->SetHandled();
       break;
     }
-    case ui::ET_GESTURE_SCROLL_END: {
-      if (!ShouldUseTabletModeGridLayout())
-        return;
-
+    case ui::EventType::kGestureScrollEnd: {
       grid_->EndScroll();
       event->SetHandled();
       break;
@@ -131,80 +137,60 @@ void OverviewGridEventHandler::OnGestureEvent(ui::GestureEvent* event) {
   }
 }
 
-void OverviewGridEventHandler::OnAnimationStep(base::TimeTicks timestamp) {
-  // Updates |grid_| based on |offset| when |observed_compositor_| begins a new
-  // frame.
-  DCHECK(observed_compositor_);
-
-  // As a fling progresses, the velocity degenerates, and the difference in
-  // offset is passed into |grid_| as an updated scroll value. Stop flinging if
-  // the API for fling says to finish, or we reach one of the edges of the
-  // overview grid. Update the grid even if the API says to stop flinging as it
-  // still produces a usable |offset|, but end the fling afterwards.
-  gfx::Vector2dF offset;
-  bool continue_fling =
-      fling_curve_->ComputeScrollOffset(timestamp, &offset, &fling_velocity_);
-  continue_fling = grid_->UpdateScrollOffset(
-                       fling_last_offset_ ? offset.x() - fling_last_offset_->x()
-                                          : offset.x()) &&
-                   continue_fling;
-  fling_last_offset_ = base::make_optional(offset);
-
-  if (!continue_fling)
-    EndFling();
-}
-
-void OverviewGridEventHandler::OnCompositingShuttingDown(
-    ui::Compositor* compositor) {
-  DCHECK_EQ(compositor, observed_compositor_);
-  EndFling();
-}
-
 void OverviewGridEventHandler::HandleClickOrTap(ui::Event* event) {
   CHECK_EQ(ui::EP_PRETARGET, event->phase());
 
-  // Events that happen while app list is sliding out during overview should
-  // be ignored to prevent overview from disappearing out from under the user.
-  if (!IsSlidingOutOverviewFromShelf()) {
-    if (Shell::Get()->tablet_mode_controller()->InTabletMode() &&
-        features::IsDragFromShelfToHomeOrOverviewEnabled()) {
-      aura::Window* window = static_cast<views::View*>(event->target())
-                                 ->GetWidget()
-                                 ->GetNativeWindow();
+  // If the user is renaming a desk or saved desk, rather than closing overview
+  // the focused name view should lose focus.
+  if (grid_->IsDeskNameBeingModified() ||
+      grid_->IsSavedDeskNameBeingModified()) {
+    grid_->CommitNameChanges();
+    event->StopPropagation();
+    return;
+  }
 
-      // In tablet mode, clicking on tapping on the wallpaper background will
-      // head back to home launcher screen if not in split view (in which case
-      // the event should be ignored).
-      if (!SplitViewController::Get(window)->InSplitViewMode()) {
-        int64_t display_id =
-            display::Screen::GetScreen()->GetDisplayNearestWindow(window).id();
-        Shell::Get()->home_screen_controller()->GoHome(display_id);
-      }
-    } else {
-      Shell::Get()->overview_controller()->EndOverview();
+  if (display::Screen::Get()->InTabletMode()) {
+    aura::Window* window = static_cast<views::View*>(event->target())
+                               ->GetWidget()
+                               ->GetNativeWindow();
+
+    // In tablet mode, clicking on tapping on the wallpaper background will
+    // head back to home launcher screen if not in split view (in which case
+    // the event should be ignored).
+    if (!SplitViewController::Get(window)->InSplitViewMode()) {
+      int64_t display_id =
+          display::Screen::Get()->GetDisplayNearestWindow(window).id();
+      Shell::Get()->app_list_controller()->GoHome(display_id);
     }
+  } else {
+    OverviewController::Get()->EndOverview(
+        OverviewEndAction::kClickingOutsideWindowsInOverview);
   }
   event->StopPropagation();
 }
 
 void OverviewGridEventHandler::HandleFlingScroll(ui::GestureEvent* event) {
-  fling_velocity_ = gfx::Vector2dF(event->details().velocity_x(),
-                                   event->details().velocity_y());
-  fling_curve_ =
-      std::make_unique<ui::FlingCurve>(fling_velocity_, base::TimeTicks::Now());
-  observed_compositor_ = const_cast<ui::Compositor*>(
-      grid_->root_window()->layer()->GetCompositor());
-  observed_compositor_->AddAnimationObserver(this);
+  const gfx::Vector2dF initial_fling_velocity(event->details().velocity_x(),
+                                              event->details().velocity_y());
+  fling_handler_ = std::make_unique<WmFlingHandler>(
+      initial_fling_velocity, grid_->root_window(),
+      base::BindRepeating(&OverviewGridEventHandler::OnFlingStep,
+                          base::Unretained(this)),
+      base::BindRepeating(&OverviewGridEventHandler::OnFlingEnd,
+                          base::Unretained(this)));
 }
 
-void OverviewGridEventHandler::EndFling() {
-  if (!observed_compositor_)
+bool OverviewGridEventHandler::OnFlingStep(float offset) {
+  // Updates `grid_` based on `offset`.
+  DCHECK(fling_handler_);
+  return grid_->UpdateScrollOffset(offset);
+}
+
+void OverviewGridEventHandler::OnFlingEnd() {
+  if (!fling_handler_)
     return;
 
-  observed_compositor_->RemoveAnimationObserver(this);
-  observed_compositor_ = nullptr;
-  fling_curve_.reset();
-  fling_last_offset_ = base::nullopt;
+  fling_handler_.reset();
   grid_->EndScroll();
 }
 

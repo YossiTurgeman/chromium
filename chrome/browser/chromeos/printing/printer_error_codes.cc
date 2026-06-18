@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -51,6 +51,12 @@ STATIC_ASSERT_ENUM(
 STATIC_ASSERT_ENUM(
     PrinterErrorCode::UNKNOWN_ERROR,
     printing::printing_manager::mojom::PrinterErrorCode::kUnknownError);
+STATIC_ASSERT_ENUM(
+    PrinterErrorCode::CLIENT_UNAUTHORIZED,
+    printing::printing_manager::mojom::PrinterErrorCode::kClientUnauthorized);
+STATIC_ASSERT_ENUM(
+    PrinterErrorCode::EXPIRED_CERTIFICATE,
+    printing::printing_manager::mojom::PrinterErrorCode::kExpiredCertificate);
 }  // namespace
 
 using PrinterReason = ::printing::PrinterStatus::PrinterReason;
@@ -58,21 +64,21 @@ using PrinterReason = ::printing::PrinterStatus::PrinterReason;
 PrinterErrorCode PrinterErrorCodeFromPrinterStatusReasons(
     const ::printing::PrinterStatus& printer_status) {
   for (const auto& reason : printer_status.reasons) {
+    if (reason.severity != PrinterReason::Severity::kError &&
+        reason.severity != PrinterReason::Severity::kWarning) {
+      continue;
+    }
+
     switch (reason.reason) {
       case PrinterReason::Reason::kMediaEmpty:
       case PrinterReason::Reason::kMediaNeeded:
-      case PrinterReason::Reason::kMediaLow:
         return PrinterErrorCode::OUT_OF_PAPER;
       case PrinterReason::Reason::kMediaJam:
         return PrinterErrorCode::PAPER_JAM;
       case PrinterReason::Reason::kTonerEmpty:
-      case PrinterReason::Reason::kTonerLow:
       case PrinterReason::Reason::kDeveloperEmpty:
-      case PrinterReason::Reason::kDeveloperLow:
       case PrinterReason::Reason::kMarkerSupplyEmpty:
-      case PrinterReason::Reason::kMarkerSupplyLow:
       case PrinterReason::Reason::kMarkerWasteFull:
-      case PrinterReason::Reason::kMarkerWasteAlmostFull:
         return PrinterErrorCode::OUT_OF_INK;
       case PrinterReason::Reason::kTimedOut:
       case PrinterReason::Reason::kShutdown:
@@ -92,6 +98,13 @@ PrinterErrorCode PrinterErrorCodeFromPrinterStatusReasons(
       case PrinterReason::Reason::kPaused:
       case PrinterReason::Reason::kMovingToPaused:
         return PrinterErrorCode::STOPPED;
+      case PrinterReason::Reason::kCupsPkiExpired:
+        return PrinterErrorCode::EXPIRED_CERTIFICATE;
+      case PrinterReason::Reason::kMediaLow:
+      case PrinterReason::Reason::kTonerLow:
+      case PrinterReason::Reason::kDeveloperLow:
+      case PrinterReason::Reason::kMarkerSupplyLow:
+      case PrinterReason::Reason::kMarkerWasteAlmostFull:
       default:
         break;
     }

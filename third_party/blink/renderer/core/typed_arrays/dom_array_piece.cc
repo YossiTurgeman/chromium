@@ -1,25 +1,13 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_piece.h"
 
-#include "third_party/blink/renderer/bindings/core/v8/array_buffer_or_array_buffer_view.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_arraybuffer_arraybufferview.h"
 
 namespace blink {
 
-DOMArrayPiece::DOMArrayPiece(
-    const ArrayBufferOrArrayBufferView& array_buffer_or_view) {
-  if (array_buffer_or_view.IsArrayBuffer()) {
-    DOMArrayBuffer* array_buffer = array_buffer_or_view.GetAsArrayBuffer();
-    InitWithArrayBuffer(array_buffer);
-  } else if (array_buffer_or_view.IsArrayBufferView()) {
-    DOMArrayBufferView* array_buffer_view =
-        array_buffer_or_view.GetAsArrayBufferView().View();
-    InitWithArrayBufferView(array_buffer_view);
-  }
-}
-///////////////////////////////////////////////////////
 DOMArrayPiece::DOMArrayPiece() {
   InitNull();
 }
@@ -32,6 +20,23 @@ DOMArrayPiece::DOMArrayPiece(DOMArrayBufferView* buffer) {
   InitWithArrayBufferView(buffer);
 }
 
+DOMArrayPiece::DOMArrayPiece(
+    const V8UnionArrayBufferOrArrayBufferView* array_buffer_or_view) {
+  DCHECK(array_buffer_or_view);
+
+  switch (array_buffer_or_view->GetContentType()) {
+    case V8UnionArrayBufferOrArrayBufferView::ContentType::kArrayBuffer:
+      InitWithArrayBuffer(array_buffer_or_view->GetAsArrayBuffer());
+      return;
+    case V8UnionArrayBufferOrArrayBufferView::ContentType::kArrayBufferView:
+      InitWithArrayBufferView(
+          array_buffer_or_view->GetAsArrayBufferView().Get());
+      return;
+  }
+
+  NOTREACHED();
+}
+
 bool DOMArrayPiece::IsNull() const {
   return is_null_;
 }
@@ -42,21 +47,26 @@ bool DOMArrayPiece::IsDetached() const {
 
 void* DOMArrayPiece::Data() const {
   DCHECK(!IsNull());
-  return data_;
+  return data_.data();
 }
 
 unsigned char* DOMArrayPiece::Bytes() const {
   return static_cast<unsigned char*>(Data());
 }
 
-size_t DOMArrayPiece::ByteLengthAsSizeT() const {
+size_t DOMArrayPiece::ByteLength() const {
   DCHECK(!IsNull());
-  return byte_length_;
+  return data_.size_bytes();
+}
+
+base::span<uint8_t> DOMArrayPiece::ByteSpan() const {
+  DCHECK(!IsNull());
+  return data_;
 }
 
 void DOMArrayPiece::InitWithArrayBuffer(DOMArrayBuffer* buffer) {
   if (buffer) {
-    InitWithData(buffer->Data(), buffer->ByteLengthAsSizeT());
+    InitWithData(buffer->ByteSpan());
     is_detached_ = buffer->IsDetached();
   } else {
     InitNull();
@@ -65,23 +75,21 @@ void DOMArrayPiece::InitWithArrayBuffer(DOMArrayBuffer* buffer) {
 
 void DOMArrayPiece::InitWithArrayBufferView(DOMArrayBufferView* buffer) {
   if (buffer) {
-    InitWithData(buffer->BaseAddress(), buffer->byteLengthAsSizeT());
-    is_detached_ = buffer->buffer() ? buffer->buffer()->IsDetached() : true;
+    InitWithData(buffer->ByteSpan());
+    is_detached_ = !buffer->buffer() || buffer->buffer()->IsDetached();
   } else {
     InitNull();
   }
 }
 
-void DOMArrayPiece::InitWithData(void* data, size_t byte_length) {
-  byte_length_ = byte_length;
+void DOMArrayPiece::InitWithData(base::span<uint8_t> data) {
   data_ = data;
   is_null_ = false;
   is_detached_ = false;
 }
 
 void DOMArrayPiece::InitNull() {
-  byte_length_ = 0;
-  data_ = nullptr;
+  data_ = base::span<uint8_t>();
   is_null_ = true;
   is_detached_ = false;
 }

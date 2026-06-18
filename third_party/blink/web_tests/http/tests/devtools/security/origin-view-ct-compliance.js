@@ -1,14 +1,20 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {SecurityTestRunner} from 'security_test_runner';
+
+import * as SDK from 'devtools/core/sdk/sdk.js';
+import * as Security from 'devtools/panels/security/security.js';
 
 (async function() {
   TestRunner.addResult(
       `Tests that the panel includes Certificate Transparency compliance status\n`);
-  await TestRunner.loadModule('security_test_runner');
   await TestRunner.showPanel('security');
 
-  var request1 = new SDK.NetworkRequest(0, 'https://foo.test/', 'https://foo.test', 0, 0, null);
+  var request1 = SDK.NetworkRequest.NetworkRequest.create(
+      0, 'https://foo.test/', 'https://foo.test', 0, 0, null);
   request1.setSecurityState(Protocol.Security.SecurityState.Secure);
   let securityDetails = {};
   securityDetails.protocol = 'TLS 1.2';
@@ -27,10 +33,10 @@
   request1.setSecurityDetails(securityDetails);
   SecurityTestRunner.dispatchRequestFinished(request1);
 
-  Security.SecurityPanel._instance()._sidebarTree._elementsByOrigin.get('https://foo.test').select();
+  Security.SecurityPanel.SecurityPanel.instance().sidebar.elementsByOrigin().get('https://foo.test').select(undefined, true);
 
   TestRunner.addResult('Panel on origin view:');
-  TestRunner.dumpDeepInnerHTML(Security.SecurityPanel._instance()._visibleView.contentElement);
+  TestRunner.dumpDeepInnerHTML(Security.SecurityPanel.SecurityPanel.instance().visibleView.contentElement);
 
   TestRunner.completeTest();
 })();

@@ -1,41 +1,41 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/cdm/library_cdm/clear_key_cdm/cdm_video_decoder.h"
 
+#include <memory>
+#include <optional>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/containers/queue.h"
 #include "base/feature_list.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/no_destructor.h"
-#include "base/optional.h"
+#include "base/task/single_thread_task_runner.h"
+#include "build/build_config.h"
 // Necessary to convert async media::VideoDecoder to sync CdmVideoDecoder.
 // Typically not recommended for production code, but is ok here since
 // ClearKeyCdm is only for testing.
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_executor.h"
-#include "base/threading/thread_task_runner_handle.h"
-#include "media/base/decode_status.h"
+#include "media/base/decoder_status.h"
 #include "media/base/media_switches.h"
 #include "media/base/media_util.h"
+#include "media/base/video_decoder.h"
+#include "media/base/video_frame.h"
 #include "media/cdm/cdm_type_conversion.h"
 #include "media/cdm/library_cdm/cdm_host_proxy.h"
 #include "media/media_buildflags.h"
-#include "third_party/libaom/libaom_buildflags.h"
 #include "third_party/libyuv/include/libyuv/planar_functions.h"
 
 #if BUILDFLAG(ENABLE_LIBVPX)
 #include "media/filters/vpx_video_decoder.h"
-#endif
-
-#if BUILDFLAG(ENABLE_LIBAOM)
-#include "media/filters/aom_video_decoder.h"
 #endif
 
 #if BUILDFLAG(ENABLE_DAV1D_DECODER)
@@ -46,25 +46,22 @@
 #include "media/filters/ffmpeg_video_decoder.h"
 #endif
 
-#if BUILDFLAG(ENABLE_LIBGAV1_DECODER)
-#include "media/filters/gav1_video_decoder.h"
-#endif
-
 namespace media {
 
 namespace {
 
 media::VideoDecoderConfig ToClearMediaVideoDecoderConfig(
     const cdm::VideoDecoderConfig_3& config) {
-  gfx::Size coded_size(config.coded_size.width, config.coded_size.width);
+  gfx::Size coded_size(config.coded_size.width, config.coded_size.height);
 
   VideoDecoderConfig media_config(
       ToMediaVideoCodec(config.codec), ToMediaVideoCodecProfile(config.profile),
       VideoDecoderConfig::AlphaMode::kIsOpaque,
       ToMediaColorSpace(config.color_space), kNoTransformation, coded_size,
       gfx::Rect(coded_size), coded_size,
-      std::vector<uint8_t>(config.extra_data,
-                           config.extra_data + config.extra_data_size),
+      std::vector<uint8_t>(
+          config.extra_data,
+          UNSAFE_TODO(config.extra_data + config.extra_data_size)),
       EncryptionScheme::kUnencrypted);
 
   return media_config;
@@ -73,10 +70,10 @@ media::VideoDecoderConfig ToClearMediaVideoDecoderConfig(
 bool ToCdmVideoFrame(const VideoFrame& video_frame,
                      CdmHostProxy* cdm_host_proxy,
                      CdmVideoDecoder::CdmVideoFrame* cdm_video_frame) {
-  DCHECK(cdm_video_frame);
+  CHECK(cdm_video_frame);
 
-  if (!video_frame.IsMappable()) {
-    DVLOG(1) << "VideoFrame is not mappable";
+  if (!video_frame.HasDirectCpuAccess()) {
+    DVLOG(1) << "No direct CPU access to VideoFrame";
     return false;
   }
 
@@ -111,13 +108,13 @@ bool ToCdmVideoFrame(const VideoFrame& video_frame,
   cdm_video_frame->SetSize(
       {video_frame.coded_size().width(), video_frame.coded_size().height()});
   cdm_video_frame->SetTimestamp(video_frame.timestamp().InMicroseconds());
-  // TODO(crbug.com/707127): Set ColorSpace here. It's not trivial to convert
+  // TODO(crbug.com/40513452): Set ColorSpace here. It's not trivial to convert
   // a gfx::ColorSpace (from VideoFrame) to another other ColorSpace like
   // cdm::ColorSpace.
 
-  static_assert(VideoFrame::kYPlane == cdm::kYPlane && cdm::kYPlane == 0, "");
-  static_assert(VideoFrame::kUPlane == cdm::kUPlane && cdm::kUPlane == 1, "");
-  static_assert(VideoFrame::kVPlane == cdm::kVPlane && cdm::kVPlane == 2, "");
+  static_assert(VideoFrame::Plane::kY == cdm::kYPlane && cdm::kYPlane == 0, "");
+  static_assert(VideoFrame::Plane::kU == cdm::kUPlane && cdm::kUPlane == 1, "");
+  static_assert(VideoFrame::Plane::kV == cdm::kVPlane && cdm::kVPlane == 2, "");
 
   uint8_t* dst = buffer->Data();
   uint32_t offset = 0;
@@ -133,7 +130,7 @@ bool ToCdmVideoFrame(const VideoFrame& video_frame,
     cdm_video_frame->SetStride(cdm_plane, row_bytes);
 
     libyuv::CopyPlane(src, src_stride, dst, row_bytes, row_bytes, rows);
-    dst += row_bytes * rows;
+    UNSAFE_TODO(dst += row_bytes * rows);
     offset += row_bytes * rows;
   }
 
@@ -142,19 +139,29 @@ bool ToCdmVideoFrame(const VideoFrame& video_frame,
 }
 
 // Media VideoDecoders typically assumes a global environment where a lot of
-// things are already setup in the process, e.g. base::ThreadTaskRunnerHandle
-// and base::CommandLine. These will be available in the component build because
-// the CDM and the host is depending on the same base/ target. In static build,
-// they will not be available and we have to setup it by ourselves.
+// things are already setup in the process,
+// e.g. base::SingleThreadTaskRunnerCurrentDefautHandle and
+// base::CommandLine. These will be available in the component build because the
+// CDM and the host is depending on the same base/ target. In static build, they
+// will not be available and we have to setup it by ourselves.
 void SetupGlobalEnvironmentIfNeeded() {
   // Creating a base::SingleThreadTaskExecutor to setup
-  // base::ThreadTaskRunnerHandle.
-  if (!base::ThreadTaskRunnerHandle::IsSet()) {
+  // base::SingleThreadTaskRunner::CurrentDefaultHandle.
+  if (!base::SingleThreadTaskRunner::HasCurrentDefault()) {
     static base::NoDestructor<base::SingleThreadTaskExecutor> task_executor;
   }
 
-  if (!base::CommandLine::InitializedForCurrentProcess())
+  // Initialize CommandLine if not already initialized. Since this is a DLL,
+  // just use empty arguments.
+  if (!base::CommandLine::InitializedForCurrentProcess()) {
+#if BUILDFLAG(IS_WIN)
+    // Use InitUsingArgvForTesting() instead of Init() to avoid dependency on
+    // shell32 API which might not work in the sandbox. See crbug.com/1242710.
+    base::CommandLine::InitUsingArgvForTesting(0, nullptr);
+#else
     base::CommandLine::Init(0, nullptr);
+#endif
+  }
 }
 
 // Adapts a media::VideoDecoder to a CdmVideoDecoder. Media VideoDecoders
@@ -165,22 +172,25 @@ void SetupGlobalEnvironmentIfNeeded() {
 // |kNestableTasksAllowed| because we could be running the RunLoop in a task,
 // e.g. in component builds when we share the same task runner as the host. In
 // a static build, this is not necessary.
-class VideoDecoderAdapter : public CdmVideoDecoder {
+class VideoDecoderAdapter final : public CdmVideoDecoder {
  public:
   VideoDecoderAdapter(CdmHostProxy* cdm_host_proxy,
                       std::unique_ptr<VideoDecoder> video_decoder)
       : cdm_host_proxy_(cdm_host_proxy),
         video_decoder_(std::move(video_decoder)) {
-    DCHECK(cdm_host_proxy_);
+    CHECK(cdm_host_proxy_);
   }
+
+  VideoDecoderAdapter(const VideoDecoderAdapter&) = delete;
+  VideoDecoderAdapter& operator=(const VideoDecoderAdapter&) = delete;
 
   ~VideoDecoderAdapter() final = default;
 
   // CdmVideoDecoder implementation.
-  Status Initialize(const cdm::VideoDecoderConfig_3& config) final {
+  DecoderStatus Initialize(const cdm::VideoDecoderConfig_3& config) final {
     auto clear_config = ToClearMediaVideoDecoderConfig(config);
     DVLOG(1) << __func__ << ": " << clear_config.AsHumanReadableString();
-    DCHECK(!last_init_result_.has_value());
+    CHECK(!last_init_result_.has_value());
 
     // Initialize |video_decoder_| and wait for completion.
     base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
@@ -220,7 +230,7 @@ class VideoDecoderAdapter : public CdmVideoDecoder {
   cdm::Status Decode(scoped_refptr<DecoderBuffer> buffer,
                      CdmVideoFrame* decoded_frame) final {
     DVLOG(3) << __func__;
-    DCHECK(!last_decode_status_.has_value());
+    CHECK(!last_decode_status_.has_value());
 
     // Call |video_decoder_| Decode() and wait for completion.
     base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
@@ -233,11 +243,12 @@ class VideoDecoderAdapter : public CdmVideoDecoder {
     auto decode_status = last_decode_status_.value();
     last_decode_status_.reset();
 
-    if (decode_status == DecodeStatus::DECODE_ERROR)
-      return cdm::kDecodeError;
+    // "kAborted" shouldn't happen during a sync decode, so treat it as an
+    // error.
+    DCHECK_NE(decode_status.code(), DecoderStatus::Codes::kAborted);
 
-    // "ABORTED" shouldn't happen during a sync decode, so treat it as an error.
-    DCHECK_EQ(decode_status, DecodeStatus::OK);
+    if (!decode_status.is_ok())
+      return cdm::kDecodeError;
 
     if (decoded_video_frames_.empty())
       return cdm::kNeedMoreData;
@@ -251,16 +262,16 @@ class VideoDecoderAdapter : public CdmVideoDecoder {
   }
 
  private:
-  void OnInitialized(base::OnceClosure quit_closure, Status status) {
+  void OnInitialized(base::OnceClosure quit_closure, DecoderStatus status) {
     DVLOG(1) << __func__ << " success = " << status.is_ok();
-    DCHECK(!last_init_result_.has_value());
+    CHECK(!last_init_result_.has_value());
     last_init_result_ = std::move(status);
     std::move(quit_closure).Run();
   }
 
   void OnVideoFrameReady(scoped_refptr<VideoFrame> video_frame) {
     // Do not queue EOS frames, which is not needed.
-    if (video_frame->metadata()->end_of_stream)
+    if (video_frame->metadata().end_of_stream)
       return;
 
     decoded_video_frames_.push(std::move(video_frame));
@@ -272,63 +283,51 @@ class VideoDecoderAdapter : public CdmVideoDecoder {
     std::move(quit_closure).Run();
   }
 
-  void OnDecoded(base::OnceClosure quit_closure, DecodeStatus decode_status) {
-    DCHECK(!last_decode_status_.has_value());
-    last_decode_status_ = decode_status;
+  void OnDecoded(base::OnceClosure quit_closure, DecoderStatus decode_status) {
+    CHECK(!last_decode_status_.has_value());
+    last_decode_status_ = std::move(decode_status);
     std::move(quit_closure).Run();
   }
 
-  CdmHostProxy* const cdm_host_proxy_;
+  const raw_ptr<CdmHostProxy> cdm_host_proxy_;
   std::unique_ptr<VideoDecoder> video_decoder_;
 
   // Results of |video_decoder_| operations. Set iff the callback of the
   // operation has been called.
-  base::Optional<Status> last_init_result_;
-  base::Optional<DecodeStatus> last_decode_status_;
+  std::optional<DecoderStatus> last_init_result_;
+  std::optional<DecoderStatus> last_decode_status_;
 
   // Queue of decoded video frames.
   using VideoFrameQueue = base::queue<scoped_refptr<VideoFrame>>;
   VideoFrameQueue decoded_video_frames_;
 
   base::WeakPtrFactory<VideoDecoderAdapter> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(VideoDecoderAdapter);
 };
 
 }  // namespace
 
 std::unique_ptr<CdmVideoDecoder> CreateVideoDecoder(
     CdmHostProxy* cdm_host_proxy,
-    const cdm::VideoDecoderConfig_3& config) {
+    const cdm::VideoDecoderConfig_3& config,
+    MediaLog* media_log) {
   SetupGlobalEnvironmentIfNeeded();
 
-  static base::NoDestructor<media::NullMediaLog> null_media_log;
   std::unique_ptr<VideoDecoder> video_decoder;
 
 #if BUILDFLAG(ENABLE_LIBVPX)
   if (config.codec == cdm::kCodecVp8 || config.codec == cdm::kCodecVp9)
-    video_decoder.reset(new VpxVideoDecoder());
+    video_decoder = std::make_unique<VpxVideoDecoder>();
 #endif
 
-#if BUILDFLAG(ENABLE_LIBGAV1_DECODER)
-  if (base::FeatureList::IsEnabled(kGav1VideoDecoder)) {
-    if (config.codec == cdm::kCodecAv1)
-      video_decoder.reset(new Gav1VideoDecoder(null_media_log.get()));
-  } else
-#endif  // BUILDFLAG(ENABLE_LIBGAV1_DECODER)
-  {
 #if BUILDFLAG(ENABLE_DAV1D_DECODER)
-    if (config.codec == cdm::kCodecAv1)
-      video_decoder.reset(new Dav1dVideoDecoder(null_media_log.get()));
-#elif BUILDFLAG(ENABLE_LIBAOM)
-    if (config.codec == cdm::kCodecAv1)
-      video_decoder.reset(new AomVideoDecoder(null_media_log.get()));
-#endif
+  if (config.codec == cdm::kCodecAv1) {
+    video_decoder = std::make_unique<Dav1dVideoDecoder>(media_log->Clone());
   }
+#endif
 
 #if BUILDFLAG(ENABLE_FFMPEG_VIDEO_DECODERS)
   if (!video_decoder)
-    video_decoder.reset(new FFmpegVideoDecoder(null_media_log.get()));
+    video_decoder = std::make_unique<FFmpegVideoDecoder>(media_log->Clone());
 #endif
 
   if (!video_decoder)

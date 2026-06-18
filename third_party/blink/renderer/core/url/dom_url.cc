@@ -29,50 +29,108 @@
 #include "base/auto_reset.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
+#include "third_party/blink/renderer/core/url/dom_origin.h"
 #include "third_party/blink/renderer/core/url/url_search_params.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/loader/fetch/memory_cache.h"
+#include "third_party/blink/renderer/platform/weborigin/kurl.h"
+#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 
 namespace blink {
 
-DOMURL::DOMURL(const String& url,
-               const KURL& base,
-               ExceptionState& exception_state) {
-  if (!base.IsValid()) {
-    exception_state.ThrowTypeError("Invalid base URL");
-    return;
-  }
+// static
+DOMURL* DOMURL::Create(const String& url, ExceptionState& exception_state) {
+  return MakeGarbageCollected<DOMURL>(PassKey(), url, NullUrl(),
+                                      exception_state);
+}
 
-  url_ = KURL(base, url);
+// static
+DOMURL* DOMURL::Create(const String& url,
+                       const String& base,
+                       ExceptionState& exception_state) {
+  KURL base_url(base);
+  if (!base_url.IsValid()) {
+    exception_state.ThrowTypeError("Invalid base URL");
+    return nullptr;
+  }
+  return MakeGarbageCollected<DOMURL>(PassKey(), url, base_url,
+                                      exception_state);
+}
+
+DOMURL::DOMURL(PassKey,
+               const String& url,
+               const KURL& base,
+               ExceptionState& exception_state)
+    : url_(base, url) {
   if (!url_.IsValid())
     exception_state.ThrowTypeError("Invalid URL");
 }
 
+DOMURL::DOMURL(PassKey, const KURL& url): url_(url) {
+}
+
 DOMURL::~DOMURL() = default;
+
+DOMOrigin* DOMURL::GetDOMOrigin(LocalDOMWindow*) const {
+  // No access check is required, as URLs are not accessible cross-origin.
+  return DOMOrigin::Create(SecurityOrigin::Create(Url()));
+}
 
 void DOMURL::Trace(Visitor* visitor) const {
   visitor->Trace(search_params_);
   ScriptWrappable::Trace(visitor);
 }
 
-void DOMURL::SetInput(const String& value) {
-  KURL url(BlankURL(), value);
-  if (url.IsValid()) {
-    url_ = url;
-    input_ = String();
-  } else {
-    url_ = KURL();
-    input_ = value;
+// static
+DOMURL* DOMURL::parse(const String& str) {
+  KURL url(str);
+  if (!url.IsValid()) {
+    return nullptr;
   }
+  return MakeGarbageCollected<DOMURL>(PassKey(), url);
+}
+
+// static
+DOMURL* DOMURL::parse(const String& str, const String& base) {
+  KURL base_url(base);
+  if (!base_url.IsValid()) {
+    return nullptr;
+  }
+  KURL url(base_url, str);
+  if (!url.IsValid()) {
+    return nullptr;
+  }
+  return MakeGarbageCollected<DOMURL>(PassKey(), url);
+}
+
+// static
+bool DOMURL::canParse(const String& url) {
+  return KURL(NullUrl(), url).IsValid();
+}
+
+// static
+bool DOMURL::canParse(const String& url, const String& base) {
+  KURL base_url(base);
+  return base_url.IsValid() && KURL(base_url, url).IsValid();
+}
+
+void DOMURL::setHref(const String& value, ExceptionState& exception_state) {
+  KURL url(value);
+  if (!url.IsValid()) {
+    exception_state.ThrowTypeError("Invalid URL");
+    return;
+  }
+  url_ = url;
   Update();
 }
 
 void DOMURL::setSearch(const String& value) {
   DOMURLUtils::setSearch(value);
-  if (!value.IsEmpty() && value[0] == '?')
-    UpdateSearchParams(value.Substring(1));
-  else
+  if (value.starts_with('?')) {
+    UpdateSearchParams(value.substr(1));
+  } else {
     UpdateSearchParams(value);
+  }
 }
 
 String DOMURL::CreatePublicURL(ExecutionContext* execution_context,
@@ -81,14 +139,15 @@ String DOMURL::CreatePublicURL(ExecutionContext* execution_context,
 }
 
 URLSearchParams* DOMURL::searchParams() {
-  if (!search_params_)
-    search_params_ = URLSearchParams::Create(Url().Query(), this);
+  if (!search_params_) {
+    search_params_ = URLSearchParams::Create(Url().Query().ToString(), this);
+  }
 
-  return search_params_;
+  return search_params_.Get();
 }
 
 void DOMURL::Update() {
-  UpdateSearchParams(Url().Query());
+  UpdateSearchParams(Url().Query().ToString());
 }
 
 void DOMURL::UpdateSearchParams(const String& query_string) {

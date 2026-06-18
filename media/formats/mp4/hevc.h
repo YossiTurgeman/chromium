@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,8 @@
 
 #include "media/base/media_export.h"
 #include "media/base/video_codecs.h"
+#include "media/base/video_decoder_config.h"
+#include "media/base/video_types.h"
 #include "media/formats/mp4/bitstream_converter.h"
 #include "media/formats/mp4/box_definitions.h"
 
@@ -25,12 +27,21 @@ namespace mp4 {
 struct MEDIA_EXPORT HEVCDecoderConfigurationRecord : Box {
   DECLARE_BOX_METHODS(HEVCDecoderConfigurationRecord);
 
+  // Parallel processing tools used by decoder.
+  enum {
+    kMixedParallel = 0,  // mixed mode of slice-based/tile-based/wavefront
+    kSliceParallel,      // slices can be decoded independently
+    kTileParallel,       // tiles can be decoded independently
+    kWaveFrontParallel,  // first row of CTUs decoded normally and rest
+                         // parallelized
+  };
   // Parses HEVCDecoderConfigurationRecord data encoded in |data|.
   // Note: This method is intended to parse data outside the MP4StreamParser
   //       context and therefore the box header is not expected to be present
   //       in |data|.
   // Returns true if |data| was successfully parsed.
-  bool Parse(const uint8_t* data, int data_size);
+  bool Parse(base::span<const uint8_t> data);
+  bool Serialize(std::vector<uint8_t>& output) const;
 
   uint8_t configurationVersion;
   uint8_t general_profile_space;
@@ -56,20 +67,31 @@ struct MEDIA_EXPORT HEVCDecoderConfigurationRecord : Box {
     HVCCNALArray();
     HVCCNALArray(const HVCCNALArray& other);
     ~HVCCNALArray();
-    uint8_t first_byte;
+    uint8_t first_byte =
+        0;  // array_completeness(1)/reserved0(1)/NAL_unit_type(6)
     std::vector<HVCCNALUnit> units;
   };
   std::vector<HVCCNALArray> arrays;
 
   VideoCodecProfile GetVideoProfile() const;
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  VideoColorSpace GetColorSpace();
+  VideoChromaSampling GetChromaSampling();
+  gfx::HDRMetadata GetHDRMetadata();
+  VideoDecoderConfig::AlphaMode GetAlphaMode();
+#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
 
  private:
   bool ParseInternal(BufferReader* reader, MediaLog* media_log);
+  VideoColorSpace color_space;
+  VideoChromaSampling chroma_sampling;
+  gfx::HDRMetadata hdr_metadata;
+  VideoDecoderConfig::AlphaMode alpha_mode;
 };
 
 class MEDIA_EXPORT HEVC {
  public:
-  static bool ConvertConfigToAnnexB(
+  static void ConvertConfigToAnnexB(
       const HEVCDecoderConfigurationRecord& hevc_config,
       std::vector<uint8_t>* buffer);
 
@@ -84,8 +106,7 @@ class MEDIA_EXPORT HEVC {
   // |subsamples| contains the information about what parts of the buffer are
   // encrypted and which parts are clear.
   static BitstreamConverter::AnalysisResult AnalyzeAnnexB(
-      const uint8_t* buffer,
-      size_t size,
+      base::span<const uint8_t> buffer,
       const std::vector<SubsampleEntry>& subsamples);
 };
 
@@ -103,7 +124,7 @@ class HEVCBitstreamConverter : public BitstreamConverter {
  private:
   ~HEVCBitstreamConverter() override;
   AnalysisResult Analyze(
-      std::vector<uint8_t>* frame_buf,
+      base::span<const uint8_t> frame_buf,
       std::vector<SubsampleEntry>* subsamples) const override;
   std::unique_ptr<HEVCDecoderConfigurationRecord> hevc_config_;
 };

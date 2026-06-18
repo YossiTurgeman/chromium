@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,16 +7,16 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/optional.h"
-#include "base/threading/sequenced_task_runner_handle.h"
-#include "device/fido/fido_constants.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/task/sequenced_task_runner.h"
 #include "device/fido/fido_device.h"
+#include "device/fido/public/fido_constants.h"
 
 namespace device {
 
@@ -25,7 +25,7 @@ namespace device {
 // operation.
 class GenericDeviceOperation {
  public:
-  virtual ~GenericDeviceOperation() {}
+  virtual ~GenericDeviceOperation() = default;
   virtual void Start() = 0;
 
   // Cancel will attempt to cancel the current operation. It is safe to call
@@ -37,8 +37,7 @@ template <class Request, class Response>
 class DeviceOperation : public GenericDeviceOperation {
  public:
   using DeviceResponseCallback =
-      base::OnceCallback<void(CtapDeviceResponseCode,
-                              base::Optional<Response>)>;
+      base::OnceCallback<void(CtapDeviceResponseCode, std::optional<Response>)>;
   // Represents a per device logic that is owned by FidoTask. Thus,
   // DeviceOperation does not outlive |request|.
   DeviceOperation(FidoDevice* device,
@@ -48,15 +47,17 @@ class DeviceOperation : public GenericDeviceOperation {
         request_(std::move(request)),
         callback_(std::move(callback)) {}
 
-  virtual ~DeviceOperation() = default;
+  DeviceOperation(const DeviceOperation&) = delete;
+  DeviceOperation& operator=(const DeviceOperation&) = delete;
+
+  ~DeviceOperation() override = default;
 
  protected:
-  // TODO(hongjunchoi): Refactor so that |command| is never base::nullopt.
-  void DispatchDeviceRequest(base::Optional<std::vector<uint8_t>> command,
-                             FidoDevice::DeviceCallback callback) {
+  void DispatchU2FCommand(std::optional<std::vector<uint8_t>> command,
+                          FidoDevice::DeviceCallback callback) {
     if (!command || device_->is_in_error_state()) {
-      base::SequencedTaskRunnerHandle::Get()->PostTask(
-          FROM_HERE, base::BindOnce(std::move(callback), base::nullopt));
+      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, base::BindOnce(std::move(callback), std::nullopt));
       return;
     }
 
@@ -66,14 +67,12 @@ class DeviceOperation : public GenericDeviceOperation {
   const Request& request() const { return request_; }
   FidoDevice* device() const { return device_; }
   DeviceResponseCallback callback() { return std::move(callback_); }
-  base::Optional<FidoDevice::CancelToken> token_;
+  std::optional<FidoDevice::CancelToken> token_;
 
  private:
-  FidoDevice* const device_ = nullptr;
+  const raw_ptr<FidoDevice> device_ = nullptr;
   Request request_;
   DeviceResponseCallback callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(DeviceOperation);
 };
 
 }  // namespace device

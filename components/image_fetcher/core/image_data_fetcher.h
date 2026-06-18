@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,11 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
-#include "base/optional.h"
+#include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/sequence_checker.h"
 #include "components/image_fetcher/core/image_fetcher.h"
 #include "components/image_fetcher/core/image_fetcher_types.h"
@@ -31,18 +30,22 @@ namespace image_fetcher {
 class ImageDataFetcher {
  public:
   // Note that this must be used consistently on the thread that owns
-  // |url_loader_factory|. See SharedURLLoaderFactory::Clone() if changing
+  // `url_loader_factory`. See SharedURLLoaderFactory::Clone() if changing
   // thread is required.
   explicit ImageDataFetcher(
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory);
+
+  ImageDataFetcher(const ImageDataFetcher&) = delete;
+  ImageDataFetcher& operator=(const ImageDataFetcher&) = delete;
+
   ~ImageDataFetcher();
 
   // Sets an upper limit for image downloads.
   // Already running downloads are not affected.
-  void SetImageDownloadLimit(base::Optional<int64_t> max_download_bytes);
+  void SetImageDownloadLimit(std::optional<int64_t> max_download_bytes);
 
-  // Fetches the raw image bytes from the given |image_url| and calls the given
-  // |callback|. The callback is run even if fetching the URL fails. In case
+  // Fetches the raw image bytes from the given `image_url` and calls the given
+  // `callback`. The callback is run even if fetching the URL fails. In case
   // of an error an empty string is passed to the callback. May return
   // synchronously.
   void FetchImageData(const GURL& image_url,
@@ -85,7 +88,8 @@ class ImageDataFetcher {
 
   void OnURLLoaderComplete(const network::SimpleURLLoader* source,
                            ImageFetcherParams params,
-                           std::unique_ptr<std::string> response_body);
+                           uint64_t flow_id,
+                           std::optional<std::string> response_body);
 
   void FinishRequest(const network::SimpleURLLoader* source,
                      const RequestMetadata& metadata,
@@ -99,11 +103,11 @@ class ImageDataFetcher {
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
 
   // Upper limit for the number of bytes to download per image.
-  base::Optional<int64_t> max_download_bytes_;
+  std::optional<int64_t> max_download_bytes_;
+
+  uint64_t fetch_sequence_number_ = 0;
 
   SEQUENCE_CHECKER(sequence_checker_);
-
-  DISALLOW_COPY_AND_ASSIGN(ImageDataFetcher);
 };
 
 }  // namespace image_fetcher

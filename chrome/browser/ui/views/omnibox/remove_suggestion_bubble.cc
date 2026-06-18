@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,14 +13,19 @@
 #include "components/search_engines/template_url_service.h"
 #include "components/strings/grit/components_strings.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/layout/box_layout.h"
 
-namespace {
-
 class RemoveSuggestionBubbleDialogDelegateView
     : public views::BubbleDialogDelegateView {
+  METADATA_HEADER(RemoveSuggestionBubbleDialogDelegateView,
+                  views::BubbleDialogDelegateView)
+
  public:
   RemoveSuggestionBubbleDialogDelegateView(
       TemplateURLService* template_url_service,
@@ -34,9 +39,11 @@ class RemoveSuggestionBubbleDialogDelegateView
     DCHECK(template_url_service);
     DCHECK(match_.SupportsDeletion());
 
-    SetButtonLabel(ui::DIALOG_BUTTON_OK, l10n_util::GetStringUTF16(IDS_REMOVE));
-    SetButtonLabel(ui::DIALOG_BUTTON_CANCEL,
+    SetButtonLabel(ui::mojom::DialogButton::kOk,
+                   l10n_util::GetStringUTF16(IDS_REMOVE));
+    SetButtonLabel(ui::mojom::DialogButton::kCancel,
                    l10n_util::GetStringUTF16(IDS_CANCEL));
+    SetModalType(ui::mojom::ModalType::kWindow);
 
     auto* layout_manager = SetLayoutManager(std::make_unique<views::BoxLayout>(
         views::BoxLayout::Orientation::kVertical));
@@ -46,9 +53,9 @@ class RemoveSuggestionBubbleDialogDelegateView
     layout_manager->set_between_child_spacing(16);
 
     // Get the Search Provider name associated with this match.
-    base::string16 search_provider_short_name;
+    std::u16string search_provider_short_name;
     const TemplateURL* template_url =
-        match.GetTemplateURL(template_url_service, false);
+        match.GetTemplateURL(template_url_service);
     // If the match has no associated Search Provider, get the default one,
     // although this may still fail if it's forbidden by policy.
     if (!template_url) {
@@ -66,13 +73,13 @@ class RemoveSuggestionBubbleDialogDelegateView
     description_label->SetMultiLine(true);
     description_label->SetHorizontalAlignment(
         gfx::HorizontalAlignment::ALIGN_LEFT);
-    AddChildView(description_label);
+    AddChildViewRaw(description_label);
 
     // TODO(tommycli): Indent and set a smaller font per UX suggestions.
     views::Label* url_label = new views::Label(match.contents);
     url_label->SetMultiLine(true);
     url_label->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
-    AddChildView(url_label);
+    AddChildViewRaw(url_label);
   }
 
   // views::DialogDelegateView:
@@ -82,14 +89,15 @@ class RemoveSuggestionBubbleDialogDelegateView
   }
 
   // views::View:
-  gfx::Size CalculatePreferredSize() const override {
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& available_size) const override {
     // TODO(tommycli): Replace with the real width from UX.
-    return gfx::Size(500, GetHeightForWidth(500));
+    return gfx::Size(500,
+                     GetLayoutManager()->GetPreferredHeightForWidth(this, 500));
   }
 
   // views::WidgetDelegate:
-  ui::ModalType GetModalType() const override { return ui::MODAL_TYPE_WINDOW; }
-  base::string16 GetWindowTitle() const override {
+  std::u16string GetWindowTitle() const override {
     return l10n_util::GetStringUTF16(
         IDS_OMNIBOX_REMOVE_SUGGESTION_BUBBLE_TITLE);
   }
@@ -99,7 +107,8 @@ class RemoveSuggestionBubbleDialogDelegateView
   base::OnceClosure remove_closure_;
 };
 
-}  // namespace
+BEGIN_METADATA(RemoveSuggestionBubbleDialogDelegateView)
+END_METADATA
 
 void ShowRemoveSuggestion(TemplateURLService* template_url_service,
                           views::View* anchor_view,

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,10 @@
 #include "ash/shell.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/accessibility/ax_node_data.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/models/image_model.h"
+#include "ui/chromeos/styles/cros_tokens_color_mappings.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/controls/image_view.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/layout/box_layout.h"
@@ -24,61 +27,39 @@ namespace {
 constexpr int kAlertIconSizeDp = 20;
 
 }  // namespace
-
 LoginErrorBubble::LoginErrorBubble()
-    : LoginErrorBubble(nullptr /*content*/,
-                       nullptr /*anchor_view*/,
-                       false /*is_persistent*/) {}
+    : LoginErrorBubble(nullptr /*anchor_view*/) {}
 
-LoginErrorBubble::LoginErrorBubble(views::View* content,
-                                   views::View* anchor_view,
-                                   bool is_persistent)
-    : LoginBaseBubbleView(anchor_view), is_persistent_(is_persistent) {
-  views::ImageView* alert_icon = new views::ImageView();
-  alert_icon->SetPreferredSize(gfx::Size(kAlertIconSizeDp, kAlertIconSizeDp));
-  alert_icon->SetImage(
-      gfx::CreateVectorIcon(kLockScreenAlertIcon, SK_ColorWHITE));
-  AddChildView(alert_icon);
+LoginErrorBubble::LoginErrorBubble(base::WeakPtr<views::View> anchor_view)
+    : LoginBaseBubbleView(std::move(anchor_view)) {
+  alert_icon_ = AddChildView(std::make_unique<views::ImageView>());
+  alert_icon_->SetImage(ui::ImageModel::FromVectorIcon(
+      kLockScreenAlertIcon,
+      static_cast<ui::ColorId>(cros_tokens::kCrosSysOnSurface),
+      kAlertIconSizeDp));
 
-  if (content) {
-    content_ = content;
-    AddChildView(content);
-  }
+  GetViewAccessibility().SetRole(ax::mojom::Role::kAlertDialog);
 }
 
 LoginErrorBubble::~LoginErrorBubble() = default;
 
-void LoginErrorBubble::SetContent(views::View* content) {
-  if (content_)
-    delete content_;
-  content_ = content;
-  AddChildView(content_);
+void LoginErrorBubble::SetContent(std::unique_ptr<views::View> content) {
+  if (content_) {
+    RemoveChildViewT(content_.get());
+  }
+  content_ = AddChildView(std::move(content));
 }
 
-void LoginErrorBubble::SetTextContent(const base::string16& message) {
-  SetContent(
-      login_views_utils::CreateBubbleLabel(message, gfx::kGoogleGrey200, this));
+views::View* LoginErrorBubble::GetContent() {
+  return content_;
 }
 
-void LoginErrorBubble::SetAccessibleName(const base::string16& name) {
-  accessible_name_ = name;
+void LoginErrorBubble::SetTextContent(const std::u16string& message) {
+  message_ = message;
+  SetContent(login_views_utils::CreateBubbleLabel(message, this));
 }
 
-bool LoginErrorBubble::IsPersistent() const {
-  return is_persistent_;
-}
-
-void LoginErrorBubble::SetPersistent(bool persistent) {
-  is_persistent_ = persistent;
-}
-
-const char* LoginErrorBubble::GetClassName() const {
-  return "LoginErrorBubble";
-}
-
-void LoginErrorBubble::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  node_data->role = ax::mojom::Role::kAlertDialog;
-  node_data->SetName(accessible_name_);
-}
+BEGIN_METADATA(LoginErrorBubble)
+END_METADATA
 
 }  // namespace ash

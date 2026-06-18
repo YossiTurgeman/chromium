@@ -1,23 +1,23 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/apps/app_shim/app_shim_termination_manager.h"
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/callback_list.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/location.h"
-#include "base/macros.h"
 #include "base/no_destructor.h"
 #include "base/notreached.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/scoped_observation.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/apps/app_shim/app_shim_manager_mac.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/lifetime/application_lifetime.h"
+#include "chrome/browser/lifetime/application_lifetime_desktop.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/common/mac/app_mode_common.h"
-#include "content/public/browser/notification_observer.h"
-#include "content/public/browser/notification_registrar.h"
-#include "content/public/browser/notification_service.h"
 
 namespace apps {
 
@@ -30,56 +30,52 @@ void TerminateIfNoAppWindows() {
 }
 
 class AppShimTerminationManagerImpl : public AppShimTerminationManager,
-                                      public content::NotificationObserver {
+                                      public BrowserCollectionObserver {
  public:
   AppShimTerminationManagerImpl() {
-    registrar_.Add(
-        this, chrome::NOTIFICATION_BROWSER_OPENED,
-        content::NotificationService::AllBrowserContextsAndSources());
-    registrar_.Add(
-        this, chrome::NOTIFICATION_CLOSE_ALL_BROWSERS_REQUEST,
-        content::NotificationService::AllBrowserContextsAndSources());
-    registrar_.Add(
-        this, chrome::NOTIFICATION_BROWSER_CLOSE_CANCELLED,
-        content::NotificationService::AllBrowserContextsAndSources());
+    browser_collection_observation_.Observe(
+        GlobalBrowserCollection::GetInstance());
+
+    closing_all_browsers_subscription_ =
+        chrome::AddClosingAllBrowsersCallback(base::BindRepeating(
+            &AppShimTerminationManagerImpl::OnClosingAllBrowsersChanged,
+            base::Unretained(this)));
   }
 
+  AppShimTerminationManagerImpl(const AppShimTerminationManagerImpl&) = delete;
+  AppShimTerminationManagerImpl& operator=(
+      const AppShimTerminationManagerImpl&) = delete;
   ~AppShimTerminationManagerImpl() override { NOTREACHED(); }
 
- private:
-  // AppShimTerminationManager
+  // AppShimTerminationManager:
   void MaybeTerminate() override {
     if (!browser_session_running_) {
       // Post this to give AppWindows a chance to remove themselves from the
       // registry.
-      base::ThreadTaskRunnerHandle::Get()->PostTask(
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
           FROM_HERE, base::BindOnce(&TerminateIfNoAppWindows));
     }
   }
 
   bool ShouldRestoreSession() override { return !browser_session_running_; }
 
-  // content::NotificationObserver override:
-  void Observe(int type,
-               const content::NotificationSource& source,
-               const content::NotificationDetails& details) override {
-    switch (type) {
-      case chrome::NOTIFICATION_BROWSER_OPENED:
-      case chrome::NOTIFICATION_BROWSER_CLOSE_CANCELLED:
-        browser_session_running_ = true;
-        break;
-      case chrome::NOTIFICATION_CLOSE_ALL_BROWSERS_REQUEST:
-        browser_session_running_ = false;
-        break;
-      default:
-        NOTREACHED();
-    }
+  // BrowserCollectionObserver:
+  void OnBrowserCreated(BrowserWindowInterface* browser) override {
+    browser_session_running_ = true;
   }
 
-  content::NotificationRegistrar registrar_;
-  bool browser_session_running_ = false;
+ private:
+  void OnClosingAllBrowsersChanged(bool closing) {
+    browser_session_running_ = !closing;
+  }
 
-  DISALLOW_COPY_AND_ASSIGN(AppShimTerminationManagerImpl);
+  // TODO(crbug.com/495686112): remove when the AppShimTerminationManagerImpl
+  // is no longer outliving the GlobalBrowserCollection it observes.
+  base::ScopedObservation<GlobalBrowserCollection,
+                          BrowserCollectionObserver>::LeakedDanglingUntriaged
+      browser_collection_observation_{this};
+  base::CallbackListSubscription closing_all_browsers_subscription_;
+  bool browser_session_running_ = false;
 };
 
 }  // namespace

@@ -1,94 +1,104 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_ENTERPRISE_CONNECTORS_COMMON_H_
 #define CHROME_BROWSER_ENTERPRISE_CONNECTORS_COMMON_H_
 
-#include <set>
 #include <string>
 
+#include "base/functional/callback_forward.h"
 #include "base/supports_user_data.h"
-#include "components/enterprise/common/proto/connectors.pb.h"
-#include "url/gurl.h"
+#include "components/enterprise/buildflags/buildflags.h"
+#include "components/enterprise/connectors/core/analysis_settings.h"
+#include "components/enterprise/connectors/core/common.h"
+#include "components/safe_browsing/buildflags.h"
+#include "content/public/browser/download_manager_delegate.h"
+
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
+#include "chrome/browser/safe_browsing/cloud_content_scanning/deep_scanning_utils.h"  // nogncheck crbug.com/40147906
+#include "components/enterprise/connectors/core/cloud_content_scanning/binary_upload_service.h"
+#endif  // BUILDFLAG(SAFE_BROWSING_AVAILABLE)
+
+class Profile;
+
+namespace content {
+class WebContents;
+}  // namespace content
+
+namespace download {
+class DownloadItem;
+}  // namespace download
+
+namespace policy {
+class BrowserPolicyConnector;
+}  // namespace policy
 
 namespace enterprise_connectors {
 
-// Alias to reduce verbosity when using TriggeredRule::Actions.
-using TriggeredRule = ContentAnalysisResponse::Result::TriggeredRule;
-
-// Keys used to read a connector's policy values.
-constexpr char kKeyServiceProvider[] = "service_provider";
-constexpr char kKeyEnable[] = "enable";
-constexpr char kKeyDisable[] = "disable";
-constexpr char kKeyUrlList[] = "url_list";
-constexpr char kKeyTags[] = "tags";
-constexpr char kKeyBlockUntilVerdict[] = "block_until_verdict";
-constexpr char kKeyBlockPasswordProtected[] = "block_password_protected";
-constexpr char kKeyBlockLargeFiles[] = "block_large_files";
-constexpr char kKeyBlockUnsupportedFileTypes[] = "block_unsupported_file_types";
-constexpr char kKeyMinimumDataSize[] = "minimum_data_size";
-
-enum class ReportingConnector {
-  SECURITY_EVENT,
-};
-
-// Enum representing if an analysis should block further interactions with the
-// browser until its verdict is obtained.
-enum class BlockUntilVerdict {
-  NO_BLOCK = 0,
-  BLOCK = 1,
-};
-
-// Structs representing settings to be used for an analysis or a report. These
-// settings should only be kept and considered valid for the specific
-// analysis/report they were obtained for.
-struct AnalysisSettings {
-  AnalysisSettings();
-  AnalysisSettings(AnalysisSettings&&);
-  AnalysisSettings& operator=(AnalysisSettings&&);
-  ~AnalysisSettings();
-
-  GURL analysis_url;
-  std::set<std::string> tags;
-  BlockUntilVerdict block_until_verdict = BlockUntilVerdict::NO_BLOCK;
-  bool block_password_protected_files = false;
-  bool block_large_files = false;
-  bool block_unsupported_file_types = false;
-
-  // Minimum text size for BulkDataEntry scans. 0 means no minimum.
-  size_t minimum_data_size = 100;
-};
-
-struct ReportingSettings {
-  ReportingSettings();
-  explicit ReportingSettings(GURL url);
-  ReportingSettings(ReportingSettings&&);
-  ReportingSettings& operator=(ReportingSettings&&);
-  ~ReportingSettings();
-
-  GURL reporting_url;
-};
-
-// Returns the pref path corresponding to a connector.
-const char* ConnectorPref(AnalysisConnector connector);
-const char* ConnectorPref(ReportingConnector connector);
-
-// Returns the highest precedence action in the given parameters.
-TriggeredRule::Action GetHighestPrecedenceAction(
-    const ContentAnalysisResponse& response);
-TriggeredRule::Action GetHighestPrecedenceAction(
-    const TriggeredRule::Action& action_1,
-    const TriggeredRule::Action& action_2);
-
-// User data class to persist ContentAnalysisResponses in base::SupportsUserData
-// objects.
-struct ScanResult : public base::SupportsUserData::Data {
-  explicit ScanResult(const ContentAnalysisResponse& response);
-  ~ScanResult() override;
+// User data to persist a save package's final callback allowing/denying
+// completion. This is used since the callback can be called either when
+// scanning completes on a block/allow verdict, when the user cancels the scan,
+// or when the user bypasses scanning.
+struct SavePackageScanningData : public base::SupportsUserData::Data {
+  explicit SavePackageScanningData(
+      content::SavePackageAllowedCallback callback);
+  ~SavePackageScanningData() override;
   static const char kKey[];
-  ContentAnalysisResponse response;
+
+  content::SavePackageAllowedCallback callback;
 };
+
+policy::BrowserPolicyConnector* GetBrowserPolicyConnector();
+
+// Checks `item` for a SavePackageScanningData, and run it's callback with
+// `allowed` if there is one.
+void RunSavePackageScanningCallback(download::DownloadItem* item, bool allowed);
+
+// Returns whether the profile is affiliated. This will only return true if both
+// the device and profile are managed, and if both share affiliation IDs.
+bool IsAffiliated(Profile* profile);
+
+// Returns whether device info should be reported for the profile.
+bool IncludeDeviceInfo(Profile* profile, bool per_profile);
+
+// Returns the email address of the unconsented account signed in to the profile
+// or an empty string if no account is signed in.  If `profile` is null then the
+// empty string is returned.
+std::string GetProfileEmail(Profile* profile);
+
+// Returns the list of URLs from the current frame all the way to the outermost
+// frame URL. Above the `kMaxFrameUrls` limit, we skip the rest of the chain and
+// take the outermost URL for performance considerations.
+google::protobuf::RepeatedPtrField<std::string> CollectFrameUrls(
+    content::WebContents* web_contents,
+    DeepScanAccessPoint access_point);
+
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
+
+// Returns the appropriate BinaryUploadService for the given `profile` and
+// `settings`. This can be a cloud or local service.
+BinaryUploadService* GetBinaryUploadServiceForConnector(
+    Profile* profile,
+    const enterprise_connectors::AnalysisSettings& settings);
+
+#endif  // BUILDFLAG(SAFE_BROWSING_AVAILABLE)
+
+#if BUILDFLAG(ENTERPRISE_CONTENT_ANALYSIS)
+// Returns whether the download danger type implies the user should be allowed
+// to review the download.
+bool ShouldPromptReviewForDownload(Profile* profile,
+                                   const download::DownloadItem* download_item);
+
+// Shows the review dialog after a user has clicked the "Review" button
+// corresponding to a download.
+void ShowDownloadReviewDialog(const std::u16string& filename,
+                              Profile* profile,
+                              download::DownloadItem* download_item,
+                              content::WebContents* web_contents,
+                              base::OnceClosure keep_closure,
+                              base::OnceClosure discard_closure);
+#endif  // BUILDFLAG(ENTERPRISE_CONTENT_ANALYSIS)
 
 }  // namespace enterprise_connectors
 

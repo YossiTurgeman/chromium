@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/supports_user_data.h"
 #include "components/dom_distiller/core/dom_distiller_service.h"
 #include "components/dom_distiller/core/task_tracker.h"
@@ -25,10 +25,17 @@ class LazyDomDistillerService : public DomDistillerServiceInterface,
   // of the returned pointer.
   static LazyDomDistillerService* Create(Profile* profile);
 
+  LazyDomDistillerService(const LazyDomDistillerService&) = delete;
+  LazyDomDistillerService& operator=(const LazyDomDistillerService&) = delete;
+
   ~LazyDomDistillerService() override;
 
   // DomDistillerServiceInterface implementation:
   std::unique_ptr<ViewerHandle> ViewUrl(
+      ViewRequestDelegate* delegate,
+      std::unique_ptr<DistillerPage> distiller_page,
+      const GURL& url) override;
+  std::unique_ptr<ViewerHandle> ViewUrlIgnoreCache(
       ViewRequestDelegate* delegate,
       std::unique_ptr<DistillerPage> distiller_page,
       const GURL& url) override;
@@ -47,9 +54,7 @@ class LazyDomDistillerService : public DomDistillerServiceInterface,
 
   // The Profile to use when retrieving the DomDistillerService and also the
   // profile to listen for destruction of.
-  Profile* profile_;
-
-  DISALLOW_COPY_AND_ASSIGN(LazyDomDistillerService);
+  raw_ptr<Profile> profile_;
 };
 
 }  // namespace dom_distiller

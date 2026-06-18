@@ -1,15 +1,14 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/omnibox/browser/on_device_model_update_listener.h"
 
 #include "base/files/file_enumerator.h"
+#include "base/no_destructor.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/task/post_task.h"
 #include "base/task/thread_pool.h"
-#include "base/task_runner_util.h"
-#include "build/build_config.h"
+#include "components/optimization_guide/core/delivery/model_util.h"
 
 namespace {
 // Helper function which finds the model and return its filename from the model
@@ -20,17 +19,7 @@ std::string GetModelFilenameFromDirectory(const base::FilePath& model_dir) {
                                   FILE_PATH_LITERAL("*_index.bin"));
 
   base::FilePath model_file_path = model_enum.Next();
-  std::string model_filename;
-
-  if (!model_file_path.empty()) {
-#if defined(OS_WIN)
-    model_filename = base::WideToUTF8(model_file_path.value());
-#else
-    model_filename = model_file_path.value();
-#endif  // defined(OS_WIN)
-  }
-
-  return model_filename;
+  return optimization_guide::FilePathToString(model_file_path);
 }
 
 }  // namespace
@@ -41,40 +30,33 @@ OnDeviceModelUpdateListener* OnDeviceModelUpdateListener::GetInstance() {
   return listener.get();
 }
 
-OnDeviceModelUpdateListener::OnDeviceModelUpdateListener()
-    : task_runner_(base::ThreadPool::CreateSequencedTaskRunner(
-          {base::TaskPriority::BEST_EFFORT,
-           base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN, base::MayBlock()})) {}
+std::string OnDeviceModelUpdateListener::head_model_filename() const {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  return head_model_filename_;
+}
+
+OnDeviceModelUpdateListener::OnDeviceModelUpdateListener() = default;
 
 OnDeviceModelUpdateListener::~OnDeviceModelUpdateListener() = default;
 
-std::unique_ptr<OnDeviceModelUpdateListener::UpdateSubscription>
-OnDeviceModelUpdateListener::AddModelUpdateCallback(
-    ModelUpdateCallback callback) {
-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  if (!model_filename_.empty())
-    callback.Run(model_filename_);
-  return model_update_callbacks_.Add(callback);
-}
-
-void OnDeviceModelUpdateListener::OnModelUpdate(
+void OnDeviceModelUpdateListener::OnHeadModelUpdate(
     const base::FilePath& model_dir) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  if (!model_dir.empty() && model_dir != model_dir_) {
-    model_dir_ = model_dir;
-    base::PostTaskAndReplyWithResult(
-        task_runner_.get(), FROM_HERE,
+  if (!model_dir.empty() && model_dir != head_model_dir_) {
+    head_model_dir_ = model_dir;
+    base::ThreadPool::PostTaskAndReplyWithResult(
+        FROM_HERE,
+        {base::TaskPriority::BEST_EFFORT,
+         base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN, base::MayBlock()},
         base::BindOnce(&GetModelFilenameFromDirectory, model_dir),
         base::BindOnce([](const std::string filename) {
-          if (!filename.empty()) {
-            GetInstance()->model_filename_ = filename;
-            GetInstance()->model_update_callbacks_.Notify(filename);
-          }
+          if (!filename.empty())
+            GetInstance()->head_model_filename_ = filename;
         }));
   }
 }
 
 void OnDeviceModelUpdateListener::ResetListenerForTest() {
-  model_dir_.clear();
-  model_filename_.clear();
+  head_model_dir_.clear();
+  head_model_filename_.clear();
 }

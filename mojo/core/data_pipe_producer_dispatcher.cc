@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,12 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
+#include "base/numerics/checked_math.h"
+#include "base/trace_event/trace_event.h"
 #include "mojo/core/configuration.h"
 #include "mojo/core/core.h"
 #include "mojo/core/data_pipe_control_message.h"
@@ -57,6 +60,9 @@ class DataPipeProducerDispatcher::PortObserverThunk
       scoped_refptr<DataPipeProducerDispatcher> dispatcher)
       : dispatcher_(dispatcher) {}
 
+  PortObserverThunk(const PortObserverThunk&) = delete;
+  PortObserverThunk& operator=(const PortObserverThunk&) = delete;
+
  private:
   ~PortObserverThunk() override = default;
 
@@ -64,8 +70,6 @@ class DataPipeProducerDispatcher::PortObserverThunk
   void OnPortStatusChanged() override { dispatcher_->OnPortStatusChanged(); }
 
   scoped_refptr<DataPipeProducerDispatcher> dispatcher_;
-
-  DISALLOW_COPY_AND_ASSIGN(PortObserverThunk);
 };
 
 // static
@@ -80,8 +84,9 @@ scoped_refptr<DataPipeProducerDispatcher> DataPipeProducerDispatcher::Create(
                                      std::move(shared_ring_buffer), options,
                                      pipe_id);
   base::AutoLock lock(producer->lock_);
-  if (!producer->InitializeNoLock())
+  if (!producer->InitializeNoLock()) {
     return nullptr;
+  }
   return producer;
 }
 
@@ -100,19 +105,24 @@ MojoResult DataPipeProducerDispatcher::WriteData(
     uint32_t* num_bytes,
     const MojoWriteDataOptions& options) {
   base::AutoLock lock(lock_);
-  if (!shared_ring_buffer_.IsValid() || in_transit_)
+  if (!shared_ring_buffer_.IsValid() || in_transit_) {
     return MOJO_RESULT_INVALID_ARGUMENT;
+  }
 
-  if (in_two_phase_write_)
+  if (in_two_phase_write_) {
     return MOJO_RESULT_BUSY;
+  }
 
-  if (peer_closed_)
+  if (peer_closed_) {
     return MOJO_RESULT_FAILED_PRECONDITION;
+  }
 
-  if (*num_bytes % options_.element_num_bytes != 0)
+  if (*num_bytes % options_.element_num_bytes != 0) {
     return MOJO_RESULT_INVALID_ARGUMENT;
-  if (*num_bytes == 0)
+  }
+  if (*num_bytes == 0) {
     return MOJO_RESULT_OK;  // Nothing to do.
+  }
 
   if ((options.flags & MOJO_WRITE_DATA_FLAG_ALL_OR_NONE) &&
       (*num_bytes > available_capacity_)) {
@@ -123,8 +133,9 @@ MojoResult DataPipeProducerDispatcher::WriteData(
 
   DCHECK_LE(available_capacity_, options_.capacity_num_bytes);
   uint32_t num_bytes_to_write = std::min(*num_bytes, available_capacity_);
-  if (num_bytes_to_write == 0)
+  if (num_bytes_to_write == 0) {
     return MOJO_RESULT_SHOULD_WAIT;
+  }
 
   *num_bytes = num_bytes_to_write;
 
@@ -141,9 +152,11 @@ MojoResult DataPipeProducerDispatcher::WriteData(
   uint32_t head_bytes_to_write = num_bytes_to_write - tail_bytes_to_write;
 
   DCHECK_GT(tail_bytes_to_write, 0u);
-  memcpy(data + write_offset_, source, tail_bytes_to_write);
-  if (head_bytes_to_write > 0)
-    memcpy(data, source + tail_bytes_to_write, head_bytes_to_write);
+  UNSAFE_TODO(memcpy(data + write_offset_, source, tail_bytes_to_write));
+  if (head_bytes_to_write > 0) {
+    UNSAFE_TODO(
+        memcpy(data, source + tail_bytes_to_write, head_bytes_to_write));
+  }
 
   DCHECK_LE(num_bytes_to_write, available_capacity_);
   available_capacity_ -= num_bytes_to_write;
@@ -160,15 +173,19 @@ MojoResult DataPipeProducerDispatcher::WriteData(
 
 MojoResult DataPipeProducerDispatcher::BeginWriteData(
     void** buffer,
-    uint32_t* buffer_num_bytes) {
+    uint32_t* buffer_num_bytes,
+    MojoBeginWriteDataFlags flags) {
   base::AutoLock lock(lock_);
-  if (!shared_ring_buffer_.IsValid() || in_transit_)
+  if (!shared_ring_buffer_.IsValid() || in_transit_) {
     return MOJO_RESULT_INVALID_ARGUMENT;
+  }
 
-  if (in_two_phase_write_)
+  if (in_two_phase_write_) {
     return MOJO_RESULT_BUSY;
-  if (peer_closed_)
+  }
+  if (peer_closed_) {
     return MOJO_RESULT_FAILED_PRECONDITION;
+  }
 
   if (available_capacity_ == 0) {
     return peer_closed_ ? MOJO_RESULT_FAILED_PRECONDITION
@@ -182,7 +199,7 @@ MojoResult DataPipeProducerDispatcher::BeginWriteData(
 
   CHECK(ring_buffer_mapping_.IsValid());
   uint8_t* data = static_cast<uint8_t*>(ring_buffer_mapping_.memory());
-  *buffer = data + write_offset_;
+  *buffer = UNSAFE_TODO(data + write_offset_);
 
   return MOJO_RESULT_OK;
 }
@@ -190,11 +207,13 @@ MojoResult DataPipeProducerDispatcher::BeginWriteData(
 MojoResult DataPipeProducerDispatcher::EndWriteData(
     uint32_t num_bytes_written) {
   base::AutoLock lock(lock_);
-  if (is_closed_ || in_transit_)
+  if (is_closed_ || in_transit_) {
     return MOJO_RESULT_INVALID_ARGUMENT;
+  }
 
-  if (!in_two_phase_write_)
+  if (!in_two_phase_write_) {
     return MOJO_RESULT_FAILED_PRECONDITION;
+  }
 
   // Note: Allow successful completion of the two-phase write even if the other
   // side has been closed.
@@ -231,8 +250,9 @@ MojoResult DataPipeProducerDispatcher::AddWatcherRef(
     const scoped_refptr<WatcherDispatcher>& watcher,
     uintptr_t context) {
   base::AutoLock lock(lock_);
-  if (is_closed_ || in_transit_)
+  if (is_closed_ || in_transit_) {
     return MOJO_RESULT_INVALID_ARGUMENT;
+  }
   return watchers_.Add(watcher, context, GetHandleSignalsStateNoLock());
 }
 
@@ -240,8 +260,9 @@ MojoResult DataPipeProducerDispatcher::RemoveWatcherRef(
     WatcherDispatcher* watcher,
     uintptr_t context) {
   base::AutoLock lock(lock_);
-  if (is_closed_ || in_transit_)
+  if (is_closed_ || in_transit_) {
     return MOJO_RESULT_INVALID_ARGUMENT;
+  }
   return watchers_.Remove(watcher, context);
 }
 
@@ -260,8 +281,9 @@ bool DataPipeProducerDispatcher::EndSerialize(
     ports::PortName* ports,
     PlatformHandle* platform_handles) {
   SerializedState* state = static_cast<SerializedState*>(destination);
-  memcpy(&state->options, &options_, sizeof(MojoCreateDataPipeOptions));
-  memset(state->padding, 0, sizeof(state->padding));
+  UNSAFE_TODO(
+      memcpy(&state->options, &options_, sizeof(MojoCreateDataPipeOptions)));
+  UNSAFE_TODO(memset(state->padding, 0, sizeof(state->padding)));
 
   base::AutoLock lock(lock_);
   DCHECK(in_transit_);
@@ -283,8 +305,9 @@ bool DataPipeProducerDispatcher::EndSerialize(
   PlatformHandle ignored_handle;
   ExtractPlatformHandlesFromSharedMemoryRegionHandle(
       region_handle.PassPlatformHandle(), &handle, &ignored_handle);
-  if (!handle.is_valid() || ignored_handle.is_valid())
+  if (!handle.is_valid() || ignored_handle.is_valid()) {
     return false;
+  }
 
   platform_handles[0] = std::move(handle);
   return true;
@@ -292,8 +315,9 @@ bool DataPipeProducerDispatcher::EndSerialize(
 
 bool DataPipeProducerDispatcher::BeginTransit() {
   base::AutoLock lock(lock_);
-  if (in_transit_)
+  if (in_transit_) {
     return false;
+  }
   in_transit_ = !in_two_phase_write_;
   return in_transit_;
 }
@@ -327,6 +351,7 @@ DataPipeProducerDispatcher::Deserialize(const void* data,
                                         size_t num_handles) {
   if (num_ports != 1 || num_handles != 1 ||
       num_bytes != sizeof(SerializedState)) {
+    AssertNotExtractingHandlesFromMessage();
     return nullptr;
   }
 
@@ -335,26 +360,42 @@ DataPipeProducerDispatcher::Deserialize(const void* data,
       state->options.capacity_num_bytes < state->options.element_num_bytes ||
       state->write_offset >= state->options.capacity_num_bytes ||
       state->available_capacity > state->options.capacity_num_bytes) {
+    AssertNotExtractingHandlesFromMessage();
     return nullptr;
   }
 
   NodeController* node_controller = Core::Get()->GetNodeController();
   ports::PortRef port;
-  if (node_controller->node()->GetPort(ports[0], &port) != ports::OK)
+  if (node_controller->node()->GetPort(ports[0], &port) != ports::OK) {
+    AssertNotExtractingHandlesFromMessage();
     return nullptr;
+  }
+
+  std::optional<base::UnguessableToken> buffer_guid =
+      base::UnguessableToken::Deserialize(state->buffer_guid_high,
+                                          state->buffer_guid_low);
+  if (!buffer_guid.has_value()) {
+    AssertNotExtractingHandlesFromMessage();
+    return nullptr;
+  }
 
   auto region_handle = CreateSharedMemoryRegionHandleFromPlatformHandles(
       std::move(handles[0]), PlatformHandle());
-  auto region = base::subtle::PlatformSharedMemoryRegion::Take(
+  auto maybe_region = base::subtle::PlatformSharedMemoryRegion::TakeOrFail(
       std::move(region_handle),
       base::subtle::PlatformSharedMemoryRegion::Mode::kUnsafe,
-      state->options.capacity_num_bytes,
-      base::UnguessableToken::Deserialize(state->buffer_guid_high,
-                                          state->buffer_guid_low));
+      state->options.capacity_num_bytes, buffer_guid.value());
+  if (!maybe_region.has_value()) {
+    LOG(ERROR) << "Failed to deserialize platform shared memory region: "
+               << static_cast<int>(maybe_region.error());
+    AssertNotExtractingHandlesFromMessage();
+    return nullptr;
+  }
   auto ring_buffer =
-      base::UnsafeSharedMemoryRegion::Deserialize(std::move(region));
+      base::UnsafeSharedMemoryRegion::Deserialize(std::move(*maybe_region));
   if (!ring_buffer.IsValid()) {
     DLOG(ERROR) << "Failed to deserialize shared buffer handle.";
+    AssertNotExtractingHandlesFromMessage();
     return nullptr;
   }
 
@@ -368,10 +409,13 @@ DataPipeProducerDispatcher::Deserialize(const void* data,
     dispatcher->write_offset_ = state->write_offset;
     dispatcher->available_capacity_ = state->available_capacity;
     dispatcher->peer_closed_ = state->flags & kFlagPeerClosed;
-    if (!dispatcher->InitializeNoLock())
+    if (!dispatcher->InitializeNoLock()) {
+      AssertNotExtractingHandlesFromMessage();
       return nullptr;
+    }
     if (state->options.capacity_num_bytes >
         dispatcher->ring_buffer_mapping_.mapped_size()) {
+      AssertNotExtractingHandlesFromMessage();
       return nullptr;
     }
     dispatcher->UpdateSignalsStateNoLock();
@@ -401,8 +445,9 @@ DataPipeProducerDispatcher::~DataPipeProducerDispatcher() {
 
 bool DataPipeProducerDispatcher::InitializeNoLock() {
   lock_.AssertAcquired();
-  if (!shared_ring_buffer_.IsValid())
+  if (!shared_ring_buffer_.IsValid()) {
     return false;
+  }
 
   DCHECK(!ring_buffer_mapping_.IsValid());
   ring_buffer_mapping_ = shared_ring_buffer_.Map();
@@ -421,8 +466,9 @@ bool DataPipeProducerDispatcher::InitializeNoLock() {
 
 MojoResult DataPipeProducerDispatcher::CloseNoLock() {
   lock_.AssertAcquired();
-  if (is_closed_ || in_transit_)
+  if (is_closed_ || in_transit_) {
     return MOJO_RESULT_INVALID_ARGUMENT;
+  }
   is_closed_ = true;
   ring_buffer_mapping_ = base::WritableSharedMemoryMapping();
   shared_ring_buffer_ = base::UnsafeSharedMemoryRegion();
@@ -442,10 +488,12 @@ HandleSignalsState DataPipeProducerDispatcher::GetHandleSignalsStateNoLock()
   HandleSignalsState rv;
   if (!peer_closed_) {
     if (!in_two_phase_write_ && shared_ring_buffer_.IsValid() &&
-        available_capacity_ > 0)
+        available_capacity_ > 0) {
       rv.satisfied_signals |= MOJO_HANDLE_SIGNAL_WRITABLE;
-    if (peer_remote_)
+    }
+    if (peer_remote_) {
       rv.satisfied_signals |= MOJO_HANDLE_SIGNAL_PEER_REMOTE;
+    }
     rv.satisfiable_signals |=
         MOJO_HANDLE_SIGNAL_WRITABLE | MOJO_HANDLE_SIGNAL_PEER_REMOTE;
   } else {
@@ -472,8 +520,9 @@ void DataPipeProducerDispatcher::OnPortStatusChanged() {
   // We stop observing the control port as soon it's transferred, but this can
   // race with events which are raised right before that happens. This is fine
   // to ignore.
-  if (transferred_)
+  if (transferred_) {
     return;
+  }
 
   DVLOG(1) << "Control port status changed for data pipe producer " << pipe_id_;
 
@@ -499,8 +548,9 @@ void DataPipeProducerDispatcher::UpdateSignalsStateNoLock() {
     do {
       rv = node_controller_->node()->GetMessage(control_port_, &message_event,
                                                 nullptr);
-      if (rv != ports::OK)
+      if (rv != ports::OK) {
         peer_closed_ = true;
+      }
       if (message_event) {
         auto* message = message_event->GetMessage<UserMessageImpl>();
         if (message->user_payload_size() < sizeof(DataPipeControlMessage)) {
@@ -517,8 +567,13 @@ void DataPipeProducerDispatcher::UpdateSignalsStateNoLock() {
           break;
         }
 
-        if (static_cast<size_t>(available_capacity_) + m->num_bytes >
-            options_.capacity_num_bytes) {
+        TRACE_EVENT0("ipc",
+                     "DataPipeProducerDispatcher received DATA_WAS_READ");
+
+        uint32_t new_available_capacity;
+        if (!base::CheckAdd(available_capacity_, m->num_bytes)
+                 .AssignIfValid(&new_available_capacity) ||
+            new_available_capacity > options_.capacity_num_bytes) {
           DLOG(ERROR) << "Consumer claims to have read too many bytes.";
           break;
         }
@@ -528,7 +583,7 @@ void DataPipeProducerDispatcher::UpdateSignalsStateNoLock() {
                  << " bytes were read. [control_port=" << control_port_.name()
                  << "]";
 
-        available_capacity_ += m->num_bytes;
+        available_capacity_ = new_available_capacity;
       }
     } while (message_event);
   }

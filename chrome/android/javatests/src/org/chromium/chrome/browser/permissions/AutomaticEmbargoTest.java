@@ -1,130 +1,149 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.permissions;
 
-import android.os.Build.VERSION_CODES;
-import android.support.test.InstrumentationRegistry;
-
 import androidx.test.filters.LargeTest;
+import androidx.test.platform.app.InstrumentationRegistry;
 
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.base.test.util.DisableIf;
+import org.chromium.base.test.util.DisabledTest;
 import org.chromium.base.test.util.Feature;
+import org.chromium.base.test.util.Features.DisableFeatures;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.permissions.PermissionTestRule.PermissionUpdateWaiter;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 import org.chromium.chrome.test.util.browser.LocationSettingsTestUtil;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
 import org.chromium.content_public.common.ContentSwitches;
 import org.chromium.device.geolocation.LocationProviderOverrider;
 import org.chromium.device.geolocation.MockLocationProvider;
+import org.chromium.ui.base.DeviceFormFactor;
 import org.chromium.ui.modaldialog.DialogDismissalCause;
+import org.chromium.ui.modaldialog.ModalDialogManager.ModalDialogType;
 
-/**
- * Test suite for permissions automatic embargo logic.
- */
+/** Test suite for permissions automatic embargo logic. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class AutomaticEmbargoTest {
-    @Rule
-    public PermissionTestRule mPermissionRule = new PermissionTestRule(true /* useHttpsServer */);
+  @Rule
+  public PermissionTestRule mPermissionRule = new PermissionTestRule(/* useHttpsServer= */ true);
 
-    private static final String GEOLOCATION_TEST_FILE =
-            "/chrome/test/data/geolocation/geolocation_on_load.html";
-    private static final String NOTIFICATIONS_TEST_FILE =
-            "/chrome/test/data/notifications/notification_tester.html";
-    private static final String MIDI_TEST_FILE = "/content/test/data/android/midi_permissions.html";
-    private static final String MEDIA_TEST_FILE =
-            "/content/test/data/android/media_permissions.html";
+  private static final String GEOLOCATION_TEST_FILE =
+      "/chrome/test/data/geolocation/geolocation_on_load.html";
+  private static final String NOTIFICATIONS_TEST_FILE =
+      "/chrome/test/data/notifications/notification_tester.html";
+  private static final String MIDI_TEST_FILE = "/content/test/data/android/midi_permissions.html";
+  private static final String MEDIA_TEST_FILE = "/content/test/data/android/media_permissions.html";
 
-    private static final int NUMBER_OF_DISMISSALS = 3;
+  private static final int NUMBER_OF_DISMISSALS = 3;
 
-    @Before
-    public void setUp() throws Exception {
-        mPermissionRule.setUpActivity();
-    }
+  @Before
+  public void setUp() throws Exception {
+    mPermissionRule.setUpActivity();
+  }
 
-    private void runTest(final String testFile, final String javascript, final String updaterPrefix,
-            final int nUpdates) throws Exception {
-        Tab tab = mPermissionRule.getActivity().getActivityTab();
-        PermissionUpdateWaiter updateWaiter =
-                new PermissionUpdateWaiter(updaterPrefix, mPermissionRule.getActivity());
-        tab.addObserver(updateWaiter);
+  private void runTest(
+      final String testFile,
+      final String javascript,
+      final String updaterPrefix,
+      final boolean withGesture)
+      throws Exception {
+    Tab tab = mPermissionRule.getActivityTab();
+    PermissionUpdateWaiter updateWaiter =
+        new PermissionUpdateWaiter(updaterPrefix, mPermissionRule.getActivity());
+    ThreadUtils.runOnUiThreadBlocking(() -> tab.addObserver(updateWaiter));
 
-        for (int i = 0; i < NUMBER_OF_DISMISSALS; ++i) {
-            mPermissionRule.setUpUrl(testFile);
-            mPermissionRule.runJavaScriptCodeInCurrentTab(javascript);
-            PermissionTestRule.waitForDialog(mPermissionRule.getActivity());
-            TestThreadUtils.runOnUiThreadBlocking(() -> {
-                mPermissionRule.getActivity()
-                        .getModalDialogManager()
-                        .getCurrentPresenterForTest()
-                        .dismissCurrentDialog(DialogDismissalCause.NAVIGATE_BACK_OR_TOUCH_OUTSIDE);
-            });
-            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    for (int i = 0; i < NUMBER_OF_DISMISSALS; ++i) {
+      mPermissionRule.setUpUrl(testFile);
+      if (withGesture) {
+        mPermissionRule.runJavaScriptCodeInCurrentTabWithGesture(javascript);
+      } else {
+        mPermissionRule.runJavaScriptCodeInCurrentTab(javascript);
+      }
+      PermissionTestRule.waitForDialog(mPermissionRule.getActivity());
+      int dialogType = mPermissionRule.getActivity().getModalDialogManager().getCurrentType();
+      ThreadUtils.runOnUiThreadBlocking(
+          () -> {
+            mPermissionRule
+                .getActivity()
+                .getModalDialogManager()
+                .getCurrentPresenterForTest()
+                .dismissCurrentDialog(
+                    dialogType == ModalDialogType.APP
+                        ? DialogDismissalCause.NAVIGATE_BACK_OR_TOUCH_OUTSIDE
+                        : DialogDismissalCause.NAVIGATE_BACK);
+          });
+      InstrumentationRegistry.getInstrumentation().waitForIdleSync();
         }
 
-        mPermissionRule.runNoPromptTest(updateWaiter, testFile, javascript, nUpdates, false, true);
-        tab.removeObserver(updateWaiter);
+        mPermissionRule.runNoPromptTest(
+                updateWaiter, testFile, javascript, /* nUpdates= */ 0, withGesture);
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.removeObserver(updateWaiter));
     }
 
     @Test
     @LargeTest
     @Feature({"Location"})
-    @DisableIf.
-    Build(message = "Test is failing on Nexus 5X (64-bit) + Android M, see crbug.com/1111001.",
-            sdk_is_greater_than = VERSION_CODES.LOLLIPOP_MR1, sdk_is_less_than = VERSION_CODES.N,
-            supported_abis_includes = "arm64-v8a")
+    @DisabledTest(message = "Flaky test crbug.com/325324593")
     public void testGeolocationEmbargo() throws Exception {
-        LocationSettingsTestUtil.setSystemLocationSettingEnabled(true);
-        LocationProviderOverrider.setLocationProviderImpl(new MockLocationProvider());
+    LocationSettingsTestUtil.setSystemLocationSettingEnabled(true);
+    LocationProviderOverrider.setLocationProviderImpl(new MockLocationProvider());
 
-        runTest(GEOLOCATION_TEST_FILE, "", "Denied", 0);
-    }
+    runTest(GEOLOCATION_TEST_FILE, "", "Denied", /* withGesture= */ true);
+  }
 
-    @Test
-    @LargeTest
-    @Feature({"Notifications"})
-    public void testNotificationsEmbargo() throws Exception {
-        runTest(NOTIFICATIONS_TEST_FILE, "requestPermission()", "request-callback-denied", 0);
-    }
+  @Test
+  @LargeTest
+  @Feature({"Notifications"})
+  @DisableFeatures({"PermissionsAndroidClapperLoud", "PermissionsGestureGatedPrompts"})
+  public void testNotificationsEmbargo() throws Exception {
+    runTest(
+        NOTIFICATIONS_TEST_FILE,
+        "requestPermission()",
+        "request-callback-denied",
+        /* withGesture= */ false);
+  }
 
-    @Test
-    @LargeTest
-    @Feature({"MIDI"})
-    public void testMIDIEmbargo() throws Exception {
-        runTest(MIDI_TEST_FILE, "", "fail", 0);
+  @Test
+  @LargeTest
+  @Feature({"MIDI"})
+  public void testMIDIEmbargo() throws Exception {
+    runTest(MIDI_TEST_FILE, "", "fail", /* withGesture= */ false);
+  }
+
+  @Test
+  @LargeTest
+  @Feature({"MediaPermissions"})
+  @CommandLineFlags.Add({ContentSwitches.USE_FAKE_DEVICE_FOR_MEDIA_STREAM})
+  @DisableIf.Device(DeviceFormFactor.ONLY_TABLET) // crbug.com/387226499
+  public void testCameraEmbargo() throws Exception {
+    runTest(MEDIA_TEST_FILE, "initiate_getMicrophone()", "deny", /* withGesture= */ true);
+  }
+
+  @Test
+  @LargeTest
+  @Feature({"MediaPermissions"})
+  @CommandLineFlags.Add({ContentSwitches.USE_FAKE_DEVICE_FOR_MEDIA_STREAM})
+  @DisabledTest(message = "Flaky. See crbug.com/380193331")
+  public void testMicrophoneEmbargo() throws Exception {
+    runTest(MEDIA_TEST_FILE, "initiate_getCamera()", "deny", /* withGesture= */ true);
     }
 
     @Test
     @LargeTest
     @Feature({"MediaPermissions"})
     @CommandLineFlags.Add({ContentSwitches.USE_FAKE_DEVICE_FOR_MEDIA_STREAM})
-    public void testCameraEmbargo() throws Exception {
-        runTest(MEDIA_TEST_FILE, "initiate_getMicrophone()", "deny", 0);
-    }
-
-    @Test
-    @LargeTest
-    @Feature({"MediaPermissions"})
-    @CommandLineFlags.Add({ContentSwitches.USE_FAKE_DEVICE_FOR_MEDIA_STREAM})
-    public void testMicrophoneEmbargo() throws Exception {
-        runTest(MEDIA_TEST_FILE, "initiate_getCamera()", "deny", 0);
-    }
-
-    @Test
-    @LargeTest
-    @Feature({"MediaPermissions"})
-    @CommandLineFlags.Add({ContentSwitches.USE_FAKE_DEVICE_FOR_MEDIA_STREAM})
+    @DisabledTest(message = "https://crbug.com/40874926")
     public void testMicrophoneAndCameraEmbargo() throws Exception {
-        runTest(MEDIA_TEST_FILE, "initiate_getCombined()", "deny", 0);
+        runTest(MEDIA_TEST_FILE, "initiate_getCombined()", "deny", /* withGesture= */ true);
     }
 }

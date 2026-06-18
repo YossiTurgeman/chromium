@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/test/fake_webrtc_connection.h"
 
-#include "jingle/glue/thread_wrapper.h"
+#include "components/webrtc/thread_wrapper.h"
+#include "remoting/base/errors.h"
 #include "remoting/base/logging.h"
 #include "remoting/protocol/transport_context.h"
 
@@ -14,8 +15,11 @@ namespace test {
 FakeWebrtcConnection::FakeWebrtcConnection(
     scoped_refptr<protocol::TransportContext> transport_context,
     base::OnceClosure on_closed) {
+  // TODO(lambroslambrou): Passing nullptr for the VideoEncoderFactory may
+  // break the ftl_signaling_playground executable. If needed, this should be
+  // replaced with a factory that supports at least one video codec.
   transport_ = std::make_unique<protocol::WebrtcTransport>(
-      jingle_glue::JingleThreadWrapper::current(), transport_context, this);
+      webrtc::ThreadWrapper::current(), transport_context, nullptr, this);
   on_closed_ = std::move(on_closed);
 }
 
@@ -30,8 +34,12 @@ void FakeWebrtcConnection::OnWebrtcTransportConnected() {
   std::move(on_closed_).Run();
 }
 
-void FakeWebrtcConnection::OnWebrtcTransportError(protocol::ErrorCode error) {
-  LOG(ERROR) << "Webrtc transport error: " << error;
+void FakeWebrtcConnection::OnWebrtcTransportError(
+    protocol::ErrorCode error,
+    std::string_view error_details,
+    const base::Location& error_location) {
+  LOG(ERROR) << "Webrtc transport error: " << ErrorCodeToString(error) << ", "
+             << error_details << ", location: " << error_location.ToString();
   std::move(on_closed_).Run();
 }
 
@@ -42,10 +50,10 @@ void FakeWebrtcConnection::OnWebrtcTransportIncomingDataChannel(
     std::unique_ptr<protocol::MessagePipe> pipe) {}
 
 void FakeWebrtcConnection::OnWebrtcTransportMediaStreamAdded(
-    scoped_refptr<webrtc::MediaStreamInterface> stream) {}
+    webrtc::scoped_refptr<webrtc::MediaStreamInterface> stream) {}
 
 void FakeWebrtcConnection::OnWebrtcTransportMediaStreamRemoved(
-    scoped_refptr<webrtc::MediaStreamInterface> stream) {}
+    webrtc::scoped_refptr<webrtc::MediaStreamInterface> stream) {}
 
 void FakeWebrtcConnection::OnWebrtcTransportRouteChanged(
     const protocol::TransportRoute& route) {}

@@ -1,68 +1,66 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/fuchsia/test_component_context_for_process.h"
 
-#include <fuchsia/intl/cpp/fidl.h>
+#include <fidl/fuchsia.buildinfo/cpp/fidl.h>
+#include <fuchsia/buildinfo/cpp/fidl.h>
+#include <lib/async/default.h>
 #include <lib/sys/cpp/component_context.h>
 
+#include <string_view>
+
+#include "base/fuchsia/fuchsia_component_connect.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/fuchsia/process_context.h"
 #include "base/fuchsia/scoped_service_binding.h"
-#include "base/fuchsia/testfidl/cpp/fidl.h"
+#include "base/fuchsia/test_interface_impl.h"
+#include "base/fuchsia/test_interface_natural_impl.h"
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
+#include "base/testfidl/cpp/fidl.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace base {
 
-class TestComponentContextForProcessTest
-    : public testing::Test,
-      public fuchsia::testfidl::TestInterface {
+class TestComponentContextForProcessTest : public testing::Test {
  public:
   TestComponentContextForProcessTest()
       : task_environment_(base::test::TaskEnvironment::MainThreadType::IO) {}
 
-  bool HasTestInterface() {
-    return VerifyTestInterface(
-        ComponentContextForProcess()
-            ->svc()
-            ->Connect<fuchsia::testfidl::TestInterface>());
+  bool CanConnectToTestInterfaceServiceHlcpp() {
+    auto test_interface_ptr =
+        ComponentContextForProcess()->svc()->Connect<testfidl::TestInterface>();
+    return VerifyTestInterface(test_interface_ptr) == ZX_OK;
   }
 
-  bool HasPublishedTestInterface() {
-    return VerifyTestInterface(
-        test_context_.published_services()
-            ->Connect<fuchsia::testfidl::TestInterface>());
+  bool CanConnectToTestInterfaceServiceNatural() {
+    auto client_end =
+        fuchsia_component::Connect<base_testfidl::TestInterface>();
+    EXPECT_TRUE(client_end.is_ok()) << client_end.status_string();
+    fidl::Client client(std::move(client_end.value()),
+                        async_get_default_dispatcher());
+    return VerifyTestInterface(client) == ZX_OK;
   }
 
-  // fuchsia::testfidl::TestInterface implementation.
-  void Add(int32_t a, int32_t b, AddCallback callback) override {
-    callback(a + b);
+  bool HasPublishedTestInterfaceHlcpp() {
+    auto test_interface_ptr =
+        test_context_.published_services()->Connect<testfidl::TestInterface>();
+    return VerifyTestInterface(test_interface_ptr) == ZX_OK;
+  }
+
+  bool HasPublishedTestInterfaceNatural() {
+    auto client_end =
+        fuchsia_component::ConnectAt<base_testfidl::TestInterface>(
+            test_context_.published_services_natural());
+    EXPECT_TRUE(client_end.is_ok()) << client_end.status_string();
+    fidl::Client client(std::move(client_end.value()),
+                        async_get_default_dispatcher());
+    return VerifyTestInterface(client) == ZX_OK;
   }
 
  protected:
-  bool VerifyTestInterface(fuchsia::testfidl::TestInterfacePtr test_interface) {
-    bool have_interface = false;
-    RunLoop wait_loop;
-    test_interface.set_error_handler([quit_loop = wait_loop.QuitClosure(),
-                                      &have_interface](zx_status_t status) {
-      ZX_CHECK(status == ZX_ERR_PEER_CLOSED, status);
-      have_interface = false;
-      quit_loop.Run();
-    });
-    test_interface->Add(
-        45, 6,
-        [quit_loop = wait_loop.QuitClosure(), &have_interface](int32_t result) {
-          EXPECT_EQ(result, 45 + 6);
-          have_interface = true;
-          quit_loop.Run();
-        });
-    wait_loop.Run();
-    return have_interface;
-  }
-
   const base::test::SingleThreadTaskEnvironment task_environment_;
 
   base::TestComponentContextForProcess test_context_;
@@ -70,51 +68,85 @@ class TestComponentContextForProcessTest
 
 TEST_F(TestComponentContextForProcessTest, NoServices) {
   // No services should be available.
-  EXPECT_FALSE(HasTestInterface());
+  EXPECT_FALSE(CanConnectToTestInterfaceServiceHlcpp());
+  EXPECT_FALSE(CanConnectToTestInterfaceServiceNatural());
 }
 
 TEST_F(TestComponentContextForProcessTest, InjectTestInterface) {
+  TestInterfaceImpl test_interface_impl;
   // Publish a fake TestInterface for the process' ComponentContext to expose.
-  base::fuchsia::ScopedServiceBinding<fuchsia::testfidl::TestInterface>
-      service_binding(test_context_.additional_services(), this);
+  base::ScopedServiceBinding<testfidl::TestInterface> service_binding(
+      test_context_.additional_services(), &test_interface_impl);
 
   // Verify that the TestInterface is accessible & usable.
-  EXPECT_TRUE(HasTestInterface());
+  EXPECT_TRUE(CanConnectToTestInterfaceServiceHlcpp());
+  EXPECT_TRUE(CanConnectToTestInterfaceServiceNatural());
 }
 
 TEST_F(TestComponentContextForProcessTest, PublishTestInterface) {
+  TestInterfaceImpl test_interface_impl;
   // Publish TestInterface to the process' outgoing-directory.
-  base::fuchsia::ScopedServiceBinding<fuchsia::testfidl::TestInterface>
-      service_binding(ComponentContextForProcess()->outgoing().get(), this);
+  base::ScopedServiceBinding<testfidl::TestInterface> service_binding(
+      ComponentContextForProcess()->outgoing().get(), &test_interface_impl);
 
   // Attempt to use the TestInterface from the outgoing-directory.
-  EXPECT_TRUE(HasPublishedTestInterface());
+  EXPECT_TRUE(HasPublishedTestInterfaceHlcpp());
+  EXPECT_TRUE(HasPublishedTestInterfaceNatural());
 }
 
 TEST_F(TestComponentContextForProcessTest, ProvideSystemService) {
-  // Expose fuchsia.device.NameProvider through the ComponentContext.
-  const base::StringPiece kServiceNames[] = {
-      ::fuchsia::intl::PropertyProvider::Name_};
+  // Expose fuchsia.buildinfo.Provider through the
+  // TestComponentContextForProcess. This service was chosen because it is one
+  // of the ambient services in Fuchsia's hermetic environment for Chromium
+  // tests.
+  const std::string_view kServiceNames[] = {
+      ::fuchsia::buildinfo::Provider::Name_};
   test_context_.AddServices(kServiceNames);
 
-  // Attempt to use the PropertyProvider via the process ComponentContext.
+  // Connect to the BuildInfo provider service via the process
+  // TestComponentContextForProcess.
   RunLoop wait_loop;
-  auto property_provider = ComponentContextForProcess()
-                               ->svc()
-                               ->Connect<::fuchsia::intl::PropertyProvider>();
-  property_provider.set_error_handler(
+  auto provider = ComponentContextForProcess()
+                      ->svc()
+                      ->Connect<::fuchsia::buildinfo::Provider>();
+  provider.set_error_handler(
       [quit_loop = wait_loop.QuitClosure()](zx_status_t status) {
-        if (status == ZX_ERR_PEER_CLOSED) {
-          ADD_FAILURE() << "PropertyProvider disconnected; probably not found.";
-        } else {
-          ZX_LOG(FATAL, status);
-        }
+        ZX_LOG(ERROR, status);
+        ADD_FAILURE();
         quit_loop.Run();
       });
-  property_provider->GetProfile(
-      [quit_loop = wait_loop.QuitClosure()](::fuchsia::intl::Profile profile) {
-        quit_loop.Run();
-      });
+
+  // If the BuildInfo service is actually connected then GetBuildInfo() will
+  // return a result, otherwise the channel will be observed closing (as above).
+  provider->GetBuildInfo([quit_loop = wait_loop.QuitClosure()](
+                             auto build_info) { quit_loop.Run(); });
+  wait_loop.Run();
+}
+
+TEST_F(TestComponentContextForProcessTest, ProvideSystemServiceNatural) {
+  // Expose fuchsia.buildinfo.Provider through the
+  // TestComponentContextForProcess. This service was chosen because it is one
+  // of the ambient services in Fuchsia's hermetic environment for Chromium
+  // tests.
+  const std::string_view kServiceNames[] = {
+      fidl::DiscoverableProtocolName<fuchsia_buildinfo::Provider>};
+  test_context_.AddServices(kServiceNames);
+
+  // Connect to the BuildInfo provider service via the process
+  // TestComponentContextForProcess.
+  RunLoop wait_loop;
+  auto client_end = fuchsia_component::Connect<fuchsia_buildinfo::Provider>();
+  ASSERT_TRUE(client_end.is_ok());
+  fidl::Client provider(std::move(client_end.value()),
+                        async_get_default_dispatcher());
+
+  // If the BuildInfo service is actually connected then GetBuildInfo() will
+  // return a result, otherwise the bindings will report an error.
+  provider->GetBuildInfo().Then([quit_loop =
+                                     wait_loop.QuitClosure()](auto build_info) {
+    EXPECT_FALSE(build_info.is_error()) << build_info.error_value().status();
+    quit_loop.Run();
+  });
   wait_loop.Run();
 }
 

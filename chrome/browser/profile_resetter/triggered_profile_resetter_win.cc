@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include "base/logging.h"
 #include "base/metrics/field_trial.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/string_util.h"
 #include "base/win/registry.h"
 #include "build/branding_buildflags.h"
 #include "chrome/browser/profile_resetter/triggered_profile_resetter.h"
@@ -50,7 +50,6 @@ void TriggeredProfileResetter::Activate() {
   // System profiles don't contain user settings and bail out if we're not in
   // the field trial.
   if (!profile_ || profile_->IsSystemProfile() || IsDisabledByFieldTrial()) {
-    UMA_HISTOGRAM_BOOLEAN("Profile.TriggeredReset", false);
     return;
   }
 
@@ -61,7 +60,6 @@ void TriggeredProfileResetter::Activate() {
   if (!reset_reg_key.Valid() ||
       reset_reg_key.ReadInt64(kTriggeredResetTimestamp, &timestamp) !=
           ERROR_SUCCESS) {
-    UMA_HISTOGRAM_BOOLEAN("Profile.TriggeredReset", false);
     return;
   }
 
@@ -81,15 +79,15 @@ void TriggeredProfileResetter::Activate() {
 
     has_reset_trigger_ = true;
 
-    if (reset_reg_key.ReadValue(kTriggeredResetToolName, &tool_name_) !=
+    std::wstring tool_name;
+    if (reset_reg_key.ReadValue(kTriggeredResetToolName, &tool_name) !=
         ERROR_SUCCESS) {
       DVLOG(1) << "Failed to read triggered profile reset tool name.";
-    } else if (tool_name_.length() > kMaxToolNameLength) {
-      tool_name_.resize(kMaxToolNameLength);
+    } else if (tool_name.length() > kMaxToolNameLength) {
+      tool_name.resize(kMaxToolNameLength);
     }
+    tool_name_ = base::AsString16(tool_name);
 
     pref_service->SetInt64(prefs::kLastProfileResetTimestamp, timestamp);
   }
-
-  UMA_HISTOGRAM_BOOLEAN("Profile.TriggeredReset", has_reset_trigger_);
 }

@@ -32,17 +32,23 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_FETCH_CONTEXT_H_
 
 #include <memory>
+#include <optional>
 
-#include "base/macros.h"
-#include "base/optional.h"
-#include "base/single_thread_task_runner.h"
+#include "base/notimplemented.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/types/optional_ref.h"
+#include "components/subresource_filter/core/common/scoped_rule.h"
+#include "third_party/blink/public/common/subresource_load_metrics.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/loader/request_context_frame_type.mojom-blink-forward.h"
-#include "third_party/blink/public/mojom/timing/worker_timing_container.mojom-blink-forward.h"
+#include "third_party/blink/public/mojom/timing/resource_timing.mojom-blink-forward.h"
+#include "third_party/blink/public/platform/resource_load_info_notifier_wrapper.h"
 #include "third_party/blink/public/platform/resource_request_blocked_reason.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/loader/fetch/ad_tagging_utils.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_initiator_info.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_parameters.h"
+#include "third_party/blink/renderer/platform/loader/fetch/guardrail_policy_asset_type.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_load_priority.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
 #include "third_party/blink/renderer/platform/network/content_security_policy_parsers.h"
@@ -50,14 +56,17 @@
 #include "third_party/blink/renderer/platform/weborigin/reporting_disposition.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 
+namespace network {
+class PermissionsPolicy;
+}  // namespace network
+
 namespace blink {
 
 enum class ResourceType : uint8_t;
-class ClientHintsPreferences;
-class FeaturePolicy;
 class KURL;
+class Resource;
 struct ResourceLoaderOptions;
-class ResourceTimingInfo;
+class SecurityOrigin;
 class WebScopedVirtualTimePauser;
 
 // The FetchContext is an interface for performing context specific processing
@@ -70,6 +79,8 @@ class WebScopedVirtualTimePauser;
 class PLATFORM_EXPORT FetchContext : public GarbageCollected<FetchContext> {
  public:
   FetchContext() = default;
+  FetchContext(const FetchContext&) = delete;
+  FetchContext& operator=(const FetchContext&) = delete;
 
   static FetchContext& NullInstance() {
     return *MakeGarbageCollected<FetchContext>();
@@ -91,37 +102,48 @@ class PLATFORM_EXPORT FetchContext : public GarbageCollected<FetchContext> {
 
   // This internally dispatches WebLocalFrameClient::WillSendRequest and hooks
   // request interceptors like ServiceWorker and ApplicationCache.
-  // This may modify the request.
+  // This may modify the request and ResourceLoaderOptions.
   // |virtual_time_pauser| is an output parameter. PrepareRequest may
   // create a new WebScopedVirtualTimePauser and set it to
   // |virtual_time_pauser|.
   // This is called on initial and every redirect request.
   virtual void PrepareRequest(ResourceRequest&,
-                              const FetchInitiatorInfo&,
+                              ResourceLoaderOptions&,
                               WebScopedVirtualTimePauser& virtual_time_pauser,
                               ResourceType);
 
-  // WARNING: |info| can be modified by the implementation of this method
-  // despite the fact that it is given as const-ref. Namely, if
-  // |worker_timing_receiver_| is set implementations may take (move out) the
-  // field.
-  // TODO(shimazu): Fix this. Eventually ResourceTimingInfo should become a mojo
-  // struct and this should take a moved-value of it.
-  virtual void AddResourceTiming(const ResourceTimingInfo&);
-  virtual bool AllowImage(bool, const KURL&) const { return false; }
-  virtual base::Optional<ResourceRequestBlockedReason> CanRequest(
+  virtual void FillInitiatorInfo(FetchInitiatorInfo& initiator_info) {}
+
+  virtual void AddResourceTiming(mojom::blink::ResourceTimingInfoPtr,
+                                 const AtomicString& initiator_type);
+  virtual bool AllowImage() const { return false; }
+  virtual std::optional<ResourceRequestBlockedReason> CanRequest(
       ResourceType,
       const ResourceRequest&,
       const KURL&,
       const ResourceLoaderOptions&,
       ReportingDisposition,
-      const base::Optional<ResourceRequest::RedirectInfo>& redirect_info)
+      base::optional_ref<const ResourceRequest::RedirectInfo> redirect_info)
       const {
     return ResourceRequestBlockedReason::kOther;
   }
-  virtual base::Optional<ResourceRequestBlockedReason> CheckCSPForRequest(
-      mojom::RequestContextType,
+  // In derived classes, performs *only* a SubresourceFilter check for whether
+  // the request can go through or should be blocked.
+  virtual std::optional<ResourceRequestBlockedReason>
+  CanRequestBasedOnSubresourceFilterOnly(
+      ResourceType,
+      const ResourceRequest&,
+      const KURL&,
+      const ResourceLoaderOptions&,
+      ReportingDisposition,
+      base::optional_ref<const ResourceRequest::RedirectInfo> redirect_info)
+      const {
+    return ResourceRequestBlockedReason::kOther;
+  }
+  virtual std::optional<ResourceRequestBlockedReason> CheckCSPForRequest(
+      mojom::blink::RequestContextType,
       network::mojom::RequestDestination request_destination,
+      network::mojom::RequestMode request_mode,
       const KURL&,
       const ResourceLoaderOptions&,
       ReportingDisposition,
@@ -130,14 +152,63 @@ class PLATFORM_EXPORT FetchContext : public GarbageCollected<FetchContext> {
     return ResourceRequestBlockedReason::kOther;
   }
 
-  // Populates the ResourceRequest using the given values and information
-  // stored in the FetchContext implementation. Used by ResourceFetcher to
-  // prepare a ResourceRequest instance at the start of resource loading.
-  virtual void PopulateResourceRequest(ResourceType,
-                                       const ClientHintsPreferences&,
-                                       const FetchParameters::ResourceWidth&,
-                                       ResourceRequest&,
-                                       const ResourceLoaderOptions&);
+  virtual std::optional<ResourceRequestBlockedReason>
+  CheckAndEnforceCSPForRequest(
+      mojom::blink::RequestContextType,
+      network::mojom::RequestDestination request_destination,
+      network::mojom::RequestMode request_mode,
+      const KURL&,
+      const ResourceLoaderOptions&,
+      ReportingDisposition,
+      const KURL& url_before_redirects,
+      ResourceRequest::RedirectStatus) const {
+    return ResourceRequestBlockedReason::kOther;
+  }
+
+  // Check for guardrails policy state and report large asset violation if
+  // necessary.
+  virtual void CheckGuardrailsPolicyForAssetSize(
+      GuardrailPolicyAssetType asset_type,
+      size_t bytes,
+      const KURL& url) {}
+
+  // Check for policy on the resource and report if necessary, per the explainer
+  // here: https://aka.ms/webembeddedperf
+  virtual void CheckGuardrailsPolicyForRequest(
+      ResourceType resource_type,
+      mojom::blink::RequestContextType request_context,
+      const ResourceResponse& response,
+      const KURL& url) {}
+
+  // Called from RequestResource() to upgrade insecure ResourceRequests if
+  // necessary and prepare them for checking CSP. A mutable ResourceRequest is
+  // passed as the URL may be modified. After this call returns, it is not
+  // permitted to modify the URL of the ResourceRequest.
+  virtual void ModifyRequestForMixedContentUpgrade(ResourceRequest&) {}
+
+  // Populates the ResourceRequest with enough information for a cache lookup.
+  // If the resource requires a load, then UpgradeResourceRequestForLoader() is
+  // called.
+  virtual void PopulateResourceRequestBeforeCacheAccess(
+      const ResourceLoaderOptions& options,
+      ResourceRequest& request) {}
+
+  // Called after csp checks to potentially override the URL of the request.
+  virtual void WillSendRequest(ResourceRequest& request) {}
+
+  // Called if a resource request needs to be loaded (vs served from the cache).
+  // This adds additional information to the ResourceRequest needed for
+  // loading. This is called after PopulateResourceRequestBeforeCacheAccess().
+  // This function may be called in some circumstances when still served from
+  // the cache. For example, if the right probes are present, then this is
+  // always called.
+  virtual void UpgradeResourceRequestForLoader(
+      ResourceType,
+      const std::optional<float> resource_width,
+      ResourceRequest&,
+      const ResourceLoaderOptions&);
+
+  virtual bool StartSpeculativeImageDecode(Resource* resource);
 
   // Called when the underlying context is detached. Note that some
   // FetchContexts continue working after detached (e.g., for fetch() operations
@@ -147,30 +218,76 @@ class PLATFORM_EXPORT FetchContext : public GarbageCollected<FetchContext> {
     return MakeGarbageCollected<FetchContext>();
   }
 
-  virtual const FeaturePolicy* GetFeaturePolicy() const { return nullptr; }
+  virtual const network::PermissionsPolicy* GetPermissionsPolicy() const {
+    return nullptr;
+  }
+
+  virtual const FeatureContext* GetFeatureContext() const { return nullptr; }
 
   // Determine if the request is on behalf of an advertisement. If so, return
-  // true.
-  virtual bool CalculateIfAdSubresource(
-      const ResourceRequest& resource_request,
+  // the associated `AdProvenance`. Checks `resource_request.Url()` unless
+  // `alias_url` is non-null, in which case it checks the latter.
+  // `scan_stack_for_ads` should be true once per request, and should be called
+  // while the v8 stack that triggered this request is still available.
+  virtual std::optional<AdProvenance> CalculateIfAdSubresource(
+      const ResourceRequestHead& resource_request,
+      base::optional_ref<const KURL> alias_url,
       ResourceType type,
-      const FetchInitiatorInfo& initiator_info) {
-    return false;
+      const FetchInitiatorInfo& initiator_info,
+      bool scan_stack_for_ads) {
+    return std::nullopt;
   }
 
-  virtual PreviewsState previews_state() const {
-    return PreviewsTypes::kPreviewsUnspecified;
+  // Returns a wrapper of ResourceLoadInfoNotifier to notify loading stats.
+  virtual std::unique_ptr<ResourceLoadInfoNotifierWrapper>
+  CreateResourceLoadInfoNotifierWrapper() {
+    return nullptr;
   }
 
-  // Returns a receiver corresponding to a request with |request_id|.
-  // Null if the request has not been intercepted by a service worker.
-  virtual mojo::PendingReceiver<mojom::blink::WorkerTimingContainer>
-  TakePendingWorkerTimingReceiver(int request_id);
+  // Returns if the request context is for prerendering or not.
+  virtual bool IsPrerendering() const { return false; }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(FetchContext);
+  // Update SubresourceLoad metrics.
+  virtual void UpdateSubresourceLoadMetrics(
+      const SubresourceLoadMetrics& subresource_load_metrics) {}
+
+  // Returns true iff we have LCPP hint data for the fetch context.
+  virtual bool DoesLCPPHaveAnyHintData() { return false; }
+
+  // Returns true iff we have LCP element locator hint data for the fetch
+  // context.
+  virtual bool DoesLCPPHaveLcpElementLocatorHintData() { return false; }
+
+  // Returns the origin of the top frame in the document or the dedicated
+  // worker. This returns nullptr for Shared Workers and Service Workers.
+  virtual scoped_refptr<const SecurityOrigin> GetTopFrameOrigin() const {
+    return nullptr;
+  }
+
+  // Returns the list of potentially unused preload URLs flagged by the LCP
+  // predcitor, which is attached to the frame. This returns an empty Vector for
+  // Shared Workers and Service Workers.
+  virtual const Vector<KURL>& GetPotentiallyUnusedPreloads() const {
+    return empty_unused_preloads_;
+  }
+
+  virtual void AddLcpPredictedCallback(base::OnceClosure callback) {
+    NOTIMPLEMENTED();
+  }
+
+  virtual HashSet<HashAlgorithm> CSPHashesToReport() const {
+    return HashSet<HashAlgorithm>();
+  }
+  virtual void AddCSPHashReport(
+      const String& url,
+      const HashMap<HashAlgorithm, String>& integrity_hashes) {}
+
+  virtual String GetSVGCacheIdentifier() const { return String(); }
+
+ protected:
+  const Vector<KURL> empty_unused_preloads_;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_FETCH_CONTEXT_H_

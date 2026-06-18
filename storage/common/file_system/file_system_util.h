@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -99,17 +99,6 @@ GURL GetFileSystemRootURI(const GURL& origin_url, FileSystemType type);
 COMPONENT_EXPORT(STORAGE_COMMON)
 std::string GetFileSystemName(const GURL& origin_url, FileSystemType type);
 
-// Converts FileSystemType |type| to/from the StorageType |storage_type| that
-// is used for the unified quota system.
-// (Basically this naively maps TEMPORARY storage type to TEMPORARY filesystem
-// type, PERSISTENT storage type to PERSISTENT filesystem type and vice versa.)
-COMPONENT_EXPORT(STORAGE_COMMON)
-FileSystemType QuotaStorageTypeToFileSystemType(
-    blink::mojom::StorageType storage_type);
-
-COMPONENT_EXPORT(STORAGE_COMMON)
-blink::mojom::StorageType FileSystemTypeToQuotaStorageType(FileSystemType type);
-
 // Returns the string representation of the given filesystem |type|.
 // Returns an empty string if the |type| is invalid.
 COMPONENT_EXPORT(STORAGE_COMMON)
@@ -118,7 +107,7 @@ std::string GetFileSystemTypeString(FileSystemType type);
 // Sets type to FileSystemType enum that corresponds to the string name.
 // Returns false if the |type_string| is invalid.
 COMPONENT_EXPORT(STORAGE_COMMON)
-bool GetFileSystemPublicType(std::string type_string,
+bool GetFileSystemPublicType(const std::string& type_string,
                              blink::WebFileSystemType* type);
 
 // Encodes |file_path| to a string.

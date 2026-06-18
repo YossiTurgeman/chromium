@@ -1,16 +1,19 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/rlz/chrome_rlz_tracker_delegate.h"
 
-#include "base/bind.h"
+#include <algorithm>
+
 #include "base/check.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/notreached.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/google/google_brand.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
 #include "chrome/browser/profiles/profile.h"
@@ -25,44 +28,41 @@
 #include "components/search_engines/template_url.h"
 #include "components/search_engines/template_url_service.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/navigation_controller.h"
-#include "content/public/browser/navigation_details.h"
-#include "content/public/browser/navigation_entry.h"
-#include "content/public/browser/notification_details.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_source.h"
 #include "content/public/common/content_switches.h"
 #include "rlz/buildflags/buildflags.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "chrome/installer/util/google_update_settings.h"
 #endif
 
-#if defined(OS_CHROMEOS)
-#include "base/command_line.h"
-#include "chromeos/constants/chromeos_switches.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/ash_switches.h"
 #endif
 
-ChromeRLZTrackerDelegate::ChromeRLZTrackerDelegate() {}
+ChromeRLZTrackerDelegate::ChromeRLZTrackerDelegate() = default;
 
-ChromeRLZTrackerDelegate::~ChromeRLZTrackerDelegate() {}
+ChromeRLZTrackerDelegate::~ChromeRLZTrackerDelegate() = default;
 
 // static
 void ChromeRLZTrackerDelegate::RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* registry) {
 #if BUILDFLAG(ENABLE_RLZ)
   int rlz_ping_delay_seconds = 90;
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          chromeos::switches::kRlzPingDelay)) {
+          ash::switches::kRlzPingDelay)) {
     // Use a switch for overwriting the default delay because it doesn't seem
     // possible to manually override the Preferences file on Chrome OS: the file
     // is already loaded into memory by the time you modify it and any changes
     // made get overwritten by Chrome.
-    rlz_ping_delay_seconds =
-        std::stoi(base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
-            chromeos::switches::kRlzPingDelay));
+    int parsed_delay_from_switch = 0;
+    if (base::StringToInt(
+            base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+                ash::switches::kRlzPingDelay),
+            &parsed_delay_from_switch)) {
+      rlz_ping_delay_seconds = parsed_delay_from_switch;
+    }
   } else {
     rlz_ping_delay_seconds = 24 * 3600;
   }
@@ -100,16 +100,13 @@ bool ChromeRLZTrackerDelegate::IsGoogleInStartpages(Profile* profile) {
       StartupBrowserCreator::GetSessionStartupPref(
           *base::CommandLine::ForCurrentProcess(), profile);
   if (session_startup_prefs.type == SessionStartupPref::URLS) {
-    is_google_in_startpages =
-        std::count_if(session_startup_prefs.urls.begin(),
-                      session_startup_prefs.urls.end(),
-                      google_util::IsGoogleHomePageUrl) > 0;
+    is_google_in_startpages = std::ranges::contains(
+        session_startup_prefs.urls, true, google_util::IsGoogleHomePageUrl);
   }
   return is_google_in_startpages;
 }
 
 void ChromeRLZTrackerDelegate::Cleanup() {
-  registrar_.RemoveAll();
   on_omnibox_search_callback_.Reset();
   on_homepage_search_callback_.Reset();
 }
@@ -140,9 +137,12 @@ bool ChromeRLZTrackerDelegate::ShouldEnableZeroDelayForTesting() {
       ::switches::kTestType);
 }
 
-bool ChromeRLZTrackerDelegate::GetLanguage(base::string16* language) {
-#if defined(OS_WIN)
-  return GoogleUpdateSettings::GetLanguage(language);
+bool ChromeRLZTrackerDelegate::GetLanguage(std::u16string* language) {
+#if BUILDFLAG(IS_WIN)
+  std::wstring wide_language;
+  bool result = GoogleUpdateSettings::GetLanguage(&wide_language);
+  *language = base::AsString16(wide_language);
+  return result;
 #else
   // On other systems, we don't know the install language of promotions. That's
   // OK, for now all promotions on non-Windows systems will be reported as "en".
@@ -152,9 +152,12 @@ bool ChromeRLZTrackerDelegate::GetLanguage(base::string16* language) {
 #endif
 }
 
-bool ChromeRLZTrackerDelegate::GetReferral(base::string16* referral) {
-#if defined(OS_WIN)
-  return GoogleUpdateSettings::GetReferral(referral);
+bool ChromeRLZTrackerDelegate::GetReferral(std::u16string* referral) {
+#if BUILDFLAG(IS_WIN)
+  std::wstring wide_referral;
+  bool result = GoogleUpdateSettings::GetReferral(&wide_referral);
+  *referral = base::AsString16(wide_referral);
+  return result;
 #else
   // The referral program is defunct and not used. No need to implement this
   // function on non-Win platforms.
@@ -163,7 +166,7 @@ bool ChromeRLZTrackerDelegate::GetReferral(base::string16* referral) {
 }
 
 bool ChromeRLZTrackerDelegate::ClearReferral() {
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   return GoogleUpdateSettings::ClearReferral();
 #else
   // The referral program is defunct and not used. No need to implement this
@@ -177,77 +180,25 @@ void ChromeRLZTrackerDelegate::SetOmniboxSearchCallback(
   DCHECK(!callback.is_null());
   omnibox_url_opened_subscription_ =
       OmniboxEventGlobalTracker::GetInstance()->RegisterCallback(
-          base::Bind(&ChromeRLZTrackerDelegate::OnURLOpenedFromOmnibox,
-                     base::Unretained(this)));
+          base::BindRepeating(&ChromeRLZTrackerDelegate::OnURLOpenedFromOmnibox,
+                              base::Unretained(this)));
   on_omnibox_search_callback_ = std::move(callback);
 }
 
 void ChromeRLZTrackerDelegate::SetHomepageSearchCallback(
     base::OnceClosure callback) {
   DCHECK(!callback.is_null());
-  registrar_.Add(this, content::NOTIFICATION_NAV_ENTRY_COMMITTED,
-                 content::NotificationService::AllSources());
   on_homepage_search_callback_ = std::move(callback);
+}
+
+void ChromeRLZTrackerDelegate::RunHomepageSearchCallback() {
+  if (!on_homepage_search_callback_.is_null()) {
+    std::move(on_homepage_search_callback_).Run();
+  }
 }
 
 bool ChromeRLZTrackerDelegate::ShouldUpdateExistingAccessPointRlz() {
   return true;
-}
-
-void ChromeRLZTrackerDelegate::Observe(
-    int type,
-    const content::NotificationSource& source,
-    const content::NotificationDetails& details) {
-  base::OnceClosure callback_to_run;
-  switch (type) {
-    case content::NOTIFICATION_NAV_ENTRY_COMMITTED: {
-      // Firstly check if it is a Google search.
-      content::LoadCommittedDetails* load_details =
-          content::Details<content::LoadCommittedDetails>(details).ptr();
-      if (load_details == nullptr)
-        break;
-
-      content::NavigationEntry* entry = load_details->entry;
-      if (entry == nullptr)
-        break;
-
-      if (google_util::IsGoogleSearchUrl(entry->GetURL())) {
-        // If it is a Google search, check if it originates from HOMEPAGE by
-        // getting the previous NavigationEntry.
-        content::NavigationController* controller =
-            content::Source<content::NavigationController>(source).ptr();
-        if (controller == nullptr)
-          break;
-
-        int entry_index = controller->GetLastCommittedEntryIndex();
-        if (entry_index < 1)
-          break;
-
-        content::NavigationEntry* previous_entry =
-            controller->GetEntryAtIndex(entry_index - 1);
-
-        if (previous_entry == nullptr)
-          break;
-
-        // Make sure it is a Google web page originated from HOMEPAGE.
-        if (google_util::IsGoogleHomePageUrl(previous_entry->GetURL()) &&
-            ((previous_entry->GetTransitionType() &
-              ui::PAGE_TRANSITION_HOME_PAGE) != 0)) {
-          registrar_.Remove(this, content::NOTIFICATION_NAV_ENTRY_COMMITTED,
-                            content::NotificationService::AllSources());
-          callback_to_run = std::move(on_homepage_search_callback_);
-        }
-      }
-      break;
-    }
-
-    default:
-      NOTREACHED();
-      break;
-  }
-
-  if (!callback_to_run.is_null())
-    std::move(callback_to_run).Run();
 }
 
 void ChromeRLZTrackerDelegate::OnURLOpenedFromOmnibox(OmniboxLog* log) {
@@ -259,6 +210,6 @@ void ChromeRLZTrackerDelegate::OnURLOpenedFromOmnibox(OmniboxLog* log) {
   if (!log->is_popup_open)
     return;
 
-  omnibox_url_opened_subscription_.reset();
+  omnibox_url_opened_subscription_ = {};
   std::move(on_omnibox_search_callback_).Run();
 }

@@ -2,7 +2,7 @@ async function setUp(dp) {
   // Grant permission to register Background Sync events.
   await dp.Browser.grantPermissions({
     origin: location.origin,
-    permissions: ['backgroundSync'],
+    permissions: ['backgroundSync', 'backgroundFetch'],
   });
 
   await dp.BackgroundService.startObserving({service: 'backgroundFetch'});
@@ -37,7 +37,7 @@ async function waitForEvents(dp, numEvents) {
   });
 }
 
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   var {page, session, dp} = await testRunner.startURL(
       'resources/background-services.html',
       `Tests that the expected events are received.`);

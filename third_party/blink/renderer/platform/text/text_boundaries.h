@@ -26,35 +26,23 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_TEXT_BOUNDARIES_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_TEXT_BOUNDARIES_H_
 
-#include <utility>
-
+#include "base/containers/span.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
-#include "third_party/blink/renderer/platform/wtf/text/unicode.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_uchar.h"
 
 namespace blink {
 
-inline bool RequiresContextForWordBoundary(UChar32 ch) {
-  return WTF::unicode::HasLineBreakingPropertyComplexContext(ch);
-}
-
-PLATFORM_EXPORT int EndOfFirstWordBoundaryContext(const UChar* characters,
-                                                  int length);
-PLATFORM_EXPORT int StartOfLastWordBoundaryContext(const UChar* characters,
-                                                   int length);
-
-// |UChar*| should be a string in logical order instead of visual order, since
-// |FindWordBoundary()| uses ICU, which works on logical order strings
-PLATFORM_EXPORT std::pair<int, int> FindWordBackward(const UChar*,
-                                                     int len,
-                                                     int position);
-PLATFORM_EXPORT std::pair<int, int> FindWordForward(const UChar*,
-                                                    int len,
-                                                    int position);
-PLATFORM_EXPORT int FindWordStartBoundary(const UChar*, int len, int position);
-PLATFORM_EXPORT int FindWordEndBoundary(const UChar*, int len, int position);
-PLATFORM_EXPORT int FindNextWordBackward(const UChar*, int len, int position);
-PLATFORM_EXPORT int FindNextWordForward(const UChar*, int len, int position);
+// `chars` should be a string in logical order instead of visual order, since
+// these functions use ICU, which works on logical order strings
+PLATFORM_EXPORT int FindWordStartBoundary(base::span<const UChar> chars,
+                                          int position);
+PLATFORM_EXPORT int FindWordEndBoundary(base::span<const UChar> chars,
+                                        int position);
+PLATFORM_EXPORT int FindNextWordBackward(base::span<const UChar> chars,
+                                         int position);
+PLATFORM_EXPORT int FindNextWordForward(base::span<const UChar> chars,
+                                        int position);
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_TEXT_BOUNDARIES_H_

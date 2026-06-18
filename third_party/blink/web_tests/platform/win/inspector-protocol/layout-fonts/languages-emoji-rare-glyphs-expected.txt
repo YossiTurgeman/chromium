@@ -22,10 +22,14 @@
 #arabic_pangram:
 "Times New Roman" : 85
 
-🌱🌲🌳🌴🌵🌷🌸🌹🌺🌻🌼💐🌾🌿🍀🍁🍂🍃🍄🌰☺️😀👪
-#emoji:
-"Segoe UI Emoji" : 22,
-"Times New Roman" : 2
+🌱🌲🌳🌴🌵🌷🌸🌹🌺🌻🌼💐🌾🌿🍀🍁🍂🍃🍄🌰☺️😀👪♐☔☃️™️
+#emoji_emoji:
+"Segoe UI Emoji" : 30
+
+☔︎♐︎☺☺︎☃☃︎☯︎☯™™︎00︎
+#text_emoji:
+"Segoe UI Symbol" : 16,
+"Times New Roman" : 3
 
 𓀀𓀁𓀂𓀃𓀄𓀅𓀆𓀇𓀈𓀉𓀊𓀋𓀌𓀍𓀎𓀏
 #egyptian_hieroglyphs:
@@ -46,8 +50,7 @@
 
 ⇦⇧⇨⇩￩￪￫￬⟀
 #text_presentation_arrows_maths:
-"MS PGothic" : 4,
-"Cambria Math" : 4,
-"Segoe UI Symbol" : 1
+"Cambria Math" : 5,
+"MS PGothic" : 4
 
 

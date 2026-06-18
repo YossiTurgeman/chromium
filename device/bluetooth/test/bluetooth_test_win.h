@@ -1,50 +1,54 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEVICE_BLUETOOTH_TEST_BLUETOOTH_TEST_WIN_H_
 #define DEVICE_BLUETOOTH_TEST_BLUETOOTH_TEST_WIN_H_
 
-#include "device/bluetooth/test/bluetooth_test.h"
+#include <Windows.Devices.Enumeration.h>
+#include <wrl/client.h>
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
-#include "base/optional.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/test_pending_task.h"
 #include "base/test/test_simple_task_runner.h"
 #include "base/win/scoped_winrt_initializer.h"
 #include "device/bluetooth/bluetooth_classic_win_fake.h"
-#include "device/bluetooth/bluetooth_low_energy_win_fake.h"
 #include "device/bluetooth/bluetooth_task_manager_win.h"
+#include "device/bluetooth/test/bluetooth_test.h"
 
 namespace device {
 
+class FakeBluetoothLEDeviceWinrt;
+class FakeBluetoothLEDeviceStaticsWinrt;
+
 // Windows implementation of BluetoothTestBase.
-class BluetoothTestWin : public BluetoothTestBase,
-                         public win::BluetoothLowEnergyWrapperFake::Observer {
+class BluetoothTestWin : public BluetoothTestBase {
  public:
   BluetoothTestWin();
   ~BluetoothTestWin() override;
 
   // BluetoothTestBase overrides
-  bool PlatformSupportsLowEnergy() override;
   void InitWithDefaultAdapter() override;
   void InitWithoutDefaultAdapter() override;
   void InitWithFakeAdapter() override;
   bool DenyPermission() override;
   void StartLowEnergyDiscoverySession() override;
   BluetoothDevice* SimulateLowEnergyDevice(int device_ordinal) override;
-  base::Optional<BluetoothUUID> GetTargetGattService(
+  std::optional<BluetoothUUID> GetTargetGattService(
       BluetoothDevice* device) override;
   void SimulateGattConnection(BluetoothDevice* device) override;
   void SimulateStatusChangeToDisconnect(BluetoothDevice* device) override;
   void SimulateGattServicesDiscovered(
       BluetoothDevice* device,
-      const std::vector<std::string>& uuids) override;
+      const std::vector<std::string>& uuids,
+      const std::vector<std::string>& blocked_uuids = {}) override;
   void SimulateGattServiceRemoved(BluetoothRemoteGattService* service) override;
   void SimulateGattCharacteristic(BluetoothRemoteGattService* service,
                                   const std::string& uuid,
@@ -52,20 +56,17 @@ class BluetoothTestWin : public BluetoothTestBase,
   void SimulateGattCharacteristicRemoved(
       BluetoothRemoteGattService* service,
       BluetoothRemoteGattCharacteristic* characteristic) override;
-  void RememberCharacteristicForSubsequentAction(
-      BluetoothRemoteGattCharacteristic* characteristic) override;
   void SimulateGattCharacteristicRead(
       BluetoothRemoteGattCharacteristic* characteristic,
       const std::vector<uint8_t>& value) override;
   void SimulateGattCharacteristicReadError(
       BluetoothRemoteGattCharacteristic* characteristic,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void SimulateGattCharacteristicWrite(
       BluetoothRemoteGattCharacteristic* characteristic) override;
   void SimulateGattCharacteristicWriteError(
       BluetoothRemoteGattCharacteristic* characteristic,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
-  void RememberDeviceForSubsequentAction(BluetoothDevice* device) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void DeleteDevice(BluetoothDevice* device) override;
   void SimulateGattDescriptor(BluetoothRemoteGattCharacteristic* characteristic,
                               const std::string& uuid) override;
@@ -73,37 +74,17 @@ class BluetoothTestWin : public BluetoothTestBase,
       BluetoothRemoteGattCharacteristic* characteristic) override;
   void SimulateGattNotifySessionStartError(
       BluetoothRemoteGattCharacteristic* characteristic,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void SimulateGattCharacteristicChanged(
       BluetoothRemoteGattCharacteristic* characteristic,
       const std::vector<uint8_t>& value) override;
-
-  // win::BluetoothLowEnergyWrapperFake::Observer overrides.
-  void OnReadGattCharacteristicValue() override;
-  void OnWriteGattCharacteristicValue(
-      const PBTH_LE_GATT_CHARACTERISTIC_VALUE value) override;
-  void OnStartCharacteristicNotification() override;
-  void OnWriteGattDescriptorValue(const std::vector<uint8_t>& value) override;
 
  private:
   scoped_refptr<base::TestSimpleTaskRunner> ui_task_runner_;
   scoped_refptr<base::TestSimpleTaskRunner> bluetooth_task_runner_;
 
-  win::BluetoothLowEnergyWrapperFake* fake_bt_le_wrapper_;
-
-  // This is used for retaining access to a single deleted device.
-  std::string remembered_device_address_;
-
   void AdapterInitCallback();
-  win::GattService* GetSimulatedService(win::BLEDevice* device,
-                                        BluetoothRemoteGattService* service);
-  win::GattCharacteristic* GetSimulatedCharacteristic(
-      BluetoothRemoteGattCharacteristic* characteristic);
 
-  // Run pending Bluetooth tasks until the first callback that the test fixture
-  // tracks is called.
-  void RunPendingTasksUntilCallback();
-  void ForceRefreshDevice();
   void FinishPendingTasks();
 };
 
@@ -111,61 +92,55 @@ class BluetoothTestWin : public BluetoothTestBase,
 typedef BluetoothTestWin BluetoothTest;
 
 struct BluetoothTestWinrtParam {
-  // The feature state of |kNewBLEWinImplementation|.
-  bool new_ble_implementation_enabled;
   // The feature state of |kNewBLEGattSessionHandling|.
   bool new_gatt_session_handling_enabled;
+  // The feature state of |kUncachedGattDiscoveryForGattConnection|.
+  bool uncached_gatt_discovery_for_gatt_connection;
 
   friend std::ostream& operator<<(std::ostream& os,
                                   const BluetoothTestWinrtParam& p) {
-    return os << "{new_ble_implementation_enabled="
-              << p.new_ble_implementation_enabled
-              << ", new_gatt_session_handling_enabled="
-              << p.new_gatt_session_handling_enabled << "}";
+    return os << "{new_gatt_session_handling_enabled="
+              << p.new_gatt_session_handling_enabled << "}"
+              << "{uncached_gatt_discovery_for_gatt_connection="
+              << p.uncached_gatt_discovery_for_gatt_connection << "}";
   }
 };
 
-constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParamAll[] = {
-    {false, false},
-    {false, true},
-    {true, false},
-    {true, true},
+constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParam[] = {
+    {/*new_gatt_session_handling_enabled=*/true,
+     /*uncached_gatt_discovery_for_gatt_connection=*/true},
+    {/*new_gatt_session_handling_enabled=*/true,
+     /*uncached_gatt_discovery_for_gatt_connection=*/false},
+    {/*new_gatt_session_handling_enabled=*/false,
+     /*uncached_gatt_discovery_for_gatt_connection=*/true},
+    {/*new_gatt_session_handling_enabled=*/false,
+     /*uncached_gatt_discovery_for_gatt_connection=*/false},
 };
 
-constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParamWinrtOnly[] = {
-    {true, false},
-    {true, true},
-};
-
-constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParamWin32Only[] = {
-    {false, false},
-    {false, true},
-};
-
-// This test suite represents tests that should run with the new BLE
-// implementation both enabled and disabled. This requires declaring tests
-// in the following way: TEST_P(BluetoothTestWinrt, YourTestName).
+// This test suite represents tests that are parameterized on Windows. This
+// requires declaring tests in the following way:
+//
+// TEST_P(BluetoothTestWinrt, YourTestName).
 //
 // Test suites inheriting from this class should be instantiated as
 //
 // INSTANTIATE_TEST_SUITE_P(
 //     All, FooTestSuiteWinrt,
-//     ::testing::ValuesIn(
-//         <kBluetoothTestWinrtParamWin32Only |
-//          kBluetoothTestWinrtParamWinrtOnly |
-//          kBluetoothTestWinrtParamAll>));
-//
-// depending on whether they should run only the old or new implementation or
-// both.
+//     ::testing::ValuesIn(kBluetoothTestWinrtParam>));
 class BluetoothTestWinrt
     : public BluetoothTestWin,
       public ::testing::WithParamInterface<BluetoothTestWinrtParam> {
  public:
   BluetoothTestWinrt();
-  ~BluetoothTestWinrt() override;
 
-  bool UsesNewBleImplementation() const;
+  BluetoothTestWinrt(const BluetoothTestWinrt&) = delete;
+  BluetoothTestWinrt& operator=(const BluetoothTestWinrt&) = delete;
+
+  ~BluetoothTestWinrt() override;
+  void TearDown() override;
+
   bool UsesNewGattSessionHandling() const;
+  bool UncachedGattDiscoveryForGattConnection() const;
 
   // Simulate a fake adapter whose power status cannot be
   // controlled because of a Windows Privacy setting.
@@ -173,7 +148,6 @@ class BluetoothTestWinrt
   void SimulateSpuriousRadioStateChangedEvent();
 
   // BluetoothTestBase:
-  bool PlatformSupportsLowEnergy() override;
   void InitWithDefaultAdapter() override;
   void InitWithoutDefaultAdapter() override;
   void InitWithFakeAdapter() override;
@@ -186,6 +160,12 @@ class BluetoothTestWinrt
   void SimulateDevicePaired(BluetoothDevice* device, bool is_paired) override;
   void SimulatePairingPinCode(BluetoothDevice* device,
                               std::string pin_code) override;
+  // Currently only Win derived class has this function for create ConfirmOnly /
+  // DisplayPin tests.  If in future we find that other platform need to test
+  // for pairing_kind we should promote this function as virtual
+  void SimulateConfirmOnly(BluetoothDevice* device);
+  void SimulateDisplayPin(BluetoothDevice* device,
+                          std::string_view display_pin);
   void SimulateAdvertisementStarted(
       BluetoothAdvertisement* advertisement) override;
   void SimulateAdvertisementStopped(
@@ -204,7 +184,8 @@ class BluetoothTestWinrt
   void SimulateStatusChangeToDisconnect(BluetoothDevice* device) override;
   void SimulateGattServicesDiscovered(
       BluetoothDevice* device,
-      const std::vector<std::string>& uuids) override;
+      const std::vector<std::string>& uuids,
+      const std::vector<std::string>& blocked_uuids = {}) override;
   void SimulateGattServicesChanged(BluetoothDevice* device) override;
   void SimulateGattServiceRemoved(BluetoothRemoteGattService* service) override;
   void SimulateGattServicesDiscoveryError(BluetoothDevice* device) override;
@@ -215,12 +196,12 @@ class BluetoothTestWinrt
       BluetoothRemoteGattCharacteristic* characteristic) override;
   void SimulateGattNotifySessionStartError(
       BluetoothRemoteGattCharacteristic* characteristic,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void SimulateGattNotifySessionStopped(
       BluetoothRemoteGattCharacteristic* characteristic) override;
   void SimulateGattNotifySessionStopError(
       BluetoothRemoteGattCharacteristic* characteristic,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void SimulateGattCharacteristicChanged(
       BluetoothRemoteGattCharacteristic* characteristic,
       const std::vector<uint8_t>& value) override;
@@ -229,43 +210,55 @@ class BluetoothTestWinrt
       const std::vector<uint8_t>& value) override;
   void SimulateGattCharacteristicReadError(
       BluetoothRemoteGattCharacteristic* characteristic,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void SimulateGattCharacteristicWrite(
       BluetoothRemoteGattCharacteristic* characteristic) override;
   void SimulateGattCharacteristicWriteError(
       BluetoothRemoteGattCharacteristic* characteristic,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void SimulateGattDescriptor(BluetoothRemoteGattCharacteristic* characteristic,
                               const std::string& uuid) override;
   void SimulateGattDescriptorRead(BluetoothRemoteGattDescriptor* descriptor,
                                   const std::vector<uint8_t>& value) override;
   void SimulateGattDescriptorReadError(
       BluetoothRemoteGattDescriptor* descriptor,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
   void SimulateGattDescriptorWrite(
       BluetoothRemoteGattDescriptor* descriptor) override;
   void SimulateGattDescriptorWriteError(
       BluetoothRemoteGattDescriptor* descriptor,
-      BluetoothRemoteGattService::GattErrorCode error_code) override;
+      BluetoothGattService::GattErrorCode error_code) override;
+  void RememberDeviceForSubsequentAction(BluetoothDevice* device) override;
   void DeleteDevice(BluetoothDevice* device) override;
 
   void OnFakeBluetoothDeviceConnectGattAttempt();
   void OnFakeBluetoothDeviceGattServiceDiscoveryAttempt();
+  void OnFakeBluetoothDeviceGattServiceDiscoveryAttemptWithCacheMode(
+      ABI::Windows::Devices::Bluetooth::BluetoothCacheMode cache_mode);
   void OnFakeBluetoothGattDisconnect();
   void OnFakeBluetoothCharacteristicReadValue();
   void OnFakeBluetoothCharacteristicWriteValue(std::vector<uint8_t> value);
   void OnFakeBluetoothGattSetCharacteristicNotification(NotifyValueState state);
   void OnFakeBluetoothDescriptorReadValue();
   void OnFakeBluetoothDescriptorWriteValue(std::vector<uint8_t> value);
+  void RegisterFakeDevice(FakeBluetoothLEDeviceWinrt* device);
+  void UnregisterFakeDevice(FakeBluetoothLEDeviceWinrt* device);
+  void RegisterFakeDeviceStatics(FakeBluetoothLEDeviceStaticsWinrt* statics);
+  void UnregisterFakeDeviceStatics(FakeBluetoothLEDeviceStaticsWinrt* statics);
+
+  int gatt_discovery_attempts_with_uncached_mode() const {
+    return gatt_discovery_attempts_with_uncached_mode_;
+  }
 
  private:
   base::test::ScopedFeatureList scoped_feature_list_;
-  base::Optional<base::win::ScopedWinrtInitializer> scoped_winrt_initializer_;
-
-  DISALLOW_COPY_AND_ASSIGN(BluetoothTestWinrt);
+  base::win::ScopedWinrtInitializer scoped_winrt_initializer_;
+  int gatt_discovery_attempts_with_uncached_mode_ = 0;
+  Microsoft::WRL::ComPtr<FakeBluetoothLEDeviceWinrt> remembered_ble_device_;
+  std::vector<raw_ptr<FakeBluetoothLEDeviceWinrt>> fake_ble_devices_;
+  std::vector<raw_ptr<FakeBluetoothLEDeviceStaticsWinrt>>
+      fake_ble_device_statics_;
 };
-
-using BluetoothTestWinrtOnly = BluetoothTestWinrt;
 
 }  // namespace device
 

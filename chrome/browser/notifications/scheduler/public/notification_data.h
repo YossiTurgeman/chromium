@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-#include "base/strings/string16.h"
 #include "chrome/browser/notifications/scheduler/public/icon_bundle.h"
 #include "chrome/browser/notifications/scheduler/public/notification_scheduler_types.h"
 
@@ -25,11 +24,15 @@ struct NotificationData {
   struct Button {
     Button();
     Button(const Button& other);
-    bool operator==(const Button& other) const;
+    Button(Button&& other);
+    Button& operator=(const Button& other);
+    Button& operator=(Button&& other);
     ~Button();
 
+    bool operator==(const Button& other) const;
+
     // The text associated with the button.
-    base::string16 text;
+    std::u16string text;
 
     // The button type.
     ActionButtonType type;
@@ -39,16 +42,21 @@ struct NotificationData {
   };
 
   using CustomData = std::map<std::string, std::string>;
+
   NotificationData();
   NotificationData(const NotificationData& other);
-  bool operator==(const NotificationData& other) const;
+  NotificationData(NotificationData&& other);
+  NotificationData& operator=(const NotificationData& other);
+  NotificationData& operator=(NotificationData&& other);
   ~NotificationData();
 
+  bool operator==(const NotificationData& other) const;
+
   // The title of the notification.
-  base::string16 title;
+  std::u16string title;
 
   // The body text of the notification.
-  base::string16 message;
+  std::u16string message;
 
   // The icons of the notification.
   std::map<IconType, IconBundle> icons;

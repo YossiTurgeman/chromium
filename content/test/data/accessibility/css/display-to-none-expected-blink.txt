@@ -1,12 +1,11 @@
 rootWebArea
-++genericContainer ignored display='block'
-++++genericContainer ignored display='block'
-++++++genericContainer ignored display='block'
+++genericContainer ignored
+++++genericContainer ignored
+++++++genericContainer ignored
 ++++++++genericContainer display='block'
-++++++++++staticText display='block' name='Cats'
-++++++++++++inlineTextBox display='block' name='Cats'
-++++++++genericContainer ignored invisible display='none' name='checkbox'
-++++++++++checkBox ignored invisible display='inline-block' name='checkbox' checkedState=false
+++++++++++staticText name='Cats'
+++++++++++++inlineTextBox name='Cats'
 ++++++++genericContainer display='block'
-++++++++++staticText display='inline' name='done'
-++++++++++++inlineTextBox display='inline' name='done'
+++++++++++code display='inline'
+++++++++++++staticText name='done'
+++++++++++++++inlineTextBox name='done'

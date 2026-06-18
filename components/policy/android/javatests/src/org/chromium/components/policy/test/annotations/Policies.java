@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,11 @@ import androidx.annotation.VisibleForTesting;
 import org.junit.Assert;
 import org.junit.runners.model.FrameworkMethod;
 
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.library_loader.LibraryLoader;
 import org.chromium.base.test.BaseJUnit4ClassRunner.TestHook;
 import org.chromium.components.policy.AbstractAppRestrictionsProvider;
+import org.chromium.components.policy.CombinedPolicyProvider;
 import org.chromium.components.policy.test.PolicyData;
 
 import java.lang.annotation.ElementType;
@@ -114,9 +117,10 @@ public final class Policies {
 
     @VisibleForTesting
     static Map<String, PolicyData> getPolicies(AnnotatedElement element) {
-        AnnotatedElement parent = (element instanceof Method)
-                ? ((Method) element).getDeclaringClass()
-                : ((Class<?>) element).getSuperclass();
+        AnnotatedElement parent =
+                (element instanceof Method)
+                        ? ((Method) element).getDeclaringClass()
+                        : ((Class<?>) element).getSuperclass();
         Map<String, PolicyData> flags =
                 (parent == null) ? new HashMap<String, PolicyData>() : getPolicies(parent);
 
@@ -125,8 +129,10 @@ public final class Policies {
         }
 
         if (element.isAnnotationPresent(Policies.Remove.class)) {
-            flags.keySet().removeAll(
-                    fromItems(element.getAnnotation(Policies.Remove.class).value()).keySet());
+            flags.keySet()
+                    .removeAll(
+                            fromItems(element.getAnnotation(Policies.Remove.class).value())
+                                    .keySet());
         }
 
         return flags;
@@ -145,6 +151,10 @@ public final class Policies {
             } else {
                 final Bundle policyBundle = PolicyData.asBundle(policyMap.values());
                 AbstractAppRestrictionsProvider.setTestRestrictions(policyBundle);
+            }
+            if (LibraryLoader.getInstance().isInitialized()) {
+                // Policy refresh required to apply annotations for batched tests.
+                ThreadUtils.runOnUiThreadBlocking(CombinedPolicyProvider.get()::refreshPolicies);
             }
         }
     }

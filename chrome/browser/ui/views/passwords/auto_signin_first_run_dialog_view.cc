@@ -1,18 +1,23 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/passwords/auto_signin_first_run_dialog_view.h"
 
+#include <utility>
+
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser_dialogs.h"
 #include "chrome/browser/ui/passwords/credential_manager_dialog_controller.h"
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/browser/ui/views/chrome_typography.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/constrained_window/constrained_window_views.h"
 #include "components/strings/grit/components_strings.h"
+#include "content/public/browser/web_contents.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/views/border.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/layout/fill_layout.h"
@@ -21,11 +26,16 @@
 AutoSigninFirstRunDialogView::AutoSigninFirstRunDialogView(
     CredentialManagerDialogController* controller,
     content::WebContents* web_contents)
-    : controller_(controller), web_contents_(web_contents) {
-  SetButtonLabel(ui::DIALOG_BUTTON_OK,
+    : controller_(controller), web_contents_(web_contents->GetWeakPtr()) {
+  SetButtonLabel(ui::mojom::DialogButton::kOk,
                  l10n_util::GetStringUTF16(IDS_AUTO_SIGNIN_FIRST_RUN_OK));
-  SetButtonLabel(ui::DIALOG_BUTTON_CANCEL,
+  SetButtonLabel(ui::mojom::DialogButton::kCancel,
                  l10n_util::GetStringUTF16(IDS_TURN_OFF));
+
+  SetModalType(ui::mojom::ModalType::kChild);
+  SetShowCloseButton(false);
+  set_fixed_width(views::LayoutProvider::Get()->GetDistanceMetric(
+      views::DISTANCE_MODAL_DIALOG_PREFERRED_WIDTH));
 
   using ControllerCallbackFn = void (CredentialManagerDialogController::*)();
   auto call_controller = [](AutoSigninFirstRunDialogView* dialog,
@@ -40,16 +50,13 @@ AutoSigninFirstRunDialogView::AutoSigninFirstRunDialogView(
   SetCancelCallback(
       base::BindOnce(call_controller, base::Unretained(this),
                      &CredentialManagerDialogController::OnAutoSigninTurnOff));
-
-  chrome::RecordDialogCreation(chrome::DialogIdentifier::AUTO_SIGNIN_FIRST_RUN);
 }
 
-AutoSigninFirstRunDialogView::~AutoSigninFirstRunDialogView() {
-}
+AutoSigninFirstRunDialogView::~AutoSigninFirstRunDialogView() = default;
 
 void AutoSigninFirstRunDialogView::ShowAutoSigninPrompt() {
   InitWindow();
-  constrained_window::ShowWebModalDialogViews(this, web_contents_);
+  constrained_window::ShowWebModalDialogViews(this, web_contents_.get());
 }
 
 void AutoSigninFirstRunDialogView::ControllerGone() {
@@ -59,33 +66,19 @@ void AutoSigninFirstRunDialogView::ControllerGone() {
   controller_ = nullptr;
 }
 
-ui::ModalType AutoSigninFirstRunDialogView::GetModalType() const {
-  return ui::MODAL_TYPE_CHILD;
-}
-
-base::string16 AutoSigninFirstRunDialogView::GetWindowTitle() const {
+std::u16string AutoSigninFirstRunDialogView::GetWindowTitle() const {
   return controller_->GetAutoSigninPromoTitle();
 }
 
-bool AutoSigninFirstRunDialogView::ShouldShowCloseButton() const {
-  return false;
-}
-
-gfx::Size AutoSigninFirstRunDialogView::CalculatePreferredSize() const {
-  const int width = ChromeLayoutProvider::Get()->GetDistanceMetric(
-                        DISTANCE_MODAL_DIALOG_PREFERRED_WIDTH) -
-                    margins().width();
-  return gfx::Size(width, GetHeightForWidth(width));
-}
-
 void AutoSigninFirstRunDialogView::WindowClosing() {
-  if (controller_)
-    controller_->OnCloseDialog();
+  if (controller_) {
+    controller_.ExtractAsDangling()->OnCloseDialog();
+  }
 }
 
 void AutoSigninFirstRunDialogView::InitWindow() {
   set_margins(ChromeLayoutProvider::Get()->GetDialogInsetsForContentType(
-      views::TEXT, views::TEXT));
+      views::DialogContentType::kText, views::DialogContentType::kText));
   SetLayoutManager(std::make_unique<views::FillLayout>());
 
   auto label = std::make_unique<views::Label>(
@@ -93,8 +86,11 @@ void AutoSigninFirstRunDialogView::InitWindow() {
       views::style::STYLE_SECONDARY);
   label->SetMultiLine(true);
   label->SetHorizontalAlignment(gfx::ALIGN_LEFT);
-  AddChildView(label.release());
+  AddChildViewRaw(label.release());
 }
+
+BEGIN_METADATA(AutoSigninFirstRunDialogView)
+END_METADATA
 
 AutoSigninFirstRunPrompt* CreateAutoSigninPromptView(
     CredentialManagerDialogController* controller,

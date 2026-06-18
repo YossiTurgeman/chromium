@@ -1,11 +1,15 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_NOTIFICATION_DEVICE_ENTRY_UI_H_
 #define CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_NOTIFICATION_DEVICE_ENTRY_UI_H_
 
-#include "chrome/browser/ui/views/media_router/cast_dialog_sink_button.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ui/views/controls/hover_button.h"
+#include "components/global_media_controls/public/mojom/device_service.mojom.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/color/color_id.h"
 
 enum class DeviceEntryUIType {
   kAudio = 0,
@@ -17,13 +21,14 @@ class DeviceEntryUI {
  public:
   DeviceEntryUI(const std::string& raw_device_id,
                 const std::string& device_name,
-                const gfx::VectorIcon* icon_,
+                const gfx::VectorIcon& icon,
                 const std::string& subtext = "");
 
   DeviceEntryUI(const DeviceEntryUI&) = delete;
   DeviceEntryUI& operator=(const DeviceEntryUI&) = delete;
   virtual ~DeviceEntryUI() = default;
 
+  const gfx::VectorIcon& icon() const { return *icon_; }
   const std::string& raw_device_id() const { return raw_device_id_; }
   const std::string& device_name() const { return device_name_; }
 
@@ -37,17 +42,18 @@ class DeviceEntryUI {
   const std::string raw_device_id_;
   const std::string device_name_;
   bool is_highlighted_ = false;
-  const gfx::VectorIcon* const icon_;
+  const raw_ref<const gfx::VectorIcon> icon_;
 };
 
 class AudioDeviceEntryView : public DeviceEntryUI, public HoverButton {
+  METADATA_HEADER(AudioDeviceEntryView, HoverButton)
+
  public:
-  AudioDeviceEntryView(views::ButtonListener* button_listener,
+  AudioDeviceEntryView(PressedCallback callback,
                        SkColor foreground_color,
                        SkColor background_color,
                        const std::string& raw_device_id,
-                       const std::string& name,
-                       const std::string& subtext = "");
+                       const std::string& name);
   ~AudioDeviceEntryView() override = default;
 
   // DeviceEntryUI
@@ -55,28 +61,28 @@ class AudioDeviceEntryView : public DeviceEntryUI, public HoverButton {
                        SkColor background_color) override;
   DeviceEntryUIType GetType() const override;
 
-  // HoverButton
-  SkColor GetInkDropBaseColor() const override;
-
   void SetHighlighted(bool highlighted);
+  bool GetHighlighted() const;
 };
 
-class CastDeviceEntryView : public DeviceEntryUI,
-                            public media_router::CastDialogSinkButton {
+// This media cast device entry UI only shows on Chrome OS ash.
+class CastDeviceEntryViewAsh : public DeviceEntryUI, public HoverButton {
+  METADATA_HEADER(CastDeviceEntryViewAsh, HoverButton)
+
  public:
-  CastDeviceEntryView(views::ButtonListener* button_listener,
-                      SkColor foreground_color,
-                      SkColor background_color,
-                      const media_router::UIMediaSink& sink);
-  ~CastDeviceEntryView() override = default;
+  CastDeviceEntryViewAsh(PressedCallback callback,
+                         ui::ColorId foreground_color_id,
+                         ui::ColorId background_color_id,
+                         const global_media_controls::mojom::DevicePtr& device);
+  ~CastDeviceEntryViewAsh() override;
 
   // DeviceEntryUI
   void OnColorsChanged(SkColor foreground_color,
-                       SkColor background_color) override;
+                       SkColor background_color) override {}
   DeviceEntryUIType GetType() const override;
 
-  // HoverButton
-  SkColor GetInkDropBaseColor() const override;
+ private:
+  global_media_controls::mojom::DevicePtr device_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_NOTIFICATION_DEVICE_ENTRY_UI_H_

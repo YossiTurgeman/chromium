@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 #include "components/variations/net/variations_http_headers.h"
 #include "components/variations/variations_client.h"
 #include "components/variations/variations_ids_provider.h"
+#include "services/network/public/cpp/http_request_headers_update_params.h"
+#include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "url/gurl.h"
 
@@ -20,8 +22,9 @@ Owner GetOwner(const url::Origin& top_frame_origin) {
   // to handle sandboxed top frames in addition to non-sandboxed ones.
   // top_frame_origin.GetURL() handles only the latter.
   const GURL url(top_frame_origin.GetTupleOrPrecursorTupleIfOpaque().GetURL());
-  if (!url.is_valid())
+  if (!url.is_valid()) {
     return Owner::kUnknownFromRenderer;
+  }
   return google_util::IsGoogleAssociatedDomainUrl(url) ? Owner::kGoogle
                                                        : Owner::kNotGoogle;
 }
@@ -29,13 +32,14 @@ Owner GetOwner(const url::Origin& top_frame_origin) {
 }  // namespace
 
 VariationsURLLoaderThrottle::VariationsURLLoaderThrottle(
-    const std::string& variation_ids_header)
-    : variation_ids_header_(variation_ids_header), owner_(Owner::kUnknown) {}
+    variations::mojom::VariationsHeadersPtr variations_headers)
+    : variations_headers_(std::move(variations_headers)),
+      owner_(Owner::kUnknown) {}
 
 VariationsURLLoaderThrottle::VariationsURLLoaderThrottle(
-    const std::string& variation_ids_header,
+    variations::mojom::VariationsHeadersPtr variations_headers,
     const url::Origin& top_frame_origin)
-    : variation_ids_header_(variation_ids_header),
+    : variations_headers_(std::move(variations_headers)),
       owner_(GetOwner(top_frame_origin)) {}
 
 VariationsURLLoaderThrottle::~VariationsURLLoaderThrottle() = default;
@@ -44,13 +48,12 @@ VariationsURLLoaderThrottle::~VariationsURLLoaderThrottle() = default;
 void VariationsURLLoaderThrottle::AppendThrottleIfNeeded(
     const variations::VariationsClient* variations_client,
     std::vector<std::unique_ptr<blink::URLLoaderThrottle>>* throttles) {
-  if (!variations_client || variations_client->IsOffTheRecord())
+  if (!variations_client || variations_client->IsOffTheRecord()) {
     return;
+  }
 
-  // TODO(crbug/1094303): Consider both variations::Study_GoogleWebVisibility
-  // values.
   throttles->push_back(std::make_unique<VariationsURLLoaderThrottle>(
-      variations_client->GetVariationsHeader()));
+      variations_client->GetVariationsHeaders()));
 }
 
 void VariationsURLLoaderThrottle::DetachFromCurrentSequence() {}
@@ -58,10 +61,14 @@ void VariationsURLLoaderThrottle::DetachFromCurrentSequence() {}
 void VariationsURLLoaderThrottle::WillStartRequest(
     network::ResourceRequest* request,
     bool* defer) {
-  // This throttle is never created when incognito so we pass in
-  // variations::InIncognito::kNo.
+  if (variations_headers_.is_null()) {
+    return;
+  }
+
+  // InIncognito::kNo is passed because this throttle is never created in
+  // incognito mode.
   variations::AppendVariationsHeaderWithCustomValue(
-      request->url, variations::InIncognito::kNo, variation_ids_header_, owner_,
+      request->url, InIncognito::kNo, variations_headers_.get(), owner_,
       request);
 }
 
@@ -69,11 +76,12 @@ void VariationsURLLoaderThrottle::WillRedirectRequest(
     net::RedirectInfo* redirect_info,
     const network::mojom::URLResponseHead& response_head,
     bool* defer,
-    std::vector<std::string>* to_be_removed_headers,
-    net::HttpRequestHeaders* modified_headers,
-    net::HttpRequestHeaders* modified_cors_exempt_headers) {
-  variations::RemoveVariationsHeaderIfNeeded(*redirect_info, response_head,
-                                             to_be_removed_headers);
+    network::HttpRequestHeadersUpdateParams* headers_update_params) {
+  // InIncognito::kNo is passed because this throttle is never created in
+  // incognito mode.
+  variations::RemoveVariationsHeaderIfNeeded(
+      *redirect_info, response_head, InIncognito::kNo,
+      &headers_update_params->removed_headers);
 }
 
 }  // namespace variations

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,91 +8,123 @@ import android.app.Activity;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.BuildInfo;
+import org.chromium.base.CollectionUtil;
 import org.chromium.base.Log;
 import org.chromium.base.Promise;
+import org.chromium.base.ServiceLoaderUtil;
 import org.chromium.base.ThreadUtils;
-import org.chromium.chrome.browser.AppHooks;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.base.lifetime.Destroyable;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.ActivityTabProvider;
 import org.chromium.chrome.browser.preferences.Pref;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.tabmodel.TabModelSelector;
+import org.chromium.chrome.browser.profiles.ProfileKeyedMap;
+import org.chromium.chrome.browser.tab_ui.TabContentManager;
 import org.chromium.components.user_prefs.UserPrefs;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Public interface for all usage stats related functionality. All calls to instances of
  * UsageStatsService must be made on the UI thread.
  */
-public class UsageStatsService {
+@NullMarked
+public class UsageStatsService implements Destroyable {
     private static final String TAG = "UsageStatsService";
 
-    private static UsageStatsService sInstance;
+    private static final ProfileKeyedMap<UsageStatsService> sProfileMap =
+            ProfileKeyedMap.createMapOfDestroyables(
+                    ProfileKeyedMap.ProfileSelection.REDIRECTED_TO_ORIGINAL);
 
-    private Profile mProfile;
-    private EventTracker mEventTracker;
-    private NotificationSuspender mNotificationSuspender;
-    private SuspensionTracker mSuspensionTracker;
-    private TokenTracker mTokenTracker;
-    private UsageStatsBridge mBridge;
+    private final Profile mProfile;
+    private final EventTracker mEventTracker;
+    private final SuspensionTracker mSuspensionTracker;
+    private final TokenTracker mTokenTracker;
+    private final UsageStatsBridge mBridge;
     // PageViewObservers are scoped to a given ChromeTabbedActivity, but UsageStatsService isn't. To
     // allow for GC of the observer to happen when the activity goes away, we only hold weak
     // references here.
-    private List<WeakReference<PageViewObserver>> mPageViewObservers;
+    private final List<WeakReference<PageViewObserver>> mPageViewObservers;
 
-    private DigitalWellbeingClient mClient;
-    private boolean mOptInState;
+    private final DigitalWellbeingClient mClient;
 
-    /** Returns if the UsageStatsService is enabled on this device */
-    public static boolean isEnabled() {
-        return BuildInfo.isAtLeastQ() && ChromeFeatureList.isEnabled(ChromeFeatureList.USAGE_STATS);
+    /** Return the {@link UsageStatsService} for the given {@link Profile}. */
+    public static UsageStatsService getForProfile(Profile profile) {
+        return sProfileMap.getForProfile(profile, UsageStatsService::new);
     }
 
-    /** Get the global instance of UsageStatsService */
-    public static UsageStatsService getInstance() {
-        assert isEnabled();
-        if (sInstance == null) {
-            sInstance = new UsageStatsService();
-        }
-
-        return sInstance;
+    /**
+     * Creates a UsageStatsService for the given Activity.
+     *
+     * @param activity The activity in which page view events are occurring.
+     * @param profile The {@link Profile} associated with the activity.
+     * @param activityTabProvider The provider of the active tab for the activity.
+     * @param tabContentManagerSupplier Supplier of the current {@link TabContentManager}.
+     */
+    public static void createPageViewObserverIfEnabled(
+            Activity activity,
+            Profile profile,
+            ActivityTabProvider activityTabProvider,
+            Supplier<TabContentManager> tabContentManagerSupplier) {
+        getForProfile(profile)
+                .createPageViewObserver(activity, activityTabProvider, tabContentManagerSupplier);
     }
 
     @VisibleForTesting
-    UsageStatsService() {
-        mProfile = Profile.getLastUsedRegularProfile();
+    UsageStatsService(Profile profile) {
+        mProfile = profile;
         mBridge = new UsageStatsBridge(mProfile, this);
         mEventTracker = new EventTracker(mBridge);
-        mNotificationSuspender = new NotificationSuspender(mProfile);
-        mSuspensionTracker = new SuspensionTracker(mBridge, mNotificationSuspender);
+        mSuspensionTracker = new SuspensionTracker(mBridge, mProfile);
         mTokenTracker = new TokenTracker(mBridge);
         mPageViewObservers = new ArrayList<>();
-        mClient = AppHooks.get().createDigitalWellbeingClient();
 
-        mSuspensionTracker.getAllSuspendedWebsites().then(
-                (suspendedSites) -> { notifyObserversOfSuspensions(suspendedSites, true); });
+        DigitalWellbeingClient client = ServiceLoaderUtil.maybeCreate(DigitalWellbeingClient.class);
+        if (client == null) {
+            client = new DigitalWellbeingClient();
+        }
+        mClient = client;
 
-        mOptInState = getOptInState();
+        mSuspensionTracker
+                .getAllSuspendedWebsites()
+                .then(
+                        (suspendedSites) -> {
+                            notifyObserversOfSuspensions(suspendedSites, true);
+                        });
     }
 
-    /* package */ NotificationSuspender getNotificationSuspender() {
-        return mNotificationSuspender;
+    @Override
+    public void destroy() {
+        mBridge.destroy();
+    }
+
+    public SuspensionTracker getSuspensionTracker() {
+        return mSuspensionTracker;
     }
 
     /**
      * Create a {@link PageViewObserver} for the given tab model selector and activity.
-     * @param tabModelSelector The tab model selector that should be used to get the current tab
-     *         model.
-     * @param activity The activity in which page view events are occuring.
+     * @param activity The activity in which page view events are occurring.
+     * @param activityTabProvider The provider of the active tab for the activity.
+     * @param tabContentManagerSupplier Supplier of the current {@link TabContentManager}.
      */
-    public PageViewObserver createPageViewObserver(
-            TabModelSelector tabModelSelector, Activity activity) {
+    private PageViewObserver createPageViewObserver(
+            Activity activity,
+            ActivityTabProvider activityTabProvider,
+            Supplier<TabContentManager> tabContentManagerSupplier) {
         ThreadUtils.assertOnUiThread();
-        PageViewObserver observer = new PageViewObserver(
-                activity, tabModelSelector, mEventTracker, mTokenTracker, mSuspensionTracker);
+        PageViewObserver observer =
+                new PageViewObserver(
+                        activity,
+                        activityTabProvider.asObservable(),
+                        mEventTracker,
+                        mTokenTracker,
+                        mSuspensionTracker,
+                        tabContentManagerSupplier);
         mPageViewObservers.add(new WeakReference<>(observer));
         return observer;
     }
@@ -100,34 +132,30 @@ public class UsageStatsService {
     /** @return Whether the user has authorized DW to access usage stats data. */
     boolean getOptInState() {
         ThreadUtils.assertOnUiThread();
-        boolean enabledByPref = UserPrefs.get(mProfile).getBoolean(Pref.USAGE_STATS_ENABLED);
-        boolean enabledByFeature = ChromeFeatureList.isEnabled(ChromeFeatureList.USAGE_STATS);
-        // If the user has previously opted in, but the feature has been turned off, we need to
-        // treat it as if they opted out; otherwise they'll have no UI affordance for clearing
-        // whatever data Digital Wellbeing has stored.
-        if (enabledByPref && !enabledByFeature) {
-            onAllHistoryDeleted();
-            setOptInState(false);
-        }
-
-        return enabledByPref && enabledByFeature;
+        return UserPrefs.get(mProfile).getBoolean(Pref.USAGE_STATS_ENABLED);
     }
 
     /** Sets the user's opt in state. */
     void setOptInState(boolean state) {
         ThreadUtils.assertOnUiThread();
+        boolean oldState = getOptInState();
+        if (oldState == state) return;
+
         UserPrefs.get(mProfile).setBoolean(Pref.USAGE_STATS_ENABLED, state);
 
-        if (mOptInState == state) return;
-        mOptInState = state;
-        mClient.notifyOptInStateChange(mOptInState);
+        mClient.notifyOptInStateChange(state);
 
         if (!state) {
-            getAllSuspendedWebsitesAsync().then(
-                    (suspendedSites) -> { setWebsitesSuspendedAsync(suspendedSites, false); });
-            getAllTrackedTokensAsync().then((tokens) -> {
-                for (String token : tokens) stopTrackingTokenAsync(token);
-            });
+            getAllSuspendedWebsitesAsync()
+                    .then(
+                            (suspendedSites) -> {
+                                setWebsitesSuspendedAsync(suspendedSites, false);
+                            });
+            getAllTrackedTokensAsync()
+                    .then(
+                            (tokens) -> {
+                                for (String token : tokens) stopTrackingTokenAsync(token);
+                            });
         }
 
         @UsageStatsMetricsEvent
@@ -157,18 +185,17 @@ public class UsageStatsService {
     }
 
     /**
-     * Stops tracking the site associated with the given token.
-     * If the token was not associated with a site, this does nothing.
+     * Stops tracking the site associated with the given token. If the token was not associated with
+     * a site, this does nothing.
      */
-    public Promise<Void> stopTrackingTokenAsync(String token) {
+    public Promise<@Nullable Void> stopTrackingTokenAsync(String token) {
         ThreadUtils.assertOnUiThread();
         return mTokenTracker.stopTrackingToken(token);
     }
 
-    /**
-     * Suspend or unsuspend every site in FQDNs, depending on the value of {@code suspended}.
-     */
-    public Promise<Void> setWebsitesSuspendedAsync(List<String> fqdns, boolean suspended) {
+    /** Suspend or unsuspend every site in FQDNs, depending on the value of {@code suspended}. */
+    public Promise<@Nullable Void> setWebsitesSuspendedAsync(
+            List<String> fqdns, boolean suspended) {
         ThreadUtils.assertOnUiThread();
         notifyObserversOfSuspensions(fqdns, suspended);
 
@@ -184,13 +211,25 @@ public class UsageStatsService {
     public void onAllHistoryDeleted() {
         ThreadUtils.assertOnUiThread();
         UsageStatsMetricsReporter.reportMetricsEvent(UsageStatsMetricsEvent.CLEAR_ALL_HISTORY);
-        mClient.notifyAllHistoryCleared();
-        mEventTracker.clearAll().except((exception) -> {
-            // Retry once; if the subsequent attempt fails, log the failure and move on.
-            mEventTracker.clearAll().except((exceptionInner) -> {
-                Log.e(TAG, "Failed to clear all events for history deletion");
-            });
-        });
+        if (getOptInState()) {
+            mClient.notifyAllHistoryCleared();
+        }
+        mEventTracker
+                .clearAll()
+                .except(
+                        (exception) -> {
+                            // Retry once; if the subsequent attempt fails, log the failure and move
+                            // on.
+                            mEventTracker
+                                    .clearAll()
+                                    .except(
+                                            (exceptionInner) -> {
+                                                Log.e(
+                                                        TAG,
+                                                        "Failed to clear all events for history"
+                                                                + " deletion");
+                                            });
+                        });
     }
 
     public void onHistoryDeletedInRange(long startTimeMs, long endTimeMs) {
@@ -200,25 +239,49 @@ public class UsageStatsService {
         // Timestamp proto. It doesn't make any sense to delete into the future, so we can
         // reasonably cap endTimeMs at now.
         long effectiveEndTimeMs = Math.min(endTimeMs, System.currentTimeMillis());
-        mClient.notifyHistoryDeletion(startTimeMs, effectiveEndTimeMs);
-        mEventTracker.clearRange(startTimeMs, effectiveEndTimeMs).except((exception) -> {
-            // Retry once; if the subsequent attempt fails, log the failure and move on.
-            mEventTracker.clearRange(startTimeMs, endTimeMs).except((exceptionInner) -> {
-                Log.e(TAG, "Failed to clear range of events for history deletion");
-            });
-        });
+        if (getOptInState()) {
+            mClient.notifyHistoryDeletion(startTimeMs, effectiveEndTimeMs);
+        }
+        mEventTracker
+                .clearRange(startTimeMs, effectiveEndTimeMs)
+                .except(
+                        (exception) -> {
+                            // Retry once; if the subsequent attempt fails, log the failure and move
+                            // on.
+                            mEventTracker
+                                    .clearRange(startTimeMs, endTimeMs)
+                                    .except(
+                                            (exceptionInner) -> {
+                                                Log.e(
+                                                        TAG,
+                                                        "Failed to clear range of events for"
+                                                                + " history deletion");
+                                            });
+                        });
     }
 
     public void onHistoryDeletedForDomains(List<String> fqdns) {
         ThreadUtils.assertOnUiThread();
         UsageStatsMetricsReporter.reportMetricsEvent(UsageStatsMetricsEvent.CLEAR_HISTORY_DOMAIN);
-        mClient.notifyHistoryDeletion(fqdns);
-        mEventTracker.clearDomains(fqdns).except((exception) -> {
-            // Retry once; if the subsequent attempt fails, log the failure and move on.
-            mEventTracker.clearDomains(fqdns).except((exceptionInner) -> {
-                Log.e(TAG, "Failed to clear domain events for history deletion");
-            });
-        });
+        if (getOptInState()) {
+            mClient.notifyHistoryDeletion(fqdns);
+        }
+        mEventTracker
+                .clearDomains(fqdns)
+                .except(
+                        (exception) -> {
+                            // Retry once; if the subsequent attempt fails, log the failure and move
+                            // on.
+                            mEventTracker
+                                    .clearDomains(fqdns)
+                                    .except(
+                                            (exceptionInner) -> {
+                                                Log.e(
+                                                        TAG,
+                                                        "Failed to clear domain events for history"
+                                                                + " deletion");
+                                            });
+                        });
     }
 
     // The below methods are dummies that are only being retained to avoid breaking the downstream
@@ -236,25 +299,18 @@ public class UsageStatsService {
         return "1";
     }
 
-    public void stopTrackingToken(String token) {
-        return;
-    }
+    public void stopTrackingToken(String token) {}
 
-    public void setWebsitesSuspended(List<String> fqdns, boolean suspended) {
-        return;
-    }
+    public void setWebsitesSuspended(List<String> fqdns, boolean suspended) {}
 
     public List<String> getAllSuspendedWebsites() {
         return new ArrayList<>();
     }
 
     private void notifyObserversOfSuspensions(List<String> fqdns, boolean suspended) {
-        for (WeakReference<PageViewObserver> observerRef : mPageViewObservers) {
-            PageViewObserver observer = observerRef.get();
-            if (observer != null) {
-                for (String fqdn : fqdns) {
-                    observer.notifySiteSuspensionChanged(fqdn, suspended);
-                }
+        for (PageViewObserver observer : CollectionUtil.strengthen(mPageViewObservers)) {
+            for (String fqdn : fqdns) {
+                observer.notifySiteSuspensionChanged(fqdn, suspended);
             }
         }
     }

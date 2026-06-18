@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,122 +7,153 @@
 
 #include "base/component_export.h"
 #include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
 #include "build/build_config.h"
 #include "ui/base/buildflags.h"
 
 namespace features {
 
-// Keep sorted!
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kSendEmptyGestureScrollUpdate);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE_PARAM(bool,
+                           kSendEmptyGestureScrollUpdateFilterOutEmptyUpdates);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kExperimentalFlingAnimation);
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kFocusFollowsCursor);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kDragDropOnlySynthesizeHttpOrHttpsUrlsFromText);
 
+#if BUILDFLAG(IS_CHROMEOS)
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kColorProviderRedirection;
+BASE_DECLARE_FEATURE(kSettingsShowsPerKeyboardSettings);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kSystemKeyboardLock);
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kCompositorThreadedScrollbarScrolling;
+BASE_DECLARE_FEATURE(kUiCompositorScrollWithLayers);
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kExperimentalFlingAnimation;
-#if defined(OS_CHROMEOS)
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kSettingsShowsPerKeyboardSettings;
-#endif  // defined(OS_CHROMEOS)
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kInputMethodSettingsUiUpdate;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kPercentBasedScrolling;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kPointerLockOptions;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kSystemCaptionStyle;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kSystemKeyboardLock;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kNotificationIndicator;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kUiCompositorScrollWithLayers;
-
-COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsNotificationIndicatorEnabled();
+BASE_DECLARE_FEATURE(kUiCompositorUsesLayerLists);
 
 COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsUiGpuRasterizationEnabled();
 
-#if defined(OS_WIN)
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kCalculateNativeWinOcclusion;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kElasticOverscrollWin;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kInputPaneOnScreenKeyboard;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kPointerEventsForTouch;
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kPrecisionTouchpadLogging;
-COMPONENT_EXPORT(UI_BASE_FEATURES) extern const base::Feature kTSFImeSupport;
+#if !BUILDFLAG(IS_APPLE)
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kElasticOverscroll);
+#endif
 
-// Returns true if the system should use WM_POINTER events for touch events.
-COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsUsingWMPointerForTouch();
-#endif  // defined(OS_WIN)
-
-#if defined(OS_WIN) || defined(OS_APPLE) || defined(OS_LINUX) || \
-    defined(OS_CHROMEOS)
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kDirectManipulationStylus;
-#endif  // defined(OS_WIN) || defined(OS_APPLE) || defined(OS_LINUX) ||
-        // defined(OS_CHROMEOS)
+BASE_DECLARE_FEATURE(kLimitScrollDeltaToScrollerSize);
+
+#if BUILDFLAG(IS_WIN)
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kCalculateNativeWinOcclusion);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kApplyNativeOcclusionToCompositor);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kAlwaysTrackNativeWindowOcclusionForTest);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kRecalculateNativeWinOcclusionOnWindowDestroy);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const base::FeatureParam<std::string>
+    kApplyNativeOcclusionToCompositorType;
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kApplyNativeOcclusionToCompositorTypeRelease[];
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kApplyNativeOcclusionToCompositorTypeThrottle[];
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kApplyNativeOcclusionToCompositorTypeThrottleAndRelease[];
+#endif  // BUILDFLAG(IS_WIN)
+
+#if BUILDFLAG(IS_MAC)
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kOnlyUseWindowResizeHelperOnResize);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kCATransactionV2);
+inline constexpr base::FeatureParam<size_t> kCAContextMaxFencePorts{
+    &kCATransactionV2, "ca_context_max_fence_ports", 4};
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kAsyncLiveResize);
+#endif  // BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_CHROMEOS)
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+bool IsImprovedKeyboardShortcutsEnabled();
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kTouchTextEditingRedesign);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+bool IsTouchTextEditingRedesignEnabled();
+
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kTouchDragAndDrop);
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsTouchDragAndDropEnabled();
 
 // Used to enable forced colors mode for web content.
-COMPONENT_EXPORT(UI_BASE_FEATURES) extern const base::Feature kForcedColors;
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kForcedColors);
 COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsForcedColorsEnabled();
 
 // Used to enable the eye-dropper in the refresh color-picker.
-COMPONENT_EXPORT(UI_BASE_FEATURES) extern const base::Feature kEyeDropper;
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kEyeDropper);
 COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsEyeDropperEnabled();
 
-// Used to enable form controls and scrollbar dark mode rendering.
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kCSSColorSchemeUARendering;
-COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsCSSColorSchemeUARenderingEnabled();
+BASE_DECLARE_FEATURE(kSystemCursorSizeSupported);
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsSystemCursorSizeSupported();
 
-// Used to enable the new controls UI.
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kFormControlsRefresh;
-COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsFormControlsRefreshEnabled();
+BASE_DECLARE_FEATURE(kUseCursorEventHook);
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool ShouldUseCursorEventHook();
 
-// Used to enable the common select popup.
+// Used to enable keyboard accessible tooltips in in-page content
+// (i.e., inside Blink). See
+// ::views::features::kKeyboardAccessibleTooltipInViews for
+// keyboard-accessible tooltips in Views UI.
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kUseCommonSelectPopup;
-COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsUseCommonSelectPopupEnabled();
+BASE_DECLARE_FEATURE(kKeyboardAccessibleTooltip);
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsKeyboardAccessibleTooltipEnabled();
 
-#if defined(OS_CHROMEOS)
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kHandwritingGesture;
-
-COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kNewShortcutMapping;
+#if BUILDFLAG(IS_CHROMEOS)
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kDeprecateAltClick);
 
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-bool IsNewShortcutMappingEnabled();
+bool IsDeprecateAltClickEnabled();
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kNotificationsIgnoreRequireInteraction);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+bool IsNotificationsIgnoreRequireInteractionEnabled();
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kSupportF11AndF12KeyShortcuts);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool AreF11AndF12ShortcutsEnabled();
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(IS_OZONE)
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kOzoneBubblesUsePlatformWidgets);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kWaylandTextInputV3);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kWaylandSessionManagement);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kWaylandExternalBeginFrameSource);
+#endif  // BUILDFLAG(IS_OZONE)
+
+#if BUILDFLAG(IS_LINUX)
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kGlobalShortcutsPortalPreferredTrigger);
 #endif
 
 // Indicates whether DrmOverlayManager should used the synchronous API to
 // perform pageflip tests.
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kSynchronousPageFlipTesting;
+BASE_DECLARE_FEATURE(kSynchronousPageFlipTesting);
 
 COMPONENT_EXPORT(UI_BASE_FEATURES)
 bool IsSynchronousPageFlipTestingEnabled();
-
-#if defined(USE_X11) || defined(USE_OZONE)
-// Indicates whether the OzonePlatform feature is used on Linux. Although, it is
-// available for all Ozone platforms, this always resolves to true for
-// non-desktop Linux builds. The reason why it is needed for all Ozone builds is
-// that we have many places in the code that Ozone takes independently of the
-// platform, and it's highly important that when USE_X11 && USE_OZONE are true
-// and the OzonePlatform feature is not enabled, the Ozone path is never taken.
-// This will be removed as soon as Ozone/Linux is default and USE_X11 is
-// removed.  More info at
-// https://docs.google.com/document/d/1PvKquOHWySbvbe4bgduAcpW0Pda4BBhXI7xphtyDtPQ
-COMPONENT_EXPORT(UI_BASE_FEATURES) extern const base::Feature kUseOzonePlatform;
-
-COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsUsingOzonePlatform();
-#endif
 
 // The type of predictor to use for the resampling events. These values are
 // used as the 'predictor' feature param for
@@ -137,14 +168,174 @@ COMPONENT_EXPORT(UI_BASE_FEATURES)
 extern const char kPredictorNameLinearResampling[];
 COMPONENT_EXPORT(UI_BASE_FEATURES) extern const char kPredictorNameEmpty[];
 
+// Enables resampling of scroll events using an experimental latency of +3.3ms
+// instead of the original -5ms.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kResamplingScrollEventsExperimentalPrediction);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kResampleLatencyModeFixedMs[];
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kResampleLatencyModeFractional[];
+
+// Enables experimental configuration of the resample latency for scroll events.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kResampleScrollEventsLatency);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const base::FeatureParam<std::string> kResampleLatencyModeParam;
+
+// Param for the value used in the chosen mode.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const base::FeatureParam<double> kResampleLatencyValueParam;
+
+// Uses a ratio of the vsync refresh rate. The timing/ratio can be changed on
+// the command line through a `latency` param.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kPredictionTypeFramesBased[];
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kPredictionTypeDefaultFramesVariation1[];
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kPredictionTypeDefaultFramesVariation2[];
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+extern const char kPredictionTypeDefaultFramesVariation3[];
+
 // The type of filter to use for filtering events. These values are used as the
 // 'filter' feature param for |blink::features::kFilteringScrollPrediction|.
 COMPONENT_EXPORT(UI_BASE_FEATURES) extern const char kFilterNameEmpty[];
 COMPONENT_EXPORT(UI_BASE_FEATURES) extern const char kFilterNameOneEuro[];
 
 // Android only feature, for swipe to move cursor.
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kSwipeToMoveCursor);
+
+// Enables UI debugging tools such as shortcuts.
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kUIDebugTools);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsSwipeToMoveCursorEnabled();
+
+// Enables Raw Draw.
+COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kRawDraw);
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsUsingRawDraw();
+COMPONENT_EXPORT(UI_BASE_FEATURES) double RawDrawTileSizeFactor();
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsRawDrawUsingMSAA();
+
+// This feature indicates that this device should have variable refresh rates
+// enabled by default if available. This overrides the default value of
+// |kEnableVariableRefreshRate|. This flag is added by cros-config and not
+// exposed in the chrome://flags UI.
 COMPONENT_EXPORT(UI_BASE_FEATURES)
-extern const base::Feature kSwipeToMoveCursor;
+BASE_DECLARE_FEATURE(kVariableRefreshRateAvailable);
+// Enables the variable refresh rate feature for Borealis gaming only.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kEnableVariableRefreshRate);
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsVariableRefreshRateEnabled();
+// Enables the variable refresh rate feature at all times.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kEnableVariableRefreshRateAlwaysOn);
+COMPONENT_EXPORT(UI_BASE_FEATURES) bool IsVariableRefreshRateAlwaysOn();
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kBubbleMetricsApi);
+
+#if BUILDFLAG(IS_WIN)
+// Use font settings for contrast and gamma as specified in system settings.
+// If not set, these values fall back to the pre-defined Skia defaults.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kUseGammaContrastRegistrySettings);
+#endif  // BUILDFLAG(IS_WIN)
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kBubbleFrameViewTitleIsHeading);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kEnableGestureBeginEndTypes);
+
+// Use the UTF-8 encoding for SVG images instead of UTF-16.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kUseUtf8EncodingForSvgImage);
+
+// Copy bookmark and write url format to clipboard with empty title.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kWriteBookmarkWithoutTitle);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kAsyncFullscreenWindowState);
+
+// Enable ClipboardChange event API
+// https://chromestatus.com/feature/5085102657503232
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kPlatformClipboardMonitor);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kNonBlockingOsClipboardReads);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kEnablePixelCanvasRecording);
+
+bool COMPONENT_EXPORT(UI_BASE_FEATURES) IsPixelCanvasRecordingEnabled();
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kHandleIMESpanChangesOnUpdateComposition);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+bool IsHandleIMESpanChangesOnUpdateCompositionEnabled();
+
+// Kill switch for honoring the HTML autocorrect="off" attribute by detecting
+// and reverting touch keyboard autocorrections in TSF.
+// See https://issues.chromium.org/issues/487613498.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kTSFHonorAutocorrectOff);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+bool IsTSFHonorAutocorrectOffEnabled();
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kStringWidthCache);
+
+// Fix for ZIP Shell Folder virtual file detection. When enabled,
+// HasVirtualFilenames() checks if CF_HDROP actually returns data
+// (not just advertises it) before treating files as real.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kUseClipboardStrictVirtualFileCheck);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kAsyncVirtualFileExtraction);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kVirtualFileChunkedRead);
+
+// When enabled, compensates for latency of handling the first blocking touch
+// move in the renderer by dampening the corresponding gesture scroll updates.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kCompensateGestureScrollUpdateLatency);
+
+// The latency (in milliseconds) for acknowledging blocking touch moves that is
+// considered expected by the `CompensateGestureScrollUpdateLatency` feature.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE_PARAM(int, kCompensationExpectedLatencyMs);
+
+// The latency (in milliseconds) for acknowledging blocking touch moves that is
+// considered acceptable by the `CompensateGestureScrollUpdateLatency` feature.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE_PARAM(int, kCompensationAcceptableLatencyMs);
+
+// When enabled, Ctrl+Alt+Click (Cmd+Alt+Click on macOS) opens a link in a
+// split view alongside the current tab.
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kSplitViewLinkOpen);
+
+// All feature flags associated with Glow Up, apart from those in ui_features.h
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kDesktopGlowUp);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kGlassFrame);
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+BASE_DECLARE_FEATURE(kRoundedIcons);
+
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+bool IsGlassFrameEnabled();
+COMPONENT_EXPORT(UI_BASE_FEATURES)
+bool IsRoundedIconsEnabled();
 
 }  // namespace features
 

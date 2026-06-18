@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,38 +8,55 @@
 #include <memory>
 #include <vector>
 
-#include "base/task/post_task.h"
-#include "base/task_runner.h"
-#include "chrome/browser/policy/messaging_layer/upload/dm_server_upload_service.h"
-#include "chrome/browser/policy/messaging_layer/util/status.h"
-#include "chrome/browser/policy/messaging_layer/util/statusor.h"
-#include "components/policy/core/common/cloud/cloud_policy_client.h"
-#include "components/policy/proto/record.pb.h"
+#include "base/task/sequenced_task_runner.h"
+#include "chrome/browser/policy/messaging_layer/upload/server_uploader.h"
+#include "chrome/browser/policy/messaging_layer/util/upload_declarations.h"
+#include "components/reporting/proto/synced/record.pb.h"
+#include "components/reporting/resources/resource_manager.h"
+#include "components/reporting/util/status.h"
+#include "components/reporting/util/statusor.h"
 
 namespace reporting {
 
 // UploadClient handles sending records to the correct upload service.
 class UploadClient {
  public:
-  // ReportSuccessfulUploadCallback is used to pass server responses back to
-  // the owner of |this|.
-  using ReportSuccessfulUploadCallback =
-      base::RepeatingCallback<void(SequencingInformation)>;
+  // UpdateConfigInMissiveCallback is called if the configuration file obtained
+  // from the server is different from the one that was sent previously using
+  // this callback.
+  using UpdateConfigInMissiveCallback =
+      ::reporting::UpdateConfigInMissiveCallback;
 
-  static StatusOr<std::unique_ptr<UploadClient>> Create(
-      std::unique_ptr<policy::CloudPolicyClient> cloud_policy_client,
-      ReportSuccessfulUploadCallback report_success_cb);
+  // CreatedCallback gets a result of Upload client creation (unique pointer or
+  // error status).
+  using CreatedCallback =
+      base::OnceCallback<void(StatusOr<std::unique_ptr<UploadClient>>)>;
 
-  ~UploadClient();
+  static void Create(CreatedCallback created_cb);
+
+  virtual ~UploadClient();
   UploadClient(const UploadClient& other) = delete;
   UploadClient& operator=(const UploadClient& other) = delete;
 
-  Status EnqueueUpload(std::unique_ptr<std::vector<EncryptedRecord>> record);
+  // Enqueues upload and provides the callbacks to track it:
+  // - `enqueued_cb` is called once the upload is enqueued (not started!);
+  // - `report_upload_success_cb` and `encryption_key_attached_cb` are called
+  // when the upload is responded by the server.
+  virtual void EnqueueUpload(
+      bool need_encryption_key,
+      int config_file_version,
+      std::vector<EncryptedRecord> record,
+      ScopedReservation scoped_reservation,
+      UploadEnqueuedCallback enqueued_cb,
+      ReportSuccessfulUploadCallback report_upload_success_cb,
+      EncryptionKeyAttachedCallback encryption_key_attached_cb,
+      ConfigFileAttachedCallback config_file_attached_cb);
 
- private:
+ protected:
   UploadClient();
 
-  std::unique_ptr<DmServerUploadService> dm_server_upload_service_;
+ private:
+  const scoped_refptr<base::SequencedTaskRunner> sequenced_task_runner_;
 };
 
 }  // namespace reporting

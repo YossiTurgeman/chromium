@@ -26,12 +26,17 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_OFFLINE_AUDIO_CONTEXT_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_OFFLINE_AUDIO_CONTEXT_H_
 
+#include "base/synchronization/lock.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
+#include "third_party/blink/renderer/platform/wtf/hash_set.h"
 
 namespace blink {
-
+class AudioBuffer;
 class ExceptionState;
 class OfflineAudioContextOptions;
 class OfflineAudioDestinationHandler;
@@ -50,21 +55,26 @@ class MODULES_EXPORT OfflineAudioContext final : public BaseAudioContext {
                                      const OfflineAudioContextOptions*,
                                      ExceptionState&);
 
-  OfflineAudioContext(Document*,
+  OfflineAudioContext(LocalDOMWindow*,
                       unsigned number_of_channels,
                       uint32_t number_of_frames,
                       float sample_rate,
-                      ExceptionState&);
+                      ExceptionState&,
+                      uint32_t render_quantum_frames);
+
   ~OfflineAudioContext() override;
 
   void Trace(Visitor*) const override;
 
   uint32_t length() const { return total_render_frames_; }
 
-  ScriptPromise startOfflineRendering(ScriptState*, ExceptionState&);
+  ScriptPromise<AudioBuffer> startOfflineRendering(ScriptState*,
+                                                   ExceptionState&);
 
-  ScriptPromise suspendContext(ScriptState*, double);
-  ScriptPromise resumeContext(ScriptState*);
+  ScriptPromise<IDLUndefined> suspendContext(ScriptState*,
+                                             double,
+                                             ExceptionState&);
+  ScriptPromise<IDLUndefined> resumeContext(ScriptState*, ExceptionState&);
 
   void RejectPendingResolvers() override;
 
@@ -77,8 +87,11 @@ class MODULES_EXPORT OfflineAudioContext final : public BaseAudioContext {
   // Fire completion event when the rendering is finished.
   void FireCompletionEvent();
 
-  bool HandlePreRenderTasks(const AudioIOPosition* output_position,
-                            const AudioCallbackMetric* metric) final;
+  bool HandlePreRenderTasks(uint32_t frames_to_process,
+                            const AudioIOPosition* output_position,
+                            const AudioCallbackMetric* metric,
+                            base::TimeDelta playout_delay,
+                            const media::AudioGlitchInfo& glitch_info) final;
   void HandlePostRenderTasks() final;
 
   // Resolve a suspend scheduled at the specified frame. With this specified
@@ -89,16 +102,12 @@ class MODULES_EXPORT OfflineAudioContext final : public BaseAudioContext {
   // OfflineAudioContext is not affected by Autoplay, so this MUST do nothing.
   void NotifySourceNodeStart() final {}
 
-  // The HashMap with 'zero' key is needed because |currentSampleFrame| can be
+  // The HashMap with 'zero' key is needed because `CurrentSampleFrame()` can be
   // zero.
   using SuspendMap = HeapHashMap<size_t,
-                                 Member<ScriptPromiseResolver>,
-                                 DefaultHash<size_t>::Hash,
-                                 WTF::UnsignedWithZeroKeyHashTraits<size_t>>;
+                                 Member<ScriptPromiseResolver<IDLUndefined>>,
+                                 IntWithZeroKeyHashTraits<size_t>>;
 
-  using OfflineGraphAutoLocker = DeferredTaskHandler::OfflineGraphAutoLocker;
-
-  // Document notification
   bool HasPendingActivity() const final;
 
  private:
@@ -113,20 +122,26 @@ class MODULES_EXPORT OfflineAudioContext final : public BaseAudioContext {
   // main thread and accessed by the audio thread with the graph lock.
   //
   // The map consists of key-value pairs of:
-  // { size_t quantizedFrame: ScriptPromiseResolver resolver }
+  // { size_t quantized_frame: ScriptPromiseResolverBase resolver }
   //
-  // Note that |quantizedFrame| is a unique key, since you can have only one
+  // Note that `quantized_frame` is a unique key, since you can have only one
   // suspend scheduled for a certain frame. Accessing to this must be
   // protected by the offline context lock.
   SuspendMap scheduled_suspends_;
 
-  Member<ScriptPromiseResolver> complete_resolver_;
+  base::Lock suspend_frames_lock_;
+  // Holds copies of `quantized_frame` in `scheduled_suspends_` to ensure
+  // a safe access from the audio thread.
+  HashSet<size_t, IntWithZeroKeyHashTraits<size_t>> scheduled_suspend_frames_
+      GUARDED_BY(suspend_frames_lock_);
+
+  Member<ScriptPromiseResolver<AudioBuffer>> complete_resolver_;
 
   // This flag is necessary to indicate the rendering has actually started or
   // running. Note that initial state of context is 'Suspended', which is the
   // same state when the context is suspended, so we cannot utilize it for this
   // purpose.
-  bool is_rendering_started_;
+  bool is_rendering_started_ = false;
 
   // Total render sample length.
   uint32_t total_render_frames_;

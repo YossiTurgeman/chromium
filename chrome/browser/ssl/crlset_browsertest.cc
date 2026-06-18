@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #include "base/files/file_util.h"
 #include "base/path_service.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/stringprintf.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "build/build_config.h"
 #include "chrome/browser/interstitials/security_interstitial_page_test_utils.h"
@@ -15,6 +14,7 @@
 #include "chrome/browser/ssl/ssl_browsertest_util.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/test/base/chrome_test_utils.h"
+#include "chrome/test/base/platform_browser_test.h"
 #include "components/security_interstitials/core/controller_client.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
@@ -22,7 +22,7 @@
 #include "content/public/browser/ssl_status.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
-#include "content/public/test/content_browser_test_utils.h"
+#include "content/public/test/browser_test_utils.h"
 #include "net/base/net_errors.h"
 #include "net/cert/cert_status_flags.h"
 #include "net/cert/cert_verify_result.h"
@@ -31,12 +31,7 @@
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/test/test_data_directory.h"
-
-#if defined(OS_ANDROID)
-#include "chrome/test/base/android/android_browser_test.h"
-#else
-#include "chrome/test/base/in_process_browser_test.h"
-#endif
+#include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom.h"
 
 namespace AuthState = ssl_test_util::AuthState;
 namespace CertError = ssl_test_util::CertError;
@@ -79,8 +74,8 @@ IN_PROC_BROWSER_TEST_F(CRLSetBrowserTest, TestCRLSetRevoked) {
         &crl_set_bytes);
   }
   base::RunLoop run_loop;
-  content::GetNetworkService()->UpdateCRLSet(
-      base::as_bytes(base::make_span(crl_set_bytes)), run_loop.QuitClosure());
+  content::GetCertVerifierServiceFactory()->UpdateCRLSet(
+      base::as_byte_span(crl_set_bytes), run_loop.QuitClosure());
   run_loop.Run();
 
   bool interstitial_expected =
@@ -95,7 +90,8 @@ IN_PROC_BROWSER_TEST_F(CRLSetBrowserTest, TestCRLSetRevoked) {
   ASSERT_EQ(interstitial_expected,
             chrome_browser_interstitials::IsShowingInterstitial(
                 GetActiveWebContents()));
-  ASSERT_TRUE(WaitForRenderFrameReady(GetActiveWebContents()->GetMainFrame()));
+  ASSERT_TRUE(
+      WaitForRenderFrameReady(GetActiveWebContents()->GetPrimaryMainFrame()));
 
   if (interstitial_expected) {
     ASSERT_TRUE(chrome_browser_interstitials::IsShowingSSLInterstitial(
@@ -124,8 +120,8 @@ IN_PROC_BROWSER_TEST_F(CRLSetBrowserTest, TestCRLSetBlockedInterception) {
                            &crl_set_bytes);
   }
   base::RunLoop run_loop;
-  content::GetNetworkService()->UpdateCRLSet(
-      base::as_bytes(base::make_span(crl_set_bytes)), run_loop.QuitClosure());
+  content::GetCertVerifierServiceFactory()->UpdateCRLSet(
+      base::as_byte_span(crl_set_bytes), run_loop.QuitClosure());
   run_loop.Run();
 
   bool interstitial_expected =
@@ -140,7 +136,8 @@ IN_PROC_BROWSER_TEST_F(CRLSetBrowserTest, TestCRLSetBlockedInterception) {
   ASSERT_EQ(interstitial_expected,
             chrome_browser_interstitials::IsShowingInterstitial(
                 GetActiveWebContents()));
-  ASSERT_TRUE(WaitForRenderFrameReady(GetActiveWebContents()->GetMainFrame()));
+  ASSERT_TRUE(
+      WaitForRenderFrameReady(GetActiveWebContents()->GetPrimaryMainFrame()));
 
   if (interstitial_expected) {
     ASSERT_TRUE(
@@ -171,8 +168,8 @@ IN_PROC_BROWSER_TEST_F(CRLSetBrowserTest, TestCRLSetKnownInterception) {
                            &crl_set_bytes);
   }
   base::RunLoop run_loop;
-  content::GetNetworkService()->UpdateCRLSet(
-      base::as_bytes(base::make_span(crl_set_bytes)), run_loop.QuitClosure());
+  content::GetCertVerifierServiceFactory()->UpdateCRLSet(
+      base::as_byte_span(crl_set_bytes), run_loop.QuitClosure());
   run_loop.Run();
 
   // Navigate to the page. It should not cause an interstitial, but should
@@ -246,7 +243,8 @@ IN_PROC_BROWSER_TEST_F(CRLSetInterceptionBrowserTest,
 
   ASSERT_TRUE(chrome_browser_interstitials::IsShowingInterstitial(
       GetActiveWebContents()));
-  ASSERT_TRUE(WaitForRenderFrameReady(GetActiveWebContents()->GetMainFrame()));
+  ASSERT_TRUE(
+      WaitForRenderFrameReady(GetActiveWebContents()->GetPrimaryMainFrame()));
 
   ssl_test_util::CheckSecurityState(
       GetActiveWebContents(),
@@ -259,5 +257,5 @@ IN_PROC_BROWSER_TEST_F(CRLSetInterceptionBrowserTest,
 
   // Expect there to be a proceed link, even for HSTS.
   EXPECT_TRUE(chrome_browser_interstitials::InterstitialHasProceedLink(
-      GetActiveWebContents()->GetMainFrame()));
+      GetActiveWebContents()->GetPrimaryMainFrame()));
 }

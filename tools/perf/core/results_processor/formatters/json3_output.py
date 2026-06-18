@@ -1,11 +1,11 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Output formatter for JSON Test Results Format.
 
 Format specification:
-https://chromium.googlesource.com/chromium/src/+/master/docs/testing/json_test_results_format.md
+https://chromium.googlesource.com/chromium/src/+/main/docs/testing/json_test_results_format.md
 """
 
 import collections
@@ -98,18 +98,22 @@ def Convert(test_results, base_dir, test_path_format):
 
 
 def _DedupedStatus(values):
-  # TODO(crbug.com/754825): The following logic is a workaround for how the
+  # TODO(crbug.com/40534832): The following logic is a workaround for how the
   # flakiness dashboard determines whether a test is flaky. As a test_case
   # (i.e. story) may be run multiple times, we squash as sequence of PASS
   # results to a single one. Note this does not affect the total number of
   # passes in num_failures_by_type.
+  # See also crbug.com/1254733 for why we want to report a FAIL in the case
+  # of flaky failures. A failed test run means less perf data so in general we
+  # want to investigate and fix those failures, not dismiss them as flakes.
   deduped = set(values)
   if deduped == {'PASS'}:
     return 'PASS'
-  elif deduped == {'SKIP'}:
+  if deduped == {'SKIP'}:
     return 'SKIP'
-  else:
-    return ' '.join(values)
+  if 'FAIL' in deduped:
+    return 'FAIL'
+  return ' '.join(values)
 
 
 def _GetTagValue(tags, key, default=None, as_type=None):
@@ -123,11 +127,10 @@ def _ArtifactPath(artifact, base_dir):
   """Extract either remote or local path of an artifact."""
   if 'fetchUrl' in artifact:
     return artifact['fetchUrl']
-  else:
-    # The spec calls for paths to be relative to the output directory and
-    # '/'-delimited on all platforms.
-    path = os.path.relpath(artifact['filePath'], base_dir)
-    return path.replace(os.sep, '/')
+  # The spec calls for paths to be relative to the output directory and
+  # '/'-delimited on all platforms.
+  path = os.path.relpath(artifact['filePath'], base_dir)
+  return path.replace(os.sep, '/')
 
 
 def _MergeDict(target, values):

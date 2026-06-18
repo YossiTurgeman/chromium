@@ -1,19 +1,27 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_DOMAIN_RELIABILITY_TEST_UTIL_H_
 #define COMPONENTS_DOMAIN_RELIABILITY_TEST_UTIL_H_
 
+#include <map>
 #include <memory>
 
-#include "base/callback_forward.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
+#include "base/time/tick_clock.h"
+#include "base/time/time.h"
 #include "components/domain_reliability/config.h"
 #include "components/domain_reliability/scheduler.h"
 #include "components/domain_reliability/uploader.h"
 #include "components/domain_reliability/util.h"
 #include "net/base/host_port_pair.h"
 #include "url/gurl.h"
+
+namespace net {
+class IsolationInfo;
+}  // namespace net
 
 namespace domain_reliability {
 
@@ -37,10 +45,11 @@ class TestCallback {
 
 class MockUploader : public DomainReliabilityUploader {
  public:
-  typedef base::OnceCallback<void(const std::string& report_json,
-                                  int max_upload_depth,
-                                  const GURL& upload_url,
-                                  UploadCallback upload_callback)>
+  typedef base::RepeatingCallback<void(const std::string& report_json,
+                                       int max_upload_depth,
+                                       const GURL& upload_url,
+                                       const net::IsolationInfo& isolation_info,
+                                       UploadCallback upload_callback)>
       UploadRequestCallback;
 
   explicit MockUploader(UploadRequestCallback callback);
@@ -53,6 +62,7 @@ class MockUploader : public DomainReliabilityUploader {
   void UploadReport(const std::string& report_json,
                     int max_upload_depth,
                     const GURL& upload_url,
+                    const net::IsolationInfo& isolation_info,
                     UploadCallback callback) override;
   void Shutdown() override;
   void SetDiscardUploads(bool discard_uploads) override;
@@ -61,6 +71,19 @@ class MockUploader : public DomainReliabilityUploader {
  private:
   UploadRequestCallback callback_;
   bool discard_uploads_;
+};
+
+class MockTime;
+
+class MockTickClock : public base::TickClock {
+ public:
+  explicit MockTickClock(MockTime* mock_time) : mock_time_(mock_time) {}
+  ~MockTickClock() override = default;
+  // base::TickClock implementation
+  base::TimeTicks NowTicks() const override;
+
+ private:
+  raw_ptr<MockTime> mock_time_;
 };
 
 class MockTime : public MockableTime {
@@ -76,6 +99,7 @@ class MockTime : public MockableTime {
   base::Time Now() const override;
   base::TimeTicks NowTicks() const override;
   std::unique_ptr<MockableTime::Timer> CreateTimer() override;
+  const base::TickClock* AsTickClock() const override;
 
   // Pretends that |delta| has passed, and runs tasks that would've happened
   // during that interval (with |Now()| returning proper values while they
@@ -118,11 +142,12 @@ class MockTime : public MockableTime {
   base::TimeTicks epoch_ticks_;
   int task_sequence_number_;
   TaskMap tasks_;
+  MockTickClock tick_clock_;
 };
 
 std::unique_ptr<DomainReliabilityConfig> MakeTestConfig();
 std::unique_ptr<DomainReliabilityConfig> MakeTestConfigWithOrigin(
-    const GURL& origin);
+    const url::Origin& origin);
 DomainReliabilityScheduler::Params MakeTestSchedulerParams();
 
 }  // namespace domain_reliability

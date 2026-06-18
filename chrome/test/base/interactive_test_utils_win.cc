@@ -1,27 +1,33 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
+
 #include "chrome/test/base/interactive_test_utils.h"
+
+#include <windows.h>
 
 #include <Psapi.h>
 
 #include <memory>
 
-#include "base/bind.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/process/process_handle.h"
-#include "base/stl_util.h"
 #include "base/test/test_timeouts.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "chrome/test/base/interactive_test_utils_aura.h"
 #include "chrome/test/base/process_lineage_win.h"
-#include "chrome/test/base/save_desktop_snapshot_win.h"
+#include "chrome/test/base/save_desktop_snapshot.h"
 #include "chrome/test/base/window_contents_as_string_win.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/test/ui_controls.h"
@@ -31,20 +37,13 @@
 namespace ui_test_utils {
 
 void HideNativeWindow(gfx::NativeWindow window) {
-#if defined(OS_CHROMEOS)
-  HideNativeWindowAura(window);
-#else
   HWND hwnd = window->GetHost()->GetAcceleratedWidget();
   ::ShowWindow(hwnd, SW_HIDE);
-#endif  // OS_CHROMEOS
 }
 
 bool ShowAndFocusNativeWindow(gfx::NativeWindow window) {
-#if defined(OS_CHROMEOS)
-  ShowAndFocusNativeWindowAura(window);
-#endif  // OS_CHROMEOS
   window->Show();
-  // Always make sure the window hosting ash is visible and focused.
+  // Always make sure the window is visible and focused.
   HWND hwnd = window->GetHost()->GetAcceleratedWidget();
 
   ::ShowWindow(hwnd, SW_SHOW);
@@ -68,16 +67,16 @@ bool ShowAndFocusNativeWindow(gfx::NativeWindow window) {
     // Emit some diagnostic information about the foreground window and its
     // owning process.
     wchar_t window_title[256];
-    GetWindowText(foreground_window, window_title, base::size(window_title));
+    GetWindowText(foreground_window, window_title, std::size(window_title));
 
-    base::string16 lineage_str;
-    base::string16 window_contents;
+    std::wstring lineage_str;
+    std::wstring window_contents;
     DWORD foreground_process_id = 0;
     if (foreground_window) {
       GetWindowThreadProcessId(foreground_window, &foreground_process_id);
       ProcessLineage lineage = ProcessLineage::Create(foreground_process_id);
       if (!lineage.IsEmpty()) {
-        lineage_str = STRING16_LITERAL(", process lineage: ");
+        lineage_str = L", process lineage: ";
         lineage_str.append(lineage.ToString());
       }
 

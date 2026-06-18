@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,9 +29,6 @@ class TextDecorationThickness {
   bool IsAuto() const { return !thickness_from_font_ && thickness_.IsAuto(); }
 
   CORE_EXPORT bool operator==(const TextDecorationThickness&) const;
-  bool operator!=(const TextDecorationThickness& other) const {
-    return !(*this == other);
-  }
 
  private:
   Length thickness_;

@@ -1,14 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_DISPLAY_DISPLAY_CHANGE_DIALOG_H_
 #define ASH_DISPLAY_DISPLAY_CHANGE_DIALOG_H_
 
+#include <string>
+
 #include "ash/ash_export.h"
-#include "base/callback.h"
+#include "base/functional/callback.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string16.h"
 #include "base/timer/timer.h"
 #include "ui/views/window/dialog_delegate.h"
 
@@ -24,8 +27,8 @@ class ASH_EXPORT DisplayChangeDialog : public views::DialogDelegateView {
  public:
   using CancelCallback = base::OnceCallback<void(bool display_was_removed)>;
 
-  DisplayChangeDialog(base::string16 window_title,
-                      base::string16 timeout_message_with_placeholder,
+  DisplayChangeDialog(std::u16string window_title,
+                      std::u16string timeout_message_with_placeholder,
                       base::OnceClosure on_accept_callback,
                       CancelCallback on_cancel_callback);
   ~DisplayChangeDialog() override;
@@ -34,7 +37,8 @@ class ASH_EXPORT DisplayChangeDialog : public views::DialogDelegateView {
   DisplayChangeDialog& operator=(const DisplayChangeDialog&) = delete;
 
   // views::View:
-  gfx::Size CalculatePreferredSize() const override;
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& available_size) const override;
 
   base::WeakPtr<DisplayChangeDialog> GetWeakPtr();
 
@@ -52,14 +56,14 @@ class ASH_EXPORT DisplayChangeDialog : public views::DialogDelegateView {
 
   // Returns the string displayed as a message in the dialog which includes a
   // countdown timer.
-  base::string16 GetRevertTimeoutString() const;
+  std::u16string GetRevertTimeoutString() const;
 
   // The remaining timeout in seconds.
   uint16_t timeout_count_ = kDefaultTimeoutInSeconds;
 
-  const base::string16 timeout_message_with_placeholder_;
+  const std::u16string timeout_message_with_placeholder_;
 
-  views::Label* label_ = nullptr;  // Not owned.
+  raw_ptr<views::Label> label_ = nullptr;  // Not owned.
   base::OnceClosure on_accept_callback_;
   CancelCallback on_cancel_callback_;
 

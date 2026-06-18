@@ -1,4 +1,4 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,14 @@
 #include <string>
 #include <vector>
 
-#include "base/files/file_path.h"
 #include "base/time/time.h"
-#include "components/sync/engine/model_safe_worker.h"
 
 namespace syncer {
 
 class CancelationSignal;
 class DebugInfoGetter;
 class ExtensionsActivity;
-class ModelTypeRegistry;
+class DataTypeRegistry;
 class ServerConnectionManager;
 class SyncCycleContext;
 class SyncEngineEventListener;
@@ -28,12 +26,6 @@ class SyncScheduler;
 // components used by the SyncManager and other things inside engine/.
 class EngineComponentsFactory {
  public:
-  enum EncryptionMethod {
-    ENCRYPTION_LEGACY,
-    // Option to enable support for keystore key based encryption.
-    ENCRYPTION_KEYSTORE
-  };
-
   enum BackoffOverride {
     BACKOFF_NORMAL,
     // Use this value for integration testing to avoid long delays /
@@ -48,12 +40,11 @@ class EngineComponentsFactory {
   // EngineComponentsFactory can use this information to build components
   // with appropriate bells and whistles.
   struct Switches {
-    EncryptionMethod encryption_method;
     BackoffOverride backoff_override;
     bool force_short_nudge_delay_for_test;
   };
 
-  virtual ~EngineComponentsFactory() {}
+  virtual ~EngineComponentsFactory() = default;
 
   virtual std::unique_ptr<SyncScheduler> BuildScheduler(
       const std::string& name,
@@ -66,8 +57,7 @@ class EngineComponentsFactory {
       ExtensionsActivity* extensions_activity,
       const std::vector<SyncEngineEventListener*>& listeners,
       DebugInfoGetter* debug_info_getter,
-      ModelTypeRegistry* model_type_registry,
-      const std::string& invalidator_client_id,
+      DataTypeRegistry* data_type_registry,
       const std::string& cache_guid,
       const std::string& store_birthday,
       const std::string& bag_of_chips,

@@ -16,7 +16,7 @@ tests are organized by overall functionality instead). Put new tests into an
 existing test class or create a new one if a suitable one isn't available.
 
 #### How to write intrumentation tests?
-See the [instrumentation test doc](/testing/android/docs/instrumentation.md).
+See the [instrumentation test doc](/docs/testing/android_instrumentation_tests.md).
 
 #### How do tests interact with WebView?
 Tests are written as JUnit4 tests. [AwActivityTestRule] is used to create and
@@ -37,17 +37,19 @@ testing, use [EmbeddedTestServer](/net/test/android/javatests/src/org/chromium/n
 which will allow simple loading of files from the [data directory](/android_webview/test/data/).
 For loading data from arbitrary URIs and more advanced control, the
 [TestWebServer](/net/test/android/javatests/src/org/chromium/net/test/util/TestWebServer.java)
-can be used.
+can be used. Note that, when simulating input or user actions on web content,
+the content should include some visiible text because input is typically
+ignored until something meaningful is painted.
 
 ## Java unittest (JUnit)
 These are off-device tests using robolectric that only exercise android\_webview
 Java code.
 
-#### Where do add tests?
+#### Where to add tests?
 The tests are located in the [junit directory](/android_webview/junit/src/org/chromium/android_webview/robolectric/).
 
 #### How to write junit tests?
-See the [JUnit doc](/testing/android/docs/junit.md#junit-tests-with-robolectric).
+See the [JUnit doc](/docs/testing/android_robolectric_tests.md).
 
 ## Native unittests
 These are on-device gtests that only exercise android\_webview native code.
@@ -57,7 +59,7 @@ The tests are located alongside respective source code files under
 [android\_webview directory](/android_webview/).
 
 #### How to write gtests?
-See the [GTest doc](/testing/android/docs/gtest_implementation.md).
+See the [GTest doc](/docs/testing/android_gtests.md).
 
 ## How to run tests?
 Running tests is covered in [WebView Test Instructions](/android_webview/docs/test-instructions.md).

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <iterator>
 
 #include "base/containers/flat_set.h"
-#include "base/macros.h"
 #include "base/process/process_handle.h"
 #include "components/performance_manager/graph/frame_node_impl.h"
 #include "components/performance_manager/graph/graph_impl.h"
@@ -24,10 +23,13 @@ SystemNodeImpl::~SystemNodeImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 }
 
+void SystemNodeImpl::CleanUpNodeState() {}
+
 void SystemNodeImpl::OnProcessMemoryMetricsAvailable() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  for (auto* observer : GetObservers())
-    observer->OnProcessMemoryMetricsAvailable(this);
+  for (auto& observer : GetObservers()) {
+    observer.OnProcessMemoryMetricsAvailable(this);
+  }
 }
 
 }  // namespace performance_manager

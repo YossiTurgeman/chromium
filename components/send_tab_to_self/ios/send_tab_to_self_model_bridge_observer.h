@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,8 @@
 
 #import <Foundation/Foundation.h>
 
-#include "base/macros.h"
+#include "base/containers/span.h"
+#include "base/scoped_observation.h"
 #include "components/send_tab_to_self/send_tab_to_self_model.h"
 #include "components/send_tab_to_self/send_tab_to_self_model_observer.h"
 
@@ -16,17 +17,15 @@
 @protocol SendTabToSelfModelBridgeObserver <NSObject>
 
 @required
-- (void)sendTabToSelfModelLoaded:(send_tab_to_self::SendTabToSelfModel*)model;
-
 - (void)sendTabToSelfModel:(send_tab_to_self::SendTabToSelfModel*)model
      didAddEntriesRemotely:
-         (const std::vector<const send_tab_to_self::SendTabToSelfEntry*>&)
+         (base::span<const send_tab_to_self::SendTabToSelfEntry* const>)
              new_entries;
 
 // The Entry has already been deleted at this point and the guid cannot be used
 // to access the old entry via SendTabToSelfModel::GetEntryByGUID.
 - (void)sendTabToSelfModel:(send_tab_to_self::SendTabToSelfModel*)model
-    didRemoveEntriesRemotely:(const std::vector<std::string>&)guids;
+    didRemoveEntriesRemotely:(base::span<const std::string>)guids;
 @end
 
 namespace send_tab_to_self {
@@ -41,19 +40,22 @@ class SendTabToSelfModelBridge : public SendTabToSelfModelObserver {
   explicit SendTabToSelfModelBridge(
       id<SendTabToSelfModelBridgeObserver> observer,
       SendTabToSelfModel* model);
+
+  SendTabToSelfModelBridge(const SendTabToSelfModelBridge&) = delete;
+  SendTabToSelfModelBridge& operator=(const SendTabToSelfModelBridge&) = delete;
+
   ~SendTabToSelfModelBridge() override;
 
  private:
-  void SendTabToSelfModelLoaded() override;
-  void EntriesAddedRemotely(
-      const std::vector<const SendTabToSelfEntry*>&) override;
-  void EntriesRemovedRemotely(const std::vector<std::string>&) override;
+  void OnEntriesAddedRemotely(
+      base::span<const SendTabToSelfEntry* const> new_entries) override;
+  void OnEntriesRemovedRemotely(base::span<const std::string> guids) override;
 
   __weak id<SendTabToSelfModelBridgeObserver> observer_;
 
   SendTabToSelfModel* model_;  // weak
-
-  DISALLOW_COPY_AND_ASSIGN(SendTabToSelfModelBridge);
+  base::ScopedObservation<SendTabToSelfModel, SendTabToSelfModelObserver>
+      model_observation_{this};
 };
 
 }  // namespace send_tab_to_self

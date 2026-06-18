@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 #include <wrl/implements.h>
 #include <map>
 
-#include "base/callback_forward.h"
+#include "base/functional/callback_forward.h"
 
 namespace webshare {
 
@@ -19,7 +19,7 @@ class FakeDataTransferManager;
 //
 // Like the Windows implementation, this class cloaks its implementation of
 // IDataTransferManagerInterop to closely match casting behaviors.
-class FakeDataTransferManagerInterop
+class FakeDataTransferManagerInterop final
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<
               Microsoft::WRL::RuntimeClassType::WinRtClassicComMix>,
@@ -52,13 +52,13 @@ class FakeDataTransferManagerInterop
       delete;
   FakeDataTransferManagerInterop& operator=(
       const FakeDataTransferManagerInterop&) = delete;
-  ~FakeDataTransferManagerInterop() override;
+  ~FakeDataTransferManagerInterop() final;
 
   // IDataTransferManagerInterop:
   IFACEMETHODIMP GetForWindow(HWND app_window,
                               REFIID riid,
-                              void** data_transfer_manager) override;
-  IFACEMETHODIMP ShowShareUIForWindow(HWND app_window) override;
+                              void** data_transfer_manager) final;
+  IFACEMETHODIMP ShowShareUIForWindow(HWND app_window) final;
 
   // Returns a callback that captures a reference to the current DataRequested
   // event handler and, when invoked, triggers that handler.

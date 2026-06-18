@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 #define BASE_TEST_WITH_FEATURE_OVERRIDE_H_
 
 #include "base/feature_list.h"
-#include "base/macros.h"
 #include "base/test/scoped_feature_list.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -46,7 +45,7 @@ class WithFeatureOverride : public testing::WithParamInterface<bool> {
 
   // Use to know if the configured feature provided in the constructor is
   // enabled or not.
-  bool IsParamFeatureEnabled();
+  bool IsParamFeatureEnabled() const;
 
  private:
   base::test::ScopedFeatureList scoped_feature_list_;

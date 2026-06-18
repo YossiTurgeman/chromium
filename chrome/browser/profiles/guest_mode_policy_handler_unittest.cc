@@ -1,9 +1,10 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/profiles/guest_mode_policy_handler.h"
 
+#include "base/test/scoped_feature_list.h"
 #include "base/values.h"
 #include "chrome/browser/policy/browser_signin_policy_handler.h"
 #include "chrome/common/pref_names.h"
@@ -15,6 +16,9 @@
 namespace policy {
 
 class GuestModePolicyHandlerTest : public ::testing::Test {
+ public:
+  GuestModePolicyHandlerTest() = default;
+
  public:
   void SetUp() override {
     prefs_.Clear();
@@ -42,19 +46,23 @@ TEST_F(GuestModePolicyHandlerTest, ForceSigninNotSet) {
   EXPECT_FALSE(prefs_.GetValue(prefs::kBrowserGuestModeEnabled, nullptr));
 }
 
+#if !BUILDFLAG(IS_CHROMEOS)
 TEST_F(GuestModePolicyHandlerTest, ForceSigninDisabled) {
-  SetUpPolicy(key::kForceBrowserSignin, false);
+  SetUpPolicy(key::kBrowserSignin,
+              static_cast<int>(policy::BrowserSigninMode::kDisabled));
   handler_.ApplyPolicySettings(policies_, &prefs_);
   EXPECT_FALSE(prefs_.GetValue(prefs::kBrowserGuestModeEnabled, nullptr));
 
-  SetUpPolicy(key::kForceBrowserSignin, 0);  // Invalid format
+  SetUpPolicy(key::kBrowserSignin,
+              static_cast<int>(policy::BrowserSigninMode::kEnabled));
   handler_.ApplyPolicySettings(policies_, &prefs_);
   EXPECT_FALSE(prefs_.GetValue(prefs::kBrowserGuestModeEnabled, nullptr));
 }
 
 TEST_F(GuestModePolicyHandlerTest, GuestModeDisabledByDefault) {
   bool value;
-  SetUpPolicy(key::kForceBrowserSignin, true);
+  SetUpPolicy(key::kBrowserSignin,
+              static_cast<int>(policy::BrowserSigninMode::kForced));
   handler_.ApplyPolicySettings(policies_, &prefs_);
   EXPECT_TRUE(prefs_.GetBoolean(prefs::kBrowserGuestModeEnabled, &value));
   EXPECT_FALSE(value);
@@ -63,7 +71,8 @@ TEST_F(GuestModePolicyHandlerTest, GuestModeDisabledByDefault) {
 TEST_F(GuestModePolicyHandlerTest,
        GuestModeDisabledByDefaultWithInvalidFormat) {
   bool value;
-  SetUpPolicy(key::kForceBrowserSignin, true);
+  SetUpPolicy(key::kBrowserSignin,
+              static_cast<int>(policy::BrowserSigninMode::kForced));
   SetUpPolicy(key::kBrowserGuestModeEnabled, 0);
   handler_.ApplyPolicySettings(policies_, &prefs_);
   EXPECT_TRUE(prefs_.GetBoolean(prefs::kBrowserGuestModeEnabled, &value));
@@ -72,7 +81,8 @@ TEST_F(GuestModePolicyHandlerTest,
 
 TEST_F(GuestModePolicyHandlerTest, GuestModeSet) {
   bool value;
-  SetUpPolicy(key::kForceBrowserSignin, true);
+  SetUpPolicy(key::kBrowserSignin,
+              static_cast<int>(policy::BrowserSigninMode::kForced));
   SetUpPolicy(key::kBrowserGuestModeEnabled, true);
   handler_.ApplyPolicySettings(policies_, &prefs_);
   EXPECT_TRUE(prefs_.GetBoolean(prefs::kBrowserGuestModeEnabled, &value));
@@ -110,13 +120,7 @@ TEST_F(GuestModePolicyHandlerTest,
   SetUpPolicy(key::kBrowserSignin, false);
   handler_.ApplyPolicySettings(policies_, &prefs_);
   EXPECT_FALSE(prefs_.GetBoolean(prefs::kBrowserGuestModeEnabled, &value));
-
-  // Even with forceBrowserSignin enable.
-  SetUpPolicy(key::kBrowserSignin,
-              static_cast<int>(BrowserSigninMode::kEnabled));
-  SetUpPolicy(key::kForceBrowserSignin, true);
-  handler_.ApplyPolicySettings(policies_, &prefs_);
-  EXPECT_FALSE(prefs_.GetBoolean(prefs::kBrowserGuestModeEnabled, &value));
 }
+#endif  //  !BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace policy

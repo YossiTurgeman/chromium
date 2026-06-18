@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,12 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <utility>
 #include <vector>
 
+#include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/win/registry.h"
 
@@ -95,7 +98,7 @@ class RegistryKeyBackup::KeyData {
 
 ValueData::ValueData() : type_(REG_NONE) {}
 
-ValueData::~ValueData() {}
+ValueData::~ValueData() = default;
 
 void ValueData::Initialize(const wchar_t* name_buffer,
                            DWORD name_size,
@@ -104,12 +107,12 @@ void ValueData::Initialize(const wchar_t* name_buffer,
                            DWORD data_size) {
   name_.assign(name_buffer, name_size);
   type_ = type;
-  data_.assign(data, data + data_size);
+  data_.assign(data, UNSAFE_TODO(data + data_size));
 }
 
-RegistryKeyBackup::KeyData::KeyData() {}
+RegistryKeyBackup::KeyData::KeyData() = default;
 
-RegistryKeyBackup::KeyData::~KeyData() {}
+RegistryKeyBackup::KeyData::~KeyData() = default;
 
 bool RegistryKeyBackup::KeyData::Initialize(const RegKey& key) {
   std::vector<ValueData> values;
@@ -268,9 +271,9 @@ bool RegistryKeyBackup::KeyData::WriteTo(RegKey* key) const {
   return true;
 }
 
-RegistryKeyBackup::RegistryKeyBackup() {}
+RegistryKeyBackup::RegistryKeyBackup() = default;
 
-RegistryKeyBackup::~RegistryKeyBackup() {}
+RegistryKeyBackup::~RegistryKeyBackup() = default;
 
 bool RegistryKeyBackup::Initialize(HKEY root,
                                    const wchar_t* key_path,
@@ -285,7 +288,7 @@ bool RegistryKeyBackup::Initialize(HKEY root,
   // Does the key exist?
   LONG result = key.Open(root, key_path, kKeyReadNoNotify | wow64_access);
   if (result == ERROR_SUCCESS) {
-    key_data.reset(new KeyData());
+    key_data = std::make_unique<KeyData>();
     if (!key_data->Initialize(key)) {
       LOG(ERROR) << "Failed to backup key at " << key_path;
       return false;

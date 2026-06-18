@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,33 @@
 namespace performance_manager {
 
 // static
-const char* PageNode::ToString(PageNode::OpenedType opened_type) {
-  switch (opened_type) {
-    case PageNode::OpenedType::kInvalid:
-      return "kInvalid";
-    case PageNode::OpenedType::kPopup:
-      return "kPopup";
-    case PageNode::OpenedType::kGuestView:
-      return "kGuestView";
-    case PageNode::OpenedType::kPortal:
-      return "kPortal";
+const char* PageNode::ToString(PageType type) {
+  switch (type) {
+    case PageType::kTab:
+      return "kTab";
+    case PageType::kExtension:
+      return "kExtension";
+    case PageType::kNonTabWebUI:
+      return "kNonTabWebUI";
+    case PageType::kUnknown:
+      return "kUnknown";
+  }
+  NOTREACHED();
+}
+
+// static
+const char* PageNode::ToString(PageNode::LoadingState loading_state) {
+  switch (loading_state) {
+    case LoadingState::kLoadingNotStarted:
+      return "kLoadingNotStarted";
+    case LoadingState::kLoading:
+      return "kLoading";
+    case LoadingState::kLoadingTimedOut:
+      return "kLoadingTimedOut";
+    case LoadingState::kLoadedBusy:
+      return "kLoadedBusy";
+    case LoadingState::kLoadedIdle:
+      return "kLoadedIdle";
   }
   NOTREACHED();
 }
@@ -28,15 +45,5 @@ PageNode::~PageNode() = default;
 
 PageNodeObserver::PageNodeObserver() = default;
 PageNodeObserver::~PageNodeObserver() = default;
-
-PageNode::ObserverDefaultImpl::ObserverDefaultImpl() = default;
-PageNode::ObserverDefaultImpl::~ObserverDefaultImpl() = default;
-
-std::ostream& operator<<(
-    std::ostream& os,
-    performance_manager::PageNode::OpenedType opened_type) {
-  os << performance_manager::PageNode::ToString(opened_type);
-  return os;
-}
 
 }  // namespace performance_manager

@@ -34,10 +34,19 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_computed_effect_timing.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_optional_effect_timing.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_timeline_range_offset.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_cssnumericvalue_string_unrestricteddouble.h"
 #include "third_party/blink/renderer/core/animation/animation_effect_owner.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/core/animation/timing.h"
+#include "third_party/blink/renderer/core/css/cssom/css_unit_values.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
+
+Timing::V8Delay* CreateTimeDelay(double delay_in_ms) {
+  return MakeGarbageCollected<Timing::V8Delay>(delay_in_ms);
+}
 
 class MockAnimationEffectOwner
     : public GarbageCollected<MockAnimationEffectOwner>,
@@ -85,9 +94,12 @@ class TestAnimationEffect : public AnimationEffect {
   void UpdateInheritedTime(double time, TimingUpdateReason reason) {
     event_delegate_->Reset();
     AnimationEffect::UpdateInheritedTime(
-        time, /*inherited_phase*/ base::nullopt, reason);
+        ANIMATION_TIME_DELTA_FROM_SECONDS(time),
+        /* is_idle */ false,
+        /* inherited_playback_rate */ 1.0, reason);
   }
 
+  bool Affects(const PropertyHandle&) const override { return false; }
   void UpdateChildrenAndEffects() const override {}
   void WillDetach() {}
   TestAnimationEffectEventDelegate* EventDelegate() {
@@ -95,23 +107,24 @@ class TestAnimationEffect : public AnimationEffect {
   }
   AnimationTimeDelta CalculateTimeToEffectChange(
       bool forwards,
-      base::Optional<double> local_time,
+      std::optional<AnimationTimeDelta> local_time,
       AnimationTimeDelta time_to_next_iteration) const override {
-    DCHECK(!local_time || !Timing::IsNull(local_time.value()));
     local_time_ = local_time;
     time_to_next_iteration_ = time_to_next_iteration;
-    return AnimationTimeDelta::FromSecondsD(
-        std::numeric_limits<double>::infinity());
+    return AnimationTimeDelta::Max();
+  }
+  std::optional<AnimationTimeDelta> TimelineDuration() const override {
+    return std::nullopt;
   }
   double TakeLocalTime() {
     DCHECK(local_time_);
-    const double result = local_time_.value();
+    const double result = local_time_->InSecondsF();
     local_time_.reset();
     return result;
   }
 
-  base::Optional<AnimationTimeDelta> TakeTimeToNextIteration() {
-    const base::Optional<AnimationTimeDelta> result = time_to_next_iteration_;
+  std::optional<AnimationTimeDelta> TakeTimeToNextIteration() {
+    const std::optional<AnimationTimeDelta> result = time_to_next_iteration_;
     time_to_next_iteration_.reset();
     return result;
   }
@@ -123,13 +136,14 @@ class TestAnimationEffect : public AnimationEffect {
 
  private:
   Member<TestAnimationEffectEventDelegate> event_delegate_;
-  mutable base::Optional<double> local_time_;
-  mutable base::Optional<AnimationTimeDelta> time_to_next_iteration_;
+  mutable std::optional<AnimationTimeDelta> local_time_;
+  mutable std::optional<AnimationTimeDelta> time_to_next_iteration_;
 };
 
 TEST(AnimationAnimationEffectTest, Sanity) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(2);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(2);
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(0);
@@ -139,7 +153,8 @@ TEST(AnimationAnimationEffectTest, Sanity) {
   EXPECT_TRUE(animation_node->IsCurrent());
   EXPECT_TRUE(animation_node->IsInEffect());
   EXPECT_EQ(0, animation_node->CurrentIteration());
-  EXPECT_EQ(2, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(ANIMATION_TIME_DELTA_FROM_SECONDS(2),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(0, animation_node->Progress());
 
   animation_node->UpdateInheritedTime(1);
@@ -149,7 +164,8 @@ TEST(AnimationAnimationEffectTest, Sanity) {
   EXPECT_TRUE(animation_node->IsCurrent());
   EXPECT_TRUE(animation_node->IsInEffect());
   EXPECT_EQ(0, animation_node->CurrentIteration());
-  EXPECT_EQ(2, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(ANIMATION_TIME_DELTA_FROM_SECONDS(2),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(0.5, animation_node->Progress());
 
   animation_node->UpdateInheritedTime(2);
@@ -159,7 +175,8 @@ TEST(AnimationAnimationEffectTest, Sanity) {
   EXPECT_FALSE(animation_node->IsCurrent());
   EXPECT_TRUE(animation_node->IsInEffect());
   EXPECT_EQ(0, animation_node->CurrentIteration());
-  EXPECT_EQ(2, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(ANIMATION_TIME_DELTA_FROM_SECONDS(2),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(1, animation_node->Progress());
 
   animation_node->UpdateInheritedTime(3);
@@ -169,13 +186,15 @@ TEST(AnimationAnimationEffectTest, Sanity) {
   EXPECT_FALSE(animation_node->IsCurrent());
   EXPECT_TRUE(animation_node->IsInEffect());
   EXPECT_EQ(0, animation_node->CurrentIteration());
-  EXPECT_EQ(2, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(ANIMATION_TIME_DELTA_FROM_SECONDS(2),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(1, animation_node->Progress());
 }
 
 TEST(AnimationAnimationEffectTest, FillAuto) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(-1);
@@ -186,8 +205,9 @@ TEST(AnimationAnimationEffectTest, FillAuto) {
 }
 
 TEST(AnimationAnimationEffectTest, FillForwards) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::FORWARDS;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -199,8 +219,9 @@ TEST(AnimationAnimationEffectTest, FillForwards) {
 }
 
 TEST(AnimationAnimationEffectTest, FillBackwards) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::BACKWARDS;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -212,8 +233,9 @@ TEST(AnimationAnimationEffectTest, FillBackwards) {
 }
 
 TEST(AnimationAnimationEffectTest, FillBoth) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::BOTH;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -225,10 +247,11 @@ TEST(AnimationAnimationEffectTest, FillBoth) {
 }
 
 TEST(AnimationAnimationEffectTest, StartDelay) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::FORWARDS;
-  timing.start_delay = 0.5;
+  timing.start_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(0.5));
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(0);
@@ -242,26 +265,30 @@ TEST(AnimationAnimationEffectTest, StartDelay) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroIteration) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_count = 0;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(-1);
-  EXPECT_EQ(0, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_FALSE(animation_node->CurrentIteration());
   EXPECT_FALSE(animation_node->Progress());
 
   animation_node->UpdateInheritedTime(0);
-  EXPECT_EQ(0, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(0, animation_node->CurrentIteration());
   EXPECT_EQ(0, animation_node->Progress());
 }
 
 TEST(AnimationAnimationEffectTest, InfiniteIteration) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_count = std::numeric_limits<double>::infinity();
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
@@ -270,8 +297,8 @@ TEST(AnimationAnimationEffectTest, InfiniteIteration) {
   EXPECT_FALSE(animation_node->CurrentIteration());
   EXPECT_FALSE(animation_node->Progress());
 
-  EXPECT_EQ(std::numeric_limits<double>::infinity(),
-            animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta::Max(),
+            animation_node->NormalizedTiming().active_duration);
 
   animation_node->UpdateInheritedTime(0);
   EXPECT_EQ(0, animation_node->CurrentIteration());
@@ -279,9 +306,10 @@ TEST(AnimationAnimationEffectTest, InfiniteIteration) {
 }
 
 TEST(AnimationAnimationEffectTest, Iteration) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_count = 2;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(2);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(2);
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(0);
@@ -306,10 +334,11 @@ TEST(AnimationAnimationEffectTest, Iteration) {
 }
 
 TEST(AnimationAnimationEffectTest, IterationStart) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_start = 1.2;
   timing.iteration_count = 2.2;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::BOTH;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -327,9 +356,10 @@ TEST(AnimationAnimationEffectTest, IterationStart) {
 }
 
 TEST(AnimationAnimationEffectTest, IterationAlternate) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_count = 10;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.direction = Timing::PlaybackDirection::ALTERNATE_NORMAL;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -347,9 +377,10 @@ TEST(AnimationAnimationEffectTest, IterationAlternate) {
 }
 
 TEST(AnimationAnimationEffectTest, IterationAlternateReverse) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_count = 10;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.direction = Timing::PlaybackDirection::ALTERNATE_REVERSE;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -367,6 +398,7 @@ TEST(AnimationAnimationEffectTest, IterationAlternateReverse) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationSanity) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -377,7 +409,8 @@ TEST(AnimationAnimationEffectTest, ZeroDurationSanity) {
   EXPECT_FALSE(animation_node->IsCurrent());
   EXPECT_TRUE(animation_node->IsInEffect());
   EXPECT_EQ(0, animation_node->CurrentIteration());
-  EXPECT_EQ(0, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(1, animation_node->Progress());
 
   animation_node->UpdateInheritedTime(1);
@@ -387,11 +420,13 @@ TEST(AnimationAnimationEffectTest, ZeroDurationSanity) {
   EXPECT_FALSE(animation_node->IsCurrent());
   EXPECT_TRUE(animation_node->IsInEffect());
   EXPECT_EQ(0, animation_node->CurrentIteration());
-  EXPECT_EQ(0, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(1, animation_node->Progress());
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationFillForwards) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::FORWARDS;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
@@ -407,6 +442,7 @@ TEST(AnimationAnimationEffectTest, ZeroDurationFillForwards) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationFillBackwards) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::BACKWARDS;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
@@ -422,6 +458,7 @@ TEST(AnimationAnimationEffectTest, ZeroDurationFillBackwards) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationFillBoth) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::BOTH;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
@@ -437,9 +474,10 @@ TEST(AnimationAnimationEffectTest, ZeroDurationFillBoth) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationStartDelay) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::FORWARDS;
-  timing.start_delay = 0.5;
+  timing.start_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(0.5));
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(0);
@@ -453,11 +491,12 @@ TEST(AnimationAnimationEffectTest, ZeroDurationStartDelay) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationIterationStartAndCount) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_start = 0.1;
   timing.iteration_count = 0.2;
   timing.fill_mode = Timing::FillMode::BOTH;
-  timing.start_delay = 0.3;
+  timing.start_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(0.3));
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(0);
@@ -472,24 +511,28 @@ TEST(AnimationAnimationEffectTest, ZeroDurationIterationStartAndCount) {
 
 // FIXME: Needs specification work.
 TEST(AnimationAnimationEffectTest, ZeroDurationInfiniteIteration) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_count = std::numeric_limits<double>::infinity();
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(-1);
-  EXPECT_EQ(0, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_FALSE(animation_node->CurrentIteration());
   EXPECT_FALSE(animation_node->Progress());
 
   animation_node->UpdateInheritedTime(0);
-  EXPECT_EQ(0, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(std::numeric_limits<double>::infinity(),
             animation_node->CurrentIteration());
   EXPECT_EQ(1, animation_node->Progress());
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationIteration) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_count = 2;
@@ -509,6 +552,7 @@ TEST(AnimationAnimationEffectTest, ZeroDurationIteration) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationIterationStart) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_start = 1.2;
   timing.iteration_count = 2.2;
@@ -529,6 +573,7 @@ TEST(AnimationAnimationEffectTest, ZeroDurationIterationStart) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationIterationAlternate) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_count = 2;
@@ -549,6 +594,7 @@ TEST(AnimationAnimationEffectTest, ZeroDurationIterationAlternate) {
 }
 
 TEST(AnimationAnimationEffectTest, ZeroDurationIterationAlternateReverse) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_count = 2;
@@ -569,6 +615,7 @@ TEST(AnimationAnimationEffectTest, ZeroDurationIterationAlternateReverse) {
 }
 
 TEST(AnimationAnimationEffectTest, InfiniteDurationSanity) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_duration = AnimationTimeDelta::Max();
   timing.iteration_count = 1;
@@ -576,8 +623,8 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationSanity) {
 
   animation_node->UpdateInheritedTime(0);
 
-  EXPECT_EQ(std::numeric_limits<double>::infinity(),
-            animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta::Max(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(Timing::kPhaseActive, animation_node->GetPhase());
   EXPECT_TRUE(animation_node->IsInPlay());
   EXPECT_TRUE(animation_node->IsCurrent());
@@ -587,8 +634,8 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationSanity) {
 
   animation_node->UpdateInheritedTime(1);
 
-  EXPECT_EQ(std::numeric_limits<double>::infinity(),
-            animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta::Max(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(Timing::kPhaseActive, animation_node->GetPhase());
   EXPECT_TRUE(animation_node->IsInPlay());
   EXPECT_TRUE(animation_node->IsCurrent());
@@ -599,6 +646,7 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationSanity) {
 
 // FIXME: Needs specification work.
 TEST(AnimationAnimationEffectTest, InfiniteDurationZeroIterations) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_duration = AnimationTimeDelta::Max();
   timing.iteration_count = 0;
@@ -606,7 +654,8 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationZeroIterations) {
 
   animation_node->UpdateInheritedTime(0);
 
-  EXPECT_EQ(0, animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(Timing::kPhaseAfter, animation_node->GetPhase());
   EXPECT_FALSE(animation_node->IsInPlay());
   EXPECT_FALSE(animation_node->IsCurrent());
@@ -626,6 +675,7 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationZeroIterations) {
 }
 
 TEST(AnimationAnimationEffectTest, InfiniteDurationInfiniteIterations) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   timing.iteration_duration = AnimationTimeDelta::Max();
   timing.iteration_count = std::numeric_limits<double>::infinity();
@@ -633,8 +683,8 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationInfiniteIterations) {
 
   animation_node->UpdateInheritedTime(0);
 
-  EXPECT_EQ(std::numeric_limits<double>::infinity(),
-            animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta::Max(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(Timing::kPhaseActive, animation_node->GetPhase());
   EXPECT_TRUE(animation_node->IsInPlay());
   EXPECT_TRUE(animation_node->IsCurrent());
@@ -644,8 +694,8 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationInfiniteIterations) {
 
   animation_node->UpdateInheritedTime(1);
 
-  EXPECT_EQ(std::numeric_limits<double>::infinity(),
-            animation_node->SpecifiedTiming().ActiveDuration());
+  EXPECT_EQ(AnimationTimeDelta::Max(),
+            animation_node->NormalizedTiming().active_duration);
   EXPECT_EQ(Timing::kPhaseActive, animation_node->GetPhase());
   EXPECT_TRUE(animation_node->IsInPlay());
   EXPECT_TRUE(animation_node->IsCurrent());
@@ -655,21 +705,24 @@ TEST(AnimationAnimationEffectTest, InfiniteDurationInfiniteIterations) {
 }
 
 TEST(AnimationAnimationEffectTest, EndTime) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.start_delay = 1;
-  timing.end_delay = 2;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(4);
+  timing.start_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(1));
+  timing.end_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(2));
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(4);
   timing.iteration_count = 2;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
-  EXPECT_EQ(11, animation_node->SpecifiedTiming().EndTimeInternal());
+  EXPECT_EQ(ANIMATION_TIME_DELTA_FROM_SECONDS(11),
+            animation_node->NormalizedTiming().end_time);
 }
 
 TEST(AnimationAnimationEffectTest, Events) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_count = 2;
-  timing.start_delay = 1;
+  timing.start_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(1));
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(0.0, kTimingUpdateOnDemand);
@@ -686,18 +739,19 @@ TEST(AnimationAnimationEffectTest, Events) {
 }
 
 TEST(AnimationAnimationEffectTest, TimeToEffectChange) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(1);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(1);
   timing.fill_mode = Timing::FillMode::FORWARDS;
   timing.iteration_start = 0.2;
   timing.iteration_count = 2.5;
-  timing.start_delay = 1;
+  timing.start_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(1));
   timing.direction = Timing::PlaybackDirection::ALTERNATE_NORMAL;
   auto* animation_node = MakeGarbageCollected<TestAnimationEffect>(timing);
 
   animation_node->UpdateInheritedTime(0);
   EXPECT_EQ(0, animation_node->TakeLocalTime());
-  base::Optional<AnimationTimeDelta> time_to_next_iteration =
+  std::optional<AnimationTimeDelta> time_to_next_iteration =
       animation_node->TakeTimeToNextIteration();
   EXPECT_TRUE(time_to_next_iteration);
   EXPECT_TRUE(time_to_next_iteration->is_max());
@@ -734,26 +788,23 @@ TEST(AnimationAnimationEffectTest, TimeToEffectChange) {
 }
 
 TEST(AnimationAnimationEffectTest, UpdateTiming) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   auto* effect = MakeGarbageCollected<TestAnimationEffect>(timing);
 
-  EXPECT_EQ(0, effect->getTiming()->delay());
+  EXPECT_EQ(0, effect->getTiming()->delay()->GetAsDouble());
   OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setDelay(2);
+  effect_timing->setDelay(CreateTimeDelay(2));
   effect->updateTiming(effect_timing);
-  EXPECT_EQ(2, effect->getTiming()->delay());
-
-  EXPECT_EQ(0, effect->getTiming()->endDelay());
+  EXPECT_EQ(2, effect->getTiming()->delay()->GetAsDouble());
   effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setEndDelay(0.5);
+  effect_timing->setEndDelay(CreateTimeDelay(0.5));
   effect->updateTiming(effect_timing);
-  EXPECT_EQ(0.5, effect->getTiming()->endDelay());
-
-  EXPECT_EQ("auto", effect->getTiming()->fill());
+  EXPECT_EQ(0.5, effect->getTiming()->endDelay()->GetAsDouble());
   effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setFill("backwards");
+  effect_timing->setFill(V8FillMode::Enum::kBackwards);
   effect->updateTiming(effect_timing);
-  EXPECT_EQ("backwards", effect->getTiming()->fill());
+  EXPECT_EQ(V8FillMode::Enum::kBackwards, effect->getTiming()->fill());
 
   EXPECT_EQ(0, effect->getTiming()->iterationStart());
   effect_timing = OptionalEffectTiming::Create();
@@ -767,11 +818,13 @@ TEST(AnimationAnimationEffectTest, UpdateTiming) {
   effect->updateTiming(effect_timing);
   EXPECT_EQ(10, effect->getTiming()->iterations());
 
-  EXPECT_EQ("normal", effect->getTiming()->direction());
+  EXPECT_EQ(V8PlaybackDirection::Enum::kNormal,
+            effect->getTiming()->direction());
   effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setDirection("reverse");
+  effect_timing->setDirection(V8PlaybackDirection::Enum::kReverse);
   effect->updateTiming(effect_timing);
-  EXPECT_EQ("reverse", effect->getTiming()->direction());
+  EXPECT_EQ(V8PlaybackDirection::Enum::kReverse,
+            effect->getTiming()->direction());
 
   EXPECT_EQ("linear", effect->getTiming()->easing());
   effect_timing = OptionalEffectTiming::Create();
@@ -779,63 +832,80 @@ TEST(AnimationAnimationEffectTest, UpdateTiming) {
   effect->updateTiming(effect_timing);
   EXPECT_EQ("ease-in-out", effect->getTiming()->easing());
 
-  EXPECT_EQ("auto", effect->getTiming()->duration().GetAsString());
+  EXPECT_EQ("auto", effect->getTiming()->duration()->GetAsString());
   effect_timing = OptionalEffectTiming::Create();
   effect_timing->setDuration(
-      UnrestrictedDoubleOrString::FromUnrestrictedDouble(2.5));
+      MakeGarbageCollected<V8UnionCSSNumericValueOrStringOrUnrestrictedDouble>(
+          2.5));
   effect->updateTiming(effect_timing);
-  EXPECT_EQ(2.5, effect->getTiming()->duration().GetAsUnrestrictedDouble());
+  EXPECT_EQ(2.5, effect->getTiming()->duration()->GetAsUnrestrictedDouble());
 }
 
 TEST(AnimationAnimationEffectTest, UpdateTimingThrowsWhenExpected) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   auto* effect = MakeGarbageCollected<TestAnimationEffect>(timing);
 
-  DummyExceptionStateForTesting exception_state;
-
   // iterationStart must be non-negative
-  OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setIterationStart(-10);
-  effect->updateTiming(effect_timing, exception_state);
-  EXPECT_TRUE(exception_state.HadException());
+  {
+    DummyExceptionStateForTesting exception_state;
+    OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
+    effect_timing->setIterationStart(-10);
+    effect->updateTiming(effect_timing, exception_state);
+    EXPECT_TRUE(exception_state.HadException());
+  }
 
   // iterations must be non-negative and non-null.
-  exception_state.ClearException();
-  effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setIterations(-2);
-  effect->updateTiming(effect_timing, exception_state);
-  EXPECT_TRUE(exception_state.HadException());
+  {
+    DummyExceptionStateForTesting exception_state;
+    OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
+    effect_timing->setIterations(-2);
+    effect->updateTiming(effect_timing, exception_state);
+    EXPECT_TRUE(exception_state.HadException());
+  }
 
-  exception_state.ClearException();
-  effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setIterations(std::numeric_limits<double>::quiet_NaN());
-  effect->updateTiming(effect_timing, exception_state);
-  EXPECT_TRUE(exception_state.HadException());
+  {
+    DummyExceptionStateForTesting exception_state;
+    OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
+    effect_timing->setIterations(std::numeric_limits<double>::quiet_NaN());
+    effect->updateTiming(effect_timing, exception_state);
+    EXPECT_TRUE(exception_state.HadException());
+  }
 
   // If it is a number, duration must be non-negative and non-null.
-  exception_state.ClearException();
-  effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setDuration(
-      UnrestrictedDoubleOrString::FromUnrestrictedDouble(-100));
-  effect->updateTiming(effect_timing, exception_state);
-  EXPECT_TRUE(exception_state.HadException());
+  {
+    DummyExceptionStateForTesting exception_state;
+    OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
+    effect_timing->setDuration(
+        MakeGarbageCollected<
+            V8UnionCSSNumericValueOrStringOrUnrestrictedDouble>(-100));
+    effect->updateTiming(effect_timing, exception_state);
+    EXPECT_TRUE(exception_state.HadException());
+  }
 
-  exception_state.ClearException();
-  effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setDuration(UnrestrictedDoubleOrString::FromUnrestrictedDouble(
-      std::numeric_limits<double>::quiet_NaN()));
-  effect->updateTiming(effect_timing, exception_state);
-  EXPECT_TRUE(exception_state.HadException());
+  {
+    DummyExceptionStateForTesting exception_state;
+    OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
+    effect_timing->setDuration(
+        MakeGarbageCollected<
+            V8UnionCSSNumericValueOrStringOrUnrestrictedDouble>(
+            std::numeric_limits<double>::quiet_NaN()));
+    effect->updateTiming(effect_timing, exception_state);
+    EXPECT_TRUE(exception_state.HadException());
+  }
 
   // easing must be a valid timing function
-  exception_state.ClearException();
-  effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setEasing("my-custom-timing-function");
-  effect->updateTiming(effect_timing, exception_state);
-  EXPECT_TRUE(exception_state.HadException());
+  {
+    DummyExceptionStateForTesting exception_state;
+    OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
+    effect_timing->setEasing("my-custom-timing-function");
+    effect->updateTiming(effect_timing, exception_state);
+    EXPECT_TRUE(exception_state.HadException());
+  }
 }
 
 TEST(AnimationAnimationEffectTest, UpdateTimingInformsOwnerOnChange) {
+  test::TaskEnvironment task_environment;
   Timing timing;
   auto* effect = MakeGarbageCollected<TestAnimationEffect>(timing);
 
@@ -846,18 +916,19 @@ TEST(AnimationAnimationEffectTest, UpdateTimingInformsOwnerOnChange) {
   EXPECT_CALL(*owner, EffectInvalidated()).Times(1);
 
   OptionalEffectTiming* effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setDelay(5);
+  effect_timing->setDelay(CreateTimeDelay(5));
   effect->updateTiming(effect_timing);
 }
 
 TEST(AnimationAnimationEffectTest, UpdateTimingNoChange) {
+  test::TaskEnvironment task_environment;
   Timing timing;
-  timing.start_delay = 0;
-  timing.end_delay = 5;
+  timing.start_delay = Timing::Delay(AnimationTimeDelta());
+  timing.end_delay = Timing::Delay(ANIMATION_TIME_DELTA_FROM_SECONDS(5));
   timing.fill_mode = Timing::FillMode::BOTH;
   timing.iteration_start = 0.1;
   timing.iteration_count = 3;
-  timing.iteration_duration = AnimationTimeDelta::FromSecondsD(2);
+  timing.iteration_duration = ANIMATION_TIME_DELTA_FROM_SECONDS(2);
   timing.direction = Timing::PlaybackDirection::ALTERNATE_REVERSE;
   timing.timing_function = CubicBezierTimingFunction::Create(1, 1, 0.3, 0.3);
   auto* effect = MakeGarbageCollected<TestAnimationEffect>(timing);
@@ -874,20 +945,21 @@ TEST(AnimationAnimationEffectTest, UpdateTimingNoChange) {
   effect->updateTiming(effect_timing);
 
   effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setDelay(0);
+  effect_timing->setDelay(CreateTimeDelay(0));
   effect->updateTiming(effect_timing);
 
   effect_timing = OptionalEffectTiming::Create();
-  effect_timing->setEndDelay(5000);
-  effect_timing->setFill("both");
+  effect_timing->setEndDelay(CreateTimeDelay(5000));
+  effect_timing->setFill(V8FillMode::Enum::kBoth);
   effect_timing->setIterationStart(0.1);
   effect->updateTiming(effect_timing);
 
   effect_timing = OptionalEffectTiming::Create();
   effect_timing->setIterations(3);
   effect_timing->setDuration(
-      UnrestrictedDoubleOrString::FromUnrestrictedDouble(2000));
-  effect_timing->setDirection("alternate-reverse");
+      MakeGarbageCollected<V8UnionCSSNumericValueOrStringOrUnrestrictedDouble>(
+          2000));
+  effect_timing->setDirection(V8PlaybackDirection::Enum::kAlternateReverse);
   effect->updateTiming(effect_timing);
 
   effect_timing = OptionalEffectTiming::Create();

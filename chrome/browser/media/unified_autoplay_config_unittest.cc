@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,6 +16,7 @@
 #include "content/public/test/web_contents_tester.h"
 #include "media/base/media_switches.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
+#include "third_party/blink/public/mojom/webpreferences/web_preferences.mojom.h"
 
 // Unit tests for the unified autoplay policy with the unified sound settings
 // UI enabled.
@@ -26,9 +27,8 @@ class UnifiedAutoplaySoundSettingsTest
   ~UnifiedAutoplaySoundSettingsTest() override = default;
 
   void SetUp() override {
-    scoped_feature_list_.InitWithFeatures(
-        {media::kAutoplayDisableSettings, media::kAutoplayWhitelistSettings},
-        {});
+    scoped_feature_list_.InitWithFeatures({media::kAutoplayDisableSettings},
+                                          {});
     ChromeRenderViewHostTestHarness::SetUp();
 
     SoundContentSettingObserver::CreateForWebContents(web_contents());
@@ -50,7 +50,7 @@ class UnifiedAutoplaySoundSettingsTest
     return UnifiedAutoplayConfig::ShouldBlockAutoplay(profile());
   }
 
-  blink::web_pref::AutoplayPolicy GetAppliedAutoplayPolicy() {
+  blink::mojom::AutoplayPolicy GetAppliedAutoplayPolicy() {
     return web_contents()->GetOrCreateWebPreferences().autoplay_policy;
   }
 
@@ -59,10 +59,25 @@ class UnifiedAutoplaySoundSettingsTest
         ->NavigateAndCommit(GURL("https://first.example.com"));
   }
 
+ protected:
+  base::test::ScopedFeatureList scoped_feature_list_;
+
  private:
   PrefService* GetPrefs() { return profile()->GetPrefs(); }
+};
 
-  base::test::ScopedFeatureList scoped_feature_list_;
+// Create a class to test when the feature is disabled. The feature must be
+// disabled in the construction of the test harness before the test body is run
+// in order to avoid race conditions.
+class UnifiedAutoplaySoundSettingsTestFeatureDisabled
+    : public UnifiedAutoplaySoundSettingsTest {
+  void SetUp() override {
+    scoped_feature_list_.InitWithFeatures({},
+                                          {media::kAutoplayDisableSettings});
+    ChromeRenderViewHostTestHarness::SetUp();
+
+    SoundContentSettingObserver::CreateForWebContents(web_contents());
+  }
 };
 
 TEST_F(UnifiedAutoplaySoundSettingsTest, ContentSetting_Allow) {
@@ -72,7 +87,7 @@ TEST_F(UnifiedAutoplaySoundSettingsTest, ContentSetting_Allow) {
   EXPECT_FALSE(ShouldBlockAutoplay());
 
   NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kNoUserGestureRequired,
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kNoUserGestureRequired,
             GetAppliedAutoplayPolicy());
 }
 
@@ -83,7 +98,7 @@ TEST_F(UnifiedAutoplaySoundSettingsTest, ContentSetting_Block) {
   EXPECT_TRUE(ShouldBlockAutoplay());
 
   NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kDocumentUserActivationRequired,
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kDocumentUserActivationRequired,
             GetAppliedAutoplayPolicy());
 
   // Set back to ALLOW to ensure that the policy is updated on the next
@@ -92,21 +107,7 @@ TEST_F(UnifiedAutoplaySoundSettingsTest, ContentSetting_Block) {
   EXPECT_FALSE(ShouldBlockAutoplay());
 
   NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kNoUserGestureRequired,
-            GetAppliedAutoplayPolicy());
-}
-
-TEST_F(UnifiedAutoplaySoundSettingsTest, Feature_DisabledNoop) {
-  // Explicitly disable the feature.
-  base::test::ScopedFeatureList scoped_feature_list;
-  scoped_feature_list.InitWithFeatures(
-      {}, {media::kAutoplayDisableSettings, media::kAutoplayWhitelistSettings});
-
-  SetAutoplayPrefValue(false);
-  EXPECT_FALSE(ShouldBlockAutoplay());
-
-  NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kDocumentUserActivationRequired,
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kNoUserGestureRequired,
             GetAppliedAutoplayPolicy());
 }
 
@@ -114,7 +115,7 @@ TEST_F(UnifiedAutoplaySoundSettingsTest, Pref_DefaultEnabled) {
   EXPECT_TRUE(ShouldBlockAutoplay());
 
   NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kDocumentUserActivationRequired,
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kDocumentUserActivationRequired,
             GetAppliedAutoplayPolicy());
 }
 
@@ -123,7 +124,7 @@ TEST_F(UnifiedAutoplaySoundSettingsTest, Pref_Disabled) {
   EXPECT_FALSE(ShouldBlockAutoplay());
 
   NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kNoUserGestureRequired,
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kNoUserGestureRequired,
             GetAppliedAutoplayPolicy());
 
   // Now update the pref and make sure we apply it on the next navigation.
@@ -131,7 +132,7 @@ TEST_F(UnifiedAutoplaySoundSettingsTest, Pref_Disabled) {
   EXPECT_TRUE(ShouldBlockAutoplay());
 
   NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kDocumentUserActivationRequired,
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kDocumentUserActivationRequired,
             GetAppliedAutoplayPolicy());
 }
 
@@ -159,6 +160,15 @@ TEST_F(UnifiedAutoplaySoundSettingsOverrideTest, CommandLineOverride) {
   EXPECT_TRUE(ShouldBlockAutoplay());
 
   NavigateToTestPage();
-  EXPECT_EQ(blink::web_pref::AutoplayPolicy::kUserGestureRequired,
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kUserGestureRequired,
+            GetAppliedAutoplayPolicy());
+}
+
+TEST_F(UnifiedAutoplaySoundSettingsTestFeatureDisabled, Feature_DisabledNoop) {
+  SetAutoplayPrefValue(false);
+  EXPECT_FALSE(ShouldBlockAutoplay());
+
+  NavigateToTestPage();
+  EXPECT_EQ(blink::mojom::AutoplayPolicy::kDocumentUserActivationRequired,
             GetAppliedAutoplayPolicy());
 }

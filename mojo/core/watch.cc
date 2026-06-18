@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -66,11 +66,13 @@ void Watch::InvokeCallback(MojoResult result,
   base::AutoLock lock(notification_lock_);
 
   // Ensure that no notifications are dispatched beyond cancellation.
-  if (is_cancelled_)
+  if (is_cancelled_) {
     return;
+  }
 
-  if (result == MOJO_RESULT_CANCELLED)
+  if (result == MOJO_RESULT_CANCELLED) {
     is_cancelled_ = true;
+  }
 
   // NOTE: This will acquire |watcher_|'s internal lock. It's safe because a
   // thread can only enter InvokeCallback() from within a RequestContext

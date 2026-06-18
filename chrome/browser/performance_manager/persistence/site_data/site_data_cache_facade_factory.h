@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,10 @@
 #define CHROME_BROWSER_PERFORMANCE_MANAGER_PERSISTENCE_SITE_DATA_SITE_DATA_CACHE_FACADE_FACTORY_H_
 
 #include "base/auto_reset.h"
-#include "base/memory/weak_ptr.h"
 #include "base/no_destructor.h"
 #include "base/threading/sequence_bound.h"
-#include "components/keyed_service/content/browser_context_keyed_service_factory.h"
+#include "base/types/pass_key.h"
+#include "chrome/browser/profiles/profile_keyed_service_factory.h"
 
 class Profile;
 
@@ -43,18 +43,25 @@ class SiteDataCacheFacadeTest;
 //   - When a browser context is destroyed the corresponding SiteDataCacheFacade
 //     is destroyed and this also destroys the corresponding SiteDataCache on
 //     the proper sequence (via the SequenceBound object).
-//   - At shutdown, the SiteDataCacheFacadeFactory is destroyed shortly before
-//     terminating the thread pool. Destruction of this object causes the
-//     SiteDataCacheFactory to be destroyed on its sequence.
-class SiteDataCacheFacadeFactory : public BrowserContextKeyedServiceFactory {
+//   - At shutdown, when the last SiteDataCacheFacade is destroyed, a task is
+//     posted to ensure that the SiteDataCacheFactory is destroyed on its
+//     sequence.
+class SiteDataCacheFacadeFactory : public ProfileKeyedServiceFactory {
  public:
+  SiteDataCacheFacadeFactory(const SiteDataCacheFacadeFactory&) = delete;
+  SiteDataCacheFacadeFactory& operator=(const SiteDataCacheFacadeFactory&) =
+      delete;
+
   ~SiteDataCacheFacadeFactory() override;
 
   static SiteDataCacheFacadeFactory* GetInstance();
 
   static std::unique_ptr<base::AutoReset<bool>> EnableForTesting();
   static void DisassociateForTesting(Profile* profile);
-  static void ReleaseInstanceForTesting();
+
+  // Returns the SiteDataCacheFacade for `profile` so that it can be directly
+  // manipulated in tests.
+  SiteDataCacheFacade* GetProfileFacadeForTesting(Profile* profile);
 
  protected:
   friend class base::NoDestructor<SiteDataCacheFacadeFactory>;
@@ -63,23 +70,30 @@ class SiteDataCacheFacadeFactory : public BrowserContextKeyedServiceFactory {
 
   SiteDataCacheFacadeFactory();
 
-  base::SequenceBound<SiteDataCacheFactory>* cache_factory() {
-    return &cache_factory_;
-  }
+  SiteDataCacheFactory* cache_factory() { return cache_factory_.get(); }
+
+  // Should be called early in the creation of a SiteDataCacheFacade to make
+  // sure that |cache_factory_| gets created.
+  void OnBeforeFacadeCreated(base::PassKey<SiteDataCacheFacade> key);
+
+  // Should be called at the end of the destruction of a SiteDataCacheFacade to
+  // release |cache_factory_| if there's no more profile needing it.
+  void OnFacadeDestroyed(base::PassKey<SiteDataCacheFacade> key);
 
  private:
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
-      content::BrowserContext* context) const override;
-  content::BrowserContext* GetBrowserContextToUse(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
   bool ServiceIsCreatedWithBrowserContext() const override;
   bool ServiceIsNULLWhileTesting() const override;
 
-  // The counterpart of this factory living on the SiteDataCache's sequence.
-  base::SequenceBound<SiteDataCacheFactory> cache_factory_;
+  // The counterpart of this factory.
+  // TODO(pmonette): Get rid of this separation now that the performance manager
+  // lives on the UI thread.
+  std::unique_ptr<SiteDataCacheFactory> cache_factory_;
 
-  DISALLOW_COPY_AND_ASSIGN(SiteDataCacheFacadeFactory);
+  // The number of SiteDataCacheFacade currently in existence.
+  size_t service_instance_count_ = 0;
 };
 
 }  // namespace performance_manager

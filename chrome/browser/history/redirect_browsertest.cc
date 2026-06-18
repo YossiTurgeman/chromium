@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,27 +8,27 @@
 // the case of redirects. It may also mean problems with the history system.
 
 #include <memory>
+#include <string>
 
-#include "base/bind.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/cancelable_task_tracker.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/test_timeouts.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread_restrictions.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/view_ids.h"
+#include "chrome/test/base/chrome_test_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/history/core/browser/history_service.h"
@@ -42,7 +42,7 @@
 
 class RedirectTest : public InProcessBrowserTest {
  public:
-  RedirectTest() {}
+  RedirectTest() = default;
 
   std::vector<GURL> GetRedirects(const GURL& url) {
     history::HistoryService* history_service =
@@ -53,21 +53,22 @@ class RedirectTest : public InProcessBrowserTest {
     // asynchronously from the callback the history system uses to notify us
     // that it's done: OnRedirectQueryComplete.
     std::vector<GURL> rv;
+    base::RunLoop loop(base::RunLoop::Type::kNestableTasksAllowed);
     history_service->QueryRedirectsFrom(
         url,
         base::BindOnce(&RedirectTest::OnRedirectQueryComplete,
-                       base::Unretained(this), &rv),
+                       base::Unretained(this), &rv, loop.QuitWhenIdleClosure()),
         &tracker_);
-    content::RunMessageLoop();
+    loop.Run();
     return rv;
   }
 
  protected:
   void OnRedirectQueryComplete(std::vector<GURL>* rv,
+                               base::OnceClosure quit_closure,
                                history::RedirectList redirects) {
     rv->insert(rv->end(), redirects.begin(), redirects.end());
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
-        FROM_HERE, base::RunLoop::QuitCurrentWhenIdleClosureDeprecated());
+    std::move(quit_closure).Run();
   }
 
   // Tracker for asynchronous history queries.
@@ -81,7 +82,7 @@ IN_PROC_BROWSER_TEST_F(RedirectTest, Server) {
   GURL first_url =
       embedded_test_server()->GetURL("/server-redirect?" + final_url.spec());
 
-  ui_test_utils::NavigateToURL(browser(), first_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), first_url));
 
   std::vector<GURL> redirects = GetRedirects(first_url);
 
@@ -107,16 +108,20 @@ IN_PROC_BROWSER_TEST_F(RedirectTest, Client) {
   EXPECT_EQ(final_url.spec(), redirects[0].spec());
 
   // The address bar should display the final URL.
-  EXPECT_EQ(final_url,
-            browser()->tab_strip_model()->GetActiveWebContents()->GetURL());
+  EXPECT_EQ(final_url, browser()
+                           ->tab_strip_model()
+                           ->GetActiveWebContents()
+                           ->GetLastCommittedURL());
 
   // Navigate one more time.
   ui_test_utils::NavigateToURLBlockUntilNavigationsComplete(
       browser(), first_url, 2);
 
   // The address bar should still display the final URL.
-  EXPECT_EQ(final_url,
-            browser()->tab_strip_model()->GetActiveWebContents()->GetURL());
+  EXPECT_EQ(final_url, browser()
+                           ->tab_strip_model()
+                           ->GetActiveWebContents()
+                           ->GetLastCommittedURL());
 }
 
 // http://code.google.com/p/chromium/issues/detail?id=62772
@@ -154,10 +159,10 @@ IN_PROC_BROWSER_TEST_F(RedirectTest, ClientEmptyReferer) {
 // Tests to make sure a location change when a pending redirect exists isn't
 // flagged as a redirect.
 IN_PROC_BROWSER_TEST_F(RedirectTest, ClientCancelled) {
-  GURL first_url = ui_test_utils::GetTestUrl(
+  GURL first_url = chrome_test_utils::GetTestUrl(
       base::FilePath(),
       base::FilePath().AppendASCII("cancelled_redirect_test.html"));
-  ui_test_utils::NavigateToURL(browser(), first_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), first_url));
 
   content::WebContents* web_contents =
       browser()->tab_strip_model()->GetActiveWebContents();
@@ -173,11 +178,11 @@ IN_PROC_BROWSER_TEST_F(RedirectTest, ClientCancelled) {
 
   std::vector<GURL> redirects = GetRedirects(first_url);
 
-  // There should be 1 redirect from first_url, because the anchor location
-  // change that occurs should be flagged as a redirect but the meta-refresh
+  // There should be no redirect from first_url, because the anchor location
+  // change is not considered as client redirect and the meta-refresh
   // won't have fired yet.
-  ASSERT_EQ(1U, redirects.size());
-  EXPECT_EQ("myanchor", web_contents->GetURL().ref());
+  ASSERT_EQ(0U, redirects.size());
+  EXPECT_EQ("myanchor", web_contents->GetLastCommittedURL().GetRef());
 }
 
 // Tests a client->server->server redirect
@@ -212,30 +217,32 @@ IN_PROC_BROWSER_TEST_F(RedirectTest, ServerReference) {
   GURL initial_url = embedded_test_server()->GetURL(
       "/server-redirect?" + final_url.spec() + "#" + ref);
 
-  ui_test_utils::NavigateToURL(browser(), initial_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), initial_url));
 
-  EXPECT_EQ(ref,
-            browser()->tab_strip_model()->GetActiveWebContents()->
-                GetURL().ref());
+  EXPECT_EQ(ref, browser()
+                     ->tab_strip_model()
+                     ->GetActiveWebContents()
+                     ->GetLastCommittedURL()
+                     .GetRef());
 }
 
 // Test that redirect from http:// to file:// :
 // A) does not crash the browser or confuse the redirect chain, see bug 1080873
 // B) does not take place.
 //
-// Flaky on XP and Vista, http://crbug.com/69390.
+// Flaky on XP and Vista, http://crbug.com/41302864.
 IN_PROC_BROWSER_TEST_F(RedirectTest, NoHttpToFile) {
   ASSERT_TRUE(embedded_test_server()->Start());
-  GURL file_url = ui_test_utils::GetTestUrl(
+  GURL file_url = chrome_test_utils::GetTestUrl(
       base::FilePath(), base::FilePath().AppendASCII("http_to_file.html"));
 
   GURL initial_url =
       embedded_test_server()->GetURL("/client-redirect?" + file_url.spec());
 
-  ui_test_utils::NavigateToURL(browser(), initial_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), initial_url));
   // We make sure the title doesn't match the title from the file, because the
   // nav should not have taken place.
-  EXPECT_NE(base::ASCIIToUTF16("File!"),
+  EXPECT_NE(u"File!",
             browser()->tab_strip_model()->GetActiveWebContents()->GetTitle());
 }
 
@@ -243,9 +250,9 @@ IN_PROC_BROWSER_TEST_F(RedirectTest, NoHttpToFile) {
 // flagged as client redirects. See bug 1139823.
 IN_PROC_BROWSER_TEST_F(RedirectTest, ClientFragments) {
   ASSERT_TRUE(embedded_test_server()->Start());
-  GURL first_url = ui_test_utils::GetTestUrl(
+  GURL first_url = chrome_test_utils::GetTestUrl(
       base::FilePath(), base::FilePath().AppendASCII("ref_redirect.html"));
-  ui_test_utils::NavigateToURL(browser(), first_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), first_url));
   std::vector<GURL> redirects = GetRedirects(first_url);
   EXPECT_EQ(1U, redirects.size());
   EXPECT_EQ(first_url.spec() + "#myanchor", redirects[0].spec());
@@ -258,7 +265,7 @@ IN_PROC_BROWSER_TEST_F(RedirectTest, ClientFragments) {
 // alternatively load the second page from disk, but we would need to start
 // the browser for this testcase with --process-per-tab, and I don't think
 // we can do this at test-case-level granularity at the moment.
-// http://crbug.com/45056
+// http://crbug.com/41153080
 IN_PROC_BROWSER_TEST_F(RedirectTest,
        DISABLED_ClientCancelledByNewNavigationAfterProvisionalLoad) {
   // We want to initiate a second navigation after the provisional load for
@@ -280,19 +287,19 @@ IN_PROC_BROWSER_TEST_F(RedirectTest,
 
   ui_test_utils::NavigateToURLWithDisposition(
       browser(), first_url, WindowOpenDisposition::CURRENT_TAB,
-      ui_test_utils::BROWSER_TEST_NONE);
+      ui_test_utils::BROWSER_TEST_NO_WAIT);
   // We don't sleep here - the first navigation won't have been committed yet
   // because we told the server to wait a minute. This means the browser has
   // started it's provisional load for the client redirect destination page but
   // hasn't completed. Our time is now!
   ui_test_utils::NavigateToURLWithDisposition(
       browser(), final_url, WindowOpenDisposition::CURRENT_TAB,
-      ui_test_utils::BROWSER_TEST_NONE);
+      ui_test_utils::BROWSER_TEST_NO_WAIT);
   observer.Wait();
 
   // Check to make sure the navigation did in fact take place and we are
   // at the expected page.
-  EXPECT_EQ(base::ASCIIToUTF16("Title Of Awesomeness"),
+  EXPECT_EQ(u"Title Of Awesomeness",
             browser()->tab_strip_model()->GetActiveWebContents()->GetTitle());
 
   bool final_navigation_not_redirect = true;

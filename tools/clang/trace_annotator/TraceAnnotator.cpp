@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -157,9 +157,14 @@ static llvm::cl::extrahelp common_help(CommonOptionsParser::HelpMessage);
 
 int main(int argc, const char* argv[]) {
   llvm::cl::OptionCategory category("TraceAnnotator Tool");
-  CommonOptionsParser options(argc, argv, category);
-  clang::tooling::ClangTool tool(options.getCompilations(),
-                                 options.getSourcePathList());
+  llvm::Expected<CommonOptionsParser> options =
+      CommonOptionsParser::create(argc, argv, category);
+  if (!options) {
+    llvm::outs() << llvm::toString(options.takeError());
+    return 1;
+  }
+  clang::tooling::ClangTool tool(options->getCompilations(),
+                                 options->getSourcePathList());
 
   std::vector<Replacement> replacements;
   TraceAnnotator converter(&replacements);
@@ -194,7 +199,7 @@ int main(int argc, const char* argv[]) {
       include_added_to.insert(r.getFilePath().str());
       // Add also copyright so that |test-expected.cc| passes presubmit.
       llvm::outs() << "include-user-header:::" << r.getFilePath()
-                   << ":::-1:::-1:::base/trace_event/base_tracing.h"
+                   << ":::-1:::-1:::base/trace_event/trace_event.h"
                    << "\n";
     }
     // Add the actual replacement.

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,21 +14,21 @@ ScrollStateData::ScrollStateData()
       delta_y_hint(0),
       position_x(0),
       position_y(0),
-      velocity_x(0),
-      velocity_y(0),
       is_beginning(false),
       is_in_inertial_phase(false),
       is_ending(false),
       from_user_input(false),
       delta_consumed_for_scroll_sequence(false),
       is_direct_manipulation(false),
+      is_scrollbar_interaction(false),
       delta_granularity(ui::ScrollGranularity::kScrollByPrecisePixel),
       caused_scroll_x(false),
       caused_scroll_y(false),
-      is_scroll_chain_cut(false),
-      is_main_thread_hit_tested(false) {}
+      is_scroll_chain_cut(false) {}
 
-ScrollStateData::ScrollStateData(const ScrollStateData& other) = default;
+ScrollStateData::ScrollStateData(const ScrollStateData&) = default;
+
+ScrollStateData& ScrollStateData::operator=(const ScrollStateData&) = default;
 
 ElementId ScrollStateData::current_native_scrolling_element() const {
   return current_native_scrolling_element_;

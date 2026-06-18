@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,42 +12,58 @@ import android.graphics.Rect;
 import android.util.Size;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewStructure;
+import android.view.accessibility.AccessibilityNodeProvider;
 import android.widget.FrameLayout;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.content_public.browser.WebContentsAccessibility;
+import org.chromium.ui.accessibility.AccessibilityState;
 
 import java.util.List;
 
 /**
  * Responsible for detecting touch gestures, displaying the content of a frame and its sub-frames.
- * {@link PlayerFrameBitmapPainter} is used for drawing the contents.
- * Sub-frames are represented with individual {@link View}s. {@link #mSubFrames} contains the list
- * of all sub-frames and their relative positions.
+ * {@link PlayerFrameBitmapPainter} is used for drawing the contents. Sub-frames are represented
+ * with individual {@link View}s. {@link #mSubFrames} contains the list of all sub-frames and their
+ * relative positions.
  */
-class PlayerFrameView extends FrameLayout {
-    private PlayerFrameBitmapPainter mBitmapPainter;
-    private PlayerFrameGestureDetector mGestureDetector;
-    private PlayerFrameViewDelegate mDelegate;
-    private List<View> mSubFrameViews;
-    private List<Rect> mSubFrameRects;
-    private Matrix mScaleMatrix;
+@NullMarked
+public class PlayerFrameView extends FrameLayout {
+    private final PlayerFrameBitmapPainter mBitmapPainter;
+    private final PlayerFrameGestureDetector mGestureDetector;
+    private final PlayerFrameViewDelegate mDelegate;
+    private @Nullable List<View> mSubFrameViews;
+    private @Nullable List<Rect> mSubFrameRects;
+    private @Nullable Matrix mScaleMatrix;
+    private final Matrix mOffset = new Matrix();
+    protected @Nullable WebContentsAccessibility mWebContentsAccessibility;
 
     /**
-     * @param context Used for initialization.
-     * @param canDetectZoom Whether this {@link View} should detect zoom (scale) gestures.
+     * @param context                 Used for initialization.
+     * @param canDetectZoom           Whether this {@link View} should detect zoom (scale)
+     *                                gestures.
      * @param playerFrameViewDelegate The interface used for forwarding events.
      */
-    PlayerFrameView(@NonNull Context context, boolean canDetectZoom,
+    public PlayerFrameView(
+            Context context,
+            boolean canDetectZoom,
             PlayerFrameViewDelegate playerFrameViewDelegate,
             PlayerFrameGestureDetectorDelegate gestureDetectorDelegate,
             @Nullable Runnable firstPaintListener) {
         super(context);
         setWillNotDraw(false);
         mDelegate = playerFrameViewDelegate;
-        mBitmapPainter = new PlayerFrameBitmapPainter(this::invalidate, firstPaintListener);
+        mBitmapPainter = new PlayerFrameBitmapPainter(this::postInvalidate, firstPaintListener);
         mGestureDetector =
                 new PlayerFrameGestureDetector(context, canDetectZoom, gestureDetectorDelegate);
+    }
+
+    /** Sets the {@link WebContentsAccessibility} for this View. */
+    public void setWebContentsAccessibility(
+            @Nullable WebContentsAccessibility webContentsAccessibility) {
+        mWebContentsAccessibility = webContentsAccessibility;
     }
 
     PlayerFrameGestureDetector getGestureDetector() {
@@ -61,6 +77,7 @@ class PlayerFrameView extends FrameLayout {
 
     /**
      * Updates the sub-frame views that this {@link PlayerFrameView} should display.
+     *
      * @param subFrameViews List of all sub-frame views.
      */
     void updateSubFrameViews(List<View> subFrameViews) {
@@ -69,10 +86,15 @@ class PlayerFrameView extends FrameLayout {
 
     /**
      * Updates clip rects for sub-frames that this {@link PlayerFrameView} should display.
+     *
      * @param subFrameRects List of all sub-frames clip rects.
      */
     void updateSubFrameRects(List<Rect> subFrameRects) {
         mSubFrameRects = subFrameRects;
+    }
+
+    void updateOffset(int left, int top) {
+        mOffset.setTranslate(left, top);
     }
 
     void updateViewPort(int left, int top, int right, int bottom) {
@@ -99,14 +121,24 @@ class PlayerFrameView extends FrameLayout {
     @Override
     protected void onDraw(Canvas canvas) {
         canvas.save();
-        if (!mScaleMatrix.isIdentity()) canvas.setMatrix(mScaleMatrix);
+        canvas.concat(mOffset);
+        canvas.concat(mScaleMatrix);
         mBitmapPainter.onDraw(canvas);
         canvas.restore();
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        return mGestureDetector.onTouchEvent(event) || super.onTouchEvent(event);
+        super.onTouchEvent(event);
+        return mGestureDetector.onTouchEvent(event);
+    }
+
+    @Override
+    public boolean onHoverEvent(MotionEvent event) {
+        if (mWebContentsAccessibility != null && AccessibilityState.isTouchExplorationEnabled()) {
+            return mWebContentsAccessibility.onHoverEventNoRenderer(event);
+        }
+        return super.onHoverEvent(event);
     }
 
     private void layoutSubFrames() {
@@ -133,5 +165,25 @@ class PlayerFrameView extends FrameLayout {
             subFrameView.layout(
                     layoutRect.left, layoutRect.top, layoutRect.right, layoutRect.bottom);
         }
+    }
+
+    @Override
+    public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        AccessibilityNodeProvider provider =
+                (mWebContentsAccessibility != null)
+                        ? mWebContentsAccessibility.getAccessibilityNodeProvider()
+                        : null;
+        return (provider != null) ? provider : super.getAccessibilityNodeProvider();
+    }
+
+    @Override
+    public void onProvideVirtualStructure(final ViewStructure structure) {
+        if (mWebContentsAccessibility != null) {
+            mWebContentsAccessibility.onProvideVirtualStructure(structure, false);
+        }
+    }
+
+    void destroy() {
+        mBitmapPainter.destroy();
     }
 }

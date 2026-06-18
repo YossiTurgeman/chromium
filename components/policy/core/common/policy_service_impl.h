@@ -1,33 +1,35 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_POLICY_CORE_COMMON_POLICY_SERVICE_IMPL_H_
 #define COMPONENTS_POLICY_CORE_COMMON_POLICY_SERVICE_IMPL_H_
 
+#include <array>
 #include <map>
 #include <memory>
 #include <set>
-#include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
-#include "base/threading/thread_checker.h"
+#include "base/sequence_checker.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/policy/core/common/configuration_policy_provider.h"
 #include "components/policy/core/common/policy_bundle.h"
 #include "components/policy/core/common/policy_migrator.h"
 #include "components/policy/core/common/policy_service.h"
+#include "components/policy/core/common/policy_types.h"
 #include "components/policy/policy_export.h"
 
 namespace policy {
 
 class PolicyMap;
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 namespace android {
 class PolicyServiceAndroid;
 }
@@ -37,13 +39,38 @@ class POLICY_EXPORT PolicyServiceImpl
     : public PolicyService,
       public ConfigurationPolicyProvider::Observer {
  public:
-  using Providers = std::vector<ConfigurationPolicyProvider*>;
+  using Providers =
+      std::vector<raw_ptr<ConfigurationPolicyProvider, VectorExperimental>>;
   using Migrators = std::vector<std::unique_ptr<PolicyMigrator>>;
+
+  static constexpr char kInitTimeHistogramPrefix[] =
+      "Enterprise.PolicyServiceInitTime";
+  static constexpr char kMachineHistogramSuffix[] = ".Machine";
+  static constexpr char kUserHistogramSuffix[] = ".User";
+  static constexpr char kWithoutPoliciesHistogramSuffix[] = ".WithoutPolicies";
+  static constexpr char kWithPoliciesHistogramSuffix[] = ".WithPolicies";
+  static constexpr char kWith1to50PoliciesHistogramSuffix[] =
+      ".With_1_to_50_Policies";
+  static constexpr char kWith51to100PoliciesHistogramSuffix[] =
+      ".With_1_to_50_Policies";
+  static constexpr char kWith101PlusPoliciesHistogramSuffix[] =
+      ".With_101_Plus_Policies";
+
+  // Represents the scope for the policy service to be logged via histograms.
+  enum class ScopeForMetrics {
+    // For cases when there is no need to collect metrics, e.g. in unit tests.
+    kUnspecified,
+    // Policy applicable to all profiles.
+    kMachine,
+    // Policy applicable only to the current signed-in user.
+    kUser,
+  };
 
   // Creates a new PolicyServiceImpl with the list of
   // ConfigurationPolicyProviders, in order of decreasing priority.
   explicit PolicyServiceImpl(
       Providers providers,
+      ScopeForMetrics scope_for_metrics = ScopeForMetrics::kUnspecified,
       Migrators migrators = std::vector<std::unique_ptr<PolicyMigrator>>());
 
   // Creates a new PolicyServiceImpl with the list of
@@ -53,7 +80,11 @@ class POLICY_EXPORT PolicyServiceImpl
   // |UnthrottleInitialization| has been called.
   static std::unique_ptr<PolicyServiceImpl> CreateWithThrottledInitialization(
       Providers providers,
+      ScopeForMetrics scope_for_metrics,
       Migrators migrators = std::vector<std::unique_ptr<PolicyMigrator>>());
+
+  PolicyServiceImpl(const PolicyServiceImpl&) = delete;
+  PolicyServiceImpl& operator=(const PolicyServiceImpl&) = delete;
 
   ~PolicyServiceImpl() override;
 
@@ -67,8 +98,10 @@ class POLICY_EXPORT PolicyServiceImpl
   bool HasProvider(ConfigurationPolicyProvider* provider) const override;
   const PolicyMap& GetPolicies(const PolicyNamespace& ns) const override;
   bool IsInitializationComplete(PolicyDomain domain) const override;
-  void RefreshPolicies(base::OnceClosure callback) override;
-#if defined(OS_ANDROID)
+  bool IsFirstPolicyLoadComplete(PolicyDomain domain) const override;
+  void RefreshPolicies(base::OnceClosure callback,
+                       PolicyFetchReason reason) override;
+#if BUILDFLAG(IS_ANDROID)
   android::PolicyServiceAndroid* GetPolicyServiceAndroid() override;
 #endif
 
@@ -79,10 +112,28 @@ class POLICY_EXPORT PolicyServiceImpl
   // notified yet because it was throttled, will notify observers synchronously.
   // Has no effect if initialization was not throttled.
   void UnthrottleInitialization();
+  void UseLocalTestPolicyProvider(
+      ConfigurationPolicyProvider* provider) override;
+
+  // Precedence policies cannot be set at the user cloud level regardless of
+  // affiliation status. This is done to prevent cloud users from potentially
+  // giving themselves increased priority, causing a security issue.
+  static void IgnoreUserCloudPrecedencePolicies(PolicyMap* policies);
+
+  // Merges the policies from `bundles` into one bundle while respecting the
+  // policy priorities and applying the appropriate `migrators`.
+  static PolicyBundle MergePolicyBundles(
+      std::vector<const policy::PolicyBundle*>& bundles,
+      Migrators& migrators);
+
+  // Records histograms for tracking policy service initialization time.
+  // Visible for testing.
+  static void RecordInitializationTime(ScopeForMetrics scope_for_metrics,
+                                       size_t policy_count,
+                                       base::TimeDelta initialization_time);
 
  private:
-  using Observers =
-      base::ObserverList<PolicyService::Observer, true>::Unchecked;
+  enum class PolicyDomainStatus { kUninitialized, kInitialized, kPolicyReady };
 
   // This constructor is not publicly visible so callers that want a
   // PolicyServiceImpl with throttled initialization use
@@ -91,6 +142,7 @@ class POLICY_EXPORT PolicyServiceImpl
   // notify observers that initialization has completed (for any domain) after
   // |UnthrottleInitialization| has been called.
   PolicyServiceImpl(Providers providers,
+                    ScopeForMetrics scope_for_metrics,
                     Migrators migrators,
                     bool initialization_throttled);
 
@@ -105,26 +157,32 @@ class POLICY_EXPORT PolicyServiceImpl
 
   void NotifyProviderUpdatesPropagated();
 
+  void NotifyPoliciesUpdated(const PolicyBundle& old_bundle);
+
   // Combines the policies from all the providers, and notifies the observers
   // of namespaces whose policies have been modified.
   void MergeAndTriggerUpdates();
 
-  // Checks if all providers are initialized and sets |initialization_complete_|
-  // accordingly. If initialization is not throttled, will also notify the
-  // observers if the service just became initialized.
-  void CheckInitializationComplete();
+  // Checks if all providers are initialized or have loaded their policies and
+  // sets |policy_domain_status_| accordingly.
+  // Returns the updated domains. The returned domains should be passed to
+  // MaybeNotifyPolicyDomainStatusChange.
+  std::vector<PolicyDomain> UpdatePolicyDomainStatus();
 
-  // If initialization is complete for |policy_domain| and initialization is not
-  // throttled, will notify obserers for |policy_domain| that it has been
-  // initialized. This function should only be called when |policy_domain| just
-  // became initialized or when initialization has been unthrottled.
-  void MaybeNotifyInitializationComplete(PolicyDomain policy_domain);
+  // If initialization is not throttled, observers of |updated_domains| of the
+  // initialization will be notified of the domains' initialization and of the
+  // first policies being loaded. This function should only be called when
+  // |updated_domains| just became initialized, just got its first policies or
+  // when initialization has been unthrottled.
+  void MaybeNotifyPolicyDomainStatusChange(
+      const std::vector<PolicyDomain>& updated_domains);
 
   // Invokes all the refresh callbacks if there are no more refreshes pending.
   void CheckRefreshComplete();
 
   // The providers, in order of decreasing priority.
   Providers providers_;
+  raw_ptr<ConfigurationPolicyProvider> local_test_policy_provider_ = nullptr;
 
   Migrators migrators_;
 
@@ -132,14 +190,17 @@ class POLICY_EXPORT PolicyServiceImpl
   PolicyBundle policy_bundle_;
 
   // Maps each policy domain to its observer list.
-  std::map<PolicyDomain, std::unique_ptr<Observers>> observers_;
+  std::map<PolicyDomain,
+           base::ObserverList<PolicyService::Observer, /*check_empty=*/true>>
+      observers_;
 
-  // True if all the providers are initialized for the indexed policy domain.
-  bool initialization_complete_[POLICY_DOMAIN_SIZE];
+  // The status of all the providers for the indexed policy domain.
+  std::array<PolicyDomainStatus, POLICY_DOMAIN_SIZE> policy_domain_status_;
 
   // Set of providers that have a pending update that was triggered by a
   // call to RefreshPolicies().
-  std::set<ConfigurationPolicyProvider*> refresh_pending_;
+  std::set<raw_ptr<ConfigurationPolicyProvider, SetExperimental>>
+      refresh_pending_;
 
   // List of callbacks to invoke once all providers refresh after a
   // RefreshPolicies() call.
@@ -155,25 +216,36 @@ class POLICY_EXPORT PolicyServiceImpl
   // Note that this is intentionally a set - if multiple updates from the same
   // provider come in faster than they can be processed, they should only
   // trigger one notification to |provider_update_observers_|.
-  std::set<ConfigurationPolicyProvider*> provider_update_pending_;
+  std::set<raw_ptr<ConfigurationPolicyProvider, SetExperimental>>
+      provider_update_pending_;
 
   // If this is true, IsInitializationComplete should be returning false for all
   // policy domains because the owner of this PolicyService is delaying the
   // initialization signal.
   bool initialization_throttled_;
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   std::unique_ptr<android::PolicyServiceAndroid> policy_service_android_;
 #endif
 
-  // Used to verify thread-safe usage.
-  base::ThreadChecker thread_checker_;
+  // The time when the policy service was created, used for logging a histogram
+  // that indicates how long it takes for the service's initialization to be
+  // completed.
+  base::Time creation_time_ = base::Time::Now();
+  // The scope of the current policy service, to be used only for metrics
+  // reporting.
+  ScopeForMetrics scope_for_metrics_;
+
+  // Used to verify usage in correct sequence.
+  SEQUENCE_CHECKER(sequence_checker_);
 
   // Used to create tasks to delay new policy updates while we may be already
   // processing previous policy updates.
+  // All WeakPtrs will be reset in |RefreshPolicies| and |OnUpdatePolicy|.
   base::WeakPtrFactory<PolicyServiceImpl> update_task_ptr_factory_{this};
 
-  DISALLOW_COPY_AND_ASSIGN(PolicyServiceImpl);
+  // Used to protect against crbug.com/747817 until crbug.com/1221454 is done.
+  base::WeakPtrFactory<PolicyServiceImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace policy

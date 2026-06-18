@@ -31,19 +31,21 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_CRYPTO_SUBTLE_CRYPTO_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_CRYPTO_SUBTLE_CRYPTO_H_
 
-#include "third_party/blink/renderer/bindings/core/v8/array_buffer_or_array_buffer_view.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_typedefs.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_typedefs.h"
 #include "third_party/blink/renderer/modules/crypto/normalize_algorithm.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 
 namespace blink {
 
-class ArrayBufferOrArrayBufferViewOrJsonWebKey;
 class CryptoKey;
-
-using BufferSource = ArrayBufferOrArrayBufferView;
+class DOMArrayBuffer;
+class EncapsulatedBits;
+class EncapsulatedKey;
+class V8UnionCryptoKeyOrCryptoKeyPair;
+class V8UnionArrayBufferOrJsonWebKey;
 
 class SubtleCrypto final : public ScriptWrappable {
   DEFINE_WRAPPERTYPEINFO();
@@ -51,76 +53,126 @@ class SubtleCrypto final : public ScriptWrappable {
  public:
   SubtleCrypto();
 
-  ScriptPromise encrypt(ScriptState*,
-                        const AlgorithmIdentifier&,
-                        CryptoKey*,
-                        const BufferSource&,
-                        ExceptionState&);
-  ScriptPromise decrypt(ScriptState*,
-                        const AlgorithmIdentifier&,
-                        CryptoKey*,
-                        const BufferSource&,
-                        ExceptionState&);
-  ScriptPromise sign(ScriptState*,
-                     const AlgorithmIdentifier&,
-                     CryptoKey*,
-                     const BufferSource&,
-                     ExceptionState&);
+  ScriptPromise<DOMArrayBuffer> encrypt(ScriptState*,
+                                        const V8AlgorithmIdentifier*,
+                                        CryptoKey*,
+                                        const V8BufferSource*,
+                                        ExceptionState&);
+  ScriptPromise<DOMArrayBuffer> decrypt(ScriptState*,
+                                        const V8AlgorithmIdentifier*,
+                                        CryptoKey*,
+                                        const V8BufferSource*,
+                                        ExceptionState&);
+  ScriptPromise<DOMArrayBuffer> sign(ScriptState*,
+                                     const V8AlgorithmIdentifier*,
+                                     CryptoKey*,
+                                     const V8BufferSource*,
+                                     ExceptionState&);
   // Note that this is not named "verify" because when compiling on Mac that
   // expands to a macro and breaks.
-  ScriptPromise verifySignature(ScriptState*,
-                                const AlgorithmIdentifier&,
-                                CryptoKey*,
-                                const BufferSource& signature,
-                                const BufferSource& data,
-                                ExceptionState&);
-  ScriptPromise digest(ScriptState*,
-                       const AlgorithmIdentifier&,
-                       const BufferSource& data,
-                       ExceptionState&);
+  ScriptPromise<IDLBoolean> verifySignature(ScriptState*,
+                                            const V8AlgorithmIdentifier*,
+                                            CryptoKey*,
+                                            const V8BufferSource* signature,
+                                            const V8BufferSource* data,
+                                            ExceptionState&);
+  ScriptPromise<DOMArrayBuffer> digest(ScriptState*,
+                                       const V8AlgorithmIdentifier*,
+                                       const V8BufferSource* data,
+                                       ExceptionState&);
 
-  ScriptPromise generateKey(ScriptState*,
-                            const AlgorithmIdentifier&,
-                            bool extractable,
-                            const Vector<String>& key_usages,
-                            ExceptionState&);
-  ScriptPromise importKey(ScriptState*,
-                          const String&,
-                          const ArrayBufferOrArrayBufferViewOrJsonWebKey&,
-                          const AlgorithmIdentifier&,
-                          bool extractable,
-                          const Vector<String>& key_usages,
-                          ExceptionState&);
-  ScriptPromise exportKey(ScriptState*, const String&, CryptoKey*);
+  ScriptPromise<V8UnionCryptoKeyOrCryptoKeyPair> generateKey(
+      ScriptState*,
+      const V8AlgorithmIdentifier*,
+      bool extractable,
+      const Vector<String>& key_usages,
+      ExceptionState&);
+  ScriptPromise<CryptoKey> importKey(ScriptState*,
+                                     const String&,
+                                     const V8UnionBufferSourceOrJsonWebKey*,
+                                     const V8AlgorithmIdentifier*,
+                                     bool extractable,
+                                     const Vector<String>& key_usages,
+                                     ExceptionState&);
+  ScriptPromise<V8UnionArrayBufferOrJsonWebKey> exportKey(ScriptState*,
+                                                          const String&,
+                                                          CryptoKey*,
+                                                          ExceptionState&);
 
-  ScriptPromise wrapKey(ScriptState*,
-                        const String&,
-                        CryptoKey*,
-                        CryptoKey*,
-                        const AlgorithmIdentifier&,
-                        ExceptionState&);
-  ScriptPromise unwrapKey(ScriptState*,
-                          const String&,
-                          const BufferSource&,
-                          CryptoKey*,
-                          const AlgorithmIdentifier&,
-                          const AlgorithmIdentifier&,
-                          bool,
-                          const Vector<String>&,
-                          ExceptionState&);
+  ScriptPromise<DOMArrayBuffer> wrapKey(ScriptState*,
+                                        const String&,
+                                        CryptoKey*,
+                                        CryptoKey*,
+                                        const V8AlgorithmIdentifier*,
+                                        ExceptionState&);
+  ScriptPromise<CryptoKey> unwrapKey(ScriptState*,
+                                     const String&,
+                                     const V8BufferSource*,
+                                     CryptoKey*,
+                                     const V8AlgorithmIdentifier*,
+                                     const V8AlgorithmIdentifier*,
+                                     bool,
+                                     const Vector<String>&,
+                                     ExceptionState&);
 
-  ScriptPromise deriveBits(ScriptState*,
-                           const AlgorithmIdentifier&,
-                           CryptoKey*,
-                           unsigned,
-                           ExceptionState&);
-  ScriptPromise deriveKey(ScriptState*,
-                          const AlgorithmIdentifier&,
-                          CryptoKey*,
-                          const AlgorithmIdentifier&,
-                          bool extractable,
-                          const Vector<String>&,
-                          ExceptionState&);
+  ScriptPromise<DOMArrayBuffer> deriveBits(ScriptState*,
+                                           const V8AlgorithmIdentifier*,
+                                           CryptoKey*,
+                                           std::optional<unsigned>,
+                                           ExceptionState&);
+  ScriptPromise<CryptoKey> deriveKey(ScriptState*,
+                                     const V8AlgorithmIdentifier*,
+                                     CryptoKey*,
+                                     const V8AlgorithmIdentifier*,
+                                     bool extractable,
+                                     const Vector<String>&,
+                                     ExceptionState&);
+
+  ScriptPromise<EncapsulatedKey> encapsulateKey(
+      ScriptState*,
+      const V8AlgorithmIdentifier* encapsulation_algorithm,
+      CryptoKey* encapsulation_key,
+      const V8AlgorithmIdentifier* shared_key_algorithm,
+      bool extractable,
+      const Vector<String>& key_usages,
+      ExceptionState&);
+
+  ScriptPromise<EncapsulatedBits> encapsulateBits(
+      ScriptState*,
+      const V8AlgorithmIdentifier* encapsulation_algorithm,
+      CryptoKey* encapsulation_key,
+      ExceptionState&);
+
+  ScriptPromise<CryptoKey> decapsulateKey(
+      ScriptState*,
+      const V8AlgorithmIdentifier* decapsulation_algorithm,
+      CryptoKey* decapsulation_key,
+      const V8BufferSource* ciphertext,
+      const V8AlgorithmIdentifier* shared_key_algorithm,
+      bool extractable,
+      const Vector<String>& key_usages,
+      ExceptionState&);
+
+  ScriptPromise<DOMArrayBuffer> decapsulateBits(
+      ScriptState*,
+      const V8AlgorithmIdentifier* decapsulation_algorithm,
+      CryptoKey* decapsulation_key,
+      const V8BufferSource* ciphertext,
+      ExceptionState&);
+  ScriptPromise<CryptoKey> getPublicKey(ScriptState*,
+                                        CryptoKey*,
+                                        const Vector<String>& key_usages,
+                                        ExceptionState&);
+
+  // Length is in bits
+  static bool supports(ScriptState*,
+                       const String& operation,
+                       const V8AlgorithmIdentifier* algorithm,
+                       std::optional<unsigned> length);
+  static bool supports(ScriptState*,
+                       const String& operation,
+                       const V8AlgorithmIdentifier* algorithm,
+                       const V8AlgorithmIdentifier* additional_algorithm);
 };
 
 }  // namespace blink

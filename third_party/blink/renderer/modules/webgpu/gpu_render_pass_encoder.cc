@@ -1,45 +1,42 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/webgpu/gpu_render_pass_encoder.h"
 
-#include "third_party/blink/renderer/bindings/modules/v8/double_sequence_or_gpu_color_dict.h"
-#include "third_party/blink/renderer/core/typed_arrays/typed_flexible_array_buffer_view.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_index_format.h"
 #include "third_party/blink/renderer/modules/webgpu/dawn_conversions.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_bind_group.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_buffer.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_device.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu_query_set.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_render_bundle.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_render_pipeline.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu_supported_features.h"
 
 namespace blink {
 
 GPURenderPassEncoder::GPURenderPassEncoder(
     GPUDevice* device,
-    WGPURenderPassEncoder render_pass_encoder)
-    : DawnObject<WGPURenderPassEncoder>(device, render_pass_encoder) {}
-
-GPURenderPassEncoder::~GPURenderPassEncoder() {
-  if (IsDawnControlClientDestroyed()) {
-    return;
-  }
-  GetProcs().renderPassEncoderRelease(GetHandle());
-}
+    wgpu::RenderPassEncoder render_pass_encoder,
+    const String& label)
+    : DawnObject<wgpu::RenderPassEncoder>(device,
+                                          std::move(render_pass_encoder),
+                                          label) {}
 
 void GPURenderPassEncoder::setBindGroup(
     uint32_t index,
     GPUBindGroup* bindGroup,
     const Vector<uint32_t>& dynamicOffsets) {
-  GetProcs().renderPassEncoderSetBindGroup(
-      GetHandle(), index, bindGroup->GetHandle(), dynamicOffsets.size(),
-      dynamicOffsets.data());
+  GetHandle().SetBindGroup(
+      index, bindGroup ? bindGroup->GetHandle() : wgpu::BindGroup(nullptr),
+      dynamicOffsets.size(), dynamicOffsets.data());
 }
 
 void GPURenderPassEncoder::setBindGroup(
     uint32_t index,
     GPUBindGroup* bind_group,
-    const FlexibleUint32Array& dynamic_offsets_data,
+    base::span<const uint32_t> dynamic_offsets_data,
     uint64_t dynamic_offsets_data_start,
     uint32_t dynamic_offsets_data_length,
     ExceptionState& exception_state) {
@@ -49,137 +46,193 @@ void GPURenderPassEncoder::setBindGroup(
     return;
   }
 
-  const uint32_t* data =
-      dynamic_offsets_data.DataMaybeOnStack() + dynamic_offsets_data_start;
-
-  GetProcs().renderPassEncoderSetBindGroup(GetHandle(), index,
-                                           bind_group->GetHandle(),
-                                           dynamic_offsets_data_length, data);
+  base::span<const uint32_t> data_span = dynamic_offsets_data.subspan(
+      base::checked_cast<size_t>(dynamic_offsets_data_start),
+      dynamic_offsets_data_length);
+  GetHandle().SetBindGroup(
+      index, bind_group ? bind_group->GetHandle() : wgpu::BindGroup(nullptr),
+      data_span.size(), data_span.data());
 }
 
-void GPURenderPassEncoder::pushDebugGroup(String groupLabel) {
-  std::string label = groupLabel.Utf8();
-  GetProcs().renderPassEncoderPushDebugGroup(GetHandle(), label.c_str());
-}
-
-void GPURenderPassEncoder::popDebugGroup() {
-  GetProcs().renderPassEncoderPopDebugGroup(GetHandle());
-}
-
-void GPURenderPassEncoder::insertDebugMarker(String markerLabel) {
-  std::string label = markerLabel.Utf8();
-  GetProcs().renderPassEncoderInsertDebugMarker(GetHandle(), label.c_str());
-}
-
-void GPURenderPassEncoder::setPipeline(GPURenderPipeline* pipeline) {
-  GetProcs().renderPassEncoderSetPipeline(GetHandle(), pipeline->GetHandle());
-}
-
-void GPURenderPassEncoder::setBlendColor(DoubleSequenceOrGPUColorDict& color,
+void GPURenderPassEncoder::setImmediates(uint32_t range_offset,
+                                         const DOMArrayBufferBase* data,
+                                         uint64_t data_offset,
                                          ExceptionState& exception_state) {
-  if (color.IsDoubleSequence() && color.GetAsDoubleSequence().size() != 4) {
-    exception_state.ThrowRangeError("color size must be 4");
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), 1, data_offset)) {
     return;
   }
 
-  WGPUColor dawn_color = AsDawnType(&color);
-  GetProcs().renderPassEncoderSetBlendColor(GetHandle(), &dawn_color);
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPURenderPassEncoder::setStencilReference(uint32_t reference) {
-  GetProcs().renderPassEncoderSetStencilReference(GetHandle(), reference);
-}
-
-void GPURenderPassEncoder::setViewport(float x,
-                                       float y,
-                                       float width,
-                                       float height,
-                                       float minDepth,
-                                       float maxDepth) {
-  GetProcs().renderPassEncoderSetViewport(GetHandle(), x, y, width, height,
-                                          minDepth, maxDepth);
-}
-
-void GPURenderPassEncoder::setScissorRect(uint32_t x,
-                                          uint32_t y,
-                                          uint32_t width,
-                                          uint32_t height) {
-  GetProcs().renderPassEncoderSetScissorRect(GetHandle(), x, y, width, height);
-}
-
-void GPURenderPassEncoder::setIndexBuffer(GPUBuffer* buffer,
-                                          uint64_t offset,
-                                          uint64_t size) {
-  device_->AddConsoleWarning(
-      "Calling setIndexBuffer without a GPUIndexFormat is deprecated.");
-  GetProcs().renderPassEncoderSetIndexBuffer(GetHandle(), buffer->GetHandle(),
-                                             offset, size);
-}
-
-void GPURenderPassEncoder::setIndexBuffer(GPUBuffer* buffer,
-                                          const WTF::String& format,
-                                          uint64_t offset,
-                                          uint64_t size,
-                                          ExceptionState& exception_state) {
-  if (format != "uint16" && format != "uint32") {
-    exception_state.ThrowTypeError(
-        "The provided value '" + format +
-        "' is not a valid enum value of type GPUIndexFormat.");
+void GPURenderPassEncoder::setImmediates(uint32_t range_offset,
+                                         const DOMArrayBufferBase* data,
+                                         uint64_t data_offset,
+                                         uint64_t size,
+                                         ExceptionState& exception_state) {
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), 1, data_offset, size)) {
     return;
   }
-  GetProcs().renderPassEncoderSetIndexBufferWithFormat(
-      GetHandle(), buffer->GetHandle(), AsDawnEnum<WGPUIndexFormat>(format),
-      offset, size);
+
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPURenderPassEncoder::setVertexBuffer(uint32_t slot,
-                                           const GPUBuffer* buffer,
-                                           const uint64_t offset,
-                                           const uint64_t size) {
-  GetProcs().renderPassEncoderSetVertexBuffer(
-      GetHandle(), slot, buffer->GetHandle(), offset, size);
+void GPURenderPassEncoder::setImmediates(
+    uint32_t range_offset,
+    const MaybeShared<DOMArrayBufferView>& data,
+    uint64_t data_offset,
+    ExceptionState& exception_state) {
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), data->TypeSize(), data_offset)) {
+    return;
+  }
+
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPURenderPassEncoder::draw(uint32_t vertexCount,
-                                uint32_t instanceCount,
-                                uint32_t firstVertex,
-                                uint32_t firstInstance) {
-  GetProcs().renderPassEncoderDraw(GetHandle(), vertexCount, instanceCount,
-                                   firstVertex, firstInstance);
+void GPURenderPassEncoder::setImmediates(
+    uint32_t range_offset,
+    const MaybeShared<DOMArrayBufferView>& data,
+    uint64_t data_offset,
+    uint64_t size,
+    ExceptionState& exception_state) {
+  base::span<const uint8_t> data_span;
+  if (!ValidateSetImmediatesAndSubSpan(
+          exception_state, &data_span, range_offset,
+          data->ByteSpanMaybeShared(), data->TypeSize(), data_offset, size)) {
+    return;
+  }
+
+  GetHandle().SetImmediates(range_offset, data_span.data(), data_span.size());
 }
 
-void GPURenderPassEncoder::drawIndexed(uint32_t indexCount,
-                                       uint32_t instanceCount,
-                                       uint32_t firstIndex,
-                                       int32_t baseVertex,
-                                       uint32_t firstInstance) {
-  GetProcs().renderPassEncoderDrawIndexed(GetHandle(), indexCount,
-                                          instanceCount, firstIndex, baseVertex,
-                                          firstInstance);
+void GPURenderPassEncoder::setBlendConstant(const V8GPUColor* color,
+                                            ExceptionState& exception_state) {
+  wgpu::Color dawn_color;
+  if (!ConvertToDawn(color, &dawn_color, exception_state)) {
+    return;
+  }
+
+  GetHandle().SetBlendConstant(&dawn_color);
 }
 
-void GPURenderPassEncoder::drawIndirect(GPUBuffer* indirectBuffer,
-                                        uint64_t indirectOffset) {
-  GetProcs().renderPassEncoderDrawIndirect(
-      GetHandle(), indirectBuffer->GetHandle(), indirectOffset);
+void GPURenderPassEncoder::multiDrawIndirect(
+    const DawnObject<wgpu::Buffer>* indirectBuffer,
+    uint64_t indirectOffset,
+    uint32_t maxDrawCount,
+    ExceptionState& exception_state) {
+  multiDrawIndirect(indirectBuffer, indirectOffset, maxDrawCount, nullptr, 0,
+                    exception_state);
 }
 
-void GPURenderPassEncoder::drawIndexedIndirect(GPUBuffer* indirectBuffer,
-                                               uint64_t indirectOffset) {
-  GetProcs().renderPassEncoderDrawIndexedIndirect(
-      GetHandle(), indirectBuffer->GetHandle(), indirectOffset);
+void GPURenderPassEncoder::multiDrawIndirect(
+    const DawnObject<wgpu::Buffer>* indirectBuffer,
+    uint64_t indirectOffset,
+    uint32_t maxDrawCount,
+    DawnObject<wgpu::Buffer>* drawCountBuffer,
+    ExceptionState& exception_state) {
+  multiDrawIndirect(indirectBuffer, indirectOffset, maxDrawCount,
+                    drawCountBuffer, 0, exception_state);
+}
+
+void GPURenderPassEncoder::multiDrawIndirect(
+    const DawnObject<wgpu::Buffer>* indirectBuffer,
+    uint64_t indirectOffset,
+    uint32_t maxDrawCount,
+    DawnObject<wgpu::Buffer>* drawCountBuffer,
+    uint64_t drawCountBufferOffset,
+    ExceptionState& exception_state) {
+  constexpr auto kRequiredFeatureEnum =
+      V8GPUFeatureName::Enum::kChromiumExperimentalMultiDrawIndirect;
+
+  if (!device_->features()->Has(kRequiredFeatureEnum)) {
+    exception_state.ThrowTypeError(StrCat(
+        {"Use of the multiDrawIndirect() method on render pass requires the '",
+         V8GPUFeatureName(kRequiredFeatureEnum).AsStringView(),
+         "' feature to be enabled on ", device_->GetFormattedLabel(), "."}));
+    return;
+  }
+  GetHandle().MultiDrawIndirect(
+      indirectBuffer->GetHandle(), indirectOffset, maxDrawCount,
+      drawCountBuffer ? drawCountBuffer->GetHandle() : wgpu::Buffer(nullptr),
+      drawCountBufferOffset);
+}
+
+void GPURenderPassEncoder::multiDrawIndexedIndirect(
+    const DawnObject<wgpu::Buffer>* indirectBuffer,
+    uint64_t indirectOffset,
+    uint32_t maxDrawCount,
+    ExceptionState& exception_state) {
+  multiDrawIndexedIndirect(indirectBuffer, indirectOffset, maxDrawCount,
+                           nullptr, 0, exception_state);
+}
+
+void GPURenderPassEncoder::multiDrawIndexedIndirect(
+    const DawnObject<wgpu::Buffer>* indirectBuffer,
+    uint64_t indirectOffset,
+    uint32_t maxDrawCount,
+    DawnObject<wgpu::Buffer>* drawCountBuffer,
+    ExceptionState& exception_state) {
+  multiDrawIndexedIndirect(indirectBuffer, indirectOffset, maxDrawCount,
+                           drawCountBuffer, 0, exception_state);
+}
+
+void GPURenderPassEncoder::multiDrawIndexedIndirect(
+    const DawnObject<wgpu::Buffer>* indirectBuffer,
+    uint64_t indirectOffset,
+    uint32_t maxDrawCount,
+    DawnObject<wgpu::Buffer>* drawCountBuffer,
+    uint64_t drawCountBufferOffset,
+    ExceptionState& exception_state) {
+  constexpr auto kRequiredFeatureEnum =
+      V8GPUFeatureName::Enum::kChromiumExperimentalMultiDrawIndirect;
+
+  if (!device_->features()->Has(kRequiredFeatureEnum)) {
+    exception_state.ThrowTypeError(StrCat(
+        {"Use of the multiDrawIndexedIndirect() method on render pass requires "
+         "the '",
+         V8GPUFeatureName(kRequiredFeatureEnum).AsStringView(),
+         "' feature to be enabled on ", device_->GetFormattedLabel(), "."}));
+    return;
+  }
+  GetHandle().MultiDrawIndexedIndirect(
+      indirectBuffer->GetHandle(), indirectOffset, maxDrawCount,
+      drawCountBuffer ? drawCountBuffer->GetHandle() : wgpu::Buffer(nullptr),
+      drawCountBufferOffset);
 }
 
 void GPURenderPassEncoder::executeBundles(
     const HeapVector<Member<GPURenderBundle>>& bundles) {
-  std::unique_ptr<WGPURenderBundle[]> dawn_bundles = AsDawnType(bundles);
+  std::unique_ptr<wgpu::RenderBundle[]> dawn_bundles = AsDawnType(bundles);
 
-  GetProcs().renderPassEncoderExecuteBundles(GetHandle(), bundles.size(),
-                                             dawn_bundles.get());
+  GetHandle().ExecuteBundles(bundles.size(), dawn_bundles.get());
 }
 
-void GPURenderPassEncoder::endPass() {
-  GetProcs().renderPassEncoderEndPass(GetHandle());
+void GPURenderPassEncoder::writeTimestamp(
+    const DawnObject<wgpu::QuerySet>* querySet,
+    uint32_t queryIndex,
+    ExceptionState& exception_state) {
+  constexpr auto kRequiredFeatureEnum =
+      V8GPUFeatureName::Enum::kChromiumExperimentalTimestampQueryInsidePasses;
+
+  if (!device_->features()->Has(kRequiredFeatureEnum)) {
+    exception_state.ThrowTypeError(StrCat(
+        {"Use of the writeTimestamp() method on render pass requires the '",
+         V8GPUFeatureName(kRequiredFeatureEnum).AsStringView(),
+         "' "
+         "feature to be enabled on ",
+         device_->GetFormattedLabel(), "."}));
+    return;
+  }
+  GetHandle().WriteTimestamp(querySet->GetHandle(), queryIndex);
 }
 
 }  // namespace blink

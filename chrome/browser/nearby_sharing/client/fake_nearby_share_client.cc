@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 #include <utility>
 
 FakeNearbyShareClient::UpdateDeviceRequest::UpdateDeviceRequest(
-    const nearbyshare::proto::UpdateDeviceRequest& request,
+    const nearby::sharing::proto::UpdateDeviceRequest& request,
     UpdateDeviceCallback&& callback,
     ErrorCallback&& error_callback)
     : request(request),
@@ -19,39 +19,8 @@ FakeNearbyShareClient::UpdateDeviceRequest::UpdateDeviceRequest(
 
 FakeNearbyShareClient::UpdateDeviceRequest::~UpdateDeviceRequest() = default;
 
-FakeNearbyShareClient::GetDeviceStateRequest::GetDeviceStateRequest(
-    const nearbyshare::proto::GetDeviceStateRequest& request,
-    GetDeviceStateCallback&& callback,
-    ErrorCallback&& error_callback)
-    : request(request),
-      callback(std::move(callback)),
-      error_callback(std::move(error_callback)) {}
-
-FakeNearbyShareClient::GetDeviceStateRequest::GetDeviceStateRequest(
-    FakeNearbyShareClient::GetDeviceStateRequest&& request) = default;
-
-FakeNearbyShareClient::GetDeviceStateRequest::~GetDeviceStateRequest() =
-    default;
-
-FakeNearbyShareClient::CheckContactsReachabilityRequest::
-    CheckContactsReachabilityRequest(
-        const nearbyshare::proto::CheckContactsReachabilityRequest& request,
-        CheckContactsReachabilityCallback&& callback,
-        ErrorCallback&& error_callback)
-    : request(request),
-      callback(std::move(callback)),
-      error_callback(std::move(error_callback)) {}
-
-FakeNearbyShareClient::CheckContactsReachabilityRequest::
-    CheckContactsReachabilityRequest(
-        FakeNearbyShareClient::CheckContactsReachabilityRequest&& request) =
-        default;
-
-FakeNearbyShareClient::CheckContactsReachabilityRequest::
-    ~CheckContactsReachabilityRequest() = default;
-
 FakeNearbyShareClient::ListContactPeopleRequest::ListContactPeopleRequest(
-    const nearbyshare::proto::ListContactPeopleRequest& request,
+    const nearby::sharing::proto::ListContactPeopleRequest& request,
     ListContactPeopleCallback&& callback,
     ErrorCallback&& error_callback)
     : request(request),
@@ -66,7 +35,7 @@ FakeNearbyShareClient::ListContactPeopleRequest::~ListContactPeopleRequest() =
 
 FakeNearbyShareClient::ListPublicCertificatesRequest::
     ListPublicCertificatesRequest(
-        const nearbyshare::proto::ListPublicCertificatesRequest& request,
+        const nearby::sharing::proto::ListPublicCertificatesRequest& request,
         ListPublicCertificatesCallback&& callback,
         ErrorCallback&& error_callback)
     : request(request),
@@ -90,31 +59,15 @@ void FakeNearbyShareClient::SetAccessTokenUsed(const std::string& token) {
 }
 
 void FakeNearbyShareClient::UpdateDevice(
-    const nearbyshare::proto::UpdateDeviceRequest& request,
+    const nearby::sharing::proto::UpdateDeviceRequest& request,
     UpdateDeviceCallback&& callback,
     ErrorCallback&& error_callback) {
   update_device_requests_.emplace_back(request, std::move(callback),
                                        std::move(error_callback));
 }
 
-void FakeNearbyShareClient::GetDeviceState(
-    const nearbyshare::proto::GetDeviceStateRequest& request,
-    GetDeviceStateCallback&& callback,
-    ErrorCallback&& error_callback) {
-  get_device_state_requests_.emplace_back(request, std::move(callback),
-                                          std::move(error_callback));
-}
-
-void FakeNearbyShareClient::CheckContactsReachability(
-    const nearbyshare::proto::CheckContactsReachabilityRequest& request,
-    CheckContactsReachabilityCallback&& callback,
-    ErrorCallback&& error_callback) {
-  check_contacts_reachabilty_requests_.emplace_back(
-      request, std::move(callback), std::move(error_callback));
-}
-
 void FakeNearbyShareClient::ListContactPeople(
-    const nearbyshare::proto::ListContactPeopleRequest& request,
+    const nearby::sharing::proto::ListContactPeopleRequest& request,
     ListContactPeopleCallback&& callback,
     ErrorCallback&& error_callback) {
   list_contact_people_requests_.emplace_back(request, std::move(callback),
@@ -122,7 +75,7 @@ void FakeNearbyShareClient::ListContactPeople(
 }
 
 void FakeNearbyShareClient::ListPublicCertificates(
-    const nearbyshare::proto::ListPublicCertificatesRequest& request,
+    const nearby::sharing::proto::ListPublicCertificatesRequest& request,
     ListPublicCertificatesCallback&& callback,
     ErrorCallback&& error_callback) {
   list_public_certificates_requests_.emplace_back(request, std::move(callback),

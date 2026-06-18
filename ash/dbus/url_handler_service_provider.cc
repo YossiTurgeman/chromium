@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,8 @@
 #include <utility>
 
 #include "ash/public/cpp/new_window_delegate.h"
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
 #include "dbus/bus.h"
 #include "dbus/message.h"
 #include "extensions/common/constants.h"
@@ -49,8 +50,7 @@ void UrlHandlerServiceProvider::Start(
 }
 
 bool UrlHandlerServiceProvider::UrlAllowed(const GURL& gurl) const {
-  return gurl.is_valid() &&
-         allowed_url_schemes_.find(gurl.scheme()) != allowed_url_schemes_.end();
+  return gurl.is_valid() && allowed_url_schemes_.contains(gurl.GetScheme());
 }
 
 void UrlHandlerServiceProvider::OpenUrl(
@@ -66,16 +66,22 @@ void UrlHandlerServiceProvider::OpenUrl(
     return;
   }
 
+  VLOG(1) << "Got request to open url";
+
   const GURL gurl(url);
   if (!UrlAllowed(gurl)) {
+    VLOG(1) << "Url is not allowed";
     std::move(response_sender)
         .Run(dbus::ErrorResponse::FromMethodCall(method_call, DBUS_ERROR_FAILED,
                                                  "Invalid URL"));
     return;
   }
 
-  NewWindowDelegate::GetInstance()->NewTabWithUrl(
-      gurl, false /* from_user_interaction */);
+  VLOG(1) << "Opening url now";
+
+  NewWindowDelegate::GetInstance()->OpenUrl(
+      gurl, NewWindowDelegate::OpenUrlFrom::kUnspecified,
+      NewWindowDelegate::Disposition::kNewForegroundTab);
   std::move(response_sender).Run(dbus::Response::FromMethodCall(method_call));
 }
 

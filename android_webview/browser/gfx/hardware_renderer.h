@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,34 @@
 
 #include "android_webview/browser/gfx/child_frame.h"
 #include "android_webview/browser/gfx/output_surface_provider_webview.h"
-#include "base/macros.h"
+#include "android_webview/browser/gfx/root_frame_sink.h"
+#include "base/memory/raw_ptr.h"
+#include "base/threading/thread_checker.h"
+#include "components/viz/common/surfaces/frame_sink_id.h"
+#include "ui/gfx/android/android_surface_control_compat.h"
 #include "ui/gfx/color_space.h"
 
 namespace android_webview {
 
+class AwVulkanContextProvider;
 class RenderThreadManager;
 
+// Lifetime: Temporary
+struct OverlaysParams {
+  enum class Mode {
+    Disabled,
+    Enabled,
+  };
+
+  typedef ASurfaceControl* (*GetSurfaceControlFn)();
+  typedef void (*MergeTransactionFn)(ASurfaceTransaction*);
+
+  Mode overlays_mode = Mode::Disabled;
+  GetSurfaceControlFn get_surface_control = nullptr;
+  MergeTransactionFn merge_transaction = nullptr;
+};
+
+// Lifetime: Temporary
 struct HardwareRendererDrawParams {
   bool operator==(const HardwareRendererDrawParams& other) const;
   bool operator!=(const HardwareRendererDrawParams& other) const;
@@ -30,6 +51,10 @@ struct HardwareRendererDrawParams {
   gfx::ColorSpace color_space;
 };
 
+using ReportRenderingThreadsCallback =
+    base::OnceCallback<void(const pid_t*, size_t)>;
+
+// Lifetime: WebView
 class HardwareRenderer {
  public:
   // Two rules:
@@ -46,27 +71,54 @@ class HardwareRenderer {
   // * Append new frame without waiting on it.
   static ChildFrameQueue WaitAndPruneFrameQueue(ChildFrameQueue* child_frames);
 
-  virtual ~HardwareRenderer();
+  HardwareRenderer(RenderThreadManager* state,
+                   RootFrameSinkGetter root_frame_sink_getter,
+                   AwVulkanContextProvider* context_provider);
 
-  void Draw(HardwareRendererDrawParams* params);
+  HardwareRenderer(const HardwareRenderer&) = delete;
+  HardwareRenderer& operator=(const HardwareRenderer&) = delete;
+
+  ~HardwareRenderer();
+
+  void Draw(const HardwareRendererDrawParams& params,
+            const OverlaysParams& overlays_params,
+            ReportRenderingThreadsCallback report_rendering_threads_callback);
   void CommitFrame();
+  void SetChildFrameForTesting(std::unique_ptr<ChildFrame> child_frame);
+  void RemoveOverlays(OverlaysParams::MergeTransactionFn merge_transaction);
+  void AbandonContext();
 
- protected:
-  explicit HardwareRenderer(RenderThreadManager* state);
+ private:
+  class OnViz;
 
+  void InitializeOnViz(RootFrameSinkGetter root_frame_sink_getter);
+  bool IsUsingVulkan() const;
+  bool IsUsingANGLEOverGL() const;
+  void MergeTransactionIfNeeded(
+      OverlaysParams::MergeTransactionFn merge_transaction);
   void ReturnChildFrame(std::unique_ptr<ChildFrame> child_frame);
-  void ReturnResourcesToCompositor(
-      const std::vector<viz::ReturnedResource>& resources,
-      const viz::FrameSinkId& frame_sink_id,
-      uint32_t layer_tree_frame_sink_id);
+  void ReturnResourcesToCompositor(std::vector<viz::ReturnedResource> resources,
+                                   const viz::FrameSinkId& frame_sink_id,
+                                   uint32_t layer_tree_frame_sink_id);
 
-  void ReportDrawMetric(HardwareRendererDrawParams* params);
+  void ReportDrawMetric(const HardwareRendererDrawParams& params);
+  void DrawAndSwap(
+      const HardwareRendererDrawParams& params,
+      const OverlaysParams& overlays_params,
+      ReportRenderingThreadsCallback report_rendering_threads_callback);
+  void MarkAllowContextLoss();
 
-  virtual void DrawAndSwap(HardwareRendererDrawParams* params) = 0;
+  THREAD_CHECKER(render_thread_checker_);
 
-  RenderThreadManager* const render_thread_manager_;
+  const raw_ptr<RenderThreadManager> render_thread_manager_;
 
   typedef void* EGLContext;
+
+  // NOTE: This must be initialized before |output_surface_provider_|: this
+  // field is expected to be initialized with the current EGL context just
+  // *before* creation of this HardwareRenderer instance, whereas this
+  // HardwareRenderer instance's creation of |output_surface_provider_| actually
+  // *causes* an EGL context to be created.
   EGLContext last_egl_context_;
 
   ChildFrameQueue child_frame_queue_;
@@ -81,7 +133,7 @@ class HardwareRenderer {
   bool did_submit_compositor_frame_ = false;
 
   // Information from UI on last commit.
-  gfx::Vector2d scroll_offset_;
+  gfx::Point scroll_offset_;
 
   // HardwareRendererSingleThread guarantees resources are returned in the order
   // of layer_tree_frame_sink_id, and resources for old output surfaces are
@@ -91,7 +143,20 @@ class HardwareRenderer {
   // Draw params that was used in previous draw. Used in reporting draw metric.
   HardwareRendererDrawParams last_draw_params_ = {};
 
-  DISALLOW_COPY_AND_ASSIGN(HardwareRenderer);
+  // Information about last delegated frame.
+  float device_scale_factor_ = 0;
+
+  viz::SurfaceId surface_id_;
+
+  // Used to create viz::OutputSurface and gl::GLSurface
+  OutputSurfaceProviderWebView output_surface_provider_;
+
+  // These are accessed on the viz thread.
+  std::unique_ptr<OnViz> on_viz_;
+
+  bool report_rendering_threads_ = false;
+
+  base::TimeDelta preferred_frame_interval_;
 };
 
 }  // namespace android_webview

@@ -1,10 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/loader/fetch/data_pipe_bytes_consumer.h"
 
-#include "base/single_thread_task_runner.h"
+#include <string_view>
+
+#include "base/containers/span.h"
+#include "base/task/single_thread_task_runner.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/loader/testing/bytes_consumer_test_reader.h"
 #include "third_party/blink/renderer/platform/scheduler/test/fake_task_runner.h"
@@ -22,48 +25,52 @@ class DataPipeBytesConsumerTest : public testing::Test {
 };
 
 TEST_F(DataPipeBytesConsumerTest, TwoPhaseRead) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
-  const std::string kData = "Such hospitality. I'm underwhelmed.";
-  uint32_t write_size = kData.size();
-
-  MojoResult rv = pipe.producer_handle->WriteData(kData.c_str(), &write_size,
-                                                  MOJO_WRITE_DATA_FLAG_NONE);
+  const std::string_view kData = "Such hospitality. I'm underwhelmed.";
+  size_t actually_written_bytes = 0;
+  MojoResult rv = producer_handle->WriteData(base::as_byte_span(kData),
+                                             MOJO_WRITE_DATA_FLAG_NONE,
+                                             actually_written_bytes);
   ASSERT_EQ(MOJO_RESULT_OK, rv);
-  ASSERT_EQ(kData.size(), write_size);
+  ASSERT_EQ(kData.size(), actually_written_bytes);
 
   // Close the producer so the consumer will reach the kDone state after
   // completion is signaled below.
-  pipe.producer_handle.reset();
+  producer_handle.reset();
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
   notifier->SignalComplete();
   auto result = MakeGarbageCollected<BytesConsumerTestReader>(consumer)->Run(
       task_runner_.get());
   EXPECT_EQ(Result::kDone, result.first);
-  EXPECT_EQ(kData, String(result.second.data(), result.second.size()).Utf8());
+  EXPECT_EQ(kData, String(result.second).Utf8());
 }
 
 TEST_F(DataPipeBytesConsumerTest, TwoPhaseRead_SignalError) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
-  const std::string kData = "Such hospitality. I'm underwhelmed.";
-  uint32_t write_size = kData.size();
-
-  MojoResult rv = pipe.producer_handle->WriteData(kData.c_str(), &write_size,
-                                                  MOJO_WRITE_DATA_FLAG_NONE);
+  const std::string_view kData = "Such hospitality. I'm underwhelmed.";
+  size_t actually_written_bytes = 0;
+  MojoResult rv = producer_handle->WriteData(base::as_byte_span(kData),
+                                             MOJO_WRITE_DATA_FLAG_NONE,
+                                             actually_written_bytes);
   ASSERT_EQ(MOJO_RESULT_OK, rv);
-  ASSERT_EQ(kData.size(), write_size);
+  ASSERT_EQ(kData.size(), actually_written_bytes);
 
-  pipe.producer_handle.reset();
+  producer_handle.reset();
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
 
   // Then explicitly signal an error.  This should override the pipe completion
   // and result in kError.
@@ -72,64 +79,64 @@ TEST_F(DataPipeBytesConsumerTest, TwoPhaseRead_SignalError) {
   auto result = MakeGarbageCollected<BytesConsumerTestReader>(consumer)->Run(
       task_runner_.get());
   EXPECT_EQ(Result::kError, result.first);
-  EXPECT_TRUE(result.second.IsEmpty());
+  EXPECT_TRUE(result.second.empty());
 }
 
 // Verify that both the DataPipe must close and SignalComplete()
 // must be called for the DataPipeBytesConsumer to reach the closed
 // state.
 TEST_F(DataPipeBytesConsumerTest, EndOfPipeBeforeComplete) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
-  pipe.producer_handle.reset();
-  rv = consumer->BeginRead(&buffer, &available);
+  producer_handle.reset();
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
   notifier->SignalComplete();
   EXPECT_EQ(PublicState::kClosed, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kDone, rv);
 }
 
 TEST_F(DataPipeBytesConsumerTest, CompleteBeforeEndOfPipe) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
   notifier->SignalComplete();
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
-  pipe.producer_handle.reset();
-  rv = consumer->BeginRead(&buffer, &available);
+  producer_handle.reset();
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kDone, rv);
   EXPECT_EQ(PublicState::kClosed, consumer->GetPublicState());
 }
@@ -138,30 +145,30 @@ TEST_F(DataPipeBytesConsumerTest, CompleteBeforeEndOfPipe) {
 // errored state immediately without waiting for the end of the
 // DataPipe.
 TEST_F(DataPipeBytesConsumerTest, EndOfPipeBeforeError) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
-  pipe.producer_handle.reset();
-  rv = consumer->BeginRead(&buffer, &available);
+  producer_handle.reset();
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
   notifier->SignalError(BytesConsumer::Error());
   EXPECT_EQ(PublicState::kErrored, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kError, rv);
 }
 
@@ -170,36 +177,34 @@ TEST_F(DataPipeBytesConsumerTest, SignalSizeBeforeRead) {
   mojo::ScopedDataPipeProducerHandle writable;
   const MojoCreateDataPipeOptions options{
       sizeof(MojoCreateDataPipeOptions), MOJO_CREATE_DATA_PIPE_FLAG_NONE, 1, 0};
-  ASSERT_EQ(MOJO_RESULT_OK,
-            mojo::CreateDataPipe(&options, &writable, &readable));
+  ASSERT_EQ(MOJO_RESULT_OK, mojo::CreateDataPipe(&options, writable, readable));
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
       task_runner_, std::move(readable), &notifier);
 
-  constexpr char kData[] = "hello";
-  uint32_t write_size = 5;
+  const std::string_view kData = "hello";
+  size_t actually_written_bytes = 0;
   MojoResult write_result =
-      writable->WriteData(kData, &write_size, MOJO_WRITE_DATA_FLAG_NONE);
+      writable->WriteData(base::as_byte_span(kData), MOJO_WRITE_DATA_FLAG_NONE,
+                          actually_written_bytes);
   ASSERT_EQ(MOJO_RESULT_OK, write_result);
-  ASSERT_EQ(5u, write_size);
+  ASSERT_EQ(5u, actually_written_bytes);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
   notifier->SignalSize(5);
 
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   ASSERT_EQ(Result::kOk, rv);
-  EXPECT_EQ(available, 5u);
+  EXPECT_EQ(buffer.size(), 5u);
 
   rv = consumer->EndRead(2);
   ASSERT_EQ(Result::kOk, rv);
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   ASSERT_EQ(Result::kOk, rv);
-  EXPECT_EQ(available, 3u);
+  EXPECT_EQ(buffer.size(), 3u);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
   rv = consumer->EndRead(3);
@@ -212,8 +217,7 @@ TEST_F(DataPipeBytesConsumerTest, SignalExcessSizeBeforeEndOfData) {
   mojo::ScopedDataPipeProducerHandle writable;
   const MojoCreateDataPipeOptions options{
       sizeof(MojoCreateDataPipeOptions), MOJO_CREATE_DATA_PIPE_FLAG_NONE, 1, 0};
-  ASSERT_EQ(MOJO_RESULT_OK,
-            mojo::CreateDataPipe(&options, &writable, &readable));
+  ASSERT_EQ(MOJO_RESULT_OK, mojo::CreateDataPipe(&options, writable, readable));
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
       task_runner_, std::move(readable), &notifier);
@@ -222,14 +226,13 @@ TEST_F(DataPipeBytesConsumerTest, SignalExcessSizeBeforeEndOfData) {
 
   notifier->SignalSize(1);
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   ASSERT_EQ(Result::kShouldWait, rv);
 
   writable.reset();
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   ASSERT_EQ(Result::kError, rv);
 
   EXPECT_EQ(PublicState::kErrored, consumer->GetPublicState());
@@ -240,8 +243,7 @@ TEST_F(DataPipeBytesConsumerTest, SignalExcessSizeAfterEndOfData) {
   mojo::ScopedDataPipeProducerHandle writable;
   const MojoCreateDataPipeOptions options{
       sizeof(MojoCreateDataPipeOptions), MOJO_CREATE_DATA_PIPE_FLAG_NONE, 1, 0};
-  ASSERT_EQ(MOJO_RESULT_OK,
-            mojo::CreateDataPipe(&options, &writable, &readable));
+  ASSERT_EQ(MOJO_RESULT_OK, mojo::CreateDataPipe(&options, writable, readable));
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
       task_runner_, std::move(readable), &notifier);
@@ -250,14 +252,13 @@ TEST_F(DataPipeBytesConsumerTest, SignalExcessSizeAfterEndOfData) {
 
   writable.reset();
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   ASSERT_EQ(Result::kShouldWait, rv);
 
   notifier->SignalSize(1);
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   ASSERT_EQ(Result::kError, rv);
 
   EXPECT_EQ(PublicState::kErrored, consumer->GetPublicState());
@@ -268,28 +269,26 @@ TEST_F(DataPipeBytesConsumerTest, SignalSizeAfterRead) {
   mojo::ScopedDataPipeProducerHandle writable;
   const MojoCreateDataPipeOptions options{
       sizeof(MojoCreateDataPipeOptions), MOJO_CREATE_DATA_PIPE_FLAG_NONE, 1, 0};
-  ASSERT_EQ(MOJO_RESULT_OK,
-            mojo::CreateDataPipe(&options, &writable, &readable));
+  ASSERT_EQ(MOJO_RESULT_OK, mojo::CreateDataPipe(&options, writable, readable));
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
       task_runner_, std::move(readable), &notifier);
 
-  constexpr char kData[] = "hello";
-  uint32_t write_size = 5;
+  const std::string_view kData = "hello";
+  size_t actually_written_bytes = 0;
   MojoResult write_result =
-      writable->WriteData(kData, &write_size, MOJO_WRITE_DATA_FLAG_NONE);
+      writable->WriteData(base::as_byte_span(kData), MOJO_WRITE_DATA_FLAG_NONE,
+                          actually_written_bytes);
   ASSERT_EQ(MOJO_RESULT_OK, write_result);
-  ASSERT_EQ(5u, write_size);
+  ASSERT_EQ(5u, actually_written_bytes);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   ASSERT_EQ(Result::kOk, rv);
-  EXPECT_EQ(available, 5u);
+  EXPECT_EQ(buffer.size(), 5u);
 
   rv = consumer->EndRead(5);
   ASSERT_EQ(Result::kOk, rv);
@@ -300,29 +299,29 @@ TEST_F(DataPipeBytesConsumerTest, SignalSizeAfterRead) {
 }
 
 TEST_F(DataPipeBytesConsumerTest, ErrorBeforeEndOfPipe) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
   notifier->SignalError(BytesConsumer::Error());
   EXPECT_EQ(PublicState::kErrored, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kError, rv);
 
-  pipe.producer_handle.reset();
-  rv = consumer->BeginRead(&buffer, &available);
+  producer_handle.reset();
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kError, rv);
   EXPECT_EQ(PublicState::kErrored, consumer->GetPublicState());
 }
@@ -330,61 +329,61 @@ TEST_F(DataPipeBytesConsumerTest, ErrorBeforeEndOfPipe) {
 // Verify that draining the DataPipe and SignalComplete() will
 // close the DataPipeBytesConsumer.
 TEST_F(DataPipeBytesConsumerTest, DrainPipeBeforeComplete) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
   mojo::ScopedDataPipeConsumerHandle drained = consumer->DrainAsDataPipe();
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
   notifier->SignalComplete();
   EXPECT_EQ(PublicState::kClosed, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kDone, rv);
 }
 
 TEST_F(DataPipeBytesConsumerTest, CompleteBeforeDrainPipe) {
-  mojo::DataPipe pipe;
-  ASSERT_TRUE(pipe.producer_handle.is_valid());
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
 
   DataPipeBytesConsumer::CompletionNotifier* notifier = nullptr;
   DataPipeBytesConsumer* consumer = MakeGarbageCollected<DataPipeBytesConsumer>(
-      task_runner_, std::move(pipe.consumer_handle), &notifier);
+      task_runner_, std::move(consumer_handle), &notifier);
 
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  const char* buffer = nullptr;
-  size_t available = 0;
-
-  Result rv = consumer->BeginRead(&buffer, &available);
+  base::span<const char> buffer;
+  Result rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
   notifier->SignalComplete();
   EXPECT_EQ(PublicState::kReadableOrWaiting, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kShouldWait, rv);
 
   mojo::ScopedDataPipeConsumerHandle drained = consumer->DrainAsDataPipe();
   EXPECT_EQ(PublicState::kClosed, consumer->GetPublicState());
 
-  rv = consumer->BeginRead(&buffer, &available);
+  rv = consumer->BeginRead(buffer);
   EXPECT_EQ(Result::kDone, rv);
   EXPECT_EQ(PublicState::kClosed, consumer->GetPublicState());
 }

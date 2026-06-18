@@ -87,7 +87,9 @@ class JSONCheckerTest(unittest.TestCase):
         pass
 
     def test_conflict_marker(self):
-        self.assert_error(0, 'json/syntax', '<<<<<<< HEAD\n{\n}\n')
+
+        expected_line = 1
+        self.assert_error(expected_line, 'json/syntax', '<<<<<<< HEAD\n{\n}\n')
 
     def test_single_quote(self):
         self.assert_error(2, 'json/syntax', "{\n'slaves': []\n}\n")

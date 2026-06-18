@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,9 @@
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
-#include "base/single_thread_task_runner.h"
-#include "chromecast/common/mojom/service_connector.mojom.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chromecast/media/audio/cast_audio_manager.h"
-#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "chromecast/media/audio/cast_audio_manager_helper.h"
 
 namespace media {
 class AlsaWrapper;
@@ -32,17 +30,19 @@ class CastAudioManagerAlsa : public CastAudioManager {
   CastAudioManagerAlsa(
       std::unique_ptr<::media::AudioThread> audio_thread,
       ::media::AudioLogFactory* audio_log_factory,
+      CastAudioManagerHelper::Delegate* delegate,
       base::RepeatingCallback<CmaBackendFactory*()> backend_factory_getter,
-      CastAudioManagerHelper::GetSessionIdCallback get_session_id_callback,
       scoped_refptr<base::SingleThreadTaskRunner> browser_task_runner,
-      scoped_refptr<base::SingleThreadTaskRunner> media_task_runner,
-      mojo::PendingRemote<chromecast::mojom::ServiceConnector> connector,
-      bool use_mixer);
+      scoped_refptr<base::SingleThreadTaskRunner> media_task_runner);
+
+  CastAudioManagerAlsa(const CastAudioManagerAlsa&) = delete;
+  CastAudioManagerAlsa& operator=(const CastAudioManagerAlsa&) = delete;
+
   ~CastAudioManagerAlsa() override;
 
   // CastAudioManager implementation.
   bool HasAudioInputDevices() override;
-  void GetAudioInputDeviceNames(
+  bool GetAudioInputDeviceNames(
       ::media::AudioDeviceNames* device_names) override;
   ::media::AudioParameters GetInputStreamParameters(
       const std::string& device_id) override;
@@ -63,7 +63,7 @@ class CastAudioManagerAlsa : public CastAudioManager {
       const std::string& device_id);
 
   // Gets a list of available ALSA devices.
-  void GetAlsaAudioDevices(StreamType type,
+  bool GetAlsaAudioDevices(StreamType type,
                            ::media::AudioDeviceNames* device_names);
 
   // Gets the ALSA devices' names and ids that support streams of the
@@ -73,8 +73,6 @@ class CastAudioManagerAlsa : public CastAudioManager {
                           ::media::AudioDeviceNames* device_names);
 
   std::unique_ptr<::media::AlsaWrapper> wrapper_;
-
-  DISALLOW_COPY_AND_ASSIGN(CastAudioManagerAlsa);
 };
 
 }  // namespace media

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,30 +8,27 @@
 #include <stdint.h>
 
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
 #include "base/check.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/span.h"
-#include "base/macros.h"
 #include "base/notreached.h"
-#include "base/strings/string_piece.h"
 #include "components/cbor/cbor_export.h"
 
 namespace cbor {
 
 // A class for Concise Binary Object Representation (CBOR) values.
-// This does not support:
-//  * Floating-point numbers.
-//  * Indefinite-length encodings.
+// This does not support indefinite-length encodings.
 class CBOR_EXPORT Value {
  public:
   struct Less {
     // Comparison predicate to order keys in a dictionary as required by the
     // canonical CBOR order defined in
     // https://tools.ietf.org/html/rfc7049#section-3.9
-    // TODO(808022): Clarify where this stands.
+    // TODO(crbug.com/40560917): Clarify where this stands.
     bool operator()(const Value& a, const Value& b) const {
       // The current implementation only supports integer, text string, byte
       // string and invalid UTF8 keys.
@@ -85,7 +82,6 @@ class CBOR_EXPORT Value {
       }
 
       NOTREACHED();
-      return false;
     }
 
     using is_transparent = void;
@@ -104,6 +100,9 @@ class CBOR_EXPORT Value {
     MAP = 5,
     TAG = 6,
     SIMPLE_VALUE = 7,
+    // In CBOR floating types also have major type 7, but we separate them here
+    // for simplicity.
+    FLOAT_VALUE = 70,
     NONE = -1,
     INVALID_UTF8 = -2,
   };
@@ -118,15 +117,14 @@ class CBOR_EXPORT Value {
   // Returns a Value with Type::INVALID_UTF8. This factory method lets tests
   // encode such a value as a CBOR string. It should never be used outside of
   // tests since encoding may yield invalid CBOR data.
-  static Value InvalidUTF8StringValueForTesting(base::StringPiece in_string);
+  static Value InvalidUTF8StringValueForTesting(std::string_view in_string);
 
   Value(Value&& that) noexcept;
   Value() noexcept;  // A NONE value.
 
-  explicit Value(Type type);
-
   explicit Value(SimpleValue in_simple);
   explicit Value(bool boolean_value);
+  explicit Value(double in_float);
 
   explicit Value(int integer_value);
   explicit Value(int64_t integer_value);
@@ -137,7 +135,7 @@ class CBOR_EXPORT Value {
 
   explicit Value(const char* in_string, Type type = Type::STRING);
   explicit Value(std::string&& in_string, Type type = Type::STRING) noexcept;
-  explicit Value(base::StringPiece in_string, Type type = Type::STRING);
+  explicit Value(std::string_view in_string, Type type = Type::STRING);
 
   explicit Value(const ArrayValue& in_array);
   explicit Value(ArrayValue&& in_array) noexcept;
@@ -146,6 +144,9 @@ class CBOR_EXPORT Value {
   explicit Value(MapValue&& in_map) noexcept;
 
   Value& operator=(Value&& that) noexcept;
+
+  Value(const Value&) = delete;
+  Value& operator=(const Value&) = delete;
 
   ~Value();
 
@@ -165,6 +166,7 @@ class CBOR_EXPORT Value {
     return is_simple() && (simple_value_ == SimpleValue::TRUE_VALUE ||
                            simple_value_ == SimpleValue::FALSE_VALUE);
   }
+  bool is_double() const { return type() == Type::FLOAT_VALUE; }
   bool is_unsigned() const { return type() == Type::UNSIGNED; }
   bool is_negative() const { return type() == Type::NEGATIVE; }
   bool is_integer() const { return is_unsigned() || is_negative(); }
@@ -176,11 +178,12 @@ class CBOR_EXPORT Value {
   // These will all fatally assert if the type doesn't match.
   SimpleValue GetSimpleValue() const;
   bool GetBool() const;
+  double GetDouble() const;
   const int64_t& GetInteger() const;
   const int64_t& GetUnsigned() const;
   const int64_t& GetNegative() const;
   const BinaryValue& GetBytestring() const;
-  base::StringPiece GetBytestringAsString() const;
+  std::string_view GetBytestringAsString() const;
   // Returned string may contain NUL characters.
   const std::string& GetString() const;
   const ArrayValue& GetArray() const;
@@ -198,6 +201,7 @@ class CBOR_EXPORT Value {
   union {
     SimpleValue simple_value_;
     int64_t integer_value_;
+    double float_value_;
     BinaryValue bytestring_value_;
     std::string string_value_;
     ArrayValue array_value_;
@@ -206,8 +210,6 @@ class CBOR_EXPORT Value {
 
   void InternalMoveConstructFrom(Value&& that);
   void InternalCleanup();
-
-  DISALLOW_COPY_AND_ASSIGN(Value);
 };
 
 }  // namespace cbor

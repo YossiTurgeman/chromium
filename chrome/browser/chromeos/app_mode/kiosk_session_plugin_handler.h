@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,12 +9,14 @@
 #include <set>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/timer/timer.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "content/public/common/buildflags.h"
 
-namespace base {
-class FilePath;
-}
+#if !BUILDFLAG(ENABLE_PLUGINS)
+#error "Plugins should be enabled"
+#endif
 
 namespace content {
 class WebContents;
@@ -41,20 +43,18 @@ class KioskSessionPluginHandler {
     void OnHungWaitTimer();
 
     // content::WebContentsObserver
-    void PluginCrashed(const base::FilePath& plugin_path,
-                       base::ProcessId plugin_pid) override;
-    void PluginHungStatusChanged(int plugin_child_id,
-                                 const base::FilePath& plugin_path,
-                                 bool is_hung) override;
     void WebContentsDestroyed() override;
 
-    KioskSessionPluginHandler* const owner_;
+    const raw_ptr<KioskSessionPluginHandler, DanglingUntriaged> owner_;
     std::set<int> hung_plugins_;
     base::OneShotTimer hung_wait_timer_;
   };
 
   explicit KioskSessionPluginHandler(
       KioskSessionPluginHandlerDelegate* delegate);
+  KioskSessionPluginHandler(const KioskSessionPluginHandler&) = delete;
+  KioskSessionPluginHandler& operator=(const KioskSessionPluginHandler&) =
+      delete;
   ~KioskSessionPluginHandler();
 
   void Observe(content::WebContents* contents);
@@ -62,14 +62,11 @@ class KioskSessionPluginHandler {
   std::vector<Observer*> GetWatchersForTesting() const;
 
  private:
-  void OnPluginCrashed(const base::FilePath& plugin_path);
   void OnPluginHung(const std::set<int>& hung_plugins);
   void OnWebContentsDestroyed(Observer* observer);
 
-  KioskSessionPluginHandlerDelegate* const delegate_;
+  const raw_ptr<KioskSessionPluginHandlerDelegate> delegate_;
   std::vector<std::unique_ptr<Observer>> watchers_;
-
-  DISALLOW_COPY_AND_ASSIGN(KioskSessionPluginHandler);
 };
 
 }  // namespace chromeos

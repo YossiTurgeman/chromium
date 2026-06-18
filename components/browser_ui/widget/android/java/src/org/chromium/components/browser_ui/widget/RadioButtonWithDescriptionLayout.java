@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.RadioGroup;
 
-import androidx.annotation.VisibleForTesting;
-
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.ui.base.ViewUtils;
 
 import java.util.ArrayList;
@@ -50,16 +50,17 @@ import java.util.List;
  * }</pre>
  * </p>
  */
-public final class RadioButtonWithDescriptionLayout
-        extends RadioGroup implements RadioButtonWithDescription.ButtonCheckedStateChangedListener {
+@NullMarked
+public final class RadioButtonWithDescriptionLayout extends RadioGroup
+        implements RadioButtonWithDescription.ButtonCheckedStateChangedListener {
     private final List<RadioButtonWithDescription> mRadioButtonsWithDescriptions;
-    private OnCheckedChangeListener mOnCheckedChangeListener;
+    private @Nullable OnCheckedChangeListener mOnCheckedChangeListener;
 
     public RadioButtonWithDescriptionLayout(Context context) {
         this(context, null);
     }
 
-    public RadioButtonWithDescriptionLayout(Context context, AttributeSet attrs) {
+    public RadioButtonWithDescriptionLayout(Context context, @Nullable AttributeSet attrs) {
         super(context, attrs);
         mRadioButtonsWithDescriptions = new ArrayList<>();
     }
@@ -76,7 +77,9 @@ public final class RadioButtonWithDescriptionLayout
     }
 
     /**
-     * @see RadioGroup.OnCheckedChangeListener
+     * Registers an observer for the group of radio buttons in this layout. Aggregates events from
+     * all of the contained radio buttons. You may find this method more preferable to registering
+     * individual listeners to each radio button.
      */
     @Override
     public void setOnCheckedChangeListener(OnCheckedChangeListener onCheckedChangeListener) {
@@ -84,11 +87,15 @@ public final class RadioButtonWithDescriptionLayout
     }
 
     /**
+     * Listens for cheked state changed events for the contained {@link RadioButtonWithDescription}
+     * and forwards them along to the observer set in {@link #setOnCheckedChangeListener(...)}.
      * @see RadioButtonWithDescription.ButtonCheckedStateChangedListener
      */
     @Override
     public void onButtonCheckedStateChanged(RadioButtonWithDescription checkedRadioButton) {
-        mOnCheckedChangeListener.onCheckedChanged(this, checkedRadioButton.getId());
+        if (mOnCheckedChangeListener != null) {
+            mOnCheckedChangeListener.onCheckedChanged(this, checkedRadioButton.getId());
+        }
     }
 
     /**
@@ -151,7 +158,6 @@ public final class RadioButtonWithDescriptionLayout
      *
      * @param childIndex Index of the child to select.
      */
-    @VisibleForTesting
     void selectChildAtIndexForTesting(int childIndex) {
         RadioButtonWithDescription b = (RadioButtonWithDescription) getChildAt(childIndex);
         b.setChecked(true);

@@ -1,14 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROMECAST_COMMON_ACTIVITY_FILTERING_URL_LOADER_THROTTLE_H_
 #define CHROMECAST_COMMON_ACTIVITY_FILTERING_URL_LOADER_THROTTLE_H_
 
-#include <string>
-#include <vector>
-
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "chromecast/common/activity_url_filter.h"
 #include "third_party/blink/public/common/loader/url_loader_throttle.h"
 #include "url/gurl.h"
@@ -20,6 +17,12 @@ namespace chromecast {
 class ActivityFilteringURLLoaderThrottle : public blink::URLLoaderThrottle {
  public:
   explicit ActivityFilteringURLLoaderThrottle(ActivityUrlFilter* filter);
+
+  ActivityFilteringURLLoaderThrottle(
+      const ActivityFilteringURLLoaderThrottle&) = delete;
+  ActivityFilteringURLLoaderThrottle& operator=(
+      const ActivityFilteringURLLoaderThrottle&) = delete;
+
   ~ActivityFilteringURLLoaderThrottle() override;
 
   // content::URLLoaderThrottle implementation:
@@ -29,9 +32,7 @@ class ActivityFilteringURLLoaderThrottle : public blink::URLLoaderThrottle {
       net::RedirectInfo* redirect_info,
       const network::mojom::URLResponseHead& response_head,
       bool* defer,
-      std::vector<std::string>* to_be_removed_request_headers,
-      net::HttpRequestHeaders* modified_request_headers,
-      net::HttpRequestHeaders* modified_cors_exempt_request_headers) override;
+      network::HttpRequestHeadersUpdateParams* headers_update_params) override;
 
  private:
   // content::URLLoaderThrottle implementation:
@@ -39,9 +40,7 @@ class ActivityFilteringURLLoaderThrottle : public blink::URLLoaderThrottle {
 
   void FilterURL(const GURL& url);
 
-  ActivityUrlFilter* url_filter_;
-
-  DISALLOW_COPY_AND_ASSIGN(ActivityFilteringURLLoaderThrottle);
+  raw_ptr<ActivityUrlFilter> url_filter_;
 };
 
 }  // namespace chromecast

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,18 +8,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <string_view>
+
 #include "storage/browser/file_system/file_system_operation.h"
 #include "storage/common/file_system/file_system_types.h"
 #include "third_party/blink/public/mojom/quota/quota_types.mojom.h"
 
+namespace blink {
+class StorageKey;
+}
+
 namespace storage {
 class FileSystemContext;
 class FileSystemURL;
-class QuotaManager;
-}
-
-namespace url {
-class Origin;
+class QuotaManagerProxy;
 }
 
 namespace storage {
@@ -28,7 +30,6 @@ namespace storage {
 class AsyncFileTestHelper {
  public:
   using FileEntryList = FileSystemOperation::FileEntryList;
-  using CopyProgressCallback = FileSystemOperation::CopyProgressCallback;
 
   static const int64_t kDontCheckSize;
 
@@ -37,17 +38,36 @@ class AsyncFileTestHelper {
                                 const FileSystemURL& src,
                                 const FileSystemURL& dest);
 
-  // Same as Copy, but this supports |progress_callback|.
-  static base::File::Error CopyWithProgress(
+  // Same as Copy, but this supports |copy_or_move_hook_delegate|.
+  static base::File::Error CopyWithHookDelegate(
       FileSystemContext* context,
       const FileSystemURL& src,
       const FileSystemURL& dest,
-      const CopyProgressCallback& progress_callback);
+      FileSystemOperation::ErrorBehavior error_behavior,
+      std::unique_ptr<CopyOrMoveHookDelegate> copy_or_move_hook_delegate);
+
+  // Performs CopyFileLocal from |src| to |dest| and returns the status code.
+  static base::File::Error CopyFileLocal(FileSystemContext* context,
+                                         const FileSystemURL& src,
+                                         const FileSystemURL& dest);
 
   // Performs Move from |src| to |dest| and returns the status code.
   static base::File::Error Move(FileSystemContext* context,
                                 const FileSystemURL& src,
                                 const FileSystemURL& dest);
+
+  // Same as Move, but this supports |copy_or_move_hook_delegate|.
+  static base::File::Error MoveWithHookDelegate(
+      FileSystemContext* context,
+      const FileSystemURL& src,
+      const FileSystemURL& dest,
+      FileSystemOperation::ErrorBehavior error_behavior,
+      std::unique_ptr<CopyOrMoveHookDelegate> copy_or_move_hook_delegate);
+
+  // Performs MoveFileLocal from |src| to |dest| and returns the status code.
+  static base::File::Error MoveFileLocal(FileSystemContext* context,
+                                         const FileSystemURL& src,
+                                         const FileSystemURL& dest);
 
   // Removes the given |url|.
   static base::File::Error Remove(FileSystemContext* context,
@@ -70,8 +90,7 @@ class AsyncFileTestHelper {
   // Creates a file at |url| and fills with |buf|.
   static base::File::Error CreateFileWithData(FileSystemContext* context,
                                               const FileSystemURL& url,
-                                              const char* buf,
-                                              int buf_size);
+                                              std::string_view data);
 
   // Truncates the file |url| to |size|.
   static base::File::Error TruncateFile(FileSystemContext* context,
@@ -102,8 +121,8 @@ class AsyncFileTestHelper {
   // Returns usage and quota. It's valid to pass nullptr to |usage| and/or
   // |quota|.
   static blink::mojom::QuotaStatusCode GetUsageAndQuota(
-      QuotaManager* quota_manager,
-      const url::Origin& origin,
+      QuotaManagerProxy* quota_manager_proxy,
+      const blink::StorageKey& storage_key,
       FileSystemType type,
       int64_t* usage,
       int64_t* quota);

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,8 +31,9 @@ MessageQueue::MessageQueue(uint64_t next_sequence_num)
 MessageQueue::~MessageQueue() {
 #if DCHECK_IS_ON()
   size_t num_leaked_ports = 0;
-  for (const auto& message : heap_)
+  for (const auto& message : heap_) {
     num_leaked_ports += message->num_ports();
+  }
   DVLOG_IF(1, num_leaked_ports > 0)
       << "Leaking " << num_leaked_ports << " ports in unreceived messages";
 #endif
@@ -59,12 +60,10 @@ void MessageQueue::GetNextMessage(std::unique_ptr<UserMessageEvent>* message,
   // here is somewhat arbitrary.
   constexpr size_t kHeapMinimumShrinkSize = 16;
   constexpr size_t kHeapShrinkInterval = 512;
-  if (UNLIKELY(heap_.size() > kHeapMinimumShrinkSize &&
-               heap_.size() % kHeapShrinkInterval == 0)) {
+  if (heap_.size() > kHeapMinimumShrinkSize &&
+      heap_.size() % kHeapShrinkInterval == 0) [[unlikely]] {
     heap_.shrink_to_fit();
   }
-
-  next_sequence_num_++;
 }
 
 void MessageQueue::AcceptMessage(std::unique_ptr<UserMessageEvent> message,
@@ -86,6 +85,10 @@ void MessageQueue::TakeAllMessages(
     std::vector<std::unique_ptr<UserMessageEvent>>* messages) {
   *messages = std::move(heap_);
   total_queued_bytes_ = 0;
+}
+
+void MessageQueue::MessageProcessed() {
+  next_sequence_num_++;
 }
 
 }  // namespace ports

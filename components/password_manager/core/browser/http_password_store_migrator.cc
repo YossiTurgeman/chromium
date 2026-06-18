@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,17 @@
 
 #include <string>
 #include <utility>
+#include <vector>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/memory/weak_ptr.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/stl_util.h"
 #include "base/strings/strcat.h"
 #include "components/password_manager/core/browser/password_manager_metrics_util.h"
 #include "components/password_manager/core/browser/password_manager_util.h"
-#include "components/password_manager/core/browser/password_store.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
+#include "components/password_manager/core/browser/password_store/smart_bubble_stats_store.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
 
@@ -37,7 +39,7 @@ void OnHSTSQueryResultHelper(
 
 HttpPasswordStoreMigrator::HttpPasswordStoreMigrator(
     const url::Origin& https_origin,
-    PasswordStore* store,
+    PasswordStoreInterface* store,
     network::mojom::NetworkContext* network_context,
     Consumer* consumer)
     : store_(store), consumer_(consumer) {
@@ -48,23 +50,24 @@ HttpPasswordStoreMigrator::HttpPasswordStoreMigrator(
   GURL::Replacements rep;
   rep.SetSchemeStr(url::kHttpScheme);
   GURL http_origin = https_origin.GetURL().ReplaceComponents(rep);
-  PasswordStore::FormDigest form(autofill::PasswordForm::Scheme::kHtml,
-                                 http_origin.GetOrigin().spec(), http_origin);
+  PasswordFormDigest form(PasswordForm::Scheme::kHtml,
+                          http_origin.DeprecatedGetOriginAsURL().spec(),
+                          http_origin);
   http_origin_domain_ = url::Origin::Create(http_origin);
-  store_->GetLogins(form, this);
+  store_->GetLogins(form, weak_ptr_factory_.GetWeakPtr());
 
   PostHSTSQueryForHostAndNetworkContext(
       https_origin, network_context,
-      base::BindOnce(&OnHSTSQueryResultHelper, GetWeakPtr()));
+      base::BindOnce(&OnHSTSQueryResultHelper, weak_ptr_factory_.GetWeakPtr()));
 }
 
 HttpPasswordStoreMigrator::~HttpPasswordStoreMigrator() = default;
 
-autofill::PasswordForm HttpPasswordStoreMigrator::MigrateHttpFormToHttps(
-    const autofill::PasswordForm& http_form) {
+PasswordForm HttpPasswordStoreMigrator::MigrateHttpFormToHttps(
+    const PasswordForm& http_form) {
   DCHECK(http_form.url.SchemeIs(url::kHttpScheme));
 
-  autofill::PasswordForm https_form = http_form;
+  PasswordForm https_form = http_form;
   GURL::Replacements rep;
   rep.SetSchemeStr(url::kHttpsScheme);
   https_form.url = http_form.url.ReplaceComponents(rep);
@@ -79,23 +82,30 @@ autofill::PasswordForm HttpPasswordStoreMigrator::MigrateHttpFormToHttps(
   }
   // If |action| is not HTTPS then it's most likely obsolete. Otherwise, it
   // may still be valid.
-  if (!http_form.action.SchemeIs(url::kHttpsScheme))
+  if (!http_form.action.SchemeIs(url::kHttpsScheme)) {
     https_form.action = https_form.url;
+  }
   https_form.form_data = autofill::FormData();
   https_form.generation_upload_status =
-      autofill::PasswordForm::GenerationUploadStatus::kNoSignalSent;
-  https_form.skip_zero_click = false;
+      PasswordForm::GenerationUploadStatus::kNoSignalSent;
+  if (https_form.type != PasswordForm::Type::kReceivedViaSharing) {
+    https_form.skip_zero_click = false;
+  }
   return https_form;
 }
 
-void HttpPasswordStoreMigrator::OnGetPasswordStoreResults(
-    std::vector<std::unique_ptr<autofill::PasswordForm>> results) {
+void HttpPasswordStoreMigrator::OnGetPasswordStoreResultsOrErrorFrom(
+    PasswordStoreInterface* store,
+    LoginsResultOrError results_or_error) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  results_ = std::move(results);
+if (auto* logins = std::get_if<LoginsResult>(&results_or_error)) {
+    results_ = ToPasswordForms(std::move(*logins));
+  }
   got_password_store_results_ = true;
 
-  if (got_hsts_query_result_)
+  if (got_hsts_query_result_) {
     ProcessPasswordStoreResults();
+  }
 }
 
 void HttpPasswordStoreMigrator::OnHSTSQueryResult(HSTSResult is_hsts) {
@@ -104,42 +114,49 @@ void HttpPasswordStoreMigrator::OnHSTSQueryResult(HSTSResult is_hsts) {
                                         : HttpPasswordMigrationMode::kCopy;
   got_hsts_query_result_ = true;
 
-  if (is_hsts == HSTSResult::kYes)
-    store_->RemoveSiteStats(http_origin_domain_.GetURL());
+  if (is_hsts == HSTSResult::kYes) {
+    SmartBubbleStatsStore* stats_store = store_->GetSmartBubbleStatsStore();
+    if (stats_store) {
+      stats_store->RemoveSiteStats(http_origin_domain_.GetURL());
+    }
+  }
 
-  if (got_password_store_results_)
+  if (got_password_store_results_) {
     ProcessPasswordStoreResults();
+  }
 }
 
 void HttpPasswordStoreMigrator::ProcessPasswordStoreResults() {
-  // Android and PSL matches are ignored.
-  base::EraseIf(
-      results_, [](const std::unique_ptr<autofill::PasswordForm>& form) {
-        return form->is_affiliation_based_match || form->is_public_suffix_match;
-      });
+  // Ignore PSL, affiliated, grouped and other matches.
+  std::erase_if(results_, [](const PasswordForm& form) {
+    return password_manager_util::GetMatchType(form) !=
+           password_manager_util::GetLoginMatchType::kExact;
+  });
 
   // Add the new credentials to the password store. The HTTP forms are
   // removed iff |mode_| == MigrationMode::MOVE.
-  for (const auto& form : results_) {
-    autofill::PasswordForm new_form =
-        HttpPasswordStoreMigrator::MigrateHttpFormToHttps(*form);
-    store_->AddLogin(new_form);
+  for (auto& form : results_) {
+    PasswordForm new_form =
+        HttpPasswordStoreMigrator::MigrateHttpFormToHttps(form);
+    store_->AddLogin(password_manager::FromPasswordForm(new_form));
 
-    if (mode_ == HttpPasswordMigrationMode::kMove)
-      store_->RemoveLogin(*form);
-    *form = std::move(new_form);
+    if (mode_ == HttpPasswordMigrationMode::kMove) {
+      store_->RemoveLogin(FROM_HERE, password_manager::FromPasswordForm(form));
+    }
+    form = std::move(new_form);
   }
 
   // Only log data if there was at least one migrated password.
   if (!results_.empty()) {
-    base::UmaHistogramCounts100("PasswordManager.HttpPasswordMigrationCount",
+    base::UmaHistogramCounts100("PasswordManager.HttpPasswordMigrationCount2",
                                 results_.size());
-    base::UmaHistogramEnumeration("PasswordManager.HttpPasswordMigrationMode",
+    base::UmaHistogramEnumeration("PasswordManager.HttpPasswordMigrationMode2",
                                   mode_);
   }
 
-  if (consumer_)
+  if (consumer_) {
     consumer_->ProcessMigratedForms(std::move(results_));
+  }
 }
 
 }  // namespace password_manager

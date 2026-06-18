@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,75 +9,53 @@
 namespace payments {
 namespace features {
 
-const base::Feature kWebPaymentsExperimentalFeatures{
-    "WebPaymentsExperimentalFeatures", base::FEATURE_DISABLED_BY_DEFAULT};
-
-const base::Feature kReturnGooglePayInBasicCard{
-    "ReturnGooglePayInBasicCard", base::FEATURE_DISABLED_BY_DEFAULT};
-
-#if defined(OS_IOS)
-const base::Feature kWebPaymentsNativeApps{"WebPaymentsNativeApps",
-                                           base::FEATURE_DISABLED_BY_DEFAULT};
-#endif
+BASE_FEATURE(kWebPaymentsExperimentalFeatures,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
 // TODO(rouslan): Remove this.
-const base::Feature kWebPaymentsMethodSectionOrderV2{
-    "WebPaymentsMethodSectionOrderV2", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kWebPaymentsSingleAppUiSkip, base::FEATURE_ENABLED_BY_DEFAULT);
 
 // TODO(rouslan): Remove this.
-const base::Feature kWebPaymentsModifiers{"WebPaymentsModifiers",
-                                          base::FEATURE_ENABLED_BY_DEFAULT};
+BASE_FEATURE(kWebPaymentsJustInTimePaymentApp,
+             base::FEATURE_ENABLED_BY_DEFAULT);
 
-// TODO(rouslan): Remove this.
-const base::Feature kWebPaymentsSingleAppUiSkip{
-    "WebPaymentsSingleAppUiSkip", base::FEATURE_ENABLED_BY_DEFAULT};
-
-// TODO(rouslan): Remove this.
-const base::Feature kWebPaymentsJustInTimePaymentApp{
-    "WebPaymentsJustInTimePaymentApp", base::FEATURE_ENABLED_BY_DEFAULT};
-
-const base::Feature kAlwaysAllowJustInTimePaymentApp{
-    "AlwaysAllowJustInTimePaymentApp", base::FEATURE_DISABLED_BY_DEFAULT};
-
-const base::Feature kWebPaymentsRedactShippingAddress{
-    "WebPaymentsRedactShippingAddress", base::FEATURE_ENABLED_BY_DEFAULT};
-
-const base::Feature kAppStoreBilling {
-  "AppStoreBilling",
-#if defined(OS_ANDROID)
-      base::FEATURE_ENABLED_BY_DEFAULT
+BASE_FEATURE(kAppStoreBilling,
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
+             base::FEATURE_ENABLED_BY_DEFAULT
 #else
-      base::FEATURE_DISABLED_BY_DEFAULT
-#endif  // OS_ANDROID
-};
+             base::FEATURE_DISABLED_BY_DEFAULT
+#endif
+);
 
-const base::Feature kAppStoreBillingDebug{"AppStoreBillingDebug",
-                                          base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kAppStoreBillingDebug, base::FEATURE_DISABLED_BY_DEFAULT);
 
-const base::Feature kStrictHasEnrolledAutofillInstrument{
-    "StrictHasEnrolledAutofillInstrument", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kAllowJITInstallationWhenAppIconIsMissing,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
-const base::Feature kPaymentRequestSkipToGPay{
-    "PaymentRequestSkipToGPay", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kEnforceFullDelegation, base::FEATURE_DISABLED_BY_DEFAULT);
 
-const base::Feature kPaymentRequestSkipToGPayIfNoCard{
-    "PaymentRequestSkipToGPayIfNoCard", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kGPayAppDynamicUpdate, base::FEATURE_ENABLED_BY_DEFAULT);
 
-const base::Feature kDownRankJustInTimePaymentApp{
-    "DownRankJustInTimePaymentApp", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kSecurePaymentConfirmationUseCredentialStoreAPIs,
+#if BUILDFLAG(IS_ANDROID)
+             base::FEATURE_ENABLED_BY_DEFAULT
+#else
+             base::FEATURE_DISABLED_BY_DEFAULT
+#endif
+);
 
-const base::Feature kPaymentHandlerPopUpSizeWindow{
-    "PaymentHandlerPopUpSizeWindow", base::FEATURE_ENABLED_BY_DEFAULT};
 
-const base::Feature kAllowJITInstallationWhenAppIconIsMissing{
-    "AllowJITInstallationWhenAppIconIsMissing",
-    base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kPaymentRequestUseRendererUrlLoader,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
-const base::Feature kPaymentHandlerSecurityIcon{
-    "PaymentHandlerSecurityIcon", base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kPaymentRequestRejectTooSmallWindows,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
-const base::Feature kEnforceFullDelegation{"EnforceFullDelegation",
-                                           base::FEATURE_DISABLED_BY_DEFAULT};
+BASE_FEATURE(kPaymentRequestSupportReportingAppError,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kPaymentHandlerDialogUseInitiatorInUrlLoad,
+             base::FEATURE_ENABLED_BY_DEFAULT);
 
 }  // namespace features
 }  // namespace payments

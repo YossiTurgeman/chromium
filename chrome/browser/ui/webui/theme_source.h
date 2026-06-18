@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,8 @@
 
 #include <string>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
-#include "base/single_thread_task_runner.h"
+#include "base/memory/raw_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "content/public/browser/url_data_source.h"
 
 class Profile;
@@ -19,7 +17,26 @@ class ThemeSource : public content::URLDataSource {
  public:
   explicit ThemeSource(Profile* profile);
   ThemeSource(Profile* profile, bool serve_untrusted);
+
+  ThemeSource(const ThemeSource&) = delete;
+  ThemeSource& operator=(const ThemeSource&) = delete;
+
   ~ThemeSource() override;
+
+  // Generates the CSS content for theme colors.
+  //
+  // This function parses the `sets` query parameter from `url` to determine
+  // which color ID sets to include. It uses `color_provider` to resolve the
+  // actual color values. `is_grayscale` and `is_baseline` are used to inject
+  // metadata variables into the CSS header.
+  //
+  // Returns the generated CSS string on success, or std::nullopt if the URL is
+  // invalid, e.g., missing or invalid `sets` parameter.
+  static std::optional<std::string> GenerateColorsCss(
+      const ui::ColorProvider& color_provider,
+      const GURL& url,
+      bool is_grayscale,
+      bool is_baseline);
 
   // content::URLDataSource implementation.
   std::string GetSource() override;
@@ -27,7 +44,7 @@ class ThemeSource : public content::URLDataSource {
       const GURL& url,
       const content::WebContents::Getter& wc_getter,
       content::URLDataSource::GotDataCallback callback) override;
-  std::string GetMimeType(const std::string& path) override;
+  std::string GetMimeType(const GURL& url) override;
   bool AllowCaching() override;
   bool ShouldServiceRequest(const GURL& url,
                             content::BrowserContext* browser_context,
@@ -50,13 +67,22 @@ class ThemeSource : public content::URLDataSource {
                       int resource_id,
                       float scale);
 
+  // Generates and sends a CSS stylesheet with colors from the |ColorProvider|.
+  // A 'sets' query parameter must be specified to indicate which colors should
+  // be in the stylesheet. e.g chrome://theme/colors.css?sets=ui,chrome
+  void SendColorsCss(const GURL& url,
+                     const content::WebContents::Getter& wc_getter,
+                     content::URLDataSource::GotDataCallback callback);
+
+#if BUILDFLAG(IS_CHROMEOS)
+  void SendTypographyCss(content::URLDataSource::GotDataCallback callback);
+#endif
+
   // The profile this object was initialized with.
-  Profile* profile_;
+  raw_ptr<Profile, FlakyDanglingUntriaged> profile_;
 
   // Whether this source services chrome-unstrusted://theme.
   bool serve_untrusted_;
-
-  DISALLOW_COPY_AND_ASSIGN(ThemeSource);
 };
 
 #endif  // CHROME_BROWSER_UI_WEBUI_THEME_SOURCE_H_

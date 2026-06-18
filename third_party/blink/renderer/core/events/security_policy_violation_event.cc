@@ -26,16 +26,10 @@
 
 #include "third_party/blink/renderer/core/events/security_policy_violation_event.h"
 
+#include "third_party/blink/renderer/bindings/core/v8/v8_security_policy_violation_event_disposition.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_security_policy_violation_event_init.h"
 
 namespace blink {
-
-namespace {
-
-const char kEnforce[] = "enforce";
-const char kReport[] = "report";
-
-}  // namespace
 
 SecurityPolicyViolationEvent::SecurityPolicyViolationEvent(
     const AtomicString& type)
@@ -57,9 +51,11 @@ SecurityPolicyViolationEvent::SecurityPolicyViolationEvent(
     effective_directive_ = initializer->effectiveDirective();
   if (initializer->hasOriginalPolicy())
     original_policy_ = initializer->originalPolicy();
-  disposition_ = initializer->disposition() == kReport
-                     ? network::mojom::ContentSecurityPolicyType::kReport
-                     : network::mojom::ContentSecurityPolicyType::kEnforce;
+  disposition_ =
+      initializer->disposition().AsEnum() ==
+              V8SecurityPolicyViolationEventDisposition::Enum::kReport
+          ? network::mojom::ContentSecurityPolicyType::kReport
+          : network::mojom::ContentSecurityPolicyType::kEnforce;
   if (initializer->hasSourceFile())
     source_file_ = initializer->sourceFile();
   if (initializer->hasLineNumber())
@@ -70,15 +66,25 @@ SecurityPolicyViolationEvent::SecurityPolicyViolationEvent(
     status_code_ = initializer->statusCode();
   if (initializer->hasSample())
     sample_ = initializer->sample();
+  if (initializer->hasEvalHash()) {
+    eval_hash_ = initializer->evalHash();
+  }
+  if (initializer->hasUrlHash()) {
+    url_hash_ = initializer->urlHash();
+  }
 }
 
-const String& SecurityPolicyViolationEvent::disposition() const {
-  DEFINE_STATIC_LOCAL(const String, enforce, (kEnforce));
-  DEFINE_STATIC_LOCAL(const String, report, (kReport));
-
-  return disposition_ == network::mojom::ContentSecurityPolicyType::kReport
-             ? report
-             : enforce;
+V8SecurityPolicyViolationEventDisposition
+SecurityPolicyViolationEvent::disposition() const {
+  switch (disposition_) {
+    case network::mojom::ContentSecurityPolicyType::kReport:
+      return V8SecurityPolicyViolationEventDisposition(
+          V8SecurityPolicyViolationEventDisposition::Enum::kReport);
+    case network::mojom::ContentSecurityPolicyType::kEnforce:
+      return V8SecurityPolicyViolationEventDisposition(
+          V8SecurityPolicyViolationEventDisposition::Enum::kEnforce);
+  }
+  NOTREACHED();
 }
 
 }  // namespace blink

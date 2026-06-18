@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,33 +21,41 @@ std::string ReferrerHeaderValueForNavigation(const GURL& destination,
     case ReferrerPolicyNever:
       return std::string();
     case ReferrerPolicyOrigin:
-      return referrer.url.GetOrigin().spec();
+      return referrer.url.DeprecatedGetOriginAsURL().spec();
     case ReferrerPolicyDefault:
     case ReferrerPolicyNoReferrerWhenDowngrade:
-      if (is_downgrade)
+      if (is_downgrade) {
         return std::string();
+      }
       return referrer.url.GetAsReferrer().spec();
     case ReferrerPolicyOriginWhenCrossOrigin:
-      if (referrer.url.GetOrigin() != destination.GetOrigin())
-        return referrer.url.GetOrigin().spec();
+      if (referrer.url.DeprecatedGetOriginAsURL() !=
+          destination.DeprecatedGetOriginAsURL()) {
+        return referrer.url.DeprecatedGetOriginAsURL().spec();
+      }
       return referrer.url.GetAsReferrer().spec();
     case ReferrerPolicySameOrigin:
-      if (referrer.url.GetOrigin() != destination.GetOrigin())
+      if (referrer.url.DeprecatedGetOriginAsURL() !=
+          destination.DeprecatedGetOriginAsURL()) {
         return std::string();
+      }
       return referrer.url.GetAsReferrer().spec();
     case ReferrerPolicyStrictOrigin:
-      if (is_downgrade)
+      if (is_downgrade) {
         return std::string();
-      return referrer.url.GetOrigin().spec();
+      }
+      return referrer.url.DeprecatedGetOriginAsURL().spec();
     case ReferrerPolicyStrictOriginWhenCrossOrigin:
-      if (is_downgrade)
+      if (is_downgrade) {
         return std::string();
-      if (referrer.url.GetOrigin() != destination.GetOrigin())
-        return referrer.url.GetOrigin().spec();
+      }
+      if (referrer.url.DeprecatedGetOriginAsURL() !=
+          destination.DeprecatedGetOriginAsURL()) {
+        return referrer.url.DeprecatedGetOriginAsURL().spec();
+      }
       return referrer.url.GetAsReferrer().spec();
   }
   NOTREACHED();
-  return std::string();
 }
 
 net::ReferrerPolicy PolicyForNavigation(const GURL& destination,
@@ -75,27 +83,34 @@ net::ReferrerPolicy PolicyForNavigation(const GURL& destination,
       return net::ReferrerPolicy::REDUCE_GRANULARITY_ON_TRANSITION_CROSS_ORIGIN;
   }
   NOTREACHED();
-  return net::ReferrerPolicy::CLEAR_ON_TRANSITION_FROM_SECURE_TO_INSECURE;
 }
 
-ReferrerPolicy ReferrerPolicyFromString(const std::string& policy) {
+ReferrerPolicy ReferrerPolicyFromString(std::string_view policy) {
   // https://w3c.github.io/webappsec-referrer-policy/#determine-policy-for-token
-  if (policy == "never" || policy == "no-referrer")
+  if (policy == "never" || policy == "no-referrer") {
     return ReferrerPolicyNever;
-  if (policy == "origin")
+  }
+  if (policy == "origin") {
     return ReferrerPolicyOrigin;
-  if (policy == "default" || policy == "no-referrer-when-downgrade")
+  }
+  if (policy == "default" || policy == "no-referrer-when-downgrade") {
     return ReferrerPolicyNoReferrerWhenDowngrade;
-  if (policy == "origin-when-cross-origin")
+  }
+  if (policy == "origin-when-cross-origin") {
     return ReferrerPolicyOriginWhenCrossOrigin;
-  if (policy == "always" || policy == "unsafe-url")
+  }
+  if (policy == "always" || policy == "unsafe-url") {
     return ReferrerPolicyAlways;
-  if (policy == "same-origin")
+  }
+  if (policy == "same-origin") {
     return ReferrerPolicySameOrigin;
-  if (policy == "strict-origin")
+  }
+  if (policy == "strict-origin") {
     return ReferrerPolicyStrictOrigin;
-  if (policy == "strict-origin-when-cross-origin")
+  }
+  if (policy == "strict-origin-when-cross-origin") {
     return ReferrerPolicyStrictOriginWhenCrossOrigin;
+  }
   return ReferrerPolicyDefault;
 }
 

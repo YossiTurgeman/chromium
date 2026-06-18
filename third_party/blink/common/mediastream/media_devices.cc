@@ -1,9 +1,9 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/public/common/mediastream/media_devices.h"
-#include "media/capture/video/video_capture_device_descriptor.h"
+#include "third_party/blink/public/mojom/mediastream/media_devices.mojom-shared.h"
 
 namespace blink {
 
@@ -14,23 +14,27 @@ WebMediaDeviceInfo::WebMediaDeviceInfo(const WebMediaDeviceInfo& other) =
 
 WebMediaDeviceInfo::WebMediaDeviceInfo(WebMediaDeviceInfo&& other) = default;
 
-WebMediaDeviceInfo::WebMediaDeviceInfo(const std::string& device_id,
-                                       const std::string& label,
-                                       const std::string& group_id,
-                                       bool pan_tilt_zoom_supported,
-                                       media::VideoFacingMode video_facing)
+WebMediaDeviceInfo::WebMediaDeviceInfo(
+    const std::string& device_id,
+    const std::string& label,
+    const std::string& group_id,
+    const media::VideoCaptureControlSupport& video_control_support,
+    blink::mojom::FacingMode video_facing,
+    std::optional<media::CameraAvailability> availability)
     : device_id(device_id),
       label(label),
       group_id(group_id),
-      pan_tilt_zoom_supported(pan_tilt_zoom_supported),
-      video_facing(video_facing) {}
+      video_control_support(video_control_support),
+      video_facing(video_facing),
+      availability(std::move(availability)) {}
 
 WebMediaDeviceInfo::WebMediaDeviceInfo(
     const media::VideoCaptureDeviceDescriptor& descriptor)
     : device_id(descriptor.device_id),
       label(descriptor.GetNameAndModel()),
-      pan_tilt_zoom_supported(descriptor.pan_tilt_zoom_supported()),
-      video_facing(descriptor.facing) {}
+      video_control_support(descriptor.control_support()),
+      video_facing(static_cast<blink::mojom::FacingMode>(descriptor.facing)),
+      availability(descriptor.availability) {}
 
 WebMediaDeviceInfo::~WebMediaDeviceInfo() = default;
 

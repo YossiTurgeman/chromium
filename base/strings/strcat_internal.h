@@ -1,60 +1,60 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef BASE_STRINGS_STRCAT_INTERNAL_H_
 #define BASE_STRINGS_STRCAT_INTERNAL_H_
 
+#include <ranges>
 #include <string>
 
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
+#include "base/numerics/safe_conversions.h"
 
-namespace base {
+namespace base::internal {
 
-namespace internal {
+// Appends `strings` to `dest`. Instead of simply calling `dest.append()`
+// `strings.size()` times, this method first resizes `dest` to be of the desired
+// size, and then appends each string via `std::ranges::copy`. This achieves
+// two goals:
+// 1) Allocating the desired size all at once avoids other allocations that
+//    could happen if intermediate allocations did not reserve enough capacity.
+// 2) Invoking std::ranges::copy instead of std::basic_string::append
+//    avoids having to write the terminating '\0' character n times.
+template <typename CharT, typename StringT>
+void StrAppendT(std::basic_string<CharT>& dest, span<const StringT> strings) {
+  const size_t initial_size = dest.size();
+  size_t total_size = initial_size;
+  for (const StringT& str : strings) {
+    total_size += str.size();
+  }
 
-// Reserves an additional amount of capacity in the given string, growing by at
-// least 2x if necessary. Used by StrAppendT().
-//
-// The "at least 2x" growing rule duplicates the exponential growth of
-// std::string. The problem is that most implementations of reserve() will grow
-// exactly to the requested amount instead of exponentially growing like would
-// happen when appending normally. If we didn't do this, an append after the
-// call to StrAppend() would definitely cause a reallocation, and loops with
-// StrAppend() calls would have O(n^2) complexity to execute. Instead, we want
-// StrAppend() to have the same semantics as std::string::append().
-template <typename String>
-void ReserveAdditionalIfNeeded(String* str,
-                               typename String::size_type additional) {
-  const size_t required = str->size() + additional;
-  // Check whether we need to reserve additional capacity at all.
-  if (required <= str->capacity())
-    return;
+  dest.resize_and_overwrite(total_size, [&](CharT* p, size_t n) {
+    // SAFETY: `std::basic_string::resize_and_overwrite` guarantees that the
+    // range `[p, p + n]` is valid.
+    UNSAFE_BUFFERS(base::span to_overwrite(p, n));
+    auto write_it = to_overwrite.begin();
 
-  str->reserve(std::max(required, str->capacity() * 2));
-}
+    // The first `initial_size` characters are guaranteed to be the previous
+    // contents of `dest`.
+    write_it += base::checked_cast<ptrdiff_t>(initial_size);
 
-template <typename DestString, typename InputString>
-void StrAppendT(DestString* dest, span<const InputString> pieces) {
-  size_t additional_size = 0;
-  for (const auto& cur : pieces)
-    additional_size += cur.size();
-  ReserveAdditionalIfNeeded(dest, additional_size);
-
-  for (const auto& cur : pieces)
-    dest->append(cur.data(), cur.size());
+    // Copy each string into the destination, resetting `write_it` as we go.
+    for (const StringT& str : strings) {
+      write_it = std::ranges::copy(str, write_it).out;
+    }
+    return n;
+  });
 }
 
 template <typename StringT>
 auto StrCatT(span<const StringT> pieces) {
-  std::basic_string<typename StringT::value_type, typename StringT::traits_type>
-      result;
-  StrAppendT(&result, pieces);
+  std::basic_string<typename StringT::value_type> result;
+  StrAppendT(result, pieces);
   return result;
 }
 
-}  // namespace internal
-
-}  // namespace base
+}  // namespace base::internal
 
 #endif  // BASE_STRINGS_STRCAT_INTERNAL_H_

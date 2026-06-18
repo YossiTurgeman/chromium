@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,26 +6,28 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/synchronization/lock.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/thread_annotations.h"
-#include "base/threading/sequenced_task_runner_handle.h"
 #include "base/time/time.h"
+#include "chromecast/external_mojo/broker_service/broker_service.h"
 #include "chromecast/external_mojo/external_service_support/external_service.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/platform/named_platform_channel.h"
 #include "mojo/public/cpp/platform/platform_channel_endpoint.h"
 #include "mojo/public/cpp/system/invitation.h"
+#include "services/service_manager/public/cpp/connector.h"
 
 namespace chromecast {
 namespace external_service_support {
 
 namespace {
-constexpr base::TimeDelta kConnectRetryDelay =
-    base::TimeDelta::FromMilliseconds(500);
+constexpr base::TimeDelta kConnectRetryDelay = base::Milliseconds(500);
 }  // namespace
 
 // Since we are only allowed to make a single underlying connection to the
@@ -46,7 +48,7 @@ class ExternalConnectorImpl::BrokerConnection
  public:
   explicit BrokerConnection(std::string broker_path)
       : broker_path_(std::move(broker_path)),
-        task_runner_(base::SequencedTaskRunnerHandle::Get()) {
+        task_runner_(base::SequencedTaskRunner::GetCurrentDefault()) {
     Connect();
   }
 
@@ -87,8 +89,14 @@ class ExternalConnectorImpl::BrokerConnection
   }
 
   void AttemptBrokerConnection() {
+    mojo::NamedPlatformChannel::Options channel_options;
+    channel_options.server_name = broker_path_;
+#if BUILDFLAG(IS_ANDROID)
+    // On Android, use the abstract namespace to avoid filesystem access.
+    channel_options.use_abstract_namespace = true;
+#endif
     mojo::PlatformChannelEndpoint endpoint =
-        mojo::NamedPlatformChannel::ConnectToServer(broker_path_);
+        mojo::NamedPlatformChannel::ConnectToServer(channel_options);
     if (!endpoint.is_valid()) {
       task_runner_->PostDelayedTask(
           FROM_HERE,
@@ -141,6 +149,21 @@ std::unique_ptr<ExternalConnector> ExternalConnector::Create(
   return std::make_unique<ExternalConnectorImpl>(broker_path);
 }
 
+// static
+std::unique_ptr<ExternalConnector> ExternalConnector::Create(
+    mojo::PendingRemote<external_mojo::mojom::ExternalConnector> remote) {
+  return std::make_unique<ExternalConnectorImpl>(std::move(remote));
+}
+
+// static
+std::unique_ptr<ExternalConnector> ExternalConnector::Create(
+    service_manager::Connector* connector) {
+  mojo::PendingRemote<external_mojo::mojom::ExternalConnector> pending_remote;
+  connector->BindInterface(external_mojo::BrokerService::kServiceName,
+                           pending_remote.InitWithNewPipeAndPassReceiver());
+  return std::make_unique<ExternalConnectorImpl>(std::move(pending_remote));
+}
+
 ExternalConnectorImpl::ExternalConnectorImpl(const std::string& broker_path)
     : broker_connection_(base::MakeRefCounted<BrokerConnection>(broker_path)) {
   DETACH_FROM_SEQUENCE(sequence_checker_);
@@ -162,11 +185,11 @@ ExternalConnectorImpl::ExternalConnectorImpl(
 
 ExternalConnectorImpl::~ExternalConnectorImpl() = default;
 
-std::unique_ptr<base::CallbackList<void()>::Subscription>
+base::CallbackListSubscription
 ExternalConnectorImpl::AddConnectionErrorCallback(
     base::RepeatingClosure callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  return error_callbacks_.Add(std::move(callback));
+  return error_closures_.Add(std::move(callback));
 }
 
 void ExternalConnectorImpl::RegisterService(const std::string& service_name,
@@ -228,7 +251,7 @@ void ExternalConnectorImpl::BindInterface(
                              std::move(interface_pipe));
     return;
   }
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&ExternalConnectorImpl::BindInterfaceImmediately,
                      weak_factory_.GetWeakPtr(), service_name, interface_name,
@@ -247,11 +270,19 @@ void ExternalConnectorImpl::BindInterfaceImmediately(
 std::unique_ptr<ExternalConnector> ExternalConnectorImpl::Clone() {
   if (broker_connection_) {
     return std::make_unique<ExternalConnectorImpl>(broker_connection_);
-  } else {
-    mojo::PendingRemote<external_mojo::mojom::ExternalConnector> remote;
-    connector_->Clone(remote.InitWithNewPipeAndPassReceiver());
-    return std::make_unique<ExternalConnectorImpl>(std::move(remote));
   }
+  // Bind to the current sequence since this is a public method.
+  BindConnectorIfNecessary();
+  return std::make_unique<ExternalConnectorImpl>(RequestConnector());
+}
+
+mojo::PendingRemote<external_mojo::mojom::ExternalConnector>
+ExternalConnectorImpl::RequestConnector() {
+  // Bind to the current sequence since this is a public method.
+  BindConnectorIfNecessary();
+  mojo::PendingRemote<external_mojo::mojom::ExternalConnector> remote;
+  connector_->Clone(remote.InitWithNewPipeAndPassReceiver());
+  return remote;
 }
 
 void ExternalConnectorImpl::SendChromiumConnectorRequest(
@@ -274,7 +305,7 @@ void ExternalConnectorImpl::OnMojoDisconnect() {
     Connect();
     BindConnectorIfNecessary();
   }
-  error_callbacks_.Notify();
+  error_closures_.Notify();
 }
 
 void ExternalConnectorImpl::BindConnectorIfNecessary() {

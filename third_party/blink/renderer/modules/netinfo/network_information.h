@@ -1,36 +1,46 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_NETINFO_NETWORK_INFORMATION_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_NETINFO_NETWORK_INFORMATION_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/public/platform/web_connection_type.h"
 #include "third_party/blink/public/platform/web_effective_connection_type.h"
 #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
 #include "third_party/blink/renderer/platform/network/network_state_notifier.h"
+#include "third_party/blink/renderer/platform/supplementable.h"
 
 namespace blink {
 
-class ExecutionContext;
+class NavigatorBase;
+class V8ConnectionType;
+class V8EffectiveConnectionType;
 
 class NetworkInformation final
-    : public EventTargetWithInlineData,
+    : public EventTarget,
       public ActiveScriptWrappable<NetworkInformation>,
+      public Supplement<NavigatorBase>,
       public ExecutionContextLifecycleObserver,
       public NetworkStateNotifier::NetworkStateObserver {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
-  explicit NetworkInformation(ExecutionContext*);
+  static const char kSupplementName[];
+
+  // Web-exposed as navigator.connection.
+  static NetworkInformation* connection(NavigatorBase&);
+
+  explicit NetworkInformation(NavigatorBase&);
   ~NetworkInformation() override;
 
-  String type() const;
+  V8ConnectionType type() const;
   double downlinkMax() const;
-  String effectiveType();
+  V8EffectiveConnectionType effectiveType();
   uint32_t rtt();
   double downlink();
   bool saveData() const;
@@ -39,9 +49,9 @@ class NetworkInformation final
   void ConnectionChange(WebConnectionType,
                         double downlink_max_mbps,
                         WebEffectiveConnectionType effective_type,
-                        const base::Optional<base::TimeDelta>& http_rtt,
-                        const base::Optional<base::TimeDelta>& transport_rtt,
-                        const base::Optional<double>& downlink_mbps,
+                        const std::optional<base::TimeDelta>& http_rtt,
+                        const std::optional<base::TimeDelta>& transport_rtt,
+                        const std::optional<double>& downlink_mbps,
                         bool save_data) override;
 
   // EventTarget overrides.

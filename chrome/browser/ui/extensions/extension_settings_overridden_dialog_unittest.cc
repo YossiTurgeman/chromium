@@ -1,20 +1,23 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/extensions/extension_settings_overridden_dialog.h"
 
-#include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
-#include "chrome/browser/extensions/extension_service.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/time/time.h"
 #include "chrome/browser/extensions/extension_service_test_base.h"
+#include "chrome/browser/profiles/profile.h"
 #include "extensions/browser/disable_reason.h"
+#include "extensions/browser/extension_pref_names.h"
 #include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/uninstall_reason.h"
 #include "extensions/common/extension_builder.h"
+#include "extensions/common/extension_features.h"
 #include "extensions/common/manifest.h"
-#include "extensions/common/value_builder.h"
 
 namespace {
 
@@ -25,12 +28,10 @@ constexpr char kTestDialogResultHistogramName[] = "TestHistogramName";
 
 ExtensionSettingsOverriddenDialog::Params CreateTestDialogParams(
     const extensions::ExtensionId& controlling_id) {
-  return {controlling_id,
-          kTestAcknowledgedPreference,
-          kTestDialogResultHistogramName,
-          base::ASCIIToUTF16("Test Dialog Title"),
-          base::ASCIIToUTF16("Test Dialog Body"),
-          nullptr};
+  SettingsOverriddenDialogController::ShowParams show_params(
+      u"Test Dialog Title", u"Test Dialog Body", nullptr);
+  return {controlling_id, "Test Extension", kTestAcknowledgedPreference,
+          kTestDialogResultHistogramName, std::move(show_params)};
 }
 
 }  // namespace
@@ -43,15 +44,32 @@ class ExtensionSettingsOverriddenDialogUnitTest
     InitializeEmptyExtensionService();
   }
 
-  // Adds a new extension with the given |name| and |location| to the profile.
+  // Adds a new extension with the given `name` and `location` to the profile.
+  // If `include_extra_perms` is true, this also adds a simple permission to
+  // the extension (so that it's not considered a "simple override").
   const extensions::Extension* AddExtension(
       const char* name = "alpha",
-      extensions::Manifest::Location location =
-          extensions::Manifest::INTERNAL) {
-    scoped_refptr<const extensions::Extension> extension =
-        extensions::ExtensionBuilder(name).SetLocation(location).Build();
-    service()->AddExtension(extension.get());
+      extensions::mojom::ManifestLocation location =
+          extensions::mojom::ManifestLocation::kInternal,
+      bool include_extra_perms = true) {
+    extensions::ExtensionBuilder builder(name);
+    builder.SetLocation(location);
+    if (include_extra_perms) {
+      builder.AddAPIPermission("storage");
+    }
+    scoped_refptr<const extensions::Extension> extension = builder.Build();
+    registrar()->AddExtension(extension);
+    SetExtensionInstallTime(extension->id(), base::Time::Now());
     return extension.get();
+  }
+
+  // Updates the install time for a specific extension to a specific time.
+  void SetExtensionInstallTime(const extensions::ExtensionId& id,
+                               base::Time time) {
+    extensions::ExtensionPrefs::Get(profile())->UpdateExtensionPref(
+        id, extensions::kPrefFirstInstallTime,
+        base::Value(base::NumberToString(
+            time.ToDeltaSinceWindowsEpoch().InMicroseconds())));
   }
 
   extensions::ExtensionPrefs* GetExtensionPrefs() {
@@ -73,34 +91,34 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
   const extensions::Extension* extension = AddExtension("fancy extension");
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(extension->id()), profile());
+      CreateTestDialogParams(extension->id()), *profile());
   EXPECT_TRUE(controller.ShouldShow());
 
   ExtensionSettingsOverriddenDialog::ShowParams show_params =
       controller.GetShowParams();
-  EXPECT_EQ("Test Dialog Title", base::UTF16ToUTF8(show_params.dialog_title));
-  EXPECT_EQ("Test Dialog Body", base::UTF16ToUTF8(show_params.message));
+  EXPECT_EQ(u"Test Dialog Title", show_params.dialog_title);
+  EXPECT_EQ(u"Test Dialog Body", show_params.message);
 }
 
 TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
        WontShowForAnAcknowledgedExtension) {
   const extensions::Extension* extension = AddExtension();
-  GetExtensionPrefs()->UpdateExtensionPref(extension->id(),
-                                           kTestAcknowledgedPreference,
-                                           std::make_unique<base::Value>(true));
+  GetExtensionPrefs()->UpdateExtensionPref(
+      extension->id(), kTestAcknowledgedPreference, base::Value(true));
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(extension->id()), profile());
+      CreateTestDialogParams(extension->id()), *profile());
   EXPECT_FALSE(controller.ShouldShow());
 }
 
 TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
        WontShowForAnExtensionThatCantBeDisabled) {
   const extensions::Extension* policy_extension = AddExtension(
-      "policy installed", extensions::Manifest::EXTERNAL_POLICY_DOWNLOAD);
+      "policy installed",
+      extensions::mojom::ManifestLocation::kExternalPolicyDownload);
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(policy_extension->id()), profile());
+      CreateTestDialogParams(policy_extension->id()), *profile());
   EXPECT_FALSE(controller.ShouldShow());
 }
 
@@ -110,7 +128,7 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
   const extensions::Extension* extension = AddExtension();
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(extension->id()), profile());
+      CreateTestDialogParams(extension->id()), *profile());
   EXPECT_TRUE(controller.ShouldShow());
   controller.OnDialogShown();
 
@@ -119,8 +137,9 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
                                       DialogResult::kChangeSettingsBack, 1);
 
   EXPECT_TRUE(registry()->disabled_extensions().Contains(extension->id()));
-  EXPECT_EQ(extensions::disable_reason::DISABLE_USER_ACTION,
-            GetExtensionPrefs()->GetDisableReasons(extension->id()));
+  EXPECT_THAT(GetExtensionPrefs()->GetDisableReasons(extension->id()),
+              testing::UnorderedElementsAre(
+                  extensions::disable_reason::DISABLE_USER_ACTION));
   EXPECT_FALSE(IsExtensionAcknowledged(extension->id()));
 }
 
@@ -130,7 +149,7 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
   const extensions::Extension* extension = AddExtension();
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(extension->id()), profile());
+      CreateTestDialogParams(extension->id()), *profile());
   EXPECT_TRUE(controller.ShouldShow());
   controller.OnDialogShown();
 
@@ -148,7 +167,7 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
   const extensions::Extension* extension = AddExtension();
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(extension->id()), profile());
+      CreateTestDialogParams(extension->id()), *profile());
   controller.OnDialogShown();
 
   controller.HandleDialogResult(DialogResult::kDialogDismissed);
@@ -166,7 +185,7 @@ TEST_F(
   const extensions::Extension* extension = AddExtension();
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(extension->id()), profile());
+      CreateTestDialogParams(extension->id()), *profile());
   controller.OnDialogShown();
 
   controller.HandleDialogResult(DialogResult::kDialogClosedWithoutUserAction);
@@ -184,7 +203,7 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
 
   {
     ExtensionSettingsOverriddenDialog controller(
-        CreateTestDialogParams(extension->id()), profile());
+        CreateTestDialogParams(extension->id()), *profile());
     EXPECT_TRUE(controller.ShouldShow());
     controller.OnDialogShown();
     controller.HandleDialogResult(DialogResult::kDialogDismissed);
@@ -194,7 +213,7 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
     // Since the dialog was already shown for this extension, it should not
     // display a second time.
     ExtensionSettingsOverriddenDialog controller(
-        CreateTestDialogParams(extension->id()), profile());
+        CreateTestDialogParams(extension->id()), *profile());
     EXPECT_FALSE(controller.ShouldShow());
   }
 }
@@ -205,7 +224,7 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
 
   {
     ExtensionSettingsOverriddenDialog controller(
-        CreateTestDialogParams(extension_one->id()), profile());
+        CreateTestDialogParams(extension_one->id()), *profile());
     EXPECT_TRUE(controller.ShouldShow());
     controller.OnDialogShown();
     controller.HandleDialogResult(DialogResult::kDialogDismissed);
@@ -214,7 +233,7 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
   const extensions::Extension* extension_two = AddExtension("two");
   {
     ExtensionSettingsOverriddenDialog controller(
-        CreateTestDialogParams(extension_two->id()), profile());
+        CreateTestDialogParams(extension_two->id()), *profile());
     EXPECT_TRUE(controller.ShouldShow());
   }
 }
@@ -224,12 +243,136 @@ TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
   const extensions::Extension* extension = AddExtension();
 
   ExtensionSettingsOverriddenDialog controller(
-      CreateTestDialogParams(extension->id()), profile());
+      CreateTestDialogParams(extension->id()), *profile());
   EXPECT_TRUE(controller.ShouldShow());
   controller.OnDialogShown();
 
-  service()->UninstallExtension(
+  registrar()->UninstallExtension(
       extension->id(), extensions::UNINSTALL_REASON_FOR_TESTING, nullptr);
 
   controller.HandleDialogResult(DialogResult::kChangeSettingsBack);
+}
+
+// Tests that simple override extensions don't trigger the settings overridden
+// dialog.
+TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
+       SimpleOverrideExtensionDoesntTriggerDialog) {
+  const extensions::Extension* extension =
+      AddExtension("alpha", extensions::mojom::ManifestLocation::kInternal,
+                   /*include_extra_perms=*/false);
+
+  ExtensionSettingsOverriddenDialog controller(
+      CreateTestDialogParams(extension->id()), *profile());
+  EXPECT_FALSE(controller.ShouldShow());
+  // The the extension should not be acknowledged. The latter is important to
+  // re-assess the extension in case it updates.
+  EXPECT_FALSE(IsExtensionAcknowledged(extension->id()));
+}
+
+TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
+       SimpleOverrideNewInstallationTriggersDialog) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      extensions_features::kSearchEngineUnconditionalDialog);
+
+  // 1. Set the enforcement timestamp to the past.
+  profile()->GetPrefs()->SetTime(ExtensionSettingsOverriddenDialog::
+                                     kSimpleOverrideBeginConfirmationTimestamp,
+                                 base::Time::Now() - base::Days(1));
+
+  // 2. Install a simple override extension. Its install time will be "Now",
+  // which is later than the enforcement timestamp.
+  const extensions::Extension* extension =
+      AddExtension("simple_new", extensions::mojom::ManifestLocation::kInternal,
+                   /*include_extra_perms=*/false);
+
+  ExtensionSettingsOverriddenDialog controller(
+      CreateTestDialogParams(extension->id()), *profile());
+
+  // Since InstallTime > EnforcementTime, it should show.
+  EXPECT_TRUE(controller.ShouldShow());
+}
+
+TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
+       SimpleOverrideOldInstallationGrandfathered) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      extensions_features::kSearchEngineUnconditionalDialog);
+
+  // 1. Install a simple override extension. Its install time is "Now".
+  const extensions::Extension* extension =
+      AddExtension("simple_old", extensions::mojom::ManifestLocation::kInternal,
+                   /*include_extra_perms=*/false);
+
+  // 2. Set the enforcement timestamp to the future.
+  profile()->GetPrefs()->SetTime(ExtensionSettingsOverriddenDialog::
+                                     kSimpleOverrideBeginConfirmationTimestamp,
+                                 base::Time::Now() + base::Days(1));
+
+  ExtensionSettingsOverriddenDialog controller(
+      CreateTestDialogParams(extension->id()), *profile());
+
+  // Since InstallTime < EnforcementTime, it should NOT show.
+  EXPECT_FALSE(controller.ShouldShow());
+  EXPECT_FALSE(IsExtensionAcknowledged(extension->id()));
+}
+
+TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
+       SimpleOverrideFirstRunCreatesPrefAndGrandfathers) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      extensions_features::kSearchEngineUnconditionalDialog);
+
+  // 1. Install a simple override extension.
+  const extensions::Extension* extension = AddExtension(
+      "simple_first_run", extensions::mojom::ManifestLocation::kInternal,
+      /*include_extra_perms=*/false);
+
+  // Set the install time to the past to ensure it is strictly before the
+  // "Now" that will be generated inside ShouldShow().
+  SetExtensionInstallTime(extension->id(),
+                          base::Time::Now() - base::Seconds(10));
+
+  // 2. Ensure the preference does not exist yet.
+  PrefService* prefs = profile()->GetPrefs();
+  EXPECT_TRUE(prefs
+                  ->GetTime(ExtensionSettingsOverriddenDialog::
+                                kSimpleOverrideBeginConfirmationTimestamp)
+                  .is_null());
+
+  ExtensionSettingsOverriddenDialog controller(
+      CreateTestDialogParams(extension->id()), *profile());
+
+  // 3. It should not show (Grandfathered), because InstallTime <
+  // EnforcementTime (Now).
+  EXPECT_FALSE(controller.ShouldShow());
+
+  // 4. The preference should have been created and set to the current time.
+  EXPECT_FALSE(prefs
+                   ->GetTime(ExtensionSettingsOverriddenDialog::
+                                 kSimpleOverrideBeginConfirmationTimestamp)
+                   .is_null());
+}
+
+TEST_F(ExtensionSettingsOverriddenDialogUnitTest,
+       NonSimpleOverrideAlwaysTriggersIgnoresTimestamp) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      extensions_features::kSearchEngineUnconditionalDialog);
+
+  const extensions::Extension* extension =
+      AddExtension("complex", extensions::mojom::ManifestLocation::kInternal,
+                   /*include_extra_perms=*/true);
+
+  // Set the enforcement timestamp to the future. If this were a simple
+  // override, it would be grandfathered. However, for non-simple overrides,
+  // this pref should be irrelevant.
+  profile()->GetPrefs()->SetTime(ExtensionSettingsOverriddenDialog::
+                                     kSimpleOverrideBeginConfirmationTimestamp,
+                                 base::Time::Now() + base::Days(1));
+
+  ExtensionSettingsOverriddenDialog controller(
+      CreateTestDialogParams(extension->id()), *profile());
+
+  EXPECT_TRUE(controller.ShouldShow());
 }

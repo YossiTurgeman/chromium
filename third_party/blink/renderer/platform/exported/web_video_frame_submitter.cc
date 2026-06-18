@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,10 +14,6 @@ class LayerTreeSettings;
 class VideoFrameProvider;
 }  // namespace cc
 
-namespace gpu {
-class GpuMemoryBufferManager;
-}
-
 namespace viz {
 class ContextProvider;
 }
@@ -26,7 +22,8 @@ namespace blink {
 
 std::unique_ptr<WebVideoFrameSubmitter> WebVideoFrameSubmitter::Create(
     WebContextProviderCallback context_provider_callback,
-    cc::PlaybackRoughnessReportingCallback roughness_reporting_callback,
+    cc::VideoPlaybackRoughnessReporter::ReportingCallback
+        roughness_reporting_callback,
     const cc::LayerTreeSettings& settings,
     bool use_sync_primitives) {
   return std::make_unique<VideoFrameSubmitter>(

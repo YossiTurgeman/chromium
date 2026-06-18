@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/workers/threaded_worklet_object_proxy.h"
 #include "third_party/blink/renderer/core/workers/worker_clients.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_messaging_proxy.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_node.h"
@@ -45,8 +46,7 @@ BaseAudioContext* AudioWorklet::GetBaseAudioContext() const {
   return context_.Get();
 }
 
-const Vector<CrossThreadAudioParamInfo>
-    AudioWorklet::GetParamInfoListForProcessor(
+Vector<CrossThreadAudioParamInfo> AudioWorklet::GetParamInfoListForProcessor(
     const String& name) {
   DCHECK(IsMainThread());
   DCHECK(GetMessagingProxy());
@@ -65,8 +65,8 @@ bool AudioWorklet::IsReady() {
 }
 
 bool AudioWorklet::NeedsToCreateGlobalScope() {
-  // This is a callback from |Worklet::FetchAndInvokeScript| call, which only
-  // can be triggered by Worklet.addModule() call.
+  // This is a callback from `Worklet::FetchAndInvokeScript()` call, which only
+  // can be triggered by `Worklet.addModule()` call.
   UseCounter::Count(GetExecutionContext(), WebFeature::kAudioWorkletAddModule);
 
   return GetNumberOfGlobalScopes() == 0;
@@ -79,7 +79,8 @@ WorkletGlobalScopeProxy* AudioWorklet::CreateGlobalScope() {
       MakeGarbageCollected<AudioWorkletMessagingProxy>(GetExecutionContext(),
                                                        this);
   proxy->Initialize(MakeGarbageCollected<WorkerClients>(),
-                    ModuleResponsesMap());
+                    ModuleResponsesMap(),
+                    WorkerBackingThreadStartupData::CreateDefault());
   return proxy;
 }
 
@@ -88,6 +89,14 @@ AudioWorkletMessagingProxy* AudioWorklet::GetMessagingProxy() {
              ? nullptr
              : static_cast<AudioWorkletMessagingProxy*>(
                    FindAvailableGlobalScope());
+}
+
+void AudioWorklet::TerminateProxies() {
+  DCHECK(IsMainThread());
+  AbortPendingTasks();
+  for (const auto& proxy : proxies_) {
+    proxy->TerminateWorkletGlobalScope();
+  }
 }
 
 void AudioWorklet::Trace(Visitor* visitor) const {

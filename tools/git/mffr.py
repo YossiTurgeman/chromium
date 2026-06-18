@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright (c) 2013 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -37,14 +37,17 @@ import sys
 # quotes for CreateProcess(), rather than |, <, >, etc. through multiple layers
 # of cmd.
 if sys.platform == 'win32':
-  _git = os.path.normpath(os.path.join(subprocess.check_output(
-      'git bash -c "cd / && pwd -W"', shell=True).strip(), 'bin\\git.exe'))
+  _git = os.path.normpath(
+      os.path.join(
+          subprocess.check_output('git bash -c "cd / && pwd -W"',
+                                  shell=True).decode('utf-8').strip(),
+          'bin\\git.exe'))
 else:
   _git = 'git'
 
 
 def MultiFileFindReplace(original, replacement, file_globs):
-  """Implements fast multi-file find and replace.
+  r"""Implements fast multi-file find and replace.
 
   Given an |original| string and a |replacement| string, find matching
   files by running git grep on |original| in files matching any
@@ -74,13 +77,13 @@ def MultiFileFindReplace(original, replacement, file_globs):
   referees = out.splitlines()
 
   for referee in referees:
-    with open(referee) as f:
+    with open(referee, encoding='utf-8') as f:
       original_contents = f.read()
     contents = re.sub(original, replacement, original_contents)
     if contents == original_contents:
       raise Exception('No change in file %s although matched in grep' %
                       referee)
-    with open(referee, 'wb') as f:
+    with open(referee, mode='w', encoding='utf-8', newline='\n') as f:
       f.write(contents)
 
   return referees

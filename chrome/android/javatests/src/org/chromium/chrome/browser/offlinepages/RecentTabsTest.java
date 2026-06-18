@@ -1,68 +1,64 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.offlinepages;
 
-import android.support.test.InstrumentationRegistry;
-
 import androidx.test.filters.MediumTest;
 
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.CriteriaHelper;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tabmodel.TabClosureParams;
 import org.chromium.chrome.browser.tabmodel.TabModel;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.tabmodel.TabModelUtils;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
-import org.chromium.content_public.browser.test.util.CriteriaHelper;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.chrome.test.transit.AutoResetCtaTransitTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.page.WebPageStation;
 import org.chromium.net.NetworkChangeNotifier;
 import org.chromium.net.test.EmbeddedTestServer;
-
-import java.util.concurrent.Callable;
 
 /** Integration tests for the Last 1 feature of Offline Pages. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
+@Batch(Batch.PER_CLASS)
 public class RecentTabsTest {
     @Rule
-    public ChromeTabbedActivityTestRule mActivityTestRule = new ChromeTabbedActivityTestRule();
+    public AutoResetCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.fastAutoResetCtaActivityRule();
 
     private static final String TEST_PAGE = "/chrome/test/data/android/about.html";
-    private static final int TIMEOUT_MS = 5000;
 
     private OfflinePageBridge mOfflinePageBridge;
     private EmbeddedTestServer mTestServer;
     private String mTestPage;
+    private WebPageStation mStartingPage;
 
     @Before
     public void setUp() throws Exception {
-        mActivityTestRule.startMainActivityOnBlankPage();
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            // Ensure we start in an offline state.
-            NetworkChangeNotifier.forceConnectivityState(false);
-            if (!NetworkChangeNotifier.isInitialized()) {
-                NetworkChangeNotifier.init();
-            }
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    // Ensure we start in an offline state.
+                    NetworkChangeNotifier.forceConnectivityState(false);
+                    if (!NetworkChangeNotifier.isInitialized()) {
+                        NetworkChangeNotifier.init();
+                    }
+                });
 
         mOfflinePageBridge = OfflineTestUtil.getOfflinePageBridge();
-        mTestServer = EmbeddedTestServer.createAndStartServer(InstrumentationRegistry.getContext());
-        mTestPage = mTestServer.getURL(TEST_PAGE);
-    }
-
-    @After
-    public void tearDown() {
-        mTestServer.stopAndDestroyServer();
+        mTestPage = mActivityTestRule.getTestServer().getURL(TEST_PAGE);
+        mStartingPage = mActivityTestRule.startOnBlankPage();
     }
 
     @Test
@@ -105,23 +101,25 @@ public class RecentTabsTest {
 
         // The tab should be foreground and so no snapshot should exist.
         TabModelSelector tabModelSelector = mActivityTestRule.getActivity().getTabModelSelector();
-        Assert.assertEquals(tabModelSelector.getCurrentTab(), tab);
+        Assert.assertEquals(
+                ThreadUtils.runOnUiThreadBlocking(() -> tabModelSelector.getCurrentTab()), tab);
         Assert.assertFalse(tab.isHidden());
         Assert.assertNull(OfflineTestUtil.getPageByClientId(firstTabClientId));
 
         // The tab model is expected to support pending closures.
-        final TabModel tabModel = tabModelSelector.getModelForTabId(tab.getId());
-        Assert.assertTrue(tabModel.supportsPendingClosures());
+        final TabModel tabModel =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () -> tabModelSelector.getModelForTabId(tab.getId()));
+        Assert.assertTrue(
+                ThreadUtils.runOnUiThreadBlocking(() -> tabModel.supportsPendingClosures()));
 
         // Requests closing of the tab allowing for closure undo and checks it's actually closing.
-        boolean closeTabReturnValue =
-                TestThreadUtils.runOnUiThreadBlocking(new Callable<Boolean>() {
-                    @Override
-                    public Boolean call() {
-                        return tabModel.closeTab(tab, false, false, true);
-                    }
-                });
-        Assert.assertTrue(closeTabReturnValue);
+        ThreadUtils.runOnUiThreadBlocking(
+                () ->
+                        tabModel.getTabRemover()
+                                .closeTabs(
+                                        TabClosureParams.closeTab(tab).build(),
+                                        /* allowDialog= */ false));
         Assert.assertTrue(tab.isHidden());
         Assert.assertTrue(tab.isClosing());
 
@@ -130,24 +128,29 @@ public class RecentTabsTest {
         Assert.assertNull(OfflineTestUtil.getPageByClientId(firstTabClientId));
 
         // Undo the closure and make sure the tab is again the current one on foreground.
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            tabModel.cancelTabClosure(tab.getId());
-            int tabIndex = TabModelUtils.getTabIndexById(tabModel, tab.getId());
-            TabModelUtils.setIndex(tabModel, tabIndex);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    tabModel.cancelTabClosure(tab.getId());
+                    int tabIndex = TabModelUtils.getTabIndexById(tabModel, tab.getId());
+                    TabModelUtils.setIndex(tabModel, tabIndex);
+                });
         Assert.assertFalse(tab.isHidden());
         Assert.assertFalse(tab.isClosing());
-        Assert.assertEquals(tabModelSelector.getCurrentTab(), tab);
+        Assert.assertEquals(
+                ThreadUtils.runOnUiThreadBlocking(() -> tabModelSelector.getCurrentTab()), tab);
 
         // Finally switch to a new tab and check that a snapshot is created.
         Tab newTab = mActivityTestRule.loadUrlInNewTab("about:blank");
-        Assert.assertEquals(tabModelSelector.getCurrentTab(), newTab);
+        Assert.assertEquals(
+                ThreadUtils.runOnUiThreadBlocking(() -> tabModelSelector.getCurrentTab()), newTab);
         Assert.assertTrue(tab.isHidden());
         waitForPageWithClientId(firstTabClientId);
     }
 
     private void waitForPageWithClientId(final ClientId clientId) {
         CriteriaHelper.pollInstrumentationThread(
-                () -> { return OfflineTestUtil.getPageByClientId(clientId) != null; });
+                () -> {
+                    return OfflineTestUtil.getPageByClientId(clientId) != null;
+                });
     }
 }

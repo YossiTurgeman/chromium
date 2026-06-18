@@ -31,13 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_WORKER_INSPECTOR_CONTROLLER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_WORKER_INSPECTOR_CONTROLLER_H_
 
-#include "base/callback.h"
-#include "base/macros.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/unguessable_token.h"
 #include "third_party/blink/renderer/core/inspector/devtools_agent.h"
 #include "third_party/blink/renderer/core/inspector/inspector_task_runner.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 #include "third_party/blink/renderer/platform/scheduler/public/thread.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
@@ -48,13 +46,14 @@ namespace blink {
 
 class CoreProbeSink;
 class InspectedFrames;
+class InspectorInspectorAgent;
 class WorkerThread;
 class WorkerThreadDebugger;
 struct WorkerDevToolsParams;
 
 class WorkerInspectorController final
     : public GarbageCollected<WorkerInspectorController>,
-      public trace_event::EnabledStateObserver,
+      public trace_event::TraceSessionObserver,
       public DevToolsAgent::Client,
       private Thread::TaskObserver {
  public:
@@ -69,23 +68,26 @@ class WorkerInspectorController final
                             WorkerThreadDebugger*,
                             scoped_refptr<InspectorTaskRunner>,
                             std::unique_ptr<WorkerDevToolsParams>);
+  WorkerInspectorController(const WorkerInspectorController&) = delete;
+  WorkerInspectorController& operator=(const WorkerInspectorController&) =
+      delete;
   ~WorkerInspectorController() override;
-  void Trace(Visitor*) const;
+  void Trace(Visitor*) const override;
 
   CoreProbeSink* GetProbeSink() const { return probe_sink_.Get(); }
   DevToolsAgent* GetDevToolsAgent() const { return agent_.Get(); }
   void Dispose();
   void FlushProtocolNotifications();
   void WaitForDebuggerIfNeeded();
+  void WorkerScriptLoaded();
 
  private:
   // Thread::TaskObserver implementation.
   void WillProcessTask(const base::PendingTask&, bool) override;
   void DidProcessTask(const base::PendingTask&) override;
 
-  // blink::trace_event::EnabledStateObserver implementation:
-  void OnTraceLogEnabled() override;
-  void OnTraceLogDisabled() override;
+  // trace_event::TraceSessionObserver implementation:
+  void OnStart(const perfetto::DataSourceBase::StartArgs&) override;
 
   void EmitTraceEvent();
 
@@ -101,7 +103,8 @@ class WorkerInspectorController final
   WorkerThread* thread_;
   Member<InspectedFrames> inspected_frames_;
   Member<CoreProbeSink> probe_sink_;
-  int session_count_ = 0;
+  HeapHashMap<Member<DevToolsSession>, Member<InspectorInspectorAgent>>
+      inspector_agents_;
   bool wait_for_debugger_ = false;
 
   // These fields are set up in the constructor and then read
@@ -109,9 +112,7 @@ class WorkerInspectorController final
   base::UnguessableToken worker_devtools_token_;
   base::UnguessableToken parent_devtools_token_;
   KURL url_;
-  PlatformThreadId worker_thread_id_;
-
-  DISALLOW_COPY_AND_ASSIGN(WorkerInspectorController);
+  const base::PlatformThreadId worker_thread_id_;
 };
 
 }  // namespace blink

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,15 @@
 #include <utility>
 
 #include "base/check.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
 #include "cc/paint/paint_flags.h"
-#include "ui/compositor/dip_util.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/color/color_provider.h"
+#include "ui/color/color_variant.h"
+#include "ui/compositor/layer.h"
 #include "ui/gfx/canvas.h"
+#include "ui/gfx/geometry/dip_util.h"
+#include "ui/gfx/geometry/insets_conversions.h"
 #include "ui/gfx/geometry/rect_f.h"
 #include "ui/gfx/scoped_canvas.h"
 #include "ui/views/painter.h"
@@ -25,43 +29,57 @@ namespace {
 // A simple border with different thicknesses on each side and single color.
 class SolidSidedBorder : public Border {
  public:
-  SolidSidedBorder(const gfx::Insets& insets, SkColor color);
+  SolidSidedBorder(const gfx::Insets& insets, ui::ColorVariant color);
+
+  SolidSidedBorder(const SolidSidedBorder&) = delete;
+  SolidSidedBorder& operator=(const SolidSidedBorder&) = delete;
 
   // Overridden from Border:
   void Paint(const View& view, gfx::Canvas* canvas) override;
   gfx::Insets GetInsets() const override;
   gfx::Size GetMinimumSize() const override;
+  void OnViewThemeChanged(View* view) override;
 
  private:
   const gfx::Insets insets_;
-
-  DISALLOW_COPY_AND_ASSIGN(SolidSidedBorder);
 };
 
-SolidSidedBorder::SolidSidedBorder(const gfx::Insets& insets, SkColor color)
-    : Border(color), insets_(insets) {}
+SolidSidedBorder::SolidSidedBorder(const gfx::Insets& insets,
+                                   ui::ColorVariant color)
+    : insets_(insets) {
+  SetColor(color);
+}
 
 void SolidSidedBorder::Paint(const View& view, gfx::Canvas* canvas) {
-  // Undo DSF so that we can be sure to draw an integral number of pixels for
-  // the border. Integral scale factors should be unaffected by this, but for
-  // fractional scale factors this ensures sharp lines.
   gfx::ScopedCanvas scoped(canvas);
-  float dsf = canvas->UndoDeviceScaleFactor();
-
   gfx::RectF scaled_bounds;
-  if (view.layer()) {
-    scaled_bounds =
-        gfx::RectF(ui::ConvertRectToPixel(view.layer(), view.GetLocalBounds()));
+  gfx::InsetsF insets_in_pixels;
+
+  if (view.GetPaintScaleType() == PaintInfo::ScaleType::kUniformScaling) {
+    // Undo DSF so that we can be sure to draw an integral number of pixels for
+    // the border. Integral scale factors should be unaffected by this, but for
+    // fractional scale factors this ensures sharp lines.
+    const float dsf = canvas->UndoDeviceScaleFactor();
+
+    // Use the layer's specific DSF if available, otherwise fallback to the
+    // canvas DSF we just undid.
+    const float bounds_dsf =
+        view.layer() ? view.layer()->device_scale_factor() : dsf;
+
+    scaled_bounds = gfx::ConvertRectToPixels(view.GetLocalBounds(), bounds_dsf);
+    insets_in_pixels = gfx::ConvertInsetsToPixels(insets_, dsf);
   } else {
+    // PixelCanvasRecording handles scaling, so we use the logical coordinates
+    // directly.
     scaled_bounds = gfx::RectF(view.GetLocalBounds());
-    scaled_bounds.Scale(dsf);
+    insets_in_pixels = gfx::InsetsF(insets_);
   }
 
-  // This scaling operation floors the inset values.
-  scaled_bounds.Inset(insets_.Scale(dsf));
-  canvas->sk_canvas()->clipRect(gfx::RectFToSkRect(scaled_bounds),
+  scaled_bounds.Inset(insets_in_pixels);
+  gfx::Rect clip_bounds = ToEnclosedRect(scaled_bounds);
+  canvas->sk_canvas()->clipRect(gfx::RectToSkRect(clip_bounds),
                                 SkClipOp::kDifference, true);
-  canvas->DrawColor(color());
+  canvas->DrawColor(color().ResolveToSkColor(view.GetColorProvider()));
 }
 
 gfx::Insets SolidSidedBorder::GetInsets() const {
@@ -72,48 +90,57 @@ gfx::Size SolidSidedBorder::GetMinimumSize() const {
   return gfx::Size(insets_.width(), insets_.height());
 }
 
+void SolidSidedBorder::OnViewThemeChanged(View* view) {
+  if (color().IsLogical()) {
+    view->SchedulePaint();
+  }
+}
+
 // A border with a rounded rectangle and single color.
 class RoundedRectBorder : public Border {
  public:
   RoundedRectBorder(int thickness,
-                    int corner_radius,
+                    float corner_radius,
                     const gfx::Insets& paint_insets,
-                    SkColor color);
+                    ui::ColorVariant color);
+
+  RoundedRectBorder(const RoundedRectBorder&) = delete;
+  RoundedRectBorder& operator=(const RoundedRectBorder&) = delete;
 
   // Overridden from Border:
   void Paint(const View& view, gfx::Canvas* canvas) override;
   gfx::Insets GetInsets() const override;
   gfx::Size GetMinimumSize() const override;
+  void OnViewThemeChanged(View* view) override;
 
  private:
   const int thickness_;
-  const int corner_radius_;
+  const float corner_radius_;
   const gfx::Insets paint_insets_;
-
-  DISALLOW_COPY_AND_ASSIGN(RoundedRectBorder);
 };
 
 RoundedRectBorder::RoundedRectBorder(int thickness,
-                                     int corner_radius,
+                                     float corner_radius,
                                      const gfx::Insets& paint_insets,
-                                     SkColor color)
-    : Border(color),
-      thickness_(thickness),
+                                     ui::ColorVariant color)
+    : thickness_(thickness),
       corner_radius_(corner_radius),
-      paint_insets_(paint_insets) {}
+      paint_insets_(paint_insets) {
+  SetColor(color);
+}
 
 void RoundedRectBorder::Paint(const View& view, gfx::Canvas* canvas) {
   cc::PaintFlags flags;
   flags.setStrokeWidth(thickness_);
-  flags.setColor(color());
+  flags.setColor(color().ResolveToSkColor(view.GetColorProvider()));
   flags.setStyle(cc::PaintFlags::kStroke_Style);
   flags.setAntiAlias(true);
 
-  float half_thickness = thickness_ / 2.0f;
+  const float half_thickness = thickness_ / 2.0f;
   gfx::RectF bounds(view.GetLocalBounds());
-  bounds.Inset(paint_insets_);
-  bounds.Inset(half_thickness, half_thickness);
-  canvas->DrawRoundRect(bounds, corner_radius_, flags);
+  bounds.Inset(gfx::InsetsF(paint_insets_));
+  bounds.Inset(half_thickness);
+  canvas->DrawRoundRect(bounds, corner_radius_ - half_thickness, flags);
 }
 
 gfx::Insets RoundedRectBorder::GetInsets() const {
@@ -124,9 +151,18 @@ gfx::Size RoundedRectBorder::GetMinimumSize() const {
   return gfx::Size(thickness_ * 2, thickness_ * 2);
 }
 
+void RoundedRectBorder::OnViewThemeChanged(View* view) {
+  if (color().IsLogical()) {
+    view->SchedulePaint();
+  }
+}
+
 class EmptyBorder : public Border {
  public:
   explicit EmptyBorder(const gfx::Insets& insets);
+
+  EmptyBorder(const EmptyBorder&) = delete;
+  EmptyBorder& operator=(const EmptyBorder&) = delete;
 
   // Overridden from Border:
   void Paint(const View& view, gfx::Canvas* canvas) override;
@@ -135,8 +171,6 @@ class EmptyBorder : public Border {
 
  private:
   const gfx::Insets insets_;
-
-  DISALLOW_COPY_AND_ASSIGN(EmptyBorder);
 };
 
 EmptyBorder::EmptyBorder(const gfx::Insets& insets) : insets_(insets) {}
@@ -155,6 +189,9 @@ class ExtraInsetsBorder : public Border {
  public:
   ExtraInsetsBorder(std::unique_ptr<Border> border, const gfx::Insets& insets);
 
+  ExtraInsetsBorder(const ExtraInsetsBorder&) = delete;
+  ExtraInsetsBorder& operator=(const ExtraInsetsBorder&) = delete;
+
   // Overridden from Border:
   void Paint(const View& view, gfx::Canvas* canvas) override;
   gfx::Insets GetInsets() const override;
@@ -163,15 +200,13 @@ class ExtraInsetsBorder : public Border {
  private:
   std::unique_ptr<Border> border_;
   const gfx::Insets extra_insets_;
-
-  DISALLOW_COPY_AND_ASSIGN(ExtraInsetsBorder);
 };
 
 ExtraInsetsBorder::ExtraInsetsBorder(std::unique_ptr<Border> border,
                                      const gfx::Insets& insets)
-    : Border(border->color()),
-      border_(std::move(border)),
-      extra_insets_(insets) {}
+    : border_(std::move(border)), extra_insets_(insets) {
+  SetColor(border_->color());
+}
 
 void ExtraInsetsBorder::Paint(const View& view, gfx::Canvas* canvas) {
   border_->Paint(view, canvas);
@@ -191,16 +226,18 @@ class BorderPainter : public Border {
  public:
   BorderPainter(std::unique_ptr<Painter> painter, const gfx::Insets& insets);
 
+  BorderPainter(const BorderPainter&) = delete;
+  BorderPainter& operator=(const BorderPainter&) = delete;
+
   // Overridden from Border:
   void Paint(const View& view, gfx::Canvas* canvas) override;
   gfx::Insets GetInsets() const override;
   gfx::Size GetMinimumSize() const override;
+  void SetColor(ui::ColorVariant color) override;
 
  private:
   std::unique_ptr<Painter> painter_;
   const gfx::Insets insets_;
-
-  DISALLOW_COPY_AND_ASSIGN(BorderPainter);
 };
 
 BorderPainter::BorderPainter(std::unique_ptr<Painter> painter,
@@ -221,19 +258,29 @@ gfx::Size BorderPainter::GetMinimumSize() const {
   return painter_->GetMinimumSize();
 }
 
+void BorderPainter::SetColor(ui::ColorVariant color) {
+  NOTREACHED() << "It does not make sense to `SetColor()` for a painter "
+                  "based border.";
+}
+
 }  // namespace
 
 Border::Border() = default;
 
-Border::Border(SkColor color) : color_(color) {}
-
 Border::~Border() = default;
+
+void Border::OnViewThemeChanged(View* view) {}
+
+void Border::SetColor(ui::ColorVariant color) {
+  color_ = color;
+}
 
 std::unique_ptr<Border> NullBorder() {
   return nullptr;
 }
 
-std::unique_ptr<Border> CreateSolidBorder(int thickness, SkColor color) {
+std::unique_ptr<Border> CreateSolidBorder(int thickness,
+                                          ui::ColorVariant color) {
   return std::make_unique<SolidSidedBorder>(gfx::Insets(thickness), color);
 }
 
@@ -241,34 +288,28 @@ std::unique_ptr<Border> CreateEmptyBorder(const gfx::Insets& insets) {
   return std::make_unique<EmptyBorder>(insets);
 }
 
+std::unique_ptr<Border> CreateEmptyBorder(int thickness) {
+  return CreateEmptyBorder(gfx::Insets(thickness));
+}
+
 std::unique_ptr<Border> CreateRoundedRectBorder(int thickness,
-                                                int corner_radius,
-                                                SkColor color) {
+                                                float corner_radius,
+                                                ui::ColorVariant color) {
   return CreateRoundedRectBorder(thickness, corner_radius, gfx::Insets(),
                                  color);
 }
+
 std::unique_ptr<Border> CreateRoundedRectBorder(int thickness,
-                                                int corner_radius,
+                                                float corner_radius,
                                                 const gfx::Insets& paint_insets,
-                                                SkColor color) {
+                                                ui::ColorVariant color) {
   return std::make_unique<RoundedRectBorder>(thickness, corner_radius,
                                              paint_insets, color);
 }
 
-std::unique_ptr<Border> CreateEmptyBorder(int top,
-                                          int left,
-                                          int bottom,
-                                          int right) {
-  return CreateEmptyBorder(gfx::Insets(top, left, bottom, right));
-}
-
-std::unique_ptr<Border> CreateSolidSidedBorder(int top,
-                                               int left,
-                                               int bottom,
-                                               int right,
-                                               SkColor color) {
-  return std::make_unique<SolidSidedBorder>(
-      gfx::Insets(top, left, bottom, right), color);
+std::unique_ptr<Border> CreateSolidSidedBorder(const gfx::Insets& insets,
+                                               ui::ColorVariant color) {
+  return std::make_unique<SolidSidedBorder>(insets, color);
 }
 
 std::unique_ptr<Border> CreatePaddedBorder(std::unique_ptr<Border> border,
@@ -278,7 +319,7 @@ std::unique_ptr<Border> CreatePaddedBorder(std::unique_ptr<Border> border,
 
 std::unique_ptr<Border> CreateBorderPainter(std::unique_ptr<Painter> painter,
                                             const gfx::Insets& insets) {
-  return base::WrapUnique(new BorderPainter(std::move(painter), insets));
+  return std::make_unique<BorderPainter>(std::move(painter), insets);
 }
 
 }  // namespace views

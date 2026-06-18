@@ -21,6 +21,8 @@ can be the result of one of the following cases:
 * Navigating to a fragment within an existing document (e.g.
   `https://foo.com/1.html#fragment`).
 * A document calling the `history.pushState()` or `history.replaceState()` APIs.
+* A new document created via `document.open()`, which may change the URL to
+  match the document that initiated the call (possibly from another frame).
 * A session history navigation that stays in the same document, such as going
   back/forward to an existing entry for the same document.
 
@@ -56,7 +58,9 @@ should be preferred.
 The _last committed_ URL or Origin represents the document that is currently in
 the frame, regardless of what is showing in the address bar. This is almost
 always what should be used for feature-related state, unless a feature is
-explicitly tied to the address bar (e.g., padlock icon). See
+explicitly tied to the address bar (e.g., padlock icon). This is empty if no
+navigation is ever committed. e.g. if a tab is newly open for a navigation but
+then the navigation got cancelled. See
 `RenderFrameHost::GetLastCommittedOrigin` (or URL) and
 `NavigationController::GetLastCommittedEntry`.
 
@@ -73,9 +77,12 @@ an attacker is able to display content as if it came from a victim URL). In
 general, the visible URL is:
 
  * The pending URL for browser-initiated navigations like typed URLs or
-   bookmarks, excluding session history navigations.
+   bookmarks, excluding session history navigations. This becomes empty if the
+   navigation is cancelled.
  * The last committed URL for renderer-initiated navigations, where an attacker
    might have control over the contents of the document and the pending URL.
+   This is also used when there is no ongoing navigations, and it is empty when
+   no navigation is ever committed.
  * A renderer-initiated navigation's URL is only visible while pending if it
    opens in a new unmodified tab (so that an unhelpful `about:blank` URL is not
    displayed), but only until another document tries to access the initial empty

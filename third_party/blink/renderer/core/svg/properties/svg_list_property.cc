@@ -30,6 +30,7 @@
 
 #include "third_party/blink/renderer/core/svg/properties/svg_list_property.h"
 
+#include "base/compiler_specific.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 namespace blink {
@@ -43,7 +44,8 @@ void SVGListPropertyBase::Clear() {
   values_.clear();
 }
 
-void SVGListPropertyBase::Insert(uint32_t index, SVGPropertyBase* new_item) {
+void SVGListPropertyBase::Insert(uint32_t index,
+                                 SVGListablePropertyBase* new_item) {
   values_.insert(index, new_item);
   new_item->SetOwnerList(this);
 }
@@ -54,12 +56,13 @@ void SVGListPropertyBase::Remove(uint32_t index) {
   values_.EraseAt(index);
 }
 
-void SVGListPropertyBase::Append(SVGPropertyBase* new_item) {
+void SVGListPropertyBase::Append(SVGListablePropertyBase* new_item) {
   values_.push_back(new_item);
   new_item->SetOwnerList(this);
 }
 
-void SVGListPropertyBase::Replace(uint32_t index, SVGPropertyBase* new_item) {
+void SVGListPropertyBase::Replace(uint32_t index,
+                                  SVGListablePropertyBase* new_item) {
   DCHECK_EQ(values_[index]->OwnerList(), this);
   values_[index]->SetOwnerList(nullptr);
   values_[index] = new_item;
@@ -67,20 +70,13 @@ void SVGListPropertyBase::Replace(uint32_t index, SVGPropertyBase* new_item) {
 }
 
 String SVGListPropertyBase::ValueAsString() const {
-  if (values_.IsEmpty())
+  if (values_.empty())
     return String();
 
   StringBuilder builder;
-
-  auto* it = values_.begin();
-  auto* it_end = values_.end();
-  while (it != it_end) {
-    builder.Append((*it)->ValueAsString());
-    ++it;
-    if (it != it_end)
-      builder.Append(' ');
-  }
-  return builder.ToString();
+  builder.AppendRange(values_, " ",
+                      [](const auto& value) { return value->ValueAsString(); });
+  return builder.ReleaseString();
 }
 
 }  // namespace blink

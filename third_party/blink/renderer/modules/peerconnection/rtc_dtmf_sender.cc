@@ -27,6 +27,7 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/modules/mediastream/media_stream_track.h"
@@ -38,12 +39,23 @@
 
 namespace blink {
 
-static const int kMinToneDurationMs = 40;
-static const int kDefaultToneDurationMs = 100;
-static const int kMaxToneDurationMs = 6000;
-static const int kMinInterToneGapMs = 30;
-static const int kMaxInterToneGapMs = 6000;
-static const int kDefaultInterToneGapMs = 70;
+namespace {
+
+constexpr int kMinToneDurationMs = 40;
+constexpr int kDefaultToneDurationMs = 100;
+constexpr int kMaxToneDurationMs = 6000;
+constexpr int kMinInterToneGapMs = 30;
+constexpr int kMaxInterToneGapMs = 6000;
+constexpr int kDefaultInterToneGapMs = 70;
+
+bool IsValidDTMFCharacters(const String& tones) {
+  return std::ranges::all_of(tones.Ascii(), [](const char c) {
+    static constexpr std::string_view kDTMFCharacters("0123456789abcdABCD#*,");
+    return kDTMFCharacters.find(c) != std::string_view::npos;
+  });
+}
+
+}  // namespace
 
 RTCDTMFSender* RTCDTMFSender::Create(
     ExecutionContext* context,
@@ -102,8 +114,7 @@ void RTCDTMFSender::insertDTMF(const String& tones,
     return;
   }
   // Spec: Throw on illegal characters
-  if (strspn(tones.Ascii().c_str(), "0123456789abcdABCD#*,") !=
-      tones.length()) {
+  if (!IsValidDTMFCharacters(tones)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kInvalidCharacterError,
         "Illegal characters in InsertDTMF tone argument");
@@ -118,17 +129,17 @@ void RTCDTMFSender::insertDTMF(const String& tones,
   inter_tone_gap_ = std::min(inter_tone_gap_, kMaxInterToneGapMs);
 
   // Spec: a-d should be represented in the tone buffer as A-D
-  tone_buffer_ = tones.UpperASCII();
+  tone_buffer_ = tones.ToAsciiUpper();
 
-  if (tone_buffer_.IsEmpty()) {
+  if (tone_buffer_.empty()) {
     return;
   }
   if (!playout_task_is_scheduled_) {
     playout_task_is_scheduled_ = true;
     GetExecutionContext()
         ->GetTaskRunner(TaskType::kNetworking)
-        ->PostTask(FROM_HERE, WTF::Bind(&RTCDTMFSender::PlayoutTask,
-                                        WrapPersistent(this)));
+        ->PostTask(FROM_HERE,
+                   BindOnce(&RTCDTMFSender::PlayoutTask, WrapPersistent(this)));
   }
 }
 
@@ -136,13 +147,13 @@ void RTCDTMFSender::PlayoutTask() {
   playout_task_is_scheduled_ = false;
   // TODO(crbug.com/891638): Add check on transceiver's "stopped"
   // and "currentDirection" attributes as per spec.
-  if (tone_buffer_.IsEmpty()) {
+  if (tone_buffer_.empty()) {
     Member<Event> event = MakeGarbageCollected<RTCDTMFToneChangeEvent>("");
     DispatchEvent(*event.Release());
     return;
   }
-  String this_tone = tone_buffer_.Substring(0, 1);
-  tone_buffer_ = tone_buffer_.Substring(1, tone_buffer_.length() - 1);
+  String this_tone = tone_buffer_.substr(0, 1);
+  tone_buffer_ = tone_buffer_.substr(1, tone_buffer_.length() - 1);
   // InsertDTMF handles both tones and ",", and calls DidPlayTone after
   // the specified delay.
   if (!handler_->InsertDTMF(this_tone, duration_, inter_tone_gap_)) {
@@ -158,13 +169,13 @@ void RTCDTMFSender::PlayoutTask() {
 void RTCDTMFSender::DidPlayTone(const String& tone) {
   // We're using the DidPlayTone with an empty buffer to signal the
   // end of the tone.
-  if (tone.IsEmpty()) {
+  if (tone.empty()) {
     GetExecutionContext()
         ->GetTaskRunner(TaskType::kNetworking)
         ->PostDelayedTask(
             FROM_HERE,
-            WTF::Bind(&RTCDTMFSender::PlayoutTask, WrapPersistent(this)),
-            base::TimeDelta::FromMilliseconds(inter_tone_gap_));
+            BindOnce(&RTCDTMFSender::PlayoutTask, WrapPersistent(this)),
+            base::Milliseconds(inter_tone_gap_));
   }
 }
 
@@ -182,7 +193,7 @@ void RTCDTMFSender::ContextDestroyed() {
 }
 
 void RTCDTMFSender::Trace(Visitor* visitor) const {
-  EventTargetWithInlineData::Trace(visitor);
+  EventTarget::Trace(visitor);
   RtcDtmfSenderHandler::Client::Trace(visitor);
   ExecutionContextLifecycleObserver::Trace(visitor);
 }

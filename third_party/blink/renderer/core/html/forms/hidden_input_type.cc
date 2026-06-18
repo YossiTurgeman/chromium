@@ -32,6 +32,8 @@
 #include "third_party/blink/renderer/core/html/forms/hidden_input_type.h"
 
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/dom/element.h"
+#include "third_party/blink/renderer/core/dom/events/simulated_click_options.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/forms/form_controller.h"
 #include "third_party/blink/renderer/core/html/forms/form_data.h"
@@ -55,10 +57,6 @@ InputTypeView* HiddenInputType::CreateView() {
   return this;
 }
 
-const AtomicString& HiddenInputType::FormControlType() const {
-  return input_type_names::kHidden;
-}
-
 bool HiddenInputType::ShouldSaveAndRestoreFormControlState() const {
   return false;
 }
@@ -67,13 +65,11 @@ bool HiddenInputType::SupportsValidation() const {
   return false;
 }
 
-LayoutObject* HiddenInputType::CreateLayoutObject(const ComputedStyle&,
-                                                  LegacyLayout) const {
+LayoutObject* HiddenInputType::CreateLayoutObject(const ComputedStyle&) const {
   NOTREACHED();
-  return nullptr;
 }
 
-void HiddenInputType::AccessKeyAction(bool) {}
+void HiddenInputType::AccessKeyAction(SimulatedClickCreationScope) {}
 
 bool HiddenInputType::LayoutObjectIsNeeded() {
   return false;
@@ -92,9 +88,9 @@ void HiddenInputType::SetValue(const String& sanitized_value,
 }
 
 void HiddenInputType::AppendToFormData(FormData& form_data) const {
-  if (EqualIgnoringASCIICase(GetElement().GetName(), "_charset_")) {
+  if (EqualIgnoringAsciiCase(GetElement().GetName(), "_charset_")) {
     form_data.AppendFromElement(GetElement().GetName(),
-                                String(form_data.Encoding().GetName()));
+                                form_data.Encoding().GetName());
     return;
   }
   InputType::AppendToFormData(form_data);
@@ -102,6 +98,20 @@ void HiddenInputType::AppendToFormData(FormData& form_data) const {
 
 bool HiddenInputType::ShouldRespectHeightAndWidthAttributes() {
   return true;
+}
+
+bool HiddenInputType::IsAutoDirectionalityFormAssociated() const {
+  return true;
+}
+
+void HiddenInputType::ValueAttributeChanged() {
+  UpdateView();
+  // Hidden input need to adjust directionality explicitly since it has no
+  // descendant to propagate dir from.
+  if (GetElement().HasDirectionAuto()) {
+    GetElement().UpdateAncestorWithDirAuto(
+        Element::UpdateAncestorTraversal::IncludeSelf);
+  }
 }
 
 }  // namespace blink

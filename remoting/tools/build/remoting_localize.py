@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2013 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -36,6 +36,12 @@ from optparse import OptionParser
 import os
 import sys
 from string import Template
+
+# Put third_party in the path so we can import jinja2.
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', '..', '..',
+                                'third_party'))
+import jinja2
+import jinja2.ext
 
 
 # Win32 primary languages IDs.
@@ -418,7 +424,6 @@ _LANGUAGE_MAP = {
   'neutral' : [ 1200, 'LANG_NEUTRAL', 'SUBLANG_NEUTRAL' ],
   # LANG_USER_DEFAULT LCID, unicode(1200) code page.
   'userdefault' : [ 1200, 'LANG_NEUTRAL', 'SUBLANG_DEFAULT' ],
-  'fake-bidi' : [ 1255, 'LANG_HEBREW', 'SUBLANG_NEUTRAL' ],
   'af' : [ 1252, 'LANG_AFRIKAANS', 'SUBLANG_DEFAULT' ],
   'am' : [ 1200, 'LANG_AMHARIC', 'SUBLANG_DEFAULT' ],
   'ar' : [ 1256, 'LANG_ARABIC', 'SUBLANG_DEFAULT' ],
@@ -586,7 +591,7 @@ def ReadMessagesFromFile(file_name):
 
   values = {}
   for key in messages.keys():
-    values[key] = unicode(messages[key]['message']);
+    values[key] = messages[key]['message'];
   return values
 
 
@@ -673,6 +678,11 @@ def Localize(source, locales, options):
     for define in options.define:
       context.update(dict([define.split('=', 1)]));
 
+  if options.define_list:
+    for define_list in options.define_list:
+      kv = define_list.split('=', 1)
+      context.update(dict([[kv[0], kv[1].split(',')]]))
+
   # Read NAME=VALUE variables from file.
   if options.variables:
     for file_name in options.variables:
@@ -682,20 +692,10 @@ def Localize(source, locales, options):
   template = None
 
   if source:
-    # Load jinja2 library.
-    if options.jinja2:
-      jinja2_path = os.path.normpath(options.jinja2)
-    else:
-      jinja2_path = os.path.normpath(
-          os.path.join(os.path.abspath(__file__),
-                       '../../../../third_party/jinja2'))
-    sys.path.append(os.path.split(jinja2_path)[0])
-    from jinja2 import Environment, FileSystemLoader
-
     # Create jinja2 environment.
     (template_path, template_name) = os.path.split(source)
-    env = Environment(loader=FileSystemLoader(template_path),
-                      extensions=['jinja2.ext.do', 'jinja2.ext.i18n'])
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(template_path),
+                             extensions=['jinja2.ext.do', 'jinja2.ext.i18n'])
 
     # Register custom filters.
     env.filters['GetCodepage'] = GetCodepage
@@ -752,6 +752,10 @@ def DoMain(argv):
   parser.add_option(
       '-d', '--define', dest='define', action='append', type='string',
       help='define a variable (NAME=VALUE).')
+  parser.add_option(
+      '--define_list', dest='define_list', action='append', type='string',
+      help='define a list variable, with list items separated by commas '
+           '(NAME=VALUE1,VALUE2,...).')
   parser.add_option(
       '--encoding', dest='encoding', type='string', default='utf-8',
       help="set the encoding of <output>. 'utf-8' is the default.")

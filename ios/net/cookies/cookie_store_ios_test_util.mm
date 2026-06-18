@@ -1,27 +1,23 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ios/net/cookies/cookie_store_ios_test_util.h"
+#import "ios/net/cookies/cookie_store_ios_test_util.h"
 
 #import <Foundation/Foundation.h>
 
-#include <memory>
+#import <memory>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/optional.h"
-#include "base/run_loop.h"
-#include "base/test/test_simple_task_runner.h"
-#include "base/threading/thread_task_runner_handle.h"
+#import "base/functional/bind.h"
+#import "base/functional/callback_helpers.h"
+#import "base/run_loop.h"
+#import "base/task/sequenced_task_runner.h"
+#import "base/task/single_thread_task_runner.h"
+#import "base/test/test_simple_task_runner.h"
 #import "ios/net/cookies/cookie_store_ios.h"
-#include "net/cookies/canonical_cookie.h"
-#include "net/cookies/cookie_options.h"
-#include "testing/gtest/include/gtest/gtest.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "net/cookies/canonical_cookie.h"
+#import "net/cookies/cookie_options.h"
+#import "testing/gtest/include/gtest/gtest.h"
 
 namespace net {
 
@@ -39,19 +35,22 @@ TestPersistentCookieStore::~TestPersistentCookieStore() = default;
 void TestPersistentCookieStore::RunLoadedCallback() {
   std::vector<std::unique_ptr<net::CanonicalCookie>> cookies;
   std::unique_ptr<net::CanonicalCookie> cookie(
-      net::CanonicalCookie::Create(kTestCookieURL, "a=b", base::Time::Now(),
-                                   base::nullopt /* server_time */));
+      net::CanonicalCookie::CreateForTesting(kTestCookieURL, "a=b",
+                                             base::Time::Now(),
+                                             net::CookieSourceType::kOther));
   cookies.push_back(std::move(cookie));
 
-  std::unique_ptr<net::CanonicalCookie> bad_canonical_cookie(
-      std::make_unique<net::CanonicalCookie>(
+  std::unique_ptr<net::CanonicalCookie> bad_canonical_cookie =
+      net::CanonicalCookie::CreateUnsafeCookieForTesting(
           "name", "\x81r\xe4\xbd\xa0\xe5\xa5\xbd", "domain", "/path/",
           base::Time(),  // creation
           base::Time(),  // expires
           base::Time(),  // last accessed
+          base::Time(),  // last updated
           false,         // secure
           false,         // httponly
-          net::CookieSameSite::NO_RESTRICTION, net::COOKIE_PRIORITY_DEFAULT));
+          net::CookieSameSite::NO_RESTRICTION, net::COOKIE_PRIORITY_DEFAULT,
+          net::CookieSourceType::kOther);
   cookies.push_back(std::move(bad_canonical_cookie));
   std::move(loaded_callback_).Run(std::move(cookies));
 }
@@ -100,7 +99,7 @@ TestCookieStoreIOSClient::TestCookieStoreIOSClient() {}
 
 scoped_refptr<base::SequencedTaskRunner>
 TestCookieStoreIOSClient::GetTaskRunner() const {
-  return base::ThreadTaskRunnerHandle::Get();
+  return base::SingleThreadTaskRunner::GetCurrentDefault();
 }
 
 #pragma mark -
@@ -124,8 +123,9 @@ void RecordCookieChanges(std::vector<net::CanonicalCookie>* out_cookies,
                          const net::CookieChangeInfo& change) {
   DCHECK(out_cookies);
   out_cookies->push_back(change.cookie);
-  if (out_removes)
+  if (out_removes) {
     out_removes->push_back(net::CookieChangeCauseIsDeletion(change.cause));
+  }
 }
 
 void SetCookie(const std::string& cookie_line,
@@ -133,11 +133,12 @@ void SetCookie(const std::string& cookie_line,
                net::CookieStore* store) {
   net::CookieOptions options;
   options.set_include_httponly();
-  auto canonical_cookie = net::CanonicalCookie::Create(
-      url, cookie_line, base::Time::Now(), base::nullopt /* server_time */);
+  auto canonical_cookie = net::CanonicalCookie::CreateForTesting(
+      url, cookie_line, base::Time::Now(), net::CookieSourceType::kOther);
   ASSERT_TRUE(canonical_cookie);
   store->SetCanonicalCookieAsync(std::move(canonical_cookie), url, options,
-                                 base::DoNothing());
+                                 base::DoNothing(),
+                                 /*cookie_access_result=*/std::nullopt);
   net::CookieStoreIOS::NotifySystemCookiesChanged();
   // Wait until the flush is posted.
   base::RunLoop().RunUntilIdle();
@@ -147,8 +148,9 @@ void ClearCookies() {
   NSHTTPCookieStorage* store = [NSHTTPCookieStorage sharedHTTPCookieStorage];
   [store setCookieAcceptPolicy:NSHTTPCookieAcceptPolicyAlways];
   NSArray* cookies = [store cookies];
-  for (NSHTTPCookie* cookie in cookies)
+  for (NSHTTPCookie* cookie in cookies) {
     [store deleteCookie:cookie];
+  }
   EXPECT_EQ(0u, [[store cookies] count]);
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,8 +35,7 @@ MTPFileStreamReader::MTPFileStreamReader(
       expected_modification_time_(expected_modification_time),
       media_header_validated_(!do_media_header_validation) {}
 
-MTPFileStreamReader::~MTPFileStreamReader() {
-}
+MTPFileStreamReader::~MTPFileStreamReader() = default;
 
 int MTPFileStreamReader::Read(net::IOBuffer* buf,
                               int buf_len,
@@ -60,27 +59,27 @@ int MTPFileStreamReader::Read(net::IOBuffer* buf,
       header_buf_len = buf_len;
     } else {
       // Otherwise, make a special request for the header.
-      header_buf = base::MakeRefCounted<net::IOBuffer>(net::kMaxBytesToSniff);
+      header_buf =
+          base::MakeRefCounted<net::IOBufferWithSize>(net::kMaxBytesToSniff);
       header_buf_len = net::kMaxBytesToSniff;
     }
 
-    ReadBytes(
-        url_, header_buf.get(), 0, header_buf_len,
-        base::Bind(&MTPFileStreamReader::FinishValidateMediaHeader,
-                   weak_factory_.GetWeakPtr(), base::RetainedRef(header_buf),
-                   base::RetainedRef(buf), buf_len));
+    ReadBytes(url_, header_buf.get(), 0, header_buf_len,
+              base::BindOnce(&MTPFileStreamReader::FinishValidateMediaHeader,
+                             weak_factory_.GetWeakPtr(),
+                             base::RetainedRef(header_buf),
+                             base::RetainedRef(buf), buf_len));
     return net::ERR_IO_PENDING;
   }
 
-  ReadBytes(
-      url_, buf, current_offset_, buf_len,
-      base::Bind(&MTPFileStreamReader::FinishRead, weak_factory_.GetWeakPtr()));
+  ReadBytes(url_, buf, current_offset_, buf_len,
+            base::BindOnce(&MTPFileStreamReader::FinishRead,
+                           weak_factory_.GetWeakPtr()));
 
   return net::ERR_IO_PENDING;
 }
 
-int64_t MTPFileStreamReader::GetLength(
-    net::Int64CompletionOnceCallback callback) {
+int64_t MTPFileStreamReader::GetLength(GetLengthCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
 
   MTPDeviceAsyncDelegate* delegate =
@@ -91,9 +90,9 @@ int64_t MTPFileStreamReader::GetLength(
   get_length_callback_ = std::move(callback);
   delegate->GetFileInfo(
       url_.path(),
-      base::Bind(&MTPFileStreamReader::FinishGetLength,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(
+      base::BindOnce(&MTPFileStreamReader::FinishGetLength,
+                     weak_factory_.GetWeakPtr()),
+      base::BindRepeating(
           &MTPFileStreamReader::CallGetLengthCallbackWithPlatformFileError,
           weak_factory_.GetWeakPtr()));
 
@@ -123,9 +122,9 @@ void MTPFileStreamReader::FinishValidateMediaHeader(
 
   // Header buffer isn't the same as the original read buffer. Make a separate
   // request for that.
-  ReadBytes(
-      url_, buf, current_offset_, buf_len,
-      base::Bind(&MTPFileStreamReader::FinishRead, weak_factory_.GetWeakPtr()));
+  ReadBytes(url_, buf, current_offset_, buf_len,
+            base::BindOnce(&MTPFileStreamReader::FinishRead,
+                           weak_factory_.GetWeakPtr()));
 }
 
 void MTPFileStreamReader::FinishRead(const base::File::Info& file_info,
@@ -147,7 +146,8 @@ void MTPFileStreamReader::FinishGetLength(
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
 
   if (!VerifySnapshotTime(expected_modification_time_, file_info)) {
-    std::move(get_length_callback_).Run(net::ERR_UPLOAD_FILE_CHANGED);
+    std::move(get_length_callback_)
+        .Run(base::unexpected(net::ERR_UPLOAD_FILE_CHANGED));
     return;
   }
 
@@ -161,7 +161,8 @@ void MTPFileStreamReader::CallReadCallbackwithPlatformFileError(
 
 void MTPFileStreamReader::CallGetLengthCallbackWithPlatformFileError(
     base::File::Error file_error) {
-  std::move(get_length_callback_).Run(net::FileErrorToNetError(file_error));
+  std::move(get_length_callback_)
+      .Run(base::unexpected(net::FileErrorToNetError(file_error)));
 }
 
 void MTPFileStreamReader::ReadBytes(
@@ -169,7 +170,7 @@ void MTPFileStreamReader::ReadBytes(
     const scoped_refptr<net::IOBuffer>& buf,
     int64_t offset,
     int buf_len,
-    const MTPDeviceAsyncDelegate::ReadBytesSuccessCallback& success_callback) {
+    MTPDeviceAsyncDelegate::ReadBytesSuccessCallback success_callback) {
   MTPDeviceAsyncDelegate* delegate =
       MTPDeviceMapService::GetInstance()->GetMTPDeviceAsyncDelegate(url);
   if (!delegate) {
@@ -178,7 +179,8 @@ void MTPFileStreamReader::ReadBytes(
   }
 
   delegate->ReadBytes(
-      url.path(), buf, offset, buf_len, success_callback,
-      base::Bind(&MTPFileStreamReader::CallReadCallbackwithPlatformFileError,
-                 weak_factory_.GetWeakPtr()));
+      url.path(), buf, offset, buf_len, std::move(success_callback),
+      base::BindRepeating(
+          &MTPFileStreamReader::CallReadCallbackwithPlatformFileError,
+          weak_factory_.GetWeakPtr()));
 }

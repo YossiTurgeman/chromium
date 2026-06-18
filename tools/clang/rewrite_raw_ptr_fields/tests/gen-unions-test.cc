@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,7 +28,9 @@ class MyClass {
 
 union MyUnion1 {
   SomeClass* some_class_ptr;
-  const char* char_ptr;
+  char* char_ptr;
+  // TODO(crbug.com/40245402) |const char| pointer fields are not supported yet.
+  const char* const_char_ptr;
 };
 
 union MyUnion2 {
@@ -39,6 +41,15 @@ union MyUnion2 {
 union MyUnion3 {
   SomeClass* some_class_ptr;
   SomeClass* some_class_ptr2;
+};
+
+struct MyNestedStruct {
+  SomeClass* ptr_field;
+};
+
+union MyUnion4 {
+  MyNestedStruct nested_struct;
+  uintptr_t uintptr;
 };
 
 }  // namespace my_namespace

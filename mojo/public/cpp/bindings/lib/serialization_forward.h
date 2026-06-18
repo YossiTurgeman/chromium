@@ -1,14 +1,18 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MOJO_PUBLIC_CPP_BINDINGS_LIB_SERIALIZATION_FORWARD_H_
 #define MOJO_PUBLIC_CPP_BINDINGS_LIB_SERIALIZATION_FORWARD_H_
 
-#include "base/optional.h"
+#include <optional>
+#include <type_traits>
+
 #include "mojo/public/cpp/bindings/array_traits.h"
 #include "mojo/public/cpp/bindings/enum_traits.h"
 #include "mojo/public/cpp/bindings/lib/buffer.h"
+#include "mojo/public/cpp/bindings/lib/default_construct_tag_internal.h"
+#include "mojo/public/cpp/bindings/lib/message_fragment.h"
 #include "mojo/public/cpp/bindings/lib/template_util.h"
 #include "mojo/public/cpp/bindings/map_traits.h"
 #include "mojo/public/cpp/bindings/string_traits.h"
@@ -26,66 +30,49 @@ namespace internal {
 template <typename MojomType, typename MaybeConstUserType>
 struct Serializer;
 
-template <typename T>
-struct IsOptionalWrapper {
-  static const bool value = IsSpecializationOf<
-      base::Optional,
-      typename std::remove_const<
-          typename std::remove_reference<T>::type>::type>::value;
-};
-
-template <typename MojomType,
-          typename InputUserType,
-          typename... Args,
-          typename std::enable_if<
-              !IsOptionalWrapper<InputUserType>::value>::type* = nullptr>
+template <typename MojomType, typename InputUserType, typename... Args>
 void Serialize(InputUserType&& input, Args&&... args) {
-  Serializer<MojomType, typename std::remove_reference<InputUserType>::type>::
-      Serialize(std::forward<InputUserType>(input),
-                std::forward<Args>(args)...);
-}
-
-template <typename MojomType,
-          typename DataType,
-          typename InputUserType,
-          typename... Args,
-          typename std::enable_if<
-              !IsOptionalWrapper<InputUserType>::value>::type* = nullptr>
-bool Deserialize(DataType&& input, InputUserType* output, Args&&... args) {
-  return Serializer<MojomType, InputUserType>::Deserialize(
-      std::forward<DataType>(input), output, std::forward<Args>(args)...);
-}
-
-template <typename MojomType,
-          typename InputUserType,
-          typename BufferWriterType,
-          typename... Args,
-          typename std::enable_if<
-              IsOptionalWrapper<InputUserType>::value>::type* = nullptr>
-void Serialize(InputUserType&& input,
-               Buffer* buffer,
-               BufferWriterType* writer,
-               Args&&... args) {
-  if (!input)
-    return;
-  Serialize<MojomType>(*input, buffer, writer, std::forward<Args>(args)...);
-}
-
-template <typename MojomType,
-          typename DataType,
-          typename InputUserType,
-          typename... Args,
-          typename std::enable_if<
-              IsOptionalWrapper<InputUserType>::value>::type* = nullptr>
-bool Deserialize(DataType&& input, InputUserType* output, Args&&... args) {
-  if (!input) {
-    *output = base::nullopt;
-    return true;
+  if constexpr (IsStdOptional<InputUserType>::value) {
+    if (!input) {
+      return;
+    }
+    Serialize<MojomType>(*input, std::forward<Args>(args)...);
+  } else if constexpr (IsOptionalAsPointer<InputUserType>::value) {
+    if (!input.has_value()) {
+      return;
+    }
+    Serialize<MojomType>(input.value(), std::forward<Args>(args)...);
+  } else {
+    Serializer<MojomType, std::remove_reference_t<InputUserType>>::Serialize(
+        std::forward<InputUserType>(input), std::forward<Args>(args)...);
   }
-  if (!*output)
-    output->emplace();
-  return Deserialize<MojomType>(std::forward<DataType>(input), &output->value(),
-                                std::forward<Args>(args)...);
+}
+
+template <typename MojomType,
+          typename DataType,
+          typename InputUserType,
+          typename... Args>
+bool Deserialize(DataType&& input, InputUserType* output, Args&&... args) {
+  if constexpr (IsStdOptional<InputUserType>::value) {
+    if (!input) {
+      *output = std::nullopt;
+      return true;
+    }
+    if (!*output) {
+      if constexpr (std::is_constructible_v<typename InputUserType::value_type,
+                                            ::mojo::DefaultConstruct::Tag>) {
+        output->emplace(mojo::internal::DefaultConstructTag());
+      } else {
+        output->emplace(typename InputUserType::value_type());
+      }
+    }
+    return Deserialize<MojomType>(std::forward<DataType>(input),
+                                  &output->value(),
+                                  std::forward<Args>(args)...);
+  } else {
+    return Serializer<MojomType, InputUserType>::Deserialize(
+        std::forward<DataType>(input), output, std::forward<Args>(args)...);
+  }
 }
 
 }  // namespace internal

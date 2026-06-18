@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,22 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/files/file_path.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/test/scoped_feature_list.h"
 #include "components/download/content/factory/download_service_factory_helper.h"
+#include "components/download/public/background_service/background_download_service.h"
 #include "components/download/public/background_service/blob_context_getter_factory.h"
 #include "components/download/public/background_service/clients.h"
 #include "components/download/public/background_service/download_metadata.h"
 #include "components/download/public/background_service/download_params.h"
-#include "components/download/public/background_service/download_service.h"
 #include "components/download/public/background_service/features.h"
+#include "components/download/public/background_service/url_loader_factory_getter.h"
 #include "components/keyed_service/core/simple_factory_key.h"
 #include "components/keyed_service/core/simple_key_map.h"
 #include "content/public/browser/background_fetch_description.h"
@@ -33,6 +36,7 @@
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/cpp/resource_request_body.h"
+#include "third_party/blink/public/mojom/blob/blob.mojom.h"
 #include "ui/gfx/geometry/size.h"
 
 namespace content {
@@ -42,19 +46,46 @@ class TestBlobContextGetterFactory : public download::BlobContextGetterFactory {
  public:
   TestBlobContextGetterFactory(content::BrowserContext* browser_context)
       : browser_context_(browser_context) {}
+
+  TestBlobContextGetterFactory(const TestBlobContextGetterFactory&) = delete;
+  TestBlobContextGetterFactory& operator=(const TestBlobContextGetterFactory&) =
+      delete;
+
   ~TestBlobContextGetterFactory() override = default;
 
  private:
   // download::BlobContextGetterFactory implementation.
   void RetrieveBlobContextGetter(
       download::BlobContextGetterCallback callback) override {
-    auto blob_context_getter =
-        content::BrowserContext::GetBlobStorageContext(browser_context_);
+    auto blob_context_getter = browser_context_->GetBlobStorageContext();
     std::move(callback).Run(blob_context_getter);
   }
 
-  content::BrowserContext* browser_context_;
-  DISALLOW_COPY_AND_ASSIGN(TestBlobContextGetterFactory);
+  raw_ptr<content::BrowserContext> browser_context_;
+};
+
+// Provides URLLoaderFactory from a BrowserContext.
+class TestURLLoaderFactoryGetter : public download::URLLoaderFactoryGetter {
+ public:
+  TestURLLoaderFactoryGetter(content::BrowserContext* browser_context)
+      : browser_context_(browser_context) {}
+
+  TestURLLoaderFactoryGetter(const TestURLLoaderFactoryGetter&) = delete;
+  TestURLLoaderFactoryGetter& operator=(const TestURLLoaderFactoryGetter&) =
+      delete;
+
+  ~TestURLLoaderFactoryGetter() override = default;
+
+ private:
+  // download::URLLoaderFactoryGetter implementation.
+  void RetrieveURLLoaderFactory(
+      download::URLLoaderFactoryGetterCallback callback) override {
+    auto url_loader_factory = browser_context_->GetDefaultStoragePartition()
+                                  ->GetURLLoaderFactoryForBrowserProcess();
+    std::move(callback).Run(url_loader_factory);
+  }
+
+  raw_ptr<content::BrowserContext> browser_context_;
 };
 
 // Implementation of a Download Service client that will be servicing
@@ -65,6 +96,11 @@ class WebTestBackgroundFetchDelegate::WebTestBackgroundFetchDownloadClient
   explicit WebTestBackgroundFetchDownloadClient(
       base::WeakPtr<content::BackgroundFetchDelegate::Client> client)
       : client_(std::move(client)) {}
+
+  WebTestBackgroundFetchDownloadClient(
+      const WebTestBackgroundFetchDownloadClient&) = delete;
+  WebTestBackgroundFetchDownloadClient& operator=(
+      const WebTestBackgroundFetchDownloadClient&) = delete;
 
   ~WebTestBackgroundFetchDownloadClient() override = default;
 
@@ -141,7 +177,6 @@ class WebTestBackgroundFetchDelegate::WebTestBackgroundFetchDownloadClient
         return;
       default:
         NOTREACHED();
-        return;
     }
 
     std::unique_ptr<BackgroundFetchResult> result =
@@ -188,7 +223,7 @@ class WebTestBackgroundFetchDelegate::WebTestBackgroundFetchDownloadClient
   void GetUploadData(const std::string& guid,
                      download::GetUploadDataCallback callback) override {
     if (!guid_to_request_body_mapping_[guid]) {
-      base::SequencedTaskRunnerHandle::Get()->PostTask(
+      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
           FROM_HERE, base::BindOnce(std::move(callback), nullptr));
       return;
     }
@@ -225,8 +260,6 @@ class WebTestBackgroundFetchDelegate::WebTestBackgroundFetchDownloadClient
 
   base::WeakPtrFactory<WebTestBackgroundFetchDownloadClient> weak_ptr_factory_{
       this};
-
-  DISALLOW_COPY_AND_ASSIGN(WebTestBackgroundFetchDownloadClient);
 };
 
 WebTestBackgroundFetchDelegate::WebTestBackgroundFetchDelegate(
@@ -239,14 +272,6 @@ void WebTestBackgroundFetchDelegate::GetIconDisplaySize(
     GetIconDisplaySizeCallback callback) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   std::move(callback).Run(gfx::Size(192, 192));
-}
-
-void WebTestBackgroundFetchDelegate::GetPermissionForOrigin(
-    const url::Origin& origin,
-    const WebContents::Getter& wc_getter,
-    GetPermissionForOriginCallback callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  std::move(callback).Run(BackgroundFetchPermission::ALLOWED);
 }
 
 void WebTestBackgroundFetchDelegate::CreateDownloadJob(
@@ -273,17 +298,14 @@ void WebTestBackgroundFetchDelegate::CreateDownloadJob(
       base::test::ScopedFeatureList download_service_configuration;
       download_service_configuration.InitAndEnableFeatureWithParameters(
           download::kDownloadServiceFeature, {{"start_up_delay_ms", "0"}});
-      auto* url_loader_factory =
-          BrowserContext::GetDefaultStoragePartition(browser_context_)
-              ->GetURLLoaderFactoryForBrowserProcess()
-              .get();
       SimpleFactoryKey* simple_key =
           SimpleKeyMap::GetInstance()->GetForBrowserContext(browser_context_);
       download_service_ = download::BuildInMemoryDownloadService(
           simple_key, std::move(clients), GetNetworkConnectionTracker(),
           base::FilePath(),
           std::make_unique<TestBlobContextGetterFactory>(browser_context_),
-          GetIOThreadTaskRunner({}), url_loader_factory);
+          GetIOThreadTaskRunner({}),
+          std::make_unique<TestURLLoaderFactoryGetter>(browser_context_));
     }
   }
 }
@@ -293,6 +315,7 @@ void WebTestBackgroundFetchDelegate::DownloadUrl(
     const std::string& download_guid,
     const std::string& method,
     const GURL& url,
+    ::network::mojom::CredentialsMode credentials_mode,
     const net::NetworkTrafficAnnotationTag& traffic_annotation,
     const net::HttpRequestHeaders& headers,
     bool has_request_body) {
@@ -310,7 +333,7 @@ void WebTestBackgroundFetchDelegate::DownloadUrl(
   params.traffic_annotation =
       net::MutableNetworkTrafficAnnotationTag(traffic_annotation);
 
-  download_service_->StartDownload(params);
+  download_service_->StartDownload(std::move(params));
 }
 
 void WebTestBackgroundFetchDelegate::Abort(const std::string& job_unique_id) {
@@ -323,8 +346,8 @@ void WebTestBackgroundFetchDelegate::MarkJobComplete(
 
 void WebTestBackgroundFetchDelegate::UpdateUI(
     const std::string& job_unique_id,
-    const base::Optional<std::string>& title,
-    const base::Optional<SkBitmap>& icon) {
+    const std::optional<std::string>& title,
+    const std::optional<SkBitmap>& icon) {
   background_fetch_client_->client()->OnUIUpdated(job_unique_id);
 }
 

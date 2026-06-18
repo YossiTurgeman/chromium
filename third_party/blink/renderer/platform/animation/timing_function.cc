@@ -1,26 +1,83 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/animation/timing_function.h"
 
+#include <algorithm>
+
 #include "base/notreached.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "ui/gfx/animation/keyframe/timing_function.h"
 
 namespace blink {
 
 String LinearTimingFunction::ToString() const {
-  return "linear";
+  if (linear_->IsTrivial()) {
+    return "linear";
+  }
+  StringBuilder builder;
+  builder.Append("linear(");
+  for (wtf_size_t i = 0; i < linear_->Points().size(); ++i) {
+    if (i != 0) {
+      builder.Append(", ");
+    }
+    builder.Append(String::NumberToStringEcmaScript(linear_->Point(i).output));
+    builder.Append(" ");
+    builder.Append(String::NumberToStringEcmaScript(linear_->Point(i).input));
+    builder.Append("%");
+  }
+  builder.Append(")");
+  return builder.ReleaseString();
 }
 
-double LinearTimingFunction::Evaluate(double fraction) const {
-  return fraction;
+double LinearTimingFunction::Evaluate(
+    double fraction,
+    TimingFunction::LimitDirection limit_direction) const {
+  return linear_->GetValue(fraction, limit_direction);
 }
 
-void LinearTimingFunction::Range(double* min_value, double* max_value) const {}
+void LinearTimingFunction::Range(double* min_value, double* max_value) const {
+  if (IsTrivial()) {
+    return;
+  }
+  //
+  //        (min_it) # *               (max_it) ^ *
+  //                 | | *                      | |
+  //  (min_value) @  | | |   (max_value) %      | |
+  //                 * | | *                    | |
+  // ________________|_|_|_|____________________|_|_
+  // @ - min_value.
+  // % - max_value.
+  // # - min_it is first of points with same input (and input >= min_value).
+  // ^ - max_it.
+  // for min_comp we want the first of points in case of input equality.
+  // (e.g. begin of range).
+  const auto min_comp = [](double value, const auto& point) {
+    return value <= point.input;
+  };
+  // for max_comp we want the last of points in case of input equality.
+  // (e.g. end of range).
+  const auto max_comp = [](double value, const auto& point) {
+    return value < point.input;
+  };
+  auto min_it = std::upper_bound(Points().cbegin(), Points().cend(),
+                                 100 * *min_value, min_comp);
+  min_it = min_it == Points().cend() ? std::prev(min_it) : min_it;
+  auto max_it = std::upper_bound(Points().cbegin(), Points().cend(),
+                                 100 * *max_value, max_comp);
+  const auto [min, max] = std::minmax_element(
+      min_it, max_it,
+      [](const auto& a, const auto& b) { return a.output < b.output; });
+  double min_val = Evaluate(*min_value);
+  double max_val = Evaluate(*max_value);
+  *min_value = std::min({min_val, max_val, min->output});
+  *max_value = std::max({min_val, max_val, max->output});
+}
 
-std::unique_ptr<cc::TimingFunction> LinearTimingFunction::CloneToCC() const {
-  return nullptr;
+std::unique_ptr<gfx::TimingFunction> LinearTimingFunction::CloneToCC() const {
+  return linear_->Clone();
 }
 
 CubicBezierTimingFunction* CubicBezierTimingFunction::Preset(
@@ -49,12 +106,11 @@ CubicBezierTimingFunction* CubicBezierTimingFunction::Preset(
       return ease_in_out;
     default:
       NOTREACHED();
-      return nullptr;
   }
 }
 
 String CubicBezierTimingFunction::ToString() const {
-  switch (this->GetEaseType()) {
+  switch (GetEaseType()) {
     case CubicBezierTimingFunction::EaseType::EASE:
       return "ease";
     case CubicBezierTimingFunction::EaseType::EASE_IN:
@@ -64,17 +120,18 @@ String CubicBezierTimingFunction::ToString() const {
     case CubicBezierTimingFunction::EaseType::EASE_IN_OUT:
       return "ease-in-out";
     case CubicBezierTimingFunction::EaseType::CUSTOM:
-      return "cubic-bezier(" + String::NumberToStringECMAScript(this->X1()) +
-             ", " + String::NumberToStringECMAScript(this->Y1()) + ", " +
-             String::NumberToStringECMAScript(this->X2()) + ", " +
-             String::NumberToStringECMAScript(this->Y2()) + ")";
+      return StrCat({"cubic-bezier(", String::NumberToStringEcmaScript(X1()),
+                     ", ", String::NumberToStringEcmaScript(Y1()), ", ",
+                     String::NumberToStringEcmaScript(X2()), ", ",
+                     String::NumberToStringEcmaScript(Y2()), ")"});
     default:
       NOTREACHED();
-      return "";
   }
 }
 
-double CubicBezierTimingFunction::Evaluate(double fraction) const {
+double CubicBezierTimingFunction::Evaluate(
+    double fraction,
+    TimingFunction::LimitDirection limit_direction) const {
   return bezier_->bezier().Solve(fraction);
 }
 
@@ -95,7 +152,7 @@ void CubicBezierTimingFunction::Range(double* min_value,
   *max_value = std::max(std::max(*max_value, solution1), solution2);
 }
 
-std::unique_ptr<cc::TimingFunction> CubicBezierTimingFunction::CloneToCC()
+std::unique_ptr<gfx::TimingFunction> CubicBezierTimingFunction::CloneToCC()
     const {
   return bezier_->Clone();
 }
@@ -130,7 +187,7 @@ String StepsTimingFunction::ToString() const {
 
   StringBuilder builder;
   builder.Append("steps(");
-  builder.Append(String::NumberToStringECMAScript(this->NumberOfSteps()));
+  builder.Append(String::NumberToStringEcmaScript(NumberOfSteps()));
   if (position_string) {
     builder.Append(", ");
     builder.Append(position_string);
@@ -146,29 +203,24 @@ void StepsTimingFunction::Range(double* min_value, double* max_value) const {
 
 double StepsTimingFunction::Evaluate(double fraction,
                                      LimitDirection limit_direction) const {
-  return steps_->GetPreciseValue(fraction, limit_direction);
+  return steps_->GetValue(fraction, limit_direction);
 }
 
-double StepsTimingFunction::Evaluate(double fraction) const {
-  NOTREACHED() << "Use Evaluate(fraction, limit_direction) instead.";
-  return steps_->GetPreciseValue(fraction, LimitDirection::RIGHT);
-}
-
-std::unique_ptr<cc::TimingFunction> StepsTimingFunction::CloneToCC() const {
+std::unique_ptr<gfx::TimingFunction> StepsTimingFunction::CloneToCC() const {
   return steps_->Clone();
 }
 
 scoped_refptr<TimingFunction> CreateCompositorTimingFunctionFromCC(
-    const cc::TimingFunction* timing_function) {
+    const gfx::TimingFunction* timing_function) {
   if (!timing_function)
     return LinearTimingFunction::Shared();
 
   switch (timing_function->GetType()) {
-    case cc::TimingFunction::Type::CUBIC_BEZIER: {
+    case gfx::TimingFunction::Type::CUBIC_BEZIER: {
       auto* cubic_timing_function =
-          static_cast<const cc::CubicBezierTimingFunction*>(timing_function);
+          static_cast<const gfx::CubicBezierTimingFunction*>(timing_function);
       if (cubic_timing_function->ease_type() !=
-          cc::CubicBezierTimingFunction::EaseType::CUSTOM)
+          gfx::CubicBezierTimingFunction::EaseType::CUSTOM)
         return CubicBezierTimingFunction::Preset(
             cubic_timing_function->ease_type());
 
@@ -177,23 +229,34 @@ scoped_refptr<TimingFunction> CreateCompositorTimingFunctionFromCC(
                                                bezier.GetX2(), bezier.GetY2());
     }
 
-    case cc::TimingFunction::Type::STEPS: {
+    case gfx::TimingFunction::Type::STEPS: {
       auto* steps_timing_function =
-          static_cast<const cc::StepsTimingFunction*>(timing_function);
+          static_cast<const gfx::StepsTimingFunction*>(timing_function);
       return StepsTimingFunction::Create(
           steps_timing_function->steps(),
           steps_timing_function->step_position());
     }
 
+    case gfx::TimingFunction::Type::LINEAR: {
+      auto* linear_timing_function =
+          static_cast<const gfx::LinearTimingFunction*>(timing_function);
+      if (linear_timing_function->IsTrivial()) {
+        return LinearTimingFunction::Shared();
+      }
+      return LinearTimingFunction::Create(linear_timing_function->Points());
+    }
+
     default:
       NOTREACHED();
-      return nullptr;
   }
 }
 
 // Equals operators
 bool operator==(const LinearTimingFunction& lhs, const TimingFunction& rhs) {
-  return rhs.GetType() == TimingFunction::Type::LINEAR;
+  if (auto* rhs_func = DynamicTo<LinearTimingFunction>(rhs)) {
+    return lhs == *rhs_func;
+  }
+  return false;
 }
 
 bool operator==(const CubicBezierTimingFunction& lhs,
@@ -238,12 +301,6 @@ bool operator==(const TimingFunction& lhs, const TimingFunction& rhs) {
     default:
       NOTREACHED();
   }
-  return false;
-}
-
-// No need to define specific operator!= as they can all come via this function.
-bool operator!=(const TimingFunction& lhs, const TimingFunction& rhs) {
-  return !(lhs == rhs);
 }
 
 }  // namespace blink

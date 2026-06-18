@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,8 +17,7 @@ namespace {
 void SetWindowBoundsInScreen(aura::Window* window,
                              const gfx::Rect& bounds_in_screen) {
   window->SetBoundsInScreen(
-      bounds_in_screen,
-      display::Screen::GetScreen()->GetDisplayNearestView(window));
+      bounds_in_screen, display::Screen::Get()->GetDisplayNearestView(window));
 }
 
 // Moves the window to ensure caret not in rect.
@@ -32,12 +31,9 @@ void MoveWindowToEnsureCaretNotInRect(aura::Window* window,
   }
 
   // Calculate vertical window shift.
-  const int top_y =
-      std::max(rect_in_screen.y() - original_window_bounds.height(),
-               display::Screen::GetScreen()
-                   ->GetDisplayNearestView(window)
-                   .work_area()
-                   .y());
+  const int top_y = std::max(
+      rect_in_screen.y() - original_window_bounds.height(),
+      display::Screen::Get()->GetDisplayNearestView(window).work_area().y());
 
   // No need to move the window up.
   if (top_y >= original_window_bounds.y())
@@ -45,7 +41,7 @@ void MoveWindowToEnsureCaretNotInRect(aura::Window* window,
 
   // Set restore bounds and move the window.
   window->SetProperty(kVirtualKeyboardRestoreBoundsKey,
-                      new gfx::Rect(original_window_bounds));
+                      std::make_unique<gfx::Rect>(original_window_bounds));
 
   gfx::Rect new_bounds_in_screen = original_window_bounds;
   new_bounds_in_screen.set_y(top_y);
@@ -54,14 +50,9 @@ void MoveWindowToEnsureCaretNotInRect(aura::Window* window,
 
 }  // namespace
 
-DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(gfx::Rect,
-                                   kVirtualKeyboardRestoreBoundsKey,
-                                   nullptr)
+DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(gfx::Rect, kVirtualKeyboardRestoreBoundsKey)
 
 void RestoreWindowBoundsOnClientFocusLost(aura::Window* window) {
-  window->GetRootWindow()->ClearProperty(
-      aura::client::kEmbeddedWindowEnsureNotInRect);
-
   // Get restore bounds of the window
   gfx::Rect* vk_restore_bounds =
       window->GetProperty(kVirtualKeyboardRestoreBoundsKey);
@@ -95,39 +86,6 @@ void EnsureWindowNotInRect(aura::Window* window,
   }
 
   MoveWindowToEnsureCaretNotInRect(window, rect_in_screen);
-}
-
-EnsureWindowNotInRectHelper::EnsureWindowNotInRectHelper(
-    aura::Window* embedding_root)
-    : embedding_root_(embedding_root) {
-  embedding_root_->AddObserver(this);
-}
-
-EnsureWindowNotInRectHelper::~EnsureWindowNotInRectHelper() {
-  if (embedding_root_)
-    embedding_root_->RemoveObserver(this);
-}
-
-void EnsureWindowNotInRectHelper::OnWindowPropertyChanged(aura::Window* window,
-                                                          const void* key,
-                                                          intptr_t old) {
-  DCHECK_EQ(embedding_root_, window);
-
-  if (key != aura::client::kEmbeddedWindowEnsureNotInRect)
-    return;
-
-  aura::Window* top_level = embedding_root_->GetToplevelWindow();
-  gfx::Rect* rect_in_screen = embedding_root_->GetProperty(
-      aura::client::kEmbeddedWindowEnsureNotInRect);
-  if (rect_in_screen)
-    EnsureWindowNotInRect(top_level, *rect_in_screen);
-  else
-    RestoreWindowBoundsOnClientFocusLost(top_level);
-}
-
-void EnsureWindowNotInRectHelper::OnWindowDestroyed(aura::Window* window) {
-  DCHECK_EQ(embedding_root_, window);
-  embedding_root_ = nullptr;
 }
 
 }  // namespace wm

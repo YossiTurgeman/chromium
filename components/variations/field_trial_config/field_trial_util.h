@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -37,16 +37,16 @@ bool AssociateParamsFromString(const std::string& variations_string);
 // with default field trials with |feature_list|.
 void AssociateParamsFromFieldTrialConfig(
     const FieldTrialTestingConfig& config,
-    const VariationsSeedProcessor::UIStringOverrideCallback& callback,
     Study::Platform platform,
+    Study::FormFactor current_form_factor,
     base::FeatureList* feature_list);
 
 // Associates params and features to FieldTrial groups and forces the selection
 // of groups specified in testing/variations/fieldtrial_testing_config.json.
 // Registers features associated with default field trials with |feature_list|.
 void AssociateDefaultFieldTrialConfig(
-    const VariationsSeedProcessor::UIStringOverrideCallback& callback,
     Study::Platform platform,
+    Study::FormFactor current_form_factor,
     base::FeatureList* feature_list);
 
 }  // namespace variations

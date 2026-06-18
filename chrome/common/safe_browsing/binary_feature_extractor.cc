@@ -1,35 +1,69 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/common/safe_browsing/binary_feature_extractor.h"
 
+#include "build/build_config.h"
+
 #include <memory>
 #include <utility>
 
+#include "base/containers/heap_array.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/files/memory_mapped_file.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
-#include "crypto/secure_hash.h"
-#include "crypto/sha2.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/strings/string_view_util.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
+#include "crypto/hash.h"
 
 namespace safe_browsing {
 
-BinaryFeatureExtractor::BinaryFeatureExtractor() {}
+BinaryFeatureExtractor::BinaryFeatureExtractor() = default;
 
-BinaryFeatureExtractor::~BinaryFeatureExtractor() {}
+BinaryFeatureExtractor::~BinaryFeatureExtractor() = default;
 
 bool BinaryFeatureExtractor::ExtractImageFeatures(
     const base::FilePath& file_path,
     ExtractHeadersOption options,
     ClientDownloadRequest_ImageHeaders* image_headers,
     google::protobuf::RepeatedPtrField<std::string>* signed_data) {
-  base::MemoryMappedFile mapped_file;
-  if (!mapped_file.Initialize(file_path))
+  base::FilePath temp_dir;
+  if (!base::GetTempDir(&temp_dir)) {
     return false;
-  return ExtractImageFeaturesFromData(mapped_file.data(), mapped_file.length(),
-      options, image_headers, signed_data);
+  }
+
+  base::FilePath temp_path;
+  base::File temp_file = base::CreateAndOpenTemporaryFileInDir(
+      temp_dir, &temp_path,
+      base::File::FLAG_WIN_TEMPORARY | base::File::FLAG_DELETE_ON_CLOSE);
+  if (!temp_file.IsValid()) {
+    return false;
+  }
+
+
+
+  {
+    base::File source_file(file_path,
+                           base::File::FLAG_OPEN | base::File::FLAG_READ);
+    if (!source_file.IsValid()) {
+      return false;
+    }
+
+    if (!base::CopyFileContents(source_file, temp_file)) {
+      base::DeleteFile(temp_path);
+      return false;
+    }
+  }
+
+  base::MemoryMappedFile mapped_file;
+  if (!mapped_file.Initialize(std::move(temp_file))) {
+    return false;
+  }
+  return ExtractImageFeaturesFromData(mapped_file.bytes(), options,
+                                      image_headers, signed_data);
 }
 
 bool BinaryFeatureExtractor::ExtractImageFeaturesFromFile(
@@ -40,8 +74,8 @@ bool BinaryFeatureExtractor::ExtractImageFeaturesFromFile(
   base::MemoryMappedFile mapped_file;
   if (!mapped_file.Initialize(std::move(file)))
     return false;
-  return ExtractImageFeaturesFromData(mapped_file.data(), mapped_file.length(),
-      options, image_headers, signed_data);
+  return ExtractImageFeaturesFromData(mapped_file.bytes(), options,
+                                      image_headers, signed_data);
 }
 
 void BinaryFeatureExtractor::ExtractDigest(
@@ -49,21 +83,21 @@ void BinaryFeatureExtractor::ExtractDigest(
     ClientDownloadRequest_Digests* digests) {
   base::File file(file_path, base::File::FLAG_OPEN | base::File::FLAG_READ);
   if (file.IsValid()) {
-    const int kBufferSize = 1 << 12;
-    std::unique_ptr<char[]> buf(new char[kBufferSize]);
-    std::unique_ptr<crypto::SecureHash> ctx(
-        crypto::SecureHash::Create(crypto::SecureHash::SHA256));
-    int len = 0;
+    auto buf = base::HeapArray<uint8_t>::Uninit(1 << 12);
+    crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
+    std::optional<size_t> result;
     while (true) {
-      len = file.ReadAtCurrentPos(buf.get(), kBufferSize);
-      if (len <= 0)
+      result = file.ReadAtCurrentPos(buf);
+      if (!result.has_value() || result.value() == 0) {
         break;
-      ctx->Update(buf.get(), len);
+      }
+      hasher.Update(buf.first(*result));
     }
-    if (!len) {
-      uint8_t hash[crypto::kSHA256Length];
-      ctx->Finish(hash, sizeof(hash));
-      digests->set_sha256(hash, sizeof(hash));
+    // The loop was broken out of because of EOF, not an error.
+    if (result.has_value() && result.value() == 0) {
+      std::array<uint8_t, crypto::hash::kSha256Size> hash;
+      hasher.Finish(hash);
+      digests->set_sha256(base::as_string_view(hash));
     }
   }
 }

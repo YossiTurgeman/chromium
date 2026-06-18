@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@
 
 // We can build SSE2 optimized versions for all x86 CPUs
 // except when building for the IOS emulator.
-#if defined(ARCH_CPU_X86_FAMILY) && !defined(OS_IOS)
+#if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_IOS)
 #define SIMD_SSE2 1
 #define SIMD_PADDING 8  // 8 * int16_t
 #endif
@@ -29,6 +29,10 @@
 #if defined(ARCH_CPU_ARM_FAMILY) && \
     (defined(__ARM_NEON__) || defined(__ARM_NEON))
 #define SIMD_NEON 1
+#endif
+
+#if defined(ARCH_CPU_LOONGARCH_FAMILY) && defined(__loongarch_sx)
+#define SIMD_LSX 1
 #endif
 
 // avoid confusion with Mac OS X's math library (Carbon)

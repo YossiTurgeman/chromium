@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,125 +6,133 @@
 
 #include <stddef.h>
 
+#include "base/containers/fixed_flat_set.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
+#include "base/notreached.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
+#include "build/chromeos_buildflags.h"
 #include "chrome/common/buildflags.h"
 #include "chrome/common/extensions/extension_constants.h"
 #include "chrome/grit/browser_resources.h"
+#include "chrome/grit/component_extension_resources.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "printing/buildflags/buildflags.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/keyboard/ui/grit/keyboard_resources.h"
-#include "chrome/browser/chromeos/input_method/component_extension_ime_manager_impl.h"
+#include "chrome/browser/ash/input_method/component_extension_ime_manager_delegate_impl.h"
+#include "chromeos/constants/chromeos_features.h"
 #include "ui/file_manager/grit/file_manager_resources.h"
 #endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 bool IsComponentExtensionAllowlisted(const std::string& extension_id) {
-  const char* const kAllowed[] = {
-    extension_misc::kInAppPaymentsSupportAppId,
-    extension_misc::kCastExtensionIdRelease,
-    extension_misc::kPdfExtensionId,
-#if defined(OS_CHROMEOS)
-    extension_misc::kAssessmentAssistantExtensionId,
-    extension_misc::kAccessibilityCommonExtensionId,
-    extension_misc::kChromeVoxExtensionId,
-    extension_misc::kEspeakSpeechSynthesisExtensionId,
-    extension_misc::kGoogleSpeechSynthesisExtensionId,
-    extension_misc::kSelectToSpeakExtensionId,
-    extension_misc::kSwitchAccessExtensionId,
-    extension_misc::kZipArchiverExtensionId,
-    extension_misc::kCameraAppId,
-#endif
-  };
+  constexpr auto kAllowed = base::MakeFixedFlatSet<std::string_view>({
+      extension_misc::kContextualTasksExtensionId,
+      extension_misc::kGlicExtensionId,
+      extension_misc::kInAppPaymentsSupportAppId,
+      extension_misc::kPdfExtensionId,
+#if BUILDFLAG(IS_CHROMEOS)
+      extension_misc::kAssessmentAssistantExtensionId,
+      extension_misc::kAccessibilityCommonExtensionId,
+      extension_misc::kChromeVoxExtensionId,
+      extension_misc::kEnhancedNetworkTtsExtensionId,
+      extension_misc::kEspeakSpeechSynthesisExtensionId,
+      extension_misc::kGoogleSpeechSynthesisExtensionId,
+      extension_misc::kGuestModeTestExtensionId,
+      extension_misc::kSelectToSpeakExtensionId,
+      extension_misc::kSwitchAccessExtensionId,
+      extension_misc::kDeskApiExtensionId,
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+      extension_misc::kQuickOfficeComponentExtensionId,
+#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#endif  // BUILDFLAG(IS_CHROMEOS)
+      extension_misc::kReadingModeGDocsHelperExtensionId,
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+      extension_misc::kTTSEngineExtensionId,
+      extension_misc::kComponentUpdaterTTSEngineExtensionId,
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+#if !BUILDFLAG(IS_ANDROID)
+      extension_misc::kIndigoExtensionId,
+#endif  // !BUILDFLAG(IS_ANDROID)
+  });
 
-  for (size_t i = 0; i < base::size(kAllowed); ++i) {
-    if (extension_id == kAllowed[i])
-      return true;
-  }
-
-#if defined(OS_CHROMEOS)
-  if (chromeos::ComponentExtensionIMEManagerImpl::IsIMEExtensionID(
-          extension_id)) {
+  if (kAllowed.contains(extension_id)) {
     return true;
   }
-#endif
+
+#if BUILDFLAG(IS_CHROMEOS)
+  if (chromeos::features::IsUploadOfficeToCloudEnabled() &&
+      extension_id == extension_misc::kODFSExtensionId) {
+    return true;
+  }
+
+  if (ash::input_method::ComponentExtensionIMEManagerDelegateImpl::
+          IsIMEExtensionID(extension_id)) {
+    return true;
+  }
+#endif  // BUILDFLAG(IS_CHROMEOS)
   LOG(ERROR) << "Component extension with id " << extension_id << " not in "
              << "allowlist and is not being loaded as a result.";
-  NOTREACHED();
-  return false;
+  NOTREACHED() << "Component extension with id " << extension_id << " not in "
+               << "allowlist and is not being loaded as a result.";
 }
 
 bool IsComponentExtensionAllowlisted(int manifest_resource_id) {
   switch (manifest_resource_id) {
     // Please keep the list in alphabetical order.
-#if BUILDFLAG(ENABLE_PRINTING)
-    case IDR_CLOUDPRINT_MANIFEST:
-#endif
-    case IDR_CRYPTOTOKEN_MANIFEST:
-    case IDR_FEEDBACK_MANIFEST:
 #if BUILDFLAG(ENABLE_HANGOUT_SERVICES_EXTENSION)
-    case IDR_HANGOUT_SERVICES_MANIFEST:
+    case IDR_HANGOUT_SERVICES_MANIFEST_V2:
+    case IDR_HANGOUT_SERVICES_MANIFEST_V3:
 #endif
-    case IDR_IDENTITY_API_SCOPE_APPROVAL_MANIFEST:
+    case IDR_CONTEXTUAL_TASKS_EXTENSION_MANIFEST:
+    case IDR_GLIC_EXTENSION_MANIFEST:
     case IDR_NETWORK_SPEECH_SYNTHESIS_MANIFEST:
+    case IDR_NETWORK_SPEECH_SYNTHESIS_MANIFEST_MV3:
+    case IDR_READING_MODE_GDOCS_HELPER_MANIFEST:
     case IDR_WEBSTORE_MANIFEST:
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     // Separate ChromeOS list, as it is quite large.
     case IDR_ARC_SUPPORT_MANIFEST:
-    case IDR_AUDIO_PLAYER_MANIFEST:
     case IDR_CHROME_APP_MANIFEST:
-    case IDR_CONNECTIVITY_DIAGNOSTICS_LAUNCHER_MANIFEST:
-    case IDR_CONNECTIVITY_DIAGNOSTICS_MANIFEST:
-    case IDR_DEMO_APP_MANIFEST:
-    case IDR_ECHO_MANIFEST:
-    case IDR_FILEMANAGER_MANIFEST:
-    case IDR_FIRST_RUN_DIALOG_MANIFEST:
-    case IDR_GALLERY_MANIFEST:
     case IDR_IMAGE_LOADER_MANIFEST:
     case IDR_KEYBOARD_MANIFEST:
-    case IDR_MOBILE_MANIFEST:
-    case IDR_VIDEO_PLAYER_MANIFEST:
-    case IDR_WALLPAPERMANAGER_MANIFEST:
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-    case IDR_GENIUS_APP_MANIFEST:
     case IDR_HELP_MANIFEST:
-    case IDR_QUICKOFFICE_MANIFEST:
 #endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
-#endif  // defined(OS_CHROMEOS)
+    case IDR_DESK_API_MANIFEST:
+    case IDR_ECHO_MANIFEST:
+#endif  // BUILDFLAG(IS_CHROMEOS)
       return true;
   }
 
   LOG(ERROR) << "Component extension with manifest resource id "
              << manifest_resource_id << " not in allowlist and is not being "
              << "loaded as a result.";
-  NOTREACHED();
-  return false;
+  NOTREACHED() << "Component extension with manifest resource id "
+               << manifest_resource_id << " not in allowlist and is not being "
+               << "loaded as a result.";
 }
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 bool IsComponentExtensionAllowlistedForSignInProfile(
     const std::string& extension_id) {
-  const char* const kAllowed[] = {
+  constexpr auto kAllowed = base::MakeFixedFlatSet<std::string_view>({
       extension_misc::kAccessibilityCommonExtensionId,
       extension_misc::kChromeVoxExtensionId,
       extension_misc::kEspeakSpeechSynthesisExtensionId,
       extension_misc::kGoogleSpeechSynthesisExtensionId,
       extension_misc::kSelectToSpeakExtensionId,
       extension_misc::kSwitchAccessExtensionId,
-  };
+  });
 
-  for (size_t i = 0; i < base::size(kAllowed); ++i) {
-    if (extension_id == kAllowed[i])
-      return true;
-  }
-
-  return false;
+  return kAllowed.contains(extension_id);
 }
 #endif
 

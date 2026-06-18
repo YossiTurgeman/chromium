@@ -1,15 +1,15 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef SKIA_EXT_SK_TRACE_MEMORY_DUMP_CHROME_H_
-#define SKIA_EXT_SK_TRACE_MEMORY_DUMP_CHROME_H_
+#ifndef SKIA_EXT_SKIA_TRACE_MEMORY_DUMP_IMPL_H_
+#define SKIA_EXT_SKIA_TRACE_MEMORY_DUMP_IMPL_H_
 
 #include <stdint.h>
 
 #include <string>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/trace_event/memory_dump_request_args.h"
 #include "third_party/skia/include/core/SkTraceMemoryDump.h"
 
@@ -36,24 +36,30 @@ class SK_API SkiaTraceMemoryDumpImpl : public SkTraceMemoryDump {
       base::trace_event::MemoryDumpLevelOfDetail level_of_detail,
       base::trace_event::ProcessMemoryDump* process_memory_dump);
 
+  SkiaTraceMemoryDumpImpl(const SkiaTraceMemoryDumpImpl&) = delete;
+  SkiaTraceMemoryDumpImpl& operator=(const SkiaTraceMemoryDumpImpl&) = delete;
+
   ~SkiaTraceMemoryDumpImpl() override;
 
   // SkTraceMemoryDump implementation:
-  void dumpNumericValue(const char* dumpName,
-                        const char* valueName,
+  void dumpNumericValue(const char* dump_name,
+                        const char* value_name,
                         const char* units,
                         uint64_t value) override;
   void dumpStringValue(const char* dump_name,
                        const char* value_name,
                        const char* value) override;
-  void setMemoryBacking(const char* dumpName,
-                        const char* backingType,
-                        const char* backingObjectId) override;
+  void setMemoryBacking(const char* dump_name,
+                        const char* backing_type,
+                        const char* backing_object_id) override;
   void setDiscardableMemoryBacking(
-      const char* dumpName,
-      const SkDiscardableMemory& discardableMemoryObject) override;
+      const char* dump_name,
+      const SkDiscardableMemory& discardable_memory) override;
   LevelOfDetail getRequestedDetails() const override;
   bool shouldDumpWrappedObjects() const override;
+  void dumpWrappedState(const char* dump_name, bool wrapped) override;
+  bool shouldDumpUnbudgetedObjects() const override;
+  void dumpBudgetedState(const char* dump_name, bool budgeted) override;
 
  protected:
   base::trace_event::ProcessMemoryDump* process_memory_dump() {
@@ -63,14 +69,12 @@ class SK_API SkiaTraceMemoryDumpImpl : public SkTraceMemoryDump {
  private:
   std::string dump_name_prefix_;
 
-  base::trace_event::ProcessMemoryDump* process_memory_dump_;
+  raw_ptr<base::trace_event::ProcessMemoryDump> process_memory_dump_;
 
   // Stores the level of detail for the current dump.
   LevelOfDetail request_level_;
-
-  DISALLOW_COPY_AND_ASSIGN(SkiaTraceMemoryDumpImpl);
 };
 
 }  // namespace skia
 
-#endif  // SKIA_EXT_SK_TRACE_MEMORY_DUMP_CHROME_H_
+#endif  // SKIA_EXT_SKIA_TRACE_MEMORY_DUMP_IMPL_H_

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,6 @@
 #include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/win/registry.h"
-#include "build/branding_buildflags.h"
 #include "chrome/install_static/install_util.h"
 #include "chrome/installer/setup/setup_util.h"
 #include "chrome/installer/util/google_update_settings.h"
@@ -30,7 +29,7 @@ namespace {
 
 // Returns the boolean value of the distribution preference in |prefs| named
 // |pref_name|, or |default_value| if not set.
-bool GetMasterPreference(const MasterPreferences& prefs,
+bool GetMasterPreference(const InitialPreferences& prefs,
                          const char* pref_name,
                          bool default_value) {
   bool value;
@@ -56,21 +55,21 @@ InstallerState::InstallerState(Level level)
   set_level(level);
 }
 
-InstallerState::~InstallerState() {}
+InstallerState::~InstallerState() = default;
 
 void InstallerState::Initialize(const base::CommandLine& command_line,
-                                const MasterPreferences& prefs,
+                                const InitialPreferences& prefs,
                                 const InstallationState& machine_state) {
   Clear();
 
-  set_level(GetMasterPreference(prefs, master_preferences::kSystemLevel, false)
+  set_level(GetMasterPreference(prefs, initial_preferences::kSystemLevel, false)
                 ? SYSTEM_LEVEL
                 : USER_LEVEL);
 
   verbose_logging_ =
-      GetMasterPreference(prefs, master_preferences::kVerboseLogging, false);
+      GetMasterPreference(prefs, initial_preferences::kVerboseLogging, false);
 
-  msi_ = GetMasterPreference(prefs, master_preferences::kMsi, false);
+  msi_ = GetMasterPreference(prefs, initial_preferences::kMsi, false);
   if (!msi_) {
     const ProductState* product_state =
         machine_state.GetProductState(system_install());
@@ -80,7 +79,8 @@ void InstallerState::Initialize(const base::CommandLine& command_line,
 
   const bool is_uninstall = command_line.HasSwitch(switches::kUninstall);
 
-  target_path_ = GetChromeInstallPath(system_install());
+  target_path_ = GetChromeInstallPathWithPrefs(system_install(), prefs);
+
   state_key_ = install_static::GetClientStateKeyPath();
 
   VLOG(1) << (is_uninstall ? "Uninstall Chrome" : "Install Chrome");
@@ -172,7 +172,7 @@ void InstallerState::SetStage(InstallerStage stage) const {
 void InstallerState::WriteInstallerResult(
     InstallStatus status,
     int string_resource_id,
-    const base::string16* const launch_cmd) const {
+    const std::wstring* const launch_cmd) const {
   // Use a no-rollback list since this is a best-effort deal.
   std::unique_ptr<WorkItemList> install_list(WorkItem::CreateWorkItemList());
   install_list->set_log_message("Write Installer Result");

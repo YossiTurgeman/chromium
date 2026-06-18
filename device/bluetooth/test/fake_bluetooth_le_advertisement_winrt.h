@@ -1,20 +1,18 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEVICE_BLUETOOTH_TEST_FAKE_BLUETOOTH_LE_ADVERTISEMENT_WINRT_H_
 #define DEVICE_BLUETOOTH_TEST_FAKE_BLUETOOTH_LE_ADVERTISEMENT_WINRT_H_
 
+#include <stdint.h>
 #include <windows.devices.bluetooth.advertisement.h>
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
-#include <stdint.h>
-
+#include <optional>
 #include <string>
 
-#include "base/macros.h"
-#include "base/optional.h"
 #include "device/bluetooth/bluetooth_device.h"
 
 namespace device {
@@ -28,12 +26,18 @@ class FakeBluetoothLEAdvertisementWinrt
  public:
   FakeBluetoothLEAdvertisementWinrt();
   FakeBluetoothLEAdvertisementWinrt(
-      base::Optional<std::string> local_name,
-      base::Optional<uint8_t> flags,
+      std::optional<std::string> local_name,
+      std::optional<uint8_t> flags,
       BluetoothDevice::UUIDList advertised_uuids,
-      base::Optional<int8_t> tx_power,
+      std::optional<int8_t> tx_power,
       BluetoothDevice::ServiceDataMap service_data,
       BluetoothDevice::ManufacturerDataMap manufacturer_data);
+
+  FakeBluetoothLEAdvertisementWinrt(const FakeBluetoothLEAdvertisementWinrt&) =
+      delete;
+  FakeBluetoothLEAdvertisementWinrt& operator=(
+      const FakeBluetoothLEAdvertisementWinrt&) = delete;
+
   ~FakeBluetoothLEAdvertisementWinrt() override;
 
   // IBluetoothLEAdvertisement:
@@ -67,14 +71,12 @@ class FakeBluetoothLEAdvertisementWinrt
               BluetoothLEAdvertisementDataSection*>** section_list) override;
 
  private:
-  base::Optional<std::string> local_name_;
-  base::Optional<uint8_t> flags_;
+  std::optional<std::string> local_name_;
+  std::optional<uint8_t> flags_;
   BluetoothDevice::UUIDList advertised_uuids_;
-  base::Optional<int8_t> tx_power_;
+  std::optional<int8_t> tx_power_;
   BluetoothDevice::ServiceDataMap service_data_;
   BluetoothDevice::ManufacturerDataMap manufacturer_data_;
-
-  DISALLOW_COPY_AND_ASSIGN(FakeBluetoothLEAdvertisementWinrt);
 };
 
 }  // namespace device

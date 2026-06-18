@@ -1,42 +1,22 @@
-/*
- * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
- *           (C) 1999 Antti Koivisto (koivisto@kde.org)
- * Copyright (C) 2003, 2004, 2005, 2006, 2007, 2009 Apple Inc.
- *               All rights reserved.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
- *
- * You should have received a copy of the GNU Library General Public License
- * along with this library; see the file COPYING.LIB.  If not, write to
- * the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
- * Boston, MA 02110-1301, USA.
- *
- */
-
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_LIST_ITEM_ORDINAL_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_LIST_ITEM_ORDINAL_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
 class HTMLOListElement;
 class LayoutObject;
 class Node;
+class Element;
 
 // Represents an "ordinal value" and its related algorithms:
 // https://html.spec.whatwg.org/C/#ordinal-value
@@ -57,43 +37,60 @@ class CORE_EXPORT ListItemOrdinal {
 
   // Get/set/clear the explicit value; i.e., the 'value' attribute of an <li>
   // element.
-  base::Optional<int> ExplicitValue() const;
-  void SetExplicitValue(int, const Node&);
+  std::optional<int> ExplicitValue() const;
+  void SetExplicitValue(int, const Element&);
+  bool UseExplicitValue() const {
+    DCHECK(!RuntimeEnabledFeatures::CSSListCounterAccountingEnabled());
+    return type_ == kExplicit;
+  }
   void ClearExplicitValue(const Node&);
+  void MarkDirty() { SetType(kNeedsUpdate); }
 
-  static bool IsList(const Node&);
   static bool IsListItem(const Node&);
   static bool IsListItem(const LayoutObject*);
   static bool IsInReversedOrderedList(const Node&);
 
-  // Compute the total item count of a list.
-  static unsigned ItemCountForOrderedList(const HTMLOListElement*);
+  // Compute the initial counter value of a reversed list.
+  static int InitialCounterForReversedOrderedList(const HTMLOListElement*);
 
   // Invalidate all ordinal values of a list.
   static void InvalidateAllItemsForOrderedList(const HTMLOListElement*);
 
   // Invalidate items that are affected by an insertion or a removal.
   static void ItemInsertedOrRemoved(const LayoutObject*);
+  // Invalidate items that are affected by counter style update.
+  static void ItemCounterStyleUpdated(const LayoutObject&);
 
  private:
   enum ValueType { kNeedsUpdate, kUpdated, kExplicit };
   ValueType Type() const { return static_cast<ValueType>(type_); }
   void SetType(ValueType type) const { type_ = type; }
-  bool HasExplicitValue() const { return type_ == kExplicit; }
+
+  static bool IsListOwner(const Node&);
+  // https://drafts.csswg.org/css-contain-2/#containment-style
+  static bool HasStyleContainment(const Node&);
 
   static Node* EnclosingList(const Node*);
   struct NodeAndOrdinal {
     STACK_ALLOCATED();
 
    public:
-    Persistent<const Node> node;
+    const Node* node = nullptr;
     ListItemOrdinal* ordinal = nullptr;
     operator bool() const { return node; }
   };
+  struct NodeAndOrdinalWithIntermediateSum : NodeAndOrdinal {
+    STACK_ALLOCATED();
+
+   public:
+    int64_t intermediate_sum = 0;
+    bool counter_set_seen = false;
+  };
   static NodeAndOrdinal NextListItem(const Node* list_node,
                                      const Node* item_node = nullptr);
-  static NodeAndOrdinal PreviousListItem(const Node* list_node,
-                                         const Node* item_node);
+  static NodeAndOrdinalWithIntermediateSum PreviousListItem(
+      const Node* list_node,
+      const Node* item_node);
   static NodeAndOrdinal NextOrdinalItem(bool is_reversed,
                                         const Node* list_node,
                                         const Node* item_node = nullptr);
@@ -105,8 +102,16 @@ class CORE_EXPORT ListItemOrdinal {
   static void InvalidateOrdinalsAfter(bool is_reversed,
                                       const Node* list_node,
                                       const Node* item_node);
+  enum UpdateType { kInsertedOrRemoved, kCounterStyle };
+  static void ItemUpdated(const LayoutObject*, UpdateType type);
 
   mutable int value_ = 0;
+  // `explicit_value_` represents the value of li elements. When the `type` is
+  // set to `kExplicit`, the value of `value_` is the same as `explicit_value_`.
+  //
+  // TODO(crbug.com/40760770): Remove `explicit_value_` when
+  // CSSListCounterAccounting is enabled by default and removed.
+  mutable std::optional<int> explicit_value_;
   mutable unsigned type_ : 2;  // ValueType
 };
 

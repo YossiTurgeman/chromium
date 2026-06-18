@@ -22,43 +22,54 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_TRANSFORMABLE_CONTAINER_H_
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_container.h"
+#include "ui/gfx/geometry/vector2d_f.h"
 
 namespace blink {
 
 class SVGGraphicsElement;
 
-class LayoutSVGTransformableContainer final : public LayoutSVGContainer {
+class LayoutSVGTransformableContainer : public LayoutSVGContainer {
  public:
   explicit LayoutSVGTransformableContainer(SVGGraphicsElement*);
 
   bool IsChildAllowed(LayoutObject*, const ComputedStyle&) const override;
 
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectSVGTransformableContainer ||
-           LayoutSVGContainer::IsOfType(type);
+  bool IsSVGTransformableContainer() const final {
+    NOT_DESTROYED();
+    return true;
   }
-  const FloatSize& AdditionalTranslation() const {
+  const gfx::Vector2dF& AdditionalTranslation() const {
+    NOT_DESTROYED();
     return additional_translation_;
   }
-
-  void SetNeedsTransformUpdate() override;
-
- private:
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
-  SVGTransformChange CalculateLocalTransform(bool bounds_changed) override;
   AffineTransform LocalSVGTransform() const override {
+    NOT_DESTROYED();
     return local_transform_;
   }
-  bool IsUseElement() const;
 
-  bool needs_transform_update_ : 1;
-  bool transform_uses_reference_box_ : 1;
+  virtual bool HasAdditionalTransform() const {
+    NOT_DESTROYED();
+    return !additional_translation_.IsZero();
+  }
+
+ protected:
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const StyleChangeContext&) override;
+  void WillBeDestroyed() override;
+  SVGTransformChange UpdateLocalTransform(
+      const gfx::RectF& reference_box) override;
+
   AffineTransform local_transform_;
-  FloatSize additional_translation_;
+  gfx::Vector2dF additional_translation_;
 };
 
-DEFINE_LAYOUT_OBJECT_TYPE_CASTS(LayoutSVGTransformableContainer,
-                                IsSVGTransformableContainer());
+template <>
+struct DowncastTraits<LayoutSVGTransformableContainer> {
+  static bool AllowFrom(const LayoutObject& object) {
+    return object.IsSVGTransformableContainer();
+  }
+};
 
 }  // namespace blink
 

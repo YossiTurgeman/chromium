@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,13 @@
 #define CHROME_BROWSER_BROWSER_SWITCHER_BROWSER_SWITCHER_SERVICE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
-#include "base/callback.h"
 #include "base/callback_list.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_switcher/browser_switcher_prefs.h"
@@ -58,10 +58,11 @@ class BrowserSwitcherService;
 
 class XmlDownloader {
  public:
-  XmlDownloader(Profile* profile,
-                BrowserSwitcherService* service,
-                base::TimeDelta first_fetch_delay,
-                base::RepeatingCallback<void()> all_done_callback);
+  XmlDownloader(
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      BrowserSwitcherService* service,
+      base::TimeDelta first_fetch_delay,
+      base::RepeatingCallback<void()> all_done_callback);
   virtual ~XmlDownloader();
 
   base::Time last_refresh_time() const;
@@ -78,7 +79,7 @@ class XmlDownloader {
 
   // Parses the XML for a source, and calls DoneParsing() on the UI thread when
   // done.
-  void ParseXml(RulesetSource* source, std::unique_ptr<std::string> bytes);
+  void ParseXml(RulesetSource* source, std::optional<std::string> bytes);
 
   // Runs hooks on the source, and runs |all_done_callback| and
   // ScheduleRefresh() if this is the last source.
@@ -96,7 +97,7 @@ class XmlDownloader {
   scoped_refptr<network::SharedURLLoaderFactory> other_url_factory_;
 
   // This |BrowserSwitcherService| owns this object.
-  BrowserSwitcherService* service_;
+  raw_ptr<BrowserSwitcherService> service_;
 
   std::vector<RulesetSource> sources_;
 
@@ -118,11 +119,15 @@ class BrowserSwitcherService : public KeyedService {
   using AllRulesetsParsedCallbackSignature = void(BrowserSwitcherService*);
   using AllRulesetsParsedCallback =
       base::RepeatingCallback<AllRulesetsParsedCallbackSignature>;
-  using CallbackSubscription =
-      base::CallbackList<AllRulesetsParsedCallbackSignature>::Subscription;
 
  public:
+  BrowserSwitcherService() = delete;
+
   explicit BrowserSwitcherService(Profile* profile);
+
+  BrowserSwitcherService(const BrowserSwitcherService&) = delete;
+  BrowserSwitcherService& operator=(const BrowserSwitcherService&) = delete;
+
   ~BrowserSwitcherService() override;
 
   virtual void Init();
@@ -187,18 +192,18 @@ class BrowserSwitcherService : public KeyedService {
 
   // Registers a callback that triggers after the sitelists are done downloading
   // and all rules are applied.
-  std::unique_ptr<CallbackSubscription> RegisterAllRulesetsParsedCallback(
+  base::CallbackListSubscription RegisterAllRulesetsParsedCallback(
       AllRulesetsParsedCallback callback);
 
   std::unique_ptr<XmlDownloader> sitelist_downloader_;
 
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
   BrowserSwitcherPrefs prefs_;
-  std::unique_ptr<BrowserSwitcherPrefs::CallbackSubscription>
-      prefs_subscription_;
+  base::CallbackListSubscription prefs_subscription_;
 
   // CallbackList for OnAllRulesetsParsed() listeners.
-  base::CallbackList<AllRulesetsParsedCallbackSignature> callback_list_;
+  base::RepeatingCallbackList<AllRulesetsParsedCallbackSignature>
+      callback_list_;
 
   base::OnceCallback<void()> all_rulesets_loaded_callback_for_testing_;
 
@@ -207,9 +212,6 @@ class BrowserSwitcherService : public KeyedService {
   std::unique_ptr<BrowserSwitcherSitelist> sitelist_;
 
   base::WeakPtrFactory<BrowserSwitcherService> weak_ptr_factory_{this};
-
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(BrowserSwitcherService);
 };
 
 }  // namespace browser_switcher

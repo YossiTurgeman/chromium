@@ -80,9 +80,6 @@ class TestDumpReaderMultipart(unittest.TestCase):
         host.filesystem.maybe_make_directory(build_dir)
         host.filesystem.exists = lambda x: True
 
-        # The mock file object returned by open_binary_file_for_reading doesn't
-        # have readline(), however, the real File object does.
-        host.filesystem.open_binary_file_for_reading = host.filesystem.open_text_file_for_reading
         dump_reader = DumpReaderMultipart(host, build_dir)
         dump_reader._file_extension = lambda: 'dmp'
         dump_reader._binaries_to_symbolize = lambda: ['content_shell']
@@ -101,9 +98,6 @@ class TestDumpReaderMultipart(unittest.TestCase):
         host.filesystem.maybe_make_directory(build_dir)
         host.filesystem.exists = lambda x: True
 
-        # The mock file object returned by open_binary_file_for_reading doesn't
-        # have readline(), however, the real File object does.
-        host.filesystem.open_binary_file_for_reading = host.filesystem.open_text_file_for_reading
         dump_reader = DumpReaderMultipart(host, build_dir)
         dump_reader._file_extension = lambda: 'dmp'
         dump_reader._binaries_to_symbolize = lambda: ['content_shell']
@@ -116,3 +110,29 @@ class TestDumpReaderMultipart(unittest.TestCase):
         self.assertIn('generate_breakpad_symbols.py', cmd_line)
         cmd_line = " ".join(host.executive.calls[1])
         self.assertIn('minidump_stackwalk', cmd_line)
+
+    def test_get_pid_from_dump_with_binary_boundary(self):
+        host = MockHost()
+        dump_file = '/crash-dumps/dump.dmp'
+        # Construct a dump with a boundary that is not valid UTF-8
+        # \x93 is invalid start byte in UTF-8
+        boundary = b'--\x93boundary\x93'
+        content = [
+            boundary,
+            b'Content-Disposition: form-data; name="pid"',
+            b'',
+            b'4711',
+            boundary + b'--',
+        ]
+        host.filesystem.write_binary_file(dump_file, b'\r\n'.join(content))
+
+        build_dir = "/mock-checkout/out/Debug"
+        host.filesystem.maybe_make_directory(build_dir)
+        host.filesystem.exists = lambda x: True
+
+        dump_reader = DumpReaderMultipart(host, build_dir)
+        dump_reader._file_extension = lambda: 'dmp'
+        dump_reader._binaries_to_symbolize = lambda: ['content_shell']
+
+        # This should not raise UnicodeDecodeError
+        self.assertEqual('4711', dump_reader._get_pid_from_dump(dump_file))

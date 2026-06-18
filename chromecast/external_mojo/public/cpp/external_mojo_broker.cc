@@ -1,26 +1,31 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chromecast/external_mojo/public/cpp/external_mojo_broker.h"
 
 #include <map>
+#include <set>
 #include <utility>
 
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
+#include "base/notimplemented.h"
+#include "build/build_config.h"
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #include <sys/stat.h>
 #endif
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include <optional>
+
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/macros.h"
 #include "base/message_loop/message_pump_for_io.h"
-#include "base/optional.h"
 #include "base/task/current_thread.h"
 #include "base/token.h"
 #include "base/trace_event/trace_event.h"
+#include "chromecast/chromecast_buildflags.h"
 #include "chromecast/external_mojo/public/cpp/common.h"
 #include "chromecast/external_mojo/public/mojom/connector.mojom.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
@@ -40,6 +45,10 @@
 #include "services/service_manager/public/mojom/connector.mojom.h"
 #include "services/service_manager/public/mojom/service.mojom.h"
 
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/bundle_utils.h"
+#endif
+
 namespace chromecast {
 namespace external_mojo {
 
@@ -58,7 +67,7 @@ void OnInternalBindResult(
     const std::string& service_name,
     const std::string& interface_name,
     service_manager::mojom::ConnectResult result,
-    const base::Optional<service_manager::Identity>& identity) {
+    const std::optional<service_manager::Identity>& identity) {
   if (result != service_manager::mojom::ConnectResult::SUCCEEDED) {
     LOG(ERROR) << "Failed to bind " << service_name << ":" << interface_name
                << ", result = " << result;
@@ -70,6 +79,9 @@ void OnInternalBindResult(
 class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
  public:
   ConnectorImpl() : connector_facade_(this) {}
+
+  ConnectorImpl(const ConnectorImpl&) = delete;
+  ConnectorImpl& operator=(const ConnectorImpl&) = delete;
 
   void InitializeChromium(
       std::unique_ptr<service_manager::Connector> connector,
@@ -96,6 +108,9 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
       DCHECK(connector_);
     }
 
+    ExternalServiceProxy(const ExternalServiceProxy&) = delete;
+    ExternalServiceProxy& operator=(const ExternalServiceProxy&) = delete;
+
    private:
     void OnBindInterface(
         const service_manager::BindSourceInfo& source,
@@ -108,8 +123,6 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
     ConnectorImpl* const connector_;
     const std::string service_name_;
     service_manager::ServiceReceiver service_receiver_;
-
-    DISALLOW_COPY_AND_ASSIGN(ExternalServiceProxy);
   };
 
   class ServiceManagerConnectorFacade
@@ -135,7 +148,7 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
       connector_->BindInterface(filter.service_name(), interface_name,
                                 std::move(interface_pipe));
       std::move(callback).Run(service_manager::mojom::ConnectResult::SUCCEEDED,
-                              base::nullopt);
+                              std::nullopt);
     }
 
     void QueryService(const std::string& service_name,
@@ -147,7 +160,7 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
     void WarmService(const ::service_manager::ServiceFilter& filter,
                      WarmServiceCallback callback) override {
       std::move(callback).Run(service_manager::mojom::ConnectResult::SUCCEEDED,
-                              base::nullopt);
+                              std::nullopt);
     }
 
     void RegisterServiceInstance(
@@ -186,6 +199,9 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
       return;
     }
 
+    external_services_to_proxy_.insert(external_services_to_proxy.begin(),
+                                       external_services_to_proxy.end());
+
     for (const auto& service_name : external_services_to_proxy) {
       LOG(INFO) << "Register proxy for external " << service_name;
       mojo::PendingRemote<service_manager::mojom::Service> service_remote;
@@ -222,12 +238,11 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
   void RegisterServiceInstance(
       const std::string& service_name,
       mojo::PendingRemote<mojom::ExternalService> service_remote) {
-    if (services_.find(service_name) != services_.end()) {
+    if (services_.contains(service_name)) {
       LOG(ERROR) << "Duplicate service " << service_name;
       return;
     }
-    TRACE_EVENT_INSTANT1("mojom", "RegisterService", TRACE_EVENT_SCOPE_THREAD,
-                         "service", service_name);
+    TRACE_EVENT_INSTANT("mojom", "RegisterService", "service", service_name);
     LOG(INFO) << "Register service " << service_name;
     mojo::Remote<mojom::ExternalService> service(std::move(service_remote));
     service.set_disconnect_handler(base::BindOnce(
@@ -263,8 +278,7 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
                      const std::string& interface_name,
                      mojo::ScopedMessagePipeHandle interface_pipe) override {
     LOG(INFO) << "Request for " << service_name << ":" << interface_name;
-    TRACE_EVENT_INSTANT1("mojom", "BindToService", TRACE_EVENT_SCOPE_THREAD,
-                         "service", service_name);
+    TRACE_EVENT_INSTANT("mojom", "BindToService", "service", service_name);
     auto it = services_.find(service_name);
     if (it != services_.end()) {
       LOG(INFO) << "Found externally-registered " << service_name;
@@ -272,7 +286,9 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
       return;
     }
 
-    if (!connector_) {
+    auto service_proxy_it = external_services_to_proxy_.find(service_name);
+
+    if (!connector_ || service_proxy_it != external_services_to_proxy_.end()) {
       ServiceNotFound(service_name, interface_name, std::move(interface_pipe));
       return;
     }
@@ -339,8 +355,8 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
 
   void OnServiceLost(const std::string& service_name) {
     LOG(INFO) << service_name << " disconnected";
-    TRACE_EVENT_INSTANT1("mojom", "ServiceDisconnected",
-                         TRACE_EVENT_SCOPE_THREAD, "service", service_name);
+    TRACE_EVENT_INSTANT("mojom", "ServiceDisconnected", "service",
+                        service_name);
     services_.erase(service_name);
     services_info_[service_name].disconnect_time = base::TimeTicks::Now();
   }
@@ -349,14 +365,13 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
   std::unique_ptr<service_manager::Connector> connector_;
 
   mojo::ReceiverSet<mojom::ExternalConnector> receivers_;
+  std::set<std::string> external_services_to_proxy_;
   std::map<std::string, std::unique_ptr<ExternalServiceProxy>>
       registered_external_services_;
 
   std::map<std::string, mojo::Remote<mojom::ExternalService>> services_;
   std::map<std::string, std::vector<PendingBindRequest>> pending_bind_requests_;
   std::map<std::string, mojom::ExternalServiceInfo> services_info_;
-
-  DISALLOW_COPY_AND_ASSIGN(ConnectorImpl);
 };
 
 class ExternalMojoBroker::ReadWatcher
@@ -371,6 +386,9 @@ class ExternalMojoBroker::ReadWatcher
         listen_handle_.GetFD().get(), true /* persistent */,
         base::MessagePumpForIO::WATCH_READ, &watch_controller_, this);
   }
+
+  ReadWatcher(const ReadWatcher&) = delete;
+  ReadWatcher& operator=(const ReadWatcher&) = delete;
 
   // base::MessagePumpForIO::FdWatcher implementation:
   void OnFileCanReadWithoutBlocking(int fd) override {
@@ -395,29 +413,45 @@ class ExternalMojoBroker::ReadWatcher
   ConnectorImpl* const connector_;
   const mojo::PlatformHandle listen_handle_;
   base::MessagePumpForIO::FdWatchController watch_controller_;
-
-  DISALLOW_COPY_AND_ASSIGN(ReadWatcher);
 };
 
 ExternalMojoBroker::ExternalMojoBroker(const std::string& broker_path) {
   connector_ = std::make_unique<ConnectorImpl>();
 
+  // For external service support, we expose a channel endpoint on the
+  // |broker_path|. Otherwise, only services in the same process network can
+  // make use of the broker.
+#if BUILDFLAG(ENABLE_EXTERNAL_MOJO_SERVICES)
+#if BUILDFLAG(IS_ANDROID)
+  // Monolithic MediaShell can just access the service broker directly in the
+  // same process, so there's no need to stand up a server.
+  if (!base::android::BundleUtils::HasAnyInstalledSplits()) {
+    return;
+  }
+  // On Android, use the abstract namespace to avoid filesystem access.
+  bool use_abstract_namespace = true;
+#else
+  bool use_abstract_namespace = false;
+#endif  // BUILDFLAG(IS_ANDROID)
+
   LOG(INFO) << "Initializing external mojo broker at: " << broker_path;
 
   mojo::NamedPlatformChannel::Options channel_options;
   channel_options.server_name = broker_path;
+  channel_options.use_abstract_namespace = use_abstract_namespace;
   mojo::NamedPlatformChannel named_channel(channel_options);
 
   mojo::PlatformChannelServerEndpoint server_endpoint =
       named_channel.TakeServerEndpoint();
   DCHECK(server_endpoint.is_valid());
 
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
   chmod(broker_path.c_str(), 0770);
 #endif
 
   read_watcher_ = std::make_unique<ReadWatcher>(
       connector_.get(), server_endpoint.TakePlatformHandle());
+#endif  // BUILDFLAG(ENABLE_EXTERNAL_MOJO_SERVICES)
 }
 
 void ExternalMojoBroker::InitializeChromium(
@@ -432,6 +466,11 @@ ExternalMojoBroker::CreateConnector() {
   mojo::PendingRemote<mojom::ExternalConnector> remote;
   connector_->AddReceiver(remote.InitWithNewPipeAndPassReceiver());
   return remote;
+}
+
+void ExternalMojoBroker::BindConnector(
+    mojo::PendingReceiver<mojom::ExternalConnector> receiver) {
+  connector_->AddReceiver(std::move(receiver));
 }
 
 ExternalMojoBroker::~ExternalMojoBroker() = default;

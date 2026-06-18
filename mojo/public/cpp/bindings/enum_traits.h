@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,14 +18,22 @@ namespace mojo {
 //
 //     // Returning false results in deserialization failure and causes the
 //     // message pipe receiving it to be disconnected.
-//     static bool FromMojom(MojomType input, T* output);
+//     static T FromMojom(MojomType input);
 //   };
 //
 template <typename MojomType, typename T>
 struct EnumTraits {
-  static_assert(internal::AlwaysFalse<T>::value,
+  static_assert(false,
                 "Cannot find the mojo::EnumTraits specialization. Did you "
                 "forget to include the corresponding header file?");
+};
+
+// No special mapping or validation required if the input and output type are
+// identical.
+template <typename T>
+struct EnumTraits<T, T> {
+  static T ToMojom(T input) { return input; }
+  static T FromMojom(T input) { return input; }
 };
 
 }  // namespace mojo

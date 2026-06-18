@@ -1,18 +1,19 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_STREAMS_WRITABLE_STREAM_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_STREAMS_WRITABLE_STREAM_H_
 
-#include "base/optional.h"
+#include <memory>
+
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/core/streams/writable_stream.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 #include "third_party/blink/renderer/platform/bindings/trace_wrapper_v8_reference.h"
-#include "third_party/blink/renderer/platform/heap/heap_allocator.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_deque.h"
 #include "third_party/blink/renderer/platform/heap/member.h"
 #include "v8/include/v8.h"
 
@@ -23,11 +24,11 @@ class MessagePort;
 class ScriptState;
 class StrategySizeAlgorithm;
 class StreamAlgorithm;
-class StreamPromiseResolver;
 class StreamStartAlgorithm;
 class UnderlyingSinkBase;
 class WritableStreamDefaultController;
 class WritableStreamDefaultWriter;
+class WritableStreamTransferringOptimizer;
 
 class CORE_EXPORT WritableStream : public ScriptWrappable {
   DEFINE_WRAPPERTYPEINFO();
@@ -66,10 +67,24 @@ class CORE_EXPORT WritableStream : public ScriptWrappable {
       ScriptState*,
       UnderlyingSinkBase*,
       size_t high_water_mark);
+  static WritableStream* CreateWithCountQueueingStrategy(
+      ScriptState*,
+      UnderlyingSinkBase*,
+      size_t high_water_mark,
+      std::unique_ptr<WritableStreamTransferringOptimizer> optimizer);
 
   // Called by Create().
   WritableStream();
   ~WritableStream() override;
+
+  // This should only be used with freshly-constructed streams. It expects to be
+  // called in a valid microtask scope.
+  void InitWithCountQueueingStrategy(
+      ScriptState*,
+      UnderlyingSinkBase*,
+      size_t high_water_mark,
+      std::unique_ptr<WritableStreamTransferringOptimizer>,
+      ExceptionState&);
 
   // IDL defined functions
 
@@ -81,24 +96,30 @@ class CORE_EXPORT WritableStream : public ScriptWrappable {
   }
 
   // https://streams.spec.whatwg.org/#ws-abort
-  ScriptPromise abort(ScriptState*, ExceptionState&);
-  ScriptPromise abort(ScriptState*, ScriptValue reason, ExceptionState&);
+  ScriptPromise<IDLUndefined> abort(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLUndefined> abort(ScriptState*,
+                                    ScriptValue reason,
+                                    ExceptionState&);
 
   // https://streams.spec.whatwg.org/#ws-close
-  ScriptPromise close(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLUndefined> close(ScriptState*, ExceptionState&);
 
   // https://streams.spec.whatwg.org/#ws-get-writer
   WritableStreamDefaultWriter* getWriter(ScriptState*, ExceptionState&);
 
   // Inherited methods used internally.
 
-  static bool IsLocked(const WritableStream* stream) { return stream->writer_; }
+  static bool IsLocked(const WritableStream* stream) {
+    return stream->writer_ != nullptr;
+  }
 
   void Serialize(ScriptState*, MessagePort*, ExceptionState&);
 
-  static WritableStream* Deserialize(ScriptState*,
-                                     MessagePort*,
-                                     ExceptionState&);
+  static WritableStream* Deserialize(
+      ScriptState*,
+      MessagePort*,
+      std::unique_ptr<WritableStreamTransferringOptimizer> optimizer,
+      ExceptionState&);
 
   //
   // Methods used by ReadableStream::PipeTo
@@ -114,14 +135,15 @@ class CORE_EXPORT WritableStream : public ScriptWrappable {
   //
 
   // https://streams.spec.whatwg.org/#writable-stream-abort
-  static v8::Local<v8::Promise> Abort(ScriptState*,
-                                      WritableStream*,
-                                      v8::Local<v8::Value> reason);
+  static ScriptPromise<IDLUndefined> Abort(ScriptState*,
+                                           WritableStream*,
+                                           v8::Local<v8::Value> reason);
 
   // https://streams.spec.whatwg.org/#writable-stream-add-write-request
-  static v8::Local<v8::Promise> AddWriteRequest(ScriptState*, WritableStream*);
+  static void AddWriteRequest(WritableStream*,
+                              ScriptPromiseResolver<IDLUndefined>*);
 
-  static v8::Local<v8::Promise> Close(ScriptState*, WritableStream*);
+  static ScriptPromise<IDLUndefined> Close(ScriptState*, WritableStream*);
 
   // https://streams.spec.whatwg.org/#writable-stream-close-queued-or-in-flight
   static bool CloseQueuedOrInFlight(const WritableStream*);
@@ -178,9 +200,7 @@ class CORE_EXPORT WritableStream : public ScriptWrappable {
 
   bool HasBackpressure() const { return has_backpressure_; }
 
-  const StreamPromiseResolver* InFlightWriteRequest() const {
-    return in_flight_write_request_;
-  }
+  bool HasInFlightWriteRequest() const { return in_flight_write_request_; }
 
   bool IsClosingOrClosed() const {
     return CloseQueuedOrInFlight(this) || state_ == kClosed;
@@ -189,17 +209,20 @@ class CORE_EXPORT WritableStream : public ScriptWrappable {
   v8::Local<v8::Value> GetStoredError(v8::Isolate*) const;
 
   WritableStreamDefaultController* Controller() {
-    return writable_stream_controller_;
+    return writable_stream_controller_.Get();
   }
   const WritableStreamDefaultController* Controller() const {
-    return writable_stream_controller_;
+    return writable_stream_controller_.Get();
   }
 
-  const WritableStreamDefaultWriter* Writer() const { return writer_; }
+  const WritableStreamDefaultWriter* Writer() const { return writer_.Get(); }
 
-  void SetCloseRequest(StreamPromiseResolver*);
+  void SetCloseRequest(ScriptPromiseResolver<IDLUndefined>*);
   void SetController(WritableStreamDefaultController*);
   void SetWriter(WritableStreamDefaultWriter*);
+
+  std::unique_ptr<WritableStreamTransferringOptimizer>
+  TakeTransferringOptimizer();
 
   // Utility methods shared with other classes.
   static v8::Local<v8::String> CreateCannotActionOnStateStreamMessage(
@@ -217,13 +240,14 @@ class CORE_EXPORT WritableStream : public ScriptWrappable {
  protected:
   // Used when creating a stream from JavaScript. Called from Create().
   // https://streams.spec.whatwg.org/#ws-constructor
+  // TODO(ricea): Port external callers to InitWithCountQueuingStrategy().
   void InitInternal(ScriptState*,
                     ScriptValue raw_underlying_sink,
                     ScriptValue raw_strategy,
                     ExceptionState&);
 
  private:
-  using PromiseQueue = HeapDeque<Member<StreamPromiseResolver>>;
+  using PromiseQueue = HeapDeque<Member<ScriptPromiseResolver<IDLUndefined>>>;
 
   class PendingAbortRequest;
 
@@ -251,14 +275,15 @@ class CORE_EXPORT WritableStream : public ScriptWrappable {
   // |state_| is here out of order so it doesn't require 7 bytes of padding.
   State state_ = kWritable;
 
-  Member<StreamPromiseResolver> close_request_;
-  Member<StreamPromiseResolver> in_flight_write_request_;
-  Member<StreamPromiseResolver> in_flight_close_request_;
+  Member<ScriptPromiseResolver<IDLUndefined>> close_request_;
+  Member<ScriptPromiseResolver<IDLUndefined>> in_flight_write_request_;
+  Member<ScriptPromiseResolver<IDLUndefined>> in_flight_close_request_;
   Member<PendingAbortRequest> pending_abort_request_;
   TraceWrapperV8Reference<v8::Value> stored_error_;
   Member<WritableStreamDefaultController> writable_stream_controller_;
   Member<WritableStreamDefaultWriter> writer_;
   PromiseQueue write_requests_;
+  std::unique_ptr<WritableStreamTransferringOptimizer> transferring_optimizer_;
 };
 
 }  // namespace blink

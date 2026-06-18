@@ -1,9 +1,8 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/command_line.h"
-#include "base/macros.h"
 #include "chrome/browser/search/instant_service.h"
 #include "chrome/browser/search/instant_service_factory.h"
 #include "chrome/browser/ui/browser.h"
@@ -14,7 +13,6 @@
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "components/network_session_configurator/common/network_switches.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
@@ -30,18 +28,15 @@ class ThirdPartyNTPUiTest : public InProcessBrowserTest,
  public:
   ThirdPartyNTPUiTest() = default;
 
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    command_line->AppendSwitch(switches::kIgnoreCertificateErrors);
-  }
+  ThirdPartyNTPUiTest(const ThirdPartyNTPUiTest&) = delete;
+  ThirdPartyNTPUiTest& operator=(const ThirdPartyNTPUiTest&) = delete;
 
   void SetUpOnMainThread() override {
     InProcessBrowserTest::SetUpOnMainThread();
     host_resolver()->AddRule("*", "127.0.0.1");
+    https_test_server().SetCertHostnames({"ntp.com"});
     ASSERT_TRUE(https_test_server().Start());
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ThirdPartyNTPUiTest);
 };
 
 // Verifies that Chrome won't steal focus from the Omnibox and focus the tab
@@ -51,8 +46,7 @@ IN_PROC_BROWSER_TEST_F(ThirdPartyNTPUiTest, Reloads) {
       https_test_server().GetURL("ntp.com", "/instant_extended.html");
   GURL ntp_url =
       https_test_server().GetURL("ntp.com", "/instant_extended_ntp.html");
-  InstantTestBase::Init(base_url, ntp_url, false);
-  SetupInstant(browser());
+  SetupInstant(browser()->profile(), base_url, ntp_url);
 
   // Verify that at the start of the test the tab contents has focus.
   browser()->tab_strip_model()->GetActiveWebContents()->Focus();
@@ -63,7 +57,7 @@ IN_PROC_BROWSER_TEST_F(ThirdPartyNTPUiTest, Reloads) {
   content::WebContents* tab1;
   {
     content::WebContentsAddedObserver tab1_observer;
-    chrome::NewTab(browser());
+    chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
     tab1 = tab1_observer.GetWebContents();
     ASSERT_TRUE(WaitForLoadStop(tab1));
     EXPECT_EQ(ntp_url, content::EvalJs(tab1, "window.location.href"));
@@ -79,7 +73,7 @@ IN_PROC_BROWSER_TEST_F(ThirdPartyNTPUiTest, Reloads) {
     ASSERT_TRUE(content::ExecJs(tab1, "window.location.reload()"));
     nav_observer.WaitForNavigationFinished();
     ASSERT_TRUE(nav_observer.last_navigation_succeeded());
-    EXPECT_EQ(ntp_url, tab1->GetMainFrame()->GetLastCommittedURL());
+    EXPECT_EQ(ntp_url, tab1->GetPrimaryMainFrame()->GetLastCommittedURL());
     EXPECT_EQ(1, content::EvalJs(tab1, "history.length"));
   }
   // Verify that the omnibox retained its focus.

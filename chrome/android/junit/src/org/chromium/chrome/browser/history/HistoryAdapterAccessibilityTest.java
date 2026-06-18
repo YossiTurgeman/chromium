@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,43 +8,53 @@ import static org.chromium.chrome.browser.history.HistoryTestUtils.checkAdapterC
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.chrome.browser.ui.signin.signin_promo.SigninPromoCoordinator;
 import org.chromium.components.browser_ui.widget.MoreProgressButton;
 import org.chromium.components.browser_ui.widget.MoreProgressButton.State;
-import org.chromium.components.browser_ui.widget.selectable_list.SelectionDelegate;
 
 import java.util.Date;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Tests for the {@link HistoryAdapter}. This test will more focusing on cases when accessibility
- * turned on (HistoryManager::isScrollToLoadDisabled() == true).
+ * turned on (HistoryContentManager::isScrollToLoadDisabled() == true).
  */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class HistoryAdapterAccessibilityTest {
     public static final int PAGING = 2;
 
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
     private StubbedHistoryProvider mHistoryProvider;
     private HistoryAdapter mAdapter;
 
-    @Mock
-    private MoreProgressButton mMockButton;
+    @Mock private MoreProgressButton mMockButton;
+    @Mock private HistoryContentManager mContentManager;
+    @Mock private SigninPromoCoordinator mHistorySyncPromoCoordinator;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mHistoryProvider = new StubbedHistoryProvider();
         mHistoryProvider.setPaging(PAGING);
 
-        mAdapter = new HistoryAdapter(new SelectionDelegate<HistoryItem>(), null, mHistoryProvider);
+        mAdapter =
+                new HistoryAdapter(
+                        mContentManager,
+                        mHistoryProvider,
+                        mHistorySyncPromoCoordinator,
+                        /* shouldClusterByDomain= */ false,
+                        /* snackbarManager= */ null,
+                        /* profile= */ null);
         mAdapter.generateHeaderItemsForTest();
         mAdapter.generateFooterItemsForTest(mMockButton);
         mAdapter.setScrollToLoadDisabledForTest(true);
@@ -52,7 +62,7 @@ public class HistoryAdapterAccessibilityTest {
 
     @Test
     public void testInitializeEmpty() {
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
         checkAdapterContents(mAdapter, false, false);
     }
 
@@ -63,7 +73,7 @@ public class HistoryAdapterAccessibilityTest {
         HistoryItem item1 = StubbedHistoryProvider.createHistoryItem(0, timestamp);
         mHistoryProvider.addItem(item1);
 
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
 
         // There should be three items - the header, a date and the history item;
         // The number of items is less than paging, so the view should not contain footer items.
@@ -83,7 +93,7 @@ public class HistoryAdapterAccessibilityTest {
         HistoryItem item3 = StubbedHistoryProvider.createHistoryItem(2, timestamp);
         mHistoryProvider.addItem(item3);
 
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
 
         // There should be five items - the header, a date, two history item, and a footer;
         checkAdapterContents(mAdapter, true, true, null, null, item1, item2, null);
@@ -107,7 +117,7 @@ public class HistoryAdapterAccessibilityTest {
         HistoryItem item3 = StubbedHistoryProvider.createHistoryItem(2, timestamp2);
         mHistoryProvider.addItem(item3);
 
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
 
         // There should be six items - the list header, a date header, a history item, another
         // date header, another history item, and the footer.
@@ -163,7 +173,7 @@ public class HistoryAdapterAccessibilityTest {
         HistoryItem item4 = StubbedHistoryProvider.createHistoryItem(0, timestamp4);
         mHistoryProvider.addItem(item4);
 
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
         checkAdapterContents(mAdapter, true, true, null, null, item1, null, item2, null);
 
         mAdapter.search("google");
@@ -199,7 +209,7 @@ public class HistoryAdapterAccessibilityTest {
         HistoryItem item4 = StubbedHistoryProvider.createHistoryItem(1, timestamp4);
         mHistoryProvider.addItem(item4);
 
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
         checkAdapterContents(mAdapter, true, true, null, null, item1, null, item2, null);
 
         mAdapter.search("google");
@@ -232,7 +242,7 @@ public class HistoryAdapterAccessibilityTest {
         HistoryItem item4 = StubbedHistoryProvider.createHistoryItem(4, timestamp2);
         mHistoryProvider.addItem(item4);
 
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
 
         // Only the first 2 of five items should be loaded.
         checkAdapterContents(mAdapter, true, true, null, null, item1, item2, null);
@@ -264,7 +274,7 @@ public class HistoryAdapterAccessibilityTest {
         HistoryItem item4 = StubbedHistoryProvider.createHistoryItem(0, timestamp4);
         mHistoryProvider.addItem(item4);
 
-        mAdapter.initialize();
+        mAdapter.startLoadingItems();
         checkAdapterContents(mAdapter, true, true, null, null, item1, item2, null);
 
         mAdapter.search("google");

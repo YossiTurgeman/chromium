@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,57 +6,72 @@
 
 #include "chrome/browser/extensions/api/debugger/debugger_api.h"
 
-#include <stddef.h>
-
+#include <algorithm>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
+#include <string_view>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/check.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
-#include "base/lazy_instance.h"
-#include "base/macros.h"
-#include "base/memory/singleton.h"
-#include "base/scoped_observer.h"
-#include "base/stl_util.h"
+#include "base/logging.h"
+#include "base/memory/raw_ptr.h"
+#include "base/no_destructor.h"
+#include "base/scoped_observation.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/task/post_task.h"
+#include "base/types/optional_util.h"
 #include "base/values.h"
-#include "chrome/browser/chrome_notification_types.h"
-#include "chrome/browser/devtools/chrome_devtools_manager_delegate.h"
-#include "chrome/browser/extensions/api/debugger/debugger_api_constants.h"
-#include "chrome/browser/extensions/api/debugger/extension_dev_tools_infobar_delegate.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/extension_tab_util.h"
-#include "chrome/browser/extensions/extension_util.h"
+#include "chrome/browser/lifetime/termination_notification.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/webui/chrome_web_ui_controller_factory.h"
+#include "chrome/browser/profiles/profile_observer.h"
 #include "chrome/common/chrome_switches.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "content/public/browser/browser_thread.h"
+#include "chrome/common/extensions/extension_constants.h"
+#include "components/security_interstitials/content/security_interstitial_tab_helper.h"
 #include "content/public/browser/devtools_agent_host.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_source.h"
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/render_process_host.h"
-#include "content/public/browser/render_widget_host.h"
+#include "content/public/browser/security_principal.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/common/content_client.h"
 #include "content/public/common/url_constants.h"
-#include "content/public/common/url_utils.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/extension_host.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_observer.h"
+#include "extensions/browser/extension_util.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_id.h"
+#include "extensions/common/manifest.h"
 #include "extensions/common/manifest_constants.h"
 #include "extensions/common/permissions/permissions_data.h"
-#include "extensions/common/switches.h"
+#include "pdf/buildflags.h"
+#include "url/origin.h"
+#include "url/url_constants.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/extensions/api/debugger/extension_dev_tools_message_delegate.h"
+#else
+#include "chrome/browser/extensions/api/debugger/extension_dev_tools_infobar_delegate.h"
+#endif
+
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+#include "chrome/browser/devtools/chrome_devtools_manager_delegate.h"
+#include "extensions/browser/guest_view/mime_handler_view/mime_handler_view_guest.h"
+#endif
+
+#if BUILDFLAG(ENABLE_PDF)
+#include "components/pdf/common/pdf_util.h"
+#include "pdf/pdf_features.h"
+#endif  // BUILDFLAG(ENABLE_PDF)
 
 using content::DevToolsAgentHost;
 using content::RenderProcessHost;
@@ -69,84 +84,286 @@ namespace OnDetach = extensions::api::debugger::OnDetach;
 namespace OnEvent = extensions::api::debugger::OnEvent;
 namespace SendCommand = extensions::api::debugger::SendCommand;
 
+#if BUILDFLAG(IS_ANDROID)
+namespace ui {
+class WindowAndroid;
+}
+#endif  // BUILDFLAG(IS_ANDROID)
+
 namespace extensions {
 class ExtensionRegistry;
 class ExtensionDevToolsClientHost;
 
 namespace {
 
+constexpr char kAlreadyAttachedError[] =
+    "Another debugger is already attached to the * with id: *.";
+constexpr char kNoTargetError[] = "No * with given id *.";
+constexpr char kInvalidTargetError[] =
+    "Either tab id or extension id must be specified.";
+constexpr char kNotAttachedError[] =
+    "Debugger is not attached to the * with id: *.";
+constexpr char kProtocolVersionNotSupportedError[] =
+    "Requested protocol version is not supported: *.";
+constexpr char kRestrictedError[] = "Cannot attach to this target.";
+constexpr char kDetachedWhileHandlingError[] =
+    "Detached while handling command.";
+
+constexpr char kTabTargetType[] = "tab";
+constexpr char kBackgroundPageTargetType[] = "background page";
+constexpr char kOpaqueTargetType[] = "target";
+
 // Helpers --------------------------------------------------------------------
 
 void CopyDebuggee(Debuggee* dst, const Debuggee& src) {
-  if (src.tab_id)
-    dst->tab_id.reset(new int(*src.tab_id));
-  if (src.extension_id)
-    dst->extension_id.reset(new std::string(*src.extension_id));
-  if (src.target_id)
-    dst->target_id.reset(new std::string(*src.target_id));
+  dst->tab_id = src.tab_id;
+  dst->extension_id = src.extension_id;
+  dst->target_id = src.target_id;
+}
+
+void DebuggerSessionFromDebugee(DebuggerSession& dst,
+                                const Debuggee& src,
+                                std::string* maybe_session_id) {
+  dst.tab_id = src.tab_id;
+  dst.extension_id = src.extension_id;
+  dst.target_id = src.target_id;
+  if (maybe_session_id) {
+    dst.session_id = *maybe_session_id;
+  }
+}
+
+void DebuggeeFromDebuggerSession(Debuggee& dst, const DebuggerSession& src) {
+  dst.tab_id = src.tab_id;
+  dst.extension_id = src.extension_id;
+  dst.target_id = src.target_id;
+}
+
+#if BUILDFLAG(ENABLE_PDF)
+// Returns whether `url` is the URL for the built-in PDF extension.
+bool IsPdfExtensionUrl(const GURL& url) {
+  return url.GetScheme() == kExtensionScheme &&
+         url.GetHost() == extension_misc::kPdfExtensionId;
+}
+
+// Returns whether `principal` is for the built-in PDF extension.
+bool IsPdfExtensionPrincipal(const content::SecurityPrincipal& principal) {
+  return principal.SchemeIs(kExtensionScheme) &&
+         principal.GetHost() == extension_misc::kPdfExtensionId;
+}
+#endif  // BUILDFLAG(ENABLE_PDF)
+
+bool ExtensionMayAttachToTargetProfile(Profile* extension_profile,
+                                       bool allow_incognito_access,
+                                       DevToolsAgentHost& agent_host) {
+  Profile* profile =
+      Profile::FromBrowserContext(agent_host.GetBrowserContext());
+  if (!profile) {
+    return false;
+  }
+  if (!extension_profile->IsSameOrParent(profile)) {
+    return false;
+  }
+  return profile == extension_profile || allow_incognito_access;
 }
 
 // Returns true if the given |Extension| is allowed to attach to the specified
 // |url|.
 bool ExtensionMayAttachToURL(const Extension& extension,
+                             Profile* extension_profile,
                              const GURL& url,
-                             Profile* profile,
                              std::string* error) {
-  if (url == content::kUnreachableWebDataURL)
+  // Allow the extension to attach to about:blank and empty URLs.
+  if (url.is_empty() || url == "about:") {
     return true;
+  }
+
+  if (url == content::kUnreachableWebDataURL) {
+    return true;
+  }
 
   // NOTE: The `debugger` permission implies all URLs access (and indicates
   // such to the user), so we don't check explicit page access. However, we
   // still need to check if it's an otherwise-restricted URL.
-  if (extension.permissions_data()->IsRestrictedUrl(url, error))
-    return false;
-
-  if (url.SchemeIsFile() && !util::AllowFileAccess(extension.id(), profile)) {
-    *error = debugger_api_constants::kRestrictedError;
+  // NOTE: blob URLs are generally restricted but debugger should be able to
+  // attach if it has access to the origin that created the blob.
+  // See https://crbug.com/40285404.
+  const GURL& url_for_restriction_check =
+      url.SchemeIsBlob() ? url::Origin::Create(url).GetURL() : url;
+  if (extension.permissions_data()->IsRestrictedUrl(url_for_restriction_check,
+                                                    error)) {
     return false;
   }
 
+  // Policy blocked hosts supersede the `debugger` permission.
+  if (extension.permissions_data()->IsPolicyBlockedHost(url) ||
+      extension.permissions_data()->IsPolicyBlockedHost(
+          url_for_restriction_check)) {
+    *error = kRestrictedError;
+    return false;
+  }
+
+  if (url.SchemeIsFile() &&
+      !util::AllowFileAccess(extension.id(), extension_profile)) {
+    *error = kRestrictedError;
+    return false;
+  }
+
+  return true;
+}
+
+// Returns whether the extension may attach to a frame. `frame_url` is the URL
+// of the frame, If querying about a frame, `page_url` is non-null, and
+// identifies the URL of the outermost frame.
+bool ExtensionMayAttachToURLOrInnerURL(const Extension& extension,
+                                       Profile* extension_profile,
+                                       const GURL& frame_url,
+                                       const GURL* page_url,
+                                       std::string* error) {
+  // cid: URLs within file: urls are just parts of the top level page, and don't
+  // represent new origins. We skip over these and instead test against the
+  // top-level page URL.
+  if (page_url && page_url->SchemeIsFile() &&
+      frame_url.SchemeIs(url::kContentIDScheme)) {
+    return ExtensionMayAttachToURLOrInnerURL(extension, extension_profile,
+                                             *page_url, nullptr, error);
+  }
+
+  if (!ExtensionMayAttachToURL(extension, extension_profile, frame_url,
+                               error)) {
+    return false;
+  }
+  // For nested URLs, make sure ExtensionMayAttachToURL() allows both
+  // the outer and the inner URLs.
+  if (frame_url.inner_url() &&
+      !ExtensionMayAttachToURL(extension, extension_profile,
+                               *frame_url.inner_url(), error)) {
+    return false;
+  }
   return true;
 }
 
 constexpr char kBrowserTargetId[] = "browser";
 
-constexpr char kPerfettoUIExtensionId[] = "lfmkphfpdbjijhpomgecfikhfohaoine";
+bool ExtensionIsTrusted(const Extension& extension) {
+  if (extension.id() != extension_misc::kPerfettoUIExtensionId) {
+    return false;
+  }
+  return !Manifest::IsUnpackedLocation(extension.location()) ||
+         base::CommandLine::ForCurrentProcess()->HasSwitch(
+             switches::kAllowUnpackedPerfettoExtension);
+}
 
-bool ExtensionMayAttachToBrowser(const Extension& extension) {
-  return extension.id() == kPerfettoUIExtensionId;
+bool ExtensionMayAttachToRenderFrameHost(
+    const Extension& extension,
+    Profile* extension_profile,
+    content::RenderFrameHost* render_frame_host,
+    std::string* error) {
+  bool result = true;
+  const GURL& page_url = render_frame_host->GetLastCommittedURL();
+  render_frame_host->ForEachRenderFrameHostWithAction(
+      [&page_url, &extension, extension_profile, error,
+       &result](content::RenderFrameHost* render_frame_host) {
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+        // If |render_frame_host| is attached to an inner MimeHandlerViewGuest
+        // skip it. This is done to fix crbug.com/40213673 because an extension
+        // cannot inspect another extension.
+        if (MimeHandlerViewGuest::FromRenderFrameHost(render_frame_host)) {
+          return content::RenderFrameHost::FrameIterationAction::kSkipChildren;
+        }
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+
+#if BUILDFLAG(ENABLE_PDF)
+        // The PDF extension frame would normally prevent all other frames in
+        // the frame tree from being attachable. Skip it so this doesn't occur.
+        // This should be okay, since the PDF extension frame and PDF content
+        // frame aren't listed in chrome.debugger.getTargets(). Check both the
+        // last committed origin and the SiteURL for the PDF extension frame,
+        // because this method may be called in the middle of a navigation where
+        // the SiteURL has been updated but navigation hasn't committed yet.
+        if (chrome_pdf::features::IsOopifPdfEnabled() &&
+            (IsPdfExtensionOrigin(
+                 render_frame_host->GetLastCommittedOrigin()) ||
+             IsPdfExtensionPrincipal(render_frame_host->GetSiteInstance()
+                                         ->GetSecurityPrincipal()))) {
+          return content::RenderFrameHost::FrameIterationAction::kContinue;
+        }
+#endif  // BUILDFLAG(ENABLE_PDF)
+
+        if (render_frame_host->GetWebUI()) {
+          *error = kRestrictedError;
+          result = false;
+          return content::RenderFrameHost::FrameIterationAction::kStop;
+        }
+
+        // We check both the last committed URL and the SiteURL because this
+        // method may be called in the middle of a navigation where the SiteURL
+        // has been updated but navigation hasn't committed yet.
+        if (!ExtensionMayAttachToURLOrInnerURL(
+                extension, extension_profile,
+                render_frame_host->GetLastCommittedURL(), &page_url, error) ||
+            !ExtensionMayAttachToURLOrInnerURL(
+                extension, extension_profile,
+                render_frame_host->GetSiteInstance()
+                    ->GetSecurityPrincipal()
+                    .GetDeprecatedSiteURL(),
+                &page_url, error)) {
+          result = false;
+          return content::RenderFrameHost::FrameIterationAction::kStop;
+        }
+
+        return content::RenderFrameHost::FrameIterationAction::kContinue;
+      });
+  return result;
 }
 
 bool ExtensionMayAttachToWebContents(const Extension& extension,
+                                     Profile* extension_profile,
                                      WebContents& web_contents,
-                                     Profile* profile,
                                      std::string* error) {
+  security_interstitials::SecurityInterstitialTabHelper*
+      security_interstitial_tab_helper = security_interstitials::
+          SecurityInterstitialTabHelper::FromWebContents(&web_contents);
+  if (security_interstitial_tab_helper &&
+      security_interstitial_tab_helper->IsDisplayingInterstitial()) {
+    *error = kRestrictedError;
+    return false;
+  }
   // This is *not* redundant to the checks below, as
   // web_contents.GetLastCommittedURL() may be different from
-  // web_contents.GetMainFrame()->GetLastCommittedURL(), with the
+  // web_contents.GetPrimaryMainFrame()->GetLastCommittedURL(), with the
   // former being a 'virtual' URL as obtained from NavigationEntry.
-  if (!ExtensionMayAttachToURL(extension, web_contents.GetLastCommittedURL(),
-                               profile, error)) {
+  if (!ExtensionMayAttachToURL(extension, extension_profile,
+                               web_contents.GetLastCommittedURL(), error)) {
+    return false;
+  }
+  if (web_contents.GetController().GetPendingEntry() &&
+      !ExtensionMayAttachToURL(
+          extension, extension_profile,
+          web_contents.GetController().GetPendingEntry()->GetURL(), error)) {
     return false;
   }
 
-  for (content::RenderFrameHost* rfh : web_contents.GetAllFrames()) {
-    if (!ExtensionMayAttachToURL(extension, rfh->GetLastCommittedURL(), profile,
-                                 error))
-      return false;
-  }
-  return true;
+  return ExtensionMayAttachToRenderFrameHost(
+      extension, extension_profile, web_contents.GetPrimaryMainFrame(), error);
 }
 
 bool ExtensionMayAttachToAgentHost(const Extension& extension,
+                                   bool allow_incognito_access,
+                                   Profile* extension_profile,
                                    DevToolsAgentHost& agent_host,
-                                   Profile* profile,
                                    std::string* error) {
-  if (WebContents* wc = agent_host.GetWebContents())
-    return ExtensionMayAttachToWebContents(extension, *wc, profile, error);
+  if (!ExtensionMayAttachToTargetProfile(extension_profile,
+                                         allow_incognito_access, agent_host)) {
+    *error = kRestrictedError;
+    return false;
+  }
+  if (WebContents* wc = agent_host.GetWebContents()) {
+    return ExtensionMayAttachToWebContents(extension, extension_profile, *wc,
+                                           error);
+  }
 
-  return ExtensionMayAttachToURL(extension, agent_host.GetURL(), profile,
-                                 error);
+  return ExtensionMayAttachToURL(extension, extension_profile,
+                                 agent_host.GetURL(), error);
 }
 
 }  // namespace
@@ -154,40 +371,64 @@ bool ExtensionMayAttachToAgentHost(const Extension& extension,
 // ExtensionDevToolsClientHost ------------------------------------------------
 
 using AttachedClientHosts = std::set<ExtensionDevToolsClientHost*>;
-base::LazyInstance<AttachedClientHosts>::Leaky g_attached_client_hosts =
-    LAZY_INSTANCE_INITIALIZER;
+AttachedClientHosts& GetAttachedClientHosts() {
+  static base::NoDestructor<AttachedClientHosts> attached_client_hosts;
+  return *attached_client_hosts;
+}
 
 class ExtensionDevToolsClientHost : public content::DevToolsAgentHostClient,
-                                    public content::NotificationObserver,
-                                    public ExtensionRegistryObserver {
+                                    public ExtensionRegistryObserver,
+                                    public ProfileObserver {
  public:
-  ExtensionDevToolsClientHost(Profile* profile,
-                              DevToolsAgentHost* agent_host,
-                              scoped_refptr<const Extension> extension,
-                              const Debuggee& debuggee);
+  ExtensionDevToolsClientHost(
+      Profile* profile,
+      DevToolsAgentHost* agent_host,
+      scoped_refptr<const Extension> extension,
+      std::optional<WorkerId> extension_service_worker_id,
+      const Debuggee& debuggee);
+
+  ExtensionDevToolsClientHost(const ExtensionDevToolsClientHost&) = delete;
+  ExtensionDevToolsClientHost& operator=(const ExtensionDevToolsClientHost&) =
+      delete;
 
   ~ExtensionDevToolsClientHost() override;
 
+  std::string GetTypeForMetrics() override { return "Extension"; }
+
   bool Attach();
-  const std::string& extension_id() { return extension_->id(); }
+#if BUILDFLAG(IS_ANDROID)
+  // Creates the "Foo started debugging this browser" warning. Android uses
+  // the messages API for this.
+  void CreateWarningMessage();
+#else
+  // Creates the "Foo started debugging this browser" warning.
+  // Win/Mac/Linux/Chrome OS use the infobar API for this.
+  void CreateWarningInfobar();
+#endif
+  const ExtensionId& extension_id() { return extension_->id(); }
   DevToolsAgentHost* agent_host() { return agent_host_.get(); }
   void RespondDetachedToPendingRequests();
   void Close();
   void SendMessageToBackend(DebuggerSendCommandFunction* function,
                             const std::string& method,
-                            SendCommand::Params::CommandParams* command_params);
+                            SendCommand::Params::CommandParams* command_params,
+                            std::optional<std::string> session_id);
 
   // Closes connection as terminated by the user.
-  void InfoBarDestroyed();
+  void WarningUiDestroyed();
 
   // DevToolsAgentHostClient interface.
   void AgentHostClosed(DevToolsAgentHost* agent_host) override;
   void DispatchProtocolMessage(DevToolsAgentHost* agent_host,
                                base::span<const uint8_t> message) override;
+  bool MayAttachToRenderFrameHost(
+      content::RenderFrameHost* render_frame_host) override;
   bool MayAttachToURL(const GURL& url, bool is_webui) override;
-  bool MayAttachToBrowser() override;
+  bool MayAccessAllCookies() override;
+  bool IsTrusted() override;
   bool MayReadLocalFiles() override;
   bool MayWriteLocalFiles() override;
+  std::optional<url::Origin> GetNavigationInitiatorOrigin() override;
 
  private:
   using PendingRequests =
@@ -195,82 +436,158 @@ class ExtensionDevToolsClientHost : public content::DevToolsAgentHostClient,
 
   void SendDetachedEvent();
 
-  // content::NotificationObserver implementation.
-  void Observe(int type,
-               const content::NotificationSource& source,
-               const content::NotificationDetails& details) override;
+  void OnAppTerminating();
 
   // ExtensionRegistryObserver implementation.
   void OnExtensionUnloaded(content::BrowserContext* browser_context,
                            const Extension* extension,
                            UnloadedExtensionReason reason) override;
+  // ProfileObserver implementation
+  void OnProfileWillBeDestroyed(Profile* profile) override;
 
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
   scoped_refptr<DevToolsAgentHost> agent_host_;
   scoped_refptr<const Extension> extension_;
+  // The WorkerId of the extension service worker that called attach() for this
+  // client host, if any.
+  const std::optional<WorkerId> extension_service_worker_id_;
+
   Debuggee debuggee_;
-  content::NotificationRegistrar registrar_;
+  base::CallbackListSubscription on_app_terminating_subscription_;
   int last_request_id_ = 0;
   PendingRequests pending_requests_;
-  std::unique_ptr<ExtensionDevToolsInfoBarDelegate::CallbackList::Subscription>
-      subscription_;
+#if BUILDFLAG(IS_ANDROID)
+  // Android uses the messages API for warnings.
+  std::unique_ptr<ExtensionDevToolsMessageDelegate> warning_message_;
+#else
+  // Win/Mac/Linux/Chrome OS use the infobar API for warnings.
+  base::CallbackListSubscription warning_infobar_subscription_;
+#endif
   api::debugger::DetachReason detach_reason_ =
-      api::debugger::DETACH_REASON_TARGET_CLOSED;
+      api::debugger::DetachReason::kTargetClosed;
+
+  // A service worker keepalive used to keep the associated worker alive while
+  // this client is attached. Only used if `extension_service_worker_id_` has a
+  // value.
+  std::optional<base::Uuid> service_worker_keepalive_;
 
   // Listen to extension unloaded notification.
-  ScopedObserver<ExtensionRegistry, ExtensionRegistryObserver>
-      extension_registry_observer_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ExtensionDevToolsClientHost);
+  base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
+      extension_registry_observation_{this};
+  base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
 };
 
 ExtensionDevToolsClientHost::ExtensionDevToolsClientHost(
     Profile* profile,
     DevToolsAgentHost* agent_host,
     scoped_refptr<const Extension> extension,
+    std::optional<WorkerId> extension_service_worker_id,
     const Debuggee& debuggee)
     : profile_(profile),
       agent_host_(agent_host),
-      extension_(std::move(extension)) {
+      extension_(std::move(extension)),
+      extension_service_worker_id_(std::move(extension_service_worker_id)) {
   CopyDebuggee(&debuggee_, debuggee);
 
-  g_attached_client_hosts.Get().insert(this);
+  GetAttachedClientHosts().insert(this);
 
   // ExtensionRegistryObserver listen extension unloaded and detach debugger
   // from there.
-  extension_registry_observer_.Add(ExtensionRegistry::Get(profile_));
+  extension_registry_observation_.Observe(ExtensionRegistry::Get(profile_));
+  profile_observation_.Observe(profile_);
 
   // RVH-based agents disconnect from their clients when the app is terminating
   // but shared worker-based agents do not.
   // Disconnect explicitly to make sure that |this| observer is not leaked.
-  registrar_.Add(this, chrome::NOTIFICATION_APP_TERMINATING,
-                 content::NotificationService::AllSources());
+  on_app_terminating_subscription_ =
+      browser_shutdown::AddAppTerminatingCallback(
+          base::BindOnce(&ExtensionDevToolsClientHost::OnAppTerminating,
+                         base::Unretained(this)));
 }
 
 bool ExtensionDevToolsClientHost::Attach() {
   // Attach to debugger and tell it we are ready.
-  if (!agent_host_->AttachClient(this))
+  if (!agent_host_->AttachClient(this)) {
     return false;
-
-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          ::switches::kSilentDebuggerExtensionAPI)) {
-    return true;
   }
 
   // We allow policy-installed extensions to circumvent the normal
-  // infobar warning. See crbug.com/693621.
-  if (Manifest::IsPolicyLocation(extension_->location()))
-    return true;
+  // infobar warning. See crbug.com/41302695.
+  const bool suppress_warning =
+      base::CommandLine::ForCurrentProcess()->HasSwitch(
+          ::switches::kSilentDebuggerExtensionAPI) ||
+      Manifest::IsPolicyLocation(extension_->location());
 
-  subscription_ = ExtensionDevToolsInfoBarDelegate::Create(
-      extension_id(), extension_->name(),
-      base::BindOnce(&ExtensionDevToolsClientHost::InfoBarDestroyed,
-                     base::Unretained(this)));
+  if (!suppress_warning) {
+#if BUILDFLAG(IS_ANDROID)
+    CreateWarningMessage();
+#else
+    CreateWarningInfobar();
+#endif
+  }
+
+  if (extension_service_worker_id_) {
+    ProcessManager* process_manager = ProcessManager::Get(profile_);
+    CHECK(process_manager);
+    // The service worker should definitely be registered at this point.
+    CHECK(process_manager->HasServiceWorker(*extension_service_worker_id_));
+    service_worker_keepalive_ =
+        process_manager->IncrementServiceWorkerKeepaliveCount(
+            *extension_service_worker_id_,
+            content::ServiceWorkerExternalRequestTimeoutType::kDoesNotTimeout,
+            Activity::DEBUGGER, /*extra_data=*/std::string());
+  }
+
   return true;
 }
 
+#if BUILDFLAG(IS_ANDROID)
+// Android uses the messages API for the warning message.
+void ExtensionDevToolsClientHost::CreateWarningMessage() {
+  if (warning_message_) {
+    // Already open.
+    return;
+  }
+  WebContents* web_contents = agent_host_->GetWebContents();
+  if (!web_contents) {
+    return;
+  }
+  ui::WindowAndroid* window = web_contents->GetTopLevelNativeWindow();
+  if (!window) {
+    return;
+  }
+  warning_message_ = std::make_unique<ExtensionDevToolsMessageDelegate>(
+      extension_->name(),
+      base::BindOnce(&ExtensionDevToolsClientHost::WarningUiDestroyed,
+                     base::Unretained(this)));
+  warning_message_->Show(window);
+}
+#else
+// Win/Mac/Linux/Chrome OS use the infobar API for the warning message.
+void ExtensionDevToolsClientHost::CreateWarningInfobar() {
+  warning_infobar_subscription_ = ExtensionDevToolsInfoBarDelegate::Create(
+      extension_id(), extension_->name(),
+      base::BindOnce(&ExtensionDevToolsClientHost::WarningUiDestroyed,
+                     base::Unretained(this)));
+}
+#endif  // BUILDFLAG(IS_ANDROID)
+
 ExtensionDevToolsClientHost::~ExtensionDevToolsClientHost() {
-  g_attached_client_hosts.Get().erase(this);
+  GetAttachedClientHosts().erase(this);
+
+  // Decrement the associated worker keepalive, if any.
+  if (service_worker_keepalive_) {
+    CHECK(extension_service_worker_id_);
+    ProcessManager* process_manager = ProcessManager::Get(profile_);
+    CHECK(process_manager);
+    // The worker may have terminated for other reasons. Only decrement the
+    // keepalive if it's still around.
+    if (process_manager->HasServiceWorker(*extension_service_worker_id_)) {
+      process_manager->DecrementServiceWorkerKeepaliveCount(
+          *extension_service_worker_id_, *service_worker_keepalive_,
+          Activity::DEBUGGER, /*extra_data=*/std::string());
+    }
+  }
 }
 
 // DevToolsAgentHostClient implementation.
@@ -290,43 +607,45 @@ void ExtensionDevToolsClientHost::Close() {
 void ExtensionDevToolsClientHost::SendMessageToBackend(
     DebuggerSendCommandFunction* function,
     const std::string& method,
-    SendCommand::Params::CommandParams* command_params) {
-  base::DictionaryValue protocol_request;
+    SendCommand::Params::CommandParams* command_params,
+    std::optional<std::string> session_id) {
+  base::DictValue protocol_request;
   int request_id = ++last_request_id_;
   pending_requests_[request_id] = function;
-  protocol_request.SetInteger("id", request_id);
-  protocol_request.SetString("method", method);
+  protocol_request.Set("id", request_id);
+  protocol_request.Set("method", method);
   if (command_params) {
-    protocol_request.Set(
-        "params", command_params->additional_properties.CreateDeepCopy());
+    protocol_request.Set("params",
+                         command_params->additional_properties.Clone());
+  }
+  if (session_id.has_value()) {
+    protocol_request.Set("sessionId", session_id.value());
   }
 
-  std::string json;
-  base::JSONWriter::Write(protocol_request, &json);
-
-  agent_host_->DispatchProtocolMessage(this,
-                                       base::as_bytes(base::make_span(json)));
+  std::string json = base::WriteJson(protocol_request).value_or("");
+  agent_host_->DispatchProtocolMessage(this, base::as_byte_span(json));
 }
 
-void ExtensionDevToolsClientHost::InfoBarDestroyed() {
-  detach_reason_ = api::debugger::DETACH_REASON_CANCELED_BY_USER;
+void ExtensionDevToolsClientHost::WarningUiDestroyed() {
+  detach_reason_ = api::debugger::DetachReason::kCanceledByUser;
   RespondDetachedToPendingRequests();
   SendDetachedEvent();
   Close();
 }
 
 void ExtensionDevToolsClientHost::RespondDetachedToPendingRequests() {
-  for (const auto& it : pending_requests_)
+  for (const auto& it : pending_requests_) {
     it.second->SendDetachedError();
+  }
   pending_requests_.clear();
 }
 
 void ExtensionDevToolsClientHost::SendDetachedEvent() {
-  if (!EventRouter::Get(profile_))
+  if (!EventRouter::Get(profile_)) {
     return;
+  }
 
-  std::unique_ptr<base::ListValue> args(
-      OnDetach::Create(debuggee_, detach_reason_));
+  auto args(OnDetach::Create(debuggee_, detach_reason_));
   auto event =
       std::make_unique<Event>(events::DEBUGGER_ON_DETACH, OnDetach::kEventName,
                               std::move(args), profile_);
@@ -334,19 +653,22 @@ void ExtensionDevToolsClientHost::SendDetachedEvent() {
                                                        std::move(event));
 }
 
+void ExtensionDevToolsClientHost::OnProfileWillBeDestroyed(Profile* profile) {
+  if (profile == profile_) {
+    Close();
+  }
+}
+
 void ExtensionDevToolsClientHost::OnExtensionUnloaded(
     content::BrowserContext* browser_context,
     const Extension* extension,
     UnloadedExtensionReason reason) {
-  if (extension->id() == extension_id())
+  if (extension->id() == extension_id()) {
     Close();
+  }
 }
 
-void ExtensionDevToolsClientHost::Observe(
-    int type,
-    const content::NotificationSource& source,
-    const content::NotificationDetails& details) {
-  DCHECK_EQ(chrome::NOTIFICATION_APP_TERMINATING, type);
+void ExtensionDevToolsClientHost::OnAppTerminating() {
   Close();
 }
 
@@ -354,61 +676,75 @@ void ExtensionDevToolsClientHost::DispatchProtocolMessage(
     DevToolsAgentHost* agent_host,
     base::span<const uint8_t> message) {
   DCHECK(agent_host == agent_host_.get());
-  if (!EventRouter::Get(profile_))
+  if (!EventRouter::Get(profile_)) {
     return;
+  }
 
-  base::StringPiece message_str(reinterpret_cast<const char*>(message.data()),
-                                message.size());
-  std::unique_ptr<base::Value> result = base::JSONReader::ReadDeprecated(
+  std::string_view message_str = base::as_string_view(message);
+  std::optional<base::Value> result = base::JSONReader::Read(
       message_str, base::JSON_REPLACE_INVALID_CHARACTERS);
   if (!result || !result->is_dict()) {
     LOG(ERROR) << "Tried to send invalid message to extension: " << message_str;
     return;
   }
-  base::DictionaryValue* dictionary =
-      static_cast<base::DictionaryValue*>(result.get());
+  base::DictValue& dictionary = result->GetDict();
 
-  int id;
-  if (!dictionary->GetInteger("id", &id)) {
-    std::string method_name;
-    if (!dictionary->GetString("method", &method_name))
+  std::optional<int> id = dictionary.FindInt("id");
+  if (!id) {
+    std::string* method_name = dictionary.FindString("method");
+    if (!method_name) {
       return;
+    }
 
     OnEvent::Params params;
-    base::DictionaryValue* params_value;
-    if (dictionary->GetDictionary("params", &params_value))
-      params.additional_properties.Swap(params_value);
+    if (base::DictValue* params_value = dictionary.FindDict("params")) {
+      params.additional_properties = std::move(*params_value);
+    }
 
-    std::unique_ptr<base::ListValue> args(
-        OnEvent::Create(debuggee_, method_name, params));
+    DebuggerSession session;
+    DebuggerSessionFromDebugee(session, debuggee_,
+                               dictionary.FindString("sessionId"));
+
+    auto args(OnEvent::Create(session, *method_name, params));
     auto event =
         std::make_unique<Event>(events::DEBUGGER_ON_EVENT, OnEvent::kEventName,
                                 std::move(args), profile_);
     EventRouter::Get(profile_)->DispatchEventToExtension(extension_id(),
                                                          std::move(event));
   } else {
-    auto it = pending_requests_.find(id);
-    if (it == pending_requests_.end())
+    auto it = pending_requests_.find(*id);
+    if (it == pending_requests_.end()) {
       return;
+    }
 
-    it->second->SendResponseBody(dictionary);
+    it->second->SendResponseBody(base::Value(std::move(dictionary)));
     pending_requests_.erase(it);
   }
 }
 
-bool ExtensionDevToolsClientHost::MayAttachToURL(const GURL& url,
-                                                 bool is_webui) {
-  if (is_webui)
-    return false;
-  // Allow the extension to attach to about:blank.
-  if (url.is_empty() || url == "about:")
-    return true;
+bool ExtensionDevToolsClientHost::MayAttachToRenderFrameHost(
+    content::RenderFrameHost* render_frame_host) {
   std::string error;
-  return ExtensionMayAttachToURL(*extension_, url, profile_, &error);
+  return ExtensionMayAttachToRenderFrameHost(*extension_, profile_,
+                                             render_frame_host, &error);
 }
 
-bool ExtensionDevToolsClientHost::MayAttachToBrowser() {
-  return ExtensionMayAttachToBrowser(*extension_);
+bool ExtensionDevToolsClientHost::MayAttachToURL(const GURL& url,
+                                                 bool is_webui) {
+  if (is_webui) {
+    return false;
+  }
+  std::string error;
+  return ExtensionMayAttachToURLOrInnerURL(*extension_, profile_, url, nullptr,
+                                           &error);
+}
+
+bool ExtensionDevToolsClientHost::MayAccessAllCookies() {
+  return false;
+}
+
+bool ExtensionDevToolsClientHost::IsTrusted() {
+  return ExtensionIsTrusted(*extension_);
 }
 
 bool ExtensionDevToolsClientHost::MayReadLocalFiles() {
@@ -417,6 +753,14 @@ bool ExtensionDevToolsClientHost::MayReadLocalFiles() {
 
 bool ExtensionDevToolsClientHost::MayWriteLocalFiles() {
   return false;
+}
+
+std::optional<url::Origin>
+ExtensionDevToolsClientHost::GetNavigationInitiatorOrigin() {
+  // Ensure that navigations started by debugger API are treated as
+  // renderer-initiated by this extension, so that URL spoof defenses are in
+  // effect.
+  return extension_->origin();
 }
 
 // DebuggerFunction -----------------------------------------------------------
@@ -428,17 +772,15 @@ DebuggerFunction::~DebuggerFunction() = default;
 std::string DebuggerFunction::FormatErrorMessage(const std::string& format) {
   if (debuggee_.tab_id) {
     return ErrorUtils::FormatErrorMessage(
-        format, debugger_api_constants::kTabTargetType,
-        base::NumberToString(*debuggee_.tab_id));
+        format, kTabTargetType, base::NumberToString(*debuggee_.tab_id));
   }
   if (debuggee_.extension_id) {
-    return ErrorUtils::FormatErrorMessage(
-        format, debugger_api_constants::kBackgroundPageTargetType,
-        *debuggee_.extension_id);
+    return ErrorUtils::FormatErrorMessage(format, kBackgroundPageTargetType,
+                                          *debuggee_.extension_id);
   }
 
-  return ErrorUtils::FormatErrorMessage(
-      format, debugger_api_constants::kOpaqueTargetType, *debuggee_.target_id);
+  return ErrorUtils::FormatErrorMessage(format, kOpaqueTargetType,
+                                        *debuggee_.target_id);
 }
 
 bool DebuggerFunction::InitAgentHost(std::string* error) {
@@ -449,8 +791,8 @@ bool DebuggerFunction::InitAgentHost(std::string* error) {
         &web_contents);
     if (result && web_contents) {
       if (!ExtensionMayAttachToWebContents(
-              *extension(), *web_contents,
-              Profile::FromBrowserContext(browser_context()), error)) {
+              *extension(), Profile::FromBrowserContext(browser_context()),
+              *web_contents, error)) {
         return false;
       }
 
@@ -461,8 +803,9 @@ bool DebuggerFunction::InitAgentHost(std::string* error) {
         ProcessManager::Get(browser_context())
             ->GetBackgroundHostForExtension(*debuggee_.extension_id);
     if (extension_host) {
-      if (extension()->permissions_data()->IsRestrictedUrl(
-              extension_host->GetLastCommittedURL(), error)) {
+      const GURL& url = extension_host->GetLastCommittedURL();
+      if (extension()->permissions_data()->IsRestrictedUrl(url, error) ||
+          extension()->permissions_data()->IsPolicyBlockedHost(url)) {
         return false;
       }
       agent_host_ =
@@ -473,21 +816,21 @@ bool DebuggerFunction::InitAgentHost(std::string* error) {
         DevToolsAgentHost::GetForId(*debuggee_.target_id);
     if (agent_host) {
       if (!ExtensionMayAttachToAgentHost(
-              *extension(), *agent_host,
-              Profile::FromBrowserContext(browser_context()), error)) {
+              *extension(), include_incognito_information(),
+              Profile::FromBrowserContext(browser_context()), *agent_host,
+              error)) {
         return false;
       }
       agent_host_ = std::move(agent_host);
     } else if (*debuggee_.target_id == kBrowserTargetId &&
-               ExtensionMayAttachToBrowser(*extension())) {
+               ExtensionIsTrusted(*extension())) {
       // TODO(caseq): get rid of the below code, browser agent host should
       // really be a singleton.
       // Re-use existing browser agent hosts.
-      const std::string& extension_id = extension()->id();
-      AttachedClientHosts& hosts = g_attached_client_hosts.Get();
-      auto it = std::find_if(
-          hosts.begin(), hosts.end(),
-          [&extension_id](ExtensionDevToolsClientHost* client_host) {
+      const ExtensionId& extension_id = extension()->id();
+      AttachedClientHosts& hosts = GetAttachedClientHosts();
+      auto it = std::ranges::find_if(
+          hosts, [&extension_id](ExtensionDevToolsClientHost* client_host) {
             return client_host->extension_id() == extension_id &&
                    client_host->agent_host() &&
                    client_host->agent_host()->GetType() ==
@@ -500,24 +843,25 @@ bool DebuggerFunction::InitAgentHost(std::string* error) {
                               DevToolsAgentHost::CreateServerSocketCallback());
     }
   } else {
-    *error = debugger_api_constants::kInvalidTargetError;
+    *error = kInvalidTargetError;
     return false;
   }
 
   if (!agent_host_.get()) {
-    *error = FormatErrorMessage(debugger_api_constants::kNoTargetError);
+    *error = FormatErrorMessage(kNoTargetError);
     return false;
   }
   return true;
 }
 
 bool DebuggerFunction::InitClientHost(std::string* error) {
-  if (!InitAgentHost(error))
+  if (!InitAgentHost(error)) {
     return false;
+  }
 
   client_host_ = FindClientHost();
   if (!client_host_) {
-    *error = FormatErrorMessage(debugger_api_constants::kNotAttachedError);
+    *error = FormatErrorMessage(kNotAttachedError);
     return false;
   }
 
@@ -525,14 +869,15 @@ bool DebuggerFunction::InitClientHost(std::string* error) {
 }
 
 ExtensionDevToolsClientHost* DebuggerFunction::FindClientHost() {
-  if (!agent_host_.get())
+  if (!agent_host_.get()) {
     return nullptr;
+  }
 
-  const std::string& extension_id = extension()->id();
+  const ExtensionId& extension_id = extension()->id();
   DevToolsAgentHost* agent_host = agent_host_.get();
-  AttachedClientHosts& hosts = g_attached_client_hosts.Get();
-  auto it = std::find_if(
-      hosts.begin(), hosts.end(),
+  AttachedClientHosts& hosts = GetAttachedClientHosts();
+  auto it = std::ranges::find_if(
+      hosts,
       [&agent_host, &extension_id](ExtensionDevToolsClientHost* client_host) {
         return client_host->agent_host() == agent_host &&
                client_host->extension_id() == extension_id;
@@ -548,35 +893,35 @@ DebuggerAttachFunction::DebuggerAttachFunction() = default;
 DebuggerAttachFunction::~DebuggerAttachFunction() = default;
 
 ExtensionFunction::ResponseAction DebuggerAttachFunction::Run() {
-  std::unique_ptr<Attach::Params> params(Attach::Params::Create(*args_));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<Attach::Params> params = Attach::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   CopyDebuggee(&debuggee_, params->target);
   std::string error;
-  if (!InitAgentHost(&error))
+  if (!InitAgentHost(&error)) {
     return RespondNow(Error(std::move(error)));
+  }
 
   if (!DevToolsAgentHost::IsSupportedProtocolVersion(
           params->required_version)) {
     return RespondNow(Error(ErrorUtils::FormatErrorMessage(
-        debugger_api_constants::kProtocolVersionNotSupportedError,
-        params->required_version)));
+        kProtocolVersionNotSupportedError, params->required_version)));
   }
 
   if (FindClientHost()) {
-    return RespondNow(Error(
-        FormatErrorMessage(debugger_api_constants::kAlreadyAttachedError)));
+    return RespondNow(Error(FormatErrorMessage(kAlreadyAttachedError)));
   }
 
+  Profile* profile = Profile::FromBrowserContext(browser_context());
   auto host = std::make_unique<ExtensionDevToolsClientHost>(
-      Profile::FromBrowserContext(browser_context()), agent_host_.get(),
-      extension(), debuggee_);
+      profile, agent_host_.get(), extension(), worker_id(), debuggee_);
 
   if (!host->Attach()) {
-    return RespondNow(Error(debugger_api_constants::kRestrictedError));
+    return RespondNow(Error(kRestrictedError));
   }
 
   host.release();  // An attached client host manages its own lifetime.
+
   return RespondNow(NoArguments());
 }
 
@@ -587,13 +932,14 @@ DebuggerDetachFunction::DebuggerDetachFunction() = default;
 DebuggerDetachFunction::~DebuggerDetachFunction() = default;
 
 ExtensionFunction::ResponseAction DebuggerDetachFunction::Run() {
-  std::unique_ptr<Detach::Params> params(Detach::Params::Create(*args_));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<Detach::Params> params = Detach::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   CopyDebuggee(&debuggee_, params->target);
   std::string error;
-  if (!InitClientHost(&error))
+  if (!InitClientHost(&error)) {
     return RespondNow(Error(std::move(error)));
+  }
 
   client_host_->RespondDetachedToPendingRequests();
   client_host_->Close();
@@ -607,42 +953,41 @@ DebuggerSendCommandFunction::DebuggerSendCommandFunction() = default;
 DebuggerSendCommandFunction::~DebuggerSendCommandFunction() = default;
 
 ExtensionFunction::ResponseAction DebuggerSendCommandFunction::Run() {
-  std::unique_ptr<SendCommand::Params> params(
-      SendCommand::Params::Create(*args_));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<SendCommand::Params> params =
+      SendCommand::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
-  CopyDebuggee(&debuggee_, params->target);
+  DebuggeeFromDebuggerSession(debuggee_, params->target);
   std::string error;
-  if (!InitClientHost(&error))
+  if (!InitClientHost(&error)) {
     return RespondNow(Error(std::move(error)));
+  }
 
-  client_host_->SendMessageToBackend(this, params->method,
-      params->command_params.get());
-  if (did_respond())
+  client_host_->SendMessageToBackend(
+      this, params->method, base::OptionalToPtr(params->command_params),
+      params->target.session_id);
+  if (did_respond()) {
     return AlreadyResponded();
+  }
   return RespondLater();
 }
 
-void DebuggerSendCommandFunction::SendResponseBody(
-    base::DictionaryValue* response) {
-  base::Value* error_body;
-  if (response->Get("error", &error_body)) {
-    std::string error;
-    base::JSONWriter::Write(*error_body, &error);
-    Respond(Error(std::move(error)));
+void DebuggerSendCommandFunction::SendResponseBody(base::Value response) {
+  if (base::Value* error_body = response.GetDict().Find("error")) {
+    Respond(Error(base::WriteJson(*error_body).value_or("")));
     return;
   }
 
-  base::DictionaryValue* result_body;
   SendCommand::Results::Result result;
-  if (response->GetDictionary("result", &result_body))
-    result.additional_properties.Swap(result_body);
+  if (base::DictValue* result_body = response.GetDict().FindDict("result")) {
+    result.additional_properties = std::move(*result_body);
+  }
 
   Respond(ArgumentList(SendCommand::Results::Create(result)));
 }
 
 void DebuggerSendCommandFunction::SendDetachedError() {
-  Respond(Error(debugger_api_constants::kDetachedWhileHandlingError));
+  Respond(Error(kDetachedWhileHandlingError));
 }
 
 // DebuggerGetTargetsFunction -------------------------------------------------
@@ -658,39 +1003,47 @@ const char kTargetFaviconUrlField[] = "faviconUrl";
 const char kTargetTabIdField[] = "tabId";
 const char kTargetExtensionIdField[] = "extensionId";
 const char kTargetTypePage[] = "page";
+#if BUILDFLAG(ENABLE_EXTENSIONS)
 const char kTargetTypeBackgroundPage[] = "background_page";
+#endif
 const char kTargetTypeWorker[] = "worker";
 const char kTargetTypeOther[] = "other";
 
-std::unique_ptr<base::DictionaryValue> SerializeTarget(
-    scoped_refptr<DevToolsAgentHost> host) {
-  std::unique_ptr<base::DictionaryValue> dictionary(
-      new base::DictionaryValue());
-  dictionary->SetString(kTargetIdField, host->GetId());
-  dictionary->SetString(kTargetTitleField, host->GetTitle());
-  dictionary->SetBoolean(kTargetAttachedField, host->IsAttached());
-  dictionary->SetString(kTargetUrlField, host->GetURL().spec());
+base::DictValue SerializeTarget(scoped_refptr<DevToolsAgentHost> host) {
+  base::DictValue dictionary;
+  dictionary.Set(kTargetIdField, host->GetId());
+  dictionary.Set(kTargetTitleField, host->GetTitle());
+  dictionary.Set(kTargetAttachedField, host->IsAttached());
+  dictionary.Set(kTargetUrlField, host->GetURL().spec());
 
   std::string type = host->GetType();
   std::string target_type = kTargetTypeOther;
   if (type == DevToolsAgentHost::kTypePage) {
     int tab_id =
         extensions::ExtensionTabUtil::GetTabId(host->GetWebContents());
-    dictionary->SetInteger(kTargetTabIdField, tab_id);
+    if (tab_id != api::tabs::TAB_ID_NONE) {
+      dictionary.Set(kTargetTabIdField, tab_id);
+    } else {
+      dictionary.Set(kTargetExtensionIdField, host->GetURL().GetHost());
+    }
     target_type = kTargetTypePage;
+// TODO(crbug.com/405218860): Support background pages on desktop Android.
+#if BUILDFLAG(ENABLE_EXTENSIONS)
   } else if (type == ChromeDevToolsManagerDelegate::kTypeBackgroundPage) {
-    dictionary->SetString(kTargetExtensionIdField, host->GetURL().host());
+    dictionary.Set(kTargetExtensionIdField, host->GetURL().GetHost());
     target_type = kTargetTypeBackgroundPage;
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
   } else if (type == DevToolsAgentHost::kTypeServiceWorker ||
              type == DevToolsAgentHost::kTypeSharedWorker) {
     target_type = kTargetTypeWorker;
   }
 
-  dictionary->SetString(kTargetTypeField, target_type);
+  dictionary.Set(kTargetTypeField, target_type);
 
   GURL favicon_url = host->GetFaviconURL();
-  if (favicon_url.is_valid())
-    dictionary->SetString(kTargetFaviconUrlField, favicon_url.spec());
+  if (favicon_url.is_valid()) {
+    dictionary.Set(kTargetFaviconUrlField, favicon_url.spec());
+  }
 
   return dictionary;
 }
@@ -703,11 +1056,34 @@ DebuggerGetTargetsFunction::~DebuggerGetTargetsFunction() = default;
 
 ExtensionFunction::ResponseAction DebuggerGetTargetsFunction::Run() {
   content::DevToolsAgentHost::List list = DevToolsAgentHost::GetOrCreateAll();
-  std::unique_ptr<base::ListValue> result(new base::ListValue());
-  for (size_t i = 0; i < list.size(); ++i)
-    result->Append(SerializeTarget(list[i]));
+  base::ListValue result;
+  Profile* profile = Profile::FromBrowserContext(browser_context());
+  for (auto& host : list) {
+    // TODO(crbug.com/40233332): hide all Tab targets for now to avoid
+    // compatibility problems. Consider exposing them later when they're fully
+    // supported, and compatibility considerations are better understood.
+    if (host->GetType() == DevToolsAgentHost::kTypeTab) {
+      continue;
+    }
+    if (!ExtensionMayAttachToTargetProfile(
+            profile, include_incognito_information(), *host)) {
+      continue;
+    }
+#if BUILDFLAG(ENABLE_PDF)
+    // OOPIF PDF viewer only. Don't list the `content::DevToolsAgentHost`s for
+    // inner PDF frames. PDF extension frames and PDF content frames shouldn't
+    // be exposed to chrome.debugger clients.
+    auto* process_host = host->GetProcessHost();
+    if (chrome_pdf::features::IsOopifPdfEnabled() &&
+        (IsPdfExtensionUrl(host->GetURL()) ||
+         (process_host && process_host->IsPdf()))) {
+      continue;
+    }
+#endif  // BUILDFLAG(ENABLE_PDF)
+    result.Append(SerializeTarget(host));
+  }
 
-  return RespondNow(OneArgument(std::move(result)));
+  return RespondNow(WithArguments(std::move(result)));
 }
 
 }  // namespace extensions

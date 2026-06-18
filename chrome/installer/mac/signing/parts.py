@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """
@@ -8,8 +8,8 @@ bundle that need to be signed, as well as providing utilities to sign them.
 
 import os.path
 
-from . import commands, signing
-from .model import CodeSignOptions, CodeSignedProduct, VerifyOptions
+from signing import commands, signing
+from signing.model import CodeSignOptions, CodeSignedProduct, VerifyOptions
 
 _PROVISIONPROFILE_EXT = '.provisionprofile'
 _PROVISIONPROFILE_DEST = 'embedded.provisionprofile'
@@ -33,7 +33,7 @@ def get_parts(config):
     else:
         uncustomized_bundle_id = config.base_bundle_id
 
-    verify_options = VerifyOptions.DEEP + VerifyOptions.STRICT
+    verify_options = VerifyOptions.DEEP | VerifyOptions.STRICT
 
     parts = {
         'app':
@@ -50,14 +50,6 @@ def get_parts(config):
                 # The framework is a dylib, so options= flags are meaningless.
                 config.framework_dir,
                 '{}.framework'.format(uncustomized_bundle_id),
-                verify_options=verify_options),
-        'notification-xpc':
-            CodeSignedProduct(
-                '{.framework_dir}/XPCServices/AlertNotificationService.xpc'
-                .format(config),
-                '{}.framework.AlertNotificationService'.format(
-                    config.base_bundle_id),
-                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
                 verify_options=verify_options),
         'crashpad':
             CodeSignedProduct(
@@ -81,8 +73,8 @@ def get_parts(config):
                 # Do not use |CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS|
                 # because library validation is incompatible with the JIT
                 # entitlement.
-                options=CodeSignOptions.RESTRICT + CodeSignOptions.KILL +
-                CodeSignOptions.HARDENED_RUNTIME,
+                options=CodeSignOptions.RESTRICT | CodeSignOptions.KILL
+                | CodeSignOptions.HARDENED_RUNTIME,
                 entitlements='helper-renderer-entitlements.plist',
                 verify_options=verify_options),
         'helper-gpu-app':
@@ -93,21 +85,17 @@ def get_parts(config):
                 # Do not use |CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS|
                 # because library validation is incompatible with more
                 # permissive code signing entitlements.
-                options=CodeSignOptions.RESTRICT + CodeSignOptions.KILL +
-                CodeSignOptions.HARDENED_RUNTIME,
+                options=CodeSignOptions.RESTRICT | CodeSignOptions.KILL
+                | CodeSignOptions.HARDENED_RUNTIME,
                 entitlements='helper-gpu-entitlements.plist',
                 verify_options=verify_options),
-        'helper-plugin-app':
+        'helper-alerts':
             CodeSignedProduct(
-                '{0.framework_dir}/Helpers/{0.product} Helper (Plugin).app'
+                '{0.framework_dir}/Helpers/{0.product} Helper (Alerts).app'
                 .format(config),
-                '{}.helper.plugin'.format(uncustomized_bundle_id),
-                # Do not use |CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS|
-                # because library validation is incompatible with the
-                # disable-library-validation entitlement.
-                options=CodeSignOptions.RESTRICT + CodeSignOptions.KILL +
-                CodeSignOptions.HARDENED_RUNTIME,
-                entitlements='helper-plugin-entitlements.plist',
+                '{}.framework.AlertNotificationService'.format(
+                    config.base_bundle_id),
+                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
                 verify_options=verify_options),
         'app-mode-app':
             CodeSignedProduct(
@@ -115,15 +103,34 @@ def get_parts(config):
                 'app_mode_loader',
                 options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
                 verify_options=verify_options),
+        'web-app-shortcut-copier':
+            CodeSignedProduct(
+                '{.framework_dir}/Helpers/web_app_shortcut_copier'.format(
+                    config),
+                '{}.web_app_shortcut_copier'.format(uncustomized_bundle_id),
+                options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
+                sign_with_identifier=True,
+                verify_options=verify_options),
     }
 
-    dylibs = (
+    if config.enable_updater:
+        parts['privileged-helper'] = CodeSignedProduct(
+            ('{.app_product}.app/Contents/Library/LaunchServices/' +
+             '{}.UpdaterPrivilegedHelper').format(config,
+                                                  uncustomized_bundle_id),
+            '{}.UpdaterPrivilegedHelper'.format(uncustomized_bundle_id),
+            options=CodeSignOptions.FULL_HARDENED_RUNTIME_OPTIONS,
+            verify_options=verify_options)
+
+    dylibs = [
         'libEGL.dylib',
         'libGLESv2.dylib',
-        'libswiftshader_libEGL.dylib',
-        'libswiftshader_libGLESv2.dylib',
         'libvk_swiftshader.dylib',
-    )
+    ]
+    if config.shared_libvulkan_on_mac:
+        dylibs.append('libvulkan.dylib')
+    if config.is_chrome_branded():
+        dylibs.append('liboptimization_guide_internal.dylib')
     for library in dylibs:
         library_basename = os.path.basename(library)
         parts[library_basename] = CodeSignedProduct(
@@ -156,18 +163,18 @@ def get_installer_tools(config):
     )
     for binary in binaries:
         options = (
-            CodeSignOptions.HARDENED_RUNTIME + CodeSignOptions.RESTRICT +
-            CodeSignOptions.LIBRARY_VALIDATION + CodeSignOptions.KILL)
+            CodeSignOptions.HARDENED_RUNTIME | CodeSignOptions.RESTRICT
+            | CodeSignOptions.LIBRARY_VALIDATION | CodeSignOptions.KILL)
         tools[binary] = CodeSignedProduct(
             '{.packaging_dir}/{binary}'.format(config, binary=binary),
             binary.replace('.dylib', ''),
             options=options if not binary.endswith('dylib') else None,
-            verify_options=VerifyOptions.DEEP + VerifyOptions.STRICT)
+            verify_options=VerifyOptions.DEEP | VerifyOptions.STRICT)
 
     return tools
 
 
-def sign_chrome(paths, config, sign_framework=False):
+async def sign_chrome(paths, config, sign_framework=False):
     """Code signs the Chrome application bundle and all of its internal nested
     code parts.
 
@@ -191,7 +198,7 @@ def sign_chrome(paths, config, sign_framework=False):
         # signing the Current version.
         # https://developer.apple.com/library/content/technotes/tn2206/_index.html#//apple_ref/doc/uid/DTS40007919-CH1-TNTAG13
         for name, part in parts.items():
-            if name in ('app', 'framework'):
+            if name in ('app', 'framework', 'privileged-helper'):
                 continue
             signing.sign_part(paths, config, part)
 
@@ -207,15 +214,18 @@ def sign_chrome(paths, config, sign_framework=False):
             os.path.join(paths.work, parts['app'].path, 'Contents',
                          _PROVISIONPROFILE_DEST))
 
+    # Sign the privileged helper.
+    if 'privileged-helper' in parts:
+        signing.sign_part(paths, config, parts['privileged-helper'])
+
     # Sign the outer app bundle.
     signing.sign_part(paths, config, parts['app'])
 
-    # Verify all the parts.
-    for part in parts.values():
-        signing.verify_part(paths, part)
-
     # Display the code signature.
-    signing.validate_app(paths, config, parts['app'])
+    await signing.validate_app(paths, config, parts['app'])
+
+    # Validate the app's architecture geometry, if configured.
+    signing.validate_app_geometry(paths, config, parts['app'])
 
 
 def _sanity_check_version_keys(paths, parts):

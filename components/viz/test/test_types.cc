@@ -1,9 +1,10 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/viz/test/test_types.h"
 
+#include "build/build_config.h"
 #include "components/viz/test/buildflags.h"
 
 namespace viz {
@@ -13,35 +14,31 @@ namespace {
 // Provides a test renderer suffix appropriate for |type|.
 const char* RendererTypeTestSuffix(RendererType type) {
   switch (type) {
-    case RendererType::kGL:
-      return "GL";
     case RendererType::kSkiaGL:
       return "SkiaGL";
     case RendererType::kSkiaVk:
       return "SkiaVulkan";
-    case RendererType::kSkiaDawn:
-      return "SkiaDawn";
+    case RendererType::kSkiaGraphiteDawn:
+      return "SkiaGraphiteDawn";
     case RendererType::kSoftware:
       return "Software";
   }
 }
 
-std::vector<RendererType> GetRendererTypes(bool include_software,
-                                           bool include_dawn) {
+std::vector<RendererType> GetRendererTypes(bool include_software) {
   std::vector<RendererType> types;
-  if (include_software)
+  if (include_software) {
     types.push_back(RendererType::kSoftware);
+  }
 #if BUILDFLAG(ENABLE_GL_BACKEND_TESTS)
-  types.push_back(RendererType::kGL);
   types.push_back(RendererType::kSkiaGL);
-#endif
+#endif  // BUILDFLAG(ENABLE_GL_BACKEND_TESTS)
 #if BUILDFLAG(ENABLE_VULKAN_BACKEND_TESTS)
   types.push_back(RendererType::kSkiaVk);
-#endif
-#if BUILDFLAG(ENABLE_DAWN_BACKEND_TESTS)
-  if (include_dawn)
-    types.push_back(RendererType::kSkiaDawn);
-#endif
+#endif  // BUILDFLAG(ENABLE_VULKAN_BACKEND_TESTS)
+#if BUILDFLAG(ENABLE_SKIA_GRAPHITE_TESTS)
+  types.push_back(RendererType::kSkiaGraphiteDawn);
+#endif  // BUILDFLAG(ENABLE_SKIA_GRAPHITE_TESTS)
   return types;
 }
 
@@ -52,19 +49,11 @@ void PrintTo(RendererType type, std::ostream* os) {
 }
 
 std::vector<RendererType> GetRendererTypes() {
-  return GetRendererTypes(true, true);
-}
-
-std::vector<RendererType> GetRendererTypesNoDawn() {
-  return GetRendererTypes(true, false);
+  return GetRendererTypes(true);
 }
 
 std::vector<RendererType> GetGpuRendererTypes() {
-  return GetRendererTypes(false, true);
-}
-
-std::vector<RendererType> GetGpuRendererTypesNoDawn() {
-  return GetRendererTypes(false, false);
+  return GetRendererTypes(false);
 }
 
 }  // namespace viz

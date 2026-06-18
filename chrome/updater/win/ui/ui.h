@@ -1,21 +1,26 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_UPDATER_WIN_UI_UI_H_
 #define CHROME_UPDATER_WIN_UI_UI_H_
 
+#include <windows.h>
+
+#include <string>
 #include <vector>
 
-#include "base/strings/string16.h"
-#include "base/threading/thread_checker.h"
-#include "base/win/atl.h"
+#include "base/memory/raw_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/win/scoped_gdi_object.h"
+#include "chrome/updater/updater_scope.h"
+#include "chrome/updater/win/ui/message_loop.h"
 #include "chrome/updater/win/ui/owner_draw_controls.h"
 #include "chrome/updater/win/ui/resources/resources.grh"
+#include "chrome/updater/win/ui/window_impl.h"
+#include "ui/gfx/win/msg_util.h"
 
-namespace updater {
-namespace ui {
+namespace updater::ui {
 
 void EnableFlatButtons(HWND hwnd_parent);
 
@@ -29,12 +34,10 @@ class OmahaWndEvents {
 };
 
 // Implements the UI progress window.
-class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
+class OmahaWnd : public DialogImpl,
                  public OwnerDrawTitleBar,
                  public CustomDlgColors,
-                 public WTL::CMessageFilter {
-  using Base = CAxDialogImpl<OmahaWnd>;
-
+                 public MessageFilter {
  public:
   const int IDD;
 
@@ -44,26 +47,26 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
 
   virtual HRESULT Initialize();
 
-  // Overrides for CMessageFilter.
+  // Overrides for MessageFilter.
   BOOL PreTranslateMessage(MSG* msg) override;
 
   void SetEventSink(OmahaWndEvents* ev) { events_sink_ = ev; }
 
-  void set_is_machine(bool is_machine) { is_machine_ = is_machine; }
-  void set_bundle_name(const base::string16& bundle_name) {
+  void set_scope(UpdaterScope scope) { scope_ = scope; }
+  void set_bundle_name(const std::u16string& bundle_name) {
     bundle_name_ = bundle_name;
   }
 
   virtual void Show();
 
-  BEGIN_MSG_MAP(OmahaWnd)
-    MESSAGE_HANDLER(WM_CLOSE, OnClose)
-    MESSAGE_HANDLER(WM_NCDESTROY, OnNCDestroy)
-    COMMAND_ID_HANDLER(IDCANCEL, OnCancel)
-    CHAIN_MSG_MAP(Base)
-    CHAIN_MSG_MAP(OwnerDrawTitleBar)
-    CHAIN_MSG_MAP(CustomDlgColors)
-  END_MSG_MAP()
+  CR_BEGIN_MSG_MAP_EX(OmahaWnd)
+    CR_MESSAGE_HANDLER_EX(WM_CLOSE, OnClose)
+    CR_MESSAGE_HANDLER_EX(WM_NCDESTROY, OnNCDestroy)
+    CR_MESSAGE_HANDLER_EX(WM_DPICHANGED, OnDpiChanged)
+    CR_COMMAND_ID_HANDLER_EX(IDCANCEL, OnCancel)
+    CR_CHAIN_MSG_MAP(OwnerDrawTitleBar)
+    CR_CHAIN_MSG_MAP(CustomDlgColors)
+  CR_END_MSG_MAP()
 
  protected:
   struct ControlAttributes {
@@ -74,21 +77,18 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
     const bool is_default = false;
   };
 
-  OmahaWnd(int dialog_id, WTL::CMessageLoop* message_loop, HWND parent);
+  OmahaWnd(int dialog_id,
+           MessageLoop* message_loop,
+           HWND parent,
+           const std::wstring& lang);
 
   // Message and command handlers.
-  LRESULT OnClose(UINT msg,
-                  WPARAM wparam,
-                  LPARAM lparam,
-                  BOOL& handled);  // NOLINT
-  LRESULT OnNCDestroy(UINT msg,
-                      WPARAM wparam,
-                      LPARAM lparam,
-                      BOOL& handled);  // NOLINT
-  LRESULT OnCancel(WORD notify_code,
-                   WORD id,
-                   HWND wnd_ctl,
-                   BOOL& handled);  // NOLINT
+  LRESULT OnClose(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnNCDestroy(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnDpiChanged(UINT msg, WPARAM wparam, LPARAM lparam);
+  void OnCancel(UINT notify_code, int id, HWND wnd_ctl);
+
+  void ApplyDpiScaling(int dpi);
 
   // Returns true if the window is closed.
   virtual bool MaybeCloseWindow() = 0;
@@ -106,14 +106,15 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
                             const ControlAttributes& attributes);
 
   void SetVisible(bool visible) {
-    ShowWindow(visible ? SW_SHOWNORMAL : SW_HIDE);
+    ::ShowWindow(hwnd(), visible ? SW_SHOWNORMAL : SW_HIDE);
   }
 
-  WTL::CMessageLoop* message_loop() { return message_loop_; }
+  MessageLoop* message_loop() { return message_loop_; }
+  std::wstring lang() const { return lang_; }
   bool is_complete() { return is_complete_; }
   bool is_close_enabled() { return is_close_enabled_; }
-  bool is_machine() { return is_machine_; }
-  const base::string16& bundle_name() { return bundle_name_; }
+  UpdaterScope scope() { return scope_; }
+  const std::u16string& bundle_name() { return bundle_name_; }
 
   static const ControlAttributes kVisibleTextAttributes;
   static const ControlAttributes kDefaultActiveButtonAttributes;
@@ -128,27 +129,30 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
   void MaybeRequestExitProcess();
   void RequestExitProcess();
 
-  THREAD_CHECKER(thread_checker_);
+  SEQUENCE_CHECKER(sequence_checker_);
 
-  WTL::CMessageLoop* message_loop_;
+  raw_ptr<MessageLoop> message_loop_;
   HWND parent_;
+  const std::wstring lang_;
 
   bool is_complete_;
   bool is_close_enabled_;
 
-  OmahaWndEvents* events_sink_;
+  raw_ptr<OmahaWndEvents> events_sink_;
 
-  bool is_machine_;
-  base::string16 bundle_name_;
+  UpdaterScope scope_;
+  std::u16string bundle_name_;
 
-  // Handle to large icon to show when ALT-TAB
+  // Handle to large icon to show when ALT-TAB.
   base::win::ScopedGDIObject<HICON> hicon_;
 
-  WTL::CFont default_font_;
-  WTL::CFont font_;
-  WTL::CFont error_font_;
+  base::win::ScopedGDIObject<HFONT> default_font_;
+  base::win::ScopedGDIObject<HFONT> header_font_;
+  base::win::ScopedGDIObject<HFONT> font_;
 
   CustomProgressBarCtrl progress_bar_;
+
+  CR_MSG_MAP_CLASS_DECLARATIONS(OmahaWnd)
 };
 
 // Registers the specified common control classes from the common control DLL.
@@ -157,7 +161,6 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
 // supports visual styles.
 HRESULT InitializeCommonControls(DWORD control_classes);
 
-}  // namespace ui
-}  // namespace updater
+}  // namespace updater::ui
 
 #endif  // CHROME_UPDATER_WIN_UI_UI_H_

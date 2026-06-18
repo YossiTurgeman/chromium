@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,16 +7,6 @@
 #include "base/no_destructor.h"
 #include "base/trace_event/trace_event.h"
 #include "content/public/browser/browser_context.h"
-
-#ifndef NDEBUG
-#include "base/command_line.h"
-#include "base/files/file_util.h"
-
-// Dumps dependency information about our browser context keyed services
-// into a dot file in the browser context directory.
-const char kDumpBrowserContextDependencyGraphFlag[] =
-    "dump-browser-context-graph";
-#endif  // NDEBUG
 
 void BrowserContextDependencyManager::RegisterProfilePrefsForServices(
     user_prefs::PrefRegistrySyncable* pref_registry) {
@@ -41,7 +31,7 @@ void BrowserContextDependencyManager::DoCreateBrowserContextServices(
     bool is_testing_context) {
   TRACE_EVENT0(
       "browser",
-      "BrowserContextDependencyManager::DoCreateBrowserContextServices")
+      "BrowserContextDependencyManager::DoCreateBrowserContextServices");
   create_services_callbacks_.Notify(context);
   DependencyManager::CreateContextServices(context, is_testing_context);
 }
@@ -51,8 +41,7 @@ void BrowserContextDependencyManager::DestroyBrowserContextServices(
   DependencyManager::DestroyContextServices(context);
 }
 
-std::unique_ptr<
-    BrowserContextDependencyManager::CreateServicesCallbackList::Subscription>
+base::CallbackListSubscription
 BrowserContextDependencyManager::RegisterCreateServicesCallbackForTesting(
     const CreateServicesCallback& callback) {
   return create_services_callbacks_.Add(callback);
@@ -80,18 +69,3 @@ BrowserContextDependencyManager::BrowserContextDependencyManager() {
 
 BrowserContextDependencyManager::~BrowserContextDependencyManager() {
 }
-
-#ifndef NDEBUG
-void BrowserContextDependencyManager::DumpContextDependencies(
-    void* context) const {
-  // Whenever we try to build a destruction ordering, we should also dump a
-  // dependency graph to "/path/to/context/context-dependencies.dot".
-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          kDumpBrowserContextDependencyGraphFlag)) {
-    base::FilePath dot_file =
-        static_cast<content::BrowserContext*>(context)->GetPath().AppendASCII(
-            "browser-context-dependencies.dot");
-    DumpDependenciesAsGraphviz("BrowserContext", dot_file);
-  }
-}
-#endif  // NDEBUG

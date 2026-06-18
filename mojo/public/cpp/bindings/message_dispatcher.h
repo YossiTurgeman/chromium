@@ -1,17 +1,14 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MOJO_PUBLIC_CPP_BINDINGS_MESSAGE_DISPATCHER_H_
 #define MOJO_PUBLIC_CPP_BINDINGS_MESSAGE_DISPATCHER_H_
 
-#include <utility>
-#include <vector>
+#include <memory>
 
-#include "base/compiler_specific.h"
 #include "base/component_export.h"
-#include "base/macros.h"
-#include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/memory/weak_ptr.h"
 #include "mojo/public/cpp/bindings/message.h"
 
@@ -26,6 +23,10 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) MessageDispatcher
 
   MessageDispatcher(MessageDispatcher&& other);
   MessageDispatcher& operator=(MessageDispatcher&& other);
+
+  MessageDispatcher(const MessageDispatcher&) = delete;
+  MessageDispatcher& operator=(const MessageDispatcher&) = delete;
+
   ~MessageDispatcher() override;
 
   void SetValidator(std::unique_ptr<MessageReceiver> validator);
@@ -42,11 +43,10 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) MessageDispatcher
   std::unique_ptr<MessageReceiver> validator_;
   std::unique_ptr<MessageFilter> filter_;
 
-  MessageReceiver* sink_;
+  // RAW_PTR_EXCLUSION: Performance reasons (based on analysis of speedometer3).
+  RAW_PTR_EXCLUSION MessageReceiver* sink_ = nullptr;
 
   base::WeakPtrFactory<MessageDispatcher> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(MessageDispatcher);
 };
 
 }  // namespace mojo

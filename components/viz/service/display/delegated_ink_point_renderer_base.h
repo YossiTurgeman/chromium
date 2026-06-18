@@ -1,25 +1,28 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_DELEGATED_INK_POINT_RENDERER_BASE_H_
 #define COMPONENTS_VIZ_SERVICE_DISPLAY_DELEGATED_INK_POINT_RENDERER_BASE_H_
 
-#include <map>
 #include <memory>
+#include <optional>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "components/viz/common/quads/aggregated_render_pass.h"
+#include "components/viz/service/display/delegated_ink_trail_data.h"
 #include "components/viz/service/viz_service_export.h"
 #include "mojo/public/cpp/bindings/receiver.h"
-#include "services/viz/public/mojom/compositing/delegated_ink_point.mojom.h"
+#include "ui/gfx/delegated_ink_metadata.h"
+#include "ui/gfx/mojom/delegated_ink_point_renderer.mojom.h"
+
+namespace gfx {
+class DelegatedInkPoint;
+}  // namespace gfx
 
 namespace viz {
-class DelegatedInkMetadata;
-
-// The maximum number of delegated ink points that will be stored at a time.
-// When this is hit, the oldest one will be removed each time a new one is
-// added.
-constexpr int kMaximumDelegatedInkPointsStored = 10;
 
 // This is the base class used for rendering delegated ink trails on the end of
 // strokes to reduce user perceived latency. On initialization, it binds the
@@ -27,9 +30,9 @@ constexpr int kMaximumDelegatedInkPointsStored = 10;
 // sent from the browser process.
 //
 // For more information on the feature, please see the explainer:
-// https://github.com/WICG/ink-enhancement/blob/master/README.md
+// https://github.com/WICG/ink-enhancement/blob/main/README.md
 class VIZ_SERVICE_EXPORT DelegatedInkPointRendererBase
-    : public mojom::DelegatedInkPointRenderer {
+    : public gfx::mojom::DelegatedInkPointRenderer {
  public:
   DelegatedInkPointRendererBase();
   ~DelegatedInkPointRendererBase() override;
@@ -38,40 +41,77 @@ class VIZ_SERVICE_EXPORT DelegatedInkPointRendererBase
       const DelegatedInkPointRendererBase&) = delete;
 
   void InitMessagePipeline(
-      mojo::PendingReceiver<mojom::DelegatedInkPointRenderer> receiver);
+      mojo::PendingReceiver<gfx::mojom::DelegatedInkPointRenderer> receiver);
 
-  void StoreDelegatedInkPoint(const DelegatedInkPoint& point) override;
-  void SetDelegatedInkMetadata(std::unique_ptr<DelegatedInkMetadata> metadata) {
-    metadata_ = std::move(metadata);
-  }
+  void StoreDelegatedInkPoint(const gfx::DelegatedInkPoint& point) override;
+  virtual void SetDelegatedInkMetadata(
+      std::unique_ptr<gfx::DelegatedInkMetadata> metadata);
 
-  void DrawDelegatedInkTrail();
+  virtual void FinalizePathForDraw() = 0;
+  virtual gfx::Rect GetDamageRect() = 0;
+
+  // This function is called after Delegated Ink's points are submitted to be
+  // drawn on screen, and fires a histogram with the time between points' event
+  // creation and the points' draw submission to the OS.
+  void ReportPointsDrawn();
+
+  // Get the of the render pass that the Delegated Ink trail should be drawn on.
+  // This id is initially set on the metadata during surface aggregation.
+  std::optional<AggregatedRenderPassId> GetLatestMetadataRenderPassId() const;
 
  protected:
-  // |points_| is not emptied each time after the points are drawn, because one
-  // point in |points_| could potentially be drawn in more than one delegated
-  // ink trail. However, if a point has a timestamp that is earlier than the
-  // timestamp on the metadata, then the point has already been drawn, and
-  // therefore should be removed from |points_| before drawing.
-  void FilterPoints();
+  // `pointer_ids_` is not emptied each time after the points are drawn, because
+  // one point in `pointer_ids_` could potentially be drawn in more than one
+  // delegated ink trail. However, if a point has a timestamp that is earlier
+  // than the timestamp on the metadata, then the point has already been drawn,
+  // and therefore should be removed from `pointer_ids_` before drawing.
+  std::vector<gfx::DelegatedInkPoint> FilterPoints();
 
-  std::unique_ptr<DelegatedInkMetadata> metadata_;
-  std::map<base::TimeTicks, gfx::PointF> points_;
+  // Empties `pointer_ids_` and resets the pointer_id_` if there is no
+  // `metadata_` when `FinalizePathForDraw()` gets called.
+  void ResetPoints();
+
+  void PredictPoints(std::vector<gfx::DelegatedInkPoint>* ink_points_to_draw);
+  void ResetPrediction() override;
+
+  std::unique_ptr<gfx::DelegatedInkMetadata> metadata_;
 
  private:
-  FRIEND_TEST_ALL_PREFIXES(DisplayTest, SkiaDelegatedInkRenderer);
+  friend class DelegatedInkDisplayTest;
+  friend class SkiaDelegatedInkRendererTest;
 
-  void virtual DrawDelegatedInkTrailInternal() = 0;
-
-  const std::map<base::TimeTicks, gfx::PointF>& GetPointsMapForTest() const {
-    return points_;
+  const std::unordered_map<int32_t, DelegatedInkTrailData>&
+  GetPointsMapForTest() const {
+    return pointer_ids_;
   }
 
-  const DelegatedInkMetadata* GetMetadataForTest() const {
+  const gfx::DelegatedInkMetadata* GetMetadataForTest() const {
     return metadata_.get();
   }
 
-  mojo::Receiver<mojom::DelegatedInkPointRenderer> receiver_{this};
+  virtual int GetPathPointCountForTest() const = 0;
+
+  // Cached pointer id that matches the most recent metadata. This is set when
+  // a metadata arrives, and if no stored DelegatedInkPoints match the metadata,
+  // then it is null.
+  std::optional<int32_t> pointer_id_;
+
+  // The points that arrived from the browser process and may be drawn as part
+  // of the ink trail are stored according to their pointer ids so that if
+  // more than one source of points is arriving, we can choose the correct set
+  // of points to use when drawing the delegated ink trail.
+  std::unordered_map<int32_t, DelegatedInkTrailData> pointer_ids_;
+
+  mojo::Receiver<gfx::mojom::DelegatedInkPointRenderer> receiver_{this};
+
+  // The timestamp in which a Delegated Ink point that matches the metadata was
+  // first painted.
+  std::optional<base::TimeTicks> metadata_paint_time_;
+
+  // `metadata_` gets deleted and re-set on every paint cycle. This variable
+  // persists the metadata value to avoid incorrect repetitions of histogram
+  // fires for the same metadata.
+  std::optional<gfx::DelegatedInkMetadata> previous_metadata_;
 };
 
 }  // namespace viz

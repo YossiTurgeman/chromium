@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,29 +6,38 @@ package org.chromium.components.content_capture;
 
 import android.view.autofill.AutofillId;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.components.content_capture.PlatformSession.PlatformSessionData;
 
-/**
- * The task to update the captured content in platform.
- */
+/** The task to update the captured content in platform. */
+@NullMarked
 class ContentUpdateTask extends ProcessContentCaptureDataTask {
-    public ContentUpdateTask(FrameSession session, ContentCaptureData contentCaptureData,
+    public ContentUpdateTask(
+            FrameSession session,
+            ContentCaptureFrame contentCaptureFrame,
             PlatformSession platformSession) {
-        super(session, contentCaptureData, platformSession);
+        super(session, contentCaptureFrame, platformSession);
     }
 
     @Override
     protected AutofillId notifyPlatform(
-            PlatformSessionData parentPlatformSessionData, ContentCaptureData data) {
-        return notifyViewTextChanged(parentPlatformSessionData, data);
+            PlatformSessionData parentPlatformSessionData, ContentCaptureDataBase data) {
+        return notifyViewTextChanged(parentPlatformSessionData, (ContentCaptureData) data);
     }
 
     private AutofillId notifyViewTextChanged(
             PlatformSessionData parentPlatformSessionData, ContentCaptureData data) {
-        AutofillId autofillId = parentPlatformSessionData.contentCaptureSession.newAutofillId(
-                mPlatformSession.getRootPlatformSessionData().autofillId, data.getId());
-        parentPlatformSessionData.contentCaptureSession.notifyViewTextChanged(
-                autofillId, data.getValue());
+        AutofillId autofillId =
+                PlatformAPIWrapper.getInstance()
+                        .newAutofillId(
+                                parentPlatformSessionData.contentCaptureSession,
+                                mPlatformSession.getRootPlatformSessionData().autofillId,
+                                data.getId());
+        PlatformAPIWrapper.getInstance()
+                .notifyViewTextChanged(
+                        parentPlatformSessionData.contentCaptureSession,
+                        autofillId,
+                        data.getValue());
         return autofillId;
     }
 }

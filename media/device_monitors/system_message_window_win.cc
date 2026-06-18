@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,18 @@
 #include <dbt.h>
 #include <stddef.h>
 
+#include <memory>
+
 #include "base/logging.h"
 #include "base/no_destructor.h"
-#include "base/stl_util.h"
 #include "base/system/system_monitor.h"
 #include "base/win/wrapped_window_proc.h"
 #include "media/audio/win/core_audio_util_win.h"
+#include "ui/gfx/win/singleton_hwnd.h"
 
 namespace media {
 
 namespace {
-const wchar_t kWindowClassName[] = L"Chrome_SystemMessageWindow";
-
 // A static map from a device category guid to base::SystemMonitor::DeviceType.
 struct DeviceCategoryToType {
   const GUID device_category;
@@ -38,10 +38,15 @@ const std::vector<DeviceCategoryToType>& GetDeviceCategoryToType() {
 // Manages the device notification handles for SystemMessageWindowWin.
 class SystemMessageWindowWin::DeviceNotifications {
  public:
+  DeviceNotifications() = delete;
+
   explicit DeviceNotifications(HWND hwnd)
-      : notifications_(base::size(GetDeviceCategoryToType())) {
+      : notifications_(std::size(GetDeviceCategoryToType())) {
     Register(hwnd);
   }
+
+  DeviceNotifications(const DeviceNotifications&) = delete;
+  DeviceNotifications& operator=(const DeviceNotifications&) = delete;
 
   ~DeviceNotifications() { Unregister(); }
 
@@ -81,31 +86,14 @@ class SystemMessageWindowWin::DeviceNotifications {
 
  private:
   std::vector<HDEVNOTIFY> notifications_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(DeviceNotifications);
 };
 
 SystemMessageWindowWin::SystemMessageWindowWin() {
-  WNDCLASSEX window_class;
-  base::win::InitializeWindowClass(
-      kWindowClassName,
-      &base::win::WrappedWindowProc<SystemMessageWindowWin::WndProcThunk>, 0, 0,
-      0, NULL, NULL, NULL, NULL, NULL, &window_class);
-  instance_ = window_class.hInstance;
-  ATOM clazz = RegisterClassEx(&window_class);
-  DCHECK(clazz);
-
-  window_ =
-      CreateWindow(kWindowClassName, 0, 0, 0, 0, 0, 0, 0, 0, instance_, 0);
-  SetWindowLongPtr(window_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-  device_notifications_.reset(new DeviceNotifications(window_));
+  device_notifications_ = std::make_unique<DeviceNotifications>(
+      gfx::SingletonHwnd::GetInstance()->hwnd());
 }
 
 SystemMessageWindowWin::~SystemMessageWindowWin() {
-  if (window_) {
-    DestroyWindow(window_);
-    UnregisterClass(kWindowClassName, instance_);
-  }
 }
 
 LRESULT SystemMessageWindowWin::OnDeviceChange(UINT event_type, LPARAM data) {
@@ -152,18 +140,13 @@ LRESULT SystemMessageWindowWin::OnDeviceChange(UINT event_type, LPARAM data) {
   return TRUE;
 }
 
-LRESULT CALLBACK SystemMessageWindowWin::WndProc(HWND hwnd,
-                                                 UINT message,
-                                                 WPARAM wparam,
-                                                 LPARAM lparam) {
-  switch (message) {
-    case WM_DEVICECHANGE:
-      return OnDeviceChange(static_cast<UINT>(wparam), lparam);
-    default:
-      break;
+void SystemMessageWindowWin::WndProc(HWND hwnd,
+                                     UINT message,
+                                     WPARAM wparam,
+                                     LPARAM lparam) {
+  if (message == WM_DEVICECHANGE) {
+    OnDeviceChange(static_cast<UINT>(wparam), lparam);
   }
-
-  return ::DefWindowProc(hwnd, message, wparam, lparam);
 }
 
 }  // namespace media

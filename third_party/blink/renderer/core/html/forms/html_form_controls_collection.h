@@ -29,11 +29,12 @@
 #include "third_party/blink/renderer/core/html/forms/radio_node_list.h"
 #include "third_party/blink/renderer/core/html/html_collection.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/platform/bindings/union_base.h"
 
 namespace blink {
 
 class HTMLImageElement;
-class RadioNodeListOrElement;
+class V8UnionElementOrRadioNodeList;
 
 // This class is just a big hack to find form elements even in malformed HTML
 // elements.  The famous <table><tr><form><td> problem.
@@ -52,7 +53,9 @@ class HTMLFormControlsCollection final : public HTMLCollection {
   }
 
   HTMLElement* namedItem(const AtomicString& name) const override;
-  void namedGetter(const AtomicString& name, RadioNodeListOrElement&);
+  bindings::OptimizedReturnProxy<V8UnionElementOrRadioNodeList> namedGetter(
+      ScriptState*,
+      const AtomicString& name);
 
   void Trace(Visitor*) const override;
 

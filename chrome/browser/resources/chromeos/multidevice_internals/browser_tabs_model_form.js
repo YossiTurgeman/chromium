@@ -1,21 +1,23 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'chrome://resources/cr_elements/shared_style_css.m.js';
-import 'chrome://resources/cr_elements/cr_button/cr_button.m.js';
-import 'chrome://resources/cr_elements/cr_input/cr_input.m.js';
-import './shared_style.js';
+import 'chrome://resources/ash/common/cr_elements/cr_shared_style.css.js';
+import 'chrome://resources/ash/common/cr_elements/cr_button/cr_button.js';
+import 'chrome://resources/ash/common/cr_elements/cr_input/cr_input.js';
+import './shared_style.css.js';
 import './browser_tabs_metadata_form.js';
 
-import {html, Polymer} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {Polymer} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+
+import {getTemplate} from './browser_tabs_model_form.html.js';
 import {MultidevicePhoneHubBrowserProxy} from './multidevice_phonehub_browser_proxy.js';
 import {BrowserTabsMetadataModel, BrowserTabsModel} from './types.js';
 
 Polymer({
   is: 'browser-tabs-model-form',
 
-  _template: html`{__html_template__}`,
+  _template: getTemplate(),
 
   properties: {
     /** @private */
@@ -34,23 +36,12 @@ Polymer({
       type: Object,
     },
 
-    /** @private{BrowserTabsMetadataModel} */
-    browserTabThreeMetadata_: {
-      type: Object,
-    },
-
-    /** @private{BrowserTabsMetadataModel} */
-    browserTabFourMetadata_: {
-      type: Object,
-    },
-
     /** @type{number} */
     nValidTabs_: {
       type: Number,
       computed:
           'computeNValidTabs_(isTabSyncEnabled_, browserTabOneMetadata_, ' +
-          'browserTabTwoMetadata_, browserTabThreeMetadata_, ' +
-          'browserTabFourMetadata_)',
+          'browserTabTwoMetadata_)',
     },
   },
 
@@ -67,10 +58,7 @@ Polymer({
    * @private
    */
   getAllBrowserTabMetadatas_() {
-    return [
-      this.browserTabOneMetadata_, this.browserTabTwoMetadata_,
-      this.browserTabThreeMetadata_, this.browserTabFourMetadata_
-    ];
+    return [this.browserTabOneMetadata_, this.browserTabTwoMetadata_];
   },
 
   /**
@@ -94,8 +82,6 @@ Polymer({
         isTabSyncEnabled: false,
         browserTabOneMetadata: null,
         browserTabTwoMetadata: null,
-        browserTabThreeMetadata: null,
-        browserTabFourMetadata: null,
       };
       this.browserProxy_.setBrowserTabs(syncDisabledBrowserTabsModel);
       return;
@@ -105,8 +91,6 @@ Polymer({
       isTabSyncEnabled: this.isTabSyncEnabled_,
       browserTabOneMetadata: this.browserTabOneMetadata_,
       browserTabTwoMetadata: this.browserTabTwoMetadata_,
-      browserTabThreeMetadata: this.browserTabThreeMetadata_,
-      browserTabFourMetadata: this.browserTabFourMetadata_,
     };
     this.browserProxy_.setBrowserTabs(browserTabsModel);
   },

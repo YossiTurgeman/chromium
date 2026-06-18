@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,11 @@
 
 #include <stddef.h>
 
-#include "base/callback_helpers.h"
 #include "base/check_op.h"
-#include "base/notreached.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/functional/callback_helpers.h"
+#include "base/notimplemented.h"
 #include "net/base/io_buffer.h"
 #include "net/base/ip_address.h"
 #include "net/base/net_errors.h"
@@ -23,20 +25,20 @@ const int kMaxPayload = 4096;
 AndroidUsbSocket::AndroidUsbSocket(scoped_refptr<AndroidUsbDevice> device,
                                    uint32_t socket_id,
                                    const std::string& command,
-                                   base::Closure delete_callback)
+                                   base::OnceClosure delete_callback)
     : device_(device),
       command_(command),
       local_id_(socket_id),
       remote_id_(0),
       is_connected_(false),
-      delete_callback_(delete_callback) {}
+      delete_callback_(std::move(delete_callback)) {}
 
 AndroidUsbSocket::~AndroidUsbSocket() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (is_connected_)
     Disconnect();
   if (!delete_callback_.is_null())
-    delete_callback_.Run();
+    std::move(delete_callback_).Run();
 }
 
 void AndroidUsbSocket::HandleIncoming(std::unique_ptr<AdbMessage> message) {
@@ -125,7 +127,8 @@ int AndroidUsbSocket::Read(net::IOBuffer* buffer,
 
   size_t bytes_to_copy = static_cast<size_t>(length) > read_buffer_.length() ?
       read_buffer_.length() : static_cast<size_t>(length);
-  memcpy(buffer->data(), read_buffer_.data(), bytes_to_copy);
+  buffer->span().copy_prefix_from(
+      base::as_byte_span(read_buffer_).first(bytes_to_copy));
   if (read_buffer_.length() > bytes_to_copy)
     read_buffer_ = read_buffer_.substr(bytes_to_copy);
   else
@@ -212,23 +215,13 @@ bool AndroidUsbSocket::WasEverUsed() const {
   return true;
 }
 
-bool AndroidUsbSocket::WasAlpnNegotiated() const {
-  NOTIMPLEMENTED();
-  return true;
-}
-
 net::NextProto AndroidUsbSocket::GetNegotiatedProtocol() const {
   NOTIMPLEMENTED();
-  return net::kProtoUnknown;
+  return net::NextProto::kProtoUnknown;
 }
 
 bool AndroidUsbSocket::GetSSLInfo(net::SSLInfo* ssl_info) {
   return false;
-}
-
-void AndroidUsbSocket::GetConnectionAttempts(
-    net::ConnectionAttempts* out) const {
-  out->clear();
 }
 
 int64_t AndroidUsbSocket::GetTotalReceivedBytes() const {
@@ -244,9 +237,11 @@ void AndroidUsbSocket::RespondToReader(bool disconnect) {
   if (read_callback_.is_null() || (read_buffer_.empty() && !disconnect))
     return;
   size_t bytes_to_copy =
-      static_cast<size_t>(read_length_) > read_buffer_.length() ?
-          read_buffer_.length() : static_cast<size_t>(read_length_);
-  memcpy(read_io_buffer_->data(), read_buffer_.data(), bytes_to_copy);
+      static_cast<size_t>(read_length_) > read_buffer_.length()
+          ? read_buffer_.length()
+          : static_cast<size_t>(read_length_);
+  read_io_buffer_->span().copy_prefix_from(
+      base::as_byte_span(read_buffer_).first(bytes_to_copy));
   if (read_buffer_.length() > bytes_to_copy)
     read_buffer_ = read_buffer_.substr(bytes_to_copy);
   else

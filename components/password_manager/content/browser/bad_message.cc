@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,12 @@
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/syslog_logging.h"
-#include "components/autofill/core/common/password_form.h"
+#include "components/password_manager/core/browser/password_form.h"
 #include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 
-namespace password_manager {
-namespace bad_message {
+namespace password_manager::bad_message {
 namespace {
 
 // Called when the browser receives a bad IPC message from a renderer process on
@@ -32,64 +31,66 @@ void ReceivedBadMessage(content::RenderProcessHost* host,
 
 }  // namespace
 
-bool CheckChildProcessSecurityPolicyForURL(content::RenderFrameHost* frame,
-                                           const GURL& form_url,
-                                           BadMessageReason reason) {
+bool CheckForIllegalURL(content::RenderFrameHost* frame,
+                        const GURL& form_url,
+                        BadMessageReason reason,
+                        bool may_kill_renderer) {
   if (form_url.SchemeIs(url::kAboutScheme) ||
       form_url.SchemeIs(url::kDataScheme)) {
-    SYSLOG(WARNING) << "Killing renderer: illegal password access from about: "
-                    << "or data: URL. Reason: " << static_cast<int>(reason);
-    bad_message::ReceivedBadMessage(frame->GetProcess(), reason);
+    if (may_kill_renderer) {
+      SYSLOG(WARNING)
+          << "Killing renderer: illegal password access from about: "
+          << "or data: URL. Reason: " << static_cast<int>(reason);
+      bad_message::ReceivedBadMessage(frame->GetProcess(), reason);
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool CheckChildProcessSecurityPolicyForURL(content::RenderFrameHost* frame,
+                                           const GURL& form_url,
+                                           BadMessageReason reason,
+                                           bool may_kill_renderer) {
+  if (!CheckForIllegalURL(frame, form_url, reason, may_kill_renderer)) {
     return false;
   }
 
   content::ChildProcessSecurityPolicy* policy =
       content::ChildProcessSecurityPolicy::GetInstance();
-  if (!policy->CanAccessDataForOrigin(frame->GetProcess()->GetID(), form_url)) {
-    SYSLOG(WARNING) << "Killing renderer: illegal password access. Reason: "
-                    << static_cast<int>(reason);
-    bad_message::ReceivedBadMessage(frame->GetProcess(), reason);
+  if (!policy->CanAccessDataForOrigin(frame->GetProcess()->GetDeprecatedID(),
+                                      url::Origin::Create(form_url))) {
+    if (may_kill_renderer) {
+      SYSLOG(WARNING) << "Killing renderer: illegal password access. Reason: "
+                      << static_cast<int>(reason);
+      bad_message::ReceivedBadMessage(frame->GetProcess(), reason);
+    }
     return false;
   }
 
   return true;
 }
 
-bool CheckChildProcessSecurityPolicy(
-    content::RenderFrameHost* frame,
-    const autofill::PasswordForm& password_form,
-    BadMessageReason reason) {
-  return CheckChildProcessSecurityPolicyForURL(frame, password_form.url,
-                                               reason) &&
-         CheckChildProcessSecurityPolicyForURL(
-             frame, GURL(password_form.signon_realm), reason) &&
-         CheckChildProcessSecurityPolicyForURL(
-             frame, password_form.form_data.url, reason);
-}
-
-bool CheckChildProcessSecurityPolicy(
-    content::RenderFrameHost* frame,
-    const std::vector<autofill::PasswordForm>& forms,
-    BadMessageReason reason) {
-  for (const auto& form : forms) {
-    if (!bad_message::CheckChildProcessSecurityPolicy(frame, form, reason))
-      return false;
+bool CheckFrameNotPrerendering(content::RenderFrameHost* frame) {
+  if (frame->GetLifecycleState() ==
+      content::RenderFrameHost::LifecycleState::kPrerendering) {
+    bad_message::ReceivedBadMessage(
+        frame->GetProcess(), BadMessageReason::CPMD_BAD_ORIGIN_PRERENDERING);
+    return false;
   }
   return true;
 }
 
-bool CheckChildProcessSecurityPolicy(
-    content::RenderFrameHost* frame,
-    const std::vector<autofill::FormData>& forms_data,
-    BadMessageReason reason) {
-  for (const auto& form_data : forms_data) {
-    if (!bad_message::CheckChildProcessSecurityPolicyForURL(
-            frame, form_data.url, reason)) {
-      return false;
-    }
+bool CheckGeneratedPassword(content::RenderFrameHost* frame,
+                            const std::u16string& generated_password) {
+  if (generated_password.empty()) {
+    ReceivedBadMessage(
+        frame->GetProcess(),
+        BadMessageReason::CPMD_BAD_ORIGIN_NO_GENERATED_PASSWORD_TO_EDIT);
+    return false;
   }
   return true;
 }
 
-}  // namespace bad_message
-}  // namespace password_manager
+}  // namespace password_manager::bad_message

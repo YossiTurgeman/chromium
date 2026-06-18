@@ -1,12 +1,14 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/media/output_protection_proxy.h"
 
+#include <optional>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/notimplemented.h"
 #include "build/build_config.h"
 #include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
 #include "content/public/browser/render_frame_host.h"
@@ -14,25 +16,23 @@
 #include "ui/display/types/display_constants.h"
 
 namespace {
-
 gfx::NativeView GetRenderFrameView(int render_process_id, int render_frame_id) {
   auto* host =
       content::RenderFrameHost::FromID(render_process_id, render_frame_id);
-  return host ? host->GetNativeView() : gfx::kNullNativeView;
+  return host ? host->GetNativeView() : gfx::NativeView();
 }
-
 }  // namespace
 
 OutputProtectionProxy::OutputProtectionProxy(int render_process_id,
                                              int render_frame_id)
     : render_process_id_(render_process_id),
       render_frame_id_(render_frame_id)
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
       ,
       output_protection_delegate_(
           // On OS_CHROMEOS, NativeView and NativeWindow are both aura::Window*.
           GetRenderFrameView(render_process_id, render_frame_id))
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 {
 }
 
@@ -44,13 +44,13 @@ void OutputProtectionProxy::QueryStatus(QueryStatusCallback callback) {
   DVLOG(1) << __func__;
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   output_protection_delegate_.QueryStatus(
       base::BindOnce(&OutputProtectionProxy::ProcessQueryStatusResult,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
-#else  // defined(OS_CHROMEOS)
+#else
   ProcessQueryStatusResult(std::move(callback), true, 0, 0);
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void OutputProtectionProxy::EnableProtection(
@@ -59,13 +59,13 @@ void OutputProtectionProxy::EnableProtection(
   DVLOG(1) << __func__;
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   output_protection_delegate_.SetProtection(desired_method_mask,
                                             std::move(callback));
-#else   // defined(OS_CHROMEOS)
+#else   // BUILDFLAG(IS_CHROMEOS)
   NOTIMPLEMENTED();
   std::move(callback).Run(false);
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void OutputProtectionProxy::ProcessQueryStatusResult(

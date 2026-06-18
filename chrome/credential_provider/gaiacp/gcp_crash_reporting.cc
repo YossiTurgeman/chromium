@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include "base/debug/leak_annotations.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/win/current_module.h"
-#include "build/branding_buildflags.h"
 #include "chrome/credential_provider/common/gcp_strings.h"
 #include "chrome/credential_provider/gaiacp/gcp_crash_reporter_client.h"
 #include "chrome/credential_provider/gaiacp/gcp_crash_reporting_utils.h"
@@ -27,7 +26,7 @@ class GcpDllCrashReporterClient
 
  protected:
   base::FilePath GetPathForFileVersionInfo(
-      const base::string16& exe_path) override;
+      const std::wstring& exe_path) override;
 };
 
 // When the DLL is loaded through rundll32. |exe_path| will point to
@@ -35,7 +34,7 @@ class GcpDllCrashReporterClient
 // version for rundll32.exe instead of querying the version of the DLL that
 // contains the credential provider.
 base::FilePath GcpDllCrashReporterClient::GetPathForFileVersionInfo(
-    const base::string16& exe_path) {
+    const std::wstring& exe_path) {
   base::FilePath path_to_current_dll;
   HRESULT hr = credential_provider::GetPathToDllFromHandle(
       CURRENT_MODULE(), &path_to_current_dll);
@@ -86,7 +85,7 @@ void ConfigureGcpCrashReporting(const base::CommandLine& command_line) {
 
   crash_reporter::InitializeCrashpadWithDllEmbeddedHandler(
       process_type.empty(), "GCPW DLL", "", dll_main_cmd_line.GetProgram(),
-      {base::UTF16ToUTF8(dll_main_cmd_line.GetArgs()[0])});
+      {base::WideToUTF8(dll_main_cmd_line.GetArgs()[0])});
 
   SetCommonCrashKeys(command_line);
 }

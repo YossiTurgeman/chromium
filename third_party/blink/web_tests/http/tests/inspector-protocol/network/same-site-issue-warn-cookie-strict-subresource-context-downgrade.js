@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   const {page, session, dp} = await testRunner.startBlank(
       `Verifies that a subresource accessing a SameSite=Strict cookie across schemes triggers a context downgrade inspector issue.\n`);
 
@@ -9,7 +9,7 @@
 
   const setCookieUrl = 'https://cookie.test:8443/inspector-protocol/network/resources/set-cookie.php?cookie='
       + encodeURIComponent('name=value; SameSite=Strict');
-  await session.evaluate(`fetch('${setCookieUrl}', {method: 'POST', credentials: 'include'})`);
+  session.evaluate(`fetch('${setCookieUrl}', {method: 'POST', credentials: 'include'})`);
   const issue = await dp.Audits.onceIssueAdded();
   testRunner.log(issue.params, 'Inspector issue:');
 

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #import <memory>
 
-#import "ios/web/security/cert_verification_error.h"
 #import "ios/web/web_state/ui/crw_web_view_handler.h"
 #import "ios/web/web_state/ui/crw_web_view_handler_delegate.h"
 #include "ui/base/page_transition_types.h"
@@ -18,7 +17,6 @@
 @class CRWWKNavigationHandler;
 @class CRWPendingNavigationInfo;
 @class CRWWKNavigationStates;
-@class CRWJSInjector;
 @class CRWCertVerificationController;
 class GURL;
 namespace web {
@@ -27,19 +25,18 @@ enum class ErrorRetryCommand;
 struct Referrer;
 class NavigationContextImpl;
 class WKBackForwardListItemHolder;
-}
+}  // namespace web
 
 // CRWWKNavigationHandler uses this protocol to interact with its owner.
 @protocol CRWWKNavigationHandlerDelegate <CRWWebViewHandlerDelegate>
+
+// Returns whether `action` was user initiated.
+- (BOOL)isUserInitiatedAction:(WKNavigationAction*)action;
 
 // Returns associated certificate verificatio controller.
 - (CRWCertVerificationController*)
     certVerificationControllerForNavigationHandler:
         (CRWWKNavigationHandler*)navigationHandler;
-
-// Returns the associated js injector.
-- (CRWJSInjector*)JSInjectorForNavigationHandler:
-    (CRWWKNavigationHandler*)navigationHandler;
 
 // Sets document URL to newURL, and updates any relevant state information.
 - (void)navigationHandler:(CRWWKNavigationHandler*)navigationHandler
@@ -55,8 +52,7 @@ class WKBackForwardListItemHolder;
     registerLoadRequestForURL:(const GURL&)URL
        sameDocumentNavigation:(BOOL)sameDocumentNavigation
                hasUserGesture:(BOOL)hasUserGesture
-            rendererInitiated:(BOOL)renderedInitiated
-        placeholderNavigation:(BOOL)placeholderNavigation;
+            rendererInitiated:(BOOL)renderedInitiated;
 
 // Instructs the delegate to display the webView.
 - (void)navigationHandlerDisplayWebView:
@@ -79,6 +75,10 @@ class WKBackForwardListItemHolder;
     didCompleteLoadWithSuccess:(BOOL)loadSuccess
                     forContext:(web::NavigationContextImpl*)context;
 
+// Resumes download using `webView`
+- (void)resumeDownloadWithData:(NSData*)data
+             completionHandler:(void (^)(WKDownload*))completionHandler;
+
 @end
 
 // Handler class for WKNavigationDelegate, deals with navigation callbacks from
@@ -92,10 +92,15 @@ class WKBackForwardListItemHolder;
 // Indicates if the webview reported a crash.
 @property(nonatomic, assign, readonly) BOOL webProcessCrashed;
 
+// Indicates if the next call to decidePolicyForNavigationAction will block
+// universal links.  This is useful for native session restore's navigation.
+@property(nonatomic, assign, readwrite)
+    BOOL blockUniversalLinksOnNextDecidePolicy;
+
 // Pending information for an in-progress page navigation. The lifetime of
-// this object starts at |decidePolicyForNavigationAction| where the info is
-// extracted from the request, and ends at either |didCommitNavigation| or
-// |didFailProvisionalNavigation|.
+// this object starts at `decidePolicyForNavigationAction` where the info is
+// extracted from the request, and ends at either `didCommitNavigation` or
+// `didFailProvisionalNavigation`.
 @property(nonatomic, strong) CRWPendingNavigationInfo* pendingNavigationInfo;
 
 // Holds all WKNavigation objects and their states which are currently in
@@ -103,7 +108,7 @@ class WKBackForwardListItemHolder;
 @property(nonatomic, readonly, strong) CRWWKNavigationStates* navigationStates;
 
 // The current page loading phase.
-// TODO(crbug.com/956511): Remove this once refactor is done.
+// TODO(crbug.com/40624624): Remove this once refactor is done.
 @property(nonatomic, readwrite, assign) web::WKNavigationState navigationState;
 
 // Returns the WKBackForwardlistItemHolder of current navigation item.
@@ -119,7 +124,7 @@ class WKBackForwardListItemHolder;
 // Informs this handler that any outstanding load operations are cancelled.
 - (void)loadCancelled;
 
-// Returns context for pending navigation that has |URL|. null if there is no
+// Returns context for pending navigation that has `URL`. null if there is no
 // matching pending navigation.
 - (web::NavigationContextImpl*)contextForPendingMainFrameNavigationWithURL:
     (const GURL&)URL;
@@ -131,7 +136,7 @@ class WKBackForwardListItemHolder;
 // loaded by a POST request.
 - (BOOL)isCurrentNavigationItemPOST;
 
-// Sets last committed NavigationItem's title to the given |title|, which can
+// Sets last committed NavigationItem's title to the given `title`, which can
 // not be nil.
 - (void)setLastCommittedNavigationItemTitle:(NSString*)title;
 
@@ -139,19 +144,9 @@ class WKBackForwardListItemHolder;
 - (ui::PageTransition)pageTransitionFromNavigationType:
     (WKNavigationType)navigationType;
 
-// Loads a blank page directly into WKWebView as a placeholder to create a new
-// back forward item (f.e. for error page). This page has the URL
-// about:blank?for=<encoded original URL>. If |originalContext| is provided,
-// reuse it for the placeholder navigation instead of creating a new one.
-- (web::NavigationContextImpl*)
-    loadPlaceholderInWebViewForURL:(const GURL&)originalURL
-                 rendererInitiated:(BOOL)rendererInitiated
-                        forContext:(std::unique_ptr<web::NavigationContextImpl>)
-                                       originalContext;
-
 // Called when the web page has changed document and/or URL, and so the page
 // navigation should be reported to the delegate, and internal state updated to
-// reflect the fact that the navigation has occurred. |context| contains
+// reflect the fact that the navigation has occurred. `context` contains
 // information about the navigation that triggered the document/URL change.
 - (void)webPageChangedWithContext:(web::NavigationContextImpl*)context
                           webView:(WKWebView*)webView;

@@ -1,10 +1,9 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/feedback/system_logs/log_sources/memory_details_log_source.h"
 
-#include "base/macros.h"
 #include "chrome/browser/memory_details.h"
 #include "components/feedback/feedback_report.h"
 #include "content/public/browser/browser_thread.h"
@@ -16,6 +15,9 @@ class SystemLogsMemoryHandler : public MemoryDetails {
  public:
   explicit SystemLogsMemoryHandler(SysLogsSourceCallback callback)
       : callback_(std::move(callback)) {}
+
+  SystemLogsMemoryHandler(const SystemLogsMemoryHandler&) = delete;
+  SystemLogsMemoryHandler& operator=(const SystemLogsMemoryHandler&) = delete;
 
   // Sends the data to the callback.
   // MemoryDetails override.
@@ -31,18 +33,15 @@ class SystemLogsMemoryHandler : public MemoryDetails {
   }
 
  private:
-  ~SystemLogsMemoryHandler() override {}
+  ~SystemLogsMemoryHandler() override = default;
   SysLogsSourceCallback callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(SystemLogsMemoryHandler);
 };
 
 MemoryDetailsLogSource::MemoryDetailsLogSource()
     : SystemLogsSource("MemoryDetails") {
 }
 
-MemoryDetailsLogSource::~MemoryDetailsLogSource() {
-}
+MemoryDetailsLogSource::~MemoryDetailsLogSource() = default;
 
 void MemoryDetailsLogSource::Fetch(SysLogsSourceCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);

@@ -32,11 +32,9 @@
 
 #include <unicode/unistr.h>
 
-#include "base/stl_util.h"
-#include "base/sys_byteorder.h"
+#include "base/compiler_specific.h"
+#include "base/logging.h"
 #include "build/build_config.h"
-#include "third_party/blink/renderer/platform/geometry/int_size.h"
-#include "third_party/blink/renderer/platform/graphics/skia/image_pixel_locker.h"
 #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
 #include "third_party/blink/renderer/platform/image-encoders/image_encoder.h"
 #include "third_party/blink/renderer/platform/wtf/text/base64.h"
@@ -47,6 +45,7 @@
 #include "third_party/skia/include/core/SkPath.h"
 #include "third_party/skia/include/core/SkRRect.h"
 #include "third_party/skia/include/core/SkRect.h"
+#include "ui/gfx/geometry/size.h"
 
 namespace blink {
 
@@ -83,7 +82,6 @@ String PointModeName(SkCanvas::PointMode mode) {
       return "Polygon";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -98,7 +96,7 @@ std::unique_ptr<JSONArray> ArrayForSkPoints(size_t count,
                                             const SkPoint points[]) {
   auto points_array_item = std::make_unique<JSONArray>();
   for (size_t i = 0; i < count; ++i)
-    points_array_item->PushObject(ObjectForSkPoint(points[i]));
+    points_array_item->PushObject(ObjectForSkPoint(UNSAFE_TODO(points[i])));
   return points_array_item;
 }
 
@@ -127,7 +125,6 @@ String RrectTypeName(SkRRect::Type type) {
       return "Complex";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -143,7 +140,6 @@ String RadiusName(SkRRect::Corner corner) {
       return "lowerLeftRadius";
     default:
       NOTREACHED();
-      return "?";
   }
 }
 
@@ -172,7 +168,6 @@ String FillTypeName(SkPathFillType type) {
       return "InverseEvenOdd";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -194,7 +189,6 @@ VerbParams SegmentParams(SkPath::Verb verb) {
       return VerbParams("Done", 0, 0);
     default:
       NOTREACHED();
-      return VerbParams("?", 0, 0);
   };
 }
 
@@ -212,10 +206,11 @@ std::unique_ptr<JSONObject> ObjectForSkPath(const SkPath& path) {
     auto path_point_item = std::make_unique<JSONObject>();
     path_point_item->SetString("verb", verb_params.name);
     DCHECK_LE(verb_params.point_count + verb_params.point_offset,
-              base::size(points));
+              std::size(points));
     path_point_item->SetArray(
-        "points", ArrayForSkPoints(verb_params.point_count,
-                                   points + verb_params.point_offset));
+        "points",
+        ArrayForSkPoints(verb_params.point_count,
+                         UNSAFE_TODO(points + verb_params.point_offset)));
     if (SkPath::kConic_Verb == verb)
       path_point_item->SetDouble("conicWeight", iter.conicWeight());
     path_points_array->PushObject(std::move(path_point_item));
@@ -234,18 +229,11 @@ std::unique_ptr<JSONObject> ObjectForSkImage(const SkImage* image) {
   return image_item;
 }
 
-std::unique_ptr<JSONArray> ArrayForSkMatrix(const SkMatrix& matrix) {
-  auto matrix_array = std::make_unique<JSONArray>();
-  for (int i = 0; i < 9; ++i)
-    matrix_array->PushDouble(matrix[i]);
-  return matrix_array;
-}
-
 std::unique_ptr<JSONArray> ArrayForSkScalars(size_t count,
                                              const SkScalar array[]) {
   auto points_array_item = std::make_unique<JSONArray>();
   for (size_t i = 0; i < count; ++i)
-    points_array_item->PushDouble(array[i]);
+    points_array_item->PushDouble(UNSAFE_TODO(array[i]));
   return points_array_item;
 }
 
@@ -277,22 +265,6 @@ String StringForSkPaintFlags(const SkPaint& paint) {
   return flags_string.ToString();
 }
 
-String FilterQualityName(SkFilterQuality filter_quality) {
-  switch (filter_quality) {
-    case kNone_SkFilterQuality:
-      return "None";
-    case kLow_SkFilterQuality:
-      return "Low";
-    case kMedium_SkFilterQuality:
-      return "Medium";
-    case kHigh_SkFilterQuality:
-      return "High";
-    default:
-      NOTREACHED();
-      return "?";
-  };
-}
-
 String StrokeCapName(SkPaint::Cap cap) {
   switch (cap) {
     case SkPaint::kButt_Cap:
@@ -303,7 +275,6 @@ String StrokeCapName(SkPaint::Cap cap) {
       return "Square";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -317,7 +288,6 @@ String StrokeJoinName(SkPaint::Join join) {
       return "Bevel";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -329,7 +299,6 @@ String StyleName(SkPaint::Style style) {
       return "Stroke";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -341,13 +310,14 @@ std::unique_ptr<JSONObject> ObjectForSkPaint(const SkPaint& paint) {
   paint_item->SetDouble("strokeWidth", paint.getStrokeWidth());
   paint_item->SetDouble("strokeMiter", paint.getStrokeMiter());
   paint_item->SetString("flags", StringForSkPaintFlags(paint));
-  paint_item->SetString("filterLevel",
-                        FilterQualityName(paint.getFilterQuality()));
   paint_item->SetString("strokeCap", StrokeCapName(paint.getStrokeCap()));
   paint_item->SetString("strokeJoin", StrokeJoinName(paint.getStrokeJoin()));
   paint_item->SetString("styleName", StyleName(paint.getStyle()));
-  if (paint.getBlendMode() != SkBlendMode::kSrcOver)
-    paint_item->SetString("blendMode", SkBlendMode_Name(paint.getBlendMode()));
+  const auto bm = paint.asBlendMode();
+  if (bm != SkBlendMode::kSrcOver) {
+    paint_item->SetString("blendMode",
+                          bm ? SkBlendMode_Name(bm.value()) : "custom");
+  }
   if (paint.getImageFilter())
     paint_item->SetString("imageFilter", "SkImageFilter");
   return paint_item;
@@ -362,6 +332,41 @@ String ClipOpName(SkClipOp op) {
     default:
       return "Unknown type";
   };
+}
+
+String FilterModeName(SkFilterMode fm) {
+  switch (fm) {
+    case SkFilterMode::kNearest:
+      return "kNearest";
+    case SkFilterMode::kLinear:
+      return "kLinear";
+  }
+  return "not reachable";
+}
+
+String MipmapModeName(SkMipmapMode mm) {
+  switch (mm) {
+    case SkMipmapMode::kNone:
+      return "kNone";
+    case SkMipmapMode::kNearest:
+      return "kNearest";
+    case SkMipmapMode::kLinear:
+      return "kLinear";
+  }
+  return "not reachable";
+}
+
+std::unique_ptr<JSONObject> ObjectForSkSamplingOptions(
+    const SkSamplingOptions& sampling) {
+  auto sampling_item = std::make_unique<JSONObject>();
+  if (sampling.useCubic) {
+    sampling_item->SetDouble("B", sampling.cubic.B);
+    sampling_item->SetDouble("C", sampling.cubic.C);
+  } else {
+    sampling_item->SetString("filter", FilterModeName(sampling.filter));
+    sampling_item->SetString("mipmap", MipmapModeName(sampling.mipmap));
+  }
+  return sampling_item;
 }
 
 }  // namespace
@@ -405,7 +410,7 @@ void LoggingCanvas::onDrawPaint(const SkPaint& paint) {
   AutoLogger logger(this);
   logger.LogItemWithParams("drawPaint")
       ->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawPaint(paint);
+  SkCanvas::onDrawPaint(paint);
 }
 
 void LoggingCanvas::onDrawPoints(PointMode mode,
@@ -417,7 +422,7 @@ void LoggingCanvas::onDrawPoints(PointMode mode,
   params->SetString("pointMode", PointModeName(mode));
   params->SetArray("points", ArrayForSkPoints(count, pts));
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawPoints(mode, count, pts, paint);
+  SkCanvas::onDrawPoints(mode, count, pts, paint);
 }
 
 void LoggingCanvas::onDrawRect(const SkRect& rect, const SkPaint& paint) {
@@ -425,7 +430,7 @@ void LoggingCanvas::onDrawRect(const SkRect& rect, const SkPaint& paint) {
   JSONObject* params = logger.LogItemWithParams("drawRect");
   params->SetObject("rect", ObjectForSkRect(rect));
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawRect(rect, paint);
+  SkCanvas::onDrawRect(rect, paint);
 }
 
 void LoggingCanvas::onDrawOval(const SkRect& oval, const SkPaint& paint) {
@@ -433,7 +438,7 @@ void LoggingCanvas::onDrawOval(const SkRect& oval, const SkPaint& paint) {
   JSONObject* params = logger.LogItemWithParams("drawOval");
   params->SetObject("oval", ObjectForSkRect(oval));
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawOval(oval, paint);
+  SkCanvas::onDrawOval(oval, paint);
 }
 
 void LoggingCanvas::onDrawRRect(const SkRRect& rrect, const SkPaint& paint) {
@@ -441,7 +446,7 @@ void LoggingCanvas::onDrawRRect(const SkRRect& rrect, const SkPaint& paint) {
   JSONObject* params = logger.LogItemWithParams("drawRRect");
   params->SetObject("rrect", ObjectForSkRRect(rrect));
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawRRect(rrect, paint);
+  SkCanvas::onDrawRRect(rrect, paint);
 }
 
 void LoggingCanvas::onDrawPath(const SkPath& path, const SkPaint& paint) {
@@ -449,37 +454,40 @@ void LoggingCanvas::onDrawPath(const SkPath& path, const SkPaint& paint) {
   JSONObject* params = logger.LogItemWithParams("drawPath");
   params->SetObject("path", ObjectForSkPath(path));
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawPath(path, paint);
+  SkCanvas::onDrawPath(path, paint);
 }
 
-void LoggingCanvas::onDrawImage(const SkImage* image,
-                                SkScalar left,
-                                SkScalar top,
-                                const SkPaint* paint) {
+void LoggingCanvas::onDrawImage2(const SkImage* image,
+                                 SkScalar left,
+                                 SkScalar top,
+                                 const SkSamplingOptions& sampling,
+                                 const SkPaint* paint) {
   AutoLogger logger(this);
   JSONObject* params = logger.LogItemWithParams("drawImage");
   params->SetDouble("left", left);
   params->SetDouble("top", top);
+  params->SetObject("sampling", ObjectForSkSamplingOptions(sampling));
   params->SetObject("image", ObjectForSkImage(image));
   if (paint)
     params->SetObject("paint", ObjectForSkPaint(*paint));
-  this->SkCanvas::onDrawImage(image, left, top, paint);
+  SkCanvas::onDrawImage2(image, left, top, sampling, paint);
 }
 
-void LoggingCanvas::onDrawImageRect(const SkImage* image,
-                                    const SkRect* src,
-                                    const SkRect& dst,
-                                    const SkPaint* paint,
-                                    SrcRectConstraint constraint) {
+void LoggingCanvas::onDrawImageRect2(const SkImage* image,
+                                     const SkRect& src,
+                                     const SkRect& dst,
+                                     const SkSamplingOptions& sampling,
+                                     const SkPaint* paint,
+                                     SrcRectConstraint constraint) {
   AutoLogger logger(this);
   JSONObject* params = logger.LogItemWithParams("drawImageRect");
   params->SetObject("image", ObjectForSkImage(image));
-  if (src)
-    params->SetObject("src", ObjectForSkRect(*src));
+  params->SetObject("src", ObjectForSkRect(src));
   params->SetObject("dst", ObjectForSkRect(dst));
+  params->SetObject("sampling", ObjectForSkSamplingOptions(sampling));
   if (paint)
     params->SetObject("paint", ObjectForSkPaint(*paint));
-  this->SkCanvas::onDrawImageRect(image, src, dst, paint, constraint);
+  SkCanvas::onDrawImageRect2(image, src, dst, sampling, paint, constraint);
 }
 
 void LoggingCanvas::onDrawVerticesObject(const SkVertices* vertices,
@@ -488,7 +496,7 @@ void LoggingCanvas::onDrawVerticesObject(const SkVertices* vertices,
   AutoLogger logger(this);
   JSONObject* params = logger.LogItemWithParams("drawVertices");
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawVerticesObject(vertices, bmode, paint);
+  SkCanvas::onDrawVerticesObject(vertices, bmode, paint);
 }
 
 void LoggingCanvas::onDrawDRRect(const SkRRect& outer,
@@ -499,7 +507,7 @@ void LoggingCanvas::onDrawDRRect(const SkRRect& outer,
   params->SetObject("outer", ObjectForSkRRect(outer));
   params->SetObject("inner", ObjectForSkRRect(inner));
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawDRRect(outer, inner, paint);
+  SkCanvas::onDrawDRRect(outer, inner, paint);
 }
 
 void LoggingCanvas::onDrawTextBlob(const SkTextBlob* blob,
@@ -511,7 +519,7 @@ void LoggingCanvas::onDrawTextBlob(const SkTextBlob* blob,
   params->SetDouble("x", x);
   params->SetDouble("y", y);
   params->SetObject("paint", ObjectForSkPaint(paint));
-  this->SkCanvas::onDrawTextBlob(blob, x, y, paint);
+  SkCanvas::onDrawTextBlob(blob, x, y, paint);
 }
 
 void LoggingCanvas::onClipRect(const SkRect& rect,
@@ -522,7 +530,7 @@ void LoggingCanvas::onClipRect(const SkRect& rect,
   params->SetObject("rect", ObjectForSkRect(rect));
   params->SetString("SkRegion::Op", ClipOpName(op));
   params->SetBoolean("softClipEdgeStyle", kSoft_ClipEdgeStyle == style);
-  this->SkCanvas::onClipRect(rect, op, style);
+  SkCanvas::onClipRect(rect, op, style);
 }
 
 void LoggingCanvas::onClipRRect(const SkRRect& rrect,
@@ -533,7 +541,7 @@ void LoggingCanvas::onClipRRect(const SkRRect& rrect,
   params->SetObject("rrect", ObjectForSkRRect(rrect));
   params->SetString("SkRegion::Op", ClipOpName(op));
   params->SetBoolean("softClipEdgeStyle", kSoft_ClipEdgeStyle == style);
-  this->SkCanvas::onClipRRect(rrect, op, style);
+  SkCanvas::onClipRRect(rrect, op, style);
 }
 
 void LoggingCanvas::onClipPath(const SkPath& path,
@@ -544,26 +552,28 @@ void LoggingCanvas::onClipPath(const SkPath& path,
   params->SetObject("path", ObjectForSkPath(path));
   params->SetString("SkRegion::Op", ClipOpName(op));
   params->SetBoolean("softClipEdgeStyle", kSoft_ClipEdgeStyle == style);
-  this->SkCanvas::onClipPath(path, op, style);
+  SkCanvas::onClipPath(path, op, style);
 }
 
 void LoggingCanvas::onClipRegion(const SkRegion& region, SkClipOp op) {
   AutoLogger logger(this);
   JSONObject* params = logger.LogItemWithParams("clipRegion");
   params->SetString("op", ClipOpName(op));
-  this->SkCanvas::onClipRegion(region, op);
+  SkCanvas::onClipRegion(region, op);
 }
 
 void LoggingCanvas::onDrawPicture(const SkPicture* picture,
                                   const SkMatrix* matrix,
                                   const SkPaint* paint) {
-  this->UnrollDrawPicture(picture, matrix, paint, nullptr);
+  UnrollDrawPicture(picture, matrix, paint, nullptr);
 }
 
-void LoggingCanvas::didSetMatrix(const SkMatrix& matrix) {
+void LoggingCanvas::didSetM44(const SkM44& matrix) {
+  SkScalar m[16];
+  matrix.getColMajor(m);
   AutoLogger logger(this);
   JSONObject* params = logger.LogItemWithParams("setMatrix");
-  params->SetArray("matrix", ArrayForSkMatrix(matrix));
+  params->SetArray("matrix44", ArrayForSkScalars(16, m));
 }
 
 void LoggingCanvas::didConcat44(const SkM44& matrix) {
@@ -572,29 +582,6 @@ void LoggingCanvas::didConcat44(const SkM44& matrix) {
   AutoLogger logger(this);
   JSONObject* params = logger.LogItemWithParams("concat44");
   params->SetArray("matrix44", ArrayForSkScalars(16, m));
-}
-
-void LoggingCanvas::didConcat(const SkMatrix& matrix) {
-  AutoLogger logger(this);
-  JSONObject* params;
-
-  switch (matrix.getType()) {
-    case SkMatrix::kTranslate_Mask:
-      params = logger.LogItemWithParams("translate");
-      params->SetDouble("dx", matrix.getTranslateX());
-      params->SetDouble("dy", matrix.getTranslateY());
-      break;
-
-    case SkMatrix::kScale_Mask:
-      params = logger.LogItemWithParams("scale");
-      params->SetDouble("scaleX", matrix.getScaleX());
-      params->SetDouble("scaleY", matrix.getScaleY());
-      break;
-
-    default:
-      params = logger.LogItemWithParams("concat");
-      params->SetArray("matrix", ArrayForSkMatrix(matrix));
-  }
 }
 
 void LoggingCanvas::didScale(SkScalar x, SkScalar y) {
@@ -614,7 +601,7 @@ void LoggingCanvas::didTranslate(SkScalar x, SkScalar y) {
 void LoggingCanvas::willSave() {
   AutoLogger logger(this);
   logger.LogItem("save");
-  this->SkCanvas::willSave();
+  SkCanvas::willSave();
 }
 
 SkCanvas::SaveLayerStrategy LoggingCanvas::getSaveLayerStrategy(
@@ -626,13 +613,13 @@ SkCanvas::SaveLayerStrategy LoggingCanvas::getSaveLayerStrategy(
   if (rec.fPaint)
     params->SetObject("paint", ObjectForSkPaint(*rec.fPaint));
   params->SetInteger("saveFlags", static_cast<int>(rec.fSaveLayerFlags));
-  return this->SkCanvas::getSaveLayerStrategy(rec);
+  return SkCanvas::getSaveLayerStrategy(rec);
 }
 
 void LoggingCanvas::willRestore() {
   AutoLogger logger(this);
   logger.LogItem("restore");
-  this->SkCanvas::willRestore();
+  SkCanvas::willRestore();
 }
 
 std::unique_ptr<JSONArray> LoggingCanvas::Log() {

@@ -1,10 +1,12 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
 (async function() {
   TestRunner.addResult(`Tests that InspectorCSSAgent API methods work as expected.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
 <head>
@@ -25,12 +27,18 @@ body.mainpage {
 body:hover {
   color: #CDE;
 }
+
+#target:target {
+  background: #bada55;
+  outline: 5px solid lime;
+}
 </style>
 </head>
 <body id="mainBody" class="main1 main2 mainpage" style="font-weight: normal; width: 85%; background-image: url(bar.png)">
   <table width="50%" id="thetable">
   </table>
   <h1 id="toggle">H1</h1>
+  <p id="target">:target</p>
 </body>
     `);
 
@@ -81,7 +89,7 @@ body:hover {
 
       var resultStyles = {};
 
-      function computedCallback(computedStyle) {
+      function computedCallback({computedStyle}) {
         if (!computedStyle) {
           TestRunner.addResult('Error');
           TestRunner.completeTest();
@@ -91,8 +99,8 @@ body:hover {
       }
 
       function matchedCallback(response) {
-        if (response[Protocol.Error]) {
-          TestRunner.addResult('error: ' + response[Protocol.Error]);
+        if (response.getError()) {
+          TestRunner.addResult('error: ' + response.getError());
           TestRunner.completeTest();
           return;
         }
@@ -103,24 +111,45 @@ body:hover {
         resultStyles.inherited = response.inherited;
       }
 
-      function nodeCallback(node) {
+      async function nodeCallback(node) {
         bodyId = node.id;
         var promises = [
-          TestRunner.CSSAgent.getComputedStyleForNode(node.id).then(computedCallback),
+          TestRunner.CSSAgent.invoke_getComputedStyleForNode({nodeId: node.id}).then(computedCallback),
           TestRunner.CSSAgent.invoke_getMatchedStylesForNode({nodeId: node.id}).then(matchedCallback)
         ];
-        Promise.all(promises).then(callback.bind(null, resultStyles));
+        await Promise.all(promises).then(() => callback(resultStyles));
       }
       ElementsTestRunner.selectNodeWithId('mainBody', nodeCallback);
     },
 
-    async function test_forcedState(next) {
-      TestRunner.CSSAgent.forcePseudoState(bodyId, ['hover']);
-      var response = await TestRunner.CSSAgent.invoke_getMatchedStylesForNode({nodeId: bodyId});
+    async function test_forcedStateHover(next) {
+      await TestRunner.CSSAgent.invoke_forcePseudoState({nodeId: bodyId, forcedPseudoClasses: ['hover']});
+      const response = await TestRunner.CSSAgent.invoke_getMatchedStylesForNode({nodeId: bodyId});
 
       TestRunner.addResult('=== BODY with forced :hover ===');
       ElementsTestRunner.dumpRuleMatchesArray(response.matchedCSSRules);
-      TestRunner.CSSAgent.forcePseudoState(bodyId, ['hover']).then(next);
+
+      // Note: the forced :hover state persists for now, but is removed
+      // as part of the next test.
+      next();
+    },
+
+    async function test_forcedStateTarget(next) {
+      await TestRunner.CSSAgent.invoke_forcePseudoState({nodeId: bodyId, forcedPseudoClasses: ['target']});
+      ElementsTestRunner.nodeWithId('target', nodeCallback);
+
+      async function nodeCallback(node) {
+        const nodeId = node.id;
+        await TestRunner.CSSAgent.invoke_forcePseudoState({nodeId: nodeId, forcedPseudoClasses: ['target']});
+        const response = await TestRunner.CSSAgent.invoke_getMatchedStylesForNode({nodeId: nodeId});
+
+        TestRunner.addResult('=== #target with forced :target ===');
+        ElementsTestRunner.dumpRuleMatchesArray(response.matchedCSSRules);
+
+        // Reset all forced pseudo states for the next tests.
+        await TestRunner.CSSAgent.invoke_forcePseudoState({nodeId: nodeId, forcedPseudoClasses: []});
+        next();
+      }
     },
 
     function test_textNodeComputedStyles(next) {
@@ -133,7 +162,7 @@ body:hover {
           TestRunner.completeTest();
           return;
         }
-        var computedStyle = await TestRunner.CSSAgent.getComputedStyleForNode(textNode.id);
+        var {computedStyle} = await TestRunner.CSSAgent.invoke_getComputedStyleForNode({nodeId: textNode.id});
         if (!computedStyle) {
           TestRunner.addResult('Error');
           return;
@@ -149,8 +178,8 @@ body:hover {
     function test_tableStyles(next) {
       async function nodeCallback(node) {
         var response = await TestRunner.CSSAgent.invoke_getInlineStylesForNode({nodeId: node.id});
-        if (response[Protocol.Error]) {
-          TestRunner.addResult('error: ' + response[Protocol.Error]);
+        if (response.getError()) {
+          TestRunner.addResult('error: ' + response.getError());
           next();
           return;
         }
@@ -158,13 +187,14 @@ body:hover {
         TestRunner.addResult('=== Attributes style for table ===');
         ElementsTestRunner.dumpStyle(response.attributesStyle);
 
-        var result = await TestRunner.CSSAgent.getStyleSheetText(response.inlineStyle.styleSheetId);
+        var result =
+            await TestRunner.CSSAgent.invoke_getStyleSheetText({styleSheetId: response.inlineStyle.styleSheetId});
 
         TestRunner.addResult('');
         TestRunner.addResult('=== Stylesheet-for-inline-style text ===');
-        TestRunner.addResult(result || '');
+        TestRunner.addResult(result.content || '');
 
-        await TestRunner.CSSAgent.setStyleSheetText(response.inlineStyle.styleSheetId, '');
+        await TestRunner.CSSAgent.invoke_setStyleSheetText({styleSheetId: response.inlineStyle.styleSheetId, text: ''});
 
         TestRunner.addResult('');
         TestRunner.addResult('=== Stylesheet-for-inline-style modification result ===');
@@ -176,7 +206,7 @@ body:hover {
 
     async function test_addRule(next) {
       var frameId = TestRunner.resourceTreeModel.mainFrame.id;
-      var styleSheetId = await TestRunner.CSSAgent.createStyleSheet(frameId);
+      var styleSheetId = (await TestRunner.CSSAgent.invoke_createStyleSheet({frameId})).styleSheetId;
       if (!styleSheetId) {
         TestRunner.addResult('Error in CSS.createStyleSheet');
         next();
@@ -185,23 +215,26 @@ body:hover {
 
       var range = {startLine: 0, startColumn: 0, endLine: 0, endColumn: 0};
 
-      var rule = await TestRunner.CSSAgent.addRule(styleSheetId, 'body {}', range);
+      var rule = (await TestRunner.CSSAgent.invoke_addRule({styleSheetId, ruleText: 'body {}', location: range})).rule;
       if (!rule) {
         TestRunner.addResult('Error in CSS.addRule');
         next();
         return;
       }
 
-      var style = await TestRunner.CSSAgent.setStyleTexts([{
-        styleSheetId: rule.style.styleSheetId,
-        range: {
-          startLine: rule.style.range.startLine,
-          startColumn: rule.style.range.startColumn,
-          endLine: rule.style.range.startLine,
-          endColumn: rule.style.range.startColumn
-        },
-        text: 'font-family: serif;'
-      }]);
+      var style =
+          (await TestRunner.CSSAgent.invoke_setStyleTexts({
+            edits: [{
+              styleSheetId: rule.style.styleSheetId,
+              range: {
+                startLine: rule.style.range.startLine,
+                startColumn: rule.style.range.startColumn,
+                endLine: rule.style.range.startLine,
+                endColumn: rule.style.range.startColumn
+              },
+              text: 'font-family: serif;'
+            }]
+          })).styles;
       if (!style) {
         TestRunner.addResult('Error in CSS.setStyleTexts');
         next();
@@ -209,8 +242,8 @@ body:hover {
       }
 
       var response = await TestRunner.CSSAgent.invoke_getMatchedStylesForNode({nodeId: bodyId});
-      if (response[Protocol.Error]) {
-        TestRunner.addResult('error: ' + response[Protocol.Error]);
+      if (response.getError()) {
+        TestRunner.addResult('error: ' + response.getError());
         next();
         return;
       }

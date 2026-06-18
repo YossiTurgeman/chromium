@@ -1,31 +1,55 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/feedback/feedback_uploader.h"
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include <string>
+
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/metrics/histogram_macros.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/task/task_traits.h"
+#include "base/task/thread_pool.h"
+#include "build/branding_buildflags.h"
+#include "build/build_config.h"
+#include "components/feedback/features.h"
 #include "components/feedback/feedback_report.h"
 #include "components/feedback/feedback_switches.h"
 #include "components/variations/net/variations_http_headers.h"
-#include "content/public/browser/browser_context.h"
-#include "content/public/browser/storage_partition.h"
 #include "net/base/load_flags.h"
-#include "net/url_request/url_fetcher.h"
+#include "net/http/http_response_headers.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/simple_url_loader.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 
 namespace feedback {
 
 namespace {
 
+constexpr char kReportSendingResultHistogramName[] =
+    "Feedback.ReportSending.Result";
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class FeedbackReportSendingResult {
+  kSuccessAtFirstTry = 0,  // The report was uploaded successfully without retry
+  kSuccessAfterRetry = 1,  // The report was uploaded successfully after retry
+  kDropped = 2,            // The report is corrupt or invalid and was dropped
+  kMaxValue = kDropped,
+};
+
 constexpr base::FilePath::CharType kFeedbackReportPath[] =
     FILE_PATH_LITERAL("Feedback Reports");
 
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
 constexpr char kFeedbackPostUrl[] =
     "https://www.google.com/tools/feedback/chrome/__submit";
+#else
+constexpr char kFeedbackPostUrl[] = "";
+#endif
 
 constexpr char kProtoBufMimeType[] = "application/x-protobuf";
 
@@ -38,15 +62,11 @@ constexpr int kHttpPostFailServerError = 500;
 // backoff delay is applied on successive failures.
 // This value can be overriden by tests by calling
 // FeedbackUploader::SetMinimumRetryDelayForTesting().
-base::TimeDelta g_minimum_retry_delay = base::TimeDelta::FromMinutes(60);
+base::TimeDelta g_minimum_retry_delay = base::Minutes(60);
 
 // If a new report is queued to be dispatched immediately while another is being
 // dispatched, this is the time to wait for the on-going dispatching to finish.
-base::TimeDelta g_dispatching_wait_delay = base::TimeDelta::FromSeconds(4);
-
-base::FilePath GetPathFromContext(content::BrowserContext* context) {
-  return context->GetPath().Append(kFeedbackReportPath);
-}
+base::TimeDelta g_dispatching_wait_delay = base::Seconds(4);
 
 GURL GetFeedbackPostGURL() {
   const base::CommandLine& command_line =
@@ -56,22 +76,37 @@ GURL GetFeedbackPostGURL() {
                   : kFeedbackPostUrl);
 }
 
+// Creates a new SingleThreadTaskRunner that is used to run feedback blocking
+// background work.
+scoped_refptr<base::SingleThreadTaskRunner> CreateUploaderTaskRunner() {
+  // Uses a BLOCK_SHUTDOWN file task runner to prevent losing reports or
+  // corrupting report's files.
+  return base::ThreadPool::CreateSingleThreadTaskRunner(
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
+       base::TaskShutdownBehavior::BLOCK_SHUTDOWN});
+}
+
 }  // namespace
 
 FeedbackUploader::FeedbackUploader(
-    content::BrowserContext* context,
-    scoped_refptr<base::SingleThreadTaskRunner> task_runner)
-    : context_(context),
-      feedback_reports_path_(GetPathFromContext(context)),
-      task_runner_(task_runner),
-      feedback_post_url_(GetFeedbackPostGURL()),
-      retry_delay_(g_minimum_retry_delay),
-      is_dispatching_(false) {
-  DCHECK(task_runner_);
-  DCHECK(context_);
-}
+    bool is_off_the_record,
+    const base::FilePath& state_path,
+    SharedURLLoaderFactoryGetter shared_url_loader_factory_getter)
+    : FeedbackUploader(is_off_the_record,
+                       state_path,
+                       std::move(shared_url_loader_factory_getter),
+                       nullptr) {}
 
-FeedbackUploader::~FeedbackUploader() {}
+FeedbackUploader::FeedbackUploader(
+    bool is_off_the_record,
+    const base::FilePath& state_path,
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory)
+    : FeedbackUploader(is_off_the_record,
+                       state_path,
+                       SharedURLLoaderFactoryGetter(),
+                       shared_url_loader_factory) {}
+
+FeedbackUploader::~FeedbackUploader() = default;
 
 // static
 void FeedbackUploader::SetMinimumRetryDelayForTesting(base::TimeDelta delay) {
@@ -79,10 +114,11 @@ void FeedbackUploader::SetMinimumRetryDelayForTesting(base::TimeDelta delay) {
 }
 
 void FeedbackUploader::QueueReport(std::unique_ptr<std::string> data,
-                                   bool has_email) {
+                                   bool has_email,
+                                   int product_id) {
   reports_queue_.emplace(base::MakeRefCounted<FeedbackReport>(
       feedback_reports_path_, base::Time::Now(), std::move(data), task_runner_,
-      has_email));
+      has_email, product_id));
   UpdateUploadTimer();
 }
 
@@ -98,6 +134,13 @@ void FeedbackUploader::StartDispatchingReport() {
 }
 
 void FeedbackUploader::OnReportUploadSuccess() {
+  if (retry_delay_ == g_minimum_retry_delay) {
+    UMA_HISTOGRAM_ENUMERATION(kReportSendingResultHistogramName,
+                              FeedbackReportSendingResult::kSuccessAtFirstTry);
+  } else {
+    UMA_HISTOGRAM_ENUMERATION(kReportSendingResultHistogramName,
+                              FeedbackReportSendingResult::kSuccessAfterRetry);
+  }
   retry_delay_ = g_minimum_retry_delay;
   is_dispatching_ = false;
   // Explicitly release the successfully dispatched report.
@@ -115,6 +158,8 @@ void FeedbackUploader::OnReportUploadFailure(bool should_retry) {
   } else {
     // The report won't be retried, hence explicitly delete its file on disk.
     report_being_dispatched_->DeleteReportOnDisk();
+    UMA_HISTOGRAM_ENUMERATION(kReportSendingResultHistogramName,
+                              FeedbackReportSendingResult::kDropped);
   }
 
   // The report dispatching failed, and should either be retried or not. In all
@@ -130,6 +175,21 @@ bool FeedbackUploader::ReportsUploadTimeComparator::operator()(
     const scoped_refptr<FeedbackReport>& a,
     const scoped_refptr<FeedbackReport>& b) const {
   return a->upload_at() > b->upload_at();
+}
+
+FeedbackUploader::FeedbackUploader(
+    bool is_off_the_record,
+    const base::FilePath& state_path,
+    SharedURLLoaderFactoryGetter url_loader_factory_getter,
+    scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
+    : url_loader_factory_getter_(std::move(url_loader_factory_getter)),
+      url_loader_factory_(url_loader_factory),
+      feedback_reports_path_(state_path.Append(kFeedbackReportPath)),
+      task_runner_(CreateUploaderTaskRunner()),
+      feedback_post_url_(GetFeedbackPostGURL()),
+      retry_delay_(g_minimum_retry_delay),
+      is_off_the_record_(is_off_the_record) {
+  DCHECK(!!url_loader_factory_getter_ != !!url_loader_factory_);
 }
 
 void FeedbackUploader::AppendExtraHeadersToUploadRequest(
@@ -150,20 +210,36 @@ void FeedbackUploader::DispatchReport() {
           data:
             "The free-form text that user has entered and useful debugging "
             "logs (UI logs, Chrome logs, kernel logs, auto update engine logs, "
-            "ARC++ logs, etc.). The logs are anonymized to remove any "
+            "ARC++ logs, etc.). The logs are redacted to remove any "
             "user-private data. The user can view the system information "
             "before sending, and choose to send the feedback report without "
             "system information and the logs (unchecking 'Send system "
             "information' prevents sending logs as well), the screenshot, or "
             "even his/her email address."
           destination: GOOGLE_OWNED_SERVICE
+          internal {
+            contacts {
+              email: "cros-device-enablement@google.com"
+            }
+          }
+          user_data {
+            type: ARBITRARY_DATA
+            type: EMAIL
+            type: IMAGE
+            type: USER_CONTENT
+          }
+          last_reviewed: "2023-08-14"
         }
         policy {
           cookies_allowed: NO
           setting:
             "This feature cannot be disabled by settings and is only activated "
             "by direct user request."
-          policy_exception_justification: "Not implemented."
+          chrome_policy {
+            UserFeedbackAllowed {
+              UserFeedbackAllowed: false
+            }
+          }
         })");
   auto resource_request = std::make_unique<network::ResourceRequest>();
   resource_request->url = feedback_post_url_;
@@ -171,11 +247,13 @@ void FeedbackUploader::DispatchReport() {
   resource_request->method = "POST";
 
   // Tell feedback server about the variation state of this install.
-  variations::AppendVariationsHeaderUnknownSignedIn(
-      feedback_post_url_,
-      context_->IsOffTheRecord() ? variations::InIncognito::kYes
-                                 : variations::InIncognito::kNo,
-      resource_request.get());
+  if (report_being_dispatched_->should_include_variations()) {
+    variations::AppendVariationsHeaderUnknownSignedIn(
+        feedback_post_url_,
+        is_off_the_record_ ? variations::InIncognito::kYes
+                           : variations::InIncognito::kNo,
+        resource_request.get());
+  }
 
   if (report_being_dispatched_->has_email()) {
     AppendExtraHeadersToUploadRequest(resource_request.get());
@@ -190,15 +268,13 @@ void FeedbackUploader::DispatchReport() {
   auto it = uploads_in_progress_.insert(uploads_in_progress_.begin(),
                                         std::move(simple_url_loader));
 
-  // Creating the StoragePartitionImpl is costly, so don't do it until
-  // necessary (most importantly, avoid doing so during startup).
   if (!url_loader_factory_) {
-    url_loader_factory_ =
-        content::BrowserContext::GetDefaultStoragePartition(context_)
-            ->GetURLLoaderFactoryForBrowserProcess();
+    // Lazily create the URLLoaderFactory.
+    url_loader_factory_ = std::move(url_loader_factory_getter_).Run();
+    DCHECK(url_loader_factory_);
   }
 
-  simple_url_loader_ptr->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
+  simple_url_loader_ptr->DownloadHeadersOnly(
       url_loader_factory_.get(),
       base::BindOnce(&FeedbackUploader::OnDispatchComplete,
                      base::Unretained(this), std::move(it)));
@@ -206,13 +282,12 @@ void FeedbackUploader::DispatchReport() {
 
 void FeedbackUploader::OnDispatchComplete(
     UrlLoaderList::iterator it,
-    std::unique_ptr<std::string> response_body) {
+    scoped_refptr<net::HttpResponseHeaders> headers) {
   std::stringstream error_stream;
   network::SimpleURLLoader* simple_url_loader = it->get();
   int response_code = kHttpPostFailNoConnection;
-  if (simple_url_loader->ResponseInfo() &&
-      simple_url_loader->ResponseInfo()->headers) {
-    response_code = simple_url_loader->ResponseInfo()->headers->response_code();
+  if (headers) {
+    response_code = headers->response_code();
   }
   if (response_code == kHttpPostSuccessNoContent) {
     error_stream << "Success";
@@ -251,6 +326,14 @@ void FeedbackUploader::UpdateUploadTimer() {
     return;
 
   scoped_refptr<FeedbackReport> report = reports_queue_.top();
+
+  // Don't send reports in Tast tests so that they don't spam Listnr.
+  if (feedback::features::IsSkipSendingFeedbackReportInTastTestsEnabled()) {
+    report->DeleteReportOnDisk();
+    reports_queue_.pop();
+    return;
+  }
+
   const base::Time now = base::Time::Now();
   if (report->upload_at() <= now && !is_dispatching_) {
     reports_queue_.pop();
@@ -266,6 +349,12 @@ void FeedbackUploader::UpdateUploadTimer() {
     upload_timer_.Start(FROM_HERE, delay, this,
                         &FeedbackUploader::UpdateUploadTimer);
   }
+}
+
+GURL FeedbackUploader::SetFeedbackGURLForTesting(GURL url) {
+  GURL previous_url = feedback_post_url_;
+  feedback_post_url_ = std::move(url);
+  return previous_url;
 }
 
 }  // namespace feedback

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,35 +8,34 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.util.SparseArray;
 
-import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.common.GoogleApiAvailability;
 import com.google.android.gms.vision.Frame;
 import com.google.android.gms.vision.text.TextBlock;
 import com.google.android.gms.vision.text.TextRecognizer;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.gfx.mojom.PointF;
 import org.chromium.gfx.mojom.RectF;
+import org.chromium.gms.ChromiumPlayServicesAvailability;
 import org.chromium.mojo.system.MojoException;
 import org.chromium.shape_detection.mojom.TextDetection;
 import org.chromium.shape_detection.mojom.TextDetectionResult;
 
-
-/**
- * Implementation of mojo TextDetection, using Google Play Services vision package.
- */
+/** Implementation of mojo TextDetection, using Google Play Services vision package. */
+@NullMarked
 public class TextDetectionImpl implements TextDetection {
     private static final String TAG = "TextDetectionImpl";
 
-    private TextRecognizer mTextRecognizer;
+    private final TextRecognizer mTextRecognizer;
 
     public TextDetectionImpl() {
         mTextRecognizer = new TextRecognizer.Builder(ContextUtils.getApplicationContext()).build();
     }
 
     @Override
-    public void detect(org.chromium.skia.mojom.Bitmap bitmapData, DetectResponse callback) {
+    public void detect(org.chromium.skia.mojom.BitmapN32 bitmapData, Detect_Response callback) {
         // The vision library will be downloaded the first time the API is used
         // on the device; this happens "fast", but it might have not completed,
         // bail in this case. Also, the API was disabled between and v.9.0 and
@@ -88,10 +87,9 @@ public class TextDetectionImpl implements TextDetection {
         close();
     }
 
-    public static TextDetection create() {
-        if (GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(
-                    ContextUtils.getApplicationContext())
-                != ConnectionResult.SUCCESS) {
+    public static @Nullable TextDetection create() {
+        if (!ChromiumPlayServicesAvailability.isGooglePlayServicesAvailable(
+                ContextUtils.getApplicationContext())) {
             Log.e(TAG, "Google Play Services not available");
             return null;
         }

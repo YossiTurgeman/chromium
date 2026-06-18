@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -13,14 +13,12 @@ file uses "coded linker name" to identify formats and variants:
   'lld-lto_v0': LLD linker with ThinLTO, old format.
   'lld_v1': LLD linker (no LTO), new format.
   'lld-lto_v1': LLD linker with ThinLTO, new format.
-
-The |linker_name| parameter in various functions must take one of the above
-coded linker name values.
 """
 
 import argparse
 import code
 import collections
+import gzip
 import itertools
 import logging
 import os
@@ -28,6 +26,7 @@ import re
 import readline
 import sys
 
+import archive_util
 import demangle
 import models
 
@@ -45,6 +44,22 @@ _STRIP_NAME_PREFIX = {
     models.FLAG_REL: 4,
     models.FLAG_HOT: 4,
 }
+
+# Sections that we want to create individual symbols from.
+_USEFUL_SECTIONS = frozenset(models.BSS_SECTIONS + (
+    models.SECTION_DATA,
+    models.SECTION_DATA_REL_RO,
+    models.SECTION_DATA_REL_RO_LOCAL,
+    models.SECTION_RODATA,
+    models.SECTION_TDATA,
+    models.SECTION_TEXT,
+))
+
+def _OpenMaybeGzAsText(path):
+  """Calls `gzip.open()` if |path| ends in ".gz", otherwise calls `open()`."""
+  if path.endswith('.gz'):
+    return gzip.open(path, 'rt')
+  return open(path, 'rt')
 
 
 def _FlagsFromMangledName(name):
@@ -77,7 +92,7 @@ def _NormalizeName(name):
   return name
 
 
-class MapFileParserGold(object):
+class MapFileParserGold:
   """Parses a linker map file from gold linker."""
   # Map file writer for gold linker:
   # https://github.com/gittup/binutils/blob/HEAD/gold/mapfile.cc
@@ -107,7 +122,7 @@ class MapFileParserGold(object):
         self._common_symbols = self._ParseCommonSymbols()
         logging.debug('.bss common entries: %d', len(self._common_symbols))
         continue
-      elif line.startswith('Memory map'):
+      if line.startswith('Memory map'):
         self._ParseSections()
       break
     return self._section_ranges, self._symbols, {}
@@ -116,6 +131,7 @@ class MapFileParserGold(object):
     for l in self._lines:
       if l.startswith(prefix) or (prefix2 and l.startswith(prefix2)):
         return l
+    return None
 
   def _ParsePossiblyWrappedParts(self, line, count):
     parts = line.split(None, count - 1)
@@ -185,6 +201,7 @@ class MapFileParserGold(object):
       if not line:
         break
       section_name = None
+      prev_section_name = None
       try:
         # Parse section name and size.
         parts = self._ParsePossiblyWrappedParts(line, 3)
@@ -192,11 +209,25 @@ class MapFileParserGold(object):
           break
         section_name, section_address_str, section_size_str = parts
         section_address = int(section_address_str[2:], 16)
+
+        # .debug sections have address=0, and always come at the end.
+        if syms and section_address == 0:
+          logging.info('Stopped parsing at %s', section_name)
+          break
+
         section_size = int(section_size_str[2:], 16)
-        self._section_ranges[section_name] = (section_address, section_size)
-        if (section_name in models.BSS_SECTIONS
-            or section_name in (models.SECTION_RODATA, models.SECTION_TEXT)
-            or section_name.startswith(models.SECTION_DATA)):
+
+        # E.g. Merge user-defined sections. e.g.: malloc_hook, protected_memory.
+        if not section_name.startswith('.'):
+          logging.info('Merged %s into %s', section_name, prev_section_name)
+          section_name = prev_section_name
+          archive_util.ExtendSectionRangeAdjacent(section_ranges, section_name,
+                                                  section_address, section_size)
+        else:
+          prev_section_name = section_name
+          self._section_ranges[section_name] = (section_address, section_size)
+
+        if section_name in _USEFUL_SECTIONS:
           logging.info('Parsing %s', section_name)
           if section_name in models.BSS_SECTIONS:
             # Common symbols have no address.
@@ -254,9 +285,9 @@ class MapFileParserGold(object):
                   # using addresses. We do this because fill lines are not
                   # present when compiling with gcc (only for clang).
                   continue
-                elif line.startswith(' **'):
+                if line.startswith(' **'):
                   break
-                elif name is None:
+                if name is None:
                   address_str2, name = self._ParsePossiblyWrappedParts(line, 2)
 
               if address_str == '0xffffffffffffffff':
@@ -327,7 +358,7 @@ class MapFileParserGold(object):
         raise
 
 
-class MapFileParserLld(object):
+class MapFileParserLld:
   """Parses a linker map file from LLD."""
   # Map file writer for LLD linker (for ELF):
   # https://github.com/llvm-mirror/lld/blob/HEAD/ELF/MapFile.cpp
@@ -441,11 +472,14 @@ class MapFileParserLld(object):
     #     600      600       14     4         ...:(.text.OUTLINED_FUNCTION_0)
     #     600      600        0     1                 $x.3
     #     600      600       14     1                 OUTLINED_FUNCTION_0
+    #    3f00     3f00      700     4 malloc_hook
+    #    3f00     3f00      700     1         ...:o:(malloc_hook.foo)
+    #    3f00     3f00      700     1                 foo (.llvm.1234)
     #  123800   123800    20000   256 .rodata
-    #  123800   123800       4      4         ...:o:(.rodata._ZN3fooE.llvm.1234)
-    #  123800   123800       4      1                 foo (.llvm.1234)
-    #  123804   123804       4      4         ...:o:(.rodata.bar.llvm.1234)
-    #  123804   123804       4      1                 bar.llvm.1234
+    #  123800   123800        4     4         ...:o:(.rodata._ZN3fooE.llvm.1234)
+    #  123800   123800        4     1                 foo (.llvm.1234)
+    #  123804   123804        4     4         ...:o:(.rodata.bar.llvm.1234)
+    #  123804   123804        4     1                 bar.llvm.1234
     # Older format:
     # Address          Size             Align Out     In      Symbol
     # 00000000002002a8 000000000000001c     1 .interp
@@ -487,41 +521,46 @@ class MapFileParserLld(object):
 
     tokenizer = self.Tokenize(lines)
 
-    in_partitions = False
     in_jump_table = False
     jump_tables_count = 0
     jump_entries_count = 0
+    prev_section_end = 0
+    prev_section_name = None
 
     for (line, address, size, level, span, tok) in tokenizer:
       # Level 1 data match the "Out" column. They specify sections or
       # PROVIDE_HIDDEN lines.
       if level == 1:
-        # Ignore sections that belong to feature library partitions. Seeing a
-        # partition name is an indicator that we've entered a list of feature
-        # partitions. After these, a single .part.end section will follow to
-        # reserve memory at runtime. Seeing the .part.end section also marks the
-        # end of partition sections in the map file.
-        if tok.endswith('_partition'):
-          in_partitions = True
-        elif tok == '.part.end':
-          # Note that we want to retain .part.end section, so it's fine to
-          # restart processing on this section, rather than the next one.
-          in_partitions = False
+        # .debug sections have address=0, and always come at the end.
+        # Once we've hit a partition, we've finished the main library.
+        # Ideally we'd also break down symbols in partitions, but we're likely
+        # to stop using them soon anyways.
+        if (syms and address == 0 or tok.endswith('_partition')
+            or tok.startswith('PROVIDE_HIDDEN')):
+          logging.info('Stopped parsing at %s', tok)
+          break
 
-        if in_partitions:
-          # For now, completely ignore feature partitions.
-          cur_section = None
-          cur_section_is_useful = False
+        cur_section = tok
+        assert address >= prev_section_end, (
+            f'Section {cur_section} has start address within previous section: '
+            f'{address}\n{self._section_ranges}')
+
+        # E.g. Merge user-defined sections. e.g.: malloc_hook, protected_memory.
+        if not cur_section.startswith('.'):
+          logging.info('Merged %s into %s', cur_section, prev_section_name)
+          cur_section = prev_section_name
+          archive_util.ExtendSectionRangeAdjacent(self._section_ranges,
+                                                  cur_section, address, size)
         else:
-          if not tok.startswith('PROVIDE_HIDDEN'):
-            self._section_ranges[tok] = (address, size)
-          cur_section = tok
-          # E.g., Want to convert "(.text._name)" -> "_name" later.
-          mangled_start_idx = len(cur_section) + 2
-          cur_section_is_useful = (
-              cur_section in models.BSS_SECTIONS
-              or cur_section in (models.SECTION_RODATA, models.SECTION_TEXT)
-              or cur_section.startswith(models.SECTION_DATA))
+          prev_section_name = cur_section
+          self._section_ranges[cur_section] = (address, size)
+
+        if cur_section not in models.BSS_SECTIONS:
+          prev_section_end = address + size
+
+        # E.g., Want to convert "(.text._name)" -> "_name" later.
+        mangled_start_idx = len(cur_section) + 2
+        cur_section_is_useful = cur_section in _USEFUL_SECTIONS
 
       elif cur_section_is_useful:
         # Level 2 data match the "In" column. They specify object paths and
@@ -546,18 +585,19 @@ class MapFileParserLld(object):
             # merged data. Feature request is filed under:
             # https://bugs.llvm.org/show_bug.cgi?id=35248
             if cur_obj == '<internal>':
-              if cur_section == '.rodata' and mangled_name == '':
+              if cur_section == '.rodata':
                 # Treat all <internal> sections within .rodata as as string
                 # literals. Some may hold numeric constants or other data, but
                 # there is currently no way to distinguish them.
                 mangled_name = '** lld merge strings'
               else:
                 # e.g. <internal>:(.text.thunk)
-                mangled_name = '** ' + mangled_name
+                mangled_name = '** ' + paren_value.strip('()')
 
               is_partial = False
               cur_obj = None
-            elif cur_obj == 'lto.tmp' or 'thinlto-cache' in cur_obj:
+            elif (cur_obj == 'lto.tmp' or 'thinlto-cache' in cur_obj
+                  or '.lto.' in cur_obj):
               thin_map[address] = os.path.basename(cur_obj)
               cur_obj = None
 
@@ -635,7 +675,8 @@ class MapFileParserLld(object):
                   #   symbol.
                   # Anything that makes it here would be an anomaly worthy of
                   # investigation, so print warnings.
-                  logging.warn('Unrecognized __typeid_ symbol at %08X', address)
+                  logging.warning('Unrecognized __typeid_ symbol at %08X',
+                                  address)
                   continue
               else:
                 # Prefer |size|, and only fall back to |span| if |size == 0|.
@@ -664,8 +705,8 @@ class MapFileParserLld(object):
 def _DetectLto(lines):
   """Scans LLD linker map file and returns whether LTO was used."""
   # It's assumed that the first line in |lines| was consumed to determine that
-  # LLD was used. Seek 'thinlto-cache' prefix within an "indicator section" as
-  # indicator for LTO.
+  # LLD was used. Seek 'thinlto-cache' prefix or the string '.lto' within an
+  # "indicator section" as indicator for LTO.
   found_indicator_section = False
   # Potential names of "main section". Only one gets used.
   indicator_section_set = set(['.rodata', '.ARM.exidx'])
@@ -689,12 +730,12 @@ def _DetectLto(lines):
         found_indicator_section = True
     elif indent_size == 8:
       if found_indicator_section:
-        if tok.startswith('thinlto-cache'):
+        if tok.startswith('thinlto-cache') or '.lto.' in tok:
           return True
   return False
 
 
-def DetectLinkerNameFromMapFile(lines):
+def _DetectLinkerName(lines):
   """Heuristic linker detection from partial scan of the linker map.
 
   Args:
@@ -702,7 +743,6 @@ def DetectLinkerNameFromMapFile(lines):
 
   Returns:
     A coded linker name.
-
   """
   first_line = next(lines)
 
@@ -718,33 +758,42 @@ def DetectLinkerNameFromMapFile(lines):
   raise Exception('Invalid map file: ' + first_line)
 
 
-class MapFileParser(object):
-  """Parses a linker map file generated from a specified linker."""
-  def Parse(self, linker_name, lines):
-    """Parses a linker map file.
+def ParseLines(lines):
+  """Parses a linker map file given an iterable of its lines.
 
-    Args:
-      linker_name: Coded linker name to specify a linker.
-      lines: Iterable of lines from the linker map.
+  Returns:
+    A tuple of (section_ranges, symbols, extras).
+  """
+  # Buffer 1000 lines for format detection.
+  header = list(itertools.islice(lines, 1000))
+  lines = itertools.chain(header, lines)
+  linker_name = _DetectLinkerName(iter(header))
+  logging.info('Detected map file of type %s', linker_name)
+  if linker_name.startswith('lld'):
+    inner_parser = MapFileParserLld(linker_name)
+  elif linker_name == 'gold':
+    inner_parser = MapFileParserGold()
+  else:
+    raise Exception('.map file is from a unsupported linker.')
 
-    Returns:
-      A tuple of (section_ranges, symbols, extras).
-    """
-    next(lines)  # Consume the first line of headers.
-    if linker_name.startswith('lld'):
-      inner_parser = MapFileParserLld(linker_name)
-    elif linker_name == 'gold':
-      inner_parser = MapFileParserGold()
-    else:
-      raise Exception('.map file is from a unsupported linker.')
+  next(lines)  # Consume the first line of headers.
+  section_ranges, syms, extras = inner_parser.Parse(lines)
+  for sym in syms:
+    if sym.object_path and not sym.object_path.endswith(')'):
+      # Don't want '' to become '.'.
+      # Thin archives' paths will get fixed in |ar.CreateThinObjectPath|.
+      sym.object_path = os.path.normpath(sym.object_path)
+  return section_ranges, syms, extras
 
-    section_ranges, syms, extras = inner_parser.Parse(lines)
-    for sym in syms:
-      if sym.object_path and not sym.object_path.endswith(')'):
-        # Don't want '' to become '.'.
-        # Thin archives' paths will get fixed in |ar.CreateThinObjectPath|.
-        sym.object_path = os.path.normpath(sym.object_path)
-    return (section_ranges, syms, extras)
+
+def ParseFile(path):
+  """Parses a linker map file pointed to by |path|.
+
+  Returns:
+    A tuple of (section_ranges, symbols, extras).
+  """
+  with _OpenMaybeGzAsText(path) as f:
+    return ParseLines(f)
 
 
 def DeduceObjectPathsFromThinMap(raw_symbols, extras):
@@ -816,12 +865,7 @@ def main():
       level=logging.WARNING - args.verbose * 10,
       format='%(levelname).1s %(relativeCreated)6d %(message)s')
 
-  with open(args.linker_file, 'r') as map_file:
-    linker_name = DetectLinkerNameFromMapFile(map_file)
-  print('Linker type: %s' % linker_name)
-
-  with open(args.linker_file, 'r') as map_file:
-    section_ranges, syms, extras = MapFileParser().Parse(linker_name, map_file)
+  section_ranges, syms, extras = ParseFile(args.linker_file)
 
   if args.dump:
     print(section_ranges)

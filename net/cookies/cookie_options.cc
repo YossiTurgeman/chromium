@@ -1,10 +1,12 @@
-// Copyright (c) 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // Brought to you by number 42.
 
 #include "net/cookies/cookie_options.h"
+
+#include <tuple>
 
 #include "net/cookies/cookie_util.h"
 
@@ -25,11 +27,26 @@ CookieOptions::SameSiteCookieContext::MakeInclusiveForSet() {
 CookieOptions::SameSiteCookieContext::ContextType
 CookieOptions::SameSiteCookieContext::GetContextForCookieInclusion() const {
   DCHECK_LE(schemeful_context_, context_);
+  return schemeful_context_;
+}
 
-  if (cookie_util::IsSchemefulSameSiteEnabled())
-    return schemeful_context_;
+const CookieOptions::SameSiteCookieContext::ContextMetadata&
+CookieOptions::SameSiteCookieContext::GetMetadataForCurrentSchemefulMode()
+    const {
+  return schemeful_metadata();
+}
 
-  return context_;
+void CookieOptions::SameSiteCookieContext::SetContextTypesForTesting(
+    ContextType context_type,
+    ContextType schemeful_context_type) {
+  context_ = context_type;
+  schemeful_context_ = schemeful_context_type;
+}
+
+bool CookieOptions::SameSiteCookieContext::CompleteEquivalenceForTesting(
+    const SameSiteCookieContext& other) const {
+  return (*this == other) && (metadata() == other.metadata()) &&
+         (schemeful_metadata() == other.schemeful_metadata());
 }
 
 bool operator==(const CookieOptions::SameSiteCookieContext& lhs,
@@ -38,18 +55,18 @@ bool operator==(const CookieOptions::SameSiteCookieContext& lhs,
          std::tie(rhs.context_, rhs.schemeful_context_);
 }
 
-bool operator!=(const CookieOptions::SameSiteCookieContext& lhs,
-                const CookieOptions::SameSiteCookieContext& rhs) {
-  return !(lhs == rhs);
-}
-
-// Keep default values in sync with content/public/common/cookie_manager.mojom.
+// Keep default values in sync with
+// services/network/public/mojom/cookie_manager.mojom.
 CookieOptions::CookieOptions()
-    : exclude_httponly_(true),
-      same_site_cookie_context_(SameSiteCookieContext(
-          SameSiteCookieContext::ContextType::CROSS_SITE)),
-      update_access_time_(true),
-      return_excluded_cookies_(false) {}
+    : same_site_cookie_context_(SameSiteCookieContext(
+          SameSiteCookieContext::ContextType::CROSS_SITE)) {}
+
+CookieOptions::CookieOptions(const CookieOptions& other) = default;
+CookieOptions::CookieOptions(CookieOptions&& other) = default;
+CookieOptions::~CookieOptions() = default;
+
+CookieOptions& CookieOptions::operator=(const CookieOptions&) = default;
+CookieOptions& CookieOptions::operator=(CookieOptions&&) = default;
 
 // static
 CookieOptions CookieOptions::MakeAllInclusive() {

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@ import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.suggestions.SuggestionsDependencyFactory;
 import org.chromium.chrome.browser.suggestions.mostvisited.MostVisitedSites;
 import org.chromium.chrome.browser.thumbnail.generator.ThumbnailProvider;
-import org.chromium.chrome.browser.ui.favicon.LargeIconBridge;
+import org.chromium.components.favicon.LargeIconBridge;
 
 /**
  * Rule that allows mocking native dependencies of the suggestions package.
@@ -23,7 +23,7 @@ import org.chromium.chrome.browser.ui.favicon.LargeIconBridge;
  * @see SuggestionsDependencyFactory
  */
 public class SuggestionsDependenciesRule extends TestWatcher {
-    private TestFactory mFactory;
+    private final TestFactory mFactory;
 
     public TestFactory getFactory() {
         return mFactory;

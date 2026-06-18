@@ -1,15 +1,13 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Reset sources_assignment_filter for the BUILD.gn file to prevent
-# regression during the migration of Chromium away from the feature.
-# See docs/no_sources_assignment_filter.md for more information.
-# TODO(crbug.com/1018739): remove this when migration is done.
-set_sources_assignment_filter([])
+import("//build/config/ozone.gni")
 
 component("webview") {
   sources = [
+    "simple_web_view.h",
+    "simple_web_view_dialog_delegate.h",
     "unhandled_keyboard_event_handler.cc",
     "unhandled_keyboard_event_handler.h",
     "web_contents_set_background_color.cc",
@@ -37,14 +35,15 @@ component("webview") {
 
   deps = [
     "//base:i18n",
-    "//base/third_party/dynamic_annotations",
+    "//components/input",
     "//ipc",
     "//skia",
     "//ui/accessibility",
-    "//ui/base",
+    "//ui/base/interaction",
     "//ui/content_accelerators",
     "//ui/events",
     "//ui/events:events_base",
+    "//ui/gfx:native_ui_types",
     "//ui/web_dialogs",
     "//url",
   ]
@@ -58,30 +57,11 @@ component("webview") {
   ]
 
   if (is_linux || is_chromeos || is_android || is_fuchsia) {
-    sources += [ "unhandled_keyboard_event_handler_default.cc" ]
+    if (use_ozone) {
+      sources += [ "unhandled_keyboard_event_handler_ozone.cc" ]
+      deps += [ "//ui/ozone" ]
+    } else {
+      sources += [ "unhandled_keyboard_event_handler_default.cc" ]
+    }
   }
-}
-
-static_library("test_support") {
-  testonly = true
-  sources = [
-    "../../test/webview_test_helper.cc",
-    "../../test/webview_test_helper.h",
-  ]
-
-  public_deps = [ ":webview" ]
-  deps = [
-    "//base",
-    "//content",
-    "//content/test:test_support",
-    "//ipc:test_support",
-    "//skia",
-    "//testing/gtest",
-    "//ui/base",
-    "//ui/events",
-    "//ui/gfx",
-    "//ui/gfx/geometry",
-    "//ui/views",
-    "//ui/views:test_support",
-  ]
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,28 +9,38 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/containers/heap_array.h"
 
 namespace media {
 
 class Cluster {
  public:
-  Cluster(std::unique_ptr<uint8_t[]> data, int size);
+  Cluster() = delete;
+
+  // The size of the `bytes_used` might be less size of `data`.
+  Cluster(base::HeapArray<uint8_t> data, int bytes_used);
+
+  Cluster(const Cluster&) = delete;
+  Cluster& operator=(const Cluster&) = delete;
+
   ~Cluster();
 
-  const uint8_t* data() const { return data_.get(); }
-  int size() const { return size_; }
+  // TODO(frs): This should be changed to return a span.
+  const uint8_t* data() const { return data_.data(); }
+  int bytes_used() const { return bytes_used_; }
 
  private:
-  std::unique_ptr<uint8_t[]> data_;
-  int size_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(Cluster);
+  base::HeapArray<uint8_t> data_;
+  const int bytes_used_;
 };
 
 class ClusterBuilder {
  public:
   ClusterBuilder();
+
+  ClusterBuilder(const ClusterBuilder&) = delete;
+  ClusterBuilder& operator=(const ClusterBuilder&) = delete;
+
   ~ClusterBuilder();
 
   void SetClusterTimecode(int64_t cluster_timecode);
@@ -66,7 +76,7 @@ class ClusterBuilder {
                              const uint8_t* data,
                              int size);
   void Reset();
-  void ExtendBuffer(int bytes_needed);
+  void ExtendBuffer(size_t bytes_needed);
   void UpdateUInt64(int offset, int64_t value);
   void WriteBlock(uint8_t* buf,
                   int track_num,
@@ -75,12 +85,9 @@ class ClusterBuilder {
                   const uint8_t* data,
                   int size);
 
-  std::unique_ptr<uint8_t[]> buffer_;
-  int buffer_size_;
-  int bytes_used_;
+  base::HeapArray<uint8_t> buffer_;
+  size_t bytes_used_;
   int64_t cluster_timecode_;
-
-  DISALLOW_COPY_AND_ASSIGN(ClusterBuilder);
 };
 
 }  // namespace media

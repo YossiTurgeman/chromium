@@ -1,9 +1,8 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/command_line.h"
-#include "base/strings/stringprintf.h"
 #include "build/build_config.h"
 #include "content/browser/webrtc/webrtc_content_browsertest_base.h"
 #include "content/public/common/content_switches.h"
@@ -14,8 +13,7 @@
 #include "media/base/test_data_util.h"
 #include "media/mojo/buildflags.h"
 
-#if defined(OS_ANDROID)
-#include "base/android/build_info.h"
+#if BUILDFLAG(IS_ANDROID)
 #include "base/system/sys_info.h"
 #endif
 
@@ -59,25 +57,27 @@ class WebRtcCaptureFromElementBrowserTest
       public testing::WithParamInterface<struct FileAndTypeParameters> {
  public:
   WebRtcCaptureFromElementBrowserTest() {}
+
+  WebRtcCaptureFromElementBrowserTest(
+      const WebRtcCaptureFromElementBrowserTest&) = delete;
+  WebRtcCaptureFromElementBrowserTest& operator=(
+      const WebRtcCaptureFromElementBrowserTest&) = delete;
+
   ~WebRtcCaptureFromElementBrowserTest() override {}
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
     WebRtcContentBrowserTestBase::SetUpCommandLine(command_line);
 
     // Allow <video>/<audio>.play() when not initiated by user gesture.
-    base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
+    command_line->AppendSwitchASCII(
         switches::kAutoplayPolicy,
         switches::autoplay::kNoUserGestureRequiredPolicy);
     // Allow experimental canvas features.
-    base::CommandLine::ForCurrentProcess()->AppendSwitch(
+    command_line->AppendSwitch(
         switches::kEnableExperimentalWebPlatformFeatures);
     // Allow window.internals for simulating context loss.
-    base::CommandLine::ForCurrentProcess()->AppendSwitch(
-        switches::kExposeInternalsForTesting);
+    command_line->AppendSwitch(switches::kExposeInternalsForTesting);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(WebRtcCaptureFromElementBrowserTest);
 };
 
 IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
@@ -86,24 +86,47 @@ IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
                   kCanvasCaptureColorTestHtmlFile);
 }
 
+#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
+#define MAYBE_VerifyCanvasWebGLCaptureOpaqueColor \
+  DISABLED_VerifyCanvasWebGLCaptureOpaqueColor
+#else
+#define MAYBE_VerifyCanvasWebGLCaptureOpaqueColor \
+  VerifyCanvasWebGLCaptureOpaqueColor
+#endif  // BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
 IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
-                       VerifyCanvasWebGLCaptureColor) {
-#if !defined(OS_MAC)
-  // TODO(crbug.com/706009): Make this test pass on mac.  Behavior is not buggy
-  // (verified manually) on mac, but for some reason this test fails on the mac
-  // bot.
-  MakeTypicalCall("testCanvasWebGLCaptureColors(true);",
+                       MAYBE_VerifyCanvasWebGLCaptureOpaqueColor) {
+  MakeTypicalCall("testCanvasWebGLCaptureOpaqueColors(true);",
                   kCanvasCaptureColorTestHtmlFile);
-#endif
 }
 
+#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
+#define MAYBE_VerifyCanvasWebGLCaptureAlphaColor \
+  DISABLED_VerifyCanvasWebGLCaptureAlphaColor
+#else
+#define MAYBE_VerifyCanvasWebGLCaptureAlphaColor \
+  VerifyCanvasWebGLCaptureAlphaColor
+#endif  // BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
 IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
-                       VerifyCanvasCapture2DFrames) {
+                       MAYBE_VerifyCanvasWebGLCaptureAlphaColor) {
+  MakeTypicalCall("testCanvasWebGLCaptureAlphaColors(true);",
+                  kCanvasCaptureColorTestHtmlFile);
+}
+
+// TODO(crbug.com/40856408): Flaky.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_ANDROID)
+#define MAYBE_VerifyCanvasCapture2DFrames DISABLED_VerifyCanvasCapture2DFrames
+#else
+#define MAYBE_VerifyCanvasCapture2DFrames VerifyCanvasCapture2DFrames
+#endif
+IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
+                       MAYBE_VerifyCanvasCapture2DFrames) {
   MakeTypicalCall("testCanvasCapture(draw2d);", kCanvasCaptureTestHtmlFile);
 }
 
+// TODO(crbug.com/40846825): Flaky on mac, windows, and linux.
+// TODO(crbug.com/362833242): Flaky on Android.
 IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
-                       VerifyCanvasCaptureWebGLFrames) {
+                       DISABLED_VerifyCanvasCaptureWebGLFrames) {
   MakeTypicalCall("testCanvasCapture(drawWebGL);", kCanvasCaptureTestHtmlFile);
 }
 
@@ -117,8 +140,9 @@ IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
                   kCanvasCaptureTestHtmlFile);
 }
 
+// TODO(crbug.com/40846743): Fix and re-enable.
 IN_PROC_BROWSER_TEST_F(WebRtcCaptureFromElementBrowserTest,
-                       VerifyCanvasCaptureBitmapRendererFrames) {
+                       DISABLED_VerifyCanvasCaptureBitmapRendererFrames) {
   MakeTypicalCall("testCanvasCapture(drawBitmapRenderer);",
                   kCanvasCaptureTestHtmlFile);
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,27 +10,25 @@
 #include <string>
 #include <vector>
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "chrome/browser/devtools/device/android_device_manager.h"
-
-namespace crypto {
-class RSAPrivateKey;
-}
+#include "crypto/keypair.h"
 
 class AndroidUsbDevice;
+class Profile;
 
 class UsbDeviceProvider : public AndroidDeviceManager::DeviceProvider {
  public:
   explicit UsbDeviceProvider(Profile* profile);
 
-  void QueryDevices(const SerialsCallback& callback) override;
+  void QueryDevices(SerialsCallback callback) override;
 
   void QueryDeviceInfo(const std::string& serial,
-                       const DeviceInfoCallback& callback) override;
+                       DeviceInfoCallback callback) override;
 
   void OpenSocket(const std::string& serial,
                   const std::string& socket_name,
-                  const SocketCallback& callback) override;
+                  SocketCallback callback) override;
 
   void ReleaseDevice(const std::string& serial) override;
 
@@ -38,12 +36,12 @@ class UsbDeviceProvider : public AndroidDeviceManager::DeviceProvider {
   ~UsbDeviceProvider() override;
 
   void EnumeratedDevices(
-      const SerialsCallback& callback,
-      const std::vector<scoped_refptr<AndroidUsbDevice> >& devices);
+      SerialsCallback callback,
+      const std::vector<scoped_refptr<AndroidUsbDevice>>& devices);
 
   typedef std::map<std::string, scoped_refptr<AndroidUsbDevice> > UsbDeviceMap;
 
-  std::unique_ptr<crypto::RSAPrivateKey> rsa_key_;
+  crypto::keypair::PrivateKey rsa_key_;
   UsbDeviceMap device_map_;
 };
 

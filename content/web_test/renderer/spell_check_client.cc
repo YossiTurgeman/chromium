@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,11 @@
 
 #include <stddef.h>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/task/single_thread_task_runner.h"
 #include "content/web_test/renderer/web_test_grammar_checker.h"
-#include "third_party/blink/public/web/blink.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_text_checking_completion.h"
 #include "third_party/blink/public/web/web_text_checking_result.h"
@@ -44,7 +44,7 @@ void SpellCheckClient::CheckSpelling(
     const blink::WebString& text,
     size_t& misspelled_offset,
     size_t& misspelled_length,
-    blink::WebVector<blink::WebString>* optional_suggestions) {
+    std::vector<blink::WebString>* optional_suggestions) {
   if (!enabled_) {
     misspelled_offset = 0;
     misspelled_length = 0;
@@ -57,6 +57,9 @@ void SpellCheckClient::CheckSpelling(
 
 void SpellCheckClient::RequestCheckingOfText(
     const blink::WebString& text,
+    const std::vector<blink::WebSpellingMarker>& spelling_markers,
+    blink::WebTextCheckClient::ShouldForceRefreshTextCheckService
+        should_force_refresh,
     std::unique_ptr<blink::WebTextCheckingCompletion> completion) {
   if (!enabled_ || text.IsEmpty()) {
     if (completion) {
@@ -74,7 +77,9 @@ void SpellCheckClient::RequestCheckingOfText(
 
   last_requested_text_checking_completion_ = std::move(completion);
   last_requested_text_check_string_ = text;
-  if (spell_checker_.HasInCache(text)) {
+  if (should_force_refresh ==
+          blink::WebTextCheckClient::ShouldForceRefreshTextCheckService::kNo &&
+      spell_checker_.HasInCache(text)) {
     FinishLastTextCheck();
   } else {
     frame_->GetTaskRunner(blink::TaskType::kInternalTest)
@@ -91,17 +96,17 @@ void SpellCheckClient::FinishLastTextCheck() {
   size_t offset = 0;
   if (!spell_checker_.IsMultiWordMisspelling(last_requested_text_check_string_,
                                              &results)) {
-    base::string16 text = last_requested_text_check_string_.Utf16();
+    std::u16string text = last_requested_text_check_string_.Utf16();
     while (text.length()) {
       size_t misspelled_position = 0;
       size_t misspelled_length = 0;
-      spell_checker_.SpellCheckWord(blink::WebString::FromUTF16(text),
+      spell_checker_.SpellCheckWord(blink::WebString::FromUtf16(text),
                                     &misspelled_position, &misspelled_length);
       if (!misspelled_length)
         break;
-      blink::WebVector<blink::WebString> suggestions;
+      std::vector<blink::WebString> suggestions;
       spell_checker_.FillSuggestionList(
-          blink::WebString::FromUTF16(
+          blink::WebString::FromUtf16(
               text.substr(misspelled_position, misspelled_length)),
           &suggestions);
       results.push_back(blink::WebTextCheckingResult(
@@ -120,7 +125,8 @@ void SpellCheckClient::FinishLastTextCheck() {
 
 void SpellCheckClient::SetSpellCheckResolvedCallback(
     v8::Local<v8::Function> callback) {
-  resolved_callback_.Reset(blink::MainThreadIsolate(), callback);
+  resolved_callback_.Reset(frame_->GetAgentGroupScheduler()->Isolate(),
+                           callback);
 }
 
 void SpellCheckClient::RemoveSpellCheckResolvedCallback() {
@@ -131,7 +137,7 @@ void SpellCheckClient::RequestResolved() {
   if (resolved_callback_.IsEmpty())
     return;
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  v8::Isolate* isolate = frame_->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
 
   v8::Local<v8::Context> context = frame_->MainWorldScriptContext();

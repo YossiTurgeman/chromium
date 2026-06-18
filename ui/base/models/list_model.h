@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "base/check_op.h"
-#include "base/macros.h"
 #include "base/observer_list.h"
 #include "ui/base/models/list_model_observer.h"
 
@@ -27,6 +26,10 @@ class ListModel {
   using ItemList = std::vector<std::unique_ptr<ItemType>>;
 
   ListModel() {}
+
+  ListModel(const ListModel&) = delete;
+  ListModel& operator=(const ListModel&) = delete;
+
   ~ListModel() {}
 
   // Adds |item| at the |index| into |items_|. Returns a raw pointer.
@@ -90,32 +93,28 @@ class ListModel {
     NotifyItemMoved(index, target_index);
   }
 
-  void AddObserver(ListModelObserver* observer) {
+  void AddObserver(ListModelObserver* observer) const {
     observers_.AddObserver(observer);
   }
 
-  void RemoveObserver(ListModelObserver* observer) {
+  void RemoveObserver(ListModelObserver* observer) const {
     observers_.RemoveObserver(observer);
   }
 
   void NotifyItemsAdded(size_t start, size_t count) {
-    for (ListModelObserver& observer : observers_)
-      observer.ListItemsAdded(start, count);
+    observers_.Notify(&ListModelObserver::ListItemsAdded, start, count);
   }
 
   void NotifyItemsRemoved(size_t start, size_t count) {
-    for (ListModelObserver& observer : observers_)
-      observer.ListItemsRemoved(start, count);
+    observers_.Notify(&ListModelObserver::ListItemsRemoved, start, count);
   }
 
   void NotifyItemMoved(size_t index, size_t target_index) {
-    for (ListModelObserver& observer : observers_)
-      observer.ListItemMoved(index, target_index);
+    observers_.Notify(&ListModelObserver::ListItemMoved, index, target_index);
   }
 
   void NotifyItemsChanged(size_t start, size_t count) {
-    for (ListModelObserver& observer : observers_)
-      observer.ListItemsChanged(start, count);
+    observers_.Notify(&ListModelObserver::ListItemsChanged, start, count);
   }
 
   size_t item_count() const { return items_.size(); }
@@ -137,9 +136,10 @@ class ListModel {
 
  private:
   ItemList items_;
-  base::ObserverList<ListModelObserver>::Unchecked observers_;
 
-  DISALLOW_COPY_AND_ASSIGN(ListModel<ItemType>);
+  // Mutable to allow adding/removing `ListModelObserver`'s through a const
+  // ListModel in order to preserve underlying data const-ness.
+  mutable base::ObserverList<ListModelObserver>::Unchecked observers_;
 };
 
 }  // namespace ui

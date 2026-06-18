@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # Copyright (C) 2009 Google Inc. All rights reserved.
 #
@@ -28,7 +28,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-# Copyright (c) 2009 The Chromium Authors. All rights reserved.
+# Copyright 2009 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -36,7 +36,6 @@
 # INPUT_FILE is a path to *.y such as xpath_grammar.y.
 # OUTPUT_DIR is where the bison-generated .cc and .h files should be placed.
 
-import errno
 import os
 import os.path
 import subprocess
@@ -46,8 +45,8 @@ from blinkbuild.name_style_converter import NameStyleConverter
 
 
 def modify_file(path, prefix_lines, suffix_lines, replace_list=[]):
-    prefix_lines = map(lambda s: s + '\n', prefix_lines)
-    suffix_lines = map(lambda s: s + '\n', suffix_lines)
+    prefix_lines = list(map(lambda s: s + '\n', prefix_lines))
+    suffix_lines = list(map(lambda s: s + '\n', suffix_lines))
     with open(path, 'r') as f:
         old_lines = f.readlines()
     for i in range(len(old_lines)):

@@ -1,26 +1,28 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/extensions/extension_action_icon_factory.h"
+#include "extensions/browser/extension_action_icon_factory.h"
 
+#include <memory>
 #include <utility>
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/json/json_file_value_serializer.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
-#include "base/test/metrics/histogram_tester.h"
 #include "build/build_config.h"
-#include "chrome/browser/extensions/extension_service.h"
+#include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/test_extension_system.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/test/base/testing_profile.h"
 #include "content/public/test/browser_task_environment.h"
 #include "extensions/browser/extension_action.h"
 #include "extensions/browser/extension_action_manager.h"
+#include "extensions/browser/extension_registrar.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/image_util.h"
 #include "extensions/grit/extensions_browser_resources.h"
@@ -30,15 +32,24 @@
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/image/image_skia_rep.h"
 #include "ui/gfx/skia_util.h"
 
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/chromeos/login/users/scoped_test_user_manager.h"
-#include "chrome/browser/chromeos/settings/scoped_cros_settings_test_helper.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/ash/login/users/user_manager_delegate_impl.h"
+#include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
+#include "chrome/browser/browser_process.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
+#include "components/user_manager/scoped_user_manager.h"
+#include "components/user_manager/user_manager_impl.h"
 #endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 namespace {
+
+using ::extensions::mojom::ManifestLocation;
 
 bool ImageRepsAreEqual(const gfx::ImageSkiaRep& image_rep1,
                        const gfx::ImageSkiaRep& image_rep2) {
@@ -70,13 +81,11 @@ gfx::Image LoadIcon(const std::string& filename) {
   base::PathService::Get(chrome::DIR_TEST_DATA, &path);
   path = path.AppendASCII("extensions/api_test").AppendASCII(filename);
 
-  std::string file_contents;
-  base::ReadFileToString(path, &file_contents);
-  const unsigned char* data =
-      reinterpret_cast<const unsigned char*>(file_contents.data());
+  std::optional<std::vector<uint8_t>> file_contents =
+      base::ReadFileToBytes(path);
 
-  SkBitmap bitmap;
-  gfx::PNGCodec::Decode(data, file_contents.length(), &bitmap);
+  SkBitmap bitmap = gfx::PNGCodec::Decode(file_contents.value());
+  CHECK(!bitmap.isNull());
 
   return gfx::Image::CreateFrom1xBitmap(bitmap);
 }
@@ -85,18 +94,23 @@ class ExtensionActionIconFactoryTest
     : public testing::Test,
       public ExtensionActionIconFactory::Observer {
  public:
-  ExtensionActionIconFactoryTest() : quit_in_icon_updated_(false) {}
+  ExtensionActionIconFactoryTest() = default;
 
-  ~ExtensionActionIconFactoryTest() override {}
+  ExtensionActionIconFactoryTest(const ExtensionActionIconFactoryTest&) =
+      delete;
+  ExtensionActionIconFactoryTest& operator=(
+      const ExtensionActionIconFactoryTest&) = delete;
+
+  ~ExtensionActionIconFactoryTest() override = default;
 
   void WaitForIconUpdate() {
     quit_in_icon_updated_ = true;
-    base::RunLoop().Run();
+    loop_.Run();
     quit_in_icon_updated_ = false;
   }
 
   scoped_refptr<Extension> CreateExtension(const char* name,
-                                           Manifest::Location location) {
+                                           ManifestLocation location) {
     // Create and load an extension.
     base::FilePath test_file;
     if (!base::PathService::Get(chrome::DIR_TEST_DATA, &test_file)) {
@@ -108,43 +122,44 @@ class ExtensionActionIconFactoryTest
     std::string error;
     JSONFileValueDeserializer deserializer(
         test_file.AppendASCII("manifest.json"));
-    std::unique_ptr<base::DictionaryValue> valid_value =
-        base::DictionaryValue::From(
-            deserializer.Deserialize(&error_code, &error));
+    std::unique_ptr<base::Value> valid_value =
+        deserializer.Deserialize(&error_code, &error);
     EXPECT_EQ(0, error_code) << error;
     if (error_code != 0)
       return nullptr;
 
-    EXPECT_TRUE(valid_value.get());
-    if (!valid_value)
+    EXPECT_TRUE(valid_value.get() && valid_value->is_dict());
+    if (!valid_value || !valid_value->is_dict())
       return nullptr;
 
-    scoped_refptr<Extension> extension = Extension::Create(
-        test_file, location, *valid_value, Extension::NO_FLAGS, &error);
-    EXPECT_TRUE(extension.get()) << error;
-    if (extension.get())
-      extension_service_->AddExtension(extension.get());
+    std::u16string utf16_error;
+    scoped_refptr<Extension> extension =
+        Extension::Create(test_file, location, valid_value->GetDict(),
+                          Extension::NO_FLAGS, &utf16_error);
+    EXPECT_TRUE(extension.get()) << utf16_error;
+    if (extension) {
+      ExtensionRegistrar::Get(profile_.get())->AddExtension(extension);
+    }
     return extension;
   }
 
   // testing::Test overrides:
   void SetUp() override {
-    profile_.reset(new TestingProfile);
+    profile_ = std::make_unique<TestingProfile>();
     base::CommandLine command_line(base::CommandLine::NO_PROGRAM);
-    extension_service_ = static_cast<extensions::TestExtensionSystem*>(
-        extensions::ExtensionSystem::Get(profile_.get()))->
-        CreateExtensionService(&command_line, base::FilePath(), false);
+    static_cast<extensions::TestExtensionSystem*>(
+        extensions::ExtensionSystem::Get(profile_.get()))
+        ->CreateExtensionService(&command_line, base::FilePath(), false);
   }
 
   void TearDown() override {
     profile_.reset();  // Get all DeleteSoon calls sent to ui_loop_.
-    base::RunLoop().RunUntilIdle();
   }
 
   // ExtensionActionIconFactory::Observer overrides:
   void OnIconUpdated() override {
     if (quit_in_icon_updated_)
-      base::RunLoop::QuitCurrentWhenIdleDeprecated();
+      loop_.QuitWhenIdle();
   }
 
   gfx::ImageSkia GetFavicon() {
@@ -153,24 +168,24 @@ class ExtensionActionIconFactoryTest
   }
 
   ExtensionAction* GetExtensionAction(const Extension& extension) {
-    return ExtensionActionManager::Get(profile())->GetExtensionAction(
-        extension);
+    return ExtensionActionManager::Get(profile_.get())
+        ->GetExtensionAction(extension);
   }
-
-  TestingProfile* profile() { return profile_.get(); }
 
  private:
   content::BrowserTaskEnvironment task_environment_;
-  bool quit_in_icon_updated_;
+  bool quit_in_icon_updated_ = false;
   std::unique_ptr<TestingProfile> profile_;
-  ExtensionService* extension_service_;
+  base::RunLoop loop_;
 
-#if defined OS_CHROMEOS
-  chromeos::ScopedCrosSettingsTestHelper cros_settings_test_helper_;
-  chromeos::ScopedTestUserManager test_user_manager_;
+#if BUILDFLAG(IS_CHROMEOS)
+  ash::ScopedCrosSettingsTestHelper cros_settings_test_helper_;
+  user_manager::ScopedUserManager user_manager_{
+      std::make_unique<user_manager::UserManagerImpl>(
+          std::make_unique<ash::UserManagerDelegateImpl>(),
+          g_browser_process->local_state(),
+          ash::CrosSettings::Get())};
 #endif
-
-  DISALLOW_COPY_AND_ASSIGN(ExtensionActionIconFactoryTest);
 };
 
 // If there is no default icon, and the icon has not been set using |SetIcon|,
@@ -179,15 +194,14 @@ TEST_F(ExtensionActionIconFactoryTest, NoIcons) {
   // Load an extension that has browser action without default icon set in the
   // manifest and does not call |SetIcon| by default.
   scoped_refptr<Extension> extension(
-      CreateExtension("browser_action/no_icon", Manifest::UNPACKED));
-  ASSERT_TRUE(extension.get() != nullptr);
+      CreateExtension("browser_action/no_icon", ManifestLocation::kUnpacked));
+  ASSERT_TRUE(extension);
   ExtensionAction* action = GetExtensionAction(*extension);
   ASSERT_TRUE(action);
   ASSERT_FALSE(action->default_icon());
   ASSERT_TRUE(action->GetExplicitlySetIcon(0 /*tab id*/).IsEmpty());
 
-  ExtensionActionIconFactory icon_factory(profile(), extension.get(), action,
-                                          this);
+  ExtensionActionIconFactory icon_factory(extension.get(), action, this);
 
   gfx::Image icon = icon_factory.GetIcon(0);
 
@@ -201,8 +215,8 @@ TEST_F(ExtensionActionIconFactoryTest, NoIcons) {
 TEST_F(ExtensionActionIconFactoryTest, InvisibleIcon) {
   // Load an extension that has browser action with a default icon set in the
   // manifest, but that icon is not sufficiently visible.
-  scoped_refptr<Extension> extension(
-      CreateExtension("browser_action/invisible_icon", Manifest::INTERNAL));
+  scoped_refptr<Extension> extension(CreateExtension(
+      "browser_action/invisible_icon", ManifestLocation::kInternal));
 
   // Check that the default icon is not sufficiently visible.
   ASSERT_TRUE(extension);
@@ -218,22 +232,14 @@ TEST_F(ExtensionActionIconFactoryTest, InvisibleIcon) {
   // Set the flag for testing.
   ExtensionActionIconFactory::SetAllowInvisibleIconsForTest(false);
 
-  ExtensionActionIconFactory icon_factory(profile(), extension.get(), action,
-                                          this);
+  ExtensionActionIconFactory icon_factory(extension.get(), action, this);
 
-  base::HistogramTester histogram_tester;
   gfx::Image icon = icon_factory.GetIcon(0);
   // The default icon should not be returned, since it's invisible.
   // The placeholder icon should be returned instead.
   EXPECT_TRUE(ImageRepsAreEqual(
       action->GetPlaceholderIconImage().ToImageSkia()->GetRepresentation(1.0f),
       icon.ToImageSkia()->GetRepresentation(1.0f)));
-  EXPECT_THAT(histogram_tester.GetAllSamples(
-                  "Extensions.ManifestIconSetIconWasVisibleForPacked"),
-              testing::ElementsAre(base::Bucket(0, 1)));
-  EXPECT_THAT(histogram_tester.GetAllSamples(
-                  "Extensions.ManifestIconSetIconWasVisibleForPackedRendered"),
-              testing::ElementsAre(base::Bucket(0, 1)));
 
   // Reset the flag for testing.
   ExtensionActionIconFactory::SetAllowInvisibleIconsForTest(true);
@@ -246,8 +252,8 @@ TEST_F(ExtensionActionIconFactoryTest, AfterSetIcon) {
   // manifest and does not call |SetIcon| by default (but has an browser action
   // icon resource).
   scoped_refptr<Extension> extension(
-      CreateExtension("browser_action/no_icon", Manifest::UNPACKED));
-  ASSERT_TRUE(extension.get() != nullptr);
+      CreateExtension("browser_action/no_icon", ManifestLocation::kUnpacked));
+  ASSERT_TRUE(extension);
   ExtensionAction* action = GetExtensionAction(*extension);
   ASSERT_TRUE(action);
   ASSERT_FALSE(action->default_icon());
@@ -260,8 +266,7 @@ TEST_F(ExtensionActionIconFactoryTest, AfterSetIcon) {
 
   ASSERT_FALSE(action->GetExplicitlySetIcon(0 /*tab id*/).IsEmpty());
 
-  ExtensionActionIconFactory icon_factory(profile(), extension.get(), action,
-                                          this);
+  ExtensionActionIconFactory icon_factory(extension.get(), action, this);
 
   gfx::Image icon = icon_factory.GetIcon(0);
 
@@ -284,15 +289,15 @@ TEST_F(ExtensionActionIconFactoryTest, DefaultIcon) {
   // manifest and does not call |SetIcon| by default (but has an browser action
   // icon resource).
   scoped_refptr<Extension> extension(
-      CreateExtension("browser_action/no_icon", Manifest::UNPACKED));
-  ASSERT_TRUE(extension.get() != nullptr);
+      CreateExtension("browser_action/no_icon", ManifestLocation::kUnpacked));
+  ASSERT_TRUE(extension);
   ExtensionAction* action = GetExtensionAction(*extension);
   ASSERT_TRUE(action);
   ASSERT_FALSE(action->default_icon());
   ASSERT_TRUE(action->GetExplicitlySetIcon(0 /*tab id*/).IsEmpty());
 
   scoped_refptr<const Extension> extension_with_icon =
-      CreateExtension("browser_action_with_icon", Manifest::UNPACKED);
+      CreateExtension("browser_action_with_icon", ManifestLocation::kUnpacked);
   ASSERT_TRUE(extension_with_icon);
 
   int icon_size = ExtensionAction::ActionIconSize();
@@ -303,8 +308,8 @@ TEST_F(ExtensionActionIconFactoryTest, DefaultIcon) {
   action = GetExtensionAction(*extension_with_icon);
   ASSERT_TRUE(action->default_icon());
 
-  ExtensionActionIconFactory icon_factory(profile(), extension_with_icon.get(),
-                                          action, this);
+  ExtensionActionIconFactory icon_factory(extension_with_icon.get(), action,
+                                          this);
 
   gfx::Image icon = icon_factory.GetIcon(0);
 

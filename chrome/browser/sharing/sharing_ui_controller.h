@@ -1,29 +1,26 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_SHARING_SHARING_UI_CONTROLLER_H_
 #define CHROME_BROWSER_SHARING_SHARING_UI_CONTROLLER_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/callback_forward.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/strings/string16.h"
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/sharing/proto/sharing_message.pb.h"
-#include "chrome/browser/sharing/sharing_app.h"
-#include "chrome/browser/sharing/sharing_constants.h"
-#include "chrome/browser/sharing/sharing_dialog_data.h"
-#include "chrome/browser/sharing/sharing_metrics.h"
-#include "chrome/browser/sharing/sharing_service.h"
 #include "chrome/browser/ui/page_action/page_action_icon_type.h"
-#include "components/sync/protocol/device_info_specifics.pb.h"
-#include "components/sync_device_info/device_info.h"
-#include "ui/views/controls/styled_label.h"
+#include "components/sharing_message/proto/sharing_message.pb.h"
+#include "components/sharing_message/sharing_app.h"
+#include "components/sharing_message/sharing_constants.h"
+#include "components/sharing_message/sharing_dialog_data.h"
+#include "components/sharing_message/sharing_metrics.h"
+#include "components/sharing_message/sharing_service.h"
+#include "components/sharing_message/sharing_target_device_info.h"
 #include "url/origin.h"
 
 class SharingDialog;
@@ -46,28 +43,35 @@ class SharingUiController {
   virtual ~SharingUiController();
 
   // Title of the dialog.
-  virtual base::string16 GetTitle(SharingDialogType dialog_type);
+  virtual std::u16string GetTitle(SharingDialogType dialog_type);
   // Called when user chooses a synced device to complete the task.
-  virtual void OnDeviceChosen(const syncer::DeviceInfo& device) = 0;
+  virtual void OnDeviceChosen(const SharingTargetDeviceInfo& device) = 0;
   // Called when user chooses a local app to complete the task.
   virtual void OnAppChosen(const SharingApp& app) = 0;
-  virtual PageActionIconType GetIconType() = 0;
-  virtual sync_pb::SharingSpecificFields::EnabledFeatures
-  GetRequiredFeature() = 0;
+  virtual syncer::DeviceInfo::SharingFeature GetRequiredFeature() const = 0;
   virtual const gfx::VectorIcon& GetVectorIcon() const = 0;
-  virtual base::string16 GetTextForTooltipAndAccessibleName() const = 0;
+  // If true, shows a loading icon on omnibox when sending out the message.
+  virtual bool ShouldShowLoadingIcon() const;
+  virtual std::u16string GetTextForTooltipAndAccessibleName() const = 0;
+
+  // If false, any UI associated will be excluded from the accessibility tree,
+  // making it completely undiscoverable and unusable to (at least) screen
+  // reader users. If you override this function, please seek the review of
+  // an accessibility OWNER and clearly document the use case in your code.
+  virtual bool HasAccessibleUi() const;
+
   // Get the name of the feature to be used as a prefix for the metric name.
   virtual SharingFeatureName GetFeatureMetricsPrefix() const = 0;
-  // Describes the content type of shared data.
-  virtual base::string16 GetContentType() const = 0;
+  // Describes the content type of shared data. For most languages this
+  // will be lower case as it's intended to be put as a placeholder within
+  // a sentence.
+  virtual std::u16string GetContentType() const = 0;
   // Returns the message to be shown in the body of error dialog based on
   // |send_result_|.
-  virtual base::string16 GetErrorDialogText() const;
+  virtual std::u16string GetErrorDialogText() const;
 
   // Called by the SharingDialog when it is being closed.
   virtual void OnDialogClosed(SharingDialog* dialog);
-  // Called by the SharingDialogView when the help text got clicked.
-  virtual void OnHelpTextClicked(SharingDialogType dialog_type);
   // Called when a new dialog is shown.
   virtual void OnDialogShown(bool has_devices, bool has_apps);
 
@@ -75,11 +79,10 @@ class SharingUiController {
   void ClearLastDialog();
 
   // Gets the current list of apps and devices and shows a new dialog.
-  void UpdateAndShowDialog(
-      const base::Optional<url::Origin>& initiating_origin);
+  void UpdateAndShowDialog(const std::optional<url::Origin>& initiating_origin);
 
   // Gets the current list of devices that support the required feature.
-  std::vector<std::unique_ptr<syncer::DeviceInfo>> GetDevices();
+  std::vector<SharingTargetDeviceInfo> GetDevices() const;
 
   bool HasSendFailed() const;
 
@@ -104,34 +107,38 @@ class SharingUiController {
   // Prepares a new dialog data.
   virtual SharingDialogData CreateDialogData(SharingDialogType dialog_type);
 
-  void SendMessageToDevice(
-      const syncer::DeviceInfo& device,
-      chrome_browser_sharing::SharingMessage sharing_message);
+  // Shows an icon in the omnibox which will be removed when receiving a
+  // response or when cancelling the request by calling the returned callback.
+  base::OnceClosure SendMessageToDevice(
+      const SharingTargetDeviceInfo& device,
+      std::optional<base::TimeDelta> response_timeout,
+      components_sharing_message::SharingMessage sharing_message,
+      std::optional<SharingMessageSender::ResponseCallback> callback);
 
  private:
-  // Updates the omnibox icon if available.
-  void UpdateIcon();
   // Closes the current dialog if there is one.
   void CloseDialog();
   // Shows a new SharingDialog and closes the old one.
   void ShowNewDialog(SharingDialogData dialog_data);
 
-  base::string16 GetTargetDeviceName() const;
+  std::u16string GetTargetDeviceName() const;
 
   // Called after a message got sent to a device. Shows a new error dialog if
-  // |success| is false and updates the omnibox icon.
-  void OnMessageSentToDevice(
+  // |success| is false and updates the omnibox icon. The client can handle the
+  // response via |custom_callback|.
+  void OnResponse(
       int dialog_id,
+      std::optional<SharingMessageSender::ResponseCallback> custom_callback,
       SharingSendMessageResult result,
-      std::unique_ptr<chrome_browser_sharing::ResponseMessage> response);
+      std::unique_ptr<components_sharing_message::ResponseMessage> response);
 
   void OnAppsReceived(int dialog_id,
-                      const base::Optional<url::Origin>& initiating_origin,
+                      const std::optional<url::Origin>& initiating_origin,
                       std::vector<SharingApp> apps);
 
-  SharingDialog* dialog_ = nullptr;
-  content::WebContents* web_contents_ = nullptr;
-  SharingService* sharing_service_ = nullptr;
+  raw_ptr<SharingDialog> dialog_ = nullptr;
+  raw_ptr<content::WebContents> web_contents_ = nullptr;
+  raw_ptr<SharingService> sharing_service_ = nullptr;
 
   bool is_loading_ = false;
   SharingSendMessageResult send_result_ = SharingSendMessageResult::kSuccessful;

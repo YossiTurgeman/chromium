@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,21 +8,18 @@
 #include <stdint.h>
 
 #include <memory>
-#include <queue>
-#include <string>
 #include <vector>
 
-#include "base/callback.h"
 #include "base/command_line.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/viz/service/gl/gpu_service_impl.h"
 #include "components/viz/service/main/viz_main_impl.h"
 #include "content/child/child_thread_impl.h"
-#include "gpu/config/gpu_extra_info.h"
 #include "gpu/config/gpu_feature_info.h"
 #include "gpu/config/gpu_info.h"
 #include "gpu/config/gpu_preferences.h"
@@ -32,10 +29,6 @@
 #include "gpu/ipc/service/gpu_config.h"
 #include "gpu/ipc/service/x_util.h"
 #include "media/base/android_overlay_mojo_factory.h"
-#include "mojo/public/cpp/bindings/pending_associated_receiver.h"
-#include "services/viz/privileged/mojom/viz_main.mojom.h"
-#include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
-#include "ui/gfx/native_widget_types.h"
 
 namespace content {
 class GpuServiceFactory;
@@ -53,38 +46,31 @@ class GpuChildThread : public ChildThreadImpl,
   GpuChildThread(const InProcessChildThreadParams& params,
                  std::unique_ptr<gpu::GpuInit> gpu_init);
 
+  GpuChildThread(const GpuChildThread&) = delete;
+  GpuChildThread& operator=(const GpuChildThread&) = delete;
+
   ~GpuChildThread() override;
 
-  void Init(const base::Time& process_start_time);
+  void Init(const base::TimeTicks& process_start_time);
 
  private:
   GpuChildThread(base::RepeatingClosure quit_closure,
                  ChildThreadImpl::Options options,
                  std::unique_ptr<gpu::GpuInit> gpu_init);
 
-  void CreateVizMainService(
-      mojo::PendingAssociatedReceiver<viz::mojom::VizMain> pending_receiver);
-
   bool in_process_gpu() const;
 
   // ChildThreadImpl:
-  bool Send(IPC::Message* msg) override;
   void BindServiceInterface(mojo::GenericPendingReceiver receiver) override;
-
-  // IPC::Listener implementation via ChildThreadImpl:
-  void OnAssociatedInterfaceRequest(
-      const std::string& name,
-      mojo::ScopedInterfaceEndpointHandle handle) override;
 
   // viz::VizMainImpl::Delegate:
   void OnInitializationFailed() override;
   void OnGpuServiceConnection(viz::GpuServiceImpl* gpu_service) override;
   void PostCompositorThreadCreated(
       base::SingleThreadTaskRunner* task_runner) override;
+  void PostDisplayCompositorGpuThreadCreated(
+      base::SingleThreadTaskRunner* task_runner) override;
   void QuitMainMessageLoop() override;
-
-  void OnMemoryPressure(
-      base::MemoryPressureListener::MemoryPressureLevel level);
 
   // Returns a closure which calls into the VizMainImpl to perform shutdown
   // before quitting the main message loop. Must be called on the main thread.
@@ -92,7 +78,7 @@ class GpuChildThread : public ChildThreadImpl,
   static void QuitSafelyHelper(
       scoped_refptr<base::SingleThreadTaskRunner> task_runner);
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   static std::unique_ptr<media::AndroidOverlay> CreateAndroidOverlay(
       scoped_refptr<base::SingleThreadTaskRunner> main_task_runner,
       const base::UnguessableToken& routing_token,
@@ -108,16 +94,10 @@ class GpuChildThread : public ChildThreadImpl,
   // |service_factory_| initialization.
   std::vector<mojo::GenericPendingReceiver> pending_service_receivers_;
 
-  blink::AssociatedInterfaceRegistry associated_interfaces_;
-
   // A closure which quits the main message loop.
   base::RepeatingClosure quit_closure_;
 
-  std::unique_ptr<base::MemoryPressureListener> memory_pressure_listener_;
-
   base::WeakPtrFactory<GpuChildThread> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(GpuChildThread);
 };
 
 }  // namespace content

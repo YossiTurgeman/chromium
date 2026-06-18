@@ -1,25 +1,29 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/download/content/internal/download_driver_impl.h"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/memory_usage_estimator.h"
 #include "components/download/internal/background_service/driver_entry.h"
+#include "components/download/network/download_http_utils.h"
 #include "components/download/public/common/download_features.h"
 #include "components/download/public/common/download_interrupt_reasons.h"
 #include "components/download/public/common/download_url_parameters.h"
 #include "components/download/public/common/simple_download_manager_coordinator.h"
+#include "net/http/http_byte_range.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_status_code.h"
 
@@ -43,7 +47,6 @@ DriverEntry::State ToDriverEntryState(
       return DriverEntry::State::UNKNOWN;
     default:
       NOTREACHED();
-      return DriverEntry::State::UNKNOWN;
   }
 }
 
@@ -106,8 +109,9 @@ DriverEntry DownloadDriverImpl::CreateDriverEntry(
 
   if (item->GetState() == DownloadItem::DownloadState::COMPLETE) {
     std::string hash = item->GetHash();
-    if (!hash.empty())
-      entry.hash256 = base::HexEncode(hash.data(), hash.size());
+    if (!hash.empty()) {
+      entry.hash256 = base::HexEncode(hash);
+    }
   }
 
   return entry;
@@ -125,6 +129,8 @@ DownloadDriverImpl::DownloadDriverImpl(
 DownloadDriverImpl::~DownloadDriverImpl() {
   if (download_manager_coordinator_)
     download_manager_coordinator_->GetNotifier()->RemoveObserver(this);
+
+  CHECK(!IsInObserverList());
 }
 
 void DownloadDriverImpl::Initialize(DownloadDriver::Client* client) {
@@ -143,7 +149,7 @@ void DownloadDriverImpl::Initialize(DownloadDriver::Client* client) {
 
 void DownloadDriverImpl::HardRecover() {
   // TODO(dtrainor, xingliu): Implement recovery for the DownloadManager.
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&DownloadDriverImpl::OnHardRecoverComplete,
                                 weak_ptr_factory_.GetWeakPtr(), true));
 }
@@ -171,11 +177,39 @@ void DownloadDriverImpl::Start(
   // collision and return an error to fail the download cleanly.
   for (net::HttpRequestHeaders::Iterator it(request_params.request_headers);
        it.GetNext();) {
+    // Range and If-Range are managed by download core instead.
+    if (it.name() == net::HttpRequestHeaders::kRange ||
+        it.name() == net::HttpRequestHeaders::kIfRange) {
+      continue;
+    }
+
     download_url_params->add_request_header(it.name(), it.value());
   }
+
+  if (request_params.request_headers.HasHeader(
+          net::HttpRequestHeaders::kRange)) {
+    std::optional<net::HttpByteRange> byte_range =
+        ParseRangeHeader(request_params.request_headers);
+    if (byte_range.has_value()) {
+      download_url_params->set_use_if_range(false);
+      if (byte_range->IsSuffixByteRange()) {
+        download_url_params->set_range_request_offset(
+            kInvalidRange, byte_range->suffix_length());
+      } else {
+        download_url_params->set_range_request_offset(
+            byte_range->first_byte_position(),
+            byte_range->last_byte_position());
+      }
+    } else {
+      // The request headers are validated in ControllerImpl::StartDownload.
+      NOTREACHED() << "Failed to parse Range request header.";
+    }
+  }
+
   download_url_params->set_guid(guid);
   download_url_params->set_transient(true);
   download_url_params->set_method(request_params.method);
+  download_url_params->set_credentials_mode(request_params.credentials_mode);
   download_url_params->set_file_path(file_path);
   if (request_params.fetch_error_body)
     download_url_params->set_fetch_error_body(true);
@@ -189,6 +223,16 @@ void DownloadDriverImpl::Start(
                           weak_ptr_factory_.GetWeakPtr(), guid));
   download_url_params->set_require_safety_checks(
       request_params.require_safety_checks);
+  if (request_params.isolation_info) {
+    download_url_params->set_isolation_info(
+        request_params.isolation_info.value());
+  }
+  download_url_params->set_update_first_party_url_on_redirect(
+      request_params.update_first_party_url_on_redirect);
+  if (request_params.initiator) {
+    download_url_params->set_initiator(request_params.initiator.value());
+  }
+
   download_manager_coordinator_->DownloadUrl(std::move(download_url_params));
 }
 
@@ -197,7 +241,7 @@ void DownloadDriverImpl::Remove(const std::string& guid, bool remove_file) {
 
   // DownloadItem::Remove will cause the item object removed from memory, post
   // the remove task to avoid the object being accessed in the same call stack.
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&DownloadDriverImpl::DoRemoveDownload,
                      weak_ptr_factory_.GetWeakPtr(), guid, remove_file));
@@ -233,13 +277,13 @@ void DownloadDriverImpl::Resume(const std::string& guid) {
     item->Resume(true);
 }
 
-base::Optional<DriverEntry> DownloadDriverImpl::Find(const std::string& guid) {
+std::optional<DriverEntry> DownloadDriverImpl::Find(const std::string& guid) {
   if (!download_manager_coordinator_)
-    return base::nullopt;
+    return std::nullopt;
   DownloadItem* item = download_manager_coordinator_->GetDownloadByGuid(guid);
   if (item)
     return CreateDriverEntry(item);
-  return base::nullopt;
+  return std::nullopt;
 }
 
 std::set<std::string> DownloadDriverImpl::GetActiveDownloads() {
@@ -247,10 +291,10 @@ std::set<std::string> DownloadDriverImpl::GetActiveDownloads() {
   if (!download_manager_coordinator_)
     return guids;
 
-  std::vector<DownloadItem*> items;
+  std::vector<raw_ptr<DownloadItem, VectorExperimental>> items;
   download_manager_coordinator_->GetAllDownloads(&items);
 
-  for (auto* item : items) {
+  for (download::DownloadItem* item : items) {
     DriverEntry::State state = ToDriverEntryState(item->GetState());
     if (state == DriverEntry::State::IN_PROGRESS)
       guids.insert(item->GetGuid());
@@ -276,13 +320,31 @@ void DownloadDriverImpl::OnDownloadUpdated(
   download::DownloadInterruptReason reason = item->GetLastReason();
   DriverEntry entry = CreateDriverEntry(item);
 
-  if (state == DownloadState::COMPLETE) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&DownloadDriverImpl::NotifyClientOfUpdatedState,
+                     weak_ptr_factory_.GetWeakPtr(), entry, state, reason));
+}
+
+void DownloadDriverImpl::NotifyClientOfUpdatedState(
+    const DriverEntry& entry,
+    download::DownloadItem::DownloadState state,
+    download::DownloadInterruptReason reason) {
+  if (!client_) {
+    return;
+  }
+  if (guid_to_remove_.find(entry.guid) != guid_to_remove_.end()) {
+    return;
+  }
+
+  if (state == download::DownloadItem::DownloadState::COMPLETE) {
     client_->OnDownloadSucceeded(entry);
-  } else if (state == DownloadState::IN_PROGRESS) {
+  } else if (state == download::DownloadItem::DownloadState::IN_PROGRESS) {
     client_->OnDownloadUpdated(entry);
   } else if (reason != DOWNLOAD_INTERRUPT_REASON_NONE) {
-    if (client_->IsTrackingDownload(item->GetGuid()))
+    if (client_->IsTrackingDownload(entry.guid)) {
       LogDownloadInterruptReason(reason);
+    }
     client_->OnDownloadFailed(entry, FailureTypeFromInterruptReason(reason));
   }
 }
@@ -300,7 +362,7 @@ void DownloadDriverImpl::OnDownloadCreated(
   if (guid_to_remove_.find(item->GetGuid()) != guid_to_remove_.end()) {
     // Client has removed the download before content persistence layer created
     // the record, remove the download immediately.
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&DownloadDriverImpl::DoRemoveDownload,
                                   weak_ptr_factory_.GetWeakPtr(),
                                   item->GetGuid(), false /* remove_file */));
@@ -313,8 +375,24 @@ void DownloadDriverImpl::OnDownloadCreated(
 
   // Only notifies the client about new downloads. Existing download data will
   // be loaded before the driver is ready.
-  if (IsReady())
+  if (IsReady()) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&DownloadDriverImpl::NotifyClientOfCreatedState,
+                       weak_ptr_factory_.GetWeakPtr(), entry));
+  }
+}
+
+void DownloadDriverImpl::NotifyClientOfCreatedState(const DriverEntry& entry) {
+  if (!client_) {
+    return;
+  }
+  if (guid_to_remove_.find(entry.guid) != guid_to_remove_.end()) {
+    return;
+  }
+  if (IsReady()) {
     client_->OnDownloadCreated(entry);
+  }
 }
 
 void DownloadDriverImpl::OnUploadProgress(const std::string& guid,

@@ -30,27 +30,33 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_DOM_SELECTION_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_DOM_SELECTION_H_
 
+#include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/dom/shadow_root.h"
+#include "third_party/blink/renderer/core/dom/static_range.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 
 namespace blink {
 
 class ExceptionState;
+class FrameSelection;
+class GetComposedRangesOptions;
 class Node;
 class Range;
 class SetSelectionOptions;
 class TreeScope;
 
-class CORE_EXPORT DOMSelection final : public ScriptWrappable,
+class CORE_EXPORT DomSelection final : public ScriptWrappable,
                                        public ExecutionContextClient {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
-  explicit DOMSelection(const TreeScope*);
+  explicit DomSelection(const TreeScope*);
 
   void ClearTreeScope();
 
@@ -87,7 +93,7 @@ class CORE_EXPORT DOMSelection final : public ScriptWrappable,
   void collapseToStart(ExceptionState&);
   void extend(Node*, unsigned offset, ExceptionState&);
   Range* getRangeAt(unsigned, ExceptionState&) const;
-  void removeRange(Range*);
+  void removeRange(Range*, ExceptionState&);
   void removeAllRanges();
   void addRange(Range*);
   void deleteFromDocument();
@@ -99,18 +105,37 @@ class CORE_EXPORT DOMSelection final : public ScriptWrappable,
   // Microsoft Selection Object API
   void empty();
 
+  // Selection API across shadow DOM
+  String direction() const;
+
+  const StaticRangeVector getComposedRanges(
+      const GetComposedRangesOptions*) const;
+
   void Trace(Visitor*) const override;
 
  private:
+  class TemporaryRange {
+    STACK_ALLOCATED();
+
+   public:
+    TemporaryRange(const DomSelection*, Range*);
+    ~TemporaryRange();
+    Range* GetRange();
+
+   private:
+    Range* range_ = nullptr;
+    const DomSelection* owner_dom_selection_ = nullptr;
+  };
+
+  FrameSelection& Selection() const;
   bool IsAvailable() const;
 
-  void UpdateFrameSelection(const SelectionInDOMTree&,
+  void UpdateFrameSelection(const SelectionInDomTree&,
                             Range*,
                             const SetSelectionOptions&) const;
   // Convenience methods for accessors, does not check owner Frame presence.
   VisibleSelection GetVisibleSelection() const;
-  bool IsBaseFirstInSelection() const;
-  const Position& AnchorPosition() const;
+  bool IsAnchorFirstInSelection() const;
 
   Node* ShadowAdjustedNode(const Position&) const;
   unsigned ShadowAdjustedOffset(const Position&) const;
@@ -125,6 +150,16 @@ class CORE_EXPORT DOMSelection final : public ScriptWrappable,
   void CacheRangeIfSelectionOfDocument(Range*) const;
   Range* DocumentCachedRange() const;
   void ClearCachedRangeIfSelectionOfDocument();
+
+  // Rescope the provided selection endpoint to be within the list of shadow
+  // roots. If endpoint is inside a not listed shadow root, the endpoint will
+  // be rescoped to include the host element for that shadow root.
+  // Both arguments node and offset are references and might be modified by
+  // this function.
+  void Rescope(Node*& node,
+               unsigned& offset,
+               const HeapVector<Member<ShadowRoot>>&,
+               bool) const;
 
   Member<const TreeScope> tree_scope_;
 };

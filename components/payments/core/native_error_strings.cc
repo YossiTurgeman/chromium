@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -97,6 +97,15 @@ const char kPaymentManifestCrossSiteRedirectNotAllowed[] =
 const char kPaymentManifestDownloadFailed[] =
     "Unable to download payment manifest \"$1\".";
 
+const char kPaymentManifestDownloadFailedWithNetworkError[] =
+    "Unable to download payment manifest \"$1\". $2 ($3)";
+
+const char kPaymentManifestDownloadFailedWithHttpStatusCode[] =
+    "Unable to download payment manifest \"$1\". HTTP $2 $3.";
+
+const char kPaymentManifestCSPDenied[] =
+    "Content Security Policy denied the download of payment manifest \"$1\".";
+
 const char kPaymentDetailsNotObject[] =
     "Payment app returned invalid response. \"details\" field is not a "
     "dictionary.";
@@ -134,6 +143,15 @@ const char kPaymentHandlerInsecureNavigation[] =
     "The payment handler navigated to a page with insecure context, invalid "
     "certificate state, or malicious content.";
 
+const char kPaymentHandlerInstallFailed[] =
+    "Failed to install the payment handler.";
+
+const char kPaymentHandlerActivityDied[] =
+    "The payment handler is closed because the Android activity is destroyed.";
+
+const char kPaymentHandlerFailToLoadMainFrame[] =
+    "The payment handler fails to load the page.";
+
 const char kSinglePaymentMethodNotSupportedFormat[] =
     "The payment method $ is not supported.";
 
@@ -147,10 +165,6 @@ const char kCanMakePaymentEventTimeout[] =
 const char kCanMakePaymentEventNoResponse[] =
     "Payment handler did not respond to \"canmakepayment\" event.";
 
-const char kCanMakePaymentEventNoReadyForMinimalUiValue[] =
-    "Payment handler did not specify a value for \"readyForMinimalUI\" in "
-    "CanMakePaymentEvent.respondWithMinimalUI()..";
-
 const char kCanMakePaymentEventBooleanConversionError[] =
     "Unable to convert the value of \"canmakepayment\" response to a boolean.";
 
@@ -161,22 +175,6 @@ const char kCanMakePaymentEventBrowserError[] =
 const char kCanMakePaymentEventInternalError[] =
     "Payment handler encountered an error (e.g., threw a JavaScript exception) "
     "while responding to \"canmakepayment\" event.";
-
-const char kCanMakePaymentEventInvalidAccountBalanceValue[] =
-    "Payment handler provided invalid account balance value in "
-    "CanMakePaymentEvent.respondWithMinimalUI().";
-
-const char kCanMakePaymentEventMinimalUiResponseConversionError[] =
-    "Unable to parse the object that the payment handler passed into "
-    "CanMakePaymentEvent.respondWithMinimalUI().";
-
-const char kCanMakePaymentEventNoAccountBalanceValue[] =
-    "Payment handler did not specify account balance in "
-    "CanMakePaymentEvent.respondWithMinimalUI().";
-
-const char kCanMakePaymentEventNoCanMakePaymentValue[] =
-    "Payment handler did not specify a value for \"canMakePayment\" in "
-    "CanMakePaymentEvent.respondWithMinimalUI().";
 
 const char kCanMakePaymentEventNoUrlBasedPaymentMethods[] =
     "Browser did not fire \"canmakepayment\" event because the payment handler "
@@ -194,9 +192,8 @@ const char kCanMakePaymentEventNoExplicitlyVerifiedMethods[] =
 const char kGenericPaymentMethodNotSupportedMessage[] =
     "Payment method not supported.";
 
-const char kNoContentAndNoLinkHeader[] =
-    "No content and no \"Link: rel=payment-method-manifest\" HTTP header found "
-    "at \"$1\".";
+const char kNoLinkHeader[] =
+    "No \"Link: rel=payment-method-manifest\" HTTP header found at \"$1\".";
 
 const char kNoContentInPaymentManifest[] =
     "No content found in payment manifest \"$1\".";
@@ -217,6 +214,90 @@ const char kCredentialIdsRequired[] =
 const char kTimeoutTooLong[] =
     "The \"secure-payment-confirmation\" method requires at most 1 hour "
     "\"timeout\" field.";
+
+const char kChallengeRequired[] =
+    "The \"secure-payment-confirmation\" method requires a non-empty "
+    "\"challenge\" field.";
+
+const char kInstrumentRequired[] =
+    "The \"secure-payment-confirmation\" method requires a "
+    "\"instrument\" field.";
+
+const char kInstrumentDisplayNameRequired[] =
+    "The \"secure-payment-confirmation\" method requires a non-empty "
+    "\"instrument.displayName\" field.";
+
+const char kValidInstrumentIconRequired[] =
+    "The \"secure-payment-confirmation\" method requires a valid URL in the "
+    "\"instrument.icon\" field.";
+
+const char kInvalidIcon[] =
+    "The \"instrument.icon\" either could not be downloaded or decoded.";
+
+const char kNonUtf8InstrumentDetailsString[] =
+    "The \"secure-payment-confirmation\" method requires the "
+    "\"instrument.details\" field to be UTF8.";
+
+const char kEmptyInstrumentDetailsString[] =
+    "The \"secure-payment-confirmation\" method requires the "
+    "\"instrument.details\" field, if present, to be non-empty.";
+
+const char kTooLongInstrumentDetailsString[] =
+    "The \"secure-payment-confirmation\" method requires the "
+    "\"instrument.details\" field to be at most 4096 characters long.";
+
+const char kRpIdRequired[] =
+    "The \"secure-payment-confirmation\" method requires a valid domain in the "
+    "\"rpId\" field.";
+
+const char kPayeeOriginOrPayeeNameRequired[] =
+    "The \"secure-payment-confirmation\" method requires a non-empty "
+    "\"payeeOrigin\" or \"payeeName\" field.";
+
+const char kPayeeOriginMustBeHttps[] =
+    "The \"secure-payment-confirmation\" method requires that the "
+    "\"payeeOrigin\" field must be https.";
+
+const char kNonNullPaymentEntityLogoRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" is non-null.";
+
+extern const char kValidLogoUrlRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" has a valid URL in the \"url\" field.";
+
+extern const char kValidLogoUrlSchemeRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" has a URL whose scheme is one of \"https\", "
+    "\"http\", or \"data\" in the \"url\" field.";
+
+extern const char kLogoLabelRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" has a non-empty \"label\" field.";
+
+const char kSpcDisabledMustBeNull[] =
+    "If the SPC feature is disabled, secure_payment_confirmation must be null";
+
+const char kSpcMustBeOnlyPaymentMethod[] =
+    "If present, \"secure-payment-confirmation\" must be the only payment "
+    "method";
+
+const char kSpcUnsupportedOptions[] =
+    "The \"secure-payment-confirmation\" payment method does not support "
+    "requestPayerName, requestPayerEmail, requestPayerPhone, or "
+    "requestShipping";
+
+const char kSpcEnabledMustNotBeNull[] =
+    "If the SPC feature is enabled, secure_payment_confirmation must not be "
+    "null";
+
+const char kInternalError[] =
+    "An internal error occurred during validation of "
+    "SecurePaymentConfirmationRequest.";
+
+const char kWebAuthnExtensionsNotSupported[] =
+    "The \"secure-payment-confirmation\" method does not support the "
+    "provided WebAuthn extension(s).";
 
 }  // namespace errors
 }  // namespace payments

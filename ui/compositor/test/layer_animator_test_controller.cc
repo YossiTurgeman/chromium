@@ -1,8 +1,10 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stddef.h>
+
+#include <utility>
 
 #include "ui/compositor/layer_animation_sequence.h"
 #include "ui/compositor/test/layer_animator_test_controller.h"
@@ -12,8 +14,7 @@ namespace ui {
 
 LayerAnimatorTestController::LayerAnimatorTestController(
     scoped_refptr<LayerAnimator> animator)
-    : animator_(animator) {
-}
+    : animator_(std::move(animator)) {}
 
 LayerAnimatorTestController::~LayerAnimatorTestController() {
 }
@@ -28,7 +29,8 @@ LayerAnimationSequence* LayerAnimatorTestController::GetRunningSequence(
     return NULL;
 }
 
-void LayerAnimatorTestController::StartThreadedAnimationsIfNeeded() {
+void LayerAnimatorTestController::StartThreadedAnimationsIfNeeded(
+    base::TimeTicks started_time) {
   std::vector<cc::TargetProperty::Type> threaded_properties;
   threaded_properties.push_back(cc::TargetProperty::OPACITY);
   threaded_properties.push_back(cc::TargetProperty::TRANSFORM);
@@ -48,8 +50,7 @@ void LayerAnimatorTestController::StartThreadedAnimationsIfNeeded() {
         element->effective_start_time() != base::TimeTicks())
       continue;
 
-    animator_->OnThreadedAnimationStarted(base::TimeTicks::Now(),
-                                          threaded_properties[i],
+    animator_->OnThreadedAnimationStarted(started_time, threaded_properties[i],
                                           element->animation_group_id());
   }
 }

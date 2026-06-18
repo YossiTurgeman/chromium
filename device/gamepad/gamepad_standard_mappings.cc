@@ -1,6 +1,7 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #include "device/gamepad/gamepad_standard_mappings.h"
 
@@ -76,6 +77,59 @@ void DpadFromAxis(Gamepad* mapped, float dir) {
 float RenormalizeAndClampAxis(float value, float min, float max) {
   value = (2.f * (value - min) / (max - min)) - 1.f;
   return value < -1.f ? -1.f : (value > 1.f ? 1.f : value);
+}
+
+void MapperSwitchPro(const Gamepad& input, Gamepad* mapped) {
+  *mapped = input;
+  mapped->buttons_length = SWITCH_PRO_BUTTON_COUNT;
+  mapped->axes_length = AXIS_INDEX_COUNT;
+}
+
+void MapperSwitchJoyCon(const Gamepad& input, Gamepad* mapped) {
+  *mapped = input;
+  mapped->buttons_length = BUTTON_INDEX_COUNT;
+  mapped->axes_length = 2;
+}
+
+void MapperSwitchComposite(const Gamepad& input, Gamepad* mapped) {
+  // In composite mode, the inputs from two Joy-Cons are combined to form one
+  // virtual gamepad. Some buttons do not have equivalents in the Standard
+  // Gamepad and are exposed as extra buttons:
+  // * Capture button (Joy-Con L):  BUTTON_INDEX_COUNT
+  // * SL (Joy-Con L):              BUTTON_INDEX_COUNT + 1
+  // * SR (Joy-Con L):              BUTTON_INDEX_COUNT + 2
+  // * SL (Joy-Con R):              BUTTON_INDEX_COUNT + 3
+  // * SR (Joy-Con R):              BUTTON_INDEX_COUNT + 4
+  constexpr size_t kSwitchCompositeExtraButtonCount = 5;
+  *mapped = input;
+  mapped->buttons_length =
+      BUTTON_INDEX_COUNT + kSwitchCompositeExtraButtonCount;
+  mapped->axes_length = AXIS_INDEX_COUNT;
+}
+
+// Mapper function for gamepads built on "DragonRise" firmware which exposes 8
+// buttons and 2 axes for the D-pad.
+void Mapper2Axes8Keys(const Gamepad& input, Gamepad* mapped) {
+  *mapped = input;
+  mapped->buttons[BUTTON_INDEX_PRIMARY] = input.buttons[2];
+  mapped->buttons[BUTTON_INDEX_SECONDARY] = input.buttons[1];
+  mapped->buttons[BUTTON_INDEX_TERTIARY] = input.buttons[3];
+  mapped->buttons[BUTTON_INDEX_QUATERNARY] = input.buttons[0];
+  mapped->buttons[BUTTON_INDEX_DPAD_UP] = AxisNegativeAsButton(input.axes[1]);
+  mapped->buttons[BUTTON_INDEX_DPAD_DOWN] = AxisPositiveAsButton(input.axes[1]);
+  mapped->buttons[BUTTON_INDEX_DPAD_LEFT] = AxisNegativeAsButton(input.axes[0]);
+  mapped->buttons[BUTTON_INDEX_DPAD_RIGHT] =
+      AxisPositiveAsButton(input.axes[0]);
+
+  // Missing buttons
+  mapped->buttons[BUTTON_INDEX_LEFT_TRIGGER] = NullButton();
+  mapped->buttons[BUTTON_INDEX_RIGHT_TRIGGER] = NullButton();
+  mapped->buttons[BUTTON_INDEX_LEFT_THUMBSTICK] = NullButton();
+  mapped->buttons[BUTTON_INDEX_RIGHT_THUMBSTICK] = NullButton();
+  mapped->buttons[BUTTON_INDEX_META] = NullButton();
+
+  mapped->buttons_length = BUTTON_INDEX_COUNT - 1;
+  mapped->axes_length = 0;
 }
 
 }  // namespace device

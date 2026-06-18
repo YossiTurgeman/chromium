@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-# Copyright (c) 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import cStringIO
+from io import StringIO
 import logging
 import os
 import sys
@@ -55,7 +55,7 @@ class ReduceDebuglineTest(unittest.TestCase):
 
   def test(self):
     ranges_dict = reduce_debugline.reduce_decoded_debugline(
-        cStringIO.StringIO(self._DECODED_DEBUGLINE))
+        StringIO(self._DECODED_DEBUGLINE))
     self.assertEqual(self._EXPECTED_REDUCED_DEBUGLINE, ranges_dict)
 
 

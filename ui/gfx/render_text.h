@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,26 +10,29 @@
 
 #include <algorithm>
 #include <array>
+#include <concepts>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "base/check.h"
 #include "base/i18n/rtl.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
-#include "cc/paint/paint_canvas.h"
+#include "base/memory/raw_ptr.h"
+#include "build/build_config.h"
 #include "cc/paint/paint_flags.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "third_party/skia/include/core/SkFont.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
 #include "ui/gfx/break_list.h"
+#include "ui/gfx/color_palette.h"
 #include "ui/gfx/font_list.h"
 #include "ui/gfx/font_render_params.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/rect.h"
-#include "ui/gfx/geometry/rect_f.h"
 #include "ui/gfx/geometry/size_f.h"
 #include "ui/gfx/geometry/vector2d.h"
 #include "ui/gfx/range/range.h"
@@ -38,9 +41,13 @@
 #include "ui/gfx/shadow_value.h"
 #include "ui/gfx/text_constants.h"
 
-class SkDrawLooper;
 struct SkPoint;
 class SkTypeface;
+
+namespace cc {
+class DrawLooper;
+class PaintCanvas;
+}
 
 namespace gfx {
 namespace test {
@@ -50,24 +57,29 @@ class RenderTextTestApi;
 class Canvas;
 struct DecoratedText;
 class Font;
+class PointF;
 
 namespace internal {
 
 class TextRunList;
 
 // Internal helper class used by derived classes to draw text through Skia.
-class GFX_EXPORT SkiaTextRenderer {
+class COMPONENT_EXPORT(GFX) SkiaTextRenderer {
  public:
   explicit SkiaTextRenderer(Canvas* canvas);
+  SkiaTextRenderer(const SkiaTextRenderer&) = delete;
+  SkiaTextRenderer& operator=(const SkiaTextRenderer&) = delete;
   virtual ~SkiaTextRenderer();
 
-  void SetDrawLooper(sk_sp<SkDrawLooper> draw_looper);
+  void SetDrawLooper(sk_sp<cc::DrawLooper> draw_looper);
   void SetFontRenderParams(const FontRenderParams& params,
                            bool subpixel_rendering_suppressed);
   void SetTypeface(sk_sp<SkTypeface> typeface);
   void SetTextSize(SkScalar size);
   void SetForegroundColor(SkColor foreground);
   void SetShader(sk_sp<cc::PaintShader> shader);
+  void SetFillStyle(cc::PaintFlags::Style fill_style);
+  void SetStrokeWidth(SkScalar stroke_width);
   // TODO(vmpstr): Change this API to mimic SkCanvas::drawTextBlob instead.
   virtual void DrawPosText(const SkPoint* pos,
                            const uint16_t* glyphs,
@@ -78,18 +90,17 @@ class GFX_EXPORT SkiaTextRenderer {
  private:
   friend class test::RenderTextTestApi;
 
-  Canvas* canvas_;
-  cc::PaintCanvas* canvas_skia_;
+  raw_ptr<Canvas> canvas_;
+  raw_ptr<cc::PaintCanvas> canvas_skia_;
   cc::PaintFlags flags_;
   SkFont font_;
-
-  DISALLOW_COPY_AND_ASSIGN(SkiaTextRenderer);
 };
 
 struct TextToDisplayIndex {
   size_t text_index = 0;
   size_t display_index = 0;
 };
+
 using TextToDisplaySequence = std::vector<TextToDisplayIndex>;
 using GraphemeIterator = TextToDisplaySequence::const_iterator;
 using StyleArray = std::array<BreakList<bool>, TEXT_STYLE_COUNT>;
@@ -101,6 +112,9 @@ class StyleIterator {
                 const BreakList<BaselineStyle>* baselines,
                 const BreakList<int>* font_size_overrides,
                 const BreakList<Font::Weight>* weights,
+                const BreakList<SkTypefaceID>* resolved_typefaces,
+                const BreakList<cc::PaintFlags::Style>* fill_styles,
+                const BreakList<SkScalar>* stroke_widths,
                 const StyleArray* styles);
   StyleIterator(const StyleIterator& style);
   ~StyleIterator();
@@ -112,6 +126,9 @@ class StyleIterator {
   int font_size_override() const { return font_size_override_->second; }
   bool style(TextStyle s) const { return style_[s]->second; }
   Font::Weight weight() const { return weight_->second; }
+  SkTypefaceID resolved_typeface() const { return resolved_typeface_->second; }
+  cc::PaintFlags::Style fill_style() const { return fill_style_->second; }
+  SkScalar stroke_width() const { return stroke_width_->second; }
 
   // Get the intersecting range of the current iterator set.
   Range GetRange() const;
@@ -126,16 +143,22 @@ class StyleIterator {
  private:
   // Pointers to the breaklists to iterate through. These pointers can't be
   // nullptr and the breaklists must outlive this object.
-  const BreakList<SkColor>* colors_;
-  const BreakList<BaselineStyle>* baselines_;
-  const BreakList<int>* font_size_overrides_;
-  const BreakList<Font::Weight>* weights_;
-  const StyleArray* styles_;
+  raw_ptr<const BreakList<SkColor>> colors_;
+  raw_ptr<const BreakList<BaselineStyle>> baselines_;
+  raw_ptr<const BreakList<int>> font_size_overrides_;
+  raw_ptr<const BreakList<Font::Weight>> weights_;
+  raw_ptr<const BreakList<SkTypefaceID>> resolved_typefaces_;
+  raw_ptr<const BreakList<cc::PaintFlags::Style>> fill_styles_;
+  raw_ptr<const BreakList<SkScalar>> stroke_widths_;
+  raw_ptr<const StyleArray> styles_;
 
   BreakList<SkColor>::const_iterator color_;
   BreakList<BaselineStyle>::const_iterator baseline_;
   BreakList<int>::const_iterator font_size_override_;
   BreakList<Font::Weight>::const_iterator weight_;
+  BreakList<SkTypefaceID>::const_iterator resolved_typeface_;
+  BreakList<cc::PaintFlags::Style>::const_iterator fill_style_;
+  BreakList<SkScalar>::const_iterator stroke_width_;
   std::array<BreakList<bool>::const_iterator, TEXT_STYLE_COUNT> style_;
 };
 
@@ -208,9 +231,9 @@ void ApplyRenderParams(const FontRenderParams& params,
 // visual layout. Support is built in for a cursor, selections, simple styling,
 // complex scripts, and bi-directional text. Implementations provide mechanisms
 // for rendering and translation between logical and visual data.
-class GFX_EXPORT RenderText {
+class COMPONENT_EXPORT(GFX) RenderText {
  public:
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_APPLE)
   // On Mac, while selecting text if the cursor is outside the vertical text
   // bounds, drag to the end of the text.
   static constexpr bool kDragToEndIfOutsideVerticalBounds = true;
@@ -222,12 +245,6 @@ class GFX_EXPORT RenderText {
   static constexpr bool kSelectionIsAlwaysDirected = true;
 #endif
 
-  // Default color used for the text and cursor.
-  static constexpr SkColor kDefaultColor = SK_ColorBLACK;
-
-  // Default color used for drawing selection background.
-  static constexpr SkColor kDefaultSelectionBackgroundColor = SK_ColorGRAY;
-
   // Invalid value of baseline.  Assigning this value to |baseline_| causes
   // re-calculation of baseline.
   static constexpr int kInvalidBaseline = INT_MAX;
@@ -238,8 +255,10 @@ class GFX_EXPORT RenderText {
   // The character used for displaying obscured text. Use a bullet character.
   // TODO(pbos): This is highly font dependent, consider replacing the character
   // with a vector glyph.
-  static constexpr base::char16 kPasswordReplacementChar = 0x2022;
+  static constexpr char16_t kPasswordReplacementChar = 0x2022;
 
+  RenderText(const RenderText&) = delete;
+  RenderText& operator=(const RenderText&) = delete;
   virtual ~RenderText();
 
   // Creates a RenderText instance.
@@ -247,11 +266,26 @@ class GFX_EXPORT RenderText {
 
   // Like above but copies all style settings too.
   std::unique_ptr<RenderText> CreateInstanceOfSameStyle(
-      const base::string16& text) const;
+      std::u16string_view text) const;
 
-  const base::string16& text() const { return text_; }
-  void SetText(const base::string16& text);
-  void AppendText(const base::string16& text);
+  std::u16string_view text() const { return text_; }
+  void SetText(std::u16string_view text);
+
+  // If the caller already has a `std::u16string`, this can save unnecessary
+  // work otherwise done by the `SetText()` version above. Templatizing the arg
+  // causes the compiler to prefer the above function unambiguously if the
+  // argument is neither a string nor a string_view, but convertible to either
+  // (e.g. a `const char16_t*`).
+  template <typename T>
+    requires(std::same_as<T, std::u16string>)
+  void SetText(T text) {
+    DCHECK(!composition_range_.IsValid());
+    if (text_ != text) {
+      SetTextImpl(std::move(text));
+    }
+  }
+
+  void AppendText(std::u16string_view text);
 
   HorizontalAlignment horizontal_alignment() const {
     return horizontal_alignment_;
@@ -296,10 +330,10 @@ class GFX_EXPORT RenderText {
 
   // Makes a char in obscured text at |index| to be revealed. |index| should be
   // a UTF16 text index. If there is a previous revealed index, the previous one
-  // is cleared and only the last set index will be revealed. If |index| is -1
-  // or out of range, no char will be revealed. The revealed index is also
-  // cleared when SetText or SetObscured is called.
-  void SetObscuredRevealIndex(int index);
+  // is cleared and only the last set index will be revealed. If |index| is
+  // nullopt or out of range, no char will be revealed. The revealed index is
+  // also cleared when SetText or SetObscured is called.
+  void SetObscuredRevealIndex(std::optional<size_t> index);
 
   // For obscured (password) fields, the extra spacing between glyphs.
   int obscured_glyph_spacing() const { return obscured_glyph_spacing_; }
@@ -339,12 +373,10 @@ class GFX_EXPORT RenderText {
   ElideBehavior elide_behavior() const { return elide_behavior_; }
 
   // When display text is elided, determines how whitespace is handled.
-  // If base::nullopt is specified, the default elision for the current elide
+  // If std::nullopt is specified, the default elision for the current elide
   // behavior will be applied.
-  void SetWhitespaceElision(base::Optional<bool> elide_whitespace);
-  base::Optional<bool> whitespace_elision() const {
-    return whitespace_elision_;
-  }
+  void SetWhitespaceElision(std::optional<bool> elide_whitespace);
+  std::optional<bool> whitespace_elision() const { return whitespace_elision_; }
 
   const Rect& display_rect() const { return display_rect_; }
   void SetDisplayRect(const Rect& r);
@@ -447,6 +479,21 @@ class GFX_EXPORT RenderText {
   void SetWeight(Font::Weight weight);
   void ApplyWeight(Font::Weight weight, const Range& range);
 
+  // Set the fill style over the entire text or a logical character range.
+  void SetFillStyle(cc::PaintFlags::Style fill_style);
+  void ApplyFillStyle(cc::PaintFlags::Style fill_style, const Range& range);
+
+  // Set the stroke width over the entire text or a logical character range.
+  // Stroke width only applies to stroke styles and must be >= 0 to have an
+  // effect.
+  void SetStrokeWidth(SkScalar stroke_width);
+  void ApplyStrokeWidth(SkScalar stroke_width, const Range& range);
+
+  // Replace the elided text by an ellipsis. This property is getting rewritten
+  // by the use of SetElideBehavior(...).
+  void SetEliding(bool value);
+  void ApplyEliding(bool value, const Range& range);
+
   // Returns whether this style is enabled consistently across the entire
   // RenderText.
   bool GetStyle(TextStyle style) const;
@@ -469,7 +516,7 @@ class GFX_EXPORT RenderText {
   // Returns the text used to display, which may be obscured, truncated or
   // elided. The subclass may compute elided text on the fly, or use
   // precomputed the elided text.
-  virtual const base::string16& GetDisplayText() = 0;
+  virtual std::u16string_view GetDisplayText() = 0;
 
   // Returns the size required to display the current string (which is the
   // wrapped size in multiline mode). The returned size does not include space
@@ -527,7 +574,7 @@ class GFX_EXPORT RenderText {
   // is longer than the textfield. Subsequent text, cursor, or bounds changes
   // may invalidate returned values. Note that |caret| must be placed at
   // grapheme boundary, i.e. caret.caret_pos() must be a cursorable position.
-  // TODO(crbug.com/248597): Add multiline support.
+  // TODO(crbug.com/40321377): Add multiline support.
   Rect GetCursorBounds(const SelectionModel& caret, bool insert_mode);
 
   // Compute the current cursor bounds, panning the text to show the cursor in
@@ -569,8 +616,8 @@ class GFX_EXPORT RenderText {
   // guaranteed not to be smaller. These bounds could be visually discontinuous
   // if the substring is split by a LTR/RTL level change. These bounds are in
   // local coordinates, but may be outside the visible region if the text is
-  // longer than the textfield. Subsequent text, cursor, or bounds changes may
-  // invalidate returned values.
+  // larger than the available space. Subsequent text, cursor, or bounds changes
+  // may invalidate returned values.
   virtual std::vector<Rect> GetSubstringBounds(const Range& range) = 0;
 
   // Gets the horizontal span (relative to the left of the text, not the view)
@@ -582,6 +629,7 @@ class GFX_EXPORT RenderText {
 
   const Vector2d& GetUpdatedDisplayOffset();
   void SetDisplayOffset(int horizontal_offset);
+  void SetDisplayOffset(Vector2d offset);
 
   // Returns the line offset from the origin after applying the text alignment
   // and the display offset.
@@ -589,25 +637,24 @@ class GFX_EXPORT RenderText {
 
   // Retrieves the word displayed at the given |point| along with its styling
   // information. |point| is in the view's coordinates. If no word is displayed
-  // at the point, returns a nearby word. |baseline_point| should correspond to
-  // the baseline point of the leftmost glyph of the |word| in the view's
-  // coordinates. Returns false, if no word can be retrieved.
+  // at the point, returns a nearby word. |rect| should correspond to the space
+  // used by the glyph of the |word| in the view's coordinates. Returns false,
+  // if no word can be retrieved.
   bool GetWordLookupDataAtPoint(const Point& point,
                                 DecoratedText* decorated_word,
-                                Point* baseline_point);
+                                Rect* rect);
 
   // Retrieves the text at |range| along with its styling information.
-  // |baseline_point| should correspond to the baseline point of
-  // the leftmost glyph of the text in the view's coordinates. If the text
-  // spans multiple lines, |baseline_point| will correspond with the leftmost
-  // glyph on the first line in the range. Returns false, if no text can be
-  // retrieved.
+  // |rect| should correspond to the space used by the glyph of the text in the
+  // view's coordinates. If the text spans multiple lines, |rect| will
+  // correspond with the leftmost glyph on the first line in the range. Returns
+  // false, if no text can be retrieved.
   bool GetLookupDataForRange(const Range& range,
                              DecoratedText* decorated_text,
-                             Point* baseline_point);
+                             Rect* rect);
 
   // Retrieves the text in the given |range|.
-  base::string16 GetTextFromRange(const Range& range) const;
+  std::u16string_view GetTextFromRange(const Range& range) const;
 
   void set_strike_thickness_factor(SkScalar f) { strike_thickness_factor_ = f; }
 
@@ -619,6 +666,24 @@ class GFX_EXPORT RenderText {
   // resulting range. Maintains directionality of |range|.
   Range ExpandRangeToGraphemeBoundary(const Range& range) const;
 
+  // Expands |range| to its nearest word boundaries and returns the resulting
+  // range. Maintains directionality of |range|.
+  Range ExpandRangeToWordBoundary(const Range& range) const;
+
+  // Specify the width/height of a glyph for test. The width/height of glyphs is
+  // very platform-dependent and environment-dependent. Otherwise multiline text
+  // will become really flaky.
+  void set_glyph_width_for_test(float width) { glyph_width_for_test_ = width; }
+  void set_glyph_height_for_test(float height) {
+    glyph_height_for_test_ = height;
+  }
+
+  // Specify whether missing glyphs introduce additional run breaks. Glyph
+  // support is very platform-dependent and this allows for consistent testing.
+  void ignore_missing_glyph_breaks_for_test(bool enabled) {
+    ignore_missing_glyph_breaks_for_test_ = enabled;
+  }
+
  protected:
   RenderText();
 
@@ -627,21 +692,21 @@ class GFX_EXPORT RenderText {
   bool IsNewlineSegment(const internal::LineSegment& segment) const;
 
   // Whether |segment| corresponds to the newline character inside |text|.
-  bool IsNewlineSegment(const base::string16& text,
+  bool IsNewlineSegment(std::u16string_view text,
                         const internal::LineSegment& segment) const;
 
   // Returns the character range of segments in |line| excluding the trailing
   // newline segment.
-  Range GetLineRange(const base::string16& text,
+  Range GetLineRange(std::u16string_view text,
                      const internal::Line& line) const;
 
   // Returns the text used for layout (e.g. after rewriting, eliding and
   // obscuring characters).
-  const base::string16& GetLayoutText() const;
+  std::u16string_view GetLayoutText() const;
 
   // NOTE: The value of these accessors may be stale. Please make sure
   // that these fields are up to date before accessing them.
-  const base::string16& display_text() const { return display_text_; }
+  std::u16string_view display_text() const { return display_text_; }
   bool text_elided() const { return text_elided_; }
 
   // Returns an iterator over the |text_| attributes.
@@ -656,9 +721,19 @@ class GFX_EXPORT RenderText {
   }
   const BreakList<Font::Weight>& weights() const { return weights_; }
   const internal::StyleArray& styles() const { return styles_; }
+  const BreakList<cc::PaintFlags::Style>& fill_styles() const {
+    return fill_styles_;
+  }
+  const BreakList<SkScalar>& stroke_widths() const { return stroke_widths_; }
   SkScalar strike_thickness_factor() const { return strike_thickness_factor_; }
 
   const BreakList<SkColor>& layout_colors() const { return layout_colors_; }
+  BreakList<SkTypefaceID>& layout_resolved_typefaces() const {
+    return layout_resolved_typefaces_;
+  }
+  BreakList<SkTypefaceID>& resolved_typefaces() const {
+    return resolved_typefaces_;
+  }
 
   // Whether all the BreakLists have only one break.
   bool IsHomogeneous() const;
@@ -741,9 +816,8 @@ class GFX_EXPORT RenderText {
   size_t DisplayIndexToTextIndex(size_t index) const;
 
   // Notifies that layout text, or attributes that affect the layout text
-  // shape have changed. |text_changed| is true if the content of the
-  // |layout_text_| has changed, not just attributes.
-  virtual void OnLayoutTextAttributeChanged(bool text_changed);
+  // shape have changed.
+  virtual void OnLayoutTextAttributeChanged();
 
   // Notifies that attributes that affect the display text shape have changed.
   virtual void OnDisplayTextAttributeChanged() = 0;
@@ -758,12 +832,12 @@ class GFX_EXPORT RenderText {
   // Update the display text.
   void UpdateDisplayText(float text_width);
 
-  // Returns display text positions that are suitable for breaking lines.
-  const BreakList<size_t>& GetLineBreaks();
-
   // Convert points from the text space to the view space. Handles the display
-  // area, display offset, application LTR/RTL mode and multiline.
-  Point ToViewPoint(const PointF& point, LogicalCursorDirection caret_affinity);
+  // area, display offset, application LTR/RTL mode and multiline. |line| is the
+  // index of the line in which |point| is found, and is required to be passed
+  // because by the time |point| is in text space, the information to account
+  // for certain zero-width characters (such as empty lines) is lost.
+  Point ToViewPoint(const PointF& point, size_t line);
 
   // Get the alignment, resolving ALIGN_TO_HEAD with the current text direction.
   HorizontalAlignment GetCurrentHorizontalAlignment();
@@ -780,7 +854,7 @@ class GFX_EXPORT RenderText {
   // Get the text direction for the current directionality mode and given
   // |text|.
   base::i18n::TextDirection GetTextDirectionForGivenText(
-      const base::string16& text) const;
+      std::u16string_view text) const;
 
   // Adjust ranged styles to accommodate a new |text_| length.
   void UpdateStyleLengths();
@@ -808,21 +882,32 @@ class GFX_EXPORT RenderText {
   static gfx::Rect ExpandToBeVerticallySymmetric(const gfx::Rect& rect,
                                                  const gfx::Rect& display_rect);
 
+  // Given |rects|, sort them along the x-axis and merge intersecting rects
+  // using union. Expects all selections in the text to be from the same line.
+  static void MergeIntersectingRects(std::vector<Rect>& rects);
+
   // Resets |cached_cursor_x_| to null. When non-null, CURSOR_UP, CURSOR_DOWN
   // movements use this value instead of the current cursor x position to
   // determine the next cursor x position.
   void reset_cached_cursor_x() { cached_cursor_x_.reset(); }
 
   void set_cached_cursor_x(int x) { cached_cursor_x_ = x; }
-  base::Optional<int> cached_cursor_x() const { return cached_cursor_x_; }
+  std::optional<int> cached_cursor_x() const { return cached_cursor_x_; }
 
   // Fixed width of glyphs. This should only be set in test environments.
   float glyph_width_for_test_ = 0;
   // Fixed height of glyphs. This should only be set in test environments.
   float glyph_height_for_test_ = 0;
+  // Prevents breaking glyphs based on font support. This should only be set in
+  // test environments.
+  bool ignore_missing_glyph_breaks_for_test_ = false;
 
  private:
   friend class test::RenderTextTestApi;
+
+  // Common implementation of public `SetText()` methods, once `text` is known
+  // to differ.
+  void SetTextImpl(std::u16string text);
 
   // Resets |layout_text_| and |display_text_| and marks them dirty.
   void OnTextAttributeChanged();
@@ -834,13 +919,13 @@ class GFX_EXPORT RenderText {
   // Elides |text| as needed to fit in the |available_width| using |behavior|.
   // |text_width| is the pre-calculated width of the text shaped by this render
   // text, or pass 0 if the width is unknown.
-  base::string16 Elide(const base::string16& text,
+  std::u16string Elide(std::u16string_view text,
                        float text_width,
                        float available_width,
                        ElideBehavior behavior);
 
   // Elides |email| as needed to fit the |available_width|.
-  base::string16 ElideEmail(const base::string16& email, float available_width);
+  std::u16string ElideEmail(std::u16string_view email, float available_width);
 
   // Update the cached bounds and display offset to ensure that the current
   // cursor is within the visible display area.
@@ -851,38 +936,29 @@ class GFX_EXPORT RenderText {
 
   // Returns a grapheme iterator that contains the codepoint at |index|.
   internal::GraphemeIterator GetGraphemeIteratorAtIndex(
-      const base::string16& text,
-      const size_t internal::TextToDisplayIndex::*field,
-      size_t index) const;
+      size_t index,
+      const size_t internal::TextToDisplayIndex::* field,
+      size_t end) const;
 
   // Returns the nearest word start boundary for |index|. First searches in the
   // CURSOR_BACKWARD direction, then in the CURSOR_FORWARD direction. Returns
   // the text length if no valid boundary is found.
   size_t GetNearestWordStartBoundary(size_t index) const;
 
-  // Expands |range| to its nearest word boundaries and returns the resulting
-  // range. Maintains directionality of |range|.
-  Range ExpandRangeToWordBoundary(const Range& range) const;
-
   // Returns an implementation-specific run list, if implemented.
   virtual internal::TextRunList* GetRunList() = 0;
   virtual const internal::TextRunList* GetRunList() const = 0;
 
-  // Returns the decorated text corresponding to |range|. Returns false if the
-  // text cannot be retrieved, e.g. if the text is obscured.
-  virtual bool GetDecoratedTextForRange(const Range& range,
+  // Returns the decorated text corresponding to `text_range`, in logical
+  // offsets. The text returned in the decorated text object is the text(), not
+  // the display_text(), and it's not obscured. It's the responsibility of the
+  // callers of this function to replace the text by the password replacement
+  // character if it is obscured and exposed to platform APIs.
+  virtual void GetDecoratedTextForRange(const Range& text_range,
                                         DecoratedText* decorated_text) = 0;
 
-  // Specify the width/height of a glyph for test. The width/height of glyphs is
-  // very platform-dependent and environment-dependent. Otherwise multiline text
-  // will become really flaky.
-  void set_glyph_width_for_test(float width) { glyph_width_for_test_ = width; }
-  void set_glyph_height_for_test(float height) {
-    glyph_height_for_test_ = height;
-  }
-
   // Logical UTF-16 string data to be drawn.
-  base::string16 text_;
+  std::u16string text_;
 
   // Horizontal alignment of the text with respect to |display_rect_|.  The
   // default is to align left if the application UI is LTR and right if RTL.
@@ -923,11 +999,10 @@ class GFX_EXPORT RenderText {
   bool has_directed_selection_ = kSelectionIsAlwaysDirected;
 
   // The color used for drawing selected text.
-  SkColor selection_color_ = kDefaultColor;
+  SkColor selection_color_ = kPlaceholderColor;
 
   // The background color used for drawing the selection when focused.
-  SkColor selection_background_focused_color_ =
-      kDefaultSelectionBackgroundColor;
+  SkColor selection_background_focused_color_ = kPlaceholderColor;
 
   // Whether the selection visual bounds should be expanded vertically to be
   // vertically symmetric with respect to the display rect. Note this flag has
@@ -943,46 +1018,57 @@ class GFX_EXPORT RenderText {
   // Color, baseline, and style breaks, used to modify ranges of text.
   // BreakList positions are stored with text indices, not display indices.
   // TODO(msw): Expand to support cursor, selection, background, etc. colors.
-  BreakList<SkColor> colors_{kDefaultColor};
-  BreakList<BaselineStyle> baselines_{NORMAL_BASELINE};
+  BreakList<SkColor> colors_{kPlaceholderColor};
+  BreakList<BaselineStyle> baselines_{BaselineStyle::kNormalBaseline};
   BreakList<int> font_size_overrides_{0};
   BreakList<Font::Weight> weights_{Font::Weight::NORMAL};
+  mutable BreakList<SkTypefaceID> resolved_typefaces_;
+  BreakList<cc::PaintFlags::Style> fill_styles_{cc::PaintFlags::kFill_Style};
+  BreakList<SkScalar> stroke_widths_{0.f};
   internal::StyleArray styles_;
+  BreakList<bool> elidings_;
 
+  // Layout breaklists. These are used for eliding, and should not be manually
+  // cleared.
   mutable BreakList<SkColor> layout_colors_;
   mutable BreakList<BaselineStyle> layout_baselines_;
   mutable BreakList<int> layout_font_size_overrides_;
+  mutable BreakList<SkTypefaceID> layout_resolved_typefaces_;
   mutable BreakList<Font::Weight> layout_weights_;
+  mutable BreakList<cc::PaintFlags::Style> layout_fill_styles_;
+  mutable BreakList<SkScalar> layout_stroke_widths_;
   mutable internal::StyleArray layout_styles_;
 
   // A mapping from text to display text indices for each grapheme. The vector
   // contains an ordered sequence of indice pairs. Both sequence |text_index|
-  // and |display_index| are sorted.
+  // and |display_index| are sorted. Note that currently this is a mapping
+  // between `text_` and `layout_text_`, but the intention is to combine the
+  // phases that currently creates `layout_text_` and `display_text_`.
   mutable internal::TextToDisplaySequence text_to_display_indices_;
 
   // A flag to obscure actual text with asterisks for password fields.
   bool obscured_ = false;
   // The index at which the char should be revealed in the obscured text.
-  int obscured_reveal_index_ = -1;
+  std::optional<size_t> obscured_reveal_index_;
 
   // The maximum length of text to display, 0 forgoes a hard limit.
   size_t truncate_length_ = 0;
 
   // The obscured and/or truncated text used to layout the text to display.
-  mutable base::string16 layout_text_;
+  mutable std::u16string layout_text_;
 
   // The elided text displayed visually. This is empty if the text
   // does not have to be elided, or became empty as a result of eliding.
   // TODO(oshima): When the text is elided, painting can be done only with
   // display text info, so it should be able to clear the |layout_text_| and
   // associated information.
-  mutable base::string16 display_text_;
+  mutable std::u16string display_text_;
 
   // The behavior for eliding, fading, or truncating.
   ElideBehavior elide_behavior_ = NO_ELIDE;
 
   // The behavior for eliding whitespace when eliding or truncating.
-  base::Optional<bool> whitespace_elision_;
+  std::optional<bool> whitespace_elision_;
 
   // True if the text is elided given the current behavior and display area.
   bool text_elided_ = false;
@@ -1030,9 +1116,6 @@ class GFX_EXPORT RenderText {
   // Text shadows to be drawn.
   ShadowValues shadows_;
 
-  // A list of valid display text line break positions.
-  BreakList<size_t> line_breaks_;
-
   // Text shaping computed by EnsureLayout. This should be invalidated upon
   // OnLayoutTextAttributeChanged and OnDisplayTextAttributeChanged calls.
   std::unique_ptr<internal::ShapedText> shaped_text_;
@@ -1044,12 +1127,10 @@ class GFX_EXPORT RenderText {
   int obscured_glyph_spacing_ = 0;
 
   // The cursor position in view space, used to traverse lines of varied widths.
-  base::Optional<int> cached_cursor_x_;
+  std::optional<int> cached_cursor_x_;
 
   // Tell whether or not the |layout_text_| needs an update or is up to date.
   mutable bool layout_text_up_to_date_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(RenderText);
 };
 
 }  // namespace gfx

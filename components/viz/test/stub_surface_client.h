@@ -1,13 +1,15 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_VIZ_TEST_STUB_SURFACE_CLIENT_H_
 #define COMPONENTS_VIZ_TEST_STUB_SURFACE_CLIENT_H_
 
-#include "components/viz/service/surfaces/surface_client.h"
+#include <memory>
+#include <vector>
 
 #include "base/memory/weak_ptr.h"
+#include "components/viz/service/surfaces/surface_client.h"
 
 namespace viz {
 
@@ -16,21 +18,20 @@ class StubSurfaceClient : public SurfaceClient {
   StubSurfaceClient();
   ~StubSurfaceClient() override;
 
+  void OnSurfaceCommitted(Surface* surface) override {}
   void OnSurfaceActivated(Surface* surface) override {}
   void OnSurfaceDestroyed(Surface* surface) override {}
   void OnSurfaceWillDraw(Surface* surface) override {}
   void RefResources(
       const std::vector<TransferableResource>& resources) override {}
-  void UnrefResources(const std::vector<ReturnedResource>& resources) override {
-  }
-  void ReturnResources(
-      const std::vector<ReturnedResource>& resources) override {}
+  void UnrefResources(std::vector<ReturnedResourceViz> resources) override {}
+  void ReturnResources(std::vector<ReturnedResource> resources) override {}
   void ReceiveFromChild(
       const std::vector<TransferableResource>& resources) override {}
-  std::vector<std::unique_ptr<CopyOutputRequest>> TakeCopyOutputRequests(
+  std::vector<std::unique_ptr<PendingCopyOutputRequest>> TakeCopyOutputRequests(
       const LocalSurfaceId& latest_surface_id) override;
   void OnFrameTokenChanged(uint32_t frame_token) override {}
-  void OnSurfaceProcessed(Surface* surface) override {}
+  void SendCompositorFrameAck() override {}
   void OnSurfaceAggregatedDamage(
       Surface* surface,
       const LocalSurfaceId& local_surface_id,
@@ -41,6 +42,8 @@ class StubSurfaceClient : public SurfaceClient {
                           base::TimeTicks draw_start_timestamp,
                           const gfx::SwapTimings& swap_timings,
                           const gfx::PresentationFeedback& feedback) override {}
+  bool IsVideoCaptureStarted() override;
+  std::vector<Thread> GetThreads() override;
 
   base::WeakPtrFactory<StubSurfaceClient> weak_factory{this};
 };

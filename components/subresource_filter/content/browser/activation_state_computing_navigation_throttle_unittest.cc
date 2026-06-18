@@ -1,50 +1,40 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/subresource_filter/content/browser/activation_state_computing_navigation_throttle.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include "base/bind_helpers.h"
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/optional.h"
 #include "base/run_loop.h"
-#include "base/sequenced_task_runner.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/test_simple_task_runner.h"
-#include "base/threading/sequenced_task_runner_handle.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter_test_utils.h"
+#include "components/subresource_filter/content/browser/utils.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter_test_utils.h"
+#include "components/subresource_filter/core/common/constants.h"
 #include "components/subresource_filter/core/common/scoped_timers.h"
 #include "components/subresource_filter/core/common/test_ruleset_creator.h"
 #include "components/subresource_filter/core/common/test_ruleset_utils.h"
 #include "components/subresource_filter/core/mojom/subresource_filter.mojom.h"
 #include "components/url_pattern_index/proto/rules.pb.h"
 #include "content/public/browser/navigation_handle.h"
+#include "content/public/browser/navigation_throttle_registry.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/test/navigation_simulator.h"
+#include "content/public/test/test_navigation_throttle_inserter.h"
 #include "content/public/test/test_renderer_host.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace subresource_filter {
-
-namespace {
-
-// Histogram name on thread timers. Please, use |ExpectThreadTimers| for
-// expectation calls corrections.
-constexpr char kActivationCPU[] =
-    "SubresourceFilter.DocumentLoad.Activation.CPUDuration";
-
-int ExpectThreadTimers(int expected) {
-  return ScopedThreadTimers::IsSupported() ? expected : 0;
-}
-
-}  // namespace
 
 namespace proto = url_pattern_index::proto;
 
@@ -59,13 +49,25 @@ class ActivationStateComputingNavigationThrottleTest
   ActivationStateComputingNavigationThrottleTest()
       : simple_task_runner_(base::MakeRefCounted<base::TestSimpleTaskRunner>()),
         dryrun_speculation_(GetParam()) {}
-  ~ActivationStateComputingNavigationThrottleTest() override {}
+
+  ActivationStateComputingNavigationThrottleTest(
+      const ActivationStateComputingNavigationThrottleTest&) = delete;
+  ActivationStateComputingNavigationThrottleTest& operator=(
+      const ActivationStateComputingNavigationThrottleTest&) = delete;
+
+  ~ActivationStateComputingNavigationThrottleTest() override = default;
 
   void SetUp() override {
     content::RenderViewHostTestHarness::SetUp();
     NavigateAndCommit(GURL("https://example.first"));
     InitializeRuleset();
     Observe(RenderViewHostTestHarness::web_contents());
+    throttle_inserter_ =
+        std::make_unique<content::TestNavigationThrottleInserter>(
+            RenderViewHostTestHarness::web_contents(),
+            base::BindRepeating(
+                &ActivationStateComputingNavigationThrottleTest::InsertThrottle,
+                base::Unretained(this)));
   }
 
   void TearDown() override {
@@ -104,7 +106,7 @@ class ActivationStateComputingNavigationThrottleTest
     // Make the blocking task runner run on the current task runner for the
     // tests, to ensure that the NavigationSimulator properly runs all necessary
     // tasks while waiting for throttle checks to finish.
-    InitializeRulesetHandles(base::SequencedTaskRunnerHandle::Get());
+    InitializeRulesetHandles(base::SequencedTaskRunner::GetCurrentDefault());
   }
 
   void NavigateAndCommitMainFrameWithPageActivationState(
@@ -160,7 +162,7 @@ class ActivationStateComputingNavigationThrottleTest
   void InitializeRulesetHandles(
       scoped_refptr<base::SequencedTaskRunner> ruleset_task_runner) {
     dealer_handle_ = std::make_unique<VerifiedRulesetDealer::Handle>(
-        std::move(ruleset_task_runner));
+        std::move(ruleset_task_runner), kSafeBrowsingRulesetConfig);
     dealer_handle_->TryOpenAndSetRulesetFile(test_ruleset_pair_.indexed.path,
                                              /*expected_checksum=*/0,
                                              base::DoNothing());
@@ -191,33 +193,37 @@ class ActivationStateComputingNavigationThrottleTest
   }
 
  protected:
-  // content::WebContentsObserver:
-  void DidStartNavigation(
-      content::NavigationHandle* navigation_handle) override {
+  void InsertThrottle(content::NavigationThrottleRegistry& registry) {
+    content::NavigationHandle& navigation_handle =
+        registry.GetNavigationHandle();
     std::unique_ptr<ActivationStateComputingNavigationThrottle> throttle =
-        navigation_handle->IsInMainFrame()
-            ? ActivationStateComputingNavigationThrottle::CreateForMainFrame(
-                  navigation_handle)
-            : ActivationStateComputingNavigationThrottle::CreateForSubframe(
-                  navigation_handle, ruleset_handle_.get(),
-                  parent_activation_state_.value());
-    if (navigation_handle->IsInMainFrame() && dryrun_speculation_) {
+        IsInSubresourceFilterRoot(&navigation_handle)
+            ? ActivationStateComputingNavigationThrottle::CreateForRoot(
+                  registry, kSafeBrowsingRulesetConfig.uma_tag)
+            : ActivationStateComputingNavigationThrottle::CreateForChild(
+                  registry, ruleset_handle_.get(),
+                  parent_activation_state_.value(),
+                  kSafeBrowsingRulesetConfig.uma_tag);
+    if (navigation_handle.IsInMainFrame() && dryrun_speculation_) {
       mojom::ActivationState dryrun_state;
       dryrun_state.activation_level = mojom::ActivationLevel::kDryRun;
       throttle->NotifyPageActivationWithRuleset(ruleset_handle_.get(),
                                                 dryrun_state);
     }
     test_throttle_ = throttle.get();
-    navigation_handle->RegisterThrottleForTesting(std::move(throttle));
+    registry.AddThrottle(std::move(throttle));
   }
 
+  // content::WebContentsObserver:
   void ReadyToCommitNavigation(
       content::NavigationHandle* navigation_handle) override {
-    if (!test_throttle_)
+    if (!test_throttle_) {
       return;
+    }
     ASSERT_EQ(navigation_handle, test_throttle_->navigation_handle());
-    if (test_throttle_->filter())
+    if (test_throttle_->filter()) {
       test_throttle_->WillSendActivationToRenderer();
+    }
 
     if (auto filter = test_throttle_->ReleaseFilter()) {
       EXPECT_NE(mojom::ActivationLevel::kDisabled,
@@ -230,8 +236,9 @@ class ActivationStateComputingNavigationThrottleTest
 
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override {
-    if (!test_throttle_)
+    if (!test_throttle_) {
       return;
+    }
     last_committed_frame_host_ = navigation_handle->GetRenderFrameHost();
     test_throttle_ = nullptr;
   }
@@ -250,16 +257,17 @@ class ActivationStateComputingNavigationThrottleTest
   scoped_refptr<base::TestSimpleTaskRunner> simple_task_runner_;
 
   // Owned by the current navigation.
-  ActivationStateComputingNavigationThrottle* test_throttle_;
-  base::Optional<mojom::ActivationState> last_activation_state_;
-  base::Optional<mojom::ActivationState> parent_activation_state_;
+  raw_ptr<ActivationStateComputingNavigationThrottle> test_throttle_;
+  std::optional<mojom::ActivationState> last_activation_state_;
+  std::optional<mojom::ActivationState> parent_activation_state_;
 
   // Needed for potential cross process navigations which swap hosts.
-  content::RenderFrameHost* last_committed_frame_host_ = nullptr;
+  raw_ptr<content::RenderFrameHost, DanglingUntriaged>
+      last_committed_frame_host_ = nullptr;
 
   bool dryrun_speculation_;
 
-  DISALLOW_COPY_AND_ASSIGN(ActivationStateComputingNavigationThrottleTest);
+  std::unique_ptr<content::TestNavigationThrottleInserter> throttle_inserter_;
 };
 
 typedef ActivationStateComputingNavigationThrottleTest
@@ -275,9 +283,11 @@ TEST_P(ActivationStateComputingThrottleMainFrameTest, Activate) {
   EXPECT_FALSE(state.filtering_disabled_for_document);
 }
 
-// TODO(crbug.com/1069398): Fix this test failure.
 TEST_P(ActivationStateComputingThrottleMainFrameTest,
-       DISABLED_NoPageActivationNotification_NoActivation) {
+       NoPageActivationNotification_NoActivation) {
+  if (dryrun_speculation()) {
+    GTEST_SKIP() << "TODO(crbug.com/40125895): Fix this test failure.";
+  }
   CreateTestNavigationForMainFrame(GURL("http://example.test/"));
   SimulateStartAndExpectToProceed();
   SimulateRedirectAndExpectToProceed(GURL("http://example.test/?v=1"));
@@ -484,52 +494,9 @@ TEST_P(ActivationStateComputingThrottleSubFrameTest, DisabledStatePropagated2) {
   EXPECT_TRUE(state.generic_blocking_rules_disabled);
 }
 
-TEST_P(ActivationStateComputingThrottleSubFrameTest, Speculation) {
-  // Use the activation performance metric as a proxy for how many times
-  // activation computation occurred.
-  base::HistogramTester main_histogram_tester;
-
-  // Main frames don't do speculative lookups, a navigation commit should only
-  // trigger a single ruleset lookup.
-  CreateTestNavigationForMainFrame(GURL("http://example.test/"));
-  SimulateStartAndExpectToProceed();
-  base::RunLoop().RunUntilIdle();
-  int main_frame_checks = dryrun_speculation() ? 1 : 0;
-  main_histogram_tester.ExpectTotalCount(kActivationCPU,
-                                         ExpectThreadTimers(main_frame_checks));
-
-  SimulateRedirectAndExpectToProceed(GURL("http://example.test2/"));
-  base::RunLoop().RunUntilIdle();
-  main_frame_checks += dryrun_speculation() ? 1 : 0;
-  main_histogram_tester.ExpectTotalCount(kActivationCPU,
-                                         ExpectThreadTimers(main_frame_checks));
-
-  mojom::ActivationState state;
-  state.activation_level = mojom::ActivationLevel::kEnabled;
-  NotifyPageActivation(state);
-  SimulateCommitAndExpectToProceed();
-  main_frame_checks += dryrun_speculation() ? 0 : 1;
-  main_histogram_tester.ExpectTotalCount(kActivationCPU,
-                                         ExpectThreadTimers(main_frame_checks));
-
-  base::HistogramTester sub_histogram_tester;
-  CreateSubframeAndInitTestNavigation(GURL("http://example.test/"),
-                                      last_committed_frame_host(),
-                                      last_activation_state());
-  // For subframes, do a ruleset lookup at the start and every redirect.
-  SimulateStartAndExpectToProceed();
-  base::RunLoop().RunUntilIdle();
-  sub_histogram_tester.ExpectTotalCount(kActivationCPU, ExpectThreadTimers(1));
-
-  SimulateRedirectAndExpectToProceed(GURL("http://example.test2/"));
-  base::RunLoop().RunUntilIdle();
-  sub_histogram_tester.ExpectTotalCount(kActivationCPU, ExpectThreadTimers(2));
-
-  // No ruleset lookup required at commit because we've already checked the
-  // latest URL.
-  SimulateCommitAndExpectToProceed();
-  sub_histogram_tester.ExpectTotalCount(kActivationCPU, ExpectThreadTimers(2));
-}
+// TODO(crbug.com/40155196): A test is needed to verify that
+// ComputeActivationState was called appropriately.  Previously this was done
+// via looking at performance histograms, but those are now obsolete.
 
 TEST_P(ActivationStateComputingThrottleSubFrameTest, SpeculationWithDelay) {
   InitializeRulesetHandles(simple_task_runner());
@@ -545,11 +512,9 @@ TEST_P(ActivationStateComputingThrottleSubFrameTest, SpeculationWithDelay) {
 
   simulator->Start();
   EXPECT_FALSE(simulator->IsDeferred());
-  main_histogram_tester.ExpectTotalCount(kActivationCPU, 0);
 
   simulator->Redirect(GURL("http://example.test2/"));
   EXPECT_FALSE(simulator->IsDeferred());
-  main_histogram_tester.ExpectTotalCount(kActivationCPU, 0);
 
   mojom::ActivationState state;
   state.activation_level = mojom::ActivationLevel::kEnabled;
@@ -559,17 +524,12 @@ TEST_P(ActivationStateComputingThrottleSubFrameTest, SpeculationWithDelay) {
   EXPECT_TRUE(simulator->IsDeferred());
   EXPECT_LT(0u, simple_task_runner()->NumPendingTasks());
   simple_task_runner()->RunPendingTasks();
-  // If speculation was enabled for this test, will do a lookup at start and
-  // redirect.
-  main_histogram_tester.ExpectTotalCount(
-      kActivationCPU, ExpectThreadTimers(dryrun_speculation() ? 2 : 1));
   simulator->Wait();
   EXPECT_FALSE(simulator->IsDeferred());
   EXPECT_EQ(content::NavigationThrottle::PROCEED,
             simulator->GetLastThrottleCheckResult());
   simulator->Commit();
 
-  base::HistogramTester sub_histogram_tester;
   auto subframe_simulator =
       content::NavigationSimulator::CreateRendererInitiated(
           GURL("http://example.test"),
@@ -582,14 +542,12 @@ TEST_P(ActivationStateComputingThrottleSubFrameTest, SpeculationWithDelay) {
   // navigation until commit time.
   subframe_simulator->Start();
   EXPECT_FALSE(subframe_simulator->IsDeferred());
-  sub_histogram_tester.ExpectTotalCount(kActivationCPU, 0);
 
   // Calling redirect should ensure that the throttle does not receive the
   // results of the check, but the task to actually perform the check will still
   // happen.
   subframe_simulator->Redirect(GURL("http://example.test2/"));
   EXPECT_FALSE(subframe_simulator->IsDeferred());
-  sub_histogram_tester.ExpectTotalCount(kActivationCPU, 0);
 
   // Finish the checks dispatched in the start and redirect phase when the
   // navigation is ready to commit.
@@ -601,7 +559,6 @@ TEST_P(ActivationStateComputingThrottleSubFrameTest, SpeculationWithDelay) {
   EXPECT_FALSE(subframe_simulator->IsDeferred());
   EXPECT_EQ(content::NavigationThrottle::PROCEED,
             simulator->GetLastThrottleCheckResult());
-  sub_histogram_tester.ExpectTotalCount(kActivationCPU, ExpectThreadTimers(2));
 }
 
 INSTANTIATE_TEST_SUITE_P(All,

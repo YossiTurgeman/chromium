@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,25 +6,31 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <memory>
+#include <optional>
+#include <string>
 
-#include "base/bind.h"
 #include "base/command_line.h"
-#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_string_value_serializer.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/strings/stringprintf.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "base/values.h"
 #include "build/build_config.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "net/base/network_change_notifier.h"
 #include "net/base/test_completion_callback.h"
+#include "net/http/http_response_headers.h"
 #include "net/log/net_log_capture_mode.h"
 #include "net/log/net_log_event_type.h"
 #include "net/test/embedded_test_server/default_handlers.h"
@@ -65,18 +71,18 @@ namespace net_log {
 
 class FakeNetLogExporter : public network::mojom::NetLogExporter {
  public:
-  FakeNetLogExporter() {}
-  ~FakeNetLogExporter() override {}
+  FakeNetLogExporter() = default;
+  ~FakeNetLogExporter() override = default;
 
   void Start(base::File destination,
-             base::Value extra_constants,
+             base::DictValue extra_constants,
              net::NetLogCaptureMode capture_mode,
              uint64_t max_file_size,
              StartCallback callback) override {
     std::move(callback).Run(net::OK);
   }
 
-  void Stop(base::Value polled_values, StopCallback callback) override {
+  void Stop(base::DictValue polled_values, StopCallback callback) override {
     std::move(callback).Run(net::OK);
   }
 };
@@ -105,15 +111,15 @@ bool SetPathToGivenAndReturnTrue(const base::FilePath& path_to_return,
 }
 
 // Checks the "state" string of a NetExportFileWriter state.
-WARN_UNUSED_RESULT ::testing::AssertionResult VerifyState(
-    std::unique_ptr<base::DictionaryValue> state,
+[[nodiscard]] ::testing::AssertionResult VerifyState(
+    base::DictValue state,
     const std::string& expected_state_string) {
-  std::string actual_state_string;
-  if (!state->GetString("state", &actual_state_string)) {
+  const std::string* actual_state_string = state.FindString("state");
+  if (!actual_state_string) {
     return ::testing::AssertionFailure()
            << "State is missing \"state\" string.";
   }
-  if (actual_state_string != expected_state_string) {
+  if (*actual_state_string != expected_state_string) {
     return ::testing::AssertionFailure()
            << "\"state\" string of state does not match expected." << std::endl
            << "    Actual: " << actual_state_string << std::endl
@@ -125,25 +131,24 @@ WARN_UNUSED_RESULT ::testing::AssertionResult VerifyState(
 // Checks all fields of a NetExportFileWriter state except possibly the
 // "captureMode" string; that field is only checked if
 // |expected_log_capture_mode_known| is true.
-WARN_UNUSED_RESULT ::testing::AssertionResult VerifyState(
-    std::unique_ptr<base::DictionaryValue> state,
+[[nodiscard]] ::testing::AssertionResult VerifyState(
+    base::DictValue state,
     const std::string& expected_state_string,
     bool expected_log_exists,
     bool expected_log_capture_mode_known,
     const std::string& expected_log_capture_mode_string) {
-  base::DictionaryValue expected_state;
-  expected_state.SetString("state", expected_state_string);
-  expected_state.SetBoolean("logExists", expected_log_exists);
-  expected_state.SetBoolean("logCaptureModeKnown",
-                            expected_log_capture_mode_known);
+  base::DictValue expected_state;
+  expected_state.Set("state", expected_state_string);
+  expected_state.Set("logExists", expected_log_exists);
+  expected_state.Set("logCaptureModeKnown", expected_log_capture_mode_known);
   if (expected_log_capture_mode_known) {
-    expected_state.SetString("captureMode", expected_log_capture_mode_string);
+    expected_state.Set("captureMode", expected_log_capture_mode_string);
   } else {
-    state->Remove("captureMode", nullptr);
+    state.Remove("captureMode");
   }
 
   // Remove "file" field which is only added in debug mode.
-  state->Remove("file", nullptr);
+  state.Remove("file");
 
   std::string expected_state_json_string;
   JSONStringValueSerializer expected_state_serializer(
@@ -152,7 +157,7 @@ WARN_UNUSED_RESULT ::testing::AssertionResult VerifyState(
 
   std::string actual_state_json_string;
   JSONStringValueSerializer actual_state_serializer(&actual_state_json_string);
-  actual_state_serializer.Serialize(*state);
+  actual_state_serializer.Serialize(state);
 
   if (actual_state_json_string != expected_state_json_string) {
     return ::testing::AssertionFailure()
@@ -165,23 +170,23 @@ WARN_UNUSED_RESULT ::testing::AssertionResult VerifyState(
   return ::testing::AssertionSuccess();
 }
 
-WARN_UNUSED_RESULT ::testing::AssertionResult ReadCompleteLogFile(
-    const base::FilePath& log_path,
-    std::unique_ptr<base::DictionaryValue>* root) {
+[[nodiscard]] base::expected<base::DictValue, ::testing::AssertionResult>
+ReadCompleteLogFile(const base::FilePath& log_path) {
   DCHECK(!log_path.empty());
 
   if (!base::PathExists(log_path)) {
-    return ::testing::AssertionFailure()
-           << log_path.value() << " does not exist.";
+    return base::unexpected(::testing::AssertionFailure()
+                            << log_path.value() << " does not exist.");
   }
 
   // Check file permissions. These tests are only done on POSIX for simplicity,
   // since base has better support for the POSIX permission model.
-#if defined(OS_POSIX)
+#if BUILDFLAG(IS_POSIX)
   int actual_permissions = 0;
   if (!base::GetPosixFilePermissions(log_path, &actual_permissions)) {
-    return ::testing::AssertionFailure()
-           << "Failed getting file permissions for " << log_path.value();
+    return base::unexpected(::testing::AssertionFailure()
+                            << "Failed getting file permissions for "
+                            << log_path.value());
   }
 
   // Creating the file will have requested permission 600 (or 644 on Chrome
@@ -191,48 +196,46 @@ WARN_UNUSED_RESULT ::testing::AssertionResult ReadCompleteLogFile(
   // 640 rather than 644.
   int expected_permissions = base::FILE_PERMISSION_READ_BY_USER |
                              base::FILE_PERMISSION_WRITE_BY_USER
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
                              | base::FILE_PERMISSION_READ_BY_GROUP |
                              base::FILE_PERMISSION_READ_BY_OTHERS
 #endif
       ;
 
   if ((actual_permissions & expected_permissions) != actual_permissions) {
-    return ::testing::AssertionFailure()
-           << "Unexpected permissions: "
-           << base::StringPrintf("%o", actual_permissions) << " vs "
-           << base::StringPrintf("%o", expected_permissions);
+    return base::unexpected(::testing::AssertionFailure()
+                            << "Unexpected permissions: "
+                            << base::StringPrintf("%o", actual_permissions)
+                            << " vs "
+                            << base::StringPrintf("%o", expected_permissions));
   }
-#endif  // defined(OS_POSIX)
+#endif  // BUILDFLAG(IS_POSIX)
 
   // Parse log file contents into a dictionary
   std::string log_string;
   if (!base::ReadFileToString(log_path, &log_string)) {
-    return ::testing::AssertionFailure()
-           << log_path.value() << " could not be read.";
+    return base::unexpected(::testing::AssertionFailure()
+                            << log_path.value() << " could not be read.");
   }
-  *root =
-      base::DictionaryValue::From(base::JSONReader::ReadDeprecated(log_string));
-  if (!*root) {
-    return ::testing::AssertionFailure()
-           << "Contents of " << log_path.value()
-           << " do not form valid JSON dictionary.";
+  std::optional<base::DictValue> log_parsed = base::JSONReader::ReadDict(
+      log_string, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (!log_parsed) {
+    return base::unexpected(::testing::AssertionFailure()
+                            << "Contents of " << log_path.value()
+                            << " do not form valid JSON dictionary.");
   }
+
   // Make sure the "constants" section exists
-  base::DictionaryValue* constants;
-  if (!(*root)->GetDictionary("constants", &constants)) {
-    root->reset();
-    return ::testing::AssertionFailure()
-           << log_path.value() << " is missing constants.";
+  if (!log_parsed->FindDict("constants")) {
+    return base::unexpected(::testing::AssertionFailure()
+                            << log_path.value() << " is missing constants.");
   }
   // Make sure the "events" section exists
-  base::ListValue* events;
-  if (!(*root)->GetList("events", &events)) {
-    root->reset();
-    return ::testing::AssertionFailure()
-           << log_path.value() << " is missing events list.";
+  if (!log_parsed->FindList("events")) {
+    return base::unexpected(::testing::AssertionFailure()
+                            << log_path.value() << " is missing events list.");
   }
-  return ::testing::AssertionSuccess();
+  return std::move(*log_parsed);
 }
 
 // An implementation of NetExportFileWriter::StateObserver that allows waiting
@@ -240,20 +243,19 @@ WARN_UNUSED_RESULT ::testing::AssertionResult ReadCompleteLogFile(
 class TestStateObserver : public NetExportFileWriter::StateObserver {
  public:
   // NetExportFileWriter::StateObserver implementation
-  void OnNewState(const base::DictionaryValue& state) override {
+  void OnNewState(const base::DictValue& state) override {
     test_closure_.closure().Run();
-    result_state_ = state.CreateDeepCopy();
+    result_state_ = state.Clone();
   }
 
-  std::unique_ptr<base::DictionaryValue> WaitForNewState() {
+  base::DictValue WaitForNewState() {
     test_closure_.WaitForResult();
-    DCHECK(result_state_);
     return std::move(result_state_);
   }
 
  private:
   net::TestClosure test_closure_;
-  std::unique_ptr<base::DictionaryValue> result_state_;
+  base::DictValue result_state_;
 };
 
 // A class that wraps around TestClosure. Provides the ability to wait on a
@@ -333,12 +335,11 @@ class NetExportFileWriterTest : public ::testing::Test {
     return test_callback.WaitForResult();
   }
 
-  WARN_UNUSED_RESULT ::testing::AssertionResult InitializeThenVerifyNewState(
+  [[nodiscard]] ::testing::AssertionResult InitializeThenVerifyNewState(
       bool expected_initialize_success,
       bool expected_log_exists) {
     file_writer_.Initialize();
-    std::unique_ptr<base::DictionaryValue> state =
-        test_state_observer_.WaitForNewState();
+    base::DictValue state = test_state_observer_.WaitForNewState();
     ::testing::AssertionResult result =
         VerifyState(std::move(state), kStateInitializingString);
     if (!result) {
@@ -366,7 +367,7 @@ class NetExportFileWriterTest : public ::testing::Test {
 
   // If |custom_log_path| is empty path, |file_writer_| will use its
   // default log path, which is cached in |default_log_path_|.
-  WARN_UNUSED_RESULT::testing::AssertionResult StartThenVerifyNewState(
+  [[nodiscard]] ::testing::AssertionResult StartThenVerifyNewState(
       const base::FilePath& custom_log_path,
       net::NetLogCaptureMode capture_mode,
       const std::string& expected_capture_mode_string,
@@ -374,8 +375,7 @@ class NetExportFileWriterTest : public ::testing::Test {
     file_writer_.StartNetLog(custom_log_path, capture_mode, kMaxLogSizeBytes,
                              base::CommandLine::StringType(), kChannelString,
                              network_context);
-    std::unique_ptr<base::DictionaryValue> state =
-        test_state_observer_.WaitForNewState();
+    base::DictValue state = test_state_observer_.WaitForNewState();
     ::testing::AssertionResult result =
         VerifyState(std::move(state), kStateStartingLogString);
     if (!result) {
@@ -408,13 +408,12 @@ class NetExportFileWriterTest : public ::testing::Test {
 
   // If |custom_log_path| is empty path, it's assumed the log file with be at
   // |default_log_path_|.
-  WARN_UNUSED_RESULT ::testing::AssertionResult StopThenVerifyNewStateAndFile(
+  [[nodiscard]] ::testing::AssertionResult StopThenVerifyNewStateAndFile(
       const base::FilePath& custom_log_path,
-      std::unique_ptr<base::DictionaryValue> polled_data,
+      base::DictValue polled_data,
       const std::string& expected_capture_mode_string) {
     file_writer_.StopNetLog(std::move(polled_data));
-    std::unique_ptr<base::DictionaryValue> state =
-        test_state_observer_.WaitForNewState();
+    base::DictValue state = test_state_observer_.WaitForNewState();
     ::testing::AssertionResult result =
         VerifyState(std::move(state), kStateStoppingLogString);
     if (!result) {
@@ -448,12 +447,12 @@ class NetExportFileWriterTest : public ::testing::Test {
     }
 
     // Make sure the generated log file is valid.
-    std::unique_ptr<base::DictionaryValue> root;
-    result = ReadCompleteLogFile(expected_log_path, &root);
-    if (!result) {
+    base::expected<base::DictValue, ::testing::AssertionResult> log_result =
+        ReadCompleteLogFile(expected_log_path);
+    if (!log_result.has_value()) {
       return ::testing::AssertionFailure()
              << "Log file after logging stopped is not valid:" << std::endl
-             << result.message();
+             << log_result.error().message();
     }
 
     return ::testing::AssertionSuccess();
@@ -534,14 +533,17 @@ TEST_F(NetExportFileWriterTest, InitWithExistingLog) {
 }
 
 TEST_F(NetExportFileWriterTest, StartAndStopWithAllCaptureModes) {
-  const net::NetLogCaptureMode capture_modes[3] = {
+  const std::array<net::NetLogCaptureMode, 3> capture_modes = {
       net::NetLogCaptureMode::kDefault,
       net::NetLogCaptureMode::kIncludeSensitive,
-      net::NetLogCaptureMode::kEverything};
+      net::NetLogCaptureMode::kEverything,
+  };
 
-  const std::string capture_mode_strings[3] = {
-      kCaptureModeDefaultString, kCaptureModeIncludeSensitiveString,
-      kCaptureModeIncludeEverythingString};
+  const std::array<std::string, 3> capture_mode_strings = {
+      kCaptureModeDefaultString,
+      kCaptureModeIncludeSensitiveString,
+      kCaptureModeIncludeEverythingString,
+  };
 
   ASSERT_TRUE(InitializeThenVerifyNewState(true, false));
 
@@ -568,11 +570,11 @@ TEST_F(NetExportFileWriterTest, StartAndStopWithAllCaptureModes) {
     // StopNetLog(), should result in state change. The capture mode should
     // match that of the first StartNetLog() call (called by
     // StartThenVerifyNewState()).
-    ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), nullptr,
-                                              capture_mode_strings[i]));
+    ASSERT_TRUE(StopThenVerifyNewStateAndFile(
+        base::FilePath(), base::DictValue(), capture_mode_strings[i]));
 
     // Stopping a second time should be a no-op.
-    file_writer()->StopNetLog(nullptr);
+    file_writer()->StopNetLog();
   }
 
   // Start and stop one more time just to make sure the last StopNetLog() call
@@ -581,7 +583,7 @@ TEST_F(NetExportFileWriterTest, StartAndStopWithAllCaptureModes) {
                                       capture_mode_strings[0],
                                       network_context()));
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), base::DictValue(),
                                             capture_mode_strings[0]));
 }
 
@@ -594,20 +596,19 @@ TEST_F(NetExportFileWriterTest, StartClearsFile) {
       base::FilePath(), net::NetLogCaptureMode::kDefault,
       kCaptureModeDefaultString, network_context()));
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), base::DictValue(),
                                             kCaptureModeDefaultString));
 
-  int64_t stop_file_size;
-  EXPECT_TRUE(base::GetFileSize(default_log_path(), &stop_file_size));
+  std::optional<int64_t> stop_file_size = base::GetFileSize(default_log_path());
+  ASSERT_TRUE(stop_file_size.has_value());
 
   // Add some junk at the end of the file.
   std::string junk_data("Hello");
-  EXPECT_TRUE(base::AppendToFile(default_log_path(), junk_data.c_str(),
-                                 junk_data.size()));
+  EXPECT_TRUE(base::AppendToFile(default_log_path(), junk_data));
 
-  int64_t junk_file_size;
-  EXPECT_TRUE(base::GetFileSize(default_log_path(), &junk_file_size));
-  EXPECT_GT(junk_file_size, stop_file_size);
+  std::optional<int64_t> junk_file_size = base::GetFileSize(default_log_path());
+  ASSERT_TRUE(junk_file_size.has_value());
+  EXPECT_GT(junk_file_size.value(), stop_file_size.value());
 
   // Start and stop again and make sure the file is back to the size it was
   // before adding the junk data.
@@ -615,13 +616,14 @@ TEST_F(NetExportFileWriterTest, StartClearsFile) {
       base::FilePath(), net::NetLogCaptureMode::kDefault,
       kCaptureModeDefaultString, network_context()));
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), base::DictValue(),
                                             kCaptureModeDefaultString));
 
-  int64_t new_stop_file_size;
-  EXPECT_TRUE(base::GetFileSize(default_log_path(), &new_stop_file_size));
+  std::optional<int64_t> new_stop_file_size =
+      base::GetFileSize(default_log_path());
+  ASSERT_TRUE(new_stop_file_size.has_value());
 
-  EXPECT_EQ(stop_file_size, new_stop_file_size);
+  EXPECT_EQ(stop_file_size.value(), new_stop_file_size.value());
 }
 
 // Adds an event to the log file, then checks that the file is larger than
@@ -633,12 +635,12 @@ TEST_F(NetExportFileWriterTest, AddEvent) {
       base::FilePath(), net::NetLogCaptureMode::kDefault,
       kCaptureModeDefaultString, network_context()));
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), base::DictValue(),
                                             kCaptureModeDefaultString));
 
   // Get file size without the event.
-  int64_t stop_file_size;
-  EXPECT_TRUE(base::GetFileSize(default_log_path(), &stop_file_size));
+  std::optional<int64_t> stop_file_size = base::GetFileSize(default_log_path());
+  ASSERT_TRUE(stop_file_size.has_value());
 
   ASSERT_TRUE(StartThenVerifyNewState(
       base::FilePath(), net::NetLogCaptureMode::kDefault,
@@ -646,13 +648,13 @@ TEST_F(NetExportFileWriterTest, AddEvent) {
 
   net_log()->AddGlobalEntry(net::NetLogEventType::CANCELLED);
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), base::DictValue(),
                                             kCaptureModeDefaultString));
 
   // Get file size after adding the event and make sure it's larger than before.
-  int64_t new_stop_file_size;
-  EXPECT_TRUE(base::GetFileSize(default_log_path(), &new_stop_file_size));
-  EXPECT_GE(new_stop_file_size, stop_file_size);
+  std::optional<int64_t> new_stop_file_size =
+      base::GetFileSize(default_log_path());
+  EXPECT_GE(new_stop_file_size.value(), stop_file_size.value());
 }
 
 // Using a custom path to make sure logging can still occur when the path has
@@ -671,12 +673,12 @@ TEST_F(NetExportFileWriterTest, AddEventCustomPath) {
       StartThenVerifyNewState(custom_log_path, net::NetLogCaptureMode::kDefault,
                               kCaptureModeDefaultString, network_context()));
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(custom_log_path, nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(custom_log_path, base::DictValue(),
                                             kCaptureModeDefaultString));
 
   // Get file size without the event.
-  int64_t stop_file_size;
-  EXPECT_TRUE(base::GetFileSize(custom_log_path, &stop_file_size));
+  std::optional<int64_t> stop_file_size = base::GetFileSize(custom_log_path);
+  ASSERT_TRUE(stop_file_size.has_value());
 
   ASSERT_TRUE(
       StartThenVerifyNewState(custom_log_path, net::NetLogCaptureMode::kDefault,
@@ -684,13 +686,14 @@ TEST_F(NetExportFileWriterTest, AddEventCustomPath) {
 
   net_log()->AddGlobalEntry(net::NetLogEventType::CANCELLED);
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(custom_log_path, nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(custom_log_path, base::DictValue(),
                                             kCaptureModeDefaultString));
 
   // Get file size after adding the event and make sure it's larger than before.
-  int64_t new_stop_file_size;
-  EXPECT_TRUE(base::GetFileSize(custom_log_path, &new_stop_file_size));
-  EXPECT_GE(new_stop_file_size, stop_file_size);
+  std::optional<int64_t> new_stop_file_size =
+      base::GetFileSize(custom_log_path);
+  ASSERT_TRUE(new_stop_file_size.has_value());
+  EXPECT_GE(new_stop_file_size.value(), stop_file_size.value());
 }
 
 TEST_F(NetExportFileWriterTest, StopWithPolledData) {
@@ -699,9 +702,8 @@ TEST_F(NetExportFileWriterTest, StopWithPolledData) {
   // Create dummy polled data
   const char kDummyPolledDataPath[] = "dummy_path";
   const char kDummyPolledDataString[] = "dummy_info";
-  std::unique_ptr<base::DictionaryValue> dummy_polled_data =
-      std::make_unique<base::DictionaryValue>();
-  dummy_polled_data->SetString(kDummyPolledDataPath, kDummyPolledDataString);
+  base::DictValue dummy_polled_data;
+  dummy_polled_data.Set(kDummyPolledDataPath, kDummyPolledDataString);
 
   ASSERT_TRUE(StartThenVerifyNewState(
       base::FilePath(), net::NetLogCaptureMode::kDefault,
@@ -712,19 +714,23 @@ TEST_F(NetExportFileWriterTest, StopWithPolledData) {
                                             kCaptureModeDefaultString));
 
   // Read polledData from log file.
-  std::unique_ptr<base::DictionaryValue> root;
-  ASSERT_TRUE(ReadCompleteLogFile(default_log_path(), &root));
-  base::DictionaryValue* polled_data;
-  ASSERT_TRUE(root->GetDictionary("polledData", &polled_data));
+  base::expected<base::DictValue, ::testing::AssertionResult> log_result =
+      ReadCompleteLogFile(default_log_path());
+  ASSERT_TRUE(log_result.has_value());
+  const base::DictValue* polled_data =
+      log_result.value().FindDict("polledData");
+  ASSERT_TRUE(polled_data);
 
   // Check that it contains the field from the polled data that was passed in.
-  std::string dummy_string;
-  ASSERT_TRUE(polled_data->GetString(kDummyPolledDataPath, &dummy_string));
-  EXPECT_EQ(kDummyPolledDataString, dummy_string);
+  const std::string* dummy_string =
+      polled_data->FindString(kDummyPolledDataPath);
+  ASSERT_TRUE(dummy_string);
+  EXPECT_EQ(kDummyPolledDataString, *dummy_string);
 
   // Check that it also contains something from net::GetNetInfo.
-  base::DictionaryValue* http_cache_info;
-  ASSERT_TRUE(polled_data->GetDictionary("httpCacheInfo", &http_cache_info));
+  const base::DictValue* http_cache_info =
+      polled_data->FindDict("httpCacheInfo");
+  ASSERT_TRUE(http_cache_info);
 }
 
 // Test with requests in flight. This is done by going through a sequence of a
@@ -755,8 +761,9 @@ TEST_F(NetExportFileWriterTest, StartWithNetworkContextActive) {
   mojo::Remote<network::mojom::URLLoaderFactory> url_loader_factory;
   auto url_loader_factory_params =
       network::mojom::URLLoaderFactoryParams::New();
-  url_loader_factory_params->process_id = network::mojom::kBrowserProcessId;
-  url_loader_factory_params->is_corb_enabled = false;
+  url_loader_factory_params->process_id =
+      network::OriginatingProcessId::browser();
+  url_loader_factory_params->is_orb_enabled = false;
   network_context()->CreateURLLoaderFactory(
       url_loader_factory.BindNewPipeAndPassReceiver(),
       std::move(url_loader_factory_params));
@@ -769,51 +776,46 @@ TEST_F(NetExportFileWriterTest, StartWithNetworkContextActive) {
   std::unique_ptr<network::SimpleURLLoader> simple_loader =
       network::SimpleURLLoader::Create(std::move(request),
                                        TRAFFIC_ANNOTATION_FOR_TESTS);
-  base::RunLoop run_loop, run_loop2;
+  base::test::TestFuture<void> redirect_future;
   simple_loader->SetOnRedirectCallback(base::BindRepeating(
-      [](base::RepeatingClosure notify_log,
+      [](base::RepeatingClosure notify_log, const GURL& url_before_redirect,
          const net::RedirectInfo& redirect_info,
          const network::mojom::URLResponseHead& response_head,
          std::vector<std::string>* to_be_removed_headers) { notify_log.Run(); },
-      run_loop.QuitClosure()));
-  simple_loader->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
-      url_loader_factory.get(),
-      base::BindOnce(
-          [](base::OnceClosure quit_closure,
-             std::unique_ptr<std::string> response_body) {
-            std::move(quit_closure).Run();
-          },
-          run_loop2.QuitClosure()));
+      redirect_future.GetRepeatingCallback()));
+  base::test::TestFuture<scoped_refptr<net::HttpResponseHeaders>> fetch_future;
+  simple_loader->DownloadHeadersOnly(url_loader_factory.get(),
+                                     fetch_future.GetCallback());
 
-  // Wait for fetch to get some bytes accross. It will not be the entire
+  // Wait for fetch to get some bytes across. It will not be the entire
   // thing since the post-redirect URL will get blocked by the custom handler.
-  run_loop.Run();
+  EXPECT_TRUE(redirect_future.Wait());
   ASSERT_TRUE(StartThenVerifyNewState(
       base::FilePath(), net::NetLogCaptureMode::kDefault,
       kCaptureModeDefaultString, network_context()));
 
-  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), nullptr,
+  ASSERT_TRUE(StopThenVerifyNewStateAndFile(base::FilePath(), base::DictValue(),
                                             kCaptureModeDefaultString));
   // Read events from log file.
-  std::unique_ptr<base::DictionaryValue> root;
-  ASSERT_TRUE(ReadCompleteLogFile(default_log_path(), &root));
-  base::ListValue* events;
-  ASSERT_TRUE(root->GetList("events", &events));
+  base::expected<base::DictValue, ::testing::AssertionResult> log_result =
+      ReadCompleteLogFile(default_log_path());
+  ASSERT_TRUE(log_result.has_value());
+  const base::ListValue* events = log_result.value().FindList("events");
+  ASSERT_TRUE(events);
 
   // Check there is at least one event as a result of the ongoing request.
-  ASSERT_GE(events->GetSize(), 1u);
+  ASSERT_GE(events->size(), 1u);
 
   // Check the URL in the params of the first event.
-  base::DictionaryValue* event;
-  EXPECT_TRUE(events->GetDictionary(0, &event));
-  base::DictionaryValue* event_params;
-  EXPECT_TRUE(event->GetDictionary("params", &event_params));
-  std::string event_url;
-  EXPECT_TRUE(event_params->GetString("url", &event_url));
-  EXPECT_EQ(test_server.GetURL(kRedirectURL), event_url);
+  const base::DictValue* event = (*events)[0].GetIfDict();
+  EXPECT_TRUE(event);
+  const base::DictValue* event_params = event->FindDict("params");
+  EXPECT_TRUE(event_params);
+  EXPECT_EQ(test_server.GetURL(kRedirectURL),
+            *(event_params->FindString("url")));
 
   block_fetch.Signal();
-  run_loop2.Run();
+  EXPECT_TRUE(fetch_future.Wait());
 }
 
 TEST_F(NetExportFileWriterTest, ReceiveStartWhileInitializing) {
@@ -832,8 +834,7 @@ TEST_F(NetExportFileWriterTest, ReceiveStartWhileInitializing) {
   // Now run the main message loop. Make sure StartNetLog() was ignored by
   // checking that the next two states are "initializing" followed by
   // "not-logging".
-  std::unique_ptr<base::DictionaryValue> state =
-      test_state_observer()->WaitForNewState();
+  base::DictValue state = test_state_observer()->WaitForNewState();
   ASSERT_TRUE(VerifyState(std::move(state), kStateInitializingString));
   state = test_state_observer()->WaitForNewState();
   ASSERT_TRUE(
@@ -849,7 +850,7 @@ TEST_F(NetExportFileWriterTest, ReceiveStartWhileStoppingLog) {
       kCaptureModeIncludeEverythingString, network_context()));
 
   // Tell |file_writer_| to stop logging.
-  file_writer()->StopNetLog(nullptr);
+  file_writer()->StopNetLog();
 
   // Before running the main message loop, tell |file_writer_| to start
   // logging. Not running the main message loop prevents the stopping process
@@ -864,8 +865,7 @@ TEST_F(NetExportFileWriterTest, ReceiveStartWhileStoppingLog) {
   // ignored by checking that the next two states are "stopping-log" followed by
   // "not-logging". Also make sure the capture mode matches that of the first
   // StartNetLog() call (called by StartThenVerifyState()).
-  std::unique_ptr<base::DictionaryValue> state =
-      test_state_observer()->WaitForNewState();
+  base::DictValue state = test_state_observer()->WaitForNewState();
   ASSERT_TRUE(VerifyState(std::move(state), kStateStoppingLogString));
   state = test_state_observer()->WaitForNewState();
   ASSERT_TRUE(VerifyState(std::move(state), kStateNotLoggingString, true, true,
@@ -883,8 +883,7 @@ TEST_F(NetExportFileWriterTest, HandleCrash) {
   // Break the pipe, as if network service crashed.
   fake_network_context.Disconnect();
 
-  std::unique_ptr<base::DictionaryValue> state =
-      test_state_observer()->WaitForNewState();
+  base::DictValue state = test_state_observer()->WaitForNewState();
   ASSERT_TRUE(VerifyState(std::move(state), kStateNotLoggingString));
 }
 

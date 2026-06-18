@@ -1,12 +1,11 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import <Cocoa/Cocoa.h>
-
 #import "chrome/browser/ui/cocoa/window_size_autosaver.h"
 
-#include "base/mac/scoped_nsobject.h"
+#import <Cocoa/Cocoa.h>
+
 #include "chrome/browser/ui/cocoa/test/cocoa_test_helper.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
 #include "chrome/test/base/testing_profile.h"
@@ -18,17 +17,20 @@
 
 namespace {
 
+constexpr char kPath[] = "WindowSizeAutosaverTest";
+
 class WindowSizeAutosaverTest : public BrowserWithTestWindowTest {
   void SetUp() override {
     BrowserWithTestWindowTest::SetUp();
     window_ = [[NSWindow alloc]
         initWithContentRect:NSMakeRect(100, 101, 150, 151)
-                  styleMask:NSTitledWindowMask | NSResizableWindowMask
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable
                     backing:NSBackingStoreBuffered
                       defer:NO];
+    window_.releasedWhenClosed = NO;
     static_cast<user_prefs::PrefRegistrySyncable*>(
         profile()->GetPrefs()->DeprecatedGetPrefRegistry())
-        ->RegisterDictionaryPref(path_);
+        ->RegisterDictionaryPref(kPath);
   }
 
   void TearDown() override {
@@ -38,8 +40,7 @@ class WindowSizeAutosaverTest : public BrowserWithTestWindowTest {
 
  public:
   CocoaTestHelper cocoa_test_helper_;
-  NSWindow* window_;
-  const char* path_ = "WindowSizeAutosaverTest";
+  NSWindow* __strong window_;
 };
 
 TEST_F(WindowSizeAutosaverTest, RestoresAndSavesPos) {
@@ -47,17 +48,16 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesPos) {
   ASSERT_TRUE(pref);
 
   // Check to make sure there is no existing pref for window placement.
-  const base::DictionaryValue* placement = pref->GetDictionary(path_);
-  ASSERT_TRUE(placement);
-  EXPECT_TRUE(placement->empty());
+  const base::DictValue& placement = pref->GetDict(kPath);
+  EXPECT_TRUE(placement.empty());
 
   // Replace the window with one that doesn't have resize controls.
   [window_ close];
-  window_ =
-      [[NSWindow alloc] initWithContentRect:NSMakeRect(100, 101, 150, 151)
-                                  styleMask:NSTitledWindowMask
-                                    backing:NSBackingStoreBuffered
-                                      defer:NO];
+  window_ = [[NSWindow alloc] initWithContentRect:NSMakeRect(100, 101, 150, 151)
+                                        styleMask:NSWindowStyleMaskTitled
+                                          backing:NSBackingStoreBuffered
+                                            defer:NO];
+  window_.releasedWhenClosed = NO;
 
   // Ask the window to save its position, then check that a preference
   // exists.  We're technically passing in a pointer to the user prefs
@@ -67,10 +67,10 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesPos) {
   {
     NSRect frame = [window_ frame];
     // Empty state, shouldn't restore:
-    base::scoped_nsobject<WindowSizeAutosaver> sizeSaver(
+    [[maybe_unused]] WindowSizeAutosaver* sizeSaver =
         [[WindowSizeAutosaver alloc] initWithWindow:window_
                                         prefService:pref
-                                               path:path_]);
+                                               path:kPath];
     EXPECT_EQ(NSMinX(frame), NSMinX([window_ frame]));
     EXPECT_EQ(NSMinY(frame), NSMinY([window_ frame]));
     EXPECT_EQ(NSWidth(frame), NSWidth([window_ frame]));
@@ -85,10 +85,10 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesPos) {
 
   {
     // Should restore last stored position, but not size.
-    base::scoped_nsobject<WindowSizeAutosaver> sizeSaver(
+    [[maybe_unused]] WindowSizeAutosaver* sizeSaver =
         [[WindowSizeAutosaver alloc] initWithWindow:window_
                                         prefService:pref
-                                               path:path_]);
+                                               path:kPath];
     EXPECT_EQ(300, NSMinX([window_ frame]));
     EXPECT_EQ(310, NSMinY([window_ frame]));
     EXPECT_EQ(160, NSWidth([window_ frame]));
@@ -96,17 +96,17 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesPos) {
   }
 
   // ...and it should be in the profile, too.
-  EXPECT_TRUE(pref->GetDictionary(path_));
-  int x, y;
-  const base::DictionaryValue* windowPref = pref->GetDictionary(path_);
-  EXPECT_FALSE(windowPref->GetInteger("left", &x));
-  EXPECT_FALSE(windowPref->GetInteger("right", &x));
-  EXPECT_FALSE(windowPref->GetInteger("top", &x));
-  EXPECT_FALSE(windowPref->GetInteger("bottom", &x));
-  ASSERT_TRUE(windowPref->GetInteger("x", &x));
-  ASSERT_TRUE(windowPref->GetInteger("y", &y));
-  EXPECT_EQ(300, x);
-  EXPECT_EQ(310, y);
+  const base::DictValue& windowPref = pref->GetDict(kPath);
+  EXPECT_FALSE(windowPref.FindInt("left").has_value());
+  EXPECT_FALSE(windowPref.FindInt("right").has_value());
+  EXPECT_FALSE(windowPref.FindInt("top").has_value());
+  EXPECT_FALSE(windowPref.FindInt("bottom").has_value());
+  std::optional<int> x = windowPref.FindInt("x");
+  std::optional<int> y = windowPref.FindInt("y");
+  ASSERT_TRUE(x.has_value());
+  ASSERT_TRUE(y.has_value());
+  EXPECT_EQ(300, x.value());
+  EXPECT_EQ(310, y.value());
 }
 
 TEST_F(WindowSizeAutosaverTest, RestoresAndSavesRect) {
@@ -114,9 +114,8 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesRect) {
   ASSERT_TRUE(pref);
 
   // Check to make sure there is no existing pref for window placement.
-  const base::DictionaryValue* placement = pref->GetDictionary(path_);
-  ASSERT_TRUE(placement);
-  EXPECT_TRUE(placement->empty());
+  const base::DictValue& placement = pref->GetDict(kPath);
+  EXPECT_TRUE(placement.empty());
 
   // Ask the window to save its position, then check that a preference
   // exists.  We're technically passing in a pointer to the user prefs
@@ -126,10 +125,10 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesRect) {
   {
     NSRect frame = [window_ frame];
     // Empty state, shouldn't restore:
-    base::scoped_nsobject<WindowSizeAutosaver> sizeSaver(
+    [[maybe_unused]] WindowSizeAutosaver* sizeSaver =
         [[WindowSizeAutosaver alloc] initWithWindow:window_
                                         prefService:pref
-                                               path:path_]);
+                                               path:kPath];
     EXPECT_EQ(NSMinX(frame), NSMinX([window_ frame]));
     EXPECT_EQ(NSMinY(frame), NSMinY([window_ frame]));
     EXPECT_EQ(NSWidth(frame), NSWidth([window_ frame]));
@@ -144,10 +143,10 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesRect) {
 
   {
     // Should restore last stored size
-    base::scoped_nsobject<WindowSizeAutosaver> sizeSaver(
+    [[maybe_unused]] WindowSizeAutosaver* sizeSaver =
         [[WindowSizeAutosaver alloc] initWithWindow:window_
                                         prefService:pref
-                                               path:path_]);
+                                               path:kPath];
     EXPECT_EQ(300, NSMinX([window_ frame]));
     EXPECT_EQ(310, NSMinY([window_ frame]));
     EXPECT_EQ(250, NSWidth([window_ frame]));
@@ -155,40 +154,42 @@ TEST_F(WindowSizeAutosaverTest, RestoresAndSavesRect) {
   }
 
   // ...and it should be in the profile, too.
-  EXPECT_TRUE(pref->GetDictionary(path_));
-  int x1, y1, x2, y2;
-  const base::DictionaryValue* windowPref = pref->GetDictionary(path_);
-  EXPECT_FALSE(windowPref->GetInteger("x", &x1));
-  EXPECT_FALSE(windowPref->GetInteger("y", &x1));
-  ASSERT_TRUE(windowPref->GetInteger("left", &x1));
-  ASSERT_TRUE(windowPref->GetInteger("right", &x2));
-  ASSERT_TRUE(windowPref->GetInteger("top", &y1));
-  ASSERT_TRUE(windowPref->GetInteger("bottom", &y2));
-  EXPECT_EQ(300, x1);
-  EXPECT_EQ(310, y1);
-  EXPECT_EQ(300 + 250, x2);
-  EXPECT_EQ(310 + 252, y2);
+  const base::DictValue& windowPref = pref->GetDict(kPath);
+  EXPECT_FALSE(windowPref.FindInt("x").has_value());
+  EXPECT_FALSE(windowPref.FindInt("y").has_value());
+  std::optional<int> x1 = windowPref.FindInt("left");
+  std::optional<int> x2 = windowPref.FindInt("right");
+  std::optional<int> y1 = windowPref.FindInt("top");
+  std::optional<int> y2 = windowPref.FindInt("bottom");
+  ASSERT_TRUE(x1.has_value());
+  ASSERT_TRUE(x2.has_value());
+  ASSERT_TRUE(y1.has_value());
+  ASSERT_TRUE(y2.has_value());
+  EXPECT_EQ(300, x1.value());
+  EXPECT_EQ(310, y1.value());
+  EXPECT_EQ(300 + 250, x2.value());
+  EXPECT_EQ(310 + 252, y2.value());
 }
 
-// http://crbug.com/39625
+// http://crbug.com/41121561
 TEST_F(WindowSizeAutosaverTest, DoesNotRestoreButClearsEmptyRect) {
   PrefService* pref = profile()->GetPrefs();
   ASSERT_TRUE(pref);
 
-  DictionaryPrefUpdate update(pref, path_);
-  base::DictionaryValue* windowPref = update.Get();
-  windowPref->SetInteger("left", 50);
-  windowPref->SetInteger("right", 50);
-  windowPref->SetInteger("top", 60);
-  windowPref->SetInteger("bottom", 60);
+  ScopedDictPrefUpdate update(pref, kPath);
+  base::DictValue& windowPref = update.Get();
+  windowPref.Set("left", 50);
+  windowPref.Set("right", 50);
+  windowPref.Set("top", 60);
+  windowPref.Set("bottom", 60);
 
   {
     // Window rect shouldn't change...
     NSRect frame = [window_ frame];
-    base::scoped_nsobject<WindowSizeAutosaver> sizeSaver(
+    [[maybe_unused]] WindowSizeAutosaver* sizeSaver =
         [[WindowSizeAutosaver alloc] initWithWindow:window_
                                         prefService:pref
-                                               path:path_]);
+                                               path:kPath];
     EXPECT_EQ(NSMinX(frame), NSMinX([window_ frame]));
     EXPECT_EQ(NSMinY(frame), NSMinY([window_ frame]));
     EXPECT_EQ(NSWidth(frame), NSWidth([window_ frame]));
@@ -196,14 +197,12 @@ TEST_F(WindowSizeAutosaverTest, DoesNotRestoreButClearsEmptyRect) {
   }
 
   // ...and it should be gone from the profile, too.
-  EXPECT_TRUE(pref->GetDictionary(path_));
-  int x1, y1, x2, y2;
-  EXPECT_FALSE(windowPref->GetInteger("x", &x1));
-  EXPECT_FALSE(windowPref->GetInteger("y", &x1));
-  ASSERT_FALSE(windowPref->GetInteger("left", &x1));
-  ASSERT_FALSE(windowPref->GetInteger("right", &x2));
-  ASSERT_FALSE(windowPref->GetInteger("top", &y1));
-  ASSERT_FALSE(windowPref->GetInteger("bottom", &y2));
+  EXPECT_FALSE(windowPref.FindInt("x").has_value());
+  EXPECT_FALSE(windowPref.FindInt("y").has_value());
+  ASSERT_FALSE(windowPref.FindInt("left").has_value());
+  ASSERT_FALSE(windowPref.FindInt("right").has_value());
+  ASSERT_FALSE(windowPref.FindInt("top").has_value());
+  ASSERT_FALSE(windowPref.FindInt("bottom").has_value());
 }
 
 }  // namespace

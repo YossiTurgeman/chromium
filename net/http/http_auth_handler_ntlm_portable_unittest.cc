@@ -1,16 +1,19 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
+#include <memory>
 #include <string>
+#include <string_view>
 
 #include "base/base64.h"
 #include "base/containers/span.h"
-#include "base/stl_util.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "net/base/network_isolation_key.h"
+#include "net/base/network_anonymization_key.h"
 #include "net/base/test_completion_callback.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/http/http_auth_challenge_tokenizer.h"
@@ -28,6 +31,8 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
+#include "url/gurl.h"
+#include "url/scheme_host_port.h"
 
 namespace net {
 
@@ -35,34 +40,31 @@ class HttpAuthHandlerNtlmPortableTest : public PlatformTest {
  public:
   // Test input value defined in [MS-NLMP] Section 4.2.1.
   HttpAuthHandlerNtlmPortableTest() {
-    http_auth_preferences_.reset(new MockAllowHttpAuthPreferences());
+    http_auth_preferences_ = std::make_unique<MockAllowHttpAuthPreferences>();
     // Disable NTLMv2 for this end to end test because it's not possible
     // to mock all the required dependencies for NTLMv2 from here. These
     // tests are only of the overall flow, and the detailed tests of the
     // contents of the protocol messages are in ntlm_client_unittest.cc
     http_auth_preferences_->set_ntlm_v2_enabled(false);
-    factory_.reset(new HttpAuthHandlerNTLM::Factory());
+    factory_ = std::make_unique<HttpAuthHandlerNTLM::Factory>();
     factory_->set_http_auth_preferences(http_auth_preferences_.get());
     creds_ = AuthCredentials(
-        ntlm::test::kNtlmDomain + base::ASCIIToUTF16("\\") + ntlm::test::kUser,
+        base::StrCat({ntlm::test::kNtlmDomain, u"\\", ntlm::test::kUser}),
         ntlm::test::kPassword);
   }
 
   int CreateHandler() {
-    GURL gurl("https://foo.com");
+    url::SchemeHostPort scheme_host_port(GURL("https://foo.com"));
     SSLInfo null_ssl_info;
 
     return factory_->CreateAuthHandlerFromString(
-        "NTLM", HttpAuth::AUTH_SERVER, null_ssl_info, NetworkIsolationKey(),
-        gurl, NetLogWithSource(), nullptr, &auth_handler_);
+        "NTLM", HttpAuth::AUTH_SERVER, null_ssl_info, NetworkAnonymizationKey(),
+        scheme_host_port, NetLogWithSource(), nullptr, &auth_handler_);
   }
 
   std::string CreateNtlmAuthHeader(base::span<const uint8_t> buffer) {
-    std::string output;
-    base::Base64Encode(
-        base::StringPiece(reinterpret_cast<const char*>(buffer.data()),
-                          buffer.size()),
-        &output);
+    std::string output = base::Base64Encode(std::string_view(
+        reinterpret_cast<const char*>(buffer.data()), buffer.size()));
 
     return "NTLM " + output;
   }
@@ -70,12 +72,12 @@ class HttpAuthHandlerNtlmPortableTest : public PlatformTest {
 
   HttpAuth::AuthorizationResult HandleAnotherChallenge(
       const std::string& challenge) {
-    HttpAuthChallengeTokenizer tokenizer(challenge.begin(), challenge.end());
+    HttpAuthChallengeTokenizer tokenizer(challenge);
     return GetAuthHandler()->HandleAnotherChallenge(&tokenizer);
   }
 
   bool DecodeChallenge(const std::string& challenge, std::string* decoded) {
-    HttpAuthChallengeTokenizer tokenizer(challenge.begin(), challenge.end());
+    HttpAuthChallengeTokenizer tokenizer(challenge);
     return base::Base64Decode(tokenizer.base64_param(), decoded);
   }
 
@@ -84,53 +86,6 @@ class HttpAuthHandlerNtlmPortableTest : public PlatformTest {
     HttpRequestInfo request_info;
     return callback.GetResult(GetAuthHandler()->GenerateAuthToken(
         GetCreds(), &request_info, callback.callback(), token));
-  }
-
-  bool ReadBytesPayload(ntlm::NtlmBufferReader* reader,
-                        base::span<uint8_t> buffer) {
-    ntlm::SecurityBuffer sec_buf;
-    return reader->ReadSecurityBuffer(&sec_buf) &&
-           (sec_buf.length == buffer.size()) &&
-           reader->ReadBytesFrom(sec_buf, buffer);
-  }
-
-  // Reads bytes from a payload and assigns them to a string. This makes
-  // no assumptions about the underlying encoding.
-  bool ReadStringPayload(ntlm::NtlmBufferReader* reader, std::string* str) {
-    ntlm::SecurityBuffer sec_buf;
-    if (!reader->ReadSecurityBuffer(&sec_buf))
-      return false;
-
-    if (!reader->ReadBytesFrom(
-            sec_buf,
-            base::as_writable_bytes(base::make_span(
-                base::WriteInto(str, sec_buf.length + 1), sec_buf.length)))) {
-      return false;
-    }
-
-    return true;
-  }
-
-  // Reads bytes from a payload and assigns them to a string16. This makes
-  // no assumptions about the underlying encoding. This will fail if there
-  // are an odd number of bytes in the payload.
-  void ReadString16Payload(ntlm::NtlmBufferReader* reader,
-                           base::string16* str) {
-    ntlm::SecurityBuffer sec_buf;
-    EXPECT_TRUE(reader->ReadSecurityBuffer(&sec_buf));
-    EXPECT_EQ(0, sec_buf.length % 2);
-
-    std::vector<uint8_t> raw(sec_buf.length);
-    EXPECT_TRUE(reader->ReadBytesFrom(sec_buf, raw));
-
-#if defined(ARCH_CPU_BIG_ENDIAN)
-    for (size_t i = 0; i < raw.size(); i += 2) {
-      std::swap(raw[i], raw[i + 1]);
-    }
-#endif
-
-    str->assign(reinterpret_cast<const base::char16*>(raw.data()),
-                raw.size() / 2);
   }
 
   int GetGenerateAuthTokenResult() {
@@ -144,10 +99,10 @@ class HttpAuthHandlerNtlmPortableTest : public PlatformTest {
     return static_cast<HttpAuthHandlerNTLM*>(auth_handler_.get());
   }
 
-  static void MockRandom(uint8_t* output, size_t n) {
+  static void MockRandom(base::span<uint8_t> output) {
     // This is set to 0xaa because the client challenge for testing in
     // [MS-NLMP] Section 4.2.1 is 8 bytes of 0xaa.
-    memset(output, 0xaa, n);
+    std::ranges::fill(output, 0xaa);
   }
 
   static uint64_t MockGetMSTime() {
@@ -232,11 +187,11 @@ TEST_F(HttpAuthHandlerNtlmPortableTest, NtlmV1AuthenticationSuccess) {
   // Validate the authenticate message
   std::string decoded;
   ASSERT_TRUE(DecodeChallenge(token, &decoded));
-  ASSERT_EQ(base::size(ntlm::test::kExpectedAuthenticateMsgSpecResponseV1),
+  ASSERT_EQ(std::size(ntlm::test::kExpectedAuthenticateMsgSpecResponseV1),
             decoded.size());
-  ASSERT_EQ(0, memcmp(decoded.data(),
-                      ntlm::test::kExpectedAuthenticateMsgSpecResponseV1,
-                      decoded.size()));
+  ASSERT_EQ(
+      base::as_byte_span(decoded),
+      base::as_byte_span(ntlm::test::kExpectedAuthenticateMsgSpecResponseV1));
 }
 
 }  // namespace net

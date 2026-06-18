@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/ozone/platform/x11/gl_egl_utility_x11.h"
 
 #include "ui/base/x/x11_gl_egl_utility.h"
+#include "ui/base/x/x11_util.h"
 
 namespace ui {
 
@@ -22,8 +23,17 @@ void GLEGLUtilityX11::ChooseEGLAlphaAndBufferSize(EGLint* alpha_size,
   ChoosePlatformCustomAlphaAndBufferSize(alpha_size, buffer_size);
 }
 
-bool GLEGLUtilityX11::IsTransparentBackgroundSupported() const {
-  return ui::IsTransparentBackgroundSupported();
+bool GLEGLUtilityX11::HasVisualManager() {
+  return true;
+}
+
+std::optional<base::ScopedEnvironmentVariableOverride>
+GLEGLUtilityX11::MaybeGetScopedDisplayUnsetForVulkan() {
+  // Unset DISPLAY env, so the vulkan can be initialized successfully, if the
+  // X server doesn't support Vulkan surface.
+  if (!ui::IsVulkanSurfaceSupported())
+    return std::optional<base::ScopedEnvironmentVariableOverride>("DISPLAY");
+  return std::nullopt;
 }
 
 }  // namespace ui

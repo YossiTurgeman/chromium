@@ -1,11 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.keyboard_accessory;
 
-import androidx.annotation.Nullable;
-
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.content_public.browser.WebContents;
 
@@ -48,7 +47,7 @@ class ManualFillingStateCache {
      * @return A {@link ManualFillingState}. Never null.
      */
     ManualFillingState getStateFor(@Nullable WebContents webContents) {
-        if (webContents == null) {
+        if (webContents == null || webContents.isDestroyed()) {
             // If state is requested for destroyed or invalid WebContents, it returns a null object.
             return new ManualFillingState(null);
         }
@@ -80,7 +79,7 @@ class ManualFillingStateCache {
      * @param webContents The WebContents about to be destroyed and should not be held any longer.
      */
     void destroyStateFor(WebContents webContents) {
-        if (webContents != null) {
+        if (webContents != null) { // No need to check isDestroyed since the object is only a key.
             getStateFor(webContents).destroy();
             mStatesForWebContents.remove(webContents);
         }

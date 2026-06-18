@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,10 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/file_version_info.h"
 #include "base/files/file_path.h"
-#include "base/macros.h"
 #include "base/path_service.h"
 #include "base/scoped_native_library.h"
 #include "base/strings/string_util.h"
@@ -24,7 +25,7 @@ namespace {
 
 FilePath GetTestDataPath() {
   FilePath path;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &path);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
   path = path.AppendASCII("base");
   path = path.AppendASCII("test");
   path = path.AppendASCII("data");
@@ -35,6 +36,8 @@ FilePath GetTestDataPath() {
 class FileVersionInfoFactory {
  public:
   explicit FileVersionInfoFactory(const FilePath& path) : path_(path) {}
+  FileVersionInfoFactory(const FileVersionInfoFactory&) = delete;
+  FileVersionInfoFactory& operator=(const FileVersionInfoFactory&) = delete;
 
   std::unique_ptr<FileVersionInfo> Create() const {
     return FileVersionInfo::CreateFileVersionInfo(path_);
@@ -42,8 +45,6 @@ class FileVersionInfoFactory {
 
  private:
   const FilePath path_;
-
-  DISALLOW_COPY_AND_ASSIGN(FileVersionInfoFactory);
 };
 
 class FileVersionInfoForModuleFactory {
@@ -56,6 +57,10 @@ class FileVersionInfoForModuleFactory {
                                  LOAD_LIBRARY_AS_IMAGE_RESOURCE)) {
     EXPECT_TRUE(library_.is_valid());
   }
+  FileVersionInfoForModuleFactory(const FileVersionInfoForModuleFactory&) =
+      delete;
+  FileVersionInfoForModuleFactory& operator=(
+      const FileVersionInfoForModuleFactory&) = delete;
 
   std::unique_ptr<FileVersionInfo> Create() const {
     return FileVersionInfo::CreateFileVersionInfoForModule(library_.get());
@@ -63,8 +68,6 @@ class FileVersionInfoForModuleFactory {
 
  private:
   const base::ScopedNativeLibrary library_;
-
-  DISALLOW_COPY_AND_ASSIGN(FileVersionInfoForModuleFactory);
 };
 
 template <typename T>
@@ -81,7 +84,7 @@ TYPED_TEST(FileVersionInfoTest, HardCodedProperties) {
   const base::FilePath::CharType kDLLName[] =
       FILE_PATH_LITERAL("FileVersionInfoTest1.dll");
 
-  const wchar_t* const kExpectedValues[15] = {
+  static constexpr std::wstring_view kExpectedValues[15] = {
       // FileVersionInfoTest.dll
       L"Goooooogle",                      // company_name
       L"Google",                          // company_short_name
@@ -95,6 +98,8 @@ TYPED_TEST(FileVersionInfoTest, HardCodedProperties) {
       L"1.2.3.4",                         // file_version
   };
 
+  auto expected_span = base::span(kExpectedValues);
+
   FilePath dll_path = GetTestDataPath();
   dll_path = dll_path.Append(kDLLName);
 
@@ -103,26 +108,26 @@ TYPED_TEST(FileVersionInfoTest, HardCodedProperties) {
   ASSERT_TRUE(version_info);
 
   int j = 0;
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->company_name()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->company_short_name()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->product_name()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->product_short_name()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->internal_name()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->product_version()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->special_build()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->original_filename()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->file_description()));
-  EXPECT_EQ(kExpectedValues[j++],
-            base::AsWStringPiece(version_info->file_version()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->company_name()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->company_short_name()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->product_name()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->product_short_name()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->internal_name()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->product_version()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->special_build()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->original_filename()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->file_description()));
+  EXPECT_EQ(expected_span[j++],
+            base::AsWStringView(version_info->file_version()));
 }
 
 TYPED_TEST(FileVersionInfoTest, CustomProperties) {
@@ -134,35 +139,26 @@ TYPED_TEST(FileVersionInfoTest, CustomProperties) {
   ASSERT_TRUE(version_info);
 
   // Test few existing properties.
-  base::string16 str;
+  std::u16string str;
   FileVersionInfoWin* version_info_win =
       static_cast<FileVersionInfoWin*>(version_info.get());
-  EXPECT_TRUE(
-      version_info_win->GetValue(STRING16_LITERAL("Custom prop 1"), &str));
-  EXPECT_EQ(STRING16_LITERAL("Un"), str);
-  EXPECT_EQ(STRING16_LITERAL("Un"), version_info_win->GetStringValue(
-                                        STRING16_LITERAL("Custom prop 1")));
+  EXPECT_TRUE(version_info_win->GetValue(u"Custom prop 1", &str));
+  EXPECT_EQ(u"Un", str);
+  EXPECT_EQ(u"Un", version_info_win->GetStringValue(u"Custom prop 1"));
 
-  EXPECT_TRUE(
-      version_info_win->GetValue(STRING16_LITERAL("Custom prop 2"), &str));
-  EXPECT_EQ(STRING16_LITERAL("Deux"), str);
-  EXPECT_EQ(STRING16_LITERAL("Deux"), version_info_win->GetStringValue(
-                                          STRING16_LITERAL("Custom prop 2")));
+  EXPECT_TRUE(version_info_win->GetValue(u"Custom prop 2", &str));
+  EXPECT_EQ(u"Deux", str);
+  EXPECT_EQ(u"Deux", version_info_win->GetStringValue(u"Custom prop 2"));
 
-  EXPECT_TRUE(
-      version_info_win->GetValue(STRING16_LITERAL("Custom prop 3"), &str));
-  EXPECT_EQ(
-      STRING16_LITERAL("1600 Amphitheatre Parkway Mountain View, CA 94043"),
-      str);
-  EXPECT_EQ(
-      STRING16_LITERAL("1600 Amphitheatre Parkway Mountain View, CA 94043"),
-      version_info_win->GetStringValue(STRING16_LITERAL("Custom prop 3")));
+  EXPECT_TRUE(version_info_win->GetValue(u"Custom prop 3", &str));
+  EXPECT_EQ(u"1600 Amphitheatre Parkway Mountain View, CA 94043", str);
+  EXPECT_EQ(u"1600 Amphitheatre Parkway Mountain View, CA 94043",
+            version_info_win->GetStringValue(u"Custom prop 3"));
 
   // Test an non-existing property.
-  EXPECT_FALSE(
-      version_info_win->GetValue(STRING16_LITERAL("Unknown property"), &str));
-  EXPECT_EQ(base::string16(), version_info_win->GetStringValue(
-                                  STRING16_LITERAL("Unknown property")));
+  EXPECT_FALSE(version_info_win->GetValue(u"Unknown property", &str));
+  EXPECT_EQ(std::u16string(),
+            version_info_win->GetStringValue(u"Unknown property"));
 
   EXPECT_EQ(base::Version(std::vector<uint32_t>{1, 0, 0, 1}),
             version_info_win->GetFileVersion());

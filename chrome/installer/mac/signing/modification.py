@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """
@@ -10,15 +10,28 @@ be modified or renamed to support side-by-side channel installs.
 
 import os.path
 
-from . import commands, parts
+from signing import commands, parts
 
+_CF_BUNDLE_DISPLAY_NAME = 'CFBundleDisplayName'
 _CF_BUNDLE_EXE = 'CFBundleExecutable'
 _CF_BUNDLE_ID = 'CFBundleIdentifier'
 _CF_BUNDLE_NAME = 'CFBundleName'
 _ENT_APP_ID = 'com.apple.application-identifier'
+_ENT_GET_TASK_ALLOW = 'com.apple.security.get-task-allow'
 _KS_BRAND_ID = 'KSBrandID'
 _KS_CHANNEL_ID = 'KSChannelID'
 _KS_PRODUCT_ID = 'KSProductID'
+
+
+def _should_keep_scheme(scheme, dist):
+    """Returns True if the URL scheme should be kept in the Info.plist."""
+    if scheme not in ('google-chrome', 'chromium'):
+        return True
+
+    if dist.direct_launch_scheme is not None:
+        return scheme == dist.direct_launch_scheme
+
+    return True
 
 
 def _modify_plists(paths, dist, config):
@@ -36,19 +49,34 @@ def _modify_plists(paths, dist, config):
                                   'Info.plist')
     with commands.PlistContext(app_plist_path, rewrite=True) as app_plist:
         if dist.channel_customize:
-            notification_xpc_plist_path = os.path.join(
-                paths.work, config.framework_dir, 'XPCServices',
-                'AlertNotificationService.xpc', 'Contents', 'Info.plist')
+            alert_helper_app_path = os.path.join(
+                paths.work, config.framework_dir, 'Helpers',
+                '{} Helper (Alerts).app'.format(config.product))
+            alert_helper_plist_path = os.path.join(alert_helper_app_path,
+                                                   'Contents', 'Info.plist')
             with commands.PlistContext(
-                    notification_xpc_plist_path,
-                    rewrite=True) as notification_xpc_plist:
-                notification_xpc_plist[_CF_BUNDLE_ID] = \
-                        notification_xpc_plist[_CF_BUNDLE_ID].replace(
+                    alert_helper_plist_path,
+                    rewrite=True) as alert_helper_plist:
+                alert_helper_plist[_CF_BUNDLE_ID] = \
+                        alert_helper_plist[_CF_BUNDLE_ID].replace(
                                 config.base_config.base_bundle_id,
                                 config.base_bundle_id)
 
-            app_plist[_CF_BUNDLE_ID] = config.base_bundle_id
+            alert_helper_plist_strings_path = os.path.join(
+                alert_helper_app_path, 'Contents', 'Resources', 'base.lproj',
+                'InfoPlist.strings')
+            with commands.PlistContext(
+                    alert_helper_plist_strings_path, rewrite=True,
+                    binary=True) as alert_helper_plist_strings:
+                alert_helper_plist_strings[_CF_BUNDLE_DISPLAY_NAME] = \
+                        '{} {}'.format(
+                            alert_helper_plist_strings[_CF_BUNDLE_DISPLAY_NAME],
+                            dist.app_name_fragment)
+
+            app_plist[_CF_BUNDLE_DISPLAY_NAME] = '{} {}'.format(
+                app_plist[_CF_BUNDLE_DISPLAY_NAME], dist.app_name_fragment)
             app_plist[_CF_BUNDLE_EXE] = config.app_product
+            app_plist[_CF_BUNDLE_ID] = config.base_bundle_id
             app_plist[_CF_BUNDLE_NAME] = '{} {}'.format(
                 app_plist[_CF_BUNDLE_NAME], dist.app_name_fragment)
             app_plist[_KS_PRODUCT_ID] += '.' + dist.channel
@@ -59,8 +87,15 @@ def _modify_plists(paths, dist, config):
         elif _KS_BRAND_ID in app_plist:
             del app_plist[_KS_BRAND_ID]
 
+        base_tag = app_plist.get(_KS_CHANNEL_ID)
+        base_channel_tag_components = []
+        if base_tag:
+            base_channel_tag_components.append(base_tag)
         if dist.channel:
-            app_plist[_KS_CHANNEL_ID] = dist.channel
+            base_channel_tag_components.append(dist.channel)
+        base_channel_tag = '-'.join(base_channel_tag_components)
+        if base_channel_tag:
+            app_plist[_KS_CHANNEL_ID] = base_channel_tag
         elif _KS_CHANNEL_ID in app_plist:
             del app_plist[_KS_CHANNEL_ID]
 
@@ -75,9 +110,27 @@ def _modify_plists(paths, dist, config):
         for key in app_plist.keys():
             if not key.startswith(_KS_CHANNEL_ID + '-'):
                 continue
-            orig_channel, tag = key.split('-')
-            channel_str = dist.channel if dist.channel else ''
-            app_plist[key] = '{}-{}'.format(channel_str, tag)
+            ignore, extra = key.split('-')
+            app_plist[key] = '{}-{}'.format(base_channel_tag, extra)
+
+        # The 'google-chrome' and 'chromium' URI schemes are registered by
+        # build/apple/tweak_info_plist.py.
+        # We need to filter them based on the distribution configuration (e.g.
+        # removing them for side-by-side channels).
+        url_types = app_plist.get('CFBundleURLTypes')
+        if url_types:
+            new_url_types = []
+            for url_type in url_types:
+                schemes = url_type.get('CFBundleURLSchemes', [])
+                new_schemes = []
+                for scheme in schemes:
+                    if _should_keep_scheme(scheme, dist):
+                        new_schemes.append(scheme)
+
+                if new_schemes:
+                    url_type['CFBundleURLSchemes'] = new_schemes
+                    new_url_types.append(url_type)
+            app_plist['CFBundleURLTypes'] = new_url_types
 
 
 def _replace_icons(paths, dist, config):
@@ -93,14 +146,24 @@ def _replace_icons(paths, dist, config):
     packaging_dir = paths.packaging_dir(config)
     resources_dir = os.path.join(paths.work, config.resources_dir)
 
+    new_asset_catalog = os.path.join(packaging_dir,
+                                     'Assets_{}.car'.format(dist.channel))
     new_app_icon = os.path.join(packaging_dir,
                                 'app_{}.icns'.format(dist.channel))
-    new_document_icon = os.path.join(packaging_dir,
-                                     'document_{}.icns'.format(dist.channel))
 
+    commands.copy_files(new_asset_catalog,
+                        os.path.join(resources_dir, 'Assets.car'))
     commands.copy_files(new_app_icon, os.path.join(resources_dir, 'app.icns'))
-    commands.copy_files(new_document_icon,
-                        os.path.join(resources_dir, 'document.icns'))
+
+    # Also update the icon in the Alert Helper app.
+    alert_helper_resources_dir = os.path.join(
+        paths.work, config.framework_dir, 'Helpers',
+        '{} Helper (Alerts).app'.format(config.product), 'Contents',
+        'Resources')
+    commands.copy_files(new_asset_catalog,
+                        os.path.join(alert_helper_resources_dir, 'Assets.car'))
+    commands.copy_files(new_app_icon,
+                        os.path.join(alert_helper_resources_dir, 'app.icns'))
 
 
 def _rename_enterprise_manifest(paths, dist, config):
@@ -156,14 +219,16 @@ def _process_entitlements(paths, dist, config):
         commands.copy_files(
             os.path.join(packaging_dir, entitlements_name), entitlements_file)
 
-        if dist.channel_customize:
+        if dist.channel_customize or config.inject_get_task_allow_entitlement:
             with commands.PlistContext(
                     entitlements_file, rewrite=True) as entitlements:
-                if _ENT_APP_ID in entitlements:
+                if dist.channel_customize and _ENT_APP_ID in entitlements:
                     app_id = entitlements[_ENT_APP_ID]
                     entitlements[_ENT_APP_ID] = app_id.replace(
                         config.base_config.base_bundle_id,
                         config.base_bundle_id)
+                if config.inject_get_task_allow_entitlement:
+                    entitlements[_ENT_GET_TASK_ALLOW] = True
 
 
 def customize_distribution(paths, dist, config):

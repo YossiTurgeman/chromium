@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,16 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/json/json_reader.h"
 #include "base/run_loop.h"
-#include "base/stl_util.h"
 #include "base/test/values_test_util.h"
 #include "base/values.h"
+#include "build/chromeos_buildflags.h"
 #include "chrome/common/extensions/extension_test_util.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/url_matcher/url_matcher_constants.h"
@@ -27,9 +27,14 @@
 #include "extensions/browser/api/web_request/web_request_info.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/browser/rules_registry_ids.h"
+#include "extensions/buildflags/buildflags.h"
+#include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest-message.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace helpers = extension_web_request_api_helpers;
 namespace keys = extensions::declarative_webrequest_constants;
@@ -58,7 +63,6 @@ WebRequestInfoInitParams CreateRequestParams(const GURL& url) {
   WebRequestInfoInitParams info;
   info.url = url;
   info.is_navigation_request = true;
-  info.type = blink::mojom::ResourceType::kMainFrame;
   info.web_request_type = WebRequestResourceType::MAIN_FRAME;
   return info;
 }
@@ -69,9 +73,8 @@ class TestWebRequestRulesRegistry : public WebRequestRulesRegistry {
  public:
   explicit TestWebRequestRulesRegistry(content::BrowserContext* context)
       : WebRequestRulesRegistry(context,
-                                nullptr /* cache_delegate */,
-                                RulesRegistryService::kDefaultRulesRegistryID),
-        num_clear_cache_calls_(0) {}
+                                /*cache_delegate=*/nullptr,
+                                rules_registry_ids::kDefaultRulesRegistryID) {}
 
   // Returns how often the in-memory caches of the renderers were instructed
   // to be cleared.
@@ -84,12 +87,12 @@ class TestWebRequestRulesRegistry : public WebRequestRulesRegistry {
   }
 
  protected:
-  ~TestWebRequestRulesRegistry() override {}
+  ~TestWebRequestRulesRegistry() override = default;
 
   void ClearCacheOnNavigation() override { ++num_clear_cache_calls_; }
 
  private:
-  int num_clear_cache_calls_;
+  int num_clear_cache_calls_ = 0;
 };
 
 class WebRequestRulesRegistryTest : public testing::Test {
@@ -104,104 +107,104 @@ class WebRequestRulesRegistryTest : public testing::Test {
   // Returns a rule that roughly matches http://*.example.com and
   // https://www.example.com and cancels it
   api::events::Rule CreateRule1() {
-    auto scheme_http = std::make_unique<base::ListValue>();
-    scheme_http->AppendString("http");
-    auto http_condition_dict = std::make_unique<base::DictionaryValue>();
-    http_condition_dict->SetString(keys2::kHostSuffixKey, "example.com");
-    base::DictionaryValue http_condition_url_filter;
-    http_condition_url_filter.SetString(keys::kInstanceTypeKey,
-                                        keys::kRequestMatcherType);
+    base::ListValue scheme_http;
+    scheme_http.Append("http");
+    base::DictValue http_condition_dict;
+    http_condition_dict.Set(keys2::kHostSuffixKey, "example.com");
+    base::DictValue http_condition_url_filter;
+    http_condition_url_filter.Set(keys::kInstanceTypeKey,
+                                  keys::kRequestMatcherType);
 
-    scheme_http->AppendString("https");
-    auto https_condition_dict = std::make_unique<base::DictionaryValue>();
-    https_condition_dict->Set(keys2::kSchemesKey,
-                              std::make_unique<base::ListValue>());
-    https_condition_dict->SetString(keys2::kHostSuffixKey, "example.com");
-    https_condition_dict->SetString(keys2::kHostPrefixKey, "www");
-    base::DictionaryValue https_condition_url_filter;
+    scheme_http.Append("https");
+    base::DictValue https_condition_dict;
+    https_condition_dict.Set(keys2::kSchemesKey, base::ListValue());
+    https_condition_dict.Set(keys2::kHostSuffixKey, "example.com");
+    https_condition_dict.Set(keys2::kHostPrefixKey, "www");
+
+    base::DictValue https_condition_url_filter;
     https_condition_url_filter.Set(keys::kUrlKey,
                                    std::move(https_condition_dict));
-    https_condition_url_filter.SetString(keys::kInstanceTypeKey,
-                                         keys::kRequestMatcherType);
+    https_condition_url_filter.Set(keys::kInstanceTypeKey,
+                                   keys::kRequestMatcherType);
 
-    base::DictionaryValue action_dict;
-    action_dict.SetString(keys::kInstanceTypeKey, keys::kCancelRequestType);
+    base::DictValue action_dict;
+    action_dict.Set(keys::kInstanceTypeKey, keys::kCancelRequestType);
 
     api::events::Rule rule;
-    rule.id.reset(new std::string(kRuleId1));
-    rule.priority.reset(new int(100));
-    rule.actions.push_back(action_dict.CreateDeepCopy());
-    http_condition_dict->Set(keys2::kSchemesKey, std::move(scheme_http));
+    rule.id = kRuleId1;
+    rule.priority = 100;
+    rule.actions.Append(std::move(action_dict));
+    http_condition_dict.Set(keys2::kSchemesKey, std::move(scheme_http));
     http_condition_url_filter.Set(keys::kUrlKey,
                                   std::move(http_condition_dict));
-    rule.conditions.push_back(http_condition_url_filter.CreateDeepCopy());
-    rule.conditions.push_back(https_condition_url_filter.CreateDeepCopy());
+    rule.conditions.Append(std::move(http_condition_url_filter));
+    rule.conditions.Append(std::move(https_condition_url_filter));
     return rule;
   }
 
   // Returns a rule that matches anything and cancels it.
   api::events::Rule CreateRule2() {
-    base::DictionaryValue condition_dict;
-    condition_dict.SetString(keys::kInstanceTypeKey, keys::kRequestMatcherType);
+    base::DictValue condition_dict;
+    condition_dict.Set(keys::kInstanceTypeKey, keys::kRequestMatcherType);
 
-    base::DictionaryValue action_dict;
-    action_dict.SetString(keys::kInstanceTypeKey, keys::kCancelRequestType);
+    base::DictValue action_dict;
+    action_dict.Set(keys::kInstanceTypeKey, keys::kCancelRequestType);
 
     api::events::Rule rule;
-    rule.id.reset(new std::string(kRuleId2));
-    rule.priority.reset(new int(100));
-    rule.actions.push_back(action_dict.CreateDeepCopy());
-    rule.conditions.push_back(condition_dict.CreateDeepCopy());
+    rule.id = kRuleId2;
+    rule.priority = 100;
+    rule.actions.Append(std::move(action_dict));
+    rule.conditions.Append(std::move(condition_dict));
     return rule;
   }
 
   api::events::Rule CreateRedirectRule(const std::string& destination) {
-    base::DictionaryValue condition_dict;
-    condition_dict.SetString(keys::kInstanceTypeKey, keys::kRequestMatcherType);
+    base::DictValue condition_dict;
+    condition_dict.Set(keys::kInstanceTypeKey, keys::kRequestMatcherType);
 
-    base::DictionaryValue action_dict;
-    action_dict.SetString(keys::kInstanceTypeKey, keys::kRedirectRequestType);
-    action_dict.SetString(keys::kRedirectUrlKey, destination);
+    base::DictValue action_dict;
+    action_dict.Set(keys::kInstanceTypeKey, keys::kRedirectRequestType);
+    action_dict.Set(keys::kRedirectUrlKey, destination);
 
     api::events::Rule rule;
-    rule.id.reset(new std::string(kRuleId3));
-    rule.priority.reset(new int(100));
-    rule.actions.push_back(action_dict.CreateDeepCopy());
-    rule.conditions.push_back(condition_dict.CreateDeepCopy());
+    rule.id = kRuleId3;
+    rule.priority = 100;
+    rule.actions.Append(std::move(action_dict));
+    rule.conditions.Append(std::move(condition_dict));
     return rule;
   }
 
   // Create a rule to ignore all other rules for a destination that
   // contains index.html.
   api::events::Rule CreateIgnoreRule() {
-    base::DictionaryValue condition_dict;
-    auto http_condition_dict = std::make_unique<base::DictionaryValue>();
-    http_condition_dict->SetString(keys2::kPathContainsKey, "index.html");
-    condition_dict.SetString(keys::kInstanceTypeKey, keys::kRequestMatcherType);
+    base::DictValue condition_dict;
+    base::DictValue http_condition_dict;
+    http_condition_dict.Set(keys2::kPathContainsKey, "index.html");
+    condition_dict.Set(keys::kInstanceTypeKey, keys::kRequestMatcherType);
     condition_dict.Set(keys::kUrlKey, std::move(http_condition_dict));
 
-    base::DictionaryValue action_dict;
-    action_dict.SetString(keys::kInstanceTypeKey, keys::kIgnoreRulesType);
-    action_dict.SetInteger(keys::kLowerPriorityThanKey, 150);
+    base::DictValue action_dict;
+    action_dict.Set(keys::kInstanceTypeKey, keys::kIgnoreRulesType);
+    action_dict.Set(keys::kLowerPriorityThanKey, 150);
 
     api::events::Rule rule;
-    rule.id.reset(new std::string(kRuleId4));
-    rule.priority.reset(new int(200));
-    rule.actions.push_back(action_dict.CreateDeepCopy());
-    rule.conditions.push_back(condition_dict.CreateDeepCopy());
+    rule.id = kRuleId4;
+    rule.priority = 200;
+    rule.actions.Append(std::move(action_dict));
+    rule.conditions.Append(std::move(condition_dict));
     return rule;
   }
 
   // Create a condition with the attributes specified. An example value of
   // |attributes| is: "\"resourceType\": [\"stylesheet\"], \n".
-  std::unique_ptr<base::Value> CreateCondition(const std::string& attributes) {
+  base::Value CreateCondition(const std::string& attributes) {
     std::string json_description =
         "{ \n"
         "  \"instanceType\": \"declarativeWebRequest.RequestMatcher\", \n";
     json_description += attributes;
     json_description += "}";
 
-    return base::test::ParseJsonDeprecated(json_description);
+    return base::test::ParseJson(json_description);
   }
 
   // Create a rule with the ID |rule_id| and with conditions created from the
@@ -210,20 +213,22 @@ class WebRequestRulesRegistryTest : public testing::Test {
   api::events::Rule CreateCancellingRule(
       const char* rule_id,
       const std::vector<const std::string*>& attributes) {
-    base::DictionaryValue action_dict;
-    action_dict.SetString(keys::kInstanceTypeKey, keys::kCancelRequestType);
+    base::DictValue action_dict;
+    action_dict.Set(keys::kInstanceTypeKey, keys::kCancelRequestType);
 
     api::events::Rule rule;
-    rule.id.reset(new std::string(rule_id));
-    rule.priority.reset(new int(1));
-    rule.actions.push_back(action_dict.CreateDeepCopy());
-    for (auto it = attributes.cbegin(); it != attributes.cend(); ++it)
-      rule.conditions.push_back(CreateCondition(**it));
+    rule.id = rule_id;
+    rule.priority = 1;
+    rule.actions.Append(std::move(action_dict));
+    for (auto* attribute : attributes) {
+      rule.conditions.Append(CreateCondition(*attribute));
+    }
     return rule;
   }
 
  protected:
   content::BrowserTaskEnvironment task_environment_;
+
   TestingProfile profile_;
   // Two extensions with host permissions for all URLs and the DWR permission.
   // Installation times will be so that |extension_| is older than
@@ -238,32 +243,27 @@ void WebRequestRulesRegistryTest::SetUp() {
   std::string error;
   extension_ = LoadManifestUnchecked("permissions",
                                      "web_request_all_host_permissions.json",
-                                     Manifest::INVALID_LOCATION,
-                                     Extension::NO_FLAGS,
-                                     kExtensionId,
-                                     &error);
+                                     mojom::ManifestLocation::kInvalidLocation,
+                                     Extension::NO_FLAGS, kExtensionId, &error);
   ASSERT_TRUE(extension_.get()) << error;
-  extension2_ = LoadManifestUnchecked("permissions",
-                                      "web_request_all_host_permissions.json",
-                                      Manifest::INVALID_LOCATION,
-                                      Extension::NO_FLAGS,
-                                      kExtensionId2,
-                                      &error);
+  extension2_ = LoadManifestUnchecked(
+      "permissions", "web_request_all_host_permissions.json",
+      mojom::ManifestLocation::kInvalidLocation, Extension::NO_FLAGS,
+      kExtensionId2, &error);
   ASSERT_TRUE(extension2_.get()) << error;
   CHECK(ExtensionRegistry::Get(&profile_));
   ExtensionRegistry::Get(&profile_)->AddEnabled(extension_);
   ExtensionPrefs::Get(&profile_)->OnExtensionInstalled(
-      extension_.get(), Extension::State::ENABLED, syncer::StringOrdinal(), "");
+      extension_.get(), /*disable_reasons=*/{}, syncer::StringOrdinal(), "");
   ExtensionRegistry::Get(&profile_)->AddEnabled(extension2_);
   ExtensionPrefs::Get(&profile_)->OnExtensionInstalled(
-      extension2_.get(), Extension::State::ENABLED, syncer::StringOrdinal(),
-      "");
+      extension2_.get(), /*disable_reasons=*/{}, syncer::StringOrdinal(), "");
 }
 
 
 TEST_F(WebRequestRulesRegistryTest, AddRulesImpl) {
-  scoped_refptr<TestWebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<TestWebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   std::string error;
 
   {
@@ -285,12 +285,11 @@ TEST_F(WebRequestRulesRegistryTest, AddRulesImpl) {
   EXPECT_EQ(2u, matches.size());
 
   std::set<WebRequestRule::GlobalRuleId> matches_ids;
-  for (auto it = matches.cbegin(); it != matches.cend(); ++it)
-    matches_ids.insert((*it)->id());
-  EXPECT_TRUE(
-      base::Contains(matches_ids, std::make_pair(kExtensionId, kRuleId1)));
-  EXPECT_TRUE(
-      base::Contains(matches_ids, std::make_pair(kExtensionId, kRuleId2)));
+  for (const auto* match : matches) {
+    matches_ids.insert(match->id());
+  }
+  EXPECT_TRUE(matches_ids.contains(std::make_pair(kExtensionId, kRuleId1)));
+  EXPECT_TRUE(matches_ids.contains(std::make_pair(kExtensionId, kRuleId2)));
 
   GURL foobar_url("http://www.foobar.com");
   WebRequestInfo foobar_request_info(CreateRequestParams(foobar_url));
@@ -303,8 +302,8 @@ TEST_F(WebRequestRulesRegistryTest, AddRulesImpl) {
 }
 
 TEST_F(WebRequestRulesRegistryTest, RemoveRulesImpl) {
-  scoped_refptr<TestWebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<TestWebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   std::string error;
 
   // Setup RulesRegistry to contain two rules.
@@ -353,8 +352,8 @@ TEST_F(WebRequestRulesRegistryTest, RemoveRulesImpl) {
 }
 
 TEST_F(WebRequestRulesRegistryTest, RemoveAllRulesImpl) {
-  scoped_refptr<TestWebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<TestWebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   std::string error;
 
   {
@@ -410,8 +409,8 @@ TEST_F(WebRequestRulesRegistryTest, RemoveAllRulesImpl) {
 
 // Test precedences between extensions.
 TEST_F(WebRequestRulesRegistryTest, Precedences) {
-  scoped_refptr<WebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<WebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   std::string error;
 
   {
@@ -452,8 +451,8 @@ TEST_F(WebRequestRulesRegistryTest, Precedences) {
 
 // Test priorities of rules within one extension.
 TEST_F(WebRequestRulesRegistryTest, Priorities) {
-  scoped_refptr<WebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<WebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   std::string error;
 
   {
@@ -530,23 +529,18 @@ TEST_F(WebRequestRulesRegistryTest, IgnoreRulesByTag) {
       "  \"priority\": 300                                               \n"
       "}                                                                 ";
 
-  std::unique_ptr<base::Value> value1 =
-      base::JSONReader::ReadDeprecated(kRule1);
-  ASSERT_TRUE(value1.get());
-  std::unique_ptr<base::Value> value2 =
-      base::JSONReader::ReadDeprecated(kRule2);
-  ASSERT_TRUE(value2.get());
+  base::DictValue value1 = base::test::ParseJsonDict(kRule1);
+  base::DictValue value2 = base::test::ParseJsonDict(kRule2);
 
-  std::vector<const api::events::Rule*> rules;
-  api::events::Rule rule1;
-  api::events::Rule rule2;
-  rules.push_back(&rule1);
-  rules.push_back(&rule2);
-  ASSERT_TRUE(api::events::Rule::Populate(*value1, &rule1));
-  ASSERT_TRUE(api::events::Rule::Populate(*value2, &rule2));
+  std::optional<api::events::Rule> rule1 = api::events::Rule::FromValue(value1);
+  std::optional<api::events::Rule> rule2 = api::events::Rule::FromValue(value2);
+  ASSERT_TRUE(rule1);
+  ASSERT_TRUE(rule2);
+  std::vector<const api::events::Rule*> rules = {&rule1.value(),
+                                                 &rule2.value()};
 
-  scoped_refptr<WebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<WebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   std::string error = registry->AddRulesImpl(kExtensionId, rules);
   EXPECT_EQ("", error);
   EXPECT_FALSE(registry->IsEmpty());
@@ -566,8 +560,8 @@ TEST_F(WebRequestRulesRegistryTest, IgnoreRulesByTag) {
 // Test that rules failing IsFulfilled on their conditions are never returned by
 // GetMatches.
 TEST_F(WebRequestRulesRegistryTest, GetMatchesCheckFulfilled) {
-  scoped_refptr<TestWebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<TestWebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   const std::string kMatchingUrlAttribute(
       "\"url\": { \"pathContains\": \"\" }, \n");
   const std::string kNonMatchingNonUrlAttribute(
@@ -613,8 +607,8 @@ TEST_F(WebRequestRulesRegistryTest, GetMatchesCheckFulfilled) {
 
 // Test different URL patterns.
 TEST_F(WebRequestRulesRegistryTest, GetMatchesDifferentUrls) {
-  scoped_refptr<TestWebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<TestWebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
   const std::string kUrlAttribute(
       "\"url\": { \"hostContains\": \"url\" }, \n");
   const std::string kUrlAttribute2(
@@ -641,17 +635,17 @@ TEST_F(WebRequestRulesRegistryTest, GetMatchesDifferentUrls) {
 
   std::set<const WebRequestRule*> matches;
 
-  const GURL urls[] = {
-    GURL("http://url.example.com"),  // matching
-    GURL("http://www.example.com")   // non-matching
-  };
+  const auto urls = std::to_array<GURL>({
+      GURL("http://url.example.com"),  // matching
+      GURL("http://www.example.com")   // non-matching
+  });
   // Which rules should match in subsequent test iterations.
-  const char* const matchingRuleIds[] = { kRuleId1, kRuleId2 };
-  static_assert(base::size(urls) == base::size(matchingRuleIds),
+  const auto matchingRuleIds = std::to_array<const char*>({kRuleId1, kRuleId2});
+  static_assert(std::size(urls) == std::size(matchingRuleIds),
                 "urls and matchingRuleIds must have the same number "
                 "of elements");
 
-  for (size_t i = 0; i < base::size(matchingRuleIds); ++i) {
+  for (size_t i = 0; i < std::size(matchingRuleIds); ++i) {
     // Construct the inputs.
     WebRequestInfoInitParams params = CreateRequestParams(urls[i]);
     WebRequestInfo http_request_info(std::move(params));
@@ -693,23 +687,22 @@ TEST(WebRequestRulesRegistrySimpleTest, StageChecker) {
       "  \"priority\": 200                                                \n"
       "}                                                                  ";
 
-  std::unique_ptr<base::Value> value = base::JSONReader::ReadDeprecated(kRule);
-  ASSERT_TRUE(value);
+  base::DictValue value = base::test::ParseJsonDict(kRule);
 
-  api::events::Rule rule;
-  ASSERT_TRUE(api::events::Rule::Populate(*value, &rule));
+  std::optional<api::events::Rule> rule = api::events::Rule::FromValue(value);
+  ASSERT_TRUE(rule);
 
   std::string error;
   URLMatcher matcher;
   std::unique_ptr<WebRequestConditionSet> conditions =
-      WebRequestConditionSet::Create(NULL, matcher.condition_factory(),
-                                     rule.conditions, &error);
+      WebRequestConditionSet::Create(nullptr, matcher.condition_factory(),
+                                     rule->conditions, &error);
   ASSERT_TRUE(error.empty()) << error;
   ASSERT_TRUE(conditions);
 
   bool bad_message = false;
   std::unique_ptr<WebRequestActionSet> actions = WebRequestActionSet::Create(
-      NULL, NULL, rule.actions, &error, &bad_message);
+      nullptr, nullptr, rule->actions, &error, &bad_message);
   ASSERT_TRUE(error.empty()) << error;
   ASSERT_FALSE(bad_message);
   ASSERT_TRUE(actions);
@@ -726,18 +719,15 @@ TEST(WebRequestRulesRegistrySimpleTest, HostPermissionsChecker) {
       "  \"instanceType\": \"declarativeWebRequest.RedirectRequest\",\n"
       "  \"redirectUrl\": \"http://bar.com\"                         \n"
       "}                                                             ";
-  std::unique_ptr<base::Value> action_value =
-      base::JSONReader::ReadDeprecated(kAction);
-  ASSERT_TRUE(action_value);
+  base::Value action_value = base::test::ParseJson(kAction);
 
-  WebRequestActionSet::Values actions;
-  actions.push_back(std::move(action_value));
-  ASSERT_TRUE(actions.back().get());
+  base::ListValue actions;
+  actions.Append(std::move(action_value));
 
   std::string error;
   bool bad_message = false;
-  std::unique_ptr<WebRequestActionSet> action_set(
-      WebRequestActionSet::Create(NULL, NULL, actions, &error, &bad_message));
+  std::unique_ptr<WebRequestActionSet> action_set(WebRequestActionSet::Create(
+      nullptr, nullptr, actions, &error, &bad_message));
   ASSERT_TRUE(error.empty()) << error;
   ASSERT_FALSE(bad_message);
   ASSERT_TRUE(action_set);
@@ -783,16 +773,14 @@ TEST_F(WebRequestRulesRegistryTest, CheckOriginAndPathRegEx) {
       "  \"priority\": 200                                               \n"
       "}                                                                 ";
 
-  std::unique_ptr<base::Value> value = base::JSONReader::ReadDeprecated(kRule);
-  ASSERT_TRUE(value.get());
+  base::DictValue value = base::test::ParseJsonDict(kRule);
 
-  std::vector<const api::events::Rule*> rules;
-  api::events::Rule rule;
-  rules.push_back(&rule);
-  ASSERT_TRUE(api::events::Rule::Populate(*value, &rule));
+  std::optional<api::events::Rule> rule = api::events::Rule::FromValue(value);
+  ASSERT_TRUE(rule);
+  std::vector<const api::events::Rule*> rules = {&rule.value()};
 
-  scoped_refptr<WebRequestRulesRegistry> registry(
-      new TestWebRequestRulesRegistry(&profile_));
+  scoped_refptr<WebRequestRulesRegistry> registry =
+      base::MakeRefCounted<TestWebRequestRulesRegistry>(&profile_);
 
   URLMatcher matcher;
   std::string error = registry->AddRulesImpl(kExtensionId, rules);

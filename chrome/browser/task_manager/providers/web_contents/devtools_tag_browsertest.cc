@@ -1,15 +1,17 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/devtools/devtools_window_testing.h"
 #include "chrome/browser/task_manager/mock_web_contents_task_manager.h"
 #include "chrome/browser/task_manager/providers/web_contents/web_contents_tags_manager.h"
+#include "chrome/browser/preloading/scoped_prewarm_feature_list.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "content/public/browser/back_forward_cache.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
@@ -34,11 +36,13 @@ class DevToolsTagTest : public InProcessBrowserTest {
     CHECK(embedded_test_server()->Start());
   }
 
-  ~DevToolsTagTest() override {}
+  DevToolsTagTest(const DevToolsTagTest&) = delete;
+  DevToolsTagTest& operator=(const DevToolsTagTest&) = delete;
+  ~DevToolsTagTest() override = default;
 
   void LoadTestPage(const std::string& test_page) {
     GURL url = embedded_test_server()->GetURL(test_page);
-    ui_test_utils::NavigateToURL(browser(), url);
+    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   }
 
   void OpenDevToolsWindow(bool is_docked) {
@@ -55,14 +59,16 @@ class DevToolsTagTest : public InProcessBrowserTest {
   }
 
  private:
-  DevToolsWindow* devtools_window_;
-
-  DISALLOW_COPY_AND_ASSIGN(DevToolsTagTest);
+  // TODO(https://crbug.com/423465927): Explore a better approach to make the
+  // existing tests run with the prewarm feature enabled.
+  test::ScopedPrewarmFeatureList scoped_prewarm_feature_list_{
+      test::ScopedPrewarmFeatureList::PrewarmState::kDisabled};
+  raw_ptr<DevToolsWindow, AcrossTasksDanglingUntriaged> devtools_window_;
 };
 
 // Tests that opening a DevToolsWindow will result in tagging its main
 // WebContents and that tag will be recorded by the TagsManager.
-IN_PROC_BROWSER_TEST_F(DevToolsTagTest, TagsManagerRecordsATag) {
+IN_PROC_BROWSER_TEST_F(DevToolsTagTest, DISABLED_TagsManagerRecordsATag) {
   // Browser tests start with a single tab.
   EXPECT_EQ(1U, tags_manager()->tracked_tags().size());
 
@@ -127,10 +133,19 @@ IN_PROC_BROWSER_TEST_F(DevToolsTagTest, DevToolsTaskIsProvided) {
   }
   EXPECT_NE(task_manager.tasks()[0]->title(),
             task_manager.tasks()[1]->title());
+  // If back/forward cache is enabled, the task for the previous page
+  // will still be around.
+  EXPECT_EQ(
+      content::BackForwardCache::IsBackForwardCacheFeatureEnabled() ? 3U : 2U,
+      task_manager.tasks().size());
 
+  // Close the DevTools window.
   CloseDevToolsWindow();
   EXPECT_EQ(1U, tags_manager()->tracked_tags().size());
-  EXPECT_EQ(1U, task_manager.tasks().size());
+
+  EXPECT_EQ(
+      content::BackForwardCache::IsBackForwardCacheFeatureEnabled() ? 2U : 1U,
+      task_manager.tasks().size());
 }
 
 }  // namespace task_manager

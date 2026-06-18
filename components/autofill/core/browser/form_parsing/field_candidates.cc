@@ -1,48 +1,86 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/autofill/core/browser/form_parsing/field_candidates.h"
 
-#include <algorithm>
-#include <vector>
+#include <stddef.h>
 
-#include "base/logging.h"
+#include <algorithm>
+#include <array>
+#include <iterator>
+
+#include "components/autofill/core/browser/field_types.h"
+#include "components/autofill/core/browser/form_parsing/autofill_parsing_utils.h"
+#include "components/autofill/core/common/dense_set.h"
 
 namespace autofill {
 
-FieldCandidate::FieldCandidate(ServerFieldType field_type, float field_score)
-    : type(field_type), score(field_score) {}
+namespace {
+// Order reflects their priority in ascending order.
+// kSearch has the lowest precedence and kEmail has the highest precedence.
+inline constexpr std::array<HeuristicParser, 12>
+    kParserIncreasingPriorityOrder = {
+        HeuristicParser::kSearch,      HeuristicParser::kMerchantPromoCode,
+        HeuristicParser::kName,        HeuristicParser::kLoyaltyCard,
+        HeuristicParser::kPrice,       HeuristicParser::kIban,
+        HeuristicParser::kOneTimeCode, HeuristicParser::kCreditCard,
+        HeuristicParser::kAddress,     HeuristicParser::kTravel,
+        HeuristicParser::kPhone,       HeuristicParser::kEmail};
 
-FieldCandidates::FieldCandidates() {}
-
-FieldCandidates::FieldCandidates(const FieldCandidates& other) = default;
-
-FieldCandidates::~FieldCandidates() {}
-
-void FieldCandidates::AddFieldCandidate(ServerFieldType type, float score) {
-  field_candidates_.emplace_back(type, score);
+// Returns `parser_type`'s priority as the index in
+// `kParserIncreasingPriorityOrder`.
+inline constexpr size_t GetParserPriority(HeuristicParser parser_type) {
+  for (size_t i = 0; i < kParserIncreasingPriorityOrder.size(); ++i) {
+    if (kParserIncreasingPriorityOrder[i] == parser_type) {
+      return i;
+    }
+  }
+  NOTREACHED();
 }
 
-// We currently select the type with the biggest sum.
-ServerFieldType FieldCandidates::BestHeuristicType() const {
-  if (field_candidates_.empty())
+}  // namespace
+
+FieldCandidatePriority::FieldCandidatePriority(
+    bool is_name_or_high_quality_label_match,
+    HeuristicParser parser_type)
+    : is_name_or_high_quality_label_match(is_name_or_high_quality_label_match),
+      parser_priority(GetParserPriority(parser_type)) {}
+
+FieldCandidates::FieldCandidates() = default;
+
+FieldCandidates::FieldCandidates(FieldCandidates&& other) = default;
+FieldCandidates& FieldCandidates::operator=(FieldCandidates&& other) = default;
+
+FieldCandidates::~FieldCandidates() = default;
+
+void FieldCandidates::AddFieldCandidate(FieldType type,
+                                        MatchAttribute match_attribute,
+                                        FieldCandidatePriority priority) {
+  field_candidates_.push_back(FieldCandidate{
+      .type = type, .match_attribute = match_attribute, .priority = priority});
+}
+
+// We currently select a type with the maximum score sum.
+FieldType FieldCandidates::BestHeuristicType() const {
+  if (field_candidates_.empty()) {
     return UNKNOWN_TYPE;
-
-  // Scores for each type. The index is their ServerFieldType enum value.
-  std::vector<float> type_scores(MAX_VALID_FIELD_TYPE, 0.0f);
-
-  for (const auto& field_candidate : field_candidates_) {
-    VLOG(1) << "type: " << field_candidate.type
-            << " score: " << field_candidate.score;
-    type_scores[field_candidate.type] += field_candidate.score;
   }
 
-  const auto best_type_iter =
-      std::max_element(type_scores.begin(), type_scores.end());
-  const size_t index = std::distance(type_scores.begin(), best_type_iter);
+  return std::ranges::max_element(field_candidates_, {},
+                                  &FieldCandidate::priority)
+      ->type;
+}
 
-  return static_cast<ServerFieldType>(index);
+DenseSet<MatchAttribute> FieldCandidates::BestHeuristicTypeReason() const {
+  FieldType best_type = BestHeuristicType();
+  DenseSet<MatchAttribute> attributes;
+  for (const FieldCandidate& candidate : field_candidates_) {
+    if (candidate.type == best_type) {
+      attributes.insert(candidate.match_attribute);
+    }
+  }
+  return attributes;
 }
 
 }  // namespace autofill

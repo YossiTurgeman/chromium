@@ -1,30 +1,35 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/policy/core/common/cloud/cloud_policy_core.h"
 
+#include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/check.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/observer_list.h"
+#include "base/task/sequenced_task_runner.h"
 #include "components/policy/core/common/cloud/cloud_policy_client.h"
 #include "components/policy/core/common/cloud/cloud_policy_refresh_scheduler.h"
 #include "components/policy/core/common/cloud/cloud_policy_service.h"
 #include "components/policy/core/common/cloud/cloud_policy_store.h"
 #include "components/policy/core/common/cloud/policy_invalidation_scope.h"
 #include "components/policy/core/common/remote_commands/remote_commands_factory.h"
+#include "components/policy/core/common/remote_commands/remote_commands_fetch_reason.h"
 #include "components/policy/core/common/remote_commands/remote_commands_service.h"
 #include "components/prefs/pref_service.h"
 
 namespace policy {
 
-CloudPolicyCore::Observer::~Observer() {}
+CloudPolicyCore::Observer::~Observer() = default;
 
 void CloudPolicyCore::Observer::OnRemoteCommandsServiceStarted(
-    CloudPolicyCore* core) {
-}
+    CloudPolicyCore* core) {}
+
+void CloudPolicyCore::Observer::OnCoreDestruction(CloudPolicyCore* core) {}
 
 CloudPolicyCore::CloudPolicyCore(
     const std::string& policy_type,
@@ -37,24 +42,34 @@ CloudPolicyCore::CloudPolicyCore(
       store_(store),
       task_runner_(task_runner),
       network_connection_tracker_getter_(
-          std::move(network_connection_tracker_getter)) {}
+          std::move(network_connection_tracker_getter)) {
+  CHECK(store_);
+}
 
-CloudPolicyCore::~CloudPolicyCore() {}
+CloudPolicyCore::~CloudPolicyCore() {
+  Disconnect();
+  for (auto& observer : observers_) {
+    observer.OnCoreDestruction(this);
+  }
+}
 
 void CloudPolicyCore::Connect(std::unique_ptr<CloudPolicyClient> client) {
   CHECK(!client_);
   CHECK(client);
   client_ = std::move(client);
-  service_.reset(new CloudPolicyService(policy_type_, settings_entity_id_,
-                                        client_.get(), store_));
-  for (auto& observer : observers_)
+  service_ = std::make_unique<CloudPolicyService>(
+      policy_type_, settings_entity_id_, client_.get(), store_);
+  for (auto& observer : observers_) {
     observer.OnCoreConnected(this);
+  }
 }
 
 void CloudPolicyCore::Disconnect() {
-  if (client_)
-    for (auto& observer : observers_)
+  if (client_) {
+    for (auto& observer : observers_) {
       observer.OnCoreDisconnecting(this);
+    }
+  }
   refresh_delay_.reset();
   refresh_scheduler_.reset();
   remote_commands_service_.reset();
@@ -72,15 +87,18 @@ void CloudPolicyCore::StartRemoteCommandsService(
       std::move(factory), client_.get(), store_, scope);
 
   // Do an initial remote commands fetch immediately.
-  remote_commands_service_->FetchRemoteCommands();
+  remote_commands_service_->FetchRemoteCommands(
+      RemoteCommandsFetchReason::kStartup);
 
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.OnRemoteCommandsServiceStarted(this);
+  }
 }
 
-void CloudPolicyCore::RefreshSoon() {
-  if (refresh_scheduler_)
-    refresh_scheduler_->RefreshSoon();
+void CloudPolicyCore::RefreshSoon(PolicyFetchReason reason) {
+  if (refresh_scheduler_) {
+    refresh_scheduler_->RefreshSoon(reason);
+  }
 }
 
 void CloudPolicyCore::StartRefreshScheduler() {
@@ -89,15 +107,16 @@ void CloudPolicyCore::StartRefreshScheduler() {
         client_.get(), store_, service_.get(), task_runner_,
         network_connection_tracker_getter_);
     UpdateRefreshDelayFromPref();
-    for (auto& observer : observers_)
+    for (auto& observer : observers_) {
       observer.OnRefreshSchedulerStarted(this);
+    }
   }
 }
 
 void CloudPolicyCore::TrackRefreshDelayPref(
     PrefService* pref_service,
     const std::string& refresh_pref_name) {
-  refresh_delay_.reset(new IntegerPrefMember());
+  refresh_delay_ = std::make_unique<IntegerPrefMember>();
   refresh_delay_->Init(
       refresh_pref_name, pref_service,
       base::BindRepeating(&CloudPolicyCore::UpdateRefreshDelayFromPref,
@@ -118,13 +137,15 @@ void CloudPolicyCore::ConnectForTesting(
     std::unique_ptr<CloudPolicyClient> client) {
   service_ = std::move(service);
   client_ = std::move(client);
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.OnCoreConnected(this);
+  }
 }
 
 void CloudPolicyCore::UpdateRefreshDelayFromPref() {
-  if (refresh_scheduler_ && refresh_delay_)
+  if (refresh_scheduler_ && refresh_delay_) {
     refresh_scheduler_->SetDesiredRefreshDelay(refresh_delay_->GetValue());
+  }
 }
 
 }  // namespace policy

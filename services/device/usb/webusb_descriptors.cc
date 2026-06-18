@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,12 @@
 
 #include <limits>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted_memory.h"
-#include "base/stl_util.h"
 #include "components/device_event_log/device_event_log.h"
 #include "services/device/usb/usb_device_handle.h"
 #include "url/gurl.h"
@@ -46,7 +47,7 @@ const size_t kMaxControlTransferLength = std::numeric_limits<uint8_t>::max();
 const int kControlTransferTimeoutMs = 2000;  // 2 seconds
 
 using ReadCompatabilityDescriptorCallback = base::OnceCallback<void(
-    const base::Optional<WebUsbPlatformCapabilityDescriptor>& descriptor)>;
+    const std::optional<WebUsbPlatformCapabilityDescriptor>& descriptor)>;
 using ReadLandingPageCallback =
     base::OnceCallback<void(const GURL& landing_page)>;
 
@@ -63,8 +64,8 @@ void OnReadLandingPage(uint8_t landing_page_id,
   }
 
   GURL url;
-  ParseWebUsbUrlDescriptor(
-      std::vector<uint8_t>(buffer->front(), buffer->front() + length), &url);
+  ParseWebUsbUrlDescriptor(UNSAFE_TODO(base::span(buffer->data(), length)),
+                           &url);
   std::move(callback).Run(url);
 }
 
@@ -75,14 +76,14 @@ void OnReadBosDescriptor(scoped_refptr<UsbDeviceHandle> device_handle,
                          size_t length) {
   if (status != UsbTransferStatus::COMPLETED) {
     USB_LOG(EVENT) << "Failed to read BOS descriptor.";
-    std::move(callback).Run(base::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
   WebUsbPlatformCapabilityDescriptor descriptor;
   if (!descriptor.ParseFromBosDescriptor(
-          std::vector<uint8_t>(buffer->front(), buffer->front() + length))) {
-    std::move(callback).Run(base::nullopt);
+          UNSAFE_TODO(base::span(buffer->data(), length)))) {
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
@@ -96,11 +97,11 @@ void OnReadBosDescriptorHeader(scoped_refptr<UsbDeviceHandle> device_handle,
                                size_t length) {
   if (status != UsbTransferStatus::COMPLETED || length != 5) {
     USB_LOG(EVENT) << "Failed to read BOS descriptor header.";
-    std::move(callback).Run(base::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
-  const uint8_t* data = buffer->front();
+  base::span<const uint8_t> data = *buffer;
   uint16_t new_length = data[2] | (data[3] << 8);
   auto new_buffer = base::MakeRefCounted<base::RefCountedBytes>(new_length);
   device_handle->ControlTransfer(
@@ -113,7 +114,7 @@ void OnReadBosDescriptorHeader(scoped_refptr<UsbDeviceHandle> device_handle,
 void OnReadWebUsbCapabilityDescriptor(
     scoped_refptr<UsbDeviceHandle> device_handle,
     ReadLandingPageCallback callback,
-    const base::Optional<WebUsbPlatformCapabilityDescriptor>& descriptor) {
+    const std::optional<WebUsbPlatformCapabilityDescriptor>& descriptor) {
   if (!descriptor || !descriptor->landing_page_id) {
     std::move(callback).Run(GURL());
     return;
@@ -132,7 +133,7 @@ WebUsbPlatformCapabilityDescriptor::~WebUsbPlatformCapabilityDescriptor() =
     default;
 
 bool WebUsbPlatformCapabilityDescriptor::ParseFromBosDescriptor(
-    const std::vector<uint8_t>& bytes) {
+    base::span<const uint8_t> bytes) {
   if (bytes.size() < 5) {
     // Too short for the BOS descriptor header.
     return false;
@@ -177,7 +178,8 @@ bool WebUsbPlatformCapabilityDescriptor::ParseFromBosDescriptor(
       return false;
     }
 
-    if (memcmp(&it[4], kWebUsbCapabilityUUID, sizeof(kWebUsbCapabilityUUID)) !=
+    if (UNSAFE_TODO(memcmp(&it[4], kWebUsbCapabilityUUID,
+                           sizeof(kWebUsbCapabilityUUID))) !=
         0) {  // PlatformCapabilityUUID
       continue;
     }
@@ -207,7 +209,7 @@ bool WebUsbPlatformCapabilityDescriptor::ParseFromBosDescriptor(
 }
 
 // Parses a WebUSB URL Descriptor:
-// http://wicg.github.io/webusb/#dfn-url-descriptor
+// https://wicg.github.io/webusb/#url-descriptor
 //
 //  0                   1                   2                   3
 //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -216,7 +218,7 @@ bool WebUsbPlatformCapabilityDescriptor::ParseFromBosDescriptor(
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |     data[1]   |      ...
 // +-+-+-+-+-+-+-+-+-+-+-+------
-bool ParseWebUsbUrlDescriptor(const std::vector<uint8_t>& bytes, GURL* output) {
+bool ParseWebUsbUrlDescriptor(base::span<const uint8_t> bytes, GURL* output) {
   const uint8_t kDescriptorType = 0x03;
   const uint8_t kDescriptorMinLength = 3;
 
@@ -240,10 +242,13 @@ bool ParseWebUsbUrlDescriptor(const std::vector<uint8_t>& bytes, GURL* output) {
     case 1:
       url.append("https://");
       break;
+    case 255:  // 255 indicates that the entire URL is encoded in the URL field.
+      break;
     default:
       return false;
   }
-  url.append(reinterpret_cast<const char*>(bytes.data() + 3), length - 3);
+  url.append(reinterpret_cast<const char*>(UNSAFE_TODO(bytes.data() + 3)),
+             length - 3);
 
   *output = GURL(url);
   if (!output->is_valid()) {

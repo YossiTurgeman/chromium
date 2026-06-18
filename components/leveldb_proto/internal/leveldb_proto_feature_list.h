@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,10 @@
 
 namespace leveldb_proto {
 
-extern const COMPONENT_EXPORT(LEVELDB_PROTO) base::Feature
-    kProtoDBSharedMigration;
+COMPONENT_EXPORT(LEVELDB_PROTO) BASE_DECLARE_FEATURE(kProtoDBSharedMigration);
+
+COMPONENT_EXPORT(LEVELDB_PROTO) BASE_DECLARE_FEATURE(kLevelDBProtoAsyncWrite);
 
 }  // namespace leveldb_proto
 
-#endif  // COMPONENTS_LEVELDB_PROTO_FEATURE_LIST_H_
+#endif  // COMPONENTS_LEVELDB_PROTO_INTERNAL_LEVELDB_PROTO_FEATURE_LIST_H_

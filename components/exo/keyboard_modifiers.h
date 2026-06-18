@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,8 @@
 #define COMPONENTS_EXO_KEYBOARD_MODIFIERS_H_
 
 #include <stdint.h>
+
+#include <tuple>
 
 namespace exo {
 
@@ -16,6 +18,12 @@ struct KeyboardModifiers {
   uint32_t latched;
   uint32_t group;
 };
+
+inline bool operator==(const KeyboardModifiers& lhs,
+                       const KeyboardModifiers& rhs) {
+  return std::tie(lhs.depressed, lhs.locked, lhs.latched, lhs.group) ==
+         std::tie(rhs.depressed, rhs.locked, rhs.latched, rhs.group);
+}
 
 }  // namespace exo
 

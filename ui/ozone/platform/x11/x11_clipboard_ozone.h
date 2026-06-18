@@ -1,24 +1,26 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_OZONE_PLATFORM_X11_X11_CLIPBOARD_OZONE_H_
 #define UI_OZONE_PLATFORM_X11_X11_CLIPBOARD_OZONE_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/containers/flat_map.h"
-#include "ui/events/platform/x11/x11_event_source.h"
-#include "ui/gfx/x/event.h"
-#include "ui/gfx/x/x11.h"
-#include "ui/gfx/x/x11_types.h"
-#include "ui/gfx/x/xfixes.h"
-#include "ui/gfx/x/xproto.h"
+#include "base/functional/callback.h"
+#include "ui/base/clipboard/clipboard_buffer.h"
+#include "ui/base/x/selection_utils.h"
 #include "ui/ozone/public/platform_clipboard.h"
 
+#if BUILDFLAG(IS_LINUX)
+#include "base/memory/weak_ptr.h"
+#endif
+
 namespace ui {
+
+class XClipboardHelper;
 
 // Handles clipboard operations for X11.
 // Registers to receive standard X11 events, as well as
@@ -28,88 +30,52 @@ namespace ui {
 // text/plain.  Otherwise GetAvailableMimeTypes and RequestClipboardData call
 // the appropriate X11 functions and invoke callbacks when the associated events
 // are received.
-class X11ClipboardOzone : public PlatformClipboard, public XEventDispatcher {
+class X11ClipboardOzone : public PlatformClipboard {
  public:
   X11ClipboardOzone();
+  X11ClipboardOzone(const X11ClipboardOzone&) = delete;
+  X11ClipboardOzone& operator=(const X11ClipboardOzone&) = delete;
   ~X11ClipboardOzone() override;
 
   // PlatformClipboard:
-  void OfferClipboardData(
-      ClipboardBuffer buffer,
-      const PlatformClipboard::DataMap& data_map,
-      PlatformClipboard::OfferDataClosure callback) override;
+  void OfferClipboardData(ClipboardBuffer buffer,
+                          const PlatformClipboard::DataMap& data_map) override;
   void RequestClipboardData(
       ClipboardBuffer buffer,
       const std::string& mime_type,
-      PlatformClipboard::DataMap* data_map,
       PlatformClipboard::RequestDataClosure callback) override;
   void GetAvailableMimeTypes(
       ClipboardBuffer buffer,
       PlatformClipboard::GetMimeTypesClosure callback) override;
-  bool IsSelectionOwner(ClipboardBuffer buffer) override;
-  void SetSequenceNumberUpdateCb(
-      PlatformClipboard::SequenceNumberUpdateCb cb) override;
+  void IsSelectionOwner(ClipboardBuffer buffer,
+                        IsSelectionOwnerClosure callback) override;
+  void SetClipboardDataChangedCallback(
+      ClipboardDataChangedCallback data_changed_callback) override;
   bool IsSelectionBufferAvailable() const override;
 
  private:
-  struct SelectionState;
+  void OnSelectionChanged(ClipboardBuffer buffer);
 
-  // XEventDispatcher:
-  bool DispatchXEvent(x11::Event* xev) override;
+#if BUILDFLAG(IS_LINUX)
+  void OnPortalKeyRead(PlatformClipboard::RequestDataClosure callback,
+                       SelectionData selection_data);
+  void OnPathsExtracted(PlatformClipboard::RequestDataClosure callback,
+                        std::vector<std::string> paths);
+  void OnGetAvailableMimeTypesForPortal(
+      ClipboardBuffer buffer,
+      std::vector<x11::Atom> uri_list_atoms,
+      std::vector<x11::Atom> portal_atoms,
+      PlatformClipboard::RequestDataClosure callback,
+      const std::vector<std::string>& mime_types);
+#endif
 
-  bool OnSelectionRequest(const x11::SelectionRequestEvent& event);
-  bool OnSelectionNotify(const x11::SelectionNotifyEvent& event);
-  bool OnSetSelectionOwnerNotify(
-      const x11::XFixes::SelectionNotifyEvent& event);
+  const std::unique_ptr<XClipboardHelper> helper_;
 
-  // Returns an X atom for a clipboard buffer type.
-  x11::Atom SelectionAtomForBuffer(ClipboardBuffer buffer) const;
+  ClipboardDataChangedCallback clipboard_changed_callback_;
 
-  // Returns a clipboard buffer type for an X atom for a selection name of the
-  // system clipboard buffer.
-  ClipboardBuffer BufferForSelectionAtom(x11::Atom selection) const;
-
-  // Returns the state for the given selection;
-  SelectionState& GetSelectionState(x11::Atom selection);
-
-  // Queries the current clipboard owner for what mime types are available by
-  // sending XConvertSelection with target=TARGETS.  After sending this, we
-  // will receive a SelectionNotify event with xselection.target=TARGETS which
-  // is processed in |OnSelectionNotify|.
-  void QueryTargets(x11::Atom selection);
-
-  // Reads the contents of the remote clipboard by sending XConvertSelection
-  // with target=<mime-type>.  After sending this, we will receive a
-  // SelectionNotify event with xselection.target=<mime-type> which is processed
-  // in |OnSelectionNotify|.
-  void ReadRemoteClipboard(x11::Atom selection);
-
-  // Local cache of atoms.
-  const x11::Atom atom_clipboard_;
-  const x11::Atom atom_targets_;
-  const x11::Atom atom_timestamp_;
-
-  // The property on |x_window_| which will receive remote clipboard contents.
-  const x11::Atom x_property_;
-
-  // Our X11 state.
-  x11::Connection* connection_;
-
-  // Input-only window used as a selection owner.
-  const x11::Window x_window_;
-
-  // If XFixes is unavailable, this clipboard window will not register to
-  // receive events and no processing will take place.
-  // TODO(joelhockey): Make clipboard work without xfixes.
-  bool using_xfixes_ = false;
-
-  // Notifies whenever clipboard sequence number is changed.
-  PlatformClipboard::SequenceNumberUpdateCb update_sequence_cb_;
-
-  // State of selections served by this instance.
-  base::flat_map<x11::Atom, std::unique_ptr<SelectionState>> selection_state_;
-
-  DISALLOW_COPY_AND_ASSIGN(X11ClipboardOzone);
+#if BUILDFLAG(IS_LINUX)
+  base::WeakPtrFactory<X11ClipboardOzone> weak_factory_{this};
+#endif
 };
 
 }  // namespace ui

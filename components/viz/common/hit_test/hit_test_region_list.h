@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/viz_common_export.h"
 #include "ui/gfx/geometry/rect.h"
-#include "ui/gfx/transform.h"
+#include "ui/gfx/geometry/transform.h"
 
 namespace viz {
 
@@ -19,7 +19,7 @@ namespace viz {
 enum HitTestRegionFlags : uint32_t {
   // Region maps to this surface (me).
   kHitTestMine = 0x01,
-  // Region ignored for hit testing (transparent backgrounds & hover:none).
+  // Region ignored for hit testing (e.g. pointer-events:none).
   kHitTestIgnore = 0x02,
   // Region maps to child surface (OOPIF).
   kHitTestChildSurface = 0x04,
@@ -36,9 +36,6 @@ enum HitTestRegionFlags : uint32_t {
 
   // Client hasn't submitted its own hit-test data yet.
   kHitTestNotActive = 0x40,
-
-  // Hit-test debugging is enabled.
-  kHitTestDebug = 0x80,
 };
 
 // In viz hit testing surface layer, hit test regions are marked as kHitTestAsk
@@ -53,15 +50,8 @@ enum AsyncHitTestReasons : uint32_t {
   kIrregularClip = 1 << 1,
   // The |HitTestRegion|'s surface has not been activated yet.
   kRegionNotActive = 1 << 2,
-  // Synchronous event targeting aborts at the present of perspective transform.
-  kPerspectiveTransform = 1 << 3,
-  // The |HitTestRegion| is marked as |kHitTestAsk| because it comes from draw
-  // quad. This is a reason specifically for slow path |hit-test| with draw quad
-  // variant.
-  kUseDrawQuadData = 1 << 4,
-
   // The maximum number of flags in this enum excluding itself.
-  kAsyncHitTestReasonCount = 5,
+  kAsyncHitTestReasonCount = 3,
 };
 
 struct HitTestRegion {

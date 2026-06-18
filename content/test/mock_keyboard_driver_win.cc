@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <string.h>
 
 #include "base/check.h"
-#include "base/stl_util.h"
+#include "base/compiler_specific.h"
 #include "content/test/mock_keyboard.h"
 
 namespace content {
@@ -29,7 +29,7 @@ MockKeyboardDriverWin::MockKeyboardDriverWin() {
   orig_keyboard_layouts_list_.resize(num_keyboard_layouts);
   GetKeyboardLayoutList(num_keyboard_layouts, &orig_keyboard_layouts_list_[0]);
 
-  memset(&keyboard_states_[0], 0, sizeof(keyboard_states_));
+  UNSAFE_TODO(memset(&keyboard_states_[0], 0, sizeof(keyboard_states_)));
 }
 
 MockKeyboardDriverWin::~MockKeyboardDriverWin() {
@@ -103,10 +103,10 @@ bool MockKeyboardDriverWin::SetLayout(int layout) {
     {L"00001009", MockKeyboard::LAYOUT_CANADIAN_FRENCH},
   };
 
-  for (size_t i = 0; i < base::size(kLanguageIDs); ++i) {
-    if (layout == kLanguageIDs[i].keyboard_layout) {
-      HKL new_keyboard_layout = LoadKeyboardLayout(kLanguageIDs[i].language,
-                                                   KLF_ACTIVATE);
+  for (size_t i = 0; i < std::size(kLanguageIDs); ++i) {
+    if (layout == UNSAFE_TODO(kLanguageIDs[i]).keyboard_layout) {
+      HKL new_keyboard_layout = LoadKeyboardLayout(
+          UNSAFE_TODO(kLanguageIDs[i]).language, KLF_ACTIVATE);
       // loaded_keyboard_layout_ must always have a valid keyboard handle
       // so we only assign upon success.
       if (new_keyboard_layout) {
@@ -128,7 +128,7 @@ bool MockKeyboardDriverWin::SetModifiers(int modifiers) {
   // modifier-key status. So, we update the modifier-key status with this
   // SetKeyboardState() call before creating NativeWebKeyboardEvent
   // instances.
-  memset(&keyboard_states_[0], 0, sizeof(keyboard_states_));
+  UNSAFE_TODO(memset(&keyboard_states_[0], 0, sizeof(keyboard_states_)));
   static const struct {
     int key_code;
     int mask;
@@ -143,10 +143,11 @@ bool MockKeyboardDriverWin::SetModifiers(int modifiers) {
     {VK_RCONTROL, MockKeyboard::RIGHT_CONTROL},
     {VK_RMENU,    MockKeyboard::RIGHT_ALT},
   };
-  for (size_t i = 0; i < base::size(kModifierMasks); ++i) {
+  for (size_t i = 0; i < std::size(kModifierMasks); ++i) {
     const int kKeyDownMask = 0x80;
-    if (modifiers & kModifierMasks[i].mask)
-      keyboard_states_[kModifierMasks[i].key_code] = kKeyDownMask;
+    if (modifiers & UNSAFE_TODO(kModifierMasks[i]).mask) {
+      UNSAFE_TODO(keyboard_states_[kModifierMasks[i]).key_code] = kKeyDownMask;
+    }
   }
   SetKeyboardState(&keyboard_states_[0]);
 
@@ -161,7 +162,7 @@ int MockKeyboardDriverWin::GetCharacters(int key_code,
   wchar_t code[16];
   int length =
       ToUnicodeEx(key_code, MapVirtualKey(key_code, 0), &keyboard_states_[0],
-                  &code[0], base::size(code), 0, active_keyboard_layout_);
+                  &code[0], std::size(code), 0, active_keyboard_layout_);
   if (length > 0)
     output->assign(code);
   return length;

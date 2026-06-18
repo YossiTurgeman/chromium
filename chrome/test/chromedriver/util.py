@@ -1,11 +1,12 @@
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Generic utilities for all python scripts."""
 
 import atexit
-import httplib
+import base64
+import http.client
 import json
 import os
 import platform
@@ -17,8 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
-import urlparse
 import zipfile
+
+import requests
 
 import chrome_paths
 
@@ -52,7 +54,7 @@ def Is64Bit():
   # see what CPU we're targetting.
   try:
     args_gn = os.path.join(chrome_paths.GetBuildDir(['args.gn']), 'args.gn')
-    with open(args_gn) as build_args:
+    with open(args_gn, encoding='utf-8') as build_args:
       for build_arg in build_args:
         decommented = build_arg.split('#')[0]
         key_and_value = decommented.split('=')
@@ -180,7 +182,7 @@ def RunCommand(cmd, cwd=None, fileName=None):
   """
   sys.stdout.flush()
   if fileName is not None:
-    with open(fileName,"wb") as out:
+    with open(fileName, "wb", encoding='utf-8') as out:
       process = subprocess.Popen(cmd, cwd=cwd,stdout=out,stderr=out)
   else:
     process = subprocess.Popen(cmd, cwd=cwd)
@@ -189,47 +191,23 @@ def RunCommand(cmd, cwd=None, fileName=None):
   return process.returncode
 
 
-def DoesUrlExist(url):
-  """Determines whether a resource exists at the given URL.
-
-  Args:
-    url: URL to be verified.
-
-  Returns:
-    True if url exists, otherwise False.
-  """
-  parsed = urlparse.urlparse(url)
-  try:
-    conn = httplib.HTTPConnection(parsed.netloc)
-    conn.request('HEAD', parsed.path)
-    response = conn.getresponse()
-  except httplib.HTTPException:
-    return False
-  finally:
-    conn.close()
-  # Follow both permanent (301) and temporary (302) redirects.
-  if response.status == 302 or response.status == 301:
-    return DoesUrlExist(response.getheader('location'))
-  return response.status == 200
-
-
 def MarkBuildStepStart(name):
-  print '@@@BUILD_STEP %s@@@' % name
+  print('@@@BUILD_STEP %s@@@' % name)
   sys.stdout.flush()
 
 
 def MarkBuildStepError():
-  print '@@@STEP_FAILURE@@@'
+  print('@@@STEP_FAILURE@@@')
   sys.stdout.flush()
 
 
 def AddBuildStepText(text):
-  print '@@@STEP_TEXT@%s@@@' % text
+  print('@@@STEP_TEXT@%s@@@' % text)
   sys.stdout.flush()
 
 
 def PrintAndFlush(text):
-  print text
+  print(text)
   sys.stdout.flush()
 
 
@@ -240,7 +218,7 @@ def AddLink(label, url):
     label: A string with the name of the label.
     url: A string of the URL.
   """
-  print '@@@STEP_LINK@%s@%s@@@' % (label, url)
+  print('@@@STEP_LINK@%s@%s@@@' % (label, url))
 
 
 def FindProbableFreePorts():
@@ -252,7 +230,7 @@ def FindProbableFreePorts():
   if there is any alternative.
   """
   # This is the range of dynamic ports. See RFC6335 page 10.
-  dynamic_ports = range(49152, 65535)
+  dynamic_ports = list(range(49152, 65535))
   random.shuffle(dynamic_ports)
 
   for port in dynamic_ports:
@@ -291,9 +269,9 @@ def WriteResultToJSONFile(test_suites, results, json_path):
   }
 
   def initialize(test_suite):
-    for test in test_suite:
-      if test.id() not in output['tests']:
-        output['tests'][test.id()] = {
+    for test_name in test_suite:
+      if test_name not in output['tests']:
+        output['tests'][test_name] = {
             'expected': 'PASS',
             'actual': []
         }
@@ -306,9 +284,9 @@ def WriteResultToJSONFile(test_suites, results, json_path):
     fail = []
     for failure in result.failures + result.errors:
       fail.append(failure[0].id())
-    for test in test_suite:
-      if test.id() not in fail:
-        success.append(test.id())
+    for test_name in test_suite:
+      if test_name not in fail:
+        success.append(test_name)
     return {
         'success': success,
         'fail': fail,
@@ -322,7 +300,7 @@ def WriteResultToJSONFile(test_suites, results, json_path):
       output['tests'][f]['actual'].append('FAIL')
 
   num_fails = 0
-  for test_result in output['tests'].itervalues():
+  for test_result in output['tests'].values():
     if test_result['actual'][-1] == 'FAIL':
       num_fails += 1
       test_result['is_unexpected'] = True
@@ -331,6 +309,95 @@ def WriteResultToJSONFile(test_suites, results, json_path):
   output['num_failures_by_type']['FAIL'] = num_fails
   output['num_failures_by_type']['PASS'] = len(output['tests']) - num_fails
 
-  with open(json_path, 'w') as script_out_file:
+  with open(json_path, 'w', encoding='utf-8') as script_out_file:
     json.dump(output, script_out_file)
     script_out_file.write('\n')
+
+
+def TryUploadingResultToResultSink(results):
+  def _create_test_id_struct_dict(test_id):
+    struct_test_dict = {
+        'coarseName': None,
+        'fineName': None,
+        'caseNameComponents': None,
+    }
+
+    test_split = test_id.rsplit('.', 2)
+    if len(test_split) == 3:
+      struct_test_dict['coarseName'] =  test_split[0]
+      struct_test_dict['fineName'] =  test_split[1]
+      struct_test_dict['caseNameComponents'] = [test_split[2]]
+
+    return struct_test_dict
+
+  def parse(result):
+    test_results = []
+    for test_case in result.successes:
+      test_results.append({
+          'testId': test_case.id(),
+          'expected': True,
+          'status': 'PASS',
+          'testIdStructured': _create_test_id_struct_dict(test_case.id()),
+          'testMetadata': {
+              'name': test_case.id(),
+          },
+          'tags': [
+              {
+                  'key': 'test_name',
+                  'value': test_case.id(),
+              },
+          ],
+      })
+
+    for (test_case, stack_trace) in result.failures + result.errors:
+      test_results.append({
+          'testId': test_case.id(),
+          'expected': False,
+          'status': 'FAIL',
+          # Uses <text-artifact> tag to embed the artifact content
+          # in summaryHtml.
+          'summaryHtml': '<p><text-artifact artifact-id="stack_trace"></p>',
+          'testIdStructured': _create_test_id_struct_dict(test_case.id()),
+          'testMetadata': {
+              'name': test_case.id(),
+          },
+          'tags': [
+              {
+                  'key': 'test_name',
+                  'value': test_case.id(),
+              },
+          ],
+          # A map of artifacts. The keys are artifact ids which uniquely
+          # identify an artifact within the test result.
+          'artifacts': {
+               'stack_trace': {
+                    'contents': base64.b64encode(stack_trace.encode()).decode(),
+               },
+          },
+      })
+    return test_results
+
+  def getResultSinkTestResults(results):
+    test_results = []
+    for r in results:
+        test_results.extend(parse(r))
+    return test_results
+
+  try:
+    with open(os.environ['LUCI_CONTEXT'], encoding='utf-8') as f:
+      sink = json.load(f)['result_sink']
+  except KeyError:
+    return
+
+  test_results = getResultSinkTestResults(results)
+  # Uploads all test results at once.
+  res = requests.post(
+    url='http://%s/prpc/luci.resultsink.v1.Sink/ReportTestResults' % sink['address'],
+    headers={
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': 'ResultSink %s' % sink['auth_token'],
+    },
+    data=json.dumps({'testResults': test_results})
+  )
+  res.raise_for_status()

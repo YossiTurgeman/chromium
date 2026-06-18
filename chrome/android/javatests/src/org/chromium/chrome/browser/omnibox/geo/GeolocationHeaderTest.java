@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,165 +17,118 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.CriteriaHelper;
+import org.chromium.base.test.util.DisabledTest;
 import org.chromium.base.test.util.Feature;
-import org.chromium.chrome.browser.app.ChromeActivity;
+import org.chromium.base.test.util.Features.DisableFeatures;
+import org.chromium.base.test.util.RequiresRestart;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
-import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.test.ChromeActivityTestRule;
+import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
+import org.chromium.chrome.browser.profiles.ProfileManager;
+import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+import org.chromium.chrome.test.transit.AutoResetCtaTransitTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.page.WebPageStation;
+import org.chromium.chrome.test.util.OmniboxTestUtils;
+import org.chromium.chrome.test.util.browser.LocationSettingsTestUtil;
+import org.chromium.components.browser_ui.site_settings.GeolocationSetting;
 import org.chromium.components.browser_ui.site_settings.PermissionInfo;
-import org.chromium.components.content_settings.ContentSettingValues;
+import org.chromium.components.browser_ui.site_settings.WebsitePreferenceBridgeJni;
+import org.chromium.components.content_settings.ContentSetting;
 import org.chromium.components.content_settings.ContentSettingsType;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.components.omnibox.OmniboxFeatureList;
+import org.chromium.components.permissions.PermissionsAndroidFeatureList;
+import org.chromium.components.permissions.PermissionsAndroidFeatureMap;
+import org.chromium.url.GURL;
 
-/**
- * Tests for GeolocationHeader and GeolocationTracker.
- */
+/** Tests for GeolocationHeader and GeolocationTracker. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
+@Batch(Batch.PER_CLASS)
+@DisableFeatures({OmniboxFeatureList.PLATFORM_AGNOSTIC_X_GEO})
 public class GeolocationHeaderTest {
-    @Rule
-    public ChromeActivityTestRule<ChromeActivity> mActivityTestRule =
-            new ChromeActivityTestRule<>(ChromeActivity.class);
+    public @Rule AutoResetCtaTransitTestRule mAutoResetCtaTestRule =
+            ChromeTransitTestRules.autoResetCtaActivityRule();
+
+    private WebPageStation mCurrentWebPageStation;
 
     private static final String SEARCH_URL_1 = "https://www.google.com/search?q=potatoes";
     private static final String SEARCH_URL_2 = "https://www.google.co.jp/webhp?#q=dinosaurs";
-    private static final String DISABLE_FEATURES = "disable-features=";
-    private static final String ENABLE_FEATURES = "enable-features=";
     private static final String GOOGLE_BASE_URL_SWITCH = "google-base-url=https://www.google.com";
     private static final double LOCATION_LAT = 20.3;
     private static final double LOCATION_LONG = 155.8;
     private static final float LOCATION_ACCURACY = 20f;
 
     @Before
-    public void setUp() throws InterruptedException {
-        mActivityTestRule.startMainActivityOnBlankPage();
+    public void setUp() {
+        mCurrentWebPageStation = mAutoResetCtaTestRule.startOnBlankPage();
+        LocationSettingsTestUtil.setSystemLocationSettingEnabled(true);
+
+        // With incognito windows, this test will create many windows so we need to increase the
+        // ChromeTabbedActivity instance limit.
+        MultiWindowUtils.setMaxInstancesForTesting(1000);
     }
 
     @Test
     @SmallTest
     @Feature({"Location"})
-    @CommandLineFlags.Add({GOOGLE_BASE_URL_SWITCH})
-    public void testConsistentHeader() {
-        long now = setMockLocationNow();
-
-        // X-Geo should be sent for Google search results page URLs.
-        assertNonNullHeader(SEARCH_URL_1, false, now);
-
-        // But only the current CCTLD.
-        assertNullHeader(SEARCH_URL_2, false);
-
-        // X-Geo shouldn't be sent in incognito mode.
-        assertNullHeader(SEARCH_URL_1, true);
-        assertNullHeader(SEARCH_URL_2, true);
-
-        // X-Geo shouldn't be sent with URLs that aren't the Google search results page.
-        assertNullHeader("invalid$url", false);
-        assertNullHeader("https://www.chrome.fr/", false);
-        assertNullHeader("https://www.google.com/", false);
-
-        // X-Geo shouldn't be sent over HTTP.
-        assertNullHeader("http://www.google.com/search?q=potatoes", false);
-        assertNullHeader("http://www.google.com/webhp?#q=dinosaurs", false);
-    }
-
-    @Test
-    @SmallTest
-    @Feature({"Location"})
-    @CommandLineFlags.Add({GOOGLE_BASE_URL_SWITCH})
-    public void testPermission() {
-        long now = setMockLocationNow();
-
-        // X-Geo shouldn't be sent when location is disallowed for the origin.
-        checkHeaderWithPermission(ContentSettingValues.ALLOW, now, false);
-        checkHeaderWithPermission(ContentSettingValues.BLOCK, now, true);
-
-        // The default permission for the DSE is to allow access, so the header
-        // should be sent in this case.
-        checkHeaderWithPermission(ContentSettingValues.DEFAULT, now, false);
-    }
-
-    @Test
-    @SmallTest
-    @Feature({"Location"})
+    @DisabledTest(message = "https://crbug.com/416787235")
     public void testProtoEncoding() {
+        setPermission(ContentSetting.ALLOW);
         long now = setMockLocationNow();
 
         // X-Geo should be sent for Google search results page URLs using proto encoding.
-        assertNonNullHeader(SEARCH_URL_1, false, now);
+        assertNonNullHeader(SEARCH_URL_1, false, now, /* isPrecise= */ true);
     }
 
     @Test
     @SmallTest
     @Feature({"Location"})
-    public void testGpsFallback() {
-        // Only GPS location, should be sent when flag is on.
-        long now = System.currentTimeMillis();
-        Location gpsLocation = generateMockLocation(LocationManager.GPS_PROVIDER, now);
-        GeolocationTracker.setLocationForTesting(null, gpsLocation);
-
-        assertNonNullHeader(SEARCH_URL_1, false, now);
+    public void testGeolocationHeaderPrimingEnabledPermissionAllow() {
+        setPermission(ContentSetting.ALLOW);
+        checkHeaderPriming(/* shouldPrimeHeader= */ true);
     }
 
     @Test
     @SmallTest
     @Feature({"Location"})
-    public void testGpsFallbackYounger() {
-        long now = System.currentTimeMillis();
-        // GPS location is younger.
-        Location gpsLocation = generateMockLocation(LocationManager.GPS_PROVIDER, now + 100);
-        // Network location is older
-        Location netLocation = generateMockLocation(LocationManager.NETWORK_PROVIDER, now);
-        GeolocationTracker.setLocationForTesting(netLocation, gpsLocation);
-
-        // The younger (GPS) should be used.
-        assertNonNullHeader(SEARCH_URL_1, false, now + 100);
+    public void testGeolocationHeaderPrimingDisabledPermissionBlock() {
+        setPermission(ContentSetting.BLOCK);
+        checkHeaderPriming(/* shouldPrimeHeader= */ false);
     }
 
     @Test
     @SmallTest
     @Feature({"Location"})
-    public void testGpsFallbackOlder() {
-        long now = System.currentTimeMillis();
-        // GPS location is older.
-        Location gpsLocation = generateMockLocation(LocationManager.GPS_PROVIDER, now - 100);
-        // Network location is younger.
-        Location netLocation = generateMockLocation(LocationManager.NETWORK_PROVIDER, now);
-        GeolocationTracker.setLocationForTesting(netLocation, gpsLocation);
-
-        // The younger (Network) should be used.
-        assertNonNullHeader(SEARCH_URL_1, false, now);
+    @DisabledTest(message = "Flaky. See crbug.com/392607758")
+    public void testGeolocationHeaderPrimingDisabledPermissionAsk() {
+        setPermission(ContentSetting.ASK);
+        checkHeaderPriming(/* shouldPrimeHeader= */ false);
     }
 
-    private void checkHeaderWithPermission(final @ContentSettingValues int httpsPermission,
-            final long locationTime, final boolean shouldBeNull) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            PermissionInfo infoHttps =
-                    new PermissionInfo(ContentSettingsType.GEOLOCATION, SEARCH_URL_1, null, false);
-            infoHttps.setContentSetting(Profile.getLastUsedRegularProfile(), httpsPermission);
-            String header = GeolocationHeader.getGeoHeader(
-                    SEARCH_URL_1, mActivityTestRule.getActivity().getActivityTab());
-            assertHeaderState(header, locationTime, shouldBeNull);
-        });
+    @Test
+    @SmallTest
+    @Feature({"Location"})
+    @RequiresRestart(value = "Needs to reset cached geolocation from previous tests")
+    @DisabledTest(message = "Flaky. See crbug.com/392607758")
+    public void testGeolocationHeaderPrimingDisabledOsPermissionBlocked() {
+        setPermission(ContentSetting.ALLOW);
+        LocationSettingsTestUtil.setSystemLocationSettingEnabled(false);
+        checkHeaderPriming(/* shouldPrimeHeader= */ false);
     }
 
-    private void checkHeaderWithLocation(final long locationTime, final boolean shouldBeNull) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            setMockLocation(locationTime);
-            String header = GeolocationHeader.getGeoHeader(
-                    SEARCH_URL_1, mActivityTestRule.getActivity().getActivityTab());
-            assertHeaderState(header, locationTime, shouldBeNull);
-        });
-    }
+    private void checkHeaderPriming(boolean shouldPrimeHeader) {
+        openBlankPage(/* isIncognito= */ false);
 
-    private void assertHeaderState(String header, long locationTime, boolean shouldBeNull) {
-        if (shouldBeNull) {
-            Assert.assertNull(header);
-        } else {
-            assertHeaderEquals(locationTime, header);
-        }
+        var omniboxTestUtils = new OmniboxTestUtils(mCurrentWebPageStation.getActivity());
+        omniboxTestUtils.requestFocus();
+        omniboxTestUtils.typeText("aaaaaaaaaa", false);
+        omniboxTestUtils.waitAnimationsComplete();
+        Assert.assertEquals(shouldPrimeHeader, GeolocationHeader.isGeolocationPrimedForTesting());
     }
 
     private long setMockLocationNow() {
@@ -200,21 +153,24 @@ public class GeolocationHeaderTest {
         GeolocationTracker.setLocationForTesting(location, null);
     }
 
-    private void assertNullHeader(final String url, final boolean isIncognito) {
-        final Tab tab = mActivityTestRule.loadUrlInNewTab("about:blank", isIncognito);
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { Assert.assertNull(GeolocationHeader.getGeoHeader(url, tab)); });
-    }
-
     private void assertNonNullHeader(
-            final String url, final boolean isIncognito, final long locationTime) {
-        final Tab tab = mActivityTestRule.loadUrlInNewTab("about:blank", isIncognito);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            assertHeaderEquals(locationTime, GeolocationHeader.getGeoHeader(url, tab));
-        });
+            final String url,
+            final boolean isIncognito,
+            final long locationTime,
+            boolean isPrecise) {
+        openBlankPage(isIncognito);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    var profile = mCurrentWebPageStation.getTab().getProfile();
+                    var service = TemplateUrlServiceFactory.getForProfile(profile);
+                    assertHeaderEquals(
+                            locationTime,
+                            GeolocationHeader.getGeoHeader(url, profile, service),
+                            isPrecise);
+                });
     }
 
-    private void assertHeaderEquals(long locationTime, String header) {
+    private void assertHeaderEquals(long locationTime, String header, boolean isPrecise) {
         long timestamp = locationTime * 1000;
         // Latitude times 1e7.
         int latitudeE7 = (int) (LOCATION_LAT * 10000000);
@@ -224,10 +180,11 @@ public class GeolocationHeaderTest {
         int radius = (int) (LOCATION_ACCURACY * 1000);
 
         // Create a LatLng for the coordinates.
-        PartnerLocationDescriptor.LatLng latlng = PartnerLocationDescriptor.LatLng.newBuilder()
-                                                          .setLatitudeE7(latitudeE7)
-                                                          .setLongitudeE7(longitudeE7)
-                                                          .build();
+        PartnerLocationDescriptor.LatLng latlng =
+                PartnerLocationDescriptor.LatLng.newBuilder()
+                        .setLatitudeE7(latitudeE7)
+                        .setLongitudeE7(longitudeE7)
+                        .build();
 
         // Populate a LocationDescriptor with the LatLng.
         PartnerLocationDescriptor.LocationDescriptor locationDescriptor =
@@ -238,11 +195,101 @@ public class GeolocationHeaderTest {
                         .setProducer(PartnerLocationDescriptor.LocationProducer.DEVICE_LOCATION)
                         .setTimestamp(timestamp)
                         .setRadius((float) radius)
+                        .setPermissionGranularity(
+                                isPrecise
+                                        ? PartnerLocationDescriptor.PermissionGranularity
+                                                .PERMISSION_GRANULARITY_FINE
+                                        : PartnerLocationDescriptor.PermissionGranularity
+                                                .PERMISSION_GRANULARITY_COARSE)
                         .build();
 
-        String locationProto = Base64.encodeToString(
-                locationDescriptor.toByteArray(), Base64.NO_WRAP | Base64.URL_SAFE);
+        String locationProto =
+                Base64.encodeToString(
+                        locationDescriptor.toByteArray(), Base64.NO_WRAP | Base64.URL_SAFE);
         String expectedHeader = "X-Geo: w " + locationProto;
         Assert.assertEquals(expectedHeader, header);
+    }
+
+    private void setPermission(final @ContentSetting int setting) {
+        setPermission(setting, setting, /* isOneTime= */ false);
+    }
+
+    private void setPermission(
+            final @ContentSetting int approximate,
+            final @ContentSetting int precise,
+            boolean isOneTime) {
+        final boolean approximateGelocationEnabled =
+                PermissionsAndroidFeatureMap.isEnabled(
+                        PermissionsAndroidFeatureList.APPROXIMATE_GEOLOCATION_PERMISSION);
+        PermissionInfo infoHttps =
+                new PermissionInfo(
+                        approximateGelocationEnabled
+                                ? ContentSettingsType.GEOLOCATION_WITH_OPTIONS
+                                : ContentSettingsType.GEOLOCATION,
+                        SEARCH_URL_1,
+                        /* embedder= */ null,
+                        /* isEmbargoed= */ false);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    if (isOneTime) {
+                        if (approximateGelocationEnabled) {
+                            WebsitePreferenceBridgeJni.get()
+                                    .setGeolocationEphemeralGrantForTesting(
+                                            ProfileManager.getLastUsedRegularProfile(),
+                                            new GURL(SEARCH_URL_1),
+                                            new GeolocationSetting(approximate, precise));
+                        } else {
+                            WebsitePreferenceBridgeJni.get()
+                                    .setEphemeralGrantForTesting(
+                                            ProfileManager.getLastUsedRegularProfile(),
+                                            ContentSettingsType.GEOLOCATION,
+                                            new GURL(SEARCH_URL_1),
+                                            new GURL(SEARCH_URL_1));
+                        }
+                    } else {
+                        if (approximateGelocationEnabled) {
+                            infoHttps.setGeolocationSetting(
+                                    ProfileManager.getLastUsedRegularProfile(),
+                                    new GeolocationSetting(approximate, precise));
+                        } else {
+                            infoHttps.setContentSetting(
+                                    ProfileManager.getLastUsedRegularProfile(), precise);
+                        }
+                    }
+                });
+
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    if (approximateGelocationEnabled) {
+                        var expectedApproximate =
+                                approximate == ContentSetting.DEFAULT
+                                        ? ContentSetting.ASK
+                                        : approximate;
+                        var expectedPrecise =
+                                precise == ContentSetting.DEFAULT ? ContentSetting.ASK : precise;
+                        GeolocationSetting geolocationSetting =
+                                infoHttps.getGeolocationSetting(
+                                        ProfileManager.getLastUsedRegularProfile());
+                        return geolocationSetting.mPrecise == expectedPrecise
+                                && geolocationSetting.mApproximate == expectedApproximate;
+                    } else {
+                        var expectedSetting =
+                                precise == ContentSetting.DEFAULT ? ContentSetting.ASK : precise;
+                        Integer contentSetting =
+                                infoHttps.getContentSetting(
+                                        ProfileManager.getLastUsedRegularProfile());
+                        return contentSetting == expectedSetting;
+                    }
+                });
+    }
+
+    private void openBlankPage(boolean isIncognito) {
+        if (isIncognito) {
+            mCurrentWebPageStation =
+                    mCurrentWebPageStation.openNewIncognitoTabOrWindowFast().loadAboutBlank();
+        } else {
+            mCurrentWebPageStation =
+                    mCurrentWebPageStation.openNewTabOrWindowFast().loadAboutBlank();
+        }
     }
 }

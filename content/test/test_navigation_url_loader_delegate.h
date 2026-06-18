@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,8 @@
 #define CONTENT_TEST_TEST_NAVIGATION_URL_LOADER_DELEGATE_H_
 
 #include <memory>
+#include <optional>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
-#include "base/optional.h"
-#include "base/time/time.h"
 #include "content/browser/loader/navigation_url_loader_delegate.h"
 #include "net/url_request/redirect_info.h"
 #include "services/network/public/mojom/url_response_head.mojom-forward.h"
@@ -26,70 +23,77 @@ namespace content {
 class TestNavigationURLLoaderDelegate : public NavigationURLLoaderDelegate {
  public:
   TestNavigationURLLoaderDelegate();
+
+  TestNavigationURLLoaderDelegate(const TestNavigationURLLoaderDelegate&) =
+      delete;
+  TestNavigationURLLoaderDelegate& operator=(
+      const TestNavigationURLLoaderDelegate&) = delete;
+
   ~TestNavigationURLLoaderDelegate() override;
 
   const net::RedirectInfo& redirect_info() const { return redirect_info_; }
-  network::mojom::URLResponseHead* redirect_response() const {
-    return redirect_response_.get();
-  }
-  network::mojom::URLResponseHead* response() const {
-    return response_head_.get();
-  }
   int net_error() const { return net_error_; }
   const net::SSLInfo& ssl_info() const { return ssl_info_; }
   int on_request_handled_counter() const { return on_request_handled_counter_; }
-  bool is_download() const { return is_download_; }
-  bool has_url_loader_client_endpoints() {
-    return !!url_loader_client_endpoints_;
+  int on_redirect_handled_counter() const {
+    return on_redirect_handled_counter_;
   }
 
   // Waits for various navigation events.
   // Note: if the event already happened, the functions will hang.
   // TODO(clamy): Make the functions not hang if they are called after the
   // event happened.
+  void WaitForOnReceiveRedirect();
   void WaitForRequestRedirected();
   void WaitForResponseStarted();
   void WaitForRequestFailed();
-  void WaitForRequestStarted();
 
-  void ReleaseURLLoaderClientEndpoints();
+  void set_clear_parsed_headers_on_redirect(
+      bool clear_parsed_headers_on_redirect) {
+    clear_parsed_headers_on_redirect_ = clear_parsed_headers_on_redirect;
+  }
 
   // NavigationURLLoaderDelegate implementation.
   void OnRequestRedirected(
       const net::RedirectInfo& redirect_info,
+      const net::NetworkAnonymizationKey& network_anonymization_key,
       network::mojom::URLResponseHeadPtr response) override;
   void OnResponseStarted(
       network::mojom::URLLoaderClientEndpointsPtr url_loader_client_endpoints,
       network::mojom::URLResponseHeadPtr response_head,
       mojo::ScopedDataPipeConsumerHandle response_body,
-      const GlobalRequestID& request_id,
+      GlobalRequestID request_id,
       bool is_download,
-      NavigationDownloadPolicy download_policy,
-      base::Optional<SubresourceLoaderParams> subresource_loader_params)
-      override;
+      net::NetworkAnonymizationKey network_anonymization_key,
+      SubresourceLoaderParams subresource_loader_params,
+      EarlyHints early_hints) override;
   void OnRequestFailed(
       const network::URLLoaderCompletionStatus& status) override;
-  void OnRequestStarted(base::TimeTicks timestamp) override;
+  std::optional<NavigationEarlyHintsManagerParams>
+  CreateNavigationEarlyHintsManagerParams(
+      const network::mojom::EarlyHints& early_hints) override;
+  bool ShouldClearParsedHeadersOnTestReceiveRedirect() override;
 
  private:
   net::RedirectInfo redirect_info_;
   network::mojom::URLResponseHeadPtr redirect_response_;
-  network::mojom::URLLoaderClientEndpointsPtr url_loader_client_endpoints_;
   network::mojom::URLResponseHeadPtr response_head_;
   mojo::ScopedDataPipeConsumerHandle response_body_;
-  int net_error_;
+  int net_error_ = 0;
   net::SSLInfo ssl_info_;
-  int on_request_handled_counter_;
-  bool is_download_;
+  int on_request_handled_counter_ = 0;
+  int on_redirect_handled_counter_ = 0;
 
+  // See `NavigationURLLoaderImpl::ParseHeaders()` and
+  // `OnReceiveRedirect()`.
+  bool clear_parsed_headers_on_redirect_ = false;
+
+  std::unique_ptr<base::RunLoop> on_receive_redirect_;
   std::unique_ptr<base::RunLoop> request_redirected_;
   std::unique_ptr<base::RunLoop> response_started_;
   std::unique_ptr<base::RunLoop> request_failed_;
-  std::unique_ptr<base::RunLoop> request_started_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestNavigationURLLoaderDelegate);
 };
 
 }  // namespace content
 
-#endif  // CONTENT_TEST_TEST_NAVIGATION_URL_LOADER_DELEGATE_H
+#endif  // CONTENT_TEST_TEST_NAVIGATION_URL_LOADER_DELEGATE_H_

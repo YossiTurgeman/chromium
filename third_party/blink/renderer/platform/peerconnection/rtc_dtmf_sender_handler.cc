@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,19 @@
 
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/task/single_thread_task_runner.h"
 
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_checker.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
+#include "third_party/blink/renderer/platform/wtf/cross_thread_copier_base.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 #include "third_party/blink/renderer/platform/wtf/thread_safe_ref_counted.h"
 
 namespace blink {
 
 class RtcDtmfSenderHandler::Observer
-    : public WTF::ThreadSafeRefCounted<Observer>,
+    : public ThreadSafeRefCounted<Observer>,
       public webrtc::DtmfSenderObserverInterface {
  public:
   explicit Observer(scoped_refptr<base::SingleThreadTaskRunner> main_thread,
@@ -24,7 +26,7 @@ class RtcDtmfSenderHandler::Observer
       : main_thread_(std::move(main_thread)), handler_(handler) {}
 
  private:
-  friend class WTF::ThreadSafeRefCounted<Observer>;
+  friend class ThreadSafeRefCounted<Observer>;
 
   ~Observer() override {}
 
@@ -69,7 +71,7 @@ void RtcDtmfSenderHandler::SetClient(RtcDtmfSenderHandler::Client* client) {
 }
 
 String RtcDtmfSenderHandler::CurrentToneBuffer() {
-  return String::FromUTF8(dtmf_sender_->tones());
+  return String::FromUtf8(dtmf_sender_->tones());
 }
 
 bool RtcDtmfSenderHandler::CanInsertDTMF() {

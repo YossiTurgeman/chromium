@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,10 +13,9 @@
 
 using EnvironmentInternalTest = PlatformTest;
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 
 namespace {
 void ExpectEnvironmentBlock(const std::vector<std::wstring>& vars,
@@ -88,14 +87,14 @@ TEST_F(EnvironmentInternalTest, AlterEnvironment) {
   ExpectEnvironmentBlock({L"B=3", L"A=1", L"C=4"}, e);
 }
 
-#else  // !OS_WIN
+#else  // !BUILDFLAG(IS_WIN)
 
 TEST_F(EnvironmentInternalTest, AlterEnvironment) {
   const char* const empty[] = {nullptr};
   const char* const a2[] = {"A=2", nullptr};
   const char* const a2b3[] = {"A=2", "B=3", nullptr};
   EnvironmentMap changes;
-  std::unique_ptr<char*[]> e;
+  base::HeapArray<char*> e;
 
   e = AlterEnvironment(empty, changes);
   EXPECT_TRUE(e[0] == nullptr);
@@ -155,7 +154,6 @@ TEST_F(EnvironmentInternalTest, AlterEnvironment) {
   EXPECT_TRUE(e[3] == nullptr);
 }
 
-#endif  // OS_WIN
+#endif  // BUILDFLAG(IS_WIN)
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal

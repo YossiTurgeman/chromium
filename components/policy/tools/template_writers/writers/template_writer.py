@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,6 @@ class TemplateWriter(object):
   '''Abstract base class for writing policy templates in various formats.
   The methods of this class will be called by PolicyTemplateGenerator.
   '''
-
   def __init__(self, platforms, config):
     '''Initializes a TemplateWriter object.
 
@@ -84,12 +83,8 @@ class TemplateWriter(object):
     Returns:
       True if the writer chooses to include 'policy' in its output.
     '''
-    if ('deprecated' in policy and policy['deprecated'] is True and
-        not self.IsDeprecatedPolicySupported(policy)):
-      return False
-
-    if ('future' in policy and policy['future'] is True and
-        not self.IsFuturePolicySupported(policy)):
+    if ('deprecated' in policy and policy['deprecated'] is True
+        and not self.IsDeprecatedPolicySupported(policy)):
       return False
 
     if (self.IsCloudOnlyPolicy(policy)
@@ -135,11 +130,7 @@ class TemplateWriter(object):
     '''Checks if the given policy is internal only'''
     return self.GetPolicyFeature(policy, 'internal_only', False)
 
-  def IsPolicyOrItemSupportedOnPlatform(self,
-                                        item,
-                                        platform,
-                                        product=None,
-                                        management=None):
+  def IsPolicyOrItemSupportedOnPlatform(self, item, platform, product=None):
     '''Checks if |item| is supported on |product| for |platform|. If
     |product| is not specified, only the platform support is checked.
     If |management| is specified, also checks for support for Chrome OS
@@ -151,12 +142,7 @@ class TemplateWriter(object):
         'win', 'mac', 'linux', 'chrome_os', 'android'.
       product: Optional product to check; one of
         'chrome', 'chrome_frame', 'chrome_os', 'webview'.
-      management: Optional Chrome OS management type to check; one of
-        'active_directory', 'google_cloud'.
     '''
-    if management and not self.IsCrOSManagementSupported(item, management):
-      return False
-
     for supported_on in item['supported_on']:
       if (platform == supported_on['platform']
           and (not product or product in supported_on['product'])
@@ -181,21 +167,8 @@ class TemplateWriter(object):
       product: Optional product to check; one of
         'chrome', 'chrome_frame', 'chrome_os', 'webview'
     '''
-    return (self.IsPolicyOrItemSupportedOnPlatform(policy, 'win', product) or
-            self.IsPolicyOrItemSupportedOnPlatform(policy, 'win7', product))
-
-  def IsCrOSManagementSupported(self, policy, management):
-    '''Checks whether |policy| supports the Chrome OS |management| type.
-
-    Args:
-      policy: The dictionary of the policy.
-      management: Chrome OS management type to check; one of
-        'active_directory', 'google_cloud'.
-    '''
-    # By default, i.e. if supported_chrome_os_management is not set, all
-    # management types are supported.
-    return management in policy.get('supported_chrome_os_management',
-                                    ['active_directory', 'google_cloud'])
+    return (self.IsPolicyOrItemSupportedOnPlatform(policy, 'win', product)
+            or self.IsPolicyOrItemSupportedOnPlatform(policy, 'win7', product))
 
   def IsVersionSupported(self, policy, supported_on):
     '''Checks whether the policy is supported on current version'''
@@ -206,8 +179,8 @@ class TemplateWriter(object):
     since_version = supported_on.get('since_version', None)
     until_version = supported_on.get('until_version', None)
 
-    return ((not since_version or int(since_version) <= major_version) and
-            (not until_version or int(until_version) >= major_version))
+    return ((not since_version or int(since_version) <= major_version)
+            and (not until_version or int(until_version) >= major_version))
 
   def _GetChromiumVersionString(self):
     '''Returns the Chromium version string stored in the environment variable
@@ -262,27 +235,7 @@ class TemplateWriter(object):
     template['policy_definitions'] = \
         self.PreprocessPolicies(template['policy_definitions'])
     self.BeginTemplate()
-    for policy in template['policy_definitions']:
-      if policy['type'] == 'group':
-        child_policies = self._GetPoliciesForWriter(policy)
-        child_recommended_policies = filter(self.CanBeRecommended,
-                                            child_policies)
-        if child_policies:
-          # Only write nonempty groups.
-          self.BeginPolicyGroup(policy)
-          for child_policy in child_policies:
-            # Nesting of groups is currently not supported.
-            self.WritePolicy(child_policy)
-          self.EndPolicyGroup()
-        if child_recommended_policies:
-          self.BeginRecommendedPolicyGroup(policy)
-          for child_policy in child_recommended_policies:
-            self.WriteRecommendedPolicy(child_policy)
-          self.EndRecommendedPolicyGroup()
-      elif self.IsPolicySupported(policy):
-        self.WritePolicy(policy)
-        if self.CanBeRecommended(policy):
-          self.WriteRecommendedPolicy(policy)
+    self.WritePolicies(template['policy_definitions'])
     self.EndTemplate()
 
     return self.GetTemplateText()
@@ -302,6 +255,41 @@ class TemplateWriter(object):
       The sorted policy list.
     '''
     return self.SortPoliciesGroupsFirst(policy_list)
+
+  def WritePolicies(self, policy_list):
+    '''Appends the template text corresponding to all the policies into the
+    internal buffer.
+
+    Args:
+      policy_list: A list containing the policies to write.
+    '''
+    for policy in policy_list:
+      if policy['type'] == 'group':
+        child_policies = list(self._GetPoliciesForWriter(policy))
+        child_recommended_policies = list(
+            filter(self.CanBeRecommended, child_policies))
+        # Only write nonempty groups.
+        if child_policies:
+          # Miscellaneous should not be considered a group.
+          treat_as_group = policy['name'] != 'Miscellaneous'
+          if treat_as_group:
+            self.BeginPolicyGroup(policy)
+          for child_policy in child_policies:
+            # Nesting of groups is currently not supported.
+            self.WritePolicy(child_policy)
+          if treat_as_group:
+            self.EndPolicyGroup()
+        if child_recommended_policies:
+          if treat_as_group:
+            self.BeginRecommendedPolicyGroup(policy)
+          for child_policy in child_recommended_policies:
+            self.WriteRecommendedPolicy(child_policy)
+          if treat_as_group:
+            self.EndRecommendedPolicyGroup()
+      elif self.IsPolicySupported(policy):
+        self.WritePolicy(policy)
+        if self.CanBeRecommended(policy):
+          self.WriteRecommendedPolicy(policy)
 
   def WritePolicy(self, policy):
     '''Appends the template text corresponding to a policy into the
@@ -444,8 +432,8 @@ class TemplateWriter(object):
     '''Returns whether the policy has expanded documentation containing the link
     to the documentation with schema and formatting.
     '''
-    return (policy['type'] in ('dict', 'external') or 'url_schema' in policy or
-            'validation_schema' in policy or 'description_schema' in policy)
+    return (policy['type'] in ('dict', 'external') or 'url_schema' in policy
+            or 'validation_schema' in policy or 'description_schema' in policy)
 
   def GetExpandedPolicyDescription(self, policy):
     '''Returns the expanded description of the policy containing the link to the
@@ -456,8 +444,8 @@ class TemplateWriter(object):
     url = None
     if 'url_schema' in policy:
       url = policy['url_schema']
-    if (policy['type'] in ('dict', 'external') or
-        'validation_schema' in policy or 'description_schema' in policy):
-      url = ('https://cloud.google.com/docs/chrome-enterprise/policies/?policy='
-             + policy['name'])
+    if (policy['type'] in ('dict', 'external') or 'validation_schema' in policy
+        or 'description_schema' in policy):
+      url = ('https://chromeenterprise.google/policies/?policy=' +
+             policy['name'])
     return schema_description_link_text.replace('$6', url) if url else ''

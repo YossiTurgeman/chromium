@@ -1,11 +1,18 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/network/public/cpp/resource_request_body.h"
 
+#include <utility>
+#include <vector>
+
+#include "base/check.h"
+#include "base/memory/scoped_refptr.h"
+#include "services/network/public/cpp/data_element.h"
 #include "services/network/public/mojom/chunked_data_pipe_getter.mojom.h"
 #include "services/network/public/mojom/data_pipe_getter.mojom.h"
+#include "services/network/public/mojom/url_request.mojom-shared.h"
 
 namespace network {
 
@@ -13,36 +20,37 @@ ResourceRequestBody::ResourceRequestBody()
     : identifier_(0), contains_sensitive_info_(false) {}
 
 // static
+scoped_refptr<ResourceRequestBody> ResourceRequestBody::CreateFromCopyOfBytes(
+    base::span<const uint8_t> bytes) {
+  auto result = base::MakeRefCounted<ResourceRequestBody>();
+  result->AppendCopyOfBytes(bytes);
+  return result;
+}
+
+// static
 scoped_refptr<ResourceRequestBody> ResourceRequestBody::CreateFromBytes(
-    const char* bytes,
-    size_t length) {
-  scoped_refptr<ResourceRequestBody> result = new ResourceRequestBody();
-  result->AppendBytes(bytes, length);
+    std::vector<uint8_t>&& bytes) {
+  auto result = base::MakeRefCounted<ResourceRequestBody>();
+  result->AppendBytes(std::move(bytes));
   return result;
 }
 
 bool ResourceRequestBody::EnableToAppendElement() const {
   return elements_.empty() ||
          (elements_.front().type() !=
-              mojom::DataElementType::kChunkedDataPipe &&
-          elements_.front().type() != mojom::DataElementType::kReadOnceStream);
+          mojom::DataElementDataView::Tag::kChunkedDataPipe);
 }
 
-void ResourceRequestBody::AppendBytes(std::vector<uint8_t> bytes) {
+void ResourceRequestBody::AppendBytes(std::vector<uint8_t>&& bytes) {
   DCHECK(EnableToAppendElement());
 
   if (bytes.size() > 0) {
-    elements_.push_back(DataElement());
-    elements_.back().SetToBytes(std::move(bytes));
+    elements_.emplace_back(DataElementBytes(std::move(bytes)));
   }
 }
 
-void ResourceRequestBody::AppendBytes(const char* bytes, int bytes_len) {
-  std::vector<uint8_t> vec;
-  vec.assign(reinterpret_cast<const uint8_t*>(bytes),
-             reinterpret_cast<const uint8_t*>(bytes + bytes_len));
-
-  AppendBytes(std::move(vec));
+void ResourceRequestBody::AppendCopyOfBytes(base::span<const uint8_t> bytes) {
+  AppendBytes(std::vector<uint8_t>(bytes.begin(), bytes.end()));
 }
 
 void ResourceRequestBody::AppendFileRange(
@@ -52,66 +60,34 @@ void ResourceRequestBody::AppendFileRange(
     const base::Time& expected_modification_time) {
   DCHECK(EnableToAppendElement());
 
-  elements_.push_back(DataElement());
-  elements_.back().SetToFilePathRange(file_path, offset, length,
-                                      expected_modification_time);
-}
-
-void ResourceRequestBody::AppendRawFileRange(
-    base::File file,
-    const base::FilePath& file_path,
-    uint64_t offset,
-    uint64_t length,
-    const base::Time& expected_modification_time) {
-  DCHECK(EnableToAppendElement());
-
-  elements_.push_back(DataElement());
-  elements_.back().SetToFileRange(std::move(file), file_path, offset, length,
-                                  expected_modification_time);
-}
-
-void ResourceRequestBody::AppendBlob(const std::string& uuid) {
-  AppendBlob(uuid, std::numeric_limits<uint64_t>::max());
-}
-
-void ResourceRequestBody::AppendBlob(const std::string& uuid, uint64_t length) {
-  DCHECK(EnableToAppendElement());
-
-  elements_.push_back(DataElement());
-  elements_.back().SetToBlobRange(uuid, 0 /* offset */, length);
+  elements_.emplace_back(
+      DataElementFile(file_path, offset, length, expected_modification_time));
 }
 
 void ResourceRequestBody::AppendDataPipe(
     mojo::PendingRemote<mojom::DataPipeGetter> data_pipe_getter) {
   DCHECK(EnableToAppendElement());
+  DCHECK(data_pipe_getter);
 
-  elements_.push_back(DataElement());
-  elements_.back().SetToDataPipe(std::move(data_pipe_getter));
+  elements_.emplace_back(DataElementDataPipe(std::move(data_pipe_getter)));
 }
 
 void ResourceRequestBody::SetToChunkedDataPipe(
-    mojo::PendingRemote<mojom::ChunkedDataPipeGetter>
-        chunked_data_pipe_getter) {
+    mojo::PendingRemote<mojom::ChunkedDataPipeGetter> chunked_data_pipe_getter,
+    ReadOnlyOnce read_only_once) {
   DCHECK(elements_.empty());
+  DCHECK(chunked_data_pipe_getter);
 
-  elements_.push_back(DataElement());
-  elements_.back().SetToChunkedDataPipe(std::move(chunked_data_pipe_getter));
-}
-
-void ResourceRequestBody::SetToReadOnceStream(
-    mojo::PendingRemote<mojom::ChunkedDataPipeGetter>
-        chunked_data_pipe_getter) {
-  DCHECK(elements_.empty());
-
-  elements_.push_back(DataElement());
-  elements_.back().SetToReadOnceStream(std::move(chunked_data_pipe_getter));
+  elements_.emplace_back(DataElementChunkedDataPipe(
+      std::move(chunked_data_pipe_getter), read_only_once));
 }
 
 std::vector<base::FilePath> ResourceRequestBody::GetReferencedFiles() const {
   std::vector<base::FilePath> result;
   for (const auto& element : *elements()) {
-    if (element.type() == mojom::DataElementType::kFile)
-      result.push_back(element.path());
+    if (const auto* file = element.TryAs<DataElementFile>()) {
+      result.push_back(file->path());
+    }
   }
   return result;
 }

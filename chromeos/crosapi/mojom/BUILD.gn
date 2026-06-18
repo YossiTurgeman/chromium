@@ -1,59 +1,54 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//mojo/public/tools/bindings/mojom.gni")
+import("//printing/buildflags/buildflags.gni")
 
 mojom("mojom") {
   sources = [
-    "bitmap.mojom",
+    "account_manager.mojom",
     "crosapi.mojom",
-    "keystore_service.mojom",
-    "message_center.mojom",
-    "notification.mojom",
-    "screen_manager.mojom",
-    "select_file.mojom",
+    "local_printer.mojom",
+    "nullable_primitives.mojom",
+    "probe_service.mojom",
+    "telemetry_diagnostic_routine_service.mojom",
+    "telemetry_event_service.mojom",
+    "telemetry_extension_exception.mojom",
+    "telemetry_keyboard_event.mojom",
   ]
   disable_variants = true
-
-  cpp_typemaps = [
-    {
-      types = [
-        {
-          mojom = "crosapi.mojom.Bitmap"
-          cpp = "crosapi::Bitmap"
-          move_only = true
-        },
-      ]
-      traits_headers = [ "//chromeos/crosapi/mojom/bitmap_mojom_traits.h" ]
-      traits_public_deps = [
-        ":mojom_traits",
-        "//chromeos/crosapi/cpp",
-      ]
-    },
-  ]
+  enable_js_fuzzing = false
+  cpp_only = true
 
   public_deps = [
+    "//chromeos/components/in_session_auth/mojom",
+    "//chromeos/components/payments/mojom",
+    "//chromeos/components/remote_apps/mojom",
+    "//chromeos/components/sensors/mojom",
+    "//chromeos/services/chromebox_for_meetings/public/mojom",
+    "//chromeos/services/machine_learning/public/mojom",
+    "//chromeos/services/network_health/public/mojom:types",
+    "//components/global_media_controls/public/mojom:device_service",
+    "//components/printing/common:mojo_interfaces",
+    "//components/tab_groups/public/mojom:mojo_bindings",
+    "//media/mojo/mojom:speech_recognition",
     "//mojo/public/mojom/base",
-    "//services/device/public/mojom:mojom",
+    "//printing/backend/mojom",
+    "//printing/mojom",
+    "//remoting/host/mojom",
+    "//services/device/public/mojom",
+    "//services/media_session/public/mojom",
+    "//ui/accessibility:ax_enums_mojo",
+    "//ui/accessibility/mojom",
+    "//ui/base/mojom",
+    "//ui/base/mojom:ui_base_types",
+    "//ui/color:mojom",
+    "//ui/display/mojom",
+    "//ui/events/mojom",
+    "//ui/gfx/geometry/mojom",
     "//ui/gfx/image/mojom",
+    "//ui/gfx/mojom",
     "//url/mojom:url_mojom_gurl",
-  ]
-}
-
-component("mojom_traits") {
-  output_name = "crosapi_mojom_traits"
-
-  sources = [
-    "bitmap_mojom_traits.cc",
-    "bitmap_mojom_traits.h",
-  ]
-
-  defines = [ "IS_CROSAPI_MOJOM_TRAITS_IMPL" ]
-
-  public_deps = [
-    ":mojom_shared",
-    "//chromeos/crosapi/cpp",
-    "//mojo/public/cpp/base:shared_typemap_traits",
   ]
 }

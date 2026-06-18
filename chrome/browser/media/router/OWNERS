@@ -1,2 +1,4 @@
-file://components/media_router/OWNERS
-# COMPONENT: Internals>Cast
+mfoltz@chromium.org
+muyaoxu@google.com
+
+file://media/OWNERS  #{LAST_RESORT_SUGGESTION}

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 #define COMPONENTS_PERMISSIONS_TEST_PERMISSION_REQUEST_OBSERVER_H_
 
 #include "base/run_loop.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_observation.h"
 #include "components/permissions/permission_request_manager.h"
 
 namespace permissions {
@@ -22,18 +22,29 @@ class PermissionRequestObserver : public PermissionRequestManager::Observer {
   ~PermissionRequestObserver() override;
 
   bool request_shown() const { return request_shown_; }
+  bool is_view_recreate_failed() const { return is_view_recreate_failed_; }
+  bool is_prompt_show_failed_hidden_tab() const {
+    return is_prompt_show_failed_hidden_tab_;
+  }
 
   // Blocks until a request is shown.
   void Wait();
 
   // PermissionRequestManager::Observer:
-  void OnBubbleAdded() override;
+  void OnPromptAdded() override;
+  void OnRequestsFinalized() override;
+  void OnPromptRecreateViewFailed() override;
+  void OnPromptCreationFailedHiddenTab() override;
+  void OnPermissionRequestManagerDestructed() override;
 
  private:
-  ScopedObserver<PermissionRequestManager, PermissionRequestManager::Observer>
-      observer_{this};
+  base::ScopedObservation<PermissionRequestManager,
+                          PermissionRequestManager::Observer>
+      observation_{this};
   base::RunLoop loop_;
   bool request_shown_ = false;
+  bool is_view_recreate_failed_ = false;
+  bool is_prompt_show_failed_hidden_tab_ = false;
 };
 
 }  // namespace permissions

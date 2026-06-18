@@ -1,16 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_VIDEO_RVFC_VIDEO_FRAME_REQUEST_CALLBACK_COLLECTION_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_VIDEO_RVFC_VIDEO_FRAME_REQUEST_CALLBACK_COLLECTION_H_
 
-#include "third_party/blink/renderer/bindings/modules/v8/v8_video_frame_metadata.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_video_frame_callback_metadata.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_video_frame_request_callback.h"
 #include "third_party/blink/renderer/core/dom/dom_high_res_time_stamp.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/name_client.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -24,21 +25,22 @@ class MODULES_EXPORT VideoFrameRequestCallbackCollection final
       public NameClient {
  public:
   explicit VideoFrameRequestCallbackCollection(ExecutionContext*);
+  ~VideoFrameRequestCallbackCollection() final = default;
 
   using CallbackId = int;
 
-  // Abstract class that generalizes a video.rAF callback.
+  // Abstract class that generalizes a video.rVFC callback.
   class MODULES_EXPORT VideoFrameCallback
       : public GarbageCollected<VideoFrameCallback>,
         public NameClient {
    public:
     virtual void Trace(Visitor*) const {}
-    const char* NameInHeapSnapshot() const override {
+    const char* GetHumanReadableName() const override {
       return "VideoFrameCallback";
     }
-    virtual ~VideoFrameCallback() = default;
+    ~VideoFrameCallback() override = default;
 
-    virtual void Invoke(double, const VideoFrameMetadata*) = 0;
+    virtual void Invoke(double, const VideoFrameCallbackMetadata*) = 0;
 
     int Id() const { return id_; }
     bool IsCancelled() const { return is_cancelled_; }
@@ -58,14 +60,14 @@ class MODULES_EXPORT VideoFrameRequestCallbackCollection final
   class MODULES_EXPORT V8VideoFrameCallback : public VideoFrameCallback {
    public:
     void Trace(Visitor*) const override;
-    const char* NameInHeapSnapshot() const override {
+    const char* GetHumanReadableName() const override {
       return "V8VideoFrameCallback";
     }
 
     explicit V8VideoFrameCallback(V8VideoFrameRequestCallback*);
     ~V8VideoFrameCallback() override = default;
 
-    void Invoke(double, const VideoFrameMetadata* metadata) override;
+    void Invoke(double, const VideoFrameCallbackMetadata* metadata) override;
 
    private:
     Member<V8VideoFrameRequestCallback> callback_;
@@ -81,12 +83,13 @@ class MODULES_EXPORT VideoFrameRequestCallbackCollection final
   void CancelFrameCallback(CallbackId);
 
   // Invokes all callbacks with the provided information.
-  void ExecuteFrameCallbacks(double high_res_now_ms, const VideoFrameMetadata*);
+  void ExecuteFrameCallbacks(double high_res_now_ms,
+                             const VideoFrameCallbackMetadata*);
 
   bool IsEmpty() const { return !frame_callbacks_.size(); }
 
-  virtual void Trace(Visitor*) const;
-  const char* NameInHeapSnapshot() const override {
+  void Trace(Visitor*) const;
+  const char* GetHumanReadableName() const override {
     return "VideoFrameRequestCallbackCollection";
   }
 

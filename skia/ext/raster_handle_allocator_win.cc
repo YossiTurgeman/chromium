@@ -1,4 +1,4 @@
-// Copyright (c) 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,20 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/debug/gdi_debug_util_win.h"
-#include "base/memory/ptr_util.h"
 #include "base/logging.h"
+#include "base/memory/ptr_util.h"
+#include "base/win/scoped_gdi_object.h"
 #include "base/win/win_util.h"
+#include "skia/ext/legacy_display_globals.h"
 #include "skia/ext/platform_canvas.h"
 #include "skia/ext/skia_utils_win.h"
 #include "third_party/skia/include/core/SkMatrix.h"
 #include "third_party/skia/include/core/SkPath.h"
-#include "third_party/skia/include/core/SkRefCnt.h"
 #include "third_party/skia/include/core/SkRect.h"
+#include "third_party/skia/include/core/SkRefCnt.h"
 
 namespace {
 
@@ -32,12 +36,9 @@ static void DeleteHDCCallback(void*, void* context) {
 
   // Must select back in the old bitmap before we delete the hdc, and so we can
   // recover the new_bitmap that we allocated, so we can delete it.
-  HBITMAP new_bitmap =
-      static_cast<HBITMAP>(SelectObject(rec->hdc_, rec->prev_bitmap_));
-  bool success = DeleteObject(new_bitmap);
-  DCHECK(success);
-  success = DeleteDC(rec->hdc_);
-  DCHECK(success);
+  DeleteObject(
+      static_cast<HBITMAP>(SelectObject(rec->hdc_, rec->prev_bitmap_)));
+  DeleteDC(rec->hdc_);
   delete rec;
 }
 
@@ -45,36 +46,39 @@ static void DeleteHDCCallback(void*, void* context) {
 // on error.
 static bool Create(int width,
                    int height,
-                   bool is_opaque,
                    HANDLE shared_section,
                    bool do_clear,
                    SkRasterHandleAllocator::Rec* rec) {
   void* pixels;
-  HBITMAP new_bitmap =
-      skia::CreateHBitmap(width, height, is_opaque, shared_section, &pixels);
-  if (!new_bitmap) {
+  base::win::ScopedGDIObject<HBITMAP> new_bitmap =
+      skia::CreateHBitmapXRGB8888(width, height, shared_section, &pixels);
+  if (!new_bitmap.is_valid()) {
     LOG(ERROR) << "CreateHBitmap failed";
     return false;
   }
 
-  size_t row_bytes = skia::PlatformCanvasStrideForWidth(width);
-  if (do_clear)
-    memset(pixels, 0, row_bytes * height);
+  // The HBITMAP is 32-bit RGB data. A size_t causes a type change from int when
+  // multiplying against the dimensions.
+  const size_t bpp = 4;
+  if (do_clear) {
+    UNSAFE_TODO(memset(pixels, 0, width * bpp * height));
+  }
 
   HDC hdc = CreateCompatibleDC(nullptr);
-  if (!hdc) {
-    DeleteObject(new_bitmap);
+  if (!hdc)
     return false;
-  }
+
   SetGraphicsMode(hdc, GM_ADVANCED);
 
-  HBITMAP prev_bitmap = static_cast<HBITMAP>(SelectObject(hdc, new_bitmap));
+  // The |new_bitmap| will be destroyed by |rec|'s DeleteHDCCallback().
+  HBITMAP prev_bitmap =
+      static_cast<HBITMAP>(SelectObject(hdc, new_bitmap.release()));
   DCHECK(prev_bitmap);
 
   rec->fReleaseProc = DeleteHDCCallback;
   rec->fReleaseCtx = new HDCContextRec{hdc, prev_bitmap};
   rec->fPixels = pixels;
-  rec->fRowBytes = row_bytes;
+  rec->fRowBytes = width * bpp;
   rec->fHandle = hdc;
   return true;
 }
@@ -88,8 +92,7 @@ class GDIAllocator : public SkRasterHandleAllocator {
 
   bool allocHandle(const SkImageInfo& info, Rec* rec) override {
     SkASSERT(info.colorType() == kN32_SkColorType);
-    return Create(info.width(), info.height(), info.isOpaque(), nullptr,
-                  !info.isOpaque(), rec);
+    return Create(info.width(), info.height(), nullptr, !info.isOpaque(), rec);
   }
 
   void updateHandle(Handle handle,
@@ -98,11 +101,9 @@ class GDIAllocator : public SkRasterHandleAllocator {
     HDC hdc = static_cast<HDC>(handle);
     skia::LoadTransformToDC(hdc, ctm);
 
-    HRGN hrgn = CreateRectRgnIndirect(&skia::SkIRectToRECT(clip_bounds));
-    int result = SelectClipRgn(hdc, hrgn);
-    DCHECK(result != ERROR);
-    result = DeleteObject(hrgn);
-    DCHECK(result != 0);
+    base::win::ScopedGDIObject<HRGN> hrgn(
+        CreateRectRgnIndirect(&skia::SkIRectToRECT(clip_bounds)));
+    SelectClipRgn(hdc, hrgn.get());
   }
 };
 
@@ -122,7 +123,9 @@ std::unique_ptr<SkCanvas> CreatePlatformCanvasWithSharedSection(
     OnFailureType failure_type) {
   SkAlphaType alpha = is_opaque ? kOpaque_SkAlphaType : kPremul_SkAlphaType;
   SkImageInfo info = SkImageInfo::MakeN32(width, height, alpha);
-  size_t row_bytes = PlatformCanvasStrideForWidth(width);
+  // 32-bit RGB data as we're using N32 |info|. A size_t causes a type change
+  // from int when multiplying against the dimensions.
+  const size_t bpp = 4;
 
   // This function contains an implementation of a Skia platform bitmap for
   // drawing and compositing graphics. The original implementation uses Windows
@@ -132,18 +135,19 @@ std::unique_ptr<SkCanvas> CreatePlatformCanvasWithSharedSection(
   // shared memory as the bitmap.
   if (base::win::IsUser32AndGdi32Available()) {
     SkRasterHandleAllocator::Rec rec;
-    if (Create(width, height, is_opaque, shared_section, false, &rec))
+    if (Create(width, height, shared_section, false, &rec))
       return SkRasterHandleAllocator::MakeCanvas(
           std::make_unique<GDIAllocator>(), info, &rec);
   } else {
     DCHECK(shared_section != NULL);
-    void* pixels =
-        MapViewOfFile(shared_section, FILE_MAP_WRITE, 0, 0, row_bytes * height);
+    void* pixels = MapViewOfFile(shared_section, FILE_MAP_WRITE, 0, 0,
+                                 width * bpp * height);
     if (pixels) {
       SkBitmap bitmap;
-      if (bitmap.installPixels(info, pixels, row_bytes, unmap_view_proc,
+      if (bitmap.installPixels(info, pixels, width * bpp, unmap_view_proc,
                                nullptr)) {
-        return std::make_unique<SkCanvas>(bitmap);
+        return std::make_unique<SkCanvas>(
+            bitmap, LegacyDisplayGlobals::GetSkSurfaceProps());
       }
     }
   }

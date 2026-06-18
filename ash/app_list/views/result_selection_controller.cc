@@ -1,11 +1,14 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/app_list/views/result_selection_controller.h"
 
+#include <utility>
+
 #include "ash/app_list/app_list_util.h"
 #include "ash/app_list/views/search_result_container_view.h"
+#include "base/i18n/rtl.h"
 
 namespace ash {
 
@@ -44,6 +47,11 @@ ResultSelectionController::ResultSelectionController(
 
 ResultSelectionController::~ResultSelectionController() = default;
 
+bool ResultSelectionController::IsSelectedResultAtFirstAvailableLocation() {
+  auto location = GetFirstAvailableResultLocation();
+  return location && (*location == *selected_location_details_);
+}
+
 ResultSelectionController::MoveResult ResultSelectionController::MoveSelection(
     const ui::KeyEvent& event) {
   if (block_selection_changes_)
@@ -70,9 +78,10 @@ void ResultSelectionController::ResetSelection(const ui::KeyEvent* key_event,
   if (block_selection_changes_)
     return;
 
-  // Clear selection if no search results exist (the first container will have
-  // at least one result if search results are available).
-  if (result_selection_model_->at(0)->num_results() == 0) {
+  std::unique_ptr<ResultLocationDetails> default_location =
+      GetFirstAvailableResultLocation();
+  // Clear selection if no search results exist.
+  if (!default_location) {
     ClearSelection();
     return;
   }
@@ -87,25 +96,22 @@ void ResultSelectionController::ResetSelection(const ui::KeyEvent* key_event,
           : nullptr;
   const bool selected_id_preserved = selected_location_details_.get();
 
-  const bool is_up_key = key_event && key_event->key_code() == ui::VKEY_UP;
+  const bool is_previous_key =
+      key_event && (key_event->key_code() == ui::VKEY_UP ||
+                    key_event->key_code() == ui::VKEY_LEFT);
   const bool is_shift_tab = key_event &&
                             key_event->key_code() == ui::VKEY_TAB &&
                             key_event->IsShiftDown();
 
   if (!selected_location_details_) {
-    selected_location_details_ = std::make_unique<ResultLocationDetails>(
-        0 /* container_index */,
-        result_selection_model_->size() /* container_count */,
-        0 /* result_index */,
-        result_selection_model_->at(0)->num_results() /* result_count */,
-        result_selection_model_->at(0)
-            ->horizontally_traversable() /* container_is_horizontal */);
-
+    selected_location_details_ = std::move(default_location);
     // Note: left and right arrows are used primarily for traversal in
     // horizontal containers, so treat "back" arrow as other non-traversal keys
     // when deciding whether to reverse selection direction.
-    if (is_up_key || is_shift_tab)
-      ChangeContainer(selected_location_details_.get(), -1);
+    if (is_previous_key || is_shift_tab) {
+      ChangeContainer(selected_location_details_.get(),
+                      selected_location_details_->container_index - 1);
+    }
   }
 
   SearchResultBaseView* new_selection =
@@ -114,7 +120,7 @@ void ResultSelectionController::ResetSelection(const ui::KeyEvent* key_event,
     return;
 
   if (selected_result_)
-    selected_result_->SetSelected(false, base::nullopt);
+    selected_result_->SetSelected(false, std::nullopt);
 
   selected_result_ = new_selection;
 
@@ -123,7 +129,8 @@ void ResultSelectionController::ResetSelection(const ui::KeyEvent* key_event,
     selected_result_->set_is_default_result(default_selection &&
                                             !selected_id_preserved);
     selected_result_->SetSelected(true, is_shift_tab);
-    selected_result_id_ = new_selection->result()->id();
+    selected_result_id_ =
+        new_selection->result() ? new_selection->result()->id() : std::string();
   } else {
     selected_result_id_ = std::string();
   }
@@ -135,7 +142,7 @@ void ResultSelectionController::ClearSelection() {
   selected_location_details_ = nullptr;
   if (selected_result_) {
     // Reset the state of the previous selected result.
-    selected_result_->SetSelected(false, base::nullopt);
+    selected_result_->SetSelected(false, std::nullopt);
     selected_result_id_ = std::string();
     selected_result_->set_is_default_result(false);
   }
@@ -176,7 +183,7 @@ ResultSelectionController::GetNextResultLocationForLocation(
           ChangeContainer(next_location, location.container_index - 1);
 
           if (next_location->container_index >= location.container_index)
-            return MoveResult::kSelectionCycleRejected;
+            return MoveResult::kSelectionCycleBeforeFirstResult;
 
         } else {
           --next_location->result_index;
@@ -187,7 +194,7 @@ ResultSelectionController::GetNextResultLocationForLocation(
           ChangeContainer(next_location, location.container_index + 1);
 
           if (next_location->container_index <= location.container_index)
-            return MoveResult::kSelectionCycleRejected;
+            return MoveResult::kSelectionCycleAfterLastResult;
         } else {
           ++next_location->result_index;
         }
@@ -200,7 +207,7 @@ ResultSelectionController::GetNextResultLocationForLocation(
         ChangeContainer(next_location, location.container_index - 1);
 
         if (next_location->container_index >= location.container_index)
-          return MoveResult::kSelectionCycleRejected;
+          return MoveResult::kSelectionCycleBeforeFirstResult;
       } else {
         // Traversing 'up' moves up one result.
         --next_location->result_index;
@@ -211,7 +218,7 @@ ResultSelectionController::GetNextResultLocationForLocation(
         // Traversing 'down' from the bottom of a container changes containers.
         ChangeContainer(next_location, location.container_index + 1);
         if (next_location->container_index <= location.container_index)
-          return MoveResult::kSelectionCycleRejected;
+          return MoveResult::kSelectionCycleAfterLastResult;
       } else {
         // Traversing 'down' moves down one result.
         ++next_location->result_index;
@@ -275,6 +282,23 @@ void ResultSelectionController::SetSelection(
   selection_change_callback_.Run();
 }
 
+std::unique_ptr<ResultLocationDetails>
+ResultSelectionController::GetFirstAvailableResultLocation() const {
+  for (size_t container_index = 0;
+       container_index < result_selection_model_->size(); ++container_index) {
+    SearchResultContainerView* container =
+        result_selection_model_->at(container_index);
+    if (!container->num_results())
+      continue;
+
+    return std::make_unique<ResultLocationDetails>(
+        container_index, result_selection_model_->size() /* container_count */,
+        0 /* result_index */, container->num_results() /* result_count */,
+        container->horizontally_traversable() /* container_is_horizontal */);
+  }
+  return nullptr;
+}
+
 SearchResultBaseView* ResultSelectionController::GetResultAtLocation(
     const ResultLocationDetails& location) {
   SearchResultContainerView* located_container =
@@ -288,9 +312,11 @@ ResultSelectionController::FindResultWithId(const std::string& id) {
        container_index < result_selection_model_->size(); ++container_index) {
     SearchResultContainerView* const container =
         result_selection_model_->at(container_index);
-    for (int result_index = 0; result_index < container->num_results();
+    for (size_t result_index = 0; result_index < container->num_results();
          ++result_index) {
-      if (container->GetResultViewAt(result_index)->result()->id() == id) {
+      const SearchResult* const result =
+          container->GetResultViewAt(result_index)->result();
+      if (result && result->id() == id) {
         return std::make_unique<ResultLocationDetails>(
             container_index, result_selection_model_->size(), result_index,
             container->num_results(), container->horizontally_traversable());
@@ -303,9 +329,8 @@ ResultSelectionController::FindResultWithId(const std::string& id) {
 void ResultSelectionController::ChangeContainer(
     ResultLocationDetails* location_details,
     int new_container_index) {
-  if (new_container_index == location_details->container_index) {
+  if (new_container_index == location_details->container_index)
     return;
-  }
 
   // If the index is advancing
   bool container_advancing =
@@ -313,12 +338,15 @@ void ResultSelectionController::ChangeContainer(
 
   // This handles 'looping', so if the selection goes off the end of the
   // container, it will come back to the beginning.
-  int new_container = new_container_index;
-  if (new_container < 0) {
-    new_container = location_details->container_count - 1;
-  }
-  if (new_container >= location_details->container_count)
-    new_container = 0;
+  auto ensure_valid_index = [&location_details](int index) -> int {
+    if (index < 0)
+      return location_details->container_count - 1;
+    if (index >= location_details->container_count)
+      return 0;
+    return index;
+  };
+
+  int new_container = ensure_valid_index(new_container_index);
 
   // Because all containers always exist, we need to make sure there are results
   // in the next container.
@@ -329,13 +357,12 @@ void ResultSelectionController::ChangeContainer(
       --new_container;
     }
 
-    // Prevent any potential infinite looping by resetting to '0', a container
-    // that should never be empty.
-    if (new_container <= 0 ||
-        new_container >= location_details->container_count) {
-      new_container = 0;
+    new_container = ensure_valid_index(new_container);
+
+    // Prevent any potential infinite looping by resetting to currently selected
+    // container.
+    if (new_container == location_details->container_index)
       break;
-    }
   }
 
   // Updates |result_count| and |container_is_horizontal| based on

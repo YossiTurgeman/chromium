@@ -1,121 +1,114 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/password_manager/android/credential_leak_controller_android.h"
 
+#include <memory>
+
 #include "base/android/jni_android.h"
-#include "base/android/jni_string.h"
-#include "base/feature_list.h"
-#include "chrome/android/chrome_jni_headers/PasswordChangeLauncher_jni.h"
 #include "chrome/browser/password_manager/android/password_checkup_launcher_helper.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/android/passwords/credential_leak_dialog_view_android.h"
-#include "chrome/common/url_constants.h"
+#include "components/password_manager/core/browser/features/password_features.h"
 #include "components/password_manager/core/browser/leak_detection_dialog_utils.h"
-#include "components/password_manager/core/common/password_manager_features.h"
+#include "components/password_manager/core/browser/password_manager_metrics_util.h"
 #include "ui/android/window_android.h"
 
+using password_manager::CreateDialogTraits;
+using password_manager::CredentialLeakType;
+using password_manager::PasswordCheckReferrerAndroid;
 using password_manager::metrics_util::LeakDialogDismissalReason;
-using password_manager::metrics_util::LogLeakDialogTypeAndDismissalReason;
+using password_manager::metrics_util::LeakDialogMetricsRecorder;
+using password_manager::metrics_util::LeakDialogType;
 
 CredentialLeakControllerAndroid::CredentialLeakControllerAndroid(
     password_manager::CredentialLeakType leak_type,
-    password_manager::CompromisedSitesCount saved_sites,
     const GURL& origin,
-    const base::string16& username,
-    ui::WindowAndroid* window_android)
+    const std::u16string& username,
+    Profile* profile,
+    ui::WindowAndroid* window_android,
+    std::unique_ptr<PasswordCheckupLauncherHelper> checkup_launcher,
+    std::unique_ptr<LeakDialogMetricsRecorder> metrics_recorder,
+    std::string account_email)
     : leak_type_(leak_type),
-      saved_sites_(saved_sites),
       origin_(origin),
       username_(username),
-      window_android_(window_android) {}
+      profile_(profile),
+      window_android_(window_android),
+      leak_dialog_traits_(CreateDialogTraits(leak_type_)),
+      checkup_launcher_(std::move(checkup_launcher)),
+      metrics_recorder_(std::move(metrics_recorder)),
+      account_email_(account_email) {}
 
 CredentialLeakControllerAndroid::~CredentialLeakControllerAndroid() = default;
 
 void CredentialLeakControllerAndroid::ShowDialog() {
-  dialog_view_.reset(new CredentialLeakDialogViewAndroid(this));
+  dialog_view_ = std::make_unique<CredentialLeakDialogViewAndroid>(this);
   dialog_view_->Show(window_android_);
 }
 
 void CredentialLeakControllerAndroid::OnCancelDialog() {
-  LogLeakDialogTypeAndDismissalReason(
-      password_manager::GetLeakDialogType(leak_type_),
+  metrics_recorder_->LogLeakDialogTypeAndDismissalReason(
       LeakDialogDismissalReason::kClickedClose);
   delete this;
 }
 
 void CredentialLeakControllerAndroid::OnAcceptDialog() {
-  LogLeakDialogTypeAndDismissalReason(
-      password_manager::GetLeakDialogType(leak_type_),
-      ShouldCheckPasswords() ? LeakDialogDismissalReason::kClickedCheckPasswords
-                             : LeakDialogDismissalReason::kClickedOk);
-
-  // |window_android_| might be null in tests.
-  if (!window_android_) {
-    delete this;
-    return;
+  LeakDialogType dialog_type = password_manager::GetLeakDialogType(leak_type_);
+  LeakDialogDismissalReason dismissal_reason =
+      LeakDialogDismissalReason::kClickedOk;
+  switch (dialog_type) {
+    case LeakDialogType::kChange:
+      dismissal_reason = LeakDialogDismissalReason::kClickedOk;
+      break;
+    case LeakDialogType::kCheckup:
+    case LeakDialogType::kCheckupAndChange:
+      dismissal_reason = LeakDialogDismissalReason::kClickedCheckPasswords;
+      break;
   }
 
-  DCHECK(!(ShouldCheckPasswords() && ShouldShowChangePasswordButton()));
+  metrics_recorder_->LogLeakDialogTypeAndDismissalReason(dismissal_reason);
+
   JNIEnv* env = base::android::AttachCurrentThread();
-  if (ShouldCheckPasswords()) {
-    if (base::FeatureList::IsEnabled(
-            password_manager::features::kPasswordCheck)) {
-      PasswordCheckupLauncherHelper::LaunchLocalCheckup(
-          env, window_android_->GetJavaObject());
-    } else {
-      PasswordCheckupLauncherHelper::LaunchCheckupInAccountWithWindowAndroid(
-          env,
-          base::android::ConvertUTF8ToJavaString(
-              env, password_manager::GetPasswordCheckupURL().spec()),
-          window_android_->GetJavaObject());
-    }
-  } else if (ShouldShowChangePasswordButton()) {
-    Java_PasswordChangeLauncher_start(
-        env, window_android_->GetJavaObject(),
-        base::android::ConvertUTF8ToJavaString(env, origin_.spec()),
-        base::android::ConvertUTF16ToJavaString(env, username_));
+
+  switch (dialog_type) {
+    case LeakDialogType::kChange:
+      // No-op.
+      break;
+    case LeakDialogType::kCheckup:
+    case LeakDialogType::kCheckupAndChange:
+      checkup_launcher_->LaunchCheckupOnDevice(
+          env, profile_, window_android_,
+          PasswordCheckReferrerAndroid::kLeakDialog, account_email_);
+      break;
   }
 
   delete this;
 }
 
 void CredentialLeakControllerAndroid::OnCloseDialog() {
-  LogLeakDialogTypeAndDismissalReason(
-      password_manager::GetLeakDialogType(leak_type_),
+  metrics_recorder_->LogLeakDialogTypeAndDismissalReason(
       LeakDialogDismissalReason::kNoDirectInteraction);
   delete this;
 }
 
-base::string16 CredentialLeakControllerAndroid::GetAcceptButtonLabel() const {
-  return password_manager::GetAcceptButtonLabel(leak_type_);
+std::u16string CredentialLeakControllerAndroid::GetAcceptButtonLabel() const {
+  return leak_dialog_traits_->GetAcceptButtonLabel();
 }
 
-base::string16 CredentialLeakControllerAndroid::GetCancelButtonLabel() const {
-  return password_manager::GetCancelButtonLabel();
+std::u16string CredentialLeakControllerAndroid::GetCancelButtonLabel() const {
+  return leak_dialog_traits_->GetCancelButtonLabel();
 }
 
-base::string16 CredentialLeakControllerAndroid::GetDescription() const {
-  if (base::FeatureList::IsEnabled(
-          password_manager::features::kPasswordCheck)) {
-    return password_manager::GetDescriptionWithCount(leak_type_, origin_,
-                                                     saved_sites_);
-  }
-  return password_manager::GetDescription(leak_type_, origin_);
+std::u16string CredentialLeakControllerAndroid::GetDescription() const {
+  return leak_dialog_traits_->GetDescription();
 }
 
-base::string16 CredentialLeakControllerAndroid::GetTitle() const {
-  return password_manager::GetTitle(leak_type_);
-}
-
-bool CredentialLeakControllerAndroid::ShouldCheckPasswords() const {
-  return password_manager::ShouldCheckPasswords(leak_type_);
-}
-
-bool CredentialLeakControllerAndroid::ShouldShowChangePasswordButton() const {
-  return password_manager::ShouldShowChangePasswordButton(leak_type_);
+std::u16string CredentialLeakControllerAndroid::GetTitle() const {
+  return leak_dialog_traits_->GetTitle();
 }
 
 bool CredentialLeakControllerAndroid::ShouldShowCancelButton() const {
-  return password_manager::ShouldShowCancelButton(leak_type_);
+  return leak_dialog_traits_->ShouldShowCancelButton();
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,20 +36,16 @@ void TestWebDialogDelegate::SetCloseOnEscape(bool enabled) {
   close_on_escape_ = enabled;
 }
 
-ModalType TestWebDialogDelegate::GetDialogModalType() const {
-  return MODAL_TYPE_WINDOW;
+ui::mojom::ModalType TestWebDialogDelegate::GetDialogModalType() const {
+  return ui::mojom::ModalType::kWindow;
 }
 
-base::string16 TestWebDialogDelegate::GetDialogTitle() const {
-  return base::UTF8ToUTF16("Test");
+std::u16string TestWebDialogDelegate::GetDialogTitle() const {
+  return u"Test";
 }
 
 GURL TestWebDialogDelegate::GetDialogContentURL() const {
   return url_;
-}
-
-void TestWebDialogDelegate::GetWebUIMessageHandlers(
-    std::vector<WebUIMessageHandler*>* handlers) const {
 }
 
 void TestWebDialogDelegate::GetDialogSize(gfx::Size* size) const {

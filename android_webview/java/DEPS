@@ -1,9 +1,13 @@
 include_rules = [
+  "+components/android_autofill",
   "+components/autofill/android/java",
   "+components/embedder_support/android/java",
   "+components/navigation_interception/android/java",
   "+components/policy/android/java",
   "+components/safe_browsing/android/java",
+  "+components/stylus_handwriting/android/java",
+  "+components/webauthn/android",
+  "+components/zoom/android/java",
 
   "-content/public/android/java",
   "+content/public/android/java/src/org/chromium/content_public",

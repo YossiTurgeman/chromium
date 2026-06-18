@@ -31,6 +31,7 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_OPTION_ELEMENT_H_
 #define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_OPTION_ELEMENT_H_
 
+#include "third_party/blink/public/platform/web_common.h"
 #include "third_party/blink/public/web/web_element.h"
 
 namespace blink {
@@ -40,7 +41,9 @@ class WebString;
 
 class BLINK_EXPORT WebOptionElement final : public WebElement {
  public:
-  WebOptionElement() : WebElement() {}
+  explicit WebOptionElement(
+      cppgc::SourceLocation loc = BLINK_WEB_NODE_LOCATION_FROM_HERE)
+      : WebElement(loc) {}
   WebOptionElement(const WebOptionElement& element) = default;
 
   WebOptionElement& operator=(const WebOptionElement& element) {
@@ -53,6 +56,11 @@ class BLINK_EXPORT WebOptionElement final : public WebElement {
   WebString GetText() const;
   WebString Label() const;
 
+  bool IsEnabled() const;
+
+  // Returns whether the option is currently selected.
+  bool IsSelected() const;
+
 #if INSIDE_BLINK
   WebOptionElement(HTMLOptionElement*);
   WebOptionElement& operator=(HTMLOptionElement*);
@@ -64,4 +72,4 @@ DECLARE_WEB_NODE_TYPE_CASTS(WebOptionElement);
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_OPTION_ELEMENT_H_

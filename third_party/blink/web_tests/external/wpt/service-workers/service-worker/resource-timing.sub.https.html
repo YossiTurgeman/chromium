@@ -74,7 +74,7 @@ promise_test(async (t) => {
   const performance = frame.contentWindow.performance;
   verify({
     performance: performance,
-    resource: 'resources/dummy.js',
+    resource: 'resources/sample.js',
     mode: 'same-origin',
     description: 'Generated response',
   });
@@ -114,9 +114,9 @@ promise_test(async (t) => {
   });
   verify({
     performance: performance,
-    resource: 'resources/missing.jpg',
+    resource: 'resources/missing.asis',  // ORB-compatible 404 response.
     mode: 'cross-origin',
-    description: 'Network fallback cross-origin load failure',
+    description: 'Network fallback cross-origin load failure (404 response)',
   });
   // Tests for respondWith(fetch()).
   verify({
@@ -127,7 +127,7 @@ promise_test(async (t) => {
   });
   verify({
     performance: performance,
-    resource: 'resources/dummy.txt?SWFetched',
+    resource: 'resources/sample.txt?SWFetched',
     mode: 'same-origin',
     description: 'Resource fetched as response from missing.jpg?SWRespondsWithFetch.',
     should_no_performance_entry: true,

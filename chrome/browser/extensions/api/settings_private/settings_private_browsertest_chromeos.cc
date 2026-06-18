@@ -1,9 +1,9 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/values.h"
-#include "chrome/browser/chromeos/login/test/guest_session_mixin.h"
+#include "chrome/browser/ash/login/test/guest_session_mixin.h"
 #include "chrome/browser/extensions/api/settings_private/prefs_util_enums.h"
 #include "chrome/browser/extensions/api/settings_private/settings_private_api.h"
 #include "chrome/browser/extensions/api/settings_private/settings_private_delegate.h"
@@ -21,12 +21,12 @@ namespace {
 
 class SettingsPrivateGuestModeTest : public MixinBasedInProcessBrowserTest {
  protected:
-  chromeos::GuestSessionMixin guest_session_{&mixin_host_};
+  ash::GuestSessionMixin guest_session_{&mixin_host_};
 };
 
-// Regression test for https://crbug.com/887383.
+// Regression test for https://crbug.com/41416087.
 IN_PROC_BROWSER_TEST_F(SettingsPrivateGuestModeTest, GuestMode) {
-  Profile* guest_profile = browser()->profile();
+  Profile* guest_profile = GetProfile();
   EXPECT_TRUE(guest_profile->IsOffTheRecord());
 
   // SettingsPrivate uses the incognito profile, not the recording profile,
@@ -49,7 +49,7 @@ IN_PROC_BROWSER_TEST_F(SettingsPrivateGuestModeTest, GuestMode) {
   // default value.
   EXPECT_EQ(settings_private::SetPrefResult::PREF_NOT_MODIFIABLE,
             delegate->SetDefaultZoom(0.5));
-  EXPECT_EQ(delegate->GetDefaultZoom()->GetDouble(), 0.0);
+  EXPECT_EQ(delegate->GetDefaultZoom().GetDouble(), 0.0);
 }
 
 }  // namespace

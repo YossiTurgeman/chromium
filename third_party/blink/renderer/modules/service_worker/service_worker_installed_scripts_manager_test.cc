@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,19 @@
 
 #include <utility>
 
+#include "base/containers/span.h"
+#include "base/containers/to_vector.h"
 #include "base/run_loop.h"
 #include "base/synchronization/waitable_event.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/mojom/service_worker/service_worker_installed_scripts_manager.mojom-blink.h"
-#include "third_party/blink/public/platform/platform.h"
+#include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/public/web/web_embedded_worker.h"
+#include "third_party/blink/renderer/platform/scheduler/public/non_main_thread.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
-#include "third_party/blink/renderer/platform/scheduler/public/thread.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 
@@ -27,6 +30,10 @@ class BrowserSideSender
     : mojom::blink::ServiceWorkerInstalledScriptsManagerHost {
  public:
   BrowserSideSender() = default;
+
+  BrowserSideSender(const BrowserSideSender&) = delete;
+  BrowserSideSender& operator=(const BrowserSideSender&) = delete;
+
   ~BrowserSideSender() override = default;
 
   mojom::blink::ServiceWorkerInstalledScriptsInfoPtr CreateAndBind(
@@ -54,9 +61,9 @@ class BrowserSideSender
     script_info->encoding = encoding;
     script_info->headers = headers;
     EXPECT_EQ(MOJO_RESULT_OK,
-              mojo::CreateDataPipe(nullptr, &body_handle_, &script_info->body));
-    EXPECT_EQ(MOJO_RESULT_OK, mojo::CreateDataPipe(nullptr, &meta_data_handle_,
-                                                   &script_info->meta_data));
+              mojo::CreateDataPipe(nullptr, body_handle_, script_info->body));
+    EXPECT_EQ(MOJO_RESULT_OK, mojo::CreateDataPipe(nullptr, meta_data_handle_,
+                                                   script_info->meta_data));
     script_info->body_size = body_size;
     script_info->meta_data_size = meta_data_size;
     manager_->TransferInstalledScript(std::move(script_info));
@@ -90,15 +97,23 @@ class BrowserSideSender
     std::move(requested_script_closure_).Run();
   }
 
+  // Send |data| with null terminator.
   void PushDataPipe(const std::string& data,
                     const mojo::DataPipeProducerHandle& handle) {
-    // Send |data| with null terminator.
     ASSERT_TRUE(handle.is_valid());
-    uint32_t written_bytes = data.size() + 1;
-    MojoResult rv = handle.WriteData(data.c_str(), &written_bytes,
-                                     MOJO_WRITE_DATA_FLAG_NONE);
+
+    size_t actually_written_bytes = 0;
+    MojoResult rv =
+        handle.WriteData(base::as_byte_span(data), MOJO_WRITE_DATA_FLAG_NONE,
+                         actually_written_bytes);
     ASSERT_EQ(MOJO_RESULT_OK, rv);
-    ASSERT_EQ(data.size() + 1, written_bytes);
+    ASSERT_EQ(data.size(), actually_written_bytes);
+
+    char nul_char = '\0';
+    rv = handle.WriteData(base::byte_span_from_ref(nul_char),
+                          MOJO_WRITE_DATA_FLAG_NONE, actually_written_bytes);
+    ASSERT_EQ(MOJO_RESULT_OK, rv);
+    ASSERT_EQ(1u, actually_written_bytes);
   }
 
   base::OnceClosure requested_script_closure_;
@@ -110,8 +125,6 @@ class BrowserSideSender
 
   mojo::ScopedDataPipeProducerHandle body_handle_;
   mojo::ScopedDataPipeProducerHandle meta_data_handle_;
-
-  DISALLOW_COPY_AND_ASSIGN(BrowserSideSender);
 };
 
 CrossThreadHTTPHeaderMapData ToCrossThreadHTTPHeaderMapData(
@@ -127,15 +140,20 @@ CrossThreadHTTPHeaderMapData ToCrossThreadHTTPHeaderMapData(
 class ServiceWorkerInstalledScriptsManagerTest : public testing::Test {
  public:
   ServiceWorkerInstalledScriptsManagerTest()
-      : io_thread_(Platform::Current()->CreateThread(
+      : io_thread_(NonMainThread::CreateThread(
             ThreadCreationParams(ThreadType::kTestThread)
                 .SetThreadNameForTest("io thread"))),
-        worker_thread_(Platform::Current()->CreateThread(
+        worker_thread_(NonMainThread::CreateThread(
             ThreadCreationParams(ThreadType::kTestThread)
                 .SetThreadNameForTest("worker thread"))),
         worker_waiter_(std::make_unique<base::WaitableEvent>(
             base::WaitableEvent::ResetPolicy::AUTOMATIC,
             base::WaitableEvent::InitialState::NOT_SIGNALED)) {}
+
+  ServiceWorkerInstalledScriptsManagerTest(
+      const ServiceWorkerInstalledScriptsManagerTest&) = delete;
+  ServiceWorkerInstalledScriptsManagerTest& operator=(
+      const ServiceWorkerInstalledScriptsManagerTest&) = delete;
 
  protected:
   using RawScriptData = ThreadSafeScriptContainer::RawScriptData;
@@ -145,7 +163,8 @@ class ServiceWorkerInstalledScriptsManagerTest : public testing::Test {
           installed_scripts_info) {
     auto installed_scripts_manager_params =
         std::make_unique<WebServiceWorkerInstalledScriptsManagerParams>(
-            std::move(installed_scripts_info->installed_urls),
+            base::ToVector(std::move(installed_scripts_info->installed_urls),
+                           ToWebURL),
             std::move(installed_scripts_info->manager_receiver),
             std::move(installed_scripts_info->manager_host_remote));
     installed_scripts_manager_ =
@@ -193,15 +212,14 @@ class ServiceWorkerInstalledScriptsManagerTest : public testing::Test {
     waiter->Signal();
   }
 
-  std::unique_ptr<Thread> io_thread_;
-  std::unique_ptr<Thread> worker_thread_;
+  test::TaskEnvironment task_environment_;
+  std::unique_ptr<NonMainThread> io_thread_;
+  std::unique_ptr<NonMainThread> worker_thread_;
 
   std::unique_ptr<base::WaitableEvent> worker_waiter_;
 
   std::unique_ptr<ServiceWorkerInstalledScriptsManager>
       installed_scripts_manager_;
-
-  DISALLOW_COPY_AND_ASSIGN(ServiceWorkerInstalledScriptsManagerTest);
 };
 
 TEST_F(ServiceWorkerInstalledScriptsManagerTest, GetRawScriptData) {
@@ -329,7 +347,7 @@ TEST_F(ServiceWorkerInstalledScriptsManagerTest, EarlyDisconnectionBody) {
     // only sends kExpectedBody and a null byte (kExpectedBody.length() + 1
     // bytes in total).
     sender.TransferInstalledScript(
-        kScriptUrl, String::FromUTF8("utf8"), HashMap<String, String>(),
+        kScriptUrl, "utf8", HashMap<String, String>(),
         kExpectedBody.length() + 100, kExpectedMetaData.length() + 1);
     sender.PushBody(kExpectedBody);
     sender.PushMetaData(kExpectedMetaData);
@@ -374,7 +392,7 @@ TEST_F(ServiceWorkerInstalledScriptsManagerTest, EarlyDisconnectionMetaData) {
     // sender only sends kExpectedMetaData and a null byte
     // (kExpectedMetaData.length() + 1 bytes in total).
     sender.TransferInstalledScript(
-        kScriptUrl, String::FromUTF8("utf8"), HashMap<String, String>(),
+        kScriptUrl, "utf8", HashMap<String, String>(),
         kExpectedBody.length() + 1, kExpectedMetaData.length() + 100);
     sender.PushBody(kExpectedBody);
     sender.PushMetaData(kExpectedMetaData);

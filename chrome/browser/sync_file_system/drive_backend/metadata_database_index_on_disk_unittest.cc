@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "base/files/scoped_temp_dir.h"
@@ -36,7 +37,7 @@ const int64_t kPlaceholderTrackerID = 4;
 
 class MetadataDatabaseIndexOnDiskTest : public testing::Test {
  public:
-  ~MetadataDatabaseIndexOnDiskTest() override {}
+  ~MetadataDatabaseIndexOnDiskTest() override = default;
 
   void SetUp() override {
     ASSERT_TRUE(database_dir_.CreateUniqueTempDir());
@@ -169,12 +170,12 @@ TEST_F(MetadataDatabaseIndexOnDiskTest, SetEntryTest) {
 
   WriteToDB();
 
-  metadata.reset(new FileMetadata);
+  metadata = std::make_unique<FileMetadata>();
   ASSERT_TRUE(index()->GetFileMetadata("test_file_id", metadata.get()));
   EXPECT_TRUE(metadata->has_details());
   EXPECT_EQ("test_title", metadata->details().title());
 
-  tracker.reset(new FileTracker);
+  tracker = std::make_unique<FileTracker>();
   ASSERT_TRUE(index()->GetFileTracker(tracker_id, tracker.get()));
   EXPECT_EQ("test_file_id", tracker->file_id());
 
@@ -283,27 +284,6 @@ TEST_F(MetadataDatabaseIndexOnDiskTest, BuildAndDeleteIndexTest) {
   WriteToDB();
   EXPECT_EQ(answer, index()->BuildTrackerIndexes());
   WriteToDB();
-}
-
-TEST_F(MetadataDatabaseIndexOnDiskTest, AllEntriesTest) {
-  CreateTestDatabase(true, nullptr);
-
-  EXPECT_EQ(3U, index()->CountFileMetadata());
-  std::vector<std::string> file_ids(index()->GetAllMetadataIDs());
-  ASSERT_EQ(3U, file_ids.size());
-  std::sort(file_ids.begin(), file_ids.end());
-  EXPECT_EQ("app_root_folder_id", file_ids[0]);
-  EXPECT_EQ("file_id", file_ids[1]);
-  EXPECT_EQ("sync_root_folder_id", file_ids[2]);
-
-  EXPECT_EQ(4U, index()->CountFileTracker());
-  std::vector<int64_t> tracker_ids = index()->GetAllTrackerIDs();
-  ASSERT_EQ(4U, tracker_ids.size());
-  std::sort(tracker_ids.begin(), tracker_ids.end());
-  EXPECT_EQ(kSyncRootTrackerID, tracker_ids[0]);
-  EXPECT_EQ(kAppRootTrackerID, tracker_ids[1]);
-  EXPECT_EQ(kFileTrackerID, tracker_ids[2]);
-  EXPECT_EQ(kPlaceholderTrackerID, tracker_ids[3]);
 }
 
 TEST_F(MetadataDatabaseIndexOnDiskTest, IndexAppRootIDByAppIDTest) {
@@ -590,7 +570,7 @@ TEST_F(MetadataDatabaseIndexOnDiskTest, TrackerIDSetDetailsTest) {
   EXPECT_FALSE(idset.has_active());
 
   // Activate one file tracker.
-  file_tracker.reset(new FileTracker);
+  file_tracker = std::make_unique<FileTracker>();
   index()->GetFileTracker(kFileTrackerID2, file_tracker.get());
   file_tracker->set_active(true);
   index()->StoreFileTracker(std::move(file_tracker));

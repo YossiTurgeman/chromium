@@ -1,17 +1,16 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/protocol/pairing_host_authenticator.h"
 
-#include "base/bind.h"
+#include <utility>
+
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "remoting/base/constants.h"
-#include "remoting/protocol/channel_authenticator.h"
-#include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
 
-namespace remoting {
-namespace protocol {
+namespace remoting::protocol {
 
 PairingHostAuthenticator::PairingHostAuthenticator(
     scoped_refptr<PairingRegistry> pairing_registry,
@@ -42,25 +41,20 @@ void PairingHostAuthenticator::Initialize(
       client_id,
       base::BindOnce(&PairingHostAuthenticator::InitializeWithPairing,
                      weak_factory_.GetWeakPtr(), preferred_initial_state,
-                     base::Passed(std::move(resume_callback))));
+                     std::move(resume_callback)));
 }
 
 PairingHostAuthenticator::~PairingHostAuthenticator() = default;
 
 Authenticator::State PairingHostAuthenticator::state() const {
-  if (protocol_error_) {
-    return REJECTED;
-  } else if (waiting_for_paired_secret_) {
+  if (waiting_for_paired_secret_) {
     return PROCESSING_MESSAGE;
   }
   return PairingAuthenticatorBase::state();
 }
 
-Authenticator::RejectionReason
-PairingHostAuthenticator::rejection_reason() const {
-  if (protocol_error_) {
-    return PROTOCOL_ERROR;
-  }
+Authenticator::RejectionReason PairingHostAuthenticator::rejection_reason()
+    const {
   return PairingAuthenticatorBase::rejection_reason();
 }
 
@@ -94,5 +88,4 @@ void PairingHostAuthenticator::InitializeWithPairing(
   std::move(resume_callback).Run();
 }
 
-}  // namespace protocol
-}  // namespace remoting
+}  // namespace remoting::protocol

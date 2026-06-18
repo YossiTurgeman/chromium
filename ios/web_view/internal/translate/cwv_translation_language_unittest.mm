@@ -1,19 +1,14 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import "ios/web_view/internal/translate/cwv_translation_language_internal.h"
-
 #import <Foundation/Foundation.h>
 
-#include "base/strings/sys_string_conversions.h"
-#include "testing/gtest/include/gtest/gtest.h"
+#import "base/strings/sys_string_conversions.h"
+#import "ios/web_view/internal/translate/cwv_translation_language_internal.h"
+#import "testing/gtest/include/gtest/gtest.h"
 #import "testing/gtest_mac.h"
-#include "testing/platform_test.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "testing/platform_test.h"
 
 namespace ios_web_view {
 
@@ -32,6 +27,36 @@ TEST_F(CWVTranslationLanguageTest, Initialization) {
   EXPECT_NSEQ(language_code, language.languageCode);
   EXPECT_NSEQ(localized_name, language.localizedName);
   EXPECT_NSEQ(native_name, language.nativeName);
+}
+
+// Tests CWVTranslationLanguage auto language initialization.
+TEST_F(CWVTranslationLanguageTest, AutoLanguageInitialization) {
+  NSString* localized_name = @"Localized auto";
+  NSString* native_name = @"Native auto";
+  CWVTranslationLanguage* language =
+      [CWVTranslationLanguage autoLanguageWithLocalizedName:localized_name
+                                                 nativeName:native_name];
+
+  EXPECT_NSEQ(@"auto", language.languageCode);
+  EXPECT_NSEQ(localized_name, language.localizedName);
+  EXPECT_NSEQ(native_name, language.nativeName);
+}
+
+TEST_F(CWVTranslationLanguageTest, Equality) {
+  // Two languages with the same langauge code but different localized/native
+  // names.
+  CWVTranslationLanguage* language_a = [[CWVTranslationLanguage alloc]
+      initWithLanguageCode:"ja"
+             localizedName:base::SysNSStringToUTF16(@"JapaneseA")
+                nativeName:base::SysNSStringToUTF16(@"日本語A")];
+  CWVTranslationLanguage* language_b = [[CWVTranslationLanguage alloc]
+      initWithLanguageCode:"ja"
+             localizedName:base::SysNSStringToUTF16(@"JapaneseB")
+                nativeName:base::SysNSStringToUTF16(@"日本語B")];
+
+  // Equality should only be based on the language code.
+  EXPECT_NSEQ(language_a, language_b);
+  EXPECT_EQ(language_a.hash, language_b.hash);
 }
 
 }  // namespace ios_web_view

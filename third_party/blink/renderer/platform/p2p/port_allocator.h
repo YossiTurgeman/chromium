@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,16 @@
 
 #include <memory>
 
-#include "base/macros.h"
-#include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/webrtc/p2p/client/basic_port_allocator.h"
-#include "url/gurl.h"
+
+namespace webrtc {
+class LocalNetworkAccessPermissionFactoryInterface;
+}
 
 namespace blink {
 
-class P2PSocketDispatcher;
-
-class PLATFORM_EXPORT P2PPortAllocator : public cricket::BasicPortAllocator {
+class PLATFORM_EXPORT P2PPortAllocator : public webrtc::BasicPortAllocator {
  public:
   struct Config {
     // Enable non-proxied UDP-based transport when set to true. When set to
@@ -38,23 +37,22 @@ class PLATFORM_EXPORT P2PPortAllocator : public cricket::BasicPortAllocator {
     bool enable_default_local_candidate = true;
   };
 
-  P2PPortAllocator(const scoped_refptr<P2PSocketDispatcher>& socket_dispatcher,
-                   std::unique_ptr<rtc::NetworkManager> network_manager,
-                   rtc::PacketSocketFactory* socket_factory,
-                   const Config& config,
-                   const GURL& origin);
+  P2PPortAllocator(
+      std::unique_ptr<webrtc::NetworkManager> network_manager,
+      webrtc::PacketSocketFactory* socket_factory,
+      const Config& config,
+      std::unique_ptr<webrtc::LocalNetworkAccessPermissionFactoryInterface>
+          lna_permission_factory);
+  P2PPortAllocator(const P2PPortAllocator&) = delete;
+  P2PPortAllocator& operator=(const P2PPortAllocator&) = delete;
   ~P2PPortAllocator() override;
 
   // Will also initialize the network manager passed into the constructor.
   void Initialize() override;
 
  private:
-  std::unique_ptr<rtc::NetworkManager> network_manager_;
-  scoped_refptr<P2PSocketDispatcher> socket_dispatcher_;
+  std::unique_ptr<webrtc::NetworkManager> network_manager_;
   Config config_;
-  GURL origin_;
-
-  DISALLOW_COPY_AND_ASSIGN(P2PPortAllocator);
 };
 
 }  // namespace blink

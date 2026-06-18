@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,11 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
 #include "build/build_config.h"
@@ -20,26 +21,28 @@
 #include "chrome/browser/extensions/api/storage/syncable_settings_storage.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/sync/model/sync_change_processor.h"
-#include "components/sync/model/sync_change_processor_wrapper_for_test.h"
-#include "components/sync/model/sync_error_factory.h"
-#include "components/sync/model/sync_error_factory_mock.h"
+#include "components/sync/test/sync_change_processor_wrapper_for_test.h"
+#include "components/value_store/test_value_store_factory.h"
+#include "components/value_store/testing_value_store.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_utils.h"
 #include "extensions/browser/api/storage/backend_task_runner.h"
 #include "extensions/browser/api/storage/settings_test_util.h"
 #include "extensions/browser/api/storage/storage_frontend.h"
+#include "extensions/browser/api/storage/value_store_util.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/event_router_factory.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/browser/mock_extension_system.h"
-#include "extensions/browser/value_store/test_value_store_factory.h"
-#include "extensions/browser/value_store/testing_value_store.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/manifest.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-using base::DictionaryValue;
-using base::ListValue;
-using base::Value;
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+using value_store::ValueStore;
+
 namespace extensions {
 
 namespace {
@@ -50,7 +53,7 @@ const ValueStore::WriteOptions DEFAULTS = ValueStore::DEFAULTS;
 // More saving typing. Maps extension IDs to a list of sync changes for that
 // extension.
 using SettingSyncDataMultimap =
-    std::map<std::string, std::unique_ptr<SettingSyncDataList>>;
+    std::map<ExtensionId, std::unique_ptr<SettingSyncDataList>>;
 
 // Gets the pretty-printed JSON for a value.
 static std::string GetJson(const base::Value& value) {
@@ -76,7 +79,7 @@ testing::AssertionResult ValuesEq(
     return testing::AssertionFailure() <<
         "Expected: " << GetJson(*expected) << ", actual NULL";
   }
-  if (!expected->Equals(actual)) {
+  if (*expected != *actual) {
     return testing::AssertionFailure() <<
         "Expected: " << GetJson(*expected) << ", actual: " << GetJson(*actual);
   }
@@ -87,14 +90,16 @@ testing::AssertionResult ValuesEq(
 // Logs when different.
 testing::AssertionResult SettingsEq(const char* _1,
                                     const char* _2,
-                                    const base::DictionaryValue& expected,
+                                    const base::DictValue& expected,
                                     ValueStore::ReadResult actual) {
   if (!actual.status().ok()) {
     return testing::AssertionFailure()
            << "Expected: " << expected
            << ", actual has error: " << actual.status().message;
   }
-  return ValuesEq(_1, _2, &expected, &actual.settings());
+  base::Value settings(actual.PassSettings());
+  base::Value expected_value(expected.Clone());
+  return ValuesEq(_1, _2, &expected_value, &settings);
 }
 
 // SyncChangeProcessor which just records the changes made, accessed after
@@ -104,21 +109,17 @@ class MockSyncChangeProcessor : public syncer::SyncChangeProcessor {
   MockSyncChangeProcessor() : fail_all_requests_(false) {}
 
   // syncer::SyncChangeProcessor implementation.
-  base::Optional<syncer::ModelError> ProcessSyncChanges(
+  std::optional<syncer::ModelError> ProcessSyncChanges(
       const base::Location& from_here,
       const syncer::SyncChangeList& change_list) override {
     if (fail_all_requests_) {
       return syncer::ModelError(FROM_HERE,
-                                "MockSyncChangeProcessor: configured to fail");
+                                syncer::ModelError::Type::kGenericTestError);
     }
-    for (auto it = change_list.cbegin(); it != change_list.cend(); ++it) {
-      changes_.push_back(std::make_unique<SettingSyncData>(*it));
+    for (const auto& sync_change : change_list) {
+      changes_.push_back(std::make_unique<SettingSyncData>(sync_change));
     }
-    return base::nullopt;
-  }
-
-  syncer::SyncDataList GetAllSyncData(syncer::ModelType type) const override {
-    return syncer::SyncDataList();
+    return std::nullopt;
   }
 
   // Mock methods.
@@ -135,12 +136,13 @@ class MockSyncChangeProcessor : public syncer::SyncChangeProcessor {
 
   // Returns the only change for a given extension setting.  If there is not
   // exactly 1 change for that key, a test assertion will fail.
-  SettingSyncData* GetOnlyChange(const std::string& extension_id,
+  SettingSyncData* GetOnlyChange(const ExtensionId& extension_id,
                                  const std::string& key) {
     std::vector<SettingSyncData*> matching_changes;
     for (const std::unique_ptr<SettingSyncData>& change : changes_) {
-      if (change->extension_id() == extension_id && change->key() == key)
+      if (change->extension_id() == extension_id && change->key() == key) {
         matching_changes.push_back(change.get());
+      }
     }
     if (matching_changes.empty()) {
       ADD_FAILURE() << "No matching changes for " << extension_id << "/" <<
@@ -174,28 +176,28 @@ std::unique_ptr<KeyedService> BuildEventRouter(
 class ExtensionSettingsSyncTest : public testing::Test {
  public:
   ExtensionSettingsSyncTest()
-      : storage_factory_(new TestValueStoreFactory()),
+      : storage_factory_(new value_store::TestValueStoreFactory()),
         sync_processor_(new MockSyncChangeProcessor),
         sync_processor_wrapper_(new syncer::SyncChangeProcessorWrapperForTest(
             sync_processor_.get())) {}
 
   void SetUp() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-    profile_.reset(new TestingProfile(temp_dir_.GetPath()));
+    TestingProfile::Builder profile_builder;
+    profile_builder.AddTestingFactory(
+        ExtensionsBrowserClient::Get()->GetExtensionSystemFactory(),
+        base::BindRepeating(&MockExtensionSystemFactoryFunction));
+    profile_builder.AddTestingFactory(EventRouterFactory::GetInstance(),
+                                      base::BindRepeating(&BuildEventRouter));
+
+    profile_builder.SetPath(temp_dir_.GetPath());
+    profile_ = profile_builder.Build();
+
     content::RunAllTasksUntilIdle();
 
     storage_factory_->Reset();
     frontend_ =
         StorageFrontend::CreateForTesting(storage_factory_, profile_.get());
-
-    ExtensionsBrowserClient::Get()
-        ->GetExtensionSystemFactory()
-        ->SetTestingFactoryAndUse(
-            profile_.get(),
-            base::BindRepeating(&MockExtensionSystemFactoryFunction));
-
-    EventRouterFactory::GetInstance()->SetTestingFactory(
-        profile_.get(), base::BindRepeating(&BuildEventRouter));
 
     // Hold a pointer to SyncValueStoreCache in the main thread, such that
     // GetSyncableService() can be called from the backend sequence.
@@ -214,36 +216,37 @@ class ExtensionSettingsSyncTest : public testing::Test {
  protected:
   // Adds a record of an extension or app to the extension service, then returns
   // its storage area.
-  ValueStore* AddExtensionAndGetStorage(
-      const std::string& id, Manifest::Type type) {
+  ValueStore* AddExtensionAndGetStorage(const ExtensionId& id,
+                                        Manifest::Type type) {
     scoped_refptr<const Extension> extension =
         settings_test_util::AddExtensionWithId(profile_.get(), id, type);
     return settings_test_util::GetStorage(extension, frontend_.get());
   }
 
   // Gets the syncer::SyncableService for the given sync type.
-  SyncStorageBackend* GetSyncableService(syncer::ModelType model_type) {
-    // SyncValueStoreCache::GetSyncableService internally enforces |model_type|
+  SyncStorageBackend* GetSyncableService(syncer::DataType data_type) {
+    // SyncValueStoreCache::GetSyncableService internally enforces |data_type|
     // to be APP_SETTINGS or EXTENSION_SETTINGS, and the dynamic type of the
     // returned service is always SyncStorageBackend, so it can be downcast.
-    DCHECK(model_type == syncer::APP_SETTINGS ||
-           model_type == syncer::EXTENSION_SETTINGS);
+    DCHECK(data_type == syncer::APP_SETTINGS ||
+           data_type == syncer::EXTENSION_SETTINGS);
     return static_cast<SyncStorageBackend*>(
-        sync_cache_->GetSyncableService(model_type));
+        sync_cache_->GetSyncableService(data_type));
   }
 
   // Gets all the sync data from the SyncableService for a sync type as a map
   // from extension id to its sync data.
-  SettingSyncDataMultimap GetAllSyncData(syncer::ModelType model_type) {
+  SettingSyncDataMultimap GetAllSyncData(syncer::DataType data_type) {
     syncer::SyncDataList as_list =
-        GetSyncableService(model_type)->GetAllSyncDataForTesting(model_type);
+        GetSyncableService(data_type)->GetAllSyncDataForTesting(data_type);
     SettingSyncDataMultimap as_map;
-    for (auto it = as_list.begin(); it != as_list.end(); ++it) {
-      std::unique_ptr<SettingSyncData> sync_data(new SettingSyncData(*it));
+    for (auto& data : as_list) {
+      std::unique_ptr<SettingSyncData> sync_data(new SettingSyncData(data));
       std::unique_ptr<SettingSyncDataList>& list_for_extension =
           as_map[sync_data->extension_id()];
-      if (!list_for_extension)
-        list_for_extension.reset(new SettingSyncDataList());
+      if (!list_for_extension) {
+        list_for_extension = std::make_unique<SettingSyncDataList>();
+      }
       list_for_extension->push_back(std::move(sync_data));
     }
     return as_map;
@@ -251,9 +254,24 @@ class ExtensionSettingsSyncTest : public testing::Test {
 
   // This class uses it's TestingValueStore in such a way that it always mints
   // new TestingValueStore instances.
-  TestingValueStore* GetExisting(const ExtensionId& extension_id) {
-    return static_cast<TestingValueStore*>(
-        storage_factory_->GetExisting(extension_id));
+  value_store::TestingValueStore* GetExisting(const ExtensionId& extension_id,
+                                              syncer::DataType type) {
+    base::FilePath value_store_dir;
+    value_store_util::ModelType data_type;
+    switch (type) {
+      case syncer::APP_SETTINGS:
+        data_type = value_store_util::ModelType::APP;
+        break;
+      case syncer::EXTENSION_SETTINGS:
+        data_type = value_store_util::ModelType::EXTENSION;
+        break;
+      default:
+        NOTREACHED();
+    }
+    value_store_dir = value_store_util::GetValueStoreDir(
+        settings_namespace::SYNC, data_type, extension_id);
+    return static_cast<value_store::TestingValueStore*>(
+        storage_factory_->GetExisting(value_store_dir));
   }
 
   template <typename Func>
@@ -276,56 +294,53 @@ class ExtensionSettingsSyncTest : public testing::Test {
   base::ScopedTempDir temp_dir_;
   std::unique_ptr<TestingProfile> profile_;
   std::unique_ptr<StorageFrontend> frontend_;
-  scoped_refptr<TestValueStoreFactory> storage_factory_;
+  scoped_refptr<value_store::TestValueStoreFactory> storage_factory_;
   std::unique_ptr<MockSyncChangeProcessor> sync_processor_;
   std::unique_ptr<syncer::SyncChangeProcessorWrapperForTest>
       sync_processor_wrapper_;
-  SyncValueStoreCache* sync_cache_;
+  raw_ptr<SyncValueStoreCache, DanglingUntriaged> sync_cache_;
 };
 
 // Get a semblance of coverage for both EXTENSION_SETTINGS and APP_SETTINGS
 // sync by roughly alternative which one to test.
 
 TEST_F(ExtensionSettingsSyncTest, NoDataDoesNotInvokeSync) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
-    EXPECT_EQ(0u, GetAllSyncData(model_type).size());
+    EXPECT_EQ(0u, GetAllSyncData(data_type).size());
   });
 
   // Have one extension created before sync is set up, the other created after.
   AddExtensionAndGetStorage("s1", type);
 
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
-    EXPECT_EQ(0u, GetAllSyncData(model_type).size());
+    EXPECT_EQ(0u, GetAllSyncData(data_type).size());
 
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
   });
 
   AddExtensionAndGetStorage("s2", type);
 
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
-    EXPECT_EQ(0u, GetAllSyncData(model_type).size());
+    EXPECT_EQ(0u, GetAllSyncData(data_type).size());
 
-    GetSyncableService(model_type)->StopSyncing(model_type);
+    GetSyncableService(data_type)->StopSyncing(data_type);
 
     EXPECT_EQ(0u, sync_processor_->changes().size());
-    EXPECT_EQ(0u, GetAllSyncData(model_type).size());
+    EXPECT_EQ(0u, GetAllSyncData(data_type).size());
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, InSyncDataDoesNotInvokeSync) {
-  syncer::ModelType model_type = syncer::APP_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_LEGACY_PACKAGED_APP;
+  syncer::DataType data_type = syncer::APP_SETTINGS;
+  Manifest::Type type = Manifest::Type::kLegacyPackagedApp;
 
   base::Value value1("fooValue");
-  base::ListValue value2;
-  value2.AppendString("barValue");
+  base::Value value2(base::Value::Type::LIST);
+  value2.GetList().Append("barValue");
 
   ValueStore* storage1 = AddExtensionAndGetStorage("s1", type);
   ValueStore* storage2 = AddExtensionAndGetStorage("s2", type);
@@ -334,7 +349,7 @@ TEST_F(ExtensionSettingsSyncTest, InSyncDataDoesNotInvokeSync) {
     storage1->Set(DEFAULTS, "foo", value1);
     storage2->Set(DEFAULTS, "bar", value2);
 
-    SettingSyncDataMultimap all_sync_data = GetAllSyncData(model_type);
+    SettingSyncDataMultimap all_sync_data = GetAllSyncData(data_type);
     EXPECT_EQ(2u, all_sync_data.size());
     EXPECT_EQ(1u, all_sync_data["s1"]->size());
     EXPECT_PRED_FORMAT2(ValuesEq, &value1, &(*all_sync_data["s1"])[0]->value());
@@ -343,14 +358,12 @@ TEST_F(ExtensionSettingsSyncTest, InSyncDataDoesNotInvokeSync) {
 
     syncer::SyncDataList sync_data;
     sync_data.push_back(
-        settings_sync_util::CreateData("s1", "foo", value1, model_type));
+        settings_sync_util::CreateData("s1", "foo", value1, data_type));
     sync_data.push_back(
-        settings_sync_util::CreateData("s2", "bar", value2, model_type));
+        settings_sync_util::CreateData("s2", "bar", value2, data_type));
 
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, sync_data, std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, sync_data, std::move(sync_processor_wrapper_));
 
     // Already in sync, so no changes.
     EXPECT_EQ(0u, sync_processor_->changes().size());
@@ -364,19 +377,19 @@ TEST_F(ExtensionSettingsSyncTest, InSyncDataDoesNotInvokeSync) {
     EXPECT_EQ(1u, sync_processor_->changes().size());
     SettingSyncData* change = sync_processor_->GetOnlyChange("s1", "foo");
     EXPECT_EQ(syncer::SyncChange::ACTION_UPDATE, change->change_type());
-    EXPECT_TRUE(value2.Equals(&change->value()));
+    EXPECT_EQ(value2, change->value());
 
-    GetSyncableService(model_type)->StopSyncing(model_type);
+    GetSyncableService(data_type)->StopSyncing(data_type);
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, LocalDataWithNoSyncDataIsPushedToSync) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   base::Value value1("fooValue");
-  base::ListValue value2;
-  value2.AppendString("barValue");
+  base::Value value2(base::Value::Type::LIST);
+  value2.GetList().Append("barValue");
 
   ValueStore* storage1 = AddExtensionAndGetStorage("s1", type);
   ValueStore* storage2 = AddExtensionAndGetStorage("s2", type);
@@ -385,36 +398,33 @@ TEST_F(ExtensionSettingsSyncTest, LocalDataWithNoSyncDataIsPushedToSync) {
     storage1->Set(DEFAULTS, "foo", value1);
     storage2->Set(DEFAULTS, "bar", value2);
 
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
 
     // All settings should have been pushed to sync.
     EXPECT_EQ(2u, sync_processor_->changes().size());
     SettingSyncData* change = sync_processor_->GetOnlyChange("s1", "foo");
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD, change->change_type());
-    EXPECT_TRUE(value1.Equals(&change->value()));
+    EXPECT_EQ(value1, change->value());
     change = sync_processor_->GetOnlyChange("s2", "bar");
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD, change->change_type());
-    EXPECT_TRUE(value2.Equals(&change->value()));
+    EXPECT_EQ(value2, change->value());
 
-    GetSyncableService(model_type)->StopSyncing(model_type);
+    GetSyncableService(data_type)->StopSyncing(data_type);
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, AnySyncDataOverwritesLocalData) {
-  syncer::ModelType model_type = syncer::APP_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_LEGACY_PACKAGED_APP;
+  syncer::DataType data_type = syncer::APP_SETTINGS;
+  Manifest::Type type = Manifest::Type::kLegacyPackagedApp;
 
   base::Value value1("fooValue");
-  base::ListValue value2;
-  value2.AppendString("barValue");
+  base::Value value2(base::Value::Type::LIST);
+  value2.GetList().Append("barValue");
 
   // Maintain dictionaries mirrored to the expected values of the settings in
   // each storage area.
-  base::DictionaryValue expected1, expected2;
+  base::DictValue expected1, expected2;
 
   // Pre-populate one of the storage areas.
   ValueStore* storage1 = AddExtensionAndGetStorage("s1", type);
@@ -424,15 +434,13 @@ TEST_F(ExtensionSettingsSyncTest, AnySyncDataOverwritesLocalData) {
 
     syncer::SyncDataList sync_data;
     sync_data.push_back(
-        settings_sync_util::CreateData("s1", "foo", value1, model_type));
+        settings_sync_util::CreateData("s1", "foo", value1, data_type));
     sync_data.push_back(
-        settings_sync_util::CreateData("s2", "bar", value2, model_type));
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, sync_data, std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
-    expected1.Set("foo", value1.CreateDeepCopy());
-    expected2.Set("bar", value2.CreateDeepCopy());
+        settings_sync_util::CreateData("s2", "bar", value2, data_type));
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, sync_data, std::move(sync_processor_wrapper_));
+    expected1.Set("foo", value1.Clone());
+    expected2.Set("bar", value2.Clone());
   });
 
   ValueStore* storage2 = AddExtensionAndGetStorage("s2", type);
@@ -445,17 +453,17 @@ TEST_F(ExtensionSettingsSyncTest, AnySyncDataOverwritesLocalData) {
     EXPECT_PRED_FORMAT2(SettingsEq, expected1, storage1->Get());
     EXPECT_PRED_FORMAT2(SettingsEq, expected2, storage2->Get());
 
-    GetSyncableService(model_type)->StopSyncing(model_type);
+    GetSyncableService(data_type)->StopSyncing(data_type);
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, ProcessSyncChanges) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   base::Value value1("fooValue");
-  base::ListValue value2;
-  value2.AppendString("barValue");
+  base::Value value2(base::Value::Type::LIST);
+  value2.GetList().Append("barValue");
 
   // Make storage1 initialised from local data, storage2 initialised from sync.
   ValueStore* storage1 = AddExtensionAndGetStorage("s1", type);
@@ -464,30 +472,28 @@ TEST_F(ExtensionSettingsSyncTest, ProcessSyncChanges) {
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
     // Maintain dictionaries mirrored to the expected values of the settings in
     // each storage area.
-    base::DictionaryValue expected1, expected2;
+    base::DictValue expected1, expected2;
 
     storage1->Set(DEFAULTS, "foo", value1);
-    expected1.Set("foo", value1.CreateDeepCopy());
+    expected1.Set("foo", value1.Clone());
 
     syncer::SyncDataList sync_data;
     sync_data.push_back(
-        settings_sync_util::CreateData("s2", "bar", value2, model_type));
+        settings_sync_util::CreateData("s2", "bar", value2, data_type));
 
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, sync_data, std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
-    expected2.Set("bar", value2.CreateDeepCopy());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, sync_data, std::move(sync_processor_wrapper_));
+    expected2.Set("bar", value2.Clone());
 
     // Make sync add some settings.
     syncer::SyncChangeList change_list;
     change_list.push_back(
-        settings_sync_util::CreateAdd("s1", "bar", value2, model_type));
+        settings_sync_util::CreateAdd("s1", "bar", value2, data_type));
     change_list.push_back(
-        settings_sync_util::CreateAdd("s2", "foo", value1, model_type));
-    GetSyncableService(model_type)->ProcessSyncChanges(FROM_HERE, change_list);
-    expected1.Set("bar", value2.CreateDeepCopy());
-    expected2.Set("foo", value1.CreateDeepCopy());
+        settings_sync_util::CreateAdd("s2", "foo", value1, data_type));
+    GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
+    expected1.Set("bar", value2.Clone());
+    expected2.Set("foo", value1.Clone());
 
     EXPECT_PRED_FORMAT2(SettingsEq, expected1, storage1->Get());
     EXPECT_PRED_FORMAT2(SettingsEq, expected2, storage2->Get());
@@ -496,12 +502,12 @@ TEST_F(ExtensionSettingsSyncTest, ProcessSyncChanges) {
     // initial setting.
     change_list.clear();
     change_list.push_back(
-        settings_sync_util::CreateUpdate("s1", "bar", value2, model_type));
+        settings_sync_util::CreateUpdate("s1", "bar", value2, data_type));
     change_list.push_back(
-        settings_sync_util::CreateUpdate("s2", "bar", value1, model_type));
-    GetSyncableService(model_type)->ProcessSyncChanges(FROM_HERE, change_list);
-    expected1.Set("bar", value2.CreateDeepCopy());
-    expected2.Set("bar", value1.CreateDeepCopy());
+        settings_sync_util::CreateUpdate("s2", "bar", value1, data_type));
+    GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
+    expected1.Set("bar", value2.Clone());
+    expected2.Set("bar", value1.Clone());
 
     EXPECT_PRED_FORMAT2(SettingsEq, expected1, storage1->Get());
     EXPECT_PRED_FORMAT2(SettingsEq, expected2, storage2->Get());
@@ -510,27 +516,27 @@ TEST_F(ExtensionSettingsSyncTest, ProcessSyncChanges) {
     // the new setting.
     change_list.clear();
     change_list.push_back(
-        settings_sync_util::CreateDelete("s1", "foo", model_type));
+        settings_sync_util::CreateDelete("s1", "foo", data_type));
     change_list.push_back(
-        settings_sync_util::CreateDelete("s2", "foo", model_type));
-    GetSyncableService(model_type)->ProcessSyncChanges(FROM_HERE, change_list);
-    expected1.Remove("foo", NULL);
-    expected2.Remove("foo", NULL);
+        settings_sync_util::CreateDelete("s2", "foo", data_type));
+    GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
+    expected1.Remove("foo");
+    expected2.Remove("foo");
 
     EXPECT_PRED_FORMAT2(SettingsEq, expected1, storage1->Get());
     EXPECT_PRED_FORMAT2(SettingsEq, expected2, storage2->Get());
 
-    GetSyncableService(model_type)->StopSyncing(model_type);
+    GetSyncableService(data_type)->StopSyncing(data_type);
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, PushToSync) {
-  syncer::ModelType model_type = syncer::APP_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_LEGACY_PACKAGED_APP;
+  syncer::DataType data_type = syncer::APP_SETTINGS;
+  Manifest::Type type = Manifest::Type::kLegacyPackagedApp;
 
   base::Value value1("fooValue");
-  base::ListValue value2;
-  value2.AppendString("barValue");
+  base::Value value2(base::Value::Type::LIST);
+  value2.GetList().Append("barValue");
 
   // Make storage1/2 initialised from local data, storage3/4 initialised from
   // sync.
@@ -545,14 +551,12 @@ TEST_F(ExtensionSettingsSyncTest, PushToSync) {
 
     syncer::SyncDataList sync_data;
     sync_data.push_back(
-        settings_sync_util::CreateData("s3", "bar", value2, model_type));
+        settings_sync_util::CreateData("s3", "bar", value2, data_type));
     sync_data.push_back(
-        settings_sync_util::CreateData("s4", "bar", value2, model_type));
+        settings_sync_util::CreateData("s4", "bar", value2, data_type));
 
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, sync_data, std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, sync_data, std::move(sync_processor_wrapper_));
 
     // Add something locally.
     storage1->Set(DEFAULTS, "bar", value2);
@@ -562,16 +566,16 @@ TEST_F(ExtensionSettingsSyncTest, PushToSync) {
 
     SettingSyncData* change = sync_processor_->GetOnlyChange("s1", "bar");
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD, change->change_type());
-    EXPECT_TRUE(value2.Equals(&change->value()));
+    EXPECT_EQ(value2, change->value());
     sync_processor_->GetOnlyChange("s2", "bar");
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD, change->change_type());
-    EXPECT_TRUE(value2.Equals(&change->value()));
+    EXPECT_EQ(value2, change->value());
     change = sync_processor_->GetOnlyChange("s3", "foo");
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD, change->change_type());
-    EXPECT_TRUE(value1.Equals(&change->value()));
+    EXPECT_EQ(value1, change->value());
     change = sync_processor_->GetOnlyChange("s4", "foo");
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD, change->change_type());
-    EXPECT_TRUE(value1.Equals(&change->value()));
+    EXPECT_EQ(value1, change->value());
 
     // Change something locally, storage1/3 the new setting and storage2/4 the
     // initial setting, for all combinations of local vs sync intialisation and
@@ -584,16 +588,16 @@ TEST_F(ExtensionSettingsSyncTest, PushToSync) {
 
     change = sync_processor_->GetOnlyChange("s1", "bar");
     EXPECT_EQ(syncer::SyncChange::ACTION_UPDATE, change->change_type());
-    EXPECT_TRUE(value1.Equals(&change->value()));
+    EXPECT_EQ(value1, change->value());
     change = sync_processor_->GetOnlyChange("s2", "foo");
     EXPECT_EQ(syncer::SyncChange::ACTION_UPDATE, change->change_type());
-    EXPECT_TRUE(value2.Equals(&change->value()));
+    EXPECT_EQ(value2, change->value());
     change = sync_processor_->GetOnlyChange("s3", "bar");
     EXPECT_EQ(syncer::SyncChange::ACTION_UPDATE, change->change_type());
-    EXPECT_TRUE(value1.Equals(&change->value()));
+    EXPECT_EQ(value1, change->value());
     change = sync_processor_->GetOnlyChange("s4", "foo");
     EXPECT_EQ(syncer::SyncChange::ACTION_UPDATE, change->change_type());
-    EXPECT_TRUE(value2.Equals(&change->value()));
+    EXPECT_EQ(value2, change->value());
 
     // Remove something locally, storage1/3 the new setting and storage2/4 the
     // initial setting, for all combinations of local vs sync intialisation and
@@ -652,20 +656,20 @@ TEST_F(ExtensionSettingsSyncTest, PushToSync) {
     EXPECT_EQ(syncer::SyncChange::ACTION_DELETE,
               sync_processor_->GetOnlyChange("s4", "bar")->change_type());
 
-    GetSyncableService(model_type)->StopSyncing(model_type);
+    GetSyncableService(data_type)->StopSyncing(data_type);
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, ExtensionAndAppSettingsSyncSeparately) {
   base::Value value1("fooValue");
-  base::ListValue value2;
-  value2.AppendString("barValue");
+  base::Value value2(base::Value::Type::LIST);
+  value2.GetList().Append("barValue");
 
   // storage1 is an extension, storage2 is an app.
-  ValueStore* storage1 = AddExtensionAndGetStorage(
-      "s1", Manifest::TYPE_EXTENSION);
-  ValueStore* storage2 = AddExtensionAndGetStorage(
-      "s2", Manifest::TYPE_LEGACY_PACKAGED_APP);
+  ValueStore* storage1 =
+      AddExtensionAndGetStorage("s1", Manifest::Type::kExtension);
+  ValueStore* storage2 =
+      AddExtensionAndGetStorage("s2", Manifest::Type::kLegacyPackagedApp);
 
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
     storage1->Set(DEFAULTS, "foo", value1);
@@ -690,10 +694,8 @@ TEST_F(ExtensionSettingsSyncTest, ExtensionAndAppSettingsSyncSeparately) {
         "s1", "foo", value1, syncer::EXTENSION_SETTINGS));
 
     GetSyncableService(syncer::EXTENSION_SETTINGS)
-        ->MergeDataAndStartSyncing(
-            syncer::EXTENSION_SETTINGS, sync_data,
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+        ->MergeDataAndStartSyncing(syncer::EXTENSION_SETTINGS, sync_data,
+                                   std::move(sync_processor_wrapper_));
     GetSyncableService(syncer::EXTENSION_SETTINGS)
         ->StopSyncing(syncer::EXTENSION_SETTINGS);
     EXPECT_EQ(0u, sync_processor_->changes().size());
@@ -706,17 +708,16 @@ TEST_F(ExtensionSettingsSyncTest, ExtensionAndAppSettingsSyncSeparately) {
         app_settings_delegate_(new syncer::SyncChangeProcessorWrapperForTest(
             sync_processor_.get()));
     GetSyncableService(syncer::APP_SETTINGS)
-        ->MergeDataAndStartSyncing(
-            syncer::APP_SETTINGS, sync_data, std::move(app_settings_delegate_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+        ->MergeDataAndStartSyncing(syncer::APP_SETTINGS, sync_data,
+                                   std::move(app_settings_delegate_));
     GetSyncableService(syncer::APP_SETTINGS)->StopSyncing(syncer::APP_SETTINGS);
     EXPECT_EQ(0u, sync_processor_->changes().size());
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, FailingStartSyncingDisablesSync) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   base::Value fooValue("fooValue");
   base::Value barValue("barValue");
@@ -730,27 +731,25 @@ TEST_F(ExtensionSettingsSyncTest, FailingStartSyncingDisablesSync) {
 
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
     // Make bad fail for incoming sync changes.
-    GetExisting("bad")->set_status_code(ValueStore::CORRUPTION);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::CORRUPTION);
     {
       syncer::SyncDataList sync_data;
       sync_data.push_back(
-          settings_sync_util::CreateData("good", "foo", fooValue, model_type));
+          settings_sync_util::CreateData("good", "foo", fooValue, data_type));
       sync_data.push_back(
-          settings_sync_util::CreateData("bad", "foo", fooValue, model_type));
-      GetSyncableService(model_type)
-          ->MergeDataAndStartSyncing(
-              model_type, sync_data, std::move(sync_processor_wrapper_),
-              std::make_unique<syncer::SyncErrorFactoryMock>());
+          settings_sync_util::CreateData("bad", "foo", fooValue, data_type));
+      GetSyncableService(data_type)->MergeDataAndStartSyncing(
+          data_type, sync_data, std::move(sync_processor_wrapper_));
     }
-    GetExisting("bad")->set_status_code(ValueStore::OK);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::OK);
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
+      base::DictValue dict;
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
@@ -764,14 +763,14 @@ TEST_F(ExtensionSettingsSyncTest, FailingStartSyncingDisablesSync) {
     EXPECT_EQ(1u, sync_processor_->changes().size());
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
@@ -779,25 +778,24 @@ TEST_F(ExtensionSettingsSyncTest, FailingStartSyncingDisablesSync) {
     // not failing).
     {
       syncer::SyncChangeList change_list;
-      change_list.push_back(settings_sync_util::CreateUpdate(
-          "good", "foo", barValue, model_type));
+      change_list.push_back(
+          settings_sync_util::CreateUpdate("good", "foo", barValue, data_type));
       // (Sending UPDATE here even though it's adding, since that's what the
       // state of sync is.  In any case, it won't work.)
       change_list.push_back(
-          settings_sync_util::CreateUpdate("bad", "foo", barValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateUpdate("bad", "foo", barValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
@@ -812,53 +810,50 @@ TEST_F(ExtensionSettingsSyncTest, FailingStartSyncingDisablesSync) {
     EXPECT_EQ(1u, sync_processor_->changes().size());
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
-      dict.Set("bar", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
+      dict.Set("bar", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("bar", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("bar", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
     // Failing ProcessSyncChanges shouldn't go to the storage.
-    GetExisting("bad")->set_status_code(ValueStore::CORRUPTION);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::CORRUPTION);
     {
       syncer::SyncChangeList change_list;
-      change_list.push_back(settings_sync_util::CreateUpdate(
-          "good", "foo", fooValue, model_type));
+      change_list.push_back(
+          settings_sync_util::CreateUpdate("good", "foo", fooValue, data_type));
       // (Ditto.)
       change_list.push_back(
-          settings_sync_util::CreateUpdate("bad", "foo", fooValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateUpdate("bad", "foo", fooValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
-    GetExisting("bad")->set_status_code(ValueStore::OK);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::OK);
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
-      dict.Set("bar", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
+      dict.Set("bar", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("bar", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("bar", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
     // Restarting sync should make bad start syncing again.
     sync_processor_->ClearChanges();
-    GetSyncableService(model_type)->StopSyncing(model_type);
-    sync_processor_wrapper_.reset(
-        new syncer::SyncChangeProcessorWrapperForTest(sync_processor_.get()));
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->StopSyncing(data_type);
+    sync_processor_wrapper_ =
+        std::make_unique<syncer::SyncChangeProcessorWrapperForTest>(
+            sync_processor_.get());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
 
     // Local settings will have been pushed to sync, since it's empty (in this
     // test; presumably it wouldn't be live, since we've been getting changes).
@@ -884,23 +879,22 @@ TEST_F(ExtensionSettingsSyncTest, FailingStartSyncingDisablesSync) {
     // And ProcessSyncChanges work, too.
     {
       syncer::SyncChangeList change_list;
-      change_list.push_back(settings_sync_util::CreateUpdate(
-          "good", "bar", fooValue, model_type));
       change_list.push_back(
-          settings_sync_util::CreateUpdate("bad", "bar", fooValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateUpdate("good", "bar", fooValue, data_type));
+      change_list.push_back(
+          settings_sync_util::CreateUpdate("bad", "bar", fooValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
-      dict.Set("bar", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
+      dict.Set("bar", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("bar", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("bar", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
   });
@@ -909,8 +903,8 @@ TEST_F(ExtensionSettingsSyncTest, FailingStartSyncingDisablesSync) {
 TEST_F(ExtensionSettingsSyncTest, FailingProcessChangesDisablesSync) {
   // The test above tests a failing ProcessSyncChanges too, but here test with
   // an initially passing MergeDataAndStartSyncing.
-  syncer::ModelType model_type = syncer::APP_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_LEGACY_PACKAGED_APP;
+  syncer::DataType data_type = syncer::APP_SETTINGS;
+  Manifest::Type type = Manifest::Type::kLegacyPackagedApp;
 
   base::Value fooValue("fooValue");
   base::Value barValue("barValue");
@@ -923,50 +917,47 @@ TEST_F(ExtensionSettingsSyncTest, FailingProcessChangesDisablesSync) {
     {
       syncer::SyncDataList sync_data;
       sync_data.push_back(
-          settings_sync_util::CreateData("good", "foo", fooValue, model_type));
+          settings_sync_util::CreateData("good", "foo", fooValue, data_type));
       sync_data.push_back(
-          settings_sync_util::CreateData("bad", "foo", fooValue, model_type));
-      GetSyncableService(model_type)
-          ->MergeDataAndStartSyncing(
-              model_type, sync_data, std::move(sync_processor_wrapper_),
-              std::make_unique<syncer::SyncErrorFactoryMock>());
+          settings_sync_util::CreateData("bad", "foo", fooValue, data_type));
+      GetSyncableService(data_type)->MergeDataAndStartSyncing(
+          data_type, sync_data, std::move(sync_processor_wrapper_));
     }
 
     EXPECT_EQ(0u, sync_processor_->changes().size());
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
     // Now fail ProcessSyncChanges for bad.
-    GetExisting("bad")->set_status_code(ValueStore::CORRUPTION);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::CORRUPTION);
     {
       syncer::SyncChangeList change_list;
       change_list.push_back(
-          settings_sync_util::CreateAdd("good", "bar", barValue, model_type));
+          settings_sync_util::CreateAdd("good", "bar", barValue, data_type));
       change_list.push_back(
-          settings_sync_util::CreateAdd("bad", "bar", barValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateAdd("bad", "bar", barValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
-    GetExisting("bad")->set_status_code(ValueStore::OK);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::OK);
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
@@ -983,30 +974,29 @@ TEST_F(ExtensionSettingsSyncTest, FailingProcessChangesDisablesSync) {
     {
       syncer::SyncChangeList change_list;
       change_list.push_back(
-          settings_sync_util::CreateAdd("good", "foo", fooValue, model_type));
+          settings_sync_util::CreateAdd("good", "foo", fooValue, data_type));
       change_list.push_back(
-          settings_sync_util::CreateAdd("bad", "foo", fooValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateAdd("bad", "foo", fooValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, FailingGetAllSyncDataDoesntStopSync) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   base::Value fooValue("fooValue");
   base::Value barValue("barValue");
@@ -1020,21 +1010,19 @@ TEST_F(ExtensionSettingsSyncTest, FailingGetAllSyncDataDoesntStopSync) {
 
     // Even though bad will fail to get all sync data, sync data should still
     // include that from good.
-    GetExisting("bad")->set_status_code(ValueStore::CORRUPTION);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::CORRUPTION);
     {
       syncer::SyncDataList all_sync_data =
-          GetSyncableService(model_type)->GetAllSyncDataForTesting(model_type);
+          GetSyncableService(data_type)->GetAllSyncDataForTesting(data_type);
       EXPECT_EQ(1u, all_sync_data.size());
-      EXPECT_EQ("good/foo", syncer::SyncDataLocal(all_sync_data[0]).GetTag());
+      EXPECT_EQ(syncer::ClientTagHash::FromUnhashed(data_type, "good/foo"),
+                all_sync_data[0].GetClientTagHash());
     }
-    GetExisting("bad")->set_status_code(ValueStore::OK);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::OK);
 
     // Sync shouldn't be disabled for good (nor bad -- but this is unimportant).
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
 
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD,
               sync_processor_->GetOnlyChange("good", "foo")->change_type());
@@ -1055,8 +1043,8 @@ TEST_F(ExtensionSettingsSyncTest, FailingGetAllSyncDataDoesntStopSync) {
 }
 
 TEST_F(ExtensionSettingsSyncTest, FailureToReadChangesToPushDisablesSync) {
-  syncer::ModelType model_type = syncer::APP_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_LEGACY_PACKAGED_APP;
+  syncer::DataType data_type = syncer::APP_SETTINGS;
+  Manifest::Type type = Manifest::Type::kLegacyPackagedApp;
 
   base::Value fooValue("fooValue");
   base::Value barValue("barValue");
@@ -1070,13 +1058,10 @@ TEST_F(ExtensionSettingsSyncTest, FailureToReadChangesToPushDisablesSync) {
 
     // good will successfully push foo:fooValue to sync, but bad will fail to
     // get them so won't.
-    GetExisting("bad")->set_status_code(ValueStore::CORRUPTION);
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
-    GetExisting("bad")->set_status_code(ValueStore::OK);
+    GetExisting("bad", data_type)->set_status_code(ValueStore::CORRUPTION);
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
+    GetExisting("bad", data_type)->set_status_code(ValueStore::OK);
 
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD,
               sync_processor_->GetOnlyChange("good", "foo")->change_type());
@@ -1093,40 +1078,37 @@ TEST_F(ExtensionSettingsSyncTest, FailureToReadChangesToPushDisablesSync) {
 
     {
       syncer::SyncChangeList change_list;
-      change_list.push_back(settings_sync_util::CreateUpdate(
-          "good", "foo", barValue, model_type));
+      change_list.push_back(
+          settings_sync_util::CreateUpdate("good", "foo", barValue, data_type));
       // (Sending ADD here even though it's updating, since that's what the
       // state of sync is.  In any case, it won't work.)
       change_list.push_back(
-          settings_sync_util::CreateAdd("bad", "foo", barValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateAdd("bad", "foo", barValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", fooValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", fooValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
     // Re-enabling sync without failing should cause the local changes from bad
     // to be pushed to sync successfully, as should future changes to bad.
     sync_processor_->ClearChanges();
-    GetSyncableService(model_type)->StopSyncing(model_type);
-    sync_processor_wrapper_.reset(
-        new syncer::SyncChangeProcessorWrapperForTest(sync_processor_.get()));
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->StopSyncing(data_type);
+    sync_processor_wrapper_ =
+        std::make_unique<syncer::SyncChangeProcessorWrapperForTest>(
+            sync_processor_.get());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
 
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD,
               sync_processor_->GetOnlyChange("good", "foo")->change_type());
@@ -1151,8 +1133,8 @@ TEST_F(ExtensionSettingsSyncTest, FailureToReadChangesToPushDisablesSync) {
 }
 
 TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalStateDisablesSync) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   base::Value fooValue("fooValue");
   base::Value barValue("barValue");
@@ -1165,11 +1147,8 @@ TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalStateDisablesSync) {
     bad->Set(DEFAULTS, "foo", fooValue);
 
     sync_processor_->set_fail_all_requests(true);
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
     sync_processor_->set_fail_all_requests(false);
 
     // Changes from good will be send to sync, changes from bad won't.
@@ -1185,35 +1164,32 @@ TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalStateDisablesSync) {
     {
       syncer::SyncChangeList change_list;
       change_list.push_back(
-          settings_sync_util::CreateAdd("good", "bar", barValue, model_type));
+          settings_sync_util::CreateAdd("good", "bar", barValue, data_type));
       change_list.push_back(
-          settings_sync_util::CreateAdd("bad", "bar", barValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateAdd("bad", "bar", barValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
     // Restarting sync makes everything work again.
     sync_processor_->ClearChanges();
-    GetSyncableService(model_type)->StopSyncing(model_type);
-    sync_processor_wrapper_.reset(
-        new syncer::SyncChangeProcessorWrapperForTest(sync_processor_.get()));
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->StopSyncing(data_type);
+    sync_processor_wrapper_ =
+        std::make_unique<syncer::SyncChangeProcessorWrapperForTest>(
+            sync_processor_.get());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
 
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD,
               sync_processor_->GetOnlyChange("good", "foo")->change_type());
@@ -1236,8 +1212,8 @@ TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalStateDisablesSync) {
 }
 
 TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalChangeDisablesSync) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   base::Value fooValue("fooValue");
   base::Value barValue("barValue");
@@ -1246,11 +1222,8 @@ TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalChangeDisablesSync) {
   ValueStore* bad = AddExtensionAndGetStorage("bad", type);
 
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
 
     // bad will fail to send changes.
     good->Set(DEFAULTS, "foo", fooValue);
@@ -1275,35 +1248,32 @@ TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalChangeDisablesSync) {
     {
       syncer::SyncChangeList change_list;
       change_list.push_back(
-          settings_sync_util::CreateAdd("good", "bar", barValue, model_type));
+          settings_sync_util::CreateAdd("good", "bar", barValue, data_type));
       change_list.push_back(
-          settings_sync_util::CreateAdd("bad", "bar", barValue, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          settings_sync_util::CreateAdd("bad", "bar", barValue, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
 
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
-      dict.Set("bar", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
+      dict.Set("bar", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, good->Get());
     }
     {
-      base::DictionaryValue dict;
-      dict.Set("foo", barValue.CreateDeepCopy());
+      base::DictValue dict;
+      dict.Set("foo", barValue.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, dict, bad->Get());
     }
 
     // Restarting sync makes everything work again.
     sync_processor_->ClearChanges();
-    GetSyncableService(model_type)->StopSyncing(model_type);
-    sync_processor_wrapper_.reset(
-        new syncer::SyncChangeProcessorWrapperForTest(sync_processor_.get()));
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->StopSyncing(data_type);
+    sync_processor_wrapper_ =
+        std::make_unique<syncer::SyncChangeProcessorWrapperForTest>(
+            sync_processor_.get());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
 
     EXPECT_EQ(syncer::SyncChange::ACTION_ADD,
               sync_processor_->GetOnlyChange("good", "foo")->change_type());
@@ -1327,18 +1297,15 @@ TEST_F(ExtensionSettingsSyncTest, FailureToPushLocalChangeDisablesSync) {
 
 TEST_F(ExtensionSettingsSyncTest,
        LargeOutgoingChangeRejectedButIncomingAccepted) {
-  syncer::ModelType model_type = syncer::APP_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_LEGACY_PACKAGED_APP;
+  syncer::DataType data_type = syncer::APP_SETTINGS;
+  Manifest::Type type = Manifest::Type::kLegacyPackagedApp;
 
   // This value should be larger than the limit in sync_storage_backend.cc.
   base::Value large_value(std::string(10000, 'a'));
 
   PostOnBackendSequenceAndWait(FROM_HERE, [&, this]() {
-    GetSyncableService(model_type)
-        ->MergeDataAndStartSyncing(
-            model_type, syncer::SyncDataList(),
-            std::move(sync_processor_wrapper_),
-            std::make_unique<syncer::SyncErrorFactoryMock>());
+    GetSyncableService(data_type)->MergeDataAndStartSyncing(
+        data_type, syncer::SyncDataList(), std::move(sync_processor_wrapper_));
   });
 
   // Large local change rejected and doesn't get sent out.
@@ -1357,26 +1324,25 @@ TEST_F(ExtensionSettingsSyncTest,
     {
       syncer::SyncChangeList change_list;
       change_list.push_back(settings_sync_util::CreateAdd(
-          "s1", "large_value", large_value, model_type));
+          "s1", "large_value", large_value, data_type));
       change_list.push_back(settings_sync_util::CreateAdd(
-          "s2", "large_value", large_value, model_type));
-      GetSyncableService(model_type)
-          ->ProcessSyncChanges(FROM_HERE, change_list);
+          "s2", "large_value", large_value, data_type));
+      GetSyncableService(data_type)->ProcessSyncChanges(FROM_HERE, change_list);
     }
     {
-      base::DictionaryValue expected;
-      expected.Set("large_value", large_value.CreateDeepCopy());
+      base::DictValue expected;
+      expected.Set("large_value", large_value.Clone());
       EXPECT_PRED_FORMAT2(SettingsEq, expected, storage1->Get());
       EXPECT_PRED_FORMAT2(SettingsEq, expected, storage2->Get());
     }
 
-    GetSyncableService(model_type)->StopSyncing(model_type);
+    GetSyncableService(data_type)->StopSyncing(data_type);
   });
 }
 
 TEST_F(ExtensionSettingsSyncTest, Dots) {
-  syncer::ModelType model_type = syncer::EXTENSION_SETTINGS;
-  Manifest::Type type = Manifest::TYPE_EXTENSION;
+  syncer::DataType data_type = syncer::EXTENSION_SETTINGS;
+  Manifest::Type type = Manifest::Type::kExtension;
 
   ValueStore* storage = AddExtensionAndGetStorage("ext", type);
 
@@ -1385,12 +1351,10 @@ TEST_F(ExtensionSettingsSyncTest, Dots) {
       syncer::SyncDataList sync_data_list;
       std::unique_ptr<base::Value> string_value(new base::Value("value"));
       sync_data_list.push_back(settings_sync_util::CreateData(
-          "ext", "key.with.dot", *string_value, model_type));
+          "ext", "key.with.dot", *string_value, data_type));
 
-      GetSyncableService(model_type)
-          ->MergeDataAndStartSyncing(
-              model_type, sync_data_list, std::move(sync_processor_wrapper_),
-              std::make_unique<syncer::SyncErrorFactoryMock>());
+      GetSyncableService(data_type)->MergeDataAndStartSyncing(
+          data_type, sync_data_list, std::move(sync_processor_wrapper_));
     }
 
     // Test dots in keys that come from sync.
@@ -1398,9 +1362,8 @@ TEST_F(ExtensionSettingsSyncTest, Dots) {
       ValueStore::ReadResult data = storage->Get();
       ASSERT_TRUE(data.status().ok());
 
-      base::DictionaryValue expected_data;
-      expected_data.SetWithoutPathExpansion(
-          "key.with.dot", std::make_unique<base::Value>("value"));
+      base::DictValue expected_data;
+      expected_data.Set("key.with.dot", base::Value("value"));
       EXPECT_EQ(expected_data, data.settings());
     }
 
@@ -1414,7 +1377,7 @@ TEST_F(ExtensionSettingsSyncTest, Dots) {
       EXPECT_EQ(syncer::SyncChange::ACTION_ADD, sync_data->change_type());
       EXPECT_EQ("ext", sync_data->extension_id());
       EXPECT_EQ("key.with.spot", sync_data->key());
-      EXPECT_TRUE(sync_data->value().Equals(string_value.get()));
+      EXPECT_EQ(sync_data->value(), *string_value);
     }
   });
 }
@@ -1430,25 +1393,24 @@ namespace {
 static void UnlimitedSyncStorageTestCallback(ValueStore* sync_storage) {
   // Sync storage should still run out after ~100K; the unlimitedStorage
   // permission can't apply to sync.
-  std::unique_ptr<base::Value> kilobyte = settings_test_util::CreateKilobyte();
+  base::Value kilobyte = settings_test_util::CreateKilobyte();
   for (int i = 0; i < 100; ++i) {
-    sync_storage->Set(ValueStore::DEFAULTS, base::NumberToString(i), *kilobyte);
+    sync_storage->Set(ValueStore::DEFAULTS, base::NumberToString(i), kilobyte);
   }
 
-  EXPECT_FALSE(sync_storage->Set(ValueStore::DEFAULTS, "WillError", *kilobyte)
+  EXPECT_FALSE(sync_storage->Set(ValueStore::DEFAULTS, "WillError", kilobyte)
                    .status()
                    .ok());
 }
 
 static void UnlimitedLocalStorageTestCallback(ValueStore* local_storage) {
   // Local storage should never run out.
-  std::unique_ptr<base::Value> megabyte = settings_test_util::CreateMegabyte();
+  base::Value megabyte = settings_test_util::CreateMegabyte();
   for (int i = 0; i < 7; ++i) {
-    local_storage->Set(ValueStore::DEFAULTS, base::NumberToString(i),
-                       *megabyte);
+    local_storage->Set(ValueStore::DEFAULTS, base::NumberToString(i), megabyte);
   }
 
-  EXPECT_TRUE(local_storage->Set(ValueStore::DEFAULTS, "WontError", *megabyte)
+  EXPECT_TRUE(local_storage->Set(ValueStore::DEFAULTS, "WontError", megabyte)
                   .status()
                   .ok());
 }
@@ -1456,19 +1418,17 @@ static void UnlimitedLocalStorageTestCallback(ValueStore* local_storage) {
 }  // namespace
 
 TEST_F(ExtensionSettingsSyncTest, UnlimitedStorageForLocalButNotSync) {
-  const std::string id = "ext";
+  const ExtensionId id = "ext";
   std::set<std::string> permissions;
   permissions.insert("unlimitedStorage");
   scoped_refptr<const Extension> extension =
       settings_test_util::AddExtensionWithIdAndPermissions(
-          profile_.get(), id, Manifest::TYPE_EXTENSION, permissions);
+          profile_.get(), id, Manifest::Type::kExtension, permissions);
 
-  frontend_->RunWithStorage(extension,
-                            settings_namespace::SYNC,
-                            base::Bind(&UnlimitedSyncStorageTestCallback));
-  frontend_->RunWithStorage(extension,
-                            settings_namespace::LOCAL,
-                            base::Bind(&UnlimitedLocalStorageTestCallback));
+  frontend_->RunWithStorage(extension, settings_namespace::SYNC,
+                            base::BindOnce(&UnlimitedSyncStorageTestCallback));
+  frontend_->RunWithStorage(extension, settings_namespace::LOCAL,
+                            base::BindOnce(&UnlimitedLocalStorageTestCallback));
 
   content::RunAllTasksUntilIdle();
 }

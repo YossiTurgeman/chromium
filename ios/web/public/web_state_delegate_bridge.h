@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,11 +16,11 @@
 @protocol CRWWebStateDelegate <NSObject>
 @optional
 
-// Called when |webState| wants to open a new window. |url| is the URL of
-// the new window; |opener_url| is the URL of the page which requested a
-// window to be open; |initiated_by_user| is true if action was caused by the
-// user. |webState| will not open a window if this method returns nil. This
-// method can not return |webState|.
+// Called when `webState` wants to open a new window. `url` is the URL of
+// the new window; `opener_url` is the URL of the page which requested a
+// window to be open; `initiated_by_user` is true if action was caused by the
+// user. `webState` will not open a window if this method returns nil. This
+// method can not return `webState`.
 - (web::WebState*)webState:(web::WebState*)webState
     createNewWebStateForURL:(const GURL&)URL
                   openerURL:(const GURL&)openerURL
@@ -35,78 +35,87 @@
 - (web::WebState*)webState:(web::WebState*)webState
          openURLWithParams:(const web::WebState::OpenURLParams&)params;
 
-// Called when the user triggers the context menu with the given
-// |ContextMenuParams|. If this method is not implemented, no context menu will
-// be displayed.
-- (void)webState:(web::WebState*)webState
-    handleContextMenu:(const web::ContextMenuParams&)params;
-
-// Requests the repost form confirmation dialog. Clients must call |handler|
+// Requests the repost form confirmation dialog. Clients must call `handler`
 // with YES to allow repost and with NO to cancel the repost. If this method is
 // not implemented then WebState will repost the form.
 - (void)webState:(web::WebState*)webState
     runRepostFormDialogWithCompletionHandler:(void (^)(BOOL))handler;
+
+// Called when a copy operation is initiated. The delegate must call `handler`
+// with `YES` to allow the copy or `NO` to prevent it.
+// By default, copy is allowed.
+- (void)webState:(web::WebState*)webState
+    shouldAllowCopyWithDecisionHandler:(void (^)(BOOL))handler;
+
+// Called when a paste operation is initiated. The delegate must call `handler`
+// with `YES` to allow the paste or `NO` to prevent it.
+// By default, paste is allowed.
+- (void)webState:(web::WebState*)webState
+    shouldAllowPasteWithDecisionHandler:(void (^)(BOOL))handler;
+
+// Called when a cut operation is initiated. The delegate must call `handler`
+// with `YES` to allow the cut or `NO` to prevent it.
+// By default, cut is allowed.
+- (void)webState:(web::WebState*)webState
+    shouldAllowCutWithDecisionHandler:(void (^)(BOOL))handler;
+
+// Called after the user or a script pasted content into the page.
+- (void)webStateDidFinishClipboardRead:(web::WebState*)webState;
 
 // Returns a pointer to a service to manage dialogs. May return null in which
 // case dialogs aren't shown.
 - (web::JavaScriptDialogPresenter*)javaScriptDialogPresenterForWebState:
     (web::WebState*)webState;
 
+// Called when the media permission is requested and to acquire the decision
+// handler needed to process the user's decision to grant, deny media
+// permissions or show the default prompt that asks for permissions.
+- (void)webState:(web::WebState*)webState
+    handlePermissions:(NSArray<NSNumber*>*)permissions
+      decisionHandler:(web::WebStatePermissionDecisionHandler)decisionHandler;
+
 // Called when a request receives an authentication challenge specified by
-// |protectionSpace|, and is unable to respond using cached credentials.
-// Clients must call |handler| even if they want to cancel authentication
-// (in which case |username| or |password| should be nil).
+// `protectionSpace`, and is unable to respond using cached credentials.
+// Clients must call `handler` even if they want to cancel authentication
+// (in which case `username` or `password` should be nil).
 - (void)webState:(web::WebState*)webState
     didRequestHTTPAuthForProtectionSpace:(NSURLProtectionSpace*)protectionSpace
                       proposedCredential:(NSURLCredential*)proposedCredential
                        completionHandler:(void (^)(NSString* username,
                                                    NSString* password))handler;
 
-// Determines whether the given link with |linkURL| should show a preview on
-// force touch.
-- (BOOL)webState:(web::WebState*)webState
-    shouldPreviewLinkWithURL:(const GURL&)linkURL;
-
-// Called when the user performs a peek action on a link with |linkURL| with
-// force touch. Returns a view controller shown as a pop-up. Uses Webkit's
-// default preview behavior when it returns nil.
-- (UIViewController*)webState:(web::WebState*)webState
-    previewingViewControllerForLinkWithURL:(const GURL&)linkURL;
-
-// Called when the user performs a pop action on the preview on force touch.
-// |previewing_view_controller| is the view controller that is popped.
-// It should display |previewingViewController| inside the app.
+// Called when a request receives an authentication challenge specified by
+// `protectionSpace`, and is unable to respond using cached credentials.
+// Clients must call `handler` even if they want to cancel authentication
+// (in which case `identity` should be nil).
 - (void)webState:(web::WebState*)webState
-    commitPreviewingViewController:(UIViewController*)previewingViewController;
+    didRequestClientCertAuthForProtectionSpace:
+        (NSURLProtectionSpace*)protectionSpace
+                             completionHandler:
+                                 (void (^)(SecIdentityRef))handler;
 
 // Called to know the size of the view containing the WebView.
 - (UIView*)webViewContainerForWebState:(web::WebState*)webState;
 
-// Called when iOS13+ context menu is triggered and now it is required to
-// provide a UIContextMenuConfiguration to |completion_handler| to generate the
-// context menu.
+// Called when the context menu is triggered and now it is required to provide a
+// UIContextMenuConfiguration to `completion_handler` to generate the context
+// menu.
 - (void)webState:(web::WebState*)webState
-    contextMenuConfigurationForLinkWithURL:(const GURL&)linkURL
-                         completionHandler:
-                             (void (^)(UIContextMenuConfiguration*))
-                                 completionHandler API_AVAILABLE(ios(13.0));
+    contextMenuConfigurationForParams:(const web::ContextMenuParams&)params
+                    completionHandler:(void (^)(UIContextMenuConfiguration*))
+                                          completionHandler;
 
-// Called when iOS13+ context menu is ready to be showed.
+// Called when the context menu will commit with animator.
 - (void)webState:(web::WebState*)webState
-    contextMenuWillPresentForLinkWithURL:(const GURL&)linkURL
-    API_AVAILABLE(ios(13.0));
+    contextMenuWillCommitWithAnimator:
+        (id<UIContextMenuInteractionCommitAnimating>)animator;
 
-// Called when iOS13+ context menu will commit with animator.
-- (void)webState:(web::WebState*)webState
-    contextMenuForLinkWithURL:(const GURL&)linkURL
-       willCommitWithAnimator:
-           (id<UIContextMenuInteractionCommitAnimating>)animator
-    API_AVAILABLE(ios(13.0));
+// This API can be used to show custom input views in the web view.
+- (id<CRWResponderInputView>)webStateInputViewProvider:(web::WebState*)webState;
 
-// Called when iOS13+ context menu will present.
-- (void)webState:(web::WebState*)webState
-    contextMenuDidEndForLinkWithURL:(const GURL&)linkURL
-    API_AVAILABLE(ios(13.0));
+// Provides an opportunity to the delegate to react to the creation of the web
+// view.
+- (void)webStateDidCreateWebView:(web::WebState*)webState;
 
 @end
 
@@ -116,6 +125,10 @@ namespace web {
 class WebStateDelegateBridge : public web::WebStateDelegate {
  public:
   explicit WebStateDelegateBridge(id<CRWWebStateDelegate> delegate);
+
+  WebStateDelegateBridge(const WebStateDelegateBridge&) = delete;
+  WebStateDelegateBridge& operator=(const WebStateDelegateBridge&) = delete;
+
   ~WebStateDelegateBridge() override;
 
   // web::WebStateDelegate methods.
@@ -126,45 +139,48 @@ class WebStateDelegateBridge : public web::WebStateDelegate {
   void CloseWebState(WebState* source) override;
   WebState* OpenURLFromWebState(WebState*,
                                 const WebState::OpenURLParams&) override;
-  void HandleContextMenu(WebState* source,
-                         const ContextMenuParams& params) override;
   void ShowRepostFormWarningDialog(
       WebState* source,
+      FormWarningType warning_type,
       base::OnceCallback<void(bool)> callback) override;
+  void ShouldAllowCopy(WebState* source,
+                       base::OnceCallback<void(bool)> callback) override;
+  void ShouldAllowPaste(WebState* source,
+                        base::OnceCallback<void(bool)> callback) override;
+  void ShouldAllowCut(WebState* source,
+                      base::OnceCallback<void(bool)> callback) override;
+  void DidFinishClipboardRead(WebState* source) override;
   JavaScriptDialogPresenter* GetJavaScriptDialogPresenter(
       WebState* source) override;
+  void HandlePermissionsDecisionRequest(
+      WebState* source,
+      NSArray<NSNumber*>* permissions,
+      WebStatePermissionDecisionHandler handler) override;
   void OnAuthRequired(WebState* source,
                       NSURLProtectionSpace* protection_space,
                       NSURLCredential* proposed_credential,
-                      const AuthCallback& callback) override;
-  bool ShouldPreviewLink(WebState* web_state, const GURL& link_url) override;
-  UIViewController* GetPreviewingViewController(WebState* source,
-                                                const GURL& link_url) override;
-  void CommitPreviewingViewController(
-      WebState* source,
-      UIViewController* previewing_view_controller) override;
+                      HTTPAuthCallback callback) override;
+  void OnAuthRequired(WebState* source,
+                      NSURLProtectionSpace* protection_space,
+                      ClientCertAuthCallback callback) override;
   UIView* GetWebViewContainer(WebState* source) override;
   void ContextMenuConfiguration(
       WebState* source,
-      const GURL& link_url,
-      void (^completion_handler)(UIContextMenuConfiguration*))
-      API_AVAILABLE(ios(13.0)) override;
-  void ContextMenuDidEnd(WebState* source, const GURL& link_url)
-      API_AVAILABLE(ios(13.0)) override;
+      const ContextMenuParams& params,
+      void (^completion_handler)(UIContextMenuConfiguration*)) override;
   void ContextMenuWillCommitWithAnimator(
       WebState* source,
-      const GURL& link_url,
-      id<UIContextMenuInteractionCommitAnimating> animator)
-      API_AVAILABLE(ios(13.0)) override;
-  void ContextMenuWillPresent(WebState* source, const GURL& link_url)
-      API_AVAILABLE(ios(13.0)) override;
+      id<UIContextMenuInteractionCommitAnimating> animator) override;
+
+  id<CRWResponderInputView> GetResponderInputView(WebState* source) override;
+
+  void OnNewWebViewCreated(WebState* source) override;
 
  private:
   // CRWWebStateDelegate which receives forwarded calls.
   __weak id<CRWWebStateDelegate> delegate_ = nil;
-  DISALLOW_COPY_AND_ASSIGN(WebStateDelegateBridge);
 };
 
-}  // web
+}  // namespace web
 
 #endif  // IOS_WEB_PUBLIC_WEB_STATE_DELEGATE_BRIDGE_H_

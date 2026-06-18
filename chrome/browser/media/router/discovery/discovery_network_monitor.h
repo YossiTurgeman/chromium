@@ -1,4 +1,4 @@
-// Copyright (c) 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,19 +8,16 @@
 #include <string>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/lazy_instance.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/no_destructor.h"
 #include "base/observer_list_threadsafe.h"
 #include "base/sequence_checker.h"
-#include "base/task/post_task.h"
+#include "base/task/sequenced_task_runner.h"
 #include "chrome/browser/media/router/discovery/discovery_network_info.h"
 #include "net/base/ip_address.h"
 #include "services/network/public/cpp/network_connection_tracker.h"
 
 namespace media_router {
-
-class DiscoveryNetworkMonitorMetricObserver;
 
 // Tracks the set of active network interfaces that can be used for local
 // discovery.  If the list of interfaces changes, then
@@ -57,6 +54,9 @@ class DiscoveryNetworkMonitor
   static std::unique_ptr<DiscoveryNetworkMonitor> CreateInstanceForTest(
       NetworkInfoFunction strategy);
 
+  DiscoveryNetworkMonitor(const DiscoveryNetworkMonitor&) = delete;
+  DiscoveryNetworkMonitor& operator=(const DiscoveryNetworkMonitor&) = delete;
+
   void AddObserver(Observer* const observer);
   void RemoveObserver(Observer* const observer);
 
@@ -73,8 +73,9 @@ class DiscoveryNetworkMonitor
  private:
   friend class CastMediaSinkServiceImplTest;
   friend class DiscoveryNetworkMonitorTest;
+  friend class AccessCodeCastSinkServiceTest;
   friend struct std::default_delete<DiscoveryNetworkMonitor>;
-  friend struct base::LazyInstanceTraitsBase<DiscoveryNetworkMonitor>;
+  friend class base::NoDestructor<DiscoveryNetworkMonitor>;
 
   DiscoveryNetworkMonitor();
   explicit DiscoveryNetworkMonitor(NetworkInfoFunction strategy);
@@ -83,7 +84,8 @@ class DiscoveryNetworkMonitor
   void SetNetworkInfoFunctionForTest(NetworkInfoFunction strategy);
 
   // network::NetworkConnectionTracker::NetworkConnectionObserver overrides.
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   std::string GetNetworkIdOnSequence() const;
   std::string UpdateNetworkInfo();
@@ -106,14 +108,8 @@ class DiscoveryNetworkMonitor
   // connected.
   NetworkInfoFunction network_info_function_;
 
-  // Observer which records metrics about the network changes broadcast by the
-  // monitor.
-  std::unique_ptr<DiscoveryNetworkMonitorMetricObserver> metric_observer_;
-
   // SequenceChecker for |task_runner_|.
   SEQUENCE_CHECKER(sequence_checker_);
-
-  DISALLOW_COPY_AND_ASSIGN(DiscoveryNetworkMonitor);
 };
 
 }  // namespace media_router

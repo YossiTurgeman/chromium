@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,7 +18,6 @@ MockNavigationHandle::MockNavigationHandle() : MockNavigationHandle(nullptr) {}
 
 MockNavigationHandle::MockNavigationHandle(WebContents* web_contents)
     : navigation_id_(++g_mock_handle_id), web_contents_(web_contents) {
-  proxy_server_ = net::ProxyServer::Direct();
 }
 
 MockNavigationHandle::MockNavigationHandle(const GURL& url,
@@ -26,8 +25,12 @@ MockNavigationHandle::MockNavigationHandle(const GURL& url,
     : navigation_id_(++g_mock_handle_id),
       url_(url),
       web_contents_(WebContents::FromRenderFrameHost(render_frame_host)),
-      render_frame_host_(render_frame_host) {
-  proxy_server_ = net::ProxyServer::Direct();
+      render_frame_host_(render_frame_host),
+      is_in_primary_main_frame_(render_frame_host_
+                                    ? render_frame_host_->IsInPrimaryMainFrame()
+                                    : true) {
+  redirect_chain_.push_back(url);
+  runtime_feature_state_context_ = blink::RuntimeFeatureStateContext();
 }
 
 MockNavigationHandle::~MockNavigationHandle() = default;

@@ -1,4 +1,4 @@
-; Copyright 2018 The Chromium Authors. All rights reserved.
+; Copyright 2018 The Chromium Authors
 ; Use of this source code is governed by a BSD-style license that can be
 ; found in the LICENSE file.
 
@@ -35,14 +35,10 @@
   (path "/var/run")
 )
 
-; Local preferences.
-(allow file-read*
-  (path (user-homedir-path (string-append "/Library/Preferences/" (param bundle-id) ".plist")))
-)
-
 ; Certificate databases.
 (allow file-read*
   (path "/Library/Preferences/com.apple.security.plist")
+  (path (user-homedir-path "/Library/Preferences/com.apple.security.plist"))
   ; https://crbug.com/1024000
   (path (user-homedir-path "/Library/Preferences/com.apple.security.revocation.plist"))
   (subpath "/Library/Keychains")
@@ -107,6 +103,13 @@
   ; Read network configuration.
   (global-name "com.apple.SystemConfiguration.DNSConfiguration")
   (global-name "com.apple.SystemConfiguration.configd")
+
+  ; If the system has a relay configured, system frameworks may call out
+  ; to nehelper to access its configuration (https://crbug.com/383306185)
+  (global-name "com.apple.nehelper")
+
+  ; Required by the Okta SSO which is performed using URLSession api.
+  (global-name "com.apple.AppSSO.service-xpc")
 )
 
 (allow sysctl-read
@@ -116,9 +119,10 @@
 ; Kerberos support. This should be removed after GSS is moved out of the
 ; network service. https://crbug.com/1017830
 (allow mach-lookup
+  (global-name "com.apple.GSSCred") ; https://crbug.com/1134449
   (global-name "org.h5l.kcm")
 )
 (allow file-read*
   (path "/private/etc/krb5.conf")
-  (subpath "/System/Library/KerberosPlugins/KerberosFrameworkPlugins")
+  (subpath "/System/Library/KerberosPlugins") ; https://crbug.com/1134449
 )

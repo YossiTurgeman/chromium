@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,8 @@ namespace signin {
 
 // Returns true if signin cookies are allowed.
 bool SettingsAllowSigninCookies(
-    const content_settings::CookieSettings* cookie_settings);
+    const content_settings::CookieSettings* cookie_settings,
+    bool check_only_gaia_url = false);
 
 // Returns true if signin cookies are cleared on exit.
 bool SettingsDeleteSigninCookiesOnExit(

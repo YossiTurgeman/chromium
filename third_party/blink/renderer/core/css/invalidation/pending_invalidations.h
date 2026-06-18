@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,22 @@
 
 #include <memory>
 
+#include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/invalidation/node_invalidation_sets.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
 class ContainerNode;
-class Document;
 class Element;
 
+// HeapHashMap is not node-based and thus does not have stable iterators,
+// but we rely on pointers to stay stable even during modification of the map.
+// Thus, use unique_ptr to make sure the NodeInvalidationSets has a stable
+// address.
 using PendingInvalidationMap =
-    HeapHashMap<Member<ContainerNode>, NodeInvalidationSets>;
+    HeapHashMap<Member<ContainerNode>, std::unique_ptr<NodeInvalidationSets>>;
 
 // Performs deferred style invalidation for DOM subtrees.
 //
@@ -38,9 +43,10 @@ using PendingInvalidationMap =
 // InvalidationLists obtained from RuleFeatureSet.
 //
 // When we next read computed styles, for example from
-// user script or to render a frame, Invalidate(Document&)
-// is called to traverse the DOM and perform all
-// the pending style invalidations.
+// user script or to render a frame,
+// StyleInvalidator::Invalidate(Document&) is called to
+// traverse the DOM and perform all the pending style
+// invalidations.
 //
 // If an element is removed from the DOM tree, we call
 // ClearInvalidation(ContainerNode&).
@@ -64,11 +70,10 @@ class CORE_EXPORT PendingInvalidations {
   DISALLOW_NEW();
 
  public:
-  PendingInvalidations();
+  PendingInvalidations() = default;
   PendingInvalidations(const PendingInvalidations&) = delete;
   PendingInvalidations& operator=(const PendingInvalidations&) = delete;
   ~PendingInvalidations() {}
-  void Invalidate(Document&);
   // May immediately invalidate the node and/or add pending invalidation sets to
   // this node.
   void ScheduleInvalidationSetsForNode(const InvalidationLists&,

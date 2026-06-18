@@ -1,16 +1,16 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/policy/chrome_browser_cloud_management_register_watcher.h"
 
+#include <string>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/metrics/histogram_tester.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "chrome/browser/policy/chrome_browser_cloud_management_controller_desktop.h"
 #include "chrome/browser/ui/enterprise_startup_dialog.h"
 #include "components/enterprise/browser/controller/chrome_browser_cloud_management_controller.h"
@@ -42,18 +42,23 @@ class FakeChromeBrowserCloudManagementController
       std::unique_ptr<ChromeBrowserCloudManagementController::Delegate>
           delegate)
       : ChromeBrowserCloudManagementController(std::move(delegate)) {}
+  FakeChromeBrowserCloudManagementController(
+      const FakeChromeBrowserCloudManagementController&) = delete;
+  FakeChromeBrowserCloudManagementController& operator=(
+      const FakeChromeBrowserCloudManagementController&) = delete;
+
   void FireNotification(bool succeeded) {
     NotifyPolicyRegisterFinished(succeeded);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(FakeChromeBrowserCloudManagementController);
 };
 
 // A mock EnterpriseStartDialog to mimic the behavior of real dialog.
 class MockEnterpriseStartupDialog : public EnterpriseStartupDialog {
  public:
   MockEnterpriseStartupDialog() = default;
+  MockEnterpriseStartupDialog(const MockEnterpriseStartupDialog&) = delete;
+  MockEnterpriseStartupDialog& operator=(const MockEnterpriseStartupDialog&) =
+      delete;
   ~MockEnterpriseStartupDialog() override {
     // |callback_| exists if we're mocking the process that dialog is dismissed
     // automatically.
@@ -64,26 +69,24 @@ class MockEnterpriseStartupDialog : public EnterpriseStartupDialog {
   }
 
   MOCK_METHOD1(DisplayLaunchingInformationWithThrobber,
-               void(const base::string16&));
+               void(const std::u16string&));
   MOCK_METHOD2(DisplayErrorMessage,
-               void(const base::string16&,
-                    const base::Optional<base::string16>&));
-  MOCK_METHOD0(IsShowing, bool());
+               void(const std::u16string&,
+                    const std::optional<std::u16string>&));
+  bool IsShowing() override { return !callback_.is_null(); }
 
   void SetCallback(EnterpriseStartupDialog::DialogResultCallback callback) {
     callback_ = std::move(callback);
   }
 
   void UserClickedTheButton(bool confirmed) {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(std::move(callback_), confirmed,
                                   false /* can_show_browser_window */));
   }
 
  private:
   DialogResultCallback callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(MockEnterpriseStartupDialog);
 };
 
 }  // namespace
@@ -104,6 +107,10 @@ class ChromeBrowserCloudManagementRegisterWatcherTest : public ::testing::Test {
                            CreateEnterpriseStartupDialog,
                        base::Unretained(this)));
   }
+  ChromeBrowserCloudManagementRegisterWatcherTest(
+      const ChromeBrowserCloudManagementRegisterWatcherTest&) = delete;
+  ChromeBrowserCloudManagementRegisterWatcherTest& operator=(
+      const ChromeBrowserCloudManagementRegisterWatcherTest&) = delete;
 
  protected:
   FakeBrowserDMTokenStorage* storage() { return &storage_; }
@@ -126,9 +133,7 @@ class ChromeBrowserCloudManagementRegisterWatcherTest : public ::testing::Test {
   ChromeBrowserCloudManagementRegisterWatcher watcher_;
   FakeBrowserDMTokenStorage storage_;
   std::unique_ptr<MockEnterpriseStartupDialog> dialog_;
-  MockEnterpriseStartupDialog* dialog_ptr_;
-
-  DISALLOW_COPY_AND_ASSIGN(ChromeBrowserCloudManagementRegisterWatcherTest);
+  raw_ptr<MockEnterpriseStartupDialog, DanglingUntriaged> dialog_ptr_;
 };
 
 TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
@@ -150,8 +155,7 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest, EnrollmentSucceed) {
   base::HistogramTester histogram_tester;
 
   EXPECT_CALL(*dialog(), DisplayLaunchingInformationWithThrobber(_));
-  EXPECT_CALL(*dialog(), IsShowing()).WillOnce(Return(true));
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(
           &FakeChromeBrowserCloudManagementController::FireNotification,
@@ -175,9 +179,8 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
   base::HistogramTester histogram_tester;
 
   EXPECT_CALL(*dialog(), DisplayLaunchingInformationWithThrobber(_));
-  EXPECT_CALL(*dialog(), IsShowing()).WillOnce(Return(true));
   storage()->SetEnrollmentErrorOption(false);
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(
           &FakeChromeBrowserCloudManagementController::FireNotification,
@@ -204,8 +207,7 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
   EXPECT_CALL(*dialog(), DisplayErrorMessage(_, _))
       .WillOnce(
           InvokeWithoutArgs([this] { dialog()->UserClickedTheButton(false); }));
-  EXPECT_CALL(*dialog(), IsShowing()).WillOnce(Return(true));
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(
           &FakeChromeBrowserCloudManagementController::FireNotification,
@@ -232,8 +234,7 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
   EXPECT_CALL(*dialog(), DisplayErrorMessage(_, _))
       .WillOnce(
           InvokeWithoutArgs([this] { dialog()->UserClickedTheButton(true); }));
-  EXPECT_CALL(*dialog(), IsShowing()).WillOnce(Return(true));
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(
           &FakeChromeBrowserCloudManagementController::FireNotification,
@@ -257,7 +258,7 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
   base::HistogramTester histogram_tester;
 
   EXPECT_CALL(*dialog(), DisplayLaunchingInformationWithThrobber(_));
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&MockEnterpriseStartupDialog::UserClickedTheButton,
                      base::Unretained(dialog()), false));
@@ -282,7 +283,7 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
   EXPECT_CALL(*dialog(), DisplayLaunchingInformationWithThrobber(_));
   storage()->SetEnrollmentErrorOption(false);
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&MockEnterpriseStartupDialog::UserClickedTheButton,
                      base::Unretained(dialog()), false));
@@ -327,9 +328,8 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
   base::HistogramTester histogram_tester;
 
   EXPECT_CALL(*dialog(), DisplayLaunchingInformationWithThrobber(_));
-  EXPECT_CALL(*dialog(), IsShowing()).WillOnce(Return(true));
   storage()->SetEnrollmentErrorOption(false);
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(
           &FakeChromeBrowserCloudManagementController::FireNotification,
@@ -359,6 +359,7 @@ TEST_F(ChromeBrowserCloudManagementRegisterWatcherTest,
   histogram_tester.ExpectTotalCount(
       ChromeBrowserCloudManagementRegisterWatcher::kStartupDialogHistogramName,
       0);
+  EXPECT_FALSE(watcher()->IsDialogShowing());
 }
 
 }  // namespace policy

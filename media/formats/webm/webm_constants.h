@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,8 +25,8 @@ const int kWebMIdBitDepth = 0x6264;
 const int kWebMIdBitsPerChannel = 0x55B2;
 const int kWebMIdBlock = 0xA1;
 const int kWebMIdBlockAddID = 0xEE;
-const int kWebMIdBlockAdditions = 0x75A1;
 const int kWebMIdBlockAdditional = 0xA5;
+const int kWebMIdBlockAdditions = 0x75A1;
 const int kWebMIdBlockDuration = 0x9B;
 const int kWebMIdBlockGroup = 0xA0;
 const int kWebMIdBlockMore = 0xA6;
@@ -136,7 +136,7 @@ const int kWebMIdLaceNumber = 0xCC;
 const int kWebMIdLanguage = 0x22B59C;
 const int kWebMIdLuminanceMax = 0x55D9;
 const int kWebMIdLuminanceMin = 0x55DA;
-const int kWebMIdMasteringMetadata = 0x55D0;
+const int kWebMIdColorVolumeMetadata = 0x55D0;
 const int kWebMIdMatrixCoefficients = 0x55B1;
 const int kWebMIdMaxBlockAdditionId = 0x55EE;
 const int kWebMIdMaxCache = 0x6DF8;
@@ -165,6 +165,12 @@ const int kWebMIdPrimaryGChromaticityX = 0x55D3;
 const int kWebMIdPrimaryGChromaticityY = 0x55D4;
 const int kWebMIdPrimaryRChromaticityX = 0x55D1;
 const int kWebMIdPrimaryRChromaticityY = 0x55D2;
+const int kWebMIdProjection = 0x7670;
+const int kWebMIdProjectionPosePitch = 0x7674;
+const int kWebMIdProjectionPoseRoll = 0x7675;
+const int kWebMIdProjectionPoseYaw = 0x7673;
+const int kWebMIdProjectionPrivate = 0x7672;
+const int kWebMIdProjectionType = 0x7671;
 const int kWebMIdRange = 0x55B9;
 const int kWebMIdReferenceBlock = 0xFB;
 const int kWebMIdReferencePriority = 0xFA;
@@ -247,6 +253,31 @@ const int kWebMTrackTypeVideo = 1;
 const int kWebMTrackTypeAudio = 2;
 const int kWebMTrackTypeSubtitlesOrCaptions = 0x11;
 const int kWebMTrackTypeDescriptionsOrMetadata = 0x21;
+
+// Values for StereoMode are spec'd here:
+// https://www.matroska.org/technical/elements.html#StereoMode
+const int kWebMStereoModeMono = 0;
+const int kWebMStereoModeLeftRight = 1;
+const int kWebMStereoModeBottomTop = 2;
+const int kWebMStereoModeTopBottom = 3;
+const int kWebMStereoModeCheckerboardRL = 4;
+const int kWebMStereoModeCheckerboardLR = 5;
+const int kWebMStereoModeRowInterleavedRL = 6;
+const int kWebMStereoModeRowInterleavedLR = 7;
+const int kWebMStereoModeColInterleavedRL = 8;
+const int kWebMStereoModeColInterleavedLR = 9;
+const int kWebMStereoModeAnaglyphCyanRed = 10;
+const int kWebMStereoModeRightLeft = 11;
+const int kWebMStereoModeAnaglyphGreenMag = 12;
+const int kWebMStereoModeBothEyesBlockLR = 13;
+const int kWebMStereoModeBothEyesBlockRL = 14;
+
+// Values for ProjectionType are spec'd here:
+// https://www.matroska.org/technical/elements.html#ProjectionType
+const int kWebMProjectionTypeRectangular = 0;
+const int kWebMProjectionTypeEquirectangular = 1;
+const int kWebMProjectionTypeCubemap = 2;
+const int kWebMProjectionTypeMesh = 3;
 
 MEDIA_EXPORT extern const char kWebMCodecSubtitles[];
 MEDIA_EXPORT extern const char kWebMCodecCaptions[];

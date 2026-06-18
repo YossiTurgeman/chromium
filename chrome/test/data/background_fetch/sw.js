@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,14 @@ self.addEventListener('message', e => {
   if (e.data === 'fetchnowait')
     postToWindowClients('ok');
   else if (e.data === 'fetch')
-    fetchPromise.catch(e => postToWindowClients('permissionerror'));
+    fetchPromise.catch(e => {
+      postToWindowClients('permissionerror');
+    });
+  else if (e.data === 'fetch_resolves')
+    fetchPromise.then(() => postToWindowClients('resolved'))
+                .catch(e => {
+                  postToWindowClients(e.name);
+                });
   else
     postToWindowClients('unexpected message');
 });

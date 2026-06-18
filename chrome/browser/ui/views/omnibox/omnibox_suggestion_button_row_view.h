@@ -1,57 +1,83 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_VIEWS_OMNIBOX_OMNIBOX_SUGGESTION_BUTTON_ROW_VIEW_H_
 #define CHROME_BROWSER_UI_VIEWS_OMNIBOX_OMNIBOX_SUGGESTION_BUTTON_ROW_VIEW_H_
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ui/omnibox/omnibox_theme.h"
 #include "components/omnibox/browser/autocomplete_match.h"
-#include "components/omnibox/browser/omnibox_popup_model.h"
-#include "ui/views/controls/button/button.h"
-#include "ui/views/controls/button/md_text_button.h"
+#include "components/omnibox/browser/omnibox_popup_selection.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/view.h"
 
-class OmniboxPopupContentsView;
+class OmniboxPopupViewViews;
 class OmniboxSuggestionRowButton;
+class OmniboxSuggestionRowChip;
+
+namespace views {
+class Button;
+}
 
 // A view to contain the button row within a result view.
-class OmniboxSuggestionButtonRowView : public views::View,
-                                       public views::ButtonListener {
+class OmniboxSuggestionButtonRowView : public views::View {
+  METADATA_HEADER(OmniboxSuggestionButtonRowView, views::View)
+
  public:
-  explicit OmniboxSuggestionButtonRowView(OmniboxPopupContentsView* view,
+  explicit OmniboxSuggestionButtonRowView(OmniboxPopupViewViews* popup_view,
                                           int model_index);
+  OmniboxSuggestionButtonRowView(const OmniboxSuggestionButtonRowView&) =
+      delete;
+  OmniboxSuggestionButtonRowView& operator=(
+      const OmniboxSuggestionButtonRowView&) = delete;
   ~OmniboxSuggestionButtonRowView() override;
 
-  // Called when themes, styles, and visibility is refreshed in result view.
-  void OnStyleRefresh();
+  // views::View:
+  void Layout(PassKey) override;
+
+  // Called when the theme state may have changed.
+  void SetThemeState(OmniboxPartState theme_state);
 
   // Updates the suggestion row buttons based on the model.
   void UpdateFromModel();
 
-  // views::ButtonListener:
-  void ButtonPressed(views::Button* sender, const ui::Event& event) override;
+  // Called when the selected item (row or button) in the popup has changed.
+  void SelectionStateChanged();
 
   views::Button* GetActiveButton() const;
 
  private:
-  // Get the popup model from the view.
-  const OmniboxPopupModel* model() const;
+  // Indicates whether a match corresponding to `model_index_` exists in
+  // model result. Sometimes result views and button rows exist for
+  // out-of-range matches, for example during tests.
+  bool HasMatch() const;
 
   // Digs into the model with index to get the match for owning result view.
   const AutocompleteMatch& match() const;
 
-  void SetPillButtonVisibility(OmniboxSuggestionRowButton* button,
-                               OmniboxPopupModel::LineState state);
+  // Clears and builds all child views (buttons in the button row),
+  // taking the current model state (e.g. match) into account.
+  void BuildViews();
 
-  OmniboxPopupContentsView* const popup_contents_view_;
+  void SetPillButtonVisibility(OmniboxSuggestionRowButton* button,
+                               OmniboxPopupSelection::LineState state);
+
+  void ButtonPressed(const OmniboxPopupSelection selection,
+                     const ui::Event& event);
+
+  const raw_ptr<OmniboxPopupViewViews> popup_view_;
   size_t const model_index_;
 
-  OmniboxSuggestionRowButton* keyword_button_ = nullptr;
-  OmniboxSuggestionRowButton* pedal_button_ = nullptr;
-  OmniboxSuggestionRowButton* tab_switch_button_ = nullptr;
+  raw_ptr<OmniboxSuggestionRowChip> embeddings_chip_ = nullptr;
 
-  DISALLOW_COPY_AND_ASSIGN(OmniboxSuggestionButtonRowView);
+  raw_ptr<OmniboxSuggestionRowButton> keyword_button_ = nullptr;
+
+  std::vector<raw_ptr<OmniboxSuggestionRowButton>> action_buttons_;
+
+  // Which button, if any, was active as of the last call to
+  // SelectionStateChanged().
+  raw_ptr<views::Button> previous_active_button_ = nullptr;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_OMNIBOX_OMNIBOX_SUGGESTION_BUTTON_ROW_VIEW_H_

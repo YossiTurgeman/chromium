@@ -1,71 +1,98 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/webauthn/account_hover_list_model.h"
 
+#include <cstddef>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/app/vector_icons/vector_icons.h"
+#include "chrome/browser/webauthn/authenticator_request_dialog_model.h"
 #include "chrome/grit/generated_resources.h"
-#include "device/fido/authenticator_get_assertion_response.h"
-#include "device/fido/public_key_credential_user_entity.h"
+#include "components/vector_icons/vector_icons.h"
+#include "device/fido/discoverable_credential_metadata.h"
 #include "ui/base/l10n/l10n_util.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "ui/base/models/image_model.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/color/color_id.h"
+
+constexpr size_t kIconSize = 20;
+
+namespace {
+std::u16string NameTokenForDisplay(std::string_view name_token) {
+  if (name_token.empty()) {
+    return l10n_util::GetStringUTF16(IDS_WEBAUTHN_UNKNOWN_ACCOUNT);
+  }
+  return base::UTF8ToUTF16(name_token);
+}
+}  // namespace
 
 AccountHoverListModel::AccountHoverListModel(
-    const std::vector<device::AuthenticatorGetAssertionResponse>* response_list,
+    AuthenticatorRequestDialogModel* dialog_model,
     Delegate* delegate)
-    : response_list_(response_list), delegate_(delegate) {}
+    : delegate_(delegate) {
+  for (const device::DiscoverableCredentialMetadata& cred :
+       dialog_model->creds) {
+    items_.emplace_back(
+        NameTokenForDisplay(cred.user.name.value_or("")),
+        AuthenticatorRequestDialogModel::GetMechanismDescription(cred),
+        ui::ImageModel::FromVectorIcon(
+            features::IsRoundedIconsEnabled() ? vector_icons::kPasskeyIcon
+                                              : vector_icons::kPasskeyOldIcon,
+            dialog_model->ui_disabled_ ? ui::kColorIconDisabled
+                                       : ui::kColorIcon,
+            kIconSize),
+        !dialog_model->ui_disabled_);
+  }
+}
 
 AccountHoverListModel::~AccountHoverListModel() = default;
 
-bool AccountHoverListModel::ShouldShowPlaceholderForEmptyList() const {
-  return false;
-}
-
-base::string16 AccountHoverListModel::GetPlaceholderText() const {
-  return base::string16();
-}
-
-const gfx::VectorIcon* AccountHoverListModel::GetPlaceholderIcon() const {
-  return &kUserAccountAvatarIcon;
-}
-
-std::vector<int> AccountHoverListModel::GetThrobberTags() const {
-  return {};
-}
-
 std::vector<int> AccountHoverListModel::GetButtonTags() const {
-  std::vector<int> tag_list(response_list_->size());
-  for (size_t i = 0; i < response_list_->size(); ++i)
+  std::vector<int> tag_list(items_.size());
+  for (size_t i = 0; i < items_.size(); ++i) {
     tag_list[i] = i;
+  }
   return tag_list;
 }
 
-base::string16 AccountHoverListModel::GetItemText(int item_tag) const {
-  auto user = (*response_list_)[item_tag].user_entity();
-  if (user->display_name && !user->display_name->empty())
-    return base::UTF8ToUTF16(user->display_name.value());
-  return l10n_util::GetStringUTF16(IDS_WEBAUTHN_UNKNOWN_ACCOUNT);
+std::u16string AccountHoverListModel::GetItemText(int item_tag) const {
+  return items_.at(item_tag).text;
 }
 
-base::string16 AccountHoverListModel::GetDescriptionText(int item_tag) const {
-  auto user = (*response_list_)[item_tag].user_entity();
-  return base::UTF8ToUTF16(user->name.value_or(""));
+std::u16string AccountHoverListModel::GetDescriptionText(int item_tag) const {
+  return items_.at(item_tag).description;
 }
 
-const gfx::VectorIcon* AccountHoverListModel::GetItemIcon(int item_tag) const {
-  return nullptr;
+ui::ImageModel AccountHoverListModel::GetItemIcon(int item_tag) const {
+  return items_.at(item_tag).icon;
+}
+
+bool AccountHoverListModel::IsButtonEnabled(int item_tag) const {
+  return items_.at(item_tag).enabled;
 }
 
 void AccountHoverListModel::OnListItemSelected(int item_tag) {
-  delegate_->OnItemSelected(item_tag);
+  delegate_->CredentialSelected(item_tag);
 }
 
 size_t AccountHoverListModel::GetPreferredItemCount() const {
-  return response_list_->size();
+  return items_.size();
 }
 
-bool AccountHoverListModel::StyleForTwoLines() const {
-  return true;
-}
+AccountHoverListModel::Item::Item(std::u16string text,
+                                  std::u16string description,
+                                  ui::ImageModel icon,
+                                  bool enabled)
+    : text(std::move(text)),
+      description(std::move(description)),
+      icon(icon),
+      enabled(enabled) {}
+AccountHoverListModel::Item::Item(Item&&) = default;
+AccountHoverListModel::Item& AccountHoverListModel::Item::operator=(Item&&) =
+    default;
+AccountHoverListModel::Item::~Item() = default;

@@ -1,41 +1,39 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/task/sequence_manager/sequence_manager.h"
 
 #include <stddef.h>
-#include <memory>
 
-#include "base/bind.h"
+#include <memory>
+#include <optional>
+
+#include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/message_loop/message_pump_default.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
 #include "base/sequence_checker.h"
-#include "base/single_thread_task_runner.h"
-#include "base/strings/stringprintf.h"
 #include "base/synchronization/condition_variable.h"
-#include "base/task/post_task.h"
-#include "base/task/sequence_manager/task_queue_impl.h"
+#include "base/task/sequence_manager/task_queue.h"
 #include "base/task/sequence_manager/test/mock_time_domain.h"
 #include "base/task/sequence_manager/test/sequence_manager_for_test.h"
-#include "base/task/sequence_manager/test/test_task_queue.h"
 #include "base/task/sequence_manager/test/test_task_time_observer.h"
 #include "base/task/sequence_manager/thread_controller_with_message_pump_impl.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "base/task/thread_pool/thread_pool_impl.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/threading/thread.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "base/time/default_tick_clock.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/perf/perf_result_reporter.h"
 
-namespace base {
-namespace sequence_manager {
+namespace base::sequence_manager {
 namespace {
 const int kNumTasks = 1000000;
 
@@ -60,19 +58,13 @@ class PerfTestTimeDomain : public MockTimeDomain {
   PerfTestTimeDomain& operator=(const PerfTestTimeDomain&) = delete;
   ~PerfTestTimeDomain() override = default;
 
-  Optional<TimeDelta> DelayTillNextTask(LazyNow* lazy_now) override {
-    Optional<TimeTicks> run_time = NextScheduledRunTime();
-    if (!run_time)
-      return nullopt;
-    SetNowTicks(*run_time);
-    // Makes SequenceManager to continue immediately.
-    return TimeDelta();
-  }
-
-  void SetNextDelayedDoWork(LazyNow* lazy_now, TimeTicks run_time) override {
-    // De-dupe DoWorks.
-    if (NumberOfScheduledWakeUps() == 1u)
-      RequestDoWork();
+  bool MaybeFastForwardToWakeUp(std::optional<WakeUp> wake_up,
+                                bool quit_when_idle_requested) override {
+    if (wake_up) {
+      SetNowTicks(wake_up->time);
+      return true;
+    }
+    return false;
   }
 };
 
@@ -109,7 +101,7 @@ class PerfTestDelegate {
 
 class BaseSequenceManagerPerfTestDelegate : public PerfTestDelegate {
  public:
-  BaseSequenceManagerPerfTestDelegate() {}
+  BaseSequenceManagerPerfTestDelegate() = default;
 
   ~BaseSequenceManagerPerfTestDelegate() override = default;
 
@@ -118,15 +110,13 @@ class BaseSequenceManagerPerfTestDelegate : public PerfTestDelegate {
   bool MultipleQueuesSupported() const override { return true; }
 
   scoped_refptr<TaskRunner> CreateTaskRunner() override {
-    scoped_refptr<TestTaskQueue> task_queue =
-        manager_->CreateTaskQueueWithType<TestTaskQueue>(
-            TaskQueue::Spec("test").SetTimeDomain(time_domain_.get()));
-    owned_task_queues_.push_back(task_queue);
-    return task_queue->task_runner();
+    owned_task_queues_.push_back(
+        manager_->CreateTaskQueue(TaskQueue::Spec(QueueName::TEST_TQ)));
+    return owned_task_queues_.back()->task_runner();
   }
 
   void WaitUntilDone() override {
-    run_loop_.reset(new RunLoop());
+    run_loop_ = std::make_unique<RunLoop>();
     run_loop_->Run();
   }
 
@@ -137,12 +127,12 @@ class BaseSequenceManagerPerfTestDelegate : public PerfTestDelegate {
   void SetSequenceManager(std::unique_ptr<SequenceManager> manager) {
     manager_ = std::move(manager);
     time_domain_ = std::make_unique<PerfTestTimeDomain>();
-    manager_->RegisterTimeDomain(time_domain_.get());
+    manager_->SetTimeDomain(time_domain_.get());
   }
 
   void ShutDown() {
     owned_task_queues_.clear();
-    manager_->UnregisterTimeDomain(time_domain_.get());
+    manager_->ResetTimeDomain();
     manager_.reset();
   }
 
@@ -150,7 +140,7 @@ class BaseSequenceManagerPerfTestDelegate : public PerfTestDelegate {
   std::unique_ptr<SequenceManager> manager_;
   std::unique_ptr<TimeDomain> time_domain_;
   std::unique_ptr<RunLoop> run_loop_;
-  std::vector<scoped_refptr<TestTaskQueue>> owned_task_queues_;
+  std::vector<TaskQueue::Handle> owned_task_queues_;
 };
 
 class SequenceManagerWithMessagePumpPerfTestDelegate
@@ -161,21 +151,15 @@ class SequenceManagerWithMessagePumpPerfTestDelegate
       MessagePumpType type,
       bool randomised_sampling_enabled = false)
       : name_(name) {
-    auto settings =
-        SequenceManager::Settings::Builder()
-            .SetRandomisedSamplingEnabled(randomised_sampling_enabled)
-            .Build();
-    SetSequenceManager(SequenceManagerForTest::Create(
-        std::make_unique<internal::ThreadControllerWithMessagePumpImpl>(
-            MessagePump::Create(type), settings),
-        std::move(settings)));
+    auto settings = SequenceManager::Settings::Builder().Build();
+    SetSequenceManager(CreateSequenceManagerOnCurrentThreadWithPump(
+        MessagePump::Create(type), std::move(settings)));
 
     // ThreadControllerWithMessagePumpImpl doesn't provide a default task
     // runner.
-    scoped_refptr<TaskQueue> default_task_queue =
-        GetManager()->template CreateTaskQueueWithType<TestTaskQueue>(
-            TaskQueue::Spec("default"));
-    GetManager()->SetDefaultTaskRunner(default_task_queue->task_runner());
+    default_task_queue_ =
+        GetManager()->CreateTaskQueue(TaskQueue::Spec(QueueName::DEFAULT_TQ));
+    GetManager()->SetDefaultTaskQueue(default_task_queue_.get());
   }
 
   ~SequenceManagerWithMessagePumpPerfTestDelegate() override { ShutDown(); }
@@ -184,6 +168,7 @@ class SequenceManagerWithMessagePumpPerfTestDelegate
 
  private:
   const char* const name_;
+  TaskQueue::Handle default_task_queue_;
 };
 
 class SingleThreadInThreadPoolPerfTestDelegate : public PerfTestDelegate {
@@ -237,7 +222,7 @@ class TestCase {
   virtual void Start() = 0;
 
  protected:
-  PerfTestDelegate* const delegate_;  // NOT OWNED
+  const raw_ptr<PerfTestDelegate> delegate_;  // NOT OWNED
 };
 
 class TaskSource {
@@ -399,7 +384,7 @@ class SingleThreadImmediateTestCase : public TestCase {
 
     void SignalDone() override { delegate_->SignalDone(); }
 
-    PerfTestDelegate* delegate_;  // NOT OWNED.
+    raw_ptr<PerfTestDelegate> delegate_;  // NOT OWNED.
   };
 
   const std::unique_ptr<TaskSource> task_source_;
@@ -434,12 +419,12 @@ class SingleThreadDelayedTestCase : public TestCase {
       unsigned int delay =
           num_tasks_to_post_ % 2 ? 1 : (10 + num_tasks_to_post_ % 10);
       task_runners_[queue]->PostDelayedTask(FROM_HERE, task_closure_,
-                                            TimeDelta::FromMilliseconds(delay));
+                                            Milliseconds(delay));
     }
 
     void SignalDone() override { delegate_->SignalDone(); }
 
-    PerfTestDelegate* delegate_;  // NOT OWNED.
+    raw_ptr<PerfTestDelegate> delegate_;  // NOT OWNED.
   };
 
   const std::unique_ptr<TaskSource> task_source_;
@@ -492,7 +477,7 @@ class TwoThreadTestCase : public TestCase {
     // Will be called on the main thread.
     void SignalDone() override { two_thread_test_case_->SignalDone(); }
 
-    TwoThreadTestCase* two_thread_test_case_;  // NOT OWNED.
+    raw_ptr<TwoThreadTestCase> two_thread_test_case_;  // NOT OWNED.
   };
 
   class CrossThreadImmediateTaskSource : public CrossThreadTaskSource {
@@ -513,12 +498,13 @@ class TwoThreadTestCase : public TestCase {
     // Will be called on the main thread.
     void SignalDone() override { two_thread_test_case_->SignalDone(); }
 
-    TwoThreadTestCase* two_thread_test_case_;  // NOT OWNED.
+    raw_ptr<TwoThreadTestCase> two_thread_test_case_;  // NOT OWNED.
   };
 
   void SignalDone() {
-    if (++done_count_ == 2)
+    if (++done_count_ == 2) {
       delegate_->SignalDone();
+    }
   }
 
  private:
@@ -563,7 +549,6 @@ class SequenceManagerPerfTest : public testing::TestWithParam<PerfTestType> {
 
       default:
         NOTREACHED();
-        return nullptr;
     }
   }
 
@@ -733,5 +718,4 @@ TEST_P(SequenceManagerPerfTest,
 // TODO(alexclarke): Add additional tests with different mixes of non-delayed vs
 // delayed tasks.
 
-}  // namespace sequence_manager
-}  // namespace base
+}  // namespace base::sequence_manager

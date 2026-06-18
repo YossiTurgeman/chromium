@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,8 +29,10 @@ ScopedWindowEventTargetingBlocker::~ScopedWindowEventTargetingBlocker() {
   window_->RemoveObserver(this);
   window_->event_targeting_blocker_count_--;
   DCHECK_GE(window_->event_targeting_blocker_count_, 0);
-  if (window_->event_targeting_blocker_count_ == 0)
+  if (window_->event_targeting_blocker_count_ == 0 &&
+      !window_->is_destroying()) {
     window_->SetEventTargetingPolicy(window_->restore_event_targeting_policy_);
+  }
 }
 
 void ScopedWindowEventTargetingBlocker::OnWindowDestroying(Window* window) {

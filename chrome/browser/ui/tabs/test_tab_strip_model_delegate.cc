@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 
 #include "chrome/browser/extensions/tab_helper.h"
 #include "chrome/browser/ui/tab_contents/core_tab_helper.h"
+#include "chrome/browser/ui/tabs/split_tab_metrics.h"
 #include "components/tab_groups/tab_group_id.h"
 
 TestTabStripModelDelegate::TestTabStripModelDelegate() = default;
@@ -18,13 +19,14 @@ void TestTabStripModelDelegate::AddTabAt(
     const GURL& url,
     int index,
     bool foreground,
-    base::Optional<tab_groups::TabGroupId> group) {}
+    std::optional<tab_groups::TabGroupId> group,
+    bool pinned) {}
 
-Browser* TestTabStripModelDelegate::CreateNewStripWithContents(
-    std::vector<NewStripContents> contentses,
+Browser* TestTabStripModelDelegate::CreateNewStripWithTabs(
+    std::vector<NewStripContents> tabs,
     const gfx::Rect& window_bounds,
     bool maximize) {
-  return NULL;
+  return nullptr;
 }
 
 void TestTabStripModelDelegate::WillAddWebContents(
@@ -43,18 +45,20 @@ bool TestTabStripModelDelegate::CanDuplicateContentsAt(int index) {
   return false;
 }
 
-void TestTabStripModelDelegate::DuplicateContentsAt(int index) {
+bool TestTabStripModelDelegate::IsTabStripEditable() {
+  return true;
 }
+
+content::WebContents* TestTabStripModelDelegate::DuplicateContentsAt(
+    int index) {
+  return nullptr;
+}
+
+void TestTabStripModelDelegate::DuplicateSplit(split_tabs::SplitTabId split) {}
 
 void TestTabStripModelDelegate::MoveToExistingWindow(
     const std::vector<int>& indices,
     int browser_index) {}
-
-std::vector<base::string16>
-TestTabStripModelDelegate::GetExistingWindowsForMoveMenu() const {
-  std::vector<base::string16> existing_windows;
-  return existing_windows;
-}
 
 bool TestTabStripModelDelegate::CanMoveTabsToWindow(
     const std::vector<int>& indices) {
@@ -67,9 +71,34 @@ void TestTabStripModelDelegate::MoveTabsToNewWindow(
 void TestTabStripModelDelegate::MoveGroupToNewWindow(
     const tab_groups::TabGroupId& group) {}
 
-void TestTabStripModelDelegate::CreateHistoricalTab(
+std::optional<SessionID> TestTabStripModelDelegate::CreateHistoricalTab(
     content::WebContents* contents) {
+  return std::nullopt;
 }
+
+void TestTabStripModelDelegate::CreateHistoricalGroup(
+    const tab_groups::TabGroupId& group) {}
+
+void TestTabStripModelDelegate::CreateHistoricalSplit(
+    const split_tabs::SplitTabId& split_id) {}
+
+void TestTabStripModelDelegate::GroupAdded(
+    const tab_groups::TabGroupId& group) {}
+
+void TestTabStripModelDelegate::WillCloseGroup(
+    const tab_groups::TabGroupId& group) {}
+
+void TestTabStripModelDelegate::WillCloseSplit(
+    const split_tabs::SplitTabId& split_id) {}
+
+void TestTabStripModelDelegate::SplitClosed(
+    const split_tabs::SplitTabId& split_id) {}
+
+void TestTabStripModelDelegate::SplitCloseStopped(
+    const split_tabs::SplitTabId& split_id) {}
+
+void TestTabStripModelDelegate::GroupCloseStopped(
+    const tab_groups::TabGroupId& group) {}
 
 bool TestTabStripModelDelegate::ShouldRunUnloadListenerBeforeClosing(
     content::WebContents* contents) {
@@ -81,7 +110,54 @@ bool TestTabStripModelDelegate::RunUnloadListenerBeforeClosing(
   return false;
 }
 
-bool TestTabStripModelDelegate::ShouldDisplayFavicon(
-    content::WebContents* web_contents) const {
+bool TestTabStripModelDelegate::CanReload() const {
   return true;
 }
+
+void TestTabStripModelDelegate::AddToReadLater(
+    std::vector<content::WebContents*> web_contentses) {}
+
+bool TestTabStripModelDelegate::SupportsReadLater() {
+  return true;
+}
+
+bool TestTabStripModelDelegate::IsForWebApp() {
+  return false;
+}
+
+void TestTabStripModelDelegate::CopyURL(content::WebContents* web_contents) {}
+
+void TestTabStripModelDelegate::GoBack(content::WebContents* web_contents) {}
+
+bool TestTabStripModelDelegate::CanGoBack(content::WebContents* web_contents) {
+  return false;
+}
+
+bool TestTabStripModelDelegate::IsNormalWindow() {
+  return true;
+}
+
+void TestTabStripModelDelegate::NewSplitTab(
+    std::vector<int> indices,
+    split_tabs::SplitTabLayout layout,
+    split_tabs::SplitTabCreatedSource source) {}
+
+BrowserWindowInterface* TestTabStripModelDelegate::GetBrowserWindowInterface() {
+  return browser_window_interface_;
+}
+
+void TestTabStripModelDelegate::OnGroupsDestruction(
+    const std::vector<tab_groups::TabGroupId>& group_ids,
+    base::OnceCallback<void()> callback,
+    bool delete_groups) {
+  std::move(callback).Run();
+}
+
+void TestTabStripModelDelegate::OnRemovingAllTabsFromGroups(
+    const std::vector<tab_groups::TabGroupId>& group_ids,
+    base::OnceCallback<void()> callback) {
+  std::move(callback).Run();
+}
+
+void TestTabStripModelDelegate::GlicUnpinTabsFromAllConversations(
+    base::span<const tabs::TabHandle> tab_handles) {}

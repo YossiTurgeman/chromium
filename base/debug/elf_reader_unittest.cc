@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,10 @@
 #include <dlfcn.h>
 
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
+#include "base/compiler_specific.h"
 #include "base/debug/test_elf_image_builder.h"
 #include "base/files/memory_mapped_file.h"
 #include "base/native_library.h"
@@ -17,8 +20,7 @@
 
 extern char __executable_start;
 
-namespace base {
-namespace debug {
+namespace base::debug {
 
 namespace {
 constexpr uint8_t kBuildIdBytes[] = {0xab, 0xcd, 0x12, 0x34};
@@ -54,7 +56,7 @@ TEST_P(ElfReaderTest, ReadElfBuildIdUppercase) {
   ElfBuildIdBuffer build_id;
   size_t build_id_size = ReadElfBuildId(image.elf_start(), true, build_id);
   EXPECT_EQ(8u, build_id_size);
-  EXPECT_EQ(kBuildIdHexString, StringPiece(&build_id[0], build_id_size));
+  EXPECT_EQ(kBuildIdHexString, std::string_view(&build_id[0], build_id_size));
 }
 
 TEST_P(ElfReaderTest, ReadElfBuildIdLowercase) {
@@ -68,7 +70,7 @@ TEST_P(ElfReaderTest, ReadElfBuildIdLowercase) {
   size_t build_id_size = ReadElfBuildId(image.elf_start(), false, build_id);
   EXPECT_EQ(8u, build_id_size);
   EXPECT_EQ(ToLowerASCII(kBuildIdHexStringLower),
-            StringPiece(&build_id[0], build_id_size));
+            std::string_view(&build_id[0], build_id_size));
 }
 
 TEST_P(ElfReaderTest, ReadElfBuildIdMultipleNotes) {
@@ -84,7 +86,7 @@ TEST_P(ElfReaderTest, ReadElfBuildIdMultipleNotes) {
   ElfBuildIdBuffer build_id;
   size_t build_id_size = ReadElfBuildId(image.elf_start(), true, build_id);
   EXPECT_EQ(8u, build_id_size);
-  EXPECT_EQ(kBuildIdHexString, StringPiece(&build_id[0], build_id_size));
+  EXPECT_EQ(kBuildIdHexString, std::string_view(&build_id[0], build_id_size));
 }
 
 TEST_P(ElfReaderTest, ReadElfBuildIdWrongName) {
@@ -127,8 +129,9 @@ TEST_P(ElfReaderTest, ReadElfLibraryName) {
                            .AddSoName("mysoname")
                            .Build();
 
-  Optional<StringPiece> library_name = ReadElfLibraryName(image.elf_start());
-  ASSERT_NE(nullopt, library_name);
+  std::optional<std::string_view> library_name =
+      ReadElfLibraryName(image.elf_start());
+  ASSERT_NE(std::nullopt, library_name);
   EXPECT_EQ("mysoname", *library_name);
 }
 
@@ -137,8 +140,9 @@ TEST_P(ElfReaderTest, ReadElfLibraryNameNoSoName) {
                            .AddLoadSegment(PF_R | PF_X, /* size = */ 2000)
                            .Build();
 
-  Optional<StringPiece> library_name = ReadElfLibraryName(image.elf_start());
-  EXPECT_EQ(nullopt, library_name);
+  std::optional<std::string_view> library_name =
+      ReadElfLibraryName(image.elf_start());
+  EXPECT_EQ(std::nullopt, library_name);
 }
 
 TEST_P(ElfReaderTest, GetRelocationOffset) {
@@ -178,21 +182,24 @@ TEST(ElfReaderTestWithCurrentElfImage, ReadElfBuildId) {
   ASSERT_NE(build_id_size, 0u);
 
 #if defined(OFFICIAL_BUILD)
-  constexpr size_t kExpectedBuildIdStringLength = 40;  // SHA1 hash in hex.
+  EXPECT_EQ(40, build_id_size);  // SHA1 hash in hex.
 #else
-  constexpr size_t kExpectedBuildIdStringLength = 16;  // 64-bit int in hex.
+  // Allow any common BuildId hash, since it depends on linker settings.
+  if (build_id_size != 16 && build_id_size != 40 && build_id_size != 64) {
+    // LLD's "fast", or sha1, or sha256.
+    EXPECT_EQ(16, build_id_size);
+  }
 #endif
 
-  EXPECT_EQ(kExpectedBuildIdStringLength, build_id_size);
   for (size_t i = 0; i < build_id_size; ++i) {
-    char c = build_id[i];
+    char c = UNSAFE_TODO(build_id[i]);
     EXPECT_TRUE(IsHexDigit(c));
     EXPECT_FALSE(IsAsciiLower(c));
   }
 }
 
 TEST(ElfReaderTestWithCurrentImage, ReadElfBuildId) {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   // On Android the library loader memory maps the full so file.
   const char kLibraryName[] = "libbase_unittests__library";
   const void* addr = &__executable_start;
@@ -222,10 +229,9 @@ TEST(ElfReaderTestWithCurrentImage, ReadElfBuildId) {
       << "Library name " << *name << " doesn't contain expected "
       << kLibraryName;
 
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   UnloadNativeLibrary(library);
 #endif
 }
 
-}  // namespace debug
-}  // namespace base
+}  // namespace base::debug

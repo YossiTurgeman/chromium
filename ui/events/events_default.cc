@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,11 @@ namespace ui {
 base::TimeTicks EventTimeFromNative(const PlatformEvent& native_event) {
   const ui::Event* event = static_cast<const ui::Event*>(native_event);
   return event->time_stamp();
+}
+
+base::TimeTicks EventLatencyTimeFromNative(const PlatformEvent& native_event,
+                                           base::TimeTicks current_time) {
+  return EventTimeFromNative(native_event);
 }
 
 int EventFlagsFromNative(const PlatformEvent& native_event) {
@@ -87,22 +92,28 @@ bool IsCharFromNative(const PlatformEvent& native_event) {
 gfx::Vector2d GetMouseWheelOffset(const PlatformEvent& native_event) {
   const ui::MouseWheelEvent* event =
       static_cast<const ui::MouseWheelEvent*>(native_event);
-  DCHECK(event->type() == ET_MOUSEWHEEL);
+  DCHECK(event->type() == EventType::kMousewheel);
   return event->offset();
 }
 
 gfx::Vector2d GetMouseWheelTick120ths(const PlatformEvent& native_event) {
   const ui::MouseWheelEvent* event =
       static_cast<const ui::MouseWheelEvent*>(native_event);
-  DCHECK_EQ(event->type(), ET_MOUSEWHEEL);
+  DCHECK_EQ(event->type(), EventType::kMousewheel);
   return event->tick_120ths();
 }
 
-PlatformEvent CopyNativeEvent(const PlatformEvent& event) {
-  return NULL;
+bool ShouldCopyPlatformEvents() {
+  return false;
 }
 
-void ReleaseCopiedNativeEvent(const PlatformEvent& event) {}
+PlatformEvent CreateInvalidPlatformEvent() {
+  return nullptr;
+}
+
+bool IsPlatformEventValid(const PlatformEvent& event) {
+  return event != nullptr;
+}
 
 PointerDetails GetTouchPointerDetailsFromNative(
     const PlatformEvent& native_event) {
@@ -156,7 +167,7 @@ bool GetFlingData(const PlatformEvent& native_event,
   if (vy_ordinal)
     *vy_ordinal = event->y_offset_ordinal();
   if (is_cancel)
-    *is_cancel = event->type() == ET_SCROLL_FLING_CANCEL;
+    *is_cancel = event->type() == EventType::kScrollFlingCancel;
 
   return true;
 }

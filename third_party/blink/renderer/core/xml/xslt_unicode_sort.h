@@ -33,8 +33,8 @@
 namespace blink {
 
 void XsltUnicodeSortFunction(xsltTransformContextPtr ctxt,
-                             xmlNodePtr* sorts,
+                             xmlNodePtr* sorts_ptr,
                              int nbsorts);
 }
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_XML_XSLT_UNICODE_SORT_H_

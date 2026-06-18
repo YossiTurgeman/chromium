@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,24 +8,27 @@
 #include <memory>
 #include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/sequence_checker.h"
 #include "components/feedback/feedback_common.h"
 #include "components/feedback/feedback_uploader.h"
-#include "url/gurl.h"
 
 namespace base {
 class RefCountedString;
 }
-namespace content {
-class BrowserContext;
-}
+
+class TracingManager;
 
 namespace feedback {
 
 class FeedbackData : public FeedbackCommon {
  public:
-  FeedbackData(feedback::FeedbackUploader* uploader);
+  FeedbackData(base::WeakPtr<feedback::FeedbackUploader> uploader,
+               TracingManager* tracing_manager);
+
+  FeedbackData(const FeedbackData&) = delete;
+  FeedbackData& operator=(const FeedbackData&) = delete;
 
   // Called once we've updated all the data from the feedback page.
   void OnFeedbackPageDataComplete();
@@ -36,6 +39,9 @@ class FeedbackData : public FeedbackCommon {
   // Sets the histograms for this instance and kicks off its
   // compression.
   void SetAndCompressHistograms(std::string histograms);
+
+  // Kicks off compression of the autofill metadata for this instance.
+  void CompressAutofillMetadata();
 
   // Sets the attached file data and kicks off its compression.
   void AttachAndCompressFileData(std::string attached_filedata);
@@ -49,31 +55,39 @@ class FeedbackData : public FeedbackCommon {
   void SendReport();
 
   // Getters
-  content::BrowserContext* context() const { return context_; }
-  const std::string& attached_file_uuid() const { return attached_file_uuid_; }
-  const std::string& screenshot_uuid() const { return screenshot_uuid_; }
-  bool from_assistant() const { return from_assistant_; }
-  bool assistant_debug_info_allowed() const {
-    return assistant_debug_info_allowed_;
+  const std::string& attached_filename() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return attached_filename_;
+  }
+  const std::string& attached_file_uuid() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return attached_file_uuid_;
+  }
+  const std::string& screenshot_uuid() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return screenshot_uuid_;
+  }
+  int trace_id() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return trace_id_;
   }
 
   // Setters
-  void set_context(content::BrowserContext* context) { context_ = context; }
   void set_attached_filename(const std::string& attached_filename) {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     attached_filename_ = attached_filename;
   }
   void set_attached_file_uuid(const std::string& uuid) {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     attached_file_uuid_ = uuid;
   }
   void set_screenshot_uuid(const std::string& uuid) {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     screenshot_uuid_ = uuid;
   }
-  void set_trace_id(int trace_id) { trace_id_ = trace_id; }
-  void set_from_assistant(bool from_assistant) {
-    from_assistant_ = from_assistant;
-  }
-  void set_assistant_debug_info_allowed(bool assistant_debug_info_allowed) {
-    assistant_debug_info_allowed_ = assistant_debug_info_allowed;
+  void set_trace_id(int trace_id) {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    trace_id_ = trace_id;
   }
 
  private:
@@ -85,22 +99,21 @@ class FeedbackData : public FeedbackCommon {
   void OnGetTraceData(int trace_id,
                       scoped_refptr<base::RefCountedString> trace_data);
 
-  feedback::FeedbackUploader* uploader_;  // Not owned.
+  SEQUENCE_CHECKER(sequence_checker_);
 
-  content::BrowserContext* context_;
+  // The uploader_ is tied to a profile. When the profile is deleted, the
+  // uploader_ will be destroyed.
+  base::WeakPtr<feedback::FeedbackUploader> uploader_;
 
-  std::string attached_filename_;
-  std::string attached_file_uuid_;
-  std::string screenshot_uuid_;
+  std::string attached_filename_ GUARDED_BY_CONTEXT(sequence_checker_);
+  std::string attached_file_uuid_ GUARDED_BY_CONTEXT(sequence_checker_);
+  std::string screenshot_uuid_ GUARDED_BY_CONTEXT(sequence_checker_);
 
-  int trace_id_;
+  base::WeakPtr<TracingManager> tracing_manager_;
+  int trace_id_ GUARDED_BY_CONTEXT(sequence_checker_) = 0;
 
-  int pending_op_count_;
-  bool report_sent_;
-  bool from_assistant_;
-  bool assistant_debug_info_allowed_;
-
-  DISALLOW_COPY_AND_ASSIGN(FeedbackData);
+  int pending_op_count_ GUARDED_BY_CONTEXT(sequence_checker_) = 1;
+  bool report_sent_ GUARDED_BY_CONTEXT(sequence_checker_) = false;
 };
 
 }  // namespace feedback

@@ -1,21 +1,31 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "ios/web/test/web_int_test.h"
 
+#import "base/apple/foundation_util.h"
+#import "base/functional/callback_helpers.h"
 #import "base/ios/block_types.h"
-#include "base/memory/ptr_util.h"
-#include "base/scoped_observer.h"
+#import "base/memory/ptr_util.h"
+#import "base/scoped_observation.h"
+#import "base/strings/sys_string_conversions.h"
 #import "base/test/ios/wait_util.h"
+#import "base/test/scoped_run_loop_timeout.h"
+#import "ios/web/common/uikit_ui_util.h"
 #import "ios/web/common/web_view_creation_util.h"
+#import "ios/web/public/browser_state_utils.h"
 #import "ios/web/public/test/js_test_util.h"
-#include "ios/web/public/web_state_observer.h"
+#import "ios/web/public/test/web_view_interaction_test_util.h"
+#import "ios/web/public/web_state_observer.h"
+#import "ios/web/web_state/web_state_impl.h"
+#import "ui/display/screen.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
+#if DCHECK_IS_ON()
+#import "ui/display/screen_base.h"
 #endif
 
+using base::test::ios::kWaitForClearBrowsingDataTimeout;
 using base::test::ios::kWaitForPageLoadTimeout;
 using base::test::ios::WaitUntilConditionOrTimeout;
 
@@ -26,10 +36,13 @@ namespace web {
 // WebStateObserver class that is used to track when page loads finish.
 class IntTestWebStateObserver : public WebStateObserver {
  public:
-  // Instructs the observer to listen for page loads for |url|.
+  // Instructs the observer to listen for page loads for `url`.
   explicit IntTestWebStateObserver(const GURL& url) : expected_url_(url) {}
 
-  // Whether |expected_url_| has been loaded successfully.
+  IntTestWebStateObserver(const IntTestWebStateObserver&) = delete;
+  IntTestWebStateObserver& operator=(const IntTestWebStateObserver&) = delete;
+
+  // Whether `expected_url_` has been loaded successfully.
   bool IsExpectedPageLoaded() { return page_loaded_; }
 
   // WebStateObserver methods:
@@ -44,20 +57,21 @@ class IntTestWebStateObserver : public WebStateObserver {
  private:
   GURL expected_url_;
   bool page_loaded_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(IntTestWebStateObserver);
 };
 
 #pragma mark - WebIntTest
 
-WebIntTest::WebIntTest() {}
+WebIntTest::WebIntTest()
+    : screen_(std::make_unique<display::ScopedNativeScreen>()) {}
 WebIntTest::~WebIntTest() {}
 
 void WebIntTest::SetUp() {
   WebTest::SetUp();
 
   // Remove any previously existing WKWebView data.
-  RemoveWKWebViewCreatedData([WKWebsiteDataStore defaultDataStore],
+  WKWebsiteDataStore* data_store =
+      GetDataStoreForBrowserState(GetBrowserState());
+  RemoveWKWebViewCreatedData(data_store,
                              [WKWebsiteDataStore allWebsiteDataTypes]);
 
   // Create the WebState.
@@ -65,23 +79,41 @@ void WebIntTest::SetUp() {
   web_state_ = web::WebState::Create(web_state_create_params);
 
   // Resize the webview so that pages can be properly rendered.
-  web_state()->GetView().frame =
-      [UIApplication sharedApplication].keyWindow.bounds;
+  web_state()->GetView().frame = GetAnyKeyWindow().bounds;
 
   web_state()->SetDelegate(&web_state_delegate_);
   web_state()->SetKeepRenderProcessAlive(true);
 }
 
 void WebIntTest::TearDown() {
-  RemoveWKWebViewCreatedData([WKWebsiteDataStore defaultDataStore],
+  // Tests can create an unresponsive WebProcess. WebIntTest::TearDown will
+  // call ClearBrowingData, which can take a very long time with an unresponsive
+  // WebProcess. Work around this problem by force closing WKWebView and its
+  // network process via private APIs.
+  WKWebsiteDataStore* data_store =
+      GetDataStoreForBrowserState(GetBrowserState());
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wundeclared-selector"
+  WKWebView* web_view = base::apple::ObjCCast<WKWebView>(
+      web::WebStateImpl::FromWebState(web_state())
+          ->GetWebViewNavigationProxy());
+  [web_view performSelector:@selector(_close)];
+
+  [data_store performSelector:@selector(_terminateNetworkProcess)];
+#pragma clang diagnostic pop
+
+  RemoveWKWebViewCreatedData(data_store,
                              [WKWebsiteDataStore allWebsiteDataTypes]);
 
   WebTest::TearDown();
-}
 
-id WebIntTest::ExecuteJavaScript(NSString* script) {
-  return web::test::ExecuteJavaScript(web_state()->GetJSInjectionReceiver(),
-                                      script);
+#if DCHECK_IS_ON()
+  // Make sure that all display observers are removed at the end of each
+  // test.
+  display::ScreenBase* screen =
+      static_cast<display::ScreenBase*>(display::Screen::Get());
+  DCHECK(!screen->HasDisplayObservers());
+#endif
 }
 
 bool WebIntTest::ExecuteBlockAndWaitForLoad(const GURL& url,
@@ -89,12 +121,13 @@ bool WebIntTest::ExecuteBlockAndWaitForLoad(const GURL& url,
   DCHECK(block);
 
   IntTestWebStateObserver observer(url);
-  ScopedObserver<WebState, WebStateObserver> scoped_observer(&observer);
-  scoped_observer.Add(web_state());
+  base::ScopedObservation<WebState, WebStateObserver> scoped_observer(
+      &observer);
+  scoped_observer.Observe(web_state());
 
   block();
 
-  // Need to use a pointer to |observer| as the block wants to capture it by
+  // Need to use a pointer to `observer` as the block wants to capture it by
   // value (even if marked with __block) which would not work.
   IntTestWebStateObserver* observer_ptr = &observer;
   return WaitUntilConditionOrTimeout(kWaitForPageLoadTimeout, ^{
@@ -118,43 +151,26 @@ bool WebIntTest::LoadWithParams(
 
 void WebIntTest::RemoveWKWebViewCreatedData(WKWebsiteDataStore* data_store,
                                             NSSet* websiteDataTypes) {
-  __block bool data_removed = false;
+  base::RunLoop run_loop;
+  [data_store removeDataOfTypes:websiteDataTypes
+                  modifiedSince:NSDate.distantPast
+              completionHandler:base::CallbackToBlock(run_loop.QuitClosure())];
 
-  ProceduralBlock remove_data = ^{
-    [data_store removeDataOfTypes:websiteDataTypes
-                    modifiedSince:[NSDate distantPast]
-                completionHandler:^{
-                  data_removed = true;
-                }];
-  };
-
-  if ([websiteDataTypes containsObject:WKWebsiteDataTypeCookies]) {
-    // TODO(crbug.com/554225): This approach of creating a WKWebView and
-    // executing JS to clear cookies is a workaround for
-    // https://bugs.webkit.org/show_bug.cgi?id=149078.
-    // Remove this, when that bug is fixed. The |marker_web_view| will be
-    // released when cookies have been cleared.
-    WKWebView* marker_web_view =
-        web::BuildWKWebView(CGRectZero, GetBrowserState());
-    [marker_web_view evaluateJavaScript:@""
-                      completionHandler:^(id, NSError*) {
-                        [marker_web_view self];
-                        remove_data();
-                      }];
-  } else {
-    remove_data();
+  // Wait until the data is removed. We increase the timeout to 90 seconds here
+  // since this action has been timing out frequently on the bots.
+  {
+    base::test::ScopedRunLoopTimeout data_removal_timeout(FROM_HERE,
+                                                          base::Seconds(90));
+    run_loop.Run();
   }
-
-  base::test::ios::WaitUntilCondition(^bool {
-    return data_removed;
-  });
 }
 
 NSInteger WebIntTest::GetIndexOfNavigationItem(
     const web::NavigationItem* item) {
   for (NSInteger i = 0; i < navigation_manager()->GetItemCount(); ++i) {
-    if (navigation_manager()->GetItemAtIndex(i) == item)
+    if (navigation_manager()->GetItemAtIndex(i) == item) {
       return i;
+    }
   }
   return NSNotFound;
 }

@@ -1,6 +1,8 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+import json
 
 from mojom_parser_test_case import MojomParserTestCase
 
@@ -86,7 +88,7 @@ class MojomParserTest(MojomParserTestCase):
         module a;
         import "non-existent.mojom";
         struct Bar {};""")
-    with self.assertRaisesRegexp(ValueError, "does not exist"):
+    with self.assertRaisesRegex(ValueError, "does not exist"):
       self.ParseMojoms([a])
 
   def testUnparsedImport(self):
@@ -106,7 +108,7 @@ class MojomParserTest(MojomParserTestCase):
 
     # a.mojom has not been parsed yet, so its import will fail when processing
     # b.mojom here.
-    with self.assertRaisesRegexp(ValueError, "does not exist"):
+    with self.assertRaisesRegex(ValueError, "does not exist"):
       self.ParseMojoms([b])
 
   def testCheckImportsBasic(self):
@@ -119,15 +121,22 @@ class MojomParserTest(MojomParserTestCase):
     c = 'c.mojom'
     c_metadata = 'out/c.build_metadata'
     self.WriteFile(a_metadata,
-                   '{"sources": ["%s"], "deps": []}\n' % self.GetPath(a))
+                   json.dumps({
+                       "sources": [self.GetPath(a)],
+                       "deps": []
+                   }))
     self.WriteFile(
         b_metadata,
-        '{"sources": ["%s"], "deps": ["%s"]}\n' % (self.GetPath(b),
-                                                   self.GetPath(a_metadata)))
+        json.dumps({
+            "sources": [self.GetPath(b)],
+            "deps": [self.GetPath(a_metadata)]
+        }))
     self.WriteFile(
         c_metadata,
-        '{"sources": ["%s"], "deps": ["%s"]}\n' % (self.GetPath(c),
-                                                   self.GetPath(b_metadata)))
+        json.dumps({
+            "sources": [self.GetPath(c)],
+            "deps": [self.GetPath(b_metadata)]
+        }))
     self.WriteFile(a, """\
         module a;
         struct Bar {};""")
@@ -154,9 +163,15 @@ class MojomParserTest(MojomParserTestCase):
     b = 'b.mojom'
     b_metadata = 'out/b.build_metadata'
     self.WriteFile(a_metadata,
-                   '{"sources": ["%s"], "deps": []}\n' % self.GetPath(a))
+                   json.dumps({
+                       "sources": [self.GetPath(a)],
+                       "deps": []
+                   }))
     self.WriteFile(b_metadata,
-                   '{"sources": ["%s"], "deps": []}\n' % self.GetPath(b))
+                   json.dumps({
+                       "sources": [self.GetPath(b)],
+                       "deps": []
+                   }))
     self.WriteFile(a, """\
         module a;
         struct Bar {};""")
@@ -167,5 +182,5 @@ class MojomParserTest(MojomParserTestCase):
         struct Foo { a.Bar bar; };""")
 
     self.ParseMojoms([a], metadata=a_metadata)
-    with self.assertRaisesRegexp(ValueError, "not allowed by build"):
+    with self.assertRaisesRegex(ValueError, "not allowed by build"):
       self.ParseMojoms([b], metadata=b_metadata)

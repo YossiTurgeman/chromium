@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -101,7 +101,7 @@ void JavaMethod::EnsureTypesAndIDAreSetUp() const {
   // Form the signature and record the parameter types.
   parameter_types_.resize(num_parameters_);
   for (size_t i = 0; i < num_parameters_; ++i) {
-    ScopedJavaLocalRef<jclass> parameter(
+    auto parameter = jni_zero::AdoptRef(
         env,
         static_cast<jclass>(env->GetObjectArrayElement(parameters.obj(), i)));
     signature += BinaryNameToJNISignature(GetClassName(env, parameter),

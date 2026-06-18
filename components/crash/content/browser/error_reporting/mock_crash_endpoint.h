@@ -1,16 +1,20 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_CRASH_CONTENT_BROWSER_ERROR_REPORTING_MOCK_CRASH_ENDPOINT_H_
 #define COMPONENTS_CRASH_CONTENT_BROWSER_ERROR_REPORTING_MOCK_CRASH_ENDPOINT_H_
 
+#include <map>
 #include <memory>
+#include <optional>
+#include <ostream>
 #include <string>
+#include <vector>
 
-#include "base/callback.h"
-#include "base/optional.h"
-#include "url/gurl.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "net/http/http_status_code.h"
 
 namespace net {
 namespace test_server {
@@ -20,13 +24,28 @@ struct HttpRequest;
 }  // namespace test_server
 }  // namespace net
 
-// Installs a mock crash server endpoint into chrome.crashReportPrivate.
+// Installs a mock crash server endpoint.
 class MockCrashEndpoint {
  public:
-  struct Report {
-    Report(std::string query_value, std::string content_value);
-    std::string query;
-    std::string content;
+  class Report {
+   public:
+    Report(std::multimap<std::string, std::string> query_params,
+           std::string content);
+    Report(const Report&);
+    ~Report();
+
+    static Report ParseQuery(std::string_view query, std::string content);
+
+    std::optional<std::string_view> GetQueryParam(
+        const std::string& param) const;
+    const std::multimap<std::string, std::string>& query_params() const {
+      return query_params_;
+    }
+    const std::string_view content() const { return content_; }
+
+   private:
+    std::multimap<std::string, std::string> query_params_;
+    std::string content_;
   };
 
   explicit MockCrashEndpoint(net::test_server::EmbeddedTestServer* test_server);
@@ -38,11 +57,30 @@ class MockCrashEndpoint {
   Report WaitForReport();
 
   // Returns the last report received, if any.
-  const base::Optional<Report>& last_report() const { return last_report_; }
+  const std::optional<Report>& last_report() const { return last_report_; }
+
+  // Clears last report so that WaitForReport will wait for another report.
+  // Does not clear report_count() or all_reports().
+  void clear_last_report() { last_report_.reset(); }
+
+  // Get the number of reports received since this object was created.
+  int report_count() const { return report_count_; }
+
+  // Retrieves all the reports received by this mock crash endpoint.
+  const std::vector<Report>& all_reports() const { return all_reports_; }
 
   // Configures whether the mock crash reporter client has user-consent for
   // submitting crash reports.
   void set_consented(bool consented) { consented_ = consented; }
+
+  // Set the response that the server will return.
+  void set_response(net::HttpStatusCode code, const std::string& content) {
+    response_code_ = code;
+    response_content_ = content;
+  }
+
+  // Returns the URL that tests should send crash reports to.
+  std::string GetCrashEndpointURL() const;
 
  private:
   class Client;
@@ -50,11 +88,18 @@ class MockCrashEndpoint {
   std::unique_ptr<net::test_server::HttpResponse> HandleRequest(
       const net::test_server::HttpRequest& request);
 
-  net::test_server::EmbeddedTestServer* test_server_;
+  raw_ptr<net::test_server::EmbeddedTestServer> test_server_;
   std::unique_ptr<Client> client_;
-  base::Optional<Report> last_report_;
+  std::optional<Report> last_report_;
+  std::vector<Report> all_reports_;
+  int report_count_ = 0;
   bool consented_ = true;
   base::RepeatingClosure on_report_;
+  net::HttpStatusCode response_code_ = net::HTTP_OK;
+  std::string response_content_ = "123";
 };
+
+std::ostream& operator<<(std::ostream& out,
+                         const MockCrashEndpoint::Report& report);
 
 #endif  // COMPONENTS_CRASH_CONTENT_BROWSER_ERROR_REPORTING_MOCK_CRASH_ENDPOINT_H_

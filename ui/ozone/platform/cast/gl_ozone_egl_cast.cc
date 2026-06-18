@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 #include <utility>
 
 #include "base/command_line.h"
-#include "base/macros.h"
+#include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "chromecast/base/chromecast_switches.h"
 #include "chromecast/public/cast_egl_platform.h"
@@ -87,17 +87,21 @@ void GLOzoneEglCast::TerminateDisplay() {
 }
 
 scoped_refptr<gl::GLSurface> GLOzoneEglCast::CreateViewGLSurface(
+    gl::GLDisplay* display,
     gfx::AcceleratedWidget widget) {
   // Verify requested widget dimensions match our current display size.
   DCHECK_EQ(static_cast<int>(widget >> 16), display_size_.width());
   DCHECK_EQ(static_cast<int>(widget & 0xffff), display_size_.height());
 
-  return gl::InitializeGLSurface(new GLSurfaceCast(widget, this));
+  return gl::InitializeGLSurface(
+      new GLSurfaceCast(display->GetAs<gl::GLDisplayEGL>(), widget, this));
 }
 
 scoped_refptr<gl::GLSurface> GLOzoneEglCast::CreateOffscreenGLSurface(
+    gl::GLDisplay* display,
     const gfx::Size& size) {
-  return gl::InitializeGLSurface(new gl::PbufferGLSurfaceEGL(size));
+  return gl::InitializeGLSurface(
+      new gl::PbufferGLSurfaceEGL(display->GetAs<gl::GLDisplayEGL>(), size));
 }
 
 gl::EGLDisplayPlatform GLOzoneEglCast::GetNativeDisplay() {
@@ -132,20 +136,31 @@ bool GLOzoneEglCast::ResizeDisplay(gfx::Size size) {
   return true;
 }
 
-bool GLOzoneEglCast::LoadGLES2Bindings(gl::GLImplementation implementation) {
+bool GLOzoneEglCast::LoadGLES2Bindings(
+    const gl::GLImplementationParts& implementation) {
   InitializeHardwareIfNeeded();
 
-  void* lib_egl = egl_platform_->GetEglLibrary();
-  void* lib_gles2 = egl_platform_->GetGles2Library();
   gl::GLGetProcAddressProc gl_proc = reinterpret_cast<gl::GLGetProcAddressProc>(
       egl_platform_->GetGLProcAddressProc());
-  if (!lib_egl || !lib_gles2 || !gl_proc) {
+
+  if (!gl_proc) {
     return false;
   }
 
-  gl::SetGLGetProcAddressProc(gl_proc);
+  // The starboard version does not use lib_egl or lib_gles2. Lookups are done
+  // via gl_proc.
+#ifndef IS_STARBOARD
+  void* lib_egl = egl_platform_->GetEglLibrary();
+  void* lib_gles2 = egl_platform_->GetGles2Library();
+
+  if (!lib_egl || !lib_gles2) {
+    return false;
+  }
   gl::AddGLNativeLibrary(lib_egl);
   gl::AddGLNativeLibrary(lib_gles2);
+#endif
+
+  gl::SetGLGetProcAddressProc(gl_proc);
   return true;
 }
 

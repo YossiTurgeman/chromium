@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,41 +21,41 @@ namespace extensions {
 // revoked). It can also optionally contain a list of sub-messages which should
 // appear as nested bullet points below the main one.
 //
-// |permissions| contains the permissions that are 'represented' by this
+// `permissions` contains the permissions that are 'represented' by this
 // message and should be revoked if this permission message is revoked. Note
 // that other permissions could have contributed to the message, but these are
 // the ones 'contained' in this message - if this set is taken for all
 // PermissionMessages, each permission will only be in at most one
 // PermissionMessage.
 //
-// Some permissions may contain nested messages, stored in |submessages|. These
+// Some permissions may contain nested messages, stored in `submessages`. These
 // are appropriate to show as nested bullet points below the permission,
 // collapsed if needed. For example, host permission messages may list all the
-// sites the app has access to in |submessages|, with a summary message in
-// |message|.
+// sites the app has access to in `submessages`, with a summary message in
+// `message`.
 //
 // TODO(sashab): Add a custom revoke action for each permission and nested
 // permission message, registerable as a callback.
 class PermissionMessage {
  public:
-  PermissionMessage(const base::string16& message,
+  PermissionMessage(const std::u16string& message,
                     const PermissionIDSet& permissions);
-  PermissionMessage(const base::string16& message,
+  PermissionMessage(const std::u16string& message,
                     const PermissionIDSet& permissions,
-                    const std::vector<base::string16>& submessages);
+                    const std::vector<std::u16string>& submessages);
   PermissionMessage(const PermissionMessage& other);
   virtual ~PermissionMessage();
 
-  const base::string16& message() const { return message_; }
+  const std::u16string& message() const { return message_; }
   const PermissionIDSet& permissions() const { return permissions_; }
-  const std::vector<base::string16>& submessages() const {
+  const std::vector<std::u16string>& submessages() const {
     return submessages_;
   }
 
  private:
-  const base::string16 message_;
+  const std::u16string message_;
   const PermissionIDSet permissions_;
-  const std::vector<base::string16> submessages_;
+  const std::vector<std::u16string> submessages_;
 };
 
 using PermissionMessages = std::vector<PermissionMessage>;

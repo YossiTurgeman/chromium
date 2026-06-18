@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,18 @@
 
 #include <utility>
 
-#include "base/stl_util.h"
+#include "base/memory/raw_ptr.h"
+#include "build/chromeos_buildflags.h"
 #include "content/public/browser/browser_context.h"
 #include "extensions/browser/api/idle/idle_api_constants.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/common/api/idle.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_id.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chromeos/dbus/power/power_policy_controller.h"
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace keys = extensions::idle_api_constants;
 namespace idle = extensions::api::idle;
@@ -32,13 +34,13 @@ class DefaultEventDelegate : public IdleManager::EventDelegate {
   explicit DefaultEventDelegate(content::BrowserContext* context);
   ~DefaultEventDelegate() override;
 
-  void OnStateChanged(const std::string& extension_id,
+  void OnStateChanged(const ExtensionId& extension_id,
                       ui::IdleState new_state) override;
   void RegisterObserver(EventRouter::Observer* observer) override;
   void UnregisterObserver(EventRouter::Observer* observer) override;
 
  private:
-  content::BrowserContext* const context_;
+  const raw_ptr<content::BrowserContext> context_;
 };
 
 DefaultEventDelegate::DefaultEventDelegate(content::BrowserContext* context)
@@ -48,10 +50,10 @@ DefaultEventDelegate::DefaultEventDelegate(content::BrowserContext* context)
 DefaultEventDelegate::~DefaultEventDelegate() {
 }
 
-void DefaultEventDelegate::OnStateChanged(const std::string& extension_id,
+void DefaultEventDelegate::OnStateChanged(const ExtensionId& extension_id,
                                           ui::IdleState new_state) {
-  std::unique_ptr<base::ListValue> args(new base::ListValue());
-  args->Append(IdleManager::CreateIdleValue(new_state));
+  base::ListValue args;
+  args.Append(IdleManager::CreateIdleValue(new_state));
   auto event = std::make_unique<Event>(events::IDLE_ON_STATE_CHANGED,
                                        idle::OnStateChanged::kEventName,
                                        std::move(args), context_);
@@ -129,7 +131,7 @@ IdleManager::~IdleManager() {
 }
 
 void IdleManager::Init() {
-  extension_registry_observer_.Add(ExtensionRegistry::Get(context_));
+  extension_registry_observation_.Observe(ExtensionRegistry::Get(context_));
   event_delegate_->RegisterObserver(this);
 }
 
@@ -172,23 +174,30 @@ ui::IdleState IdleManager::QueryState(int threshold) {
   return idle_time_provider_->CalculateIdleState(threshold);
 }
 
-void IdleManager::SetThreshold(const std::string& extension_id, int threshold) {
+void IdleManager::SetThreshold(const ExtensionId& extension_id, int threshold) {
   DCHECK(thread_checker_.CalledOnValidThread());
   GetMonitor(extension_id)->threshold = threshold;
 }
 
+int IdleManager::GetThresholdForTest(const ExtensionId& extension_id) const {
+  DCHECK(thread_checker_.CalledOnValidThread());
+  auto it = monitors_.find(extension_id);
+
+  return it == monitors_.end() ? kDefaultIdleThreshold : it->second.threshold;
+}
+
 base::TimeDelta IdleManager::GetAutoLockDelay() const {
   DCHECK(thread_checker_.CalledOnValidThread());
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   return chromeos::PowerPolicyController::Get()
       ->GetMaxPolicyAutoScreenLockDelay();
-#endif
+#else
   return base::TimeDelta();
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 // static
-std::unique_ptr<base::Value> IdleManager::CreateIdleValue(
-    ui::IdleState idle_state) {
+base::Value IdleManager::CreateIdleValue(ui::IdleState idle_state) {
   const char* description;
 
   if (idle_state == ui::IDLE_STATE_ACTIVE) {
@@ -199,7 +208,7 @@ std::unique_ptr<base::Value> IdleManager::CreateIdleValue(
     description = keys::kStateLocked;
   }
 
-  return std::make_unique<base::Value>(description);
+  return base::Value(description);
 }
 
 void IdleManager::SetEventDelegateForTest(
@@ -214,7 +223,7 @@ void IdleManager::SetIdleTimeProviderForTest(
   idle_time_provider_ = std::move(idle_time_provider);
 }
 
-IdleMonitor* IdleManager::GetMonitor(const std::string& extension_id) {
+IdleMonitor* IdleManager::GetMonitor(const ExtensionId& extension_id) {
   DCHECK(thread_checker_.CalledOnValidThread());
   auto it = monitors_.find(extension_id);
 
@@ -228,8 +237,8 @@ IdleMonitor* IdleManager::GetMonitor(const std::string& extension_id) {
 void IdleManager::StartPolling() {
   DCHECK(thread_checker_.CalledOnValidThread());
   if (!poll_timer_.IsRunning()) {
-    poll_timer_.Start(FROM_HERE, base::TimeDelta::FromSeconds(kPollInterval),
-                      this, &IdleManager::UpdateIdleState);
+    poll_timer_.Start(FROM_HERE, base::Seconds(kPollInterval), this,
+                      &IdleManager::UpdateIdleState);
   }
 }
 

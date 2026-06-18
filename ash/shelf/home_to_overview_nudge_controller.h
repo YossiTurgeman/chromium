@@ -1,15 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_SHELF_HOME_TO_OVERVIEW_NUDGE_CONTROLLER_H_
 #define ASH_SHELF_HOME_TO_OVERVIEW_NUDGE_CONTROLLER_H_
 
-#include <memory>
-
 #include "ash/ash_export.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_multi_source_observation.h"
 #include "base/timer/timer.h"
 #include "ui/views/widget/widget.h"
 #include "ui/views/widget/widget_observer.h"
@@ -68,15 +67,16 @@ class ASH_EXPORT HomeToOverviewNudgeController : views::WidgetObserver {
 
   bool nudge_allowed_for_shelf_state_ = false;
 
-  HotseatWidget* const hotseat_widget_;
-  ContextualNudge* nudge_ = nullptr;
+  const raw_ptr<HotseatWidget, DanglingUntriaged> hotseat_widget_;
+  raw_ptr<ContextualNudge> nudge_ = nullptr;
 
   base::OneShotTimer nudge_show_timer_;
   base::OneShotTimer nudge_hide_timer_;
 
   // Observes hotseat widget to detect the hotseat bounds changes, and the
   // nudge widget to detect that the widget is being destroyed.
-  ScopedObserver<views::Widget, views::WidgetObserver> widget_observer_{this};
+  base::ScopedMultiSourceObservation<views::Widget, views::WidgetObserver>
+      widget_observations_{this};
 
   base::WeakPtrFactory<HomeToOverviewNudgeController> weak_factory_{this};
 };

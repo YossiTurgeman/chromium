@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,15 +10,13 @@
 namespace sync_sessions {
 namespace {
 
-// The GUID session sync will use to identify this client, even across sync
-// disable/enable events.
-const char kSyncSessionsGUID[] = "sync.session_sync_guid";
+const char kLocalDataOutOfSync[] = "sync.local_data_out_of_sync";
 
 }  // namespace
 
 // static
 void SessionSyncPrefs::RegisterProfilePrefs(PrefRegistrySimple* registry) {
-  registry->RegisterStringPref(kSyncSessionsGUID, std::string());
+  registry->RegisterBooleanPref(kLocalDataOutOfSync, false);
 }
 
 SessionSyncPrefs::SessionSyncPrefs(PrefService* pref_service)
@@ -26,14 +24,14 @@ SessionSyncPrefs::SessionSyncPrefs(PrefService* pref_service)
   DCHECK(pref_service);
 }
 
-SessionSyncPrefs::~SessionSyncPrefs() {}
+SessionSyncPrefs::~SessionSyncPrefs() = default;
 
-std::string SessionSyncPrefs::GetSyncSessionsGUID() const {
-  return pref_service_->GetString(kSyncSessionsGUID);
+bool SessionSyncPrefs::GetLocalDataOutOfSync() {
+  return pref_service_->GetBoolean(kLocalDataOutOfSync);
 }
 
-void SessionSyncPrefs::SetSyncSessionsGUID(const std::string& guid) {
-  pref_service_->SetString(kSyncSessionsGUID, guid);
+void SessionSyncPrefs::SetLocalDataOutOfSync(bool local_data_out_of_sync) {
+  pref_service_->SetBoolean(kLocalDataOutOfSync, local_data_out_of_sync);
 }
 
 }  // namespace sync_sessions

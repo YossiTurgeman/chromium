@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include "base/command_line.h"
 #include "base/system/sys_info.h"
+#include "base/task/execution_fence.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/test/mock_callback.h"
 #include "base/test/scoped_command_line.h"
@@ -45,8 +46,8 @@ class BrowserMainLoopTest : public testing::Test {
     base::ThreadPoolInstance::Set(nullptr);
   }
 
-  const base::CommandLine& GetProcessCommandLine() {
-    return *scoped_command_line_.GetProcessCommandLine();
+  const base::CommandLine* GetProcessCommandLine() {
+    return scoped_command_line_.GetProcessCommandLine();
   }
 
  private:
@@ -58,20 +59,18 @@ class BrowserMainLoopTest : public testing::Test {
 TEST_F(BrowserMainLoopTest, CreateThreadsInSingleProcess) {
   MainFunctionParams main_function_params(GetProcessCommandLine());
 
-  StartupDataImpl startup_data;
-  startup_data.io_thread = BrowserTaskExecutor::CreateIOThread();
-  main_function_params.startup_data = &startup_data;
+  auto startup_data = std::make_unique<StartupDataImpl>();
+  startup_data->io_thread = BrowserTaskExecutor::CreateIOThread();
+  main_function_params.startup_data = std::move(startup_data);
 
   BrowserMainLoop browser_main_loop(
-      main_function_params,
-      std::make_unique<base::ThreadPoolInstance::ScopedExecutionFence>());
-  browser_main_loop.MainMessageLoopStart();
+      std::move(main_function_params),
+      std::make_unique<base::ScopedThreadPoolExecutionFence>());
   browser_main_loop.Init();
+  browser_main_loop.CreateMainMessageLoop();
   browser_main_loop.CreateThreads();
-  EXPECT_GE(base::ThreadPoolInstance::Get()
-                ->GetMaxConcurrentNonBlockedTasksWithTraitsDeprecated(
-                    {base::TaskPriority::USER_VISIBLE}),
-            base::SysInfo::NumberOfProcessors() - 1);
+  EXPECT_GE(base::ThreadPoolInstance::Get()->GetMaxConcurrentForegroundTasks(),
+            static_cast<size_t>(base::SysInfo::NumberOfProcessors() - 1));
   browser_main_loop.ShutdownThreadsAndCleanUp();
   BrowserTaskExecutor::ResetForTesting();
 }
@@ -80,15 +79,15 @@ TEST_F(BrowserMainLoopTest,
        PostTaskToIOThreadBeforeThreadCreationDoesNotRunTask) {
   MainFunctionParams main_function_params(GetProcessCommandLine());
 
-  StartupDataImpl startup_data;
-  startup_data.io_thread = BrowserTaskExecutor::CreateIOThread();
-  main_function_params.startup_data = &startup_data;
+  auto startup_data = std::make_unique<StartupDataImpl>();
+  startup_data->io_thread = BrowserTaskExecutor::CreateIOThread();
+  main_function_params.startup_data = std::move(startup_data);
 
   BrowserMainLoop browser_main_loop(
-      main_function_params,
-      std::make_unique<base::ThreadPoolInstance::ScopedExecutionFence>());
-  browser_main_loop.MainMessageLoopStart();
+      std::move(main_function_params),
+      std::make_unique<base::ScopedThreadPoolExecutionFence>());
   browser_main_loop.Init();
+  browser_main_loop.CreateMainMessageLoop();
 
   StrickMockTask task;
 

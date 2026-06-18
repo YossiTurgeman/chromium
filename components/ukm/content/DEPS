@@ -1,9 +1,7 @@
 include_rules = [
-  "+components/crx_file/id_util.h",
   "+content/public/browser",
   "+content/public/common",
   "+content/public/test",
   "+content/shell",
-  "+third_party/blink/public/common/features.h",
-  "+third_party/blink/public/mojom/ukm/ukm.mojom.h",
+  "+net/url_request",
 ]

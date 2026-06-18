@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,21 @@ import android.annotation.SuppressLint;
 import android.view.View;
 import android.widget.Magnifier;
 
-/**
- * Implements MagnifierWrapper interface.
- */
-@SuppressLint("NewApi") // Magnifier requires API level 28.
-public class MagnifierWrapperImpl implements MagnifierWrapper {
-    private Magnifier mMagnifier;
-    private SelectionPopupControllerImpl.ReadbackViewCallback mCallback;
+import org.chromium.base.Log;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
-    /**
-     * Constructor.
-     */
+/** Implements MagnifierWrapper interface. */
+@SuppressLint("NewApi") // Magnifier requires API level 28.
+@NullMarked
+public class MagnifierWrapperImpl implements MagnifierWrapper {
+    private static final boolean DEBUG = false;
+    private static final String TAG = "Magnifier";
+
+    private @Nullable Magnifier mMagnifier;
+    private final SelectionPopupControllerImpl.ReadbackViewCallback mCallback;
+
+    /** Constructor. */
     public MagnifierWrapperImpl(SelectionPopupControllerImpl.ReadbackViewCallback callback) {
         mCallback = callback;
     }
@@ -28,12 +32,14 @@ public class MagnifierWrapperImpl implements MagnifierWrapper {
         View view = mCallback.getReadbackView();
         if (view == null) return;
         if (mMagnifier == null) mMagnifier = new Magnifier(view);
+        if (DEBUG) Log.i(TAG, "show (" + x + ", " + y + ")");
         mMagnifier.show(x, y);
     }
 
     @Override
     public void dismiss() {
         if (mMagnifier != null) {
+            if (DEBUG) Log.i(TAG, "dismiss");
             mMagnifier.dismiss();
             mMagnifier = null;
         }
@@ -42,5 +48,10 @@ public class MagnifierWrapperImpl implements MagnifierWrapper {
     @Override
     public boolean isAvailable() {
         return mCallback.getReadbackView() != null;
+    }
+
+    @Override
+    public void childLocalSurfaceIdChanged() {
+        // Intentional not implemented.
     }
 }

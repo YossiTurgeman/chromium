@@ -1,40 +1,50 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include <memory>
+
 #include "base/files/file_util.h"
+#include "base/files/scoped_file.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/location.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/bind_post_task.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/test/gmock_callback_support.h"
+#include "base/test/mock_callback.h"
 #include "chrome/browser/apps/platform_apps/app_browsertest_util.h"
-#include "chrome/browser/chromeos/drive/drive_integration_service.h"
-#include "chrome/browser/chromeos/drive/drivefs_test_support.h"
-#include "chrome/browser/chromeos/file_manager/volume_manager.h"
-#include "chrome/browser/chromeos/login/users/fake_chrome_user_manager.h"
-#include "chrome/browser/chromeos/profiles/profile_helper.h"
-#include "chrome/browser/extensions/api/file_system/consent_provider.h"
+#include "chrome/browser/ash/drive/drive_integration_service.h"
+#include "chrome/browser/ash/drive/drive_integration_service_factory.h"
+#include "chrome/browser/ash/drive/drivefs_test_support.h"
+#include "chrome/browser/ash/file_manager/volume_manager.h"
+#include "chrome/browser/ash/test/kiosk_app_logged_in_browser_test_mixin.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/extensions/api/file_system/consent_provider_impl.h"
 #include "chrome/browser/extensions/component_loader.h"
+#include "chrome/browser/ui/browser.h"
 #include "chrome/common/chrome_paths.h"
-#include "chromeos/constants/chromeos_features.h"
-#include "components/user_manager/scoped_user_manager.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_types.h"
+#include "chromeos/components/kiosk/kiosk_test_utils.h"
+#include "components/file_access/scoped_file_access.h"
+#include "components/file_access/test/mock_scoped_file_access_delegate.h"
+#include "components/user_manager/user_manager.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
 #include "extensions/browser/api/file_system/file_system_api.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/common/api/file_system.h"
-#include "extensions/common/switches.h"
 #include "storage/browser/file_system/external_mount_points.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/base/ui_base_types.h"
 
-// TODO(michaelpg): Port these tests to app_shell: crbug.com/505926.
-
 using file_manager::VolumeManager;
-using file_manager::VolumeType;
 
 namespace extensions {
 namespace {
@@ -42,7 +52,6 @@ namespace {
 // Mount point names for chrome.fileSystem.requestFileSystem() tests.
 const char kWritableMountPointName[] = "writable";
 const char kReadOnlyMountPointName[] = "read-only";
-const char kDownloadsMountPointName[] = "downloads";
 
 // Child directory created in each of the mount points.
 const char kChildDirectory[] = "child-dir";
@@ -56,17 +65,20 @@ const char kTestingExtensionId[] = "pkplfbidichfdicaijlchgnapepdginl";
 // simulates clicking of the specified dialog button.
 class ScopedSkipRequestFileSystemDialog {
  public:
-  explicit ScopedSkipRequestFileSystemDialog(ui::DialogButton button) {
+  explicit ScopedSkipRequestFileSystemDialog(ui::mojom::DialogButton button) {
     file_system_api::ConsentProviderDelegate::SetAutoDialogButtonForTest(
         button);
   }
+
+  ScopedSkipRequestFileSystemDialog(const ScopedSkipRequestFileSystemDialog&) =
+      delete;
+  ScopedSkipRequestFileSystemDialog& operator=(
+      const ScopedSkipRequestFileSystemDialog&) = delete;
+
   ~ScopedSkipRequestFileSystemDialog() {
     file_system_api::ConsentProviderDelegate::SetAutoDialogButtonForTest(
-        ui::DIALOG_BUTTON_NONE);
+        ui::mojom::DialogButton::kNone);
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ScopedSkipRequestFileSystemDialog);
 };
 
 // Observers adding a listener to the |event_name| event by |extension|, and
@@ -84,6 +96,10 @@ class ScopedAddListenerObserver : public EventRouter::Observer {
     event_router_->RegisterObserver(this, event_name);
   }
 
+  ScopedAddListenerObserver(const ScopedAddListenerObserver&) = delete;
+  ScopedAddListenerObserver& operator=(const ScopedAddListenerObserver&) =
+      delete;
+
   ~ScopedAddListenerObserver() override {
     event_router_->UnregisterObserver(this);
   }
@@ -91,29 +107,29 @@ class ScopedAddListenerObserver : public EventRouter::Observer {
   // EventRouter::Observer overrides.
   void OnListenerAdded(const EventListenerInfo& details) override {
     // Call the callback only once, as the listener may be added multiple times.
-    if (details.extension_id != extension_id_ || !callback_)
+    if (details.extension_id != extension_id_ || !callback_) {
       return;
+    }
 
-    base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE,
-                                                  std::move(callback_));
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, std::move(callback_));
   }
 
  private:
-  const std::string extension_id_;
+  const ExtensionId extension_id_;
   base::OnceClosure callback_;
-  EventRouter* const event_router_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedAddListenerObserver);
+  const raw_ptr<EventRouter> event_router_;
 };
 
 // This class contains chrome.filesystem API test specific to Chrome OS, namely,
 // the integrated Google Drive support.
 class FileSystemApiTestForDrive : public PlatformAppBrowserTest {
  public:
-  FileSystemApiTestForDrive() {}
+  FileSystemApiTestForDrive() = default;
 
   bool SetUpUserDataDirectory() override {
-    return drive::SetUpUserDataDirectoryForDriveFsTest();
+    return PlatformAppBrowserTest::SetUpUserDataDirectory() &&
+           drive::SetUpUserDataDirectoryForDriveFsTest();
   }
 
   // Sets up fake Drive service for tests (this has to be injected before the
@@ -124,23 +140,12 @@ class FileSystemApiTestForDrive : public PlatformAppBrowserTest {
 
     ASSERT_TRUE(test_cache_root_.CreateUniqueTempDir());
 
-    create_drive_integration_service_ =
-        base::Bind(&FileSystemApiTestForDrive::CreateDriveIntegrationService,
-                   base::Unretained(this));
-    service_factory_for_test_.reset(
-        new drive::DriveIntegrationServiceFactory::ScopedFactoryForTest(
-            &create_drive_integration_service_));
-  }
-
-  // Ensure the fake service's data is fetch in the local file system. This is
-  // necessary because the fetch starts lazily upon the first read operation.
-  void SetUpOnMainThread() override {
-    PlatformAppBrowserTest::SetUpOnMainThread();
-  }
-
-  void TearDown() override {
-    FileSystemChooseEntryFunction::StopSkippingPickerForTest();
-    PlatformAppBrowserTest::TearDown();
+    create_drive_integration_service_ = base::BindRepeating(
+        &FileSystemApiTestForDrive::CreateDriveIntegrationService,
+        base::Unretained(this));
+    service_factory_for_test_ = std::make_unique<
+        drive::DriveIntegrationServiceFactory::ScopedFactoryForTest>(
+        &create_drive_integration_service_);
   }
 
   base::FilePath GetDriveMountPoint() { return drivefs_mount_point_; }
@@ -149,9 +154,7 @@ class FileSystemApiTestForDrive : public PlatformAppBrowserTest {
   drive::DriveIntegrationService* CreateDriveIntegrationService(
       Profile* profile) {
     // Ignore signin and lock screen apps profile.
-    if (profile->GetPath() == chromeos::ProfileHelper::GetSigninProfileDir() ||
-        profile->GetPath() ==
-            chromeos::ProfileHelper::GetLockScreenAppProfilePath()) {
+    if (ash::IsSigninBrowserContext(profile)) {
       return nullptr;
     }
 
@@ -165,7 +168,8 @@ class FileSystemApiTestForDrive : public PlatformAppBrowserTest {
     SetUpTestFileHierarchy();
 
     integration_service_ = new drive::DriveIntegrationService(
-        profile, "", test_cache_root_.GetPath(),
+        g_browser_process->local_state(), profile, "",
+        test_cache_root_.GetPath(),
         fake_drivefs_helper_->CreateFakeDriveFsListenerFactory());
     return integration_service_;
   }
@@ -175,25 +179,22 @@ class FileSystemApiTestForDrive : public PlatformAppBrowserTest {
     CHECK(base::CreateDirectory(root));
 
     std::string data = "Can you see me?";
-    CHECK(base::WriteFile(root.Append("open_existing.txt"), data.data(),
-                          data.size()));
-    CHECK(base::WriteFile(root.Append("open_existing1.txt"), data.data(),
-                          data.size()));
-    CHECK(base::WriteFile(root.Append("open_existing2.txt"), data.data(),
-                          data.size()));
-    CHECK(base::WriteFile(root.Append("save_existing.txt"), data.data(),
-                          data.size()));
+    CHECK(base::WriteFile(root.Append("open_existing.txt"), data));
+    CHECK(base::WriteFile(root.Append("open_existing1.txt"), data));
+    CHECK(base::WriteFile(root.Append("open_existing2.txt"), data));
+    CHECK(base::WriteFile(root.Append("save_existing.txt"), data));
 
     CHECK(base::CreateDirectory(root.Append("subdir")));
     CHECK(base::WriteFile(root.Append("subdir").Append("open_existing.txt"),
-                          data.data(), data.size()));
+                          data));
   }
 
   base::ScopedTempDir test_cache_root_;
   base::ScopedTempDir drivefs_root_;
   base::FilePath drivefs_mount_point_;
   std::unique_ptr<drive::FakeDriveFsHelper> fake_drivefs_helper_;
-  drive::DriveIntegrationService* integration_service_ = nullptr;
+  raw_ptr<drive::DriveIntegrationService, DanglingUntriaged>
+      integration_service_ = nullptr;
   drive::DriveIntegrationServiceFactory::FactoryCallback
       create_drive_integration_service_;
   std::unique_ptr<drive::DriveIntegrationServiceFactory::ScopedFactoryForTest>
@@ -203,16 +204,9 @@ class FileSystemApiTestForDrive : public PlatformAppBrowserTest {
 // This class contains chrome.filesystem.requestFileSystem API tests.
 class FileSystemApiTestForRequestFileSystem : public PlatformAppBrowserTest {
  public:
-  FileSystemApiTestForRequestFileSystem() : fake_user_manager_(nullptr) {}
-
   bool SetUpUserDataDirectory() override {
-    return drive::SetUpUserDataDirectoryForDriveFsTest();
-  }
-
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    PlatformAppBrowserTest::SetUpCommandLine(command_line);
-    command_line->AppendSwitchASCII(
-        extensions::switches::kAllowlistedExtensionID, kTestingExtensionId);
+    return PlatformAppBrowserTest::SetUpUserDataDirectory() &&
+           drive::SetUpUserDataDirectoryForDriveFsTest();
   }
 
   // Sets up fake Drive service for tests (this has to be injected before the
@@ -224,86 +218,53 @@ class FileSystemApiTestForRequestFileSystem : public PlatformAppBrowserTest {
     create_drive_integration_service_ = base::BindRepeating(
         &FileSystemApiTestForRequestFileSystem::CreateDriveIntegrationService,
         base::Unretained(this));
-    service_factory_for_test_.reset(
-        new drive::DriveIntegrationServiceFactory::ScopedFactoryForTest(
-            &create_drive_integration_service_));
+    service_factory_for_test_ = std::make_unique<
+        drive::DriveIntegrationServiceFactory::ScopedFactoryForTest>(
+        &create_drive_integration_service_);
   }
 
   void SetUpOnMainThread() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-    CreateTestingFileSystem(kWritableMountPointName,
-                            file_manager::VOLUME_TYPE_TESTING,
-                            false /* read_only */);
-    CreateTestingFileSystem(kReadOnlyMountPointName,
-                            file_manager::VOLUME_TYPE_TESTING,
-                            true /* read_only */);
-    CreateTestingFileSystem(kDownloadsMountPointName,
-                            file_manager::VOLUME_TYPE_DOWNLOADS_DIRECTORY,
-                            false /* read_only */);
+    CreateTestingFileSystem(kWritableMountPointName, false /* read_only */);
+    CreateTestingFileSystem(kReadOnlyMountPointName, true /* read_only */);
     PlatformAppBrowserTest::SetUpOnMainThread();
-  }
-
-  void TearDownOnMainThread() override {
-    PlatformAppBrowserTest::TearDownOnMainThread();
-    user_manager_enabler_.reset();
-    fake_user_manager_ = nullptr;
   }
 
   // Simulates mounting a removable volume.
   void MountFakeVolume() {
-    VolumeManager* const volume_manager =
-        VolumeManager::Get(browser()->profile());
+    VolumeManager* const volume_manager = VolumeManager::Get(profile());
     ASSERT_TRUE(volume_manager);
     volume_manager->AddVolumeForTesting(
         base::FilePath("/a/b/c"), file_manager::VOLUME_TYPE_TESTING,
-        chromeos::DEVICE_TYPE_UNKNOWN, false /* read_only */);
+        ash::DeviceType::kUnknown, false /* read_only */);
   }
 
  protected:
   base::ScopedTempDir temp_dir_;
-  chromeos::FakeChromeUserManager* fake_user_manager_;
-  std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
 
   // Creates a testing file system in a testing directory.
   void CreateTestingFileSystem(const std::string& mount_point_name,
-                               VolumeType volume_type,
                                bool read_only) {
     const base::FilePath mount_point_path =
         temp_dir_.GetPath().Append(mount_point_name);
     ASSERT_TRUE(base::CreateDirectory(mount_point_path));
     ASSERT_TRUE(
         base::CreateDirectory(mount_point_path.Append(kChildDirectory)));
-    ASSERT_TRUE(content::BrowserContext::GetMountPoints(browser()->profile())
-                    ->RegisterFileSystem(
-                        mount_point_name, storage::kFileSystemTypeNativeLocal,
-                        storage::FileSystemMountOption(), mount_point_path));
-    VolumeManager* const volume_manager =
-        VolumeManager::Get(browser()->profile());
+    ASSERT_TRUE(profile()->GetMountPoints()->RegisterFileSystem(
+        mount_point_name, storage::kFileSystemTypeLocal,
+        storage::FileSystemMountOption(), mount_point_path));
+    VolumeManager* const volume_manager = VolumeManager::Get(profile());
     ASSERT_TRUE(volume_manager);
-    volume_manager->AddVolumeForTesting(mount_point_path, volume_type,
-                                        chromeos::DEVICE_TYPE_UNKNOWN,
-                                        read_only);
-  }
-
-  // Simulates entering the kiosk session.
-  void EnterKioskSession() {
-    fake_user_manager_ = new chromeos::FakeChromeUserManager();
-    user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
-        base::WrapUnique(fake_user_manager_));
-
-    const AccountId kiosk_app_account_id =
-        AccountId::FromUserEmail("kiosk@foobar.com");
-    fake_user_manager_->AddKioskAppUser(kiosk_app_account_id);
-    fake_user_manager_->LoginUser(kiosk_app_account_id);
+    volume_manager->AddVolumeForTesting(mount_point_path,
+                                        file_manager::VOLUME_TYPE_TESTING,
+                                        ash::DeviceType::kUnknown, read_only);
   }
 
  private:
   drive::DriveIntegrationService* CreateDriveIntegrationService(
       Profile* profile) {
     // Ignore signin and lock screen apps profile.
-    if (profile->GetPath() == chromeos::ProfileHelper::GetSigninProfileDir() ||
-        profile->GetPath() ==
-            chromeos::ProfileHelper::GetLockScreenAppProfilePath()) {
+    if (ash::IsSigninBrowserContext(profile)) {
       return nullptr;
     }
 
@@ -312,7 +273,7 @@ class FileSystemApiTestForRequestFileSystem : public PlatformAppBrowserTest {
         profile, drivefs_root_.GetPath().Append("drive-user"));
 
     return new drive::DriveIntegrationService(
-        profile, "", {},
+        g_browser_process->local_state(), profile, "", {},
         fake_drivefs_helper_->CreateFakeDriveFsListenerFactory());
   }
 
@@ -324,13 +285,26 @@ class FileSystemApiTestForRequestFileSystem : public PlatformAppBrowserTest {
       service_factory_for_test_;
 };
 
+class FileSystemApiKioskTestForRequestFileSystem
+    : public FileSystemApiTestForRequestFileSystem {
+ public:
+  FileSystemApiKioskTestForRequestFileSystem() { set_chromeos_user_ = false; }
+
+ private:
+  ash::KioskAppLoggedInBrowserTestMixin kiosk_mixin_{&mixin_host_,
+                                                     "kiosk-app-account"};
+};
+
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiOpenExistingFileTest) {
   base::FilePath test_file =
       GetDriveMountPoint().AppendASCII("root/open_existing.txt");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_file);
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/open_existing"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/open_existing",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -338,10 +312,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiOpenExistingFileWithWriteTest) {
   base::FilePath test_file =
       GetDriveMountPoint().AppendASCII("root/open_existing.txt");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_file);
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/open_existing_with_write")) << message_;
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/open_existing_with_write",
+                               {.launch_as_platform_app = true}))
+      << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
@@ -350,9 +327,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
       GetDriveMountPoint().AppendASCII("root/open_existing.txt");
   ASSERT_TRUE(base::PathService::OverrideAndCreateIfNeeded(
       chrome::DIR_USER_DOCUMENTS, test_file.DirName(), true, false));
-  FileSystemChooseEntryFunction::SkipPickerAndSelectSuggestedPathForTest();
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/open_multiple_with_suggested_name"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .use_suggested_path = true};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/open_multiple_with_suggested_name",
+                       {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -365,9 +346,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
   std::vector<base::FilePath> test_files;
   test_files.push_back(test_file1);
   test_files.push_back(test_file2);
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathsForTest(
-      &test_files);
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/open_multiple_existing"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .paths_to_be_picked = &test_files};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/open_multiple_existing",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -375,9 +359,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiOpenDirectoryTest) {
   base::FilePath test_directory =
       GetDriveMountPoint().AppendASCII("root/subdir");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_directory);
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/open_directory"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_directory};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/open_directory",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -385,10 +372,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiOpenDirectoryWithWriteTest) {
   base::FilePath test_directory =
       GetDriveMountPoint().AppendASCII("root/subdir");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_directory);
-  ASSERT_TRUE(
-      RunPlatformAppTest("api_test/file_system/open_directory_with_write"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_directory};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/open_directory_with_write",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -396,10 +385,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiOpenDirectoryWithoutPermissionTest) {
   base::FilePath test_directory =
       GetDriveMountPoint().AppendASCII("root/subdir");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_directory);
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/open_directory_without_permission"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_directory};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/open_directory_without_permission",
+                       {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -407,10 +399,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiOpenDirectoryWithOnlyWritePermissionTest) {
   base::FilePath test_directory =
       GetDriveMountPoint().AppendASCII("root/subdir");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_directory);
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/open_directory_with_only_write"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_directory};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/open_directory_with_only_write",
+                       {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -418,9 +413,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiSaveNewFileTest) {
   base::FilePath test_file =
       GetDriveMountPoint().AppendASCII("root/save_new.txt");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_file);
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/save_new"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/save_new",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
@@ -428,122 +426,281 @@ IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
                        FileSystemApiSaveExistingFileTest) {
   base::FilePath test_file =
       GetDriveMountPoint().AppendASCII("root/save_existing.txt");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_file);
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/save_existing"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/save_existing",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
-    FileSystemApiSaveNewFileWithWriteTest) {
+                       FileSystemApiSaveNewFileWithWriteTest) {
   base::FilePath test_file =
       GetDriveMountPoint().AppendASCII("root/save_new.txt");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_file);
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/save_new_with_write"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/save_new_with_write",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForDrive,
-    FileSystemApiSaveExistingFileWithWriteTest) {
+                       FileSystemApiSaveExistingFileWithWriteTest) {
   base::FilePath test_file =
       GetDriveMountPoint().AppendASCII("root/save_existing.txt");
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest(
-      &test_file);
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/save_existing_with_write")) << message_;
-}
-
-IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem, Background) {
-  EnterKioskSession();
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_OK);
-  ASSERT_TRUE(
-      RunPlatformAppTest("api_test/file_system/request_file_system_background"))
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/save_existing_with_write",
+                               {.launch_as_platform_app = true}))
       << message_;
 }
 
-IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem, ReadOnly) {
-  EnterKioskSession();
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_OK);
+IN_PROC_BROWSER_TEST_F(FileSystemApiKioskTestForRequestFileSystem, Background) {
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kOk);
   ASSERT_TRUE(
-      RunPlatformAppTest("api_test/file_system/request_file_system_read_only"))
+      RunExtensionTest("api_test/file_system/request_file_system_background",
+                       {.launch_as_platform_app = true, .profile = profile()}))
       << message_;
 }
 
-IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem, Writable) {
-  EnterKioskSession();
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_OK);
+IN_PROC_BROWSER_TEST_F(FileSystemApiKioskTestForRequestFileSystem, ReadOnly) {
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kOk);
   ASSERT_TRUE(
-      RunPlatformAppTest("api_test/file_system/request_file_system_writable"))
+      RunExtensionTest("api_test/file_system/request_file_system_read_only",
+                       {.launch_as_platform_app = true, .profile = profile()}))
       << message_;
 }
 
-IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem, UserReject) {
-  EnterKioskSession();
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_CANCEL);
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/request_file_system_user_reject"))
+IN_PROC_BROWSER_TEST_F(FileSystemApiKioskTestForRequestFileSystem, Writable) {
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kOk);
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/request_file_system_writable",
+                       {.launch_as_platform_app = true, .profile = profile()}))
+      << message_;
+}
+
+IN_PROC_BROWSER_TEST_F(FileSystemApiKioskTestForRequestFileSystem, UserReject) {
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kCancel);
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/request_file_system_user_reject",
+                       {.launch_as_platform_app = true, .profile = profile()}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem, NotKioskSession) {
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_OK);
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/request_file_system_not_kiosk_session"))
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kOk);
+  ASSERT_TRUE(RunExtensionTest(
+      "api_test/file_system/request_file_system_not_kiosk_session",
+      {.launch_as_platform_app = true}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem,
                        AllowlistedComponent) {
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_CANCEL);
-  ASSERT_TRUE(RunPlatformAppTestWithFlags(
-      "api_test/file_system/request_file_system_whitelisted_component",
-      kFlagNone, kFlagLoadAsComponent))
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kCancel);
+  ASSERT_TRUE(RunExtensionTest(
+      "api_test/file_system/request_file_system_allowed_component",
+      {.launch_as_platform_app = true}, {.load_as_component = true}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem,
                        NotAllowlistedComponent) {
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_OK);
-  ASSERT_TRUE(RunPlatformAppTestWithFlags(
-      "api_test/file_system/request_file_system_not_whitelisted_component",
-      kFlagNone, kFlagLoadAsComponent))
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kOk);
+  ASSERT_TRUE(RunExtensionTest(
+      "api_test/file_system/request_file_system_not_allowed_component",
+      {.launch_as_platform_app = true}, {.load_as_component = true}))
       << message_;
 }
 
-IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem, GetVolumeList) {
-  EnterKioskSession();
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/get_volume_list"))
+// TODO(crbug.com/399525725): Historically, this test has exercised
+// the test set up which is NOT mirroring Kiosk production behavior.
+// Thus, fixing the test set up to follow production behavior more causes
+// to fail. Revisit here to decide what to do.
+IN_PROC_BROWSER_TEST_F(FileSystemApiKioskTestForRequestFileSystem,
+                       DISABLED_GetVolumeList) {
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/get_volume_list",
+                       {.launch_as_platform_app = true, .profile = profile()}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem,
                        GetVolumeList_NotKioskSession) {
-  ASSERT_TRUE(RunPlatformAppTest(
-      "api_test/file_system/get_volume_list_not_kiosk_session"))
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/get_volume_list_not_kiosk_session",
+                       {.launch_as_platform_app = true}))
       << message_;
 }
 
-IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem,
+IN_PROC_BROWSER_TEST_F(FileSystemApiKioskTestForRequestFileSystem,
                        OnVolumeListChanged) {
-  EnterKioskSession();
-
   ScopedAddListenerObserver observer(
       profile(), extensions::api::file_system::OnVolumeListChanged::kEventName,
       kTestingExtensionId,
       base::BindOnce(&FileSystemApiTestForRequestFileSystem::MountFakeVolume,
                      base::Unretained(this)));
 
-  ASSERT_TRUE(RunPlatformAppTest("api_test/file_system/on_volume_list_changed"))
+  ASSERT_TRUE(
+      RunExtensionTest("api_test/file_system/on_volume_list_changed",
+                       {.launch_as_platform_app = true, .profile = profile()}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem,
-                       AllowlistedExtensionForDownloads) {
-  ScopedSkipRequestFileSystemDialog dialog_skipper(ui::DIALOG_BUTTON_CANCEL);
-  ASSERT_TRUE(RunPlatformAppTestWithFlags(
-      "api_test/file_system/request_downloads_whitelisted_extension", kFlagNone,
-      kFlagLaunchPlatformApp))
+                       DlpOpenFileAllow) {
+  file_access::MockScopedFileAccessDelegate file_access;
+  base::MockRepeatingCallback<void(
+      const std::vector<base::FilePath>&,
+      base::OnceCallback<void(file_access::ScopedFileAccess)>)>
+      create;
+  EXPECT_CALL(
+      file_access,
+      CreateFileAccessCallback(testing::Property(
+          &GURL::spec,
+          testing::MatchesRegex(
+              "chrome-extension://.*/_generated_background_page\\.html"))))
+      .WillOnce(testing::Return(create.Get()));
+  EXPECT_CALL(create, Run)
+      .WillOnce(base::test::RunOnceCallback<1>(
+          file_access::ScopedFileAccess::Allowed()));
+
+  base::FilePath test_file;
+  {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    FileSystemChooseEntryFunction::RegisterTempExternalFileSystemForTest(
+        "test_temp", temp_dir_.GetPath());
+
+    test_file = temp_dir_.GetPath().AppendASCII("open_existing.txt");
+    base::WriteFile(test_file, "Can you see me?");
+  }
+
+  ASSERT_FALSE(test_file.empty());
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_TRUE(RunExtensionTest("api_test/file_system/open_existing",
+                               {.launch_as_platform_app = true}))
+      << message_;
+}
+
+IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem, DlpOpenFileDeny) {
+  file_access::MockScopedFileAccessDelegate file_access;
+  base::MockRepeatingCallback<void(
+      const std::vector<base::FilePath>&,
+      base::OnceCallback<void(file_access::ScopedFileAccess)>)>
+      create;
+  EXPECT_CALL(
+      file_access,
+      CreateFileAccessCallback(testing::Property(
+          &GURL::spec,
+          testing::MatchesRegex(
+              "chrome-extension://.*/_generated_background_page\\.html"))))
+      .WillOnce(testing::Return(base::BindPostTask(
+          content::GetIOThreadTaskRunner({}), create.Get())));
+  EXPECT_CALL(create, Run)
+      .WillOnce(base::test::RunOnceCallback<1>(
+          file_access::ScopedFileAccess(false, base::ScopedFD())));
+
+  base::FilePath test_file;
+  {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    FileSystemChooseEntryFunction::RegisterTempExternalFileSystemForTest(
+        "test_temp", temp_dir_.GetPath());
+
+    test_file = temp_dir_.GetPath().AppendASCII("open_existing.txt");
+    base::WriteFile(test_file, "Can you see me?");
+  }
+
+  ASSERT_FALSE(test_file.empty());
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &test_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
+  ASSERT_FALSE(RunExtensionTest("api_test/file_system/open_existing",
+                                {.launch_as_platform_app = true}))
+      << message_;
+}
+
+IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem,
+                       AllowlistedComponentBackgroundDlpAllow) {
+  file_access::MockScopedFileAccessDelegate file_access;
+  base::MockRepeatingCallback<void(
+      const std::vector<base::FilePath>&,
+      base::OnceCallback<void(file_access::ScopedFileAccess)>)>
+      create;
+  EXPECT_CALL(
+      file_access,
+      CreateFileAccessCallback(testing::Property(
+          &GURL::spec,
+          testing::MatchesRegex(
+              "chrome-extension://.*/_generated_background_page\\.html"))))
+      .WillOnce(testing::Return(base::BindPostTask(
+          content::GetIOThreadTaskRunner({}), create.Get())));
+  EXPECT_CALL(create, Run)
+      .WillOnce(base::test::RunOnceCallback<1>(
+          file_access::ScopedFileAccess(true, base::ScopedFD())));
+
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kCancel);
+  const base::FilePath test_file = temp_dir_.GetPath()
+                                       .Append(kReadOnlyMountPointName)
+                                       .AppendASCII("open_existing.txt");
+  {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    base::WriteFile(test_file, "Can you see me?");
+  }
+  EXPECT_TRUE(RunExtensionTest(
+      "api_test/file_system/request_file_system_allowed_component_background",
+      {.launch_as_platform_app = true}, {.load_as_component = true}))
+      << message_;
+}
+
+IN_PROC_BROWSER_TEST_F(FileSystemApiTestForRequestFileSystem,
+                       AllowlistedComponentBackgroundDlpDeny) {
+  file_access::MockScopedFileAccessDelegate file_access;
+  base::MockRepeatingCallback<void(
+      const std::vector<base::FilePath>&,
+      base::OnceCallback<void(file_access::ScopedFileAccess)>)>
+      create;
+  EXPECT_CALL(
+      file_access,
+      CreateFileAccessCallback(testing::Property(
+          &GURL::spec,
+          testing::MatchesRegex(
+              "chrome-extension://.*/_generated_background_page\\.html"))))
+      .WillOnce(testing::Return(base::BindPostTask(
+          content::GetIOThreadTaskRunner({}), create.Get())));
+  EXPECT_CALL(create, Run)
+      .WillOnce(base::test::RunOnceCallback<1>(
+          file_access::ScopedFileAccess(false, base::ScopedFD())));
+
+  ScopedSkipRequestFileSystemDialog dialog_skipper(
+      ui::mojom::DialogButton::kCancel);
+  const base::FilePath test_file = temp_dir_.GetPath()
+                                       .Append(kReadOnlyMountPointName)
+                                       .AppendASCII("open_existing.txt");
+  {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    base::WriteFile(test_file, "Can you see me?");
+  }
+  EXPECT_FALSE(RunExtensionTest(
+      "api_test/file_system/request_file_system_allowed_component_background",
+      {.launch_as_platform_app = true}, {.load_as_component = true}))
       << message_;
 }
 

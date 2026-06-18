@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,10 +22,12 @@ class Error {
   static const char kHttpErrorDomain[];
   // For DNS probe errors.
   static const char kDnsProbeErrorDomain[];
+  // For Link Preview errors.
 
   // Returns a kNetErrorDomain error.
   static Error NetError(const GURL& url,
                         int reason,
+                        int extended_reason,
                         net::ResolveErrorInfo resolve_error_info,
                         bool stale_copy_in_cache);
   // Returns a kHttpErrorDomain error.
@@ -35,6 +37,10 @@ class Error {
                              int status,
                              bool stale_copy_in_cache);
 
+  ~Error();
+  Error(const Error&);
+  Error& operator=(const Error&);
+
   // Returns the url that failed to load.
   const GURL& url() const { return url_; }
   // Returns the domain of this error.
@@ -42,6 +48,10 @@ class Error {
   // Returns a numeric error code. The meaning of this code depends on the
   // domain string.
   int reason() const { return reason_; }
+  // Returns a numeric error code containing additional information about the
+  // error. Note that the extended reason is only relevant when `reason()` is
+  // `kNetErrorDomain`.
+  int extended_reason() const { return extended_reason_; }
   // Returns error details of the host resolution.
   const net::ResolveErrorInfo& resolve_error_info() const {
     return resolve_error_info_;
@@ -53,12 +63,14 @@ class Error {
   Error(const GURL& url,
         const std::string& domain,
         int reason,
+        int extended_reason,
         net::ResolveErrorInfo resolve_error_info,
         bool stale_copy_in_cache);
 
   GURL url_;
   std::string domain_;
   int reason_;
+  int extended_reason_;
   net::ResolveErrorInfo resolve_error_info_;
   bool stale_copy_in_cache_;
 };

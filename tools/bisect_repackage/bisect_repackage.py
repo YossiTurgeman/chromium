@@ -1,4 +1,4 @@
-# Copyright (c) 2016 The Chromium Authors. All rights reserved.
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Bisect repackage tool for Linux.
@@ -45,7 +45,7 @@ CHROME_REQUIRED_FILES = {
         'chrome_100_percent.pak',
         'chrome_200_percent.pak',
         'chromedriver',
-        'crashpad_handler',
+        'chrome_crashpad_handler',
         'default_apps/',
         'icudtl.dat',
         'ClearKeyCdm/',
@@ -60,8 +60,6 @@ CHROME_REQUIRED_FILES = {
         'resources/',
         'resources.pak',
         'v8_context_snapshot.bin',
-        'xdg-mime',
-        'xdg-settings'
     ],
     'win64': [
         'chrome.dll',
@@ -97,7 +95,7 @@ CHROME_WHITELIST_FILES = {
 CHROME_STRIP_LIST = {
     'linux': [
         'chrome',
-        'crashpad_handler',
+        'chrome_crashpad_handler',
         'nacl_helper'
     ]
 }

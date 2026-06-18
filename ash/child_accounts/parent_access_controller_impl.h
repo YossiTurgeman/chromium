@@ -1,9 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_CHILD_ACCOUNTS_PARENT_ACCESS_CONTROLLER_IMPL_H_
 #define ASH_CHILD_ACCOUNTS_PARENT_ACCESS_CONTROLLER_IMPL_H_
+
+#include <optional>
+#include <string>
 
 #include "ash/login/ui/pin_request_view.h"
 #include "ash/login/ui/pin_request_widget.h"
@@ -40,8 +43,19 @@ class ASH_EXPORT ParentAccessControllerImpl : public ParentAccessController,
     kTimeChangeInSession = 2,
     kTimezoneChange = 3,
     kAddUserLoginScreen = 4,
-    kReauhLoginScreen = 5,
+    kReauhLoginScreen = 5,  // Deprecated
     kMaxValue = kReauhLoginScreen,
+  };
+
+  // Result of the parent access code validation. These values are persisted to
+  // metrics. Entries should not be reordered and numeric values should never be
+  // reused.
+  enum class UMAValidationResult {
+    kValid = 0,
+    kInvalid = 1,
+    kNoConfig = 2,
+    kInternalError = 3,
+    kMaxValue = kInternalError,
   };
 
   // Histogram to log actions that originated in parent access dialog.
@@ -51,6 +65,12 @@ class ASH_EXPORT ParentAccessControllerImpl : public ParentAccessController,
   // Histogram to log context in which parent access code was used.
   static constexpr char kUMAParentAccessCodeUsage[] =
       "Supervision.ParentAccessCode.Usage";
+
+  // Returns the name of the UMA histogram used to log parent access code
+  // validation result for a given |action|. If no |action| specified, returns
+  // the name of the aggregated histogram.
+  static std::string GetUMAParentCodeValidationResultHistorgam(
+      std::optional<SupervisedAction> action);
 
   ParentAccessControllerImpl();
   ParentAccessControllerImpl(const ParentAccessControllerImpl&) = delete;
@@ -62,7 +82,7 @@ class ASH_EXPORT ParentAccessControllerImpl : public ParentAccessController,
   PinRequestView::SubmissionResult OnPinSubmitted(
       const std::string& pin) override;
   void OnBack() override;
-  void OnHelp(gfx::NativeWindow parent_window) override;
+  void OnHelp() override;
 
   // ParentAccessController:
   bool ShowWidget(const AccountId& child_account_id,

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 #include <memory>
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/renderer/bindings/core/v8/script_source_code.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_gc_controller.h"
+#include "third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.h"
 #include "third_party/blink/renderer/core/css/css_syntax_definition.h"
 #include "third_party/blink/renderer/core/css/cssom/prepopulated_computed_style_property_map.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
@@ -50,7 +50,7 @@ class TestPaintWorklet : public PaintWorklet {
 class PaintWorkletTest : public PageTestBase {
  public:
   void SetUp() override {
-    PageTestBase::SetUp(IntSize());
+    PageTestBase::SetUp(gfx::Size());
     test_paint_worklet_ =
         MakeGarbageCollected<TestPaintWorklet>(*GetDocument().domWindow());
     proxy_ = test_paint_worklet_->CreateGlobalScope();
@@ -76,8 +76,10 @@ class PaintWorkletTest : public PageTestBase {
                                int paint_cnt_to_switch,
                                size_t expected_num_paints_before_switch,
                                TestPaintWorklet* paint_worklet_to_test) {
-    paint_worklet_to_test->GetFrame()->View()->UpdateAllLifecyclePhases(
-        DocumentUpdateReason::kTest);
+    paint_worklet_to_test->DomWindow()
+        ->GetFrame()
+        ->View()
+        ->UpdateAllLifecyclePhasesForTest();
     paint_worklet_to_test->SetPaintsToSwitch(paint_cnt_to_switch);
     size_t previously_selected_global_scope =
         paint_worklet_to_test->GetActiveGlobalScope();
@@ -101,9 +103,10 @@ class PaintWorkletTest : public PageTestBase {
     EXPECT_EQ(num_paints_before_switch, expected_num_paints_before_switch);
   }
 
-  void Terminate() {
+  void TearDown() override {
     proxy_->TerminateWorkletGlobalScope();
     proxy_ = nullptr;
+    PageTestBase::TearDown();
   }
 
  private:
@@ -119,8 +122,9 @@ class PaintWorkletTest : public PageTestBase {
 TEST_F(PaintWorkletTest, PaintWithNullPaintArguments) {
   PaintWorkletGlobalScope* global_scope = GetProxy()->global_scope();
   ClassicScript::CreateUnspecifiedScript(
-      ScriptSourceCode("registerPaint('foo', class { paint() { } });"))
-      ->RunScriptOnWorkerOrWorklet(*global_scope);
+      "registerPaint('foo', class { paint() { } });")
+      ->RunScriptOnScriptState(
+          global_scope->ScriptController()->GetScriptState());
 
   CSSPaintDefinition* definition = global_scope->FindDefinition("foo");
   ASSERT_TRUE(definition);
@@ -128,7 +132,7 @@ TEST_F(PaintWorkletTest, PaintWithNullPaintArguments) {
   ImageResourceObserver* observer = GetImageResourceObserver();
   ASSERT_TRUE(observer);
 
-  const FloatSize container_size(100, 100);
+  const gfx::SizeF container_size(100, 100);
   const LayoutObject& layout_object =
       static_cast<const LayoutObject&>(*observer);
   float zoom = layout_object.StyleRef().EffectiveZoom();
@@ -138,8 +142,7 @@ TEST_F(PaintWorkletTest, PaintWithNullPaintArguments) {
           definition->NativeInvalidationProperties(),
           definition->CustomInvalidationProperties());
   scoped_refptr<Image> image = PaintGeneratedImage::Create(
-      definition->Paint(container_size, zoom, style_map, nullptr,
-                        1.0 /* device_scale_factor */),
+      definition->Paint(container_size, zoom, style_map, nullptr),
       container_size);
   EXPECT_NE(image, nullptr);
 }
@@ -149,15 +152,21 @@ TEST_F(PaintWorkletTest, PaintWithNullPaintArguments) {
 // registered. In the real world, this document paint definition should not be
 // used to paint until we see a second one being registed with the same name.
 TEST_F(PaintWorkletTest, SinglyRegisteredDocumentDefinitionNotUsed) {
+  PaintWorklet* paint_worklet_to_test =
+      PaintWorklet::From(*GetFrame().GetDocument()->domWindow());
+  paint_worklet_to_test->ResetIsPaintOffThreadForTesting();
+
   PaintWorkletGlobalScope* global_scope = GetProxy()->global_scope();
   ClassicScript::CreateUnspecifiedScript(
-      ScriptSourceCode("registerPaint('foo', class { paint() { } });"))
-      ->RunScriptOnWorkerOrWorklet(*global_scope);
+      "registerPaint('foo', class { paint() { } });")
+      ->RunScriptOnScriptState(
+          global_scope->ScriptController()->GetScriptState());
 
   CSSPaintImageGeneratorImpl* generator =
       static_cast<CSSPaintImageGeneratorImpl*>(
           CSSPaintImageGeneratorImpl::Create("foo", GetDocument(), nullptr));
   EXPECT_TRUE(generator);
+  EXPECT_FALSE(generator->IsImageGeneratorReady());
   EXPECT_EQ(generator->GetRegisteredDefinitionCountForTesting(), 1u);
   DocumentPaintDefinition* definition;
   // Please refer to CSSPaintImageGeneratorImpl::GetValidDocumentDefinition for
@@ -181,9 +190,6 @@ TEST_F(PaintWorkletTest, GlobalScopeSelection) {
   // In the last one where |paints_to_switch| is 20, there is no switching after
   // the first paint call.
   ExpectSwitchGlobalScope(false, 10, 20, 0, paint_worklet_to_test);
-
-  // Delete the page & associated objects.
-  Terminate();
 }
 
 TEST_F(PaintWorkletTest, NativeAndCustomProperties) {
@@ -193,9 +199,9 @@ TEST_F(PaintWorkletTest, NativeAndCustomProperties) {
       CSSPropertyID::kZoom,
       CSSPropertyID::kTop,
   };
-  Vector<String> custom_invalidation_properties = {
-      "--my-property",
-      "--another-property",
+  Vector<AtomicString> custom_invalidation_properties = {
+      AtomicString("--my-property"),
+      AtomicString("--another-property"),
   };
 
   TestPaintWorklet* paint_worklet_to_test = GetTestPaintWorklet();
@@ -250,7 +256,7 @@ TEST_P(MainOrOffThreadPaintWorkletTest, ConsistentGlobalScopeOnMainThread) {
   EXPECT_CALL(*observer, PaintImageGeneratorReady).Times(0);
 
   Vector<Persistent<PaintWorkletGlobalScope>> global_scopes;
-  for (size_t i = 0; i < PaintWorklet::kNumGlobalScopesPerThread; ++i) {
+  for (wtf_size_t i = 0; i < PaintWorklet::kNumGlobalScopesPerThread; ++i) {
     paint_worklet_to_test->AddGlobalScopeForTesting();
     global_scopes.push_back(
         PaintWorkletGlobalScopeProxy::From(
@@ -271,21 +277,26 @@ TEST_P(MainOrOffThreadPaintWorkletTest, ConsistentGlobalScopeOnMainThread) {
         paint() {}
       });)JS";
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(foo0))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[0]);
+  ClassicScript::CreateUnspecifiedScript(foo0)->RunScriptOnScriptState(
+      global_scopes[0]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(global_scopes[0]->FindDefinition("foo"));
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(foo1))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[1]);
+  ClassicScript::CreateUnspecifiedScript(foo1)->RunScriptOnScriptState(
+      global_scopes[1]->ScriptController()->GetScriptState());
 
   // foo0 and foo1 have the same name but different definitions, therefore
   // this definition must become invalid.
   EXPECT_FALSE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
+  DocumentPaintDefinition* invalid_definition = nullptr;
+  EXPECT_FALSE(
+      generator_foo->GetValidDocumentDefinitionForTesting(invalid_definition));
+  EXPECT_FALSE(invalid_definition);
+  EXPECT_FALSE(generator_foo->IsImageGeneratorReady());
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(bar))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[0]);
+  ClassicScript::CreateUnspecifiedScript(bar)->RunScriptOnScriptState(
+      global_scopes[0]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(global_scopes[0]->FindDefinition("bar"));
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("bar"));
@@ -296,24 +307,33 @@ TEST_P(MainOrOffThreadPaintWorkletTest, ConsistentGlobalScopeOnMainThread) {
   if (!RuntimeEnabledFeatures::OffMainThreadCSSPaintEnabled())
     EXPECT_CALL(*observer, PaintImageGeneratorReady).Times(1);
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(bar))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[1]);
+  ClassicScript::CreateUnspecifiedScript(bar)->RunScriptOnScriptState(
+      global_scopes[1]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("bar"));
 }
 
-TEST_P(MainOrOffThreadPaintWorkletTest, AllGlobalScopesMustBeCreated) {
+// TODO(crbug.com/1430318): All/MainOrOffThreadPaintWorkletTest.
+// AllGlobalScopesMustBeCreated/1 is failing on Linux TSan Tests.
+#if defined(THREAD_SANITIZER)
+#define MAYBE_AllGlobalScopesMustBeCreated DISABLED_AllGlobalScopesMustBeCreated
+#else
+#define MAYBE_AllGlobalScopesMustBeCreated AllGlobalScopesMustBeCreated
+#endif
+TEST_P(MainOrOffThreadPaintWorkletTest, MAYBE_AllGlobalScopesMustBeCreated) {
   PaintWorklet* paint_worklet_to_test =
       MakeGarbageCollected<PaintWorklet>(*GetFrame().DomWindow());
   paint_worklet_to_test->ResetIsPaintOffThreadForTesting();
 
-  EXPECT_TRUE(paint_worklet_to_test->GetGlobalScopesForTesting().IsEmpty());
+  EXPECT_TRUE(paint_worklet_to_test->GetGlobalScopesForTesting().empty());
 
   std::unique_ptr<PaintWorkletPaintDispatcher> dispatcher =
       std::make_unique<PaintWorkletPaintDispatcher>();
   Persistent<PaintWorkletProxyClient> proxy_client =
       MakeGarbageCollected<PaintWorkletProxyClient>(
-          1, paint_worklet_to_test, dispatcher->GetWeakPtr(), nullptr);
+          1, paint_worklet_to_test,
+          GetFrame().GetTaskRunner(TaskType::kInternalDefault),
+          dispatcher->GetWeakPtr(), nullptr);
   paint_worklet_to_test->SetProxyClientForTesting(proxy_client);
 
   while (paint_worklet_to_test->NeedsToCreateGlobalScopeForTesting()) {
@@ -358,7 +378,7 @@ TEST_F(PaintWorkletTest, ConsistentGlobalScopeCrossThread) {
   EXPECT_CALL(*observer, PaintImageGeneratorReady).Times(0);
 
   Vector<Persistent<PaintWorkletGlobalScope>> global_scopes;
-  for (size_t i = 0; i < PaintWorklet::kNumGlobalScopesPerThread; ++i) {
+  for (wtf_size_t i = 0; i < PaintWorklet::kNumGlobalScopesPerThread; ++i) {
     paint_worklet_to_test->AddGlobalScopeForTesting();
     global_scopes.push_back(
         PaintWorkletGlobalScopeProxy::From(
@@ -392,46 +412,43 @@ TEST_F(PaintWorkletTest, ConsistentGlobalScopeCrossThread) {
       });)JS";
 
   // Definition invalidated before cross thread check
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(foo0))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[0]);
+  ClassicScript::CreateUnspecifiedScript(foo0)->RunScriptOnScriptState(
+      global_scopes[0]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(global_scopes[0]->FindDefinition("foo"));
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(foo1))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[1]);
+  ClassicScript::CreateUnspecifiedScript(foo1)->RunScriptOnScriptState(
+      global_scopes[1]->ScriptController()->GetScriptState());
 
   EXPECT_FALSE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
 
   CSSPaintDefinition* definition = global_scopes[0]->FindDefinition("foo");
-  Vector<String> foo_custom_properties;
-  for (const auto& s : definition->CustomInvalidationProperties()) {
-    foo_custom_properties.push_back(s);
-  }
 
   paint_worklet_to_test->RegisterMainThreadDocumentPaintDefinition(
-      "foo", definition->NativeInvalidationProperties(), foo_custom_properties,
+      "foo", definition->NativeInvalidationProperties(),
+      definition->CustomInvalidationProperties(),
       definition->InputArgumentTypes(),
       definition->GetPaintRenderingContext2DSettings()->alpha());
 
   EXPECT_FALSE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
 
   // Definition invalidated by cross thread check
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(bar0))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[0]);
+  ClassicScript::CreateUnspecifiedScript(bar0)->RunScriptOnScriptState(
+      global_scopes[0]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(global_scopes[0]->FindDefinition("bar"));
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("bar"));
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(bar0))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[1]);
+  ClassicScript::CreateUnspecifiedScript(bar0)->RunScriptOnScriptState(
+      global_scopes[1]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("bar"));
 
   definition = global_scopes[0]->FindDefinition("bar");
 
   // Manually change the custom properties
-  Vector<String> bar_custom_properties({"--bar1"});
+  Vector<AtomicString> bar_custom_properties = {AtomicString("--bar1")};
 
   paint_worklet_to_test->RegisterMainThreadDocumentPaintDefinition(
       "bar", definition->NativeInvalidationProperties(), bar_custom_properties,
@@ -444,27 +461,24 @@ TEST_F(PaintWorkletTest, ConsistentGlobalScopeCrossThread) {
   EXPECT_FALSE(paint_worklet_to_test->GetDocumentDefinitionMap().at("bar"));
 
   // Definition invalidated by second main thread call after cross thread check
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(loo0))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[0]);
+  ClassicScript::CreateUnspecifiedScript(loo0)->RunScriptOnScriptState(
+      global_scopes[0]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(global_scopes[0]->FindDefinition("loo"));
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("loo"));
 
   definition = global_scopes[0]->FindDefinition("loo");
-  Vector<String> loo_custom_properties;
-  for (const auto& s : definition->CustomInvalidationProperties()) {
-    loo_custom_properties.push_back(s);
-  }
 
   paint_worklet_to_test->RegisterMainThreadDocumentPaintDefinition(
-      "loo", definition->NativeInvalidationProperties(), loo_custom_properties,
+      "loo", definition->NativeInvalidationProperties(),
+      definition->CustomInvalidationProperties(),
       definition->InputArgumentTypes(),
       definition->GetPaintRenderingContext2DSettings()->alpha());
 
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("loo"));
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(loo1))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[1]);
+  ClassicScript::CreateUnspecifiedScript(loo1)->RunScriptOnScriptState(
+      global_scopes[1]->ScriptController()->GetScriptState());
 
   // Although the first main thread call and the cross thread definition are the
   // same, the second main thread call differs so the definition must become
@@ -472,8 +486,8 @@ TEST_F(PaintWorkletTest, ConsistentGlobalScopeCrossThread) {
   EXPECT_FALSE(paint_worklet_to_test->GetDocumentDefinitionMap().at("loo"));
 
   // Definition invalidated by cross thread check before second main thread call
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(gar0))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[0]);
+  ClassicScript::CreateUnspecifiedScript(gar0)->RunScriptOnScriptState(
+      global_scopes[0]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(global_scopes[0]->FindDefinition("gar"));
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("gar"));
@@ -481,7 +495,7 @@ TEST_F(PaintWorkletTest, ConsistentGlobalScopeCrossThread) {
   definition = global_scopes[0]->FindDefinition("gar");
 
   // Manually change custom properties
-  Vector<String> gar_custom_properties({"--gar1"});
+  Vector<AtomicString> gar_custom_properties = {AtomicString("--gar1")};
 
   paint_worklet_to_test->RegisterMainThreadDocumentPaintDefinition(
       "gar", definition->NativeInvalidationProperties(), gar_custom_properties,
@@ -490,8 +504,8 @@ TEST_F(PaintWorkletTest, ConsistentGlobalScopeCrossThread) {
 
   EXPECT_FALSE(paint_worklet_to_test->GetDocumentDefinitionMap().at("gar"));
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(gar0))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[1]);
+  ClassicScript::CreateUnspecifiedScript(gar0)->RunScriptOnScriptState(
+      global_scopes[1]->ScriptController()->GetScriptState());
 
   // Although the main thread definitions were the same, the definition sent
   // cross thread differed from the main thread definitions so it must stay
@@ -515,7 +529,7 @@ TEST_F(PaintWorkletTest, GeneratorNotifiedAfterAllRegistrations) {
   EXPECT_CALL(*observer, PaintImageGeneratorReady).Times(0);
 
   Vector<Persistent<PaintWorkletGlobalScope>> global_scopes;
-  for (size_t i = 0; i < PaintWorklet::kNumGlobalScopesPerThread; ++i) {
+  for (wtf_size_t i = 0; i < PaintWorklet::kNumGlobalScopesPerThread; ++i) {
     paint_worklet_to_test->AddGlobalScopeForTesting();
     global_scopes.push_back(
         PaintWorkletGlobalScopeProxy::From(
@@ -528,32 +542,31 @@ TEST_F(PaintWorkletTest, GeneratorNotifiedAfterAllRegistrations) {
         paint() {}
       });)JS";
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(foo))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[0]);
+  ClassicScript::CreateUnspecifiedScript(foo)->RunScriptOnScriptState(
+      global_scopes[0]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(global_scopes[0]->FindDefinition("foo"));
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
 
-  ClassicScript::CreateUnspecifiedScript(ScriptSourceCode(foo))
-      ->RunScriptOnWorkerOrWorklet(*global_scopes[1]);
+  ClassicScript::CreateUnspecifiedScript(foo)->RunScriptOnScriptState(
+      global_scopes[1]->ScriptController()->GetScriptState());
 
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
+  EXPECT_FALSE(generator->IsImageGeneratorReady());
 
   CSSPaintDefinition* definition = global_scopes[0]->FindDefinition("foo");
-  Vector<String> custom_properties;
-  for (const auto& s : definition->CustomInvalidationProperties()) {
-    custom_properties.push_back(s);
-  }
 
   // The cross thread check should cause the generator to fire
   EXPECT_CALL(*observer, PaintImageGeneratorReady).Times(1);
 
   paint_worklet_to_test->RegisterMainThreadDocumentPaintDefinition(
-      "foo", definition->NativeInvalidationProperties(), custom_properties,
+      "foo", definition->NativeInvalidationProperties(),
+      definition->CustomInvalidationProperties(),
       definition->InputArgumentTypes(),
       definition->GetPaintRenderingContext2DSettings()->alpha());
 
   EXPECT_TRUE(paint_worklet_to_test->GetDocumentDefinitionMap().at("foo"));
+  EXPECT_TRUE(generator->IsImageGeneratorReady());
 }
 
 }  // namespace blink

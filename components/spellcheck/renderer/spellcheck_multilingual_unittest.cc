@@ -1,16 +1,19 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stddef.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
+#include <string_view>
 #include <utility>
+#include <vector>
 
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
-#include "base/stl_util.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -21,8 +24,8 @@
 #include "components/spellcheck/renderer/spellcheck.h"
 #include "components/spellcheck/renderer/spellcheck_provider_test.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/platform/web_runtime_features.h"
 #include "third_party/blink/public/platform/web_string.h"
-#include "third_party/blink/public/platform/web_vector.h"
 #include "third_party/blink/public/web/web_text_checking_result.h"
 
 namespace {
@@ -37,8 +40,10 @@ struct SpellcheckTestCase {
 
 base::FilePath GetHunspellDirectory() {
   base::FilePath hunspell_directory;
-  if (!base::PathService::Get(base::DIR_SOURCE_ROOT, &hunspell_directory))
+  if (!base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT,
+                              &hunspell_directory)) {
     return base::FilePath();
+  }
 
   hunspell_directory = hunspell_directory.AppendASCII("third_party");
   hunspell_directory = hunspell_directory.AppendASCII("hunspell_dictionaries");
@@ -49,12 +54,12 @@ base::FilePath GetHunspellDirectory() {
 
 class MultilingualSpellCheckTest : public testing::Test {
  public:
-  MultilingualSpellCheckTest() {}
+  MultilingualSpellCheckTest() = default;
 
   void ReinitializeSpellCheck(const std::string& unsplit_languages) {
     spellcheck_ = new SpellCheck(&embedder_provider_);
-    provider_.reset(
-        new TestingSpellCheckProvider(spellcheck_, &embedder_provider_));
+    provider_ = std::make_unique<TestingSpellCheckProvider>(
+        spellcheck_, &embedder_provider_);
     InitializeSpellCheck(unsplit_languages);
   }
 
@@ -72,20 +77,18 @@ class MultilingualSpellCheckTest : public testing::Test {
     }
   }
 
-  ~MultilingualSpellCheckTest() override {}
+  ~MultilingualSpellCheckTest() override = default;
   TestingSpellCheckProvider* provider() { return provider_.get(); }
 
  protected:
-  void ExpectSpellCheckWordResults(const std::string& languages,
-                                   const SpellcheckTestCase* test_cases,
-                                   size_t num_test_cases) {
-    ReinitializeSpellCheck(languages);
-
-    for (size_t i = 0; i < num_test_cases; ++i) {
+  void CheckSpellCheckWordResults(
+      const std::string& languages,
+      base::span<const SpellcheckTestCase> test_cases) {
+    for (size_t i = 0; i < test_cases.size(); ++i) {
       size_t misspelling_start = 0;
       size_t misspelling_length = 0;
       static_cast<blink::WebTextCheckClient*>(provider())
-          ->CheckSpelling(blink::WebString::FromUTF16(
+          ->CheckSpelling(blink::WebString::FromUtf16(
                               base::WideToUTF16(test_cases[i].input)),
                           misspelling_start, misspelling_length, nullptr);
 
@@ -98,11 +101,28 @@ class MultilingualSpellCheckTest : public testing::Test {
     }
   }
 
+  void ExpectSpellCheckWordResults(
+      const std::string& languages,
+      base::span<const SpellcheckTestCase> test_cases) {
+    ReinitializeSpellCheck(languages);
+    CheckSpellCheckWordResults(languages, test_cases);
+  }
+
+  void ExpectSpellCheckWordResultsWithoutLanguages(
+      const std::string& languages,
+      base::span<const SpellcheckTestCase> test_cases) {
+    spellcheck_ = new SpellCheck(&embedder_provider_);
+    provider_ = std::make_unique<TestingSpellCheckProvider>(
+        spellcheck_, &embedder_provider_);
+    CheckSpellCheckWordResults(languages, test_cases);
+  }
+
   void ExpectSpellCheckParagraphResults(
-      const base::string16& input,
+      const std::u16string& input,
       const std::vector<SpellCheckResult>& expected) {
-    blink::WebVector<blink::WebTextCheckingResult> results;
-    spellcheck_->SpellCheckParagraph(input, &results);
+    std::vector<blink::WebTextCheckingResult> results;
+    spellcheck_->SpellCheckParagraph(input, provider_->GetSpellCheckHost(),
+                                     &results);
 
     EXPECT_EQ(expected.size(), results.size());
     size_t size = std::min(results.size(), expected.size());
@@ -118,7 +138,7 @@ class MultilingualSpellCheckTest : public testing::Test {
   spellcheck::EmptyLocalInterfaceProvider embedder_provider_;
 
   // Owned by |provider_|.
-  SpellCheck* spellcheck_;
+  raw_ptr<SpellCheck, DanglingUntriaged> spellcheck_;
   std::unique_ptr<TestingSpellCheckProvider> provider_;
 };
 
@@ -144,13 +164,12 @@ TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckWord) {
   // A sorted list of languages. This must start sorted to get all possible
   // permutations.
   std::string languages = "el-GR,en-US,es-ES,ru-RU";
-  std::vector<base::StringPiece> permuted_languages = base::SplitStringPiece(
+  std::vector<std::string_view> permuted_languages = base::SplitStringPiece(
       languages, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
 
   do {
     std::string reordered_languages = base::JoinString(permuted_languages, ",");
-    ExpectSpellCheckWordResults(reordered_languages, kTestCases,
-                                base::size(kTestCases));
+    ExpectSpellCheckWordResults(reordered_languages, kTestCases);
   } while (std::next_permutation(permuted_languages.begin(),
                                  permuted_languages.end()));
 }
@@ -180,9 +199,103 @@ TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckWordEnglishSpanish) {
       {L"sand hola sand hola sand hola", 0, 0},
       {L"hola sand hola sand hola sand", 0, 0},
       {L"hola:legs", 0, 9},
-      {L"legs:hola", 0, 9}};
-  ExpectSpellCheckWordResults("en-US,es-ES", kTestCases,
-                              base::size(kTestCases));
+      {L"legs:hola", 0, 9},
+  };
+  ExpectSpellCheckWordResults("en-US,es-ES", kTestCases);
+}
+
+// To check when no language is set, no spelling check and no crash.
+TEST_F(MultilingualSpellCheckTest,
+       MultilingualSpellCheckCustomDictionarySpellCheckWordWithoutLanguage) {
+  blink::WebRuntimeFeatures::EnableFeatureFromString(
+      "SpellCheckCustomDictionaryAPI", true);
+  static const SpellcheckTestCase kTestCases[] = {
+      // An Pokemon name.
+      {L"Pikachu destruyan", 0, 0},
+      // A misspelled Spanish word.
+      {L"hello destruynn", 0, 0},
+  };
+  ExpectSpellCheckWordResultsWithoutLanguages("", kTestCases);
+
+  static_cast<blink::WebTextCheckClient*>(provider())
+      ->SpellCheckCustomDictionaryChanged({"Pikachu", "destruynn"}, {});
+  static const SpellcheckTestCase kNewTestCases1[] = {
+      // An Pokemon name.
+      {L"Pikachu destruyan", 0, 0},
+      // A misspelled Spanish word.
+      {L"hello destruynn", 0, 0},
+  };
+  // Use the same SpellCheck instance.
+  ExpectSpellCheckWordResultsWithoutLanguages("", kNewTestCases1);
+}
+
+TEST_F(MultilingualSpellCheckTest,
+       MultilingualSpellCheckCustomDictionarySpellCheckWord) {
+  blink::WebRuntimeFeatures::EnableFeatureFromString(
+      "SpellCheckCustomDictionaryAPI", true);
+  static const SpellcheckTestCase kTestCases[] = {
+      // An Pokemon name.
+      {L"Pikachu destruyan", 0, 7},
+      // A misspelled Spanish word.
+      {L"hello destruynn", 6, 9},
+  };
+  // ReinitializeSpellCheck.
+  ExpectSpellCheckWordResults("en-US,es-ES", kTestCases);
+
+  // Insert the Pokemon name & misspelled word to SpellCheckDictionary.
+
+  // Insert the Pokemon name and the misspelled Spanish word to
+  // SpellCheckDictionary.
+  static_cast<blink::WebTextCheckClient*>(provider())
+      ->SpellCheckCustomDictionaryChanged({"Pikachu", "destruynn"}, {});
+  static const SpellcheckTestCase kNewTestCases1[] = {
+      // An Pokemon name.
+      {L"Pikachu destruyan", 0, 0},
+      // A misspelled Spanish word.
+      {L"hello destruynn", 0, 0},
+  };
+  // Use the same SpellCheck instance.
+  CheckSpellCheckWordResults("en-US,es-ES", kNewTestCases1);
+
+  // Remove the the misspelled Spanish word from SpellCheckDictionary.
+  static_cast<blink::WebTextCheckClient*>(provider())
+      ->SpellCheckCustomDictionaryChanged({}, {"destruynn"});
+  static const SpellcheckTestCase kNewTestCases2[] = {
+      // An Pokemon name.
+      {L"Pikachu destruyan", 0, 0},
+      // A misspelled Spanish word.
+      {L"hello destruynn", 6, 9},
+  };
+  CheckSpellCheckWordResults("en-US,es-ES", kNewTestCases2);
+}
+
+// Word added to the SpellCheckDictionary applies for all languages.
+TEST_F(MultilingualSpellCheckTest,
+       SpellCheckCustomDictionarySpellCheckWordRegardlessLang) {
+  blink::WebRuntimeFeatures::EnableFeatureFromString(
+      "SpellCheckCustomDictionaryAPI", true);
+
+  static const SpellcheckTestCase kTestCases[] = {
+      // A Pokemon name in English.
+      {L"Pikachu hola", 0, 7},
+      // A Pokemon name in Spanish.
+      {L"hello Pikachu", 6, 7},
+  };
+  // ReinitializeSpellCheck.
+  ExpectSpellCheckWordResults("en-US,es-ES", kTestCases);
+
+  // Insert the misspelled words to SpellCheckDictionary.
+  static_cast<blink::WebTextCheckClient*>(provider())
+      ->SpellCheckCustomDictionaryChanged({"Pikachu"}, {});
+
+  static const SpellcheckTestCase kNewTestCases[] = {
+      // A Pokemon name in English.
+      {L"Pikachu hola", 0, 0},
+      // A Pokemon name in Spanish.
+      {L"hello Pikachu", 0, 0},
+  };
+  // Use the same SpellCheck instance - no initialization here.
+  CheckSpellCheckWordResults("en-US,es-ES", kNewTestCases);
 }
 
 // If there are no spellcheck languages, no text should be marked as misspelled.
@@ -191,7 +304,7 @@ TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckParagraphBlank) {
 
   ExpectSpellCheckParagraphResults(
       // English, German, Spanish, and a misspelled word.
-      base::UTF8ToUTF16("rocket Schwarzkommando destruyan pcnyhon"),
+      u"rocket Schwarzkommando destruyan pcnyhon",
       std::vector<SpellCheckResult>());
 }
 
@@ -202,26 +315,65 @@ TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckParagraphCorrect) {
 
   ExpectSpellCheckParagraphResults(
       // English, German, and Spanish words, all spelled correctly.
-      base::UTF8ToUTF16("rocket Schwarzkommando destruyan"),
-      std::vector<SpellCheckResult>());
+      u"rocket Schwarzkommando destruyan", std::vector<SpellCheckResult>());
 }
 
 // Make sure that all the misspellings in the text are found.
 TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckParagraph) {
   ReinitializeSpellCheck("en-US,es-ES");
   std::vector<SpellCheckResult> expected;
-  expected.push_back(SpellCheckResult(SpellCheckResult::SPELLING, 7, 15));
-  expected.push_back(SpellCheckResult(SpellCheckResult::SPELLING, 33, 7));
+  expected.emplace_back(spellcheck::Decoration::SPELLING, 7, 15);
+  expected.emplace_back(spellcheck::Decoration::SPELLING, 33, 7);
 
   ExpectSpellCheckParagraphResults(
       // English, German, Spanish, and a misspelled word.
-      base::UTF8ToUTF16("rocket Schwarzkommando destruyan pcnyhon"), expected);
+      u"rocket Schwarzkommando destruyan pcnyhon", expected);
+}
+
+TEST_F(MultilingualSpellCheckTest,
+       MultilingualCustomDictionarySpellCheckParagraph) {
+  blink::WebRuntimeFeatures::EnableFeatureFromString(
+      "SpellCheckCustomDictionaryAPI", true);
+
+  ReinitializeSpellCheck("en-US,es-ES");
+  std::vector<SpellCheckResult> expected;
+  expected.emplace_back(spellcheck::Decoration::SPELLING, 7, 15);
+  expected.emplace_back(spellcheck::Decoration::SPELLING, 33, 7);
+
+  ExpectSpellCheckParagraphResults(
+      // English, German, Spanish, and a misspelled word.
+      u"rocket Schwarzkommando destruyan pcnyhon", expected);
+
+  // Insert one of the misspelled word to SpellCheckDictionary.
+  static_cast<blink::WebTextCheckClient*>(provider())
+      ->SpellCheckCustomDictionaryChanged({"Schwarzkommando"}, {});
+  std::vector<SpellCheckResult> expected1;
+  expected1.emplace_back(spellcheck::Decoration::SPELLING, 33, 7);
+  ExpectSpellCheckParagraphResults(
+      // English, German, Spanish, and a misspelled word.
+      u"rocket Schwarzkommando destruyan pcnyhon", expected1);
+
+  // Remove the inserted word from the SpellCheckDictionary.
+  static_cast<blink::WebTextCheckClient*>(provider())
+      ->SpellCheckCustomDictionaryChanged({}, {"Schwarzkommando"});
+  ExpectSpellCheckParagraphResults(
+      // English, German, Spanish, and a misspelled word.
+      u"rocket Schwarzkommando destruyan pcnyhon", expected);
+
+  // Insert all the misspelled word to SpellCheckDictionary.
+  static_cast<blink::WebTextCheckClient*>(provider())
+      ->SpellCheckCustomDictionaryChanged({"Schwarzkommando", "pcnyhon"}, {});
+
+  ExpectSpellCheckParagraphResults(
+      // English, German, and Spanish words, all spelled correctly.
+      u"rocket Schwarzkommando destruyan pcnyhon",
+      std::vector<SpellCheckResult>());
 }
 
 // Ensure that suggestions are handled properly for multiple languages.
 TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckSuggestions) {
   ReinitializeSpellCheck("en-US,es-ES");
-  static const struct {
+  struct TestCases {
     // A string of text for checking.
     const wchar_t* input;
     // The position and the length of the first invalid word.
@@ -230,21 +382,22 @@ TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckSuggestions) {
     // A comma separated string of suggested words that should occur, in their
     // expected order.
     const wchar_t* expected_suggestions;
-  } kTestCases[] = {
+  };
+  static const auto kTestCases = std::to_array<TestCases>({
       {L"rocket", 0, 0},
       {L"destruyan", 0, 0},
       {L"rocet", 0, 5, L"rocket,roce,crochet,troce,rocen"},
       {L"jum", 0, 3, L"hum,jun,ju,um,juma"},
       {L"asdne", 0, 5, L"sadness,desasne"},
-  };
+  });
 
-  for (size_t i = 0; i < base::size(kTestCases); ++i) {
-    blink::WebVector<blink::WebString> suggestions;
+  for (size_t i = 0; i < std::size(kTestCases); ++i) {
+    std::vector<blink::WebString> suggestions;
     size_t misspelling_start;
     size_t misspelling_length;
     static_cast<blink::WebTextCheckClient*>(provider())
         ->CheckSpelling(
-            blink::WebString::FromUTF16(base::WideToUTF16(kTestCases[i].input)),
+            blink::WebString::FromUtf16(base::WideToUTF16(kTestCases[i].input)),
             misspelling_start, misspelling_length, &suggestions);
 
     EXPECT_EQ(kTestCases[i].expected_misspelling_start, misspelling_start);
@@ -254,9 +407,9 @@ TEST_F(MultilingualSpellCheckTest, MultilingualSpellCheckSuggestions) {
       continue;
     }
 
-    std::vector<base::string16> expected_suggestions = base::SplitString(
+    std::vector<std::u16string> expected_suggestions = base::SplitString(
         base::WideToUTF16(kTestCases[i].expected_suggestions),
-        base::string16(1, ','), base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+        std::u16string(1, ','), base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
 
     EXPECT_EQ(expected_suggestions.size(), suggestions.size());
     for (size_t j = 0;

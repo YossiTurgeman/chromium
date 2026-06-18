@@ -1,12 +1,18 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {AxeCoreTestRunner} from 'axe_core_test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+
+import * as ObjectUI from 'devtools/ui/legacy/components/object_ui/object_ui.js';
+import * as Sources from 'devtools/panels/sources/sources.js';
+import * as UI from 'devtools/ui/legacy/legacy.js';
+
 (async function() {
-  await TestRunner.loadModule('axe_core_test_runner');
-  await TestRunner.loadModule('sources_test_runner');
   await TestRunner.showPanel('sources');
-  await UI.viewManager.showView('sources.scopeChain');
+  await UI.ViewManager.ViewManager.instance().showView('sources.scope-chain');
 
   TestRunner.addResult('Testing accessibility in the scope pane.\n');
   await SourcesTestRunner.startDebuggerTestPromise();
@@ -23,16 +29,18 @@
   `);
   await SourcesTestRunner.waitUntilPausedPromise();
 
-  await TestRunner.addSnifferPromise(Sources.ScopeChainSidebarPane.prototype, '_sidebarPaneUpdatedForTest');
-  const scopePane = self.runtime.sharedInstance(Sources.ScopeChainSidebarPane);
-  await TestRunner.addSnifferPromise(ObjectUI.ObjectPropertyTreeElement, 'populateWithProperties');
+  await TestRunner.addSnifferPromise(Sources.ScopeChainSidebarPane.ScopeChainSidebarPane.prototype, 'sidebarPaneUpdatedForTest');
+  const scopePane = Sources.ScopeChainSidebarPane.ScopeChainSidebarPane.instance();
+  await TestRunner.addSnifferPromise(ObjectUI.ObjectPropertiesSection.ObjectPropertyTreeElement, 'populateWithProperties');
+  await new Promise(requestAnimationFrame);
   TestRunner.addResult(`Scope pane content: ${scopePane.contentElement.deepTextContent()}`);
   TestRunner.addResult(`Running the axe-core linter on the scope pane.`);
   await AxeCoreTestRunner.runValidation(scopePane.contentElement);
 
   TestRunner.addResult('Expanding the makeClosure closure.');
-  scopePane._treeOutline._rootElement.childAt(1).expand();
-  await TestRunner.addSnifferPromise(ObjectUI.ObjectPropertyTreeElement, 'populateWithProperties');
+  scopePane.treeOutline.rootElement().childAt(1).expand();
+  await TestRunner.addSnifferPromise(ObjectUI.ObjectPropertiesSection.ObjectPropertyTreeElement, 'populateWithProperties');
+  await new Promise(requestAnimationFrame);
   TestRunner.addResult(`Scope pane content: ${scopePane.contentElement.deepTextContent()}`);
   TestRunner.addResult(`Running the axe-core linter on the scope pane.`);
   await AxeCoreTestRunner.runValidation(scopePane.contentElement);

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,17 +12,17 @@
 #include <string>
 #include <vector>
 
+#include "base/apple/scoped_cftyperef.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/mac/scoped_cftyperef.h"
 #include "base/path_service.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/test/scoped_path_override.h"
 #include "chrome/browser/safe_browsing/incident_reporting/incident.h"
 #include "chrome/browser/safe_browsing/incident_reporting/mock_incident_receiver.h"
 #include "chrome/common/chrome_paths.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
 #include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -64,8 +64,7 @@ class MacSignatureEvaluatorTest : public testing::Test {
   bool SetupXattrs(const base::FilePath& path) {
     char sentinel = 'A';
     for (auto* xattr : xattrs) {
-      std::vector<uint8_t> buf(10);
-      memset(&buf[0], sentinel++, buf.size());
+      std::vector<uint8_t> buf(10, sentinel++);
       if (setxattr(path.value().c_str(), xattr, &buf[0], buf.size(), 0, 0) != 0)
         return false;
     }

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,8 @@
 #include <string>
 
 #include "base/containers/flat_map.h"
-#include "base/macros.h"
 #include "base/sequence_checker.h"
-#include "base/strings/string16.h"
+#include "base/task/sequenced_task_runner.h"
 #include "services/device/usb/usb_device.h"
 
 namespace device {
@@ -23,8 +22,15 @@ struct WebUsbPlatformCapabilityDescriptor;
 class UsbDeviceWin : public UsbDevice {
  public:
   struct FunctionInfo {
+    int interface_number;
     std::wstring driver;
     std::wstring path;
+  };
+
+  enum class DriverType {
+    kUnsupported,
+    kWinUSB,
+    kComposite,
   };
 
   UsbDeviceWin(const std::wstring& device_path,
@@ -32,7 +38,10 @@ class UsbDeviceWin : public UsbDevice {
                const base::flat_map<int, FunctionInfo>& functions,
                uint32_t bus_number,
                uint32_t port_number,
-               const std::wstring& driver_name);
+               DriverType driver_type);
+
+  UsbDeviceWin(const UsbDeviceWin&) = delete;
+  UsbDeviceWin& operator=(const UsbDeviceWin&) = delete;
 
   // UsbDevice implementation:
   void Open(OpenCallback callback) override;
@@ -47,11 +56,13 @@ class UsbDeviceWin : public UsbDevice {
   const base::flat_map<int, FunctionInfo>& functions() const {
     return functions_;
   }
-  const std::wstring& driver_name() const { return driver_name_; }
+  DriverType driver_type() const { return driver_type_; }
 
   // Opens the device's parent hub in order to read the device, configuration
   // and string descriptors.
-  void ReadDescriptors(base::OnceCallback<void(bool)> callback);
+  void ReadDescriptors(
+      scoped_refptr<base::SequencedTaskRunner> blocking_task_runner,
+      base::OnceCallback<void(bool)> callback);
 
   void UpdateFunction(int interface_number, const FunctionInfo& function_info);
 
@@ -65,11 +76,11 @@ class UsbDeviceWin : public UsbDevice {
       uint8_t i_manufacturer,
       uint8_t i_product,
       uint8_t i_serial_number,
-      std::unique_ptr<std::map<uint8_t, base::string16>> string_map);
+      std::unique_ptr<std::map<uint8_t, std::u16string>> string_map);
   void OnReadWebUsbCapabilityDescriptor(
       base::OnceCallback<void(bool)> callback,
       scoped_refptr<UsbDeviceHandle> device_handle,
-      const base::Optional<WebUsbPlatformCapabilityDescriptor>& descriptor);
+      const std::optional<WebUsbPlatformCapabilityDescriptor>& descriptor);
   void OnOpenedToReadWebUsbLandingPage(
       base::OnceCallback<void(bool)> callback,
       uint8_t vendor_code,
@@ -85,9 +96,7 @@ class UsbDeviceWin : public UsbDevice {
   const std::wstring device_path_;
   const std::wstring hub_path_;
   base::flat_map<int, FunctionInfo> functions_;
-  const std::wstring driver_name_;
-
-  DISALLOW_COPY_AND_ASSIGN(UsbDeviceWin);
+  const DriverType driver_type_;
 };
 
 }  // namespace device

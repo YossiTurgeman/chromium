@@ -1,14 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_AUDIO_AUDIO_SYSTEM_H_
 #define MEDIA_AUDIO_AUDIO_SYSTEM_H_
 
+#include <optional>
 #include <string>
 
-#include "base/callback.h"
-#include "base/optional.h"
+#include "base/functional/callback.h"
 #include "media/audio/audio_device_description.h"
 #include "media/base/audio_parameters.h"
 #include "media/base/media_export.h"
@@ -33,12 +33,12 @@ class MEDIA_EXPORT AudioSystem {
   // std::string. If optional matched output device id is empty, it means there
   // is no associated output device.
   using OnAudioParamsCallback =
-      base::OnceCallback<void(const base::Optional<AudioParameters>&)>;
+      base::OnceCallback<void(const std::optional<AudioParameters>&)>;
   using OnDeviceIdCallback =
-      base::OnceCallback<void(const base::Optional<std::string>&)>;
+      base::OnceCallback<void(const std::optional<std::string>&)>;
   using OnInputDeviceInfoCallback =
-      base::OnceCallback<void(const base::Optional<AudioParameters>&,
-                              const base::Optional<std::string>&)>;
+      base::OnceCallback<void(const std::optional<AudioParameters>&,
+                              const std::optional<std::string>&)>;
 
   using OnBoolCallback = base::OnceCallback<void(bool)>;
   using OnDeviceDescriptionsCallback =

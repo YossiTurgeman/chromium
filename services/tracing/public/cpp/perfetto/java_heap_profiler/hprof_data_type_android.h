@@ -1,9 +1,14 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SERVICES_TRACING_PUBLIC_CPP_PERFETTO_JAVA_HEAP_PROFILER_HPROF_DATA_TYPE_ANDROID_H_
 #define SERVICES_TRACING_PUBLIC_CPP_PERFETTO_JAVA_HEAP_PROFILER_HPROF_DATA_TYPE_ANDROID_H_
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "base/compiler_specific.h"
 
 namespace tracing {
 
@@ -34,7 +39,7 @@ constexpr const char* kPrimitiveArrayStrings[] = {
     "float[]", "double[]", "byte[]", "short[]", "int[]",  "long[]"};
 
 inline const char* GetTypeString(uint32_t index) {
-  return kPrimitiveArrayStrings[index];
+  return UNSAFE_TODO(kPrimitiveArrayStrings[index]);
 }
 
 }  // namespace tracing

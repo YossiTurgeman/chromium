@@ -1,11 +1,12 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_INVALIDATION_IMPL_PROFILE_IDENTITY_PROVIDER_H_
 #define COMPONENTS_INVALIDATION_IMPL_PROFILE_IDENTITY_PROVIDER_H_
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "build/build_config.h"
 #include "components/invalidation/public/identity_provider.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
@@ -16,7 +17,10 @@ namespace invalidation {
 class ProfileIdentityProvider : public IdentityProvider,
                                 public signin::IdentityManager::Observer {
  public:
-  ProfileIdentityProvider(signin::IdentityManager* identity_manager);
+  explicit ProfileIdentityProvider(signin::IdentityManager* identity_manager);
+  ProfileIdentityProvider(const ProfileIdentityProvider& other) = delete;
+  ProfileIdentityProvider& operator=(const ProfileIdentityProvider& other) =
+      delete;
   ~ProfileIdentityProvider() override;
 
   // IdentityProvider:
@@ -28,20 +32,21 @@ class ProfileIdentityProvider : public IdentityProvider,
       ActiveAccountAccessTokenCallback callback) override;
   void InvalidateAccessToken(const signin::ScopeSet& scopes,
                              const std::string& access_token) override;
-  void SetActiveAccountId(const CoreAccountId& account_id) override;
 
   // signin::IdentityManager::Observer:
+  void OnPrimaryAccountChanged(
+      const signin::PrimaryAccountChangeEvent& event_details) override;
   void OnRefreshTokenUpdatedForAccount(
       const CoreAccountInfo& account_info) override;
-  void OnRefreshTokenRemovedForAccount(
-      const CoreAccountId& account_id) override;
+  void OnIdentityManagerShutdown(
+      signin::IdentityManager* identity_manager) override;
 
  private:
-  signin::IdentityManager* const identity_manager_;
+  base::ScopedObservation<signin::IdentityManager,
+                          signin::IdentityManager::Observer>
+      identity_manager_observation_{this};
 
-  CoreAccountId active_account_id_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProfileIdentityProvider);
+  raw_ptr<signin::IdentityManager> identity_manager_;
 };
 
 }  // namespace invalidation

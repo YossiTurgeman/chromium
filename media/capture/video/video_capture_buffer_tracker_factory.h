@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "media/capture/capture_export.h"
+#include "media/capture/video/video_capture_device.h"
 #include "media/capture/video_capture_types.h"
 
 namespace media {
@@ -19,6 +20,8 @@ class CAPTURE_EXPORT VideoCaptureBufferTrackerFactory {
   virtual ~VideoCaptureBufferTrackerFactory() {}
   virtual std::unique_ptr<VideoCaptureBufferTracker> CreateTracker(
       VideoCaptureBufferType buffer_type) = 0;
+  virtual std::unique_ptr<VideoCaptureBufferTracker>
+  CreateTrackerForExternalBuffer(CapturedExternalVideoBuffer buffer) = 0;
 };
 
 }  // namespace media

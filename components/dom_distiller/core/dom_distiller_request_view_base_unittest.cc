@@ -1,7 +1,8 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
 #include <vector>
 
 #include "components/dom_distiller/core/article_distillation_update.h"
@@ -21,9 +22,11 @@ namespace dom_distiller {
 class DomDistillerRequestViewTest : public testing::Test {
  protected:
   void SetUp() override {
-    pref_service_.reset(new sync_preferences::TestingPrefServiceSyncable());
+    pref_service_ =
+        std::make_unique<sync_preferences::TestingPrefServiceSyncable>();
     DistilledPagePrefs::RegisterProfilePrefs(pref_service_->registry());
-    distilled_page_prefs_.reset(new DistilledPagePrefs(pref_service_.get()));
+    distilled_page_prefs_ =
+        std::make_unique<DistilledPagePrefs>(pref_service_.get());
   }
 
   std::unique_ptr<sync_preferences::TestingPrefServiceSyncable> pref_service_;
@@ -222,6 +225,37 @@ TEST_F(DomDistillerRequestViewTest, TestLoadingIndicator) {
   handle.OnArticleUpdated(*article_update);
 
   EXPECT_THAT(handle.GetJavaScriptBuffer(), HasSubstr(show_loader));
+}
+
+TEST_F(DomDistillerRequestViewTest, TestSetLinksEnabled) {
+  TestRequestViewHandle handle(distilled_page_prefs_.get());
+
+  // Test links disabled for distiller page.
+  {
+    distilled_page_prefs_->SetLinksEnabled(false);
+
+    std::unique_ptr<DistilledArticleProto> article_proto =
+        std::make_unique<DistilledArticleProto>();
+
+    handle.OnArticleReady(article_proto.get());
+
+    EXPECT_THAT(handle.GetJavaScriptBuffer(),
+                HasSubstr("setLinksEnabled(false)"));
+    handle.ClearJavaScriptBuffer();
+  }
+  // Test links enabled for distiller page.
+  {
+    distilled_page_prefs_->SetLinksEnabled(true);
+
+    std::unique_ptr<DistilledArticleProto> article_proto =
+        std::make_unique<DistilledArticleProto>();
+
+    handle.OnArticleReady(article_proto.get());
+
+    EXPECT_THAT(handle.GetJavaScriptBuffer(),
+                HasSubstr("setLinksEnabled(true)"));
+    handle.ClearJavaScriptBuffer();
+  }
 }
 
 }  // namespace dom_distiller

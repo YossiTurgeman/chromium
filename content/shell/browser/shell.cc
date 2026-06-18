@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,24 +7,31 @@
 #include <stddef.h>
 
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
-#include "base/macros.h"
 #include "base/no_destructor.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
-#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "build/build_config.h"
+#include "components/custom_handlers/protocol_handler.h"
+#include "components/custom_handlers/protocol_handler_registry.h"
+#include "components/custom_handlers/simple_protocol_handler_registry_factory.h"
+#include "content/public/browser/browser_context.h"
+#include "content/public/browser/color_chooser.h"
 #include "content/public/browser/devtools_agent_host.h"
+#include "content/public/browser/document_picture_in_picture_window_controller.h"
+#include "content/public/browser/file_select_listener.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
+#include "content/public/browser/page.h"
 #include "content/public/browser/picture_in_picture_window_controller.h"
 #include "content/public/browser/presentation_receiver_flags.h"
 #include "content/public/browser/render_process_host.h"
@@ -40,38 +47,31 @@
 #include "content/shell/common/shell_switches.h"
 #include "media/media_buildflags.h"
 #include "third_party/blink/public/common/peerconnection/webrtc_ip_handling_policy.h"
-#include "third_party/blink/public/mojom/renderer_preferences.mojom.h"
+#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+#include "third_party/blink/public/mojom/choosers/file_chooser.mojom-forward.h"
+#include "third_party/blink/public/mojom/input/pointer_lock_result.mojom.h"
+#include "third_party/blink/public/mojom/window_features/window_features.mojom.h"
 
 namespace content {
 
+namespace {
 // Null until/unless the default main message loop is running.
-base::NoDestructor<base::OnceClosure> g_quit_main_message_loop;
+base::OnceClosure& GetMainMessageLoopQuitClosure() {
+  static base::NoDestructor<base::OnceClosure> closure;
+  return *closure;
+}
 
-const int kDefaultTestWindowWidthDip = 800;
-const int kDefaultTestWindowHeightDip = 600;
+constexpr int kDefaultTestWindowWidthDip = 800;
+constexpr int kDefaultTestWindowHeightDip = 600;
+
+// Owning pointer. We can not use unique_ptr as a global. That introduces a
+// static constructor/destructor.
+// Acquired in Shell::Init(), released in Shell::Shutdown().
+ShellPlatformDelegate* g_platform;
+}  // namespace
 
 std::vector<Shell*> Shell::windows_;
 base::OnceCallback<void(Shell*)> Shell::shell_created_callback_;
-
-ShellPlatformDelegate* g_platform;
-
-class Shell::DevToolsWebContentsObserver : public WebContentsObserver {
- public:
-  DevToolsWebContentsObserver(Shell* shell, WebContents* web_contents)
-      : WebContentsObserver(web_contents),
-        shell_(shell) {
-  }
-
-  // WebContentsObserver
-  void WebContentsDestroyed() override {
-    shell_->OnDevToolsWebContentsDestroyed();
-  }
-
- private:
-  Shell* shell_;
-
-  DISALLOW_COPY_AND_ASSIGN(DevToolsWebContentsObserver);
-};
 
 Shell::Shell(std::unique_ptr<WebContents> web_contents,
              bool should_set_delegate)
@@ -101,23 +101,11 @@ Shell::~Shell() {
     }
   }
 
-  // Always destroy WebContents before destroying ShellPlatformDelegate.
-  // WebContents destruction sequence may depend on the resources destroyed with
-  // ShellPlatformDelegate (e.g. the display::Screen singleton).
   web_contents_->SetDelegate(nullptr);
   web_contents_.reset();
 
-  if (windows_.empty()) {
-    delete g_platform;
-    g_platform = nullptr;
-
-    for (auto it = RenderProcessHost::AllHostsIterator(); !it.IsAtEnd();
-         it.Advance()) {
-      it.GetCurrentValue()->DisableKeepAliveRefCount();
-    }
-    if (*g_quit_main_message_loop)
-      std::move(*g_quit_main_message_loop).Run();
-  }
+  if (windows().empty())
+    g_platform->DidCloseLastWindow();
 }
 
 Shell* Shell::CreateShell(std::unique_ptr<WebContents> web_contents,
@@ -138,37 +126,36 @@ Shell* Shell::CreateShell(std::unique_ptr<WebContents> web_contents,
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   if (command_line->HasSwitch(switches::kForceWebRtcIPHandlingPolicy)) {
     raw_web_contents->GetMutableRendererPrefs()->webrtc_ip_handling_policy =
-        command_line->GetSwitchValueASCII(
-            switches::kForceWebRtcIPHandlingPolicy);
+        blink::ToWebRTCIPHandlingPolicy(command_line->GetSwitchValueASCII(
+            switches::kForceWebRtcIPHandlingPolicy));
   }
 
   g_platform->SetContents(shell);
   g_platform->DidCreateOrAttachWebContents(shell, raw_web_contents);
+  // If the RenderFrame was created during WebContents construction (as happens
+  // for windows opened from the renderer) then the Shell won't hear about the
+  // main frame being created as a WebContentsObservers. This gives the delegate
+  // a chance to act on the main frame accordingly.
+  if (raw_web_contents->GetPrimaryMainFrame()->IsRenderFrameLive())
+    g_platform->MainFrameCreated(shell,
+                                 raw_web_contents->GetPrimaryMainFrame());
 
   return shell;
 }
 
-void Shell::CloseAllWindows() {
-  DevToolsAgentHost::DetachAllClients();
-
-  std::vector<Shell*> open_windows(windows_);
-  for (Shell* open_window : open_windows)
-    open_window->Close();
-  DCHECK(windows_.empty());
-
-  // Pump the message loop to allow window teardown tasks to run.
-  base::RunLoop().RunUntilIdle();
-}
-
+// static
 void Shell::SetMainMessageLoopQuitClosure(base::OnceClosure quit_closure) {
-  *g_quit_main_message_loop = std::move(quit_closure);
+  GetMainMessageLoopQuitClosure() = std::move(quit_closure);
 }
 
+// static
 void Shell::QuitMainMessageLoopForTesting() {
-  if (*g_quit_main_message_loop)
-    std::move(*g_quit_main_message_loop).Run();
+  auto& quit_loop = GetMainMessageLoopQuitClosure();
+  if (quit_loop)
+    std::move(quit_loop).Run();
 }
 
+// static
 void Shell::SetShellCreatedCallback(
     base::OnceCallback<void(Shell*)> shell_created_callback) {
   DCHECK(!shell_created_callback_);
@@ -181,6 +168,7 @@ bool Shell::ShouldHideToolbar() {
       switches::kContentShellHideToolbar);
 }
 
+// static
 Shell* Shell::FromWebContents(WebContents* web_contents) {
   for (Shell* window : windows_) {
     if (window->web_contents() && window->web_contents() == web_contents) {
@@ -190,9 +178,39 @@ Shell* Shell::FromWebContents(WebContents* web_contents) {
   return nullptr;
 }
 
+// static
 void Shell::Initialize(std::unique_ptr<ShellPlatformDelegate> platform) {
+  DCHECK(!g_platform);
   g_platform = platform.release();
   g_platform->Initialize(GetShellDefaultSize());
+}
+
+// static
+void Shell::Shutdown() {
+  if (!g_platform)  // Shutdown has already been called.
+    return;
+
+  DevToolsAgentHost::DetachAllClients();
+
+  while (!Shell::windows().empty())
+    Shell::windows().back()->Close();
+
+  delete g_platform;
+  g_platform = nullptr;
+
+  for (auto it = RenderProcessHost::AllHostsIterator(); !it.IsAtEnd();
+       it.Advance()) {
+    it.GetCurrentValue()->DisableRefCounts();
+  }
+  auto& quit_loop = GetMainMessageLoopQuitClosure();
+  if (quit_loop)
+    std::move(quit_loop).Run();
+
+  // Pump the message loop to allow window teardown tasks to run. On iOS the
+  // run loop is controlled differently and cannot be pumped.
+#if !BUILDFLAG(IS_IOS)
+  base::RunLoop().RunUntilIdle();
+#endif  // !BUILDFLAG(IS_IOS)
 }
 
 gfx::Size Shell::AdjustWindowSize(const gfx::Size& initial_size) {
@@ -201,6 +219,7 @@ gfx::Size Shell::AdjustWindowSize(const gfx::Size& initial_size) {
   return GetShellDefaultSize();
 }
 
+// static
 Shell* Shell::CreateNewWindow(BrowserContext* browser_context,
                               const GURL& url,
                               const scoped_refptr<SiteInstance>& site_instance,
@@ -208,8 +227,7 @@ Shell* Shell::CreateNewWindow(BrowserContext* browser_context,
   WebContents::CreateParams create_params(browser_context, site_instance);
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kForcePresentationReceiverForTesting)) {
-    create_params.starting_sandbox_flags =
-        content::kPresentationReceiverSandboxFlags;
+    create_params.starting_sandbox_flags = kPresentationReceiverSandboxFlags;
   }
   std::unique_ptr<WebContents> web_contents =
       WebContents::Create(create_params);
@@ -222,8 +240,10 @@ Shell* Shell::CreateNewWindow(BrowserContext* browser_context,
   return shell;
 }
 
-void Shell::RenderViewReady() {
-  g_platform->RenderViewReady(this);
+void Shell::RenderFrameCreated(RenderFrameHost* frame_host) {
+  if (frame_host == frame_host->GetOutermostMainFrame()) {
+    g_platform->MainFrameCreated(this, frame_host);
+  }
 }
 
 void Shell::LoadURL(const GURL& url) {
@@ -242,13 +262,14 @@ void Shell::LoadURLForFrame(const GURL& url,
   web_contents_->GetController().LoadURLWithParams(params);
 }
 
-void Shell::LoadDataWithBaseURL(const GURL& url, const std::string& data,
-    const GURL& base_url) {
+void Shell::LoadDataWithBaseURL(const GURL& url,
+                                const std::string& data,
+                                const GURL& base_url) {
   bool load_as_string = false;
   LoadDataWithBaseURLInternal(url, data, base_url, load_as_string);
 }
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 void Shell::LoadDataAsStringWithBaseURL(const GURL& url,
                                         const std::string& data,
                                         const GURL& base_url) {
@@ -261,18 +282,18 @@ void Shell::LoadDataWithBaseURLInternal(const GURL& url,
                                         const std::string& data,
                                         const GURL& base_url,
                                         bool load_as_string) {
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   DCHECK(!load_as_string);  // Only supported on Android.
 #endif
 
-  NavigationController::LoadURLParams params(GURL::EmptyGURL());
+  NavigationController::LoadURLParams params{GURL()};
   const std::string data_url_header = "data:text/html;charset=utf-8,";
   if (load_as_string) {
     params.url = GURL(data_url_header);
     std::string data_url_as_string = data_url_header + data;
-#if defined(OS_ANDROID)
-    params.data_url_as_string =
-        base::RefCountedString::TakeString(&data_url_as_string);
+#if BUILDFLAG(IS_ANDROID)
+    params.data_url_as_string = base::MakeRefCounted<base::RefCountedString>(
+        std::move(data_url_as_string));
 #endif
   } else {
     params.url = GURL(data_url_header + data);
@@ -280,21 +301,36 @@ void Shell::LoadDataWithBaseURLInternal(const GURL& url,
 
   params.load_type = NavigationController::LOAD_TYPE_DATA;
   params.base_url_for_data_url = base_url;
-  params.virtual_url_for_data_url = url;
+  params.virtual_url_for_special_cases = url;
   params.override_user_agent = NavigationController::UA_OVERRIDE_FALSE;
   web_contents_->GetController().LoadURLWithParams(params);
 }
 
-void Shell::AddNewContents(WebContents* source,
-                           std::unique_ptr<WebContents> new_contents,
-                           const GURL& target_url,
-                           WindowOpenDisposition disposition,
-                           const gfx::Rect& initial_rect,
-                           bool user_gesture,
-                           bool* was_blocked) {
+WebContents* Shell::AddNewContents(
+    WebContents* source,
+    std::unique_ptr<WebContents> new_contents,
+    const GURL& target_url,
+    WindowOpenDisposition disposition,
+    const blink::mojom::WindowFeatures& window_features,
+    bool user_gesture,
+    bool* was_blocked) {
+#if !BUILDFLAG(IS_ANDROID)
+  // If the shell is opening a document picture-in-picture window, it needs to
+  // inform the DocumentPictureInPictureWindowController.
+  if (disposition == WindowOpenDisposition::NEW_PICTURE_IN_PICTURE) {
+    DocumentPictureInPictureWindowController* controller =
+        PictureInPictureWindowController::
+            GetOrCreateDocumentPictureInPictureController(source);
+    controller->SetChildWebContents(new_contents.get());
+    controller->Show();
+  }
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+  WebContents* result = new_contents.get();
   CreateShell(
-      std::move(new_contents), AdjustWindowSize(initial_rect.size()),
+      std::move(new_contents), AdjustWindowSize(window_features.bounds.size()),
       !delay_popup_contents_delegate_for_testing_ /* should_set_delegate */);
+  return result;
 }
 
 void Shell::GoBackOrForward(int offset) {
@@ -313,7 +349,7 @@ void Shell::Stop() {
   web_contents_->Stop();
 }
 
-void Shell::UpdateNavigationControls(bool to_different_document) {
+void Shell::UpdateNavigationControls(bool should_show_loading_ui) {
   int current_index = web_contents_->GetController().GetCurrentEntryIndex();
   int max_index = web_contents_->GetController().GetEntryCount() - 1;
 
@@ -323,14 +359,13 @@ void Shell::UpdateNavigationControls(bool to_different_document) {
                               current_index < max_index);
   g_platform->EnableUIControl(
       this, ShellPlatformDelegate::STOP_BUTTON,
-      to_different_document && web_contents_->IsLoading());
+      should_show_loading_ui && web_contents_->IsLoading());
 }
 
 void Shell::ShowDevTools() {
   if (!devtools_frontend_) {
-    devtools_frontend_ = ShellDevToolsFrontend::Show(web_contents());
-    devtools_observer_.reset(new DevToolsWebContentsObserver(
-        this, devtools_frontend_->frontend_shell()->web_contents()));
+    auto* devtools_frontend = ShellDevToolsFrontend::Show(web_contents());
+    devtools_frontend_ = devtools_frontend->GetWeakPtr();
   }
 
   devtools_frontend_->Activate();
@@ -339,7 +374,6 @@ void Shell::ShowDevTools() {
 void Shell::CloseDevTools() {
   if (!devtools_frontend_)
     return;
-  devtools_observer_.reset();
   devtools_frontend_->Close();
   devtools_frontend_ = nullptr;
 }
@@ -350,17 +384,17 @@ void Shell::ResizeWebContentForTests(const gfx::Size& content_size) {
 
 gfx::NativeView Shell::GetContentView() {
   if (!web_contents_)
-    return nullptr;
+    return gfx::NativeView();
   return web_contents_->GetNativeView();
 }
 
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 gfx::NativeWindow Shell::window() {
   return g_platform->GetNativeWindow(this);
 }
 #endif
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 void Shell::ActionPerformed(int control) {
   switch (control) {
     case IDC_NAV_BACK:
@@ -388,8 +422,11 @@ void Shell::URLEntered(const std::string& url_string) {
 }
 #endif
 
-WebContents* Shell::OpenURLFromTab(WebContents* source,
-                                   const OpenURLParams& params) {
+WebContents* Shell::OpenURLFromTab(
+    WebContents* source,
+    const OpenURLParams& params,
+    base::OnceCallback<void(content::NavigationHandle&)>
+        navigation_handle_callback) {
   WebContents* target = nullptr;
   switch (params.disposition) {
     case WindowOpenDisposition::CURRENT_TAB:
@@ -432,18 +469,24 @@ WebContents* Shell::OpenURLFromTab(WebContents* source,
       return nullptr;
   }
 
-  target->GetController().LoadURLWithParams(
-      NavigationController::LoadURLParams(params));
+  base::WeakPtr<NavigationHandle> navigation_handle =
+      target->GetController().LoadURLWithParams(
+          NavigationController::LoadURLParams(params));
+
+  if (navigation_handle_callback && navigation_handle) {
+    std::move(navigation_handle_callback).Run(*navigation_handle);
+  }
+
   return target;
 }
 
 void Shell::LoadingStateChanged(WebContents* source,
-    bool to_different_document) {
-  UpdateNavigationControls(to_different_document);
+                                bool should_show_loading_ui) {
+  UpdateNavigationControls(should_show_loading_ui);
   g_platform->SetIsLoading(this, source->IsLoading());
 }
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 void Shell::SetOverlayMode(bool use_overlay_mode) {
   g_platform->SetOverlayMode(this, use_overlay_mode);
 }
@@ -462,19 +505,20 @@ void Shell::ExitFullscreenModeForTab(WebContents* web_contents) {
 
 void Shell::ToggleFullscreenModeForTab(WebContents* web_contents,
                                        bool enter_fullscreen) {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
   g_platform->ToggleFullscreenModeForTab(this, web_contents, enter_fullscreen);
 #endif
   if (is_fullscreen_ != enter_fullscreen) {
     is_fullscreen_ = enter_fullscreen;
-    web_contents->GetRenderViewHost()
+    web_contents->GetPrimaryMainFrame()
+        ->GetRenderViewHost()
         ->GetWidget()
         ->SynchronizeVisualProperties();
   }
 }
 
 bool Shell::IsFullscreenForTabOrPending(const WebContents* web_contents) {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
   return g_platform->IsFullscreenForTabOrPending(this, web_contents);
 #else
   return is_fullscreen_;
@@ -491,11 +535,85 @@ blink::mojom::DisplayMode Shell::GetDisplayMode(
              : blink::mojom::DisplayMode::kBrowser;
 }
 
-void Shell::RequestToLockMouse(WebContents* web_contents,
+#if !BUILDFLAG(IS_ANDROID)
+void Shell::RegisterProtocolHandler(RenderFrameHost* requesting_frame,
+                                    const std::string& protocol,
+                                    const GURL& url,
+                                    bool user_gesture) {
+  BrowserContext* context = requesting_frame->GetBrowserContext();
+  if (context->IsOffTheRecord())
+    return;
+
+  custom_handlers::ProtocolHandler handler =
+      custom_handlers::ProtocolHandler::CreateProtocolHandler(
+          protocol, url, GetProtocolHandlerSecurityLevel(requesting_frame));
+
+  // The parameters's normalization process defined in the spec has been already
+  // applied in the WebContentImpl class, so at this point it shouldn't be
+  // possible to create an invalid handler.
+  // https://html.spec.whatwg.org/multipage/system-state.html#normalize-protocol-handler-parameters
+  DCHECK(handler.IsValid());
+
+  custom_handlers::ProtocolHandlerRegistry* registry = custom_handlers::
+      SimpleProtocolHandlerRegistryFactory::GetForBrowserContext(context, true);
+  DCHECK(registry);
+  if (registry->SilentlyHandleRegisterHandlerRequest(handler))
+    return;
+
+  if (!user_gesture && !windows_.empty()) {
+    // TODO(jfernandez): This is not strictly needed, but we need a way to
+    // inform the observers in browser tests that the request has been
+    // cancelled, to avoid timeouts. Chrome just holds the handler as pending in
+    // the PageContentSettingsDelegate, but we don't have such thing in the
+    // Content Shell.
+    registry->OnDenyRegisterProtocolHandler(handler);
+    return;
+  }
+
+  // FencedFrames can not register to handle any protocols.
+  if (requesting_frame->IsNestedWithinFencedFrame()) {
+    registry->OnIgnoreRegisterProtocolHandler(handler);
+    return;
+  }
+
+  // TODO(jfernandez): Are we interested at all on using the
+  // PermissionRequestManager in the ContentShell ?
+  if (registry->registration_mode() ==
+      custom_handlers::RphRegistrationMode::kAutoAccept) {
+    registry->OnAcceptRegisterProtocolHandler(handler);
+  }
+}
+
+void Shell::UnregisterProtocolHandler(RenderFrameHost* requesting_frame,
+                                      const std::string& protocol,
+                                      const GURL& url,
+                                      bool user_gesture) {
+  BrowserContext* context = requesting_frame->GetBrowserContext();
+  if (context->IsOffTheRecord()) {
+    return;
+  }
+
+  custom_handlers::ProtocolHandler handler =
+      custom_handlers::ProtocolHandler::CreateProtocolHandler(
+          protocol, url, GetProtocolHandlerSecurityLevel(requesting_frame));
+  custom_handlers::ProtocolHandlerRegistry* registry = custom_handlers::
+      SimpleProtocolHandlerRegistryFactory::GetForBrowserContext(context, true);
+  CHECK(registry);
+
+  registry->RemoveHandler(handler);
+}
+#endif
+
+void Shell::RequestPointerLock(WebContents* web_contents,
                                bool user_gesture,
                                bool last_unlocked_by_target) {
-  web_contents->GotResponseToLockMouseRequest(
-      blink::mojom::PointerLockResult::kSuccess);
+  // Give the platform a chance to handle the lock request, if it doesn't
+  // indicate it handled it, allow the request.
+  if (!g_platform->HandlePointerLockRequest(this, web_contents, user_gesture,
+                                            last_unlocked_by_target)) {
+    web_contents->GotResponseToPointerLockRequest(
+        blink::mojom::PointerLockResult::kSuccess);
+  }
 }
 
 void Shell::Close() {
@@ -532,46 +650,24 @@ JavaScriptDialogManager* Shell::GetJavaScriptDialogManager(
   return dialog_manager_.get();
 }
 
-std::unique_ptr<BluetoothChooser> Shell::RunBluetoothChooser(
-    RenderFrameHost* frame,
-    const BluetoothChooser::EventHandler& event_handler) {
-  return g_platform->RunBluetoothChooser(this, frame, event_handler);
-}
-
-class AlwaysAllowBluetoothScanning : public BluetoothScanningPrompt {
- public:
-  explicit AlwaysAllowBluetoothScanning(const EventHandler& event_handler) {
-    event_handler.Run(content::BluetoothScanningPrompt::Event::kAllow);
-  }
-};
-
-std::unique_ptr<BluetoothScanningPrompt> Shell::ShowBluetoothScanningPrompt(
-    RenderFrameHost* frame,
-    const BluetoothScanningPrompt::EventHandler& event_handler) {
-  return std::make_unique<AlwaysAllowBluetoothScanning>(event_handler);
-}
-
-#if defined(OS_MAC)
-void Shell::DidNavigateMainFramePostCommit(WebContents* contents) {
-  g_platform->DidNavigateMainFramePostCommit(this, contents);
+#if BUILDFLAG(IS_MAC)
+void Shell::PrimaryPageChanged(Page& page) {
+  g_platform->DidNavigatePrimaryMainFramePostCommit(
+      this, WebContents::FromRenderFrameHost(&page.GetMainDocument()));
 }
 
 bool Shell::HandleKeyboardEvent(WebContents* source,
-                                const NativeWebKeyboardEvent& event) {
+                                const input::NativeWebKeyboardEvent& event) {
   return g_platform->HandleKeyboardEvent(this, source, event);
 }
 #endif
 
 bool Shell::DidAddMessageToConsole(WebContents* source,
                                    blink::mojom::ConsoleMessageLevel log_level,
-                                   const base::string16& message,
+                                   const std::u16string& message,
                                    int32_t line_no,
-                                   const base::string16& source_id) {
+                                   const std::u16string& source_id) {
   return switches::IsRunWebTestsSwitchPresent();
-}
-
-void Shell::PortalWebContentsCreated(WebContents* portal_web_contents) {
-  g_platform->DidCreateOrAttachWebContents(this, portal_web_contents);
 }
 
 void Shell::RendererUnresponsive(
@@ -582,7 +678,7 @@ void Shell::RendererUnresponsive(
 }
 
 void Shell::ActivateContents(WebContents* contents) {
-#if !defined(OS_MAC)
+#if !BUILDFLAG(IS_MAC)
   // TODO(danakj): Move this to ShellPlatformDelegate.
   contents->Focus();
 #else
@@ -594,17 +690,45 @@ void Shell::ActivateContents(WebContents* contents) {
 #endif
 }
 
-std::unique_ptr<WebContents> Shell::ActivatePortalWebContents(
-    WebContents* predecessor_contents,
-    std::unique_ptr<WebContents> portal_contents) {
-  DCHECK_EQ(predecessor_contents, web_contents_.get());
-  portal_contents->SetDelegate(this);
-  web_contents_->SetDelegate(nullptr);
-  std::swap(web_contents_, portal_contents);
-  g_platform->SetContents(this);
-  g_platform->SetAddressBarURL(this, web_contents_->GetVisibleURL());
-  LoadingStateChanged(web_contents_.get(), true);
-  return portal_contents;
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+std::unique_ptr<ColorChooser> Shell::OpenColorChooser(
+    WebContents* web_contents,
+    SkColor color,
+    const std::vector<blink::mojom::ColorSuggestionPtr>& suggestions) {
+  return g_platform->OpenColorChooser(web_contents, color, suggestions);
+}
+#endif
+
+void Shell::RunFileChooser(RenderFrameHost* render_frame_host,
+                           scoped_refptr<FileSelectListener> listener,
+                           const blink::mojom::FileChooserParams& params) {
+  run_file_chooser_count_++;
+  if (hold_file_chooser_) {
+    held_file_chooser_listener_ = std::move(listener);
+  } else {
+    g_platform->RunFileChooser(render_frame_host, std::move(listener), params);
+  }
+}
+
+void Shell::EnumerateDirectory(WebContents* web_contents,
+                               scoped_refptr<FileSelectListener> listener,
+                               const base::FilePath& path) {
+  run_file_chooser_count_++;
+  if (hold_file_chooser_) {
+    held_file_chooser_listener_ = std::move(listener);
+  } else {
+    listener->FileSelectionCanceled();
+  }
+}
+
+bool Shell::IsBackForwardCacheSupported(WebContents& web_contents) {
+  return true;
+}
+
+PreloadingEligibility Shell::IsPrerender2Supported(
+    WebContents& web_contents,
+    PreloadingTriggerType trigger_type) {
+  return PreloadingEligibility::kEligible;
 }
 
 namespace {
@@ -620,21 +744,6 @@ class PendingCallback : public base::RefCounted<PendingCallback> {
 };
 }  // namespace
 
-void Shell::UpdateInspectedWebContentsIfNecessary(
-    content::WebContents* old_contents,
-    content::WebContents* new_contents,
-    base::OnceCallback<void()> callback) {
-  scoped_refptr<PendingCallback> pending_callback =
-      base::MakeRefCounted<PendingCallback>(std::move(callback));
-  for (auto* shell_devtools_bindings :
-       ShellDevToolsBindings::GetInstancesForWebContents(old_contents)) {
-    shell_devtools_bindings->UpdateInspectedWebContents(
-        new_contents,
-        base::BindOnce(base::DoNothing::Once<scoped_refptr<PendingCallback>>(),
-                       pending_callback));
-  }
-}
-
 bool Shell::ShouldAllowRunningInsecureContent(WebContents* web_contents,
                                               bool allowed_per_prefs,
                                               const url::Origin& origin,
@@ -645,10 +754,7 @@ bool Shell::ShouldAllowRunningInsecureContent(WebContents* web_contents,
   return g_platform->ShouldAllowRunningInsecureContent(this);
 }
 
-PictureInPictureResult Shell::EnterPictureInPicture(
-    WebContents* web_contents,
-    const viz::SurfaceId& surface_id,
-    const gfx::Size& natural_size) {
+PictureInPictureResult Shell::EnterPictureInPicture(WebContents* web_contents) {
   // During tests, returning success to pretend the window was created and allow
   // tests to run accordingly.
   if (!switches::IsRunWebTestsSwitchPresent())
@@ -681,9 +787,9 @@ gfx::Size Shell::GetShellDefaultSize() {
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   if (command_line->HasSwitch(switches::kContentShellHostWindowSize)) {
     const std::string size_str = command_line->GetSwitchValueASCII(
-                  switches::kContentShellHostWindowSize);
+        switches::kContentShellHostWindowSize);
     int width, height;
-    if (sscanf(size_str.c_str(), "%dx%d", &width, &height) == 2) {
+    if (UNSAFE_TODO(sscanf(size_str.c_str(), "%dx%d", &width, &height)) == 2) {
       default_shell_size = gfx::Size(width, height);
     } else {
       LOG(ERROR) << "Invalid size \"" << size_str << "\" given to --"
@@ -692,14 +798,14 @@ gfx::Size Shell::GetShellDefaultSize() {
   }
 
   if (default_shell_size.IsEmpty()) {
-    default_shell_size = gfx::Size(
-      kDefaultTestWindowWidthDip, kDefaultTestWindowHeightDip);
+    default_shell_size =
+        gfx::Size(kDefaultTestWindowWidthDip, kDefaultTestWindowHeightDip);
   }
 
   return default_shell_size;
 }
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 void Shell::LoadProgressChanged(double progress) {
   g_platform->LoadProgressChanged(this, progress);
 }
@@ -708,11 +814,6 @@ void Shell::LoadProgressChanged(double progress) {
 void Shell::TitleWasSet(NavigationEntry* entry) {
   if (entry)
     g_platform->SetTitle(this, entry->GetTitle());
-}
-
-void Shell::OnDevToolsWebContentsDestroyed() {
-  devtools_observer_.reset();
-  devtools_frontend_ = nullptr;
 }
 
 }  // namespace content

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,14 @@
 #define CHROME_BROWSER_MEDIA_WEBRTC_WEBRTC_EVENT_LOG_MANAGER_REMOTE_H_
 
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/sequenced_task_runner.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "chrome/browser/media/webrtc/webrtc_event_log_history.h"
 #include "chrome/browser/media/webrtc/webrtc_event_log_manager_common.h"
@@ -33,6 +34,11 @@ class WebRtcRemoteEventLogManager final
   WebRtcRemoteEventLogManager(
       WebRtcRemoteEventLogsObserver* observer,
       scoped_refptr<base::SequencedTaskRunner> task_runner);
+
+  WebRtcRemoteEventLogManager(const WebRtcRemoteEventLogManager&) = delete;
+  WebRtcRemoteEventLogManager& operator=(const WebRtcRemoteEventLogManager&) =
+      delete;
+
   ~WebRtcRemoteEventLogManager() override;
 
   // Sets a network::NetworkConnectionTracker which will be used to track
@@ -75,14 +81,14 @@ class WebRtcRemoteEventLogManager final
   // The return value of both methods indicates only the consistency of the
   // information with previously received information (e.g. can't remove a
   // peer connection that was never added, etc.).
-  bool PeerConnectionAdded(const PeerConnectionKey& key);
-  bool PeerConnectionRemoved(const PeerConnectionKey& key);
+  bool OnPeerConnectionAdded(const PeerConnectionKey& key);
+  bool OnPeerConnectionRemoved(const PeerConnectionKey& key);
 
   // Called to inform |this| that a peer connection has been associated
   // with |session_id|. After this, it is possible to refer to  that peer
   // connection using StartRemoteLogging() by providing |session_id|.
-  bool PeerConnectionSessionIdSet(const PeerConnectionKey& key,
-                                  const std::string& session_id);
+  bool OnSessionIdSetForPeerConnection(const PeerConnectionKey& key,
+                                       const std::string& session_id);
 
   // Attempt to start logging the WebRTC events of an active peer connection.
   // Logging is subject to several restrictions:
@@ -120,6 +126,7 @@ class WebRtcRemoteEventLogManager final
                           size_t max_file_size_bytes,
                           int output_period_ms,
                           size_t web_app_id,
+                          std::optional<std::string> diagnostic_uuid,
                           std::string* log_id,
                           std::string* error_message);
 
@@ -161,8 +168,20 @@ class WebRtcRemoteEventLogManager final
   // were associated with the renderer process.
   void RenderProcessHostExitedDestroyed(int render_process_id);
 
+  // Stops logging all the peer connections associated with the renderer
+  // process. If StopLoggingAction is kStore, the logs are stored and uploaded,
+  // otherwise the logs are deleted.
+  // In addition, if the provided |diagnostic_uuid| matches the one in any of
+  // the PENDING logs and the StopLoggingAction is kDelete, the matching logs
+  // will be deleted.
+  void StopLogging(int render_process_id,
+                   StopLoggingAction action,
+                   std::optional<std::string> diagnostic_uuid,
+                   base::OnceClosure callback);
+
   // network::NetworkConnectionTracker::NetworkConnectionObserver implementation
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   // Unit tests may use this to inject null uploaders, or ones which are
   // directly controlled by the unit test (succeed or fail according to the
@@ -257,7 +276,7 @@ class WebRtcRemoteEventLogManager final
                        size_t max_file_size_bytes,
                        int output_period_ms,
                        size_t web_app_id,
-                       std::string* log_id_out,
+                       const std::string& log_id,
                        std::string* error_message_out);
 
   // Checks if the referenced peer connection has an associated active
@@ -268,7 +287,7 @@ class WebRtcRemoteEventLogManager final
   // On the one hand, we want to remove expired files as soon as possible, but
   // on the other hand, we don't want to waste CPU by checking this too often.
   // Therefore, we prune pending files:
-  // 1. When a new BrowserContext is initalized, thereby also pruning the
+  // 1. When a new BrowserContext is initialized, thereby also pruning the
   //    pending logs contributed by that BrowserContext.
   // 2. Before initiating a new upload, thereby avoiding uploading a file that
   //    has just now expired.
@@ -279,7 +298,7 @@ class WebRtcRemoteEventLogManager final
   // this check is not too expensive.
   // If a |browser_context_id| is provided, logs are only pruned for it.
   void PrunePendingLogs(
-      base::Optional<BrowserContextId> browser_context_id = base::nullopt);
+      std::optional<BrowserContextId> browser_context_id = std::nullopt);
 
   // PrunePendingLogs() and schedule the next proactive pending logs prune.
   void RecurringlyPrunePendingLogs();
@@ -308,7 +327,7 @@ class WebRtcRemoteEventLogManager final
   void MaybeRemovePendingLogs(
       const base::Time& delete_begin,
       const base::Time& delete_end,
-      base::Optional<BrowserContextId> browser_context_id,
+      std::optional<BrowserContextId> browser_context_id,
       bool is_cache_clear);
 
   // Remove all history files associated with |browser_context_id| which were
@@ -342,7 +361,7 @@ class WebRtcRemoteEventLogManager final
   //   can match the filter.
   bool MatchesFilter(BrowserContextId log_browser_context_id,
                      const base::Time& log_last_modification,
-                     base::Optional<BrowserContextId> filter_browser_context_id,
+                     std::optional<BrowserContextId> filter_browser_context_id,
                      const base::Time& filter_range_begin,
                      const base::Time& filter_range_end) const;
 
@@ -416,7 +435,7 @@ class WebRtcRemoteEventLogManager final
   // This is used to inform WebRtcEventLogManager when remote-bound logging
   // of a peer connection starts/stops, which allows WebRtcEventLogManager to
   // decide when to ask WebRTC to start/stop sending event logs.
-  WebRtcRemoteEventLogsObserver* const observer_;
+  const raw_ptr<WebRtcRemoteEventLogsObserver> observer_;
 
   // The IDs of the BrowserContexts for which logging is enabled, mapped to
   // the directory where each BrowserContext's remote-bound logs are stored.
@@ -450,7 +469,7 @@ class WebRtcRemoteEventLogManager final
   base::FilePath currently_uploaded_file_;
 
   // Provides notifications of network changes.
-  network::NetworkConnectionTracker* network_connection_tracker_;
+  raw_ptr<network::NetworkConnectionTracker> network_connection_tracker_;
 
   // Whether the network we are currently connected to, if any, is one over
   // which we may upload.
@@ -484,8 +503,6 @@ class WebRtcRemoteEventLogManager final
   // here. In reality, this is never auto-destroyed; see destructor for details.
   std::unique_ptr<base::WeakPtrFactory<WebRtcRemoteEventLogManager>>
       weak_ptr_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebRtcRemoteEventLogManager);
 };
 
 }  // namespace webrtc_event_logging

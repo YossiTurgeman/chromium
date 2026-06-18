@@ -1,32 +1,68 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/performance_manager/test_support/performance_manager_browsertest_harness.h"
 
-#include "base/bind_helpers.h"
+#include <string>
+#include <string_view>
+
+#include "base/command_line.h"
 #include "base/run_loop.h"
+#include "base/test/bind.h"
+#include "components/performance_manager/embedder/performance_manager_lifetime.h"
 #include "components/performance_manager/embedder/performance_manager_registry.h"
+#include "components/performance_manager/public/graph/graph.h"
+#include "components/performance_manager/public/performance_manager.h"
+#include "content/public/browser/browser_context.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/content_switches.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/shell/browser/shell.h"
-#include "content/shell/browser/shell_content_browser_client.h"
-#include "content/shell/browser/shell_web_contents_view_delegate_creator.h"
-#include "mojo/public/cpp/bindings/binder_map.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
-#include "services/service_manager/public/cpp/binder_registry.h"
+#include "ui/base/page_transition_types.h"
+#include "url/gurl.h"
 
 namespace performance_manager {
 
-PerformanceManagerBrowserTestHarness::PerformanceManagerBrowserTestHarness() {
-  helper_ = std::make_unique<PerformanceManagerTestHarnessHelper>();
+PerformanceManagerBrowserTestHarness::PerformanceManagerBrowserTestHarness() =
+    default;
+
+PerformanceManagerBrowserTestHarness::~PerformanceManagerBrowserTestHarness() {
+  EXPECT_TRUE(tracked_browser_contexts_.empty());
 }
 
-PerformanceManagerBrowserTestHarness::~PerformanceManagerBrowserTestHarness() =
-    default;
+void PerformanceManagerBrowserTestHarness::SetUp() {
+  PerformanceManagerLifetime::SetGraphFeaturesOverrideForTesting(
+      GraphFeatures::WithNone());
+  bool graph_initialization_complete = false;
+  PerformanceManagerLifetime::SetAdditionalGraphCreatedCallbackForTesting(
+      base::BindLambdaForTesting([&](Graph* graph) {
+        OnGraphCreatedImpl(graph);
+        graph_initialization_complete = true;
+      }));
+
+  // The PM gets initialized in the following, so this must occur after setting
+  // up the callback.
+  Super::SetUp();
+
+  ASSERT_TRUE(graph_initialization_complete);
+}
 
 void PerformanceManagerBrowserTestHarness::PreRunTestOnMainThread() {
   Super::PreRunTestOnMainThread();
+
+  content::BrowserContext* initial_browser_context =
+      shell()->web_contents()->GetBrowserContext();
+  ASSERT_TRUE(initial_browser_context);
+  const auto [_, inserted] =
+      tracked_browser_contexts_.insert(initial_browser_context);
+  ASSERT_TRUE(inserted);
+  PerformanceManagerRegistry::GetInstance()->NotifyBrowserContextAdded(
+      initial_browser_context);
 
   // Set up the embedded web server.
   host_resolver()->AddRule("*", "127.0.0.1");
@@ -36,7 +72,11 @@ void PerformanceManagerBrowserTestHarness::PreRunTestOnMainThread() {
 }
 
 void PerformanceManagerBrowserTestHarness::PostRunTestOnMainThread() {
-  helper_->TearDown();
+  for (content::BrowserContext* browser_context : tracked_browser_contexts_) {
+    PerformanceManagerRegistry::GetInstance()->NotifyBrowserContextRemoved(
+        browser_context);
+  }
+  tracked_browser_contexts_.clear();
   Super::PostRunTestOnMainThread();
 }
 
@@ -47,45 +87,17 @@ void PerformanceManagerBrowserTestHarness::SetUpCommandLine(
                                   "PerformanceManagerInstrumentation");
 }
 
-// We're a full embedder of the PM, so we have to wire up all of the embedder
-// hooks. Note that this runs *before* PreRunTestOnMainThread.
-void PerformanceManagerBrowserTestHarness::CreatedBrowserMainParts(
-    content::BrowserMainParts* browser_main_parts) {
-  helper_->SetUp();
-
-  content::ShellContentBrowserClient::Get()
-      ->set_web_contents_view_delegate_callback(
-          base::BindRepeating([](content::WebContents* contents)
-                                  -> content::WebContentsViewDelegate* {
-            PerformanceManagerRegistry::GetInstance()
-                ->MaybeCreatePageNodeForWebContents(contents);
-            return content::CreateShellWebContentsViewDelegate(contents);
-          }));
-
-  // Expose interfaces to RenderProcess.
-  content::ShellContentBrowserClient::Get()
-      ->set_expose_interfaces_to_renderer_callback(base::BindRepeating(
-          [](service_manager::BinderRegistry* registry,
-             blink::AssociatedInterfaceRegistry* associated_registry_unused,
-             content::RenderProcessHost* render_process_host) {
-            PerformanceManagerRegistry::GetInstance()
-                ->CreateProcessNodeAndExposeInterfacesToRendererProcess(
-                    registry, render_process_host);
-          }));
-
-  // Expose interfaces to RenderFrame.
-  content::ShellContentBrowserClient::Get()
-      ->set_register_browser_interface_binders_for_frame_callback(
-          base::BindRepeating(
-              [](content::RenderFrameHost* render_frame_host,
-                 mojo::BinderMapWithContext<content::RenderFrameHost*>* map) {
-                PerformanceManagerRegistry::GetInstance()
-                    ->ExposeInterfacesToRenderFrame(map);
-              }));
-}
+void PerformanceManagerBrowserTestHarness::OnGraphCreated(Graph* graph) {}
 
 content::Shell* PerformanceManagerBrowserTestHarness::CreateShell() {
   content::Shell* shell = CreateBrowser();
+  content::BrowserContext* browser_context =
+      shell->web_contents()->GetBrowserContext();
+  const auto [_, inserted] = tracked_browser_contexts_.insert(browser_context);
+  if (inserted) {
+    PerformanceManagerRegistry::GetInstance()->NotifyBrowserContextAdded(
+        browser_context);
+  }
   return shell;
 }
 
@@ -100,6 +112,19 @@ void PerformanceManagerBrowserTestHarness::StartNavigation(
   contents->Focus();
 }
 
+::testing::AssertionResult
+PerformanceManagerBrowserTestHarness::NavigateAndWaitForConsoleMessage(
+    content::WebContents* contents,
+    const GURL& url,
+    std::string_view console_pattern) {
+  content::WebContentsConsoleObserver console_observer(contents);
+  console_observer.SetPattern(std::string(console_pattern));
+  if (NavigateToURL(contents, url) && console_observer.Wait()) {
+    return ::testing::AssertionSuccess();
+  }
+  return ::testing::AssertionFailure();
+}
+
 namespace {
 
 class WaitForLoadObserver : public content::WebContentsObserver {
@@ -109,8 +134,9 @@ class WaitForLoadObserver : public content::WebContentsObserver {
   ~WaitForLoadObserver() override = default;
 
   void Wait() {
-    if (!web_contents()->IsLoading())
+    if (!web_contents()->IsLoading()) {
       return;
+    }
     run_loop_.Run();
   }
 
@@ -127,6 +153,11 @@ void PerformanceManagerBrowserTestHarness::WaitForLoad(
     content::WebContents* contents) {
   WaitForLoadObserver observer(contents);
   observer.Wait();
+}
+
+void PerformanceManagerBrowserTestHarness::OnGraphCreatedImpl(Graph* graph) {
+  graph_features_.ConfigureGraph(graph);
+  OnGraphCreated(graph);
 }
 
 }  // namespace performance_manager

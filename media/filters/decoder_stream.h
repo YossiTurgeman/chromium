@@ -1,26 +1,28 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_FILTERS_DECODER_STREAM_H_
 #define MEDIA_FILTERS_DECODER_STREAM_H_
 
-#include <list>
 #include <memory>
 #include <vector>
 
-#include "base/callback.h"
 #include "base/compiler_specific.h"
 #include "base/containers/circular_deque.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/util/type_safety/pass_key.h"
+#include "base/moving_window.h"
+#include "base/time/time.h"
+#include "base/types/pass_key.h"
 #include "media/base/audio_decoder.h"
 #include "media/base/audio_timestamp_helper.h"
+#include "media/base/decoder_status.h"
 #include "media/base/demuxer_stream.h"
 #include "media/base/media_export.h"
 #include "media/base/media_log.h"
-#include "media/base/moving_average.h"
 #include "media/base/pipeline_status.h"
 #include "media/base/timestamp_constants.h"
 #include "media/base/waiting.h"
@@ -28,7 +30,7 @@
 #include "media/filters/decoder_stream_traits.h"
 
 namespace base {
-class SingleThreadTaskRunner;
+class SequencedTaskRunner;
 }
 
 namespace media {
@@ -46,13 +48,6 @@ class MEDIA_EXPORT DecoderStream {
   using Output = typename StreamTraits::OutputType;
   using DecoderConfig = typename StreamTraits::DecoderConfigType;
 
-  enum ReadStatus {
-    OK,                    // Everything went as planned.
-    ABORTED,               // Read aborted due to Reset() during pending read.
-    DEMUXER_READ_ABORTED,  // Demuxer returned aborted read.
-    DECODE_ERROR,          // Decoder returned decode error.
-  };
-
   // Callback to create a list of decoders.
   using CreateDecodersCB =
       base::RepeatingCallback<std::vector<std::unique_ptr<Decoder>>()>;
@@ -61,10 +56,11 @@ class MEDIA_EXPORT DecoderStream {
   using InitCB = base::OnceCallback<void(bool success)>;
 
   // Indicates completion of a DecoderStream read.
-  using ReadCB = base::OnceCallback<void(ReadStatus, scoped_refptr<Output>)>;
+  using ReadResult = DecoderStatus::Or<scoped_refptr<Output>>;
+  using ReadCB = base::OnceCallback<void(ReadResult)>;
 
   DecoderStream(std::unique_ptr<DecoderStreamTraits<StreamType>> traits,
-                const scoped_refptr<base::SingleThreadTaskRunner>& task_runner,
+                scoped_refptr<base::SequencedTaskRunner> task_runner,
                 CreateDecodersCB create_decoders_cb,
                 MediaLog* media_log);
   virtual ~DecoderStream();
@@ -131,11 +127,16 @@ class MEDIA_EXPORT DecoderStream {
     config_change_observer_cb_ = config_change_observer;
   }
 
-  // Allows tests to keep track the currently selected decoder.
+  // Allow interested folks to keep track the currently selected decoder.  The
+  // provided decoder is valid only during the scope of the callback.
   using DecoderChangeObserverCB = base::RepeatingCallback<void(Decoder*)>;
-  void set_decoder_change_observer_for_testing(
+  void set_decoder_change_observer(
       DecoderChangeObserverCB decoder_change_observer_cb) {
     decoder_change_observer_cb_ = std::move(decoder_change_observer_cb);
+  }
+
+  void set_fallback_observer(PipelineStatusCB fallback_cb) {
+    fallback_cb_ = std::move(fallback_cb);
   }
 
   int get_pending_buffers_size_for_testing() const {
@@ -149,19 +150,19 @@ class MEDIA_EXPORT DecoderStream {
   bool is_demuxer_read_pending() const { return pending_demuxer_read_; }
 
   DecoderSelector<StreamType>& GetDecoderSelectorForTesting(
-      util::PassKey<class VideoDecoderStreamTest>) {
+      base::PassKey<class VideoDecoderStreamTest>) {
     return decoder_selector_;
   }
 
  private:
-  enum State {
-    STATE_UNINITIALIZED,
-    STATE_INITIALIZING,
-    STATE_NORMAL,  // Includes idle, pending decoder decode/reset.
-    STATE_FLUSHING_DECODER,
-    STATE_REINITIALIZING_DECODER,
-    STATE_END_OF_STREAM,  // End of stream reached; returns EOS on all reads.
-    STATE_ERROR,
+  enum class State {
+    kStateUninitialized,
+    kStateInitializing,
+    kStateNormal,  // Includes idle, pending decoder decode/reset.
+    kStateFlushingDecoder,
+    kStateReinitializingDecoder,
+    kStateEndOfStream,  // End of stream reached; returns EOS on all reads.
+    kStateError,
   };
 
   // Returns the string representation of the StreamType for logging purpose.
@@ -170,23 +171,27 @@ class MEDIA_EXPORT DecoderStream {
   // Returns maximum concurrent decode requests for the current |decoder_|.
   int GetMaxDecodeRequests() const;
 
+  // Returns if current |decoder_| is a platform decoder.
+  bool IsPlatformDecoder() const;
+
   // Returns the maximum number of outputs we should keep ready at any one time.
   int GetMaxReadyOutputs() const;
 
   // Returns true if one more decode request can be submitted to the decoder.
   bool CanDecodeMore() const;
 
-  void SelectDecoder();
+  void BeginDecoderSelection();
+  void ResumeDecoderSelection(DecoderStatus&& reinit_cause);
 
   // Called when |decoder_selector| selected the |selected_decoder|.
   // |decrypting_demuxer_stream| was also populated if a DecryptingDemuxerStream
   // is created to help decrypt the encrypted stream.
   void OnDecoderSelected(
-      std::unique_ptr<Decoder> selected_decoder,
+      DecoderStatus::Or<std::unique_ptr<Decoder>> decoder_or_error,
       std::unique_ptr<DecryptingDemuxerStream> decrypting_demuxer_stream);
 
-  // Satisfy pending |read_cb_| with |status| and |output|.
-  void SatisfyRead(ReadStatus status, scoped_refptr<Output> output);
+  // Satisfy pending |read_cb_| with |result|.
+  void SatisfyRead(ReadResult result);
 
   // Decodes |buffer| and returns the result via OnDecodeOutputReady().
   // Saves |buffer| into |pending_buffers_| if appropriate.
@@ -195,15 +200,11 @@ class MEDIA_EXPORT DecoderStream {
   // Performs the heavy lifting of the decode call.
   void DecodeInternal(scoped_refptr<DecoderBuffer> buffer);
 
-  // Flushes the decoder with an EOS buffer to retrieve internally buffered
-  // decoder output.
-  void FlushDecoder();
-
   // Callback for Decoder::Decode().
   void OnDecodeDone(int buffer_size,
                     bool end_of_stream,
                     std::unique_ptr<ScopedDecodeTrace> trace_event,
-                    DecodeStatus status);
+                    DecoderStatus status);
 
   // Output callback passed to Decoder::Initialize().
   void OnDecodeOutputReady(scoped_refptr<Output> output);
@@ -211,13 +212,12 @@ class MEDIA_EXPORT DecoderStream {
   // Reads a buffer from |stream_| and returns the result via OnBufferReady().
   void ReadFromDemuxerStream();
 
-  // Callback for DemuxerStream::Read().
-  void OnBufferReady(DemuxerStream::Status status,
-                     scoped_refptr<DecoderBuffer> buffer);
+  void OnBuffersReady(DemuxerStream::Status status,
+                      DemuxerStream::DecoderBufferVector buffers);
 
   void ReinitializeDecoder();
 
-  void CompleteDecoderReinitialization(bool success);
+  void CompleteDecoderReinitialization(DecoderStatus status);
 
   void ResetDecoder();
   void OnDecoderReset();
@@ -227,23 +227,26 @@ class MEDIA_EXPORT DecoderStream {
   void OnPreparedOutputReady(scoped_refptr<Output> frame);
   void CompletePrepare(const Output* output);
 
+  void ReportEncryptionType(const scoped_refptr<DecoderBuffer>& buffer);
+
   std::unique_ptr<DecoderStreamTraits<StreamType>> traits_;
 
-  scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
-  MediaLog* media_log_;
+  scoped_refptr<base::SequencedTaskRunner> task_runner_;
+  const std::unique_ptr<MediaLog> media_log_;
 
   State state_;
 
   StatisticsCB statistics_cb_;
   InitCB init_cb_;
   WaitingCB waiting_cb_;
+  PipelineStatusCB fallback_cb_;
 
   ReadCB read_cb_;
   base::OnceClosure reset_cb_;
 
-  DemuxerStream* stream_;
+  raw_ptr<DemuxerStream, DanglingUntriaged> stream_;
 
-  CdmContext* cdm_context_;
+  raw_ptr<CdmContext> cdm_context_;
 
   std::unique_ptr<Decoder> decoder_;
 
@@ -278,7 +281,7 @@ class MEDIA_EXPORT DecoderStream {
   int pending_decode_requests_;
 
   // Tracks the duration of incoming packets over time.
-  MovingAverage duration_tracker_;
+  base::MovingAverage<base::TimeDelta, base::TimeDelta> duration_tracker_;
 
   // Stores buffers that might be reused if the decoder fails right after
   // Initialize().
@@ -299,6 +302,14 @@ class MEDIA_EXPORT DecoderStream {
 
   // Timestamp after which all outputs need to be prepared.
   base::TimeDelta skip_prepare_until_timestamp_;
+
+  bool encryption_type_reported_ = false;
+
+  int fallback_buffers_being_decoded_ = 0;
+
+  // Last timestamp seen by DecodeInternal(), used for average duration when
+  // explicit duration information is missing.
+  base::TimeDelta last_buffer_timestamp_ = kNoTimestamp;
 
   // NOTE: Weak pointers must be invalidated before all other member variables.
   base::WeakPtrFactory<DecoderStream<StreamType>> weak_factory_{this};

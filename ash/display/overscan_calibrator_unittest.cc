@@ -1,13 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/display/overscan_calibrator.h"
-#include "ash/display/cros_display_config.h"
 
+#include "ash/display/cros_display_config.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
-#include "base/bind_helpers.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/stringprintf.h"
 #include "ui/display/manager/display_manager.h"
 #include "ui/display/manager/managed_display_info.h"
@@ -21,34 +21,34 @@ class OverscanCalibratorTest : public AshTestBase {
   OverscanCalibratorTest(OverscanCalibratorTest&) = delete;
   OverscanCalibratorTest& operator=(const OverscanCalibratorTest&) = delete;
 
-  OverscanCalibrator* StartCalibration(const std::string& id) {
+  OverscanCalibrator* StartCalibration(int64_t display_id) {
     Shell::Get()->cros_display_config()->OverscanCalibration(
-        id, mojom::DisplayConfigOperation::kStart,
-        gfx::Insets(0, 0, 0, 0) /* not used */, base::DoNothing());
-    return Shell::Get()->cros_display_config()->GetOverscanCalibrator(id);
+        display_id, DisplayCalibrationOperation::kStart,
+        gfx::Insets() /* not used */);
+    return Shell::Get()->cros_display_config()->GetOverscanCalibrator(
+        display_id);
   }
 };
 
 TEST_F(OverscanCalibratorTest, Rotation) {
   auto* display_manager = Shell::Get()->display_manager();
 
-  int64_t display_id = display::Screen::GetScreen()->GetPrimaryDisplay().id();
-  std::string id_str = base::StringPrintf("%" PRId64, display_id);
+  int64_t display_id = display::Screen::Get()->GetPrimaryDisplay().id();
 
-  auto* calibrator = StartCalibration(id_str);
-  calibrator->UpdateInsets(gfx::Insets(100, 5, 10, 15));
+  auto* calibrator = StartCalibration(display_id);
+  calibrator->UpdateInsets(gfx::Insets::TLBR(100, 5, 10, 15));
   calibrator->Commit();
   display::ManagedDisplayInfo info =
       display_manager->GetDisplayInfo(display_id);
-  EXPECT_EQ(gfx::Insets(100, 5, 10, 15), info.overscan_insets_in_dip());
+  EXPECT_EQ(gfx::Insets::TLBR(100, 5, 10, 15), info.overscan_insets_in_dip());
 
   display_manager->SetDisplayRotation(display_id,
                                       display::Display::Rotation::ROTATE_90,
                                       display::Display::RotationSource::USER);
   EXPECT_EQ(gfx::Size(490, 780),
-            display::Screen::GetScreen()->GetPrimaryDisplay().size());
+            display::Screen::Get()->GetPrimaryDisplay().size());
 
-  calibrator = StartCalibration(id_str);
+  calibrator = StartCalibration(display_id);
   // The insets will be rotated and applied in the host coordinates.
   gfx::Insets insets = calibrator->insets();
   insets.set_left(105);
@@ -57,7 +57,7 @@ TEST_F(OverscanCalibratorTest, Rotation) {
   calibrator->Commit();
 
   info = display_manager->GetDisplayInfo(display_id);
-  EXPECT_EQ(gfx::Insets(105, 5, 10, 0), info.overscan_insets_in_dip());
+  EXPECT_EQ(gfx::Insets::TLBR(105, 5, 10, 0), info.overscan_insets_in_dip());
 }
 
 }  // namespace ash

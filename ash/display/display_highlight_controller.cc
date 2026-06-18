@@ -1,11 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/display/display_highlight_controller.h"
 
+#include "ash/accessibility/magnifier/fullscreen_magnifier_controller.h"
 #include "ash/display/window_tree_host_manager.h"
-#include "ash/magnifier/magnification_controller.h"
 #include "ash/public/cpp/shell_window_ids.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
@@ -13,6 +13,7 @@
 #include "ui/compositor/layer_type.h"
 #include "ui/compositor/paint_recorder.h"
 #include "ui/display/manager/display_manager.h"
+#include "ui/display/manager/display_manager_observer.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/views/border.h"
 #include "ui/wm/core/window_animations.h"
@@ -31,9 +32,9 @@ std::unique_ptr<views::Widget> CreateHighlightWidget(
   DCHECK_NE(display_id, display::kInvalidDisplayId);
 
   views::Widget::InitParams params(
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET,
       views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
-  params.ownership = views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET;
-  params.activatable = views::Widget::InitParams::ACTIVATABLE_NO;
+  params.activatable = views::Widget::InitParams::Activatable::kNo;
   params.accept_events = false;
   params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
 
@@ -56,15 +57,15 @@ std::unique_ptr<views::Widget> CreateHighlightWidget(
       views::CreateSolidBorder(highlight_thickness, kHighlightColor));
 
   auto* window = highlight_widget->GetNativeWindow();
-  window->set_id(kShellWindowId_DisplayIdentificationHighlightWindow);
+  window->SetId(kShellWindowId_DisplayIdentificationHighlightWindow);
   ::wm::SetWindowVisibilityAnimationTransition(window, ::wm::ANIMATE_NONE);
 
-  MagnificationController* magnification_controller =
-      Shell::Get()->magnification_controller();
+  FullscreenMagnifierController* magnification_controller =
+      Shell::Get()->fullscreen_magnifier_controller();
 
   // Forces a redraw of full-screen magnification in order to reverse
   // magnification on display highlight window performed in
-  // MagnificationController::ReDraw(). If redraw is not forced, then the
+  // FullscreenMagnifierController::ReDraw(). If redraw is not forced, then the
   // highlight may not show up around the edges of the display properly until
   // the next redraw.
   if (magnification_controller->IsEnabled()) {
@@ -84,7 +85,7 @@ DisplayHighlightController::DisplayHighlightController() {
   SessionControllerImpl* session_controller = shell->session_controller();
 
   session_controller->AddObserver(this);
-  shell->window_tree_host_manager()->AddObserver(this);
+  shell->display_manager()->AddDisplayManagerObserver(this);
 
   is_locked_ = session_controller->IsScreenLocked();
 }
@@ -92,7 +93,7 @@ DisplayHighlightController::DisplayHighlightController() {
 DisplayHighlightController::~DisplayHighlightController() {
   Shell* shell = Shell::Get();
 
-  shell->window_tree_host_manager()->RemoveObserver(this);
+  shell->display_manager()->RemoveDisplayManagerObserver(this);
   shell->session_controller()->RemoveObserver(this);
 }
 
@@ -134,7 +135,7 @@ void DisplayHighlightController::OnLockStateChanged(bool locked) {
   UpdateDisplayIdentificationHighlight();
 }
 
-void DisplayHighlightController::OnDisplayConfigurationChanged() {
+void DisplayHighlightController::OnDidApplyDisplayChanges() {
   UpdateDisplayIdentificationHighlight();
 }
 

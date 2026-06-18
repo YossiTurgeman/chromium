@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {CoverageTestRunner} from 'coverage_test_runner';
+
+import * as Coverage from 'devtools/panels/coverage/coverage.js';
+
 (async function() {
   TestRunner.addResult(`Tests the coverage list view after finishing recording in the Coverage view.\n`);
-  await TestRunner.loadModule('coverage_test_runner');
   await TestRunner.loadHTML(`
       <p class="class">
       </p>
@@ -23,8 +27,8 @@
   TestRunner.addResult('After second session');
   CoverageTestRunner.dumpCoverageListView();
 
-  var coverageView = self.runtime.sharedInstance(Coverage.CoverageView);
-  coverageView._clear();
+  var coverageView = Coverage.CoverageView.CoverageView.instance();
+  coverageView.clear();
   await CoverageTestRunner.startCoverage(true);
   await CoverageTestRunner.stopCoverage();
   TestRunner.addResult('After clear');

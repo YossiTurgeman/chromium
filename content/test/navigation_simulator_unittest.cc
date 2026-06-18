@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,11 @@
 #include <tuple>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/macros.h"
-#include "base/memory/ptr_util.h"
+#include "base/functional/bind.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
+#include "base/test/bind.h"
 #include "base/test/test_simple_task_runner.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_handle.h"
@@ -23,6 +21,7 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/test/test_navigation_throttle.h"
 #include "content/public/test/test_navigation_throttle_inserter.h"
+#include "content/test/task_runner_deferring_throttle.h"
 #include "content/test/test_render_frame_host.h"
 #include "content/test/test_render_view_host.h"
 #include "content/test/test_web_contents.h"
@@ -32,67 +31,32 @@
 
 namespace content {
 
-// This class defers a navigation via a no-op async task on the provided task
-// runner.
-class TaskRunnerDeferringThrottle : public NavigationThrottle {
- public:
-  TaskRunnerDeferringThrottle(scoped_refptr<base::TaskRunner> task_runner,
-                              NavigationHandle* handle)
-      : NavigationThrottle(handle), task_runner_(std::move(task_runner)) {}
-  ~TaskRunnerDeferringThrottle() override {}
-
-  static std::unique_ptr<NavigationThrottle> Create(
-      scoped_refptr<base::TaskRunner> task_runner,
-      NavigationHandle* handle) {
-    return base::WrapUnique(
-        new TaskRunnerDeferringThrottle(std::move(task_runner), handle));
-  }
-
-  // NavigationThrottle:
-  ThrottleCheckResult WillStartRequest() override { return DeferToPostTask(); }
-  ThrottleCheckResult WillRedirectRequest() override {
-    return DeferToPostTask();
-  }
-  ThrottleCheckResult WillProcessResponse() override {
-    return DeferToPostTask();
-  }
-  const char* GetNameForLogging() override {
-    return "TaskRunnerDeferringThrottle";
-  }
-
- private:
-  ThrottleCheckResult DeferToPostTask() {
-    task_runner_->PostTaskAndReply(
-        FROM_HERE, base::DoNothing(),
-        base::BindOnce(&TaskRunnerDeferringThrottle::Resume,
-                       weak_factory_.GetWeakPtr()));
-
-    return NavigationThrottle::DEFER;
-  }
-  scoped_refptr<base::TaskRunner> task_runner_;
-  base::WeakPtrFactory<TaskRunnerDeferringThrottle> weak_factory_{this};
-  DISALLOW_COPY_AND_ASSIGN(TaskRunnerDeferringThrottle);
-};
-
 class NavigationSimulatorTest : public RenderViewHostImplTestHarness {};
 
 class CancellingNavigationSimulatorTest
     : public RenderViewHostImplTestHarness,
       public WebContentsObserver,
       public testing::WithParamInterface<
-          std::tuple<base::Optional<TestNavigationThrottle::ThrottleMethod>,
+          std::tuple<std::optional<TestNavigationThrottle::ThrottleMethod>,
                      TestNavigationThrottle::ResultSynchrony>> {
  public:
   CancellingNavigationSimulatorTest() {}
+
+  CancellingNavigationSimulatorTest(const CancellingNavigationSimulatorTest&) =
+      delete;
+  CancellingNavigationSimulatorTest& operator=(
+      const CancellingNavigationSimulatorTest&) = delete;
+
   ~CancellingNavigationSimulatorTest() override {}
 
   void SetUp() override {
     RenderViewHostImplTestHarness::SetUp();
-    contents()->GetMainFrame()->InitializeRenderFrameIfNeeded();
+    contents()->GetPrimaryMainFrame()->InitializeRenderFrameIfNeeded();
     Observe(RenderViewHostImplTestHarness::web_contents());
     std::tie(cancel_time_, sync_) = GetParam();
     simulator_ = NavigationSimulator::CreateRendererInitiated(
         GURL("https://example.test"), main_rfh());
+    SetUpThrottleInserter();
   }
 
   void TearDown() override {
@@ -100,52 +64,62 @@ class CancellingNavigationSimulatorTest
     RenderViewHostImplTestHarness::TearDown();
   }
 
-  void DidStartNavigation(content::NavigationHandle* handle) override {
-    auto throttle = std::make_unique<TestNavigationThrottle>(handle);
-    throttle->SetCallback(
-        TestNavigationThrottle::WILL_FAIL_REQUEST,
-        base::BindRepeating(
-            &CancellingNavigationSimulatorTest::OnWillFailRequestCalled,
-            base::Unretained(this)));
-    if (cancel_time_.has_value()) {
-      throttle->SetResponse(cancel_time_.value(), sync_,
-                            NavigationThrottle::CANCEL);
-    }
-    handle->RegisterThrottleForTesting(
-        std::unique_ptr<TestNavigationThrottle>(std::move(throttle)));
+  void DidStartNavigation(NavigationHandle* handle) override {}
+
+  void SetUpThrottleInserter() {
+    throttle_inserter_ = std::make_unique<TestNavigationThrottleInserter>(
+        RenderViewHostTestHarness::web_contents(),
+        base::BindLambdaForTesting([&](NavigationThrottleRegistry& registry)
+                                       -> void {
+          auto throttle = std::make_unique<TestNavigationThrottle>(registry);
+          throttle->SetCallback(
+              TestNavigationThrottle::WILL_FAIL_REQUEST,
+              base::BindRepeating(
+                  &CancellingNavigationSimulatorTest::OnWillFailRequestCalled,
+                  base::Unretained(this)));
+          if (cancel_time_.has_value()) {
+            throttle->SetResponse(cancel_time_.value(), sync_,
+                                  NavigationThrottle::CANCEL);
+          }
+          registry.AddThrottle(std::move(throttle));
+        }));
   }
 
-  void DidFinishNavigation(content::NavigationHandle* handle) override {
+  void DidFinishNavigation(NavigationHandle* handle) override {
     did_finish_navigation_ = true;
   }
 
   void OnWillFailRequestCalled() { will_fail_request_called_ = true; }
 
-  base::Optional<TestNavigationThrottle::ThrottleMethod> cancel_time_;
+  std::optional<TestNavigationThrottle::ThrottleMethod> cancel_time_;
   TestNavigationThrottle::ResultSynchrony sync_;
   std::unique_ptr<NavigationSimulator> simulator_;
   bool did_finish_navigation_ = false;
   bool will_fail_request_called_ = false;
+  std::unique_ptr<TestNavigationThrottleInserter> throttle_inserter_;
   base::WeakPtrFactory<CancellingNavigationSimulatorTest> weak_ptr_factory_{
       this};
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(CancellingNavigationSimulatorTest);
 };
 
 class MethodCheckingNavigationSimulatorTest : public NavigationSimulatorTest,
                                               public WebContentsObserver {
  public:
   MethodCheckingNavigationSimulatorTest() = default;
+
+  MethodCheckingNavigationSimulatorTest(
+      const MethodCheckingNavigationSimulatorTest&) = delete;
+  MethodCheckingNavigationSimulatorTest& operator=(
+      const MethodCheckingNavigationSimulatorTest&) = delete;
+
   ~MethodCheckingNavigationSimulatorTest() override = default;
 
   void SetUp() override {
     RenderViewHostImplTestHarness::SetUp();
-    contents()->GetMainFrame()->InitializeRenderFrameIfNeeded();
+    contents()->GetPrimaryMainFrame()->InitializeRenderFrameIfNeeded();
     Observe(RenderViewHostImplTestHarness::web_contents());
   }
 
-  void DidFinishNavigation(content::NavigationHandle* handle) override {
+  void DidFinishNavigation(NavigationHandle* handle) override {
     did_finish_navigation_ = true;
     is_post_ = handle->IsPost();
   }
@@ -159,8 +133,6 @@ class MethodCheckingNavigationSimulatorTest : public NavigationSimulatorTest,
 
   // Not valid until |did_finish_navigation_| is true;
   bool is_post_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(MethodCheckingNavigationSimulatorTest);
 };
 
 class ResponseHeadersCheckingNavigationSimulatorTest
@@ -172,18 +144,26 @@ class ResponseHeadersCheckingNavigationSimulatorTest
 
   void SetUp() override {
     RenderViewHostImplTestHarness::SetUp();
-    contents()->GetMainFrame()->InitializeRenderFrameIfNeeded();
+    contents()->GetPrimaryMainFrame()->InitializeRenderFrameIfNeeded();
     Observe(RenderViewHostImplTestHarness::web_contents());
   }
 
-  void DidFinishNavigation(content::NavigationHandle* handle) override {
-    if (handle->GetResponseHeaders()) {
-      response_headers_ = handle->GetResponseHeaders();
-    }
+  void DidFinishNavigation(NavigationHandle* handle) override {
+    EXPECT_TRUE(handle->GetResponseHeaders()->HasHeaderValue("My-Test-Header",
+                                                             "my-test-value"));
   }
 
-  const net::HttpResponseHeaders* response_headers_;
+  scoped_refptr<net::HttpResponseHeaders> response_headers_;
 };
+
+// Test that NavigationSimulator accurately commits about:blank if the browser
+// requests a navigation to an empty URL.
+TEST_F(NavigationSimulatorTest, EmptyURL) {
+  std::unique_ptr<NavigationSimulator> simulator =
+      NavigationSimulator::CreateBrowserInitiated(GURL(), contents());
+  simulator->Commit();
+  EXPECT_EQ(GURL(url::kAboutBlankURL), main_rfh()->GetLastCommittedURL());
+}
 
 TEST_F(NavigationSimulatorTest, AutoAdvanceOff) {
   std::unique_ptr<NavigationSimulator> simulator =
@@ -194,8 +174,11 @@ TEST_F(NavigationSimulatorTest, AutoAdvanceOff) {
   auto task_runner = base::MakeRefCounted<base::TestSimpleTaskRunner>();
   auto* raw_runner = task_runner.get();
   TestNavigationThrottleInserter throttle_inserter(
-      web_contents(), base::BindRepeating(&TaskRunnerDeferringThrottle::Create,
-                                          std::move(task_runner)));
+      web_contents(),
+      base::BindRepeating(&TaskRunnerDeferringThrottle::Create,
+                          std::move(task_runner), true /* defer_start */,
+                          true /* defer_redirect */,
+                          true /* defer_response */));
 
   simulator->Start();
   EXPECT_EQ(1u, raw_runner->NumPendingTasks());
@@ -249,14 +232,12 @@ TEST_F(ResponseHeadersCheckingNavigationSimulatorTest, CheckResponseHeaders) {
           GURL("https://example.test/"), main_rfh());
   simulator->Start();
 
-  auto response_headers =
+  response_headers_ =
       base::MakeRefCounted<net::HttpResponseHeaders>("HTTP/1.1 200 OK");
-  response_headers->SetHeader("My-Test-Header", "my-test-value");
-  simulator->SetResponseHeaders(response_headers);
+  response_headers_->SetHeader("My-Test-Header", "my-test-value");
+  simulator->SetResponseHeaders(response_headers_);
   simulator->ReadyToCommit();
   simulator->Commit();
-  EXPECT_TRUE(
-      response_headers_->HasHeaderValue("My-Test-Header", "my-test-value"));
 }
 
 // Stress test the navigation simulator by having a navigation throttle cancel
@@ -307,7 +288,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(TestNavigationThrottle::WILL_START_REQUEST,
                           TestNavigationThrottle::WILL_REDIRECT_REQUEST,
                           TestNavigationThrottle::WILL_PROCESS_RESPONSE,
-                          base::nullopt),
+                          std::nullopt),
         ::testing::Values(TestNavigationThrottle::SYNCHRONOUS,
                           TestNavigationThrottle::ASYNCHRONOUS)));
 

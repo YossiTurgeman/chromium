@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,22 +7,23 @@
 #include "base/logging.h"
 #include "components/strings/grit/components_strings.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 
 ConfirmBubbleModel::ConfirmBubbleModel() = default;
 ConfirmBubbleModel::~ConfirmBubbleModel() = default;
 
-base::string16 ConfirmBubbleModel::GetButtonLabel(
-    ui::DialogButton button) const {
+std::u16string ConfirmBubbleModel::GetButtonLabel(
+    ui::mojom::DialogButton button) const {
   return l10n_util::GetStringUTF16(
-      (button == ui::DIALOG_BUTTON_OK) ? IDS_OK : IDS_CANCEL);
+      (button == ui::mojom::DialogButton::kOk) ? IDS_OK : IDS_CANCEL);
 }
 
 void ConfirmBubbleModel::Accept() {}
 
 void ConfirmBubbleModel::Cancel() {}
 
-base::string16 ConfirmBubbleModel::GetLinkText() const {
-  return base::string16();
+std::u16string ConfirmBubbleModel::GetLinkText() const {
+  return std::u16string();
 }
 
 GURL ConfirmBubbleModel::GetHelpPageURL() const {

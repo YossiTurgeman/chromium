@@ -19,20 +19,62 @@
             },
             {
                 "domain": "Browser",
-                "include": ["getVersion", "getHistograms", "getHistogram", "getBrowserCommandLine", "grantPermissions", "setDownloadBehavior", "resetPermissions", "crash", "crashGpuProcess", "setPermission"]
+                "include": ["getVersion", "getHistograms", "getHistogram", "getBrowserCommandLine", "grantPermissions", "setDownloadBehavior", "cancelDownload", "resetPermissions", "crash", "crashGpuProcess", "setPermission",
+                "addPrivacySandboxCoordinatorKeyConfig"],
+                "async": ["addPrivacySandboxCoordinatorKeyConfig", "grantPermissions", "resetPermissions", "setPermission"]
             },
             {
                 "domain": "DOM",
-                "include": ["setFileInputFiles"],
+                "include": ["setFileInputFiles", "getFileInfo"],
                 "include_events": []
             },
             {
+              "domain": "DeviceOrientation",
+              "async": [
+                "setDeviceOrientationOverride"
+              ]
+            },
+            {
                 "domain": "Emulation",
-                "include": ["setIdleOverride", "clearIdleOverride", "setGeolocationOverride", "clearGeolocationOverride", "setEmitTouchEventsForMouse", "canEmulate", "setDeviceMetricsOverride", "clearDeviceMetricsOverride", "setVisibleSize", "setUserAgentOverride", "setFocusEmulationEnabled"]
+                "include": [
+                  "getOverriddenSensorInformation",
+                  "setSensorOverrideEnabled",
+                  "setSensorOverrideReadings",
+
+                  "setDevicePostureOverride",
+                  "clearDevicePostureOverride",
+
+                  "setDisplayFeaturesOverride",
+                  "clearDisplayFeaturesOverride",
+
+                  "setPressureSourceOverrideEnabled",
+                  "setPressureStateOverride",
+
+                  "setIdleOverride",
+                  "clearIdleOverride",
+                  "setGeolocationOverride",
+                  "clearGeolocationOverride",
+                  "setEmitTouchEventsForMouse",
+                  "canEmulate",
+                  "setDeviceMetricsOverride",
+                  "clearDeviceMetricsOverride",
+                  "setVisibleSize",
+                  "setUserAgentOverride",
+                  "setFocusEmulationEnabled",
+                  "setEmulatedMedia"
+                ],
+                "async": [
+                  "getOverriddenSensorInformation",
+                  "setSensorOverrideReadings",
+                  "setPressureStateOverride"
+                ]
+            },
+            {
+                "domain": "FedCm"
             },
             {
                 "domain": "Input",
-                "async": ["dispatchKeyEvent", "insertText", "dispatchMouseEvent", "dispatchTouchEvent", "synthesizePinchGesture", "synthesizeScrollGesture", "synthesizeTapGesture"]
+                "async": ["dispatchKeyEvent", "insertText", "imeSetComposition", "dispatchMouseEvent", "dispatchDragEvent", "dispatchTouchEvent", "cancelDragging", "synthesizePinchGesture", "synthesizeScrollGesture", "synthesizeTapGesture"]
             },
             {
                 "domain": "Inspector"
@@ -48,26 +90,84 @@
             },
             {
                 "domain": "Memory",
-                "include": ["getBrowserSamplingProfile", "setPressureNotificationsSuppressed", "simulatePressureNotification", "prepareForLeakDetection"],
-                "async": ["prepareForLeakDetection"]
+                "include": ["getBrowserSamplingProfile", "setPressureNotificationsSuppressed", "simulatePressureNotification", "prepareForLeakDetection", "getDOMCountersForLeakDetection"],
+                "async": ["prepareForLeakDetection", "getDOMCountersForLeakDetection"]
+            },
+            {
+                "domain": "NativeProfiling",
+                "include": ["dumpProfilingDataOfAllProcesses"],
+                "async": ["dumpProfilingDataOfAllProcesses"]
             },
             {
                 "domain": "Network",
-                "include": ["enable", "disable", "clearBrowserCache", "clearBrowserCookies", "getCookies", "getAllCookies", "deleteCookies", "setCookie", "setCookies", "setExtraHTTPHeaders", "canEmulateNetworkConditions", "emulateNetworkConditions", "setBypassServiceWorker", "setRequestInterception", "continueInterceptedRequest", "getResponseBodyForInterception", "setCacheDisabled", "takeResponseBodyForInterceptionAsStream", "getSecurityIsolationStatus"],
-                "include_events": ["requestWillBeSent", "responseReceived", "loadingFinished", "loadingFailed", "requestIntercepted", "signedExchangeReceived", "requestWillBeSentExtraInfo", "responseReceivedExtraInfo"],
-                "async": ["clearBrowserCookies", "clearBrowserCache", "getCookies", "getAllCookies", "deleteCookies", "setCookie", "setCookies", "continueInterceptedRequest", "getResponseBodyForInterception", "takeResponseBodyForInterceptionAsStream"]
+                "include": [
+                  "enable",
+                  "disable",
+                  "clearBrowserCache",
+                  "clearBrowserCookies",
+                  "getCookies",
+                  "getAllCookies",
+                  "deleteCookies",
+                  "setCookie",
+                  "setCookies",
+                  "setExtraHTTPHeaders",
+                  "canEmulateNetworkConditions",
+                  "emulateNetworkConditions",
+                  "emulateNetworkConditionsByRule",
+                  "setBypassServiceWorker",
+                  "setRequestInterception",
+                  "continueInterceptedRequest",
+                  "getResponseBody",
+                  "getResponseBodyForInterception",
+                  "setCacheDisabled",
+                  "takeResponseBodyForInterceptionAsStream",
+                  "getSecurityIsolationStatus",
+                  "loadNetworkResource",
+                  "setAcceptedEncodings",
+                  "clearAcceptedEncodingsOverride",
+                  "enableReportingApi",
+                  "enableDeviceBoundSessions",
+                  "fetchSchemefulSite",
+                  "deleteDeviceBoundSession",
+                  "setCookieControls",
+                  "configureDurableMessages"
+                ],
+                "include_events": ["requestWillBeSent", "responseReceived", "loadingFinished", "loadingFailed", "requestIntercepted", "signedExchangeReceived", "requestWillBeSentExtraInfo", "responseReceivedExtraInfo", "responseReceivedEarlyHints", "trustTokenOperationDone", "policyUpdated", "reportingApiReportAdded", "reportingApiReportUpdated", "reportingApiEndpointsChangedForOrigin", "deviceBoundSessionsAdded", "deviceBoundSessionEventOccurred"],
+                "async": [
+                  "configureDurableMessages",
+                  "clearBrowserCookies",
+                  "clearBrowserCache",
+                  "getCookies",
+                  "getAllCookies",
+                  "deleteCookies",
+                  "setCookie",
+                  "setCookies",
+                  "continueInterceptedRequest",
+                  "getResponseBody",
+                  "getResponseBodyForInterception",
+                  "takeResponseBodyForInterceptionAsStream",
+                  "loadNetworkResource"
+                ]
             },
             {
                 "domain": "Overlay",
-                "include": ["setInspectMode", "setPausedInDebuggerMessage"]
+                "include": ["enable", "setInspectMode", "setPausedInDebuggerMessage"]
             },
             {
                 "domain": "Page",
                 "include": ["enable", "disable", "reload", "navigate", "stopLoading", "getNavigationHistory", "navigateToHistoryEntry", "resetNavigationHistory", "captureScreenshot",
                     "startScreencast", "stopScreencast", "screencastFrameAck", "handleJavaScriptDialog", "setColorPickerEnabled",
-                    "printToPDF", "bringToFront", "setDownloadBehavior", "getAppManifest", "crash", "close", "setWebLifecycleState", "captureSnapshot", "getInstallabilityErrors", "getManifestIcons"],
-                "include_events": ["colorPicked", "interstitialShown", "interstitialHidden", "javascriptDialogOpening", "javascriptDialogClosed", "downloadWillBegin", "downloadProgress", "screencastVisibilityChanged", "screencastFrame"],
-                "async": ["captureScreenshot", "printToPDF", "navigate", "getAppManifest", "reload", "captureSnapshot", "getInstallabilityErrors", "getManifestIcons"]
+                    "bringToFront", "setDownloadBehavior", "getAppManifest", "crash", "close", "setWebLifecycleState", "captureSnapshot", "getInstallabilityErrors", "getManifestIcons", "setBypassCSP", "getAppId", "addCompilationCache", "setPrerenderingAllowed", "getAnnotatedPageContent",
+                    "addScriptToEvaluateOnNewDocument", "removeScriptToEvaluateOnNewDocument", "addScriptToEvaluateOnLoad", "removeScriptToEvaluateOnLoad"],
+                "include_events": ["frameDetached", "colorPicked", "interstitialShown", "interstitialHidden", "javascriptDialogOpening",
+                     "javascriptDialogClosed", "downloadWillBegin", "downloadProgress", "screencastVisibilityChanged", "screencastFrame",
+                     "backForwardCacheNotUsed", "frameStartedLoading", "frameStoppedLoading", "frameStartedNavigating"],
+                "async": ["captureScreenshot", "navigate", "getAppManifest", "reload", "captureSnapshot", "getInstallabilityErrors", "getManifestIcons", "getAppId", "getAnnotatedPageContent"]
+            },
+            {
+                "domain": "Preload",
+                "include": ["enable", "disable"],
+                "include_events": ["prefetchStatusUpdated", "prerenderStatusUpdated", "preloadEnabledStateUpdated"]
             },
             {
                 "domain": "Runtime",
@@ -86,15 +186,17 @@
             },
             {
                 "domain": "Storage",
-                "async": ["getUsageAndQuota", "clearDataForOrigin", "getCookies", "setCookies", "clearCookies"]
+                "exclude": ["runBounceTrackingMitigations", "getRelatedWebsiteSets"],
+                "async": ["getUsageAndQuota", "clearDataForOrigin", "clearDataForStorageKey", "getCookies", "setCookies", "clearCookies", "overrideQuotaForOrigin", "getTrustTokens", "clearTrustTokens", "getInterestGroupDetails", "getSharedStorageMetadata", "getSharedStorageEntries", "setSharedStorageEntry", "deleteSharedStorageEntry", "clearSharedStorageEntries", "resetSharedStorageBudget", "getStorageBucketList"]
             },
             {
                 "domain": "SystemInfo",
+                "include": ["getInfo", "getProcessInfo", "getFeatureState"],
                 "async": ["getInfo", "getProcessInfo"]
             },
             {
                 "domain": "Target",
-                "async": ["createBrowserContext", "disposeBrowserContext", "setAutoAttach"]
+                "async": ["createBrowserContext", "disposeBrowserContext", "setAutoAttach", "autoAttachRelated", "exposeDevToolsProtocol" ]
             },
             {
                 "domain": "Tethering",
@@ -105,12 +207,47 @@
                 "async": ["start", "getCategories", "requestMemoryDump"]
             },
             {
+                "domain": "VisualDebugger",
+                "include": ["filterStream", "startStream", "stopStream"],
+                "include_events": ["frameResponse"]
+            },
+            {
                 "domain": "Fetch",
-                "async": ["enable", "continueRequest", "failRequest", "fulfillRequest", "continueWithAuth", "getResponseBody", "takeResponseBodyAsStream"]
+                "async": ["enable", "continueRequest", "failRequest", "fulfillRequest", "continueWithAuth", "continueResponse", "getResponseBody", "takeResponseBodyAsStream"]
             },
             {
                 "domain": "WebAuthn",
-                "include": ["enable", "disable", "addVirtualAuthenticator", "removeVirtualAuthenticator", "addCredential", "removeCredential", "clearCredentials", "getCredential", "getCredentials", "setUserVerified", "setAutomaticPresenceSimulation"]
+                "async": ["addCredential", "getCredential", "getCredentials"]
+            },
+            {
+                "domain": "DeviceAccess",
+                "include": ["enable", "disable", "selectPrompt", "cancelPrompt"],
+                "include_events": ["deviceRequestPrompted"]
+            },
+            {
+                "domain": "BluetoothEmulation",
+                "async": [
+                    "setSimulatedCentralState",
+                    "simulatePreconnectedPeripheral",
+                    "simulateAdvertisement",
+                    "simulateGATTOperationResponse",
+                    "simulateCharacteristicOperationResponse",
+                    "simulateDescriptorOperationResponse",
+                    "addService",
+                    "removeService",
+                    "addCharacteristic",
+                    "removeCharacteristic",
+                    "addDescriptor",
+                    "removeDescriptor",
+                    "simulateGATTDisconnection"
+                ]
+            },
+            {
+                "domain": "SmartCardEmulation"
+            },
+            {
+                "domain": "WebMCP",
+                "async": ["invokeTool"]
             }
         ]
     },
@@ -118,7 +255,7 @@
     "lib": {
         "package": "content/browser/devtools/protocol",
         "output": "protocol",
-        "string_header": "content/browser/devtools/protocol/base_string_adapter.h",
+        "protocol_traits": "third_party/inspector_protocol/crdtp/chromium/protocol_traits.h",
         "export_macro": "CONTENT_EXPORT",
         "export_header": "content/common/content_export.h"
     },

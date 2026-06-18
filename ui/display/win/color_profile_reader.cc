@@ -1,15 +1,16 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/display/win/color_profile_reader.h"
 
-#include <stddef.h>
 #include <windows.h>
 
-#include "base/bind.h"
+#include <stddef.h>
+
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
-#include "base/task/post_task.h"
+#include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/scoped_thread_priority.h"
 #include "ui/display/win/display_info.h"
@@ -23,14 +24,13 @@ BOOL CALLBACK EnumMonitorForProfilePathCallback(HMONITOR monitor,
                                                 HDC input_hdc,
                                                 LPRECT rect,
                                                 LPARAM data) {
-  base::string16 device_name;
-  MONITORINFOEX monitor_info;
-  ::ZeroMemory(&monitor_info, sizeof(monitor_info));
+  std::wstring device_name;
+  MONITORINFOEX monitor_info{};
   monitor_info.cbSize = sizeof(monitor_info);
   ::GetMonitorInfo(monitor, &monitor_info);
-  device_name = base::string16(monitor_info.szDevice);
+  device_name = std::wstring(monitor_info.szDevice);
 
-  base::string16 profile_path;
+  std::wstring profile_path;
   HDC hdc = ::CreateDC(monitor_info.szDevice, NULL, NULL, NULL);
   if (hdc) {
     DWORD path_length = MAX_PATH;
@@ -38,12 +38,13 @@ BOOL CALLBACK EnumMonitorForProfilePathCallback(HMONITOR monitor,
     BOOL result = ::GetICMProfile(hdc, &path_length, path);
     ::DeleteDC(hdc);
     if (result)
-      profile_path = base::string16(path);
+      profile_path = std::wstring(path);
   }
-
-  std::map<base::string16, base::string16>* device_to_path_map =
-      reinterpret_cast<std::map<base::string16, base::string16>*>(data);
-  (*device_to_path_map)[device_name] = profile_path;
+  int64_t display_id =
+      internal::DisplayInfo::DisplayIdFromMonitorInfo(monitor_info);
+  std::map<int64_t, std::wstring>* display_id_to_path_map =
+      reinterpret_cast<std::map<int64_t, std::wstring>*>(data);
+  (*display_id_to_path_map)[display_id] = profile_path;
   return TRUE;
 }
 
@@ -56,10 +57,10 @@ ColorProfileReader::~ColorProfileReader() {}
 void ColorProfileReader::UpdateIfNeeded() {
   // There is a potential race condition wherein the result from
   // EnumDisplayMonitors is already stale by the time that we get
-  // back to BuildDeviceToPathMapCompleted.  To fix this we would
+  // back to BuildDisplayIdToPathMapCompleted.  To fix this we would
   // need to record the fact that we early-out-ed because of
   // update_in_flight_ was true, and then re-issue
-  // BuildDeviceToPathMapOnBackgroundThread when the update
+  // BuildDisplayIdToPathMapOnBackgroundThread when the update
   // returned.
   if (update_in_flight_)
     return;
@@ -68,77 +69,68 @@ void ColorProfileReader::UpdateIfNeeded() {
 
   // Enumerate device profile paths on a background thread.  When this
   // completes it will run another task on a background thread to read
-  // the profiles.
+  // the profiles. This can impact the color of the browser so we want
+  // to set this to a higher priority to complete the task earlier
+  // during startup.
   base::ThreadPool::PostTaskAndReplyWithResult(
-      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
       base::BindOnce(
-          &ColorProfileReader::BuildDeviceToPathMapOnBackgroundThread),
-      base::BindOnce(&ColorProfileReader::BuildDeviceToPathMapCompleted,
+          &ColorProfileReader::BuildDisplayIdToPathMapOnBackgroundThread),
+      base::BindOnce(&ColorProfileReader::BuildDisplayIdToPathMapCompleted,
                      weak_factory_.GetWeakPtr()));
 }
 
 // static
-ColorProfileReader::DeviceToPathMap
-ColorProfileReader::BuildDeviceToPathMapOnBackgroundThread() {
+ColorProfileReader::DisplayIdToPathMap
+ColorProfileReader::BuildDisplayIdToPathMapOnBackgroundThread() {
   SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
-  DeviceToPathMap device_to_path_map;
-  EnumDisplayMonitors(nullptr, nullptr, EnumMonitorForProfilePathCallback,
-                      reinterpret_cast<LPARAM>(&device_to_path_map));
-  return device_to_path_map;
+  DisplayIdToPathMap display_id_to_path_map;
+  ::EnumDisplayMonitors(nullptr, nullptr, EnumMonitorForProfilePathCallback,
+                        reinterpret_cast<LPARAM>(&display_id_to_path_map));
+  return display_id_to_path_map;
 }
 
-void ColorProfileReader::BuildDeviceToPathMapCompleted(
-    DeviceToPathMap new_device_to_path_map) {
+void ColorProfileReader::BuildDisplayIdToPathMapCompleted(
+    DisplayIdToPathMap new_display_id_to_path_map) {
   DCHECK(update_in_flight_);
 
   // Are there any changes from previous results
-  if (device_to_path_map_ == new_device_to_path_map) {
+  if (display_id_to_path_map_ == new_display_id_to_path_map) {
     update_in_flight_ = false;
     return;
   }
 
-  device_to_path_map_ = new_device_to_path_map;
+  display_id_to_path_map_ = new_display_id_to_path_map;
 
   base::ThreadPool::PostTaskAndReplyWithResult(
-      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
       base::BindOnce(&ColorProfileReader::ReadProfilesOnBackgroundThread,
-                     new_device_to_path_map),
+                     new_display_id_to_path_map),
       base::BindOnce(&ColorProfileReader::ReadProfilesCompleted,
                      weak_factory_.GetWeakPtr()));
 }
 
 // static
-ColorProfileReader::DeviceToDataMap
+ColorProfileReader::DisplayIdToProfileMap
 ColorProfileReader::ReadProfilesOnBackgroundThread(
-    DeviceToPathMap new_device_to_path_map) {
-  DeviceToDataMap new_device_to_data_map;
-  for (auto entry : new_device_to_path_map) {
-    const base::string16& device_name = entry.first;
-    const base::string16& profile_path = entry.second;
+    DisplayIdToPathMap new_display_id_to_path_map) {
+  DisplayIdToProfileMap new_display_id_to_profile_map;
+  for (const auto& [display_id, profile_path] : new_display_id_to_path_map) {
     std::string profile_data;
     base::ReadFileToString(base::FilePath(profile_path), &profile_data);
-    new_device_to_data_map[device_name] = profile_data;
-  }
-  return new_device_to_data_map;
-}
-
-void ColorProfileReader::ReadProfilesCompleted(
-    DeviceToDataMap device_to_data_map) {
-  DCHECK(update_in_flight_);
-  update_in_flight_ = false;
-
-  display_id_to_profile_map_.clear();
-  for (auto entry : device_to_data_map) {
-    const base::string16& device_name = entry.first;
-    const std::string& profile_data = entry.second;
     if (!profile_data.empty()) {
-      int64_t display_id =
-          DisplayInfo::DeviceIdFromDeviceName(device_name.c_str());
-      display_id_to_profile_map_[display_id] =
+      new_display_id_to_profile_map[display_id] =
           gfx::ICCProfile::FromData(profile_data.data(), profile_data.size());
     }
   }
+  return new_display_id_to_profile_map;
+}
 
+void ColorProfileReader::ReadProfilesCompleted(
+    DisplayIdToProfileMap display_id_to_profile_map) {
+  DCHECK(update_in_flight_);
+  update_in_flight_ = false;
+  display_id_to_profile_map_ = std::move(display_id_to_profile_map);
   client_->OnColorProfilesChanged();
 }
 

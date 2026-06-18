@@ -1,10 +1,12 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
+#include "base/compiler_specific.h"
+#include "build/build_config.h"
 #include "gpu/command_buffer/tests/gl_manager.h"
 #include "gpu/command_buffer/tests/gl_test_utils.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -33,24 +35,24 @@ class OcclusionQueryTest : public testing::Test {
 
 static void SetMatrix(float x, float z, float scale, float* matrix) {
   matrix[0] = scale;
-  matrix[1] = 0.0f;
-  matrix[2] = 0.0f;
-  matrix[3] = 0.0f;
+  UNSAFE_TODO(matrix[1]) = 0.0f;
+  UNSAFE_TODO(matrix[2]) = 0.0f;
+  UNSAFE_TODO(matrix[3]) = 0.0f;
 
-  matrix[4] = 0.0f;
-  matrix[5] = scale;
-  matrix[6] = 0.0f;
-  matrix[7] = 0.0f;
+  UNSAFE_TODO(matrix[4]) = 0.0f;
+  UNSAFE_TODO(matrix[5]) = scale;
+  UNSAFE_TODO(matrix[6]) = 0.0f;
+  UNSAFE_TODO(matrix[7]) = 0.0f;
 
-  matrix[8] = 0.0f;
-  matrix[9] = 0.0f;
-  matrix[10] = scale;
-  matrix[11] = 0.0f;
+  UNSAFE_TODO(matrix[8]) = 0.0f;
+  UNSAFE_TODO(matrix[9]) = 0.0f;
+  UNSAFE_TODO(matrix[10]) = scale;
+  UNSAFE_TODO(matrix[11]) = 0.0f;
 
-  matrix[12] = x;
-  matrix[13] = 0.0f;
-  matrix[14] = z;
-  matrix[15] = 1.0f;
+  UNSAFE_TODO(matrix[12]) = x;
+  UNSAFE_TODO(matrix[13]) = 0.0f;
+  UNSAFE_TODO(matrix[14]) = z;
+  UNSAFE_TODO(matrix[15]) = 1.0f;
 }
 
 void OcclusionQueryTest::DrawRect(float x, float z, float scale, float* color) {
@@ -66,7 +68,7 @@ void OcclusionQueryTest::DrawRect(float x, float z, float scale, float* color) {
 }
 
 TEST_F(OcclusionQueryTest, Occlusion) {
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   EXPECT_TRUE(GLTestHelper::HasExtension("GL_EXT_occlusion_query_boolean"))
       << "GL_EXT_occlusion_query_boolean is required on OSX";
 #endif

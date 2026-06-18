@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,10 @@
 #include <map>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/logging.h"
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
+#include "base/notimplemented.h"
 
 namespace {
 // TODO(jamiewalch): Use the correct DPI for the mode: http://crbug.com/172405.
@@ -22,28 +23,37 @@ namespace remoting {
 
 // Provide comparison operation for ScreenResolution so we can use it in
 // std::map.
-static inline bool operator <(const ScreenResolution& a,
-                              const ScreenResolution& b) {
-  if (a.dimensions().width() != b.dimensions().width())
+static inline bool operator<(const ScreenResolution& a,
+                             const ScreenResolution& b) {
+  if (a.dimensions().width() != b.dimensions().width()) {
     return a.dimensions().width() < b.dimensions().width();
-  if (a.dimensions().height() != b.dimensions().height())
+  }
+  if (a.dimensions().height() != b.dimensions().height()) {
     return a.dimensions().height() < b.dimensions().height();
-  if (a.dpi().x() != b.dpi().x())
+  }
+  if (a.dpi().x() != b.dpi().x()) {
     return a.dpi().x() < b.dpi().x();
+  }
   return a.dpi().y() < b.dpi().y();
 }
 
 class DesktopResizerWin : public DesktopResizer {
  public:
   DesktopResizerWin();
+  DesktopResizerWin(const DesktopResizerWin&) = delete;
+  DesktopResizerWin& operator=(const DesktopResizerWin&) = delete;
   ~DesktopResizerWin() override;
 
   // DesktopResizer interface.
-  ScreenResolution GetCurrentResolution() override;
+  ScreenResolution GetCurrentResolution(webrtc::ScreenId screen_id) override;
   std::list<ScreenResolution> GetSupportedResolutions(
-      const ScreenResolution& preferred) override;
-  void SetResolution(const ScreenResolution& resolution) override;
-  void RestoreResolution(const ScreenResolution& original) override;
+      const ScreenResolution& preferred,
+      webrtc::ScreenId screen_id) override;
+  void SetResolution(const ScreenResolution& resolution,
+                     webrtc::ScreenId screen_id) override;
+  void RestoreResolution(const ScreenResolution& original,
+                         webrtc::ScreenId screen_id) override;
+  void SetVideoLayout(const protocol::VideoLayout& layout) override;
 
  private:
   void UpdateBestModeForResolution(const DEVMODE& current_mode,
@@ -52,8 +62,9 @@ class DesktopResizerWin : public DesktopResizer {
 
   // Calls EnumDisplaySettingsEx() for the primary monitor.
   // Returns false if |mode_number| does not exist.
-  static bool GetPrimaryDisplayMode(
-      DWORD mode_number, DWORD flags, DEVMODE* mode);
+  static bool GetPrimaryDisplayMode(DWORD mode_number,
+                                    DWORD flags,
+                                    DEVMODE* mode);
 
   // Returns true if the mode has width, height, bits-per-pixel, frequency
   // and orientation fields.
@@ -63,42 +74,52 @@ class DesktopResizerWin : public DesktopResizer {
   static ScreenResolution GetModeResolution(const DEVMODE& mode);
 
   std::map<ScreenResolution, DEVMODE> best_mode_for_resolution_;
-
-  DISALLOW_COPY_AND_ASSIGN(DesktopResizerWin);
+  DEVMODE initial_mode_;
 };
 
 DesktopResizerWin::DesktopResizerWin() {
+  if (!GetPrimaryDisplayMode(ENUM_CURRENT_SETTINGS, 0, &initial_mode_) ||
+      !IsModeValid(initial_mode_)) {
+    LOG(ERROR) << "GetPrimaryDisplayMode failed. Resize will not prefer "
+               << "initial orientation or frequency settings.";
+    initial_mode_.dmFields = 0;
+  }
 }
 
-DesktopResizerWin::~DesktopResizerWin() {
-}
+DesktopResizerWin::~DesktopResizerWin() {}
 
-ScreenResolution DesktopResizerWin::GetCurrentResolution() {
+ScreenResolution DesktopResizerWin::GetCurrentResolution(
+    webrtc::ScreenId screen_id) {
   DEVMODE current_mode;
   if (GetPrimaryDisplayMode(ENUM_CURRENT_SETTINGS, 0, &current_mode) &&
-      IsModeValid(current_mode))
+      IsModeValid(current_mode)) {
     return GetModeResolution(current_mode);
+  }
   return ScreenResolution();
 }
 
 std::list<ScreenResolution> DesktopResizerWin::GetSupportedResolutions(
-    const ScreenResolution& preferred) {
-  if (!IsResizeSupported())
+    const ScreenResolution& preferred,
+    webrtc::ScreenId screen_id) {
+  if (!IsResizeSupported()) {
     return std::list<ScreenResolution>();
+  }
 
   // Enumerate the resolutions to return, and where there are multiple modes of
   // the same resolution, store the one most closely matching the current mode
   // in |best_mode_for_resolution_|.
   DEVMODE current_mode;
   if (!GetPrimaryDisplayMode(ENUM_CURRENT_SETTINGS, 0, &current_mode) ||
-      !IsModeValid(current_mode))
+      !IsModeValid(current_mode)) {
     return std::list<ScreenResolution>();
+  }
 
   best_mode_for_resolution_.clear();
-  for (DWORD i = 0; ; ++i) {
+  for (DWORD i = 0;; ++i) {
     DEVMODE candidate_mode;
-    if (!GetPrimaryDisplayMode(i, EDS_ROTATEDMODE, &candidate_mode))
+    if (!GetPrimaryDisplayMode(i, EDS_ROTATEDMODE, &candidate_mode)) {
       break;
+    }
     UpdateBestModeForResolution(current_mode, candidate_mode);
   }
 
@@ -109,21 +130,31 @@ std::list<ScreenResolution> DesktopResizerWin::GetSupportedResolutions(
   return resolutions;
 }
 
-void DesktopResizerWin::SetResolution(const ScreenResolution& resolution) {
-  if (best_mode_for_resolution_.count(resolution) == 0)
+void DesktopResizerWin::SetResolution(const ScreenResolution& resolution,
+                                      webrtc::ScreenId screen_id) {
+  auto it = best_mode_for_resolution_.find(resolution);
+  if (it == best_mode_for_resolution_.end()) {
     return;
+  }
 
-  DEVMODE new_mode = best_mode_for_resolution_[resolution];
+  DEVMODE new_mode = it->second;
   DWORD result = ChangeDisplaySettings(&new_mode, CDS_FULLSCREEN);
-  if (result != DISP_CHANGE_SUCCESSFUL)
+  if (result != DISP_CHANGE_SUCCESSFUL) {
     LOG(ERROR) << "SetResolution failed: " << result;
+  }
 }
 
-void DesktopResizerWin::RestoreResolution(const ScreenResolution& original) {
+void DesktopResizerWin::RestoreResolution(const ScreenResolution& original,
+                                          webrtc::ScreenId screen_id) {
   // Restore the display mode based on the registry configuration.
   DWORD result = ChangeDisplaySettings(nullptr, 0);
-  if (result != DISP_CHANGE_SUCCESSFUL)
+  if (result != DISP_CHANGE_SUCCESSFUL) {
     LOG(ERROR) << "RestoreResolution failed: " << result;
+  }
+}
+
+void DesktopResizerWin::SetVideoLayout(const protocol::VideoLayout& layout) {
+  NOTIMPLEMENTED();
 }
 
 void DesktopResizerWin::UpdateBestModeForResolution(
@@ -147,28 +178,67 @@ void DesktopResizerWin::UpdateBestModeForResolution(
   }
 
   // If there are multiple modes with the same dimensions:
-  // - Prefer the modes which match the current rotation.
-  // - Among those, prefer modes which match the current frequency.
+  // - Prefer the modes which match either the initial (preferred) or the
+  //   current rotation.
+  // - Among those, prefer modes which match the initial (preferred) or the
+  //   current frequency.
   // - Otherwise, prefer modes with a higher frequency.
   ScreenResolution candidate_resolution = GetModeResolution(candidate_mode);
-  if (best_mode_for_resolution_.count(candidate_resolution) != 0) {
-    DEVMODE best_mode = best_mode_for_resolution_[candidate_resolution];
+  if (auto it = best_mode_for_resolution_.find(candidate_resolution);
+      it != best_mode_for_resolution_.end()) {
+    DEVMODE best_mode = it->second;
 
-    if ((candidate_mode.dmDisplayOrientation !=
-         current_mode.dmDisplayOrientation) &&
-        (best_mode.dmDisplayOrientation == current_mode.dmDisplayOrientation)) {
+    bool best_mode_matches_initial_orientation =
+        (initial_mode_.dmDisplayOrientation & DM_DISPLAYORIENTATION) &&
+        (best_mode.dmDisplayOrientation == initial_mode_.dmDisplayOrientation);
+    bool candidate_mode_matches_initial_orientation =
+        candidate_mode.dmDisplayOrientation ==
+        initial_mode_.dmDisplayOrientation;
+    if (best_mode_matches_initial_orientation &&
+        !candidate_mode_matches_initial_orientation) {
       LOG(INFO) << "Ignoring mode " << candidate_mode.dmPelsWidth << "x"
                 << candidate_mode.dmPelsHeight
-                << ": mode with matching orientation already found.";
+                << ": mode matching initial orientation already found.";
       return;
     }
 
-    if ((candidate_mode.dmDisplayFrequency !=
-         current_mode.dmDisplayFrequency) &&
-        (best_mode.dmDisplayFrequency >= candidate_mode.dmDisplayFrequency)) {
+    bool best_mode_matches_current_orientation =
+        best_mode.dmDisplayOrientation == current_mode.dmDisplayOrientation;
+    bool candidate_mode_matches_current_orientation =
+        candidate_mode.dmDisplayOrientation ==
+        current_mode.dmDisplayOrientation;
+    if (best_mode_matches_current_orientation &&
+        !candidate_mode_matches_initial_orientation &&
+        !candidate_mode_matches_current_orientation) {
       LOG(INFO) << "Ignoring mode " << candidate_mode.dmPelsWidth << "x"
                 << candidate_mode.dmPelsHeight
-                << ": mode with matching or higher frequency already found.";
+                << ": mode matching current orientation already found.";
+      return;
+    }
+
+    bool best_mode_matches_initial_frequency =
+        (initial_mode_.dmDisplayOrientation & DM_DISPLAYFREQUENCY) &&
+        (best_mode.dmDisplayFrequency == initial_mode_.dmDisplayFrequency);
+    bool candidate_mode_matches_initial_frequency =
+        candidate_mode.dmDisplayFrequency == initial_mode_.dmDisplayFrequency;
+    if (best_mode_matches_initial_frequency &&
+        !candidate_mode_matches_initial_frequency) {
+      LOG(INFO) << "Ignoring mode " << candidate_mode.dmPelsWidth << "x"
+                << candidate_mode.dmPelsHeight
+                << ": mode matching initial frequency already found.";
+      return;
+    }
+
+    bool best_mode_matches_current_frequency =
+        best_mode.dmDisplayFrequency == current_mode.dmDisplayFrequency;
+    bool candidate_mode_matches_current_frequency =
+        candidate_mode.dmDisplayFrequency == current_mode.dmDisplayFrequency;
+    if (best_mode_matches_current_frequency &&
+        !candidate_mode_matches_initial_frequency &&
+        !candidate_mode_matches_current_frequency) {
+      LOG(INFO) << "Ignoring mode " << candidate_mode.dmPelsWidth << "x"
+                << candidate_mode.dmPelsHeight
+                << ": mode matching current frequency already found.";
       return;
     }
   }
@@ -185,20 +255,19 @@ bool DesktopResizerWin::IsResizeSupported() {
 }
 
 // static
-bool DesktopResizerWin::GetPrimaryDisplayMode(
-    DWORD mode_number, DWORD flags, DEVMODE* mode) {
- memset(mode, 0, sizeof(DEVMODE));
- mode->dmSize = sizeof(DEVMODE);
- if (!EnumDisplaySettingsEx(nullptr, mode_number, mode, flags))
-   return false;
- return true;
+bool DesktopResizerWin::GetPrimaryDisplayMode(DWORD mode_number,
+                                              DWORD flags,
+                                              DEVMODE* mode) {
+  *mode = {
+      .dmSize = sizeof(DEVMODE),
+  };
+  return EnumDisplaySettingsEx(nullptr, mode_number, mode, flags);
 }
 
 // static
 bool DesktopResizerWin::IsModeValid(const DEVMODE& mode) {
-  const DWORD kRequiredFields =
-      DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL |
-      DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION;
+  const DWORD kRequiredFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL |
+                                DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION;
   return (mode.dmFields & kRequiredFields) == kRequiredFields;
 }
 

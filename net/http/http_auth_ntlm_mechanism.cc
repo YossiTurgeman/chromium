@@ -1,13 +1,16 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "net/http/http_auth_ntlm_mechanism.h"
 
+#include <string_view>
+
 #include "base/base64.h"
 #include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/rand_util.h"
+#include "base/strings/strcat.h"
 #include "base/time/time.h"
 #include "net/base/net_errors.h"
 #include "net/base/network_interfaces.h"
@@ -24,8 +27,8 @@ uint64_t GetMSTime() {
   return base::Time::Now().since_origin().InMicroseconds() * 10;
 }
 
-void GenerateRandom(uint8_t* output, size_t n) {
-  base::RandBytes(output, n);
+void GenerateRandom(base::span<uint8_t> output) {
+  base::RandBytes(output);
 }
 
 // static
@@ -50,13 +53,10 @@ int SetAuthTokenFromBinaryToken(std::string* auth_token,
   if (next_token.empty())
     return ERR_UNEXPECTED;
 
-  std::string encode_output;
-  base::Base64Encode(
-      base::StringPiece(reinterpret_cast<const char*>(next_token.data()),
-                        next_token.size()),
-      &encode_output);
+  std::string encode_output = base::Base64Encode(std::string_view(
+      reinterpret_cast<const char*>(next_token.data()), next_token.size()));
 
-  *auth_token = std::string("NTLM ") + encode_output;
+  *auth_token = base::StrCat({"NTLM ", encode_output});
   return OK;
 }
 
@@ -133,12 +133,12 @@ int HttpAuthNtlmMechanism::GenerateAuthToken(
 
   // The username may be in the form "DOMAIN\user".  Parse it into the two
   // components.
-  base::string16 domain;
-  base::string16 user;
-  const base::string16& username = credentials->username();
-  const base::char16 backslash_character = '\\';
+  std::u16string domain;
+  std::u16string user;
+  const std::u16string& username = credentials->username();
+  const char16_t backslash_character = '\\';
   size_t backslash_idx = username.find(backslash_character);
-  if (backslash_idx == base::string16::npos) {
+  if (backslash_idx == std::u16string::npos) {
     user = username;
   } else {
     domain = username.substr(0, backslash_idx);
@@ -150,12 +150,12 @@ int HttpAuthNtlmMechanism::GenerateAuthToken(
     return ERR_UNEXPECTED;
 
   uint8_t client_challenge[8];
-  g_generate_random_proc(client_challenge, 8);
+  g_generate_random_proc(base::span<uint8_t>(client_challenge));
 
   auto next_token = ntlm_client_.GenerateAuthenticateMessage(
       domain, user, credentials->password(), hostname, channel_bindings, spn,
       g_get_ms_time_proc(), client_challenge,
-      base::as_bytes(base::make_span(challenge_token_)));
+      base::as_byte_span(challenge_token_));
 
   return SetAuthTokenFromBinaryToken(auth_token, next_token);
 }

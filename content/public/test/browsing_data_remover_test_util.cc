@@ -1,20 +1,20 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/public/test/browsing_data_remover_test_util.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
-#include "base/threading/thread_task_runner_handle.h"
 
 namespace content {
 
 BrowsingDataRemoverCompletionObserver::BrowsingDataRemoverCompletionObserver(
     BrowsingDataRemover* remover)
-    : observer_(this),
-      origin_task_runner_(base::ThreadTaskRunnerHandle::Get()) {
-  observer_.Add(remover);
+    : observation_(this),
+      origin_task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {
+  observation_.Observe(remover);
 }
 
 BrowsingDataRemoverCompletionObserver::
@@ -31,7 +31,8 @@ void BrowsingDataRemoverCompletionObserver::OnBrowsingDataRemoverDone(
     uint64_t failed_data_types) {
   browsing_data_remover_done_ = true;
   failed_data_types_ = failed_data_types;
-  observer_.RemoveAll();
+  DCHECK(observation_.IsObserving());
+  observation_.Reset();
   QuitRunLoopWhenTasksComplete();
 }
 
@@ -59,7 +60,7 @@ BrowsingDataRemoverCompletionInhibitor::BrowsingDataRemoverCompletionInhibitor(
     BrowsingDataRemover* remover)
     : remover_(remover),
       run_loop_(new base::RunLoop),
-      origin_task_runner_(base::ThreadTaskRunnerHandle::Get()) {
+      origin_task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {
   DCHECK(remover);
   remover_->SetWouldCompleteCallbackForTesting(
       base::BindRepeating(&BrowsingDataRemoverCompletionInhibitor::

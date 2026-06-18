@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,6 +22,8 @@ import {
 
 import 'vue-material/dist/vue-material.min.css';
 
+import VModal from 'vue-js-modal';
+
 document.addEventListener('DOMContentLoaded', () => {
   loadGraph().then(data => {
     Vue.use(MdButton);
@@ -34,6 +36,8 @@ document.addEventListener('DOMContentLoaded', () => {
     Vue.use(MdRadio);
     Vue.use(MdSubheader);
 
+    Vue.use(VModal, {dialog: true});
+
     new Vue({
       el: '#package-graph-page',
       render: createElement => createElement(
@@ -41,6 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
           {
             props: {
               graphJson: data.package_graph,
+              graphMetadata: data.build_metadata,
             },
           },
       ),

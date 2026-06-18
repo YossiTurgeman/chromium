@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as Elements from 'devtools/panels/elements/elements.js';
+
 (async function() {
   TestRunner.addResult(`Tests that links are updated properly when editing selector.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <style>
@@ -42,11 +46,12 @@
     },
 
     function testEditSelector(next) {
-      var section = UI.panels.elements._stylesWidget._sectionBlocks[0].sections[3];
+      var section =
+          Elements.ElementsPanel.ElementsPanel.instance().stylesWidget.sectionBlocks[0].sections[3];
       section.startEditingSelector();
-      section._selectorElement.textContent = '.should-change, .INSERTED-OTHER-SELECTOR';
+      section.selectorElement.textContent = '.should-change, .INSERTED-OTHER-SELECTOR';
       ElementsTestRunner.waitForSelectorCommitted(onSelectorEdited);
-      section._selectorElement.dispatchEvent(TestRunner.createKeyEvent('Enter'));
+      section.selectorElement.dispatchEvent(TestRunner.createKeyEvent('Enter'));
 
       async function onSelectorEdited() {
         TestRunner.addResult('\n\n#### AFTER SELECTOR EDIT ####\n\n');

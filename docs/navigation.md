@@ -157,8 +157,20 @@ navigation. They should not generally be used for modifying a navigation (e.g.,
 simulating a redirect), as discussed in
 [Navigation Concepts](navigation_concepts.md#rules-for-canceling-navigations).
 They are typically registered in
-`NavigationThrottleRunner::RegisterNavigationThrottles` or
+`NavigationThrottleRegistryImpl::RegisterNavigationThrottles` or
 `ContentBrowserClient::CreateThrottlesForNavigation`.
 
+The most common NavigationThrottles events are `WillStartRequest`,
+`WillRedirectRequest`, and `WillProcessResponse`, which allow intercepting a
+navigation before sending the network request, during any redirects, and after
+receiving the response. These events are only invoked on navigations that
+require a URLLoader (see NavigationRequest::NeedsUrlLoader).
+A NavigationThrottle that wishes to intercept a non-URLLoader navigation
+(same-document navigations, about:blank, etc.) should register itself in
+`NavigationThrottleRegistryImpl::RegisterNavigationThrottlesForCommitWithoutUrlLoader`,
+and will get a single `WillCommitWithoutUrlLoader` event instead of the full
+set of events centered on network requests. Page-activation navigations, such
+as activating a prerendered page or restoring a page from the back-forward
+cache, skip NavigationThrottles entirely.
 
-[WebContentsObserver]: https://source.chromium.org/chromium/chromium/src/+/master:content/public/browser/web_contents_observer.h
+[WebContentsObserver]: https://source.chromium.org/chromium/chromium/src/+/main:content/public/browser/web_contents_observer.h

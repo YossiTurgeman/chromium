@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,19 @@
 #include "base/observer_list_types.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/global_routing_id.h"
+#include "content/public/common/child_process_id.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
+#include "third_party/blink/public/mojom/worker/shared_worker_info.mojom.h"
 
 class GURL;
 
 namespace base {
 class UnguessableToken;
 }
+
+namespace blink {
+class StorageKey;
+}  // namespace blink
 
 namespace url {
 class Origin;
@@ -36,7 +42,8 @@ class CONTENT_EXPORT SharedWorkerService {
     // evaluated.
     virtual void OnWorkerCreated(
         const blink::SharedWorkerToken& token,
-        int worker_process_id,
+        ChildProcessId worker_process_id,
+        const url::Origin& security_origin,
         const base::UnguessableToken& dev_tools_token) = 0;
     virtual void OnBeforeWorkerDestroyed(
         const blink::SharedWorkerToken& token) = 0;
@@ -54,10 +61,10 @@ class CONTENT_EXPORT SharedWorkerService {
     // notifications.
     virtual void OnClientAdded(
         const blink::SharedWorkerToken& token,
-        content::GlobalFrameRoutingId render_frame_host_id) = 0;
+        content::GlobalRenderFrameHostId render_frame_host_id) = 0;
     virtual void OnClientRemoved(
         const blink::SharedWorkerToken& token,
-        content::GlobalFrameRoutingId render_frame_host_id) = 0;
+        content::GlobalRenderFrameHostId render_frame_host_id) = 0;
   };
 
   // Adds/removes an observer.
@@ -76,12 +83,18 @@ class CONTENT_EXPORT SharedWorkerService {
   //       OnClientAdded() for each worker's clients.
   virtual void EnumerateSharedWorkers(Observer* observer) = 0;
 
-  // Terminates the given shared worker identified by its name, the URL of
-  // its main script resource, and the constructor origin. Returns true on
-  // success.
-  virtual bool TerminateWorker(const GURL& url,
-                               const std::string& name,
-                               const url::Origin& constructor_origin) = 0;
+  // Terminates the given shared worker identified by its name, the URL of its
+  // main script resource, the storage key, and the same_site_cookies setting.
+  // Returns true on success.
+  virtual bool TerminateWorker(
+      const GURL& url,
+      const std::string& name,
+      const blink::StorageKey& storage_key,
+      const blink::mojom::SharedWorkerSameSiteCookies same_site_cookies) = 0;
+
+  // Drops all shared workers and references to processes for shared workers
+  // synchronously.
+  virtual void Shutdown() = 0;
 
  protected:
   virtual ~SharedWorkerService() = default;

@@ -1,18 +1,15 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ios/web/browser_url_rewriter_impl.h"
+#import "ios/web/browser_url_rewriter_impl.h"
 
-#include "base/check.h"
-#include "base/strings/string_util.h"
-#include "ios/web/public/browser_state.h"
+#import "base/check.h"
+#import "base/no_destructor.h"
+#import "base/strings/string_util.h"
+#import "ios/web/public/browser_state.h"
 #import "ios/web/public/web_client.h"
-#include "url/gurl.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "url/gurl.h"
 
 namespace web {
 
@@ -48,8 +45,9 @@ bool BrowserURLRewriter::RewriteURLWithWriters(
     const std::vector<BrowserURLRewriter::URLRewriter>& rewriters) {
   bool rewritten = false;
   for (URLRewriter rewriter : rewriters) {
-    if ((rewritten = rewriter(url, browser_state)))
+    if ((rewritten = rewriter(url, browser_state))) {
       break;
+    }
   }
   return rewritten;
 }
@@ -62,8 +60,9 @@ BrowserURLRewriterImpl* BrowserURLRewriterImpl::GetInstance() {
 
 BrowserURLRewriterImpl::BrowserURLRewriterImpl() {
   web::WebClient* web_client = web::GetWebClient();
-  if (web_client)
+  if (web_client) {
     web_client->PostBrowserURLRewriterCreation(this);
+  }
 
   // view-source:
   AddURLRewriter(&HandleViewSource);

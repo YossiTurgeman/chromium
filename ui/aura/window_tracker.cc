@@ -1,8 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/aura/window_tracker.h"
+
+#include <algorithm>
 
 #include "ui/aura/window.h"
 
@@ -20,8 +22,9 @@ WindowTracker::~WindowTracker() {
 }
 
 void WindowTracker::Add(Window* window) {
-  if (base::Contains(windows_, window))
+  if (std::ranges::contains(windows_, window)) {
     return;
+  }
 
   window->AddObserver(this);
   windows_.push_back(window);
@@ -34,7 +37,7 @@ void WindowTracker::RemoveAll() {
 }
 
 void WindowTracker::Remove(Window* window) {
-  auto iter = std::find(windows_.begin(), windows_.end(), window);
+  auto iter = std::ranges::find(windows_, window);
   if (iter != windows_.end()) {
     window->RemoveObserver(this);
     windows_.erase(iter);
@@ -49,7 +52,7 @@ Window* WindowTracker::Pop() {
 }
 
 bool WindowTracker::Contains(Window* window) const {
-  return base::Contains(windows_, window);
+  return std::ranges::contains(windows_, window);
 }
 
 void WindowTracker::OnWindowDestroying(Window* window) {

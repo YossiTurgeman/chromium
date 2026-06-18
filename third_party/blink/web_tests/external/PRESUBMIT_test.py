@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright (c) 2018 The Chromium Authors. All rights reserved.
+#!/usr/bin/env vpython3
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -17,9 +17,16 @@ class MockInputApi(object):
 
     def __init__(self):
         self.affected_paths = []
+        self.sys = sys
         self.os_path = os.path
-        self.python_executable = sys.executable
+        self.python_executable = self.python3_executable = sys.executable
         self.subprocess = subprocess
+        self.is_windows = sys.platform == 'win32'
+        self.is_committing = False
+        self.environ = os.environ
+        self.logging = PrintLogger()
+        self.change = MockChange()
+        self.no_diffs = False
 
     def AbsoluteLocalPaths(self):
         return self.affected_paths
@@ -32,6 +39,21 @@ class MockInputApi(object):
         return filter(lambda f: filter_func(f), all_files)
 
 
+class MockChange(object):
+    """A minimal mock Change for our checks."""
+
+    def RepositoryRoot(self):
+        here = os.path.dirname(__file__)
+        return os.path.abspath(os.path.join(here, '..', '..', '..', '..'))
+
+
+class PrintLogger(object):
+    """A simple logger that just prints log messages."""
+
+    def debug(self, message):
+        print(message)
+
+
 class MockPresubmitError(object):
     """A minimal mock of an error class for our checks."""
 
@@ -39,6 +61,9 @@ class MockPresubmitError(object):
         self.message = message
         self.items = items
         self.long_text = long_text
+
+    def __repr__(self):
+        return self.message + "\n" + self.long_text
 
 
 class MockPresubmitWarning(object):
@@ -92,7 +117,7 @@ class LintWPTTest(unittest.TestCase):
         mock_output = MockOutputApi()
         mock_input.affected_paths = [os.path.abspath(self._test_file)]
         errors = PRESUBMIT._LintWPT(mock_input, mock_output)
-        self.assertEqual(len(errors), 0)
+        self.assertEqual(errors, [])
 
     def testWPTLintErrors(self):
         # Private LayoutTests APIs are not allowed.
@@ -103,6 +128,7 @@ class LintWPTTest(unittest.TestCase):
         mock_input.affected_paths = [os.path.abspath(self._test_file)]
         errors = PRESUBMIT._LintWPT(mock_input, mock_output)
         self.assertEqual(len(errors), 1)
+        self.assertTrue(isinstance(errors[0], MockPresubmitError))
 
     def testWPTLintIgnore(self):
         os.mkdir(self._ignored_directory)
@@ -115,7 +141,7 @@ class LintWPTTest(unittest.TestCase):
         mock_output = MockOutputApi()
         mock_input.affected_paths = files
         errors = PRESUBMIT._LintWPT(mock_input, mock_output)
-        self.assertEqual(len(errors), 0)
+        self.assertEqual(errors, [])
 
 
 class DontModifyIDLFilesTest(unittest.TestCase):
@@ -132,14 +158,24 @@ class DontModifyIDLFilesTest(unittest.TestCase):
         mock_output = MockOutputApi()
         mock_input.affected_paths = [os.path.join(mock_input.PresubmitLocalPath(), 'wpt', 'css', 'foo.html')]
         errors = PRESUBMIT._DontModifyIDLFiles(mock_input, mock_output)
-        self.assertEqual(len(errors), 0)
+        self.assertEqual(errors, [])
 
     def testModifiesInterfaceDirOutsideOfWPT(self):
         mock_input = MockInputApi()
         mock_output = MockOutputApi()
         mock_input.affected_paths = [os.path.join(mock_input.PresubmitLocalPath(), 'other', 'interfaces', 'test.idl')]
         errors = PRESUBMIT._DontModifyIDLFiles(mock_input, mock_output)
-        self.assertEqual(len(errors), 0)
+        self.assertEqual(errors, [])
+
+    def testModifiesTentativeIDL(self):
+        mock_input = MockInputApi()
+        mock_output = MockOutputApi()
+        mock_input.affected_paths = [
+            os.path.join(mock_input.PresubmitLocalPath(), 'wpt', 'interfaces',
+                         'test.tentative.idl')
+        ]
+        errors = PRESUBMIT._DontModifyIDLFiles(mock_input, mock_output)
+        self.assertEqual(errors, [])
 
 
 if __name__ == '__main__':

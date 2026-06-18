@@ -1,16 +1,14 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_FETCH_CLIENT_SETTINGS_OBJECT_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_FETCH_CLIENT_SETTINGS_OBJECT_H_
 
-#include "base/optional.h"
-#include "services/network/public/mojom/ip_address_space.mojom-blink-forward.h"
-#include "services/network/public/mojom/referrer_policy.mojom-blink.h"
+#include "services/network/public/mojom/referrer_policy.mojom-blink-forward.h"
+#include "third_party/blink/public/mojom/frame/policy_container.mojom-blink.h"
 #include "third_party/blink/public/mojom/security_context/insecure_request_policy.mojom-blink-forward.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
 #include "third_party/blink/renderer/platform/loader/allowed_by_nosniff.h"
 #include "third_party/blink/renderer/platform/loader/fetch/https_state.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
@@ -63,19 +61,14 @@ class PLATFORM_EXPORT FetchClientSettingsObject
   // "The default referrer policy for fetches performed using this environment
   // settings object as a request client."
   // https://html.spec.whatwg.org/C/#concept-settings-object-referrer-policy
-  virtual network::mojom::ReferrerPolicy GetReferrerPolicy() const = 0;
-
-  // |GetReferrerPolicyDisregardingMetaTagsContainingLists|
-  // returns the policy that would have been set had we been ignoring all <meta
-  // name=referrer> tags with values comma-separated lists of policies. This
-  // allows histogramming the proportion of requests that would end up with
-  // different referrers were these tags ignored, helping interpret the impact
-  // of removing support for them (which is inconsistent with the spec and other
-  // engines).
-  virtual base::Optional<network::mojom::ReferrerPolicy>
-  GetReferrerPolicyDisregardingMetaTagsContainingLists() const {
-    return base::nullopt;
+  network::mojom::blink::ReferrerPolicy GetReferrerPolicy() const {
+    return GetPolicyContainerPolicies().referrer_policy;
   }
+
+  // The policy container for fetches performed using this environment settings
+  // object as a request client.
+  virtual const mojom::blink::PolicyContainerPolicies&
+  GetPolicyContainerPolicies() const = 0;
 
   // "referrerURL" used in the "Determine request's Referrer" algorithm:
   // https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer
@@ -89,15 +82,12 @@ class PLATFORM_EXPORT FetchClientSettingsObject
   virtual AllowedByNosniff::MimeTypeCheck MimeTypeCheckForClassicWorkerScript()
       const = 0;
 
-  // https://wicg.github.io/cors-rfc1918/#address-space
-  virtual network::mojom::IPAddressSpace GetAddressSpace() const = 0;
-
   // https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy
   virtual mojom::blink::InsecureRequestPolicy GetInsecureRequestsPolicy()
       const = 0;
 
   // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-insecure-navigations-set
-  using InsecureNavigationsSet = HashSet<unsigned, WTF::AlreadyHashed>;
+  using InsecureNavigationsSet = HashSet<unsigned, AlreadyHashedTraits>;
   virtual const InsecureNavigationsSet& GetUpgradeInsecureNavigationsSet()
       const = 0;
 

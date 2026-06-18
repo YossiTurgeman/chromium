@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,34 +13,21 @@
 // static
 void QuietNotificationPermissionUiState::RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* registry) {
-  registry->RegisterListPref(prefs::kNotificationPermissionActions,
-                             PrefRegistry::LOSSY_PREF);
-  // TODO(crbug.com/1001857): Consider making this syncable.
+  // TODO(crbug.com/40097905): Consider making this syncable.
   registry->RegisterBooleanPref(prefs::kEnableQuietNotificationPermissionUi,
-                                false /* default_value */);
-  registry->RegisterBooleanPref(
-      prefs::kQuietNotificationPermissionShouldShowPromo,
-      false /* default_value */);
-  registry->RegisterBooleanPref(
-      prefs::kQuietNotificationPermissionPromoWasShown,
-      false /* default_value */);
+                                /*default_value=*/false);
+  registry->RegisterBooleanPref(prefs::kEnableQuietGeolocationPermissionUi,
+                                /*default_value=*/false);
   registry->RegisterBooleanPref(
       prefs::kHadThreeConsecutiveNotificationPermissionDenies,
-      false /* default_value */);
-}
-
-// static
-bool QuietNotificationPermissionUiState::ShouldShowPromo(Profile* profile) {
-  return profile->GetPrefs()->GetBoolean(
-             prefs::kEnableQuietNotificationPermissionUi) &&
-         profile->GetPrefs()->GetBoolean(
-             prefs::kQuietNotificationPermissionShouldShowPromo) &&
-         !profile->GetPrefs()->GetBoolean(
-             prefs::kQuietNotificationPermissionPromoWasShown);
-}
-
-// static
-void QuietNotificationPermissionUiState::PromoWasShown(Profile* profile) {
-  profile->GetPrefs()->SetBoolean(
-      prefs::kQuietNotificationPermissionPromoWasShown, true /* value */);
+      /*default_value=*/false);
+  registry->RegisterTimePref(prefs::kQuietNotificationPermissionUiDisabledTime,
+                             base::Time());
+  registry->RegisterBooleanPref(prefs::kEnableNotificationCPSS,
+                                /*default_value=*/true);
+  registry->RegisterBooleanPref(prefs::kEnableGeolocationCPSS,
+                                /*default_value=*/true);
+  registry->RegisterBooleanPref(
+      prefs::kDidMigrateAdaptiveNotifiationQuietingToCPSS,
+      /*default_value=*/false);
 }

@@ -31,7 +31,16 @@ See http://dev.chromium.org/developers/how-tos/depottools/presubmit-scripts
 for more details about the presubmit API built into gcl.
 """
 
+import os
+
 def _RunBindingsTests(input_api, output_api):
+    # The presubmit tests are all run together with the module scheme set to
+    # "flat" at the recipe level. But these presubmit tests run through
+    # a test runner that parses the test as a "pyunit" test. The environment
+    # variable forces the test runner to parse the tests as a flat test,
+    # otherwise resultdb will give an error saying a field in the "flat" type
+    # is unexpectedly not empty.
+    os.environ['RESULTDB_MODULE_SCHEME'] = 'flat'
     # Make sure binding templates are considered as source files.
     FILES_TO_CHECK = (r'.+\.tmpl$', )
     # Changes to v8/ do not change generated code or tests.
@@ -55,13 +64,7 @@ def _RunBindingsTests(input_api, output_api):
         input_api.PresubmitLocalPath(), pardir, pardir, 'tools',
         'run_bindings_tests.py')
     cmd_name = 'run_bindings_tests.py'
-    if input_api.platform == 'win32':
-        # Windows needs some help.
-        cmd = [input_api.python_executable, run_bindings_tests_path]
-    else:
-        cmd = [run_bindings_tests_path]
-    if not input_api.verbose:
-        cmd.append('--suppress-diff')
+    cmd = [input_api.python3_executable, run_bindings_tests_path]
     test_cmd = input_api.Command(
         name=cmd_name, cmd=cmd, kwargs={}, message=message_type)
     if input_api.verbose:

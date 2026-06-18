@@ -41,11 +41,15 @@ class LayoutEmbeddedObject final : public LayoutEmbeddedContent {
     kPluginBlockedByContentSecurityPolicy,
   };
   void SetPluginAvailability(PluginAvailability);
-  bool ShowsUnavailablePluginIndicator() const;
+  bool ShowsUnavailablePluginIndicator() const override;
 
-  const char* GetName() const override { return "LayoutEmbeddedObject"; }
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutEmbeddedObject";
+  }
 
   const String& UnavailablePluginReplacementText() const {
+    NOT_DESTROYED();
     return unavailable_plugin_replacement_text_;
   }
 
@@ -53,20 +57,30 @@ class LayoutEmbeddedObject final : public LayoutEmbeddedContent {
   void PaintReplaced(const PaintInfo&,
                      const PhysicalOffset& paint_offset) const final;
 
-  void UpdateLayout() final;
+  void UpdateAfterLayout() final;
 
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectEmbeddedObject ||
-           LayoutEmbeddedContent::IsOfType(type);
+  bool IsEmbeddedObject() const final {
+    NOT_DESTROYED();
+    return true;
   }
-  void ComputeIntrinsicSizingInfo(IntrinsicSizingInfo&) const override;
-  bool NeedsPreferredWidthsRecalculation() const override;
+  PhysicalNaturalSizingInfo GetNaturalDimensions() const override;
+  bool ShouldApplyObjectViewBox() const override {
+    NOT_DESTROYED();
+    return false;
+  }
+  PhysicalRect ReplacedContentRectFrom(
+      const PhysicalRect& base_content_rect) const override;
 
   PluginAvailability plugin_availability_ = kPluginAvailable;
   String unavailable_plugin_replacement_text_;
 };
 
-DEFINE_LAYOUT_OBJECT_TYPE_CASTS(LayoutEmbeddedObject, IsEmbeddedObject());
+template <>
+struct DowncastTraits<LayoutEmbeddedObject> {
+  static bool AllowFrom(const LayoutObject& object) {
+    return object.IsEmbeddedObject();
+  }
+};
 
 }  // namespace blink
 

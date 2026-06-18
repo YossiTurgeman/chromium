@@ -1,17 +1,16 @@
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 '''Gatherer for <structure type="chrome_scaled_image">.
 '''
 
-from __future__ import print_function
 
 import os
+import re
 import struct
 
 from grit import exception
-from grit import lazy_re
 from grit import util
 from grit.gather import interface
 
@@ -89,7 +88,7 @@ class ChromeScaledImage(interface.GathererBase):
   (e.g. "100_percent", "200_percent").
   '''
 
-  split_context_re_ = lazy_re.compile(r'(.+)_(\d+)_percent\Z')
+  split_context_re_ = re.compile(r'(.+)_(\d+)_percent\Z')
 
   def _FindInputFile(self):
     output_context = self.grd_node.GetRoot().output_context

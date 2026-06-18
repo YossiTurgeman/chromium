@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,15 +11,15 @@ TypeConverter<blink::WebFrameOwnerProperties,
               blink::mojom::FrameOwnerProperties>::
     Convert(const blink::mojom::FrameOwnerProperties& mojo_properties) {
   blink::WebFrameOwnerProperties result;
-  result.name = blink::WebString::FromUTF8(mojo_properties.name);
+  result.name = blink::WebString::FromUtf8(mojo_properties.name);
   result.scrollbar_mode = mojo_properties.scrollbar_mode;
   result.margin_width = mojo_properties.margin_width;
   result.margin_height = mojo_properties.margin_height;
   result.allow_fullscreen = mojo_properties.allow_fullscreen;
   result.allow_payment_request = mojo_properties.allow_payment_request;
   result.is_display_none = mojo_properties.is_display_none;
-  result.required_csp =
-      blink::WebString::FromUTF8(mojo_properties.required_csp);
+  result.color_scheme = mojo_properties.color_scheme;
+  result.responsive_sizing = mojo_properties.responsive_sizing;
 
   return result;
 }
@@ -40,8 +40,9 @@ TypeConverter<blink::mojom::FrameOwnerPropertiesPtr,
   mojo_properties->allow_payment_request =
       web_frame_owner_properties.allow_payment_request;
   mojo_properties->is_display_none = web_frame_owner_properties.is_display_none;
-  mojo_properties->required_csp =
-      web_frame_owner_properties.required_csp.Utf8();
+  mojo_properties->color_scheme = web_frame_owner_properties.color_scheme;
+  mojo_properties->responsive_sizing =
+      web_frame_owner_properties.responsive_sizing;
 
   return mojo_properties;
 }

@@ -1,20 +1,28 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ios/web/public/test/fakes/fake_download_controller_delegate.h"
+#import "ios/web/public/test/fakes/fake_download_controller_delegate.h"
 
-#include "ios/web/public/download/download_controller.h"
-#include "ios/web/public/download/download_task.h"
+#import "base/check.h"
+#import "base/check_op.h"
+#import "ios/web/public/download/download_controller.h"
+#import "ios/web/public/download/download_task.h"
 
 namespace web {
 
 FakeDownloadControllerDelegate::FakeDownloadControllerDelegate(
-    DownloadController* controller) {
-  controller->SetDelegate(this);
+    DownloadController* controller)
+    : controller_(controller) {
+  DCHECK(controller_);
+  old_delegate_ = controller_->GetDelegate();
+  controller_->SetDelegate(this);
 }
 
-FakeDownloadControllerDelegate::~FakeDownloadControllerDelegate() = default;
+FakeDownloadControllerDelegate::~FakeDownloadControllerDelegate() {
+  controller_->SetDelegate(old_delegate_);
+  controller_ = nullptr;
+}
 
 void FakeDownloadControllerDelegate::OnDownloadCreated(
     DownloadController* download_controller,
@@ -25,7 +33,9 @@ void FakeDownloadControllerDelegate::OnDownloadCreated(
 
 void FakeDownloadControllerDelegate::OnDownloadControllerDestroyed(
     DownloadController* controller) {
+  DCHECK_EQ(controller_, controller);
   controller->SetDelegate(nullptr);
+  controller_ = nullptr;
 }
 
 }  // namespace web

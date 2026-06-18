@@ -13,8 +13,9 @@
 </style>
 
 <script>
-  if (window.internals)
+  if (window.internals) {
     internals.settings.setPreferCompositingToLCDTextEnabled(true);
+  }
 
   if (window.testRunner) {
     testRunner.dumpAsText();

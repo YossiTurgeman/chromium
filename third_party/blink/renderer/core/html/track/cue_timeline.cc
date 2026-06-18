@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,7 @@
 #include "third_party/blink/renderer/core/html/track/text_track.h"
 #include "third_party/blink/renderer/core/html/track/text_track_cue.h"
 #include "third_party/blink/renderer/core/html/track/text_track_cue_list.h"
+#include "ui/accessibility/accessibility_features.h"
 
 namespace blink {
 
@@ -33,13 +34,12 @@ base::TimeDelta CalculateEventTimeout(double event_time,
   DCHECK_NE(media_element.playbackRate(), 0);
 
   auto const timeout =
-      base::TimeDelta::FromSecondsD((event_time - media_element.currentTime()) /
-                                    media_element.playbackRate());
+      base::Seconds((event_time - media_element.currentTime()) /
+                    media_element.playbackRate());
 
   // Only allow timeouts of multiples of 1ms to prevent "polling-by-timer"
   // and excessive calls to `TimeMarchesOn`.
-  constexpr base::TimeDelta kMinTimeoutInterval =
-      base::TimeDelta::FromMilliseconds(1);
+  constexpr base::TimeDelta kMinTimeoutInterval = base::Milliseconds(1);
   return std::max(timeout.CeilToMultiple(kMinTimeoutInterval),
                   kMinTimeoutInterval);
 }
@@ -61,7 +61,7 @@ CueTimeline::CueTimeline(HTMLMediaElement& media_element)
       update_requested_while_ignoring_(false) {}
 
 void CueTimeline::AddCues(TextTrack* track, const TextTrackCueList* cues) {
-  DCHECK_NE(track->mode(), TextTrack::DisabledKeyword());
+  DCHECK_NE(track->mode(), TextTrackMode::kDisabled);
   for (wtf_size_t i = 0; i < cues->length(); ++i)
     AddCueInternal(cues->AnonymousIndexedGetter(i));
   if (!MediaElement().IsShowPosterFlagSet()) {
@@ -70,7 +70,7 @@ void CueTimeline::AddCues(TextTrack* track, const TextTrackCueList* cues) {
 }
 
 void CueTimeline::AddCue(TextTrack* track, TextTrackCue* cue) {
-  DCHECK_NE(track->mode(), TextTrack::DisabledKeyword());
+  DCHECK_NE(track->mode(), TextTrackMode::kDisabled);
   AddCueInternal(cue);
   if (!MediaElement().IsShowPosterFlagSet()) {
     InvokeTimeMarchesOn();
@@ -78,6 +78,7 @@ void CueTimeline::AddCue(TextTrack* track, TextTrackCue* cue) {
 }
 
 void CueTimeline::AddCueInternal(TextTrackCue* cue) {
+  newly_introduced_cues_.insert(cue);
   CueInterval interval = CreateCueInterval(cue);
   if (!cue_tree_.Contains(interval))
     cue_tree_.Add(interval);
@@ -99,6 +100,7 @@ void CueTimeline::RemoveCue(TextTrack*, TextTrackCue* cue) {
 }
 
 void CueTimeline::RemoveCueInternal(TextTrackCue* cue) {
+  newly_introduced_cues_.erase(cue);
   CueInterval interval = CreateCueInterval(cue);
   cue_tree_.Remove(interval);
 
@@ -191,8 +193,7 @@ void CueTimeline::TimeMarchesOn() {
   // kHaveNothing.
   if (media_element.getReadyState() != HTMLMediaElement::kHaveNothing &&
       media_element.GetWebMediaPlayer()) {
-    current_cues =
-        cue_tree_.AllOverlaps(cue_tree_.CreateInterval(movie_time, movie_time));
+    current_cues = cue_tree_.AllOverlaps(movie_time, movie_time);
   }
 
   CueList previous_cues;
@@ -217,16 +218,22 @@ void CueTimeline::TimeMarchesOn() {
   CueList missed_cues;
   if (last_time >= 0 && last_seek_time < movie_time) {
     CueList potentially_skipped_cues =
-        cue_tree_.AllOverlaps(cue_tree_.CreateInterval(last_time, movie_time));
+        cue_tree_.AllOverlaps(last_time, movie_time);
     missed_cues.ReserveInitialCapacity(potentially_skipped_cues.size());
 
     for (CueInterval cue : potentially_skipped_cues) {
-      // Consider cues that may have been missed since the last seek time.
+      // Consider cues that may have been missed since the last seek time. Do
+      // not add cues into `missed_cues` that are also in
+      // `newly_introduced_cues_`, as stated in
+      // https://html.spec.whatwg.org/multipage/media.html#time-marches-on
       if (cue.Low() > std::max(last_seek_time, last_time) &&
-          cue.High() < movie_time)
+          cue.High() < movie_time &&
+          !newly_introduced_cues_.Contains(cue.Data())) {
         missed_cues.push_back(cue);
+      }
     }
   }
+  newly_introduced_cues_.clear();
 
   last_update_time_ = movie_time;
 
@@ -422,7 +429,7 @@ CueTimeline::IgnoreUpdateScope CueTimeline::BeginIgnoreUpdateScope() {
   return scope;
 }
 
-void CueTimeline::EndIgnoreUpdateScope(util::PassKey<IgnoreUpdateScope>,
+void CueTimeline::EndIgnoreUpdateScope(base::PassKey<IgnoreUpdateScope>,
                                        IgnoreUpdateScope const& scope) {
   DCHECK(ignore_update_);
   --ignore_update_;
@@ -493,7 +500,9 @@ void CueTimeline::CancelCueEventTimer() {
 }
 
 void CueTimeline::CueEventTimerFired(TimerBase*) {
-  InvokeTimeMarchesOn();
+  if (!MediaElement().IsShowPosterFlagSet()) {
+    InvokeTimeMarchesOn();
+  }
 }
 
 void CueTimeline::CueTimestampEventTimerFired(TimerBase*) {
@@ -543,6 +552,9 @@ void CueTimeline::DidMoveToNewDocument(Document& /*old_document*/) {
 
 void CueTimeline::Trace(Visitor* visitor) const {
   visitor->Trace(media_element_);
+  visitor->Trace(newly_introduced_cues_);
+  visitor->Trace(cue_event_timer_);
+  visitor->Trace(cue_timestamp_event_timer_);
 }
 
 }  // namespace blink

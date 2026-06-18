@@ -1,16 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/content_index/service_worker_registration_content_index.h"
 
+#include "base/task/single_thread_task_runner.h"
 #include "third_party/blink/renderer/modules/content_index/content_index.h"
 
 namespace blink {
 
 ServiceWorkerRegistrationContentIndex::ServiceWorkerRegistrationContentIndex(
     ServiceWorkerRegistration* registration)
-    : registration_(registration) {}
+    : Supplement(*registration) {}
 
 const char ServiceWorkerRegistrationContentIndex::kSupplementName[] =
     "ServiceWorkerRegistrationContentIndex";
@@ -38,10 +39,11 @@ ContentIndex* ServiceWorkerRegistrationContentIndex::index(
 
 ContentIndex* ServiceWorkerRegistrationContentIndex::index() {
   if (!content_index_) {
-    ExecutionContext* execution_context = registration_->GetExecutionContext();
+    ExecutionContext* execution_context =
+        GetSupplementable()->GetExecutionContext();
     // TODO(falken): Consider defining a task source in the spec for this event.
     content_index_ = MakeGarbageCollected<ContentIndex>(
-        registration_,
+        GetSupplementable(),
         execution_context->GetTaskRunner(TaskType::kMiscPlatformAPI));
   }
 
@@ -49,7 +51,6 @@ ContentIndex* ServiceWorkerRegistrationContentIndex::index() {
 }
 
 void ServiceWorkerRegistrationContentIndex::Trace(Visitor* visitor) const {
-  visitor->Trace(registration_);
   visitor->Trace(content_index_);
   Supplement<ServiceWorkerRegistration>::Trace(visitor);
 }

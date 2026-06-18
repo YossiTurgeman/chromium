@@ -1,10 +1,11 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "net/proxy_resolution/win/proxy_config_service_win.h"
 
-#include "base/stl_util.h"
+#include <array>
+
 #include "net/base/net_errors.h"
 #include "net/proxy_resolution/proxy_config.h"
 #include "net/proxy_resolution/proxy_config_service_common_unittest.h"
@@ -20,7 +21,7 @@ TEST(ProxyConfigServiceWinTest, SetFromIEConfig) {
     const wchar_t* proxy;
     const wchar_t* proxy_bypass;
   };
-  const struct {
+  struct Test {
     // Input.
     IEProxyConfig ie_config;
 
@@ -29,7 +30,9 @@ TEST(ProxyConfigServiceWinTest, SetFromIEConfig) {
     GURL pac_url;
     ProxyRulesExpectation proxy_rules;
     const char* proxy_bypass_list;  // newline separated
-  } tests[] = {
+  };
+
+  auto tests = std::to_array<Test>({
       // Auto detect.
       {
           {
@@ -204,9 +207,9 @@ TEST(ProxyConfigServiceWinTest, SetFromIEConfig) {
           GURL(),  // pac_url
           ProxyRulesExpectation::EmptyWithBypass("foo.com,google.com"),
       },
-  };
+  });
 
-  for (size_t i = 0; i < base::size(tests); ++i) {
+  for (size_t i = 0; i < std::size(tests); ++i) {
     WINHTTP_CURRENT_USER_IE_PROXY_CONFIG ie_config = {
         tests[i].ie_config.auto_detect,
         const_cast<wchar_t*>(tests[i].ie_config.auto_config_url),

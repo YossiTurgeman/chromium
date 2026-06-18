@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,21 @@
 #include <utility>
 
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
+#include "base/test/scoped_feature_list.h"
 #include "chrome/browser/offline_pages/android/offline_page_auto_fetcher_service.h"
+#include "chrome/browser/offline_pages/android/offline_page_auto_fetcher_service_factory.h"
+#include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "components/offline_pages/core/client_namespace_constants.h"
+#include "content/public/browser/render_frame_host.h"
+#include "content/public/test/navigation_simulator.h"
+#include "content/public/test/render_frame_host_test_support.h"
+#include "content/public/test/test_renderer_host.h"
+#include "content/public/test/test_web_contents_factory.h"
+#include "content/public/test/web_contents_tester.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 
 namespace offline_pages {
 namespace {
@@ -22,8 +33,7 @@ using ::offline_pages::auto_fetch_internal::RequestInfo;
 using ::offline_pages::auto_fetch_internal::TabInfo;
 using ::testing::_;
 
-const int kDefaultTabId = 123;
-const base::Time kEpoch = base::Time::FromDoubleT(1.0e6);
+constexpr int kDefaultTabId = 123;
 
 GURL TestURL() {
   return GURL("http://www.url.com");
@@ -53,7 +63,7 @@ class MockAutoFetchNotifier : public AutoFetchNotifier {
 
 class FakeInternalImplDelegate : public InternalImpl::Delegate {
  public:
-  ~FakeInternalImplDelegate() override {}
+  ~FakeInternalImplDelegate() override = default;
   void SetNotificationStateToShown(int64_t request_id) override {
     set_notification_state_requests.push_back(request_id);
   }
@@ -70,7 +80,7 @@ class FakeInternalImplDelegate : public InternalImpl::Delegate {
 // tab information.
 class StubTabFinder : public AutoFetchPageLoadWatcher::AndroidTabFinder {
  public:
-  ~StubTabFinder() override {}
+  ~StubTabFinder() override = default;
 
   // AutoFetchPageLoadWatcher::AndroidTabFinder.
   std::map<int, TabInfo> FindAndroidTabs(
@@ -84,10 +94,10 @@ class StubTabFinder : public AutoFetchPageLoadWatcher::AndroidTabFinder {
     return result;
   }
 
-  base::Optional<TabInfo> FindNavigationTab(
+  std::optional<TabInfo> FindNavigationTab(
       content::WebContents* web_contents) override {
     if (!tabs_.count(current_tab_id_))
-      return base::nullopt;
+      return std::nullopt;
     return TabInfo{current_tab_id_, tabs_[current_tab_id_]};
   }
 
@@ -110,11 +120,12 @@ class AutoFetchInternalImplTest : public testing::Test {
  protected:
   // A WebContents* is needed for some |InternalImpl| methods, but nullptr is
   // sufficient because |StubTabFinder| doesn't inspect the value.
-  content::WebContents* const web_contents_ = nullptr;
+  const raw_ptr<content::WebContents> web_contents_ = nullptr;
   MockAutoFetchNotifier notifier_;
   FakeInternalImplDelegate delegate_;
-  StubTabFinder* tab_finder_ = new StubTabFinder;
-  InternalImpl impl_{&notifier_, &delegate_, base::WrapUnique(tab_finder_)};
+  raw_ptr<StubTabFinder> tab_finder_ = new StubTabFinder;
+  InternalImpl impl_{&notifier_, &delegate_,
+                     base::WrapUnique(tab_finder_.get())};
 };
 
 TEST_F(AutoFetchInternalImplTest, NoInitialization) {
@@ -273,6 +284,66 @@ TEST_F(AutoFetchInternalImplTest, OtherTabClosedDoesNotNotify) {
   impl_.TabClosed(kDefaultTabId + 1);
 
   EXPECT_EQ(std::vector<int64_t>(), delegate_.set_notification_state_requests);
+}
+
+class AutoFetchInternalImplFencedFrameTest
+    : public ChromeRenderViewHostTestHarness {
+ public:
+  AutoFetchInternalImplFencedFrameTest() = default;
+  ~AutoFetchInternalImplFencedFrameTest() override = default;
+
+  void SetUp() override {
+    scoped_feature_list_.InitAndEnableFeatureWithParameters(
+        blink::features::kFencedFrames, {{"implementation_type", "mparch"}});
+    ChromeRenderViewHostTestHarness::SetUp();
+  }
+
+  content::RenderFrameHost* CreateFencedFrame(
+      content::RenderFrameHost* parent) {
+    content::RenderFrameHost* fenced_frame =
+        content::RenderFrameHostTester::For(parent)->AppendFencedFrame();
+    return fenced_frame;
+  }
+
+ protected:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+TEST_F(AutoFetchInternalImplFencedFrameTest,
+       DoNotHandleFencedFrameNavigationAsSuccessfulPageNavigation) {
+  const GURL kTestUrl("http://mystery.site/foo.html");
+
+  auto web_content = CreateTestWebContents();
+  AutoFetchPageLoadWatcher::CreateForWebContents(web_content.get());
+
+  AutoFetchPageLoadWatcher* page_load_watcher =
+      OfflinePageAutoFetcherServiceFactory::GetForBrowserContext(
+          web_content->GetBrowserContext())
+          ->page_load_watcher();
+
+  content::WebContentsTester::For(web_content.get())
+      ->NavigateAndCommit(kTestUrl);
+
+  EXPECT_EQ(page_load_watcher->loaded_pages_for_testing().size(), 1U);
+  EXPECT_EQ(kTestUrl, page_load_watcher->loaded_pages_for_testing()[0]);
+
+  // Create a fenced frame and navigate a different URL.
+  content::RenderFrameHostTester::For(main_rfh())
+      ->InitializeRenderFrameIfNeeded();
+  content::RenderFrameHost* fenced_frame_rfh =
+      CreateFencedFrame(web_content->GetPrimaryMainFrame());
+  GURL kFencedFrameUrl("http://fencedframe.com");
+  std::unique_ptr<content::NavigationSimulator> navigation_simulator =
+      content::NavigationSimulator::CreateRendererInitiated(kFencedFrameUrl,
+                                                            fenced_frame_rfh);
+  navigation_simulator->Commit();
+  EXPECT_TRUE(
+      navigation_simulator->GetFinalRenderFrameHost()->IsFencedFrameRoot());
+
+  // AutoFetchPageLoadWatcher should not store the URL navigated in the fenced
+  // frame.
+  EXPECT_EQ(page_load_watcher->loaded_pages_for_testing().size(), 1U);
+  EXPECT_EQ(kTestUrl, page_load_watcher->loaded_pages_for_testing()[0]);
 }
 
 }  // namespace

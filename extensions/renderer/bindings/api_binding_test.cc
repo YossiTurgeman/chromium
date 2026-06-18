@@ -1,10 +1,13 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "extensions/renderer/bindings/api_binding_test.h"
 
-#include "base/threading/thread_task_runner_handle.h"
+#include <algorithm>
+
+#include "base/task/single_thread_task_runner.h"
+#include "extensions/renderer/bindings/api_binding_util.h"
 #include "gin/array_buffer.h"
 #include "gin/public/context_holder.h"
 #include "gin/public/isolate_holder.h"
@@ -12,8 +15,8 @@
 
 namespace extensions {
 
-APIBindingTest::APIBindingTest() {}
-APIBindingTest::~APIBindingTest() {}
+APIBindingTest::APIBindingTest() = default;
+APIBindingTest::~APIBindingTest() = default;
 
 v8::ExtensionConfiguration* APIBindingTest::GetV8ExtensionConfiguration() {
   return nullptr;
@@ -32,7 +35,7 @@ void APIBindingTest::SetUp() {
                                  gin::ArrayBufferAllocator::SharedInstance());
 
   isolate_holder_ = std::make_unique<gin::IsolateHolder>(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       gin::IsolateHolder::IsolateType::kTest);
   isolate()->Enter();
 
@@ -42,6 +45,8 @@ void APIBindingTest::SetUp() {
   context->Enter();
   main_context_holder_ = std::make_unique<gin::ContextHolder>(isolate());
   main_context_holder_->SetContext(context);
+
+  binding::InitializeContext(context);
 }
 
 void APIBindingTest::TearDown() {
@@ -74,8 +79,8 @@ void APIBindingTest::DisposeAllContexts() {
           OnWillDisposeContext(context);
           if (exit)
             context->Exit();
+          holder.reset();
         }
-        holder.reset();
 
         // Garbage collect everything so that we find any issues where we might
         // be double-freeing.
@@ -100,6 +105,7 @@ v8::Local<v8::Context> APIBindingTest::AddContext() {
       v8::Context::New(isolate(), GetV8ExtensionConfiguration());
   holder->SetContext(context);
   additional_context_holders_.push_back(std::move(holder));
+  binding::InitializeContext(context);
   return context;
 }
 
@@ -115,11 +121,8 @@ void APIBindingTest::DisposeContext(v8::Local<v8::Context> context) {
     return;
   }
 
-  auto iter = std::find_if(
-      additional_context_holders_.begin(), additional_context_holders_.end(),
-      [context](const std::unique_ptr<gin::ContextHolder>& holder) {
-        return holder->context() == context;
-      });
+  auto iter = std::ranges::find(additional_context_holders_, context,
+                                &gin::ContextHolder::context);
   ASSERT_TRUE(iter != additional_context_holders_.end())
       << "Could not find context";
   OnWillDisposeContext(context);
@@ -131,7 +134,7 @@ void APIBindingTest::RunGarbageCollection() {
   // hopefully clean up all the various paths.
   for (int i = 0; i < 5; ++i) {
     isolate()->RequestGarbageCollectionForTesting(
-        v8::Isolate::kFullGarbageCollection);
+        v8::Isolate::kFullGarbageCollection, v8::StackState::kNoHeapPointers);
   }
 }
 

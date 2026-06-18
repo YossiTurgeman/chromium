@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 
-#include "base/macros.h"
+#include "base/byte_count.h"
 #include "chrome/browser/task_manager/providers/task.h"
 
 namespace task_manager {
@@ -16,23 +16,23 @@ namespace task_manager {
 class BrowserProcessTask : public Task {
  public:
   BrowserProcessTask();
+  BrowserProcessTask(const BrowserProcessTask&) = delete;
+  BrowserProcessTask& operator=(const BrowserProcessTask&) = delete;
   ~BrowserProcessTask() override;
 
   // task_manager::Task:
   bool IsKillable() override;
-  void Kill() override;
+  bool Kill() override;
   void Refresh(const base::TimeDelta& update_interval,
                int64_t refresh_flags) override;
   Type GetType() const override;
   int GetChildProcessUniqueID() const override;
-  int64_t GetSqliteMemoryUsed() const override;
+  std::optional<base::ByteSize> GetSqliteMemoryUsed() const override;
 
  private:
   static gfx::ImageSkia* s_icon_;
 
-  int64_t used_sqlite_memory_;
-
-  DISALLOW_COPY_AND_ASSIGN(BrowserProcessTask);
+  std::optional<base::ByteSize> used_sqlite_memory_;
 };
 
 }  // namespace task_manager

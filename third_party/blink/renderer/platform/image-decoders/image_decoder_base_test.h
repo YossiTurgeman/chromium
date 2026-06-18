@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,7 @@
 
 #include "base/compiler_specific.h"
 #include "base/files/file_path.h"
-#include "base/macros.h"
-
 #include "testing/gtest/include/gtest/gtest.h"
-
 #include "third_party/blink/renderer/platform/image-decoders/image_decoder.h"
 
 namespace blink {
@@ -31,6 +28,8 @@ namespace blink {
 class ImageDecoderBaseTest : public testing::Test {
  public:
   explicit ImageDecoderBaseTest(const String& format) : format_(format) {}
+  ImageDecoderBaseTest(const ImageDecoderBaseTest&) = delete;
+  ImageDecoderBaseTest& operator=(const ImageDecoderBaseTest&) = delete;
 
   enum class FileSelection {
     kAll,
@@ -77,8 +76,6 @@ class ImageDecoderBaseTest : public testing::Test {
  private:
   // Path to the test files.
   base::FilePath data_dir_;
-
-  DISALLOW_COPY_AND_ASSIGN(ImageDecoderBaseTest);
 };
 
 }  // namespace blink

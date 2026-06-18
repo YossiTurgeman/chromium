@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/midi/midi_manager_win.h"
 
-#include <windows.h>
+#include "base/compiler_specific.h"
+
+// clang-format off
+#include <windows.h> // Must be in front of other Windows header files.
+// clang-format on
 
 #include <ks.h>
 #include <ksmedia.h>
@@ -14,21 +18,22 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
-#include "base/optional.h"
-#include "base/single_thread_task_runner.h"
-#include "base/stl_util.h"
-#include "base/strings/string16.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/synchronization/lock.h"
-#include "base/win/windows_version.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "media/midi/message_util.h"
 #include "media/midi/midi_manager_winrt.h"
 #include "media/midi/midi_service.h"
@@ -51,7 +56,7 @@ class MidiManagerWin::PortManager {
   // Unregisters HMIDIIN handle.
   void UnregisterInHandle(HMIDIIN handle);
 
-  // Finds HMIDIIN handle and fullfil |out_index| with the port index.
+  // Finds HMIDIIN handle and fulfill |out_index| with the port index.
   bool FindInHandle(HMIDIIN hmi, size_t* out_index);
 
   // Restores used input buffer for the next data receive.
@@ -91,7 +96,7 @@ constexpr HMIDIIN kInvalidInHandle = nullptr;
 constexpr HMIDIOUT kInvalidOutHandle = nullptr;
 
 // Defines SysEx message size limit.
-// TODO(crbug.com/383578): This restriction should be removed once Web MIDI
+// TODO(crbug.com/40370059): This restriction should be removed once Web MIDI
 // defines a standardized way to handle large sysex messages.
 // Note for built-in USB-MIDI driver:
 // From an observation on Windows 7/8.1 with a USB-MIDI keyboard,
@@ -119,7 +124,7 @@ base::Lock* GetInstanceIdLock() {
 }
 
 // Issues unique MidiManager instance ID.
-int64_t IssueNextInstanceId(base::Optional<int64_t> override_id) {
+int64_t IssueNextInstanceId(std::optional<int64_t> override_id) {
   static int64_t id = kInvalidInstanceId;
   if (override_id) {
     int64_t result = ++id;
@@ -207,7 +212,7 @@ using ScopedMIDIHDR = std::unique_ptr<MIDIHDR, MIDIHDRDeleter>;
 
 ScopedMIDIHDR CreateMIDIHDR(size_t size) {
   ScopedMIDIHDR hdr(new MIDIHDR);
-  ZeroMemory(hdr.get(), sizeof(*hdr));
+  UNSAFE_TODO(ZeroMemory(hdr.get(), sizeof(*hdr)));
   hdr->lpData = new char[size];
   hdr->dwBufferLength = static_cast<DWORD>(size);
   return hdr;
@@ -215,7 +220,7 @@ ScopedMIDIHDR CreateMIDIHDR(size_t size) {
 
 ScopedMIDIHDR CreateMIDIHDR(const std::vector<uint8_t>& data) {
   ScopedMIDIHDR hdr(CreateMIDIHDR(data.size()));
-  std::copy(data.begin(), data.end(), hdr->lpData);
+  std::ranges::copy(data, hdr->lpData);
   return hdr;
 }
 
@@ -249,7 +254,7 @@ std::string GetManufacturerName(uint16_t id, const GUID& guid) {
   if (id == MM_MICROSOFT)
     return "Microsoft Corporation";
 
-  // TODO(crbug.com/472341): Support other manufacture IDs.
+  // TODO(crbug.com/41165639): Support other manufacture IDs.
   return "";
 }
 
@@ -352,8 +357,7 @@ class MidiManagerWin::InPort final : public Port {
              caps.wMid,
              caps.wPid,
              caps.vDriverVersion,
-             base::WideToUTF8(
-                 base::string16(caps.szPname, wcslen(caps.szPname))),
+             base::WideToUTF8(std::wstring(caps.szPname, wcslen(caps.szPname))),
              caps.ManufacturerGuid),
         manager_(manager),
         in_handle_(kInvalidInHandle),
@@ -393,7 +397,7 @@ class MidiManagerWin::InPort final : public Port {
   }
 
   base::TimeTicks CalculateInEventTime(uint32_t elapsed_ms) const {
-    return start_time_ + base::TimeDelta::FromMilliseconds(elapsed_ms);
+    return start_time_ + base::Milliseconds(elapsed_ms);
   }
 
   void RestoreBuffer() {
@@ -456,7 +460,7 @@ class MidiManagerWin::InPort final : public Port {
   }
 
  private:
-  MidiManagerWin* manager_;
+  raw_ptr<MidiManagerWin> manager_;
   HMIDIIN in_handle_;
   ScopedMIDIHDR hdr_;
   base::TimeTicks start_time_;
@@ -471,8 +475,7 @@ class MidiManagerWin::OutPort final : public Port {
              caps.wMid,
              caps.wPid,
              caps.vDriverVersion,
-             base::WideToUTF8(
-                 base::string16(caps.szPname, wcslen(caps.szPname))),
+             base::WideToUTF8(std::wstring(caps.szPname, wcslen(caps.szPname))),
              caps.ManufacturerGuid),
         software_(caps.wTechnology == MOD_SWSYNTH),
         out_handle_(kInvalidOutHandle) {}
@@ -538,7 +541,7 @@ class MidiManagerWin::OutPort final : public Port {
         midiOutUnprepareHeader(out_handle_, hdr.get(), sizeof(*hdr));
       } else {
         // MIDIHDR will be released on MOM_DONE.
-        ignore_result(hdr.release());
+        std::ignore = hdr.release();
       }
     }
   }
@@ -632,11 +635,11 @@ MidiManagerWin::PortManager::HandleMidiInCallback(HMIDIIN hmi,
   // Exceptionally, we do not take the lock when this callback is invoked inside
   // midiInGetNumDevs() on the caller thread because the lock is already
   // obtained by the current caller thread.
-  std::unique_ptr<base::AutoLock> task_lock;
+  std::optional<base::AutoLock> task_lock;
   if (IsRunningInsideMidiInGetNumDevs())
     GetTaskLock()->AssertAcquired();
   else
-    task_lock.reset(new base::AutoLock(*GetTaskLock()));
+    task_lock.emplace(*GetTaskLock());
   {
     base::AutoLock lock(*GetInstanceIdLock());
     if (instance_id != g_active_instance_id)
@@ -656,9 +659,9 @@ MidiManagerWin::PortManager::HandleMidiInCallback(HMIDIIN hmi,
         static_cast<uint8_t>((param1 >> 16) & 0xff);
     const uint8_t kData[] = {status_byte, first_data_byte, second_data_byte};
     const size_t len = GetMessageLength(status_byte);
-    DCHECK_LE(len, base::size(kData));
+    DCHECK_LE(len, std::size(kData));
     std::vector<uint8_t> data;
-    data.assign(kData, kData + len);
+    data.assign(kData, UNSAFE_TODO(kData + len));
     manager->PostReplyTask(base::BindOnce(
         &MidiManagerWin::ReceiveMidiData, base::Unretained(manager),
         static_cast<uint32_t>(index), data,
@@ -669,7 +672,7 @@ MidiManagerWin::PortManager::HandleMidiInCallback(HMIDIIN hmi,
     if (hdr->dwBytesRecorded > 0) {
       const uint8_t* src = reinterpret_cast<const uint8_t*>(hdr->lpData);
       std::vector<uint8_t> data;
-      data.assign(src, src + hdr->dwBytesRecorded);
+      data.assign(src, UNSAFE_TODO(src + hdr->dwBytesRecorded));
       manager->PostReplyTask(base::BindOnce(
           &MidiManagerWin::ReceiveMidiData, base::Unretained(manager),
           static_cast<uint32_t>(index), data,
@@ -705,13 +708,13 @@ void MidiManagerWin::OverflowInstanceIdForTesting() {
 
 MidiManagerWin::MidiManagerWin(MidiService* service)
     : MidiManager(service),
-      instance_id_(IssueNextInstanceId(base::nullopt)),
+      instance_id_(IssueNextInstanceId(std::nullopt)),
       port_manager_(std::make_unique<PortManager>()) {
   base::AutoLock lock(*GetInstanceIdLock());
   CHECK_EQ(kInvalidInstanceId, g_active_instance_id);
 
-  // Obtains the task runner for the current thread that hosts this instnace.
-  thread_runner_ = base::ThreadTaskRunnerHandle::Get();
+  // Obtains the task runner for the current thread that hosts this instance.
+  thread_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
 }
 
 MidiManagerWin::~MidiManagerWin() {
@@ -719,6 +722,11 @@ MidiManagerWin::~MidiManagerWin() {
   // not be needed.
   if (instance_id_ == kInvalidInstanceId)
     return;
+
+  // Behind the lock below, we can safely access all members for finalization
+  // even on the I/O thread. This also ensures that no bound task runs on
+  // TaskRunner concurrently while destructing the instance.
+  base::AutoLock lock(*GetTaskLock());
 
   // Unregisters on the I/O thread. OnDevicesChanged() won't be called any more.
   CHECK(thread_runner_->BelongsToCurrentThread());
@@ -735,20 +743,12 @@ MidiManagerWin::~MidiManagerWin() {
 
   // Invalidate instance bound tasks.
   {
-    base::AutoLock lock(*GetInstanceIdLock());
+    base::AutoLock lock_id(*GetInstanceIdLock());
     CHECK_EQ(instance_id_, g_active_instance_id);
     g_active_instance_id = kInvalidInstanceId;
     CHECK_EQ(this, g_manager_instance);
     g_manager_instance = nullptr;
   }
-
-  // Ensures that no bound task runs on TaskRunner so to destruct the instance
-  // safely.
-  // Tasks that did not started yet will do nothing after invalidate the
-  // instance ID above.
-  // Behind the lock below, we can safely access all members for finalization
-  // even on the I/O thread.
-  base::AutoLock lock(*GetTaskLock());
 }
 
 void MidiManagerWin::StartInitialization() {
@@ -802,7 +802,7 @@ void MidiManagerWin::OnDevicesChanged(
 void MidiManagerWin::ReceiveMidiData(uint32_t index,
                                      const std::vector<uint8_t>& data,
                                      base::TimeTicks time) {
-  MidiManager::ReceiveMidiData(index, data.data(), data.size(), time);
+  MidiManager::ReceiveMidiData(index, data, time);
 }
 
 void MidiManagerWin::PostTask(base::OnceClosure task) {
@@ -848,14 +848,15 @@ void MidiManagerWin::UpdateDeviceListOnTaskRunner() {
 }
 
 template <typename T>
-void MidiManagerWin::ReflectActiveDeviceList(MidiManagerWin* manager,
-                                             std::vector<T>* known_ports,
-                                             std::vector<T>* active_ports) {
+void MidiManagerWin::ReflectActiveDeviceList(
+    MidiManagerWin* manager,
+    std::vector<std::unique_ptr<T>>* known_ports,
+    std::vector<std::unique_ptr<T>>* active_ports) {
   // Update existing port states.
   for (const auto& port : *known_ports) {
-    const auto& it = std::find_if(
-        active_ports->begin(), active_ports->end(),
-        [&port](const auto& candidate) { return *candidate == *port; });
+    const auto& it = std::ranges::find(
+        *active_ports, *port,
+        [](const auto& candidate) -> T& { return *candidate; });
     if (it == active_ports->end()) {
       if (port->Disconnect())
         port->NotifyPortStateSet(this);
@@ -868,10 +869,9 @@ void MidiManagerWin::ReflectActiveDeviceList(MidiManagerWin* manager,
 
   // Find new ports from active ports and append them to known ports.
   for (auto& port : *active_ports) {
-    if (std::find_if(known_ports->begin(), known_ports->end(),
-                     [&port](const auto& candidate) {
-                       return *candidate == *port;
-                     }) == known_ports->end()) {
+    if (!std::ranges::contains(
+            *known_ports, *port,
+            [](const auto& candidate) -> T& { return *candidate; })) {
       size_t index = known_ports->size();
       port->set_index(index);
       known_ports->push_back(std::move(port));
@@ -892,8 +892,7 @@ void MidiManagerWin::SendOnTaskRunner(MidiManagerClient* client,
 }
 
 MidiManager* MidiManager::Create(MidiService* service) {
-  if (base::FeatureList::IsEnabled(features::kMidiManagerWinrt) &&
-      base::win::GetVersion() >= base::win::Version::WIN10) {
+  if (base::FeatureList::IsEnabled(features::kMidiManagerWinrt)) {
     return new MidiManagerWinrt(service);
   }
   return new MidiManagerWin(service);

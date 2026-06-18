@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,33 +7,31 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/notreached.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
 #include "net/websockets/websocket_deflate_parameters.h"
 #include "net/websockets/websocket_deflate_predictor.h"
 #include "net/websockets/websocket_deflater.h"
-#include "net/websockets/websocket_errors.h"
 #include "net/websockets/websocket_frame.h"
 #include "net/websockets/websocket_inflater.h"
 #include "net/websockets/websocket_stream.h"
 
-class GURL;
-
 namespace net {
+class NetLogWithSource;
 
-namespace {
-
-const int kWindowBits = 15;
-const size_t kChunkSize = 4 * 1024;
-
-}  // namespace
 
 WebSocketDeflateStream::WebSocketDeflateStream(
     std::unique_ptr<WebSocketStream> stream,
@@ -42,10 +40,6 @@ WebSocketDeflateStream::WebSocketDeflateStream(
     : stream_(std::move(stream)),
       deflater_(params.client_context_take_over_mode()),
       inflater_(kChunkSize, kChunkSize),
-      reading_state_(NOT_READING),
-      writing_state_(NOT_WRITING),
-      current_reading_opcode_(WebSocketFrameHeader::kOpCodeText),
-      current_writing_opcode_(WebSocketFrameHeader::kOpCodeText),
       predictor_(std::move(predictor)) {
   DCHECK(stream_);
   DCHECK(params.IsValidAsResponse());
@@ -98,6 +92,10 @@ std::string WebSocketDeflateStream::GetExtensions() const {
   return stream_->GetExtensions();
 }
 
+const NetLogWithSource& WebSocketDeflateStream::GetNetLogWithSource() const {
+  return stream_->GetNetLogWithSource();
+}
+
 void WebSocketDeflateStream::OnReadComplete(
     std::vector<std::unique_ptr<WebSocketFrame>>* frames,
     int result) {
@@ -137,10 +135,7 @@ int WebSocketDeflateStream::Deflate(
       frames_to_write.push_back(std::move(frame));
       current_writing_opcode_ = WebSocketFrameHeader::kOpCodeContinuation;
     } else {
-      if (frame->payload &&
-          !deflater_.AddBytes(
-              frame->payload,
-              static_cast<size_t>(frame->header.payload_length))) {
+      if (!frame->payload.empty() && !deflater_.AddBytes(frame->payload)) {
         DVLOG(1) << "WebSocket protocol error. "
                  << "deflater_.AddBytes() returns an error.";
         return ERR_WS_PROTOCOL_ERROR;
@@ -222,7 +217,7 @@ int WebSocketDeflateStream::AppendCompressedFrame(
   compressed->header.final = header.final;
   compressed->header.reserved1 =
       (opcode != WebSocketFrameHeader::kOpCodeContinuation);
-  compressed->payload = compressed_payload->data();
+  compressed->payload = compressed_payload->span();
   compressed->header.payload_length = compressed_payload->size();
 
   current_writing_opcode_ = WebSocketFrameHeader::kOpCodeContinuation;
@@ -260,8 +255,7 @@ int WebSocketDeflateStream::AppendPossiblyCompressedMessage(
   if (original_payload_length <=
       static_cast<uint64_t>(compressed_payload->size())) {
     // Compression is not effective. Use the original frames.
-    for (size_t i = 0; i < frames->size(); ++i) {
-      std::unique_ptr<WebSocketFrame> frame = std::move((*frames)[i]);
+    for (auto& frame : *frames) {
       predictor_->RecordWrittenDataFrame(frame.get());
       frames_to_write->push_back(std::move(frame));
     }
@@ -273,7 +267,7 @@ int WebSocketDeflateStream::AppendPossiblyCompressedMessage(
   compressed->header.opcode = opcode;
   compressed->header.final = true;
   compressed->header.reserved1 = true;
-  compressed->payload = compressed_payload->data();
+  compressed->payload = compressed_payload->span();
   compressed->header.payload_length = compressed_payload->size();
 
   predictor_->RecordWrittenDataFrame(compressed.get());
@@ -286,9 +280,9 @@ int WebSocketDeflateStream::Inflate(
   std::vector<std::unique_ptr<WebSocketFrame>> frames_to_output;
   std::vector<std::unique_ptr<WebSocketFrame>> frames_passed;
   frames->swap(frames_passed);
-  for (size_t i = 0; i < frames_passed.size(); ++i) {
-    std::unique_ptr<WebSocketFrame> frame(std::move(frames_passed[i]));
-    frames_passed[i] = nullptr;
+  for (auto& frame_passed : frames_passed) {
+    std::unique_ptr<WebSocketFrame> frame(std::move(frame_passed));
+    frame_passed = nullptr;
     DVLOG(3) << "Input frame: opcode=" << frame->header.opcode
              << " final=" << frame->header.final
              << " reserved1=" << frame->header.reserved1
@@ -320,10 +314,7 @@ int WebSocketDeflateStream::Inflate(
       frames_to_output.push_back(std::move(frame));
     } else {
       DCHECK_EQ(reading_state_, READING_COMPRESSED_MESSAGE);
-      if (frame->payload &&
-          !inflater_.AddBytes(
-              frame->payload,
-              static_cast<size_t>(frame->header.payload_length))) {
+      if (!frame->payload.empty() && !inflater_.AddBytes(frame->payload)) {
         DVLOG(1) << "WebSocket protocol error. "
                  << "inflater_.AddBytes() returns an error.";
         return ERR_WS_PROTOCOL_ERROR;
@@ -356,7 +347,7 @@ int WebSocketDeflateStream::Inflate(
         inflated->header.opcode = current_reading_opcode_;
         inflated->header.final = is_final;
         inflated->header.reserved1 = false;
-        inflated->payload = data->data();
+        inflated->payload = data->span();
         inflated->header.payload_length = data->size();
         DVLOG(3) << "Inflated frame: opcode=" << inflated->header.opcode
                  << " final=" << inflated->header.final

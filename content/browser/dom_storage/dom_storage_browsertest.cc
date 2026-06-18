@@ -1,15 +1,16 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
 #include "base/command_line.h"
-#include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/test/with_feature_override.h"
 #include "base/threading/thread_restrictions.h"
 #include "build/build_config.h"
-#include "components/services/storage/dom_storage/legacy_dom_storage_database.h"
+#include "components/services/storage/dom_storage/features.h"
 #include "components/services/storage/dom_storage/local_storage_impl.h"
 #include "components/services/storage/public/cpp/constants.h"
 #include "components/services/storage/public/cpp/filesystem/filesystem_proxy.h"
@@ -31,15 +32,26 @@
 #include "content/shell/browser/shell_browser_context.h"
 #include "content/shell/browser/shell_content_browser_client.h"
 #include "testing/gmock/include/gmock/gmock.h"
-#include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 
 namespace content {
 
 // This browser test is aimed towards exercising the DOMStorage system
 // from end-to-end.
-class DOMStorageBrowserTest : public ContentBrowserTest {
+class DOMStorageBrowserTest : public base::test::WithFeatureOverride,
+                              public ContentBrowserTest {
  public:
-  DOMStorageBrowserTest() {}
+  DOMStorageBrowserTest()
+      : base::test::WithFeatureOverride(storage::kDomStorageSqlite) {
+    // Match the state of `kDomStorageSqliteInMemory` to the top level
+    // kDomStorageSqlite. That way in-memory databases (e.g. incognito) will
+    // use the backend expected by the param state.
+    if (GetParam()) {
+      feature_list_.InitAndEnableFeature(storage::kDomStorageSqliteInMemory);
+    } else {
+      feature_list_.InitAndDisableFeature(storage::kDomStorageSqliteInMemory);
+    }
+  }
 
   void SimpleTest(const GURL& test_url, bool incognito) {
     // The test page will perform tests then navigate to either
@@ -47,19 +59,18 @@ class DOMStorageBrowserTest : public ContentBrowserTest {
     Shell* the_browser = incognito ? CreateOffTheRecordBrowser() : shell();
     NavigateToURLBlockUntilNavigationsComplete(the_browser, test_url, 2);
     std::string result =
-        the_browser->web_contents()->GetLastCommittedURL().ref();
+        the_browser->web_contents()->GetLastCommittedURL().GetRef();
     if (result != "pass") {
-      std::string js_result;
-      ASSERT_TRUE(ExecuteScriptAndExtractString(
-          the_browser, "window.domAutomationController.send(getLog())",
-          &js_result));
+      std::string js_result = EvalJs(the_browser, "getLog()").ExtractString();
       FAIL() << "Failed: " << js_result;
     }
   }
 
   StoragePartition* partition() {
-    return BrowserContext::GetDefaultStoragePartition(
-        shell()->web_contents()->GetBrowserContext());
+    return shell()
+        ->web_contents()
+        ->GetBrowserContext()
+        ->GetDefaultStoragePartition();
   }
 
   std::vector<StorageUsageInfo> GetUsage() {
@@ -74,9 +85,9 @@ class DOMStorageBrowserTest : public ContentBrowserTest {
     return usage;
   }
 
-  void DeletePhysicalOrigin(url::Origin origin) {
+  void DeletePhysicalStorageKey(blink::StorageKey storage_key) {
     base::RunLoop loop;
-    partition()->GetDOMStorageContext()->DeleteLocalStorage(origin,
+    partition()->GetDOMStorageContext()->DeleteLocalStorage(storage_key,
                                                             loop.QuitClosure());
     loop.Run();
   }
@@ -85,26 +96,36 @@ class DOMStorageBrowserTest : public ContentBrowserTest {
     return static_cast<DOMStorageContextWrapper*>(
         partition()->GetDOMStorageContext());
   }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
 };
 
 static const bool kIncognito = true;
 static const bool kNotIncognito = false;
 
-IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, SanityCheck) {
+IN_PROC_BROWSER_TEST_P(DOMStorageBrowserTest, SanityCheck) {
   SimpleTest(GetTestUrl("dom_storage", "sanity_check.html"), kNotIncognito);
 }
 
-IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, SanityCheckIncognito) {
+// TODO(crbug.com/488417166): Fix flakiness on android-x86-rel and re-enable.
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_SanityCheckIncognito DISABLED_SanityCheckIncognito
+#else
+#define MAYBE_SanityCheckIncognito SanityCheckIncognito
+#endif
+IN_PROC_BROWSER_TEST_P(DOMStorageBrowserTest, MAYBE_SanityCheckIncognito) {
   SimpleTest(GetTestUrl("dom_storage", "sanity_check.html"), kIncognito);
 }
 
 // http://crbug.com/654704 PRE_ tests aren't supported on Android.
-#if defined(OS_ANDROID)
+// TODO(crbug.com/40885339): Re-enable this test for fuchsia.
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FUCHSIA)
 #define MAYBE_DataPersists DISABLED_DataPersists
 #else
 #define MAYBE_DataPersists DataPersists
 #endif
-IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, PRE_DataPersists) {
+IN_PROC_BROWSER_TEST_P(DOMStorageBrowserTest, PRE_DataPersists) {
   SimpleTest(GetTestUrl("dom_storage", "store_data.html"), kNotIncognito);
 
   // Browser shutdown can always race with async work on non-shutdown-blocking
@@ -122,27 +143,33 @@ IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, PRE_DataPersists) {
   loop.Run();
 }
 
-IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, MAYBE_DataPersists) {
+IN_PROC_BROWSER_TEST_P(DOMStorageBrowserTest, MAYBE_DataPersists) {
   SimpleTest(GetTestUrl("dom_storage", "verify_data.html"), kNotIncognito);
 }
 
-IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, DeletePhysicalOrigin) {
+// TODO(crbug/361107780): Fix flakiness on android-bfcache-rel and re-enable.
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_DeletePhysicalStorageKey DISABLED_DeletePhysicalStorageKey
+#else
+#define MAYBE_DeletePhysicalStorageKey DeletePhysicalStorageKey
+#endif
+IN_PROC_BROWSER_TEST_P(DOMStorageBrowserTest, MAYBE_DeletePhysicalStorageKey) {
   EXPECT_EQ(0U, GetUsage().size());
   SimpleTest(GetTestUrl("dom_storage", "store_data.html"), kNotIncognito);
   std::vector<StorageUsageInfo> usage = GetUsage();
   ASSERT_EQ(1U, usage.size());
-  DeletePhysicalOrigin(usage[0].origin);
+  DeletePhysicalStorageKey(usage[0].storage_key);
   EXPECT_EQ(0U, GetUsage().size());
 }
 
 // On Windows file://localhost/C:/src/chromium/src/content/test/data/title1.html
 // doesn't work.
-#if !defined(OS_WIN)
+#if !BUILDFLAG(IS_WIN)
 // Regression test for https://crbug.com/776160.  The test verifies that there
 // is no disagreement between 1) site URL used for browser-side isolation
 // enforcement and 2) the origin requested by Blink.  Before this bug was fixed,
 // (1) was file://localhost/ and (2) was file:// - this led to renderer kills.
-IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, FileUrlWithHost) {
+IN_PROC_BROWSER_TEST_P(DOMStorageBrowserTest, FileUrlWithHost) {
   // Navigate to file://localhost/.../title1.html
   GURL regular_file_url = GetTestUrl(nullptr, "title1.html");
   GURL::Replacements host_replacement;
@@ -156,47 +183,20 @@ IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, FileUrlWithHost) {
               testing::EndsWith("/title1.html"));
 
   // Verify that window.localStorage works fine.
-  std::string result;
   std::string script = R"(
       localStorage["foo"] = "bar";
-      domAutomationController.send(localStorage["foo"]);
+      localStorage["foo"];
   )";
-  EXPECT_TRUE(ExecuteScriptAndExtractString(shell(), script, &result));
-  EXPECT_EQ("bar", result);
+  EXPECT_EQ("bar", EvalJs(shell(), script));
 }
 #endif
 
-IN_PROC_BROWSER_TEST_F(DOMStorageBrowserTest, DataMigrates) {
-  const base::FilePath legacy_local_storage_path =
-      partition()->GetPath().Append(storage::kLocalStoragePath);
-  base::FilePath db_path = legacy_local_storage_path.Append(
-      storage::LocalStorageImpl::LegacyDatabaseFileNameFromOrigin(
-          url::Origin::Create(GetTestUrl("dom_storage", "store_data.html"))));
-  {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    EXPECT_TRUE(base::CreateDirectory(legacy_local_storage_path));
-    storage::LegacyDomStorageDatabase db(
-        db_path,
-        std::make_unique<storage::FilesystemProxy>(
-            storage::FilesystemProxy::UNRESTRICTED, legacy_local_storage_path));
-    storage::LegacyDomStorageValuesMap data;
-    data[base::ASCIIToUTF16("foo")] =
-        base::NullableString16(base::ASCIIToUTF16("bar"), false);
-    db.CommitChanges(false, data);
-    EXPECT_TRUE(base::PathExists(db_path));
-  }
-  std::vector<StorageUsageInfo> usage = GetUsage();
-  ASSERT_EQ(1U, usage.size());
-  EXPECT_GT(usage[0].total_size_bytes, 6u);
-
-  SimpleTest(GetTestUrl("dom_storage", "verify_data.html"), kNotIncognito);
-  usage = GetUsage();
-  ASSERT_EQ(1U, usage.size());
-  EXPECT_GT(usage[0].total_size_bytes, 6u);
-  {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    EXPECT_FALSE(base::PathExists(db_path));
-  }
-}
+INSTANTIATE_TEST_SUITE_P(
+    /*no prefix*/,
+    DOMStorageBrowserTest,
+    testing::Bool(),
+    [](const testing::TestParamInfo<DOMStorageBrowserTest::ParamType>& info) {
+      return info.param ? "SQLite" : "LevelDB";
+    });
 
 }  // namespace content

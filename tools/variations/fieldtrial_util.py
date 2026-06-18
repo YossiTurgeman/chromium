@@ -1,4 +1,4 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -31,7 +31,7 @@ def _FindDuplicates(entries):
       duplicates.add(entry)
     else:
       seen.add(entry)
-  return duplicates
+  return sorted(duplicates)
 
 def _CheckForDuplicateFeatures(enable_features, disable_features):
   enable_features = [f.split('<')[0] for f in enable_features]
@@ -68,11 +68,11 @@ def MergeFeaturesAndFieldTrialsArgs(args):
   --force-fieldtrials and --force-fieldtrial-params. Any such merged flags are
   moved to the end of the returned list. The original argument ordering is
   otherwise maintained.
-  TODO(crbug.com/1033090): Add functionality to handle duplicate flags using the
-  Foo<Bar syntax. Currently, the implementation considers e.g. 'Foo', 'Foo<Bar'
-  and 'Foo<Baz' to be different. Also add functionality to handle cases where
-  the same trial is specified with different groups via --force-fieldtrials,
-  which isn't currently unhandled.
+  TODO(crbug.com/40663174): Add functionality to handle duplicate flags using
+  the Foo<Bar syntax. Currently, the implementation considers e.g. 'Foo',
+  'Foo<Bar' and 'Foo<Baz' to be different. Also add functionality to handle
+  cases where the same trial is specified with different groups via
+  --force-fieldtrials, which isn't currently unhandled.
 
   Args:
     args: An iterable of strings representing command line arguments.
@@ -137,18 +137,22 @@ def GenerateArgs(config_path, platform, override_args=None):
   except (IOError, ValueError):
     return []
 
-  platform_studies = fieldtrial_to_struct.ConfigToStudies(
-      # For now, assume we never invert. Can add this as an argument if needed.
-      config,
-      [platform],
-      False)
+  platform_studies = fieldtrial_to_struct.ConfigToStudies(config, [platform])
 
   if override_args is None:
     override_args = []
   overriden_features_set = set(_FindFeaturesOverriddenByArgs(override_args))
   # Should skip any experiment that will enable or disable a feature that is
   # also enabled or disabled in the override_args.
+  #
+  # In addition because this is only used for benchmarks we also remove any
+  # experiment that sets `disable_benchmarking`. In actual field trials this
+  # would require `--enable-benchmarking` to be passed to the Chrome binary,
+  # but since this is generated without command line args we err on the side
+  # of caution and remove that experiment.
   def ShouldSkipExperiment(experiment):
+    if experiment.get('disable_benchmarking', False):
+      return True
     experiment_features = (experiment.get('disable_features', [])
                            + experiment.get('enable_features', []))
     return not overriden_features_set.isdisjoint(experiment_features)

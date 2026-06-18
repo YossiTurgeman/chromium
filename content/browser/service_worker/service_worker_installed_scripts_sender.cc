@@ -1,17 +1,32 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/service_worker/service_worker_installed_scripts_sender.h"
 
+#include <algorithm>
+#include <optional>
+
 #include "base/memory/ref_counted.h"
+#include "base/stl_util.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/trace_event/trace_event.h"
 #include "content/browser/service_worker/service_worker_consts.h"
 #include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/browser/service_worker/service_worker_script_cache_map.h"
-#include "content/browser/service_worker/service_worker_storage.h"
+#include "content/common/features.h"
+#include "net/base/hash_value.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 
 namespace content {
+
+namespace {
+perfetto::NamedTrack GetTracingTrack(
+    const ServiceWorkerInstalledScriptsSender* sender) {
+  return perfetto::NamedTrack::FromPointer(
+      "ServiceWorkerInstalledScriptsSender", sender);
+}
+}  // namespace
 
 ServiceWorkerInstalledScriptsSender::ServiceWorkerInstalledScriptsSender(
     ServiceWorkerVersion* owner)
@@ -31,10 +46,15 @@ ServiceWorkerInstalledScriptsSender::~ServiceWorkerInstalledScriptsSender() {}
 
 blink::mojom::ServiceWorkerInstalledScriptsInfoPtr
 ServiceWorkerInstalledScriptsSender::CreateInfoAndBind() {
-  DCHECK_EQ(State::kNotStarted, state_);
+  if (base::FeatureList::IsEnabled(
+          features::kServiceWorkerStaticRouterConsolidateMainScriptResponse)) {
+    DCHECK(!manager_.is_bound());
+  } else {
+    DCHECK_EQ(State::kNotStarted, state_);
+  }
 
-  std::vector<storage::mojom::ServiceWorkerResourceRecordPtr> resources;
-  owner_->script_cache_map()->GetResources(&resources);
+  std::vector<storage::mojom::ServiceWorkerResourceRecordPtr> resources =
+      owner_->script_cache_map()->GetResources();
   std::vector<GURL> installed_urls;
   for (const auto& resource : resources) {
     installed_urls.emplace_back(resource->url);
@@ -55,9 +75,9 @@ ServiceWorkerInstalledScriptsSender::CreateInfoAndBind() {
 void ServiceWorkerInstalledScriptsSender::Start() {
   DCHECK_EQ(State::kNotStarted, state_);
   DCHECK_NE(blink::mojom::kInvalidServiceWorkerResourceId, main_script_id_);
-  TRACE_EVENT_NESTABLE_ASYNC_BEGIN1("ServiceWorker",
-                                    "ServiceWorkerInstalledScriptsSender", this,
-                                    "main_script_url", main_script_url_.spec());
+  TRACE_EVENT_BEGIN("ServiceWorker", "ServiceWorkerInstalledScriptsSender",
+                    GetTracingTrack(this), "main_script_url",
+                    main_script_url_.spec());
   StartSendingScript(main_script_id_, main_script_url_);
 }
 
@@ -68,6 +88,14 @@ void ServiceWorkerInstalledScriptsSender::StartSendingScript(
   DCHECK(current_sending_url_.is_empty());
   state_ = State::kSendingScripts;
 
+  // (crbug.com/352578800) Override the state and bypass reading the scripts as
+  // it does not exist since the registration is a fake one and therefore there
+  // is no actual script.
+  if (resource_id == blink::mojom::kSyntheticResponseServiceWorkerResourceId) {
+    state_ = State::kIdle;
+    return;
+  }
+
   if (!owner_->context()) {
     Abort(ServiceWorkerInstalledScriptReader::FinishedReason::kNoContextError);
     return;
@@ -76,13 +104,20 @@ void ServiceWorkerInstalledScriptsSender::StartSendingScript(
   current_sending_url_ = script_url;
 
   mojo::Remote<storage::mojom::ServiceWorkerResourceReader> resource_reader;
-  owner_->context()
-      ->registry()
-      ->GetRemoteStorageControl()
-      ->CreateResourceReader(resource_id,
-                             resource_reader.BindNewPipeAndPassReceiver());
-  TRACE_EVENT_NESTABLE_ASYNC_BEGIN1("ServiceWorker", "SendingScript", this,
-                                    "script_url", current_sending_url_.spec());
+  std::optional<std::string> sha256_checksum =
+      owner_->script_cache_map()->LookupSha256Checksum(script_url);
+  std::optional<net::SHA256HashValue> sha256_hash_value;
+  if (sha256_checksum) {
+    sha256_hash_value.emplace();
+    if (!base::HexStringToSpan(*sha256_checksum, *sha256_hash_value)) {
+      sha256_hash_value.reset();
+    }
+  }
+  owner_->context()->registry().GetRemoteStorageControl()->CreateResourceReader(
+      resource_id, sha256_hash_value,
+      resource_reader.BindNewPipeAndPassReceiver());
+  TRACE_EVENT_BEGIN("ServiceWorker", "SendingScript", GetTracingTrack(this),
+                    "script_url", current_sending_url_.spec());
   reader_ = std::make_unique<ServiceWorkerInstalledScriptReader>(
       std::move(resource_reader), this);
   reader_->Start();
@@ -90,16 +125,16 @@ void ServiceWorkerInstalledScriptsSender::StartSendingScript(
 
 void ServiceWorkerInstalledScriptsSender::OnStarted(
     network::mojom::URLResponseHeadPtr response_head,
-    base::Optional<mojo_base::BigBuffer> metadata,
+    std::optional<mojo_base::BigBuffer> metadata,
     mojo::ScopedDataPipeConsumerHandle body_handle,
     mojo::ScopedDataPipeConsumerHandle meta_data_handle) {
   DCHECK(response_head);
   DCHECK(reader_);
   DCHECK_EQ(State::kSendingScripts, state_);
   uint64_t meta_data_size = metadata ? metadata->size() : 0;
-  TRACE_EVENT_NESTABLE_ASYNC_INSTANT2(
-      "ServiceWorker", "OnStarted", this, "body_size",
-      response_head->content_length, "meta_data_size", meta_data_size);
+  TRACE_EVENT_INSTANT("ServiceWorker", "OnStarted", GetTracingTrack(this),
+                      "body_size", response_head->content_length,
+                      "meta_data_size", meta_data_size);
 
   // Create a map of response headers.
   scoped_refptr<net::HttpResponseHeaders> headers = response_head->headers;
@@ -117,15 +152,18 @@ void ServiceWorkerInstalledScriptsSender::OnStarted(
     }
   }
 
-  auto script_info = blink::mojom::ServiceWorkerScriptInfo::New();
-  script_info->script_url = current_sending_url_;
-  script_info->headers = std::move(header_strings);
-  headers->GetCharset(&script_info->encoding);
-  script_info->body = std::move(body_handle);
-  script_info->body_size = response_head->content_length;
-  script_info->meta_data = std::move(meta_data_handle);
-  script_info->meta_data_size = meta_data_size;
-  manager_->TransferInstalledScript(std::move(script_info));
+  // If `CreateInfoAndBind()` is not called, manager_ won't be set up.
+  if (manager_.is_bound()) {
+    auto script_info = blink::mojom::ServiceWorkerScriptInfo::New();
+    script_info->script_url = current_sending_url_;
+    script_info->headers = std::move(header_strings);
+    headers->GetCharset(&script_info->encoding);
+    script_info->body = std::move(body_handle);
+    script_info->body_size = response_head->content_length;
+    script_info->meta_data = std::move(meta_data_handle);
+    script_info->meta_data_size = meta_data_size;
+    manager_->TransferInstalledScript(std::move(script_info));
+  }
   if (IsSendingMainScript()) {
     owner_->SetMainScriptResponse(
         std::make_unique<ServiceWorkerVersion::MainScriptResponse>(
@@ -137,7 +175,8 @@ void ServiceWorkerInstalledScriptsSender::OnFinished(
     ServiceWorkerInstalledScriptReader::FinishedReason reason) {
   DCHECK(reader_);
   DCHECK_EQ(State::kSendingScripts, state_);
-  TRACE_EVENT_NESTABLE_ASYNC_END0("ServiceWorker", "SendingScript", this);
+  // SendingScript
+  TRACE_EVENT_END("ServiceWorker", GetTracingTrack(this));
   reader_.reset();
   current_sending_url_ = GURL();
 
@@ -152,8 +191,8 @@ void ServiceWorkerInstalledScriptsSender::OnFinished(
   if (pending_scripts_.empty()) {
     UpdateFinishedReasonAndBecomeIdle(
         ServiceWorkerInstalledScriptReader::FinishedReason::kSuccess);
-    TRACE_EVENT_NESTABLE_ASYNC_END0(
-        "ServiceWorker", "ServiceWorkerInstalledScriptsSender", this);
+    // ServiceWorkerInstalledScriptsSender
+    TRACE_EVENT_END("ServiceWorker", GetTracingTrack(this));
     return;
   }
 
@@ -169,9 +208,9 @@ void ServiceWorkerInstalledScriptsSender::Abort(
   DCHECK_EQ(State::kSendingScripts, state_);
   DCHECK_NE(ServiceWorkerInstalledScriptReader::FinishedReason::kSuccess,
             reason);
-  TRACE_EVENT_NESTABLE_ASYNC_END1("ServiceWorker",
-                                  "ServiceWorkerInstalledScriptsSender", this,
-                                  "FinishedReason", static_cast<int>(reason));
+  // ServiceWorkerInstalledScriptsSender
+  TRACE_EVENT_END("ServiceWorker", GetTracingTrack(this), "FinishedReason",
+                  static_cast<int>(reason));
 
   // Remove all pending scripts.
   // Note that base::queue doesn't have clear(), and also base::STLClearObject
@@ -185,8 +224,8 @@ void ServiceWorkerInstalledScriptsSender::Abort(
     case ServiceWorkerInstalledScriptReader::FinishedReason::kNotFinished:
     case ServiceWorkerInstalledScriptReader::FinishedReason::kSuccess:
       NOTREACHED();
-      return;
-    case ServiceWorkerInstalledScriptReader::FinishedReason::kNoHttpInfoError:
+    case ServiceWorkerInstalledScriptReader::FinishedReason::
+        kNoResponseHeadError:
     case ServiceWorkerInstalledScriptReader::FinishedReason::
         kResponseReaderError:
       owner_->SetStartWorkerStatusCode(
@@ -202,10 +241,15 @@ void ServiceWorkerInstalledScriptsSender::Abort(
 
       // Delete the registration data since the data was corrupted.
       if (owner_->context()) {
-        ServiceWorkerRegistration* registration =
+        scoped_refptr<ServiceWorkerRegistration> registration =
             owner_->context()->GetLiveRegistration(owner_->registration_id());
-        // This can destruct |this|.
-        registration->ForceDelete();
+        DCHECK(registration);
+        // Check if the registation is still alive. The registration may have
+        // already been deleted while this service worker was running.
+        if (!registration->is_uninstalled()) {
+          // This can destruct |this|.
+          registration->ForceDelete();
+        }
       }
       return;
     case ServiceWorkerInstalledScriptReader::FinishedReason::
@@ -231,6 +275,21 @@ void ServiceWorkerInstalledScriptsSender::UpdateFinishedReasonAndBecomeIdle(
   DCHECK(current_sending_url_.is_empty());
   state_ = State::kIdle;
   last_finished_reason_ = reason;
+
+  // Inform the owner that we are done with the main script. If the reason is
+  // not Success, we may still need to notify listeners that no metadata will
+  // be forthcoming.
+  if (base::FeatureList::IsEnabled(
+          features::kServiceWorkerStaticRouterConsolidateMainScriptResponse)) {
+    if (reason !=
+        ServiceWorkerInstalledScriptReader::FinishedReason::kSuccess) {
+      owner_->SetMainScriptResponse(nullptr);
+    }
+  }
+
+  if (finish_callback_) {
+    std::move(finish_callback_).Run();
+  }
 }
 
 void ServiceWorkerInstalledScriptsSender::RequestInstalledScript(
@@ -242,7 +301,7 @@ void ServiceWorkerInstalledScriptsSender::RequestInstalledScript(
       owner_->script_cache_map()->LookupResourceId(script_url);
 
   if (resource_id == blink::mojom::kInvalidServiceWorkerResourceId) {
-    mojo::ReportBadMessage("Requested script was not installed.");
+    receiver_.ReportBadMessage("Requested script was not installed.");
     return;
   }
 
@@ -254,9 +313,9 @@ void ServiceWorkerInstalledScriptsSender::RequestInstalledScript(
   }
 
   DCHECK_EQ(State::kIdle, state_);
-  TRACE_EVENT_NESTABLE_ASYNC_BEGIN1("ServiceWorker",
-                                    "ServiceWorkerInstalledScriptsSender", this,
-                                    "main_script_url", main_script_url_.spec());
+  TRACE_EVENT_BEGIN("ServiceWorker", "ServiceWorkerInstalledScriptsSender",
+                    GetTracingTrack(this), "main_script_url",
+                    main_script_url_.spec());
   StartSendingScript(resource_id, script_url);
 }
 
@@ -265,6 +324,11 @@ bool ServiceWorkerInstalledScriptsSender::IsSendingMainScript() const {
   // |sent_main_script_| is false if calling importScripts for the main
   // script.
   return !sent_main_script_ && current_sending_url_ == main_script_url_;
+}
+
+void ServiceWorkerInstalledScriptsSender::SetFinishCallback(
+    base::OnceClosure callback) {
+  finish_callback_ = std::move(callback);
 }
 
 }  // namespace content

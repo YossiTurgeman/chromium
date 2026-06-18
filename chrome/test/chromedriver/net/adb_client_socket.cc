@@ -1,18 +1,22 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/test/chromedriver/net/adb_client_socket.h"
 
 #include <stddef.h>
+
+#include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/stringprintf.h"
 #include "net/base/address_list.h"
 #include "net/base/completion_repeating_callback.h"
@@ -44,16 +48,14 @@ typedef base::RepeatingCallback<void(int, net::StreamSocket*)> SocketCallback;
 typedef base::RepeatingCallback<void(const std::string&)> ParserCallback;
 
 std::string EncodeMessage(const std::string& message) {
-  static const char kHexChars[] = "0123456789ABCDEF";
-
   size_t length = message.length();
-  std::string result(4, '\0');
-  char b = reinterpret_cast<const char*>(&length)[1];
-  result[0] = kHexChars[(b >> 4) & 0xf];
-  result[1] = kHexChars[b & 0xf];
-  b = reinterpret_cast<const char*>(&length)[0];
-  result[2] = kHexChars[(b >> 4) & 0xf];
-  result[3] = kHexChars[b & 0xf];
+  CHECK_LE(length, 0xffffu);
+  std::string result;
+  result.reserve(4);
+  base::AppendHexEncodedByte(
+      UNSAFE_TODO(reinterpret_cast<const uint8_t*>(&length)[1]), result);
+  base::AppendHexEncodedByte(reinterpret_cast<const uint8_t*>(&length)[0],
+                             result);
   return result + message;
 }
 
@@ -72,7 +74,7 @@ class AdbTransportSocket : public AdbClientSocket {
   }
 
  private:
-  ~AdbTransportSocket() {}
+  ~AdbTransportSocket() = default;
 
   void OnConnected(int result) {
     if (!CheckNetResultOrDie(result))
@@ -137,8 +139,7 @@ class HttpOverAdbSocket {
   }
 
  private:
-  ~HttpOverAdbSocket() {
-  }
+  ~HttpOverAdbSocket() = default;
 
   void Connect(int port,
                const std::string& serial,
@@ -171,8 +172,8 @@ class HttpOverAdbSocket {
     if (!CheckNetResultOrDie(result))
       return;
 
-    scoped_refptr<net::IOBuffer> response_buffer =
-        base::MakeRefCounted<net::IOBuffer>(kBufferSize);
+    auto response_buffer =
+        base::MakeRefCounted<net::IOBufferWithSize>(kBufferSize);
 
     result = socket_->Read(
         response_buffer.get(), kBufferSize,
@@ -271,8 +272,7 @@ class AdbQuerySocket : AdbClientSocket {
   }
 
  private:
-  ~AdbQuerySocket() {
-  }
+  ~AdbQuerySocket() = default;
 
   void SendNextQuery(int result) {
     if (!CheckNetResultOrDie(result))
@@ -342,7 +342,7 @@ class AdbSendFileSocket : AdbClientSocket {
   }
 
  private:
-  ~AdbSendFileSocket() {}
+  ~AdbSendFileSocket() = default;
 
   void SendTransport(int result) {
     if (!CheckNetResultOrDie(result))
@@ -384,13 +384,14 @@ class AdbSendFileSocket : AdbClientSocket {
     size_t offset = current_offset_;
     size_t length = std::min(content_.length() - offset, kAdbDataChunkSize);
     current_offset_ += length;
-    SendPayload(kDataCommand, length, content_.c_str() + offset, length,
+    SendPayload(kDataCommand, length, UNSAFE_TODO(content_.c_str() + offset),
+                length,
                 base::BindOnce(&AdbSendFileSocket::SendContent,
                                base::Unretained(this)));
   }
 
   void SendDone() {
-    int data = time(NULL);
+    int data = time(nullptr);
     SendPayload(kDoneCommand, data, nullptr, 0,
                 base::BindOnce(&AdbSendFileSocket::ReadFinalResponse,
                                base::Unretained(this)));
@@ -406,32 +407,31 @@ class AdbSendFileSocket : AdbClientSocket {
   void SendPayload(const char* command,
                    int data,
                    const char* payload,
-                   size_t payloadLength,
+                   size_t payload_length,
                    net::CompletionOnceCallback callback) {
     std::string buffer(command);
     for (int i = 0; i < 4; i++) {
       buffer.append(1, static_cast<char>(data & 0xff));
       data >>= 8;
     }
-    if (payloadLength > 0)
-      buffer.append(payload, payloadLength);
+    if (payload_length > 0)
+      buffer.append(payload, payload_length);
 
     scoped_refptr<net::StringIOBuffer> request_buffer =
-        base::MakeRefCounted<net::StringIOBuffer>(buffer);
+        base::MakeRefCounted<net::StringIOBuffer>(std::move(buffer));
 
-    net::CompletionRepeatingCallback copyable_callback =
-        base::AdaptCallbackForRepeating(std::move(callback));
-    int result =
-        socket_->Write(request_buffer.get(), request_buffer->size(),
-                       copyable_callback, TRAFFIC_ANNOTATION_FOR_TESTS);
+    auto split_callback = base::SplitOnceCallback(std::move(callback));
+    int result = socket_->Write(request_buffer.get(), request_buffer->size(),
+                                std::move(split_callback.first),
+                                TRAFFIC_ANNOTATION_FOR_TESTS);
     if (result != net::ERR_IO_PENDING)
-      copyable_callback.Run(result);
+      std::move(split_callback.second).Run(result);
   }
 
   bool CheckNetResultOrDie(int result) {
     if (result >= 0)
       return true;
-    callback_.Run(result, NULL);
+    callback_.Run(result, std::string());
     delete this;
     return false;
   }
@@ -491,8 +491,7 @@ void AdbClientSocket::HttpQuery(int port,
 
 AdbClientSocket::AdbClientSocket(int port) : port_(port) {}
 
-AdbClientSocket::~AdbClientSocket() {
-}
+AdbClientSocket::~AdbClientSocket() = default;
 
 void AdbClientSocket::Connect(net::CompletionOnceCallback callback) {
   // In a IPv4/IPv6 dual stack environment, getaddrinfo for localhost could
@@ -500,19 +499,19 @@ void AdbClientSocket::Connect(net::CompletionOnceCallback callback) {
   // on IPv4. So just try IPv4 first, then fall back to IPv6.
   net::IPAddressList list = {net::IPAddress::IPv4Localhost(),
                              net::IPAddress::IPv6Localhost()};
-  net::AddressList ip_list = net::AddressList::CreateFromIPAddressList(
-      list, "localhost");
+  std::vector<std::string> aliases({"localhost"});
+  net::AddressList ip_list =
+      net::AddressList::CreateFromIPAddressList(list, std::move(aliases));
   net::AddressList address_list = net::AddressList::CopyWithPort(
       ip_list, port_);
 
-  socket_.reset(new net::TCPClientSocket(address_list, nullptr, nullptr,
-                                         nullptr, net::NetLogSource()));
+  socket_ = std::make_unique<net::TCPClientSocket>(
+      address_list, nullptr, nullptr, nullptr, net::NetLogSource());
 
-  net::CompletionRepeatingCallback copyable_callback =
-      base::AdaptCallbackForRepeating(std::move(callback));
-  int result = socket_->Connect(copyable_callback);
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
+  int result = socket_->Connect(std::move(split_callback.first));
   if (result != net::ERR_IO_PENDING)
-    copyable_callback.Run(result);
+    std::move(split_callback.second).Run(result);
 }
 
 void AdbClientSocket::SendCommand(const std::string& command,
@@ -604,9 +603,8 @@ void AdbClientSocket::ReadUntilEOF(
     }
   } else if (socket_result == 0) {
     // We hit EOF. The socket is closed on the other side.
-    std::string adb_output(socket_buffer->StartOfBuffer(),
-                           socket_buffer->offset());
-    parse_output_callback.Run(adb_output);
+    parse_output_callback.Run(
+        std::string(base::as_string_view(socket_buffer->span_before_offset())));
   }
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,32 +7,45 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "components/autofill/content/common/mojom/autofill_agent.mojom.h"
 #include "components/autofill/core/browser/logging/stub_log_manager.h"
-#include "components/autofill/core/browser/test_autofill_client.h"
+#include "components/autofill/core/common/aliases.h"
+#include "components/autofill/core/common/unique_ids.h"
+#include "components/password_manager/content/browser/form_meta_data.h"
+#include "components/password_manager/core/browser/mock_password_form_cache.h"
+#include "components/password_manager/core/browser/password_form.h"
+#include "components/password_manager/core/browser/password_form_cache.h"
 #include "components/password_manager/core/browser/password_form_filling.h"
+#include "components/password_manager/core/browser/password_manager_driver.h"
 #include "components/password_manager/core/browser/stub_password_manager_client.h"
 #include "components/safe_browsing/buildflags.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/ssl_status.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/test/navigation_simulator.h"
 #include "content/public/test/test_renderer_host.h"
 #include "content/public/test/web_contents_tester.h"
+#include "content/test/test_render_frame_host.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "services/service_manager/public/cpp/interface_provider.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
+#include "third_party/blink/public/common/features.h"
 
 using autofill::ParsingResult;
-using autofill::PasswordForm;
 using autofill::PasswordFormFillData;
 using base::ASCIIToUTF16;
 using testing::_;
+using testing::ElementsAre;
+using testing::NiceMock;
 using testing::Return;
 
 namespace password_manager {
@@ -41,21 +54,25 @@ namespace {
 
 class MockLogManager : public autofill::StubLogManager {
  public:
-  MOCK_CONST_METHOD0(IsLoggingActive, bool(void));
+  MOCK_METHOD(bool, IsLoggingActive, (), (const override));
 };
 
 class MockPasswordManagerClient : public StubPasswordManagerClient {
  public:
   MockPasswordManagerClient() = default;
+  MockPasswordManagerClient(const MockPasswordManagerClient&) = delete;
+  MockPasswordManagerClient& operator=(const MockPasswordManagerClient&) =
+      delete;
   ~MockPasswordManagerClient() override = default;
 
-  MOCK_CONST_METHOD0(GetLogManager, const autofill::LogManager*());
+  MOCK_METHOD(autofill::LogManager*, GetCurrentLogManager, (), (override));
+  MOCK_METHOD(PasswordManager*, GetPasswordManager, (), (const override));
 #if BUILDFLAG(SAFE_BROWSING_DB_LOCAL)
-  MOCK_METHOD2(CheckSafeBrowsingReputation, void(const GURL&, const GURL&));
+  MOCK_METHOD(void,
+              CheckSafeBrowsingReputation,
+              (const GURL&, const GURL&),
+              (override));
 #endif
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(MockPasswordManagerClient);
 };
 
 class FakePasswordAutofillAgent
@@ -77,13 +94,67 @@ class FakePasswordAutofillAgent
   }
 
   // autofill::mojom::PasswordAutofillAgent:
-  MOCK_METHOD1(FillPasswordForm, void(const PasswordFormFillData&));
-  MOCK_METHOD1(InformNoSavedCredentials, void(bool));
-  MOCK_METHOD2(FillIntoFocusedField, void(bool, const base::string16&));
-  MOCK_METHOD1(TouchToFillClosed, void(bool));
-  MOCK_METHOD1(AnnotateFieldsWithParsingResult, void(const ParsingResult&));
-
-  MOCK_METHOD0(BlacklistedFormFound, void());
+  MOCK_METHOD(void,
+              ApplyFillDataOnParsingCompletion,
+              (const PasswordFormFillData&),
+              (override));
+  MOCK_METHOD(void,
+              FillPasswordSuggestion,
+              (const std::u16string&,
+               const std::u16string&,
+               base::OnceCallback<void(bool)>),
+              (override));
+  MOCK_METHOD(void,
+              FillPasswordSuggestionById,
+              (autofill::FieldRendererId,
+               autofill::FieldRendererId,
+               const std::u16string&,
+               const std::u16string&,
+               autofill::AutofillSuggestionTriggerSource),
+              (override));
+  MOCK_METHOD(void,
+              PreviewPasswordSuggestionById,
+              (autofill::FieldRendererId,
+               autofill::FieldRendererId,
+               const std::u16string&,
+               const std::u16string&),
+              (override));
+  MOCK_METHOD(void, InformNoSavedCredentials, (bool), (override));
+  MOCK_METHOD(void,
+              FillIntoFocusedField,
+              (bool, const std::u16string&),
+              (override));
+  MOCK_METHOD(void,
+              PreviewField,
+              (autofill::FieldRendererId, const std::u16string&),
+              (override));
+  MOCK_METHOD(void,
+              FillField,
+              (autofill::FieldRendererId,
+               const std::u16string&,
+               autofill::FieldPropertiesMask,
+               base::OnceCallback<void(bool)>),
+              (override));
+  MOCK_METHOD(void,
+              FillChangePasswordForm,
+              (autofill::FieldRendererId,
+               autofill::FieldRendererId,
+               autofill::FieldRendererId,
+               const std::u16string&,
+               const std::u16string&,
+               FillChangePasswordFormCallback),
+              (override));
+#if BUILDFLAG(IS_ANDROID)
+  MOCK_METHOD(void, TriggerFormSubmission, (), (override));
+#endif
+  MOCK_METHOD(void,
+              AnnotateFieldsWithParsingResult,
+              (const ParsingResult&),
+              (override));
+  MOCK_METHOD(void,
+              CheckViewAreaVisible,
+              (autofill::FieldRendererId, CheckViewAreaVisibleCallback),
+              (override));
 
  private:
   void SetLoggingState(bool active) override {
@@ -100,6 +171,33 @@ class FakePasswordAutofillAgent
       this};
 };
 
+class MockPasswordManager : public PasswordManager {
+ public:
+  explicit MockPasswordManager(PasswordManagerClient* client)
+      : PasswordManager(client) {}
+  ~MockPasswordManager() override = default;
+
+  MOCK_METHOD(void,
+              OnPasswordFormsParsed,
+              (PasswordManagerDriver * driver,
+               const std::vector<autofill::FormData>&),
+              (override));
+  MOCK_METHOD(void,
+              OnPasswordFormsRendered,
+              (PasswordManagerDriver * driver,
+               const std::vector<autofill::FormData>&),
+              (override));
+  MOCK_METHOD(void,
+              OnPasswordFormSubmitted,
+              (PasswordManagerDriver * driver, const autofill::FormData&),
+              (override));
+  MOCK_METHOD(void,
+              OnPasswordFormCleared,
+              (PasswordManagerDriver * driver, const autofill::FormData&),
+              (override));
+  MOCK_METHOD(PasswordFormCache*, GetPasswordFormCache, (), (override));
+};
+
 PasswordFormFillData GetTestPasswordFormFillData() {
   // Create the current form on the page.
   PasswordForm form_on_page;
@@ -107,32 +205,45 @@ PasswordFormFillData GetTestPasswordFormFillData() {
   form_on_page.action = GURL("https://foo.com/login");
   form_on_page.signon_realm = "https://foo.com/";
   form_on_page.scheme = PasswordForm::Scheme::kHtml;
+  form_on_page.form_data.set_host_frame(autofill::LocalFrameToken(
+      base::UnguessableToken::CreateForTesting(98765, 43210)));
 
   // Create an exact match in the database.
-  PasswordForm preferred_match = form_on_page;
-  preferred_match.username_element = ASCIIToUTF16("username");
-  preferred_match.username_value = ASCIIToUTF16("test@gmail.com");
-  preferred_match.password_element = ASCIIToUTF16("password");
-  preferred_match.password_value = ASCIIToUTF16("test");
+  StoredCredential preferred_match;
+  preferred_match.url = GURL("https://foo.com/");
+  preferred_match.username_value = u"test@gmail.com";
+  preferred_match.password_value = u"test";
+  preferred_match.signon_realm = "https://foo.com/";
+  preferred_match.scheme = PasswordForm::Scheme::kHtml;
+  preferred_match.match_type = PasswordForm::MatchType::kExact;
 
-  std::vector<const PasswordForm*> matches;
-  PasswordForm non_preferred_match = preferred_match;
-  non_preferred_match.username_value = ASCIIToUTF16("test1@gmail.com");
-  non_preferred_match.password_value = ASCIIToUTF16("test1");
-  matches.push_back(&non_preferred_match);
+  std::vector<StoredCredential> matches;
+  StoredCredential non_preferred_match;
+  non_preferred_match.url = GURL("https://foo.com/");
+  non_preferred_match.username_value = u"test1@gmail.com";
+  non_preferred_match.password_value = u"test1";
+  non_preferred_match.signon_realm = "https://foo.com/";
+  non_preferred_match.scheme = PasswordForm::Scheme::kHtml;
+  non_preferred_match.match_type = PasswordForm::MatchType::kPSL;
+  matches.push_back(std::move(non_preferred_match));
 
-  return CreatePasswordFormFillData(form_on_page, matches, preferred_match,
-                                    true);
+  url::Origin page_origin = url::Origin::Create(GURL("https://foo.com/"));
+
+  return CreatePasswordFormFillData(form_on_page, matches, &preferred_match,
+                                    page_origin, /*wait_for_username=*/true,
+                                    /*suggestion_banned_fields=*/{});
 }
 
 MATCHER(WerePasswordsCleared, "Passwords not cleared") {
-  if (!arg.password_field.value.empty())
+  if (!arg.preferred_login.password_value.empty()) {
     return false;
+  }
 
-  for (auto& credentials : arg.additional_logins)
-    if (!credentials.password.empty())
+  for (auto& credentials : arg.additional_logins) {
+    if (!credentials.password_value.empty()) {
       return false;
-
+    }
+  }
   return true;
 }
 
@@ -144,11 +255,11 @@ class ContentPasswordManagerDriverTest
  public:
   void SetUp() override {
     content::RenderViewHostTestHarness::SetUp();
-    ON_CALL(password_manager_client_, GetLogManager())
+    ON_CALL(password_manager_client_, GetCurrentLogManager())
         .WillByDefault(Return(&log_manager_));
 
     blink::AssociatedInterfaceProvider* remote_interfaces =
-        web_contents()->GetMainFrame()->GetRemoteAssociatedInterfaces();
+        web_contents()->GetPrimaryMainFrame()->GetRemoteAssociatedInterfaces();
     remote_interfaces->OverrideBinderForTesting(
         autofill::mojom::PasswordAutofillAgent::Name_,
         base::BindRepeating(&FakePasswordAutofillAgent::BindPendingReceiver,
@@ -167,10 +278,8 @@ class ContentPasswordManagerDriverTest
   }
 
  protected:
-  MockLogManager log_manager_;
-  MockPasswordManagerClient password_manager_client_;
-  autofill::TestAutofillClient autofill_client_;
-
+  NiceMock<MockLogManager> log_manager_;
+  NiceMock<MockPasswordManagerClient> password_manager_client_;
   FakePasswordAutofillAgent fake_agent_;
 };
 
@@ -179,8 +288,7 @@ TEST_P(ContentPasswordManagerDriverTest, SendLoggingStateInCtor) {
   EXPECT_CALL(log_manager_, IsLoggingActive())
       .WillRepeatedly(Return(should_allow_logging));
   std::unique_ptr<ContentPasswordManagerDriver> driver(
-      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_,
-                                       &autofill_client_));
+      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_));
 
   if (should_allow_logging) {
     bool logging_activated = false;
@@ -195,16 +303,15 @@ TEST_P(ContentPasswordManagerDriverTest, SendLoggingStateInCtor) {
 
 TEST_P(ContentPasswordManagerDriverTest, SendLoggingStateAfterLogManagerReady) {
   const bool should_allow_logging = GetParam();
-  EXPECT_CALL(password_manager_client_, GetLogManager())
+  EXPECT_CALL(password_manager_client_, GetCurrentLogManager())
       .WillOnce(Return(nullptr));
   std::unique_ptr<ContentPasswordManagerDriver> driver(
-      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_,
-                                       &autofill_client_));
+      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_));
   // Because log manager is not ready yet, should have no logging state sent.
   EXPECT_FALSE(WasLoggingActivationMessageSent(nullptr));
 
   // Log manager is ready, send logging state actually.
-  EXPECT_CALL(password_manager_client_, GetLogManager())
+  EXPECT_CALL(password_manager_client_, GetCurrentLogManager())
       .WillOnce(Return(&log_manager_));
   EXPECT_CALL(log_manager_, IsLoggingActive())
       .WillRepeatedly(Return(should_allow_logging));
@@ -216,28 +323,242 @@ TEST_P(ContentPasswordManagerDriverTest, SendLoggingStateAfterLogManagerReady) {
 
 TEST_F(ContentPasswordManagerDriverTest, ClearPasswordsOnAutofill) {
   std::unique_ptr<ContentPasswordManagerDriver> driver(
-      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_,
-                                       &autofill_client_));
+      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_));
 
   PasswordFormFillData fill_data = GetTestPasswordFormFillData();
   fill_data.wait_for_username = true;
-  EXPECT_CALL(fake_agent_, FillPasswordForm(WerePasswordsCleared()));
-  driver->FillPasswordForm(fill_data);
+  EXPECT_CALL(fake_agent_,
+              ApplyFillDataOnParsingCompletion(WerePasswordsCleared()));
+  driver->PropagateFillDataOnParsingCompletion(fill_data);
   base::RunLoop().RunUntilIdle();
 }
 
-TEST_F(ContentPasswordManagerDriverTest, NotInformAboutBlacklistedForm) {
-  std::unique_ptr<ContentPasswordManagerDriver> driver(
-      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_,
-                                       &autofill_client_));
+TEST_F(ContentPasswordManagerDriverTest, SetFrameAndFormMetaDataOfForm) {
+  NavigateAndCommit(GURL("https://username:password@hostname/path?query#hash"));
 
-  PasswordFormFillData fill_data = GetTestPasswordFormFillData();
-  EXPECT_CALL(fake_agent_, BlacklistedFormFound()).Times(0);
-  driver->FillPasswordForm(fill_data);
+  std::unique_ptr<ContentPasswordManagerDriver> driver(
+      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_));
+  autofill::FormData form;
+  autofill::FormData form2 = GetFormWithFrameAndFormMetaData(main_rfh(), form);
+
+  EXPECT_EQ(
+      form2.host_frame(),
+      autofill::LocalFrameToken(
+          web_contents()->GetPrimaryMainFrame()->GetFrameToken().value()));
+  EXPECT_EQ(form2.url(), GURL("https://hostname/path"));
+  EXPECT_EQ(form2.full_url(), GURL("https://hostname/path?query#hash"));
+  EXPECT_EQ(form2.main_frame_origin(),
+            web_contents()->GetPrimaryMainFrame()->GetLastCommittedOrigin());
+  EXPECT_EQ(form2.main_frame_origin(),
+            url::Origin::CreateFromNormalizedTuple("https", "hostname", 443));
 }
 
 INSTANTIATE_TEST_SUITE_P(All,
                          ContentPasswordManagerDriverTest,
-                         testing::Values(true, false));
+                         testing::Bool());
+
+class ContentPasswordManagerDriverURLTest
+    : public ContentPasswordManagerDriverTest {
+ public:
+  void SetUp() override {
+    ContentPasswordManagerDriverTest::SetUp();
+    ON_CALL(password_manager_client_, GetPasswordManager())
+        .WillByDefault(Return(&password_manager_));
+    driver_ = std::make_unique<ContentPasswordManagerDriver>(
+        main_rfh(), &password_manager_client_);
+    NavigateAndCommit(
+        GURL("https://username:password@hostname/path?query#hash"));
+  }
+
+  void TearDown() override {
+    driver_.reset();
+    ContentPasswordManagerDriverTest::TearDown();
+  }
+
+  autofill::FormData ExpectedFormData() {
+    autofill::FormData expected_form;
+    expected_form.set_url(GURL("https://hostname/path"));
+    expected_form.set_full_url(GURL("https://hostname/path?query#hash"));
+    expected_form.set_main_frame_origin(
+        url::Origin::CreateFromNormalizedTuple("https", "hostname", 443));
+    expected_form.set_host_frame(autofill::LocalFrameToken(
+        web_contents()->GetPrimaryMainFrame()->GetFrameToken().value()));
+    return expected_form;
+  }
+
+  autofill::mojom::PasswordManagerDriver* driver() {
+    return static_cast<autofill::mojom::PasswordManagerDriver*>(driver_.get());
+  }
+
+ protected:
+  MockPasswordManager password_manager_{&password_manager_client_};
+  std::unique_ptr<ContentPasswordManagerDriver> driver_;
+};
+
+TEST_F(ContentPasswordManagerDriverURLTest, PasswordFormsParsed) {
+  autofill::FormData form;
+  form.set_url(GURL("http://evil.com"));
+  form.set_full_url(GURL("http://evil.com/path"));
+
+  EXPECT_CALL(password_manager_,
+              OnPasswordFormsParsed(_, ElementsAre(ExpectedFormData())));
+
+  driver()->PasswordFormsParsed({form});
+}
+
+TEST_F(ContentPasswordManagerDriverURLTest, PasswordFormsRendered) {
+  autofill::FormData form;
+  form.set_url(GURL("http://evil.com"));
+  form.set_full_url(GURL("http://evil.com/path"));
+
+  EXPECT_CALL(password_manager_,
+              OnPasswordFormsRendered(_, ElementsAre(ExpectedFormData())));
+
+  driver()->PasswordFormsRendered({form});
+}
+
+TEST_F(ContentPasswordManagerDriverURLTest, PasswordFormSubmitted) {
+  autofill::FormData form;
+  form.set_url(GURL("http://evil.com"));
+  form.set_full_url(GURL("http://evil.com/path"));
+
+  EXPECT_CALL(password_manager_,
+              OnPasswordFormSubmitted(_, ExpectedFormData()));
+
+  driver()->PasswordFormSubmitted(form);
+}
+
+TEST_F(ContentPasswordManagerDriverURLTest, PasswordFormCleared) {
+  autofill::FormData form;
+  form.set_url(GURL("http://evil.com"));
+  form.set_full_url(GURL("http://evil.com/path"));
+
+  EXPECT_CALL(password_manager_, OnPasswordFormCleared(_, ExpectedFormData()));
+
+  driver()->PasswordFormCleared(form);
+}
+
+class ContentPasswordManagerDriverFencedFramesTest
+    : public ContentPasswordManagerDriverTest {
+ public:
+  ContentPasswordManagerDriverFencedFramesTest() {
+    scoped_feature_list_.InitAndEnableFeatureWithParameters(
+        blink::features::kFencedFrames, {{"implementation_type", "mparch"}});
+  }
+  ~ContentPasswordManagerDriverFencedFramesTest() override = default;
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+TEST_F(ContentPasswordManagerDriverFencedFramesTest,
+       SetFrameAndFormMetaDataOfForm) {
+  NavigateAndCommit(GURL("https://test.org"));
+
+  std::unique_ptr<ContentPasswordManagerDriver> driver(
+      new ContentPasswordManagerDriver(main_rfh(), &password_manager_client_));
+
+  content::RenderFrameHost* fenced_frame_root =
+      content::RenderFrameHostTester::For(main_rfh())->AppendFencedFrame();
+
+  // Navigate a fenced frame.
+  GURL fenced_frame_url = GURL("https://hostname/path?query#hash");
+  std::unique_ptr<content::NavigationSimulator> navigation_simulator =
+      content::NavigationSimulator::CreateRendererInitiated(fenced_frame_url,
+                                                            fenced_frame_root);
+  navigation_simulator->Commit();
+  fenced_frame_root = navigation_simulator->GetFinalRenderFrameHost();
+
+  autofill::FormData initial_form;
+  autofill::FormData form_in_fenced_frame =
+      GetFormWithFrameAndFormMetaData(fenced_frame_root, initial_form);
+
+  // Verify all form data that are filled from a fenced frame's render frame
+  // host, not from the primary main frame.
+  EXPECT_EQ(
+      form_in_fenced_frame.host_frame(),
+      autofill::LocalFrameToken(fenced_frame_root->GetFrameToken().value()));
+  EXPECT_EQ(form_in_fenced_frame.url(), GURL("https://hostname/path"));
+  EXPECT_EQ(form_in_fenced_frame.full_url(),
+            GURL("https://hostname/path?query#hash"));
+
+  EXPECT_EQ(form_in_fenced_frame.main_frame_origin(),
+            fenced_frame_root->GetLastCommittedOrigin());
+  EXPECT_NE(form_in_fenced_frame.main_frame_origin(),
+            web_contents()->GetPrimaryMainFrame()->GetLastCommittedOrigin());
+  EXPECT_EQ(form_in_fenced_frame.main_frame_origin(),
+            url::Origin::CreateFromNormalizedTuple("https", "hostname", 443));
+}
+
+TEST_F(ContentPasswordManagerDriverTest,
+       PasswordAutofillDisabledOnCredentiallessIframe) {
+  NavigateAndCommit(GURL("https://test.org"));
+
+  content::RenderFrameHost* credentialless_iframe_root =
+      content::RenderFrameHostTester::For(main_rfh())
+          ->AppendCredentiallessChild("credentialless_iframe");
+
+  // Navigate a credentialless iframe.
+  GURL credentialless_iframe_url = GURL("https://hostname/path?query#hash");
+  std::unique_ptr<content::NavigationSimulator> navigation_simulator =
+      content::NavigationSimulator::CreateRendererInitiated(
+          credentialless_iframe_url, credentialless_iframe_root);
+  navigation_simulator->Commit();
+  content::RenderFrameHost* credentialless_rfh_1 =
+      navigation_simulator->GetFinalRenderFrameHost();
+
+  // Install a the PasswordAutofillAgent mock. Verify it do not receive commands
+  // from the browser side.
+  FakePasswordAutofillAgent credentialless_fake_agent;
+  EXPECT_CALL(credentialless_fake_agent, ApplyFillDataOnParsingCompletion)
+      .Times(0);
+  credentialless_rfh_1->GetRemoteAssociatedInterfaces()
+      ->OverrideBinderForTesting(
+          autofill::mojom::PasswordAutofillAgent::Name_,
+          base::BindRepeating(&FakePasswordAutofillAgent::BindPendingReceiver,
+                              base::Unretained(&credentialless_fake_agent)));
+
+  autofill::FormData initial_form;
+  autofill::FormData form_in_credentialless_iframe =
+      GetFormWithFrameAndFormMetaData(credentialless_rfh_1, initial_form);
+
+  // Verify autofill can not be triggered by browser side.
+  std::unique_ptr<ContentPasswordManagerDriver> driver(
+      std::make_unique<ContentPasswordManagerDriver>(
+          credentialless_rfh_1, &password_manager_client_));
+  driver->PropagateFillDataOnParsingCompletion(GetTestPasswordFormFillData());
+  base::RunLoop().RunUntilIdle();
+}
+
+TEST_F(ContentPasswordManagerDriverTest, HasCrossOriginAncestor) {
+  NavigateAndCommit(GURL("https://victim.com"));
+
+  content::RenderFrameHost* top_rfh = main_rfh();
+
+  content::RenderFrameHost* mid_rfh =
+      content::RenderFrameHostTester::For(top_rfh)->AppendChild("middle");
+  GURL mid_url("https://evil.com");
+  auto mid_navigation =
+      content::NavigationSimulator::CreateRendererInitiated(mid_url, mid_rfh);
+  mid_navigation->Commit();
+  mid_rfh = mid_navigation->GetFinalRenderFrameHost();
+
+  content::RenderFrameHost* bot_rfh =
+      content::RenderFrameHostTester::For(mid_rfh)->AppendChild("bottom");
+  GURL bot_url("https://victim.com/login");
+  auto bot_navigation =
+      content::NavigationSimulator::CreateRendererInitiated(bot_url, bot_rfh);
+  bot_navigation->Commit();
+  bot_rfh = bot_navigation->GetFinalRenderFrameHost();
+
+  ContentPasswordManagerDriver driver(bot_rfh, &password_manager_client_);
+  EXPECT_TRUE(driver.HasCrossOriginAncestor());
+
+  ContentPasswordManagerDriver top_driver(top_rfh, &password_manager_client_);
+  EXPECT_FALSE(top_driver.HasCrossOriginAncestor());
+
+  ContentPasswordManagerDriver mid_driver(mid_rfh, &password_manager_client_);
+  EXPECT_TRUE(mid_driver.HasCrossOriginAncestor());
+}
 
 }  // namespace password_manager

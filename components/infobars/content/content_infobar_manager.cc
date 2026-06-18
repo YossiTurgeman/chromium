@@ -1,12 +1,12 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/infobars/content/content_infobar_manager.h"
 
 #include "base/command_line.h"
-#include "components/infobars/core/confirm_infobar_delegate.h"
 #include "components/infobars/core/infobar.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_details.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
@@ -35,26 +35,27 @@ ContentInfoBarManager::NavigationDetailsFromLoadCommittedDetails(
 // static
 content::WebContents* ContentInfoBarManager::WebContentsFromInfoBar(
     InfoBar* infobar) {
-  if (!infobar || !infobar->owner())
+  if (!infobar || !infobar->owner()) {
     return nullptr;
+  }
   ContentInfoBarManager* infobar_manager =
       static_cast<ContentInfoBarManager*>(infobar->owner());
   return infobar_manager->web_contents();
 }
 
 ContentInfoBarManager::ContentInfoBarManager(content::WebContents* web_contents)
-    : content::WebContentsObserver(web_contents), ignore_next_reload_(false) {
+    : content::WebContentsObserver(web_contents),
+      content::WebContentsUserData<ContentInfoBarManager>(*web_contents) {
   DCHECK(web_contents);
   // Infobar animations cause viewport resizes. Disable them for automated
   // tests, since they could lead to flakiness.
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kEnableAutomation))
+          switches::kEnableAutomation)) {
     set_animations_enabled(false);
+  }
 }
 
-ContentInfoBarManager::~ContentInfoBarManager() {
-  ShutDown();
-}
+ContentInfoBarManager::~ContentInfoBarManager() = default;
 
 int ContentInfoBarManager::GetActiveEntryID() {
   content::NavigationEntry* active_entry =
@@ -62,19 +63,14 @@ int ContentInfoBarManager::GetActiveEntryID() {
   return active_entry ? active_entry->GetUniqueID() : 0;
 }
 
-std::unique_ptr<InfoBar> ContentInfoBarManager::CreateConfirmInfoBar(
-    std::unique_ptr<ConfirmInfoBarDelegate> delegate) {
-  NOTREACHED();
-  return nullptr;
-}
-
-void ContentInfoBarManager::RenderProcessGone(base::TerminationStatus status) {
+void ContentInfoBarManager::PrimaryMainFrameRenderProcessGone(
+    base::TerminationStatus status) {
   RemoveAllInfoBars(true);
 }
 
 void ContentInfoBarManager::DidStartNavigation(
     content::NavigationHandle* navigation_handle) {
-  if (!navigation_handle->IsInMainFrame() ||
+  if (!navigation_handle->IsInPrimaryMainFrame() ||
       navigation_handle->IsSameDocument()) {
     return;
   }
@@ -89,27 +85,29 @@ void ContentInfoBarManager::NavigationEntryCommitted(
       ui::PageTransitionCoreTypeIs(load_details.entry->GetTransitionType(),
                                    ui::PAGE_TRANSITION_RELOAD);
   ignore_next_reload_ = false;
-  if (!ignore)
+  if (!ignore) {
     OnNavigation(NavigationDetailsFromLoadCommittedDetails(load_details));
-}
-
-void ContentInfoBarManager::WebContentsDestroyed() {
-  // Subclasses may override this method to destroy this object, so don't do
-  // anything here.
+  }
 }
 
 void ContentInfoBarManager::OpenURL(const GURL& url,
-                                    WindowOpenDisposition disposition) {
+                                    WindowOpenDisposition disposition,
+                                    const std::string& text_fragment) {
   // A normal user click on an infobar URL will result in a CURRENT_TAB
   // disposition; turn that into a NEW_FOREGROUND_TAB so that we don't end up
   // smashing the page the user is looking at.
-  web_contents()->OpenURL(
-      content::OpenURLParams(url, content::Referrer(),
-                             (disposition == WindowOpenDisposition::CURRENT_TAB)
-                                 ? WindowOpenDisposition::NEW_FOREGROUND_TAB
-                                 : disposition,
-                             ui::PAGE_TRANSITION_LINK, false));
+  content::OpenURLParams params(
+      url, content::Referrer(),
+      (disposition == WindowOpenDisposition::CURRENT_TAB)
+          ? WindowOpenDisposition::NEW_FOREGROUND_TAB
+          : disposition,
+      ui::PAGE_TRANSITION_LINK, false);
+  if (!text_fragment.empty()) {
+    params.internal_scroll_to_text_fragment = text_fragment;
+  }
+  web_contents()->OpenURL(params, /*navigation_handle_callback=*/{});
+}
 
-}  // namespace infobars
+WEB_CONTENTS_USER_DATA_KEY_IMPL(ContentInfoBarManager);
 
 }  // namespace infobars

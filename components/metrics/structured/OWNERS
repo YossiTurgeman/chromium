@@ -1,4 +1,5 @@
 file://base/metrics/OWNERS
-tby@chromium.org
+troywang@google.com
 
-# COMPONENT: Internals>Metrics
+# Last resort reviewers
+tby@chromium.org

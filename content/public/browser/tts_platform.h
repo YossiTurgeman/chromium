@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include "base/macros.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/tts_controller.h"
 #include "content/public/browser/tts_utterance.h"
@@ -20,19 +19,27 @@ class CONTENT_EXPORT TtsPlatform {
  public:
   static TtsPlatform* GetInstance();
 
-  // Returns true if this platform implementation is supported and available.
-  virtual bool PlatformImplAvailable() = 0;
+  // Returns true if this platform implementation is supported. The returned
+  // value of this method won't change over time.
+  virtual bool PlatformImplSupported() = 0;
+
+  // Returns true if this platform implementation is initialized. If the
+  // platform is supported, this method will eventually return true, when
+  // the asynchronous initialisation is completed. Other methods may fail if
+  // called when not yet initialized.
+  virtual bool PlatformImplInitialized() = 0;
 
   // Some platforms may provide a built-in TTS engine. Returns true
   // if the engine was not previously loaded and is now loading, and
   // false if it's already loaded or if there's no engine to load.
   // Will call TtsController::RetrySpeakingQueuedUtterances when
   // the engine finishes loading.
-  virtual bool LoadBuiltInTtsEngine(BrowserContext* browser_context) = 0;
+  virtual void LoadBuiltInTtsEngine(BrowserContext* browser_context) = 0;
 
-  // Speak the given utterance with the given parameters if possible,
-  // and return true on success. Utterance will always be nonempty.
-  // If rate, pitch, or volume are -1.0, they will be ignored.
+  // Speak the given utterance using the native voice provided by the platform
+  // with the given parameters if possible.
+  // Utterance will always be nonempty. If rate, pitch, or volume are -1.0,
+  // they will be ignored.
   //
   // The TtsController will only try to speak one utterance at
   // a time. If it wants to interrupt speech, it will always call Stop
@@ -74,6 +81,18 @@ class CONTENT_EXPORT TtsPlatform {
   virtual std::string GetError() = 0;
   virtual void ClearError() = 0;
   virtual void SetError(const std::string& error) = 0;
+
+  // If supported, the platform shutdown its internal state. After that call,
+  // other methods may no-op.
+  virtual void Shutdown() = 0;
+
+  // Given engine delegate and platform voices, returns the finalized voice
+  // ordering used by the controller when exposing voices to clients.
+  virtual void FinalizeVoiceOrdering(std::vector<VoiceData>& voices) = 0;
+
+  // Triggers the TtsPlatform to update its list of voices and relay that update
+  // through VoicesChanged.
+  virtual void RefreshVoices() = 0;
 };
 
 }  // namespace content

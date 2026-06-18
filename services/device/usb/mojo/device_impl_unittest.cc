@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,21 +10,30 @@
 #include <algorithm>
 #include <map>
 #include <memory>
-#include <numeric>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
+#include "base/compiler_specific.h"
 #include "base/containers/queue.h"
-#include "base/macros.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/run_loop.h"
-#include "base/stl_util.h"
+#include "base/strings/stringprintf.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/test/bind.h"
+#include "base/test/run_until.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "mojo/public/cpp/test_support/test_utils.h"
+#include "services/device/public/cpp/device_features.h"
 #include "services/device/usb/mock_usb_device.h"
 #include "services/device/usb/mock_usb_device_handle.h"
 #include "services/device/usb/usb_descriptors.h"
@@ -45,14 +54,22 @@ namespace usb {
 
 namespace {
 
+constexpr size_t kUsbTransferLengthLimit = 32 * 1024 * 1024;
+
 MATCHER_P(BufferSizeIs, size, "") {
   return arg->size() == size;
 }
 
 class ConfigBuilder {
  public:
-  explicit ConfigBuilder(uint8_t value)
-      : config_(BuildUsbConfigurationInfoPtr(value, false, false, 0)) {}
+  explicit ConfigBuilder(uint8_t configuration_value)
+      : config_(BuildUsbConfigurationInfoPtr(configuration_value,
+                                             /*self_powered=*/false,
+                                             /*remote_wakeup=*/false,
+                                             /*maximum_power=*/0)) {}
+
+  ConfigBuilder(const ConfigBuilder&) = delete;
+  ConfigBuilder& operator=(const ConfigBuilder&) = delete;
 
   ConfigBuilder& AddInterface(uint8_t interface_number,
                               uint8_t alternate_setting,
@@ -69,16 +86,7 @@ class ConfigBuilder {
 
  private:
   mojom::UsbConfigurationInfoPtr config_;
-
-  DISALLOW_COPY_AND_ASSIGN(ConfigBuilder);
 };
-
-void ExpectOpenAndThen(mojom::UsbOpenDeviceError expected,
-                       base::OnceClosure continuation,
-                       mojom::UsbOpenDeviceError error) {
-  EXPECT_EQ(expected, error);
-  std::move(continuation).Run();
-}
 
 void ExpectResultAndThen(bool expected_result,
                          base::OnceClosure continuation,
@@ -91,7 +99,7 @@ void ExpectTransferInAndThen(mojom::UsbTransferStatus expected_status,
                              const std::vector<uint8_t>& expected_bytes,
                              base::OnceClosure continuation,
                              mojom::UsbTransferStatus actual_status,
-                             const std::vector<uint8_t>& actual_bytes) {
+                             base::span<const uint8_t> actual_bytes) {
   EXPECT_EQ(expected_status, actual_status);
   ASSERT_EQ(expected_bytes.size(), actual_bytes.size());
   for (size_t i = 0; i < actual_bytes.size(); ++i) {
@@ -119,7 +127,7 @@ void ExpectPacketsInAndThen(
     const std::vector<uint8_t>& expected_bytes,
     const std::vector<uint32_t>& expected_packets,
     base::OnceClosure continuation,
-    const std::vector<uint8_t>& actual_bytes,
+    base::span<const uint8_t> actual_bytes,
     std::vector<UsbIsochronousPacketPtr> actual_packets) {
   ASSERT_EQ(expected_packets.size(), actual_packets.size());
   for (size_t i = 0; i < expected_packets.size(); ++i) {
@@ -163,7 +171,10 @@ class MockUsbDeviceClient : public mojom::UsbDeviceClient {
 
 class USBDeviceImplTest : public testing::Test {
  public:
-  USBDeviceImplTest() : is_device_open_(false), allow_reset_(false) {}
+  USBDeviceImplTest() = default;
+
+  USBDeviceImplTest(const USBDeviceImplTest&) = delete;
+  USBDeviceImplTest& operator=(const USBDeviceImplTest&) = delete;
 
   ~USBDeviceImplTest() override = default;
 
@@ -171,7 +182,7 @@ class USBDeviceImplTest : public testing::Test {
 
  protected:
   MockUsbDevice& mock_device() { return *mock_device_.get(); }
-  bool is_device_open() const { return is_device_open_; }
+  bool is_device_open() const { return open_count_ > 0; }
   MockUsbDeviceHandle& mock_handle() { return *mock_handle_.get(); }
 
   void set_allow_reset(bool allow_reset) { allow_reset_ = allow_reset; }
@@ -184,6 +195,8 @@ class USBDeviceImplTest : public testing::Test {
       const std::string& manufacturer,
       const std::string& product,
       const std::string& serial,
+      base::span<const uint8_t> blocked_interface_classes,
+      bool allow_security_key_requests,
       mojo::PendingRemote<mojom::UsbDeviceClient> client) {
     mock_device_ =
         new MockUsbDevice(vendor_id, product_id, manufacturer, product, serial);
@@ -191,7 +204,8 @@ class USBDeviceImplTest : public testing::Test {
 
     mojo::Remote<mojom::UsbDevice> proxy;
     DeviceImpl::Create(mock_device_, proxy.BindNewPipeAndPassReceiver(),
-                       std::move(client));
+                       std::move(client), blocked_interface_classes,
+                       allow_security_key_requests);
 
     // Set up mock handle calls to respond based on mock device configs
     // established by the test.
@@ -226,15 +240,32 @@ class USBDeviceImplTest : public testing::Test {
   mojo::Remote<mojom::UsbDevice> GetMockDeviceProxy(
       mojo::PendingRemote<mojom::UsbDeviceClient> client) {
     return GetMockDeviceProxy(0x1234, 0x5678, "ACME", "Frobinator", "ABCDEF",
+                              /*blocked_interface_classes=*/{},
+                              /*allow_security_key_requests=*/false,
                               std::move(client));
   }
 
+  mojo::Remote<mojom::UsbDevice> GetMockSecurityKeyDeviceProxy() {
+    return GetMockDeviceProxy(0x1234, 0x5678, "ACME", "Frobinator", "ABCDEF",
+                              /*blocked_interface_classes=*/{},
+                              /*allow_security_key_requests=*/true,
+                              /*client=*/mojo::NullRemote());
+  }
+
+  mojo::Remote<mojom::UsbDevice> GetMockDeviceProxyWithBlockedInterfaces(
+      base::span<const uint8_t> blocked_interface_classes) {
+    return GetMockDeviceProxy(0x1234, 0x5678, "ACME", "Frobinator", "ABCDEF",
+                              blocked_interface_classes,
+                              /*allow_security_key_requests=*/false,
+                              /*client=*/mojo::NullRemote());
+  }
+
   mojo::Remote<mojom::UsbDevice> GetMockDeviceProxy() {
-    return GetMockDeviceProxy(mojo::NullRemote());
+    return GetMockDeviceProxy(/*client=*/mojo::NullRemote());
   }
 
   void AddMockConfig(mojom::UsbConfigurationInfoPtr config) {
-    DCHECK(!base::Contains(mock_configs_, config->configuration_value));
+    DCHECK(!mock_configs_.contains(config->configuration_value));
     mock_configs_.insert(
         std::make_pair(config->configuration_value, config.get()));
     mock_device_->AddMockConfig(std::move(config));
@@ -262,14 +293,16 @@ class USBDeviceImplTest : public testing::Test {
 
  private:
   void OpenMockHandle(UsbDevice::OpenCallback& callback) {
-    EXPECT_FALSE(is_device_open_);
-    is_device_open_ = true;
-    std::move(callback).Run(mock_handle_);
+    open_count_++;
+    // Simulate the asynchronous device opening process.
+    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, base::BindOnce(std::move(callback), mock_handle_),
+        base::Milliseconds(1));
   }
 
   void CloseMockHandle() {
-    EXPECT_TRUE(is_device_open_);
-    is_device_open_ = false;
+    EXPECT_GT(open_count_, 0);
+    open_count_--;
   }
 
   void SetConfiguration(uint8_t value,
@@ -298,7 +331,7 @@ class USBDeviceImplTest : public testing::Test {
 
   void ReleaseInterface(uint8_t interface_number,
                         UsbDeviceHandle::ResultCallback& callback) {
-    if (base::Contains(claimed_interfaces_, interface_number)) {
+    if (claimed_interfaces_.contains(interface_number)) {
       claimed_interfaces_.erase(interface_number);
       std::move(callback).Run(true);
     } else {
@@ -339,7 +372,7 @@ class USBDeviceImplTest : public testing::Test {
     const std::vector<uint8_t>& bytes = mock_outbound_data_.front();
     ASSERT_EQ(bytes.size(), buffer->size());
     for (size_t i = 0; i < bytes.size(); ++i) {
-      EXPECT_EQ(bytes[i], buffer->front()[i])
+      UNSAFE_TODO(EXPECT_EQ(bytes[i], buffer->front()[i]))
           << "Contents differ at index: " << i;
     }
     mock_outbound_data_.pop();
@@ -390,8 +423,10 @@ class USBDeviceImplTest : public testing::Test {
 
     ASSERT_EQ(packets.size(), packet_lengths.size());
     for (size_t i = 0; i < packets.size(); ++i) {
-      EXPECT_EQ(packets[i]->length, packet_lengths[i])
-          << "Packet lengths differ at index: " << i;
+      if (packets[i]->status == mojom::UsbTransferStatus::COMPLETED) {
+        EXPECT_EQ(packets[i]->length, packet_lengths[i])
+            << "Packet lengths differ at index: " << i;
+      }
     }
 
     std::move(callback).Run(buffer, std::move(packets));
@@ -405,11 +440,9 @@ class USBDeviceImplTest : public testing::Test {
       UsbDeviceHandle::IsochronousTransferCallback& callback) {
     ASSERT_FALSE(mock_outbound_data_.empty());
     const std::vector<uint8_t>& bytes = mock_outbound_data_.front();
-    size_t length =
-        std::accumulate(packet_lengths.begin(), packet_lengths.end(), 0u);
-    ASSERT_EQ(bytes.size(), length);
-    for (size_t i = 0; i < length; ++i) {
-      EXPECT_EQ(bytes[i], buffer->front()[i])
+    ASSERT_EQ(buffer->size(), bytes.size());
+    for (size_t i = 0; i < bytes.size(); ++i) {
+      UNSAFE_TODO(EXPECT_EQ(bytes[i], buffer->front()[i]))
           << "Contents differ at index: " << i;
     }
     mock_outbound_data_.pop();
@@ -421,8 +454,10 @@ class USBDeviceImplTest : public testing::Test {
 
     ASSERT_EQ(packets.size(), packet_lengths.size());
     for (size_t i = 0; i < packets.size(); ++i) {
-      EXPECT_EQ(packets[i]->length, packet_lengths[i])
-          << "Packet lengths differ at index: " << i;
+      if (packets[i]->status == mojom::UsbTransferStatus::COMPLETED) {
+        EXPECT_EQ(packets[i]->length, packet_lengths[i])
+            << "Packet lengths differ at index: " << i;
+      }
     }
 
     std::move(callback).Run(buffer, std::move(packets));
@@ -431,10 +466,11 @@ class USBDeviceImplTest : public testing::Test {
   base::test::SingleThreadTaskEnvironment task_environment_;
   scoped_refptr<MockUsbDevice> mock_device_;
   scoped_refptr<MockUsbDeviceHandle> mock_handle_;
-  bool is_device_open_;
-  bool allow_reset_;
+  int open_count_ = 0;
+  bool allow_reset_ = false;
 
-  std::map<uint8_t, const mojom::UsbConfigurationInfo*> mock_configs_;
+  std::map<uint8_t, raw_ptr<const mojom::UsbConfigurationInfo, CtnExperimental>>
+      mock_configs_;
 
   base::queue<std::vector<uint8_t>> mock_inbound_data_;
   base::queue<std::vector<uint8_t>> mock_outbound_data_;
@@ -442,8 +478,6 @@ class USBDeviceImplTest : public testing::Test {
   base::queue<std::vector<UsbIsochronousPacketPtr>> mock_outbound_packets_;
 
   std::set<uint8_t> claimed_interfaces_;
-
-  DISALLOW_COPY_AND_ASSIGN(USBDeviceImplTest);
 };
 
 }  // namespace
@@ -459,10 +493,9 @@ TEST_F(USBDeviceImplTest, Disconnect) {
   EXPECT_CALL(device_client, OnDeviceOpened());
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   EXPECT_CALL(mock_handle(), Close());
@@ -487,18 +520,17 @@ TEST_F(USBDeviceImplTest, Open) {
   EXPECT_CALL(device_client, OnDeviceOpened());
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(&ExpectOpenAndThen,
-                                mojom::UsbOpenDeviceError::ALREADY_OPEN,
-                                loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    auto result = future.Take();
+    EXPECT_TRUE(result->is_error());
+    EXPECT_EQ(result->get_error(), mojom::UsbOpenDeviceError::ALREADY_OPEN);
   }
 
   EXPECT_CALL(mock_handle(), Close());
@@ -514,17 +546,33 @@ TEST_F(USBDeviceImplTest, OpenFailure) {
       GetMockDeviceProxy(device_client.CreateInterfacePtrAndBind());
 
   EXPECT_CALL(mock_device(), OpenInternal(_))
-      .WillOnce(Invoke([](UsbDevice::OpenCallback& callback) {
+      .WillOnce([](UsbDevice::OpenCallback& callback) {
         std::move(callback).Run(nullptr);
-      }));
+      });
   EXPECT_CALL(device_client, OnDeviceOpened()).Times(0);
   EXPECT_CALL(device_client, OnDeviceClosed()).Times(0);
 
-  base::RunLoop loop;
-  device->Open(base::BindOnce(&ExpectOpenAndThen,
-                              mojom::UsbOpenDeviceError::ACCESS_DENIED,
-                              loop.QuitClosure()));
-  loop.Run();
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    auto result = future.Take();
+    EXPECT_TRUE(result->is_error());
+    EXPECT_EQ(result->get_error(), mojom::UsbOpenDeviceError::ACCESS_DENIED);
+  }
+
+  // A second attempt can succeed.
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  EXPECT_CALL(device_client, OnDeviceOpened());
+  EXPECT_CALL(device_client, OnDeviceClosed());
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  device.reset();
+  base::RunLoop().RunUntilIdle();
 }
 
 TEST_F(USBDeviceImplTest, OpenDelayedFailure) {
@@ -534,18 +582,35 @@ TEST_F(USBDeviceImplTest, OpenDelayedFailure) {
 
   UsbDevice::OpenCallback saved_callback;
   EXPECT_CALL(mock_device(), OpenInternal(_))
-      .WillOnce(Invoke([&saved_callback](UsbDevice::OpenCallback& callback) {
+      .WillOnce([&saved_callback](UsbDevice::OpenCallback& callback) {
         saved_callback = std::move(callback);
-      }));
+      });
   EXPECT_CALL(device_client, OnDeviceOpened()).Times(0);
   EXPECT_CALL(device_client, OnDeviceClosed()).Times(0);
 
-  device->Open(
-      base::BindOnce([](mojom::UsbOpenDeviceError result) { NOTREACHED(); }));
+  device->Open(base::BindOnce(
+      [](mojom::UsbOpenDeviceResultPtr result) { NOTREACHED(); }));
   device.reset();
   base::RunLoop().RunUntilIdle();
 
   std::move(saved_callback).Run(nullptr);
+}
+
+TEST_F(USBDeviceImplTest, MultipleOpenNotAllowed) {
+  MockUsbDeviceClient device_client;
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxy(device_client.CreateInterfacePtrAndBind());
+
+  device->Open(
+      base::BindLambdaForTesting([&](mojom::UsbOpenDeviceResultPtr result) {
+        EXPECT_TRUE(result->is_success());
+      }));
+
+  base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+  device->Open(future.GetCallback());
+  auto result = future.Take();
+  EXPECT_TRUE(result->is_error());
+  EXPECT_EQ(result->get_error(), mojom::UsbOpenDeviceError::ALREADY_OPEN);
 }
 
 TEST_F(USBDeviceImplTest, Close) {
@@ -559,10 +624,9 @@ TEST_F(USBDeviceImplTest, Close) {
   EXPECT_CALL(device_client, OnDeviceOpened());
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   EXPECT_CALL(mock_handle(), Close());
@@ -583,10 +647,9 @@ TEST_F(USBDeviceImplTest, SetInvalidConfiguration) {
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   EXPECT_CALL(mock_handle(), SetConfigurationInternal(42, _));
@@ -609,10 +672,9 @@ TEST_F(USBDeviceImplTest, SetValidConfiguration) {
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   EXPECT_CALL(mock_handle(), SetConfigurationInternal(42, _));
@@ -638,10 +700,9 @@ TEST_F(USBDeviceImplTest, Reset) {
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   EXPECT_CALL(mock_handle(), ResetDeviceInternal(_));
@@ -675,10 +736,9 @@ TEST_F(USBDeviceImplTest, ClaimAndReleaseInterface) {
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   // Now add a mock interface #1.
@@ -697,7 +757,11 @@ TEST_F(USBDeviceImplTest, ClaimAndReleaseInterface) {
     // Try to claim an invalid interface and expect failure.
     base::RunLoop loop;
     device->ClaimInterface(
-        2, base::BindOnce(&ExpectResultAndThen, false, loop.QuitClosure()));
+        2,
+        base::BindLambdaForTesting([&](mojom::UsbClaimInterfaceResult result) {
+          EXPECT_EQ(result, mojom::UsbClaimInterfaceResult::kFailure);
+          loop.Quit();
+        }));
     loop.Run();
   }
 
@@ -706,7 +770,11 @@ TEST_F(USBDeviceImplTest, ClaimAndReleaseInterface) {
   {
     base::RunLoop loop;
     device->ClaimInterface(
-        1, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
+        1,
+        base::BindLambdaForTesting([&](mojom::UsbClaimInterfaceResult result) {
+          EXPECT_EQ(result, mojom::UsbClaimInterfaceResult::kSuccess);
+          loop.Quit();
+        }));
     loop.Run();
   }
 
@@ -733,16 +801,263 @@ TEST_F(USBDeviceImplTest, ClaimAndReleaseInterface) {
   EXPECT_CALL(mock_handle(), Close());
 }
 
+TEST_F(USBDeviceImplTest, ClaimProtectedInterface) {
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(uint8_t{2}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // The second interface implements a class which has been blocked above.
+  AddMockConfig(
+      ConfigBuilder(/*configuration_value=*/1)
+          .AddInterface(/*interface_number=*/0, /*alternate_setting=*/0,
+                        /*class_code=*/1, /*subclass_code=*/0,
+                        /*protocol_code=*/0)
+          .AddInterface(/*interface_number=*/1, /*alternate_setting=*/0,
+                        /*class_code=*/2, /*subclass_code=*/0,
+                        /*protocol_code=*/0)
+          .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::RunLoop loop;
+    device->SetConfiguration(
+        1, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), ClaimInterfaceInternal(0, _));
+
+  {
+    base::RunLoop loop;
+    device->ClaimInterface(
+        0,
+        base::BindLambdaForTesting([&](mojom::UsbClaimInterfaceResult result) {
+          EXPECT_EQ(result, mojom::UsbClaimInterfaceResult::kSuccess);
+          loop.Quit();
+        }));
+    loop.Run();
+  }
+
+  {
+    base::RunLoop loop;
+    device->ClaimInterface(
+        1,
+        base::BindLambdaForTesting([&](mojom::UsbClaimInterfaceResult result) {
+          EXPECT_EQ(result, mojom::UsbClaimInterfaceResult::kProtectedClass);
+          loop.Quit();
+        }));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+TEST_F(USBDeviceImplTest, ClaimInterfaceFailsDuringSetConfiguration) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  AddMockConfig(ConfigBuilder(1).AddInterface(0, 0, 1, 2, 3).Build());
+
+  UsbDeviceHandle::ResultCallback saved_callback;
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _))
+      .WillOnce([&saved_callback](int value,
+                                  UsbDeviceHandle::ResultCallback& callback) {
+        saved_callback = std::move(callback);
+      });
+
+  // Initiate SetConfiguration but only save the callback without invoking it.
+  base::test::TestFuture<bool> set_config_future;
+  device->SetConfiguration(1, set_config_future.GetCallback());
+
+  // Ensure the request has reached the service.
+  base::RunLoop().RunUntilIdle();
+  ASSERT_TRUE(saved_callback);
+
+  // Immediately try to claim interface; should fail synchronously in service.
+  base::test::TestFuture<mojom::UsbClaimInterfaceResult> claim_future;
+  device->ClaimInterface(0, claim_future.GetCallback());
+  EXPECT_EQ(claim_future.Get(), mojom::UsbClaimInterfaceResult::kFailure);
+
+  // Now resolve the pending SetConfiguration.
+  mock_device().ActiveConfigurationChanged(1);
+  std::move(saved_callback).Run(true);
+  EXPECT_TRUE(set_config_future.Get());
+
+  // After SetConfiguration completes, claiming should succeed.
+  EXPECT_CALL(mock_handle(), ClaimInterfaceInternal(0, _));
+  base::test::TestFuture<mojom::UsbClaimInterfaceResult> claim_future2;
+  device->ClaimInterface(0, claim_future2.GetCallback());
+  EXPECT_EQ(claim_future2.Get(), mojom::UsbClaimInterfaceResult::kSuccess);
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+TEST_F(USBDeviceImplTest, ClaimInterfaceFailsDuringSetConfigurationMultiPipe) {
+  mojo::Remote<mojom::UsbDevice> device1 = GetMockDeviceProxy();
+
+  // Create a second DeviceImpl pointing to the SAME mock UsbDevice to mimic
+  // dual Mojo pipes created from a compromised renderer pointing to the same
+  // physical device. We cannot use GetMockDeviceProxy() here as it would
+  // recreate and overwrite the mock device instance.
+  mojo::Remote<mojom::UsbDevice> device2;
+  DeviceImpl::Create(scoped_refptr<device::UsbDevice>(&mock_device()),
+                     device2.BindNewPipeAndPassReceiver(),
+                     /*client=*/mojo::NullRemote(),
+                     /*blocked_interface_classes=*/{},
+                     /*allow_security_key_requests=*/false);
+
+  EXPECT_CALL(mock_device(), OpenInternal(_)).Times(2);
+
+  // Open the device via both pipes.
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device1->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device2->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  AddMockConfig(ConfigBuilder(1).AddInterface(0, 0, 1, 2, 3).Build());
+
+  base::test::TestFuture<UsbDeviceHandle::ResultCallback>
+      set_config_callback_future;
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _))
+      .WillOnce([&set_config_callback_future](
+                    int value, UsbDeviceHandle::ResultCallback& callback) {
+        set_config_callback_future.SetValue(std::move(callback));
+      });
+
+  // Initiate SetConfiguration via device1.
+  base::test::TestFuture<bool> set_config_future;
+  device1->SetConfiguration(1, set_config_future.GetCallback());
+
+  // Ensure the request has reached the service and retrieve the callback.
+  UsbDeviceHandle::ResultCallback saved_callback =
+      set_config_callback_future.Take();
+  ASSERT_TRUE(saved_callback);
+
+  // Immediately try to claim interface via device2; should fail
+  // synchronously in service.
+  base::test::TestFuture<mojom::UsbClaimInterfaceResult> claim_future;
+  device2->ClaimInterface(0, claim_future.GetCallback());
+  EXPECT_EQ(claim_future.Get(), mojom::UsbClaimInterfaceResult::kFailure);
+
+  // Now resolve the pending SetConfiguration.
+  mock_device().ActiveConfigurationChanged(1);
+  std::move(saved_callback).Run(true);
+  EXPECT_TRUE(set_config_future.Get());
+
+  // After SetConfiguration completes, claiming on device2 should succeed.
+  EXPECT_CALL(mock_handle(), ClaimInterfaceInternal(0, _));
+  base::test::TestFuture<mojom::UsbClaimInterfaceResult> claim_future2;
+  device2->ClaimInterface(0, claim_future2.GetCallback());
+  EXPECT_EQ(claim_future2.Get(), mojom::UsbClaimInterfaceResult::kSuccess);
+
+  EXPECT_CALL(mock_handle(), Close()).Times(2);
+}
+
+// Verify that concurrent SetConfiguration calls are blocked and rejected
+// with a bad message while an asynchronous ClaimInterface is in progress.
+TEST_F(USBDeviceImplTest, SetConfigurationBlockedDuringClaimInterface) {
+  // Smart Card class (0x0B) is blocklisted for WebUSB.
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(
+          base::span_from_ref(uint8_t{0x0B}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // Multi-configuration device:
+  //   config 1, interface 0 = vendor-specific (0xFF) -> NOT blocked
+  //   config 2, interface 0 = Smart Card     (0x0B) -> BLOCKED
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/0,
+                                  /*alternate_setting=*/0,
+                                  /*class_code=*/0xFF, /*subclass_code=*/0,
+                                  /*protocol_code=*/0)
+                    .Build());
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/2)
+                    .AddInterface(/*interface_number=*/0,
+                                  /*alternate_setting=*/0,
+                                  /*class_code=*/0x0B, /*subclass_code=*/0,
+                                  /*protocol_code=*/0)
+                    .Build());
+
+  // Device boots in config 1.
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+  {
+    base::test::TestFuture<bool> future;
+    device->SetConfiguration(1, future.GetCallback());
+    EXPECT_TRUE(future.Get());
+  }
+
+  // --- Step 1 -------------------------------------------------------------
+  // Renderer sends ClaimInterface(0). DeviceImpl::ClaimInterface checks
+  // state_change_in_progress (false -> passes), validates the blocklist
+  // against CONFIG 1 (0xFF -> allowed), and forwards to the device handle.
+  // On ChromeOS / Android the handle posts an async DetachInterface hop before
+  // the real CLAIMINTERFACE ioctl; we model that by stashing the callback.
+  UsbDeviceHandle::ResultCallback deferred_claim_callback;
+  EXPECT_CALL(mock_handle(), ClaimInterfaceInternal(0, _))
+      .WillOnce([&deferred_claim_callback](
+                    int, UsbDeviceHandle::ResultCallback& callback) {
+        deferred_claim_callback = std::move(callback);
+      });
+
+  base::test::TestFuture<mojom::UsbClaimInterfaceResult> claim_future;
+  device->ClaimInterface(0, claim_future.GetCallback());
+  // Reaching the handle proves the blocklist check (against config 1) passed.
+  ASSERT_TRUE(base::test::RunUntil(
+      [&]() { return !deferred_claim_callback.is_null(); }));
+
+  // --- Step 2 -------------------------------------------------------------
+  // Renderer immediately sends SetConfiguration(2) on the same pipe.
+  // DeviceImpl::ClaimInterface SETS the in-progress flag, so SetConfiguration's
+  // guard at device_impl.cc:384 sees `true` and rejects it as a bad message.
+  EXPECT_CALL(mock_handle(), Close());
+
+  mojo::test::BadMessageObserver bad_message_observer;
+  base::test::TestFuture<bool> set_config_future;
+  device->SetConfiguration(2, set_config_future.GetCallback());
+
+  EXPECT_EQ("Device state change in progress.",
+            bad_message_observer.WaitForBadMessage());
+
+  device.reset();
+  EXPECT_TRUE(base::test::RunUntil([&]() { return !is_device_open(); }));
+}
+
 TEST_F(USBDeviceImplTest, SetInterfaceAlternateSetting) {
   mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
 
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   AddMockConfig(ConfigBuilder(1)
@@ -751,38 +1066,100 @@ TEST_F(USBDeviceImplTest, SetInterfaceAlternateSetting) {
                     .AddInterface(2, 0, 1, 2, 3)
                     .Build());
 
+  // The device must be configured because SetInterfaceAlternateSetting now
+  // retrieves the active configuration to validate the interface class code.
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::test::TestFuture<bool> future;
+    device->SetConfiguration(1, future.GetCallback());
+    EXPECT_TRUE(future.Get());
+  }
+
   EXPECT_CALL(mock_handle(), SetInterfaceAlternateSettingInternal(1, 42, _));
 
   {
-    base::RunLoop loop;
-    device->SetInterfaceAlternateSetting(
-        1, 42, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<bool> future;
+    device->SetInterfaceAlternateSetting(1, 42, future.GetCallback());
+    EXPECT_TRUE(future.Get());
   }
 
-  EXPECT_CALL(mock_handle(), SetInterfaceAlternateSettingInternal(1, 100, _));
+  EXPECT_CALL(mock_handle(), SetInterfaceAlternateSettingInternal(1, 100, _))
+      .Times(0);
 
   {
-    base::RunLoop loop;
-    device->SetInterfaceAlternateSetting(
-        1, 100,
-        base::BindOnce(&ExpectResultAndThen, false, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<bool> future;
+    device->SetInterfaceAlternateSetting(1, 100, future.GetCallback());
+    EXPECT_FALSE(future.Get());
   }
 
   EXPECT_CALL(mock_handle(), Close());
 }
 
-TEST_F(USBDeviceImplTest, ControlTransfer) {
+TEST_F(USBDeviceImplTest, SetInterfaceAlternateSettingProtectedClassBypass) {
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(uint8_t{3}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  AddMockConfig(
+      ConfigBuilder(/*configuration_value=*/1)
+          .AddInterface(/*interface_number=*/0, /*alternate_setting=*/0,
+                        /*class_code=*/0xFF, /*subclass_code=*/0,
+                        /*protocol_code=*/0)
+          .AddInterface(/*interface_number=*/1, /*alternate_setting=*/0,
+                        /*class_code=*/3, /*subclass_code=*/0,
+                        /*protocol_code=*/0)
+          .AddInterface(/*interface_number=*/1, /*alternate_setting=*/1,
+                        /*class_code=*/3, /*subclass_code=*/0,
+                        /*protocol_code=*/0)
+          .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::test::TestFuture<bool> future;
+    device->SetConfiguration(1, future.GetCallback());
+    EXPECT_TRUE(future.Get());
+  }
+
+  EXPECT_CALL(mock_handle(), ClaimInterfaceInternal(1, _)).Times(0);
+
+  {
+    base::test::TestFuture<mojom::UsbClaimInterfaceResult> future;
+    device->ClaimInterface(1, future.GetCallback());
+    EXPECT_EQ(future.Get(), mojom::UsbClaimInterfaceResult::kProtectedClass);
+  }
+
+  EXPECT_CALL(mock_handle(), SetInterfaceAlternateSettingInternal(1, 1, _))
+      .Times(0);
+
+  {
+    base::test::TestFuture<bool> future;
+    device->SetInterfaceAlternateSetting(1, 1, future.GetCallback());
+    EXPECT_FALSE(future.Get());
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+// Verify that standard read/get requests (e.g., GET_DESCRIPTOR) are
+// successfully permitted for STANDARD control transfers.
+TEST_F(USBDeviceImplTest, ControlTransferStandardReadAllowed) {
   mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
 
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   AddMockConfig(ConfigBuilder(1).AddInterface(7, 0, 1, 2, 3).Build());
@@ -806,12 +1183,472 @@ TEST_F(USBDeviceImplTest, ControlTransfer) {
   EXPECT_CALL(mock_handle(),
               ControlTransferInternal(UsbTransferDirection::INBOUND,
                                       UsbControlTransferType::STANDARD,
-                                      UsbControlTransferRecipient::DEVICE, 5, 6,
+                                      UsbControlTransferRecipient::DEVICE, 6, 6,
                                       7, _, 0, _));
 
   {
     auto params = mojom::UsbControlTransferParams::New();
     params->type = UsbControlTransferType::STANDARD;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = 6;
+    params->value = 6;
+    params->index = 7;
+    base::RunLoop loop;
+    device->ControlTransferIn(
+        std::move(params), static_cast<uint32_t>(fake_data.size()), 0,
+        base::BindOnce(&ExpectTransferInAndThen,
+                       mojom::UsbTransferStatus::COMPLETED, fake_data,
+                       loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+// Verify that standard modifying/write requests (e.g., SET_CONFIGURATION) are
+// strictly blocked with PERMISSION_DENIED for STANDARD control transfers.
+TEST_F(USBDeviceImplTest, ControlTransferStandardWriteBlocked) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  std::vector<uint8_t> fake_data = {1, 2, 3};
+
+  {
+    // A STANDARD outbound request (e.g., SET_CONFIGURATION 9) should be
+    // blocked.
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::STANDARD;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = 9;
+    params->value = 1;
+    params->index = 0;
+    base::RunLoop loop;
+    device->ControlTransferOut(
+        std::move(params), fake_data, 0,
+        base::BindOnce(&ExpectTransferStatusAndThen,
+                       mojom::UsbTransferStatus::PERMISSION_DENIED,
+                       loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+// Verify that allowed standard requests (such as GET_DESCRIPTOR) are only
+// permitted when the transfer direction is correctly set to INBOUND. OUTBOUND
+// standard transfers are blocked with PERMISSION_DENIED.
+TEST_F(USBDeviceImplTest, ControlTransferOut_StandardGetRequests_Blocked) {
+  // Mark HID (class 3) as a blocked/protected interface class to prove the
+  // allowlist branch returns before the protected-class check.
+  constexpr uint8_t kHidClass = 0x03;
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(kHidClass));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // Interface #2 is HID (class 3) -- a protected/blocked class.
+  constexpr uint8_t kHidInterfaceNumber = 2;
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(kHidInterfaceNumber, /*alternate_setting=*/0,
+                                  kHidClass, /*subclass=*/0, /*protocol=*/0)
+                    .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+  {
+    base::test::TestFuture<bool> future;
+    device->SetConfiguration(1, future.GetCallback());
+    EXPECT_TRUE(future.Get());
+  }
+
+  // Arbitrary attacker-controlled host->device data stage.
+  const std::vector<uint8_t> payload = {0xDE, 0xAD, 0xBE, 0xEF,
+                                        0xCA, 0xFE, 0xBA, 0xBE};
+
+  // The five IN-only standard requests permitted by the allowlist.
+  constexpr uint8_t kGetStatus = 0x00;
+  constexpr uint8_t kGetDescriptor = 0x06;
+  constexpr uint8_t kGetConfiguration = 0x08;
+  constexpr uint8_t kGetInterface = 0x0A;
+  constexpr uint8_t kSynchFrame = 0x0C;
+
+  for (uint8_t request : {kGetStatus, kGetDescriptor, kGetConfiguration,
+                          kGetInterface, kSynchFrame}) {
+    // Report the active request ID in gtest traces if any assertions fail
+    // during this loop iteration.
+    SCOPED_TRACE(base::StringPrintf("bRequest=0x%02x", request));
+
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::STANDARD;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = request;
+    params->value = 0;
+    params->index = kHidInterfaceNumber;
+
+    base::test::TestFuture<mojom::UsbTransferStatus> future;
+    // Mimic the WebUSB abuse scenario where a website calls
+    // controlTransferOut() (forcing OUTBOUND direction and carrying an
+    // arbitrary payload) but specifies a standard read-only (IN-only) request
+    // ID.
+    device->ControlTransferOut(std::move(params), payload, /*timeout=*/0,
+                               future.GetCallback());
+    EXPECT_EQ(future.Get(), mojom::UsbTransferStatus::PERMISSION_DENIED);
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+// Verify that when kWebUsbEnforceStandardRequestAllowlist is disabled, standard
+// modifying/write requests (e.g., SET_CONFIGURATION) fall back to legacy
+// behavior and are allowed.
+TEST_F(USBDeviceImplTest, ControlTransferLegacyStandardWriteAllowed) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      features::kWebUsbEnforceStandardRequestAllowlist);
+
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  AddMockConfig(ConfigBuilder(1).AddInterface(7, 0, 1, 2, 3).Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::RunLoop loop;
+    device->SetConfiguration(
+        1, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
+    loop.Run();
+  }
+
+  std::vector<uint8_t> fake_data = {1, 2, 3};
+  AddMockOutboundData(fake_data);
+
+  EXPECT_CALL(mock_handle(),
+              ControlTransferInternal(UsbTransferDirection::OUTBOUND,
+                                      UsbControlTransferType::STANDARD,
+                                      UsbControlTransferRecipient::DEVICE, 9, 1,
+                                      0, _, 0, _));
+
+  {
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::STANDARD;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = 9;
+    params->value = 1;
+    params->index = 0;
+    base::RunLoop loop;
+    device->ControlTransferOut(
+        std::move(params), fake_data, 0,
+        base::BindOnce(&ExpectTransferStatusAndThen,
+                       mojom::UsbTransferStatus::COMPLETED,
+                       loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+// Test control transfers to an interface with a protected class should be
+// blocked for VENDOR or CLASS types.
+TEST_F(USBDeviceImplTest, ControlTransferProtectedClassBlock) {
+  // Block interface class 2.
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(uint8_t{2}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // Interface 7 has class 2 (blocked).
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/7,
+                                  /*alternate_setting=*/0,
+                                  /*class_code=*/2, /*subclass_code=*/0,
+                                  /*protocol_code=*/0)
+                    .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::RunLoop loop;
+    device->SetConfiguration(
+        1, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
+    loop.Run();
+  }
+
+  {
+    // A VENDOR request to the INTERFACE with index 7 (targeting the blocked
+    // interface) should be blocked.
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::VENDOR;
+    params->recipient = UsbControlTransferRecipient::INTERFACE;
+    params->request = 5;
+    params->value = 6;
+    params->index = 7;
+    base::RunLoop loop;
+    device->ControlTransferIn(
+        std::move(params), 8, 0,
+        base::BindOnce(&ExpectTransferInAndThen,
+                       mojom::UsbTransferStatus::PERMISSION_DENIED,
+                       std::vector<uint8_t>(), loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+TEST_F(USBDeviceImplTest, VendorControlTransferToDevice) {
+  // Block interface class 2.
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(uint8_t{2}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // Interface 1 has class 2 (blocked).
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/1,
+                                  /*alternate_setting=*/0,
+                                  /*class_code=*/2, /*subclass_code=*/0,
+                                  /*protocol_code=*/0)
+                    .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::RunLoop loop;
+    device->SetConfiguration(
+        1, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
+    loop.Run();
+  }
+
+  {
+    // A VENDOR request to the DEVICE with index 1 (AOA pattern) should be
+    // ALLOWED. Even though index 1 matches the interface number of a protected
+    // class, for VENDOR requests the index is vendor-defined and does not
+    // necessarily identify an interface.
+    std::vector<uint8_t> fake_data = {1, 2, 3};
+    AddMockInboundData(fake_data);
+
+    EXPECT_CALL(mock_handle(),
+                ControlTransferInternal(UsbTransferDirection::INBOUND,
+                                        UsbControlTransferType::VENDOR,
+                                        UsbControlTransferRecipient::DEVICE, 52,
+                                        0, 1, _, 0, _));
+
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::VENDOR;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = 52;
+    params->value = 0;
+    params->index = 1;
+    base::RunLoop loop;
+    device->ControlTransferIn(
+        std::move(params), static_cast<uint32_t>(fake_data.size()), 0,
+        base::BindOnce(&ExpectTransferInAndThen,
+                       mojom::UsbTransferStatus::COMPLETED, fake_data,
+                       loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+TEST_F(USBDeviceImplTest,
+       ClassControlTransferToDeviceWithProtectedInterfaceBypass) {
+  // Block interface class 2.
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(uint8_t{2}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // Interface 1 has class 2 (blocked).
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/1,
+                                  /*alternate_setting=*/0,
+                                  /*class_code=*/2, /*subclass_code=*/0,
+                                  /*protocol_code=*/0)
+                    .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::test::TestFuture<bool> future;
+    device->SetConfiguration(1, future.GetCallback());
+    EXPECT_TRUE(future.Get());
+  }
+
+  {
+    // A CLASS request to the DEVICE with index 0xFF (not matching any
+    // interface) should be BLOCKED because the device has a protected interface
+    // (interface 1).
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::CLASS;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = 5;
+    params->value = 6;
+    params->index = 0xFF;  // Does not exist
+
+    std::vector<uint8_t> fake_data = {1, 2, 3};
+    AddMockInboundData(fake_data);
+
+    base::RunLoop loop;
+    device->ControlTransferIn(
+        std::move(params), static_cast<uint32_t>(fake_data.size()), 0,
+        base::BindOnce(&ExpectTransferInAndThen,
+                       mojom::UsbTransferStatus::PERMISSION_DENIED,
+                       std::vector<uint8_t>(), loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+TEST_F(USBDeviceImplTest,
+       ClassControlTransferToDeviceWithoutProtectedInterface) {
+  // Block interface class 2 (but device won't have it).
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(uint8_t{2}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // Interface 1 has class 3 (NOT blocked).
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/1,
+                                  /*alternate_setting=*/0,
+                                  /*class_code=*/3, /*subclass_code=*/0,
+                                  /*protocol_code=*/0)
+                    .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::test::TestFuture<bool> future;
+    device->SetConfiguration(1, future.GetCallback());
+    EXPECT_TRUE(future.Get());
+  }
+
+  {
+    // A CLASS request to the DEVICE with index 0xFF (not matching any
+    // interface) should be ALLOWED because the device has no protected
+    // interfaces.
+    std::vector<uint8_t> fake_data = {1, 2, 3};
+    AddMockInboundData(fake_data);
+
+    EXPECT_CALL(mock_handle(),
+                ControlTransferInternal(UsbTransferDirection::INBOUND,
+                                        UsbControlTransferType::CLASS,
+                                        UsbControlTransferRecipient::DEVICE, 5,
+                                        6, 0xFF, _, 0, _));
+
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::CLASS;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = 5;
+    params->value = 6;
+    params->index = 0xFF;  // Does not exist
+
+    base::RunLoop loop;
+    device->ControlTransferIn(
+        std::move(params), static_cast<uint32_t>(fake_data.size()), 0,
+        base::BindOnce(&ExpectTransferInAndThen,
+                       mojom::UsbTransferStatus::COMPLETED, fake_data,
+                       loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+TEST_F(USBDeviceImplTest, ControlTransferProtectedClassBlockDisabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      features::kWebUsbProtectedClassControlTransferBlock);
+
+  // Block interface class 2.
+  mojo::Remote<mojom::UsbDevice> device =
+      GetMockDeviceProxyWithBlockedInterfaces(base::span_from_ref(uint8_t{2}));
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  // Interface 7 has class 2 (blocked).
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/7,
+                                  /*alternate_setting=*/0,
+                                  /*class_code=*/2, /*subclass_code=*/0,
+                                  /*protocol_code=*/0)
+                    .Build());
+
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::RunLoop loop;
+    device->SetConfiguration(
+        1, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
+    loop.Run();
+  }
+
+  {
+    // A VENDOR request to the DEVICE with index 7 targeting the blocked
+    // interface should be ALLOWED because
+    // `kWebUsbProtectedClassControlTransferBlock` is disabled.
+    std::vector<uint8_t> fake_data = {1, 2, 3};
+    AddMockInboundData(fake_data);
+
+    EXPECT_CALL(mock_handle(),
+                ControlTransferInternal(UsbTransferDirection::INBOUND,
+                                        UsbControlTransferType::VENDOR,
+                                        UsbControlTransferRecipient::DEVICE, 5,
+                                        6, 7, _, 0, _));
+
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::VENDOR;
     params->recipient = UsbControlTransferRecipient::DEVICE;
     params->request = 5;
     params->value = 6;
@@ -825,30 +1662,6 @@ TEST_F(USBDeviceImplTest, ControlTransfer) {
     loop.Run();
   }
 
-  AddMockOutboundData(fake_data);
-
-  EXPECT_CALL(mock_handle(),
-              ControlTransferInternal(UsbTransferDirection::OUTBOUND,
-                                      UsbControlTransferType::STANDARD,
-                                      UsbControlTransferRecipient::INTERFACE, 5,
-                                      6, 7, _, 0, _));
-
-  {
-    auto params = mojom::UsbControlTransferParams::New();
-    params->type = UsbControlTransferType::STANDARD;
-    params->recipient = UsbControlTransferRecipient::INTERFACE;
-    params->request = 5;
-    params->value = 6;
-    params->index = 7;
-    base::RunLoop loop;
-    device->ControlTransferOut(
-        std::move(params), fake_data, 0,
-        base::BindOnce(&ExpectTransferStatusAndThen,
-                       mojom::UsbTransferStatus::COMPLETED,
-                       loop.QuitClosure()));
-    loop.Run();
-  }
-
   EXPECT_CALL(mock_handle(), Close());
 }
 
@@ -858,19 +1671,18 @@ TEST_F(USBDeviceImplTest, GenericTransfer) {
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   std::string message1 = "say hello please";
   std::vector<uint8_t> fake_outbound_data(message1.size());
-  std::copy(message1.begin(), message1.end(), fake_outbound_data.begin());
+  std::ranges::copy(message1, fake_outbound_data.begin());
 
   std::string message2 = "hello world!";
   std::vector<uint8_t> fake_inbound_data(message2.size());
-  std::copy(message2.begin(), message2.end(), fake_inbound_data.begin());
+  std::ranges::copy(message2, fake_inbound_data.begin());
 
   AddMockConfig(ConfigBuilder(1).AddInterface(7, 0, 1, 2, 3).Build());
   AddMockOutboundData(fake_outbound_data);
@@ -914,18 +1726,17 @@ TEST_F(USBDeviceImplTest, IsochronousTransfer) {
   EXPECT_CALL(mock_device(), OpenInternal(_));
 
   {
-    base::RunLoop loop;
-    device->Open(base::BindOnce(
-        &ExpectOpenAndThen, mojom::UsbOpenDeviceError::OK, loop.QuitClosure()));
-    loop.Run();
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
   }
 
   std::vector<UsbIsochronousPacketPtr> fake_packets_in(4);
-  for (size_t i = 0; i < fake_packets_in.size(); ++i) {
-    fake_packets_in[i] = mojom::UsbIsochronousPacket::New();
-    fake_packets_in[i]->length = 8;
-    fake_packets_in[i]->transferred_length = 8;
-    fake_packets_in[i]->status = UsbTransferStatus::COMPLETED;
+  for (auto& packet : fake_packets_in) {
+    packet = mojom::UsbIsochronousPacket::New();
+    packet->length = 8;
+    packet->transferred_length = 8;
+    packet->status = UsbTransferStatus::COMPLETED;
   }
   std::vector<UsbIsochronousPacketPtr> fake_packets_out;
   for (const auto& packet : fake_packets_in) {
@@ -937,13 +1748,11 @@ TEST_F(USBDeviceImplTest, IsochronousTransfer) {
 
   std::string outbound_data = "aaaaaaaabbbbbbbbccccccccdddddddd";
   std::vector<uint8_t> fake_outbound_data(outbound_data.size());
-  std::copy(outbound_data.begin(), outbound_data.end(),
-            fake_outbound_data.begin());
+  std::ranges::copy(outbound_data, fake_outbound_data.begin());
 
   std::string inbound_data = "ddddddddccccccccbbbbbbbbaaaaaaaa";
   std::vector<uint8_t> fake_inbound_data(inbound_data.size());
-  std::copy(inbound_data.begin(), inbound_data.end(),
-            fake_inbound_data.begin());
+  std::ranges::copy(inbound_data, fake_inbound_data.begin());
 
   AddMockConfig(ConfigBuilder(1).AddInterface(7, 0, 1, 2, 3).Build());
   AddMockOutboundPackets(fake_outbound_data, std::move(fake_packets_in));
@@ -975,6 +1784,349 @@ TEST_F(USBDeviceImplTest, IsochronousTransfer) {
 
   EXPECT_CALL(mock_handle(), Close());
 }
+
+TEST_F(USBDeviceImplTest, IsochronousTransferOutBufferSizeMismatch) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal);
+
+  base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> open_future;
+  device->Open(open_future.GetCallback());
+  EXPECT_TRUE(open_future.Get()->is_success());
+
+  constexpr size_t kPacketCount = 4;
+  constexpr size_t kPacketLength = 8;
+  std::vector<UsbIsochronousPacketPtr> fake_packets;
+  for (size_t i = 0; i < kPacketCount; ++i) {
+    fake_packets.push_back(mojom::UsbIsochronousPacket::New(
+        kPacketLength, kPacketLength, UsbTransferStatus::TRANSFER_ERROR));
+  }
+
+  std::string outbound_data = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  std::vector<uint8_t> fake_outbound_data(outbound_data.size());
+  std::ranges::copy(outbound_data, fake_outbound_data.begin());
+
+  std::string inbound_data = "ddddddddccccccccbbbbbbbbaaaaaaaa";
+  std::vector<uint8_t> fake_inbound_data(inbound_data.size());
+  std::ranges::copy(inbound_data, fake_inbound_data.begin());
+
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/7,
+                                  /*alternate_setting=*/0, /*class_code=*/1,
+                                  /*subclass_code=*/2, /*protocol_code=*/3)
+                    .Build());
+  AddMockOutboundPackets(fake_outbound_data, mojo::Clone(fake_packets));
+  AddMockInboundPackets(fake_inbound_data, mojo::Clone(fake_packets));
+
+  // The `packet_lengths` parameter for IsochronousTransferOut describes the
+  // number of bytes in each packet. Set the size of the last packet one byte
+  // shorter than the buffer size and check that the returned packets indicate
+  // a transfer error.
+  std::vector<uint32_t> short_packet_lengths(kPacketCount, kPacketLength);
+  short_packet_lengths.back() = kPacketLength - 1;
+
+  base::test::TestFuture<std::vector<UsbIsochronousPacketPtr>>
+      transfer_out_future;
+  device->IsochronousTransferOut(
+      /*endpoint_number=*/1, fake_outbound_data, short_packet_lengths,
+      /*timeout=*/0, transfer_out_future.GetCallback());
+  ASSERT_EQ(kPacketCount, transfer_out_future.Get().size());
+  for (const auto& packet : transfer_out_future.Get()) {
+    EXPECT_EQ(packet->status, UsbTransferStatus::TRANSFER_ERROR);
+  }
+
+  EXPECT_CALL(mock_handle(), Close);
+}
+
+TEST_F(USBDeviceImplTest, IsochronousTransferPacketLengthsOverflow) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal);
+
+  base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> open_future;
+  device->Open(open_future.GetCallback());
+  EXPECT_TRUE(open_future.Get()->is_success());
+
+  constexpr size_t kPacketCount = 2;
+  constexpr size_t kPacketLength = 8;
+  std::vector<UsbIsochronousPacketPtr> fake_packets;
+  for (size_t i = 0; i < kPacketCount; ++i) {
+    fake_packets.push_back(mojom::UsbIsochronousPacket::New(
+        kPacketLength, kPacketLength, UsbTransferStatus::TRANSFER_ERROR));
+  }
+
+  std::string outbound_data = "aaaaaaaabbbbbbbb";
+  std::vector<uint8_t> fake_outbound_data(outbound_data.size());
+  std::ranges::copy(outbound_data, fake_outbound_data.begin());
+
+  std::string inbound_data = "bbbbbbbbaaaaaaaa";
+  std::vector<uint8_t> fake_inbound_data(inbound_data.size());
+  std::ranges::copy(inbound_data, fake_inbound_data.begin());
+
+  AddMockConfig(ConfigBuilder(/*configuration_value=*/1)
+                    .AddInterface(/*interface_number=*/7,
+                                  /*alternate_setting=*/0, /*class_code=*/1,
+                                  /*subclass_code=*/2, /*protocol_code=*/3)
+                    .Build());
+  AddMockOutboundPackets(fake_outbound_data, mojo::Clone(fake_packets));
+  AddMockInboundPackets(fake_inbound_data, mojo::Clone(fake_packets));
+
+  // The `packet_lengths` parameter for IsochronousTransferOut and
+  // IsochronousTransferIn describes the number of bytes in each packet. Set
+  // the packet sizes so the total will exceed the maximum value for uint32_t
+  // and check that the returned packets indicate a transfer error.
+  std::vector<uint32_t> overflow_packet_lengths = {0xffffffff, 1};
+
+  base::test::TestFuture<std::vector<UsbIsochronousPacketPtr>>
+      transfer_out_future;
+  device->IsochronousTransferOut(
+      /*endpoint_number=*/1, fake_outbound_data, overflow_packet_lengths,
+      /*timeout=*/0, transfer_out_future.GetCallback());
+  ASSERT_EQ(kPacketCount, transfer_out_future.Get().size());
+  for (const auto& packet : transfer_out_future.Get()) {
+    EXPECT_EQ(packet->status, UsbTransferStatus::TRANSFER_ERROR);
+  }
+
+  base::test::TestFuture<base::span<const uint8_t>,
+                         std::vector<UsbIsochronousPacketPtr>>
+      transfer_in_future;
+  device->IsochronousTransferIn(
+      /*endpoint_number=*/1, overflow_packet_lengths, /*timeout=*/0,
+      transfer_in_future.GetCallback());
+  ASSERT_EQ(kPacketCount, transfer_in_future.Get<1>().size());
+  for (const auto& packet : transfer_in_future.Get<1>()) {
+    EXPECT_EQ(packet->status, UsbTransferStatus::TRANSFER_ERROR);
+  }
+
+  EXPECT_CALL(mock_handle(), Close);
+}
+
+TEST_F(USBDeviceImplTest, ControlTransferInLengthOverLimit) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  std::vector<uint8_t> fake_data(kUsbTransferLengthLimit + 1);
+  auto params = mojom::UsbControlTransferParams::New();
+  params->type = UsbControlTransferType::STANDARD;
+  params->recipient = UsbControlTransferRecipient::DEVICE;
+  params->request = 5;
+  params->value = 6;
+  params->index = 7;
+
+  EXPECT_CALL(mock_handle(), ControlTransferInternal).Times(0);
+  EXPECT_CALL(mock_handle(), Close());
+  {
+    mojo::test::BadMessageObserver bad_message_observer;
+    device->ControlTransferIn(std::move(params),
+                              static_cast<uint32_t>(fake_data.size()), 0,
+                              base::DoNothing());
+    EXPECT_EQ(base::StringPrintf("Transfer size %zu is over the limit.",
+                                 kUsbTransferLengthLimit + 1),
+              bad_message_observer.WaitForBadMessage());
+  }
+}
+
+TEST_F(USBDeviceImplTest, ControlTransferOutLengthOverLimit) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  std::vector<uint8_t> fake_data(kUsbTransferLengthLimit + 1);
+  auto params = mojom::UsbControlTransferParams::New();
+  params->type = UsbControlTransferType::STANDARD;
+  params->recipient = UsbControlTransferRecipient::DEVICE;
+  params->request = 5;
+  params->value = 6;
+  params->index = 7;
+
+  EXPECT_CALL(mock_handle(), ControlTransferInternal).Times(0);
+  EXPECT_CALL(mock_handle(), Close());
+  {
+    mojo::test::BadMessageObserver bad_message_observer;
+    device->ControlTransferOut(std::move(params), fake_data, 0,
+                               base::DoNothing());
+    EXPECT_EQ(base::StringPrintf("Transfer size %zu is over the limit.",
+                                 kUsbTransferLengthLimit + 1),
+              bad_message_observer.WaitForBadMessage());
+  }
+}
+
+TEST_F(USBDeviceImplTest, GenericTransferInLengthOverLimit) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  std::vector<uint8_t> fake_data(kUsbTransferLengthLimit + 1);
+  EXPECT_CALL(mock_handle(), GenericTransferInternal).Times(0);
+  EXPECT_CALL(mock_handle(), Close());
+  {
+    mojo::test::BadMessageObserver bad_message_observer;
+    device->GenericTransferIn(1, fake_data.size(), 0, base::DoNothing());
+    EXPECT_EQ(base::StringPrintf("Transfer size %zu is over the limit.",
+                                 kUsbTransferLengthLimit + 1),
+              bad_message_observer.WaitForBadMessage());
+  }
+}
+
+TEST_F(USBDeviceImplTest, GenericTransferOutLengthOverLimit) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  std::vector<uint8_t> fake_data(kUsbTransferLengthLimit + 1);
+  EXPECT_CALL(mock_handle(), GenericTransferInternal).Times(0);
+  EXPECT_CALL(mock_handle(), Close());
+  {
+    mojo::test::BadMessageObserver bad_message_observer;
+    device->GenericTransferOut(1, fake_data, 0, base::DoNothing());
+    EXPECT_EQ(base::StringPrintf("Transfer size %zu is over the limit.",
+                                 kUsbTransferLengthLimit + 1),
+              bad_message_observer.WaitForBadMessage());
+  }
+}
+
+TEST_F(USBDeviceImplTest, IsochronousTransferInLengthOverLimit) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  std::vector<uint32_t> fake_packet_lengths(2, kUsbTransferLengthLimit);
+  std::vector<uint8_t> fake_data(kUsbTransferLengthLimit * 2);
+  EXPECT_CALL(mock_handle(), IsochronousTransferInInternal).Times(0);
+  EXPECT_CALL(mock_handle(), Close());
+  {
+    mojo::test::BadMessageObserver bad_message_observer;
+    device->IsochronousTransferIn(1, fake_packet_lengths, 0, base::DoNothing());
+    EXPECT_EQ(base::StringPrintf("Transfer size %zu is over the limit.",
+                                 kUsbTransferLengthLimit * 2),
+              bad_message_observer.WaitForBadMessage());
+  }
+}
+
+TEST_F(USBDeviceImplTest, IsochronousTransferOutLengthOverLimit) {
+  mojo::Remote<mojom::UsbDevice> device = GetMockDeviceProxy();
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  std::vector<uint32_t> fake_packet_lengths(2, kUsbTransferLengthLimit);
+  std::vector<uint8_t> fake_data(kUsbTransferLengthLimit * 2);
+  EXPECT_CALL(mock_handle(), IsochronousTransferOutInternal).Times(0);
+  EXPECT_CALL(mock_handle(), Close());
+  {
+    mojo::test::BadMessageObserver bad_message_observer;
+    device->IsochronousTransferOut(1, fake_data, fake_packet_lengths, 0,
+                                   base::DoNothing());
+    EXPECT_EQ(base::StringPrintf("Transfer size %zu is over the limit.",
+                                 kUsbTransferLengthLimit * 2),
+              bad_message_observer.WaitForBadMessage());
+  }
+}
+
+class USBDeviceImplSecurityKeyTest : public USBDeviceImplTest,
+                                     public testing::WithParamInterface<bool> {
+};
+
+TEST_P(USBDeviceImplSecurityKeyTest, SecurityKeyControlTransferBlocked) {
+  const bool allow_security_key_requests = GetParam();
+  mojo::Remote<mojom::UsbDevice> device;
+  if (allow_security_key_requests) {
+    device = GetMockSecurityKeyDeviceProxy();
+  } else {
+    device = GetMockDeviceProxy();
+  }
+
+  EXPECT_CALL(mock_device(), OpenInternal(_));
+
+  {
+    base::test::TestFuture<mojom::UsbOpenDeviceResultPtr> future;
+    device->Open(future.GetCallback());
+    EXPECT_TRUE(future.Get()->is_success());
+  }
+
+  AddMockConfig(ConfigBuilder(1).AddInterface(7, 0, 1, 2, 3).Build());
+  EXPECT_CALL(mock_handle(), SetConfigurationInternal(1, _));
+
+  {
+    base::RunLoop loop;
+    device->SetConfiguration(
+        1, base::BindOnce(&ExpectResultAndThen, true, loop.QuitClosure()));
+    loop.Run();
+  }
+
+  const char* data_str = mojom::UsbControlTransferParams::kSecurityKeyAOAModel;
+  const std::vector<uint8_t> data(
+      reinterpret_cast<const uint8_t*>(data_str),
+      UNSAFE_TODO(reinterpret_cast<const uint8_t*>(data_str) +
+                  strlen(data_str)));
+
+  if (allow_security_key_requests) {
+    AddMockOutboundData(data);
+    EXPECT_CALL(mock_handle(),
+                ControlTransferInternal(UsbTransferDirection::OUTBOUND,
+                                        UsbControlTransferType::VENDOR,
+                                        UsbControlTransferRecipient::DEVICE, 52,
+                                        0, 1, _, 0, _));
+  }
+
+  {
+    // This control transfer should be rejected, unless
+    // |allow_security_key_requests| is true, because it's a request to
+    // trigger security key functionality on Android devices.
+
+    auto params = mojom::UsbControlTransferParams::New();
+    params->type = UsbControlTransferType::VENDOR;
+    params->recipient = UsbControlTransferRecipient::DEVICE;
+    params->request = 52;
+    params->value = 0;
+    params->index = 1;
+    base::RunLoop loop;
+    device->ControlTransferOut(
+        std::move(params), data, 0,
+        base::BindOnce(&ExpectTransferStatusAndThen,
+                       allow_security_key_requests
+                           ? mojom::UsbTransferStatus::COMPLETED
+                           : mojom::UsbTransferStatus::PERMISSION_DENIED,
+                       loop.QuitClosure()));
+    loop.Run();
+  }
+
+  EXPECT_CALL(mock_handle(), Close());
+}
+
+INSTANTIATE_TEST_SUITE_P(USBDeviceImplSecurityKeyTests,
+                         USBDeviceImplSecurityKeyTest,
+                         testing::Values(false, true));
 
 }  // namespace usb
 }  // namespace device

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include "base/check.h"
 #include "chrome/browser/safe_browsing/incident_reporting/incident_handler_util.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
 
 namespace safe_browsing {
 
@@ -18,8 +18,7 @@ ResourceRequestIncident::ResourceRequestIncident(
   payload()->set_allocated_resource_request(script_request_incident.release());
 }
 
-ResourceRequestIncident::~ResourceRequestIncident() {
-}
+ResourceRequestIncident::~ResourceRequestIncident() = default;
 
 IncidentType ResourceRequestIncident::GetType() const {
   return IncidentType::RESOURCE_REQUEST;

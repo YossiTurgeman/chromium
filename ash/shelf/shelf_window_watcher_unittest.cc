@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,6 @@
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
-#include "ash/window_factory.h"
 #include "ash/wm/desks/desks_util.h"
 #include "ash/wm/window_resizer.h"
 #include "ash/wm/window_state.h"
@@ -56,11 +55,13 @@ TEST_F(ShelfWindowWatcherTest, OpenAndClose) {
   ASSERT_EQ(0, model->item_count());
   // Windows with valid ShelfItemType and ShelfID properties get shelf items.
   std::unique_ptr<views::Widget> widget1 = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   CreateShelfItem(widget1->GetNativeWindow());
   EXPECT_EQ(1, model->item_count());
   std::unique_ptr<views::Widget> widget2 = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   CreateShelfItem(widget2->GetNativeWindow());
   EXPECT_EQ(2, model->item_count());
 
@@ -75,9 +76,11 @@ TEST_F(ShelfWindowWatcherTest, CreateAndRemoveShelfItemProperties) {
   ShelfModel* model = ShelfModel::Get();
   // Creating windows without a valid ShelfItemType does not add items.
   std::unique_ptr<views::Widget> widget1 = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   std::unique_ptr<views::Widget> widget2 = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   EXPECT_EQ(0, model->item_count());
 
   // Create a ShelfItem for the first window.
@@ -117,7 +120,8 @@ TEST_F(ShelfWindowWatcherTest, UpdateWindowProperty) {
   ShelfModel* model = ShelfModel::Get();
   // Create a ShelfItem for a new window.
   std::unique_ptr<views::Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   ShelfID id = CreateShelfItem(widget->GetNativeWindow());
   EXPECT_EQ(1, model->item_count());
 
@@ -135,7 +139,8 @@ TEST_F(ShelfWindowWatcherTest, MaximizeAndRestoreWindow) {
   ShelfModel* model = ShelfModel::Get();
   // Create a ShelfItem for a new window.
   std::unique_ptr<views::Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   ShelfID id = CreateShelfItem(widget->GetNativeWindow());
   EXPECT_EQ(1, model->item_count());
 
@@ -169,7 +174,8 @@ TEST_F(ShelfWindowWatcherTest, DragWindow) {
   ShelfModel* model = ShelfModel::Get();
   // Create a ShelfItem for a new window.
   std::unique_ptr<views::Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   ShelfID id = CreateShelfItem(widget->GetNativeWindow());
   EXPECT_EQ(1, model->item_count());
 
@@ -194,7 +200,8 @@ TEST_F(ShelfWindowWatcherTest, DialogWindows) {
   ShelfModel* model = ShelfModel::Get();
   // An item is created for a dialog window.
   std::unique_ptr<views::Widget> dialog_widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   aura::Window* dialog = dialog_widget->GetNativeWindow();
   dialog->SetProperty(kShelfIDKey, ShelfID("a").Serialize());
   dialog->SetProperty(kShelfItemTypeKey, static_cast<int32_t>(TYPE_DIALOG));
@@ -202,7 +209,8 @@ TEST_F(ShelfWindowWatcherTest, DialogWindows) {
 
   // An item is not created for an app window.
   std::unique_ptr<views::Widget> app_widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   aura::Window* app = app_widget->GetNativeWindow();
   app->SetProperty(kShelfIDKey, ShelfID("c").Serialize());
   app->SetProperty(kShelfItemTypeKey, static_cast<int32_t>(TYPE_APP));
@@ -219,7 +227,8 @@ TEST_F(ShelfWindowWatcherTest, ItemIcon) {
   ShelfModel* model = ShelfModel::Get();
   // Create a ShelfItem for a window; it should have a default icon.
   std::unique_ptr<views::Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   aura::Window* window = widget->GetNativeWindow();
   ShelfID id = CreateShelfItem(window);
   EXPECT_EQ(1, model->item_count());
@@ -246,7 +255,7 @@ TEST_F(ShelfWindowWatcherTest, ItemIcon) {
 TEST_F(ShelfWindowWatcherTest, DontCreateShelfEntriesForChildWindows) {
   ShelfModel* model = ShelfModel::Get();
   std::unique_ptr<aura::Window> window =
-      window_factory::NewWindow(nullptr, aura::client::WINDOW_TYPE_NORMAL);
+      std::make_unique<aura::Window>(nullptr, aura::client::WINDOW_TYPE_NORMAL);
   window->Init(ui::LAYER_NOT_DRAWN);
   window->SetProperty(kShelfIDKey, ShelfID("a").Serialize());
   window->SetProperty(kShelfItemTypeKey, static_cast<int32_t>(TYPE_DIALOG));
@@ -257,7 +266,7 @@ TEST_F(ShelfWindowWatcherTest, DontCreateShelfEntriesForChildWindows) {
   EXPECT_EQ(1, model->item_count());
 
   std::unique_ptr<aura::Window> child =
-      window_factory::NewWindow(nullptr, aura::client::WINDOW_TYPE_NORMAL);
+      std::make_unique<aura::Window>(nullptr, aura::client::WINDOW_TYPE_NORMAL);
   child->Init(ui::LAYER_NOT_DRAWN);
   child->SetProperty(kShelfIDKey, ShelfID("b").Serialize());
   child->SetProperty(kShelfItemTypeKey, static_cast<int32_t>(TYPE_DIALOG));
@@ -275,7 +284,7 @@ TEST_F(ShelfWindowWatcherTest, DontCreateShelfEntriesForChildWindows) {
 TEST_F(ShelfWindowWatcherTest, CreateShelfEntriesForTransientWindows) {
   ShelfModel* model = ShelfModel::Get();
   std::unique_ptr<aura::Window> window =
-      window_factory::NewWindow(nullptr, aura::client::WINDOW_TYPE_NORMAL);
+      std::make_unique<aura::Window>(nullptr, aura::client::WINDOW_TYPE_NORMAL);
   window->Init(ui::LAYER_NOT_DRAWN);
   window->SetProperty(kShelfIDKey, ShelfID("a").Serialize());
   window->SetProperty(kShelfItemTypeKey, static_cast<int32_t>(TYPE_DIALOG));
@@ -286,7 +295,7 @@ TEST_F(ShelfWindowWatcherTest, CreateShelfEntriesForTransientWindows) {
   EXPECT_EQ(1, model->item_count());
 
   std::unique_ptr<aura::Window> transient =
-      window_factory::NewWindow(nullptr, aura::client::WINDOW_TYPE_NORMAL);
+      std::make_unique<aura::Window>(nullptr, aura::client::WINDOW_TYPE_NORMAL);
   transient->Init(ui::LAYER_NOT_DRAWN);
   transient->SetProperty(kShelfIDKey,
                          new std::string(ShelfID("b").Serialize()));
@@ -317,12 +326,13 @@ TEST_F(ShelfWindowWatcherSessionStartTest, PreExistingWindow) {
 
   // Construct a window that should get a shelf item once the session starts.
   std::unique_ptr<views::Widget> widget = CreateTestWidget(
-      nullptr, desks_util::GetActiveDeskContainerId(), gfx::Rect());
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET, nullptr,
+      desks_util::GetActiveDeskContainerId(), gfx::Rect());
   CreateShelfItem(widget->GetNativeWindow());
   EXPECT_EQ(0, model->item_count());
 
   // Start the test user session; ShelfWindowWatcher will find the open window.
-  CreateUserSessions(1);
+  SimulateUserLogin(kRegularUserLoginInfo);
   EXPECT_EQ(1, model->item_count());
 }
 

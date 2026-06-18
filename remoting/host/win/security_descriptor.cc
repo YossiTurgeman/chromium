@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,9 @@
 #include <sddl.h>
 #include <stdint.h>
 
-#include "base/strings/string16.h"
+#include <string>
+
+#include "base/compiler_specific.h"
 #include "base/strings/utf_string_conversions.h"
 
 namespace remoting {
@@ -16,12 +18,12 @@ ScopedSd ConvertSddlToSd(const std::string& sddl) {
   PSECURITY_DESCRIPTOR raw_sd = nullptr;
   ULONG length = 0;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
-          base::UTF8ToUTF16(sddl).c_str(), SDDL_REVISION_1, &raw_sd, &length)) {
+          base::UTF8ToWide(sddl).c_str(), SDDL_REVISION_1, &raw_sd, &length)) {
     return ScopedSd();
   }
 
   ScopedSd sd(length);
-  memcpy(sd.get(), raw_sd, length);
+  UNSAFE_TODO(memcpy(sd.get(), raw_sd, length));
 
   LocalFree(raw_sd);
   return sd;
@@ -29,13 +31,14 @@ ScopedSd ConvertSddlToSd(const std::string& sddl) {
 
 // Converts a SID into a text string.
 std::string ConvertSidToString(SID* sid) {
-  base::char16* c_sid_string = nullptr;
-  if (!ConvertSidToStringSid(sid, &c_sid_string))
+  wchar_t* c_sid_string = nullptr;
+  if (!ConvertSidToStringSid(sid, &c_sid_string)) {
     return std::string();
+  }
 
-  base::string16 sid_string(c_sid_string);
+  std::wstring sid_string(c_sid_string);
   LocalFree(c_sid_string);
-  return base::UTF16ToUTF8(sid_string);
+  return base::WideToUTF8(sid_string);
 }
 
 // Returns the logon SID of a token. Returns nullptr if the token does not
@@ -48,16 +51,19 @@ ScopedSid GetLogonSid(HANDLE token) {
   }
 
   TypedBuffer<TOKEN_GROUPS> groups(length);
-  if (!GetTokenInformation(token, TokenGroups, groups.get(), length, &length))
+  if (!GetTokenInformation(token, TokenGroups, groups.get(), length, &length)) {
     return ScopedSid();
+  }
 
   for (uint32_t i = 0; i < groups->GroupCount; ++i) {
-    if ((groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) ==
+    if ((UNSAFE_TODO(groups->Groups[i]).Attributes & SE_GROUP_LOGON_ID) ==
         SE_GROUP_LOGON_ID) {
-      length = GetLengthSid(groups->Groups[i].Sid);
+      length = GetLengthSid(UNSAFE_TODO(groups->Groups[i]).Sid);
       ScopedSid logon_sid(length);
-      if (!CopySid(length, logon_sid.get(), groups->Groups[i].Sid))
+      if (!CopySid(length, logon_sid.get(),
+                   UNSAFE_TODO(groups->Groups[i]).Sid)) {
         return ScopedSid();
+      }
 
       return logon_sid;
     }
@@ -67,28 +73,24 @@ ScopedSid GetLogonSid(HANDLE token) {
 }
 
 bool MakeScopedAbsoluteSd(const ScopedSd& relative_sd,
-                          ScopedSd* absolute_sd,
-                          ScopedAcl* dacl,
-                          ScopedSid* group,
-                          ScopedSid* owner,
-                          ScopedAcl* sacl) {
+                          ScopedSd& absolute_sd,
+                          ScopedAcl& dacl,
+                          ScopedSid& group,
+                          ScopedSid& owner,
+                          ScopedAcl& sacl) {
   // Get buffer sizes.
   DWORD absolute_sd_size = 0;
   DWORD dacl_size = 0;
   DWORD group_size = 0;
   DWORD owner_size = 0;
   DWORD sacl_size = 0;
-  if (MakeAbsoluteSD(relative_sd.get(),
-                     nullptr,
-                     &absolute_sd_size,
-                     nullptr,
-                     &dacl_size,
-                     nullptr,
-                     &sacl_size,
-                     nullptr,
-                     &owner_size,
-                     nullptr,
-                     &group_size) ||
+
+  // `MakeAbsoluteSD()` requires a non-const pointer.
+  ScopedSd& non_const_relative_sd = const_cast<ScopedSd&>(relative_sd);
+
+  if (MakeAbsoluteSD(non_const_relative_sd.get(), nullptr, &absolute_sd_size,
+                     nullptr, &dacl_size, nullptr, &sacl_size, nullptr,
+                     &owner_size, nullptr, &group_size) ||
       GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
     return false;
   }
@@ -101,25 +103,18 @@ bool MakeScopedAbsoluteSd(const ScopedSd& relative_sd,
   ScopedAcl local_sacl(sacl_size);
 
   // Do the conversion.
-  if (!MakeAbsoluteSD(relative_sd.get(),
-                      local_absolute_sd.get(),
-                      &absolute_sd_size,
-                      local_dacl.get(),
-                      &dacl_size,
-                      local_sacl.get(),
-                      &sacl_size,
-                      local_owner.get(),
-                      &owner_size,
-                      local_group.get(),
-                      &group_size)) {
+  if (!MakeAbsoluteSD(non_const_relative_sd.get(), local_absolute_sd.get(),
+                      &absolute_sd_size, local_dacl.get(), &dacl_size,
+                      local_sacl.get(), &sacl_size, local_owner.get(),
+                      &owner_size, local_group.get(), &group_size)) {
     return false;
   }
 
-  absolute_sd->Swap(local_absolute_sd);
-  dacl->Swap(local_dacl);
-  group->Swap(local_group);
-  owner->Swap(local_owner);
-  sacl->Swap(local_sacl);
+  absolute_sd.Swap(local_absolute_sd);
+  dacl.Swap(local_dacl);
+  group.Swap(local_group);
+  owner.Swap(local_owner);
+  sacl.Swap(local_sacl);
   return true;
 }
 

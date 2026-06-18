@@ -1,15 +1,25 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/color/color_provider_manager.h"
 
 #include <algorithm>
+#include <optional>
+#include <utility>
 
 #include "base/check.h"
+#include "base/functional/bind.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
-#include "base/optional.h"
+#include "base/timer/elapsed_timer.h"
+#include "build/build_config.h"
+#include "ui/color/color_metrics.h"
+#include "ui/color/color_mixers.h"
 #include "ui/color/color_provider.h"
+#include "ui/color/color_provider_key.h"
+#include "ui/color/color_provider_utils.h"
+#include "ui/webui/buildflags.h"
 
 namespace ui {
 
@@ -25,24 +35,39 @@ class GlobalManager : public ColorProviderManager {
 
 static_assert(sizeof(GlobalManager) == sizeof(ColorProviderManager),
               "Global manager is intended to provide constructor visibility to "
-              "base::Optional, nothing more.");
+              "std::optional, nothing more.");
 
-base::Optional<GlobalManager>& GetGlobalManager() {
-  static base::NoDestructor<base::Optional<GlobalManager>> manager;
+std::optional<GlobalManager>& GetGlobalManager() {
+  static base::NoDestructor<std::optional<GlobalManager>> manager;
   return *manager;
 }
 
 }  // namespace
 
-ColorProviderManager::ColorProviderManager() = default;
+ColorProviderManager::ColorProviderManager() {
+  ResetColorProviderInitializerList();
+}
+
 ColorProviderManager::~ColorProviderManager() = default;
 
 // static
 ColorProviderManager& ColorProviderManager::Get() {
-  base::Optional<GlobalManager>& manager = GetGlobalManager();
-  if (!manager.has_value())
+  std::optional<GlobalManager>& manager = GetGlobalManager();
+  if (!manager.has_value()) {
     manager.emplace();
+    manager.value().AppendColorProviderInitializer(
+        base::BindRepeating(AddColorMixers));
+  }
 
+  return manager.value();
+}
+
+// static
+ColorProviderManager& ColorProviderManager::GetForTesting() {
+  std::optional<GlobalManager>& manager = GetGlobalManager();
+  if (!manager.has_value()) {
+    manager.emplace();
+  }
   return manager.value();
 }
 
@@ -51,24 +76,43 @@ void ColorProviderManager::ResetForTesting() {
   GetGlobalManager().reset();
 }
 
-void ColorProviderManager::SetColorProviderInitializer(
-    ColorProviderInitializer initializer) {
-  DCHECK(initializer_.is_null());
-  DCHECK(color_providers_.empty());
-  initializer_ = std::move(initializer);
+void ColorProviderManager::ResetColorProviderInitializerList() {
+  ResetColorProviderCache();
+  initializer_list_ = std::make_unique<ColorProviderInitializerList>();
+  initializer_subscriptions_.clear();
 }
 
-ColorProvider* ColorProviderManager::GetColorProviderFor(
-    ColorMode color_mode,
-    ContrastMode contrast_mode) {
-  auto key = ColorProviderKey(color_mode, contrast_mode);
+void ColorProviderManager::ResetColorProviderCache() {
+  if (!color_providers_.empty()) {
+    color_providers_.clear();
+  }
+}
+
+void ColorProviderManager::AppendColorProviderInitializer(
+    ColorProviderInitializerList::CallbackType initializer) {
+  DCHECK(initializer_list_);
+  ResetColorProviderCache();
+
+  initializer_subscriptions_.push_back(
+      initializer_list_->Add(std::move(initializer)));
+}
+
+ColorProvider* ColorProviderManager::GetColorProviderFor(ColorProviderKey key) {
   auto iter = color_providers_.find(key);
   if (iter == color_providers_.end()) {
+    base::ElapsedTimer timer;
+
     auto provider = std::make_unique<ColorProvider>();
-    if (!initializer_.is_null())
-      initializer_.Run(provider.get(), color_mode, contrast_mode);
+    DCHECK(initializer_list_);
+    if (!initializer_list_->empty()) {
+      initializer_list_->Notify(provider.get(), key);
+    }
+
+    RecordTimeSpentInitializingColorProvider(timer.Elapsed());
+    ++num_providers_initialized_;
 
     iter = color_providers_.emplace(key, std::move(provider)).first;
+    RecordColorProviderCacheSize(static_cast<int>(color_providers_.size()));
   }
   ColorProvider* provider = iter->second.get();
   DCHECK(provider);

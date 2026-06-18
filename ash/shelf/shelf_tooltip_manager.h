@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include "ash/ash_export.h"
 #include "ash/shelf/shelf_observer.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
 #include "ui/events/event_handler.h"
@@ -30,6 +30,10 @@ class ASH_EXPORT ShelfTooltipManager : public ui::EventHandler,
                                        public ShelfObserver {
  public:
   explicit ShelfTooltipManager(Shelf* shelf);
+
+  ShelfTooltipManager(const ShelfTooltipManager&) = delete;
+  ShelfTooltipManager& operator=(const ShelfTooltipManager&) = delete;
+
   ~ShelfTooltipManager() override;
 
   // Closes the tooltip; uses an animation if |animate| is true.
@@ -63,7 +67,7 @@ class ASH_EXPORT ShelfTooltipManager : public ui::EventHandler,
   void OnKeyEvent(ui::KeyEvent* event) override;
 
   // ShelfObserver overrides:
-  void WillChangeVisibilityState(ShelfVisibilityState new_state) override;
+  void OnShelfVisibilityStateChanged(ShelfVisibilityState new_state) override;
   void OnAutoHideStateChanged(ShelfAutoHideState new_state) override;
 
  private:
@@ -78,14 +82,12 @@ class ASH_EXPORT ShelfTooltipManager : public ui::EventHandler,
 
   int timer_delay_;
   base::OneShotTimer timer_;
-  Shelf* shelf_ = nullptr;
-  ShelfBubble* bubble_ = nullptr;
+  raw_ptr<Shelf> shelf_ = nullptr;
+  raw_ptr<ShelfBubble, DanglingUntriaged> bubble_ = nullptr;
 
-  ShelfTooltipDelegate* shelf_tooltip_delegate_ = nullptr;
+  raw_ptr<ShelfTooltipDelegate> shelf_tooltip_delegate_ = nullptr;
 
   base::WeakPtrFactory<ShelfTooltipManager> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ShelfTooltipManager);
 };
 
 }  // namespace ash

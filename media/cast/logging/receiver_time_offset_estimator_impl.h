@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include <map>
 
-#include "base/macros.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
 #include "media/cast/common/mod_util.h"
@@ -20,7 +19,6 @@
 namespace media {
 namespace cast {
 
-
 // This should be large enough so that we can collect all 3 events before
 // the entry gets removed from the map.
 const size_t kMaxEventTimesMapSize = 500;
@@ -29,16 +27,21 @@ const size_t kMaxEventTimesMapSize = 500;
 // (But with more jitter.)
 const size_t kClockDriftSpeed = 500;
 
-
 // This implementation listens to two pair of events
 // 1. FRAME_ACK_SENT / FRAME_ACK_RECEIVED  (receiver->sender)
 // 2. PACKET_SENT_TO_NETWORK / PACKET_RECEIVED (sender->receiver)
 // There is a causal relationship between these events in that these events
 // must happen in order. This class obtains the lower and upper bounds for
 // the offset by taking the difference of timestamps.
-class ReceiverTimeOffsetEstimatorImpl : public ReceiverTimeOffsetEstimator {
+class ReceiverTimeOffsetEstimatorImpl final
+    : public ReceiverTimeOffsetEstimator {
  public:
   ReceiverTimeOffsetEstimatorImpl();
+
+  ReceiverTimeOffsetEstimatorImpl(const ReceiverTimeOffsetEstimatorImpl&) =
+      delete;
+  ReceiverTimeOffsetEstimatorImpl& operator=(
+      const ReceiverTimeOffsetEstimatorImpl&) = delete;
 
   ~ReceiverTimeOffsetEstimatorImpl() final;
 
@@ -51,7 +54,7 @@ class ReceiverTimeOffsetEstimatorImpl : public ReceiverTimeOffsetEstimator {
                                base::TimeDelta* upper_bound) final;
 
  private:
-  // This helper uses the difference between sent and recived event
+  // This helper uses the difference between sent and received event
   // to calculate an upper bound on the difference between the clocks
   // on the sender and receiver. Note that this difference can take
   // very large positive or negative values, but the smaller value is
@@ -94,7 +97,6 @@ class ReceiverTimeOffsetEstimatorImpl : public ReceiverTimeOffsetEstimator {
   BoundCalculator lower_bound_;
 
   base::ThreadChecker thread_checker_;
-  DISALLOW_COPY_AND_ASSIGN(ReceiverTimeOffsetEstimatorImpl);
 };
 
 }  // namespace cast

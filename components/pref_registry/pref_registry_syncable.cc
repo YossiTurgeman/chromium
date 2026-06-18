@@ -1,8 +1,10 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/pref_registry/pref_registry_syncable.h"
+
+#include <string_view>
 
 #include "base/files/file_path.h"
 #include "base/strings/string_number_conversions.h"
@@ -13,7 +15,7 @@ namespace user_prefs {
 namespace {
 
 constexpr uint32_t kSyncablePrefFlags =
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     PrefRegistrySyncable::SYNCABLE_OS_PREF |
     PrefRegistrySyncable::SYNCABLE_OS_PRIORITY_PREF |
 #endif
@@ -31,13 +33,13 @@ void PrefRegistrySyncable::SetSyncableRegistrationCallback(
   callback_ = std::move(cb);
 }
 
-void PrefRegistrySyncable::OnPrefRegistered(const std::string& path,
+void PrefRegistrySyncable::OnPrefRegistered(std::string_view path,
                                             uint32_t flags) {
   // Tests that |flags| does not contain both SYNCABLE_PREF and
   // SYNCABLE_PRIORITY_PREF flags at the same time.
   DCHECK(!(flags & PrefRegistrySyncable::SYNCABLE_PREF) ||
          !(flags & PrefRegistrySyncable::SYNCABLE_PRIORITY_PREF));
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   // Ditto for the mutually exclusive OS pref flags.
   DCHECK(!(flags & PrefRegistrySyncable::SYNCABLE_OS_PREF) ||
          !(flags & PrefRegistrySyncable::SYNCABLE_OS_PRIORITY_PREF));
@@ -56,7 +58,6 @@ scoped_refptr<PrefRegistrySyncable> PrefRegistrySyncable::ForkForIncognito() {
   scoped_refptr<PrefRegistrySyncable> registry(new PrefRegistrySyncable());
   registry->defaults_ = defaults_;
   registry->registration_flags_ = registration_flags_;
-  registry->foreign_pref_keys_ = foreign_pref_keys_;
   return registry;
 }
 

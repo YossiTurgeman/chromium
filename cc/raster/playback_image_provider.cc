@@ -1,10 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cc/raster/playback_image_provider.h"
 
-#include "base/bind.h"
+#include <utility>
+#include "base/functional/bind.h"
 #include "cc/tiles/image_decode_cache.h"
 #include "gpu/command_buffer/common/mailbox.h"
 
@@ -20,10 +21,10 @@ void UnrefImageFromCache(DrawImage draw_image,
 
 PlaybackImageProvider::PlaybackImageProvider(
     ImageDecodeCache* cache,
-    const gfx::ColorSpace& target_color_space,
-    base::Optional<Settings>&& settings)
+    const TargetColorParams& target_color_params,
+    std::optional<Settings>&& settings)
     : cache_(cache),
-      target_color_space_(target_color_space),
+      target_color_params_(target_color_params),
       settings_(std::move(settings)) {
   DCHECK(cache_);
 }
@@ -50,27 +51,25 @@ ImageProvider::ScopedResult PlaybackImageProvider::GetRasterContent(
     return ScopedResult();
   }
 
-  const auto& it =
-      settings_->image_to_current_frame_index.find(paint_image.stable_id());
-  size_t frame_index = it == settings_->image_to_current_frame_index.end()
-                           ? PaintImage::kDefaultFrameIndex
-                           : it->second;
+  size_t frame_index = PaintImage::kDefaultFrameIndex;
+  if (settings_->image_to_current_frame_index) {
+    const auto& it =
+        settings_->image_to_current_frame_index->find(paint_image.stable_id());
+    if (it != settings_->image_to_current_frame_index->end()) {
+      frame_index = it->second;
+    }
+  }
 
-  DrawImage adjusted_image(draw_image, 1.f, frame_index, target_color_space_);
+  DrawImage adjusted_image(draw_image, 1.f, frame_index, target_color_params_);
   if (!cache_->UseCacheForDrawImage(adjusted_image)) {
-    if (settings_->raster_mode == RasterMode::kOop) {
+    if (settings_->raster_mode == RasterMode::kGpu) {
       return ScopedResult(DecodedDrawImage(paint_image.GetMailbox(),
                                            draw_image.filter_quality()));
-    } else if (settings_->raster_mode == RasterMode::kGpu) {
+    } else {
       return ScopedResult(DecodedDrawImage(
-          paint_image.GetAcceleratedSkImage(), SkSize::Make(0, 0),
+          paint_image.GetSwSkImage(), nullptr, SkSize::Make(0, 0),
           SkSize::Make(1.f, 1.f), draw_image.filter_quality(),
           true /* is_budgeted */));
-    } else {
-      return ScopedResult(
-          DecodedDrawImage(paint_image.GetSwSkImage(), SkSize::Make(0, 0),
-                           SkSize::Make(1.f, 1.f), draw_image.filter_quality(),
-                           true /* is_budgeted */));
     }
   }
 
@@ -79,6 +78,13 @@ ImageProvider::ScopedResult PlaybackImageProvider::GetRasterContent(
       decoded_draw_image,
       base::BindOnce(&UnrefImageFromCache, std::move(adjusted_image), cache_,
                      decoded_draw_image));
+}
+
+void PlaybackImageProvider::SetAnimatedImageFrameIndexes(
+    scoped_refptr<const AnimatedImageFrameIndexMap> index_map) {
+  if (settings_) {
+    settings_->image_to_current_frame_index = index_map;
+  }
 }
 
 PlaybackImageProvider::Settings::Settings() = default;

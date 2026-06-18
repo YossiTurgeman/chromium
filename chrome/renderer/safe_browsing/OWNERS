@@ -1,5 +1,4 @@
-drubery@chromium.org
-nparker@chromium.org
-vakh@chromium.org
+file://components/safe_browsing/OWNERS
 
-# COMPONENT: Services>Safebrowsing
+per-file *phishing_classifier*=andysjlim@chromium.org
+per-file *phishing_dom_utils*=andysjlim@chromium.org

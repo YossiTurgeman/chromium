@@ -26,6 +26,21 @@ google.com.bd certificates from Comodo.
 
   * [487afc8d0d411b2a05561a2a6f35918f4040e5570c4c73ee323cc50583bcfbb7.pem](487afc8d0d411b2a05561a2a6f35918f4040e5570c4c73ee323cc50583bcfbb7.pem)
 
+### Camerfirma
+
+For details, see <https://groups.google.com/g/mozilla.dev.security.policy/c/dSeD3dgnpzk/m/iAUwcFioAQAJ>
+
+As a result of a long-standing pattern of misissuances and incomplete or
+insufficient remediations, trust in TLS server certificates from Camerfirma
+was fully removed.
+
+  * [04f1bec36951bc1454a904ce32890c5da3cde1356b7900f6e62dfa2041ebad51.pem](04f1bec36951bc1454a904ce32890c5da3cde1356b7900f6e62dfa2041ebad51.pem)
+  * [063e4afac491dfd332f3089b8542e94617d893d7fe944e10a7937ee29d9693c0.pem](063e4afac491dfd332f3089b8542e94617d893d7fe944e10a7937ee29d9693c0.pem)
+  * [0c258a12a5674aef25f28ba7dcfaeceea348e541e6f5cc4ee63b71b361606ac3.pem](0c258a12a5674aef25f28ba7dcfaeceea348e541e6f5cc4ee63b71b361606ac3.pem)
+  * [136335439334a7698016a0d324de72284e079d7b5220bb8fbd747816eebebaca.pem](136335439334a7698016a0d324de72284e079d7b5220bb8fbd747816eebebaca.pem)
+  * [c1d80ce474a51128b77e794a98aa2d62a0225da3f419e5c7ed73dfbf660e7109.pem](c1d80ce474a51128b77e794a98aa2d62a0225da3f419e5c7ed73dfbf660e7109.pem)
+  * [ef3cb417fc8ebf6f97876c9e4ece39de1ea5fe649141d1028b7d11c0b2298ced.pem](ef3cb417fc8ebf6f97876c9e4ece39de1ea5fe649141d1028b7d11c0b2298ced.pem)
+
 ### China Internet Network Information Center (CNNIC)
 
 For details, see <https://security.googleblog.com/2015/03/maintaining-digital-certificate-security.html>
@@ -98,6 +113,13 @@ ccTLD namespace.
   * [a8e1dfd9cd8e470aa2f443914f931cfd61c323e94d75827affee985241c35ce5.pem](a8e1dfd9cd8e470aa2f443914f931cfd61c323e94d75827affee985241c35ce5.pem)
   * [e4f9a3235df7330255f36412bc849fb630f8519961ec3538301deb896c953da5.pem](e4f9a3235df7330255f36412bc849fb630f8519961ec3538301deb896c953da5.pem)
 
+### Sri Lanka
+
+google.lk certificate from Sectigo. https://crt.sh/?id=4037732415
+
+  * [91018fcd3e0dc73f48d011a123f604d846d66821c58304474f949d7449dd600a.pem]
+  (91018fcd3e0dc73f48d011a123f604d846d66821c58304474f949d7449dd600a.pem)
+
 ### Thawte
 
 A precert that appeared in the CT logs for (www.)google.com, issued by
@@ -123,6 +145,17 @@ Another incident in August 2019.
 
   * [82a4cedbc7f61ce5cb04482aa27ea3145bb0cea58ab63ba1931a1654bfbdbb4f.pem](82a4cedbc7f61ce5cb04482aa27ea3145bb0cea58ab63ba1931a1654bfbdbb4f.pem)
 
+### TrustCor
+
+To coincide with the release of M111, the Chrome Root Program announced a
+distrust of the CA Owner "TrustCor".
+
+For details, see <https://groups.google.com/a/mozilla.org/g/dev-security-policy/c/oxX69KFvsm4/m/PKpJf5W6AQAJ>
+
+  * [5a885db19c01d912c5759388938cafbbdf031ab2d48e91ee15589b42971d039c.pem](5a885db19c01d912c5759388938cafbbdf031ab2d48e91ee15589b42971d039c.pem)
+  * [0753e940378c1bd5e3836e395daea5cb839e5046f1bd0eae1951cf10fec7c965.pem](0753e940378c1bd5e3836e395daea5cb839e5046f1bd0eae1951cf10fec7c965.pem)
+  * [d40e9c86cd8fe468c1776959f49ea774fa548684b6c406f3909261f4dce2575c.pem](d40e9c86cd8fe468c1776959f49ea774fa548684b6c406f3909261f4dce2575c.pem)
+
 ### Trustwave
 
 For details, see <https://www.trustwave.com/Resources/SpiderLabs-Blog/Clarifying-The-Trustwave-CA-Policy-Update/>
@@ -146,6 +179,17 @@ have been revoked.
 
   * [372447c43185c38edd2ce0e9c853f9ac1576ddd1704c2f54d96076c089cb4227.pem](372447c43185c38edd2ce0e9c853f9ac1576ddd1704c2f54d96076c089cb4227.pem)
   * [42187727be39faf667aeb92bf0cc4e268f6e2ead2cefbec575bdc90430024f69.pem](42187727be39faf667aeb92bf0cc4e268f6e2ead2cefbec575bdc90430024f69.pem)
+
+### Uganda
+
+Google and Youtube certificates from Let's Encrypt.
+
+  * [289ed1676f42b679f2b665bb5a3f25610d9d19ac017beafa46787f1d6022986a](289ed1676f42b679f2b665bb5a3f25610d9d19ac017beafa46787f1d6022986a.pem)
+  * [3a554ead9dd3e881c0bf6b4c694755ca51acbfb5b99ded5af49da950be21f2f7](3a554ead9dd3e881c0bf6b4c694755ca51acbfb5b99ded5af49da950be21f2f7.pem)
+  * [632b75ece2b543391dc3d520c4d9944cd6b9a302a9a60401aabcaaddf6b9451d](632b75ece2b543391dc3d520c4d9944cd6b9a302a9a60401aabcaaddf6b9451d.pem)
+  * [9717b1e4242ac93e7e6cafd2123130c9b6d12931c4b7d157f328dceb489ebdab](9717b1e4242ac93e7e6cafd2123130c9b6d12931c4b7d157f328dceb489ebdab.pem)
+  * [9adb8bc0ad191ff90992722ab16f15d607b6c111e60f0aec704a09f3360a2d81](9adb8bc0ad191ff90992722ab16f15d607b6c111e60f0aec704a09f3360a2d81.pem)
+  * [e0486928e42eeebca5e9ab5ce0f2d266f2ec9314542c0ab170736147383d21b0](e0486928e42eeebca5e9ab5ce0f2d266f2ec9314542c0ab170736147383d21b0.pem)
 
 ## Private Key Leakages
 
@@ -282,10 +326,19 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=1423400
 For details, see <https://security.googleblog.com/2019/08/protecting-chrome-users-in-kazakhstan.html>
 
   * [00309c736dd661da6f1eb24173aa849944c168a43a15bffd192eecfdb6f8dbd2.pem](00309c736dd661da6f1eb24173aa849944c168a43a15bffd192eecfdb6f8dbd2.pem)
+  * [61c0fc2e38b5b6f9071b42cee54a9013d858b6697c68b460948551b3249576a1.pem](61c0fc2e38b5b6f9071b42cee54a9013d858b6697c68b460948551b3249576a1.pem)
+  * [1df696f021ab1c3ace9a376b07ed7256a40214cd3396d7934087614924e2d7ef.pem](1df696f021ab1c3ace9a376b07ed7256a40214cd3396d7934087614924e2d7ef.pem)
+  * [0230a604d99220e5612ee7862ab9f7a6e18e4f1ac4c9e27075788cc5220169ab.pem](0230a604d99220e5612ee7862ab9f7a6e18e4f1ac4c9e27075788cc5220169ab.pem)
+  * [06fd20629c143b9eab28d2799caefc5d23fde267d16c631e3f5b8b4bab3f68e6.pem](06fd20629c143b9eab28d2799caefc5d23fde267d16c631e3f5b8b4bab3f68e6.pem)
+  * [0bd39de4793cdc117138f47708aa4d583acf67adb059a0d91f668d1803bf6489.pem](0bd39de4793cdc117138f47708aa4d583acf67adb059a0d91f668d1803bf6489.pem)
+  * [c95c133b68319ee516b5f41e377f589878af1556567cc2834ef03b1d10830fd3.pem](c95c133b68319ee516b5f41e377f589878af1556567cc2834ef03b1d10830fd3.pem)
+  * [c530fadc9bfa265e63b755cc6ee04c2d70d60bb916ce2f331dc7359362571b25.pem](c530fadc9bfa265e63b755cc6ee04c2d70d60bb916ce2f331dc7359362571b25.pem)
+  * [89107c8e50e029b7b5f4ff0ccd2956bcc9d0c8ba2bfb6a58374ed63a6b034a30.pem](89107c8e50e029b7b5f4ff0ccd2956bcc9d0c8ba2bfb6a58374ed63a6b034a30.pem)
+  * [3472e4f16c570e0dd388aaaa4a64a34a4b939f1ca770996b5be0037c1aded9c1.pem](3472e4f16c570e0dd388aaaa4a64a34a4b939f1ca770996b5be0037c1aded9c1.pem)
 
 ### revoked.badssl.com
 
-  * [c6910d0ba9eddf593334149fedfe87385f37b625354bb4395c0ae2c8df48e17c.pem](c6910d0ba9eddf593334149fedfe87385f37b625354bb4395c0ae2c8df48e17c.pem)
+  * [29abf614b2870ed70df11225e9ae2068e3074eb9845ae252c2064e31ce9fe8a1.pem](29abf614b2870ed70df11225e9ae2068e3074eb9845ae252c2064e31ce9fe8a1.pem)
 
 ### blocked-interception.badssl.com
 

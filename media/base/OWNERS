@@ -1,4 +1,8 @@
 per-file *audio*=file://media/audio/OWNERS
 
-per-file media_switches.*=beccahughes@chromium.org
-per-file media_switches.*=mlamouri@chromium.org
+# For audio-related switches:
+per-file media_switches*=file://media/audio/OWNERS
+
+# For Media Remoting related changes:
+per-file media_remoting*=file://media/remoting/OWNERS
+

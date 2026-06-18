@@ -1,19 +1,27 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_VR_VR_TAB_HELPER_H_
 #define CHROME_BROWSER_VR_VR_TAB_HELPER_H_
 
-#include "base/macros.h"
-#include "chrome/browser/vr/ui_suppressed_element.h"
+#include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "content/public/browser/web_contents_user_data.h"
 
 namespace vr {
 
 class VrTabHelper : public content::WebContentsUserData<VrTabHelper> {
  public:
+  VrTabHelper(const VrTabHelper&) = delete;
+  VrTabHelper& operator=(const VrTabHelper&) = delete;
+
   ~VrTabHelper() override;
+
+  class Observer : public base::CheckedObserver {
+   public:
+    virtual void OnIsContentDisplayedInHeadsetChanged(bool state) = 0;
+  };
 
   bool is_in_vr() const { return is_in_vr_; }
 
@@ -27,15 +35,13 @@ class VrTabHelper : public content::WebContentsUserData<VrTabHelper> {
 
   void SetIsContentDisplayedInHeadset(bool state);
 
-  static bool IsInVr(content::WebContents* contents);
+  void AddObserver(Observer* observer);
+  void RemoveObserver(Observer* observer);
 
+  static bool IsInVr(content::WebContents* contents);
   static bool IsContentDisplayedInHeadset(content::WebContents* contents);
   static void SetIsContentDisplayedInHeadset(content::WebContents* contents,
                                              bool state);
-
-  // If suppressed, this function will log a UMA stat.
-  static bool IsUiSuppressedInVr(content::WebContents* contents,
-                                 UiSuppressedElement element);
 
   static void ExitVrPresentation();
 
@@ -43,8 +49,6 @@ class VrTabHelper : public content::WebContentsUserData<VrTabHelper> {
   explicit VrTabHelper(content::WebContents* contents);
 
   friend class content::WebContentsUserData<VrTabHelper>;
-
-  content::WebContents* web_contents_;
 
   // If is_in_vr_ is true, that means that the only content displayed is
   // inside vr (for example, VR browsing or immersive experience
@@ -61,9 +65,9 @@ class VrTabHelper : public content::WebContentsUserData<VrTabHelper> {
   bool is_in_vr_ = false;
   bool is_content_displayed_in_headset_ = false;
 
-  WEB_CONTENTS_USER_DATA_KEY_DECL();
+  base::ObserverList<Observer> observers_;
 
-  DISALLOW_COPY_AND_ASSIGN(VrTabHelper);
+  WEB_CONTENTS_USER_DATA_KEY_DECL();
 };
 
 }  // namespace vr

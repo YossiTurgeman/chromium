@@ -1,11 +1,10 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_SERVICES_HEAP_PROFILING_PUBLIC_CPP_SETTINGS_H_
 #define COMPONENTS_SERVICES_HEAP_PROFILING_PUBLIC_CPP_SETTINGS_H_
 
-#include "base/feature_list.h"
 #include "components/services/heap_profiling/public/mojom/heap_profiling_client.mojom.h"
 
 // These helper functions parse the command line and FeatureList settings to
@@ -45,6 +44,9 @@ enum class Mode {
   // Every utility process and the browser process are profiled.
   kUtilityAndBrowser = 9,
 
+  // Profile all utility processes.
+  kAllUtilities = 10,
+
   kCount
 };
 
@@ -58,12 +60,6 @@ mojom::StackMode ConvertStringToStackMode(const std::string& input);
 // interval. If |sampling_rate| is N, then on average, an allocation will be
 // recorded every N bytes of allocated objects.
 uint32_t GetSamplingRateForStartup();
-
-bool IsBackgroundHeapProfilingEnabled();
-
-// Exposed for testing.
-extern const base::Feature kOOPHeapProfilingFeature;
-extern const char kOOPHeapProfilingFeatureMode[];
 
 }  // namespace heap_profiling
 

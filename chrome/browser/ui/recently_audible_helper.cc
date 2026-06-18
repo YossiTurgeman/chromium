@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,25 +30,30 @@ bool RecentlyAudibleHelper::IsCurrentlyAudible() const {
 }
 
 bool RecentlyAudibleHelper::WasRecentlyAudible() const {
-  if (last_audible_time_.is_max())
+  if (last_audible_time_.is_max()) {
     return true;
-  if (last_audible_time_.is_null())
+  }
+  if (last_audible_time_.is_null()) {
     return false;
+  }
   base::TimeTicks recently_audible_time_limit =
       last_audible_time_ + kRecentlyAudibleTimeout;
   return tick_clock_->NowTicks() < recently_audible_time_limit;
 }
 
-std::unique_ptr<RecentlyAudibleHelper::Subscription>
-RecentlyAudibleHelper::RegisterCallback(const Callback& callback) {
+base::CallbackListSubscription
+RecentlyAudibleHelper::RegisterRecentlyAudibleChangedCallback(
+    const Callback& callback) {
   return callback_list_.Add(callback);
 }
 
 RecentlyAudibleHelper::RecentlyAudibleHelper(content::WebContents* contents)
     : content::WebContentsObserver(contents),
+      content::WebContentsUserData<RecentlyAudibleHelper>(*contents),
       tick_clock_(GetDefaultTickClock()) {
-  if (contents->IsCurrentlyAudible())
+  if (contents->IsCurrentlyAudible()) {
     last_audible_time_ = base::TimeTicks::Max();
+  }
 }
 
 void RecentlyAudibleHelper::OnAudioStateChanged(bool audible) {
@@ -68,8 +73,9 @@ void RecentlyAudibleHelper::OnAudioStateChanged(bool audible) {
   bool was_recently_audible = WasRecentlyAudible();
   last_audible_time_ = base::TimeTicks::Max();
   recently_audible_timer_.Stop();
-  if (!was_recently_audible)
+  if (!was_recently_audible) {
     callback_list_.Notify(true);
+  }
 }
 
 void RecentlyAudibleHelper::OnRecentlyAudibleTimerFired() {
@@ -82,7 +88,7 @@ void RecentlyAudibleHelper::OnRecentlyAudibleTimerFired() {
   // notified by AudioStreamMonitor of changes due to audio in its own frames
   // (but not in inner contents) directly.
   //
-  // TODO(https://crbug.com/846374): Remove this once WebContents is notified
+  // TODO(crbug.com/41390955): Remove this once WebContents is notified
   // via |callback_list_| in this class instead.
   web_contents()->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_AUDIO);
 }
@@ -106,6 +112,7 @@ void RecentlyAudibleHelper::SetTickClockForTesting(
 void RecentlyAudibleHelper::SetCurrentlyAudibleForTesting() {
   recently_audible_timer_.Stop();
   last_audible_time_ = base::TimeTicks::Max();
+  callback_list_.Notify(true);
 }
 
 void RecentlyAudibleHelper::SetRecentlyAudibleForTesting() {
@@ -115,6 +122,11 @@ void RecentlyAudibleHelper::SetRecentlyAudibleForTesting() {
 void RecentlyAudibleHelper::SetNotRecentlyAudibleForTesting() {
   last_audible_time_ = tick_clock_->NowTicks() - kRecentlyAudibleTimeout;
   recently_audible_timer_.Stop();
+  callback_list_.Notify(false);
 }
 
-WEB_CONTENTS_USER_DATA_KEY_IMPL(RecentlyAudibleHelper)
+void RecentlyAudibleHelper::FireRecentlyAudibleTimerForTesting() {
+  OnRecentlyAudibleTimerFired();
+}
+
+WEB_CONTENTS_USER_DATA_KEY_IMPL(RecentlyAudibleHelper);

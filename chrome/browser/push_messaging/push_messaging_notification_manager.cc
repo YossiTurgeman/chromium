@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,19 +9,21 @@
 #include <bitset>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/task/post_task.h"
-#include "chrome/browser/engagement/site_engagement_service.h"
+#include "build/build_config.h"
+#include "build/chromeos_buildflags.h"
 #include "chrome/browser/notifications/platform_notification_service_factory.h"
 #include "chrome/browser/notifications/platform_notification_service_impl.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/push_messaging/push_messaging_constants.h"
 #include "chrome/grit/generated_resources.h"
+#include "components/push_messaging/push_messaging_constants.h"
+#include "components/site_engagement/content/site_engagement_service.h"
 #include "components/url_formatter/elide_url.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
@@ -34,6 +36,7 @@
 #include "content/public/common/content_features.h"
 #include "content/public/common/page_visibility_state.h"
 #include "content/public/common/url_constants.h"
+#include "extensions/buildflags/buildflags.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
 #include "third_party/blink/public/common/notifications/notification_resources.h"
 #include "third_party/blink/public/mojom/notifications/notification.mojom-shared.h"
@@ -41,19 +44,21 @@
 #include "ui/base/l10n/l10n_util.h"
 #include "url/gurl.h"
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "extensions/browser/extension_registry.h"
+#include "extensions/common/constants.h"
+#include "extensions/common/extension_set.h"
+#include "extensions/common/manifest_handlers/background_info.h"
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+
+#if BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/ui/android/tab_model/tab_model.h"
 #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
 #else
 #include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"  // nogncheck crbug.com/40147906
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
-#endif
-
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/chromeos/android_sms/android_sms_service_factory.h"
-#include "chrome/browser/chromeos/android_sms/android_sms_urls.h"
-#include "chrome/browser/chromeos/multidevice_setup/multidevice_setup_client_factory.h"
 #endif
 
 using content::BrowserThread;
@@ -64,13 +69,10 @@ using content::ServiceWorkerContext;
 using content::WebContents;
 
 namespace {
-void RecordUserVisibleStatus(blink::mojom::PushUserVisibleStatus status) {
-  UMA_HISTOGRAM_ENUMERATION("PushMessaging.UserVisibleStatus", status);
-}
 
 content::StoragePartition* GetStoragePartition(Profile* profile,
                                                const GURL& origin) {
-  return content::BrowserContext::GetStoragePartitionForSite(profile, origin);
+  return profile->GetStoragePartitionForUrl(origin);
 }
 
 NotificationDatabaseData CreateDatabaseData(
@@ -92,6 +94,10 @@ NotificationDatabaseData CreateDatabaseData(
   database_data.origin = origin;
   database_data.service_worker_registration_id = service_worker_registration_id;
   database_data.notification_data = notification_data;
+
+  // Make sure we don't expose this notification to the site.
+  database_data.is_shown_by_browser = true;
+
   return database_data;
 }
 
@@ -106,16 +112,17 @@ PushMessagingNotificationManager::~PushMessagingNotificationManager() = default;
 void PushMessagingNotificationManager::EnforceUserVisibleOnlyRequirements(
     const GURL& origin,
     int64_t service_worker_registration_id,
-    EnforceRequirementsCallback message_handled_callback) {
+    EnforceRequirementsCallback message_handled_callback,
+    bool user_visible_only_bypass) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
-#if defined(OS_CHROMEOS)
-  if (ShouldSkipUserVisibleOnlyRequirements(origin)) {
+  if (ShouldBypassUserVisibleOnlyRequirement(origin,
+                                             user_visible_only_bypass)) {
     std::move(message_handled_callback)
         .Run(/* did_show_generic_notification= */ false);
+    LogSilentPushEvent(SilentPushEvent::kNotificationEnforcementSkipped);
     return;
   }
-#endif
 
   // TODO(johnme): Relax this heuristic slightly.
   scoped_refptr<PlatformNotificationContext> notification_context =
@@ -126,13 +133,14 @@ void PushMessagingNotificationManager::EnforceUserVisibleOnlyRequirements(
       base::BindOnce(
           &PushMessagingNotificationManager::DidCountVisibleNotifications,
           weak_factory_.GetWeakPtr(), origin, service_worker_registration_id,
-          std::move(message_handled_callback)));
+          std::move(message_handled_callback), user_visible_only_bypass));
 }
 
 void PushMessagingNotificationManager::DidCountVisibleNotifications(
     const GURL& origin,
     int64_t service_worker_registration_id,
     EnforceRequirementsCallback message_handled_callback,
+    bool user_visible_only_bypass,
     bool success,
     int notification_count) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
@@ -140,31 +148,33 @@ void PushMessagingNotificationManager::DidCountVisibleNotifications(
   // user-visible action done in response to a push message - but make sure that
   // sending two messages in rapid succession which show then hide a
   // notification doesn't count.
-  // TODO(knollr): Scheduling a notification should count as a user-visible
-  // action, if it is not immediately cancelled or the |origin| schedules too
-  // many notifications too far in the future.
+  // TODO(crbug.com/40596304): Scheduling a notification should count as a
+  // user-visible action, if it is not immediately cancelled or the |origin|
+  // schedules too many notifications too far in the future.
   bool notification_shown = notification_count > 0;
   bool notification_needed = true;
 
-  base::UmaHistogramCounts100("PushMessaging.VisibleNotificationCount",
-                              notification_count);
-
   // Sites with a currently visible tab don't need to show notifications.
-#if defined(OS_ANDROID)
-  for (auto it = TabModelList::begin(); it != TabModelList::end(); ++it) {
-    Profile* profile = (*it)->GetProfile();
-    WebContents* active_web_contents = (*it)->GetActiveWebContents();
-#else
-  for (auto* browser : *BrowserList::GetInstance()) {
-    Profile* profile = browser->profile();
-    WebContents* active_web_contents =
-        browser->tab_strip_model()->GetActiveWebContents();
-#endif
-    if (IsTabVisible(profile, active_web_contents, origin)) {
+#if BUILDFLAG(IS_ANDROID)
+  for (const TabModel* model : TabModelList::models()) {
+    Profile* profile = model->GetProfile();
+    if (IsTabVisible(profile, model->GetActiveWebContents(), origin)) {
       notification_needed = false;
       break;
     }
   }
+#else
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [this, &origin, &notification_needed](BrowserWindowInterface* browser) {
+        Profile* const profile = browser->GetProfile();
+        if (IsTabVisible(profile,
+                         browser->GetTabStripModel()->GetActiveWebContents(),
+                         origin)) {
+          notification_needed = false;
+        }
+        return notification_needed;
+      });
+#endif
 
   // If more than one notification is showing for this Service Worker, close
   // the default notification if it happens to be part of this group.
@@ -172,7 +182,8 @@ void PushMessagingNotificationManager::DidCountVisibleNotifications(
     scoped_refptr<PlatformNotificationContext> notification_context =
         GetStoragePartition(profile_, origin)->GetPlatformNotificationContext();
     notification_context->DeleteAllNotificationDataWithTag(
-        kPushMessagingForcedNotificationTag, origin, base::DoNothing());
+        kPushMessagingForcedNotificationTag, /*is_shown_by_browser=*/true,
+        origin, base::DoNothing());
   }
 
   if (notification_needed && !notification_shown) {
@@ -187,17 +198,6 @@ void PushMessagingNotificationManager::DidCountVisibleNotifications(
     return;
   }
 
-  if (notification_needed && notification_shown) {
-    RecordUserVisibleStatus(
-        blink::mojom::PushUserVisibleStatus::REQUIRED_AND_SHOWN);
-  } else if (!notification_needed && !notification_shown) {
-    RecordUserVisibleStatus(
-        blink::mojom::PushUserVisibleStatus::NOT_REQUIRED_AND_NOT_SHOWN);
-  } else {
-    RecordUserVisibleStatus(
-        blink::mojom::PushUserVisibleStatus::NOT_REQUIRED_BUT_SHOWN);
-  }
-
   std::move(message_handled_callback)
       .Run(/* did_show_generic_notification= */ false);
 }
@@ -206,7 +206,7 @@ bool PushMessagingNotificationManager::IsTabVisible(
     Profile* profile,
     WebContents* active_web_contents,
     const GURL& origin) {
-  if (!active_web_contents || !active_web_contents->GetMainFrame())
+  if (!active_web_contents || !active_web_contents->GetPrimaryMainFrame())
     return false;
 
   // Don't leak information from other profiles.
@@ -214,7 +214,7 @@ bool PushMessagingNotificationManager::IsTabVisible(
     return false;
 
   // Ignore minimized windows.
-  switch (active_web_contents->GetMainFrame()->GetVisibilityState()) {
+  switch (active_web_contents->GetPrimaryMainFrame()->GetVisibilityState()) {
     case content::PageVisibilityState::kHidden:
     case content::PageVisibilityState::kHiddenButPainting:
       return false;
@@ -230,9 +230,9 @@ bool PushMessagingNotificationManager::IsTabVisible(
   // and thus should be considered when checking the visible URL. However, the
   // prefix has to be removed before the origins can be compared.
   if (visible_url.SchemeIs(content::kViewSourceScheme))
-    visible_url = GURL(visible_url.GetContent());
+    visible_url = GURL(visible_url.GetContentPiece());
 
-  return visible_url.GetOrigin() == origin;
+  return visible_url.DeprecatedGetOriginAsURL() == origin;
 }
 
 void PushMessagingNotificationManager::ProcessSilentPush(
@@ -241,18 +241,15 @@ void PushMessagingNotificationManager::ProcessSilentPush(
     EnforceRequirementsCallback message_handled_callback,
     bool silent_push_allowed) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  LogSilentPushEvent(SilentPushEvent::kSilentRequest);
 
   // If the origin was allowed to issue a silent push, just return.
   if (silent_push_allowed) {
-    RecordUserVisibleStatus(
-        blink::mojom::PushUserVisibleStatus::REQUIRED_BUT_NOT_SHOWN_USED_GRACE);
     std::move(message_handled_callback)
         .Run(/* did_show_generic_notification= */ false);
+    LogSilentPushEvent(SilentPushEvent::kAllowedWithoutNotification);
     return;
   }
-
-  RecordUserVisibleStatus(blink::mojom::PushUserVisibleStatus::
-                              REQUIRED_BUT_NOT_SHOWN_GRACE_EXCEEDED);
 
   // The site failed to show a notification when one was needed, and they don't
   // have enough budget to cover the cost of suppressing, so we will show a
@@ -283,63 +280,46 @@ void PushMessagingNotificationManager::DidWriteNotificationData(
 
   std::move(message_handled_callback)
       .Run(/* did_show_generic_notification= */ true);
+  LogSilentPushEvent(SilentPushEvent::kAllowedWithGenericNotification);
 }
 
-#if defined(OS_CHROMEOS)
-bool PushMessagingNotificationManager::ShouldSkipUserVisibleOnlyRequirements(
-    const GURL& origin) {
-  // This is a short-term exception to user visible only enforcement added
-  // to support for "Messages for Web" integration on ChromeOS.
-
-  chromeos::multidevice_setup::MultiDeviceSetupClient* multidevice_setup_client;
-  if (test_multidevice_setup_client_) {
-    multidevice_setup_client = test_multidevice_setup_client_;
-  } else {
-    multidevice_setup_client = chromeos::multidevice_setup::
-        MultiDeviceSetupClientFactory::GetForProfile(profile_);
+bool PushMessagingNotificationManager::ShouldBypassUserVisibleOnlyRequirement(
+    const GURL& origin,
+    bool user_visible_only_bypass) {
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  if (origin.SchemeIs(extensions::kExtensionScheme)) {
+    return ShouldExtensionsBypassUserVisibleOnlyRequirement(
+        origin, user_visible_only_bypass);
   }
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
-  if (!multidevice_setup_client)
-    return false;
+  // Returning true is an exception, so default to deny for anything we don't
+  // explicitly identify.
+  return false;
+}
 
-  // Check if messages feature is enabled
-  if (multidevice_setup_client->GetFeatureState(
-          chromeos::multidevice_setup::mojom::Feature::kMessages) !=
-      chromeos::multidevice_setup::mojom::FeatureState::kEnabledByUser) {
+void PushMessagingNotificationManager::LogSilentPushEvent(
+    SilentPushEvent event) {
+  UMA_HISTOGRAM_ENUMERATION("PushMessaging.SilentNotification", event);
+}
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+bool PushMessagingNotificationManager::
+    ShouldExtensionsBypassUserVisibleOnlyRequirement(
+        const GURL& origin,
+        bool user_visible_only_bypass) {
+  // Worker based extensions are exempt from the user visible requirement only
+  // if they request it.
+  if (!user_visible_only_bypass) {
     return false;
   }
-
-  chromeos::android_sms::AndroidSmsAppManager* android_sms_app_manager;
-  if (test_android_sms_app_manager_) {
-    android_sms_app_manager = test_android_sms_app_manager_;
-  } else {
-    chromeos::android_sms::AndroidSmsService* android_sms_service =
-        chromeos::android_sms::AndroidSmsServiceFactory::GetForBrowserContext(
-            profile_);
-    if (!android_sms_service)
-      return false;
-    android_sms_app_manager = android_sms_service->android_sms_app_manager();
-  }
-
-  // Check if origin matches current messages url
-  base::Optional<GURL> app_url = android_sms_app_manager->GetCurrentAppUrl();
-  if (!app_url)
-    app_url = chromeos::android_sms::GetAndroidMessagesURL();
-
-  if (!origin.EqualsIgnoringRef(app_url->GetOrigin()))
+  const extensions::ExtensionSet& extensions =
+      extensions::ExtensionRegistry::Get(profile_)->enabled_extensions();
+  const extensions::Extension* extension =
+      extensions.GetExtensionOrAppByURL(origin);
+  if (!extension) {
     return false;
-
-  return true;
+  }
+  return extensions::BackgroundInfo::IsServiceWorkerBased(extension);
 }
-
-void PushMessagingNotificationManager::SetTestMultiDeviceSetupClient(
-    chromeos::multidevice_setup::MultiDeviceSetupClient*
-        multidevice_setup_client) {
-  test_multidevice_setup_client_ = multidevice_setup_client;
-}
-
-void PushMessagingNotificationManager::SetTestAndroidSmsAppManager(
-    chromeos::android_sms::AndroidSmsAppManager* android_sms_app_manager) {
-  test_android_sms_app_manager_ = android_sms_app_manager;
-}
-#endif
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)

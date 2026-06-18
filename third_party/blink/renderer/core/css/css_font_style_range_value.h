@@ -55,6 +55,8 @@ class CSSFontStyleRangeValue final : public CSSValue {
 
   bool Equals(const CSSFontStyleRangeValue&) const;
 
+  bool HasRandomFunctions() const;
+
   void TraceAfterDispatch(blink::Visitor*) const;
 
  private:
@@ -73,4 +75,4 @@ struct DowncastTraits<cssvalue::CSSFontStyleRangeValue> {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_FONT_STYLE_RANGE_VALUE_H_

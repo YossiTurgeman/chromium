@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -43,9 +43,9 @@ struct membuf : std::streambuf {
 
 bool PrintMinidumpProcess(const uint8_t* data,
                           size_t size,
-                          const std::vector<string>& symbol_paths) {
+                          const std::vector<std::string>& symbol_paths) {
   // Signature and version number.
-  static const char kHeaderPrefix[] = {'P', 'M', 'D', 'M', 0, 0, 0xa7, 0x93};
+  static const uint8_t kHeaderPrefix[] = {'P', 'M', 'D', 'M', 0, 0, 0xa7, 0x93};
   if (size > std::numeric_limits<size_t>::max() - sizeof(kHeaderPrefix))
     return false;
 
@@ -91,6 +91,6 @@ bool PrintMinidumpProcess(const uint8_t* data,
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   // TODO(wfh): Somehow pull symbols in.
-  PrintMinidumpProcess(data, size, std::vector<string>());
+  PrintMinidumpProcess(data, size, std::vector<std::string>());
   return 0;
 }

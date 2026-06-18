@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "extensions/browser/disable_reason.h"
 #include "extensions/common/extension.h"
 
@@ -28,6 +28,13 @@ namespace extensions {
 // restrictions registered with and exposed by the ManagementPolicy.
 class ManagementPolicy {
  public:
+  // The value returned by the UserMayInstall() method. This is safer than using
+  // an output parameter in an async method, for `error`.
+  struct Decision {
+    bool allowed;
+    std::u16string error;
+  };
+
   // Each mechanism that wishes to limit users' ability to control extensions,
   // whether one individual extension or the whole system, should implement
   // the methods of this Provider interface that it needs. In each case, if the
@@ -39,12 +46,16 @@ class ManagementPolicy {
   // of providers is short-circuited as soon as a decision is possible), so
   // implementations of these methods must have no side effects.
   //
-  // For all of the Provider methods below, if |error| is not NULL and the
-  // method imposes a restriction on the desired action, |error| may be set
+  // For all of the Provider methods below, if `error` is not NULL and the
+  // method imposes a restriction on the desired action, `error` may be set
   // to an applicable error message, but this is not required.
   class Provider {
    public:
     Provider() {}
+
+    Provider(const Provider&) = delete;
+    Provider& operator=(const Provider&) = delete;
+
     virtual ~Provider() {}
 
     // A human-readable name for this provider, for use in debug messages.
@@ -53,64 +64,69 @@ class ManagementPolicy {
     // enabled.
     virtual std::string GetDebugPolicyProviderName() const = 0;
 
-    // Providers should return false if a user may not install the |extension|,
+    // Providers should return false if a user may not install the `extension`,
     // or load or run it if it has already been installed.
-    // TODO(crbug.com/461747): The method name is misleading, since this applies
-    // to all extension installations, not just user-initiated ones. Fix either
-    // the name or the semantics.
+    // TODO(crbug.com/41159442): The method name is misleading, since this
+    // applies to all extension installations, not just user-initiated ones. Fix
+    // either the name or the semantics.
     virtual bool UserMayLoad(const Extension* extension,
-                             base::string16* error) const;
+                             std::u16string* error) const;
 
-    // Returns false if the user should not be allowed to install the given
-    // |extension|. By default, this forwards to UserMayLoad() (since a user
-    // should not be able to install an extension they cannot load).
-    virtual bool UserMayInstall(const Extension* extension,
-                                base::string16* error) const;
+    // Calls `callback` with a `Decision` indicating if the user should be
+    // allowed to install the given `extension`. By default, this forwards to
+    // UserMayLoad() (since a user should not be able to install an extension
+    // they cannot load).
+    //
+    // Callback may be called synchronously or asynchronously.
+    virtual void UserMayInstall(
+        scoped_refptr<const Extension> extension,
+        base::OnceCallback<void(Decision)> callback) const;
 
     // Providers should return false if a user may not enable, disable, or
-    // uninstall the |extension|, or change its usage options (incognito
+    // uninstall the `extension`, or change its usage options (incognito
     // permission, file access, etc.).
-    // TODO(crbug.com/461747): The method name is misleading, since this applies
-    // to all setting modifications, not just user-initiated ones. Fix either
-    // the name or the semantics.
+    // TODO(crbug.com/41159442): The method name is misleading, since this
+    // applies to all setting modifications, not just user-initiated ones. Fix
+    // either the name or the semantics.
     virtual bool UserMayModifySettings(const Extension* extension,
-                                       base::string16* error) const;
+                                       std::u16string* error) const;
 
     // Providers should return false if the originating extension
-    // |source_extension| cannot disable the |extension|.
+    // `source_extension` cannot disable the `extension`.
     virtual bool ExtensionMayModifySettings(const Extension* source_extension,
                                             const Extension* extension,
-                                            base::string16* error) const;
+                                            std::u16string* error) const;
 
-    // Providers should return true if the |extension| must always remain
+    // Providers should return true if the `extension` must always remain
     // enabled. This is distinct from UserMayModifySettings() in that the latter
     // also prohibits enabling the extension if it is currently disabled.
     // Providers implementing this method should also implement the others
     // above, if they wish to completely lock in an extension.
     virtual bool MustRemainEnabled(const Extension* extension,
-                                   base::string16* error) const;
+                                   std::u16string* error) const;
 
     // Similar to MustRemainEnabled, but for whether an extension must remain
-    // disabled, and returns an error and/or reason if the caller needs it.
-    virtual bool MustRemainDisabled(const Extension* extension,
-                                    disable_reason::DisableReason* reason,
-                                    base::string16* error) const;
+    // disabled, and populates the reason, if any.
+    virtual bool MustRemainDisabled(
+        const Extension* extension,
+        disable_reason::DisableReason* reason) const;
 
     // Similar to MustRemainEnabled, but for whether an extension must remain
     // installed, and returns an error and/or reason if the caller needs it.
     virtual bool MustRemainInstalled(const Extension* extension,
-                                     base::string16* error) const;
+                                     std::u16string* error) const;
 
     // Providers should return true for extensions that should be force
     // uninstalled.
     virtual bool ShouldForceUninstall(const Extension* extension,
-                                      base::string16* error) const;
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(Provider);
+                                      std::u16string* error) const;
   };
 
   ManagementPolicy();
+
+  ManagementPolicy(const ManagementPolicy&) = delete;
+  ManagementPolicy& operator=(const ManagementPolicy&) = delete;
+
   ~ManagementPolicy();
 
   // Registers or unregisters a provider, causing it to be added to or removed
@@ -124,55 +140,62 @@ class ManagementPolicy {
       const std::vector<std::unique_ptr<Provider>>& providers);
 
   // Returns true if the user is permitted to install, load, and run the given
-  // extension. If not, |error| may be set to an appropriate message.
+  // extension.
   // Installed extensions failing this check are disabled with the reason
   // DISABLE_BLOCKED_BY_POLICY.
-  // TODO(crbug.com/461747): Misleading name; see comment in Provider.
-  bool UserMayLoad(const Extension* extension, base::string16* error) const;
+  // TODO(crbug.com/41159442): Misleading name; see comment in Provider.
+  bool UserMayLoad(const Extension* extension) const;
 
-  // Returns false if the user should not be allowed to install the given
-  // |extension|. By default, this forwards to UserMayLoad() (since a user
-  // should not be able to install an extension they cannot load).
-  bool UserMayInstall(const Extension* extension, base::string16* error) const;
+  // Calls `callback` with a `Decision` indicating if the user should be allowed
+  // to install the given `extension`. By default, this forwards to
+  // UserMayLoad() (since a user should not be able to install an extension they
+  // cannot load).
+  //
+  // Callback may be called synchronously or asynchronously.
+  void UserMayInstall(scoped_refptr<const Extension> extension,
+                      base::OnceCallback<void(Decision)> callback) const;
 
   // Returns true if the user is permitted to enable, disable, or uninstall the
   // given extension, or change the extension's usage options (incognito mode,
-  // file access, etc.). If not, |error| may be set to an appropriate message.
-  // TODO(crbug.com/461747): Misleading name; see comment in Provider.
+  // file access, etc.). If not, `error` may be set to an appropriate message.
+  // TODO(crbug.com/41159442): Misleading name; see comment in Provider.
   bool UserMayModifySettings(const Extension* extension,
-                             base::string16* error) const;
+                             std::u16string* error) const;
 
   // Returns true if the originating extension is permitted to disable the
-  // given extension. If not, |error| may be set to an appropriate message.
+  // given extension. If not, `error` may be set to an appropriate message.
   bool ExtensionMayModifySettings(const Extension* source_extension,
                                   const Extension* extension,
-                                  base::string16* error) const;
+                                  std::u16string* error) const;
 
   // Returns true if the extension must remain enabled at all times (e.g. a
-  // component extension). In that case, |error| may be set to an appropriate
+  // component extension). In that case, `error` may be set to an appropriate
   // message.
   bool MustRemainEnabled(const Extension* extension,
-                         base::string16* error) const;
+                         std::u16string* error) const;
 
   // Returns true immediately if any registered provider's UserMayLoad() returns
   // false or MustRemainDisabled() returns true.
   bool MustRemainDisabled(const Extension* extension,
-                          disable_reason::DisableReason* reason,
-                          base::string16* error) const;
+                          disable_reason::DisableReason* reason) const;
 
   // Returns true immediately if any registered provider's MustRemainInstalled
   // function returns true.
   bool MustRemainInstalled(const Extension* extension,
-                           base::string16* error) const;
+                           std::u16string* error) const;
 
   // Returns true for extensions that should be force uninstalled.
   bool ShouldForceUninstall(const Extension* extension,
-                            base::string16* error) const;
+                            std::u16string* error) const;
 
-  // Returns true if the |extension| should be repaired upon corruption.
+  // Returns true if the `extension` should be repaired upon corruption.
   // Note that this method doesn't check whether extension is corrupted or not
   // (it's job of ContentVerifier).
   bool ShouldRepairIfCorrupted(const Extension* extension);
+
+  // Returns whether `extension` cannot have its site access modified by the
+  // user because of policy.
+  bool HasEnterpriseForcedAccess(const extensions::Extension& extension) const;
 
   // For use in testing.
   void UnregisterAllProviders();
@@ -182,26 +205,24 @@ class ManagementPolicy {
   // This is a pointer to a function in the Provider interface, used in
   // ApplyToProviderList.
   typedef bool (Provider::*ProviderFunction)(const Extension*,
-                                             base::string16*) const;
+                                             std::u16string*) const;
 
-  typedef std::set<Provider*> ProviderList;
+  typedef std::set<raw_ptr<Provider, SetExperimental>> ProviderList;
 
   // This is a helper to apply a method in the Provider interface to each of
-  // the Provider objects in |providers_|. The return value of this function
-  // will be |normal_result|, unless any of the Provider calls to |function|
+  // the Provider objects in `providers_`. The return value of this function
+  // will be `normal_result`, unless any of the Provider calls to `function`
   // return !normal_result, in which case this function will then early-return
   // !normal_result.
   bool ApplyToProviderList(ProviderFunction function,
                            const char* debug_operation_name,
                            bool normal_result,
                            const Extension* extension,
-                           base::string16* error) const;
+                           std::u16string* error) const;
 
   // This stores raw pointers to Provider.
   // TODO(lazyboy): Consider making ManagementPolicy own these providers.
   ProviderList providers_;
-
-  DISALLOW_COPY_AND_ASSIGN(ManagementPolicy);
 };
 
 }  // namespace extensions

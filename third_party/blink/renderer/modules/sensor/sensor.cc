@@ -1,22 +1,24 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/sensor/sensor.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "services/device/public/cpp/generic_sensor/sensor_traits.h"
 #include "services/device/public/mojom/sensor.mojom-blink.h"
-#include "third_party/blink/public/mojom/feature_policy/feature_policy.mojom-blink.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/core/timing/dom_window_performance.h"
 #include "third_party/blink/renderer/core/timing/window_performance.h"
 #include "third_party/blink/renderer/modules/sensor/sensor_error_event.h"
 #include "third_party/blink/renderer/modules/sensor/sensor_provider_proxy.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/web_test_support.h"
 
 namespace blink {
@@ -26,12 +28,12 @@ const double kWaitingIntervalThreshold = 0.01;
 
 bool AreFeaturesEnabled(
     ExecutionContext* context,
-    const Vector<mojom::blink::FeaturePolicyFeature>& features) {
-  return std::all_of(features.begin(), features.end(),
-                     [context](mojom::blink::FeaturePolicyFeature feature) {
-                       return context->IsFeatureEnabled(
-                           feature, ReportOptions::kReportOnFailure);
-                     });
+    const Vector<network::mojom::PermissionsPolicyFeature>& features) {
+  return std::ranges::all_of(
+      features, [context](network::mojom::PermissionsPolicyFeature feature) {
+        return context->IsFeatureEnabled(feature,
+                                         ReportOptions::kReportOnFailure);
+      });
 }
 
 }  // namespace
@@ -40,19 +42,20 @@ Sensor::Sensor(ExecutionContext* execution_context,
                const SensorOptions* sensor_options,
                ExceptionState& exception_state,
                device::mojom::blink::SensorType type,
-               const Vector<mojom::blink::FeaturePolicyFeature>& features)
-    : ExecutionContextLifecycleObserver(execution_context),
+               const Vector<network::mojom::PermissionsPolicyFeature>& features)
+    : ActiveScriptWrappable<Sensor>({}),
+      ExecutionContextLifecycleObserver(execution_context),
       frequency_(0.0),
       type_(type),
       state_(SensorState::kIdle),
       last_reported_timestamp_(0.0) {
   // [SecureContext] in idl.
   DCHECK(execution_context->IsSecureContext());
-  DCHECK(!features.IsEmpty());
+  DCHECK(!features.empty());
 
   if (!AreFeaturesEnabled(execution_context, features)) {
     exception_state.ThrowSecurityError(
-        "Access to sensor features is disallowed by feature policy");
+        "Access to sensor features is disallowed by permissions policy");
     return;
   }
 
@@ -78,18 +81,21 @@ Sensor::Sensor(ExecutionContext* execution_context,
                const SpatialSensorOptions* options,
                ExceptionState& exception_state,
                device::mojom::blink::SensorType sensor_type,
-               const Vector<mojom::blink::FeaturePolicyFeature>& features)
+               const Vector<network::mojom::PermissionsPolicyFeature>& features)
     : Sensor(execution_context,
              static_cast<const SensorOptions*>(options),
              exception_state,
              sensor_type,
              features) {
-  use_screen_coords_ = (options->referenceFrame() == "screen");
+  use_screen_coords_ =
+      (options->referenceFrame() == V8LocalCoordinateSystem::Enum::kScreen);
 }
 
 Sensor::~Sensor() = default;
 
 void Sensor::start() {
+  if (!GetExecutionContext())
+    return;
   if (state_ != SensorState::kIdle)
     return;
   state_ = SensorState::kActivating;
@@ -115,36 +121,31 @@ bool Sensor::hasReading() const {
   return sensor_proxy_->GetReading().timestamp() != 0.0;
 }
 
-base::Optional<DOMHighResTimeStamp> Sensor::timestamp(
+std::optional<DOMHighResTimeStamp> Sensor::timestamp(
     ScriptState* script_state) const {
   if (!hasReading()) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   LocalDOMWindow* window = LocalDOMWindow::From(script_state);
   if (!window) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   WindowPerformance* performance = DOMWindowPerformance::performance(*window);
   DCHECK(performance);
   DCHECK(sensor_proxy_);
 
-  if (WebTestSupport::IsRunningWebTest()) {
-    // In web tests performance.now() * 0.001 is passed to the shared buffer.
-    return sensor_proxy_->GetReading().timestamp() * 1000;
-  }
-
   return performance->MonotonicTimeToDOMHighResTimeStamp(
       base::TimeTicks() +
-      base::TimeDelta::FromSecondsD(sensor_proxy_->GetReading().timestamp()));
+      base::Seconds(sensor_proxy_->GetReading().timestamp()));
 }
 
 void Sensor::Trace(Visitor* visitor) const {
   visitor->Trace(sensor_proxy_);
   ActiveScriptWrappable::Trace(visitor);
   ExecutionContextLifecycleObserver::Trace(visitor);
-  EventTargetWithInlineData::Trace(visitor);
+  EventTarget::Trace(visitor);
 }
 
 bool Sensor::HasPendingActivity() const {
@@ -186,8 +187,14 @@ void Sensor::InitSensorProxyIfNeeded() {
 }
 
 void Sensor::ContextDestroyed() {
-  if (!IsIdleOrErrored())
+  // We do not use IsIdleOrErrored() here because we also want to call
+  // Deactivate() if |pending_error_notification_| is active (see
+  // https://crbug.com/324301018).
+  if (state_ != SensorState::kIdle) {
     Deactivate();
+  }
+
+  state_ = SensorState::kIdle;
 
   if (sensor_proxy_)
     sensor_proxy_->Detach();
@@ -219,7 +226,7 @@ void Sensor::OnSensorReadingChanged() {
   // We also avoid scheduling if the elapsed time is slightly behind the
   // polling period.
   auto sensor_reading_changed =
-      WTF::Bind(&Sensor::NotifyReading, WrapWeakPersistent(this));
+      BindOnce(&Sensor::NotifyReading, WrapWeakPersistent(this));
   if (waitingTime < kWaitingIntervalThreshold) {
     // Invoke JS callbacks in a different callchain to obviate
     // possible modifications of SensorProxy::observers_ container
@@ -230,8 +237,7 @@ void Sensor::OnSensorReadingChanged() {
   } else {
     pending_reading_notification_ = PostDelayedCancellableTask(
         *GetExecutionContext()->GetTaskRunner(TaskType::kSensor), FROM_HERE,
-        std::move(sensor_reading_changed),
-        base::TimeDelta::FromSecondsD(waitingTime));
+        std::move(sensor_reading_changed), base::Seconds(waitingTime));
   }
 }
 
@@ -256,23 +262,22 @@ void Sensor::OnAddConfigurationRequestCompleted(bool result) {
 
   pending_activated_notification_ = PostCancellableTask(
       *GetExecutionContext()->GetTaskRunner(TaskType::kSensor), FROM_HERE,
-      WTF::Bind(&Sensor::NotifyActivated, WrapWeakPersistent(this)));
+      BindOnce(&Sensor::NotifyActivated, WrapWeakPersistent(this)));
 }
 
 void Sensor::Activate() {
   DCHECK_EQ(state_, SensorState::kActivating);
 
   InitSensorProxyIfNeeded();
-  if (!sensor_proxy_) {
-    HandleError(DOMExceptionCode::kInvalidStateError,
-                "The Sensor is no longer associated to a frame.");
-    return;
-  }
+  DCHECK(sensor_proxy_);
 
-  if (sensor_proxy_->IsInitialized())
+  if (sensor_proxy_->IsInitialized()) {
     RequestAddConfiguration();
-  else
-    sensor_proxy_->Initialize();
+  } else {
+    auto* window = To<LocalDOMWindow>(GetExecutionContext());
+    sensor_proxy_->Initialize(
+        LocalFrame::HasTransientUserActivation(window->GetFrame()));
+  }
 
   sensor_proxy_->AddObserver(this);
 }
@@ -311,8 +316,8 @@ void Sensor::RequestAddConfiguration() {
   DCHECK(sensor_proxy_);
   sensor_proxy_->AddConfiguration(
       configuration_->Clone(),
-      WTF::Bind(&Sensor::OnAddConfigurationRequestCompleted,
-                WrapWeakPersistent(this)));
+      BindOnce(&Sensor::OnAddConfigurationRequestCompleted,
+               WrapWeakPersistent(this)));
 }
 
 void Sensor::HandleError(DOMExceptionCode code,
@@ -332,8 +337,8 @@ void Sensor::HandleError(DOMExceptionCode code,
                                                    unsanitized_message);
   pending_error_notification_ = PostCancellableTask(
       *GetExecutionContext()->GetTaskRunner(TaskType::kSensor), FROM_HERE,
-      WTF::Bind(&Sensor::NotifyError, WrapWeakPersistent(this),
-                WrapPersistent(error)));
+      BindOnce(&Sensor::NotifyError, WrapWeakPersistent(this),
+               WrapPersistent(error)));
 }
 
 void Sensor::NotifyReading() {
@@ -346,19 +351,14 @@ void Sensor::NotifyActivated() {
   DCHECK_EQ(state_, SensorState::kActivating);
   state_ = SensorState::kActivated;
 
-  // Explicitly call the Sensor implementation of hasReading(). Subclasses may
-  // override the method and introduce additional requirements, but in this case
-  // we are really only interested in whether there is data in the shared
-  // buffer, so that we can then process it possibly for the first time in
-  // OnSensorReadingChanged().
-  if (Sensor::hasReading()) {
+  if (hasReading()) {
     // If reading has already arrived, process the reading values (a subclass
     // may do some filtering, for example) and then send an initial "reading"
     // event right away.
     DCHECK(!pending_reading_notification_.IsActive());
     pending_reading_notification_ = PostCancellableTask(
         *GetExecutionContext()->GetTaskRunner(TaskType::kSensor), FROM_HERE,
-        WTF::Bind(&Sensor::OnSensorReadingChanged, WrapWeakPersistent(this)));
+        BindOnce(&Sensor::OnSensorReadingChanged, WrapWeakPersistent(this)));
   }
 
   DispatchEvent(*Event::Create(event_type_names::kActivate));

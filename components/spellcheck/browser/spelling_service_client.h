@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,11 @@
 
 #include <list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/compiler_specific.h"
-#include "base/strings/string16.h"
+#include "base/functional/callback.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "url/gurl.h"
 
@@ -47,7 +46,7 @@ class SimpleURLLoader;
 //       ...
 //     }
 //
-//     void MyTextCheck(BrowserContext* context, const base::string16& text) {
+//     void MyTextCheck(BrowserContext* context, const std::u16string& text) {
 //        client_.reset(new SpellingServiceClient);
 //        client_->RequestTextCheck(context, 0, text,
 //            base::BindOnce(&MyClient::OnTextCheckComplete,
@@ -65,6 +64,9 @@ class SpellingServiceClient {
   // * SPELLCHECK: Spellchecking text (used by Google Docs).
   // This type is used for choosing a backend when sending a JSON-RPC request to
   // the service.
+  // Note: While named ServiceType, the integer values are used to construct
+  // the API endpoint URL and correspond to the API version (v1, v2). The actual
+  // backend for both endpoints seems to be the same.
   enum ServiceType {
     SUGGEST = 1,
     SPELLCHECK = 2,
@@ -83,7 +85,7 @@ class SpellingServiceClient {
   };
   typedef base::OnceCallback<void(
       bool /* success */,
-      const base::string16& /* text */,
+      const std::u16string& /* text */,
       const std::vector<SpellCheckResult>& /* results */)>
       TextCheckCompleteCallback;
 
@@ -96,7 +98,7 @@ class SpellingServiceClient {
   // call |callback| when we receive a text-check response from the service.
   bool RequestTextCheck(content::BrowserContext* context,
                         ServiceType type,
-                        const base::string16& text,
+                        const std::u16string& text,
                         TextCheckCompleteCallback callback);
 
   // Returns whether the specified service is available for the given context.
@@ -108,7 +110,7 @@ class SpellingServiceClient {
           url_loader_factory_for_testing);
 
   // Builds the endpoint URL to use for the service request.
-  GURL BuildEndpointUrl(int type);
+  GURL BuildEndpointUrl(content::BrowserContext* context, ServiceType type);
 
  protected:
   // Parses a JSON-RPC response from the Spelling service.
@@ -121,7 +123,11 @@ class SpellingServiceClient {
     TextCheckCallbackData(
         std::unique_ptr<network::SimpleURLLoader> simple_url_loader,
         TextCheckCompleteCallback callback,
-        base::string16 text);
+        std::u16string text);
+
+    TextCheckCallbackData(const TextCheckCallbackData&) = delete;
+    TextCheckCallbackData& operator=(const TextCheckCallbackData&) = delete;
+
     ~TextCheckCallbackData();
 
     // The URL loader used.
@@ -132,18 +138,14 @@ class SpellingServiceClient {
     TextCheckCompleteCallback callback;
 
     // The text checked by the Spelling service.
-    base::string16 text;
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(TextCheckCallbackData);
+    std::u16string text;
   };
 
   using SpellCheckLoaderList =
       std::list<std::unique_ptr<TextCheckCallbackData>>;
 
   void OnSimpleLoaderComplete(SpellCheckLoaderList::iterator it,
-                              base::TimeTicks request_start,
-                              std::unique_ptr<std::string> response_body);
+                              std::optional<std::string> response_body);
 
   // List of loaders in use.
   SpellCheckLoaderList spellcheck_loaders_;

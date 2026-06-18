@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,7 +24,7 @@ GbmPixmap::GbmPixmap(GbmSurfaceFactory* surface_manager,
       buffer_(std::move(buffer)),
       framebuffer_(std::move(framebuffer)) {}
 
-gfx::NativePixmapHandle GbmPixmap::ExportHandle() {
+gfx::NativePixmapHandle GbmPixmap::ExportHandle() const {
   return buffer_->ExportHandle();
 }
 
@@ -52,12 +52,16 @@ size_t GbmPixmap::GetNumberOfPlanes() const {
   return buffer_->GetNumPlanes();
 }
 
-uint64_t GbmPixmap::GetBufferFormatModifier() const {
+bool GbmPixmap::SupportsZeroCopyWebGPUImport() const {
+  return buffer_->SupportsZeroCopyWebGPUImport();
+}
+
+uint64_t GbmPixmap::GetFormatModifier() const {
   return buffer_->GetFormatModifier();
 }
 
-gfx::BufferFormat GbmPixmap::GetBufferFormat() const {
-  return buffer_->GetBufferFormat();
+viz::SharedImageFormat GbmPixmap::GetSharedImageFormat() const {
+  return buffer_->GetSharedImageFormat();
 }
 
 gfx::Size GbmPixmap::GetBufferSize() const {
@@ -68,26 +72,27 @@ uint32_t GbmPixmap::GetUniqueId() const {
   return buffer_->GetHandle();
 }
 
-bool GbmPixmap::ScheduleOverlayPlane(gfx::AcceleratedWidget widget,
-                                     int plane_z_order,
-                                     gfx::OverlayTransform plane_transform,
-                                     const gfx::Rect& display_bounds,
-                                     const gfx::RectF& crop_rect,
-                                     bool enable_blend,
-                                     std::unique_ptr<gfx::GpuFence> gpu_fence) {
+bool GbmPixmap::ScheduleOverlayPlane(
+    gfx::AcceleratedWidget widget,
+    const gfx::OverlayPlaneData& overlay_plane_data,
+    std::vector<gfx::GpuFence> acquire_fences,
+    std::vector<gfx::GpuFence> release_fences) {
   DCHECK(buffer_->GetFlags() & GBM_BO_USE_SCANOUT);
   // |framebuffer_id| might be 0 if AddFramebuffer2 failed, in that case we
   // already logged the error in GbmBuffer ctor. We avoid logging the error
   // here since this method might be called every pageflip.
   if (framebuffer_) {
+    DCHECK(acquire_fences.empty() || acquire_fences.size() == 1u);
     surface_manager_->GetSurface(widget)->QueueOverlayPlane(DrmOverlayPlane(
-        framebuffer_, plane_z_order, plane_transform, display_bounds, crop_rect,
-        enable_blend, std::move(gpu_fence)));
+        framebuffer_, overlay_plane_data,
+        acquire_fences.empty()
+            ? nullptr
+            : std::make_unique<gfx::GpuFence>(std::move(acquire_fences[0]))));
   }
 
   return true;
 }
 
-GbmPixmap::~GbmPixmap() {}
+GbmPixmap::~GbmPixmap() = default;
 
 }  // namespace ui

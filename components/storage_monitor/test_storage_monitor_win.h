@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -10,20 +10,21 @@
 
 #include <windows.h>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include <memory>
+
 #include "components/storage_monitor/storage_monitor_win.h"
 
 namespace storage_monitor {
 
-class TestPortableDeviceWatcherWin;
 class TestVolumeMountWatcherWin;
 
 class TestStorageMonitorWin: public StorageMonitorWin {
  public:
-  TestStorageMonitorWin(
-      TestVolumeMountWatcherWin* volume_mount_watcher,
-      TestPortableDeviceWatcherWin* portable_device_watcher);
+  explicit TestStorageMonitorWin(
+      std::unique_ptr<TestVolumeMountWatcherWin> volume_mount_watcher);
+
+  TestStorageMonitorWin(const TestStorageMonitorWin&) = delete;
+  TestStorageMonitorWin& operator=(const TestStorageMonitorWin&) = delete;
 
   ~TestStorageMonitorWin() override;
 
@@ -32,9 +33,6 @@ class TestStorageMonitorWin: public StorageMonitorWin {
   VolumeMountWatcherWin* volume_mount_watcher();
 
   Receiver* receiver() const override;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(TestStorageMonitorWin);
 };
 
 }  // namespace storage_monitor

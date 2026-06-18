@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium Authors. All rights reserved.
+// Copyright 2010 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 
 #include <algorithm>
 
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
 #include "base/i18n/icu_string_conversions.h"
 #include "base/logging.h"
@@ -24,12 +25,13 @@ namespace {
 // NULL-terminated ASCII string.
 bool StringBeginsWith(const std::string& str, const char* with) {
   size_t cur = 0;
-  while (cur < str.size() && with[cur] != 0) {
-    if (str[cur] != with[cur])
+  while (cur < str.size() && UNSAFE_TODO(with[cur]) != 0) {
+    if (str[cur] != UNSAFE_TODO(with[cur])) {
       return false;
+    }
     cur++;
   }
-  return with[cur] == 0;
+  return UNSAFE_TODO(with[cur]) == 0;
 }
 
 // Collapses runs of spaces to only one space.
@@ -138,7 +140,7 @@ bool AffReader::Read() {
 
 bool AffReader::EncodingToUTF8(const std::string& encoded,
                                std::string* utf8) const {
-  base::string16 word;
+  std::u16string word;
   if (!base::CodepageToUTF16(encoded, encoding(),
                              base::OnStringConversionError::FAIL, &word))
     return false;
@@ -159,8 +161,7 @@ int AffReader::GetAFIndexForAFString(const std::string& af_string) {
 std::vector<std::string> AffReader::GetAffixGroups() const {
   int max_id = 0;
   for (auto i = affix_groups_.begin(); i != affix_groups_.end(); ++i) {
-    if (i->second > max_id)
-      max_id = i->second;
+    max_id = std::max(max_id, i->second);
   }
 
   std::vector<std::string> ret;

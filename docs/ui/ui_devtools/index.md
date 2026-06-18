@@ -1,21 +1,30 @@
 # UI DevTools Overview
 
-UI DevTools allows UI developers to inspect the Chrome desktop UI system like a webpage using the frontend DevTools Inspector. It is
-currently supported on Linux, Windows, Mac, and ChromeOS.
-
-* [Old Ash Doc](https://www.chromium.org/developers/how-tos/inspecting-ash)
-* [Backend Source Code](https://cs.chromium.org/chromium/src/components/ui_devtools/)
-* [Inspector Frontend Source Code](https://chromium.googlesource.com/devtools/devtools-frontend)
+UI DevTools allows UI developers to inspect the Chrome desktop UI system like
+a webpage using the frontend DevTools Inspector. It is
+currently supported on all desktop platforms including Linux, Windows, Mac,
+and ChromeOS.
 
 ## How to run
 
-1. Run Chromium with default port 9223 and start Chromium with UI DevTools flag:
+There are two ways to enable UI DevTools:
 
-        $ out/Default/chrome --enable-ui-devtools
+1. Run Chromium with default port 9223 and start Chromium with UI DevTools
+   command line flag:
 
-    * If you want to use different port, add port in the flag `--enable-ui-devtools=<port>`.
-2. In the Chrome Omnibox, go to chrome://inspect#other and click `inspect` under UIDevToolsClient.
-    * Direct link is devtools://devtools/bundled/inspector.html?ws=localhost:9223/0.
+   ```shell
+   $ out/Default/chrome --enable-ui-devtools
+   ```
+
+    * If you want to use a different port, add the port number in the flag
+    `--enable-ui-devtools=<port>`.
+
+2. Enable `ui-debug-tools` feature flag from `chrome://flags`
+
+Once enabled, go to `chrome://inspect#native-ui` and click the `Inspect Native UI`
+button to launch the DevTools front-end in a separate tab.
+
+![launch UIDevTools]
 
 
 ## How to Use
@@ -82,25 +91,16 @@ is read in from local files.
 
 ![sources panel]
 
-### View Bounds Highlighting
-
-Red border rectangles around each View element can be drawn using the command Ctrl+R (Meta+R for mac).
-The rectangles can be toggled off and on using the same command.
-
-![debug bounds rectangles]
-
 ### Bubble Locking
 
-In order to inspect a bubble, the command Ctrl+Shift+R (Meta+Shift+R for mac) locks bubbles to prevent
-them from dismissing upon losing focus. This allows a bubble's inner elements to be inspected. Bubble
-locking can be toggled off and on using the same command.
+In order to inspect a bubble, tick the "Bubble Locking" checkbox on chrome://inspect/#native-ui.
 
 ![lock and inspect bubble]
 
 ### UI Element Tree Search
 
 In the elements panel, Ctrl+F to open the search bar at the bottom. The search functionality allows
-developers to search the UI element tree quickly by name, tag <>, and style properties. 
+developers to search the UI element tree quickly by name, tag <>, and style properties.
 The search can do substring matches or exact matches (specified with quotations). The search returns
 all matches and highlights the specific nodes on the tree that are matched. The up and down arrows
 on the right of the search bar or ENTER are used to traverse through the matches.
@@ -112,6 +112,7 @@ key word 'style:' must be typed in the search bar.
 
 ![search style]
 
+[launch UIDevTools]: images/launch_tools.png
 [expand elements]: images/expand_elements.gif
 [browser frame properties]: images/browser_frame_properties.png
 [image view properties]: images/image_view_properties.png
@@ -126,3 +127,9 @@ key word 'style:' must be typed in the search bar.
 [lock and inspect bubble]: images/lock_and_inspect_bubble.gif
 [ui element tree search]: images/ui_element_tree_search.gif
 [search style]: images/search_style.png
+
+### References
+
+* [Old Ash Doc](https://www.chromium.org/developers/how-tos/inspecting-ash) (obsolete)
+* [Backend Source Code](https://cs.chromium.org/chromium/src/components/ui_devtools/)
+* [Inspector Frontend Source Code](https://chromium.googlesource.com/devtools/devtools-frontend)

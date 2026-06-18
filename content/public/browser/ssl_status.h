@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,8 @@
 
 #include <stdint.h>
 
-#include <memory>
-#include <vector>
-
 #include "content/common/content_export.h"
 #include "net/cert/cert_status_flags.h"
-#include "net/cert/ct_policy_status.h"
-#include "net/cert/sct_status_flags.h"
 #include "net/cert/x509_certificate.h"
 
 namespace net {
@@ -24,20 +19,6 @@ namespace content {
 
 // Collects the SSL information for this NavigationEntry.
 struct CONTENT_EXPORT SSLStatus {
-  // SSLStatus consumers can attach instances of derived UserData classes to an
-  // SSLStatus. This allows an embedder to attach data to the NavigationEntry
-  // without SSLStatus having to know about it. Derived UserData classes have to
-  // be cloneable since NavigationEntrys are cloned during navigations.
-  class UserData {
-   public:
-    UserData() {}
-    virtual ~UserData() = default;
-    virtual std::unique_ptr<UserData> Clone() = 0;
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(UserData);
-  };
-
   // Flags used for the page security content status.
   enum ContentStatusFlags {
     // HTTP page, or HTTPS page with no insecure content.
@@ -64,7 +45,7 @@ struct CONTENT_EXPORT SSLStatus {
   SSLStatus();
   explicit SSLStatus(const net::SSLInfo& ssl_info);
   SSLStatus(const SSLStatus& other);
-  SSLStatus& operator=(SSLStatus other);
+  SSLStatus& operator=(const SSLStatus& other);
   ~SSLStatus();
 
   bool initialized;
@@ -78,16 +59,9 @@ struct CONTENT_EXPORT SSLStatus {
   int content_status;
   // True if PKP was bypassed due to a local trust anchor.
   bool pkp_bypassed;
-  // Whether the page's main resource complied with the Certificate Transparency
-  // policy.
-  net::ct::CTPolicyCompliance ct_policy_compliance;
-  // Embedder-specific data attached to the SSLStatus is cloned when an
-  // |SSLStatus| is assigned or copy-constructed, and is cleared when a
-  // navigation commits.
-  std::unique_ptr<UserData> user_data;
 
-  // If you add new fields here, be sure to add them in the copy constructor and
-  // copy assignment operator definitions in ssl_status.cc.
+  // If you add new fields here, be sure to add them in the constructor
+  // definitions in ssl_status.cc.
 };
 
 }  // namespace content

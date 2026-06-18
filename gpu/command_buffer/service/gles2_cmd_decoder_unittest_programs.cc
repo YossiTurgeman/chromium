@@ -1,23 +1,20 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-#include "gpu/command_buffer/service/gles2_cmd_decoder.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #include "base/command_line.h"
-#include "base/stl_util.h"
+#include "base/compiler_specific.h"
 #include "base/strings/string_number_conversions.h"
 #include "gpu/command_buffer/common/gles2_cmd_format.h"
 #include "gpu/command_buffer/common/gles2_cmd_utils.h"
 #include "gpu/command_buffer/service/context_group.h"
 #include "gpu/command_buffer/service/context_state.h"
 #include "gpu/command_buffer/service/gl_surface_mock.h"
+#include "gpu/command_buffer/service/gles2_cmd_decoder.h"
 #include "gpu/command_buffer/service/gles2_cmd_decoder_unittest.h"
-#include "gpu/command_buffer/service/image_manager.h"
-#include "gpu/command_buffer/service/mailbox_manager.h"
 #include "gpu/command_buffer/service/mocks.h"
 #include "gpu/command_buffer/service/program_manager.h"
 #include "gpu/command_buffer/service/test_helper.h"
@@ -539,7 +536,6 @@ TEST_P(GLES2DecoderManualInitTest, GetShaderPrecisionFormatSucceeds) {
   // format.
   InitState init;
   init.gl_version = "OpenGL ES 2.0";
-  init.bind_generates_resource = true;
   InitDecoder(init);
 
   cmds::GetShaderPrecisionFormat cmd;
@@ -549,7 +545,7 @@ TEST_P(GLES2DecoderManualInitTest, GetShaderPrecisionFormatSucceeds) {
   const GLint range[2] = {62, 62};
   const GLint precision = 16;
   EXPECT_CALL(*gl_, GetShaderPrecisionFormat(_, _, _, _))
-      .WillOnce(DoAll(SetArrayArgument<2>(range, range + 2),
+      .WillOnce(DoAll(SetArrayArgument<2>(range, UNSAFE_TODO(range + 2)),
                       SetArgPointee<3>(precision)))
       .RetiresOnSaturation();
   cmd.Init(GL_VERTEX_SHADER,
@@ -629,10 +625,8 @@ TEST_P(GLES2DecoderWithShaderTest, GetActiveUniformSucceeds) {
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
   CommonDecoder::Bucket* bucket = decoder_->GetBucket(kBucketId);
   ASSERT_TRUE(bucket != nullptr);
-  EXPECT_EQ(
-      0,
-      memcmp(
-          bucket->GetData(0, bucket->size()), kUniform2Name, bucket->size()));
+  UNSAFE_TODO(EXPECT_EQ(0, memcmp(bucket->GetData(0, bucket->size()),
+                                  kUniform2Name, bucket->size())));
 }
 
 TEST_P(GLES2DecoderWithShaderTest, GetActiveUniformResultNotInitFails) {
@@ -733,18 +727,18 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformBlockNameSucceeds) {
                            GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH, _))
       .WillOnce(SetArgPointee<2>(kMaxLength))
       .RetiresOnSaturation();
-  EXPECT_CALL(*gl_,
-              GetActiveUniformBlockName(kServiceProgramId, 0, _, _, _))
-      .WillOnce(DoAll(SetArgPointee<3>(strlen(kName)),
-                      SetArrayArgument<4>(kName, kName + strlen(kName) + 1)))
+  EXPECT_CALL(*gl_, GetActiveUniformBlockName(kServiceProgramId, 0, _, _, _))
+      .WillOnce(DoAll(
+          SetArgPointee<3>(strlen(kName)),
+          SetArrayArgument<4>(kName, UNSAFE_TODO(kName + strlen(kName) + 1))))
       .RetiresOnSaturation();
   EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
   EXPECT_NE(0, *result);
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
   CommonDecoder::Bucket* bucket = decoder_->GetBucket(kBucketId);
   ASSERT_TRUE(bucket != nullptr);
-  EXPECT_EQ(0,
-            memcmp(bucket->GetData(0, bucket->size()), kName, bucket->size()));
+  UNSAFE_TODO(EXPECT_EQ(
+      0, memcmp(bucket->GetData(0, bucket->size()), kName, bucket->size())));
 }
 
 TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformBlockNameUnlinkedProgram) {
@@ -828,17 +822,14 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformBlockivSucceeds) {
     GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER,
     GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER,
   };
-  for (size_t ii = 0; ii < base::size(kPname); ++ii) {
+  for (size_t ii = 0; ii < std::size(kPname); ++ii) {
     result->SetNumResults(0);
-    cmd.Init(client_program_id_,
-             0,
-             kPname[ii],
-             shared_memory_id_,
+    cmd.Init(client_program_id_, 0, UNSAFE_TODO(kPname[ii]), shared_memory_id_,
              shared_memory_offset_);
     EXPECT_CALL(*gl_, GetProgramiv(kServiceProgramId, GL_LINK_STATUS, _))
         .WillOnce(SetArgPointee<2>(GL_TRUE))
         .RetiresOnSaturation();
-    if (kPname[ii] == GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES) {
+    if (UNSAFE_TODO(kPname[ii]) == GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES) {
       EXPECT_CALL(*gl_, GetError())
           .WillOnce(Return(GL_NO_ERROR))
           .RetiresOnSaturation();
@@ -848,9 +839,8 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformBlockivSucceeds) {
           .WillOnce(SetArgPointee<3>(1))
           .RetiresOnSaturation();
     }
-    EXPECT_CALL(*gl_,
-                GetActiveUniformBlockiv(
-                    kServiceProgramId, 0, kPname[ii], _))
+    UNSAFE_TODO(EXPECT_CALL(*gl_, GetActiveUniformBlockiv(kServiceProgramId, 0,
+                                                          kPname[ii], _)))
         .WillOnce(SetArgPointee<3>(1976))
         .RetiresOnSaturation();
     EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
@@ -982,9 +972,8 @@ TEST_P(GLES2DecoderWithShaderTest, GetActiveAttribSucceeds) {
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
   CommonDecoder::Bucket* bucket = decoder_->GetBucket(kBucketId);
   ASSERT_TRUE(bucket != nullptr);
-  EXPECT_EQ(
-      0,
-      memcmp(bucket->GetData(0, bucket->size()), kAttrib2Name, bucket->size()));
+  UNSAFE_TODO(EXPECT_EQ(0, memcmp(bucket->GetData(0, bucket->size()),
+                                  kAttrib2Name, bucket->size())));
 }
 
 TEST_P(GLES2DecoderWithShaderTest, GetActiveAttribResultNotInitFails) {
@@ -1069,7 +1058,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesSucceeds) {
   const char kName0[] = "Cow";
   const char kName1[] = "Chicken";
   const char* kNames[] = { kName0, kName1 };
-  const size_t kCount = base::size(kNames);
+  const size_t kCount = std::size(kNames);
   const char kValidStrEnd = 0;
   const GLuint kIndices[] = { 1, 2 };
   SetBucketAsCStrings(kBucketId, kCount, kNames, kCount, kValidStrEnd);
@@ -1079,7 +1068,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesSucceeds) {
   cmd.Init(client_program_id_, kBucketId, shared_memory_id_,
            kSharedMemoryOffset);
   EXPECT_CALL(*gl_, GetUniformIndices(kServiceProgramId, kCount, _, _))
-      .WillOnce(SetArrayArgument<3>(kIndices, kIndices + kCount))
+      .WillOnce(SetArrayArgument<3>(kIndices, UNSAFE_TODO(kIndices + kCount)))
       .RetiresOnSaturation();
   EXPECT_CALL(*gl_, GetProgramiv(kServiceProgramId, GL_LINK_STATUS, _))
       .WillOnce(SetArgPointee<2>(GL_TRUE))
@@ -1092,7 +1081,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesSucceeds) {
   EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
   EXPECT_EQ(kCount, static_cast<size_t>(result->GetNumResults()));
   for (size_t ii = 0; ii < kCount; ++ii) {
-    EXPECT_EQ(kIndices[ii], result->GetData()[ii]);
+    UNSAFE_TODO(EXPECT_EQ(kIndices[ii], result->GetData()[ii]));
   }
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
 }
@@ -1102,7 +1091,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesBadProgramFails) {
   const char kName0[] = "Cow";
   const char kName1[] = "Chicken";
   const char* kNames[] = { kName0, kName1 };
-  const size_t kCount = base::size(kNames);
+  const size_t kCount = std::size(kNames);
   const char kValidStrEnd = 0;
   SetBucketAsCStrings(kBucketId, kCount, kNames, kCount, kValidStrEnd);
   auto* result =
@@ -1131,7 +1120,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesBadParamsFails) {
   const char kName0[] = "Cow";
   const char kName1[] = "Chicken";
   const char* kNames[] = { kName0, kName1 };
-  const size_t kCount = base::size(kNames);
+  const size_t kCount = std::size(kNames);
   const char kValidStrEnd = 0;
   const GLuint kIndices[] = { 1, 2 };
   SetBucketAsCStrings(kBucketId, kCount, kNames, kCount, kValidStrEnd);
@@ -1141,7 +1130,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesBadParamsFails) {
   cmd.Init(client_program_id_, kBucketId, shared_memory_id_,
            kSharedMemoryOffset);
   EXPECT_CALL(*gl_, GetUniformIndices(kServiceProgramId, kCount, _, _))
-      .WillOnce(SetArrayArgument<3>(kIndices, kIndices + kCount))
+      .WillOnce(SetArrayArgument<3>(kIndices, UNSAFE_TODO(kIndices + kCount)))
       .RetiresOnSaturation();
   EXPECT_CALL(*gl_, GetProgramiv(kServiceProgramId, GL_LINK_STATUS, _))
       .WillOnce(SetArgPointee<2>(GL_TRUE))
@@ -1161,7 +1150,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesResultNotInitFails) {
   const char kName0[] = "Cow";
   const char kName1[] = "Chicken";
   const char* kNames[] = { kName0, kName1 };
-  const size_t kCount = base::size(kNames);
+  const size_t kCount = std::size(kNames);
   const char kValidStrEnd = 0;
   SetBucketAsCStrings(kBucketId, kCount, kNames, kCount, kValidStrEnd);
   auto* result =
@@ -1177,7 +1166,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetUniformIndicesBadSharedMemoryFails) {
   const char kName0[] = "Cow";
   const char kName1[] = "Chicken";
   const char* kNames[] = { kName0, kName1 };
-  const size_t kCount = base::size(kNames);
+  const size_t kCount = std::size(kNames);
   const char kValidStrEnd = 0;
   SetBucketAsCStrings(kBucketId, kCount, kNames, kCount, kValidStrEnd);
   auto* result =
@@ -1199,17 +1188,16 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivSucceeds) {
   const uint32_t kBucketId = 123;
   const GLuint kIndices[] = { 1, 2 };
   const GLint kResults[] = { 1976, 321 };
-  const size_t kCount = base::size(kIndices);
+  const size_t kCount = std::size(kIndices);
   SetBucketData(kBucketId, kIndices, sizeof(GLuint) * kCount);
   auto* result =
       static_cast<cmds::GetActiveUniformsiv::Result*>(shared_memory_address_);
   cmds::GetActiveUniformsiv cmd;
   cmd.Init(client_program_id_, kBucketId, GL_UNIFORM_TYPE, shared_memory_id_,
            kSharedMemoryOffset);
-  EXPECT_CALL(*gl_,
-              GetActiveUniformsiv(
-                  kServiceProgramId, kCount, _, GL_UNIFORM_TYPE, _))
-      .WillOnce(SetArrayArgument<4>(kResults, kResults + kCount))
+  EXPECT_CALL(*gl_, GetActiveUniformsiv(kServiceProgramId, kCount, _,
+                                        GL_UNIFORM_TYPE, _))
+      .WillOnce(SetArrayArgument<4>(kResults, UNSAFE_TODO(kResults + kCount)))
       .RetiresOnSaturation();
   EXPECT_CALL(*gl_, GetProgramiv(kServiceProgramId, GL_LINK_STATUS, _))
       .WillOnce(SetArgPointee<2>(GL_TRUE))
@@ -1218,7 +1206,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivSucceeds) {
   EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
   EXPECT_EQ(kCount, static_cast<size_t>(result->GetNumResults()));
   for (size_t ii = 0; ii < kCount; ++ii) {
-    EXPECT_EQ(kResults[ii], result->GetData()[ii]);
+    UNSAFE_TODO(EXPECT_EQ(kResults[ii], result->GetData()[ii]));
   }
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
 }
@@ -1226,7 +1214,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivSucceeds) {
 TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivBadProgramFails) {
   const uint32_t kBucketId = 123;
   const GLuint kIndices[] = { 1, 2 };
-  const size_t kCount = base::size(kIndices);
+  const size_t kCount = std::size(kIndices);
   SetBucketData(kBucketId, kIndices, sizeof(GLuint) * kCount);
   auto* result =
       static_cast<cmds::GetActiveUniformsiv::Result*>(shared_memory_address_);
@@ -1253,7 +1241,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivBadProgramFails) {
 TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivBadParamsFails) {
   const uint32_t kBucketId = 123;
   const GLuint kIndices[] = { 1, 100 };
-  const size_t kCount = base::size(kIndices);
+  const size_t kCount = std::size(kIndices);
   SetBucketData(kBucketId, kIndices, sizeof(GLuint) * kCount);
   auto* result =
       static_cast<cmds::GetActiveUniformsiv::Result*>(shared_memory_address_);
@@ -1269,7 +1257,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivBadParamsFails) {
 TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivBadPnameFails) {
   const uint32_t kBucketId = 123;
   const GLuint kIndices[] = { 1, 2 };
-  const size_t kCount = base::size(kIndices);
+  const size_t kCount = std::size(kIndices);
   SetBucketData(kBucketId, kIndices, sizeof(GLuint) * kCount);
   auto* result =
       static_cast<cmds::GetActiveUniformsiv::Result*>(shared_memory_address_);
@@ -1293,7 +1281,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivBadPnameFails) {
 TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivResultNotInitFails) {
   const uint32_t kBucketId = 123;
   const GLuint kIndices[] = { 1, 2 };
-  const size_t kCount = base::size(kIndices);
+  const size_t kCount = std::size(kIndices);
   SetBucketData(kBucketId, kIndices, sizeof(GLuint) * kCount);
   auto* result =
       static_cast<cmds::GetActiveUniformsiv::Result*>(shared_memory_address_);
@@ -1307,7 +1295,7 @@ TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivResultNotInitFails) {
 TEST_P(GLES3DecoderWithShaderTest, GetActiveUniformsivBadSharedMemoryFails) {
   const uint32_t kBucketId = 123;
   const GLuint kIndices[] = { 1, 2 };
-  const size_t kCount = base::size(kIndices);
+  const size_t kCount = std::size(kIndices);
   SetBucketData(kBucketId, kIndices, sizeof(GLuint) * kCount);
   auto* result =
       static_cast<cmds::GetActiveUniformsiv::Result*>(shared_memory_address_);
@@ -1348,8 +1336,9 @@ TEST_P(GLES2DecoderWithShaderTest, GetShaderInfoLogValidArgs) {
       .WillOnce(SetArgPointee<2>(strlen(kInfo) + 1))
       .RetiresOnSaturation();
   EXPECT_CALL(*gl_, GetShaderInfoLog(kServiceShaderId, strlen(kInfo) + 1, _, _))
-      .WillOnce(DoAll(SetArgPointee<2>(strlen(kInfo)),
-                      SetArrayArgument<3>(kInfo, kInfo + strlen(kInfo) + 1)));
+      .WillOnce(DoAll(
+          SetArgPointee<2>(strlen(kInfo)),
+          SetArrayArgument<3>(kInfo, UNSAFE_TODO(kInfo + strlen(kInfo) + 1))));
   compile_cmd.Init(client_shader_id_);
   cmd.Init(client_shader_id_, kBucketId);
   EXPECT_EQ(error::kNoError, ExecuteCmd(compile_cmd));
@@ -1357,8 +1346,8 @@ TEST_P(GLES2DecoderWithShaderTest, GetShaderInfoLogValidArgs) {
   CommonDecoder::Bucket* bucket = decoder_->GetBucket(kBucketId);
   ASSERT_TRUE(bucket != nullptr);
   EXPECT_EQ(strlen(kInfo) + 1, bucket->size());
-  EXPECT_EQ(0,
-            memcmp(bucket->GetData(0, bucket->size()), kInfo, bucket->size()));
+  UNSAFE_TODO(EXPECT_EQ(
+      0, memcmp(bucket->GetData(0, bucket->size()), kInfo, bucket->size())));
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
 }
 
@@ -1393,13 +1382,12 @@ TEST_P(GLES3DecoderWithShaderTest, GetTransformFeedbackVaryingSucceeds) {
                                  GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH, _))
       .WillOnce(SetArgPointee<2>(kBufferSize))
       .RetiresOnSaturation();
-  EXPECT_CALL(*gl_,
-              GetTransformFeedbackVarying(
-                  kServiceProgramId, kIndex, _, _, _, _, _))
-      .WillOnce(DoAll(SetArgPointee<3>(kBufferSize - 1),
-                      SetArgPointee<4>(kSize),
-                      SetArgPointee<5>(kType),
-                      SetArrayArgument<6>(kName, kName + kBufferSize)))
+  EXPECT_CALL(*gl_, GetTransformFeedbackVarying(kServiceProgramId, kIndex, _, _,
+                                                _, _, _))
+      .WillOnce(
+          DoAll(SetArgPointee<3>(kBufferSize - 1), SetArgPointee<4>(kSize),
+                SetArgPointee<5>(kType),
+                SetArrayArgument<6>(kName, UNSAFE_TODO(kName + kBufferSize))))
       .RetiresOnSaturation();
   cmd.Init(client_program_id_,
            kIndex,
@@ -1413,8 +1401,8 @@ TEST_P(GLES3DecoderWithShaderTest, GetTransformFeedbackVaryingSucceeds) {
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
   CommonDecoder::Bucket* bucket = decoder_->GetBucket(kBucketId);
   ASSERT_TRUE(bucket != nullptr);
-  EXPECT_EQ(
-      0, memcmp(bucket->GetData(0, bucket->size()), kName, bucket->size()));
+  UNSAFE_TODO(EXPECT_EQ(
+      0, memcmp(bucket->GetData(0, bucket->size()), kName, bucket->size())));
 }
 
 TEST_P(GLES3DecoderWithShaderTest, GetTransformFeedbackVaryingNotInitFails) {
@@ -1563,8 +1551,8 @@ TEST_P(GLES2DecoderTest, ShaderSourceBucketAndGetShaderSourceValidArgs) {
   CommonDecoder::Bucket* bucket = decoder_->GetBucket(kOutBucketId);
   ASSERT_TRUE(bucket != nullptr);
   EXPECT_EQ(sizeof(kSource0), bucket->size());
-  EXPECT_EQ(0, memcmp(bucket->GetData(0, bucket->size()),
-                      kSource0, bucket->size()));
+  UNSAFE_TODO(EXPECT_EQ(
+      0, memcmp(bucket->GetData(0, bucket->size()), kSource0, bucket->size())));
 }
 
 #if GLES2_TEST_SHADER_VS_PROGRAM_IDS
@@ -2044,52 +2032,6 @@ TEST_P(GLES2DecoderWithShaderTest, BindUniformLocationCHROMIUMBucket) {
            kBucketId);
   EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
   EXPECT_EQ(GL_INVALID_VALUE, GetGLError());
-}
-
-TEST_P(GLES2DecoderManualInitTest, ClearUniformsBeforeFirstProgramUse) {
-  gpu::GpuDriverBugWorkarounds workarounds;
-  workarounds.clear_uniforms_before_first_program_use = true;
-  InitState init;
-  init.has_alpha = true;
-  init.request_alpha = true;
-  init.bind_generates_resource = true;
-  InitDecoderWithWorkarounds(init, workarounds);
-  {
-    static AttribInfo attribs[] = {
-        {
-         kAttrib1Name, kAttrib1Size, kAttrib1Type, kAttrib1Location,
-        },
-        {
-         kAttrib2Name, kAttrib2Size, kAttrib2Type, kAttrib2Location,
-        },
-        {
-         kAttrib3Name, kAttrib3Size, kAttrib3Type, kAttrib3Location,
-        },
-    };
-    static UniformInfo uniforms[] = {
-        {kUniform1Name, kUniform1Size, kUniform1Type, kUniform1FakeLocation,
-         kUniform1RealLocation, kUniform1DesiredLocation},
-        {kUniform2Name, kUniform2Size, kUniform2Type, kUniform2FakeLocation,
-         kUniform2RealLocation, kUniform2DesiredLocation},
-        {kUniform3Name, kUniform3Size, kUniform3Type, kUniform3FakeLocation,
-         kUniform3RealLocation, kUniform3DesiredLocation},
-    };
-    SetupShader(attribs, base::size(attribs), uniforms, base::size(uniforms),
-                client_program_id_, kServiceProgramId, client_vertex_shader_id_,
-                kServiceVertexShaderId, client_fragment_shader_id_,
-                kServiceFragmentShaderId);
-    TestHelper::SetupExpectationsForClearingUniforms(gl_.get(), uniforms,
-                                                     base::size(uniforms));
-  }
-
-  {
-    EXPECT_CALL(*gl_, UseProgram(kServiceProgramId))
-        .Times(1)
-        .RetiresOnSaturation();
-    cmds::UseProgram cmd;
-    cmd.Init(client_program_id_);
-    EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
-  }
 }
 
 TEST_P(GLES2DecoderWithShaderTest, UseDeletedProgram) {

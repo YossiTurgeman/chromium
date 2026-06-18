@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,33 +8,42 @@
 
 #include <string>
 
+#include "base/feature_list.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/ui_features.h"
 #include "chrome/common/pref_names.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
-#include "components/prefs/scoped_user_pref_update.h"
 #include "components/url_formatter/url_fixer.h"
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/ui/startup/startup_tab.h"
+#endif
 
 namespace {
 
 // Converts a SessionStartupPref::Type to an integer written to prefs.
 int TypeToPrefValue(SessionStartupPref::Type type) {
   switch (type) {
-    case SessionStartupPref::LAST: return SessionStartupPref::kPrefValueLast;
-    case SessionStartupPref::URLS: return SessionStartupPref::kPrefValueURLs;
-    default:                       return SessionStartupPref::kPrefValueNewTab;
+    case SessionStartupPref::LAST:
+      return SessionStartupPref::kPrefValueLast;
+    case SessionStartupPref::URLS:
+      return SessionStartupPref::kPrefValueURLs;
+    case SessionStartupPref::LAST_AND_URLS:
+      return SessionStartupPref::kPrefValueLastAndURLs;
+    default:
+      return SessionStartupPref::kPrefValueNewTab;
   }
 }
 
-void URLListToPref(const base::ListValue* url_list, SessionStartupPref* pref) {
+void URLListToPref(const base::ListValue& url_list, SessionStartupPref* pref) {
   pref->urls.clear();
-  for (size_t i = 0; i < url_list->GetSize(); ++i) {
-    std::string url_text;
-    if (url_list->GetString(i, &url_text)) {
-      GURL fixed_url = url_formatter::FixupURL(url_text, std::string());
+  for (const base::Value& i : url_list) {
+    const std::string* url_text = i.GetIfString();
+    if (url_text) {
+      GURL fixed_url = url_formatter::FixupURL(*url_text);
       pref->urls.push_back(fixed_url);
     }
   }
@@ -45,7 +54,7 @@ void URLListToPref(const base::ListValue* url_list, SessionStartupPref* pref) {
 // static
 void SessionStartupPref::RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* registry) {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   uint32_t flags = PrefRegistry::NO_REGISTRATION_FLAGS;
 #else
   uint32_t flags = user_prefs::PrefRegistrySyncable::SYNCABLE_PREF;
@@ -58,17 +67,21 @@ void SessionStartupPref::RegisterProfilePrefs(
 
 // static
 SessionStartupPref::Type SessionStartupPref::GetDefaultStartupType() {
-#if defined(OS_CHROMEOS) || BUILDFLAG(IS_LACROS)
+#if BUILDFLAG(IS_CHROMEOS)
   return SessionStartupPref::LAST;
 #else
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+  if (features::kSetDefaultToContinueSession.Get()) {
+    return SessionStartupPref::LAST;
+  }
+#endif
   return SessionStartupPref::DEFAULT;
 #endif
 }
 
 // static
-void SessionStartupPref::SetStartupPref(
-    Profile* profile,
-    const SessionStartupPref& pref) {
+void SessionStartupPref::SetStartupPref(Profile* profile,
+                                        const SessionStartupPref& pref) {
   DCHECK(profile);
   SetStartupPref(profile->GetPrefs(), pref);
 }
@@ -84,15 +97,11 @@ void SessionStartupPref::SetStartupPref(PrefService* prefs,
   if (!SessionStartupPref::URLsAreManaged(prefs)) {
     // Always save the URLs, that way the UI can remain consistent even if the
     // user changes the startup type pref.
-    // Ownership of the ListValue retains with the pref service.
-    ListPrefUpdate update(prefs, prefs::kURLsToRestoreOnStartup);
-    base::ListValue* url_pref_list = update.Get();
-    DCHECK(url_pref_list);
-    url_pref_list->Clear();
-    for (size_t i = 0; i < pref.urls.size(); ++i) {
-      url_pref_list->Set(static_cast<int>(i),
-                         std::make_unique<base::Value>(pref.urls[i].spec()));
+    base::ListValue url_pref_list;
+    for (const GURL& url : pref.urls) {
+      url_pref_list.Append(url.spec());
     }
+    prefs->SetList(prefs::kURLsToRestoreOnStartup, std::move(url_pref_list));
   }
 }
 
@@ -117,7 +126,7 @@ SessionStartupPref SessionStartupPref::GetStartupPref(
 
   // Always load the urls, even if the pref type isn't URLS. This way the
   // preferences panels can show the user their last choice.
-  const base::ListValue* url_list =
+  const base::ListValue& url_list =
       prefs->GetList(prefs::kURLsToRestoreOnStartup);
   URLListToPref(url_list, &pref);
 
@@ -125,7 +134,7 @@ SessionStartupPref SessionStartupPref::GetStartupPref(
 }
 
 // static
-bool SessionStartupPref::TypeIsManaged(PrefService* prefs) {
+bool SessionStartupPref::TypeIsManaged(const PrefService* prefs) {
   DCHECK(prefs);
   const PrefService::Preference* pref_restore =
       prefs->FindPreference(prefs::kRestoreOnStartup);
@@ -134,7 +143,7 @@ bool SessionStartupPref::TypeIsManaged(PrefService* prefs) {
 }
 
 // static
-bool SessionStartupPref::URLsAreManaged(PrefService* prefs) {
+bool SessionStartupPref::URLsAreManaged(const PrefService* prefs) {
   DCHECK(prefs);
   const PrefService::Preference* pref_urls =
       prefs->FindPreference(prefs::kURLsToRestoreOnStartup);
@@ -143,7 +152,7 @@ bool SessionStartupPref::URLsAreManaged(PrefService* prefs) {
 }
 
 // static
-bool SessionStartupPref::TypeHasRecommendedValue(PrefService* prefs) {
+bool SessionStartupPref::TypeHasRecommendedValue(const PrefService* prefs) {
   DCHECK(prefs);
   const PrefService::Preference* pref_restore =
       prefs->FindPreference(prefs::kRestoreOnStartup);
@@ -163,9 +172,14 @@ bool SessionStartupPref::TypeIsDefault(const PrefService* prefs) {
 // static
 SessionStartupPref::Type SessionStartupPref::PrefValueToType(int pref_value) {
   switch (pref_value) {
-    case kPrefValueLast:     return SessionStartupPref::LAST;
-    case kPrefValueURLs:     return SessionStartupPref::URLS;
-    default:                 return SessionStartupPref::DEFAULT;
+    case kPrefValueLast:
+      return SessionStartupPref::LAST;
+    case kPrefValueURLs:
+      return SessionStartupPref::URLS;
+    case kPrefValueLastAndURLs:
+      return SessionStartupPref::LAST_AND_URLS;
+    default:
+      return SessionStartupPref::DEFAULT;
   }
 }
 
@@ -174,4 +188,25 @@ SessionStartupPref::SessionStartupPref(Type type) : type(type) {}
 SessionStartupPref::SessionStartupPref(const SessionStartupPref& other) =
     default;
 
-SessionStartupPref::~SessionStartupPref() {}
+SessionStartupPref::~SessionStartupPref() = default;
+
+bool SessionStartupPref::ShouldRestoreLastSession() const {
+  return type == LAST || type == LAST_AND_URLS;
+}
+
+bool SessionStartupPref::ShouldOpenUrls() const {
+  return type == URLS || type == LAST_AND_URLS;
+}
+
+#if !BUILDFLAG(IS_ANDROID)
+StartupTabs SessionStartupPref::ToStartupTabs() const {
+  StartupTabs startup_tabs;
+  for (const GURL& url : urls) {
+    startup_tabs.emplace_back(
+        url, type == LAST_AND_URLS
+                 ? StartupTab::Type::kFromLastAndUrlsStartupPref
+                 : StartupTab::Type::kNormal);
+  }
+  return startup_tabs;
+}
+#endif

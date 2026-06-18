@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,11 +9,27 @@
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace metrics {
+namespace {
+
+TEST(UnsentLogStoreMetricsImplTest, RecordDroppedLogSize) {
+  UnsentLogStoreMetricsImpl impl;
+  base::HistogramTester histogram_tester;
+
+  impl.RecordDroppedLogSize(99999);
+  histogram_tester.ExpectBucketCount("UMA.UnsentLogs.DroppedSize", 99999, 1);
+}
+
+TEST(UnsentLogStoreMetricsImplTest, RecordDroppedLogsNum) {
+  UnsentLogStoreMetricsImpl impl;
+  base::HistogramTester histogram_tester;
+
+  impl.RecordDroppedLogsNum(17);
+  histogram_tester.ExpectBucketCount("UMA.UnsentLogs.Dropped", 17, 1);
+}
 
 TEST(UnsentLogStoreMetricsImplTest, RecordLastUnsentLogMetadataMetrics) {
   base::test::ScopedFeatureList feature_override;
-  feature_override.InitAndEnableFeature(
-      UnsentLogStoreMetrics::kRecordLastUnsentLogMetadataMetrics);
+  feature_override.InitAndEnableFeature(kRecordLastUnsentLogMetadataMetrics);
   UnsentLogStoreMetricsImpl impl;
   base::HistogramTester histogram_tester;
 
@@ -42,8 +58,7 @@ TEST(UnsentLogStoreMetricsImplTest, DisableRecordLastUnsentLogMetadataMetrics) {
 
 TEST(UnsentLogStoreMetricsImplTest, BothUnsentAndSentZeroSample) {
   base::test::ScopedFeatureList feature_override;
-  feature_override.InitAndEnableFeature(
-      UnsentLogStoreMetrics::kRecordLastUnsentLogMetadataMetrics);
+  feature_override.InitAndEnableFeature(kRecordLastUnsentLogMetadataMetrics);
   UnsentLogStoreMetricsImpl impl;
   base::HistogramTester histogram_tester;
 
@@ -55,8 +70,7 @@ TEST(UnsentLogStoreMetricsImplTest, BothUnsentAndSentZeroSample) {
 
 TEST(UnsentLogStoreMetricsImplTest, ZeroUnsentSample) {
   base::test::ScopedFeatureList feature_override;
-  feature_override.InitAndEnableFeature(
-      UnsentLogStoreMetrics::kRecordLastUnsentLogMetadataMetrics);
+  feature_override.InitAndEnableFeature(kRecordLastUnsentLogMetadataMetrics);
   UnsentLogStoreMetricsImpl impl;
   base::HistogramTester histogram_tester;
 
@@ -68,8 +82,7 @@ TEST(UnsentLogStoreMetricsImplTest, ZeroUnsentSample) {
 
 TEST(UnsentLogStoreMetricsImplTest, ZeroSentSample) {
   base::test::ScopedFeatureList feature_override;
-  feature_override.InitAndEnableFeature(
-      UnsentLogStoreMetrics::kRecordLastUnsentLogMetadataMetrics);
+  feature_override.InitAndEnableFeature(kRecordLastUnsentLogMetadataMetrics);
   UnsentLogStoreMetricsImpl impl;
   base::HistogramTester histogram_tester;
 
@@ -79,4 +92,5 @@ TEST(UnsentLogStoreMetricsImplTest, ZeroSentSample) {
   histogram_tester.ExpectBucketCount("UMA.UnsentLogs.UnsentPercentage", 100, 1);
 }
 
+}  // namespace
 }  // namespace metrics

@@ -1,10 +1,11 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "mojo/public/cpp/bindings/sync_handle_watcher.h"
 
 #include "base/check_op.h"
+#include "base/memory/scoped_refptr.h"
 
 namespace mojo {
 
@@ -18,12 +19,13 @@ SyncHandleWatcher::SyncHandleWatcher(
       registered_(false),
       register_request_count_(0),
       registry_(SyncHandleRegistry::current()),
-      destroyed_(new base::RefCountedData<bool>(false)) {}
+      destroyed_(base::MakeRefCounted<base::RefCountedData<bool>>(false)) {}
 
 SyncHandleWatcher::~SyncHandleWatcher() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (registered_)
+  if (registered_) {
     registry_->UnregisterHandle(handle_);
+  }
 
   destroyed_->data = true;
 }
@@ -45,11 +47,12 @@ bool SyncHandleWatcher::SyncWatch(const bool* should_stop) {
   // the boolean that Wait uses.
   auto destroyed = destroyed_;
   const bool* should_stop_array[] = {should_stop, &destroyed->data};
-  bool result = registry_->Wait(should_stop_array, 2);
+  bool result = registry_->Wait(should_stop_array);
 
   // This object has been destroyed.
-  if (destroyed->data)
+  if (destroyed->data) {
     return false;
+  }
 
   DecrementRegisterCount();
   return result;

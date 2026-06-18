@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,19 @@
 // NOTE: The format of types has changed. 'FooType' is now
 //   'chrome.tabs.FooType'.
 // Please run the closure compiler before committing changes.
-// See https://chromium.googlesource.com/chromium/src/+/master/docs/closure_compilation.md
+// See https://chromium.googlesource.com/chromium/src/+/main/docs/closure_compilation.md
 
-// IMPORTANT NOTE: Work-around for crbug.com/543822
+// TODO(crbug.com/543822): Disable automatic extern generation until fixed.
+// s/chrome.tabs.extensionTypes.DeleteInjectionDetails/chrome.extensionTypes.DeleteInjectionDetails/
 // s/chrome.tabs.extensionTypes.ImageDetails/chrome.extensionTypes.ImageDetails/
 // s/chrome.tabs.extensionTypes.InjectDetails/chrome.extensionTypes.InjectDetails/
 // s/chrome.tabs.runtime.Port/chrome.runtime.Port/
 // s/chrome.tabs.windows.Window/chrome.windows.Window/
 
-/** @fileoverview Externs generated from namespace: tabs */
+/**
+ * @fileoverview Externs generated from namespace: tabs
+ * @externs
+ */
 
 /** @const */
 chrome.tabs = {};
@@ -55,13 +59,17 @@ chrome.tabs.MutedInfo;
  * @typedef {{
  *   id: (number|undefined),
  *   index: number,
+ *   groupId: number,
+ *   splitViewId: (number|undefined),
  *   windowId: number,
  *   openerTabId: (number|undefined),
  *   selected: boolean,
+ *   lastAccessed: number,
  *   highlighted: boolean,
  *   active: boolean,
  *   pinned: boolean,
  *   audible: (boolean|undefined),
+ *   frozen: boolean,
  *   discarded: boolean,
  *   autoDiscardable: boolean,
  *   mutedInfo: (!chrome.tabs.MutedInfo|undefined),
@@ -119,7 +127,24 @@ chrome.tabs.WindowType = {
   PANEL: 'panel',
   APP: 'app',
   DEVTOOLS: 'devtools',
+  CUSTOM_TAB: 'custom-tab',
 };
+
+/**
+ * The maximum number of times that $(ref:captureVisibleTab) can be called per
+ * second. $(ref:captureVisibleTab) is expensive and should not be called too
+ * often.
+ * @type {number}
+ * @see https://developer.chrome.com/extensions/tabs#type-MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND
+ */
+chrome.tabs.MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND;
+
+/**
+ * An ID that represents the absence of a split tab.
+ * @type {number}
+ * @see https://developer.chrome.com/extensions/tabs#type-SPLIT_VIEW_ID_NONE
+ */
+chrome.tabs.SPLIT_VIEW_ID_NONE;
 
 /**
  * An ID that represents the absence of a browser tab.
@@ -129,17 +154,25 @@ chrome.tabs.WindowType = {
 chrome.tabs.TAB_ID_NONE;
 
 /**
+ * An index that represents the absence of a tab index in a tab_strip.
+ * @type {number}
+ * @see https://developer.chrome.com/extensions/tabs#type-TAB_INDEX_NONE
+ */
+chrome.tabs.TAB_INDEX_NONE;
+
+/**
  * Retrieves details about the specified tab.
  * @param {number} tabId
- * @param {function(!chrome.tabs.Tab):void} callback
+ * @param {function(!chrome.tabs.Tab): void} callback
  * @see https://developer.chrome.com/extensions/tabs#method-get
  */
 chrome.tabs.get = function(tabId, callback) {};
 
 /**
- * Gets the tab that this script call is being made from. May be undefined if
- * called from a non-tab context (for example, a background page or popup view).
- * @param {function((!chrome.tabs.Tab|undefined)):void} callback
+ * Gets the tab that this script call is being made from. Returns
+ * <code>undefined</code> if called from a non-tab context (for example, a
+ * background page or popup view).
+ * @param {function((!chrome.tabs.Tab|undefined)): void} callback
  * @see https://developer.chrome.com/extensions/tabs#method-getCurrent
  */
 chrome.tabs.getCurrent = function(callback) {};
@@ -152,7 +185,8 @@ chrome.tabs.getCurrent = function(callback) {};
  * @param {number} tabId
  * @param {{
  *   name: (string|undefined),
- *   frameId: (number|undefined)
+ *   frameId: (number|undefined),
+ *   documentId: (string|undefined)
  * }=} connectInfo
  * @return {!chrome.runtime.Port} A port that can be used to communicate
  *     with the content scripts running in the specified tab. The port's
@@ -168,33 +202,35 @@ chrome.tabs.connect = function(tabId, connectInfo) {};
  * the specified tab for the current extension.
  * @param {number} tabId
  * @param {*} request
- * @param {function(*):void=} responseCallback
+ * @param {function(*): void=} callback
  * @deprecated Please use $(ref:runtime.sendMessage).
  * @see https://developer.chrome.com/extensions/tabs#method-sendRequest
  */
-chrome.tabs.sendRequest = function(tabId, request, responseCallback) {};
+chrome.tabs.sendRequest = function(tabId, request, callback) {};
 
 /**
- * Sends a single message to the content script(s) in the specified tab, with an
- * optional callback to run when a response is sent back.  The
+ * Sends a single message to the content script(s) in the specified tab. The
  * $(ref:runtime.onMessage) event is fired in each content script running in the
  * specified tab for the current extension.
  * @param {number} tabId
  * @param {*} message The message to send. This message should be a JSON-ifiable
  *     object.
  * @param {{
- *   frameId: (number|undefined)
+ *   frameId: (number|undefined),
+ *   documentId: (string|undefined)
  * }=} options
- * @param {function(*):void=} responseCallback
+ * @param {function(*): void=} callback Promise that resolves with the response
+ *     from the content script. If an error occurs while connecting to the
+ *     specified tab, the promise will be rejected.
  * @see https://developer.chrome.com/extensions/tabs#method-sendMessage
  */
-chrome.tabs.sendMessage = function(tabId, message, options, responseCallback) {};
+chrome.tabs.sendMessage = function(tabId, message, options, callback) {};
 
 /**
  * Gets the tab that is selected in the specified window.
  * @param {?number|undefined} windowId Defaults to the <a
  *     href='windows#current-window'>current window</a>.
- * @param {function(!chrome.tabs.Tab):void} callback
+ * @param {function(!chrome.tabs.Tab): void} callback
  * @deprecated Please use $(ref:tabs.query) <code>{active: true}</code>.
  * @see https://developer.chrome.com/extensions/tabs#method-getSelected
  */
@@ -204,7 +240,7 @@ chrome.tabs.getSelected = function(windowId, callback) {};
  * Gets details about all tabs in the specified window.
  * @param {?number|undefined} windowId Defaults to the <a
  *     href='windows#current-window'>current window</a>.
- * @param {function(!Array<!chrome.tabs.Tab>):void} callback
+ * @param {function(!Array<!chrome.tabs.Tab>): void} callback
  * @deprecated Please use $(ref:tabs.query) <code>{windowId: windowId}</code>.
  * @see https://developer.chrome.com/extensions/tabs#method-getAllInWindow
  */
@@ -221,7 +257,7 @@ chrome.tabs.getAllInWindow = function(windowId, callback) {};
  *   pinned: (boolean|undefined),
  *   openerTabId: (number|undefined)
  * }} createProperties
- * @param {function(!chrome.tabs.Tab):void=} callback
+ * @param {function(!chrome.tabs.Tab): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-create
  */
 chrome.tabs.create = function(createProperties, callback) {};
@@ -229,7 +265,7 @@ chrome.tabs.create = function(createProperties, callback) {};
 /**
  * Duplicates a tab.
  * @param {number} tabId The ID of the tab to duplicate.
- * @param {function((!chrome.tabs.Tab|undefined)):void=} callback
+ * @param {function((!chrome.tabs.Tab|undefined)): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-duplicate
  */
 chrome.tabs.duplicate = function(tabId, callback) {};
@@ -243,6 +279,7 @@ chrome.tabs.duplicate = function(tabId, callback) {};
  *   audible: (boolean|undefined),
  *   muted: (boolean|undefined),
  *   highlighted: (boolean|undefined),
+ *   frozen: (boolean|undefined),
  *   discarded: (boolean|undefined),
  *   autoDiscardable: (boolean|undefined),
  *   currentWindow: (boolean|undefined),
@@ -250,11 +287,13 @@ chrome.tabs.duplicate = function(tabId, callback) {};
  *   status: (!chrome.tabs.TabStatus|undefined),
  *   title: (string|undefined),
  *   url: ((string|!Array<string>)|undefined),
+ *   groupId: (number|undefined),
+ *   splitViewId: (number|undefined),
  *   windowId: (number|undefined),
  *   windowType: (!chrome.tabs.WindowType|undefined),
  *   index: (number|undefined)
  * }} queryInfo
- * @param {function(!Array<!chrome.tabs.Tab>):void} callback
+ * @param {function(!Array<!chrome.tabs.Tab>): void} callback
  * @see https://developer.chrome.com/extensions/tabs#method-query
  */
 chrome.tabs.query = function(queryInfo, callback) {};
@@ -266,7 +305,7 @@ chrome.tabs.query = function(queryInfo, callback) {};
  *   windowId: (number|undefined),
  *   tabs: (!Array<number>|number)
  * }} highlightInfo
- * @param {function(!chrome.windows.Window):void=} callback
+ * @param {function(!chrome.windows.Window): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-highlight
  */
 chrome.tabs.highlight = function(highlightInfo, callback) {};
@@ -286,7 +325,7 @@ chrome.tabs.highlight = function(highlightInfo, callback) {};
  *   openerTabId: (number|undefined),
  *   autoDiscardable: (boolean|undefined)
  * }} updateProperties
- * @param {function((!chrome.tabs.Tab|undefined)):void=} callback
+ * @param {function((!chrome.tabs.Tab|undefined)): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-update
  */
 chrome.tabs.update = function(tabId, updateProperties, callback) {};
@@ -301,7 +340,8 @@ chrome.tabs.update = function(tabId, updateProperties, callback) {};
  *   windowId: (number|undefined),
  *   index: number
  * }} moveProperties
- * @param {function((!chrome.tabs.Tab|!Array<!chrome.tabs.Tab>)):void=} callback
+ * @param {function((!chrome.tabs.Tab|!Array<!chrome.tabs.Tab>)): void=}
+ *     callback
  * @see https://developer.chrome.com/extensions/tabs#method-move
  */
 chrome.tabs.move = function(tabIds, moveProperties, callback) {};
@@ -313,7 +353,7 @@ chrome.tabs.move = function(tabIds, moveProperties, callback) {};
  * @param {{
  *   bypassCache: (boolean|undefined)
  * }=} reloadProperties
- * @param {function():void=} callback
+ * @param {function(): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-reload
  */
 chrome.tabs.reload = function(tabId, reloadProperties, callback) {};
@@ -322,16 +362,41 @@ chrome.tabs.reload = function(tabId, reloadProperties, callback) {};
  * Closes one or more tabs.
  * @param {(number|!Array<number>)} tabIds The tab ID or list of tab IDs to
  *     close.
- * @param {function():void=} callback
+ * @param {function(): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-remove
  */
 chrome.tabs.remove = function(tabIds, callback) {};
 
 /**
+ * Adds one or more tabs to a specified group, or if no group is specified, adds
+ * the given tabs to a newly created group.
+ * @param {{
+ *   tabIds: (number|!Array<number>),
+ *   groupId: (number|undefined),
+ *   createProperties: ({
+ *     windowId: (number|undefined)
+ *   }|undefined)
+ * }} options
+ * @param {function(number): void=} callback
+ * @see https://developer.chrome.com/extensions/tabs#method-group
+ */
+chrome.tabs.group = function(options, callback) {};
+
+/**
+ * Removes one or more tabs from their respective groups. If any groups become
+ * empty, they are deleted.
+ * @param {(number|!Array<number>)} tabIds The tab ID or list of tab IDs to
+ *     remove from their respective groups.
+ * @param {function(): void=} callback
+ * @see https://developer.chrome.com/extensions/tabs#method-ungroup
+ */
+chrome.tabs.ungroup = function(tabIds, callback) {};
+
+/**
  * Detects the primary language of the content in a tab.
  * @param {?number|undefined} tabId Defaults to the active tab of the <a
  *     href='windows#current-window'>current window</a>.
- * @param {function(string):void} callback
+ * @param {function(string): void} callback
  * @see https://developer.chrome.com/extensions/tabs#method-detectLanguage
  */
 chrome.tabs.detectLanguage = function(tabId, callback) {};
@@ -339,49 +404,66 @@ chrome.tabs.detectLanguage = function(tabId, callback) {};
 /**
  * Captures the visible area of the currently active tab in the specified
  * window. In order to call this method, the extension must have either the <a
- * href='declare_permissions'>&lt;all_urls&gt;</a> permission or the <a
- * href='activeTab'>activeTab</a> permission. In addition to sites that
- * extensions can normally access, this method allows extensions to capture
- * sensitive sites that are otherwise restricted, including chrome:-scheme
- * pages, other extensions' pages, and data: URLs. These sensitive sites can
- * only be captured with the activeTab permission. File URLs may be captured
- * only if the extension has been granted file access.
+ * href='develop/concepts/declare-permissions'>&lt;all_urls&gt;</a> permission
+ * or the <a href='develop/concepts/activeTab'>activeTab</a> permission. In
+ * addition to sites that extensions can normally access, this method allows
+ * extensions to capture sensitive sites that are otherwise restricted,
+ * including chrome:-scheme pages, other extensions' pages, and data: URLs.
+ * These sensitive sites can only be captured with the activeTab permission.
+ * File URLs may be captured only if the extension has been granted file access.
  * @param {?number|undefined} windowId The target window. Defaults to the <a
  *     href='windows#current-window'>current window</a>.
  * @param {?chrome.extensionTypes.ImageDetails|undefined} options
- * @param {function(string):void} callback
+ * @param {function(string): void} callback
  * @see https://developer.chrome.com/extensions/tabs#method-captureVisibleTab
  */
 chrome.tabs.captureVisibleTab = function(windowId, options, callback) {};
 
 /**
  * Injects JavaScript code into a page. For details, see the <a
- * href='content_scripts#pi'>programmatic injection</a> section of the content
- * scripts doc.
+ * href='/docs/extensions/develop/concepts/content-scripts#programmatic'>programmatic injection</a> section of the content scripts doc.
  * @param {?number|undefined} tabId The ID of the tab in which to run the
  *     script; defaults to the active tab of the current window.
  * @param {!chrome.extensionTypes.InjectDetails} details Details of the
  *     script to run. Either the code or the file property must be set, but both
  *     may not be set at the same time.
- * @param {function((!Array<*>|undefined)):void=} callback Called after all the
- *     JavaScript has been executed.
+ * @param {function((!Array<*>|undefined)): void=} callback Resolves after all
+ *     the JavaScript has been executed.
+ * @deprecated Replaced by $(ref:scripting.executeScript) in Manifest V3.
  * @see https://developer.chrome.com/extensions/tabs#method-executeScript
  */
 chrome.tabs.executeScript = function(tabId, details, callback) {};
 
 /**
- * Injects CSS into a page. For details, see the <a
- * href='content_scripts#pi'>programmatic injection</a> section of the content
- * scripts doc.
+ * Injects CSS into a page. Styles inserted with this method can be removed with
+ * $(ref:scripting.removeCSS). For details, see the <a
+ * href='/docs/extensions/develop/concepts/content-scripts#programmatic'>programmatic injection</a> section of the content scripts doc.
  * @param {?number|undefined} tabId The ID of the tab in which to insert the
  *     CSS; defaults to the active tab of the current window.
  * @param {!chrome.extensionTypes.InjectDetails} details Details of the CSS
  *     text to insert. Either the code or the file property must be set, but
  *     both may not be set at the same time.
- * @param {function():void=} callback Called when all the CSS has been inserted.
+ * @param {function(): void=} callback Resolves when all the CSS has been
+ *     inserted.
+ * @deprecated Replaced by $(ref:scripting.insertCSS) in Manifest V3.
  * @see https://developer.chrome.com/extensions/tabs#method-insertCSS
  */
 chrome.tabs.insertCSS = function(tabId, details, callback) {};
+
+/**
+ * Removes from a page CSS that was previously injected by a call to
+ * $(ref:scripting.insertCSS).
+ * @param {?number|undefined} tabId The ID of the tab from which to remove the
+ *     CSS; defaults to the active tab of the current window.
+ * @param {!chrome.extensionTypes.DeleteInjectionDetails} details Details
+ *     of the CSS text to remove. Either the code or the file property must be
+ *     set, but both may not be set at the same time.
+ * @param {function(): void=} callback Resolves when all the CSS has been
+ *     removed.
+ * @deprecated Replaced by $(ref:scripting.removeCSS) in Manifest V3.
+ * @see https://developer.chrome.com/extensions/tabs#method-removeCSS
+ */
+chrome.tabs.removeCSS = function(tabId, details, callback) {};
 
 /**
  * Zooms a specified tab.
@@ -390,7 +472,7 @@ chrome.tabs.insertCSS = function(tabId, details, callback) {};
  * @param {number} zoomFactor The new zoom factor. A value of <code>0</code>
  *     sets the tab to its current default zoom factor. Values greater than
  *     <code>0</code> specify a (possibly non-default) zoom factor for the tab.
- * @param {function():void=} callback Called after the zoom factor has been
+ * @param {function(): void=} callback Resolves after the zoom factor has been
  *     changed.
  * @see https://developer.chrome.com/extensions/tabs#method-setZoom
  */
@@ -400,7 +482,7 @@ chrome.tabs.setZoom = function(tabId, zoomFactor, callback) {};
  * Gets the current zoom factor of a specified tab.
  * @param {?number|undefined} tabId The ID of the tab to get the current zoom
  *     factor from; defaults to the active tab of the current window.
- * @param {function(number):void} callback Called with the tab's current zoom
+ * @param {function(number): void} callback Resolves with the tab's current zoom
  *     factor after it has been fetched.
  * @see https://developer.chrome.com/extensions/tabs#method-getZoom
  */
@@ -413,7 +495,7 @@ chrome.tabs.getZoom = function(tabId, callback) {};
  *     settings for; defaults to the active tab of the current window.
  * @param {!chrome.tabs.ZoomSettings} zoomSettings Defines how zoom changes are
  *     handled and at what scope.
- * @param {function():void=} callback Called after the zoom settings are
+ * @param {function(): void=} callback Resolves after the zoom settings are
  *     changed.
  * @see https://developer.chrome.com/extensions/tabs#method-setZoomSettings
  */
@@ -423,7 +505,7 @@ chrome.tabs.setZoomSettings = function(tabId, zoomSettings, callback) {};
  * Gets the current zoom settings of a specified tab.
  * @param {?number|undefined} tabId The ID of the tab to get the current zoom
  *     settings from; defaults to the active tab of the current window.
- * @param {function(!chrome.tabs.ZoomSettings):void} callback Called with the
+ * @param {function(!chrome.tabs.ZoomSettings): void} callback Resolves with the
  *     tab's current zoom settings.
  * @see https://developer.chrome.com/extensions/tabs#method-getZoomSettings
  */
@@ -436,8 +518,8 @@ chrome.tabs.getZoomSettings = function(tabId, callback) {};
  *     tab is discarded unless it is active or already discarded. If omitted,
  *     the browser discards the least important tab. This can fail if no
  *     discardable tabs exist.
- * @param {function((!chrome.tabs.Tab|undefined)):void=} callback Called after
- *     the operation is completed.
+ * @param {function((!chrome.tabs.Tab|undefined)): void=} callback Resolves
+ *     after the operation is completed.
  * @see https://developer.chrome.com/extensions/tabs#method-discard
  */
 chrome.tabs.discard = function(tabId, callback) {};
@@ -446,7 +528,7 @@ chrome.tabs.discard = function(tabId, callback) {};
  * Go foward to the next page, if one is available.
  * @param {number=} tabId The ID of the tab to navigate forward; defaults to the
  *     selected tab of the current window.
- * @param {function():void=} callback
+ * @param {function(): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-goForward
  */
 chrome.tabs.goForward = function(tabId, callback) {};
@@ -455,15 +537,16 @@ chrome.tabs.goForward = function(tabId, callback) {};
  * Go back to the previous page, if one is available.
  * @param {number=} tabId The ID of the tab to navigate back; defaults to the
  *     selected tab of the current window.
- * @param {function():void=} callback
+ * @param {function(): void=} callback
  * @see https://developer.chrome.com/extensions/tabs#method-goBack
  */
 chrome.tabs.goBack = function(tabId, callback) {};
 
 /**
- * Fired when a tab is created. Note that the tab's URL may not be set at the
- * time this event is fired, but you can listen to onUpdated events so as to be
- * notified when a URL is set.
+ * Fired when a tab is created. Note that the tab's URL and tab group membership
+ * may not be set at the time this event is fired, but you can listen to
+ * onUpdated events so as to be notified when a URL is set or the tab is added
+ * to a tab group.
  * @type {!ChromeEvent}
  * @see https://developer.chrome.com/extensions/tabs#event-onCreated
  */

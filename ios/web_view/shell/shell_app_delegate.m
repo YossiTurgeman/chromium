@@ -1,14 +1,12 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "ios/web_view/shell/shell_app_delegate.h"
 
-#import "ios/web_view/shell/shell_view_controller.h"
+#import <ChromeWebView/ChromeWebView.h>
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/web_view/shell/shell_view_controller.h"
 
 @implementation ShellAppDelegate
 
@@ -16,11 +14,23 @@
 
 - (BOOL)application:(UIApplication*)application
     willFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
+  [[CWVGlobalState sharedInstance] earlyInit];
+  [[CWVGlobalState sharedInstance] start];
+
   // Note that initialization of the window and the root view controller must be
   // done here, not in -application:didFinishLaunchingWithOptions: when state
   // restoration is supported.
 
-  self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+  UIWindowScene* scene = nil;
+  for (UIScene* connectedScene in UIApplication.sharedApplication
+           .connectedScenes) {
+    if ([connectedScene isKindOfClass:[UIWindowScene class]]) {
+      scene = (UIWindowScene*)connectedScene;
+      break;
+    }
+  }
+  self.window = [[UIWindow alloc] initWithWindowScene:scene];
+  self.window.frame = [[UIScreen mainScreen] bounds];
   self.window.backgroundColor = [UIColor whiteColor];
   self.window.tintColor = [UIColor darkGrayColor];
 
@@ -51,17 +61,40 @@
 }
 
 - (void)applicationWillTerminate:(UIApplication*)application {
+  [[CWVGlobalState sharedInstance] stop];
 }
 
 - (BOOL)application:(UIApplication*)application
-    shouldSaveApplicationState:(NSCoder*)coder {
+    shouldSaveSecureApplicationState:(NSCoder*)coder {
   return YES;
 }
 
 - (BOOL)application:(UIApplication*)application
-    shouldRestoreApplicationState:(NSCoder*)coder {
-  // TODO(crbug.com/710329): Make this value configurable in the settings.
+    shouldRestoreSecureApplicationState:(NSCoder*)coder {
   return YES;
+}
+
+- (void)application:(UIApplication*)application
+    didDecodeRestorableStateWithCoder:(NSCoder*)coder {
+}
+
+- (void)application:(UIApplication*)application
+    willEncodeRestorableStateWithCoder:(NSCoder*)coder {
+}
+
+- (UIViewController*)application:(UIApplication*)application
+    viewControllerWithRestorationIdentifierPath:
+        (NSArray<NSString*>*)identifierComponents
+                                          coder:(NSCoder*)coder {
+  const NSUInteger identifiersCount = identifierComponents.count;
+  if (identifiersCount > 0) {
+    NSString* identifier = identifierComponents[identifiersCount - 1];
+    UIViewController* rootViewController = self.window.rootViewController;
+    if ([identifier isEqualToString:rootViewController.restorationIdentifier]) {
+      return rootViewController;
+    }
+  }
+  return nil;
 }
 
 @end

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,10 @@
 #include "base/i18n/case_conversion.h"
 #include "base/strings/string_util.h"
 
-AnswersQueryData::AnswersQueryData() : query_type(-1) {}
-AnswersQueryData::AnswersQueryData(const base::string16& text, int type)
+AnswersQueryData::AnswersQueryData()
+    : query_type(omnibox::ANSWER_TYPE_UNSPECIFIED) {}
+AnswersQueryData::AnswersQueryData(const std::u16string& text,
+                                   omnibox::AnswerType type)
     : full_query_text(text), query_type(type) {}
 
 AnswersCache::AnswersCache(size_t max_entries) : max_entries_(max_entries) {
@@ -17,9 +19,9 @@ AnswersCache::AnswersCache(size_t max_entries) : max_entries_(max_entries) {
 AnswersCache::~AnswersCache() {
 }
 
-AnswersQueryData AnswersCache::GetTopAnswerEntry(const base::string16& query) {
-  base::string16 collapsed_query = base::i18n::ToLower(
-      base::CollapseWhitespace(query, false));
+AnswersQueryData AnswersCache::GetTopAnswerEntry(const std::u16string& query) {
+  std::u16string collapsed_query =
+      base::i18n::ToLower(base::CollapseWhitespace(query, false));
   for (auto it = cache_.begin(); it != cache_.end(); ++it) {
     // If the query text starts with trimmed input, this is valid prefetch data.
     if (base::StartsWith(base::i18n::ToLower(it->full_query_text),
@@ -32,8 +34,8 @@ AnswersQueryData AnswersCache::GetTopAnswerEntry(const base::string16& query) {
   return AnswersQueryData();
 }
 
-void AnswersCache::UpdateRecentAnswers(const base::string16& full_query_text,
-                                       int query_type) {
+void AnswersCache::UpdateRecentAnswers(const std::u16string& full_query_text,
+                                       omnibox::AnswerType query_type) {
   // If this entry is already part of the cache, just update recency.
   for (auto it = cache_.begin(); it != cache_.end(); ++it) {
     if (full_query_text == it->full_query_text &&

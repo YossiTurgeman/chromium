@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,9 @@ import androidx.annotation.IntDef;
 import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager.SnackbarController;
 import org.chromium.chrome.ui.messages.R;
 
@@ -21,14 +24,14 @@ import java.lang.annotation.RetentionPolicy;
  * To show a snackbar, create the snackbar using {@link #make}, configure it using the various
  * set*() methods, and show it using {@link SnackbarManager#showSnackbar(Snackbar)}. Example:
  *
- *   SnackbarManager.showSnackbar(
- *           Snackbar.make("Closed example.com", controller, Snackbar.UMA_TAB_CLOSE_UNDO)
- *           .setAction("undo", actionData));
+ * <p>SnackbarManager.showSnackbar( Snackbar.make("Closed example.com", controller,
+ * Snackbar.UMA_TAB_CLOSE_UNDO) .setAction("undo", actionData));
  */
+@NullMarked
 public class Snackbar {
     /**
      * Snackbars that are created as an immediate response to user's action. These snackbars are
-     * managed in a stack and will be swiped away altogether after timeout.
+     * managed in a stack and will be dismissed one by one.
      */
     public static final int TYPE_ACTION = 0;
 
@@ -47,10 +50,10 @@ public class Snackbar {
      */
     public static final int TYPE_PERSISTENT = 2;
 
-    /**
-     * UMA Identifiers of features using snackbar. See SnackbarIdentifier enum in histograms.
-     */
+    /** UMA Identifiers of features using snackbar. See SnackbarIdentifier enum in histograms. */
+    // LINT.IfChange(SnackbarIdentifier)
     public static final int UMA_TEST_SNACKBAR = -2;
+
     public static final int UMA_UNKNOWN = -1;
     public static final int UMA_BOOKMARK_ADDED = 0;
     public static final int UMA_BOOKMARK_DELETE_UNDO = 1;
@@ -87,23 +90,80 @@ public class Snackbar {
     public static final int UMA_TAB_GROUP_MANUAL_CREATION_UNDO = 32;
     public static final int UMA_TWA_PRIVACY_DISCLOSURE_V2 = 33;
     public static final int UMA_HOMEPAGE_PROMO_CHANGED_UNDO = 34;
-    public static final int UMA_CONDITIONAL_TAB_STRIP_DISMISS_UNDO = 35;
+    // Obsolete; don't use: UMA_CONDITIONAL_TAB_STRIP_DISMISS_UNDO = 35;
     public static final int UMA_PAINT_PREVIEW_UPGRADE_NOTIFICATION = 36;
+    public static final int UMA_READING_LIST_BOOKMARK_ADDED = 37;
+    public static final int UMA_PRIVACY_SANDBOX_PAGE_OPEN = 38;
+    // Obsolete; don't use: public static final int UMA_WEB_FEED_FOLLOW_SUCCESS = 39;
+    // Obsolete; don't use: public static final int UMA_WEB_FEED_FOLLOW_FAILURE = 40;
+    // Obsolete; don't use: public static final int UMA_WEB_FEED_UNFOLLOW_SUCCESS = 41;
+    // Obsolete; don't use: public static final int UMA_WEB_FEED_UNFOLLOW_FAILURE = 42;
+    public static final int UMA_LANGUAGE_SPLIT_RESTART = 43;
+    public static final int UMA_AUTOFILL_VIRTUAL_CARD_FILLED = 44;
+    public static final int UMA_WINDOW_ERROR = 45;
+    public static final int UMA_MODULE_INSTALL_FAILURE = 46;
+    public static final int UMA_PRICE_TRACKING_SUCCESS = 47;
+    public static final int UMA_PRICE_TRACKING_FAILURE = 48;
+    public static final int UMA_PRIVACY_SANDBOX_ADD_INTEREST = 49;
+    public static final int UMA_PRIVACY_SANDBOX_REMOVE_INTEREST = 50;
+    public static final int UMA_BAD_FLAGS = 51;
+    public static final int UMA_DOWNLOAD_INTERSTITIAL_DOWNLOAD_DELETED = 52;
+    public static final int UMA_INCOGNITO_REAUTH_ENABLED_FROM_PROMO = 53;
+    public static final int UMA_PRIVACY_SANDBOX_ADD_SITE = 54;
+    public static final int UMA_PRIVACY_SANDBOX_REMOVE_SITE = 55;
+    // Obsolete; don't use: UMA_CREATOR_FOLLOW_SUCCESS = 56;
+    // Obsolete; don't use: UMA_CREATOR_FOLLOW_FAILURE = 57;
+    // Obsolete; don't use: UMA_CREATOR_UNFOLLOW_SUCCESS = 58;
+    // Obsolete; don't use: UMA_CREATOR_UNFOLLOW_FAILURE = 59;
+    public static final int UMA_QUICK_DELETE = 60;
+    public static final int UMA_AUTO_TRANSLATE = 61;
+    public static final int UMA_BOOKMARK_MOVED = 62;
+    public static final int UMA_CLEAR_BROWSING_DATA = 63;
+    public static final int UMA_SIGN_OUT = 64;
+    public static final int UMA_TAB_GROUP_DELETE_UNDO = 65;
+    public static final int UMA_SINGLE_TAB_GROUP_DELETE_UNDO = 66;
+    public static final int UMA_SAFETY_HUB_REGRANT_SINGLE_PERMISSION = 67;
+    public static final int UMA_SAFETY_HUB_REGRANT_MULTIPLE_PERMISSIONS = 68;
+    public static final int UMA_SAFETY_HUB_SINGLE_SITE_NOTIFICATIONS = 69;
+    public static final int UMA_SAFETY_HUB_MULTIPLE_SITE_NOTIFICATIONS = 70;
+    public static final int UMA_SETTINGS_BATCH_UPLOAD = 71;
+    public static final int UMA_REVOKE_FILE_EDIT_GRANT = 72;
+    public static final int UMA_SEARCH_ENGINE_CHANGED_NOTIFICATION = 73;
+    public static final int UMA_BOOKMARK_BATCH_UPLOAD = 74;
+    public static final int UMA_NTP_MOST_VISITED_UNPIN_UNDO = 75;
+    public static final int UMA_SIGN_IN = 76;
+    public static final int UMA_TAB_PICKER_LIMIT_REACHED = 77;
+    public static final int UMA_FUSEBOX_MAX_ATTACHMENTS = 78;
+    public static final int UMA_FUSEBOX_UPLOAD_FAILED = 79;
+    public static final int UMA_BOOKMARK_LINK_COPIED = 80;
+    public static final int UMA_BOOKMARK_LINK_COPIED_NON_SELECTION = 81;
+    public static final int UMA_CROSS_DEVICE_SETTING_IMPORT = 82;
+    public static final int UMA_CROSS_DEVICE_SETTING_UNDO = 83;
+    public static final int UMA_CROSS_DEVICE_SETTING_REDO = 84;
+    public static final int UMA_CHROME_FINDS_OPT_IN = 85;
+    public static final int UMA_AUTOFILL_AI_LOCAL_SAVE_FALLBACK = 86;
+    public static final int UMA_EXCLUSIVE_ACCESS_BUBBLE = 87;
+    public static final int UMA_CONTEXTUAL_TASKS_BOTTOM_SHEET_CLOSED_UNDO = 88;
+    public static final int UMA_ACTOR = 89;
+    public static final int UMA_GLIC = 90;
+    public static final int UMA_TIPS_OPT_IN = 91;
+    public static final int UMA_NTP_THEME_TIP = 92;
+    // LINT.ThenChange(//tools/metrics/histograms/metadata/ui/enums.xml:SnackbarIdentifier)
 
-    private SnackbarController mController;
-    private CharSequence mText;
-    private String mTemplateText;
-    private String mActionText;
-    private Object mActionData;
+    private final @Nullable SnackbarController mController;
+    private final CharSequence mText;
+    private @Nullable String mTemplateText;
+    private @Nullable String mActionText;
+    private @Nullable Object mActionData;
     private int mBackgroundColor;
-    private int mTextApperanceResId;
-    private boolean mSingleLine = true;
+    private int mTextAppearanceResId;
+    private boolean mDefaultLines = true;
+    private boolean mIsHighPriority;
     private int mDurationMs;
-    private Drawable mProfileImage;
-    private int mType;
+    private @Nullable Drawable mProfileImage;
+    private final int mType;
     private int mIdentifier = UMA_UNKNOWN;
-    @Theme
-    private int mTheme = Theme.BASIC;
+    private @Theme int mTheme = Theme.BASIC;
 
     @IntDef({Theme.BASIC, Theme.GOOGLE})
     @Retention(RetentionPolicy.SOURCE)
@@ -112,37 +172,49 @@ public class Snackbar {
         int GOOGLE = 1;
     }
 
-    // Prevent instantiation.
-    private Snackbar() {}
+    private Snackbar(
+            CharSequence text, @Nullable SnackbarController controller, int type, int identifier) {
+        mText = text;
+        mController = controller;
+        mType = type;
+        mIdentifier = identifier;
+    }
 
     /**
      * Creates and returns a snackbar to display the given text. If this is a snackbar for a new
      * feature shown to the user, please add the feature name to SnackbarIdentifier in histograms.
      *
      * @param text The text to show on the snackbar.
-     * @param controller The SnackbarController to receive callbacks about the snackbar's state.
+     * @param controller The SnackbarController to receive callbacks about the snackbar's state. The
+     *     controller can be null when no callbacks are required for a snackbar.
      * @param type Type of the snackbar. Either {@link #TYPE_ACTION} or {@link #TYPE_NOTIFICATION}.
      * @param identifier The feature code of the snackbar. Should be one of the UMA* constants above
      */
+    @Initializer
     public static Snackbar make(
-            CharSequence text, SnackbarController controller, int type, int identifier) {
-        Snackbar s = new Snackbar();
-        s.mText = text;
-        s.mController = controller;
-        s.mType = type;
-        s.mIdentifier = identifier;
+            CharSequence text, @Nullable SnackbarController controller, int type, int identifier) {
+        Snackbar s = new Snackbar(text, controller, type, identifier);
         if (type == TYPE_PERSISTENT) {
             // For persistent snackbars we set a default action text to ensure the snackbar can be
             // closed.
-            s.mActionText =
-                    ContextUtils.getApplicationContext().getResources().getString(R.string.ok);
+            s.mActionText = ContextUtils.getApplicationContext().getString(R.string.ok);
         }
         return s;
     }
 
     /**
-     * Sets the template text to show on the snackbar, e.g. "Closed %s". See
-     * {@link TemplatePreservingTextView} for details on how the template text is used.
+     * Sets whether the snackbar is high priority. High priority snackbars are shielded from being
+     * discarded by the timeout of other action-type snackbars in the queue (e.g. for security-
+     * critical notices), and they stay at the front of the queue.
+     */
+    public Snackbar setHighPriority(boolean highPriority) {
+        mIsHighPriority = highPriority;
+        return this;
+    }
+
+    /**
+     * Sets the template text to show on the snackbar, e.g. "Closed %s". See {@link
+     * TemplatePreservingTextView} for details on how the template text is used.
      */
     public Snackbar setTemplateText(String templateText) {
         mTemplateText = templateText;
@@ -151,21 +223,22 @@ public class Snackbar {
 
     /**
      * Sets the action button to show on the snackbar.
+     *
      * @param actionText The text to show on the button. If null, the button will not be shown.
-     * @param actionData An object to be passed to {@link SnackbarController#onAction} or
-     *        {@link SnackbarController#onDismissNoAction} when the button is pressed or the
-     *        snackbar is dismissed.
+     * @param actionData An object to be passed to {@link SnackbarController#onAction} or {@link
+     *     SnackbarController#onDismissNoAction} when the button is pressed or the snackbar is
+     *     dismissed.
      */
-    public Snackbar setAction(String actionText, Object actionData) {
+    public Snackbar setAction(String actionText, @Nullable Object actionData) {
         mActionText = actionText;
         mActionData = actionData;
         return this;
     }
 
     /**
-     * Sets the identity profile image that will be displayed at the beginning of the snackbar.
-     * If null, there won't be a profile image. The ability to have an icon is exclusive to
-     * identity snackbars.
+     * Sets the identity profile image that will be displayed at the beginning of the snackbar. If
+     * null, there won't be a profile image. The ability to have an icon is exclusive to identity
+     * snackbars.
      */
     public Snackbar setProfileImage(Drawable profileImage) {
         mProfileImage = profileImage;
@@ -173,10 +246,11 @@ public class Snackbar {
     }
 
     /**
-     * Sets whether the snackbar text should be limited to a single line and ellipsized if needed.
+     * Sets whether the snackbar text should be limited to 2, the default number of lines, and
+     * ellipsized if needed.
      */
-    public Snackbar setSingleLine(boolean singleLine) {
-        mSingleLine = singleLine;
+    public Snackbar setDefaultLines(boolean defaultLines) {
+        mDefaultLines = defaultLines;
         return this;
     }
 
@@ -190,9 +264,7 @@ public class Snackbar {
         return this;
     }
 
-    /**
-     * Sets the background color for the snackbar. If 0, the snackbar will use default color.
-     */
+    /** Sets the background color for the snackbar. If 0, the snackbar will use default color. */
     // TODO(fgorski): Clean up background color and text appearance -- transition all the consumers
     // to the Theme based styling.
     public Snackbar setBackgroundColor(int color) {
@@ -205,7 +277,7 @@ public class Snackbar {
      * appearance.
      */
     public Snackbar setTextAppearance(int resId) {
-        mTextApperanceResId = resId;
+        mTextAppearanceResId = resId;
         return this;
     }
 
@@ -221,7 +293,7 @@ public class Snackbar {
     /**
      * @return The {@link SnackbarController} that controls this snackbar.
      */
-    public SnackbarController getController() {
+    public @Nullable SnackbarController getController() {
         return mController;
     }
 
@@ -229,20 +301,22 @@ public class Snackbar {
         return mText;
     }
 
-    String getTemplateText() {
+    @Nullable String getTemplateText() {
         return mTemplateText;
     }
 
-    String getActionText() {
+    @VisibleForTesting(otherwise = VisibleForTesting.PROTECTED)
+    public @Nullable String getActionText() {
         return mActionText;
     }
 
-    Object getActionData() {
+    @VisibleForTesting
+    public @Nullable Object getActionData() {
         return mActionData;
     }
 
-    boolean getSingleLine() {
-        return mSingleLine;
+    boolean getDefaultLines() {
+        return mDefaultLines;
     }
 
     public int getDuration() {
@@ -253,18 +327,14 @@ public class Snackbar {
         return mIdentifier;
     }
 
-    /**
-     * If method returns zero, then default color for snackbar will be used.
-     */
+    /** If method returns zero, then default color for snackbar will be used. */
     int getBackgroundColor() {
         return mBackgroundColor;
     }
 
-    /**
-     * If method returns zero, then default text appearance for snackbar will be used.
-     */
+    /** If method returns zero, then default text appearance for snackbar will be used. */
     int getTextAppearance() {
-        return mTextApperanceResId;
+        return mTextAppearanceResId;
     }
 
     /**
@@ -276,10 +346,8 @@ public class Snackbar {
         return mTheme;
     }
 
-    /**
-     * If method returns null, then no profileImage will be shown in snackbar.
-     */
-    Drawable getProfileImage() {
+    /** If method returns null, then no profileImage will be shown in snackbar. */
+    @Nullable Drawable getProfileImage() {
         return mProfileImage;
     }
 
@@ -297,14 +365,18 @@ public class Snackbar {
         return mType == TYPE_PERSISTENT;
     }
 
-    /** So tests can trigger a press on a Snackbar. */
-    @VisibleForTesting
-    public Object getActionDataForTesting() {
-        return mActionData;
+    /**
+     * @return Whether the snackbar is high priority.
+     */
+    boolean isHighPriority() {
+        return mIsHighPriority;
     }
 
-    @VisibleForTesting
     public int getIdentifierForTesting() {
         return mIdentifier;
+    }
+
+    public CharSequence getTextForTesting() {
+        return mText;
     }
 }

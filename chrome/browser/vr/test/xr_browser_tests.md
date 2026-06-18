@@ -13,7 +13,7 @@ and documented in
 `//chrome/android/javatests/src/org/chromium/chrome/browser/vr/*.md`) for
 use in browser tests in order to test XR features on desktop platforms.
 
-[vr android dir]: https://chromium.googlesource.com/chromium/src/+/master/chrome/android/javatests/src/org/chromium/chrome/browser/vr
+[vr android dir]: https://chromium.googlesource.com/chromium/src/+/main/chrome/android/javatests/src/org/chromium/chrome/browser/vr
 
 This is pretty much a direct port, with the same JavaScript/HTML files being
 used for both and the Java/C++ code being functionally equivalent to each other,
@@ -21,13 +21,31 @@ so the instrumentation test's documentation on writing tests using the framework
 is applicable here, too. As such, this documentation only covers any notable
 differences between the two implementations.
 
+## Mock XR Device
+
+Any runtime attempting to start an Immersive session needs to add a Mock Device,
+as otherwise Android tests will fail due to trying to spawn a new activity,
+which currently isn't supported.
+
+## Threading
+
+It is important to be mindful of the threading model within these tests. The
+main test thread is the same as the browser's UI thread. On Android, the
+device thread is also the browser thread. This configuration makes
+it very easy to cause a deadlock in the browser process. To avoid this, any
+`MockXRDevice` should run its mojo methods, which are synchronously queried by
+the device on the device thread, on a separate thread. Furthermore, using
+`base::WaitableEvent` will completely block the thread it is called on. Since
+this would block the browser process, `base::WaitableEvent` should not be
+used, but rather `base::RunLoop` should be used instead.
+
 ## Restrictions
 
 Both the instrumentation tests and browser tests have hardware/software
 restrictions - in the case of browser tests, XR is only supported on Windows 8
 and later (or Windows 7 with a non-standard patch applied) with a GPU that
-supports DirectX 11.1, although several tests exist that don't actually use XR
-functionality, and thus don't have these requirements.
+supports DirectX 11.1 or on Android, although, several tests exist that don't
+actually use XR functionality, and thus don't have these requirements.
 
 Runtime restrictions in browser tests are handled via the macros in
 `conditional_skipping.h`. To add a runtime requirement to a test class, simply
@@ -61,6 +79,8 @@ flags that are set in its `SetUp` function.
 
 ## Compiling And Running
 
+### Windows
+
 The tests are compiled in the `xr_browser_tests` target. This is a combination
 of the `xr_browser_tests_binary` target, which is the actual test, and the
 `xr_browser_tests_runner` target, which is a wrapper script that ensures special
@@ -77,6 +97,14 @@ Additional options such as test filtering can be found by running
 Because the "test" is actually a Python wrapper script, you may need to prepend
 `python` to the front of the command on Windows if Python file association is
 not set up on your machine.
+
+### Android
+
+On Android, the tests are built and run via the `android_browsertests` target.
+Note that due to the deployment of a mock OpenXR runtime and writing a JSON file
+to: `'/product/etc/openxr/1/active_runtime.json'`, tests must be run on a rooted
+device. Because this is a large target, it is recommended to append
+`--gtest_filter=*WebXr*` when running the tests.
 
 ## Adding New Files
 
@@ -107,16 +135,16 @@ You should consider using the standard IN_PROC_BROWSER_TEST_F macros instead.
 Small snippets of runtime-specific code are acceptable, but if it affects
 readability significantly, the tests should probably remain separate.
 
-Most tests simply use the standard `WebXrVrOpenXrBrowserTest` and
-`WebXrVrWmrBrowserTest` classes. In this case, you can instead use the
-`WEBXR_VR_ALL_RUNTIMES_BROWSER_TEST_F` macro, which only needs to take the test
-name, further cutting down on boilerplate code.
+Most tests simply use the standard `WebXrVrOpenXrBrowserTest` class.
+In this case, you can instead use the `WEBXR_VR_ALL_RUNTIMES_BROWSER_TEST_F`
+macro, which only needs to take the test name, further cutting down on
+boilerplate code.
 
 You can also use `WEBXR_VR_ALL_RUNTIMES_PLUS_INCOGNITO_BROWSER_TEST_F` if you
 want the same functionality as `WEBXR_VR_ALL_RUNTIMES_BROWSER_TEST_F`, but
 also want the test run in Incognito mode in addition to regular Chrome.
 
-[multi class macros]: https://chromium.googlesource.com/chromium/src/+/master/chrome/browser/vr/test/multi_class_browser_test.h
+[multi class macros]: https://chromium.googlesource.com/chromium/src/+/main/chrome/browser/vr/test/multi_class_browser_test.h
 
 ## Test Class Names
 
@@ -145,7 +173,7 @@ being tested. Details about what goes on under the hood can be found in
 [`//chrome/browser/vr/test/xr_browser_test_details.md`][xr details], but below
 is a quick guide on how to use them.
 
-[xr details]: https://chromium.googlesource.com/chromium/src/+/master/chrome/browser/vr/test/xr_browser_test_details.md
+[xr details]: https://chromium.googlesource.com/chromium/src/+/main/chrome/browser/vr/test/xr_browser_test_details.md
 
 In order to let a test provide data to a runtime, it must create an instance of
 [`MockXRDeviceHookBase`][xr hook base] or some subclass of it. This should be
@@ -153,7 +181,7 @@ created at the beginning of the test before any attempts to enter VR are made,
 as there are currently assumptions that prevent switching to or from the mock
 runtimes once they have been attempted to be started.
 
-[xr hook base]: https://chromium.googlesource.com/chromium/src/+/master/chrome/browser/vr/test/mock_xr_device_hook_base.h
+[xr hook base]: https://chromium.googlesource.com/chromium/src/+/main/chrome/browser/vr/test/mock_xr_device_hook_base.h
 
 Once created, the runtime being used will call the various functions inherited
 from [`VRTestHook`][vr test hook] whenever it would normally acquire or submit
@@ -162,9 +190,9 @@ called every time the runtime would normally check the state of a real
 controller, and `OnFrameSubmitted()` will be called each time the runtime
 submits a finished frame to the headset.
 
-[vr test hook]: https://chromium.googlesource.com/chromium/src/+/master/device/vr/test/test_hook.h
+[vr test hook]: https://chromium.googlesource.com/chromium/src/+/main/device/vr/test/test_hook.h
 
 For real examples on how to use the input capabilities, look at the tests in
 [`//chrome/browser/vr/webxr_vr_input_browser_test.cc`][input test].
 
-[input test]: https://chromium.googlesource.com/chromium/src/+/master/chrome/browser/vr/webxr_vr_input_browser_test.cc
+[input test]: https://chromium.googlesource.com/chromium/src/+/main/chrome/browser/vr/webxr_vr_input_browser_test.cc

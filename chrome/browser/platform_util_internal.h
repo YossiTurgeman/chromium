@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,6 +19,7 @@ namespace internal {
 // of type |type|. Called on the thread pool with
 // base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN semantics (and thus can't
 // use global state torn down during shutdown).
+// Defined in per-platform files (e.g. platform_util_win.cc).
 void PlatformOpenVerifiedItem(const base::FilePath& path, OpenItemType type);
 
 // Prevent shell or external applications from being invoked during testing.

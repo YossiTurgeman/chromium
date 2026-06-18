@@ -1,11 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
 
 (async function() {
   'use strict';
   TestRunner.addResult(`Tests that Elements properly populate and select after immediate updates crbug.com/829884\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <!DOCTYPE HTML">
@@ -23,8 +25,8 @@
     TestRunner.addResult(`BEFORE: children: ${node.children()}, childNodeCount: ${node.childNodeCount()}`);
 
     // Any operation that modifies the node, followed by an immediate, synchronous update.
-    TestRunner.domModel._childNodeCountUpdated(node.id, 3);
-    treeOutline._updateModifiedNodes();
+    TestRunner.domModel.childNodeCountUpdated(node.id, 3);
+    treeOutline.updateModifiedNodes();
 
     TestRunner.addResult(`AFTER: children: ${node.children()}, childNodeCount: ${node.childNodeCount()}`);
     ElementsTestRunner.expandElementsTree(afterExpand);
@@ -32,7 +34,7 @@
 
   function afterExpand() {
     ElementsTestRunner.selectNodeWithId('body', node => {
-      const treeElement = node[treeOutline.treeElementSymbol()];
+      const treeElement = treeOutline.treeElementByNode.get(node);
       TestRunner.addResult(`AFTER EXPAND: TreeElement childCount: ${treeElement.childCount()}`);
 
       var selectedElement = treeOutline.selectedTreeElement;

@@ -26,9 +26,9 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_PLATFORM_LOCALE_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_PLATFORM_LOCALE_H_
 
+#include <array>
 #include <memory>
 
-#include "base/macros.h"
 #include "third_party/blink/renderer/platform/language.h"
 #include "third_party/blink/renderer/platform/text/date_components.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -60,7 +60,7 @@ class PLATFORM_EXPORT Locale {
   // Converts the specified localized number string to a number string in the
   // HTML floating-point number format. The input string is provided by a end
   // user, and might not be a number string. It's ok that the function returns
-  // a string which is not conforms to the HTML floating-point number format,
+  // a string which does not conform to the HTML floating-point number format,
   // callers of this function are responsible to check the format of the
   // resultant string.
   String ConvertFromLocalizedNumber(const String&);
@@ -109,7 +109,7 @@ class PLATFORM_EXPORT Locale {
   // Returns a year-month format in Unicode TR35 LDML.
   virtual String MonthFormat() = 0;
 
-  // Returns a year-month format using short month lanel in Unicode TR35 LDML.
+  // Returns a year-month format using short month label in Unicode TR35 LDML.
   virtual String ShortMonthFormat() = 0;
 
   // Returns time format in Unicode TR35 LDML[1] containing hour, minute, and
@@ -130,9 +130,9 @@ class PLATFORM_EXPORT Locale {
   // field.
   virtual String DateTimeFormatWithoutSeconds() = 0;
 
-  // weekFormatInLDML() returns week and year format in LDML, Unicode
+  // WeekFormatInLdml() returns week and year format in LDML, Unicode
   // technical standard 35, Locale Data Markup Language, e.g. "'Week' ww, yyyy"
-  String WeekFormatInLDML();
+  String WeekFormatInLdml();
 
   // Returns a vector of string of which size is 12. The first item is a
   // localized string of Jan and the last item is a localized string of
@@ -149,7 +149,7 @@ class PLATFORM_EXPORT Locale {
   virtual const Vector<String>& ShortStandAloneMonthLabels() = 0;
 
   // Returns localized period field(AM/PM) strings.
-  virtual const Vector<String>& TimeAMPMLabels() = 0;
+  virtual const Vector<String>& TimeAmPmLabels() = 0;
 
   // Returns a vector of string of which size is 12. The first item is a
   // localized string of January, and the last item is a localized string of
@@ -166,7 +166,7 @@ class PLATFORM_EXPORT Locale {
 
   // Returns true if people use right-to-left writing in the locale for this
   // object.
-  virtual bool IsRTL() = 0;
+  virtual bool IsRtl() = 0;
 
   enum FormatType {
     kFormatTypeUnspecified,
@@ -181,6 +181,8 @@ class PLATFORM_EXPORT Locale {
   String FormatDateTime(const DateComponents&,
                         FormatType = kFormatTypeUnspecified);
 
+  Locale(const Locale&) = delete;
+  Locale& operator=(const Locale&) = delete;
   virtual ~Locale();
 
  protected:
@@ -190,6 +192,15 @@ class PLATFORM_EXPORT Locale {
     kGroupSeparatorIndex = 11,
     kDecimalSymbolsSize
   };
+
+  static constexpr char kFallbackWeekdayShortNames[7][4] = {
+      "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  static constexpr char kFallbackMonthShortNames[12][4] = {
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  static constexpr const char* kFallbackMonthNames[12] = {
+      "January", "February", "March",     "April",   "May",      "June",
+      "July",    "August",   "September", "October", "November", "December"};
 
   Locale() : has_locale_data_(false) {}
   virtual void InitializeLocaleData() = 0;
@@ -206,7 +217,7 @@ class PLATFORM_EXPORT Locale {
                                   unsigned& end_index);
   unsigned MatchedDecimalSymbolIndex(const String& input, unsigned& position);
 
-  String decimal_symbols_[kDecimalSymbolsSize];
+  std::array<String, kDecimalSymbolsSize> decimal_symbols_;
   String positive_prefix_;
   String positive_suffix_;
   String negative_prefix_;
@@ -216,9 +227,7 @@ class PLATFORM_EXPORT Locale {
   // Does the locale use single character filtering to do additional number
   // input validation?
   bool uses_single_char_number_filtering_;
-
-  DISALLOW_COPY_AND_ASSIGN(Locale);
 };
 
 }  // namespace blink
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_TEXT_PLATFORM_LOCALE_H_

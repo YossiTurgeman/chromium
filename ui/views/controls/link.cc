@@ -1,80 +1,111 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/controls/link.h"
 
-#include "build/build_config.h"
-
 #include "base/check.h"
 #include "base/strings/utf_string_conversions.h"
+#include "build/build_config.h"
 #include "ui/accessibility/ax_enums.mojom.h"
-#include "ui/accessibility/ax_node_data.h"
 #include "ui/base/cursor/cursor.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/color/color_id.h"
+#include "ui/color/color_provider.h"
+#include "ui/color/color_variant.h"
 #include "ui/events/event.h"
 #include "ui/events/keycodes/keyboard_codes.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/color_utils.h"
 #include "ui/gfx/font_list.h"
-#include "ui/native_theme/native_theme.h"
-#include "ui/views/native_cursor.h"
+#include "ui/views/accessibility/view_accessibility.h"
+#include "ui/views/controls/focus_ring.h"
 #include "ui/views/style/platform_style.h"
 
 namespace views {
 
-Link::Link(const base::string16& title, int text_context, int text_style)
+Link::Link(const std::u16string& title, int text_context, int text_style)
     : Label(title, text_context, text_style) {
   RecalculateFont();
 
-  enabled_changed_subscription_ = AddEnabledChangedCallback(
+  enabled_changed_subscription_ = AddEnabledInViewsSubtreeChangedCallback(
       base::BindRepeating(&Link::RecalculateFont, base::Unretained(this)));
+
+  GetViewAccessibility().SetRole(ax::mojom::Role::kLink);
+  GetViewAccessibility().SetName(title);
+  // Prevent invisible links from being announced by screen reader.
+  GetViewAccessibility().SetIsIgnored(title.empty());
 
   // Label() indirectly calls SetText(), but at that point our virtual override
   // will not be reached.  Call it explicitly here to configure focus.
   SetText(GetText());
+
+  views::FocusRing::Install(this);
 }
 
 Link::~Link() = default;
 
 SkColor Link::GetColor() const {
-  // TODO(tapted): Use style::GetColor().
-  const ui::NativeTheme* theme = GetNativeTheme();
-  DCHECK(theme);
-  if (!GetEnabled())
-    return theme->GetSystemColor(ui::NativeTheme::kColorId_LinkDisabled);
+  // TODO(crbug.com/40268779): Use TypographyProvider::GetColorId().
+  const ui::ColorProvider* color_provider = GetColorProvider();
+  DCHECK(color_provider);
+  if (!GetEnabledInViewsSubtree()) {
+    return color_provider->GetColor(ui::kColorLinkForegroundDisabled);
+  }
 
-  if (requested_enabled_color_.has_value())
+  if (requested_enabled_color_) {
     return requested_enabled_color_.value();
+  }
 
-  return GetNativeTheme()->GetSystemColor(
-      pressed_ ? ui::NativeTheme::kColorId_LinkPressed
-               : ui::NativeTheme::kColorId_LinkEnabled);
+  if (GetTextContext() == style::CONTEXT_BUBBLE_FOOTER) {
+    return color_provider->GetColor(
+        pressed_ ? ui::kColorLinkForegroundPressedOnBubbleFooter
+                 : ui::kColorLinkForegroundOnBubbleFooter);
+  }
+
+  return color_provider->GetColor(pressed_ ? ui::kColorLinkForegroundPressed
+                                           : ui::kColorLinkForeground);
 }
 
 void Link::SetForceUnderline(bool force_underline) {
-  if (force_underline_ == force_underline)
+  if (force_underline_ == force_underline) {
     return;
+  }
 
   force_underline_ = force_underline;
   RecalculateFont();
 }
 
-gfx::NativeCursor Link::GetCursor(const ui::MouseEvent& event) {
-  if (!GetEnabled())
-    return gfx::kNullCursor;
-  return GetNativeHandCursor();
+bool Link::GetForceUnderline() const {
+  return force_underline_;
 }
 
-bool Link::CanProcessEventsWithinSubtree() const {
+ui::Cursor Link::GetCursor(const ui::MouseEvent& event) {
+  if (!GetEnabledInViewsSubtree()) {
+    return ui::Cursor();
+  }
+  return ui::mojom::CursorType::kHand;
+}
+
+bool Link::GetCanProcessEventsWithinSubtree() const {
   // Links need to be able to accept events (e.g., clicking) even though
   // in general Labels do not.
-  return View::CanProcessEventsWithinSubtree();
+  return View::GetCanProcessEventsWithinSubtree();
+}
+
+void Link::OnMouseEntered(const ui::MouseEvent& event) {
+  RecalculateFont();
+}
+
+void Link::OnMouseExited(const ui::MouseEvent& event) {
+  RecalculateFont();
 }
 
 bool Link::OnMousePressed(const ui::MouseEvent& event) {
   if (!GetEnabled() ||
-      (!event.IsLeftMouseButton() && !event.IsMiddleMouseButton()))
+      (!event.IsLeftMouseButton() && !event.IsMiddleMouseButton())) {
     return false;
+  }
   SetPressed(true);
   return true;
 }
@@ -92,8 +123,9 @@ void Link::OnMouseReleased(const ui::MouseEvent& event) {
   OnMouseCaptureLost();
   if (GetEnabled() &&
       (event.IsLeftMouseButton() || event.IsMiddleMouseButton()) &&
-      HitTestPoint(event.location()))
+      HitTestPoint(event.location())) {
     OnClick(event);
+  }
 }
 
 void Link::OnMouseCaptureLost() {
@@ -105,8 +137,9 @@ bool Link::OnKeyPressed(const ui::KeyEvent& event) {
                     (event.flags() & ui::EF_ALT_DOWN) == 0) ||
                    (event.key_code() == ui::VKEY_RETURN &&
                     PlatformStyle::kReturnClicksFocusedControl));
-  if (!activate)
+  if (!activate) {
     return false;
+  }
 
   SetPressed(false);
   OnClick(event);
@@ -114,12 +147,13 @@ bool Link::OnKeyPressed(const ui::KeyEvent& event) {
 }
 
 void Link::OnGestureEvent(ui::GestureEvent* event) {
-  if (!GetEnabled())
+  if (!GetEnabled()) {
     return;
+  }
 
-  if (event->type() == ui::ET_GESTURE_TAP_DOWN) {
+  if (event->type() == ui::EventType::kGestureTapDown) {
     SetPressed(true);
-  } else if (event->type() == ui::ET_GESTURE_TAP) {
+  } else if (event->type() == ui::EventType::kGestureTap) {
     OnClick(*event);
   } else {
     SetPressed(false);
@@ -134,13 +168,6 @@ bool Link::SkipDefaultKeyEventProcessing(const ui::KeyEvent& event) {
   return event.key_code() == ui::VKEY_SPACE ||
          (event.key_code() == ui::VKEY_RETURN &&
           PlatformStyle::kReturnClicksFocusedControl);
-}
-
-void Link::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  Label::GetAccessibleNodeData(node_data);
-  // Prevent invisible links from being announced by screen reader.
-  node_data->role =
-      GetText().empty() ? ax::mojom::Role::kIgnored : ax::mojom::Role::kLink;
 }
 
 void Link::OnFocus() {
@@ -162,8 +189,10 @@ void Link::SetFontList(const gfx::FontList& font_list) {
   RecalculateFont();
 }
 
-void Link::SetText(const base::string16& text) {
+void Link::SetText(std::u16string_view text) {
   Label::SetText(text);
+  // Prevent invisible links from being announced by screen reader.
+  GetViewAccessibility().SetIsIgnored(text.empty());
   ConfigureFocus();
 }
 
@@ -172,9 +201,15 @@ void Link::OnThemeChanged() {
   Label::SetEnabledColor(GetColor());
 }
 
-void Link::SetEnabledColor(SkColor color) {
-  requested_enabled_color_ = color;
-  Label::SetEnabledColor(GetColor());
+void Link::SetEnabledColor(ui::ColorVariant color) {
+  if (color.IsPhysical()) {
+    requested_enabled_color_ =
+        color.ResolveToSkColor(/*color_provider=*/nullptr);
+  }
+
+  if (GetWidget()) {
+    Label::SetEnabledColor(GetColor());
+  }
 }
 
 bool Link::IsSelectionSupported() const {
@@ -192,18 +227,22 @@ void Link::SetPressed(bool pressed) {
 
 void Link::OnClick(const ui::Event& event) {
   RequestFocus();
-  if (callback_)
+  if (callback_) {
     callback_.Run(event);
+  }
 }
 
 void Link::RecalculateFont() {
   const int style = font_list().GetFontStyle();
-  const int intended_style = ((GetEnabled() && HasFocus()) || force_underline_)
-                                 ? (style | gfx::Font::UNDERLINE)
-                                 : (style & ~gfx::Font::UNDERLINE);
+  const int intended_style =
+      ((GetEnabledInViewsSubtree() && (HasFocus() || IsMouseHovered())) ||
+       force_underline_)
+          ? (style | gfx::Font::UNDERLINE)
+          : (style & ~gfx::Font::UNDERLINE);
 
-  if (style != intended_style)
+  if (style != intended_style) {
     Label::SetFontList(font_list().DeriveWithStyle(intended_style));
+  }
 }
 
 void Link::ConfigureFocus() {
@@ -211,7 +250,7 @@ void Link::ConfigureFocus() {
   if (GetText().empty()) {
     SetFocusBehavior(FocusBehavior::NEVER);
   } else {
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_MAC)
     SetFocusBehavior(FocusBehavior::ACCESSIBLE_ONLY);
 #else
     SetFocusBehavior(FocusBehavior::ALWAYS);
@@ -219,8 +258,9 @@ void Link::ConfigureFocus() {
   }
 }
 
-BEGIN_METADATA(Link, Label)
-ADD_READONLY_PROPERTY_METADATA(SkColor, Color)
+BEGIN_METADATA(Link)
+ADD_READONLY_PROPERTY_METADATA(SkColor, Color, ui::metadata::SkColorConverter)
+ADD_PROPERTY_METADATA(bool, ForceUnderline)
 END_METADATA
 
 }  // namespace views

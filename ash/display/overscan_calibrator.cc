@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include <limits>
+#include <memory>
 
 #include "ash/display/window_tree_host_manager.h"
 #include "ash/public/cpp/shell_window_ids.h"
@@ -14,13 +15,14 @@
 #include "third_party/skia/include/core/SkColor.h"
 #include "third_party/skia/include/core/SkPaint.h"
 #include "third_party/skia/include/core/SkPath.h"
+#include "third_party/skia/include/core/SkPathBuilder.h"
 #include "ui/aura/window.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/paint_recorder.h"
 #include "ui/display/manager/display_manager.h"
 #include "ui/display/manager/managed_display_info.h"
-#include "ui/display/screen.h"
 #include "ui/gfx/canvas.h"
+#include "ui/gfx/geometry/skia_conversions.h"
 
 namespace ash {
 namespace {
@@ -49,21 +51,20 @@ void DrawTriangle(int x_offset,
   border_flags.setColor(SkColorSetA(
       SK_ColorWHITE, std::numeric_limits<uint8_t>::max() * kArrowOpacity));
 
-  SkPath base_path;
-  base_path.moveTo(0, 0);
-  base_path.lineTo(SkIntToScalar(-kCalibrationArrowHeight),
-                   SkIntToScalar(-kCalibrationArrowHeight));
-  base_path.lineTo(SkIntToScalar(kCalibrationArrowHeight),
-                   SkIntToScalar(-kCalibrationArrowHeight));
-  base_path.close();
-
-  SkPath path;
   gfx::Transform rotate_transform;
   rotate_transform.Rotate(rotation_degree);
   gfx::Transform move_transform;
   move_transform.Translate(x_offset, y_offset);
-  rotate_transform.ConcatTransform(move_transform);
-  base_path.transform(SkMatrix(rotate_transform.matrix()), &path);
+  rotate_transform.PostConcat(move_transform);
+
+  const SkPath path =
+      SkPathBuilder()
+          .moveTo(0, 0)
+          .lineTo(-kCalibrationArrowHeight, -kCalibrationArrowHeight)
+          .lineTo(kCalibrationArrowHeight, -kCalibrationArrowHeight)
+          .close()
+          .transform(gfx::TransformToFlattenedSkMatrix(rotate_transform))
+          .detach();
 
   canvas->DrawPath(path, content_flags);
   canvas->DrawPath(path, border_flags);
@@ -75,17 +76,16 @@ gfx::Insets RotateInsets(display::Display::Rotation rotation,
     case display::Display::ROTATE_0:
       return insets;
     case display::Display::ROTATE_90:
-      return gfx::Insets(insets.right(), insets.top(), insets.left(),
-                         insets.bottom());
+      return gfx::Insets::TLBR(insets.right(), insets.top(), insets.left(),
+                               insets.bottom());
     case display::Display::ROTATE_180:
-      return gfx::Insets(insets.bottom(), insets.right(), insets.top(),
-                         insets.left());
+      return gfx::Insets::TLBR(insets.bottom(), insets.right(), insets.top(),
+                               insets.left());
     case display::Display::ROTATE_270:
-      return gfx::Insets(insets.left(), insets.bottom(), insets.right(),
-                         insets.top());
+      return gfx::Insets::TLBR(insets.left(), insets.bottom(), insets.right(),
+                               insets.top());
   }
   NOTREACHED();
-  return std::move(insets);
 }
 
 gfx::Insets ConvertToDisplay(const display::Display& display,
@@ -94,7 +94,8 @@ gfx::Insets ConvertToDisplay(const display::Display& display,
       ash::Shell::Get()->display_manager()->GetDisplayInfo(display.id());
   return RotateInsets(
       display.rotation(),
-      insets.Scale(info.device_scale_factor() / display.device_scale_factor()));
+      gfx::ScaleToFlooredInsets(
+          insets, info.device_scale_factor() / display.device_scale_factor()));
 }
 
 gfx::Insets ConvertToHost(const display::Display& display,
@@ -106,7 +107,8 @@ gfx::Insets ConvertToHost(const display::Display& display,
           (4 - static_cast<int>(display.rotation())) % 4);
   return RotateInsets(
       inverted_rotation,
-      insets.Scale(display.device_scale_factor() / info.device_scale_factor()));
+      gfx::ScaleToFlooredInsets(
+          insets, display.device_scale_factor() / info.device_scale_factor()));
 }
 
 }  // namespace
@@ -119,24 +121,22 @@ OverscanCalibrator::OverscanCalibrator(const display::Display& target_display,
       committed_(false) {
   // Undo the overscan calibration temporarily so that the user can see
   // dark boundary and current overscan region.
-  Shell::Get()->window_tree_host_manager()->SetOverscanInsets(display_.id(),
-                                                              gfx::Insets());
+  Shell::Get()->display_manager()->SetOverscanInsets(display_.id(),
+                                                     gfx::Insets());
   UpdateUILayer();
-  display::Screen::GetScreen()->AddObserver(this);
 }
 
 OverscanCalibrator::~OverscanCalibrator() {
-  display::Screen::GetScreen()->RemoveObserver(this);
   // Overscan calibration has finished without commit, so the display has to
   // be the original offset.
   if (!committed_) {
-    Shell::Get()->window_tree_host_manager()->SetOverscanInsets(
-        display_.id(), initial_insets_);
+    Shell::Get()->display_manager()->SetOverscanInsets(display_.id(),
+                                                       initial_insets_);
   }
 }
 
 void OverscanCalibrator::Commit() {
-  Shell::Get()->window_tree_host_manager()->SetOverscanInsets(
+  Shell::Get()->display_manager()->SetOverscanInsets(
       display_.id(), ConvertToHost(display_, insets_));
   committed_ = true;
 }
@@ -147,8 +147,9 @@ void OverscanCalibrator::Reset() {
 }
 
 void OverscanCalibrator::UpdateInsets(const gfx::Insets& insets) {
-  insets_.Set(std::max(insets.top(), 0), std::max(insets.left(), 0),
-              std::max(insets.bottom(), 0), std::max(insets.right(), 0));
+  insets_ = gfx::Insets::TLBR(
+      std::max(insets.top(), 0), std::max(insets.left(), 0),
+      std::max(insets.bottom(), 0), std::max(insets.right(), 0));
   calibration_layer_->SchedulePaint(calibration_layer_->bounds());
 }
 
@@ -193,7 +194,7 @@ void OverscanCalibrator::UpdateUILayer() {
   aura::Window* root = Shell::GetRootWindowForDisplayId(display_.id());
   ui::Layer* parent_layer =
       Shell::GetContainer(root, kShellWindowId_OverlayContainer)->layer();
-  calibration_layer_.reset(new ui::Layer());
+  calibration_layer_ = std::make_unique<ui::Layer>();
   calibration_layer_->SetOpacity(0.5f);
   calibration_layer_->SetBounds(parent_layer->bounds());
   calibration_layer_->set_delegate(this);

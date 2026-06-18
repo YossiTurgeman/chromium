@@ -1,10 +1,12 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/download/download_manager_utils.h"
 
-#include "base/bind.h"
+#include <utility>
+
+#include "base/functional/bind.h"
 #include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
@@ -24,7 +26,7 @@
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "services/device/public/mojom/wake_lock_provider.mojom.h"
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 #include "base/android/path_utils.h"
 #include "chrome/browser/download/android/download_controller.h"
 #include "chrome/browser/download/android/download_manager_service.h"
@@ -43,6 +45,17 @@ InProgressManagerMap& GetInProgressManagerMap() {
   return *map;
 }
 
+// Returns a callback to be invoked during `RetrieveInProgressDownloadManager()`
+// to provide an opportunity to cache a pointer to the in progress download
+// manager being released.
+base::RepeatingCallback<void(download::InProgressDownloadManager*)>&
+GetRetrieveInProgressDownloadManagerCallback() {
+  static base::NoDestructor<
+      base::RepeatingCallback<void(download::InProgressDownloadManager*)>>
+      callback;
+  return *callback;
+}
+
 // Ignores origin security check. DownloadManagerImpl will provide its own
 // implementation when InProgressDownloadManager object is passed to it.
 bool IgnoreOriginSecurityCheck(const GURL& url) {
@@ -53,8 +66,7 @@ bool IgnoreOriginSecurityCheck(const GURL& url) {
 // is created, and cause the download request to fail. This method helps us
 // ensure that the DownloadManager will be created after profile creation.
 void GetDownloadManagerOnProfileCreation(Profile* profile) {
-  content::DownloadManager* manager =
-      content::BrowserContext::GetDownloadManager(profile);
+  content::DownloadManager* manager = profile->GetDownloadManager();
   DCHECK(manager);
 }
 
@@ -66,17 +78,19 @@ void BindWakeLockProvider(
 }  // namespace
 
 // static
-download::InProgressDownloadManager*
+std::unique_ptr<download::InProgressDownloadManager>
 DownloadManagerUtils::RetrieveInProgressDownloadManager(Profile* profile) {
   ProfileKey* key = profile->GetProfileKey();
   GetInProgressDownloadManager(key);
   auto& map = GetInProgressManagerMap();
-  return map[key].release();
+  if (GetRetrieveInProgressDownloadManagerCallback())
+    GetRetrieveInProgressDownloadManagerCallback().Run(map[key].get());
+  return std::move(map[key]);
 }
 
 // static
 void DownloadManagerUtils::InitializeSimpleDownloadManager(ProfileKey* key) {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   if (!g_browser_process) {
     GetInProgressDownloadManager(key);
     return;
@@ -113,7 +127,7 @@ DownloadManagerUtils::GetInProgressDownloadManager(ProfileKey* key) {
     scoped_refptr<network::SharedURLLoaderFactory> factory =
         SystemNetworkContextManager::GetInstance()->GetSharedURLLoaderFactory();
     in_progress_manager->set_url_loader_factory(std::move(factory));
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
     in_progress_manager->set_download_start_observer(
         DownloadControllerBase::Get());
     in_progress_manager->set_intermediate_path_cb(
@@ -121,11 +135,19 @@ DownloadManagerUtils::GetInProgressDownloadManager(ProfileKey* key) {
     base::FilePath download_dir;
     base::android::GetDownloadsDirectory(&download_dir);
     in_progress_manager->set_default_download_dir(download_dir);
-#endif  // defined(OS_ANDROID)
+#endif  // BUILDFLAG(IS_ANDROID)
     auto* download_provider =
         DownloadOfflineContentProviderFactory::GetForKey(key);
     download_provider->SetSimpleDownloadManagerCoordinator(coordinator);
     map[key] = std::move(in_progress_manager);
   }
   return map[key].get();
+}
+
+// static
+void DownloadManagerUtils::
+    SetRetrieveInProgressDownloadManagerCallbackForTesting(
+        base::RepeatingCallback<void(download::InProgressDownloadManager*)>
+            callback) {
+  GetRetrieveInProgressDownloadManagerCallback() = callback;
 }

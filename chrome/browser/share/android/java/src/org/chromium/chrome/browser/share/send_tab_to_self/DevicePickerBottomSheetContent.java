@@ -1,11 +1,10 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.share.send_tab_to_self;
 
 import android.content.Context;
-import android.content.res.Resources;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -14,27 +13,28 @@ import android.widget.AdapterView.OnItemClickListener;
 import android.widget.ListView;
 import android.widget.TextView;
 
-import org.chromium.base.ContextUtils;
-import org.chromium.base.metrics.RecordUserAction;
+import androidx.annotation.StringRes;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.settings.SettingsLauncher;
-import org.chromium.chrome.browser.share.send_tab_to_self.SendTabToSelfMetrics.SendTabToSelfShareClickResult;
+import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetContent;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
-import org.chromium.ui.widget.ButtonCompat;
+import org.chromium.content_public.browser.WebContents;
 import org.chromium.ui.widget.Toast;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
- * Bottom sheet content to display a list of devices a user can send a tab to after they have
- * chosen to share it with themselves through the SendTabToSelfFeature. If sync is disabled
- * or no target devices are available an prompt will be shown indicating to the user that
- * they must sign in to use the feature.
+ * Bottom sheet content to display a list of devices a user can send a tab to after they have chosen
+ * to share it with themselves through the send-tab-to-self feature.
  */
-public class DevicePickerBottomSheetContent implements BottomSheetContent, OnItemClickListener {
+@NullMarked
+class DevicePickerBottomSheetContent implements BottomSheetContent, OnItemClickListener {
     private final Context mContext;
     private final BottomSheetController mController;
     private ViewGroup mToolbarView;
@@ -43,71 +43,55 @@ public class DevicePickerBottomSheetContent implements BottomSheetContent, OnIte
     private final Profile mProfile;
     private final String mUrl;
     private final String mTitle;
-    private final long mNavigationTime;
-    private final SettingsLauncher mSettingsLauncher;
-    private final boolean mIsSyncEnabled;
+    private final Supplier<@Nullable Tab> mTabProvider;
 
-    public DevicePickerBottomSheetContent(Context context, String url, String title,
-            long navigationTime, BottomSheetController controller,
-            SettingsLauncher settingsLauncher, boolean isSyncEnabled) {
+    private boolean mIsActionStarted;
+
+    public DevicePickerBottomSheetContent(
+            Context context,
+            String url,
+            String title,
+            BottomSheetController controller,
+            List<TargetDeviceInfo> targetDevices,
+            Profile profile,
+            Supplier<@Nullable Tab> tabProvider) {
         mContext = context;
         mController = controller;
-        mProfile = Profile.getLastUsedRegularProfile();
-        mAdapter = new DevicePickerBottomSheetAdapter(mProfile);
+        mProfile = profile;
+        mAdapter = new DevicePickerBottomSheetAdapter(targetDevices);
         mUrl = url;
         mTitle = title;
-        mNavigationTime = navigationTime;
-        mSettingsLauncher = settingsLauncher;
-        mIsSyncEnabled = isSyncEnabled;
+        mTabProvider = tabProvider;
 
         createToolbarView();
         createContentView();
     }
 
     private void createToolbarView() {
-        mToolbarView = (ViewGroup) LayoutInflater.from(mContext).inflate(
-                R.layout.send_tab_to_self_device_picker_toolbar, null);
+        mToolbarView =
+                (ViewGroup)
+                        LayoutInflater.from(mContext)
+                                .inflate(R.layout.send_tab_to_self_device_picker_toolbar, null);
         TextView toolbarText = mToolbarView.findViewById(R.id.device_picker_toolbar);
         toolbarText.setText(R.string.send_tab_to_self_sheet_toolbar);
     }
 
     private void createContentView() {
-        List<TargetDeviceInfo> targetDeviceList = new ArrayList<TargetDeviceInfo>();
-        SendTabToSelfAndroidBridgeJni.get().getAllTargetDeviceInfos(mProfile, targetDeviceList);
+        mContentView =
+                (ViewGroup)
+                        LayoutInflater.from(mContext)
+                                .inflate(R.layout.send_tab_to_self_device_picker_list, null);
+        ListView listView = mContentView.findViewById(R.id.device_picker_list);
+        listView.setAdapter(mAdapter);
+        listView.setOnItemClickListener(this);
 
-        if (!mIsSyncEnabled) {
-            RecordUserAction.record("SharingHubAndroid.SendTabToSelf.NotSyncing");
-            mContentView = (ViewGroup) LayoutInflater.from(mContext).inflate(
-                    R.layout.send_tab_to_self_feature_unavailable_prompt, null);
-            mToolbarView.setVisibility(View.GONE);
-            enableSettingsButton();
-        } else if (targetDeviceList.isEmpty()) {
-            RecordUserAction.record("SharingHubAndroid.SendTabToSelf.NoTargetDevices");
-            mContentView = (ViewGroup) LayoutInflater.from(mContext).inflate(
-                    R.layout.send_tab_to_self_feature_unavailable_prompt, null);
-            mToolbarView.setVisibility(View.GONE);
-            TextView textView = mContentView.findViewById(R.id.enable_sync_text_field);
-            textView.setText(mContext.getResources().getString(
-                    R.string.sharing_hub_no_devices_available_text));
-        } else {
-            mContentView = (ViewGroup) LayoutInflater.from(mContext).inflate(
-                    R.layout.send_tab_to_self_device_picker_list, null);
-            ListView listView = mContentView.findViewById(R.id.device_picker_list);
-            listView.setAdapter(mAdapter);
-            listView.setOnItemClickListener(this);
-        }
-    }
-
-    private void enableSettingsButton() {
-        if (mSettingsLauncher == null) {
-            return;
-        }
-        ButtonCompat chromeSettingsButton = mContentView.findViewById(R.id.chrome_settings);
-        chromeSettingsButton.setVisibility(View.VISIBLE);
-        chromeSettingsButton.setOnClickListener(view -> {
-            RecordUserAction.record("SharingHubAndroid.SendTabToSelf.ChromeSettingsClicked");
-            mSettingsLauncher.launchSettingsActivity(ContextUtils.getApplicationContext());
-        });
+        ViewGroup footerView =
+                (ViewGroup)
+                        LayoutInflater.from(mContext)
+                                .inflate(R.layout.send_tab_to_self_device_picker_footer, null);
+        ((ManageAccountDevicesLinkView) footerView.findViewById(R.id.manage_account_devices_link))
+                .setProfile(mProfile);
+        listView.addFooterView(footerView);
     }
 
     @Override
@@ -141,12 +125,6 @@ public class DevicePickerBottomSheetContent implements BottomSheetContent, OnIte
     }
 
     @Override
-    public int getPeekHeight() {
-        // Return DISABLED to ensure that the entire bottom sheet is shown.
-        return BottomSheetContent.HeightMode.DISABLED;
-    }
-
-    @Override
     public float getFullHeightRatio() {
         // Return WRAP_CONTENT to have the bottom sheet only open as far as it needs to display the
         // list of devices and nothing beyond that.
@@ -154,39 +132,56 @@ public class DevicePickerBottomSheetContent implements BottomSheetContent, OnIte
     }
 
     @Override
-    public int getSheetContentDescriptionStringId() {
-        return R.string.send_tab_to_self_content_description;
+    public String getSheetContentDescription(Context context) {
+        return context.getString(R.string.send_tab_to_self_content_description);
     }
 
     @Override
-    public int getSheetHalfHeightAccessibilityStringId() {
+    public @StringRes int getSheetHalfHeightAccessibilityStringId() {
         return R.string.send_tab_to_self_sheet_half_height;
     }
 
     @Override
-    public int getSheetFullHeightAccessibilityStringId() {
+    public @StringRes int getSheetFullHeightAccessibilityStringId() {
         return R.string.send_tab_to_self_sheet_full_height;
     }
 
     @Override
-    public int getSheetClosedAccessibilityStringId() {
+    public @StringRes int getSheetClosedAccessibilityStringId() {
         return R.string.send_tab_to_self_sheet_closed;
     }
 
     @Override
     public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-        SendTabToSelfShareClickResult.recordClickResult(
-                SendTabToSelfShareClickResult.ClickType.CLICK_ITEM);
-        TargetDeviceInfo targetDeviceInfo = mAdapter.getItem(position);
-
-        SendTabToSelfAndroidBridge.addEntry(
-                mProfile, mUrl, mTitle, mNavigationTime, targetDeviceInfo.cacheGuid);
-
-        Resources res = mContext.getResources();
-        String toastMessage =
-                res.getString(R.string.send_tab_to_self_toast, targetDeviceInfo.deviceName);
-        Toast.makeText(mContext, toastMessage, Toast.LENGTH_SHORT).show();
+        // Only process the click once to avoid multiple entries being sent if the user
+        // taps multiple items quickly.
+        if (mIsActionStarted) return;
+        mIsActionStarted = true;
 
         mController.hideContent(this, true);
+
+        SendTabToSelfMetricsRecorder.recordCrossDeviceTabJourney();
+        TargetDeviceInfo targetDeviceInfo = mAdapter.getItem(position);
+
+        // TODO(crbug.com/492072882): Remove the optimistic toast completely once the
+        // SendTabToSelfPostSendToast feature has fully launched.
+        if (!ChromeFeatureList.isEnabled(ChromeFeatureList.SEND_TAB_TO_SELF_POST_SEND_TOAST)) {
+            String toastMessage =
+                    mContext.getString(
+                            R.string.send_tab_to_self_toast, targetDeviceInfo.deviceName);
+            Toast.makeText(mContext, toastMessage, Toast.LENGTH_SHORT).show();
+        }
+
+        Tab tab = mTabProvider.get();
+        WebContents webContents = (tab != null) ? tab.getWebContents() : null;
+
+        SendTabToSelfAndroidBridge.sendTabToDevice(
+                mProfile,
+                webContents,
+                targetDeviceInfo.cacheGuid,
+                targetDeviceInfo.deviceName,
+                mUrl,
+                mTitle,
+                null);
     }
 }

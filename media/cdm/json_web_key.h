@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "base/time/time.h"
+#include "base/containers/span.h"
 #include "media/base/media_export.h"
 
 namespace media {
@@ -60,10 +60,8 @@ typedef std::pair<std::string, std::string> KeyIdAndKeyPair;
 typedef std::vector<KeyIdAndKeyPair> KeyIdAndKeyPairs;
 
 // Converts a single |key|, |key_id| pair to a JSON Web Key Set.
-MEDIA_EXPORT std::string GenerateJWKSet(const uint8_t* key,
-                                        int key_length,
-                                        const uint8_t* key_id,
-                                        int key_id_length);
+MEDIA_EXPORT std::string GenerateJWKSet(base::span<const uint8_t> key,
+                                        base::span<const uint8_t> key_id);
 
 // Converts a set of |key|, |key_id| pairs to a JSON Web Key Set.
 MEDIA_EXPORT std::string GenerateJWKSet(const KeyIdAndKeyPairs& keys,
@@ -97,11 +95,6 @@ MEDIA_EXPORT void CreateKeyIdsInitData(const KeyIdList& key_ids,
 
 MEDIA_EXPORT std::vector<uint8_t> CreateLicenseReleaseMessage(
     const KeyIdList& key_ids);
-
-MEDIA_EXPORT std::vector<uint8_t> CreateLicenseReleaseMessage(
-    const KeyIdList& key_ids,
-    const base::Time first_decrypt_time,
-    const base::Time latest_decrypt_time);
 
 // Extract the first key from the license request message. Returns true if
 // |license| is a valid license request and contains at least one key,

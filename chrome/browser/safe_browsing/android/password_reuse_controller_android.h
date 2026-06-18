@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,10 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/time/time.h"
 #include "chrome/browser/safe_browsing/chrome_password_protection_service.h"
+#include "components/prefs/pref_service.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "url/gurl.h"
 
@@ -34,28 +36,41 @@ class PasswordReuseControllerAndroid
  public:
   PasswordReuseControllerAndroid(content::WebContents* web_contents,
                                  ChromePasswordProtectionService* service,
+                                 PrefService* pref_service,
                                  ReusedPasswordAccountType password_type,
                                  OnWarningDone done_callback);
+
+  PasswordReuseControllerAndroid(const PasswordReuseControllerAndroid&) =
+      delete;
+  PasswordReuseControllerAndroid& operator=(
+      const PasswordReuseControllerAndroid&) = delete;
+
   ~PasswordReuseControllerAndroid() override;
 
   // Called by |ChromePasswordProtectionService| when modal dialog needs to be
   // shown.
   void ShowDialog();
-  // Called by |PasswordReuseDialogViewAndroid| when the dialog is closed from
-  // Java side.
+
+  // Called by |PasswordReuseDialogViewAndroid| when the option to open the
+  // CheckPasswords page is selected by the user and needs to be shown.
+  void ShowCheckPasswords();
+
+  // Called by |PasswordReuseDialogViewAndroid| when the option to ignore the
+  // modal dialog is selected by the user.
+  void IgnoreDialog();
+
+  // Called by |PasswordReuseDialogViewAndroid| when the dialog is closed
+  // through some other means than the modal dialog Ignore button.
   void CloseDialog();
 
   // The following functions are called from |PasswordReuseDialogViewAndroid|,
   // to get text shown on the dialog.
-  base::string16 GetButtonText() const;
+  std::u16string GetPrimaryButtonText() const;
+  std::u16string GetSecondaryButtonText() const;
+
   // Get the detailed warning text that should show in the modal warning dialog.
-  // |placeholder_offsets| are the start points/indices of the placeholders that
-  // are passed into the resource string.
-  base::string16 GetWarningDetailText(
-      std::vector<size_t>* placeholder_offsets) const;
-  base::string16 GetTitle() const;
-  const std::vector<base::string16> GetPlaceholdersForSavedPasswordWarningText()
-      const;
+  std::u16string GetWarningDetailText() const;
+  std::u16string GetTitle() const;
 
   // ChromePasswordProtectionService::Observer:
   void OnGaiaPasswordChanged() override;
@@ -66,18 +81,20 @@ class PasswordReuseControllerAndroid
   // content::WebContentsObserver:
   void WebContentsDestroyed() override;
 
+  void SetReusedPasswordAccountTypeForTesting(
+      ReusedPasswordAccountType password_type);
+
  private:
   std::unique_ptr<PasswordReuseDialogViewAndroid> dialog_view_;
-  ChromePasswordProtectionService* service_;
+  raw_ptr<ChromePasswordProtectionService> service_;
+  raw_ptr<PrefService> pref_service_ = nullptr;
   const GURL url_;
-  const ReusedPasswordAccountType password_type_;
-  ui::WindowAndroid* window_android_;
+  ReusedPasswordAccountType password_type_;
+  raw_ptr<ui::WindowAndroid> window_android_ = nullptr;
   OnWarningDone done_callback_;
 
   // Records the start time when modal warning is constructed.
   base::TimeTicks modal_construction_start_time_;
-
-  DISALLOW_COPY_AND_ASSIGN(PasswordReuseControllerAndroid);
 };
 
 }  // namespace safe_browsing

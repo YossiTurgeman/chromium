@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,40 +8,50 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/time/time.h"
+#include "base/byte_size.h"
 #include "build/build_config.h"
 #include "content/common/content_export.h"
+#include "media/media_buildflags.h"
+#include "third_party/blink/public/common/buildflags.h"
 
 namespace content {
 
-#if defined(OS_ANDROID)
-constexpr base::TimeDelta kHungRendererDelay = base::TimeDelta::FromSeconds(5);
-#else
-// TODO(jdduke): Consider shortening this delay on desktop. It was originally
-// set to 5 seconds but was extended to accommodate less responsive plugins.
-constexpr base::TimeDelta kHungRendererDelay = base::TimeDelta::FromSeconds(30);
-#endif
-
 // The maximum length of string as data url.
-extern const size_t kMaxLengthOfDataURLString;
+inline constexpr base::ByteSize kMaxLengthOfDataURLString = base::MiBU(20);
 
-// Constants used to organize content processes in about:tracing.
-CONTENT_EXPORT extern const int kTraceEventBrowserProcessSortIndex;
-CONTENT_EXPORT extern const int kTraceEventRendererProcessSortIndex;
-CONTENT_EXPORT extern const int kTraceEventPpapiProcessSortIndex;
-CONTENT_EXPORT extern const int kTraceEventPpapiBrokerProcessSortIndex;
-CONTENT_EXPORT extern const int kTraceEventGpuProcessSortIndex;
-
-// Constants used to organize content threads in about:tracing.
-CONTENT_EXPORT extern const int kTraceEventRendererMainThreadSortIndex;
-
-// HTTP header set in requests to indicate they should be marked DoNotTrack.
-extern const char kDoNotTrackHeader[];
+// Accept header used for frame requests.
+// Note: JXL inclusion is determined at runtime via features::kJXLImageFormat.
+// These constants provide the base values with and without JXL.
+#if BUILDFLAG(ENABLE_DAV1D_DECODER) && BUILDFLAG(ENABLE_JXL_DECODER)
+inline constexpr char kFrameAcceptHeaderValue[] =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+    "image/webp,image/apng,*/*;q=0.8";
+inline constexpr char kFrameAcceptHeaderValueWithJxl[] =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,"
+    "image/avif,image/webp,image/apng,*/*;q=0.8";
+#elif BUILDFLAG(ENABLE_DAV1D_DECODER)
+inline constexpr char kFrameAcceptHeaderValue[] =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+    "image/webp,image/apng,*/*;q=0.8";
+#elif BUILDFLAG(ENABLE_JXL_DECODER)
+inline constexpr char kFrameAcceptHeaderValue[] =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,"
+    "image/apng,*/*;q=0.8";
+inline constexpr char kFrameAcceptHeaderValueWithJxl[] =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,"
+    "image/webp,image/apng,*/*;q=0.8";
+#else
+inline constexpr char kFrameAcceptHeaderValue[] =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,"
+    "image/apng,*/*;q=0.8";
+#endif
 
 // Constants for attaching message pipes to the mojo invitation used to
 // initialize child processes.
-extern const int kChildProcessReceiverAttachmentName;
-extern const int kChildProcessHostRemoteAttachmentName;
+inline constexpr int kChildProcessReceiverAttachmentName = 0;
+inline constexpr int kChildProcessHostRemoteAttachmentName = 1;
+inline constexpr int kLegacyIpcBootstrapAttachmentName = 2;
+inline constexpr int kGPUChannelAttachmentName = 3;
 
 } // namespace content
 

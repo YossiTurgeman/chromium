@@ -1,31 +1,36 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.paintpreview.player.frame;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.util.Size;
 
-import androidx.annotation.VisibleForTesting;
-
 import org.chromium.base.UnguessableToken;
+import org.chromium.build.annotations.EnsuresNonNull;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.paintpreview.player.PlayerCompositorDelegate;
 
-/**
- * Class for managing which bitmap state is shown.
- */
+/** Class for managing which bitmap state is shown. */
+@NullMarked
 public class PlayerFrameBitmapStateController {
-    private PlayerFrameBitmapState mLoadingBitmapState;
-    private PlayerFrameBitmapState mVisibleBitmapState;
+    private @Nullable PlayerFrameBitmapState mLoadingBitmapState;
+    private @Nullable PlayerFrameBitmapState mVisibleBitmapState;
 
     private final UnguessableToken mGuid;
     private final PlayerFrameViewport mViewport;
     private final Size mContentSize;
-    private final PlayerCompositorDelegate mCompositorDelegate;
+    private final @Nullable PlayerCompositorDelegate mCompositorDelegate;
     private final PlayerFrameMediatorDelegate mMediatorDelegate;
 
-    PlayerFrameBitmapStateController(UnguessableToken guid, PlayerFrameViewport viewport,
-            Size contentSize, PlayerCompositorDelegate compositorDelegate,
+    PlayerFrameBitmapStateController(
+            UnguessableToken guid,
+            PlayerFrameViewport viewport,
+            Size contentSize,
+            @Nullable PlayerCompositorDelegate compositorDelegate,
             PlayerFrameMediatorDelegate mediatorDelegate) {
         mGuid = guid;
         mViewport = viewport;
@@ -34,13 +39,31 @@ public class PlayerFrameBitmapStateController {
         mMediatorDelegate = mediatorDelegate;
     }
 
-    @VisibleForTesting
+    void deleteAll() {
+        if (mLoadingBitmapState != null) {
+            mLoadingBitmapState.destroy();
+            mLoadingBitmapState = null;
+        }
+        if (mVisibleBitmapState != null) {
+            mVisibleBitmapState.destroy();
+            mVisibleBitmapState = null;
+        }
+    }
+
+    void destroy() {
+        deleteAll();
+    }
+
     void swapForTest() {
+        // Since this method is only being called by tests, we assume that
+        // mLoadingBitmapState is not null so that swap() always takes a non-null parameter
+        assumeNonNull(mLoadingBitmapState);
         swap(mLoadingBitmapState);
     }
 
     /**
      * Gets the bitmap state for loading.
+     *
      * @param scaleUpdated Whether the scale was updated.
      * @return The bitmap state to load new bitmaps to.
      */
@@ -50,9 +73,17 @@ public class PlayerFrameBitmapStateController {
                 (mLoadingBitmapState == null) ? mVisibleBitmapState : mLoadingBitmapState;
         if (scaleUpdated || activeLoadingState == null) {
             invalidateLoadingBitmaps();
+            Size tileSize = mViewport.getBitmapTileSize();
+            assumeNonNull(mCompositorDelegate);
             mLoadingBitmapState =
-                    new PlayerFrameBitmapState(mGuid, mViewport.getWidth(), mViewport.getHeight(),
-                            mViewport.getScale(), mContentSize, mCompositorDelegate, this);
+                    new PlayerFrameBitmapState(
+                            mGuid,
+                            tileSize.getWidth(),
+                            tileSize.getHeight(),
+                            mViewport.getScale(),
+                            mContentSize,
+                            mCompositorDelegate,
+                            this);
             if (mVisibleBitmapState == null) {
                 mLoadingBitmapState.skipWaitingForVisibleBitmaps();
                 swap(mLoadingBitmapState);
@@ -66,17 +97,21 @@ public class PlayerFrameBitmapStateController {
 
     /**
      * Swaps the state to be new state.
+     *
      * @param newState The new visible bitmap state.
      */
+    @EnsuresNonNull("mVisibleBitmapState")
     void swap(PlayerFrameBitmapState newState) {
         assert mLoadingBitmapState == newState;
-        // Clear the state to stop potential stragling updates.
-        if (mVisibleBitmapState != null) {
-            mVisibleBitmapState.clear();
-        }
+        PlayerFrameBitmapState oldState = mVisibleBitmapState;
         mVisibleBitmapState = newState;
         mLoadingBitmapState = null;
         mMediatorDelegate.onSwapState();
+        // Clear the state to stop potential stragling updates. Destroy afterwards in case drawing
+        // is happening concurrently somehow.
+        if (oldState != null) {
+            oldState.destroy();
+        }
     }
 
     /**
@@ -94,28 +129,28 @@ public class PlayerFrameBitmapStateController {
         swap(bitmapState);
     }
 
-    /**
-     * Whether the bitmap state is visible.
-     */
+    /** Whether the bitmap state is visible. */
     boolean isVisible(PlayerFrameBitmapState state) {
         return state == mVisibleBitmapState;
     }
 
     void onStartScaling() {
+        if (mVisibleBitmapState == null) return;
         invalidateLoadingBitmaps();
+
+        if (mVisibleBitmapState == null) return;
+
         mVisibleBitmapState.lock();
     }
 
-    /**
-     * Invalidates loading bitmaps.
-     */
+    /** Invalidates loading bitmaps. */
     void invalidateLoadingBitmaps() {
         if (mLoadingBitmapState == null) return;
 
         // Invalidate an in-progress load if there is one. We only want one new scale factor fetched
         // at a time. NOTE: we clear then null as the bitmap callbacks still hold a reference to the
         // state so it won't be GC'd right away.
-        mLoadingBitmapState.clear();
+        mLoadingBitmapState.destroy();
         mLoadingBitmapState = null;
     }
 }

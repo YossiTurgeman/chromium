@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -47,10 +47,13 @@ extern const wchar_t kRegCFOptInCmdField[];
 extern const wchar_t kRegCFOptOutCmdField[];
 extern const wchar_t kRegCFTempOptOutCmdField[];
 extern const wchar_t kRegChannelField[];
+extern const wchar_t kRegCleanInstallRequiredForVersionBelowField[];
 extern const wchar_t kRegClientField[];
 extern const wchar_t kRegCommandLineField[];
 extern const wchar_t kRegCriticalVersionField[];
+extern const wchar_t kRegDefaultField[];
 extern const wchar_t kRegDidRunField[];
+extern const wchar_t kRegDowngradeCleanupCommandField[];
 extern const wchar_t kRegEulaAceptedField[];
 extern const wchar_t kRegGoogleUpdateVersion[];
 extern const wchar_t kRegInstallerProgress[];
@@ -64,6 +67,7 @@ extern const wchar_t kRegLastInstallerExtraField[];
 extern const wchar_t kRegMetricsId[];
 extern const wchar_t kRegMetricsIdEnabledDate[];
 extern const wchar_t kRegMetricsIdInstallDate[];
+extern const wchar_t kRegMetricsReportingLevel[];
 extern const wchar_t kRegMSIField[];
 extern const wchar_t kRegNameField[];
 extern const wchar_t kRegOemInstallField[];
@@ -74,7 +78,6 @@ extern const wchar_t kRegProfilesSignedIn[];
 extern const wchar_t kRegRLZBrandField[];
 extern const wchar_t kRegRLZReactivationBrandField[];
 extern const wchar_t kRegReferralField[];
-extern const wchar_t kRegRenameCmdField[];
 extern const wchar_t kRegRunAsUserField[];
 extern const wchar_t kRegSendsPingsField[];
 extern const wchar_t kRegUninstallCmdLine[];
@@ -84,10 +87,6 @@ extern const wchar_t kRegWebAccessibleField[];
 
 // Last time that chrome ran in the Time internal format.
 extern const wchar_t kRegLastRunTimeField[];
-
-// The name of the value where Google Update reads the list of experiments for
-// itself and Chrome.
-extern const wchar_t kExperimentLabels[];
 
 }  // namespace google_update
 

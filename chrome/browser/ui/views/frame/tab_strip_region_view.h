@@ -1,53 +1,104 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2025 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_VIEWS_FRAME_TAB_STRIP_REGION_VIEW_H_
 #define CHROME_BROWSER_UI_VIEWS_FRAME_TAB_STRIP_REGION_VIEW_H_
 
-#include "chrome/browser/ui/views/tabs/tab_strip.h"
-#include "ui/views/view.h"
+#include <memory>
+#include <optional>
 
-class TabSearchButton;
+#include "chrome/browser/ui/tabs/tab_data.h"
+#include "chrome/browser/ui/views/frame/browser_root_view.h"
+#include "components/tab_groups/tab_group_id.h"
+#include "components/tabs/public/tab_interface.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/views/accessible_pane_view.h"
 
-// Container for the tabstrip, new tab button, and reserved grab handle space.
-// TODO (https://crbug.com/949660) Under construction.
-class TabStripRegionView final : public views::View {
+namespace tabs {
+struct TabData;
+}
+
+class TabDragContext;
+class TabStripObserver;
+
+class ExpandOnHoverLock {
  public:
-  explicit TabStripRegionView(std::unique_ptr<TabStrip> tab_strip);
-  ~TabStripRegionView() override;
+  virtual ~ExpandOnHoverLock() = default;
+};
 
-  // Returns true if the specified rect intersects the window caption area of
-  // the browser window. |rect| is in the local coordinate space
-  // of |this|.
-  bool IsRectInWindowCaption(const gfx::Rect& rect);
+enum class ExpandOnHoverLockType {
+  // This forces the tab strip to collapse and prevents expansion. This should
+  // be used when there is some other high priority UI element (e.g. omnibox)
+  // that will overlay over the tab strip.
+  kForceCollapse,
+  // This forces the current state to persist. It should be used when the user
+  // is interacting with a bubble or context menu so that their interaction with
+  // the tab strip is not interrupted.
+  kKeepCurrentState,
+  // This forces the tab strip to be expanded and prevents collapse. This is
+  // used during tab dragging so it is clear to the user which tab is being
+  // dragged.
+  kKeepExpanded
+};
 
-  // A convenience function which calls |IsRectInWindowCaption()| with a rect of
-  // size 1x1 and an origin of |point|. |point| is in the local coordinate space
-  // of |this|.
-  bool IsPositionInWindowCaption(const gfx::Point& point);
+// This class serves as the single point of interaction for all consumers of
+// tabstrip-related functionality. This should only be owned by BrowserView and
+// backed by the View container responsible for managing the tabstrip.
+class TabStripRegionView : public views::AccessiblePaneView,
+                           public BrowserRootView::DropTarget {
+  METADATA_HEADER(TabStripRegionView, views::AccessiblePaneView)
 
-  // Called when the colors of the frame change.
-  void FrameColorsChanged();
+ public:
+  ~TabStripRegionView() override = default;
 
-  TabSearchButton* tab_search_button() { return tab_search_button_; }
+  // -- Life Time Management --
+  virtual void InitializeTabStrip() = 0;
+  virtual void ResetTabStrip() = 0;
 
-  // views::View overrides:
-  const char* GetClassName() const override;
-  void ChildPreferredSizeChanged(views::View* child) override;
-  gfx::Size GetMinimumSize() const override;
-  void OnThemeChanged() override;
+  // -- View State Queries --
+  virtual bool IsTabStripEditable() const = 0;
+  virtual void DisableTabStripEditingForTesting() = 0;
+  virtual bool IsTabStripCloseable() const = 0;
+  virtual void UpdateLoadingAnimations(const base::TimeDelta& elapsed_time) = 0;
+  virtual std::optional<int> GetFocusedTabIndex() const = 0;
+  virtual const tabs::TabData& GetTabData(const tabs::TabHandle& tab) = 0;
+  virtual views::View* GetTabStripView() = 0;
 
-  // TODO(958173): Override OnBoundsChanged to cancel tabstrip animations.
+  // -- UI anchoring --
+  virtual views::View* GetTabAnchorViewAt(int tab_index) = 0;
+  virtual views::View* GetTabGroupAnchorView(
+      const tab_groups::TabGroupId& group) = 0;
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(TabStripRegionView);
+  // -- Tab Group UI State --
+  virtual void OnTabGroupFocusChanged(
+      std::optional<tab_groups::TabGroupId> new_focused_group_id,
+      std::optional<tab_groups::TabGroupId> old_focused_group_id) = 0;
 
-  int CalculateTabStripAvailableWidth();
+  // -- Drag and drop --
+  virtual TabDragContext* GetDragContext() = 0;
+  std::optional<BrowserRootView::DropIndex> GetDropIndex(
+      const ui::DropTargetEvent& event) override = 0;
+  BrowserRootView::DropTarget* GetDropTarget(
+      gfx::Point loc_in_local_coords) override = 0;
+  views::View* GetViewForDrop() override = 0;
+  // These system drag & drop methods should forward the events to
+  // TabDragController to support its fallback tab dragging mode in the case
+  // where the platform can't support the usual run loop based mode.
+  bool CanDrop(const OSExchangeData& data) override = 0;
+  bool GetDropFormats(
+      int* formats,
+      std::set<ui::ClipboardFormatType>* format_types) override = 0;
+  void OnDragEntered(const ui::DropTargetEvent& event) override = 0;
+  int OnDragUpdated(const ui::DropTargetEvent& event) override = 0;
+  void OnDragExited() override = 0;
 
-  views::View* tab_strip_container_;
-  TabStrip* tab_strip_;
-  TabSearchButton* tab_search_button_ = nullptr;
+  // -- Observers --
+  virtual void SetTabStripObserver(TabStripObserver* observer) = 0;
+
+  // -- Locks --
+  virtual std::unique_ptr<ExpandOnHoverLock> GetExpandOnHoverLock(
+      ExpandOnHoverLockType lock_type) = 0;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_FRAME_TAB_STRIP_REGION_VIEW_H_

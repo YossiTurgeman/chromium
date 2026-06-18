@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,13 @@
 #include "base/memory/ptr_util.h"
 #include "skia/ext/image_operations.h"
 #include "ui/aura/window.h"
+#include "ui/base/dragdrop/drag_drop_types.h"
 #include "ui/base/dragdrop/mojom/drag_drop_types.mojom-shared.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/gfx/canvas.h"
+#include "ui/gfx/image/image_skia_rep.h"
 #include "ui/resources/grit/ui_resources.h"
 #include "ui/views/widget/widget.h"
 
@@ -26,11 +28,12 @@ DragImageView::DragImageView(ui::mojom::DragEventSource event_source)
 DragImageView::~DragImageView() = default;
 
 // static
-views::UniqueWidgetPtr DragImageView::Create(
+std::unique_ptr<views::Widget> DragImageView::Create(
     aura::Window* root_window,
     ui::mojom::DragEventSource event_source) {
-  views::Widget::InitParams params;
-  params.type = views::Widget::InitParams::TYPE_TOOLTIP;
+  views::Widget::InitParams params(
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET,
+      views::Widget::InitParams::TYPE_TOOLTIP);
   params.name = "DragWidget";
   params.accept_events = false;
   params.shadow_type = views::Widget::InitParams::ShadowType::kNone;
@@ -39,8 +42,7 @@ views::UniqueWidgetPtr DragImageView::Create(
       root_window->GetChildById(kShellWindowId_DragImageAndTooltipContainer);
   if (!params.parent)
     params.context = root_window;  // Happens in tests.
-  auto drag_widget = views::UniqueWidgetPtr(
-      std::make_unique<views::Widget>(std::move(params)));
+  auto drag_widget = std::make_unique<views::Widget>(std::move(params));
   drag_widget->SetOpacity(1.f);
   drag_widget->SetContentsView(
       base::WrapUnique(new DragImageView(event_source)));
@@ -114,7 +116,7 @@ void DragImageView::OnPaint(gfx::Canvas* canvas) {
     canvas->DrawImageInt(GetImage(), 0, 0);
   } else {
     aura::Window* window = GetWidget()->GetNativeWindow();
-    const float device_scale = display::Screen::GetScreen()
+    const float device_scale = display::Screen::Get()
                                    ->GetDisplayNearestWindow(window)
                                    .device_scale_factor();
     // The drag image already has device scale factor applied. But
@@ -127,7 +129,8 @@ void DragImageView::OnPaint(gfx::Canvas* canvas) {
     SkBitmap scaled = skia::ImageOperations::Resize(
         image_rep.GetBitmap(), skia::ImageOperations::RESIZE_LANCZOS3,
         drag_image_size_pixels.width(), drag_image_size_pixels.height());
-    gfx::ImageSkia image_skia(gfx::ImageSkiaRep(scaled, device_scale));
+    gfx::ImageSkia image_skia =
+        gfx::ImageSkia::CreateFromBitmap(scaled, device_scale);
     canvas->DrawImageInt(image_skia, 0, 0);
   }
 
@@ -178,8 +181,8 @@ gfx::Size DragImageView::GetMinimumSize() const {
   return minimum_size;
 }
 
-void DragImageView::Layout() {
-  View::Layout();
+void DragImageView::Layout(PassKey) {
+  LayoutSuperclass<View>(this);
 
   // Only consider resizing the widget for the drag hint image if we are in a
   // touch initiated drag.

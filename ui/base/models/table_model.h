@@ -1,22 +1,25 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_BASE_MODELS_TABLE_MODEL_H_
 #define UI_BASE_MODELS_TABLE_MODEL_H_
 
+#include <string>
 #include <vector>
 
 #include "base/component_export.h"
-#include "base/strings/string16.h"
-#include "third_party/icu/source/i18n/unicode/coll.h"
+#include "third_party/icu/source/common/unicode/uversion.h"
+#include "ui/gfx/text_constants.h"
 
-namespace gfx {
-class ImageSkia;
+// third_party/icu/source/common/unicode/uversion.h will set namespace icu.
+namespace U_ICU_NAMESPACE {
+class Collator;
 }
 
 namespace ui {
 
+class ImageModel;
 class TableModelObserver;
 
 // The model driving the TableView.
@@ -26,21 +29,51 @@ class COMPONENT_EXPORT(UI_BASE) TableModel {
   static constexpr int kIconSize = 16;
 
   // Number of rows in the model.
-  virtual int RowCount() = 0;
+  virtual size_t RowCount() = 0;
 
   // Returns the value at a particular location in text.
-  virtual base::string16 GetText(int row, int column_id) = 0;
+  virtual std::u16string GetText(size_t row, int column_id) = 0;
 
   // Returns the small icon (|kIconSize| x |kIconSize|) that should be displayed
   // in the first column before the text. This is only used when the TableView
-  // was created with the ICON_AND_TEXT table type. Returns an isNull() image if
-  // there is no image.
-  virtual gfx::ImageSkia GetIcon(int row);
+  // was created with the ICON_AND_TEXT table type. An empty ImageModel if there
+  // is no image.
+  virtual ui::ImageModel GetIcon(size_t row);
 
   // Returns the tooltip, if any, to show for a particular row.  If there are
   // multiple columns in the row, this will only be shown when hovering over
   // column zero.
-  virtual base::string16 GetTooltip(int row);
+  virtual std::u16string GetTooltip(size_t row);
+
+  // Returns the accessibility name and sort status for the header.
+  // If there are multiple columns in the table, the AX name will be combined
+  // names from all visible columns' titles and sort status.
+  // For example: The table has 3 visible columns with title as `col1`, `col2`
+  // and `col3` correspondingly. Their sortable status is `unsorted`,`sorted in
+  // ascending order`,`sorted in descending order`.The accessibility name for
+  // the `header` would be `col1 unsorted col2 sorted in ascending order col3
+  // sorted in descending order`.
+  virtual std::u16string GetAXNameForHeader(
+      const std::vector<std::u16string>& visible_column_titles,
+      const std::vector<std::u16string>& visible_column_sortable);
+
+  // Returns the accessibility name and sort status for the header cell.
+  // For example:  `col1` has sortable status as `sorted in ascending
+  // order`. The accessibility name for the `header` cell would be `col1 sorted
+  // in ascending order`.
+  virtual std::u16string GetAXNameForHeaderCell(
+      const std::u16string& visible_column_title,
+      const std::u16string& visible_column_sortable);
+
+  // Returns the accessibility name for the row.
+  // If there are multiple columns in the `row`, the AX name will be
+  // combined names from all visible columns. For example: The indexed `row`
+  // has 3 visible columns with value as `col1`, `col2` and `col3`
+  // correspondingly. The accessibility name for the `row` would be `col1
+  // col2 col3`.
+  virtual std::u16string GetAXNameForRow(
+      size_t row,
+      const std::vector<int>& visible_column_ids);
 
   // Sets the observer for the model. The TableView should NOT take ownership
   // of the observer.
@@ -52,13 +85,13 @@ class COMPONENT_EXPORT(UI_BASE) TableModel {
   //
   // This implementation does a case insensitive locale specific string
   // comparison.
-  virtual int CompareValues(int row1, int row2, int column_id);
+  virtual int CompareValues(size_t row1, size_t row2, int column_id);
 
   // Reset the collator.
   void ClearCollator();
 
  protected:
-  virtual ~TableModel() {}
+  virtual ~TableModel();
 
   // Returns the collator used by CompareValues.
   icu::Collator* GetCollator();
@@ -66,22 +99,21 @@ class COMPONENT_EXPORT(UI_BASE) TableModel {
 
 // TableColumn specifies the title, alignment and size of a particular column.
 struct COMPONENT_EXPORT(UI_BASE) TableColumn {
-  enum Alignment {
-    LEFT, RIGHT, CENTER
-  };
+  enum Alignment : uint8_t { LEFT, RIGHT, CENTER };
 
   TableColumn();
   TableColumn(int id, Alignment alignment, int width, float percent);
   TableColumn(const TableColumn& other);
+  TableColumn& operator=(const TableColumn& other);
+
+  // Note: Please be mindful of ordering when adding, modifying, or removing
+  //       fields. The struct should be as tightly packed together as possible.
+
+  // The title for the column.
+  std::u16string title;
 
   // A unique identifier for the column.
   int id;
-
-  // The title for the column.
-  base::string16 title;
-
-  // Alignment for the content.
-  Alignment alignment;
 
   // The size of a column may be specified in two ways:
   // 1. A fixed width. Set the width field to a positive number and the
@@ -103,11 +135,18 @@ struct COMPONENT_EXPORT(UI_BASE) TableColumn {
   // (including the header) to be visible.
   int min_visible_width;
 
+  // Alignment for the content.
+  Alignment alignment;
+
   // Is this column sortable? Default is false.
   bool sortable;
 
   // Determines what sort order to apply initially. Default is true.
   bool initial_sort_is_ascending;
+
+  // Elide behavior for the column text. Defaults to NO_ELIDE (which will
+  // fallback to Views' default elision behavior, usually tail clipping).
+  gfx::ElideBehavior elide_behavior;
 };
 
 }  // namespace ui

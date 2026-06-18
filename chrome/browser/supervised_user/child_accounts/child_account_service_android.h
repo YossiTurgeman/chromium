@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,16 @@
 
 #include <string>
 
-#include "base/callback_forward.h"
+#include "base/functional/callback_forward.h"
+#include "components/signin/public/identity_manager/account_info.h"
 
 namespace content {
 class WebContents;
 }
 
-void ReauthenticateChildAccount(content::WebContents* web_contents,
-                                const std::string& email,
-                                const base::Callback<void(bool)>& callback);
+void ReauthenticateChildAccount(
+    content::WebContents* web_contents,
+    const CoreAccountInfo& accountInfo,
+    const base::RepeatingCallback<void()>& on_failure_callback);
 
 #endif  // CHROME_BROWSER_SUPERVISED_USER_CHILD_ACCOUNTS_CHILD_ACCOUNT_SERVICE_ANDROID_H_

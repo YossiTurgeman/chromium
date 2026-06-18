@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,8 @@
 #include "chrome/browser/ui/views/payments/secure_payment_confirmation_dialog_view.h"
 
 namespace content {
-class WebContents;
-}
+class RenderFrameHost;
+}  // namespace content
 
 namespace payments {
 
@@ -22,13 +22,14 @@ class TestSecurePaymentConfirmationPaymentRequestDelegate
  public:
   // This delegate does not own things passed as pointers.
   TestSecurePaymentConfirmationPaymentRequestDelegate(
-      content::WebContents* web_contents,
+      content::RenderFrameHost* render_frame_host,
       base::WeakPtr<SecurePaymentConfirmationModel> model,
-      SecurePaymentConfirmationDialogView::ObserverForTest* observer);
+      base::WeakPtr<SecurePaymentConfirmationDialogView::ObserverForTest>
+          observer);
   ~TestSecurePaymentConfirmationPaymentRequestDelegate() override;
 
   // ChromePaymentRequestDelegate:
-  void ShowDialog(PaymentRequest* request) override;
+  void ShowDialog(base::WeakPtr<PaymentRequest> request) override;
   void CloseDialog() override;
 
   SecurePaymentConfirmationDialogView* dialog_view() {
@@ -36,7 +37,6 @@ class TestSecurePaymentConfirmationPaymentRequestDelegate
   }
 
  private:
-  content::WebContents* web_contents_;
   base::WeakPtr<SecurePaymentConfirmationModel> model_;
   base::WeakPtr<SecurePaymentConfirmationDialogView> dialog_view_;
 };

@@ -1,14 +1,15 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEVICE_FIDO_BIO_ENROLLER_H_
 #define DEVICE_FIDO_BIO_ENROLLER_H_
 
+#include <optional>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/sequence_checker.h"
 #include "device/fido/bio/enrollment.h"
 #include "device/fido/pin.h"
@@ -27,9 +28,9 @@ class BioEnroller {
     virtual void OnSampleCollected(BioEnrollmentSampleStatus status,
                                    int samples_remaining) = 0;
     // Called when the enrollment has completed. |template_id| may be
-    // base::nullopt if the enrollment has been cancelled.
+    // std::nullopt if the enrollment has been cancelled.
     virtual void OnEnrollmentDone(
-        base::Optional<std::vector<uint8_t>> template_id) = 0;
+        std::optional<std::vector<uint8_t>> template_id) = 0;
     virtual void OnEnrollmentError(CtapDeviceResponseCode status) = 0;
   };
 
@@ -46,6 +47,7 @@ class BioEnroller {
   void Cancel();
 
   pin::TokenResponse token() { return token_; }
+  FidoAuthenticator* authenticator() { return authenticator_; }
 
  private:
   enum State {
@@ -55,18 +57,18 @@ class BioEnroller {
   };
 
   void FinishWithError(CtapDeviceResponseCode status);
-  void FinishSuccessfully(base::Optional<std::vector<uint8_t>> template_id);
+  void FinishSuccessfully(std::optional<std::vector<uint8_t>> template_id);
 
   void OnEnrollResponse(CtapDeviceResponseCode status,
-                        base::Optional<BioEnrollmentResponse> response);
+                        std::optional<BioEnrollmentResponse> response);
   void OnEnrollCancelled(CtapDeviceResponseCode status,
-                         base::Optional<BioEnrollmentResponse> response);
+                         std::optional<BioEnrollmentResponse> response);
 
   State state_ = State::kInProgress;
-  Delegate* delegate_;
-  FidoAuthenticator* authenticator_;
+  raw_ptr<Delegate> delegate_;
+  raw_ptr<FidoAuthenticator> authenticator_;
   pin::TokenResponse token_;
-  base::Optional<std::vector<uint8_t>> template_id_;
+  std::optional<std::vector<uint8_t>> template_id_;
 
   SEQUENCE_CHECKER(my_sequence_checker_);
   base::WeakPtrFactory<BioEnroller> weak_factory_{this};

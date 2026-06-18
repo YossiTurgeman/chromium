@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,13 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
-#include "base/callback_forward.h"
 #include "base/files/file_path.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
-#include "base/optional.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/scoped_refptr.h"
 #include "components/policy/policy_export.h"
 
 namespace base {
@@ -37,7 +36,9 @@ class POLICY_EXPORT ResourceCache {
  public:
   ResourceCache(const base::FilePath& cache_path,
                 scoped_refptr<base::SequencedTaskRunner> task_runner,
-                const base::Optional<int64_t> max_cache_size);
+                const std::optional<int64_t> max_cache_size);
+  ResourceCache(const ResourceCache&) = delete;
+  ResourceCache& operator=(const ResourceCache&) = delete;
   virtual ~ResourceCache();
 
   // Stores |data| under (key, subkey). Returns file path if the store
@@ -132,13 +133,11 @@ class POLICY_EXPORT ResourceCache {
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
   // Maximum size of the cache directory.
-  const base::Optional<int64_t> max_cache_size_;
+  const std::optional<int64_t> max_cache_size_;
 
   // Note that this variable could be created on any thread, but is modified
   // only on the |task_runner_| thread.
   int64_t current_cache_size_;
-
-  DISALLOW_COPY_AND_ASSIGN(ResourceCache);
 };
 
 }  // namespace policy

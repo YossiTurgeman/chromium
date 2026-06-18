@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,50 +8,55 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <ranges>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
-#include "base/files/file_util.h"
+#include "base/containers/span.h"
+#include "base/containers/span_reader.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
-#include "base/optional.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
-#include "base/stl_util.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/synchronization/lock.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "crypto/rsa_private_key.h"
 #include "net/base/address_list.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/features.h"
+#include "net/base/host_port_pair.h"
 #include "net/base/io_buffer.h"
 #include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_errors.h"
-#include "net/base/network_isolation_key.h"
+#include "net/base/network_anonymization_key.h"
+#include "net/base/schemeful_site.h"
 #include "net/base/test_completion_callback.h"
 #include "net/cert/asn1_util.h"
-#include "net/cert/ct_policy_enforcer.h"
+#include "net/cert/cert_database.h"
 #include "net/cert/ct_policy_status.h"
-#include "net/cert/ct_verifier.h"
-#include "net/cert/do_nothing_ct_verifier.h"
 #include "net/cert/mock_cert_verifier.h"
 #include "net/cert/mock_client_cert_verifier.h"
 #include "net/cert/sct_auditing_delegate.h"
 #include "net/cert/signed_certificate_timestamp_and_status.h"
 #include "net/cert/test_root_certs.h"
 #include "net/cert/x509_util.h"
-#include "net/der/input.h"
-#include "net/der/parser.h"
-#include "net/der/tag.h"
 #include "net/dns/host_resolver.h"
 #include "net/http/transport_security_state.h"
 #include "net/http/transport_security_state_test_util.h"
@@ -63,12 +68,14 @@
 #include "net/socket/client_socket_handle.h"
 #include "net/socket/read_buffering_stream_socket.h"
 #include "net/socket/socket_test_util.h"
+#include "net/socket/ssl_client_socket_impl.h"
 #include "net/socket/ssl_server_socket.h"
 #include "net/socket/stream_socket.h"
 #include "net/socket/tcp_client_socket.h"
 #include "net/socket/tcp_server_socket.h"
 #include "net/ssl/ssl_cert_request_info.h"
 #include "net/ssl/ssl_client_session_cache.h"
+#include "net/ssl/ssl_config.h"
 #include "net/ssl/ssl_config_service.h"
 #include "net/ssl/ssl_connection_status_flags.h"
 #include "net/ssl/ssl_handshake_details.h"
@@ -82,27 +89,32 @@
 #include "net/test/embedded_test_server/http_response.h"
 #include "net/test/gtest_util.h"
 #include "net/test/key_util.h"
-#include "net/test/spawned_test_server/spawned_test_server.h"
+#include "net/test/ssl_test_util.h"
 #include "net/test/test_data_directory.h"
 #include "net/test/test_with_task_environment.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
+#include "third_party/boringssl/src/include/openssl/base.h"
 #include "third_party/boringssl/src/include/openssl/bio.h"
 #include "third_party/boringssl/src/include/openssl/evp.h"
+#include "third_party/boringssl/src/include/openssl/hpke.h"
 #include "third_party/boringssl/src/include/openssl/pem.h"
 #include "third_party/boringssl/src/include/openssl/ssl.h"
 #include "url/gurl.h"
-#include "url/origin.h"
 
 using net::test::IsError;
 using net::test::IsOk;
 
 using testing::_;
-using testing::AnyOf;
+using testing::Bool;
+using testing::Combine;
+using testing::ElementsAreArray;
+using testing::Not;
 using testing::Return;
-using testing::Truly;
+using testing::Values;
+using testing::ValuesIn;
 
 namespace net {
 
@@ -121,11 +133,25 @@ const uint8_t kGoodHashValueVectorInput = 0;
 // TestSPKI pin.
 const uint8_t kBadHashValueVectorInput = 3;
 
+// TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+constexpr uint16_t kModernTLS12Cipher = 0xc02f;
+// TLS_RSA_WITH_AES_128_GCM_SHA256
+constexpr uint16_t kRSACipher = 0x009c;
+// TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+constexpr uint16_t kCBCCipher = 0xc013;
+// TLS_RSA_WITH_3DES_EDE_CBC_SHA
+constexpr uint16_t k3DESCipher = 0x000a;
+
 // Simulates synchronously receiving an error during Read() or Write()
 class SynchronousErrorStreamSocket : public WrappedStreamSocket {
  public:
   explicit SynchronousErrorStreamSocket(std::unique_ptr<StreamSocket> transport)
       : WrappedStreamSocket(std::move(transport)) {}
+
+  SynchronousErrorStreamSocket(const SynchronousErrorStreamSocket&) = delete;
+  SynchronousErrorStreamSocket& operator=(const SynchronousErrorStreamSocket&) =
+      delete;
+
   ~SynchronousErrorStreamSocket() override = default;
 
   // Socket implementation:
@@ -166,8 +192,6 @@ class SynchronousErrorStreamSocket : public WrappedStreamSocket {
 
   bool have_write_error_ = false;
   int pending_write_error_ = OK;
-
-  DISALLOW_COPY_AND_ASSIGN(SynchronousErrorStreamSocket);
 };
 
 int SynchronousErrorStreamSocket::Read(IOBuffer* buf,
@@ -214,6 +238,7 @@ class FakeBlockingStreamSocket : public WrappedStreamSocket {
   int ReadIfReady(IOBuffer* buf,
                   int buf_len,
                   CompletionOnceCallback callback) override;
+  int CancelReadIfReady() override;
   int Write(IOBuffer* buf,
             int buf_len,
             CompletionOnceCallback callback,
@@ -339,19 +364,25 @@ int FakeBlockingStreamSocket::ReadIfReady(IOBuffer* buf,
     CHECK(!should_block_read_);
     CHECK_GE(len, static_cast<int>(read_if_ready_buf_.size()));
     int rv = read_if_ready_buf_.size();
-    memcpy(buf->data(), read_if_ready_buf_.data(), rv);
+    buf->span().copy_prefix_from(base::as_byte_span(read_if_ready_buf_));
     read_if_ready_buf_.clear();
     return rv;
   }
-  scoped_refptr<IOBuffer> buf_copy = base::MakeRefCounted<IOBuffer>(len);
+  auto buf_copy = base::MakeRefCounted<IOBufferWithSize>(len);
   int rv = Read(buf_copy.get(), len,
                 base::BindOnce(&FakeBlockingStreamSocket::CompleteReadIfReady,
                                base::Unretained(this), buf_copy));
   if (rv > 0)
-    memcpy(buf->data(), buf_copy->data(), rv);
+    buf->span().copy_prefix_from(buf_copy->first(rv));
   if (rv == ERR_IO_PENDING)
     read_if_ready_callback_ = std::move(callback);
   return rv;
+}
+
+int FakeBlockingStreamSocket::CancelReadIfReady() {
+  DCHECK(!read_if_ready_callback_.is_null());
+  read_if_ready_callback_.Reset();
+  return OK;
 }
 
 int FakeBlockingStreamSocket::Write(
@@ -403,7 +434,7 @@ bool FakeBlockingStreamSocket::ReplaceReadResult(const std::string& data) {
   if (static_cast<size_t>(pending_read_buf_len_) < data.size())
     return false;
 
-  memcpy(pending_read_buf_->data(), data.data(), data.size());
+  pending_read_buf_->span().copy_prefix_from(base::as_byte_span(data));
   pending_read_result_ = data.size();
   return true;
 }
@@ -414,7 +445,7 @@ void FakeBlockingStreamSocket::WaitForReadResult() {
 
   if (pending_read_result_ != ERR_IO_PENDING)
     return;
-  read_loop_.reset(new base::RunLoop);
+  read_loop_ = std::make_unique<base::RunLoop>();
   read_loop_->Run();
   read_loop_.reset();
   DCHECK_NE(ERR_IO_PENDING, pending_read_result_);
@@ -457,7 +488,7 @@ void FakeBlockingStreamSocket::WaitForWrite() {
 
   if (pending_write_buf_.get())
     return;
-  write_loop_.reset(new base::RunLoop);
+  write_loop_ = std::make_unique<base::RunLoop>();
   write_loop_->Run();
   write_loop_.reset();
   DCHECK(pending_write_buf_.get());
@@ -481,12 +512,13 @@ void FakeBlockingStreamSocket::OnReadCompleted(int result) {
 
 void FakeBlockingStreamSocket::CompleteReadIfReady(scoped_refptr<IOBuffer> buf,
                                                    int rv) {
-  DCHECK(read_if_ready_callback_);
   DCHECK(read_if_ready_buf_.empty());
   DCHECK(!should_block_read_);
   if (rv > 0)
-    read_if_ready_buf_ = std::string(buf->data(), buf->data() + rv);
-  std::move(read_if_ready_callback_).Run(rv > 0 ? OK : rv);
+    read_if_ready_buf_ = base::as_string_view(buf->first(rv));
+  // The callback may be null if CancelReadIfReady() was called.
+  if (!read_if_ready_callback_.is_null())
+    std::move(read_if_ready_callback_).Run(rv > 0 ? OK : rv);
 }
 
 void FakeBlockingStreamSocket::ReturnReadResult() {
@@ -502,9 +534,7 @@ void FakeBlockingStreamSocket::ReturnReadResult() {
 class CountingStreamSocket : public WrappedStreamSocket {
  public:
   explicit CountingStreamSocket(std::unique_ptr<StreamSocket> transport)
-      : WrappedStreamSocket(std::move(transport)),
-        read_count_(0),
-        write_count_(0) {}
+      : WrappedStreamSocket(std::move(transport)) {}
   ~CountingStreamSocket() override = default;
 
   // Socket implementation:
@@ -527,14 +557,18 @@ class CountingStreamSocket : public WrappedStreamSocket {
   int write_count() const { return write_count_; }
 
  private:
-  int read_count_;
-  int write_count_;
+  int read_count_ = 0;
+  int write_count_ = 0;
 };
 
 // A helper class that will delete |socket| when the callback is invoked.
 class DeleteSocketCallback : public TestCompletionCallbackBase {
  public:
   explicit DeleteSocketCallback(StreamSocket* socket) : socket_(socket) {}
+
+  DeleteSocketCallback(const DeleteSocketCallback&) = delete;
+  DeleteSocketCallback& operator=(const DeleteSocketCallback&) = delete;
+
   ~DeleteSocketCallback() override = default;
 
   CompletionOnceCallback callback() {
@@ -545,99 +579,14 @@ class DeleteSocketCallback : public TestCompletionCallbackBase {
  private:
   void OnComplete(int result) {
     if (socket_) {
-      delete socket_;
-      socket_ = nullptr;
+      delete socket_.ExtractAsDangling();
     } else {
       ADD_FAILURE() << "Deleting socket twice";
     }
     SetResult(result);
   }
 
-  StreamSocket* socket_;
-
-  DISALLOW_COPY_AND_ASSIGN(DeleteSocketCallback);
-};
-
-// A mock ExpectCTReporter that remembers the latest violation that was
-// reported and the number of violations reported.
-class MockExpectCTReporter : public TransportSecurityState::ExpectCTReporter {
- public:
-  MockExpectCTReporter() : num_failures_(0) {}
-  ~MockExpectCTReporter() override = default;
-
-  void OnExpectCTFailed(
-      const HostPortPair& host_port_pair,
-      const GURL& report_uri,
-      base::Time expiration,
-      const X509Certificate* validated_certificate_chain,
-      const X509Certificate* served_certificate_chain,
-      const SignedCertificateTimestampAndStatusList&
-          signed_certificate_timestamps,
-      const NetworkIsolationKey& network_isolation_key) override {
-    num_failures_++;
-    host_port_pair_ = host_port_pair;
-    report_uri_ = report_uri;
-    served_certificate_chain_ = served_certificate_chain;
-    validated_certificate_chain_ = validated_certificate_chain;
-    signed_certificate_timestamps_ = signed_certificate_timestamps;
-    network_isolation_key_ = network_isolation_key;
-  }
-
-  const HostPortPair& host_port_pair() const { return host_port_pair_; }
-  const GURL& report_uri() const { return report_uri_; }
-  uint32_t num_failures() const { return num_failures_; }
-  const X509Certificate* served_certificate_chain() const {
-    return served_certificate_chain_;
-  }
-  const X509Certificate* validated_certificate_chain() const {
-    return validated_certificate_chain_;
-  }
-  const SignedCertificateTimestampAndStatusList& signed_certificate_timestamps()
-      const {
-    return signed_certificate_timestamps_;
-  }
-  const NetworkIsolationKey network_isolation_key() const {
-    return network_isolation_key_;
-  }
-
- private:
-  HostPortPair host_port_pair_;
-  GURL report_uri_;
-  uint32_t num_failures_;
-  const X509Certificate* served_certificate_chain_;
-  const X509Certificate* validated_certificate_chain_;
-  SignedCertificateTimestampAndStatusList signed_certificate_timestamps_;
-  NetworkIsolationKey network_isolation_key_;
-};
-
-// A mock CTVerifier that records every call to Verify but doesn't verify
-// anything.
-class MockCTVerifier : public CTVerifier {
- public:
-  MOCK_METHOD6(Verify,
-               void(base::StringPiece,
-                    X509Certificate*,
-                    base::StringPiece,
-                    base::StringPiece,
-                    SignedCertificateTimestampAndStatusList*,
-                    const NetLogWithSource&));
-};
-
-// A mock CTPolicyEnforcer that returns a custom verification result.
-class MockCTPolicyEnforcer : public CTPolicyEnforcer {
- public:
-  MOCK_METHOD3(CheckCompliance,
-               ct::CTPolicyCompliance(X509Certificate* cert,
-                                      const ct::SCTList&,
-                                      const NetLogWithSource&));
-};
-
-class MockRequireCTDelegate : public TransportSecurityState::RequireCTDelegate {
- public:
-  MOCK_METHOD3(IsCTRequiredForHost,
-               CTRequirementLevel(const std::string& host,
-                                  const X509Certificate* chain,
-                                  const HashValueVector& hashes));
+  raw_ptr<StreamSocket> socket_;
 };
 
 class MockSCTAuditingDelegate : public SCTAuditingDelegate {
@@ -666,33 +615,34 @@ class ManySmallRecordsHttpResponse : public test_server::HttpResponse {
   ManySmallRecordsHttpResponse(size_t chunk_size, size_t chunk_count)
       : chunk_size_(chunk_size), chunk_count_(chunk_count) {}
 
-  void SendResponse(const test_server::SendBytesCallback& send,
-                    test_server::SendCompleteCallback done) override {
-    std::string headers = base::StringPrintf(
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Length: %zu\r\n"
-        "Content-Type: text/plain\r\n\r\n",
-        chunk_size_ * chunk_count_);
-    send.Run(headers, base::BindOnce(&SendChunks, chunk_size_, chunk_count_,
-                                     send, std::move(done)));
+  void SendResponse(
+      base::WeakPtr<test_server::HttpResponseDelegate> delegate) override {
+    base::StringPairs headers = {
+        {"Connection", "close"},
+        {"Content-Length", base::NumberToString(chunk_size_ * chunk_count_)},
+        {"Content-Type", "text/plain"}};
+    delegate->SendResponseHeaders(HTTP_OK, "OK", headers);
+    SendChunks(chunk_size_, chunk_count_, delegate);
   }
 
  private:
-  static void SendChunks(size_t chunk_size,
-                         size_t chunk_count,
-                         const test_server::SendBytesCallback& send,
-                         test_server::SendCompleteCallback done) {
+  static void SendChunks(
+      size_t chunk_size,
+      size_t chunk_count,
+      base::WeakPtr<test_server::HttpResponseDelegate> delegate) {
+    if (!delegate)
+      return;
+
     if (chunk_count == 0) {
-      std::move(done).Run();
+      delegate->FinishResponse();
       return;
     }
 
     std::string chunk(chunk_size, '*');
     // This assumes that splitting output into separate |send| calls will
     // produce separate TLS records.
-    send.Run(chunk, base::BindOnce(&SendChunks, chunk_size, chunk_count - 1,
-                                   send, std::move(done)));
+    delegate->SendContents(chunk, base::BindOnce(&SendChunks, chunk_size,
+                                                 chunk_count - 1, delegate));
   }
 
   size_t chunk_size_;
@@ -705,35 +655,25 @@ class SSLClientSocketTest : public PlatformTest, public WithTaskEnvironment {
       : socket_factory_(ClientSocketFactory::GetDefaultFactory()),
         ssl_config_service_(
             std::make_unique<TestSSLConfigService>(SSLContextConfig())),
-        cert_verifier_(std::make_unique<MockCertVerifier>()),
+        cert_verifier_(std::make_unique<ParamRecordingMockCertVerifier>()),
         transport_security_state_(std::make_unique<TransportSecurityState>()),
-        ct_verifier_(std::make_unique<DoNothingCTVerifier>()),
-        ct_policy_enforcer_(std::make_unique<MockCTPolicyEnforcer>()),
         ssl_client_session_cache_(std::make_unique<SSLClientSessionCache>(
             SSLClientSessionCache::Config())),
         context_(
             std::make_unique<SSLClientContext>(ssl_config_service_.get(),
                                                cert_verifier_.get(),
                                                transport_security_state_.get(),
-                                               ct_verifier_.get(),
-                                               ct_policy_enforcer_.get(),
                                                ssl_client_session_cache_.get(),
                                                nullptr)) {
     cert_verifier_->set_default_result(OK);
     cert_verifier_->set_async(true);
-
-    EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(_, _, _))
-        .WillRepeatedly(
-            Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
   }
 
  protected:
-  // The address of the test server, after calling StartEmbeddedTestServer() or
-  // StartTestServer().
+  // The address of the test server, after calling StartEmbeddedTestServer().
   const AddressList& addr() const { return addr_; }
 
-  // The hostname of the test server, after calling StartEmbeddedTestServer() or
-  // StartTestServer().
+  // The hostname of the test server, after calling StartEmbeddedTestServer().
   const HostPortPair& host_port_pair() const { return host_port_pair_; }
 
   // The EmbeddedTestServer object, after calling StartEmbeddedTestServer().
@@ -741,16 +681,10 @@ class SSLClientSocketTest : public PlatformTest, public WithTaskEnvironment {
     return embedded_test_server_.get();
   }
 
-  // The SpawnedTestServer object, after calling StartTestServer().
-  const SpawnedTestServer* spawned_test_server() const {
-    return spawned_test_server_.get();
-  }
-
   // Starts the embedded test server with the specified parameters. Returns true
   // on success.
   bool StartEmbeddedTestServer(EmbeddedTestServer::ServerCertificate cert,
                                const SSLServerConfig& server_config) {
-    spawned_test_server_ = nullptr;
     embedded_test_server_ =
         std::make_unique<EmbeddedTestServer>(EmbeddedTestServer::TYPE_HTTPS);
     embedded_test_server_->SetSSLConfig(cert, server_config);
@@ -760,13 +694,20 @@ class SSLClientSocketTest : public PlatformTest, public WithTaskEnvironment {
   // Starts the embedded test server with the specified parameters. Returns true
   // on success.
   bool StartEmbeddedTestServer(
-      const EmbeddedTestServer::ServerCertificateConfig& cert_config,
+      base::span<const EmbeddedTestServer::ServerCertificateConfig>
+          cert_configs,
       const SSLServerConfig& server_config) {
-    spawned_test_server_ = nullptr;
     embedded_test_server_ =
         std::make_unique<EmbeddedTestServer>(EmbeddedTestServer::TYPE_HTTPS);
-    embedded_test_server_->SetSSLConfig(cert_config, server_config);
+    embedded_test_server_->SetSSLConfig(cert_configs, server_config);
     return FinishStartingEmbeddedTestServer();
+  }
+
+  bool StartEmbeddedTestServer(
+      const EmbeddedTestServer::ServerCertificateConfig& cert_config,
+      const SSLServerConfig& server_config) {
+    return StartEmbeddedTestServer(base::span_from_ref(cert_config),
+                                   server_config);
   }
 
   bool FinishStartingEmbeddedTestServer() {
@@ -789,25 +730,8 @@ class SSLClientSocketTest : public PlatformTest, public WithTaskEnvironment {
     server->AddDefaultHandlers(base::FilePath());
     server->RegisterRequestHandler(
         base::BindRepeating(&ManySmallRecordsHttpResponse::HandleRequest));
-  }
-
-  // Starts the spawned test server with SSL configuration |ssl_options|.
-  // Returns true on success. Prefer StartEmbeddedTestServer().
-  bool StartTestServer(const SpawnedTestServer::SSLOptions& ssl_options) {
-    embedded_test_server_ = nullptr;
-    spawned_test_server_ = std::make_unique<SpawnedTestServer>(
-        SpawnedTestServer::TYPE_HTTPS, ssl_options, base::FilePath());
-    if (!spawned_test_server_->Start()) {
-      LOG(ERROR) << "Could not start SpawnedTestServer";
-      return false;
-    }
-
-    if (!spawned_test_server_->GetAddressList(&addr_)) {
-      LOG(ERROR) << "Could not get SpawnedTestServer address list";
-      return false;
-    }
-    host_port_pair_ = spawned_test_server_->host_port_pair();
-    return true;
+    server->RegisterRequestHandler(
+        base::BindRepeating(&HandleSSLInfoRequest, base::Unretained(this)));
   }
 
   std::unique_ptr<SSLClientSocket> CreateSSLClientSocket(
@@ -820,11 +744,11 @@ class SSLClientSocketTest : public PlatformTest, public WithTaskEnvironment {
 
   // Create an SSLClientSocket object and use it to connect to a test server,
   // then wait for connection results. This must be called after a successful
-  // StartTestServer() call.
+  // StartEmbeddedTestServer() call.
   //
   // |ssl_config| The SSL configuration to use.
   // |host_port_pair| The hostname and port to use at the SSL layer. (The
-  //     socket connection will still be made to |spawned_test_server_|.)
+  //     socket connection will still be made to |embedded_test_server_|.)
   // |result| will retrieve the ::Connect() result value.
   //
   // Returns true on success, false otherwise. Success means that the SSL
@@ -834,11 +758,11 @@ class SSLClientSocketTest : public PlatformTest, public WithTaskEnvironment {
       const SSLConfig& ssl_config,
       const HostPortPair& host_port_pair,
       int* result) {
-    std::unique_ptr<StreamSocket> transport(
-        new TCPClientSocket(addr_, nullptr, nullptr, &log_, NetLogSource()));
+    auto transport = std::make_unique<TCPClientSocket>(
+        addr_, nullptr, nullptr, NetLog::Get(), NetLogSource());
     int rv = callback_.GetResult(transport->Connect(callback_.callback()));
     if (rv != OK) {
-      LOG(ERROR) << "Could not connect to SpawnedTestServer";
+      LOG(ERROR) << "Could not connect to test server";
       return false;
     }
 
@@ -856,39 +780,41 @@ class SSLClientSocketTest : public PlatformTest, public WithTaskEnvironment {
                                                    result);
   }
 
-  // Adds the server certificate with provided cert status.
-  // Must be called after StartTestServer has been called.
-  void AddServerCertStatusToSSLConfig(CertStatus status,
-                                      SSLConfig* ssl_config) {
-    ASSERT_TRUE(spawned_test_server() || embedded_test_server());
-    // Find out the certificate the server is using.
-    scoped_refptr<X509Certificate> server_cert;
-    if (spawned_test_server()) {
-      server_cert = spawned_test_server()->GetCertificate();
-    } else {
-      server_cert = embedded_test_server()->GetCertificate();
-    }
-    // Get the MockCertVerifier to verify it as an EV cert.
-    CertVerifyResult verify_result;
-    verify_result.cert_status = status;
-    verify_result.verified_cert = server_cert;
-    cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
+  std::optional<SSLInfo> LastSSLInfoFromServer() {
+    // EmbeddedTestServer callbacks run on another thread, so protect this
+    // with a lock.
+    base::AutoLock lock(server_ssl_info_lock_);
+    return std::exchange(server_ssl_info_, std::nullopt);
   }
 
-  RecordingTestNetLog log_;
-  ClientSocketFactory* socket_factory_;
+  RecordingNetLogObserver log_observer_;
+  raw_ptr<ClientSocketFactory> socket_factory_;
   std::unique_ptr<TestSSLConfigService> ssl_config_service_;
-  std::unique_ptr<MockCertVerifier> cert_verifier_;
+  std::unique_ptr<ParamRecordingMockCertVerifier> cert_verifier_;
   std::unique_ptr<TransportSecurityState> transport_security_state_;
-  std::unique_ptr<DoNothingCTVerifier> ct_verifier_;
-  std::unique_ptr<MockCTPolicyEnforcer> ct_policy_enforcer_;
   std::unique_ptr<SSLClientSessionCache> ssl_client_session_cache_;
   std::unique_ptr<SSLClientContext> context_;
   std::unique_ptr<SSLClientSocket> sock_;
 
  private:
-  std::unique_ptr<SpawnedTestServer> spawned_test_server_;
+  static std::unique_ptr<test_server::HttpResponse> HandleSSLInfoRequest(
+      SSLClientSocketTest* test,
+      const test_server::HttpRequest& request) {
+    if (request.relative_url != "/ssl-info") {
+      return nullptr;
+    }
+    {
+      // EmbeddedTestServer callbacks run on another thread, so protect this
+      // with a lock.
+      base::AutoLock lock(test->server_ssl_info_lock_);
+      test->server_ssl_info_ = request.ssl_info;
+    }
+    return std::make_unique<test_server::BasicHttpResponse>();
+  }
+
   std::unique_ptr<EmbeddedTestServer> embedded_test_server_;
+  base::Lock server_ssl_info_lock_;
+  std::optional<SSLInfo> server_ssl_info_ GUARDED_BY(server_ssl_info_lock_);
   TestCompletionCallback callback_;
   AddressList addr_;
   HostPortPair host_port_pair_;
@@ -957,54 +883,20 @@ class ClientSocketFactoryWithoutReadIfReady : public ClientSocketFactory {
                                            host_and_port, ssl_config);
   }
 
-  std::unique_ptr<ProxyClientSocket> CreateProxyClientSocket(
-      std::unique_ptr<StreamSocket> stream_socket,
-      const std::string& user_agent,
-      const HostPortPair& endpoint,
-      const ProxyServer& proxy_server,
-      HttpAuthController* http_auth_controller,
-      bool tunnel,
-      bool using_spdy,
-      NextProto negotiated_protocol,
-      ProxyDelegate* proxy_delegate,
-      const NetworkTrafficAnnotationTag& traffic_annotation) override {
-    return factory_->CreateProxyClientSocket(
-        std::move(stream_socket), user_agent, endpoint, proxy_server,
-        http_auth_controller, tunnel, using_spdy, negotiated_protocol,
-        proxy_delegate, traffic_annotation);
-  }
-
  private:
-  ClientSocketFactory* const factory_;
+  const raw_ptr<ClientSocketFactory> factory_;
 };
 
 std::vector<uint16_t> GetTLSVersions() {
-  return {SSL_PROTOCOL_VERSION_TLS1, SSL_PROTOCOL_VERSION_TLS1_1,
-          SSL_PROTOCOL_VERSION_TLS1_2, SSL_PROTOCOL_VERSION_TLS1_3};
-}
-
-base::Optional<SpawnedTestServer::SSLOptions::TLSMaxVersion>
-ProtocolVersionToSpawnedTestServer(uint16_t version) {
-  switch (version) {
-    case SSL_PROTOCOL_VERSION_TLS1:
-      return SpawnedTestServer::SSLOptions::TLS_MAX_VERSION_TLS1_0;
-    case SSL_PROTOCOL_VERSION_TLS1_1:
-      return SpawnedTestServer::SSLOptions::TLS_MAX_VERSION_TLS1_1;
-    case SSL_PROTOCOL_VERSION_TLS1_2:
-      return SpawnedTestServer::SSLOptions::TLS_MAX_VERSION_TLS1_2;
-    case SSL_PROTOCOL_VERSION_TLS1_3:
-      // SpawnedTestServer does not support TLS 1.3.
-      return base::nullopt;
-    default:
-      ADD_FAILURE() << "Unknown version " << version;
-      return base::nullopt;
-  }
+  return {SSL_PROTOCOL_VERSION_TLS1_2, SSL_PROTOCOL_VERSION_TLS1_3};
 }
 
 class SSLClientSocketVersionTest
     : public SSLClientSocketTest,
       public ::testing::WithParamInterface<uint16_t> {
  protected:
+  SSLClientSocketVersionTest() = default;
+
   uint16_t version() const { return GetParam(); }
 
   SSLServerConfig GetServerConfig() {
@@ -1028,6 +920,13 @@ class SSLClientSocketReadTest
               socket_factory_);
       socket_factory_ = wrapped_socket_factory_.get();
     }
+  }
+
+  ~SSLClientSocketReadTest() override {
+    // `socket_factory_` is a member in the base class and destroyed after
+    // `wrapped_socket_factory_` so manually clear it now to avoid dangling
+    // references.
+    socket_factory_ = nullptr;
   }
 
   // Convienient wrapper to call Read()/ReadIfReady() depending on whether
@@ -1088,13 +987,12 @@ class SSLClientSocketReadTest
   std::unique_ptr<ClientSocketFactory> wrapped_socket_factory_;
 };
 
-INSTANTIATE_TEST_SUITE_P(
-    All,
-    SSLClientSocketReadTest,
-    ::testing::Combine(::testing::Values(READ_IF_READY_SUPPORTED,
-                                         READ_IF_READY_NOT_SUPPORTED),
-                       ::testing::Values(TEST_SSL_READ_IF_READY, TEST_SSL_READ),
-                       ::testing::ValuesIn(GetTLSVersions())));
+INSTANTIATE_TEST_SUITE_P(All,
+                         SSLClientSocketReadTest,
+                         Combine(Values(READ_IF_READY_SUPPORTED,
+                                        READ_IF_READY_NOT_SUPPORTED),
+                                 Values(TEST_SSL_READ_IF_READY, TEST_SSL_READ),
+                                 ValuesIn(GetTLSVersions())));
 
 // Verifies the correctness of GetSSLCertRequestInfo.
 class SSLClientSocketCertRequestInfoTest : public SSLClientSocketVersionTest {
@@ -1112,7 +1010,7 @@ class SSLClientSocketCertRequestInfoTest : public SSLClientSocketVersionTest {
     sock_->GetSSLCertRequestInfo(request_info.get());
     sock_->Disconnect();
     EXPECT_FALSE(sock_->IsConnected());
-    EXPECT_TRUE(host_port_pair().Equals(request_info->host_and_port));
+    EXPECT_EQ(host_port_pair(), request_info->host_and_port);
 
     return request_info;
   }
@@ -1132,25 +1030,24 @@ class SSLClientSocketFalseStartTest : public SSLClientSocketTest {
   // the client successfully false started, |callback.WaitForResult()| will
   // return OK without unblocking transport reads. But Read() will still block.)
   //
-  // Must be called after StartTestServer is called.
+  // Must be called after StartEmbeddedTestServer is called.
   void CreateAndConnectUntilServerFinishedReceived(
       const SSLConfig& client_config,
       TestCompletionCallback* callback,
       FakeBlockingStreamSocket** out_raw_transport,
       std::unique_ptr<SSLClientSocket>* out_sock) {
-    CHECK(spawned_test_server());
+    CHECK(embedded_test_server());
 
-    std::unique_ptr<StreamSocket> real_transport(
-        new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-    std::unique_ptr<FakeBlockingStreamSocket> transport(
-        new FakeBlockingStreamSocket(std::move(real_transport)));
+    auto real_transport = std::make_unique<TCPClientSocket>(
+        addr(), nullptr, nullptr, nullptr, NetLogSource());
+    auto transport =
+        std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
     int rv = callback->GetResult(transport->Connect(callback->callback()));
     EXPECT_THAT(rv, IsOk());
 
     FakeBlockingStreamSocket* raw_transport = transport.get();
     std::unique_ptr<SSLClientSocket> sock = CreateSSLClientSocket(
-        std::move(transport), spawned_test_server()->host_port_pair(),
-        client_config);
+        std::move(transport), host_port_pair(), client_config);
 
     // Connect. Stop before the client processes the first server leg
     // (ServerHello, etc.)
@@ -1176,10 +1073,11 @@ class SSLClientSocketFalseStartTest : public SSLClientSocketTest {
     *out_sock = std::move(sock);
   }
 
-  void TestFalseStart(const SpawnedTestServer::SSLOptions& server_options,
+  void TestFalseStart(const SSLServerConfig& server_config,
                       const SSLConfig& client_config,
                       bool expect_false_start) {
-    ASSERT_TRUE(StartTestServer(server_options));
+    ASSERT_TRUE(
+        StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
     TestCompletionCallback callback;
     FakeBlockingStreamSocket* raw_transport = nullptr;
@@ -1198,22 +1096,19 @@ class SSLClientSocketFalseStartTest : public SSLClientSocketTest {
       EXPECT_THAT(rv, IsOk());
       EXPECT_TRUE(sock->IsConnected());
 
-      const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-      static const int kRequestTextSize =
-          static_cast<int>(base::size(request_text) - 1);
-      scoped_refptr<IOBuffer> request_buffer =
-          base::MakeRefCounted<IOBuffer>(kRequestTextSize);
-      memcpy(request_buffer->data(), request_text, kRequestTextSize);
+      static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+      auto request_buffer = base::MakeRefCounted<VectorIOBuffer>(
+          base::as_byte_span(request_text));
 
       // Write the request.
-      rv = callback.GetResult(sock->Write(request_buffer.get(),
-                                          kRequestTextSize, callback.callback(),
-                                          TRAFFIC_ANNOTATION_FOR_TESTS));
-      EXPECT_EQ(kRequestTextSize, rv);
+      rv = callback.GetResult(
+          sock->Write(request_buffer.get(), request_text.size(),
+                      callback.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
+      EXPECT_EQ(request_text.size(), rv);
 
       // The read will hang; it's waiting for the peer to complete the
       // handshake, and the handshake is still blocked.
-      scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+      auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
       rv = sock->Read(buf.get(), 4096, callback.callback());
 
       // After releasing reads, the connection proceeds.
@@ -1231,12 +1126,12 @@ class SSLClientSocketFalseStartTest : public SSLClientSocketTest {
 
 // Sends an HTTP request on the socket and reads the response. This may be used
 // to ensure some data has been consumed from the server.
-int MakeHTTPRequest(StreamSocket* socket) {
-  base::StringPiece request = "GET / HTTP/1.0\r\n\r\n";
+int MakeHTTPRequest(StreamSocket* socket, const char* path = "/") {
+  std::string request = base::StringPrintf("GET %s HTTP/1.0\r\n\r\n", path);
   TestCompletionCallback callback;
   while (!request.empty()) {
     auto request_buffer =
-        base::MakeRefCounted<StringIOBuffer>(request.as_string());
+        base::MakeRefCounted<StringIOBuffer>(std::string(request));
     int rv = callback.GetResult(
         socket->Write(request_buffer.get(), request_buffer->size(),
                       callback.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
@@ -1246,7 +1141,7 @@ int MakeHTTPRequest(StreamSocket* socket) {
     request = request.substr(rv);
   }
 
-  auto response_buffer = base::MakeRefCounted<IOBuffer>(1024);
+  auto response_buffer = base::MakeRefCounted<IOBufferWithSize>(1024);
   int rv = callback.GetResult(
       socket->Read(response_buffer.get(), 1024, callback.callback()));
   if (rv < 0) {
@@ -1259,11 +1154,15 @@ int MakeHTTPRequest(StreamSocket* socket) {
 // as early data.
 class ZeroRTTResponse : public test_server::HttpResponse {
  public:
-  ZeroRTTResponse(bool zero_rtt) : zero_rtt_(zero_rtt) {}
-  ~ZeroRTTResponse() override {}
+  explicit ZeroRTTResponse(bool zero_rtt) : zero_rtt_(zero_rtt) {}
 
-  void SendResponse(const test_server::SendBytesCallback& send,
-                    test_server::SendCompleteCallback done) override {
+  ZeroRTTResponse(const ZeroRTTResponse&) = delete;
+  ZeroRTTResponse& operator=(const ZeroRTTResponse&) = delete;
+
+  ~ZeroRTTResponse() override = default;
+
+  void SendResponse(
+      base::WeakPtr<test_server::HttpResponseDelegate> delegate) override {
     std::string response;
     if (zero_rtt_) {
       response = "1";
@@ -1274,27 +1173,21 @@ class ZeroRTTResponse : public test_server::HttpResponse {
     // Since the EmbeddedTestServer doesn't keep the socket open by default, it
     // is explicitly kept alive to allow the remaining leg of the 0RTT handshake
     // to be received after the early data.
-    send.Run(response, base::BindOnce([]() {}));
+    delegate->SendContents(response);
   }
 
  private:
   bool zero_rtt_;
-
-  DISALLOW_COPY_AND_ASSIGN(ZeroRTTResponse);
 };
 
 std::unique_ptr<test_server::HttpResponse> HandleZeroRTTRequest(
     const test_server::HttpRequest& request) {
-  if (request.GetURL().path() != "/zerortt")
+  if (request.GetURL().GetPath() != "/zerortt" || !request.ssl_info) {
     return nullptr;
-  bool zero_rtt = false;
-  if (request.headers.find("Early-Data") != request.headers.end()) {
-    if (request.headers.at("Early-Data") == "1") {
-      zero_rtt = true;
-    }
   }
 
-  return std::unique_ptr<ZeroRTTResponse>(new ZeroRTTResponse(zero_rtt));
+  return std::make_unique<ZeroRTTResponse>(
+      request.ssl_info->early_data_received);
 }
 
 class SSLClientSocketZeroRTTTest : public SSLClientSocketTest {
@@ -1334,10 +1227,10 @@ class SSLClientSocketZeroRTTTest : public SSLClientSocketTest {
     SSLConfig ssl_config;
     ssl_config.early_data_enabled = early_data_enabled;
 
-    real_transport_.reset(
-        new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-    std::unique_ptr<FakeBlockingStreamSocket> transport(
-        new FakeBlockingStreamSocket(std::move(real_transport_)));
+    real_transport_ = std::make_unique<TCPClientSocket>(
+        addr(), nullptr, nullptr, nullptr, NetLogSource());
+    auto transport =
+        std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport_));
     FakeBlockingStreamSocket* raw_transport = transport.get();
 
     int rv = callback_.GetResult(transport->Connect(callback_.callback()));
@@ -1354,10 +1247,10 @@ class SSLClientSocketZeroRTTTest : public SSLClientSocketTest {
     return callback_.GetResult(ssl_socket_->Connect(callback_.callback()));
   }
 
-  int WriteAndWait(base::StringPiece request) {
-    scoped_refptr<IOBuffer> request_buffer =
-        base::MakeRefCounted<IOBuffer>(request.size());
-    memcpy(request_buffer->data(), request.data(), request.size());
+  int WriteAndWait(std::string_view request) {
+    auto request_buffer =
+        base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request));
+
     return callback_.GetResult(
         ssl_socket_->Write(request_buffer.get(), request.size(),
                            callback_.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
@@ -1384,10 +1277,16 @@ class SSLClientSocketZeroRTTTest : public SSLClientSocketTest {
 
     SSLInfo ssl_info;
     EXPECT_TRUE(GetSSLInfo(&ssl_info));
+
+    // Make sure all asynchronous histogram logging is complete.
+    base::RunLoop().RunUntilIdle();
+
     return SSLInfo::HANDSHAKE_FULL == ssl_info.handshake_type;
   }
 
   SSLClientSocket* ssl_socket() { return ssl_socket_.get(); }
+
+  void DestroyClient() { ssl_socket_.reset(); }
 
  private:
   TestCompletionCallback callback_;
@@ -1434,7 +1333,19 @@ class HangingCertVerifier : public CertVerifier {
     return ERR_IO_PENDING;
   }
 
+  void Verify2QwacBinding(
+      const std::string& binding,
+      const std::string& hostname,
+      const scoped_refptr<net::X509Certificate>& tls_cert,
+      base::OnceCallback<void(const scoped_refptr<net::X509Certificate>&)>
+          callback,
+      const net::NetLogWithSource& net_log) override {
+    ADD_FAILURE();
+    std::move(callback).Run(nullptr);
+  }
   void SetConfig(const Config& config) override {}
+  void AddObserver(Observer* observer) override {}
+  void RemoveObserver(Observer* observer) override {}
 
  private:
   class HangingRequest : public Request {
@@ -1448,30 +1359,33 @@ class HangingCertVerifier : public CertVerifier {
     ~HangingRequest() override { verifier_->num_active_requests_--; }
 
    private:
-    HangingCertVerifier* verifier_;
+    raw_ptr<HangingCertVerifier> verifier_;
   };
 
   base::RunLoop run_loop_;
   int num_active_requests_ = 0;
 };
 
-}  // namespace
+class MockSSLClientContextObserver : public SSLClientContext::Observer {
+ public:
+  MOCK_METHOD1(OnSSLConfigChanged, void(SSLClientContext::SSLConfigChangeType));
+  MOCK_METHOD1(OnSSLConfigForServersChanged,
+               void(const base::flat_set<HostPortPair>&));
+};
 
-// TODO(950069): Add testing for frame_origin in NetworkIsolationKey
-// using kAppendInitiatingFrameOriginToNetworkIsolationKey.
+}  // namespace
 
 INSTANTIATE_TEST_SUITE_P(TLSVersion,
                          SSLClientSocketVersionTest,
-                         ::testing::ValuesIn(GetTLSVersions()));
+                         ValuesIn(GetTLSVersions()));
 
 TEST_P(SSLClientSocketVersionTest, Connect) {
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  RecordingTestNetLog log;
-  std::unique_ptr<StreamSocket> transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, &log, NetLogSource()));
+  auto transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, NetLog::Get(), NetLogSource());
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -1482,13 +1396,13 @@ TEST_P(SSLClientSocketVersionTest, Connect) {
 
   rv = sock->Connect(callback.callback());
 
-  auto entries = log.GetEntries();
+  auto entries = log_observer_.GetEntries();
   EXPECT_TRUE(LogContainsBeginEvent(entries, 5, NetLogEventType::SSL_CONNECT));
   if (rv == ERR_IO_PENDING)
     rv = callback.WaitForResult();
   EXPECT_THAT(rv, IsOk());
   EXPECT_TRUE(sock->IsConnected());
-  entries = log.GetEntries();
+  entries = log_observer_.GetEntries();
   EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
 
   sock->Disconnect();
@@ -1519,7 +1433,7 @@ TEST_P(SSLClientSocketVersionTest, ConnectExpired) {
   // test that the handshake has finished. This is because it may be
   // desirable to disconnect the socket before showing a user prompt, since
   // the user may take indefinitely long to respond.
-  auto entries = log_.GetEntries();
+  auto entries = log_observer_.GetEntries();
   EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
 }
 
@@ -1544,12 +1458,11 @@ TEST_P(SSLClientSocketVersionTest, SocketDestroyedDuringVerify) {
   HangingCertVerifier verifier;
   context_ = std::make_unique<SSLClientContext>(
       ssl_config_service_.get(), &verifier, transport_security_state_.get(),
-      ct_verifier_.get(), ct_policy_enforcer_.get(),
       ssl_client_session_cache_.get(), nullptr);
 
   TestCompletionCallback callback;
-  auto transport = std::make_unique<TCPClientSocket>(addr(), nullptr, nullptr,
-                                                     &log_, NetLogSource());
+  auto transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, NetLog::Get(), NetLogSource());
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
 
@@ -1583,28 +1496,52 @@ TEST_P(SSLClientSocketVersionTest, ConnectMismatched) {
   // test that the handshake has finished. This is because it may be
   // desirable to disconnect the socket before showing a user prompt, since
   // the user may take indefinitely long to respond.
-  auto entries = log_.GetEntries();
+  auto entries = log_observer_.GetEntries();
   EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
 }
 
 // Tests that certificates parsable by SSLClientSocket's internal SSL
-// implementation, but not X509Certificate are treated as fatal connection
-// errors. This is a regression test for https://crbug.com/91341.
-TEST_P(SSLClientSocketVersionTest, ConnectBadValidity) {
-  ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_BAD_VALIDITY,
-                                      GetServerConfig()));
-  cert_verifier_->set_default_result(ERR_CERT_DATE_INVALID);
+// implementation, but not parsable by X509Certificate are treated as fatal
+// connection errors. This is a regression test for https://crbug.com/91341.
+TEST_P(SSLClientSocketVersionTest, ConnectInvalidCert) {
+  EmbeddedTestServer::ServerCertificateConfig cert_config;
+  // Set the leaf certificate subject field to an invalid Name. The subject
+  // field isn't parsed by the SSL implementation, so this only fails when
+  // trying to construct an X509Certificate for the leaf.
+  // SEQUENCE { NULL }
+  cert_config.subject_tlv = {0x30, 0x01, 0x05};
+
+  ASSERT_TRUE(StartEmbeddedTestServer(cert_config, GetServerConfig()));
 
   SSLConfig ssl_config;
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  EXPECT_THAT(rv, IsError(ERR_CERT_DATE_INVALID));
+  EXPECT_THAT(rv, IsError(ERR_SSL_SERVER_CERT_BAD_FORMAT));
 }
 
-// Ignoring the certificate error from an invalid certificate should
+// If the certificate could not be parsed as an X509Certificate, overriding the
+// error is not possible.
+TEST_P(SSLClientSocketVersionTest, ConnectInvalidCertCannotIgnoreCertErrors) {
+  EmbeddedTestServer::ServerCertificateConfig cert_config;
+  // Set the leaf certificate subject field to an invalid Name. The subject
+  // field isn't parsed by the SSL implementation, so this only fails when
+  // trying to construct an X509Certificate for the leaf.
+  // SEQUENCE { NULL }
+  cert_config.subject_tlv = {0x30, 0x01, 0x05};
+
+  ASSERT_TRUE(StartEmbeddedTestServer(cert_config, GetServerConfig()));
+
+  SSLConfig ssl_config;
+  ssl_config.ignore_certificate_errors = true;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  EXPECT_THAT(rv, IsError(ERR_SSL_SERVER_CERT_BAD_FORMAT));
+}
+
+// Ignoring the certificate error from an untrusted certificate should
 // allow a complete connection.
-TEST_P(SSLClientSocketVersionTest, ConnectBadValidityIgnoreCertErrors) {
-  ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_BAD_VALIDITY,
+TEST_P(SSLClientSocketVersionTest, ConnectUntrustedCertIgnoreCertErrors) {
+  ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_EXPIRED,
                                       GetServerConfig()));
   cert_verifier_->set_default_result(ERR_CERT_DATE_INVALID);
 
@@ -1616,6 +1553,8 @@ TEST_P(SSLClientSocketVersionTest, ConnectBadValidityIgnoreCertErrors) {
   EXPECT_TRUE(sock_->IsConnected());
 }
 
+// Client certificates are disabled on iOS.
+#if BUILDFLAG(ENABLE_CLIENT_CERTIFICATES)
 // Attempt to connect to a page which requests a client certificate. It should
 // return an error code on connect.
 TEST_P(SSLClientSocketVersionTest, ConnectClientAuthCertRequested) {
@@ -1628,7 +1567,7 @@ TEST_P(SSLClientSocketVersionTest, ConnectClientAuthCertRequested) {
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
   EXPECT_THAT(rv, IsError(ERR_SSL_CLIENT_AUTH_CERT_NEEDED));
 
-  auto entries = log_.GetEntries();
+  auto entries = log_observer_.GetEntries();
   EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
   EXPECT_FALSE(sock_->IsConnected());
 }
@@ -1658,6 +1597,7 @@ TEST_P(SSLClientSocketVersionTest, ConnectClientAuthSendNullCert) {
   sock_->Disconnect();
   EXPECT_FALSE(sock_->IsConnected());
 }
+#endif  // BUILDFLAG(ENABLE_CLIENT_CERTIFICATES)
 
 // TODO(wtc): Add unit tests for IsConnectedAndIdle:
 //   - Server closes an SSL connection (with a close_notify alert message).
@@ -1671,8 +1611,8 @@ TEST_P(SSLClientSocketReadTest, Read) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
+  auto transport = std::make_unique<TCPClientSocket>(addr(), nullptr, nullptr,
+                                                     nullptr, NetLogSource());
   EXPECT_EQ(0, transport->GetTotalReceivedBytes());
 
   int rv = callback.GetResult(transport->Connect(callback.callback()));
@@ -1689,17 +1629,16 @@ TEST_P(SSLClientSocketReadTest, Read) {
   // establishment.
   EXPECT_GT(sock->GetTotalReceivedBytes(), 0);
 
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(base::size(request_text) - 1);
-  memcpy(request_buffer->data(), request_text, base::size(request_text) - 1);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
-  rv = callback.GetResult(
-      sock->Write(request_buffer.get(), base::size(request_text) - 1,
-                  callback.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(static_cast<int>(base::size(request_text) - 1), rv);
+  rv = callback.GetResult(sock->Write(request_buffer.get(), request_text.size(),
+                                      callback.callback(),
+                                      TRAFFIC_ANNOTATION_FOR_TESTS));
+  EXPECT_EQ(request_text.size(), rv);
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int64_t unencrypted_bytes_read = 0;
   int64_t network_bytes_read_during_handshake = sock->GetTotalReceivedBytes();
   do {
@@ -1721,6 +1660,52 @@ TEST_P(SSLClientSocketReadTest, Read) {
   EXPECT_EQ(0, rv);
 }
 
+TEST_F(SSLClientSocketTest, MldsaSignature) {
+  auto [leaf, root] = CertBuilder::CreateSimpleChain2();
+  leaf->GenerateMldsa44Key();
+
+  EmbeddedTestServer::ServerCertificateConfig cert_config;
+  cert_config.cert_and_key = EmbeddedTestServer::CertAndKey(
+      leaf->DupCertBuffer(), bssl::UpRef(leaf->GetKey()));
+
+  ASSERT_TRUE(StartEmbeddedTestServer(cert_config, SSLServerConfig()));
+
+  cert_verifier_->set_default_result(OK);
+
+  {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndEnableFeature(features::kTlsMldsaSignatures);
+
+    TestCompletionCallback callback;
+    auto transport = std::make_unique<TCPClientSocket>(addr(), nullptr, nullptr,
+                                                       nullptr, NetLogSource());
+    EXPECT_THAT(callback.GetResult(transport->Connect(callback.callback())),
+                IsOk());
+
+    std::unique_ptr<SSLClientSocket> sock(CreateSSLClientSocket(
+        std::move(transport), host_port_pair(), SSLConfig()));
+    EXPECT_THAT(callback.GetResult(sock->Connect(callback.callback())), IsOk());
+  }
+
+  {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndDisableFeature(features::kTlsMldsaSignatures);
+    // The connection should fail when the client doesn't have ML-DSA support
+    // enabled.
+
+    TestCompletionCallback callback;
+    auto transport = std::make_unique<TCPClientSocket>(addr(), nullptr, nullptr,
+                                                       nullptr, NetLogSource());
+    EXPECT_THAT(callback.GetResult(transport->Connect(callback.callback())),
+                IsOk());
+
+    std::unique_ptr<SSLClientSocket> sock(CreateSSLClientSocket(
+        std::move(transport), host_port_pair(), SSLConfig()));
+    EXPECT_THAT(callback.GetResult(sock->Connect(callback.callback())),
+                IsError(ERR_SSL_VERSION_OR_CIPHER_MISMATCH));
+  }
+}
+
 // Tests that SSLClientSocket properly handles when the underlying transport
 // synchronously fails a transport write in during the handshake.
 TEST_F(SSLClientSocketTest, Connect_WithSynchronousError) {
@@ -1728,10 +1713,10 @@ TEST_F(SSLClientSocketTest, Connect_WithSynchronousError) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<SynchronousErrorStreamSocket> transport(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -1755,10 +1740,10 @@ TEST_P(SSLClientSocketReadTest, Read_WithSynchronousError) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<SynchronousErrorStreamSocket> transport(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -1772,22 +1757,19 @@ TEST_P(SSLClientSocketReadTest, Read_WithSynchronousError) {
   EXPECT_THAT(rv, IsOk());
   EXPECT_TRUE(sock->IsConnected());
 
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  static const int kRequestTextSize =
-      static_cast<int>(base::size(request_text) - 1);
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(kRequestTextSize);
-  memcpy(request_buffer->data(), request_text, kRequestTextSize);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
-  rv = callback.GetResult(sock->Write(request_buffer.get(), kRequestTextSize,
+  rv = callback.GetResult(sock->Write(request_buffer.get(), request_text.size(),
                                       callback.callback(),
                                       TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(kRequestTextSize, rv);
+  EXPECT_EQ(request_text.size(), rv);
 
   // Simulate an unclean/forcible shutdown.
   raw_transport->SetNextReadError(ERR_CONNECTION_RESET);
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
 
   // Note: This test will hang if this bug has regressed. Simply checking that
   // rv != ERR_IO_PENDING is insufficient, as ERR_IO_PENDING is a legitimate
@@ -1805,15 +1787,15 @@ TEST_P(SSLClientSocketVersionTest, Write_WithSynchronousError) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
   // Note: |error_socket|'s ownership is handed to |transport|, but a pointer
   // is retained in order to configure additional errors.
-  std::unique_ptr<SynchronousErrorStreamSocket> error_socket(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto error_socket =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   SynchronousErrorStreamSocket* raw_error_socket = error_socket.get();
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(error_socket)));
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(error_socket));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
@@ -1825,12 +1807,9 @@ TEST_P(SSLClientSocketVersionTest, Write_WithSynchronousError) {
   EXPECT_THAT(rv, IsOk());
   EXPECT_TRUE(sock->IsConnected());
 
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  static const int kRequestTextSize =
-      static_cast<int>(base::size(request_text) - 1);
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(kRequestTextSize);
-  memcpy(request_buffer->data(), request_text, kRequestTextSize);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
   // Simulate an unclean/forcible shutdown on the underlying socket.
   // However, simulate this error asynchronously.
@@ -1840,12 +1819,12 @@ TEST_P(SSLClientSocketVersionTest, Write_WithSynchronousError) {
   // This write should complete synchronously, because the TLS ciphertext
   // can be created and placed into the outgoing buffers independent of the
   // underlying transport.
-  rv = callback.GetResult(sock->Write(request_buffer.get(), kRequestTextSize,
+  rv = callback.GetResult(sock->Write(request_buffer.get(), request_text.size(),
                                       callback.callback(),
                                       TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(kRequestTextSize, rv);
+  EXPECT_EQ(request_text.size(), rv);
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
 
   rv = sock->Read(buf.get(), 4096, callback.callback());
   EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
@@ -1870,15 +1849,15 @@ TEST_P(SSLClientSocketVersionTest, Write_WithSynchronousErrorNoRead) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
   // Note: intermediate sockets' ownership are handed to |sock|, but a pointer
   // is retained in order to query them.
-  std::unique_ptr<SynchronousErrorStreamSocket> error_socket(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto error_socket =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   SynchronousErrorStreamSocket* raw_error_socket = error_socket.get();
-  std::unique_ptr<CountingStreamSocket> counting_socket(
-      new CountingStreamSocket(std::move(error_socket)));
+  auto counting_socket =
+      std::make_unique<CountingStreamSocket>(std::move(error_socket));
   CountingStreamSocket* raw_counting_socket = counting_socket.get();
   int rv = callback.GetResult(counting_socket->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -1893,20 +1872,17 @@ TEST_P(SSLClientSocketVersionTest, Write_WithSynchronousErrorNoRead) {
   // Simulate an unclean/forcible shutdown on the underlying socket.
   raw_error_socket->SetNextWriteError(ERR_CONNECTION_RESET);
 
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  static const int kRequestTextSize =
-      static_cast<int>(base::size(request_text) - 1);
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(kRequestTextSize);
-  memcpy(request_buffer->data(), request_text, kRequestTextSize);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
   // This write should complete synchronously, because the TLS ciphertext
   // can be created and placed into the outgoing buffers independent of the
   // underlying transport.
-  rv = callback.GetResult(sock->Write(request_buffer.get(), kRequestTextSize,
+  rv = callback.GetResult(sock->Write(request_buffer.get(), request_text.size(),
                                       callback.callback(),
                                       TRAFFIC_ANNOTATION_FOR_TESTS));
-  ASSERT_EQ(kRequestTextSize, rv);
+  ASSERT_EQ(request_text.size(), rv);
 
   // Let the event loop spin for a little bit of time. Even on platforms where
   // pumping the state machine involve thread hops, there should be no further
@@ -1915,8 +1891,8 @@ TEST_P(SSLClientSocketVersionTest, Write_WithSynchronousErrorNoRead) {
   // TODO(davidben): Avoid the arbitrary timeout?
   int old_write_count = raw_counting_socket->write_count();
   base::RunLoop loop;
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-      FROM_HERE, loop.QuitClosure(), base::TimeDelta::FromMilliseconds(100));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE, loop.QuitClosure(), base::Milliseconds(100));
   loop.Run();
   EXPECT_EQ(old_write_count, raw_counting_socket->write_count());
 }
@@ -1933,7 +1909,7 @@ TEST_P(SSLClientSocketReadTest, Read_FullDuplex) {
 
   // Issue a "hanging" Read first.
   TestCompletionCallback callback;
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int read_rv = Read(sock_.get(), buf.get(), 4096, callback.callback());
   // We haven't written the request, so there should be no response yet.
   ASSERT_THAT(read_rv, IsError(ERR_IO_PENDING));
@@ -1946,8 +1922,7 @@ TEST_P(SSLClientSocketReadTest, Read_FullDuplex) {
   for (int i = 0; i < 3770; ++i)
     request_text.push_back('*');
   request_text.append("\r\n\r\n");
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<StringIOBuffer>(request_text);
+  auto request_buffer = base::MakeRefCounted<StringIOBuffer>(request_text);
 
   TestCompletionCallback callback2;  // Used for Write only.
   rv = callback2.GetResult(
@@ -1972,15 +1947,15 @@ TEST_P(SSLClientSocketReadTest, Read_DeleteWhilePendingFullDuplex) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
   // Note: |error_socket|'s ownership is handed to |transport|, but a pointer
   // is retained in order to configure additional errors.
-  std::unique_ptr<SynchronousErrorStreamSocket> error_socket(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto error_socket =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   SynchronousErrorStreamSocket* raw_error_socket = error_socket.get();
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(error_socket)));
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(error_socket));
   FakeBlockingStreamSocket* raw_transport = transport.get();
 
   int rv = callback.GetResult(transport->Connect(callback.callback()));
@@ -2015,7 +1990,7 @@ TEST_P(SSLClientSocketReadTest, Read_DeleteWhilePendingFullDuplex) {
   // the ERR_IO_PENDING caused by SetReadShouldBlock() and thus return.
   SSLClientSocket* raw_sock = sock.get();
   DeleteSocketCallback read_callback(sock.release());
-  scoped_refptr<IOBuffer> read_buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto read_buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   rv = Read(raw_sock, read_buf.get(), 4096, read_callback.callback());
 
   // Ensure things didn't complete synchronously, otherwise |sock| is invalid.
@@ -2056,15 +2031,15 @@ TEST_P(SSLClientSocketReadTest, Read_WithWriteError) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
   // Note: |error_socket|'s ownership is handed to |transport|, but a pointer
   // is retained in order to configure additional errors.
-  std::unique_ptr<SynchronousErrorStreamSocket> error_socket(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto error_socket =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   SynchronousErrorStreamSocket* raw_error_socket = error_socket.get();
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(error_socket)));
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(error_socket));
   FakeBlockingStreamSocket* raw_transport = transport.get();
 
   int rv = callback.GetResult(transport->Connect(callback.callback()));
@@ -2078,22 +2053,19 @@ TEST_P(SSLClientSocketReadTest, Read_WithWriteError) {
   EXPECT_TRUE(sock->IsConnected());
 
   // Send a request so there is something to read from the socket.
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  static const int kRequestTextSize =
-      static_cast<int>(base::size(request_text) - 1);
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(kRequestTextSize);
-  memcpy(request_buffer->data(), request_text, kRequestTextSize);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
-  rv = callback.GetResult(sock->Write(request_buffer.get(), kRequestTextSize,
+  rv = callback.GetResult(sock->Write(request_buffer.get(), request_text.size(),
                                       callback.callback(),
                                       TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(kRequestTextSize, rv);
+  EXPECT_EQ(request_text.size(), rv);
 
   // Start a hanging read.
   TestCompletionCallback read_callback;
   raw_transport->BlockReadResult();
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   rv = Read(sock.get(), buf.get(), 4096, read_callback.callback());
   EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
 
@@ -2145,10 +2117,10 @@ TEST_F(SSLClientSocketTest, Connect_WithZeroReturn) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<SynchronousErrorStreamSocket> transport(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -2171,10 +2143,10 @@ TEST_P(SSLClientSocketReadTest, Read_WithZeroReturn) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<SynchronousErrorStreamSocket> transport(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -2189,7 +2161,7 @@ TEST_P(SSLClientSocketReadTest, Read_WithZeroReturn) {
   EXPECT_TRUE(sock->IsConnected());
 
   raw_transport->SetNextReadError(0);
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   rv = ReadAndWaitForCompletion(sock.get(), buf.get(), 4096);
   EXPECT_EQ(0, rv);
 }
@@ -2202,13 +2174,13 @@ TEST_P(SSLClientSocketReadTest, Read_WithAsyncZeroReturn) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<SynchronousErrorStreamSocket> error_socket(
-      new SynchronousErrorStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto error_socket =
+      std::make_unique<SynchronousErrorStreamSocket>(std::move(real_transport));
   SynchronousErrorStreamSocket* raw_error_socket = error_socket.get();
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(error_socket)));
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(error_socket));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
@@ -2224,7 +2196,7 @@ TEST_P(SSLClientSocketReadTest, Read_WithAsyncZeroReturn) {
 
   raw_error_socket->SetNextReadError(0);
   raw_transport->BlockReadResult();
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   TestCompletionCallback read_callback;
   rv = Read(sock.get(), buf.get(), 4096, read_callback.callback());
   EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
@@ -2237,14 +2209,10 @@ TEST_P(SSLClientSocketReadTest, Read_WithAsyncZeroReturn) {
 // Tests that fatal alerts from the peer are processed. This is a regression
 // test for https://crbug.com/466303.
 TEST_P(SSLClientSocketReadTest, Read_WithFatalAlert) {
-  SpawnedTestServer::SSLOptions ssl_options;
-  auto tls_max_version = ProtocolVersionToSpawnedTestServer(version());
-  if (!tls_max_version) {
-    return;
-  }
-  ssl_options.tls_max_version = *tls_max_version;
-  ssl_options.alert_after_handshake = true;
-  ASSERT_TRUE(StartTestServer(ssl_options));
+  SSLServerConfig server_config = GetServerConfig();
+  server_config.alert_after_handshake_for_testing = SSL_AD_INTERNAL_ERROR;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
@@ -2252,7 +2220,7 @@ TEST_P(SSLClientSocketReadTest, Read_WithFatalAlert) {
 
   // Receive the fatal alert.
   TestCompletionCallback callback;
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   EXPECT_EQ(ERR_SSL_PROTOCOL_ERROR,
             ReadAndWaitForCompletion(sock_.get(), buf.get(), 4096));
 }
@@ -2265,18 +2233,17 @@ TEST_P(SSLClientSocketReadTest, Read_SmallChunks) {
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
   EXPECT_THAT(rv, IsOk());
 
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(base::size(request_text) - 1);
-  memcpy(request_buffer->data(), request_text, base::size(request_text) - 1);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
   TestCompletionCallback callback;
-  rv = callback.GetResult(
-      sock_->Write(request_buffer.get(), base::size(request_text) - 1,
-                   callback.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(static_cast<int>(base::size(request_text) - 1), rv);
+  rv = callback.GetResult(sock_->Write(request_buffer.get(),
+                                       request_text.size(), callback.callback(),
+                                       TRAFFIC_ANNOTATION_FOR_TESTS));
+  EXPECT_EQ(static_cast<int>(request_text.size()), rv);
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(1);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(1);
   do {
     rv = ReadAndWaitForCompletion(sock_.get(), buf.get(), 1);
     EXPECT_GE(rv, 0);
@@ -2289,10 +2256,10 @@ TEST_P(SSLClientSocketReadTest, Read_ManySmallRecords) {
 
   TestCompletionCallback callback;
 
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<ReadBufferingStreamSocket> transport(
-      new ReadBufferingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<ReadBufferingStreamSocket>(std::move(real_transport));
   ReadBufferingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -2306,16 +2273,16 @@ TEST_P(SSLClientSocketReadTest, Read_ManySmallRecords) {
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock->IsConnected());
 
-  const char request_text[] = "GET /ssl-many-small-records HTTP/1.0\r\n\r\n";
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(base::size(request_text) - 1);
-  memcpy(request_buffer->data(), request_text, base::size(request_text) - 1);
+  static constexpr std::string_view request_text =
+      "GET /ssl-many-small-records HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
-  rv = callback.GetResult(
-      sock->Write(request_buffer.get(), base::size(request_text) - 1,
-                  callback.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
+  rv = callback.GetResult(sock->Write(request_buffer.get(), request_text.size(),
+                                      callback.callback(),
+                                      TRAFFIC_ANNOTATION_FOR_TESTS));
   ASSERT_GT(rv, 0);
-  ASSERT_EQ(static_cast<int>(base::size(request_text) - 1), rv);
+  ASSERT_EQ(static_cast<int>(request_text.size()), rv);
 
   // Note: This relies on SSLClientSocketNSS attempting to read up to 17K of
   // data (the max SSL record size) at a time. Ensure that at least 15K worth
@@ -2328,7 +2295,7 @@ TEST_P(SSLClientSocketReadTest, Read_ManySmallRecords) {
   // of ciphertext necessary to contain the 8K of plaintext requested below.
   raw_transport->BufferNextRead(15000);
 
-  scoped_refptr<IOBuffer> buffer = base::MakeRefCounted<IOBuffer>(8192);
+  auto buffer = base::MakeRefCounted<IOBufferWithSize>(8192);
   rv = ReadAndWaitForCompletion(sock.get(), buffer.get(), 8192);
   ASSERT_EQ(rv, 8192);
 }
@@ -2341,19 +2308,18 @@ TEST_P(SSLClientSocketReadTest, Read_Interrupted) {
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
   EXPECT_THAT(rv, IsOk());
 
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(base::size(request_text) - 1);
-  memcpy(request_buffer->data(), request_text, base::size(request_text) - 1);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
   TestCompletionCallback callback;
-  rv = callback.GetResult(
-      sock_->Write(request_buffer.get(), base::size(request_text) - 1,
-                   callback.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(static_cast<int>(base::size(request_text) - 1), rv);
+  rv = callback.GetResult(sock_->Write(request_buffer.get(),
+                                       request_text.size(), callback.callback(),
+                                       TRAFFIC_ANNOTATION_FOR_TESTS));
+  EXPECT_EQ(static_cast<int>(request_text.size()), rv);
 
   // Do a partial read and then exit.  This test should not crash!
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(512);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(512);
   rv = ReadAndWaitForCompletion(sock_.get(), buf.get(), 512);
   EXPECT_GT(rv, 0);
 }
@@ -2363,10 +2329,9 @@ TEST_P(SSLClientSocketReadTest, Read_FullLogging) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  RecordingTestNetLog log;
-  log.SetObserverCaptureMode(NetLogCaptureMode::kEverything);
-  std::unique_ptr<StreamSocket> transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, &log, NetLogSource()));
+  log_observer_.SetObserverCaptureMode(NetLogCaptureMode::kEverything);
+  auto transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, NetLog::Get(), NetLogSource());
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -2377,29 +2342,28 @@ TEST_P(SSLClientSocketReadTest, Read_FullLogging) {
   EXPECT_THAT(rv, IsOk());
   EXPECT_TRUE(sock->IsConnected());
 
-  const char request_text[] = "GET / HTTP/1.0\r\n\r\n";
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(base::size(request_text) - 1);
-  memcpy(request_buffer->data(), request_text, base::size(request_text) - 1);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
-  rv = callback.GetResult(
-      sock->Write(request_buffer.get(), base::size(request_text) - 1,
-                  callback.callback(), TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(static_cast<int>(base::size(request_text) - 1), rv);
+  rv = callback.GetResult(sock->Write(request_buffer.get(), request_text.size(),
+                                      callback.callback(),
+                                      TRAFFIC_ANNOTATION_FOR_TESTS));
+  EXPECT_EQ(static_cast<int>(request_text.size()), rv);
 
-  auto entries = log.GetEntries();
+  auto entries = log_observer_.GetEntries();
   size_t last_index = ExpectLogContainsSomewhereAfter(
       entries, 5, NetLogEventType::SSL_SOCKET_BYTES_SENT,
       NetLogEventPhase::NONE);
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   for (;;) {
     rv = ReadAndWaitForCompletion(sock.get(), buf.get(), 4096);
     EXPECT_GE(rv, 0);
     if (rv <= 0)
       break;
 
-    entries = log.GetEntries();
+    entries = log_observer_.GetEntries();
     last_index = ExpectLogContainsSomewhereAfter(
         entries, last_index + 1, NetLogEventType::SSL_SOCKET_BYTES_RECEIVED,
         NetLogEventPhase::NONE);
@@ -2411,22 +2375,21 @@ TEST_F(SSLClientSocketTest, PrematureApplicationData) {
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
 
-  static const unsigned char application_data[] = {
-      0x17, 0x03, 0x01, 0x00, 0x4a, 0x02, 0x00, 0x00, 0x46, 0x03, 0x01, 0x4b,
-      0xc2, 0xf8, 0xb2, 0xc1, 0x56, 0x42, 0xb9, 0x57, 0x7f, 0xde, 0x87, 0x46,
-      0xf7, 0xa3, 0x52, 0x42, 0x21, 0xf0, 0x13, 0x1c, 0x9c, 0x83, 0x88, 0xd6,
-      0x93, 0x0c, 0xf6, 0x36, 0x30, 0x05, 0x7e, 0x20, 0xb5, 0xb5, 0x73, 0x36,
-      0x53, 0x83, 0x0a, 0xfc, 0x17, 0x63, 0xbf, 0xa0, 0xe4, 0x42, 0x90, 0x0d,
-      0x2f, 0x18, 0x6d, 0x20, 0xd8, 0x36, 0x3f, 0xfc, 0xe6, 0x01, 0xfa, 0x0f,
-      0xa5, 0x75, 0x7f, 0x09, 0x00, 0x04, 0x00, 0x16, 0x03, 0x01, 0x11, 0x57,
-      0x0b, 0x00, 0x11, 0x53, 0x00, 0x11, 0x50, 0x00, 0x06, 0x22, 0x30, 0x82,
-      0x06, 0x1e, 0x30, 0x82, 0x05, 0x06, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02,
-      0x0a};
+  static const uint8_t application_data[] = {
+      0x17, 0x03, 0x01, 0x00, 0x4a, 0x02, 0x00, 0x00, 0x46, 0x03, 0x01,
+      0x4b, 0xc2, 0xf8, 0xb2, 0xc1, 0x56, 0x42, 0xb9, 0x57, 0x7f, 0xde,
+      0x87, 0x46, 0xf7, 0xa3, 0x52, 0x42, 0x21, 0xf0, 0x13, 0x1c, 0x9c,
+      0x83, 0x88, 0xd6, 0x93, 0x0c, 0xf6, 0x36, 0x30, 0x05, 0x7e, 0x20,
+      0xb5, 0xb5, 0x73, 0x36, 0x53, 0x83, 0x0a, 0xfc, 0x17, 0x63, 0xbf,
+      0xa0, 0xe4, 0x42, 0x90, 0x0d, 0x2f, 0x18, 0x6d, 0x20, 0xd8, 0x36,
+      0x3f, 0xfc, 0xe6, 0x01, 0xfa, 0x0f, 0xa5, 0x75, 0x7f, 0x09, 0x00,
+      0x04, 0x00, 0x16, 0x03, 0x01, 0x11, 0x57, 0x0b, 0x00, 0x11, 0x53,
+      0x00, 0x11, 0x50, 0x00, 0x06, 0x22, 0x30, 0x82, 0x06, 0x1e, 0x30,
+      0x82, 0x05, 0x06, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x0a};
 
   // All reads and writes complete synchronously (async=false).
   MockRead data_reads[] = {
-      MockRead(SYNCHRONOUS, reinterpret_cast<const char*>(application_data),
-               base::size(application_data)),
+      MockRead(SYNCHRONOUS, base::span(application_data)),
       MockRead(SYNCHRONOUS, OK),
   };
 
@@ -2434,7 +2397,7 @@ TEST_F(SSLClientSocketTest, PrematureApplicationData) {
 
   TestCompletionCallback callback;
   std::unique_ptr<StreamSocket> transport(
-      new MockTCPClientSocket(addr(), nullptr, &data));
+      std::make_unique<MockTCPClientSocket>(addr(), nullptr, &data));
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -2446,22 +2409,50 @@ TEST_F(SSLClientSocketTest, PrematureApplicationData) {
 }
 
 TEST_F(SSLClientSocketTest, CipherSuiteDisables) {
-  // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-  static const uint16_t kTestCipher = 0xc02f;
-
   SSLServerConfig server_config;
   server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
-  server_config.cipher_suite_for_testing = kTestCipher;
+  server_config.cipher_suite_for_testing = kModernTLS12Cipher;
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   SSLContextConfig ssl_context_config;
-  ssl_context_config.disabled_cipher_suites.push_back(kTestCipher);
+  ssl_context_config.disabled_cipher_suites.push_back(kModernTLS12Cipher);
   ssl_config_service_->UpdateSSLConfigAndNotify(ssl_context_config);
 
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
   EXPECT_THAT(rv, IsError(ERR_SSL_VERSION_OR_CIPHER_MISMATCH));
+}
+
+// Test that TLS versions prior to TLS 1.2 cannot be configured in
+// SSLClientSocket.
+TEST_F(SSLClientSocketTest, LegacyTLSVersions) {
+  // Start a server, just so the underlying socket can connect somewhere, but it
+  // will fail before talking to the server, so it is fine that the server does
+  // not speak these versions.
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
+
+  // Although we don't have `SSL_PROTOCOL_VERSION_*` constants for SSL 3.0
+  // through TLS 1.1, these values are just passed through to the BoringSSL API,
+  // which means the underlying protocol version numbers can be used here.
+  //
+  // TODO(crbug.com/40893435): Ideally SSLConfig would just take an enum,
+  // at which point this test can be removed.
+  for (uint16_t version : {SSL3_VERSION, TLS1_VERSION, TLS1_1_VERSION}) {
+    SCOPED_TRACE(version);
+
+    SSLConfig config;
+    config.version_min_override = version;
+    int rv;
+    ASSERT_TRUE(CreateAndConnectSSLClientSocket(config, &rv));
+    EXPECT_THAT(rv, IsError(ERR_UNEXPECTED));
+
+    config.version_min_override = std::nullopt;
+    config.version_max_override = version;
+    ASSERT_TRUE(CreateAndConnectSSLClientSocket(config, &rv));
+    EXPECT_THAT(rv, IsError(ERR_UNEXPECTED));
+  }
 }
 
 // When creating an SSLClientSocket, it is allowed to pass in a
@@ -2473,8 +2464,8 @@ TEST_F(SSLClientSocketTest, ClientSocketHandleNotFromPool) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
+  auto transport = std::make_unique<TCPClientSocket>(addr(), nullptr, nullptr,
+                                                     nullptr, NetLogSource());
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   EXPECT_THAT(rv, IsOk());
 
@@ -2499,45 +2490,41 @@ TEST_P(SSLClientSocketVersionTest, ExportKeyingMaterial) {
 
   const int kKeyingMaterialSize = 32;
   const char kKeyingLabel1[] = "client-socket-test-1";
-  const char kKeyingContext1[] = "";
-  unsigned char client_out1[kKeyingMaterialSize];
-  memset(client_out1, 0, sizeof(client_out1));
-  rv = sock_->ExportKeyingMaterial(kKeyingLabel1, false, kKeyingContext1,
-                                   client_out1, sizeof(client_out1));
+  std::array<uint8_t, kKeyingMaterialSize> client_out1;
+  rv = sock_->ExportKeyingMaterial(kKeyingLabel1, std::nullopt, client_out1);
   EXPECT_EQ(rv, OK);
 
   const char kKeyingLabel2[] = "client-socket-test-2";
-  unsigned char client_out2[kKeyingMaterialSize];
-  memset(client_out2, 0, sizeof(client_out2));
-  rv = sock_->ExportKeyingMaterial(kKeyingLabel2, false, kKeyingContext1,
-                                   client_out2, sizeof(client_out2));
+  std::array<uint8_t, kKeyingMaterialSize> client_out2;
+  rv = sock_->ExportKeyingMaterial(kKeyingLabel2, std::nullopt, client_out2);
   EXPECT_EQ(rv, OK);
-  EXPECT_NE(memcmp(client_out1, client_out2, kKeyingMaterialSize), 0);
+  EXPECT_NE(client_out1, client_out2);
 
   const char kKeyingContext2[] = "context";
-  rv = sock_->ExportKeyingMaterial(kKeyingLabel1, true, kKeyingContext2,
-                                   client_out2, sizeof(client_out2));
+  client_out2.fill(0);
+  rv = sock_->ExportKeyingMaterial(
+      kKeyingLabel1, base::as_byte_span(kKeyingContext2), client_out2);
   EXPECT_EQ(rv, OK);
-  EXPECT_NE(memcmp(client_out1, client_out2, kKeyingMaterialSize), 0);
+  EXPECT_NE(client_out1, client_out2);
 
   // Prior to TLS 1.3, using an empty context should give different key material
   // from not using a context at all. In TLS 1.3, the distinction is deprecated
   // and they are the same.
-  memset(client_out2, 0, sizeof(client_out2));
-  rv = sock_->ExportKeyingMaterial(kKeyingLabel1, true, kKeyingContext1,
-                                   client_out2, sizeof(client_out2));
+  client_out2.fill(0);
+  rv = sock_->ExportKeyingMaterial(kKeyingLabel1, base::span<const uint8_t>(),
+                                   client_out2);
   EXPECT_EQ(rv, OK);
   if (version() >= SSL_PROTOCOL_VERSION_TLS1_3) {
-    EXPECT_EQ(memcmp(client_out1, client_out2, kKeyingMaterialSize), 0);
+    EXPECT_EQ(client_out1, client_out2);
   } else {
-    EXPECT_NE(memcmp(client_out1, client_out2, kKeyingMaterialSize), 0);
+    EXPECT_NE(client_out1, client_out2);
   }
 }
 
 TEST(SSLClientSocket, SerializeNextProtos) {
   NextProtoVector next_protos;
-  next_protos.push_back(kProtoHTTP11);
-  next_protos.push_back(kProtoHTTP2);
+  next_protos.push_back(NextProto::kProtoHTTP11);
+  next_protos.push_back(NextProto::kProtoHTTP2);
   static std::vector<uint8_t> serialized =
       SSLClientSocket::SerializeNextProtos(next_protos);
   ASSERT_EQ(12u, serialized.size());
@@ -2572,7 +2559,7 @@ TEST_P(SSLClientSocketVersionTest, VerifyServerChainProperlyOrdered) {
   EXPECT_THAT(rv, IsError(ERR_CERT_INVALID));
   EXPECT_FALSE(sock_->IsConnected());
 
-  // When given option CERT_CHAIN_WRONG_ROOT, SpawnedTestServer will present
+  // When given option CERT_CHAIN_WRONG_ROOT, EmbeddedTestServer will present
   // certs from redundant-server-chain.pem.
   CertificateList server_certs =
       CreateCertificateListFromFile(GetTestCertsDirectory(),
@@ -2655,7 +2642,7 @@ TEST_P(SSLClientSocketVersionTest, VerifyReturnChainProperlyOrdered) {
   scoped_refptr<X509Certificate> root_cert = ImportCertFromFile(
       GetTestCertsDirectory(), "redundant-validated-chain-root.pem");
   ASSERT_NE(static_cast<X509Certificate*>(nullptr), root_cert.get());
-  ScopedTestRoot scoped_root(root_cert.get());
+  ScopedTestRoot scoped_root(root_cert);
 
   // Set up a test server with CERT_CHAIN_WRONG_ROOT.
   ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_CHAIN_WRONG_ROOT,
@@ -2666,7 +2653,7 @@ TEST_P(SSLClientSocketVersionTest, VerifyReturnChainProperlyOrdered) {
   EXPECT_THAT(rv, IsOk());
   EXPECT_TRUE(sock_->IsConnected());
 
-  auto entries = log_.GetEntries();
+  auto entries = log_observer_.GetEntries();
   EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
 
   SSLInfo ssl_info;
@@ -2702,9 +2689,11 @@ TEST_P(SSLClientSocketVersionTest, VerifyReturnChainProperlyOrdered) {
   EXPECT_FALSE(sock_->IsConnected());
 }
 
+// Client certificates are disabled on iOS.
+#if BUILDFLAG(ENABLE_CLIENT_CERTIFICATES)
 INSTANTIATE_TEST_SUITE_P(TLSVersion,
                          SSLClientSocketCertRequestInfoTest,
-                         ::testing::ValuesIn(GetTLSVersions()));
+                         ValuesIn(GetTLSVersions()));
 
 TEST_P(SSLClientSocketCertRequestInfoTest,
        DontRequestClientCertsIfServerCertInvalid) {
@@ -2751,10 +2740,10 @@ TEST_P(SSLClientSocketCertRequestInfoTest, TwoAuthorities) {
 
   SSLServerConfig config = GetServerConfig();
   config.client_cert_type = SSLServerConfig::OPTIONAL_CLIENT_CERT;
-  config.cert_authorities.push_back(
-      std::string(std::begin(kThawteDN), std::end(kThawteDN)));
-  config.cert_authorities.push_back(
-      std::string(std::begin(kDiginotarDN), std::end(kDiginotarDN)));
+  config.cert_authorities.emplace_back(std::begin(kThawteDN),
+                                       std::end(kThawteDN));
+  config.cert_authorities.emplace_back(std::begin(kDiginotarDN),
+                                       std::end(kDiginotarDN));
   ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, config));
   scoped_refptr<SSLCertRequestInfo> request_info = GetCertRequest();
   ASSERT_TRUE(request_info.get());
@@ -2762,180 +2751,226 @@ TEST_P(SSLClientSocketCertRequestInfoTest, TwoAuthorities) {
 }
 
 TEST_P(SSLClientSocketCertRequestInfoTest, CertKeyTypes) {
-  SpawnedTestServer::SSLOptions ssl_options;
-  auto tls_max_version = ProtocolVersionToSpawnedTestServer(version());
-  if (!tls_max_version) {
-    return;
-  }
-  ssl_options.tls_max_version = *tls_max_version;
-  ssl_options.request_client_certificate = true;
-  ssl_options.client_cert_types.push_back(CLIENT_CERT_RSA_SIGN);
-  ssl_options.client_cert_types.push_back(CLIENT_CERT_ECDSA_SIGN);
-  ASSERT_TRUE(StartTestServer(ssl_options));
+  SSLServerConfig config = GetServerConfig();
+  config.client_cert_type = SSLServerConfig::OPTIONAL_CLIENT_CERT;
+  ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, config));
   scoped_refptr<SSLCertRequestInfo> request_info = GetCertRequest();
-  ASSERT_TRUE(request_info.get());
-  ASSERT_EQ(2u, request_info->cert_key_types.size());
-  EXPECT_EQ(CLIENT_CERT_RSA_SIGN, request_info->cert_key_types[0]);
-  EXPECT_EQ(CLIENT_CERT_ECDSA_SIGN, request_info->cert_key_types[1]);
+  ASSERT_TRUE(request_info);
+  // Look for some values we expect BoringSSL to always send.
+  EXPECT_THAT(request_info->signature_algorithms,
+              testing::Contains(SSL_SIGN_ECDSA_SECP256R1_SHA256));
+  EXPECT_THAT(request_info->signature_algorithms,
+              testing::Contains(SSL_SIGN_RSA_PSS_RSAE_SHA256));
 }
+#endif  // BUILDFLAG(ENABLE_CLIENT_CERTIFICATES)
 
 // Tests that the Certificate Transparency (RFC 6962) TLS extension is
 // supported.
-TEST_F(SSLClientSocketTest, ConnectSignedCertTimestampsTLSExtension) {
+TEST_P(SSLClientSocketVersionTest, ConnectSignedCertTimestampsTLSExtension) {
   // Encoding of SCT List containing 'test'.
-  base::StringPiece sct_ext("\x00\x06\x00\x04test", 8);
+  std::string_view sct_ext("\x00\x06\x00\x04test", 8);
 
-  SpawnedTestServer::SSLOptions ssl_options;
-  ssl_options.signed_cert_timestamps_tls_ext = sct_ext.as_string();
-  ASSERT_TRUE(StartTestServer(ssl_options));
-
-  MockCTVerifier ct_verifier;
-  context_ = std::make_unique<SSLClientContext>(
-      ssl_config_service_.get(), cert_verifier_.get(),
-      transport_security_state_.get(), &ct_verifier, ct_policy_enforcer_.get(),
-      ssl_client_session_cache_.get(), nullptr);
-
-  // Check that the SCT list is extracted from the TLS extension as expected,
-  // while also simulating that it was an unparsable response.
-  SignedCertificateTimestampAndStatusList sct_list;
-  EXPECT_CALL(ct_verifier, Verify(_, _, _, sct_ext, _, _))
-      .WillOnce(testing::SetArgPointee<4>(sct_list));
+  EmbeddedTestServer::ServerCertificateConfig cert_config;
+  cert_config.tls_signed_cert_timestamp_list =
+      std::vector<uint8_t>(sct_ext.begin(), sct_ext.end());
+  SSLServerConfig server_config = GetServerConfig();
+  ASSERT_TRUE(StartEmbeddedTestServer(cert_config, server_config));
 
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
   EXPECT_THAT(rv, IsOk());
 
-  EXPECT_TRUE(sock_->signed_cert_timestamps_received_);
+  ASSERT_EQ(cert_verifier_->GetVerifyParams().size(), 1u);
+  const auto& params = cert_verifier_->GetVerifyParams().front();
+  EXPECT_TRUE(params.certificate()->EqualsIncludingChain(
+      embedded_test_server()->GetCertificate().get()));
+  EXPECT_EQ(params.hostname(), embedded_test_server()->host_port_pair().host());
+  EXPECT_EQ(params.ocsp_response(), "");
+  EXPECT_EQ(params.sct_list(), sct_ext);
 
   sock_ = nullptr;
   context_ = nullptr;
 }
 
-// Test that when a CT verifier and a CTPolicyEnforcer are defined, and
-// the EV certificate used conforms to the CT/EV policy, its EV status
-// is maintained.
-TEST_P(SSLClientSocketVersionTest, EVCertStatusMaintainedForCompliantCert) {
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-
+// Tests that Trust Anchor IDs are sent when configured via SSLConfig.
+TEST_P(SSLClientSocketVersionTest, ConnectWithTrustAnchorIDs) {
   SSLConfig ssl_config;
-  AddServerCertStatusToSSLConfig(CERT_STATUS_IS_EV, &ssl_config);
+  ssl_config.trust_anchor_ids =
+      std::vector<uint8_t>{0x03, 0x01, 0x02, 0x03, 0x02, 0x04, 0x05};
 
-  // Emulate compliance of the certificate to the policy.
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(_, _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
+  bool ran_callback = false;
+  SSLServerConfig server_config = GetServerConfig();
+  server_config.client_hello_callback_for_testing =
+      base::BindLambdaForTesting([&](const SSL_CLIENT_HELLO* client_hello) {
+        const uint8_t* data;
+        size_t len = 0;
+        if (!SSL_early_callback_ctx_extension_get(
+                client_hello, TLSEXT_TYPE_trust_anchors, &data, &len) ||
+            len < 2) {
+          return false;
+        }
+        // SAFETY: `SSL_early_callback_ctx_extension_get` sets `data` and `len`
+        // to a valid span.
+        auto extension = UNSAFE_BUFFERS(base::span(data, len));
+        // The TLS extension should contain the configured trust anchor IDs
+        // list, plus a 2-byte length prefix.
+        EXPECT_EQ(extension[0], 0u);
+        EXPECT_EQ(extension[1], ssl_config.trust_anchor_ids->size());
+        EXPECT_EQ(base::span(*ssl_config.trust_anchor_ids),
+                  extension.subspan(2u));
+        ran_callback = true;
+        return true;
+      });
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(ran_callback);
 
-  SSLInfo result;
-  ASSERT_TRUE(sock_->GetSSLInfo(&result));
-
-  EXPECT_TRUE(result.cert_status & CERT_STATUS_IS_EV);
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::SSL_CLIENT_TRUST_ANCHOR_IDS_LIST);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "trust_anchor_ids"),
+            "1.2.3, 4.5");
 }
 
-// Test that when a CT verifier and a CTPolicyEnforcer are defined, but
-// the EV certificate used does not conform to the CT/EV policy, its EV status
-// is removed.
-TEST_P(SSLClientSocketVersionTest, EVCertStatusRemovedForNonCompliantCert) {
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-
+// Tests that an empty Trust Anchor ID list is sent when configured.
+TEST_P(SSLClientSocketVersionTest, ConnectWithEmptyTrustAnchorIDs) {
   SSLConfig ssl_config;
-  AddServerCertStatusToSSLConfig(CERT_STATUS_IS_EV, &ssl_config);
+  ssl_config.trust_anchor_ids.emplace();
 
-  // Emulate non-compliance of the certificate to the policy.
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(_, _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
+  bool ran_callback = false;
+  SSLServerConfig server_config = GetServerConfig();
+  server_config.client_hello_callback_for_testing =
+      base::BindLambdaForTesting([&](const SSL_CLIENT_HELLO* client_hello) {
+        const uint8_t* data;
+        size_t len = 0;
+        if (!SSL_early_callback_ctx_extension_get(
+                client_hello, TLSEXT_TYPE_trust_anchors, &data, &len) ||
+            len < 2) {
+          return false;
+        }
+        // SAFETY: `SSL_early_callback_ctx_extension_get` sets `data` and `len`
+        // to a valid span.
+        auto extension = UNSAFE_BUFFERS(base::span(data, len));
+        // The TLS extension should contain the configured trust anchor IDs
+        // list (empty), plus a 2-byte length prefix.
+        EXPECT_EQ(extension.size(), 2u);
+        EXPECT_EQ(extension[0], 0u);
+        EXPECT_EQ(extension[1], 0u);
+        ran_callback = true;
+        return true;
+      });
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   EXPECT_THAT(rv, IsOk());
-
-  SSLInfo result;
-  ASSERT_TRUE(sock_->GetSSLInfo(&result));
-
-  EXPECT_FALSE(result.cert_status & CERT_STATUS_IS_EV);
-  EXPECT_TRUE(result.cert_status & CERT_STATUS_CT_COMPLIANCE_FAILED);
+  EXPECT_TRUE(ran_callback);
 }
 
-// Test that when an EV certificate does not conform to the CT policy and its EV
-// status is removed, the corresponding histogram is recorded correctly.
-TEST_P(SSLClientSocketVersionTest, NonCTCompliantEVHistogram) {
-  const char kHistogramName[] = "Net.CertificateTransparency.EVCompliance2.SSL";
-  base::HistogramTester histograms;
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
+// Tests that SSLClientSocket sends Trust Anchor IDs when configured via
+// SSLConfig (similar to ConnectWithTrustAnchorIDs, but more end-to-end as it
+// tests that sending a Trust Anchor ID influences the actual certificate that
+// the server serves), and properly retrieves the server's Trust Anchor IDs from
+// the handshake on error.
+TEST_P(SSLClientSocketVersionTest, ConnectToServerWithTrustAnchorIDs) {
+  EmbeddedTestServer::ServerCertificateConfig tai_config;
+  tai_config.intermediate = EmbeddedTestServer::IntermediateType::kNone;
+  tai_config.trust_anchor_id = {0x01, 0x02, 0x03};
 
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
+  EmbeddedTestServer::ServerCertificateConfig tai_config2;
+  tai_config2.intermediate = EmbeddedTestServer::IntermediateType::kNone;
+  tai_config2.trust_anchor_id = {0x04, 0x05};
 
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.cert_status = CERT_STATUS_IS_EV;
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
+  EmbeddedTestServer::ServerCertificateConfig default_config;
+  default_config.intermediate =
+      EmbeddedTestServer::IntermediateType::kInHandshake;
 
-  // Emulate non-compliance of the certificate to the policy.
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(_, _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
+  SSLServerConfig server_config;
 
-  SSLConfig ssl_config;
+  ASSERT_TRUE(StartEmbeddedTestServer({tai_config, tai_config2, default_config},
+                                      server_config));
+
+  SSLConfig client_config;
+
+  // If the client doesn't advertise any trust anchor IDs on the connection,
+  // then the server should provide a full chain (with the intermediate).
   int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
   EXPECT_THAT(rv, IsOk());
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(1u, ssl_info.unverified_cert->intermediate_buffers().size());
 
-  SSLInfo result;
-  ASSERT_TRUE(sock_->GetSSLInfo(&result));
-
-  EXPECT_FALSE(result.cert_status & CERT_STATUS_IS_EV);
-  // The histogram should have been recorded with the CT compliance status.
-  histograms.ExpectUniqueSample(
-      kHistogramName,
-      static_cast<int>(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS), 1);
-}
-
-// Test that when an EV certificate does conform to the CT policy and its EV
-// status is not removed, the corresponding histogram is recorded correctly.
-TEST_P(SSLClientSocketVersionTest, CTCompliantEVHistogram) {
-  const char kHistogramName[] = "Net.CertificateTransparency.EVCompliance2.SSL";
-  base::HistogramTester histograms;
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.cert_status = CERT_STATUS_IS_EV;
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Emulate non-compliance of the certificate to the policy.
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(_, _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  // If the client advertises trust anchor IDs that don't correspond to the
+  // server's intermediate, then the server should provide a full chain (with
+  // the intermediate).
+  client_config.trust_anchor_ids = {0x03, 0x01, 0x01, 0x01, 0x02, 0x03, 0x03};
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
   EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->GetServerTrustAnchorIDs().empty());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(1u, ssl_info.unverified_cert->intermediate_buffers().size());
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::SSL_CLIENT_RECEIVED_TRUST_ANCHOR_IDS);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "trust_anchor_ids"),
+            "1.2.3, 4.5");
 
-  SSLInfo result;
-  ASSERT_TRUE(sock_->GetSSLInfo(&result));
+  // If the client advertises the trust anchor ID corresponding to the server's
+  // intermediate, then the server should omit the intermediate from the
+  // connection.
+  client_config.trust_anchor_ids = {0x03, 0x01, 0x02, 0x03};
+  log_observer_.Clear();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->GetServerTrustAnchorIDs().empty());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(0u, ssl_info.unverified_cert->intermediate_buffers().size());
+  entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::SSL_CLIENT_RECEIVED_TRUST_ANCHOR_IDS);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "trust_anchor_ids"),
+            "1.2.3, 4.5");
 
-  EXPECT_TRUE(result.cert_status & CERT_STATUS_IS_EV);
-  // The histogram should have been recorded with the CT compliance status.
-  histograms.ExpectUniqueSample(
-      kHistogramName,
-      static_cast<int>(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS), 1);
+  // If the client advertises multiple trust anchor IDs including the one
+  // corresponding to the server's intermediate, then the server should omit the
+  // intermediate from the connection.
+  client_config.trust_anchor_ids = {0x02, 0x01, 0x01, 0x03, 0x01, 0x02, 0x03};
+  log_observer_.Clear();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->GetServerTrustAnchorIDs().empty());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(0u, ssl_info.unverified_cert->intermediate_buffers().size());
+  entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::SSL_CLIENT_RECEIVED_TRUST_ANCHOR_IDS);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "trust_anchor_ids"),
+            "1.2.3, 4.5");
+
+  // If the client advertises the trust anchor ID corresponding to the server's
+  // intermediate but gets an error, it should be able to access the trust
+  // anchor IDs that the server advertised in the handshake.
+  cert_verifier_->set_default_result(ERR_CERT_INVALID);
+  client_config.trust_anchor_ids = {0x03, 0x01, 0x02, 0x03};
+  log_observer_.Clear();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsError(ERR_CERT_INVALID));
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(0u, ssl_info.unverified_cert->intermediate_buffers().size());
+  EXPECT_EQ(
+      sock_->GetServerTrustAnchorIDs(),
+      std::vector<std::vector<uint8_t>>({{0x01, 0x02, 0x03}, {0x04, 0x05}}));
+  entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::SSL_CLIENT_RECEIVED_TRUST_ANCHOR_IDS);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "trust_anchor_ids"),
+            "1.2.3, 4.5");
 }
 
 // Tests that OCSP stapling is requested, as per Certificate Transparency (RFC
@@ -2945,7 +2980,7 @@ TEST_P(SSLClientSocketVersionTest, ConnectSignedCertTimestampsEnablesOCSP) {
   // for a freshly minted certificate.
   EmbeddedTestServer::ServerCertificateConfig cert_config;
   cert_config.stapled_ocsp_config = EmbeddedTestServer::OCSPConfig(
-      {{OCSPRevocationStatus::GOOD,
+      {{bssl::OCSPRevocationStatus::GOOD,
         EmbeddedTestServer::OCSPConfig::SingleResponse::Date::kValid}});
 
   ASSERT_TRUE(StartEmbeddedTestServer(cert_config, GetServerConfig()));
@@ -2956,7 +2991,12 @@ TEST_P(SSLClientSocketVersionTest, ConnectSignedCertTimestampsEnablesOCSP) {
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   EXPECT_THAT(rv, IsOk());
 
-  EXPECT_TRUE(sock_->stapled_ocsp_response_received_);
+  ASSERT_EQ(cert_verifier_->GetVerifyParams().size(), 1u);
+  const auto& params = cert_verifier_->GetVerifyParams().front();
+  EXPECT_TRUE(params.certificate()->EqualsIncludingChain(
+      embedded_test_server()->GetCertificate().get()));
+  EXPECT_EQ(params.hostname(), embedded_test_server()->host_port_pair().host());
+  EXPECT_FALSE(params.ocsp_response().empty());
 }
 
 // Tests that IsConnectedAndIdle and WasEverUsed behave as expected.
@@ -2974,17 +3014,15 @@ TEST_P(SSLClientSocketVersionTest, ReuseStates) {
   EXPECT_TRUE(sock_->IsConnectedAndIdle());
   EXPECT_FALSE(sock_->WasEverUsed());
 
-  const char kRequestText[] = "GET / HTTP/1.0\r\n\r\n";
-  const size_t kRequestLen = base::size(kRequestText) - 1;
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(kRequestLen);
-  memcpy(request_buffer->data(), kRequestText, kRequestLen);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0\r\n\r\n";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
   TestCompletionCallback callback;
-  rv = callback.GetResult(sock_->Write(request_buffer.get(), kRequestLen,
-                                       callback.callback(),
+  rv = callback.GetResult(sock_->Write(request_buffer.get(),
+                                       request_text.size(), callback.callback(),
                                        TRAFFIC_ANNOTATION_FOR_TESTS));
-  EXPECT_EQ(static_cast<int>(kRequestLen), rv);
+  EXPECT_EQ(static_cast<int>(request_text.size()), rv);
 
   // The socket has now been used.
   EXPECT_TRUE(sock_->WasEverUsed());
@@ -3015,8 +3053,7 @@ TEST_P(SSLClientSocketVersionTest, IsFatalErrorSetOnFatalError) {
   ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_CHAIN_WRONG_ROOT,
                                       GetServerConfig()));
   int rv;
-  const base::Time expiry =
-      base::Time::Now() + base::TimeDelta::FromSeconds(1000);
+  const base::Time expiry = base::Time::Now() + base::Seconds(1000);
   transport_security_state_->AddHSTS(host_port_pair().host(), expiry, true);
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
   SSLInfo ssl_info;
@@ -3032,10 +3069,10 @@ TEST_P(SSLClientSocketVersionTest, ReusableAfterWrite) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   ASSERT_THAT(callback.GetResult(transport->Connect(callback.callback())),
               IsOk());
@@ -3048,18 +3085,16 @@ TEST_P(SSLClientSocketVersionTest, ReusableAfterWrite) {
   raw_transport->BlockWrite();
 
   // Write a partial HTTP request.
-  const char kRequestText[] = "GET / HTTP/1.0";
-  const size_t kRequestLen = base::size(kRequestText) - 1;
-  scoped_refptr<IOBuffer> request_buffer =
-      base::MakeRefCounted<IOBuffer>(kRequestLen);
-  memcpy(request_buffer->data(), kRequestText, kRequestLen);
+  static constexpr std::string_view request_text = "GET / HTTP/1.0";
+  auto request_buffer =
+      base::MakeRefCounted<VectorIOBuffer>(base::as_byte_span(request_text));
 
   // Although transport writes are blocked, SSLClientSocketImpl completes the
   // outer Write operation.
-  EXPECT_EQ(static_cast<int>(kRequestLen),
-            callback.GetResult(sock->Write(request_buffer.get(), kRequestLen,
-                                           callback.callback(),
-                                           TRAFFIC_ANNOTATION_FOR_TESTS)));
+  EXPECT_EQ(static_cast<int>(request_text.size()),
+            callback.GetResult(sock->Write(
+                request_buffer.get(), request_text.size(), callback.callback(),
+                TRAFFIC_ANNOTATION_FOR_TESTS)));
 
   // The Write operation is complete, so the socket should be treated as
   // reusable, in case the server returns an HTTP response before completely
@@ -3094,8 +3129,8 @@ TEST_P(SSLClientSocketVersionTest, SessionResumption) {
   sock_.reset();
 
   // Using a different HostPortPair uses a different session cache key.
-  std::unique_ptr<StreamSocket> transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, &log_, NetLogSource()));
+  auto transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, NetLog::Get(), NetLogSource());
   TestCompletionCallback callback;
   ASSERT_THAT(callback.GetResult(transport->Connect(callback.callback())),
               IsOk());
@@ -3113,6 +3148,108 @@ TEST_P(SSLClientSocketVersionTest, SessionResumption) {
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
   EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+
+  // Pick up the ticket again and confirm resumption works.
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+  sock_.reset();
+
+  // Updating the context-wide configuration should flush the session cache.
+  SSLContextConfig config;
+  config.disabled_cipher_suites = {1234};
+  ssl_config_service_->UpdateSSLConfigAndNotify(config);
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+}
+
+// Tests that when the session cache is flushed during a connection handshake,
+// that session does not get cached, and that connections started after the
+// flush are still cached.
+TEST_P(SSLClientSocketVersionTest, FlushSessionCacheDuringHandshake) {
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
+
+  // First, perform a full handshake.
+  SSLConfig ssl_config;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+
+  // TLS 1.2 with False Start and TLS 1.3 cause the ticket to arrive later, so
+  // use the socket to ensure the session ticket has been picked up.
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  sock_.reset();
+  EXPECT_EQ(ssl_client_session_cache_->size(), 1u);
+
+  // Start a 2nd connection with a FakeBlockingStreamSocket, but block it
+  // before it completes.
+  HostPortPair second_host("b.com", 443);
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, NetLog::Get(), NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
+  FakeBlockingStreamSocket* raw_transport = transport.get();
+  TestCompletionCallback callback;
+  ASSERT_THAT(callback.GetResult(transport->Connect(callback.callback())),
+              IsOk());
+  auto sock2 =
+      CreateSSLClientSocket(std::move(transport), second_host, ssl_config);
+  raw_transport->BlockReadResult();
+  EXPECT_THAT(sock2->Connect(callback.callback()), IsError(ERR_IO_PENDING));
+  EXPECT_EQ(ssl_client_session_cache_->size(), 1u);
+
+  // Flush the session cache while the 2nd connection is pending.
+  ssl_client_session_cache_->Flush();
+  // The 1st connection's session should be removed.
+  EXPECT_EQ(ssl_client_session_cache_->size(), 0u);
+
+  // Continue the 2nd connection. It should complete successfully, but not be
+  // added to session cache.
+  raw_transport->UnblockReadResult();
+  EXPECT_THAT(callback.WaitForResult(), IsOk());
+  ASSERT_TRUE(sock2->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock2.get()), IsOk());
+  EXPECT_EQ(ssl_client_session_cache_->size(), 0u);
+
+  // Connecting again with the 2nd host should not resume.
+  ASSERT_TRUE(
+      CreateAndConnectSSLClientSocketWithHost(ssl_config, second_host, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  // The new session should be cached.
+  EXPECT_EQ(ssl_client_session_cache_->size(), 1u);
+
+  // Since the session cache was cleared, handshake with the same host as the
+  // 1st connection doesn't resume either.
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  // Both new sessions should be cached.
+  EXPECT_EQ(ssl_client_session_cache_->size(), 2u);
+
+  // Session resumption should work for sessions cached after the flush.
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+
+  ASSERT_TRUE(
+      CreateAndConnectSSLClientSocketWithHost(ssl_config, second_host, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
 }
 
 namespace {
@@ -3124,7 +3261,7 @@ class FakePeerAddressSocket : public WrappedStreamSocket {
   FakePeerAddressSocket(std::unique_ptr<StreamSocket> socket,
                         const IPEndPoint& address)
       : WrappedStreamSocket(std::move(socket)), address_(address) {}
-  ~FakePeerAddressSocket() override {}
+  ~FakePeerAddressSocket() override = default;
 
   int GetPeerAddress(IPEndPoint* address) const override {
     *address = address_;
@@ -3141,19 +3278,20 @@ TEST_F(SSLClientSocketTest, SessionResumption_RSA) {
   for (bool use_rsa : {false, true}) {
     SCOPED_TRACE(use_rsa);
 
-    SpawnedTestServer::SSLOptions ssl_options;
-    ssl_options.key_exchanges =
-        use_rsa ? SpawnedTestServer::SSLOptions::KEY_EXCHANGE_RSA
-                : SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-    ASSERT_TRUE(StartTestServer(ssl_options));
+    SSLServerConfig server_config;
+    server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+    server_config.cipher_suite_for_testing =
+        use_rsa ? kRSACipher : kModernTLS12Cipher;
+    ASSERT_TRUE(
+        StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
     SSLConfig ssl_config;
     ssl_client_session_cache_->Flush();
 
     for (int i = 0; i < 3; i++) {
       SCOPED_TRACE(i);
 
-      std::unique_ptr<StreamSocket> transport(
-          new TCPClientSocket(addr(), nullptr, nullptr, &log_, NetLogSource()));
+      auto transport = std::make_unique<TCPClientSocket>(
+          addr(), nullptr, nullptr, NetLog::Get(), NetLogSource());
       TestCompletionCallback callback;
       ASSERT_THAT(callback.GetResult(transport->Connect(callback.callback())),
                   IsOk());
@@ -3193,28 +3331,22 @@ TEST_F(SSLClientSocketTest, SessionResumption_RSA) {
 }
 
 // Tests that ALPN works with session resumption.
-// Failed on Android, see https://crbug.com/1014556.
-#if defined(OS_ANDROID)
-#define MAYBE_SessionResumptionAlpn DISABLED_SessionResumptionAlpn
-#else
-#define MAYBE_SessionResumptionAlpn SessionResumptionAlpn
-#endif
-TEST_F(SSLClientSocketTest, MAYBE_SessionResumptionAlpn) {
-  SpawnedTestServer::SSLOptions ssl_options;
-  ssl_options.alpn_protocols.push_back("h2");
-  ssl_options.alpn_protocols.push_back("http/1.1");
-  ASSERT_TRUE(StartTestServer(ssl_options));
+TEST_F(SSLClientSocketTest, SessionResumptionAlpn) {
+  SSLServerConfig server_config;
+  server_config.alpn_protos = {NextProto::kProtoHTTP2, NextProto::kProtoHTTP11};
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   // First, perform a full handshake.
   SSLConfig ssl_config;
-  ssl_config.alpn_protos.push_back(kProtoHTTP2);
+  ssl_config.alpn_protos.push_back(NextProto::kProtoHTTP2);
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   ASSERT_THAT(rv, IsOk());
   SSLInfo ssl_info;
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
   EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
-  EXPECT_EQ(kProtoHTTP2, sock_->GetNegotiatedProtocol());
+  EXPECT_EQ(NextProto::kProtoHTTP2, sock_->GetNegotiatedProtocol());
 
   // TLS 1.2 with False Start and TLS 1.3 cause the ticket to arrive later, so
   // use the socket to ensure the session ticket has been picked up.
@@ -3222,21 +3354,21 @@ TEST_F(SSLClientSocketTest, MAYBE_SessionResumptionAlpn) {
 
   // The next connection should resume; ALPN should be renegotiated.
   ssl_config.alpn_protos.clear();
-  ssl_config.alpn_protos.push_back(kProtoHTTP11);
+  ssl_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
   EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
-  EXPECT_EQ(kProtoHTTP11, sock_->GetNegotiatedProtocol());
+  EXPECT_EQ(NextProto::kProtoHTTP11, sock_->GetNegotiatedProtocol());
 }
 
-// Tests that the session cache is not sharded by NetworkIsolationKey if the
+// Tests that the session cache is not sharded by NetworkAnonymizationKey if the
 // feature is disabled.
 TEST_P(SSLClientSocketVersionTest,
        SessionResumptionNetworkIsolationKeyDisabled) {
   base::test::ScopedFeatureList feature_list;
   feature_list.InitAndDisableFeature(
-      features::kPartitionSSLSessionsByNetworkIsolationKey);
+      features::kPartitionConnectionsByNetworkIsolationKey);
 
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
@@ -3263,10 +3395,11 @@ TEST_P(SSLClientSocketVersionTest,
   EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
   sock_.reset();
 
-  // Using a different NetworkIsolationKey shares session cache key because
+  // Using a different NetworkAnonymizationKey shares session cache key because
   // sharding is disabled.
-  const auto kOriginA = url::Origin::Create(GURL("https://a.test"));
-  ssl_config.network_isolation_key = NetworkIsolationKey(kOriginA, kOriginA);
+  const SchemefulSite kSiteA(GURL("https://a.test"));
+  ssl_config.network_anonymization_key =
+      NetworkAnonymizationKey::CreateSameSite(kSiteA);
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
@@ -3274,8 +3407,9 @@ TEST_P(SSLClientSocketVersionTest,
   EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
   sock_.reset();
 
-  const auto kOriginB = url::Origin::Create(GURL("https://a.test"));
-  ssl_config.network_isolation_key = NetworkIsolationKey(kOriginB, kOriginB);
+  const SchemefulSite kSiteB(GURL("https://a.test"));
+  ssl_config.network_anonymization_key =
+      NetworkAnonymizationKey::CreateSameSite(kSiteB);
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
@@ -3284,18 +3418,20 @@ TEST_P(SSLClientSocketVersionTest,
   sock_.reset();
 }
 
-// Tests that the session cache is sharded by NetworkIsolationKey if the
+// Tests that the session cache is sharded by NetworkAnonymizationKey if the
 // feature is enabled.
 TEST_P(SSLClientSocketVersionTest,
        SessionResumptionNetworkIsolationKeyEnabled) {
   base::test::ScopedFeatureList feature_list;
   feature_list.InitAndEnableFeature(
-      features::kPartitionSSLSessionsByNetworkIsolationKey);
+      features::kPartitionConnectionsByNetworkIsolationKey);
 
-  const auto kOriginA = url::Origin::Create(GURL("https://a.test"));
-  const auto kOriginB = url::Origin::Create(GURL("https://b.test"));
-  const NetworkIsolationKey kNetworkIsolationKeyA(kOriginA, kOriginA);
-  const NetworkIsolationKey kNetworkIsolationKeyB(kOriginB, kOriginB);
+  const SchemefulSite kSiteA(GURL("https://a.test"));
+  const SchemefulSite kSiteB(GURL("https://b.test"));
+  const auto kNetworkAnonymizationKeyA =
+      NetworkAnonymizationKey::CreateSameSite(kSiteA);
+  const auto kNetworkAnonymizationKeyB =
+      NetworkAnonymizationKey::CreateSameSite(kSiteB);
 
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
@@ -3322,8 +3458,9 @@ TEST_P(SSLClientSocketVersionTest,
   EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
   sock_.reset();
 
-  // Using a different NetworkIsolationKey uses a different session cache key.
-  ssl_config.network_isolation_key = kNetworkIsolationKeyA;
+  // Using a different NetworkAnonymizationKey uses a different session cache
+  // key.
+  ssl_config.network_anonymization_key = kNetworkAnonymizationKeyA;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
@@ -3340,7 +3477,7 @@ TEST_P(SSLClientSocketVersionTest,
   sock_.reset();
 
   // Repeat with another non-null key.
-  ssl_config.network_isolation_key = kNetworkIsolationKeyB;
+  ssl_config.network_anonymization_key = kNetworkAnonymizationKeyB;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
@@ -3356,7 +3493,74 @@ TEST_P(SSLClientSocketVersionTest,
   sock_.reset();
 
   // b.test does not evict a.test's session.
-  ssl_config.network_isolation_key = kNetworkIsolationKeyA;
+  ssl_config.network_anonymization_key = kNetworkAnonymizationKeyA;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  sock_.reset();
+}
+
+// Tests that the session cache is sharded by session usage and proxy chain.
+TEST_P(SSLClientSocketVersionTest,
+       SessionResumptionDifferentSessionUsageAndProxyChain) {
+  const SchemefulSite kSiteA(GURL("https://a.test"));
+
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
+
+  // First, perform a full handshake.
+  SSLConfig ssl_config;
+  ssl_config.session_usage = SessionUsage::kDestination;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+
+  // TLS 1.2 with False Start and TLS 1.3 cause the ticket to arrive later, so
+  // use the socket to ensure the session ticket has been picked up. Do this for
+  // every connection to avoid problems with TLS 1.3 single-use tickets.
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+
+  // The next connection should resume.
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  sock_.reset();
+
+  // Using a different SessionUsage uses a different session cache
+  // key.
+  ssl_config.session_usage = SessionUsage::kProxy;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  sock_.reset();
+
+  // We, however, can resume under that newly-established session.
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  sock_.reset();
+
+  // Repeat with a different proxy chain
+  ssl_config.proxy_chain = ProxyChain::FromSchemeHostAndPort(
+      ProxyServer::SCHEME_HTTPS, "proxy", 8080);
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  ASSERT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+  EXPECT_THAT(MakeHTTPRequest(sock_.get()), IsOk());
+  sock_.reset();
+
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
   ASSERT_THAT(rv, IsOk());
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
@@ -3388,25 +3592,11 @@ TEST_P(SSLClientSocketVersionTest, CertificateErrorNoResume) {
   EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
 }
 
-// Test that DHE is removed.
-TEST_F(SSLClientSocketTest, NoDHE) {
-  SpawnedTestServer::SSLOptions ssl_options;
-  ssl_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_DHE_RSA;
-  ASSERT_TRUE(StartTestServer(ssl_options));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  EXPECT_THAT(rv, IsError(ERR_SSL_VERSION_OR_CIPHER_MISMATCH));
-}
-
 TEST_F(SSLClientSocketTest, RequireECDHE) {
   // Run test server without ECDHE.
   SSLServerConfig server_config;
   server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
-  // TLS_RSA_WITH_AES_128_GCM_SHA256
-  server_config.cipher_suite_for_testing = 0x009c;
+  server_config.cipher_suite_for_testing = kRSACipher;
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
@@ -3420,18 +3610,13 @@ TEST_F(SSLClientSocketTest, RequireECDHE) {
 TEST_F(SSLClientSocketTest, 3DES) {
   SSLServerConfig server_config;
   server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
-  // TLS_RSA_WITH_3DES_EDE_CBC_SHA
-  server_config.cipher_suite_for_testing = 0x000a;
+  server_config.cipher_suite_for_testing = k3DESCipher;
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
+  // 3DES is always disabled.
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
-  EXPECT_THAT(rv, IsOk());
-
-  SSLConfig config;
-  config.disable_legacy_crypto = true;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(config, &rv));
   EXPECT_THAT(rv, IsError(ERR_SSL_VERSION_OR_CIPHER_MISMATCH));
 }
 
@@ -3441,88 +3626,71 @@ TEST_F(SSLClientSocketTest, SHA1) {
   // Disable RSA key exchange, to ensure the server does not pick a non-signing
   // cipher.
   server_config.require_ecdhe = true;
-  server_config.signature_algorithm_for_testing = SSL_SIGN_RSA_PKCS1_SHA1;
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+  EmbeddedTestServer::ServerCertificateConfig cert_config;
+  cert_config.signature_algorithm_for_testing = SSL_SIGN_ECDSA_SHA1;
+  ASSERT_TRUE(StartEmbeddedTestServer(cert_config, server_config));
 
+  // SHA-1 server signatures are always disabled.
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
-  EXPECT_THAT(rv, IsOk());
-
-  SSLConfig config;
-  config.disable_legacy_crypto = true;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(config, &rv));
-  EXPECT_THAT(rv, IsError(ERR_SSL_PROTOCOL_ERROR));
+  EXPECT_THAT(rv, IsError(ERR_SSL_VERSION_OR_CIPHER_MISMATCH));
 }
 
 TEST_F(SSLClientSocketFalseStartTest, FalseStartEnabled) {
   // False Start requires ALPN, ECDHE, and an AEAD.
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128GCM;
-  server_options.alpn_protocols.push_back("http/1.1");
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kModernTLS12Cipher;
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
-  ASSERT_NO_FATAL_FAILURE(TestFalseStart(server_options, client_config, true));
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
+  ASSERT_NO_FATAL_FAILURE(TestFalseStart(server_config, client_config, true));
 }
 
 // Test that False Start is disabled without ALPN.
 TEST_F(SSLClientSocketFalseStartTest, NoAlpn) {
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128GCM;
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kModernTLS12Cipher;
   SSLConfig client_config;
   client_config.alpn_protos.clear();
-  ASSERT_NO_FATAL_FAILURE(
-      TestFalseStart(server_options, client_config, false));
+  ASSERT_NO_FATAL_FAILURE(TestFalseStart(server_config, client_config, false));
 }
 
 // Test that False Start is disabled with plain RSA ciphers.
 TEST_F(SSLClientSocketFalseStartTest, RSA) {
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128GCM;
-  server_options.alpn_protocols.push_back("http/1.1");
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kRSACipher;
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
-  ASSERT_NO_FATAL_FAILURE(
-      TestFalseStart(server_options, client_config, false));
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
+  ASSERT_NO_FATAL_FAILURE(TestFalseStart(server_config, client_config, false));
 }
 
 // Test that False Start is disabled without an AEAD.
 TEST_F(SSLClientSocketFalseStartTest, NoAEAD) {
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128;
-  server_options.alpn_protocols.push_back("http/1.1");
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kCBCCipher;
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
-  ASSERT_NO_FATAL_FAILURE(TestFalseStart(server_options, client_config, false));
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
+  ASSERT_NO_FATAL_FAILURE(TestFalseStart(server_config, client_config, false));
 }
 
 // Test that sessions are resumable after receiving the server Finished message.
 TEST_F(SSLClientSocketFalseStartTest, SessionResumption) {
   // Start a server.
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128GCM;
-  server_options.alpn_protocols.push_back("http/1.1");
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kModernTLS12Cipher;
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
 
   // Let a full handshake complete with False Start.
-  ASSERT_NO_FATAL_FAILURE(
-      TestFalseStart(server_options, client_config, true));
+  ASSERT_NO_FATAL_FAILURE(TestFalseStart(server_config, client_config, true));
 
   // Make a second connection.
   int rv;
@@ -3541,16 +3709,15 @@ TEST_F(SSLClientSocketFalseStartTest, SessionResumption) {
 // client's HTTP/1.1 POST fit in transport windows.
 TEST_F(SSLClientSocketFalseStartTest, CompleteHandshakeWithoutRequest) {
   // Start a server.
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128GCM;
-  server_options.alpn_protocols.push_back("http/1.1");
-  ASSERT_TRUE(StartTestServer(server_options));
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kModernTLS12Cipher;
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
 
   // Start a handshake up to the server Finished message.
   TestCompletionCallback callback;
@@ -3560,9 +3727,8 @@ TEST_F(SSLClientSocketFalseStartTest, CompleteHandshakeWithoutRequest) {
       client_config, &callback, &raw_transport, &sock));
 
   // Wait for the server Finished to arrive, release it, and allow
-  // SSLClientSocket to process it. This should install a session.
-  // SpawnedTestServer, however, writes data in small chunks, so, even though it
-  // is only sending 51 bytes, it may take a few iterations to complete.
+  // SSLClientSocket to process it. This should install a session. It make take
+  // a few iterations to complete if the server writes in small chunks
   while (ssl_client_session_cache_->size() == 0) {
     raw_transport->WaitForReadResult();
     raw_transport->UnblockReadResult();
@@ -3589,16 +3755,15 @@ TEST_F(SSLClientSocketFalseStartTest, CompleteHandshakeWithoutRequest) {
 // server Finished message.
 TEST_F(SSLClientSocketFalseStartTest, NoSessionResumptionBeforeFinished) {
   // Start a server.
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128GCM;
-  server_options.alpn_protocols.push_back("http/1.1");
-  ASSERT_TRUE(StartTestServer(server_options));
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kModernTLS12Cipher;
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
 
   // Start a handshake up to the server Finished message.
   TestCompletionCallback callback;
@@ -3619,7 +3784,7 @@ TEST_F(SSLClientSocketFalseStartTest, NoSessionResumptionBeforeFinished) {
   // processed; however, pump the underlying transport so that it is read from
   // the socket. NOTE: This may flakily pass if the server's final flight
   // doesn't come in one Read.
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int rv = sock1->Read(buf.get(), 4096, callback.callback());
   EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
   raw_transport1->WaitForReadResult();
@@ -3643,16 +3808,15 @@ TEST_F(SSLClientSocketFalseStartTest, NoSessionResumptionBeforeFinished) {
 // message was bad.
 TEST_F(SSLClientSocketFalseStartTest, NoSessionResumptionBadFinished) {
   // Start a server.
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.key_exchanges =
-      SpawnedTestServer::SSLOptions::KEY_EXCHANGE_ECDHE_RSA;
-  server_options.bulk_ciphers =
-      SpawnedTestServer::SSLOptions::BULK_CIPHER_AES128GCM;
-  server_options.alpn_protocols.push_back("http/1.1");
-  ASSERT_TRUE(StartTestServer(server_options));
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.cipher_suite_for_testing = kModernTLS12Cipher;
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
 
   // Start a handshake up to the server Finished message.
   TestCompletionCallback callback;
@@ -3672,7 +3836,7 @@ TEST_F(SSLClientSocketFalseStartTest, NoSessionResumptionBadFinished) {
   // The actual read on |sock1| will not complete until the Finished message is
   // processed; however, pump the underlying transport so that it is read from
   // the socket.
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int rv = sock1->Read(buf.get(), 4096, callback.callback());
   EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
   raw_transport1->WaitForReadResult();
@@ -3681,7 +3845,7 @@ TEST_F(SSLClientSocketFalseStartTest, NoSessionResumptionBadFinished) {
   // |sock1|. Before doing so, break the server's second leg.
   int bytes_read = raw_transport1->pending_read_result();
   ASSERT_LT(0, bytes_read);
-  raw_transport1->pending_read_buf()->data()[bytes_read - 1]++;
+  raw_transport1->pending_read_buf()->span()[bytes_read - 1]++;
 
   // Unblock the Finished message. |sock1->Read| should now fail.
   raw_transport1->UnblockReadResult();
@@ -3704,27 +3868,28 @@ TEST_F(SSLClientSocketFalseStartTest, NoSessionResumptionBadFinished) {
 
 // Server preference should win in ALPN.
 TEST_F(SSLClientSocketTest, Alpn) {
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.alpn_protocols.push_back("h2");
-  server_options.alpn_protocols.push_back("http/1.1");
-  ASSERT_TRUE(StartTestServer(server_options));
+  SSLServerConfig server_config;
+  server_config.alpn_protos = {NextProto::kProtoHTTP2, NextProto::kProtoHTTP11};
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   SSLConfig client_config;
-  client_config.alpn_protos.push_back(kProtoHTTP11);
-  client_config.alpn_protos.push_back(kProtoHTTP2);
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP11);
+  client_config.alpn_protos.push_back(NextProto::kProtoHTTP2);
 
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
   EXPECT_THAT(rv, IsOk());
 
-  EXPECT_EQ(kProtoHTTP2, sock_->GetNegotiatedProtocol());
+  EXPECT_EQ(NextProto::kProtoHTTP2, sock_->GetNegotiatedProtocol());
 }
 
 // If the server supports ALPN but the client does not, then ALPN is not used.
 TEST_F(SSLClientSocketTest, AlpnClientDisabled) {
-  SpawnedTestServer::SSLOptions server_options;
-  server_options.alpn_protocols.push_back("foo");
-  ASSERT_TRUE(StartTestServer(server_options));
+  SSLServerConfig server_config;
+  server_config.alpn_protos = {NextProto::kProtoHTTP2};
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   SSLConfig client_config;
 
@@ -3732,9 +3897,11 @@ TEST_F(SSLClientSocketTest, AlpnClientDisabled) {
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
   EXPECT_THAT(rv, IsOk());
 
-  EXPECT_EQ(kProtoUnknown, sock_->GetNegotiatedProtocol());
+  EXPECT_EQ(NextProto::kProtoUnknown, sock_->GetNegotiatedProtocol());
 }
 
+// Client certificates are disabled on iOS.
+#if BUILDFLAG(ENABLE_CLIENT_CERTIFICATES)
 // Connect to a server requesting client authentication, do not send
 // any client certificates. It should refuse the connection.
 TEST_P(SSLClientSocketVersionTest, NoCert) {
@@ -3878,10 +4045,703 @@ TEST_F(SSLClientSocketTest, ClearSessionCacheOnClientCertChange) {
   EXPECT_THAT(rv, IsError(ERR_BAD_SSL_CLIENT_AUTH_CERT));
 }
 
-HashValueVector MakeHashValueVector(uint8_t value) {
-  HashValueVector out;
-  HashValue hash(HASH_VALUE_SHA256);
-  memset(hash.data(), value, hash.size());
+TEST_F(SSLClientSocketTest, ClearSessionCacheOnClientCertDatabaseChange) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  HostPortPair host_port_pair2("example.com", 42);
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})));
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair2})));
+  EXPECT_CALL(observer,
+              OnSSLConfigForServersChanged(base::flat_set<HostPortPair>(
+                  {host_port_pair(), host_port_pair2})));
+
+  context_->AddObserver(&observer);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  context_->SetClientCertificate(
+      host_port_pair(), ImportCertFromFile(certs_dir, "client_1.pem"),
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key")));
+
+  context_->SetClientCertificate(
+      host_port_pair2, ImportCertFromFile(certs_dir, "client_2.pem"),
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_2.key")));
+
+  EXPECT_EQ(2U, context_->GetClientCertificateCachedServersForTesting().size());
+
+  // Connect to `host_port_pair()` using the client cert.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+
+  EXPECT_EQ(1U, context_->ssl_client_session_cache()->size());
+  const uint64_t generation_number_0 =
+      context_->ssl_client_session_cache()->generation_number();
+
+  CertDatabase::GetInstance()->NotifyObserversClientCertStoreChanged();
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(0U, context_->GetClientCertificateCachedServersForTesting().size());
+  EXPECT_EQ(0U, context_->ssl_client_session_cache()->size());
+
+  const uint64_t generation_number_1 =
+      context_->ssl_client_session_cache()->generation_number();
+  EXPECT_NE(generation_number_0, generation_number_1);
+
+  // Simulate another ClientCertStoreChanged while the client auth cache is
+  // empty.
+  CertDatabase::GetInstance()->NotifyObserversClientCertStoreChanged();
+  base::RunLoop().RunUntilIdle();
+
+  // Since there were no entries in the SSLClientAuthCache, the database
+  // changed event should not have triggered a SSLClientSessionCache flush nor
+  // an observer OnSSLConfigForServersChanged call (which is verified since the
+  // StrictMock has no more expectations left to satisfy.)
+  EXPECT_EQ(generation_number_1,
+            context_->ssl_client_session_cache()->generation_number());
+
+  context_->RemoveObserver(&observer);
+}
+
+TEST_F(SSLClientSocketTest, DontClearEmptyClientCertCache) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  context_->AddObserver(&observer);
+
+  // No cached client certs and no open session.
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().empty());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate1 =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  context_->ClearClientCertificateIfNeeded(host_port_pair(), certificate1);
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().empty());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  context_->RemoveObserver(&observer);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "host"),
+            host_port_pair().ToString());
+  EXPECT_FALSE(GetBooleanValueFromParams(entries[0], "is_cleared"));
+}
+
+TEST_F(SSLClientSocketTest, DontClearMatchingClientCertificates) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})));
+  context_->AddObserver(&observer);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate1 =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  scoped_refptr<net::SSLPrivateKey> private_key1 =
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key"));
+
+  context_->SetClientCertificate(host_port_pair(), certificate1, private_key1);
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+
+  // Connect to `host_port_pair()` using the client cert.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  context_->ClearClientCertificateIfNeeded(host_port_pair(), certificate1);
+  base::RunLoop().RunUntilIdle();
+
+  // Cached certificate and session should not have been cleared since the
+  // certificates were identical.
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().contains(
+      host_port_pair()));
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  context_->RemoveObserver(&observer);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "host"),
+            host_port_pair().ToString());
+  EXPECT_FALSE(GetBooleanValueFromParams(entries[0], "is_cleared"));
+}
+
+TEST_F(SSLClientSocketTest, ClearMismatchingClientCertificates) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})))
+      .Times(2);
+  context_->AddObserver(&observer);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate1 =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  scoped_refptr<net::SSLPrivateKey> private_key1 =
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key"));
+
+  context_->SetClientCertificate(host_port_pair(), certificate1, private_key1);
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+
+  // Connect to `host_port_pair()` using the client cert.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  scoped_refptr<net::X509Certificate> certificate2 =
+      ImportCertFromFile(certs_dir, "client_2.pem");
+  context_->ClearClientCertificateIfNeeded(host_port_pair(), certificate2);
+  base::RunLoop().RunUntilIdle();
+
+  // Cached certificate and session should have been cleared since the
+  // certificates were different.
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().empty());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  context_->RemoveObserver(&observer);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "host"),
+            host_port_pair().ToString());
+  EXPECT_TRUE(GetBooleanValueFromParams(entries[0], "is_cleared"));
+}
+
+TEST_F(SSLClientSocketTest,
+       ClearMismatchingClientCertificatesWithNullParameter) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})))
+      .Times(2);
+  context_->AddObserver(&observer);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate1 =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  scoped_refptr<net::SSLPrivateKey> private_key1 =
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key"));
+
+  context_->SetClientCertificate(host_port_pair(), certificate1, private_key1);
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+
+  // Connect to `host_port_pair()` using the client cert.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  context_->ClearClientCertificateIfNeeded(host_port_pair(), nullptr);
+  base::RunLoop().RunUntilIdle();
+
+  // Cached certificate and session should have been cleared since the
+  // certificates were different.
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().empty());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  context_->RemoveObserver(&observer);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "host"),
+            host_port_pair().ToString());
+  EXPECT_TRUE(GetBooleanValueFromParams(entries[0], "is_cleared"));
+}
+
+TEST_F(SSLClientSocketTest,
+       ClearMismatchingClientCertificatesWithNullCachedCert) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::OPTIONAL_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})))
+      .Times(2);
+  context_->AddObserver(&observer);
+
+  context_->SetClientCertificate(host_port_pair(), nullptr, nullptr);
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+
+  // Connect to `host_port_pair()` using the client cert.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate2 =
+      ImportCertFromFile(certs_dir, "client_2.pem");
+  context_->ClearClientCertificateIfNeeded(host_port_pair(), certificate2);
+  base::RunLoop().RunUntilIdle();
+
+  // Cached certificate and session should have been cleared since the
+  // certificates were different.
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().empty());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  context_->RemoveObserver(&observer);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "host"),
+            host_port_pair().ToString());
+  EXPECT_TRUE(GetBooleanValueFromParams(entries[0], "is_cleared"));
+}
+
+TEST_F(SSLClientSocketTest, DontClearClientCertificatesWithNullCerts) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::OPTIONAL_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})));
+  context_->AddObserver(&observer);
+
+  context_->SetClientCertificate(host_port_pair(), nullptr, nullptr);
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+
+  // Connect to `host_port_pair()` using the client cert.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  context_->ClearClientCertificateIfNeeded(host_port_pair(), nullptr);
+  base::RunLoop().RunUntilIdle();
+
+  // Cached certificate and session should not have been cleared since the
+  // certificates were identical.
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().contains(
+      host_port_pair()));
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  context_->RemoveObserver(&observer);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+  EXPECT_EQ(GetStringValueFromParams(entries[0], "host"),
+            host_port_pair().ToString());
+  EXPECT_FALSE(GetBooleanValueFromParams(entries[0], "is_cleared"));
+}
+
+TEST_F(SSLClientSocketTest, ClearMatchingCertDontClearEmptyClientCertCache) {
+  SSLServerConfig server_config;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // No cached client certs and no open session.
+  ASSERT_TRUE(context_->GetClientCertificateCachedServersForTesting().empty());
+  ASSERT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate1 =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  context_->ClearMatchingClientCertificate(certificate1);
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_TRUE(context_->GetClientCertificateCachedServersForTesting().empty());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_MATCHING_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+
+  const auto& log_entry = entries[0];
+  ASSERT_FALSE(log_entry.params.empty());
+
+  const base::ListValue* hosts_values =
+      log_entry.params.FindListByDottedPath("hosts");
+  ASSERT_TRUE(hosts_values);
+  ASSERT_TRUE(hosts_values->empty());
+
+  const base::ListValue* certificates_values =
+      log_entry.params.FindListByDottedPath("certificates");
+  ASSERT_TRUE(certificates_values);
+  EXPECT_FALSE(certificates_values->empty());
+}
+
+TEST_F(SSLClientSocketTest, ClearMatchingCertSingleNotMatching) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // Add a client cert decision to the cache.
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate1 =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  scoped_refptr<net::SSLPrivateKey> private_key1 =
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key"));
+  context_->SetClientCertificate(host_port_pair(), certificate1, private_key1);
+  ASSERT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+
+  // Create a connection to `host_port_pair()`.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  scoped_refptr<net::X509Certificate> certificate2 =
+      ImportCertFromFile(certs_dir, "client_2.pem");
+  context_->ClearMatchingClientCertificate(certificate2);
+  base::RunLoop().RunUntilIdle();
+
+  // Verify that calling with an unused certificate should not invalidate the
+  // cache, but will still log an event with no hosts.
+  EXPECT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 1U);
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_MATCHING_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+
+  const auto& log_entry = entries[0];
+  ASSERT_FALSE(log_entry.params.empty());
+
+  const base::ListValue* hosts_values =
+      log_entry.params.FindListByDottedPath("hosts");
+  ASSERT_TRUE(hosts_values);
+  ASSERT_TRUE(hosts_values->empty());
+
+  const base::ListValue* certificates_values =
+      log_entry.params.FindListByDottedPath("certificates");
+  ASSERT_TRUE(certificates_values);
+  EXPECT_FALSE(certificates_values->empty());
+}
+
+TEST_F(SSLClientSocketTest, ClearMatchingCertSingleMatching) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // Add a couple of client cert decision to the cache.
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> certificate1 =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  scoped_refptr<net::SSLPrivateKey> private_key1 =
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key"));
+  context_->SetClientCertificate(host_port_pair(), certificate1, private_key1);
+
+  HostPortPair host_port_pair2("example.com", 42);
+  scoped_refptr<net::X509Certificate> certificate2 =
+      ImportCertFromFile(certs_dir, "client_2.pem");
+  scoped_refptr<net::SSLPrivateKey> private_key2 =
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_2.key"));
+  context_->SetClientCertificate(host_port_pair2, certificate2, private_key2);
+  ASSERT_EQ(context_->GetClientCertificateCachedServersForTesting().size(), 2U);
+
+  // Create a connection to `host_port_pair()`.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 1U);
+
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})));
+  context_->AddObserver(&observer);
+
+  context_->ClearMatchingClientCertificate(certificate1);
+  base::RunLoop().RunUntilIdle();
+
+  context_->RemoveObserver(&observer);
+  auto cached_servers_with_decision =
+      context_->GetClientCertificateCachedServersForTesting();
+  EXPECT_EQ(cached_servers_with_decision.size(), 1U);
+  EXPECT_TRUE(cached_servers_with_decision.contains(host_port_pair2));
+
+  EXPECT_EQ(context_->ssl_client_session_cache()->size(), 0U);
+
+  auto entries = log_observer_.GetEntriesWithType(
+      NetLogEventType::CLEAR_MATCHING_CACHED_CLIENT_CERT);
+  ASSERT_EQ(1u, entries.size());
+
+  const auto& log_entry = entries[0];
+  ASSERT_FALSE(log_entry.params.empty());
+
+  const base::ListValue* hosts_values =
+      log_entry.params.FindListByDottedPath("hosts");
+  ASSERT_TRUE(hosts_values);
+  ASSERT_EQ(hosts_values->size(), 1U);
+  EXPECT_EQ(hosts_values->front().GetString(), host_port_pair().ToString());
+
+  const base::ListValue* certificates_values =
+      log_entry.params.FindListByDottedPath("certificates");
+  ASSERT_TRUE(certificates_values);
+  EXPECT_FALSE(certificates_values->empty());
+}
+
+TEST_F(SSLClientSocketTest, DontClearSessionCacheOnServerCertDatabaseChange) {
+  SSLServerConfig server_config;
+  // TLS 1.3 reports client certificate errors after the handshake, so test at
+  // TLS 1.2 for simplicity.
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  HostPortPair host_port_pair2("example.com", 42);
+  testing::StrictMock<MockSSLClientContextObserver> observer;
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair()})));
+  EXPECT_CALL(observer, OnSSLConfigForServersChanged(
+                            base::flat_set<HostPortPair>({host_port_pair2})));
+  EXPECT_CALL(observer,
+              OnSSLConfigChanged(
+                  SSLClientContext::SSLConfigChangeType::kCertDatabaseChanged));
+
+  context_->AddObserver(&observer);
+
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  context_->SetClientCertificate(
+      host_port_pair(), ImportCertFromFile(certs_dir, "client_1.pem"),
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key")));
+
+  context_->SetClientCertificate(
+      host_port_pair2, ImportCertFromFile(certs_dir, "client_2.pem"),
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_2.key")));
+
+  EXPECT_EQ(2U, context_->GetClientCertificateCachedServersForTesting().size());
+
+  // Connect to `host_port_pair()` using the client cert.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(sock_->IsConnected());
+
+  EXPECT_EQ(1U, context_->ssl_client_session_cache()->size());
+
+  CertDatabase::GetInstance()->NotifyObserversTrustStoreChanged();
+  base::RunLoop().RunUntilIdle();
+
+  // The `OnSSLConfigChanged` observer call should be verified by the
+  // mock observer, but the client auth and client session cache should be
+  // untouched.
+
+  EXPECT_EQ(2U, context_->GetClientCertificateCachedServersForTesting().size());
+  EXPECT_EQ(1U, context_->ssl_client_session_cache()->size());
+
+  context_->RemoveObserver(&observer);
+}
+
+// Test client certificate signature algorithm selection.
+TEST_F(SSLClientSocketTest, ClientCertSignatureAlgorithm) {
+  base::FilePath certs_dir = GetTestCertsDirectory();
+  scoped_refptr<net::X509Certificate> client_cert =
+      ImportCertFromFile(certs_dir, "client_1.pem");
+  scoped_refptr<net::SSLPrivateKey> client_key =
+      key_util::LoadPrivateKeyOpenSSL(certs_dir.AppendASCII("client_1.key"));
+
+  const struct {
+    const char* name;
+    uint16_t version;
+    std::vector<uint16_t> server_prefs;
+    std::vector<uint16_t> client_prefs;
+    Error error = OK;
+    uint16_t expected_signature_algorithm = 0;
+  } kTests[] = {
+      {
+          .name = "TLS 1.2 client preference",
+          .version = SSL_PROTOCOL_VERSION_TLS1_2,
+          .server_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA384,
+                           SSL_SIGN_RSA_PSS_RSAE_SHA256},
+          .client_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA256,
+                           SSL_SIGN_RSA_PSS_RSAE_SHA384},
+          // The client's preference should be used.
+          .expected_signature_algorithm = SSL_SIGN_RSA_PSS_RSAE_SHA256,
+      },
+      {
+          .name = "TLS 1.3 client preference",
+          .version = SSL_PROTOCOL_VERSION_TLS1_3,
+          .server_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA384,
+                           SSL_SIGN_RSA_PSS_RSAE_SHA256},
+          .client_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA256,
+                           SSL_SIGN_RSA_PSS_RSAE_SHA384},
+          // The client's preference should be used.
+          .expected_signature_algorithm = SSL_SIGN_RSA_PSS_RSAE_SHA256,
+      },
+
+      {
+          .name = "TLS 1.2 no common algorithms",
+          .version = SSL_PROTOCOL_VERSION_TLS1_2,
+          .server_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA384},
+          .client_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA256},
+          .error = ERR_SSL_CLIENT_AUTH_NO_COMMON_ALGORITHMS,
+      },
+      {
+          .name = "TLS 1.3 no common algorithms",
+          .version = SSL_PROTOCOL_VERSION_TLS1_3,
+          .server_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA384},
+          .client_prefs = {SSL_SIGN_RSA_PSS_RSAE_SHA256},
+          .error = ERR_SSL_CLIENT_AUTH_NO_COMMON_ALGORITHMS,
+      },
+
+      {
+          .name = "TLS 1.2 PKCS#1",
+          .version = SSL_PROTOCOL_VERSION_TLS1_2,
+          .server_prefs = {SSL_SIGN_RSA_PKCS1_SHA256},
+          .client_prefs = {SSL_SIGN_RSA_PKCS1_SHA256},
+          .expected_signature_algorithm = SSL_SIGN_RSA_PKCS1_SHA256,
+      },
+      {
+          .name = "TLS 1.2 no PKCS#1",
+          .version = SSL_PROTOCOL_VERSION_TLS1_3,
+          .server_prefs = {SSL_SIGN_RSA_PKCS1_SHA256},
+          .client_prefs = {SSL_SIGN_RSA_PKCS1_SHA256},
+          // The rsa_pkcs1_sha256 codepoint may not be used in TLS 1.3, so the
+          // TLS library should exclude it.
+          .error = ERR_SSL_CLIENT_AUTH_NO_COMMON_ALGORITHMS,
+      },
+
+      // Test rsa_pkcs1_sha256_legacy. The value is omitted from `client_prefs`
+      // because SSLPrivateKey implementations are not expected to specify
+      // `SSL_SIGN_RSA_PKCS1_SHA256_LEGACY`. Instead, SSLClientSocket
+      // automatically applies support when `SSL_SIGN_RSA_PKCS1_SHA256` is
+      // available.
+      {
+          .name = "TLS 1.2 no legacy PKCS#1",
+          .version = SSL_PROTOCOL_VERSION_TLS1_2,
+          .server_prefs = {SSL_SIGN_RSA_PKCS1_SHA256_LEGACY},
+          .client_prefs = {SSL_SIGN_RSA_PKCS1_SHA256},
+          // The rsa_pkcs1_sha256_legacy codepoint is specifically for
+          // restoring PKCS#1 to TLS 1.3, so it should not be accepted.
+          .error = ERR_SSL_CLIENT_AUTH_NO_COMMON_ALGORITHMS,
+      },
+      {
+          .name = "TLS 1.3 legacy PKCS#1",
+          .version = SSL_PROTOCOL_VERSION_TLS1_3,
+          .server_prefs = {SSL_SIGN_RSA_PKCS1_SHA256_LEGACY},
+          .client_prefs = {SSL_SIGN_RSA_PKCS1_SHA256},
+          // The rsa_pkcs1_sha256_legacy codepoint may be used in TLS 1.3.
+          .expected_signature_algorithm = SSL_SIGN_RSA_PKCS1_SHA256_LEGACY,
+      },
+      {
+          .name = "TLS 1.3 legacy PKCS#1 not preferred",
+          .version = SSL_PROTOCOL_VERSION_TLS1_3,
+          .server_prefs = {SSL_SIGN_RSA_PKCS1_SHA256_LEGACY,
+                           SSL_SIGN_RSA_PSS_RSAE_SHA256},
+          .client_prefs = {SSL_SIGN_RSA_PKCS1_SHA256,
+                           SSL_SIGN_RSA_PSS_RSAE_SHA256},
+          // The legacy codepoint is only used when no other options are
+          // available. The key supports PSS, so we will use PSS instead.
+          .expected_signature_algorithm = SSL_SIGN_RSA_PSS_RSAE_SHA256,
+      },
+  };
+  for (const auto& test : kTests) {
+    SCOPED_TRACE(test.name);
+
+    SSLServerConfig server_config;
+    server_config.version_min = test.version;
+    server_config.version_max = test.version;
+    server_config.client_cert_type = SSLServerConfig::REQUIRE_CLIENT_CERT;
+    server_config.client_cert_signature_algorithms = test.server_prefs;
+    ASSERT_TRUE(
+        StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+    // Connect with the client certificate.
+    context_->SetClientCertificate(
+        host_port_pair(), client_cert,
+        WrapSSLPrivateKeyWithPreferences(client_key, test.client_prefs));
+    int rv;
+    ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+    if (test.error != OK) {
+      EXPECT_THAT(rv, IsError(test.error));
+      continue;
+    }
+
+    EXPECT_THAT(rv, IsOk());
+    EXPECT_TRUE(sock_->IsConnected());
+
+    // Capture the SSLInfo from the server to get the client's chosen signature
+    // algorithm.
+    EXPECT_THAT(MakeHTTPRequest(sock_.get(), "/ssl-info"), IsOk());
+    std::optional<SSLInfo> server_ssl_info = LastSSLInfoFromServer();
+    ASSERT_TRUE(server_ssl_info);
+    EXPECT_EQ(server_ssl_info->peer_signature_algorithm,
+              test.expected_signature_algorithm);
+  }
+}
+#endif  // BUILDFLAG(ENABLE_CLIENT_CERTIFICATES)
+
+std::vector<SHA256HashValue> MakeHashValueVector(uint8_t tag) {
+  SHA256HashValue hash;
+  std::ranges::fill(hash, tag);
+  std::vector<SHA256HashValue> out;
   out.push_back(hash);
   return out;
 }
@@ -3889,6 +4749,9 @@ HashValueVector MakeHashValueVector(uint8_t value) {
 // Test that |ssl_info.pkp_bypassed| is set when a local trust anchor causes
 // pinning to be bypassed.
 TEST_P(SSLClientSocketVersionTest, PKPBypassedSet) {
+  base::test::ScopedFeatureList scoped_feature_list_;
+  scoped_feature_list_.InitAndEnableFeature(
+      net::features::kStaticKeyPinningEnforcement);
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
   scoped_refptr<X509Certificate> server_cert =
@@ -3904,6 +4767,7 @@ TEST_P(SSLClientSocketVersionTest, PKPBypassedSet) {
   cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
 
   transport_security_state_->EnableStaticPinsForTesting();
+  transport_security_state_->SetPinningListAlwaysTimelyForTesting(true);
   ScopedTransportSecurityStateSource scoped_security_state_source;
 
   SSLConfig ssl_config;
@@ -3922,6 +4786,9 @@ TEST_P(SSLClientSocketVersionTest, PKPBypassedSet) {
 }
 
 TEST_P(SSLClientSocketVersionTest, PKPEnforced) {
+  base::test::ScopedFeatureList scoped_feature_list_;
+  scoped_feature_list_.InitAndEnableFeature(
+      net::features::kStaticKeyPinningEnforcement);
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
   scoped_refptr<X509Certificate> server_cert =
@@ -3937,6 +4804,7 @@ TEST_P(SSLClientSocketVersionTest, PKPEnforced) {
   cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
 
   transport_security_state_->EnableStaticPinsForTesting();
+  transport_security_state_->SetPinningListAlwaysTimelyForTesting(true);
   ScopedTransportSecurityStateSource scoped_security_state_source;
 
   SSLConfig ssl_config;
@@ -3957,46 +4825,38 @@ TEST_P(SSLClientSocketVersionTest, PKPEnforced) {
 namespace {
 // TLS_RSA_WITH_AES_128_GCM_SHA256's key exchange involves encrypting to the
 // server long-term key.
-const uint16_t kEncryptingCipher = 0x009c;
+const uint16_t kEncryptingCipher = kRSACipher;
 // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256's key exchange involves a signature by
 // the server long-term key.
-const uint16_t kSigningCipher = 0xc02f;
+const uint16_t kSigningCipher = kModernTLS12Cipher;
 }  // namespace
 
 struct KeyUsageTest {
   EmbeddedTestServer::ServerCertificate server_cert;
   uint16_t cipher_suite;
-  bool known_root;
-  bool success;
+  bool match;
 };
 
 class SSLClientSocketKeyUsageTest
     : public SSLClientSocketTest,
-      public ::testing::WithParamInterface<struct KeyUsageTest> {};
+      public ::testing::WithParamInterface<
+          std::tuple<KeyUsageTest, bool /*known_root*/>> {};
 
-const struct KeyUsageTest kKeyUsageTests[] = {
-    // Known Root: Success iff keyUsage allows the key exchange method
-    {EmbeddedTestServer::CERT_KEY_USAGE_RSA_ENCIPHERMENT, kSigningCipher, true,
-     false},
+const KeyUsageTest kKeyUsageTests[] = {
+    // keyUsage matches cipher suite.
     {EmbeddedTestServer::CERT_KEY_USAGE_RSA_DIGITAL_SIGNATURE, kSigningCipher,
-     true, true},
-    {EmbeddedTestServer::CERT_KEY_USAGE_RSA_ENCIPHERMENT, kEncryptingCipher,
-     true, true},
-    {EmbeddedTestServer::CERT_KEY_USAGE_RSA_DIGITAL_SIGNATURE,
-     kEncryptingCipher, true, false},
-    // Unknown Root: Always succeeds
-    {EmbeddedTestServer::CERT_KEY_USAGE_RSA_ENCIPHERMENT, kSigningCipher, false,
      true},
-    {EmbeddedTestServer::CERT_KEY_USAGE_RSA_DIGITAL_SIGNATURE, kSigningCipher,
-     false, true},
     {EmbeddedTestServer::CERT_KEY_USAGE_RSA_ENCIPHERMENT, kEncryptingCipher,
-     false, true},
+     true},
+    // keyUsage does not match cipher suite.
+    {EmbeddedTestServer::CERT_KEY_USAGE_RSA_ENCIPHERMENT, kSigningCipher,
+     false},
     {EmbeddedTestServer::CERT_KEY_USAGE_RSA_DIGITAL_SIGNATURE,
-     kEncryptingCipher, false, true},
+     kEncryptingCipher, false},
 };
 
-TEST_P(SSLClientSocketKeyUsageTest, RSAKeyUsageEnforcedForKnownRoot) {
-  const KeyUsageTest test = GetParam();
+TEST_P(SSLClientSocketKeyUsageTest, RSAKeyUsage) {
+  const auto& [test, known_root] = GetParam();
   SSLServerConfig server_config;
   server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
   server_config.cipher_suite_for_testing = test.cipher_suite;
@@ -4006,7 +4866,7 @@ TEST_P(SSLClientSocketKeyUsageTest, RSAKeyUsageEnforcedForKnownRoot) {
 
   // Certificate is trusted.
   CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = test.known_root;
+  verify_result.is_issued_by_known_root = known_root;
   verify_result.verified_cert = server_cert;
   verify_result.public_key_hashes =
       MakeHashValueVector(kGoodHashValueVectorInput);
@@ -4018,7 +4878,7 @@ TEST_P(SSLClientSocketKeyUsageTest, RSAKeyUsageEnforcedForKnownRoot) {
   SSLInfo ssl_info;
   ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
 
-  if (test.success) {
+  if (test.match) {
     EXPECT_THAT(rv, IsOk());
     EXPECT_TRUE(sock_->IsConnected());
   } else {
@@ -4029,49 +4889,7 @@ TEST_P(SSLClientSocketKeyUsageTest, RSAKeyUsageEnforcedForKnownRoot) {
 
 INSTANTIATE_TEST_SUITE_P(RSAKeyUsageInstantiation,
                          SSLClientSocketKeyUsageTest,
-                         ::testing::ValuesIn(kKeyUsageTests));
-
-// Test that when CT is required (in this case, by the delegate), the
-// absence of CT information is a socket error.
-TEST_P(SSLClientSocketVersionTest, CTIsRequired) {
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up CT
-  MockRequireCTDelegate require_ct_delegate;
-  transport_security_state_->SetRequireCTDelegate(&require_ct_delegate);
-  EXPECT_CALL(require_ct_delegate, IsCTRequiredForHost(_, _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::NOT_REQUIRED));
-  EXPECT_CALL(require_ct_delegate,
-              IsCTRequiredForHost(host_port_pair().host(), _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::REQUIRED));
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  EXPECT_THAT(rv, IsError(ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  EXPECT_TRUE(ssl_info.cert_status &
-              CERT_STATUS_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(sock_->IsConnected());
-}
+                         Combine(ValuesIn(kKeyUsageTests), Bool()));
 
 // Test that when CT is required, setting ignore_certificate_errors
 // ignores errors in CT.
@@ -4087,21 +4905,11 @@ TEST_P(SSLClientSocketVersionTest, IgnoreCertificateErrorsBypassesRequiredCT) {
   verify_result.verified_cert = server_cert;
   verify_result.public_key_hashes =
       MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up CT
-  MockRequireCTDelegate require_ct_delegate;
-  transport_security_state_->SetRequireCTDelegate(&require_ct_delegate);
-  EXPECT_CALL(require_ct_delegate, IsCTRequiredForHost(_, _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::NOT_REQUIRED));
-  EXPECT_CALL(require_ct_delegate,
-              IsCTRequiredForHost(host_port_pair().host(), _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::REQUIRED));
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
+  verify_result.policy_compliance =
+      ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS;
+  verify_result.cert_status = CERT_STATUS_CERTIFICATE_TRANSPARENCY_REQUIRED;
+  cert_verifier_->AddResultForCert(server_cert.get(), verify_result,
+                                   ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
 
   SSLConfig ssl_config;
   ssl_config.ignore_certificate_errors = true;
@@ -4116,431 +4924,12 @@ TEST_P(SSLClientSocketVersionTest, IgnoreCertificateErrorsBypassesRequiredCT) {
   EXPECT_TRUE(sock_->IsConnected());
 }
 
-// Test that the CT compliance status is recorded in a histogram.
-TEST_P(SSLClientSocketVersionTest, CTComplianceStatusHistogram) {
-  const char kHistogramName[] =
-      "Net.CertificateTransparency.ConnectionComplianceStatus2.SSL";
-  base::HistogramTester histograms;
-
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up CT.
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_DIVERSE_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  // The histogram should have been recorded with the CT compliance status.
-  histograms.ExpectUniqueSample(
-      kHistogramName,
-      static_cast<int>(ct::CTPolicyCompliance::CT_POLICY_NOT_DIVERSE_SCTS), 1);
-}
-
-// Test that the CT compliance status histogram is not recorded for
-// locally-installed roots.
-TEST_P(SSLClientSocketVersionTest, CTComplianceStatusHistogramLocalRoot) {
-  const char kHistogramName[] =
-      "Net.CertificateTransparency.ConnectionComplianceStatus2.SSL";
-  base::HistogramTester histograms;
-
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted but chains to a local root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = false;
-  verify_result.verified_cert = server_cert;
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up CT.
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_DIVERSE_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  histograms.ExpectTotalCount(kHistogramName, 0);
-}
-
-// Test that when CT is required (in this case, by an Expect-CT opt-in) and the
-// connection is compliant, the histogram for CT-required connections is
-// recorded properly.
-TEST_P(SSLClientSocketVersionTest, CTRequiredHistogramCompliant) {
-  const char kHistogramName[] =
-      "Net.CertificateTransparency.CTRequiredConnectionComplianceStatus2.SSL";
-  base::HistogramTester histograms;
-
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      TransportSecurityState::kDynamicExpectCTFeature);
-
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up the Expect-CT opt-in.
-  const base::Time current_time(base::Time::Now());
-  const base::Time expiry = current_time + base::TimeDelta::FromSeconds(1000);
-  transport_security_state_->AddExpectCT(
-      host_port_pair().host(), expiry, true /* enforce */,
-      GURL("https://example-report.test"), NetworkIsolationKey());
-  MockExpectCTReporter reporter;
-  transport_security_state_->SetExpectCTReporter(&reporter);
-
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  // The histogram should have been recorded with the CT compliance status.
-  histograms.ExpectUniqueSample(
-      kHistogramName,
-      static_cast<int>(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS), 1);
-}
-
-// Test that when CT is not required and the connection is compliant, the
-// histogram for CT-required connections is not recorded.
-TEST_P(SSLClientSocketVersionTest, CTNotRequiredHistogram) {
-  const char kHistogramName[] =
-      "Net.CertificateTransparency.CTRequiredConnectionComplianceStatus2.SSL";
-  base::HistogramTester histograms;
-
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a private root, so CT is not required.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = false;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  // The histogram should not have been recorded because CT was not required for
-  // the connection.
-  histograms.ExpectTotalCount(kHistogramName, 0);
-}
-
-// Test that when CT is required (in this case, by an Expect-CT opt-in), the
-// absence of CT information is recorded in the histogram for CT-required
-// connections.
-TEST_P(SSLClientSocketVersionTest, CTRequiredHistogramNonCompliant) {
-  const char kHistogramName[] =
-      "Net.CertificateTransparency.CTRequiredConnectionComplianceStatus2.SSL";
-  base::HistogramTester histograms;
-
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      TransportSecurityState::kDynamicExpectCTFeature);
-
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up the Expect-CT opt-in.
-  const base::Time current_time(base::Time::Now());
-  const base::Time expiry = current_time + base::TimeDelta::FromSeconds(1000);
-  transport_security_state_->AddExpectCT(
-      host_port_pair().host(), expiry, true /* enforce */,
-      GURL("https://example-report.test"), NetworkIsolationKey());
-  MockExpectCTReporter reporter;
-  transport_security_state_->SetExpectCTReporter(&reporter);
-
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  EXPECT_THAT(rv, IsError(ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-
-  // The histogram should have been recorded with the CT compliance status.
-  histograms.ExpectUniqueSample(
-      kHistogramName,
-      static_cast<int>(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS), 1);
-}
-
-// Test that when CT is required (in this case, by an Expect-CT opt-in) but the
-// connection is not compliant, the relevant flag is set on the SSLInfo.
-TEST_P(SSLClientSocketVersionTest, CTRequirementsFlagNotMet) {
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up the Expect-CT opt-in.
-  const base::Time current_time(base::Time::Now());
-  const base::Time expiry = current_time + base::TimeDelta::FromSeconds(1000);
-  transport_security_state_->AddExpectCT(host_port_pair().host(), expiry,
-                                         true /* enforce */, GURL(),
-                                         NetworkIsolationKey());
-
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-  EXPECT_TRUE(ssl_info.ct_policy_compliance_required);
-}
-
-// Test that when CT is required (in this case, by an Expect-CT opt-in) and the
-// connection is compliant, the relevant flag is set on the SSLInfo.
-TEST_P(SSLClientSocketVersionTest, CTRequirementsFlagMet) {
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up the Expect-CT opt-in.
-  const base::Time current_time(base::Time::Now());
-  const base::Time expiry = current_time + base::TimeDelta::FromSeconds(1000);
-  transport_security_state_->AddExpectCT(host_port_pair().host(), expiry,
-                                         true /* enforce */, GURL(),
-                                         NetworkIsolationKey());
-
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-  EXPECT_TRUE(ssl_info.ct_policy_compliance_required);
-}
-
-// Test that when CT is required (in this case, by a CT delegate), the CT
-// required histogram is not recorded for a locally installed root.
-TEST_P(SSLClientSocketVersionTest, CTRequiredHistogramNonCompliantLocalRoot) {
-  const char kHistogramName[] =
-      "Net.CertificateTransparency.CTRequiredConnectionComplianceStatus2.SSL";
-  base::HistogramTester histograms;
-
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      TransportSecurityState::kDynamicExpectCTFeature);
-
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = false;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up the CT requirement and failure to comply.
-  base::ScopedClosureRunner cleanup(
-      base::BindOnce(&TransportSecurityState::SetRequireCTForTesting, false));
-  TransportSecurityState::SetRequireCTForTesting(true);
-  MockRequireCTDelegate require_ct_delegate;
-  transport_security_state_->SetRequireCTDelegate(&require_ct_delegate);
-  EXPECT_CALL(require_ct_delegate, IsCTRequiredForHost(_, _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::REQUIRED));
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
-
-  SSLConfig ssl_config;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  EXPECT_THAT(rv, IsError(ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-
-  histograms.ExpectTotalCount(kHistogramName, 0);
-}
-
-// Test that when CT is required (in this case, by an Expect-CT opt-in), the
-// absence of CT information is a socket error.
-TEST_P(SSLClientSocketVersionTest, CTIsRequiredByExpectCT) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      TransportSecurityState::kDynamicExpectCTFeature);
-
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-  scoped_refptr<X509Certificate> server_cert =
-      embedded_test_server()->GetCertificate();
-
-  // Certificate is trusted and chains to a public root.
-  CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = true;
-  verify_result.verified_cert = server_cert;
-  verify_result.public_key_hashes =
-      MakeHashValueVector(kGoodHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up the Expect-CT opt-in.
-  NetworkIsolationKey network_isolation_key =
-      NetworkIsolationKey::CreateTransient();
-  const base::Time current_time(base::Time::Now());
-  const base::Time expiry = current_time + base::TimeDelta::FromSeconds(1000);
-  transport_security_state_->AddExpectCT(
-      host_port_pair().host(), expiry, true /* enforce */,
-      GURL("https://example-report.test"), NetworkIsolationKey());
-  MockExpectCTReporter reporter;
-  transport_security_state_->SetExpectCTReporter(&reporter);
-
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
-
-  SSLConfig ssl_config;
-  ssl_config.network_isolation_key = network_isolation_key;
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  SSLInfo ssl_info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  EXPECT_THAT(rv, IsError(ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  EXPECT_TRUE(ssl_info.cert_status &
-              CERT_STATUS_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(sock_->IsConnected());
-
-  EXPECT_EQ(1u, reporter.num_failures());
-  EXPECT_EQ(GURL("https://example-report.test"), reporter.report_uri());
-  EXPECT_EQ(ssl_info.unverified_cert.get(),
-            reporter.served_certificate_chain());
-  EXPECT_EQ(ssl_info.cert.get(), reporter.validated_certificate_chain());
-  EXPECT_EQ(0u, reporter.signed_certificate_timestamps().size());
-  EXPECT_EQ(network_isolation_key, reporter.network_isolation_key());
-
-  transport_security_state_->ClearReportCachesForTesting();
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_DIVERSE_SCTS));
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  EXPECT_THAT(rv, IsError(ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  EXPECT_TRUE(ssl_info.cert_status &
-              CERT_STATUS_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(sock_->IsConnected());
-
-  EXPECT_EQ(2u, reporter.num_failures());
-  EXPECT_EQ(GURL("https://example-report.test"), reporter.report_uri());
-  EXPECT_EQ(ssl_info.unverified_cert.get(),
-            reporter.served_certificate_chain());
-  EXPECT_EQ(ssl_info.cert.get(), reporter.validated_certificate_chain());
-  EXPECT_EQ(0u, reporter.signed_certificate_timestamps().size());
-  EXPECT_EQ(network_isolation_key, reporter.network_isolation_key());
-
-  // If the connection is CT compliant, then there should be no socket error nor
-  // a report.
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  EXPECT_EQ(net::OK, rv);
-  EXPECT_FALSE(ssl_info.cert_status &
-               CERT_STATUS_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_TRUE(sock_->IsConnected());
-  EXPECT_EQ(2u, reporter.num_failures());
-
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_BUILD_NOT_TIMELY));
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
-  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
-
-  EXPECT_EQ(net::OK, rv);
-  EXPECT_FALSE(ssl_info.cert_status &
-               CERT_STATUS_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_TRUE(sock_->IsConnected());
-  EXPECT_EQ(2u, reporter.num_failures());
-}
-
 // When both PKP and CT are required for a host, and both fail, the more
 // serious error is that the pin validation failed.
 TEST_P(SSLClientSocketVersionTest, PKPMoreImportantThanCT) {
+  base::test::ScopedFeatureList scoped_feature_list_;
+  scoped_feature_list_.InitAndEnableFeature(
+      net::features::kStaticKeyPinningEnforcement);
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
   scoped_refptr<X509Certificate> server_cert =
@@ -4553,25 +4942,17 @@ TEST_P(SSLClientSocketVersionTest, PKPMoreImportantThanCT) {
   verify_result.verified_cert = server_cert;
   verify_result.public_key_hashes =
       MakeHashValueVector(kBadHashValueVectorInput);
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
+  verify_result.policy_compliance =
+      ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS;
+  verify_result.cert_status = CERT_STATUS_CERTIFICATE_TRANSPARENCY_REQUIRED;
+  cert_verifier_->AddResultForCert(server_cert.get(), verify_result,
+                                   ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
 
   transport_security_state_->EnableStaticPinsForTesting();
+  transport_security_state_->SetPinningListAlwaysTimelyForTesting(true);
   ScopedTransportSecurityStateSource scoped_security_state_source;
 
-  const char kCTHost[] = "pkp-expect-ct.preloaded.test";
-
-  // Set up CT.
-  MockRequireCTDelegate require_ct_delegate;
-  transport_security_state_->SetRequireCTDelegate(&require_ct_delegate);
-  EXPECT_CALL(require_ct_delegate, IsCTRequiredForHost(_, _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::NOT_REQUIRED));
-  EXPECT_CALL(require_ct_delegate, IsCTRequiredForHost(kCTHost, _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::REQUIRED));
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_NOT_ENOUGH_SCTS));
+  const char kCTHost[] = "hsts-hpkp-preloaded.test";
 
   SSLConfig ssl_config;
   int rv;
@@ -4601,23 +4982,14 @@ TEST_P(SSLClientSocketVersionTest, SCTAuditingReportCollected) {
   verify_result.verified_cert = server_cert;
   verify_result.public_key_hashes =
       MakeHashValueVector(kGoodHashValueVectorInput);
+  verify_result.policy_compliance =
+      ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS;
   cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
-
-  // Set up CT and auditing delegate.
-  MockRequireCTDelegate require_ct_delegate;
-  transport_security_state_->SetRequireCTDelegate(&require_ct_delegate);
-  EXPECT_CALL(require_ct_delegate, IsCTRequiredForHost(_, _, _))
-      .WillRepeatedly(Return(TransportSecurityState::RequireCTDelegate::
-                                 CTRequirementLevel::REQUIRED));
-  EXPECT_CALL(*ct_policy_enforcer_, CheckCompliance(server_cert.get(), _, _))
-      .WillRepeatedly(
-          Return(ct::CTPolicyCompliance::CT_POLICY_COMPLIES_VIA_SCTS));
 
   MockSCTAuditingDelegate sct_auditing_delegate;
   context_ = std::make_unique<SSLClientContext>(
       ssl_config_service_.get(), cert_verifier_.get(),
-      transport_security_state_.get(), ct_verifier_.get(),
-      ct_policy_enforcer_.get(), ssl_client_session_cache_.get(),
+      transport_security_state_.get(), ssl_client_session_cache_.get(),
       &sct_auditing_delegate);
 
   EXPECT_CALL(sct_auditing_delegate, IsSCTAuditingEnabled())
@@ -4640,10 +5012,10 @@ TEST_F(SSLClientSocketTest, HandshakeFailureServerHello) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -4675,10 +5047,10 @@ TEST_F(SSLClientSocketTest, HandshakeFailureNoClientCerts) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -4724,10 +5096,10 @@ TEST_F(SSLClientSocketTest, LateHandshakeFailureMissingClientCerts) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -4774,10 +5146,10 @@ TEST_F(SSLClientSocketTest, LateHandshakeFailureSendClientCerts) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -4826,10 +5198,10 @@ TEST_F(SSLClientSocketTest, AccessDeniedNoClientCerts) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -4873,10 +5245,10 @@ TEST_F(SSLClientSocketTest, AccessDeniedClientCerts) {
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
   TestCompletionCallback callback;
-  std::unique_ptr<StreamSocket> real_transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, nullptr, NetLogSource()));
-  std::unique_ptr<FakeBlockingStreamSocket> transport(
-      new FakeBlockingStreamSocket(std::move(real_transport)));
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
   FakeBlockingStreamSocket* raw_transport = transport.get();
   int rv = callback.GetResult(transport->Connect(callback.callback()));
   ASSERT_THAT(rv, IsOk());
@@ -4924,15 +5296,15 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTEarlyDataBeforeServerHello) {
   FakeBlockingStreamSocket* socket = MakeClient(true);
   socket->BlockReadResult();
   ASSERT_THAT(Connect(), IsOk());
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
   // Release the ServerHello. Now reads complete.
   socket->UnblockReadResult();
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int size = ReadAndWait(buf.get(), 4096);
   EXPECT_GT(size, 0);
-  EXPECT_EQ('1', buf->data()[size - 1]);
+  EXPECT_EQ('1', buf->span()[size - 1]);
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
@@ -4957,17 +5329,17 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTEarlyDataAfterServerHello) {
   base::RunLoop().RunUntilIdle();
 
   // Now write to the socket.
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
   // Although the socket was created in early data state and the client never
   // explicitly called ReaD() or ConfirmHandshake(), SSLClientSocketImpl
   // internally consumed the ServerHello and switch keys. The server then
   // responds with '0'.
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int size = ReadAndWait(buf.get(), 4096);
   EXPECT_GT(size, 0);
-  EXPECT_EQ('0', buf->data()[size - 1]);
+  EXPECT_EQ('0', buf->span()[size - 1]);
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
@@ -4984,14 +5356,14 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTConfirmedAfterRead) {
   FakeBlockingStreamSocket* socket = MakeClient(true);
   socket->BlockReadResult();
   ASSERT_THAT(Connect(), IsOk());
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
   socket->UnblockReadResult();
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int size = ReadAndWait(buf.get(), 4096);
   EXPECT_GT(size, 0);
-  EXPECT_EQ('1', buf->data()[size - 1]);
+  EXPECT_EQ('1', buf->span()[size - 1]);
 
   // After the handshake is confirmed, ConfirmHandshake should return
   // synchronously.
@@ -5040,7 +5412,7 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTEarlyDataLimit) {
 
   // Queue a read. It should be blocked on the ServerHello.
   TestCompletionCallback read_callback;
-  auto read_buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto read_buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int read_rv =
       ssl_socket()->Read(read_buf.get(), 4096, read_callback.callback());
   ASSERT_THAT(read_rv, IsError(ERR_IO_PENDING));
@@ -5062,11 +5434,82 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTEarlyDataLimit) {
   EXPECT_THAT(confirm_callback.GetResult(confirm_rv), IsOk());
   int size = read_callback.GetResult(read_rv);
   ASSERT_GT(size, 0);
-  EXPECT_EQ('1', read_buf->data()[size - 1]);
+  EXPECT_EQ('1', read_buf->span()[size - 1]);
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
   EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+}
+
+// When a client socket reaches the 0-RTT early data limit, both Write() and
+// ConfirmHandshake() become blocked on a transport read. Test that
+// CancelReadIfReady() does not interrupt those.
+TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTEarlyDataLimitCancelReadIfReady) {
+  ASSERT_TRUE(StartServer());
+  ASSERT_TRUE(RunInitialConnection());
+
+  // Make a 0-RTT Connection. Connect() completes even though the ServerHello is
+  // blocked.
+  FakeBlockingStreamSocket* socket = MakeClient(true);
+  socket->BlockReadResult();
+  ASSERT_THAT(Connect(), IsOk());
+
+  // EmbeddedTestServer uses BoringSSL's hard-coded early data limit, which is
+  // below 16k.
+  constexpr size_t kRequestSize = 16 * 1024;
+  std::string request = "GET /zerortt HTTP/1.0\r\n";
+  while (request.size() < kRequestSize) {
+    request += "The-Answer-To-Life-The-Universe-And-Everything: 42\r\n";
+  }
+  request += "\r\n";
+
+  // Writing the large input should not succeed. It is blocked on the
+  // ServerHello.
+  TestCompletionCallback write_callback;
+  auto write_buf = base::MakeRefCounted<StringIOBuffer>(request);
+  int write_rv = ssl_socket()->Write(write_buf.get(), request.size(),
+                                     write_callback.callback(),
+                                     TRAFFIC_ANNOTATION_FOR_TESTS);
+  ASSERT_THAT(write_rv, IsError(ERR_IO_PENDING));
+
+  // The Write should have issued a read for the ServerHello, so
+  // WaitForReadResult has something to wait for.
+  socket->WaitForReadResult();
+  EXPECT_TRUE(socket->pending_read_result());
+
+  // Attempt a ReadIfReady(). It should be blocked on the ServerHello.
+  TestCompletionCallback read_callback;
+  auto read_buf = base::MakeRefCounted<IOBufferWithSize>(4096);
+  int read_rv =
+      ssl_socket()->ReadIfReady(read_buf.get(), 4096, read_callback.callback());
+  ASSERT_THAT(read_rv, IsError(ERR_IO_PENDING));
+
+  // Also queue a ConfirmHandshake. It should also be blocked on ServerHello.
+  TestCompletionCallback confirm_callback;
+  int confirm_rv = ssl_socket()->ConfirmHandshake(confirm_callback.callback());
+  ASSERT_THAT(confirm_rv, IsError(ERR_IO_PENDING));
+
+  // Cancel the ReadIfReady() and release the ServerHello. The remaining
+  // operations should complete.
+  ASSERT_THAT(ssl_socket()->CancelReadIfReady(), IsOk());
+  socket->UnblockReadResult();
+  EXPECT_EQ(static_cast<int>(request.size()),
+            write_callback.GetResult(write_rv));
+  EXPECT_THAT(confirm_callback.GetResult(confirm_rv), IsOk());
+
+  // ReadIfReady() should not complete.
+  base::RunLoop().RunUntilIdle();
+  EXPECT_FALSE(read_callback.have_result());
+
+  SSLInfo ssl_info;
+  ASSERT_TRUE(GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+
+  // After a canceled read, future reads are still possible.
+  TestCompletionCallback read_callback2;
+  read_rv = read_callback2.GetResult(
+      ssl_socket()->Read(read_buf.get(), 4096, read_callback2.callback()));
+  ASSERT_GT(read_rv, 0);
 }
 
 TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTReject) {
@@ -5082,24 +5525,68 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTReject) {
   FakeBlockingStreamSocket* socket = MakeClient(true);
   socket->BlockReadResult();
   ASSERT_THAT(Connect(), IsOk());
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
   socket->UnblockReadResult();
 
   // Expect early data to be rejected.
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int rv = ReadAndWait(buf.get(), 4096);
   EXPECT_EQ(ERR_EARLY_DATA_REJECTED, rv);
   rv = WriteAndWait(kRequest);
   EXPECT_EQ(ERR_EARLY_DATA_REJECTED, rv);
 
-  // Retrying the connection should succeed.
+  // Run the event loop so the rejection has reached the TLS session cache.
+  base::RunLoop().RunUntilIdle();
+
+  // Now that the session cache has been updated, retrying the connection
+  // should succeed.
   socket = MakeClient(true);
   ASSERT_THAT(Connect(), IsOk());
   ASSERT_THAT(MakeHTTPRequest(ssl_socket()), IsOk());
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
   EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+}
+
+// Test that early data is cleared from the cache immediately when a read error
+// occurs, even if the socket is destroyed before the posted DoPeek task can
+// run. This prevents infinite retry loops in HttpNetworkTransaction.
+TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTRejectNoRunLoop) {
+  ASSERT_TRUE(StartServer());
+  ASSERT_TRUE(RunInitialConnection());
+
+  SSLServerConfig server_config;
+  server_config.early_data_enabled = false;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_3;
+  SetServerConfig(server_config);
+
+  // 0-RTT Connection
+  FakeBlockingStreamSocket* socket = MakeClient(true);
+  socket->BlockReadResult();
+  ASSERT_THAT(Connect(), IsOk());
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
+  socket->UnblockReadResult();
+  base::PlatformThread::Sleep(base::Milliseconds(100));
+
+  // Expect early data to be rejected.
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
+  int rv = ReadAndWait(buf.get(), 4096);
+  EXPECT_EQ(ERR_EARLY_DATA_REJECTED, rv);
+
+  // Destroy the socket immediately without running the event loop.
+  // This simulates HttpNetworkTransaction destroying the socket on error.
+  DestroyClient();
+
+  // Try to connect again. Since the socket was destroyed immediately, the
+  // posted DoPeek task was cancelled. However, the cache should have been
+  // cleared during the read error mapping, so this connection should not
+  // attempt 0-RTT and should succeed.
+  socket = MakeClient(true);
+  ASSERT_THAT(Connect(), IsOk());
+  rv = MakeHTTPRequest(ssl_socket());
+  EXPECT_THAT(rv, IsOk());
 }
 
 TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTWrongVersion) {
@@ -5114,22 +5601,22 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTWrongVersion) {
   FakeBlockingStreamSocket* socket = MakeClient(true);
   socket->BlockReadResult();
   ASSERT_THAT(Connect(), IsOk());
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
   socket->UnblockReadResult();
 
   // Expect early data to be rejected because the TLS version was incorrect.
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int rv = ReadAndWait(buf.get(), 4096);
   EXPECT_EQ(ERR_WRONG_VERSION_ON_EARLY_DATA, rv);
   rv = WriteAndWait(kRequest);
-  // TODO(https://crbug.com/1078515): This should be
-  // ERR_WRONG_VERSION_ON_EARLY_DATA. We assert on the current value so that,
-  // when the bug is fixed (likely in BoringSSL), we remember to fix the test to
-  // set a proper test expectation.
-  EXPECT_EQ(ERR_SSL_PROTOCOL_ERROR, rv);
+  EXPECT_EQ(ERR_WRONG_VERSION_ON_EARLY_DATA, rv);
 
-  // Retrying the connection should succeed.
+  // Run the event loop so the rejection has reached the TLS session cache.
+  base::RunLoop().RunUntilIdle();
+
+  // Now that the session cache has been updated, retrying the connection
+  // should succeed.
   socket = MakeClient(true);
   ASSERT_THAT(Connect(), IsOk());
   ASSERT_THAT(MakeHTTPRequest(ssl_socket()), IsOk());
@@ -5160,13 +5647,13 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTConfirmHandshake) {
   socket->UnblockReadResult();
   ASSERT_THAT(callback.GetResult(ERR_IO_PENDING), IsOk());
 
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int size = ReadAndWait(buf.get(), 4096);
   EXPECT_GT(size, 0);
-  EXPECT_EQ('0', buf->data()[size - 1]);
+  EXPECT_EQ('0', buf->span()[size - 1]);
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
@@ -5185,20 +5672,20 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTReadBeforeWrite) {
   ASSERT_THAT(Connect(), IsOk());
 
   // Read() does not make progress.
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   TestCompletionCallback read_callback;
   ASSERT_EQ(ERR_IO_PENDING,
             ssl_socket()->Read(buf.get(), 4096, read_callback.callback()));
 
   // Write() completes, even though reads are blocked.
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
   // Release the ServerHello, etc. The Read() now completes.
   socket->UnblockReadResult();
   int size = read_callback.GetResult(ERR_IO_PENDING);
   EXPECT_GT(size, 0);
-  EXPECT_EQ('1', buf->data()[size - 1]);
+  EXPECT_EQ('1', buf->span()[size - 1]);
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
@@ -5219,13 +5706,13 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTDoubleConfirmHandshake) {
   // After the handshake is confirmed, ConfirmHandshake should return
   // synchronously.
   ASSERT_THAT(ssl_socket()->ConfirmHandshake(callback.callback()), IsOk());
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int size = ReadAndWait(buf.get(), 4096);
   EXPECT_GT(size, 0);
-  EXPECT_EQ('0', buf->data()[size - 1]);
+  EXPECT_EQ('0', buf->span()[size - 1]);
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
@@ -5241,7 +5728,7 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTParallelReadConfirm) {
   socket->BlockReadResult();
   ASSERT_THAT(Connect(), IsOk());
 
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
   // The ServerHello is blocked, so ConfirmHandshake should not complete.
@@ -5251,7 +5738,7 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTParallelReadConfirm) {
   base::RunLoop().RunUntilIdle();
   EXPECT_FALSE(callback.have_result());
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   TestCompletionCallback read_callback;
   ASSERT_EQ(ERR_IO_PENDING,
             ssl_socket()->Read(buf.get(), 4096, read_callback.callback()));
@@ -5264,64 +5751,19 @@ TEST_F(SSLClientSocketZeroRTTTest, ZeroRTTParallelReadConfirm) {
 
   int result = read_callback.WaitForResult();
   EXPECT_GT(result, 0);
-  EXPECT_EQ('1', buf->data()[result - 1]);
+  EXPECT_EQ('1', buf->span()[result - 1]);
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
   EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
 }
 
-// Basic test for dumping memory stats.
-TEST_P(SSLClientSocketReadTest, DumpMemoryStats) {
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, GetServerConfig()));
-
-  // This test compares the memory usage when there is and isn't a pending read
-  // on the socket, so disable the post-handshake peek.
-  SSLConfig config;
-  config.disable_post_handshake_peek_for_testing = true;
-
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(config, &rv));
-  EXPECT_THAT(rv, IsOk());
-  StreamSocket::SocketMemoryStats stats;
-  sock_->DumpMemoryStats(&stats);
-  EXPECT_EQ(0u, stats.buffer_size);
-  EXPECT_EQ(1u, stats.cert_count);
-  EXPECT_LT(0u, stats.cert_size);
-  EXPECT_EQ(stats.cert_size, stats.total_size);
-
-  // Read the response without writing a request, so the read will be pending.
-  TestCompletionCallback read_callback;
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
-  rv = Read(sock_.get(), buf.get(), 4096, read_callback.callback());
-  EXPECT_EQ(ERR_IO_PENDING, rv);
-
-  // Dump memory again and check that |buffer_size| contain the read buffer.
-  StreamSocket::SocketMemoryStats stats2;
-  sock_->DumpMemoryStats(&stats2);
-
-  if (read_if_ready_supported()) {
-    EXPECT_EQ(0u, stats2.buffer_size);
-    EXPECT_EQ(stats.cert_size, stats2.total_size);
-  } else {
-    EXPECT_EQ(17 * 1024u, stats2.buffer_size);
-    EXPECT_LT(17 * 1024u, stats2.total_size);
-  }
-  EXPECT_EQ(1u, stats2.cert_count);
-  EXPECT_LT(0u, stats2.cert_size);
-
-  // Drop the socket. It has a pending read with a reference to |read_callback|,
-  // so the socket must be dropped before the test returns.
-  sock_ = nullptr;
-}
-
 TEST_P(SSLClientSocketReadTest, IdleAfterRead) {
   // Set up a TCP server.
   TCPServerSocket server_listener(nullptr, NetLogSource());
-  ASSERT_THAT(
-      server_listener.Listen(IPEndPoint(IPAddress::IPv4Localhost(), 0), 1),
-      IsOk());
+  ASSERT_THAT(server_listener.Listen(IPEndPoint(IPAddress::IPv4Localhost(), 0),
+                                     1, /*ipv6_only=*/std::nullopt),
+              IsOk());
   IPEndPoint server_address;
   ASSERT_THAT(server_listener.GetLocalAddress(&server_address), IsOk());
 
@@ -5332,8 +5774,8 @@ TEST_P(SSLClientSocketReadTest, IdleAfterRead) {
       server_listener.Accept(&server_transport, server_callback.callback());
 
   TestCompletionCallback client_callback;
-  std::unique_ptr<TCPClientSocket> client_transport(new TCPClientSocket(
-      AddressList(server_address), nullptr, nullptr, nullptr, NetLogSource()));
+  auto client_transport = std::make_unique<TCPClientSocket>(
+      AddressList(server_address), nullptr, nullptr, nullptr, NetLogSource());
   int client_rv = client_transport->Connect(client_callback.callback());
 
   EXPECT_THAT(server_callback.GetResult(server_rv), IsOk());
@@ -5347,11 +5789,8 @@ TEST_P(SSLClientSocketReadTest, IdleAfterRead) {
   bssl::UniquePtr<EVP_PKEY> pkey =
       key_util::LoadEVP_PKEYFromPEM(certs_dir.AppendASCII("ok_cert.pem"));
   ASSERT_TRUE(pkey);
-  std::unique_ptr<crypto::RSAPrivateKey> key =
-      crypto::RSAPrivateKey::CreateFromKey(pkey.get());
-  ASSERT_TRUE(key);
   std::unique_ptr<SSLServerContext> server_context =
-      CreateSSLServerContext(cert.get(), *key.get(), GetServerConfig());
+      CreateSSLServerContext(cert.get(), pkey.get(), GetServerConfig());
 
   // Complete the SSL handshake on both sides.
   std::unique_ptr<SSLClientSocket> client(CreateSSLClientSocket(
@@ -5367,13 +5806,13 @@ TEST_P(SSLClientSocketReadTest, IdleAfterRead) {
   EXPECT_THAT(client_callback.GetResult(client_rv), IsOk());
 
   // Write a single record on the server.
-  scoped_refptr<IOBuffer> write_buf = base::MakeRefCounted<StringIOBuffer>("a");
+  auto write_buf = base::MakeRefCounted<StringIOBuffer>("a");
   server_rv = server->Write(write_buf.get(), 1, server_callback.callback(),
                             TRAFFIC_ANNOTATION_FOR_TESTS);
 
   // Read that record on the server, but with a much larger buffer than
   // necessary.
-  scoped_refptr<IOBuffer> read_buf = base::MakeRefCounted<IOBuffer>(1024);
+  auto read_buf = base::MakeRefCounted<IOBufferWithSize>(1024);
   client_rv =
       Read(client.get(), read_buf.get(), 1024, client_callback.callback());
 
@@ -5383,14 +5822,6 @@ TEST_P(SSLClientSocketReadTest, IdleAfterRead) {
 
   // At this point the client socket should be idle.
   EXPECT_TRUE(client->IsConnectedAndIdle());
-
-  // The read buffer should be released.
-  StreamSocket::SocketMemoryStats stats;
-  client->DumpMemoryStats(&stats);
-  EXPECT_EQ(0u, stats.buffer_size);
-  EXPECT_EQ(1u, stats.cert_count);
-  EXPECT_LT(0u, stats.cert_size);
-  EXPECT_EQ(stats.cert_size, stats.total_size);
 }
 
 // Test that certificate errors are properly reported when the underlying
@@ -5421,9 +5852,9 @@ TEST_F(SSLClientSocketTest, SSLOverSSLBadCertificate) {
 
   // Set up a TCP server.
   TCPServerSocket server_listener(nullptr, NetLogSource());
-  ASSERT_THAT(
-      server_listener.Listen(IPEndPoint(IPAddress::IPv4Localhost(), 0), 1),
-      IsOk());
+  ASSERT_THAT(server_listener.Listen(IPEndPoint(IPAddress::IPv4Localhost(), 0),
+                                     1, /*ipv6_only=*/std::nullopt),
+              IsOk());
   IPEndPoint server_address;
   ASSERT_THAT(server_listener.GetLocalAddress(&server_address), IsOk());
 
@@ -5442,17 +5873,11 @@ TEST_F(SSLClientSocketTest, SSLOverSSLBadCertificate) {
   ASSERT_THAT(client_callback.GetResult(client_rv), IsOk());
 
   // Set up a pair of SSL servers.
-  std::unique_ptr<crypto::RSAPrivateKey> ok_key =
-      crypto::RSAPrivateKey::CreateFromKey(ok_pkey.get());
-  ASSERT_TRUE(ok_key);
   std::unique_ptr<SSLServerContext> ok_server_context =
-      CreateSSLServerContext(ok_cert.get(), *ok_key.get(), SSLServerConfig());
+      CreateSSLServerContext(ok_cert.get(), ok_pkey.get(), SSLServerConfig());
 
-  std::unique_ptr<crypto::RSAPrivateKey> expired_key =
-      crypto::RSAPrivateKey::CreateFromKey(expired_pkey.get());
-  ASSERT_TRUE(expired_key);
   std::unique_ptr<SSLServerContext> expired_server_context =
-      CreateSSLServerContext(expired_cert.get(), *expired_key.get(),
+      CreateSSLServerContext(expired_cert.get(), expired_pkey.get(),
                              SSLServerConfig());
 
   // Complete the proxy SSL handshake with ok_cert.pem. This should succeed.
@@ -5482,7 +5907,7 @@ TEST_F(SSLClientSocketTest, SSLOverSSLBadCertificate) {
   ASSERT_TRUE(client->GetSSLInfo(&ssl_info));
   EXPECT_EQ(ssl_info.cert_status, expired_result.cert_status);
 
-  // TODO(https://crbug.com/912383): The server sees
+  // TODO(crbug.com/41430308): The server sees
   // ERR_BAD_SSL_CLIENT_AUTH_CERT because its peer (the client) alerts it with
   // bad_certificate. The alert-mapping code assumes it is running on a client,
   // so it translates bad_certificate to ERR_BAD_SSL_CLIENT_AUTH_CERT, which
@@ -5495,84 +5920,281 @@ TEST_F(SSLClientSocketTest, Tag) {
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
 
-  RecordingTestNetLog log;
-  std::unique_ptr<StreamSocket> transport(
-      new TCPClientSocket(addr(), nullptr, nullptr, &log, NetLogSource()));
+  auto transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, NetLog::Get(), NetLogSource());
 
-  MockTaggingStreamSocket* tagging_sock =
-      new MockTaggingStreamSocket(std::move(transport));
+  auto tagging_sock =
+      std::make_unique<MockTaggingStreamSocket>(std::move(transport));
+  auto* tagging_sock_ptr = tagging_sock.get();
 
   // |sock| takes ownership of |tagging_sock|, but keep a
   // non-owning pointer to it.
-  std::unique_ptr<SSLClientSocket> sock(
-      CreateSSLClientSocket(std::unique_ptr<StreamSocket>(tagging_sock),
-                            host_port_pair(), SSLConfig()));
+  std::unique_ptr<SSLClientSocket> sock(CreateSSLClientSocket(
+      std::move(tagging_sock), host_port_pair(), SSLConfig()));
 
-  EXPECT_EQ(tagging_sock->tag(), SocketTag());
-#if defined(OS_ANDROID)
+  EXPECT_EQ(tagging_sock_ptr->tag(), SocketTag());
+#if BUILDFLAG(IS_ANDROID)
   SocketTag tag(0x12345678, 0x87654321);
   sock->ApplySocketTag(tag);
-  EXPECT_EQ(tagging_sock->tag(), tag);
-#endif  // OS_ANDROID
+  EXPECT_EQ(tagging_sock_ptr->tag(), tag);
+#endif  // BUILDFLAG(IS_ANDROID)
 }
 
-class TLS13DowngradeTest
-    : public SSLClientSocketTest,
-      public ::testing::WithParamInterface<
-          std::tuple<SpawnedTestServer::SSLOptions::TLSMaxVersion,
-                     /* simulate_tls13_downgrade */ bool,
-                     /* known_root */ bool>> {
- public:
-  TLS13DowngradeTest() {}
-  ~TLS13DowngradeTest() {}
+TEST_F(SSLClientSocketTest, ECH) {
+  SSLServerConfig server_config;
+  SSLConfig client_config;
+  server_config.ech_keys = MakeTestEchKeys(
+      "public.example", /*max_name_len=*/64, &client_config.ech_config_list);
+  ASSERT_TRUE(server_config.ech_keys);
 
-  SpawnedTestServer::SSLOptions::TLSMaxVersion tls_max_version() const {
-    return std::get<0>(GetParam());
-  }
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
-  bool simulate_tls13_downgrade() const { return std::get<1>(GetParam()); }
-  bool known_root() const { return std::get<2>(GetParam()); }
-};
+  // Connecting with the client should use ECH.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, ssl_info.handshake_type);
+  EXPECT_TRUE(ssl_info.encrypted_client_hello);
 
-INSTANTIATE_TEST_SUITE_P(
-    All,
-    TLS13DowngradeTest,
-    ::testing::Combine(
-        ::testing::Values(
-            SpawnedTestServer::SSLOptions::TLS_MAX_VERSION_TLS1_0,
-            SpawnedTestServer::SSLOptions::TLS_MAX_VERSION_TLS1_1,
-            SpawnedTestServer::SSLOptions::TLS_MAX_VERSION_TLS1_2),
-        ::testing::Values(false, true),
-        ::testing::Values(false, true)));
+  // TLS 1.3 causes the ticket to arrive later. Use the socket to ensure we have
+  // a ticket. This also populates the SSLInfo from the server.
+  EXPECT_THAT(MakeHTTPRequest(sock_.get(), "/ssl-info"), IsOk());
+  std::optional<SSLInfo> server_ssl_info = LastSSLInfoFromServer();
+  ASSERT_TRUE(server_ssl_info);
+  EXPECT_TRUE(server_ssl_info->encrypted_client_hello);
 
-TEST_P(TLS13DowngradeTest, DowngradeEnforced) {
-  SpawnedTestServer::SSLOptions ssl_options;
-  ssl_options.simulate_tls13_downgrade = simulate_tls13_downgrade();
-  ssl_options.tls_max_version = tls_max_version();
-  ASSERT_TRUE(StartTestServer(ssl_options));
+  // Reconnect. ECH should not interfere with resumption.
+  sock_.reset();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, ssl_info.handshake_type);
+  EXPECT_TRUE(ssl_info.encrypted_client_hello);
+
+  // Check SSLInfo from the server.
+  EXPECT_THAT(MakeHTTPRequest(sock_.get(), "/ssl-info"), IsOk());
+  server_ssl_info = LastSSLInfoFromServer();
+  ASSERT_TRUE(server_ssl_info);
+  EXPECT_TRUE(server_ssl_info->encrypted_client_hello);
+
+  // Connecting without ECH should not report ECH was used.
+  client_config.ech_config_list.clear();
+  sock_.reset();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_FALSE(ssl_info.encrypted_client_hello);
+
+  // Check SSLInfo from the server.
+  EXPECT_THAT(MakeHTTPRequest(sock_.get(), "/ssl-info"), IsOk());
+  server_ssl_info = LastSSLInfoFromServer();
+  ASSERT_TRUE(server_ssl_info);
+  EXPECT_FALSE(server_ssl_info->encrypted_client_hello);
+}
+
+// Test that, on key mismatch, the public name can be used to authenticate
+// replacement keys.
+TEST_F(SSLClientSocketTest, ECHWrongKeys) {
+  static const char kPublicName[] = "public.example";
+  std::vector<uint8_t> ech_config_list1, ech_config_list2;
+  bssl::UniquePtr<SSL_ECH_KEYS> keys1 =
+      MakeTestEchKeys(kPublicName, /*max_name_len=*/64, &ech_config_list1);
+  ASSERT_TRUE(keys1);
+  bssl::UniquePtr<SSL_ECH_KEYS> keys2 =
+      MakeTestEchKeys(kPublicName, /*max_name_len=*/64, &ech_config_list2);
+  ASSERT_TRUE(keys2);
+
+  // Configure the client and server with different keys.
+  SSLServerConfig server_config;
+  server_config.ech_keys = std::move(keys1);
+  SSLConfig client_config;
+  client_config.ech_config_list = std::move(ech_config_list2);
+
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // Verify the fallback handshake verifies the certificate against the public
+  // name.
+  cert_verifier_->set_default_result(ERR_CERT_INVALID);
   scoped_refptr<X509Certificate> server_cert =
-      spawned_test_server()->GetCertificate();
-
-  SSLContextConfig config;
-  config.version_max = SSL_PROTOCOL_VERSION_TLS1_3;
-  ssl_config_service_->UpdateSSLConfigAndNotify(config);
-
+      embedded_test_server()->GetCertificate();
   CertVerifyResult verify_result;
-  verify_result.is_issued_by_known_root = known_root();
   verify_result.verified_cert = server_cert;
-  cert_verifier_->ClearRules();
-  cert_verifier_->AddResultForCert(server_cert.get(), verify_result, OK);
+  cert_verifier_->AddResultForCertAndHost(server_cert, kPublicName,
+                                          verify_result, OK);
 
-  ssl_client_session_cache_->Flush();
+  // Connecting with the client should report ECH was not negotiated.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsError(ERR_ECH_NOT_NEGOTIATED));
+
+  // The server's keys are available as retry keys.
+  EXPECT_EQ(ech_config_list1, sock_->GetECHRetryConfigs());
+}
+
+// Test that, if the server does not support ECH, it can securely report this
+// via the public name. This allows recovery if the server needed to
+// rollback ECH support.
+TEST_F(SSLClientSocketTest, ECHSecurelyDisabled) {
+  static const char kPublicName[] = "public.example";
+  std::vector<uint8_t> ech_config_list;
+  bssl::UniquePtr<SSL_ECH_KEYS> keys =
+      MakeTestEchKeys(kPublicName, /*max_name_len=*/64, &ech_config_list);
+  ASSERT_TRUE(keys);
+
+  // The server does not have keys configured.
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
+
+  // However it can authenticate for kPublicName.
+  cert_verifier_->set_default_result(ERR_CERT_INVALID);
+  scoped_refptr<X509Certificate> server_cert =
+      embedded_test_server()->GetCertificate();
+  CertVerifyResult verify_result;
+  verify_result.verified_cert = server_cert;
+  cert_verifier_->AddResultForCertAndHost(server_cert, kPublicName,
+                                          verify_result, OK);
+
+  // Connecting with the client should report ECH was not negotiated.
+  SSLConfig client_config;
+  client_config.ech_config_list = std::move(ech_config_list);
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsError(ERR_ECH_NOT_NEGOTIATED));
+
+  // The retry config is empty, meaning the server has securely reported that
+  // ECH is disabled
+  EXPECT_TRUE(sock_->GetECHRetryConfigs().empty());
+}
+
+// The same as the above, but testing that it also works in TLS 1.2, which
+// otherwise does not support ECH.
+TEST_F(SSLClientSocketTest, ECHSecurelyDisabledTLS12) {
+  static const char kPublicName[] = "public.example";
+  std::vector<uint8_t> ech_config_list;
+  bssl::UniquePtr<SSL_ECH_KEYS> keys =
+      MakeTestEchKeys(kPublicName, /*max_name_len=*/64, &ech_config_list);
+  ASSERT_TRUE(keys);
+
+  // The server does not have keys configured.
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // However it can authenticate for kPublicName.
+  cert_verifier_->set_default_result(ERR_CERT_INVALID);
+  scoped_refptr<X509Certificate> server_cert =
+      embedded_test_server()->GetCertificate();
+  CertVerifyResult verify_result;
+  verify_result.verified_cert = server_cert;
+  cert_verifier_->AddResultForCertAndHost(server_cert, kPublicName,
+                                          verify_result, OK);
+
+  // Connecting with the client should report ECH was not negotiated.
+  SSLConfig client_config;
+  client_config.ech_config_list = std::move(ech_config_list);
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsError(ERR_ECH_NOT_NEGOTIATED));
+
+  // The retry config is empty, meaning the server has securely reported that
+  // ECH is disabled
+  EXPECT_TRUE(sock_->GetECHRetryConfigs().empty());
+}
+
+// Test that the ECH fallback handshake rejects bad certificates.
+TEST_F(SSLClientSocketTest, ECHFallbackBadCert) {
+  static const char kPublicName[] = "public.example";
+  std::vector<uint8_t> ech_config_list1, ech_config_list2;
+  bssl::UniquePtr<SSL_ECH_KEYS> keys1 =
+      MakeTestEchKeys(kPublicName, /*max_name_len=*/64, &ech_config_list1);
+  ASSERT_TRUE(keys1);
+  bssl::UniquePtr<SSL_ECH_KEYS> keys2 =
+      MakeTestEchKeys(kPublicName, /*max_name_len=*/64, &ech_config_list2);
+  ASSERT_TRUE(keys2);
+
+  // Configure the client and server with different keys.
+  SSLServerConfig server_config;
+  server_config.ech_keys = std::move(keys1);
+  SSLConfig client_config;
+  client_config.ech_config_list = std::move(ech_config_list2);
+
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // Configure the client to reject the certificate for the public name (or any
+  // other name).
+  cert_verifier_->set_default_result(ERR_CERT_INVALID);
+
+  // Connecting with the client will fail with a fatal error.
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsError(ERR_ECH_FALLBACK_CERTIFICATE_INVALID));
+}
+
+TEST_F(SSLClientSocketTest, InvalidECHConfigList) {
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
+
+  // If the ECHConfigList cannot be parsed at all, report an error to the
+  // caller.
+  SSLConfig client_config;
+  client_config.ech_config_list = {0x00};
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsError(ERR_INVALID_ECH_CONFIG_LIST));
+}
+
+// Test that, if no ECHConfigList is available, the client sends ECH GREASE.
+TEST_F(SSLClientSocketTest, ECHGreaseEnabled) {
+  // Configure the server to expect an ECH extension.
+  bool ran_callback = false;
+  SSLServerConfig server_config;
+  server_config.client_hello_callback_for_testing =
+      base::BindLambdaForTesting([&](const SSL_CLIENT_HELLO* client_hello) {
+        const uint8_t* data;
+        size_t len;
+        EXPECT_TRUE(SSL_early_callback_ctx_extension_get(
+            client_hello, TLSEXT_TYPE_encrypted_client_hello, &data, &len));
+        ran_callback = true;
+        return true;
+      });
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
   int rv;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
-  if (simulate_tls13_downgrade()) {
-    EXPECT_THAT(rv, IsError(ERR_TLS13_DOWNGRADE_DETECTED));
-    EXPECT_FALSE(sock_->IsConnected());
-  } else {
-    EXPECT_THAT(rv, IsOk());
-    EXPECT_TRUE(sock_->IsConnected());
-  }
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(ran_callback);
+}
+
+// Test that, if ECH is disabled, the client does not send ECH GREASE.
+TEST_F(SSLClientSocketTest, ECHGreaseDisabled) {
+  SSLContextConfig context_config;
+  context_config.ech_enabled = false;
+  ssl_config_service_->UpdateSSLConfigAndNotify(context_config);
+
+  // Configure the server not to expect an ECH extension.
+  bool ran_callback = false;
+  SSLServerConfig server_config;
+  server_config.client_hello_callback_for_testing =
+      base::BindLambdaForTesting([&](const SSL_CLIENT_HELLO* client_hello) {
+        const uint8_t* data;
+        size_t len;
+        EXPECT_FALSE(SSL_early_callback_ctx_extension_get(
+            client_hello, TLSEXT_TYPE_encrypted_client_hello, &data, &len));
+        ran_callback = true;
+        return true;
+      });
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+  EXPECT_TRUE(ran_callback);
 }
 
 struct SSLHandshakeDetailsParams {
@@ -5584,13 +6206,6 @@ struct SSLHandshakeDetailsParams {
 };
 
 const SSLHandshakeDetailsParams kSSLHandshakeDetailsParams[] = {
-    // TLS 1.0 and 1.1 never do False Start.
-    {false /* no ALPN */, false /* no early data */, SSL_PROTOCOL_VERSION_TLS1,
-     SSLHandshakeDetails::kTLS12Full, SSLHandshakeDetails::kTLS12Resume},
-    {false /* no ALPN */, false /* no early data */,
-     SSL_PROTOCOL_VERSION_TLS1_1, SSLHandshakeDetails::kTLS12Full,
-     SSLHandshakeDetails::kTLS12Resume},
-
     // TLS 1.2 does False Start if ALPN is enabled.
     {false /* no ALPN */, false /* no early data */,
      SSL_PROTOCOL_VERSION_TLS1_2, SSLHandshakeDetails::kTLS12Full,
@@ -5612,15 +6227,13 @@ class SSLHandshakeDetailsTest
 
 INSTANTIATE_TEST_SUITE_P(All,
                          SSLHandshakeDetailsTest,
-                         ::testing::ValuesIn(kSSLHandshakeDetailsParams));
+                         ValuesIn(kSSLHandshakeDetailsParams));
 
 TEST_P(SSLHandshakeDetailsTest, Metrics) {
   // Enable all test features in the server.
   SSLServerConfig server_config;
-  server_config.version_min = SSL_PROTOCOL_VERSION_TLS1;
-  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_3;
   server_config.early_data_enabled = true;
-  server_config.alpn_protos = {kProtoHTTP11};
+  server_config.alpn_protos = {NextProto::kProtoHTTP11};
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
 
@@ -5634,17 +6247,11 @@ TEST_P(SSLHandshakeDetailsTest, Metrics) {
   client_config.version_max_override = GetParam().version;
   client_config.early_data_enabled = GetParam().early_data;
   if (GetParam().alpn) {
-    client_config.alpn_protos = {kProtoHTTP11};
+    client_config.alpn_protos = {NextProto::kProtoHTTP11};
   }
 
   SSLVersion version;
   switch (GetParam().version) {
-    case SSL_PROTOCOL_VERSION_TLS1:
-      version = SSL_CONNECTION_VERSION_TLS1;
-      break;
-    case SSL_PROTOCOL_VERSION_TLS1_1:
-      version = SSL_CONNECTION_VERSION_TLS1_1;
-      break;
     case SSL_PROTOCOL_VERSION_TLS1_2:
       version = SSL_CONNECTION_VERSION_TLS1_2;
       break;
@@ -5667,7 +6274,6 @@ TEST_P(SSLHandshakeDetailsTest, Metrics) {
     ASSERT_TRUE(sock_->GetSSLInfo(&info));
     EXPECT_EQ(version, SSLConnectionStatusToVersion(info.connection_status));
     EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, info.handshake_type);
-    EXPECT_EQ(GetParam().alpn, sock_->WasAlpnNegotiated());
 
     histograms.ExpectUniqueSample("Net.SSLHandshakeDetails",
                                   GetParam().expected_initial, 1);
@@ -5689,167 +6295,10 @@ TEST_P(SSLHandshakeDetailsTest, Metrics) {
     ASSERT_TRUE(sock_->GetSSLInfo(&info));
     EXPECT_EQ(version, SSLConnectionStatusToVersion(info.connection_status));
     EXPECT_EQ(SSLInfo::HANDSHAKE_RESUME, info.handshake_type);
-    EXPECT_EQ(GetParam().alpn, sock_->WasAlpnNegotiated());
 
     histograms.ExpectUniqueSample("Net.SSLHandshakeDetails",
                                   GetParam().expected_resume, 1);
   }
-}
-
-class LegacyTLSDeprecationTest : public SSLClientSocketTest {
- public:
-  LegacyTLSDeprecationTest() {
-    feature_list_.InitAndEnableFeature(features::kLegacyTLSEnforced);
-  }
-
- private:
-  base::test::ScopedFeatureList feature_list_;
-};
-
-// Set version_min_warn to TLS 1.2 and check that TLS 1.0 and 1.1 fail (with the
-// expected error and cert status) but TLS 1.2 and 1.3 pass.
-TEST_F(LegacyTLSDeprecationTest, SetVersionMinWarnToTLS12) {
-  const struct TestCase {
-    uint16_t ssl_version;
-    int expected_net_error;
-    CertStatus expected_cert_status;
-  } kTestCases[]{
-      {SSL_PROTOCOL_VERSION_TLS1, ERR_SSL_OBSOLETE_VERSION,
-       CERT_STATUS_LEGACY_TLS},
-      {SSL_PROTOCOL_VERSION_TLS1_1, ERR_SSL_OBSOLETE_VERSION,
-       CERT_STATUS_LEGACY_TLS},
-      {SSL_PROTOCOL_VERSION_TLS1_2, OK, 0},
-      {SSL_PROTOCOL_VERSION_TLS1_3, OK, 0},
-  };
-
-  for (const auto& test_case : kTestCases) {
-    SCOPED_TRACE(test_case.ssl_version);
-
-    SSLServerConfig server_config;
-    server_config.version_min = test_case.ssl_version;
-    server_config.version_max = test_case.ssl_version;
-    ASSERT_TRUE(
-        StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
-
-    SSLContextConfig client_context_config;
-    client_context_config.version_min = SSL_PROTOCOL_VERSION_TLS1;
-    client_context_config.version_max = SSL_PROTOCOL_VERSION_TLS1_3;
-    client_context_config.version_min_warn = SSL_PROTOCOL_VERSION_TLS1_2;
-    ssl_config_service_->UpdateSSLConfigAndNotify(client_context_config);
-
-    SSLConfig client_config;
-
-    // Try to connect, then check that the expected error is returned and no
-    // unexpected cert_status are set.
-    int rv;
-    ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
-    EXPECT_THAT(rv, IsError(test_case.expected_net_error));
-    SSLInfo info;
-    ASSERT_TRUE(sock_->GetSSLInfo(&info));
-    EXPECT_EQ(test_case.expected_cert_status,
-              info.cert_status & test_case.expected_cert_status);
-    net::CertStatus extra_cert_errors =
-        test_case.expected_cert_status ^
-        (info.cert_status & CERT_STATUS_ALL_ERRORS);
-    EXPECT_FALSE(extra_cert_errors);
-  }
-}
-
-// Check that TLS 1.0 and TLS 1.1 failure is bypassed when you add
-// allowed_bad_certs (with the expected error and cert status).
-TEST_F(LegacyTLSDeprecationTest, NoErrorWhenAddedToAllowedBadCerts) {
-  SSLServerConfig server_config;
-  server_config.version_min = SSL_PROTOCOL_VERSION_TLS1;
-  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1;
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
-
-  SSLConfig client_config;
-  client_config.allowed_bad_certs.emplace_back(
-      embedded_test_server()->GetCertificate(), CERT_STATUS_LEGACY_TLS);
-
-  // Connection should proceed without a net error but with
-  // CERT_STATUS_LEGACY_TLS.
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
-  EXPECT_THAT(rv, IsOk());
-  SSLInfo info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&info));
-  EXPECT_EQ(CERT_STATUS_LEGACY_TLS, info.cert_status);
-}
-
-// Check that if the we have bypassed a certificate error previously and then
-// the server responded with TLS 1.0, we fill in both cert status flags.
-TEST_F(LegacyTLSDeprecationTest, BypassedCertShouldSetLegacyTLSStatus) {
-  SSLServerConfig server_config;
-  server_config.version_min = SSL_PROTOCOL_VERSION_TLS1;
-  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1;
-  ASSERT_TRUE(StartEmbeddedTestServer(EmbeddedTestServer::CERT_MISMATCHED_NAME,
-                                      server_config));
-  cert_verifier_->set_default_result(ERR_CERT_COMMON_NAME_INVALID);
-
-  SSLConfig client_config;
-  client_config.allowed_bad_certs.emplace_back(
-      embedded_test_server()->GetCertificate(),
-      CERT_STATUS_COMMON_NAME_INVALID);
-
-  // Connection should proceed, and CERT_STATUS_LEGACY_TLS and
-  // CERT_STATUS_COMMON_NAME_INVALID should be set.
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
-  EXPECT_THAT(rv, IsOk());
-  SSLInfo info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&info));
-  EXPECT_TRUE(info.cert_status & CERT_STATUS_LEGACY_TLS);
-  EXPECT_TRUE(info.cert_status & CERT_STATUS_COMMON_NAME_INVALID);
-}
-
-// Checks that other errors are prioritized over legacy TLS errors.
-TEST_F(LegacyTLSDeprecationTest, PrioritizeCertErrorsOverLegacyTLS) {
-  SSLServerConfig server_config;
-  server_config.version_min = SSL_PROTOCOL_VERSION_TLS1;
-  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1;
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_EXPIRED, server_config));
-  cert_verifier_->set_default_result(ERR_CERT_DATE_INVALID);
-
-  SSLConfig client_config;
-
-  // Connection should fail with ERR_CERT_DATE_INVALID and only the date invalid
-  // cert status.
-  int rv;
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
-  EXPECT_THAT(rv, IsError(ERR_CERT_DATE_INVALID));
-  SSLInfo info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&info));
-  EXPECT_FALSE(info.cert_status & CERT_STATUS_LEGACY_TLS);
-  EXPECT_TRUE(info.cert_status & CERT_STATUS_DATE_INVALID);
-}
-
-// Checks that legacy TLS errors are not fatal.
-TEST_F(LegacyTLSDeprecationTest, LegacyTLSErrorsNotFatal) {
-  SSLServerConfig server_config;
-  server_config.version_min = SSL_PROTOCOL_VERSION_TLS1;
-  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1;
-  ASSERT_TRUE(
-      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
-
-  SSLConfig client_config;
-
-  // Connection should fail with ERR_SSL_OBSOLETE_VERSION and the legacy TLS
-  // cert status.
-  int rv;
-  const base::Time expiry =
-      base::Time::Now() + base::TimeDelta::FromSeconds(1000);
-  transport_security_state_->AddHSTS(host_port_pair().host(), expiry, true);
-  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
-  EXPECT_THAT(rv, IsError(ERR_SSL_OBSOLETE_VERSION));
-  SSLInfo info;
-  ASSERT_TRUE(sock_->GetSSLInfo(&info));
-  EXPECT_TRUE(info.cert_status & CERT_STATUS_LEGACY_TLS);
-
-  // The error should not be marked as fatal.
-  EXPECT_FALSE(info.is_fatal_cert_error);
 }
 
 TEST_F(SSLClientSocketZeroRTTTest, EarlyDataReasonNewSession) {
@@ -5881,15 +6330,17 @@ TEST_F(SSLClientSocketZeroRTTTest, EarlyDataReasonNoResume) {
   FakeBlockingStreamSocket* socket = MakeClient(true);
   socket->BlockReadResult();
   ASSERT_THAT(Connect(), IsOk());
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
   socket->UnblockReadResult();
 
   // Expect early data to be rejected.
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int rv = ReadAndWait(buf.get(), 4096);
   EXPECT_EQ(ERR_EARLY_DATA_REJECTED, rv);
 
+  // The histogram may be record asynchronously.
+  base::RunLoop().RunUntilIdle();
   histograms.ExpectUniqueSample(kReasonHistogram,
                                 ssl_early_data_session_not_resumed, 1);
 }
@@ -5909,6 +6360,9 @@ TEST_F(SSLClientSocketZeroRTTTest, EarlyDataReasonZeroRTT) {
   ASSERT_THAT(
       callback.GetResult(ssl_socket()->ConfirmHandshake(callback.callback())),
       IsOk());
+
+  base::RunLoop().RunUntilIdle();
+
   histograms.ExpectUniqueSample(kReasonHistogram, ssl_early_data_accepted, 1);
 }
 
@@ -5923,13 +6377,17 @@ TEST_F(SSLClientSocketZeroRTTTest, EarlyDataReasonReadServerHello) {
   base::HistogramTester histograms;
   MakeClient(true);
   ASSERT_THAT(Connect(), IsOk());
-  constexpr base::StringPiece kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
+  constexpr std::string_view kRequest = "GET /zerortt HTTP/1.0\r\n\r\n";
   EXPECT_EQ(static_cast<int>(kRequest.size()), WriteAndWait(kRequest));
 
-  scoped_refptr<IOBuffer> buf = base::MakeRefCounted<IOBuffer>(4096);
+  auto buf = base::MakeRefCounted<IOBufferWithSize>(4096);
   int size = ReadAndWait(buf.get(), 4096);
   EXPECT_GT(size, 0);
-  EXPECT_EQ('1', buf->data()[size - 1]);
+  EXPECT_EQ('1', buf->span()[size - 1]);
+
+  // 0-RTT metrics are logged on a PostTask, so if Read returns synchronously,
+  // it is possible the metrics haven't been picked up yet.
+  base::RunLoop().RunUntilIdle();
 
   SSLInfo ssl_info;
   ASSERT_TRUE(GetSSLInfo(&ssl_info));
@@ -5938,17 +6396,11 @@ TEST_F(SSLClientSocketZeroRTTTest, EarlyDataReasonReadServerHello) {
   histograms.ExpectUniqueSample(kReasonHistogram, ssl_early_data_accepted, 1);
 }
 
-TEST_F(SSLClientSocketTest, VersionOverride) {
-  // Enable all test features in the server.
+TEST_F(SSLClientSocketTest, VersionMaxOverride) {
   SSLServerConfig server_config;
-  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_3;
   ASSERT_TRUE(
       StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
-
-  SSLContextConfig context_config;
-  context_config.version_min = SSL_PROTOCOL_VERSION_TLS1_1;
-  context_config.version_max = SSL_PROTOCOL_VERSION_TLS1_1;
-  ssl_config_service_->UpdateSSLConfigAndNotify(context_config);
 
   // Connecting normally uses the global configuration.
   SSLConfig config;
@@ -5957,7 +6409,7 @@ TEST_F(SSLClientSocketTest, VersionOverride) {
   EXPECT_THAT(rv, IsOk());
   SSLInfo info;
   ASSERT_TRUE(sock_->GetSSLInfo(&info));
-  EXPECT_EQ(SSL_CONNECTION_VERSION_TLS1_1,
+  EXPECT_EQ(SSL_CONNECTION_VERSION_TLS1_3,
             SSLConnectionStatusToVersion(info.connection_status));
 
   // Individual sockets may override the maximum version.
@@ -5967,12 +6419,436 @@ TEST_F(SSLClientSocketTest, VersionOverride) {
   ASSERT_TRUE(sock_->GetSSLInfo(&info));
   EXPECT_EQ(SSL_CONNECTION_VERSION_TLS1_2,
             SSLConnectionStatusToVersion(info.connection_status));
+}
+
+TEST_F(SSLClientSocketTest, VersionMinOverride) {
+  SSLServerConfig server_config;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_2;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // Connecting normally uses the global configuration.
+  SSLConfig config;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(config, &rv));
+  EXPECT_THAT(rv, IsOk());
+  SSLInfo info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&info));
+  EXPECT_EQ(SSL_CONNECTION_VERSION_TLS1_2,
+            SSLConnectionStatusToVersion(info.connection_status));
 
   // Individual sockets may also override the minimum version.
   config.version_min_override = SSL_PROTOCOL_VERSION_TLS1_3;
   config.version_max_override = SSL_PROTOCOL_VERSION_TLS1_3;
   ASSERT_TRUE(CreateAndConnectSSLClientSocket(config, &rv));
   EXPECT_THAT(rv, IsError(ERR_SSL_VERSION_OR_CIPHER_MISMATCH));
+}
+
+// Basic test of CancelReadIfReady works.
+TEST_F(SSLClientSocketTest, CancelReadIfReady) {
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, SSLServerConfig()));
+
+  // Connect with a FakeBlockingStreamSocket.
+  auto real_transport = std::make_unique<TCPClientSocket>(
+      addr(), nullptr, nullptr, nullptr, NetLogSource());
+  auto transport =
+      std::make_unique<FakeBlockingStreamSocket>(std::move(real_transport));
+  FakeBlockingStreamSocket* raw_transport = transport.get();
+  TestCompletionCallback callback;
+  ASSERT_THAT(callback.GetResult(transport->Connect(callback.callback())),
+              IsOk());
+
+  // Complete the handshake. Disable the post-handshake peek so that, after the
+  // handshake, there are no pending reads on the transport.
+  SSLConfig config;
+  config.disable_post_handshake_peek_for_testing = true;
+  auto sock =
+      CreateSSLClientSocket(std::move(transport), host_port_pair(), config);
+  ASSERT_THAT(callback.GetResult(sock->Connect(callback.callback())), IsOk());
+
+  // Block the socket and wait for some data to arrive from the server.
+  raw_transport->BlockReadResult();
+  auto write_buf =
+      base::MakeRefCounted<StringIOBuffer>("GET / HTTP/1.0\r\n\r\n");
+  ASSERT_EQ(callback.GetResult(sock->Write(write_buf.get(), write_buf->size(),
+                                           callback.callback(),
+                                           TRAFFIC_ANNOTATION_FOR_TESTS)),
+            write_buf->size());
+
+  // ReadIfReady() should not read anything because the socket is blocked.
+  bool callback_called = false;
+  auto read_buf = base::MakeRefCounted<IOBufferWithSize>(100);
+  int rv = sock->ReadIfReady(
+      read_buf.get(), 100,
+      base::BindLambdaForTesting([&](int rv) { callback_called = true; }));
+  ASSERT_THAT(rv, IsError(ERR_IO_PENDING));
+
+  // Cancel ReadIfReady() and unblock the socket.
+  ASSERT_THAT(sock->CancelReadIfReady(), IsOk());
+  raw_transport->WaitForReadResult();
+  raw_transport->UnblockReadResult();
+  base::RunLoop().RunUntilIdle();
+
+  // Although data is now available, the callback should not have been called.
+  EXPECT_FALSE(callback_called);
+
+  // Future reads on the socket should still work. The data should be
+  // synchronously available.
+  EXPECT_GT(
+      callback.GetResult(sock->Read(read_buf.get(), 100, callback.callback())),
+      0);
+}
+
+// Test that the server_name extension (SNI) is sent on DNS names, and not IP
+// literals.
+TEST_F(SSLClientSocketTest, ServerName) {
+  std::optional<std::string> got_server_name;
+  bool ran_callback = false;
+  auto reset_callback_state = [&] {
+    got_server_name = std::nullopt;
+    ran_callback = false;
+  };
+
+  // Start a server which records the server name.
+  SSLServerConfig server_config;
+  server_config.client_hello_callback_for_testing =
+      base::BindLambdaForTesting([&](const SSL_CLIENT_HELLO* client_hello) {
+        const char* server_name =
+            SSL_get_servername(client_hello->ssl, TLSEXT_NAMETYPE_host_name);
+        if (server_name) {
+          got_server_name = server_name;
+        } else {
+          got_server_name = std::nullopt;
+        }
+        ran_callback = true;
+        return true;
+      });
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // The client should send the server_name extension for DNS names.
+  uint16_t port = host_port_pair().port();
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocketWithHost(
+      SSLConfig(), HostPortPair("example.com", port), &rv));
+  ASSERT_THAT(rv, IsOk());
+  EXPECT_TRUE(ran_callback);
+  EXPECT_EQ(got_server_name, "example.com");
+
+  // The client should not send the server_name extension for IPv4 and IPv6
+  // literals. See https://crbug.com/500981.
+  reset_callback_state();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocketWithHost(
+      SSLConfig(), HostPortPair("1.2.3.4", port), &rv));
+  ASSERT_THAT(rv, IsOk());
+  EXPECT_TRUE(ran_callback);
+  EXPECT_EQ(got_server_name, std::nullopt);
+
+  reset_callback_state();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocketWithHost(
+      SSLConfig(), HostPortPair("::1", port), &rv));
+  ASSERT_THAT(rv, IsOk());
+  EXPECT_TRUE(ran_callback);
+  EXPECT_EQ(got_server_name, std::nullopt);
+
+  reset_callback_state();
+  ASSERT_TRUE(CreateAndConnectSSLClientSocketWithHost(
+      SSLConfig(), HostPortPair("2001:db8::42", port), &rv));
+  ASSERT_THAT(rv, IsOk());
+  EXPECT_TRUE(ran_callback);
+  EXPECT_EQ(got_server_name, std::nullopt);
+}
+
+TEST_F(SSLClientSocketTest, PostQuantumKeyExchange) {
+  SSLServerConfig server_config;
+  server_config.curves_for_testing.push_back(NID_X25519MLKEM768);
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+  EXPECT_THAT(rv, IsOk());
+}
+
+// Test that the compliance policy that reorders the cipher preference for TLS
+// 1.3 can be configured.
+TEST_F(SSLClientSocketTest, Tls13CipherPreferAes256) {
+  std::vector<std::string> cipher_names;
+  SSLServerConfig server_config;
+  server_config.version_min = SSL_PROTOCOL_VERSION_TLS1_3;
+  server_config.version_max = SSL_PROTOCOL_VERSION_TLS1_3;
+  // Set a callback that copies the ordered list of TLS 1.3 cipher names out of
+  // the ClientHello.
+  server_config.client_hello_callback_for_testing =
+      base::BindLambdaForTesting([&](const SSL_CLIENT_HELLO* client_hello) {
+        cipher_names.clear();
+        // Each cipher is encoded as a two-byte, big-endian integer.
+        CHECK(client_hello->cipher_suites_len % 2 == 0);
+        // SAFETY: BoringSSL API guarantees that `client_hello->cipher_suites`
+        // and `client_hello->ciphers_suites_len` describe a valid span.
+        auto cipher_suites_reader = base::SpanReader{UNSAFE_BUFFERS(base::span{
+            client_hello->cipher_suites, client_hello->cipher_suites_len})};
+        uint16_t value;
+        while (cipher_suites_reader.ReadU16BigEndian(value)) {
+          // Skip values we don't recognize as any TLS 1.3 cipher.
+          const SSL_CIPHER* cipher = SSL_get_cipher_by_value(value);
+          if (!cipher || SSL_CIPHER_get_min_version(cipher) != TLS1_3_VERSION) {
+            continue;
+          }
+          cipher_names.emplace_back(SSL_CIPHER_standard_name(cipher));
+        }
+        return true;
+      });
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  // The compliance policy prefers AES-256-GCM over AES-128-GCM over anything
+  // else.
+  const auto kExpectedCipherNamesWithPolicy = std::to_array<const char*>(
+      {"TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256",
+       "TLS_CHACHA20_POLY1305_SHA256"});
+
+  SSLContextConfig config;
+  config.version_min = SSL_PROTOCOL_VERSION_TLS1_3;
+  config.version_max = SSL_PROTOCOL_VERSION_TLS1_3;
+  {
+    // Compliance policy not configured. The default list differs from the
+    // expected ciphers under the policy.
+    config.tls13_cipher_prefer_aes_256 = false;
+    ssl_config_service_->UpdateSSLConfigAndNotify(config);
+    int rv;
+    ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+    EXPECT_THAT(rv, IsOk());
+    EXPECT_THAT(cipher_names,
+                Not(ElementsAreArray(kExpectedCipherNamesWithPolicy)));
+  }
+  {
+    // Compliance policy configured. Resulting ciphers should match expectation.
+    config.tls13_cipher_prefer_aes_256 = true;
+    ssl_config_service_->UpdateSSLConfigAndNotify(config);
+    int rv;
+    ASSERT_TRUE(CreateAndConnectSSLClientSocket(SSLConfig(), &rv));
+    EXPECT_THAT(rv, IsOk());
+    EXPECT_THAT(cipher_names, ElementsAreArray(kExpectedCipherNamesWithPolicy));
+  }
+}
+
+class SSLClientSocketAlpsTest
+    : public SSLClientSocketTest,
+      public ::testing::WithParamInterface<std::tuple<bool, bool, bool>> {
+ public:
+  SSLClientSocketAlpsTest() {
+    if (client_use_new_alps()) {
+      feature_list_.InitAndEnableFeature(features::kUseNewAlpsCodepointHttp2);
+    } else {
+      feature_list_.InitAndDisableFeature(features::kUseNewAlpsCodepointHttp2);
+    }
+  }
+
+  bool client_alps_enabled() const { return std::get<0>(GetParam()); }
+  bool server_alps_enabled() const { return std::get<1>(GetParam()); }
+  bool client_use_new_alps() const { return std::get<2>(GetParam()); }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+};
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         SSLClientSocketAlpsTest,
+                         Combine(Bool(), Bool(), Bool()));
+
+TEST_P(SSLClientSocketAlpsTest, Alps) {
+  const std::string server_data = "server sends some test data";
+  const std::string client_data = "client also sends some data";
+
+  SSLServerConfig server_config;
+  server_config.alpn_protos = {NextProto::kProtoHTTP2};
+  if (server_alps_enabled()) {
+    server_config.application_settings[NextProto::kProtoHTTP2] =
+        std::vector<uint8_t>(server_data.begin(), server_data.end());
+  }
+  // Configure the server to support whichever ALPS codepoint the client sent.
+  server_config.client_hello_callback_for_testing =
+      base::BindRepeating([](const SSL_CLIENT_HELLO* client_hello) {
+        const uint8_t* unused_extension_bytes;
+        size_t unused_extension_len;
+        int use_alps_new_codepoint = SSL_early_callback_ctx_extension_get(
+            client_hello, TLSEXT_TYPE_application_settings,
+            &unused_extension_bytes, &unused_extension_len);
+        SSL_set_alps_use_new_codepoint(client_hello->ssl,
+                                       use_alps_new_codepoint);
+        return true;
+      });
+
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  SSLConfig client_config;
+  client_config.alpn_protos = {NextProto::kProtoHTTP2};
+  if (client_alps_enabled()) {
+    client_config.application_settings[NextProto::kProtoHTTP2] =
+        std::vector<uint8_t>(client_data.begin(), client_data.end());
+  }
+
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+
+  SSLInfo info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&info));
+  EXPECT_EQ(SSL_CONNECTION_VERSION_TLS1_3,
+            SSLConnectionStatusToVersion(info.connection_status));
+  EXPECT_EQ(SSLInfo::HANDSHAKE_FULL, info.handshake_type);
+
+  EXPECT_EQ(NextProto::kProtoHTTP2, sock_->GetNegotiatedProtocol());
+
+  // ALPS is negotiated only if ALPS is enabled both on client and server.
+  const auto alps_data_received_by_client = sock_->GetPeerApplicationSettings();
+
+  if (client_alps_enabled() && server_alps_enabled()) {
+    ASSERT_TRUE(alps_data_received_by_client.has_value());
+    EXPECT_EQ(server_data, alps_data_received_by_client.value());
+  } else {
+    EXPECT_FALSE(alps_data_received_by_client.has_value());
+  }
+}
+
+// Test that unused protocols in `application_settings` are ignored.
+TEST_P(SSLClientSocketAlpsTest, UnusedProtocols) {
+  if (!client_alps_enabled() || !server_alps_enabled()) {
+    return;
+  }
+
+  SSLConfig client_config;
+  client_config.alpn_protos = {NextProto::kProtoHTTP2};
+  client_config.application_settings[NextProto::kProtoHTTP2] = {};
+  client_config.application_settings[NextProto::kProtoHTTP11] = {};
+
+  // Configure the server to check the ClientHello is as we expected.
+  SSLServerConfig server_config;
+  server_config.client_hello_callback_for_testing =
+      base::BindLambdaForTesting([&](const SSL_CLIENT_HELLO* client_hello) {
+        const uint8_t* data;
+        size_t len;
+        if (!SSL_early_callback_ctx_extension_get(
+                client_hello,
+                client_use_new_alps() ? TLSEXT_TYPE_application_settings
+                                      : TLSEXT_TYPE_application_settings_old,
+                &data, &len)) {
+          return false;
+        }
+        // The client should only have sent "h2" in the extension. Note there
+        // are two length prefixes. A two-byte length prefix (0x0003) followed
+        // by a one-byte length prefix (0x02). See
+        // https://www.ietf.org/archive/id/draft-vvv-tls-alps-01.html#section-4
+        static constexpr auto expected =
+            std::to_array<uint8_t>({0x00, 0x03, 0x02, 'h', '2'});
+        EXPECT_EQ(
+            // SAFETY:
+            // https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_early_callback_ctx_extension_get
+            // The comment of `SSL_early_callback_ctx_extension_get` says that
+            // `data` is set to extension contents, and `len` is the
+            // length of the extension contents.
+            UNSAFE_BUFFERS(base::span(data, data + len)), base::span(expected));
+        return true;
+      });
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(client_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+}
+
+TEST_F(SSLClientSocketTest, ServerPaddingSupported) {
+  SSLServerConfig server_config;
+  server_config.server_padding_enabled = true;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  SSLConfig ssl_config;
+  ssl_config.server_padding_to_request = 128;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_TRUE(ssl_info.server_padding_requested);
+  EXPECT_TRUE(ssl_info.server_padding_received);
+
+  auto entries = log_observer_.GetEntries();
+  EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
+  EXPECT_EQ(true, entries.back().params.FindBool("requested_server_padding"));
+  EXPECT_EQ(true, entries.back().params.FindBool("received_server_padding"));
+}
+
+TEST_F(SSLClientSocketTest, ServerPaddingSupportedZeroPadding) {
+  SSLServerConfig server_config;
+  server_config.server_padding_enabled = true;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  SSLConfig ssl_config;
+  ssl_config.server_padding_to_request = 0;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_TRUE(ssl_info.server_padding_requested);
+  EXPECT_TRUE(ssl_info.server_padding_received);
+
+  auto entries = log_observer_.GetEntries();
+  EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
+  EXPECT_EQ(true, entries.back().params.FindBool("requested_server_padding"));
+  EXPECT_EQ(true, entries.back().params.FindBool("received_server_padding"));
+}
+
+TEST_F(SSLClientSocketTest, ServerPaddingSupportedNoPaddingRequested) {
+  SSLServerConfig server_config;
+  server_config.server_padding_enabled = true;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  SSLConfig ssl_config;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_FALSE(ssl_info.server_padding_requested);
+  EXPECT_FALSE(ssl_info.server_padding_received);
+
+  auto entries = log_observer_.GetEntries();
+  EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
+  EXPECT_EQ(false, entries.back().params.FindBool("requested_server_padding"));
+  EXPECT_EQ(false, entries.back().params.FindBool("received_server_padding"));
+}
+
+TEST_F(SSLClientSocketTest, ServerPaddingUnsupported) {
+  SSLServerConfig server_config;
+  server_config.server_padding_enabled = false;
+  ASSERT_TRUE(
+      StartEmbeddedTestServer(EmbeddedTestServer::CERT_OK, server_config));
+
+  SSLConfig ssl_config;
+  ssl_config.server_padding_to_request = 128;
+  int rv;
+  ASSERT_TRUE(CreateAndConnectSSLClientSocket(ssl_config, &rv));
+  EXPECT_THAT(rv, IsOk());
+
+  SSLInfo ssl_info;
+  ASSERT_TRUE(sock_->GetSSLInfo(&ssl_info));
+  EXPECT_TRUE(ssl_info.server_padding_requested);
+  EXPECT_FALSE(ssl_info.server_padding_received);
+
+  auto entries = log_observer_.GetEntries();
+  EXPECT_TRUE(LogContainsEndEvent(entries, -1, NetLogEventType::SSL_CONNECT));
+  EXPECT_EQ(true, entries.back().params.FindBool("requested_server_padding"));
+  EXPECT_EQ(false, entries.back().params.FindBool("received_server_padding"));
 }
 
 }  // namespace net

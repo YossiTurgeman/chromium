@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <string_view>
+
 #include "base/component_export.h"
-#include "base/macros.h"
+#include "base/containers/flat_map.h"
+#include "base/gtest_prod_util.h"
+#include "build/build_config.h"
 #include "ui/base/clipboard/clipboard.h"
+
+namespace headless {
+class HeadlessClipboard;
+}
 
 namespace ui {
 
@@ -26,100 +34,122 @@ class ClipboardInternal;
 class COMPONENT_EXPORT(UI_BASE_CLIPBOARD) ClipboardNonBacked
     : public Clipboard {
  public:
-  // Returns the in-memory clipboard for the current thread. Note that this
+  // Returns the in-memory clipboard for the current thread. This
   // method must *only* be used when the caller is sure that the clipboard for
   // the current thread is in fact an instance of ClipboardNonBacked.
   static ClipboardNonBacked* GetForCurrentThread();
 
+  ClipboardNonBacked(const ClipboardNonBacked&) = delete;
+  ClipboardNonBacked& operator=(const ClipboardNonBacked&) = delete;
+
   // Returns the current ClipboardData.
-  const ClipboardData* GetClipboardData(ClipboardDataEndpoint* data_dst) const;
+  const ClipboardData* GetClipboardData(
+      DataTransferEndpoint* data_dst,
+      ClipboardBuffer buffer = ClipboardBuffer::kCopyPaste) const;
 
   // Writes the current ClipboardData and returns the previous data.
   // The data source is expected to be set in `data`.
   std::unique_ptr<ClipboardData> WriteClipboardData(
-      std::unique_ptr<ClipboardData> data);
+      std::unique_ptr<ClipboardData> data,
+      ClipboardBuffer buffer = ClipboardBuffer::kCopyPaste);
+
+  // Clipboard overrides:
+  void GetSource(ClipboardBuffer buffer,
+                 GetSourceCallback callback) const override;
+  const ClipboardSequenceNumberToken& GetSequenceNumber(
+      ClipboardBuffer buffer) const override;
+
+  int NumImagesEncodedForTesting(
+      ClipboardBuffer buffer = ClipboardBuffer::kCopyPaste) const;
 
  private:
   friend class Clipboard;
-  friend class ClipboardNonBackedTest;
+  friend class ClipboardNonBackedTestBase;
+  friend class headless::HeadlessClipboard;
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedTest, PlainText);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedTest, BookmarkURL);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedTest, TextURIList);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedTest, ImageEncoding);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedTest, EncodeImageOnce);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedTest, EncodeMultipleImages);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedTest, ClipboardBufferTypes);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardNonBackedMockTimeTest,
+                           RecordsTimeIntervalBetweenCommitAndRead);
   ClipboardNonBacked();
   ~ClipboardNonBacked() override;
 
   // Clipboard overrides:
   void OnPreShutdown() override;
-  void SetClipboardDlpController(
-      std::unique_ptr<ClipboardDlpController> dlp_controller) override;
-  uint64_t GetSequenceNumber(ClipboardBuffer buffer) const override;
-  bool IsFormatAvailable(const ClipboardFormatType& format,
-                         ClipboardBuffer buffer,
-                         const ClipboardDataEndpoint* data_dst) const override;
+  void GetStandardFormats(ClipboardBuffer buffer,
+                          const std::optional<DataTransferEndpoint>& data_dst,
+                          GetStandardFormatsCallback callback) const override;
+  void GetAllAvailableFormats(
+      ClipboardBuffer buffer,
+      const std::optional<DataTransferEndpoint>& data_dst,
+      base::OnceCallback<void(base::flat_set<ClipboardFormatType>)> callback)
+      const override;
   void Clear(ClipboardBuffer buffer) override;
   void ReadAvailableTypes(ClipboardBuffer buffer,
-                          const ClipboardDataEndpoint* data_dst,
-                          std::vector<base::string16>* types) const override;
-  std::vector<base::string16> ReadAvailablePlatformSpecificFormatNames(
-      ClipboardBuffer buffer,
-      const ClipboardDataEndpoint* data_dst) const override;
+                          const std::optional<DataTransferEndpoint>& data_dst,
+                          ReadAvailableTypesCallback callback) const override;
   void ReadText(ClipboardBuffer buffer,
-                const ClipboardDataEndpoint* data_dst,
-                base::string16* result) const override;
+                const std::optional<DataTransferEndpoint>& data_dst,
+                ReadTextCallback callback) const override;
   void ReadAsciiText(ClipboardBuffer buffer,
-                     const ClipboardDataEndpoint* data_dst,
-                     std::string* result) const override;
+                     const std::optional<DataTransferEndpoint>& data_dst,
+                     ReadAsciiTextCallback callback) const override;
   void ReadHTML(ClipboardBuffer buffer,
-                const ClipboardDataEndpoint* data_dst,
-                base::string16* markup,
-                std::string* src_url,
-                uint32_t* fragment_start,
-                uint32_t* fragment_end) const override;
+                const std::optional<DataTransferEndpoint>& data_dst,
+                ReadHtmlCallback callback) const override;
   void ReadSvg(ClipboardBuffer buffer,
-               const ClipboardDataEndpoint* data_dst,
-               base::string16* result) const override;
+               const std::optional<DataTransferEndpoint>& data_dst,
+               ReadSvgCallback callback) const override;
   void ReadRTF(ClipboardBuffer buffer,
-               const ClipboardDataEndpoint* data_dst,
-               std::string* result) const override;
-  void ReadImage(ClipboardBuffer buffer,
-                 const ClipboardDataEndpoint* data_dst,
-                 ReadImageCallback callback) const override;
-  void ReadCustomData(ClipboardBuffer buffer,
-                      const base::string16& type,
-                      const ClipboardDataEndpoint* data_dst,
-                      base::string16* result) const override;
-  void ReadBookmark(const ClipboardDataEndpoint* data_dst,
-                    base::string16* title,
-                    std::string* url) const override;
+               const std::optional<DataTransferEndpoint>& data_dst,
+               ReadRTFCallback callback) const override;
+  void ReadPng(ClipboardBuffer buffer,
+               const std::optional<DataTransferEndpoint>& data_dst,
+               ReadPngCallback callback) const override;
+  void ReadDataTransferCustomData(
+      ClipboardBuffer buffer,
+      const std::u16string& type,
+      const std::optional<DataTransferEndpoint>& data_dst,
+      ReadDataTransferCustomDataCallback callback) const override;
+  void ReadFilenames(ClipboardBuffer buffer,
+                     const std::optional<DataTransferEndpoint>& data_dst,
+                     ReadFilenamesCallback callback) const override;
+  void ReadURL(const std::optional<DataTransferEndpoint>& data_dst,
+               ReadUrlCallback callback) const override;
   void ReadData(const ClipboardFormatType& format,
-                const ClipboardDataEndpoint* data_dst,
-                std::string* result) const override;
+                const std::optional<DataTransferEndpoint>& data_dst,
+                ReadDataCallback callback) const override;
+#if BUILDFLAG(IS_OZONE)
   bool IsSelectionBufferAvailable() const override;
-  void WritePortableRepresentations(
+#endif  // BUILDFLAG(IS_OZONE)
+  void WritePortableAndPlatformRepresentations(
       ClipboardBuffer buffer,
       const ObjectMap& objects,
-      std::unique_ptr<ClipboardDataEndpoint> data_src) override;
-  void WritePlatformRepresentations(
-      ClipboardBuffer buffer,
+      const std::vector<RawData>& raw_objects,
       std::vector<Clipboard::PlatformRepresentation> platform_representations,
-      std::unique_ptr<ClipboardDataEndpoint> data_src) override;
-  void WriteText(const char* text_data, size_t text_len) override;
-  void WriteHTML(const char* markup_data,
-                 size_t markup_len,
-                 const char* url_data,
-                 size_t url_len) override;
-  void WriteSvg(const char* markup_data, size_t markup_len) override;
-  void WriteRTF(const char* rtf_data, size_t data_len) override;
-  void WriteBookmark(const char* title_data,
-                     size_t title_len,
-                     const char* url_data,
-                     size_t url_len) override;
+      std::unique_ptr<DataTransferEndpoint> data_src,
+      uint32_t privacy_types) override;
+  void WriteText(std::string_view text) override;
+  void WriteHTML(std::string_view markup,
+                 std::optional<std::string_view> source_url) override;
+  void WriteSvg(std::string_view markup) override;
+  void WriteRTF(std::string_view rtf) override;
+  void WriteFilenames(std::vector<ui::FileInfo> filenames) override;
+  void WriteURL(const ClipboardUrlInfo& url_info) override;
   void WriteWebSmartPaste() override;
   void WriteBitmap(const SkBitmap& bitmap) override;
   void WriteData(const ClipboardFormatType& format,
-                 const char* data_data,
-                 size_t data_len) override;
+                 base::span<const uint8_t> data) override;
 
-  const std::unique_ptr<ClipboardInternal> clipboard_internal_;
+  const ClipboardInternal& GetInternalClipboard(ClipboardBuffer buffer) const;
+  ClipboardInternal& GetInternalClipboard(ClipboardBuffer buffer);
 
-  DISALLOW_COPY_AND_ASSIGN(ClipboardNonBacked);
+  base::flat_map<ClipboardBuffer, std::unique_ptr<ClipboardInternal>>
+      internal_clipboards_;
 };
 
 }  // namespace ui

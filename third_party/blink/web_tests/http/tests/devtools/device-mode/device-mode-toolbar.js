@@ -1,35 +1,41 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {DeviceModeTestRunner} from 'device_mode_test_runner';
+
+import * as Emulation from 'devtools/panels/emulation/emulation.js';
+import * as EmulationModel from 'devtools/models/emulation/emulation.js';
+import * as Geometry from 'devtools/models/geometry/geometry.js'
+
 (async function() {
   TestRunner.addResult(`Test toolbar state when switching modes.\n`);
-  await TestRunner.loadModule('device_mode_test_runner');
 
   var phoneA = DeviceModeTestRunner.buildFakePhone();
-  var view = new Emulation.DeviceModeView();
-  var toolbar = view._toolbar;
-  var model = view._model;
-  var viewportSize = new UI.Size(800, 600);
+  var view = new Emulation.DeviceModeView.DeviceModeView();
+  var toolbar = view.toolbar;
+  var model = view.model;
+  var viewportSize = new Geometry.Size(800, 600);
   model.setAvailableSize(viewportSize, viewportSize);
 
   // Check that default model has type None.
   dumpInfo();
 
-  model.emulate(Emulation.DeviceModeModel.Type.None, null, null);
+  model.emulate(EmulationModel.DeviceModeModel.Type.None, null, null);
   dumpType();
-  toolbar._switchToResponsive();
+  toolbar.switchToResponsive();
   dumpInfo();
 
-  model.emulate(Emulation.DeviceModeModel.Type.None, null, null);
+  model.emulate(EmulationModel.DeviceModeModel.Type.None, null, null);
   dumpType();
-  toolbar._emulateDevice(phoneA);
+  toolbar.emulateDevice(phoneA);
   dumpInfo();
 
-  toolbar._switchToResponsive();
+  toolbar.switchToResponsive();
   dumpInfo();
 
-  toolbar._emulateDevice(phoneA);
+  toolbar.emulateDevice(phoneA);
   dumpInfo();
 
   function dumpType() {
@@ -38,7 +44,7 @@
 
   function dumpInfo() {
     dumpType();
-    TestRunner.addResult(`Rotate: ${toolbar._modeButton._enabled ? 'enabled': 'disabled'}, Width/Height: ${!toolbar._widthInput.disabled ? 'enabled': 'disabled'}`);
+    TestRunner.addResult(`Rotate: ${toolbar.modeButton.enabled ? 'enabled': 'disabled'}, Width/Height: ${!toolbar.widthInput.disabled ? 'enabled': 'disabled'}`);
   }
 
   TestRunner.completeTest();

@@ -1,9 +1,9 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef CHROME_BROWSER_BROWSING_DATA_MOCK_BROWSING_DATA_REMOVER_DELEGATE_H_
-#define CHROME_BROWSER_BROWSING_DATA_MOCK_BROWSING_DATA_REMOVER_DELEGATE_H_
+#ifndef CONTENT_PUBLIC_TEST_MOCK_BROWSING_DATA_REMOVER_DELEGATE_H_
+#define CONTENT_PUBLIC_TEST_MOCK_BROWSING_DATA_REMOVER_DELEGATE_H_
 
 #include <list>
 #include <memory>
@@ -24,8 +24,6 @@ class MockBrowsingDataRemoverDelegate : public BrowsingDataRemoverDelegate {
   BrowsingDataRemoverDelegate::EmbedderOriginTypeMatcher GetOriginTypeMatcher()
       override;
   bool MayRemoveDownloadHistory() override;
-  std::vector<std::string> GetDomainsForDeferredCookieDeletion(
-      uint64_t remove_mask) override;
   void RemoveEmbedderData(const base::Time& delete_begin,
                           const base::Time& delete_end,
                           uint64_t remove_mask,
@@ -86,4 +84,4 @@ std::ostream& operator<<(
 
 }  // content
 
-#endif  // CHROME_BROWSER_BROWSING_DATA_MOCK_BROWSING_DATA_REMOVER_DELEGATE_H_
+#endif  // CONTENT_PUBLIC_TEST_MOCK_BROWSING_DATA_REMOVER_DELEGATE_H_

@@ -1,4 +1,4 @@
-# Copyright (c) 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 # WHAT IS THIS FILE?
 # =============================================================================
 #
-# This is the master GN build configuration. This file is loaded after the
+# This is the main GN build configuration. This file is loaded after the
 # build args (args.gn) for the build directory and after the toplevel ".gn"
 # file (which points to this file as the build configuration).
 #
@@ -28,7 +28,7 @@
 # represents the computer doing the compile and never changes. The "target"
 # represents the main thing we're trying to build. The "current" represents
 # which configuration is currently being defined, which can be either the
-# host, the target, or something completely different (like nacl). GN will
+# host, the target, or something completely different. GN will
 # run the same build file multiple times for the different required
 # configuration in the same build.
 #
@@ -56,7 +56,7 @@ if (target_cpu == "") {
     # build for ARM by default, not the host_cpu (which is likely x64).
     # This allows us to not have to specify both target_os and target_cpu
     # on the command line.
-    target_cpu = "arm"
+    target_cpu = "arm64"
   } else {
     target_cpu = host_cpu
   }
@@ -128,16 +128,16 @@ declare_args() {
   # release (!is_debug). This might be better expressed as a tri-state
   # (debug, release, official) but for historical reasons there are two
   # separate flags.
+  #
+  # IMPORTANT NOTE: (!is_debug) is *not* sufficient to get satisfying
+  # performance. In particular, DCHECK()s are still enabled for release builds,
+  # which can halve overall performance, and do increase memory usage. Always
+  # set "is_official_build" to true for any build intended to ship to end-users.
   is_official_build = false
-
-  # Whether we're a traditional desktop unix.
-  is_desktop_linux = current_os == "linux"
 
   # Set to true when compiling with the Clang compiler.
   is_clang = current_os != "linux" ||
-             (current_cpu != "s390x" && current_cpu != "s390" &&
-              current_cpu != "ppc64" && current_cpu != "ppc" &&
-              current_cpu != "mips" && current_cpu != "mips64")
+             (current_cpu != "mips" && current_cpu != "mips64")
 
   # Allows the path to a custom target toolchain to be injected as a single
   # argument, and set as the default toolchain.
@@ -146,6 +146,11 @@ declare_args() {
   # This should not normally be set as a build argument.  It's here so that
   # every toolchain can pass through the "global" value via toolchain_args().
   host_toolchain = ""
+
+  # Do not set this directly.
+  # It should be set only by //build/toolchains/android:robolectric_x64.
+  # True when compiling native code for use with robolectric_binary().
+  is_robolectric = false
 
   # DON'T ADD MORE FLAGS HERE. Read the comment above.
 }
@@ -161,11 +166,32 @@ declare_args() {
   # When false, components will be linked statically.
   #
   # For more information see
-  # https://chromium.googlesource.com/chromium/src/+/master/docs/component_build.md
-  is_component_build = is_debug && current_os != "ios"
+  # https://chromium.googlesource.com/chromium/src/+/main/docs/component_build.md
+  is_component_build =
+      is_debug && current_os != "ios" && current_os != "watchos"
 }
 
 assert(!(is_debug && is_official_build), "Can't do official debug builds")
+assert(!(current_os == "ios" && is_component_build),
+       "Can't use component build on iOS")
+assert(!(current_os == "watchos" && is_component_build),
+       "Can't use component build on watchOS")
+
+declare_args() {
+  # Unsafe buffers. Location of file used by plugins to track portions of
+  # the codebase which have been made manifestly safe.
+  clang_unsafe_buffers_paths = ""
+  clang_warning_suppression_file = ""
+}
+
+declare_args() {
+  # Whether to enable strict deps checks. This ensures that your dependencies
+  # are correctly declared (no missing deps and no accessing transitive deps).
+  enable_strict_deps = false
+}
+if (enable_strict_deps) {
+  generate_modulemap = "textual"
+}
 
 # ==============================================================================
 # TOOLCHAIN SETUP
@@ -213,6 +239,8 @@ if (host_toolchain == "") {
     }
   } else if (host_os == "aix") {
     host_toolchain = "//build/toolchain/aix:$host_cpu"
+  } else if (host_os == "zos") {
+    host_toolchain = "//build/toolchain/zos:$host_cpu"
   } else {
     assert(false, "Unsupported host_os: $host_os")
   }
@@ -221,8 +249,8 @@ if (host_toolchain == "") {
 _default_toolchain = ""
 
 if (target_os == "android") {
-  assert(host_os == "linux" || host_os == "mac",
-         "Android builds are only supported on Linux and Mac hosts.")
+  # Targeting android on Mac is best-effort and not guaranteed to work.
+  assert(host_os == "linux", "Android builds are only supported on Linux.")
   _default_toolchain = "//build/toolchain/android:android_clang_$target_cpu"
 } else if (target_os == "chromeos" || target_os == "linux") {
   # See comments in build/toolchain/cros/BUILD.gn about board compiles.
@@ -234,9 +262,10 @@ if (target_os == "android") {
 } else if (target_os == "fuchsia") {
   _default_toolchain = "//build/toolchain/fuchsia:$target_cpu"
 } else if (target_os == "ios") {
-  _default_toolchain = "//build/toolchain/mac:ios_clang_$target_cpu"
+  _default_toolchain = "//build/toolchain/ios:ios_clang_$target_cpu"
 } else if (target_os == "mac") {
-  assert(host_os == "mac", "Mac cross-compiles are unsupported.")
+  assert(host_os == "mac" || host_os == "linux",
+         "Mac cross-compiles are unsupported.")
   _default_toolchain = "//build/toolchain/mac:clang_$target_cpu"
 } else if (target_os == "win") {
   # On Windows, we use the same toolchain for host and target by default.
@@ -254,6 +283,14 @@ if (target_os == "android") {
   _default_toolchain = "//build/toolchain/win:uwp_$target_cpu"
 } else if (target_os == "aix") {
   _default_toolchain = "//build/toolchain/aix:$target_cpu"
+} else if (target_os == "zos") {
+  _default_toolchain = "//build/toolchain/zos:$target_cpu"
+} else if (target_os == "emscripten") {
+  # Because it's too hard to remove all targets from //BUILD.gn that do not work
+  # with it.
+  assert(
+      false,
+      "emscripten is not a supported target_os. It is available only as secondary toolchain.")
 } else {
   assert(false, "Unsupported target_os: $target_os")
 }
@@ -277,8 +314,8 @@ if (custom_toolchain != "") {
 # - is_mac is set only for desktop Mac. It is not set on iOS.
 # - is_posix is true for mac and any Unix-like system (basically everything
 #   except Fuchsia and Windows).
-# - is_linux is true for desktop Linux and ChromeOS, but not Android (which is
-#   generally too different despite being based on the Linux kernel).
+# - is_linux is true for desktop Linux, but not for ChromeOS nor Android (which
+#   is generally too different despite being based on the Linux kernel).
 #
 # Do not add more is_* variants here for random lesser-used Unix systems like
 # aix or one of the BSDs. If you need to check these, just check the
@@ -288,26 +325,14 @@ is_android = current_os == "android"
 is_chromeos = current_os == "chromeos"
 is_fuchsia = current_os == "fuchsia"
 is_ios = current_os == "ios"
-is_linux = current_os == "chromeos" || current_os == "linux"
+is_linux = current_os == "linux"
 is_mac = current_os == "mac"
-is_nacl = current_os == "nacl"
+is_wasm = current_os == "emscripten"
+is_watchos = current_os == "watchos"
 is_win = current_os == "win" || current_os == "winuwp"
 
-is_apple = is_ios || is_mac
+is_apple = is_ios || is_mac || is_watchos
 is_posix = !is_win && !is_fuchsia
-
-# =============================================================================
-# SOURCES FILTERS
-# =============================================================================
-#
-# Compatibility to allow incremental migration of BUILD.gn files away from
-# depending on global call of set_sources_assignment_filter. Will be removed
-# when all files that depend on the assignment have been converted to import
-# the file directly. See https://crbug.com/1018739#c69.
-
-import("//build/config/deprecated_default_sources_assignment_filter.gni")
-sources_assignment_filter = deprecated_default_sources_assignment_filter
-set_sources_assignment_filter(sources_assignment_filter)
 
 # =============================================================================
 # TARGET DEFAULTS
@@ -328,36 +353,48 @@ set_sources_assignment_filter(sources_assignment_filter)
 
 # Holds all configs used for running the compiler.
 default_compiler_configs = [
-  "//build/config:feature_flags",
+  "//build/config/compiler/pgo:default_pgo_flags",
   "//build/config/compiler:afdo",
   "//build/config/compiler:afdo_optimize_size",
+  "//build/config/compiler:cet_shadow_stack",
+  "//build/config/compiler:chromium_code",
   "//build/config/compiler:compiler",
   "//build/config/compiler:compiler_arm_fpu",
   "//build/config/compiler:compiler_arm_thumb",
-  "//build/config/compiler:chromium_code",
   "//build/config/compiler:default_include_dirs",
+  "//build/config/compiler:default_init_stack_vars",
   "//build/config/compiler:default_optimization",
   "//build/config/compiler:default_stack_frames",
   "//build/config/compiler:default_symbols",
-  "//build/config/compiler:export_dynamic",
+  "//build/config/compiler:disallow_unstable_features",
   "//build/config/compiler:no_exceptions",
   "//build/config/compiler:no_rtti",
+  "//build/config/compiler:no_unresolved_symbols",
   "//build/config/compiler:runtime_library",
+  "//build/config/compiler:sanitize_c_array_bounds",
+  "//build/config/compiler:sanitize_return",
   "//build/config/compiler:thin_archive",
-  "//build/config/compiler:default_init_stack_vars",
-  "//build/config/compiler/pgo:default_pgo_flags",
+  "//build/config/compiler:thinlto_optimize_default",
+  "//build/config/compiler:tot_warnings",
   "//build/config/coverage:default_coverage",
   "//build/config/sanitizers:default_sanitizer_flags",
+  "//build/config:feature_flags",
 ]
 
 if (is_win) {
   default_compiler_configs += [
+    "//build/config/win:default_cfg_compiler",
     "//build/config/win:default_crt",
     "//build/config/win:lean_and_mean",
     "//build/config/win:nominmax",
     "//build/config/win:unicode",
     "//build/config/win:winver",
+    "//build/config/win:wincrypt_use_symbol_prefix",
   ]
+}
+
+if (is_apple) {
+  default_compiler_configs += [ "//build/config/compiler:enable_arc" ]
 }
 
 if (is_posix) {
@@ -376,15 +413,11 @@ if (is_android) {
       [ "//build/config/android:default_orderfile_instrumentation" ]
 }
 
-if (is_win) {
-  default_compiler_configs +=
-      [ "//build/config/win:default_cygprofile_instrumentation" ]
-}
-
-if (is_clang && !is_nacl) {
+if (is_clang) {
   default_compiler_configs += [
-    "//build/config/clang:find_bad_constructs",
     "//build/config/clang:extra_warnings",
+    "//build/config/clang:find_bad_constructs",
+    "//build/config/clang:unsafe_buffers",
   ]
 }
 
@@ -395,6 +428,10 @@ if (is_debug) {
   default_compiler_configs += [ "//build/config:release" ]
 }
 
+if (current_os == "zos") {
+  default_compiler_configs += [ "//build/config/zos:compiler" ]
+}
+
 # Static libraries and source sets use only the compiler ones.
 set_defaults("static_library") {
   configs = default_compiler_configs
@@ -402,35 +439,52 @@ set_defaults("static_library") {
 set_defaults("source_set") {
   configs = default_compiler_configs
 }
+set_defaults("rust_library") {
+  configs = default_compiler_configs
+}
 
 # Compute the set of configs common to all linked targets (shared libraries,
 # loadable modules, executables) to avoid duplication below.
+_linker_configs = [
+  "//build/config:default_libs",
+  "//build/config/compiler:linker",
+]
 if (is_win) {
   # Many targets remove these configs, so they are not contained within
   # //build/config:executable_config for easy removal.
-  _linker_configs = [
+  _linker_configs += [
     "//build/config/win:default_incremental_linking",
 
     # Default to console-mode apps. Most of our targets are tests and such
     # that shouldn't use the windows subsystem.
     "//build/config/win:console",
   ]
-} else if (is_mac) {
-  _linker_configs = [ "//build/config/mac:strip_all" ]
-} else {
-  _linker_configs = []
+} else if (is_apple) {
+  _linker_configs += [ "//build/config/apple:strip_all" ]
+} else if (is_android) {
+  # Warn whenever linking code that could unintentionally switch off
+  # branch target identification (BTI) on Arm systems.
+  _linker_configs += [ "//build/config/android:lld_branch_target_hardening" ]
 }
 
 # Executable defaults.
-default_executable_configs = default_compiler_configs + [
-                               "//build/config:default_libs",
+default_executable_configs = default_compiler_configs + _linker_configs + [
+                               "//build/config/compiler:export_dynamic",
                                "//build/config:executable_config",
-                             ] + _linker_configs
+                             ]
 
 if (is_win) {
   # Turn on linker CFI for executables, and position it so it can be removed
   # if needed.
   default_executable_configs += [ "//build/config/win:cfi_linker" ]
+}
+if (is_fuchsia) {
+  # Sometimes executables are linked by rustc passing a command line to
+  # clang++. It includes "-pie" which is pointless on Fuchsia. Suppress the
+  # resulting (fatal) warning. Unfortunately there's no way to do this only
+  # for binaries linked by rustc; gn does not make the distinction.
+  default_executable_configs +=
+      [ "//build/config/fuchsia:rustc_no_pie_warning" ]
 }
 
 set_defaults("executable") {
@@ -439,10 +493,8 @@ set_defaults("executable") {
 
 # Shared library and loadable module defaults (also for components in component
 # mode).
-default_shared_library_configs = default_compiler_configs + [
-                                   "//build/config:default_libs",
-                                   "//build/config:shared_library_config",
-                                 ] + _linker_configs
+default_shared_library_configs = default_compiler_configs + _linker_configs +
+                                 [ "//build/config:shared_library_config" ]
 if (is_win) {
   # Turn on linker CFI for DLLs, and position it so it can be removed if needed.
   default_shared_library_configs += [ "//build/config/win:cfi_linker" ]
@@ -453,6 +505,14 @@ if (is_android) {
   # want this can remove this config.
   default_shared_library_configs +=
       [ "//build/config/android:hide_all_but_jni_onload" ]
+}
+if (is_fuchsia) {
+  # Sometimes shared libraries are linked by rustc passing a command line to
+  # clang++. It includes "-pie" which is pointless on Fuchsia. Suppress the
+  # resulting (fatal) warning. Unfortunately there's no way to do this only
+  # for binaries linked by rustc; gn does not make the distinction.
+  default_shared_library_configs +=
+      [ "//build/config/fuchsia:rustc_no_pie_warning" ]
 }
 set_defaults("shared_library") {
   configs = default_shared_library_configs
@@ -466,6 +526,127 @@ set_defaults("loadable_module") {
   }
 }
 
+default_rust_proc_macro_configs =
+    default_shared_library_configs + [ "//build/rust:proc_macro_extern" ] +
+    # Rust proc macros don't support (Thin)LTO, so always remove it.
+    [
+      "//build/config/compiler:thinlto_optimize_default",
+      "//build/config/compiler:thinlto_optimize_max",
+    ] -
+    [
+      "//build/config/compiler:thinlto_optimize_default",
+      "//build/config/compiler:thinlto_optimize_max",
+    ]
+
+set_defaults("rust_proc_macro") {
+  configs = default_rust_proc_macro_configs
+}
+
+# A helper for forwarding testonly and visibility.
+# Forwarding "*" does not include variables from outer scopes (to avoid copying
+# all globals into each template invocation), so it will not pick up
+# file-scoped or outer-template-scoped variables. Normally this behavior is
+# desired, but "visibility" and "testonly" are commonly defined in outer scopes.
+# Explicitly forwarding them in forward_variables_from() works around this
+# nuance. See //build/docs/writing_gn_templates.md#using-forward_variables_from
+TESTONLY_AND_VISIBILITY = [
+  "testonly",
+  "visibility",
+]
+
+# Sets default dependencies for static_library and source_set targets.
+#
+# Variables
+#   use_libcxx_modules: If true, libc++'s modules are added to deps.
+#       This is true by default.
+#   strict_deps: If false, the strict deps check will be disabled even when the
+#       feature is enabled in args.gn.
+#       This is true by default.
+foreach(_target_type,
+        [
+          "source_set",
+          "static_library",
+        ]) {
+  template(_target_type) {
+    target(_target_type, target_name) {
+      forward_variables_from(invoker, "*", TESTONLY_AND_VISIBILITY)
+      forward_variables_from(invoker, TESTONLY_AND_VISIBILITY)
+      if (!defined(inputs)) {
+        inputs = []
+      }
+      if (!defined(deps)) {
+        deps = []
+      }
+
+      if (!defined(public_deps)) {
+        public_deps = []
+      }
+
+      if (!defined(use_libcxx_modules)) {
+        use_libcxx_modules = is_clang
+      }
+
+      if (filter_include(
+              configs,
+              [
+                # TODO(https://github.com/llvm/llvm-project/pull/145654):
+                # Remove mac_no_default_new_delete_symbols after clang roll.
+                ":mac_no_default_new_delete_symbols",
+                "//build/config/compiler:exceptions",
+                "//build/config/compiler:rtti",
+              ]) != [] ||
+          filter_include(configs,
+                         [ "//build/config/compiler:no_exceptions" ]) == []) {
+        # Exceptions (i.e. if the 'no_exceptions' config is not used) and RTTI
+        # flags are incompatible with libc++ modules build. So disable modules
+        # build for such targets.
+        use_libcxx_modules = false
+      }
+
+      if (!defined(strict_deps)) {
+        strict_deps = enable_strict_deps
+      }
+
+      if (use_libcxx_modules && is_clang) {
+        if (strict_deps) {
+          configs += [ "//build/modules:strict_deps" ]
+        }
+      } else {
+        not_needed([ "strict_deps" ])
+      }
+
+      if (use_libcxx_modules) {
+        # Add a dependency needed for Clang modules builds.
+        deps += [ "//buildtools/third_party/libc++:all_modules" ]
+
+        if (!defined(invoker.generate_modulemap) &&
+            defined(generate_modulemap)) {
+          generate_modulemap = generate_modulemap
+        }
+      }
+
+      # Consumed by the unsafe-buffers plugin during compile.
+      #
+      # TODO(crbug.com/326584510): Reclient doesn't respect this variable, see
+      # rbe_bug_326584510_missing_inputs in //build/config/clang/clang.gni
+      _uses_cflags = false
+      if (defined(sources)) {
+        foreach(f, sources) {
+          if (string_replace(f + ".END", ".cc.END", "") != f + ".END" ||
+              string_replace(f + ".END", ".c.END", "") != f + ".END" ||
+              string_replace(f + ".END", ".mm.END", "") != f + ".END" ||
+              string_replace(f + ".END", ".m.END", "") != f + ".END") {
+            _uses_cflags = true
+          }
+        }
+      }
+      if (_uses_cflags && clang_unsafe_buffers_paths != "") {
+        inputs += [ clang_unsafe_buffers_paths ]
+      }
+    }
+  }
+}
+
 # Sets default dependencies for executable and shared_library targets.
 #
 # Variables
@@ -473,6 +654,11 @@ set_defaults("loadable_module") {
 #       Targets that set this usually also want to remove
 #       "//build/config/compiler:runtime_library" from configs (to remove
 #       its subconfig "//build/config/c++:runtime_library").
+#   use_libcxx_modules: If true, libc++'s modules are added to deps.
+#       This is true by default.
+#   strict_deps: If false, the strict deps check will be disabled even when the
+#       feature is enabled in args.gn.
+#       This is true by default.
 foreach(_target_type,
         [
           "executable",
@@ -480,9 +666,36 @@ foreach(_target_type,
           "shared_library",
         ]) {
   template(_target_type) {
+    # Alias "target_name" because it is clobbered by forward_variables_from().
     _target_name = target_name
     target(_target_type, _target_name) {
-      forward_variables_from(invoker, "*", [ "no_default_deps" ])
+      forward_variables_from(invoker,
+                             "*",
+                             TESTONLY_AND_VISIBILITY + [ "no_default_deps" ])
+      forward_variables_from(invoker, TESTONLY_AND_VISIBILITY)
+      if (!defined(inputs)) {
+        inputs = []
+      }
+
+      # Consumed by the unsafe-buffers plugin during compile.
+      #
+      # TODO(crbug.com/326584510): Reclient doesn't respect this variable, see
+      # rbe_bug_326584510_missing_inputs in //build/config/clang/clang.gni
+      _uses_cflags = false
+      if (defined(sources)) {
+        foreach(f, sources) {
+          if (string_replace(f + ".END", ".cc.END", "") != f + ".END" ||
+              string_replace(f + ".END", ".c.END", "") != f + ".END" ||
+              string_replace(f + ".END", ".mm.END", "") != f + ".END" ||
+              string_replace(f + ".END", ".m.END", "") != f + ".END") {
+            _uses_cflags = true
+          }
+        }
+      }
+      if (_uses_cflags && clang_unsafe_buffers_paths != "") {
+        inputs += [ clang_unsafe_buffers_paths ]
+      }
+
       if (!defined(deps)) {
         deps = []
       }
@@ -496,10 +709,57 @@ foreach(_target_type,
         deps += [ "//build/config:${_target_type}_deps" ]
       }
 
+      if (!defined(public_deps)) {
+        public_deps = []
+      }
+
+      if (!defined(use_libcxx_modules)) {
+        use_libcxx_modules = is_clang
+      }
+
+      if (filter_include(
+              configs,
+              [
+                # TODO(https://github.com/llvm/llvm-project/pull/145654):
+                # Remove mac_no_default_new_delete_symbols after clang roll.
+                ":mac_no_default_new_delete_symbols",
+                "//build/config/compiler:exceptions",
+                "//build/config/compiler:rtti",
+              ]) != [] ||
+          filter_include(configs,
+                         [ "//build/config/compiler:no_exceptions" ]) == []) {
+        # Exceptions (i.e. if the 'no_exceptions' config is not used) and RTTI
+        # flags are incompatible with libc++ modules build. So disable modules
+        # build for such targets.
+        use_libcxx_modules = false
+      }
+
+      if (!defined(strict_deps)) {
+        strict_deps = enable_strict_deps
+      }
+
+      if (use_libcxx_modules && is_clang) {
+        if (strict_deps) {
+          configs += [ "//build/modules:strict_deps" ]
+        }
+      } else {
+        not_needed([ "strict_deps" ])
+      }
+
+      if (use_libcxx_modules) {
+        # Add a dependency needed for Clang modules builds.
+        deps += [ "//buildtools/third_party/libc++:all_modules" ]
+
+        if (!defined(invoker.generate_modulemap) &&
+            defined(generate_modulemap)) {
+          generate_modulemap = generate_modulemap
+        }
+      }
+
       # On Android, write shared library output file to metadata. We will use
       # this information to, for instance, collect all shared libraries that
       # should be packaged into an APK.
-      if (!defined(invoker.metadata) && is_android &&
+      if (!defined(invoker.metadata) && (is_android || is_robolectric) &&
           (_target_type == "shared_library" ||
            _target_type == "loadable_module")) {
         _output_name = _target_name
@@ -517,8 +777,6 @@ foreach(_target_type,
 
         if (defined(output_extension)) {
           _shlib_extension = ".$output_extension"
-        } else if (is_component_build && _target_type != "loadable_module") {
-          _shlib_extension = ".cr.so"
         } else {
           _shlib_extension = ".so"
         }
@@ -550,6 +808,16 @@ foreach(_target_type,
 template("component") {
   if (is_component_build) {
     _component_mode = "shared_library"
+
+    # Generate a unique output_name for a shared library if not set by invoker.
+    if (!defined(invoker.output_name)) {
+      _output_name = get_label_info(":$target_name", "label_no_toolchain")
+      _output_name =
+          string_replace(_output_name, "$target_name:$target_name", target_name)
+      _output_name = string_replace(_output_name, "//", "")
+      _output_name = string_replace(_output_name, "/", "_")
+      _output_name = string_replace(_output_name, ":", "_")
+    }
   } else if (defined(invoker.static_component_type)) {
     assert(invoker.static_component_type == "static_library" ||
            invoker.static_component_type == "source_set")
@@ -562,26 +830,37 @@ template("component") {
     _component_mode = "static_library"
   }
   target(_component_mode, target_name) {
-    # Explicitly forward visibility, implicitly forward everything else.
-    # Forwarding "*" doesn't recurse into nested scopes (to avoid copying all
-    # globals into each template invocation), so won't pick up file-scoped
-    # variables. Normally this isn't too bad, but visibility is commonly
-    # defined at the file scope. Explicitly forwarding visibility and then
-    # excluding it from the "*" set works around this problem.
-    # See http://crbug.com/594610
-    forward_variables_from(invoker, [ "visibility" ])
-    forward_variables_from(invoker, "*", [ "visibility" ])
+    if (defined(_output_name)) {
+      output_name = _output_name
+    }
+    if (is_component_build && is_android) {
+      # By appending .cr, we prevent name collisions with libraries already
+      # loaded by the Android zygote.
+      output_extension = "cr.so"
+    }
+    forward_variables_from(invoker, TESTONLY_AND_VISIBILITY)
+    forward_variables_from(invoker, "*", TESTONLY_AND_VISIBILITY)
   }
 }
 
 # Component defaults
-set_defaults("component") {
-  if (is_component_build) {
-    configs = default_shared_library_configs
-    if (is_android) {
-      configs -= [ "//build/config/android:hide_all_but_jni_onload" ]
-    }
-  } else {
-    configs = default_compiler_configs
+# Set a variable since we also want to make this available
+# to mixed_component.gni
+if (is_component_build) {
+  default_component_configs = default_shared_library_configs
+  if (is_android) {
+    default_component_configs -=
+        [ "//build/config/android:hide_all_but_jni_onload" ]
   }
+  if (is_win) {
+    # We don't want component dlls to statically load OS dlls that aren't
+    # loaded normally.
+    default_component_configs += [ "//build/config/win:delayloads" ]
+  }
+} else {
+  default_component_configs = default_compiler_configs
+}
+
+set_defaults("component") {
+  configs = default_component_configs
 }

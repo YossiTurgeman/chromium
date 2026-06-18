@@ -1,29 +1,32 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <stdint.h>
-#include <algorithm>
+#include "components/cbor/reader.h"
 
-#include "components/cbor/reader.h"  // nogncheck
-#include "components/cbor/writer.h"  // nogncheck
+#include <stdint.h>
+
+#include <optional>
+#include <vector>
+
+#include "base/check.h"
+#include "base/containers/span.h"
+#include "components/cbor/writer.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 
 namespace cbor {
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  std::vector<uint8_t> input(data, data + size);
-  base::Optional<Value> cbor = Reader::Read(input);
-
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(const base::span<const uint8_t> input) {
+  std::optional<Value> cbor = Reader::Read(input);
   if (cbor.has_value()) {
-    base::Optional<std::vector<uint8_t>> serialized_cbor =
+    std::optional<std::vector<uint8_t>> serialized_cbor =
         Writer::Write(cbor.value());
     CHECK(serialized_cbor.has_value());
-    if (serialized_cbor.has_value()) {
-      CHECK(serialized_cbor.value().size() == input.size());
-      CHECK(memcmp(serialized_cbor.value().data(), input.data(),
-                   input.size()) == 0);
-    }
+    // This can only be reached if the input was canonical, which means that it
+    // must exactly match the re-serialized output.
+    CHECK(serialized_cbor.value() == input);
   }
+
   return 0;
 }
 

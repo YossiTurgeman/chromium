@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,19 +12,8 @@
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/resource_coordinator/lifecycle_unit.h"
 #include "chrome/browser/resource_coordinator/time.h"
-#include "net/base/network_change_notifier.h"
 
 namespace resource_coordinator {
-
-namespace {
-
-void RecordReloadAfterDiscardHistograms(const char* reason) {
-  base::UmaHistogramBoolean(
-      base::JoinString({"Discarding.OnlineOnReload", reason}, "."),
-      !net::NetworkChangeNotifier::IsOffline());
-}
-
-}  // namespace
 
 DiscardMetricsLifecycleUnitObserver::DiscardMetricsLifecycleUnitObserver() =
     default;
@@ -33,10 +22,9 @@ DiscardMetricsLifecycleUnitObserver::~DiscardMetricsLifecycleUnitObserver() =
 
 void DiscardMetricsLifecycleUnitObserver::OnLifecycleUnitStateChanged(
     LifecycleUnit* lifecycle_unit,
-    LifecycleUnitState last_state,
-    LifecycleUnitStateChangeReason reason) {
+    LifecycleUnitState last_state) {
   if (lifecycle_unit->GetState() == LifecycleUnitState::DISCARDED)
-    OnDiscard(lifecycle_unit, reason);
+    OnDiscard(lifecycle_unit);
   else if (last_state == LifecycleUnitState::DISCARDED)
     OnReload();
 }
@@ -49,9 +37,9 @@ void DiscardMetricsLifecycleUnitObserver::OnLifecycleUnitDestroyed(
       lifecycle_unit->GetState() != LifecycleUnitState::DISCARDED &&
       !reload_time_.is_null()) {
     auto reload_to_close_time = NowTicks() - reload_time_;
-    UMA_HISTOGRAM_CUSTOM_TIMES(
-        "TabManager.Discarding.ReloadToCloseTime", reload_to_close_time,
-        base::TimeDelta::FromSeconds(1), base::TimeDelta::FromDays(1), 100);
+    UMA_HISTOGRAM_CUSTOM_TIMES("TabManager.Discarding.ReloadToCloseTime",
+                               reload_to_close_time, base::Seconds(1),
+                               base::Days(1), 100);
   }
 
   // This is a self-owned object that destroys itself with the LifecycleUnit
@@ -61,11 +49,9 @@ void DiscardMetricsLifecycleUnitObserver::OnLifecycleUnitDestroyed(
 }
 
 void DiscardMetricsLifecycleUnitObserver::OnDiscard(
-    LifecycleUnit* lifecycle_unit,
-    LifecycleUnitStateChangeReason reason) {
+    LifecycleUnit* lifecycle_unit) {
   discard_time_ = NowTicks();
-  discard_reason_ = reason;
-  last_focused_time_before_discard_ = lifecycle_unit->GetLastFocusedTime();
+  last_focused_time_before_discard_ = lifecycle_unit->GetLastFocusedTimeTicks();
 
   static int discard_count = 0;
   UMA_HISTOGRAM_CUSTOM_COUNTS("TabManager.Discarding.DiscardCount",
@@ -80,28 +66,14 @@ void DiscardMetricsLifecycleUnitObserver::OnReload() {
   UMA_HISTOGRAM_CUSTOM_COUNTS("TabManager.Discarding.ReloadCount",
                               ++reload_count, 1, 1000, 50);
   auto discard_to_reload_time = reload_time_ - discard_time_;
-  UMA_HISTOGRAM_CUSTOM_TIMES(
-      "TabManager.Discarding.DiscardToReloadTime", discard_to_reload_time,
-      base::TimeDelta::FromSeconds(1), base::TimeDelta::FromDays(1), 100);
+  UMA_HISTOGRAM_CUSTOM_TIMES("TabManager.Discarding.DiscardToReloadTime",
+                             discard_to_reload_time, base::Seconds(1),
+                             base::Days(1), 100);
   auto inactive_to_reload_time =
       reload_time_ - last_focused_time_before_discard_;
-  UMA_HISTOGRAM_CUSTOM_TIMES(
-      "TabManager.Discarding.InactiveToReloadTime", inactive_to_reload_time,
-      base::TimeDelta::FromSeconds(1), base::TimeDelta::FromDays(1), 100);
-
-  // TODO(fdoray): All discard histograms should have a reason suffix.
-  switch (discard_reason_) {
-    case LifecycleUnitStateChangeReason::SYSTEM_MEMORY_PRESSURE:
-      RecordReloadAfterDiscardHistograms("Urgent");
-      break;
-    case LifecycleUnitStateChangeReason::EXTENSION_INITIATED:
-      RecordReloadAfterDiscardHistograms("Extension");
-      break;
-    case LifecycleUnitStateChangeReason::BROWSER_INITIATED:
-    default:
-      NOTREACHED();
-      break;
-  }
+  UMA_HISTOGRAM_CUSTOM_TIMES("TabManager.Discarding.InactiveToReloadTime",
+                             inactive_to_reload_time, base::Seconds(1),
+                             base::Days(1), 100);
 }
 
 }  // namespace resource_coordinator

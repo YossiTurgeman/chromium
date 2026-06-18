@@ -1,19 +1,23 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_SERVICE_WORKER_SERVICE_WORKER_EVENT_QUEUE_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_SERVICE_WORKER_SERVICE_WORKER_EVENT_QUEUE_H_
 
+#include <optional>
 #include <set>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "third_party/blink/public/mojom/service_worker/service_worker.mojom-blink.h"
 #include "third_party/blink/public/mojom/service_worker/service_worker_event_status.mojom-blink-forward.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
+#include "third_party/blink/renderer/platform/allow_discouraged_type.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cancellable_task.h"
 #include "third_party/blink/renderer/platform/wtf/deque.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
@@ -64,15 +68,10 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
       base::OnceCallback<void(int /* event_id */,
                               mojom::blink::ServiceWorkerEventStatus)>;
 
-  using BeforeStartEventCallback =
-      base::RepeatingCallback<void(/*is_offline_event=*/bool)>;
-
-  ServiceWorkerEventQueue(BeforeStartEventCallback before_start_event_callback,
-                          base::RepeatingClosure idle_callback,
+  ServiceWorkerEventQueue(base::RepeatingClosure idle_callback,
                           scoped_refptr<base::SequencedTaskRunner> task_runner);
   // For testing.
-  ServiceWorkerEventQueue(BeforeStartEventCallback before_start_event_callback,
-                          base::RepeatingClosure idle_callback,
+  ServiceWorkerEventQueue(base::RepeatingClosure idle_callback,
                           scoped_refptr<base::SequencedTaskRunner> task_runner,
                           const base::TickClock* tick_clock);
   ~ServiceWorkerEventQueue();
@@ -90,22 +89,22 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
 
   // Enqueues a Normal event. See ServiceWorkerEventQueue::Event to know the
   // meaning of each parameter.
-  void EnqueueNormal(StartCallback start_callback,
+  void EnqueueNormal(int event_id,
+                     StartCallback start_callback,
                      AbortCallback abort_callback,
-                     base::Optional<base::TimeDelta> custom_timeout);
+                     std::optional<base::TimeDelta> custom_timeout);
 
   // Similar to EnqueueNormal(), but enqueues a Pending event.
-  void EnqueuePending(StartCallback start_callback,
+  void EnqueuePending(int event_id,
+                      StartCallback start_callback,
                       AbortCallback abort_callback,
-                      base::Optional<base::TimeDelta> custom_timeout);
+                      std::optional<base::TimeDelta> custom_timeout);
 
-  // Similar to EnqueueNormal(), but enqueues an Offline event.
-  void EnqueueOffline(StartCallback start_callback,
-                      AbortCallback abort_callback,
-                      base::Optional<base::TimeDelta> custom_timeout);
-
-  // Returns true if |event_id| was started and hasn't ended.
+  // Returns true if |event_id| was enqueued and hasn't ended.
   bool HasEvent(int event_id) const;
+
+  // Returns true if |event_id| was enqueued and hasn't started.
+  bool HasEventInQueue(int event_id) const;
 
   // Creates a StayAwakeToken to ensure that the idle callback won't be
   // triggered while any of these are alive.
@@ -116,19 +115,27 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
   // This method must be called after the event queue is started.
   void SetIdleDelay(base::TimeDelta idle_delay);
 
+  // Resets the members for idle timeouts to cancel the idle callback.
+  void ResetIdleTimeout();
+
+  // Checks if the event queue is empty.
+  // Schedules idle timeout callback if there is no ongoing event.
+  void CheckEventQueue();
+
   // Returns true if the event queue thinks no events ran for a while, and has
   // triggered the |idle_callback_| passed to the constructor. It'll be reset to
   // false again when StartEvent() is called.
   bool did_idle_timeout() const { return did_idle_timeout_; }
 
+  // Returns the next event id, which is a monotonically increasing number.
+  int NextEventId();
+
   // Duration of the long standing event timeout since StartEvent() has been
   // called.
-  static constexpr base::TimeDelta kEventTimeout =
-      base::TimeDelta::FromMinutes(5);
+  static constexpr base::TimeDelta kEventTimeout = base::Minutes(5);
   // ServiceWorkerEventQueue periodically updates the timeout state by
   // kUpdateInterval.
-  static constexpr base::TimeDelta kUpdateInterval =
-      base::TimeDelta::FromSeconds(30);
+  static constexpr base::TimeDelta kUpdateInterval = base::Seconds(10);
 
  private:
   // Represents an event dispatch, which can be queued into |queue_|.
@@ -146,18 +153,15 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
       // signalling that the browser decided not to terminate the
       // worker.
       Pending,
-      // An offline event. ServiceWorkerEventQueue never dispatches offline
-      // events while non-offfline events are being dispatched, and vice-versa.
-      // An offline event is only used in offline-capability-check fetch event
-      // dispatch, which will be added later.
-      Offline,
     };
 
-    Event(Type type,
+    Event(int event_id,
+          Type type,
           StartCallback start_callback,
           AbortCallback abort_callback,
-          base::Optional<base::TimeDelta> custom_timeout);
+          std::optional<base::TimeDelta> custom_timeout);
     ~Event();
+    const int event_id;
     Type type;
     // Callback which is run when the event queue starts this event. The
     // callback receives |event_id|. When an event finishes,
@@ -166,18 +170,15 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
     // Callback which is run when a started event is aborted.
     AbortCallback abort_callback;
     // The custom timeout value.
-    base::Optional<base::TimeDelta> custom_timeout;
+    std::optional<base::TimeDelta> custom_timeout;
   };
 
   // Enqueues the event to |queue_|, and run events in the queue or sometimes
   // later synchronously, depending on the type of events.
   void EnqueueEvent(std::unique_ptr<Event> event);
 
-  // Returns true if we can start |event|.
-  bool CanStartEvent(const Event& event) const;
-
   // Starts a single event.
-  void StartEvent(std::unique_ptr<Event> event);
+  void StartEvent(int event_id, std::unique_ptr<Event> event);
 
   // Updates the internal states and fires the event timeout callbacks if any.
   // TODO(shimazu): re-implement it by delayed tasks and cancelable callbacks.
@@ -199,9 +200,6 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
   // Processes all events in |queue_|.
   void ProcessEvents();
 
-  // Resets the members for idle timeouts to cancel the idle callback.
-  void ResetIdleTimeout();
-
   // True if the idle callback is scheduled to run.
   bool HasScheduledIdleCallback() const;
 
@@ -219,10 +217,7 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
 
   // For long standing event timeouts. This is used to look up an EventInfo
   // by event id.
-  HashMap<int /* event_id */, std::unique_ptr<EventInfo>> id_event_map_;
-
-  // Callback which is run just before starting an event.
-  BeforeStartEventCallback before_start_event_callback_;
+  HashMap<int /* event_id */, std::unique_ptr<EventInfo>> all_events_;
 
   // For idle timeouts. When there's no inflight event, this is scheduled to run
   // in |idle_delay_|.
@@ -234,27 +229,27 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
 
   // For idle timeouts. The time when there's no inflight event. Set to null if
   // there are inflight events.
-  base::TimeTicks last_no_inflight_event_;
+  base::TimeTicks last_no_inflight_event_time_;
 
   // For idle timeouts. The delay until the worker is identified as idle after
   // all inflight events are completed.
-  base::TimeDelta idle_delay_ = base::TimeDelta::FromSeconds(
-      mojom::blink::kServiceWorkerDefaultIdleDelayInSeconds);
+  base::TimeDelta idle_delay_ =
+      base::Seconds(mojom::blink::kServiceWorkerDefaultIdleDelayInSeconds);
 
   // Set to true once |idle_callback_| has been invoked. Set to false when
   // StartEvent() is called.
   bool did_idle_timeout_ = false;
 
-  // Event queue to where all events are enqueued.
-  Deque<std::unique_ptr<Event>> queue_;
+  // Event queue to where all online events (normal and pending events) are
+  // enqueued. We use std::map as a task queue because it's ordered by the
+  // `event_id` and the entries can be effectively erased in random order.
+  std::map<int /* event_id */, std::unique_ptr<Event>> queued_online_events_
+      ALLOW_DISCOURAGED_TYPE("Needs to be ordered by event_id");
 
   // Set to true during running ProcessEvents(). This is used for avoiding to
   // invoke |idle_callback_| or to re-enter ProcessEvents() when calling
   // ProcessEvents().
   bool processing_events_ = false;
-
-  // Set to true during running offline events.
-  bool running_offline_events_ = false;
 
   // The number of the living StayAwakeToken. See also class comments.
   int num_of_stay_awake_tokens_ = 0;
@@ -262,10 +257,15 @@ class MODULES_EXPORT ServiceWorkerEventQueue {
   // |timer_| invokes UpdateEventStatus() periodically.
   base::RepeatingTimer timer_;
 
-  // |tick_clock_| outlives |this|.
-  const base::TickClock* const tick_clock_;
+  // If true, this event queue is ready for processing events.
+  bool is_ready_for_processing_events_ = false;
 
-  bool in_dtor_ = false;
+  // |tick_clock_| outlives |this|.
+  const raw_ptr<const base::TickClock> tick_clock_;
+
+  // Monotonically increasing number. Event id should not start from zero since
+  // HashMap in Blink requires non-zero keys.
+  int next_event_id_ = 1;
 
   base::WeakPtrFactory<ServiceWorkerEventQueue> weak_factory_{this};
 };

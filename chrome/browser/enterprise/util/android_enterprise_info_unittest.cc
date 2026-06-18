@@ -1,33 +1,35 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/enterprise/util/android_enterprise_info.h"
 
-#include "base/bind.h"
-#include "base/optional.h"
-#include "base/test/bind_test_util.h"
+#include <optional>
+
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/test/bind.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 class AndroidEnterpriseInfoTest : public ::testing::Test {
  protected:
   AndroidEnterpriseInfoTest() {
-    instance_ = chrome::enterprise_util::AndroidEnterpriseInfo::GetInstance();
+    instance_ = enterprise_util::AndroidEnterpriseInfo::GetInstance();
     // Java side isn't running, so we need to skip the call to it.
     instance_->set_skip_jni_call_for_testing(true);
   }
 
-  chrome::enterprise_util::AndroidEnterpriseInfo* instance_;
+  raw_ptr<enterprise_util::AndroidEnterpriseInfo> instance_;
 };
 
 class EnterpriseInfoCallbackHelper {
  public:
-  base::Optional<bool> is_profile_owned, is_device_owned;
+  std::optional<bool> is_device_owned, is_profile_owned;
   int num_times_called = 0;
 
-  void OnResult(bool profile_owned, bool device_owned) {
-    is_profile_owned = profile_owned;
+  void OnResult(bool device_owned, bool profile_owned) {
     is_device_owned = device_owned;
+    is_profile_owned = profile_owned;
     num_times_called++;
   }
 };
@@ -41,15 +43,15 @@ TEST_F(AndroidEnterpriseInfoTest, CallbackGetsResult) {
   instance_->GetAndroidEnterpriseInfoState(base::BindOnce(
       &EnterpriseInfoCallbackHelper::OnResult, base::Unretained(&helper)));
 
-  bool profile_value = true;
   bool device_value = false;
+  bool profile_value = true;
   // Now pretend we got a result.
-  instance_->ServiceCallbacksForTesting(profile_value, device_value);
+  instance_->ServiceCallbacksForTesting(device_value, profile_value);
 
-  ASSERT_TRUE(helper.is_profile_owned.has_value());
   ASSERT_TRUE(helper.is_device_owned.has_value());
-  EXPECT_EQ(helper.is_profile_owned, profile_value);
+  ASSERT_TRUE(helper.is_profile_owned.has_value());
   EXPECT_EQ(helper.is_device_owned, device_value);
+  EXPECT_EQ(helper.is_profile_owned, profile_value);
 }
 
 // Test that multiple queued callbacks are all serviced.
@@ -110,17 +112,17 @@ TEST_F(AndroidEnterpriseInfoTest, MultipleCallbacksSameResult) {
   instance_->GetAndroidEnterpriseInfoState(base::BindOnce(
       &EnterpriseInfoCallbackHelper::OnResult, base::Unretained(&helper2)));
 
-  bool profile_value = false;
   bool device_value = true;
+  bool profile_value = false;
   // Now pretend we got a result.
-  instance_->ServiceCallbacksForTesting(profile_value, device_value);
+  instance_->ServiceCallbacksForTesting(device_value, profile_value);
 
   // If at least one optional has a value, then the other optional can only be
   // equivalent if it has the same value.
-  ASSERT_TRUE(helper2.is_profile_owned.has_value());
   ASSERT_TRUE(helper2.is_device_owned.has_value());
-  EXPECT_EQ(helper1.is_profile_owned, helper2.is_profile_owned);
+  ASSERT_TRUE(helper2.is_profile_owned.has_value());
   EXPECT_EQ(helper1.is_device_owned, helper2.is_device_owned);
+  EXPECT_EQ(helper1.is_profile_owned, helper2.is_profile_owned);
 }
 
 // Test that a reentrant callback doesn't cause a loop.
@@ -129,9 +131,9 @@ TEST_F(AndroidEnterpriseInfoTest, ReentrantCallback) {
 
   // Insert 4 callbacks into the instance, the 2nd callback will attempt to
   // insert another callback when it's serviced.
-  chrome::enterprise_util::AndroidEnterpriseInfo::EnterpriseInfoCallback
+  enterprise_util::AndroidEnterpriseInfo::EnterpriseInfoCallback
       reentrant_callback =
-          base::BindLambdaForTesting([&](bool one, bool two) -> void {
+          base::BindLambdaForTesting([&](bool device_owned, bool profile_owned) -> void {
             // Do nothing with the arguments, just enter the function again.
             instance_->GetAndroidEnterpriseInfoState(
                 base::BindOnce(&EnterpriseInfoCallbackHelper::OnResult,

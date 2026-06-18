@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,31 +9,30 @@
 
 #include <map>
 #include <set>
+#include <string>
 
 #include "ash/ash_export.h"
-#include "ash/display/window_tree_host_manager.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include "base/gtest_prod_util.h"
+#include "ui/display/manager/display_manager_observer.h"
 #include "ui/display/manager/managed_display_info.h"
 
 namespace ash {
 
 // ScreenLayoutObserver is responsible to send notification to users when screen
 // resolution changes or screen rotation changes.
-class ASH_EXPORT ScreenLayoutObserver : public WindowTreeHostManager::Observer {
+class ASH_EXPORT ScreenLayoutObserver : public display::DisplayManagerObserver {
  public:
   ScreenLayoutObserver();
+
+  ScreenLayoutObserver(const ScreenLayoutObserver&) = delete;
+  ScreenLayoutObserver& operator=(const ScreenLayoutObserver&) = delete;
+
   ~ScreenLayoutObserver() override;
 
   static const char kNotificationId[];
 
-  // WindowTreeHostManager::Observer:
-  void OnDisplayConfigurationChanged() override;
-
-  // No notification will be shown only for the next ui scale change for the
-  // display with |display_id|. This state will be consumed and subsequent
-  // changes won't be affected.
-  void SetDisplayChangedFromSettingsUI(int64_t display_id);
+  // display::DisplayManagerObserver:
+  void OnDidApplyDisplayChanges() override;
 
   // Notifications are shown in production and are not shown in unit tests.
   // Allow individual unit tests to show notifications.
@@ -58,20 +57,18 @@ class ASH_EXPORT ScreenLayoutObserver : public WindowTreeHostManager::Observer {
   // |out_message| to empty, which means the notification should be removed. It
   // also sets |out_additional_message| which appears in the notification with
   // the |out_message|.
-  bool GetDisplayMessageForNotification(
-      const DisplayInfoMap& old_info,
-      bool should_notify_has_unassociated_display,
-      base::string16* out_message,
-      base::string16* out_additional_message);
+  bool GetUnassociatedDisplayMessage(const DisplayInfoMap& old_info,
+                                     std::u16string* out_message,
+                                     std::u16string* out_additional_message);
 
   // Creates or updates the display notification.
-  void CreateOrUpdateNotification(const base::string16& message,
-                                  const base::string16& additional_message);
+  void CreateOrUpdateNotification(const std::u16string& message,
+                                  const std::u16string& additional_message);
 
   // Returns the notification message that should be shown when mirror display
   // mode is exited.
-  bool GetExitMirrorModeMessage(base::string16* out_message,
-                                base::string16* out_additional_message);
+  bool GetExitMirrorModeMessage(std::u16string* out_message,
+                                std::u16string* out_additional_message);
 
   DisplayInfoMap display_info_;
 
@@ -89,13 +86,7 @@ class ASH_EXPORT ScreenLayoutObserver : public WindowTreeHostManager::Observer {
 
   bool has_unassociated_display_ = false;
 
-  // When the UI scale of a display is modified from the Settings UI, we should
-  // ignore this change and avoid showing a notification for it.
-  std::set<int64_t> displays_changed_from_settings_ui_;
-
   bool show_notifications_for_testing_ = true;
-
-  DISALLOW_COPY_AND_ASSIGN(ScreenLayoutObserver);
 };
 
 }  // namespace ash

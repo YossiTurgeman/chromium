@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,12 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/observer_list.h"
-#include "base/optional.h"
 #include "dbus/object_path.h"
 #include "dbus/property.h"
 #include "device/bluetooth/bluetooth_common.h"
@@ -85,9 +85,18 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothDeviceClient
   void Connect(const dbus::ObjectPath& object_path,
                base::OnceClosure callback,
                ErrorCallback error_callback) override;
+  void ConnectClassic(const dbus::ObjectPath& object_path,
+                      base::OnceClosure callback,
+                      ErrorCallback error_callback) override;
+  void ConnectLE(const dbus::ObjectPath& object_path,
+                 base::OnceClosure callback,
+                 ErrorCallback error_callback) override;
   void Disconnect(const dbus::ObjectPath& object_path,
                   base::OnceClosure callback,
                   ErrorCallback error_callback) override;
+  void DisconnectLE(const dbus::ObjectPath& object_path,
+                    base::OnceClosure callback,
+                    ErrorCallback error_callback) override;
   void ConnectProfile(const dbus::ObjectPath& object_path,
                       const std::string& uuid,
                       base::OnceClosure callback,
@@ -137,9 +146,8 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothDeviceClient
   void CreateDeviceWithProperties(const dbus::ObjectPath& adapter_path,
                                   const IncomingDeviceProperties& props);
 
-  // Creates and returns a list of std::unique_ptr<base::DictionaryValue>
-  // objects, which contain all the data from the constants for devices with
-  // predefined behavior.
+  // Creates and returns a list of dictionary objects as a Value, which contain
+  // all the data from the constants for devices with predefined behavior.
   base::Value GetBluetoothDevicesAsDictionaries() const;
 
   SimulatedPairingOptions* GetPairingOptions(
@@ -171,7 +179,7 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothDeviceClient
   // Create a test Bluetooth device with the given properties.
   void CreateTestDevice(
       const dbus::ObjectPath& adapter_path,
-      const base::Optional<std::string> name,
+      const std::optional<std::string> name,
       const std::string alias,
       const std::string device_address,
       const std::vector<std::string>& service_uuids,
@@ -202,7 +210,7 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothDeviceClient
 
   // Adds a pending prepare write request to |object_path|.
   void AddPrepareWriteRequest(const dbus::ObjectPath& object_path,
-                              const std::vector<uint8_t>& value);
+                              base::span<const uint8_t> value);
 
   static const char kTestPinCode[];
   static const int kTestPassKey;
@@ -357,7 +365,12 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothDeviceClient
       BluetoothProfileServiceProvider::Delegate::Status status);
 
   // List of observers interested in event notifications from us.
-  base::ObserverList<Observer>::Unchecked observers_;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/false,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
+      observers_;
 
   using PropertiesMap =
       std::map<const dbus::ObjectPath, std::unique_ptr<Properties>>;

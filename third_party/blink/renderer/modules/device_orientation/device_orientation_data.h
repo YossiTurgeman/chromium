@@ -26,9 +26,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_DEVICE_ORIENTATION_DEVICE_ORIENTATION_DATA_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_DEVICE_ORIENTATION_DEVICE_ORIENTATION_DATA_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/modules/modules_export.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -38,16 +39,16 @@ class MODULES_EXPORT DeviceOrientationData final
     : public GarbageCollected<DeviceOrientationData> {
  public:
   static DeviceOrientationData* Create();
-  static DeviceOrientationData* Create(const base::Optional<double>& alpha,
-                                       const base::Optional<double>& beta,
-                                       const base::Optional<double>& gamma,
+  static DeviceOrientationData* Create(const std::optional<double>& alpha,
+                                       const std::optional<double>& beta,
+                                       const std::optional<double>& gamma,
                                        bool absolute);
   static DeviceOrientationData* Create(const DeviceOrientationEventInit*);
 
   DeviceOrientationData();
-  DeviceOrientationData(const base::Optional<double>& alpha,
-                        const base::Optional<double>& beta,
-                        const base::Optional<double>& gamma,
+  DeviceOrientationData(const std::optional<double>& alpha,
+                        const std::optional<double>& beta,
+                        const std::optional<double>& gamma,
                         bool absolute);
 
   void Trace(Visitor* visitor) const {}
@@ -63,9 +64,9 @@ class MODULES_EXPORT DeviceOrientationData final
   bool CanProvideEventData() const;
 
  private:
-  base::Optional<double> alpha_;
-  base::Optional<double> beta_;
-  base::Optional<double> gamma_;
+  std::optional<double> alpha_;
+  std::optional<double> beta_;
+  std::optional<double> gamma_;
   bool absolute_;
 };
 

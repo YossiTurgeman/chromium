@@ -1,15 +1,16 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 
-#include "ui/gfx/native_widget_types.h"
-#include "ui/ozone/platform/wayland/host/wayland_auxiliary_window.h"
+#include "base/logging.h"
+#include "ui/ozone/platform/wayland/host/wayland_bubble.h"
 #include "ui/ozone/platform/wayland/host/wayland_connection.h"
 #include "ui/ozone/platform/wayland/host/wayland_popup.h"
 #include "ui/ozone/platform/wayland/host/wayland_toplevel_window.h"
 #include "ui/ozone/platform/wayland/host/wayland_window.h"
+#include "ui/platform_window/platform_window_init_properties.h"
 
 namespace ui {
 
@@ -20,34 +21,39 @@ std::unique_ptr<WaylandWindow> WaylandWindow::Create(
     PlatformWindowInitProperties properties) {
   std::unique_ptr<WaylandWindow> window;
   switch (properties.type) {
-    case PlatformWindowType::kMenu:
     case PlatformWindowType::kPopup:
-      // We are unable to create a popup or menu window, because they require a
-      // parent window to be set. Thus, create a normal window instead then.
-      if (properties.parent_widget == gfx::kNullAcceleratedWidget &&
-          !connection->wayland_window_manager()->GetCurrentFocusedWindow()) {
-        window.reset(new WaylandToplevelWindow(delegate, connection));
-      } else if (connection->IsDragInProgress()) {
-        // We are in the process of drag and requested a popup. Most probably,
-        // it is an arrow window.
-        window.reset(new WaylandAuxiliaryWindow(delegate, connection));
+    case PlatformWindowType::kBubble:
+      // kPopup can be created by MessagePopupView without a parent window set.
+      // It looks like it ought to be a global notification window. Thus, use a
+      // toplevel window instead.
+      if (auto* parent = connection->window_manager()->GetWindow(
+              properties.parent_widget)) {
+        window = std::make_unique<WaylandBubble>(delegate, connection, parent);
       } else {
-        window.reset(new WaylandPopup(delegate, connection));
+        // TODO(crbug.com/40883130): Make sure bubbles/popups pass a parent
+        // window.
+        DLOG(WARNING) << "Failed to determine parent for bubble/popup window.";
+        window = std::make_unique<WaylandToplevelWindow>(delegate, connection);
       }
       break;
     case PlatformWindowType::kTooltip:
-      window.reset(new WaylandAuxiliaryWindow(delegate, connection));
+    case PlatformWindowType::kMenu:
+      if (auto* parent = connection->window_manager()->GetWindow(
+              properties.parent_widget)) {
+        window = std::make_unique<WaylandPopup>(delegate, connection, parent);
+      } else {
+        DLOG(WARNING) << "Failed to determine parent for menu/tooltip window.";
+        window = std::make_unique<WaylandToplevelWindow>(delegate, connection);
+      }
       break;
     case PlatformWindowType::kWindow:
-    case PlatformWindowType::kBubble:
     case PlatformWindowType::kDrag:
-      // TODO(msisov): Figure out what kind of surface we need to create for
-      // bubble and drag windows.
-      window.reset(new WaylandToplevelWindow(delegate, connection));
+      // TODO(crbug.com/40883130): Figure out what kind of surface we need to
+      // create kDrag windows.
+      window = std::make_unique<WaylandToplevelWindow>(delegate, connection);
       break;
     default:
       NOTREACHED();
-      break;
   }
   return window && window->Initialize(std::move(properties)) ? std::move(window)
                                                              : nullptr;

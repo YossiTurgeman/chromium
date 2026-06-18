@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,12 @@
 
 #include <shellapi.h>
 
+#include <string>
+
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/process/process.h"
-#include "base/strings/string16.h"
 #include "base/win/windows_types.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/notification_helper/notification_helper_util.h"
@@ -116,17 +118,17 @@ HRESULT NotificationActivator::Activate(
 
   // Check to see if a user response (inline reply) is also supplied.
   for (ULONG i = 0; i < count; ++i) {
-    if (lstrcmpW(kUserResponse, data[i].Key) == 0) {
+    if (lstrcmpW(kUserResponse, UNSAFE_TODO(data[i]).Key) == 0) {
       command_line.AppendSwitchNative(switches::kNotificationInlineReply,
-                                      data[i].Value);
+                                      UNSAFE_TODO(data[i]).Value);
       break;
     }
   }
 
-  base::string16 params(command_line.GetCommandLineString());
+  std::wstring params(command_line.GetCommandLineString());
 
   SHELLEXECUTEINFO info;
-  memset(&info, 0, sizeof(info));
+  UNSAFE_TODO(memset(&info, 0, sizeof(info)));
   info.cbSize = sizeof(info);
   info.fMask =
       SEE_MASK_NOASYNC | SEE_MASK_FLAG_LOG_USAGE | SEE_MASK_NOCLOSEPROCESS;
@@ -148,7 +150,7 @@ HRESULT NotificationActivator::Activate(
 
     // Despite the fact that the Windows notification center grants the helper
     // permission to set the foreground window, the helper fails to pass the
-    // baton to Chrome at an alarming rate; see https://crbug.com/837796.
+    // baton to Chrome at an alarming rate; see https://crbug.com/40574049.
     // Sending generic down/up key events seems to fix it.
     INPUT keyboard_inputs[2] = {};
 

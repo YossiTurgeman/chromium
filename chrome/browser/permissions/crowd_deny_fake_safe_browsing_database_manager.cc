@@ -1,13 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/permissions/crowd_deny_fake_safe_browsing_database_manager.h"
 
-#include "components/safe_browsing/core/db/database_manager.h"
+#include "components/safe_browsing/core/browser/db/database_manager.h"
+#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 
 CrowdDenyFakeSafeBrowsingDatabaseManager::
-    CrowdDenyFakeSafeBrowsingDatabaseManager() = default;
+    CrowdDenyFakeSafeBrowsingDatabaseManager()
+    : safe_browsing::TestSafeBrowsingDatabaseManager(
+          content::GetUIThreadTaskRunner({})) {}
 
 void CrowdDenyFakeSafeBrowsingDatabaseManager::SetSimulatedMetadataForUrl(
     const GURL& url,
@@ -15,7 +19,7 @@ void CrowdDenyFakeSafeBrowsingDatabaseManager::SetSimulatedMetadataForUrl(
   url_to_simulated_threat_metadata_[url] = metadata;
 }
 
-void CrowdDenyFakeSafeBrowsingDatabaseManager::RemoveAllBlacklistedUrls() {
+void CrowdDenyFakeSafeBrowsingDatabaseManager::RemoveAllBlocklistedUrls() {
   url_to_simulated_threat_metadata_.clear();
 }
 
@@ -24,7 +28,7 @@ CrowdDenyFakeSafeBrowsingDatabaseManager::
   EXPECT_THAT(pending_clients_, testing::IsEmpty());
 }
 
-bool CrowdDenyFakeSafeBrowsingDatabaseManager::CheckApiBlacklistUrl(
+bool CrowdDenyFakeSafeBrowsingDatabaseManager::CheckApiBlocklistUrl(
     const GURL& url,
     Client* client) {
   if (simulate_synchronous_result_)
@@ -35,7 +39,7 @@ bool CrowdDenyFakeSafeBrowsingDatabaseManager::CheckApiBlacklistUrl(
     pending_clients_.insert(client);
   } else {
     auto result = GetSimulatedMetadataOrSafe(url);
-    client->OnCheckApiBlacklistUrlResult(url, std::move(result));
+    client->OnCheckApiBlocklistUrlResult(url, std::move(result));
   }
   return false;
 }
@@ -46,13 +50,6 @@ bool CrowdDenyFakeSafeBrowsingDatabaseManager::CancelApiCheck(Client* client) {
   return true;
 }
 
-bool CrowdDenyFakeSafeBrowsingDatabaseManager::IsSupported() const {
-  return true;
-}
-
-bool CrowdDenyFakeSafeBrowsingDatabaseManager::ChecksAreAlwaysAsync() const {
-  return false;
-}
 safe_browsing::ThreatMetadata
 CrowdDenyFakeSafeBrowsingDatabaseManager::GetSimulatedMetadataOrSafe(
     const GURL& url) {

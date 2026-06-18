@@ -1,25 +1,34 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/nearby_sharing/instantmessaging/send_message_express.h"
 
+#include <optional>
+#include <sstream>
+#include <string>
+
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/stringprintf.h"
 #include "chrome/browser/nearby_sharing/instantmessaging/constants.h"
 #include "chrome/browser/nearby_sharing/instantmessaging/proto/instantmessaging.pb.h"
 #include "chrome/browser/nearby_sharing/instantmessaging/token_fetcher.h"
+#include "chromeos/ash/components/nearby/common/client/nearby_http_result.h"
+#include "components/cross_device/logging/logging.h"
 #include "net/base/load_flags.h"
-#include "services/network/public/cpp/cors/cors.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "url/gurl.h"
 
 namespace {
+
 // 256 KB as max response size.
 constexpr int kMaxSendResponseSize = 256;
 
-// TODO(crbug.com/1123164) - Add nearby sharing policy when available.
+// Timeout for network calls to instantmessaging servers.
+const base::TimeDelta kNetworkTimeout = base::Milliseconds(2500);
+
 const net::NetworkTrafficAnnotationTag kTrafficAnnotation =
     net::DefineNetworkTrafficAnnotation("send_message_express", R"(
         semantics {
@@ -41,34 +50,46 @@ const net::NetworkTrafficAnnotationTag kTrafficAnnotation =
             cookies_allowed: NO
             setting:
               "This feature is only enabled for signed-in users who enable "
-              "Nearby sharing"
+              "Nearby sharing or Phone Hub."
             chrome_policy {
-              BrowserSignin {
+              NearbyShareAllowed {
                 policy_options {mode: MANDATORY}
-                BrowserSignin: 0
+                NearbyShareAllowed: false
+              },
+              PhoneHubAllowed {
+                policy_options {mode: MANDATORY}
+                PhoneHubAllowed: false
               }
             }
           })");
 
-bool IsLoaderSuccessful(const network::SimpleURLLoader* loader) {
-  if (!loader || loader->NetError() != net::OK)
-    return false;
-
-  if (!loader->ResponseInfo() || !loader->ResponseInfo()->headers)
-    return false;
-
-  return network::cors::IsOkStatus(
-      loader->ResponseInfo()->headers->response_code());
+void LogSendResult(bool success,
+                   const ash::nearby::NearbyHttpStatus& http_status,
+                   const std::string& request_id) {
+  std::stringstream ss;
+  ss << "Instant messaging send express " << (success ? "succeeded" : "failed")
+     << " for request " << request_id << ". HTTP status: " << http_status;
+  if (success) {
+    CD_LOG(VERBOSE, Feature::NS) << ss.str();
+  } else {
+    CD_LOG(ERROR, Feature::NS) << ss.str();
+  }
+  base::UmaHistogramBoolean(
+      "Nearby.Connections.InstantMessaging.SendExpress.Result", success);
+  if (!success) {
+    base::UmaHistogramSparse(
+        "Nearby.Connections.InstantMessaging.SendExpress.Result.FailureReason",
+        http_status.GetResultCodeForMetrics());
+  }
 }
+
 }  // namespace
 
 SendMessageExpress::SendMessageExpress(
-    TokenFetcher* token_fetcher,
+    signin::IdentityManager* identity_manager,
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
-    : token_fetcher_(token_fetcher),
-      url_loader_factory_(std::move(url_loader_factory)) {
-  DCHECK(token_fetcher_);
-}
+    : token_fetcher_(identity_manager),
+      url_loader_factory_(std::move(url_loader_factory)) {}
 
 SendMessageExpress::~SendMessageExpress() = default;
 
@@ -76,7 +97,7 @@ void SendMessageExpress::SendMessage(
     const chrome_browser_nearby_sharing_instantmessaging::
         SendMessageExpressRequest& request,
     SuccessCallback callback) {
-  token_fetcher_->GetAccessToken(base::BindOnce(
+  token_fetcher_.GetAccessToken(base::BindOnce(
       &SendMessageExpress::DoSendMessage, weak_ptr_factory_.GetWeakPtr(),
       request, std::move(callback)));
 }
@@ -86,12 +107,17 @@ void SendMessageExpress::DoSendMessage(
         SendMessageExpressRequest& request,
     SuccessCallback callback,
     const std::string& oauth_token) {
+  base::UmaHistogramBoolean(
+      "Nearby.Connections.InstantMessaging.SendExpress.OAuthTokenFetchResult",
+      !oauth_token.empty());
   if (oauth_token.empty()) {
+    CD_LOG(ERROR, Feature::NS) << __func__ << ": Failed to fetch OAuth token.";
     std::move(callback).Run(false);
+    // NOTE: |this| might be destroyed here after running the callback
     return;
   }
 
-  std::string message_id = request.header().requester_id().id();
+  std::string request_id = request.header().request_id();
 
   auto resource_request = std::make_unique<network::ResourceRequest>();
   resource_request->url = GURL(kInstantMessagingSendMessageAPI);
@@ -112,19 +138,21 @@ void SendMessageExpress::DoSendMessage(
   send_url_loader_ptr->DownloadToString(
       url_loader_factory_.get(),
       base::BindOnce(&SendMessageExpress::OnSendMessageResponse,
-                     weak_ptr_factory_.GetWeakPtr(), message_id,
+                     weak_ptr_factory_.GetWeakPtr(), request_id,
                      std::move(send_url_loader), std::move(callback)),
       kMaxSendResponseSize);
 }
 
 void SendMessageExpress::OnSendMessageResponse(
-    const std::string& message_id,
+    const std::string& request_id,
     std::unique_ptr<network::SimpleURLLoader> url_loader,
     SuccessCallback callback,
-    std::unique_ptr<std::string> response_body) {
-  // TODO(crbug.com/1123172) - Add metrics for success and failures, with error
-  // codes for failures.
-  bool success = response_body && !response_body->empty();
-  success &= IsLoaderSuccessful(url_loader.get());
+    std::optional<std::string> response_body) {
+  ash::nearby::NearbyHttpStatus http_status(url_loader->NetError(),
+                                            url_loader->ResponseInfo());
+  bool success =
+      http_status.IsSuccess() && response_body && !response_body->empty();
+  LogSendResult(success, http_status, request_id);
   std::move(callback).Run(success);
+  // NOTE: |this| might be destroyed here after running the callback
 }

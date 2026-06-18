@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,22 +6,24 @@
 
 #include <stddef.h>
 
+#include <string>
 #include <vector>
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/test_shortcut_win.h"
 #include "base/win/scoped_com_initializer.h"
+#include "build/branding_buildflags.h"
 #include "chrome/browser/shell_integration.h"
-#include "chrome/browser/web_applications/components/web_app_helpers.h"
-#include "chrome/browser/web_applications/components/web_app_shortcut_win.h"
+#include "chrome/browser/shortcuts/platform_util_win.h"
+#include "chrome/browser/web_applications/web_app_helpers.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/chrome_paths_internal.h"
+#include "chrome/install_static/install_details.h"
 #include "chrome/install_static/install_util.h"
 #include "chrome/installer/util/install_util.h"
 #include "chrome/installer/util/shell_util.h"
@@ -39,8 +41,14 @@ struct ShortcutTestObject {
 };
 
 class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
+ public:
+  ShellIntegrationWinMigrateShortcutTest(
+      const ShellIntegrationWinMigrateShortcutTest&) = delete;
+  ShellIntegrationWinMigrateShortcutTest& operator=(
+      const ShellIntegrationWinMigrateShortcutTest&) = delete;
+
  protected:
-  ShellIntegrationWinMigrateShortcutTest() {}
+  ShellIntegrationWinMigrateShortcutTest() = default;
 
   void SetUp() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
@@ -70,9 +78,9 @@ class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
             non_default_user_data_dir_.Append(non_default_profile_));
 
     extension_id_ = L"chromiumexampleappidforunittests";
-    base::string16 app_name =
-        base::UTF8ToUTF16(web_app::GenerateApplicationNameFromAppId(
-            base::UTF16ToUTF8(extension_id_)));
+    std::wstring app_name =
+        base::UTF8ToWide(web_app::GenerateApplicationNameFromAppId(
+            base::WideToUTF8(extension_id_)));
     extension_app_id_ = GetAppUserModelIdForApp(app_name, default_profile_path);
     non_default_profile_extension_app_id_ = GetAppUserModelIdForApp(
         app_name, default_user_data_dir.Append(non_default_profile_));
@@ -86,14 +94,14 @@ class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
       base::win::ShortcutProperties* shortcut_properties) {
     ShortcutTestObject shortcut_test_object;
     base::FilePath shortcut_path = shortcut_dir.Append(
-        L"Shortcut " + base::NumberToString16(shortcuts_.size()) +
+        L"Shortcut " + base::NumberToWString(shortcuts_.size()) +
         installer::kLnkExt);
     shortcut_test_object.path = shortcut_path;
     shortcut_test_object.properties = *shortcut_properties;
     shortcuts_.push_back(shortcut_test_object);
     ASSERT_TRUE(base::win::CreateOrUpdateShortcutLink(
         shortcut_path, *shortcut_properties,
-        base::win::SHORTCUT_CREATE_ALWAYS));
+        base::win::ShortcutOperation::kCreateAlways));
     shortcut_properties->options = 0U;
   }
 
@@ -111,12 +119,10 @@ class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
     // Shortcut 1 points to chrome.exe and thus should be migrated.
     temp_properties.set_target(chrome_exe_);
     temp_properties.set_app_id(L"Dumbo");
-    temp_properties.set_dual_mode(false);
     ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
         temp_dir_.GetPath(), &temp_properties));
 
-    // Shortcut 2 points to chrome.exe, but already has the right appid and thus
-    // should only be migrated if dual_mode is desired.
+    // Shortcut 2 points to chrome.exe, but already has the right appid.
     temp_properties.set_target(chrome_exe_);
     temp_properties.set_app_id(chrome_app_id_);
     ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
@@ -124,7 +130,7 @@ class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
 
     // Shortcut 3 is like shortcut 1, but it's appid is a prefix of the expected
     // appid instead of being totally different.
-    base::string16 chrome_app_id_is_prefix(chrome_app_id_);
+    std::wstring chrome_app_id_is_prefix(chrome_app_id_);
     chrome_app_id_is_prefix.push_back(L'1');
     temp_properties.set_target(chrome_exe_);
     temp_properties.set_app_id(chrome_app_id_is_prefix);
@@ -133,13 +139,13 @@ class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
 
     // Shortcut 4 is like shortcut 1, but it's appid is of the same size as the
     // expected appid.
-    base::string16 same_size_as_chrome_app_id(chrome_app_id_.size(), L'1');
+    std::wstring same_size_as_chrome_app_id(chrome_app_id_.size(), L'1');
     temp_properties.set_target(chrome_exe_);
     temp_properties.set_app_id(same_size_as_chrome_app_id);
     ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
         temp_dir_.GetPath(), &temp_properties));
 
-    // Shortcut 5 doesn't have an app_id, nor is dual_mode even set; they should
+    // Shortcut 5 doesn't have an app_id, it should
     // be set as expected upon migration.
     temp_properties.set_target(chrome_exe_);
     ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
@@ -193,25 +199,9 @@ class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
     ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
         temp_dir_.GetPath(), &temp_properties));
 
-    // Shortcut 11 points to chrome.exe, already has the right appid, and has
-    // dual_mode set and thus should only be migrated if dual_mode is being
-    // cleared.
-    temp_properties.set_target(chrome_exe_);
-    temp_properties.set_app_id(chrome_app_id_);
-    temp_properties.set_dual_mode(true);
-    ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
-        temp_dir_.GetPath(), &temp_properties));
-
-    // Shortcut 12 is similar to 11 but with dual_mode explicitly set to false.
-    temp_properties.set_target(chrome_exe_);
-    temp_properties.set_app_id(chrome_app_id_);
-    temp_properties.set_dual_mode(false);
-    ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
-        temp_dir_.GetPath(), &temp_properties));
-
-    // Shortcut 13 is like shortcut 1, but it's appid explicitly includes the
+    // Shortcut 11 is like shortcut 1, but it's appid explicitly includes the
     // default profile.
-    base::string16 chrome_app_id_with_default_profile =
+    std::wstring chrome_app_id_with_default_profile =
         chrome_app_id_ + L".Default";
     temp_properties.set_target(chrome_exe_);
     temp_properties.set_app_id(chrome_app_id_with_default_profile);
@@ -236,47 +226,43 @@ class ShellIntegrationWinMigrateShortcutTest : public testing::Test {
   base::FilePath other_target_;
 
   // Chrome's AppUserModelId.
-  base::string16 chrome_app_id_;
+  std::wstring chrome_app_id_;
 
   // A profile that isn't the Default profile.
-  base::string16 non_default_profile_;
+  std::wstring non_default_profile_;
 
   // A user data dir that isn't the default.
   base::FilePath non_default_user_data_dir_;
 
   // Chrome's AppUserModelId for the non-default profile.
-  base::string16 non_default_profile_chrome_app_id_;
+  std::wstring non_default_profile_chrome_app_id_;
 
   // Chrome's AppUserModelId for the non-default user data dir.
-  base::string16 non_default_user_data_dir_chrome_app_id_;
+  std::wstring non_default_user_data_dir_chrome_app_id_;
 
   // Chrome's AppUserModelId for the non-default user data dir and non-default
   // profile.
-  base::string16 non_default_user_data_dir_and_profile_chrome_app_id_;
+  std::wstring non_default_user_data_dir_and_profile_chrome_app_id_;
 
   // An example extension id of an example app.
-  base::string16 extension_id_;
+  std::wstring extension_id_;
 
   // The app id of the example app for the default profile and user data dir.
-  base::string16 extension_app_id_;
+  std::wstring extension_app_id_;
 
   // The app id of the example app for the non-default profile.
-  base::string16 non_default_profile_extension_app_id_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ShellIntegrationWinMigrateShortcutTest);
+  std::wstring non_default_profile_extension_app_id_;
 };
 
 }  // namespace
 
-TEST_F(ShellIntegrationWinMigrateShortcutTest, ClearDualModeAndAdjustAppIds) {
+TEST_F(ShellIntegrationWinMigrateShortcutTest, AdjustAppIds) {
   CreateShortcuts();
-  // 10 shortcuts should have their app id updated below and shortcut 11 should
-  // be migrated away from dual_mode for a total of 11 shortcuts migrated.
-  EXPECT_EQ(11,
+  // 10 shortcuts should have their app id updated below.
+  EXPECT_EQ(10,
             MigrateShortcutsInPathInternal(chrome_exe_, temp_dir_.GetPath()));
 
-  // Shortcut 1, 3, 4, 5, 6, 7, 8, 9, 10, and 13 should have had their app_id
+  // Shortcut 1, 3, 4, 5, 6, 7, 8, 9, 10, and 11 should have had their app_id
   //  fixed.
   shortcuts_[1].properties.set_app_id(chrome_app_id_);
   shortcuts_[3].properties.set_app_id(chrome_app_id_);
@@ -288,11 +274,7 @@ TEST_F(ShellIntegrationWinMigrateShortcutTest, ClearDualModeAndAdjustAppIds) {
       non_default_user_data_dir_and_profile_chrome_app_id_);
   shortcuts_[9].properties.set_app_id(extension_app_id_);
   shortcuts_[10].properties.set_app_id(non_default_profile_extension_app_id_);
-  shortcuts_[13].properties.set_app_id(chrome_app_id_);
-
-  // No shortcut should still have the dual_mode property.
-  for (size_t i = 0; i < shortcuts_.size(); ++i)
-    shortcuts_[i].properties.set_dual_mode(false);
+  shortcuts_[11].properties.set_app_id(chrome_app_id_);
 
   for (size_t i = 0; i < shortcuts_.size(); ++i) {
     SCOPED_TRACE(i);
@@ -312,11 +294,11 @@ TEST_F(ShellIntegrationWinMigrateShortcutTest, MigrateChromeProxyTest) {
   // using the default profile, with the AppModelId not containing the
   // profile name.
   base::win::ShortcutProperties temp_properties;
-  temp_properties.set_target(web_app::GetChromeProxyPath());
+  temp_properties.set_target(shortcuts::GetChromeProxyPath());
   temp_properties.set_app_id(L"Dumbo.Default");
   ASSERT_NO_FATAL_FAILURE(
       AddTestShortcutAndResetProperties(temp_dir_.GetPath(), &temp_properties));
-  temp_properties.set_target(web_app::GetChromeProxyPath());
+  temp_properties.set_target(shortcuts::GetChromeProxyPath());
   temp_properties.set_app_id(L"Dumbo2.Default");
   ASSERT_NO_FATAL_FAILURE(AddTestShortcutAndResetProperties(
       temp_dir_sub_dir_.GetPath(), &temp_properties));
@@ -325,10 +307,10 @@ TEST_F(ShellIntegrationWinMigrateShortcutTest, MigrateChromeProxyTest) {
   // id has its AUMI migrated to start with the browser's app_id.
   // It technically doesn't matter what ShortcutProperties's app_id is,
   // since the migration is based on ShortcutProperties.arguments.
-  temp_properties.set_target(web_app::GetChromeProxyPath());
+  temp_properties.set_target(shortcuts::GetChromeProxyPath());
   temp_properties.set_app_id(L"Dumbo3.Default");
   base::CommandLine cmd_line = shell_integration::CommandLineArgsForLauncher(
-      GURL(), base::UTF16ToUTF8(extension_id_), base::FilePath());
+      GURL(), base::WideToUTF8(extension_id_), base::FilePath(), "");
   ASSERT_EQ(cmd_line.GetCommandLineString(), L" --app-id=" + extension_id_);
   temp_properties.set_arguments(cmd_line.GetCommandLineString());
   ASSERT_NO_FATAL_FAILURE(
@@ -336,11 +318,11 @@ TEST_F(ShellIntegrationWinMigrateShortcutTest, MigrateChromeProxyTest) {
 
   // Check that a chrome proxy shortcut with a kApp url in its command line
   // has its AUMI migrated to start with the browser's app_id.
-  temp_properties.set_target(web_app::GetChromeProxyPath());
+  temp_properties.set_target(shortcuts::GetChromeProxyPath());
   temp_properties.set_app_id(L"Dumbo4.Default");
   GURL url("http://www.example.com");
-  cmd_line = shell_integration::CommandLineArgsForLauncher(url, std::string(),
-                                                           base::FilePath());
+  cmd_line = shell_integration::CommandLineArgsForLauncher(
+      url, std::string(), base::FilePath(), "");
   ASSERT_EQ(cmd_line.GetCommandLineString(), L" --app=http://www.example.com/");
   temp_properties.set_arguments(cmd_line.GetCommandLineString());
   ASSERT_NO_FATAL_FAILURE(
@@ -360,7 +342,7 @@ TEST_F(ShellIntegrationWinMigrateShortcutTest, MigrateChromeProxyTest) {
   base::win::ValidateShortcut(shortcuts_[2].path, shortcuts_[2].properties);
 
   shortcuts_[3].properties.set_app_id(GetAppUserModelIdForApp(
-      base::UTF8ToUTF16(web_app::GenerateApplicationNameFromURL(url)),
+      base::UTF8ToWide(web_app::GenerateApplicationNameFromURL(url)),
       base::FilePath()));
   base::win::ValidateShortcut(shortcuts_[3].path, shortcuts_[3].properties);
 }
@@ -369,7 +351,7 @@ TEST_F(ShellIntegrationWinMigrateShortcutTest, MigrateChromeProxyTest) {
 // comparison when comparing the shortcut target with the chrome exe path.
 TEST_F(ShellIntegrationWinMigrateShortcutTest, MigrateMixedCaseDirTest) {
   base::win::ShortcutProperties temp_properties;
-  base::FilePath chrome_proxy_path(web_app::GetChromeProxyPath());
+  base::FilePath chrome_proxy_path(shortcuts::GetChromeProxyPath());
   ASSERT_EQ(chrome_proxy_path.Extension(), FILE_PATH_LITERAL(".exe"));
   temp_properties.set_target(
       chrome_proxy_path.ReplaceExtension(FILE_PATH_LITERAL("EXE")));
@@ -384,11 +366,11 @@ TEST_F(ShellIntegrationWinMigrateShortcutTest, MigrateMixedCaseDirTest) {
 }
 
 TEST(ShellIntegrationWinTest, GetAppModelIdForProfileTest) {
-  const base::string16 base_app_id(install_static::GetBaseAppId());
+  const std::wstring base_app_id(install_static::GetBaseAppId());
 
   // Empty profile path should get chrome::kBrowserAppID
-  base::string16 app_name = L"app";
-  base::string16 expected_model_id_without_profile =
+  std::wstring app_name = L"app";
+  std::wstring expected_model_id_without_profile =
       base_app_id + L"." + app_name;
   base::FilePath empty_path;
   EXPECT_EQ(expected_model_id_without_profile,
@@ -412,4 +394,23 @@ TEST(ShellIntegrationWinTest, GetAppModelIdForProfileTest) {
 }
 
 }  // namespace win
+
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+TEST(ShellIntegrationWinTest, GetDirectLaunchUrlScheme) {
+  std::string scheme = GetDirectLaunchUrlScheme();
+  // For branded builds, the scheme should either be "google-chrome"
+  // (primary install mode) or empty (secondary/side-by-side install modes)
+  // for security reasons.
+  if (install_static::InstallDetails::Get().is_primary_mode()) {
+    EXPECT_EQ(scheme, "google-chrome");
+  } else {
+    EXPECT_EQ(scheme, std::string());
+  }
+}
+#else  // !BUILDFLAG(GOOGLE_CHROME_BRANDING)
+TEST(ShellIntegrationWinTest, GetDirectLaunchUrlSchemeUnbranded) {
+  EXPECT_EQ("chromium", GetDirectLaunchUrlScheme());
+}
+#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
+
 }  // namespace shell_integration

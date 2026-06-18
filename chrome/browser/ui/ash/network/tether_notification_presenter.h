@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,26 +8,25 @@
 #include <memory>
 #include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "ash/constants/notifier_catalogs.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string16.h"
-#include "chromeos/components/multidevice/remote_device_ref.h"
-#include "chromeos/components/tether/notification_presenter.h"
-#include "chromeos/network/network_state.h"
+#include "chromeos/ash/components/network/network_state.h"
+#include "chromeos/ash/components/tether/notification_presenter.h"
 #include "ui/message_center/public/cpp/notification.h"
 
 class Profile;
+class PrefRegistrySimple;
+
+namespace ash {
+class NetworkConnect;
+}
 
 namespace message_center {
 class Notification;
 }  // namespace message_center
 
-namespace chromeos {
-
-class NetworkConnect;
-
-namespace tether {
+namespace ash::tether {
 
 // Produces notifications associated with CrOS tether network events and alerts
 // observers about interactions with those notifications.
@@ -37,10 +36,18 @@ class TetherNotificationPresenter : public NotificationPresenter {
   // instance.
   TetherNotificationPresenter(Profile* profile,
                               NetworkConnect* network_connect);
+
+  TetherNotificationPresenter(const TetherNotificationPresenter&) = delete;
+  TetherNotificationPresenter& operator=(const TetherNotificationPresenter&) =
+      delete;
+
   ~TetherNotificationPresenter() override;
 
+  static void RegisterProfilePrefs(PrefRegistrySimple* registry);
+
   // NotificationPresenter:
-  void NotifyPotentialHotspotNearby(multidevice::RemoteDeviceRef remote_device,
+  void NotifyPotentialHotspotNearby(const std::string& device_id,
+                                    const std::string& device_name,
                                     int signal_strength) override;
   void NotifyMultiplePotentialHotspotsNearby() override;
   NotificationPresenter::PotentialHotspotNotificationState
@@ -54,7 +61,7 @@ class TetherNotificationPresenter : public NotificationPresenter {
 
   class SettingsUiDelegate {
    public:
-    virtual ~SettingsUiDelegate() {}
+    virtual ~SettingsUiDelegate() = default;
 
     // Displays the settings page (opening a new window if necessary) at the
     // provided subpage for the user with the Profile |profile|.
@@ -85,15 +92,16 @@ class TetherNotificationPresenter : public NotificationPresenter {
   };
 
   void OnNotificationClicked(const std::string& notification_id,
-                             base::Optional<int> button_index);
+                             std::optional<int> button_index);
   NotificationInteractionType GetMetricValueForClickOnNotificationBody(
       const std::string& clicked_notification_id) const;
   void OnNotificationClosed(const std::string& notification_id);
 
   std::unique_ptr<message_center::Notification> CreateNotification(
       const std::string& id,
-      const base::string16& title,
-      const base::string16& message,
+      const NotificationCatalogName& catalog_name,
+      const std::u16string& title,
+      const std::u16string& message,
       const gfx::ImageSkia& small_image,
       const message_center::RichNotificationData& rich_notification_data);
 
@@ -105,8 +113,10 @@ class TetherNotificationPresenter : public NotificationPresenter {
                                          const std::string& notification_id);
   void RemoveNotificationIfVisible(const std::string& notification_id);
 
-  Profile* profile_;
-  NetworkConnect* network_connect_;
+  bool AreNotificationsEnabled();
+
+  raw_ptr<Profile, DanglingUntriaged> profile_;
+  raw_ptr<NetworkConnect, DanglingUntriaged> network_connect_;
 
   // The ID of the currently showing notification.
   std::string showing_notification_id_;
@@ -117,13 +127,10 @@ class TetherNotificationPresenter : public NotificationPresenter {
   // hotspot nearby" notification. If the notification is not visible or it is
   // in the "multiple hotspots available" mode, this pointer is null.
   std::unique_ptr<std::string> hotspot_nearby_device_id_;
-  base::WeakPtrFactory<TetherNotificationPresenter> weak_ptr_factory_{this};
 
-  DISALLOW_COPY_AND_ASSIGN(TetherNotificationPresenter);
+  base::WeakPtrFactory<TetherNotificationPresenter> weak_ptr_factory_{this};
 };
 
-}  // namespace tether
-
-}  // namespace chromeos
+}  // namespace ash::tether
 
 #endif  // CHROME_BROWSER_UI_ASH_NETWORK_TETHER_NOTIFICATION_PRESENTER_H_

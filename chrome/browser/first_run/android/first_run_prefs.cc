@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,6 @@
 namespace first_run {
 
 // Whether the ToS should be shown during the first-run for CCTs.
-const char kCCTToSDialogEnabled[] = "policy.cct_tos_dialog_enabled";
+const char kTosDialogBehavior[] = "policy.cct_tos_dialog_behavior";
 
 }  // namespace first_run

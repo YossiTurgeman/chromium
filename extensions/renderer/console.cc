@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 #include "base/compiler_specific.h"
 #include "base/debug/alias.h"
 #include "base/lazy_instance.h"
-#include "base/macros.h"
+#include "base/logging.h"
+#include "base/notreached.h"
 #include "base/strings/string_util.h"
-#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "extensions/renderer/get_script_context.h"
 #include "extensions/renderer/script_context.h"
@@ -18,7 +18,11 @@
 #include "extensions/renderer/worker_thread_dispatcher.h"
 #include "gin/converter.h"
 #include "gin/per_isolate_data.h"
+#include "gin/public/wrappable_pointer_tags.h"
 #include "third_party/blink/public/web/web_console_message.h"
+#include "v8/include/v8-function-callback.h"
+#include "v8/include/v8-primitive.h"
+#include "v8/include/v8-template.h"
 
 namespace extensions {
 namespace console {
@@ -28,14 +32,15 @@ namespace {
 // Writes |message| to stack to show up in minidump, then crashes.
 void CheckWithMinidump(const std::string& message) {
   DEBUG_ALIAS_FOR_CSTR(minidump, message.c_str(), 1024);
-  CHECK(false) << message;
+  NOTREACHED() << message;
 }
 
 void BoundLogMethodCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
   std::string message;
   for (int i = 0; i < info.Length(); ++i) {
-    if (i > 0)
+    if (i > 0) {
       message += " ";
+    }
     message += *v8::String::Utf8Value(info.GetIsolate(), info[i]);
   }
 
@@ -48,7 +53,9 @@ void BoundLogMethodCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
   AddMessage(script_context, level, message);
 }
 
-gin::WrapperInfo kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo kWrapperInfo = {
+    {gin::kEmbedderNativeGin},
+    static_cast<gin::WrappablePointerTag>(v8::CppHeapPointerTag::kNullTag)};
 
 }  // namespace
 
@@ -73,7 +80,7 @@ void AddMessage(ScriptContext* script_context,
   }
 
   blink::WebConsoleMessage web_console_message(
-      level, blink::WebString::FromUTF8(message));
+      level, blink::WebString::FromUtf8(message));
   blink::WebConsoleMessage::LogWebConsoleMessage(script_context->v8_context(),
                                                  web_console_message);
 }
@@ -96,8 +103,8 @@ v8::Local<v8::Object> AsV8Object(v8::Isolate* isolate) {
     for (const auto& method : methods) {
       v8::Local<v8::FunctionTemplate> function = v8::FunctionTemplate::New(
           isolate, BoundLogMethodCallback,
-          v8::Integer::New(isolate, static_cast<int>(method.level)));
-      function->RemovePrototype();
+          v8::Integer::New(isolate, static_cast<int>(method.level)),
+          v8::Local<v8::Signature>(), 0, v8::ConstructorBehavior::kThrow);
       templ->Set(gin::StringToSymbol(isolate, method.name), function);
     }
     data->SetObjectTemplate(&kWrapperInfo, templ);

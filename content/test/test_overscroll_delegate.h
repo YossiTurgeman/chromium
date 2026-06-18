@@ -1,13 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_TEST_TEST_OVERSCROLL_DELEGATE_H_
 #define CONTENT_TEST_TEST_OVERSCROLL_DELEGATE_H_
 
+#include <optional>
 #include <vector>
 
-#include "base/optional.h"
+#include "base/functional/callback.h"
 #include "content/browser/renderer_host/overscroll_controller.h"
 #include "content/browser/renderer_host/overscroll_controller_delegate.h"
 #include "ui/gfx/geometry/size.h"
@@ -17,9 +18,21 @@ namespace content {
 class TestOverscrollDelegate : public OverscrollControllerDelegate {
  public:
   explicit TestOverscrollDelegate(const gfx::Size& display_size);
+
+  TestOverscrollDelegate(const TestOverscrollDelegate&) = delete;
+  TestOverscrollDelegate& operator=(const TestOverscrollDelegate&) = delete;
+
   ~TestOverscrollDelegate() override;
 
   void set_delta_cap(float delta_cap) { delta_cap_ = delta_cap; }
+
+  void set_delete_controller_on_complete(bool delete_controller) {
+    delete_controller_on_complete_ = delete_controller;
+  }
+
+  void set_on_complete_callback(base::OnceClosure callback) {
+    on_complete_callback_ = std::move(callback);
+  }
 
   OverscrollMode current_mode() const { return current_mode_; }
   OverscrollMode completed_mode() const { return completed_mode_; }
@@ -40,11 +53,11 @@ class TestOverscrollDelegate : public OverscrollControllerDelegate {
                               OverscrollMode new_mode,
                               OverscrollSource source,
                               cc::OverscrollBehavior behavior) override;
-  base::Optional<float> GetMaxOverscrollDelta() const override;
+  std::optional<float> GetMaxOverscrollDelta() const override;
 
   gfx::Size display_size_;
 
-  base::Optional<float> delta_cap_;
+  std::optional<float> delta_cap_;
   OverscrollMode current_mode_;
   OverscrollMode completed_mode_;
   std::vector<OverscrollMode> historical_modes_;
@@ -52,7 +65,8 @@ class TestOverscrollDelegate : public OverscrollControllerDelegate {
   float delta_x_;
   float delta_y_;
 
-  DISALLOW_COPY_AND_ASSIGN(TestOverscrollDelegate);
+  bool delete_controller_on_complete_ = false;
+  base::OnceClosure on_complete_callback_;
 };
 
 }  // namespace content

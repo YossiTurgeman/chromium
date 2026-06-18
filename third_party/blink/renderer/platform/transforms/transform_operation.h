@@ -25,18 +25,18 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_TRANSFORMS_TRANSFORM_OPERATION_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_TRANSFORMS_TRANSFORM_OPERATION_H_
 
-#include "base/macros.h"
-#include "base/memory/scoped_refptr.h"
-#include "third_party/blink/renderer/platform/geometry/float_size.h"
-#include "third_party/blink/renderer/platform/transforms/transformation_matrix.h"
-#include "third_party/blink/renderer/platform/wtf/ref_counted.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/platform_export.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "ui/gfx/geometry/size_f.h"
+#include "ui/gfx/geometry/transform.h"
 
 namespace blink {
 
 // CSS Transforms (may become part of CSS3)
 
 class PLATFORM_EXPORT TransformOperation
-    : public RefCounted<TransformOperation> {
+    : public GarbageCollected<TransformOperation> {
  public:
   enum OperationType {
     kScaleX,
@@ -46,7 +46,7 @@ class PLATFORM_EXPORT TransformOperation
     kTranslateY,
     kTranslate,
     kRotate,
-    kRotateZ = kRotate,
+    kRotateZ,
     kSkewX,
     kSkewY,
     kSkew,
@@ -65,24 +65,31 @@ class PLATFORM_EXPORT TransformOperation
   };
 
   TransformOperation() = default;
+  TransformOperation(const TransformOperation&) = delete;
+  TransformOperation& operator=(const TransformOperation&) = delete;
   virtual ~TransformOperation() = default;
 
-  virtual bool operator==(const TransformOperation&) const = 0;
-  bool operator!=(const TransformOperation& o) const { return !(*this == o); }
+  virtual void Trace(Visitor*) const {}
 
-  virtual void Apply(TransformationMatrix&,
-                     const FloatSize& border_box_size) const = 0;
+  bool operator==(const TransformOperation& o) const {
+    return IsSameType(o) && IsEqualAssumingSameType(o);
+  }
+
+  virtual void Apply(gfx::Transform&,
+                     const gfx::SizeF& border_box_size) const = 0;
 
   // Implements the accumulative behavior described in
   // https://drafts.csswg.org/css-transforms-2/#combining-transform-lists
-  virtual scoped_refptr<TransformOperation> Accumulate(
-      const TransformOperation& other) = 0;
+  virtual TransformOperation* Accumulate(const TransformOperation& other) = 0;
 
-  virtual scoped_refptr<TransformOperation> Blend(
-      const TransformOperation* from,
-      double progress,
-      bool blend_to_identity = false) = 0;
-  virtual scoped_refptr<TransformOperation> Zoom(double factor) = 0;
+  // Accumulates |other| onto |this|, |n| times.
+  virtual TransformOperation* AccumulateN(const TransformOperation& other,
+                                          int n) = 0;
+
+  virtual TransformOperation* Blend(const TransformOperation* from,
+                                    double progress,
+                                    bool blend_to_identity = false) = 0;
+  virtual TransformOperation* Zoom(double factor) = 0;
 
   virtual OperationType GetType() const = 0;
 
@@ -92,9 +99,12 @@ class PLATFORM_EXPORT TransformOperation
   bool IsSameType(const TransformOperation& other) const {
     return other.GetType() == GetType();
   }
-  virtual bool CanBlendWith(const TransformOperation& other) const = 0;
+  bool CanBlendWith(const TransformOperation& other) const {
+    return PrimitiveType() == other.PrimitiveType();
+  }
 
   virtual bool PreservesAxisAlignment() const { return false; }
+  virtual bool IsIdentityOrTranslation() const { return false; }
 
   bool Is3DOperation() const {
     OperationType op_type = GetType();
@@ -107,10 +117,28 @@ class PLATFORM_EXPORT TransformOperation
 
   virtual bool HasNonTrivial3DComponent() const { return Is3DOperation(); }
 
-  virtual bool DependsOnBoxSize() const { return false; }
+  enum BoxSizeDependency {
+    kDependsNone = 0,
+    kDependsWidth = 0x01,
+    kDependsHeight = 0x02,
+    kDependsBoth = kDependsWidth | kDependsHeight
+  };
+  virtual BoxSizeDependency BoxSizeDependencies() const { return kDependsNone; }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(TransformOperation);
+  static inline BoxSizeDependency CombineDependencies(BoxSizeDependency a,
+                                                      BoxSizeDependency b) {
+    return static_cast<BoxSizeDependency>(a | b);
+  }
+
+  // For debugging/logging only.
+  virtual String DebugString() const { return "(unknown op)"; }
+  friend std::ostream& operator<<(std::ostream& stream,
+                                  const TransformOperation& op) {
+    return stream << op.DebugString();
+  }
+
+ protected:
+  virtual bool IsEqualAssumingSameType(const TransformOperation&) const = 0;
 };
 
 }  // namespace blink

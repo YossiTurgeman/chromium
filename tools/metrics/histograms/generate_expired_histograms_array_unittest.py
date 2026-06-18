@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,7 +7,9 @@ import datetime
 import unittest
 import xml.dom.minidom
 
-import generate_expired_histograms_array
+import setup_modules  # pylint: disable=unused-import
+
+import chromium_src.tools.metrics.histograms.generate_expired_histograms_array as generate_expired_histograms_array
 
 _EXPECTED_HEADER_FILE_CONTENT = (
 """// Generated from generate_expired_histograms_array.py. Do not edit!
@@ -28,21 +30,17 @@ namespace some_namespace {{
 """)
 
 _EXPECTED_NON_EMPTY_ARRAY_DEFINITION = (
-"""const uint64_t kExpiredHistogramsHashes[] = {
-  0x965ce8e9e12a9c89,  // Test.FirstHistogram
-  0xdb5b2f55ffd139e8,  // Test.SecondHistogram
-};
-
-const size_t kNumExpiredHistograms = 2;"""
-)
+    """const uint32_t kExpiredHistogramsHashes[] = {
+  0x0557fa92,  // Back
+  0x290eb683,  // NewTab
+  0x67d2f674,  // Forward
+};""")
 
 _EXPECTED_EMPTY_ARRAY_DEFINITION = (
-"""const uint64_t kExpiredHistogramsHashes[] = {
-  0x0000000000000000,  // Dummy.Histogram
-};
+    """const uint32_t kExpiredHistogramsHashes[] = {
+  0x00000000,  // Dummy.Histogram
+};""")
 
-const size_t kNumExpiredHistograms = 1;"""
-)
 
 class ExpiredHistogramsTest(unittest.TestCase):
 
@@ -59,7 +57,6 @@ class ExpiredHistogramsTest(unittest.TestCase):
         },
         "FourthHistogram": {},
         "FifthHistogram": {
-            "obsolete": "Has expired.",
             "expires_after": "2000-10-01"
         },
         "SixthHistogram": {
@@ -68,7 +65,7 @@ class ExpiredHistogramsTest(unittest.TestCase):
         "SeventhHistogram": {
             "expires_after": "M60"
         },
-        "EigthHistogram": {
+        "EighthHistogram": {
             "expires_after": "M65"
         },
     }
@@ -80,9 +77,10 @@ class ExpiredHistogramsTest(unittest.TestCase):
         generate_expired_histograms_array._GetExpiredHistograms(
             histograms, base_date, current_milestone))
 
-    self.assertEqual(2, len(expired_histograms_names))
+    self.assertEqual(3, len(expired_histograms_names))
     self.assertIn("FirstHistogram", expired_histograms_names)
     self.assertIn("SixthHistogram", expired_histograms_names)
+    self.assertIn("FifthHistogram", expired_histograms_names)
 
   def testBadExpiryDate(self):
     histograms = {
@@ -97,8 +95,8 @@ class ExpiredHistogramsTest(unittest.TestCase):
     current_milestone = 60
 
     with self.assertRaises(generate_expired_histograms_array.Error) as error:
-        generate_expired_histograms_array._GetExpiredHistograms(histograms,
-            base_date, current_milestone)
+      generate_expired_histograms_array._GetExpiredHistograms(
+          histograms, base_date, current_milestone)
 
     self.assertEqual(
         generate_expired_histograms_array._DATE_FORMAT_ERROR.format(
@@ -110,22 +108,22 @@ class ExpiredHistogramsTest(unittest.TestCase):
     # Does not match the pattern.
     content = "MAJOR_BRANCH__FAKE_DATE=2017-09-09"
     with self.assertRaises(generate_expired_histograms_array.Error):
-        generate_expired_histograms_array._GetBaseDate(content, regex)
+      generate_expired_histograms_array._GetBaseDate(content, regex)
 
     # Has invalid format.
     content = "MAJOR_BRANCH_DATE=2010/01/01"
     with self.assertRaises(generate_expired_histograms_array.Error):
-        generate_expired_histograms_array._GetBaseDate(content, regex)
+      generate_expired_histograms_array._GetBaseDate(content, regex)
 
     # Has invalid format.
     content = "MAJOR_BRANCH_DATE=2010-20-02"
     with self.assertRaises(generate_expired_histograms_array.Error):
-        generate_expired_histograms_array._GetBaseDate(content, regex)
+      generate_expired_histograms_array._GetBaseDate(content, regex)
 
     # Has invalid date.
     content = "MAJOR_BRANCH_DATE=2017-02-29"
     with self.assertRaises(generate_expired_histograms_array.Error):
-        generate_expired_histograms_array._GetBaseDate(content, regex)
+      generate_expired_histograms_array._GetBaseDate(content, regex)
 
     content = "!!FOO!\nMAJOR_BRANCH_DATE=2010-01-01\n!FOO!!"
     base_date = generate_expired_histograms_array._GetBaseDate(content, regex)
@@ -136,10 +134,11 @@ class ExpiredHistogramsTest(unittest.TestCase):
     namespace = "some_namespace"
 
     histogram_map = generate_expired_histograms_array._GetHashToNameMap(
-        ["Test.FirstHistogram", "Test.SecondHistogram"])
+        ["Back", "NewTab", "Forward"])
     expected_histogram_map = {
-        "0x965ce8e9e12a9c89": "Test.FirstHistogram",
-        "0xdb5b2f55ffd139e8": "Test.SecondHistogram",
+        "0x0557fa92": "Back",
+        "0x290eb683": "NewTab",
+        "0x67d2f674": "Forward",
     }
     self.assertEqual(expected_histogram_map, histogram_map)
 
@@ -171,7 +170,7 @@ class ExpiredHistogramsTest(unittest.TestCase):
     This is a summary.
   </summary>
     </histogram>
-  <histogram name="ThirdHistogram" expires_after="M60" units="units">
+  <histogram name="ThirdHistogram" expires_after="M59" units="units">
     <owner>me@chromium.org</owner>
     <summary>
       This is a summary.

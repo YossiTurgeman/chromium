@@ -30,14 +30,16 @@
 
 #include "third_party/blink/renderer/platform/weborigin/security_policy.h"
 
+#include "base/test/scoped_command_line.h"
 #include "base/test/scoped_feature_list.h"
+#include "services/network/public/cpp/is_potentially_trustworthy.h"
+#include "services/network/public/cpp/network_switches.h"
 #include "services/network/public/mojom/cors.mojom-blink.h"
 #include "services/network/public/mojom/cors_origin_pattern.mojom-blink.h"
 #include "services/network/public/mojom/referrer_policy.mojom-shared.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/loader/referrer_utils.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/weborigin/scheme_registry.h"
@@ -51,15 +53,14 @@ TEST(SecurityPolicyTest, EmptyReferrerForUnauthorizedScheme) {
   const KURL example_http_url = KURL("http://example.com/");
   EXPECT_TRUE(String() == SecurityPolicy::GenerateReferrer(
                               network::mojom::ReferrerPolicy::kAlways,
-                              example_http_url,
-                              String::FromUTF8("chrome://somepage/"))
+                              example_http_url, "chrome://somepage/")
                               .referrer);
 }
 
 TEST(SecurityPolicyTest, GenerateReferrerRespectsReferrerSchemesRegistry) {
   const KURL example_http_url = KURL("http://example.com/");
-  const String foobar_url = String::FromUTF8("foobar://somepage/");
-  const String foobar_scheme = String::FromUTF8("foobar");
+  const String foobar_url = "foobar://somepage/";
+  const String foobar_scheme = "foobar";
 
   EXPECT_EQ(String(), SecurityPolicy::GenerateReferrer(
                           network::mojom::ReferrerPolicy::kAlways,
@@ -70,19 +71,19 @@ TEST(SecurityPolicyTest, GenerateReferrerRespectsReferrerSchemesRegistry) {
                             network::mojom::ReferrerPolicy::kAlways,
                             example_http_url, foobar_url)
                             .referrer);
-  SchemeRegistry::RemoveURLSchemeAsAllowedForReferrer(foobar_scheme);
+  SchemeRegistry::RemoveURLSchemeAsAllowedForReferrerForTest(foobar_scheme);
 }
 
 TEST(SecurityPolicyTest, ShouldHideReferrerRespectsReferrerSchemesRegistry) {
   const KURL example_http_url = KURL("http://example.com/");
   const KURL foobar_url = KURL("foobar://somepage/");
-  const String foobar_scheme = String::FromUTF8("foobar");
+  const String foobar_scheme = "foobar";
 
   EXPECT_TRUE(SecurityPolicy::ShouldHideReferrer(example_http_url, foobar_url));
   SchemeRegistry::RegisterURLSchemeAsAllowedForReferrer(foobar_scheme);
   EXPECT_FALSE(
       SecurityPolicy::ShouldHideReferrer(example_http_url, foobar_url));
-  SchemeRegistry::RemoveURLSchemeAsAllowedForReferrer(foobar_scheme);
+  SchemeRegistry::RemoveURLSchemeAsAllowedForReferrerForTest(foobar_scheme);
 }
 
 TEST(SecurityPolicyTest, GenerateReferrer) {
@@ -105,6 +106,7 @@ TEST(SecurityPolicyTest, GenerateReferrer) {
       "blob:http://a.test/b3aae9c8-7f90-440d-8d7c-43aa20d72fde";
   const char kFilesystemURL[] = "filesystem:http://a.test/path/t/file.html";
   const char kInvalidURL[] = "not-a-valid-url";
+  const char kEmptyURL[] = "";
 
   bool reduced_granularity =
       base::FeatureList::IsEnabled(features::kReducedReferrerGranularity);
@@ -145,6 +147,10 @@ TEST(SecurityPolicyTest, GenerateReferrer) {
        kInsecureURLB, kInsecureOriginA},
       {network::mojom::ReferrerPolicy::kSameOrigin, kInsecureURLA,
        kInsecureURLB, nullptr},
+      {network::mojom::ReferrerPolicy::kSameOrigin, kInsecureURLB,
+       kFilesystemURL, nullptr},
+      {network::mojom::ReferrerPolicy::kSameOrigin, kInsecureURLB, kBlobURL,
+       nullptr},
       {network::mojom::ReferrerPolicy::kStrictOrigin, kInsecureURLA,
        kInsecureURLB, kInsecureOriginA},
       {network::mojom::ReferrerPolicy::kStrictOriginWhenCrossOrigin,
@@ -232,31 +238,33 @@ TEST(SecurityPolicyTest, GenerateReferrer) {
 
       // blob, filesystem, and invalid URL handling
       {network::mojom::ReferrerPolicy::kAlways, kInsecureURLA, kBlobURL,
-       nullptr},
+       kInsecureURLA},
       {network::mojom::ReferrerPolicy::kAlways, kBlobURL, kInsecureURLA,
        nullptr},
       {network::mojom::ReferrerPolicy::kAlways, kInsecureURLA, kFilesystemURL,
-       nullptr},
+       kInsecureURLA},
       {network::mojom::ReferrerPolicy::kAlways, kFilesystemURL, kInsecureURLA,
        nullptr},
       {network::mojom::ReferrerPolicy::kAlways, kInsecureURLA, kInvalidURL,
        kInsecureURLA},
       {network::mojom::ReferrerPolicy::kAlways, kInvalidURL, kInsecureURLA,
        nullptr},
+      {network::mojom::ReferrerPolicy::kAlways, kEmptyURL, kInsecureURLA,
+       nullptr},
   };
 
   for (TestCase test : inputs) {
     KURL destination(test.destination);
     Referrer result = SecurityPolicy::GenerateReferrer(
-        test.policy, destination, String::FromUTF8(test.referrer));
+        test.policy, destination, String::FromUtf8(test.referrer));
     if (test.expected) {
-      EXPECT_EQ(String::FromUTF8(test.expected), result.referrer)
+      EXPECT_EQ(String::FromUtf8(test.expected), result.referrer)
           << "'" << test.referrer << "' to '" << test.destination
           << "' with policy=" << static_cast<int>(test.policy)
           << " should have been '" << test.expected << "': was '"
           << result.referrer.Utf8() << "'.";
     } else {
-      EXPECT_TRUE(result.referrer.IsEmpty())
+      EXPECT_TRUE(result.referrer.empty())
           << "'" << test.referrer << "' to '" << test.destination
           << "' should have been empty: was '" << result.referrer.Utf8()
           << "'.";
@@ -281,7 +289,8 @@ TEST(SecurityPolicyTest, GenerateReferrerTruncatesLongUrl) {
   std::fill_n(std::begin(buffer), 4097, 'a');
 
   String base = "https://a.com/";
-  String string_with_4096 = base + String(buffer, 4096 - base.length());
+  String string_with_4096 =
+      base + String(base::span(buffer).first(4096 - base.length()));
   ASSERT_EQ(string_with_4096.length(), 4096u);
 
   network::mojom::ReferrerPolicy kAlways =
@@ -291,7 +300,8 @@ TEST(SecurityPolicyTest, GenerateReferrerTruncatesLongUrl) {
                 .referrer,
             string_with_4096);
 
-  String string_with_4097 = base + String(buffer, 4097 - base.length());
+  String string_with_4097 =
+      base + String(base::span(buffer).first(4097 - base.length()));
   ASSERT_EQ(string_with_4097.length(), 4097u);
   EXPECT_EQ(SecurityPolicy::GenerateReferrer(
                 kAlways, KURL("https://destination.example"), string_with_4097)
@@ -303,7 +313,8 @@ TEST(SecurityPolicyTest, GenerateReferrerTruncatesLongUrl) {
   // referrer with length > 4096 due to its path should not get stripped to its
   // outgoing origin.
   String string_with_4097_because_of_long_ref =
-      base + "path#" + String(buffer, 4097 - 5 - base.length());
+      base + "path#" +
+      String(base::span(buffer).first(4097 - 5 - base.length()));
   ASSERT_EQ(string_with_4097_because_of_long_ref.length(), 4097u);
   EXPECT_EQ(SecurityPolicy::GenerateReferrer(
                 kAlways, KURL("https://destination.example"),
@@ -358,8 +369,17 @@ TEST(SecurityPolicyTest, TrustworthySafelist) {
     scoped_refptr<const SecurityOrigin> origin =
         SecurityOrigin::CreateFromString(url);
     EXPECT_FALSE(origin->IsPotentiallyTrustworthy());
-    SecurityPolicy::AddOriginToTrustworthySafelist(origin->ToString());
-    EXPECT_TRUE(origin->IsPotentiallyTrustworthy());
+
+    {
+      base::test::ScopedCommandLine scoped_command_line;
+      base::CommandLine* command_line =
+          scoped_command_line.GetProcessCommandLine();
+      command_line->AppendSwitchASCII(
+          network::switches::kUnsafelyTreatInsecureOriginAsSecure,
+          origin->ToString().Latin1());
+      network::SecureOriginAllowlist::GetInstance().ResetForTesting();
+      EXPECT_TRUE(origin->IsPotentiallyTrustworthy());
+    }
   }
 
   // Tests that adding URLs that have inner-urls to the safelist
@@ -385,15 +405,45 @@ TEST(SecurityPolicyTest, TrustworthySafelist) {
 
     EXPECT_FALSE(origin1->IsPotentiallyTrustworthy());
     EXPECT_FALSE(origin2->IsPotentiallyTrustworthy());
-    SecurityPolicy::AddOriginToTrustworthySafelist(origin1->ToString());
-    EXPECT_TRUE(origin1->IsPotentiallyTrustworthy());
-    EXPECT_TRUE(origin2->IsPotentiallyTrustworthy());
+    {
+      base::test::ScopedCommandLine scoped_command_line;
+      base::CommandLine* command_line =
+          scoped_command_line.GetProcessCommandLine();
+      command_line->AppendSwitchASCII(
+          network::switches::kUnsafelyTreatInsecureOriginAsSecure,
+          origin1->ToString().Latin1());
+      network::SecureOriginAllowlist::GetInstance().ResetForTesting();
+      EXPECT_TRUE(origin1->IsPotentiallyTrustworthy());
+      EXPECT_TRUE(origin2->IsPotentiallyTrustworthy());
+    }
+  }
+}
+
+TEST(SecurityPolicyTest, ReferrerPolicyToAndFromString) {
+  const char* policies[] = {"no-referrer",
+                            "unsafe-url",
+                            "origin",
+                            "origin-when-cross-origin",
+                            "same-origin",
+                            "strict-origin",
+                            "strict-origin-when-cross-origin",
+                            "no-referrer-when-downgrade"};
+
+  for (const char* policy : policies) {
+    network::mojom::ReferrerPolicy result =
+        network::mojom::ReferrerPolicy::kDefault;
+    EXPECT_TRUE(SecurityPolicy::ReferrerPolicyFromString(
+        policy, kDoNotSupportReferrerPolicyLegacyKeywords, &result));
+    String string_result = SecurityPolicy::ReferrerPolicyAsString(result);
+    EXPECT_EQ(string_result, policy);
   }
 }
 
 class SecurityPolicyAccessTest : public testing::Test {
  public:
   SecurityPolicyAccessTest() = default;
+  SecurityPolicyAccessTest(const SecurityPolicyAccessTest&) = delete;
+  SecurityPolicyAccessTest& operator=(const SecurityPolicyAccessTest&) = delete;
   ~SecurityPolicyAccessTest() override = default;
 
   void SetUp() override {
@@ -433,8 +483,6 @@ class SecurityPolicyAccessTest : public testing::Test {
   scoped_refptr<const SecurityOrigin> http_example_origin_;
   scoped_refptr<const SecurityOrigin> https_chromium_origin_;
   scoped_refptr<const SecurityOrigin> https_google_origin_;
-
-  DISALLOW_COPY_AND_ASSIGN(SecurityPolicyAccessTest);
 };
 
 // TODO(toyoshim): Simplify origin access related tests since all we need here
@@ -616,35 +664,20 @@ TEST(SecurityPolicyTest, ReferrerForCustomScheme) {
   String kFullReferrer = "my-new-scheme://com.foo.me/this-should-be-truncated";
   String kTruncatedReferrer = "my-new-scheme://com.foo.me/";
 
-  {
-    // With the feature off, the old default policy of
-    // no-referrer-when-downgrade should preserve the entire URL.
-    base::test::ScopedFeatureList scoped_feature_list;
-    scoped_feature_list.InitAndDisableFeature(
-        features::kReducedReferrerGranularity);
+  // The default policy of strict-origin-when-cross-origin should truncate the
+  // referrer.
+  EXPECT_EQ(SecurityPolicy::GenerateReferrer(
+                network::mojom::ReferrerPolicy::kDefault,
+                KURL("https://www.example.com/"), kFullReferrer)
+                .referrer,
+            kTruncatedReferrer);
 
-    EXPECT_EQ(SecurityPolicy::GenerateReferrer(
-                  network::mojom::ReferrerPolicy::kDefault,
-                  KURL("https://www.example.com/"), kFullReferrer)
-                  .referrer,
-              kFullReferrer);
-  }
-
-  {
-    // With the feature on, the new default policy of
-    // strict-origin-when-cross-origin should truncate the referrer.
-    base::test::ScopedFeatureList scoped_feature_list;
-    scoped_feature_list.InitAndEnableFeature(
-        features::kReducedReferrerGranularity);
-
-    ASSERT_TRUE(ReferrerUtils::IsReducedReferrerGranularityEnabled());
-
-    EXPECT_EQ(SecurityPolicy::GenerateReferrer(
-                  network::mojom::ReferrerPolicy::kDefault,
-                  KURL("https://www.example.com/"), kFullReferrer)
-                  .referrer,
-              kTruncatedReferrer);
-  }
+  // no-referrer-when-downgrade shouldn't truncate the referrer.
+  EXPECT_EQ(SecurityPolicy::GenerateReferrer(
+                network::mojom::ReferrerPolicy::kNoReferrerWhenDowngrade,
+                KURL("https://www.example.com/"), kFullReferrer)
+                .referrer,
+            kFullReferrer);
 }
 
 }  // namespace blink

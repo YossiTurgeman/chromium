@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,10 @@
 
 #include <limits>
 
+#include "base/compiler_specific.h"
 #include "base/memory/platform_shared_memory_region.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/writable_shared_memory_region.h"
-#include "base/stl_util.h"
 #include "mojo/core/dispatcher.h"
 #include "mojo/core/platform_shared_memory_mapping.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -46,10 +46,12 @@ void RevalidateCreateOptions(
 class SharedBufferDispatcherTest : public testing::Test {
  public:
   SharedBufferDispatcherTest() = default;
-  ~SharedBufferDispatcherTest() override = default;
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(SharedBufferDispatcherTest);
+  SharedBufferDispatcherTest(const SharedBufferDispatcherTest&) = delete;
+  SharedBufferDispatcherTest& operator=(const SharedBufferDispatcherTest&) =
+      delete;
+
+  ~SharedBufferDispatcherTest() override = default;
 };
 
 // Tests valid inputs to |ValidateCreateOptions()|.
@@ -65,8 +67,8 @@ TEST_F(SharedBufferDispatcherTest, ValidateCreateOptionsValid) {
   // Different flags.
   MojoCreateSharedBufferFlags flags_values[] = {
       MOJO_CREATE_SHARED_BUFFER_FLAG_NONE};
-  for (size_t i = 0; i < base::size(flags_values); i++) {
-    const MojoCreateSharedBufferFlags flags = flags_values[i];
+  for (size_t i = 0; i < std::size(flags_values); i++) {
+    const MojoCreateSharedBufferFlags flags = UNSAFE_TODO(flags_values[i]);
 
     // Different capacities (size 1).
     for (uint32_t capacity = 1; capacity <= 100 * 1000 * 1000; capacity *= 10) {
@@ -123,7 +125,7 @@ TEST_F(SharedBufferDispatcherTest, CreateAndMapBuffer) {
   ASSERT_TRUE(mapping1->GetBase());
   EXPECT_EQ(100u, mapping1->GetLength());
   // Write something.
-  static_cast<char*>(mapping1->GetBase())[50] = 'x';
+  UNSAFE_TODO(static_cast<char*>(mapping1->GetBase())[50]) = 'x';
 
   std::unique_ptr<PlatformSharedMemoryMapping> mapping2;
   EXPECT_EQ(MOJO_RESULT_OK, dispatcher->MapBuffer(50, 50, &mapping2));
@@ -136,8 +138,8 @@ TEST_F(SharedBufferDispatcherTest, CreateAndMapBuffer) {
 
   // Check that we can still read/write to mappings after the dispatcher has
   // gone away.
-  static_cast<char*>(mapping2->GetBase())[1] = 'y';
-  EXPECT_EQ('y', static_cast<char*>(mapping1->GetBase())[51]);
+  UNSAFE_TODO(static_cast<char*>(mapping2->GetBase())[1]) = 'y';
+  UNSAFE_TODO(EXPECT_EQ('y', static_cast<char*>(mapping1->GetBase())[51]));
 }
 
 TEST_F(SharedBufferDispatcherTest, CreateAndMapBufferFromPlatformBuffer) {
@@ -160,7 +162,7 @@ TEST_F(SharedBufferDispatcherTest, CreateAndMapBufferFromPlatformBuffer) {
   ASSERT_TRUE(mapping1->GetBase());
   EXPECT_EQ(100u, mapping1->GetLength());
   // Write something.
-  static_cast<char*>(mapping1->GetBase())[50] = 'x';
+  UNSAFE_TODO(static_cast<char*>(mapping1->GetBase())[50]) = 'x';
 
   std::unique_ptr<PlatformSharedMemoryMapping> mapping2;
   EXPECT_EQ(MOJO_RESULT_OK, dispatcher->MapBuffer(50, 50, &mapping2));
@@ -173,8 +175,8 @@ TEST_F(SharedBufferDispatcherTest, CreateAndMapBufferFromPlatformBuffer) {
 
   // Check that we can still read/write to mappings after the dispatcher has
   // gone away.
-  static_cast<char*>(mapping2->GetBase())[1] = 'y';
-  EXPECT_EQ('y', static_cast<char*>(mapping1->GetBase())[51]);
+  UNSAFE_TODO(static_cast<char*>(mapping2->GetBase())[1]) = 'y';
+  UNSAFE_TODO(EXPECT_EQ('y', static_cast<char*>(mapping1->GetBase())[51]));
 }
 
 TEST_F(SharedBufferDispatcherTest, DuplicateBufferHandle) {

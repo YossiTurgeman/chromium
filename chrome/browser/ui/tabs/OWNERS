@@ -1,12 +1,8 @@
-bsep@chromium.org
-connily@chromium.org
-cyan@chromium.org
-dfried@chromium.org
-erikchen@chromium.org
-sky@chromium.org
-tbergquist@chromium.org
+dpenning@chromium.org
+dljames@chromium.org
+agale@chromium.org
+corising@chromium.org
 
-# For changes related to the tab alert indicators.
-per-file tab_utils*=miu@chromium.org
-
-# COMPONENT: UI>Browser>TabStrip
+per-file tab_dialog_manager*=kylixrd@chromium.org
+per-file tab_dialog_manager*=kerenzhu@chromium.org
+per-file glic_actor*=file://chrome/browser/actor/ui/OWNERS

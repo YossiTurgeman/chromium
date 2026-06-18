@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,8 @@
 #include "base/strings/utf_string_conversions.h"
 #include "extensions/common/permissions/permissions_info.h"
 #include "ui/base/l10n/l10n_util.h"
+
+using extensions::mojom::APIPermissionID;
 
 namespace chrome_apps {
 
@@ -54,7 +56,7 @@ MediaGalleriesPermission::MediaGalleriesPermission(
     : SetDisjunctionPermission<MediaGalleriesPermissionData,
                                MediaGalleriesPermission>(info) {}
 
-MediaGalleriesPermission::~MediaGalleriesPermission() {}
+MediaGalleriesPermission::~MediaGalleriesPermission() = default;
 
 bool MediaGalleriesPermission::FromValue(
     const base::Value* value,
@@ -100,7 +102,6 @@ bool MediaGalleriesPermission::FromValue(
     // MediaGalleriesPermissionData is probably out of sync in some way.
     // Fail so developers notice this.
     NOTREACHED();
-    return false;
   }
 
   return IsValidPermissionSet(has_read, has_copy_to, has_delete, error);
@@ -127,7 +128,6 @@ extensions::PermissionIDSet MediaGalleriesPermission::GetPermissions() const {
 
   if (!IsValidPermissionSet(has_read, has_copy_to, has_delete, nullptr)) {
     NOTREACHED();
-    return result;
   }
 
   // If |has_all_auto_detected| is false, then Chrome will prompt the user at
@@ -140,16 +140,16 @@ extensions::PermissionIDSet MediaGalleriesPermission::GetPermissions() const {
 
   // Separate PermissionMessage IDs for read, copyTo, and delete. Otherwise an
   // extension can silently gain new access capabilities.
-  result.insert(extensions::APIPermission::kMediaGalleriesAllGalleriesRead);
+  result.insert(APIPermissionID::kMediaGalleriesAllGalleriesRead);
 
   // For copyTo and delete, the proper combined permission message will be
   // derived in ChromePermissionMessageProvider::GetWarningMessages(), such
   // that the user get 1 entry for all media galleries access permissions,
   // rather than several separate entries.
   if (has_copy_to)
-    result.insert(extensions::APIPermission::kMediaGalleriesAllGalleriesCopyTo);
+    result.insert(APIPermissionID::kMediaGalleriesAllGalleriesCopyTo);
   if (has_delete)
-    result.insert(extensions::APIPermission::kMediaGalleriesAllGalleriesDelete);
+    result.insert(APIPermissionID::kMediaGalleriesAllGalleriesDelete);
 
   return result;
 }

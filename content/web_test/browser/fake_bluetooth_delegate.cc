@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/web_test/browser/fake_bluetooth_delegate.h"
 
 #include "content/public/browser/web_contents.h"
+#include "content/web_test/browser/web_test_control_host.h"
 #include "device/bluetooth/bluetooth_device.h"
 #include "third_party/blink/public/common/bluetooth/web_bluetooth_device_id.h"
 #include "third_party/blink/public/mojom/bluetooth/web_bluetooth.mojom.h"
@@ -16,9 +17,45 @@ using device::BluetoothUUID;
 
 namespace content {
 
+namespace {
+
+class AlwaysAllowBluetoothScanning : public BluetoothScanningPrompt {
+ public:
+  explicit AlwaysAllowBluetoothScanning(const EventHandler& event_handler) {
+    event_handler.Run(BluetoothScanningPrompt::Event::kAllow);
+  }
+};
+
+}  // namespace
+
 // public
 FakeBluetoothDelegate::FakeBluetoothDelegate() = default;
 FakeBluetoothDelegate::~FakeBluetoothDelegate() = default;
+
+std::unique_ptr<BluetoothChooser> FakeBluetoothDelegate::RunBluetoothChooser(
+    RenderFrameHost* frame,
+    const BluetoothChooser::EventHandler& event_handler) {
+  if (auto* web_test_control_host = WebTestControlHost::Get())
+    return web_test_control_host->RunBluetoothChooser(frame, event_handler);
+  return nullptr;
+}
+
+std::unique_ptr<BluetoothScanningPrompt>
+FakeBluetoothDelegate::ShowBluetoothScanningPrompt(
+    RenderFrameHost* frame,
+    const BluetoothScanningPrompt::EventHandler& event_handler) {
+  return std::make_unique<AlwaysAllowBluetoothScanning>(event_handler);
+}
+
+void FakeBluetoothDelegate::ShowDevicePairPrompt(
+    RenderFrameHost* frame,
+    const std::u16string& device_identifier,
+    PairPromptCallback callback,
+    PairingKind pairing_kind,
+    const std::optional<std::u16string>& pin) {
+  std::move(callback).Run(content::BluetoothDelegate::PairPromptResult(
+      content::BluetoothDelegate::PairPromptStatus::kCancelled));
+}
 
 WebBluetoothDeviceId FakeBluetoothDelegate::GetWebBluetoothDeviceId(
     RenderFrameHost* frame,
@@ -62,7 +99,18 @@ WebBluetoothDeviceId FakeBluetoothDelegate::GrantServiceAccessPermission(
 bool FakeBluetoothDelegate::HasDevicePermission(
     RenderFrameHost* frame,
     const WebBluetoothDeviceId& device_id) {
-  return base::Contains(device_id_to_services_map_, device_id);
+  return device_id_to_services_map_.contains(device_id);
+}
+
+void FakeBluetoothDelegate::RevokeDevicePermissionWebInitiated(
+    RenderFrameHost* frame,
+    const WebBluetoothDeviceId& device_id) {
+  device_id_to_services_map_.erase(device_id);
+  device_id_to_name_map_.erase(device_id);
+  device_id_to_manufacturer_code_map_.erase(device_id);
+  auto& device_address_to_id_map = GetAddressToIdMapForOrigin(frame);
+  base::EraseIf(device_address_to_id_map,
+                [device_id](auto& entry) { return entry.second == device_id; });
 }
 
 bool FakeBluetoothDelegate::IsAllowedToAccessService(
@@ -73,7 +121,7 @@ bool FakeBluetoothDelegate::IsAllowedToAccessService(
   if (id_to_services_it == device_id_to_services_map_.end())
     return false;
 
-  return base::Contains(id_to_services_it->second, service);
+  return id_to_services_it->second.contains(service);
 }
 
 bool FakeBluetoothDelegate::IsAllowedToAccessAtLeastOneService(
@@ -95,7 +143,7 @@ bool FakeBluetoothDelegate::IsAllowedToAccessManufacturerData(
   if (id_to_manufacturer_data_it == device_id_to_manufacturer_code_map_.end())
     return false;
 
-  return base::Contains(id_to_manufacturer_data_it->second, manufacturer_code);
+  return id_to_manufacturer_data_it->second.contains(manufacturer_code);
 }
 
 std::vector<blink::mojom::WebBluetoothDevicePtr>
@@ -161,9 +209,9 @@ void FakeBluetoothDelegate::GrantUnionOfServicesAndManufacturerDataForDevice(
 FakeBluetoothDelegate::AddressToIdMap&
 FakeBluetoothDelegate::GetAddressToIdMapForOrigin(RenderFrameHost* frame) {
   auto* web_contents = WebContents::FromRenderFrameHost(frame);
-  auto origin_pair =
-      std::make_pair(frame->GetLastCommittedOrigin(),
-                     web_contents->GetMainFrame()->GetLastCommittedOrigin());
+  auto origin_pair = std::make_pair(
+      frame->GetLastCommittedOrigin(),
+      web_contents->GetPrimaryMainFrame()->GetLastCommittedOrigin());
   return device_address_to_id_map_for_origin_[origin_pair];
 }
 

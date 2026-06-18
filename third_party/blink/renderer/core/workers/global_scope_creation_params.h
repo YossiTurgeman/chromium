@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,22 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_GLOBAL_SCOPE_CREATION_PARAMS_H_
 
 #include <memory>
-#include "base/macros.h"
-#include "base/optional.h"
+#include <optional>
+
+#include "base/task/single_thread_task_runner.h"
 #include "base/unguessable_token.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "services/network/public/mojom/ip_address_space.mojom-blink-forward.h"
+#include "net/storage_access_api/status.h"
+#include "services/metrics/public/cpp/ukm_source_id.h"
+#include "services/network/public/cpp/permissions_policy/permissions_policy.h"
 #include "services/network/public/mojom/referrer_policy.mojom-blink-forward.h"
-#include "third_party/blink/public/common/feature_policy/feature_policy.h"
+#include "third_party/blink/public/common/permissions_policy/document_policy.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+#include "third_party/blink/public/mojom/blob/blob_url_store.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/browser_interface_broker.mojom-blink-forward.h"
+#include "third_party/blink/public/mojom/frame/reporting_observer.mojom-blink-forward.h"
+#include "third_party/blink/public/mojom/loader/code_cache.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/script/script_type.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/v8_cache_options.mojom-blink.h"
 #include "third_party/blink/public/platform/web_content_settings_client.h"
@@ -25,13 +31,14 @@
 #include "third_party/blink/renderer/core/workers/worker_clients.h"
 #include "third_party/blink/renderer/core/workers/worker_settings.h"
 #include "third_party/blink/renderer/core/workers/worklet_module_responses_map.h"
-#include "third_party/blink/renderer/platform/graphics/begin_frame_provider.h"
+#include "third_party/blink/renderer/platform/graphics/begin_frame_provider_params.h"
 #include "third_party/blink/renderer/platform/loader/fetch/https_state.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 
 namespace blink {
 
+class InterfaceRegistry;
 class WorkerClients;
 
 // GlobalScopeCreationParams contains parameters for initializing
@@ -42,33 +49,69 @@ struct CORE_EXPORT GlobalScopeCreationParams final {
  public:
   GlobalScopeCreationParams(
       const KURL& script_url,
-      mojom::ScriptType script_type,
+      mojom::blink::ScriptType script_type,
       const String& global_scope_name,
       const String& user_agent,
-      const base::Optional<UserAgentMetadata>& ua_metadata,
+      const std::optional<UserAgentMetadata>& ua_metadata,
       scoped_refptr<WebWorkerFetchContext>,
-      const Vector<CSPHeaderAndType>& outside_content_security_policy_headers,
+      Vector<network::mojom::blink::ContentSecurityPolicyPtr>
+          outside_content_security_policies,
+      Vector<network::mojom::blink::ContentSecurityPolicyPtr>
+          response_content_security_policies,
       network::mojom::ReferrerPolicy referrer_policy,
+      DocumentPolicy::DocumentPolicyBundle document_policy,
       const SecurityOrigin*,
       bool starter_secure_context,
       HttpsState starter_https_state,
       WorkerClients*,
       std::unique_ptr<WebContentSettingsClient>,
-      base::Optional<network::mojom::IPAddressSpace>,
-      const Vector<String>* origin_trial_tokens,
+      const Vector<mojom::blink::OriginTrialFeature>* inherited_trial_features,
       const base::UnguessableToken& parent_devtools_token,
       std::unique_ptr<WorkerSettings>,
       mojom::blink::V8CacheOptions,
       WorkletModuleResponsesMap*,
       mojo::PendingRemote<mojom::blink::BrowserInterfaceBroker>
           browser_interface_broker = mojo::NullRemote(),
+      mojo::PendingRemote<mojom::blink::CodeCacheHost> code_cahe_host =
+          mojo::NullRemote(),
+      mojo::PendingRemote<mojom::blink::BlobURLStore> blob_url_store =
+          mojo::NullRemote(),
       BeginFrameProviderParams begin_frame_provider_params = {},
-      const FeaturePolicy* parent_feature_policy = nullptr,
+      const network::PermissionsPolicy* parent_permissions_policy = nullptr,
       base::UnguessableToken agent_cluster_id = {},
-      const base::Optional<ExecutionContextToken>& parent_context_token =
-          base::nullopt);
+      ukm::SourceId ukm_source_id = ukm::kInvalidSourceId,
+      const std::optional<ExecutionContextToken>& parent_context_token =
+          std::nullopt,
+      bool cross_origin_isolated_capability = false,
+      bool parent_is_isolated_context = false,
+      bool direct_sockets_force_enabled_in_parent = false,
+      InterfaceRegistry* interface_registry = nullptr,
+      scoped_refptr<base::SingleThreadTaskRunner>
+          agent_group_scheduler_compositor_task_runner = nullptr,
+      const SecurityOrigin* top_level_frame_security_origin = nullptr,
+      net::StorageAccessApiStatus parent_storage_access_api_status =
+          net::StorageAccessApiStatus::kNone,
+      bool require_cross_site_request_for_cookies = false,
+      scoped_refptr<SecurityOrigin> origin_to_use = nullptr,
+      mojo::PendingReceiver<mojom::blink::ReportingObserver>
+          coep_reporting_observer = mojo::NullReceiver(),
+      mojo::PendingReceiver<mojom::blink::ReportingObserver>
+          dip_reporting_observer = mojo::NullReceiver());
+  GlobalScopeCreationParams(const GlobalScopeCreationParams&) = delete;
+  GlobalScopeCreationParams& operator=(const GlobalScopeCreationParams&) =
+      delete;
 
   ~GlobalScopeCreationParams() = default;
+
+  static std::unique_ptr<GlobalScopeCreationParams> CreateForWorkerForTesting(
+      const SecurityOrigin* starter_origin,
+      const KURL& script_url,
+      const std::optional<ExecutionContextToken>& parent_context_token,
+      std::unique_ptr<WorkerSettings> worker_settings);
+
+  static std::unique_ptr<GlobalScopeCreationParams> CreateForWorkerForTesting(
+      const SecurityOrigin* starter_origin,
+      const KURL& script_url);
 
   // The URL to be used as the worker global scope's URL.
   // According to the spec, this should be response URL of the top-level
@@ -84,7 +127,7 @@ struct CORE_EXPORT GlobalScopeCreationParams final {
   // workers.
   KURL script_url;
 
-  mojom::ScriptType script_type;
+  mojom::blink::ScriptType script_type;
 
   String global_scope_name;
   String user_agent;
@@ -92,13 +135,25 @@ struct CORE_EXPORT GlobalScopeCreationParams final {
 
   scoped_refptr<WebWorkerFetchContext> web_worker_fetch_context;
 
-  // TODO(bashi): This contains "inside" CSP headers for on-the-main-thread
-  // service/shared worker script fetch. Add a separate parameter for "inside"
-  // CSP headers.
-  Vector<CSPHeaderAndType> outside_content_security_policy_headers;
+  Vector<network::mojom::blink::ContentSecurityPolicyPtr>
+      outside_content_security_policies;
+
+  // This is used only for classic dedicated workers with off-the-main-thread
+  // fetch disabled.
+  //
+  // TODO(https://crbug.com/835717): Remove this after dedicated workers support
+  // off-the-main-thread script fetch by default.
+  Vector<network::mojom::blink::ContentSecurityPolicyPtr>
+      response_content_security_policies;
 
   network::mojom::ReferrerPolicy referrer_policy;
-  std::unique_ptr<Vector<String>> origin_trial_tokens;
+
+  DocumentPolicy::DocumentPolicyBundle document_policy;
+
+  // Origin trial features to be inherited by worker/worklet from the document
+  // loading it.
+  std::unique_ptr<Vector<mojom::blink::OriginTrialFeature>>
+      inherited_trial_features;
 
   // The SecurityOrigin of the Document creating a Worker/Worklet.
   //
@@ -114,13 +169,20 @@ struct CORE_EXPORT GlobalScopeCreationParams final {
   // script loader uses Document's SecurityOrigin for security checks.
   scoped_refptr<const SecurityOrigin> starter_origin;
 
+  // The SecurityOrigin to be used by the worker, if it's pre-calculated
+  // already (e.g. passed down from the browser to the renderer). Only set
+  // for dedicated and shared workers. The origin is calculated in the browser
+  // process and sent to the renderer. This guarantees both the renderer and
+  // browser knows the exact origin used by the worker.
+  scoped_refptr<SecurityOrigin> origin_to_use;
+
   // Indicates if the Document creating a Worker/Worklet is a secure context.
   //
   // Worklets are defined to have a unique, opaque origin, so are not secure:
   // https://drafts.css-houdini.org/worklets/#script-settings-for-worklets
-  // Origin trials are only enabled in secure contexts, and the trial tokens are
-  // inherited from the document, so also consider the context of the document.
-  // The value should be supplied as the result of Document.IsSecureContext().
+  // Origin trials are only enabled in secure contexts so also consider the
+  // context of the document. The value should be supplied as the result of
+  // Document.IsSecureContext().
   bool starter_secure_context;
 
   HttpsState starter_https_state;
@@ -138,11 +200,6 @@ struct CORE_EXPORT GlobalScopeCreationParams final {
 
   std::unique_ptr<WebContentSettingsClient> content_settings_client;
 
-  // Worker script response's address space. This is valid only when the worker
-  // script is fetched on the main thread (i.e., when
-  // |off_main_thread_fetch_option| is kDisabled).
-  base::Optional<network::mojom::IPAddressSpace> response_address_space;
-
   base::UnguessableToken parent_devtools_token;
 
   std::unique_ptr<WorkerSettings> worker_settings;
@@ -154,21 +211,75 @@ struct CORE_EXPORT GlobalScopeCreationParams final {
   mojo::PendingRemote<mojom::blink::BrowserInterfaceBroker>
       browser_interface_broker;
 
+  mojo::PendingRemote<mojom::blink::CodeCacheHost> code_cache_host_interface;
+
+  mojo::PendingRemote<mojom::blink::BlobURLStore> blob_url_store;
+
   BeginFrameProviderParams begin_frame_provider_params;
 
-  std::unique_ptr<FeaturePolicy> worker_feature_policy;
+  std::unique_ptr<network::PermissionsPolicy> worker_permissions_policy;
 
   // Set when the worker/worklet has the same AgentClusterID as the execution
   // context that created it (e.g. for a dedicated worker).
   // See https://tc39.github.io/ecma262/#sec-agent-clusters
   base::UnguessableToken agent_cluster_id;
 
+  // Set to ukm::kInvalidSourceId when the global scope is not provided an ID.
+  ukm::SourceId ukm_source_id;
+
   // The identity of the parent ExecutionContext that is the sole owner of this
   // worker or worklet, which caused it to be created, and to whose lifetime
   // this worker/worklet is bound. This is used for resource usage attribution.
-  base::Optional<ExecutionContextToken> parent_context_token;
+  std::optional<ExecutionContextToken> parent_context_token;
 
-  DISALLOW_COPY_AND_ASSIGN(GlobalScopeCreationParams);
+  // https://html.spec.whatwg.org/C/#concept-settings-object-cross-origin-isolated-capability
+  // Whether the execution context has access to cross-origin isolated APIs.
+  const bool cross_origin_isolated_capability;
+
+  // Governs whether Isolated Context APIs are available in a worker context,
+  // false when no parent exists.
+  // https://wicg.github.io/isolated-web-apps/isolated-contexts.html
+  const bool parent_is_isolated_context;
+
+  // Direct Sockets might be enabled outside of Isolated Context in selected
+  // scenarios.
+  const bool direct_sockets_force_enabled_in_parent;
+
+  InterfaceRegistry* const interface_registry;
+
+  // The compositor task runner associated with the |AgentGroupScheduler| this
+  // worker belongs to.
+  scoped_refptr<base::SingleThreadTaskRunner>
+      agent_group_scheduler_compositor_task_runner;
+
+  // The security origin of the top level frame associated with the worker. This
+  // can be used, for instance, to check if the top level frame has an opaque
+  // origin.
+  scoped_refptr<const SecurityOrigin> top_level_frame_security_origin;
+
+  // Timestamp of the dedicated worker start.
+  // i.e. when DedicatedWorkerStart() was called.
+  std::optional<base::TimeTicks> dedicated_worker_start_time;
+
+  // The parent ExecutionContext's Storage Access API status.
+  const net::StorageAccessApiStatus parent_storage_access_api_status;
+
+  // Late initialized on thread creation. This signals whether the world created
+  // is the default world for an isolate.
+  bool is_default_world_of_isolate = false;
+
+  // If `require_cross_site_request_for_cookies` is specified, then all requests
+  // made must have an empty site_for_cookies to ensure only SameSite=None
+  // cookies can be attached to the request.
+  // For context on usage see:
+  // https://privacycg.github.io/saa-non-cookie-storage/shared-workers.html
+  const bool require_cross_site_request_for_cookies;
+
+  // Used by COEP and DocumentIsolationPolicy reporting to trigger
+  // ReportingObserver events.
+  mojo::PendingReceiver<mojom::blink::ReportingObserver>
+      coep_reporting_observer;
+  mojo::PendingReceiver<mojom::blink::ReportingObserver> dip_reporting_observer;
 };
 
 }  // namespace blink

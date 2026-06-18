@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,13 +12,11 @@ namespace media {
 
 // Minimum time that we require after a failed overlay attempt before we'll try
 // again for an overlay.
-constexpr base::TimeDelta MinimumDelayAfterFailedOverlay =
-    base::TimeDelta::FromSeconds(5);
+constexpr base::TimeDelta MinimumDelayAfterFailedOverlay = base::Seconds(5);
 
 AndroidVideoSurfaceChooserImpl::AndroidVideoSurfaceChooserImpl(
-    bool allow_dynamic,
     const base::TickClock* tick_clock)
-    : allow_dynamic_(allow_dynamic), tick_clock_(tick_clock) {
+    : tick_clock_(tick_clock) {
   // Use a DefaultTickClock if one wasn't provided.
   if (!tick_clock_)
     tick_clock_ = base::DefaultTickClock::GetInstance();
@@ -35,7 +33,7 @@ void AndroidVideoSurfaceChooserImpl::SetClientCallbacks(
 }
 
 void AndroidVideoSurfaceChooserImpl::UpdateState(
-    base::Optional<AndroidOverlayFactoryCB> new_factory,
+    std::optional<AndroidOverlayFactoryCB> new_factory,
     const State& new_state) {
   DCHECK(use_overlay_cb_);
   bool entered_fullscreen =
@@ -45,24 +43,6 @@ void AndroidVideoSurfaceChooserImpl::UpdateState(
   bool factory_changed = new_factory.has_value();
   if (factory_changed)
     overlay_factory_ = std::move(*new_factory);
-
-  if (!allow_dynamic_) {
-    if (!initial_state_received_) {
-      initial_state_received_ = true;
-      // Choose here so that Choose() doesn't have to handle non-dynamic.
-      // Note that we ignore |is_expecting_relayout| here, since it's transient.
-      // We don't want to pick TextureOwner permanently for that.
-      if (overlay_factory_ &&
-          (current_state_.is_fullscreen || current_state_.is_secure ||
-           current_state_.is_required) &&
-          current_state_.video_rotation == VIDEO_ROTATION_0) {
-        SwitchToOverlay(false);
-      } else {
-        SwitchToTextureOwner();
-      }
-    }
-    return;
-  }
 
   // If we're entering fullscreen, clear any previous failure attempt.  It's
   // likely that any previous failure was due to a lack of power efficiency,
@@ -82,20 +62,12 @@ void AndroidVideoSurfaceChooserImpl::UpdateState(
 }
 
 void AndroidVideoSurfaceChooserImpl::Choose() {
-  // Pre-M we shouldn't be called.
-  DCHECK(allow_dynamic_);
-
   // TODO(liberato): should this depend on resolution?
   OverlayState new_overlay_state =
-      current_state_.promote_aggressively ? kUsingOverlay : kUsingTextureOwner;
-  // Do we require a power-efficient overlay?
-  bool needs_power_efficient = current_state_.promote_aggressively;
+      current_state_.promote_secure_only ? kUsingTextureOwner : kUsingOverlay;
 
-  // In player element fullscreen, we want to use overlays if we can.  Note that
-  // this does nothing if |promote_aggressively|, which is fine since switching
-  // from "want power efficient" from "don't care" is problematic.
-  if (current_state_.is_fullscreen)
-    new_overlay_state = kUsingOverlay;
+  // Do we require a power-efficient overlay?
+  bool needs_power_efficient = true;
 
   // Try to use an overlay if possible for protected content.  If the compositor
   // won't promote, though, it's okay if we switch out.  Set |is_required| in
@@ -213,19 +185,20 @@ void AndroidVideoSurfaceChooserImpl::SwitchToOverlay(
   // We bind all of our callbacks with weak ptrs, since we don't know how long
   // the client will hold on to overlays.  They could, in principle, show up
   // long after the client is destroyed too, if codec destruction hangs.
-  config.ready_cb = base::Bind(&AndroidVideoSurfaceChooserImpl::OnOverlayReady,
-                               weak_factory_.GetWeakPtr());
+  config.ready_cb =
+      base::BindOnce(&AndroidVideoSurfaceChooserImpl::OnOverlayReady,
+                     weak_factory_.GetWeakPtr());
   config.failed_cb =
-      base::Bind(&AndroidVideoSurfaceChooserImpl::OnOverlayFailed,
-                 weak_factory_.GetWeakPtr());
+      base::BindOnce(&AndroidVideoSurfaceChooserImpl::OnOverlayFailed,
+                     weak_factory_.GetWeakPtr());
   config.rect = current_state_.initial_position;
   config.secure = current_state_.is_secure;
 
   // Request power efficient overlays and callbacks if we're supposed to.
   config.power_efficient = needs_power_efficient;
-  config.power_cb =
-      base::Bind(&AndroidVideoSurfaceChooserImpl::OnPowerEfficientState,
-                 weak_factory_.GetWeakPtr());
+  config.power_cb = base::BindRepeating(
+      &AndroidVideoSurfaceChooserImpl::OnPowerEfficientState,
+      weak_factory_.GetWeakPtr());
 
   overlay_ = overlay_factory_.Run(std::move(config));
   if (!overlay_)
@@ -286,10 +259,6 @@ void AndroidVideoSurfaceChooserImpl::OnPowerEfficientState(
   // If the overlay is now required, then keep it.  It might have become
   // required since we requested it.
   if (current_state_.is_required)
-    return;
-
-  // If we're not able to switch dynamically, then keep the overlay.
-  if (!allow_dynamic_)
     return;
 
   // We could set the failure timer here, but we don't mostly for fullscreen.

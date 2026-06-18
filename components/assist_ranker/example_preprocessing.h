@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -127,10 +127,6 @@ class ExampleFloatIterator {
   bool operator==(const ExampleFloatIterator& other) const {
     return feature_iterator_ == other.feature_iterator_ &&
            string_list_index_ == other.string_list_index_;
-  }
-
-  bool operator!=(const ExampleFloatIterator& other) const {
-    return !(*this == other);
   }
 
  private:

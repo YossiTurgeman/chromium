@@ -34,18 +34,19 @@
 
 namespace blink {
 
+class Document;
+
 class CORE_EXPORT LayoutThemeFontProvider {
   STATIC_ONLY(LayoutThemeFontProvider);
 
  public:
-  static void SystemFont(CSSValueID system_font_id,
-                         FontSelectionValue& slope,
-                         FontSelectionValue& weight,
-                         float& font_size,
-                         AtomicString& font_family);
+  static const AtomicString& SystemFontFamily(CSSValueID system_font_id);
+  static float SystemFontSize(CSSValueID system_font_id,
+                              const Document* document);
 
  protected:
-  static const WTF::AtomicString& DefaultGUIFont();
+  static const AtomicString& DefaultGUIFont();
+  static float DefaultFontSize(const Document*);
 };
 
 }  // namespace blink

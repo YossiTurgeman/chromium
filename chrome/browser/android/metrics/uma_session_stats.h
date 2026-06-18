@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,36 +12,54 @@
 #include <string>
 #include <vector>
 
+#include "base/android/jni_array.h"
 #include "base/android/scoped_java_ref.h"
-#include "base/macros.h"
 #include "base/no_destructor.h"
 #include "base/time/time.h"
+#include "components/variations/synthetic_trials.h"
 
 // The native part of java UmaSessionStats class. This is a singleton.
 class UmaSessionStats {
  public:
-  static UmaSessionStats* GetInstance();
-
-  void UmaResumeSession(JNIEnv* env,
-                        const base::android::JavaParamRef<jobject>& obj);
-  void UmaEndSession(JNIEnv* env,
-                     const base::android::JavaParamRef<jobject>& obj);
+  void UmaResumeSession(JNIEnv* env);
+  void UmaEndSession(JNIEnv* env);
 
   // Called before an UMA log is completed to record associated metrics.
   void ProvideCurrentSessionData();
 
+  static UmaSessionStats* GetInstance();
+
+  UmaSessionStats(const UmaSessionStats&) = delete;
+  UmaSessionStats& operator=(const UmaSessionStats&) = delete;
+
+  // Returns true if there is a visible activity. Android Chrome only.
+  static bool HasVisibleActivity();
+
   // Called once on browser startup.
   static void OnStartup();
 
-  static void RegisterSyntheticFieldTrial(const std::string& trial_name,
-                                          const std::string& group_name);
+  static void RegisterSyntheticFieldTrial(
+      const std::string& trial_name,
+      const std::string& group_name,
+      variations::SyntheticTrialAnnotationMode annotation_mode);
 
   static bool IsBackgroundSessionStartForTesting();
 
+  // Reads counters Chrome.UMA.OnPostCreateCounter2 and
+  // Chrome.UMA.OnResumeCounter2 that are written to in ChromeActivity.java. The
+  // counters are encoded in an enum histogram, emitted and reset to 0.
+  static void EmitAndResetCounters();
+
  private:
   friend class base::NoDestructor<UmaSessionStats>;
-  UmaSessionStats();
-  ~UmaSessionStats();
+  UmaSessionStats() = default;
+  ~UmaSessionStats() = default;
+
+  // Registers an external experiment with the synthetic trial registry. Private
+  // as its access control is restricted to the JNI interface.
+  static void RegisterExternalExperiments(
+      const std::vector<int>& experiment_ids,
+      variations::SyntheticTrialAnnotationMode override_mode);
 
   class SessionTimeTracker {
    public:
@@ -80,8 +98,7 @@ class UmaSessionStats {
 
   SessionTimeTracker session_time_tracker_;
   int active_session_count_ = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(UmaSessionStats);
+  bool closing_active_session_ = false;
 };
 
 #endif  // CHROME_BROWSER_ANDROID_METRICS_UMA_SESSION_STATS_H_

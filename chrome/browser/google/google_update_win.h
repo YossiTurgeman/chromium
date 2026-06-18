@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,13 @@
 
 #include <wrl/client.h>
 
+#include <optional>
 #include <string>
 
-#include "base/callback_forward.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/strings/string16.h"
-#include "google_update/google_update_idl.h"
-#include "ui/gfx/native_widget_types.h"
+#include "chrome/updater/app/server/win/updater_legacy_idl.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace base {
 class SingleThreadTaskRunner;
@@ -56,13 +54,13 @@ enum GoogleUpdateErrorCode {
 // and results of an update check.
 class UpdateCheckDelegate {
  public:
-  virtual ~UpdateCheckDelegate() {}
+  virtual ~UpdateCheckDelegate() = default;
 
   // Invoked following a successful update check. |new_version|, if not empty,
   // indicates the new version that is available. Otherwise (if |new_version| is
   // empty), Chrome is up to date. This method will only be invoked when
   // BeginUpdateCheck is called with |install_update_if_possible| == false.
-  virtual void OnUpdateCheckComplete(const base::string16& new_version) = 0;
+  virtual void OnUpdateCheckComplete(const std::u16string& new_version) = 0;
 
   // Invoked zero or more times during an upgrade. |progress|, a number between
   // 0 and 100 (inclusive), is an estimation as to what percentage of the
@@ -70,12 +68,12 @@ class UpdateCheckDelegate {
   // download and installed. This method will only be invoked when
   // BeginUpdateCheck is called with |install_update_if_possible| == true.
   virtual void OnUpgradeProgress(int progress,
-                                 const base::string16& new_version) = 0;
+                                 const std::u16string& new_version) = 0;
 
   // Invoked following a successful upgrade. |new_version| indicates the version
   // to which Chrome was updated. This method will only be invoked when
   // BeginUpdateCheck is called with |install_update_if_possible| == true.
-  virtual void OnUpgradeComplete(const base::string16& new_version) = 0;
+  virtual void OnUpgradeComplete(const std::u16string& new_version) = 0;
 
   // Invoked following an unrecoverable error, indicated by |error_code|.
   // |html_error_message|, if not empty, must be a localized string containing
@@ -84,11 +82,11 @@ class UpdateCheckDelegate {
   // state information).  |new_version|, if not empty, indicates the version
   // to which an upgrade attempt was made.
   virtual void OnError(GoogleUpdateErrorCode error_code,
-                       const base::string16& html_error_message,
-                       const base::string16& new_version) = 0;
+                       const std::u16string& html_error_message,
+                       const std::u16string& new_version) = 0;
 
  protected:
-  UpdateCheckDelegate() {}
+  UpdateCheckDelegate() = default;
 };
 
 // Begins an asynchronous update check. If a new version is
@@ -97,11 +95,10 @@ class UpdateCheckDelegate {
 // which should own any necessary elevation UI. Methods on |delegate| will be
 // invoked on the caller's thread to provide feedback on the operation, with
 // messages localized to |locale| if possible.
-void BeginUpdateCheck(
-    const std::string& locale,
-    bool install_update_if_possible,
-    gfx::AcceleratedWidget elevation_window,
-    const base::WeakPtr<UpdateCheckDelegate>& delegate);
+void BeginUpdateCheck(const std::string& locale,
+                      bool install_update_if_possible,
+                      gfx::AcceleratedWidget elevation_window,
+                      const base::WeakPtr<UpdateCheckDelegate>& delegate);
 
 // The state from a completed update check.
 struct UpdateState {
@@ -117,19 +114,19 @@ struct UpdateState {
 
   // The next version available or an empty string if either no update is
   // available or an error occurred before the new version was discovered.
-  base::string16 new_version;
+  std::u16string new_version;
 
   // S_OK if the last check or update succeeded; otherwise, the failing error
   // from Google Update or COM.
   HRESULT hresult = S_OK;
 
   // If present, the process exit code from the failed run of the installer.
-  base::Optional<int> installer_exit_code;
+  std::optional<int> installer_exit_code;
 };
 
 // Returns the state from the most recent completed update check or no value if
 // no such check has taken place.
-base::Optional<UpdateState> GetLastUpdateState();
+std::optional<UpdateState> GetLastUpdateState();
 
 // A type of callback supplied by tests to provide a custom IGoogleUpdate3Web
 // implementation (see src/google_update/google_update_idl.idl).

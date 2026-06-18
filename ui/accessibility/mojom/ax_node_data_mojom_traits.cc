@@ -1,139 +1,127 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/accessibility/mojom/ax_node_data_mojom_traits.h"
+
+#include "base/containers/flat_map.h"
+#include "ui/accessibility/ax_node_id_forward.h"
 #include "ui/accessibility/mojom/ax_relative_bounds.mojom-shared.h"
 #include "ui/accessibility/mojom/ax_relative_bounds_mojom_traits.h"
 
 namespace mojo {
-
-// static
-std::unordered_map<ax::mojom::StringAttribute, std::string>
-StructTraits<ax::mojom::AXNodeDataDataView, ui::AXNodeData>::string_attributes(
-    const ui::AXNodeData& p) {
-  std::unordered_map<ax::mojom::StringAttribute, std::string> result;
-  for (const auto& iter : p.string_attributes)
-    result[iter.first] = iter.second;
-  return result;
+namespace {
+bool HasAnyHighlightEntries(std::vector<int32_t>& marker_types) {
+  for (auto marker : marker_types) {
+    if (marker & static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)) {
+      // Can stop looking once we know there is one highlight.
+      return true;
+    }
+  }
+  return false;
 }
+}  // namespace
 
 // static
-std::unordered_map<ax::mojom::IntAttribute, int32_t>
-StructTraits<ax::mojom::AXNodeDataDataView, ui::AXNodeData>::int_attributes(
-    const ui::AXNodeData& p) {
-  std::unordered_map<ax::mojom::IntAttribute, int32_t> result;
-  for (const auto& iter : p.int_attributes)
-    result[iter.first] = iter.second;
-  return result;
-}
-
-// static
-std::unordered_map<ax::mojom::FloatAttribute, float>
-StructTraits<ax::mojom::AXNodeDataDataView, ui::AXNodeData>::float_attributes(
-    const ui::AXNodeData& p) {
-  std::unordered_map<ax::mojom::FloatAttribute, float> result;
-  for (const auto& iter : p.float_attributes)
-    result[iter.first] = iter.second;
-  return result;
-}
-
-// static
-std::unordered_map<ax::mojom::BoolAttribute, bool>
-StructTraits<ax::mojom::AXNodeDataDataView, ui::AXNodeData>::bool_attributes(
-    const ui::AXNodeData& p) {
-  std::unordered_map<ax::mojom::BoolAttribute, bool> result;
-  for (const auto& iter : p.bool_attributes)
-    result[iter.first] = iter.second;
-  return result;
-}
-
-// static
-std::unordered_map<ax::mojom::IntListAttribute, std::vector<int32_t>>
-StructTraits<ax::mojom::AXNodeDataDataView, ui::AXNodeData>::intlist_attributes(
-    const ui::AXNodeData& p) {
-  std::unordered_map<ax::mojom::IntListAttribute, std::vector<int32_t>> result;
-  for (const auto& iter : p.intlist_attributes)
-    result[iter.first] = iter.second;
-  return result;
-}
-
-// static
-std::unordered_map<ax::mojom::StringListAttribute, std::vector<std::string>>
-StructTraits<ax::mojom::AXNodeDataDataView,
-             ui::AXNodeData>::stringlist_attributes(const ui::AXNodeData& p) {
-  std::unordered_map<ax::mojom::StringListAttribute, std::vector<std::string>>
-      result;
-  for (const auto& iter : p.stringlist_attributes)
-    result[iter.first] = iter.second;
-  return result;
-}
-
-// static
-std::unordered_map<std::string, std::string>
-StructTraits<ax::mojom::AXNodeDataDataView, ui::AXNodeData>::html_attributes(
-    const ui::AXNodeData& p) {
-  std::unordered_map<std::string, std::string> result;
-  for (const auto& iter : p.html_attributes)
-    result[iter.first] = iter.second;
-  return result;
+bool StructTraits<ax::mojom::AXBitsetDataDataView,
+                  ui::AXBitset<ax::mojom::BoolAttribute>>::
+    Read(ax::mojom::AXBitsetDataDataView data,
+         ui::AXBitset<ax::mojom::BoolAttribute>* out) {
+  *out = ui::AXBitset<ax::mojom::BoolAttribute>(data.set_bits(), data.values());
+  return true;
 }
 
 // static
 bool StructTraits<ax::mojom::AXNodeDataDataView, ui::AXNodeData>::Read(
     ax::mojom::AXNodeDataDataView data,
     ui::AXNodeData* out) {
+  if (!ui::IsValidAXNodeIDFromRenderer(data.id())) {
+    return false;
+  }
   out->id = data.id();
   out->role = data.role();
-  out->state = data.state();
+  out->state = ui::AXStates(data.state());
   out->actions = data.actions();
 
-  std::unordered_map<ax::mojom::StringAttribute, std::string> string_attributes;
-  if (!data.ReadStringAttributes(&string_attributes))
+  if (!data.ReadStringAttributes(&out->string_attributes.container())) {
     return false;
-  for (const auto& iter : string_attributes)
-    out->AddStringAttribute(iter.first, iter.second);
-
-  std::unordered_map<ax::mojom::IntAttribute, int32_t> int_attributes;
-  if (!data.ReadIntAttributes(&int_attributes))
+  }
+  if (!data.ReadIntAttributes(&out->int_attributes.container())) {
     return false;
-  for (const auto& iter : int_attributes)
-    out->AddIntAttribute(iter.first, iter.second);
-
-  std::unordered_map<ax::mojom::FloatAttribute, float> float_attributes;
-  if (!data.ReadFloatAttributes(&float_attributes))
+  }
+  if (!data.ReadFloatAttributes(&out->float_attributes.container())) {
     return false;
-  for (const auto& iter : float_attributes)
-    out->AddFloatAttribute(iter.first, iter.second);
+  }
 
-  std::unordered_map<ax::mojom::BoolAttribute, bool> bool_attributes;
-  if (!data.ReadBoolAttributes(&bool_attributes))
+  std::optional<ui::AXBitset<ax::mojom::BoolAttribute>> bitset_from_mojo;
+  if (!data.ReadBoolAttributesData(&bitset_from_mojo)) {
     return false;
-  for (const auto& iter : bool_attributes)
-    out->AddBoolAttribute(iter.first, iter.second);
+  }
 
-  std::unordered_map<ax::mojom::IntListAttribute, std::vector<int32_t>>
-      intlist_attributes;
-  if (!data.ReadIntlistAttributes(&intlist_attributes))
+  if (bitset_from_mojo.has_value()) {
+    out->bool_attributes = bitset_from_mojo.value();
+  }
+
+  auto& intlist_attributes = out->intlist_attributes.container();
+  if (!data.ReadIntlistAttributes(&intlist_attributes)) {
     return false;
-  for (const auto& iter : intlist_attributes)
-    out->AddIntListAttribute(iter.first, iter.second);
+  }
 
-  std::unordered_map<ax::mojom::StringListAttribute, std::vector<std::string>>
-      stringlist_attributes;
-  if (!data.ReadStringlistAttributes(&stringlist_attributes))
+  // Enforce some invariants:
+  //  If marker types are present, marker starts and ends must be present.
+  //  If any marker type is a highlight, highlights must be present.
+  if (auto types_it =
+          intlist_attributes.find(ax::mojom::IntListAttribute::kMarkerTypes);
+      types_it != intlist_attributes.end()) {
+    auto starts_it =
+        intlist_attributes.find(ax::mojom::IntListAttribute::kMarkerStarts);
+    if (starts_it == intlist_attributes.end()) {
+      return false;
+    }
+    auto ends_it =
+        intlist_attributes.find(ax::mojom::IntListAttribute::kMarkerEnds);
+    if (ends_it == intlist_attributes.end()) {
+      return false;
+    }
+    auto& marker_types = types_it->second;
+    auto& marker_starts = starts_it->second;
+    auto& marker_ends = ends_it->second;
+    if (marker_types.size() != marker_starts.size() ||
+        marker_types.size() != marker_ends.size()) {
+      return false;
+    }
+    if (HasAnyHighlightEntries(marker_types)) {
+      auto highlight_types_it =
+          intlist_attributes.find(ax::mojom::IntListAttribute::kHighlightTypes);
+      if (highlight_types_it == intlist_attributes.end()) {
+        return false;
+      }
+      auto& highlight_types = highlight_types_it->second;
+      if (marker_types.size() != highlight_types.size()) {
+        return false;
+      }
+    }
+  }
+
+  if (!data.ReadStringlistAttributes(&out->stringlist_attributes.container())) {
     return false;
-  for (const auto& iter : stringlist_attributes)
-    out->AddStringListAttribute(iter.first, iter.second);
+  }
 
-  std::unordered_map<std::string, std::string> html_attributes;
+  base::flat_map<std::string, std::string> html_attributes;
   if (!data.ReadHtmlAttributes(&html_attributes))
     return false;
-  for (const auto& iter : html_attributes)
-    out->html_attributes.push_back(std::make_pair(iter.first, iter.second));
+  out->html_attributes = std::move(html_attributes).extract();
 
-  if (!data.ReadChildIds(&out->child_ids))
+  std::vector<int32_t> child_ids;
+  if (!data.ReadChildIds(&child_ids)) {
     return false;
+  }
+  for (int32_t child_id : child_ids) {
+    if (!ui::IsValidAXNodeIDFromRenderer(child_id)) {
+      return false;
+    }
+  }
+  out->child_ids = std::move(child_ids);
 
   if (!data.ReadRelativeBounds(&out->relative_bounds))
     return false;

@@ -35,7 +35,7 @@ class TextDocumentParser final : public HTMLDocumentParser {
   ~TextDocumentParser() override;
 
  private:
-  void AppendBytes(const char*, size_t) override;
+  void AppendBytes(base::span<const uint8_t>) override;
   void InsertFakePreElement();
 
   bool have_inserted_fake_pre_element_;
@@ -43,4 +43,4 @@ class TextDocumentParser final : public HTMLDocumentParser {
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_TEXT_DOCUMENT_PARSER_H_

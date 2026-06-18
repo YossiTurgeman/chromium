@@ -1,4 +1,5 @@
-pmarko@chromium.org
-stevenjb@chromium.org
+acostinas@google.com
 
-# COMPONENT: OS>Systems>Network
+# Owners of proxy override rules.
+seblalancette@chromium.org
+domfc@chromium.org

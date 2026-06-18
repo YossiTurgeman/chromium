@@ -24,8 +24,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_DOM_NODE_LIST_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_DOM_NODE_LIST_H_
 
+#include <concepts>
+
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
+#include "third_party/blink/renderer/platform/heap/thread_state_storage.h"
 
 namespace blink {
 
@@ -49,6 +52,12 @@ class CORE_EXPORT NodeList : public ScriptWrappable {
 
  protected:
   NodeList() = default;
+};
+
+template <typename T>
+  requires(std::derived_from<T, blink::NodeList>)
+struct ThreadingTrait<T> {
+  static constexpr ThreadAffinity kAffinity = kMainThreadOnly;
 };
 
 }  // namespace blink

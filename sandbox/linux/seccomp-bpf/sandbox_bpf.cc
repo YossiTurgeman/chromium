@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,9 @@
 #include "base/compiler_specific.h"
 #include "base/files/scoped_file.h"
 #include "base/logging.h"
-#include "base/macros.h"
 #include "base/notreached.h"
 #include "base/posix/eintr_wrapper.h"
+#include "build/build_config.h"
 #include "sandbox/linux/bpf_dsl/bpf_dsl.h"
 #include "sandbox/linux/bpf_dsl/codegen.h"
 #include "sandbox/linux/bpf_dsl/policy.h"
@@ -58,7 +58,7 @@ bool KernelSupportsSeccompBPF() {
 // flags that are unlikely to ever be used by the kernel. A normal kernel would
 // return -EINVAL, but a buggy LG kernel would return 1.
 bool KernelHasLGBug() {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   // sys_set_media will see this as NULL, which should be a safe (non-crashing)
   // way to invoke it. A genuine seccomp syscall will see it as
   // SECCOMP_SET_MODE_STRICT.
@@ -73,7 +73,7 @@ bool KernelHasLGBug() {
   if (rv != -1) {
     return true;
   }
-#endif  // defined(OS_ANDROID)
+#endif  // BUILDFLAG(IS_ANDROID)
 
   return false;
 }
@@ -100,14 +100,6 @@ bool KernelSupportsSeccompFlags(unsigned int flags) {
 bool KernelSupportsSeccompTsync() {
   return KernelSupportsSeccompFlags(SECCOMP_FILTER_FLAG_TSYNC);
 }
-
-#if BUILDFLAG(DISABLE_SECCOMP_SSBD)
-// Check if the kernel supports seccomp-filter via the seccomp system call and
-// without spec flaw mitigation.
-bool KernelSupportSeccompSpecAllow() {
-  return KernelSupportsSeccompFlags(SECCOMP_FILTER_FLAG_SPEC_ALLOW);
-}
-#endif
 
 uint64_t EscapePC() {
   intptr_t rv = Syscall::Call(-1);
@@ -142,10 +134,9 @@ bool SandboxBPF::SupportsSeccompSandbox(SeccompLevel level) {
       return KernelSupportsSeccompTsync();
   }
   NOTREACHED();
-  return false;
 }
 
-bool SandboxBPF::StartSandbox(SeccompLevel seccomp_level) {
+bool SandboxBPF::StartSandbox(SeccompLevel seccomp_level, bool enable_ibpb) {
   DCHECK(policy_);
   CHECK(seccomp_level == SeccompLevel::SINGLE_THREADED ||
         seccomp_level == SeccompLevel::MULTI_THREADED);
@@ -154,7 +145,6 @@ bool SandboxBPF::StartSandbox(SeccompLevel seccomp_level) {
     SANDBOX_DIE(
         "Cannot repeatedly start sandbox. Create a separate Sandbox "
         "object instead.");
-    return false;
   }
 
   if (!proc_fd_.is_valid()) {
@@ -171,7 +161,6 @@ bool SandboxBPF::StartSandbox(SeccompLevel seccomp_level) {
     if (!supports_tsync) {
       SANDBOX_DIE("Cannot start sandbox; kernel does not support synchronizing "
                   "filters for a threadgroup");
-      return false;
     }
   }
 
@@ -183,13 +172,14 @@ bool SandboxBPF::StartSandbox(SeccompLevel seccomp_level) {
   }
 
   // Install the filters.
-  InstallFilter(seccomp_level == SeccompLevel::MULTI_THREADED);
+  InstallFilter(seccomp_level == SeccompLevel::MULTI_THREADED, enable_ibpb);
 
   return true;
 }
 
 void SandboxBPF::SetProcFd(base::ScopedFD proc_fd) {
-  proc_fd_.swap(proc_fd);
+  if (proc_fd_.get() != proc_fd.get())
+    proc_fd_ = std::move(proc_fd);
 }
 
 // static
@@ -222,7 +212,7 @@ CodeGen::Program SandboxBPF::AssembleFilter() {
   return compiler.Compile();
 }
 
-void SandboxBPF::InstallFilter(bool must_sync_threads) {
+void SandboxBPF::InstallFilter(bool must_sync_threads, bool enable_ibpb) {
   // We want to be very careful in not imposing any requirements on the
   // policies that are set with SetSandboxPolicy(). This means, as soon as
   // the sandbox is active, we shouldn't be relying on libraries that could
@@ -236,10 +226,15 @@ void SandboxBPF::InstallFilter(bool must_sync_threads) {
   // in system calls to things like munmap() or brk().
   CodeGen::Program program = AssembleFilter();
 
+// Silence clang's warning about allocating on the stack because we have no
+// other choice.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wvla-extension"
   struct sock_filter bpf[program.size()];
+#pragma clang diagnostic pop
   const struct sock_fprog prog = {static_cast<unsigned short>(program.size()),
                                   bpf};
-  memcpy(bpf, &program[0], sizeof(bpf));
+  UNSAFE_TODO(memcpy(bpf, &program[0], sizeof(bpf)));
   CodeGen::Program().swap(program);  // vector swap trick
 
   // Make an attempt to release memory that is no longer needed here, rather
@@ -258,17 +253,17 @@ void SandboxBPF::InstallFilter(bool must_sync_threads) {
   unsigned int seccomp_filter_flags = 0;
   if (must_sync_threads) {
     seccomp_filter_flags |= SECCOMP_FILTER_FLAG_TSYNC;
-#if BUILDFLAG(DISABLE_SECCOMP_SSBD)
     // Seccomp will disable indirect branch speculation and speculative store
     // bypass simultaneously. To only opt-out SSBD, following steps are needed
     // 1. Disable IBSpec with prctl
     // 2. Call seccomp with SECCOMP_FILTER_FLAG_SPEC_ALLOW
     // As prctl provide a per thread control of the speculation feature, only
     // opt-out SSBD when process is single-threaded and tsync is not necessary.
-  } else if (KernelSupportSeccompSpecAllow()) {
+  } else if (KernelSupportsSeccompFlags(SECCOMP_FILTER_FLAG_SPEC_ALLOW)) {
     seccomp_filter_flags |= SECCOMP_FILTER_FLAG_SPEC_ALLOW;
-    DisableIBSpec();
-#endif
+    if (enable_ibpb) {
+      DisableIBSpec();
+    }
   } else {
     if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) {
       SANDBOX_DIE("Kernel refuses to turn on BPF filters");
@@ -291,26 +286,21 @@ void SandboxBPF::DisableIBSpec() {
   // misfeature will fail.
   const int rv =
       prctl(PR_GET_SPECULATION_CTRL, PR_SPEC_INDIRECT_BRANCH, 0, 0, 0);
-  // Kernel control of the speculation misfeature is not supported.
-  if (rv < 0) {
+  // Kernel control of the speculation misfeature is not supported or the
+  // misfeature is already force disabled.
+  if (rv < 0 || (rv & PR_SPEC_FORCE_DISABLE)) {
     return;
   }
 
   if (!(rv & PR_SPEC_PRCTL)) {
-    DLOG(INFO) << "Indirect branch speculation can not be controled by prctl."
-               << rv;
-    return;
-  }
-
-  if (rv & PR_SPEC_FORCE_DISABLE) {
-    DLOG(INFO) << "Indirect branch speculation is already force disabled."
-               << rv;
+    DVLOG(1) << "Indirect branch speculation can not be controled by prctl. "
+             << rv;
     return;
   }
 
   if (prctl(PR_SET_SPECULATION_CTRL, PR_SPEC_INDIRECT_BRANCH,
             PR_SPEC_FORCE_DISABLE, 0, 0)) {
-    DPLOG(INFO) << "Kernel failed to force disable indirect branch speculation";
+    PLOG(ERROR) << "Kernel failed to force disable indirect branch speculation";
   }
 }
 

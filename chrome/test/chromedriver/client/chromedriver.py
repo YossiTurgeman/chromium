@@ -1,66 +1,28 @@
-# Copyright 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import platform
+import psutil
 import sys
+import time
+import urllib.parse
 import util
 
 import command_executor
 from command_executor import Command
 from webelement import WebElement
+from webshadowroot import WebShadowRoot
+from windowreference import WindowReference
+from framereference import FrameReference
 from websocket_connection import WebSocketConnection
+from exceptions import *
 
-ELEMENT_KEY_W3C = "element-6066-11e4-a52e-4f735466cecf"
-ELEMENT_KEY = "ELEMENT"
-MAX_RETRY_COUNT = 3
-
-class ChromeDriverException(Exception):
-  pass
-class NoSuchElement(ChromeDriverException):
-  pass
-class NoSuchFrame(ChromeDriverException):
-  pass
-class UnknownCommand(ChromeDriverException):
-  pass
-class StaleElementReference(ChromeDriverException):
-  pass
-class ElementNotVisible(ChromeDriverException):
-  pass
-class InvalidElementState(ChromeDriverException):
-  pass
-class UnknownError(ChromeDriverException):
-  pass
-class JavaScriptError(ChromeDriverException):
-  pass
-class XPathLookupError(ChromeDriverException):
-  pass
-class Timeout(ChromeDriverException):
-  pass
-class NoSuchWindow(ChromeDriverException):
-  pass
-class InvalidCookieDomain(ChromeDriverException):
-  pass
-class ScriptTimeout(ChromeDriverException):
-  pass
-class InvalidSelector(ChromeDriverException):
-  pass
-class SessionNotCreated(ChromeDriverException):
-  pass
-class InvalidSessionId(ChromeDriverException):
-  pass
-class UnexpectedAlertOpen(ChromeDriverException):
-  pass
-class NoSuchAlert(ChromeDriverException):
-  pass
-class NoSuchCookie(ChromeDriverException):
-  pass
-class InvalidArgument(ChromeDriverException):
-  pass
-class ElementNotInteractable(ChromeDriverException):
-  pass
-class UnsupportedOperation(ChromeDriverException):
-  pass
+ELEMENT_KEY_W3C = 'element-6066-11e4-a52e-4f735466cecf'
+ELEMENT_KEY = 'ELEMENT'
+SHADOW_KEY = 'shadow-6066-11e4-a52e-4f735466cecf'
+FRAME_KEY = 'frame-075b-4da1-b6ba-e579c2d3230a'
+WINDOW_KEY = 'window-fcc6-11e5-b4f8-330a88ab9d7f'
+MAX_RETRY_COUNT = 5
 
 def _ExceptionForLegacyResponse(response):
   exception_class_map = {
@@ -92,34 +54,14 @@ def _ExceptionForLegacyResponse(response):
   return exception_class_map.get(status, ChromeDriverException)(msg)
 
 def _ExceptionForStandardResponse(response):
-  exception_map = {
-    'invalid session id' : InvalidSessionId,
-    'no such element': NoSuchElement,
-    'no such frame': NoSuchFrame,
-    'unknown command': UnknownCommand,
-    'stale element reference': StaleElementReference,
-    'element not interactable': ElementNotVisible,
-    'invalid element state': InvalidElementState,
-    'unknown error': UnknownError,
-    'javascript error': JavaScriptError,
-    'invalid selector': XPathLookupError,
-    'timeout': Timeout,
-    'no such window': NoSuchWindow,
-    'invalid cookie domain': InvalidCookieDomain,
-    'unexpected alert open': UnexpectedAlertOpen,
-    'no such alert': NoSuchAlert,
-    'script timeout': ScriptTimeout,
-    'invalid selector': InvalidSelector,
-    'session not created': SessionNotCreated,
-    'no such cookie': NoSuchCookie,
-    'invalid argument': InvalidArgument,
-    'element not interactable': ElementNotInteractable,
-    'unsupported operation': UnsupportedOperation,
-  }
-
   error = response['value']['error']
   msg = response['value']['message']
-  return exception_map.get(error, ChromeDriverException)(msg)
+
+  stacktrace = response['value']['stacktrace']
+  if stacktrace:
+      msg += '\n\nStackTrace:\n\n' + stacktrace
+
+  return EXCEPTION_MAP.get(error, ChromeDriverException)(msg)
 
 class ChromeDriver(object):
   """Starts and controls a single Chrome instance on this machine."""
@@ -127,21 +69,43 @@ class ChromeDriver(object):
   retry_count = 0
   retried_tests = []
 
-  def __init__(self, *args, **kwargs):
+  def __init__(self, server_url, server_pid, **kwargs):
     try:
-      self._InternalInit(*args, **kwargs)
+      self._InternalInit(server_url, **kwargs)
     except Exception as e:
-      if not e.message.startswith('timed out'):
+      if not str(e).startswith('timed out'):
         raise
       else:
+        # Kill ChromeDriver child processes recursively
+        # (i.e. browsers and their child processes etc)
+        # when there is a timeout for launching browser
+        if server_pid:
+          processes = psutil.Process(server_pid).children(recursive=True)
+          if len(processes):
+            print('Terminating', len(processes), 'processes')
+            for p in processes:
+              p.terminate()
+
+            _, alive = psutil.wait_procs(processes, timeout=3)
+            if len(alive):
+              print('Killing', len(alive), 'processes')
+              for p in alive:
+                p.kill()
+
         if ChromeDriver.retry_count < MAX_RETRY_COUNT:
-          ChromeDriver.retry_count = ChromeDriver.retry_count + 1
           ChromeDriver.retried_tests.append(kwargs.get('test_name'))
-          self._InternalInit(*args, **kwargs)
+          try:
+            self._InternalInit(server_url, **kwargs)
+          except:
+            # Only count it as retry if failed
+            print('Retry', ChromeDriver.retry_count, 'failed')
+            ChromeDriver.retry_count = ChromeDriver.retry_count + 1
+            raise
         else:
           raise
 
-  def _InternalInit(self, server_url, chrome_binary=None, android_package=None,
+  def _InternalInit(self, server_url,
+      chrome_binary=None, android_package=None,
       android_activity=None, android_process=None,
       android_use_running_app=None, chrome_switches=None,
       chrome_extensions=None, chrome_log_path=None,
@@ -151,11 +115,13 @@ class ChromeDriver(object):
       send_w3c_capability=True, send_w3c_request=True,
       page_load_strategy=None, unexpected_alert_behaviour=None,
       devtools_events_to_log=None, accept_insecure_certs=None,
-      timeouts=None, test_name=None, web_socket_url=None):
-    self._executor = command_executor.CommandExecutor(server_url)
+      timeouts=None, test_name=None, web_socket_url=None, browser_name=None,
+      http_timeout=None):
+    self._executor = command_executor.CommandExecutor(server_url,
+                                                      http_timeout=http_timeout)
     self._server_url = server_url
     self.w3c_compliant = False
-    self._websocket = None
+    self.debuggerAddress = None
 
     options = {}
 
@@ -174,25 +140,28 @@ class ChromeDriver(object):
     elif chrome_binary:
       options['binary'] = chrome_binary
 
+    if chrome_switches is None:
+      chrome_switches = []
+
     if sys.platform.startswith('linux') and android_package is None:
-      if chrome_switches is None:
-        chrome_switches = []
-      # Workaround for crbug.com/611886.
+      # Workaround for crbug.com/40469290.
       chrome_switches.append('no-sandbox')
       # https://bugs.chromium.org/p/chromedriver/issues/detail?id=1695
       chrome_switches.append('disable-gpu')
 
-    if chrome_switches is None:
-      chrome_switches = []
     chrome_switches.append('force-color-profile=srgb')
 
-    if chrome_switches:
-      assert type(chrome_switches) is list
-      options['args'] = chrome_switches
+    # Resampling can change the distance of a synthetic scroll.
+    chrome_switches.append('disable-features=ResamplingScrollEvents')
 
-      # TODO(crbug.com/1011000): Work around a bug with headless on Mac.
-      if util.GetPlatformName() == 'mac' and '--headless' in chrome_switches:
-        options['excludeSwitches'] = ['--enable-logging']
+    assert type(chrome_switches) is list
+    options['args'] = chrome_switches
+
+    # TODO(crbug.com/40101714): Work around a bug with headless on Mac.
+    if (util.GetPlatformName() == 'mac' and
+        browser_name == 'chrome-headless-shell' and
+        debugger_address is None):
+      options['excludeSwitches'] = ['--enable-logging']
 
     if mobile_emulation:
       assert type(mobile_emulation) is dict
@@ -225,7 +194,6 @@ class ChromeDriver(object):
       assert type(devtools_events_to_log) is list
       options['devToolsEventsToLog'] = devtools_events_to_log
 
-    download_prefs = {}
     if download_dir:
       if 'prefs' not in options:
         options['prefs'] = {}
@@ -269,6 +237,9 @@ class ChromeDriver(object):
     if web_socket_url is not None:
       params['webSocketUrl'] = web_socket_url
 
+    if browser_name is not None:
+      params['browserName'] = browser_name
+
     if send_w3c_request:
       params = {'capabilities': {'alwaysMatch': params}}
     else:
@@ -279,14 +250,24 @@ class ChromeDriver(object):
       self.w3c_compliant = True
       self._session_id = response['value']['sessionId']
       self.capabilities = self._UnwrapValue(response['value']['capabilities'])
-      self.debuggerAddress = str(
-          self.capabilities['goog:chromeOptions']['debuggerAddress'])
+      if ('goog:chromeOptions' in self.capabilities
+          and 'debuggerAddress' in self.capabilities['goog:chromeOptions']):
+          self.debuggerAddress = str(
+              self.capabilities['goog:chromeOptions']['debuggerAddress'])
     elif isinstance(response['status'], int):
       self.w3c_compliant = False
       self._session_id = response['sessionId']
       self.capabilities = self._UnwrapValue(response['value'])
     else:
       raise UnknownError("unexpected response")
+
+  def _KeyToTypeMap(self):
+      return [
+        (WINDOW_KEY, WindowReference),
+        (FRAME_KEY, FrameReference),
+        (SHADOW_KEY, WebShadowRoot),
+        (ELEMENT_KEY_W3C if self.w3c_compliant else ELEMENT_KEY, WebElement),
+      ]
 
   def _WrapValue(self, value):
     """Wrap value from client side for chromedriver side."""
@@ -295,31 +276,25 @@ class ChromeDriver(object):
       for key, val in value.items():
         converted[key] = self._WrapValue(val)
       return converted
-    elif isinstance(value, WebElement):
-      if (self.w3c_compliant):
-        return {ELEMENT_KEY_W3C: value._id}
-      else:
-        return {ELEMENT_KEY: value._id}
-    elif isinstance(value, list):
+    key_to_type = self._KeyToTypeMap()
+    for key, wrapper_type in key_to_type:
+        if isinstance(value, wrapper_type):
+            return {key: value._id}
+    if isinstance(value, list):
       return list(self._WrapValue(item) for item in value)
-    else:
-      return value
+    return value
 
   def _UnwrapValue(self, value):
     if isinstance(value, dict):
-      if (self.w3c_compliant and len(value) == 1
-          and ELEMENT_KEY_W3C in value
-          and isinstance(
-            value[ELEMENT_KEY_W3C], basestring)):
-        return WebElement(self, value[ELEMENT_KEY_W3C])
-      elif (len(value) == 1 and ELEMENT_KEY in value
-            and isinstance(value[ELEMENT_KEY], basestring)):
-        return WebElement(self, value[ELEMENT_KEY])
-      else:
-        unwraped = {}
-        for key, val in value.items():
-          unwraped[key] = self._UnwrapValue(val)
-        return unwraped
+      key_to_type = self._KeyToTypeMap()
+      for key, wrapper_type in key_to_type:
+          if (len(value) == 1 and key in value
+              and isinstance(value[key], str)):
+              return wrapper_type(self, value[key])
+      unwraped = {}
+      for key, val in value.items():
+        unwraped[key] = self._UnwrapValue(val)
+      return unwraped
     elif isinstance(value, list):
       return list(self._UnwrapValue(item) for item in value)
     else:
@@ -330,7 +305,7 @@ class ChromeDriver(object):
     try:
       response = self._executor.Execute(command, params)
     except Exception as e:
-      if e.message.startswith('timed out'):
+      if str(e).startswith('timed out'):
         self._RequestCrash()
       raise e
 
@@ -346,7 +321,7 @@ class ChromeDriver(object):
     # Can't issue a new command without session_id
     if not hasattr(self, '_session_id') or self._session_id == None:
       return
-    tempDriver = ChromeDriver(self._server_url,
+    tempDriver = ChromeDriver(self._server_url, None,
       debugger_address=self.debuggerAddress, test_name='_forceCrash')
     try:
       tempDriver.SendCommandAndGetResult("Page.crash", {})
@@ -356,8 +331,9 @@ class ChromeDriver(object):
       # In some cases, Chrome will not honor the request
       # Print the exception as it may give information on the Chrome state
       # but Page.crash will also generate exception, so filter that out
-      if 'session deleted because of page crash' not in e.message:
-        print '\n Exception from Page.crash: ' + str(e.message) + '\n'
+      message = str(e)
+      if 'session deleted because of page crash' not in message:
+        print('\n Exception from Page.crash: ' + message + '\n')
     tempDriver.Quit()
 
   def ExecuteCommand(self, command, params={}):
@@ -366,11 +342,14 @@ class ChromeDriver(object):
     return self._UnwrapValue(response['value'])
 
   def CreateWebSocketConnection(self):
-    if self._websocket:
-      return self._websocket
-    else:
-      self._websocket = WebSocketConnection(self._server_url, self._session_id)
-      return self._websocket
+    return WebSocketConnection(self._server_url, self._session_id)
+
+  def CreateWebSocketConnectionIPv6(self):
+    url_components = urllib.parse.urlparse(self._server_url)
+    new_url = urllib.parse.urlunparse(
+        url_components._replace(
+            netloc=('%s:%d' % ('[::1]', url_components.port))))
+    return WebSocketConnection(new_url, self._session_id)
 
   def GetWindowHandles(self):
     return self.ExecuteCommand(Command.GET_WINDOW_HANDLES)
@@ -398,6 +377,24 @@ class ChromeDriver(object):
     return self.ExecuteCommand(
         Command.EXECUTE_SCRIPT, {'script': script, 'args': converted_args})
 
+  def CreateVirtualSensor(self, sensor_type, sensor_params=None):
+    params = {'type': sensor_type}
+    if sensor_params is not None:
+      params.update(sensor_params)
+    return self.ExecuteCommand(Command.CREATE_VIRTUAL_SENSOR, params)
+
+  def UpdateVirtualSensor(self, sensor_type, reading):
+    params = {'type': sensor_type, 'reading': reading}
+    return self.ExecuteCommand(Command.UPDATE_VIRTUAL_SENSOR, params)
+
+  def RemoveVirtualSensor(self, sensor_type):
+    params = {'type': sensor_type}
+    return self.ExecuteCommand(Command.REMOVE_VIRTUAL_SENSOR, params)
+
+  def GetVirtualSensorInformation(self, sensor_type):
+    params = {'type': sensor_type}
+    return self.ExecuteCommand(Command.GET_VIRTUAL_SENSOR_INFORMATION, params)
+
   def SetPermission(self, parameters):
     return self.ExecuteCommand(Command.SET_PERMISSION, parameters)
 
@@ -408,7 +405,7 @@ class ChromeDriver(object):
         {'script': script, 'args': converted_args})
 
   def SwitchToFrame(self, id_or_name):
-    if isinstance(id_or_name, basestring) and self.w3c_compliant:
+    if isinstance(id_or_name, str) and self.w3c_compliant:
         try:
           id_or_name = self.FindElement('css selector',
                                         '[id="%s"]' % id_or_name)
@@ -450,6 +447,16 @@ class ChromeDriver(object):
     return self.ExecuteCommand(Command.GET_TIMEOUTS)
 
   def SetTimeouts(self, params):
+    if (len(params) == 0):
+      return;
+    sorted_params = sorted(params.items(), key=lambda x: x[1])
+    max_kv = sorted_params[-1];
+    # make sure that we have ms on the both sides of inequality
+    if (self._executor.HttpTimeout() * 500 < max_kv[1]):
+      raise ChromeDriverException(
+        'Timeout "%s" for ChromeDriver exceeds 50%% of the '
+            'HTTP connection timeout'
+         % max_kv[0])
     return self.ExecuteCommand(Command.SET_TIMEOUTS, params)
 
   def GetCurrentUrl(self):
@@ -593,6 +600,19 @@ class ChromeDriver(object):
   def FullScreenWindow(self):
     return self.ExecuteCommand(Command.FULLSCREEN_WINDOW)
 
+  def SetDevicePosture(self, posture):
+    return self.ExecuteCommand(Command.SET_DEVICE_POSTURE, {'posture': posture})
+
+  def ClearDevicePosture(self):
+    return self.ExecuteCommand(Command.CLEAR_DEVICE_POSTURE)
+
+  def SetDisplayFeatures(self, features):
+    return self.ExecuteCommand(Command.SET_DISPLAY_FEATURES,
+                               {'features': features})
+
+  def ClearDisplayFeatures(self):
+    return self.ExecuteCommand(Command.CLEAR_DISPLAY_FEATURES)
+
   def TakeScreenshot(self):
     return self.ExecuteCommand(Command.SCREENSHOT)
 
@@ -614,7 +634,7 @@ class ChromeDriver(object):
 
   def SetNetworkConditions(self, latency, download_throughput,
                            upload_throughput, offline=False):
-    # Until http://crbug.com/456324 is resolved, we'll always set 'offline' to
+    # Until http://crbug.com/41156249 is resolved, we'll always set 'offline' to
     # False, as going "offline" will sever Chromedriver's connection to Chrome.
     params = {
         'network_conditions': {
@@ -665,9 +685,14 @@ class ChromeDriver(object):
   def GenerateTestReport(self, message):
     self.ExecuteCommand(Command.GENERATE_TEST_REPORT, {'message': message})
 
+  def SetTimeZone(self, timeZone):
+    return self.ExecuteCommand(Command.SET_TIME_ZONE, {'time_zone': timeZone})
+
   def AddVirtualAuthenticator(self, protocol=None, transport=None,
                               hasResidentKey=None, hasUserVerification=None,
-                              isUserConsenting=None, isUserVerified=None):
+                              isUserConsenting=None, isUserVerified=None,
+                              extensions=None, defaultBackupState=None,
+                              defaultBackupEligibility=None):
     options = {}
     if protocol is not None:
       options['protocol'] = protocol
@@ -681,6 +706,12 @@ class ChromeDriver(object):
       options['isUserConsenting'] = isUserConsenting
     if isUserVerified is not None:
       options['isUserVerified'] = isUserVerified
+    if extensions is not None:
+      options['extensions'] = extensions
+    if defaultBackupState is not None:
+      options['defaultBackupState'] = defaultBackupState
+    if defaultBackupEligibility is not None:
+      options['defaultBackupEligibility'] = defaultBackupEligibility
 
     return self.ExecuteCommand(Command.ADD_VIRTUAL_AUTHENTICATOR, options)
 
@@ -690,7 +721,9 @@ class ChromeDriver(object):
 
   def AddCredential(self, authenticatorId=None, credentialId=None,
                     isResidentCredential=None, rpId=None, privateKey=None,
-                    userHandle=None, signCount=None):
+                    userHandle=None, signCount=None, largeBlob=None,
+                    backupState=None, backupEligibility=None,userName=None,
+                    userDisplayName=None):
     options = {}
     if authenticatorId is not None:
       options['authenticatorId'] = authenticatorId
@@ -706,6 +739,16 @@ class ChromeDriver(object):
       options['userHandle'] = userHandle
     if signCount is not None:
       options['signCount'] = signCount
+    if largeBlob is not None:
+      options['largeBlob'] = largeBlob
+    if backupState is not None:
+      options['backupState'] = backupState
+    if backupEligibility is not None:
+      options['backupEligibility'] = backupEligibility
+    if userName is not None:
+      options['userName'] = userName
+    if userDisplayName is not None:
+      options['userDisplayName'] = userDisplayName
     return self.ExecuteCommand(Command.ADD_CREDENTIAL, options)
 
   def GetCredentials(self, authenticatorId):
@@ -726,8 +769,85 @@ class ChromeDriver(object):
               'isUserVerified': isUserVerified}
     return self.ExecuteCommand(Command.SET_USER_VERIFIED, params)
 
+  def SetCredentialProperties(self, authenticatorId, credentialId,
+                              backupState=None, backupEligibility=None):
+    params = {'authenticatorId': authenticatorId, 'credentialId': credentialId}
+    if backupState is not None:
+      params['backupState'] = backupState
+    if backupEligibility is not None:
+      params['backupEligibility'] = backupEligibility
+    return self.ExecuteCommand(Command.SET_CREDENTIAL_PROPERTIES, params)
+
+  def SetSPCTransactionMode(self, mode):
+    params = {'mode': mode}
+    return self.ExecuteCommand(Command.SET_SPC_TRANSACTION_MODE, params)
+
+  def SetRPHRegistrationMode(self, mode):
+    params = {'mode': mode}
+    return self.ExecuteCommand(Command.SET_RPH_REGISTRATION_MODE, params)
+
+  def CancelFedCmDialog(self):
+    return self.ExecuteCommand(Command.CANCEL_FEDCM_DIALOG, {})
+
+  def SelectAccount(self, index):
+    params = {'accountIndex': index}
+    return self.ExecuteCommand(Command.SELECT_ACCOUNT, params)
+
+  def ClickFedCmDialogButton(self, dialogButton, index=None):
+    params = {'dialogButton': dialogButton}
+    if index is not None:
+      params['index'] = index
+    return self.ExecuteCommand(Command.CLICK_FEDCM_DIALOG_BUTTON, params)
+
+  def GetAccounts(self):
+    return self.ExecuteCommand(Command.GET_ACCOUNTS, {})
+
+  def GetFedCmTitle(self):
+    return self.ExecuteCommand(Command.GET_FEDCM_TITLE, {})
+
+  def GetDialogType(self):
+    return self.ExecuteCommand(Command.GET_DIALOG_TYPE, {})
+
+  def SetDelayEnabled(self, enabled):
+    params = {'enabled': enabled}
+    return self.ExecuteCommand(Command.SET_DELAY_ENABLED, params)
+
+  def ResetCooldown(self):
+    return self.ExecuteCommand(Command.RESET_COOLDOWN, {})
+
+  def RunBounceTrackingMitigations(self):
+    return self.ExecuteCommand(Command.RUN_BOUNCE_TRACKING_MITIGATIONS, {})
+
   def GetSessionId(self):
     if not hasattr(self, '_session_id'):
       return None
     return self._session_id
 
+  def GetCastSinks(self, vendorId):
+    params = {'vendorId': vendorId}
+    return self.ExecuteCommand(Command.GET_CAST_SINKS, params)
+
+  def CreateVirtualPressureSource(self, type, metadata=None):
+    params = {'type': type}
+    if metadata is not None:
+      params.update(metadata)
+    return self.ExecuteCommand(Command.CREATE_VIRTUAL_PRESSURE_SOURCE, params)
+
+  def UpdateVirtualPressureSource(self, type, sample):
+    params = {'type': type, 'sample': sample}
+    return self.ExecuteCommand(Command.UPDATE_VIRTUAL_PRESSURE_SOURCE, params)
+
+  def RemoveVirtualPressureSource(self, type):
+    params = {'type': type}
+    return self.ExecuteCommand(Command.REMOVE_VIRTUAL_PRESSURE_SOURCE, params)
+
+  def SetProtectedAudienceKAnonymity(self, owner, name, hashes):
+    params = {'owner': owner, 'name': name, 'hashes': hashes}
+    return self.ExecuteCommand(Command.SET_PROTECTED_AUDIENCE_KANONYMITY,
+                               params)
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, *args):
+    self.Quit()

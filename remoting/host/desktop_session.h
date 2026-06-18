@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,8 @@
 #define REMOTING_HOST_DESKTOP_SESSION_H_
 
 #include "base/compiler_specific.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "remoting/host/mojom/desktop_session.mojom.h"
 
 namespace remoting {
 
@@ -17,10 +18,19 @@ class ScreenResolution;
 // has a unique identifier used by cross-platform code to refer to it.
 class DesktopSession {
  public:
+  DesktopSession(const DesktopSession&) = delete;
+  DesktopSession& operator=(const DesktopSession&) = delete;
+
   virtual ~DesktopSession();
 
   // Changes the screen resolution of the desktop session.
   virtual void SetScreenResolution(const ScreenResolution& resolution) = 0;
+
+  // Requests the desktop process to reconnect the network channel, i.e.
+  // creating a new DesktopSessionAgent instance and passing a new desktop pipe
+  // to the network process via the daemon process.
+  virtual void ReconnectNetworkChannel(
+      const mojom::DesktopSessionOptions& options) = 0;
 
   int id() const { return id_; }
 
@@ -33,12 +43,10 @@ class DesktopSession {
 
  private:
   // The owner of |this|.
-  DaemonProcess* const daemon_process_;
+  const raw_ptr<DaemonProcess> daemon_process_;
 
   // A unique identifier of the terminal.
   const int id_;
-
-  DISALLOW_COPY_AND_ASSIGN(DesktopSession);
 };
 
 }  // namespace remoting

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,22 +8,22 @@
 #include <string>
 #include <vector>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/task/cancelable_task_tracker.h"
+#include "base/values.h"
 #include "chrome/common/extensions/api/history.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/history_service_observer.h"
+#include "components/history/core/browser/history_types.h"
 #include "extensions/browser/browser_context_keyed_api_factory.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 class Profile;
-
-namespace base {
-class ListValue;
-}
 
 namespace extensions {
 
@@ -33,28 +33,28 @@ class HistoryEventRouter : public history::HistoryServiceObserver {
  public:
   HistoryEventRouter(Profile* profile,
                      history::HistoryService* history_service);
+
+  HistoryEventRouter(const HistoryEventRouter&) = delete;
+  HistoryEventRouter& operator=(const HistoryEventRouter&) = delete;
+
   ~HistoryEventRouter() override;
 
  private:
   // history::HistoryServiceObserver.
   void OnURLVisited(history::HistoryService* history_service,
-                    ui::PageTransition transition,
-                    const history::URLRow& row,
-                    const history::RedirectList& redirects,
-                    base::Time visit_time) override;
-  void OnURLsDeleted(history::HistoryService* history_service,
-                     const history::DeletionInfo& deletion_info) override;
+                    const history::VisitedURLInfo& visited_url_info) override;
+  void OnHistoryDeletions(history::HistoryService* history_service,
+                          const history::DeletionInfo& deletion_info) override;
 
   void DispatchEvent(Profile* profile,
                      events::HistogramValue histogram_value,
                      const std::string& event_name,
-                     std::unique_ptr<base::ListValue> event_args);
+                     base::ListValue event_args);
 
-  Profile* profile_;
-  ScopedObserver<history::HistoryService, history::HistoryServiceObserver>
-      history_service_observer_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(HistoryEventRouter);
+  raw_ptr<Profile> profile_;
+  base::ScopedObservation<history::HistoryService,
+                          history::HistoryServiceObserver>
+      history_service_observation_{this};
 };
 
 class HistoryAPI : public BrowserContextKeyedAPI, public EventRouter::Observer {
@@ -74,7 +74,7 @@ class HistoryAPI : public BrowserContextKeyedAPI, public EventRouter::Observer {
  private:
   friend class BrowserContextKeyedAPIFactory<HistoryAPI>;
 
-  content::BrowserContext* browser_context_;
+  raw_ptr<content::BrowserContext> browser_context_;
 
   // BrowserContextKeyedAPI implementation.
   static const char* service_name() {
@@ -92,7 +92,7 @@ void BrowserContextKeyedAPIFactory<HistoryAPI>::DeclareFactoryDependencies();
 // Base class for history function APIs.
 class HistoryFunction : public ExtensionFunction {
  protected:
-  ~HistoryFunction() override {}
+  ~HistoryFunction() override = default;
 
   bool ValidateUrl(const std::string& url_string,
                    GURL* url,
@@ -120,13 +120,13 @@ class HistoryGetVisitsFunction : public HistoryFunctionWithCallback {
   DECLARE_EXTENSION_FUNCTION("history.getVisits", HISTORY_GETVISITS)
 
  protected:
-  ~HistoryGetVisitsFunction() override {}
+  ~HistoryGetVisitsFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
 
   // Callback for the history function to provide results.
-  void QueryComplete(history::QueryURLResult result);
+  void QueryComplete(history::QueryURLAndVisitsResult result);
 };
 
 class HistorySearchFunction : public HistoryFunctionWithCallback {
@@ -134,7 +134,7 @@ class HistorySearchFunction : public HistoryFunctionWithCallback {
   DECLARE_EXTENSION_FUNCTION("history.search", HISTORY_SEARCH)
 
  protected:
-  ~HistorySearchFunction() override {}
+  ~HistorySearchFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -148,7 +148,7 @@ class HistoryAddUrlFunction : public HistoryFunction {
   DECLARE_EXTENSION_FUNCTION("history.addUrl", HISTORY_ADDURL)
 
  protected:
-  ~HistoryAddUrlFunction() override {}
+  ~HistoryAddUrlFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -159,7 +159,7 @@ class HistoryDeleteAllFunction : public HistoryFunctionWithCallback {
   DECLARE_EXTENSION_FUNCTION("history.deleteAll", HISTORY_DELETEALL)
 
  protected:
-  ~HistoryDeleteAllFunction() override {}
+  ~HistoryDeleteAllFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -168,13 +168,12 @@ class HistoryDeleteAllFunction : public HistoryFunctionWithCallback {
   void DeleteComplete();
 };
 
-
 class HistoryDeleteUrlFunction : public HistoryFunction {
  public:
   DECLARE_EXTENSION_FUNCTION("history.deleteUrl", HISTORY_DELETEURL)
 
  protected:
-  ~HistoryDeleteUrlFunction() override {}
+  ~HistoryDeleteUrlFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -185,7 +184,7 @@ class HistoryDeleteRangeFunction : public HistoryFunctionWithCallback {
   DECLARE_EXTENSION_FUNCTION("history.deleteRange", HISTORY_DELETERANGE)
 
  protected:
-  ~HistoryDeleteRangeFunction() override {}
+  ~HistoryDeleteRangeFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;

@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,21 +36,24 @@
 #include <string>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/files/file_path.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_string_value_serializer.h"
+#include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/stl_util.h"
+#include "base/strings/cstring_view.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
-#include "base/task_runner_util.h"
 #include "chrome/browser/extensions/activity_log/activity_log_task_runner.h"
 #include "chrome/common/chrome_constants.h"
+#include "extensions/buildflags/buildflags.h"
 #include "sql/statement.h"
 #include "sql/transaction.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace {
 
@@ -58,7 +61,7 @@ using extensions::Action;
 
 // Delay between cleaning passes (to delete old action records) through the
 // database.
-constexpr base::TimeDelta kCleaningDelay = base::TimeDelta::FromHours(12);
+constexpr base::TimeDelta kCleaningDelay = base::Hours(12);
 
 // We should log the arguments to these API calls.  Be careful when
 // constructing this allowlist to not keep arguments that might compromise
@@ -95,20 +98,27 @@ const ApiList kAlwaysLog[] = {
 
 // Columns in the main database table.  See the file-level comment for a
 // discussion of how data is stored and the meanings of the _x columns.
-const char* const kTableContentFields[] = {
-    "count", "extension_id_x", "time", "action_type", "api_name_x", "args_x",
-    "page_url_x", "page_title_x", "arg_url_x", "other_x"};
-const char* const kTableFieldTypes[] = {
-    "INTEGER NOT NULL DEFAULT 1", "INTEGER NOT NULL", "INTEGER", "INTEGER",
-    "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER",
-    "INTEGER"};
+constexpr base::cstring_view kTableContentFields[] = {
+    "count",  "extension_id_x", "time",         "action_type", "api_name_x",
+    "args_x", "page_url_x",     "page_title_x", "arg_url_x",   "other_x"};
+constexpr base::cstring_view kTableFieldTypes[] = {"INTEGER NOT NULL DEFAULT 1",
+                                                   "INTEGER NOT NULL",
+                                                   "INTEGER",
+                                                   "INTEGER",
+                                                   "INTEGER",
+                                                   "INTEGER",
+                                                   "INTEGER",
+                                                   "INTEGER",
+                                                   "INTEGER",
+                                                   "INTEGER"};
 
 // Miscellaneous SQL commands for initializing the database; these should be
 // idempotent.
-static const char kPolicyMiscSetup[] =
+constexpr char kPolicySetupDropView[] =
     // The activitylog_uncompressed view performs string lookups for simpler
     // access to the log data.
-    "DROP VIEW IF EXISTS activitylog_uncompressed;\n"
+    "DROP VIEW IF EXISTS activitylog_uncompressed";
+constexpr char kPolicySetupCreateView[] =
     "CREATE VIEW activitylog_uncompressed AS\n"
     "SELECT count,\n"
     "    x1.value AS extension_id,\n"
@@ -128,7 +138,8 @@ static const char kPolicyMiscSetup[] =
     "    LEFT JOIN url_ids    AS x4 ON (x4.id = page_url_x)\n"
     "    LEFT JOIN string_ids AS x5 ON (x5.id = page_title_x)\n"
     "    LEFT JOIN url_ids    AS x6 ON (x6.id = arg_url_x)\n"
-    "    LEFT JOIN string_ids AS x7 ON (x7.id = other_x);\n"
+    "    LEFT JOIN string_ids AS x7 ON (x7.id = other_x)";
+constexpr char kPolicySetupCreateIndex[] =
     // An index on all fields except count and time: all the fields that aren't
     // changed when incrementing a count.  This should accelerate finding the
     // rows to update (at worst several rows will need to be checked to find
@@ -139,7 +150,7 @@ static const char kPolicyMiscSetup[] =
 
 // SQL statements to clean old, unused entries out of the string and URL id
 // tables.
-static const char kStringTableCleanup[] =
+constexpr char kStringTableCleanup[] =
     "DELETE FROM string_ids WHERE id NOT IN\n"
     "(SELECT extension_id_x FROM activitylog_compressed\n"
     "    WHERE extension_id_x IS NOT NULL\n"
@@ -151,7 +162,7 @@ static const char kStringTableCleanup[] =
     "    WHERE page_title_x IS NOT NULL\n"
     " UNION SELECT other_x FROM activitylog_compressed\n"
     "    WHERE other_x IS NOT NULL)";
-static const char kUrlTableCleanup[] =
+constexpr char kUrlTableCleanup[] =
     "DELETE FROM url_ids WHERE id NOT IN\n"
     "(SELECT page_url_x FROM activitylog_compressed\n"
     "    WHERE page_url_x IS NOT NULL\n"
@@ -162,7 +173,6 @@ static const char kUrlTableCleanup[] =
 
 namespace extensions {
 
-const char CountingPolicy::kTableName[] = "activitylog_compressed";
 const char CountingPolicy::kReadViewName[] = "activitylog_uncompressed";
 
 CountingPolicy::CountingPolicy(Profile* profile)
@@ -171,14 +181,13 @@ CountingPolicy::CountingPolicy(Profile* profile)
           base::FilePath(chrome::kExtensionActivityLogFilename)),
       string_table_("string_ids"),
       url_table_("url_ids"),
-      retention_time_(base::TimeDelta::FromHours(60)) {
-  for (size_t i = 0; i < base::size(kAlwaysLog); i++) {
-    api_arg_allowlist_.insert(
-        std::make_pair(kAlwaysLog[i].type, kAlwaysLog[i].name));
+      retention_time_(base::Hours(60)) {
+  for (auto log : kAlwaysLog) {
+    api_arg_allowlist_.insert(std::make_pair(log.type, log.name));
   }
 }
 
-CountingPolicy::~CountingPolicy() {}
+CountingPolicy::~CountingPolicy() = default;
 
 bool CountingPolicy::InitDatabase(sql::Database* db) {
   if (!string_table_.Initialize(db))
@@ -187,14 +196,17 @@ bool CountingPolicy::InitDatabase(sql::Database* db) {
     return false;
 
   // Create the unified activity log entry table.
-  if (!ActivityDatabase::InitializeTable(db, kTableName, kTableContentFields,
-                                         kTableFieldTypes,
-                                         base::size(kTableContentFields)))
+  if (!ActivityDatabase::InitializeTable(db, "activitylog_compressed",
+                                         kTableContentFields,
+                                         kTableFieldTypes)) {
     return false;
+  }
 
   // Create a view for easily accessing the uncompressed form of the data, and
   // any necessary indexes if needed.
-  return db->Execute(kPolicyMiscSetup);
+  return db->Execute(kPolicySetupDropView) &&
+         db->Execute(kPolicySetupCreateView) &&
+         db->Execute(kPolicySetupCreateIndex);
 }
 
 void CountingPolicy::ProcessAction(scoped_refptr<Action> action) {
@@ -258,37 +270,32 @@ bool CountingPolicy::FlushDatabase(sql::Database* db) {
   // to be inserted.
   //   1. Run the query in locate_str to search for a row which matches and can
   //      have the count incremented.
-  //  2a. If found, increment the count using update_str and the rowid found in
+  //  2a. If found, increment the count using kUpdateSql and the rowid found in
   //      step 1, or
   //  2b. If not found, insert a new row using insert_str.
   std::string locate_str =
-      "SELECT rowid FROM " + std::string(kTableName) +
+      "SELECT rowid FROM activitylog_compressed"
       " WHERE time >= ? AND time < ?";
-  std::string insert_str =
-      "INSERT INTO " + std::string(kTableName) + "(count, time";
-  std::string update_str =
-      "UPDATE " + std::string(kTableName) +
+  std::string insert_str = "INSERT INTO activitylog_compressed(count, time";
+  static constexpr char kUpdateSql[] =
+      "UPDATE activitylog_compressed"
       " SET count = count + ?, time = max(?, time)"
       " WHERE rowid = ?";
 
-  for (size_t i = 0; i < base::size(matched_columns); i++) {
-    locate_str = base::StringPrintf(
-        "%s AND %s IS ?", locate_str.c_str(), matched_columns[i]);
-    insert_str =
-        base::StringPrintf("%s, %s", insert_str.c_str(), matched_columns[i]);
+  for (const auto* column : matched_columns) {
+    locate_str =
+        base::StringPrintf("%s AND %s IS ?", locate_str.c_str(), column);
+    insert_str = base::StringPrintf("%s, %s", insert_str.c_str(), column);
   }
   insert_str += ") VALUES (?, ?";
-  for (size_t i = 0; i < base::size(matched_columns); i++) {
+  for (size_t i = 0; i < std::size(matched_columns); i++) {
     insert_str += ", ?";
   }
   locate_str += " ORDER BY time DESC LIMIT 1";
   insert_str += ")";
 
-  for (auto i = queue.begin(); i != queue.end(); ++i) {
-    const Action& action = *i->first;
-    int count = i->second;
-
-    base::Time day_start = action.time().LocalMidnight();
+  for (auto& [action, count] : queue) {
+    base::Time day_start = action->time().LocalMidnight();
     base::Time next_day = Util::AddDays(day_start, 1);
 
     // The contents in values must match up with fields in matched_columns.  A
@@ -296,18 +303,18 @@ bool CountingPolicy::FlushDatabase(sql::Database* db) {
     int64_t id;
     std::vector<int64_t> matched_values;
 
-    if (!string_table_.StringToInt(db, action.extension_id(), &id))
+    if (!string_table_.StringToInt(db, action->extension_id(), &id))
       return false;
     matched_values.push_back(id);
 
-    matched_values.push_back(static_cast<int>(action.action_type()));
+    matched_values.push_back(static_cast<int>(action->action_type()));
 
-    if (!string_table_.StringToInt(db, action.api_name(), &id))
+    if (!string_table_.StringToInt(db, action->api_name(), &id))
       return false;
     matched_values.push_back(id);
 
-    if (action.args()) {
-      std::string args = Util::Serialize(action.args());
+    if (action->args()) {
+      std::string args = Util::Serialize(action->args());
       // TODO(mvrable): For now, truncate long argument lists.  This is a
       // workaround for excessively-long values coming from DOM logging.  When
       // the V8ValueConverter is fixed to return more reasonable values, we can
@@ -322,7 +329,7 @@ bool CountingPolicy::FlushDatabase(sql::Database* db) {
       matched_values.push_back(-1);
     }
 
-    std::string page_url_string = action.SerializePageUrl();
+    std::string page_url_string = action->SerializePageUrl();
     if (!page_url_string.empty()) {
       if (!url_table_.StringToInt(db, page_url_string, &id))
         return false;
@@ -332,15 +339,15 @@ bool CountingPolicy::FlushDatabase(sql::Database* db) {
     }
 
     // TODO(mvrable): Create a title_table_?
-    if (!action.page_title().empty()) {
-      if (!string_table_.StringToInt(db, action.page_title(), &id))
+    if (!action->page_title().empty()) {
+      if (!string_table_.StringToInt(db, action->page_title(), &id))
         return false;
       matched_values.push_back(id);
     } else {
       matched_values.push_back(-1);
     }
 
-    std::string arg_url_string = action.SerializeArgUrl();
+    std::string arg_url_string = action->SerializeArgUrl();
     if (!arg_url_string.empty()) {
       if (!url_table_.StringToInt(db, arg_url_string, &id))
         return false;
@@ -349,8 +356,8 @@ bool CountingPolicy::FlushDatabase(sql::Database* db) {
       matched_values.push_back(-1);
     }
 
-    if (action.other()) {
-      if (!string_table_.StringToInt(db, Util::Serialize(action.other()), &id))
+    if (action->other()) {
+      if (!string_table_.StringToInt(db, Util::Serialize(action->other()), &id))
         return false;
       matched_values.push_back(id);
     } else {
@@ -359,10 +366,10 @@ bool CountingPolicy::FlushDatabase(sql::Database* db) {
 
     // Search for a matching row for this action whose count can be
     // incremented.
-    sql::Statement locate_statement(db->GetCachedStatement(
-        sql::StatementID(SQL_FROM_HERE), locate_str.c_str()));
-    locate_statement.BindInt64(0, day_start.ToInternalValue());
-    locate_statement.BindInt64(1, next_day.ToInternalValue());
+    sql::Statement locate_statement(
+        db->GetCachedStatement(sql::StatementID(SQL_FROM_HERE), locate_str));
+    locate_statement.BindTime(0, day_start);
+    locate_statement.BindTime(1, next_day);
     for (size_t j = 0; j < matched_values.size(); j++) {
       // A call to BindNull when matched_values contains -1 is likely not
       // necessary as parameters default to null before they are explicitly
@@ -378,19 +385,19 @@ bool CountingPolicy::FlushDatabase(sql::Database* db) {
     if (locate_statement.Step()) {
       // A matching row was found.  Update the count and time.
       int64_t rowid = locate_statement.ColumnInt64(0);
-      sql::Statement update_statement(db->GetCachedStatement(
-          sql::StatementID(SQL_FROM_HERE), update_str.c_str()));
+      sql::Statement update_statement(
+          db->GetCachedStatement(sql::StatementID(SQL_FROM_HERE), kUpdateSql));
       update_statement.BindInt(0, count);
-      update_statement.BindInt64(1, action.time().ToInternalValue());
+      update_statement.BindTime(1, action->time());
       update_statement.BindInt64(2, rowid);
       if (!update_statement.Run())
         return false;
     } else if (locate_statement.Succeeded()) {
       // No matching row was found, so we need to insert one.
-      sql::Statement insert_statement(db->GetCachedStatement(
-          sql::StatementID(SQL_FROM_HERE), insert_str.c_str()));
+      sql::Statement insert_statement(
+          db->GetCachedStatement(sql::StatementID(SQL_FROM_HERE), insert_str));
       insert_statement.BindInt(0, count);
-      insert_statement.BindInt64(1, action.time().ToInternalValue());
+      insert_statement.BindTime(1, action->time());
       for (size_t j = 0; j < matched_values.size(); j++) {
         if (matched_values[j] == -1)
           insert_statement.BindNull(j + 2);
@@ -468,7 +475,7 @@ std::unique_ptr<Action::ActionVector> CountingPolicy::DoReadFilteredData(
       kReadViewName,
       where_str.empty() ? "" : "WHERE",
       where_str.c_str());
-  sql::Statement query(db->GetUniqueStatement(query_str.c_str()));
+  sql::Statement query(db->GetUniqueStatement(query_str));
   int i = -1;
   if (!extension_id.empty())
     query.BindString(++i, extension_id);
@@ -491,17 +498,15 @@ std::unique_ptr<Action::ActionVector> CountingPolicy::DoReadFilteredData(
   // Execute the query and get results.
   while (query.is_valid() && query.Step()) {
     auto action = base::MakeRefCounted<Action>(
-        query.ColumnString(0),
-        base::Time::FromInternalValue(query.ColumnInt64(1)),
+        query.ColumnString(0), query.ColumnTime(1),
         static_cast<Action::ActionType>(query.ColumnInt(2)),
         query.ColumnString(3), query.ColumnInt64(10));
 
     if (query.GetColumnType(4) != sql::ColumnType::kNull) {
-      std::unique_ptr<base::Value> parsed_value =
-          base::JSONReader::ReadDeprecated(query.ColumnString(4));
+      std::optional<base::Value> parsed_value = base::JSONReader::Read(
+          query.ColumnStringView(4), base::JSON_PARSE_CHROMIUM_EXTENSIONS);
       if (parsed_value && parsed_value->is_list()) {
-        action->set_args(base::WrapUnique(
-            static_cast<base::ListValue*>(parsed_value.release())));
+        action->set_args(std::move(*parsed_value).TakeList());
       }
     }
 
@@ -510,11 +515,10 @@ std::unique_ptr<Action::ActionVector> CountingPolicy::DoReadFilteredData(
     action->ParseArgUrl(query.ColumnString(7));
 
     if (query.GetColumnType(8) != sql::ColumnType::kNull) {
-      std::unique_ptr<base::Value> parsed_value =
-          base::JSONReader::ReadDeprecated(query.ColumnString(8));
+      std::optional<base::Value> parsed_value = base::JSONReader::Read(
+          query.ColumnStringView(8), base::JSON_PARSE_CHROMIUM_EXTENSIONS);
       if (parsed_value && parsed_value->is_dict()) {
-        action->set_other(base::WrapUnique(
-            static_cast<base::DictionaryValue*>(parsed_value.release())));
+        action->set_other(std::move(*parsed_value).TakeDict());
       }
     }
     action->set_count(query.ColumnInt(9));
@@ -541,13 +545,12 @@ void CountingPolicy::DoRemoveActions(const std::vector<int64_t>& action_ids) {
   if (!transaction.Begin())
     return;
 
-  std::string statement_str =
-      base::StringPrintf("DELETE FROM %s WHERE rowid = ?", kTableName);
   sql::Statement statement(db->GetCachedStatement(
-      sql::StatementID(SQL_FROM_HERE), statement_str.c_str()));
-  for (size_t i = 0; i < action_ids.size(); i++) {
+      sql::StatementID(SQL_FROM_HERE),
+      "DELETE FROM activitylog_compressed WHERE rowid = ?"));
+  for (long action_id : action_ids) {
     statement.Reset(true);
-    statement.BindInt64(0, action_ids[i]);
+    statement.BindInt64(0, action_id);
     if (!statement.Run()) {
       LOG(ERROR) << "Removing activities from database failed: "
                  << statement.GetSQLStatement();
@@ -574,13 +577,10 @@ void CountingPolicy::DoRemoveURLs(const std::vector<GURL>& restrict_urls) {
 
   // If no restrictions then then all URLs need to be removed.
   if (restrict_urls.empty()) {
-    std::string sql_str = base::StringPrintf(
-      "UPDATE %s SET page_url_x=NULL,page_title_x=NULL,arg_url_x=NULL",
-      kTableName);
-
-    sql::Statement statement;
-    statement.Assign(db->GetCachedStatement(
-        sql::StatementID(SQL_FROM_HERE), sql_str.c_str()));
+    sql::Statement statement(db->GetCachedStatement(
+        sql::StatementID(SQL_FROM_HERE),
+        "UPDATE activitylog_compressed SET "
+        "page_url_x=NULL,page_title_x=NULL,arg_url_x=NULL"));
 
     if (!statement.Run()) {
       LOG(ERROR) << "Removing all URLs from database failed: "
@@ -590,21 +590,17 @@ void CountingPolicy::DoRemoveURLs(const std::vector<GURL>& restrict_urls) {
   }
 
   // If URLs are specified then restrict to only those URLs.
-  for (size_t i = 0; i < restrict_urls.size(); ++i) {
+  for (const auto& url : restrict_urls) {
     int64_t url_id;
-    if (!restrict_urls[i].is_valid() ||
-        !url_table_.StringToInt(db, restrict_urls[i].spec(), &url_id)) {
+    if (!url.is_valid() || !url_table_.StringToInt(db, url.spec(), &url_id)) {
       continue;
     }
 
     // Remove any that match the page_url.
-    std::string sql_str = base::StringPrintf(
-      "UPDATE %s SET page_url_x=NULL,page_title_x=NULL WHERE page_url_x IS ?",
-      kTableName);
-
-    sql::Statement statement;
-    statement.Assign(db->GetCachedStatement(
-        sql::StatementID(SQL_FROM_HERE), sql_str.c_str()));
+    sql::Statement statement(db->GetCachedStatement(
+        sql::StatementID(SQL_FROM_HERE),
+        "UPDATE activitylog_compressed SET page_url_x=NULL,page_title_x=NULL "
+        "WHERE page_url_x IS ?"));
     statement.BindInt64(0, url_id);
 
     if (!statement.Run()) {
@@ -614,11 +610,10 @@ void CountingPolicy::DoRemoveURLs(const std::vector<GURL>& restrict_urls) {
     }
 
     // Remove any that match the arg_url.
-    sql_str = base::StringPrintf(
-      "UPDATE %s SET arg_url_x=NULL WHERE arg_url_x IS ?", kTableName);
-
-    statement.Assign(db->GetCachedStatement(
-        sql::StatementID(SQL_FROM_HERE), sql_str.c_str()));
+    statement.Assign(
+        db->GetCachedStatement(sql::StatementID(SQL_FROM_HERE),
+                               "UPDATE activitylog_compressed SET "
+                               "arg_url_x=NULL WHERE arg_url_x IS ?"));
     statement.BindInt64(0, url_id);
 
     if (!statement.Run()) {
@@ -629,7 +624,7 @@ void CountingPolicy::DoRemoveURLs(const std::vector<GURL>& restrict_urls) {
   }
 
   // Clean up unused strings from the strings and urls table to really delete
-  // the urls and page titles. Should be called even if an error occured when
+  // the urls and page titles. Should be called even if an error occurred when
   // removing a URL as there may some things to clean up.
   CleanStringTables(db);
 }
@@ -647,10 +642,9 @@ void CountingPolicy::DoRemoveExtensionData(const std::string& extension_id) {
   // Make sure any queued in memory are sent to the database before cleaning.
   activity_database()->AdviseFlush(ActivityDatabase::kFlushImmediately);
 
-  std::string sql_str = base::StringPrintf(
-      "DELETE FROM %s WHERE extension_id_x=?", kTableName);
-  sql::Statement statement(
-      db->GetCachedStatement(sql::StatementID(SQL_FROM_HERE), sql_str.c_str()));
+  sql::Statement statement(db->GetCachedStatement(
+      sql::StatementID(SQL_FROM_HERE),
+      "DELETE FROM activitylog_compressed WHERE extension_id_x=?"));
   int64_t id;
   if (string_table_.StringToInt(db, extension_id, &id)) {
     statement.BindInt64(0, id);
@@ -679,10 +673,8 @@ void CountingPolicy::DoDeleteDatabase() {
 
   // Not wrapped in a transaction because a late failure shouldn't undo a
   // previous deletion.
-  std::string sql_str = base::StringPrintf("DELETE FROM %s", kTableName);
   sql::Statement statement(db->GetCachedStatement(
-      sql::StatementID(SQL_FROM_HERE),
-      sql_str.c_str()));
+      sql::StatementID(SQL_FROM_HERE), "DELETE FROM activitylog_compressed"));
   if (!statement.Run()) {
     LOG(ERROR) << "Deleting the database failed: "
                << statement.GetSQLStatement();
@@ -723,8 +715,8 @@ void CountingPolicy::ReadFilteredData(
     const std::string& arg_url,
     const int days_ago,
     base::OnceCallback<void(std::unique_ptr<Action::ActionVector>)> callback) {
-  base::PostTaskAndReplyWithResult(
-      GetActivityLogTaskRunner().get(), FROM_HERE,
+  GetActivityLogTaskRunner()->PostTaskAndReplyWithResult(
+      FROM_HERE,
       base::BindOnce(&CountingPolicy::DoReadFilteredData,
                      base::Unretained(this), extension_id, type, api_name,
                      page_url, arg_url, days_ago),
@@ -758,11 +750,10 @@ void CountingPolicy::OnDatabaseClose() {
 // Cleans old records from the activity log database.
 bool CountingPolicy::CleanOlderThan(sql::Database* db,
                                     const base::Time& cutoff) {
-  std::string clean_statement =
-      "DELETE FROM " + std::string(kTableName) + " WHERE time < ?";
-  sql::Statement cleaner(db->GetCachedStatement(sql::StatementID(SQL_FROM_HERE),
-                                                clean_statement.c_str()));
-  cleaner.BindInt64(0, cutoff.ToInternalValue());
+  sql::Statement cleaner(db->GetCachedStatement(
+      sql::StatementID(SQL_FROM_HERE),
+      "DELETE FROM activitylog_compressed WHERE time < ?"));
+  cleaner.BindTime(0, cutoff);
   if (!cleaner.Run())
     return false;
   return CleanStringTables(db);

@@ -1,55 +1,16 @@
 include_rules = [
-  "+chrome/browser/image_decoder",
-  # TODO(ananta): Remove this when we move files which display UI in
-  # chrome/browser/chromeos to chrome/browser/ui/views/chromeos
-  # crbug.com/728877
-  "+chrome/browser/ui/views/chrome_layout_provider.h",
+  # See README.md.
+  "-ash",
 
-  "+chrome/services/keymaster/public",
-  "+chrome/services/wilco_dtc_supportd/public",
-  "+components/guest_os",
-  "+components/services/app_service/public",
-  "+cros",
-  "+dbus",
-  "+device/bluetooth",
-  "+media/audio/sounds",  # For system sounds
-  "+media/base/media_switches.h",  # For media command line switches.
-  "+media/mojo/mojom",  # For platform verification mojom interface.
-  "+remoting/host/it2me",  # For CRD host in remote command
-  "+services/device/public",
-  "+services/metrics/public",
-  "+services/network",
-  "+services/tracing/public",
-  "+services/viz/public/mojom",
+  "+ash/constants",
+
+  # ChromeOS should not depend on //chrome. See //docs/chromeos/code.md for
+  # details.
+  "-chrome",
+
+  # Browser abstraction for use by ChromeOS feature code. Will eventually be
+  # moved out of chrome/.
+  "+chrome/browser/ash/browser_delegate/browser_controller.h",
+  "+chrome/browser/ash/browser_delegate/browser_delegate.h",
+  "+chrome/browser/ash/browser_delegate/browser_type.h",
 ]
-
-specific_include_rules = {
-  # Dependencies specific for fuzz targets and other fuzzing-related code.
-  ".*fuzz.*": [
-    "+third_party/libFuzzer/src/utils",  # This contains FuzzedDataProvider.
-  ],
-  ".*test.*": [
-   "!ash",
-   "+ash/public",
-  ],
-  "assistant_util_unittest\.cc": [
-    "+ui/events/devices/device_data_manager.h",
-  ],
-  "child_status_collector_browsertest.cc": [
-    "+mojo/core/embedder/embedder.h",
-  ],
-  "chrome_browser_main_chromeos\.cc": [
-    "+ash/shell.h",
-    "+ash/sticky_keys/sticky_keys_controller.h",
-  ],
-  "device_status_collector_browsertest.cc": [
-    "+mojo/core/embedder/embedder.h",
-  ],
-  "event_rewriter_unittest\.cc": [
-    "+ui/events/devices/device_data_manager.h",
-  ],
-  "file_manager_browsertest_base.cc": [
-    "+chrome/browser/ui/views/extensions/extension_dialog.h",
-    "+chrome/browser/ui/views/select_file_dialog_extension.h",
-  ],
-}

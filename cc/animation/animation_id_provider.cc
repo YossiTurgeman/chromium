@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@ base::AtomicSequenceNumber g_next_keyframe_model_id;
 base::AtomicSequenceNumber g_next_group_id;
 base::AtomicSequenceNumber g_next_timeline_id;
 base::AtomicSequenceNumber g_next_animation_id;
+base::AtomicSequenceNumber g_next_animation_trigger_id;
 
 int AnimationIdProvider::NextKeyframeModelId() {
   // Animation IDs start from 1.
@@ -28,6 +29,10 @@ int AnimationIdProvider::NextTimelineId() {
 
 int AnimationIdProvider::NextAnimationId() {
   return g_next_animation_id.GetNext() + 1;
+}
+
+int AnimationIdProvider::NextAnimationTriggerId() {
+  return g_next_animation_trigger_id.GetNext() + 1;
 }
 
 }  // namespace cc

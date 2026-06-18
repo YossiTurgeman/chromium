@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,15 @@
 #include <string>
 #include <utility>
 
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/logging.h"
+#include "base/task/single_thread_task_runner.h"
 #include "mojo/public/cpp/bindings/remote_set.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "services/device/wake_lock/wake_lock.h"
+#include "services/device/wake_lock/wake_lock_context.h"
+#include "services/device/wake_lock/wake_lock_features.h"
 
 namespace device {
 
@@ -19,6 +25,10 @@ namespace device {
 // would be 3.
 struct WakeLockProvider::WakeLockDataPerType {
   WakeLockDataPerType() = default;
+
+  WakeLockDataPerType(const WakeLockDataPerType&) = delete;
+  WakeLockDataPerType& operator=(const WakeLockDataPerType&) = delete;
+
   ~WakeLockDataPerType() = default;
 
   // Currently activated wake locks of this wake lock type.
@@ -30,8 +40,6 @@ struct WakeLockProvider::WakeLockDataPerType {
 
   // Observers for this wake lock type.
   mojo::RemoteSet<mojom::WakeLockObserver> observers;
-
-  DISALLOW_COPY_AND_ASSIGN(WakeLockDataPerType);
 };
 
 WakeLockProvider::WakeLockProvider(
@@ -48,7 +56,20 @@ WakeLockProvider::WakeLockProvider(
       std::make_unique<WakeLockDataPerType>();
 }
 
-WakeLockProvider::~WakeLockProvider() = default;
+WakeLockProvider::~WakeLockProvider() {
+  // Guard against a situation on some platforms where
+  // WakeLockProvider is destroyed before OnConnectionError has been called
+  // as expected when a WakeLock is disconnected.
+  // Issue appears to primarily affect MacOS and ChromeOS Ash, but we are adding
+  // this code defensively on all platforms.
+  // TODO(crbug.com/352093447): Resolve the issue(s) that
+  // necessitate this code being here and remove this code.
+  if (base::FeatureList::IsEnabled(features::kRemoveWakeLockInDestructor)) {
+    for (auto& wake_lock_data : wake_lock_store_) {
+      GetWakeLockDataPerType(wake_lock_data.first).wake_locks.clear();
+    }
+  }
+}
 
 void WakeLockProvider::AddBinding(
     mojo::PendingReceiver<mojom::WakeLockProvider> receiver) {
@@ -70,12 +91,11 @@ void WakeLockProvider::GetWakeLockWithoutContext(
     mojom::WakeLockReason reason,
     const std::string& description,
     mojo::PendingReceiver<mojom::WakeLock> receiver) {
-  std::unique_ptr<WakeLock> wake_lock =
-      std::make_unique<WakeLock>(std::move(receiver), type, reason, description,
-                                 WakeLockContext::WakeLockInvalidContextId,
-                                 native_view_getter_, file_task_runner_, this);
-  GetWakeLockDataPerType(type).wake_locks[wake_lock.get()] =
-      std::move(wake_lock);
+  std::unique_ptr<WakeLock> wake_lock = std::make_unique<WakeLock>(
+      std::move(receiver), type, reason, description,
+      WakeLockContext::WakeLockInvalidContextId, native_view_getter_, this);
+  WakeLock* const key = wake_lock.get();
+  GetWakeLockDataPerType(type).wake_locks[key] = std::move(wake_lock);
 }
 
 void WakeLockProvider::NotifyOnWakeLockDeactivation(
@@ -114,8 +134,9 @@ void WakeLockProvider::OnWakeLockDeactivated(mojom::WakeLockType type) {
   // Notify observers of the last cancelation i.e. deactivation of wake lock
   // type |type|.
   if (new_count == 0) {
-    for (auto& observer : GetWakeLockDataPerType(type).observers)
+    for (auto& observer : GetWakeLockDataPerType(type).observers) {
       observer->OnWakeLockDeactivated(type);
+    }
   }
 }
 
@@ -138,7 +159,7 @@ WakeLockProvider::WakeLockDataPerType& WakeLockProvider::GetWakeLockDataPerType(
     mojom::WakeLockType type) {
   auto it = wake_lock_store_.find(type);
   // An entry for |type| should always be created in the constructor.
-  DCHECK(it != wake_lock_store_.end());
+  CHECK(it != wake_lock_store_.end());
   return *(it->second);
 }
 

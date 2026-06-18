@@ -1,26 +1,30 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "content/browser/speech/speech_recognizer_impl.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
+#include <memory>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/numerics/byte_conversions.h"
 #include "base/run_loop.h"
-#include "base/stl_util.h"
+#include "base/strings/string_view_util.h"
 #include "base/synchronization/waitable_event.h"
-#include "base/sys_byteorder.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/threading/thread.h"
-#include "base/threading/thread_task_runner_handle.h"
-#include "content/browser/speech/speech_recognition_engine.h"
-#include "content/browser/speech/speech_recognizer_impl.h"
+#include "content/browser/speech/network_speech_recognition_engine_impl.h"
 #include "content/public/browser/google_streaming_api.pb.h"
+#include "content/public/browser/speech_recognition_audio_forwarder_config.h"
 #include "content/public/browser/speech_recognition_event_listener.h"
 #include "content/public/common/content_features.h"
 #include "content/public/test/browser_task_environment.h"
@@ -31,6 +35,9 @@
 #include "media/audio/mock_audio_manager.h"
 #include "media/audio/test_audio_thread.h"
 #include "media/base/audio_bus.h"
+#include "media/base/audio_glitch_info.h"
+#include "media/base/audio_sample_types.h"
+#include "media/base/audio_timestamp_helper.h"
 #include "media/base/test_helpers.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/data_pipe.h"
@@ -75,7 +82,8 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
                                  public testing::Test {
  public:
   SpeechRecognizerImplTest()
-      : audio_capturer_source_(new testing::NiceMock<MockCapturerSource>()),
+      : audio_capturer_source_(
+            base::MakeRefCounted<testing::NiceMock<MockCapturerSource>>()),
         recognition_started_(false),
         recognition_ended_(false),
         result_received_(false),
@@ -83,7 +91,7 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
         audio_ended_(false),
         sound_started_(false),
         sound_ended_(false),
-        error_(blink::mojom::SpeechRecognitionErrorCode::kNone),
+        error_(media::mojom::SpeechRecognitionErrorCode::kNone),
         volume_(-1.0f) {
     // This test environment is not set up to support out-of-process services.
     feature_list_.InitWithFeatures(
@@ -91,11 +99,11 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
         /*disabled_features=*/{features::kAudioServiceOutOfProcess});
 
     // SpeechRecognizer takes ownership of sr_engine.
-    SpeechRecognitionEngine* sr_engine = new SpeechRecognitionEngine(
-        base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
-            &url_loader_factory_),
-        "" /* accept_language */);
-    SpeechRecognitionEngine::Config config;
+    std::unique_ptr<NetworkSpeechRecognitionEngineImpl> sr_engine =
+        std::make_unique<NetworkSpeechRecognitionEngineImpl>(
+            base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
+                &url_loader_factory_));
+    NetworkSpeechRecognitionEngineImpl::Config config;
     config.audio_num_bits_per_sample =
         SpeechRecognizerImpl::kNumBitsPerAudioSample;
     config.audio_sample_rate = SpeechRecognizerImpl::kAudioSampleRate;
@@ -104,28 +112,31 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
 
     const int kTestingSessionId = 1;
 
-    audio_manager_.reset(new media::MockAudioManager(
-        std::make_unique<media::TestAudioThread>(true)));
+    audio_manager_ = std::make_unique<media::MockAudioManager>(
+        std::make_unique<media::TestAudioThread>(true));
     audio_manager_->SetInputStreamParameters(
         media::AudioParameters::UnavailableDeviceParams());
     audio_system_ =
         std::make_unique<media::AudioSystemImpl>(audio_manager_.get());
     SpeechRecognizerImpl::SetAudioEnvironmentForTesting(
         audio_system_.get(), audio_capturer_source_.get());
-    recognizer_ = new SpeechRecognizerImpl(
-        this, audio_system_.get(), kTestingSessionId, false, false, sr_engine);
+    recognizer_ = new SpeechRecognizerImpl(this, audio_system_.get(),
+                                           kTestingSessionId, false, false,
+                                           std::move(sr_engine), std::nullopt);
 
-    int audio_packet_length_bytes =
-        (SpeechRecognizerImpl::kAudioSampleRate *
-         SpeechRecognitionEngine::kAudioPacketIntervalMs *
-         ChannelLayoutToChannelCount(SpeechRecognizerImpl::kChannelLayout) *
-         SpeechRecognizerImpl::kNumBitsPerAudioSample) / (8 * 1000);
+    const int channels = SpeechRecognizerImpl::kChannelLayoutConfig.channels();
+
+    const int bytes_per_sample =
+        SpeechRecognizerImpl::kNumBitsPerAudioSample / 8;
+
+    const int frames = media::AudioTimestampHelper::TimeToFrames(
+        base::Milliseconds(
+            NetworkSpeechRecognitionEngineImpl::kAudioPacketIntervalMs),
+        SpeechRecognizerImpl::kAudioSampleRate);
+
+    const int audio_packet_length_bytes = frames * channels * bytes_per_sample;
     audio_packet_.resize(audio_packet_length_bytes);
 
-    const int channels =
-        ChannelLayoutToChannelCount(SpeechRecognizerImpl::kChannelLayout);
-    int bytes_per_sample = SpeechRecognizerImpl::kNumBitsPerAudioSample / 8;
-    const int frames = audio_packet_length_bytes / channels / bytes_per_sample;
     audio_bus_ = media::AudioBus::Create(channels, frames);
     audio_bus_->Zero();
   }
@@ -135,20 +146,21 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
     audio_manager_->Shutdown();
   }
 
-  bool GetUpstreamRequest(const network::TestURLLoaderFactory::PendingRequest**
-                              pending_request_out) WARN_UNUSED_RESULT {
+  [[nodiscard]] bool GetUpstreamRequest(
+      const network::TestURLLoaderFactory::PendingRequest**
+          pending_request_out) {
     return GetPendingRequest(pending_request_out, "/up");
   }
 
-  bool GetDownstreamRequest(
-      const network::TestURLLoaderFactory::PendingRequest** pending_request_out)
-      WARN_UNUSED_RESULT {
+  [[nodiscard]] bool GetDownstreamRequest(
+      const network::TestURLLoaderFactory::PendingRequest**
+          pending_request_out) {
     return GetPendingRequest(pending_request_out, "/down");
   }
 
-  bool GetPendingRequest(
+  [[nodiscard]] bool GetPendingRequest(
       const network::TestURLLoaderFactory::PendingRequest** pending_request_out,
-      const char* url_substring) WARN_UNUSED_RESULT {
+      const char* url_substring) {
     for (const auto& pending_request :
          *url_loader_factory_.pending_requests()) {
       if (pending_request.request.url.spec().find(url_substring) !=
@@ -191,14 +203,14 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
 
   void OnRecognitionResults(
       int session_id,
-      const std::vector<blink::mojom::SpeechRecognitionResultPtr>& results)
+      const std::vector<media::mojom::WebSpeechRecognitionResultPtr>& results)
       override {
     result_received_ = true;
   }
 
   void OnRecognitionError(
       int session_id,
-      const blink::mojom::SpeechRecognitionError& error) override {
+      const media::mojom::SpeechRecognitionError& error) override {
     EXPECT_TRUE(recognition_started_);
     EXPECT_FALSE(recognition_ended_);
     error_ = error.code;
@@ -221,8 +233,6 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
     CheckEventsConsistency();
   }
 
-  void OnEnvironmentEstimationComplete(int session_id) override {}
-
   void OnSoundStart(int session_id) override {
     sound_started_ = true;
     CheckEventsConsistency();
@@ -237,8 +247,8 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
     static_assert(SpeechRecognizerImpl::kNumBitsPerAudioSample == 16,
                   "FromInterleaved expects 2 bytes.");
     // Copy the created signal into an audio bus in a deinterleaved format.
-    audio_bus_->FromInterleaved<media::SignedInt16SampleTypeTraits>(
-        reinterpret_cast<int16_t*>(audio_packet_.data()), audio_bus_->frames());
+    audio_bus_->FromInterleavedBytes<media::SignedInt16SampleTypeTraits>(
+        audio_packet_);
   }
 
   void FillPacketWithTestWaveform() {
@@ -262,14 +272,15 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
     auto* capture_callback =
         static_cast<media::AudioCapturerSource::CaptureCallback*>(
             recognizer_.get());
-    capture_callback->Capture(data, base::TimeTicks::Now(), 0.0, false);
+    capture_callback->Capture(data, base::TimeTicks::Now(), {}, 0.0);
   }
 
   void OnCaptureError() {
     auto* capture_callback =
         static_cast<media::AudioCapturerSource::CaptureCallback*>(
             recognizer_.get());
-    capture_callback->OnCaptureError("");
+    capture_callback->OnCaptureError(
+        media::AudioCapturerSource::ErrorCode::kUnknown, "");
   }
 
   void WaitForAudioThreadToPostDeviceInfo() {
@@ -297,7 +308,7 @@ class SpeechRecognizerImplTest : public SpeechRecognitionEventListener,
   bool audio_ended_;
   bool sound_started_;
   bool sound_ended_;
-  blink::mojom::SpeechRecognitionErrorCode error_;
+  media::mojom::SpeechRecognitionErrorCode error_;
   std::vector<uint8_t> audio_packet_;
   std::unique_ptr<media::AudioBus> audio_bus_;
   float volume_;
@@ -315,7 +326,29 @@ TEST_F(SpeechRecognizerImplTest, StartNoInputDevices) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_FALSE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kAudioCapture, error_);
+  OnCaptureError();
+  base::RunLoop().RunUntilIdle();
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kAudioCapture, error_);
+  CheckFinalEventsConsistency();
+}
+
+TEST_F(SpeechRecognizerImplTest, StartFakeInputDevice) {
+  // Check for callbacks when stopping record before any audio gets recorded.
+  audio_manager_->SetHasInputDevices(false);
+  recognizer_->StartRecognition(
+      media::AudioDeviceDescription::kDefaultDeviceId);
+  base::RunLoop().RunUntilIdle();  // EVENT_PREPARE processing.
+  WaitForAudioThreadToPostDeviceInfo();
+  base::RunLoop().RunUntilIdle();  // EVENT_START processing.
+  Capture(audio_bus_.get());
+  recognizer_->StopAudioCapture();
+  base::RunLoop().RunUntilIdle();
+  EXPECT_TRUE(recognition_started_);
+  EXPECT_TRUE(audio_started_);
+  EXPECT_FALSE(result_received_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  recognizer_->AbortRecognition();
+  base::RunLoop().RunUntilIdle();
   CheckFinalEventsConsistency();
 }
 
@@ -326,9 +359,8 @@ TEST_F(SpeechRecognizerImplTest, StopBeforeDeviceInfoReceived) {
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
 
   // Block audio thread.
-  audio_manager_->GetTaskRunner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&base::WaitableEvent::Wait, base::Unretained(&event)));
+  audio_manager_->GetTaskRunner()->PostTask(FROM_HERE,
+                                            event.GetWaitCallbackForTesting());
 
   recognizer_->StartRecognition(
       media::AudioDeviceDescription::kDefaultDeviceId);
@@ -343,7 +375,7 @@ TEST_F(SpeechRecognizerImplTest, StopBeforeDeviceInfoReceived) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_FALSE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -354,9 +386,8 @@ TEST_F(SpeechRecognizerImplTest, CancelBeforeDeviceInfoReceived) {
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
 
   // Block audio thread.
-  audio_manager_->GetTaskRunner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&base::WaitableEvent::Wait, base::Unretained(&event)));
+  audio_manager_->GetTaskRunner()->PostTask(FROM_HERE,
+                                            event.GetWaitCallbackForTesting());
 
   recognizer_->StartRecognition(
       media::AudioDeviceDescription::kDefaultDeviceId);
@@ -371,7 +402,7 @@ TEST_F(SpeechRecognizerImplTest, CancelBeforeDeviceInfoReceived) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_FALSE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -386,7 +417,7 @@ TEST_F(SpeechRecognizerImplTest, StopNoData) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_FALSE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -402,7 +433,7 @@ TEST_F(SpeechRecognizerImplTest, CancelNoData) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_FALSE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kAborted, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kAborted, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -421,7 +452,10 @@ TEST_F(SpeechRecognizerImplTest, StopWithData) {
   // full recording to complete.
   const size_t kNumChunks = 5;
   mojo::Remote<network::mojom::ChunkedDataPipeGetter> chunked_data_pipe_getter;
-  mojo::DataPipe data_pipe;
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  ASSERT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
   for (size_t i = 0; i < kNumChunks; ++i) {
     Capture(audio_bus_.get());
 
@@ -433,30 +467,25 @@ TEST_F(SpeechRecognizerImplTest, StopWithData) {
       ASSERT_TRUE(GetUpstreamRequest(&upstream_request));
       ASSERT_TRUE(upstream_request->request.request_body);
       ASSERT_EQ(1u, upstream_request->request.request_body->elements()->size());
-      ASSERT_EQ(
-          network::mojom::DataElementType::kChunkedDataPipe,
-          (*upstream_request->request.request_body->elements())[0].type());
-      network::TestURLLoaderFactory::PendingRequest* mutable_upstream_request =
-          const_cast<network::TestURLLoaderFactory::PendingRequest*>(
-              upstream_request);
-      chunked_data_pipe_getter.Bind((*mutable_upstream_request->request
-                                          .request_body->elements_mutable())[0]
-                                        .ReleaseChunkedDataPipeGetter());
-      chunked_data_pipe_getter->StartReading(
-          std::move(data_pipe.producer_handle));
+      auto& element =
+          (*upstream_request->request.request_body->elements_mutable())[0];
+      ASSERT_EQ(network::DataElement::Tag::kChunkedDataPipe, element.type());
+      chunked_data_pipe_getter.Bind(
+          element.As<network::DataElementChunkedDataPipe>()
+              .ReleaseChunkedDataPipeGetter());
+      chunked_data_pipe_getter->StartReading(std::move(producer_handle));
     }
 
     std::string data;
     while (true) {
       base::RunLoop().RunUntilIdle();
 
-      const void* buffer;
-      uint32_t num_bytes;
-      MojoResult result = data_pipe.consumer_handle->BeginReadData(
-          &buffer, &num_bytes, MOJO_READ_DATA_FLAG_NONE);
+      base::span<const uint8_t> buffer;
+      MojoResult result =
+          consumer_handle->BeginReadData(MOJO_READ_DATA_FLAG_NONE, buffer);
       if (result == MOJO_RESULT_OK) {
-        data.append(static_cast<const char*>(buffer), num_bytes);
-        data_pipe.consumer_handle->EndReadData(num_bytes);
+        data.append(base::as_string_view(buffer));
+        consumer_handle->EndReadData(buffer.size());
         continue;
       }
       if (result == MOJO_RESULT_SHOULD_WAIT) {
@@ -478,7 +507,7 @@ TEST_F(SpeechRecognizerImplTest, StopWithData) {
   EXPECT_TRUE(audio_ended_);
   EXPECT_FALSE(recognition_ended_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
 
   // Create a response string.
   proto::SpeechRecognitionEvent proto_event;
@@ -491,9 +520,9 @@ TEST_F(SpeechRecognizerImplTest, StopWithData) {
   proto_alternative->set_transcript("123");
   std::string msg_string;
   proto_event.SerializeToString(&msg_string);
-  uint32_t prefix =
-      base::HostToNet32(base::checked_cast<uint32_t>(msg_string.size()));
-  msg_string.insert(0, reinterpret_cast<char*>(&prefix), sizeof(prefix));
+  auto msg_size_bytes =
+      base::U32ToBigEndian(base::checked_cast<uint32_t>(msg_string.size()));
+  msg_string.insert(0u, base::as_string_view(msg_size_bytes));
 
   // Issue the network callback to complete the process.
   const network::TestURLLoaderFactory::PendingRequest* downstream_request;
@@ -504,7 +533,7 @@ TEST_F(SpeechRecognizerImplTest, StopWithData) {
 
   EXPECT_TRUE(recognition_ended_);
   EXPECT_TRUE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -524,7 +553,7 @@ TEST_F(SpeechRecognizerImplTest, CancelWithData) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_TRUE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kAborted, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kAborted, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -547,7 +576,7 @@ TEST_F(SpeechRecognizerImplTest, ConnectionError) {
   EXPECT_TRUE(audio_ended_);
   EXPECT_FALSE(recognition_ended_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
 
   // Issue the network callback to complete the process.
   const network::TestURLLoaderFactory::PendingRequest* pending_request;
@@ -559,7 +588,7 @@ TEST_F(SpeechRecognizerImplTest, ConnectionError) {
   base::RunLoop().RunUntilIdle();
   EXPECT_TRUE(recognition_ended_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNetwork, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNetwork, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -582,7 +611,7 @@ TEST_F(SpeechRecognizerImplTest, ServerError) {
   EXPECT_TRUE(audio_ended_);
   EXPECT_FALSE(recognition_ended_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
 
   const network::TestURLLoaderFactory::PendingRequest* pending_request;
   ASSERT_TRUE(GetUpstreamRequest(&pending_request));
@@ -597,7 +626,7 @@ TEST_F(SpeechRecognizerImplTest, ServerError) {
   base::RunLoop().RunUntilIdle();
   EXPECT_TRUE(recognition_ended_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNetwork, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNetwork, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -614,7 +643,7 @@ TEST_F(SpeechRecognizerImplTest, OnCaptureError_PropagatesError) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_FALSE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kAudioCapture, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kAudioCapture, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -627,8 +656,10 @@ TEST_F(SpeechRecognizerImplTest, NoSpeechCallbackIssued) {
   WaitForAudioThreadToPostDeviceInfo();
   base::RunLoop().RunUntilIdle();  // EVENT_START processing.
 
-  int num_packets = (SpeechRecognizerImpl::kNoSpeechTimeoutMs) /
-                     SpeechRecognitionEngine::kAudioPacketIntervalMs + 1;
+  int num_packets =
+      (SpeechRecognizerImpl::kNoSpeechTimeoutMs) /
+          NetworkSpeechRecognitionEngineImpl::kAudioPacketIntervalMs +
+      1;
   // The vector is already filled with zero value samples on create.
   for (int i = 0; i < num_packets; ++i) {
     Capture(audio_bus_.get());
@@ -637,7 +668,7 @@ TEST_F(SpeechRecognizerImplTest, NoSpeechCallbackIssued) {
   EXPECT_TRUE(recognition_started_);
   EXPECT_TRUE(audio_started_);
   EXPECT_FALSE(result_received_);
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNoSpeech, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNoSpeech, error_);
   CheckFinalEventsConsistency();
 }
 
@@ -653,7 +684,7 @@ TEST_F(SpeechRecognizerImplTest, NoSpeechCallbackNotIssued) {
   base::RunLoop().RunUntilIdle();  // EVENT_START processing.
 
   int num_packets = (SpeechRecognizerImpl::kNoSpeechTimeoutMs) /
-                     SpeechRecognitionEngine::kAudioPacketIntervalMs;
+                    NetworkSpeechRecognitionEngineImpl::kAudioPacketIntervalMs;
 
   // The vector is already filled with zero value samples on create.
   for (int i = 0; i < num_packets / 2; ++i) {
@@ -666,7 +697,7 @@ TEST_F(SpeechRecognizerImplTest, NoSpeechCallbackNotIssued) {
   }
 
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
   EXPECT_TRUE(audio_started_);
   EXPECT_FALSE(audio_ended_);
   EXPECT_FALSE(recognition_ended_);
@@ -688,7 +719,7 @@ TEST_F(SpeechRecognizerImplTest, SetInputVolumeCallback) {
 
   // Feed some samples to begin with for the endpointer to do noise estimation.
   int num_packets = SpeechRecognizerImpl::kEndpointerEstimationTimeMs /
-                    SpeechRecognitionEngine::kAudioPacketIntervalMs;
+                    NetworkSpeechRecognitionEngineImpl::kAudioPacketIntervalMs;
   FillPacketWithNoise();
   for (int i = 0; i < num_packets; ++i) {
     Capture(audio_bus_.get());
@@ -707,7 +738,7 @@ TEST_F(SpeechRecognizerImplTest, SetInputVolumeCallback) {
   EXPECT_NEAR(0.89926866f, volume_, 0.00001f);
   EXPECT_FLOAT_EQ(0.75071919f, noise_volume_);
 
-  EXPECT_EQ(blink::mojom::SpeechRecognitionErrorCode::kNone, error_);
+  EXPECT_EQ(media::mojom::SpeechRecognitionErrorCode::kNone, error_);
   EXPECT_FALSE(audio_ended_);
   EXPECT_FALSE(recognition_ended_);
   recognizer_->AbortRecognition();

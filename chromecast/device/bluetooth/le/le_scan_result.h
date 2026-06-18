@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,11 @@
 #define CHROMECAST_DEVICE_BLUETOOTH_LE_LE_SCAN_RESULT_H_
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/containers/span.h"
-#include "base/optional.h"
 #include "chromecast/public/bluetooth/bluetooth_types.h"
 
 namespace chromecast {
@@ -43,18 +43,18 @@ struct LeScanResult {
 
   bool SetAdvData(base::span<const uint8_t> adv_data);
 
-  base::Optional<std::string> Name() const;
+  std::optional<std::string> Name() const;
 
-  base::Optional<uint8_t> Flags() const;
+  std::optional<uint8_t> Flags() const;
 
   using UuidList = std::vector<bluetooth_v2_shlib::Uuid>;
-  base::Optional<UuidList> AllServiceUuids() const;
-  base::Optional<UuidList> IncompleteListOf16BitServiceUuids() const;
-  base::Optional<UuidList> CompleteListOf16BitServiceUuids() const;
-  base::Optional<UuidList> IncompleteListOf32BitServiceUuids() const;
-  base::Optional<UuidList> CompleteListOf32BitServiceUuids() const;
-  base::Optional<UuidList> IncompleteListOf128BitServiceUuids() const;
-  base::Optional<UuidList> CompleteListOf128BitServiceUuids() const;
+  std::optional<UuidList> AllServiceUuids() const;
+  std::optional<UuidList> IncompleteListOf16BitServiceUuids() const;
+  std::optional<UuidList> CompleteListOf16BitServiceUuids() const;
+  std::optional<UuidList> IncompleteListOf32BitServiceUuids() const;
+  std::optional<UuidList> CompleteListOf32BitServiceUuids() const;
+  std::optional<UuidList> IncompleteListOf128BitServiceUuids() const;
+  std::optional<UuidList> CompleteListOf128BitServiceUuids() const;
 
   using ServiceDataMap =
       std::map<bluetooth_v2_shlib::Uuid, std::vector<uint8_t>>;

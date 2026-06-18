@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -38,9 +38,9 @@ static bool SolveLeastSquares(const gfx::Matrix3F& x,
 
 }  // namespace
 
-LeastSquaresPredictor::LeastSquaresPredictor() {}
+LeastSquaresPredictor::LeastSquaresPredictor() = default;
 
-LeastSquaresPredictor::~LeastSquaresPredictor() {}
+LeastSquaresPredictor::~LeastSquaresPredictor() = default;
 
 const char* LeastSquaresPredictor::GetName() const {
   return features::kPredictorNameLsq;
@@ -82,7 +82,8 @@ gfx::Matrix3F LeastSquaresPredictor::GetXMatrix() const {
 }
 
 std::unique_ptr<InputPredictor::InputData>
-LeastSquaresPredictor::GeneratePrediction(base::TimeTicks predict_time) const {
+LeastSquaresPredictor::GeneratePrediction(base::TimeTicks predict_time,
+                                          base::TimeDelta frame_interval) {
   if (!HasPrediction())
     return nullptr;
 

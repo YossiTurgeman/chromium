@@ -1,12 +1,12 @@
-# Copyright 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import httplib
+import http.client
 import json
 import os
 import sys
-from urlparse import urlparse
+from urllib.parse import urlparse
 
 _THIS_DIR = os.path.abspath(os.path.dirname(__file__))
 _PARENT_DIR = os.path.join(_THIS_DIR, os.pardir)
@@ -81,6 +81,14 @@ class Command(object):
       _Method.GET, '/session/:sessionId/element/:id/property/:name')
   GET_ELEMENT_COMPUTED_LABEL = (
       _Method.GET, '/session/:sessionId/element/:id/computedlabel')
+  GET_ELEMENT_COMPUTED_ROLE = (
+      _Method.GET, '/session/:sessionId/element/:id/computedrole')
+  GET_ELEMENT_SHADOW_ROOT = (
+      _Method.GET, '/session/:sessionId/element/:id/shadow')
+  FIND_ELEMENT_FROM_SHADOW_ROOT = (
+      _Method.POST, '/session/:sessionId/shadow/:id/element')
+  FIND_ELEMENTS_FROM_SHADOW_ROOT = (
+      _Method.POST, '/session/:sessionId/shadow/:id/elements')
   ELEMENT_EQUALS = (
       _Method.GET, '/session/:sessionId/element/:id/equals/:other')
   GET_COOKIES = (_Method.GET, '/session/:sessionId/cookie')
@@ -110,6 +118,14 @@ class Command(object):
       _Method.POST, '/session/:sessionId/window/minimize')
   FULLSCREEN_WINDOW = (
       _Method.POST, '/session/:sessionId/window/fullscreen')
+  SET_DEVICE_POSTURE = (
+      _Method.POST, '/session/:sessionId/deviceposture')
+  CLEAR_DEVICE_POSTURE = (
+      _Method.DELETE, '/session/:sessionId/deviceposture')
+  SET_DISPLAY_FEATURES = (
+      _Method.POST, '/session/:sessionId/displayfeatures')
+  CLEAR_DISPLAY_FEATURES = (
+      _Method.DELETE, '/session/:sessionId/displayfeatures')
   CLOSE = (_Method.DELETE, '/session/:sessionId/window')
   DRAG_ELEMENT = (_Method.POST, '/session/:sessionId/element/:id/drag')
   GET_ELEMENT_VALUE_OF_CSS_PROPERTY = (
@@ -180,6 +196,7 @@ class Command(object):
       _Method.POST, '/session/:sessionId/chromium/send_command_and_get_result')
   GENERATE_TEST_REPORT = (
       _Method.POST, '/session/:sessionId/reporting/generate_test_report')
+  SET_TIME_ZONE = (_Method.POST, '/session/:sessionId/time_zone')
   ADD_VIRTUAL_AUTHENTICATOR = (
       _Method.POST, '/session/:sessionId/webauthn/authenticator')
   REMOVE_VIRTUAL_AUTHENTICATOR = (
@@ -201,22 +218,78 @@ class Command(object):
   SET_USER_VERIFIED = (
       _Method.POST,
       '/session/:sessionId/webauthn/authenticator/:authenticatorId/uv')
+  SET_CREDENTIAL_PROPERTIES = (
+      _Method.POST,
+      '/session/:sessionId/webauthn/authenticator/:authenticatorId/credentials/'
+      ':credentialId/props')
+  SET_SPC_TRANSACTION_MODE = (
+      _Method.POST,
+      '/session/:sessionId/secure-payment-confirmation/set-mode')
+  SET_RPH_REGISTRATION_MODE = (
+      _Method.POST,
+      '/session/:sessionId/custom-handlers/set-mode')
+  CREATE_VIRTUAL_SENSOR = (
+      _Method.POST, '/session/:sessionId/sensor')
+  UPDATE_VIRTUAL_SENSOR = (
+      _Method.POST, '/session/:sessionId/sensor/:type')
+  REMOVE_VIRTUAL_SENSOR = (
+      _Method.DELETE, '/session/:sessionId/sensor/:type')
+  GET_VIRTUAL_SENSOR_INFORMATION = (
+      _Method.GET, '/session/:sessionId/sensor/:type')
   SET_PERMISSION = (
       _Method.POST, '/session/:sessionId/permissions')
+  GET_CAST_SINKS = (
+      _Method.GET,
+      '/session/:sessionId/:vendorId/cast/get_sinks')
+  CANCEL_FEDCM_DIALOG = (
+      _Method.POST,
+      '/session/:sessionId/fedcm/canceldialog')
+  SELECT_ACCOUNT = (
+      _Method.POST,
+      '/session/:sessionId/fedcm/selectaccount')
+  CLICK_FEDCM_DIALOG_BUTTON = (
+      _Method.POST,
+      '/session/:sessionId/fedcm/clickdialogbutton')
+  GET_ACCOUNTS = (
+      _Method.GET,
+      '/session/:sessionId/fedcm/accountlist')
+  GET_FEDCM_TITLE = (
+      _Method.GET,
+      '/session/:sessionId/fedcm/gettitle')
+  GET_DIALOG_TYPE = (
+      _Method.GET,
+      '/session/:sessionId/fedcm/getdialogtype')
+  SET_DELAY_ENABLED = (
+      _Method.POST,
+      '/session/:sessionId/fedcm/setdelayenabled')
+  RESET_COOLDOWN = (
+      _Method.POST,
+      '/session/:sessionId/fedcm/resetcooldown')
+  RUN_BOUNCE_TRACKING_MITIGATIONS = (
+        _Method.DELETE,
+        '/session/:sessionId/storage/run_bounce_tracking_mitigations')
+  CREATE_VIRTUAL_PRESSURE_SOURCE = (
+      _Method.POST, '/session/:sessionId/pressuresource')
+  UPDATE_VIRTUAL_PRESSURE_SOURCE = (
+      _Method.POST, '/session/:sessionId/pressuresource/:type')
+  REMOVE_VIRTUAL_PRESSURE_SOURCE = (
+      _Method.DELETE, '/session/:sessionId/pressuresource/:type')
+  SET_PROTECTED_AUDIENCE_KANONYMITY = (
+      _Method.POST, '/session/:sessionId/protected_audience/set_k_anonymity')
 
   # Custom Chrome commands.
   IS_LOADING = (_Method.GET, '/session/:sessionId/is_loading')
 
 class CommandExecutor(object):
-  def __init__(self, server_url):
+  def __init__(self, server_url, http_timeout=None):
     self._server_url = server_url
     parsed_url = urlparse(server_url)
-    timeout = 10
-    # see https://crbug.com/1045241: short timeout seems to introduce flakiness
-    if util.IsMac() or util.IsWindows():
-      timeout = 30
-    self._http_client = httplib.HTTPConnection(
-      parsed_url.hostname, parsed_url.port, timeout=timeout)
+    # see https://crbug.com/40115943: short timeout seems to introduce flakiness
+    self._http_timeout = 60
+    if http_timeout is not None:
+      self._http_timeout = http_timeout
+    self._http_client = http.client.HTTPConnection(
+      parsed_url.hostname, parsed_url.port, timeout=self._http_timeout)
 
   @staticmethod
   def CreatePath(template_url_path, params):
@@ -230,6 +303,9 @@ class CommandExecutor(object):
       else:
         substituted_parts += [part]
     return '/'.join(substituted_parts)
+
+  def HttpTimeout(self):
+    return self._http_timeout
 
   def Execute(self, command, params):
     url_path = self.CreatePath(command[1], params)

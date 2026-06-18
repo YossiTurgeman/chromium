@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,27 +8,32 @@ import org.junit.rules.TestRule;
 import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
 
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.util.Batch;
-import org.chromium.chrome.browser.app.ChromeActivity;
+import org.chromium.chrome.browser.ChromeTabbedActivity;
 import org.chromium.chrome.browser.firstrun.FirstRunStatus;
+import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabLaunchType;
-import org.chromium.chrome.browser.tabmodel.TabModelUtils;
-import org.chromium.chrome.test.ChromeActivityTestRule;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.chrome.browser.tabmodel.IncognitoTabHostUtils;
+import org.chromium.chrome.browser.tabmodel.TabClosureParams;
+import org.chromium.chrome.browser.tabmodel.TabModel;
+import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
+import org.chromium.chrome.test.util.ChromeTabUtils;
+
+import java.lang.ref.WeakReference;
+import java.util.Collections;
 
 /**
  * To be used by batched tests that would like to reset to a single blank tab open in
  * ChromeTabbedActivity between each test, without restarting the Activity.
  *
- * State is stored statically, and so the Activity may be reused across multiple test suites within
- * the same {@link Batch}.
- *
- * @param <T> The type of {@link ChromeActivity}.
+ * <p>State is stored statically, and so the Activity may be reused across multiple test suites
+ * within the same {@link Batch}.
  */
-public class BlankCTATabInitialStateRule<T extends ChromeActivity> implements TestRule {
-    private static ChromeActivity sActivity;
+public class BlankCTATabInitialStateRule implements TestRule {
+    private static WeakReference<ChromeTabbedActivity> sActivity;
 
-    private final ChromeActivityTestRule<T> mActivityTestRule;
+    private final ChromeTabbedActivityTestRule mActivityTestRule;
     private final boolean mClearAllTabState;
 
     /**
@@ -37,10 +42,11 @@ public class BlankCTATabInitialStateRule<T extends ChromeActivity> implements Te
      *     renderer process between each test.
      */
     public BlankCTATabInitialStateRule(
-            ChromeActivityTestRule<T> activityTestRule, boolean clearAllTabState) {
+            ChromeTabbedActivityTestRule activityTestRule, boolean clearAllTabState) {
         super();
         mActivityTestRule = activityTestRule;
         mClearAllTabState = clearAllTabState;
+        mActivityTestRule.setFinishActivity(false);
     }
 
     @Override
@@ -49,44 +55,141 @@ public class BlankCTATabInitialStateRule<T extends ChromeActivity> implements Te
             @Override
             public void evaluate() throws Throwable {
                 if (sActivity == null) {
-                    TestThreadUtils.runOnUiThreadBlocking(
-                            () -> { FirstRunStatus.setFirstRunFlowComplete(true); });
-                    mActivityTestRule.startMainActivityOnBlankPage();
-                    sActivity = mActivityTestRule.getActivity();
+                    ThreadUtils.runOnUiThreadBlocking(
+                            () -> {
+                                FirstRunStatus.setFirstRunFlowComplete(true);
+                            });
+                    if (mActivityTestRule.getActivity() == null) {
+                        mActivityTestRule.startMainActivityOnBlankPage();
+                    }
+                    sActivity = new WeakReference<>(mActivityTestRule.getActivity());
+
+                    // Previous tests may have left tabs open and finished the Activity.
+                    if (regularTabCount() > 1) resetTabStateFast();
                 } else {
-                    mActivityTestRule.setActivity((T) sActivity);
-                    if (mClearAllTabState) {
-                        resetTabStateThorough();
-                    } else {
+                    ChromeTabbedActivity cta = sActivity.get();
+                    if (cta == null) {
+                        throw new IllegalStateException(
+                                "sActivity was destroyed between last test and this test.");
+                    }
+                    mActivityTestRule.setActivity(cta);
+                    if (shouldPerformFastReset()) {
                         resetTabStateFast();
+                    } else {
+                        resetTabStateThorough();
                     }
                 }
-                base.evaluate();
+                try {
+                    base.evaluate();
+                } finally {
+                    // If the activity was relaunched during the test, update the reference to use
+                    // the most up to date Activity.
+                    ChromeTabbedActivity activity = mActivityTestRule.getActivity();
+                    if (activity == null || activity.isActivityFinishingOrDestroyed()) {
+                        sActivity = null;
+                    } else {
+                        sActivity = new WeakReference<>(activity);
+                    }
+                }
             }
         };
+    }
+
+    private int regularTabCount() {
+        return ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    return getActivity().getTabModelSelector().getModel(false).getCount();
+                });
+    }
+
+    private static ChromeTabbedActivity getActivity() {
+        return sActivity.get();
+    }
+
+    private boolean shouldPerformFastReset() {
+        if (mClearAllTabState) return false;
+        return regularTabCount() > 0;
+    }
+
+    private void closeAllButOneTab(TabModel tabModel) {
+        ThreadUtils.assertOnUiThread();
+
+        while (tabModel.getCount() > 1) {
+            tabModel.getTabRemover()
+                    .forceCloseTabs(
+                            TabClosureParams.closeTab(tabModel.getTabAt(1))
+                                    .allowUndo(false)
+                                    .build());
+        }
     }
 
     // Avoids closing the primary tab (and killing the renderer) in order to reset tab state
     // quickly, at the cost of thoroughness. This should be adequate for most tests.
     private void resetTabStateFast() {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            // Close all but the first tab as these tests expect to start with a single
-            // tab.
-            while (TabModelUtils.closeTabByIndex(sActivity.getCurrentTabModel(), 1)) {
-            }
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    IncognitoTabHostUtils.closeAllIncognitoTabs();
+                    // Close all but the first regular tab as these tests expect to start with a
+                    // single tab.
+                    TabModel regularTabModel =
+                            getActivity().getTabModelSelector().getModel(/* incognito= */ false);
+                    closeAllButOneTab(regularTabModel);
+
+                    TabModel tabModel =
+                            getActivity().getTabModelSelector().getModel(/* incognito= */ false);
+                    Tab activityTab = getActivity().getActivityTab();
+                    if (tabModel.isTabInTabGroup(activityTab)) {
+                        tabModel.getTabUngrouper()
+                                .ungroupTabs(
+                                        Collections.singletonList(activityTab),
+                                        /* trailing= */ false,
+                                        /* allowDialog= */ false);
+                        // If the group is a collaboration it is possible a tab got added to perseve
+                        // the group. If this happens delete the tab forcibly.
+                        closeAllButOneTab(regularTabModel);
+                    }
+                    if (activityTab.getIsPinned()) {
+                        regularTabModel.unpinTab(activityTab.getId());
+                    }
+                });
         mActivityTestRule.loadUrl("about:blank");
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            sActivity.getCurrentWebContents().getNavigationController().clearHistory();
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    getActivity().getCurrentWebContents().getNavigationController().clearHistory();
+                });
     }
 
     // Thoroughly resets tab state by closing all tabs before restoring the primary tab to
     // about:blank state.
     private void resetTabStateThorough() {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            sActivity.getTabModelSelector().closeAllTabs();
-            sActivity.getTabCreator(false).launchUrl("about:blank", TabLaunchType.FROM_CHROME_UI);
-        });
+        Tab createdTab =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () -> {
+                            // We have to avoid closing all tabs and triggering CTA's self-finish
+                            // logic when all tabs are closed.
+                            Tab newTab =
+                                    getActivity()
+                                            .getTabCreator(false)
+                                            .launchUrl("about:blank", TabLaunchType.FROM_CHROME_UI);
+                            IncognitoTabHostUtils.closeAllIncognitoTabs();
+
+                            TabModel regularTabModel =
+                                    getActivity()
+                                            .getTabModelSelector()
+                                            .getModel(/* incognito= */ false);
+                            for (int i = regularTabModel.getCount() - 1; i >= 0; i--) {
+                                Tab tab = regularTabModel.getTabAt(i);
+                                if (tab != newTab) {
+                                    regularTabModel
+                                            .getTabRemover()
+                                            .forceCloseTabs(
+                                                    TabClosureParams.closeTab(tab)
+                                                            .allowUndo(false)
+                                                            .build());
+                                }
+                            }
+                            return newTab;
+                        });
+        ChromeTabUtils.waitForTabPageLoaded(createdTab, "about:blank");
     }
 }

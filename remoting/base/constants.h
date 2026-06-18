@@ -1,11 +1,11 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef REMOTING_BASE_CONSTANTS_H_
 #define REMOTING_BASE_CONSTANTS_H_
 
-#include "base/time/time.h"
+#include "build/build_config.h"
 
 namespace remoting {
 
@@ -24,12 +24,13 @@ extern const char kMimeTypeTextUtf8[];
 
 const int kDefaultDpi = 96;
 
-// The default interval for processes to send resource usage to network process.
-constexpr base::TimeDelta kDefaultProcessStatsInterval =
-    base::TimeDelta::FromMilliseconds(2000);
-
 // The video frame rate.
 constexpr int kTargetFrameRate = 30;
+
+#if BUILDFLAG(IS_LINUX)
+inline constexpr char kChromeRemoteDesktopSessionEnvVar[] =
+    "CHROME_REMOTE_DESKTOP_SESSION";
+#endif
 
 }  // namespace remoting
 

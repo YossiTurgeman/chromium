@@ -1,16 +1,17 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/containers/queue.h"
-#include "base/sequenced_task_runner.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/synchronization/lock.h"
 #include "base/synchronization/waitable_event.h"
-#include "base/test/bind_test_util.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "base/threading/platform_thread.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
@@ -19,7 +20,7 @@
 #include "mojo/public/cpp/bindings/pending_associated_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
-#include "mojo/public/interfaces/bindings/tests/test_associated_interfaces.mojom.h"
+#include "mojo/public/interfaces/bindings/tests/test_associated_interfaces.test-mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace mojo {
@@ -34,11 +35,13 @@ class TestTaskRunner : public base::SequencedTaskRunner {
         task_ready_(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                     base::WaitableEvent::InitialState::NOT_SIGNALED) {}
 
+  TestTaskRunner(const TestTaskRunner&) = delete;
+  TestTaskRunner& operator=(const TestTaskRunner&) = delete;
+
   bool PostNonNestableDelayedTask(const base::Location& from_here,
                                   base::OnceClosure task,
                                   base::TimeDelta delay) override {
     NOTREACHED();
-    return false;
   }
 
   bool PostDelayedTask(const base::Location& from_here,
@@ -70,8 +73,9 @@ class TestTaskRunner : public base::SequencedTaskRunner {
           {
             base::AutoUnlock unlocker(lock_);
             std::move(task).Run();
-            if (quit_called_)
+            if (quit_called_) {
               return;
+            }
           }
         }
       }
@@ -116,8 +120,6 @@ class TestTaskRunner : public base::SequencedTaskRunner {
   // Protect |tasks_|.
   base::Lock lock_;
   base::queue<base::OnceClosure> tasks_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestTaskRunner);
 };
 
 template <typename ReceiverType, typename PendingReceiverType>
@@ -134,10 +136,11 @@ class IntegerSenderImpl : public IntegerSender {
   void set_echo_handler(const EchoHandler& handler) { echo_handler_ = handler; }
 
   void Echo(int32_t value, EchoCallback callback) override {
-    if (echo_handler_.is_null())
+    if (echo_handler_.is_null()) {
       std::move(callback).Run(value);
-    else
+    } else {
       echo_handler_.Run(value, std::move(callback));
+    }
   }
   void Send(int32_t value) override { NOTREACHED(); }
 
@@ -194,7 +197,8 @@ class BindTaskRunnerTest : public testing::Test {
     remote_task_runner_ = scoped_refptr<TestTaskRunner>(new TestTaskRunner);
 
     auto receiver = remote_.BindNewPipeAndPassReceiver(remote_task_runner_);
-    impl_.reset(new ImplType(std::move(receiver), receiver_task_runner_));
+    impl_ =
+        std::make_unique<ImplType>(std::move(receiver), receiver_task_runner_);
   }
 
   base::test::SingleThreadTaskEnvironment task_environment_;
@@ -221,9 +225,9 @@ class AssociatedBindTaskRunnerTest : public testing::Test {
 
     auto connection_receiver = connection_remote_.BindNewPipeAndPassReceiver(
         connection_remote_task_runner_);
-    connection_impl_.reset(new IntegerSenderConnectionImpl(
+    connection_impl_ = std::make_unique<IntegerSenderConnectionImpl>(
         std::move(connection_receiver), connection_receiver_task_runner_,
-        sender_receiver_task_runner_));
+        sender_receiver_task_runner_);
 
     connection_impl_->set_get_sender_notification(base::BindOnce(
         &AssociatedBindTaskRunnerTest::QuitTaskRunner, base::Unretained(this)));

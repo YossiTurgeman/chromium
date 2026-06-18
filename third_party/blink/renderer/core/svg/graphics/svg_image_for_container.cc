@@ -19,61 +19,129 @@
 
 #include "third_party/blink/renderer/core/svg/graphics/svg_image_for_container.h"
 
-#include "base/memory/scoped_refptr.h"
-#include "third_party/blink/renderer/platform/geometry/float_rect.h"
-#include "third_party/blink/renderer/platform/geometry/float_size.h"
-#include "third_party/skia/include/core/SkBitmap.h"
-#include "third_party/skia/include/core/SkImage.h"
+#include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/dom/element.h"
+#include "third_party/blink/renderer/core/layout/natural_sizing_info.h"
+#include "third_party/blink/renderer/core/svg/graphics/svg_image.h"
+#include "third_party/blink/renderer/platform/graphics/graphics_context.h"
+#include "third_party/blink/renderer/platform/weborigin/kurl.h"
+#include "ui/gfx/geometry/size_conversions.h"
 
 namespace blink {
 
-IntSize SVGImageForContainer::Size() const {
-  // The image orientation is irrelevant because there is not concept of
-  // orientation for SVG images.
-  return RoundedIntSize(SizeAsFloat(kRespectImageOrientation));
+const SVGImageViewInfo* SVGImageForContainer::CreateViewInfo(
+    SVGImage& image,
+    const String& fragment) {
+  return image.CreateViewInfo(fragment);
 }
 
-FloatSize SVGImageForContainer::SizeAsFloat(RespectImageOrientationEnum) const {
-  FloatSize scaled_container_size(container_size_);
-  scaled_container_size.Scale(zoom_);
-  return scaled_container_size;
+const SVGImageViewInfo* SVGImageForContainer::CreateViewInfo(SVGImage& image,
+                                                             const KURL& url) {
+  if (!url.HasFragmentIdentifier()) {
+    return nullptr;
+  }
+  return CreateViewInfo(image, url.FragmentIdentifier().ToString());
+}
+
+const SVGImageViewInfo* SVGImageForContainer::CreateViewInfo(
+    SVGImage& image,
+    const Element& element) {
+  KURL url = element.GetDocument().CompleteURL(element.ImageSourceURL());
+  return CreateViewInfo(image, url);
+}
+
+const SVGImageViewInfo* SVGImageForContainer::CreateViewInfo(SVGImage& image,
+                                                             const Node* node) {
+  if (auto* element = DynamicTo<Element>(node)) {
+    return CreateViewInfo(image, *element);
+  }
+  return nullptr;
+}
+
+std::optional<NaturalSizingInfo> SVGImageForContainer::GetNaturalDimensions(
+    SVGImage& image,
+    const SVGImageViewInfo* info) {
+  return image.GetNaturalDimensions(info ? info->ViewSpec() : nullptr);
+}
+
+gfx::SizeF SVGImageForContainer::ConcreteObjectSize(
+    SVGImage& image,
+    const SVGImageViewInfo* info,
+    const gfx::SizeF& default_object_size) {
+  std::optional<NaturalSizingInfo> sizing_info =
+      GetNaturalDimensions(image, info);
+  if (!sizing_info) {
+    return default_object_size;
+  }
+  return blink::ConcreteObjectSize(*sizing_info, default_object_size);
+}
+
+gfx::Size SVGImageForContainer::SizeWithConfig(SizeConfig config) const {
+  return gfx::ToRoundedSize(SizeWithConfigAsFloat(config));
+}
+
+gfx::SizeF SVGImageForContainer::SizeWithConfigAsFloat(SizeConfig) const {
+  return gfx::ScaleSize(container_size_, zoom_);
+}
+
+SVGImageForContainer::SVGImageForContainer(SVGImage& image,
+                                           const gfx::SizeF& container_size,
+                                           float zoom,
+                                           const SVGImageViewInfo* viewinfo)
+    : image_(image),
+      viewinfo_(viewinfo),
+      container_size_(container_size),
+      zoom_(zoom) {}
+
+SVGImageForContainer::SVGImageForContainer(
+    SVGImage& image,
+    const gfx::SizeF& container_size,
+    float zoom,
+    const SVGImageViewInfo* viewinfo,
+    mojom::blink::PreferredColorScheme preferred_color_scheme)
+    : SVGImageForContainer(image, container_size, zoom, viewinfo) {
+  image_.SetPreferredColorScheme(preferred_color_scheme);
+}
+
+bool SVGImageForContainer::HasIntrinsicSize() const {
+  return image_.HasIntrinsicSize();
 }
 
 void SVGImageForContainer::Draw(cc::PaintCanvas* canvas,
                                 const cc::PaintFlags& flags,
-                                const FloatRect& dst_rect,
-                                const FloatRect& src_rect,
-                                RespectImageOrientationEnum,
-                                ImageClampingMode,
-                                ImageDecodingMode) {
-  image_->DrawForContainer(canvas, flags, container_size_, zoom_, dst_rect,
-                           src_rect, url_);
+                                const gfx::RectF& dst_rect,
+                                const gfx::RectF& src_rect,
+                                const ImageDrawOptions& draw_options) {
+  const SVGImage::DrawInfo draw_info(container_size_, zoom_, viewinfo_,
+                                     draw_options.apply_dark_mode);
+  image_.DrawForContainer(draw_info, canvas, flags, dst_rect, src_rect);
 }
 
 void SVGImageForContainer::DrawPattern(GraphicsContext& context,
-                                       const FloatRect& src_rect,
-                                       const FloatSize& scale,
-                                       const FloatPoint& phase,
-                                       SkBlendMode op,
-                                       const FloatRect& dst_rect,
-                                       const FloatSize& repeat_spacing,
-                                       RespectImageOrientationEnum) {
-  image_->DrawPatternForContainer(context, container_size_, zoom_, src_rect,
-                                  scale, phase, op, dst_rect, repeat_spacing,
-                                  url_);
+                                       const cc::PaintFlags& flags,
+                                       const gfx::RectF& dst_rect,
+                                       const ImageTilingInfo& tiling_info,
+                                       const ImageDrawOptions& draw_options) {
+  const SVGImage::DrawInfo draw_info(container_size_, zoom_, viewinfo_,
+                                     draw_options.apply_dark_mode);
+  image_.DrawPatternForContainer(draw_info, context, flags, dst_rect,
+                                 tiling_info);
 }
 
 bool SVGImageForContainer::ApplyShader(cc::PaintFlags& flags,
-                                       const SkMatrix& local_matrix) {
-  return image_->ApplyShaderForContainer(container_size_, zoom_, url_, flags,
-                                         local_matrix);
+                                       const SkMatrix& local_matrix,
+                                       const gfx::RectF& src_rect,
+                                       const ImageDrawOptions& draw_options) {
+  const SVGImage::DrawInfo draw_info(container_size_, zoom_, viewinfo_,
+                                     draw_options.apply_dark_mode);
+  return image_.ApplyShaderForContainer(draw_info, flags, src_rect,
+                                        local_matrix);
 }
 
 PaintImage SVGImageForContainer::PaintImageForCurrentFrame() {
-  auto builder = CreatePaintImageBuilder().set_completion_state(
-      image_->completion_state());
-  image_->PopulatePaintRecordForCurrentFrameForContainer(builder, Size(), zoom_,
-                                                         url_);
+  const SVGImage::DrawInfo draw_info(container_size_, zoom_, viewinfo_, false);
+  auto builder = CreatePaintImageBuilder();
+  image_.PopulatePaintRecordForCurrentFrameForContainer(draw_info, builder);
   return builder.TakePaintImage();
 }
 

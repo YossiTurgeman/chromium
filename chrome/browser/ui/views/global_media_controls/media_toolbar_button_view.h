@@ -1,28 +1,36 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_TOOLBAR_BUTTON_VIEW_H_
 #define CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_TOOLBAR_BUTTON_VIEW_H_
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "base/observer_list.h"
 #include "chrome/browser/ui/global_media_controls/media_toolbar_button_controller_delegate.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_button.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 
 class Browser;
-class GlobalMediaControlsPromoController;
+class BrowserView;
 class MediaNotificationService;
 class MediaToolbarButtonController;
 class MediaToolbarButtonObserver;
+class MediaToolbarButtonContextualMenu;
 
 // Media icon shown in the trusted area of toolbar. Its lifetime is tied to that
 // of its parent ToolbarView. The icon is made visible when there is an active
 // media session.
 class MediaToolbarButtonView : public ToolbarButton,
-                               public MediaToolbarButtonControllerDelegate,
-                               public views::ButtonListener {
+                               public MediaToolbarButtonControllerDelegate {
+  METADATA_HEADER(MediaToolbarButtonView, ToolbarButton)
+
  public:
-  explicit MediaToolbarButtonView(const Browser* browser);
+  MediaToolbarButtonView(
+      BrowserView* browser_view,
+      std::unique_ptr<MediaToolbarButtonContextualMenu> context_menu);
+  MediaToolbarButtonView(const MediaToolbarButtonView&) = delete;
+  MediaToolbarButtonView& operator=(const MediaToolbarButtonView&) = delete;
   ~MediaToolbarButtonView() override;
 
   void AddObserver(MediaToolbarButtonObserver* observer);
@@ -33,50 +41,26 @@ class MediaToolbarButtonView : public ToolbarButton,
   void Hide() override;
   void Enable() override;
   void Disable() override;
+  void MaybeShowLocalMediaCastingPromo() override;
+  void MaybeShowStopCastingPromo() override;
 
-  // views::ButtonListener implementation.
-  void ButtonPressed(views::Button* sender, const ui::Event& event) override;
-
-  // ToolbarButton implementation.
-  SkColor GetInkDropBaseColor() const override;
-  void UpdateIcon() override;
-
-  void ShowPromo();
-
-  // Called when the in-product help bubble has gone away.
-  void OnPromoEnded();
-
-  GlobalMediaControlsPromoController* GetPromoControllerForTesting() {
-    EnsurePromoController();
-    return promo_controller_.get();
+  MediaToolbarButtonController* media_toolbar_button_controller() {
+    return controller_.get();
   }
 
  private:
-  // Lazily constructs |promo_controller_| if necessary.
-  void EnsurePromoController();
+  void ButtonPressed();
+  void ClosePromoBubble(bool engaged);
 
-  // Informs the Global Media Controls in-product help that the GMC dialog was
-  // opened.
-  void InformIPHOfDialogShown();
+  const raw_ptr<Browser> browser_;
 
-  // Informs the Global Media Controls in-product help of the current button
-  // state.
-  void InformIPHOfButtonEnabled();
-  void InformIPHOfButtonDisabledorHidden();
+  const raw_ptr<MediaNotificationService> service_;
 
-  // Shows the in-product help bubble.
-  std::unique_ptr<GlobalMediaControlsPromoController> promo_controller_;
-
-  // True if the in-product help bubble is currently showing.
-  bool is_promo_showing_ = false;
-
-  MediaNotificationService* const service_;
   std::unique_ptr<MediaToolbarButtonController> controller_;
-  const Browser* const browser_;
 
   base::ObserverList<MediaToolbarButtonObserver> observers_;
 
-  DISALLOW_COPY_AND_ASSIGN(MediaToolbarButtonView);
+  std::unique_ptr<MediaToolbarButtonContextualMenu> context_menu_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_TOOLBAR_BUTTON_VIEW_H_

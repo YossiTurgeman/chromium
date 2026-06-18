@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,21 +6,31 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/rand_util.h"
+#include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
+#include "net/base/features.h"
 #include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
 #include "net/dns/dns_config.h"
+#include "net/dns/dns_config_service.h"
 #include "net/dns/dns_session.h"
 #include "net/dns/dns_test_util.h"
-#include "net/dns/public/dns_over_https_server_config.h"
+#include "net/dns/public/dns_over_https_config.h"
+#include "net/dns/public/dns_protocol.h"
+#include "net/dns/public/doh_provider_entry.h"
+#include "net/dns/public/secure_dns_mode.h"
 #include "net/dns/resolve_context.h"
 #include "net/socket/socket_test_util.h"
 #include "net/test/test_with_task_environment.h"
 #include "net/url_request/url_request_context.h"
+#include "net/url_request/url_request_context_builder.h"
+#include "net/url_request/url_request_test_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "url/scheme_host_port.h"
 
 namespace net {
 
@@ -45,9 +55,12 @@ class DnsClientTest : public TestWithTaskEnvironment {
             base::test::TaskEnvironment::TimeSource::MOCK_TIME) {}
 
   void SetUp() override {
-    client_ = DnsClient::CreateClientForTesting(
-        nullptr /* net_log */, &socket_factory_,
-        base::BindRepeating(&base::RandInt));
+    client_ = DnsClient::CreateClient(/*net_log=*/NetLog::Get());
+    auto context_builder = CreateTestURLRequestContextBuilder();
+    context_builder->set_client_socket_factory_for_testing(&socket_factory_);
+    request_context_ = context_builder->Build();
+    resolve_context_ = std::make_unique<ResolveContext>(
+        request_context_.get(), false /* enable_caching */);
   }
 
   DnsConfig BasicValidConfig() {
@@ -61,8 +74,8 @@ class DnsClientTest : public TestWithTaskEnvironment {
     if (!doh_only) {
       config = BasicValidConfig();
     }
-    config.dns_over_https_servers = {
-        DnsOverHttpsServerConfig("www.doh.com", true /* use_post */)};
+    config.doh_config =
+        *net::DnsOverHttpsConfig::FromString("https://www.doh.com/");
     return config;
   }
 
@@ -72,19 +85,29 @@ class DnsClientTest : public TestWithTaskEnvironment {
     return config;
   }
 
-  URLRequestContext request_context_;
-  ResolveContext resolve_context_{&request_context_,
-                                  false /* enable_caching */};
+  IPEndPoint Loopbackv4() { return IPEndPoint(IPAddress::IPv4Localhost(), 53); }
+
+  IPEndPoint Loopbackv6() { return IPEndPoint(IPAddress::IPv6Localhost(), 53); }
+
+  IPAddress PublicDnsIp() { return IPAddress(1, 2, 3, 4); }
+
+  IPAddress GooglePublicDnsIp() { return IPAddress(8, 8, 8, 8); }
+
+  IPAddress PrivateDnsIp() { return IPAddress(192, 168, 1, 1); }
+
+  std::unique_ptr<URLRequestContext> request_context_;
+  std::unique_ptr<ResolveContext> resolve_context_;
   std::unique_ptr<DnsClient> client_;
   AlwaysFailSocketFactory socket_factory_;
 };
 
 TEST_F(DnsClientTest, NoConfig) {
-  client_->SetInsecureEnabled(true);
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/true);
 
   EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_FALSE(client_->CanUseInsecureDnsTransactions());
   EXPECT_TRUE(client_->FallbackFromInsecureTransactionPreferred());
 
@@ -95,12 +118,13 @@ TEST_F(DnsClientTest, NoConfig) {
 }
 
 TEST_F(DnsClientTest, InvalidConfig) {
-  client_->SetInsecureEnabled(true);
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/true);
   client_->SetSystemConfig(DnsConfig());
 
   EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_FALSE(client_->CanUseInsecureDnsTransactions());
   EXPECT_TRUE(client_->FallbackFromInsecureTransactionPreferred());
 
@@ -111,13 +135,15 @@ TEST_F(DnsClientTest, InvalidConfig) {
 }
 
 TEST_F(DnsClientTest, CanUseSecureDnsTransactions_NoDohServers) {
-  client_->SetInsecureEnabled(true);
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/true);
   client_->SetSystemConfig(BasicValidConfig());
 
   EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_TRUE(client_->CanUseInsecureDnsTransactions());
+  EXPECT_TRUE(client_->CanQueryAdditionalTypesViaInsecureDns());
   EXPECT_FALSE(client_->FallbackFromInsecureTransactionPreferred());
 
   EXPECT_THAT(client_->GetEffectiveConfig(),
@@ -128,12 +154,13 @@ TEST_F(DnsClientTest, CanUseSecureDnsTransactions_NoDohServers) {
 }
 
 TEST_F(DnsClientTest, InsecureNotEnabled) {
-  client_->SetInsecureEnabled(false);
+  client_->SetInsecureEnabled(/*enabled=*/false,
+                              /*additional_types_enabled=*/false);
   client_->SetSystemConfig(ValidConfigWithDoh(false /* doh_only */));
 
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_FALSE(client_->CanUseInsecureDnsTransactions());
   EXPECT_TRUE(client_->FallbackFromInsecureTransactionPreferred());
 
@@ -145,15 +172,29 @@ TEST_F(DnsClientTest, InsecureNotEnabled) {
             ValidConfigWithDoh(false /* doh_only */));
 }
 
+TEST_F(DnsClientTest, RespectsAdditionalTypesDisabled) {
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/false);
+  client_->SetSystemConfig(BasicValidConfig());
+
+  EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
+  EXPECT_TRUE(
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
+  EXPECT_TRUE(client_->CanUseInsecureDnsTransactions());
+  EXPECT_FALSE(client_->CanQueryAdditionalTypesViaInsecureDns());
+  EXPECT_FALSE(client_->FallbackFromInsecureTransactionPreferred());
+}
+
 TEST_F(DnsClientTest, UnhandledOptions) {
-  client_->SetInsecureEnabled(true);
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/true);
   DnsConfig config = ValidConfigWithDoh(false /* doh_only */);
   config.unhandled_options = true;
   client_->SetSystemConfig(config);
 
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_FALSE(client_->CanUseInsecureDnsTransactions());
   EXPECT_TRUE(client_->FallbackFromInsecureTransactionPreferred());
 
@@ -167,30 +208,31 @@ TEST_F(DnsClientTest, UnhandledOptions) {
 
 TEST_F(DnsClientTest, CanUseSecureDnsTransactions_ProbeSuccess) {
   client_->SetSystemConfig(ValidConfigWithDoh(true /* doh_only */));
-  resolve_context_.InvalidateCachesAndPerSessionData(
+  resolve_context_->InvalidateCachesAndPerSessionData(
       client_->GetCurrentSession(), true /* network_change */);
 
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
 
-  resolve_context_.RecordServerSuccess(0u /* server_index */,
-                                       true /* is_doh_server */,
-                                       client_->GetCurrentSession());
+  resolve_context_->RecordServerSuccess(0u /* server_index */,
+                                        true /* is_doh_server */,
+                                        client_->GetCurrentSession());
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_FALSE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
 }
 
 TEST_F(DnsClientTest, DnsOverTlsActive) {
-  client_->SetInsecureEnabled(true);
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/true);
   DnsConfig config = ValidConfigWithDoh(false /* doh_only */);
   config.dns_over_tls_active = true;
   client_->SetSystemConfig(config);
 
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_FALSE(client_->CanUseInsecureDnsTransactions());
   EXPECT_TRUE(client_->FallbackFromInsecureTransactionPreferred());
 
@@ -201,18 +243,20 @@ TEST_F(DnsClientTest, DnsOverTlsActive) {
 }
 
 TEST_F(DnsClientTest, AllAllowed) {
-  client_->SetInsecureEnabled(true);
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/true);
   client_->SetSystemConfig(ValidConfigWithDoh(false /* doh_only */));
-  resolve_context_.InvalidateCachesAndPerSessionData(
+  resolve_context_->InvalidateCachesAndPerSessionData(
       client_->GetCurrentSession(), false /* network_change */);
-  resolve_context_.RecordServerSuccess(0u /* server_index */,
-                                       true /* is_doh_server */,
-                                       client_->GetCurrentSession());
+  resolve_context_->RecordServerSuccess(0u /* server_index */,
+                                        true /* is_doh_server */,
+                                        client_->GetCurrentSession());
 
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_FALSE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_TRUE(client_->CanUseInsecureDnsTransactions());
+  EXPECT_TRUE(client_->CanQueryAdditionalTypesViaInsecureDns());
   EXPECT_FALSE(client_->FallbackFromInsecureTransactionPreferred());
 
   EXPECT_THAT(client_->GetEffectiveConfig(),
@@ -223,15 +267,17 @@ TEST_F(DnsClientTest, AllAllowed) {
             ValidConfigWithDoh(false /* doh_only */));
 }
 
-TEST_F(DnsClientTest, FallbackFromInsecureTransactionPreferred_Failures) {
-  client_->SetInsecureEnabled(true);
+TEST_F(DnsClientTest, FallbackFromSecureTransactionPreferred_Failures) {
+  client_->SetInsecureEnabled(/*enabled=*/true,
+                              /*additional_types_enabled=*/true);
   client_->SetSystemConfig(ValidConfigWithDoh(false /* doh_only */));
 
   for (int i = 0; i < DnsClient::kMaxInsecureFallbackFailures; ++i) {
     EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
-    EXPECT_TRUE(
-        client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+    EXPECT_TRUE(client_->FallbackFromSecureTransactionPreferred(
+        resolve_context_.get()));
     EXPECT_TRUE(client_->CanUseInsecureDnsTransactions());
+    EXPECT_TRUE(client_->CanQueryAdditionalTypesViaInsecureDns());
     EXPECT_FALSE(client_->FallbackFromInsecureTransactionPreferred());
 
     client_->IncrementInsecureFallbackFailures();
@@ -239,17 +285,300 @@ TEST_F(DnsClientTest, FallbackFromInsecureTransactionPreferred_Failures) {
 
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_TRUE(client_->CanUseInsecureDnsTransactions());
+  EXPECT_TRUE(client_->CanQueryAdditionalTypesViaInsecureDns());
   EXPECT_TRUE(client_->FallbackFromInsecureTransactionPreferred());
 
   client_->ClearInsecureFallbackFailures();
 
   EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
   EXPECT_TRUE(
-      client_->FallbackFromSecureTransactionPreferred(&resolve_context_));
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
   EXPECT_TRUE(client_->CanUseInsecureDnsTransactions());
+  EXPECT_TRUE(client_->CanQueryAdditionalTypesViaInsecureDns());
   EXPECT_FALSE(client_->FallbackFromInsecureTransactionPreferred());
+}
+
+TEST_F(DnsClientTest, GetPresetAddrs) {
+  DnsConfig config;
+  config.doh_config = *net::DnsOverHttpsConfig::FromString(R"(
+    {
+      "servers": [{
+        "template": "https://www.doh.com/",
+        "endpoints": [{
+          "ips": ["4.3.2.1"]
+        }, {
+          "ips": ["4.3.2.2"]
+        }]
+      }]
+    }
+  )");
+  client_->SetSystemConfig(config);
+
+  EXPECT_FALSE(client_->GetPresetAddrs(
+      url::SchemeHostPort("https", "otherdomain.com", 443)));
+  EXPECT_FALSE(
+      client_->GetPresetAddrs(url::SchemeHostPort("http", "www.doh.com", 443)));
+  EXPECT_FALSE(client_->GetPresetAddrs(
+      url::SchemeHostPort("https", "www.doh.com", 9999)));
+
+  std::vector<IPEndPoint> expected({{{4, 3, 2, 1}, 443}, {{4, 3, 2, 2}, 443}});
+
+  EXPECT_THAT(
+      client_->GetPresetAddrs(url::SchemeHostPort("https", "www.doh.com", 443)),
+      testing::Optional(expected));
+}
+
+TEST_F(DnsClientTest,
+       SetSystemConfig_AutomaticModeWithDohFallback_AddsFallback) {
+  // The DoH config is replaced with a fallback server if:
+  // - Secure DNS is used in Automatic mode
+  // - The DNS Config has no DoH servers and no local nameservers set
+  // - The kAddAutomaticWithDohFallbackMode feature flag is enabled
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      net::features::kAddAutomaticWithDohFallbackMode);
+  base::HistogramTester histogram_tester;
+
+  DnsConfig initial_config = BasicValidConfig();
+  initial_config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  initial_config.allow_dns_over_https_upgrade = true;
+  client_->SetSystemConfig(initial_config);
+
+  // Check that kAutomatic doesn't change the config without a
+  // fallback server set.
+  EXPECT_THAT(client_->GetEffectiveConfig(),
+              testing::Pointee(std::move(initial_config)));
+  EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 1);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 1);
+
+  DnsConfigOverrides overrides = BasicValidOverrides();
+  // Use well-known nameserver that is supported for DoH upgrade.
+  std::vector<net::IPEndPoint> fallback_doh_nameservers = {net::IPEndPoint(
+      net::IPAddress(8, 8, 8, 8), net::dns_protocol::kDefaultPort)};
+  std::vector<DnsOverHttpsServerConfig> fallback_doh_configs =
+      net::GetDohUpgradeServersFromNameservers(fallback_doh_nameservers);
+  ASSERT_GT(fallback_doh_configs.size(), 0u);
+  overrides.fallback_doh_nameservers = fallback_doh_nameservers;
+  client_->SetConfigOverrides(std::move(overrides));
+
+  // The DNS config now has the fallback nameservers which are used to set
+  // the DoH config, enabling Secure DNS.
+  EXPECT_THAT(client_->GetEffectiveConfig()->doh_config,
+              DnsOverHttpsConfig(fallback_doh_configs));
+  EXPECT_THAT(client_->GetEffectiveConfig()->fallback_doh_nameservers,
+              fallback_doh_nameservers);
+  EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", true, 1);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", true, 1);
+}
+
+TEST_F(
+    DnsClientTest,
+    SetSystemConfig_AutomaticModeWithDohFallback_AddsFallback_FeatureDisabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndDisableFeature(
+      features::kAddAutomaticWithDohFallbackMode);
+  base::HistogramTester histogram_tester;
+
+  DnsConfig initial_config = BasicValidConfig();
+  initial_config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  initial_config.allow_dns_over_https_upgrade = true;
+  // Use well-known nameserver that is supported for DoH upgrade.
+  std::vector<net::IPEndPoint> fallback_doh_nameservers = {net::IPEndPoint(
+      net::IPAddress(8, 8, 8, 8), net::dns_protocol::kDefaultPort)};
+  std::vector<DnsOverHttpsServerConfig> fallback_doh_configs =
+      net::GetDohUpgradeServersFromNameservers(fallback_doh_nameservers);
+  ASSERT_GT(fallback_doh_configs.size(), 0u);
+  initial_config.fallback_doh_nameservers = fallback_doh_nameservers;
+  client_->SetSystemConfig(initial_config);
+
+  // Fallback nameservers provided, but should NOT be used because the feature
+  // is disabled.
+  EXPECT_EQ(client_->GetEffectiveConfig()->doh_config, DnsOverHttpsConfig());
+  EXPECT_THAT(client_->GetEffectiveConfig()->fallback_doh_nameservers,
+              fallback_doh_nameservers);
+  EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 1);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 1);
+}
+
+TEST_F(
+    DnsClientTest,
+    SetSystemConfig_AutomaticModeWithDohFallback_WithIpv4Loopback_DoesntAddFallback) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      net::features::kAddAutomaticWithDohFallbackMode);
+  base::HistogramTester histogram_tester;
+
+  DnsConfig initial_config = BasicValidConfig();
+  initial_config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  initial_config.allow_dns_over_https_upgrade = true;
+  initial_config.nameservers.emplace_back(IPAddress::IPv4Localhost(),
+                                          dns_protocol::kDefaultPort);
+  client_->SetSystemConfig(std::move(initial_config));
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 1);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 1);
+
+  DnsConfigOverrides overrides;
+  std::vector<net::IPEndPoint> fallback_doh_nameservers = {net::IPEndPoint(
+      net::IPAddress(8, 8, 8, 8), net::dns_protocol::kDefaultPort)};
+  overrides.fallback_doh_nameservers = std::move(fallback_doh_nameservers);
+  client_->SetConfigOverrides(std::move(overrides));
+
+  // Check that the fallback DoH nameservers aren't applied to the DoH config.
+  EXPECT_EQ(client_->GetEffectiveConfig()->doh_config, DnsOverHttpsConfig());
+  EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 2);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 2);
+}
+
+TEST_F(
+    DnsClientTest,
+    SetSystemConfig_AutomaticModeWithDohFallback_WithIpv6Loopback_DoesntAddFallback) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      net::features::kAddAutomaticWithDohFallbackMode);
+  base::HistogramTester histogram_tester;
+
+  DnsConfig initial_config = BasicValidConfig();
+  initial_config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  initial_config.allow_dns_over_https_upgrade = true;
+  initial_config.nameservers.emplace_back(IPAddress::IPv6Localhost(),
+                                          dns_protocol::kDefaultPort);
+  client_->SetSystemConfig(std::move(initial_config));
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 1);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 1);
+
+  DnsConfigOverrides overrides;
+  std::vector<net::IPEndPoint> fallback_doh_nameservers = {net::IPEndPoint(
+      net::IPAddress(8, 8, 8, 8), net::dns_protocol::kDefaultPort)};
+  overrides.fallback_doh_nameservers = std::move(fallback_doh_nameservers);
+  client_->SetConfigOverrides(std::move(overrides));
+
+  // Check that the fallback DoH nameservers aren't applied to the DoH config.
+  EXPECT_EQ(client_->GetEffectiveConfig()->doh_config, DnsOverHttpsConfig());
+  EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 2);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 2);
+}
+
+TEST_F(
+    DnsClientTest,
+    SetSystemConfig_AutomaticModeWithDohFallback_WithLocalAddress_DoesntAddFallback) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      net::features::kAddAutomaticWithDohFallbackMode);
+  base::HistogramTester histogram_tester;
+
+  DnsConfig initial_config = BasicValidConfig();
+  initial_config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  initial_config.allow_dns_over_https_upgrade = true;
+  initial_config.nameservers.emplace_back(IPAddress(192, 168, 1, 1),
+                                          dns_protocol::kDefaultPort);
+  client_->SetSystemConfig(std::move(initial_config));
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 1);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 1);
+
+  DnsConfigOverrides overrides;
+  std::vector<net::IPEndPoint> fallback_doh_nameservers = {net::IPEndPoint(
+      net::IPAddress(8, 8, 8, 8), net::dns_protocol::kDefaultPort)};
+  overrides.fallback_doh_nameservers = std::move(fallback_doh_nameservers);
+  client_->SetConfigOverrides(std::move(overrides));
+
+  // Check that the fallback DoH nameservers aren't applied to the DoH config.
+  EXPECT_EQ(client_->GetEffectiveConfig()->doh_config, DnsOverHttpsConfig());
+  EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", false, 2);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", false, 2);
+}
+
+TEST_F(
+    DnsClientTest,
+    SetSystemConfig_AutomaticModeWithDohFallback_WithLocalAddress_AddsFallbackIfFeatureEnabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {net::features::kDohFallbackAllowedWithLocalNameservers,
+       features::kAddAutomaticWithDohFallbackMode},
+      {});
+  base::HistogramTester histogram_tester;
+
+  DnsConfig initial_config = BasicValidConfig();
+  initial_config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  initial_config.allow_dns_over_https_upgrade = true;
+  initial_config.nameservers.emplace_back(IPAddress(192, 168, 1, 1),
+                                          dns_protocol::kDefaultPort);
+  client_->SetSystemConfig(std::move(initial_config));
+
+  DnsConfigOverrides overrides;
+  std::vector<net::IPEndPoint> fallback_doh_nameservers = {net::IPEndPoint(
+      net::IPAddress(8, 8, 8, 8), net::dns_protocol::kDefaultPort)};
+  std::vector<DnsOverHttpsServerConfig> fallback_doh_configs =
+      net::GetDohUpgradeServersFromNameservers(fallback_doh_nameservers);
+  ASSERT_GT(fallback_doh_configs.size(), 0u);
+  overrides.fallback_doh_nameservers = std::move(fallback_doh_nameservers);
+  client_->SetConfigOverrides(std::move(overrides));
+
+  // The fallback DoH nameservers ARE applied to the DoH config even with local
+  // nameservers because the feature is enabled.
+  EXPECT_THAT(client_->GetEffectiveConfig()->doh_config,
+              DnsOverHttpsConfig(std::move(fallback_doh_configs)));
+  EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeWithFallbackSucceeded", true, 1);
+  histogram_tester.ExpectBucketCount(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", true, 1);
+}
+
+TEST_F(
+    DnsClientTest,
+    SetSystemConfig_AutomaticModeWithDohFallback_AutoUpgradeSucceeds_DoesntAddFallback) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      net::features::kAddAutomaticWithDohFallbackMode);
+
+  DnsConfig initial_config;
+  initial_config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  initial_config.allow_dns_over_https_upgrade = true;
+  // Use well-known nameserver that is supported for DoH upgrade.
+  initial_config.nameservers.emplace_back(IPAddress(8, 8, 8, 8),
+                                          dns_protocol::kDefaultPort);
+  client_->SetSystemConfig(initial_config);
+
+  // Set a different server for fallback DoH to differentiate which one was used
+  // for the upgrade.
+  DnsConfigOverrides overrides;
+  std::vector<net::IPEndPoint> fallback_doh_nameservers = {net::IPEndPoint(
+      net::IPAddress(1, 1, 1, 1), net::dns_protocol::kDefaultPort)};
+  overrides.fallback_doh_nameservers = std::move(fallback_doh_nameservers);
+  client_->SetConfigOverrides(std::move(overrides));
+
+  // The DoH config should be from the standard autoupgrade, not the fallback.
+  std::vector<DnsOverHttpsServerConfig> expected_doh_configs =
+      net::GetDohUpgradeServersFromNameservers(initial_config.nameservers);
+  EXPECT_THAT(client_->GetEffectiveConfig()->doh_config,
+              DnsOverHttpsConfig(expected_doh_configs));
+  EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
 }
 
 TEST_F(DnsClientTest, Override) {
@@ -338,6 +667,146 @@ TEST_F(DnsClientTest, ReplaceCurrentSession_NoSession) {
   EXPECT_FALSE(client_->GetCurrentSession());
 }
 
-}  // namespace
+TEST_F(DnsClientTest, AutoUpgradeSucceeds) {
+  base::HistogramTester histogram_tester;
+  DnsConfig config;
+  config.nameservers = {IPEndPoint(GooglePublicDnsIp(), 53)};
+  config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  config.allow_dns_over_https_upgrade = true;
 
+  EXPECT_FALSE(client_->CanUseSecureDnsTransactions());
+  client_->SetSystemConfig(std::move(config));
+  EXPECT_TRUE(client_->CanUseSecureDnsTransactions());
+
+  histogram_tester.ExpectUniqueSample(
+      "Net.DNS.UpgradeConfig.InsecureUpgradeSucceeded", true, 1);
+  histogram_tester.ExpectTotalCount(
+      "Net.DNS.UpgradeConfigFailed.LocalNameserverState", 0);
+}
+
+TEST_F(DnsClientTest, AutoUpgradeFails_NoLocalNameservers) {
+  base::HistogramTester histogram_tester;
+  DnsConfig config;
+  config.nameservers = {IPEndPoint(PublicDnsIp(), 53)};
+  config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  config.allow_dns_over_https_upgrade = true;
+  client_->SetSystemConfig(std::move(config));
+
+  histogram_tester.ExpectUniqueSample(
+      "Net.DNS.UpgradeConfigFailed.LocalNameserverState",
+      net::DnsConfigLocalNameserverState::kNoLocal, 1);
+}
+
+TEST_F(DnsClientTest, AutoUpgradeFails_OnlyLoopbackNameservers) {
+  base::HistogramTester histogram_tester;
+  DnsConfig config;
+  config.nameservers = {Loopbackv4(), Loopbackv6(),
+                        IPEndPoint(PublicDnsIp(), 53)};
+  config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  config.allow_dns_over_https_upgrade = true;
+  client_->SetSystemConfig(std::move(config));
+
+  histogram_tester.ExpectUniqueSample(
+      "Net.DNS.UpgradeConfigFailed.LocalNameserverState",
+      net::DnsConfigLocalNameserverState::kOnlyLoopback, 1);
+}
+
+TEST_F(DnsClientTest, AutoUpgradeFails_OnlyNonLoopbackLocalNameservers) {
+  base::HistogramTester histogram_tester;
+  DnsConfig config;
+  config.nameservers = {IPEndPoint(PrivateDnsIp(), 53)};
+  config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  config.allow_dns_over_https_upgrade = true;
+  client_->SetSystemConfig(std::move(config));
+
+  histogram_tester.ExpectUniqueSample(
+      "Net.DNS.UpgradeConfigFailed.LocalNameserverState",
+      net::DnsConfigLocalNameserverState::kOnlyNonLoopbackLocal, 1);
+}
+
+TEST_F(DnsClientTest, AutoUpgradeFails_LoopbackAndNonLoopbackLocalNameservers) {
+  base::HistogramTester histogram_tester;
+  DnsConfig config;
+  config.nameservers = {Loopbackv4(), IPEndPoint(PrivateDnsIp(), 53)};
+  config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  config.allow_dns_over_https_upgrade = true;
+  client_->SetSystemConfig(std::move(config));
+
+  histogram_tester.ExpectUniqueSample(
+      "Net.DNS.UpgradeConfigFailed.LocalNameserverState",
+      net::DnsConfigLocalNameserverState::kLoopbackAndNonLoopback, 1);
+}
+
+TEST_F(DnsClientTest,
+       FallbackFromSecureTransactionPreferred_DohFallbackAllowed_Eligible) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      net::features::kAddAutomaticWithDohFallbackMode);
+
+  DnsConfig config = BasicValidConfig();
+  config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  config.allow_dns_over_https_upgrade = true;
+  config.fallback_doh_nameservers = {IPEndPoint(GooglePublicDnsIp(), 53)};
+  client_->SetSystemConfig(config);
+
+  ASSERT_TRUE(client_->GetCurrentSession());
+  ASSERT_TRUE(client_->GetCurrentSession()
+                  ->config()
+                  .should_perform_doh_fallback_upgrade);
+
+  resolve_context_->InvalidateCachesAndPerSessionData(
+      client_->GetCurrentSession(), /*network_change=*/false);
+
+  // Make DoH server available.
+  resolve_context_->RecordServerSuccess(/*server_index=*/0u,
+                                        /*is_doh_server=*/true,
+                                        client_->GetCurrentSession());
+
+  // If DoH is available, should NOT prefer fallback to insecure DNS.
+  EXPECT_FALSE(
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
+}
+
+TEST_F(
+    DnsClientTest,
+    FallbackFromSecureTransactionPreferred_DohFallbackAllowed_IneligibleAuto) {
+  DnsConfig config = ValidConfigWithDoh(/*doh_only=*/false);
+  config.secure_dns_mode = SecureDnsMode::kAutomatic;
+  client_->SetSystemConfig(config);
+
+  resolve_context_->InvalidateCachesAndPerSessionData(
+      client_->GetCurrentSession(), /*network_change=*/false);
+
+  // Make DoH server available.
+  resolve_context_->RecordServerSuccess(/*server_index=*/0u,
+                                        /*is_doh_server=*/true,
+                                        client_->GetCurrentSession());
+
+  // If `should_perform_doh_fallback_upgrade` is false, it should NOT prefer
+  // fallback if DoH is available.
+  EXPECT_FALSE(
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
+}
+
+TEST_F(
+    DnsClientTest,
+    FallbackFromSecureTransactionPreferred_DohFallbackAllowed_IneligibleSecure) {
+  DnsConfig config = ValidConfigWithDoh(/*doh_only=*/false);
+  config.secure_dns_mode = SecureDnsMode::kSecure;
+  client_->SetSystemConfig(config);
+
+  resolve_context_->InvalidateCachesAndPerSessionData(
+      client_->GetCurrentSession(), /*network_change=*/false);
+
+  // Make DoH server available.
+  resolve_context_->RecordServerSuccess(/*server_index=*/0u,
+                                        /*is_doh_server=*/true,
+                                        client_->GetCurrentSession());
+
+  // In SECURE mode, it should NOT prefer fallback if DoH is available.
+  EXPECT_FALSE(
+      client_->FallbackFromSecureTransactionPreferred(resolve_context_.get()));
+}
+
+}  // namespace
 }  // namespace net

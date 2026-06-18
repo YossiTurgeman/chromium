@@ -21,9 +21,12 @@
 
 #include "third_party/blink/renderer/core/css/css_rule.h"
 
+#include "third_party/blink/renderer/core/css/css_grouping_rule.h"
+#include "third_party/blink/renderer/core/css/css_style_rule.h"
 #include "third_party/blink/renderer/core/css/css_style_sheet.h"
 #include "third_party/blink/renderer/core/css/style_rule.h"
 #include "third_party/blink/renderer/core/css/style_sheet_contents.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/platform/wtf/size_assertions.h"
 
 namespace blink {
@@ -33,10 +36,6 @@ struct SameSizeAsCSSRule : public GarbageCollected<SameSizeAsCSSRule>,
   ~SameSizeAsCSSRule() override;
   unsigned char bitfields;
   Member<ScriptWrappable> member;
-#if !DCHECK_IS_ON()
-  // Increasing size of Member increases size of CSSRule.
-  ASSERT_SIZE(Member<ScriptWrappable>, void*);
-#endif  // DCHECK_IS_ON()
 };
 
 ASSERT_SIZE(CSSRule, SameSizeAsCSSRule);
@@ -51,6 +50,35 @@ const CSSParserContext* CSSRule::ParserContext(
   CSSStyleSheet* style_sheet = parentStyleSheet();
   return style_sheet ? style_sheet->Contents()->ParserContext()
                      : StrictCSSParserContext(secure_context_mode);
+}
+
+void CSSRule::CountUse(WebFeature feature) const {
+  CSSStyleSheet* style_sheet = parentStyleSheet();
+  Document* document = style_sheet ? style_sheet->OwnerDocument() : nullptr;
+  if (document) {
+    document->CountUse(feature);
+  }
+}
+
+wtf_size_t CSSRule::ReplaceChildRuleInParentIfExists(StyleRuleBase* old_rule,
+                                                     StyleRuleBase* new_rule,
+                                                     wtf_size_t position_hint) {
+  CSSRule* parent_rule = parentRule();
+  if (auto* style_rule = DynamicTo<CSSStyleRule>(parent_rule)) {
+    return style_rule->GetStyleRule()->ReplaceChildRuleIfExists(
+        old_rule, new_rule, position_hint);
+  }
+  if (auto* grouping_rule = DynamicTo<CSSGroupingRule>(parent_rule)) {
+    return grouping_rule->GroupRule()->ReplaceChildRuleIfExists(
+        old_rule, new_rule, position_hint);
+  }
+  if (CSSStyleSheet* parent_stylesheet = parentStyleSheet()) {
+    StyleSheetContents* contents = parent_stylesheet->Contents();
+    CHECK(contents);
+    return contents->ReplaceChildRuleIfExists(old_rule, new_rule,
+                                              position_hint);
+  }
+  return std::numeric_limits<wtf_size_t>::max();  // Not found.
 }
 
 void CSSRule::SetParentStyleSheet(CSSStyleSheet* style_sheet) {
@@ -69,11 +97,11 @@ void CSSRule::Trace(Visitor* visitor) const {
 }
 
 bool CSSRule::VerifyParentIsCSSRule() const {
-  return !parent_ || parent_->GetWrapperTypeInfo()->IsSubclass(
+  return !parent_ || ToWrapperTypeInfo(parent_)->IsSubclass(
                          CSSRule::GetStaticWrapperTypeInfo());
 }
 bool CSSRule::VerifyParentIsCSSStyleSheet() const {
-  return !parent_ || parent_->GetWrapperTypeInfo()->IsSubclass(
+  return !parent_ || ToWrapperTypeInfo(parent_)->IsSubclass(
                          CSSStyleSheet::GetStaticWrapperTypeInfo());
 }
 

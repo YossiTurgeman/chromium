@@ -1,36 +1,35 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.suggestions.tile;
 
+import android.content.res.ColorStateList;
 import android.graphics.drawable.Drawable;
 
-import androidx.annotation.Nullable;
-
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.suggestions.OfflinableSuggestion;
 import org.chromium.chrome.browser.suggestions.SiteSuggestion;
-import org.chromium.chrome.browser.ui.favicon.IconType;
+import org.chromium.components.favicon.IconType;
+import org.chromium.url.GURL;
 
-/**
- * Holds the details to populate a site suggestion tile.
- */
+/** Holds the details to populate a site suggestion tile. */
+@NullMarked
 public class Tile implements OfflinableSuggestion {
     private final SiteSuggestion mSiteData;
 
     private final int mIndex;
 
-    @TileVisualType
-    private int mType = TileVisualType.NONE;
+    private @TileVisualType int mType = TileVisualType.NONE;
 
-    @IconType
-    private int mIconType = IconType.INVALID;
+    private @IconType int mIconType = IconType.INVALID;
 
-    @Nullable
-    private Drawable mIcon;
+    private @Nullable Drawable mIcon;
 
-    @Nullable
-    private Long mOfflinePageOfflineId;
+    private @Nullable ColorStateList mIconTint;
+
+    private @Nullable Long mOfflinePageOfflineId;
 
     /**
      * @param suggestion The site data we want to populate the tile with.
@@ -46,7 +45,7 @@ public class Tile implements OfflinableSuggestion {
     }
 
     @Override
-    public String getUrl() {
+    public GURL getUrl() {
         return mSiteData.url;
     }
 
@@ -55,9 +54,8 @@ public class Tile implements OfflinableSuggestion {
         mOfflinePageOfflineId = offlineId;
     }
 
-    @Nullable
     @Override
-    public Long getOfflinePageOfflineId() {
+    public @Nullable Long getOfflinePageOfflineId() {
         return mOfflinePageOfflineId;
     }
 
@@ -91,25 +89,22 @@ public class Tile implements OfflinableSuggestion {
      * @return The source of this tile's title. Used for metrics tracking. Valid values are listed
      * in {@code TileTitleSource}.
      */
-    @TileTitleSource
-    public int getTitleSource() {
+    public @TileTitleSource int getTitleSource() {
         return mSiteData.titleSource;
     }
 
     /**
-     * @return The source of this tile. Used for metrics tracking. Valid values are listed in
-     * {@code TileSource}.
+     * @return The source of this tile. Used for metrics tracking. Valid values are listed in {@code
+     *     TileSource}.
      */
-    @TileSource
-    public int getSource() {
+    public @TileSource.EnumType int getSource() {
         return mSiteData.source;
     }
 
     /**
      * @return The visual type of this tile. Valid values are listed in {@link TileVisualType}.
      */
-    @TileVisualType
-    public int getType() {
+    public @TileVisualType int getType() {
         return mType;
     }
 
@@ -124,14 +119,11 @@ public class Tile implements OfflinableSuggestion {
     /**
      * @return The icon type of this tile. Valid values are listed in {@link IconType}.
      */
-    @IconType
-    public int getIconType() {
+    public @IconType int getIconType() {
         return mIconType;
     }
 
-    /**
-     * Sets the icon type of this tile. Valid values are listed in {@link IconType}.
-     */
+    /** Sets the icon type of this tile. Valid values are listed in {@link IconType}. */
     public void setIconType(@IconType int iconType) {
         mIconType = iconType;
     }
@@ -139,20 +131,25 @@ public class Tile implements OfflinableSuggestion {
     /**
      * @return The icon, may be null.
      */
-    @Nullable
-    public Drawable getIcon() {
+    public @Nullable Drawable getIcon() {
         return mIcon;
     }
 
-    /**
-     * Updates the icon drawable.
-     */
+    /** Updates the icon drawable. */
     public void setIcon(@Nullable Drawable icon) {
         mIcon = icon;
     }
 
-    @TileSectionType
-    public int getSectionType() {
+    /** Updates the icon tint color. */
+    public void setIconTint(@Nullable ColorStateList iconTint) {
+        mIconTint = iconTint;
+    }
+
+    public @Nullable ColorStateList getIconTint() {
+        return mIconTint;
+    }
+
+    public @TileSectionType int getSectionType() {
         return mSiteData.sectionType;
     }
 }

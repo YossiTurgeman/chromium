@@ -37,12 +37,12 @@ class SinkDocumentParser : public RawDataDocumentParser {
 
  private:
   // Ignore all data.
-  void AppendBytes(const char*, size_t) override {}
+  void AppendBytes(base::span<const uint8_t>) override {}
 };
 
 SinkDocument::SinkDocument(const DocumentInit& initializer)
     : HTMLDocument(initializer) {
-  SetCompatibilityMode(kQuirksMode);
+  SetCompatibilityMode(kNoQuirksMode);
   LockCompatibilityMode();
 }
 

@@ -1,21 +1,19 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import "ios/web_view/internal/autofill/cwv_credit_card_verifier_internal.h"
+#import <memory>
 
-#include <memory>
-
-#include "base/strings/sys_string_conversions.h"
-#include "components/autofill/core/browser/data_model/credit_card.h"
-#include "components/autofill/core/browser/ui/payments/card_unmask_prompt_controller_impl.h"
-#include "components/autofill/core/browser/ui/payments/card_unmask_prompt_view.h"
+#import "base/strings/sys_string_conversions.h"
+#import "components/autofill/core/browser/data_model/payments/credit_card.h"
+#import "components/autofill/core/browser/payments/card_unmask_challenge_option.h"
+#import "components/autofill/core/browser/payments/payments_autofill_client.h"
+#import "components/autofill/core/browser/ui/payments/card_unmask_prompt_controller_impl.h"
+#import "components/autofill/core/browser/ui/payments/card_unmask_prompt_options.h"
+#import "components/autofill/core/browser/ui/payments/card_unmask_prompt_view.h"
 #import "ios/web_view/internal/autofill/cwv_credit_card_internal.h"
-#include "ui/base/resource/resource_bundle.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/web_view/internal/autofill/cwv_credit_card_verifier_internal.h"
+#import "ui/base/resource/resource_bundle.h"
 
 NSErrorDomain const CWVCreditCardVerifierErrorDomain =
     @"org.chromium.chromewebview.CreditCardVerifierErrorDomain";
@@ -23,20 +21,30 @@ NSErrorUserInfoKey const CWVCreditCardVerifierRetryAllowedKey =
     @"retry_allowed";
 
 namespace {
-// Converts an autofill::AutofillClient::PaymentsRpcResult to a
-// CWVCreditCardVerificationError.
+// Converts an autofill::payments::PaymentsAutofillClient::PaymentsRpcResult to
+// a CWVCreditCardVerificationError.
 CWVCreditCardVerificationError CWVConvertPaymentsRPCResult(
-    autofill::AutofillClient::PaymentsRpcResult result) {
+    autofill::payments::PaymentsAutofillClient::PaymentsRpcResult result) {
   switch (result) {
-    case autofill::AutofillClient::NONE:
-    case autofill::AutofillClient::SUCCESS:
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::kNone:
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::
+        kSuccess:
+    // The following two errors are not expected on iOS.
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::
+        kVcnRetrievalTryAgainFailure:
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::
+        kVcnRetrievalPermanentFailure:
       NOTREACHED();
-      return CWVCreditCardVerificationErrorNone;
-    case autofill::AutofillClient::TRY_AGAIN_FAILURE:
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::
+        kTryAgainFailure:
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::
+        kClientSideTimeout:
       return CWVCreditCardVerificationErrorTryAgainFailure;
-    case autofill::AutofillClient::PERMANENT_FAILURE:
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::
+        kPermanentFailure:
       return CWVCreditCardVerificationErrorPermanentFailure;
-    case autofill::AutofillClient::NETWORK_ERROR:
+    case autofill::payments::PaymentsAutofillClient::PaymentsRpcResult::
+        kNetworkError:
       return CWVCreditCardVerificationErrorNetworkFailure;
   }
 }
@@ -67,7 +75,7 @@ class WebViewCardUnmaskPromptView : public autofill::CardUnmaskPromptView {
   void DisableAndWaitForVerification() override {
     // No op.
   }
-  void GotVerificationResult(const base::string16& error_message,
+  void GotVerificationResult(const std::u16string& error_message,
                              bool allow_retry) override {
     NSString* ns_error_message = base::SysUTF16ToNSString(error_message);
     [verifier_ didReceiveVerificationResultWithErrorMessage:ns_error_message
@@ -95,26 +103,39 @@ class WebViewCardUnmaskPromptView : public autofill::CardUnmaskPromptView {
 
 @synthesize creditCard = _creditCard;
 
-- (instancetype)initWithPrefs:(PrefService*)prefs
-               isOffTheRecord:(BOOL)isOffTheRecord
-                   creditCard:(const autofill::CreditCard&)creditCard
-                       reason:(autofill::AutofillClient::UnmaskCardReason)reason
-                     delegate:
-                         (base::WeakPtr<autofill::CardUnmaskDelegate>)delegate {
+- (instancetype)
+     initWithPrefs:(PrefService*)prefs
+    isOffTheRecord:(BOOL)isOffTheRecord
+        creditCard:(const autofill::CreditCard&)creditCard
+            reason:
+                (autofill::payments::PaymentsAutofillClient::UnmaskCardReason)
+                    reason
+          delegate:(base::WeakPtr<autofill::CardUnmaskDelegate>)delegate {
   self = [super init];
   if (self) {
     _creditCard = [[CWVCreditCard alloc] initWithCreditCard:creditCard];
-    _unmaskingView =
-        std::make_unique<ios_web_view::WebViewCardUnmaskPromptView>(self);
     _unmaskingController =
-        std::make_unique<autofill::CardUnmaskPromptControllerImpl>(prefs);
+        std::make_unique<autofill::CardUnmaskPromptControllerImpl>(
+            prefs, creditCard,
+            autofill::CardUnmaskPromptOptions(std::nullopt, reason), delegate);
+    __weak CWVCreditCardVerifier* weakSelf = self;
     _unmaskingController->ShowPrompt(
         base::BindOnce(^autofill::CardUnmaskPromptView*() {
-          return _unmaskingView.get();
-        }),
-        creditCard, reason, delegate);
+          return [weakSelf createUnmaskingView];
+        }));
   }
   return self;
+}
+
+// Factory function to CardUnmaskPromptController::ShowPrompt. This should
+// return std:unique_ptr<autofill::CardUnmaskPromptView>> but there are tests
+// which don't do the ownership correctly, so ownership is retained in the
+// CWVCreditCardVerifier instance.
+- (autofill::CardUnmaskPromptView*)createUnmaskingView {
+  DCHECK(!_unmaskingView);
+  _unmaskingView =
+      std::make_unique<ios_web_view::WebViewCardUnmaskPromptView>(self);
+  return _unmaskingView.get();
 }
 
 - (void)dealloc {
@@ -129,7 +150,7 @@ class WebViewCardUnmaskPromptView : public autofill::CardUnmaskPromptView {
 #pragma mark - Public Methods
 
 - (NSString*)navigationTitle {
-  return base::SysUTF16ToNSString(_unmaskingController->GetWindowTitle());
+  return base::SysUTF16ToNSString(_unmaskingController->GetNavigationTitle());
 }
 
 - (NSString*)instructionMessage {
@@ -172,23 +193,8 @@ class WebViewCardUnmaskPromptView : public autofill::CardUnmaskPromptView {
 
   _unmaskingController->OnUnmaskPromptAccepted(
       base::SysNSStringToUTF16(CVC), base::SysNSStringToUTF16(expirationMonth),
-      base::SysNSStringToUTF16(expirationYear), /*should_store_pan=*/false,
-      /*enable_fido_auth=*/false);
-}
-
-- (void)verifyWithCVC:(NSString*)CVC
-      expirationMonth:(nullable NSString*)expirationMonth
-       expirationYear:(nullable NSString*)expirationYear
-         storeLocally:(BOOL)storeLocally
-             riskData:(NSString*)riskData
-    completionHandler:(void (^)(NSError* _Nullable error))completionHandler {
-  DCHECK(!storeLocally) << "|storeLocally| is deprecated, please call the "
-                           "method without this parameter.";
-  [self verifyWithCVC:CVC
-        expirationMonth:expirationMonth
-         expirationYear:expirationYear
-               riskData:riskData
-      completionHandler:completionHandler];
+      base::SysNSStringToUTF16(expirationYear), /*enable_fido_auth=*/false,
+      /*was_checkbox_visible=*/false);
 }
 
 - (BOOL)isCVCValid:(NSString*)CVC {
@@ -210,10 +216,13 @@ class WebViewCardUnmaskPromptView : public autofill::CardUnmaskPromptView {
                                         retryAllowed:(BOOL)retryAllowed {
   if (_completionHandler) {
     NSError* error;
-    autofill::AutofillClient::PaymentsRpcResult result =
+    autofill::payments::PaymentsAutofillClient::PaymentsRpcResult result =
         _unmaskingController->GetVerificationResult();
-    if (errorMessage.length > 0 && result != autofill::AutofillClient::NONE &&
-        result != autofill::AutofillClient::SUCCESS) {
+    if (errorMessage.length > 0 &&
+        result != autofill::payments::PaymentsAutofillClient::
+                      PaymentsRpcResult::kNone &&
+        result != autofill::payments::PaymentsAutofillClient::
+                      PaymentsRpcResult::kSuccess) {
       NSDictionary* userInfo = @{
         NSLocalizedDescriptionKey : errorMessage,
         CWVCreditCardVerifierRetryAllowedKey : @(retryAllowed),
@@ -230,7 +239,7 @@ class WebViewCardUnmaskPromptView : public autofill::CardUnmaskPromptView {
 #pragma mark - Internal Methods
 
 - (void)didReceiveUnmaskVerificationResult:
-    (autofill::AutofillClient::PaymentsRpcResult)result {
+    (autofill::payments::PaymentsAutofillClient::PaymentsRpcResult)result {
   _unmaskingController->OnVerificationResult(result);
 }
 

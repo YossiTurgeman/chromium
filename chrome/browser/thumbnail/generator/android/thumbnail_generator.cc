@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,21 @@
 #include <memory>
 
 #include "base/android/jni_string.h"
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/strings/string_util.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/threading/thread_restrictions.h"
 #include "chrome/browser/thumbnail/generator/android/thumbnail_media_parser.h"
-#include "chrome/browser/thumbnail/generator/jni_headers/ThumbnailGenerator_jni.h"
 #include "chrome/browser/thumbnail/generator/thumbnail_util.h"
 #include "content/public/browser/browser_thread.h"
 #include "ui/gfx/android/java_bitmap.h"
 
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/browser/thumbnail/generator/jni_headers/ThumbnailGenerator_jni.h"
+
 class SkBitmap;
 
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 using base::android::ScopedJavaGlobalRef;
 
 namespace {
@@ -31,7 +35,7 @@ void ForwardJavaCallback(const ScopedJavaGlobalRef<jobject>& java_delegate,
   JNIEnv* env = base::android::AttachCurrentThread();
   Java_ThumbnailGenerator_onThumbnailRetrieved(
       env, java_delegate, content_id, icon_size,
-      thumbnail.drawsNothing() ? nullptr : gfx::ConvertToJavaBitmap(&thumbnail),
+      thumbnail.drawsNothing() ? nullptr : gfx::ConvertToJavaBitmap(thumbnail),
       callback);
 }
 
@@ -43,15 +47,14 @@ void OnThumbnailScaled(base::OnceCallback<void(SkBitmap)> java_callback,
 
 }  // namespace
 
-ThumbnailGenerator::ThumbnailGenerator(const JavaParamRef<jobject>& jobj)
+ThumbnailGenerator::ThumbnailGenerator(const JavaRef<jobject>& jobj)
     : java_delegate_(jobj) {
   DCHECK(!jobj.is_null());
 }
 
 ThumbnailGenerator::~ThumbnailGenerator() = default;
 
-void ThumbnailGenerator::Destroy(JNIEnv* env,
-                                 const JavaParamRef<jobject>& jobj) {
+void ThumbnailGenerator::Destroy(JNIEnv* env) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   delete this;
 }
@@ -77,16 +80,23 @@ void ThumbnailGenerator::OnVideoThumbnailRetrieved(
   // Scale the bitmap before sending back to Java.
   ScaleDownBitmap(icon_size, std::move(thumbnail),
                   base::BindOnce(&OnThumbnailScaled, std::move(java_callback)));
+
+  // We want to delete |parser| but can't do it immediately because current
+  // stack contains functions that belong to ThumbnailMediaParser and the
+  // VideoDecoder that the parser owens. This would cause use-after-free.
+  // That's why |parser|'s destruction is postponed till the current task
+  // is completed and the call stack doesn't have frames referencing memory
+  // owned by |parser|
+  base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
+                                                             std::move(parser));
 }
 
-void ThumbnailGenerator::RetrieveThumbnail(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& jobj,
-    const JavaParamRef<jstring>& jcontent_id,
-    const JavaParamRef<jstring>& jfile_path,
-    const JavaParamRef<jstring>& jmime_type,
-    jint icon_size,
-    const JavaParamRef<jobject>& callback) {
+void ThumbnailGenerator::RetrieveThumbnail(JNIEnv* env,
+                                           const JavaRef<jstring>& jcontent_id,
+                                           const JavaRef<jstring>& jfile_path,
+                                           const JavaRef<jstring>& jmime_type,
+                                           int32_t icon_size,
+                                           const JavaRef<jobject>& callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   base::FilePath file_path = base::FilePath::FromUTF8Unsafe(
@@ -107,10 +117,11 @@ void ThumbnailGenerator::RetrieveThumbnail(
   if (base::StartsWith(mime_type, "video/",
                        base::CompareCase::INSENSITIVE_ASCII)) {
     auto parser = ThumbnailMediaParser::Create(mime_type, file_path);
-    parser->Start(base::BindOnce(&ThumbnailGenerator::OnVideoThumbnailRetrieved,
-                                 weak_factory_.GetWeakPtr(),
-                                 std::move(java_callback), icon_size,
-                                 std::move(parser)));
+    auto* const parser_ptr = parser.get();
+    parser_ptr->Start(
+        base::BindOnce(&ThumbnailGenerator::OnVideoThumbnailRetrieved,
+                       weak_factory_.GetWeakPtr(), std::move(java_callback),
+                       icon_size, std::move(parser)));
     return;
   }
 
@@ -127,7 +138,9 @@ void ThumbnailGenerator::RetrieveThumbnail(
 }
 
 // static
-static jlong JNI_ThumbnailGenerator_Init(JNIEnv* env,
-                                         const JavaParamRef<jobject>& jobj) {
+static int64_t JNI_ThumbnailGenerator_Init(JNIEnv* env,
+                                           const JavaRef<jobject>& jobj) {
   return reinterpret_cast<intptr_t>(new ThumbnailGenerator(jobj));
 }
+
+DEFINE_JNI(ThumbnailGenerator)

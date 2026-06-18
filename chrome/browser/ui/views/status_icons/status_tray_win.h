@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,7 @@
 
 #include <memory>
 
-#include "base/compiler_specific.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
 #include "chrome/browser/status_icons/status_tray.h"
 
 class StatusIconWin;
@@ -21,7 +19,7 @@ class StatusIconWin;
 // a task to a worker thread each time EnqueueChange is called.
 class StatusTrayStateChangerProxy {
  public:
-  virtual ~StatusTrayStateChangerProxy() {}
+  virtual ~StatusTrayStateChangerProxy() = default;
 
   // Called by StatusTrayWin to request upgraded visibility on the icon
   // represented by the |icon_id|, |window| pair.
@@ -31,27 +29,35 @@ class StatusTrayStateChangerProxy {
 class StatusTrayWin : public StatusTray {
  public:
   StatusTrayWin();
+
+  StatusTrayWin(const StatusTrayWin&) = delete;
+  StatusTrayWin& operator=(const StatusTrayWin&) = delete;
+
   ~StatusTrayWin() override;
 
   void UpdateIconVisibilityInBackground(StatusIconWin* status_icon);
 
   // Exposed for testing.
-  LRESULT CALLBACK
-      WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+  LRESULT CALLBACK WndProc(HWND hwnd,
+                           UINT message,
+                           WPARAM wparam,
+                           LPARAM lparam);
 
  protected:
   // Overriden from StatusTray:
   std::unique_ptr<StatusIcon> CreatePlatformStatusIcon(
       StatusIconType type,
       const gfx::ImageSkia& image,
-      const base::string16& tool_tip) override;
+      const std::u16string& tool_tip) override;
 
  private:
   FRIEND_TEST_ALL_PREFIXES(StatusTrayWinTest, EnsureVisibleTest);
 
   // Static callback invoked when a message comes in to our messaging window.
-  static LRESULT CALLBACK
-      WndProcStatic(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+  static LRESULT CALLBACK WndProcStatic(HWND hwnd,
+                                        UINT message,
+                                        WPARAM wparam,
+                                        LPARAM lparam);
 
   UINT NextIconId();
 
@@ -77,9 +83,6 @@ class StatusTrayWin : public StatusTray {
   // Manages changes performed on a background thread to manipulate visibility
   // of notification icons.
   std::unique_ptr<StatusTrayStateChangerProxy> state_changer_proxy_;
-
-  DISALLOW_COPY_AND_ASSIGN(StatusTrayWin);
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_STATUS_ICONS_STATUS_TRAY_WIN_H_
-

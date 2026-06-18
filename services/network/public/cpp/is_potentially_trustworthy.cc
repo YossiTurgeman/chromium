@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,22 +6,27 @@
 
 #include <algorithm>
 #include <iterator>
+#include <optional>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "base/command_line.h"
 #include "base/logging.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/no_destructor.h"
-#include "base/optional.h"
+#include "base/numerics/checked_math.h"
 #include "base/sequence_checker.h"
 #include "base/strings/pattern.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "build/build_config.h"
+#include "net/base/ip_address.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
 #include "net/base/url_util.h"
 #include "services/network/public/cpp/network_switches.h"
+#include "third_party/abseil-cpp/absl/container/inlined_vector.h"
+#include "url/gurl.h"
 #include "url/origin.h"
 #include "url/scheme_host_port.h"
 #include "url/url_canon.h"
@@ -34,23 +39,68 @@ namespace network {
 
 namespace {
 
+// Best effort test if the hostname with wildcards can match a raw IPv4 address
+// taken from a GURL (e.g., "1.2.3.4").  This excludes things like
+// "0x1.0x2.0x3.0x4", since GURL will map that to 1.2.3.4. Can potentially
+// incorrectly return true cases with extra 0's (e.g., "*.2.3.00").
+bool PatternCanMatchIpV4Host(std::string_view hostname_pattern) {
+  // This method doesn't expect to receive empty strings, since
+  // IsValidWildcardPattern() ensures there is at least one '*'.
+  DCHECK(!hostname_pattern.empty());
+
+  std::vector<std::string_view> components = base::SplitStringPiece(
+      hostname_pattern, ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
+  // If there are more than 4, it can't match an IPv4 IP.
+  if (components.size() > 4)
+    return false;
+
+  // Create a copy of the original string, with components exactly matching "*"
+  // replaced with 0. Leave components with *'s and non-*'s alone. They'll be
+  // rejected when trying to parse the resulting string as an IPv4 IP.
+  absl::InlinedVector<std::string_view, 4> string_pieces;
+  for (const std::string_view component : components) {
+    if (component == "*") {
+      string_pieces.push_back("0");
+    } else {
+      string_pieces.push_back(component);
+    }
+  }
+
+  // If there are fewer than 4 components, add components until there are, as a
+  // wildcard can match multiple components.
+  for (size_t i = components.size(); i < 4; ++i) {
+    string_pieces.push_back("0");
+  }
+
+  std::string wildcards_replaced = base::JoinString(string_pieces, ".");
+
+  net::IPAddress ip_address;
+  return ip_address.AssignFromIPLiteral(wildcards_replaced) &&
+         ip_address.IsIPv4();
+}
+
 // Given a hostname pattern with a wildcard such as "*.foo.com", returns
 // true if |hostname_pattern| meets both of these conditions:
 // 1.) A string matching |hostname_pattern| is a valid hostname.
 // 2.) Wildcards only appear beyond the eTLD+1. "*.foo.com" is considered
 //     valid but "*.com" is not.
-bool IsValidWildcardPattern(const std::string& hostname_pattern) {
+bool IsValidWildcardPattern(std::string_view hostname_pattern) {
   // Replace wildcards with dummy values to check whether a matching origin is
-  // valid.
+  // valid. Use "z" so it won't potentially map to a hex digit, since IPv4 IPs
+  // are tested by PatternCanMatchIpV4Ip().
   std::string wildcards_replaced;
-  if (!base::ReplaceChars(hostname_pattern, "*", "a", &wildcards_replaced))
+  if (!base::ReplaceChars(hostname_pattern, "*", "z", &wildcards_replaced))
     return false;
   // Construct a SchemeHostPort with a dummy scheme and port to check that the
   // hostname is valid.
   url::SchemeHostPort scheme_host_port(
       GURL(base::StringPrintf("http://%s:80", wildcards_replaced.c_str())));
-  if (!scheme_host_port.IsValid())
-    return false;
+  if (!scheme_host_port.IsValid()) {
+    // Have to check for IPv4 separately. "http://z.0.0.1/" is considered
+    // invalid, but "http://0.0.0.1/" is valid.
+    if (!PatternCanMatchIpV4Host(hostname_pattern))
+      return false;
+  }
 
   // Check that wildcards only appear beyond the eTLD+1.
   size_t registry_length =
@@ -64,18 +114,29 @@ bool IsValidWildcardPattern(const std::string& hostname_pattern) {
   // If there is no registrar portion, the pattern is considered invalid.
   if (registry_length == 0)
     return false;
+  // If the registrar portion contains a wildcard, the pattern is considered
+  // invalid.
+  if (hostname_pattern.find('*', hostname_pattern.size() - registry_length) !=
+      std::string::npos)
+    return false;
   // If there is no component before the registrar portion, or if the component
   // immediately preceding the registrar portion contains a wildcard, the
   // pattern is not considered valid.
-  std::string host_before_registrar =
+  std::string_view host_before_registrar =
       hostname_pattern.substr(0, hostname_pattern.size() - registry_length);
-  std::vector<std::string> components =
-      base::SplitString(host_before_registrar, ".", base::KEEP_WHITESPACE,
-                        base::SPLIT_WANT_NONEMPTY);
+  std::vector<std::string_view> components =
+      base::SplitStringPiece(host_before_registrar, ".", base::KEEP_WHITESPACE,
+                             base::SPLIT_WANT_NONEMPTY);
   if (components.size() == 0)
     return false;
   if (components.back().find("*") != std::string::npos)
     return false;
+  // If a wildcard is a part of a component or there is adjacent wildcards, the
+  // pattern is not considered valid.
+  for (const std::string_view component : components) {
+    if (component.find('*') != std::string::npos && component != "*")
+      return false;
+  }
   return true;
 }
 
@@ -83,7 +144,7 @@ bool IsValidWildcardPattern(const std::string& hostname_pattern) {
 // wildcard components or components that fail canonicalization. For example,
 // given a |hostname_pattern| of "TeSt.*.%46oo.com", the output will be
 // "test.*.foo.com".
-std::string CanonicalizePatternComponents(const std::string& hostname_pattern) {
+std::string CanonicalizePatternComponents(std::string_view hostname_pattern) {
   std::string canonical_host;  // Do not modify outside of canon_output.
   canonical_host.reserve(hostname_pattern.length());
   url::StdStringCanonOutput canon_output(&canonical_host);
@@ -97,15 +158,11 @@ std::string CanonicalizePatternComponents(const std::string& hostname_pattern) {
       current = hostname_pattern.length();
 
     // Try to append the canonicalized version of this component.
-    int current_len = base::checked_cast<int>(current - begin);
-    if (hostname_pattern.substr(begin, current_len) == "*" ||
-        !url::CanonicalizeHostSubstring(
-            hostname_pattern.data(),
-            url::Component(base::checked_cast<int>(begin), current_len),
-            &canon_output)) {
+    std::string_view hostname = hostname_pattern.substr(begin, current - begin);
+    if (hostname == "*" ||
+        !url::CanonicalizeHostSubstring(hostname, &canon_output)) {
       // Failed to canonicalize this component; append as-is.
-      canon_output.Append(hostname_pattern.substr(begin, current_len).data(),
-                          current_len);
+      canon_output.Append(hostname);
     }
 
     if (current < hostname_pattern.length())
@@ -175,11 +232,11 @@ std::vector<std::string> ParseSecureOriginAllowlistFromCmdline() {
 
   std::vector<std::string> origin_patterns =
       ParseSecureOriginAllowlist(origins_str);
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   // For Crostini, we allow access to the default VM/container as a secure
   // origin via the hostname penguin.linux.test. We are required to use a
   // wildcard for the prefix because we do not know what the port number is.
-  // https://chromium.googlesource.com/chromiumos/docs/+/master/containers_and_vms.md
+  // https://chromium.googlesource.com/chromiumos/docs/+/main/containers_and_vms.md
   origin_patterns.push_back("*.linux.test");
 #endif
   return origin_patterns;
@@ -187,7 +244,7 @@ std::vector<std::string> ParseSecureOriginAllowlistFromCmdline() {
 
 bool IsAllowlisted(const std::vector<std::string>& allowlist,
                    const url::Origin& origin) {
-  if (base::Contains(allowlist, origin.Serialize()))
+  if (std::ranges::contains(allowlist, origin.Serialize()))
     return true;
 
   for (const std::string& origin_or_pattern : allowlist) {
@@ -198,43 +255,11 @@ bool IsAllowlisted(const std::vector<std::string>& allowlist,
   return false;
 }
 
-}  // namespace
-
-bool IsOriginPotentiallyTrustworthy(const url::Origin& origin) {
+bool IsSchemeConsideredAuthenticated(std::string_view scheme) {
   // The code below is based on the specification at
-  // https://www.w3.org/TR/powerful-features/#is-origin-trustworthy.
+  // https://w3c.github.io/webappsec-secure-contexts/#potentially-trustworthy-origin
 
-  // 1. If origin is an opaque origin, return "Not Trustworthy".
-  if (origin.opaque())
-    return false;
-
-  // 2. Assert: origin is a tuple origin.
-  DCHECK(!origin.opaque());
-
-  // 3. If origin’s scheme is either "https" or "wss", return "Potentially
-  //    Trustworthy".
-  if (GURL::SchemeIsCryptographic(origin.scheme()))
-    return true;
-
-  // 4. If origin’s host component matches one of the CIDR notations 127.0.0.0/8
-  //    or ::1/128 [RFC4632], return "Potentially Trustworthy".
-  //
-  // Diverging from the spec a bit here - in addition to the hostnames covered
-  // by https://www.w3.org/TR/powerful-features/#is-origin-trustworthy, the code
-  // below also considers "localhost" to be potentially secure.
-  //
-  // Cannot just pass |origin.host()| to |HostStringIsLocalhost|, because of the
-  // need to also strip the brackets from things like "[::1]".
-  if (net::IsLocalhost(origin.GetURL()))
-    return true;
-
-  // 5. If origin’s scheme component is file, return "Potentially Trustworthy".
-  //
-  // This is somewhat redundant with the GetLocalSchemes-based check below.
-  if (origin.scheme() == url::kFileScheme)
-    return true;
-
-  // 6. If origin’s scheme component is one which the user agent considers to be
+  // 7. If origin’s scheme component is one which the user agent considers to be
   //    authenticated, return "Potentially Trustworthy".
   //    Note: See §7.1 Packaged Applications for detail here.
   //
@@ -247,36 +272,71 @@ bool IsOriginPotentiallyTrustworthy(const url::Origin& origin) {
   //   content::ContentClient::Schemes::secure_schemes
   // - url::AddLocalScheme
   // - url::AddSecureScheme
-  if (base::Contains(url::GetSecureSchemes(), origin.scheme()) ||
-      base::Contains(url::GetLocalSchemes(), origin.scheme())) {
-    return true;
-  }
+  return std::ranges::contains(url::GetSecureSchemes(), scheme) ||
+         std::ranges::contains(url::GetLocalSchemes(), scheme);
+}
 
-  // 7. If origin has been configured as a trustworthy origin, return
+}  // namespace
+
+bool IsOriginPotentiallyTrustworthy(const url::Origin& origin) {
+  // The code below is based on the specification at
+  // https://w3c.github.io/webappsec-secure-contexts/#potentially-trustworthy-origin
+
+  // 1. If origin is an opaque origin, return "Not Trustworthy".
+  if (origin.opaque())
+    return false;
+
+  // 2. Assert: origin is a tuple origin.
+  DCHECK(!origin.opaque());
+
+  // 3. If origin’s scheme is either "https" or "wss", return "Potentially
+  //    Trustworthy".
+  // This is somewhat redundant with the GetSecureSchemes()-based check below.
+  if (GURL::SchemeIsCryptographic(origin.scheme()))
+    return true;
+
+  // 4. If origin’s host component matches one of the CIDR notations 127.0.0.0/8
+  //    or ::1/128 [RFC4632], return "Potentially Trustworthy".
+  // 5. If origin’s host component is "localhost" or falls within ".localhost",
+  //    and the user agent conforms to the name resolution rules in
+  //    [let-localhost-be-localhost], return "Potentially Trustworthy".
+  if (net::IsLocalhost(origin.GetURL()))
+    return true;
+
+  // 6. If origin’s scheme component is file, return "Potentially Trustworthy".
+  //
+  // This is somewhat redundant with the GetLocalSchemes-based
+  // IsSchemeConsideredAuthenticated check below.
+  if (origin.scheme() == url::kFileScheme)
+    return true;
+
+  // 7. If origin’s scheme component is one which the user agent considers to be
+  //    authenticated, return "Potentially Trustworthy".
+  //    Note: See §7.1 Packaged Applications for detail here.
+  if (IsSchemeConsideredAuthenticated(origin.scheme()))
+    return true;
+
+  // 8. If origin has been configured as a trustworthy origin, return
   //    "Potentially Trustworthy".
   //    Note: See §7.2 Development Environments for detail here.
   if (SecureOriginAllowlist::GetInstance().IsOriginAllowlisted(origin))
     return true;
 
-  // 8. Return "Not Trustworthy".
+  // 9. Return "Not Trustworthy".
   return false;
 }
 
 bool IsUrlPotentiallyTrustworthy(const GURL& url) {
   // The code below is based on the specification at
-  // https://www.w3.org/TR/powerful-features/#is-url-trustworthy.
+  // https://w3c.github.io/webappsec-secure-contexts/#potentially-trustworthy-url
 
-  // 1. If url’s scheme is "data", return "Not Trustworthy".
-  //    Note: This aligns the definition of a secure context with the de facto
-  //    "data: URL as opaque origin" behavior that a majority of today’s
-  //    browsers have agreed upon, rather than the de jure "data: URL inherits
-  //    origin" behavior defined in HTML.
-  if (url.SchemeIs(url::kDataScheme))
-    return false;
-
-  // 2. If url is "about:blank" or "about:srcdoc", return "Potentially
+  // 1. If url is "about:blank" or "about:srcdoc", return "Potentially
   //    Trustworthy".
-  if (url.SchemeIs(url::kAboutScheme))
+  if (url.IsAboutBlank() || url.IsAboutSrcdoc())
+    return true;
+
+  // 2. If url’s scheme is "data", return "Potentially Trustworthy".
+  if (url.SchemeIs(url::kDataScheme))
     return true;
 
   // 3. Return the result of executing §3.2 Is origin potentially trustworthy?
@@ -284,7 +344,15 @@ bool IsUrlPotentiallyTrustworthy(const GURL& url) {
   //    Note: The origin of blob: and filesystem: URLs is the origin of the
   //    context in which they were created. Therefore, blobs created in a
   //    trustworthy origin will themselves be potentially trustworthy.
-  return IsOriginPotentiallyTrustworthy(url::Origin::Create(url));
+  url::Origin origin = url::Origin::Create(url);
+  if (origin.opaque() && IsSchemeConsideredAuthenticated(url.scheme())) {
+    // Authenticated schemes should be treated as trustworthy, even if they
+    // translate into an opaque origin (e.g. because some of them might also be
+    // registered as a no-access, like the //content-layer chrome-error:// or
+    // the //chrome-layer chrome-native://).
+    return true;
+  }
+  return IsOriginPotentiallyTrustworthy(origin);
 }
 
 // static
@@ -299,10 +367,8 @@ std::vector<std::string> SecureOriginAllowlist::GetCurrentAllowlist() {
 
   std::vector<std::string> result;
   result.reserve(cmdline_allowlist_.size() + auxiliary_allowlist_.size());
-  std::copy(cmdline_allowlist_.begin(), cmdline_allowlist_.end(),
-            std::back_inserter(result));
-  std::copy(auxiliary_allowlist_.begin(), auxiliary_allowlist_.end(),
-            std::back_inserter(result));
+  std::ranges::copy(cmdline_allowlist_, std::back_inserter(result));
+  std::ranges::copy(auxiliary_allowlist_, std::back_inserter(result));
   return result;
 }
 

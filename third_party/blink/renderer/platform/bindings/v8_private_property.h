@@ -1,14 +1,12 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_V8_PRIVATE_PROPERTY_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_V8_PRIVATE_PROPERTY_H_
 
-#include <memory>
-
 #include "base/memory/ptr_util.h"
-#include "third_party/blink/renderer/platform/bindings/v8_binding_macros.h"
+#include "third_party/blink/renderer/platform/bindings/scoped_persistent.h"
 #include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -16,8 +14,6 @@
 #include "v8/include/v8.h"
 
 namespace blink {
-
-class ScriptWrappable;
 
 // Provides access to V8's private properties with a symbol key.
 //
@@ -42,6 +38,8 @@ class PLATFORM_EXPORT V8PrivateProperty {
   };
 
   V8PrivateProperty() = default;
+  V8PrivateProperty(const V8PrivateProperty&) = delete;
+  V8PrivateProperty& operator=(const V8PrivateProperty&) = delete;
 
   // Provides fast access to V8's private properties.
   //
@@ -57,7 +55,7 @@ class PLATFORM_EXPORT V8PrivateProperty {
     }
 
     // Returns the value of the private property if set, or undefined.
-    WARN_UNUSED_RESULT v8::MaybeLocal<v8::Value> GetOrUndefined(
+    [[nodiscard]] v8::MaybeLocal<v8::Value> GetOrUndefined(
         v8::Local<v8::Object> object) const {
       return object->GetPrivate(GetContext(), private_symbol_);
     }
@@ -75,9 +73,6 @@ class PLATFORM_EXPORT V8PrivateProperty {
 
    private:
     friend class V8PrivateProperty;
-    // The following classes are exceptionally allowed to call to
-    // getFromMainWorld.
-    friend class V8ExtendableMessageEvent;
 
     Symbol(v8::Isolate* isolate, v8::Local<v8::Private> private_symbol)
         : private_symbol_(private_symbol), isolate_(isolate) {}
@@ -86,10 +81,6 @@ class PLATFORM_EXPORT V8PrivateProperty {
     v8::Local<v8::Context> GetContext() const {
       return isolate_->GetCurrentContext();
     }
-
-    // Only friend classes are allowed to use this API.
-    WARN_UNUSED_RESULT v8::MaybeLocal<v8::Value> GetFromMainWorld(
-        ScriptWrappable*);
 
     v8::Local<v8::Private> private_symbol_;
     v8::Isolate* isolate_;
@@ -103,7 +94,6 @@ class PLATFORM_EXPORT V8PrivateProperty {
    public:
     SymbolKey() = default;
 
-   private:
     SymbolKey(const SymbolKey&) = delete;
     SymbolKey& operator=(const SymbolKey&) = delete;
   };
@@ -135,9 +125,7 @@ class PLATFORM_EXPORT V8PrivateProperty {
   // requirement.
   ScopedPersistent<v8::Private> symbol_window_document_cached_accessor_;
 
-  WTF::HashMap<const void*, v8::Eternal<v8::Private>> symbol_map_;
-
-  DISALLOW_COPY_AND_ASSIGN(V8PrivateProperty);
+  HashMap<const void*, v8::Eternal<v8::Private>> symbol_map_;
 };
 
 }  // namespace blink

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,17 +28,6 @@ std::string ToString(Namespace settings_namespace) {
       break;
   }
   NOTREACHED();
-  return std::string();
-}
-
-Namespace FromString(const std::string& namespace_string) {
-  if (namespace_string == kLocalNamespace)
-    return LOCAL;
-  if (namespace_string == kSyncNamespace)
-    return SYNC;
-  if (namespace_string == kManagedNamespace)
-    return MANAGED;
-  return INVALID;
 }
 
 }  // namespace settings_namespace

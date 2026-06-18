@@ -1,30 +1,45 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/policy/cloud/user_policy_signin_service.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/command_line.h"
+#include "base/feature_list.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/enterprise/util/managed_browser_utils.h"
 #include "chrome/browser/policy/chrome_browser_policy_connector.h"
 #include "chrome/browser/policy/profile_policy_connector.h"
+#include "chrome/browser/signin/chrome_signin_client_factory.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
 #include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/webui/signin/dice_turn_sync_on_helper.h"
+#include "chrome/browser/ui/webui/signin/signin_utils.h"
+#include "chrome/browser/ui/webui/signin/turn_sync_on_helper.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/policy/core/common/policy_namespace.h"
 #include "components/policy/core/common/policy_switches.h"
 #include "components/policy/core/common/policy_test_utils.h"
 #include "components/policy/policy_constants.h"
-#include "components/policy/test_support/local_policy_test_server.h"
+#include "components/policy/proto/cloud_policy.pb.h"
+#include "components/policy/test_support/embedded_policy_test_server.h"
+#include "components/policy/test_support/policy_storage.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/pref_test_utils.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "components/signin/public/identity_manager/accounts_mutator.h"
 #include "components/signin/public/identity_manager/identity_test_utils.h"
-#include "components/sync/driver/sync_driver_switches.h"
+#include "components/signin/public/identity_manager/primary_account_mutator.h"
+#include "components/sync/base/command_line_switches.h"
+#include "components/sync/base/features.h"
 #include "content/public/test/browser_test.h"
 #include "google_apis/gaia/fake_gaia.h"
 #include "google_apis/gaia/gaia_switches.h"
@@ -36,6 +51,7 @@
 #include "testing/gtest/include/gtest/gtest.h"
 
 class UserPolicySigninServiceTest;
+class SigninUIError;
 
 namespace {
 
@@ -44,53 +60,40 @@ const char kTestRefreshToken[] =
     "test_refresh_token_for_enterprise@example.com";
 
 // Dummy delegate forwarding all the calls the test fixture.
-// Owned by the DiceTurnOnSyncHelper.
-class TestDiceTurnSyncOnHelperDelegate : public DiceTurnSyncOnHelper::Delegate {
+// Owned by the TurnSyncOnHelper.
+class TestTurnSyncOnHelperDelegate : public TurnSyncOnHelper::Delegate {
  public:
-  explicit TestDiceTurnSyncOnHelperDelegate(
+  explicit TestTurnSyncOnHelperDelegate(
       UserPolicySigninServiceTest* test_fixture);
-  ~TestDiceTurnSyncOnHelperDelegate() override;
+  ~TestTurnSyncOnHelperDelegate() override;
 
  private:
-  // DiceTurnSyncOnHelper::Delegate:
-  void ShowLoginError(const std::string& email,
-                      const std::string& error_message) override;
+  // TurnSyncOnHelper::Delegate:
+  void ShowLoginError(const SigninUIError& error) override;
   void ShowMergeSyncDataConfirmation(
       const std::string& previous_email,
       const std::string& new_email,
-      DiceTurnSyncOnHelper::SigninChoiceCallback callback) override;
+      signin::SigninChoiceCallback callback) override;
   void ShowEnterpriseAccountConfirmation(
-      const std::string& email,
-      DiceTurnSyncOnHelper::SigninChoiceCallback callback) override;
+      const AccountInfo& account_info,
+      signin::SigninChoiceCallback callback) override;
   void ShowSyncConfirmation(
+      base::OnceCallback<void(LoginUIService::SyncConfirmationUIClosedResult)>
+          callback) override;
+  void ShowSyncDisabledConfirmation(
+      bool is_managed_account,
       base::OnceCallback<void(LoginUIService::SyncConfirmationUIClosedResult)>
           callback) override;
   void ShowSyncSettings() override;
   void SwitchToProfile(Profile* new_profile) override;
 
-  UserPolicySigninServiceTest* test_fixture_;
+  raw_ptr<UserPolicySigninServiceTest> test_fixture_;
 };
-
-std::string GetTestPolicy() {
-  const char kTestPolicy[] = R"(
-      {
-        "%s": {
-          "mandatory": {
-            "ShowHomeButton": true
-          }
-        },
-        "managed_users": [ "*" ],
-        "policy_user": "%s",
-        "current_key_index": 0,
-        "policy_invalidation_topic": "test_policy_topic"
-      })";
-
-  return base::StringPrintf(
-      kTestPolicy, policy::dm_protocol::kChromeUserPolicyType, kTestEmail);
-}
 
 }  // namespace
 
+// TODO(https://crbug.com/340623286): Convert this test suite to use the
+// `ProfileManagementDisclaimerService`.
 class UserPolicySigninServiceTest : public InProcessBrowserTest {
  public:
   UserPolicySigninServiceTest()
@@ -112,26 +115,35 @@ class UserPolicySigninServiceTest : public InProcessBrowserTest {
 
   ~UserPolicySigninServiceTest() override {
     // Ensure that no helper leaked.
-    DCHECK_EQ(dice_helper_created_count_, dice_helper_deleted_count_);
+    DCHECK_EQ(helper_created_count_, helper_deleted_count_);
   }
 
   Profile* profile() { return browser()->profile(); }
+
+  SigninClient* signin_client() {
+    return ChromeSigninClientFactory::GetForProfile(profile());
+  }
+
+  const CoreAccountId& account_id() { return account_info_.account_id; }
 
   policy::PolicyService* GetPolicyService() {
     return profile()->GetProfilePolicyConnector()->policy_service();
   }
 
-  DiceTurnSyncOnHelper* CreateDiceTurnOnSyncHelper() {
-    // DiceTurnSyncOnHelper deletes itself. At the end of the test, there is a
-    // check that these objects did not leak.
-    ++dice_helper_created_count_;
-    return new DiceTurnSyncOnHelper(
-        profile(), signin_metrics::AccessPoint::ACCESS_POINT_BOOKMARK_MANAGER,
+  signin::IdentityManager* identity_manager() {
+    return IdentityManagerFactory::GetForProfile(profile());
+  }
+
+  TurnSyncOnHelper* CreateTurnSyncOnHelper() {
+    // TurnSyncOnHelper deletes itself. At the end of the test, there is a check
+    // that these objects did not leak.
+    ++helper_created_count_;
+    return new TurnSyncOnHelper(
+        profile(), signin_metrics::AccessPoint::kBookmarkManager,
         signin_metrics::PromoAction::PROMO_ACTION_WITH_DEFAULT,
-        signin_metrics::Reason::REASON_REAUTHENTICATION,
         account_info_.account_id,
-        DiceTurnSyncOnHelper::SigninAbortedMode::REMOVE_ACCOUNT,
-        std::make_unique<TestDiceTurnSyncOnHelperDelegate>(this),
+        TurnSyncOnHelper::SigninAbortedMode::REMOVE_ACCOUNT,
+        std::make_unique<TestTurnSyncOnHelperDelegate>(this),
         base::DoNothing());
   }
 
@@ -156,11 +168,11 @@ class UserPolicySigninServiceTest : public InProcessBrowserTest {
     std::move(sync_confirmation_callback_).Run(confirmation_result);
   }
 
-  // DiceTurnSyncOnHelperDelegate calls:
+  // TurnSyncOnHelperDelegate calls:
   void OnShowEnterpriseAccountConfirmation(
-      const std::string& email,
-      DiceTurnSyncOnHelper::SigninChoiceCallback callback) {
-    std::move(callback).Run(DiceTurnSyncOnHelper::SIGNIN_CHOICE_CONTINUE);
+      const AccountInfo& account_info,
+      signin::SigninChoiceCallback callback) {
+    std::move(callback).Run(signin::SIGNIN_CHOICE_CONTINUE);
   }
 
   void OnShowSyncConfirmation(
@@ -171,7 +183,15 @@ class UserPolicySigninServiceTest : public InProcessBrowserTest {
       std::move(sync_confirmation_shown_closure_).Run();
   }
 
-  void OnDiceTurnSyncOnHelperDeleted() { ++dice_helper_deleted_count_; }
+  void OnShowSyncDisabledConfirmation(
+      base::OnceCallback<void(LoginUIService::SyncConfirmationUIClosedResult)>
+          callback) {
+    sync_confirmation_callback_ = std::move(callback);
+    if (sync_confirmation_shown_closure_)
+      std::move(sync_confirmation_shown_closure_).Run();
+  }
+
+  void OnTurnSyncOnHelperDeleted() { ++helper_deleted_count_; }
 
   void set_policy_hanging(bool hanging) { policy_hanging_ = hanging; }
 
@@ -196,10 +216,12 @@ class UserPolicySigninServiceTest : public InProcessBrowserTest {
     command_line->AppendSwitchASCII(switches::kGaiaUrl, base_url.spec());
     command_line->AppendSwitchASCII(switches::kLsoUrl, base_url.spec());
     command_line->AppendSwitchASCII(switches::kGoogleApisUrl, base_url.spec());
+    command_line->AppendSwitchASCII(switches::kOAuthAccountManagerUrl,
+                                    base_url.spec());
     policy::ChromeBrowserPolicyConnector::EnableCommandLineSupportForTesting();
     fake_gaia_.Initialize();
     // Configure Sync server.
-    command_line->AppendSwitch(switches::kDisableSync);
+    command_line->AppendSwitch(syncer::kDisableSync);
 
     // Set retry delay to prevent timeouts.
     policy::DeviceManagementService::SetRetryDelayForTesting(0);
@@ -212,29 +234,29 @@ class UserPolicySigninServiceTest : public InProcessBrowserTest {
 
     embedded_test_server_.StartAcceptingConnections();
 
-    account_info_ = signin::MakeAccountAvailable(
-        IdentityManagerFactory::GetForProfile(profile()), kTestEmail);
-    signin::SetRefreshTokenForAccount(
-        IdentityManagerFactory::GetForProfile(profile()),
-        account_info_.account_id, kTestRefreshToken);
+    account_info_ = MakeAccountAvailable(
+        identity_manager(), signin::AccountAvailabilityOptionsBuilder()
+                                .AsPrimary(signin::ConsentLevel::kSignin)
+                                .WithRefreshToken(kTestRefreshToken)
+                                .Build(kTestEmail));
     SetupFakeGaiaResponses();
   }
 
-  void SetServerPolicy(const std::string& policy) {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    ASSERT_TRUE(base::WriteFile(policy_file_path(), policy));
-  }
-
-  base::FilePath policy_file_path() const {
-    return temp_dir_.GetPath().AppendASCII("policy.json");
-  }
-
   void SetUpPolicyServer() {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-    ASSERT_NO_FATAL_FAILURE(SetServerPolicy(GetTestPolicy()));
-    policy_server_ =
-        std::make_unique<policy::LocalPolicyTestServer>(policy_file_path());
+    policy_server_ = std::make_unique<policy::EmbeddedPolicyTestServer>();
+
+    policy::PolicyStorage* policy_storage = policy_server_->policy_storage();
+    em::CloudPolicySettings settings;
+    settings.mutable_showhomebutton()->mutable_policy_options()->set_mode(
+        em::PolicyOptions::MANDATORY);
+    settings.mutable_showhomebutton()->set_value(true);
+    policy_storage->SetPolicyPayload(
+        policy::dm_protocol::GetChromeUserPolicyType(),
+        settings.SerializeAsString());
+    policy_storage->add_managed_user("*");
+    policy_storage->set_policy_user(kTestEmail);
+    policy_storage->signature_provider()->set_current_key_version(1);
+    policy_storage->set_policy_invalidation_topic("test_policy_topic");
   }
 
   void SetupFakeGaiaResponses() {
@@ -276,7 +298,7 @@ class UserPolicySigninServiceTest : public InProcessBrowserTest {
 
     // Redirect to the policy server.
     GURL::Replacements replace_query;
-    std::string query = r.GetURL().query();
+    std::string query = r.GetURL().GetQuery();
     replace_query.SetQueryStr(query);
     std::string dest =
         policy_server_->GetServiceURL().ReplaceComponents(replace_query).spec();
@@ -287,129 +309,209 @@ class UserPolicySigninServiceTest : public InProcessBrowserTest {
     return http_response;
   }
 
-  base::ScopedTempDir temp_dir_;
   net::EmbeddedTestServer embedded_test_server_;
   FakeGaia fake_gaia_;
-  std::unique_ptr<policy::LocalPolicyTestServer> policy_server_;
+  std::unique_ptr<policy::EmbeddedPolicyTestServer> policy_server_;
   CoreAccountInfo account_info_;
   base::OnceClosure sync_confirmation_shown_closure_;
   base::OnceClosure policy_hanging_closure_;
   base::OnceCallback<void(LoginUIService::SyncConfirmationUIClosedResult)>
       sync_confirmation_callback_;
   bool policy_hanging_ = false;
-  int dice_helper_created_count_ = 0;
-  int dice_helper_deleted_count_ = 0;
+  int helper_created_count_ = 0;
+  int helper_deleted_count_ = 0;
 };
 
-TestDiceTurnSyncOnHelperDelegate::TestDiceTurnSyncOnHelperDelegate(
+TestTurnSyncOnHelperDelegate::TestTurnSyncOnHelperDelegate(
     UserPolicySigninServiceTest* test_fixture)
     : test_fixture_(test_fixture) {}
 
-TestDiceTurnSyncOnHelperDelegate::~TestDiceTurnSyncOnHelperDelegate() {
-  test_fixture_->OnDiceTurnSyncOnHelperDeleted();
+TestTurnSyncOnHelperDelegate::~TestTurnSyncOnHelperDelegate() {
+  test_fixture_->OnTurnSyncOnHelperDeleted();
 }
 
-void TestDiceTurnSyncOnHelperDelegate::ShowLoginError(
-    const std::string& email,
-    const std::string& error_message) {
+void TestTurnSyncOnHelperDelegate::ShowLoginError(const SigninUIError& error) {
   NOTREACHED();
 }
 
-void TestDiceTurnSyncOnHelperDelegate::ShowMergeSyncDataConfirmation(
+void TestTurnSyncOnHelperDelegate::ShowMergeSyncDataConfirmation(
     const std::string& previous_email,
     const std::string& new_email,
-    DiceTurnSyncOnHelper::SigninChoiceCallback callback) {
+    signin::SigninChoiceCallback callback) {
   NOTREACHED();
 }
 
-void TestDiceTurnSyncOnHelperDelegate::ShowEnterpriseAccountConfirmation(
-    const std::string& email,
-    DiceTurnSyncOnHelper::SigninChoiceCallback callback) {
-  test_fixture_->OnShowEnterpriseAccountConfirmation(email,
+void TestTurnSyncOnHelperDelegate::ShowEnterpriseAccountConfirmation(
+    const AccountInfo& account_info,
+    signin::SigninChoiceCallback callback) {
+  test_fixture_->OnShowEnterpriseAccountConfirmation(account_info,
                                                      std::move(callback));
 }
 
-void TestDiceTurnSyncOnHelperDelegate::ShowSyncConfirmation(
+void TestTurnSyncOnHelperDelegate::ShowSyncConfirmation(
     base::OnceCallback<void(LoginUIService::SyncConfirmationUIClosedResult)>
         callback) {
   test_fixture_->OnShowSyncConfirmation(std::move(callback));
 }
 
-void TestDiceTurnSyncOnHelperDelegate::ShowSyncSettings() {
+void TestTurnSyncOnHelperDelegate::ShowSyncDisabledConfirmation(
+    bool is_managed_account,
+    base::OnceCallback<void(LoginUIService::SyncConfirmationUIClosedResult)>
+        callback) {
+  test_fixture_->OnShowSyncDisabledConfirmation(std::move(callback));
+}
+
+void TestTurnSyncOnHelperDelegate::ShowSyncSettings() {
   NOTREACHED();
 }
 
-void TestDiceTurnSyncOnHelperDelegate::SwitchToProfile(Profile* new_profile) {
+void TestTurnSyncOnHelperDelegate::SwitchToProfile(Profile* new_profile) {
   NOTREACHED();
 }
 
-IN_PROC_BROWSER_TEST_F(UserPolicySigninServiceTest, BasicSignin) {
+// TODO(https://crbug.com/340623286): Convert this test to use the
+// `ProfileManagementDisclaimerService`.
+IN_PROC_BROWSER_TEST_F(UserPolicySigninServiceTest, DISABLED_BasicSignin) {
   EXPECT_FALSE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_TRUE(signin_client()->IsClearPrimaryAccountAllowed());
 
   // Signin and show sync confirmation dialog.
-  CreateDiceTurnOnSyncHelper();
+  CreateTurnSyncOnHelper();
   WaitForSyncConfirmation();
 
-  // Policies are applied even before the user confirms.
-  EXPECT_TRUE(
-      IdentityManagerFactory::GetForProfile(profile())->HasPrimaryAccount());
-  WaitForPrefValue(profile()->GetPrefs(), prefs::kShowHomeButton,
-                   base::Value(true));
+  // Policies are applied right before the sync confirmation is shown.
+  EXPECT_EQ(signin::ConsentLevel::kSignin,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_TRUE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
 
-  // Confirm the signin.
+  // Opt-in to Sync.
   ConfirmSync(LoginUIService::SYNC_WITH_DEFAULT_SETTINGS);
   // Policy is still applied.
   EXPECT_TRUE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_EQ(signin::ConsentLevel::kSync,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
 }
 
-IN_PROC_BROWSER_TEST_F(UserPolicySigninServiceTest, UndoSignin) {
+// TODO(https://crbug.com/340623286): Convert this test to use the
+// `ProfileManagementDisclaimerService`.
+IN_PROC_BROWSER_TEST_F(UserPolicySigninServiceTest, DISABLED_UndoSignin) {
   EXPECT_FALSE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_FALSE(enterprise_util::UserAcceptedAccountManagement(profile()));
+  EXPECT_FALSE(enterprise_util::ProfileCanBeManaged(profile()));
+  EXPECT_TRUE(signin_client()->IsClearPrimaryAccountAllowed());
 
   // Signin and show sync confirmation dialog.
-  CreateDiceTurnOnSyncHelper();
+  CreateTurnSyncOnHelper();
   WaitForSyncConfirmation();
 
-  // Policies are applied even before the user confirms.
-  EXPECT_TRUE(
-      IdentityManagerFactory::GetForProfile(profile())->HasPrimaryAccount());
+  // Policies are applied right before the sync confirmation is shown.
+  EXPECT_EQ(signin::ConsentLevel::kSignin,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_TRUE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
+
+  // Cancel sync.
+  ConfirmSync(LoginUIService::ABORT_SYNC);
+
+  // Policy is still applied.
   WaitForPrefValue(profile()->GetPrefs(), prefs::kShowHomeButton,
                    base::Value(true));
-
-  // Undo the signin.
-  ConfirmSync(LoginUIService::ABORT_SIGNIN);
-  // Policy is reverted.
-  WaitForPrefValue(profile()->GetPrefs(), prefs::kShowHomeButton,
-                   base::Value(false));
+  EXPECT_EQ(signin::ConsentLevel::kSignin,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
+  EXPECT_TRUE(enterprise_util::UserAcceptedAccountManagement(profile()));
+  EXPECT_TRUE(enterprise_util::ProfileCanBeManaged(profile()));
 }
 
-// Regression test for https://crbug.com/1061459
+// TODO(https://crbug.com/340623286): Convert this test to use the
+// `ProfileManagementDisclaimerService`.
+IN_PROC_BROWSER_TEST_F(UserPolicySigninServiceTest,
+                       DISABLED_AcceptManagementDeclineSync) {
+  TurnSyncOnHelper::SetShowSyncEnabledUiForTesting(true);
+  EXPECT_FALSE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_FALSE(enterprise_util::ProfileCanBeManaged(profile()));
+  EXPECT_TRUE(signin_client()->IsClearPrimaryAccountAllowed());
+
+  // Signin and show sync confirmation dialog.
+  CreateTurnSyncOnHelper();
+  WaitForSyncConfirmation();
+
+  // Policies are applied right before the sync confirmation is shown.
+  EXPECT_EQ(signin::ConsentLevel::kSignin,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_TRUE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
+
+  // Cancel sync.
+  ConfirmSync(LoginUIService::ABORT_SYNC);
+
+  EXPECT_EQ(signin::ConsentLevel::kSignin,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_TRUE(enterprise_util::UserAcceptedAccountManagement(profile()));
+  EXPECT_TRUE(enterprise_util::ProfileCanBeManaged(profile()));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
+  // Policy is still applied.
+  EXPECT_TRUE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
+  EXPECT_EQ(signin::ConsentLevel::kSignin,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_TRUE(enterprise_util::UserAcceptedAccountManagement(profile()));
+  EXPECT_TRUE(enterprise_util::ProfileCanBeManaged(profile()));
+  TurnSyncOnHelper::SetShowSyncEnabledUiForTesting(false);
+}
+
+// This test can be deleted once syncer::kReplaceSyncPromosWithSignInPromos is
+// launched.
+class UserPolicySigninServiceTestWithReplaceSyncPromosWithSignInPromosDisabled
+    : public UserPolicySigninServiceTest {
+ public:
+  UserPolicySigninServiceTestWithReplaceSyncPromosWithSignInPromosDisabled() {
+    scoped_feature_list_.InitWithFeatures(
+        /*enabled_features=*/{},
+        /*disabled_features=*/{
+            syncer::kReplaceSyncPromosWithSignInPromos,
+            syncer::kReplaceSyncPromosWithSigninPromosNewSignin});
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+// Regression test for https://crbug.com/40122451
 // Start a new signing flow while the existing one is hanging on a policy
 // request.
-IN_PROC_BROWSER_TEST_F(UserPolicySigninServiceTest, ConcurrentSignin) {
+IN_PROC_BROWSER_TEST_F(
+    UserPolicySigninServiceTestWithReplaceSyncPromosWithSignInPromosDisabled,
+    ConcurrentSignin) {
   EXPECT_FALSE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
 
   set_policy_hanging(true);
-  CreateDiceTurnOnSyncHelper();
+  CreateTurnSyncOnHelper();
   WaitForPolicyHanging();
 
-  // User is not signed in, policy is not applied.
-  EXPECT_FALSE(
-      IdentityManagerFactory::GetForProfile(profile())->HasPrimaryAccount());
+  // Policy hanging, policy is not applied.
   EXPECT_FALSE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_TRUE(signin_client()->IsClearPrimaryAccountAllowed());
 
   // Restart a new signin flow and allow it to complete.
-  CreateDiceTurnOnSyncHelper();
+  CreateTurnSyncOnHelper();
   set_policy_hanging(false);
   WaitForSyncConfirmation();
 
-  // Policies are applied even before the user confirms.
-  EXPECT_TRUE(
-      IdentityManagerFactory::GetForProfile(profile())->HasPrimaryAccount());
-  WaitForPrefValue(profile()->GetPrefs(), prefs::kShowHomeButton,
-                   base::Value(true));
+  // Policies are applied right before the sync confirmation is shown.
+  EXPECT_EQ(signin::ConsentLevel::kSignin,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_TRUE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
 
   // Confirm the signin.
   ConfirmSync(LoginUIService::SYNC_WITH_DEFAULT_SETTINGS);
   // Policy is still applied.
   EXPECT_TRUE(profile()->GetPrefs()->GetBoolean(prefs::kShowHomeButton));
+  EXPECT_EQ(signin::ConsentLevel::kSync,
+            signin::GetPrimaryAccountConsentLevel(identity_manager()));
+  EXPECT_FALSE(signin_client()->IsClearPrimaryAccountAllowed());
 }

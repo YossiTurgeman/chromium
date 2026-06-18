@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2015 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -21,9 +21,11 @@ import wrapper_utils
 
 def CollectSONAME(args):
   """Replaces: readelf -d $sofile | grep SONAME"""
+  # TODO(crbug.com/40797404): Come up with a way to get this info without having
+  # to bundle readelf in the toolchain package.
   toc = ''
   readelf = subprocess.Popen(wrapper_utils.CommandToRun(
-      [args.readelf, '-d', args.sofile]),
+      [args.readelf, '-d', args.output]),
                              stdout=subprocess.PIPE,
                              bufsize=-1,
                              universal_newlines=True)
@@ -37,7 +39,7 @@ def CollectDynSym(args):
   """Replaces: nm --format=posix -g -D -p $sofile | cut -f1-2 -d' '"""
   toc = ''
   nm = subprocess.Popen(wrapper_utils.CommandToRun(
-      [args.nm, '--format=posix', '-g', '-D', '-p', args.sofile]),
+      [args.nm, '--format=posix', '-g', '-D', '-p', args.output]),
                         stdout=subprocess.PIPE,
                         bufsize=-1,
                         universal_newlines=True)
@@ -80,6 +82,13 @@ def InterceptFlag(flag, command):
   return ret
 
 
+def SafeDelete(path):
+  try:
+    os.unlink(path)
+  except OSError:
+    pass
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--readelf',
@@ -93,10 +102,9 @@ def main():
   parser.add_argument('--strip',
                       help='The strip binary to run',
                       metavar='PATH')
-  parser.add_argument('--dwp', help='The dwp binary to run', metavar='PATH')
-  parser.add_argument('--sofile',
-                      required=True,
-                      help='Shared object file produced by linking command',
+  parser.add_argument('--symbols-file',
+                      help='.so file with .debug sections '
+                      '(if different from --output)',
                       metavar='FILE')
   parser.add_argument('--tocfile',
                       required=True,
@@ -120,12 +128,11 @@ def main():
 
   # Extract flags passed through ldflags but meant for this script.
   # https://crbug.com/954311 tracks finding a better way to plumb these.
-  link_only = InterceptFlag('--link-only', args.command)
+  partitioned_library = InterceptFlag('--partitioned-library', args.command)
   collect_inputs_only = InterceptFlag('--collect-inputs-only', args.command)
-  generate_dwp = InterceptFlag('--generate-dwp', args.command)
 
-  # If only linking, we are likely generating a partitioned .so that will be
-  # split apart later. In that case:
+  # Partitioned .so libraries are used only for splitting apart in a subsequent
+  # step.
   #
   # - The TOC file optimization isn't useful, because the partition libraries
   #   must always be re-extracted if the combined library changes (and nothing
@@ -137,56 +144,50 @@ def main():
   # tools would need to be updated to handle and/or not complain about
   # partitioned libraries. Instead, to keep Ninja happy, simply create dummy
   # files for the TOC and stripped lib.
-  if link_only or collect_inputs_only:
-    open(args.output, 'w').close()
+  if collect_inputs_only or partitioned_library:
     open(args.tocfile, 'w').close()
+
+  if partitioned_library:
+    open(args.output, 'w').close()
 
   # Instead of linking, records all inputs to a file. This is used by
   # enable_resource_allowlist_generation in order to avoid needing to
-  # link (which is slow) to build the resources whitelist.
+  # link (which is slow) to build the resources allowlist.
   if collect_inputs_only:
-    with open(args.sofile, 'w') as f:
-      CollectInputs(f, args.command)
     if args.map_file:
       open(args.map_file, 'w').close()
+    if args.symbols_file:
+      open(args.symbols_file, 'w').close()
+
+    with open(args.output, 'w') as f:
+      CollectInputs(f, args.command)
     return 0
 
-  # First, run the actual link.
+  # Run the actual link.
   command = wrapper_utils.CommandToRun(args.command)
   result = wrapper_utils.RunLinkWithOptionalMapFile(command,
                                                     env=fast_env,
                                                     map_file=args.map_file)
-
-  if result != 0 or link_only:
-    return result
-
-  # If dwp is set, then package debug info for this SO.
-  dwp_proc = None
-  if generate_dwp:
-    if not args.dwp:
-      parser.error('--generate-dwp requireds --dwp')
-    dwp_proc = subprocess.Popen(
-        wrapper_utils.CommandToRun(
-            [args.dwp, '-e', args.sofile, '-o', args.output + '.dwp']))
-
-  # Next, generate the contents of the TOC file.
-  result, toc = CollectTOC(args)
   if result != 0:
     return result
 
-  # If there is an existing TOC file with identical contents, leave it alone.
-  # Otherwise, write out the TOC file.
-  UpdateTOC(args.tocfile, toc)
+  if not partitioned_library:
+    # Strip the linked shared object file (if desired).
+    # When use_mold=true, the linker creates both stripped and symbols
+    # files directly.
+    if args.strip:
+      result = subprocess.call(
+          wrapper_utils.CommandToRun(
+              [args.strip, '-o', args.output, args.symbols_file]))
 
-  # Finally, strip the linked shared object file (if desired).
-  if args.strip:
-    result = subprocess.call(wrapper_utils.CommandToRun(
-        [args.strip, '-o', args.output, args.sofile]))
+    # Generate the contents of the TOC file.
+    result, toc = CollectTOC(args)
+    if result != 0:
+      return result
 
-  if dwp_proc:
-    dwp_result = dwp_proc.wait()
-    if dwp_result != 0:
-      return dwp_result
+    # If there is an existing TOC file with identical contents, leave it alone.
+    # Otherwise, write out the TOC file.
+    UpdateTOC(args.tocfile, toc)
 
   return result
 

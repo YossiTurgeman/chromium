@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@ package org.chromium.components.paintpreview.player;
 
 import android.graphics.Rect;
 
-import androidx.annotation.VisibleForTesting;
-
 import org.chromium.base.UnguessableToken;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
 
 import java.util.Arrays;
 
@@ -18,21 +18,29 @@ import java.util.Arrays;
  * Each frame has a GUID, content width and height.
  * Optionally, a frame can have other frames (iframes) as its children. or sub-frames.
  */
+@NullMarked
 class PaintPreviewFrame {
-    private UnguessableToken mGuid;
+    private final UnguessableToken mGuid;
     // The content size of this frame. In native, this is represented as 'scroll extent'.
-    private int mContentWidth;
-    private int mContentHeight;
+    private final int mContentWidth;
+    private final int mContentHeight;
+
     // Other frames that this frame embeds, its sub-frames.
     private PaintPreviewFrame[] mSubFrames;
+
     // The coordinates of the sub-frames relative to this frame.
     private Rect[] mSubFrameClips;
-    // The initial scroll position of this frame.
-    private int mInitialScrollX;
-    private int mInitialScrollY;
 
-    PaintPreviewFrame(UnguessableToken guid, int contentWidth, int contentHeight,
-            int initialScrollX, int initialScrollY) {
+    // The initial scroll position of this frame.
+    private final int mInitialScrollX;
+    private final int mInitialScrollY;
+
+    PaintPreviewFrame(
+            UnguessableToken guid,
+            int contentWidth,
+            int contentHeight,
+            int initialScrollX,
+            int initialScrollY) {
         mGuid = guid;
         mContentWidth = contentWidth;
         mContentHeight = contentHeight;
@@ -40,8 +48,13 @@ class PaintPreviewFrame {
         mInitialScrollY = initialScrollY;
     }
 
-    private PaintPreviewFrame(UnguessableToken guid, int contentWidth, int contentHeight,
-            int initialScrollX, int initialScrollY, PaintPreviewFrame[] subFrames,
+    private PaintPreviewFrame(
+            UnguessableToken guid,
+            int contentWidth,
+            int contentHeight,
+            int initialScrollX,
+            int initialScrollY,
+            PaintPreviewFrame[] subFrames,
             Rect[] subFrameClips) {
         mGuid = guid;
         mContentWidth = contentWidth;
@@ -52,10 +65,12 @@ class PaintPreviewFrame {
         mSubFrameClips = subFrameClips;
     }
 
+    @Initializer
     void setSubFrames(PaintPreviewFrame[] subFrames) {
         mSubFrames = subFrames;
     }
 
+    @Initializer
     void setSubFrameClips(Rect[] subFrameClips) {
         mSubFrameClips = subFrameClips;
     }
@@ -88,9 +103,33 @@ class PaintPreviewFrame {
         return mSubFrameClips;
     }
 
+    /**
+     *
+     * @param checkDirectChildren Should direct children of this frame be considered.
+     * @return Whether this frame has any scrollable descendants.
+     */
+    boolean hasScrollableDescendants(boolean checkDirectChildren) {
+        if (mSubFrameClips == null || mSubFrames == null) {
+            return false;
+        }
+
+        for (int i = 0; i < mSubFrames.length; i++) {
+            PaintPreviewFrame subFrame = mSubFrames[i];
+            Rect subFrameClip = mSubFrameClips[i];
+            if (checkDirectChildren) {
+                if (subFrame.mContentWidth > subFrameClip.width()
+                        || subFrame.mContentHeight > subFrameClip.height()) {
+                    return true;
+                }
+            }
+            if (subFrame.hasScrollableDescendants(true)) return true;
+        }
+        return false;
+    }
+
     @Override
     public boolean equals(Object obj) {
-        if (obj == null || getClass() != obj.getClass()) return false;
+        if (!(obj instanceof PaintPreviewFrame)) return false;
 
         PaintPreviewFrame other = (PaintPreviewFrame) obj;
         if (!this.mGuid.equals(other.mGuid)) return false;
@@ -122,11 +161,21 @@ class PaintPreviewFrame {
         return sb.toString();
     }
 
-    @VisibleForTesting
-    static PaintPreviewFrame createInstanceForTest(UnguessableToken guid, int contentWidth,
-            int contentHeight, int initialScrollX, int initialScrollY,
-            PaintPreviewFrame[] subFrames, Rect[] subFrameClips) {
-        return new PaintPreviewFrame(guid, contentWidth, contentHeight, initialScrollX,
-                initialScrollY, subFrames, subFrameClips);
+    static PaintPreviewFrame createInstanceForTest(
+            UnguessableToken guid,
+            int contentWidth,
+            int contentHeight,
+            int initialScrollX,
+            int initialScrollY,
+            PaintPreviewFrame[] subFrames,
+            Rect[] subFrameClips) {
+        return new PaintPreviewFrame(
+                guid,
+                contentWidth,
+                contentHeight,
+                initialScrollX,
+                initialScrollY,
+                subFrames,
+                subFrameClips);
     }
 }

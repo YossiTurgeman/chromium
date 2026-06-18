@@ -1,47 +1,81 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
+#include "content/browser/renderer_host/navigation_request.h"
+
+#include <memory>
+
 #include "base/command_line.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
+#include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "build/build_config.h"
+#include "components/history/core/browser/features.h"
+#include "content/browser/process_lock.h"
 #include "content/browser/renderer_host/debug_urls.h"
 #include "content/browser/renderer_host/navigation_controller_impl.h"
-#include "content/browser/renderer_host/navigation_request.h"
+#include "content/browser/renderer_host/navigation_throttle_runner.h"
+#include "content/browser/renderer_host/process_selection_deferring_condition_runner.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/site_instance_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
+#include "content/common/content_navigation_policy.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_throttle.h"
+#include "content/public/browser/runtime_feature_state/runtime_feature_state_document_data.h"
+#include "content/public/browser/security_principal.h"
 #include "content/public/browser/site_isolation_policy.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/bindings_policy.h"
 #include "content/public/common/content_features.h"
 #include "content/public/common/content_switches.h"
+#include "content/public/common/result_codes.h"
 #include "content/public/common/url_constants.h"
+#include "content/public/test/back_forward_cache_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
+#include "content/public/test/content_browser_test_content_browser_client.h"
 #include "content/public/test/content_browser_test_utils.h"
+#include "content/public/test/fenced_frame_test_util.h"
+#include "content/public/test/mock_web_contents_observer.h"
 #include "content/public/test/navigation_handle_observer.h"
+#include "content/public/test/prerender_test_util.h"
 #include "content/public/test/test_frame_navigation_observer.h"
 #include "content/public/test/test_navigation_observer.h"
+#include "content/public/test/test_service.mojom.h"
 #include "content/public/test/test_utils.h"
+#include "content/public/test/url_loader_interceptor.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/browser/shell_browser_context.h"
 #include "content/shell/browser/shell_download_manager_delegate.h"
 #include "content/test/content_browser_test_utils_internal.h"
+#include "content/test/mock_commit_deferring_condition.h"
+#include "content/test/mock_process_selection_deferring_condition_tester.h"
 #include "net/dns/mock_host_resolver.h"
+#include "net/test/embedded_test_server/controllable_http_response.h"
+#include "net/test/embedded_test_server/default_handlers.h"
+#include "net/test/embedded_test_server/expectation_handler.h"
 #include "net/test/url_request/url_request_failed_job.h"
+#include "services/network/public/cpp/loading_params.h"
 #include "testing/gmock/include/gmock/gmock.h"
+#include "third_party/blink/public/common/chrome_debug_urls.h"
+#include "third_party/blink/public/common/runtime_feature_state/runtime_feature_state_context.h"
+#include "third_party/blink/public/common/runtime_feature_state/runtime_feature_state_read_context.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom.h"
+#include "third_party/blink/public/mojom/runtime_feature_state/runtime_feature.mojom.h"
 #include "ui/base/page_transition_types.h"
+#include "url/origin.h"
+#include "url/scheme_host_port.h"
 #include "url/url_constants.h"
 
 namespace {
@@ -61,25 +95,32 @@ namespace {
 class TestNavigationThrottle : public NavigationThrottle {
  public:
   TestNavigationThrottle(
-      NavigationHandle* handle,
+      NavigationThrottleRegistry& registry,
       NavigationThrottle::ThrottleCheckResult will_start_result,
       NavigationThrottle::ThrottleCheckResult will_redirect_result,
       NavigationThrottle::ThrottleCheckResult will_fail_result,
       NavigationThrottle::ThrottleCheckResult will_process_result,
+      NavigationThrottle::ThrottleCheckResult
+          will_commit_without_url_loader_result,
       base::OnceClosure did_call_will_start,
       base::OnceClosure did_call_will_redirect,
       base::OnceClosure did_call_will_fail,
-      base::OnceClosure did_call_will_process)
-      : NavigationThrottle(handle),
+      base::OnceClosure did_call_will_process,
+      base::OnceClosure did_call_will_commit_without_url_loader)
+      : NavigationThrottle(registry),
         will_start_result_(will_start_result),
         will_redirect_result_(will_redirect_result),
         will_fail_result_(will_fail_result),
         will_process_result_(will_process_result),
+        will_commit_without_url_loader_result_(
+            will_commit_without_url_loader_result),
         did_call_will_start_(std::move(did_call_will_start)),
         did_call_will_redirect_(std::move(did_call_will_redirect)),
         did_call_will_fail_(std::move(did_call_will_fail)),
-        did_call_will_process_(std::move(did_call_will_process)) {}
-  ~TestNavigationThrottle() override {}
+        did_call_will_process_(std::move(did_call_will_process)),
+        did_call_will_commit_without_url_loader_(
+            std::move(did_call_will_commit_without_url_loader)) {}
+  ~TestNavigationThrottle() override = default;
 
   const char* GetNameForLogging() override { return "TestNavigationThrottle"; }
 
@@ -138,14 +179,30 @@ class TestNavigationThrottle : public NavigationThrottle {
     return will_process_result_;
   }
 
+  NavigationThrottle::ThrottleCheckResult WillCommitWithoutUrlLoader()
+      override {
+    NavigationRequest* navigation_request =
+        NavigationRequest::From(navigation_handle());
+    CHECK_NE(blink::mojom::RequestContextType::UNSPECIFIED,
+             navigation_request->request_context_type());
+    request_context_type_ = navigation_request->request_context_type();
+
+    GetUIThreadTaskRunner({})->PostTask(
+        FROM_HERE, std::move(did_call_will_commit_without_url_loader_));
+    return will_commit_without_url_loader_result_;
+  }
+
   NavigationThrottle::ThrottleCheckResult will_start_result_;
   NavigationThrottle::ThrottleCheckResult will_redirect_result_;
   NavigationThrottle::ThrottleCheckResult will_fail_result_;
   NavigationThrottle::ThrottleCheckResult will_process_result_;
+  NavigationThrottle::ThrottleCheckResult
+      will_commit_without_url_loader_result_;
   base::OnceClosure did_call_will_start_;
   base::OnceClosure did_call_will_redirect_;
   base::OnceClosure did_call_will_fail_;
   base::OnceClosure did_call_will_process_;
+  base::OnceClosure did_call_will_commit_without_url_loader_;
   blink::mojom::RequestContextType request_context_type_ =
       blink::mojom::RequestContextType::UNSPECIFIED;
 };
@@ -161,6 +218,7 @@ class TestNavigationThrottleInstaller : public WebContentsObserver {
     WILL_REDIRECT_REQUEST,
     WILL_FAIL_REQUEST,
     WILL_PROCESS_RESPONSE,
+    WILL_COMMIT_WITHOUT_URL_LOADER,
   };
 
   TestNavigationThrottleInstaller(
@@ -169,14 +227,18 @@ class TestNavigationThrottleInstaller : public WebContentsObserver {
       NavigationThrottle::ThrottleCheckResult will_redirect_result,
       NavigationThrottle::ThrottleCheckResult will_fail_result,
       NavigationThrottle::ThrottleCheckResult will_process_result,
+      NavigationThrottle::ThrottleCheckResult
+          will_commit_without_url_loader_result,
       const GURL& expected_start_url = GURL())
       : WebContentsObserver(web_contents),
         will_start_result_(will_start_result),
         will_redirect_result_(will_redirect_result),
         will_fail_result_(will_fail_result),
         will_process_result_(will_process_result),
+        will_commit_without_url_loader_result_(
+            will_commit_without_url_loader_result),
         expected_start_url_(expected_start_url) {}
-  ~TestNavigationThrottleInstaller() override {}
+  ~TestNavigationThrottleInstaller() override = default;
 
   // Installs a TestNavigationThrottle whose |method| method will return
   // |result|. All other methods will return NavigationThrottle::PROCEED.
@@ -189,6 +251,7 @@ class TestNavigationThrottleInstaller : public WebContentsObserver {
     auto will_redirect_result = will_start_result;
     auto will_fail_result = will_start_result;
     auto will_process_result = will_start_result;
+    auto will_commit_without_url_loader_result = will_start_result;
 
     switch (method) {
       case WILL_START_REQUEST:
@@ -203,96 +266,131 @@ class TestNavigationThrottleInstaller : public WebContentsObserver {
       case WILL_PROCESS_RESPONSE:
         will_process_result = result;
         break;
+      case WILL_COMMIT_WITHOUT_URL_LOADER:
+        will_commit_without_url_loader_result = result;
+        break;
     }
 
     return std::make_unique<TestNavigationThrottleInstaller>(
         web_contents, will_start_result, will_redirect_result, will_fail_result,
-        will_process_result);
+        will_process_result, will_commit_without_url_loader_result);
   }
 
   TestNavigationThrottle* navigation_throttle() { return navigation_throttle_; }
 
   void WaitForThrottleWillStart() {
-    if (will_start_called_)
+    if (will_start_called_) {
       return;
+    }
     will_start_loop_runner_ = new MessageLoopRunner();
     will_start_loop_runner_->Run();
     will_start_loop_runner_ = nullptr;
   }
 
   void WaitForThrottleWillRedirect() {
-    if (will_redirect_called_)
+    if (will_redirect_called_) {
       return;
+    }
     will_redirect_loop_runner_ = new MessageLoopRunner();
     will_redirect_loop_runner_->Run();
     will_redirect_loop_runner_ = nullptr;
   }
 
   void WaitForThrottleWillFail() {
-    if (will_fail_called_)
+    if (will_fail_called_) {
       return;
+    }
     will_fail_loop_runner_ = new MessageLoopRunner();
     will_fail_loop_runner_->Run();
     will_fail_loop_runner_ = nullptr;
   }
 
   void WaitForThrottleWillProcess() {
-    if (will_process_called_)
+    if (will_process_called_) {
       return;
+    }
     will_process_loop_runner_ = new MessageLoopRunner();
     will_process_loop_runner_->Run();
     will_process_loop_runner_ = nullptr;
   }
 
+  void WaitForThrottleWillCommitWithoutUrlLoader() {
+    if (will_commit_without_url_loader_called_) {
+      return;
+    }
+    will_commit_without_url_loader_loop_runner_ = new MessageLoopRunner();
+    will_commit_without_url_loader_loop_runner_->Run();
+    will_commit_without_url_loader_loop_runner_ = nullptr;
+  }
+
   void Continue(NavigationThrottle::ThrottleCheckResult result) {
     ASSERT_NE(NavigationThrottle::DEFER, result.action());
-    if (result.action() == NavigationThrottle::PROCEED)
+    if (result.action() == NavigationThrottle::PROCEED) {
       navigation_throttle()->ResumeNavigation();
-    else
+    } else {
       navigation_throttle()->CancelNavigation(result);
+    }
   }
 
   int will_start_called() { return will_start_called_; }
   int will_redirect_called() { return will_redirect_called_; }
   int will_fail_called() { return will_fail_called_; }
   int will_process_called() { return will_process_called_; }
+  int will_commit_without_url_loader_called() {
+    return will_commit_without_url_loader_called_;
+  }
 
   int install_count() { return install_count_; }
 
  protected:
   virtual void DidCallWillStartRequest() {
     will_start_called_++;
-    if (will_start_loop_runner_)
+    if (will_start_loop_runner_) {
       will_start_loop_runner_->Quit();
+    }
   }
 
   virtual void DidCallWillRedirectRequest() {
     will_redirect_called_++;
-    if (will_redirect_loop_runner_)
+    if (will_redirect_loop_runner_) {
       will_redirect_loop_runner_->Quit();
+    }
   }
 
   virtual void DidCallWillFailRequest() {
     will_fail_called_++;
-    if (will_fail_loop_runner_)
+    if (will_fail_loop_runner_) {
       will_fail_loop_runner_->Quit();
+    }
   }
 
   virtual void DidCallWillProcessResponse() {
     will_process_called_++;
-    if (will_process_loop_runner_)
+    if (will_process_loop_runner_) {
       will_process_loop_runner_->Quit();
+    }
+  }
+
+  virtual void DidCallWillCommitWithoutUrlLoader() {
+    will_commit_without_url_loader_called_++;
+    if (will_commit_without_url_loader_loop_runner_) {
+      will_commit_without_url_loader_loop_runner_->Quit();
+    }
   }
 
  private:
+  // WebContentsObserver:
   void DidStartNavigation(NavigationHandle* handle) override {
     if (!expected_start_url_.is_empty() &&
-        handle->GetURL() != expected_start_url_)
+        handle->GetURL() != expected_start_url_) {
       return;
+    }
 
+    auto* request = NavigationRequest::From(handle);
+    auto& registry = *request->GetNavigationThrottleRegistryForTesting();
     std::unique_ptr<NavigationThrottle> throttle(new TestNavigationThrottle(
-        handle, will_start_result_, will_redirect_result_, will_fail_result_,
-        will_process_result_,
+        registry, will_start_result_, will_redirect_result_, will_fail_result_,
+        will_process_result_, will_commit_without_url_loader_result_,
         base::BindOnce(
             &TestNavigationThrottleInstaller::DidCallWillStartRequest,
             weak_factory_.GetWeakPtr()),
@@ -303,34 +401,43 @@ class TestNavigationThrottleInstaller : public WebContentsObserver {
                        weak_factory_.GetWeakPtr()),
         base::BindOnce(
             &TestNavigationThrottleInstaller::DidCallWillProcessResponse,
+            weak_factory_.GetWeakPtr()),
+        base::BindOnce(
+            &TestNavigationThrottleInstaller::DidCallWillCommitWithoutUrlLoader,
             weak_factory_.GetWeakPtr())));
     navigation_throttle_ = static_cast<TestNavigationThrottle*>(throttle.get());
-    handle->RegisterThrottleForTesting(std::move(throttle));
+    registry.AddThrottle(std::move(throttle));
     ++install_count_;
   }
 
   void DidFinishNavigation(NavigationHandle* handle) override {
-    if (!navigation_throttle_)
+    if (!navigation_throttle_) {
       return;
+    }
 
-    if (handle == navigation_throttle_->navigation_handle())
+    if (handle == navigation_throttle_->navigation_handle()) {
       navigation_throttle_ = nullptr;
+    }
   }
 
   NavigationThrottle::ThrottleCheckResult will_start_result_;
   NavigationThrottle::ThrottleCheckResult will_redirect_result_;
   NavigationThrottle::ThrottleCheckResult will_fail_result_;
   NavigationThrottle::ThrottleCheckResult will_process_result_;
+  NavigationThrottle::ThrottleCheckResult
+      will_commit_without_url_loader_result_;
   int will_start_called_ = 0;
   int will_redirect_called_ = 0;
   int will_fail_called_ = 0;
   int will_process_called_ = 0;
-  TestNavigationThrottle* navigation_throttle_ = nullptr;
+  int will_commit_without_url_loader_called_ = 0;
+  raw_ptr<TestNavigationThrottle> navigation_throttle_ = nullptr;
   int install_count_ = 0;
   scoped_refptr<MessageLoopRunner> will_start_loop_runner_;
   scoped_refptr<MessageLoopRunner> will_redirect_loop_runner_;
   scoped_refptr<MessageLoopRunner> will_fail_loop_runner_;
   scoped_refptr<MessageLoopRunner> will_process_loop_runner_;
+  scoped_refptr<MessageLoopRunner> will_commit_without_url_loader_loop_runner_;
   GURL expected_start_url_;
 
   // The throttle installer can be deleted before all tasks posted by its
@@ -350,8 +457,11 @@ class TestDeferringNavigationThrottleInstaller
       NavigationThrottle::ThrottleCheckResult will_redirect_result,
       NavigationThrottle::ThrottleCheckResult will_fail_result,
       NavigationThrottle::ThrottleCheckResult will_process_result,
+      NavigationThrottle::ThrottleCheckResult
+          will_commit_without_url_loader_result,
       GURL expected_start_url = GURL())
       : TestNavigationThrottleInstaller(web_contents,
+                                        NavigationThrottle::DEFER,
                                         NavigationThrottle::DEFER,
                                         NavigationThrottle::DEFER,
                                         NavigationThrottle::DEFER,
@@ -360,7 +470,9 @@ class TestDeferringNavigationThrottleInstaller
         will_start_deferred_result_(will_start_result),
         will_redirect_deferred_result_(will_redirect_result),
         will_fail_deferred_result_(will_fail_result),
-        will_process_deferred_result_(will_process_result) {}
+        will_process_deferred_result_(will_process_result),
+        will_commit_without_url_loader_result_(
+            will_commit_without_url_loader_result) {}
 
  protected:
   void DidCallWillStartRequest() override {
@@ -383,17 +495,24 @@ class TestDeferringNavigationThrottleInstaller
     Continue(will_process_deferred_result_);
   }
 
+  void DidCallWillCommitWithoutUrlLoader() override {
+    TestNavigationThrottleInstaller::DidCallWillCommitWithoutUrlLoader();
+    Continue(will_commit_without_url_loader_result_);
+  }
+
  private:
   NavigationThrottle::ThrottleCheckResult will_start_deferred_result_;
   NavigationThrottle::ThrottleCheckResult will_redirect_deferred_result_;
   NavigationThrottle::ThrottleCheckResult will_fail_deferred_result_;
   NavigationThrottle::ThrottleCheckResult will_process_deferred_result_;
+  NavigationThrottle::ThrottleCheckResult
+      will_commit_without_url_loader_result_;
 };
 
 // Records all navigation start URLs from the WebContents.
 class NavigationStartUrlRecorder : public WebContentsObserver {
  public:
-  NavigationStartUrlRecorder(WebContents* web_contents)
+  explicit NavigationStartUrlRecorder(WebContents* web_contents)
       : WebContentsObserver(web_contents) {}
 
   void DidStartNavigation(NavigationHandle* navigation_handle) override {
@@ -409,8 +528,8 @@ class NavigationStartUrlRecorder : public WebContentsObserver {
 void ExpectChildFrameSetAsCollapsedInFTN(Shell* shell, bool expect_collapsed) {
   // Check if the frame should be collapsed in theory as per FTN.
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell->web_contents())
-                            ->GetFrameTree()
-                            ->root();
+                            ->GetPrimaryFrameTree()
+                            .root();
   ASSERT_EQ(1u, root->child_count());
   FrameTreeNode* child = root->child_at(0u);
   EXPECT_EQ(expect_collapsed, child->is_collapsed());
@@ -420,13 +539,9 @@ void ExpectChildFrameCollapsedInLayout(Shell* shell,
                                        const std::string& frame_id,
                                        bool expect_collapsed) {
   // Check if the frame is collapsed in practice.
-  const char kScript[] =
-      "window.domAutomationController.send("
-      "  document.getElementById(\"%s\").clientWidth"
-      ");";
-  int client_width = 0;
-  EXPECT_TRUE(ExecuteScriptAndExtractInt(
-      shell, base::StringPrintf(kScript, frame_id.c_str()), &client_width));
+  const char kScript[] = "document.getElementById(\"%s\").clientWidth;";
+  int client_width =
+      EvalJs(shell, base::StringPrintf(kScript, frame_id.c_str())).ExtractInt();
   EXPECT_EQ(expect_collapsed, !client_width) << client_width;
 }
 
@@ -440,6 +555,11 @@ void ExpectChildFrameCollapsed(Shell* shell,
 }  // namespace
 
 class NavigationRequestBrowserTest : public ContentBrowserTest {
+ public:
+  WebContentsImpl* contents() const {
+    return static_cast<WebContentsImpl*>(shell()->web_contents());
+  }
+
  protected:
   void SetUpOnMainThread() override {
     host_resolver()->AddRule("*", "127.0.0.1");
@@ -469,13 +589,21 @@ class NavigationRequestBrowserTest : public ContentBrowserTest {
     EXPECT_TRUE(observer.has_committed());
     EXPECT_TRUE(observer.is_error());
 
-    std::string result;
-    const std::string javascript =
-        "domAutomationController.send(document.body.textContent)";
-    content::RenderFrameHost* rfh = shell()->web_contents()->GetMainFrame();
-    ASSERT_TRUE(
-        content::ExecuteScriptAndExtractString(rfh, javascript, &result));
-    EXPECT_EQ(kBodyTextContent, result);
+    RenderFrameHost* rfh = shell()->web_contents()->GetPrimaryMainFrame();
+    EXPECT_EQ(kBodyTextContent, EvalJs(rfh, "document.body.textContent"));
+  }
+};
+
+// A test class that calls IsolateAllSitesForTesting() early enough in the setup
+// that we get consistent results for AreOriginKeyedProcessesEnabledByDefault()
+// if kOriginKeyedProcessesByDefault is enabled. Specifically, make sure the
+// initial shell's main frame's BrowsingInstance gets the correct default
+// isolation state, which depends on AreOriginKeyedProcessesEnabledByDefault().
+class NavigationRequestBrowserTest_IsolateAllSites
+    : public NavigationRequestBrowserTest {
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    NavigationRequestBrowserTest::SetUpCommandLine(command_line);
+    IsolateAllSitesForTesting(command_line);
   }
 };
 
@@ -545,7 +673,6 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifyPageTransition) {
 
 // Ensure that the following methods on NavigationHandle behave correctly:
 // * IsInMainFrame
-// * IsParentMainFrame
 IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifyFrameTree) {
   GURL main_url(embedded_test_server()->GetURL(
       "a.com", "/cross_site_iframe_factory.html?a(b(c))"));
@@ -561,8 +688,8 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifyFrameTree) {
   EXPECT_TRUE(NavigateToURL(shell(), main_url));
 
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetFrameTree()
-                            ->root();
+                            ->GetPrimaryFrameTree()
+                            .root();
 
   // Verify the main frame.
   EXPECT_TRUE(main_observer.has_committed());
@@ -576,7 +703,6 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifyFrameTree) {
   EXPECT_FALSE(b_observer.is_error());
   EXPECT_EQ(b_url, b_observer.last_committed_url());
   EXPECT_FALSE(b_observer.is_main_frame());
-  EXPECT_TRUE(b_observer.is_parent_main_frame());
   EXPECT_EQ(root->child_at(0)->frame_tree_node_id(),
             b_observer.frame_tree_node_id());
 
@@ -585,7 +711,6 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifyFrameTree) {
   EXPECT_FALSE(c_observer.is_error());
   EXPECT_EQ(c_url, c_observer.last_committed_url());
   EXPECT_FALSE(c_observer.is_main_frame());
-  EXPECT_FALSE(c_observer.is_parent_main_frame());
   EXPECT_EQ(root->child_at(0)->child_at(0)->frame_tree_node_id(),
             c_observer.frame_tree_node_id());
 }
@@ -615,6 +740,141 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifyRedirect) {
     EXPECT_FALSE(observer.is_error());
     EXPECT_TRUE(observer.was_redirected());
   }
+}
+
+// Ensure that we can read and write to the browser process's copy of the blink
+// runtime-enabled features via NavigationRequest's method
+// GetMutableRuntimeFeatureStateContext() during commit. Then ensure that its
+// values are persisted to the RenderFrameHostImpl's read-only context.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       RuntimeFeatureStatePersisted) {
+  // Sets up the NavigationRequest where we can begin accessing the
+  // RuntimeFeatureStateContext class.
+  GURL url(embedded_test_server()->GetURL("/title1.html"));
+  TestNavigationManager manager(shell()->web_contents(), url);
+
+  // Begin loading our url and wait for the request to start.
+  shell()->LoadURL(url);
+  EXPECT_TRUE(manager.WaitForRequestStart());
+
+  // Ensure we can get and set values in RuntimeFeatureStateContext.
+  blink::RuntimeFeatureStateContext& context =
+      NavigationRequest::From(manager.GetNavigationHandle())
+          ->GetMutableRuntimeFeatureStateContext();
+  bool is_test_feature_enabled(context.IsTestFeatureEnabled());
+  context.SetTestFeatureEnabled(!is_test_feature_enabled);
+  EXPECT_EQ(context.IsTestFeatureEnabled(), !is_test_feature_enabled);
+
+  // Check the override value map as well.
+  base::flat_map<::blink::mojom::RuntimeFeature, bool>
+      expected_feature_overrides = context.GetFeatureOverrides();
+  EXPECT_EQ(
+      expected_feature_overrides[blink::mojom::RuntimeFeature::kTestFeature],
+      !is_test_feature_enabled);
+
+  // Continue with the navigation until completion.
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+  EXPECT_TRUE(manager.was_successful());
+
+  // Check that the changes were saved to the RenderFrameHost.
+  RuntimeFeatureStateDocumentData* document_data =
+      RuntimeFeatureStateDocumentData::GetForCurrentDocument(
+          shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_TRUE(document_data);
+  blink::RuntimeFeatureStateReadContext read_context =
+      document_data->runtime_feature_state_read_context();
+  EXPECT_EQ(expected_feature_overrides, read_context.GetFeatureOverrides());
+}
+
+// Similar to RuntimeFeatureStatePersisted but ensures that even for
+// runtime-enabled feature values that are equivalent to the previous state.
+// This is important to persist as it helps the renderer determine force-enabled
+// and force-disabled values.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       RuntimeFeatureStatePersistedForSameValue) {
+  // Sets up the NavigationRequest where we can begin accessing the
+  // RuntimeFeatureStateContext class.
+  GURL url(embedded_test_server()->GetURL("/title1.html"));
+  TestNavigationManager manager(shell()->web_contents(), url);
+
+  // Begin loading our url and wait for the request to start.
+  shell()->LoadURL(url);
+  EXPECT_TRUE(manager.WaitForRequestStart());
+
+  // Ensure we can set values in RuntimeFeatureStateContext that are
+  // equivalent to the feature's previous state.
+  blink::RuntimeFeatureStateContext& context =
+      NavigationRequest::From(manager.GetNavigationHandle())
+          ->GetMutableRuntimeFeatureStateContext();
+  bool is_test_feature_enabled(context.IsTestFeatureEnabled());
+  context.SetTestFeatureEnabled(is_test_feature_enabled);
+  EXPECT_EQ(context.IsTestFeatureEnabled(), is_test_feature_enabled);
+
+  // Check the override value map as well.
+  base::flat_map<::blink::mojom::RuntimeFeature, bool>
+      expected_feature_overrides = context.GetFeatureOverrides();
+  EXPECT_EQ(
+      expected_feature_overrides[blink::mojom::RuntimeFeature::kTestFeature],
+      is_test_feature_enabled);
+
+  // Continue with the navigation until completion.
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+  EXPECT_TRUE(manager.was_successful());
+
+  // Check that the changes were saved to the RenderFrameHost's feature
+  // overrides.
+  RuntimeFeatureStateDocumentData* document_data =
+      RuntimeFeatureStateDocumentData::GetForCurrentDocument(
+          shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_TRUE(document_data);
+  blink::RuntimeFeatureStateReadContext read_context =
+      document_data->runtime_feature_state_read_context();
+  EXPECT_EQ(expected_feature_overrides, read_context.GetFeatureOverrides());
+}
+
+// Similar to RuntimeFeatureStatePersisted but ensures that even for
+// runtime-enabled feature values are cleared across redirects.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       RuntimeFeatureStateClearOnRedirect) {
+  // Sets up the NavigationRequest where we can begin accessing the
+  // RuntimeFeatureStateContext class.
+  GURL redirect_url(
+      embedded_test_server()->GetURL("/cross-site/bar.com/title2.html"));
+  TestNavigationManager redirect_manager(shell()->web_contents(), redirect_url);
+  shell()->LoadURL(redirect_url);
+
+  EXPECT_TRUE(redirect_manager.WaitForRequestStart());
+
+  // Set a feature value we expect to be cleared upon redirect.
+  blink::RuntimeFeatureStateContext& context =
+      NavigationRequest::From(redirect_manager.GetNavigationHandle())
+          ->GetMutableRuntimeFeatureStateContext();
+  bool is_test_feature_enabled(context.IsTestFeatureEnabled());
+  context.SetTestFeatureEnabled(!is_test_feature_enabled);
+  EXPECT_FALSE(context.GetFeatureOverrides().empty());
+
+  redirect_manager.ResumeNavigation();
+  EXPECT_TRUE(redirect_manager.WaitForResponse());
+
+  // Ensure NavigationRequest's new RuntimeFeatureStateContext is clear
+  const blink::RuntimeFeatureStateContext& new_context =
+      NavigationRequest::From(redirect_manager.GetNavigationHandle())
+          ->GetRuntimeFeatureStateContext();
+  EXPECT_TRUE(new_context.GetFeatureOverrides().empty());
+
+  // Continue with the navigation until completion.
+  ASSERT_TRUE(redirect_manager.WaitForNavigationFinished());
+  EXPECT_TRUE(redirect_manager.was_successful());
+
+  // Ensure that the changes made to the features before redirect do not
+  // persist to the read context.
+  RuntimeFeatureStateDocumentData* document_data =
+      RuntimeFeatureStateDocumentData::GetForCurrentDocument(
+          shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_TRUE(document_data);
+  blink::RuntimeFeatureStateReadContext read_context =
+      document_data->runtime_feature_state_read_context();
+  EXPECT_TRUE(read_context.GetFeatureOverrides().empty());
 }
 
 // Ensure that a certificate error results in a committed navigation with
@@ -685,14 +945,14 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifyRendererInitiated) {
     EXPECT_TRUE(NavigateToURL(shell(), url));
 
     FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                              ->GetFrameTree()
-                              ->root();
+                              ->GetPrimaryFrameTree()
+                              .root();
 
     NavigationHandleObserver observer(
         shell()->web_contents(),
         embedded_test_server()->GetURL("a.com", "/bar"));
-    EXPECT_TRUE(ExecuteScript(root->child_at(0),
-                              "window.history.pushState({}, '', 'bar');"));
+    EXPECT_TRUE(
+        ExecJs(root->child_at(0), "window.history.pushState({}, '', 'bar');"));
 
     EXPECT_TRUE(observer.has_committed());
     EXPECT_FALSE(observer.is_error());
@@ -723,14 +983,14 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifySameDocument) {
   EXPECT_TRUE(NavigateToURL(shell(), url));
 
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetFrameTree()
-                            ->root();
+                            ->GetPrimaryFrameTree()
+                            .root();
   {
     NavigationHandleObserver observer(
         shell()->web_contents(),
         embedded_test_server()->GetURL("a.com", "/foo"));
-    EXPECT_TRUE(ExecuteScript(root->child_at(0),
-                              "window.history.pushState({}, '', 'foo');"));
+    EXPECT_TRUE(
+        ExecJs(root->child_at(0), "window.history.pushState({}, '', 'foo');"));
 
     EXPECT_TRUE(observer.has_committed());
     EXPECT_FALSE(observer.is_error());
@@ -740,8 +1000,8 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifySameDocument) {
     NavigationHandleObserver observer(
         shell()->web_contents(),
         embedded_test_server()->GetURL("a.com", "/bar"));
-    EXPECT_TRUE(ExecuteScript(root->child_at(0),
-                              "window.history.replaceState({}, '', 'bar');"));
+    EXPECT_TRUE(ExecJs(root->child_at(0),
+                       "window.history.replaceState({}, '', 'bar');"));
 
     EXPECT_TRUE(observer.has_committed());
     EXPECT_FALSE(observer.is_error());
@@ -751,8 +1011,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifySameDocument) {
     NavigationHandleObserver observer(
         shell()->web_contents(),
         embedded_test_server()->GetURL("a.com", "/bar#frag"));
-    EXPECT_TRUE(
-        ExecuteScript(root->child_at(0), "window.location.replace('#frag');"));
+    EXPECT_TRUE(ExecJs(root->child_at(0), "window.location.replace('#frag');"));
 
     EXPECT_TRUE(observer.has_committed());
     EXPECT_FALSE(observer.is_error());
@@ -762,7 +1021,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifySameDocument) {
   GURL about_blank_url(url::kAboutBlankURL);
   {
     NavigationHandleObserver observer(shell()->web_contents(), about_blank_url);
-    EXPECT_TRUE(ExecuteScript(
+    EXPECT_TRUE(ExecJs(
         root, "document.body.appendChild(document.createElement('iframe'));"));
 
     EXPECT_TRUE(observer.has_committed());
@@ -772,7 +1031,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, VerifySameDocument) {
   }
   {
     NavigationHandleObserver observer(shell()->web_contents(), about_blank_url);
-    NavigateFrameToURL(root->child_at(0), about_blank_url);
+    EXPECT_TRUE(NavigateToURLFromRenderer(root->child_at(0), about_blank_url));
 
     EXPECT_TRUE(observer.has_committed());
     EXPECT_FALSE(observer.is_error());
@@ -793,7 +1052,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelStart) {
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::CANCEL,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
   EXPECT_FALSE(NavigateToURL(shell(), redirect_url));
 
@@ -819,7 +1078,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelRedirect) {
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::CANCEL, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
     EXPECT_FALSE(NavigateToURL(shell(), redirect_url));
 
@@ -836,7 +1095,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelRedirect) {
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::CANCEL, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
     EXPECT_TRUE(NavigateToURL(shell(), no_redirect_url));
 
@@ -861,7 +1120,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelFailure) {
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::CANCEL,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
     NavigationHandleObserver observer(shell()->web_contents(), url);
 
@@ -884,7 +1143,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelFailure) {
         NavigationThrottle::PROCEED,
         NavigationThrottle::ThrottleCheckResult(NavigationThrottle::CANCEL,
                                                 net::ERR_CERT_DATE_INVALID),
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
     NavigationHandleObserver observer(shell()->web_contents(), url);
 
@@ -903,18 +1162,66 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelFailure) {
   // WillFailRequest() on the throttle. (We set the failure method response to
   // CANCEL, but that shouldn't matter if the test passes.)
   {
-    GURL url(embedded_test_server()->GetURL("/title2.html"));
+    url = embedded_test_server()->GetURL("/title2.html");
     NavigationHandleObserver observer(shell()->web_contents(), url);
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::CANCEL,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
     EXPECT_TRUE(NavigateToURL(shell(), url));
 
     EXPECT_FALSE(installer.will_fail_called());
     EXPECT_FALSE(observer.is_error());
   }
+}
+
+// Ensure that a NavigationThrottle can cancel a redirected navigation that is
+// blocked by CSP.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       ThrottleCancelFailureRedirectBlockedByCSP) {
+  // Navigate to a URL with an iframe that will be later redirected to a
+  // URL blocked by CSP.
+  GURL main_url(
+      embedded_test_server()->GetURL("a.com", "/page_with_iframe.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // Add frame-src CSP via a new <meta> element.
+  EXPECT_TRUE(
+      ExecJs(shell(),
+             "var meta = document.createElement('meta');"
+             "meta.httpEquiv = 'Content-Security-Policy';"
+             "meta.content = 'frame-src http://a.com:*';"
+             "document.getElementsByTagName('head')[0].appendChild(meta);"));
+
+  // Create a cross-origin redirect URL that doesn't honour above specified CSP.
+  GURL subframe_url(embedded_test_server()->GetURL("b.com", "/title2.html"));
+  GURL redirecting_subframe_url(embedded_test_server()->GetURL(
+      "a.com", "/server-redirect?" + subframe_url.spec()));
+
+  NavigationHandleObserver subframe_observer(shell()->web_contents(),
+                                             redirecting_subframe_url);
+  TestNavigationThrottleInstaller installer(
+      shell()->web_contents(), NavigationThrottle::PROCEED,
+      NavigationThrottle::PROCEED, NavigationThrottle::CANCEL_AND_IGNORE,
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
+
+  FrameTreeNode* child = static_cast<WebContentsImpl*>(shell()->web_contents())
+                             ->GetPrimaryFrameTree()
+                             .root()
+                             ->child_at(0);
+
+  // Navigate the subframe to a location that is not allowed by CSP.
+  EXPECT_FALSE(NavigateToURLFromRenderer(child, redirecting_subframe_url));
+
+  // Wait for WillFailRequest.
+  installer.WaitForThrottleWillFail();
+  // Make sure that throttle WillFailRequest() was called.
+  EXPECT_TRUE(installer.will_fail_called());
+  EXPECT_TRUE(subframe_observer.is_error());
+  // The redirected navigation is cancelled and the old net error code
+  // `net::BLOCKED_BY_CSP` is replaced with `net::ERR_ABORTED`.
+  EXPECT_EQ(net::ERR_ABORTED, subframe_observer.net_error_code());
 }
 
 // Ensure that a NavigationThrottle can cancel the navigation when the response
@@ -929,7 +1236,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelResponse) {
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::PROCEED,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::CANCEL);
+      NavigationThrottle::CANCEL, NavigationThrottle::PROCEED);
 
   EXPECT_FALSE(NavigateToURL(shell(), redirect_url));
 
@@ -938,6 +1245,28 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleCancelResponse) {
   // The navigation should have been redirected first, and then canceled when
   // the response arrived.
   EXPECT_TRUE(observer.was_redirected());
+  EXPECT_EQ(shell()->web_contents()->GetLastCommittedURL(), start_url);
+}
+
+// Ensure that a NavigationThrottle can cancel the navigation when committing
+// without a URLLoader.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       ThrottleCancelCommitWithoutUrlLoader) {
+  GURL start_url(embedded_test_server()->GetURL("/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), start_url));
+
+  GURL about_blank_url(url::kAboutBlankURL);
+  NavigationHandleObserver observer(shell()->web_contents(), about_blank_url);
+  TestNavigationThrottleInstaller installer(
+      shell()->web_contents(), NavigationThrottle::PROCEED,
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+      NavigationThrottle::PROCEED, NavigationThrottle::CANCEL_AND_IGNORE);
+
+  EXPECT_FALSE(NavigateToURL(shell(), about_blank_url));
+
+  EXPECT_FALSE(observer.has_committed());
+  EXPECT_TRUE(observer.is_error());
+  EXPECT_FALSE(observer.was_redirected());
   EXPECT_EQ(shell()->web_contents()->GetLastCommittedURL(), start_url);
 }
 
@@ -954,7 +1283,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDefer) {
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::DEFER,
       NavigationThrottle::DEFER, NavigationThrottle::DEFER,
-      NavigationThrottle::DEFER);
+      NavigationThrottle::DEFER, NavigationThrottle::DEFER);
 
   shell()->LoadURL(redirect_url);
 
@@ -964,6 +1293,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDefer) {
   EXPECT_EQ(0, installer.will_redirect_called());
   EXPECT_EQ(0, installer.will_fail_called());
   EXPECT_EQ(0, installer.will_process_called());
+  EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
   installer.navigation_throttle()->ResumeNavigation();
 
   // Wait for WillRedirectRequest.
@@ -972,6 +1302,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDefer) {
   EXPECT_EQ(1, installer.will_redirect_called());
   EXPECT_EQ(0, installer.will_fail_called());
   EXPECT_EQ(0, installer.will_process_called());
+  EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
   installer.navigation_throttle()->ResumeNavigation();
 
   // Wait for WillProcessResponse.
@@ -980,6 +1311,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDefer) {
   EXPECT_EQ(1, installer.will_redirect_called());
   EXPECT_EQ(0, installer.will_fail_called());
   EXPECT_EQ(1, installer.will_process_called());
+  EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
   installer.navigation_throttle()->ResumeNavigation();
 
   // Wait for the end of the navigation.
@@ -1005,7 +1337,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDeferFailure) {
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::DEFER,
       NavigationThrottle::DEFER, NavigationThrottle::DEFER,
-      NavigationThrottle::DEFER);
+      NavigationThrottle::DEFER, NavigationThrottle::DEFER);
 
   shell()->LoadURL(failure_url);
 
@@ -1015,6 +1347,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDeferFailure) {
   EXPECT_EQ(0, installer.will_redirect_called());
   EXPECT_EQ(0, installer.will_fail_called());
   EXPECT_EQ(0, installer.will_process_called());
+  EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
   installer.navigation_throttle()->ResumeNavigation();
 
   // Wait for WillFailRequest.
@@ -1023,6 +1356,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDeferFailure) {
   EXPECT_EQ(0, installer.will_redirect_called());
   EXPECT_EQ(1, installer.will_fail_called());
   EXPECT_EQ(0, installer.will_process_called());
+  EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
   installer.navigation_throttle()->ResumeNavigation();
 
   // Wait for the end of the navigation.
@@ -1031,6 +1365,180 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleDeferFailure) {
   EXPECT_TRUE(observer.has_committed());
   EXPECT_TRUE(observer.is_error());
   EXPECT_EQ(net::ERR_CERT_COMMON_NAME_INVALID, observer.net_error_code());
+}
+
+// Ensure that a NavigationThrottle can defer and resume the navigation when
+// navigating without a URLLoader. This test covers multiple types of
+// navigations that do not require a URLLoader (same-document navigations and
+// about:blank).
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       ThrottleDeferCommitWithoutUrlLoader) {
+  GURL url(embedded_test_server()->GetURL("/title1.html"));
+  GURL url_fragment(embedded_test_server()->GetURL("/title1.html#id_1"));
+  GURL about_blank_url(url::kAboutBlankURL);
+
+  // Perform a new-document navigation (setup).
+  {
+    TestNavigationThrottleInstaller installer(
+        shell()->web_contents(), NavigationThrottle::PROCEED,
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
+    NavigationHandleObserver observer(shell()->web_contents(), url);
+    EXPECT_TRUE(NavigateToURL(shell(), url));
+    EXPECT_EQ(1, installer.will_start_called());
+    EXPECT_EQ(1, installer.will_process_called());
+    EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
+    EXPECT_FALSE(observer.is_same_document());
+  }
+
+  // Same-document navigation
+  {
+    TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
+    NavigationHandleObserver observer(shell()->web_contents(), url_fragment);
+    TestNavigationThrottleInstaller installer(
+        shell()->web_contents(), NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER);
+
+    shell()->LoadURL(url_fragment);
+
+    // Wait for WillCommitWithoutUrlLoader.
+    installer.WaitForThrottleWillCommitWithoutUrlLoader();
+    EXPECT_EQ(0, installer.will_start_called());
+    EXPECT_EQ(0, installer.will_redirect_called());
+    EXPECT_EQ(0, installer.will_fail_called());
+    EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
+    installer.navigation_throttle()->ResumeNavigation();
+
+    // Wait for the end of the navigation.
+    navigation_observer.Wait();
+
+    EXPECT_TRUE(observer.is_same_document());
+    EXPECT_TRUE(observer.has_committed());
+    EXPECT_FALSE(observer.was_redirected());
+    EXPECT_FALSE(observer.is_error());
+    EXPECT_EQ(shell()->web_contents()->GetLastCommittedURL(), url_fragment);
+  }
+
+  // about:blank
+  {
+    TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
+    NavigationHandleObserver observer(shell()->web_contents(), about_blank_url);
+    TestNavigationThrottleInstaller installer(
+        shell()->web_contents(), NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER);
+
+    shell()->LoadURL(about_blank_url);
+
+    // Wait for WillCommitWithoutUrlLoader.
+    installer.WaitForThrottleWillCommitWithoutUrlLoader();
+    EXPECT_EQ(0, installer.will_start_called());
+    EXPECT_EQ(0, installer.will_redirect_called());
+    EXPECT_EQ(0, installer.will_fail_called());
+    EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
+    installer.navigation_throttle()->ResumeNavigation();
+
+    // Wait for the end of the navigation.
+    navigation_observer.Wait();
+
+    EXPECT_FALSE(observer.is_same_document());
+    EXPECT_TRUE(observer.has_committed());
+    EXPECT_FALSE(observer.was_redirected());
+    EXPECT_FALSE(observer.is_error());
+    EXPECT_EQ(shell()->web_contents()->GetLastCommittedURL(), about_blank_url);
+  }
+}
+
+// Ensure that a NavigationThrottle can defer and cancel the navigation when
+// navigating without a URLLoader. This test covers multiple types of
+// navigations that do not require a URLLoader (same-document navigations and
+// about:blank).
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       ThrottleDeferAndCancelCommitWithoutUrlLoader) {
+  GURL url(embedded_test_server()->GetURL("/title1.html"));
+  GURL url_fragment(embedded_test_server()->GetURL("/title1.html#id_1"));
+  GURL about_blank_url(url::kAboutBlankURL);
+
+  // Perform a new-document navigation (setup).
+  {
+    TestNavigationThrottleInstaller installer(
+        shell()->web_contents(), NavigationThrottle::PROCEED,
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
+    NavigationHandleObserver observer(shell()->web_contents(), url);
+    EXPECT_TRUE(NavigateToURL(shell(), url));
+    EXPECT_EQ(1, installer.will_start_called());
+    EXPECT_EQ(1, installer.will_process_called());
+    EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
+    EXPECT_FALSE(observer.is_same_document());
+  }
+
+  // Same-document navigation
+  {
+    TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
+    NavigationHandleObserver observer(shell()->web_contents(), url_fragment);
+    TestNavigationThrottleInstaller installer(
+        shell()->web_contents(), NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER);
+
+    shell()->LoadURL(url_fragment);
+
+    // Wait for WillCommitWithoutUrlLoader.
+    installer.WaitForThrottleWillCommitWithoutUrlLoader();
+    EXPECT_EQ(0, installer.will_start_called());
+    EXPECT_EQ(0, installer.will_redirect_called());
+    EXPECT_EQ(0, installer.will_fail_called());
+    EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
+
+    // Cancel the deferred navigation.
+    installer.navigation_throttle()->CancelNavigation(
+        NavigationThrottle::CANCEL_AND_IGNORE);
+
+    // Wait for the end of the navigation.
+    navigation_observer.Wait();
+
+    EXPECT_TRUE(observer.is_same_document());
+    EXPECT_FALSE(observer.has_committed());
+    EXPECT_FALSE(observer.was_redirected());
+    EXPECT_TRUE(observer.is_error());
+  }
+
+  // about:blank
+  {
+    TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
+    NavigationHandleObserver observer(shell()->web_contents(), about_blank_url);
+    TestNavigationThrottleInstaller installer(
+        shell()->web_contents(), NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER);
+
+    shell()->LoadURL(about_blank_url);
+
+    // Wait for WillCommitWithoutUrlLoader.
+    installer.WaitForThrottleWillCommitWithoutUrlLoader();
+    EXPECT_EQ(0, installer.will_start_called());
+    EXPECT_EQ(0, installer.will_redirect_called());
+    EXPECT_EQ(0, installer.will_fail_called());
+    EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
+
+    // Cancel the deferred navigation.
+    installer.navigation_throttle()->CancelNavigation(
+        NavigationThrottle::CANCEL_AND_IGNORE);
+
+    // Wait for the end of the navigation.
+    navigation_observer.Wait();
+
+    EXPECT_FALSE(observer.is_same_document());
+    EXPECT_FALSE(observer.has_committed());
+    EXPECT_FALSE(observer.was_redirected());
+    EXPECT_TRUE(observer.is_error());
+  }
 }
 
 // Ensure that a NavigationThrottle can block the navigation and collapse the
@@ -1072,16 +1580,19 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ThrottleBlockAndCollapse) {
     std::unique_ptr<TestNavigationThrottleInstaller>
         subframe_throttle_installer;
     if (test_case.deferred_block) {
-      subframe_throttle_installer.reset(
-          new TestDeferringNavigationThrottleInstaller(
+      subframe_throttle_installer =
+          std::make_unique<TestDeferringNavigationThrottleInstaller>(
               shell()->web_contents(), test_case.will_start_result,
               test_case.will_redirect_result, NavigationThrottle::PROCEED,
-              NavigationThrottle::PROCEED, blocked_subframe_url));
+              NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+              blocked_subframe_url);
     } else {
-      subframe_throttle_installer.reset(new TestNavigationThrottleInstaller(
-          shell()->web_contents(), test_case.will_start_result,
-          test_case.will_redirect_result, NavigationThrottle::PROCEED,
-          NavigationThrottle::PROCEED, blocked_subframe_url));
+      subframe_throttle_installer =
+          std::make_unique<TestNavigationThrottleInstaller>(
+              shell()->web_contents(), test_case.will_start_result,
+              test_case.will_redirect_result, NavigationThrottle::PROCEED,
+              NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+              blocked_subframe_url);
     }
 
     {
@@ -1144,7 +1655,8 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   TestNavigationThrottleInstaller subframe_throttle_installer(
       shell()->web_contents(), NavigationThrottle::BLOCK_REQUEST_AND_COLLAPSE,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED, blocked_subframe_url);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+      blocked_subframe_url);
 
   {
     SCOPED_TRACE("Initial navigation blocked on main frame load.");
@@ -1188,7 +1700,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::PROCEED,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
   TestNavigationManager main_manager(shell()->web_contents(), main_url);
   TestNavigationManager b_manager(shell()->web_contents(), b_url);
   TestNavigationManager c_manager(shell()->web_contents(), c_url);
@@ -1207,7 +1719,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
             installer.navigation_throttle()->request_context_type());
 
   // Ditto for frame b navigation.
-  main_manager.WaitForNavigationFinished();
+  ASSERT_TRUE(main_manager.WaitForNavigationFinished());
   EXPECT_TRUE(b_manager.WaitForRequestStart());
   EXPECT_EQ(2, installer.install_count());
   EXPECT_EQ(b_url, url_recorder.urls().back());
@@ -1216,7 +1728,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
             installer.navigation_throttle()->request_context_type());
 
   // Ditto for frame c navigation.
-  b_manager.WaitForNavigationFinished();
+  ASSERT_TRUE(b_manager.WaitForNavigationFinished());
   EXPECT_TRUE(c_manager.WaitForRequestStart());
   EXPECT_EQ(3, installer.install_count());
   EXPECT_EQ(c_url, url_recorder.urls().back());
@@ -1226,7 +1738,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
 
   // Lets the final navigation finish so that we conclude running the
   // RequestContextType checks that happen in TestNavigationThrottle.
-  c_manager.WaitForNavigationFinished();
+  ASSERT_TRUE(c_manager.WaitForNavigationFinished());
   // Confirms the last navigation did finish.
   EXPECT_FALSE(installer.navigation_throttle());
 }
@@ -1240,7 +1752,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::PROCEED,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
   TestNavigationManager link_manager(shell()->web_contents(), link_url);
   NavigationStartUrlRecorder url_recorder(shell()->web_contents());
 
@@ -1251,11 +1763,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
 
   // Starts the navigation from a link click and then check it.
   EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
-  bool success = false;
-  EXPECT_TRUE(ExecuteScriptAndExtractBool(
-      shell(), "window.domAutomationController.send(clickSameSiteLink());",
-      &success));
-  EXPECT_TRUE(success);
+  EXPECT_EQ(true, EvalJs(shell(), "clickSameSiteLink();"));
   EXPECT_TRUE(link_manager.WaitForRequestStart());
   EXPECT_EQ(link_url, url_recorder.urls().back());
   EXPECT_EQ(2ul, url_recorder.urls().size());
@@ -1263,7 +1771,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
             installer.navigation_throttle()->request_context_type());
 
   // Finishes the last navigation.
-  link_manager.WaitForNavigationFinished();
+  ASSERT_TRUE(link_manager.WaitForNavigationFinished());
   EXPECT_FALSE(installer.navigation_throttle());
 }
 
@@ -1277,7 +1785,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::PROCEED,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
   TestNavigationManager post_manager(shell()->web_contents(), post_url);
   NavigationStartUrlRecorder url_recorder(shell()->web_contents());
 
@@ -1297,7 +1805,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
             installer.navigation_throttle()->request_context_type());
 
   // Finishes the last navigation.
-  post_manager.WaitForNavigationFinished();
+  ASSERT_TRUE(post_manager.WaitForNavigationFinished());
   EXPECT_FALSE(installer.navigation_throttle());
 }
 
@@ -1315,7 +1823,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::CANCEL_AND_IGNORE,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), kUrl);
 
     // Try to navigate to the url. The navigation should be canceled and the
@@ -1330,7 +1838,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::CANCEL_AND_IGNORE, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), kRedirectingUrl);
 
     // Try to navigate to the url. The navigation should be canceled and the
@@ -1345,7 +1853,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::CANCEL_AND_IGNORE);
+        NavigationThrottle::CANCEL_AND_IGNORE, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), kUrl);
 
     // Try to navigate to the url. The navigation should be canceled and the
@@ -1360,7 +1868,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::BLOCK_REQUEST,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), kUrl);
 
     // Try to navigate to the url. The navigation should be canceled and the
@@ -1374,7 +1882,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::PROCEED,
       NavigationThrottle::BLOCK_REQUEST, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
   NavigationHandleObserver observer(shell()->web_contents(), kRedirectingUrl);
 
   // Try to navigate to the url. The navigation should be canceled and the
@@ -1404,7 +1912,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::CANCEL_AND_IGNORE,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
   EXPECT_FALSE(NavigateToURL(shell(), kUrl2));
 }
@@ -1422,13 +1930,13 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
 
   // Kill the a.com process, to test what happens with the next navigation.
   scoped_refptr<SiteInstance> site_instance_a =
-      shell()->web_contents()->GetMainFrame()->GetSiteInstance();
+      shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance();
   EXPECT_TRUE(site_instance_a->HasProcess());
   RenderProcessHost* process_1 = site_instance_a->GetProcess();
   RenderProcessHostWatcher process_exit_observer_1(
-      process_1, content::RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
+      process_1, RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
   RenderProcessHostWatcher rph_gone_observer_1(
-      process_1, content::RenderProcessHostWatcher::WATCH_FOR_HOST_DESTRUCTION);
+      process_1, RenderProcessHostWatcher::WATCH_FOR_HOST_DESTRUCTION);
   process_1->Shutdown(RESULT_CODE_KILLED);
   process_exit_observer_1.Wait();
 
@@ -1443,23 +1951,31 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   // RenderFrameHost.
   scoped_refptr<SiteInstance> starting_site_instance =
       navigation_b.GetNavigationHandle()->GetStartingSiteInstance();
-  EXPECT_EQ(shell()->web_contents()->GetMainFrame()->GetSiteInstance(),
+  EXPECT_EQ(shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance(),
             starting_site_instance);
-  // Because of the sad tab, this is actually the b.com SiteInstance, which
-  // commits immediately after starting the navigation and has a process.
-  EXPECT_EQ(GURL("http://b.com"), starting_site_instance->GetSiteURL());
+  if (ShouldSkipEarlyCommitPendingForCrashedFrame()) {
+    EXPECT_EQ(
+        GURL("http://a.com"),
+        starting_site_instance->GetSecurityPrincipal().GetDeprecatedSiteURL());
+  } else {
+    // Because of the sad tab, this is actually the b.com SiteInstance, which
+    // commits immediately after starting the navigation and has a process.
+    EXPECT_EQ(
+        GURL("http://b.com"),
+        starting_site_instance->GetSecurityPrincipal().GetDeprecatedSiteURL());
+  }
   EXPECT_TRUE(starting_site_instance->HasProcess());
 
   // In https://crbug.com/949977, we used the a.com SiteInstance here and didn't
-  // have a process, and an observer called GetProcess, creating a process. This
-  // RPH never went away, even after the SiteInstance was gone. Simulate this
-  // by creating a new RPH for site_instance_a directly. Note that the actual
-  // process may not get created (only if the spare process is in use), so wait
-  // for RPH destruction rather than process exit.
-  RenderProcessHost* rph_2 = site_instance_a->GetProcess();
+  // have a process, and an observer called GetOrCreateProcess, creating a
+  // process. This RPH never went away, even after the SiteInstance was gone.
+  // Simulate this by creating a new RPH for site_instance_a directly. Note that
+  // the actual process may not get created (only if the spare process is in
+  // use), so wait for RPH destruction rather than process exit.
+  RenderProcessHost* rph_2 = site_instance_a->GetOrCreateProcessForTesting();
   RenderProcessHostWatcher process_exit_observer_2(
-      rph_2, content::RenderProcessHostWatcher::WATCH_FOR_HOST_DESTRUCTION);
-  navigation_b.WaitForNavigationFinished();
+      rph_2, RenderProcessHostWatcher::WATCH_FOR_HOST_DESTRUCTION);
+  ASSERT_TRUE(navigation_b.WaitForNavigationFinished());
 
   // Ensure RPH 1 is destroyed, which happens at commit time even before the fix
   // for the bug.
@@ -1470,8 +1986,8 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   // finish in the case that the starting SiteInstance is b.com, since b.com's
   // process goes away with this navigation.
   // TODO(creis): There's still a slight risk that other buggy code could find
-  // site_instance_a and call GetProcess() on it, causing a leak. We'll add a
-  // backup fix and test for that in a followup CL.
+  // site_instance_a and call GetOrCreateProcess() on it, causing a leak. We'll
+  // add a backup fix and test for that in a followup CL.
   GURL url_c = embedded_test_server()->GetURL("c.com", "/title1.html");
   EXPECT_TRUE(NavigateToURL(shell()->web_contents(), url_c));
 
@@ -1501,7 +2017,7 @@ class NavigationRequestHttpsUpgradeBrowserTest
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     TestNavigationManager navigation_manager(shell()->web_contents(),
                                              iframe_secure_url);
 
@@ -1574,12 +2090,13 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
       shell()->web_contents(), embedded_test_server()->GetURL("/title1.html"));
   TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
 
-  auto frames = shell()->web_contents()->GetMainFrame()->GetFramesInSubtree();
-  ASSERT_EQ(frames.size(), 2u);
-  auto* frame = static_cast<RenderFrameHostImpl*>(frames[1]);
+  RenderFrameHostImpl* main_frame = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  ASSERT_EQ(1u, main_frame->child_count());
+  FrameTreeNode* child = main_frame->child_at(0u);
   auto* navigation_controller = static_cast<NavigationControllerImpl*>(
       &shell()->web_contents()->GetController());
-  navigation_controller->ReloadFrame(frame->frame_tree_node());
+  navigation_controller->ReloadFrame(child);
   navigation_observer.Wait();
 
   EXPECT_EQ(handle_observer.reload_type(), ReloadType::NORMAL);
@@ -1591,7 +2108,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   GURL url = embedded_test_server()->GetURL("/hello.html");
   EXPECT_TRUE(NavigateToURL(shell(), url));
   NavigationHandleObserver observer(shell()->web_contents(), url);
-  EXPECT_TRUE(ExecuteScript(shell(), "location.reload();"));
+  EXPECT_TRUE(ExecJs(shell(), "location.reload();"));
   EXPECT_EQ(observer.reload_type(), ReloadType::NORMAL);
 }
 
@@ -1602,15 +2119,18 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
 
   NavigationHandleObserver handle_observer(
       shell()->web_contents(), embedded_test_server()->GetURL("/title1.html"));
-  EXPECT_TRUE(ExecuteScript(shell(),
-                            "document.getElementById('test_iframe')."
-                            "contentWindow.location.reload();"));
+  EXPECT_TRUE(ExecJs(shell(),
+                     "document.getElementById('test_iframe')."
+                     "contentWindow.location.reload();"));
   EXPECT_EQ(handle_observer.reload_type(), ReloadType::NORMAL);
   EXPECT_FALSE(handle_observer.is_main_frame());
 }
 
 // Ensure that browser-initiated same-document navigations are detected and
 // don't issue network requests.  See crbug.com/663777.
+// Browser-initiated same-document navigations should trigger a
+// WillCommitWithoutUrlLoader() callback, instead of the WillStartRequest()
+// and WillProcessResponse() callbacks used when there is a network request.
 IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
                        SameDocumentBrowserInitiatedNoReload) {
   GURL url(embedded_test_server()->GetURL("/title1.html"));
@@ -1622,11 +2142,12 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), url);
     EXPECT_TRUE(NavigateToURL(shell(), url));
     EXPECT_EQ(1, installer.will_start_called());
     EXPECT_EQ(1, installer.will_process_called());
+    EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
     EXPECT_FALSE(observer.is_same_document());
   }
 
@@ -1635,11 +2156,12 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), url_fragment_1);
     EXPECT_TRUE(NavigateToURL(shell(), url_fragment_1));
     EXPECT_EQ(0, installer.will_start_called());
     EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
     EXPECT_TRUE(observer.is_same_document());
   }
 
@@ -1648,25 +2170,28 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), url_fragment_2);
     EXPECT_TRUE(NavigateToURL(shell(), url_fragment_2));
     EXPECT_EQ(0, installer.will_start_called());
     EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
     EXPECT_TRUE(observer.is_same_document());
   }
 
-  // 4) Redo the last navigation, but this time it should trigger a reload.
+  // 4) Redo the last navigation, and it should be treated as fragment
+  //    navigation.
   {
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), url_fragment_2);
     EXPECT_TRUE(NavigateToURL(shell(), url_fragment_2));
-    EXPECT_EQ(1, installer.will_start_called());
-    EXPECT_EQ(1, installer.will_process_called());
-    EXPECT_FALSE(observer.is_same_document());
+    EXPECT_EQ(0, installer.will_start_called());
+    EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
+    EXPECT_TRUE(observer.is_same_document());
   }
 
   // 5) Perform a new-document navigation by removing the fragment.
@@ -1674,11 +2199,12 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     TestNavigationThrottleInstaller installer(
         shell()->web_contents(), NavigationThrottle::PROCEED,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
     NavigationHandleObserver observer(shell()->web_contents(), url);
     EXPECT_TRUE(NavigateToURL(shell(), url));
     EXPECT_EQ(1, installer.will_start_called());
     EXPECT_EQ(1, installer.will_process_called());
+    EXPECT_EQ(0, installer.will_commit_without_url_loader_called());
     EXPECT_FALSE(observer.is_same_document());
   }
 }
@@ -1708,7 +2234,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestHostResolutionFailureTest,
 // Record and list the navigations that are started and finished.
 class NavigationLogger : public WebContentsObserver {
  public:
-  NavigationLogger(WebContents* web_contents)
+  explicit NavigationLogger(WebContents* web_contents)
       : WebContentsObserver(web_contents) {}
 
   void DidStartNavigation(NavigationHandle* navigation_handle) override {
@@ -1754,7 +2280,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, BlockedOnRedirect) {
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::PROCEED,
       NavigationThrottle::BLOCK_REQUEST, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
   NavigationHandleObserver observer(shell()->web_contents(), kRedirectingUrl);
   NavigationLogger logger(shell()->web_contents());
 
@@ -1792,13 +2318,13 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ErrorCodeOnRedirect) {
   GURL url(embedded_test_server()->GetURL("/title1.html"));
   EXPECT_TRUE(NavigateToURL(shell(), url));
 
-  GURL redirect_url = embedded_test_server()->GetURL(
-      std::string("/server-redirect?") + kChromeUINetworkErrorsListingURL);
+  GURL redirect_url =
+      embedded_test_server()->GetURL(std::string("/server-redirect?") +
+                                     blink::kChromeUINetworkErrorsListingURL);
   NavigationHandleObserver observer(shell()->web_contents(), redirect_url);
   TestNavigationObserver same_tab_observer(shell()->web_contents(), 1);
-  EXPECT_TRUE(
-      ExecuteScript(shell(), base::StringPrintf("location.href = '%s';",
-                                                redirect_url.spec().c_str())));
+  EXPECT_TRUE(ExecJs(shell(), base::StringPrintf("location.href = '%s';",
+                                                 redirect_url.spec().c_str())));
   same_tab_observer.Wait();
   EXPECT_EQ(net::ERR_UNSAFE_REDIRECT, observer.net_error_code());
 }
@@ -1819,12 +2345,12 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   }
 
   scoped_refptr<SiteInstance> site_instance =
-      shell()->web_contents()->GetMainFrame()->GetSiteInstance();
+      shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance();
 
   auto installer = std::make_unique<TestNavigationThrottleInstaller>(
       shell()->web_contents(), NavigationThrottle::BLOCK_REQUEST,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
   {
     // A blocked, renderer-initiated navigation in the main frame should commit
@@ -1832,30 +2358,36 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     NavigationHandleObserver observer(shell()->web_contents(), blocked_url);
     TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
     EXPECT_TRUE(
-        ExecuteScript(shell(), base::StringPrintf("location.href = '%s'",
-                                                  blocked_url.spec().c_str())));
+        ExecJs(shell(), base::StringPrintf("location.href = '%s'",
+                                           blocked_url.spec().c_str())));
     navigation_observer.Wait();
     EXPECT_TRUE(observer.has_committed());
     EXPECT_TRUE(observer.is_error());
     if (SiteIsolationPolicy::IsErrorPageIsolationEnabled(true)) {
-      EXPECT_NE(site_instance,
-                shell()->web_contents()->GetMainFrame()->GetSiteInstance());
+      EXPECT_NE(
+          site_instance,
+          shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance());
       EXPECT_EQ(kUnreachableWebDataURL, shell()
                                             ->web_contents()
-                                            ->GetMainFrame()
+                                            ->GetPrimaryMainFrame()
                                             ->GetSiteInstance()
-                                            ->GetSiteURL());
+                                            ->GetSecurityPrincipal()
+                                            .GetDeprecatedSiteURL());
     } else {
-      EXPECT_EQ(site_instance,
-                shell()->web_contents()->GetMainFrame()->GetSiteInstance());
+      EXPECT_EQ(
+          site_instance,
+          shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance());
     }
   }
 
   {
     // Reloading the blocked document from the browser process still ends up
     // in the error page process.
-    int process_id =
-        shell()->web_contents()->GetMainFrame()->GetProcess()->GetID();
+    int process_id = shell()
+                         ->web_contents()
+                         ->GetPrimaryMainFrame()
+                         ->GetProcess()
+                         ->GetDeprecatedID();
     NavigationHandleObserver observer(shell()->web_contents(), blocked_url);
     TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
 
@@ -1866,17 +2398,23 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     if (SiteIsolationPolicy::IsErrorPageIsolationEnabled(true)) {
       EXPECT_EQ(kUnreachableWebDataURL, shell()
                                             ->web_contents()
-                                            ->GetMainFrame()
+                                            ->GetPrimaryMainFrame()
                                             ->GetSiteInstance()
-                                            ->GetSiteURL());
-      EXPECT_EQ(process_id,
-                shell()->web_contents()->GetMainFrame()->GetProcess()->GetID());
+                                            ->GetSecurityPrincipal()
+                                            .GetDeprecatedSiteURL());
+      EXPECT_EQ(process_id, shell()
+                                ->web_contents()
+                                ->GetPrimaryMainFrame()
+                                ->GetProcess()
+                                ->GetDeprecatedID());
     } else if (AreAllSitesIsolatedForTesting()) {
-      EXPECT_NE(site_instance,
-                shell()->web_contents()->GetMainFrame()->GetSiteInstance());
+      EXPECT_NE(
+          site_instance,
+          shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance());
     } else {
-      EXPECT_EQ(site_instance,
-                shell()->web_contents()->GetMainFrame()->GetSiteInstance());
+      EXPECT_EQ(
+          site_instance,
+          shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance());
     }
   }
 
@@ -1892,14 +2430,15 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     navigation_observer.Wait();
     EXPECT_TRUE(observer.has_committed());
     EXPECT_FALSE(observer.is_error());
-    EXPECT_EQ(site_instance,
-              shell()->web_contents()->GetMainFrame()->GetSiteInstance());
+    EXPECT_EQ(
+        site_instance,
+        shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance());
   }
 
   installer = std::make_unique<TestNavigationThrottleInstaller>(
       shell()->web_contents(), NavigationThrottle::BLOCK_REQUEST,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
   {
     // A blocked, browser-initiated navigation should commit an error page in a
@@ -1912,22 +2451,24 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     navigation_observer.Wait();
     EXPECT_TRUE(observer.has_committed());
     EXPECT_TRUE(observer.is_error());
-    EXPECT_NE(site_instance,
-              shell()->web_contents()->GetMainFrame()->GetSiteInstance());
+    EXPECT_NE(
+        site_instance,
+        shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance());
     if (SiteIsolationPolicy::IsErrorPageIsolationEnabled(true)) {
       EXPECT_EQ(kUnreachableWebDataURL, shell()
                                             ->web_contents()
-                                            ->GetMainFrame()
+                                            ->GetPrimaryMainFrame()
                                             ->GetSiteInstance()
-                                            ->GetSiteURL());
+                                            ->GetSecurityPrincipal()
+                                            .GetDeprecatedSiteURL());
     }
   }
 
   installer.reset();
 
   {
-    // A blocked subframe navigation should commit an error page in the same
-    // process.
+    // A blocked subframe navigation should commit an error page in the error
+    // page process or stay in the same process, based on the isolation policy.
     EXPECT_TRUE(NavigateToURL(shell(), start_url));
     const std::string javascript =
         "var i = document.createElement('iframe');"
@@ -1939,23 +2480,23 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
     installer = std::make_unique<TestNavigationThrottleInstaller>(
         shell()->web_contents(), NavigationThrottle::BLOCK_REQUEST,
         NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-        NavigationThrottle::PROCEED);
+        NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
-    content::RenderFrameHost* rfh = shell()->web_contents()->GetMainFrame();
+    RenderFrameHost* rfh = shell()->web_contents()->GetPrimaryMainFrame();
+    scoped_refptr<SiteInstance> initial_site_instance = rfh->GetSiteInstance();
     TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
-    ASSERT_TRUE(content::ExecuteScript(rfh, javascript));
+    ASSERT_TRUE(ExecJs(rfh, javascript));
     navigation_observer.Wait();
 
     FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                              ->GetFrameTree()
-                              ->root();
+                              ->GetPrimaryFrameTree()
+                              .root();
     ASSERT_EQ(1u, root->child_count());
     FrameTreeNode* child = root->child_at(0u);
 
-    EXPECT_EQ(root->current_frame_host()->GetSiteInstance(),
-              child->current_frame_host()->GetSiteInstance());
-    EXPECT_NE(kUnreachableWebDataURL,
-              child->current_frame_host()->GetSiteInstance()->GetSiteURL());
+    EXPECT_TRUE(IsExpectedSubframeErrorTransition(
+        initial_site_instance.get(),
+        child->current_frame_host()->GetSiteInstance()));
   }
 }
 
@@ -1965,7 +2506,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
 IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ErrorPageNetworkError) {
   GURL start_url(embedded_test_server()->GetURL("foo.com", "/title1.html"));
   GURL error_url(embedded_test_server()->GetURL("/close-socket"));
-  EXPECT_NE(start_url.host(), error_url.host());
+  EXPECT_NE(start_url.GetHost(), error_url.GetHost());
   GetIOThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(&net::URLRequestFailedJob::AddUrlHandler));
 
@@ -1977,22 +2518,538 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, ErrorPageNetworkError) {
   }
 
   scoped_refptr<SiteInstance> site_instance =
-      shell()->web_contents()->GetMainFrame()->GetSiteInstance();
+      shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance();
   {
     NavigationHandleObserver observer(shell()->web_contents(), error_url);
     EXPECT_FALSE(NavigateToURL(shell(), error_url));
     EXPECT_TRUE(observer.has_committed());
     EXPECT_TRUE(observer.is_error());
-    EXPECT_NE(site_instance,
-              shell()->web_contents()->GetMainFrame()->GetSiteInstance());
+    EXPECT_NE(
+        site_instance,
+        shell()->web_contents()->GetPrimaryMainFrame()->GetSiteInstance());
     if (SiteIsolationPolicy::IsErrorPageIsolationEnabled(true)) {
       EXPECT_EQ(kUnreachableWebDataURL, shell()
                                             ->web_contents()
-                                            ->GetMainFrame()
+                                            ->GetPrimaryMainFrame()
                                             ->GetSiteInstance()
-                                            ->GetSiteURL());
+                                            ->GetSecurityPrincipal()
+                                            .GetDeprecatedSiteURL());
     }
   }
+}
+
+class ReadyToCommitObserver : public WebContentsObserver {
+ public:
+  explicit ReadyToCommitObserver(WebContents* web_contents) {
+    WebContentsObserver::Observe(web_contents);
+  }
+
+  bool ReadyToCommitNavigationWasCalled() const {
+    return ready_to_commit_navigation_called_;
+  }
+
+ protected:
+  void ReadyToCommitNavigation(NavigationHandle* navigation_handle) override {
+    ready_to_commit_navigation_called_ = true;
+  }
+
+  bool ready_to_commit_navigation_called_ = false;
+};
+
+// Ensure that adding a deferring condition that's already satisfied when
+// checked (i.e. can return synchronously) doesn't block commit.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       SynchronouslyCompleteCommitDeferringCondition) {
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+  WebContents* web_contents = shell()->web_contents();
+  ReadyToCommitObserver observer(web_contents);
+
+  MockCommitDeferringConditionInstaller installer(
+      simple_url, CommitDeferringCondition::Result::kProceed);
+
+  shell()->LoadURL(simple_url);
+  ASSERT_TRUE(manager.WaitForResponse());
+  manager.ResumeNavigation();
+
+  // Ready to commit should be reached synchronously after a response.
+  EXPECT_TRUE(installer.condition().WasInvoked());
+  EXPECT_TRUE(observer.ReadyToCommitNavigationWasCalled());
+  EXPECT_TRUE(manager.GetNavigationHandle()->IsWaitingToCommit());
+
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+}
+
+// Ensure asynchronously deferring conditions block the navigation when it's
+// ready to commit.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       AsyncCommitDeferringCondition) {
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+  WebContents* web_contents = shell()->web_contents();
+
+  MockCommitDeferringConditionInstaller installer1(
+      simple_url, CommitDeferringCondition::Result::kDefer);
+  MockCommitDeferringConditionInstaller installer2(
+      simple_url, CommitDeferringCondition::Result::kDefer);
+
+  ReadyToCommitObserver observer(web_contents);
+
+  shell()->LoadURL(simple_url);
+  ASSERT_TRUE(manager.WaitForResponse());
+  manager.ResumeNavigation();
+
+  NavigationRequest* request =
+      static_cast<NavigationRequest*>(manager.GetNavigationHandle());
+
+  // The navigation should not have proceeded through to ReadyToCommit because
+  // the first condition is deferring it. The second condition should not be
+  // checked until the first is resolved.
+  EXPECT_LT(request->state(), NavigationRequest::READY_TO_COMMIT);
+  EXPECT_FALSE(observer.ReadyToCommitNavigationWasCalled());
+  EXPECT_TRUE(installer1.condition().WasInvoked());
+  EXPECT_FALSE(installer2.condition().WasInvoked());
+  EXPECT_TRUE(request->IsCommitDeferringConditionDeferredForTesting());
+
+  // Resume from the first condition. This should now block on the second
+  // condition.
+  installer1.condition().CallResumeClosure();
+  EXPECT_LT(request->state(), NavigationRequest::READY_TO_COMMIT);
+  EXPECT_FALSE(observer.ReadyToCommitNavigationWasCalled());
+  EXPECT_TRUE(installer2.condition().WasInvoked());
+
+  // Resuming from the second condition should now resume the navigaiton. This
+  // should call ReadyToCommit and commit the navigation.
+  installer2.condition().CallResumeClosure();
+  EXPECT_TRUE(observer.ReadyToCommitNavigationWasCalled());
+  EXPECT_EQ(request->state(), NavigationRequest::READY_TO_COMMIT);
+  EXPECT_FALSE(request->IsCommitDeferringConditionDeferredForTesting());
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+}
+
+// Ensure a navigation can be cancelled while an asynchronously deferring
+// condition is blocking commit.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       CancelWhileCommitDeferred) {
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+  WebContents* web_contents = shell()->web_contents();
+
+  MockCommitDeferringConditionInstaller installer1(
+      simple_url, CommitDeferringCondition::Result::kDefer);
+
+  // We'll cancel the navigation while the first condition is deferred so this
+  // is added only to make sure it's never invoked.
+  MockCommitDeferringConditionInstaller installer2(
+      simple_url, CommitDeferringCondition::Result::kDefer);
+
+  shell()->LoadURL(simple_url);
+  ASSERT_TRUE(manager.WaitForResponse());
+  manager.ResumeNavigation();
+
+  NavigationRequest* request =
+      static_cast<NavigationRequest*>(manager.GetNavigationHandle());
+
+  // The navigation should have passed all checks but is now deferred from
+  // committing by |condition|.
+  EXPECT_LT(request->state(), NavigationRequest::READY_TO_COMMIT);
+  EXPECT_TRUE(installer1.condition().WasInvoked());
+  EXPECT_TRUE(request->IsCommitDeferringConditionDeferredForTesting());
+
+  // While the commit is deferred, cancel the navigation. This should delete
+  // the navigation request.
+  EXPECT_FALSE(installer1.condition().IsDestroyed());
+  web_contents->Stop();
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+  EXPECT_EQ(manager.GetNavigationHandle(), nullptr);
+  EXPECT_TRUE(installer1.condition().IsDestroyed());
+  EXPECT_TRUE(installer2.condition().IsDestroyed());
+
+  // Call resume on `installer1`'s condition, as could happen when e.g. the
+  // renderer responds after the navigation is stopped. Make sure we don't
+  // crash.
+  installer1.condition().CallResumeClosure();
+
+  EXPECT_FALSE(installer2.condition().WasInvoked());
+}
+
+// A test ContentBrowserClient that allows injecting
+// ProcessSelectionDeferringConditions into a NavigationRequest.
+class ProcessSelectionDeferringBrowserClient
+    : public ContentBrowserTestContentBrowserClient {
+ public:
+  ProcessSelectionDeferringBrowserClient() = default;
+
+  ~ProcessSelectionDeferringBrowserClient() override = default;
+
+  std::vector<std::unique_ptr<ProcessSelectionDeferringCondition>>
+  CreateProcessSelectionDeferringConditionsForNavigation(
+      NavigationHandle& navigation_handle) override {
+    std::vector<std::unique_ptr<ProcessSelectionDeferringCondition>> conditions;
+    create_process_conditions_call_count_++;
+    for (auto result : condition_results_to_create_) {
+      auto condition =
+          std::make_unique<MockProcessSelectionDeferringConditionTester>(
+              navigation_handle, result);
+      conditions.push_back(condition->Release());
+      owned_conditions_.push_back(std::move(condition));
+    }
+    return conditions;
+  }
+
+  // Add a condition type to create on each navigation. If the test involves
+  // multiple navigations, all condition types will be created for each
+  // navigation.
+  void AddConditionToCreate(ProcessSelectionDeferringCondition::Result result) {
+    condition_results_to_create_.push_back(result);
+  }
+
+  // Returns the currently created process selection deferring conditions to the
+  // caller. The returned vector will contain all conditions created since the
+  // last time that GetCreatedConditions() was called, which may include
+  // conditions from multiple navigations.
+  std::vector<std::unique_ptr<MockProcessSelectionDeferringConditionTester>>
+  GetCreatedConditions() {
+    return std::move(owned_conditions_);
+  }
+
+  int create_process_conditions_call_count() {
+    return create_process_conditions_call_count_;
+  }
+
+ private:
+  std::vector<ProcessSelectionDeferringCondition::Result>
+      condition_results_to_create_;
+  std::vector<std::unique_ptr<MockProcessSelectionDeferringConditionTester>>
+      owned_conditions_;
+  int create_process_conditions_call_count_ = 0;
+};
+
+class ProcessSelectionDeferralTest : public NavigationRequestBrowserTest {
+ public:
+  ProcessSelectionDeferralTest() {
+    scoped_feature_list_.InitAndEnableFeature(
+        features::kProcessSelectionDeferringConditions);
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+// Ensure a navigation runs process selection deferring conditions.
+IN_PROC_BROWSER_TEST_F(
+    ProcessSelectionDeferralTest,
+    ProcessSelectionDeferringConditionsAreCalledOnNavigation) {
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+
+  ProcessSelectionDeferringBrowserClient browser_client;
+  browser_client.AddConditionToCreate(
+      ProcessSelectionDeferringCondition::Result::kProceed);
+
+  shell()->LoadURL(simple_url);
+  ASSERT_TRUE(manager.WaitForResponse());
+  manager.ResumeNavigation();
+
+  NavigationRequest* request =
+      static_cast<NavigationRequest*>(manager.GetNavigationHandle());
+
+  EXPECT_EQ(request->state(), NavigationRequest::READY_TO_COMMIT);
+  auto conditions = browser_client.GetCreatedConditions();
+  ASSERT_EQ(1u, conditions.size());
+  MockProcessSelectionDeferringConditionTester* condition = conditions[0].get();
+  ASSERT_TRUE(condition);
+  EXPECT_EQ(condition->GetOnRequestRedirectedCallCount(), 0);
+  EXPECT_TRUE(condition->WasOnWillSelectFinalProcessCalled());
+}
+
+// Ensure a navigation runs process selection deferring conditions when a
+// request is redirected.
+IN_PROC_BROWSER_TEST_F(ProcessSelectionDeferralTest,
+                       ProcessSelectionDeferringConditionsAreCalledOnRedirect) {
+  GURL final_url = embedded_test_server()->GetURL("/defaultresponse");
+  GURL first_url =
+      embedded_test_server()->GetURL("/server-redirect?" + final_url.spec());
+
+  TestNavigationManager manager(shell()->web_contents(), first_url);
+
+  ProcessSelectionDeferringBrowserClient browser_client;
+  browser_client.AddConditionToCreate(
+      ProcessSelectionDeferringCondition::Result::kProceed);
+
+  shell()->LoadURL(first_url);
+  ASSERT_TRUE(manager.WaitForResponse());
+  manager.ResumeNavigation();
+
+  NavigationRequest* request =
+      static_cast<NavigationRequest*>(manager.GetNavigationHandle());
+
+  EXPECT_EQ(request->state(), NavigationRequest::READY_TO_COMMIT);
+  auto conditions = browser_client.GetCreatedConditions();
+  ASSERT_EQ(1u, conditions.size());
+  MockProcessSelectionDeferringConditionTester* condition = conditions[0].get();
+  ASSERT_TRUE(condition);
+  EXPECT_EQ(condition->GetOnRequestRedirectedCallCount(), 1);
+}
+
+// Ensure a navigation can be deferred by a
+// ProcessSelectionDeferringCondition.
+IN_PROC_BROWSER_TEST_F(ProcessSelectionDeferralTest,
+                       ProcessSelectionCanBeDeferred) {
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationObserver navigation_observer(shell()->web_contents());
+
+  ProcessSelectionDeferringBrowserClient browser_client;
+  browser_client.AddConditionToCreate(
+      ProcessSelectionDeferringCondition::Result::kDefer);
+
+  shell()->LoadURL(simple_url);
+
+  auto conditions = browser_client.GetCreatedConditions();
+  ASSERT_EQ(1u, conditions.size());
+  MockProcessSelectionDeferringConditionTester* condition = conditions[0].get();
+  ASSERT_TRUE(condition);
+
+  condition->WaitUntilOnWillSelectFinalProcessIsCalled();
+
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  NavigationRequest* request = root->navigation_request();
+  ASSERT_TRUE(request);
+
+  // The navigation should not have proceeded through to ReadyToCommit.
+  EXPECT_LT(request->state(), NavigationRequest::READY_TO_COMMIT);
+  EXPECT_TRUE(condition->WasOnWillSelectFinalProcessCalled());
+
+  // Resume the deferral.
+  condition->CallResumeClosure();
+
+  // The navigation should now be able to commit.
+  navigation_observer.Wait();
+  EXPECT_TRUE(navigation_observer.last_navigation_succeeded());
+}
+
+// Ensure a subframe navigation can be deferred by a
+// ProcessSelectionDeferringCondition.
+IN_PROC_BROWSER_TEST_F(ProcessSelectionDeferralTest,
+                       ProcessSelectionForSubframeCanBeDeferred) {
+  GURL main_frame_url(embedded_test_server()->GetURL(
+      "a.com", "/cross_site_iframe_factory.html?a(b())"));
+  GURL subframe_url(embedded_test_server()->GetURL(
+      "b.com", "/cross_site_iframe_factory.html?b()"));
+
+  TestNavigationManager main_frame_manager(shell()->web_contents(),
+                                           main_frame_url);
+  TestNavigationManager subframe_manager(shell()->web_contents(), subframe_url);
+
+  ProcessSelectionDeferringBrowserClient browser_client;
+  // Since there are two navigations, two conditions will be created.
+  browser_client.AddConditionToCreate(
+      ProcessSelectionDeferringCondition::Result::kDefer);
+
+  shell()->LoadURL(main_frame_url);
+
+  EXPECT_TRUE(main_frame_manager.WaitForRequestStart());
+  auto conditions = browser_client.GetCreatedConditions();
+  ASSERT_EQ(1u, conditions.size());
+  MockProcessSelectionDeferringConditionTester* main_frame_condition =
+      conditions[0].get();
+
+  // Allow the navigation to proceed until it is deferred by the condition.
+  main_frame_manager.ResumeNavigation();
+  main_frame_condition->WaitUntilOnWillSelectFinalProcessIsCalled();
+
+  // Main frame should be deferred.
+  EXPECT_FALSE(main_frame_manager.was_committed());
+
+  // After the main frame's process selection is resumed, it will commit and
+  // the subframe navigation will start.
+  main_frame_condition->CallResumeClosure();
+  ASSERT_TRUE(main_frame_manager.WaitForNavigationFinished());
+
+  // Main frame should commit, but we need to wait until the subframe navigation
+  // starts.
+  EXPECT_TRUE(subframe_manager.WaitForRequestStart());
+  EXPECT_TRUE(main_frame_manager.was_committed());
+  EXPECT_FALSE(subframe_manager.was_committed());
+
+  EXPECT_EQ(2, browser_client.create_process_conditions_call_count());
+  conditions = browser_client.GetCreatedConditions();
+  ASSERT_EQ(1u, conditions.size());
+  MockProcessSelectionDeferringConditionTester* subframe_condition =
+      conditions[0].get();
+
+  // Allow the subframe navigation to proceed until it is deferred by the
+  // condition.
+  subframe_manager.ResumeNavigation();
+  subframe_condition->WaitUntilOnWillSelectFinalProcessIsCalled();
+
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  ASSERT_EQ(1u, root->child_count());
+  FrameTreeNode* child = root->child_at(0u);
+  NavigationRequest* request = child->navigation_request();
+  ASSERT_TRUE(request);
+  EXPECT_LT(request->state(), NavigationRequest::READY_TO_COMMIT);
+  EXPECT_FALSE(subframe_manager.was_committed());
+
+  subframe_condition->CallResumeClosure();
+  ASSERT_TRUE(subframe_manager.WaitForNavigationFinished());
+  EXPECT_TRUE(subframe_manager.was_committed());
+}
+
+// Ensure a navigation can be cancelled while process selection is deferring.
+IN_PROC_BROWSER_TEST_F(ProcessSelectionDeferralTest,
+                       CanCancelWhileProcessSelectionIsDeferring) {
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationObserver navigation_observer(shell()->web_contents());
+
+  ProcessSelectionDeferringBrowserClient browser_client;
+  browser_client.AddConditionToCreate(
+      ProcessSelectionDeferringCondition::Result::kDefer);
+
+  shell()->LoadURL(simple_url);
+
+  auto conditions = browser_client.GetCreatedConditions();
+  ASSERT_EQ(1u, conditions.size());
+  MockProcessSelectionDeferringConditionTester* condition = conditions[0].get();
+  ASSERT_TRUE(condition);
+
+  // This will run until the condition's `OnWillSelectFinalProcess` is called.
+  condition->WaitUntilOnWillSelectFinalProcessIsCalled();
+
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  NavigationRequest* request = root->navigation_request();
+  ASSERT_TRUE(request);
+
+  EXPECT_TRUE(condition->WasOnWillSelectFinalProcessCalled());
+
+  // The navigation should not have proceeded through to ReadyToCommit.
+  EXPECT_LT(request->state(), NavigationRequest::READY_TO_COMMIT);
+
+  EXPECT_FALSE(condition->IsDestroyed());
+  base::OnceClosure resume_closure = condition->GetResumeClosure();
+  // While the process selection is deferred, cancel the navigation.
+  shell()->web_contents()->Stop();
+
+  // The navigation should complete, but fail.
+  navigation_observer.Wait();
+  EXPECT_FALSE(navigation_observer.last_navigation_succeeded());
+  EXPECT_TRUE(condition->IsDestroyed());
+
+  // Run the resume closure that was passed to the condition. This simulates
+  // what could happen when an asynchronous task completes after the navigation
+  // is stopped. Running the closure now tests that the browser doesn't crash
+  // when this happens.
+  std::move(resume_closure).Run();
+}
+
+class ProcessSelectionDeferralDisabledTest
+    : public NavigationRequestBrowserTest {
+ public:
+  ProcessSelectionDeferralDisabledTest() {
+    scoped_feature_list_.InitAndDisableFeature(
+        features::kProcessSelectionDeferringConditions);
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+// `ProcessSelectionDeferringConditions` are not created or processed when the
+// feature is disabled.
+IN_PROC_BROWSER_TEST_F(
+    ProcessSelectionDeferralDisabledTest,
+    ProcessSelectionDeferringConditionsDoNotRunWhenDisabled) {
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+
+  ProcessSelectionDeferringBrowserClient browser_client;
+  browser_client.AddConditionToCreate(
+      ProcessSelectionDeferringCondition::Result::kProceed);
+
+  shell()->LoadURL(simple_url);
+  ASSERT_TRUE(manager.WaitForResponse());
+  manager.ResumeNavigation();
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+
+  ASSERT_TRUE(manager.was_successful());
+  auto conditions = browser_client.GetCreatedConditions();
+  EXPECT_EQ(0u, conditions.size());
+}
+
+// Ensure throttles registered by tests using RegisterThrottleForTesting() are
+// executed after those registered by the WebContents' browser client (i.e. how
+// non-test throttles are normally registered).
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       RegisterThrottleForTestingIsLast) {
+  WebContents* web_contents = shell()->web_contents();
+  GURL simple_url(embedded_test_server()->GetURL("/simple_page.html"));
+
+  TestNavigationThrottle* client_throttle = nullptr;
+
+  // Set the client to register a TestNavigationThrottle that defers in
+  // WillStartRequest. We'll save a pointer to this throttle in
+  // |client_throttle| when its registered.
+  ShellContentBrowserClient::Get()
+      ->set_create_throttles_for_navigation_callback(base::BindLambdaForTesting(
+          [&client_throttle](NavigationThrottleRegistry& registry) -> void {
+            std::unique_ptr<TestNavigationThrottle> throttle(
+                new TestNavigationThrottle(
+                    registry, NavigationThrottle::DEFER,
+                    NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+                    NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+                    base::DoNothing(), base::DoNothing(), base::DoNothing(),
+                    base::DoNothing(), base::DoNothing()));
+            client_throttle = throttle.get();
+            registry.AddThrottle(std::move(throttle));
+          }));
+
+  // Add another similar throttle using the installer which will use
+  // RegisterThrottleForTesting and registers throttles in DidStartNavigation,
+  // before browser client throttles are registered.
+  TestNavigationThrottleInstaller test_throttle_installer(
+      web_contents, NavigationThrottle::DEFER, NavigationThrottle::PROCEED,
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
+      NavigationThrottle::PROCEED);
+
+  // Start navigating.
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+  shell()->LoadURL(simple_url);
+  auto* handle = manager.GetNavigationHandle();
+  auto* registry = NavigationRequest::From(handle)
+                       ->GetNavigationThrottleRegistryForTesting();
+
+  // The navigation should have been deferred by one of our throttles. Ensure
+  // it's the client throttle since we explicitly want test throttles to
+  // execute after all others.
+  ASSERT_TRUE(handle->IsDeferredForTesting());
+  ASSERT_NE(client_throttle, nullptr);
+  EXPECT_EQ(registry->GetDeferringThrottles().size(), 1u);
+  EXPECT_TRUE(registry->GetDeferringThrottles().contains(client_throttle));
+
+  // Now when we resume we should get deferred by the other throttle. This
+  // should be the throttle installed via RegisterThrottleForTesting.
+  client_throttle->ResumeNavigation();
+  ASSERT_TRUE(handle->IsDeferredForTesting());
+  EXPECT_EQ(registry->GetDeferringThrottles().size(), 1u);
+  EXPECT_TRUE(registry->GetDeferringThrottles().contains(
+      test_throttle_installer.navigation_throttle()));
+
+  // Finish the navigation.
+  test_throttle_installer.navigation_throttle()->ResumeNavigation();
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
 }
 
 // Tests the case where a browser-initiated navigation to a normal webpage is
@@ -2004,11 +3061,11 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, BlockedRequestAfterWebUI) {
   WebContents* web_contents = shell()->web_contents();
 
   // Navigate to the initial page.
-  EXPECT_FALSE(web_contents->GetMainFrame()->GetEnabledBindings() &
-               BINDINGS_POLICY_WEB_UI);
+  EXPECT_FALSE(web_contents->GetPrimaryMainFrame()->GetEnabledBindings().Has(
+      BindingsPolicyValue::kWebUi));
   EXPECT_TRUE(NavigateToURL(shell(), web_ui_url));
-  EXPECT_TRUE(web_contents->GetMainFrame()->GetEnabledBindings() &
-              BINDINGS_POLICY_WEB_UI);
+  EXPECT_TRUE(web_contents->GetPrimaryMainFrame()->GetEnabledBindings().Has(
+      BindingsPolicyValue::kWebUi));
   scoped_refptr<SiteInstance> web_ui_process = web_contents->GetSiteInstance();
 
   // Start a new, non-webUI navigation that will be blocked by a
@@ -2017,7 +3074,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, BlockedRequestAfterWebUI) {
   TestNavigationThrottleInstaller installer(
       web_contents, NavigationThrottle::BLOCK_REQUEST,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
   NavigationHandleObserver commit_observer(web_contents, blocked_url);
   EXPECT_FALSE(NavigateToURL(shell(), blocked_url));
   NavigationEntry* last_committed =
@@ -2039,13 +3096,13 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   EXPECT_TRUE(NavigateToURL(shell(), url));
 
   const GURL kTestUrls[] = {GURL("javascript:window.alert('hello')"),
-                            GURL(kChromeUIBadCastCrashURL),
-                            GURL(kChromeUICrashURL),
-                            GURL(kChromeUIDumpURL),
-                            GURL(kChromeUIKillURL),
-                            GURL(kChromeUIHangURL),
-                            GURL(kChromeUIShorthangURL),
-                            GURL(kChromeUIMemoryExhaustURL)};
+                            GURL(blink::kChromeUIBadCastCrashURL),
+                            GURL(blink::kChromeUICrashURL),
+                            GURL(blink::kChromeUIDumpURL),
+                            GURL(blink::kChromeUIKillURL),
+                            GURL(blink::kChromeUIHangURL),
+                            GURL(blink::kChromeUIShorthangURL),
+                            GURL(blink::kChromeUIMemoryExhaustURL)};
 
   for (const auto& test_url : kTestUrls) {
     SCOPED_TRACE(testing::Message() << "renderer_debug_url = " << test_url);
@@ -2079,11 +3136,9 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
 
 // Check that iframe with embedded credentials are blocked.
 // See https://crbug.com/755892.
+// TODO(crbug.com/40799853): Enable the test again.
 IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
-                       BlockCredentialedSubresources) {
-  if (!base::FeatureList::IsEnabled(features::kBlockCredentialedSubresources))
-    return;
-
+                       DISABLED_BlockCredentialedSubresources) {
   const struct {
     GURL main_url;
     GURL iframe_url;
@@ -2158,14 +3213,14 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
       TestNavigationThrottleInstaller installer(
           shell()->web_contents(), NavigationThrottle::PROCEED,
           NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-          NavigationThrottle::PROCEED);
+          NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
       NavigateIframeToURL(shell()->web_contents(), "child0", iframe_url);
 
       FrameTreeNode* root =
           static_cast<WebContentsImpl*>(shell()->web_contents())
-              ->GetFrameTree()
-              ->root();
+              ->GetPrimaryFrameTree()
+              .root();
       ASSERT_EQ(1u, root->child_count());
       if (test_case.blocked) {
         EXPECT_EQ(redirect, !!installer.will_start_called());
@@ -2184,7 +3239,52 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
   }
 }
 
-IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, StartToCommitMetrics) {
+class NavigationRequestUpdateHistoryBrowserTest
+    : public NavigationRequestBrowserTest,
+      public testing::WithParamInterface<bool> {
+ public:
+  NavigationRequestUpdateHistoryBrowserTest() {
+    scoped_feature_list_.InitWithFeatureState(history::kVisitedLinksOn404,
+                                              GetParam());
+  }
+
+ protected:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_P(NavigationRequestUpdateHistoryBrowserTest,
+                       Reachable404) {
+  base::RunLoop did_finish_navigation_run_loop;
+  DidFinishNavigationObserver observer(
+      shell()->web_contents(),
+      base::BindLambdaForTesting([&did_finish_navigation_run_loop](
+                                     NavigationHandle* navigation_handle) {
+        ASSERT_EQ(navigation_handle->GetNavigatingFrameType(),
+                  FrameType::kPrimaryMainFrame);
+        ASSERT_TRUE(navigation_handle->GetResponseHeaders());
+        ASSERT_EQ(navigation_handle->GetResponseHeaders()->response_code(),
+                  404);
+        // If `history::kVisitedLinksOn404` is enabled, history should be
+        // updated even for 404 navigations. If disabled, history should not be
+        // updated for navigations resulting in a 404.
+        EXPECT_EQ(navigation_handle->ShouldUpdateHistory(),
+                  base::FeatureList::IsEnabled(history::kVisitedLinksOn404));
+        did_finish_navigation_run_loop.Quit();
+      }));
+
+  // Navigate to a reachable URL that 404s.
+  ASSERT_TRUE(
+      NavigateToURL(shell(), embedded_test_server()->GetURL("/page404.html")));
+
+  did_finish_navigation_run_loop.Run();
+}
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         NavigationRequestUpdateHistoryBrowserTest,
+                         ::testing::Bool());
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest_IsolateAllSites,
+                       StartToCommitMetrics) {
   enum class FrameType {
     kMain,
     kSub,
@@ -2222,8 +3322,9 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, StartToCommitMetrics) {
     auto add_suffix = [&names](std::vector<std::string> suffixes) {
       size_t original_size = names.size();
       for (size_t i = 0; i < original_size; i++) {
-        for (const std::string& suffix : suffixes)
+        for (const std::string& suffix : suffixes) {
           names.push_back(names[i] + suffix);
+        }
       }
     };
     add_suffix({kProcessSuffixes.at(process_type)});
@@ -2248,7 +3349,6 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, StartToCommitMetrics) {
   };
 
   // Main frame tests.
-  IsolateAllSitesForTesting(base::CommandLine::ForCurrentProcess());
   EXPECT_TRUE(
       NavigateToURL(shell(), embedded_test_server()->GetURL("/hello.html")));
   {
@@ -2289,9 +3389,20 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, StartToCommitMetrics) {
   }
   {
     base::HistogramTester histograms;
+    int previous_process_id = shell()
+                                  ->web_contents()
+                                  ->GetPrimaryMainFrame()
+                                  ->GetProcess()
+                                  ->GetDeprecatedID();
     EXPECT_TRUE(NavigateToURL(shell(), GURL(url::kAboutBlankURL)));
-    check_navigation(histograms, ProcessType::kSame, FrameType::kMain,
-                     TransitionType::kNew);
+    bool process_changed = (previous_process_id != shell()
+                                                       ->web_contents()
+                                                       ->GetPrimaryMainFrame()
+                                                       ->GetProcess()
+                                                       ->GetDeprecatedID());
+    check_navigation(histograms,
+                     process_changed ? ProcessType::kCross : ProcessType::kSame,
+                     FrameType::kMain, TransitionType::kNew);
   }
 
   // Subframe tests. All of these tests just navigate a frame within
@@ -2300,8 +3411,8 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, StartToCommitMetrics) {
       shell(), embedded_test_server()->GetURL("/page_with_iframe.html")));
   FrameTreeNode* first_child =
       static_cast<WebContentsImpl*>(shell()->web_contents())
-          ->GetFrameTree()
-          ->root()
+          ->GetPrimaryFrameTree()
+          .root()
           ->child_at(0);
   {
     base::HistogramTester histograms;
@@ -2313,7 +3424,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, StartToCommitMetrics) {
   {
     base::HistogramTester histograms;
     TestFrameNavigationObserver nav_observer(first_child);
-    EXPECT_TRUE(ExecuteScript(first_child, "location.reload();"));
+    EXPECT_TRUE(ExecJs(first_child, "location.reload();"));
     nav_observer.Wait();
     // location.reload triggers the PAGE_TRANSITION_AUTO_SUBFRAME which
     // corresponds to NewNavigation.
@@ -2334,7 +3445,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, StartToCommitMetrics) {
   {
     base::HistogramTester histograms;
     TestFrameNavigationObserver nav_observer(first_child);
-    EXPECT_TRUE(ExecuteScript(first_child, "clickSameSiteLink();"));
+    EXPECT_TRUE(ExecJs(first_child, "clickSameSiteLink();"));
     nav_observer.Wait();
     // Link clicking will trigger PAGE_TRANSITION_MANUAL_SUBFRAME which
     // corresponds to NewNavigation.
@@ -2386,16 +3497,16 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
 
   // Add a new subframe.
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetFrameTree()
-                            ->root();
-  EXPECT_TRUE(ExecuteScript(
+                            ->GetPrimaryFrameTree()
+                            .root();
+  EXPECT_TRUE(ExecJs(
       root, "document.body.appendChild(document.createElement('iframe'));"));
 
   // Navigate subframe cross-site and ensure Subframe metrics are logged.
   {
     base::HistogramTester histograms;
     GURL url(embedded_test_server()->GetURL("b.com", "/title3.html"));
-    NavigateFrameToURL(root->child_at(0), url);
+    EXPECT_TRUE(NavigateToURLFromRenderer(root->child_at(0), url));
 
     std::string navigation_type =
         AreAllSitesIsolatedForTesting() ? "CrossProcess" : "SameProcess";
@@ -2448,7 +3559,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestDownloadBrowserTest,
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::CANCEL,
       NavigationThrottle::PROCEED, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
   EXPECT_TRUE(NavigateToURLAndExpectNoCommit(shell(), url));
   EXPECT_FALSE(observer.has_committed());
@@ -2475,7 +3586,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestDownloadBrowserTest,
   TestNavigationThrottleInstaller installer(
       shell()->web_contents(), NavigationThrottle::PROCEED,
       NavigationThrottle::CANCEL, NavigationThrottle::PROCEED,
-      NavigationThrottle::PROCEED);
+      NavigationThrottle::PROCEED, NavigationThrottle::PROCEED);
 
   EXPECT_FALSE(NavigateToURL(shell(), redirect_url));
 
@@ -2633,14 +3744,19 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestDownloadBrowserTest,
   shell()->LoadURL(simple_url);
   EXPECT_TRUE(manager.WaitForRequestStart());
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetMainFrame()
+                            ->GetPrimaryMainFrame()
                             ->frame_tree_node();
   EXPECT_TRUE(root->navigation_request()
                   ->common_params()
                   .download_policy.IsDownloadAllowed());
 
+  // This is not a download (though allowed), so the response should be
+  // rendered.
+  EXPECT_TRUE(manager.WaitForResponse());
+  EXPECT_TRUE(root->navigation_request()->response_should_be_rendered());
+
   // The response is not handled as a download.
-  manager.WaitForNavigationFinished();
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
   EXPECT_FALSE(handle_observer.is_download());
 }
 
@@ -2657,14 +3773,18 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestDownloadBrowserTest,
   shell()->LoadURL(download_url);
   EXPECT_TRUE(manager.WaitForRequestStart());
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetMainFrame()
+                            ->GetPrimaryMainFrame()
                             ->frame_tree_node();
   EXPECT_TRUE(root->navigation_request()
                   ->common_params()
                   .download_policy.IsDownloadAllowed());
 
+  // Downloads do not need to be rendered, and should not be rendered.
+  EXPECT_TRUE(manager.WaitForResponse());
+  EXPECT_FALSE(root->navigation_request()->response_should_be_rendered());
+
   // The response is handled as a download.
-  manager.WaitForNavigationFinished();
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
   EXPECT_TRUE(handle_observer.is_download());
 }
 
@@ -2674,7 +3794,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestDownloadBrowserTest, Disallowed) {
 
   // An URL is allowed to be a download iff it is not a view-source URL.
   GURL view_source_url =
-      GURL(content::kViewSourceScheme + std::string(":") + download_url.spec());
+      GURL(kViewSourceScheme + std::string(":") + download_url.spec());
 
   NavigationHandleObserver handle_observer(shell()->web_contents(),
                                            download_url);
@@ -2684,17 +3804,17 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestDownloadBrowserTest, Disallowed) {
   shell()->LoadURL(view_source_url);
   EXPECT_TRUE(manager.WaitForRequestStart());
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetMainFrame()
+                            ->GetPrimaryMainFrame()
                             ->frame_tree_node();
   EXPECT_TRUE(
       root->navigation_request()->common_params().download_policy.IsType(
-          NavigationDownloadType::kViewSource));
+          blink::NavigationDownloadType::kViewSource));
   EXPECT_FALSE(root->navigation_request()
                    ->common_params()
                    .download_policy.IsDownloadAllowed());
 
   // The response is not handled as a download.
-  manager.WaitForNavigationFinished();
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
   EXPECT_FALSE(handle_observer.is_download());
 }
 
@@ -2779,8 +3899,8 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBackForwardBrowserTest,
   const GURL url1(embedded_test_server()->GetURL("/title1.html"));
   const GURL url1_fragment1(
       embedded_test_server()->GetURL("/title1.html#id_1"));
-  const GURL url2(
-      embedded_test_server()->GetURL("/frame_tree/page_with_one_frame.html"));
+  const GURL url2(embedded_test_server()->GetURL(
+      "b.com", "/frame_tree/page_with_one_frame.html"));
   const char kChildFrameId[] = "child0";
 
   EXPECT_TRUE(NavigateToURL(shell(), url1));
@@ -2806,7 +3926,11 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBackForwardBrowserTest,
 
   {
     // We are waiting for two navigations here: main frame and subframe.
-    TestNavigationObserver navigation_observer(shell()->web_contents(), 2);
+    // However, when back/forward cache is enabled, back navigation to a page
+    // with subframes will not trigger a subframe navigation (since the
+    // subframe is cached with the page).
+    TestNavigationObserver navigation_observer(
+        shell()->web_contents(), IsBackForwardCacheEnabled() ? 1 : 2);
     shell()->GoBackOrForward(-1);
     navigation_observer.WaitForNavigationFinished();
   }
@@ -2849,8 +3973,16 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBackForwardBrowserTest,
   // navigations have offset 3 as requested.
   // Note that all subframe navigations have offset 1 regardless of whether they
   // result in a new entry being generated or not.
-  EXPECT_THAT(offsets_,
-              testing::ElementsAre(1, 1, 1, 0, 1, 1, -1, 1, -1, -1, -1, 4));
+  if (IsBackForwardCacheEnabled()) {
+    // When back/forward cache is enabled, back navigation to a page with
+    // subframes will not trigger a subframe navigation (since the subframe is
+    // cached with the page and won't need to be reconstructed/navigated).
+    EXPECT_THAT(offsets_,
+                testing::ElementsAre(1, 1, 1, 0, 1, 1, -1, -1, -1, -1, 4));
+  } else {
+    EXPECT_THAT(offsets_,
+                testing::ElementsAre(1, 1, 1, 0, 1, 1, -1, 1, -1, -1, -1, 4));
+  }
 }
 
 IN_PROC_BROWSER_TEST_F(NavigationRequestBackForwardBrowserTest,
@@ -2870,17 +4002,36 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBackForwardBrowserTest,
 }
 
 IN_PROC_BROWSER_TEST_F(NavigationRequestBackForwardBrowserTest,
+                       SameUrlNavigationFromAddressBar) {
+  const GURL url1(embedded_test_server()->GetURL("/title1.html"));
+
+  // NavigateToURL is treated like an address bar navigation because it uses
+  // NavigateToURLBlockUntilNavigationsComplete, which sets that transition
+  // type.
+  EXPECT_TRUE(NavigateToURL(shell(), url1));
+  EXPECT_TRUE(NavigateToURL(shell(), url1));
+
+  // The second navigation has an offset of 1 because the estimated
+  // offset is calculated at the time when the navigation request is created and
+  // it is created as a regular navigation without should_replace_current_entry
+  // set. The estimated offset is not updated when should_replace_current_entry
+  // is updated to true later on in NavigationRequest::StartNavigation.
+  // We should consider fixing this to report an offset of 0 instead.
+  EXPECT_THAT(offsets_, testing::ElementsAre(1, 1));
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestBackForwardBrowserTest,
                        LocationReplace) {
   const GURL url1(embedded_test_server()->GetURL("/title1.html"));
 
   EXPECT_TRUE(NavigateToURL(shell(), url1));
   FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetFrameTree()
-                            ->root();
+                            ->GetPrimaryFrameTree()
+                            .root();
 
   {
     TestNavigationObserver navigation_observer(shell()->web_contents());
-    EXPECT_TRUE(ExecuteScript(root, "window.location.replace('#frag');"));
+    EXPECT_TRUE(ExecJs(root, "window.location.replace('#frag');"));
     navigation_observer.WaitForNavigationFinished();
   }
 
@@ -2898,7 +4049,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, AuthChallengeInfo) {
   EXPECT_TRUE(observer.has_committed());
   ASSERT_TRUE(observer.auth_challenge_info().has_value());
   EXPECT_FALSE(observer.auth_challenge_info()->is_proxy);
-  EXPECT_EQ(url::Origin::Create(url),
+  EXPECT_EQ(url::SchemeHostPort(url),
             observer.auth_challenge_info()->challenger);
   EXPECT_EQ("basic", observer.auth_challenge_info()->scheme);
   EXPECT_EQ("testrealm", observer.auth_challenge_info()->realm);
@@ -2909,7 +4060,7 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, AuthChallengeInfo) {
 
 class TestMixedContentWebContentsDelegate : public WebContentsDelegate {
  public:
-  TestMixedContentWebContentsDelegate() {}
+  TestMixedContentWebContentsDelegate() = default;
   TestMixedContentWebContentsDelegate(
       const TestMixedContentWebContentsDelegate&) = delete;
   TestMixedContentWebContentsDelegate& operator=(
@@ -2956,6 +4107,1751 @@ IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
                              non_webby_url)));
   observer.Wait();
   EXPECT_FALSE(test_delegate.passive_insecure_content_found());
+}
+
+// Tests that a NavigationRequest's RFH can be retrieved during a synchronous
+// renderer commit same-document navigation (regardless of whether the
+// navigation commits or not).
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       GetRFHDuringSyncRendererCommitSameDocumentNavigation) {
+  const GURL url(embedded_test_server()->GetURL("/title1.html"));
+  const GURL same_doc_url(embedded_test_server()->GetURL("/title1.html#foo"));
+
+  EXPECT_TRUE(NavigateToURL(shell(), url));
+  WebContents* web_contents = shell()->web_contents();
+
+  // Test sync-renderer-commit same-document navigation that commits.
+  {
+    TestNavigationManager navigation_manager(web_contents, same_doc_url);
+    testing::NiceMock<MockWebContentsObserver> observer(web_contents);
+    EXPECT_CALL(observer, DidFinishNavigation(testing::_))
+        .WillOnce([](NavigationHandle* navigation_handle) {
+          NavigationRequest* request =
+              NavigationRequest::From(navigation_handle);
+          EXPECT_TRUE(request->is_synchronous_renderer_commit());
+          EXPECT_TRUE(navigation_handle->GetRenderFrameHost());
+        });
+    EXPECT_TRUE(ExecJs(web_contents, "location.href = '#foo';"));
+    ASSERT_TRUE(navigation_manager.WaitForNavigationFinished());
+  }
+
+  EXPECT_TRUE(NavigateToURL(shell(), GURL(url::kAboutBlankURL)));
+  WebContents* popup = nullptr;
+  {
+    WebContentsAddedObserver popup_observer;
+    ASSERT_TRUE(
+        ExecJs(web_contents,
+               JsReplace("var w = window.open($1, 'my-popup')", GURL())));
+    popup = popup_observer.GetWebContents();
+  }
+  // Test sync-renderer-commit same-document navigation that doesn't commit.
+  {
+    testing::NiceMock<MockWebContentsObserver> observer(popup);
+    EXPECT_CALL(observer, DidFinishNavigation(testing::_))
+        .WillOnce([](NavigationHandle* navigation_handle) {
+          NavigationRequest* request =
+              NavigationRequest::From(navigation_handle);
+          EXPECT_TRUE(request->is_synchronous_renderer_commit());
+          EXPECT_TRUE(navigation_handle->GetRenderFrameHost());
+        });
+    TestNavigationManager navigation_manager(popup, GURL("about:blank#foo"));
+    EXPECT_TRUE(
+        ExecJs(web_contents, "w.history.replaceState({}, '', '#foo');"));
+    ASSERT_TRUE(navigation_manager.WaitForNavigationFinished());
+  }
+}
+
+// Tests that a NavigationRequest's RFH can be retrieved during a synchronous
+// renderer commit initial-about-blank navigation (regardless of whether the
+// navigation commits or not).
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       GetRFHDuringInitialAboutBlankNavigation) {
+  EXPECT_TRUE(
+      NavigateToURL(shell(), embedded_test_server()->GetURL("/title1.html")));
+  WebContentsImpl* web_contents =
+      static_cast<WebContentsImpl*>(shell()->web_contents());
+
+  // Test initial-about-blank navigation that commits.
+  {
+    testing::NiceMock<MockWebContentsObserver> observer(web_contents);
+    EXPECT_CALL(observer, DidFinishNavigation(testing::_))
+        .WillOnce([](NavigationHandle* navigation_handle) {
+          NavigationRequest* request =
+              NavigationRequest::From(navigation_handle);
+          EXPECT_TRUE(request->is_synchronous_renderer_commit());
+          EXPECT_TRUE(navigation_handle->GetRenderFrameHost());
+        });
+    CreateSubframe(web_contents, "subframe", GURL(),
+                   /*wait_for_navigation*/ true);
+  }
+
+  WebContentsImpl* popup = nullptr;
+  {
+    WebContentsAddedObserver popup_observer;
+    ASSERT_TRUE(
+        ExecJs(web_contents,
+               JsReplace("var w = window.open($1, 'my-popup')", GURL())));
+    popup = static_cast<WebContentsImpl*>(popup_observer.GetWebContents());
+  }
+  // Test initial-about-blank navigation that doesn't commit.
+  {
+    testing::NiceMock<MockWebContentsObserver> observer(popup);
+    EXPECT_CALL(observer, DidFinishNavigation(testing::_))
+        .WillOnce([](NavigationHandle* navigation_handle) {
+          NavigationRequest* request =
+              NavigationRequest::From(navigation_handle);
+          EXPECT_TRUE(request->is_synchronous_renderer_commit());
+          EXPECT_TRUE(navigation_handle->GetRenderFrameHost());
+
+          // Ensure that response_should_be_rendered() is true even for pages
+          // that do not require a URLLoader.
+          EXPECT_TRUE(request->response_should_be_rendered());
+        });
+    CreateSubframe(popup, "popup_subframe", GURL(),
+                   /*wait_for_navigation*/ true);
+  }
+}
+
+// Verify that when navigating to a site that doesn't require a dedicated
+// process from a initial siteless SiteInstance, the SiteInstance sets its site
+// at ready-to-commit time (rather than at DidCommitNavigation time).
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       SiteIsSetAtResponseTimeWithoutSiteIsolation) {
+  // A custom ContentBrowserClient to turn off strict site isolation.
+  class NoSiteIsolationContentBrowserClient
+      : public ContentBrowserTestContentBrowserClient {
+   public:
+    bool ShouldEnableStrictSiteIsolation() override { return false; }
+  } no_site_isolation_client;
+
+  // The test should start in a blank shell with a siteless SiteInstance.
+  EXPECT_FALSE(
+      static_cast<SiteInstanceImpl*>(shell()->web_contents()->GetSiteInstance())
+          ->HasSite());
+
+  // Start a navigation and wait for response.  Note that this won't require a
+  // dedicated process due to the custom ContentBrowserClient.
+  GURL main_url(embedded_test_server()->GetURL("bar.com", "/title1.html"));
+  TestNavigationManager manager(shell()->web_contents(), main_url);
+  shell()->web_contents()->GetController().LoadURL(
+      main_url, Referrer(), ui::PAGE_TRANSITION_LINK, std::string());
+  EXPECT_TRUE(manager.WaitForResponse());
+
+  // At this point, the navigation should be processing the response but not
+  // committed yet. It should have already determined the final
+  // RenderFrameHost, which should just be the initial RenderFrameHost.
+  NavigationRequest* request =
+      static_cast<NavigationRequest*>(manager.GetNavigationHandle());
+  EXPECT_EQ(request->state(), NavigationRequest::WILL_PROCESS_RESPONSE);
+  EXPECT_EQ(shell()->web_contents()->GetPrimaryMainFrame(),
+            request->GetRenderFrameHost());
+
+  // The navigation will stay in the initial SiteInstance, and that
+  // SiteInstance's site should now be set.
+  EXPECT_TRUE(
+      static_cast<SiteInstanceImpl*>(shell()->web_contents()->GetSiteInstance())
+          ->HasSite());
+
+  // The process should also be considered used at this point.
+  EXPECT_FALSE(
+      shell()->web_contents()->GetPrimaryMainFrame()->GetProcess()->IsUnused());
+
+  // Ensure the navigation finishes before we restore the ContentBrowserClient
+  // which would turn strict site isolation back on.  Otherwise, the navigation
+  // commit may fail citadel protection checks at test teardown.
+  EXPECT_TRUE(manager.WaitForNavigationFinished());
+  EXPECT_TRUE(manager.was_successful());
+}
+
+// Check that a subframe can load an error page with an about:srcdoc URL, and
+// that the origin does not inherit the parent's origin (i.e., behaves like all
+// error pages) in this case.  In practice, this path may be taken by the heavy
+// ads intervention (for an example, see the
+// HeavyAdInterventionEnabled_ErrorPageLoaded test).
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       OriginForSrcdocErrorPageInSubframe) {
+  // Start on a page with a blank subframe.
+  GURL start_url =
+      embedded_test_server()->GetURL("a.test", "/page_with_blank_iframe.html");
+  EXPECT_TRUE(NavigateToURL(shell(), start_url));
+
+  // Do a srcdoc navigation in the subframe.
+  EXPECT_TRUE(
+      ExecJs(shell(), "document.querySelector('iframe').srcdoc='foo';"));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  RenderFrameHostImpl* subframe_rfh = root->child_at(0)->current_frame_host();
+  EXPECT_EQ(GURL("about:srcdoc"), subframe_rfh->GetLastCommittedURL());
+
+  // Navigate the subframe to a post-commit error page, reusing its current
+  // srcdoc URL.  A post-commit error page provides a way to reach an error
+  // page for a srcdoc subframe; note that it isn't possible to use
+  // NavigationThrottles to block srcdoc navigations, since throttles don't
+  // currently run in that case.
+  TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
+  shell()->web_contents()->GetController().LoadPostCommitErrorPage(
+      subframe_rfh, subframe_rfh->GetLastCommittedURL(), "error_page_contents");
+  navigation_observer.Wait();
+  EXPECT_FALSE(navigation_observer.last_navigation_succeeded());
+
+  // Verify that the origin of the srcdoc frame's parent wasn't inherited and
+  // also wasn't used for the precursor.  The error page's origin should be
+  // opaque without a valid precursor.
+  url::Origin origin =
+      root->child_at(0)->current_frame_host()->GetLastCommittedOrigin();
+  EXPECT_TRUE(origin.opaque());
+  EXPECT_FALSE(origin.GetTupleOrPrecursorTupleIfOpaque().IsValid());
+}
+
+// Verify that when navigation 1, which starts in an initial siteless
+// SiteInstance and results in an error page, races with navigation 2, which
+// requires a dedicated process and wants to reuse an existing process,
+// navigation 2 does not incorrectly reuse navigation 1's process.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       ErrorPageMarksProcessAsUsed) {
+  // The scenario in this test originally led to a site isolation bypass only
+  // when error page isolation for main frames is turned off.  Do this via a
+  // custom ContentBrowserClient.
+  class NoErrorPageIsolationContentBrowserClient
+      : public ContentBrowserTestContentBrowserClient {
+   public:
+    bool ShouldIsolateErrorPage(bool in_main_frame) override { return false; }
+  } no_error_isolation_client;
+
+  // Set the process limit to 1.  This will force main frame navigations to
+  // attempt to reuse existing processes.
+  RenderProcessHost::SetMaxRendererProcessCount(1);
+
+  // The test should start in a blank shell with a siteless SiteInstance.
+  EXPECT_FALSE(
+      static_cast<SiteInstanceImpl*>(shell()->web_contents()->GetSiteInstance())
+          ->HasSite());
+
+  // Set up a foo.com URL which will fail to load.
+  GURL foo_url(embedded_test_server()->GetURL("foo.com", "/title1.html"));
+  std::unique_ptr<URLLoaderInterceptor> interceptor =
+      URLLoaderInterceptor::SetupRequestFailForURL(foo_url,
+                                                   net::ERR_CONNECTION_REFUSED);
+
+  // Set up a throttle that will be used to wait for WillFailRequest() and then
+  // defer the navigation.
+  TestNavigationThrottleInstaller installer(
+      shell()->web_contents(),
+      NavigationThrottle::PROCEED /* will_start_result */,
+      NavigationThrottle::PROCEED /* will_redirect_result */,
+      NavigationThrottle::DEFER /* will_fail_result */,
+      NavigationThrottle::PROCEED /* will_process_result */,
+      NavigationThrottle::PROCEED /* will_commit_without_url_loader_result */);
+
+  // Start a navigation to foo.com that will result in an error.
+  shell()->web_contents()->GetController().LoadURL(
+      foo_url, Referrer(), ui::PAGE_TRANSITION_LINK, std::string());
+
+  // Wait for WillFailRequest(). After this point, we will have picked the
+  // final RenderFrameHost for the error page.
+  installer.WaitForThrottleWillFail();
+
+  // Create a new tab and navigate it to a different site.  Ensure this site
+  // requires a dedicated process, even on Android.
+  GURL bar_url(embedded_test_server()->GetURL("bar.com", "/title1.html"));
+  auto* policy = ChildProcessSecurityPolicyImpl::GetInstance();
+  policy->AddFutureIsolatedOrigins(
+      {url::Origin::Create(bar_url)},
+      ChildProcessSecurityPolicy::IsolatedOriginSource::TEST);
+  Shell* new_shell = CreateBrowser();
+  EXPECT_TRUE(NavigateToURL(new_shell, bar_url));
+
+  // Resume the error page navigation.  It should be able to finish without
+  // crashing.
+  installer.navigation_throttle()->ResumeNavigation();
+  EXPECT_FALSE(WaitForLoadStop(shell()->web_contents()));
+  EXPECT_TRUE(
+      shell()->web_contents()->GetPrimaryMainFrame()->IsErrorDocument());
+
+  // Ensure that bar.com didn't reuse the foo.com error page process.
+  EXPECT_NE(shell()->web_contents()->GetPrimaryMainFrame()->GetProcess(),
+            new_shell->web_contents()->GetPrimaryMainFrame()->GetProcess());
+}
+
+// Check that a renderer-initiated navigation from an error page to about:blank
+// honors the initiator origin when selecting the SiteInstance and process for
+// about:blank.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       NavigateToAboutBlankFromErrorPage) {
+  GURL url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  std::unique_ptr<URLLoaderInterceptor> url_interceptor =
+      URLLoaderInterceptor::SetupRequestFailForURL(url, net::ERR_DNS_TIMED_OUT);
+
+  // Start off with navigation to a.com, which results in an error page.
+  WebContents* web_contents = shell()->web_contents();
+  {
+    TestNavigationObserver observer(web_contents);
+    ASSERT_FALSE(NavigateToURL(shell(), url));
+    EXPECT_FALSE(observer.last_navigation_succeeded());
+    if (SiteIsolationPolicy::IsErrorPageIsolationEnabled(true)) {
+      EXPECT_EQ(GURL(kUnreachableWebDataURL),
+                web_contents->GetPrimaryMainFrame()
+                    ->GetSiteInstance()
+                    ->GetSecurityPrincipal()
+                    .GetDeprecatedSiteURL());
+    }
+  }
+
+  // Now, do a renderer-initiated navigation to about:blank out of the error
+  // page. We don't expect error pages to normally do this, but this might
+  // still be possible via DevTools or automation.
+  GURL about_blank(url::kAboutBlankURL);
+  {
+    TestNavigationObserver observer(web_contents);
+    EXPECT_TRUE(ExecJs(web_contents, "location = 'about:blank';"));
+    observer.Wait();
+    EXPECT_TRUE(observer.last_navigation_succeeded());
+    EXPECT_EQ(about_blank, observer.last_navigation_url());
+  }
+  RenderFrameHostImpl* rfh =
+      static_cast<RenderFrameHostImpl*>(web_contents->GetPrimaryMainFrame());
+  EXPECT_NE(
+      GURL(kUnreachableWebDataURL),
+      rfh->GetSiteInstance()->GetSecurityPrincipal().GetDeprecatedSiteURL());
+
+  // Note that the error page's origin was opaque with a.com as the precursor.
+  // This becomes the initiator origin for the about:blank navigation, and it
+  // should end up as the final origin for the blank document.  See
+  // https://crbug.com/585649.
+  EXPECT_TRUE(rfh->GetLastCommittedOrigin().opaque());
+  EXPECT_EQ(
+      "a.com",
+      rfh->GetLastCommittedOrigin().GetTupleOrPrecursorTupleIfOpaque().host());
+
+  // Because about:blank's origin is opaque with a.com as the precursor, its
+  // SiteInstance and process should also correspond to a.com, rather than be
+  // left unassigned/unused.
+  //
+  // This covers an interesting and rare corner case, where an about:blank
+  // navigation can't use the source SiteInstance, which would normally keep it
+  // in the initiator's process and SiteInstance.  This is because the
+  // navigation originates from an error page process, which is incompatible
+  // with a non-error navigation to about:blank.  In this case, a new
+  // SiteInstance and process will be created, and they should still reflect
+  // about:blank's committed origin, rather than end up in an unlocked process
+  // and an unassigned SiteInstance. See https://crbug.com/1426928.
+  EXPECT_FALSE(rfh->GetProcess()->IsUnused());
+  if (AreAllSitesIsolatedForTesting()) {
+    EXPECT_EQ(
+        "http://a.com/",
+        rfh->GetSiteInstance()->GetSecurityPrincipal().GetDeprecatedSiteURL());
+    EXPECT_TRUE(rfh->GetProcess()->GetProcessLock().IsLockedToSite());
+    EXPECT_EQ("http://a.com/", rfh->GetProcess()->GetProcessLock().site_url());
+  } else {
+    EXPECT_TRUE(rfh->GetProcess()->GetProcessLock().AllowsAnySite());
+  }
+}
+
+using CSPEmbeddedEnforcementBrowserTest = NavigationRequestBrowserTest;
+
+IN_PROC_BROWSER_TEST_F(CSPEmbeddedEnforcementBrowserTest,
+                       CheckCSPEmbeddedEnforcement) {
+  // We need one initial navigation to set up everything.
+  EXPECT_TRUE(NavigateToURL(shell(), embedded_test_server()->GetURL(
+                                         "www.example.org", "/empty.html")));
+
+  struct TestCase {
+    const char* name;
+    const char* required_csp;
+    const char* frame_url;
+    const char* allow_csp_from;
+    const char* returned_csp;
+    bool expect_allow;
+  } cases[] = {
+      {
+          "No required csp",
+          "",
+          "www.not-example.org",
+          nullptr,
+          nullptr,
+          true,
+      },
+      {
+          "Required csp - Same origin",
+          "script-src 'none'",
+          "www.example.org",
+          nullptr,
+          nullptr,
+          false,
+      },
+      {
+          "Required csp - Cross origin",
+          "script-src 'none'",
+          "www.not-example.org",
+          nullptr,
+          nullptr,
+          false,
+      },
+      {
+          "Required csp - Cross origin with Allow-CSP-From",
+          "script-src 'none'",
+          "www.not-example.org",
+          "*",
+          nullptr,
+          true,
+      },
+      {
+          "Required csp - Cross origin with wrong Allow-CSP-From",
+          "script-src 'none'",
+          "www.not-example.org",
+          "www.another-example.org",
+          nullptr,
+          false,
+      },
+      {
+          "Required csp - Cross origin with non-subsuming CSPs",
+          "script-src 'none'",
+          "www.not-example.org",
+          nullptr,
+          "style-src 'none'",
+          false,
+      },
+      {
+          "Required csp - Cross origin with subsuming CSPs",
+          "script-src 'none'",
+          "www.not-example.org",
+          nullptr,
+          "script-src 'none'",
+          true,
+      },
+      {
+          "Required csp - Cross origin with wrong Allow-CSP-From but subsuming "
+          "CSPs",
+          "script-src 'none'",
+          "www.not-example.org",
+          "www.another-example.org",
+          "script-src 'none'",
+          true,
+      },
+  };
+
+  for (auto test : cases) {
+    SCOPED_TRACE(test.name);
+
+    std::string headers;
+    if (test.returned_csp) {
+      headers +=
+          base::StringPrintf("Content-Security-Policy: %s&", test.returned_csp);
+    }
+    if (test.allow_csp_from) {
+      headers += base::StringPrintf("Allow-CSP-From: %s&", test.allow_csp_from);
+    }
+
+    GURL frame_url = embedded_test_server()->GetURL(test.frame_url,
+                                                    "/set-header?" + headers);
+    TestNavigationManager observer(shell()->web_contents(), frame_url);
+
+    EXPECT_TRUE(ExecJs(shell()->web_contents(),
+                       JsReplace(R"(
+      const iframe = document.createElement("iframe");
+      iframe.src = $2;
+      if ($1)
+        iframe.csp = $1;
+      document.body.appendChild(iframe);
+    )",
+                                 test.required_csp, frame_url)));
+
+    ASSERT_TRUE(observer.WaitForNavigationFinished());
+    EXPECT_EQ(test.expect_allow, observer.was_successful());
+  }
+}
+
+class NavigationRequestFencedFrameBrowserTest
+    : public NavigationRequestBrowserTest {
+ public:
+  NavigationRequestFencedFrameBrowserTest() = default;
+  ~NavigationRequestFencedFrameBrowserTest() override = default;
+  NavigationRequestFencedFrameBrowserTest(
+      const NavigationRequestFencedFrameBrowserTest&) = delete;
+
+  NavigationRequestFencedFrameBrowserTest& operator=(
+      const NavigationRequestFencedFrameBrowserTest&) = delete;
+
+  void SetUpOnMainThread() override {
+    https_server()->SetSSLConfig(net::EmbeddedTestServer::CERT_TEST_NAMES);
+    https_server()->ServeFilesFromSourceDirectory(GetTestDataFilePath());
+    net::test_server::RegisterDefaultHandlers(https_server());
+    ASSERT_TRUE(https_server()->Start());
+    NavigationRequestBrowserTest::SetUpOnMainThread();
+  }
+
+  test::FencedFrameTestHelper& fenced_frame_test_helper() {
+    return fenced_frame_helper_;
+  }
+
+  net::EmbeddedTestServer* https_server() { return &https_server_; }
+
+ private:
+  test::FencedFrameTestHelper fenced_frame_helper_;
+  net::EmbeddedTestServer https_server_{net::EmbeddedTestServer::TYPE_HTTPS};
+};
+
+IN_PROC_BROWSER_TEST_F(
+    NavigationRequestFencedFrameBrowserTest,
+    ShouldRespectOutermostFrameCOEPParentAndChildOnInsecureContent) {
+  // Navigate |untrustworthy_url| to test if a fenced frame sets the outermost
+  // main frame's COEP.
+  GURL untrustworthy_url =
+      embedded_test_server()->GetURL("a.test", "/title1.html");
+  EXPECT_TRUE(NavigateToURL(shell(), untrustworthy_url));
+
+  // Create a fenced frame on an insecure content and its document should have
+  // the COEP of the outermost main frame.
+  GURL fenced_frame_url = embedded_test_server()->GetURL(
+      "a.test",
+      "/set-header?"
+      "Supports-Loading-Mode: fenced-frame&"
+      "Cross-Origin-Embedder-Policy: require-corp");
+  RenderFrameHostImpl* fenced_frame_host = static_cast<RenderFrameHostImpl*>(
+      fenced_frame_test_helper().CreateFencedFrame(
+          shell()->web_contents()->GetPrimaryMainFrame(), fenced_frame_url));
+  ASSERT_TRUE(fenced_frame_host);
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kNone,
+            fenced_frame_host->cross_origin_embedder_policy().value);
+}
+
+IN_PROC_BROWSER_TEST_F(
+    NavigationRequestFencedFrameBrowserTest,
+    RespectOutermostFrameCOEPParentOnInsecureContentAndChildOnSecureContent) {
+  // Navigate |untrustworthy_url| to test if a fenced frame sets the outermost
+  // main frame's COEP.
+  GURL untrustworthy_url =
+      embedded_test_server()->GetURL("a.test", "/title1.html");
+  EXPECT_TRUE(NavigateToURL(shell(), untrustworthy_url));
+
+  // Create a fenced frame on a secure content and its document should have the
+  // COEP of the outermost main frame.
+  GURL fenced_frame_url =
+      https_server()->GetURL("a.test",
+                             "/set-header?"
+                             "Supports-Loading-Mode: fenced-frame&"
+                             "Cross-Origin-Embedder-Policy: require-corp");
+  RenderFrameHostImpl* fenced_frame_host = static_cast<RenderFrameHostImpl*>(
+      fenced_frame_test_helper().CreateFencedFrame(
+          shell()->web_contents()->GetPrimaryMainFrame(), fenced_frame_url));
+  ASSERT_TRUE(fenced_frame_host);
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kNone,
+            fenced_frame_host->cross_origin_embedder_policy().value);
+}
+
+// Ensure that fenced frames don't enable the view source mode since navigations
+// in fenced frames to view-sources URLs are blocked.
+IN_PROC_BROWSER_TEST_F(NavigationRequestFencedFrameBrowserTest,
+                       ViewSourceNavigation_FencedFrame) {
+  EXPECT_TRUE(
+      NavigateToURL(shell(), embedded_test_server()->GetURL("/title1.html")));
+
+  GURL fenced_frame_url =
+      embedded_test_server()->GetURL("/fenced_frames/title1.html");
+  RenderFrameHost* fenced_frame_host =
+      fenced_frame_test_helper().CreateFencedFrame(
+          shell()->web_contents()->GetPrimaryMainFrame(), fenced_frame_url);
+  EXPECT_NE(nullptr, fenced_frame_host);
+
+  GURL view_source_url(kViewSourceScheme + std::string(":") +
+                       fenced_frame_url.spec());
+  WebContentsConsoleObserver console_observer(shell()->web_contents());
+  console_observer.SetPattern("Not allowed to load local resource: " +
+                              view_source_url.spec());
+
+  // Attempt to navigate to a view source url in the fenced frame.
+  EXPECT_EQ(view_source_url.spec(),
+            EvalJs(fenced_frame_host,
+                   JsReplace(R"({location.href = $1;})", view_source_url)));
+  ASSERT_TRUE(console_observer.Wait());
+
+  // Original page shouldn't navigate away.
+  EXPECT_EQ(fenced_frame_url, fenced_frame_host->GetLastCommittedURL());
+  EXPECT_FALSE(shell()
+                   ->web_contents()
+                   ->GetController()
+                   .GetLastCommittedEntry()
+                   ->IsViewSourceMode());
+}
+
+class NavigationRequestPrerenderBrowserTest
+    : public NavigationRequestBrowserTest {
+ public:
+  NavigationRequestPrerenderBrowserTest() {
+    prerender_helper_ =
+        std::make_unique<test::PrerenderTestHelper>(base::BindRepeating(
+            &NavigationRequestPrerenderBrowserTest::web_contents,
+            base::Unretained(this)));
+  }
+  ~NavigationRequestPrerenderBrowserTest() override = default;
+
+  NavigationRequestPrerenderBrowserTest(
+      const NavigationRequestPrerenderBrowserTest&) = delete;
+  NavigationRequestPrerenderBrowserTest& operator=(
+      const NavigationRequestPrerenderBrowserTest&) = delete;
+
+  void SetUpOnMainThread() override {
+    NavigationRequestBrowserTest::SetUpOnMainThread();
+
+    https_server_ = std::make_unique<net::EmbeddedTestServer>(
+        net::EmbeddedTestServer::TYPE_HTTPS);
+    https_server_->AddDefaultHandlers(GetTestDataFilePath());
+    https_server_->SetSSLConfig(net::EmbeddedTestServer::CERT_TEST_NAMES);
+
+    ASSERT_TRUE(https_server()->Start());
+  }
+
+ protected:
+  net::EmbeddedTestServer* https_server() { return https_server_.get(); }
+
+  test::PrerenderTestHelper& prerender_helper() { return *prerender_helper_; }
+
+  WebContents* web_contents() { return shell()->web_contents(); }
+
+ private:
+  std::unique_ptr<net::EmbeddedTestServer> https_server_;
+  std::unique_ptr<test::PrerenderTestHelper> prerender_helper_;
+};
+
+// Make sure if a main frame page served with a COOP header attempts to navigate
+// itself to about:srcdoc that we handle it correctly.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       CoopWithMainframeAboutSrcdocNavigation) {
+  std::unique_ptr<net::EmbeddedTestServer> https_server =
+      std::make_unique<net::EmbeddedTestServer>(
+          net::EmbeddedTestServer::TYPE_HTTPS);
+  https_server->AddDefaultHandlers(GetTestDataFilePath());
+  https_server->SetSSLConfig(net::EmbeddedTestServer::CERT_TEST_NAMES);
+
+  ASSERT_TRUE(https_server->Start());
+
+  GURL url(https_server->GetURL("a.test",
+                                "/location_equals_about_srcdoc_script.html"));
+
+  // Navigate to a document that sets COOP and immediately navigates the
+  // mainframe to about:srcdoc.
+  TestNavigationObserver navigation_observer(shell()->web_contents());
+  // Since the redirect to about:srcdoc in the page's script is expected to
+  // fail, use EXPECT_FALSE here.
+  EXPECT_FALSE(NavigateToURL(shell(), url));
+  navigation_observer.Wait();
+
+  // Verify that the second navigation was attempted and failed.
+  EXPECT_FALSE(navigation_observer.last_navigation_succeeded());
+  EXPECT_EQ(net::ERR_INVALID_URL, navigation_observer.last_net_error_code());
+  EXPECT_EQ(GURL(url::kAboutSrcdocURL),
+            navigation_observer.last_navigation_url());
+}
+
+// Same as CoopWithMainframeAboutSrcdocNavigation above, except instead of a
+// single, redirected navigation, we get two distinct navigations in this case.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       CoopWithMainframeAboutSrcdocNavigation2) {
+  std::unique_ptr<net::EmbeddedTestServer> https_server =
+      std::make_unique<net::EmbeddedTestServer>(
+          net::EmbeddedTestServer::TYPE_HTTPS);
+  https_server->AddDefaultHandlers(GetTestDataFilePath());
+  https_server->SetSSLConfig(net::EmbeddedTestServer::CERT_TEST_NAMES);
+
+  ASSERT_TRUE(https_server->Start());
+
+  GURL url(https_server->GetURL("a.test",
+                                "/set-header?"
+                                "cross-origin-opener-policy: same-origin"));
+
+  // Navigate to a document that sets COOP.
+  EXPECT_TRUE(NavigateToURL(shell(), url));
+  RenderFrameHostImpl* main_frame = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_EQ(network::mojom::CrossOriginOpenerPolicyValue::kSameOrigin,
+            main_frame->cross_origin_opener_policy().value);
+
+  // Navigate main frame to about:srcdoc.
+  TestNavigationObserver navigation_observer(shell()->web_contents());
+  EXPECT_TRUE(ExecJs(main_frame, "location = 'about:srcdoc';"));
+  navigation_observer.Wait();
+
+  // Verify that the second navigation was attempted and failed.
+  EXPECT_FALSE(navigation_observer.last_navigation_succeeded());
+  EXPECT_EQ(net::ERR_INVALID_URL, navigation_observer.last_net_error_code());
+  EXPECT_EQ(GURL(url::kAboutSrcdocURL),
+            navigation_observer.last_navigation_url());
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestPrerenderBrowserTest,
+                       CoopCoepCheckWithPrerender) {
+  GURL url(
+      https_server()->GetURL("a.test",
+                             "/set-header"
+                             "?cross-origin-opener-policy: same-origin"
+                             "&cross-origin-embedder-policy: require-corp"));
+
+  // Navigate to a document that sets COOP and COEP.
+  EXPECT_TRUE(NavigateToURL(shell(), url));
+  RenderFrameHostImpl* primary_main_frame = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+
+  EXPECT_EQ(network::mojom::CrossOriginOpenerPolicyValue::kSameOriginPlusCoep,
+            primary_main_frame->cross_origin_opener_policy().value);
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kRequireCorp,
+            primary_main_frame->cross_origin_embedder_policy().value);
+
+  // Add a prerender.
+  PrerenderHostId host_id = prerender_helper().AddPrerender(
+      https_server()->GetURL("a.test", "/title1.html?prerendering"));
+  RenderFrameHostImpl* prerender_main_frame = static_cast<RenderFrameHostImpl*>(
+      prerender_helper().GetPrerenderedMainFrameHost(host_id));
+
+  // The prerender rfh's polices are none.
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kNone,
+            prerender_main_frame->cross_origin_embedder_policy().value);
+  EXPECT_EQ(network::mojom::CrossOriginOpenerPolicyValue::kUnsafeNone,
+            prerender_main_frame->cross_origin_opener_policy().value);
+
+  // Prerendering should not affect the primary rfh's polices.
+  EXPECT_EQ(network::mojom::CrossOriginOpenerPolicyValue::kSameOriginPlusCoep,
+            primary_main_frame->cross_origin_opener_policy().value);
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kRequireCorp,
+            primary_main_frame->cross_origin_embedder_policy().value);
+}
+
+enum class TestMPArchType {
+  kPrerender,
+  kFencedFrame,
+};
+
+class NavigationRequestMPArchBrowserTest
+    : public NavigationRequestBrowserTest,
+      public testing::WithParamInterface<TestMPArchType> {
+ public:
+  NavigationRequestMPArchBrowserTest() {
+    switch (GetParam()) {
+      case TestMPArchType::kPrerender:
+        prerender_helper_ =
+            std::make_unique<test::PrerenderTestHelper>(base::BindRepeating(
+                &NavigationRequestMPArchBrowserTest::web_contents,
+                base::Unretained(this)));
+        break;
+
+      case TestMPArchType::kFencedFrame:
+        fenced_frame_helper_ = std::make_unique<test::FencedFrameTestHelper>();
+        break;
+    }
+  }
+  ~NavigationRequestMPArchBrowserTest() override = default;
+  NavigationRequestMPArchBrowserTest(
+      const NavigationRequestMPArchBrowserTest&) = delete;
+
+  NavigationRequestMPArchBrowserTest& operator=(
+      const NavigationRequestMPArchBrowserTest&) = delete;
+
+ protected:
+  test::PrerenderTestHelper& prerender_helper() { return *prerender_helper_; }
+
+  test::FencedFrameTestHelper& fenced_frame_test_helper() {
+    return *fenced_frame_helper_;
+  }
+
+  WebContents* web_contents() { return shell()->web_contents(); }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+  std::unique_ptr<test::PrerenderTestHelper> prerender_helper_;
+  std::unique_ptr<test::FencedFrameTestHelper> fenced_frame_helper_;
+};
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         NavigationRequestMPArchBrowserTest,
+                         ::testing::Values(TestMPArchType::kPrerender,
+                                           TestMPArchType::kFencedFrame));
+
+IN_PROC_BROWSER_TEST_P(NavigationRequestMPArchBrowserTest,
+                       ShouldNotUpdateHistory) {
+  const auto get_observer = [&](WebContents* web_contents) {
+    return DidFinishNavigationObserver(
+        web_contents,
+        base::BindLambdaForTesting([](NavigationHandle* navigation_handle) {
+          DCHECK_EQ(navigation_handle->GetNavigatingFrameType(),
+                    GetParam() == TestMPArchType::kPrerender
+                        ? FrameType::kPrerenderMainFrame
+                    : GetParam() == TestMPArchType::kFencedFrame
+                        ? FrameType::kFencedFrameRoot
+                        : FrameType::kPrimaryMainFrame);
+          EXPECT_FALSE(navigation_handle->ShouldUpdateHistory());
+        }));
+  };
+
+  {
+    DidFinishNavigationObserver observer(
+        web_contents(),
+        base::BindLambdaForTesting([](NavigationHandle* navigation_handle) {
+          DCHECK_EQ(navigation_handle->GetNavigatingFrameType(),
+                    FrameType::kPrimaryMainFrame);
+          EXPECT_TRUE(navigation_handle->ShouldUpdateHistory());
+        }));
+
+    // Navigate the primary page.
+    EXPECT_TRUE(
+        NavigateToURL(shell(), embedded_test_server()->GetURL("/title1.html")));
+  }
+  {
+    switch (GetParam()) {
+      case TestMPArchType::kPrerender: {
+        const auto prerender_observer = get_observer(web_contents());
+        // Load a page in the prerender.
+        prerender_helper().AddPrerender(
+            embedded_test_server()->GetURL("/title1.html?prendering"));
+        break;
+      }
+
+      case TestMPArchType::kFencedFrame: {
+        const auto fenced_frame_observer = get_observer(web_contents());
+        // Create a fenced frame.
+        ASSERT_TRUE(fenced_frame_test_helper().CreateFencedFrame(
+            web_contents()->GetPrimaryMainFrame(),
+            embedded_test_server()->GetURL("/fenced_frames/title1.html")));
+        break;
+      }
+    }
+  }
+}
+
+// Tests that when trying to commit an error page for a failed navigation, but
+// the renderer process of the error page crashed, the navigation won't commit
+// and the browser won't crash.
+// Regression test for https://crbug.com/1444360.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       RendererCrashedBeforeCommitErrorPage) {
+  // Navigate to `url_a` first.
+  GURL url_a(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  ASSERT_TRUE(NavigateToURL(shell(), url_a));
+
+  // Set up an URLLoaderInterceptor which will cause future navigations to fail.
+  auto url_loader_interceptor = std::make_unique<URLLoaderInterceptor>(
+      base::BindRepeating([](URLLoaderInterceptor::RequestParams* params) {
+        network::URLLoaderCompletionStatus status;
+        status.error_code = net::ERR_NOT_IMPLEMENTED;
+        params->client->OnComplete(status);
+        return true;
+      }));
+
+  // Do a navigation to `url_b1` that will fail and commit an error page. This
+  // is important so that the next error page navigation won't need to create a
+  // speculative RenderFrameHost (unless RenderDocument is enabled) and won't
+  // get cancelled earlier than commit time due to speculative RFH deletion.
+  GURL url_b1(embedded_test_server()->GetURL("b.com", "/title1.html"));
+  EXPECT_FALSE(NavigateToURL(shell(), url_b1));
+  EXPECT_EQ(shell()->web_contents()->GetLastCommittedURL(), url_b1);
+  EXPECT_TRUE(
+      shell()->web_contents()->GetPrimaryMainFrame()->IsErrorDocument());
+
+  // For the next navigation, set up a throttle that will be used to wait for
+  // WillFailRequest() and then defer the navigation, so that we can crash the
+  // error page process first.
+  TestNavigationThrottleInstaller installer(
+      shell()->web_contents(),
+      NavigationThrottle::PROCEED /* will_start_result */,
+      NavigationThrottle::PROCEED /* will_redirect_result */,
+      NavigationThrottle::DEFER /* will_fail_result */,
+      NavigationThrottle::PROCEED /* will_process_result */,
+      NavigationThrottle::PROCEED /* will_commit_without_url_loader_result */);
+
+  // Start a navigation to `url_b2` that will also fail, but before it commits
+  // an error page, cause the error page process to crash.
+  GURL url_b2(embedded_test_server()->GetURL("b.com", "/title2.html"));
+  TestNavigationManager manager(shell()->web_contents(), url_b2);
+  shell()->LoadURL(url_b2);
+  EXPECT_TRUE(manager.WaitForRequestStart());
+
+  // Resume the navigation and wait for WillFailRequest(). After this point, we
+  // will have picked the final RenderFrameHost & RenderProcessHost for the
+  // failed navigation.
+  manager.ResumeNavigation();
+  installer.WaitForThrottleWillFail();
+
+  // Ensure that response_should_be_rendered() is true even for error pages.
+  EXPECT_TRUE(static_cast<WebContentsImpl*>(shell()->web_contents())
+                  ->GetPrimaryMainFrame()
+                  ->frame_tree_node()
+                  ->navigation_request()
+                  ->response_should_be_rendered());
+
+  // Kill the error page process. This will cause the navigation to `url_b2` to
+  // return early in `NavigationRequest::ReadyToCommitNavigation()` and not
+  // commit a new error page.
+  RenderProcessHost* process_to_crash =
+      manager.GetNavigationHandle()->GetRenderFrameHost()->GetProcess();
+  ASSERT_TRUE(process_to_crash->IsInitializedAndNotDead());
+  RenderProcessHostWatcher crash_observer(
+      process_to_crash, RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
+  process_to_crash->Shutdown(0);
+  crash_observer.Wait();
+  ASSERT_FALSE(process_to_crash->IsInitializedAndNotDead());
+
+  // Resume the navigation, which won't commit.
+  if (!ShouldCreateNewHostForAllFrames()) {
+    installer.navigation_throttle()->ResumeNavigation();
+  }
+  EXPECT_TRUE(manager.WaitForNavigationFinished());
+  EXPECT_FALSE(WaitForLoadStop(shell()->web_contents()));
+
+  // The tab stayed at `url_b1` as the `url_b2` navigation didn't commit.
+  EXPECT_EQ(shell()->web_contents()->GetLastCommittedURL(), url_b1);
+}
+
+namespace {
+
+constexpr char kResponseBody[] = "response-body-contents";
+
+// HTTP response template with adjustable header and body contents.
+const char kResponseTemplate[] =
+    "HTTP/1.1 200 OK\r\n"
+    "%s"
+    "\r\n"
+    "%s";
+
+// Test version of a NavigationThrottle that requests the response body.
+class ResponseBodyNavigationThrottle : public NavigationThrottle {
+ public:
+  explicit ResponseBodyNavigationThrottle(NavigationThrottleRegistry& registry)
+      : NavigationThrottle(registry) {}
+  ResponseBodyNavigationThrottle(const ResponseBodyNavigationThrottle&) =
+      delete;
+  ResponseBodyNavigationThrottle& operator=(
+      const ResponseBodyNavigationThrottle&) = delete;
+  ~ResponseBodyNavigationThrottle() override = default;
+
+  NavigationThrottle::ThrottleCheckResult WillProcessResponse() override {
+    // It is safe to use base::Unretained as the NavigationThrottle will not be
+    // destroyed before the callback is called.
+    navigation_handle()->GetResponseBody(
+        base::BindOnce(&ResponseBodyNavigationThrottle::OnResponseBodyReady,
+                       base::Unretained(this)));
+    return NavigationThrottle::DEFER;
+  }
+
+  const char* GetNameForLogging() override {
+    return "ResponseBodyNavigationThrottle";
+  }
+
+  bool was_callback_called() const { return was_callback_called_; }
+
+  const std::string& response_body() const { return response_body_; }
+
+ private:
+  void OnResponseBodyReady(const std::string& response_body) {
+    was_callback_called_ = true;
+    response_body_ = response_body;
+    Resume();
+  }
+
+  bool was_callback_called_ = false;
+  std::string response_body_;
+};
+
+}  // namespace
+
+class NavigationRequestResponseBodyBrowserTest
+    : public NavigationRequestBrowserTest {
+ protected:
+  void SetUpOnMainThread() override {
+    host_resolver()->AddRule("*", "127.0.0.1");
+  }
+};
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestResponseBodyBrowserTest, Received) {
+  net::test_server::ExpectationHandler handler(embedded_test_server());
+  handler.OnRequest("/target.html").RespondWith("text/html", kResponseBody);
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  ResponseBodyNavigationThrottle* client_throttle = nullptr;
+
+  // Set the client to register a ResponseBodyNavigationThrottle. Save a pointer
+  // to this throttle in `client_throttle` on registration.
+  ShellContentBrowserClient::Get()
+      ->set_create_throttles_for_navigation_callback(base::BindLambdaForTesting(
+          [&client_throttle](NavigationThrottleRegistry& registry) -> void {
+            auto throttle =
+                std::make_unique<ResponseBodyNavigationThrottle>(registry);
+            client_throttle = throttle.get();
+            registry.AddThrottle(std::move(throttle));
+          }));
+
+  // Start navigating.
+  GURL simple_url(embedded_test_server()->GetURL("/target.html"));
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+  shell()->LoadURL(simple_url);
+
+  EXPECT_TRUE(manager.WaitForRequestStart());
+  manager.ResumeNavigation();
+
+  ASSERT_TRUE(manager.WaitForResponse());
+  ASSERT_NE(nullptr, client_throttle);
+  EXPECT_TRUE(client_throttle->was_callback_called());
+  EXPECT_EQ(kResponseBody, client_throttle->response_body());
+
+  // Finish the navigation.
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestResponseBodyBrowserTest,
+                       ContentLengthZero) {
+  net::test_server::ControllableHttpResponse response(embedded_test_server(),
+                                                      "/target.html");
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  ResponseBodyNavigationThrottle* client_throttle = nullptr;
+
+  // Set the client to register a ResponseBodyNavigationThrottle. Save a pointer
+  // to this throttle in `client_throttle` on registration.
+  ShellContentBrowserClient::Get()
+      ->set_create_throttles_for_navigation_callback(base::BindLambdaForTesting(
+          [&client_throttle](NavigationThrottleRegistry& registry) -> void {
+            auto throttle =
+                std::make_unique<ResponseBodyNavigationThrottle>(registry);
+            client_throttle = throttle.get();
+            registry.AddThrottle(std::move(throttle));
+          }));
+
+  // Start navigating.
+  GURL simple_url(embedded_test_server()->GetURL("/target.html"));
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+  shell()->LoadURL(simple_url);
+
+  EXPECT_TRUE(manager.WaitForRequestStart());
+  manager.ResumeNavigation();
+
+  // Build the response with Content-Length: 0 and some body text.
+  response.WaitForRequest();
+  response.Send(base::StringPrintf(kResponseTemplate, "Content-Length: 0",
+                                   kResponseBody));
+  response.Done();
+  ASSERT_TRUE(manager.WaitForResponse());
+  ASSERT_NE(nullptr, client_throttle);
+  EXPECT_TRUE(client_throttle->was_callback_called());
+  // The received response body is empty due to the Content-Length value.
+  EXPECT_EQ(std::string(), client_throttle->response_body());
+
+  // Finish the navigation.
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestResponseBodyBrowserTest,
+                       BodyLargerThanDataPipeSize) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  ResponseBodyNavigationThrottle* client_throttle = nullptr;
+
+  // Set the client to register a ResponseBodyNavigationThrottle. Save a pointer
+  // to this throttle in `client_throttle` on registration.
+  ShellContentBrowserClient::Get()
+      ->set_create_throttles_for_navigation_callback(base::BindLambdaForTesting(
+          [&client_throttle](NavigationThrottleRegistry& registry) -> void {
+            auto throttle =
+                std::make_unique<ResponseBodyNavigationThrottle>(registry);
+            client_throttle = throttle.get();
+            registry.AddThrottle(std::move(throttle));
+          }));
+
+  // Start navigating to a page with a large body (>5 million characters).
+  GURL simple_url(embedded_test_server()->GetURL("/long_response_body.html"));
+  TestNavigationManager manager(shell()->web_contents(), simple_url);
+  shell()->LoadURL(simple_url);
+
+  ASSERT_TRUE(manager.WaitForResponse());
+  ASSERT_NE(nullptr, client_throttle);
+  EXPECT_TRUE(client_throttle->was_callback_called());
+  // Ensure that the received response body contains text from the target page.
+  EXPECT_NE(client_throttle->response_body().npos,
+            client_throttle->response_body().find(
+                "Test page with a long response body"));
+  // The initial response body chunk may be smaller than the max data pipe size.
+  EXPECT_LE(client_throttle->response_body().length(),
+            network::GetDataPipeDefaultAllocationSize(
+                network::DataPipeAllocationSize::kLargerSizeIfPossible));
+
+  // Finish the navigation.
+  ASSERT_TRUE(manager.WaitForNavigationFinished());
+}
+
+// Helper class to turn off strict site isolation, to allow testing dynamic
+// isolated origins added for future BrowsingInstances.
+class NavigationRequestNoSiteIsolationBrowserTest
+    : public NavigationRequestBrowserTest {
+ public:
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    command_line->AppendSwitch(switches::kDisableSiteIsolation);
+    command_line->RemoveSwitch(switches::kSitePerProcess);
+    NavigationRequestBrowserTest::SetUpCommandLine(command_line);
+  }
+};
+
+// Test the early swap metrics logged when performing the early swap out of the
+// initial RenderFrameHost.  Currently, the vast majority of navigations are
+// allowed to reuse the initial RFH.  One exception is a navigation to a
+// future-isolated origin, which forces a BrowsingInstance swap so that the
+// isolation can take effect right away, so this is the case this test
+// exercises.
+IN_PROC_BROWSER_TEST_F(NavigationRequestNoSiteIsolationBrowserTest,
+                       EarlySwapMetrics_InitialFrame) {
+  base::HistogramTester histograms;
+
+  EXPECT_FALSE(SiteIsolationPolicy::UseDedicatedProcessesForAllSites());
+
+  // Isolate bar.com in future BrowsingInstances.
+  GURL bar_url(embedded_test_server()->GetURL("bar.com", "/title1.html"));
+  auto* policy = ChildProcessSecurityPolicyImpl::GetInstance();
+  policy->AddFutureIsolatedOrigins(
+      {url::Origin::Create(bar_url)},
+      ChildProcessSecurityPolicy::IsolatedOriginSource::TEST);
+
+  // Navigate the initial frame to bar.com which requires isolation. Currently,
+  // the isolation heuristics force a BrowsingInstance and a RenderFrameHost
+  // swap, so the initial RFH cannot be reused for such a URL, and hence we
+  // should create a speculative RenderFrameHost and swap it in early because
+  // the initial frame is not live.
+  ASSERT_FALSE(
+      shell()->web_contents()->GetPrimaryMainFrame()->IsRenderFrameLive());
+  ASSERT_TRUE(NavigateToURL(shell(), bar_url));
+  histograms.ExpectUniqueSample(
+      "Navigation.EarlyRenderFrameHostSwapType",
+      NavigationRequest::EarlyRenderFrameHostSwapType::kInitialFrame, 1);
+  histograms.ExpectUniqueSample(
+      "Navigation.EarlyRenderFrameHostSwap.HasCommitted", 1, 1);
+  histograms.ExpectUniqueSample(
+      "Navigation.EarlyRenderFrameHostSwap.IsInOutermostMainFrame", 1, 1);
+}
+
+// Test that same-site cross-origin navigations keep user activation even when
+// site isolation is disabled.
+IN_PROC_BROWSER_TEST_F(NavigationRequestNoSiteIsolationBrowserTest,
+                       UserActivationSameSite) {
+  GURL main_url(embedded_test_server()->GetURL(
+      "a.com", "/cross_site_iframe_factory.html?a(b)"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // It is safe to obtain the root frame tree node here, as it doesn't change.
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  FrameTreeNode* child = root->child_at(0);
+
+  // Sanity check that there is no sticky user activation at first.
+  EXPECT_FALSE(child->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(false, EvalJs(child->current_frame_host(),
+                          "navigator.userActivation.hasBeenActive",
+                          EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Load cross-origin same-site page into iframe and verify there is still no
+  // sticky user activation.
+  GURL first_http_url(
+      embedded_test_server()->GetURL("subdomain.b.com", "/title1.html"));
+  EXPECT_TRUE(
+      NavigateToURLFromRendererWithoutUserGesture(child, first_http_url));
+  EXPECT_FALSE(child->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(false, EvalJs(child->current_frame_host(),
+                          "navigator.userActivation.hasBeenActive",
+                          EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Give the child iframe user activation.
+  EXPECT_TRUE(ExecJs(child, "// No-op script"));
+  EXPECT_TRUE(child->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(true, EvalJs(child->current_frame_host(),
+                         "navigator.userActivation.hasBeenActive",
+                         EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Perform another cross-origin same-site navigation in the iframe.
+  GURL second_http_url(embedded_test_server()->GetURL("b.com", "/title1.html"));
+  EXPECT_TRUE(
+      NavigateToURLFromRendererWithoutUserGesture(child, second_http_url));
+
+  // The cross-origin same-site navigation should keep the sticky user
+  // activation from the previous page.
+  EXPECT_TRUE(child->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(true, EvalJs(child->current_frame_host(),
+                         "navigator.userActivation.hasBeenActive",
+                         EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Ensure that top-level navigations can still happen.
+  EXPECT_TRUE(ExecJs(child->current_frame_host(),
+                     JsReplace("window.open($1, $2)", first_http_url, "_top"),
+                     EXECUTE_SCRIPT_NO_USER_GESTURE));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+  EXPECT_EQ(first_http_url, shell()->web_contents()->GetLastCommittedURL());
+}
+
+// Test that navigating the outermost main frame to a javascript: url does not
+// preserve user activation state.
+IN_PROC_BROWSER_TEST_F(NavigationRequestNoSiteIsolationBrowserTest,
+                       UserActivationJavascriptUrlMainFrame) {
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // It is safe to obtain the root frame tree node here, as it doesn't change.
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+
+  // Sanity check that there is no sticky user activation at first.
+  EXPECT_FALSE(root->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(false, EvalJs(root->current_frame_host(),
+                          "navigator.userActivation.hasBeenActive",
+                          EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Give the root frame user activation.
+  EXPECT_TRUE(ExecJs(root, "// No-op script"));
+  EXPECT_TRUE(root->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(true, EvalJs(root->current_frame_host(),
+                         "navigator.userActivation.hasBeenActive",
+                         EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Perform a javascript URL navigation.
+  GURL javascript_url("javascript:'foo'");
+  EXPECT_TRUE(ExecJs(shell()->web_contents(),
+                     JsReplace("location.href = $1", javascript_url),
+                     EXECUTE_SCRIPT_NO_USER_GESTURE));
+  EXPECT_EQ("foo", EvalJs(shell()->web_contents(), "document.body.innerText",
+                          EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // The navigation to the javascript: URL should not keep the sticky user
+  // activation from the previous page.
+  // TODO(crbug.com/328296079) The browser and renderer's sticky activation
+  // state should not be out of sync. Update this test when fixing that bug to
+  // check that the browser-side clears sticky user activation.
+  EXPECT_TRUE(root->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(false, EvalJs(root->current_frame_host(),
+                          "navigator.userActivation.hasBeenActive",
+                          EXECUTE_SCRIPT_NO_USER_GESTURE));
+}
+
+// Test that navigating an iframe to a javascript: url preserves the user
+// activation state.
+IN_PROC_BROWSER_TEST_F(NavigationRequestNoSiteIsolationBrowserTest,
+                       UserActivationJavascriptUrlChildFrame) {
+  GURL main_url(embedded_test_server()->GetURL(
+      "a.com", "/cross_site_iframe_factory.html?a(b)"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // It is safe to obtain the root frame tree node here, as it doesn't change.
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  FrameTreeNode* child = root->child_at(0);
+
+  // Sanity check that there is no sticky user activation at first.
+  EXPECT_FALSE(child->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(false, EvalJs(child->current_frame_host(),
+                          "navigator.userActivation.hasBeenActive",
+                          EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Give the child iframe user activation.
+  EXPECT_TRUE(ExecJs(child, "// No-op script"));
+  EXPECT_TRUE(child->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(true, EvalJs(child->current_frame_host(),
+                         "navigator.userActivation.hasBeenActive",
+                         EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Perform a javascript URL navigation in the iframe.
+  GURL javascript_url("javascript:'foo'");
+  EXPECT_TRUE(ExecJs(child->current_frame_host(),
+                     JsReplace("location.href = $1", javascript_url),
+                     EXECUTE_SCRIPT_NO_USER_GESTURE));
+  EXPECT_EQ("foo",
+            EvalJs(child->current_frame_host(), "document.body.innerText",
+                   EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // The navigation to the javascript: URL should keep the sticky user
+  // activation from the previous page.
+  EXPECT_TRUE(child->current_frame_host()->HasStickyUserActivation());
+  EXPECT_EQ(true, EvalJs(child->current_frame_host(),
+                         "navigator.userActivation.hasBeenActive",
+                         EXECUTE_SCRIPT_NO_USER_GESTURE));
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       EarlySwapMetrics_CrashNoCommit) {
+  GURL url_a(embedded_test_server()->GetURL("a.test", "/title1.html"));
+  {
+    base::HistogramTester histograms;
+    // Ensure that a normal navigation doesn't log early swap metrics.
+    ASSERT_TRUE(NavigateToURL(shell(), url_a));
+    histograms.ExpectUniqueSample(
+        "Navigation.EarlyRenderFrameHostSwapType",
+        NavigationRequest::EarlyRenderFrameHostSwapType::kNone, 1);
+    histograms.ExpectTotalCount(
+        "Navigation.EarlyRenderFrameHostSwap.HasCommitted", 0);
+    histograms.ExpectTotalCount(
+        "Navigation.EarlyRenderFrameHostSwap.IsInOutermostMainFrame", 0);
+  }
+
+  // Crash the main frame.
+  RenderProcessHost* process =
+      shell()->web_contents()->GetPrimaryMainFrame()->GetProcess();
+  RenderProcessHostWatcher crash_observer(
+      process, RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
+  process->Shutdown(0);
+  crash_observer.Wait();
+  ASSERT_FALSE(
+      shell()->web_contents()->GetPrimaryMainFrame()->IsRenderFrameLive());
+
+  {
+    base::HistogramTester histograms;
+
+    // Load a page that results in a 204 error.  This should result in an early
+    // RFH swap that leaves the new RFH in a blank state.  The HasCommitted
+    // early swap metric should be logged as false.
+    GURL url_204(embedded_test_server()->GetURL("a.test", "/nocontent"));
+    EXPECT_TRUE(NavigateToURLAndExpectNoCommit(shell(), url_204));
+
+    histograms.ExpectUniqueSample(
+        "Navigation.EarlyRenderFrameHostSwapType",
+        NavigationRequest::EarlyRenderFrameHostSwapType::kCrashedFrame, 1);
+    histograms.ExpectUniqueSample(
+        "Navigation.EarlyRenderFrameHostSwap.HasCommitted", 0, 1);
+    histograms.ExpectUniqueSample(
+        "Navigation.EarlyRenderFrameHostSwap.IsInOutermostMainFrame", 1, 1);
+  }
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       EarlySwapMetrics_CrashedSubframe) {
+  // Needed to guarantee that the subframe will be an OOPIF on Android.
+  IsolateAllSitesForTesting(base::CommandLine::ForCurrentProcess());
+
+  GURL url(embedded_test_server()->GetURL(
+      "a.com", "/cross_site_iframe_factory.html?a(b)"));
+  ASSERT_TRUE(NavigateToURL(shell(), url));
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  RenderFrameHostImpl* subframe_rfh = root->child_at(0)->current_frame_host();
+
+  // Crash the subframe.
+  RenderProcessHost* child_process = subframe_rfh->GetProcess();
+  RenderProcessHostWatcher crash_observer(
+      child_process, RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
+  child_process->Shutdown(0);
+  crash_observer.Wait();
+  ASSERT_FALSE(subframe_rfh->IsRenderFrameLive());
+
+  {
+    base::HistogramTester histograms;
+
+    // Navigate the subframe, which should result in an early RFH swap.
+    GURL subframe_url(embedded_test_server()->GetURL("c.com", "/title1.html"));
+    TestNavigationObserver load_observer(shell()->web_contents());
+    EXPECT_TRUE(
+        ExecJs(shell(), JsReplace("frames[0].location = $1", subframe_url)));
+    load_observer.Wait();
+
+    histograms.ExpectUniqueSample(
+        "Navigation.EarlyRenderFrameHostSwapType",
+        NavigationRequest::EarlyRenderFrameHostSwapType::kCrashedFrame, 1);
+    histograms.ExpectUniqueSample(
+        "Navigation.EarlyRenderFrameHostSwap.HasCommitted", 1, 1);
+    histograms.ExpectUniqueSample(
+        "Navigation.EarlyRenderFrameHostSwap.IsInOutermostMainFrame", 0, 1);
+  }
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       EarlySwapMetrics_NoSwapForWebUI) {
+  base::HistogramTester histograms;
+
+  // Navigate the initial frame to a WebUI URL. The initial RFH should be reused
+  // for such a URL, and hence there should be no early swap recorded in the
+  // metrics.
+  ASSERT_FALSE(
+      shell()->web_contents()->GetPrimaryMainFrame()->IsRenderFrameLive());
+  GURL web_ui_url(GetWebUIURL("gpu"));
+  ASSERT_TRUE(NavigateToURL(shell(), web_ui_url));
+  histograms.ExpectUniqueSample(
+      "Navigation.EarlyRenderFrameHostSwapType",
+      NavigationRequest::EarlyRenderFrameHostSwapType::kNone, 1);
+  histograms.ExpectTotalCount(
+      "Navigation.EarlyRenderFrameHostSwap.HasCommitted", 0);
+  histograms.ExpectTotalCount(
+      "Navigation.EarlyRenderFrameHostSwap.IsInOutermostMainFrame", 0);
+}
+
+// Check the output of NavigationHandle::SandboxFlagsInitiator() when the
+// navigation is initiated from the omnibox. It must be `kNone`.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       InitiatorSandboxFlags_BrowserInitiated) {
+  GURL url_initiator = embedded_test_server()->GetURL(
+      "a.com", "/set-header?Content-Security-Policy: sandbox allow-scripts");
+  ASSERT_TRUE(NavigateToURL(shell(), url_initiator));
+
+  GURL url_target = embedded_test_server()->GetURL("a.com", "/");
+  TestNavigationManager manager(shell()->web_contents(), url_target);
+  shell()->LoadURL(url_target);
+  EXPECT_TRUE(manager.WaitForRequestStart());
+  ASSERT_TRUE(manager.GetNavigationHandle());
+  EXPECT_EQ(manager.GetNavigationHandle()->SandboxFlagsInitiator(),
+            network::mojom::WebSandboxFlags::kNone);
+  EXPECT_EQ(manager.GetNavigationHandle()->SandboxFlagsInherited(),
+            network::mojom::WebSandboxFlags::kNone);
+}
+
+// Check the output of NavigationHandle::SandboxFlagsInitiator() when the
+// navigation is initiated by the top-level document. It must match.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       InitiatorSandboxFlags_DocumentInitiated) {
+  GURL url_initiator = embedded_test_server()->GetURL(
+      "a.com", "/set-header?Content-Security-Policy: sandbox allow-scripts");
+  ASSERT_TRUE(NavigateToURL(shell(), url_initiator));
+
+  GURL url_target = embedded_test_server()->GetURL("a.com", "/");
+  TestNavigationManager manager(shell()->web_contents(), url_target);
+  EXPECT_TRUE(ExecJs(shell()->web_contents(),
+                     JsReplace("location.href = $1", url_target)));
+  EXPECT_TRUE(manager.WaitForRequestStart());
+  ASSERT_TRUE(manager.GetNavigationHandle());
+  EXPECT_EQ(manager.GetNavigationHandle()->SandboxFlagsInitiator(),
+            network::mojom::WebSandboxFlags::kAll &
+                ~network::mojom::WebSandboxFlags::kScripts &
+                ~network::mojom::WebSandboxFlags::kAutomaticFeatures);
+  EXPECT_EQ(manager.GetNavigationHandle()->SandboxFlagsInherited(),
+            network::mojom::WebSandboxFlags::kNone);
+}
+
+// Check the output of NavigationHandle::SandboxFlagsInitiator() when the
+// navigation is initiated by a sandboxed iframe.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       InitiatorSandboxFlags_SandboxedIframe) {
+  // Create the parent document:
+  GURL parent_url = embedded_test_server()->GetURL("a.com", "/title1.html");
+  ASSERT_TRUE(NavigateToURL(shell(), parent_url));
+
+  // Create the child frame. It has sandbox flags from the
+  // Content-Security-Policy and from its iframe.sandbox flags:
+  GURL url_initiator = embedded_test_server()->GetURL(
+      "a.com",
+      "/set-header?Content-Security-Policy: sandbox allow-scripts allow-forms");
+  EXPECT_TRUE(ExecJs(shell()->web_contents(), JsReplace(R"(
+    const iframe = document.createElement("iframe");
+    iframe.src = $1;
+    iframe.sandbox = "allow-scripts allow-popups";
+    document.body.appendChild(iframe);
+  )",
+                                                        url_initiator)));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+  RenderFrameHostImpl* main_frame = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  ASSERT_EQ(1u, main_frame->child_count());
+
+  // Navigate the child frame.
+  GURL url_target = embedded_test_server()->GetURL("a.com", "/");
+  TestNavigationManager manager(shell()->web_contents(), url_target);
+  EXPECT_TRUE(ExecJs(main_frame->child_at(0),
+                     JsReplace("location.href = $1", url_target)));
+  EXPECT_TRUE(manager.WaitForRequestStart());
+  ASSERT_TRUE(manager.GetNavigationHandle());
+  EXPECT_EQ(manager.GetNavigationHandle()->SandboxFlagsInitiator(),
+            // `allow-script`:
+            network::mojom::WebSandboxFlags::kAll &
+                ~network::mojom::WebSandboxFlags::kScripts &
+                ~network::mojom::WebSandboxFlags::kAutomaticFeatures);
+  EXPECT_EQ(
+      manager.GetNavigationHandle()->SandboxFlagsInherited(),
+      // `allow-scripts allow-popups`:
+      network::mojom::WebSandboxFlags::kAll &
+          ~network::mojom::WebSandboxFlags::kScripts &
+          ~network::mojom::WebSandboxFlags::kPopups &
+          ~network::mojom::WebSandboxFlags::kTopNavigationToCustomProtocols &
+          ~network::mojom::WebSandboxFlags::kAutomaticFeatures);
+}
+
+// Tests the scenario when a navigation without URLLoader is cancelled and an
+// error page is committed using the same NavigationRequest.
+// See https://crbug.com/1487944.
+IN_PROC_BROWSER_TEST_F(
+    NavigationRequestBrowserTest,
+    ThrottleDeferAndCancelCommitWithoutUrlLoaderWithErrorPage) {
+  GURL url(embedded_test_server()->GetURL("/title1.html"));
+  GURL about_blank_url(url::kAboutBlankURL);
+
+  // Perform a new-document navigation (setup).
+  EXPECT_TRUE(NavigateToURL(shell(), url));
+
+  // Navigate to about:blank so the NavigationRequest is expected to commit
+  // without URL loader.
+  {
+    TestNavigationObserver navigation_observer(shell()->web_contents(), 1);
+    NavigationHandleObserver observer(shell()->web_contents(), about_blank_url);
+    TestNavigationThrottleInstaller installer(
+        shell()->web_contents(), NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER,
+        NavigationThrottle::DEFER, NavigationThrottle::DEFER);
+
+    shell()->LoadURL(about_blank_url);
+
+    // Wait for WillCommitWithoutUrlLoader.
+    installer.WaitForThrottleWillCommitWithoutUrlLoader();
+    EXPECT_EQ(0, installer.will_start_called());
+    EXPECT_EQ(0, installer.will_redirect_called());
+    EXPECT_EQ(0, installer.will_fail_called());
+    EXPECT_EQ(0, installer.will_process_called());
+    EXPECT_EQ(1, installer.will_commit_without_url_loader_called());
+
+    // Cancel the deferred navigation with `net::ERR_BLOCKED_BY_RESPONSE`, so
+    // the NavigationRequest will be used for an error page commit.
+    installer.navigation_throttle()->CancelNavigation(
+        {NavigationThrottle::CANCEL_AND_IGNORE, net::ERR_BLOCKED_BY_RESPONSE});
+
+    // Wait for the end of the navigation.
+    navigation_observer.Wait();
+
+    EXPECT_FALSE(observer.is_same_document());
+    EXPECT_TRUE(observer.has_committed());
+    EXPECT_FALSE(observer.was_redirected());
+    EXPECT_TRUE(observer.is_error());
+
+    EXPECT_TRUE(
+        shell()->web_contents()->GetPrimaryMainFrame()->IsErrorDocument());
+  }
+}
+
+// data: URLs should have opaque origins with nonce that is stable across a
+// navigation, which is stored as the tentative origin to commit.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       TentativeOriginToCommitIsStable_Data) {
+  // Start a navigation to a data URL with an opaque origin.
+  const std::string data = "<html><title>One</title><body>foo</body></html>";
+  const GURL data_url = GURL("data:text/html;charset=utf-8," + data);
+  TestNavigationManager navigation_manager(contents(), data_url);
+  shell()->LoadURL(data_url);
+  EXPECT_TRUE(navigation_manager.WaitForRequestStart());
+
+  // Get a copy of the computed origin at an early stage, both from the
+  // NavigationRequest and the UrlInfo, where the values are set and used.
+  NavigationRequest* data_request =
+      contents()->GetPrimaryFrameTree().root()->navigation_request();
+  std::optional<url::Origin> data_tentative_origin_to_commit =
+      data_request->GetTentativeOriginAtRequestTime();
+  EXPECT_TRUE(data_tentative_origin_to_commit.has_value());
+  std::optional<url::Origin> url_info_origin =
+      data_request->GetUrlInfo().origin;
+  EXPECT_TRUE(url_info_origin.has_value());
+  EXPECT_EQ(data_tentative_origin_to_commit, url_info_origin);
+
+  // Verify that the committed origin at the end matches the initial one.
+  EXPECT_TRUE(navigation_manager.WaitForNavigationFinished());
+  url::Origin data_committed_origin =
+      contents()->GetPrimaryMainFrame()->GetLastCommittedOrigin();
+  EXPECT_EQ(data_tentative_origin_to_commit.value(), data_committed_origin);
+  EXPECT_EQ(url_info_origin.value(), data_committed_origin);
+}
+
+// Tests that on reload of a POST request, the HTTP `Origin` header is set
+// properly.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest, OriginHeaderOnPostReload) {
+  GURL start_url = embedded_test_server()->GetURL("a.com", "/title1.html");
+  ASSERT_TRUE(NavigateToURL(shell(), start_url));
+
+  GURL url = embedded_test_server()->GetURL("/echoheader?Origin");
+
+  // Do an initial POST navigation.
+  std::string script = JsReplace(
+      "var f = document.createElement('form');"
+      "f.method = 'POST';"
+      "f.action = $1;"
+      "document.body.appendChild(f);"
+      "f.submit();",
+      url);
+
+  {
+    TestNavigationObserver observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(shell(), script));
+    observer.Wait();
+  }
+
+  EXPECT_EQ(url::Origin::Create(start_url).Serialize(),
+            EvalJs(shell(), "document.body.textContent"));
+
+  // Reload and check that the Origin header is the same as on the original POST
+  // navigation.
+  {
+    TestNavigationObserver reload_observer(shell()->web_contents());
+    shell()->web_contents()->GetController().Reload(ReloadType::NORMAL,
+                                                    /*check_for_repost=*/false);
+    reload_observer.Wait();
+  }
+
+  EXPECT_EQ(url::Origin::Create(start_url).Serialize(),
+            EvalJs(shell(), "document.body.textContent"));
+}
+
+// Tests that on reload of a POST request that was initiated by an opaque
+// origin, the HTTP `Origin` header is set properly.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       OriginHeaderOpaqueOnPostReload) {
+  GURL data_url("data:text/html,<html><body></body></html>");
+  ASSERT_TRUE(NavigateToURL(shell(), data_url));
+
+  GURL url = embedded_test_server()->GetURL("/echoheader?Origin");
+
+  // Do an initial POST navigation.
+  std::string script = JsReplace(
+      "var f = document.createElement('form');"
+      "f.method = 'POST';"
+      "f.action = $1;"
+      "document.body.appendChild(f);"
+      "f.submit();",
+      url);
+
+  {
+    TestNavigationObserver observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(shell(), script));
+    observer.Wait();
+  }
+
+  EXPECT_EQ("null", EvalJs(shell(), "document.body.textContent"));
+
+  // Reload and check that the Origin header is the same as on the original POST
+  // navigation.
+  {
+    TestNavigationObserver reload_observer(shell()->web_contents());
+    shell()->web_contents()->GetController().Reload(ReloadType::NORMAL,
+                                                    /*check_for_repost=*/false);
+    reload_observer.Wait();
+  }
+
+  EXPECT_EQ("null", EvalJs(shell(), "document.body.textContent"));
+}
+
+// Tests that a POST request from an opaque origin uses an HTTP `Origin` header
+// of "null".
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       OriginHeaderOnPostFromOpaque) {
+  GURL data_url("data:text/html,<html><body></body></html>");
+  ASSERT_TRUE(NavigateToURL(shell(), data_url));
+
+  GURL url = embedded_test_server()->GetURL("a.com", "/echoheader?Origin");
+
+  std::string script = JsReplace(
+      "var f = document.createElement('form');"
+      "f.method = 'POST';"
+      "f.action = $1;"
+      "document.body.appendChild(f);"
+      "f.submit();",
+      url);
+
+  {
+    TestNavigationObserver observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(shell(), script));
+    observer.Wait();
+  }
+
+  EXPECT_EQ("null", EvalJs(shell(), "document.body.textContent"));
+}
+
+// Tests that on a "client-initiated" reload (e.g., `location.reload()`) of a
+// POST navigation, the HTTP `Origin` header is set properly to the current
+// document's origin.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       OriginHeaderOnPostReloadClientInitiated) {
+  GURL start_url = embedded_test_server()->GetURL("a.com", "/title1.html");
+  ASSERT_TRUE(NavigateToURL(shell(), start_url));
+
+  GURL url = embedded_test_server()->GetURL("b.com", "/echoheader?Origin");
+
+  std::string script = JsReplace(
+      "var f = document.createElement('form');"
+      "f.method = 'POST';"
+      "f.action = $1;"
+      "document.body.appendChild(f);"
+      "f.submit();",
+      url);
+
+  {
+    TestNavigationObserver observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(shell(), script));
+    observer.Wait();
+  }
+
+  EXPECT_EQ(url::Origin::Create(start_url).Serialize(),
+            EvalJs(shell(), "document.body.textContent"));
+
+  // Do a client-initiated reload and check that the Origin header matches the
+  // document that initiated the reload, not `start_url`.
+  {
+    TestNavigationObserver reload_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(shell(), "location.reload()"));
+    reload_observer.Wait();
+  }
+
+  EXPECT_EQ(url::Origin::Create(url).Serialize(),
+            EvalJs(shell(), "document.body.textContent"));
+}
+
+// Tests that a POST navigation from about:blank has the correct Origin header.
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       OriginHeaderOnPostAboutBlank) {
+  GURL start_url = embedded_test_server()->GetURL("a.com", "/title1.html");
+  ASSERT_TRUE(NavigateToURL(shell(), start_url));
+
+  // Open about:blank popup from `start_url` so that it has `start_url`'s
+  // origin.
+  ShellAddedObserver shell_observer;
+  EXPECT_TRUE(ExecJs(shell(), "window.open('about:blank', 'popup')"));
+  Shell* popup_shell = shell_observer.GetShell();
+  EXPECT_TRUE(WaitForLoadStop(popup_shell->web_contents()));
+
+  GURL url = embedded_test_server()->GetURL("b.com", "/echoheader?Origin");
+  std::string script = JsReplace(
+      "var f = document.createElement('form');"
+      "f.method = 'POST';"
+      "f.action = $1;"
+      "document.body.appendChild(f);"
+      "f.submit();",
+      url);
+
+  TestNavigationObserver observer(popup_shell->web_contents());
+  EXPECT_TRUE(ExecJs(popup_shell->web_contents(), script));
+  observer.Wait();
+
+  EXPECT_EQ(url::Origin::Create(start_url).Serialize(),
+            EvalJs(popup_shell->web_contents(), "document.body.textContent"));
+}
+
+// Tests that a POST navigation from about:blank (with referrer policy of
+// `no-referrer`) has the correct Origin header of "null".
+IN_PROC_BROWSER_TEST_F(NavigationRequestBrowserTest,
+                       OriginHeaderOnPostAboutBlankNoReferrer) {
+  GURL start_url = embedded_test_server()->GetURL("a.com", "/title1.html");
+  ASSERT_TRUE(NavigateToURL(shell(), start_url));
+
+  // Open about:blank popup with no-referrer.
+  ShellAddedObserver shell_observer;
+  EXPECT_TRUE(ExecJs(shell(),
+                     "var w = window.open('about:blank', 'popup');"
+                     "var d = w.document;"
+                     "var m = d.createElement('meta');"
+                     "m.name = 'referrer';"
+                     "m.content = 'no-referrer';"
+                     "d.head.appendChild(m);"));
+  Shell* popup_shell = shell_observer.GetShell();
+  EXPECT_TRUE(WaitForLoadStop(popup_shell->web_contents()));
+
+  GURL url = embedded_test_server()->GetURL("a.com", "/echoheader?Origin");
+  std::string script = JsReplace(
+      "var f = document.createElement('form');"
+      "f.method = 'POST';"
+      "f.action = $1;"
+      "document.body.appendChild(f);"
+      "f.submit();",
+      url);
+
+  TestNavigationObserver observer(popup_shell->web_contents());
+  EXPECT_TRUE(ExecJs(popup_shell->web_contents(), script));
+  observer.Wait();
+
+  // Origin should be "null" because of the no-referrer policy.
+  EXPECT_EQ("null",
+            EvalJs(popup_shell->web_contents(), "document.body.textContent"));
 }
 
 }  // namespace content

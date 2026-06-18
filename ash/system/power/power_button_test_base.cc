@@ -1,10 +1,9 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/system/power/power_button_test_base.h"
 
-#include "ash/public/cpp/ash_switches.h"
 #include "ash/public/cpp/test/shell_test_api.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/session/test_session_controller_client.h"
@@ -24,6 +23,9 @@
 namespace ash {
 
 PowerButtonTestBase::PowerButtonTestBase() = default;
+PowerButtonTestBase::PowerButtonTestBase(
+    base::test::TaskEnvironment::TimeSource time)
+    : AshTestBase(time) {}
 
 PowerButtonTestBase::~PowerButtonTestBase() = default;
 
@@ -36,6 +38,9 @@ void PowerButtonTestBase::SetUp() {
 }
 
 void PowerButtonTestBase::TearDown() {
+  lock_state_test_api_.reset();
+  lock_state_controller_ = nullptr;
+
   AshTestBase::TearDown();
 }
 
@@ -71,6 +76,10 @@ void PowerButtonTestBase::SetTabletModeSwitchState(
   screenshot_controller_ = power_button_test_api_->GetScreenshotController();
 }
 
+void PowerButtonTestBase::LaunchArcPowerButtonEvent() {
+  power_button_controller_->OnArcPowerButtonMenuEvent();
+}
+
 void PowerButtonTestBase::PressPowerButton() {
   power_button_controller_->PowerButtonEventReceived(true,
                                                      tick_clock_.NowTicks());
@@ -93,19 +102,6 @@ void PowerButtonTestBase::GenerateMouseMoveEvent() {
   GetEventGenerator()->MoveMouseTo(10, 10);
 }
 
-void PowerButtonTestBase::Initialize(
-    PowerButtonController::ButtonType button_type,
-    LoginStatus status) {
-  power_button_test_api_->SetPowerButtonType(button_type);
-  if (status == LoginStatus::NOT_LOGGED_IN)
-    ClearLogin();
-  else
-    CreateUserSessions(1);
-
-  if (status == LoginStatus::GUEST)
-    SetCanLockScreen(false);
-}
-
 void PowerButtonTestBase::LockScreen() {
   lock_state_controller_->OnLockStateChanged(true);
   GetSessionControllerClient()->LockScreen();
@@ -122,7 +118,7 @@ void PowerButtonTestBase::EnableTabletMode(bool enable) {
 
 void PowerButtonTestBase::AdvanceClockToAvoidIgnoring() {
   tick_clock_.Advance(PowerButtonController::kIgnoreRepeatedButtonUpDelay +
-                      base::TimeDelta::FromMilliseconds(1));
+                      base::Milliseconds(1));
 }
 
 }  // namespace ash

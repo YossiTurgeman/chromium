@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,14 @@
 
 #include <stdint.h>
 
+#include "base/auto_reset.h"
 #include "build/build_config.h"
 
 class PrefRegistrySimple;
 
 namespace browser_shutdown {
 
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 
 // The type of restart to perform during shutdown; see ShutdownPostThreadsStop.
 enum class RestartMode {
@@ -39,7 +40,7 @@ enum class RestartMode {
   kRestartThisSession,
 };
 
-#endif  // !defined(OS_ANDROID)
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
@@ -54,7 +55,10 @@ enum class ShutdownType {
   kEndSession = 3,
   // Exit without onbeforeunload or in-progress download prompts.
   kSilentExit = 4,
-  kMaxValue = kSilentExit
+  // The browser process is exiting but not by a user action. These exit paths
+  // can happen with early exit paths where the browser main is not executed.
+  kOtherExit = 5,
+  kMaxValue = kOtherExit
 };
 
 void RegisterPrefs(PrefRegistrySimple* registry);
@@ -65,6 +69,8 @@ void OnShutdownStarting(ShutdownType type);
 
 // Returns true if OnShutdownStarting has been called to note that shutdown has
 // started.
+// TODO (crbug.com/40160014): Make this work in sync with
+// BrowserProcessImpl::IsShuttingDown.
 bool HasShutdownStarted();
 
 // Returns true if OnShutdownStarting has been called and unload handlers (e.g.,
@@ -75,24 +81,24 @@ bool ShouldIgnoreUnloadHandlers();
 // Get the current shutdown type.
 ShutdownType GetShutdownType();
 
-#if !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 // Performs the shutdown tasks that need to be done before
 // BrowserProcess and the various threads go away.
 //
-// Returns true if the session should be restarted.
-bool ShutdownPreThreadsStop();
+// Returns the type of restart to perform.
+RestartMode ShutdownPreThreadsStop();
 
-// Records the shutdown related prefs, and returns true if the browser should be
-// restarted on exit.
-bool RecordShutdownInfoPrefs();
+// Records the shutdown retrics.
+void RecordShutdownMetrics();
+
+// Records the shutdown related prefs, and returns the type of restart to
+// perform on exit.
+RestartMode RecordShutdownInfoPrefs();
 
 // Performs the remaining shutdown tasks after all threads but the
 // main thread have been stopped.  This includes deleting g_browser_process.
 void ShutdownPostThreadsStop(RestartMode restart_mode);
 #endif
-
-// Called at startup to create a histogram from our previous shutdown time.
-void ReadLastShutdownInfo();
 
 // There are various situations where the browser process should continue to
 // run after the last browser window has closed - the Mac always continues
@@ -114,6 +120,13 @@ void SetTryingToQuit(bool quitting);
 
 // General accessor.
 bool IsTryingToQuit();
+
+// Allows setting a fake shutdown type for testing purposes.
+base::AutoReset<ShutdownType> SetShutdownTypeForTesting(
+    ShutdownType shutdown_type);
+
+// Allows resetting the shutdown globals for testing purposes.
+void ResetShutdownGlobalsForTesting();
 
 }  // namespace browser_shutdown
 

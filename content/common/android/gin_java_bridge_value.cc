@@ -1,8 +1,11 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/common/android/gin_java_bridge_value.h"
+
+#include "base/containers/span.h"
+#include "base/pickle.h"
 
 namespace content {
 
@@ -54,13 +57,20 @@ std::unique_ptr<base::Value> GinJavaBridgeValue::CreateObjectIDValue(
 }
 
 // static
+std::unique_ptr<base::Value> GinJavaBridgeValue::CreateUInt32Value(
+    uint32_t in_value) {
+  GinJavaBridgeValue gin_value(TYPE_UINT32);
+  gin_value.pickle_.WriteUInt32(in_value);
+  return gin_value.SerializeToBinaryValue();
+}
+
+// static
 bool GinJavaBridgeValue::ContainsGinJavaBridgeValue(const base::Value* value) {
   if (!value->is_blob())
     return false;
   if (value->GetBlob().size() < sizeof(Header))
     return false;
-  base::Pickle pickle(reinterpret_cast<const char*>(value->GetBlob().data()),
-                      value->GetBlob().size());
+  base::Pickle pickle = base::Pickle::WithData(value->GetBlob());
   // Broken binary value: payload or header size is wrong
   if (!pickle.data() || pickle.size() - pickle.payload_size() != sizeof(Header))
     return false;
@@ -104,6 +114,15 @@ bool GinJavaBridgeValue::GetAsObjectID(int32_t* out_object_id) const {
   }
 }
 
+bool GinJavaBridgeValue::GetAsUInt32(uint32_t* out_value) const {
+  if (GetType() == TYPE_UINT32) {
+    base::PickleIterator iter(pickle_);
+    return iter.ReadUInt32(out_value);
+  } else {
+    return false;
+  }
+}
+
 GinJavaBridgeValue::GinJavaBridgeValue(Type type) :
     pickle_(sizeof(Header)) {
   Header* header = pickle_.headerT<Header>();
@@ -112,14 +131,12 @@ GinJavaBridgeValue::GinJavaBridgeValue(Type type) :
 }
 
 GinJavaBridgeValue::GinJavaBridgeValue(const base::Value* value)
-    : pickle_(reinterpret_cast<const char*>(value->GetBlob().data()),
-              value->GetBlob().size()) {
+    : pickle_(base::Pickle::WithData(value->GetBlob())) {
   DCHECK(ContainsGinJavaBridgeValue(value));
 }
 
 std::unique_ptr<base::Value> GinJavaBridgeValue::SerializeToBinaryValue() {
-  return base::Value::CreateWithCopiedBuffer(
-      reinterpret_cast<const char*>(pickle_.data()), pickle_.size());
+  return base::Value::ToUniquePtrValue(base::Value(pickle_.AsBytes()));
 }
 
 }  // namespace content

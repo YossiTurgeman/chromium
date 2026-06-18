@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,11 @@
 
 #include <mach/mach.h>
 
+#include <memory>
+#include <vector>
+
 #include "base/base_export.h"
 #include "base/profiler/module_cache.h"
-#include "base/profiler/native_unwinder_mac.h"
 #include "base/profiler/sampling_profiler_thread_token.h"
 #include "base/profiler/suspendable_thread_delegate.h"
 #include "base/threading/platform_thread.h"
@@ -17,7 +19,7 @@
 namespace base {
 
 // Platform- and thread-specific implementation in support of stack sampling on
-// Mac.
+// Mac (X86_64) and iOS (X86_64 and ARM64).
 class BASE_EXPORT SuspendableThreadDelegateMac
     : public SuspendableThreadDelegate {
  public:
@@ -50,10 +52,14 @@ class BASE_EXPORT SuspendableThreadDelegateMac
   PlatformThreadId GetThreadId() const override;
   uintptr_t GetStackBaseAddress() const override;
   bool CanCopyStack(uintptr_t stack_pointer) override;
-  std::vector<uintptr_t*> GetRegistersToRewrite(
-      RegisterContext* thread_context) override;
+  std::vector<uintptr_t> GetRegisters(RegisterContext* thread_context) override;
+  void SetRegisters(RegisterContext* thread_context,
+                    const std::vector<uintptr_t>& registers) override;
 
  private:
+  // Thread ID of thread being profiled.
+  const base::PlatformThreadId thread_id_;
+
   // Weak reference: Mach port for thread being profiled.
   const mach_port_t thread_port_;
 

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,7 +18,7 @@ using LifecycleUpdateReason = DocumentUpdateReason;
 class SVGUseElementTest : public PageTestBase {};
 
 TEST_F(SVGUseElementTest, InstanceInvalidatedWhenNonAttachedTargetRemoved) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <style></style>
     <svg>
         <unknown>
@@ -29,26 +29,27 @@ TEST_F(SVGUseElementTest, InstanceInvalidatedWhenNonAttachedTargetRemoved) {
         </unknown>
     </svg>
   )HTML");
-  GetDocument().View()->UpdateAllLifecyclePhases(LifecycleUpdateReason::kTest);
+  UpdateAllLifecyclePhasesForTest();
 
   // Remove #target.
-  ASSERT_TRUE(GetDocument().getElementById("target"));
-  GetDocument().getElementById("target")->remove();
+  ASSERT_TRUE(GetDocument().getElementById(AtomicString("target")));
+  GetDocument().getElementById(AtomicString("target"))->remove();
 
   // This should cause a rebuild of the <use> shadow tree.
-  GetDocument().View()->UpdateAllLifecyclePhases(LifecycleUpdateReason::kTest);
+  UpdateAllLifecyclePhasesForTest();
 
   // There should be no instance for #target anymore, since that element was
   // removed.
-  auto* use = To<SVGUseElement>(GetDocument().getElementById("use"));
+  auto* use =
+      To<SVGUseElement>(GetDocument().getElementById(AtomicString("use")));
   ASSERT_TRUE(use);
   ASSERT_TRUE(use->GetShadowRoot());
-  ASSERT_FALSE(use->GetShadowRoot()->getElementById("target"));
+  ASSERT_FALSE(use->GetShadowRoot()->getElementById(AtomicString("target")));
 }
 
 TEST_F(SVGUseElementTest,
        InstanceInvalidatedWhenNonAttachedTargetMovedInDocument) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <svg>
       <use id="use" href="#path"/>
       <textPath id="path">
@@ -58,26 +59,27 @@ TEST_F(SVGUseElementTest,
       </textPath>
     </svg>
   )HTML");
-  GetDocument().View()->UpdateAllLifecyclePhases(LifecycleUpdateReason::kTest);
+  UpdateAllLifecyclePhasesForTest();
 
   // Move #target in the document (leaving it still "connected").
-  Element* target = GetDocument().getElementById("target");
+  Element* target = GetDocument().getElementById(AtomicString("target"));
   ASSERT_TRUE(target);
   GetDocument().body()->appendChild(target);
 
   // This should cause a rebuild of the <use> shadow tree.
-  GetDocument().View()->UpdateAllLifecyclePhases(LifecycleUpdateReason::kTest);
+  UpdateAllLifecyclePhasesForTest();
 
   // There should be no instance for #target anymore, since that element was
   // removed.
-  auto* use = To<SVGUseElement>(GetDocument().getElementById("use"));
+  auto* use =
+      To<SVGUseElement>(GetDocument().getElementById(AtomicString("use")));
   ASSERT_TRUE(use);
   ASSERT_TRUE(use->GetShadowRoot());
-  ASSERT_FALSE(use->GetShadowRoot()->getElementById("target"));
+  ASSERT_FALSE(use->GetShadowRoot()->getElementById(AtomicString("target")));
 }
 
 TEST_F(SVGUseElementTest, NullInstanceRootWhenNotConnectedToDocument) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <svg>
       <defs>
         <rect id="r" width="100" height="100" fill="blue"/>
@@ -85,9 +87,10 @@ TEST_F(SVGUseElementTest, NullInstanceRootWhenNotConnectedToDocument) {
       <use id="target" href="#r"/>
     </svg>
   )HTML");
-  GetDocument().View()->UpdateAllLifecyclePhases(LifecycleUpdateReason::kTest);
+  UpdateAllLifecyclePhasesForTest();
 
-  auto* target = To<SVGUseElement>(GetDocument().getElementById("target"));
+  auto* target =
+      To<SVGUseElement>(GetDocument().getElementById(AtomicString("target")));
   ASSERT_TRUE(target);
   ASSERT_TRUE(target->InstanceRoot());
 
@@ -97,7 +100,7 @@ TEST_F(SVGUseElementTest, NullInstanceRootWhenNotConnectedToDocument) {
 }
 
 TEST_F(SVGUseElementTest, NullInstanceRootWhenConnectedToInactiveDocument) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <svg>
       <defs>
         <rect id="r" width="100" height="100" fill="blue"/>
@@ -105,9 +108,10 @@ TEST_F(SVGUseElementTest, NullInstanceRootWhenConnectedToInactiveDocument) {
       <use id="target" href="#r"/>
     </svg>
   )HTML");
-  GetDocument().View()->UpdateAllLifecyclePhases(LifecycleUpdateReason::kTest);
+  UpdateAllLifecyclePhasesForTest();
 
-  auto* target = To<SVGUseElement>(GetDocument().getElementById("target"));
+  auto* target =
+      To<SVGUseElement>(GetDocument().getElementById(AtomicString("target")));
   ASSERT_TRUE(target);
   ASSERT_TRUE(target->InstanceRoot());
 
@@ -119,21 +123,26 @@ TEST_F(SVGUseElementTest, NullInstanceRootWhenConnectedToInactiveDocument) {
 }
 
 TEST_F(SVGUseElementTest, NullInstanceRootWhenShadowTreePendingRebuild) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <svg>
       <defs>
-        <rect id="r" width="100" height="100" fill="blue"/>
+        <g id="g"/>
       </defs>
-      <use id="target" href="#r"/>
+      <use id="target" href="#g"/>
     </svg>
   )HTML");
-  GetDocument().View()->UpdateAllLifecyclePhases(LifecycleUpdateReason::kTest);
+  UpdateAllLifecyclePhasesForTest();
 
-  auto* target = To<SVGUseElement>(GetDocument().getElementById("target"));
+  auto* target =
+      To<SVGUseElement>(GetDocument().getElementById(AtomicString("target")));
   ASSERT_TRUE(target);
   ASSERT_TRUE(target->InstanceRoot());
 
-  GetDocument().getElementById("r")->setAttribute(html_names::kWidthAttr, "50");
+  GetDocument()
+      .getElementById(AtomicString("g"))
+      ->appendChild(GetDocument().createElementNS(
+          AtomicString("http://www.w3.org/2000/svg"), AtomicString("text"),
+          ASSERT_NO_EXCEPTION));
 
   ASSERT_FALSE(target->InstanceRoot());
 }

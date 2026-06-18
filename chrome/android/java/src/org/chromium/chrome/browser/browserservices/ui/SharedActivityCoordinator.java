@@ -1,16 +1,15 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.browserservices.ui;
 
-import static android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
-
-import androidx.annotation.Nullable;
 import androidx.browser.trusted.TrustedWebActivityDisplayMode;
 import androidx.browser.trusted.TrustedWebActivityDisplayMode.ImmersiveMode;
 
-import org.chromium.chrome.browser.browserservices.BrowserServicesIntentDataProvider;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider;
 import org.chromium.chrome.browser.browserservices.trustedwebactivityui.controller.TrustedWebActivityBrowserControlsVisibilityManager;
 import org.chromium.chrome.browser.browserservices.ui.controller.CurrentPageVerifier;
 import org.chromium.chrome.browser.browserservices.ui.controller.CurrentPageVerifier.VerificationStatus;
@@ -19,58 +18,54 @@ import org.chromium.chrome.browser.customtabs.CustomTabOrientationController;
 import org.chromium.chrome.browser.customtabs.CustomTabStatusBarColorProvider;
 import org.chromium.chrome.browser.customtabs.content.CustomTabActivityNavigationController;
 import org.chromium.chrome.browser.customtabs.features.ImmersiveModeController;
-import org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbarColorController;
-import org.chromium.chrome.browser.dependency_injection.ActivityScope;
+import org.chromium.chrome.browser.customtabs.features.toolbar.BrowserServicesThemeColorProvider;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
 import org.chromium.chrome.browser.lifecycle.InflationObserver;
-import org.chromium.chrome.browser.webapps.WebDisplayMode;
-import org.chromium.chrome.browser.webapps.WebappExtras;
 
-import javax.inject.Inject;
+import java.util.function.Supplier;
 
-import dagger.Lazy;
-
-/**
- * Coordinator for shared functionality between Trusted Web Activities and webapps.
- */
-@ActivityScope
+/** Coordinator for shared functionality between Trusted Web Activities and webapps. */
+@NullMarked
 public class SharedActivityCoordinator implements InflationObserver {
     private final CurrentPageVerifier mCurrentPageVerifier;
-    private final BrowserServicesIntentDataProvider mIntentDataProvider;
-    private TrustedWebActivityBrowserControlsVisibilityManager mBrowserControlsVisibilityManager;
-    private final CustomTabToolbarColorController mToolbarColorController;
+    private final TrustedWebActivityBrowserControlsVisibilityManager
+            mBrowserControlsVisibilityManager;
     private final CustomTabStatusBarColorProvider mStatusBarColorProvider;
-    private final Lazy<ImmersiveModeController> mImmersiveModeController;
+    private final Supplier<ImmersiveModeController> mImmersiveModeController;
     private final CustomTabOrientationController mCustomTabOrientationController;
+    private final BrowserServicesThemeColorProvider mBrowserServicesThemeColorProvider;
 
-    @Nullable
-    private final ImmersiveMode mImmersiveDisplayMode;
+    private final @Nullable ImmersiveMode mImmersiveDisplayMode;
 
     private boolean mUseAppModeUi = true;
 
-    @Inject
-    public SharedActivityCoordinator(CurrentPageVerifier currentPageVerifier, Verifier verifier,
-            CustomTabActivityNavigationController navigationController,
-            BrowserServicesIntentDataProvider intentDataProvider,
-            CustomTabToolbarColorController toolbarColorController,
-            CustomTabStatusBarColorProvider statusBarColorProvider,
-            ActivityLifecycleDispatcher lifecycleDispatcher,
+    public SharedActivityCoordinator(
+            CurrentPageVerifier currentPageVerifier,
             TrustedWebActivityBrowserControlsVisibilityManager browserControlsVisibilityManager,
-            Lazy<ImmersiveModeController> immersiveModeController,
-            CustomTabOrientationController customTabOrientationController) {
+            CustomTabStatusBarColorProvider statusBarColorProvider,
+            Supplier<ImmersiveModeController> immersiveModeController,
+            BrowserServicesIntentDataProvider intentDataProvider,
+            CustomTabOrientationController customTabOrientationController,
+            CustomTabActivityNavigationController customTabActivityNavigationController,
+            Verifier verifier,
+            BrowserServicesThemeColorProvider browserServicesThemeColorProvider,
+            ActivityLifecycleDispatcher lifecycleDispatcher) {
         mCurrentPageVerifier = currentPageVerifier;
-        mIntentDataProvider = intentDataProvider;
         mBrowserControlsVisibilityManager = browserControlsVisibilityManager;
-        mToolbarColorController = toolbarColorController;
         mStatusBarColorProvider = statusBarColorProvider;
         mImmersiveModeController = immersiveModeController;
         mImmersiveDisplayMode = computeImmersiveMode(intentDataProvider);
         mCustomTabOrientationController = customTabOrientationController;
+        mBrowserServicesThemeColorProvider = browserServicesThemeColorProvider;
 
-        navigationController.setLandingPageOnCloseCriterion(verifier::wasPreviouslyVerified);
+        customTabActivityNavigationController.setLandingPageOnCloseCriterion(
+                verifier::wasPreviouslyVerified);
 
-        currentPageVerifier.addVerificationObserver(this::onVerificationUpdate);
+        mCurrentPageVerifier.addVerificationObserver(this::onVerificationUpdate);
         lifecycleDispatcher.register(this);
+        if (mCurrentPageVerifier.getState() == null) {
+            updateImmersiveMode(true); // Set immersive mode ASAP, before layout inflation.
+        }
     }
 
     public boolean shouldUseAppModeUi() {
@@ -78,11 +73,7 @@ public class SharedActivityCoordinator implements InflationObserver {
     }
 
     @Override
-    public void onPreInflationStartup() {
-        if (mCurrentPageVerifier.getState() == null) {
-            updateImmersiveMode(true); // Set immersive mode ASAP, before layout inflation.
-        }
-    }
+    public void onPreInflationStartup() {}
 
     @Override
     public void onPostInflationStartup() {
@@ -106,8 +97,8 @@ public class SharedActivityCoordinator implements InflationObserver {
 
     private void updateUi(boolean useAppModeUi) {
         updateImmersiveMode(useAppModeUi);
+        mBrowserServicesThemeColorProvider.setUseTabTheme(useAppModeUi);
         mBrowserControlsVisibilityManager.updateIsInAppMode(useAppModeUi);
-        mToolbarColorController.setUseTabThemeColor(useAppModeUi);
         mStatusBarColorProvider.setUseTabThemeColor(useAppModeUi);
         mCustomTabOrientationController.setCanControlOrientation(useAppModeUi);
     }
@@ -117,22 +108,19 @@ public class SharedActivityCoordinator implements InflationObserver {
             return;
         }
         if (inAppMode) {
-            mImmersiveModeController.get().enterImmersiveMode(
-                    mImmersiveDisplayMode.layoutInDisplayCutoutMode(),
-                    mImmersiveDisplayMode.isSticky());
+            mImmersiveModeController
+                    .get()
+                    .enterImmersiveMode(
+                            mImmersiveDisplayMode.layoutInDisplayCutoutMode(),
+                            mImmersiveDisplayMode.isSticky());
         } else {
             mImmersiveModeController.get().exitImmersiveMode();
         }
     }
 
-    private ImmersiveMode computeImmersiveMode(
+    private @Nullable ImmersiveMode computeImmersiveMode(
             BrowserServicesIntentDataProvider intentDataProvider) {
-        WebappExtras webappExtras = intentDataProvider.getWebappExtras();
-        if (webappExtras != null && webappExtras.displayMode == WebDisplayMode.FULLSCREEN) {
-            return new ImmersiveMode(false /* sticky */, LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT);
-        }
-
-        TrustedWebActivityDisplayMode displayMode = intentDataProvider.getTwaDisplayMode();
+        TrustedWebActivityDisplayMode displayMode = intentDataProvider.getProvidedTwaDisplayMode();
         return (displayMode instanceof ImmersiveMode) ? (ImmersiveMode) displayMode : null;
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,27 +6,28 @@
 #define CHROME_TEST_CHROMEDRIVER_SERVER_HTTP_HANDLER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/compiler_specific.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_forward.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/threading/thread_checker.h"
 #include "chrome/test/chromedriver/command.h"
 #include "chrome/test/chromedriver/commands.h"
+#include "chrome/test/chromedriver/connection_session_map.h"
 #include "chrome/test/chromedriver/element_commands.h"
 #include "chrome/test/chromedriver/net/sync_websocket_factory.h"
 #include "chrome/test/chromedriver/session_commands.h"
 #include "chrome/test/chromedriver/session_connection_map.h"
 #include "chrome/test/chromedriver/session_thread_map.h"
 #include "chrome/test/chromedriver/window_commands.h"
+#include "net/http/http_status_code.h"
 
 namespace base {
-class DictionaryValue;
 class SingleThreadTaskRunner;
 }
 
@@ -45,6 +46,7 @@ class URLRequestContextGetter;
 class WrapperURLLoaderFactory;
 
 class HttpServer;
+class HttpServerInterface;
 
 enum HttpMethod {
   kGet,
@@ -79,10 +81,22 @@ class HttpHandler {
               const scoped_refptr<base::SingleThreadTaskRunner> cmd_task_runner,
               const std::string& url_base,
               int adb_port);
+
+  HttpHandler(const HttpHandler&) = delete;
+  HttpHandler& operator=(const HttpHandler&) = delete;
+
   ~HttpHandler();
 
   void Handle(const net::HttpServerRequestInfo& request,
               const HttpResponseSenderFunc& send_response_func);
+
+  void OnWebSocketMessage(HttpServerInterface* http_server,
+                          int connection_id,
+                          const std::string& data);
+
+  void OnWebSocketRequest(HttpServerInterface* http_server,
+                          int connection_id,
+                          const net::HttpServerRequestInfo& info);
 
   base::WeakPtr<HttpHandler> WeakPtr();
 
@@ -96,6 +110,8 @@ class HttpHandler {
   typedef std::vector<CommandMapping> CommandMap;
 
   friend class HttpServer;
+  friend class WebSocketMessageTest;
+  friend class WebSocketRequestTest;
 
   Command WrapToCommand(const char* name,
                         const SessionCommand& session_command,
@@ -127,13 +143,69 @@ class HttpHandler {
       std::unique_ptr<base::Value> value,
       const std::string& session_id);
 
-  void OnWebSocketRequest(int connection_id,
-                          const net::HttpServerRequestInfo& info);
+  void OnWebSocketAttachToSessionRequest(
+      HttpServerInterface* http_server,
+      int connection_id,
+      const std::string& session_id,
+      const net::HttpServerRequestInfo& info);
 
-  void OnClose(int connection_id);
+  void OnWebSocketUnboundConnectionRequest(
+      HttpServerInterface* http_server,
+      int connection_id,
+      const net::HttpServerRequestInfo& info);
+
+  void SendResponseOverWebSocket(HttpServerInterface* http_server,
+                                 int connection_id,
+                                 const std::optional<base::Value>& maybe_id,
+                                 const Status& status,
+                                 std::unique_ptr<base::Value> result,
+                                 const std::string& session_id,
+                                 bool w3c);
+
+  void CloseConnectionOnCommandThread(HttpServerInterface* http_server,
+                                      int connection_id);
+
+  void SendForwardedResponseOnCommandThread(HttpServerInterface* http_server,
+                                            int connection_id,
+                                            std::string message);
+
+  void OnWebSocketResponseOnCmdThread(HttpServerInterface* http_server,
+                                      int connection_id,
+                                      const std::string& data);
+
+  void OnWebSocketResponseOnSessionThread(HttpServerInterface* http_server,
+                                          int connection_id,
+                                          const std::string& data);
+  Command WrapCreateNewSessionCommand(Command command);
+  void OnNewSessionCreated(const CommandCallback& next_callback,
+                           const Status& status,
+                           std::unique_ptr<base::Value> result,
+                           const std::string& session_id,
+                           bool w3c);
+  void OnSessionTerminated(std::string session_id);
+  void OnNewBidiSessionOnCmdThread(HttpServerInterface* http_server,
+                                   int connection_id,
+                                   const std::optional<base::Value>& maybe_id,
+                                   const Status& status,
+                                   std::unique_ptr<base::Value> result,
+                                   const std::string& session_id,
+                                   bool w3c);
+
+  void OnClose(HttpServerInterface* http_server, int connection_id);
+
+  void SendWebSocketRejectResponse(
+      base::RepeatingCallback<void(int,
+                                   const net::HttpServerResponseInfo&,
+                                   const net::NetworkTrafficAnnotationTag&)>
+          send_http_response,
+      int connection_id,
+      net::HttpStatusCode code,
+      const std::string& msg);
 
   base::ThreadChecker thread_checker_;
   base::RepeatingClosure quit_func_;
+  scoped_refptr<base::SingleThreadTaskRunner> io_task_runner_;
+  scoped_refptr<base::SingleThreadTaskRunner> cmd_task_runner_;
   std::string url_base_;
   bool received_shutdown_;
   scoped_refptr<URLRequestContextGetter> context_getter_;
@@ -143,13 +215,15 @@ class HttpHandler {
   SyncWebSocketFactory socket_factory_;
   SessionThreadMap session_thread_map_;
   SessionConnectionMap session_connection_map_;
+  ConnectionSessionMap connection_session_map_;
   std::unique_ptr<CommandMap> command_map_;
   std::unique_ptr<Adb> adb_;
   std::unique_ptr<DeviceManager> device_manager_;
+  std::map<std::string, Command> static_bidi_command_map_;
+  std::map<std::string, Command> session_bidi_command_map_;
+  Command forward_session_command_;
 
   base::WeakPtrFactory<HttpHandler> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(HttpHandler);
 };
 
 namespace internal {
@@ -160,9 +234,15 @@ bool MatchesCommand(const std::string& method,
                     const std::string& path,
                     const CommandMapping& command,
                     std::string* session_id,
-                    base::DictionaryValue* out_params);
+                    base::DictValue* out_params);
 
 bool IsNewSession(const CommandMapping& command);
+
+Status ParseBidiCommand(const std::string& data, base::DictValue& parsed);
+
+base::DictValue CreateBidiErrorResponse(
+    Status status,
+    std::optional<base::Value> maybe_id = std::nullopt);
 
 }  // namespace internal
 

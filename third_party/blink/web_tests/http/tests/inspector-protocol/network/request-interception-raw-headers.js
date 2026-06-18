@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   var {page, session, dp} = await testRunner.startBlank(
       `Tests that raw response headers are correctly reported in case of interception.`);
 
@@ -16,13 +16,7 @@
     document.body.appendChild(iframe);
   `);
 
-  await dp.Network.onResponseReceived(event => {
-    const response = event.params.response;
-    const haveRequestHeadersText = response.requestHeadersText;
-    const splitRawHeaders = response.requestHeadersText.split('\r\n');
-    const connectionHeaderPresent = splitRawHeaders.filter(header => header.includes('Connection'));
-
-    testRunner.log(`Response.requestHeadersText present: ${!!haveRequestHeadersText}`);
-    testRunner.log(`Connection raw header present: ${!!connectionHeaderPresent.length}`);
+  await dp.Network.onRequestWillBeSentExtraInfo(event => {
+    testRunner.log(`Connection raw header present: ${!!event.params.headers['Connection'].length}`);
   });
 })

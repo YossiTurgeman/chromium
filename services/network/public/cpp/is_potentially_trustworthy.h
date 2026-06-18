@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "base/component_export.h"
-#include "base/macros.h"
 #include "base/no_destructor.h"
 #include "base/synchronization/lock.h"
 #include "base/thread_annotations.h"
@@ -27,14 +26,14 @@ namespace network {
 // This function is safe to be called from any thread.
 //
 // See also blink::SecurityOrigin::isPotentiallyTrustworthy.
-COMPONENT_EXPORT(NETWORK_CPP)
+COMPONENT_EXPORT(NETWORK_CPP_IS_POTENTIALLY_TRUSTWORTHY)
 bool IsOriginPotentiallyTrustworthy(const url::Origin& origin);
 
 // Returns whether a URL is potentially trustworthy according to
 // https://www.w3.org/TR/powerful-features/#is-url-trustworthy.
 //
 // This function is safe to be called from any thread.
-COMPONENT_EXPORT(NETWORK_CPP)
+COMPONENT_EXPORT(NETWORK_CPP_IS_POTENTIALLY_TRUSTWORTHY)
 bool IsUrlPotentiallyTrustworthy(const GURL& url);
 
 // Helper class for maintaining an allowlist of origins and hostname patterns
@@ -60,9 +59,13 @@ bool IsUrlPotentiallyTrustworthy(const GURL& url);
 // this class handles marking origins as "configured as a trustworthy origin".
 //
 // Note: all methods of this class are thread-safe.
-class COMPONENT_EXPORT(NETWORK_CPP) SecureOriginAllowlist {
+class COMPONENT_EXPORT(NETWORK_CPP_IS_POTENTIALLY_TRUSTWORTHY)
+    SecureOriginAllowlist {
  public:
   static SecureOriginAllowlist& GetInstance();
+
+  SecureOriginAllowlist(const SecureOriginAllowlist&) = delete;
+  SecureOriginAllowlist& operator=(const SecureOriginAllowlist&) = delete;
 
   // Returns true if |origin| has a match in the secure origin allowlist.
   bool IsOriginAllowlisted(const url::Origin& origin);
@@ -111,8 +114,6 @@ class COMPONENT_EXPORT(NETWORK_CPP) SecureOriginAllowlist {
   bool has_cmdline_been_parsed_ GUARDED_BY(lock_) = false;
 
   std::vector<std::string> auxiliary_allowlist_ GUARDED_BY(lock_);
-
-  DISALLOW_COPY_AND_ASSIGN(SecureOriginAllowlist);
 };
 
 }  // namespace network

@@ -1,8 +1,5 @@
 mfoltz@chromium.org
-mlamouri@chromium.org
+muyaoxu@google.com
 
-per-file *.mojom=set noparent
-per-file *.mojom=file://ipc/SECURITY_OWNERS
+file://media/OWNERS  #{LAST_RESORT_SUGGESTION}
 
-# TEAM: media-dev@chromium.org
-# COMPONENT: Blink>PresentationAPI

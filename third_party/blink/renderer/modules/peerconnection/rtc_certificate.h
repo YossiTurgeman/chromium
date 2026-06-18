@@ -31,12 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_PEERCONNECTION_RTC_CERTIFICATE_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_PEERCONNECTION_RTC_CERTIFICATE_H_
 
-#include <memory>
-
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_dtls_fingerprint.h"
 #include "third_party/blink/renderer/core/dom/dom_time_stamp.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -49,9 +48,9 @@ class MODULES_EXPORT RTCCertificate final : public ScriptWrappable {
 
  public:
   // Takes ownership of the certificate.
-  RTCCertificate(rtc::scoped_refptr<rtc::RTCCertificate>);
+  RTCCertificate(webrtc::scoped_refptr<webrtc::RTCCertificate>);
 
-  const rtc::scoped_refptr<rtc::RTCCertificate>& Certificate() const {
+  const webrtc::scoped_refptr<webrtc::RTCCertificate>& Certificate() const {
     return certificate_;
   }
 
@@ -60,7 +59,7 @@ class MODULES_EXPORT RTCCertificate final : public ScriptWrappable {
   HeapVector<Member<RTCDtlsFingerprint>> getFingerprints();
 
  private:
-  rtc::scoped_refptr<rtc::RTCCertificate> certificate_;
+  webrtc::scoped_refptr<webrtc::RTCCertificate> certificate_;
 };
 
 }  // namespace blink

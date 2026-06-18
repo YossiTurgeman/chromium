@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <cmath>
 #include <memory>
+#include <string_view>
+#include <vector>
 
-#include "base/bind.h"
 #include "base/bit_cast.h"
+#include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
+#include "build/build_config.h"
 #include "gpu/command_buffer/tests/gl_manager.h"
 #include "gpu/command_buffer/tests/gl_test_utils.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -37,11 +43,11 @@ class GLReadbackTest : public testing::Test {
     if (done) {
       std::move(cb).Run();
     } else {
-      base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
           FROM_HERE,
           base::BindOnce(&GLReadbackTest::WaitForQueryCallback,
                          base::Unretained(this), q, std::move(cb)),
-          base::TimeDelta::FromMilliseconds(3));
+          base::Milliseconds(3));
     }
   }
 
@@ -74,14 +80,18 @@ TEST_F(GLReadbackTest, ReadPixelsWithPBOAndQuery) {
   WaitForQuery(q);
 
   // TODO(hubbe): Check that glMapBufferCHROMIUM does not block here.
-  unsigned char *data = static_cast<unsigned char *>(
-      glMapBufferCHROMIUM(
-          GL_PIXEL_PACK_TRANSFER_BUFFER_CHROMIUM,
-          GL_READ_ONLY));
+  const unsigned char* data =
+      static_cast<const unsigned char*>(glMapBufferCHROMIUM(
+          GL_PIXEL_PACK_TRANSFER_BUFFER_CHROMIUM, GL_READ_ONLY));
   EXPECT_TRUE(data);
-  EXPECT_EQ(data[0], 0);   // red
-  EXPECT_EQ(data[1], 0);   // green
-  EXPECT_EQ(data[2], 255); // blue
+  // SAFETY: The mapped read-only PBO is guaranteed to be large enough to
+  // contain the mapped pixels, meaning it holds at least `kWidth * kHeight *
+  // kBytesPerPixel` bytes.
+  auto data_span = UNSAFE_BUFFERS(
+      base::span(data, static_cast<size_t>(kWidth * kHeight * kBytesPerPixel)));
+  EXPECT_EQ(data_span[0], 0);    // red
+  EXPECT_EQ(data_span[1], 0);    // green
+  EXPECT_EQ(data_span[2], 255);  // blue
   glUnmapBufferCHROMIUM(GL_PIXEL_PACK_TRANSFER_BUFFER_CHROMIUM);
   glBindBuffer(GL_PIXEL_PACK_TRANSFER_BUFFER_CHROMIUM, 0);
   glDeleteBuffers(1, &b);
@@ -97,7 +107,7 @@ static float HalfToFloat32(uint16_t value) {
   if (e == 0) {
     if (m == 0) {
       uint32_t result = s << 31;
-      return bit_cast<float>(result);
+      return base::bit_cast<float>(result);
     } else {
       while (!(m & 0x00000400)) {
         m <<= 1;
@@ -110,10 +120,10 @@ static float HalfToFloat32(uint16_t value) {
   } else if (e == 31) {
     if (m == 0) {
       uint32_t result = (s << 31) | 0x7f800000;
-      return bit_cast<float>(result);
+      return base::bit_cast<float>(result);
     } else {
       uint32_t result = (s << 31) | 0x7f800000 | (m << 13);
-      return bit_cast<float>(result);
+      return base::bit_cast<float>(result);
     }
   }
 
@@ -121,7 +131,7 @@ static float HalfToFloat32(uint16_t value) {
   m = m << 13;
 
   uint32_t result = (s << 31) | (e << 23) | m;
-  return bit_cast<float>(result);
+  return base::bit_cast<float>(result);
 }
 
 static GLuint CompileShader(GLenum type, const char *data) {
@@ -145,14 +155,14 @@ static GLuint CompileShader(GLenum type, const char *data) {
 // backend. crbug.com/607283.
 // TODO(zmo): This test also fails on some android devices when the readback
 // type is HALF_FLOAT_OES. Likely it's due to a driver bug. crbug.com/607936.
-#if defined(OS_WIN) || defined(OS_ANDROID)
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
 #define MAYBE_ReadPixelsFloat DISABLED_ReadPixelsFloat
 #else
 #define MAYBE_ReadPixelsFloat ReadPixelsFloat
 #endif
 TEST_F(GLReadbackTest, MAYBE_ReadPixelsFloat) {
   const GLsizei kTextureSize = 4;
-  const GLfloat kDrawColor[4] = { -10.9f, 0.5f, 10.5f, 100.12f };
+  const std::array<GLfloat, 4> kDrawColor = {-10.9f, 0.5f, 10.5f, 100.12f};
   const GLfloat kEpsilon = 0.01f;
 
   struct TestFormat {
@@ -160,23 +170,18 @@ TEST_F(GLReadbackTest, MAYBE_ReadPixelsFloat) {
     GLint type;
     uint32_t comp_count;
   };
-  TestFormat test_formats[4];
-  size_t test_count = 0;
-  const char *extensions = reinterpret_cast<const char*>(
-      glGetString(GL_EXTENSIONS));
-  if (strstr(extensions, "GL_OES_texture_half_float") != nullptr) {
-    TestFormat rgb16f = {GL_RGB, GL_HALF_FLOAT_OES, 3};
-    test_formats[test_count++] = rgb16f;
-
-    TestFormat rgba16f = {GL_RGBA, GL_HALF_FLOAT_OES, 4};
-    test_formats[test_count++] = rgba16f;
+  std::vector<TestFormat> test_formats;
+  test_formats.reserve(4);
+  const char* extensions_cstr =
+      reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+  std::string_view extensions(extensions_cstr ? extensions_cstr : "");
+  if (extensions.find("GL_OES_texture_half_float") != std::string_view::npos) {
+    test_formats.push_back({GL_RGB, GL_HALF_FLOAT_OES, 3});
+    test_formats.push_back({GL_RGBA, GL_HALF_FLOAT_OES, 4});
   }
-  if (strstr(extensions, "GL_OES_texture_float") != nullptr) {
-    TestFormat rgb32f = {GL_RGB, GL_FLOAT, 3};
-    test_formats[test_count++] = rgb32f;
-
-    TestFormat rgba32f = {GL_RGBA, GL_FLOAT, 4};
-    test_formats[test_count++] = rgba32f;
+  if (extensions.find("GL_OES_texture_float") != std::string_view::npos) {
+    test_formats.push_back({GL_RGB, GL_FLOAT, 3});
+    test_formats.push_back({GL_RGBA, GL_FLOAT, 4});
   }
 
   const char *vs_source =
@@ -226,9 +231,8 @@ TEST_F(GLReadbackTest, MAYBE_ReadPixelsFloat) {
   GLuint vertex_buffer;
   glGenBuffers(1, &vertex_buffer);
   glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
-  glBufferData(
-      GL_ARRAY_BUFFER, sizeof(quad_vertices),
-      reinterpret_cast<void*>(quad_vertices), GL_STATIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), quad_vertices,
+               GL_STATIC_DRAW);
 
   GLint position_location = glGetAttribLocation(program, "a_position");
   glVertexAttribPointer(position_location, 2, GL_FLOAT, GL_FALSE,
@@ -236,17 +240,17 @@ TEST_F(GLReadbackTest, MAYBE_ReadPixelsFloat) {
   glEnableVertexAttribArray(position_location);
 
   glUseProgram(program);
-  glUniform4fv(glGetUniformLocation(program, "u_color"), 1, kDrawColor);
+  glUniform4fv(glGetUniformLocation(program, "u_color"), 1, kDrawColor.data());
 
   EXPECT_EQ(glGetError(), GLenum(GL_NO_ERROR));
 
-  for (size_t ii = 0; ii < test_count; ++ii) {
+  for (const auto& test_format : test_formats) {
     GLuint texture_id = 0;
     glGenTextures(1, &texture_id);
     glBindTexture(GL_TEXTURE_2D, texture_id);
-    glTexImage2D(GL_TEXTURE_2D, 0, test_formats[ii].format, kTextureSize,
-                 kTextureSize, 0, test_formats[ii].format,
-                 test_formats[ii].type, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, test_format.format, kTextureSize,
+                 kTextureSize, 0, test_format.format, test_format.type,
+                 nullptr);
 
     GLuint framebuffer = 0;
     glGenFramebuffers(1, &framebuffer);
@@ -268,7 +272,7 @@ TEST_F(GLReadbackTest, MAYBE_ReadPixelsFloat) {
       EXPECT_EQ(glGetError(), GLenum(GL_NO_ERROR));
 
       if ((read_format == GL_RGB || read_format == GL_RGBA) &&
-          read_type == test_formats[ii].type) {
+          read_type == test_format.type) {
         glClear(GL_COLOR_BUFFER_BIT);
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
@@ -284,34 +288,43 @@ TEST_F(GLReadbackTest, MAYBE_ReadPixelsFloat) {
 
         switch (read_type) {
           case GL_HALF_FLOAT_OES: {
-            std::unique_ptr<GLushort[]> buf(
-                new GLushort[kTextureSize * kTextureSize * read_comp_count]);
-            glReadPixels(
-                0, 0, kTextureSize, kTextureSize, read_format, read_type,
-                buf.get());
+            auto buf = base::HeapArray<GLushort>::Uninit(
+                kTextureSize * kTextureSize * read_comp_count);
+            glReadPixels(0, 0, kTextureSize, kTextureSize, read_format,
+                         read_type, buf.data());
             EXPECT_EQ(glGetError(), GLenum(GL_NO_ERROR));
+            base::span<const GLushort> buf_span = buf;
             for (uint32_t jj = 0; jj < kTextureSize * kTextureSize; ++jj) {
-              for (uint32_t kk = 0; kk < test_formats[ii].comp_count; ++kk) {
-                EXPECT_LE(
-                    std::abs(HalfToFloat32(buf[jj * read_comp_count + kk]) -
-                        kDrawColor[kk]),
-                    std::abs(kDrawColor[kk] * kEpsilon));
+              auto pixel =
+                  buf_span.subspan(jj * read_comp_count, read_comp_count);
+              // Only compare components that exist in both the texture and the
+              // read-back format.
+              for (uint32_t kk = 0;
+                   kk < std::min(test_format.comp_count, read_comp_count);
+                   ++kk) {
+                EXPECT_LE(std::abs(HalfToFloat32(pixel[kk]) - kDrawColor[kk]),
+                          std::abs(kDrawColor[kk] * kEpsilon));
               }
             }
             break;
           }
           case GL_FLOAT: {
-            std::unique_ptr<GLfloat[]> buf(
-                new GLfloat[kTextureSize * kTextureSize * read_comp_count]);
-            glReadPixels(
-                0, 0, kTextureSize, kTextureSize, read_format, read_type,
-                buf.get());
+            auto buf = base::HeapArray<GLfloat>::Uninit(
+                kTextureSize * kTextureSize * read_comp_count);
+            glReadPixels(0, 0, kTextureSize, kTextureSize, read_format,
+                         read_type, buf.data());
             EXPECT_EQ(glGetError(), GLenum(GL_NO_ERROR));
+            base::span<const GLfloat> buf_span = buf;
             for (uint32_t jj = 0; jj < kTextureSize * kTextureSize; ++jj) {
-              for (uint32_t kk = 0; kk < test_formats[ii].comp_count; ++kk) {
-                EXPECT_LE(
-                    std::abs(buf[jj * read_comp_count + kk] - kDrawColor[kk]),
-                    std::abs(kDrawColor[kk] * kEpsilon));
+              auto pixel =
+                  buf_span.subspan(jj * read_comp_count, read_comp_count);
+              // Only compare components that exist in both the texture and the
+              // read-back format.
+              for (uint32_t kk = 0;
+                   kk < std::min(test_format.comp_count, read_comp_count);
+                   ++kk) {
+                EXPECT_LE(std::abs(pixel[kk] - kDrawColor[kk]),
+                          std::abs(kDrawColor[kk] * kEpsilon));
               }
             }
             break;

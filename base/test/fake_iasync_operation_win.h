@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define BASE_TEST_FAKE_IASYNC_OPERATION_WIN_H_
 
 #include <wrl/client.h>
+#include <wrl/implements.h>
 
 #include "base/notreached.h"
 #include "base/win/winrt_foundation_helpers.h"
@@ -62,39 +63,37 @@ class FakeIAsyncOperation final
       ABI::Windows::Foundation::IAsyncOperationCompletedHandler<T>** handler)
       final {
     NOTREACHED();
-    return E_NOTIMPL;
   }
   IFACEMETHODIMP GetResults(internal::AsyncOperationAbi<T>* results) final {
     if (!is_complete_) {
       ADD_FAILURE() << "GetResults called on incomplete IAsyncOperation.";
       return E_PENDING;
     }
-    if (status_ != AsyncStatus::Completed)
+    if (status_ != AsyncStatus::Completed && !results_includes_failure_) {
       return E_UNEXPECTED;
+    }
     return base::win::internal::CopyTo(results_, results);
   }
 
   // ABI::Windows::Foundation::IAsyncInfo:
-  IFACEMETHODIMP get_Id(uint32_t* id) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  IFACEMETHODIMP get_Id(uint32_t* id) final { NOTREACHED(); }
   IFACEMETHODIMP get_Status(AsyncStatus* status) final {
     *status = status_;
     return S_OK;
   }
   IFACEMETHODIMP get_ErrorCode(HRESULT* error_code) final {
+    EXPECT_FALSE(results_includes_failure_)
+        << "get_ErrorCode called on IAsyncOperation whose failure is expected "
+           "to be expressed through the results instead. If a case arises "
+           "where this is actually intended this check can be removed, but is "
+           "most likely an indication of incorrectly assuming the error_code "
+           "can be used in place of get_Status or GetResults for this kind of "
+           "IAsyncOperation.";
     *error_code = error_code_;
     return S_OK;
   }
-  IFACEMETHODIMP Cancel() final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP Close() final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  IFACEMETHODIMP Cancel() final { NOTREACHED(); }
+  IFACEMETHODIMP Close() final { NOTREACHED(); }
 
   // Completes the operation with |error_code|.
   //
@@ -103,6 +102,22 @@ class FakeIAsyncOperation final
   // (if defined) will be run.
   void CompleteWithError(HRESULT error_code) {
     error_code_ = error_code;
+    status_ = AsyncStatus::Error;
+    InvokeCompletedHandler();
+  }
+
+  // Completes the operation with |results|, but with an AsyncStatus of Error.
+  // This is an uncommon combination only appropriate when |results| includes
+  // the failure information.
+  //
+  // The GetResults API will be set to return |results| and the get_ErrorCode
+  // API will be set to return S_OK, but the get_Status API will be set to
+  // return AsyncStatus::Error. Then the CompletedHandler (if defined) will be
+  // run.
+  void CompleteWithErrorResult(internal::AsyncOperationStorage<T> results) {
+    error_code_ = S_OK;
+    results_ = std::move(results);
+    results_includes_failure_ = true;
     status_ = AsyncStatus::Error;
     InvokeCompletedHandler();
   }
@@ -125,8 +140,9 @@ class FakeIAsyncOperation final
         << "Attempted to invoke completion on an already "
            "completed IAsyncOperation.";
     is_complete_ = true;
-    if (handler_)
+    if (handler_) {
       handler_->Invoke(this, status_);
+    }
   }
 
   HRESULT error_code_ = S_OK;
@@ -135,6 +151,7 @@ class FakeIAsyncOperation final
       handler_;
   bool is_complete_ = false;
   internal::AsyncOperationOptionalStorage<T> results_;
+  bool results_includes_failure_ = false;
   AsyncStatus status_ = AsyncStatus::Started;
 };
 

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,19 +6,27 @@
 #define CHROME_BROWSER_NEARBY_SHARING_LOCAL_DEVICE_DATA_NEARBY_SHARE_LOCAL_DEVICE_DATA_MANAGER_IMPL_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/optional.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ref.h"
 #include "chrome/browser/nearby_sharing/local_device_data/nearby_share_local_device_data_manager.h"
-#include "chrome/browser/nearby_sharing/proto/device_rpc.pb.h"
-#include "chrome/browser/nearby_sharing/proto/rpc_resources.pb.h"
+#include "chromeos/ash/services/nearby/public/mojom/nearby_share_settings.mojom.h"
+#include "third_party/nearby/sharing/proto/device_rpc.pb.h"
+#include "third_party/nearby/sharing/proto/rpc_resources.pb.h"
 
 class NearbyShareClientFactory;
 class NearbyShareDeviceDataUpdater;
-class NearbyShareScheduler;
-class PrefService;
+
+namespace ash::nearby {
+class NearbyScheduler;
+}  // namespace ash::nearby
+
+namespace user_manager {
+class User;
+}  // namespace user_manager
 
 // Implementation of NearbyShareLocalDeviceDataManager that persists device data
 // in prefs. All RPC-related calls are guarded by a timeout, so callbacks are
@@ -31,14 +39,14 @@ class NearbyShareLocalDeviceDataManagerImpl
   class Factory {
    public:
     static std::unique_ptr<NearbyShareLocalDeviceDataManager> Create(
-        PrefService* pref_service,
+        user_manager::User& user,
         NearbyShareClientFactory* http_client_factory);
     static void SetFactoryForTesting(Factory* test_factory);
 
    protected:
     virtual ~Factory();
     virtual std::unique_ptr<NearbyShareLocalDeviceDataManager> CreateInstance(
-        PrefService* pref_service,
+        user_manager::User& user,
         NearbyShareClientFactory* http_client_factory) = 0;
 
    private:
@@ -49,43 +57,55 @@ class NearbyShareLocalDeviceDataManagerImpl
 
  private:
   NearbyShareLocalDeviceDataManagerImpl(
-      PrefService* pref_service,
+      user_manager::User& user,
       NearbyShareClientFactory* http_client_factory);
 
   // NearbyShareLocalDeviceDataManager:
   std::string GetId() override;
-  base::Optional<std::string> GetDeviceName() const override;
-  base::Optional<std::string> GetFullName() const override;
-  base::Optional<std::string> GetIconUrl() const override;
-  void SetDeviceName(const std::string& name) override;
+  std::string GetDeviceName() const override;
+  std::optional<std::string> GetFullName() const override;
+  std::optional<std::string> GetIconUrl() const override;
+  nearby_share::mojom::DeviceNameValidationResult ValidateDeviceName(
+      const std::string& name) override;
+  nearby_share::mojom::DeviceNameValidationResult SetDeviceName(
+      const std::string& name) override;
   void DownloadDeviceData() override;
-  void UploadContacts(std::vector<nearbyshare::proto::Contact> contacts,
+  void UploadContacts(std::vector<nearby::sharing::proto::Contact> contacts,
                       UploadCompleteCallback callback) override;
   void UploadCertificates(
-      std::vector<nearbyshare::proto::PublicCertificate> certificates,
+      std::vector<nearby::sharing::proto::PublicCertificate> certificates,
       UploadCompleteCallback callback) override;
   void OnStart() override;
   void OnStop() override;
 
-  base::Optional<std::string> GetStringPref(const std::string& pref_name) const;
-  void SetStringPref(const std::string& pref_name,
-                     const base::Optional<std::string>& value);
+  std::optional<std::string> GetIconToken() const;
+
+  // Creates a default device name of the form "<given name>'s <device type>."
+  // For example, "Josh's Chromebook." If a given name cannot be found, returns
+  // just the device type. If the resulting name is too long the user's name
+  // will be truncated, for example "Mi...'s Chromebook."
+  std::string GetDefaultDeviceName() const;
 
   void OnDownloadDeviceDataRequested();
   void OnDownloadDeviceDataFinished(
-      const base::Optional<nearbyshare::proto::UpdateDeviceResponse>& response);
+      const std::optional<nearby::sharing::proto::UpdateDeviceResponse>&
+          response);
   void OnUploadContactsFinished(
       UploadCompleteCallback callback,
-      const base::Optional<nearbyshare::proto::UpdateDeviceResponse>& response);
+      const std::optional<nearby::sharing::proto::UpdateDeviceResponse>&
+          response);
   void OnUploadCertificatesFinished(
       UploadCompleteCallback callback,
-      const base::Optional<nearbyshare::proto::UpdateDeviceResponse>& response);
+      const std::optional<nearby::sharing::proto::UpdateDeviceResponse>&
+          response);
   void HandleUpdateDeviceResponse(
-      const base::Optional<nearbyshare::proto::UpdateDeviceResponse>& response);
+      const std::optional<nearby::sharing::proto::UpdateDeviceResponse>&
+          response);
 
-  PrefService* pref_service_ = nullptr;
+  const raw_ref<user_manager::User> user_;
   std::unique_ptr<NearbyShareDeviceDataUpdater> device_data_updater_;
-  std::unique_ptr<NearbyShareScheduler> download_device_data_scheduler_;
+  std::unique_ptr<ash::nearby::NearbyScheduler> download_device_data_scheduler_;
+  std::string default_device_name_;
 };
 
 #endif  // CHROME_BROWSER_NEARBY_SHARING_LOCAL_DEVICE_DATA_NEARBY_SHARE_LOCAL_DEVICE_DATA_MANAGER_IMPL_H_

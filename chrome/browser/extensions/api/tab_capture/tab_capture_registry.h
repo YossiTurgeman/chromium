@@ -1,16 +1,18 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_EXTENSIONS_API_TAB_CAPTURE_TAB_CAPTURE_REGISTRY_H_
 #define CHROME_BROWSER_EXTENSIONS_API_TAB_CAPTURE_TAB_CAPTURE_REGISTRY_H_
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
+#include "base/values.h"
 #include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
 #include "chrome/common/extensions/api/tab_capture.h"
 #include "content/public/browser/desktop_media_id.h"
@@ -18,10 +20,9 @@
 #include "extensions/browser/browser_context_keyed_api_factory.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_observer.h"
+#include "extensions/buildflags/buildflags.h"
 
-namespace base {
-class ListValue;
-}
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace content {
 class BrowserContext;
@@ -36,6 +37,11 @@ class TabCaptureRegistry : public BrowserContextKeyedAPI,
                            public ExtensionRegistryObserver,
                            public MediaCaptureDevicesDispatcher::Observer {
  public:
+  explicit TabCaptureRegistry(content::BrowserContext* context);
+  ~TabCaptureRegistry() override;
+  TabCaptureRegistry(const TabCaptureRegistry&) = delete;
+  TabCaptureRegistry& operator=(const TabCaptureRegistry&) = delete;
+
   static TabCaptureRegistry* Get(content::BrowserContext* context);
 
   // Used by BrowserContextKeyedAPI.
@@ -44,7 +50,7 @@ class TabCaptureRegistry : public BrowserContextKeyedAPI,
 
   // List all pending, active and stopped capture requests.
   void GetCapturedTabs(const std::string& extension_id,
-                       base::ListValue* list_of_capture_info) const;
+                       base::ListValue* capture_info_list) const;
 
   // Add a tab capture request to the registry when a stream is requested
   // through the API and create a randomly generated device id after user
@@ -55,15 +61,20 @@ class TabCaptureRegistry : public BrowserContextKeyedAPI,
   // |extension_id|: the Extension initiating the request.
   // |is_anonymous| is true if GetCapturedTabs() should not list the captured
   // tab, and no status change events should be dispatched for it.
-  // |caller_contents|: the WebContents associated with the tab/extension that
-  // starts the capture.
+  // |caller_render_process_id|: the process ID associated with the
+  // tab/extension that starts the capture.
+  // |restrict_to_render_frame_id|: If populated, restricts the validity of the
+  // capture request to a render frame with the specified ID. This may be empty
+  // in the case of a Manifest V3 extension service worker calling
+  // getMediaStreamId(), where it is designed to be consumed by another context
+  // on the same origin (e.g., an offscreen document).
   std::string AddRequest(content::WebContents* target_contents,
                          const std::string& extension_id,
                          bool is_anonymous,
                          const GURL& origin,
                          content::DesktopMediaID source,
-                         const std::string& extension_name,
-                         content::WebContents* caller_contents);
+                         int caller_render_process_id,
+                         std::optional<int> restrict_to_render_frame_id);
 
   // Called by MediaStreamDevicesController to verify the request before
   // creating the stream.  |render_process_id| and |render_frame_id| are used to
@@ -78,9 +89,6 @@ class TabCaptureRegistry : public BrowserContextKeyedAPI,
  private:
   friend class BrowserContextKeyedAPIFactory<TabCaptureRegistry>;
   class LiveRequest;
-
-  explicit TabCaptureRegistry(content::BrowserContext* context);
-  ~TabCaptureRegistry() override;
 
   // Used by BrowserContextKeyedAPI.
   static const char* service_name() {
@@ -113,13 +121,11 @@ class TabCaptureRegistry : public BrowserContextKeyedAPI,
   // Removes the |request| from |requests_|, thus causing its destruction.
   void KillRequest(LiveRequest* request);
 
-  content::BrowserContext* const browser_context_;
+  const raw_ptr<content::BrowserContext> browser_context_;
   std::vector<std::unique_ptr<LiveRequest>> requests_;
 
-  ScopedObserver<ExtensionRegistry, ExtensionRegistryObserver>
-      extension_registry_observer_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(TabCaptureRegistry);
+  base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
+      extension_registry_observation_{this};
 };
 
 }  // namespace extensions

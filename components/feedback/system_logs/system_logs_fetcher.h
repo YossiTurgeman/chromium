@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,18 @@
 
 #include <stddef.h>
 
-#include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/containers/span.h"
+#include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
-#include "base/sequenced_task_runner.h"
+#include "base/sequence_checker.h"
+#include "base/task/sequenced_task_runner.h"
 #include "components/feedback/feedback_common.h"
-#include "components/feedback/redaction_tool.h"
+#include "components/feedback/redaction_tool/redaction_tool.h"
 #include "components/feedback/system_logs/system_logs_source.h"
 
 namespace system_logs {
@@ -44,11 +45,16 @@ using SysLogsFetcherCallback =
 class SystemLogsFetcher {
  public:
   // If |scrub_data| is true, logs will be redacted.
-  // |first_party_extension_ids| is a null terminated array of all the 1st
-  // party extension IDs whose URLs won't be redacted. It is OK to pass null for
-  // that value if it's OK to redact those URLs or they won't be present.
-  explicit SystemLogsFetcher(bool scrub_data,
-                             const char* const first_party_extension_ids[]);
+  // |first_party_extension_ids| is a span of all the 1st party
+  // extension IDs whose URLs won't be redacted. It is OK to pass an
+  // empty span if it's OK to redact those URLs or they won't be present.
+  explicit SystemLogsFetcher(
+      bool scrub_data,
+      base::span<const std::string_view> first_party_extension_ids = {});
+
+  SystemLogsFetcher(const SystemLogsFetcher&) = delete;
+  SystemLogsFetcher& operator=(const SystemLogsFetcher&) = delete;
+
   ~SystemLogsFetcher();
 
   // Adds a source to use when fetching.
@@ -73,6 +79,8 @@ class SystemLogsFetcher {
   // Runs the callback provided to Fetch and posts a task to delete |this|.
   void RunCallbackAndDeleteSoon();
 
+  SEQUENCE_CHECKER(sequence_checker_);
+
   std::vector<std::unique_ptr<SystemLogsSource>> data_sources_;
   SysLogsFetcherCallback callback_;
 
@@ -80,11 +88,9 @@ class SystemLogsFetcher {
   size_t num_pending_requests_;  // The number of callbacks it should get.
 
   scoped_refptr<base::SequencedTaskRunner> task_runner_for_redactor_;
-  std::unique_ptr<feedback::RedactionTool> redactor_;
+  std::unique_ptr<redaction::RedactionTool> redactor_;
 
   base::WeakPtrFactory<SystemLogsFetcher> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(SystemLogsFetcher);
 };
 
 }  // namespace system_logs

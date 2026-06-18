@@ -1,20 +1,22 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/translate/core/browser/translate_language_list.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
+#include "base/command_line.h"
 #include "base/run_loop.h"
-#include "base/stl_util.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "base/test/scoped_command_line.h"
 #include "base/test/task_environment.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "components/translate/core/browser/translate_download_manager.h"
+#include "components/translate/core/browser/translate_url_fetcher.h"
 #include "components/translate/core/browser/translate_url_util.h"
+#include "components/variations/scoped_variations_ids_provider.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -22,13 +24,38 @@
 
 namespace translate {
 
+namespace {
+
+class DummyTranslateUrlFetcher : public TranslateUrlFetcher {
+ public:
+  DummyTranslateUrlFetcher() = default;
+  ~DummyTranslateUrlFetcher() override = default;
+
+  bool Request(const GURL& url, Callback callback, bool is_incognito) override {
+    return true;
+  }
+
+  State state() const override { return IDLE; }
+};
+
+}  // namespace
+
+class TranslateLanguageListTest : public testing::Test {
+ public:
+ private:
+  variations::test::ScopedVariationsIdsProvider scoped_variations_ids_provider_{
+      variations::VariationsIdsProvider::Mode::kUseSignedInState};
+};
+
 // Test that the supported languages can be explicitly set using
 // SetSupportedLanguages().
-TEST(TranslateLanguageListTest, SetSupportedLanguages) {
+TEST_F(TranslateLanguageListTest, SetSupportedLanguages) {
   const std::string language_list(
       "{"
-      "\"sl\":{\"en\":\"English\",\"ja\":\"Japanese\"},"
-      "\"tl\":{\"en\":\"English\",\"ja\":\"Japanese\"}"
+      "\"sl\":{\"en\":\"English\",\"ja\":\"Japanese\",\"tl\":\"Tagalog\","
+      "\"xx\":\"NotALanguage\"},"
+      "\"tl\":{\"en\":\"English\",\"ja\":\"Japanese\",\"tl\":\"Tagalog\","
+      "\"xx\":\"NotALanguage\"}"
       "}");
 
   base::test::TaskEnvironment task_environment;
@@ -39,21 +66,25 @@ TEST(TranslateLanguageListTest, SetSupportedLanguages) {
   TranslateDownloadManager* manager = TranslateDownloadManager::GetInstance();
   manager->set_application_locale("en");
   manager->set_url_loader_factory(test_shared_loader_factory);
+  manager->set_language_list(std::make_unique<TranslateLanguageList>(
+      std::make_unique<DummyTranslateUrlFetcher>()));
   EXPECT_TRUE(manager->language_list()->SetSupportedLanguages(language_list));
 
   std::vector<std::string> results;
   manager->language_list()->GetSupportedLanguages(true /* translate_allowed */,
                                                   &results);
-  ASSERT_EQ(2u, results.size());
+  ASSERT_EQ(3u, results.size());
   EXPECT_EQ("en", results[0]);
   EXPECT_EQ("ja", results[1]);
+  EXPECT_EQ("tl", results[2]);
   manager->ResetForTesting();
 }
 
 // Test that the language code back-off of locale is done correctly (where
 // required).
-TEST(TranslateLanguageListTest, GetLanguageCode) {
-  TranslateLanguageList language_list;
+TEST_F(TranslateLanguageListTest, GetLanguageCode) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
   EXPECT_EQ("en", language_list.GetLanguageCode("en"));
   // Test backoff of unsupported locale.
   EXPECT_EQ("en", language_list.GetLanguageCode("en-US"));
@@ -64,8 +95,9 @@ TEST(TranslateLanguageListTest, GetLanguageCode) {
 // Test that the translation URL is correctly generated, and that the
 // translate-security-origin command-line flag correctly overrides the default
 // value.
-TEST(TranslateLanguageListTest, TranslateLanguageUrl) {
-  TranslateLanguageList language_list;
+TEST_F(TranslateLanguageListTest, TranslateLanguageUrl) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
 
   // Test default security origin.
   // The command-line override switch should not be set by default.
@@ -85,35 +117,78 @@ TEST(TranslateLanguageListTest, TranslateLanguageUrl) {
 
 // Test that IsSupportedLanguage() is true for languages that should be
 // supported, and false for invalid languages.
-TEST(TranslateLanguageListTest, IsSupportedLanguage) {
-  TranslateLanguageList language_list;
+TEST_F(TranslateLanguageListTest, IsSupportedLanguage) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
   EXPECT_TRUE(language_list.IsSupportedLanguage("en"));
   EXPECT_TRUE(language_list.IsSupportedLanguage("zh-CN"));
   EXPECT_FALSE(language_list.IsSupportedLanguage("xx"));
+}
+
+// Test that IsSupportedPartialTranslateLanguage() is true for languages that
+// should be supported, and false for invalid languages.
+TEST_F(TranslateLanguageListTest, IsSupportedPartialTranslateLanguage) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
+  EXPECT_TRUE(language_list.IsSupportedPartialTranslateLanguage("en"));
+  EXPECT_TRUE(language_list.IsSupportedPartialTranslateLanguage("zh-CN"));
+  EXPECT_FALSE(language_list.IsSupportedPartialTranslateLanguage("xx"));
+  EXPECT_FALSE(language_list.IsSupportedPartialTranslateLanguage("ilo"));
+  EXPECT_FALSE(language_list.IsSupportedPartialTranslateLanguage("mni-Mtei"));
 }
 
 // Sanity test for the default set of supported languages. The default set of
 // languages should be large (> 100) and must contain very common languages.
 // If either of these tests are not true, the default language configuration is
 // likely to be incorrect.
-TEST(TranslateLanguageListTest, GetSupportedLanguages) {
-  TranslateLanguageList language_list;
+TEST_F(TranslateLanguageListTest, GetSupportedLanguages) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
   std::vector<std::string> languages;
   language_list.GetSupportedLanguages(true /* translate_allowed */, &languages);
   // Check there are a lot of default languages.
   EXPECT_GE(languages.size(), 100ul);
   // Check that some very common languages are there.
-  EXPECT_TRUE(base::Contains(languages, "en"));
-  EXPECT_TRUE(base::Contains(languages, "es"));
-  EXPECT_TRUE(base::Contains(languages, "fr"));
-  EXPECT_TRUE(base::Contains(languages, "ru"));
-  EXPECT_TRUE(base::Contains(languages, "zh-CN"));
-  EXPECT_TRUE(base::Contains(languages, "zh-TW"));
+  EXPECT_TRUE(std::ranges::contains(languages, "en"));
+  EXPECT_TRUE(std::ranges::contains(languages, "es"));
+  EXPECT_TRUE(std::ranges::contains(languages, "fr"));
+  EXPECT_TRUE(std::ranges::contains(languages, "ru"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-CN"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-TW"));
+}
+
+// Sanity test for the default set of partial translate supported languages. The
+// default set of languages should be large (> 100) and must contain very common
+// languages. If either of these tests are not true, the default language
+// configuration is likely to be incorrect.
+TEST_F(TranslateLanguageListTest, GetSupportedPartialTranslateLanguages) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
+  std::vector<std::string> languages;
+  language_list.GetSupportedPartialTranslateLanguages(&languages);
+  // Check there are a lot of default languages.
+  EXPECT_GE(languages.size(), 100ul);
+  // Check that some very common languages are there.
+  EXPECT_TRUE(std::ranges::contains(languages, "en"));
+  EXPECT_TRUE(std::ranges::contains(languages, "es"));
+  EXPECT_TRUE(std::ranges::contains(languages, "fr"));
+  EXPECT_TRUE(std::ranges::contains(languages, "ru"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-CN"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-TW"));
+
+  // Check that unsupported languages are not there
+  EXPECT_FALSE(std::ranges::contains(languages, "ilo"));
+  EXPECT_FALSE(std::ranges::contains(languages, "lus"));
+  EXPECT_FALSE(std::ranges::contains(languages, "mni-Mtei"));
+  EXPECT_FALSE(std::ranges::contains(languages, "gom"));
+  EXPECT_FALSE(std::ranges::contains(languages, "doi"));
+  EXPECT_FALSE(std::ranges::contains(languages, "bm"));
+  EXPECT_FALSE(std::ranges::contains(languages, "ckb"));
 }
 
 // Check that we contact the translate server to update the supported language
 // list when translate is enabled by policy.
-TEST(TranslateLanguageListTest, GetSupportedLanguagesFetch) {
+TEST_F(TranslateLanguageListTest, GetSupportedLanguagesFetch) {
   // Set up fake network environment.
   base::test::TaskEnvironment task_environment;
   network::TestURLLoaderFactory test_url_loader_factory;
@@ -166,7 +241,7 @@ TEST(TranslateLanguageListTest, GetSupportedLanguagesFetch) {
 
 // Check that we don't send any network data when translate is disabled by
 // policy.
-TEST(TranslateLanguageListTest, GetSupportedLanguagesNoFetch) {
+TEST_F(TranslateLanguageListTest, GetSupportedLanguagesNoFetch) {
   // Set up fake network environment.
   base::test::TaskEnvironment task_environment;
   network::TestURLLoaderFactory test_url_loader_factory;

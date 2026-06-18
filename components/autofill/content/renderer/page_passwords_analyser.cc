@@ -1,15 +1,18 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/autofill/content/renderer/page_passwords_analyser.h"
 
+#include <algorithm>
 #include <map>
 #include <stack>
 #include <string>
 #include <vector>
 
 #include "base/lazy_instance.h"
+#include "base/memory/raw_ptr.h"
+#include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "components/autofill/content/renderer/form_autofill_util.h"
@@ -33,17 +36,16 @@ using blink::WebLabelElement;
 using blink::WebLocalFrame;
 using blink::WebNode;
 using blink::WebString;
-using blink::WebVector;
 
 namespace autofill {
 
 namespace {
 
-const char kDocumentationUrl[] = "https://goo.gl/9p2vKq";
-const char* kTypeAttributes[] = {"text", "email", "tel", "password"};
-const char* kTypeTextAttributes[] = {"text", "email", "tel"};
-char kTextFieldSignature = 'T';
-char kPasswordFieldSignature = 'P';
+constexpr const char kDocumentationUrl[] = "https://goo.gl/9p2vKq";
+constexpr const char* kTypeAttributes[] = {"text", "email", "tel", "password"};
+constexpr const char* kTypeTextAttributes[] = {"text", "email", "tel"};
+constexpr char kTextFieldSignature = 'T';
+constexpr char kPasswordFieldSignature = 'P';
 
 // Produce a relevant link to developer documentation regarding the warning or
 // error. If no particular reference is given, the default URL will be provided.
@@ -123,7 +125,7 @@ DECLARE_LAZY_MATCHER(telephone_matcher, R"((mobile)?(telephone)?(number|no))");
 // something of the purpose of an element (for example: that it is a username
 // field).
 struct InputHint {
-  const re2::RE2* regex;
+  raw_ptr<const re2::RE2> regex;
   size_t match;
 
   explicit InputHint(const re2::RE2* regex)
@@ -161,15 +163,16 @@ void TrackElementId(const WebElement& element,
   }
 }
 
-// We don't want to re-analyse the same nodes each time the method is
+// We don't want to re-analyze the same nodes each time the method is
 // called. This technically means some warnings might be overlooked (for
 // example if an invalid attribute is added), but these cases are assumed
 // to be rare, and are ignored for the sake of simplicity.
 // The id of |node| will additionally be added to the corresponding |ids| set.
+template <typename RendererId>
 bool TrackElementByRendererIdIfUntracked(
     const WebElement& element,
-    const uint32_t renderer_id,
-    std::set<uint32_t>* skip_renderer_ids,
+    const RendererId renderer_id,
+    std::set<RendererId>* skip_renderer_ids,
     std::map<std::string, std::vector<WebNode>>* nodes_for_id) {
   if (skip_renderer_ids->count(renderer_id))
     return true;
@@ -183,8 +186,8 @@ bool TrackElementByRendererIdIfUntracked(
 // analysis.
 std::vector<FormInputCollection> ExtractFormsForAnalysis(
     const WebDocument& document,
-    std::set<uint32_t>* skip_form_ids,
-    std::set<uint32_t>* skip_control_ids,
+    std::set<FormRendererId>* skip_form_ids,
+    std::set<FieldRendererId>* skip_control_ids,
     PageFormAnalyserLogger* logger) {
   std::vector<FormInputCollection> form_input_collections;
 
@@ -193,73 +196,64 @@ std::vector<FormInputCollection> ExtractFormsForAnalysis(
   std::set<WebFormControlElement> inputs_with_forms;
   std::map<std::string, std::vector<WebNode>> nodes_for_id;
 
-  for (const WebFormElement& form : document.Forms()) {
+  for (const WebFormElement& form : document.GetTopLevelForms()) {
     form_input_collections.push_back(FormInputCollection{form});
     // Collect all the inputs in the form.
     for (const WebFormControlElement& input : form.GetFormControlElements()) {
       if (TrackElementByRendererIdIfUntracked(
-              input, input.UniqueRendererFormControlId(), skip_control_ids,
-              &nodes_for_id))
+              input, form_util::GetFieldRendererId(input), skip_control_ids,
+              &nodes_for_id)) {
         continue;
+      }
       // We are only interested in a subset of input elements -- those likely
       // to be username or password fields.
       if (input.TagName() == "INPUT" &&
           (!input.HasAttribute("type") ||
-           base::Contains(kTypeAttributes,
-                          input.GetAttribute("type").Utf8()))) {
+           std::ranges::contains(kTypeAttributes,
+                                 input.GetAttribute("type").Utf8()))) {
         form_input_collections.back().AddInput(input);
         inputs_with_forms.insert(input);
       }
     }
-    TrackElementByRendererIdIfUntracked(form, form.UniqueRendererFormId(),
-                                        skip_form_ids, &nodes_for_id);
+    TrackElementByRendererIdIfUntracked(
+        form, form_util::GetFormRendererId(form), skip_form_ids, &nodes_for_id);
   }
 
   // Check for password fields that are not contained inside forms.
   auto password_inputs = document.QuerySelectorAll("input[type=\"password\"]");
-  for (unsigned i = 0; i < password_inputs.size(); ++i) {
-    const WebInputElement* input_element =
-        ToWebInputElement(&password_inputs[i]);
-    if (!input_element || input_element->IsNull())
+  for (const WebElement& password_input : password_inputs) {
+    const WebInputElement input_element =
+        password_input.DynamicTo<WebInputElement>();
+    if (!input_element) {
       continue;
+    }
     if (TrackElementByRendererIdIfUntracked(
-            password_inputs[i], input_element->UniqueRendererFormControlId(),
-            skip_control_ids, &nodes_for_id))
+            password_input, form_util::GetFieldRendererId(input_element),
+            skip_control_ids, &nodes_for_id)) {
       continue;
+    }
     // Any password fields inside <form> elements will have been skipped,
     // leaving just those without associated forms.
     logger->Send(
         LinkDocumentation("Password field is not contained in a form:"),
-        PageFormAnalyserLogger::kVerbose, password_inputs[i]);
+        PageFormAnalyserLogger::kVerbose, password_input);
   }
   // Check for input fields that are not contained inside forms, to make sure
   // their id attributes don't conflict with other fields also not contained
   // inside forms.
   std::string selector = "input:not([type])";
   for (const char* text_type : kTypeTextAttributes)
-    selector += ", input[type=\"" + std::string(text_type) + "\"]";
-  auto text_inputs = document.QuerySelectorAll(WebString::FromUTF8(selector));
+    base::StrAppend(&selector, {", input[type=\"", text_type, "\"]"});
+  auto text_inputs = document.QuerySelectorAll(WebString::FromUtf8(selector));
   for (const WebElement& text_input : text_inputs) {
-    const WebInputElement* input_element = ToWebInputElement(&text_input);
-    if (!input_element || input_element->IsNull())
+    const WebInputElement input_element =
+        text_input.DynamicTo<WebInputElement>();
+    if (!input_element) {
       continue;
+    }
     TrackElementByRendererIdIfUntracked(
-        text_input, input_element->UniqueRendererFormControlId(),
+        text_input, form_util::GetFieldRendererId(input_element),
         skip_control_ids, &nodes_for_id);
-  }
-  // Warn against elements sharing an id attribute. Duplicate id attributes both
-  // are against the HTML specification and can cause issues with password
-  // saving/filling, as the Password Manager makes the assumption that ids may
-  // be used as a unique identifier for nodes.
-  for (const auto& pair : nodes_for_id) {
-    const std::string& id_attr = pair.first;
-    const std::vector<WebNode>& nodes = pair.second;
-    if (nodes.size() <= 1)
-      continue;
-    logger->Send(LinkDocumentation(base::StringPrintf(
-                     "Found %zu elements with non-unique id #%s:", nodes.size(),
-                     id_attr.c_str())),
-                 PageFormAnalyserLogger::kWarning, nodes);
   }
 
   return form_input_collections;
@@ -270,7 +264,7 @@ std::vector<FormInputCollection> ExtractFormsForAnalysis(
 // possible to work out which one is the username. Here, we find any
 // <label> elements pointing to the input fields, and check their content.
 // Labels containing text such as "Username:" or "Email address:" are
-// likely to indicate the desired field, and will be prioritised over
+// likely to indicate the desired field, and will be prioritized over
 // other fields.
 void InferUsernameField(
     const WebFormElement& form,
@@ -278,21 +272,20 @@ void InferUsernameField(
     size_t username_field_guess,
     std::map<size_t, std::string>* autocomplete_suggestions) {
   WebElementCollection labels(form.GetElementsByHTMLTagName("label"));
-  DCHECK(!labels.IsNull());
+  DCHECK(labels);
 
   std::vector<InputHint> input_hints;
 
-  input_hints.push_back(InputHint(username_matcher.Pointer()));
-  input_hints.push_back(InputHint(email_matcher.Pointer()));
-  input_hints.push_back(InputHint(telephone_matcher.Pointer()));
+  input_hints.emplace_back(username_matcher.Pointer());
+  input_hints.emplace_back(email_matcher.Pointer());
+  input_hints.emplace_back(telephone_matcher.Pointer());
 
-  for (WebElement item = labels.FirstItem(); !item.IsNull();
-       item = labels.NextItem()) {
+  for (WebElement item = labels.FirstItem(); item; item = labels.NextItem()) {
     WebLabelElement label(item.To<WebLabelElement>());
     WebElement control(label.CorrespondingControl());
-    if (!control.IsNull() && control.IsFormControlElement()) {
+    if (control && control.IsFormControlElement()) {
       WebFormControlElement form_control(control.To<WebFormControlElement>());
-      auto found = std::find(inputs.begin(), inputs.end(), form_control);
+      auto found = std::ranges::find(inputs, form_control);
       if (found != inputs.end()) {
         std::string label_content(
             base::UTF16ToUTF8(form_util::FindChildText(label)));
@@ -326,7 +319,7 @@ void GuessAutocompleteAttributesForPasswordFields(
   switch (password_count) {
     case 3:
       (*autocomplete_suggestions)[password_inputs[0]] = "current-password";
-      FALLTHROUGH;  // To match the last two password fields.
+      [[fallthrough]];  // To match the last two password fields.
     case 2:
       (*autocomplete_suggestions)[password_inputs[password_count - 2]] =
           "new-password";
@@ -430,9 +423,9 @@ void AnalyseForm(const FormInputCollection& form_input_collection,
 }  // namespace
 
 // Out-of-line definitions to keep [chromium-style] happy.
-PagePasswordsAnalyser::PagePasswordsAnalyser() {}
+PagePasswordsAnalyser::PagePasswordsAnalyser() = default;
 
-PagePasswordsAnalyser::~PagePasswordsAnalyser() {}
+PagePasswordsAnalyser::~PagePasswordsAnalyser() = default;
 
 void PagePasswordsAnalyser::Reset() {
   skip_control_element_renderer_ids_.clear();
@@ -449,7 +442,7 @@ void PagePasswordsAnalyser::AnalyseDocumentDOM(WebLocalFrame* frame,
       ExtractFormsForAnalysis(document, &skip_form_element_renderer_ids_,
                               &skip_control_element_renderer_ids_, logger));
 
-  // Analyse each form in turn, for example with respect to autocomplete
+  // Analyze each form in turn, for example with respect to autocomplete
   // attributes.
   for (const FormInputCollection& form_input_collection : forms)
     AnalyseForm(form_input_collection, logger);

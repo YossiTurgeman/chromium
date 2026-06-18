@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,21 +8,25 @@
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_observation.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_observer.h"
+#include "extensions/common/extension_id.h"
 
 namespace extensions {
 
-// A helper class that listen for ExtensionRegistry notifications.
+// A helper class that listens for ExtensionRegistry notifications.
 class TestExtensionRegistryObserver : public ExtensionRegistryObserver {
  public:
-  // If |extension_id| is provided, listens only to events relating to that
+  // If `extension_id` is provided, listens only to events relating to that
   // extension. Otherwise, listens to all events.
   explicit TestExtensionRegistryObserver(ExtensionRegistry* registry);
   TestExtensionRegistryObserver(ExtensionRegistry* registry,
-                                const std::string& extension_id);
+                                const ExtensionId& extension_id);
+
+  TestExtensionRegistryObserver(const TestExtensionRegistryObserver&) = delete;
+  TestExtensionRegistryObserver& operator=(
+      const TestExtensionRegistryObserver&) = delete;
 
   ~TestExtensionRegistryObserver() override;
 
@@ -30,6 +34,7 @@ class TestExtensionRegistryObserver : public ExtensionRegistryObserver {
   scoped_refptr<const Extension> WaitForExtensionWillBeInstalled();
   scoped_refptr<const Extension> WaitForExtensionInstalled();
   scoped_refptr<const Extension> WaitForExtensionUninstalled();
+  scoped_refptr<const Extension> WaitForExtensionUninstallationDenied();
   scoped_refptr<const Extension> WaitForExtensionLoaded();
   scoped_refptr<const Extension> WaitForExtensionReady();
   scoped_refptr<const Extension> WaitForExtensionUnloaded();
@@ -48,6 +53,8 @@ class TestExtensionRegistryObserver : public ExtensionRegistryObserver {
   void OnExtensionUninstalled(content::BrowserContext* browser_context,
                               const Extension* extension,
                               extensions::UninstallReason reason) override;
+  void OnExtensionUninstallationDenied(content::BrowserContext* browser_context,
+                                       const Extension* extension) override;
   void OnExtensionLoaded(content::BrowserContext* browser_context,
                          const Extension* extension) override;
   void OnExtensionReady(content::BrowserContext* browser_context,
@@ -61,16 +68,15 @@ class TestExtensionRegistryObserver : public ExtensionRegistryObserver {
   std::unique_ptr<Waiter> will_be_installed_waiter_;
   std::unique_ptr<Waiter> installed_waiter_;
   std::unique_ptr<Waiter> uninstalled_waiter_;
+  std::unique_ptr<Waiter> uninstallation_denied_waiter_;
   std::unique_ptr<Waiter> loaded_waiter_;
   std::unique_ptr<Waiter> ready_waiter_;
   std::unique_ptr<Waiter> unloaded_waiter_;
 
-  ScopedObserver<ExtensionRegistry, ExtensionRegistryObserver>
-      extension_registry_observer_{this};
+  base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
+      extension_registry_observation_{this};
 
-  std::string extension_id_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestExtensionRegistryObserver);
+  ExtensionId extension_id_;
 };
 
 }  // namespace extensions

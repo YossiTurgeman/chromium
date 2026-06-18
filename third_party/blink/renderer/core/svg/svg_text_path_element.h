@@ -22,9 +22,11 @@
 
 #include "third_party/blink/renderer/core/svg/svg_text_content_element.h"
 #include "third_party/blink/renderer/core/svg/svg_uri_reference.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
+
+class SVGAnimatedPath;
 
 enum SVGTextPathMethodType {
   kSVGTextPathMethodUnknown = 0,
@@ -56,6 +58,10 @@ class SVGTextPathElement final : public SVGTextContentElement,
   };
 
   explicit SVGTextPathElement(Document&);
+  ~SVGTextPathElement() override;
+  ElementType GetElementType() const final {
+    return ElementType::kSVGTextPathElement;
+  }
 
   SVGAnimatedLength* startOffset() const { return start_offset_.Get(); }
   SVGAnimatedEnumeration<SVGTextPathMethodType>* method() {
@@ -64,28 +70,32 @@ class SVGTextPathElement final : public SVGTextContentElement,
   SVGAnimatedEnumeration<SVGTextPathSpacingType>* spacing() {
     return spacing_.Get();
   }
+  SVGAnimatedPath* path() const { return path_.Get(); }
 
   void Trace(Visitor*) const override;
 
  private:
-  ~SVGTextPathElement() override;
-
   void ClearResourceReferences();
 
   void BuildPendingResource() override;
   InsertionNotificationRequest InsertedInto(ContainerNode&) override;
   void RemovedFrom(ContainerNode&) override;
 
-  void SvgAttributeChanged(const QualifiedName&) override;
+  void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
 
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
-  bool LayoutObjectIsNeeded(const ComputedStyle&) const override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
+  bool LayoutObjectIsNeeded(const DisplayStyle&) const override;
 
   bool SelfHasRelativeLengths() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedLength> start_offset_;
   Member<SVGAnimatedEnumeration<SVGTextPathMethodType>> method_;
   Member<SVGAnimatedEnumeration<SVGTextPathSpacingType>> spacing_;
+  Member<SVGAnimatedPath> path_;
   Member<IdTargetObserver> target_id_observer_;
 };
 

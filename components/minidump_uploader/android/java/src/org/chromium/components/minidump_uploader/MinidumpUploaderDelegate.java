@@ -1,21 +1,22 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.minidump_uploader;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.components.minidump_uploader.util.CrashReportingPermissionManager;
 
 import java.io.File;
 
-/**
- * Interface for embedder-specific implementations for uploading minidumps.
- */
+/** Interface for embedder-specific implementations for uploading minidumps. */
+@NullMarked
 public interface MinidumpUploaderDelegate {
     /**
      * Returns the parent directory in which the embedder will store the crash report directory and
      * its minidumps. That is, if this method returns the directory ".../parent/", the embedder
      * should store minidumps in the directory ".../parent/Crash Reports/".
+     *
      * @return A reference to the directory, or null if the directory did not exist and creation
      *     failed.
      */

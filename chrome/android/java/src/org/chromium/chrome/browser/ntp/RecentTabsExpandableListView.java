@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,12 +9,14 @@ import android.util.AttributeSet;
 import android.view.View;
 import android.widget.ExpandableListView;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.base.DeviceFormFactor;
 
 /**
- * Customized ExpandableListView for the recent tabs page. This class handles tablet-specific
- * layout implementation.
+ * Customized ExpandableListView for the recent tabs page. This class handles tablet-specific layout
+ * implementation.
  */
+@NullMarked
 public class RecentTabsExpandableListView extends ExpandableListView {
     private static final int MAX_LIST_VIEW_WIDTH_DP = 550;
 
@@ -22,9 +24,7 @@ public class RecentTabsExpandableListView extends ExpandableListView {
     private int mSavedListPosition;
     private int mSavedListTop;
 
-    /**
-     * Constructor for inflating from XML.
-     */
+    /** Constructor for inflating from XML. */
     public RecentTabsExpandableListView(Context context, AttributeSet attrs) {
         super(context, attrs);
     }

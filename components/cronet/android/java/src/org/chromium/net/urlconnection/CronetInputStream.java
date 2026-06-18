@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -56,6 +56,21 @@ class CronetInputStream extends InputStream {
         return -1;
     }
 
+    @Override
+    public int available() throws IOException {
+        if (mResponseDataCompleted) {
+            if (mException != null) {
+                throw mException;
+            }
+            return 0;
+        }
+        if (hasUnreadData()) {
+            return mBuffer.remaining();
+        } else {
+            return 0;
+        }
+    }
+
     /**
      * Called by {@link CronetHttpURLConnection} to notify that the entire
      * response body has been read.
@@ -94,9 +109,7 @@ class CronetInputStream extends InputStream {
         }
     }
 
-    /**
-     * Returns whether {@link #mBuffer} has unread data.
-     */
+    /** Returns whether {@link #mBuffer} has unread data. */
     private boolean hasUnreadData() {
         return mBuffer != null && mBuffer.hasRemaining();
     }

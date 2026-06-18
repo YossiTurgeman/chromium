@@ -1,4 +1,4 @@
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,46 +10,20 @@ for more details about the presubmit API built into depot_tools.
 
 
 def _LintWPT(input_api, output_api):
-    """Lint functionality duplicated from web-platform-tests upstream.
+    """Lint functionality encompassing web-platform-tests upstream.
 
     This is to catch lint errors that would otherwise be caught in WPT CI.
     See https://web-platform-tests.org/writing-tests/lint-tool.html for more
     information about the lint tool.
     """
+    tools_path = input_api.os_path.join(input_api.PresubmitLocalPath(),
+                                        input_api.os_path.pardir,
+                                        input_api.os_path.pardir, 'tools')
+    if tools_path not in input_api.sys.path:
+        input_api.sys.path.insert(0, tools_path)
+    from blinkpy.presubmit.common_checks import lint_wpt_root
     wpt_path = input_api.os_path.join(input_api.PresubmitLocalPath(), 'wpt')
-    linter_path = input_api.os_path.join(input_api.PresubmitLocalPath(), '..', '..', 'tools', 'blinkpy', 'third_party', 'wpt',
-                                         'wpt', 'wpt')
-
-    paths_in_wpt = []
-    for abs_path in input_api.AbsoluteLocalPaths():
-        if abs_path.endswith(input_api.os_path.relpath(abs_path, wpt_path)):
-            paths_in_wpt.append(abs_path)
-
-    # If there are changes in LayoutTests/external that aren't in wpt, e.g.
-    # changes to wpt_automation or this presubmit script, then we can return
-    # to avoid running the linter on all files in wpt (which is slow).
-    if not paths_in_wpt:
-        return []
-
-    args = [
-        input_api.python_executable,
-        linter_path,
-        'lint',
-        '--repo-root=%s' % wpt_path,
-        '--ignore-glob=*-expected.txt',
-        '--ignore-glob=*DIR_METADATA',
-        '--ignore-glob=*OWNERS',
-    ] + paths_in_wpt
-
-    proc = input_api.subprocess.Popen(
-        args,
-        stdout=input_api.subprocess.PIPE,
-        stderr=input_api.subprocess.PIPE)
-    stdout, stderr = proc.communicate()
-
-    if proc.returncode != 0:
-        return [output_api.PresubmitError('wpt lint failed:', long_text=stdout + stderr)]
-    return []
+    return lint_wpt_root(input_api, output_api, wpt_path)
 
 
 def _DontModifyIDLFiles(input_api, output_api):
@@ -63,11 +37,20 @@ def _DontModifyIDLFiles(input_api, output_api):
     """
     interfaces_path = input_api.os_path.join(input_api.PresubmitLocalPath(), 'wpt', 'interfaces')
 
-    def is_idl_file(f):
+    def is_generated_idl_file(f):
         abs_path = f.AbsoluteLocalPath()
-        return abs_path.endswith(input_api.os_path.relpath(abs_path, interfaces_path))
+        if not abs_path.endswith(
+                input_api.os_path.relpath(abs_path, interfaces_path)):
+            return False
+        # WPT's tools/ci/interfaces_update.sh replaces all files that end in
+        # .idl but do not end in .tentative.idl .
+        return (abs_path.endswith(".idl")
+                and not abs_path.endswith(".tentative.idl"))
 
-    idl_files = [f.LocalPath() for f in input_api.AffectedSourceFiles(is_idl_file)]
+    idl_files = [
+        f.LocalPath()
+        for f in input_api.AffectedSourceFiles(is_generated_idl_file)
+    ]
 
     if not idl_files:
         return []

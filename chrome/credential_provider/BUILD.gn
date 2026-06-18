@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -15,11 +15,10 @@ action("gcp_installer") {
     rebase_path(target_gen_dir, root_build_dir),
   ]
 
-  if (is_debug) {
-    args += [ "debug" ]
-  } else {
-    args += [ "release" ]
-  }
+  inputs = [
+    "$root_out_dir/gaia1_0.dll",
+    "$root_out_dir/gcp_eventlog_provider.dll",
+  ]
 
   deps = [
     "//chrome/credential_provider/eventlog:gcp_eventlog_provider",
@@ -31,5 +30,8 @@ action("gcp_installer") {
 }
 
 group("credential_provider") {
-  deps = [ ":gcp_installer" ]
+  # TODO(crbug.com/40155023): Get this working in cross builds.
+  if (host_os == "win") {
+    deps = [ ":gcp_installer" ]
+  }
 }

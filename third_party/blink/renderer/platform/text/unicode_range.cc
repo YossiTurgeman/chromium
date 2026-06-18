@@ -34,7 +34,11 @@
 
 #include "third_party/blink/renderer/platform/text/unicode_range.h"
 
+#include <array>
+
 namespace blink {
+
+namespace {
 
 /**********************************************************************
  * Unicode subranges as defined in unicode 3.0
@@ -174,23 +178,23 @@ namespace blink {
  *  fff0 - ffff
  *********************************************************************/
 
-static const unsigned kCNumSubTables = 9;
-static const unsigned kCSubTableSize = 16;
+constexpr unsigned kCNumSubTables = 9;
+constexpr unsigned kCSubTableSize = 16;
 
-static const unsigned char
-    kGUnicodeSubrangeTable[kCNumSubTables][kCSubTableSize] = {
+constexpr std::array<std::array<unsigned char, kCSubTableSize>, kCNumSubTables>
+    kGUnicodeSubrangeTable = {{
         {
             // table for X---
             kCRangeTableBase + 1,  // u0xxx
             kCRangeTableBase + 2,  // u1xxx
             kCRangeTableBase + 3,  // u2xxx
-            kCRangeSetCJK,         // u3xxx
-            kCRangeSetCJK,         // u4xxx
-            kCRangeSetCJK,         // u5xxx
-            kCRangeSetCJK,         // u6xxx
-            kCRangeSetCJK,         // u7xxx
-            kCRangeSetCJK,         // u8xxx
-            kCRangeSetCJK,         // u9xxx
+            kCRangeSetCjk,         // u3xxx
+            kCRangeSetCjk,         // u4xxx
+            kCRangeSetCjk,         // u5xxx
+            kCRangeSetCjk,         // u6xxx
+            kCRangeSetCjk,         // u7xxx
+            kCRangeSetCjk,         // u8xxx
+            kCRangeSetCjk,         // u9xxx
             kCRangeTableBase + 4,  // uaxxx
             kCRangeKorean,         // ubxxx
             kCRangeKorean,         // ucxxx
@@ -254,8 +258,8 @@ static const unsigned char
             kCRangeUnassigned,             // u2bxx
             kCRangeUnassigned,             // u2cxx
             kCRangeUnassigned,             // u2dxx
-            kCRangeSetCJK,                 // u2exx
-            kCRangeSetCJK,                 // u2fxx
+            kCRangeSetCjk,                 // u2exx
+            kCRangeSetCjk,                 // u2fxx
         },
         {
             // table for ax--
@@ -306,15 +310,15 @@ static const unsigned char
             kCRangePrivate,  // uf6xx
             kCRangePrivate,  // uf7xx
             kCRangePrivate,  // uf8xx
-            kCRangeSetCJK,   // uf9xx
-            kCRangeSetCJK,   // ufaxx
+            kCRangeSetCjk,   // uf9xx
+            kCRangeSetCjk,   // ufaxx
             kCRangeArabic,   // ufbxx, includes alphabic presentation form
             kCRangeArabic,   // ufcxx
             kCRangeArabic,   // ufdxx
             kCRangeArabic,   // ufexx, includes Combining half marks,
-                            //                CJK compatibility forms,
-                            //                CJK compatibility forms,
-                            //                small form variants
+                             //                CJK compatibility forms,
+                             //                CJK compatibility forms,
+                             //                small form variants
             kCRangeTableBase +
                 8,  // uffxx, halfwidth and fullwidth forms, includes Specials
         },
@@ -339,67 +343,70 @@ static const unsigned char
         },
         {
             // table for 0xff00 - 0xffff
-            kCRangeSetCJK,    // uff0x, fullwidth latin
-            kCRangeSetCJK,    // uff1x, fullwidth latin
-            kCRangeSetCJK,    // uff2x, fullwidth latin
-            kCRangeSetCJK,    // uff3x, fullwidth latin
-            kCRangeSetCJK,    // uff4x, fullwidth latin
-            kCRangeSetCJK,    // uff5x, fullwidth latin
-            kCRangeSetCJK,    // uff6x, halfwidth katakana
-            kCRangeSetCJK,    // uff7x, halfwidth katakana
-            kCRangeSetCJK,    // uff8x, halfwidth katakana
-            kCRangeSetCJK,    // uff9x, halfwidth katakana
-            kCRangeSetCJK,    // uffax, halfwidth hangul jamo
-            kCRangeSetCJK,    // uffbx, halfwidth hangul jamo
-            kCRangeSetCJK,    // uffcx, halfwidth hangul jamo
-            kCRangeSetCJK,    // uffdx, halfwidth hangul jamo
-            kCRangeSetCJK,    // uffex, fullwidth symbols
+            kCRangeSetCjk,    // uff0x, fullwidth latin
+            kCRangeSetCjk,    // uff1x, fullwidth latin
+            kCRangeSetCjk,    // uff2x, fullwidth latin
+            kCRangeSetCjk,    // uff3x, fullwidth latin
+            kCRangeSetCjk,    // uff4x, fullwidth latin
+            kCRangeSetCjk,    // uff5x, fullwidth latin
+            kCRangeSetCjk,    // uff6x, halfwidth katakana
+            kCRangeSetCjk,    // uff7x, halfwidth katakana
+            kCRangeSetCjk,    // uff8x, halfwidth katakana
+            kCRangeSetCjk,    // uff9x, halfwidth katakana
+            kCRangeSetCjk,    // uffax, halfwidth hangul jamo
+            kCRangeSetCjk,    // uffbx, halfwidth hangul jamo
+            kCRangeSetCjk,    // uffcx, halfwidth hangul jamo
+            kCRangeSetCjk,    // uffdx, halfwidth hangul jamo
+            kCRangeSetCjk,    // uffex, fullwidth symbols
             kCRangeSpecials,  // ufffx, Specials
         },
-};
+    }};
 
 // Most scripts between U+0700 and U+16FF are assigned a chunk of 128 (0x80)
 // code points so that the number of entries in the tertiary range
 // table for that range is obtained by dividing (0x1700 - 0x0700) by 128.
 // Exceptions: Ethiopic, Tibetan, Hangul Jamo and Canadian aboriginal
 // syllabaries take multiple chunks and Ogham and Runic share a single chunk.
-static const unsigned kCTertiaryTableSize = ((0x1700 - 0x0700) / 0x80);
+constexpr unsigned kCTertiaryTableSize = ((0x1700 - 0x0700) / 0x80);
 
-static const unsigned char kGUnicodeTertiaryRangeTable[kCTertiaryTableSize] = {
-    // table for 0x0700 - 0x1600
-    kCRangeSyriac,      // u070x
-    kCRangeThaana,      // u078x
-    kCRangeUnassigned,  // u080x  place holder(resolved in the 2ndary tab.)
-    kCRangeUnassigned,  // u088x  place holder(resolved in the 2ndary tab.)
-    kCRangeDevanagari,  // u090x
-    kCRangeBengali,     // u098x
-    kCRangeGurmukhi,    // u0a0x
-    kCRangeGujarati,    // u0a8x
-    kCRangeOriya,       // u0b0x
-    kCRangeTamil,       // u0b8x
-    kCRangeTelugu,      // u0c0x
-    kCRangeKannada,     // u0c8x
-    kCRangeMalayalam,   // u0d0x
-    kCRangeSinhala,     // u0d8x
-    kCRangeThai,        // u0e0x
-    kCRangeLao,         // u0e8x
-    kCRangeTibetan,     // u0f0x  place holder(resolved in the 2ndary tab.)
-    kCRangeTibetan,     // u0f8x  place holder(resolved in the 2ndary tab.)
-    kCRangeMyanmar,     // u100x
-    kCRangeGeorgian,    // u108x
-    kCRangeKorean,      // u110x  place holder(resolved in the 2ndary tab.)
-    kCRangeKorean,      // u118x  place holder(resolved in the 2ndary tab.)
-    kCRangeEthiopic,    // u120x  place holder(resolved in the 2ndary tab.)
-    kCRangeEthiopic,    // u128x  place holder(resolved in the 2ndary tab.)
-    kCRangeEthiopic,    // u130x
-    kCRangeCherokee,    // u138x
-    kCRangeCanadian,    // u140x  place holder(resolved in the 2ndary tab.)
-    kCRangeCanadian,    // u148x  place holder(resolved in the 2ndary tab.)
-    kCRangeCanadian,    // u150x  place holder(resolved in the 2ndary tab.)
-    kCRangeCanadian,    // u158x  place holder(resolved in the 2ndary tab.)
-    kCRangeCanadian,    // u160x
-    kCRangeOghamRunic,  // u168x  this contains two scripts, Ogham & Runic
+constexpr std::array<unsigned char, kCTertiaryTableSize>
+    kGUnicodeTertiaryRangeTable = {
+        // table for 0x0700 - 0x1600
+        kCRangeSyriac,      // u070x
+        kCRangeThaana,      // u078x
+        kCRangeUnassigned,  // u080x  place holder(resolved in the 2ndary tab.)
+        kCRangeUnassigned,  // u088x  place holder(resolved in the 2ndary tab.)
+        kCRangeDevanagari,  // u090x
+        kCRangeBengali,     // u098x
+        kCRangeGurmukhi,    // u0a0x
+        kCRangeGujarati,    // u0a8x
+        kCRangeOriya,       // u0b0x
+        kCRangeTamil,       // u0b8x
+        kCRangeTelugu,      // u0c0x
+        kCRangeKannada,     // u0c8x
+        kCRangeMalayalam,   // u0d0x
+        kCRangeSinhala,     // u0d8x
+        kCRangeThai,        // u0e0x
+        kCRangeLao,         // u0e8x
+        kCRangeTibetan,     // u0f0x  place holder(resolved in the 2ndary tab.)
+        kCRangeTibetan,     // u0f8x  place holder(resolved in the 2ndary tab.)
+        kCRangeMyanmar,     // u100x
+        kCRangeGeorgian,    // u108x
+        kCRangeKorean,      // u110x  place holder(resolved in the 2ndary tab.)
+        kCRangeKorean,      // u118x  place holder(resolved in the 2ndary tab.)
+        kCRangeEthiopic,    // u120x  place holder(resolved in the 2ndary tab.)
+        kCRangeEthiopic,    // u128x  place holder(resolved in the 2ndary tab.)
+        kCRangeEthiopic,    // u130x
+        kCRangeCherokee,    // u138x
+        kCRangeCanadian,    // u140x  place holder(resolved in the 2ndary tab.)
+        kCRangeCanadian,    // u148x  place holder(resolved in the 2ndary tab.)
+        kCRangeCanadian,    // u150x  place holder(resolved in the 2ndary tab.)
+        kCRangeCanadian,    // u158x  place holder(resolved in the 2ndary tab.)
+        kCRangeCanadian,    // u160x
+        kCRangeOghamRunic,  // u168x  this contains two scripts, Ogham & Runic
 };
+
+}  // namespace
 
 // A two level index is almost enough for locating a range, with the
 // exception of u03xx and u05xx. Since we don't really care about range for
@@ -413,10 +420,8 @@ unsigned FindCharUnicodeRange(UChar32 ch) {
   if (ch >= 0xFFFF)
     return 0;
 
-  unsigned range;
-
   // search the first table
-  range = kGUnicodeSubrangeTable[0][ch >> 12];
+  unsigned range = kGUnicodeSubrangeTable[0][ch >> 12];
 
   if (range < kCRangeTableBase)
     // we try to get a specific range
@@ -426,8 +431,9 @@ unsigned FindCharUnicodeRange(UChar32 ch) {
   range = kGUnicodeSubrangeTable[range - kCRangeTableBase][(ch & 0x0f00) >> 8];
   if (range < kCRangeTableBase)
     return range;
-  if (range < kCRangeTertiaryTable)
+  if (range < kCRangeTertiaryTable) {
     return kGUnicodeSubrangeTable[range - kCRangeTableBase][(ch & 0x00f0) >> 4];
+  }
 
   // Yet another table to look at : U+0700 - U+16FF : 128 code point blocks
   return kGUnicodeTertiaryRangeTable[(ch - 0x0700) >> 7];

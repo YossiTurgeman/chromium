@@ -1,10 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/performance_manager/policies/background_tab_loading_policy_helpers.h"
 
 #include <math.h>
+
+#include <algorithm>
 #include <limits>
 
 #include "base/check_op.h"
@@ -39,7 +41,7 @@ size_t CalculateMaxSimultaneousTabLoads(size_t lower_bound,
 }
 
 float CalculateAgeScore(double last_visibility_change_seconds) {
-  // TODO(crbug.com/1059341): Determine via an experiment whether tabs could
+  // TODO(crbug.com/40121561): Determine via an experiment whether tabs could
   // simply be sorted by descending order of last visibility, instead of using
   // an opaque score.
 

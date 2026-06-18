@@ -1,21 +1,23 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/task_manager/task_manager_browsertest_util.h"
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include <iomanip>
+#include <string>
+#include <string_view>
+
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/pattern.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/test_timeouts.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "base/timer/timer.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/task_manager/task_manager_tester.h"
@@ -36,8 +38,8 @@ namespace {
 // output, to assist debugging.
 class ResourceChangeObserver {
  public:
-  ResourceChangeObserver(int required_count,
-                         const base::string16& title_pattern,
+  ResourceChangeObserver(size_t required_count,
+                         const std::u16string& title_pattern,
                          ColumnSpecifier column_specifier,
                          size_t min_column_value)
       : required_count_(required_count),
@@ -78,15 +80,15 @@ class ResourceChangeObserver {
     if (!IsSatisfied())
       return;
 
-    base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE,
-                                                  run_loop_.QuitClosure());
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, run_loop_.QuitClosure());
   }
 
   bool IsSatisfied() { return CountMatches() == required_count_; }
 
-  int CountMatches() {
-    int match_count = 0;
-    for (int i = 0; i < task_manager_tester_->GetRowCount(); i++) {
+  size_t CountMatches() {
+    size_t match_count = 0;
+    for (size_t i = 0; i < task_manager_tester_->GetRowCount(); i++) {
       if (!base::MatchPattern(task_manager_tester_->GetRowTitle(i),
                               title_pattern_))
         continue;
@@ -128,8 +130,8 @@ class ResourceChangeObserver {
   }
 
   void OnTimeout() {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE,
-                                                  run_loop_.QuitClosure());
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, run_loop_.QuitClosure());
     FAIL() << "Timed out.\n" << DumpTaskManagerModel();
   }
 
@@ -145,7 +147,7 @@ class ResourceChangeObserver {
     task_manager_state_dump << "\nCurrently there are " << CountMatches()
                             << " matches.";
     task_manager_state_dump << "\nCurrent Task Manager Model is:";
-    for (int i = 0; i < task_manager_tester_->GetRowCount(); i++) {
+    for (size_t i = 0; i < task_manager_tester_->GetRowCount(); i++) {
       task_manager_state_dump
           << "\n  > " << std::setw(40) << std::left
           << base::UTF16ToASCII(task_manager_tester_->GetRowTitle(i));
@@ -158,8 +160,8 @@ class ResourceChangeObserver {
   }
 
   std::unique_ptr<TaskManagerTester> task_manager_tester_;
-  const int required_count_;
-  const base::string16 title_pattern_;
+  const size_t required_count_;
+  const std::u16string title_pattern_;
   const ColumnSpecifier column_specifier_;
   const int64_t min_column_value_;
   base::RunLoop run_loop_;
@@ -168,98 +170,142 @@ class ResourceChangeObserver {
 
 }  // namespace
 
-void WaitForTaskManagerRows(int required_count,
-                            const base::string16& title_pattern) {
-  const int column_value_dont_care = 0;
+void WaitForTaskManagerRows(size_t required_count,
+                            const std::u16string& title_pattern) {
+  constexpr size_t kColumnValueDontCare = 0;
   ResourceChangeObserver observer(required_count, title_pattern,
                                   ColumnSpecifier::COLUMN_NONE,
-                                  column_value_dont_care);
+                                  kColumnValueDontCare);
   observer.RunUntilSatisfied();
 }
 
-void WaitForTaskManagerStatToExceed(const base::string16& title_pattern,
+void WaitForTaskManagerStatToExceed(const std::u16string& title_pattern,
                                     ColumnSpecifier column_getter,
                                     size_t min_column_value) {
-  const int wait_for_one_match = 1;
-  ResourceChangeObserver observer(wait_for_one_match, title_pattern,
+  constexpr size_t kWaitForOneMatch = 1;
+  ResourceChangeObserver observer(kWaitForOneMatch, title_pattern,
                                   column_getter, min_column_value);
   observer.RunUntilSatisfied();
 }
 
-base::string16 MatchTab(const char* title) {
+std::u16string MatchTab(std::string_view title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_TAB_PREFIX,
-                                    base::ASCIIToUTF16(title));
+                                    base::UTF8ToUTF16(title));
 }
 
-base::string16 MatchAnyTab() {
+std::u16string MatchAnyTab() {
   return MatchTab("*");
 }
 
-base::string16 MatchAboutBlankTab() {
+std::u16string MatchAboutBlankTab() {
   return MatchTab("about:blank");
 }
 
-base::string16 MatchExtension(const char* title) {
+std::u16string MatchIncognitoTab(std::string_view title) {
+  return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_TAB_INCOGNITO_PREFIX,
+                                    base::UTF8ToUTF16(title));
+}
+
+std::u16string MatchAnyIncognitoTab() {
+  return MatchIncognitoTab("*");
+}
+
+std::u16string MatchExtension(const char* title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_EXTENSION_PREFIX,
                                     base::ASCIIToUTF16(title));
 }
 
-base::string16 MatchAnyExtension() {
+std::u16string MatchAnyExtension() {
   return MatchExtension("*");
 }
 
-base::string16 MatchApp(const char* title) {
+std::u16string MatchApp(const char* title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_APP_PREFIX,
                                     base::ASCIIToUTF16(title));
 }
 
-base::string16 MatchAnyApp() {
+std::u16string MatchAnyApp() {
   return MatchApp("*");
 }
 
-base::string16 MatchWebView(const char* title) {
+std::u16string MatchWebView(const char* title) {
   return l10n_util::GetStringFUTF16(
       IDS_EXTENSION_TASK_MANAGER_WEBVIEW_TAG_PREFIX, base::ASCIIToUTF16(title));
 }
 
-base::string16 MatchAnyWebView() {
+std::u16string MatchAnyWebView() {
   return MatchWebView("*");
 }
 
-base::string16 MatchBackground(const char* title) {
+std::u16string MatchBackground(const char* title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_BACKGROUND_PREFIX,
                                     base::ASCIIToUTF16(title));
 }
 
-base::string16 MatchAnyBackground() {
+std::u16string MatchAnyBackground() {
   return MatchBackground("*");
 }
 
-base::string16 MatchPrint(const char* title) {
+std::u16string MatchPrint(const char* title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_PRINT_PREFIX,
                                     base::ASCIIToUTF16(title));
 }
 
-base::string16 MatchAnyPrint() {
+std::u16string MatchAnyPrint() {
   return MatchPrint("*");
 }
 
-base::string16 MatchSubframe(const char* title) {
+std::u16string MatchSubframe(const char* title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_SUBFRAME_PREFIX,
                                     base::ASCIIToUTF16(title));
 }
 
-base::string16 MatchAnySubframe() {
+std::u16string MatchAnySubframe() {
   return MatchSubframe("*");
 }
 
-base::string16 MatchUtility(const base::string16& title) {
+std::u16string MatchUtility(const std::u16string& title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_UTILITY_PREFIX, title);
 }
 
-base::string16 MatchAnyUtility() {
-  return MatchUtility(base::ASCIIToUTF16("*"));
+std::u16string MatchAnyUtility() {
+  return MatchUtility(u"*");
 }
 
+std::u16string MatchBFCache(std::string_view title) {
+  return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_BACK_FORWARD_CACHE_PREFIX,
+                                    base::UTF8ToUTF16(title));
+}
+
+std::u16string MatchAnyBFCache() {
+  return MatchBFCache("*");
+}
+
+std::u16string MatchPrerender(std::string_view title) {
+  return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_PRERENDER_PREFIX,
+                                    base::UTF8ToUTF16(title));
+}
+
+std::u16string MatchAnyPrerender() {
+  return MatchPrerender("*");
+}
+
+std::u16string MatchFencedFrame(std::string_view title) {
+  return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_FENCED_FRAME_PREFIX,
+                                    base::UTF8ToUTF16(title));
+}
+
+std::u16string MatchAnyFencedFrame() {
+  return MatchFencedFrame("*");
+}
+
+std::u16string MatchIncognitoFencedFrame(std::string_view title) {
+  return l10n_util::GetStringFUTF16(
+      IDS_TASK_MANAGER_FENCED_FRAME_INCOGNITO_PREFIX, base::UTF8ToUTF16(title));
+}
+
+std::u16string MatchAnyIncognitoFencedFrame() {
+  return MatchIncognitoFencedFrame("*");
+}
 }  // namespace browsertest_util
 }  // namespace task_manager

@@ -1,34 +1,37 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.background_task_scheduler.internal;
 
 import android.content.SharedPreferences;
+import android.text.format.DateUtils;
 
 import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.base.ResettersForTesting;
 import org.chromium.base.ThreadUtils;
 import org.chromium.base.library_loader.LibraryLoader;
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.background_task_scheduler.BackgroundTaskSchedulerExternalUma;
 
 import java.util.HashSet;
 import java.util.Set;
 
-/**
- * Helper class to report UMA.
- */
+/** Helper class to report UMA. */
+@NullMarked
 public class BackgroundTaskSchedulerUma extends BackgroundTaskSchedulerExternalUma {
     static final String KEY_CACHED_UMA = "bts_cached_uma";
 
-    private static BackgroundTaskSchedulerUma sInstance;
+    private static @Nullable BackgroundTaskSchedulerUma sInstance;
 
     private static class CachedUmaEntry {
         private static final String SEPARATOR = ":";
-        private String mEvent;
-        private int mValue;
+        private final String mEvent;
+        private final int mValue;
         private int mCount;
 
         /**
@@ -37,11 +40,13 @@ public class BackgroundTaskSchedulerUma extends BackgroundTaskSchedulerExternalU
          * @param entry A serialized entry from preferences store.
          * @return A parsed CachedUmaEntry object, or <c>null</c> if parsing failed.
          */
-        public static CachedUmaEntry parseEntry(String entry) {
+        public static @Nullable CachedUmaEntry parseEntry(String entry) {
             if (entry == null) return null;
 
             String[] entryParts = entry.split(SEPARATOR);
-            if (entryParts.length != 3 || entryParts[0].isEmpty() || entryParts[1].isEmpty()
+            if (entryParts.length != 3
+                    || entryParts[0].isEmpty()
+                    || entryParts[1].isEmpty()
                     || entryParts[2].isEmpty()) {
                 return null;
             }
@@ -101,35 +106,41 @@ public class BackgroundTaskSchedulerUma extends BackgroundTaskSchedulerExternalU
         return sInstance;
     }
 
-    @VisibleForTesting
     public static void setInstanceForTesting(BackgroundTaskSchedulerUma instance) {
+        var oldValue = sInstance;
         sInstance = instance;
+        ResettersForTesting.register(() -> sInstance = oldValue);
     }
 
     /** Reports metrics for task scheduling and whether it was successful. */
     public void reportTaskScheduled(int taskId, boolean success) {
         if (success) {
-            cacheEvent("Android.BackgroundTaskScheduler.TaskScheduled.Success",
+            cacheEvent(
+                    "Android.BackgroundTaskScheduler.TaskScheduled.Success",
                     toUmaEnumValueFromTaskId(taskId));
         } else {
-            cacheEvent("Android.BackgroundTaskScheduler.TaskScheduled.Failure",
+            cacheEvent(
+                    "Android.BackgroundTaskScheduler.TaskScheduled.Failure",
                     toUmaEnumValueFromTaskId(taskId));
         }
     }
 
     /** Reports metrics for creating an exact tasks. */
     public void reportExactTaskCreated(int taskId) {
-        cacheEvent("Android.BackgroundTaskScheduler.ExactTaskCreated",
+        cacheEvent(
+                "Android.BackgroundTaskScheduler.ExactTaskCreated",
                 toUmaEnumValueFromTaskId(taskId));
     }
 
     /** Reports metrics for task scheduling with the expiration feature activated. */
     public void reportTaskCreatedAndExpirationState(int taskId, boolean expires) {
         if (expires) {
-            cacheEvent("Android.BackgroundTaskScheduler.TaskCreated.WithExpiration",
+            cacheEvent(
+                    "Android.BackgroundTaskScheduler.TaskCreated.WithExpiration",
                     toUmaEnumValueFromTaskId(taskId));
         } else {
-            cacheEvent("Android.BackgroundTaskScheduler.TaskCreated.WithoutExpiration",
+            cacheEvent(
+                    "Android.BackgroundTaskScheduler.TaskCreated.WithoutExpiration",
                     toUmaEnumValueFromTaskId(taskId));
         }
     }
@@ -160,45 +171,23 @@ public class BackgroundTaskSchedulerUma extends BackgroundTaskSchedulerExternalU
         cacheEvent("Android.BackgroundTaskScheduler.TaskRescheduled", 0);
     }
 
-    /** Reports metrics for migrating scheduled tasks to Protocol Buffer data format. */
-    public void reportMigrationToProto(int taskId) {
-        cacheEvent("Android.BackgroundTaskScheduler.MigrationToProto",
-                toUmaEnumValueFromTaskId(taskId));
+    @Override
+    public void reportTaskFinished(int taskId, long taskDurationMs) {
+        cacheEvent(
+                "Android.BackgroundTaskScheduler.TaskFinished2", toUmaEnumValueFromTaskId(taskId));
+        RecordHistogram.recordCustomTimesHistogram(
+                "Android.BackgroundTaskScheduler.TaskFinished."
+                        + getHistogramPatternForTaskId(taskId),
+                taskDurationMs,
+                1,
+                DateUtils.DAY_IN_MILLIS,
+                50);
     }
 
     @Override
-    public void reportTaskStartedNative(int taskId, boolean serviceManagerOnlyMode) {
+    public void reportTaskStartedNative(int taskId) {
         int umaEnumValue = toUmaEnumValueFromTaskId(taskId);
         cacheEvent("Android.BackgroundTaskScheduler.TaskLoadedNative", umaEnumValue);
-        if (serviceManagerOnlyMode) {
-            cacheEvent(
-                    "Android.BackgroundTaskScheduler.TaskLoadedNative.ReducedMode", umaEnumValue);
-        } else {
-            cacheEvent(
-                    "Android.BackgroundTaskScheduler.TaskLoadedNative.FullBrowser", umaEnumValue);
-        }
-    }
-
-    @Override
-    public void reportNativeTaskStarted(int taskId, boolean serviceManagerOnlyMode) {
-        int umaEnumValue = toUmaEnumValueFromTaskId(taskId);
-        cacheEvent("Android.NativeBackgroundTask.TaskStarted", umaEnumValue);
-        if (serviceManagerOnlyMode) {
-            cacheEvent("Android.NativeBackgroundTask.TaskStarted.ReducedMode", umaEnumValue);
-        } else {
-            cacheEvent("Android.NativeBackgroundTask.TaskStarted.FullBrowser", umaEnumValue);
-        }
-    }
-
-    @Override
-    public void reportNativeTaskFinished(int taskId, boolean serviceManagerOnlyMode) {
-        int umaEnumValue = toUmaEnumValueFromTaskId(taskId);
-        cacheEvent("Android.NativeBackgroundTask.TaskFinished", umaEnumValue);
-        if (serviceManagerOnlyMode) {
-            cacheEvent("Android.NativeBackgroundTask.TaskFinished.ReducedMode", umaEnumValue);
-        } else {
-            cacheEvent("Android.NativeBackgroundTask.TaskFinished.FullBrowser", umaEnumValue);
-        }
     }
 
     @Override

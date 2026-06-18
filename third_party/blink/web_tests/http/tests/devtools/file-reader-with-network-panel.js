@@ -1,11 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {NetworkTestRunner} from 'network_test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
 (async function() {
-  TestRunner.addResult(`Tests that FileReader's Blob request isn't shown in network panel.\n`);
-  await TestRunner.loadModule('network_test_runner');
-  await TestRunner.loadModule('console_test_runner');
+  // This await is necessary for evaluateInPagePromise to produce accurate line numbers.
+  await TestRunner.addResult(`Tests that FileReader's Blob request isn't shown in network panel.\n`);
   await TestRunner.evaluateInPagePromise(`
       function readBlob()
       {

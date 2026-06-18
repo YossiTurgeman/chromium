@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,11 +17,10 @@ std::string GenerateValidVerificationKey() {
   std::string verification(TRUST_TOKEN_MAX_PUBLIC_KEY_SIZE, 'a'),
       signing(TRUST_TOKEN_MAX_PRIVATE_KEY_SIZE, 'a');
   size_t verification_len, signing_len;
+  const TRUST_TOKEN_METHOD* method = TRUST_TOKEN_pst_v1_voprf();
   CHECK(TRUST_TOKEN_generate_key(
-      TRUST_TOKEN_experiment_v1(),
-      base::as_writable_bytes(base::make_span(signing)).data(), &signing_len,
-      signing.size(),
-      base::as_writable_bytes(base::make_span(verification)).data(),
+      method, base::as_writable_byte_span(signing).data(), &signing_len,
+      signing.size(), base::as_writable_byte_span(verification).data(),
       &verification_len, verification.size(),
       /*id=*/0));
   verification.resize(verification_len);
@@ -32,16 +31,13 @@ std::string GenerateValidVerificationKey() {
 }  // namespace
 
 TEST(BoringsslTrustTokenIssuanceCryptographer, RespectsKeyLimit) {
-  // Test that adding more than
-  // |kMaximumConcurrentlyValidTrustTokenVerificationKeys| many keys fails. This
-  // is essentially an integration test ensuring that
-  // kMaximumConcurrentlyValidTrustTokenVerificationKeys is no greater than
-  // BoringSSL's internally-configured maximum number of permitted keys.
+  // Test that adding more than the number of support keys fails.
   BoringsslTrustTokenIssuanceCryptographer cryptographer;
   ASSERT_TRUE(cryptographer.Initialize(/*issuer_configured_batch_size=*/10));
 
-  for (size_t i = 0; i < kMaximumConcurrentlyValidTrustTokenVerificationKeys;
-       ++i) {
+  const size_t max_keys = TrustTokenMaxKeysForVersion(
+      mojom::TrustTokenProtocolVersion::kPrivateStateTokenV1Voprf);
+  for (size_t i = 0; i < max_keys; ++i) {
     ASSERT_TRUE(cryptographer.AddKey(GenerateValidVerificationKey())) << i;
   }
   EXPECT_FALSE(cryptographer.AddKey(GenerateValidVerificationKey()));

@@ -1,18 +1,21 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chromecast/metrics/cast_metrics_service_client.h"
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include <string>
+#include <string_view>
+
 #include "base/command_line.h"
-#include "base/guid.h"
+#include "base/files/file_path.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/i18n/rtl.h"
 #include "base/logging.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/uuid.h"
 #include "build/build_config.h"
 #include "chromecast/base/cast_sys_info_util.h"
 #include "chromecast/base/chromecast_switches.h"
@@ -26,12 +29,13 @@
 #include "components/metrics/metrics_service.h"
 #include "components/metrics/metrics_state_manager.h"
 #include "components/metrics/net/net_metrics_log_uploader.h"
-#include "components/metrics/url_constants.h"
+#include "components/metrics/persistent_synthetic_trial_observer.h"
+#include "components/metrics/server_urls.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 #include "chromecast/base/android/dumpstate_writer.h"
 #endif
 
@@ -44,11 +48,11 @@ const int kStandardUploadIntervalMinutes = 5;
 
 const char kMetricsOldClientID[] = "user_experience_metrics.client_id";
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 const char kClientIdName[] = "Client ID";
-#endif  // defined(OS_ANDROID)
+#endif  // BUILDFLAG(IS_ANDROID)
 
-#if !defined(OS_ANDROID) && !defined(OS_FUCHSIA)
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_FUCHSIA)
 
 const struct ChannelMap {
   const char* chromecast_channel;
@@ -75,12 +79,17 @@ const struct ChannelMap {
   // Any non-empty channel name is considered beta channel
   return ::metrics::SystemProfileProto::CHANNEL_BETA;
 }
-#endif  // !defined(OS_ANDROID) && !defined(OS_FUCHSIA)
+#endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_FUCHSIA)
 
 }  // namespace
 
 void CastMetricsServiceClient::RegisterPrefs(PrefRegistrySimple* registry) {
   registry->RegisterStringPref(kMetricsOldClientID, std::string());
+}
+
+variations::SyntheticTrialRegistry*
+CastMetricsServiceClient::GetSyntheticTrialRegistry() {
+  return synthetic_trial_registry_.get();
 }
 
 ::metrics::MetricsService* CastMetricsServiceClient::GetMetricsService() {
@@ -93,7 +102,7 @@ void CastMetricsServiceClient::SetMetricsClientId(
   LOG(INFO) << "Metrics client ID set: " << client_id;
   if (delegate_)
     delegate_->SetMetricsClientId(client_id);
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   DumpstateWriter::AddDumpValue(kClientIdName, client_id);
 #endif
 }
@@ -117,7 +126,8 @@ CastMetricsServiceClient::LoadClientInfo() {
     // instead of just being FDR'ed.
     if (!pref_service_->GetString(kMetricsOldClientID).empty()) {
       // Force old client id to be regenerated. See b/9487011.
-      client_info->client_id = base::GenerateGUID();
+      client_info->client_id =
+          base::Uuid::GenerateRandomV4().AsLowercaseString();
       pref_service_->SetBoolean(prefs::kMetricsIsNewClientID, true);
       return client_info;
     }
@@ -125,7 +135,8 @@ CastMetricsServiceClient::LoadClientInfo() {
   }
 
   // Use "forced" client ID if available.
-  if (!force_client_id_.empty() && base::IsValidGUID(force_client_id_)) {
+  if (!force_client_id_.empty() &&
+      base::Uuid::ParseCaseInsensitive(force_client_id_).is_valid()) {
     client_info->client_id = force_client_id_;
     return client_info;
   }
@@ -149,13 +160,17 @@ std::string CastMetricsServiceClient::GetApplicationLocale() {
   return base::i18n::GetConfiguredLocale();
 }
 
+const network_time::NetworkTimeTracker*
+CastMetricsServiceClient::GetNetworkTimeTracker() {
+  return nullptr;
+}
+
 bool CastMetricsServiceClient::GetBrand(std::string* brand_code) {
   return false;
 }
 
 ::metrics::SystemProfileProto::Channel CastMetricsServiceClient::GetChannel() {
-
-#if defined(OS_ANDROID) || defined(OS_FUCHSIA)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FUCHSIA)
   switch (cast_sys_info_->GetBuildType()) {
     case CastSysInfo::BUILD_ENG:
       return ::metrics::SystemProfileProto::CHANNEL_UNKNOWN;
@@ -165,14 +180,17 @@ bool CastMetricsServiceClient::GetBrand(std::string* brand_code) {
       return ::metrics::SystemProfileProto::CHANNEL_STABLE;
   }
   NOTREACHED();
-  return ::metrics::SystemProfileProto::CHANNEL_UNKNOWN;
 #else
   // Use the system (or signed) release channel here to avoid the noise in the
   // metrics caused by the virtual channel which could be temporary or
   // arbitrary.
   return GetReleaseChannelFromUpdateChannelName(
       cast_sys_info_->GetSystemReleaseChannel());
-#endif  // defined(OS_ANDROID) || defined(OS_FUCHSIA)
+#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FUCHSIA)
+}
+
+bool CastMetricsServiceClient::IsExtendedStableChannel() {
+  return false;  // Not supported on Chromecast.
 }
 
 std::string CastMetricsServiceClient::GetVersionString() {
@@ -221,14 +239,14 @@ GURL CastMetricsServiceClient::GetMetricsServerUrl() {
   }
   // Note: This uses the old metrics service URL because some server-side
   // provisioning is needed to support the extra Cast traffic on the new URL.
-  return GURL(::metrics::kOldMetricsServerUrl);
+  return ::metrics::GetCastMetricsServerUrl();
 }
 
 std::unique_ptr<::metrics::MetricsLogUploader>
 CastMetricsServiceClient::CreateUploader(
     const GURL& server_url,
     const GURL& insecure_server_url,
-    base::StringPiece mime_type,
+    std::string_view mime_type,
     ::metrics::MetricsLogUploader::MetricServiceType service_type,
     const ::metrics::MetricsLogUploader::UploadCallback& on_upload_complete) {
   return std::make_unique<::metrics::NetMetricsLogUploader>(
@@ -237,27 +255,65 @@ CastMetricsServiceClient::CreateUploader(
 }
 
 base::TimeDelta CastMetricsServiceClient::GetStandardUploadInterval() {
-  return base::TimeDelta::FromMinutes(kStandardUploadIntervalMinutes);
+  return base::Minutes(kStandardUploadIntervalMinutes);
+}
+
+::metrics::MetricsLogStore::StorageLimits
+CastMetricsServiceClient::GetStorageLimits() const {
+  auto limits = ::metrics::MetricsServiceClient::GetStorageLimits();
+  if (delegate_)
+    delegate_->ApplyMetricsStorageLimits(&limits);
+  return limits;
 }
 
 bool CastMetricsServiceClient::IsConsentGiven() const {
   return pref_service_->GetBoolean(prefs::kOptInStats);
 }
 
-void CastMetricsServiceClient::EnableMetricsService(bool enabled) {
+bool CastMetricsServiceClient::IsReportingEnabled() const {
+  // Recording metrics is controlled by the opt-in stats preference
+  // (`IsConsentGiven()`), but reporting them to Google is controlled by
+  // ToS being accepted.
+  return pref_service_->GetBoolean(prefs::kTosAccepted) &&
+         ::metrics::EnabledStateProvider::IsReportingEnabled();
+}
+
+void CastMetricsServiceClient::UpdateMetricsServiceState() {
   if (!task_runner_->BelongsToCurrentThread()) {
     task_runner_->PostTask(
         FROM_HERE,
-        base::BindOnce(&CastMetricsServiceClient::EnableMetricsService,
-                       base::Unretained(this), enabled));
+        base::BindOnce(&CastMetricsServiceClient::UpdateMetricsServiceState,
+                       base::Unretained(this)));
     return;
   }
 
-  if (enabled) {
+  if (IsConsentGiven()) {
     metrics_service_->Start();
+    if (!IsReportingEnabled()) {
+      // Metrics are only reported after ToS have been accepted. If usage
+      // reporting is enabled, but ToS is not accepted, we can record metrics
+      // but must not report/upload them.
+      //
+      // `MetricsServiceImpl::Start()` will start recording and reporting.
+      // We must call `DisableReporting()` which will update the internal
+      // state machine of the reporting service and stop the upload scheduler
+      // from running.
+      metrics_service_->DisableReporting();
+    }
   } else {
     metrics_service_->Stop();
   }
+}
+
+void CastMetricsServiceClient::DisableMetricsService() {
+  if (!task_runner_->BelongsToCurrentThread()) {
+    task_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CastMetricsServiceClient::DisableMetricsService,
+                       base::Unretained(this)));
+    return;
+  }
+  metrics_service_->Stop();
 }
 
 CastMetricsServiceClient::CastMetricsServiceClient(
@@ -267,7 +323,7 @@ CastMetricsServiceClient::CastMetricsServiceClient(
     : delegate_(delegate),
       pref_service_(pref_service),
       client_info_loaded_(false),
-      task_runner_(base::ThreadTaskRunnerHandle::Get()),
+      task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       url_loader_factory_(url_loader_factory),
       cast_sys_info_(CreateSysInfo()) {}
 
@@ -282,28 +338,48 @@ void CastMetricsServiceClient::SetForceClientId(const std::string& client_id) {
   DCHECK(!client_info_loaded_)
       << "Force client ID must be set before client info is loaded.";
   force_client_id_ = client_id;
+  SetMetricsClientId(force_client_id_);
 }
 
 void CastMetricsServiceClient::InitializeMetricsService() {
   DCHECK(!metrics_state_manager_);
   metrics_state_manager_ = ::metrics::MetricsStateManager::Create(
-      pref_service_, this, base::string16(),
+      pref_service_, this, std::wstring(),
+      // Pass an empty file path since Chromecast does not use the Variations
+      // framework.
+      /*user_data_dir=*/base::FilePath(),
+      ::metrics::StartupVisibility::kUnknown, ::metrics::EntropyParams{},
       base::BindRepeating(&CastMetricsServiceClient::StoreClientInfo,
                           base::Unretained(this)),
       base::BindRepeating(&CastMetricsServiceClient::LoadClientInfo,
                           base::Unretained(this)));
+
+  // Check that the FieldTrialList already exists. This happens in
+  // CastMainDelegate::PostEarlyInitialization().
+  DCHECK(base::FieldTrialList::GetInstance());
+  // Perform additional setup that should be done after the FieldTrialList, the
+  // MetricsStateManager, and its CleanExitBeacon exist. Since the list already
+  // exists, the entropy provider type is unused.
+  // TODO(crbug.com/40791269): Make Chromecast consistent with other platforms.
+  // I.e. create the FieldTrialList and the MetricsStateManager around the same
+  // time.
+  metrics_state_manager_->InstantiateFieldTrialList();
+
+  synthetic_trial_registry_ =
+      std::make_unique<variations::SyntheticTrialRegistry>();
+  synthetic_trial_observation_.Observe(synthetic_trial_registry_.get());
+
   metrics_service_.reset(new ::metrics::MetricsService(
       metrics_state_manager_.get(), this, pref_service_));
 
   // Always create a client id as it may also be used by crash reporting,
-  // (indirectly) included in feedback, and can be queried during setup.
-  // For UMA and crash reporting, associated opt-in settings will control
-  // sending reports as directed by the user.
-  // For Setup (which also communicates the user's opt-in preferences),
-  // report the client-id and expect that setup will handle the current opt-in
-  // value.
+  // (indirectly) included in feedback, and can be queried during setup. For UMA
+  // and crash reporting, associated opt-in settings control sending reports as
+  // directed by the user. For setup (which also communicates the user's opt-in
+  // preferences), report the client id and expect setup to handle the current
+  // opt-in value.
   metrics_state_manager_->ForceClientIdCreation();
-  // Populate |client_id| to other component parts.
+  // Populate |client_id| in other component parts.
   SetMetricsClientId(metrics_state_manager_->client_id());
 }
 
@@ -312,13 +388,14 @@ void CastMetricsServiceClient::StartMetricsService() {
     delegate_->RegisterMetricsProviders(metrics_service_.get());
 
   metrics_service_->InitializeMetricsRecordingState();
-#if !defined(OS_ANDROID)
-  // Reset clean_shutdown bit after InitializeMetricsRecordingState().
-  metrics_service_->LogNeedForCleanShutdown();
-#endif  // !defined(OS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
+  // Signal that the session has not yet exited cleanly. We later signal that
+  // the session exited cleanly via MetricsService::LogCleanShutdown().
+  // TODO(crbug.com/40766116): See whether this can be called even earlier.
+  metrics_state_manager_->LogHasSessionShutdownCleanly(false);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-  if (IsReportingEnabled())
-    metrics_service_->Start();
+  UpdateMetricsServiceState();
 }
 
 void CastMetricsServiceClient::Finalize() {

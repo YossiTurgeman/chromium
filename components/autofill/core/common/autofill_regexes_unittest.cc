@@ -1,232 +1,162 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/autofill/core/common/autofill_regexes.h"
 
+// Keep these tests in sync with
+// components/autofill/core/browser/pattern_provider/default_regex_patterns_unittest.cc
+// These tests wil be superceded once the pattern provider launches.
+
 #include <stddef.h>
 
-#include "base/macros.h"
-#include "base/strings/string16.h"
-#include "base/strings/utf_string_conversions.h"
-#include "components/autofill/core/common/autofill_regex_constants.h"
-#include "testing/gtest/include/gtest/gtest.h"
+#include <string>
+#include <string_view>
 
-using base::ASCIIToUTF16;
+#include "base/memory/ptr_util.h"
+#include "base/strings/utf_string_conversions.h"
+#include "testing/gmock/include/gmock/gmock.h"
+#include "testing/gtest/include/gtest/gtest.h"
 
 namespace autofill {
 
-struct InputPatternTestCase {
-  const char* const input;
-  const char* const pattern;
-  };
+namespace {
 
-  class PositiveSampleTest
-      : public testing::TestWithParam<InputPatternTestCase> {};
-
-  TEST_P(PositiveSampleTest, SampleRegexes) {
-    auto test_case = GetParam();
-    SCOPED_TRACE(test_case.input);
-    SCOPED_TRACE(test_case.pattern);
-    EXPECT_TRUE(MatchesPattern(ASCIIToUTF16(test_case.input),
-                               ASCIIToUTF16(test_case.pattern)));
-  }
-
-  INSTANTIATE_TEST_SUITE_P(AutofillRegexes,
-                           PositiveSampleTest,
-                           testing::Values(
-                               // Empty pattern
-                               InputPatternTestCase{"", ""},
-                               InputPatternTestCase{
-                                   "Look, ma' -- a non-empty string!", ""},
-                               // Substring
-                               InputPatternTestCase{"string", "tri"},
-                               // Substring at beginning
-                               InputPatternTestCase{"string", "str"},
-                               InputPatternTestCase{"string", "^str"},
-                               // Substring at end
-                               InputPatternTestCase{"string", "ring"},
-                               InputPatternTestCase{"string", "ring$"},
-                               // Case-insensitive
-                               InputPatternTestCase{"StRiNg", "string"}));
-
-  class NegativeSampleTest
-      : public testing::TestWithParam<InputPatternTestCase> {};
-
-  TEST_P(NegativeSampleTest, SampleRegexes) {
-    auto test_case = GetParam();
-    SCOPED_TRACE(test_case.input);
-    SCOPED_TRACE(test_case.pattern);
-    EXPECT_FALSE(MatchesPattern(ASCIIToUTF16(test_case.input),
-                                ASCIIToUTF16(test_case.pattern)));
+bool MatchesRegex(std::u16string_view input,
+                  std::u16string_view regex,
+                  std::vector<std::u16string>* groups = nullptr) {
+  static base::NoDestructor<AutofillRegexCache> cache(ThreadSafe(true));
+  return autofill::MatchesRegex(input, cache->GetRegexPattern(regex), groups);
 }
 
-INSTANTIATE_TEST_SUITE_P(AutofillRegexes,
+std::optional<std::vector<std::u16string>> SplitByRegex(
+    std::u16string_view input,
+    std::string_view regex,
+    size_t max_groups) {
+  UErrorCode status = U_ZERO_ERROR;
+  std::unique_ptr<icu::RegexPattern> pattern = base::WrapUnique(
+      icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(regex),
+                                 UREGEX_CASE_INSENSITIVE, status));
+  if (U_FAILURE(status)) {
+    return std::nullopt;
+  }
+  return autofill::SplitByRegex(input, *pattern, max_groups);
+}
+
+struct InputPatternTestCase {
+  const char16_t* const input;
+  const char16_t* const pattern;
+};
+
+class PositiveSampleTest : public testing::TestWithParam<InputPatternTestCase> {
+};
+
+TEST_P(PositiveSampleTest, SampleRegexes) {
+  auto test_case = GetParam();
+  SCOPED_TRACE(base::UTF16ToUTF8(test_case.input));
+  SCOPED_TRACE(base::UTF16ToUTF8(test_case.pattern));
+  EXPECT_TRUE(MatchesRegex(test_case.input, test_case.pattern));
+}
+
+INSTANTIATE_TEST_SUITE_P(AutofillRegexesTest,
+                         PositiveSampleTest,
+                         testing::Values(
+                             // Empty pattern
+                             InputPatternTestCase{u"", u""},
+                             InputPatternTestCase{
+                                 u"Look, ma' -- a non-empty string!", u""},
+                             // Substring
+                             InputPatternTestCase{u"string", u"tri"},
+                             // Substring at beginning
+                             InputPatternTestCase{u"string", u"str"},
+                             InputPatternTestCase{u"string", u"^str"},
+                             // Substring at end
+                             InputPatternTestCase{u"string", u"ring"},
+                             InputPatternTestCase{u"string", u"ring$"},
+                             // Case-insensitive
+                             InputPatternTestCase{u"StRiNg", u"string"}));
+
+class NegativeSampleTest : public testing::TestWithParam<InputPatternTestCase> {
+};
+
+TEST_P(NegativeSampleTest, SampleRegexes) {
+  auto test_case = GetParam();
+  SCOPED_TRACE(base::UTF16ToUTF8(test_case.input));
+  SCOPED_TRACE(base::UTF16ToUTF8(test_case.pattern));
+  EXPECT_FALSE(MatchesRegex(test_case.input, test_case.pattern));
+}
+
+INSTANTIATE_TEST_SUITE_P(AutofillRegexesTest,
                          NegativeSampleTest,
                          testing::Values(
                              // Empty string
                              InputPatternTestCase{
-                                 "", "Look, ma' -- a non-empty pattern!"},
+                                 u"", u"Look, ma' -- a non-empty pattern!"},
                              // Substring
-                             InputPatternTestCase{"string", "trn"},
+                             InputPatternTestCase{u"string", u"trn"},
                              // Substring at beginning
-                             InputPatternTestCase{"string", " str"},
-                             InputPatternTestCase{"string", "^tri"},
+                             InputPatternTestCase{u"string", u" str"},
+                             InputPatternTestCase{u"string", u"^tri"},
                              // Substring at end
-                             InputPatternTestCase{"string", "ring "},
-                             InputPatternTestCase{"string", "rin$"}));
+                             InputPatternTestCase{u"string", u"ring "},
+                             InputPatternTestCase{u"string", u"rin$"}));
 
-struct InputTestCase {
-  const char* const input;
-  };
+// Tests for capture groups.
+struct CapturePatternTestCase {
+  const char16_t* const input;
+  const char16_t* const pattern;
+  const bool matches;
+  const std::vector<std::u16string> groups;
+};
 
-  class ExpirationDate2DigitYearPositive
-      : public testing::TestWithParam<InputTestCase> {};
+class CaptureTest : public testing::TestWithParam<CapturePatternTestCase> {};
 
-  TEST_P(ExpirationDate2DigitYearPositive, ExpirationDate2DigitYearRegexes) {
-    auto test_case = GetParam();
-    SCOPED_TRACE(test_case.input);
-    const base::string16 pattern = ASCIIToUTF16(kExpirationDate2DigitYearRe);
-    EXPECT_TRUE(MatchesPattern(ASCIIToUTF16(test_case.input), pattern));
-  }
-
-  INSTANTIATE_TEST_SUITE_P(
-      AutofillRegexes,
-      ExpirationDate2DigitYearPositive,
-      testing::Values(InputTestCase{"mm / yy"},
-                      InputTestCase{"mm/ yy"},
-                      InputTestCase{"mm /yy"},
-                      InputTestCase{"mm/yy"},
-                      InputTestCase{"mm - yy"},
-                      InputTestCase{"mm- yy"},
-                      InputTestCase{"mm -yy"},
-                      InputTestCase{"mm-yy"},
-                      InputTestCase{"mmyy"},
-                      // Complex two year cases
-                      InputTestCase{"Expiration Date (MM / YY)"},
-                      InputTestCase{"Expiration Date (MM/YY)"},
-                      InputTestCase{"Expiration Date (MM - YY)"},
-                      InputTestCase{"Expiration Date (MM-YY)"},
-                      InputTestCase{"Expiration Date MM / YY"},
-                      InputTestCase{"Expiration Date MM/YY"},
-                      InputTestCase{"Expiration Date MM - YY"},
-                      InputTestCase{"Expiration Date MM-YY"},
-                      InputTestCase{"expiration date yy"},
-                      InputTestCase{"Exp Date     (MM / YY)"}));
-
-  class ExpirationDate2DigitYearNegative
-      : public testing::TestWithParam<InputTestCase> {};
-
-  TEST_P(ExpirationDate2DigitYearNegative, ExpirationDate2DigitYearRegexes) {
-    auto test_case = GetParam();
-    SCOPED_TRACE(test_case.input);
-    const base::string16 pattern = ASCIIToUTF16(kExpirationDate2DigitYearRe);
-    EXPECT_FALSE(MatchesPattern(ASCIIToUTF16(test_case.input), pattern));
-  }
-
-  INSTANTIATE_TEST_SUITE_P(
-      AutofillRegexes,
-      ExpirationDate2DigitYearNegative,
-      testing::Values(InputTestCase{""},
-                      InputTestCase{"Look, ma' -- an invalid string!"},
-                      InputTestCase{"mmfavouritewordyy"},
-                      InputTestCase{"mm a yy"},
-                      InputTestCase{"mm a yyyy"},
-                      // Simple four year cases
-                      InputTestCase{"mm / yyyy"},
-                      InputTestCase{"mm/ yyyy"},
-                      InputTestCase{"mm /yyyy"},
-                      InputTestCase{"mm/yyyy"},
-                      InputTestCase{"mm - yyyy"},
-                      InputTestCase{"mm- yyyy"},
-                      InputTestCase{"mm -yyyy"},
-                      InputTestCase{"mm-yyyy"},
-                      InputTestCase{"mmyyyy"},
-                      // Complex four year cases
-                      InputTestCase{"Expiration Date (MM / YYYY)"},
-                      InputTestCase{"Expiration Date (MM/YYYY)"},
-                      InputTestCase{"Expiration Date (MM - YYYY)"},
-                      InputTestCase{"Expiration Date (MM-YYYY)"},
-                      InputTestCase{"Expiration Date MM / YYYY"},
-                      InputTestCase{"Expiration Date MM/YYYY"},
-                      InputTestCase{"Expiration Date MM - YYYY"},
-                      InputTestCase{"Expiration Date MM-YYYY"},
-                      InputTestCase{"expiration date yyyy"},
-                      InputTestCase{"Exp Date     (MM / YYYY)"}));
-
-  class ExpirationDate4DigitYearPositive
-      : public testing::TestWithParam<InputTestCase> {};
-
-  TEST_P(ExpirationDate4DigitYearPositive, ExpirationDate4DigitYearRegexes) {
-    auto test_case = GetParam();
-    const base::string16 pattern = ASCIIToUTF16(kExpirationDate4DigitYearRe);
-    SCOPED_TRACE(test_case.input);
-    EXPECT_TRUE(MatchesPattern(ASCIIToUTF16(test_case.input), pattern));
-  }
-
-  INSTANTIATE_TEST_SUITE_P(AutofillRegexes,
-                           ExpirationDate4DigitYearPositive,
-                           testing::Values(
-                               // Simple four year cases
-                               InputTestCase{"mm / yyyy"},
-                               InputTestCase{"mm/ yyyy"},
-                               InputTestCase{"mm /yyyy"},
-                               InputTestCase{"mm/yyyy"},
-                               InputTestCase{"mm - yyyy"},
-                               InputTestCase{"mm- yyyy"},
-                               InputTestCase{"mm -yyyy"},
-                               InputTestCase{"mm-yyyy"},
-                               InputTestCase{"mmyyyy"},
-                               // Complex four year cases
-                               InputTestCase{"Expiration Date (MM / YYYY)"},
-                               InputTestCase{"Expiration Date (MM/YYYY)"},
-                               InputTestCase{"Expiration Date (MM - YYYY)"},
-                               InputTestCase{"Expiration Date (MM-YYYY)"},
-                               InputTestCase{"Expiration Date MM / YYYY"},
-                               InputTestCase{"Expiration Date MM/YYYY"},
-                               InputTestCase{"Expiration Date MM - YYYY"},
-                               InputTestCase{"Expiration Date MM-YYYY"},
-                               InputTestCase{"expiration date yyyy"},
-                               InputTestCase{"Exp Date     (MM / YYYY)"}));
-
-  class ExpirationDate4DigitYearNegative
-      : public testing::TestWithParam<InputTestCase> {};
-
-  TEST_P(ExpirationDate4DigitYearNegative, ExpirationDate4DigitYearRegexes) {
-    auto test_case = GetParam();
-    const base::string16 pattern = ASCIIToUTF16(kExpirationDate4DigitYearRe);
-    SCOPED_TRACE(test_case.input);
-    EXPECT_FALSE(MatchesPattern(ASCIIToUTF16(test_case.input), pattern));
+TEST_P(CaptureTest, SampleRegexes) {
+  auto test_case = GetParam();
+  std::vector<std::u16string> groups;
+  EXPECT_EQ(test_case.matches,
+            MatchesRegex(test_case.input, test_case.pattern, &groups));
+  EXPECT_THAT(groups, testing::Eq(test_case.groups));
 }
 
 INSTANTIATE_TEST_SUITE_P(
     AutofillRegexes,
-    ExpirationDate4DigitYearNegative,
-    testing::Values(InputTestCase{""},
-                    InputTestCase{"Look, ma' -- an invalid string!"},
-                    InputTestCase{"mmfavouritewordyy"},
-                    InputTestCase{"mm a yy"},
-                    InputTestCase{"mm a yyyy"},
-                    // Simple two year cases
-                    InputTestCase{"mm / yy"},
-                    InputTestCase{"mm/ yy"},
-                    InputTestCase{"mm /yy"},
-                    InputTestCase{"mm/yy"},
-                    InputTestCase{"mm - yy"},
-                    InputTestCase{"mm- yy"},
-                    InputTestCase{"mm -yy"},
-                    InputTestCase{"mm-yy"},
-                    InputTestCase{"mmyy"},
-                    // Complex two year cases
-                    InputTestCase{"Expiration Date (MM / YY)"},
-                    InputTestCase{"Expiration Date (MM/YY)"},
-                    InputTestCase{"Expiration Date (MM - YY)"},
-                    InputTestCase{"Expiration Date (MM-YY)"},
-                    InputTestCase{"Expiration Date MM / YY"},
-                    InputTestCase{"Expiration Date MM/YY"},
-                    InputTestCase{"Expiration Date MM - YY"},
-                    InputTestCase{"Expiration Date MM-YY"},
-                    InputTestCase{"expiration date yy"},
-                    InputTestCase{"Exp Date     (MM / YY)"}));
+    CaptureTest,
+    testing::Values(
+        // Find substrings in the input.
+        CapturePatternTestCase{u"Foo abcde Bar",
+                               u"a(b+)c(d+)e",
+                               true,
+                               {u"abcde", u"b", u"d"}},
+        // Deal with optional capture groups.
+        CapturePatternTestCase{u"Foo acde Bar",
+                               u"a(b+)?c(d+)e",  // There is no b in the input.
+                               true,
+                               {u"acde", u"", u"d"}},
+        // Deal with non-matching capture groups.
+        CapturePatternTestCase{u"Foo acde Bar",
+                               u"a(b+)c(d+)e",  // There is no b in the input.
+                               false,
+                               {}}));
+
+TEST(AutofillRegexes, SplitByRegex) {
+  EXPECT_EQ(SplitByRegex(u"이영 호", "[", 10), std::nullopt);
+  EXPECT_EQ(SplitByRegex(u"이영 호", " ", 10),
+            std::vector<std::u16string>({u"이영", u"호"}));
+  EXPECT_EQ(SplitByRegex(u"이영 호", " ", 1),
+            std::vector<std::u16string>({u"이영 호"}));
+  EXPECT_EQ(SplitByRegex(u"regex", " ", 10),
+            std::vector<std::u16string>({u"regex"}));
+  EXPECT_EQ(SplitByRegex(u"1  2 3", " ", 2),
+            std::vector<std::u16string>({u"1", u" 2 3"}));
+  EXPECT_EQ(SplitByRegex(u"", " ", 10), std::nullopt);
+  EXPECT_EQ(SplitByRegex(u"    ", "\\s*", 10),
+            std::vector<std::u16string>({u"", u""}));
+  EXPECT_EQ(SplitByRegex(u"abcd", "\\s*", 10),
+            std::vector<std::u16string>({u"", u"a", u"b", u"c", u"d", u""}));
+  EXPECT_EQ(SplitByRegex(u"", "", 10), std::nullopt);
+}
+
+}  // namespace
 
 }  // namespace autofill

@@ -1,16 +1,22 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "third_party/blink/renderer/modules/webcodecs/video_decoder_broker.h"
 
 #include <memory>
 #include <vector>
 
 #include "base/run_loop.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/threading/thread.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
-#include "gpu/command_buffer/common/mailbox_holder.h"
-#include "media/base/decode_status.h"
 #include "media/base/decoder_buffer.h"
+#include "media/base/decoder_status.h"
+#include "media/base/media_switches.h"
+#include "media/base/media_util.h"
 #include "media/base/test_data_util.h"
 #include "media/base/test_helpers.h"
 #include "media/base/video_frame.h"
@@ -25,11 +31,11 @@
 #include "mojo/public/cpp/bindings/unique_receiver_set.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
-
-#include "third_party/blink/renderer/modules/webcodecs/video_decoder_broker.h"
 
 using ::testing::_;
 using ::testing::Return;
@@ -47,7 +53,7 @@ namespace {
 class FakeGpuVideoDecoder : public media::FakeVideoDecoder {
  public:
   FakeGpuVideoDecoder()
-      : FakeVideoDecoder("FakeGpuVideoDecoder" /* display_name */,
+      : FakeVideoDecoder(0 /* decoder_id */,
                          0 /* decoding_delay */,
                          13 /* max_parallel_decoding_requests */,
                          media::BytesDecodedCB()) {}
@@ -55,15 +61,21 @@ class FakeGpuVideoDecoder : public media::FakeVideoDecoder {
 
   scoped_refptr<media::VideoFrame> MakeVideoFrame(
       const media::DecoderBuffer& buffer) override {
-    gpu::MailboxHolder mailbox_holders[media::VideoFrame::kMaxPlanes];
-    mailbox_holders[0].mailbox.name[0] = 1;
-    scoped_refptr<media::VideoFrame> frame =
-        media::VideoFrame::WrapNativeTextures(
-            media::PIXEL_FORMAT_ARGB, mailbox_holders,
-            media::VideoFrame::ReleaseMailboxCB(), current_config_.coded_size(),
-            current_config_.visible_rect(), current_config_.natural_size(),
-            buffer.timestamp());
-    frame->metadata()->power_efficient = true;
+    gpu::SharedImageMetadata metadata;
+    metadata.format = viz::SinglePlaneFormat::kRGBA_8888;
+    metadata.size = current_config_.coded_size();
+    metadata.color_space = gfx::ColorSpace::CreateSRGB();
+    metadata.surface_origin = kTopLeft_GrSurfaceOrigin;
+    metadata.alpha_type = kOpaque_SkAlphaType;
+    metadata.usage = gpu::SharedImageUsageSet();
+    scoped_refptr<gpu::ClientSharedImage> shared_image =
+        gpu::ClientSharedImage::CreateForTesting(metadata);
+    scoped_refptr<media::VideoFrame> frame = media::VideoFrame::WrapSharedImage(
+        media::PIXEL_FORMAT_ARGB, shared_image, gpu::SyncToken(),
+        media::VideoFrame::ReleaseMailboxCB(), current_config_.visible_rect(),
+        current_config_.natural_size(), buffer.timestamp());
+    frame->metadata().power_efficient = true;
+    frame->set_color_space(shared_image->color_space());
     return frame;
   }
 
@@ -79,12 +91,13 @@ class FakeMojoMediaClient : public media::MojoMediaClient {
  public:
   // MojoMediaClient implementation.
   std::unique_ptr<media::VideoDecoder> CreateVideoDecoder(
-      scoped_refptr<base::SingleThreadTaskRunner> task_runner,
+      scoped_refptr<base::SequencedTaskRunner> task_runner,
       media::MediaLog* media_log,
       media::mojom::CommandBufferIdPtr command_buffer_id,
-      media::VideoDecoderImplementation implementation,
       media::RequestOverlayInfoCB request_overlay_info_cb,
-      const gfx::ColorSpace& target_color_space) override {
+      const gfx::ColorSpace& target_color_space,
+      mojo::PendingRemote<media::mojom::VideoDecoder> oop_video_decoder)
+      override {
     return std::make_unique<FakeGpuVideoDecoder>();
   }
 };
@@ -99,8 +112,8 @@ class FakeInterfaceFactory : public media::mojom::InterfaceFactory {
   void BindRequest(mojo::ScopedMessagePipeHandle handle) {
     receiver_.Bind(mojo::PendingReceiver<media::mojom::InterfaceFactory>(
         std::move(handle)));
-    receiver_.set_disconnect_handler(WTF::Bind(
-        &FakeInterfaceFactory::OnConnectionError, base::Unretained(this)));
+    receiver_.set_disconnect_handler(
+        BindOnce(&FakeInterfaceFactory::OnConnectionError, Unretained(this)));
   }
 
   void OnConnectionError() { receiver_.reset(); }
@@ -109,16 +122,27 @@ class FakeInterfaceFactory : public media::mojom::InterfaceFactory {
   // MojoVideoDecoderService allows us to reuse buffer conversion code. The
   // FakeMojoMediaClient will create a FakeGpuVideoDecoder.
   void CreateVideoDecoder(
-      mojo::PendingReceiver<media::mojom::VideoDecoder> receiver) override {
+      mojo::PendingReceiver<media::mojom::VideoDecoder> receiver,
+      mojo::PendingRemote<media::mojom::VideoDecoder> dst_video_decoder)
+      override {
     video_decoder_receivers_.Add(
-        std::make_unique<media::MojoVideoDecoderService>(&mojo_media_client_,
-                                                         &cdm_service_context_),
+        std::make_unique<media::MojoVideoDecoderService>(
+            &mojo_media_client_, &cdm_service_context_,
+            mojo::PendingRemote<media::mojom::VideoDecoder>()),
         std::move(receiver));
   }
 
   // Stub out other mojom::InterfaceFactory interfaces.
+#if BUILDFLAG(ALLOW_OOP_VIDEO_DECODER)
+  void CreateVideoDecoderWithTracker(
+      mojo::PendingReceiver<media::mojom::VideoDecoder> receiver,
+      mojo::PendingRemote<media::mojom::VideoDecoderTracker> tracker) override {
+  }
+#endif  // BUILDFLAG(ALLOW_OOP_VIDEO_DECODER)
   void CreateAudioDecoder(
       mojo::PendingReceiver<media::mojom::AudioDecoder> receiver) override {}
+  void CreateAudioEncoder(
+      mojo::PendingReceiver<media::mojom::AudioEncoder> receiver) override {}
   void CreateDefaultRenderer(
       const std::string& audio_device_id,
       mojo::PendingReceiver<media::mojom::Renderer> receiver) override {}
@@ -127,26 +151,26 @@ class FakeInterfaceFactory : public media::mojom::InterfaceFactory {
       const base::UnguessableToken& overlay_plane_id,
       mojo::PendingReceiver<media::mojom::Renderer> receiver) override {}
 #endif
-#if defined(OS_ANDROID)
-  void CreateMediaPlayerRenderer(
-      mojo::PendingRemote<media::mojom::MediaPlayerRendererClientExtension>
-          client_extension_remote,
-      mojo::PendingReceiver<media::mojom::Renderer> receiver,
-      mojo::PendingReceiver<media::mojom::MediaPlayerRendererExtension>
-          renderer_extension_receiver) override {}
+#if BUILDFLAG(IS_ANDROID)
   void CreateFlingingRenderer(
       const std::string& presentation_id,
       mojo::PendingRemote<media::mojom::FlingingRendererClientExtension>
           client_extension,
       mojo::PendingReceiver<media::mojom::Renderer> receiver) override {}
-#endif  // defined(OS_ANDROID
-  void CreateCdm(const std::string& key_system,
-                 const media::CdmConfig& cdm_config,
+#endif  // BUILDFLAG(IS_ANDROID)
+  void CreateCdm(const media::CdmConfig& cdm_config,
                  CreateCdmCallback callback) override {
-    std::move(callback).Run(mojo::NullRemote(), base::nullopt,
-                            mojo::NullRemote(), "CDM creation not supported");
+    std::move(callback).Run(mojo::NullRemote(), nullptr,
+                            media::CreateCdmStatus::kCdmNotSupported);
   }
 
+#if BUILDFLAG(IS_WIN)
+  void CreateMediaFoundationRenderer(
+      mojo::PendingRemote<media::mojom::MediaLog> media_log_remote,
+      mojo::PendingReceiver<media::mojom::Renderer> receiver,
+      mojo::PendingReceiver<media::mojom::MediaFoundationRendererExtension>
+          renderer_extension_receiver) override {}
+#endif  // BUILDFLAG(IS_WIN)
  private:
   media::MojoCdmServiceContext cdm_service_context_;
   FakeMojoMediaClient mojo_media_client_;
@@ -159,18 +183,30 @@ class FakeInterfaceFactory : public media::mojom::InterfaceFactory {
 class VideoDecoderBrokerTest : public testing::Test {
  public:
   VideoDecoderBrokerTest() = default;
+
   ~VideoDecoderBrokerTest() override {
-    if (media_thread_)
-      media_thread_->Stop();
+    // Clean up this override, or else we we fail or DCHECK in SetupMojo().
+    Platform::Current()->GetBrowserInterfaceBroker()->SetBinderForTesting(
+        media::mojom::InterfaceFactory::Name_,
+        base::RepeatingCallback<void(mojo::ScopedMessagePipeHandle)>());
+
+    // `decoder_broker` schedules deletion of internal data including decoders
+    // which keep pointers to `gpu_factories_`. The deletion is scheduled in
+    // `media_thread_`, wait for completion of all its tasks.
+    decoder_broker_.reset();
+    if (media_thread_) {
+      media_thread_->FlushForTesting();
+    }
   }
 
-  void OnInitWithClosure(base::RepeatingClosure done_cb, media::Status status) {
+  void OnInitWithClosure(base::RepeatingClosure done_cb,
+                         media::DecoderStatus status) {
     OnInit(status);
     done_cb.Run();
   }
   void OnDecodeDoneWithClosure(base::RepeatingClosure done_cb,
-                               media::DecodeStatus status) {
-    OnDecodeDone(status);
+                               media::DecoderStatus status) {
+    OnDecodeDone(std::move(status));
     done_cb.Run();
   }
 
@@ -179,8 +215,8 @@ class VideoDecoderBrokerTest : public testing::Test {
     done_cb.Run();
   }
 
-  MOCK_METHOD1(OnInit, void(media::Status status));
-  MOCK_METHOD1(OnDecodeDone, void(media::DecodeStatus));
+  MOCK_METHOD1(OnInit, void(media::DecoderStatus status));
+  MOCK_METHOD1(OnDecodeDone, void(media::DecoderStatus));
   MOCK_METHOD0(OnResetDone, void());
 
   void OnOutput(scoped_refptr<media::VideoFrame> frame) {
@@ -193,10 +229,10 @@ class VideoDecoderBrokerTest : public testing::Test {
     // that simulate gpu-accelerated decode.
     interface_factory_ = std::make_unique<FakeInterfaceFactory>();
     EXPECT_TRUE(
-        execution_context.GetBrowserInterfaceBroker().SetBinderForTesting(
+        Platform::Current()->GetBrowserInterfaceBroker()->SetBinderForTesting(
             media::mojom::InterfaceFactory::Name_,
-            WTF::BindRepeating(&FakeInterfaceFactory::BindRequest,
-                               base::Unretained(interface_factory_.get()))));
+            BindRepeating(&FakeInterfaceFactory::BindRequest,
+                          Unretained(interface_factory_.get()))));
 
     // |gpu_factories_| requires API calls be made using it's GetTaskRunner().
     // We use a separate |media_thread_| (as opposed to a separate task runner
@@ -212,38 +248,53 @@ class VideoDecoderBrokerTest : public testing::Test {
         std::make_unique<media::MockGpuVideoAcceleratorFactories>(nullptr);
     EXPECT_CALL(*gpu_factories_, GetTaskRunner())
         .WillRepeatedly(Return(media_thread_->task_runner()));
-    EXPECT_CALL(*gpu_factories_, IsDecoderConfigSupported(_, _))
+    EXPECT_CALL(*gpu_factories_, IsDecoderConfigSupported(_))
         .WillRepeatedly(
             Return(media::GpuVideoAcceleratorFactories::Supported::kTrue));
+    EXPECT_CALL(*gpu_factories_, GetChannelToken(_))
+        .WillRepeatedly(
+            [](base::OnceCallback<void(const base::UnguessableToken&)>
+                   callback) {
+              std::move(callback).Run(base::UnguessableToken());
+            });
   }
 
   void ConstructDecoder(ExecutionContext& execution_context) {
     decoder_broker_ = std::make_unique<VideoDecoderBroker>(
-        execution_context, gpu_factories_.get());
+        execution_context, gpu_factories_.get(), &null_media_log_);
   }
 
-  void InitializeDecoder(media::VideoDecoderConfig config) {
+  void InitializeDecoder(media::VideoDecoderConfig config,
+                         bool expect_success = true) {
     base::RunLoop run_loop;
-    EXPECT_CALL(*this, OnInit(media::SameStatusCode(media::OkStatus())));
+    if (expect_success) {
+      EXPECT_CALL(*this, OnInit(media::SameStatusCode(media::DecoderStatus(
+                             media::DecoderStatus::Codes::kOk))));
+    } else {
+      EXPECT_CALL(*this,
+                  OnInit(media::SameStatusCode(media::DecoderStatus(
+                      media::DecoderStatus::Codes::kUnsupportedConfig))));
+    }
     decoder_broker_->Initialize(
         config, false /*low_delay*/, nullptr /* cdm_context */,
-        WTF::Bind(&VideoDecoderBrokerTest::OnInitWithClosure,
-                  WTF::Unretained(this), run_loop.QuitClosure()),
-        WTF::BindRepeating(&VideoDecoderBrokerTest::OnOutput,
-                           WTF::Unretained(this)),
+        blink::BindOnce(&VideoDecoderBrokerTest::OnInitWithClosure,
+                        Unretained(this), run_loop.QuitClosure()),
+        blink::BindRepeating(&VideoDecoderBrokerTest::OnOutput,
+                             Unretained(this)),
         media::WaitingCB());
     run_loop.Run();
     testing::Mock::VerifyAndClearExpectations(this);
   }
 
-  void DecodeBuffer(
-      scoped_refptr<media::DecoderBuffer> buffer,
-      media::DecodeStatus expected_status = media::DecodeStatus::OK) {
+  void DecodeBuffer(scoped_refptr<media::DecoderBuffer> buffer,
+                    media::DecoderStatus::Codes expected_status =
+                        media::DecoderStatus::Codes::kOk) {
     base::RunLoop run_loop;
-    EXPECT_CALL(*this, OnDecodeDone(expected_status));
+    EXPECT_CALL(*this, OnDecodeDone(HasStatusCode(expected_status)));
     decoder_broker_->Decode(
-        buffer, WTF::Bind(&VideoDecoderBrokerTest::OnDecodeDoneWithClosure,
-                          WTF::Unretained(this), run_loop.QuitClosure()));
+        buffer,
+        blink::BindOnce(&VideoDecoderBrokerTest::OnDecodeDoneWithClosure,
+                        Unretained(this), run_loop.QuitClosure()));
     run_loop.Run();
     testing::Mock::VerifyAndClearExpectations(this);
   }
@@ -252,13 +303,15 @@ class VideoDecoderBrokerTest : public testing::Test {
     base::RunLoop run_loop;
     EXPECT_CALL(*this, OnResetDone());
     decoder_broker_->Reset(
-        WTF::Bind(&VideoDecoderBrokerTest::OnResetDoneWithClosure,
-                  WTF::Unretained(this), run_loop.QuitClosure()));
+        blink::BindOnce(&VideoDecoderBrokerTest::OnResetDoneWithClosure,
+                        Unretained(this), run_loop.QuitClosure()));
     run_loop.Run();
     testing::Mock::VerifyAndClearExpectations(this);
   }
 
-  std::string GetDisplayName() { return decoder_broker_->GetDisplayName(); }
+  media::VideoDecoderType GetDecoderType() {
+    return decoder_broker_->GetDecoderType();
+  }
 
   bool IsPlatformDecoder() { return decoder_broker_->IsPlatformDecoder(); }
 
@@ -273,25 +326,30 @@ class VideoDecoderBrokerTest : public testing::Test {
   int GetMaxDecodeRequests() { return decoder_broker_->GetMaxDecodeRequests(); }
 
  protected:
+  media::NullMediaLog null_media_log_;
+  std::unique_ptr<base::Thread> media_thread_;
+  // `gpu_factories_` must outlive `decoder_broker_` because it's stored as a
+  // raw_ptr.
+  std::unique_ptr<media::MockGpuVideoAcceleratorFactories> gpu_factories_;
   std::unique_ptr<VideoDecoderBroker> decoder_broker_;
   std::vector<scoped_refptr<media::VideoFrame>> output_frames_;
-  std::unique_ptr<media::MockGpuVideoAcceleratorFactories> gpu_factories_;
   std::unique_ptr<FakeInterfaceFactory> interface_factory_;
-  std::unique_ptr<base::Thread> media_thread_;
+
+  test::TaskEnvironment task_environment_;
 };
 
 TEST_F(VideoDecoderBrokerTest, Decode_Uninitialized) {
   V8TestingScope v8_scope;
 
   ConstructDecoder(*v8_scope.GetExecutionContext());
-  EXPECT_EQ(GetDisplayName(), "EmptyWebCodecsVideoDecoder");
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kBroker);
 
   // No call to Initialize. Other APIs should fail gracefully.
 
   DecodeBuffer(media::ReadTestDataFile("vp8-I-frame-320x120"),
-               media::DecodeStatus::DECODE_ERROR);
+               media::DecoderStatus::Codes::kNotInitialized);
   DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer(),
-               media::DecodeStatus::DECODE_ERROR);
+               media::DecoderStatus::Codes::kNotInitialized);
   ASSERT_EQ(0U, output_frames_.size());
 
   ResetDecoder();
@@ -301,10 +359,10 @@ TEST_F(VideoDecoderBrokerTest, Decode_NoMojoDecoder) {
   V8TestingScope v8_scope;
 
   ConstructDecoder(*v8_scope.GetExecutionContext());
-  EXPECT_EQ(GetDisplayName(), "EmptyWebCodecsVideoDecoder");
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kBroker);
 
-  InitializeDecoder(media::TestVideoConfig::Normal());
-  EXPECT_NE(GetDisplayName(), "EmptyWebCodecsVideoDecoder");
+  InitializeDecoder(media::TestVideoConfig::Normal(media::VideoCodec::kVP8));
+  EXPECT_NE(GetDecoderType(), media::VideoDecoderType::kBroker);
 
   DecodeBuffer(media::ReadTestDataFile("vp8-I-frame-320x120"));
   DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer());
@@ -319,22 +377,114 @@ TEST_F(VideoDecoderBrokerTest, Decode_NoMojoDecoder) {
   ResetDecoder();
 }
 
+// Makes sure that no software decoder is returned if we required acceleration,
+// even if this means that no decoder is selected.
+TEST_F(VideoDecoderBrokerTest, Init_RequireAcceleration) {
+  V8TestingScope v8_scope;
+
+  ConstructDecoder(*v8_scope.GetExecutionContext());
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kBroker);
+
+  decoder_broker_->SetHardwarePreference(HardwarePreference::kPreferHardware);
+
+  InitializeDecoder(media::TestVideoConfig::Normal(media::VideoCodec::kVP8),
+                    /*expect_success*/ false);
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kBroker);
+}
+
 #if BUILDFLAG(ENABLE_MOJO_VIDEO_DECODER)
+TEST_F(VideoDecoderBrokerTest, Init_DenyAcceleration) {
+  V8TestingScope v8_scope;
+  ExecutionContext* execution_context = v8_scope.GetExecutionContext();
+
+  SetupMojo(*execution_context);
+  ConstructDecoder(*execution_context);
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kBroker);
+
+  decoder_broker_->SetHardwarePreference(HardwarePreference::kPreferSoftware);
+
+  // Use an extra-large video to push us towards a hardware decoder.
+  media::VideoDecoderConfig config = media::TestVideoConfig::ExtraLarge();
+  InitializeDecoder(config);
+  EXPECT_FALSE(IsPlatformDecoder());
+}
+
+TEST_F(VideoDecoderBrokerTest, Decode_MultipleAccelerationPreferences) {
+  base::test::ScopedFeatureList scoped_features;
+  scoped_features.InitWithFeatures({media::kResolutionBasedDecoderPriority,
+                                    media::kWebCodecsDecoderFlushOptimizations},
+                                   {});
+  V8TestingScope v8_scope;
+  ExecutionContext* execution_context = v8_scope.GetExecutionContext();
+
+  SetupMojo(*execution_context);
+  ConstructDecoder(*execution_context);
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kBroker);
+
+  // Make sure we can decode software only.
+  decoder_broker_->SetHardwarePreference(HardwarePreference::kPreferSoftware);
+  InitializeDecoder(media::TestVideoConfig::Normal(media::VideoCodec::kVP8));
+  DecodeBuffer(media::ReadTestDataFile("vp8-I-frame-320x120"));
+  DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer());
+  ASSERT_EQ(1U, output_frames_.size());
+
+  // Make sure we can decoder with hardware only.
+  decoder_broker_->SetHardwarePreference(HardwarePreference::kPreferHardware);
+
+  // Use an extra-large video to ensure we don't get a software decoder.
+  media::VideoDecoderConfig large_config = media::TestVideoConfig::ExtraLarge();
+  InitializeDecoder(large_config);
+  DecodeBuffer(media::CreateFakeVideoBufferForTest(
+      large_config, base::TimeDelta(), base::Milliseconds(33)));
+  DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer());
+  ASSERT_EQ(2U, output_frames_.size());
+
+  // Make sure we can decode with both HW or SW as appropriate.
+  decoder_broker_->SetHardwarePreference(HardwarePreference::kNoPreference);
+
+  // Use a large frame to force hardware decode.
+  InitializeDecoder(large_config);
+  DecodeBuffer(media::CreateFakeVideoBufferForTest(
+      large_config, base::TimeDelta(), base::Milliseconds(33)));
+  DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer());
+  ASSERT_EQ(3U, output_frames_.size());
+  EXPECT_TRUE(IsPlatformDecoder());
+
+  // Reinitializing with a smaller resolution will prefer existing decoder.
+  auto normal_config = media::TestVideoConfig::Normal(media::VideoCodec::kVP8);
+  InitializeDecoder(normal_config);
+  DecodeBuffer(media::CreateFakeVideoBufferForTest(
+      normal_config, base::TimeDelta(), base::Milliseconds(33)));
+  DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer());
+  ASSERT_EQ(4U, output_frames_.size());
+  EXPECT_TRUE(IsPlatformDecoder());
+
+  // But changing the preference to kSoftware will switch back to software.
+  decoder_broker_->SetHardwarePreference(HardwarePreference::kPreferSoftware);
+  InitializeDecoder(normal_config);
+  DecodeBuffer(media::ReadTestDataFile("vp8-I-frame-320x120"));
+  DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer());
+  ASSERT_EQ(5U, output_frames_.size());
+  EXPECT_FALSE(IsPlatformDecoder());
+
+  ResetDecoder();
+}
+
 TEST_F(VideoDecoderBrokerTest, Decode_WithMojoDecoder) {
   V8TestingScope v8_scope;
   ExecutionContext* execution_context = v8_scope.GetExecutionContext();
 
   SetupMojo(*execution_context);
   ConstructDecoder(*execution_context);
-  EXPECT_EQ(GetDisplayName(), "EmptyWebCodecsVideoDecoder");
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kBroker);
 
-  // Use an extra-large video to ensure we don't get a software decoder
+  // Use an extra-large video to ensure we don't get a software decoder.
   media::VideoDecoderConfig config = media::TestVideoConfig::ExtraLarge();
   InitializeDecoder(config);
-  EXPECT_EQ(GetDisplayName(), "MojoVideoDecoder");
+  EXPECT_EQ(GetDecoderType(), media::VideoDecoderType::kTesting);
 
-  DecodeBuffer(media::CreateFakeVideoBufferForTest(
-      config, base::TimeDelta(), base::TimeDelta::FromMilliseconds(33)));
+  DecodeBuffer(media::CreateFakeVideoBufferForTest(config, base::TimeDelta(),
+                                                   base::Milliseconds(33)));
   DecodeBuffer(media::DecoderBuffer::CreateEOSBuffer());
   ASSERT_EQ(1U, output_frames_.size());
 

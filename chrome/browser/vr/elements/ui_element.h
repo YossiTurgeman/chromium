@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,12 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "cc/animation/animation_target.h"
-#include "cc/animation/transform_operations.h"
-#include "chrome/browser/vr/animation.h"
-#include "chrome/browser/vr/audio_delegate.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/vr/databinding/binding_base.h"
 #include "chrome/browser/vr/elements/corner_radii.h"
 #include "chrome/browser/vr/elements/draw_phase.h"
@@ -23,29 +18,30 @@
 #include "chrome/browser/vr/elements/ui_element_type.h"
 #include "chrome/browser/vr/frame_lifecycle.h"
 #include "chrome/browser/vr/model/camera_model.h"
-#include "chrome/browser/vr/model/reticle_model.h"
-#include "chrome/browser/vr/model/sounds.h"
 #include "chrome/browser/vr/target_property.h"
 #include "chrome/browser/vr/vr_ui_export.h"
+#include "ui/gfx/animation/keyframe/animation_curve.h"
+#include "ui/gfx/animation/keyframe/keyframe_effect.h"
 #include "ui/gfx/geometry/point3_f.h"
 #include "ui/gfx/geometry/quaternion.h"
 #include "ui/gfx/geometry/rect_f.h"
 #include "ui/gfx/geometry/size_f.h"
+#include "ui/gfx/geometry/transform.h"
+#include "ui/gfx/geometry/transform_operations.h"
 #include "ui/gfx/geometry/vector3d_f.h"
-#include "ui/gfx/transform.h"
 
 namespace base {
 class TimeTicks;
 }
 
+namespace gfx {
+class KeyframeModel;
+}  // namespace gfx
+
 namespace vr {
 
-class KeyframeModel;
-class SkiaSurfaceProvider;
 class UiElementRenderer;
-class InputEvent;
 struct CameraModel;
-struct EditedText;
 
 enum LayoutAlignment {
   NONE = 0,
@@ -55,50 +51,16 @@ enum LayoutAlignment {
   BOTTOM,
 };
 
-struct VR_UI_EXPORT EventHandlers {
-  EventHandlers();
-  EventHandlers(const EventHandlers& other);
-  ~EventHandlers();
-  base::RepeatingCallback<void()> hover_enter;
-  base::RepeatingCallback<void()> hover_leave;
-  base::RepeatingCallback<void(const gfx::PointF&)> hover_move;
-  base::RepeatingCallback<void()> button_down;
-  base::RepeatingCallback<void()> button_up;
-  base::RepeatingCallback<void(const gfx::PointF&)> touch_move;
-  base::RepeatingCallback<void(bool)> focus_change;
-};
-
-struct HitTestRequest {
-  gfx::Point3F ray_origin;
-  gfx::Point3F ray_target;
-  float max_distance_to_plane = 1000.f;
-};
-
-// The result of performing a hit test.
-struct HitTestResult {
-  enum Type {
-    // The given ray does not pass through the element.
-    kNone = 0,
-    // The given ray does not pass through the element, but passes through the
-    // element's plane.
-    kHitsPlane,
-    // The given ray passes through the element.
-    kHits,
-  };
-
-  Type type;
-  // The fields below are not set if the result Type is kNone.
-  // The hit position in the element's local coordinate space.
-  gfx::PointF local_hit_point;
-  // The hit position relative to the world.
-  gfx::Point3F hit_point;
-  // The distance from the ray origin to the hit position.
-  float distance_to_plane;
-};
-
-class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
+class VR_UI_EXPORT UiElement : public gfx::FloatAnimationCurve::Target,
+                               public gfx::TransformAnimationCurve::Target,
+                               public gfx::SizeAnimationCurve::Target,
+                               public gfx::ColorAnimationCurve::Target {
  public:
   UiElement();
+
+  UiElement(const UiElement&) = delete;
+  UiElement& operator=(const UiElement&) = delete;
+
   ~UiElement() override;
 
   enum OperationIndex {
@@ -109,7 +71,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
 
   UiElementName name() const { return name_; }
   void SetName(UiElementName name);
-  virtual void OnSetName();
 
   UiElementName owner_name_for_test() const { return owner_name_for_test_; }
   void set_owner_name_for_test(UiElementName name) {
@@ -118,12 +79,9 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
 
   UiElementType type() const { return type_; }
   void SetType(UiElementType type);
-  virtual void OnSetType();
-  UiElement* GetDescendantByType(UiElementType type);
 
   DrawPhase draw_phase() const { return draw_phase_; }
   void SetDrawPhase(DrawPhase draw_phase);
-  virtual void OnSetDrawPhase();
 
   void UpdateBindings();
 
@@ -140,55 +98,15 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
 
   virtual void UpdateTexture();
 
-  bool IsHitTestable() const;
-
   virtual void Render(UiElementRenderer* renderer,
                       const CameraModel& model) const;
 
-  virtual void Initialize(SkiaSurfaceProvider* provider);
-
-  // Controller interaction methods.
-  virtual void OnHoverEnter(const gfx::PointF& position,
-                            base::TimeTicks timestamp);
-  virtual void OnHoverLeave(base::TimeTicks timestamp);
-  virtual void OnHoverMove(const gfx::PointF& position,
-                           base::TimeTicks timestamp);
-  virtual void OnButtonDown(const gfx::PointF& position,
-                            base::TimeTicks timestamp);
-  virtual void OnButtonUp(const gfx::PointF& position,
-                          base::TimeTicks timestamp);
-  virtual void OnTouchMove(const gfx::PointF& position,
-                           base::TimeTicks timestamp);
-  virtual void OnFlingCancel(std::unique_ptr<InputEvent> gesture,
-                             const gfx::PointF& position);
-  virtual void OnScrollBegin(std::unique_ptr<InputEvent> gesture,
-                             const gfx::PointF& position);
-  virtual void OnScrollUpdate(std::unique_ptr<InputEvent> gesture,
-                              const gfx::PointF& position);
-  virtual void OnScrollEnd(std::unique_ptr<InputEvent> gesture,
-                           const gfx::PointF& position);
-
-  // Whether the point (relative to the origin of the element), should be
-  // considered on the element. All elements are considered rectangular by
-  // default though elements may override this function to handle arbitrary
-  // shapes. Points within the rectangular area are mapped from 0:1 as follows,
-  // though will extend outside this range when outside of the element:
-  // [(0.0, 0.0), (1.0, 0.0)
-  //  (0.0, 1.0), (1.0, 1.0)]
-  virtual bool LocalHitTest(const gfx::PointF& point) const;
-
-  // Performs a hit test for the ray supplied in the request and populates the
-  // result. The ray is in the world coordinate space.
-  virtual void HitTest(const HitTestRequest& request,
-                       HitTestResult* result) const;
+  virtual void Initialize();
 
   int id() const { return id_; }
 
   // If true, the object has a non-zero opacity.
   bool IsVisible() const;
-
-  // If true, the object is both visible and opaque.
-  bool IsVisibleAndOpaque() const;
 
   // For convenience, sets opacity to |opacity_when_visible_|.
   virtual void SetVisible(bool visible);
@@ -204,34 +122,8 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
     requires_layout_ = requires_layout;
   }
 
-  bool hit_testable() const { return hit_testable_; }
-  void set_hit_testable(bool hit_testable) { hit_testable_ = hit_testable; }
-
-  bool focusable() const { return focusable_; }
-  void set_focusable(bool focusable);
-  virtual void OnSetFocusable();
-
-  bool scrollable() const { return scrollable_; }
-  void set_scrollable(bool scrollable) { scrollable_ = scrollable; }
-
-  bool bubble_events() const { return bubble_events_; }
-  void set_bubble_events(bool bubble_events) { bubble_events_ = bubble_events; }
-
-  void set_event_handlers(const EventHandlers& event_handlers) {
-    event_handlers_ = event_handlers;
-  }
-
-  // Editable elements should override these functions.
-  virtual void OnFocusChanged(bool focused);
-  virtual void OnInputEdited(const EditedText& info);
-  virtual void OnInputCommitted(const EditedText& info);
-  virtual void RequestFocus();
-  virtual void RequestUnfocus();
-  virtual void UpdateInput(const EditedText& info);
-
   gfx::SizeF size() const;
   void SetSize(float width, float hight);
-  virtual void OnSetSize(const gfx::SizeF& size);
 
   // Setter and getter for the clip rect in relative tex coordinates, the same
   // system used for hit testing.
@@ -251,7 +143,7 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   // Returns the target value of the animation if the corresponding property is
   // being animated, or the current value otherwise.
   gfx::SizeF GetTargetSize() const;
-  cc::TransformOperations GetTargetTransform() const;
+  gfx::TransformOperations GetTargetTransform() const;
   float GetTargetOpacity() const;
 
   float opacity() const { return opacity_; }
@@ -259,7 +151,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
 
   CornerRadii corner_radii() const { return corner_radii_; }
   void SetCornerRadii(const CornerRadii& radii);
-  virtual void OnSetCornerRadii(const CornerRadii& radii);
 
   float corner_radius() const {
     DCHECK(corner_radii_.AllEqual());
@@ -276,8 +167,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   void set_computed_opacity(float computed_opacity) {
     computed_opacity_ = computed_opacity;
   }
-
-  virtual float ComputedAndLocalOpacityForTest() const;
 
   LayoutAlignment x_anchoring() const { return x_anchoring_; }
   void set_x_anchoring(LayoutAlignment x_anchoring) {
@@ -303,7 +192,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
     y_centering_ = y_centering;
   }
 
-  bool bounds_contain_children() const { return bounds_contain_children_; }
   void set_bounds_contain_children(bool bounds_contain_children) {
     bounds_contain_children_ = bounds_contain_children;
   }
@@ -319,11 +207,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   void set_contributes_to_parent_bounds(bool value) {
     contributes_to_parent_bounds_ = value;
   }
-
-  float left_padding() const { return left_padding_; }
-  float right_padding() const { return right_padding_; }
-  float top_padding() const { return top_padding_; }
-  float bottom_padding() const { return bottom_padding_; }
 
   void set_padding(float x, float y) {
     left_padding_ = x;
@@ -368,55 +251,25 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   const UiElement* parent() const { return parent_; }
 
   void AddBinding(std::unique_ptr<BindingBase> binding);
-  const std::vector<std::unique_ptr<BindingBase>>& bindings() {
-    return bindings_;
-  }
 
   gfx::Point3F GetCenter() const;
-  gfx::Vector3dF GetNormal() const;
 
-  // Computes the distance from |ray_origin| to this rectangles's plane, along
-  // |ray_vector|. Returns true and populates |distance| if the calculation is
-  // possible, and false if the ray is parallel to the plane.
-  bool GetRayDistance(const gfx::Point3F& ray_origin,
-                      const gfx::Vector3dF& ray_vector,
-                      float* distance) const;
-
-  // Projects a 3D world point onto the X and Y axes of the transformed
-  // rectangle, returning 2D coordinates relative to the un-transformed unit
-  // rectangle. This allows beam intersection points to be mapped to sprite
-  // pixel coordinates. Points that fall onto the rectangle will generate X and
-  // Y values on the interval [-0.5, 0.5].
-  gfx::PointF GetUnitRectangleCoordinates(
-      const gfx::Point3F& world_point) const;
-
-  // cc::AnimationTarget
-  void NotifyClientFloatAnimated(float value,
-                                 int target_property_id,
-                                 cc::KeyframeModel* keyframe_model) override;
-  void NotifyClientTransformOperationsAnimated(
-      const cc::TransformOperations& operations,
-      int target_property_id,
-      cc::KeyframeModel* keyframe_model) override;
-  void NotifyClientSizeAnimated(const gfx::SizeF& size,
-                                int target_property_id,
-                                cc::KeyframeModel* keyframe_model) override;
-  void NotifyClientFilterAnimated(const cc::FilterOperations& filter,
-                                  int target_property_id,
-                                  cc::KeyframeModel* keyframe_model) override {}
-  void NotifyClientColorAnimated(SkColor color,
-                                 int target_property_id,
-                                 cc::KeyframeModel* keyframe_model) override {}
-  void NotifyClientScrollOffsetAnimated(
-      const gfx::ScrollOffset& scroll_offset,
-      int target_property_id,
-      cc::KeyframeModel* keyframe_model) override {}
+  void OnFloatAnimated(const float& value,
+                       int target_property_id,
+                       gfx::KeyframeModel* keyframe_model) override;
+  void OnTransformAnimated(const gfx::TransformOperations& operations,
+                           int target_property_id,
+                           gfx::KeyframeModel* keyframe_model) override;
+  void OnSizeAnimated(const gfx::SizeF& size,
+                      int target_property_id,
+                      gfx::KeyframeModel* keyframe_model) override;
+  void OnColorAnimated(const SkColor& size,
+                       int target_property_id,
+                       gfx::KeyframeModel* keyframe_model) override;
 
   void SetTransitionedProperties(const std::set<TargetProperty>& properties);
-  void SetTransitionDuration(base::TimeDelta delta);
 
-  void AddKeyframeModel(std::unique_ptr<cc::KeyframeModel> keyframe_model);
-  void RemoveKeyframeModel(int keyframe_model_id);
+  void AddKeyframeModel(std::unique_ptr<gfx::KeyframeModel> keyframe_model);
   void RemoveKeyframeModels(int target_property);
   bool IsAnimatingProperty(TargetProperty property) const;
 
@@ -435,12 +288,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   // been determined.  The default implementation applies anchoring.
   virtual void LayOutNonContributingChildren();
 
-  // Recursive method that clips element subtrees, using the clip rect set.
-  void ClipChildren();
-
-  UiElement* FirstLaidOutChild() const;
-  UiElement* LastLaidOutChild() const;
-
   virtual gfx::Transform LocalTransform() const;
   virtual gfx::Transform GetTargetLocalTransform() const;
 
@@ -453,19 +300,11 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   }
 
   void set_update_phase(UpdatePhase phase) { update_phase_ = phase; }
-  UpdatePhase update_phase() const { return update_phase_; }
 
   // This is true for all elements that respect the given view model matrix. If
   // this is ignored (say for head-locked elements that draw in screen space),
   // then this function should return false.
   virtual bool IsWorldPositioned() const;
-
-  bool updated_visiblity_this_frame() const {
-    return updated_visibility_this_frame_;
-  }
-
-  void set_cursor_type(CursorType cursor_type) { cursor_type_ = cursor_type; }
-  CursorType cursor_type() const { return cursor_type_; }
 
   std::string DebugName() const;
 
@@ -484,18 +323,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   virtual void DumpGeometry(std::ostringstream* os) const;
 #endif
 
-  // Set the sounds that play when an applicable handler is executed.  Elements
-  // that override element hover and click methods must manage their own sounds.
-  void SetSounds(Sounds sounds, AudioDelegate* delegate);
-
-  bool clips_descendants() const { return clips_descendants_; }
-  void set_clip_descendants(bool clips) { clips_descendants_ = clips; }
-
-  bool resizable_by_layout() const { return resizable_by_layout_; }
-  void set_resizable_by_layout(bool resizable) {
-    resizable_by_layout_ = resizable;
-  }
-
   bool descendants_updated() const { return descendants_updated_; }
   void set_descendants_updated(bool updated) { descendants_updated_ = updated; }
 
@@ -505,27 +332,16 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   }
 
  protected:
-  // This method may be overridden by elements that have custom layout
-  // requirements.
-  virtual bool SizeAndLayOutChildren();
 
-  gfx::RectF GetAbsoluteClipRect() const;
-
-  Animation& animation() { return animation_; }
-
-  virtual const Sounds& GetSounds() const;
-
-  virtual bool ShouldUpdateWorldSpaceTransform(
-      bool parent_transform_changed) const;
+  gfx::KeyframeEffect& animator() { return animator_; }
 
   void set_world_space_transform_dirty() {
     world_space_transform_dirty_ = true;
   }
 
-  EventHandlers event_handlers_;
-
  private:
-  virtual void OnUpdatedWorldSpaceTransform();
+  bool SizeAndLayOutChildren();
+  bool ShouldUpdateWorldSpaceTransform(bool parent_transform_changed) const;
 
   // Returns true if the element has been updated in any visible way.
   virtual bool OnBeginFrame(const gfx::Transform& head_pose);
@@ -534,27 +350,10 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   // ancestors), or its animation will cause it to become locally visible.
   bool IsOrWillBeLocallyVisible() const;
 
-  // Recursive method that clips element subtrees, given that a parent is
-  // clipped. Receives a clipping rect in absolute scale.
-  void ClipChildren(const gfx::RectF& abs_clip);
-
   virtual gfx::RectF ComputeContributingChildrenBounds();
 
   // Valid IDs are non-negative.
   int id_ = -1;
-
-  // If false, the reticle will not hit the element, even if visible.
-  bool hit_testable_ = false;
-
-  // If false, clicking on the element doesn't give it focus.
-  bool focusable_ = true;
-
-  // A signal to the input routing machinery that this element accepts scrolls.
-  bool scrollable_ = false;
-
-  // If true, events such as OnButtonDown, OnHoverEnter, etc, get bubbled up the
-  // parent chain.
-  bool bubble_events_ = false;
 
   // The size of the object.  This does not affect children.
   gfx::SizeF size_;
@@ -563,9 +362,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   // size, with the origin at its center. Use the getter and setter to
   // manipulate the rect in relative tex coordinates.
   gfx::RectF clip_rect_ = {-0.5f, 0.5f, 1.0f, 1.0f};
-
-  // Indicates that this element clips its descendants with its size.
-  bool clips_descendants_ = false;
 
   // The local orgin of the element. This can be updated, say, so that an
   // element can contain its children, even if they are not centered about its
@@ -620,7 +416,7 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   float top_padding_ = 0.0f;
   float bottom_padding_ = 0.0f;
 
-  Animation animation_;
+  gfx::KeyframeEffect animator_;
 
   DrawPhase draw_phase_ = kPhaseNone;
 
@@ -648,20 +444,20 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   // stored as a list of operations rather than a baked transform to make
   // transitions easier to implement (you may, for example, want to animate just
   // the translation, but leave the rotation and scale in tact).
-  cc::TransformOperations transform_operations_;
+  gfx::TransformOperations transform_operations_;
 
   // This is a cached version of the local transform.
   gfx::Transform local_transform_;
 
   // This is set by the parent and is combined into LocalTransform()
-  cc::TransformOperations layout_offset_;
+  gfx::TransformOperations layout_offset_;
 
   // This is the combined, local to world transform. It includes
   // |inheritable_transform_|, |transform_|, and anchoring adjustments.
   gfx::Transform world_space_transform_;
   bool world_space_transform_dirty_ = false;
 
-  UiElement* parent_ = nullptr;
+  raw_ptr<UiElement> parent_ = nullptr;
   std::vector<std::unique_ptr<UiElement>> children_;
 
   // This is true if a descendant has been added and the total list has not yet
@@ -671,16 +467,6 @@ class VR_UI_EXPORT UiElement : public cc::AnimationTarget {
   std::vector<std::unique_ptr<BindingBase>> bindings_;
 
   UpdatePhase update_phase_ = kClean;
-
-  AudioDelegate* audio_delegate_ = nullptr;
-  Sounds sounds_;
-
-  // Indicates that this element may be resized by parent layout elements.
-  bool resizable_by_layout_ = false;
-
-  CursorType cursor_type_ = kCursorDefault;
-
-  DISALLOW_COPY_AND_ASSIGN(UiElement);
 };
 
 }  // namespace vr

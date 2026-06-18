@@ -1,12 +1,14 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_WM_GESTURES_WM_GESTURE_HANDLER_H_
 #define ASH_WM_GESTURES_WM_GESTURE_HANDLER_H_
 
+#include <optional>
+
 #include "ash/ash_export.h"
-#include "base/optional.h"
+#include "components/prefs/pref_registry_simple.h"
 
 namespace ui {
 class ScrollEvent;
@@ -14,9 +16,10 @@ class ScrollEvent;
 
 namespace ash {
 
-// This handles 3-finger touchpad scroll events to enter/exit overview mode and
-// move the overview highlight if it is visible. This class also handles
-// 4-finger horizontal scrolls to switch desks.
+// This handles the following interactions:
+//   - 3-finger touchpad scroll events to enter/exit overview mode and move the
+//   overview focus ring if it is visible.
+//   - 4-finger horizontal scrolls to switch desks.
 class ASH_EXPORT WmGestureHandler {
  public:
   // The thresholds of performing a wm action with a touchpad three or four
@@ -24,15 +27,24 @@ class ASH_EXPORT WmGestureHandler {
   static constexpr float kVerticalThresholdDp = 300.f;
   static constexpr float kHorizontalThresholdDp = 330.f;
 
+  // The amount in trackpad units the fingers must move in a direction before a
+  // continuous gesture animation is started. This is to minimize accidental
+  // scrolls.
+  static constexpr int kContinuousGestureMoveThresholdDp = 5;
+
+  // The amount that a user must have scrolled, after ending a vertical
+  // continuous gesture, to enter overview mode. Otherwise, animate back to
+  // the original state before the gesture began.
+  static constexpr int kEnterOverviewModeThresholdDp = kVerticalThresholdDp / 2;
+
   WmGestureHandler();
   WmGestureHandler(const WmGestureHandler&) = delete;
   WmGestureHandler& operator=(const WmGestureHandler&) = delete;
   virtual ~WmGestureHandler();
 
   // Processes a scroll event and may switch desks, start overview or move the
-  // overivew highlight. Returns true if the event has been handled and should
-  // not be processed further, false otherwise. Forwards events to
-  // DesksController if |is_enhanced_desk_animations_| is true.
+  // overview focus ring. Returns true if the event has been handled and should
+  // not be processed further, false otherwise.
   bool ProcessScrollEvent(const ui::ScrollEvent& event);
 
  private:
@@ -47,33 +59,34 @@ class ASH_EXPORT WmGestureHandler {
 
     // Continuous gestures need to first pass a threshold before we update the
     // UI. We still update this struct before that happens.
-    bool continuous_gesture_started = false;
+    bool horizontal_continuous_gesture_started = false;
+    bool vertical_continuous_gesture_started = false;
   };
+
+  // Called by ProcessScrollEvent(). Depending on |finger_count|, may switch
+  // desks, start overview or move the overview highlight. Returns true if the
+  // event has been handled and should not be processed further, false
+  // otherwise. Forwards events to DesksController.
+  bool ProcessEventImpl(int finger_count, float delta_x, float delta_y);
 
   // Called when a scroll is ended. Returns true if the scroll is processed.
   bool EndScroll();
+
+  // Called when a scroll is updated. Returns true if the scroll is processed.
+  bool UpdateScrollForContinuousOverviewAnimation();
 
   // Tries to move the overview selector. Returns true if successful. Called in
   // the middle of scrolls and when scrolls have ended.
   bool MoveOverviewSelection(int finger_count, float scroll_x, float scroll_y);
 
-  // Tries to move the window cycle list selector. Returns true if successful.
-  // Called in the middle of scrolls and when scrolls have ended.
-  bool MoveWindowCycleListSelection(int finger_count,
-                                    float scroll_x,
-                                    float scroll_y);
-
-  // Returns whether or not the selector for a given session of overview/window
-  // cycle list should horizontally scroll.
-  bool ShouldHorizontallyScrollSelector(bool in_session,
-                                        float scroll_x,
-                                        float scroll_y);
+  // Returns whether or not a given session of overview should horizontally
+  // scroll.
+  bool ShouldHorizontallyScroll(bool in_session,
+                                float scroll_x,
+                                float scroll_y);
 
   // Contains the data during a scroll session. Empty is no scroll is underway.
-  base::Optional<ScrollData> scroll_data_;
-
-  // True when the enhanced desk animations feature is enabled.
-  const bool is_enhanced_desk_animations_;
+  std::optional<ScrollData> scroll_data_;
 };
 
 }  // namespace ash

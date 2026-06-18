@@ -1,25 +1,20 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/allocator/buildflags.h"
 #include "build/build_config.h"
 #include "chrome/browser/profiling_host/profiling_process_host.h"
 #include "chrome/common/chrome_switches.h"
+#include "chrome/test/base/platform_browser_test.h"
 #include "components/heap_profiling/multi_process/test_driver.h"
 #include "components/services/heap_profiling/public/cpp/settings.h"
 #include "components/services/heap_profiling/public/cpp/switches.h"
 #include "content/public/test/browser_test.h"
+#include "partition_alloc/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-#if defined(OS_ANDROID)
-#include "chrome/test/base/android/android_browser_test.h"
-#else
-#include "chrome/test/base/in_process_browser_test.h"
-#endif
-
 // Some builds don't support memlog in which case the tests won't function.
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
 
 namespace heap_profiling {
 
@@ -56,9 +51,10 @@ class MemlogBrowserTest : public PlatformBrowserTest,
   }
 };
 
+// TODO(crbug.com/40774799) Disabled due to flakiness.
 // Ensure invocations via TracingController can generate a valid JSON file with
 // expected data.
-IN_PROC_BROWSER_TEST_P(MemlogBrowserTest, EndToEnd) {
+IN_PROC_BROWSER_TEST_P(MemlogBrowserTest, DISABLED_EndToEnd) {
   LOG(INFO) << "Memlog mode: " << static_cast<int>(GetParam().mode);
   LOG(INFO) << "Memlog stack mode: " << static_cast<int>(GetParam().stack_mode);
   LOG(INFO) << "Started via command line flag: "
@@ -79,7 +75,7 @@ std::vector<TestParam> GetParams() {
   std::vector<TestParam> params;
 
   // Test that if we don't start profiling, nothing happens.
-  params.push_back({Mode::kNone, mojom::StackMode::MIXED,
+  params.push_back({Mode::kNone, mojom::StackMode::NATIVE_WITH_THREAD_NAMES,
                     false /* start_profiling_with_command_line_flag */});
 
   // Test that we can start profiling with command line flag.
@@ -104,4 +100,4 @@ INSTANTIATE_TEST_SUITE_P(Memlog,
 
 }  // namespace heap_profiling
 
-#endif  // BUILDFLAG(USE_ALLOCATOR_SHIM)
+#endif  // PA_BUILDFLAG(USE_ALLOCATOR_SHIM)

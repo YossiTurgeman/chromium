@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,13 @@
 
 #include <map>
 #include <string>
+#include <string_view>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
+#include "base/scoped_observation_traits.h"
+#include "base/time/time.h"
 #include "components/translate/content/common/translate.mojom.h"
 #include "components/translate/core/browser/translate_driver.h"
 #include "components/translate/core/common/translate_errors.h"
@@ -22,9 +25,8 @@
 #include "services/metrics/public/cpp/ukm_source_id.h"
 
 namespace content {
-class NavigationController;
 class WebContents;
-}
+}  // namespace content
 
 namespace language {
 class UrlLanguageHistogram;
@@ -40,8 +42,7 @@ class ContentTranslateDriver : public TranslateDriver,
                                public translate::mojom::ContentTranslateDriver,
                                public content::WebContentsObserver {
  public:
-  // The observer for the ContentTranslateDriver.
-  class Observer {
+  class TranslationObserver : public base::CheckedObserver {
    public:
     // Handles when the value of IsPageTranslated is changed.
     virtual void OnIsPageTranslatedChanged(content::WebContents* source) {}
@@ -49,28 +50,24 @@ class ContentTranslateDriver : public TranslateDriver,
     // Handles when the value of translate_enabled is changed.
     virtual void OnTranslateEnabledChanged(content::WebContents* source) {}
 
-    // Called when the page language has been determined.
-    virtual void OnLanguageDetermined(
-        const translate::LanguageDetectionDetails& details) {}
-
     // Called when the page has been translated.
-    virtual void OnPageTranslated(const std::string& original_lang,
-                                  const std::string& translated_lang,
-                                  translate::TranslateErrors::Type error_type) {
-    }
-
-   protected:
-    virtual ~Observer() {}
+    virtual void OnPageTranslated(std::string_view source_lang,
+                                  std::string_view translated_lang,
+                                  translate::TranslateErrors error_type) {}
   };
 
   ContentTranslateDriver(
-      content::NavigationController* nav_controller,
+      content::WebContents& web_contents,
       language::UrlLanguageHistogram* url_language_histogram);
+
+  ContentTranslateDriver(const ContentTranslateDriver&) = delete;
+  ContentTranslateDriver& operator=(const ContentTranslateDriver&) = delete;
+
   ~ContentTranslateDriver() override;
 
-  // Adds or Removes observers.
-  void AddObserver(Observer* observer);
-  void RemoveObserver(Observer* observer);
+  // Adds or removes observers.
+  void AddTranslationObserver(TranslationObserver* observer);
+  void RemoveTranslationObserver(TranslationObserver* observer);
 
   // Number of attempts before waiting for a page to be fully reloaded.
   void set_translate_max_reload_attempts(int attempts) {
@@ -90,60 +87,51 @@ class ContentTranslateDriver : public TranslateDriver,
   void OnTranslateEnabledChanged() override;
   bool IsLinkNavigation() override;
   void TranslatePage(int page_seq_no,
-                     const std::string& translate_script,
-                     const std::string& source_lang,
-                     const std::string& target_lang) override;
+                     std::string_view translate_script,
+                     std::string_view source_lang,
+                     std::string_view target_lang) override;
   void RevertTranslation(int page_seq_no) override;
-  bool IsIncognito() override;
+  bool IsIncognito() const override;
   const std::string& GetContentsMimeType() override;
-  const GURL& GetLastCommittedURL() override;
+  const GURL& GetLastCommittedURL() const override;
   const GURL& GetVisibleURL() override;
   ukm::SourceId GetUkmSourceId() override;
-  bool HasCurrentPage() override;
-  void OpenUrlInNewTab(const GURL& url) override;
+  bool HasCurrentPage() const override;
 
   // content::WebContentsObserver implementation.
-  void NavigationEntryCommitted(
-      const content::LoadCommittedDetails& load_details) override;
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override;
 
   void OnPageTranslated(bool cancelled,
-                        const std::string& original_lang,
+                        const std::string& source_lang,
                         const std::string& translated_lang,
-                        TranslateErrors::Type error_type);
+                        TranslateErrors error_type);
 
   // Adds a receiver in |receivers_| for the passed |receiver|.
   void AddReceiver(
       mojo::PendingReceiver<translate::mojom::ContentTranslateDriver> receiver);
+
   // Called when a page has been loaded and can be potentially translated.
   void RegisterPage(
       mojo::PendingRemote<translate::mojom::TranslateAgent> translate_agent,
       const translate::LanguageDetectionDetails& details,
-      bool page_needs_translation) override;
-
- protected:
-  const base::ObserverList<Observer, true>::Unchecked& observer_list() const {
-    return observer_list_;
-  }
-
-  TranslateManager* translate_manager() const { return translate_manager_; }
-
-  language::UrlLanguageHistogram* language_histogram() const {
-    return language_histogram_;
-  }
-
-  bool IsAutoHrefTranslateAllOriginsEnabled() const;
+      bool page_level_translation_criteria_met) override;
 
  private:
   void OnPageAway(int page_seq_no);
 
-  // The navigation controller of the tab we are associated with.
-  content::NavigationController* navigation_controller_;
+  void InitiateTranslationIfReload(
+      content::NavigationHandle* navigation_handle);
 
-  TranslateManager* translate_manager_;
+  raw_ptr<TranslateManager, DanglingUntriaged> translate_manager_;
 
-  base::ObserverList<Observer, true>::Unchecked observer_list_;
+  base::ObserverList<TranslationObserver, true> translation_observers_;
+
+  // Whether the associated browser context is off the record.
+  bool is_otr_context_;
+
+  // The last committed URL of the primary main frame of the contents.
+  GURL last_committed_url_;
 
   // Max number of attempts before checking if a page has been reloaded.
   int max_reload_check_attempts_;
@@ -157,7 +145,7 @@ class ContentTranslateDriver : public TranslateDriver,
 
   // Histogram to be notified about detected language of every page visited. Not
   // owned here.
-  language::UrlLanguageHistogram* const language_histogram_;
+  const raw_ptr<language::UrlLanguageHistogram> language_histogram_;
 
   // ContentTranslateDriver is a singleton per web contents but multiple render
   // frames may be contained in a single web contents. TranslateAgents get the
@@ -170,10 +158,28 @@ class ContentTranslateDriver : public TranslateDriver,
   base::TimeTicks finish_navigation_time_;
 
   base::WeakPtrFactory<ContentTranslateDriver> weak_pointer_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ContentTranslateDriver);
 };
 
 }  // namespace translate
+
+namespace base {
+
+template <>
+struct ScopedObservationTraits<
+    translate::ContentTranslateDriver,
+    translate::ContentTranslateDriver::TranslationObserver> {
+  static void AddObserver(
+      translate::ContentTranslateDriver* source,
+      translate::ContentTranslateDriver::TranslationObserver* observer) {
+    source->AddTranslationObserver(observer);
+  }
+  static void RemoveObserver(
+      translate::ContentTranslateDriver* source,
+      translate::ContentTranslateDriver::TranslationObserver* observer) {
+    source->RemoveTranslationObserver(observer);
+  }
+};
+
+}  // namespace base
 
 #endif  // COMPONENTS_TRANSLATE_CONTENT_BROWSER_CONTENT_TRANSLATE_DRIVER_H_

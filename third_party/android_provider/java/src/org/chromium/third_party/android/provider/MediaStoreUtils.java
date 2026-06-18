@@ -19,14 +19,17 @@ package org.chromium.third_party.android.provider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.net.Uri;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.MediaStore.DownloadColumns;
 import android.provider.MediaStore.MediaColumns;
 import android.util.Log;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.io.FileNotFoundException;
 import java.io.OutputStream;
@@ -36,6 +39,7 @@ import java.util.Objects;
  * Utility class to contribute download to the public download collection using
  * MediaStore API from Q.
  */
+@NullMarked
 public class MediaStoreUtils {
     private static final String TAG = "MediaStoreUtils";
 
@@ -50,8 +54,7 @@ public class MediaStoreUtils {
      * @return token which can be passed to {@link #openPending(Context, Uri)}
      *         to work with this pending item.
      */
-    public static @NonNull Uri createPending(
-            @NonNull Context context, @NonNull PendingParams params) {
+    public static @Nullable Uri createPending(Context context, PendingParams params) {
         return context.getContentResolver().insert(params.mInsertUri, params.mInsertValues);
     }
 
@@ -64,7 +67,7 @@ public class MediaStoreUtils {
      *            {@link #createPending(Context, PendingParams)}.
      * @return pending session that was opened.
      */
-    public static @NonNull PendingSession openPending(@NonNull Context context, @NonNull Uri uri) {
+    public static PendingSession openPending(Context context, Uri uri) {
         return new PendingSession(context, uri);
     }
 
@@ -85,8 +88,7 @@ public class MediaStoreUtils {
          * @param displayName Display name of the item.
          * @param mimeType MIME type of the item.
          */
-        public PendingParams(
-                @NonNull Uri insertUri, @NonNull String displayName, @NonNull String mimeType) {
+        public PendingParams(Uri insertUri, String displayName, String mimeType) {
             mInsertUri = Objects.requireNonNull(insertUri);
             final long now = System.currentTimeMillis() / 1000;
             mInsertValues = new ContentValues();
@@ -94,10 +96,8 @@ public class MediaStoreUtils {
             mInsertValues.put(MediaColumns.MIME_TYPE, Objects.requireNonNull(mimeType));
             mInsertValues.put(MediaColumns.DATE_ADDED, now);
             mInsertValues.put(MediaColumns.DATE_MODIFIED, now);
-            try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 setPendingContentValues(this.mInsertValues, true);
-            } catch (Exception e) {
-                Log.e(TAG, "Unable to set pending content values.", e);
             }
         }
 
@@ -107,6 +107,7 @@ public class MediaStoreUtils {
          *
          * @see DownloadColumns#DOWNLOAD_URI
          */
+        @RequiresApi(Build.VERSION_CODES.Q)
         public void setDownloadUri(@Nullable Uri downloadUri) {
             if (downloadUri == null) {
                 mInsertValues.remove(DownloadColumns.DOWNLOAD_URI);
@@ -121,6 +122,7 @@ public class MediaStoreUtils {
          *
          * @see DownloadColumns#REFERER_URI
          */
+        @RequiresApi(Build.VERSION_CODES.Q)
         public void setRefererUri(@Nullable Uri refererUri) {
             if (refererUri == null) {
                 mInsertValues.remove(DownloadColumns.REFERER_URI);
@@ -132,7 +134,7 @@ public class MediaStoreUtils {
         /**
          * Sets the expiration time of the download.
          *
-         * @time Epoch time in seconds.
+         * @param time Epoch time in seconds.
          */
         public void setExpirationTime(long time) {
             mInsertValues.put("date_expires", time);
@@ -167,7 +169,7 @@ public class MediaStoreUtils {
          *
          * @return ParcelFileDescriptor to be written into.
          */
-        public @NonNull ParcelFileDescriptor open() throws FileNotFoundException {
+        public @Nullable ParcelFileDescriptor open() throws FileNotFoundException {
             return mContext.getContentResolver().openFileDescriptor(mUri, "rw");
         }
 
@@ -178,7 +180,7 @@ public class MediaStoreUtils {
          *
          * @return OutputStream to be written into.
          */
-        public @NonNull OutputStream openOutputStream() throws FileNotFoundException {
+        public @Nullable OutputStream openOutputStream() throws FileNotFoundException {
             return mContext.getContentResolver().openOutputStream(mUri);
         }
 
@@ -189,11 +191,13 @@ public class MediaStoreUtils {
          * @return the final {@code content://} Uri representing the newly
          *         published media.
          */
-        public @NonNull Uri publish() {
-            try {
-                final ContentValues values = new ContentValues();
+        public Uri publish() {
+            ContentValues values = new ContentValues();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 setPendingContentValues(values, false);
-                values.putNull("date_expires");
+            }
+            values.putNull("date_expires");
+            try {
                 mContext.getContentResolver().update(mUri, values, null, null);
             } catch (Exception e) {
                 Log.e(TAG, "Unable to publish pending session.", e);
@@ -206,7 +210,11 @@ public class MediaStoreUtils {
          * destroy the pending item record and any data related to it.
          */
         public void abandon() {
-            mContext.getContentResolver().delete(mUri, null, null);
+            try {
+                mContext.getContentResolver().delete(mUri, null, null);
+            } catch (Exception e) {
+                Log.e(TAG, "Unable to delete pending session.", e);
+            }
         }
 
         @Override
@@ -221,8 +229,8 @@ public class MediaStoreUtils {
      * @param values ContentValues to be set.
      * @param isPending Whether the item is pending.
      */
-    private static void setPendingContentValues(ContentValues values, boolean isPending)
-            throws Exception {
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private static void setPendingContentValues(ContentValues values, boolean isPending) {
         values.put(MediaColumns.IS_PENDING, isPending ? 1 : 0);
     }
 }

@@ -1,12 +1,16 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/wm/core/compound_event_filter.h"
 
+#include <string_view>
+
 #include "base/check.h"
+#include "base/observer_list.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
+#include "ui/aura/client/aura_constants.h"
 #include "ui/aura/client/cursor_client.h"
 #include "ui/aura/client/drag_drop_client.h"
 #include "ui/aura/env.h"
@@ -19,23 +23,6 @@
 #include "ui/wm/public/activation_client.h"
 
 namespace wm {
-
-namespace {
-
-// Returns true if the cursor should be hidden on touch events.
-// TODO(tdanderson|rsadam): Move this function into CursorClient.
-bool ShouldHideCursorOnTouch(const ui::TouchEvent& event) {
-#if defined(OS_WIN) || defined(OS_CHROMEOS)
-  return true;
-#else
-  // Linux Aura does not hide the cursor on touch by default.
-  // TODO(tdanderson): Change this if having consistency across
-  // all platforms which use Aura is desired.
-  return false;
-#endif
-}
-
-}  // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
 // CompoundEventFilter, public:
@@ -74,6 +61,30 @@ gfx::NativeCursor CompoundEventFilter::CursorForWindowComponent(
   }
 }
 
+gfx::NativeCursor CompoundEventFilter::NoResizeCursorForWindowComponent(
+    int window_component) {
+  switch (window_component) {
+    case HTBOTTOM:
+      return ui::mojom::CursorType::kNorthSouthNoResize;
+    case HTBOTTOMLEFT:
+      return ui::mojom::CursorType::kNorthEastSouthWestNoResize;
+    case HTBOTTOMRIGHT:
+      return ui::mojom::CursorType::kNorthWestSouthEastNoResize;
+    case HTLEFT:
+      return ui::mojom::CursorType::kEastWestNoResize;
+    case HTRIGHT:
+      return ui::mojom::CursorType::kEastWestNoResize;
+    case HTTOP:
+      return ui::mojom::CursorType::kNorthSouthNoResize;
+    case HTTOPLEFT:
+      return ui::mojom::CursorType::kNorthWestSouthEastNoResize;
+    case HTTOPRIGHT:
+      return ui::mojom::CursorType::kNorthEastSouthWestNoResize;
+    default:
+      return ui::mojom::CursorType::kNull;
+  }
+}
+
 void CompoundEventFilter::AddHandler(ui::EventHandler* handler) {
   handlers_.AddObserver(handler);
 }
@@ -103,19 +114,26 @@ void CompoundEventFilter::UpdateCursor(aura::Window* target,
       if (target->delegate()) {
         int window_component =
             target->delegate()->GetNonClientComponent(event->location());
-        cursor = CursorForWindowComponent(window_component);
+
+        if ((target->GetProperty(aura::client::kResizeBehaviorKey) &
+             aura::client::kResizeBehaviorCanResize) != 0) {
+          cursor = CursorForWindowComponent(window_component);
+        } else {
+          cursor = NoResizeCursorForWindowComponent(window_component);
+        }
       } else {
         // Allow the OS to handle non client cursors if we don't have a
         // a delegate to handle the non client hittest.
         return;
       }
     }
-    // For ET_MOUSE_ENTERED, force the update of the cursor because it may have
-    // changed without |cursor_client| knowing about it.
-    if (event->type() == ui::ET_MOUSE_ENTERED)
+    // For EventType::kMouseEntered, force the update of the cursor because it
+    // may have changed without |cursor_client| knowing about it.
+    if (event->type() == ui::EventType::kMouseEntered) {
       cursor_client->SetCursorForced(cursor);
-    else
+    } else {
       cursor_client->SetCursor(cursor);
+    }
   }
 }
 
@@ -171,10 +189,9 @@ void CompoundEventFilter::SetMouseEventsEnableStateOnEvent(aura::Window* target,
   aura::client::CursorClient* client =
       aura::client::GetCursorClient(target->GetRootWindow());
   if (!client) {
-    TRACE_EVENT_INSTANT0(
+    TRACE_EVENT_INSTANT(
         "ui,input",
-        "CompoundEventFilter::SetMouseEventsEnableStateOnEvent - No Client",
-        TRACE_EVENT_SCOPE_THREAD);
+        "CompoundEventFilter::SetMouseEventsEnableStateOnEvent - No Client");
     return;
   }
 
@@ -211,10 +228,10 @@ void CompoundEventFilter::OnMouseEvent(ui::MouseEvent* event) {
   // outside of the root window and moved back for some reasons (e.g. running on
   // on Desktop for testing, or a bug in pointer barrier).
   if (!(event->flags() & ui::EF_FROM_TOUCH) &&
-       (event->type() == ui::ET_MOUSE_ENTERED ||
-        event->type() == ui::ET_MOUSE_MOVED ||
-        event->type() == ui::ET_MOUSE_PRESSED ||
-        event->type() == ui::ET_MOUSEWHEEL)) {
+      (event->type() == ui::EventType::kMouseEntered ||
+       event->type() == ui::EventType::kMouseMoved ||
+       event->type() == ui::EventType::kMousePressed ||
+       event->type() == ui::EventType::kMousewheel)) {
     SetMouseEventsEnableStateOnEvent(window, event, true);
     SetCursorVisibilityOnEvent(window, event, true);
     UpdateCursor(window, event);
@@ -230,11 +247,12 @@ void CompoundEventFilter::OnTouchEvent(ui::TouchEvent* event) {
   TRACE_EVENT2("ui,input", "CompoundEventFilter::OnTouchEvent", "event_type",
                event->type(), "event_handled", event->handled());
   FilterTouchEvent(event);
-  if (!event->handled() && event->type() == ui::ET_TOUCH_PRESSED &&
-      ShouldHideCursorOnTouch(*event)) {
+  if (!event->handled() && event->type() == ui::EventType::kTouchPressed) {
     aura::Window* target = static_cast<aura::Window*>(event->target());
     DCHECK(target);
-    if (!aura::Env::GetInstance()->IsMouseButtonDown()) {
+    auto* client = aura::client::GetCursorClient(target->GetRootWindow());
+    if (client && client->ShouldHideCursorOnTouchEvent(*event) &&
+        !aura::Env::GetInstance()->IsMouseButtonDown()) {
       SetMouseEventsEnableStateOnEvent(target, event, false);
       SetCursorVisibilityOnEvent(target, event, false);
     }
@@ -247,6 +265,10 @@ void CompoundEventFilter::OnGestureEvent(ui::GestureEvent* event) {
       break;
     handler.OnGestureEvent(event);
   }
+}
+
+std::string_view CompoundEventFilter::GetLogContext() const {
+  return "CompoundEventFilter";
 }
 
 }  // namespace wm

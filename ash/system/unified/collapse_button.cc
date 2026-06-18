@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,18 @@
 
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/strings/grit/ash_strings.h"
-#include "ash/style/ash_color_provider.h"
-#include "ash/system/tray/tray_constants.h"
+#include "ash/style/icon_button.h"
 #include "ui/base/l10n/l10n_util.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/gfx/scoped_canvas.h"
 
 namespace ash {
 
-CollapseButton::CollapseButton(views::ButtonListener* listener)
-    : CustomShapeButton(listener) {
-  OnEnabledChanged();
-}
+CollapseButton::CollapseButton(PressedCallback callback)
+    : IconButton(std::move(callback),
+                 IconButton::Type::kMediumFloating,
+                 &kUnifiedMenuExpandIcon,
+                 IDS_ASH_STATUS_TRAY_COLLAPSE) {}
 
 CollapseButton::~CollapseButton() = default;
 
@@ -31,41 +31,15 @@ void CollapseButton::SetExpandedAmount(double expanded_amount) {
   SchedulePaint();
 }
 
-gfx::Size CollapseButton::CalculatePreferredSize() const {
-  return gfx::Size(kTrayItemSize, kTrayItemSize * 3 / 2);
-}
-
-SkPath CollapseButton::CreateCustomShapePath(const gfx::Rect& bounds) const {
-  SkPath path;
-  SkScalar bottom_radius = SkIntToScalar(kTrayItemSize / 2);
-  SkScalar radii[8] = {
-      0, 0, 0, 0, bottom_radius, bottom_radius, bottom_radius, bottom_radius};
-  path.addRoundRect(gfx::RectToSkRect(bounds), radii);
-  return path;
-}
-
 void CollapseButton::PaintButtonContents(gfx::Canvas* canvas) {
-  PaintCustomShapePath(canvas);
-
   gfx::ScopedCanvas scoped(canvas);
-  canvas->Translate(gfx::Vector2d(size().width() / 2, size().height() * 2 / 3));
+  canvas->Translate(gfx::Vector2d(size().width() / 2, size().height() / 2));
   canvas->sk_canvas()->rotate(expanded_amount_ * 180.);
   gfx::ImageSkia image = GetImageToPaint();
   canvas->DrawImageInt(image, -image.width() / 2, -image.height() / 2);
 }
 
-const char* CollapseButton::GetClassName() const {
-  return "CollapseButton";
-}
-
-void CollapseButton::OnEnabledChanged() {
-  const SkColor icon_color = AshColorProvider::Get()->GetContentLayerColor(
-      AshColorProvider::ContentLayerType::kIconColorPrimary);
-  SetImage(views::Button::STATE_NORMAL,
-           gfx::CreateVectorIcon(
-               kUnifiedMenuExpandIcon,
-               GetEnabled() ? icon_color
-                            : AshColorProvider::GetDisabledColor(icon_color)));
-}
+BEGIN_METADATA(CollapseButton)
+END_METADATA
 
 }  // namespace ash

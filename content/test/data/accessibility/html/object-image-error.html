@@ -1,10 +1,12 @@
 <!--
-@WAIT-FOR:Fallback
+@AURALINUX-WAIT-FOR:name='Fallback'
+@AURALINUX-ALLOW:tag:*
+@BLINK-WAIT-FOR:name='Fallback'
+@BLINK-ALLOW:htmlTag='slot'
 @NO-LOAD-EXPECTED:broken.jpg
 -->
 <div>
-    <object data="./broken.jpg"
-            onerror="document.getElementById('done').innerText='complete'; ">
+    <object data="./broken.jpg">
         Fallback
     </object>
 </div>

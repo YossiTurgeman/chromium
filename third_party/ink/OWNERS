@@ -1,4 +1,5 @@
-dstockwell@chromium.org
-dvallet@chromium.org
-martiw@chromium.org
-# COMPONENT: Internals
+file://pdf/INK_OWNERS
+
+# For DEPS rolling.
+per-file README.chromium=chromium-autoroll@skia-public.iam.gserviceaccount.com
+per-file src=chromium-autoroll@skia-public.iam.gserviceaccount.com

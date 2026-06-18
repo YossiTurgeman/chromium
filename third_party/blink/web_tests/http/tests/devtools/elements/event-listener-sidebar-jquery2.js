@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as Common from 'devtools/core/common/common.js';
+
 (async function() {
   TestRunner.addResult(`Tests event listeners output in the Elements sidebar panel.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <button id="node">Inspect Me</button>
@@ -23,7 +27,7 @@
       setupEventListeners();
   `);
 
-  Common.settingForTest('showEventListenersForAncestors').set(true);
+  Common.Settings.settingForTest('show-event-listeners-for-ancestors').set(true);
   ElementsTestRunner.selectNodeWithId('node', step1);
 
   function step1() {
@@ -34,7 +38,7 @@
   function step2() {
     TestRunner.addResult('Remove listeners..');
     var eventListenersWidget = ElementsTestRunner.eventListenersWidget();
-    var listenerTypes = eventListenersWidget._eventListenersView._treeOutline.rootElement().children();
+    var listenerTypes = eventListenersWidget.eventListenersView.treeOutline.rootElement().children();
     var promises = [];
     for (var i in listenerTypes) {
       var listenersItems = listenerTypes[i].children();

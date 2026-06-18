@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,27 +7,33 @@
 #include <tuple>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/metrics/user_metrics.h"
 #include "base/metrics/user_metrics_action.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser_dialogs.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
-#include "chrome/browser/ui/views/toolbar/browser_app_menu_button.h"
-#include "chrome/browser/ui/views/toolbar/toolbar_view.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/browser/ui/views/frame/toolbar_button_provider.h"
+#include "chrome/browser/ui/views/toolbar/app_menu_control.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/buildflags.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/models/image_model.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/gfx/text_constants.h"
+#include "ui/views/animation/ink_drop.h"
+#include "ui/views/border.h"
 #include "ui/views/bubble/bubble_border.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/bubble/bubble_frame_view.h"
@@ -37,23 +43,21 @@
 #include "ui/views/style/typography.h"
 #include "ui/views/widget/widget.h"
 
-#if defined(OS_MAC)
-#include "chrome/browser/platform_util.h"
-#endif  // defined(OS_MAC)
-
 // static
 views::Widget* RelaunchRecommendedBubbleView::ShowBubble(
-    Browser* browser,
+    BrowserWindowInterface* browser,
     base::Time detection_time,
     base::RepeatingClosure on_accept) {
   DCHECK(browser);
 
   // Anchor the popup to the browser's app menu.
-  auto* anchor_button = BrowserView::GetBrowserViewForBrowser(browser)
-                            ->toolbar_button_provider()
-                            ->GetAppMenuButton();
-  auto* bubble_view = new RelaunchRecommendedBubbleView(
-      anchor_button, detection_time, std::move(on_accept));
+  auto* browser_view = BrowserView::GetBrowserViewForBrowser(
+      browser->GetBrowserForMigrationOnly());
+  auto* control = browser_view->toolbar_button_provider()->GetAppMenuControl();
+  views::BubbleAnchor anchor =
+      control ? control->GetAnchor() : views::BubbleAnchor();
+  auto* bubble_view = new RelaunchRecommendedBubbleView(anchor, detection_time,
+                                                        std::move(on_accept));
   bubble_view->SetArrow(views::BubbleBorder::TOP_RIGHT);
 
   views::Widget* bubble_widget =
@@ -75,7 +79,7 @@ bool RelaunchRecommendedBubbleView::Accept() {
   return false;
 }
 
-base::string16 RelaunchRecommendedBubbleView::GetWindowTitle() const {
+std::u16string RelaunchRecommendedBubbleView::GetWindowTitle() const {
   return relaunch_recommended_timer_.GetWindowTitle();
 }
 
@@ -83,52 +87,48 @@ bool RelaunchRecommendedBubbleView::ShouldShowCloseButton() const {
   return true;
 }
 
-gfx::ImageSkia RelaunchRecommendedBubbleView::GetWindowIcon() {
-  return gfx::CreateVectorIcon(
-      gfx::IconDescription(vector_icons::kBusinessIcon,
-                           ChromeLayoutProvider::Get()->GetDistanceMetric(
-                               DISTANCE_BUBBLE_HEADER_VECTOR_ICON_SIZE),
-                           gfx::kChromeIconGrey));
+ui::ImageModel RelaunchRecommendedBubbleView::GetWindowIcon() {
+  return ui::ImageModel::FromVectorIcon(
+      features::IsRoundedIconsEnabled() ? vector_icons::kDomainIcon
+                                        : vector_icons::kBusinessOldIcon,
+      ui::kColorIcon,
+      ChromeLayoutProvider::Get()->GetDistanceMetric(
+          views::DISTANCE_BUBBLE_HEADER_VECTOR_ICON_SIZE));
 }
 
 void RelaunchRecommendedBubbleView::Init() {
   SetLayoutManager(std::make_unique<views::FillLayout>());
   auto label = std::make_unique<views::Label>(
-      l10n_util::GetPluralStringFUTF16(IDS_RELAUNCH_RECOMMENDED_BODY,
-                                       BrowserList::GetIncognitoBrowserCount()),
+      l10n_util::GetPluralStringFUTF16(
+          IDS_RELAUNCH_RECOMMENDED_BODY,
+          GlobalBrowserCollection::GetInstance()->GetIncognitoBrowserCount()),
       views::style::CONTEXT_DIALOG_BODY_TEXT);
 
   label->SetMultiLine(true);
   label->SetHorizontalAlignment(gfx::ALIGN_LEFT);
 
   // Align the body label with the left edge of the bubble's title.
-  // TODO(bsep): Remove this when fixing https://crbug.com/810970.
-  // Note: BubleFrameView applies INSETS_DIALOG_TITLE either side of the icon.
+  // TODO(bsep): Remove this when fixing https://crbug.com/40562382.
+  // Note: BubbleDialogDelegate applies INSETS_DIALOG_TITLE either side of the
+  // icon.
   const int title_offset = 2 * views::LayoutProvider::Get()
                                    ->GetInsetsMetric(views::INSETS_DIALOG_TITLE)
                                    .left() +
                            ChromeLayoutProvider::Get()->GetDistanceMetric(
-                               DISTANCE_BUBBLE_HEADER_VECTOR_ICON_SIZE);
+                               views::DISTANCE_BUBBLE_HEADER_VECTOR_ICON_SIZE);
   label->SetBorder(views::CreateEmptyBorder(
-      gfx::Insets(0, title_offset - margins().left(), 0, 0)));
+      gfx::Insets::TLBR(0, title_offset - margins().left(), 0, 0)));
 
   AddChildView(std::move(label));
 
   base::RecordAction(base::UserMetricsAction("RelaunchRecommendedShown"));
 }
 
-gfx::Size RelaunchRecommendedBubbleView::CalculatePreferredSize() const {
-  const int width = ChromeLayoutProvider::Get()->GetDistanceMetric(
-                        DISTANCE_BUBBLE_PREFERRED_WIDTH) -
-                    margins().width();
-  return gfx::Size(width, GetHeightForWidth(width));
-}
-
 void RelaunchRecommendedBubbleView::VisibilityChanged(
     views::View* starting_from,
     bool is_visible) {
-  views::Button::AsButton(GetAnchorView())
-      ->AnimateInkDrop(is_visible ? views::InkDropState::ACTIVATED
+  views::InkDrop::Get(GetAnchorView())
+      ->AnimateToState(is_visible ? views::InkDropState::ACTIVATED
                                   : views::InkDropState::DEACTIVATED,
                        nullptr);
 }
@@ -136,17 +136,17 @@ void RelaunchRecommendedBubbleView::VisibilityChanged(
 // |relaunch_recommended_timer_| automatically starts for the next time the
 // title needs to be updated (e.g., from "2 days" to "3 days").
 RelaunchRecommendedBubbleView::RelaunchRecommendedBubbleView(
-    views::Button* anchor_button,
+    views::BubbleAnchor anchor,
     base::Time detection_time,
     base::RepeatingClosure on_accept)
-    : LocationBarBubbleDelegateView(anchor_button, nullptr),
+    : LocationBarBubbleDelegateView(anchor, nullptr),
       on_accept_(std::move(on_accept)),
       relaunch_recommended_timer_(
           detection_time,
           base::BindRepeating(&RelaunchRecommendedBubbleView::UpdateWindowTitle,
                               base::Unretained(this))) {
-  SetButtons(ui::DIALOG_BUTTON_OK);
-  SetButtonLabel(ui::DIALOG_BUTTON_OK,
+  SetButtons(static_cast<int>(ui::mojom::DialogButton::kOk));
+  SetButtonLabel(ui::mojom::DialogButton::kOk,
                  l10n_util::GetStringUTF16(IDS_RELAUNCH_ACCEPT_BUTTON));
   SetShowIcon(true);
 
@@ -154,14 +154,14 @@ RelaunchRecommendedBubbleView::RelaunchRecommendedBubbleView(
       base::BindOnce(&base::RecordAction,
                      base::UserMetricsAction("RelaunchRecommended_Close")));
 
-  chrome::RecordDialogCreation(chrome::DialogIdentifier::RELAUNCH_RECOMMENDED);
+  set_fixed_width(views::LayoutProvider::Get()->GetDistanceMetric(
+      views::DISTANCE_BUBBLE_PREFERRED_WIDTH));
+
   set_margins(ChromeLayoutProvider::Get()->GetDialogInsetsForContentType(
-      views::TEXT, views::TEXT));
+      views::DialogContentType::kText, views::DialogContentType::kText));
 }
 
 void RelaunchRecommendedBubbleView::UpdateWindowTitle() {
+  // `UpdateWindowTitle` will `InvalidateLayout` when necessary.
   GetWidget()->UpdateWindowTitle();
-  // This might update the length of the window title (for N days). Resize the
-  // bubble to match the new preferred size.
-  SizeToContents();
 }

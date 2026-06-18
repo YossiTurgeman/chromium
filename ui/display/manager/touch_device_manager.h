@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <ostream>
 #include <vector>
 
-#include "base/macros.h"
 #include "base/time/time.h"
 #include "ui/display/manager/display_manager_export.h"
 #include "ui/display/types/display_constants.h"
@@ -22,6 +21,7 @@ struct TouchscreenDevice;
 }  // namespace ui
 
 namespace display {
+
 class ManagedDisplayInfo;
 
 namespace test {
@@ -64,9 +64,10 @@ class DISPLAY_MANAGER_EXPORT TouchDeviceIdentifier {
 
   TouchDeviceIdentifier& operator=(TouchDeviceIdentifier other);
 
-  bool operator<(const TouchDeviceIdentifier& other) const;
-  bool operator==(const TouchDeviceIdentifier& other) const;
-  bool operator!=(const TouchDeviceIdentifier& other) const;
+  friend bool operator==(const TouchDeviceIdentifier&,
+                         const TouchDeviceIdentifier&) = default;
+  friend auto operator<=>(const TouchDeviceIdentifier&,
+                          const TouchDeviceIdentifier&) = default;
 
   std::string ToString() const;
   std::string SecondaryIdToString() const;
@@ -101,6 +102,7 @@ struct DISPLAY_MANAGER_EXPORT TouchCalibrationData {
   TouchCalibrationData(const CalibrationPointPairQuad& point_pairs,
                        const gfx::Size& bounds);
   TouchCalibrationData(const TouchCalibrationData& calibration_data);
+  TouchCalibrationData& operator=(const TouchCalibrationData& calibration_data);
 
   bool operator==(const TouchCalibrationData& other) const;
 
@@ -135,6 +137,10 @@ class DISPLAY_MANAGER_EXPORT TouchDeviceManager {
   using PortAssociationMap = ActiveTouchAssociationMap;
 
   TouchDeviceManager();
+
+  TouchDeviceManager(const TouchDeviceManager&) = delete;
+  TouchDeviceManager& operator=(const TouchDeviceManager&) = delete;
+
   ~TouchDeviceManager();
 
   // Given a list of displays and a list of touchscreens, associate them. The
@@ -150,6 +156,12 @@ class DISPLAY_MANAGER_EXPORT TouchDeviceManager {
   void AddTouchCalibrationData(const ui::TouchscreenDevice& device,
                                int64_t display_id,
                                const TouchCalibrationData& data);
+
+  // Adds/updates the touch assosiciation between the given touchscreen |device|
+  // and the given display with id |display_id|. This updates the mapping for
+  // |active_touch_associations_|.
+  void AddTouchAssociation(const ui::TouchscreenDevice& device,
+                           int64_t display_id);
 
   // Clears any touch calibration data associated with the pair, touch device
   // identified by |device| and display identified by |display_id|.
@@ -216,7 +228,7 @@ class DISPLAY_MANAGER_EXPORT TouchDeviceManager {
   void AssociateFromHistoricalData(std::vector<ManagedDisplayInfo*>* displays,
                                    std::vector<ui::TouchscreenDevice>* devices);
 
-  void AssociateUdlDevices(std::vector<ManagedDisplayInfo*>* displays,
+  void AssociateUsbDevices(std::vector<ManagedDisplayInfo*>* displays,
                            std::vector<ui::TouchscreenDevice>* devices);
 
   void AssociateSameSizeDevices(std::vector<ManagedDisplayInfo*>* displays,
@@ -231,6 +243,10 @@ class DISPLAY_MANAGER_EXPORT TouchDeviceManager {
 
   void Associate(ManagedDisplayInfo* display,
                  const ui::TouchscreenDevice& device);
+
+  void AddTouchCalibrationDataImpl(const ui::TouchscreenDevice& device,
+                                   int64_t display_id,
+                                   const TouchCalibrationData* data);
 
   // A mapping of touch device identifiers to a map of TouchAssociationInfo
   // data. This may contain devices and displays that are not currently
@@ -249,8 +265,6 @@ class DISPLAY_MANAGER_EXPORT TouchDeviceManager {
   // This map only contains items (displays and touch devices) that are
   // currently active.
   ActiveTouchAssociationMap active_touch_associations_;
-
-  DISALLOW_COPY_AND_ASSIGN(TouchDeviceManager);
 };
 
 DISPLAY_MANAGER_EXPORT std::ostream& operator<<(
@@ -259,6 +273,7 @@ DISPLAY_MANAGER_EXPORT std::ostream& operator<<(
 
 // Returns true if the device has any external touch devices attached.
 DISPLAY_MANAGER_EXPORT bool HasExternalTouchscreenDevice();
+
 }  // namespace display
 
 #endif  // UI_DISPLAY_MANAGER_TOUCH_DEVICE_MANAGER_H_

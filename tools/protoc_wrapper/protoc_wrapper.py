@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -9,6 +9,12 @@ Script for //third_party/protobuf/proto_library.gni .
 Features:
 - Inserts #include for extra header automatically.
 - Prevents bad proto names.
+- Works around protoc's bad descriptor file generation.
+  Ninja expects the format:
+  target: deps
+  But protoc just outputs:
+  deps
+  This script adds the "target:" part.
 """
 
 from __future__ import print_function
@@ -17,6 +23,8 @@ import os.path
 import subprocess
 import sys
 import tempfile
+import re
+import itertools
 
 PROTOC_INCLUDE_POINT = "// @@protoc_insertion_point(includes)"
 
@@ -43,6 +51,27 @@ def StripProtoExtension(filename):
   return filename.rsplit(".", 1)[0]
 
 
+# Rewrites import lines containing '@bufbuild/protobuf/*' to
+# '/@bufbuild/protobuf/*/index.js' in generated .ts files.
+def RewriteImports(ts_files):
+  for file_path in ts_files:
+    try:
+      with open(file_path, 'r+', encoding='utf-8') as f:
+        lines = f.readlines()
+        modified = False
+        for i, line in enumerate(itertools.islice(lines, 50)):
+          if "@bufbuild/protobuf/" in line:
+            lines[i] = re.sub(r"'@bufbuild\/protobuf\/(\w+)'",
+                              r"'/@bufbuild/protobuf/\1/index.js'", line)
+            modified = True
+        if modified:
+          f.seek(0)
+          f.writelines(lines)
+          f.truncate()
+    except FileNotFoundError:
+      print(f"Error: File not found at path: {file_path}")
+
+
 def WriteIncludes(headers, include):
   for filename in headers:
     include_point_found = False
@@ -53,7 +82,7 @@ def WriteIncludes(headers, include):
         contents.append(stripped_line)
         if stripped_line == PROTOC_INCLUDE_POINT:
           if include_point_found:
-            raise RuntimeException("Multiple include points found.")
+            raise RuntimeError("Multiple include points found.")
           include_point_found = True
           extra_statement = "#include \"{0}\"".format(include)
           contents.append(extra_statement)
@@ -80,6 +109,13 @@ def main(argv):
                       help="Output directory for standard Python generator.")
   parser.add_argument("--js-out-dir",
                       help="Output directory for standard JS generator.")
+  parser.add_argument("--protoc-gen-js",
+                      help="Relative path to javascript compiler.")
+  parser.add_argument("--ts-out-dir",
+                      help="Output directory for standard TS generator.")
+  parser.add_argument("--protoc-gen-ts",
+                      help="Relative path to typescript compiler.")
+
   parser.add_argument("--plugin-out-dir",
                       help="Output directory for custom generator plugin.")
 
@@ -99,6 +135,19 @@ def main(argv):
   )
   parser.add_argument("--descriptor-set-out",
                       help="Path to write a descriptor.")
+  parser.add_argument(
+      "--descriptor-set-dependency-file",
+      help="Path to write the dependency file for descriptor set.")
+  # The meaning of this flag is flipped compared to the corresponding protoc
+  # flag due to this script previously passing --include_imports. Removing the
+  # --include_imports is likely to have unintended consequences.
+  parser.add_argument(
+      "--exclude-imports",
+      help="Do not include imported files into generated descriptor.",
+      action="store_true",
+      default=False)
+  parser.add_argument('--fatal_warnings', action='store_true')
+
   parser.add_argument("protos", nargs="+",
                       help="Input protobuf definition file(s).")
 
@@ -109,7 +158,11 @@ def main(argv):
 
   protos = options.protos
   headers = []
+  ts_protos = []
   VerifyProtoNames(protos)
+
+  if options.fatal_warnings:
+    protoc_cmd += ["--fatal_warnings"]
 
   if options.py_out_dir:
     protoc_cmd += ["--python_out", options.py_out_dir]
@@ -117,8 +170,20 @@ def main(argv):
   if options.js_out_dir:
     protoc_cmd += [
         "--js_out",
-        "one_output_file_per_input_file,binary:" + options.js_out_dir
+        "one_output_file_per_input_file,binary:" + options.js_out_dir,
+        "--plugin=protoc-gen-js=" + os.path.realpath(options.protoc_gen_js),
     ]
+  if options.ts_out_dir:
+    protoc_cmd += [
+        "--ts_proto_out=" + options.ts_out_dir,
+        "--ts_proto_opt=env=browser,esModuleInterop=true,importSuffix=.js",
+        "--ts_proto_opt=useOptionals=all",
+        "--plugin=protoc-gen-ts_proto=" +
+        os.path.realpath(options.protoc_gen_ts),
+    ]
+    for filename in protos:
+      stripped_name = StripProtoExtension(filename)
+      ts_protos.append(os.path.join(options.ts_out_dir, stripped_name + ".ts"))
 
   if options.cc_out_dir:
     cc_out_dir = options.cc_out_dir
@@ -149,12 +214,26 @@ def main(argv):
 
   protoc_cmd += ["--proto_path", proto_dir]
   for path in options.import_dir:
-    protoc_cmd += ["--proto_path", path]
+    # TODO: crbug.com/1477926 - Do not specify unused `--import-dir`s.
+    # On a remote worker, it shows `warning: directory does not exist` when
+    # there are no dependencies under the directory.
+    if os.path.exists(path):
+      protoc_cmd += ["--proto_path", path]
 
   protoc_cmd += [os.path.join(proto_dir, name) for name in protos]
 
   if options.descriptor_set_out:
     protoc_cmd += ["--descriptor_set_out", options.descriptor_set_out]
+    if not options.exclude_imports:
+      protoc_cmd += ["--include_imports"]
+
+  dependency_file_data = None
+  if options.descriptor_set_out and options.descriptor_set_dependency_file:
+    protoc_cmd += ['--dependency_out', options.descriptor_set_dependency_file]
+    ret = subprocess.call(protoc_cmd)
+
+    with open(options.descriptor_set_dependency_file, 'rb') as f:
+      dependency_file_data = f.read().decode('utf-8')
 
   ret = subprocess.call(protoc_cmd)
   if ret != 0:
@@ -167,6 +246,12 @@ def main(argv):
       error_number = "%d" % ret
     raise RuntimeError("Protoc has returned non-zero status: "
                        "{0}".format(error_number))
+
+  if dependency_file_data:
+    with open(options.descriptor_set_dependency_file, 'w') as f:
+      f.write(dependency_file_data)
+
+  RewriteImports(ts_protos)
 
   if options.include:
     WriteIncludes(headers, options.include)

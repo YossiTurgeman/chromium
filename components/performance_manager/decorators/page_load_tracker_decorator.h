@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include "base/time/time.h"
 #include "base/timer/timer.h"
+#include "components/performance_manager/decorators/page_load_tracker_decorator_data.h"
 #include "components/performance_manager/public/graph/frame_node.h"
 #include "components/performance_manager/public/graph/graph.h"
 #include "components/performance_manager/public/graph/node_data_describer.h"
@@ -24,14 +25,18 @@ class ProcessNodeImpl;
 // top-level load to a different document. It stops loading when it reaches an
 // "almost idle" state, based on CPU and network quiescence, or after an
 // absolute timeout. This state is then updated on PageNodes in a graph.
-class PageLoadTrackerDecorator : public FrameNode::ObserverDefaultImpl,
+class PageLoadTrackerDecorator : public FrameNodeObserver,
                                  public GraphOwnedDefaultImpl,
                                  public NodeDataDescriberDefaultImpl,
-                                 public ProcessNode::ObserverDefaultImpl {
+                                 public ProcessNodeObserver {
  public:
-  class Data;
+  using Data = PageLoadTrackerDecoratorData;
 
   PageLoadTrackerDecorator();
+
+  PageLoadTrackerDecorator(const PageLoadTrackerDecorator&) = delete;
+  PageLoadTrackerDecorator& operator=(const PageLoadTrackerDecorator&) = delete;
+
   ~PageLoadTrackerDecorator() override;
 
   // FrameNodeObserver implementation:
@@ -42,7 +47,7 @@ class PageLoadTrackerDecorator : public FrameNode::ObserverDefaultImpl,
   void OnTakenFromGraph(Graph* graph) override;
 
   // NodeDataDescriber implementation:
-  base::Value DescribePageNodeData(const PageNode* node) const override;
+  base::DictValue DescribePageNodeData(const PageNode* node) const override;
 
   // ProcessNodeObserver implementation:
   void OnMainThreadTaskLoadIsLow(const ProcessNode* process_node) override;
@@ -50,17 +55,23 @@ class PageLoadTrackerDecorator : public FrameNode::ObserverDefaultImpl,
   // Invoked by PageLoadTrackerDecoratorHelper when corresponding
   // WebContentsObserver methods are invoked, and the WebContents is loading to
   // a different document.
-  static void DidReceiveResponse(PageNodeImpl* page_node);
+  static void DidStartLoading(PageNodeImpl* page_node);
+  static void PrimaryPageChanged(PageNodeImpl* page_node);
   static void DidStopLoading(PageNodeImpl* page_node);
 
  protected:
   friend class PageLoadTrackerDecoratorTest;
 
+  // The amount of time after which a page transitions from
+  // kWaitingForNavigation to kWaitingForNavigationTimedOut if the page change
+  // hasn't been committed.
+  static constexpr base::TimeDelta kWaitingForNavigationTimeout =
+      base::Seconds(5);
+
   // The amount of time a page has to be idle post-loading in order for it to be
   // considered loaded and idle. This is used in UpdateLoadIdleState
   // transitions.
-  static constexpr base::TimeDelta kLoadedAndIdlingTimeout =
-      base::TimeDelta::FromSeconds(1);
+  static constexpr base::TimeDelta kLoadedAndIdlingTimeout = base::Seconds(1);
 
   // The maximum amount of time post-DidStopLoading a page can be waiting for
   // an idle state to occur before the page is simply considered loaded anyways.
@@ -72,8 +83,7 @@ class PageLoadTrackerDecorator : public FrameNode::ObserverDefaultImpl,
   // (see SessionRestore.ForegroundTabFirstLoaded). This ensures that all tabs
   // eventually transition to loaded, even if they keep the main task queue
   // busy, or continue loading content.
-  static constexpr base::TimeDelta kWaitingForIdleTimeout =
-      base::TimeDelta::FromMinutes(1);
+  static constexpr base::TimeDelta kWaitingForIdleTimeout = base::Minutes(1);
 
   // (Un)registers the various node observer flavors of this object with the
   // graph. These are invoked by OnPassedToGraph and OnTakenFromGraph, but
@@ -88,74 +98,19 @@ class PageLoadTrackerDecorator : public FrameNode::ObserverDefaultImpl,
   void UpdateLoadIdleStateProcess(ProcessNodeImpl* process_node);
   static void UpdateLoadIdleStatePage(PageNodeImpl* page_node);
 
+  // Schedules a call to UpdateLoadIdleStatePage() for |page_node| after
+  // |delayed_run_time| - |now| has elapsed.
+  static void ScheduleDelayedUpdateLoadIdleStatePage(
+      PageNodeImpl* page_node,
+      base::TimeTicks now,
+      base::TimeTicks delayed_run_time);
+
   // Helper function for transitioning to the final state.
   static void TransitionToLoadedAndIdle(PageNodeImpl* page_node);
 
   static bool IsIdling(const PageNodeImpl* page_node);
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(PageLoadTrackerDecorator);
-};
-
-class PageLoadTrackerDecorator::Data {
- public:
-  // The state transitions associated with a load. In general a page transitions
-  // through these states from top to bottom.
-  enum class LoadIdleState {
-    // The initial state. Can only transition to kLoading from here.
-    kLoadingNotStarted,
-    // Incoming data has started to arrive for a load. Almost idle signals are
-    // ignored in this state. Can transition to kLoadedNotIdling and
-    // kLoadedAndIdling from here.
-    kLoading,
-    // Loading has completed, but the page has not started idling. Can only
-    // transition to kLoadedAndIdling from here.
-    kLoadedNotIdling,
-    // Loading has completed, and the page is idling. Can transition to
-    // kLoadedNotIdling or kLoadedAndIdle from here.
-    kLoadedAndIdling,
-    // Loading has completed and the page has been idling for sufficiently long.
-    // This is the final state. Once this state has been reached a signal will
-    // be emitted and no further state transitions will be tracked. Committing a
-    // new non-same document navigation can start the cycle over again.
-    kLoadedAndIdle
-  };
-
-  static Data* GetOrCreateForTesting(PageNodeImpl* page_node);
-  static Data* GetForTesting(PageNodeImpl* page_node);
-  static bool DestroyForTesting(PageNodeImpl* page_node);
-
-  // Sets the LoadIdleState for the page, and updates PageNode::IsLoading()
-  // accordingly.
-  void SetLoadIdleState(PageNodeImpl* page_node, LoadIdleState load_idle_state);
-
-  // Returns the LoadIdleState for the page.
-  LoadIdleState load_idle_state() const { return load_idle_state_; }
-
-  // Whether there is an ongoing different-document load for which data started
-  // arriving.
-  bool loading_received_response_ = false;
-
-  // Marks the point in time when the DidStopLoading signal was received,
-  // transitioning to kLoadedAndNotIdling or kLoadedAndIdling. This is used as
-  // the basis for the kWaitingForIdleTimeout.
-  base::TimeTicks loading_stopped_;
-
-  // Marks the point in time when the last transition to kLoadedAndIdling
-  // occurred. Used for gating the transition to kLoadedAndIdle.
-  base::TimeTicks idling_started_;
-
-  // A one-shot timer used for transitioning between kLoadedAndIdling and
-  // kLoadedAndIdle.
-  base::OneShotTimer idling_timer_;
-
- private:
-  // Initially at kLoadingNotStarted. Transitions through the states via calls
-  // to UpdateLoadIdleState. Is reset to kLoadingNotStarted when a non-same
-  // document navigation is committed.
-  LoadIdleState load_idle_state_ = LoadIdleState::kLoadingNotStarted;
 };
 
 }  // namespace performance_manager
 
-#endif  // COMPONENTS_BROWSER_PERFORMANCE_MANAGER_DECORATORS_PAGE_LOAD_TRACKER_DECORATOR_H_
+#endif  // COMPONENTS_PERFORMANCE_MANAGER_DECORATORS_PAGE_LOAD_TRACKER_DECORATOR_H_

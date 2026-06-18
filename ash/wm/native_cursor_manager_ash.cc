@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,17 @@
 #include "ash/display/window_tree_host_manager.h"
 #include "ash/shell.h"
 #include "base/check.h"
+#include "third_party/skia/include/core/SkColor.h"
+#include "ui/aura/client/cursor_shape_client.h"
 #include "ui/aura/env.h"
 #include "ui/aura/window_event_dispatcher.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/cursor/cursor.h"
-#include "ui/base/cursor/image_cursors.h"
 #include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
-#include "ui/base/layout.h"
 #include "ui/wm/core/native_cursor_manager_delegate.h"
 
 namespace ash {
+
 namespace {
 
 void SetCursorOnAllRootWindows(gfx::NativeCursor cursor) {
@@ -55,9 +56,13 @@ void NotifyMouseEventsEnableStateChange(bool enabled) {
 }  // namespace
 
 NativeCursorManagerAsh::NativeCursorManagerAsh()
-    : native_cursor_enabled_(true), image_cursors_(new ui::ImageCursors) {}
+    : native_cursor_enabled_(true) {
+  aura::client::SetCursorShapeClient(&cursor_loader_);
+}
 
-NativeCursorManagerAsh::~NativeCursorManagerAsh() = default;
+NativeCursorManagerAsh::~NativeCursorManagerAsh() {
+  aura::client::SetCursorShapeClient(nullptr);
+}
 
 void NativeCursorManagerAsh::SetNativeCursorEnabled(bool enabled) {
   native_cursor_enabled_ = enabled;
@@ -66,44 +71,36 @@ void NativeCursorManagerAsh::SetNativeCursorEnabled(bool enabled) {
   SetCursor(cursor_manager->GetCursor(), cursor_manager);
 }
 
-float NativeCursorManagerAsh::GetScale() const {
-  return image_cursors_->GetScale();
-}
-
 display::Display::Rotation NativeCursorManagerAsh::GetRotation() const {
-  return image_cursors_->GetRotation();
+  return cursor_loader_.rotation();
 }
 
 void NativeCursorManagerAsh::SetDisplay(
     const display::Display& display,
     ::wm::NativeCursorManagerDelegate* delegate) {
-  DCHECK(display.is_valid());
-
-  const float original_scale = display.device_scale_factor();
-  // And use the nearest resource scale factor.
-  const float cursor_scale =
-      ui::GetScaleForScaleFactor(ui::GetSupportedScaleFactor(original_scale));
-
-  if (image_cursors_->SetDisplay(display, cursor_scale))
+  if (cursor_loader_.SetDisplay(display)) {
     SetCursor(delegate->GetCursor(), delegate);
+  }
 
   Shell::Get()
       ->window_tree_host_manager()
       ->cursor_window_controller()
       ->SetDisplay(display);
+
+  // Update cursor compositing based on the current display.
+  Shell::Get()->UpdateCursorCompositingEnabled();
 }
 
 void NativeCursorManagerAsh::SetCursor(
     gfx::NativeCursor cursor,
     ::wm::NativeCursorManagerDelegate* delegate) {
   if (native_cursor_enabled_) {
-    image_cursors_->SetPlatformCursor(&cursor);
+    cursor_loader_.SetPlatformCursor(&cursor);
   } else {
     gfx::NativeCursor invisible_cursor(ui::mojom::CursorType::kNone);
-    image_cursors_->SetPlatformCursor(&invisible_cursor);
+    cursor_loader_.SetPlatformCursor(&invisible_cursor);
     cursor.SetPlatformCursor(invisible_cursor.platform());
   }
-  cursor.set_image_scale_factor(image_cursors_->GetScale());
 
   delegate->CommitCursor(cursor);
 
@@ -114,7 +111,7 @@ void NativeCursorManagerAsh::SetCursor(
 void NativeCursorManagerAsh::SetCursorSize(
     ui::CursorSize cursor_size,
     ::wm::NativeCursorManagerDelegate* delegate) {
-  image_cursors_->SetCursorSize(cursor_size);
+  cursor_loader_.SetSize(cursor_size);
   delegate->CommitCursorSize(cursor_size);
 
   // Sets the cursor to reflect the scale change immediately.
@@ -127,6 +124,22 @@ void NativeCursorManagerAsh::SetCursorSize(
       ->SetCursorSize(cursor_size);
 }
 
+void NativeCursorManagerAsh::SetLargeCursorSizeInDip(
+    int large_cursor_size_in_dip,
+    ::wm::NativeCursorManagerDelegate* delegate) {
+  cursor_loader_.SetLargeCursorSizeInDip(large_cursor_size_in_dip);
+  delegate->CommitLargeCursorSizeInDip(large_cursor_size_in_dip);
+
+  // Sets the cursor to reflect the large cursor size change immediately.
+  if (delegate->IsCursorVisible()) {
+    SetCursor(delegate->GetCursor(), delegate);
+  }
+
+  Shell::Get()
+      ->window_tree_host_manager()
+      ->cursor_window_controller()
+      ->SetLargeCursorSizeInDip(large_cursor_size_in_dip);
+}
 void NativeCursorManagerAsh::SetVisibility(
     bool visible,
     ::wm::NativeCursorManagerDelegate* delegate) {
@@ -136,7 +149,7 @@ void NativeCursorManagerAsh::SetVisibility(
     SetCursor(delegate->GetCursor(), delegate);
   } else {
     gfx::NativeCursor invisible_cursor(ui::mojom::CursorType::kNone);
-    image_cursors_->SetPlatformCursor(&invisible_cursor);
+    cursor_loader_.SetPlatformCursor(&invisible_cursor);
     SetCursorOnAllRootWindows(invisible_cursor);
   }
 
@@ -155,6 +168,23 @@ void NativeCursorManagerAsh::SetMouseEventsEnabled(
 
   SetVisibility(delegate->IsCursorVisible(), delegate);
   NotifyMouseEventsEnableStateChange(enabled);
+}
+
+void NativeCursorManagerAsh::SetCursorColor(
+    SkColor color,
+    ::wm::NativeCursorManagerDelegate* delegate) {
+  cursor_loader_.SetColor(color);
+  delegate->CommitCursorColor(color);
+
+  // Sets the cursor to reflect the color change immediately.
+  if (delegate->IsCursorVisible()) {
+    SetCursor(delegate->GetCursor(), delegate);
+  }
+
+  Shell::Get()
+      ->window_tree_host_manager()
+      ->cursor_window_controller()
+      ->SetCursorColor(color);
 }
 
 }  // namespace ash

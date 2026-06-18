@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,12 +20,11 @@ void CheckCastedOriginsAlreadyNormalized(
   if (origin.IsOpaque())
     return;
 
-  base::Optional<url::Origin> checked_origin =
+  std::optional<url::Origin> checked_origin =
       url::Origin::UnsafelyCreateTupleOriginWithoutNormalization(
-          origin.Protocol().Utf8(), origin.Host().Utf8(),
-          origin.EffectivePort());
+          origin.Protocol().Utf8(), origin.Host().Utf8(), origin.Port());
   url::Origin non_checked_origin = url::Origin::CreateFromNormalizedTuple(
-      origin.Protocol().Utf8(), origin.Host().Utf8(), origin.EffectivePort());
+      origin.Protocol().Utf8(), origin.Host().Utf8(), origin.Port());
   EXPECT_EQ(checked_origin, non_checked_origin);
 }
 
@@ -92,10 +91,10 @@ TEST(BlinkPlatformTest, CastWebSecurityOrigin) {
     SCOPED_TRACE(testing::Message() << test.url);
     blink::WebSecurityOrigin web_origin =
         blink::WebSecurityOrigin::CreateFromString(
-            blink::WebString::FromUTF8(test.url));
+            blink::WebString::FromUtf8(test.url));
     EXPECT_EQ(test.scheme, web_origin.Protocol().Utf8());
     EXPECT_EQ(test.host, web_origin.Host().Utf8());
-    EXPECT_EQ(test.port, web_origin.EffectivePort());
+    EXPECT_EQ(test.port, web_origin.Port());
 
     url::Origin url_origin = web_origin;
     EXPECT_EQ(test.scheme, url_origin.scheme());
@@ -105,22 +104,27 @@ TEST(BlinkPlatformTest, CastWebSecurityOrigin) {
     web_origin = url::Origin::Create(GURL(test.url));
     EXPECT_EQ(test.scheme, web_origin.Protocol().Utf8());
     EXPECT_EQ(test.host, web_origin.Host().Utf8());
-    EXPECT_EQ(test.port, web_origin.EffectivePort());
+    EXPECT_EQ(test.port, web_origin.Port());
 
     CheckCastedOriginsAlreadyNormalized(web_origin);
   }
 
   {
     SCOPED_TRACE(testing::Message() << "null");
-    blink::WebSecurityOrigin web_origin =
-        blink::WebSecurityOrigin::CreateUniqueOpaque();
-    EXPECT_TRUE(web_origin.IsOpaque());
 
-    url::Origin url_origin = web_origin;
+    url::Origin url_origin = url::Origin::Create(GURL(""));
     EXPECT_TRUE(url_origin.opaque());
 
-    web_origin = url::Origin::Create(GURL(""));
+    blink::WebSecurityOrigin web_origin = url_origin;
     EXPECT_TRUE(web_origin.IsOpaque());
+
+    // Test copy constructor:
+    EXPECT_TRUE(url::Origin(web_origin).opaque());
+    EXPECT_TRUE(blink::WebSecurityOrigin(url_origin).IsOpaque());
+
+    // Test operator=().
+    EXPECT_TRUE(url::Origin().operator=(web_origin).opaque());
+    EXPECT_TRUE(blink::WebSecurityOrigin().operator=(url_origin).IsOpaque());
   }
 }
 
@@ -160,7 +164,7 @@ TEST(BlinkPlatformTest, WebSecurityOriginNormalization) {
     SCOPED_TRACE(testing::Message() << test.url);
     blink::WebSecurityOrigin web_origin =
         blink::WebSecurityOrigin::CreateFromString(
-            blink::WebString::FromUTF8(test.url));
+            blink::WebString::FromUtf8(test.url));
     CheckCastedOriginsAlreadyNormalized(web_origin);
   }
 }

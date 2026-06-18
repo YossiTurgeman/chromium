@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,11 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "chrome/browser/ui/views/payments/editor_view_controller.h"
 #include "chrome/browser/ui/views/payments/validation_delegate.h"
 
@@ -26,9 +27,9 @@ class ContactInfoEditorViewController : public EditorViewController {
   // Passing nullptr as |profile| indicates that we are editing a new profile;
   // other arguments should never be null.
   ContactInfoEditorViewController(
-      PaymentRequestSpec* spec,
-      PaymentRequestState* state,
-      PaymentRequestDialogView* dialog,
+      base::WeakPtr<PaymentRequestSpec> spec,
+      base::WeakPtr<PaymentRequestState> state,
+      base::WeakPtr<PaymentRequestDialogView> dialog,
       BackNavigationType back_navigation_type,
       base::OnceClosure on_edited,
       base::OnceCallback<void(const autofill::AutofillProfile&)> on_added,
@@ -39,27 +40,27 @@ class ContactInfoEditorViewController : public EditorViewController {
   // EditorViewController:
   bool IsEditingExistingItem() override;
   std::vector<EditorField> GetFieldDefinitions() override;
-  base::string16 GetInitialValueForType(
-      autofill::ServerFieldType type) override;
+  std::u16string GetInitialValueForType(autofill::FieldType type) override;
   bool ValidateModelAndSave() override;
   std::unique_ptr<ValidationDelegate> CreateValidationDelegate(
       const EditorField& field) override;
   std::unique_ptr<ui::ComboboxModel> GetComboboxModelForType(
-      const autofill::ServerFieldType& type) override;
+      const autofill::FieldType& type) override;
 
  protected:
   // PaymentRequestSheetController:
-  base::string16 GetSheetTitle() override;
+  std::u16string GetSheetTitle() override;
+  base::WeakPtr<PaymentRequestSheetController> GetWeakPtr() override;
 
  private:
   // Uses the values in the UI fields to populate the corresponding values in
   // |profile|.
   void PopulateProfile(autofill::AutofillProfile* profile);
   bool GetSheetId(DialogViewID* sheet_id) override;
-  base::string16 GetValueForType(const autofill::AutofillProfile& profile,
-                                 autofill::ServerFieldType type);
+  std::u16string GetValueForType(const autofill::AutofillProfile& profile,
+                                 autofill::FieldType type);
 
-  autofill::AutofillProfile* profile_to_edit_;
+  raw_ptr<autofill::AutofillProfile> profile_to_edit_;
 
   // Called when |profile_to_edit_| was successfully edited.
   base::OnceClosure on_edited_;
@@ -76,25 +77,28 @@ class ContactInfoEditorViewController : public EditorViewController {
 
     // ValidationDelegate:
     bool ShouldFormat() override;
-    base::string16 Format(const base::string16& text) override;
+    std::u16string Format(std::u16string_view text) override;
     bool IsValidTextfield(views::Textfield* textfield,
-                          base::string16* error_message) override;
-    bool IsValidCombobox(views::Combobox* combobox,
-                         base::string16* error_message) override;
+                          std::u16string* error_message) override;
+    bool IsValidCombobox(ValidatingCombobox* combobox,
+                         std::u16string* error_message) override;
     bool TextfieldValueChanged(views::Textfield* textfield,
                                bool was_blurred) override;
-    bool ComboboxValueChanged(views::Combobox* combobox) override;
-    void ComboboxModelChanged(views::Combobox* combobox) override {}
+    bool ComboboxValueChanged(ValidatingCombobox* combobox) override;
+    void ComboboxModelChanged(ValidatingCombobox* combobox) override {}
 
    private:
     bool ValidateTextfield(views::Textfield* textfield,
-                           base::string16* error_message);
+                           std::u16string* error_message);
 
     EditorField field_;
     // Outlives this class. Never null.
-    ContactInfoEditorViewController* controller_;
-    const std::string& locale_;
+    raw_ptr<ContactInfoEditorViewController, DanglingUntriaged> controller_;
+    const raw_ref<const std::string> locale_;
   };
+
+  // Must be the last member of a leaf class.
+  base::WeakPtrFactory<ContactInfoEditorViewController> weak_ptr_factory_{this};
 };
 
 }  // namespace payments

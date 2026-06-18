@@ -1,4 +1,4 @@
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -22,14 +22,10 @@ def AugmentOptionsForLoadingMetrics(tbm_options):
   # necessary to compute time-to-interactive.
   cat_filter.AddIncludedCategory('toplevel')
 
-  # "gpu.memory" category is used to capture timings spend performing memory
-  # ablation experiments.
-  cat_filter.AddIncludedCategory('gpu.memory')
-
   # "network" category is used to capture ResourceLoad events necessary to
   # properly compute time-to-interactive.
   cat_filter.AddDisabledByDefault('disabled-by-default-network')
 
-  tbm_options.AddTimelineBasedMetric('loadingMetric')
-  tbm_options.AddTimelineBasedMetric('memoryAblationMetric')
+  tbm_options.ExtendTimelineBasedMetric(
+      ['loadingMetric', 'coreWebVitalsMetric'])
   return tbm_options

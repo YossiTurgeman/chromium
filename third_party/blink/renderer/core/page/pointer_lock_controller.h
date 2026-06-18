@@ -26,21 +26,24 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_POINTER_LOCK_CONTROLLER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_POINTER_LOCK_CONTROLLER_H_
 
-#include "base/macros.h"
-#include "base/memory/scoped_refptr.h"
+#include <memory>
+
+#include "cc/trees/layer_tree_host.h"
+#include "third_party/blink/public/mojom/input/pointer_lock_context.mojom-blink.h"
 #include "third_party/blink/public/mojom/input/pointer_lock_result.mojom-blink-forward.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/platform/bindings/script_state.h"
-#include "third_party/blink/renderer/platform/geometry/float_point.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+#include "ui/gfx/geometry/point_f.h"
 
 namespace blink {
 
 class Element;
 class Document;
+class LocalFrame;
 class Page;
 class PointerLockOptions;
 class WebMouseEvent;
@@ -51,20 +54,25 @@ class CORE_EXPORT PointerLockController final
     : public GarbageCollected<PointerLockController> {
  public:
   explicit PointerLockController(Page*);
+  PointerLockController(const PointerLockController&) = delete;
+  PointerLockController& operator=(const PointerLockController&) = delete;
 
-  ScriptPromise RequestPointerLock(ScriptPromiseResolver* resolver,
-                                   Element* target,
-                                   ExceptionState& exception_state,
-                                   const PointerLockOptions* options = nullptr);
-  void RequestPointerUnlock();
+  using ResultCallback =
+      base::OnceCallback<void(mojom::blink::PointerLockResult)>;
+  bool RequestPointerLock(Element* target, ResultCallback callback);
+
+  void RequestPointerLock(ScriptPromiseResolver<IDLUndefined>* resolver,
+                          Element* target,
+                          const PointerLockOptions* options = nullptr);
+  void ExitPointerLock();
   void ElementRemoved(Element*);
   void DocumentDetached(Document*);
   bool LockPending() const;
+  bool IsPointerLocked() const;
   Element* GetElement() const;
 
   void DidAcquirePointerLock();
   void DidNotAcquirePointerLock();
-  void DidLosePointerLock();
   void DispatchLockedMouseEvent(const WebMouseEvent&,
                                 const Vector<WebMouseEvent>& coalesced_events,
                                 const Vector<WebMouseEvent>& predicted_events,
@@ -72,41 +80,80 @@ class CORE_EXPORT PointerLockController final
 
   // Fetch the locked mouse position when pointer is locked. The values are not
   // changed if pointer is not locked.
-  void GetPointerLockPosition(FloatPoint* lock_position,
-                              FloatPoint* lock_screen_position);
+  void GetPointerLockPosition(gfx::PointF* lock_position,
+                              gfx::PointF* lock_screen_position);
   void Trace(Visitor*) const;
 
   static Element* GetPointerLockedElement(LocalFrame* frame);
 
  private:
+  friend class PointerLockControllerRateLimitTest;
+  FRIEND_TEST_ALL_PREFIXES(PointerLockControllerRateLimitTest,
+                           SuccessfulLockAddsToRecentTimestamps);
+  FRIEND_TEST_ALL_PREFIXES(PointerLockControllerRateLimitTest,
+                           FailedLockDoesNotAffectRateLimit);
+  FRIEND_TEST_ALL_PREFIXES(PointerLockControllerRateLimitTest,
+                           RequestRejectedAfterThresholdExceeded);
+  FRIEND_TEST_ALL_PREFIXES(PointerLockControllerRateLimitTest,
+                           RequestAcceptedAfterRateLimitWindowPasses);
+
   void ClearElement();
   void EnqueueEvent(const AtomicString& type, Element*);
   void EnqueueEvent(const AtomicString& type, Document*);
   void ChangeLockRequestCallback(Element* target,
-                                 ScriptPromiseResolver* resolver,
+                                 ResultCallback callback,
                                  bool unadjusted_movement_requested,
                                  mojom::blink::PointerLockResult result);
-  void LockRequestCallback(ScriptPromiseResolver* resolver,
-                           bool unadjusted_movement_requested,
-                           mojom::blink::PointerLockResult result);
-  DOMException* ConvertResultToException(
+  void LockRequestCallback(
+      ResultCallback callback,
+      bool unadjusted_movement_requested,
+      mojom::blink::PointerLockResult result,
+      mojo::PendingRemote<blink::mojom::blink::PointerLockContext> context);
+
+  void ProcessResult(ResultCallback callback,
+                     bool unadjusted_movement_requested,
+                     mojom::blink::PointerLockResult result);
+
+  static void ProcessResultPromise(
+      ScriptPromiseResolver<IDLUndefined>* resolver,
       mojom::blink::PointerLockResult result);
-  void RejectIfPromiseEnabled(ScriptPromiseResolver* resolver,
-                              DOMException* exception);
+  static DOMException* ConvertResultToException(
+      mojom::blink::PointerLockResult result);
 
   Member<Page> page_;
   bool lock_pending_;
   Member<Element> element_;
   Member<Document> document_of_removed_element_while_waiting_for_unlock_;
 
+  HeapMojoRemote<mojom::blink::PointerLockContext> mouse_lock_context_{nullptr};
+
+  std::unique_ptr<cc::ScopedRequestHighFramerate> high_framerate_request_;
+
   // Store the locked position so that the event position keeps unchanged when
   // in locked states. These values only get set when entering lock states.
-  FloatPoint pointer_lock_position_;
-  FloatPoint pointer_lock_screen_position_;
+  gfx::PointF pointer_lock_position_;
+  gfx::PointF pointer_lock_screen_position_;
+
+  // If there are more than `kMaxLocksInWindow` lock requests within
+  // `kLockRateLimitWindow`, reject all pointer lock requests until
+  // `kLockRateLimitWindow` has passed since the last successful lock. These
+  // values were chosen were chosen to allow common use-cases and not determined
+  // through any user-study or specification. Rate limiting was added in blink
+  // instead of the browser process because a pointer lock request causes a
+  // roundtrip to the browser process, so a page that is spamming pointer lock
+  // requests would be able to cause a large amount of unnecessary IPC traffic
+  // which would bog down the browser and cause it to lag, even if the page is
+  // not able to successfully acquire pointer lock.
+  static constexpr size_t kMaxLocksInWindow = 4;
+  static constexpr base::TimeDelta kLockRateLimitWindow = base::Seconds(2);
+
+  // The timestamp of the most recent pointer lock request. Used for rate
+  // limiting to prevent abuse where a page rapidly locks and unlocks the
+  // pointer.
+  base::TimeTicks last_successful_lock_timestamp_;
+  uint8_t recent_lock_attempts_ = 0;
 
   bool current_unadjusted_movement_setting_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(PointerLockController);
 };
 
 }  // namespace blink

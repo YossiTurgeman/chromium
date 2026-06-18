@@ -1,20 +1,22 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_SYNC_SYNC_UI_UTIL_H_
 #define CHROME_BROWSER_SYNC_SYNC_UI_UTIL_H_
 
-#include "build/build_config.h"
-#include "components/sync/driver/sync_service_utils.h"
+#include <optional>
 
-class Browser;
-class GURL;
+#include "build/build_config.h"
+#include "components/sync/service/sync_service.h"
+#include "components/sync/service/sync_service_utils.h"
+
 class Profile;
 
-namespace signin {
-class IdentityManager;
-}  // namespace signin
+#if !BUILDFLAG(IS_ANDROID)
+class Browser;
+class BrowserWindowInterface;
+#endif
 
 namespace syncer {
 class SyncService;
@@ -22,85 +24,68 @@ class SyncService;
 
 // Utility functions to gather current sync status information from the sync
 // service and constructs messages suitable for showing in UI.
-namespace sync_ui_util {
 
-enum MessageType {
+enum class SyncStatusMessageType {
   // User has not set up sync.
-  PRE_SYNCED,
+  kPreSynced,
   // We are synced and authenticated to a gmail account.
-  SYNCED,
+  kSynced,
   // A sync error (such as invalid credentials) has occurred.
-  SYNC_ERROR,
-  // Same as SYNC_ERROR but affecting passwords only.
-  PASSWORDS_ONLY_SYNC_ERROR,
+  kSyncError,
+  // Same as kSyncError but affecting passwords only.
+  kPasswordsOnlySyncError,
 };
 
-// The action associated with the sync status.
-enum ActionType {
+// The action associated with the sync status in settings.
+enum class SyncStatusActionType {
   // No action to take.
-  NO_ACTION,
+  kNoAction,
   // User needs to reauthenticate.
-  REAUTHENTICATE,
-  // User needs to sign out and sign in.
-  SIGNOUT_AND_SIGNIN,
+  kReauthenticate,
   // User needs to upgrade the client.
-  UPGRADE_CLIENT,
+  kUpgradeClient,
   // User needs to enter their passphrase.
-  ENTER_PASSPHRASE,
+  kEnterPassphrase,
   // User needs to go through key retrieval.
-  RETRIEVE_TRUSTED_VAULT_KEYS,
+  kRetrieveTrustedVaultKeys,
   // User needs to confirm sync settings.
-  CONFIRM_SYNC_SETTINGS,
+  kConfirmSyncSettings,
+  // User needs to see the help article for bookmarks limit.
+  kShowBookmarksLimitHelpArticle,
 };
 
-// Sync errors that should be exposed to the user through the avatar button.
-enum AvatarSyncErrorType {
-  // No sync error.
-  NO_SYNC_ERROR,
-  // Unrecoverable error for managed users.
-  MANAGED_USER_UNRECOVERABLE_ERROR,
-  // Unrecoverable error for regular users.
-  UNRECOVERABLE_ERROR,
-  // Authentication error.
-  AUTH_ERROR,
-  // Out-of-date client error.
-  UPGRADE_CLIENT_ERROR,
-  // Sync passphrase error.
-  PASSPHRASE_ERROR,
-  // Trusted vault keys missing for all sync datatypes (encrypt everything is
-  // enabled).
-  TRUSTED_VAULT_KEY_MISSING_FOR_EVERYTHING_ERROR,
-  // Trusted vault keys missing for always-encrypted datatypes (passwords).
-  TRUSTED_VAULT_KEY_MISSING_FOR_PASSWORDS_ERROR,
-  // Sync settings dialog not confirmed yet.
-  SETTINGS_UNCONFIRMED_ERROR,
+struct SyncStatusLabels {
+  SyncStatusMessageType message_type = SyncStatusMessageType::kPreSynced;
+  int status_label_string_id = 0;
+  int button_string_id = 0;
+  int secondary_button_string_id = 0;
+  SyncStatusActionType action_type = SyncStatusActionType::kNoAction;
 };
 
-struct StatusLabels {
-  MessageType message_type;
-  int status_label_string_id;
-  int button_string_id;
-  ActionType action_type;
-};
+extern const char kBookmarksLimitExceededHelpCenter[];
 
-// Returns the high-level sync status by querying |sync_service| and
-// |identity_manager|.
-StatusLabels GetStatusLabels(syncer::SyncService* sync_service,
-                             signin::IdentityManager* identity_manager,
-                             bool is_user_signout_allowed);
+#if !BUILDFLAG(IS_ANDROID)
+SyncStatusLabels GetSyncStatusLabelsForSettings(
+    const syncer::SyncService* service);
 
-// Returns the high-level sync status by querying |profile|. This is a
-// convenience version of GetStatusLabels that use the |sync_service| and
-// |identity_manager| associated to |profile| via their respective factories.
-StatusLabels GetStatusLabels(Profile* profile);
+// `error` must not be `kNone`.
+// If `support_title_case` is true, the string may be capitalized depending on
+// platform and language. If false, sentence casing is used.
+int GetSyncErrorButtonStringId(syncer::SyncService::UserActionableError error,
+                               bool support_title_case);
 
-// Convenience version of GetStatusLabels for when you're not interested in the
-// actual labels, only in the return value.
-MessageType GetStatus(Profile* profile);
+// `error` must not be `kNone`.
+SyncStatusLabels GetAvatarSyncErrorLabelsForSettings(
+    Profile* profile,
+    syncer::SyncService::UserActionableError error);
 
-// Gets the error type (if any) that should be exposed to the user through the
-// titlebar avatar button.
-AvatarSyncErrorType GetAvatarSyncErrorType(Profile* profile);
+// This returns the string to be shown both as the tooltip of the avatar button,
+// and in the profile menu body (the menu opened by clicking the avatar button).
+// `error` must not be `kNone`.
+std::u16string GetAvatarSyncErrorDescription(
+    syncer::SyncService::UserActionableError error,
+    const std::string& user_email);
+#endif
 
 // Whether sync is currently blocked from starting because the sync
 // confirmation dialog hasn't been shown. Note that once the dialog is
@@ -109,22 +94,33 @@ bool ShouldRequestSyncConfirmation(const syncer::SyncService* service);
 
 // Returns whether it makes sense to show a Sync passphrase error UI, i.e.
 // whether a missing passphrase is preventing Sync from fully starting up.
-bool ShouldShowPassphraseError(const syncer::SyncService* service);
+bool ShouldShowSyncPassphraseError(const syncer::SyncService* service);
 
-// Returns whether missing trusted vault keys is preventing sync from starting
-// up encrypted datatypes.
-bool ShouldShowSyncKeysMissingError(const syncer::SyncService* service);
+#if !BUILDFLAG(IS_ANDROID)
+// Shows the sync passphrase dialog and attempts decrypting the data using the
+// provided passphrase.
+void ShowSyncPassphraseDialogAndDecryptData(Browser& browser);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-// Opens a tab to trigger a reauth to retrieve the trusted vault keys.
+#if !BUILDFLAG(IS_ANDROID)
+// Opens a tab for the purpose of retrieving the trusted vault keys, which
+// usually requires a reauth.
 void OpenTabForSyncKeyRetrieval(
-    Browser* browser,
-    syncer::KeyRetrievalTriggerForUMA key_retrieval_trigger);
+    BrowserWindowInterface* browser,
+    trusted_vault::TrustedVaultUserActionTriggerForUMA trigger);
 
-// Testing-only variant of the above which allows the caller to specify the
-// URL.
-void OpenTabForSyncKeyRetrievalWithURLForTesting(Browser* browser,
-                                                 const GURL& url);
+// Opens a tab for the purpose of improving the recoverability of the trusted
+// vault keys, which usually requires a reauth.
+void OpenTabForSyncKeyRecoverabilityDegraded(
+    BrowserWindowInterface* browser,
+    trusted_vault::TrustedVaultUserActionTriggerForUMA trigger);
 
-}  // namespace sync_ui_util
+// Opens a new tab with the help page for bookmarks count limit exceeded error
+// and acknowledges the error.
+void ShowBookmarksLimitExceededHelp(
+    BrowserWindowInterface* browser,
+    syncer::SyncService* sync_service,
+    syncer::SyncService::BookmarksLimitExceededHelpClickedSource source);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #endif  // CHROME_BROWSER_SYNC_SYNC_UI_UTIL_H_

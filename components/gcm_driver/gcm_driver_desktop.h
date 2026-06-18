@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,11 @@
 #include <vector>
 
 #include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/containers/queue.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
+#include "base/time/time.h"
 #include "base/tuple.h"
 #include "components/gcm_driver/crypto/gcm_decryption_result.h"
 #include "components/gcm_driver/gcm_client.h"
@@ -36,6 +37,11 @@ class NetworkConnectionTracker;
 class SharedURLLoaderFactory;
 }
 
+namespace os_crypt_async {
+class Encryptor;
+class OSCryptAsync;
+}  // namespace os_crypt_async
+
 namespace gcm {
 
 class GCMAccountMapper;
@@ -48,16 +54,11 @@ class GCMDelayedTaskController;
 class GCMDriverDesktop : public GCMDriver,
                          protected InstanceIDHandler {
  public:
-  // |remove_account_mappings_with_email_key| indicates whether account mappings
-  // having email as account key should be removed while loading. This is
-  // required during the migration of account identifier from email to Gaia ID.
   GCMDriverDesktop(
       std::unique_ptr<GCMClientFactory> gcm_client_factory,
       const GCMClient::ChromeBuildInfo& chrome_build_info,
-      const std::string& user_agent,
       PrefService* prefs,
       const base::FilePath& store_path,
-      bool remove_account_mappings_with_email_key,
       base::RepeatingCallback<void(
           mojo::PendingReceiver<network::mojom::ProxyResolvingSocketFactory>)>
           get_socket_factory_callback,
@@ -65,7 +66,12 @@ class GCMDriverDesktop : public GCMDriver,
       network::NetworkConnectionTracker* network_connection_tracker,
       const scoped_refptr<base::SequencedTaskRunner>& ui_thread,
       const scoped_refptr<base::SequencedTaskRunner>& io_thread,
-      const scoped_refptr<base::SequencedTaskRunner>& blocking_task_runner);
+      const scoped_refptr<base::SequencedTaskRunner>& blocking_task_runner,
+      os_crypt_async::OSCryptAsync* os_crypt_async);
+
+  GCMDriverDesktop(const GCMDriverDesktop&) = delete;
+  GCMDriverDesktop& operator=(const GCMDriverDesktop&) = delete;
+
   ~GCMDriverDesktop() override;
 
   // GCMDriver implementation:
@@ -74,8 +80,6 @@ class GCMDriverDesktop : public GCMDriver,
                             const std::string& registration_id,
                             ValidateRegistrationCallback callback) override;
   void Shutdown() override;
-  void OnSignedIn() override;
-  void OnSignedOut() override;
   void AddAppHandler(const std::string& app_id,
                      GCMAppHandler* handler) override;
   void RemoveAppHandler(const std::string& app_id) override;
@@ -94,7 +98,6 @@ class GCMDriverDesktop : public GCMDriver,
   void RemoveAccountMapping(const CoreAccountId& account_id) override;
   base::Time GetLastTokenFetchTime() override;
   void SetLastTokenFetchTime(const base::Time& time) override;
-  void WakeFromSuspendForHeartbeat(bool wake) override;
   InstanceIDHandler* GetInstanceIDHandlerInternal() override;
   void AddHeartbeatInterval(const std::string& scope, int interval_ms) override;
   void RemoveHeartbeatInterval(const std::string& scope) override;
@@ -116,7 +119,6 @@ class GCMDriverDesktop : public GCMDriver,
                 const std::string& authorized_entity,
                 const std::string& scope,
                 base::TimeDelta time_to_live,
-                const std::map<std::string, std::string>& options,
                 GetTokenCallback callback) override;
   void ValidateToken(const std::string& app_id,
                      const std::string& authorized_entity,
@@ -142,6 +144,11 @@ class GCMDriverDesktop : public GCMDriver,
     bool operator()(const TokenTuple& a, const TokenTuple& b) const;
   };
 
+  void OnOsCryptReady(
+      base::OnceCallback<void(scoped_refptr<os_crypt_async::Encryptor>)>
+          io_callback,
+      scoped_refptr<os_crypt_async::Encryptor> encryptor);
+
   void DoValidateRegistration(scoped_refptr<RegistrationInfo> registration_info,
                               const std::string& registration_id,
                               ValidateRegistrationCallback callback);
@@ -166,8 +173,7 @@ class GCMDriverDesktop : public GCMDriver,
   void DoGetToken(const std::string& app_id,
                   const std::string& authorized_entity,
                   const std::string& scope,
-                  base::TimeDelta time_to_live,
-                  const std::map<std::string, std::string>& options);
+                  base::TimeDelta time_to_live);
   void DoDeleteToken(const std::string& app_id,
                      const std::string& authorized_entity,
                      const std::string& scope);
@@ -200,9 +206,6 @@ class GCMDriverDesktop : public GCMDriver,
                            const std::string& scope,
                            GCMClient::Result result);
 
-  // Flag to indicate whether the user is signed in to a GAIA account.
-  bool signed_in_;
-
   // Flag to indicate if GCM is started.
   bool gcm_started_;
 
@@ -226,10 +229,6 @@ class GCMDriverDesktop : public GCMDriver,
 
   std::unique_ptr<GCMDelayedTaskController> delayed_task_controller_;
 
-  // Whether the HeartbeatManager should try to wake the system from suspend for
-  // sending heartbeat messages.
-  bool wake_from_suspend_enabled_;
-
   // For all the work occurring on the IO thread. Must be destroyed on the IO
   // thread.
   std::unique_ptr<IOWorker> io_worker_;
@@ -237,8 +236,15 @@ class GCMDriverDesktop : public GCMDriver,
   // Callback for SetGCMRecording.
   GCMStatisticsRecordingCallback gcm_statistics_recording_callback_;
 
-  // Callbacks for GetInstanceIDData.
-  std::map<std::string, GetInstanceIDDataCallback>
+  // Callbacks for GetInstanceIDData. Initializing InstanceID is asynchronous,
+  // which leads to a race condition when recreating an InstanceID before such
+  // initialization has finished, causing multiple callbacks to be in flight.
+  // Expecting all InstanceID users to care for that is fragile and complicated,
+  // so allow for a queue of callbacks to be stored here instead.
+  //
+  // Note that other InstanceID callbacks don't have this concern, as they all
+  // wait for initialization of the InstanceID instance to have completed.
+  std::map<std::string, base::queue<GetInstanceIDDataCallback>>
       get_instance_id_data_callbacks_;
 
   // Callbacks for GetToken/DeleteToken.
@@ -249,8 +255,6 @@ class GCMDriverDesktop : public GCMDriver,
 
   // Used to pass a weak pointer to the IO worker.
   base::WeakPtrFactory<GCMDriverDesktop> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(GCMDriverDesktop);
 };
 
 }  // namespace gcm

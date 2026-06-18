@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,19 +13,19 @@
 #include "base/compiler_specific.h"
 #include "base/containers/circular_deque.h"
 #include "base/logging.h"
-#include "base/macros.h"
 #include "base/synchronization/lock.h"
 #include "base/time/time.h"
+#include "components/drive/drive_export.h"
 
 namespace drive {
 
 // The default history size used by EventLogger.
-const int kDefaultHistorySize = 1000;
+inline constexpr int kDefaultHistorySize = 1000;
 
 // EventLogger is used to collect and expose text messages for diagnosing
 // behaviors of Google APIs stuff. For instance, the collected messages are
 // exposed to chrome:drive-internals.
-class EventLogger {
+class COMPONENTS_DRIVE_EXPORT EventLogger {
  public:
   // Represents a single event log.
   struct Event {
@@ -38,6 +38,10 @@ class EventLogger {
 
   // Creates an event logger that keeps the latest kDefaultHistorySize events.
   EventLogger();
+
+  EventLogger(const EventLogger&) = delete;
+  EventLogger& operator=(const EventLogger&) = delete;
+
   ~EventLogger();
 
   // Logs a message and its severity.
@@ -46,8 +50,8 @@ class EventLogger {
 
   // Logs a message with formatting.
   // Can be called from any thread as long as the object is alive.
-  void Log(logging::LogSeverity severity, const char* format, ...)
-      PRINTF_FORMAT(3, 4);
+  PRINTF_FORMAT(3, 4)
+  void Log(logging::LogSeverity severity, const char* format, ...);
 
   // Sets the history size. The existing history is cleared.
   // Can be called from any thread as long as the object is alive.
@@ -62,8 +66,6 @@ class EventLogger {
   size_t history_size_;  // guarded by lock_.
   int next_event_id_;  // guarded by lock_.
   base::Lock lock_;
-
-  DISALLOW_COPY_AND_ASSIGN(EventLogger);
 };
 
 }  // namespace drive

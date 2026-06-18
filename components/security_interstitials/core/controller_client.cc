@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,10 @@ namespace security_interstitials {
 
 const char kBoxChecked[] = "boxchecked";
 const char kDisplayCheckBox[] = "displaycheckbox";
+const char kDisplayEnhancedProtectionMessage[] =
+    "displayEnhancedProtectionMessage";
 const char kOptInLink[] = "optInLink";
+const char kEnhancedProtectionMessage[] = "enhancedProtectionMessage";
 const char kHelpCenterUrl[] = "https://support.google.com/chrome/";
 
 ControllerClient::ControllerClient(
@@ -25,7 +28,7 @@ ControllerClient::ControllerClient(
     : metrics_helper_(std::move(metrics_helper)),
       help_center_url_(kHelpCenterUrl) {}
 
-ControllerClient::~ControllerClient() {}
+ControllerClient::~ControllerClient() = default;
 
 MetricsHelper* ControllerClient::metrics_helper() const {
   return metrics_helper_.get();

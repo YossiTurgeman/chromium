@@ -1,10 +1,13 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "base/types/optional_util.h"
 #include "base/values.h"
 #include "chrome/test/chromedriver/chrome/mobile_emulation_override_manager.h"
 #include "chrome/test/chromedriver/chrome/status.h"
@@ -23,7 +26,7 @@ namespace {
 class MockChrome : public StubChrome {
  public:
   MockChrome() : web_view_("1") {}
-  ~MockChrome() override {}
+  ~MockChrome() override = default;
 
   Status GetWebViewById(const std::string& id, WebView** web_view) override {
     if (id == web_view_.GetId()) {
@@ -35,22 +38,22 @@ class MockChrome : public StubChrome {
 
  private:
   // Using a StubWebView does not allow testing the functionality end-to-end,
-  // more details in crbug.com/850703
+  // more details in crbug.com/40579857
   StubWebView web_view_;
 };
 
 typedef Status (*Command)(Session* session,
                           WebView* web_view,
-                          const base::DictionaryValue& params,
+                          const base::DictValue& params,
                           std::unique_ptr<base::Value>* value,
                           Timeout* timeout);
 
 Status CallWindowCommand(Command command,
-                         const base::DictionaryValue& params = {},
+                         const base::DictValue& params = {},
                          std::unique_ptr<base::Value>* value = nullptr) {
   MockChrome* chrome = new MockChrome();
   Session session("id", std::unique_ptr<Chrome>(chrome));
-  WebView* web_view = NULL;
+  WebView* web_view = nullptr;
   Status status = chrome->GetWebViewById("1", &web_view);
   if (status.IsError())
     return status;
@@ -63,7 +66,7 @@ Status CallWindowCommand(Command command,
 
 Status CallWindowCommand(Command command,
                          StubWebView* web_view,
-                         const base::DictionaryValue& params = {},
+                         const base::DictValue& params = {},
                          std::unique_ptr<base::Value>* value = nullptr) {
   MockChrome* chrome = new MockChrome();
   Session session("id", std::unique_ptr<Chrome>(chrome));
@@ -87,16 +90,16 @@ TEST(WindowCommandsTest, ExecuteResume) {
 }
 
 TEST(WindowCommandsTest, ExecuteSendCommandAndGetResult_NoCmd) {
-  base::DictionaryValue params;
-  params.SetDictionary("params", std::make_unique<base::DictionaryValue>());
+  base::DictValue params;
+  params.Set("params", base::DictValue());
   Status status = CallWindowCommand(ExecuteSendCommandAndGetResult, params);
   ASSERT_EQ(kInvalidArgument, status.code());
   ASSERT_NE(status.message().find("command not passed"), std::string::npos);
 }
 
 TEST(WindowCommandsTest, ExecuteSendCommandAndGetResult_NoParams) {
-  base::DictionaryValue params;
-  params.SetString("cmd", "CSS.enable");
+  base::DictValue params;
+  params.Set("cmd", "CSS.enable");
   Status status = CallWindowCommand(ExecuteSendCommandAndGetResult, params);
   ASSERT_EQ(kInvalidArgument, status.code());
   ASSERT_NE(status.message().find("params not passed"), std::string::npos);
@@ -104,165 +107,147 @@ TEST(WindowCommandsTest, ExecuteSendCommandAndGetResult_NoParams) {
 
 TEST(WindowCommandsTest, ProcessInputActionSequencePointerMouse) {
   Session session("1");
-  std::vector<std::unique_ptr<base::DictionaryValue>> action_list;
-  std::unique_ptr<base::DictionaryValue> action_sequence(
-      new base::DictionaryValue());
-  std::unique_ptr<base::ListValue> actions(new base::ListValue());
-  std::unique_ptr<base::DictionaryValue> action(new base::DictionaryValue());
-  std::unique_ptr<base::DictionaryValue> parameters(
-      new base::DictionaryValue());
-  parameters->SetString("pointerType", "mouse");
-  action->SetString("type", "pointerMove");
-  action->SetInteger("x", 30);
-  action->SetInteger("y", 60);
-  actions->Append(std::move(action));
-  action = std::make_unique<base::DictionaryValue>();
-  action->SetString("type", "pointerDown");
-  action->SetInteger("button", 0);
-  actions->Append(std::move(action));
-  action = std::make_unique<base::DictionaryValue>();
-  action->SetString("type", "pointerUp");
-  action->SetInteger("button", 0);
-  actions->Append(std::move(action));
+  std::vector<base::DictValue> action_list;
+  base::DictValue action_sequence;
+  base::ListValue actions;
+  base::DictValue parameters;
+  parameters.Set("pointerType", "mouse");
+  action_sequence.Set("parameters", std::move(parameters));
+  {
+    base::DictValue action;
+    action.Set("type", "pointerMove");
+    action.Set("x", 30);
+    action.Set("y", 60);
+    actions.Append(std::move(action));
+  }
+  {
+    base::DictValue action;
+    action.Set("type", "pointerDown");
+    action.Set("button", 0);
+    actions.Append(std::move(action));
+  }
+  {
+    base::DictValue action;
+    action.Set("type", "pointerUp");
+    action.Set("button", 0);
+    actions.Append(std::move(action));
+  }
 
   // pointer properties
-  action_sequence->SetString("type", "pointer");
-  action_sequence->SetString("id", "pointer1");
-  action_sequence->SetDictionary("parameters", std::move(parameters));
-  action_sequence->SetList("actions", std::move(actions));
-  const base::DictionaryValue* input_action_sequence = action_sequence.get();
+  action_sequence.Set("type", "pointer");
+  action_sequence.Set("id", "pointer1");
+  action_sequence.Set("actions", std::move(actions));
   Status status =
-      ProcessInputActionSequence(&session, input_action_sequence, &action_list);
+      ProcessInputActionSequence(&session, action_sequence, &action_list);
   ASSERT_TRUE(status.IsOk());
 
   // check resulting action dictionary
-  std::string pointer_type;
-  std::string source_type;
-  std::string id;
-  std::string action_type;
-  int x, y;
-  std::string button;
-
   ASSERT_EQ(3U, action_list.size());
-  const base::DictionaryValue* action1 = action_list[0].get();
-  action1->GetString("type", &source_type);
-  action1->GetString("pointerType", &pointer_type);
-  action1->GetString("id", &id);
-  ASSERT_EQ("pointer", source_type);
-  ASSERT_EQ("mouse", pointer_type);
-  ASSERT_EQ("pointer1", id);
-  action1->GetString("subtype", &action_type);
-  action1->GetInteger("x", &x);
-  action1->GetInteger("y", &y);
-  ASSERT_EQ("pointerMove", action_type);
-  ASSERT_EQ(30, x);
-  ASSERT_EQ(60, y);
+  const base::DictValue& action1 = action_list[0];
+  ASSERT_EQ("pointer", base::OptionalFromPtr(action1.FindString("type")));
+  ASSERT_EQ("mouse", base::OptionalFromPtr(action1.FindString("pointerType")));
+  ASSERT_EQ("pointer1", base::OptionalFromPtr(action1.FindString("id")));
+  ASSERT_EQ("pointerMove",
+            base::OptionalFromPtr(action1.FindString("subtype")));
+  ASSERT_EQ(30, action1.FindDouble("x"));
+  ASSERT_EQ(60, action1.FindDouble("y"));
 
-  const base::DictionaryValue* action2 = action_list[1].get();
-  action2->GetString("type", &source_type);
-  action2->GetString("pointerType", &pointer_type);
-  action2->GetString("id", &id);
-  ASSERT_EQ("pointer", source_type);
-  ASSERT_EQ("mouse", pointer_type);
-  ASSERT_EQ("pointer1", id);
-  action2->GetString("subtype", &action_type);
-  action2->GetString("button", &button);
-  ASSERT_EQ("pointerDown", action_type);
-  ASSERT_EQ("left", button);
+  const base::DictValue& action2 = action_list[1];
+  ASSERT_EQ("pointer", base::OptionalFromPtr(action2.FindString("type")));
+  ASSERT_EQ("mouse", base::OptionalFromPtr(action2.FindString("pointerType")));
+  ASSERT_EQ("pointer1", base::OptionalFromPtr(action2.FindString("id")));
+  ASSERT_EQ("pointerDown",
+            base::OptionalFromPtr(action2.FindString("subtype")));
+  ASSERT_EQ("left", base::OptionalFromPtr(action2.FindString("button")));
 
-  const base::DictionaryValue* action3 = action_list[2].get();
-  action3->GetString("type", &source_type);
-  action3->GetString("pointerType", &pointer_type);
-  action3->GetString("id", &id);
-  ASSERT_EQ("pointer", source_type);
-  ASSERT_EQ("mouse", pointer_type);
-  ASSERT_EQ("pointer1", id);
-  action3->GetString("subtype", &action_type);
-  action3->GetString("button", &button);
-  ASSERT_EQ("pointerUp", action_type);
-  ASSERT_EQ("left", button);
+  const base::DictValue& action3 = action_list[2];
+  ASSERT_EQ("pointer", base::OptionalFromPtr(action3.FindString("type")));
+  ASSERT_EQ("mouse", base::OptionalFromPtr(action3.FindString("pointerType")));
+  ASSERT_EQ("pointer1", base::OptionalFromPtr(action3.FindString("id")));
+  ASSERT_EQ("pointerUp", base::OptionalFromPtr(action3.FindString("subtype")));
+  ASSERT_EQ("left", base::OptionalFromPtr(action3.FindString("button")));
 }
 
 TEST(WindowCommandsTest, ProcessInputActionSequencePointerTouch) {
   Session session("1");
-  std::vector<std::unique_ptr<base::DictionaryValue>> action_list;
-  std::unique_ptr<base::DictionaryValue> action_sequence(
-      new base::DictionaryValue());
-  std::unique_ptr<base::ListValue> actions(new base::ListValue());
-  std::unique_ptr<base::DictionaryValue> action(new base::DictionaryValue());
-  std::unique_ptr<base::DictionaryValue> parameters(
-      new base::DictionaryValue());
-  parameters->SetString("pointerType", "touch");
-  action->SetString("type", "pointerMove");
-  action->SetInteger("x", 30);
-  action->SetInteger("y", 60);
-  actions->Append(std::move(action));
-  action = std::make_unique<base::DictionaryValue>();
-  action->SetString("type", "pointerDown");
-  actions->Append(std::move(action));
-  action = std::make_unique<base::DictionaryValue>();
-  action->SetString("type", "pointerUp");
-  actions->Append(std::move(action));
+  std::vector<base::DictValue> action_list;
+  base::DictValue action_sequence;
+  base::ListValue actions;
+  base::DictValue parameters;
+  parameters.Set("pointerType", "touch");
+  action_sequence.Set("parameters", std::move(parameters));
+  {
+    base::DictValue action;
+    action.Set("type", "pointerMove");
+    action.Set("x", 30);
+    action.Set("y", 60);
+    actions.Append(std::move(action));
+  }
+  {
+    base::DictValue action;
+    action.Set("type", "pointerDown");
+    actions.Append(std::move(action));
+  }
+  {
+    base::DictValue action;
+    action.Set("type", "pointerUp");
+    actions.Append(std::move(action));
+  }
 
   // pointer properties
-  action_sequence->SetString("type", "pointer");
-  action_sequence->SetString("id", "pointer1");
-  action_sequence->SetDictionary("parameters", std::move(parameters));
-  action_sequence->SetList("actions", std::move(actions));
-  const base::DictionaryValue* input_action_sequence = action_sequence.get();
+  action_sequence.Set("type", "pointer");
+  action_sequence.Set("id", "pointer1");
+  action_sequence.Set("actions", std::move(actions));
   Status status =
-      ProcessInputActionSequence(&session, input_action_sequence, &action_list);
+      ProcessInputActionSequence(&session, action_sequence, &action_list);
   ASSERT_TRUE(status.IsOk());
 
   // check resulting action dictionary
-  std::string pointer_type;
-  std::string source_type;
-  std::string id;
-  std::string action_type;
-  int x, y;
-
   ASSERT_EQ(3U, action_list.size());
-  const base::DictionaryValue* action1 = action_list[0].get();
-  action1->GetString("type", &source_type);
-  action1->GetString("pointerType", &pointer_type);
-  action1->GetString("id", &id);
-  ASSERT_EQ("pointer", source_type);
-  ASSERT_EQ("touch", pointer_type);
-  ASSERT_EQ("pointer1", id);
-  action1->GetString("subtype", &action_type);
-  action1->GetInteger("x", &x);
-  action1->GetInteger("y", &y);
-  ASSERT_EQ("pointerMove", action_type);
-  ASSERT_EQ(30, x);
-  ASSERT_EQ(60, y);
+  const base::DictValue& action1 = action_list[0];
+  ASSERT_EQ("pointer", base::OptionalFromPtr(action1.FindString("type")));
+  ASSERT_EQ("touch", base::OptionalFromPtr(action1.FindString("pointerType")));
+  ASSERT_EQ("pointer1", base::OptionalFromPtr(action1.FindString("id")));
+  ASSERT_EQ("pointerMove",
+            base::OptionalFromPtr(action1.FindString("subtype")));
+  ASSERT_EQ(30, action1.FindDouble("x"));
+  ASSERT_EQ(60, action1.FindDouble("y"));
 
-  const base::DictionaryValue* action2 = action_list[1].get();
-  action2->GetString("type", &source_type);
-  action2->GetString("pointerType", &pointer_type);
-  action2->GetString("id", &id);
-  ASSERT_EQ("pointer", source_type);
-  ASSERT_EQ("touch", pointer_type);
-  ASSERT_EQ("pointer1", id);
-  action2->GetString("subtype", &action_type);
-  ASSERT_EQ("pointerDown", action_type);
+  const base::DictValue& action2 = action_list[1];
+  ASSERT_EQ("pointer", base::OptionalFromPtr(action2.FindString("type")));
+  ASSERT_EQ("touch", base::OptionalFromPtr(action2.FindString("pointerType")));
+  ASSERT_EQ("pointer1", base::OptionalFromPtr(action2.FindString("id")));
+  ASSERT_EQ("pointerDown",
+            base::OptionalFromPtr(action2.FindString("subtype")));
 
-  const base::DictionaryValue* action3 = action_list[2].get();
-  action3->GetString("type", &source_type);
-  action3->GetString("pointerType", &pointer_type);
-  action3->GetString("id", &id);
-  ASSERT_EQ("pointer", source_type);
-  ASSERT_EQ("touch", pointer_type);
-  ASSERT_EQ("pointer1", id);
-  action3->GetString("subtype", &action_type);
-  ASSERT_EQ("pointerUp", action_type);
+  const base::DictValue& action3 = action_list[2];
+  ASSERT_EQ("pointer", base::OptionalFromPtr(action3.FindString("type")));
+  ASSERT_EQ("touch", base::OptionalFromPtr(action3.FindString("pointerType")));
+  ASSERT_EQ("pointer1", base::OptionalFromPtr(action3.FindString("id")));
+  ASSERT_EQ("pointerUp", base::OptionalFromPtr(action3.FindString("subtype")));
+}
+
+TEST(WindowCommandsTest, ExecuteSetRPHRegistrationMode_NoParams) {
+  base::DictValue params;
+  Status status = CallWindowCommand(ExecuteSetRPHRegistrationMode, params);
+  ASSERT_EQ(kInvalidArgument, status.code());
+  ASSERT_NE(status.message().find("missing parameter 'mode'"),
+            std::string::npos);
+}
+
+TEST(WindowCommandsTest, ExecuteSetRPHRegistrationMode) {
+  base::DictValue params;
+  params.Set("mode", "autoaccept");
+  Status status = CallWindowCommand(ExecuteSetRPHRegistrationMode, params);
+  ASSERT_EQ(kOk, status.code());
 }
 
 namespace {
 
 class AddCookieWebView : public StubWebView {
  public:
-  explicit AddCookieWebView(std::string documentUrl)
-      : StubWebView("1"), documentUrl_(documentUrl) {}
+  explicit AddCookieWebView(std::string document_url)
+      : StubWebView("1"), document_url_(document_url) {}
   ~AddCookieWebView() override = default;
 
   Status CallFunction(const std::string& frame,
@@ -270,26 +255,25 @@ class AddCookieWebView : public StubWebView {
                       const base::ListValue& args,
                       std::unique_ptr<base::Value>* result) override {
     if (function.find("document.URL") != std::string::npos) {
-      *result = std::make_unique<base::Value>(documentUrl_);
+      *result = std::make_unique<base::Value>(document_url_);
     }
     return Status(kOk);
   }
 
  private:
-  std::string documentUrl_;
+  std::string document_url_;
 };
 
 }  // namespace
 
 TEST(WindowCommandsTest, ExecuteAddCookie_Valid) {
   AddCookieWebView webview = AddCookieWebView("http://chromium.org");
-  base::DictionaryValue params;
-  std::unique_ptr<base::DictionaryValue> cookie_params =
-      std::make_unique<base::DictionaryValue>();
-  cookie_params->SetString("name", "testcookie");
-  cookie_params->SetString("value", "cookievalue");
-  cookie_params->SetString("sameSite", "Strict");
-  params.SetDictionary("cookie", std::move(cookie_params));
+  base::DictValue params;
+  base::DictValue cookie_params;
+  cookie_params.Set("name", "testcookie");
+  cookie_params.Set("value", "cookievalue");
+  cookie_params.Set("sameSite", "Strict");
+  params.Set("cookie", std::move(cookie_params));
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecuteAddCookie, &webview, params, &result_value);
@@ -298,12 +282,11 @@ TEST(WindowCommandsTest, ExecuteAddCookie_Valid) {
 
 TEST(WindowCommandsTest, ExecuteAddCookie_NameMissing) {
   AddCookieWebView webview = AddCookieWebView("http://chromium.org");
-  base::DictionaryValue params;
-  std::unique_ptr<base::DictionaryValue> cookie_params =
-      std::make_unique<base::DictionaryValue>();
-  cookie_params->SetString("value", "cookievalue");
-  cookie_params->SetString("sameSite", "invalid");
-  params.SetDictionary("cookie", std::move(cookie_params));
+  base::DictValue params;
+  base::DictValue cookie_params;
+  cookie_params.Set("value", "cookievalue");
+  cookie_params.Set("sameSite", "invalid");
+  params.Set("cookie", std::move(cookie_params));
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecuteAddCookie, &webview, params, &result_value);
@@ -314,12 +297,11 @@ TEST(WindowCommandsTest, ExecuteAddCookie_NameMissing) {
 
 TEST(WindowCommandsTest, ExecuteAddCookie_MissingValue) {
   AddCookieWebView webview = AddCookieWebView("http://chromium.org");
-  base::DictionaryValue params;
-  std::unique_ptr<base::DictionaryValue> cookie_params =
-      std::make_unique<base::DictionaryValue>();
-  cookie_params->SetString("name", "testcookie");
-  cookie_params->SetString("sameSite", "Strict");
-  params.SetDictionary("cookie", std::move(cookie_params));
+  base::DictValue params;
+  base::DictValue cookie_params;
+  cookie_params.Set("name", "testcookie");
+  cookie_params.Set("sameSite", "Strict");
+  params.Set("cookie", std::move(cookie_params));
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecuteAddCookie, &webview, params, &result_value);
@@ -330,13 +312,12 @@ TEST(WindowCommandsTest, ExecuteAddCookie_MissingValue) {
 
 TEST(WindowCommandsTest, ExecuteAddCookie_DomainInvalid) {
   AddCookieWebView webview = AddCookieWebView("file://chromium.org");
-  base::DictionaryValue params;
-  std::unique_ptr<base::DictionaryValue> cookie_params =
-      std::make_unique<base::DictionaryValue>();
-  cookie_params->SetString("name", "testcookie");
-  cookie_params->SetString("value", "cookievalue");
-  cookie_params->SetString("sameSite", "Strict");
-  params.SetDictionary("cookie", std::move(cookie_params));
+  base::DictValue params;
+  base::DictValue cookie_params;
+  cookie_params.Set("name", "testcookie");
+  cookie_params.Set("value", "cookievalue");
+  cookie_params.Set("sameSite", "Strict");
+  params.Set("cookie", std::move(cookie_params));
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecuteAddCookie, &webview, params, &result_value);
@@ -345,13 +326,12 @@ TEST(WindowCommandsTest, ExecuteAddCookie_DomainInvalid) {
 
 TEST(WindowCommandsTest, ExecuteAddCookie_SameSiteEmpty) {
   AddCookieWebView webview = AddCookieWebView("https://chromium.org");
-  base::DictionaryValue params;
-  std::unique_ptr<base::DictionaryValue> cookie_params =
-      std::make_unique<base::DictionaryValue>();
-  cookie_params->SetString("name", "testcookie");
-  cookie_params->SetString("value", "cookievalue");
-  cookie_params->SetString("sameSite", "");
-  params.SetDictionary("cookie", std::move(cookie_params));
+  base::DictValue params;
+  base::DictValue cookie_params;
+  cookie_params.Set("name", "testcookie");
+  cookie_params.Set("value", "cookievalue");
+  cookie_params.Set("sameSite", "");
+  params.Set("cookie", std::move(cookie_params));
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecuteAddCookie, &webview, params, &result_value);
@@ -360,16 +340,142 @@ TEST(WindowCommandsTest, ExecuteAddCookie_SameSiteEmpty) {
 
 TEST(WindowCommandsTest, ExecuteAddCookie_SameSiteNotSet) {
   AddCookieWebView webview = AddCookieWebView("ftp://chromium.org");
-  base::DictionaryValue params;
-  std::unique_ptr<base::DictionaryValue> cookie_params =
-      std::make_unique<base::DictionaryValue>();
-  cookie_params->SetString("name", "testcookie");
-  cookie_params->SetString("value", "cookievalue");
-  params.SetDictionary("cookie", std::move(cookie_params));
+  base::DictValue params;
+  base::DictValue cookie_params;
+  cookie_params.Set("name", "testcookie");
+  cookie_params.Set("value", "cookievalue");
+  params.Set("cookie", std::move(cookie_params));
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecuteAddCookie, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
+}
+
+namespace {
+
+class GetCookiesWebView : public StubWebView {
+ public:
+  explicit GetCookiesWebView(std::string document_url)
+      : StubWebView("1"), document_url_(document_url) {}
+  ~GetCookiesWebView() override = default;
+
+  Status CallFunction(const std::string& frame,
+                      const std::string& function,
+                      const base::ListValue& args,
+                      std::unique_ptr<base::Value>* result) override {
+    if (function.find("document.URL") != std::string::npos) {
+      *result = std::make_unique<base::Value>(document_url_);
+    }
+    return Status(kOk);
+  }
+
+  Status GetCookies(base::Value* cookies,
+                    const std::string& current_page_url) override {
+    base::ListValue new_cookies;
+    base::DictValue cookie_0;
+    cookie_0.Set("name", "a");
+    cookie_0.Set("value", "0");
+    cookie_0.Set("domain", "example.com");
+    cookie_0.Set("path", "/");
+    cookie_0.Set("session", true);
+    new_cookies.Append(cookie_0.Clone());
+    base::DictValue cookie_1;
+    cookie_1.Set("name", "b");
+    cookie_1.Set("value", "1");
+    cookie_1.Set("domain", "example.org");
+    cookie_1.Set("path", "/test");
+    cookie_1.Set("sameSite", "None");
+    cookie_1.Set("expires", 10);
+    cookie_1.Set("httpOnly", true);
+    cookie_1.Set("session", false);
+    cookie_1.Set("secure", true);
+    new_cookies.Append(cookie_1.Clone());
+    *cookies = base::Value(new_cookies.Clone());
+    return Status(kOk);
+  }
+
+ private:
+  std::string document_url_;
+};
+
+}  // namespace
+
+TEST(WindowCommandsTest, ExecuteGetCookies) {
+  GetCookiesWebView webview = GetCookiesWebView("https://chromium.org");
+  base::DictValue params;
+  std::unique_ptr<base::Value> result_value;
+  Status status =
+      CallWindowCommand(ExecuteGetCookies, &webview, params, &result_value);
+  ASSERT_EQ(kOk, status.code()) << status.message();
+  base::ListValue expected_cookies;
+  base::DictValue cookie_0;
+  cookie_0.Set("name", "a");
+  cookie_0.Set("value", "0");
+  cookie_0.Set("domain", "example.com");
+  cookie_0.Set("path", "/");
+  cookie_0.Set("sameSite", "Lax");
+  cookie_0.Set("httpOnly", false);
+  cookie_0.Set("secure", false);
+  expected_cookies.Append(cookie_0.Clone());
+  base::DictValue cookie_1;
+  cookie_1.Set("name", "b");
+  cookie_1.Set("value", "1");
+  cookie_1.Set("domain", "example.org");
+  cookie_1.Set("path", "/test");
+  cookie_1.Set("sameSite", "None");
+  cookie_1.Set("expiry", 10);
+  cookie_1.Set("httpOnly", true);
+  cookie_1.Set("secure", true);
+  expected_cookies.Append(cookie_1.Clone());
+  EXPECT_EQ(result_value->GetList(), expected_cookies);
+}
+
+TEST(WindowCommandsTest, ExecuteGetNamedCookie) {
+  GetCookiesWebView webview = GetCookiesWebView("https://chromium.org");
+  base::DictValue params;
+  std::unique_ptr<base::Value> result_value;
+
+  // Get without cookie name.
+  Status status =
+      CallWindowCommand(ExecuteGetNamedCookie, &webview, params, &result_value);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+
+  // Get with undefined cookie.
+  params.Set("name", "missing");
+  status =
+      CallWindowCommand(ExecuteGetNamedCookie, &webview, params, &result_value);
+  ASSERT_EQ(kNoSuchCookie, status.code()) << status.message();
+
+  // Get cookie a.
+  params.Set("name", "a");
+  status =
+      CallWindowCommand(ExecuteGetNamedCookie, &webview, params, &result_value);
+  ASSERT_EQ(kOk, status.code()) << status.message();
+  base::DictValue expected_cookie_0;
+  expected_cookie_0.Set("name", "a");
+  expected_cookie_0.Set("value", "0");
+  expected_cookie_0.Set("domain", "example.com");
+  expected_cookie_0.Set("path", "/");
+  expected_cookie_0.Set("sameSite", "Lax");
+  expected_cookie_0.Set("httpOnly", false);
+  expected_cookie_0.Set("secure", false);
+  EXPECT_EQ(result_value->GetDict(), expected_cookie_0);
+
+  // Get cookie b.
+  params.Set("name", "b");
+  status =
+      CallWindowCommand(ExecuteGetNamedCookie, &webview, params, &result_value);
+  ASSERT_EQ(kOk, status.code()) << status.message();
+  base::DictValue expected_cookie_1;
+  expected_cookie_1.Set("name", "b");
+  expected_cookie_1.Set("value", "1");
+  expected_cookie_1.Set("domain", "example.org");
+  expected_cookie_1.Set("path", "/test");
+  expected_cookie_1.Set("sameSite", "None");
+  expected_cookie_1.Set("expiry", 10);
+  expected_cookie_1.Set("httpOnly", true);
+  expected_cookie_1.Set("secure", true);
+  EXPECT_EQ(result_value->GetDict(), expected_cookie_1);
 }
 
 namespace {
@@ -379,427 +485,472 @@ class StorePrintParamsWebView : public StubWebView {
   StorePrintParamsWebView() : StubWebView("1") {}
   ~StorePrintParamsWebView() override = default;
 
-  Status PrintToPDF(const base::DictionaryValue& params,
-                    std::string* pdf) override {
-    params_ = params.Clone();
+  Status PrintToPDF(const base::DictValue& params, std::string* pdf) override {
+    params_ = base::Value(params.Clone());
     return Status(kOk);
   }
 
-  const base::Value& getParams() const { return params_; }
+  const base::Value& GetParams() const { return params_; }
 
  private:
   base::Value params_;
 };
 
-base::DictionaryValue getDefaultPrintParams() {
-  base::DictionaryValue printParams;
-  printParams.SetBoolean("landscape", false);
-  printParams.SetDouble("scale", 1.0);
-  printParams.SetDouble("marginBottom", ConvertCentimeterToInch(1.0));
-  printParams.SetDouble("marginLeft", ConvertCentimeterToInch(1.0));
-  printParams.SetDouble("marginRight", ConvertCentimeterToInch(1.0));
-  printParams.SetDouble("marginTop", ConvertCentimeterToInch(1.0));
-  printParams.SetDouble("paperHeight", ConvertCentimeterToInch(27.94));
-  printParams.SetDouble("paperWidth", ConvertCentimeterToInch(21.59));
-  printParams.SetString("pageRanges", "");
-  printParams.SetBoolean("preferCSSPageSize", false);
-  printParams.SetBoolean("printBackground", false);
-  printParams.SetString("transferMode", "ReturnAsBase64");
-  return printParams;
+base::DictValue GetDefaultPrintParams() {
+  base::DictValue dict;
+  dict.Set("landscape", false);
+  dict.Set("scale", 1.0);
+  dict.Set("marginBottom", ConvertCentimeterToInch(1.0));
+  dict.Set("marginLeft", ConvertCentimeterToInch(1.0));
+  dict.Set("marginRight", ConvertCentimeterToInch(1.0));
+  dict.Set("marginTop", ConvertCentimeterToInch(1.0));
+  dict.Set("paperHeight", ConvertCentimeterToInch(27.94));
+  dict.Set("paperWidth", ConvertCentimeterToInch(21.59));
+  dict.Set("pageRanges", "");
+  dict.Set("preferCSSPageSize", false);
+  dict.Set("printBackground", false);
+  dict.Set("transferMode", "ReturnAsBase64");
+  return dict;
 }
 }  // namespace
 
 TEST(WindowCommandsTest, ExecutePrintDefaultParams) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 }
 
 TEST(WindowCommandsTest, ExecutePrintSpecifyOrientation) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
 
-  params.SetString("orientation", "portrait");
+  params.Set("orientation", "portrait");
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetString("orientation", "landscape");
+  params.Set("orientation", "landscape");
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetBoolean("landscape", true);
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("landscape", true);
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetString("orientation", "Invalid");
+  params.Set("orientation", "Invalid");
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  params.SetBoolean("orientation", true);
+  params.Set("orientation", true);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 }
 
 TEST(WindowCommandsTest, ExecutePrintSpecifyScale) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
 
-  params.SetDouble("scale", 1.0);
+  params.Set("scale", 1.0);
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetDouble("scale", 2.0);
+  params.Set("scale", 2.0);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("scale", 2.0);
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("scale", 2.0);
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetDouble("scale", 0.05);
+  params.Set("scale", 0.05);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  params.SetDouble("scale", 2.1);
+  params.Set("scale", 2.1);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  params.SetString("scale", "1.3");
+  params.Set("scale", "1.3");
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 }
 
 TEST(WindowCommandsTest, ExecutePrintSpecifyBackground) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
 
-  params.SetBoolean("background", false);
+  params.Set("background", false);
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetBoolean("background", true);
+  params.Set("background", true);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetBoolean("printBackground", true);
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("printBackground", true);
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetString("background", "true");
+  params.Set("background", "true");
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  params.SetInteger("background", 2);
+  params.Set("background", 2);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 }
 
 TEST(WindowCommandsTest, ExecutePrintSpecifyShrinkToFit) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
 
-  params.SetBoolean("shrinkToFit", true);
+  params.Set("shrinkToFit", true);
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetBoolean("shrinkToFit", false);
+  params.Set("shrinkToFit", false);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetBoolean("preferCSSPageSize", true);
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("preferCSSPageSize", true);
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  params.SetString("shrinkToFit", "False");
+  params.Set("shrinkToFit", "False");
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  params.SetInteger("shrinkToFit", 2);
+  params.Set("shrinkToFit", 2);
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 }
 
 TEST(WindowCommandsTest, ExecutePrintSpecifyPageRanges) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
 
-  std::unique_ptr<base::ListValue> lv(new base::ListValue());
-  params.SetList("pageRanges", std::move(lv));
+  base::ListValue lv;
+  params.Set("pageRanges", std::move(lv));
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  lv = std::make_unique<base::ListValue>();
-  lv->AppendInteger(2);
-  lv->AppendInteger(1);
-  lv->AppendInteger(3);
-  lv->AppendString("4-4");
-  lv->AppendString("4-");
-  lv->AppendString("-5");
-  params.SetList("pageRanges", std::move(lv));
+  lv = base::ListValue();
+  lv.Append(2);
+  lv.Append(1);
+  lv.Append(3);
+  lv.Append("4-4");
+  lv.Append("4-");
+  lv.Append("-5");
+  params.Set("pageRanges", std::move(lv));
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetString("pageRanges", "2,1,3,4-4,4-,-5");
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("pageRanges", "2,1,3,4-4,4-,-5");
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  lv = std::make_unique<base::ListValue>();
-  lv->AppendInteger(-1);
-  params.SetList("pageRanges", std::move(lv));
+  lv = base::ListValue();
+  lv.Append(-1);
+  params.Set("pageRanges", std::move(lv));
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  lv = std::make_unique<base::ListValue>();
-  lv->AppendDouble(3.0);
-  params.SetList("pageRanges", std::move(lv));
+  lv = base::ListValue();
+  lv.Append(3.0);
+  params.Set("pageRanges", std::move(lv));
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  lv = std::make_unique<base::ListValue>();
-  lv->AppendBoolean(true);
-  params.SetList("pageRanges", std::move(lv));
+  lv = base::ListValue();
+  lv.Append(true);
+  params.Set("pageRanges", std::move(lv));
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
   // ExecutePrint delegates invalid string checks to CDP
-  lv = std::make_unique<base::ListValue>();
-  lv->AppendString("-");
-  lv->AppendString("");
-  lv->AppendString("  ");
-  lv->AppendString(" 1-3 ");
-  lv->AppendString("Invalid");
-  params.SetList("pageRanges", std::move(lv));
+  lv = base::ListValue();
+  lv.Append("-");
+  lv.Append("");
+  lv.Append("  ");
+  lv.Append(" 1-3 ");
+  lv.Append("Invalid");
+  params.Set("pageRanges", std::move(lv));
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetString("pageRanges", "-,,  , 1-3 ,Invalid");
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("pageRanges", "-,,  , 1-3 ,Invalid");
+  ASSERT_EQ(print_params, webview.GetParams());
 }
 
 TEST(WindowCommandsTest, ExecutePrintSpecifyPage) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
 
-  std::unique_ptr<base::DictionaryValue> dv(new base::DictionaryValue());
-  params.SetDictionary("page", std::move(dv));
+  params.Set("page", base::DictValue());
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("width", 21.59);
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("width", 21.59);
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("paperWidth", ConvertCentimeterToInch(21.59));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("paperWidth", ConvertCentimeterToInch(21.59));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("width", 33);
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("width", 33);
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("paperWidth", ConvertCentimeterToInch(33));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("paperWidth", ConvertCentimeterToInch(33));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetString("width", "10");
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("width", "10");
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("width", -3.0);
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("width", -3.0);
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("height", 20);
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("height", 20);
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("paperHeight", ConvertCentimeterToInch(20));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("paperHeight", ConvertCentimeterToInch(20));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("height", 27.94);
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("height", 27.94);
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("paperHeight", ConvertCentimeterToInch(27.94));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("paperHeight", ConvertCentimeterToInch(27.94));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetString("height", "10");
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("height", "10");
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("height", -3.0);
-  params.SetDictionary("page", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("height", -3.0);
+    params.Set("page", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 }
 
 TEST(WindowCommandsTest, ExecutePrintSpecifyMargin) {
   StorePrintParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
 
-  std::unique_ptr<base::DictionaryValue> dv(new base::DictionaryValue());
-  params.SetDictionary("margin", std::move(dv));
+  params.Set("margin", base::DictValue());
   Status status =
       CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue printParams = getDefaultPrintParams();
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  base::DictValue print_params = GetDefaultPrintParams();
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("top", 1.0);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("top", 1.0);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginTop", ConvertCentimeterToInch(1.0));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginTop", ConvertCentimeterToInch(1.0));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("top", 10.2);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("top", 10.2);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginTop", ConvertCentimeterToInch(10.2));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginTop", ConvertCentimeterToInch(10.2));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetString("top", "10.2");
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("top", "10.2");
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("top", -0.1);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("top", -0.1);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("bottom", 1.0);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("bottom", 1.0);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginBottom", ConvertCentimeterToInch(1.0));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginBottom", ConvertCentimeterToInch(1.0));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("bottom", 5.3);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("bottom", 5.3);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginBottom", ConvertCentimeterToInch(5.3));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginBottom", ConvertCentimeterToInch(5.3));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetString("bottom", "10.2");
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("bottom", "10.2");
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("bottom", -0.1);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("bottom", -0.1);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("left", 1.0);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("left", 1.0);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginLeft", ConvertCentimeterToInch(1.0));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginLeft", ConvertCentimeterToInch(1.0));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("left", 9.1);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("left", 9.1);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginLeft", ConvertCentimeterToInch(9.1));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginLeft", ConvertCentimeterToInch(9.1));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetString("left", "10.2");
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("left", "10.2");
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("left", -0.1);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("left", -0.1);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("right", 1.0);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("right", 1.0);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginRight", ConvertCentimeterToInch(1.0));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginRight", ConvertCentimeterToInch(1.0));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("right", 8.1);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("right", 8.1);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  printParams = getDefaultPrintParams();
-  printParams.SetDouble("marginRight", ConvertCentimeterToInch(8.1));
-  ASSERT_EQ(static_cast<const base::Value&>(printParams), webview.getParams());
+  print_params = GetDefaultPrintParams();
+  print_params.Set("marginRight", ConvertCentimeterToInch(8.1));
+  ASSERT_EQ(print_params, webview.GetParams());
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetString("right", "10.2");
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("right", "10.2");
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 
-  dv = std::make_unique<base::DictionaryValue>();
-  dv->SetDouble("right", -0.1);
-  params.SetDictionary("margin", std::move(dv));
+  {
+    base::DictValue dv;
+    dv.Set("right", -0.1);
+    params.Set("margin", std::move(dv));
+  }
   status = CallWindowCommand(ExecutePrint, &webview, params, &result_value);
   ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
 }
@@ -814,33 +965,33 @@ constexpr double device_scale_factor = 0.3;
 
 class StoreScreenshotParamsWebView : public StubWebView {
  public:
-  explicit StoreScreenshotParamsWebView(DevToolsClient* dtc = nullptr,
-                                        DeviceMetrics* dm = nullptr)
-      : StubWebView("1"), meom_(new MobileEmulationOverrideManager(dtc, dm)) {}
+  explicit StoreScreenshotParamsWebView(
+      DevToolsClient* dtc = nullptr,
+      std::optional<MobileDevice> md = std::nullopt)
+      : StubWebView("1"),
+        meom_(new MobileEmulationOverrideManager(dtc, md, 0)) {}
   ~StoreScreenshotParamsWebView() override = default;
 
   Status SendCommandAndGetResult(const std::string& cmd,
-                                 const base::DictionaryValue& params,
+                                 const base::DictValue& params,
                                  std::unique_ptr<base::Value>* value) override {
     if (cmd == "Page.getLayoutMetrics") {
-      std::unique_ptr<base::DictionaryValue> res =
-          std::make_unique<base::DictionaryValue>();
-      std::unique_ptr<base::DictionaryValue> d =
-          std::make_unique<base::DictionaryValue>();
-      d->SetDouble("width", wd);
-      d->SetDouble("height", hd);
-      res->SetDictionary("contentSize", std::move(d));
-      *value = std::move(res);
+      base::DictValue res;
+      base::DictValue d;
+      d.Set("width", wd);
+      d.Set("height", hd);
+      res.Set("contentSize", std::move(d));
+      *value = std::make_unique<base::Value>(std::move(res));
     } else if (cmd == "Emulation.setDeviceMetricsOverride") {
-      base::DictionaryValue expect;
-      expect.SetInteger("width", wi);
-      expect.SetInteger("height", hi);
+      base::DictValue expect;
+      expect.Set("width", wi);
+      expect.Set("height", hi);
       if (meom_->HasOverrideMetrics()) {
-        expect.SetInteger("deviceScaleFactor", device_scale_factor);
-        expect.SetBoolean("mobile", mobile);
+        expect.Set("deviceScaleFactor", device_scale_factor);
+        expect.Set("mobile", mobile);
       } else {
-        expect.SetInteger("deviceScaleFactor", 1);
-        expect.SetBoolean("mobile", false);
+        expect.Set("deviceScaleFactor", 1);
+        expect.Set("mobile", false);
       }
       if (expect != params)
         return Status(kInvalidArgument);
@@ -850,12 +1001,12 @@ class StoreScreenshotParamsWebView : public StubWebView {
   }
 
   Status CaptureScreenshot(std::string* screenshot,
-                           const base::DictionaryValue& params) override {
-    params_ = params.Clone();
+                           const base::DictValue& params) override {
+    params_ = base::Value(params.Clone());
     return Status(kOk);
   }
 
-  const base::Value& getParams() const { return params_; }
+  const base::Value& GetParams() const { return params_; }
 
   MobileEmulationOverrideManager* GetMobileEmulationOverrideManager()
       const override {
@@ -867,46 +1018,192 @@ class StoreScreenshotParamsWebView : public StubWebView {
   std::unique_ptr<MobileEmulationOverrideManager> meom_;
 };
 
-base::DictionaryValue getExpectedCaptureParams() {
-  base::DictionaryValue clip;
+base::DictValue GetExpectedCaptureParams() {
+  base::DictValue clip;
   return clip;
 }
 }  // namespace
 
 TEST(WindowCommandsTest, ExecuteScreenCapture) {
   StoreScreenshotParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
   Status status =
       CallWindowCommand(ExecuteScreenshot, &webview, params, &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  base::DictionaryValue screenshotParams = base::DictionaryValue();
-  ASSERT_EQ(static_cast<const base::Value&>(screenshotParams),
-            webview.getParams());
+  base::DictValue screenshot_params;
+  ASSERT_EQ(screenshot_params, webview.GetParams());
 }
 
 TEST(WindowCommandsTest, ExecuteFullPageScreenCapture) {
   StoreScreenshotParamsWebView webview;
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
   Status status = CallWindowCommand(ExecuteFullPageScreenshot, &webview, params,
                                     &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  ASSERT_EQ(static_cast<const base::Value&>(getExpectedCaptureParams()),
-            webview.getParams());
+  ASSERT_EQ(GetExpectedCaptureParams(), webview.GetParams());
 }
 
 TEST(WindowCommandsTest, ExecuteMobileFullPageScreenCapture) {
   StubDevToolsClient sdtc;
-  DeviceMetrics dm(0, 0, device_scale_factor, false, mobile);
-  StoreScreenshotParamsWebView webview(&sdtc, &dm);
+  MobileDevice mobile_device;
+  mobile_device.device_metrics =
+      DeviceMetrics(0, 0, device_scale_factor, false, mobile);
+  StoreScreenshotParamsWebView webview(&sdtc, std::move(mobile_device));
   ASSERT_EQ(webview.GetMobileEmulationOverrideManager()->HasOverrideMetrics(),
             true);
-  base::DictionaryValue params;
+  base::DictValue params;
   std::unique_ptr<base::Value> result_value;
   Status status = CallWindowCommand(ExecuteFullPageScreenshot, &webview, params,
                                     &result_value);
   ASSERT_EQ(kOk, status.code()) << status.message();
-  ASSERT_EQ(static_cast<const base::Value&>(getExpectedCaptureParams()),
-            webview.getParams());
+  ASSERT_EQ(GetExpectedCaptureParams(), webview.GetParams());
+}
+
+TEST(WindowCommandsTest, ExecuteScript_NoScript) {
+  base::DictValue params;
+  params.Set("args", base::ListValue());
+  Status status = CallWindowCommand(ExecuteExecuteScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'script' must be a string"),
+            std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecuteScript_ScriptNotAString) {
+  base::DictValue params;
+  params.Set("script", base::DictValue());
+  params.Set("args", base::ListValue());
+  Status status = CallWindowCommand(ExecuteExecuteScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'script' must be a string"),
+            std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecuteScript_NoArgs) {
+  base::DictValue params;
+  params.Set("script", "irrelevant");
+  Status status = CallWindowCommand(ExecuteExecuteScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'args' must be a list"), std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecuteScript_ArgsNotAList) {
+  base::DictValue params;
+  params.Set("script", "irrelevant");
+  params.Set("args", "not-a-list");
+  Status status = CallWindowCommand(ExecuteExecuteScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'args' must be a list"), std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecuteAsyncScript_NoScript) {
+  base::DictValue params;
+  params.Set("args", base::ListValue());
+  Status status = CallWindowCommand(ExecuteExecuteAsyncScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'script' must be a string"),
+            std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecuteAsyncScript_ScriptNotAString) {
+  base::DictValue params;
+  params.Set("script", base::DictValue());
+  params.Set("args", base::ListValue());
+  Status status = CallWindowCommand(ExecuteExecuteAsyncScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'script' must be a string"),
+            std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecuteAsyncScript_NoArgs) {
+  base::DictValue params;
+  params.Set("script", "irrelevant");
+  Status status = CallWindowCommand(ExecuteExecuteAsyncScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'args' must be a list"), std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecuteAsyncScript_ArgsNotAList) {
+  base::DictValue params;
+  params.Set("script", "irrelevant");
+  params.Set("args", "not-a-list");
+  Status status = CallWindowCommand(ExecuteExecuteAsyncScript, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'args' must be a list"), std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, SendKeysToActiveElement_NoValue) {
+  base::DictValue params;
+  Status status = CallWindowCommand(ExecuteSendKeysToActiveElement, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'value' must be a list"), std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, SendKeysToActiveElement_ValueNotAList) {
+  base::DictValue params;
+  params.Set("value", base::DictValue());
+  Status status = CallWindowCommand(ExecuteSendKeysToActiveElement, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'value' must be a list"), std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecutePerformActions_NoActions) {
+  base::DictValue params;
+  Status status = CallWindowCommand(ExecutePerformActions, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'actions' must be a list"),
+            std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecutePerformActions_ActionsNotAList) {
+  base::DictValue params;
+  params.Set("actions", 7);
+  Status status = CallWindowCommand(ExecutePerformActions, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'actions' must be a list"),
+            std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecutePerformActions_NoActionsInSequence) {
+  base::DictValue sequence;
+  sequence.Set("id", "irrelevant");
+  sequence.Set("type", "none");
+  base::ListValue actions;
+  actions.Append(sequence.Clone());
+  base::DictValue params;
+  params.Set("actions", actions.Clone());
+  Status status = CallWindowCommand(ExecutePerformActions, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'actions' in the sequence must be a list"),
+            std::string::npos)
+      << status.message();
+}
+
+TEST(WindowCommandsTest, ExecutePerformActions_ActionsInSequenceNotAList) {
+  base::DictValue sequence;
+  sequence.Set("id", "irrelevant");
+  sequence.Set("type", "none");
+  sequence.Set("actions", base::DictValue());
+  base::ListValue actions;
+  actions.Append(sequence.Clone());
+  base::DictValue params;
+  params.Set("actions", actions.Clone());
+  Status status = CallWindowCommand(ExecutePerformActions, params);
+  ASSERT_EQ(kInvalidArgument, status.code()) << status.message();
+  ASSERT_NE(status.message().find("'actions' in the sequence must be a list"),
+            std::string::npos)
+      << status.message();
 }

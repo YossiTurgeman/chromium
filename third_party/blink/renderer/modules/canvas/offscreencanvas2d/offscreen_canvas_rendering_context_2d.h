@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,23 +6,27 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_CANVAS_OFFSCREENCANVAS2D_OFFSCREEN_CANVAS_RENDERING_CONTEXT_2D_H_
 
 #include <memory>
-#include <random>
 
+#include "base/notreached.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_context_creation_attributes_core.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context_factory.h"
+#include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
 #include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h"
-#include "third_party/blink/renderer/modules/canvas/canvas2d/identifiability_study_helper.h"
-#include "third_party/blink/renderer/platform/privacy_budget/identifiability_digest_helpers.h"
+#include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
+#include "third_party/blink/renderer/platform/graphics/canvas_2d_color_params.h"
+#include "third_party/blink/renderer/platform/graphics/canvas_resource_provider.h"
+#include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
 
 namespace blink {
 
 class CanvasResourceProvider;
-class Font;
-class TextMetrics;
+class ExceptionState;
+class ExecutionContext;
+class MemoryManagedPaintCanvas;
 
 class MODULES_EXPORT OffscreenCanvasRenderingContext2D final
-    : public CanvasRenderingContext,
+    : public ScriptWrappable,
       public BaseRenderingContext2D {
   DEFINE_WRAPPERTYPEINFO();
 
@@ -33,15 +37,13 @@ class MODULES_EXPORT OffscreenCanvasRenderingContext2D final
     ~Factory() override = default;
 
     CanvasRenderingContext* Create(
+        ExecutionContext*,
         CanvasRenderingContextHost* host,
-        const CanvasContextCreationAttributesCore& attrs) override {
-      DCHECK(host->IsOffscreenCanvas());
-      return MakeGarbageCollected<OffscreenCanvasRenderingContext2D>(
-          static_cast<OffscreenCanvas*>(host), attrs);
-    }
+        const CanvasContextCreationAttributesCore& attrs) override;
 
-    CanvasRenderingContext::ContextType GetContextType() const override {
-      return CanvasRenderingContext::kContext2D;
+    CanvasRenderingContext::CanvasRenderingAPI GetRenderingAPI()
+        const override {
+      return CanvasRenderingContext::CanvasRenderingAPI::k2D;
     }
   };
 
@@ -54,125 +56,96 @@ class MODULES_EXPORT OffscreenCanvasRenderingContext2D final
     return static_cast<OffscreenCanvas*>(Host());
   }
 
-  void commit();
-
   // CanvasRenderingContext implementation
   ~OffscreenCanvasRenderingContext2D() override;
-  ContextType GetContextType() const override { return kContext2D; }
-  bool IsRenderingContext2D() const override { return true; }
   bool IsComposited() const override { return false; }
-  bool IsAccelerated() const override;
-  void SetOffscreenCanvasGetContextResult(OffscreenRenderingContext&) final;
-  void SetIsInHiddenPage(bool) final { NOTREACHED(); }
-  void SetIsBeingDisplayed(bool) final { NOTREACHED(); }
+  V8RenderingContext* AsV8RenderingContext() final;
+  V8OffscreenRenderingContext* AsV8OffscreenRenderingContext() final;
   void Stop() final { NOTREACHED(); }
-  void SetCanvasGetContextResult(RenderingContext&) final {}
-  void ClearRect(double x, double y, double width, double height) override {
-    BaseRenderingContext2D::clearRect(x, y, width, height);
-  }
   scoped_refptr<StaticBitmapImage> GetImage() final;
   void Reset() override;
-  void RestoreCanvasMatrixClipStack(cc::PaintCanvas* c) const override {
-    RestoreMatrixClipStack(c);
+  // CanvasRenderingContext - ActiveScriptWrappable
+  // This method will avoid this class to be garbage collected, as soon as
+  // HasPendingActivity returns true.
+  bool HasPendingActivity() const final {
+    if (!Host())
+      return false;
+    DCHECK(Host()->IsOffscreenCanvas());
+    auto* offscreen_canvas = static_cast<OffscreenCanvas*>(Host());
+    return offscreen_canvas->IsPendingFrame();
   }
-
-  String font() const;
-  void setFont(const String&) override;
-
-  String direction() const;
-  void setDirection(const String&);
-
-  void fillText(const String& text, double x, double y);
-  void fillText(const String& text, double x, double y, double max_width);
-  void strokeText(const String& text, double x, double y);
-  void strokeText(const String& text, double x, double y, double max_width);
-  TextMetrics* measureText(const String& text);
 
   // BaseRenderingContext2D implementation
   bool OriginClean() const final;
   void SetOriginTainted() final;
-  bool WouldTaintOrigin(CanvasImageSource*) final;
 
   int Width() const final;
   int Height() const final;
 
-  bool CanCreateCanvas2dResourceProvider() const final;
-  CanvasResourceProvider* GetOrCreateCanvasResourceProvider() const;
-  CanvasResourceProvider* GetCanvasResourceProvider() const;
+  bool CanCreateResourceProvider() final;
 
   // Offscreen canvas doesn't have any notion of image orientation.
   RespectImageOrientationEnum RespectImageOrientation() const final {
     return kRespectImageOrientation;
   }
 
-  bool ParseColorOrCurrentColor(Color&, const String& color_string) const final;
+  Color GetCurrentColor() const final;
 
-  cc::PaintCanvas* GetOrCreatePaintCanvas() final;
-  cc::PaintCanvas* GetPaintCanvas() const final;
+  MemoryManagedPaintCanvas* GetOrCreatePaintCanvas() final;
+  using BaseRenderingContext2D::GetPaintCanvas;  // Pull the non-const overload.
+  const MemoryManagedPaintCanvas* GetPaintCanvas() const final;
+  const MemoryManagedPaintRecorder* Recorder() const final;
 
-  void DidDraw() final;
-  void DidDraw(const SkIRect& dirty_rect) final;
+  void WillDraw(const gfx::Rect& dirty_rect,
+                CanvasPerformanceMonitor::DrawType) final;
 
-  bool StateHasFilter() final;
   sk_sp<PaintFilter> StateGetFilter() final;
-  void SnapshotStateForFilter() final;
-
-  void ValidateStateStackWithCanvas(const cc::PaintCanvas*) const final;
 
   bool HasAlpha() const final { return CreationAttributes().alpha; }
-  bool isContextLost() const override;
+  bool IsDesynchronized() const final {
+    return CreationAttributes().desynchronized;
+  }
+  void Dispose() override;
+  void LoseContext(LostContextMode) override;
 
-  ImageBitmap* TransferToImageBitmap(ScriptState*) final;
+  ImageBitmap* TransferToImageBitmap(ScriptState* script_state,
+                                     ExceptionState& exception_state) final;
 
   void Trace(Visitor*) const override;
 
-  bool PushFrame() override;
+  scoped_refptr<CanvasResource> GetResourceForPushFrame(
+      bool& should_call_push_frame) override;
 
-  IdentifiableToken IdentifiableTextToken() const override {
-    return identifiability_study_helper_.GetToken();
-  }
+  CanvasRenderingContextHost* GetCanvasRenderingContextHost() const override;
+  ExecutionContext* GetTopExecutionContext() const override;
 
-  bool IdentifiabilityEncounteredSkippedOps() const override {
-    return identifiability_study_helper_.encountered_skipped_ops();
-  }
-
-  bool IdentifiabilityEncounteredSensitiveOps() const override {
-    return identifiability_study_helper_.encountered_sensitive_ops();
-  }
+  std::optional<cc::PaintRecord> FlushCanvas(FlushReason) override;
 
  protected:
-  CanvasColorParams ColorParams() const override;
+  OffscreenCanvas* HostAsOffscreenCanvas() const final;
+  UniqueFontSelector* GetFontSelector() const final;
+
   bool WritePixels(const SkImageInfo& orig_info,
                    const void* pixels,
                    size_t row_bytes,
                    int x,
                    int y) override;
-  void WillOverwriteCanvas() override;
+
+  bool ResolveFont(const String& new_font) override;
 
  private:
-  void FinalizeFrame() final;
-  void FlushRecording();
+  CanvasResourceProvider* GetResourceProvider() const override;
+  void FinalizeFrame(FlushReason) final;
 
   bool IsPaintable() const final;
-  bool IsCanvas2DBufferValid() const override;
 
-  void DrawTextInternal(const String&,
-                        double,
-                        double,
-                        CanvasRenderingContext2DState::PaintType,
-                        double* max_width = nullptr);
-  const Font& AccessFont();
+  scoped_refptr<CanvasResource> ProduceCanvasResource(FlushReason);
 
-  scoped_refptr<CanvasResource> ProduceCanvasResource();
+  CanvasResourceProvider* GetOrCreateResourceProvider() override;
+  std::unique_ptr<CanvasResourceProvider> ReplaceResourceProvider(
+      std::unique_ptr<CanvasResourceProvider>) override;
 
-  String ColorSpaceAsString() const override;
-  CanvasPixelFormat PixelFormat() const override;
-  SkIRect dirty_rect_for_commit_;
-
-  bool is_valid_size_ = false;
-
-  std::mt19937 random_generator_;
-  std::bernoulli_distribution bernoulli_distribution_;
+  std::unique_ptr<CanvasResourceProvider> resource_provider_;
 };
 
 }  // namespace blink

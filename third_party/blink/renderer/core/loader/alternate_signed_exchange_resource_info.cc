@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,16 @@
 
 #include "media/media_buildflags.h"
 #include "net/http/http_request_headers.h"
-#include "third_party/blink/public/common/features.h"
+#include "services/network/public/cpp/constants.h"
+#include "services/network/public/mojom/fetch_api.mojom-shared.h"
+#include "third_party/blink/public/common/loader/network_utils.h"
 #include "third_party/blink/public/common/web_package/signed_exchange_consts.h"
 #include "third_party/blink/public/common/web_package/web_package_request_matcher.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource.h"
+#include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
 #include "third_party/blink/renderer/platform/loader/link_header.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/hash_functions.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
 
@@ -23,27 +25,6 @@ namespace {
 
 constexpr char kAlternate[] = "alternate";
 constexpr char kAllowedAltSxg[] = "allowed-alt-sxg";
-
-// These accept header values are also defined in
-// blink/renderer/platform/loader/fetch/url_loader/fetch_conversion.cc and
-// services/network/loader_util.h.
-// TODO(horo): Move somewhere and use shared constant value.
-const char kDefaultAcceptHeader[] = "*/*";
-const char kStylesheetAcceptHeader[] = "text/css,*/*;q=0.1";
-
-const char* ImageAcceptHeader() {
-  static constexpr char kImageAcceptHeaderWithAvif[] =
-      "image/avif,image/webp,image/apng,image/*,*/*;q=0.8";
-  static constexpr size_t kOffset = sizeof("image/avif,") - 1;
-#if BUILDFLAG(ENABLE_AV1_DECODER)
-  static const char* header = base::FeatureList::IsEnabled(features::kAVIF)
-                                  ? kImageAcceptHeaderWithAvif
-                                  : kImageAcceptHeaderWithAvif + kOffset;
-#else
-  static const char* header = kImageAcceptHeaderWithAvif + kOffset;
-#endif
-  return header;
-}
 
 using AlternateSignedExchangeMachingKey =
     std::pair<String /* anchor */,
@@ -62,9 +43,9 @@ AlternateSignedExchangeMachingKey MakeKey(const String& anchor,
 void AddAlternateUrlIfValid(
     const LinkHeader& header,
     HashMap<AlternateSignedExchangeMachingKey, KURL>* alternate_urls) {
-  if (!header.Valid() || header.Url().IsEmpty() ||
-      !header.Anchor().has_value() || header.Anchor()->IsEmpty() ||
-      !EqualIgnoringASCIICase(header.Rel(), kAlternate) ||
+  if (!header.Valid() || header.Url().empty() || !header.Anchor().has_value() ||
+      header.Anchor()->empty() ||
+      !EqualIgnoringAsciiCase(header.Rel(), kAlternate) ||
       header.MimeType() != kSignedExchangeMimeType) {
     return;
   }
@@ -81,9 +62,9 @@ std::unique_ptr<AlternateSignedExchangeResourceInfo::Entry>
 CreateEntryForLinkHeaderIfValid(
     const LinkHeader& header,
     const HashMap<AlternateSignedExchangeMachingKey, KURL>& alternate_urls) {
-  if (!header.Valid() || header.Url().IsEmpty() ||
-      header.HeaderIntegrity().IsEmpty() ||
-      !EqualIgnoringASCIICase(header.Rel(), kAllowedAltSxg)) {
+  if (!header.Valid() || header.Url().empty() ||
+      header.HeaderIntegrity().empty() ||
+      !EqualIgnoringAsciiCase(header.Rel(), kAllowedAltSxg)) {
     return nullptr;
   }
   const KURL anchor_url(header.Url());
@@ -129,7 +110,7 @@ AlternateSignedExchangeResourceInfo::CreateIfValid(
       alternative_resources_it->value.emplace_back(std::move(alt_resource));
     }
   }
-  if (alternative_resources.IsEmpty())
+  if (alternative_resources.empty())
     return nullptr;
   return std::make_unique<AlternateSignedExchangeResourceInfo>(
       std::move(alternative_resources));
@@ -142,29 +123,25 @@ AlternateSignedExchangeResourceInfo::AlternateSignedExchangeResourceInfo(
 AlternateSignedExchangeResourceInfo::Entry*
 AlternateSignedExchangeResourceInfo::FindMatchingEntry(
     const KURL& url,
-    base::Optional<ResourceType> resource_type,
+    std::optional<ResourceType> resource_type,
     const Vector<String>& languages) const {
-  const char* accept_header = kDefaultAcceptHeader;
-  if (resource_type == ResourceType::kCSSStyleSheet) {
-    accept_header = kStylesheetAcceptHeader;
-  } else if (resource_type == ResourceType::kImage) {
-    accept_header = ImageAcceptHeader();
-  }
-  return FindMatchingEntry(url, accept_header, languages);
+  return FindMatchingEntry(
+      url,
+      resource_type
+          ? network_utils::GetAcceptHeaderForDestination(
+                ResourceFetcher::DetermineRequestDestination(*resource_type))
+          : network::kDefaultAcceptHeaderValue,
+      languages);
 }
 
 AlternateSignedExchangeResourceInfo::Entry*
 AlternateSignedExchangeResourceInfo::FindMatchingEntry(
     const KURL& url,
-    mojom::RequestContextType request_context,
+    network::mojom::RequestDestination request_destination,
     const Vector<String>& languages) const {
-  const char* accept_header = kDefaultAcceptHeader;
-  if (request_context == mojom::RequestContextType::STYLE) {
-    accept_header = kStylesheetAcceptHeader;
-  } else if (request_context == mojom::RequestContextType::IMAGE) {
-    accept_header = ImageAcceptHeader();
-  }
-  return FindMatchingEntry(url, accept_header, languages);
+  return FindMatchingEntry(
+      url, network_utils::GetAcceptHeaderForDestination(request_destination),
+      languages);
 }
 
 AlternateSignedExchangeResourceInfo::Entry*
@@ -176,7 +153,7 @@ AlternateSignedExchangeResourceInfo::FindMatchingEntry(
   if (it == alternative_resources_.end())
     return nullptr;
   const Vector<std::unique_ptr<Entry>>& entries = it->value;
-  DCHECK(!entries.IsEmpty());
+  DCHECK(!entries.empty());
   if (entries[0]->variants().IsNull())
     return entries[0].get();
 
@@ -199,8 +176,7 @@ AlternateSignedExchangeResourceInfo::FindMatchingEntry(
       matcher.FindBestMatchingVariantKey(variants, variant_keys_list);
   if (variant_keys_list_it == variant_keys_list.end())
     return nullptr;
-  return (entries.begin() + (variant_keys_list_it - variant_keys_list.begin()))
-      ->get();
+  return entries[variant_keys_list_it - variant_keys_list.begin()].get();
 }
 
 }  // namespace blink

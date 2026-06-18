@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,11 @@
 
 namespace switches {
 
-extern const base::Feature kSyncDoNotCommitBookmarksWithoutFavicon;
-extern const base::Feature kUpdateBookmarkGUIDWithNodeReplacement;
-extern const base::Feature kMergeBookmarksUsingGUIDs;
-// TODO(crbug.com/1066962): remove this code when most of bookmarks are
-// reuploaded.
-extern const base::Feature kSyncReuploadBookmarkFullTitles;
-// This switch is used to disable removing of bookmark duplicates by GUID.
-extern const base::Feature kSyncDeduplicateAllBookmarksWithSameGUID;
-// TODO(crbug.com/1075709): remove after launch.
-extern const base::Feature kSyncIgnoreChangesInTouchIcons;
+// TODO(crbug.com/40780588): remove the feature toggle once most of bookmarks
+// have been reuploaded.
+BASE_DECLARE_FEATURE(kSyncReuploadBookmarks);
+
+BASE_DECLARE_FEATURE(kSyncMigrateBookmarksWithoutClientTagHash);
 
 }  // namespace switches
 

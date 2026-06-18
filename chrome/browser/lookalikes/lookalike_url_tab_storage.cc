@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,14 +34,6 @@ LookalikeUrlTabStorage* LookalikeUrlTabStorage::GetOrCreate(
     web_contents->SetUserData(kAllowlistKey, base::WrapUnique(storage));
   }
   return storage;
-}
-
-bool LookalikeUrlTabStorage::IsDomainAllowed(const std::string& domain) {
-  return allowed_domains_.count(domain) > 0;
-}
-
-void LookalikeUrlTabStorage::AllowDomain(const std::string& domain) {
-  allowed_domains_.insert(domain);
 }
 
 void LookalikeUrlTabStorage::OnLookalikeInterstitialShown(

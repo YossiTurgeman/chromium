@@ -1,13 +1,18 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_EVENTS_ANDROID_EVENT_HANDLER_ANDROID_H_
 #define UI_EVENTS_ANDROID_EVENT_HANDLER_ANDROID_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "base/time/time.h"
 #include "ui/events/events_export.h"
+
+namespace gfx {
+class Rect;
+}
 
 namespace ui {
 
@@ -31,15 +36,21 @@ class EVENTS_EXPORT EventHandlerAndroid {
   virtual bool OnGestureEvent(const GestureEventAndroid& event);
   virtual void OnSizeChanged();
   virtual void OnPhysicalBackingSizeChanged(
-      base::Optional<base::TimeDelta> deadline_override);
+      std::optional<base::TimeDelta> deadline_override);
   virtual void OnBrowserControlsHeightChanged();
   virtual void OnControlsResizeViewChanged();
+  virtual void OnWindowPositionChanged();
+  // OnPointerLockRelease is only called on the view requesting pointer lock,
+  // not the entire view tree
+  virtual void OnPointerLockRelease();
 
   virtual bool OnGenericMotionEvent(const MotionEventAndroid& event);
   virtual bool OnKeyUp(const KeyEventAndroid& event);
   virtual bool DispatchKeyEvent(const KeyEventAndroid& event);
   virtual bool ScrollBy(float delta_x, float delta_y);
   virtual bool ScrollTo(float x, float y);
+  virtual void NotifyVirtualKeyboardOverlayRect(const gfx::Rect& keyboard_rect);
+  virtual void ShowInterestInElement(int);
 };
 
 }  // namespace ui

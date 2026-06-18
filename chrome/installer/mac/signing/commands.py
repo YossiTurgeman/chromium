@@ -1,22 +1,31 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """
 The commands module wraps operations that have side-effects.
 """
 
+import asyncio
 import os
+import platform
 import plistlib
 import shutil
 import stat
 import subprocess
 import tempfile
 
-from . import logger
+from signing import logger
 
 
 def file_exists(path):
     return os.path.exists(path)
+
+
+def delete_file_if_exists(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 def copy_files(source, dest):
@@ -69,6 +78,10 @@ def read_file(path):
         return f.read()
 
 
+def zip(out, path):
+    run_command(['zip', '-9ry', out, '.'], cwd=path)
+
+
 def set_executable(path):
     """Makes the file at the specified path executable.
 
@@ -90,29 +103,102 @@ def run_command_output(args, **kwargs):
     return subprocess.check_output(args, **kwargs)
 
 
+async def run_command_output_async(args, **kwargs):
+    logger.info('Running command: %s', args)
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **kwargs)
+    stdout, stderr = await process.communicate()
+    if process.returncode:
+        logger.error('%s failed. stdout: %s stderr: %s', args, stdout, stderr)
+        raise subprocess.CalledProcessError(
+            process.returncode, args, output=stdout, stderr=stderr)
+    return stdout
+
+
+async def run_command_all_output_async(args, **kwargs):
+    logger.info('Running command: %s', args)
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **kwargs)
+    stdout, stderr = await process.communicate()
+    return ('%s' % args, process.returncode, stdout, stderr)
+
+
+def lenient_run_command_output(args, **kwargs):
+    """Runs a command, being fairly tolerant of errors.
+
+    Returns:
+        A tuple of (returncode, stdoutdata, stderrdata), or if an OSError was
+        raised, (None, None, None).
+    """
+    logger.info('Running command: %s', args)
+
+    try:
+        process = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+    except OSError:
+        return (None, None, None)
+
+    (stdout, stderr) = process.communicate()
+
+    return (process.wait(), stdout, stderr)
+
+
+def read_plist(path):
+    """Loads Plist at |path| and returns it as a dictionary."""
+    with open(path, 'rb') as f:
+        return plistlib.load(f)
+
+
+def write_plist(data, path, format):
+    """Saves |data| as a Plist to |path| in the specified |format|."""
+    # The below does not replace the destination file but update it in place,
+    # so if more than one hardlink points to destination all of them will be
+    # modified. This is not what is expected, so delete destination file if
+    # it does exist.
+    delete_file_if_exists(path)
+    with open(path, 'wb') as f:
+        plist_format = {
+            'binary1': plistlib.FMT_BINARY,
+            'xml1': plistlib.FMT_XML
+        }
+        plistlib.dump(data, f, fmt=plist_format[format])
+
+
 class PlistContext(object):
     """
     PlistContext is a context manager that reads a plist on entry, providing
     the contents as a dictionary. If |rewrite| is True, then the same dictionary
     is re-serialized on exit. If |create_new| is True, then the file is not read
-    but rather an empty dictionary is created.
+    but rather an empty dictionary is created. If |binary| is True, then both
+    input and output will be in binary instead of the default XML format.
     """
 
-    def __init__(self, plist_path, rewrite=False, create_new=False):
+    def __init__(self,
+                 plist_path,
+                 rewrite=False,
+                 create_new=False,
+                 binary=False):
         self._path = plist_path
         self._rewrite = rewrite
         self._create_new = create_new
+        self._format = 'binary1' if binary else 'xml1'
 
     def __enter__(self):
         if self._create_new:
             self._plist = {}
         else:
-            self._plist = plistlib.readPlist(self._path)
+            self._plist = read_plist(self._path)
         return self._plist
 
     def __exit__(self, exc_type, exc_value, exc_tb):
         if self._rewrite and not exc_type:
-            plistlib.writePlist(self._plist, self._path)
+            write_plist(self._plist, self._path, self._format)
         self._plist = None
 
 

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -53,11 +53,13 @@ MediaSinkInternal& MediaSinkInternal::operator=(
 }
 
 bool MediaSinkInternal::operator==(const MediaSinkInternal& other) const {
-  if (sink_type_ != other.sink_type_)
+  if (sink_type_ != other.sink_type_) {
     return false;
+  }
 
-  if (sink_ != other.sink_)
+  if (sink_ != other.sink_) {
     return false;
+  }
 
   switch (sink_type_) {
     case SinkType::DIAL:
@@ -68,11 +70,6 @@ bool MediaSinkInternal::operator==(const MediaSinkInternal& other) const {
       return true;
   }
   NOTREACHED();
-  return false;
-}
-
-bool MediaSinkInternal::operator!=(const MediaSinkInternal& other) const {
-  return !operator==(other);
 }
 
 bool MediaSinkInternal::operator<(const MediaSinkInternal& other) const {
@@ -127,12 +124,14 @@ bool MediaSinkInternal::IsValidSinkId(const std::string& sink_id) {
 // static
 std::string MediaSinkInternal::ProcessDeviceUUID(
     const std::string& device_uuid) {
-  if (device_uuid.empty())
+  if (device_uuid.empty()) {
     return std::string();
+  }
 
   std::string result = device_uuid;
-  if (base::StartsWith(device_uuid, "uuid:", base::CompareCase::SENSITIVE))
+  if (base::StartsWith(device_uuid, "uuid:", base::CompareCase::SENSITIVE)) {
     result = device_uuid.substr(5);
+  }
 
   base::RemoveChars(result, "-", &result);
   return base::ToLowerASCII(result);
@@ -206,7 +205,7 @@ bool CastSinkExtraData::operator==(const CastSinkExtraData& other) const {
   return ip_endpoint == other.ip_endpoint && model_name == other.model_name &&
          capabilities == other.capabilities &&
          cast_channel_id == other.cast_channel_id &&
-         discovered_by_dial == other.discovered_by_dial;
+         discovery_type == other.discovery_type;
 }
 
 }  // namespace media_router

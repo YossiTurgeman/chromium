@@ -211,21 +211,6 @@ This test verifies that persistent grid in iframe are positioned correctly.
         }
       ],
       "areaNames": {
-        "header": [
-          "M",
-          228,
-          98,
-          "L",
-          478,
-          98,
-          "L",
-          478,
-          343,
-          "L",
-          228,
-          343,
-          "Z"
-        ],
         "sidebar": [
           "M",
           98,
@@ -255,23 +240,33 @@ This test verifies that persistent grid in iframe are positioned correctly.
           228,
           598,
           "Z"
+        ],
+        "header": [
+          "M",
+          228,
+          98,
+          "L",
+          478,
+          98,
+          "L",
+          478,
+          343,
+          "L",
+          228,
+          343,
+          "Z"
         ]
       },
       "rowLineNameOffsets": [
         {
           "x": 98,
+          "y": 98,
+          "name": "header-start"
+        },
+        {
+          "x": 98,
           "y": 598,
           "name": "sidebar-end"
-        },
-        {
-          "x": 98,
-          "y": 348,
-          "name": "sidebar-start"
-        },
-        {
-          "x": 98,
-          "y": 348,
-          "name": "content-start"
         },
         {
           "x": 98,
@@ -285,11 +280,47 @@ This test verifies that persistent grid in iframe are positioned correctly.
         },
         {
           "x": 98,
-          "y": 98,
-          "name": "header-start"
+          "y": 348,
+          "name": "content-start"
+        },
+        {
+          "x": 98,
+          "y": 348,
+          "name": "sidebar-start"
         }
       ],
-      "columnLineNameOffsets": [],
+      "columnLineNameOffsets": [
+        {
+          "x": 223,
+          "y": 98,
+          "name": "header-start"
+        },
+        {
+          "x": 223,
+          "y": 98,
+          "name": "sidebar-end"
+        },
+        {
+          "x": 478,
+          "y": 98,
+          "name": "header-end"
+        },
+        {
+          "x": 478,
+          "y": 98,
+          "name": "content-end"
+        },
+        {
+          "x": 223,
+          "y": 98,
+          "name": "content-start"
+        },
+        {
+          "x": 98,
+          "y": 98,
+          "name": "sidebar-start"
+        }
+      ],
       "gridBorder": [
         "M",
         98,

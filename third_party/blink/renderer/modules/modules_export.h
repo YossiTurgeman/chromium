@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,13 +33,32 @@
 #endif  // defined(COMPILER_MSVC)
 
 #if defined(COMPILER_GCC)
-#if BLINK_MODULES_IMPLEMENTATION
 #define MODULES_EXPORT __attribute__((visibility("default")))
-#else
-#define MODULES_EXPORT
-#endif
 #endif  // defined(COMPILER_GCC)
 
 #endif  // !defined(COMPONENT_BUILD)
+
+//
+// MODULES_EXTERN_TEMPLATE_EXPORT
+// MODULES_TEMPLATE_EXPORT
+//
+#if BLINK_MODULES_IMPLEMENTATION
+
+#if defined(COMPILER_MSVC)
+#define MODULES_EXTERN_TEMPLATE_EXPORT
+#define MODULES_TEMPLATE_EXPORT MODULES_EXPORT
+#endif
+
+#if defined(COMPILER_GCC)
+#define MODULES_EXTERN_TEMPLATE_EXPORT MODULES_EXPORT
+#define MODULES_TEMPLATE_EXPORT
+#endif
+
+#else  // BLINK_MODULES_IMPLEMENTATION
+
+#define MODULES_EXTERN_TEMPLATE_EXPORT MODULES_EXPORT
+#define MODULES_TEMPLATE_EXPORT
+
+#endif  // BLINK_MODULES_IMPLEMENTATION
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_MODULES_MODULES_EXPORT_H_

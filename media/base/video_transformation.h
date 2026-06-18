@@ -1,13 +1,16 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_BASE_VIDEO_TRANSFORMATION_H_
 #define MEDIA_BASE_VIDEO_TRANSFORMATION_H_
 
+#include <stdint.h>
+
+#include <array>
 #include <string>
 
-#include "base/numerics/math_constants.h"
+#include "base/containers/span.h"
 #include "media/base/media_export.h"
 
 namespace media {
@@ -16,9 +19,9 @@ namespace media {
 // where it can be rotated by 90 degree intervals.
 enum VideoRotation : int {
   VIDEO_ROTATION_0 = 0,
-  VIDEO_ROTATION_90,
-  VIDEO_ROTATION_180,
-  VIDEO_ROTATION_270,
+  VIDEO_ROTATION_90 = 90,
+  VIDEO_ROTATION_180 = 180,
+  VIDEO_ROTATION_270 = 270,
   VIDEO_ROTATION_MAX = VIDEO_ROTATION_270
 };
 
@@ -26,6 +29,9 @@ enum VideoRotation : int {
 // a rotation matrix from a demuxer, and we only support 90 degree rotation
 // increments.
 struct MEDIA_EXPORT VideoTransformation {
+  static VideoTransformation FromFFmpegDisplayMatrix(
+      base::span<const int32_t, 9> matrix3x3);
+
   constexpr VideoTransformation(VideoRotation rotation, bool mirrored)
       : rotation(rotation), mirrored(mirrored) {}
   constexpr VideoTransformation(VideoRotation r)
@@ -38,7 +44,19 @@ struct MEDIA_EXPORT VideoTransformation {
   // [ sin(Θ),  cos(Θ)]
   // A vertical flip is represented by the cosine's having opposite signs
   // and a horizontal flip is represented by the sine's having the same sign.
-  VideoTransformation(int32_t matrix[4]);
+  explicit VideoTransformation(base::span<const int32_t, 4> matrix);
+
+  // Rotation is snapped to the nearest multiple of 90 degrees, rounding ties
+  // toward positive infinity.
+  VideoTransformation(double rotation, bool mirrored);
+
+  // The result of rotating and then mirroring `this` according to `delta`.
+  VideoTransformation add(VideoTransformation delta) const;
+
+  // Create a matrix based on the rotation and mirrored. Only 8 matrices are
+  // valid when limiting to {0,90,180,270} rotations and boolean of hflip (i.e.
+  // mirrored).
+  std::array<int32_t, 4> GetMatrix() const;
 
   // The video rotation value, in 90 degree steps.
   VideoRotation rotation;
@@ -47,6 +65,9 @@ struct MEDIA_EXPORT VideoTransformation {
   // This transformation takes place _after_ rotation, since they are not
   // commutative.
   bool mirrored;
+
+  // Stringifies the rotation and mirrored into a human readable string.
+  std::string ToString() const;
 };
 
 MEDIA_EXPORT bool operator==(const struct VideoTransformation& first,

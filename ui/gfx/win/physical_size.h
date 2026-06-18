@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "ui/gfx/gfx_export.h"
+#include "base/component_export.h"
 
 namespace gfx {
 
@@ -24,8 +24,9 @@ struct PhysicalDisplaySize {
 };
 
 // Gets the physical size for all displays.
-GFX_EXPORT std::vector<PhysicalDisplaySize> GetPhysicalSizeForDisplays();
+COMPONENT_EXPORT(GFX)
+std::vector<PhysicalDisplaySize> GetPhysicalSizeForDisplays();
 
 }  // namespace gfx
 
-#endif  // UI_GFX_DPI_WIN_H_
+#endif  // UI_GFX_WIN_PHYSICAL_SIZE_H_

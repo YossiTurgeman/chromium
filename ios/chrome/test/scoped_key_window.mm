@@ -1,41 +1,27 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "ios/chrome/test/scoped_key_window.h"
 
-#include "base/check_op.h"
-#import "ios/chrome/browser/ui/util/multi_window_support.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "base/check_op.h"
+#import "base/ios/ios_util.h"
+#import "ios/chrome/browser/shared/ui/util/uikit_ui_util.h"
+#import "ios/chrome/test/app/uikit_test_util.h"
 
 ScopedKeyWindow::ScopedKeyWindow() {
-  if (IsSceneStartupSupported()) {
-    if (@available(iOS 13, *)) {
-      NSSet<UIScene*>* scenes =
-          ([[UIApplication sharedApplication] connectedScenes]);
-      // Only one scene is supported in unittests at the moment.
-      DCHECK_EQ([scenes count], 1u);
-      UIScene* scene =
-          [[[UIApplication sharedApplication] connectedScenes] anyObject];
-      DCHECK([scene isKindOfClass:[UIWindowScene class]]);
-      UIWindowScene* windowScene = static_cast<UIWindowScene*>(scene);
-      for (UIWindow* window in windowScene.windows) {
-        if ([window isKeyWindow]) {
-          original_key_window_ = window;
-        }
-      }
-      DCHECK(original_key_window_);
-      current_key_window_ = [[UIWindow alloc] initWithWindowScene:windowScene];
-    }
-  }
-  if (!current_key_window_) {
-    current_key_window_ =
-        [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    original_key_window_ = [UIApplication sharedApplication].keyWindow;
-  }
+  NSSet<UIScene*>* scenes =
+      ([[UIApplication sharedApplication] connectedScenes]);
+  // Only one scene is supported in unittests at the moment.
+  DCHECK_EQ([scenes count], 1u);
+
+  UIWindowScene* window_scene = chrome_test_util::GetAnyWindowScene();
+  original_key_window_ = window_scene.keyWindow;
+  DCHECK(original_key_window_);
+
+  current_key_window_ = [[UIWindow alloc] initWithWindowScene:window_scene];
+  DCHECK(current_key_window_);
+
   [current_key_window_ makeKeyAndVisible];
 }
 

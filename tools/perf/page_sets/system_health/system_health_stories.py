@@ -1,4 +1,4 @@
-# Copyright 2016 The Chromium Authors. All rights reserved.
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -44,6 +44,9 @@ class SystemHealthStorySet(story.StorySet):
 
     for story_class in IterAllSystemHealthStoryClasses():
       if IncludeStory(story_class):
+        if platform == 'mobile':
+          # Extra browser args are disabled in the mobile platform
+          story_class.EXTRA_BROWSER_ARGUMENTS = []
         self.AddStory(story_class(self, take_memory_measurement))
 
   def GetAbridgedStorySetTagFilter(self):
@@ -96,5 +99,5 @@ def IterAllSystemHealthStoryClasses():
   for unused_cls_name, cls in sorted(discover.DiscoverClasses(
       start_dir=start_dir,
       top_level_dir=os.path.dirname(start_dir),
-      base_class=system_health_story.SystemHealthStory).iteritems()):
+      base_class=system_health_story.SystemHealthStory).items()):
     yield cls

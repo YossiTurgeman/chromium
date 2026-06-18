@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,10 @@
 
 #include "base/check.h"
 #include "base/metrics/field_trial.h"
+#include "base/strings/strcat.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/google/google_brand.h"
-#include "chrome/browser/profiles/profile.h"
 #include "chrome/common/channel_info.h"
 #include "chrome/common/chrome_switches.h"
 #include "components/google/core/common/google_util.h"
@@ -20,7 +20,7 @@
 #include "url/gurl.h"
 
 #if BUILDFLAG(ENABLE_RLZ)
-#include "components/rlz/rlz_tracker.h"  // nogncheck crbug.com/1125897
+#include "components/rlz/rlz_tracker.h"  // nogncheck crbug.com/40147906
 #endif
 
 using content::BrowserThread;
@@ -47,12 +47,12 @@ std::string UIThreadSearchTermsData::GetApplicationLocale() const {
 }
 
 // Android implementations are in ui_thread_search_terms_data_android.cc.
-#if !defined(OS_ANDROID)
-base::string16 UIThreadSearchTermsData::GetRlzParameterValue(
+#if !BUILDFLAG(IS_ANDROID)
+std::u16string UIThreadSearchTermsData::GetRlzParameterValue(
     bool from_app_list) const {
   DCHECK(!BrowserThread::IsThreadInitialized(BrowserThread::UI) ||
       BrowserThread::CurrentlyOn(BrowserThread::UI));
-  base::string16 rlz_string;
+  std::u16string rlz_string;
 #if BUILDFLAG(ENABLE_RLZ)
   // For organic brandcodes do not use rlz at all. Empty brandcode usually
   // means a chromium install. This is ok.
@@ -80,40 +80,18 @@ std::string UIThreadSearchTermsData::GetSearchClient() const {
 }
 #endif
 
-std::string UIThreadSearchTermsData::GetSuggestClient() const {
-  DCHECK(!BrowserThread::IsThreadInitialized(BrowserThread::UI) ||
-      BrowserThread::CurrentlyOn(BrowserThread::UI));
-#if defined(OS_ANDROID)
-  return ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_PHONE ?
-      "chrome" : "chrome-omni";
-#else
-  return "chrome-omni";
-#endif
-}
-
-std::string UIThreadSearchTermsData::GetSuggestRequestIdentifier() const {
-  DCHECK(!BrowserThread::IsThreadInitialized(BrowserThread::UI) ||
-      BrowserThread::CurrentlyOn(BrowserThread::UI));
-#if defined(OS_ANDROID)
-  if (ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_PHONE)
-    return "chrome-mobile-ext-ansg";
-#endif
-  return "chrome-ext-ansg";
-}
-
 // It's acutally OK to call this method on any thread, but it's currently placed
 // in UIThreadSearchTermsData since SearchTermsData cannot depend on src/chrome
 // as it is shared with iOS.
 std::string UIThreadSearchTermsData::GoogleImageSearchSource() const {
-  std::string version(version_info::GetProductName() + " " +
-                      version_info::GetVersionNumber());
-  if (version_info::IsOfficialBuild())
-    version += " (Official)";
-  version += " " + version_info::GetOSType();
-  std::string modifier(chrome::GetChannelName());
-  if (!modifier.empty())
-    version += " " + modifier;
-  return version;
+  // Do not distinguish extended from regular stable in image search queries.
+  const std::string channel_name =
+      chrome::GetChannelName(chrome::WithExtendedStable(false));
+  return base::StrCat({version_info::GetProductName(), " ",
+                       version_info::GetVersionNumber(),
+                       version_info::IsOfficialBuild() ? " (Official) " : " ",
+                       version_info::GetOSType(),
+                       channel_name.empty() ? "" : " ", channel_name});
 }
 
 size_t UIThreadSearchTermsData::EstimateMemoryUsage() const {

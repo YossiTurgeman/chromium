@@ -1,4 +1,4 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,39 +7,24 @@
 #include <stddef.h>
 
 #include <string>
+#include <utility>
 
 #include "base/memory/ptr_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/tick_clock.h"
-#include "cc/debug/rendering_stats_instrumentation.h"
-#include "cc/test/fake_compositor_frame_reporting_controller.h"
 
 namespace cc {
 
 std::unique_ptr<FakeCompositorTimingHistory>
 FakeCompositorTimingHistory::Create(
     bool using_synchronous_renderer_compositor) {
-  std::unique_ptr<RenderingStatsInstrumentation>
-      rendering_stats_instrumentation = RenderingStatsInstrumentation::Create();
-  std::unique_ptr<CompositorFrameReportingController> reporting_controller =
-      std::make_unique<FakeCompositorFrameReportingController>();
-  return base::WrapUnique(new FakeCompositorTimingHistory(
-      using_synchronous_renderer_compositor,
-      std::move(rendering_stats_instrumentation),
-      std::move(reporting_controller)));
+  return base::WrapUnique(
+      new FakeCompositorTimingHistory(using_synchronous_renderer_compositor));
 }
 
 FakeCompositorTimingHistory::FakeCompositorTimingHistory(
-    bool using_synchronous_renderer_compositor,
-    std::unique_ptr<RenderingStatsInstrumentation>
-        rendering_stats_instrumentation,
-    std::unique_ptr<CompositorFrameReportingController> reporting_controller)
-    : CompositorTimingHistory(using_synchronous_renderer_compositor,
-                              CompositorTimingHistory::NULL_UMA,
-                              rendering_stats_instrumentation.get(),
-                              reporting_controller.get()),
-      rendering_stats_instrumentation_owned_(
-          std::move(rendering_stats_instrumentation)),
-      reporting_controller_owned_(std::move(reporting_controller)) {}
+    bool using_synchronous_renderer_compositor)
+    : CompositorTimingHistory(CompositorTimingHistory::NULL_UMA) {}
 
 FakeCompositorTimingHistory::~FakeCompositorTimingHistory() = default;
 
@@ -49,7 +34,6 @@ void FakeCompositorTimingHistory::SetAllEstimatesTo(base::TimeDelta duration) {
   begin_main_frame_start_to_ready_to_commit_duration_ = duration;
   commit_duration_ = duration;
   commit_to_ready_to_activate_duration_ = duration;
-  prepare_tiles_duration_ = duration;
   activate_duration_ = duration;
   draw_duration_ = duration;
 }
@@ -79,11 +63,6 @@ void FakeCompositorTimingHistory::SetCommitDurationEstimate(
 void FakeCompositorTimingHistory::SetCommitToReadyToActivateDurationEstimate(
     base::TimeDelta duration) {
   commit_to_ready_to_activate_duration_ = duration;
-}
-
-void FakeCompositorTimingHistory::SetPrepareTilesDurationEstimate(
-    base::TimeDelta duration) {
-  prepare_tiles_duration_ = duration;
 }
 
 void FakeCompositorTimingHistory::SetActivateDurationEstimate(
@@ -127,11 +106,6 @@ FakeCompositorTimingHistory::CommitToReadyToActivateDurationEstimate() const {
   return commit_to_ready_to_activate_duration_;
 }
 
-base::TimeDelta FakeCompositorTimingHistory::PrepareTilesDurationEstimate()
-    const {
-  return prepare_tiles_duration_;
-}
-
 base::TimeDelta FakeCompositorTimingHistory::ActivateDurationEstimate() const {
   return activate_duration_;
 }
@@ -146,12 +120,14 @@ TestScheduler::TestScheduler(
     const SchedulerSettings& scheduler_settings,
     int layer_tree_host_id,
     base::SingleThreadTaskRunner* task_runner,
-    std::unique_ptr<CompositorTimingHistory> compositor_timing_history)
+    std::unique_ptr<CompositorTimingHistory> compositor_timing_history,
+    CompositorFrameReportingController* compositor_frame_reporting_controller)
     : Scheduler(client,
                 scheduler_settings,
                 layer_tree_host_id,
                 task_runner,
-                std::move(compositor_timing_history)),
+                std::move(compositor_timing_history),
+                compositor_frame_reporting_controller),
       now_src_(now_src) {}
 
 base::TimeTicks TestScheduler::Now() const {

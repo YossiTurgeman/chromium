@@ -1,4 +1,4 @@
-# Copyright 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,9 @@ See http://dev.chromium.org/developers/how-tos/depottools/presubmit-scripts
 for more details about the presubmit API built into depot_tools.
 """
 
+
 import os
+import re
 from xml.dom import minidom
 
 def _CheckNoProductNameInGeneratedResources(input_api, output_api):
@@ -23,17 +25,104 @@ def _CheckNoProductNameInGeneratedResources(input_api, output_api):
   filename_filter = lambda x: x.LocalPath().endswith(('.grd', '.grdp'))
 
   for f, line_num, line in input_api.RightHandSideLines(filename_filter):
-    if 'PRODUCT_NAME' in line:
+    if ('PRODUCT_NAME' in line and 'name="IDS_PRODUCT_NAME"' not in line and
+       'name="IDS_SHORT_PRODUCT_NAME"' not in line):
       problems.append('%s:%d' % (f.LocalPath(), line_num))
 
   if problems:
     return [output_api.PresubmitPromptWarning(
-        "Don't use PRODUCT_NAME placeholders in string resources. Instead, add "
-        "separate strings to google_chrome_strings.grd and "
-        "chromium_strings.grd. See http://goo.gl/6614MQ for more information."
+        "Don't use PRODUCT_NAME placeholders in string resources. Instead, "
+        "add separate strings to google_chrome_strings.grd and "
+        "chromium_strings.grd. See http://goo.gl/6614MQ for more information. "
         "Problems with this check? Contact dubroy@chromium.org.",
         items=problems)]
   return []
+
+def _CheckNoLiteralBrandNamesInGeneratedResources(input_api, output_api):
+  """Disallow hardcoded 'Chrome' and 'Chromium' in generated_resources.grd.
+
+  Authors should prefer adding branded IDs in
+  //chrome/app/google_chrome_strings.grd and //chrome/app/chromium_strings.grd
+  instead of hardcoding one brand in generated_resources.grd.
+  """
+  STRICT = False
+
+  brand_word = re.compile(r'(?<![A-Za-z])(Chrome|Chromium)(?![A-Za-z])')
+  filename_filter = \
+    lambda af: af.LocalPath().endswith("generated_resources.grd")
+
+  problems = []
+
+  # 1) Build: per-file → set of changed line numbers (RHS only).
+  changed_lines_by_file = {}
+  for af, line_num, _ in input_api.RightHandSideLines(filename_filter):
+    changed_lines_by_file.setdefault(af, set()).add(line_num)
+
+  if not changed_lines_by_file:
+    return []
+
+  # 2) For each file with changes, parse message ranges once, then
+  #    find only the message blocks that intersect changed lines.
+  for af, changed_lines in changed_lines_by_file.items():
+    new_lines = list(af.NewContents())
+    if not new_lines:
+      continue
+
+    # Find all <message ...> ... </message> ranges: (start_line, end_line).
+    ranges = []
+    inside = False
+    start = None
+    for i, line in enumerate(new_lines, start=1):
+      if not inside and "<message" in line:
+        inside = True
+        start = i
+      if inside and "</message>" in line:
+        ranges.append((start, i))
+        inside = False
+        start = None
+
+    if not ranges:
+      continue
+
+    # Which message ranges were touched?
+    touched_ranges = []
+    for range in ranges:
+      start, end = range
+      # any changed line within [start, end] ?
+      if any(start <= line_number <= end for line_number in changed_lines):
+        touched_ranges.append(range)
+
+    if not touched_ranges:
+      continue
+
+    # 3) Scan only touched message blocks; check *content* (strip tags).
+    for start, end in touched_ranges:
+      block_text = "\n".join(new_lines[start - 1:end])  # inclusive
+
+      # Ignore <ex>…</ex>
+      stripped = re.sub(r"<ex>.*?</ex>", "", block_text, flags=re.DOTALL)
+      # Remove remaining tags
+      stripped = re.sub(r"<[^>]+>", "", stripped)
+
+      if brand_word.search(stripped):
+        problems.append(f"{af.LocalPath()}:{start}: {stripped.strip()}")
+
+  if not problems:
+    return []
+
+  hint = (
+      "Avoid hardcoding 'Chrome' or 'Chromium' inside "
+      "generated_resources.grd.\nAdd new branded IDs to "
+      "google_chrome_strings.grd / chromium_strings.grd instead."
+  )
+  text = \
+  "Hardcoded brand names found in generated_resources.grd:\n" + "\n".join(
+    problems) + "\n\n" + hint
+
+  if STRICT:
+    return [output_api.PresubmitError(text)]
+
+  return [output_api.PresubmitPromptWarning(text)]
 
 def _CheckFlagsMessageNotTranslated(input_api, output_api):
   """Check: all about:flags messages are marked as not requiring translation.
@@ -56,36 +145,9 @@ def _CheckFlagsMessageNotTranslated(input_api, output_api):
     return [output_api.PresubmitError(
         "If you define a flag name, description or value, mark it as not "
         "requiring translation by adding the 'translateable' attribute with "
-        "value \"false\". See https://crbug.com/587272 for more context.",
+        "value \"false\". See https://crbug.com/40457200 for more context.",
         items=problems)]
   return []
-
-def _CheckCrOsStringsEduLoginInfoTextVersion(input_api, output_api):
-  """Check text version for IDS_EDU_LOGIN_INFO_* strings.
-
-  If any of IDS_EDU_LOGIN_INFO_* strings changed, text version in
-  chrome/browser/chromeos/child_accounts/secondary_account_consent_logger.cc
-  has to be updated.
-  """
-
-  CHROMEOS_STRINGS_PATH = input_api.os_path.join(
-      input_api.change.RepositoryRoot(), "chrome/app/chromeos_strings.grdp")
-  TEXT_VERSION_PATH = input_api.os_path.join(input_api.change.RepositoryRoot(),
-  "chrome/browser/chromeos/child_accounts/secondary_account_consent_logger.cc")
-  UPDATE_TEXT_VERSION_MESSAGE = (
-      "You have changed EDU login parental consent text "
-      "(IDS_EDU_LOGIN_INFO_* strings). Update kConsentScreenTextVersion in "
-      "chrome/browser/chromeos/child_accounts/"
-      "secondary_account_consent_logger.cc to the value of \"%s\"."
-  )
-  UPDATE_INVALIDATION_VERSION_MESSAGE = (
-      "You have changed EDU login parental consent text "
-      "(IDS_EDU_LOGIN_INFO_* strings). If you want to invalidate secondary "
-      "accounts added with previous consent versions, also update "
-      "kSecondaryAccountsInvalidationVersion in "
-      "chrome/browser/chromeos/child_accounts/"
-      "secondary_account_consent_logger.cc to the value of \"%s\"."
-  )
 
   def _GetInfoStrings(file_contents):
     """Retrieves IDS_EDU_LOGIN_INFO_* messages from the file contents
@@ -149,9 +211,9 @@ def _CommonChecks(input_api, output_api):
   """Checks common to both upload and commit."""
   results = []
   results.extend(_CheckNoProductNameInGeneratedResources(input_api, output_api))
-  results.extend(_CheckFlagsMessageNotTranslated(input_api, output_api))
   results.extend(
-    _CheckCrOsStringsEduLoginInfoTextVersion(input_api, output_api))
+    _CheckNoLiteralBrandNamesInGeneratedResources(input_api, output_api))
+  results.extend(_CheckFlagsMessageNotTranslated(input_api, output_api))
   return results
 
 def CheckChangeOnUpload(input_api, output_api):

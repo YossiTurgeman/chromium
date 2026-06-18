@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_SIGNIN_PUBLIC_BASE_MULTILOGIN_PARAMETERS_H_
 #define COMPONENTS_SIGNIN_PUBLIC_BASE_MULTILOGIN_PARAMETERS_H_
 
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -14,20 +15,30 @@
 namespace signin {
 
 struct MultiloginParameters {
+  // Parameters with UPDATE mode and empty accounts.
+  MultiloginParameters();
   MultiloginParameters(gaia::MultiloginMode mode,
-                       const std::vector<CoreAccountId>& accounts_to_send);
-  MultiloginParameters(const MultiloginParameters& other);
-  MultiloginParameters& operator=(const MultiloginParameters& other);
+                       std::vector<CoreAccountId> accounts_to_send);
+  MultiloginParameters(const MultiloginParameters&);
+  MultiloginParameters& operator=(const MultiloginParameters&);
   ~MultiloginParameters();
 
-  // Needed for testing.
-  bool operator==(const MultiloginParameters& other) const {
-    return mode == other.mode && accounts_to_send == other.accounts_to_send;
-  }
+  std::string ToString() const;
 
-  gaia::MultiloginMode mode;
+  bool operator==(const MultiloginParameters&) const = default;
+
+  gaia::MultiloginMode mode =
+      gaia::MultiloginMode::MULTILOGIN_UPDATE_COOKIE_ACCOUNTS_ORDER;
   std::vector<CoreAccountId> accounts_to_send;
+  // Whether to wait for a connected network state before sending the request.
+  // This is the historical default, but network state can be unreliable, so
+  // using this is not advised.
+  // TODO(crbug.com/466303351): Remove all uses of DelayNetworkCall().
+  bool wait_on_connectivity = true;
 };
+
+std::ostream& operator<<(std::ostream& out, const MultiloginParameters& p);
+
 }  // namespace signin
 
 #endif  // COMPONENTS_SIGNIN_PUBLIC_BASE_MULTILOGIN_PARAMETERS_H_

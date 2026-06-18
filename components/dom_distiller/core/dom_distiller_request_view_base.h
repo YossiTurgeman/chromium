@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "components/dom_distiller/core/distilled_page_prefs.h"
 #include "components/dom_distiller/core/dom_distiller_service.h"
 #include "components/dom_distiller/core/task_tracker.h"
@@ -40,9 +40,11 @@ class DomDistillerRequestViewBase : public ViewRequestDelegate,
 
  protected:
   // DistilledPagePrefs::Observer implementation:
-  void OnChangeTheme(mojom::Theme new_theme) override;
+  void OnChangeTheme(mojom::Theme new_theme,
+                     ThemeSettingsUpdateSource source) override;
   void OnChangeFontFamily(mojom::FontFamily new_font_family) override;
   void OnChangeFontScaling(float scaling) override;
+  void OnChangeLinksEnabled(bool enabled) override;
 
   // Sends JavaScript to the attached Viewer, buffering data if the viewer isn't
   // ready.
@@ -60,7 +62,7 @@ class DomDistillerRequestViewBase : public ViewRequestDelegate,
   int page_count_;
 
   // Interface for accessing preferences for distilled pages.
-  DistilledPagePrefs* distilled_page_prefs_;
+  raw_ptr<DistilledPagePrefs> distilled_page_prefs_;
 
   // Flag to tell this observer that the web contents are in an error state.
   bool is_error_page_;

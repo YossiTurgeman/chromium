@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/animation/ink_drop_event_handler.h"
 
 #include <memory>
+#include <string_view>
 
 #include "build/build_config.h"
 #include "ui/events/scoped_target_handler.h"
@@ -13,19 +14,31 @@
 #include "ui/views/widget/widget.h"
 
 namespace views {
+
+namespace {
+
+bool InkDropStateIsVisible(InkDropState state) {
+  return state != InkDropState::HIDDEN && state != InkDropState::DEACTIVATED;
+}
+
+}  // namespace
+
 InkDropEventHandler::InkDropEventHandler(View* host_view, Delegate* delegate)
     : target_handler_(
           std::make_unique<ui::ScopedTargetHandler>(host_view, this)),
       host_view_(host_view),
       delegate_(delegate) {
-  observer_.Add(host_view_);
+  view_observation_.Observe(host_view_.get());
+  if (Widget* widget = host_view_->GetWidget()) {
+    widget_observation_.Observe(widget);
+  }
 }
 
 InkDropEventHandler::~InkDropEventHandler() = default;
 
-void InkDropEventHandler::AnimateInkDrop(InkDropState state,
+void InkDropEventHandler::AnimateToState(InkDropState state,
                                          const ui::LocatedEvent* event) {
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   // On Windows, don't initiate ink-drops for touch/gesture events.
   // Additionally, certain event states should dismiss existing ink-drop
   // animations. If the state is already other than HIDDEN, presumably from
@@ -39,8 +52,15 @@ void InkDropEventHandler::AnimateInkDrop(InkDropState state,
   }
 #endif
   last_ripple_triggering_event_.reset(
-      event ? ui::Event::Clone(*event).release()->AsLocatedEvent() : nullptr);
-  delegate_->GetInkDrop()->AnimateToState(state);
+      event ? event->Clone().release()->AsLocatedEvent() : nullptr);
+
+  // If no ink drop exists and we are not transitioning to a visible ink drop
+  // state the transition have no visual effect. The call to GetInkDrop() will
+  // lazily create the ink drop when called. Avoid creating the ink drop in
+  // these cases to prevent the creation of unnecessary layers.
+  if (delegate_->HasInkDrop() || InkDropStateIsVisible(state)) {
+    delegate_->GetInkDrop()->AnimateToState(state);
+  }
 }
 
 ui::LocatedEvent* InkDropEventHandler::GetLastRippleTriggeringEvent() const {
@@ -48,35 +68,36 @@ ui::LocatedEvent* InkDropEventHandler::GetLastRippleTriggeringEvent() const {
 }
 
 void InkDropEventHandler::OnGestureEvent(ui::GestureEvent* event) {
-  if (!host_view_->GetEnabled() || !delegate_->SupportsGestureEvents())
+  if (!host_view_->GetEnabled() || !delegate_->SupportsGestureEvents()) {
     return;
+  }
 
   InkDropState current_ink_drop_state =
       delegate_->GetInkDrop()->GetTargetInkDropState();
 
   InkDropState ink_drop_state = InkDropState::HIDDEN;
   switch (event->type()) {
-    case ui::ET_GESTURE_TAP_DOWN:
-      if (current_ink_drop_state == InkDropState::ACTIVATED)
+    case ui::EventType::kGestureTapDown:
+      if (current_ink_drop_state == InkDropState::ACTIVATED) {
         return;
+      }
       ink_drop_state = InkDropState::ACTION_PENDING;
-      // The ui::ET_GESTURE_TAP_DOWN event needs to be marked as handled so
-      // that subsequent events for the gesture are sent to |this|.
-      event->SetHandled();
       break;
-    case ui::ET_GESTURE_LONG_PRESS:
-      if (current_ink_drop_state == InkDropState::ACTIVATED)
+    case ui::EventType::kGestureLongPress:
+      if (current_ink_drop_state == InkDropState::ACTIVATED) {
         return;
+      }
       ink_drop_state = InkDropState::ALTERNATE_ACTION_PENDING;
       break;
-    case ui::ET_GESTURE_LONG_TAP:
+    case ui::EventType::kGestureLongTap:
       ink_drop_state = InkDropState::ALTERNATE_ACTION_TRIGGERED;
       break;
-    case ui::ET_GESTURE_END:
-    case ui::ET_GESTURE_SCROLL_BEGIN:
-    case ui::ET_GESTURE_TAP_CANCEL:
-      if (current_ink_drop_state == InkDropState::ACTIVATED)
+    case ui::EventType::kGestureEnd:
+    case ui::EventType::kGestureScrollBegin:
+    case ui::EventType::kGestureTapCancel:
+      if (current_ink_drop_state == InkDropState::ACTIVATED) {
         return;
+      }
       ink_drop_state = InkDropState::HIDDEN;
       break;
     default:
@@ -93,18 +114,18 @@ void InkDropEventHandler::OnGestureEvent(ui::GestureEvent* event) {
     // case would prematurely pre-empt these animations.
     return;
   }
-  AnimateInkDrop(ink_drop_state, event);
+  AnimateToState(ink_drop_state, event);
 }
 
 void InkDropEventHandler::OnMouseEvent(ui::MouseEvent* event) {
   switch (event->type()) {
-    case ui::ET_MOUSE_ENTERED:
+    case ui::EventType::kMouseEntered:
       delegate_->GetInkDrop()->SetHovered(true);
       break;
-    case ui::ET_MOUSE_EXITED:
+    case ui::EventType::kMouseExited:
       delegate_->GetInkDrop()->SetHovered(false);
       break;
-    case ui::ET_MOUSE_DRAGGED:
+    case ui::EventType::kMouseDragged:
       delegate_->GetInkDrop()->SetHovered(
           host_view_->GetLocalBounds().Contains(event->location()));
       break;
@@ -113,13 +134,19 @@ void InkDropEventHandler::OnMouseEvent(ui::MouseEvent* event) {
   }
 }
 
+std::string_view InkDropEventHandler::GetLogContext() const {
+  return "InkDropEventHandler";
+}
+
 void InkDropEventHandler::OnViewVisibilityChanged(View* observed_view,
-                                                  View* starting_view) {
+                                                  View* starting_view,
+                                                  bool visible) {
   DCHECK_EQ(host_view_, observed_view);
   // A View is *actually* visible if its visible flag is set, all its ancestors'
   // visible flags are set, it's in a Widget, and the Widget is
   // visible. |View::IsDrawn()| captures the first two conditions.
-  const bool is_visible = host_view_->IsDrawn() && host_view_->GetWidget() &&
+  const bool is_visible = visible && host_view_->IsDrawn() &&
+                          host_view_->GetWidget() &&
                           host_view_->GetWidget()->IsVisible();
   if (!is_visible && delegate_->HasInkDrop()) {
     delegate_->GetInkDrop()->AnimateToState(InkDropState::HIDDEN);
@@ -142,8 +169,9 @@ void InkDropEventHandler::OnViewHierarchyChanged(
 
 void InkDropEventHandler::OnViewBoundsChanged(View* observed_view) {
   DCHECK_EQ(host_view_, observed_view);
-  if (delegate_->HasInkDrop())
+  if (delegate_->HasInkDrop()) {
     delegate_->GetInkDrop()->HostSizeChanged(host_view_->size());
+  }
 }
 
 void InkDropEventHandler::OnViewFocused(View* observed_view) {
@@ -154,6 +182,48 @@ void InkDropEventHandler::OnViewFocused(View* observed_view) {
 void InkDropEventHandler::OnViewBlurred(View* observed_view) {
   DCHECK_EQ(host_view_, observed_view);
   delegate_->GetInkDrop()->SetFocused(false);
+}
+
+void InkDropEventHandler::OnViewThemeChanged(View* observed_view) {
+  CHECK_EQ(host_view_, observed_view);
+  // The call to GetInkDrop() will lazily create the ink drop when called. We do
+  // not want to create the ink drop when view theme changed.
+  if (delegate_->HasInkDrop()) {
+    delegate_->GetInkDrop()->HostViewThemeChanged();
+  }
+}
+
+void InkDropEventHandler::OnViewAddedToWidget(View* observed_view) {
+  CHECK_EQ(host_view_, observed_view);
+  if (!widget_observation_.IsObserving()) {
+    widget_observation_.Observe(host_view_->GetWidget());
+  }
+}
+
+void InkDropEventHandler::OnViewRemovedFromWidget(View* observed_view) {
+  CHECK_EQ(host_view_, observed_view);
+  // Only clean up ink drop and widget observation. Keep observing the view
+  // since it may be added to another widget later.
+  CleanupInkDrop();
+  widget_observation_.Reset();
+}
+
+void InkDropEventHandler::OnWidgetDestroying(Widget* widget) {
+  // Clean up everything including both observations since the widget is being
+  // destroyed.
+  CleanupInkDrop();
+  widget_observation_.Reset();
+  view_observation_.Reset();
+}
+
+void InkDropEventHandler::CleanupInkDrop() {
+  // Clean up ink drop state before the widget completes destruction. This
+  // prevents crashes when observer callbacks try to access widget components
+  // (like frame views) that have already been destroyed.
+  if (delegate_->HasInkDrop()) {
+    delegate_->GetInkDrop()->SnapToHidden();
+    delegate_->GetInkDrop()->SetHovered(false);
+  }
 }
 
 }  // namespace views

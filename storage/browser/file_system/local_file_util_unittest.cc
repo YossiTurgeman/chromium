@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,7 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/macros.h"
 #include "base/run_loop.h"
-#include "base/strings/sys_string_conversions.h"
-#include "base/strings/utf_string_conversions.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
 #include "storage/browser/file_system/async_file_util_adapter.h"
@@ -23,12 +20,18 @@
 #include "storage/browser/file_system/file_system_operation_context.h"
 #include "storage/browser/file_system/local_file_util.h"
 #include "storage/browser/file_system/native_file_util.h"
+#include "storage/browser/quota/quota_manager_proxy.h"
 #include "storage/browser/test/async_file_test_helper.h"
 #include "storage/browser/test/test_file_system_context.h"
 #include "storage/common/file_system/file_system_types.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "url/gurl.h"
 #include "url/origin.h"
+
+#if BUILDFLAG(IS_POSIX)
+#include <sys/stat.h>
+#endif  // BUILDFLAG(IS_POSIX)
 
 namespace storage {
 
@@ -42,10 +45,13 @@ class LocalFileUtilTest : public testing::Test {
  public:
   LocalFileUtilTest() = default;
 
+  LocalFileUtilTest(const LocalFileUtilTest&) = delete;
+  LocalFileUtilTest& operator=(const LocalFileUtilTest&) = delete;
+
   void SetUp() override {
     ASSERT_TRUE(data_dir_.CreateUniqueTempDir());
-    file_system_context_ =
-        CreateFileSystemContextForTesting(nullptr, data_dir_.GetPath());
+    file_system_context_ = CreateFileSystemContextForTesting(
+        /*quota_manager_proxy=*/nullptr, data_dir_.GetPath());
   }
 
   void TearDown() override {
@@ -54,9 +60,9 @@ class LocalFileUtilTest : public testing::Test {
   }
 
  protected:
-  FileSystemOperationContext* NewContext() {
-    FileSystemOperationContext* context =
-        new FileSystemOperationContext(file_system_context_.get());
+  std::unique_ptr<FileSystemOperationContext> NewContext() {
+    auto context = std::make_unique<FileSystemOperationContext>(
+        file_system_context_.get());
     context->set_update_observers(
         *file_system_context_->GetUpdateObservers(kFileSystemType));
     return context;
@@ -70,8 +76,8 @@ class LocalFileUtilTest : public testing::Test {
 
   FileSystemURL CreateURL(const std::string& file_name) {
     return file_system_context_->CreateCrackedFileSystemURL(
-        url::Origin::Create(GURL("http://foo/")), kFileSystemType,
-        base::FilePath().FromUTF8Unsafe(file_name));
+        blink::StorageKey::CreateFromStringForTesting("http://foo/"),
+        kFileSystemType, base::FilePath().FromUTF8Unsafe(file_name));
   }
 
   base::FilePath LocalPath(const char* file_name) {
@@ -119,8 +125,6 @@ class LocalFileUtilTest : public testing::Test {
   base::test::TaskEnvironment task_environment_;
   scoped_refptr<FileSystemContext> file_system_context_;
   base::ScopedTempDir data_dir_;
-
-  DISALLOW_COPY_AND_ASSIGN(LocalFileUtilTest);
 };
 
 TEST_F(LocalFileUtilTest, CreateAndClose) {
@@ -136,7 +140,7 @@ TEST_F(LocalFileUtilTest, CreateAndClose) {
 }
 
 // base::CreateSymbolicLink is supported on most POSIX, but not on Fuchsia.
-#if defined(OS_POSIX)
+#if BUILDFLAG(IS_POSIX)
 TEST_F(LocalFileUtilTest, CreateFailForSymlink) {
   // Create symlink target file.
   const char* target_name = "symlink_target";
@@ -174,6 +178,12 @@ TEST_F(LocalFileUtilTest, EnsureFileExists) {
   EXPECT_FALSE(created);
 }
 
+// TODO(crbug.com/40511450): Remove this test once last_access_time has
+// been removed after PPAPI has been deprecated. Fuchsia does not support touch,
+// which breaks this test that relies on it. Since PPAPI is being deprecated,
+// this test is excluded from the Fuchsia build.
+// See https://crbug.com/1077456 for details.
+#if !BUILDFLAG(IS_FUCHSIA)
 TEST_F(LocalFileUtilTest, TouchFile) {
   const char* file_name = "test_file";
   base::File file = CreateFile(file_name);
@@ -184,10 +194,8 @@ TEST_F(LocalFileUtilTest, TouchFile) {
 
   base::File::Info info;
   ASSERT_TRUE(base::GetFileInfo(LocalPath(file_name), &info));
-  const base::Time new_accessed =
-      info.last_accessed + base::TimeDelta::FromHours(10);
-  const base::Time new_modified =
-      info.last_modified + base::TimeDelta::FromHours(5);
+  const base::Time new_accessed = info.last_accessed + base::Hours(10);
+  const base::Time new_modified = info.last_modified + base::Hours(5);
 
   EXPECT_EQ(base::File::FILE_OK,
             file_util()->Touch(context.get(), CreateURL(file_name),
@@ -208,10 +216,8 @@ TEST_F(LocalFileUtilTest, TouchDirectory) {
 
   base::File::Info info;
   ASSERT_TRUE(base::GetFileInfo(LocalPath(dir_name), &info));
-  const base::Time new_accessed =
-      info.last_accessed + base::TimeDelta::FromHours(10);
-  const base::Time new_modified =
-      info.last_modified + base::TimeDelta::FromHours(5);
+  const base::Time new_accessed = info.last_accessed + base::Hours(10);
+  const base::Time new_modified = info.last_modified + base::Hours(5);
 
   EXPECT_EQ(base::File::FILE_OK,
             file_util()->Touch(context.get(), CreateURL(dir_name), new_accessed,
@@ -221,6 +227,7 @@ TEST_F(LocalFileUtilTest, TouchDirectory) {
   EXPECT_EQ(new_accessed, info.last_accessed);
   EXPECT_EQ(new_modified, info.last_modified);
 }
+#endif  // !BUILDFLAG(IS_FUCHSIA)
 
 TEST_F(LocalFileUtilTest, Truncate) {
   const char* file_name = "truncated";
@@ -230,7 +237,7 @@ TEST_F(LocalFileUtilTest, Truncate) {
 
   std::unique_ptr<FileSystemOperationContext> context;
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             file_util()->Truncate(context.get(), CreateURL(file_name), 1020));
 
@@ -247,7 +254,7 @@ TEST_F(LocalFileUtilTest, CopyFile) {
   ASSERT_TRUE(created);
 
   std::unique_ptr<FileSystemOperationContext> context;
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             file_util()->Truncate(context.get(), CreateURL(from_file), 1020));
 
@@ -259,7 +266,7 @@ TEST_F(LocalFileUtilTest, CopyFile) {
       AsyncFileTestHelper::Copy(file_system_context(), CreateURL(from_file),
                                 CreateURL(to_file1)));
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(
       base::File::FILE_OK,
       AsyncFileTestHelper::Copy(file_system_context(), CreateURL(from_file),
@@ -281,14 +288,14 @@ TEST_F(LocalFileUtilTest, CopyDirectory) {
   bool created;
   std::unique_ptr<FileSystemOperationContext> context;
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             file_util()->CreateDirectory(context.get(), CreateURL(from_dir),
                                          false, false));
   ASSERT_EQ(base::File::FILE_OK, EnsureFileExists(from_file, &created));
   ASSERT_TRUE(created);
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             file_util()->Truncate(context.get(), CreateURL(from_file), 1020));
 
@@ -297,7 +304,7 @@ TEST_F(LocalFileUtilTest, CopyDirectory) {
   EXPECT_EQ(1020, GetSize(from_file));
   EXPECT_FALSE(DirectoryExists(to_dir));
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             AsyncFileTestHelper::Copy(file_system_context(),
                                       CreateURL(from_dir), CreateURL(to_dir)));
@@ -318,14 +325,14 @@ TEST_F(LocalFileUtilTest, MoveFile) {
   ASSERT_TRUE(created);
   std::unique_ptr<FileSystemOperationContext> context;
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             file_util()->Truncate(context.get(), CreateURL(from_file), 1020));
 
   EXPECT_TRUE(FileExists(from_file));
   EXPECT_EQ(1020, GetSize(from_file));
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK, AsyncFileTestHelper::Move(
                                      file_system_context(),
                                      CreateURL(from_file), CreateURL(to_file)));
@@ -343,14 +350,14 @@ TEST_F(LocalFileUtilTest, MoveDirectory) {
   bool created;
   std::unique_ptr<FileSystemOperationContext> context;
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             file_util()->CreateDirectory(context.get(), CreateURL(from_dir),
                                          false, false));
   ASSERT_EQ(base::File::FILE_OK, EnsureFileExists(from_file, &created));
   ASSERT_TRUE(created);
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             file_util()->Truncate(context.get(), CreateURL(from_file), 1020));
 
@@ -359,7 +366,7 @@ TEST_F(LocalFileUtilTest, MoveDirectory) {
   EXPECT_EQ(1020, GetSize(from_file));
   EXPECT_FALSE(DirectoryExists(to_dir));
 
-  context.reset(NewContext());
+  context = NewContext();
   ASSERT_EQ(base::File::FILE_OK,
             AsyncFileTestHelper::Move(file_system_context(),
                                       CreateURL(from_dir), CreateURL(to_dir)));
@@ -369,5 +376,57 @@ TEST_F(LocalFileUtilTest, MoveDirectory) {
   EXPECT_TRUE(FileExists(to_file));
   EXPECT_EQ(1020, GetSize(to_file));
 }
+
+// Test that CreateFileEnumerator will propagate any underlying file system
+// error when walking a directory. An easy way to trigger a file system error,
+// on POSIX, is to chmod a freshly created directory so that its rwx (read
+// write execute) mode bits are all zero.
+//
+// There is an equivalent "remove permissions" mechanism on Windows, but it's
+// simpler if this test is only enabled when BUILDFLAG(IS_POSIX). The
+// LocalFileUtil code itself already uses the cross-platform abstractions in
+// Chromium's base namespace.
+#if BUILDFLAG(IS_POSIX)
+TEST_F(LocalFileUtilTest, FileEnumeratorError) {
+  const char* dir_name = "file_enumerator_error_dir";
+  FileSystemURL dir_url = CreateURL(dir_name);
+  std::string dir_path = LocalPath(dir_name).AsUTF8Unsafe();
+  const char* dir_str = dir_path.c_str();
+
+  std::unique_ptr<FileSystemOperationContext> context(NewContext());
+  ASSERT_EQ(base::File::FILE_OK,
+            file_util()->CreateDirectory(context.get(), dir_url,
+                                         false /* exclusive */,
+                                         false /* recursive */));
+
+  // Run "enumerate the dir_name directory" twice. The first run should succeed
+  // (FILE_OK). For the second run (i > 0), we chmod the directory's mode bits
+  // to 0 (not readable, writable or executable) before and restore after the
+  // enumeration, so that the enumeration itself (calling Next) should fail
+  // with FILE_ERROR_ACCESS_DENIED.
+  for (int i = 0; i < 2; i++) {
+    struct stat statbuf = {0};
+
+    if (i > 0) {
+      ASSERT_EQ(0, stat(dir_str, &statbuf));
+      ASSERT_EQ(0, chmod(dir_str, 0));
+    }
+
+    auto enumerator = file_util()->CreateFileEnumerator(context.get(), dir_url,
+                                                        false /* recursive */);
+    bool next_is_empty = enumerator->Next().empty();
+
+    if (i > 0) {
+      ASSERT_EQ(0, chmod(dir_str, statbuf.st_mode));
+    }
+
+    ASSERT_TRUE(next_is_empty);
+    base::File::Error error_have = enumerator->GetError();
+    base::File::Error error_want =
+        (i > 0) ? base::File::FILE_ERROR_ACCESS_DENIED : base::File::FILE_OK;
+    ASSERT_EQ(error_have, error_want);
+  }
+}
+#endif  // BUILDFLAG(IS_POSIX)
 
 }  // namespace storage

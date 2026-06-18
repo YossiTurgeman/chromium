@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include <tuple>
 #include <utility>
 
-#include "base/macros.h"
 #include "base/notreached.h"
 #include "mojo/public/cpp/bindings/interface_endpoint_client.h"
+#include "mojo/public/cpp/bindings/lib/message_fragment.h"
 #include "mojo/public/cpp/bindings/lib/serialization.h"
 #include "mojo/public/cpp/bindings/lib/validation_util.h"
 #include "mojo/public/cpp/bindings/message.h"
@@ -24,8 +26,10 @@ bool ValidateControlRequestWithResponse(Message* message) {
   ValidationContext validation_context(message->payload(),
                                        message->payload_num_bytes(), 0, 0,
                                        message, "ControlRequestValidator");
-  if (!ValidateMessageIsRequestExpectingResponse(message, &validation_context))
+  if (!ValidateMessageIsRequestExpectingResponse(message,
+                                                 &validation_context)) {
     return false;
+  }
 
   switch (message->header()->name) {
     case interface_control::kRunMessageId:
@@ -40,8 +44,9 @@ bool ValidateControlRequestWithoutResponse(Message* message) {
   ValidationContext validation_context(message->payload(),
                                        message->payload_num_bytes(), 0, 0,
                                        message, "ControlRequestValidator");
-  if (!ValidateMessageIsRequestWithoutResponse(message, &validation_context))
+  if (!ValidateMessageIsRequestWithoutResponse(message, &validation_context)) {
     return false;
+  }
 
   switch (message->header()->name) {
     case interface_control::kRunOrClosePipeMessageId:
@@ -66,31 +71,32 @@ ControlMessageHandler::ControlMessageHandler(InterfaceEndpointClient* owner,
                                              uint32_t interface_version)
     : owner_(owner), interface_version_(interface_version) {}
 
-ControlMessageHandler::~ControlMessageHandler() {
-}
+ControlMessageHandler::~ControlMessageHandler() {}
 
 bool ControlMessageHandler::Accept(Message* message) {
-  if (!ValidateControlRequestWithoutResponse(message))
+  if (!ValidateControlRequestWithoutResponse(message)) {
     return false;
+  }
 
-  if (message->header()->name == interface_control::kRunOrClosePipeMessageId)
+  if (message->header()->name == interface_control::kRunOrClosePipeMessageId) {
     return RunOrClosePipe(message);
+  }
 
   NOTREACHED();
-  return false;
 }
 
 bool ControlMessageHandler::AcceptWithResponder(
     Message* message,
     std::unique_ptr<MessageReceiverWithStatus> responder) {
-  if (!ValidateControlRequestWithResponse(message))
+  if (!ValidateControlRequestWithResponse(message)) {
     return false;
+  }
 
-  if (message->header()->name == interface_control::kRunMessageId)
+  if (message->header()->name == interface_control::kRunMessageId) {
     return Run(message, std::move(responder));
+  }
 
   NOTREACHED();
-  return false;
 }
 
 bool ControlMessageHandler::Run(
@@ -101,17 +107,13 @@ bool ControlMessageHandler::Run(
           message->mutable_payload());
   interface_control::RunMessageParamsPtr params_ptr;
   Deserialize<interface_control::RunMessageParamsDataView>(params, &params_ptr,
-                                                           &context_);
+                                                           message);
   auto& input = *params_ptr->input;
-  interface_control::RunOutputPtr output = interface_control::RunOutput::New();
+  interface_control::RunOutputPtr output;
   if (input.is_query_version()) {
-    output->set_query_version_result(
+    output = interface_control::RunOutput::NewQueryVersionResult(
         interface_control::QueryVersionResult::New());
     output->get_query_version_result()->version = interface_version_;
-  } else if (input.is_flush_for_testing()) {
-    output.reset();
-  } else {
-    output.reset();
   }
 
   auto response_params_ptr = interface_control::RunResponseMessageParams::New();
@@ -119,12 +121,11 @@ bool ControlMessageHandler::Run(
   Message response_message(interface_control::kRunMessageId,
                            Message::kFlagIsResponse, 0, 0, nullptr);
   response_message.set_request_id(message->request_id());
-  interface_control::internal::RunResponseMessageParams_Data::BufferWriter
-      response_writer;
+  MessageFragment<interface_control::internal::RunResponseMessageParams_Data>
+      response_fragment(response_message);
   Serialize<interface_control::RunResponseMessageParamsDataView>(
-      response_params_ptr, response_message.payload_buffer(), &response_writer,
-      &context_);
-  ignore_result(responder->Accept(&response_message));
+      response_params_ptr, response_fragment);
+  std::ignore = responder->Accept(&response_message);
   return true;
 }
 
@@ -135,18 +136,21 @@ bool ControlMessageHandler::RunOrClosePipe(Message* message) {
           message->mutable_payload());
   interface_control::RunOrClosePipeMessageParamsPtr params_ptr;
   Deserialize<interface_control::RunOrClosePipeMessageParamsDataView>(
-      params, &params_ptr, &context_);
+      params, &params_ptr, message);
   auto& input = *params_ptr->input;
-  if (input.is_require_version())
+  if (input.is_require_version()) {
     return interface_version_ >= input.get_require_version()->version;
+  }
   if (input.is_enable_idle_tracking()) {
-    return owner_->AcceptEnableIdleTracking(base::TimeDelta::FromMicroseconds(
+    return owner_->AcceptEnableIdleTracking(base::Microseconds(
         input.get_enable_idle_tracking()->timeout_in_microseconds));
   }
-  if (input.is_message_ack())
+  if (input.is_message_ack()) {
     return owner_->AcceptMessageAck();
-  if (input.is_notify_idle())
+  }
+  if (input.is_notify_idle()) {
     return owner_->AcceptNotifyIdle();
+  }
   return false;
 }
 

@@ -1,17 +1,16 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/omnibox/browser/omnibox_field_trial.h"
 
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "base/command_line.h"
 #include "base/metrics/field_trial.h"
 #include "base/metrics/field_trial_params.h"
-#include "base/strings/string16.h"
-#include "base/strings/stringprintf.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "components/history/core/browser/url_database.h"
@@ -33,7 +32,7 @@ class OmniboxFieldTrialTest : public testing::Test {
 
   void ResetFieldTrialList() {
     scoped_feature_list_.Reset();
-    variations::testing::ClearAllVariationParams();
+    variations::test::ClearAllVariationParams();
     scoped_feature_list_.Init();
   }
 
@@ -41,7 +40,7 @@ class OmniboxFieldTrialTest : public testing::Test {
       const base::Feature& feature,
       const base::FieldTrialParams& feature_parameters) {
     scoped_feature_list_.Reset();
-    variations::testing::ClearAllVariationParams();
+    variations::test::ClearAllVariationParams();
     scoped_feature_list_.InitAndEnableFeatureWithParameters(feature,
                                                             feature_parameters);
   }
@@ -51,22 +50,9 @@ class OmniboxFieldTrialTest : public testing::Test {
                                            const std::string& group_name) {
     base::FieldTrial* trial = base::FieldTrialList::CreateFieldTrial(
         name, group_name);
-    trial->group();
+    trial->Activate();
     return trial;
   }
-
-  // EXPECT()s that demotions[match_type] exists with value expected_value.
-  static void VerifyDemotion(
-      const OmniboxFieldTrial::DemotionMultipliers& demotions,
-      AutocompleteMatchType::Type match_type,
-      float expected_value);
-
-  // EXPECT()s that OmniboxFieldTrial::GetValueForRuleInContext(|rule|,
-  // |page_classification|) returns |rule_value|.
-  static void ExpectRuleValue(
-      const std::string& rule_value,
-      const std::string& rule,
-      OmniboxEventProto::PageClassification page_classification);
 
   // EXPECT()s that OmniboxFieldTrial::GetSuggestPollingStrategy returns
   // |expected_from_last_keystroke| and |expected_delay_ms| for the given
@@ -82,25 +68,6 @@ class OmniboxFieldTrialTest : public testing::Test {
  private:
   base::test::ScopedFeatureList scoped_feature_list_;
 };
-
-// static
-void OmniboxFieldTrialTest::VerifyDemotion(
-    const OmniboxFieldTrial::DemotionMultipliers& demotions,
-    AutocompleteMatchType::Type match_type,
-    float expected_value) {
-  auto demotion_it = demotions.find(match_type);
-  ASSERT_TRUE(demotion_it != demotions.end());
-  EXPECT_FLOAT_EQ(expected_value, demotion_it->second);
-}
-
-// static
-void OmniboxFieldTrialTest::ExpectRuleValue(
-    const std::string& rule_value,
-    const std::string& rule,
-    OmniboxEventProto::PageClassification page_classification) {
-  EXPECT_EQ(rule_value, OmniboxFieldTrial::internal::GetValueForRuleInContext(
-                            rule, page_classification));
-}
 
 void OmniboxFieldTrialTest::VerifySuggestPollingStrategy(
     const char* from_last_keystroke_rule_value,
@@ -119,7 +86,7 @@ void OmniboxFieldTrialTest::VerifySuggestPollingStrategy(
         OmniboxFieldTrial::kSuggestPollingDelayMsRule)] =
         polling_delay_ms_rule_value;
   }
-  ASSERT_TRUE(variations::AssociateVariationParams(
+  ASSERT_TRUE(base::AssociateFieldTrialParams(
       OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
   base::FieldTrialList::CreateFieldTrial(
       OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A");
@@ -140,7 +107,7 @@ TEST_F(OmniboxFieldTrialTest, GetDisabledProviderTypes) {
     SCOPED_TRACE("Valid field trial, missing param.");
     ResetFieldTrialList();
     std::map<std::string, std::string> params;
-    ASSERT_TRUE(variations::AssociateVariationParams(
+    ASSERT_TRUE(base::AssociateFieldTrialParams(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
     base::FieldTrialList::CreateFieldTrial(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A");
@@ -152,7 +119,7 @@ TEST_F(OmniboxFieldTrialTest, GetDisabledProviderTypes) {
     ResetFieldTrialList();
     std::map<std::string, std::string> params;
     params[std::string(OmniboxFieldTrial::kDisableProvidersRule)] = "";
-    ASSERT_TRUE(variations::AssociateVariationParams(
+    ASSERT_TRUE(base::AssociateFieldTrialParams(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
     base::FieldTrialList::CreateFieldTrial(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A");
@@ -164,7 +131,7 @@ TEST_F(OmniboxFieldTrialTest, GetDisabledProviderTypes) {
     ResetFieldTrialList();
     std::map<std::string, std::string> params;
     params[std::string(OmniboxFieldTrial::kDisableProvidersRule)] = "aaa";
-    ASSERT_TRUE(variations::AssociateVariationParams(
+    ASSERT_TRUE(base::AssociateFieldTrialParams(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
     base::FieldTrialList::CreateFieldTrial(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A");
@@ -176,7 +143,7 @@ TEST_F(OmniboxFieldTrialTest, GetDisabledProviderTypes) {
     ResetFieldTrialList();
     std::map<std::string, std::string> params;
     params[std::string(OmniboxFieldTrial::kDisableProvidersRule)] = "12321";
-    ASSERT_TRUE(variations::AssociateVariationParams(
+    ASSERT_TRUE(base::AssociateFieldTrialParams(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
     base::FieldTrialList::CreateFieldTrial(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A");
@@ -184,36 +151,9 @@ TEST_F(OmniboxFieldTrialTest, GetDisabledProviderTypes) {
   }
 }
 
-TEST_F(OmniboxFieldTrialTest, GetDemotionsByTypeWithFallback) {
-  {
-    std::map<std::string, std::string> params;
-    params[std::string(OmniboxFieldTrial::kDemoteByTypeRule) + ":1:*"] =
-        "1:50,2:0";
-    params[std::string(OmniboxFieldTrial::kDemoteByTypeRule) + ":3:*"] =
-        "5:100";
-    params[std::string(OmniboxFieldTrial::kDemoteByTypeRule) + ":*:*"] = "1:25";
-    ASSERT_TRUE(variations::AssociateVariationParams(
-        OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
-  }
-  base::FieldTrialList::CreateFieldTrial(
-      OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A");
-  OmniboxFieldTrial::DemotionMultipliers demotions_by_type;
-  OmniboxFieldTrial::GetDemotionsByType(
-      OmniboxEventProto::NTP, &demotions_by_type);
-  ASSERT_EQ(2u, demotions_by_type.size());
-  VerifyDemotion(demotions_by_type, AutocompleteMatchType::HISTORY_URL, 0.5);
-  VerifyDemotion(demotions_by_type, AutocompleteMatchType::HISTORY_TITLE, 0.0);
-  OmniboxFieldTrial::GetDemotionsByType(
-      OmniboxEventProto::HOME_PAGE, &demotions_by_type);
-  ASSERT_EQ(1u, demotions_by_type.size());
-  VerifyDemotion(demotions_by_type, AutocompleteMatchType::NAVSUGGEST, 1.0);
-  OmniboxFieldTrial::GetDemotionsByType(
-      OmniboxEventProto::BLANK, &demotions_by_type);
-  ASSERT_EQ(1u, demotions_by_type.size());
-  VerifyDemotion(demotions_by_type, AutocompleteMatchType::HISTORY_URL, 0.25);
-}
-
 TEST_F(OmniboxFieldTrialTest, GetProviderMaxMatches) {
+  OmniboxFieldTrial::ScopedMLConfigForTesting scoped_ml_config;
+  scoped_ml_config.GetMLConfig().ml_url_scoring = false;
   {
     ResetAndEnableFeatureWithParameters(
         omnibox::kUIExperimentMaxAutocompleteMatches,
@@ -247,173 +187,21 @@ TEST_F(OmniboxFieldTrialTest, GetProviderMaxMatches) {
     ASSERT_EQ(3ul, OmniboxFieldTrial::GetProviderMaxMatches(
                        AutocompleteProvider::Type::TYPE_HISTORY_QUICK));
   }
-}
-
-TEST_F(OmniboxFieldTrialTest, GetValueForRuleInContext) {
   {
-    std::map<std::string, std::string> params;
-    // Rule 1 has some exact matches and fallbacks at every level.
-    params["rule1:1:0"] = "rule1-1-0-value";  // NTP
-    params["rule1:3:0"] = "rule1-3-0-value";  // HOME_PAGE
-    params["rule1:4:1"] = "rule1-4-1-value";  // OTHER
-    params["rule1:4:*"] = "rule1-4-*-value";  // OTHER
-    params["rule1:*:1"] = "rule1-*-1-value";  // global
-    params["rule1:*:*"] = "rule1-*-*-value";  // global
-    // Rule 2 has no exact matches but has fallbacks.
-    params["rule2:*:0"] = "rule2-*-0-value";  // global
-    params["rule2:1:*"] = "rule2-1-*-value";  // NTP
-    params["rule2:*:*"] = "rule2-*-*-value";  // global
-    // Rule 3 has only a global fallback.
-    params["rule3:*:*"] = "rule3-*-*-value";  // global
-    // Rule 4 has an exact match but no fallbacks.
-    params["rule4:4:0"] = "rule4-4-0-value";  // OTHER
-    // Add a malformed rule to make sure it doesn't screw things up.
-    params["unrecognized"] = "unrecognized-value";
-    ASSERT_TRUE(variations::AssociateVariationParams(
-        OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
+    scoped_ml_config.GetMLConfig().ml_url_scoring = true;
+    scoped_ml_config.GetMLConfig().url_scoring_model = true;
+    scoped_ml_config.GetMLConfig().ml_url_scoring_max_matches_by_provider =
+        "1:10,4:10,8:10,64:10,65536:10";
+
+    ASSERT_EQ(10ul, OmniboxFieldTrial::GetProviderMaxMatches(
+                        AutocompleteProvider::Type::TYPE_BOOKMARK));
+    ASSERT_EQ(10ul, OmniboxFieldTrial::GetProviderMaxMatches(
+                        AutocompleteProvider::Type::TYPE_HISTORY_QUICK));
+    ASSERT_EQ(10ul, OmniboxFieldTrial::GetProviderMaxMatches(
+                        AutocompleteProvider::Type::TYPE_HISTORY_URL));
+    ASSERT_EQ(10ul, OmniboxFieldTrial::GetProviderMaxMatches(
+                        AutocompleteProvider::Type::TYPE_HISTORY_FUZZY));
   }
-
-  base::FieldTrialList::CreateFieldTrial(
-      OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A");
-
-  if (search::IsInstantExtendedAPIEnabled()) {
-    // Tests with Instant Extended enabled.
-    // Tests for rule 1.
-    ExpectRuleValue("rule1-4-1-value",
-                    "rule1", OmniboxEventProto::OTHER);    // exact match
-    ExpectRuleValue("rule1-*-1-value",
-                    "rule1", OmniboxEventProto::BLANK);    // partial fallback
-    ExpectRuleValue("rule1-*-1-value",
-                    "rule1",
-                    OmniboxEventProto::NTP);               // partial fallback
-
-    // Tests for rule 2.
-    ExpectRuleValue("rule2-1-*-value",
-                    "rule2",
-                    OmniboxEventProto::NTP);               // partial fallback
-    ExpectRuleValue("rule2-*-*-value",
-                    "rule2", OmniboxEventProto::OTHER);    // global fallback
-
-    // Tests for rule 3.
-    ExpectRuleValue("rule3-*-*-value",
-                    "rule3",
-                    OmniboxEventProto::HOME_PAGE);         // global fallback
-    ExpectRuleValue("rule3-*-*-value",
-                    "rule3",
-                    OmniboxEventProto::OTHER);             // global fallback
-
-    // Tests for rule 4.
-    ExpectRuleValue("",
-                    "rule4",
-                    OmniboxEventProto::BLANK);             // no global fallback
-    ExpectRuleValue("",
-                    "rule4",
-                    OmniboxEventProto::HOME_PAGE);         // no global fallback
-
-    // Tests for rule 5 (a missing rule).
-    ExpectRuleValue("",
-                    "rule5", OmniboxEventProto::OTHER);    // no rule at all
-  } else {
-    // Tests for rule 1.
-    ExpectRuleValue("rule1-1-0-value",
-                    "rule1", OmniboxEventProto::NTP);      // exact match
-    ExpectRuleValue("rule1-1-0-value",
-                    "rule1", OmniboxEventProto::NTP);      // exact match
-    ExpectRuleValue("rule1-*-*-value",
-                    "rule1", OmniboxEventProto::BLANK);    // fallback to global
-    ExpectRuleValue("rule1-3-0-value",
-                    "rule1",
-                    OmniboxEventProto::HOME_PAGE);         // exact match
-    ExpectRuleValue("rule1-4-*-value",
-                    "rule1", OmniboxEventProto::OTHER);    // partial fallback
-    // Tests for rule 2.
-    ExpectRuleValue("rule2-*-0-value",
-                    "rule2",
-                    OmniboxEventProto::HOME_PAGE);         // partial fallback
-    ExpectRuleValue("rule2-*-0-value",
-                    "rule2", OmniboxEventProto::OTHER);    // partial fallback
-
-    // Tests for rule 3.
-    ExpectRuleValue("rule3-*-*-value",
-                    "rule3",
-                    OmniboxEventProto::HOME_PAGE);         // fallback to global
-    ExpectRuleValue("rule3-*-*-value",
-                    "rule3", OmniboxEventProto::OTHER);    // fallback to global
-
-    // Tests for rule 4.
-    ExpectRuleValue("",
-                    "rule4", OmniboxEventProto::BLANK);    // no global fallback
-    ExpectRuleValue("",
-                    "rule4",
-                    OmniboxEventProto::HOME_PAGE);         // no global fallback
-    ExpectRuleValue("rule4-4-0-value",
-                    "rule4", OmniboxEventProto::OTHER);    // exact match
-
-    // Tests for rule 5 (a missing rule).
-    ExpectRuleValue("",
-                    "rule5", OmniboxEventProto::OTHER);    // no rule at all
-  }
-}
-
-TEST_F(OmniboxFieldTrialTest, LocalZeroSuggestAgeThreshold) {
-  base::test::ScopedFeatureList scoped_feature_list_;
-
-  // The default value can be overridden.
-  scoped_feature_list_.InitWithFeaturesAndParameters(
-      {{omnibox::kOmniboxLocalZeroSuggestAgeThreshold,
-        {{OmniboxFieldTrial::kOmniboxLocalZeroSuggestAgeThresholdParam, "7"}}}},
-      {});
-  base::Time age_threshold =
-      OmniboxFieldTrial::GetLocalHistoryZeroSuggestAgeThreshold();
-  EXPECT_EQ(7, base::TimeDelta(base::Time::Now() - age_threshold).InDays());
-
-  // If the age threshold is not parsable to an unsigned integer, the default
-  // value is used.
-  scoped_feature_list_.Reset();
-  scoped_feature_list_.InitWithFeaturesAndParameters(
-      {{omnibox::kOmniboxLocalZeroSuggestAgeThreshold,
-        {{OmniboxFieldTrial::kOmniboxLocalZeroSuggestAgeThresholdParam, "j"}}}},
-      {});
-  age_threshold = OmniboxFieldTrial::GetLocalHistoryZeroSuggestAgeThreshold();
-  EXPECT_EQ(history::kLowQualityMatchAgeLimitInDays,
-            base::TimeDelta(base::Time::Now() - age_threshold).InDays());
-
-  // If new search features are disabled, the default value is used.
-  scoped_feature_list_.Reset();
-  scoped_feature_list_.InitWithFeaturesAndParameters(
-      {{omnibox::kOmniboxLocalZeroSuggestAgeThreshold,
-        {{OmniboxFieldTrial::kOmniboxLocalZeroSuggestAgeThresholdParam, "7"}}}},
-      {omnibox::kNewSearchFeatures});
-  age_threshold = OmniboxFieldTrial::GetLocalHistoryZeroSuggestAgeThreshold();
-  EXPECT_EQ(history::kLowQualityMatchAgeLimitInDays,
-            base::TimeDelta(base::Time::Now() - age_threshold).InDays());
-}
-
-TEST_F(OmniboxFieldTrialTest, GetZeroSuggestVariantsCanUseMultipleFeatures) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitWithFeaturesAndParameters(
-      {
-          {omnibox::kOnFocusSuggestions,
-           // 7 is NTP omnibox.
-           {{"ZeroSuggestVariant:7:*", "omnibox1,omnibox2"}}},
-          {omnibox::kZeroSuggestionsOnNTPRealbox,
-           // 15 is NTP realbox.
-           {{"ZeroSuggestVariant:15:*", "realbox1, realbox2"}}},
-      },
-      {});
-
-  std::vector<std::string> omnibox_variants =
-      OmniboxFieldTrial::GetZeroSuggestVariants(
-          OmniboxEventProto::INSTANT_NTP_WITH_OMNIBOX_AS_STARTING_FOCUS);
-  ASSERT_EQ(2U, omnibox_variants.size());
-  EXPECT_EQ("omnibox1", omnibox_variants[0]);
-  EXPECT_EQ("omnibox2", omnibox_variants[1]);
-
-  std::vector<std::string> realbox_variants =
-      OmniboxFieldTrial::GetZeroSuggestVariants(OmniboxEventProto::NTP_REALBOX);
-  ASSERT_EQ(2U, realbox_variants.size());
-  EXPECT_EQ("realbox1", realbox_variants[0]);
-  EXPECT_EQ("realbox2", realbox_variants[1]);
 }
 
 TEST_F(OmniboxFieldTrialTest, HUPNewScoringFieldTrial) {
@@ -433,7 +221,7 @@ TEST_F(OmniboxFieldTrialTest, HUPNewScoringFieldTrial) {
     params[std::string(
         OmniboxFieldTrial::kHUPNewScoringVisitedCountScoreBucketsParam)] =
         "5:300,0:200";
-    ASSERT_TRUE(variations::AssociateVariationParams(
+    ASSERT_TRUE(base::AssociateFieldTrialParams(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
   }
   base::FieldTrialList::CreateFieldTrial(
@@ -467,7 +255,7 @@ TEST_F(OmniboxFieldTrialTest, HUPNewScoringFieldTrialWithDecayFactor) {
         "1";
     params[OmniboxFieldTrial::kHUPNewScoringTypedCountScoreBucketsParam] =
         "0.1:100,0.5:500,1.0:1000";
-    ASSERT_TRUE(variations::AssociateVariationParams(
+    ASSERT_TRUE(base::AssociateFieldTrialParams(
         OmniboxFieldTrial::kBundledExperimentFieldTrialName, "A", params));
   }
   base::FieldTrialList::CreateFieldTrial(
@@ -484,13 +272,13 @@ TEST_F(OmniboxFieldTrialTest, HalfLifeTimeDecay) {
   HUPScoringParams::ScoreBuckets buckets;
 
   // No decay by default.
-  EXPECT_EQ(1.0, buckets.HalfLifeTimeDecay(base::TimeDelta::FromDays(7)));
+  EXPECT_EQ(1.0, buckets.HalfLifeTimeDecay(base::Days(7)));
 
   buckets.set_half_life_days(7);
-  EXPECT_EQ(0.5, buckets.HalfLifeTimeDecay(base::TimeDelta::FromDays(7)));
-  EXPECT_EQ(0.25, buckets.HalfLifeTimeDecay(base::TimeDelta::FromDays(14)));
-  EXPECT_EQ(1.0, buckets.HalfLifeTimeDecay(base::TimeDelta::FromDays(0)));
-  EXPECT_EQ(1.0, buckets.HalfLifeTimeDecay(base::TimeDelta::FromDays(-1)));
+  EXPECT_EQ(0.5, buckets.HalfLifeTimeDecay(base::Days(7)));
+  EXPECT_EQ(0.25, buckets.HalfLifeTimeDecay(base::Days(14)));
+  EXPECT_EQ(1.0, buckets.HalfLifeTimeDecay(base::Days(0)));
+  EXPECT_EQ(1.0, buckets.HalfLifeTimeDecay(base::Days(-1)));
 }
 
 TEST_F(OmniboxFieldTrialTest, GetSuggestPollingStrategy) {

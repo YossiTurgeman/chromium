@@ -36,29 +36,28 @@
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 #include "third_party/blink/renderer/core/html/html_br_element.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/core/html/html_li_element.h"
+#include "third_party/blink/renderer/core/html/html_olist_element.h"
 #include "third_party/blink/renderer/core/html/html_quote_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
-#include "third_party/blink/renderer/core/layout/layout_list_item.h"
-#include "third_party/blink/renderer/core/layout/ng/list/layout_ng_list_item.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/core/layout/list/layout_list_item.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
 namespace {
 
-base::Optional<int> GetListItemNumber(const Node* node) {
+std::optional<int> GetListItemNumber(const Node* node) {
   if (!node)
-    return base::nullopt;
+    return std::nullopt;
   // Because of elements with "display:list-item" has list item number,
   // we use layout object instead of checking |HTMLLIElement|.
-  const LayoutObject* const layout_object = node->GetLayoutObject();
-  if (!layout_object)
-    return base::nullopt;
-  if (layout_object->IsLayoutNGListItem())
-    return ToLayoutNGListItem(layout_object)->Value();
-  if (layout_object->IsListItem())
-    return ToLayoutListItem(layout_object)->Value();
-  return base::nullopt;
+  if (const auto* list_item =
+          DynamicTo<LayoutListItem>(node->GetLayoutObject())) {
+    return list_item->Value();
+  }
+  return std::nullopt;
 }
 
 bool IsFirstVisiblePositionInNode(const VisiblePosition& visible_position,
@@ -155,9 +154,15 @@ void BreakBlockquoteCommand::DoApply(EditingState* editing_state) {
     if (editing_state->IsAborted())
       return;
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
+        SelectionInDomTree::Builder()
             .Collapse(Position::BeforeNode(*break_element))
             .Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder()
+              .Collapse(Position::BeforeNode(*break_element))
+              .Build()));
+    }
     RebalanceWhitespace();
     return;
   }
@@ -173,9 +178,15 @@ void BreakBlockquoteCommand::DoApply(EditingState* editing_state) {
   // need to break the quote.
   if (is_last_vis_pos_in_node) {
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
+        SelectionInDomTree::Builder()
             .Collapse(Position::BeforeNode(*break_element))
             .Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder()
+              .Collapse(Position::BeforeNode(*break_element))
+              .Build()));
+    }
     RebalanceWhitespace();
     return;
   }
@@ -217,9 +228,15 @@ void BreakBlockquoteCommand::DoApply(EditingState* editing_state) {
   // If there's nothing inside topBlockquote to move, we're finished.
   if (!start_node->IsDescendantOf(top_blockquote)) {
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
+        SelectionInDomTree::Builder()
             .Collapse(FirstPositionInOrBeforeNode(*start_node))
             .Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder()
+              .Collapse(FirstPositionInOrBeforeNode(*start_node))
+              .Build()));
+    }
     return;
   }
 
@@ -267,7 +284,7 @@ void BreakBlockquoteCommand::DoApply(EditingState* editing_state) {
   if (editing_state->IsAborted())
     return;
 
-  if (!ancestors.IsEmpty()) {
+  if (!ancestors.empty()) {
     // Split the tree up the ancestor chain until the topBlockquote
     // Throughout this loop, clonedParent is the clone of ancestor's parent.
     // This is so we can clone ancestor's siblings and place the clones
@@ -301,9 +318,15 @@ void BreakBlockquoteCommand::DoApply(EditingState* editing_state) {
 
   // Put the selection right before the break.
   SetEndingSelection(SelectionForUndoStep::From(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .Collapse(Position::BeforeNode(*break_element))
           .Build()));
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    SetEndingDomSelection(SelectionForUndoStep::From(
+        SelectionInDomTree::Builder()
+            .Collapse(Position::BeforeNode(*break_element))
+            .Build()));
+  }
   RebalanceWhitespace();
 }
 

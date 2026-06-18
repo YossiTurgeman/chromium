@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,14 +27,22 @@ void SetIsolatedWorldInfo(int32_t world_id, const WebIsolatedWorldInfo& info) {
       world_id, info.content_security_policy, security_origin);
 }
 
+bool IsEqualOrExceedEmbedderWorldIdLimit(int world_id) {
+  if (world_id >= IsolatedWorldId::kEmbedderWorldIdLimit)
+    return true;
+  return false;
+}
+
 WebString GetIsolatedWorldStableId(v8::Local<v8::Context> context) {
-  const DOMWrapperWorld& world = DOMWrapperWorld::World(context);
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  const DOMWrapperWorld& world = DOMWrapperWorld::World(isolate, context);
   DCHECK(!world.IsMainWorld());
   return world.NonMainWorldStableId();
 }
 
 WebString GetIsolatedWorldHumanReadableName(v8::Local<v8::Context> context) {
-  const DOMWrapperWorld& world = DOMWrapperWorld::World(context);
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  const DOMWrapperWorld& world = DOMWrapperWorld::World(isolate, context);
   DCHECK(!world.IsMainWorld());
   return world.NonMainWorldHumanReadableName();
 }

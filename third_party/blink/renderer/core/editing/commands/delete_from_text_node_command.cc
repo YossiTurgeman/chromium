@@ -28,6 +28,7 @@
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -47,7 +48,7 @@ void DeleteFromTextNodeCommand::DoApply(EditingState*) {
   DCHECK(node_);
 
   GetDocument().UpdateStyleAndLayoutTree();
-  if (!HasEditableStyle(*node_))
+  if (!IsEditable(*node_))
     return;
 
   DummyExceptionStateForTesting exception_state;
@@ -61,10 +62,15 @@ void DeleteFromTextNodeCommand::DoApply(EditingState*) {
 void DeleteFromTextNodeCommand::DoUnapply() {
   DCHECK(node_);
 
-  if (!HasEditableStyle(*node_))
+  if (!IsEditable(*node_))
     return;
 
   node_->insertData(offset_, text_, IGNORE_EXCEPTION_FOR_TESTING);
+}
+
+String DeleteFromTextNodeCommand::ToString() const {
+  return StrCat({"DeleteFromTextNodeCommand {offset:", String::Number(offset_),
+                 ", count:", String::Number(count_), "}"});
 }
 
 void DeleteFromTextNodeCommand::Trace(Visitor* visitor) const {

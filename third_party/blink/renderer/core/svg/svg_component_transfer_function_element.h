@@ -24,7 +24,7 @@
 #include "third_party/blink/renderer/core/svg/svg_animated_enumeration.h"
 #include "third_party/blink/renderer/core/svg/svg_element.h"
 #include "third_party/blink/renderer/platform/graphics/filters/fe_component_transfer.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -52,13 +52,17 @@ class SVGComponentTransferFunctionElement : public SVGElement {
  protected:
   SVGComponentTransferFunctionElement(const QualifiedName&, Document&);
 
-  void SvgAttributeChanged(const QualifiedName&) final;
+  void SvgAttributeChanged(const SvgAttributeChangedParams&) final;
 
-  bool LayoutObjectIsNeeded(const ComputedStyle& style) const final {
+  bool LayoutObjectIsNeeded(const DisplayStyle& style) const final {
     return false;
   }
 
  private:
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
+
   Member<SVGAnimatedNumberList> table_values_;
   Member<SVGAnimatedNumber> slope_;
   Member<SVGAnimatedNumber> intercept_;
@@ -66,6 +70,16 @@ class SVGComponentTransferFunctionElement : public SVGElement {
   Member<SVGAnimatedNumber> exponent_;
   Member<SVGAnimatedNumber> offset_;
   Member<SVGAnimatedEnumeration<ComponentTransferType>> type_;
+};
+
+template <>
+struct DowncastTraits<SVGComponentTransferFunctionElement> {
+  static bool AllowFrom(const SVGElement& svg_element) {
+    return svg_element.HasTagName(svg_names::kFEFuncATag) ||
+           svg_element.HasTagName(svg_names::kFEFuncBTag) ||
+           svg_element.HasTagName(svg_names::kFEFuncGTag) ||
+           svg_element.HasTagName(svg_names::kFEFuncRTag);
+  }
 };
 
 }  // namespace blink

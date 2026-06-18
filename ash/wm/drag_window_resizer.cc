@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,6 @@
 #include "ash/wm/window_positioning_utils.h"
 #include "ash/wm/window_state.h"
 #include "ash/wm/window_util.h"
-#include "base/memory/weak_ptr.h"
 #include "ui/aura/client/aura_constants.h"
 #include "ui/aura/env.h"
 #include "ui/aura/window.h"
@@ -20,6 +19,7 @@
 #include "ui/aura/window_event_dispatcher.h"
 #include "ui/base/hit_test.h"
 #include "ui/base/ui_base_types.h"
+#include "ui/compositor/layer.h"
 #include "ui/display/screen.h"
 #include "ui/gfx/geometry/point_conversions.h"
 #include "ui/wm/core/coordinate_conversion.h"
@@ -28,17 +28,6 @@
 #include "ui/wm/core/window_util.h"
 
 namespace ash {
-namespace {
-
-void RecursiveSchedulePainter(ui::Layer* layer) {
-  if (!layer)
-    return;
-  layer->SchedulePaint(gfx::Rect(layer->size()));
-  for (auto* child : layer->children())
-    RecursiveSchedulePainter(child);
-}
-
-}  // namespace
 
 // static
 DragWindowResizer* DragWindowResizer::instance_ = nullptr;
@@ -64,10 +53,11 @@ void DragWindowResizer::Drag(const gfx::PointF& location, int event_flags) {
 
   last_mouse_location_ = location;
   // Show a phantom window for dragging in another root window.
-  if (display::Screen::GetScreen()->GetNumDisplays() > 1)
+  if (display::Screen::Get()->GetNumDisplays() > 1) {
     UpdateDragWindow();
-  else
+  } else {
     drag_window_controller_.reset();
+  }
 }
 
 void DragWindowResizer::CompleteDrag() {
@@ -83,6 +73,10 @@ void DragWindowResizer::RevertDrag() {
 void DragWindowResizer::FlingOrSwipe(ui::GestureEvent* event) {
   EndDragImpl();
   next_window_resizer_->FlingOrSwipe(event);
+}
+
+void DragWindowResizer::Pinch(const gfx::PointF& location, float scale) {
+  next_window_resizer_->Pinch(location, scale);
 }
 
 DragWindowResizer::DragWindowResizer(
@@ -109,7 +103,8 @@ void DragWindowResizer::UpdateDragWindow() {
 
   if (!drag_window_controller_) {
     drag_window_controller_ = std::make_unique<DragWindowController>(
-        GetTarget(), details().source == wm::WINDOW_MOVE_SOURCE_TOUCH);
+        GetTarget(), details().source == wm::WINDOW_MOVE_SOURCE_TOUCH,
+        /*create_window_shadow=*/true);
   }
   drag_window_controller_->Update();
 }
@@ -123,10 +118,6 @@ bool DragWindowResizer::ShouldAllowMouseWarp() {
 void DragWindowResizer::EndDragImpl() {
   drag_window_controller_.reset();
 
-  // TODO(malaykeshav) - This is temporary fix/workaround that keeps performance
-  // but may not give the best UI while dragging. See https://crbug/834114
-  RecursiveSchedulePainter(GetTarget()->layer());
-
   // Check if the destination is another display.
   if (details().source == wm::WINDOW_MOVE_SOURCE_TOUCH)
     return;
@@ -136,14 +127,20 @@ void DragWindowResizer::EndDragImpl() {
   // TODO(oshima): Change the API so |GetDisplay| just returns a display id.
   const int64_t dst_display_id =
       Shell::Get()->cursor_manager()->GetDisplay().id();
-  display::Screen* screen = display::Screen::GetScreen();
+  display::Screen* screen = display::Screen::Get();
   if (dst_display_id == screen->GetDisplayNearestWindow(root_window).id())
     return;
 
   // Adjust the size and position so that it doesn't exceed the size of work
   // area.
   display::Display dst_display;
-  screen->GetDisplayWithDisplayId(dst_display_id, &dst_display);
+  // TODO(crbug.com/40721205): It's possible that |dst_display_id| returned from
+  // CursorManager::GetDisplay().id() is an invalid display id thus
+  // |dst_display| may be invalid as well. This may cause crash later. To avoid
+  // crash, we early return here. However, |dst_display_id| should never be
+  // invalid.
+  if (!screen->GetDisplayWithDisplayId(dst_display_id, &dst_display))
+    return;
   const gfx::Size& size = dst_display.work_area().size();
   gfx::Rect bounds = GetTarget()->bounds();
   if (bounds.width() > size.width()) {
@@ -168,8 +165,8 @@ void DragWindowResizer::EndDragImpl() {
     else if (last_mouse_location_in_screen.x() > dst_bounds.right())
       dst_bounds.set_x(last_mouse_location_in_screen.x() - dst_bounds.width());
   }
-  AdjustBoundsToEnsureMinimumWindowVisibility(dst_display.bounds(),
-                                              &dst_bounds);
+  AdjustBoundsToEnsureMinimumWindowVisibility(
+      dst_display.bounds(), /*client_controlled=*/false, &dst_bounds);
 
   GetTarget()->SetBoundsInScreen(dst_bounds, dst_display);
 }

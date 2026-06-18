@@ -1,18 +1,20 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/extensions/api/declarative_content/declarative_content_is_bookmarked_condition_tracker.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
-#include "base/stl_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
 #include "chrome/browser/bookmarks/bookmark_model_factory.h"
 #include "content/public/browser/web_contents.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/api/declarative/declarative_constants.h"
 #include "extensions/common/permissions/permissions_data.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -25,7 +27,7 @@ const char kIsBookmarkedRequiresBookmarkPermission[] =
 
 bool HasBookmarkAPIPermission(const Extension* extension) {
   return extension->permissions_data()->HasAPIPermission(
-      APIPermission::kBookmark);
+      mojom::APIPermissionID::kBookmark);
 }
 
 }  // namespace
@@ -35,8 +37,7 @@ bool HasBookmarkAPIPermission(const Extension* extension) {
 //
 
 DeclarativeContentIsBookmarkedPredicate::
-~DeclarativeContentIsBookmarkedPredicate() {
-}
+    ~DeclarativeContentIsBookmarkedPredicate() = default;
 
 bool DeclarativeContentIsBookmarkedPredicate::IsIgnored() const {
   return !HasBookmarkAPIPermission(extension_.get());
@@ -49,20 +50,19 @@ DeclarativeContentIsBookmarkedPredicate::Create(
     const Extension* extension,
     const base::Value& value,
     std::string* error) {
-  bool is_bookmarked = false;
-  if (value.GetAsBoolean(&is_bookmarked)) {
-    if (!HasBookmarkAPIPermission(extension)) {
-      *error = kIsBookmarkedRequiresBookmarkPermission;
-      return std::unique_ptr<DeclarativeContentIsBookmarkedPredicate>();
-    } else {
-      return base::WrapUnique(new DeclarativeContentIsBookmarkedPredicate(
-          evaluator, extension, is_bookmarked));
-    }
-  } else {
+  if (!value.is_bool()) {
     *error = base::StringPrintf(kIsBookmarkedInvalidTypeOfParameter,
                                 declarative_content_constants::kIsBookmarked);
-    return std::unique_ptr<DeclarativeContentIsBookmarkedPredicate>();
+    return nullptr;
   }
+
+  if (!HasBookmarkAPIPermission(extension)) {
+    *error = kIsBookmarkedRequiresBookmarkPermission;
+    return nullptr;
+  }
+
+  return base::WrapUnique(new DeclarativeContentIsBookmarkedPredicate(
+      evaluator, extension, value.GetBool() /* is_bookmarked */));
 }
 
 ContentPredicateEvaluator*
@@ -85,20 +85,18 @@ DeclarativeContentIsBookmarkedPredicate(
 //
 
 DeclarativeContentIsBookmarkedConditionTracker::PerWebContentsTracker::
-PerWebContentsTracker(
-    content::WebContents* contents,
-    const RequestEvaluationCallback& request_evaluation,
-    const WebContentsDestroyedCallback& web_contents_destroyed)
+    PerWebContentsTracker(content::WebContents* contents,
+                          RequestEvaluationCallback request_evaluation,
+                          WebContentsDestroyedCallback web_contents_destroyed)
     : WebContentsObserver(contents),
-      request_evaluation_(request_evaluation),
-      web_contents_destroyed_(web_contents_destroyed) {
+      request_evaluation_(std::move(request_evaluation)),
+      web_contents_destroyed_(std::move(web_contents_destroyed)) {
   is_url_bookmarked_ = IsCurrentUrlBookmarked();
   request_evaluation_.Run(web_contents());
 }
 
 DeclarativeContentIsBookmarkedConditionTracker::PerWebContentsTracker::
-~PerWebContentsTracker() {
-}
+    ~PerWebContentsTracker() = default;
 
 void DeclarativeContentIsBookmarkedConditionTracker::PerWebContentsTracker::
 BookmarkAddedForUrl(const GURL& url) {
@@ -110,7 +108,7 @@ BookmarkAddedForUrl(const GURL& url) {
 
 void DeclarativeContentIsBookmarkedConditionTracker::PerWebContentsTracker::
 BookmarkRemovedForUrls(const std::set<GURL>& urls) {
-  if (base::Contains(urls, web_contents()->GetVisibleURL())) {
+  if (urls.contains(web_contents()->GetVisibleURL())) {
     is_url_bookmarked_ = false;
     request_evaluation_.Run(web_contents());
   }
@@ -120,10 +118,12 @@ void DeclarativeContentIsBookmarkedConditionTracker::PerWebContentsTracker::
 UpdateState(bool request_evaluation_if_unchanged) {
   bool state_changed =
       IsCurrentUrlBookmarked() != is_url_bookmarked_;
-  if (state_changed)
+  if (state_changed) {
     is_url_bookmarked_ = !is_url_bookmarked_;
-  if (state_changed || request_evaluation_if_unchanged)
+  }
+  if (state_changed || request_evaluation_if_unchanged) {
     request_evaluation_.Run(web_contents());
+  }
 }
 
 bool DeclarativeContentIsBookmarkedConditionTracker::PerWebContentsTracker::
@@ -138,7 +138,7 @@ IsCurrentUrlBookmarked() {
 
 void DeclarativeContentIsBookmarkedConditionTracker::PerWebContentsTracker::
 WebContentsDestroyed() {
-  web_contents_destroyed_.Run(web_contents());
+  std::move(web_contents_destroyed_).Run(web_contents());
 }
 
 //
@@ -153,13 +153,13 @@ DeclarativeContentIsBookmarkedConditionTracker::
   bookmarks::BookmarkModel* bookmark_model =
       BookmarkModelFactory::GetForBrowserContext(context);
   // Can be null during unit test execution.
-  if (bookmark_model)
-    scoped_bookmarks_observer_.Add(bookmark_model);
+  if (bookmark_model) {
+    scoped_bookmarks_observation_.Observe(bookmark_model);
+  }
 }
 
 DeclarativeContentIsBookmarkedConditionTracker::
-~DeclarativeContentIsBookmarkedConditionTracker() {
-}
+    ~DeclarativeContentIsBookmarkedConditionTracker() = default;
 
 std::string DeclarativeContentIsBookmarkedConditionTracker::
 GetPredicateApiAttributeName() const {
@@ -190,18 +190,23 @@ void DeclarativeContentIsBookmarkedConditionTracker::TrackForWebContents(
     content::WebContents* contents) {
   per_web_contents_tracker_[contents] = std::make_unique<PerWebContentsTracker>(
       contents,
-      base::Bind(&Delegate::RequestEvaluation, base::Unretained(delegate_)),
-      base::Bind(&DeclarativeContentIsBookmarkedConditionTracker::
-                     DeletePerWebContentsTracker,
-                 base::Unretained(this)));
+      base::BindRepeating(&Delegate::NotifyPredicateStateUpdated,
+                          base::Unretained(delegate_)),
+      base::BindOnce(&DeclarativeContentIsBookmarkedConditionTracker::
+                         DeletePerWebContentsTracker,
+                     base::Unretained(this)));
 }
 
 void DeclarativeContentIsBookmarkedConditionTracker::OnWebContentsNavigation(
     content::WebContents* contents,
     content::NavigationHandle* navigation_handle) {
-  DCHECK(base::Contains(per_web_contents_tracker_, contents));
+  DCHECK(per_web_contents_tracker_.contains(contents));
   per_web_contents_tracker_[contents]->UpdateState(true);
 }
+
+void DeclarativeContentIsBookmarkedConditionTracker::OnWatchedPageChanged(
+    content::WebContents* contents,
+    const std::vector<std::string>& css_selectors) {}
 
 bool DeclarativeContentIsBookmarkedConditionTracker::EvaluatePredicate(
     const ContentPredicate* predicate,
@@ -210,16 +215,16 @@ bool DeclarativeContentIsBookmarkedConditionTracker::EvaluatePredicate(
   const DeclarativeContentIsBookmarkedPredicate* typed_predicate =
       static_cast<const DeclarativeContentIsBookmarkedPredicate*>(predicate);
   auto loc = per_web_contents_tracker_.find(tab);
-  DCHECK(loc != per_web_contents_tracker_.end());
+  CHECK(loc != per_web_contents_tracker_.end());
   return loc->second->is_url_bookmarked() == typed_predicate->is_bookmarked();
 }
 
 void DeclarativeContentIsBookmarkedConditionTracker::BookmarkModelChanged() {}
 
 void DeclarativeContentIsBookmarkedConditionTracker::BookmarkNodeAdded(
-    bookmarks::BookmarkModel* model,
     const bookmarks::BookmarkNode* parent,
-    size_t index) {
+    size_t index,
+    bool added_by_user) {
   if (!extensive_bookmark_changes_in_progress_) {
     for (const auto& web_contents_tracker_pair : per_web_contents_tracker_) {
       web_contents_tracker_pair.second->BookmarkAddedForUrl(
@@ -229,11 +234,11 @@ void DeclarativeContentIsBookmarkedConditionTracker::BookmarkNodeAdded(
 }
 
 void DeclarativeContentIsBookmarkedConditionTracker::BookmarkNodeRemoved(
-    bookmarks::BookmarkModel* model,
     const bookmarks::BookmarkNode* parent,
     size_t old_index,
     const bookmarks::BookmarkNode* node,
-    const std::set<GURL>& no_longer_bookmarked) {
+    const std::set<GURL>& no_longer_bookmarked,
+    const base::Location& location) {
   if (!extensive_bookmark_changes_in_progress_) {
     for (const auto& web_contents_tracker_pair : per_web_contents_tracker_) {
       web_contents_tracker_pair.second->BookmarkRemovedForUrls(
@@ -243,42 +248,41 @@ void DeclarativeContentIsBookmarkedConditionTracker::BookmarkNodeRemoved(
 }
 
 void DeclarativeContentIsBookmarkedConditionTracker::
-ExtensiveBookmarkChangesBeginning(
-    bookmarks::BookmarkModel* model) {
+    ExtensiveBookmarkChangesBeginning() {
   ++extensive_bookmark_changes_in_progress_;
 }
 
-void
-DeclarativeContentIsBookmarkedConditionTracker::ExtensiveBookmarkChangesEnded(
-    bookmarks::BookmarkModel* model) {
-  if (--extensive_bookmark_changes_in_progress_ == 0)
+void DeclarativeContentIsBookmarkedConditionTracker::
+    ExtensiveBookmarkChangesEnded() {
+  if (--extensive_bookmark_changes_in_progress_ == 0) {
     UpdateAllPerWebContentsTrackers();
+  }
 }
 
-void
-DeclarativeContentIsBookmarkedConditionTracker::GroupedBookmarkChangesBeginning(
-    bookmarks::BookmarkModel* model) {
+void DeclarativeContentIsBookmarkedConditionTracker::
+    GroupedBookmarkChangesBeginning() {
   ++extensive_bookmark_changes_in_progress_;
 }
 
-void
-DeclarativeContentIsBookmarkedConditionTracker::GroupedBookmarkChangesEnded(
-    bookmarks::BookmarkModel* model) {
-  if (--extensive_bookmark_changes_in_progress_ == 0)
+void DeclarativeContentIsBookmarkedConditionTracker::
+    GroupedBookmarkChangesEnded() {
+  if (--extensive_bookmark_changes_in_progress_ == 0) {
     UpdateAllPerWebContentsTrackers();
+  }
 }
 
 void
 DeclarativeContentIsBookmarkedConditionTracker::DeletePerWebContentsTracker(
     content::WebContents* contents) {
-  DCHECK(base::Contains(per_web_contents_tracker_, contents));
+  DCHECK(per_web_contents_tracker_.contains(contents));
   per_web_contents_tracker_.erase(contents);
 }
 
 void DeclarativeContentIsBookmarkedConditionTracker::
 UpdateAllPerWebContentsTrackers() {
-  for (const auto& web_contents_tracker_pair : per_web_contents_tracker_)
+  for (const auto& web_contents_tracker_pair : per_web_contents_tracker_) {
     web_contents_tracker_pair.second->UpdateState(false);
+  }
 }
 
 }  // namespace extensions

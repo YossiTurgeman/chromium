@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,10 @@
 #include <string>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/observer_list.h"
-#include "base/strings/string16.h"
 #include "base/strings/string_util.h"
 #include "services/device/usb/usb_descriptors.h"
 #include "url/gurl.h"
@@ -47,6 +46,9 @@ class UsbDevice : public base::RefCountedThreadSafe<UsbDevice> {
     virtual void OnDeviceRemoved(scoped_refptr<UsbDevice> device);
   };
 
+  UsbDevice(const UsbDevice&) = delete;
+  UsbDevice& operator=(const UsbDevice&) = delete;
+
   const mojom::UsbDeviceInfo& device_info() const { return *device_info_; }
 
   // A unique identifier which remains stable for the lifetime of this device
@@ -65,19 +67,19 @@ class UsbDevice : public base::RefCountedThreadSafe<UsbDevice> {
   uint16_t usb_version() const;
   uint16_t device_version() const;
 
-  const base::string16& manufacturer_string() const {
+  const std::u16string& manufacturer_string() const {
     if (device_info_->manufacturer_name)
       return *device_info_->manufacturer_name;
 
     return base::EmptyString16();
   }
-  const base::string16& product_string() const {
+  const std::u16string& product_string() const {
     if (device_info_->product_name)
       return *device_info_->product_name;
 
     return base::EmptyString16();
   }
-  const base::string16& serial_number() const {
+  const std::u16string& serial_number() const {
     if (device_info_->serial_number)
       return *device_info_->serial_number;
 
@@ -94,6 +96,11 @@ class UsbDevice : public base::RefCountedThreadSafe<UsbDevice> {
     return device_info_->configurations;
   }
   const mojom::UsbConfigurationInfo* GetActiveConfiguration() const;
+
+  bool state_change_in_progress() const { return state_change_in_progress_; }
+  void set_state_change_in_progress(bool in_progress) {
+    state_change_in_progress_ = in_progress;
+  }
 
   // On ChromeOS the permission_broker service must be used to open USB devices.
   // This function asks it to check whether a future Open call will be allowed.
@@ -125,9 +132,9 @@ class UsbDevice : public base::RefCountedThreadSafe<UsbDevice> {
             uint16_t vendor_id,
             uint16_t product_id,
             uint16_t device_version,
-            const base::string16& manufacturer_string,
-            const base::string16& product_string,
-            const base::string16& serial_number,
+            const std::u16string& manufacturer_string,
+            const std::u16string& product_string,
+            const std::u16string& serial_number,
             uint32_t bus_number,
             uint32_t port_number);
   virtual ~UsbDevice();
@@ -135,7 +142,9 @@ class UsbDevice : public base::RefCountedThreadSafe<UsbDevice> {
   void ActiveConfigurationChanged(int configuration_value);
   void NotifyDeviceRemoved();
 
-  std::list<UsbDeviceHandle*>& handles() { return handles_; }
+  std::list<raw_ptr<UsbDeviceHandle, CtnExperimental>>& handles() {
+    return handles_;
+  }
 
   // This member must be mutable by subclasses as necessary during device
   // enumeration. To preserve the thread safety of this object they must remain
@@ -147,6 +156,7 @@ class UsbDevice : public base::RefCountedThreadSafe<UsbDevice> {
   friend class UsbDeviceHandleImpl;
   friend class UsbDeviceHandleMac;
   friend class UsbDeviceHandleUsbfs;
+  friend class UsbDeviceHandleUsbfsTest;
   friend class UsbDeviceHandleWin;
   friend class UsbServiceAndroid;
   friend class UsbServiceImpl;
@@ -159,11 +169,11 @@ class UsbDevice : public base::RefCountedThreadSafe<UsbDevice> {
 
   // Weak pointers to open handles. HandleClosed() will be called before each
   // is freed.
-  std::list<UsbDeviceHandle*> handles_;
+  std::list<raw_ptr<UsbDeviceHandle, CtnExperimental>> handles_;
 
   base::ObserverList<Observer, true>::Unchecked observer_list_;
 
-  DISALLOW_COPY_AND_ASSIGN(UsbDevice);
+  bool state_change_in_progress_ = false;
 };
 
 }  // namespace device

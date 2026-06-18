@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,13 @@ import androidx.annotation.Nullable;
 
 import org.chromium.base.Log;
 import org.chromium.base.task.PostTask;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
+import org.chromium.base.task.TaskTraits;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Mocked {@link MediaRouteProvider}.
- */
+/** Mocked {@link MediaRouteProvider}. */
 public class MockMediaRouteProvider implements MediaRouteProvider {
     private static final String TAG = "MediaRouter";
 
@@ -27,9 +25,8 @@ public class MockMediaRouteProvider implements MediaRouteProvider {
 
     private MediaRouteManager mManager;
 
-    private final Map<String, MediaRoute> mRoutes = new HashMap<String, MediaRoute>();
-    private final Map<String, MediaRoute> mPresentationIdToRoute =
-            new HashMap<String, MediaRoute>();
+    private final Map<String, MediaRoute> mRoutes = new HashMap<>();
+    private final Map<String, MediaRoute> mPresentationIdToRoute = new HashMap<>();
 
     private int mSinksObservedDelayMillis;
     private int mCreateRouteDelayMillis;
@@ -38,9 +35,7 @@ public class MockMediaRouteProvider implements MediaRouteProvider {
     private String mJoinRouteErrorMessage;
     private boolean mCloseRouteWithErrorOnSend;
 
-    /**
-     * Factory for {@link MockMediaRouteProvider}.
-     */
+    /** Factory for {@link MockMediaRouteProvider}. */
     public static class Factory implements MediaRouteProvider.Factory {
         public static final MockMediaRouteProvider sProvider = new MockMediaRouteProvider();
 
@@ -85,13 +80,13 @@ public class MockMediaRouteProvider implements MediaRouteProvider {
     }
 
     @Override
-    public void startObservingMediaSinks(final String sourceId) {
-        final ArrayList<MediaSink> sinks = new ArrayList<MediaSink>();
+    public void startObservingMediaSinks(final String sourceId, String origin) {
+        final ArrayList<MediaSink> sinks = new ArrayList<>();
         sinks.add(new MediaSink(SINK_ID1, SINK_NAME1, null));
         sinks.add(new MediaSink(SINK_ID2, SINK_NAME2, null));
-        PostTask.postDelayedTask(UiThreadTaskTraits.DEFAULT,
-                ()
-                        -> mManager.onSinksReceived(sourceId, MockMediaRouteProvider.this, sinks),
+        PostTask.postDelayedTask(
+                TaskTraits.UI_DEFAULT,
+                () -> mManager.onSinksReceived(sourceId, MockMediaRouteProvider.this, sinks),
                 mSinksObservedDelayMillis);
     }
 
@@ -99,27 +94,43 @@ public class MockMediaRouteProvider implements MediaRouteProvider {
     public void stopObservingMediaSinks(String sourceId) {}
 
     @Override
-    public void createRoute(final String sourceId, final String sinkId, final String presentationId,
-            final String origin, final int tabId, final boolean isIncognito,
+    public void createRoute(
+            final String sourceId,
+            final String sinkId,
+            final String presentationId,
+            final String origin,
+            final int tabId,
+            final boolean isIncognito,
             final int nativeRequestId) {
         if (mCreateRouteErrorMessage != null) {
-            mManager.onRouteRequestError(mCreateRouteErrorMessage, nativeRequestId);
+            mManager.onCreateRouteRequestError(mCreateRouteErrorMessage, nativeRequestId);
             return;
         }
 
         if (mCreateRouteDelayMillis == 0) {
             doCreateRoute(sourceId, sinkId, presentationId, origin, tabId, nativeRequestId);
         } else {
-            PostTask.postDelayedTask(UiThreadTaskTraits.DEFAULT,
-                    ()
-                            -> doCreateRoute(sourceId, sinkId, presentationId, origin, tabId,
+            PostTask.postDelayedTask(
+                    TaskTraits.UI_DEFAULT,
+                    () ->
+                            doCreateRoute(
+                                    sourceId,
+                                    sinkId,
+                                    presentationId,
+                                    origin,
+                                    tabId,
                                     nativeRequestId),
                     mCreateRouteDelayMillis);
         }
     }
 
-    private void doCreateRoute(String sourceId, String sinkId, String presentationId, String origin,
-            int tabId, int nativeRequestId) {
+    private void doCreateRoute(
+            String sourceId,
+            String sinkId,
+            String presentationId,
+            String origin,
+            int tabId,
+            int nativeRequestId) {
         MediaRoute route = new MediaRoute(sinkId, sourceId, presentationId);
         mRoutes.put(route.id, route);
         mPresentationIdToRoute.put(presentationId, route);
@@ -130,12 +141,12 @@ public class MockMediaRouteProvider implements MediaRouteProvider {
     public void joinRoute(
             String sourceId, String presentationId, String origin, int tabId, int nativeRequestId) {
         if (mJoinRouteErrorMessage != null) {
-            mManager.onRouteRequestError(mJoinRouteErrorMessage, nativeRequestId);
+            mManager.onJoinRouteRequestError(mJoinRouteErrorMessage, nativeRequestId);
             return;
         }
         MediaRoute existingRoute = mPresentationIdToRoute.get(presentationId);
         if (existingRoute == null) {
-            mManager.onRouteRequestError("Presentation does not exist", nativeRequestId);
+            mManager.onJoinRouteRequestError("Presentation does not exist", nativeRequestId);
             return;
         }
         mManager.onRouteCreated(
@@ -150,7 +161,7 @@ public class MockMediaRouteProvider implements MediaRouteProvider {
             return;
         }
         mRoutes.remove(routeId);
-        Map<String, MediaRoute> newPresentationIdToRoute = new HashMap<String, MediaRoute>();
+        Map<String, MediaRoute> newPresentationIdToRoute = new HashMap<>();
         for (Map.Entry<String, MediaRoute> entry : mPresentationIdToRoute.entrySet()) {
             if (!entry.getValue().id.equals(routeId)) {
                 newPresentationIdToRoute.put(entry.getKey(), entry.getValue());

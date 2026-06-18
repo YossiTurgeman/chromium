@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,12 +15,14 @@ namespace base {
 template <typename String>
 void MeasureIsStringASCII(size_t str_length, size_t non_ascii_pos) {
   String str(str_length, 'A');
-  if (non_ascii_pos < str_length)
+  if (non_ascii_pos < str_length) {
     str[non_ascii_pos] = '\xAF';
+  }
 
   TimeTicks t0 = TimeTicks::Now();
-  for (size_t i = 0; i < 10000000; ++i)
+  for (size_t i = 0; i < 10000000; ++i) {
     IsStringASCII(str);
+  }
   TimeDelta time = TimeTicks::Now() - t0;
   printf(
       "char-size:\t%zu\tlength:\t%zu\tnon-ascii-pos:\t%zu\ttime-ms:\t%" PRIu64
@@ -34,8 +36,8 @@ TEST(StringUtilTest, DISABLED_IsStringASCIIPerf) {
     for (size_t non_ascii_loc = 0; non_ascii_loc < 3; ++non_ascii_loc) {
       size_t non_ascii_pos = str_length * non_ascii_loc / 2 + 2;
       MeasureIsStringASCII<std::string>(str_length, non_ascii_pos);
-      MeasureIsStringASCII<string16>(str_length, non_ascii_pos);
-#if defined(WCHAR_T_IS_UTF32)
+      MeasureIsStringASCII<std::u16string>(str_length, non_ascii_pos);
+#if defined(WCHAR_T_IS_32_BIT)
       MeasureIsStringASCII<std::basic_string<wchar_t>>(str_length,
                                                        non_ascii_pos);
 #endif

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,11 @@
 
 #include "base/at_exit.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/message_loop/message_pump_type.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/task/single_thread_task_executor.h"
 #include "components/exo/wayland/clients/client_base.h"
 #include "components/exo/wayland/clients/client_helper.h"
@@ -29,7 +32,7 @@ void FrameCallback(void* data, wl_callback* callback, uint32_t time) {
 
 class YuvClient : public ClientBase {
  public:
-  YuvClient() {}
+  YuvClient() = default;
 
   bool WriteSolidColor(gbm_bo* bo, SkColor color);
 
@@ -41,21 +44,29 @@ bool YuvClient::WriteSolidColor(gbm_bo* bo, SkColor color) {
     base::ScopedFD fd(gbm_bo_get_plane_fd(bo, i));
     uint32_t stride = gbm_bo_get_stride_for_plane(bo, i);
     uint32_t offset = gbm_bo_get_offset(bo, i);
-    uint32_t map_size = gbm_bo_get_plane_size(bo, i) + offset;
+    uint32_t plane_size = gbm_bo_get_plane_size(bo, i);
+    uint32_t map_size = plane_size + offset;
     void* void_data = mmap(nullptr, map_size, (PROT_READ | PROT_WRITE),
                            MAP_SHARED, fd.get(), 0);
     if (void_data == MAP_FAILED) {
       LOG(ERROR) << "Failed mmap().";
       return false;
     }
-    uint8_t* data = static_cast<uint8_t*>(void_data) + offset;
+    // SAFETY: void_data points to a mapped region of map_size bytes.
+    // data points to void_data + offset, which is within the mapped region.
+    // The size of the valid region starting at data is plane_size.
+    auto data = UNSAFE_BUFFERS(
+        base::span(static_cast<uint8_t*>(void_data) + offset, plane_size));
     uint8_t yuv[] = {
-        (0.257 * SkColorGetR(color)) + (0.504 * SkColorGetG(color)) +
-            (0.098 * SkColorGetB(color)) + 16,
-        -(0.148 * SkColorGetR(color)) - (0.291 * SkColorGetG(color)) +
-            (0.439 * SkColorGetB(color)) + 128,
-        (0.439 * SkColorGetR(color)) - (0.368 * SkColorGetG(color)) -
-            (0.071 * SkColorGetB(color)) + 128};
+        base::ClampRound<uint8_t>((0.257 * SkColorGetR(color)) +
+                                  (0.504 * SkColorGetG(color)) +
+                                  (0.098 * SkColorGetB(color)) + 16),
+        base::ClampRound<uint8_t>(-(0.148 * SkColorGetR(color)) -
+                                  (0.291 * SkColorGetG(color)) +
+                                  (0.439 * SkColorGetB(color)) + 128),
+        base::ClampRound<uint8_t>((0.439 * SkColorGetR(color)) -
+                                  (0.368 * SkColorGetG(color)) -
+                                  (0.071 * SkColorGetB(color)) + 128)};
     if (i == 0) {
       for (int y = 0; y < size_.height(); ++y) {
         for (int x = 0; x < size_.width(); ++x) {
@@ -99,9 +110,11 @@ void YuvClient::Run(const ClientBase::InitParams& params) {
     }
     const SkColor kColors[] = {SK_ColorBLUE,   SK_ColorGREEN, SK_ColorRED,
                                SK_ColorYELLOW, SK_ColorCYAN,  SK_ColorMAGENTA};
-    if (!WriteSolidColor(buffer->bo.get(),
-                         kColors[frame_number % buffers_.size()]))
+    if (!WriteSolidColor(
+            buffer->bo.get(),
+            UNSAFE_TODO(kColors[frame_number % buffers_.size()]))) {
       return;
+    }
 
     wl_surface_set_buffer_scale(surface_.get(), scale_);
     wl_surface_set_buffer_transform(surface_.get(), transform_);

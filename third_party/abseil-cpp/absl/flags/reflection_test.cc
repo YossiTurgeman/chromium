@@ -20,10 +20,8 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/flags/declare.h"
+#include "absl/flags/config.h"
 #include "absl/flags/flag.h"
-#include "absl/flags/internal/commandlineflag.h"
-#include "absl/flags/marshalling.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
@@ -32,15 +30,16 @@ ABSL_FLAG(int, int_flag, 1, "int_flag help");
 ABSL_FLAG(std::string, string_flag, "dflt", "string_flag help");
 ABSL_RETIRED_FLAG(bool, bool_retired_flag, false, "bool_retired_flag help");
 
-ABSL_DECLARE_FLAG(bool, help);
-
 namespace {
-
-namespace flags = absl::flags_internal;
 
 class ReflectionTest : public testing::Test {
  protected:
-  void SetUp() override { flag_saver_ = absl::make_unique<absl::FlagSaver>(); }
+  void SetUp() override {
+#if ABSL_FLAGS_STRIP_NAMES
+    GTEST_SKIP() << "This test requires flag names to be present";
+#endif
+    flag_saver_ = std::make_unique<absl::FlagSaver>();
+  }
   void TearDown() override { flag_saver_.reset(); }
 
  private:
@@ -66,12 +65,9 @@ TEST_F(ReflectionTest, TestFindCommandLineFlag) {
 // --------------------------------------------------------------------
 
 TEST_F(ReflectionTest, TestGetAllFlags) {
-  (void)absl::GetFlag(FLAGS_help);  // Force linking of usage flags.
-
   auto all_flags = absl::GetAllFlags();
   EXPECT_NE(all_flags.find("int_flag"), all_flags.end());
-  EXPECT_NE(all_flags.find("bool_retired_flag"), all_flags.end());
-  EXPECT_NE(all_flags.find("help"), all_flags.end());
+  EXPECT_EQ(all_flags.find("bool_retired_flag"), all_flags.end());
   EXPECT_EQ(all_flags.find("some_undefined_flag"), all_flags.end());
 
   std::vector<absl::string_view> flag_names_first_attempt;

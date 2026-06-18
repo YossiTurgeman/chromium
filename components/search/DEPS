@@ -1,5 +1,8 @@
 include_rules = [
-  "+components/google/core",
+  "+components/keyed_service/core",
+  "+components/omnibox/browser",
   "+components/search_engines",
-  "+components/variations",
+  "+net",
+  "+services/network/public",
+  "+services/network/test",
 ]

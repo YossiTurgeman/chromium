@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,15 @@
 
 namespace gpu {
 struct GpuPreferences;
+class GpuDriverBugWorkarounds;
 }
 
 namespace mojo {
 class BinderMap;
+}
+
+namespace viz {
+class GpuServiceImpl;
 }
 
 namespace content {
@@ -22,8 +27,11 @@ namespace content {
 // Embedder-specific GPU interfaces can be exposed to the browser via
 // |ContentGpuClient::ExposeInterfacesToBrowser()| or embedder-specific helper
 // functions.
-void ExposeGpuInterfacesToBrowser(const gpu::GpuPreferences& gpu_preferences,
-                                  mojo::BinderMap* binders);
+void ExposeGpuInterfacesToBrowser(
+    viz::GpuServiceImpl* gpu_service,
+    const gpu::GpuPreferences& gpu_preferences,
+    const gpu::GpuDriverBugWorkarounds& gpu_workarounds,
+    mojo::BinderMap* binders);
 
 }  // namespace content
 

@@ -1,17 +1,18 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_PUBLIC_TEST_FAKE_DOWNLOAD_ITEM_H_
 #define CONTENT_PUBLIC_TEST_FAKE_DOWNLOAD_ITEM_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/callback_forward.h"
 #include "base/files/file_path.h"
+#include "base/functional/callback_forward.h"
 #include "base/observer_list.h"
-#include "base/optional.h"
+#include "base/time/time.h"
 #include "components/download/public/common/download_danger_type.h"
 #include "components/download/public/common/download_interrupt_reasons.h"
 #include "components/download/public/common/download_item.h"
@@ -25,6 +26,10 @@ namespace content {
 class FakeDownloadItem : public download::DownloadItem {
  public:
   FakeDownloadItem();
+
+  FakeDownloadItem(const FakeDownloadItem&) = delete;
+  FakeDownloadItem& operator=(const FakeDownloadItem&) = delete;
+
   ~FakeDownloadItem() override;
 
   // download::DownloadItem overrides.
@@ -57,22 +62,23 @@ class FakeDownloadItem : public download::DownloadItem {
   bool IsTransient() const override;
   bool IsParallelDownload() const override;
   DownloadCreationType GetDownloadCreationType() const override;
-  const base::Optional<download::DownloadSchedule>& GetDownloadSchedule()
-      const override;
+  ::network::mojom::CredentialsMode GetCredentialsMode() const override;
+  const std::optional<net::IsolationInfo>& GetIsolationInfo() const override;
   bool IsDone() const override;
   const std::string& GetETag() const override;
   const std::string& GetLastModifiedTime() const override;
   bool IsPaused() const override;
   bool AllowMetered() const override;
   bool IsTemporary() const override;
+  bool RequireSafetyChecks() const override;
   bool CanResume() const override;
   int64_t GetBytesWasted() const override;
   int32_t GetAutoResumeCount() const override;
   const GURL& GetReferrerUrl() const override;
-  const GURL& GetSiteUrl() const override;
+  const std::string& GetSerializedEmbedderDownloadData() const override;
   const GURL& GetTabUrl() const override;
   const GURL& GetTabReferrerUrl() const override;
-  const base::Optional<url::Origin>& GetRequestInitiator() const override;
+  const std::optional<url::Origin>& GetRequestInitiator() const override;
   std::string GetSuggestedFilename() const override;
   std::string GetContentDisposition() const override;
   std::string GetOriginalMimeType() const override;
@@ -89,10 +95,16 @@ class FakeDownloadItem : public download::DownloadItem {
   const std::string& GetHash() const override;
   void DeleteFile(base::OnceCallback<void(bool)> callback) override;
   download::DownloadFile* GetDownloadFile() override;
+  download::DownloadItemRenameHandler* GetRenameHandler() override;
+#if BUILDFLAG(IS_ANDROID)
+  bool IsFromExternalApp() override;
+  bool AllowAutoOpenAfterCompletion() override;
+#endif  // BUILDFLAG(IS_ANDROID)
   bool IsDangerous() const override;
-  bool IsMixedContent() const override;
+  bool IsInsecure() const override;
+  bool IsUserConfirmed() const override;
   download::DownloadDangerType GetDangerType() const override;
-  download::DownloadItem::MixedContentStatus GetMixedContentStatus()
+  download::DownloadItem::InsecureDownloadStatus GetInsecureDownloadStatus()
       const override;
   bool TimeRemaining(base::TimeDelta* remaining) const override;
   int64_t CurrentSpeed() const override;
@@ -100,6 +112,7 @@ class FakeDownloadItem : public download::DownloadItem {
   bool AllDataSaved() const override;
   const std::vector<download::DownloadItem::ReceivedSlice>& GetReceivedSlices()
       const override;
+  int64_t GetUploadedBytes() const override;
   bool CanShowInFolder() override;
   bool CanOpenDownload() override;
   bool ShouldOpenFileBasedOnExtension() override;
@@ -118,19 +131,20 @@ class FakeDownloadItem : public download::DownloadItem {
   void SimulateErrorForTesting(
       download::DownloadInterruptReason reason) override;
   void ValidateDangerousDownload() override;
-  void ValidateMixedContentDownload() override;
-  void StealDangerousDownload(bool delete_file_afterward,
-                              AcquireFileCallback callback) override;
+  void ValidateInsecureDownload() override;
+  void ConfirmNonDangerousDownload() override;
+  void CopyDownload(AcquireFileCallback callback) override;
   void Rename(const base::FilePath& name,
               RenameDownloadCallback callback) override;
   void OnAsyncScanningCompleted(
       download::DownloadDangerType danger_type) override;
-  void OnDownloadScheduleChanged(
-      base::Optional<download::DownloadSchedule> schedule) override;
+
   bool removed() const { return removed_; }
+
   void NotifyDownloadDestroyed();
   void NotifyDownloadRemoved();
   void NotifyDownloadUpdated();
+
   void SetId(uint32_t id);
   void SetGuid(const std::string& guid);
   void SetURL(const GURL& url);
@@ -144,6 +158,7 @@ class FakeDownloadItem : public download::DownloadItem {
       scoped_refptr<const net::HttpResponseHeaders> response_headers);
   void SetMimeType(const std::string& mime_type);
   void SetOriginalUrl(const GURL& url);
+  void SetTabUrl(const GURL& url);
   void SetLastReason(download::DownloadInterruptReason last_reason);
   void SetReceivedBytes(int64_t received_bytes);
   void SetTotalBytes(int64_t total_bytes);
@@ -153,9 +168,16 @@ class FakeDownloadItem : public download::DownloadItem {
   void SetETag(const std::string& etag);
   void SetLastModifiedTime(const std::string& last_modified_time);
   void SetHash(const std::string& hash);
+  void SetPercentComplete(int percent_complete);
+  void SetDummyFilePath(const base::FilePath& dummy_file_path);
+  void SetIsDangerous(bool is_dangerous);
+  void SetIsInsecure(bool is_insecure);
+  void SetDangerType(download::DownloadDangerType danger_type);
+  void SetInsecureDownloadStatus(
+      download::DownloadItem::InsecureDownloadStatus insecure_download_status);
 
  private:
-  base::ObserverList<Observer>::Unchecked observers_;
+  base::ObserverList<Observer> observers_;
   uint32_t id_ = 0;
   std::string guid_;
   GURL url_;
@@ -172,9 +194,11 @@ class FakeDownloadItem : public download::DownloadItem {
   scoped_refptr<const net::HttpResponseHeaders> response_headers_;
   std::string mime_type_;
   GURL original_url_;
+  GURL tab_url_;
   download::DownloadInterruptReason last_reason_ =
       download::DOWNLOAD_INTERRUPT_REASON_NONE;
   int64_t received_bytes_ = 0;
+  int64_t uploaded_bytes_ = 0;
   int64_t total_bytes_ = 0;
   bool is_transient_ = false;
   bool is_parallel_download_ = false;
@@ -182,15 +206,21 @@ class FakeDownloadItem : public download::DownloadItem {
   std::string etag_;
   std::string last_modified_time_;
   std::string hash_;
-  base::Optional<download::DownloadSchedule> download_schedule_;
+  int percent_complete_ = 0;
+  bool open_when_complete_ = false;
+  bool is_dangerous_ = false;
+  bool is_insecure_ = false;
+  std::optional<net::IsolationInfo> isolation_info_;
+  download::DownloadDangerType danger_type_ =
+      download::DownloadDangerType::DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS;
+  download::DownloadItem::InsecureDownloadStatus insecure_download_status_ =
+      download::DownloadItem::InsecureDownloadStatus::UNKNOWN;
 
   // The members below are to be returned by methods, which return by reference.
-  std::string dummy_string;
   GURL dummy_url;
-  base::Optional<url::Origin> dummy_origin;
+  std::string serialized_embedder_download_data;
+  std::optional<url::Origin> dummy_origin;
   base::FilePath dummy_file_path;
-
-  DISALLOW_COPY_AND_ASSIGN(FakeDownloadItem);
 };
 
 }  // namespace content

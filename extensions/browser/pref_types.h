@@ -1,11 +1,9 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef EXTENSIONS_BROWSER_PREF_TYPES_H_
 #define EXTENSIONS_BROWSER_PREF_TYPES_H_
-
-#include <string>
 
 namespace extensions {
 
@@ -34,6 +32,13 @@ struct PrefMap {
 };
 
 extern const PrefMap kCorruptedDisableCount;
+extern const PrefMap kUserPermissions;
+extern const PrefMap kUserScriptsWorldsConfiguration;
+// TODO(https://crbug.com/431097630): Remove these.
+extern const PrefMap kMV2DeprecationWarningAcknowledgedGloballyPref;
+extern const PrefMap kMV2DeprecationDisabledAcknowledgedGloballyPref;
+// TODO(https://crbug.com/431097630): Move this somewhere less central.
+extern const PrefMap kMV2DeprecationUnsupportedAcknowledgedGloballyPref;
 
 }  // namespace extensions
 

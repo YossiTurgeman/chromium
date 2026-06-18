@@ -1,13 +1,15 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "device/bluetooth/dbus/bluetooth_gatt_manager_client.h"
 
-#include "base/bind.h"
-#include "base/callback_forward.h"
 #include "base/check.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/strings/strcat.h"
 #include "dbus/bus.h"
 #include "dbus/message.h"
 #include "dbus/object_manager.h"
@@ -18,11 +20,24 @@ namespace bluez {
 
 const char BluetoothGattManagerClient::kNoResponseError[] =
     "org.chromium.Error.NoResponse";
+const char BluetoothGattManagerClient::kUnknownGattManager[] =
+    "org.chromium.Error.UnknownGattManager";
+
+namespace {
+
+const char kNoGattManagerMessage[] = "No GATT Manager found: ";
+
+}  // namespace
 
 // The BluetoothGattManagerClient implementation used in production.
 class BluetoothGattManagerClientImpl : public BluetoothGattManagerClient {
  public:
   BluetoothGattManagerClientImpl() : object_manager_(nullptr) {}
+
+  BluetoothGattManagerClientImpl(const BluetoothGattManagerClientImpl&) =
+      delete;
+  BluetoothGattManagerClientImpl& operator=(
+      const BluetoothGattManagerClientImpl&) = delete;
 
   ~BluetoothGattManagerClientImpl() override = default;
 
@@ -49,13 +64,16 @@ class BluetoothGattManagerClientImpl : public BluetoothGattManagerClient {
     DCHECK(object_manager_);
     dbus::ObjectProxy* object_proxy =
         object_manager_->GetObjectProxy(adapter_object_path);
-    DCHECK(object_proxy);
-    object_proxy->CallMethodWithErrorCallback(
+    if (!object_proxy) {
+      RespondWhenNoProxyAvailable(adapter_object_path,
+                                  std::move(error_callback));
+      return;
+    }
+
+    object_proxy->CallMethodWithErrorResponse(
         &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-        base::BindOnce(&BluetoothGattManagerClientImpl::OnSuccess,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
-        base::BindOnce(&BluetoothGattManagerClientImpl::OnError,
-                       weak_ptr_factory_.GetWeakPtr(),
+        base::BindOnce(&BluetoothGattManagerClientImpl::OnMethodResponse,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        std::move(error_callback)));
   }
 
@@ -74,13 +92,16 @@ class BluetoothGattManagerClientImpl : public BluetoothGattManagerClient {
     DCHECK(object_manager_);
     dbus::ObjectProxy* object_proxy =
         object_manager_->GetObjectProxy(adapter_object_path);
-    DCHECK(object_proxy);
-    object_proxy->CallMethodWithErrorCallback(
+    if (!object_proxy) {
+      RespondWhenNoProxyAvailable(adapter_object_path,
+                                  std::move(error_callback));
+      return;
+    }
+
+    object_proxy->CallMethodWithErrorResponse(
         &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-        base::BindOnce(&BluetoothGattManagerClientImpl::OnSuccess,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
-        base::BindOnce(&BluetoothGattManagerClientImpl::OnError,
-                       weak_ptr_factory_.GetWeakPtr(),
+        base::BindOnce(&BluetoothGattManagerClientImpl::OnMethodResponse,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        std::move(error_callback)));
   }
 
@@ -97,37 +118,43 @@ class BluetoothGattManagerClientImpl : public BluetoothGattManagerClient {
   }
 
  private:
-  // Called when a response for a successful method call is received.
-  void OnSuccess(base::OnceClosure callback, dbus::Response* response) {
-    DCHECK(response);
+  void OnMethodResponse(base::OnceClosure callback,
+                        ErrorCallback error_callback,
+                        dbus::Response* response,
+                        dbus::ErrorResponse* error_response) {
+    if (!response) {
+      std::string error_name;
+      std::string error_message;
+      if (error_response) {
+        dbus::MessageReader reader(error_response);
+        error_name = error_response->GetErrorName();
+        reader.PopString(&error_message);
+      } else {
+        error_name = kNoResponseError;
+      }
+      std::move(error_callback).Run(error_name, error_message);
+      return;
+    }
+
     std::move(callback).Run();
   }
 
-  // Called when a response for a failed method call is received.
-  void OnError(ErrorCallback error_callback, dbus::ErrorResponse* response) {
-    // Error response has optional error message argument.
-    std::string error_name;
-    std::string error_message;
-    if (response) {
-      dbus::MessageReader reader(response);
-      error_name = response->GetErrorName();
-      reader.PopString(&error_message);
-    } else {
-      error_name = kNoResponseError;
-    }
-    std::move(error_callback).Run(error_name, error_message);
+  void RespondWhenNoProxyAvailable(const dbus::ObjectPath& application_path,
+                                   ErrorCallback error_callback) {
+    LOG(WARNING) << "No ObjectProxy found for " << application_path.value();
+    std::move(error_callback)
+        .Run(kUnknownGattManager,
+             base::StrCat({kNoGattManagerMessage, application_path.value()}));
   }
 
   // The proxy to the bluez object manager.
-  dbus::ObjectManager* object_manager_;
+  raw_ptr<dbus::ObjectManager> object_manager_;
 
   // Weak pointer factory for generating 'this' pointers that might live longer
   // than we do.
   // Note: This should remain the last member so it'll be destroyed and
   // invalidate its weak pointers before any other members are destroyed.
   base::WeakPtrFactory<BluetoothGattManagerClientImpl> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(BluetoothGattManagerClientImpl);
 };
 
 BluetoothGattManagerClient::BluetoothGattManagerClient() = default;

@@ -1,9 +1,12 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/events/android/gesture_event_android.h"
 
+#include <memory>
+
+#include "ui/events/event_constants.h"
 #include "ui/gfx/geometry/point_f.h"
 
 namespace ui {
@@ -12,6 +15,7 @@ GestureEventAndroid::GestureEventAndroid(int type,
                                          const gfx::PointF& location,
                                          const gfx::PointF& screen_location,
                                          long time_ms,
+                                         GestureDeviceType source,
                                          float scale,
                                          float delta_x,
                                          float delta_y,
@@ -24,6 +28,7 @@ GestureEventAndroid::GestureEventAndroid(int type,
       location_(location),
       screen_location_(screen_location),
       time_ms_(time_ms),
+      source_(source),
       scale_(scale),
       delta_x_(delta_x),
       delta_y_(delta_y),
@@ -39,10 +44,10 @@ std::unique_ptr<GestureEventAndroid> GestureEventAndroid::CreateFor(
     const gfx::PointF& new_location) const {
   auto offset = new_location - location_;
   gfx::PointF new_screen_location = screen_location_ + offset;
-  return std::unique_ptr<GestureEventAndroid>(new GestureEventAndroid(
-      type_, new_location, new_screen_location, time_ms_, scale_, delta_x_,
-      delta_y_, velocity_x_, velocity_y_, target_viewport_, synthetic_scroll_,
-      prevent_boosting_));
+  return std::make_unique<GestureEventAndroid>(
+      type_, new_location, new_screen_location, time_ms_, source_, scale_,
+      delta_x_, delta_y_, velocity_x_, velocity_y_, target_viewport_,
+      synthetic_scroll_, prevent_boosting_);
 }
 
 }  // namespace ui

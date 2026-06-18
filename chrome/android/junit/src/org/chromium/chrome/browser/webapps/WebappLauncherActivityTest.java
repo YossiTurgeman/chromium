@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,20 +8,25 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.robolectric.Shadows.shadowOf;
 
+import android.app.Activity;
+import android.app.Application;
 import android.content.Intent;
 import android.os.Bundle;
 
-import org.junit.After;
+import androidx.test.core.app.ApplicationProvider;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
-import org.robolectric.shadows.ShadowApplication;
 
-import org.chromium.base.CommandLine;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.components.webapk.lib.client.WebApkValidator;
 import org.chromium.components.webapk.lib.common.WebApkMetaDataKeys;
@@ -31,20 +36,14 @@ import org.chromium.webapk.test.WebApkTestHelper;
 /** JUnit test for WebappLauncherActivity. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
+@CommandLineFlags.Add(ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE)
 public class WebappLauncherActivityTest {
     private static final String WEBAPK_PACKAGE_NAME = "org.chromium.webapk.test_package";
     private static final String START_URL = "https://www.google.com/scope/a_is_for_apple";
 
     @Before
     public void setUp() {
-        CommandLine.getInstance().appendSwitchWithValue(
-                ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE, null);
         WebApkValidator.setDisableValidationForTesting(true);
-    }
-
-    @After
-    public void tearDown() {
-        WebApkValidator.setDisableValidationForTesting(false);
     }
 
     /**
@@ -64,9 +63,7 @@ public class WebappLauncherActivityTest {
         assertNull(WebApkIntentDataProviderFactory.create(intent));
     }
 
-    /**
-     * Test the launch intent created by {@link WebappLauncherActivity} for old-style WebAPKs.
-     */
+    /** Test the launch intent created by {@link WebappLauncherActivity} for old-style WebAPKs. */
     @Test
     public void testOldStyleLaunchIntent() {
         registerWebApk(WEBAPK_PACKAGE_NAME, START_URL);
@@ -83,9 +80,7 @@ public class WebappLauncherActivityTest {
         assertNotNull(WebApkIntentDataProviderFactory.create(launchIntent));
     }
 
-    /**
-     * Test the launch intent created by {@link WebappLauncherActivity} for new-style WebAPKs.
-     */
+    /** Test the launch intent created by {@link WebappLauncherActivity} for new-style WebAPKs. */
     @Test
     public void testNewStyleLaunchIntent() {
         registerWebApk(WEBAPK_PACKAGE_NAME, START_URL);
@@ -97,19 +92,54 @@ public class WebappLauncherActivityTest {
         Intent launchIntent = getNextStartedActivity();
         assertEquals(
                 SameTaskWebApkActivity.class.getName(), launchIntent.getComponent().getClassName());
-        assertEquals(launchIntent.getFlags() & Intent.FLAG_ACTIVITY_NEW_TASK, 0);
+        assertEquals(0, launchIntent.getFlags() & Intent.FLAG_ACTIVITY_NEW_TASK);
         assertNotNull(WebApkIntentDataProviderFactory.create(launchIntent));
+    }
+
+    /**
+     * Test that an intent with only a URL causes an intent to {@link ChromeLauncherActivity} (ie, a
+     * "launch in tab" action) rather than an intent to {@link SameTaskWebApkActivity} or {@link
+     * WebappActivity}. In particular, that means that this intent did NOT make it past the security
+     * checks that ensure that webapp launches must be triggered from trusted intents from Chrome.
+     */
+    @Test
+    public void testUnauthenticatedNonWebApkIntentOpensInTabAndNotWebappMode() {
+        Intent intent = new Intent();
+        intent.setPackage(RuntimeEnvironment.application.getPackageName());
+        intent.putExtra(WebApkConstants.EXTRA_URL, START_URL);
+
+        Activity activity =
+                Robolectric.buildActivity(WebappLauncherActivity.class, intent).setup().get();
+
+        Intent nextIntent = Shadows.shadowOf(activity).getNextStartedActivityForResult().intent;
+        assertEquals(
+                "org.chromium.chrome.browser.document.ChromeLauncherActivity",
+                nextIntent.getComponent().getClassName());
+
+        // And just in case, one with an empty-string WebAPK Package Name.
+        intent = new Intent();
+        intent.setPackage(RuntimeEnvironment.application.getPackageName());
+        intent.putExtra(WebApkConstants.EXTRA_URL, START_URL);
+        intent.putExtra(WebApkConstants.EXTRA_WEBAPK_PACKAGE_NAME, "");
+
+        activity = Robolectric.buildActivity(WebappLauncherActivity.class, intent).setup().get();
+
+        nextIntent = Shadows.shadowOf(activity).getNextStartedActivityForResult().intent;
+        assertEquals(
+                "org.chromium.chrome.browser.document.ChromeLauncherActivity",
+                nextIntent.getComponent().getClassName());
     }
 
     private void registerWebApk(String webApkPackage, String startUrl) {
         Bundle bundle = new Bundle();
         bundle.putString(WebApkMetaDataKeys.START_URL, START_URL);
         WebApkTestHelper.registerWebApkWithMetaData(
-                webApkPackage, bundle, null /* shareTargetMetaData */);
+                webApkPackage, bundle, /* shareTargetMetaData= */ null);
         WebApkTestHelper.addIntentFilterForUrl(webApkPackage, startUrl);
     }
 
     private Intent getNextStartedActivity() {
-        return ShadowApplication.getInstance().getNextStartedActivity();
+        return shadowOf((Application) ApplicationProvider.getApplicationContext())
+                .getNextStartedActivity();
     }
 }

@@ -21,9 +21,11 @@
 
 #include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
 #include "third_party/blink/renderer/core/svg/svg_animated_length.h"
+#include "third_party/blink/renderer/core/svg/svg_animated_path.h"
+#include "third_party/blink/renderer/core/svg/svg_length_context.h"
 #include "third_party/blink/renderer/core/svg/svg_path_element.h"
 #include "third_party/blink/renderer/core/svg/svg_text_path_element.h"
-#include "third_party/blink/renderer/platform/graphics/path.h"
+#include "third_party/blink/renderer/platform/geometry/path_builder.h"
 
 namespace blink {
 
@@ -36,8 +38,7 @@ PathPositionMapper::PathPositionMapper(const Path& path,
 
 PathPositionMapper::PositionType PathPositionMapper::PointAndNormalAtLength(
     float length,
-    FloatPoint& point,
-    float& angle) {
+    PointAndTangent& point_and_tangent) {
   if (length < 0)
     return kBeforePath;
   if (length > path_length_)
@@ -45,7 +46,7 @@ PathPositionMapper::PositionType PathPositionMapper::PointAndNormalAtLength(
   DCHECK_GE(length, 0);
   DCHECK_LE(length, path_length_);
 
-  position_calculator_.PointAndNormalAtLength(length, point, angle);
+  point_and_tangent = position_calculator_.PointAndNormalAtLength(length);
   return kOnPath;
 }
 
@@ -54,6 +55,7 @@ LayoutSVGTextPath::LayoutSVGTextPath(Element* element)
 
 bool LayoutSVGTextPath::IsChildAllowed(LayoutObject* child,
                                        const ComputedStyle&) const {
+  NOT_DESTROYED();
   if (child->IsText())
     return SVGLayoutSupport::IsLayoutableTextNode(child);
 
@@ -61,32 +63,56 @@ bool LayoutSVGTextPath::IsChildAllowed(LayoutObject* child,
 }
 
 std::unique_ptr<PathPositionMapper> LayoutSVGTextPath::LayoutPath() const {
+  NOT_DESTROYED();
   const auto& text_path_element = To<SVGTextPathElement>(*GetNode());
-  Element* target_element = SVGURIReference::TargetElementFromIRIString(
-      text_path_element.HrefString(), text_path_element.OriginatingTreeScope());
 
-  const auto* path_element = DynamicTo<SVGPathElement>(target_element);
-  if (!path_element)
+  // Check if 'path' attribute is valid and its value is non-empty.
+  Path path =
+      text_path_element.path()->CurrentValue()->GetStylePath()->GetPath();
+  // The 'path' attribute defines path data inline, not in a separate
+  // element, so there's no element with a 'pathLength' attribute to
+  // provide an author path length. We use only the computed path length.
+
+  float author_path_length = std::numeric_limits<float>::quiet_NaN();
+  // If path attribute was not present or produced an empty/invalid path,
+  // fall back to href
+  if (path.IsEmpty()) {
+    // Use href to reference a path element
+    Element* target_element = SVGURIReference::TargetElementFromIRIString(
+        text_path_element.HrefString(),
+        text_path_element.OriginatingTreeScope());
+
+    const auto* path_element = DynamicTo<SVGPathElement>(target_element);
+    if (!path_element) {
+      return nullptr;
+    }
+
+    PathBuilder path_data = path_element->AsMutablePath();
+    if (path_data.IsEmpty()) {
+      return nullptr;
+    }
+
+    // Spec: The 'transform' attribute on the referenced 'path' ...
+    // element represents a supplemental transformation relative to the current
+    // user coordinate system for the current 'text' element, including any
+    // adjustments to the current user coordinate system due to a possible
+    // 'transform' property on the current 'text' element.
+    // https://svgwg.org/svg2-draft/text.html#TextPathElement
+    path_data.Transform(
+        path_element->CalculateTransform(SVGElement::kIncludeMotionTransform));
+
+    path = path_data.Finalize();
+    author_path_length = path_element->AuthorPathLength();
+  }
+
+  if (path.IsEmpty()) {
     return nullptr;
-
-  Path path_data = path_element->AsPath();
-  if (path_data.IsEmpty())
-    return nullptr;
-
-  // Spec: The 'transform' attribute on the referenced 'path' ...
-  // element represents a supplemental transformation relative to the current
-  // user coordinate system for the current 'text' element, including any
-  // adjustments to the current user coordinate system due to a possible
-  // 'transform' property on the current 'text' element.
-  // https://svgwg.org/svg2-draft/text.html#TextPathElement
-  path_data.Transform(
-      path_element->CalculateTransform(SVGElement::kIncludeMotionTransform));
+  }
 
   // Determine the length to resolve any percentage 'startOffset'
   // against - either 'pathLength' (author path length) or the
   // computed length of the path.
-  float computed_path_length = path_data.length();
-  float author_path_length = path_element->AuthorPathLength();
+  float computed_path_length = path.length();
   float offset_scale = 1;
   if (!std::isnan(author_path_length)) {
     offset_scale = SVGGeometryElement::PathLengthScaleFactor(
@@ -95,15 +121,13 @@ std::unique_ptr<PathPositionMapper> LayoutSVGTextPath::LayoutPath() const {
     author_path_length = computed_path_length;
   }
 
-  const SVGLength& start_offset =
-      *text_path_element.startOffset()->CurrentValue();
-  float path_start_offset = start_offset.ValueAsPercentage();
-  if (start_offset.IsPercentage())
-    path_start_offset *= author_path_length;
-
+  const SVGLengthConversionData conversion_data(*this);
+  float path_start_offset =
+      text_path_element.startOffset()->CurrentValue()->Value(
+          conversion_data, author_path_length);
   path_start_offset *= offset_scale;
 
-  return std::make_unique<PathPositionMapper>(path_data, computed_path_length,
+  return std::make_unique<PathPositionMapper>(path, computed_path_length,
                                               path_start_offset);
 }
 

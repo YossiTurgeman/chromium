@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,14 @@
 
 #include <stdint.h>
 
-#include <map>
+#include <optional>
 
-#include "base/callback.h"
 #include "base/containers/flat_map.h"
+#include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
 #include "base/process/process_handle.h"
-#include "components/arc/mojom/process.mojom.h"
+#include "base/time/time.h"
+#include "chromeos/ash/experiences/arc/mojom/process.mojom.h"
 
 namespace task_manager {
 
@@ -23,12 +23,14 @@ namespace task_manager {
 class ArcSharedSampler {
  public:
   ArcSharedSampler();
+  ArcSharedSampler(const ArcSharedSampler&) = delete;
+  ArcSharedSampler& operator=(const ArcSharedSampler&) = delete;
   ~ArcSharedSampler();
 
   using MemoryFootprintBytes = uint64_t;
 
   using OnSamplingCompleteCallback =
-      base::RepeatingCallback<void(base::Optional<MemoryFootprintBytes>)>;
+      base::RepeatingCallback<void(std::optional<MemoryFootprintBytes>)>;
 
   // Registers task group specific callback.
   void RegisterCallback(base::ProcessId process_id,
@@ -61,8 +63,6 @@ class ArcSharedSampler {
   base::Time last_app_refresh_;
 
   base::WeakPtrFactory<ArcSharedSampler> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ArcSharedSampler);
 };
 
 }  // namespace task_manager

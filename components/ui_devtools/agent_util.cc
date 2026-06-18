@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include "base/logging.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
-#include "base/task/post_task.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 
@@ -32,8 +31,14 @@ const char kChromiumCodeSearchSrcURL[] =
     "https://cs.chromium.org/chromium/src/";
 
 bool GetSourceCode(std::string path, std::string* source_code) {
+  // Prevent directory traversal. This has been a security concern since
+  // this function can otherwise be used to read arbitrary files on the disk.
+  if (path.find("..") != std::string::npos) {
+    return false;
+  }
+
   base::FilePath src_dir;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &src_dir);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &src_dir);
   src_dir = src_dir.AppendASCII(path);
 
   base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);

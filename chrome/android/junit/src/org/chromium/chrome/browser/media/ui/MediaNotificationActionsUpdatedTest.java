@@ -1,15 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.media.ui;
 
 import static org.junit.Assert.assertEquals;
-import static org.mockito.Mockito.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doCallRealMethod;
 
 import android.content.Intent;
-import android.os.Build;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -18,7 +17,6 @@ import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.media.ui.ChromeMediaNotificationControllerDelegate.ListenerService;
 import org.chromium.components.browser_ui.media.MediaNotificationController;
 import org.chromium.media_session.mojom.MediaSessionAction;
 
@@ -30,13 +28,11 @@ import java.util.Set;
  * change or the tab navigates.
  */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE,
-        // Remove this after updating to a version of Robolectric that supports
-        // notification channel creation. crbug.com/774315
-        sdk = Build.VERSION_CODES.N_MR1, shadows = {MediaNotificationTestShadowResources.class})
+@Config(
+        manifest = Config.NONE,
+        shadows = {MediaNotificationTestShadowResources.class})
 public class MediaNotificationActionsUpdatedTest extends MediaNotificationTestBase {
     private static final int TAB_ID_1 = 1;
-    private static final int TAB_ID_2 = 2;
     private static final int THROTTLE_MILLIS =
             MediaNotificationController.Throttler.THROTTLE_MILLIS;
 
@@ -48,7 +44,7 @@ public class MediaNotificationActionsUpdatedTest extends MediaNotificationTestBa
         super.setUp();
 
         getController().mThrottler.mController = getController();
-        doCallRealMethod().when(getController()).onServiceStarted(any(ListenerService.class));
+        doCallRealMethod().when(getController()).onServiceStarted(any(MockListenerService.class));
         doCallRealMethod()
                 .when(mMockForegroundServiceUtils)
                 .startForegroundService(any(Intent.class));

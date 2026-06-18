@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,7 +26,7 @@ int32_t StringToIntBits(const std::string& str) {
 int32_t FloatToIntBits(float f) {
   if (std::numeric_limits<float>::is_iec559) {
     // Directly bit_cast if float follows ieee754 standard.
-    return bit_cast<int32_t>(f);
+    return base::bit_cast<int32_t>(f);
   } else {
     // Otherwise, manually calculate sign, exp and mantissa.
     // For sign.
@@ -113,15 +113,11 @@ bool FeatureToInt64(const Feature& feature,
       if (index >= 0 && index < feature.string_list().string_value_size()) {
         value = StringToIntBits(feature.string_list().string_value(index));
       } else {
-        DVLOG(3) << "Invalid index for string list: " << index;
-        NOTREACHED();
-        return false;
+        NOTREACHED() << "Invalid index for string list: " << index;
       }
       break;
     default:
-      DVLOG(3) << "Feature type is supported for logging: " << type;
-      NOTREACHED();
-      return false;
+      NOTREACHED() << "Feature type is supported for logging: " << type;
   }
   *res = PairInt(type, value, index);
   return true;

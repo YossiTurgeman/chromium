@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,9 @@
 #include <memory>
 #include <vector>
 
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "net/base/net_errors.h"
 #include "net/base/net_export.h"
 #include "net/base/upload_data_stream.h"
 
@@ -30,13 +30,16 @@ class NET_EXPORT ElementsUploadDataStream : public UploadDataStream {
       std::vector<std::unique_ptr<UploadElementReader>> element_readers,
       int64_t identifier);
 
+  ElementsUploadDataStream(const ElementsUploadDataStream&) = delete;
+  ElementsUploadDataStream& operator=(const ElementsUploadDataStream&) = delete;
+
   ~ElementsUploadDataStream() override;
 
   // Creates an ElementsUploadDataStream with a single reader.  Returns a
-  // std::unique_ptr<UploadDataStream> for ease of use.
+  // std::unique_ptr<UploadDataStream> for ease of use. The UploadDataStream
+  // will use an identifier value of 0, indicating an unspecified identifier.
   static std::unique_ptr<UploadDataStream> CreateWithReader(
-      std::unique_ptr<UploadElementReader> reader,
-      int64_t identifier);
+      std::unique_ptr<UploadElementReader> reader);
 
  private:
   // UploadDataStream implementation.
@@ -75,14 +78,12 @@ class NET_EXPORT ElementsUploadDataStream : public UploadDataStream {
   // Index of the current upload element (i.e. the element currently being
   // read). The index is used as a cursor to iterate over elements in
   // |upload_data_|.
-  size_t element_index_;
+  size_t element_index_ = 0;
 
   // Set to actual error if read fails, otherwise set to net::OK.
-  int read_error_;
+  int read_error_ = OK;
 
   base::WeakPtrFactory<ElementsUploadDataStream> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ElementsUploadDataStream);
 };
 
 }  // namespace net

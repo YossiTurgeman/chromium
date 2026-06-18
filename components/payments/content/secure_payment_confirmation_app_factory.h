@@ -1,23 +1,23 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_PAYMENTS_CONTENT_SECURE_PAYMENT_CONFIRMATION_APP_FACTORY_H_
 #define COMPONENTS_PAYMENTS_CONTENT_SECURE_PAYMENT_CONFIRMATION_APP_FACTORY_H_
 
-#include <map>
 #include <memory>
 
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/payments/content/payment_app_factory.h"
-#include "components/webdata/common/web_data_service_consumer.h"
+#include "components/payments/content/secure_payment_confirmation_credential_finder.h"
 
 namespace payments {
 
-struct SecurePaymentConfirmationInstrument;
+class BrowserBoundKeyStore;
+struct SecurePaymentConfirmationCredential;
 
-class SecurePaymentConfirmationAppFactory : public PaymentAppFactory,
-                                            public WebDataServiceConsumer {
+class SecurePaymentConfirmationAppFactory : public PaymentAppFactory {
  public:
   SecurePaymentConfirmationAppFactory();
   ~SecurePaymentConfirmationAppFactory() override;
@@ -30,26 +30,38 @@ class SecurePaymentConfirmationAppFactory : public PaymentAppFactory,
   // PaymentAppFactory:
   void Create(base::WeakPtr<Delegate> delegate) override;
 
+  void SetBrowserBoundKeyStoreForTesting(
+      scoped_refptr<BrowserBoundKeyStore> key_store);
+
+  void SetCredentialFinderForTesting(
+      std::unique_ptr<SecurePaymentConfirmationCredentialFinder>
+          credential_finder);
+
  private:
   struct Request;
 
-  // WebDataServiceConsumer:
-  void OnWebDataServiceRequestDone(
-      WebDataServiceBase::Handle handle,
-      std::unique_ptr<WDTypedResult> result) override;
-
   void OnIsUserVerifyingPlatformAuthenticatorAvailable(
-      base::WeakPtr<PaymentAppFactory::Delegate> delegate,
-      mojom::SecurePaymentConfirmationRequestPtr request,
-      std::unique_ptr<autofill::InternalAuthenticator> authenticator,
+      std::unique_ptr<Request> request,
       bool is_available);
 
-  void OnAppIconDecoded(
-      std::unique_ptr<SecurePaymentConfirmationInstrument> instrument,
+  void OnRetrievedCredentials(
       std::unique_ptr<Request> request,
-      const SkBitmap& decoded_image);
+      std::optional<
+          std::vector<std::unique_ptr<SecurePaymentConfirmationCredential>>>
+          credentials);
 
-  std::map<WebDataServiceBase::Handle, std::unique_ptr<Request>> requests_;
+  void OnRetrievedBrowserBoundKeyId(
+      std::unique_ptr<Request> request,
+      std::optional<std::vector<uint8_t>> maybe_browser_bound_key_id);
+
+  // Called once all icons are downloaded and their respective SkBitmaps have
+  // been set into the Request.
+  void DidDownloadAllIcons(std::unique_ptr<Request> request);
+
+  scoped_refptr<BrowserBoundKeyStore> browser_bound_key_store_for_testing_;
+
+  std::unique_ptr<SecurePaymentConfirmationCredentialFinder> credential_finder_;
+
   base::WeakPtrFactory<SecurePaymentConfirmationAppFactory> weak_ptr_factory_{
       this};
 };

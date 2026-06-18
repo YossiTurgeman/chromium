@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,8 @@ import org.chromium.base.FileUtils;
 import org.chromium.base.PathUtils;
 import org.chromium.base.task.AsyncTask;
 import org.chromium.base.task.BackgroundOnlyAsyncTask;
-import org.chromium.chrome.browser.metrics.WebApkUma;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.browserservices.metrics.WebApkUmaRecorder;
 
 import java.io.File;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,8 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Manages directories created to store data for WebAPK updates, and cleans up stale state
  * directories left behind under app_WebappActivity/.
  *
- * Also records metrics about files in the "WebAPK update" directory.
+ * <p>Also records metrics about files in the "WebAPK update" directory.
  */
+@NullMarked
 public class WebappDirectoryManager {
     protected static final String DEPRECATED_WEBAPP_DIRECTORY_NAME = "WebappActivity";
 
@@ -32,13 +34,11 @@ public class WebappDirectoryManager {
     /** Whether or not the class has already started trying to clean up obsolete directories. */
     private static final AtomicBoolean sMustCleanUpOldDirectories = new AtomicBoolean(true);
 
-    /**
-     * Deletes web app directories with stale data.
-     */
+    /** Deletes web app directories with stale data. */
     public static void cleanUpDirectories() {
         if (!sMustCleanUpOldDirectories.getAndSet(false)) return;
 
-        new BackgroundOnlyAsyncTask<Void>() {
+        new BackgroundOnlyAsyncTask<>() {
             @Override
             protected final Void doInBackground() {
                 recordNumberOfStaleWebApkUpdateRequestFiles();
@@ -75,7 +75,7 @@ public class WebappDirectoryManager {
             }
         }
 
-        WebApkUma.recordNumberOfStaleWebApkUpdateRequestFiles(count);
+        WebApkUmaRecorder.recordNumberOfStaleWebApkUpdateRequestFiles(count);
     }
 
     /** Returns the directory containing all of Chrome's web app data, creating it if needed. */

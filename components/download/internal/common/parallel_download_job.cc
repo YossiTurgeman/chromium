@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,7 @@
 
 #include <algorithm>
 
-#include "base/bind.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/functional/bind.h"
 #include "base/time/time.h"
 #include "components/download/internal/common/parallel_download_utils.h"
 #include "components/download/public/common/download_create_info.h"
@@ -34,7 +33,6 @@ ParallelDownloadJob::ParallelDownloadJob(
       content_length_(create_info.total_bytes),
       requests_sent_(false),
       is_canceled_(false),
-      range_support_(create_info.accept_range),
       url_loader_factory_provider_(std::move(url_loader_factory_provider)),
       wake_lock_provider_binder_(std::move(wake_lock_provider_binder)) {}
 
@@ -110,7 +108,7 @@ void ParallelDownloadJob::CancelRequestWithOffset(int64_t offset) {
   }
 
   auto it = workers_.find(offset);
-  DCHECK(it != workers_.end());
+  CHECK(it != workers_.end());
   it->second->Cancel(false);
 }
 
@@ -129,9 +127,6 @@ void ParallelDownloadJob::OnInputStreamReady(
     std::unique_ptr<DownloadCreateInfo> download_create_info) {
   bool success =
       DownloadJob::AddInputStream(std::move(input_stream), worker->offset());
-
-  RecordParallelDownloadAddStreamSuccess(
-      success, range_support_ == RangeRequestSupportType::kSupport);
 
   // Destroy the request if the sink is gone.
   if (!success) {
@@ -189,9 +184,6 @@ void ParallelDownloadJob::BuildParallelRequests() {
           first_slice_offset,
           content_length_ - first_slice_offset + initial_request_offset_,
           GetParallelRequestCount(), GetMinSliceSize());
-    } else {
-      RecordParallelDownloadCreationEvent(
-          ParallelDownloadCreationEvent::FALLBACK_REASON_REMAINING_TIME);
     }
   }
 
@@ -203,9 +195,11 @@ void ParallelDownloadJob::BuildParallelRequests() {
   if (!received_slices.empty() && received_slices.back().finished)
     slices_to_download.pop_back();
 
+  if (slices_to_download.empty())
+    return;
+
   ForkSubRequests(slices_to_download);
-  RecordParallelDownloadRequestCount(
-      static_cast<int>(slices_to_download.size()));
+
   requests_sent_ = true;
 }
 

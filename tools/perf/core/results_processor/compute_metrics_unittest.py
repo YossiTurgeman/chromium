@@ -1,8 +1,9 @@
-# Copyright 2019 The Chromium Authors. All rights reserved.
+# Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import unittest
+from unittest import mock
 
 from core.results_processor import compute_metrics
 from core.results_processor import testing
@@ -13,12 +14,10 @@ from tracing.mre import mre_result
 from tracing.value import histogram
 from tracing.value import histogram_set
 
-import mock
-
 
 RUN_METRICS_METHOD = 'tracing.metrics.metric_runner.RunMetricOnSingleTrace'
 GETSIZE_METHOD = 'os.path.getsize'
-TRACE_PROCESSOR_METRIC_METHOD = 'core.tbmv3.trace_processor.RunMetric'
+TRACE_PROCESSOR_METRIC_METHOD = 'core.tbmv3.trace_processor.RunMetrics'
 
 
 class ComputeMetricsTest(unittest.TestCase):

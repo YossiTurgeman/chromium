@@ -1,28 +1,35 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/viz/service/display/overlay_processor_android.h"
 
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include "base/synchronization/waitable_event.h"
-#include "components/viz/common/quads/stream_video_draw_quad.h"
+#include "components/viz/common/quads/texture_draw_quad.h"
+#include "components/viz/service/display/display_compositor_memory_and_task_controller.h"
 #include "components/viz/service/display/overlay_processor_on_gpu.h"
 #include "components/viz/service/display/overlay_strategy_underlay.h"
 #include "components/viz/service/display/skia_output_surface.h"
-#include "gpu/ipc/scheduler_sequence.h"
+#include "gpu/command_buffer/service/scheduler_sequence.h"
 #include "ui/gfx/geometry/rect_conversions.h"
 
 namespace viz {
 OverlayProcessorAndroid::OverlayProcessorAndroid(
-    gpu::SharedImageManager* shared_image_manager,
-    gpu::MemoryTracker* memory_tracker,
-    scoped_refptr<gpu::GpuTaskSchedulerHelper> gpu_task_scheduler,
-    bool enable_overlay)
+    DisplayCompositorMemoryAndTaskController* display_controller)
     : OverlayProcessorUsingStrategy(),
-      gpu_task_scheduler_(std::move(gpu_task_scheduler)),
-      overlay_enabled_(enable_overlay) {
-  if (!overlay_enabled_)
-    return;
+      gpu_task_scheduler_(display_controller->gpu_task_scheduler()) {
+  // Promoting video to overlay with SurfaceView overlays requires recreation of
+  // main SurfaceView and Display. This leads to the situation when we
+  // consider video overlay not being efficient for the first frame after we
+  // updated SurfaceView and video gets demoted back to composition. To avoid
+  // this, we disable heuristics that filter out not efficient quads but still
+  // sort them by potential power savings.
+  prioritization_config_.changing_threshold = false;
+  prioritization_config_.damage_rate_threshold = false;
 
   // In unittests, we don't have the gpu_task_scheduler_ set up, but still want
   // to test ProcessForOverlays functionalities where we are making overlay
@@ -35,8 +42,10 @@ OverlayProcessorAndroid::OverlayProcessorAndroid(
                               base::WaitableEvent::InitialState::NOT_SIGNALED);
     auto callback = base::BindOnce(
         &OverlayProcessorAndroid::InitializeOverlayProcessorOnGpu,
-        base::Unretained(this), shared_image_manager, memory_tracker, &event);
-    gpu_task_scheduler_->ScheduleGpuTask(std::move(callback), {});
+        base::Unretained(this), display_controller->controller_on_gpu(),
+        &event);
+    gpu_task_scheduler_->ScheduleGpuTask(
+        std::move(callback), /*sync_token_fences=*/{}, gpu::SyncToken());
     event.Wait();
   }
 
@@ -63,17 +72,18 @@ OverlayProcessorAndroid::~OverlayProcessorAndroid() {
     auto callback =
         base::BindOnce(&OverlayProcessorAndroid::DestroyOverlayProcessorOnGpu,
                        base::Unretained(this), &event);
-    gpu_task_scheduler_->ScheduleGpuTask(std::move(callback), {});
+    gpu_task_scheduler_->ScheduleGpuTask(
+        std::move(callback), /*sync_token_fences=*/{}, gpu::SyncToken());
     event.Wait();
   }
 }
 
 void OverlayProcessorAndroid::InitializeOverlayProcessorOnGpu(
-    gpu::SharedImageManager* shared_image_manager,
-    gpu::MemoryTracker* memory_tracker,
+    gpu::DisplayCompositorMemoryAndTaskControllerOnGpu*
+        display_controller_on_gpu,
     base::WaitableEvent* event) {
-  processor_on_gpu_ = std::make_unique<OverlayProcessorOnGpu>(
-      shared_image_manager, memory_tracker);
+  processor_on_gpu_ =
+      std::make_unique<OverlayProcessorOnGpu>(display_controller_on_gpu);
   DCHECK(event);
   event->Signal();
 }
@@ -86,10 +96,10 @@ void OverlayProcessorAndroid::DestroyOverlayProcessorOnGpu(
 }
 
 bool OverlayProcessorAndroid::IsOverlaySupported() const {
-  return overlay_enabled_;
+  return true;
 }
 
-bool OverlayProcessorAndroid::NeedsSurfaceOccludingDamageRect() const {
+bool OverlayProcessorAndroid::NeedsSurfaceDamageRectList() const {
   return false;
 }
 
@@ -116,7 +126,8 @@ void OverlayProcessorAndroid::ScheduleOverlays(
   auto task = base::BindOnce(&OverlayProcessorOnGpu::ScheduleOverlays,
                              base::Unretained(processor_on_gpu_.get()),
                              std::move(overlay_candidates_));
-  gpu_task_scheduler_->ScheduleGpuTask(std::move(task), locks_sync_tokens);
+  gpu_task_scheduler_->ScheduleGpuTask(std::move(task), locks_sync_tokens,
+                                       gpu::SyncToken());
   overlay_candidates_.clear();
 }
 
@@ -133,8 +144,8 @@ void OverlayProcessorAndroid::OverlayPresentationComplete() {
   pending_overlay_locks_.pop_front();
 }
 
-void OverlayProcessorAndroid::CheckOverlaySupport(
-    const OverlayProcessorInterface::OutputSurfaceOverlayPlane* primary_plane,
+void OverlayProcessorAndroid::CheckOverlaySupportImpl(
+    const std::optional<OverlayCandidate>& primary_plane,
     OverlayCandidateList* candidates) {
   // For pre-SurfaceControl Android we should not have output surface as overlay
   // plane.
@@ -154,7 +165,7 @@ void OverlayProcessorAndroid::CheckOverlaySupport(
     // SurfaceView.  Record that it should get a promotion hint.
     promotion_hint_info_map_[candidate.resource_id] = candidate.display_rect;
 
-    if (candidate.is_backed_by_surface_texture) {
+    if (!candidate.is_video_in_surface_view) {
       // This quad would be promoted if it were backed by a SurfaceView.  Since
       // it isn't, we can't promote it.
       return;
@@ -173,9 +184,21 @@ void OverlayProcessorAndroid::CheckOverlaySupport(
     promotion_hint_info_map_[candidate.resource_id] = candidate.display_rect;
   }
 }
+
 gfx::Rect OverlayProcessorAndroid::GetOverlayDamageRectForOutputSurface(
     const OverlayCandidate& overlay) const {
   return ToEnclosedRect(overlay.display_rect);
+}
+
+void OverlayProcessorAndroid::InsertPrimaryPlane(
+    OverlayCandidate primary_plane,
+    OverlayCandidateList& candidates) {
+  // `OverlayProcessorAndroid` will never have a primary plane.
+  NOTREACHED();
+}
+
+bool OverlayProcessorAndroid::ShouldCreatePrimaryPlane() const {
+  return false;
 }
 
 void OverlayProcessorAndroid::TakeOverlayCandidates(
@@ -188,11 +211,6 @@ void OverlayProcessorAndroid::NotifyOverlayPromotion(
     DisplayResourceProvider* resource_provider,
     const CandidateList& candidates,
     const QuadList& quad_list) {
-  // No need to notify overlay promotion if not any resource wants promotion
-  // hints.
-  if (!resource_provider->DoAnyResourcesWantPromotionHints())
-    return;
-
   // If we don't have a processor_on_gpu_, there is nothing to send the overlay
   // promotions to.
   if (!processor_on_gpu_) {
@@ -205,12 +223,18 @@ void OverlayProcessorAndroid::NotifyOverlayPromotion(
   ResourceIdSet promotion_hint_requestor_set;
 
   for (auto* quad : quad_list) {
-    if (quad->material != DrawQuad::Material::kStreamVideoContent)
+    if (quad->material != DrawQuad::Material::kTextureContent)
       continue;
-    ResourceId id = StreamVideoDrawQuad::MaterialCast(quad)->resource_id();
+    const TextureDrawQuad* texture_quad = TextureDrawQuad::MaterialCast(quad);
+    ResourceId id = texture_quad->resource_id;
     if (!resource_provider->DoesResourceWantPromotionHint(id))
       continue;
     promotion_hint_requestor_set.insert(id);
+  }
+
+  if (promotion_hint_requestor_set.empty()) {
+    promotion_hint_info_map_.clear();
+    return;
   }
 
   base::flat_set<gpu::Mailbox> promotion_denied;
@@ -249,7 +273,8 @@ void OverlayProcessorAndroid::NotifyOverlayPromotion(
                                base::Unretained(processor_on_gpu_.get()),
                                std::move(promotion_denied),
                                std::move(possible_promotions));
-    gpu_task_scheduler_->ScheduleGpuTask(std::move(task), locks_sync_tokens);
+    gpu_task_scheduler_->ScheduleGpuTask(std::move(task), locks_sync_tokens,
+                                         gpu::SyncToken());
   }
   promotion_hint_info_map_.clear();
 }

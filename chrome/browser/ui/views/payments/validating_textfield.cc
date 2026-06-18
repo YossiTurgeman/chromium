@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,30 +6,35 @@
 
 #include <utility>
 
+#include "ui/base/metadata/metadata_impl_macros.h"
+
 namespace payments {
 
 ValidatingTextfield::ValidatingTextfield(
     std::unique_ptr<ValidationDelegate> delegate)
-    : Textfield(), delegate_(std::move(delegate)) {}
+    : delegate_(std::move(delegate)) {}
 
-ValidatingTextfield::~ValidatingTextfield() {}
+ValidatingTextfield::~ValidatingTextfield() = default;
 
 void ValidatingTextfield::OnBlur() {
   Textfield::OnBlur();
   was_blurred_ = true;
 
   // Do not validate if the view is being removed.
-  if (!being_removed_)
+  if (!being_removed_) {
     Validate();
+  }
 
-  if (!GetText().empty() && delegate_->ShouldFormat())
+  if (!GetText().empty() && delegate_->ShouldFormat()) {
     SetText(delegate_->Format(GetText()));
+  }
 }
 
 void ValidatingTextfield::ViewHierarchyChanged(
     const views::ViewHierarchyChangedDetails& details) {
-  if (details.child == this && !details.is_add)
+  if (details.child == this && !details.is_add) {
     being_removed_ = true;
+  }
 }
 
 void ValidatingTextfield::OnContentsChanged() {
@@ -43,7 +48,7 @@ void ValidatingTextfield::OnContentsChanged() {
 }
 
 bool ValidatingTextfield::IsValid() {
-  base::string16 unused;
+  std::u16string unused;
   return delegate_->IsValidTextfield(this, &unused);
 }
 
@@ -51,5 +56,8 @@ void ValidatingTextfield::Validate() {
   // TextfieldValueChanged may have side-effects, such as displaying errors.
   SetInvalid(!delegate_->TextfieldValueChanged(this, was_blurred_));
 }
+
+BEGIN_METADATA(ValidatingTextfield)
+END_METADATA
 
 }  // namespace payments

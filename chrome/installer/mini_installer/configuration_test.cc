@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 #include <memory>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/environment.h"
-#include "base/macros.h"
 #include "base/test/test_reg_util_win.h"
 #include "base/win/registry.h"
 #include "build/branding_buildflags.h"
@@ -40,12 +40,12 @@ class ScopedGoogleUpdateIsMachine {
 class TestConfiguration : public Configuration {
  public:
   explicit TestConfiguration(const wchar_t* command_line) {
-    EXPECT_TRUE(Initialize(::GetModuleHandle(nullptr)));
+    EXPECT_TRUE(Initialize());
     EXPECT_TRUE(ParseCommandLine(command_line));
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(TestConfiguration);
+  TestConfiguration(const TestConfiguration&) = delete;
+  TestConfiguration& operator=(const TestConfiguration&) = delete;
 };
 
 }  // namespace
@@ -53,6 +53,11 @@ class TestConfiguration : public Configuration {
 class MiniInstallerConfigurationTest : public ::testing::Test {
  protected:
   MiniInstallerConfigurationTest() = default;
+
+  MiniInstallerConfigurationTest(const MiniInstallerConfigurationTest&) =
+      delete;
+  MiniInstallerConfigurationTest& operator=(
+      const MiniInstallerConfigurationTest&) = delete;
 
   void SetUp() override {
     ASSERT_NO_FATAL_FAILURE(
@@ -63,24 +68,7 @@ class MiniInstallerConfigurationTest : public ::testing::Test {
 
  private:
   registry_util::RegistryOverrideManager registry_overrides_;
-
-  DISALLOW_COPY_AND_ASSIGN(MiniInstallerConfigurationTest);
 };
-
-// Test that the operation type is CLEANUP iff --cleanup is on the cmdline.
-TEST_F(MiniInstallerConfigurationTest, Operation) {
-  EXPECT_EQ(Configuration::INSTALL_PRODUCT,
-            TestConfiguration(L"spam.exe").operation());
-  EXPECT_EQ(Configuration::INSTALL_PRODUCT,
-            TestConfiguration(L"spam.exe --clean").operation());
-  EXPECT_EQ(Configuration::INSTALL_PRODUCT,
-            TestConfiguration(L"spam.exe --cleanupthis").operation());
-
-  EXPECT_EQ(Configuration::CLEANUP,
-            TestConfiguration(L"spam.exe --cleanup").operation());
-  EXPECT_EQ(Configuration::CLEANUP,
-            TestConfiguration(L"spam.exe --cleanup now").operation());
-}
 
 TEST_F(MiniInstallerConfigurationTest, Program) {
   EXPECT_EQ(nullptr, mini_installer::Configuration().program());
@@ -105,8 +93,9 @@ TEST_F(MiniInstallerConfigurationTest, CommandLine) {
       L"spam.exe --foo",
   };
   for (size_t i = 0; i < _countof(kCommandLines); ++i) {
-    EXPECT_TRUE(std::wstring(kCommandLines[i]) ==
-                TestConfiguration(kCommandLines[i]).command_line());
+    EXPECT_TRUE(
+        std::wstring(UNSAFE_TODO(kCommandLines[i])) ==
+        TestConfiguration(UNSAFE_TODO(kCommandLines[i])).command_line());
   }
 }
 
@@ -143,6 +132,7 @@ TEST_F(MiniInstallerConfigurationTest, HasInvalidSwitch) {
   EXPECT_FALSE(TestConfiguration(L"spam.exe").has_invalid_switch());
   EXPECT_TRUE(
       TestConfiguration(L"spam.exe --chrome-frame").has_invalid_switch());
+  EXPECT_TRUE(TestConfiguration(L"spam.exe --cleanup").has_invalid_switch());
 }
 
 TEST_F(MiniInstallerConfigurationTest, DeleteExtractedFilesDefaultTrue) {

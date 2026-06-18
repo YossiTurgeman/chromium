@@ -1,20 +1,23 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/device/generic_sensor/platform_sensor_provider_win.h"
 
-#include <comdef.h>
 #include <objbase.h>
+
+#include <comdef.h>
 
 #include <iomanip>
 
-#include "base/bind.h"
-#include "base/task/post_task.h"
+#include "base/check.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
-#include "base/task_runner_util.h"
 #include "base/threading/thread.h"
+#include "services/device/generic_sensor/gravity_fusion_algorithm_using_accelerometer.h"
 #include "services/device/generic_sensor/linear_acceleration_fusion_algorithm_using_accelerometer.h"
 #include "services/device/generic_sensor/orientation_euler_angles_fusion_algorithm_using_quaternion.h"
 #include "services/device/generic_sensor/platform_sensor_fusion.h"
@@ -28,6 +31,10 @@ PlatformSensorProviderWin::PlatformSensorProviderWin()
 
 PlatformSensorProviderWin::~PlatformSensorProviderWin() = default;
 
+base::WeakPtr<PlatformSensorProvider> PlatformSensorProviderWin::AsWeakPtr() {
+  return weak_factory_.GetWeakPtr();
+}
+
 void PlatformSensorProviderWin::SetSensorManagerForTesting(
     Microsoft::WRL::ComPtr<ISensorManager> sensor_manager) {
   sensor_manager_ = sensor_manager;
@@ -40,19 +47,17 @@ PlatformSensorProviderWin::GetComStaTaskRunnerForTesting() {
 
 void PlatformSensorProviderWin::CreateSensorInternal(
     mojom::SensorType type,
-    SensorReadingSharedBuffer* reading_buffer,
     CreateSensorCallback callback) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   if (sensor_manager_) {
-    OnInitSensorManager(type, reading_buffer, std::move(callback));
+    OnInitSensorManager(type, std::move(callback));
   } else {
     com_sta_task_runner_->PostTaskAndReply(
         FROM_HERE,
         base::BindOnce(&PlatformSensorProviderWin::InitSensorManager,
                        base::Unretained(this)),
         base::BindOnce(&PlatformSensorProviderWin::OnInitSensorManager,
-                       base::Unretained(this), type, reading_buffer,
-                       std::move(callback)));
+                       base::Unretained(this), type, std::move(callback)));
   }
 }
 
@@ -76,7 +81,6 @@ void PlatformSensorProviderWin::InitSensorManager() {
 
 void PlatformSensorProviderWin::OnInitSensorManager(
     mojom::SensorType type,
-    SensorReadingSharedBuffer* reading_buffer,
     CreateSensorCallback callback) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
@@ -86,27 +90,36 @@ void PlatformSensorProviderWin::OnInitSensorManager(
   }
 
   switch (type) {
-    // Fusion sensor.
+    // Fusion sensors.
     case mojom::SensorType::LINEAR_ACCELERATION: {
       auto linear_acceleration_fusion_algorithm = std::make_unique<
           LinearAccelerationFusionAlgorithmUsingAccelerometer>();
       // If this PlatformSensorFusion object is successfully initialized,
       // |callback| will be run with a reference to this object.
       PlatformSensorFusion::Create(
-          reading_buffer, this, std::move(linear_acceleration_fusion_algorithm),
+          AsWeakPtr(), std::move(linear_acceleration_fusion_algorithm),
           std::move(callback));
+      break;
+    }
+    case mojom::SensorType::GRAVITY: {
+      auto gravity_fusion_algorithm =
+          std::make_unique<GravityFusionAlgorithmUsingAccelerometer>();
+      // If this PlatformSensorFusion object is successfully initialized,
+      // |callback| will be run with a reference to this object.
+      PlatformSensorFusion::Create(AsWeakPtr(),
+                                   std::move(gravity_fusion_algorithm),
+                                   std::move(callback));
       break;
     }
 
     // Try to create low-level sensors by default.
     default: {
-      base::PostTaskAndReplyWithResult(
-          com_sta_task_runner_.get(), FROM_HERE,
+      com_sta_task_runner_->PostTaskAndReplyWithResult(
+          FROM_HERE,
           base::BindOnce(&PlatformSensorProviderWin::CreateSensorReader,
                          base::Unretained(this), type),
           base::BindOnce(&PlatformSensorProviderWin::SensorReaderCreated,
-                         base::Unretained(this), type, reading_buffer,
-                         std::move(callback)));
+                         base::Unretained(this), type, std::move(callback)));
       break;
     }
   }
@@ -114,10 +127,10 @@ void PlatformSensorProviderWin::OnInitSensorManager(
 
 void PlatformSensorProviderWin::SensorReaderCreated(
     mojom::SensorType type,
-    SensorReadingSharedBuffer* reading_buffer,
     CreateSensorCallback callback,
     std::unique_ptr<PlatformSensorReaderWinBase> sensor_reader) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+
   if (!sensor_reader) {
     // Fallback options for sensors that can be implemented using sensor
     // fusion. Note that it is important not to generate a cycle by adding a
@@ -127,7 +140,7 @@ void PlatformSensorProviderWin::SensorReaderCreated(
         auto algorithm = std::make_unique<
             OrientationEulerAnglesFusionAlgorithmUsingQuaternion>(
             true /* absolute */);
-        PlatformSensorFusion::Create(reading_buffer, this, std::move(algorithm),
+        PlatformSensorFusion::Create(AsWeakPtr(), std::move(algorithm),
                                      std::move(callback));
         return;
       }
@@ -137,9 +150,9 @@ void PlatformSensorProviderWin::SensorReaderCreated(
     }
   }
 
-  scoped_refptr<PlatformSensor> sensor =
-      new PlatformSensorWin(type, reading_buffer, this, com_sta_task_runner_,
-                            std::move(sensor_reader));
+  scoped_refptr<PlatformSensor> sensor = new PlatformSensorWin(
+      type, GetSensorReadingSharedBufferForType(type), AsWeakPtr(),
+      com_sta_task_runner_, std::move(sensor_reader));
   std::move(callback).Run(sensor);
 }
 

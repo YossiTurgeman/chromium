@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,15 +14,13 @@
 #include <wrl/client.h>
 
 #include "base/base_paths.h"
-#include "base/bind.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/path_service.h"
-#include "base/stl_util.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/task/post_task.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "base/win/registry.h"
@@ -30,7 +28,6 @@
 #include "chrome/browser/platform_util_internal.h"
 #include "content/public/browser/browser_thread.h"
 #include "ui/base/win/shell.h"
-#include "ui/gfx/native_widget_types.h"
 #include "url/gurl.h"
 
 using content::BrowserThread;
@@ -73,8 +70,7 @@ void ShowItemInFolderOnWorkerThread(const base::FilePath& full_path) {
   if (!platform_util::internal::AreShellOperationsAllowed())
     return;
 
-  hr =
-      SHOpenFolderAndSelectItems(dir_item, base::size(highlight), highlight, 0);
+  hr = SHOpenFolderAndSelectItems(dir_item, std::size(highlight), highlight, 0);
   if (FAILED(hr)) {
     // On some systems, the above call mysteriously fails with "file not
     // found" even though the file is there.  In these cases, ShellExecute()
@@ -99,16 +95,6 @@ void OpenExternalOnWorkerThread(const GURL& url) {
   escaped_url.insert(0, "\"");
   escaped_url += "\"";
 
-  // According to Mozilla in uriloader/exthandler/win/nsOSHelperAppService.cpp:
-  // "Some versions of windows (Win2k before SP3, Win XP before SP1) crash in
-  // ShellExecute on long URLs (bug 161357 on bugzilla.mozilla.org). IE 5 and 6
-  // support URLS of 2083 chars in length, 2K is safe."
-  //
-  // It may be possible to increase this. https://crbug.com/727909
-  const size_t kMaxUrlLength = 2048;
-  if (escaped_url.length() > kMaxUrlLength)
-    return;
-
   // Specify %windir%\system32 as the CWD so that any new proc spawned does not
   // inherit this proc's CWD. Without this, uninstalls may be broken by a
   // long-lived child proc that holds a handle to the browser's version
@@ -123,7 +109,7 @@ void OpenExternalOnWorkerThread(const GURL& url) {
           NULL, "open", escaped_url.c_str(), NULL,
           system_dir.AsUTF8Unsafe().c_str(), SW_SHOWNORMAL)) <= 32) {
     // On failure, it may be good to display a message to the user.
-    // https://crbug.com/727913
+    // https://crbug.com/40523302
     return;
   }
 }
@@ -156,7 +142,7 @@ void PlatformOpenVerifiedItem(const base::FilePath& path, OpenItemType type) {
 
 }  // namespace internal
 
-void OpenExternal(Profile* profile, const GURL& url) {
+void OpenExternal(const GURL& url) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   base::ThreadPool::CreateCOMSTATaskRunner(

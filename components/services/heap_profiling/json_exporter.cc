@@ -1,29 +1,35 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/services/heap_profiling/json_exporter.h"
 
 #include <inttypes.h>
+
+#include <array>
 #include <map>
-#include <unordered_map>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "base/containers/adapters.h"
+#include "base/files/file_path.h"
 #include "base/json/json_writer.h"
 #include "base/json/string_escape.h"
-#include "base/macros.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
-#include "services/resource_coordinator/public/cpp/memory_instrumentation/tracing_observer.h"
+#include "services/resource_coordinator/public/mojom/memory_instrumentation/memory_instrumentation.mojom.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 
 namespace heap_profiling {
 namespace {
 
 // Maps strings to integers for the JSON string table.
-using StringTable = std::unordered_map<std::string, int>;
+using StringTable = absl::flat_hash_map<std::string, int>;
 
 // Maps allocation site to node_id of the top frame.
-using AllocationToNodeId = std::unordered_map<const AllocationSite*, int>;
+using AllocationToNodeId = absl::flat_hash_map<const AllocationSite*, int>;
 
 constexpr int kAllocatorCount = static_cast<int>(AllocatorType::kMaxValue) + 1;
 
@@ -57,77 +63,138 @@ const char* StringForAllocatorType(uint32_t type) {
       return "malloc";
     case AllocatorType::kPartitionAlloc:
       return "partition_alloc";
-    case AllocatorType::kOilpan:
-      return "blink_gc";
     default:
       NOTREACHED();
-      return "unknown";
   }
 }
 
 // Writes the top-level allocators section. This section is used by the tracing
 // UI to show a small summary for each allocator. It's necessary as a
 // placeholder to allow the stack-viewing UI to be shown.
-base::Value BuildAllocatorsSummary(const AllocationMap& allocations) {
+base::DictValue BuildAllocatorsSummary(const AllocationMap& allocations) {
   // Aggregate stats for each allocator type.
-  size_t total_size[kAllocatorCount] = {0};
-  size_t total_count[kAllocatorCount] = {0};
+  std::array<size_t, kAllocatorCount> total_size = {};
+  std::array<size_t, kAllocatorCount> total_count = {};
   for (const auto& alloc_pair : allocations) {
     int index = static_cast<int>(alloc_pair.first.allocator);
     total_size[index] += alloc_pair.second.size;
     total_count[index] += alloc_pair.second.count;
   }
 
-  base::Value result(base::Value::Type::DICTIONARY);
+  base::DictValue result;
   for (int i = 0; i < kAllocatorCount; i++) {
     const char* alloc_type = StringForAllocatorType(i);
 
     // Overall sizes.
-    base::Value sizes(base::Value::Type::DICTIONARY);
-    sizes.SetStringKey("type", "scalar");
-    sizes.SetStringKey("units", "bytes");
-    sizes.SetStringKey("value", base::StringPrintf("%zx", total_size[i]));
+    base::DictValue sizes;
+    sizes.Set("type", "scalar");
+    sizes.Set("units", "bytes");
+    sizes.Set("value", base::StringPrintf("%zx", total_size[i]));
 
-    base::Value attrs(base::Value::Type::DICTIONARY);
-    attrs.SetKey("virtual_size", sizes.Clone());
-    attrs.SetKey("size", std::move(sizes));
+    base::DictValue attrs;
+    attrs.Set("virtual_size", sizes.Clone());
+    attrs.Set("size", std::move(sizes));
 
-    base::Value allocator(base::Value::Type::DICTIONARY);
-    allocator.SetKey("attrs", std::move(attrs));
-    result.SetKey(alloc_type, std::move(allocator));
+    base::DictValue allocator;
+    allocator.Set("attrs", std::move(attrs));
+    result.Set(alloc_type, std::move(allocator));
 
     // Allocated objects.
-    base::Value shim_allocated_objects_count(base::Value::Type::DICTIONARY);
-    shim_allocated_objects_count.SetStringKey("type", "scalar");
-    shim_allocated_objects_count.SetStringKey("units", "objects");
-    shim_allocated_objects_count.SetStringKey(
-        "value", base::StringPrintf("%zx", total_count[i]));
+    base::DictValue shim_allocated_objects_count;
+    shim_allocated_objects_count.Set("type", "scalar");
+    shim_allocated_objects_count.Set("units", "objects");
+    shim_allocated_objects_count.Set("value",
+                                     base::StringPrintf("%zx", total_count[i]));
 
-    base::Value shim_allocated_objects_size(base::Value::Type::DICTIONARY);
-    shim_allocated_objects_size.SetStringKey("type", "scalar");
-    shim_allocated_objects_size.SetStringKey("units", "bytes");
-    shim_allocated_objects_size.SetStringKey(
-        "value", base::StringPrintf("%zx", total_size[i]));
+    base::DictValue shim_allocated_objects_size;
+    shim_allocated_objects_size.Set("type", "scalar");
+    shim_allocated_objects_size.Set("units", "bytes");
+    shim_allocated_objects_size.Set("value",
+                                    base::StringPrintf("%zx", total_size[i]));
 
-    base::Value allocated_objects_attrs(base::Value::Type::DICTIONARY);
-    allocated_objects_attrs.SetKey("shim_allocated_objects_count",
-                                   std::move(shim_allocated_objects_count));
-    allocated_objects_attrs.SetKey("shim_allocated_objects_size",
-                                   std::move(shim_allocated_objects_size));
+    base::DictValue allocated_objects_attrs;
+    allocated_objects_attrs.Set("shim_allocated_objects_count",
+                                std::move(shim_allocated_objects_count));
+    allocated_objects_attrs.Set("shim_allocated_objects_size",
+                                std::move(shim_allocated_objects_size));
 
-    base::Value allocated_objects(base::Value::Type::DICTIONARY);
-    allocated_objects.SetKey("attrs", std::move(allocated_objects_attrs));
-    result.SetKey(alloc_type + std::string("/allocated_objects"),
-                  std::move(allocated_objects));
+    base::DictValue allocated_objects;
+    allocated_objects.Set("attrs", std::move(allocated_objects_attrs));
+    result.Set(alloc_type + std::string("/allocated_objects"),
+               std::move(allocated_objects));
   }
   return result;
 }
 
+std::string ApplyPathFiltering(const std::string& file,
+                               bool is_argument_filtering_enabled) {
+  if (is_argument_filtering_enabled) {
+    base::FilePath::StringType path(file.begin(), file.end());
+    return base::FilePath(path).BaseName().AsUTF8Unsafe();
+  }
+  return file;
+}
+
+base::Value MemoryMapsAsValue(
+    const std::vector<memory_instrumentation::mojom::VmRegionPtr>& memory_maps,
+    bool is_argument_filtering_enabled) {
+  static const char kHexFmt[] = "%" PRIx64;
+
+  // Refer to the design doc goo.gl/sxfFY8 for the semantics of these fields.
+  base::ListValue vm_regions;
+  for (const auto& region : memory_maps) {
+    base::DictValue region_dict =
+        base::DictValue()
+            .Set("sa", base::StringPrintf(kHexFmt, region->start_address))
+            .Set("sz", base::StringPrintf(kHexFmt, region->size_in_bytes))
+            .Set("pf", base::saturated_cast<int>(region->protection_flags))
+            // The module path will be the basename when argument filtering is
+            // activated. The allowlisting implemented for filtering string
+            // values doesn't allow rewriting. Therefore, a different path is
+            // produced here when argument filtering is activated.
+            .Set("mf", ApplyPathFiltering(region->mapped_file,
+                                          is_argument_filtering_enabled));
+
+    if (region->module_timestamp) {
+      region_dict.Set("ts",
+                      base::StringPrintf(kHexFmt, region->module_timestamp));
+    }
+    if (!region->module_debugid.empty()) {
+      region_dict.Set("id", region->module_debugid);
+    }
+    if (!region->module_debug_path.empty()) {
+      region_dict.Set("df", ApplyPathFiltering(region->module_debug_path,
+                                               is_argument_filtering_enabled));
+    }
+
+// The following stats are only well defined on Linux-derived OSes.
+#if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_WIN)
+    // byte stats
+    region_dict.Set(
+        "bs",
+        base::DictValue()
+            .Set("pss", base::StringPrintf(
+                            kHexFmt, region->byte_stats_proportional_resident))
+            .Set("pd", base::StringPrintf(
+                           kHexFmt, region->byte_stats_private_dirty_resident))
+            .Set("pc", base::StringPrintf(
+                           kHexFmt, region->byte_stats_private_clean_resident))
+            .Set("sd", base::StringPrintf(
+                           kHexFmt, region->byte_stats_shared_dirty_resident))
+            .Set("sc", base::StringPrintf(
+                           kHexFmt, region->byte_stats_shared_clean_resident))
+            .Set("sw",
+                 base::StringPrintf(kHexFmt, region->byte_stats_swapped)));
+#endif
+
+    vm_regions.Append(std::move(region_dict));
+  }
+  return base::Value(
+      base::DictValue().Set("vm_regions", std::move(vm_regions)));
+}
+
 base::Value BuildMemoryMaps(const ExportParams& params) {
-  base::trace_event::TracedValueJSON traced_value;
-  memory_instrumentation::TracingObserver::MemoryMapsAsValueInto(
-      params.maps, &traced_value, params.strip_path_from_mapped_files);
-  return traced_value.ToBaseValue()->Clone();
+  return MemoryMapsAsValue(params.maps, params.strip_path_from_mapped_files);
 }
 
 // Inserts or retrieves the ID for a string in the string table.
@@ -187,71 +254,69 @@ int AppendBacktraceStrings(const AllocationSite& alloc,
   return parent;  // Last item is the top of this stack.
 }
 
-base::Value BuildStrings(const StringTable& string_table) {
-  base::Value::ListStorage strings;
+base::ListValue BuildStrings(const StringTable& string_table) {
+  base::ListValue strings;
   strings.reserve(string_table.size());
   for (const auto& string_pair : string_table) {
-    base::Value item(base::Value::Type::DICTIONARY);
-    item.SetIntKey("id", string_pair.second);
-    item.SetStringKey("string", string_pair.first);
-    strings.push_back(std::move(item));
+    base::DictValue item;
+    item.Set("id", string_pair.second);
+    item.Set("string", string_pair.first);
+    strings.Append(std::move(item));
   }
-  return base::Value(std::move(strings));
+  return strings;
 }
 
-base::Value BuildMapNodes(const BacktraceTable& nodes) {
-  base::Value::ListStorage items;
+base::ListValue BuildMapNodes(const BacktraceTable& nodes) {
+  base::ListValue items;
   items.reserve(nodes.size());
   for (const auto& node_pair : nodes) {
-    base::Value item(base::Value::Type::DICTIONARY);
-    item.SetIntKey("id", node_pair.second);
-    item.SetIntKey("name_sid", node_pair.first.string_id());
+    base::DictValue item;
+    item.Set("id", node_pair.second);
+    item.Set("name_sid", node_pair.first.string_id());
     if (node_pair.first.parent() != BacktraceNode::kNoParent)
-      item.SetIntKey("parent", node_pair.first.parent());
-    items.push_back(std::move(item));
+      item.Set("parent", node_pair.first.parent());
+    items.Append(std::move(item));
   }
-  return base::Value(std::move(items));
+  return items;
 }
 
-base::Value BuildTypeNodes(const std::map<int, int>& type_to_string) {
-  base::Value::ListStorage items;
+base::ListValue BuildTypeNodes(const std::map<int, int>& type_to_string) {
+  base::ListValue items;
   items.reserve(type_to_string.size());
   for (const auto& pair : type_to_string) {
-    base::Value item(base::Value::Type::DICTIONARY);
-    item.SetIntKey("id", pair.first);
-    item.SetIntKey("name_sid", pair.second);
-    items.push_back(std::move(item));
+    base::DictValue item;
+    item.Set("id", pair.first);
+    item.Set("name_sid", pair.second);
+    items.Append(std::move(item));
   }
-  return base::Value(std::move(items));
+  return items;
 }
 
-base::Value BuildAllocations(const AllocationMap& allocations,
-                             const AllocationToNodeId& alloc_to_node_id) {
-  base::Value::ListStorage counts[kAllocatorCount];
-  base::Value::ListStorage sizes[kAllocatorCount];
-  base::Value::ListStorage types[kAllocatorCount];
-  base::Value::ListStorage nodes[kAllocatorCount];
+base::DictValue BuildAllocations(const AllocationMap& allocations,
+                                 const AllocationToNodeId& alloc_to_node_id) {
+  std::array<base::ListValue, kAllocatorCount> counts;
+  std::array<base::ListValue, kAllocatorCount> sizes;
+  std::array<base::ListValue, kAllocatorCount> types;
+  std::array<base::ListValue, kAllocatorCount> nodes;
 
   for (const auto& alloc : allocations) {
     int allocator = static_cast<int>(alloc.first.allocator);
     // We use double to store size and count, as it can precisely represent
     // values up to 2^52 ~ 4.5 petabytes.
-    counts[allocator].push_back(
-        base::Value(static_cast<double>(round(alloc.second.count))));
-    sizes[allocator].push_back(
-        base::Value(static_cast<double>(alloc.second.size)));
-    types[allocator].push_back(base::Value(alloc.first.context_id));
-    nodes[allocator].push_back(base::Value(alloc_to_node_id.at(&alloc.first)));
+    counts[allocator].Append(static_cast<double>(round(alloc.second.count)));
+    sizes[allocator].Append(static_cast<double>(alloc.second.size));
+    types[allocator].Append(alloc.first.context_id);
+    nodes[allocator].Append(alloc_to_node_id.at(&alloc.first));
   }
 
-  base::Value allocators(base::Value::Type::DICTIONARY);
+  base::DictValue allocators;
   for (uint32_t i = 0; i < kAllocatorCount; i++) {
-    base::Value allocator(base::Value::Type::DICTIONARY);
-    allocator.SetKey("counts", base::Value(std::move(counts[i])));
-    allocator.SetKey("sizes", base::Value(std::move(sizes[i])));
-    allocator.SetKey("types", base::Value(std::move(types[i])));
-    allocator.SetKey("nodes", base::Value(std::move(nodes[i])));
-    allocators.SetKey(StringForAllocatorType(i), std::move(allocator));
+    base::DictValue allocator;
+    allocator.Set("counts", std::move(counts[i]));
+    allocator.Set("sizes", std::move(sizes[i]));
+    allocator.Set("types", std::move(types[i]));
+    allocator.Set("nodes", std::move(nodes[i]));
+    allocators.Set(StringForAllocatorType(i), std::move(allocator));
   }
   return allocators;
 }
@@ -262,16 +327,16 @@ ExportParams::ExportParams() = default;
 ExportParams::~ExportParams() = default;
 
 std::string ExportMemoryMapsAndV2StackTraceToJSON(ExportParams* params) {
-  base::Value result(base::Value::Type::DICTIONARY);
+  base::DictValue result;
 
-  result.SetStringKey("level_of_detail", "detailed");
-  result.SetKey("process_mmaps", BuildMemoryMaps(*params));
-  result.SetKey("allocators", BuildAllocatorsSummary(params->allocs));
+  result.Set("level_of_detail", "detailed");
+  result.Set("process_mmaps", BuildMemoryMaps(*params));
+  result.Set("allocators", BuildAllocatorsSummary(params->allocs));
 
-  base::Value heaps_v2(base::Value::Type::DICTIONARY);
+  base::DictValue heaps_v2;
 
   // Output Heaps_V2 format version. Currently "1" is the only valid value.
-  heaps_v2.SetIntKey("version", 1);
+  heaps_v2.Set("version", 1);
 
   // Put all required context strings in the string table and generate a
   // mapping from allocation context_id to string ID.
@@ -290,16 +355,16 @@ std::string ExportMemoryMapsAndV2StackTraceToJSON(ExportParams* params) {
   }
 
   // Maps section.
-  base::Value maps(base::Value::Type::DICTIONARY);
-  maps.SetKey("strings", BuildStrings(string_table));
-  maps.SetKey("nodes", BuildMapNodes(nodes));
-  maps.SetKey("types", BuildTypeNodes(context_to_string_id_map));
-  heaps_v2.SetKey("maps", std::move(maps));
+  base::DictValue maps;
+  maps.Set("strings", BuildStrings(string_table));
+  maps.Set("nodes", BuildMapNodes(nodes));
+  maps.Set("types", BuildTypeNodes(context_to_string_id_map));
+  heaps_v2.Set("maps", std::move(maps));
 
-  heaps_v2.SetKey("allocators",
-                  BuildAllocations(params->allocs, alloc_to_node_id));
+  heaps_v2.Set("allocators",
+               BuildAllocations(params->allocs, alloc_to_node_id));
 
-  result.SetKey("heaps_v2", std::move(heaps_v2));
+  result.Set("heaps_v2", std::move(heaps_v2));
 
   std::string result_json;
   bool ok = base::JSONWriter::WriteWithOptions(

@@ -1,23 +1,29 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_GFX_SWAP_RESULT_H_
 #define UI_GFX_SWAP_RESULT_H_
 
-#include <memory>
-
+#include "base/component_export.h"
 #include "base/time/time.h"
-#include "ui/gfx/gfx_export.h"
+#include "ui/gfx/ca_layer_params.h"
+#include "ui/gfx/gpu_fence_handle.h"
 
 namespace gfx {
-
-struct CALayerParams;
-class GpuFence;
 
 enum class SwapResult {
   SWAP_ACK,
   SWAP_FAILED,
+  // Typically, the Viz thread should decide whether to skip a swap based off
+  // the damage. In rare cases, however, the GPU main thread might skip the
+  // swap after the Viz thread requests it (e.g. the Viz thread might not know
+  // that the buffers are not fully initialized yet). For the purposes of
+  // metrics bookkeeping, we label this scenario as SWAP_SKIPPED and treat it
+  // much like we do a SWAP_FAILED (e.g. failed PresentationFeedback).
+  // TODO(https://crbug.com/1226090): Consider more explicit handling of
+  // SWAP_SKIPPED.
+  SWAP_SKIPPED,
   SWAP_NAK_RECREATE_BUFFERS,
   SWAP_RESULT_LAST = SWAP_NAK_RECREATE_BUFFERS,
 };
@@ -32,16 +38,20 @@ struct SwapTimings {
   // dicontinuities in associated UMA data.
   base::TimeTicks swap_end;
 
-  // When Display Compositor thread scheduled work to GPU Thread. For GLRenderer
-  // it's when InProcessCommandBuffer::Flush() happens, for SkiaRenderer it's
-  // PostTask time for FinishPaintRenderPass or SwapBuffers whichever comes
-  // first.
+  // When Display Compositor thread scheduled work to GPU Thread. For
+  // SkiaRenderer it's PostTask time for FinishPaintRenderPass or SwapBuffers
+  // whichever comes first.
   base::TimeTicks viz_scheduled_draw;
 
   // When GPU thread started draw submitted by Display Compositor thread. For
-  // GLRenderer it's InProcessCommandBuffer::FlushOnGpuThread, for SkiaRenderer
-  // it's FinishPaintRenderPass/SwapBuffers.
+  // SkiaRenderer it's FinishPaintRenderPass/SwapBuffers.
   base::TimeTicks gpu_started_draw;
+
+  // When GPU scheduler removed the last required dependency.
+  base::TimeTicks gpu_task_ready;
+
+  // When the GPU thread started scheduling overlays.
+  base::TimeTicks gpu_started_overlay;
 
   bool is_null() const { return swap_start.is_null() && swap_end.is_null(); }
 };
@@ -55,7 +65,7 @@ struct SwapResponse {
   uint64_t swap_id;
 
   // Indicates whether the swap succeeded or not.
-  // TODO(https://crbug.com/894929): It may be more reasonable to add
+  // TODO(crbug.com/40597949): It may be more reasonable to add
   // a full SwapCompletionResult as a member.
   SwapResult result;
 
@@ -63,13 +73,13 @@ struct SwapResponse {
   SwapTimings timings;
 };
 
-// Sent by GLImages to their GLImage::SwapCompletionCallbacks.
-struct GFX_EXPORT SwapCompletionResult {
+// Sent as part of finishing a swap.
+struct COMPONENT_EXPORT(GFX) SwapCompletionResult {
   explicit SwapCompletionResult(gfx::SwapResult swap_result);
   SwapCompletionResult(gfx::SwapResult swap_result,
-                       std::unique_ptr<gfx::GpuFence> gpu_fence);
+                       gfx::GpuFenceHandle release_fence);
   SwapCompletionResult(gfx::SwapResult swap_result,
-                       std::unique_ptr<gfx::CALayerParams> ca_layer_params);
+                       gfx::CALayerParams ca_layer_params);
   SwapCompletionResult(SwapCompletionResult&& other);
   ~SwapCompletionResult();
 
@@ -77,8 +87,8 @@ struct GFX_EXPORT SwapCompletionResult {
   SwapCompletionResult& operator=(const SwapCompletionResult other) = delete;
 
   gfx::SwapResult swap_result = SwapResult::SWAP_FAILED;
-  std::unique_ptr<GpuFence> gpu_fence;
-  std::unique_ptr<CALayerParams> ca_layer_params;
+  gfx::GpuFenceHandle release_fence;
+  CALayerParams ca_layer_params;
 };
 
 }  // namespace gfx

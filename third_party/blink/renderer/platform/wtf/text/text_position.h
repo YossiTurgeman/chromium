@@ -28,13 +28,12 @@
 
 #include <memory>
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_export.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
 
-namespace WTF {
+namespace blink {
 
 // An abstract number of element in a sequence. The sequence has a first
 // element.  This type should be used instead of integer because 2
@@ -50,7 +49,9 @@ class OrdinalNumber final {
   static OrdinalNumber FromOneBasedInt(int one_based_int) {
     return OrdinalNumber(one_based_int - 1);
   }
-  OrdinalNumber() : zero_based_value_(0) {}
+
+  // Use First() instead.
+  OrdinalNumber() = delete;
 
   int ZeroBasedInt() const { return zero_based_value_; }
   int OneBasedInt() const { return zero_based_value_ + 1; }
@@ -58,7 +59,6 @@ class OrdinalNumber final {
   bool operator==(OrdinalNumber other) const {
     return zero_based_value_ == other.zero_based_value_;
   }
-  bool operator!=(OrdinalNumber other) const { return !((*this) == other); }
 
   static OrdinalNumber First() { return OrdinalNumber(0); }
   static OrdinalNumber BeforeFirst() { return OrdinalNumber(-1); }
@@ -77,12 +77,12 @@ class TextPosition final {
  public:
   TextPosition(OrdinalNumber line, OrdinalNumber column)
       : line_(line), column_(column) {}
-  TextPosition() = default;
+
+  // Use MinimumPosition() instead.
+  TextPosition() = delete;
+
   bool operator==(const TextPosition& other) const {
     return line_ == other.line_ && column_ == other.column_;
-  }
-  bool operator!=(const TextPosition& other) const {
-    return !((*this) == other);
   }
   WTF_EXPORT OrdinalNumber ToOffset(const Vector<unsigned>&);
 
@@ -110,12 +110,6 @@ class TextPosition final {
 
 WTF_EXPORT std::unique_ptr<Vector<wtf_size_t>> GetLineEndings(const String&);
 
-}  // namespace WTF
-
-using WTF::OrdinalNumber;
-
-using WTF::TextPosition;
-
-using WTF::GetLineEndings;
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_TEXT_POSITION_H_

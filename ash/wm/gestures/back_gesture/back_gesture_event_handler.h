@@ -1,11 +1,10 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_WM_GESTURES_BACK_GESTURE_BACK_GESTURE_EVENT_HANDLER_H_
 #define ASH_WM_GESTURES_BACK_GESTURE_BACK_GESTURE_EVENT_HANDLER_H_
 
-#include "ash/wm/gestures/back_gesture/back_gesture_metrics.h"
 #include "base/containers/flat_set.h"
 #include "ui/display/display_observer.h"
 #include "ui/events/event_handler.h"
@@ -41,6 +40,10 @@ class BackGestureEventHandler : public display::DisplayObserver,
   // ui::EventHandler:
   void OnGestureEvent(ui::GestureEvent* event) override;
   void OnTouchEvent(ui::TouchEvent* event) override;
+
+  // ui::GestureConsumer:
+  const std::string& GetName() const override;
+  base::WeakPtr<ui::GestureConsumer> GetWeakPtr() override;
 
   // ui::GestureProviderAuraClient:
   void OnGestureEvent(GestureConsumer* consumer,
@@ -112,7 +115,10 @@ class BackGestureEventHandler : public display::DisplayObserver,
   // OnTouchEvent session. This is done to avoid tap down event be used by the
   // window that is underneath to do other things (e.g, highlight a menu item)
   // instead of going back.
-  ui::GestureProviderAura gesture_provider_;
+  ui::GestureProviderAura gesture_provider_{this, this};
+
+  // Register for DisplayObserver callbacks.
+  display::ScopedDisplayObserver display_observer_{this};
 
   // False if BackGestureEventHandler should not handle touch events directly in
   // OnTouchEvent(), but should wait after touch ack is received. This is needed
@@ -121,9 +127,7 @@ class BackGestureEventHandler : public display::DisplayObserver,
   // whether back gesture should be shown.
   bool should_wait_for_touch_ack_ = false;
 
-  // Start scenario type of the back gesture, used for related metrics.
-  BackGestureStartScenarioType back_gesture_start_scenario_type_ =
-      BackGestureStartScenarioType::kMaxValue;
+  base::WeakPtrFactory<BackGestureEventHandler> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

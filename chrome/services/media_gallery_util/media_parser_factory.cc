@@ -1,10 +1,9 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/services/media_gallery_util/media_parser_factory.h"
 
-#include "base/allocator/buildflags.h"
 #include "build/build_config.h"
 #include "chrome/services/media_gallery_util/media_parser.h"
 #include "media/base/media.h"
@@ -12,7 +11,7 @@
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_FFMPEG)
 #include "chrome/services/media_gallery_util/media_parser_android.h"
 #endif
 
@@ -29,7 +28,7 @@ void MediaParserFactory::CreateMediaParser(int64_t libyuv_cpu_flags,
 
   mojo::PendingRemote<chrome::mojom::MediaParser> remote_media_parser;
   std::unique_ptr<MediaParser> media_parser;
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_FFMPEG)
   media_parser = std::make_unique<MediaParserAndroid>();
 #else
   media_parser = std::make_unique<MediaParser>();

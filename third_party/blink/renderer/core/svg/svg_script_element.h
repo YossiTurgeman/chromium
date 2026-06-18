@@ -21,13 +21,14 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_SCRIPT_ELEMENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_SCRIPT_ELEMENT_H_
 
+#include "base/dcheck_is_on.h"
 #include "third_party/blink/renderer/core/dom/create_element_flags.h"
 #include "third_party/blink/renderer/core/script/script_element_base.h"
 #include "third_party/blink/renderer/core/svg/svg_element.h"
 #include "third_party/blink/renderer/core/svg/svg_uri_reference.h"
 #include "third_party/blink/renderer/core/svg_names.h"
 #include "third_party/blink/renderer/platform/bindings/parkable_string.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
@@ -40,6 +41,9 @@ class SVGScriptElement final : public SVGElement,
 
  public:
   SVGScriptElement(Document&, const CreateElementFlags);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGScriptElement;
+  }
 
   ScriptLoader* Loader() const final { return loader_.Get(); }
 
@@ -51,16 +55,21 @@ class SVGScriptElement final : public SVGElement,
 
   const AttrNameToTrustedType& GetCheckedAttributeTypes() const override;
 
+  V8HTMLOrSVGScriptElement* AsV8HTMLOrSVGScriptElement() override;
+  DOMNodeId GetDOMNodeId() override;
+
   void Trace(Visitor*) const override;
+
+  void setAsync(bool);
+  bool async() const;
 
  private:
   void ParseAttribute(const AttributeModificationParams&) override;
   InsertionNotificationRequest InsertedInto(ContainerNode&) override;
   void DidNotifySubtreeInsertionsToDocument() override;
   void ChildrenChanged(const ChildrenChange&) override;
-  void DidMoveToNewDocument(Document& old_document) override;
 
-  void SvgAttributeChanged(const QualifiedName&) override;
+  void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   bool IsURLAttribute(const Attribute&) const override;
   bool IsStructurallyExternal() const override { return HasSourceAttribute(); }
   void FinishParsingChildren() override;
@@ -68,48 +77,57 @@ class SVGScriptElement final : public SVGElement,
   bool HaveLoadedRequiredResources() override;
 
   // ScriptElementBase overrides:
-  bool AsyncAttributeValue() const override { return false; }
   String CharsetAttributeValue() const override { return String(); }
   String CrossOriginAttributeValue() const override { return String(); }
   bool DeferAttributeValue() const override { return false; }
   String EventAttributeValue() const override { return String(); }
   String ForAttributeValue() const override { return String(); }
-  String IntegrityAttributeValue() const override { return String(); }
+  String IntegrityAttributeValue() const override;
+  String SignatureAttributeValue() const override;
   String ReferrerPolicyAttributeValue() const override { return String(); }
-  String ImportanceAttributeValue() const override { return String(); }
+  String FetchPriorityAttributeValue() const override { return String(); }
   String LanguageAttributeValue() const override { return String(); }
   bool NomoduleAttributeValue() const override { return false; }
+  bool AsyncAttributeValue() const override;
   String SourceAttributeValue() const override;
   String TypeAttributeValue() const override;
+  String CacheHintAttributeValue() const override { return String(); }
   String ChildTextContent() override;
   String ScriptTextInternalSlot() const override;
   bool HasSourceAttribute() const override;
+  bool HasAttributionsrcAttribute() const override { return false; }
   bool IsConnected() const override;
   bool HasChildren() const override;
   const AtomicString& GetNonceForElement() const override;
   bool ElementHasDuplicateAttributes() const override {
     return HasDuplicateAttribute();
   }
+  bool IsPotentiallyRenderBlocking() const override { return false; }
   bool AllowInlineScriptForCSP(const AtomicString& nonce,
-                               const WTF::OrdinalNumber&,
+                               const OrdinalNumber&,
                                const String& script_content) override;
   Document& GetDocument() const override;
   ExecutionContext* GetExecutionContext() const override;
   void DispatchLoadEvent() override;
   void DispatchErrorEvent() override;
-  void SetScriptElementForBinding(
-      HTMLScriptElementOrSVGScriptElement&) override;
 
   Type GetScriptElementType() override;
 
-  Element& CloneWithoutAttributesAndChildren(Document&) const override;
-  bool LayoutObjectIsNeeded(const ComputedStyle&) const override {
+  Element& CloneWithoutAttributesAndChildren(Document&, CustomElementRegistry*)
+      const override;
+  bool LayoutObjectIsNeeded(const DisplayStyle&) const override {
     return false;
   }
 
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
+
   bool have_fired_load_ = false;
 
+  // https://w3c.github.io/trusted-types/dist/spec/#script-scripttext
   ParkableString script_text_internal_slot_;
+  bool children_changed_by_api_ = false;
 
   Member<ScriptLoader> loader_;
 };

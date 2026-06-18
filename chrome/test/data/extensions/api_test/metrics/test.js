@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,22 +27,39 @@ chrome.test.runTests([
     chrome.test.succeed();
   },
 
-  function recordValue() {
-    chrome.metricsPrivate.recordValue({
-      'metricName': 'test.h.1',
-      'type': chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LOG,
-      'min': 1,
-      'max': 100,
-      'buckets': 50
-    }, 42);
+  function recordExtensionUsageUkm() {
+    const EXTENSION_ID = 'a'.repeat(32);
+    chrome.metricsPrivate.recordExtensionUsageUkm(EXTENSION_ID, 'kPinned');
+    chrome.metricsPrivate.recordExtensionUsageUkm(EXTENSION_ID, 'kUnpinned');
+    chrome.metricsPrivate.recordExtensionUsageUkm(
+        EXTENSION_ID, 'kContextMenuInit');
+    chrome.metricsPrivate.recordExtensionUsageUkm(
+        EXTENSION_ID, 'kActionClicked');
+    chrome.metricsPrivate.recordExtensionUsageUkm(EXTENSION_ID, 'kEnabled');
+    chrome.metricsPrivate.recordExtensionUsageUkm(EXTENSION_ID, 'kDisabled');
+    chrome.test.succeed();
+  },
 
-    chrome.metricsPrivate.recordValue({
-      'metricName': 'test.h.2',
-      'type': chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LINEAR,
-      'min': 1,
-      'max': 200,
-      'buckets': 50
-    }, 42);
+  function recordValue() {
+    chrome.metricsPrivate.recordValue(
+        {
+          metricName: 'test.h.1',
+          type: chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LOG,
+          min: 1,
+          max: 100,
+          buckets: 50,
+        },
+        42);
+
+    chrome.metricsPrivate.recordValue(
+        {
+          metricName: 'test.h.2',
+          type: chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LINEAR,
+          min: 1,
+          max: 200,
+          buckets: 50,
+        },
+        42);
 
     chrome.metricsPrivate.recordPercentage('test.h.3', 42);
     chrome.metricsPrivate.recordPercentage('test.h.3', 42);
@@ -81,12 +98,12 @@ chrome.test.runTests([
   },
 
   function getFieldTrial() {
-    var test1Callback = function(group) {
+    const test1Callback = function(group) {
       chrome.test.assertEq('', group);
       chrome.metricsPrivate.getFieldTrial('apitestfieldtrial2', test2Callback);
     };
 
-    var test2Callback = function(group) {
+    const test2Callback = function(group) {
       chrome.test.assertEq('group1', group);
       chrome.test.succeed();
     };
@@ -97,49 +114,49 @@ chrome.test.runTests([
   function getVariationParams1() {
     chrome.metricsPrivate.getVariationParams(
         'apitestfieldtrial1', function(params) {
-      chrome.test.assertEq(undefined, chrome.runtime.lastError);
-      chrome.test.assertEq(undefined, params);
-      chrome.test.succeed();
-    });
+          chrome.test.assertEq(undefined, chrome.runtime.lastError);
+          chrome.test.assertEq(undefined, params);
+          chrome.test.succeed();
+        });
   },
 
   function getVariationParams2() {
     chrome.metricsPrivate.getVariationParams(
         'apitestfieldtrial2', function(params) {
-      chrome.test.assertEq(undefined, chrome.runtime.lastError);
-      chrome.test.assertEq({a: 'aa', b: 'bb'}, params);
-      chrome.test.succeed();
-    });
+          chrome.test.assertEq(undefined, chrome.runtime.lastError);
+          chrome.test.assertEq({a: 'aa', b: 'bb'}, params);
+          chrome.test.succeed();
+        });
   },
 
   function testBucketSizeChanges() {
-    var linear1 = {
-      'metricName': 'test.bucketchange.linear',
-      'type': chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LINEAR,
-      'min': 0,
-      'max': 100,
-      'buckets': 10
+    const linear1 = {
+      metricName: 'test.bucketchange.linear',
+      type: chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LINEAR,
+      min: 0,
+      max: 100,
+      buckets: 10,
     };
-    var linear2 = {
-      'metricName': 'test.bucketchange.linear',
-      'type': chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LINEAR,
-      'min': 0,
-      'max': 100,
-      'buckets': 20
+    const linear2 = {
+      metricName: 'test.bucketchange.linear',
+      type: chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LINEAR,
+      min: 0,
+      max: 100,
+      buckets: 20,
     };
-    var log1 = {
-      'metricName': 'test.bucketchange.log',
-      'type': chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LOG,
-      'min': 0,
-      'max': 100,
-      'buckets': 10
+    const log1 = {
+      metricName: 'test.bucketchange.log',
+      type: chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LOG,
+      min: 0,
+      max: 100,
+      buckets: 10,
     };
-    var log2 = {
-      'metricName': 'test.bucketchange.log',
-      'type': chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LOG,
-      'min': 0,
-      'max': 100,
-      'buckets': 20
+    const log2 = {
+      metricName: 'test.bucketchange.log',
+      type: chrome.metricsPrivate.MetricTypeType.HISTOGRAM_LOG,
+      min: 0,
+      max: 100,
+      buckets: 20,
     };
 
     chrome.metricsPrivate.recordValue(linear1, 42);
@@ -158,4 +175,3 @@ chrome.test.runTests([
   },
 
 ]);
-

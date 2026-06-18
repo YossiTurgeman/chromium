@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,14 @@
 #define COMPONENTS_JS_INJECTION_BROWSER_JS_COMMUNICATION_HOST_H_
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
-#include "base/optional.h"
-#include "base/strings/string16.h"
-#include "components/js_injection/common/interfaces.mojom.h"
+#include "base/memory/raw_ptr.h"
+#include "components/js_injection/common/enum.mojom-forward.h"
+#include "components/origin_matcher/origin_matcher.h"
+#include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/web_contents_observer.h"
 
 namespace content {
@@ -19,11 +22,26 @@ class RenderFrameHost;
 
 namespace js_injection {
 
-class OriginMatcher;
-struct DocumentStartJavaScript;
 struct JsObject;
-class JsToBrowserMessaging;
 class WebMessageHostFactory;
+
+struct JavaScriptExecutable {
+  JavaScriptExecutable(std::u16string script,
+                       mojom::DocumentInjectionTime event_type,
+                       origin_matcher::OriginMatcher allowed_origin_rules,
+                       int32_t world_identifier,
+                       int32_t script_id);
+  JavaScriptExecutable(JavaScriptExecutable&) = delete;
+  JavaScriptExecutable& operator=(JavaScriptExecutable&) = delete;
+  JavaScriptExecutable(JavaScriptExecutable&&) = default;
+  JavaScriptExecutable& operator=(JavaScriptExecutable&&) = default;
+
+  std::u16string script_;
+  origin_matcher::OriginMatcher allowed_origin_rules_;
+  int32_t script_id_;
+  mojom::DocumentInjectionTime event_type_;
+  int32_t world_identifier_;
+};
 
 // This class is 1:1 with WebContents, when AddWebMessageListener() is called,
 // it stores the information in this class and send them to renderer side
@@ -33,6 +51,10 @@ class WebMessageHostFactory;
 class JsCommunicationHost : public content::WebContentsObserver {
  public:
   explicit JsCommunicationHost(content::WebContents* web_contents);
+
+  JsCommunicationHost(const JsCommunicationHost&) = delete;
+  JsCommunicationHost& operator=(const JsCommunicationHost&) = delete;
+
   ~JsCommunicationHost() override;
 
   // Captures the result of adding script. There are two possibilities when
@@ -44,35 +66,42 @@ class JsCommunicationHost : public content::WebContentsObserver {
     AddScriptResult& operator=(const AddScriptResult&);
     ~AddScriptResult();
 
-    base::Optional<std::string> error_message;
-    base::Optional<int> script_id;
+    std::optional<std::string> error_message;
+    std::optional<int> script_id;
   };
 
-  // Native side AddDocumentStartJavaScript, returns an error message if the
+  // Native side AddPersistentJavaScript, returns an error message if the
   // parameters didn't pass necessary checks.
-  AddScriptResult AddDocumentStartJavaScript(
-      const base::string16& script,
-      const std::vector<std::string>& allowed_origin_rules);
+  AddScriptResult AddPersistentJavaScript(
+      std::u16string script,
+      mojom::DocumentInjectionTime event_type,
+      const std::vector<std::string>& allowed_origin_rules,
+      int32_t world_identifier);
 
-  bool RemoveDocumentStartJavaScript(int script_id);
+  bool RemovePersistentJavaScript(int script_id);
+
+  const std::vector<JavaScriptExecutable>& GetPersistentJavaScripts() const;
 
   // Adds a new WebMessageHostFactory. For any urls that match
   // |allowed_origin_rules|, |js_object_name| is registered as a JS object that
   // can be used by script on the page to send and receive messages. Returns
   // an empty string on success. On failure, the return string gives the error
   // message.
-  base::string16 AddWebMessageHostFactory(
+  std::u16string AddWebMessageHostFactory(
       std::unique_ptr<WebMessageHostFactory> factory,
-      const base::string16& js_object_name,
-      const std::vector<std::string>& allowed_origin_rules);
+      const std::u16string& js_object_name,
+      const std::vector<std::string>& allowed_origin_rules,
+      int32_t world_identifier);
 
   // Returns the factory previously registered under the specified name.
-  void RemoveWebMessageHostFactory(const base::string16& js_object_name);
+  void RemoveWebMessageHostFactory(const std::u16string& js_object_name,
+                                   int32_t world_identifier);
 
   struct RegisteredFactory {
-    base::string16 js_name;
-    OriginMatcher allowed_origin_rules;
-    WebMessageHostFactory* factory = nullptr;
+    std::u16string js_name;
+    origin_matcher::OriginMatcher allowed_origin_rules;
+    int32_t world_id;
+    raw_ptr<WebMessageHostFactory> factory = nullptr;
   };
 
   // Returns the registered factories.
@@ -81,28 +110,32 @@ class JsCommunicationHost : public content::WebContentsObserver {
   // content::WebContentsObserver implementations
   void RenderFrameCreated(content::RenderFrameHost* render_frame_host) override;
   void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
+  void RenderFrameHostStateChanged(
+      content::RenderFrameHost* render_frame_host,
+      content::RenderFrameHost::LifecycleState old_state,
+      content::RenderFrameHost::LifecycleState new_state) override;
+  void PrimaryPageChanged(content::Page& page) override;
 
  private:
+  class JsToBrowserMessagingList;
   void NotifyFrameForWebMessageListener(
       content::RenderFrameHost* render_frame_host);
-  void NotifyFrameForAllDocumentStartJavaScripts(
+  void NotifyFrameForAllPersistentJavaScripts(
       content::RenderFrameHost* render_frame_host);
-  void NotifyFrameForAddDocumentStartJavaScript(
-      const DocumentStartJavaScript* script,
+  void NotifyFrameForPersistentJavaScript(
+      const JavaScriptExecutable* script,
       content::RenderFrameHost* render_frame_host);
-
-  void NotifyFrameForRemoveDocumentStartJavaScript(
+  void NotifyFrameForRemovePersistentJavaScript(
       int32_t script_id,
       content::RenderFrameHost* render_frame_host);
 
   int32_t next_script_id_ = 0;
-  std::vector<DocumentStartJavaScript> scripts_;
+  std::vector<JavaScriptExecutable> sticky_scripts_;
   std::vector<std::unique_ptr<JsObject>> js_objects_;
-  std::map<content::RenderFrameHost*,
-           std::vector<std::unique_ptr<JsToBrowserMessaging>>>
+  std::map<content::GlobalRenderFrameHostId,
+           std::unique_ptr<JsToBrowserMessagingList>>
       js_to_browser_messagings_;
-
-  DISALLOW_COPY_AND_ASSIGN(JsCommunicationHost);
+  bool has_navigation_listener_ = false;
 };
 
 }  // namespace js_injection

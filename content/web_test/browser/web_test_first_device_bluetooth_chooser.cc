@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,9 +21,10 @@ void WebTestFirstDeviceBluetoothChooser::SetAdapterPresence(
     case AdapterPresence::POWERED_OFF:
       // Without a user-visible dialog, if the adapter is off, there's no way to
       // ask the user to turn it on again, so we should cancel.
-      event_handler_.Run(Event::CANCELLED, "");
+      event_handler_.Run(BluetoothChooserEvent::CANCELLED, "");
       break;
     case AdapterPresence::POWERED_ON:
+    case AdapterPresence::UNAUTHORIZED:
       break;
   }
 }
@@ -37,7 +38,7 @@ void WebTestFirstDeviceBluetoothChooser::ShowDiscoveryState(
       // device, we'll never find one, so we should cancel.
       VLOG(1) << "WebTestFirstDeviceBluetoothChooser found nothing before "
                  "going idle.";
-      event_handler_.Run(Event::CANCELLED, "");
+      event_handler_.Run(BluetoothChooserEvent::CANCELLED, "");
       break;
     case DiscoveryState::DISCOVERING:
       break;
@@ -47,11 +48,11 @@ void WebTestFirstDeviceBluetoothChooser::ShowDiscoveryState(
 void WebTestFirstDeviceBluetoothChooser::AddOrUpdateDevice(
     const std::string& device_id,
     bool should_update_name,
-    const base::string16& deviceName,
+    const std::u16string& deviceName,
     bool is_gatt_connected,
     bool is_paired,
     int signal_strength_level) {
-  event_handler_.Run(Event::SELECTED, device_id);
+  event_handler_.Run(BluetoothChooserEvent::SELECTED, device_id);
 }
 
 }  // namespace content

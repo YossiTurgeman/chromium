@@ -1,6 +1,7 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 // Implementation of a client that produces output in the form of RGBA
 // buffers when receiving pointer/touch events. RGB contains the lower
@@ -11,8 +12,10 @@
 #include <wayland-client-core.h>
 #include <wayland-client-protocol.h>
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -20,20 +23,20 @@
 #include "base/command_line.h"
 #include "base/containers/circular_deque.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/scoped_generic.h"
-#include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_executor.h"
 #include "base/time/time.h"
 #include "components/exo/wayland/clients/client_base.h"
 #include "components/exo/wayland/clients/client_helper.h"
+#include "skia/ext/font_utils.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkFont.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
 #include "third_party/skia/include/core/SkSurface.h"
-#include "third_party/skia/include/gpu/GrDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
 #include "ui/gl/gl_bindings.h"
 
 namespace exo {
@@ -146,7 +149,7 @@ void FrameCallback(void* data, wl_callback* callback, uint32_t time) {
 }
 
 struct Frame {
-  ClientBase::Buffer* buffer = nullptr;
+  raw_ptr<ClientBase::Buffer> buffer = nullptr;
   base::TimeDelta wall_time;
   base::TimeDelta cpu_time;
   std::vector<base::TimeTicks> event_times;
@@ -200,13 +203,10 @@ void FeedbackDiscarded(void* data,
                        struct wp_presentation_feedback* presentation_feedback) {
   Presentation* presentation = static_cast<Presentation*>(data);
   DCHECK_GT(presentation->scheduled_frames.size(), 0u);
-  auto it =
-      std::find_if(presentation->scheduled_frames.begin(),
-                   presentation->scheduled_frames.end(),
-                   [presentation_feedback](std::unique_ptr<Frame>& frame) {
-                     return frame->feedback.get() == presentation_feedback;
-                   });
-  DCHECK(it != presentation->scheduled_frames.end());
+  auto it = std::ranges::find(
+      presentation->scheduled_frames, presentation_feedback,
+      [](std::unique_ptr<Frame>& frame) { return frame->feedback.get(); });
+  CHECK(it != presentation->scheduled_frames.end());
   presentation->scheduled_frames.erase(it);
   LOG(WARNING) << "Frame discarded";
 }
@@ -221,8 +221,7 @@ void InputTimestamp(void* data,
   int64_t microseconds = seconds * base::Time::kMicrosecondsPerSecond +
                          tv_nsec / base::Time::kNanosecondsPerMicrosecond;
 
-  *timestamp =
-      base::TimeTicks() + base::TimeDelta::FromMicroseconds(microseconds);
+  *timestamp = base::TimeTicks() + base::Microseconds(microseconds);
 }
 
 }  // namespace
@@ -232,7 +231,10 @@ void InputTimestamp(void* data,
 
 class RectsClient : public ClientBase {
  public:
-  RectsClient() {}
+  RectsClient() = default;
+
+  RectsClient(const RectsClient&) = delete;
+  RectsClient& operator=(const RectsClient&) = delete;
 
   // Initialize and run client main loop.
   int Run(const ClientBase::InitParams& params,
@@ -241,9 +243,6 @@ class RectsClient : public ClientBase {
           size_t num_benchmark_runs,
           base::TimeDelta benchmark_interval,
           bool show_fps_counter);
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RectsClient);
 };
 
 int RectsClient::Run(const ClientBase::InitParams& params,
@@ -318,7 +317,7 @@ int RectsClient::Run(const ClientBase::InitParams& params,
   wp_presentation_feedback_listener feedback_listener = {
       FeedbackSyncOutput, FeedbackPresented, FeedbackDiscarded};
 
-  SkFont font;
+  SkFont font = skia::DefaultFont();
   font.setSize(32);
   font.setEdging(SkFont::Edging::kAlias);
   SkPaint text_paint;
@@ -424,7 +423,7 @@ int RectsClient::Run(const ClientBase::InitParams& params,
                                    SK_ColorRED,  SK_ColorYELLOW,
                                    SK_ColorCYAN, SK_ColorMAGENTA};
         SkPaint paint;
-        paint.setColor(SkColorSetA(kColors[i % base::size(kColors)], 0xA0));
+        paint.setColor(SkColorSetA(kColors[i % std::size(kColors)], 0xA0));
         canvas->rotate(rotation / num_rects);
         canvas->drawIRect(rect, paint);
       }
@@ -442,8 +441,8 @@ int RectsClient::Run(const ClientBase::InitParams& params,
 
 #if defined(USE_GBM)
         if (egl_sync_type_) {
-          buffer->egl_sync.reset(new ScopedEglSync(eglCreateSyncKHR(
-              eglGetCurrentDisplay(), egl_sync_type_, nullptr)));
+          buffer->egl_sync = std::make_unique<ScopedEglSync>(eglCreateSyncKHR(
+              eglGetCurrentDisplay(), egl_sync_type_, nullptr));
           DCHECK(buffer->egl_sync->is_valid());
         }
 #endif
@@ -575,6 +574,6 @@ int main(int argc, char* argv[]) {
   base::SingleThreadTaskExecutor main_task_executor(base::MessagePumpType::UI);
   exo::wayland::clients::RectsClient client;
   return client.Run(params, max_frames_pending, num_rects, num_benchmark_runs,
-                    base::TimeDelta::FromMilliseconds(benchmark_interval_ms),
+                    base::Milliseconds(benchmark_interval_ms),
                     command_line->HasSwitch(switches::kShowFpsCounter));
 }

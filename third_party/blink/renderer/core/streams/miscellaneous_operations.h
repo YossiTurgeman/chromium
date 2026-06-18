@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_STREAMS_MISCELLANEOUS_OPERATIONS_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_STREAMS_MISCELLANEOUS_OPERATIONS_H_
 
+#include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -16,12 +17,10 @@ namespace blink {
 // https://streams.spec.whatwg.org/#misc-abstract-ops
 
 class ExceptionState;
-class ReadableStream;
 class ScriptState;
 class StrategySizeAlgorithm;
 class StreamAlgorithm;
 class StreamStartAlgorithm;
-class WritableStream;
 
 // This is slightly different than the version in the standard
 // https://streams.spec.whatwg.org/#create-algorithm-from-underlying-method as
@@ -68,9 +67,28 @@ CORE_EXPORT StreamStartAlgorithm* CreateStartAlgorithm(
     const char* method_name_for_error,
     v8::Local<v8::Value> controller);
 
+// Create a StreamStartAlgorithm from the "start" method on |underlying_object|
+// for readable byte streams.
+CORE_EXPORT StreamStartAlgorithm* CreateByteStreamStartAlgorithm(
+    ScriptState*,
+    v8::Local<v8::Object> underlying_object,
+    v8::Local<v8::Value> method,
+    v8::Local<v8::Value> controller);
+
 // Returns a startAlgorithm that always returns a promise resolved with
 // undefined.
 CORE_EXPORT StreamStartAlgorithm* CreateTrivialStartAlgorithm();
+
+// Returns a streamAlgorithm that always returns a promise resolved with
+// undefined.
+CORE_EXPORT StreamAlgorithm* CreateTrivialStreamAlgorithm();
+
+// Returns a strategy object that has no size() function and the supplied
+// highWaterMark. It has a null prototype so that it won't be affected by
+// changes to the global Object prototype. It behaves the same as a
+// CountQueuingStrategy but is faster and safer to use from C++.
+CORE_EXPORT ScriptValue CreateTrivialQueuingStrategy(v8::Isolate*,
+                                                     size_t high_water_mark);
 
 // Used in place of InvokeOrNoop in spec. Always takes 1 argument.
 // https://streams.spec.whatwg.org/#invoke-or-noop
@@ -86,11 +104,12 @@ CORE_EXPORT v8::MaybeLocal<v8::Value> CallOrNoop1(ScriptState*,
 // "F" is called |method| here
 // "V" is called |recv| here
 // "args" becomes |argc| and |argv| here.
-CORE_EXPORT v8::Local<v8::Promise> PromiseCall(ScriptState*,
-                                               v8::Local<v8::Function> method,
-                                               v8::Local<v8::Object> recv,
-                                               int argc,
-                                               v8::Local<v8::Value> argv[]);
+CORE_EXPORT ScriptPromise<IDLUndefined> PromiseCall(
+    ScriptState*,
+    v8::Local<v8::Function> method,
+    v8::Local<v8::Object> recv,
+    int argc,
+    v8::Local<v8::Value> argv[]);
 
 // Unlike in the standard, the caller needs to handle the conversion of the
 // value to a Number.
@@ -105,19 +124,6 @@ CORE_EXPORT StrategySizeAlgorithm* MakeSizeAlgorithmFromSizeFunction(
     ExceptionState&);
 
 CORE_EXPORT StrategySizeAlgorithm* CreateDefaultSizeAlgorithm();
-
-// Implements "a promise rejected with" from the INFRA standard.
-// https://www.w3.org/2001/tag/doc/promises-guide/#a-promise-rejected-with
-CORE_EXPORT v8::Local<v8::Promise> PromiseReject(ScriptState*,
-                                                 v8::Local<v8::Value>);
-
-// Implements "a promise resolved with" from the INFRA standard.
-// https://www.w3.org/2001/tag/doc/promises-guide/#a-promise-resolved-with
-CORE_EXPORT v8::Local<v8::Promise> PromiseResolve(ScriptState*,
-                                                  v8::Local<v8::Value>);
-
-// Implements "a promise resolved with *undefined*".
-CORE_EXPORT v8::Local<v8::Promise> PromiseResolveWithUndefined(ScriptState*);
 
 // Converts |value| to an object. |value| must not be empty. If |value| is
 // undefined, an empty object will be returned. If |value| is JavaScript null,
@@ -140,6 +146,8 @@ class StrategyUnpacker final {
   // arbitrary user code. The object cannot be used if
   // exception_state.HadException() is true.
   StrategyUnpacker(ScriptState*, ScriptValue strategy, ExceptionState&);
+  StrategyUnpacker(const StrategyUnpacker&) = delete;
+  StrategyUnpacker& operator=(const StrategyUnpacker&) = delete;
   ~StrategyUnpacker() = default;
 
   // Performs MakeSizeAlgorithmFromSizeFunction on |size_|. Because this method
@@ -153,11 +161,11 @@ class StrategyUnpacker final {
                           int default_value,
                           ExceptionState&) const;
 
+  bool IsSizeUndefined() const;
+
  private:
   v8::Local<v8::Value> size_;
   v8::Local<v8::Value> high_water_mark_;
-
-  DISALLOW_COPY_AND_ASSIGN(StrategyUnpacker);
 };
 
 }  // namespace blink

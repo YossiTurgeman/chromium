@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,10 @@
 
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_gc_controller.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_microtasks_scope.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
-#include "third_party/blink/renderer/platform/bindings/script_state.h"
+#include "third_party/blink/renderer/platform/heap/thread_state.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
@@ -23,32 +25,36 @@ class LocalDOMWindow;
 class LocalFrame;
 class KURL;
 class Page;
+class ScriptState;
 
 class V8TestingScope {
   STACK_ALLOCATED();
 
  public:
-  // TODO(keishi): Define CreateDummyPageHolder in DummyPageHolder.
-  static std::unique_ptr<DummyPageHolder> CreateDummyPageHolder(
-      const KURL& url);
   explicit V8TestingScope(const KURL& url = KURL());
+  explicit V8TestingScope(std::unique_ptr<DummyPageHolder> holder);
   ScriptState* GetScriptState() const;
   ExecutionContext* GetExecutionContext() const;
   v8::Isolate* GetIsolate() const;
   v8::Local<v8::Context> GetContext() const;
-  ExceptionState& GetExceptionState();
+  DummyExceptionStateForTesting& GetExceptionState();
   Page& GetPage();
   LocalFrame& GetFrame();
   LocalDOMWindow& GetWindow();
   Document& GetDocument();
   ~V8TestingScope();
 
+  // Perform a checkpoint on the context's microtask queue.
+  void PerformMicrotaskCheckpoint();
+
  private:
-  std::unique_ptr<DummyPageHolder> holder_;
+  std::unique_ptr<DummyPageHolder> const holder_;
+  v8::Isolate* const isolate_;
   v8::HandleScope handle_scope_;
   v8::Local<v8::Context> context_;
   v8::Context::Scope context_scope_;
   v8::TryCatch try_catch_;
+  V8DoNotRunMicrotasksScope microtasks_scope_;
   DummyExceptionStateForTesting exception_state_;
 };
 
@@ -63,7 +69,6 @@ class BindingTestSupportingGC : public testing::Test {
  public:
   void SetIsolate(v8::Isolate* isolate) {
     CHECK(isolate);
-    CHECK_EQ(isolate, ThreadState::Current()->GetIsolate());
     isolate_ = isolate;
   }
   v8::Isolate* GetIsolate() const { return isolate_; }
@@ -77,15 +82,14 @@ class BindingTestSupportingGC : public testing::Test {
         v8::Isolate::GarbageCollectionType::kMinorGarbageCollection);
   }
 
-  void RunV8FullGC(v8::EmbedderHeapTracer::EmbedderStackState stack_state =
-                       v8::EmbedderHeapTracer::EmbedderStackState::kEmpty) {
-    ThreadState::Current()->CollectAllGarbageForTesting(
-        stack_state == v8::EmbedderHeapTracer::EmbedderStackState::kEmpty
-            ? BlinkGC::kNoHeapPointersOnStack
-            : BlinkGC::kHeapPointersOnStack);
+  void RunV8FullGC(
+      cppgc::EmbedderStackState stack_state =
+          cppgc::EmbedderStackState::kNoHeapPointers) {
+    ThreadState::Current()->CollectAllGarbageForTesting(stack_state);
   }
 
  private:
+  test::TaskEnvironment task_environment_;
   v8::Isolate* isolate_;
 };
 

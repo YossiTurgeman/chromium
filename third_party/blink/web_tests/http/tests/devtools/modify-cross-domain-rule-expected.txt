@@ -5,8 +5,8 @@ Running: testSetUp
 
 Running: testAddProperty
 === Rule modified ===
-color: green;
-width: 100%;
+['color':'green'] @[1:2-1:15] 
+['width':'100%'] @[2:2-2:14] 
 === Selector changed ===
 body {
   color: green;

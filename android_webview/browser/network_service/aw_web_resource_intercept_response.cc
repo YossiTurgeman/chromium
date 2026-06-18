@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,11 @@
 #include <memory>
 #include <utility>
 
-#include "android_webview/browser/network_service/aw_web_resource_response.h"
-#include "android_webview/browser_jni_headers/AwWebResourceInterceptResponse_jni.h"
 #include "base/android/jni_android.h"
+#include "components/embedder_support/android/util/web_resource_response.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/browser_jni_headers/AwWebResourceInterceptResponse_jni.h"
 
 using base::android::ScopedJavaLocalRef;
 
@@ -20,6 +22,14 @@ AwWebResourceInterceptResponse::AwWebResourceInterceptResponse(
     : java_object_(obj) {}
 
 AwWebResourceInterceptResponse::~AwWebResourceInterceptResponse() = default;
+AwWebResourceInterceptResponse::AwWebResourceInterceptResponse(
+    AwWebResourceInterceptResponse&) = default;
+AwWebResourceInterceptResponse& AwWebResourceInterceptResponse::operator=(
+    AwWebResourceInterceptResponse&) = default;
+AwWebResourceInterceptResponse::AwWebResourceInterceptResponse(
+    AwWebResourceInterceptResponse&&) = default;
+AwWebResourceInterceptResponse& AwWebResourceInterceptResponse::operator=(
+    AwWebResourceInterceptResponse&&) = default;
 
 bool AwWebResourceInterceptResponse::RaisedException(JNIEnv* env) const {
   return Java_AwWebResourceInterceptResponse_getRaisedException(env,
@@ -30,13 +40,11 @@ bool AwWebResourceInterceptResponse::HasResponse(JNIEnv* env) const {
   return !!Java_AwWebResourceInterceptResponse_getResponse(env, java_object_);
 }
 
-std::unique_ptr<AwWebResourceResponse>
+std::unique_ptr<embedder_support::WebResourceResponse>
 AwWebResourceInterceptResponse::GetResponse(JNIEnv* env) const {
-  ScopedJavaLocalRef<jobject> j_response =
-      Java_AwWebResourceInterceptResponse_getResponse(env, java_object_);
-  if (!j_response)
-    return nullptr;
-  return std::make_unique<AwWebResourceResponse>(j_response);
+  return Java_AwWebResourceInterceptResponse_getResponse(env, java_object_);
 }
 
 }  // namespace android_webview
+
+DEFINE_JNI(AwWebResourceInterceptResponse)

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,6 @@
 #include "ui/views/widget/widget.h"
 #include "ui/views/widget/widget_delegate.h"
 #include "ui/views/window/dialog_delegate.h"
-#include "ui/views/window/non_client_view.h"
 
 #if defined(USE_AURA)
 #include "ui/aura/client/aura_constants.h"
@@ -36,10 +35,7 @@ NativeWebContentsModalDialogManagerViews::
     NativeWebContentsModalDialogManagerViews(
         gfx::NativeWindow dialog,
         SingleWebContentsDialogManagerDelegate* native_delegate)
-    : native_delegate_(native_delegate),
-      dialog_(dialog),
-      host_(nullptr),
-      host_destroying_(false) {
+    : native_delegate_(native_delegate), dialog_(dialog) {
   ManageDialog();
 }
 
@@ -48,9 +44,11 @@ NativeWebContentsModalDialogManagerViews::
   if (host_)
     host_->RemoveObserver(this);
 
-  for (auto* widget : observed_widgets_)
+  for (views::Widget* widget : observed_widgets_) {
     widget->RemoveObserver(this);
-  CHECK(!IsInObserverList());
+  }
+  CHECK(!WidgetObserver::IsInObserverList());
+  CHECK(!ModalDialogHostObserver::IsInObserverList());
 }
 
 void NativeWebContentsModalDialogManagerViews::ManageDialog() {
@@ -71,7 +69,7 @@ void NativeWebContentsModalDialogManagerViews::ManageDialog() {
   wm::SetChildWindowVisibilityChangesAnimated(parent);
   // No animations should get performed on the window since that will re-order
   // the window stack which will then cause many problems.
-  if (parent && parent->parent()) {
+  if (parent->parent()) {
     parent->parent()->SetProperty(aura::client::kAnimationsDisabledKey, true);
   }
 
@@ -81,6 +79,10 @@ void NativeWebContentsModalDialogManagerViews::ManageDialog() {
 }
 
 // SingleWebContentsDialogManager:
+
+bool NativeWebContentsModalDialogManagerViews::IsActive() const {
+  return GetWidget(dialog_)->IsActive();
+}
 
 void NativeWebContentsModalDialogManagerViews::Show() {
   // The host destroying means the dialogs will be destroyed in short order.
@@ -93,18 +95,19 @@ void NativeWebContentsModalDialogManagerViews::Show() {
 #if defined(USE_AURA)
   std::unique_ptr<wm::SuspendChildWindowVisibilityAnimations> suspend;
   if (shown_widgets_.find(widget) != shown_widgets_.end()) {
-    suspend.reset(new wm::SuspendChildWindowVisibilityAnimations(
-        widget->GetNativeWindow()->parent()));
+    suspend = std::make_unique<wm::SuspendChildWindowVisibilityAnimations>(
+        widget->GetNativeWindow()->parent());
   }
 #endif
-  // |host_| may be null during tab drag on Views/Win32.
-  //
-  // TODO(https://crbug.com/1119431): This null check may be out of date.
-  if (host_)
-    constrained_window::UpdateWebContentsModalDialogPosition(widget, host_);
-  widget->Show();
-  if (host_->ShouldActivateDialog())
+  CHECK(host_);
+
+  constrained_window::UpdateWebContentsModalDialogPosition(widget, host_);
+  if (host_->ShouldActivateDialog()) {
+    widget->Show();
     Focus();
+  } else {
+    widget->ShowInactive();
+  }
 
 #if defined(USE_AURA)
   // TODO(pkotwicz): Control the z-order of the constrained dialog via
@@ -124,9 +127,8 @@ void NativeWebContentsModalDialogManagerViews::Show() {
 void NativeWebContentsModalDialogManagerViews::Hide() {
   views::Widget* widget = GetWidget(dialog());
 #if defined(USE_AURA)
-  std::unique_ptr<wm::SuspendChildWindowVisibilityAnimations> suspend;
-  suspend.reset(new wm::SuspendChildWindowVisibilityAnimations(
-      widget->GetNativeWindow()->parent()));
+  auto suspend = std::make_unique<wm::SuspendChildWindowVisibilityAnimations>(
+      widget->GetNativeWindow()->parent());
 #endif
   widget->Hide();
 }
@@ -154,8 +156,9 @@ void NativeWebContentsModalDialogManagerViews::Pulse() {}
 void NativeWebContentsModalDialogManagerViews::OnPositionRequiresUpdate() {
   DCHECK(host_);
 
-  for (auto* widget : observed_widgets_)
+  for (views::Widget* widget : observed_widgets_) {
     constrained_window::UpdateWebContentsModalDialogPosition(widget, host_);
+  }
 }
 
 void NativeWebContentsModalDialogManagerViews::OnHostDestroying() {
@@ -183,11 +186,11 @@ void NativeWebContentsModalDialogManagerViews::HostChanged(
 
   host_ = new_host;
 
-  // |host_| may be null during WebContents destruction or Win32 tab dragging.
+  // |host_| may be null during WebContents destruction.
   if (host_) {
     host_->AddObserver(this);
 
-    for (auto* widget : observed_widgets_) {
+    for (views::Widget* widget : observed_widgets_) {
       views::Widget::ReparentNativeView(widget->GetNativeView(),
                                         host_->GetHostView());
     }

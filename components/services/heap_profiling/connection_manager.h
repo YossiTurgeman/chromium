@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,8 @@
 #include <vector>
 
 #include "base/containers/flat_map.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/synchronization/lock.h"
 #include "base/threading/thread.h"
@@ -47,19 +47,28 @@ class ConnectionManager {
 
  public:
   ConnectionManager();
+
+  ConnectionManager(const ConnectionManager&) = delete;
+  ConnectionManager& operator=(const ConnectionManager&) = delete;
+
   ~ConnectionManager();
 
   // Dumping is asynchronous so will not be complete when this function
   // returns. The dump is complete when the callback provided in the args is
   // fired.
   void DumpProcessesForTracing(bool strip_path_from_mapped_files,
+                               bool write_proto,
                                DumpProcessesForTracingCallback callback,
                                VmRegions vm_regions);
 
   void OnNewConnection(base::ProcessId pid,
                        mojo::PendingRemote<mojom::ProfilingClient> client,
                        mojom::ProcessType process_type,
-                       mojom::ProfilingParamsPtr params);
+                       mojom::ProfilingParamsPtr params,
+                       mojom::ProfilingService::AddProfilingClientCallback
+                           started_profiling_closure);
+
+  void StopProfilingAllClients(base::OnceCallback<void(bool)> callback);
 
   // Returns pids of clients that have started profiling.
   std::vector<base::ProcessId> GetConnectionPids();
@@ -94,6 +103,9 @@ class ConnectionManager {
   // know when initialization is complete.
   void OnProfilingStarted(base::ProcessId pid);
 
+  // Indicates that a client has stopped profiling.
+  void OnProfilingStopped(base::ProcessId pid);
+
   // Reports the ProcessTypes of the processes being profiled.
   void ReportMetrics();
 
@@ -107,10 +119,13 @@ class ConnectionManager {
   // Every 24-hours, reports the types of profiled processes.
   base::RepeatingTimer metrics_timer_;
 
+  // Used while StopProfilingAllClients() is waiting for async responses.
+  base::OnceCallback<void(bool)> stop_profiling_callback_;
+  size_t stop_profiling_waiting_responses_ = 0;
+  bool stop_profiling_success_ = true;
+
   // Must be the last.
   base::WeakPtrFactory<ConnectionManager> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ConnectionManager);
 };
 
 }  // namespace heap_profiling

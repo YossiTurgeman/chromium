@@ -1,6 +1,8 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "components/autofill/core/browser/geo/phone_number_i18n.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -8,9 +10,9 @@
 #include <string>
 
 #include "base/at_exit.h"
+#include "base/containers/span.h"
 #include "base/i18n/icu_util.h"
-#include "base/strings/string16.h"
-#include "components/autofill/core/browser/geo/phone_number_i18n.h"
+#include "base/no_destructor.h"
 #include "third_party/libphonenumber/phonenumber_api.h"
 
 namespace autofill {
@@ -20,21 +22,24 @@ struct IcuEnvironment {
   // Used by ICU integration.
   base::AtExitManager at_exit_manager;
 };
-
-IcuEnvironment* env = new IcuEnvironment();
-
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  static const base::NoDestructor<IcuEnvironment> env;
   // At least 2 bytes are needed for |default_region|, due to the
   // ParsePhoneNumber contract.
   if (size < 2)
     return 0;
 
-  std::string default_region(reinterpret_cast<const char*>(data), 2);
-  base::string16 value(reinterpret_cast<const base::char16*>(data + 2),
-                       (size - 2) / 2);
-  base::string16 dummy_country_code;
-  base::string16 dummy_city_code;
-  base::string16 dummy_number;
+  // SAFETY: Size is at least 2.
+  auto data_span = UNSAFE_BUFFERS(base::span(data, size));
+  auto region_span = base::as_chars(data_span.first<2>());
+  std::string default_region(region_span.begin(), region_span.end());
+  auto rest = data_span.subspan(2u);
+  auto value_span = UNSAFE_BUFFERS(base::span<const char16_t>(
+      reinterpret_cast<const char16_t*>(rest.data()), rest.size() / 2));
+  std::u16string value(value_span.begin(), value_span.end());
+  std::u16string dummy_country_code;
+  std::u16string dummy_city_code;
+  std::u16string dummy_number;
   std::string dummy_inferred_region;
   ::i18n::phonenumbers::PhoneNumber dummy_i18n_number;
 

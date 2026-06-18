@@ -1,18 +1,22 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
 
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/path_service.h"
-#include "base/stl_util.h"
 #include "base/win/windows_types.h"
 #include "chrome/chrome_elf/chrome_elf_main.h"
 #include "chrome/chrome_elf/third_party_dlls/public_api.h"
 #include "chrome/common/chrome_switches.h"
 
-// This function is a temporary workaround for https://crbug.com/655788. We
+// This function is a temporary workaround for https://crbug.com/41280821. We
 // need to come up with a better way to initialize crash reporting that can
 // happen inside DllMain().
 void SignalInitializeCrashReporting() {}
@@ -36,6 +40,10 @@ bool GetUserDataDirectoryThunk(wchar_t* user_data_dir,
             _TRUNCATE);
 
   return !user_data_dir_path.empty();
+}
+
+bool IsTemporaryUserDataDirectoryCreatedForHeadless() {
+  return false;
 }
 
 void SetMetricsClientId(const char* client_id) {}
@@ -69,11 +77,11 @@ uint32_t DrainLog(uint8_t* buffer,
 
   // Each entry shares the module path for convenience.
   static constexpr char kModulePath[] = "C:\\foo\\bar\\module.dll";
-  static constexpr uint32_t kModulePathLength = base::size(kModulePath) - 1;
+  static constexpr uint32_t kModulePathLength = std::size(kModulePath) - 1;
 
   if (log_remaining) {
     *log_remaining = third_party_dlls::GetLogEntrySize(kModulePathLength) *
-                     base::size(kTestLogEntries);
+                     std::size(kTestLogEntries);
   }
 
   uint8_t* tracker = buffer;
@@ -113,4 +121,8 @@ void DisableHook() {}
 
 int32_t GetApplyHookResult() {
   return 0;
+}
+
+bool IsExtensionPointDisableSet() {
+  return false;
 }

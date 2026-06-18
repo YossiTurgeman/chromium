@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,27 +8,34 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <bit>
 #include <memory>
+#include <type_traits>
 
-#include "base/bind.h"
-#include "base/bits.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_span.h"
+#include "base/numerics/checked_math.h"
 #include "base/trace_event/memory_dump_provider.h"
 #include "gpu/command_buffer/client/fenced_allocator.h"
+#include "gpu/command_buffer/client/gpu_command_buffer_client_export.h"
 #include "gpu/command_buffer/common/buffer.h"
 #include "gpu/command_buffer/common/constants.h"
-#include "gpu/gpu_export.h"
 
 namespace gpu {
 
 class CommandBufferHelper;
 
 // Manages a shared memory segment.
-class GPU_EXPORT MemoryChunk {
+class GPU_COMMAND_BUFFER_CLIENT_EXPORT MemoryChunk {
  public:
   MemoryChunk(int32_t shm_id,
               scoped_refptr<gpu::Buffer> shm,
               CommandBufferHelper* helper);
+
+  MemoryChunk(const MemoryChunk&) = delete;
+  MemoryChunk& operator=(const MemoryChunk&) = delete;
+
   ~MemoryChunk();
 
   // Gets the size of the largest free block that is available without waiting.
@@ -58,9 +65,9 @@ class GPU_EXPORT MemoryChunk {
   //   size: the size of the memory block to allocate.
   //
   // Returns:
-  //   the pointer to the allocated memory block, or nullptr if out of
+  //   the span to the allocated memory block, or an empty span if out of
   //   memory.
-  void* Alloc(uint32_t size) { return allocator_.Alloc(size); }
+  base::span<uint8_t> Alloc(uint32_t size) { return allocator_.Alloc(size); }
 
   // Gets the offset to a memory block given the base memory and the address.
   // It translates nullptr to FencedAllocator::kInvalidOffset.
@@ -94,8 +101,7 @@ class GPU_EXPORT MemoryChunk {
 
   // Returns true if pointer is in the range of this block.
   bool IsInChunk(void* pointer) const {
-    return pointer >= shm_->memory() &&
-           pointer < static_cast<const int8_t*>(shm_->memory()) + shm_->size();
+    return pointer >= shm_->memory() && pointer <= &shm_->as_byte_span().back();
   }
 
   // Returns true of any memory in this chunk is in use or free pending token.
@@ -112,12 +118,10 @@ class GPU_EXPORT MemoryChunk {
   int32_t shm_id_;
   scoped_refptr<gpu::Buffer> shm_;
   FencedAllocatorWrapper allocator_;
-
-  DISALLOW_COPY_AND_ASSIGN(MemoryChunk);
 };
 
 // Manages MemoryChunks.
-class GPU_EXPORT MappedMemoryManager {
+class GPU_COMMAND_BUFFER_CLIENT_EXPORT MappedMemoryManager {
  public:
   enum MemoryLimit {
     kNoLimit = 0,
@@ -128,12 +132,15 @@ class GPU_EXPORT MappedMemoryManager {
   MappedMemoryManager(CommandBufferHelper* helper,
                       size_t unused_memory_reclaim_limit);
 
+  MappedMemoryManager(const MappedMemoryManager&) = delete;
+  MappedMemoryManager& operator=(const MappedMemoryManager&) = delete;
+
   ~MappedMemoryManager();
 
   uint32_t chunk_size_multiple() const { return chunk_size_multiple_; }
 
   void set_chunk_size_multiple(uint32_t multiple) {
-    DCHECK(base::bits::IsPowerOfTwo(multiple));
+    DCHECK(std::has_single_bit(multiple));
     DCHECK_GE(multiple, FencedAllocator::kAllocAlignment);
     chunk_size_multiple_ = multiple;
   }
@@ -152,16 +159,51 @@ class GPU_EXPORT MappedMemoryManager {
   //   shm_id: pointer to variable to receive the shared memory id.
   //   shm_offset: pointer to variable to receive the shared memory offset.
   //   option: defaults to kLoseContextOnOOM, but may be kReturnNullOnOOM.
-  //           Passing kReturnNullOnOOM will gracefully fail and return nullptr
-  //           on OOM instead of losing the context. Callers should be careful
-  //           to check error conditions.
+  //           Passing kReturnNullOnOOM will gracefully fail and return empty
+  //           span on OOM instead of losing the context. Callers should be
+  //           careful to check error conditions.
   // Returns:
-  //   pointer to allocated block of memory. nullptr if failure.
-  void* Alloc(uint32_t size,
-              int32_t* shm_id,
-              uint32_t* shm_offset,
-              TransferBufferAllocationOption option =
-                  TransferBufferAllocationOption::kLoseContextOnOOM);
+  //   span of allocated block of memory. Empty span if failure.
+  base::span<uint8_t> Alloc(
+      uint32_t size,
+      int32_t* shm_id,
+      uint32_t* shm_offset,
+      TransferBufferAllocationOption option =
+          TransferBufferAllocationOption::kLoseContextOnOOM);
+
+  // Allocates a block of typed memory, using reinterpret_span to convert
+  // the raw byte buffer to the desired type.
+  //
+  // Parameters:
+  //   count: the number of T-typed elements to allocate.
+  //   shm_id: pointer to variable to receive the shared memory id.
+  //   shm_offset: pointer to variable to receive the shared memory offset.
+  //   option: defaults to kLoseContextOnOOM, but may be kReturnNullOnOOM.
+  //           Passing kReturnNullOnOOM will gracefully fail and return empty
+  //           span on OOM instead of losing the context. Callers should be
+  //           careful to check error conditions.
+  //
+  // Returns:
+  //   span of allocated block of typed memory. Empty span if failure.
+  template <typename T>
+  base::span<T> AllocTyped(
+      uint32_t count,
+      int32_t* shm_id,
+      uint32_t* shm_offset,
+      TransferBufferAllocationOption option =
+          TransferBufferAllocationOption::kLoseContextOnOOM) {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "AllocTyped only supports trivially copyable types");
+    uint32_t byte_size = 0;
+    if (!base::CheckMul(count, sizeof(T)).AssignIfValid(&byte_size)) {
+      return {};
+    }
+    base::span<uint8_t> buffer = Alloc(byte_size, shm_id, shm_offset, option);
+    if (buffer.empty()) {
+      return {};
+    }
+    return base::subtle::reinterpret_span<T>(buffer);
+  }
 
   // Frees a block of memory.
   //
@@ -212,7 +254,7 @@ class GPU_EXPORT MappedMemoryManager {
 
   // size a chunk is rounded up to.
   uint32_t chunk_size_multiple_;
-  CommandBufferHelper* helper_;
+  raw_ptr<CommandBufferHelper> helper_;
   MemoryChunkVector chunks_;
   size_t allocated_memory_;
   size_t max_free_bytes_;
@@ -220,39 +262,32 @@ class GPU_EXPORT MappedMemoryManager {
   // A process-unique ID used for disambiguating memory dumps from different
   // mapped memory manager.
   int tracing_id_;
-
-  DISALLOW_COPY_AND_ASSIGN(MappedMemoryManager);
 };
 
 // A class that will manage the lifetime of a mapped memory allocation
-class GPU_EXPORT ScopedMappedMemoryPtr {
+class GPU_COMMAND_BUFFER_CLIENT_EXPORT ScopedMappedMemoryPtr {
  public:
   ScopedMappedMemoryPtr(uint32_t size,
                         CommandBufferHelper* helper,
                         MappedMemoryManager* mapped_memory_manager)
-      : buffer_(nullptr),
-        size_(0),
-        shm_id_(0),
-        shm_offset_(0),
-        flush_after_release_(false),
-        helper_(helper),
-        mapped_memory_manager_(mapped_memory_manager) {
+      : helper_(helper), mapped_memory_manager_(mapped_memory_manager) {
     Reset(size);
   }
+
+  ScopedMappedMemoryPtr(const ScopedMappedMemoryPtr&) = delete;
+  ScopedMappedMemoryPtr& operator=(const ScopedMappedMemoryPtr&) = delete;
 
   ~ScopedMappedMemoryPtr() {
     Release();
   }
 
-  bool valid() const { return buffer_ != nullptr; }
+  bool valid() const { return buffer_.data() != nullptr; }
 
   void SetFlushAfterRelease(bool flush_after_release) {
     flush_after_release_ = flush_after_release;
   }
 
-  uint32_t size() const {
-    return size_;
-  }
+  uint32_t size() const { return buffer_.size(); }
 
   int32_t shm_id() const {
     return shm_id_;
@@ -262,23 +297,23 @@ class GPU_EXPORT ScopedMappedMemoryPtr {
     return shm_offset_;
   }
 
-  void* address() const {
-    return buffer_;
-  }
+  void* address() const { return buffer_.data(); }
+
+  base::span<uint8_t> as_byte_span() { return buffer_; }
+
+  base::span<const uint8_t> as_byte_span() const { return buffer_; }
 
   void Release();
 
   void Reset(uint32_t new_size);
 
  private:
-  void* buffer_;
-  uint32_t size_;
-  int32_t shm_id_;
-  uint32_t shm_offset_;
-  bool flush_after_release_;
-  CommandBufferHelper* helper_;
-  MappedMemoryManager* mapped_memory_manager_;
-  DISALLOW_COPY_AND_ASSIGN(ScopedMappedMemoryPtr);
+  base::raw_span<uint8_t> buffer_;
+  int32_t shm_id_ = 0;
+  uint32_t shm_offset_ = 0;
+  bool flush_after_release_ = false;
+  raw_ptr<CommandBufferHelper> helper_;
+  raw_ptr<MappedMemoryManager> mapped_memory_manager_;
 };
 
 }  // namespace gpu

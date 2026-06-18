@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 
 #include <memory>
 
-#include "base/memory/singleton.h"
-#include "components/keyed_service/content/browser_context_keyed_service_factory.h"
+#include "base/no_destructor.h"
+#include "chrome/browser/profiles/profile_keyed_service_factory.h"
 
 class DomainDiversityReporter;
 class Profile;
@@ -17,8 +17,7 @@ namespace user_prefs {
 class PrefRegistrySyncable;
 }
 
-class DomainDiversityReporterFactory
-    : public BrowserContextKeyedServiceFactory {
+class DomainDiversityReporterFactory : public ProfileKeyedServiceFactory {
  public:
   static DomainDiversityReporter* GetForProfile(Profile* profile);
 
@@ -27,8 +26,13 @@ class DomainDiversityReporterFactory
   static std::unique_ptr<KeyedService> BuildInstanceFor(
       content::BrowserContext* profile);
 
+  DomainDiversityReporterFactory(const DomainDiversityReporterFactory&) =
+      delete;
+  DomainDiversityReporterFactory& operator=(
+      const DomainDiversityReporterFactory&) = delete;
+
  private:
-  friend struct base::DefaultSingletonTraits<DomainDiversityReporterFactory>;
+  friend class base::NoDestructor<DomainDiversityReporterFactory>;
 
   DomainDiversityReporterFactory();
   ~DomainDiversityReporterFactory() override;
@@ -37,15 +41,11 @@ class DomainDiversityReporterFactory
   void RegisterProfilePrefs(
       user_prefs::PrefRegistrySyncable* registry) override;
 
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* profile) const override;
 
-  content::BrowserContext* GetBrowserContextToUse(
-      content::BrowserContext* context) const override;
   bool ServiceIsNULLWhileTesting() const override;
   bool ServiceIsCreatedWithBrowserContext() const override;
-
-  DISALLOW_COPY_AND_ASSIGN(DomainDiversityReporterFactory);
 };
 
 #endif  // CHROME_BROWSER_HISTORY_DOMAIN_DIVERSITY_REPORTER_FACTORY_H_

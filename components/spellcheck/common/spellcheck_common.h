@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,9 @@
 #include <stddef.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/strings/string_piece.h"
 #include "components/spellcheck/common/spellcheck_result.h"
 
 namespace base {
@@ -20,7 +20,7 @@ class FilePath;
 namespace spellcheck {
 
 // Short type for holding word replacements per individual language.
-using PerLanguageSuggestions = std::vector<std::vector<base::string16>>;
+using PerLanguageSuggestions = std::vector<std::vector<std::u16string>>;
 
 // Max number of dictionary suggestions.
 static const int kMaxSuggestions = 5;
@@ -34,7 +34,7 @@ static const size_t kMaxSyncableDictionaryWords = 1300;
 // chrome/browser/resources/settings/languages_page/edit_dictionary_page.js
 static const size_t kMaxCustomDictionaryWordBytes = 99;
 
-base::FilePath GetVersionedFileName(base::StringPiece input_language,
+base::FilePath GetVersionedFileName(std::string_view input_language,
                                     const base::FilePath& dict_dir);
 
 // Returns the spellcheck language that should be used for |language|. For
@@ -45,7 +45,7 @@ base::FilePath GetVersionedFileName(base::StringPiece input_language,
 // Returns an empty string if no spellcheck language found. For example, there's
 // no single dictionary for English, so this function returns an empty string
 // for "en".
-std::string GetCorrespondingSpellCheckLanguage(base::StringPiece language);
+std::string GetCorrespondingSpellCheckLanguage(std::string_view language);
 
 // Get SpellChecker supported languages.
 std::vector<std::string> SpellCheckLanguages();
@@ -63,8 +63,8 @@ void GetISOLanguageCountryCodeFromLocale(const std::string& locale,
 // suggestion from the i-th language's suggestions. |optional_suggestions|
 // cannot be null.
 void FillSuggestions(
-    const std::vector<std::vector<base::string16>>& suggestions_list,
-    std::vector<base::string16>* optional_suggestions);
+    const std::vector<std::vector<std::u16string>>& suggestions_list,
+    std::vector<std::u16string>* optional_suggestions);
 
 }  // namespace spellcheck
 

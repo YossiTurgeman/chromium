@@ -1,11 +1,11 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/sync/test/integration/cookie_helper.h"
 
 #include "base/run_loop.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/storage_partition.h"
@@ -26,19 +26,24 @@ const char kSigninCookieName[] = "SAPISID";
 
 void AddSigninCookie(Profile* profile) {
   DCHECK(profile);
-  net::CanonicalCookie cookie(
-      kSigninCookieName, std::string(), ".google.com", "/", base::Time(),
-      base::Time(), base::Time(), /*secure=*/true, false,
-      net::CookieSameSite::NO_RESTRICTION, net::COOKIE_PRIORITY_DEFAULT);
+  std::unique_ptr<net::CanonicalCookie> cookie =
+      net::CanonicalCookie::CreateUnsafeCookieForTesting(
+          kSigninCookieName, std::string(), ".google.com", "/",
+          /*creation=*/base::Time(),
+          /*expiration=*/base::Time(), /*last_access=*/base::Time(),
+          /*last_update=*/base::Time(),
+          /*secure=*/true,
+          /*httponly=*/false, net::CookieSameSite::NO_RESTRICTION,
+          net::COOKIE_PRIORITY_DEFAULT, net::CookieSourceType::kOther);
 
   network::mojom::CookieManager* cookie_manager =
-      content::BrowserContext::GetDefaultStoragePartition(profile)
+      profile->GetDefaultStoragePartition()
           ->GetCookieManagerForBrowserProcess();
   DCHECK(cookie_manager);
 
   base::RunLoop run_loop;
   cookie_manager->SetCanonicalCookie(
-      cookie, net::cookie_util::SimulatedCookieSource(cookie, "https"),
+      *cookie, net::cookie_util::SimulatedCookieSource(*cookie, "https"),
       net::CookieOptions(),
       base::BindLambdaForTesting(
           [&run_loop](net::CookieAccessResult) { run_loop.Quit(); }));
@@ -48,7 +53,7 @@ void AddSigninCookie(Profile* profile) {
 void DeleteSigninCookies(Profile* profile) {
   DCHECK(profile);
   network::mojom::CookieManager* cookie_manager =
-      content::BrowserContext::GetDefaultStoragePartition(profile)
+      profile->GetDefaultStoragePartition()
           ->GetCookieManagerForBrowserProcess();
   DCHECK(cookie_manager);
 

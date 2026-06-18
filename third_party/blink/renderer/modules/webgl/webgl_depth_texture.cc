@@ -25,9 +25,12 @@
 
 #include "third_party/blink/renderer/modules/webgl/webgl_depth_texture.h"
 
+#include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+
 namespace blink {
 
-WebGLDepthTexture::WebGLDepthTexture(WebGLRenderingContextBase* context)
+WebGLDepthTexture::WebGLDepthTexture(WebGLRenderingContextBase* context,
+                                     ExecutionContext*)
     : WebGLExtension(context) {
   context->ExtensionsUtil()->EnsureExtensionEnabled(
       "GL_CHROMIUM_depth_texture");

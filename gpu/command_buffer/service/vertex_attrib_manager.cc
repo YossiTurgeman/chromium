@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include "base/check_op.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/stringprintf.h"
 #include "build/build_config.h"
 #include "gpu/command_buffer/common/gles2_cmd_format.h"
 #include "gpu/command_buffer/common/gles2_cmd_utils.h"
@@ -54,7 +53,7 @@ void VertexAttrib::SetInfo(
     GLsizei real_stride,
     GLsizei offset,
     GLboolean integer) {
-  DCHECK_GT(real_stride, 0);
+  CHECK_GT(real_stride, 0);
   buffer_ = buffer;
   size_ = size;
   type_ = type;
@@ -78,9 +77,11 @@ bool VertexAttrib::CanAccess(GLuint index) const {
   }
 
   uint32_t usable_size = buffer_size - offset_;
-  GLuint num_elements = usable_size / real_stride_ +
-      ((usable_size % real_stride_) >=
-       (GLES2Util::GetGroupSizeForBufferType(size_, type_)) ? 1 : 0);
+  uint32_t group_size = GLES2Util::GetGroupSizeForBufferType(size_, type_);
+  if (usable_size < group_size) {
+    return false;
+  }
+  GLuint num_elements = (usable_size - group_size) / real_stride_ + 1;
   return index < num_elements;
 }
 
@@ -105,7 +106,7 @@ VertexAttribManager::VertexAttribManager(VertexArrayManager* manager,
       do_buffer_refcounting_(do_buffer_refcounting),
       service_id_(service_id) {
   manager_->StartTracking(this);
-  Initialize(num_vertex_attribs, false);
+  Initialize(num_vertex_attribs);
 }
 
 VertexAttribManager::~VertexAttribManager() {
@@ -119,8 +120,7 @@ VertexAttribManager::~VertexAttribManager() {
   }
 }
 
-void VertexAttribManager::Initialize(uint32_t max_vertex_attribs,
-                                     bool init_attribs) {
+void VertexAttribManager::Initialize(uint32_t max_vertex_attribs) {
   vertex_attribs_.resize(max_vertex_attribs);
   uint32_t packed_size = (max_vertex_attribs + 15) / 16;
   attrib_base_type_mask_.resize(packed_size);
@@ -134,10 +134,6 @@ void VertexAttribManager::Initialize(uint32_t max_vertex_attribs,
   for (uint32_t vv = 0; vv < vertex_attribs_.size(); ++vv) {
     vertex_attribs_[vv].set_index(vv);
     vertex_attribs_[vv].SetList(&disabled_vertex_attribs_);
-
-    if (init_attribs) {
-      glVertexAttrib4f(vv, 0.0f, 0.0f, 0.0f, 1.0f);
-    }
   }
 }
 

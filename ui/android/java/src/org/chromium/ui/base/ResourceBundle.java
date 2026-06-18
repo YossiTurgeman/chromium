@@ -1,90 +1,87 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.ui.base;
 
-import android.content.res.AssetFileDescriptor;
-import android.content.res.AssetManager;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
 
-import org.chromium.base.ContextUtils;
+import org.chromium.base.ApkAssets;
 import org.chromium.base.LocaleUtils;
 import org.chromium.base.Log;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
-import java.io.IOException;
 import java.util.Arrays;
 
 /**
  * This class provides the resource bundle related methods for the native
  * library.
  *
- * IMPORTANT: Clients that use {@link ResourceBundle} and/or
- * {@link org.chromium.ui.resources.ResourceExtractor} MUST call either
+ * IMPORTANT: Clients that use {@link ResourceBundle} MUST call either
  * {@link ResourceBundle#setAvailablePakLocales(String[], String[])} or
  * {@link ResourceBundle#setNoAvailableLocalePaks()} before calling the getters in this class.
  */
 @JNINamespace("ui")
+@NullMarked
 public final class ResourceBundle {
     private static final String TAG = "ResourceBundle";
-    private static String[] sCompressedLocales;
-    private static String[] sUncompressedLocales;
+    private static String @Nullable [] sAvailableLocales;
+    private static boolean sOverrideApkSubpathExistsForTesting;
+    private static boolean sOverrideFallbackPathExistsForTesting;
 
     private ResourceBundle() {}
 
-    /**
-     * Called when there are no locale pak files available.
-     */
+    /** Called when there are no locale pak files available. */
     @CalledByNative
     public static void setNoAvailableLocalePaks() {
-        assert sCompressedLocales == null && sUncompressedLocales == null;
-        sCompressedLocales = new String[] {};
-        sUncompressedLocales = new String[] {};
+        assert sAvailableLocales == null;
+        sAvailableLocales = new String[] {};
     }
 
     /**
-     * Sets the available compressed and uncompressed locale pak files.
-     * @param compressed Locales that have compressed pak files.
-     * @param uncompressed Locales that have uncompressed pak files.
+     * Sets the available locale pak files.
+     *
+     * @param locales Locales that have pak files.
      */
-    public static void setAvailablePakLocales(String[] compressed, String[] uncompressed) {
-        assert sCompressedLocales == null && sUncompressedLocales == null;
-        sCompressedLocales = compressed;
-        sUncompressedLocales = uncompressed;
+    public static void setAvailablePakLocales(String[] locales) {
+        assert sAvailableLocales == null;
+        sAvailableLocales = locales;
+    }
+
+    public static void clearAvailablePakLocalesForTesting() {
+        sAvailableLocales = null;
     }
 
     /**
-     * Return the array of locales that have compressed pak files. Do not modify the array.
-     * @return The locales that have compressed pak files.
+     * Return the list of available locales.
+     * @return The correct locale list for this build.
      */
-    public static String[] getAvailableCompressedPakLocales() {
-        assert sCompressedLocales != null;
-        return sCompressedLocales;
+    public static String[] getAvailableLocales() {
+        assert sAvailableLocales != null;
+        return sAvailableLocales;
     }
 
     /**
-     * Return the location of a locale-specific uncompress .pak file asset.
+     * Return the location of a locale-specific .pak file asset.
      *
      * @param locale Chromium locale name.
-     * @param inBundle If true, return the path of the uncompressed .pak file
-     *                 containing Chromium UI strings within app bundles. If
-     *                 false, return the path of the uncompressed WebView UI
-     *                 strings instead. Note that APK .pak files are stored
-     *                 compressed and handled differently.
+     * @param gender User's gender.
+     * @param inBundle If true, return the path of the uncompressed .pak file containing Chromium UI
+     *     strings within app bundles. If false, return the path of the WebView UI strings instead.
      * @param logError Logs if the file is not found.
-     * @return Asset path to uncompressed .pak file, or null if the locale is
-     *         not supported by this version of Chromium, or the file is
-     *         missing.
+     * @return Asset path to .pak file, or null if the locale is not supported.
      */
     @CalledByNative
-    private static String getLocalePakResourcePath(
-            String locale, boolean inBundle, boolean logError) {
-        if (sUncompressedLocales == null) {
+    static @Nullable String getLocalePakResourcePath(
+            String locale, @Gender int gender, boolean inBundle, boolean logError) {
+        if (sAvailableLocales == null) {
             // Locales may be null in unit tests.
             return null;
         }
-        if (Arrays.binarySearch(sUncompressedLocales, locale) < 0) {
+        if (Arrays.binarySearch(sAvailableLocales, locale) < 0) {
             // This locale is not supported by Chromium.
             return null;
         }
@@ -93,22 +90,65 @@ public final class ResourceBundle {
             if (locale.equals("en-US")) {
                 pathPrefix = "assets/fallback-locales/";
             } else {
-                String lang = LocalizationUtils.getSplitLanguageForAndroid(
-                        LocaleUtils.toLanguage(locale));
+                String lang =
+                        LocalizationUtils.getSplitLanguageForAndroid(
+                                LocaleUtils.toBaseLanguage(locale));
                 pathPrefix = "assets/locales#lang_" + lang + "/";
             }
         }
-        String assetPath = pathPrefix + locale + ".pak";
-        AssetManager manager = ContextUtils.getApplicationContext().getAssets();
+        String apkSubpath = maybeAppendGender(pathPrefix + locale, gender) + ".pak";
         // The file may not exist if the language split for this locale has not been installed
         // yet, so make sure it exists before returning the asset path.
-        try (AssetFileDescriptor afd = manager.openNonAssetFd(assetPath)) {
-            return assetPath;
-        } catch (IOException e) {
-            if (logError) {
-                Log.e(TAG, "path=%s", assetPath, e);
-            }
-            return null;
+        if (ApkAssets.exists(apkSubpath) || sOverrideApkSubpathExistsForTesting) {
+            return apkSubpath;
         }
+        // Fallback for apk targets.
+        // TODO(crbug.com/40168285): Remove the need for this fallback logic.
+        String fallbackPath = maybeAppendGender("assets/locales/" + locale, gender) + ".pak";
+        if (ApkAssets.exists(fallbackPath) || sOverrideFallbackPathExistsForTesting) {
+            return fallbackPath;
+        }
+        if (logError) {
+            Log.e(TAG, "Did not exist: %s", apkSubpath);
+        }
+        return null;
+    }
+
+    /**
+     * Sets sOverrideApkSubpathExistsForTesting.
+     *
+     * @param b Value to set.
+     */
+    static void setOverrideApkSubpathExistsForTesting(boolean b) {
+        sOverrideApkSubpathExistsForTesting = b;
+        ResettersForTesting.register(() -> sOverrideApkSubpathExistsForTesting = false);
+    }
+
+    /**
+     * Sets sOverrideFallbackPathExistsForTesting.
+     *
+     * @param b Value to set.
+     */
+    static void setOverrideFallbackPathExistsForTesting(boolean b) {
+        sOverrideFallbackPathExistsForTesting = b;
+        ResettersForTesting.register(() -> sOverrideFallbackPathExistsForTesting = false);
+    }
+
+    /**
+     * Appends a gender string to the given path if the gender is not the default.
+     *
+     * @param path The path to append to.
+     * @param gender The gender to (maybe) append to the path.
+     * @return A copy of the path, possibly with a gender suffix.
+     */
+    private static String maybeAppendGender(String path, @Gender int gender) {
+        String suffix =
+                switch (gender) {
+                    case Gender.FEMININE -> "_FEMININE";
+                    case Gender.MASCULINE -> "_MASCULINE";
+                    case Gender.NEUTER -> "_NEUTER";
+                    default -> "";
+                };
+        return path + suffix;
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 
 #include <algorithm>
 
-#include "base/stl_util.h"
 #include "ui/events/event_constants.h"
 #include "ui/events/keycodes/dom/dom_code.h"
 #include "ui/events/keycodes/dom/dom_key.h"
@@ -24,7 +23,7 @@ bool IsRightSideDomCode(DomCode code) {
 
 }  // anonymous namespace
 
-base::char16 DomCodeToUsLayoutCharacter(DomCode dom_code, int flags) {
+char16_t DomCodeToUsLayoutCharacter(DomCode dom_code, int flags) {
   DomKey dom_key;
   KeyboardCode key_code;
   if (DomCodeToUsLayoutDomKey(dom_code, flags, &dom_key, &key_code) &&
@@ -54,7 +53,7 @@ bool DomCodeToUsLayoutDomKey(DomCode dom_code,
   for (const auto& it : kPrintableCodeMap) {
     if (it.dom_code == dom_code) {
       int state = ((flags & EF_SHIFT_DOWN) == EF_SHIFT_DOWN);
-      base::char16 ch = it.character[state];
+      char16_t ch = it.character[state];
       if ((flags & EF_CAPS_LOCK_ON) == EF_CAPS_LOCK_ON) {
         ch |= 0x20;
         if ((ch >= 'a') && (ch <= 'z'))
@@ -246,15 +245,16 @@ DomCode UsLayoutKeyboardCodeToDomCode(KeyboardCode key_code) {
 }
 
 KeyboardCode DomCodeToUsLayoutKeyboardCode(DomCode dom_code) {
-  const DomCodeToKeyboardCodeEntry* end =
-      kDomCodeToKeyboardCodeMap + base::size(kDomCodeToKeyboardCodeMap);
   const DomCodeToKeyboardCodeEntry* found = std::lower_bound(
-      kDomCodeToKeyboardCodeMap, end, dom_code,
+      std::begin(kDomCodeToKeyboardCodeMap),
+      std::end(kDomCodeToKeyboardCodeMap), dom_code,
       [](const DomCodeToKeyboardCodeEntry& a, DomCode b) {
         return static_cast<int>(a.dom_code) < static_cast<int>(b);
       });
-  if ((found != end) && (found->dom_code == dom_code))
+  if ((found != std::end(kDomCodeToKeyboardCodeMap)) &&
+      (found->dom_code == dom_code)) {
     return found->key_code;
+  }
 
   return VKEY_UNKNOWN;
 }
@@ -280,18 +280,38 @@ int ModifierDomKeyToEventFlag(DomKey key) {
       return EF_SHIFT_DOWN;
     case DomKey::SHIFT_LEVEL5:
       return EF_MOD3_DOWN;
+#if BUILDFLAG(IS_CHROMEOS)
+    case DomKey::FN:
+      return EF_FUNCTION_DOWN;
+#endif
     default:
       return EF_NONE;
   }
   // Not represented:
   //   DomKey::ACCEL
-  //   DomKey::FN
   //   DomKey::FN_LOCK
   //   DomKey::HYPER
   //   DomKey::NUM_LOCK
   //   DomKey::SCROLL_LOCK
   //   DomKey::SUPER
   //   DomKey::SYMBOL_LOCK
+}
+
+DomCode UsLayoutDomKeyToDomCode(DomKey dom_key) {
+  if (dom_key.IsCharacter()) {
+    char16_t c = dom_key.ToCharacter();
+    for (const auto& it : kPrintableCodeMap) {
+      if (it.character[0] == c || it.character[1] == c) {
+        return it.dom_code;
+      }
+    }
+  }
+
+  for (const auto& it : kNonPrintableCodeMap) {
+    if (it.dom_key == dom_key)
+      return it.dom_code;
+  }
+  return DomCode::NONE;
 }
 
 }  // namespace ui

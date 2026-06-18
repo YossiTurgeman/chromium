@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,24 +9,28 @@
 #include <utility>
 
 #include "base/stl_util.h"
+#include "services/device/public/cpp/hid/hid_report_descriptor_item.h"
 
 namespace device {
 
 namespace {
 
+const size_t kMaxReportDescriptorSizeBytes = 65535;
 const int kBitsPerByte = 8;
 
 }  // namespace
 
-HidReportDescriptor::HidReportDescriptor(const std::vector<uint8_t>& bytes) {
-  size_t header_index = 0;
-  HidReportDescriptorItem* item = nullptr;
-  while (header_index < bytes.size()) {
-    items_.push_back(HidReportDescriptorItem::Create(
-        &bytes[header_index], bytes.size() - header_index, item));
-    header_index += items_.back()->GetSize();
+HidReportDescriptor::HidReportDescriptor(base::span<const uint8_t> bytes) {
+  std::vector<std::unique_ptr<HidReportDescriptorItem>> items;
+  if (bytes.size() <= kMaxReportDescriptorSizeBytes) {
+    size_t header_index = 0;
+    while (header_index < bytes.size()) {
+      const auto& item = items.emplace_back(
+          HidReportDescriptorItem::Create(bytes.subspan(header_index)));
+      header_index += item->GetSize();
+    }
   }
-  collections_ = HidCollection::BuildCollections(items_);
+  collections_ = HidCollection::BuildCollections(items);
 }
 
 HidReportDescriptor::~HidReportDescriptor() {}

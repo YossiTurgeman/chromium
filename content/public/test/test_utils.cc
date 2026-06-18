@@ -1,40 +1,46 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/public/test/test_utils.h"
 
+#include <memory>
 #include <utility>
 
 #include "base/base_switches.h"
-#include "base/bind.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/macros.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/current_thread.h"
 #include "base/task/sequence_manager/sequence_manager.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/task_observer.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "base/values.h"
 #include "build/build_config.h"
+#include "content/browser/child_process_security_policy_impl.h"
+#include "content/browser/font_access/font_enumeration_cache.h"
+#include "content/browser/origin_agent_cluster_isolation_state.h"
+#include "content/browser/renderer_host/page_impl.h"
 #include "content/browser/renderer_host/render_frame_host_delegate.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
+#include "content/browser/site_info.h"
+#include "content/browser/site_instance_impl.h"
+#include "content/browser/web_contents/web_contents_impl.h"
 #include "content/common/content_navigation_policy.h"
+#include "content/common/features.h"
 #include "content/public/browser/browser_child_process_host_iterator.h"
-#include "content/public/browser/browser_plugin_guest_delegate.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/notification_service.h"
+#include "content/public/browser/page.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/site_isolation_policy.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/common/content_features.h"
+#include "content/public/common/content_client.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/process_type.h"
 #include "content/public/common/url_constants.h"
@@ -43,6 +49,29 @@
 #include "third_party/blink/public/common/fetch/fetch_api_request_headers_map.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom.h"
 #include "url/url_util.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "cc/slim/layer_tree.h"
+#include "content/browser/renderer_host/compositor_impl_android.h"
+#include "ui/android/window_android.h"
+#include "ui/android/window_android_compositor.h"
+#endif  // BUILDFLAG(IS_ANDROID)
+
+#if BUILDFLAG(IS_IOS)
+#include "content/browser/renderer_host/browser_compositor_ios.h"
+#include "content/browser/renderer_host/test_render_widget_host_view_ios_factory.h"
+#endif  // BUILDFLAG(IS_IOS)
+
+#if BUILDFLAG(IS_MAC)
+#include "content/browser/renderer_host/browser_compositor_view_mac.h"
+#include "content/browser/renderer_host/test_render_widget_host_view_mac_factory.h"
+#include "ui/compositor/compositor.h"
+#endif  // BUILDFLAG(IS_MAC)
+
+#if defined(USE_AURA)
+#include "content/browser/renderer_host/render_widget_host_view_aura.h"
+#include "ui/compositor/compositor.h"
+#endif  // defined(USE_AURA)
 
 namespace content {
 
@@ -63,7 +92,7 @@ void DeferredQuitRunLoop(base::OnceClosure quit_task, int num_quit_deferrals) {
   if (num_quit_deferrals <= 0) {
     std::move(quit_task).Run();
   } else {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&DeferredQuitRunLoop, std::move(quit_task),
                                   num_quit_deferrals - 1));
   }
@@ -72,8 +101,12 @@ void DeferredQuitRunLoop(base::OnceClosure quit_task, int num_quit_deferrals) {
 // Monitors if any task is processed by the message loop.
 class TaskObserver : public base::TaskObserver {
  public:
-  TaskObserver() : processed_(false) {}
-  ~TaskObserver() override {}
+  TaskObserver() = default;
+
+  TaskObserver(const TaskObserver&) = delete;
+  TaskObserver& operator=(const TaskObserver&) = delete;
+
+  ~TaskObserver() override = default;
 
   // TaskObserver overrides.
   void WillProcessTask(const base::PendingTask& pending_task,
@@ -92,20 +125,8 @@ class TaskObserver : public base::TaskObserver {
   bool processed() const { return processed_; }
 
  private:
-  bool processed_;
-  DISALLOW_COPY_AND_ASSIGN(TaskObserver);
+  bool processed_ = false;
 };
-
-// Adapter that makes a WindowedNotificationObserver::ConditionTestCallback from
-// a WindowedNotificationObserver::ConditionTestCallbackWithoutSourceAndDetails
-// by ignoring the notification source and details.
-bool IgnoreSourceAndDetails(
-    WindowedNotificationObserver::ConditionTestCallbackWithoutSourceAndDetails
-        callback,
-    const NotificationSource& source,
-    const NotificationDetails& details) {
-  return std::move(callback).Run();
-}
 
 }  // namespace
 
@@ -118,20 +139,14 @@ blink::mojom::FetchAPIRequestPtr CreateFetchAPIRequest(
   auto request = blink::mojom::FetchAPIRequest::New();
   request->url = url;
   request->method = method;
-  request->headers = {headers.begin(), headers.end()};
+  request->headers = headers;
   request->referrer = std::move(referrer);
   request->is_reload = is_reload;
   return request;
 }
 
 void RunMessageLoop() {
-  base::RunLoop run_loop;
-  RunThisRunLoop(&run_loop);
-}
-
-void RunThisRunLoop(base::RunLoop* run_loop) {
-  base::CurrentThread::ScopedNestableTaskAllower allow;
-  run_loop->Run();
+  base::RunLoop(base::RunLoop::Type::kNestableTasksAllowed).Run();
 }
 
 void RunAllPendingInMessageLoop() {
@@ -177,33 +192,30 @@ base::OnceClosure GetDeferredQuitTaskForRunLoop(base::RunLoop* run_loop) {
                         kNumQuitDeferrals);
 }
 
-base::Value ExecuteScriptAndGetValue(RenderFrameHost* render_frame_host,
-                                     const std::string& script) {
-  base::RunLoop run_loop;
-  base::Value result;
-
-  render_frame_host->ExecuteJavaScriptForTests(
-      base::UTF8ToUTF16(script),
-      base::BindOnce(
-          [](base::OnceClosure quit_closure, base::Value* out_result,
-             base::Value value) {
-            *out_result = std::move(value);
-            std::move(quit_closure).Run();
-          },
-          run_loop.QuitWhenIdleClosure(), &result));
-  run_loop.Run();
-
-  return result;
-}
-
 bool AreAllSitesIsolatedForTesting() {
   return SiteIsolationPolicy::UseDedicatedProcessesForAllSites();
 }
 
-bool AreDefaultSiteInstancesEnabled() {
-  return !AreAllSitesIsolatedForTesting() &&
-         base::FeatureList::IsEnabled(
-             features::kProcessSharingWithDefaultSiteInstances);
+bool IsOriginAgentClusterEnabledForOrigin(SiteInstance* site_instance,
+                                          const url::Origin& origin) {
+  OriginAgentClusterIsolationState origin_requests_isolation(
+      OriginAgentClusterIsolationState::CreateNonIsolatedByDefault());
+
+  return static_cast<ChildProcessSecurityPolicyImpl*>(
+             ChildProcessSecurityPolicy::GetInstance())
+      ->DetermineOriginAgentClusterIsolation(
+          static_cast<SiteInstanceImpl*>(site_instance)->GetIsolationContext(),
+          origin, origin_requests_isolation)
+      .is_origin_agent_cluster();
+}
+
+bool AreStrictSiteInstancesEnabled() {
+  return AreAllSitesIsolatedForTesting() || ShouldUseDefaultSiteInstanceGroup();
+}
+
+bool IsIsolatedOriginRequiredToGuaranteeDedicatedProcess() {
+  return !AreAllSitesIsolatedForTesting() ||
+         ShouldUseDefaultSiteInstanceGroup();
 }
 
 void IsolateAllSitesForTesting(base::CommandLine* command_line) {
@@ -211,23 +223,28 @@ void IsolateAllSitesForTesting(base::CommandLine* command_line) {
 }
 
 bool CanSameSiteMainFrameNavigationsChangeRenderFrameHosts() {
-  // TODO(crbug.com/936696): Also return true when RenderDocument for main frame
-  // is enabled.
-  return CanSameSiteMainFrameNavigationsChangeSiteInstances();
+  return ShouldCreateNewRenderFrameHostOnSameSiteNavigation(
+             /*is_main_frame=*/true, /*is_local_root=*/true) ||
+         CanSameSiteMainFrameNavigationsChangeSiteInstances();
+}
+
+bool WillSameSiteNavigationChangeRenderFrameHosts(bool is_main_frame,
+                                                  bool is_local_root) {
+  return ShouldCreateNewRenderFrameHostOnSameSiteNavigation(is_main_frame,
+                                                            is_local_root);
 }
 
 bool CanSameSiteMainFrameNavigationsChangeSiteInstances() {
-  return IsProactivelySwapBrowsingInstanceOnSameSiteNavigationEnabled() ||
-         IsSameSiteBackForwardCacheEnabled();
+  return IsBackForwardCacheEnabled();
 }
 
 void DisableProactiveBrowsingInstanceSwapFor(RenderFrameHost* rfh) {
   if (!CanSameSiteMainFrameNavigationsChangeSiteInstances())
     return;
-  // If the RFH is not a main frame, navigations on it will never result in a
-  // proactive BrowsingInstance swap, so we shouldn't really call it on main
-  // frames.
-  DCHECK(!rfh->GetParent());
+  // If the RFH is not a primary main frame, navigations on it will never result
+  // in a proactive BrowsingInstance swap, so we shouldn't call this function on
+  // subframes.
+  DCHECK(rfh->IsInPrimaryMainFrame());
   static_cast<RenderFrameHostImpl*>(rfh)
       ->DisableProactiveBrowsingInstanceSwapForTesting();
 }
@@ -242,8 +259,7 @@ std::string GetWebUIURLString(const std::string& host) {
 }
 
 WebContents* CreateAndAttachInnerContents(RenderFrameHost* rfh) {
-  WebContents* outer_contents =
-      static_cast<RenderFrameHostImpl*>(rfh)->delegate()->GetAsWebContents();
+  auto* outer_contents = WebContents::FromRenderFrameHost(rfh);
   if (!outer_contents)
     return nullptr;
 
@@ -255,7 +271,7 @@ WebContents* CreateAndAttachInnerContents(RenderFrameHost* rfh) {
   // Attach. |inner_contents| becomes owned by |outer_contents|.
   WebContents* inner_contents = inner_contents_ptr.get();
   outer_contents->AttachInnerWebContents(std::move(inner_contents_ptr), rfh,
-                                         false /* is_full_page */);
+                                         /*is_full_page=*/false);
 
   return inner_contents;
 }
@@ -265,7 +281,8 @@ void AwaitDocumentOnLoadCompleted(WebContents* web_contents) {
    public:
     explicit Awaiter(content::WebContents* web_contents)
         : content::WebContentsObserver(web_contents),
-          observed_(web_contents->IsDocumentOnLoadCompletedInMainFrame()) {}
+          observed_(
+              web_contents->IsDocumentOnLoadCompletedInPrimaryMainFrame()) {}
 
     Awaiter(const Awaiter&) = delete;
     Awaiter& operator=(const Awaiter&) = delete;
@@ -275,11 +292,11 @@ void AwaitDocumentOnLoadCompleted(WebContents* web_contents) {
     void Await() {
       if (!observed_)
         run_loop_.Run();
-      DCHECK(web_contents()->IsDocumentOnLoadCompletedInMainFrame());
+      DCHECK(web_contents()->IsDocumentOnLoadCompletedInPrimaryMainFrame());
     }
 
     // WebContentsObserver:
-    void DocumentOnLoadCompletedInMainFrame() override {
+    void DocumentOnLoadCompletedInPrimaryMainFrame() override {
       observed_ = true;
       if (run_loop_.running())
         run_loop_.Quit();
@@ -291,6 +308,16 @@ void AwaitDocumentOnLoadCompleted(WebContents* web_contents) {
   };
 
   Awaiter(web_contents).Await();
+}
+
+void FocusWebContentsOnFrame(WebContents* web_contents, RenderFrameHost* rfh) {
+  WebContentsImpl* contents = static_cast<WebContentsImpl*>(web_contents);
+  FrameTreeNode* node =
+      contents->GetPrimaryFrameTree().FindByID(rfh->GetFrameTreeNodeId());
+  CHECK(node);
+  CHECK_EQ(node->current_frame_host(), rfh);
+  contents->GetPrimaryFrameTree().SetFocusedFrame(
+      node, node->current_frame_host()->GetSiteInstance()->group());
 }
 
 MessageLoopRunner::MessageLoopRunner(QuitMode quit_mode)
@@ -308,7 +335,7 @@ void MessageLoopRunner::Run() {
     return;
 
   loop_running_ = true;
-  RunThisRunLoop(&run_loop_);
+  run_loop_.Run();
 }
 
 base::OnceClosure MessageLoopRunner::QuitClosure() {
@@ -334,52 +361,18 @@ void MessageLoopRunner::Quit() {
   }
 }
 
-WindowedNotificationObserver::WindowedNotificationObserver(
-    int notification_type,
-    const NotificationSource& source)
-    : source_(NotificationService::AllSources()) {
-  AddNotificationType(notification_type, source);
-}
+LoadStopObserver::LoadStopObserver(WebContents* web_contents)
+    : WebContentsObserver(web_contents),
+      run_loop_(base::RunLoop::Type::kNestableTasksAllowed) {}
 
-WindowedNotificationObserver::WindowedNotificationObserver(
-    int notification_type,
-    ConditionTestCallback callback)
-    : callback_(std::move(callback)),
-      source_(NotificationService::AllSources()) {
-  AddNotificationType(notification_type, source_);
-}
-
-WindowedNotificationObserver::WindowedNotificationObserver(
-    int notification_type,
-    ConditionTestCallbackWithoutSourceAndDetails callback)
-    : callback_(
-          base::BindRepeating(&IgnoreSourceAndDetails, std::move(callback))),
-      source_(NotificationService::AllSources()) {
-  registrar_.Add(this, notification_type, source_);
-}
-
-WindowedNotificationObserver::~WindowedNotificationObserver() = default;
-
-void WindowedNotificationObserver::AddNotificationType(
-    int notification_type,
-    const NotificationSource& source) {
-  registrar_.Add(this, notification_type, source);
-}
-
-void WindowedNotificationObserver::Wait() {
+void LoadStopObserver::Wait() {
   if (!seen_)
     run_loop_.Run();
+
   EXPECT_TRUE(seen_);
 }
 
-void WindowedNotificationObserver::Observe(int type,
-                                           const NotificationSource& source,
-                                           const NotificationDetails& details) {
-  source_ = source;
-  details_ = details;
-  if (!callback_.is_null() && !callback_.Run(source, details))
-    return;
-
+void LoadStopObserver::DidStopLoading() {
   seen_ = true;
   run_loop_.Quit();
 }
@@ -414,7 +407,7 @@ void InProcessUtilityThreadHelper::CheckHasRunningChildProcess() {
           std::move(quit_closure).Run();
       };
 
-  GetIOThreadTaskRunner({})->PostTask(
+  GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(check_has_running_child_process_on_io,
                                 run_loop_->QuitClosure()));
 }
@@ -426,34 +419,73 @@ void InProcessUtilityThreadHelper::BrowserChildProcessHostDisconnected(
 
 RenderFrameDeletedObserver::RenderFrameDeletedObserver(RenderFrameHost* rfh)
     : WebContentsObserver(WebContents::FromRenderFrameHost(rfh)),
-      process_id_(rfh->GetProcess()->GetID()),
-      routing_id_(rfh->GetRoutingID()),
-      deleted_(false) {}
+      rfh_id_(rfh->GetGlobalId()) {
+  DCHECK(rfh);
+}
 
-RenderFrameDeletedObserver::~RenderFrameDeletedObserver() {}
+RenderFrameDeletedObserver::~RenderFrameDeletedObserver() = default;
 
 void RenderFrameDeletedObserver::RenderFrameDeleted(
     RenderFrameHost* render_frame_host) {
-  if (render_frame_host->GetProcess()->GetID() == process_id_ &&
-      render_frame_host->GetRoutingID() == routing_id_) {
-    deleted_ = true;
+  if (render_frame_host->GetGlobalId() == rfh_id_) {
+    rfh_id_ = GlobalRenderFrameHostId();
 
     if (runner_.get())
       runner_->Quit();
   }
 }
 
-bool RenderFrameDeletedObserver::deleted() {
-  return deleted_;
+bool RenderFrameDeletedObserver::deleted() const {
+  return rfh_id_ == GlobalRenderFrameHostId();
 }
 
-void RenderFrameDeletedObserver::WaitUntilDeleted() {
-  if (deleted_)
-    return;
+bool RenderFrameDeletedObserver::WaitUntilDeleted() {
+  if (deleted())
+    return true;
 
-  runner_.reset(new base::RunLoop());
+  runner_ = std::make_unique<base::RunLoop>();
   runner_->Run();
   runner_.reset();
+  return deleted();
+}
+
+RenderFrameHostWrapper::RenderFrameHostWrapper(RenderFrameHost* rfh)
+    : rfh_id_(rfh ? rfh->GetGlobalId() : GlobalRenderFrameHostId()),
+      deleted_observer_(rfh ? std::make_unique<RenderFrameDeletedObserver>(rfh)
+                            : nullptr) {}
+
+RenderFrameHostWrapper::RenderFrameHostWrapper(RenderFrameHostWrapper&& rfhft) =
+    default;
+RenderFrameHostWrapper::~RenderFrameHostWrapper() = default;
+
+RenderFrameHost* RenderFrameHostWrapper::get() const {
+  return RenderFrameHost::FromID(rfh_id_);
+}
+
+bool RenderFrameHostWrapper::IsDestroyed() const {
+  return get() == nullptr;
+}
+
+// See RenderFrameDeletedObserver for notes on the difference between
+// RenderFrame being deleted and RenderFrameHost being destroyed.
+bool RenderFrameHostWrapper::WaitUntilRenderFrameDeleted() const {
+  CHECK(deleted_observer_);
+  return deleted_observer_->WaitUntilDeleted();
+}
+
+bool RenderFrameHostWrapper::IsRenderFrameDeleted() const {
+  CHECK(deleted_observer_);
+  return deleted_observer_->deleted();
+}
+
+RenderFrameHost& RenderFrameHostWrapper::operator*() const {
+  DCHECK(get());
+  return *get();
+}
+
+RenderFrameHost* RenderFrameHostWrapper::operator->() const {
+  DCHECK(get());
+  return get();
 }
 
 WebContentsDestroyedWatcher::WebContentsDestroyedWatcher(
@@ -462,8 +494,7 @@ WebContentsDestroyedWatcher::WebContentsDestroyedWatcher(
   EXPECT_TRUE(web_contents != nullptr);
 }
 
-WebContentsDestroyedWatcher::~WebContentsDestroyedWatcher() {
-}
+WebContentsDestroyedWatcher::~WebContentsDestroyedWatcher() = default;
 
 void WebContentsDestroyedWatcher::Wait() {
   run_loop_.Run();
@@ -477,7 +508,7 @@ void WebContentsDestroyedWatcher::WebContentsDestroyed() {
 TestPageScaleObserver::TestPageScaleObserver(WebContents* web_contents)
     : WebContentsObserver(web_contents) {}
 
-TestPageScaleObserver::~TestPageScaleObserver() {}
+TestPageScaleObserver::~TestPageScaleObserver() = default;
 
 void TestPageScaleObserver::OnPageScaleFactorChanged(float page_scale_factor) {
   last_scale_ = page_scale_factor;
@@ -496,47 +527,159 @@ float TestPageScaleObserver::WaitForPageScaleUpdate() {
   return last_scale_;
 }
 
-EffectiveURLContentBrowserClient::EffectiveURLContentBrowserClient(
+EffectiveURLContentBrowserClientHelper::EffectiveURLContentBrowserClientHelper(
     bool requires_dedicated_process)
     : requires_dedicated_process_(requires_dedicated_process) {}
 
-EffectiveURLContentBrowserClient::EffectiveURLContentBrowserClient(
-    const GURL& url_to_modify,
-    const GURL& url_to_return,
-    bool requires_dedicated_process)
-    : requires_dedicated_process_(requires_dedicated_process) {
-  AddTranslation(url_to_modify, url_to_return);
-}
+EffectiveURLContentBrowserClientHelper::
+    ~EffectiveURLContentBrowserClientHelper() = default;
 
-EffectiveURLContentBrowserClient::~EffectiveURLContentBrowserClient() {}
-
-void EffectiveURLContentBrowserClient::AddTranslation(
+void EffectiveURLContentBrowserClientHelper::AddTranslation(
     const GURL& url_to_modify,
     const GURL& url_to_return) {
   urls_to_modify_[url_to_modify] = url_to_return;
 }
 
-GURL EffectiveURLContentBrowserClient::GetEffectiveURL(
-    BrowserContext* browser_context,
+std::optional<GURL> EffectiveURLContentBrowserClientHelper::GetEffectiveURL(
     const GURL& url) {
   auto it = urls_to_modify_.find(url);
-  if (it != urls_to_modify_.end())
+  if (it != urls_to_modify_.end()) {
     return it->second;
-  return url;
+  }
+  return std::nullopt;
+}
+
+bool EffectiveURLContentBrowserClientHelper::DoesSiteRequireDedicatedProcess(
+    BrowserContext* browser_context,
+    const GURL& effective_site_url) {
+  if (!requires_dedicated_process_) {
+    return false;
+  }
+
+  for (const auto& pair : urls_to_modify_) {
+    // `effective_site_url` requires a dedicated process if a SiteInfo created
+    // for it uses a matching site URL (and thus doesn't use unisolated.invalid
+    // for the default SiteInstance). It is important not to call
+    // SiteInfo::CreateForTesting here to avoid an infinite recursive call when
+    // computing values for the SiteInfo.
+    // TODO(crbug.com/390571607): Make sure this test works as intended in
+    // default SiteInstanceGroup mode.
+    GURL maybe_modified_url =
+        SiteInfo::GetSiteForURLForTest(IsolationContext(browser_context),
+                                       UrlInfo::CreateForTesting(pair.first),
+                                       /*should_use_effective_urls=*/true);
+    if (maybe_modified_url == effective_site_url) {
+      return true;
+    }
+  }
+  return false;
+}
+
+EffectiveURLContentBrowserClient::EffectiveURLContentBrowserClient(
+    bool requires_dedicated_process)
+    : helper_(requires_dedicated_process) {}
+
+EffectiveURLContentBrowserClient::EffectiveURLContentBrowserClient(
+    const GURL& url_to_modify,
+    const GURL& url_to_return,
+    bool requires_dedicated_process)
+    : helper_(requires_dedicated_process) {
+  AddTranslation(url_to_modify, url_to_return);
+}
+
+EffectiveURLContentBrowserClient::~EffectiveURLContentBrowserClient() = default;
+
+void EffectiveURLContentBrowserClient::AddTranslation(
+    const GURL& url_to_modify,
+    const GURL& url_to_return) {
+  helper_.AddTranslation(url_to_modify, url_to_return);
+}
+
+std::optional<GURL> EffectiveURLContentBrowserClient::GetEffectiveURL(
+    BrowserContext* browser_context,
+    const GURL& url) {
+  return helper_.GetEffectiveURL(url);
 }
 
 bool EffectiveURLContentBrowserClient::DoesSiteRequireDedicatedProcess(
     BrowserContext* browser_context,
     const GURL& effective_site_url) {
-  if (!requires_dedicated_process_)
-    return false;
+  return helper_.DoesSiteRequireDedicatedProcess(browser_context,
+                                                 effective_site_url);
+}
 
-  for (const auto& pair : urls_to_modify_) {
-    if (SiteInstance::GetSiteForURL(browser_context, pair.first) ==
-        effective_site_url)
-      return true;
-  }
-  return false;
+ScopedContentBrowserClientSetting::ScopedContentBrowserClientSetting(
+    ContentBrowserClient* new_client)
+    : old_client_(SetBrowserClientForTesting(new_client)) {}
+
+ScopedContentBrowserClientSetting::~ScopedContentBrowserClientSetting() {
+  SetBrowserClientForTesting(old_client_);
+}
+
+void WaitForBrowserCompositorFramePresented(WebContents* web_contents) {
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_IOS) && \
+    !defined(USE_AURA)
+  NOTREACHED();
+#else
+  base::RunLoop run_loop;
+  auto callback = base::BindOnce(
+      [](base::RepeatingClosure cb,
+         const viz::FrameTimingDetails& frame_timing_details) {
+        std::move(cb).Run();
+      },
+      run_loop.QuitClosure());
+#if BUILDFLAG(IS_ANDROID)
+  ui::WindowAndroidCompositor* compositor =
+      web_contents->GetNativeView()->GetWindowAndroid()->GetCompositor();
+  compositor->PostRequestSuccessfulPresentationTimeForNextFrame(
+      std::move(callback));
+#elif BUILDFLAG(IS_MAC)
+  auto* browser_compositor = GetBrowserCompositorMacForTesting(
+      web_contents->GetRenderWidgetHostView());
+  browser_compositor->GetCompositor()
+      ->RequestSuccessfulPresentationTimeForNextFrame(std::move(callback));
+#elif BUILDFLAG(IS_IOS)
+  auto* browser_compositor = GetBrowserCompositorIOSForTesting(
+      web_contents->GetRenderWidgetHostView());
+  browser_compositor->GetCompositor()
+      ->RequestSuccessfulPresentationTimeForNextFrame(std::move(callback));
+#elif defined(USE_AURA)
+  auto* compositor = static_cast<RenderWidgetHostViewAura*>(
+                         web_contents->GetRenderWidgetHostView())
+                         ->GetCompositor();
+  compositor->RequestSuccessfulPresentationTimeForNextFrame(
+      std::move(callback));
+#endif
+  run_loop.Run();
+#endif
+}
+
+void ForceNewCompositorFrameFromBrowser(WebContents* web_contents) {
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_IOS) && \
+    !defined(USE_AURA)
+  NOTREACHED();
+#endif
+
+#if BUILDFLAG(IS_ANDROID)
+  ui::WindowAndroid* window = web_contents->GetTopLevelNativeWindow();
+  ui::WindowAndroidCompositor* compositor = window->GetCompositor();
+  cc::slim::LayerTree* layer_tree =
+      static_cast<CompositorImpl*>(compositor)->GetLayerTreeForTesting();
+  layer_tree->SetNeedsRedrawForTesting();
+#elif BUILDFLAG(IS_MAC)
+  auto* browser_compositor = GetBrowserCompositorMacForTesting(
+      web_contents->GetRenderWidgetHostView());
+  browser_compositor->GetCompositor()->ScheduleFullRedraw();
+#elif BUILDFLAG(IS_IOS)
+  auto* browser_compositor = GetBrowserCompositorIOSForTesting(
+      web_contents->GetRenderWidgetHostView());
+  browser_compositor->GetCompositor()->ScheduleFullRedraw();
+#elif defined(USE_AURA)
+  auto* compositor = static_cast<RenderWidgetHostViewAura*>(
+                         web_contents->GetRenderWidgetHostView())
+                         ->GetCompositor();
+  compositor->ScheduleFullRedraw();
+#endif
 }
 
 }  // namespace content

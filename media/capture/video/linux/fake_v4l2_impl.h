@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 
 #include <linux/videodev2.h>
 
+#include "base/synchronization/lock.h"
 #include "media/capture/capture_export.h"
 #include "media/capture/video/linux/v4l2_capture_device.h"
 #include "media/capture/video/video_capture_device_descriptor.h"
@@ -17,10 +18,12 @@
 namespace media {
 
 struct FakeV4L2DeviceConfig {
-  FakeV4L2DeviceConfig(const VideoCaptureDeviceDescriptor& descriptor)
-      : descriptor(descriptor) {}
+  explicit FakeV4L2DeviceConfig(const VideoCaptureDeviceDescriptor& descriptor,
+                                uint32_t fmt = V4L2_PIX_FMT_YUV420)
+      : descriptor(descriptor), v4l2_pixel_format(fmt) {}
 
   const VideoCaptureDeviceDescriptor descriptor;
+  uint32_t v4l2_pixel_format;
 };
 
 // Implementation of V4L2CaptureDevice interface that allows configuring fake
@@ -46,17 +49,18 @@ class CAPTURE_EXPORT FakeV4L2Impl : public V4L2CaptureDevice {
   int munmap(void* start, size_t length) override;
   int poll(struct pollfd* ufds, unsigned int nfds, int timeout) override;
 
- protected:
+ private:
   ~FakeV4L2Impl() override;
 
- private:
   class OpenedDevice;
 
-  int next_id_to_return_from_open_;
-  std::map<std::string, FakeV4L2DeviceConfig> device_configs_;
-  std::map<std::string, int> device_name_to_open_id_map_;
+  base::Lock lock_;
+
+  int next_id_to_return_from_open_ GUARDED_BY(lock_);
+  std::map<std::string, FakeV4L2DeviceConfig> device_configs_ GUARDED_BY(lock_);
+  std::map<std::string, int> device_name_to_open_id_map_ GUARDED_BY(lock_);
   std::map<int /*value returned by open()*/, std::unique_ptr<OpenedDevice>>
-      opened_devices_;
+      opened_devices_ GUARDED_BY(lock_);
 };
 
 }  // namespace media

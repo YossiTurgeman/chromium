@@ -1,14 +1,14 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/session/session_activation_observer_holder.h"
 
+#include <map>
 #include <utility>
 
 #include "ash/public/cpp/session/session_activation_observer.h"
 #include "base/notreached.h"
-#include "base/stl_util.h"
 
 namespace ash {
 
@@ -33,7 +33,6 @@ void SessionActivationObserverHolder::RemoveForAccountId(
   auto it = observer_map_.find(account_id);
   if (it == observer_map_.end()) {
     NOTREACHED();
-    return;
   }
   it->second->RemoveObserver(observer);
 }
@@ -66,9 +65,7 @@ void SessionActivationObserverHolder::NotifyLockStateChanged(bool locked) {
 }
 
 void SessionActivationObserverHolder::PruneObserverMap() {
-  base::EraseIf(observer_map_, [](auto& item) {
-    return !item.second->might_have_observers();
-  });
+  std::erase_if(observer_map_, [](auto& item) { return item.second->empty(); });
 }
 
 }  // namespace ash

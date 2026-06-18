@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,17 @@
 #define CHROME_CREDENTIAL_PROVIDER_GAIACP_WIN_HTTP_URL_FETCHER_H_
 
 #include <map>
+#include <optional>
 #include <string>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/values.h"
 #include "chrome/credential_provider/gaiacp/scoped_handle.h"
 #include "url/gurl.h"
+
+namespace base {
+class TimeDelta;
+}
 
 namespace credential_provider {
 
@@ -38,10 +43,10 @@ class WinHttpUrlFetcher {
       const GURL& request_url,
       std::string access_token,
       const std::vector<std::pair<std::string, std::string>>& headers,
-      const base::Value& request_dict,
+      const base::DictValue& request_dict,
       const base::TimeDelta& request_timeout,
       unsigned int request_retries,
-      base::Optional<base::Value>* request_result);
+      std::optional<base::DictValue>* request_result);
 
   virtual ~WinHttpUrlFetcher();
 
@@ -52,6 +57,12 @@ class WinHttpUrlFetcher {
   virtual HRESULT SetHttpRequestTimeout(const int timeout_in_millis);
   virtual HRESULT Fetch(std::vector<char>* response);
   virtual HRESULT Close();
+
+  using CreatorFunc = decltype(Create);
+  using CreatorCallback = base::RepeatingCallback<CreatorFunc>;
+
+  // Set the creator callback function to use in tests.
+  static void SetCreatorForTesting(CreatorCallback creator);
 
  protected:
   using Headers = std::map<std::string, std::string>;
@@ -75,8 +86,6 @@ class WinHttpUrlFetcher {
 
   // Gets storage of the function pointer used to create instances of this
   // class for tests.
-  using CreatorFunc = decltype(Create);
-  using CreatorCallback = base::RepeatingCallback<CreatorFunc>;
   static CreatorCallback* GetCreatorFunctionStorage();
 };
 

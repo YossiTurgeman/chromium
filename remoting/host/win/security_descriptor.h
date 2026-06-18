@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,11 +30,11 @@ ScopedSid GetLogonSid(HANDLE token);
 // Converts a security descriptor in self-relative format to a security
 // descriptor in absolute format.
 bool MakeScopedAbsoluteSd(const ScopedSd& relative_sd,
-                          ScopedSd* absolute_sd,
-                          ScopedAcl* dacl,
-                          ScopedSid* group,
-                          ScopedSid* owner,
-                          ScopedAcl* sacl);
+                          ScopedSd& absolute_sd,
+                          ScopedAcl& dacl,
+                          ScopedSid& group,
+                          ScopedSid& owner,
+                          ScopedAcl& sacl);
 
 }  // namespace remoting
 

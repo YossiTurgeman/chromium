@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,32 +6,41 @@
 #define ASH_SHELF_DRAG_HANDLE_H_
 
 #include "ash/ash_export.h"
-#include "ash/shelf/contextual_nudge.h"
-#include "ash/shelf/contextual_nudge_status_tracker.h"
+#include "ash/controls/contextual_nudge.h"
+#include "ash/controls/contextual_tooltip.h"
 #include "ash/shelf/shelf.h"
-#include "ash/shell.h"
 #include "ash/shell_observer.h"
-#include "ash/wm/overview/overview_controller.h"
 #include "ash/wm/overview/overview_observer.h"
 #include "ash/wm/splitview/split_view_controller.h"
 #include "ash/wm/splitview/split_view_observer.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_observation.h"
 #include "base/timer/timer.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/compositor/layer_animation_observer.h"
 #include "ui/compositor/layer_animator.h"
-#include "ui/views/view.h"
+#include "ui/views/controls/button/button.h"
 #include "ui/views/view_targeter_delegate.h"
 
 namespace ash {
 
-class ASH_EXPORT DragHandle : public views::View,
+class OverviewController;
+class Shell;
+
+class ASH_EXPORT DragHandle : public views::Button,
                               public views::ViewTargeterDelegate,
+                              public AccessibilityObserver,
                               public OverviewObserver,
                               public ShellObserver,
                               public ui::ImplicitAnimationObserver,
-                              public SplitViewObserver {
+                              public SplitViewObserver,
+                              public ShelfObserver {
+  METADATA_HEADER(DragHandle, views::Button)
+
  public:
-  DragHandle(int drag_handle_corner_radius, Shelf* shelf);
+  DragHandle(float drag_handle_corner_radius, Shelf* shelf);
   DragHandle(const DragHandle&) = delete;
   ~DragHandle() override;
 
@@ -56,13 +65,12 @@ class ASH_EXPORT DragHandle : public views::View,
 
   // Immediately begins the animation to return the drag handle back to its
   // original position and hide the tooltip.
-  void HideDragHandleNudge(contextual_tooltip::DismissNudgeReason reason);
+  void HideDragHandleNudge(contextual_tooltip::DismissNudgeReason reason,
+                           bool animate);
 
   // Called when the window drag from shelf starts or ends. The drag handle
   // contextual nudge will remain visible while the gesture is in progress.
   void SetWindowDragFromShelfInProgress(bool gesture_in_progress);
-
-  void UpdateColor();
 
   // views::View:
   void OnGestureEvent(ui::GestureEvent* event) override;
@@ -77,6 +85,10 @@ class ASH_EXPORT DragHandle : public views::View,
   // SplitViewObserver:
   void OnSplitViewStateChanged(SplitViewController::State previous_state,
                                SplitViewController::State state) override;
+
+  // ShelfObserver:
+  void OnHotseatStateChanged(HotseatState old_state,
+                             HotseatState new_state) override;
 
   ContextualNudge* drag_handle_nudge() { return drag_handle_nudge_; }
 
@@ -105,6 +117,13 @@ class ASH_EXPORT DragHandle : public views::View,
   }
 
  private:
+  // AccessibilityObserver:
+  void OnAccessibilityStatusChanged() override;
+
+  // Show/hide hotseat in tablet mode. This is only available when spoken
+  // feedback is enabled.
+  void ButtonPressed();
+
   // ui::ImplicitAnimationObserver:
   void OnImplicitAnimationsCompleted() override;
 
@@ -113,7 +132,7 @@ class ASH_EXPORT DragHandle : public views::View,
 
   // Helper function to hide the drag handle nudge. Called by
   // |hide_drag_handle_nudge_timer_|.
-  void HideDragHandleNudgeHelper(bool hidden_by_tap);
+  void HideDragHandleNudgeHelper(bool hidden_by_tap, bool animate);
 
   // Helper function to animate the drag handle for the drag handle gesture
   // contextual nudge.
@@ -133,8 +152,16 @@ class ASH_EXPORT DragHandle : public views::View,
   // Stops the timer to show the drag handle nudge.
   void StopDragHandleNudgeShowTimer();
 
+  // Sets accessible states of the view.
+  void UpdateExpandedCollapsedAccessibleState();
+
+  void UpdateAccessibleName();
+
+  // Updates previous-focus and next-focus accessible states of the view.
+  void UpdateAccessiblePreviousAndNextFocus();
+
   // Pointer to the shelf that owns the drag handle.
-  Shelf* const shelf_;
+  const raw_ptr<Shelf> shelf_;
 
   // Timer to hide drag handle nudge if it has a timed life.
   base::OneShotTimer hide_drag_handle_nudge_timer_;
@@ -157,20 +184,19 @@ class ASH_EXPORT DragHandle : public views::View,
   bool window_drag_from_shelf_in_progress_ = false;
 
   // A label used to educate users about swipe gestures on the drag handle.
-  ContextualNudge* drag_handle_nudge_ = nullptr;
+  raw_ptr<ContextualNudge> drag_handle_nudge_ = nullptr;
 
   std::unique_ptr<Shelf::ScopedAutoHideLock> auto_hide_lock_;
 
-  ScopedObserver<SplitViewController, SplitViewObserver> split_view_observer_{
-      this};
+  base::ScopedClosureRunner force_show_hotseat_resetter_;
 
-  ScopedObserver<OverviewController, OverviewObserver> overview_observer_{this};
+  base::ScopedObservation<SplitViewController, SplitViewObserver>
+      split_view_observation_{this};
 
-  ScopedObserver<Shell,
-                 ShellObserver,
-                 &Shell::AddShellObserver,
-                 &Shell::RemoveShellObserver>
-      shell_observer_{this};
+  base::ScopedObservation<OverviewController, OverviewObserver>
+      overview_observation_{this};
+
+  base::ScopedObservation<Shell, ShellObserver> shell_observation_{this};
 
   base::WeakPtrFactory<DragHandle> weak_factory_{this};
 };

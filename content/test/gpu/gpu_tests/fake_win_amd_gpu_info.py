@@ -1,4 +1,4 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -19,6 +19,8 @@
 #   pyformat [this file name] | sed -e "s/'/'/g"
 #
 # and put the output into this file.
+
+from __future__ import print_function
 
 # yapf: disable
 FAKE_GPU_INFO = {
@@ -114,7 +116,6 @@ FAKE_GPU_INFO = {
         ],
     'driver_bug_workarounds':
         [
-            'clear_uniforms_before_first_program_use',
             'exit_on_context_lost',
             'force_cube_complete',
             'scalarize_vec_and_mat_constructor_args',

@@ -1,23 +1,24 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_ACCELERATED_STATIC_BITMAP_IMAGE_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_ACCELERATED_STATIC_BITMAP_IMAGE_H_
 
-#include <memory>
-
 #include "base/memory/weak_ptr.h"
-#include "base/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_checker.h"
+#include "components/viz/common/resources/release_callback.h"
+#include "gpu/command_buffer/common/shared_image_usage.h"
+#include "third_party/blink/renderer/platform/graphics/mailbox_ref.h"
+#include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
 #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
 #include "third_party/blink/renderer/platform/scheduler/public/thread.h"
 
-struct SkImageInfo;
-
-namespace viz {
-class SingleReleaseCallback;
-}  // namespace viz
+namespace gpu {
+class ClientSharedImage;
+struct ExportedSharedImage;
+}  // namespace gpu
 
 namespace blink {
 class MailboxTextureBacking;
@@ -28,61 +29,53 @@ class PLATFORM_EXPORT AcceleratedStaticBitmapImage final
  public:
   ~AcceleratedStaticBitmapImage() override;
 
-  // Creates an image wrapping a shared image mailbox.
+  // Creates an image wrapping a shared image.
   //
   // |sync_token| is the token that must be waited on before reading the
-  // contents of this mailbox.
+  // contents of this shared image.
   //
-  // |shared_image_texture_id| is an optional texture bound to the shared image
-  // mailbox imported into the provided context. If provided the caller must
-  // ensure that the texture is bound to the shared image mailbox, stays alive
-  // and has a read lock on the shared image until the |release_callback| is
-  // invoked.
-  //
-  // |sk_image_info| provides the metadata associated with the backing.
-  //
-  // |texture_target| is the target that the texture should be bound to if the
-  // backing is used with GL.
-  //
-  // |is_origin_top_left| indicates whether the origin in texture space
-  // corresponds to the top-left content pixel.
-  //
-  // |context_provider| is the context that the mailbox was created with.
+  // |context_provider| is the context that the shared image was created with.
   // |context_thread_ref| and |context_task_runner| refer to the thread the
   // context is bound to. If the image is created on a different thread than
   // |context_thread_ref| then the provided sync_token must be verified and no
   // |shared_image_texture_id| should be provided.
   //
-  // |release_callback| is a callback to be invoked when this mailbox can be
-  // safely destroyed. It is guaranteed to be invoked on the context thread.
+  // |release_callback| is a callback to be invoked when this shared image can
+  // be safely destroyed. It is guaranteed to be invoked on the context thread.
   //
   // Note that it is assumed that the mailbox can only be used for read
   // operations, no writes are allowed.
-  static scoped_refptr<AcceleratedStaticBitmapImage> CreateFromCanvasMailbox(
-      const gpu::Mailbox&,
+  static scoped_refptr<AcceleratedStaticBitmapImage>
+  CreateFromCanvasSharedImage(
+      scoped_refptr<gpu::ClientSharedImage>,
       const gpu::SyncToken&,
-      GLuint shared_image_texture_id,
-      const SkImageInfo& sk_image_info,
-      GLenum texture_target,
-      bool is_origin_top_left,
+      SkAlphaType alpha_type,
+      const gfx::HDRMetadata&,
       base::WeakPtr<WebGraphicsContext3DProviderWrapper>,
       base::PlatformThreadRef context_thread_ref,
       scoped_refptr<base::SingleThreadTaskRunner> context_task_runner,
-      std::unique_ptr<viz::SingleReleaseCallback> release_callback);
+      viz::ReleaseCallback release_callback);
 
-  bool CurrentFrameKnownToBeOpaque() override;
-  IntSize Size() const override;
+  // Creates an image wrapping an external shared image.
+  // The shared image may come from a different context,
+  // potentially from a different process.
+  // This takes ownership of the shared image.
+  static scoped_refptr<AcceleratedStaticBitmapImage>
+  CreateFromExternalSharedImage(
+      gpu::ExportedSharedImage exported_shared_image,
+      const gpu::SyncToken& sync_token,
+      SkAlphaType alpha_type,
+      const gfx::HDRMetadata&,
+      base::OnceCallback<void(const gpu::SyncToken&)> release_callback);
+
+  bool IsOpaque() override;
   bool IsTextureBacked() const override { return true; }
-  scoped_refptr<StaticBitmapImage> ConvertToColorSpace(sk_sp<SkColorSpace>,
-                                                       SkColorType) override;
 
   void Draw(cc::PaintCanvas*,
             const cc::PaintFlags&,
-            const FloatRect& dst_rect,
-            const FloatRect& src_rect,
-            RespectImageOrientationEnum,
-            ImageClampingMode,
-            ImageDecodingMode) override;
+            const gfx::RectF& dst_rect,
+            const gfx::RectF& src_rect,
+            const ImageDrawOptions&) override;
 
   bool IsValid() const final;
   WebGraphicsContext3DProvider* ContextProvider() const final;
@@ -94,10 +87,11 @@ class PLATFORM_EXPORT AcceleratedStaticBitmapImage final
                      GLenum dest_target,
                      GLuint dest_texture_id,
                      GLint dest_level,
-                     bool unpack_premultiply_alpha,
-                     bool unpack_flip_y,
-                     const IntPoint& dest_point,
-                     const IntRect& source_sub_rectangle) override;
+                     SkAlphaType dest_alpha_type,
+                     GrSurfaceOrigin destination_origin,
+                     const gfx::Point& dest_point,
+                     const gfx::Rect& src_rect) override;
+
   // To be called on sender thread before performing a transfer to a different
   // thread.
   void Transfer() final;
@@ -114,76 +108,56 @@ class PLATFORM_EXPORT AcceleratedStaticBitmapImage final
 
   // Provides the mailbox backing for this image. The caller must wait on the
   // sync token before accessing this mailbox.
-  gpu::MailboxHolder GetMailboxHolder() const final;
-  bool IsOriginTopLeft() const final { return is_origin_top_left_; }
+  scoped_refptr<gpu::ClientSharedImage> GetSharedImage() const final;
+  gpu::SyncToken GetSyncToken() const final;
 
   PaintImage PaintImageForCurrentFrame() override;
 
+  gfx::Size GetSize() const override { return shared_image_->size(); }
+  SkAlphaType GetAlphaType() const override { return alpha_type_; }
+  gfx::ColorSpace GetColorSpace() const override {
+    return shared_image_->color_space();
+  }
+  viz::SharedImageFormat GetSharedImageFormat() const override {
+    return shared_image_->format();
+  }
+
+  const gfx::HDRMetadata& GetHdrMetadata() const override {
+    return hdr_metadata_;
+  }
+
  private:
-  class MailboxRef : public ThreadSafeRefCounted<MailboxRef> {
-   public:
-    MailboxRef(const gpu::SyncToken& sync_token,
-               base::PlatformThreadRef context_thread_ref,
-               scoped_refptr<base::SingleThreadTaskRunner> context_task_runner,
-               std::unique_ptr<viz::SingleReleaseCallback> release_callback);
-    ~MailboxRef();
-
-    bool is_cross_thread() const {
-      return base::PlatformThread::CurrentRef() != context_thread_ref_;
-    }
-    void set_sync_token(gpu::SyncToken token) { sync_token_ = token; }
-    const gpu::SyncToken& GetOrCreateSyncToken(
-        base::WeakPtr<WebGraphicsContext3DProviderWrapper>);
-    bool verified_flush() { return sync_token_.verified_flush(); }
-
-   private:
-    gpu::SyncToken sync_token_;
-    const base::PlatformThreadRef context_thread_ref_;
-    const scoped_refptr<base::SingleThreadTaskRunner> context_task_runner_;
-    std::unique_ptr<viz::SingleReleaseCallback> release_callback_;
-  };
-
-  struct ReleaseContext {
-    scoped_refptr<MailboxRef> mailbox_ref;
-    GLuint texture_id = 0u;
-    base::WeakPtr<WebGraphicsContext3DProviderWrapper> context_provider_wrapper;
-  };
-
-  static void ReleaseTexture(void* ctx);
-
   AcceleratedStaticBitmapImage(
-      const gpu::Mailbox&,
+      scoped_refptr<gpu::ClientSharedImage>,
       const gpu::SyncToken&,
-      GLuint shared_image_texture_id,
-      const SkImageInfo& sk_image_info,
-      GLenum texture_target,
-      bool is_origin_top_left,
+      SkAlphaType alpha_type,
+      const gfx::HDRMetadata&,
       const ImageOrientation& orientation,
       base::WeakPtr<WebGraphicsContext3DProviderWrapper>,
       base::PlatformThreadRef context_thread_ref,
       scoped_refptr<base::SingleThreadTaskRunner> context_task_runner,
-      std::unique_ptr<viz::SingleReleaseCallback> release_callback);
+      viz::ReleaseCallback release_callback);
 
   void CreateImageFromMailboxIfNeeded();
-  void InitializeTextureBacking(GLuint shared_image_texture_id);
 
-  const gpu::Mailbox mailbox_;
-  const SkImageInfo sk_image_info_;
-  const GLenum texture_target_;
-  const bool is_origin_top_left_;
+  // Fields must be safe to destroy on any thread or invalidtaed in Transfer().
+  scoped_refptr<gpu::ClientSharedImage> shared_image_;
+  SkAlphaType alpha_type_;
 
   base::WeakPtr<WebGraphicsContext3DProviderWrapper> context_provider_wrapper_;
   scoped_refptr<MailboxRef> mailbox_ref_;
 
-  // The context this TextureBacking is bound to.
+  // The context `texture_backing_` is bound to. This and `texture_backing_` are
+  // thread-affine state that must be invalidated in Transfer().
   base::WeakPtr<WebGraphicsContext3DProviderWrapper>
       skia_context_provider_wrapper_;
   sk_sp<MailboxTextureBacking> texture_backing_;
 
   PaintImage::ContentId paint_image_content_id_;
+  gfx::HDRMetadata hdr_metadata_;
   THREAD_CHECKER(thread_checker_);
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_ACCELERATED_STATIC_BITMAP_IMAGE_H_

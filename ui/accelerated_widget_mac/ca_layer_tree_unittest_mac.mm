@@ -1,19 +1,29 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
+
 #import <AVFoundation/AVFoundation.h>
+
 #include <memory>
 
+#include "base/test/scoped_feature_list.h"
+#include "components/metal_util/hdr_copier_layer.h"
+#include "components/viz/common/resources/shared_image_format.h"
 #include "gpu/GLES2/gl2extchromium.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/gtest_mac.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/accelerated_widget_mac/ca_renderer_layer_tree.h"
 #include "ui/gfx/geometry/dip_util.h"
+#include "ui/gfx/geometry/point_conversions.h"
+#include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/mac/io_surface.h"
 #include "ui/gl/ca_renderer_layer_params.h"
-#include "ui/gl/gl_image_io_surface.h"
 
 @interface CALayer (Private)
 @property BOOL wantsExtendedDynamicRangeContent;
@@ -24,8 +34,8 @@ namespace gpu {
 namespace {
 
 struct CALayerProperties {
-  CALayerProperties() {}
-  ~CALayerProperties() {}
+  CALayerProperties() = default;
+  ~CALayerProperties() = default;
 
   bool is_clipped = true;
   gfx::Rect clip_rect;
@@ -34,44 +44,44 @@ struct CALayerProperties {
   gfx::Transform transform;
   gfx::RectF contents_rect = gfx::RectF(0.0f, 0.0f, 1.0f, 1.0f);
   gfx::Rect rect = gfx::Rect(0, 0, 256, 256);
-  unsigned background_color = SkColorSetARGB(0xFF, 0xFF, 0xFF, 0xFF);
+  SkColor4f background_color = SkColors::kWhite;
   unsigned edge_aa_mask = 0;
   float opacity = 1.0f;
   float scale_factor = 1.0f;
   unsigned filter = GL_LINEAR;
-  scoped_refptr<gl::GLImageIOSurface> gl_image;
+  gfx::ScopedIOSurface io_surface;
+  gfx::ColorSpace color_space;
+  base::apple::ScopedCFTypeRef<CVPixelBufferRef> cv_pixel_buffer;
+  gfx::ProtectedVideoType protected_video_type =
+      gfx::ProtectedVideoType::kClear;
 
   bool allow_av_layers = true;
   bool allow_solid_color_layers = true;
 };
 
-scoped_refptr<gl::GLImageIOSurface> CreateGLImage(const gfx::Size& size,
-                                                  gfx::BufferFormat format,
-                                                  bool video) {
-  scoped_refptr<gl::GLImageIOSurface> gl_image(
-      gl::GLImageIOSurface::Create(size, GL_RGBA));
-  base::ScopedCFTypeRef<IOSurfaceRef> io_surface(
-      gfx::CreateIOSurface(size, format));
-  if (video) {
-    base::ScopedCFTypeRef<CVPixelBufferRef> cv_pixel_buffer;
-    CVPixelBufferCreateWithIOSurface(nullptr, io_surface, nullptr,
-                                     cv_pixel_buffer.InitializeInto());
-    gl_image->InitializeWithCVPixelBuffer(cv_pixel_buffer,
-                                          gfx::GenericSharedMemoryId(), format);
-  } else {
-    gl_image->Initialize(io_surface, gfx::GenericSharedMemoryId(), format);
-  }
-  return gl_image;
+base::apple::ScopedCFTypeRef<CVPixelBufferRef> CreateCVPixelBuffer(
+    gfx::ScopedIOSurface io_surface) {
+  base::apple::ScopedCFTypeRef<CVPixelBufferRef> cv_pixel_buffer;
+  CVPixelBufferCreateWithIOSurface(nullptr, io_surface.get(), nullptr,
+                                   cv_pixel_buffer.InitializeInto());
+  return cv_pixel_buffer;
 }
 
 bool ScheduleCALayer(ui::CARendererLayerTree* tree,
                      CALayerProperties* properties) {
+  gfx::ScopedIOSurface io_surface;
+  gfx::ColorSpace io_surface_color_space;
+  if (properties->io_surface) {
+    io_surface = properties->io_surface;
+    io_surface_color_space = properties->color_space;
+  }
   return tree->ScheduleCALayer(ui::CARendererLayerParams(
       properties->is_clipped, properties->clip_rect,
       properties->rounded_corner_bounds, properties->sorting_context_id,
-      properties->transform, properties->gl_image.get(),
+      properties->transform, io_surface, io_surface_color_space,
       properties->contents_rect, properties->rect, properties->background_color,
-      properties->edge_aa_mask, properties->opacity, properties->filter));
+      properties->edge_aa_mask, properties->opacity, properties->filter,
+      gfx::HDRMetadata(), properties->protected_video_type, false));
 }
 
 void UpdateCALayerTree(std::unique_ptr<ui::CARendererLayerTree>& ca_layer_tree,
@@ -92,9 +102,7 @@ void UpdateCALayerTree(std::unique_ptr<ui::CARendererLayerTree>& ca_layer_tree,
 
 class CALayerTreeTest : public testing::Test {
  protected:
-  void SetUp() override {
-    superlayer_.reset([[CALayer alloc] init]);
-  }
+  void SetUp() override { superlayer_ = [[CALayer alloc] init]; }
   // Traverse the tree. Validate that there exists only one content layer, and
   // return that layer.
   CALayer* GetOnlyContentLayer() {
@@ -109,7 +117,7 @@ class CALayerTreeTest : public testing::Test {
     EXPECT_EQ(1u, [[transform_layer sublayers] count]);
     return [transform_layer sublayers][0];
   }
-  base::scoped_nsobject<CALayer> superlayer_;
+  CALayer* __strong superlayer_;
 };
 
 // Test updating each layer's properties.
@@ -123,11 +131,11 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
     properties.transform.Translate(10, 20);
     properties.contents_rect = gfx::RectF(0.0f, 0.25f, 0.5f, 0.75f);
     properties.rect = gfx::Rect(16, 32, 64, 128);
-    properties.background_color = SkColorSetARGB(0xFF, 0xFF, 0, 0);
-    properties.edge_aa_mask = GL_CA_LAYER_EDGE_LEFT_CHROMIUM;
+    properties.background_color = SkColors::kRed;
+    properties.edge_aa_mask = ui::CALayerEdge::kLayerEdgeLeft;
     properties.opacity = 0.5f;
-    properties.gl_image =
-        CreateGLImage(gfx::Size(256, 256), gfx::BufferFormat::BGRA_8888, false);
+    properties.io_surface = gfx::CreateIOSurface(
+        gfx::Size(256, 256), viz::SinglePlaneFormat::kBGRA_8888);
 
     std::unique_ptr<ui::CARendererLayerTree> ca_layer_tree;
     CALayer* root_layer = nil;
@@ -174,13 +182,13 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
                 [clip_and_sorting_layer sublayerTransform].m42);
 
       // Validate the transform layer.
-      EXPECT_EQ(properties.transform.matrix().get(3, 0),
+      EXPECT_EQ(properties.transform.rc(3, 0),
                 [transform_layer sublayerTransform].m41);
-      EXPECT_EQ(properties.transform.matrix().get(3, 1),
+      EXPECT_EQ(properties.transform.rc(3, 1),
                 [transform_layer sublayerTransform].m42);
 
       // Validate the content layer.
-      EXPECT_EQ(static_cast<id>(properties.gl_image->io_surface().get()),
+      EXPECT_EQ((__bridge id)properties.io_surface.get(),
                 [content_layer contents]);
       EXPECT_EQ(properties.contents_rect,
                 gfx::RectF([content_layer contentsRect]));
@@ -189,10 +197,9 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
                 gfx::Rect([content_layer bounds]));
       EXPECT_EQ(kCALayerLeftEdge, [content_layer edgeAntialiasingMask]);
       EXPECT_EQ(properties.opacity, [content_layer opacity]);
-      EXPECT_NSEQ(kCAFilterLinear, [content_layer minificationFilter]);
-      EXPECT_NSEQ(kCAFilterLinear, [content_layer magnificationFilter]);
-      if ([content_layer respondsToSelector:(@selector(contentsScale))])
-        EXPECT_EQ(properties.scale_factor, [content_layer contentsScale]);
+      EXPECT_NSEQ(kCAFilterNearest, [content_layer minificationFilter]);
+      EXPECT_NSEQ(kCAFilterNearest, [content_layer magnificationFilter]);
+      EXPECT_EQ(properties.scale_factor, [content_layer contentsScale]);
     }
 
     // Update just the clip rect and re-commit.
@@ -262,15 +269,15 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
       EXPECT_EQ(transform_layer, [rounded_rect_layer sublayers][0]);
 
       // Validate the transform layer.
-      EXPECT_EQ(properties.transform.matrix().get(3, 0),
+      EXPECT_EQ(properties.transform.rc(3, 0),
                 [transform_layer sublayerTransform].m41);
-      EXPECT_EQ(properties.transform.matrix().get(3, 1),
+      EXPECT_EQ(properties.transform.rc(3, 1),
                 [transform_layer sublayerTransform].m42);
     }
 
     // Change the edge antialiasing mask and commit.
     {
-      properties.edge_aa_mask = GL_CA_LAYER_EDGE_TOP_CHROMIUM;
+      properties.edge_aa_mask = ui::CALayerEdge::kLayerEdgeTop;
       UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
 
       // Validate the tree structure.
@@ -290,7 +297,7 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
 
     // Change the contents and commit.
     {
-      properties.gl_image = nullptr;
+      properties.io_surface = gfx::ScopedIOSurface();
       UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
 
       // Validate the tree structure.
@@ -405,8 +412,8 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
     // Add the clipping and IOSurface contents back.
     {
       properties.is_clipped = true;
-      properties.gl_image = CreateGLImage(gfx::Size(256, 256),
-                                          gfx::BufferFormat::BGRA_8888, false);
+      properties.io_surface = gfx::CreateIOSurface(
+          gfx::Size(256, 256), viz::SinglePlaneFormat::kBGRA_8888);
       UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
 
       // Validate the tree structure.
@@ -421,7 +428,7 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
       EXPECT_EQ(content_layer, [transform_layer sublayers][0]);
 
       // Validate the content layer.
-      EXPECT_EQ(static_cast<id>(properties.gl_image->io_surface().get()),
+      EXPECT_EQ((__bridge id)properties.io_surface.get(),
                 [content_layer contents]);
       EXPECT_EQ(kCALayerBottomEdge, [content_layer edgeAntialiasingMask]);
     }
@@ -456,11 +463,12 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
 
       // Validate the clip and sorting context layer.
       EXPECT_TRUE([clip_and_sorting_layer masksToBounds]);
-      EXPECT_EQ(gfx::ConvertRectToDIP(properties.scale_factor,
-                                      gfx::Rect(properties.clip_rect.size())),
-                gfx::Rect([clip_and_sorting_layer bounds]));
-      EXPECT_EQ(gfx::ConvertPointToDIP(properties.scale_factor,
-                                       properties.clip_rect.origin()),
+      EXPECT_EQ(
+          gfx::ToFlooredRectDeprecated(gfx::ConvertRectToDips(
+              gfx::Rect(properties.clip_rect.size()), properties.scale_factor)),
+          gfx::Rect([clip_and_sorting_layer bounds]));
+      EXPECT_EQ(gfx::ToFlooredPoint(gfx::ConvertPointToDips(
+                    properties.clip_rect.origin(), properties.scale_factor)),
                 gfx::Point([clip_and_sorting_layer position]));
       EXPECT_EQ(-properties.clip_rect.origin().x() / properties.scale_factor,
                 [clip_and_sorting_layer sublayerTransform].m41);
@@ -468,28 +476,26 @@ class CALayerTreePropertyUpdatesTest : public CALayerTreeTest {
                 [clip_and_sorting_layer sublayerTransform].m42);
 
       // Validate the transform layer.
-      EXPECT_EQ(
-          properties.transform.matrix().get(3, 0) / properties.scale_factor,
-          [transform_layer sublayerTransform].m41);
-      EXPECT_EQ(
-          properties.transform.matrix().get(3, 1) / properties.scale_factor,
-          [transform_layer sublayerTransform].m42);
+      EXPECT_EQ(properties.transform.rc(3, 0) / properties.scale_factor,
+                [transform_layer sublayerTransform].m41);
+      EXPECT_EQ(properties.transform.rc(3, 1) / properties.scale_factor,
+                [transform_layer sublayerTransform].m42);
 
       // Validate the content layer.
-      EXPECT_EQ(static_cast<id>(properties.gl_image->io_surface().get()),
+      EXPECT_EQ((__bridge id)properties.io_surface.get(),
                 [content_layer contents]);
       EXPECT_EQ(properties.contents_rect,
                 gfx::RectF([content_layer contentsRect]));
-      EXPECT_EQ(gfx::ConvertPointToDIP(properties.scale_factor,
-                                       properties.rect.origin()),
+      EXPECT_EQ(gfx::ToFlooredPoint(gfx::ConvertPointToDips(
+                    properties.rect.origin(), properties.scale_factor)),
                 gfx::Point([content_layer position]));
-      EXPECT_EQ(gfx::ConvertRectToDIP(properties.scale_factor,
-                                      gfx::Rect(properties.rect.size())),
-                gfx::Rect([content_layer bounds]));
+      EXPECT_EQ(
+          gfx::ToFlooredRectDeprecated(gfx::ConvertRectToDips(
+              gfx::Rect(properties.rect.size()), properties.scale_factor)),
+          gfx::Rect([content_layer bounds]));
       EXPECT_EQ(kCALayerBottomEdge, [content_layer edgeAntialiasingMask]);
       EXPECT_EQ(properties.opacity, [content_layer opacity]);
-      if ([content_layer respondsToSelector:(@selector(contentsScale))])
-        EXPECT_EQ(properties.scale_factor, [content_layer contentsScale]);
+      EXPECT_EQ(properties.scale_factor, [content_layer contentsScale]);
     }
 
     // Remove the rounded corners. This should result in the rounded corners
@@ -569,10 +575,10 @@ TEST_F(CALayerTreeTest, SplitSortingContextZero) {
   properties.rect = gfx::Rect(0, 0, 256, 256);
 
   // We'll use the IOSurface contents to identify the content layers.
-  scoped_refptr<gl::GLImageIOSurface> gl_images[5];
+  gfx::ScopedIOSurface io_surfaces[5];
   for (size_t i = 0; i < 5; ++i) {
-    gl_images[i] =
-        CreateGLImage(gfx::Size(256, 256), gfx::BufferFormat::BGRA_8888, false);
+    io_surfaces[i] = gfx::CreateIOSurface(gfx::Size(256, 256),
+                                          viz::SinglePlaneFormat::kBGRA_8888);
   }
 
   // Have 5 transforms:
@@ -590,7 +596,7 @@ TEST_F(CALayerTreeTest, SplitSortingContextZero) {
   std::unique_ptr<ui::CARendererLayerTree> ca_layer_tree(
       new ui::CARendererLayerTree(true, true));
   for (size_t i = 0; i < 5; ++i) {
-    properties.gl_image = gl_images[i];
+    properties.io_surface = io_surfaces[i];
     properties.transform = transforms[i];
     bool result = ScheduleCALayer(ca_layer_tree.get(), &properties);
     EXPECT_TRUE(result);
@@ -637,16 +643,11 @@ TEST_F(CALayerTreeTest, SplitSortingContextZero) {
   CALayer* content_layer_4 = [transform_layer_2_0 sublayers][1];
 
   // Validate that the layers come out in order.
-  EXPECT_EQ(static_cast<id>(gl_images[0]->io_surface().get()),
-            [content_layer_0 contents]);
-  EXPECT_EQ(static_cast<id>(gl_images[1]->io_surface().get()),
-            [content_layer_1 contents]);
-  EXPECT_EQ(static_cast<id>(gl_images[2]->io_surface().get()),
-            [content_layer_2 contents]);
-  EXPECT_EQ(static_cast<id>(gl_images[3]->io_surface().get()),
-            [content_layer_3 contents]);
-  EXPECT_EQ(static_cast<id>(gl_images[4]->io_surface().get()),
-            [content_layer_4 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[0].get(), [content_layer_0 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[1].get(), [content_layer_1 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[2].get(), [content_layer_2 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[3].get(), [content_layer_3 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[4].get(), [content_layer_4 contents]);
 }
 
 // Verify that sorting contexts are allocated appropriately.
@@ -657,10 +658,10 @@ TEST_F(CALayerTreeTest, SortingContexts) {
   properties.rect = gfx::Rect(0, 0, 256, 256);
 
   // We'll use the IOSurface contents to identify the content layers.
-  scoped_refptr<gl::GLImageIOSurface> gl_images[3];
+  gfx::ScopedIOSurface io_surfaces[3];
   for (size_t i = 0; i < 3; ++i) {
-    gl_images[i] =
-        CreateGLImage(gfx::Size(256, 256), gfx::BufferFormat::BGRA_8888, false);
+    io_surfaces[i] = gfx::CreateIOSurface(gfx::Size(256, 256),
+                                          viz::SinglePlaneFormat::kBGRA_8888);
   }
 
   int sorting_context_ids[3] = {3, -1, 0};
@@ -670,7 +671,7 @@ TEST_F(CALayerTreeTest, SortingContexts) {
       new ui::CARendererLayerTree(true, true));
   for (size_t i = 0; i < 3; ++i) {
     properties.sorting_context_id = sorting_context_ids[i];
-    properties.gl_image = gl_images[i];
+    properties.io_surface = io_surfaces[i];
     bool result = ScheduleCALayer(ca_layer_tree.get(), &properties);
     EXPECT_TRUE(result);
   }
@@ -707,12 +708,9 @@ TEST_F(CALayerTreeTest, SortingContexts) {
   CALayer* content_layer_2 = [transform_layer_2 sublayers][0];
 
   // Validate that the layers come out in order.
-  EXPECT_EQ(static_cast<id>(gl_images[0]->io_surface().get()),
-            [content_layer_0 contents]);
-  EXPECT_EQ(static_cast<id>(gl_images[1]->io_surface().get()),
-            [content_layer_1 contents]);
-  EXPECT_EQ(static_cast<id>(gl_images[2]->io_surface().get()),
-            [content_layer_2 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[0].get(), [content_layer_0 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[1].get(), [content_layer_1 contents]);
+  EXPECT_EQ((__bridge id)io_surfaces[2].get(), [content_layer_2 contents]);
 }
 
 // Verify that sorting contexts must all have the same clipping properties.
@@ -764,92 +762,119 @@ TEST_F(CALayerTreeTest, SortingContextMustHaveConsistentClip) {
 
 // Test updating each layer's properties.
 TEST_F(CALayerTreeTest, AVLayer) {
+  base::test::ScopedFeatureList features;
+  features.InitWithFeatures({ui::kFullscreenLowPowerBackdropMac}, {});
+
   CALayerProperties properties;
-  properties.gl_image =
-      CreateGLImage(gfx::Size(256, 256), gfx::BufferFormat::BGRA_8888, false);
+  properties.io_surface = gfx::CreateIOSurface(
+      gfx::Size(256, 256), viz::SinglePlaneFormat::kBGRA_8888);
 
   std::unique_ptr<ui::CARendererLayerTree> ca_layer_tree;
-  CALayer* content_layer1 = nil;
-  CALayer* content_layer2 = nil;
-  CALayer* content_layer3 = nil;
-  CALayer* content_layer4 = nil;
+  CALayer* content_layer_old = nil;
+  CALayer* content_layer_new = nil;
 
   // Validate the initial values.
   {
     UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
-    content_layer1 = GetOnlyContentLayer();
-
-    // Validate the content layer.
-    EXPECT_FALSE([content_layer1
+    content_layer_new = GetOnlyContentLayer();
+    EXPECT_FALSE([content_layer_new
         isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
   }
+  content_layer_old = content_layer_new;
 
-  properties.gl_image = CreateGLImage(
-      gfx::Size(256, 256), gfx::BufferFormat::YUV_420_BIPLANAR, false);
-
-  // Pass another frame. This will automatically create a CVPixelBuffer
-  // behind the scenes, because the underlying buffer is YUV 420.
+  // Pass a YUV 420 frame. This will become an AVSampleBufferDisplayLayer
+  // because it is in fullscreen low power mode.
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(256, 256), viz::MultiPlaneFormat::kNV12);
   {
     UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
-    content_layer2 = GetOnlyContentLayer();
-
-    // Validate the content layer.
-    EXPECT_TRUE([content_layer2
+    content_layer_new = GetOnlyContentLayer();
+    EXPECT_TRUE([content_layer_new
         isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
-    EXPECT_NE(content_layer2, content_layer1);
+    EXPECT_NE(content_layer_new, content_layer_old);
   }
+  content_layer_old = content_layer_new;
 
-  properties.gl_image = CreateGLImage(
-      gfx::Size(256, 256), gfx::BufferFormat::YUV_420_BIPLANAR, true);
-
-  // Pass a frame with a CVPixelBuffer.
+  // Pass a similar frame. Nothing should change.
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(256, 128), viz::MultiPlaneFormat::kNV12);
   {
     UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
-    content_layer3 = GetOnlyContentLayer();
-
-    // Validate the content layer.
-    EXPECT_TRUE([content_layer3
+    content_layer_new = GetOnlyContentLayer();
+    EXPECT_TRUE([content_layer_new
         isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
-    EXPECT_EQ(content_layer3, content_layer2);
+    EXPECT_EQ(content_layer_new, content_layer_old);
   }
+  content_layer_old = content_layer_new;
 
-  properties.gl_image = CreateGLImage(
-      gfx::Size(513, 512), gfx::BufferFormat::YUV_420_BIPLANAR, true);
+  // Break fullscreen low power mode by changing opacity. This should cause
+  // us to drop out of using AVSampleBufferDisplayLayer.
+  properties.opacity = 0.9;
+  {
+    UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
+    content_layer_new = GetOnlyContentLayer();
+    EXPECT_FALSE([content_layer_new
+        isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
+    EXPECT_NE(content_layer_new, content_layer_old);
+  }
+  content_layer_old = content_layer_new;
+
+  // Now try a P010 frame. Because this may be HDR, we should jump back to
+  // having an AVSampleBufferDisplayLayer.
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(128, 256), viz::MultiPlaneFormat::kP010);
+  {
+    UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
+    content_layer_new = GetOnlyContentLayer();
+    EXPECT_TRUE([content_layer_new
+        isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
+    EXPECT_NE(content_layer_new, content_layer_old);
+  }
+  content_layer_old = content_layer_new;
+
+  // Go back to testing AVSampleBufferLayer and fullscreen low power.
+  properties.opacity = 1.0;
 
   // Pass a frame with a CVPixelBuffer which, when scaled down, will have a
   // fractional dimension.
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(513, 512), viz::MultiPlaneFormat::kNV12);
+  properties.cv_pixel_buffer = CreateCVPixelBuffer(properties.io_surface);
+  properties.color_space = gfx::ColorSpace::CreateREC709();
   {
     UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
-    content_layer3 = GetOnlyContentLayer();
+    content_layer_new = GetOnlyContentLayer();
 
     // Validate that the layer's size is adjusted to include the fractional
     // width, which works around a macOS bug (https://crbug.com/792632).
-    CGSize layer_size = content_layer3.bounds.size;
+    CGSize layer_size = content_layer_new.bounds.size;
     EXPECT_EQ(256.5, layer_size.width);
     EXPECT_EQ(256, layer_size.height);
   }
-
-  properties.gl_image = CreateGLImage(
-      gfx::Size(256, 256), gfx::BufferFormat::YUV_420_BIPLANAR, false);
+  content_layer_old = content_layer_new;
 
   // Pass a frame that is clipped.
   properties.contents_rect = gfx::RectF(0, 0, 1, 0.9);
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(256, 256), viz::MultiPlaneFormat::kNV12);
   {
     UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
-    content_layer4 = GetOnlyContentLayer();
-
-    // Validate the content layer.
-    EXPECT_FALSE([content_layer4
+    content_layer_new = GetOnlyContentLayer();
+    EXPECT_FALSE([content_layer_new
         isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
-    EXPECT_NE(content_layer4, content_layer3);
+    EXPECT_NE(content_layer_new, content_layer_old);
   }
+  content_layer_old = content_layer_new;
 }
 
-// Ensure that blacklisting AVSampleBufferDisplayLayer works.
-TEST_F(CALayerTreeTest, AVLayerBlacklist) {
+// Ensure that blocklisting AVSampleBufferDisplayLayer works.
+TEST_F(CALayerTreeTest, AVLayerBlocklist) {
+  base::test::ScopedFeatureList features;
+  features.InitWithFeatures({ui::kFullscreenLowPowerBackdropMac}, {});
+
   CALayerProperties properties;
-  properties.gl_image = CreateGLImage(
-      gfx::Size(256, 256), gfx::BufferFormat::YUV_420_BIPLANAR, false);
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(256, 256), viz::MultiPlaneFormat::kNV12);
 
   std::unique_ptr<ui::CARendererLayerTree> ca_layer_tree;
   CALayer* root_layer = nil;
@@ -902,19 +927,79 @@ TEST_F(CALayerTreeTest, AVLayerBlacklist) {
   }
 }
 
+// Ensure that preventsCapture is updated when recycling
+// AVSampleBufferDisplayLayer. Regression test for crbug.com/505192638.
+TEST_F(CALayerTreeTest, AVLayerPreventsCapture) {
+  base::test::ScopedFeatureList features;
+  features.InitWithFeatures({ui::kFullscreenLowPowerBackdropMac}, {});
+
+  CALayerProperties properties;
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(256, 256), viz::MultiPlaneFormat::kNV12);
+
+  std::unique_ptr<ui::CARendererLayerTree> ca_layer_tree;
+  AVSampleBufferDisplayLayer* av_layer_old = nil;
+  AVSampleBufferDisplayLayer* av_layer_new = nil;
+
+  // Initially, video is clear, so preventsCapture should be NO.
+  {
+    properties.protected_video_type = gfx::ProtectedVideoType::kClear;
+    UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
+    CALayer* content_layer = GetOnlyContentLayer();
+    EXPECT_TRUE([content_layer
+        isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
+    av_layer_new = (AVSampleBufferDisplayLayer*)content_layer;
+    EXPECT_FALSE(av_layer_new.preventsCapture);
+  }
+  av_layer_old = av_layer_new;
+
+  // Change to protected video. The layer should be recycled and preventsCapture
+  // should be updated to YES.
+  {
+    properties.protected_video_type =
+        gfx::ProtectedVideoType::kHardwareProtected;
+    UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
+    CALayer* content_layer = GetOnlyContentLayer();
+    EXPECT_TRUE([content_layer
+        isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
+    av_layer_new = (AVSampleBufferDisplayLayer*)content_layer;
+    EXPECT_EQ(av_layer_new, av_layer_old);
+    EXPECT_TRUE(av_layer_new.preventsCapture);
+  }
+  av_layer_old = av_layer_new;
+
+  // Change back to clear video. The layer should be recycled and
+  // preventsCapture should be updated to NO.
+  {
+    properties.protected_video_type = gfx::ProtectedVideoType::kClear;
+    UpdateCALayerTree(ca_layer_tree, &properties, superlayer_);
+    CALayer* content_layer = GetOnlyContentLayer();
+    EXPECT_TRUE([content_layer
+        isKindOfClass:NSClassFromString(@"AVSampleBufferDisplayLayer")]);
+    av_layer_new = (AVSampleBufferDisplayLayer*)content_layer;
+    EXPECT_EQ(av_layer_new, av_layer_old);
+    EXPECT_FALSE(av_layer_new.preventsCapture);
+  }
+}
+
 // Test fullscreen low power detection.
 TEST_F(CALayerTreeTest, FullscreenLowPower) {
+  base::test::ScopedFeatureList features;
+  features.InitWithFeatures({ui::kFullscreenLowPowerBackdropMac}, {});
+
   CALayerProperties properties;
-  properties.gl_image = CreateGLImage(
-      gfx::Size(256, 256), gfx::BufferFormat::YUV_420_BIPLANAR, true);
+  properties.io_surface =
+      gfx::CreateIOSurface(gfx::Size(256, 256), viz::MultiPlaneFormat::kNV12);
+  properties.cv_pixel_buffer = CreateCVPixelBuffer(properties.io_surface);
+  properties.color_space = gfx::ColorSpace::CreateREC709();
   properties.is_clipped = false;
 
   CALayerProperties properties_black;
   properties_black.is_clipped = false;
-  properties_black.background_color = SK_ColorBLACK;
+  properties_black.background_color = SkColors::kBlack;
   CALayerProperties properties_white;
   properties_white.is_clipped = false;
-  properties_white.background_color = SK_ColorWHITE;
+  properties_white.background_color = SkColors::kWhite;
 
   std::unique_ptr<ui::CARendererLayerTree> ca_layer_tree;
 
@@ -1048,18 +1133,16 @@ TEST_F(CALayerTreeTest, HDRTrigger) {
   bool result = false;
 
   // We only copy images that have both high-bit-depth and an HDR color space.
-  scoped_refptr<gl::GLImageIOSurface> sdr_image =
-      CreateGLImage(gfx::Size(256, 256), gfx::BufferFormat::BGRA_8888, false);
-  scoped_refptr<gl::GLImageIOSurface> tricky_sdr_image =
-      CreateGLImage(gfx::Size(256, 256), gfx::BufferFormat::BGRA_8888, false);
-  scoped_refptr<gl::GLImageIOSurface> hdr_image =
-      CreateGLImage(gfx::Size(256, 256), gfx::BufferFormat::RGBA_F16, false);
-  sdr_image->SetColorSpace(gfx::ColorSpace::CreateSRGB());
-  tricky_sdr_image->SetColorSpace(gfx::ColorSpace::CreateExtendedSRGB());
-  hdr_image->SetColorSpace(gfx::ColorSpace::CreateExtendedSRGB());
+  auto sdr_image = gfx::CreateIOSurface(gfx::Size(256, 256),
+                                        viz::SinglePlaneFormat::kBGRA_8888);
+  auto tricky_sdr_image = gfx::CreateIOSurface(
+      gfx::Size(256, 256), viz::SinglePlaneFormat::kBGRA_8888);
+  auto hdr_image = gfx::CreateIOSurface(gfx::Size(256, 256),
+                                        viz::SinglePlaneFormat::kRGBA_F16);
 
   // Schedule and commit the HDR layer.
-  properties.gl_image = hdr_image;
+  properties.io_surface = hdr_image;
+  properties.color_space = gfx::ColorSpace::CreateExtendedSRGB();
   result = ScheduleCALayer(ca_layer_trees[0].get(), &properties);
   EXPECT_TRUE(result);
   ca_layer_trees[0]->CommitScheduledCALayers(
@@ -1067,11 +1150,14 @@ TEST_F(CALayerTreeTest, HDRTrigger) {
 
   // Validate that the root layer has is triggering HDR.
   CALayer* content_layer = GetOnlyContentLayer();
-  if (@available(macos 10.15, *))
-    EXPECT_TRUE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+  EXPECT_TRUE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic pop
 
   // Commit the SDR layer.
-  properties.gl_image = sdr_image;
+  properties.io_surface = sdr_image;
+  properties.color_space = gfx::ColorSpace::CreateSRGB();
   result = ScheduleCALayer(ca_layer_trees[1].get(), &properties);
   EXPECT_TRUE(result);
   ca_layer_trees[1]->CommitScheduledCALayers(
@@ -1082,11 +1168,14 @@ TEST_F(CALayerTreeTest, HDRTrigger) {
   // un-parented.
   EXPECT_EQ([content_layer superlayer], nil);
   content_layer = GetOnlyContentLayer();
-  if (@available(macos 10.15, *))
-    EXPECT_FALSE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+  EXPECT_FALSE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic pop
 
   // Commit the tricky SDR layer.
-  properties.gl_image = tricky_sdr_image;
+  properties.io_surface = tricky_sdr_image;
+  properties.color_space = gfx::ColorSpace::CreateExtendedSRGB();
   result = ScheduleCALayer(ca_layer_trees[2].get(), &properties);
   EXPECT_TRUE(result);
   ca_layer_trees[2]->CommitScheduledCALayers(
@@ -1095,11 +1184,14 @@ TEST_F(CALayerTreeTest, HDRTrigger) {
 
   // Validate that HDR is still off, and that the content layer hasn't changed.
   EXPECT_EQ(content_layer, GetOnlyContentLayer());
-  if (@available(macos 10.15, *))
-    EXPECT_FALSE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+  EXPECT_FALSE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic pop
 
   // Commit the HDR layer.
-  properties.gl_image = hdr_image;
+  properties.io_surface = hdr_image;
+  properties.color_space = gfx::ColorSpace::CreateExtendedSRGB();
   result = ScheduleCALayer(ca_layer_trees[3].get(), &properties);
   EXPECT_TRUE(result);
   ca_layer_trees[3]->CommitScheduledCALayers(
@@ -1110,8 +1202,36 @@ TEST_F(CALayerTreeTest, HDRTrigger) {
   // been un-parented.
   EXPECT_EQ([content_layer superlayer], nil);
   content_layer = GetOnlyContentLayer();
-  if (@available(macos 10.15, *))
-    EXPECT_TRUE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+  EXPECT_TRUE([content_layer wantsExtendedDynamicRangeContent]);
+#pragma clang diagnostic pop
+}
+
+TEST(HDRCoperLayerTest, Formats) {
+  gfx::HDRMetadata metadata_empty;
+  auto io_surface_8888 = gfx::CreateIOSurface(
+      gfx::Size(256, 256), viz::SinglePlaneFormat::kBGRA_8888);
+  auto io_surface_f16 = gfx::CreateIOSurface(gfx::Size(256, 256),
+                                             viz::SinglePlaneFormat::kRGBA_F16);
+  auto cs_extended_linear = gfx::ColorSpace(
+      gfx::ColorSpace::PrimaryID::P3, gfx::ColorSpace::TransferID::LINEAR_HDR);
+  auto cs_g22 = gfx::ColorSpace(gfx::ColorSpace::PrimaryID::BT709,
+                                gfx::ColorSpace::TransferID::GAMMA22);
+  auto cs_g22_hdr = cs_g22.GetAsHDR();
+
+  EXPECT_TRUE(metal::ShouldUseHDRCopier(io_surface_f16.get(), metadata_empty,
+                                        cs_extended_linear));
+  EXPECT_TRUE(metal::ShouldUseHDRCopier(io_surface_f16.get(), metadata_empty,
+                                        cs_g22_hdr));
+  EXPECT_FALSE(
+      metal::ShouldUseHDRCopier(io_surface_f16.get(), metadata_empty, cs_g22));
+  EXPECT_FALSE(metal::ShouldUseHDRCopier(io_surface_8888.get(), metadata_empty,
+                                         cs_extended_linear));
+  EXPECT_FALSE(metal::ShouldUseHDRCopier(io_surface_8888.get(), metadata_empty,
+                                         cs_g22_hdr));
+  EXPECT_FALSE(
+      metal::ShouldUseHDRCopier(io_surface_8888.get(), metadata_empty, cs_g22));
 }
 
 }  // namespace gpu

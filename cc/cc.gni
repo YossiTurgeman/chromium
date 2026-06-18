@@ -1,4 +1,4 @@
-# Copyright 2016 The Chromium Authors. All rights reserved.
+# Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,7 +7,6 @@ import("//testing/test.gni")
 cc_remove_configs = []
 cc_add_configs = [
   "//build/config:precompiled_headers",
-  "//build/config/compiler:noshadowing",
   "//build/config/compiler:wexit_time_destructors",
 ]
 
@@ -38,6 +37,10 @@ template("cc_test_static_library") {
 
     # Not needed in test code.
     configs -= [ "//build/config/compiler:wexit_time_destructors" ]
+
+    # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+    # enable the diagnostic by removing this line.
+    configs += [ "//build/config/compiler:no_exit_time_destructors" ]
   }
 }
 
@@ -52,5 +55,9 @@ template("cc_test") {
 
     # Not needed in test code.
     configs -= [ "//build/config/compiler:wexit_time_destructors" ]
+
+    # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+    # enable the diagnostic by removing this line.
+    configs += [ "//build/config/compiler:no_exit_time_destructors" ]
   }
 }

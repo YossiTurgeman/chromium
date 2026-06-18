@@ -1,4 +1,4 @@
-// Copyright (c) 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,44 +11,39 @@ namespace policy {
 DMAuth::DMAuth() = default;
 DMAuth::~DMAuth() = default;
 
+DMAuth::DMAuth(DMAuth&& other) = default;
+DMAuth& DMAuth::operator=(DMAuth&& other) = default;
+
 // static
-std::unique_ptr<DMAuth> DMAuth::FromDMToken(const std::string& dm_token) {
-  return base::WrapUnique(new DMAuth(dm_token, DMAuthTokenType::kDm));
+DMAuth DMAuth::FromDMToken(const std::string& dm_token) {
+  return DMAuth(dm_token, DMAuthTokenType::kDm);
 }
 
 // static
-std::unique_ptr<DMAuth> DMAuth::FromGaiaToken(const std::string& gaia_token) {
-  return base::WrapUnique(new DMAuth(gaia_token, DMAuthTokenType::kGaia));
+DMAuth DMAuth::FromOAuthToken(const std::string& oauth_token) {
+  return DMAuth(oauth_token, DMAuthTokenType::kOauth);
 }
 
 // static
-std::unique_ptr<DMAuth> DMAuth::FromOAuthToken(const std::string& oauth_token) {
-  return base::WrapUnique(new DMAuth(oauth_token, DMAuthTokenType::kOauth));
+DMAuth DMAuth::FromEnrollmentToken(const std::string& enrollment_token) {
+  return DMAuth(enrollment_token, DMAuthTokenType::kEnrollment);
 }
 
 // static
-std::unique_ptr<DMAuth> DMAuth::FromEnrollmentToken(
-    const std::string& enrollment_token) {
-  return base::WrapUnique(
-      new DMAuth(enrollment_token, DMAuthTokenType::kEnrollment));
+DMAuth DMAuth::FromOidcResponse(const std::string& oidc_id_token) {
+  return DMAuth(oidc_id_token, DMAuthTokenType::kOidc);
 }
 
 // static
-std::unique_ptr<DMAuth> DMAuth::NoAuth() {
-  return std::make_unique<DMAuth>();
+DMAuth DMAuth::NoAuth() {
+  return {};
 }
 
 DMAuth::DMAuth(const std::string& token, DMAuthTokenType token_type)
     : token_(token), token_type_(token_type) {}
 
-std::unique_ptr<DMAuth> DMAuth::Clone() const {
-  std::unique_ptr<DMAuth> result = std::make_unique<DMAuth>();
-  *result = *this;
-  return result;
-}
-
-bool DMAuth::Equals(const DMAuth& other) const {
-  return token_ == other.token_ && token_type_ == other.token_type_;
+DMAuth DMAuth::Clone() const {
+  return DMAuth(token_, token_type_);
 }
 
 }  // namespace policy

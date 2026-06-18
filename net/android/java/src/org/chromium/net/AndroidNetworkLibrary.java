@@ -1,11 +1,10 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.net;
 
 import android.Manifest;
-import android.annotation.TargetApi;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -16,24 +15,28 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
 import android.net.TrafficStats;
+import android.net.TransportInfo;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Build.VERSION_CODES;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
-import android.util.Log;
+import android.security.NetworkSecurityPolicy;
+import android.telephony.TelephonyManager;
 
-import androidx.annotation.VisibleForTesting;
+import androidx.annotation.RequiresApi;
+
+import org.jni_zero.CalledByNative;
+import org.jni_zero.CalledByNativeForTesting;
+import org.jni_zero.CalledByNativeUnchecked;
 
 import org.chromium.base.ApiCompatibilityUtils;
 import org.chromium.base.ContextUtils;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.CalledByNativeUnchecked;
-import org.chromium.base.annotations.MainDex;
-import org.chromium.base.compat.ApiHelperForM;
-import org.chromium.base.compat.ApiHelperForN;
-import org.chromium.base.compat.ApiHelperForP;
+import org.chromium.base.Log;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
@@ -54,17 +57,15 @@ import java.security.cert.CertificateException;
 import java.util.Enumeration;
 import java.util.List;
 
-/**
- * This class implements net utilities required by the net component.
- */
-@MainDex
+/** This class implements net utilities required by the net component. */
+@NullMarked
 class AndroidNetworkLibrary {
     private static final String TAG = "AndroidNetworkLibrary";
 
     // Cached value indicating if app has ACCESS_NETWORK_STATE permission.
-    private static Boolean sHaveAccessNetworkState;
+    private static @Nullable Boolean sHaveAccessNetworkState;
     // Cached value indicating if app has ACCESS_WIFI_STATE permission.
-    private static Boolean sHaveAccessWifiState;
+    private static @Nullable Boolean sHaveAccessWifiState;
 
     /**
      * @return the mime type (if any) that is associated with the file
@@ -96,34 +97,49 @@ class AndroidNetworkLibrary {
             try {
                 if (netIf.isUp() && !netIf.isLoopback()) return false;
             } catch (SocketException e) {
-                continue;
             }
         }
         return true;
     }
 
     /**
-     * Validate the server's certificate chain is trusted. Note that the caller
-     * must still verify the name matches that of the leaf certificate.
+     * Validate the server's certificate chain is trusted. Note that the caller must still verify
+     * the name matches that of the leaf certificate.
      *
      * @param certChain The ASN.1 DER encoded bytes for certificates.
      * @param authType The key exchange algorithm name (e.g. RSA).
      * @param host The hostname of the server.
+     * @param If not null, ocspResponse should contain an OCSP response obtained via OCSP stapling.
+     * @param If not null, sctList should contain a SignedCertificateTimestampList from the TLS
+     *     extension as described in RFC6962 section 3.3.1.
      * @return Android certificate verification result code.
      */
     @CalledByNative
-    public static AndroidCertVerifyResult verifyServerCertificates(byte[][] certChain,
-                                                                   String authType,
-                                                                   String host) {
+    public static AndroidCertVerifyResult verifyServerCertificates(
+            byte[][] certChain,
+            String authType,
+            String host,
+            byte @Nullable [] ocspResponse,
+            byte @Nullable [] sctList) {
         try {
-            return X509Util.verifyServerCertificates(certChain, authType, host);
-        } catch (KeyStoreException e) {
-            return new AndroidCertVerifyResult(CertVerifyStatusAndroid.FAILED);
-        } catch (NoSuchAlgorithmException e) {
-            return new AndroidCertVerifyResult(CertVerifyStatusAndroid.FAILED);
-        } catch (IllegalArgumentException e) {
+            return X509Util.verifyServerCertificates(
+                    certChain, authType, host, ocspResponse, sctList);
+        } catch (KeyStoreException
+                | CertificateException
+                | NoSuchAlgorithmException
+                | IllegalArgumentException e) {
             return new AndroidCertVerifyResult(CertVerifyStatusAndroid.FAILED);
         }
+    }
+
+    /**
+     * Get the list of user-added roots.
+     *
+     * @return DER-encoded list of user-added roots.
+     */
+    @CalledByNative
+    public static byte[][] getUserAddedRoots() {
+        return X509Util.getUserAddedRoots();
     }
 
     /**
@@ -131,8 +147,8 @@ class AndroidNetworkLibrary {
      * @param rootCert DER encoded bytes of the certificate.
      */
     @CalledByNativeUnchecked
-    public static void addTestRootCertificate(byte[] rootCert) throws CertificateException,
-            KeyStoreException, NoSuchAlgorithmException {
+    public static void addTestRootCertificate(byte[] rootCert)
+            throws CertificateException, KeyStoreException, NoSuchAlgorithmException {
         X509Util.addTestRootCertificate(rootCert);
     }
 
@@ -141,27 +157,24 @@ class AndroidNetworkLibrary {
      * trust store.
      */
     @CalledByNativeUnchecked
-    public static void clearTestRootCertificates() throws NoSuchAlgorithmException,
-            CertificateException, KeyStoreException {
+    public static void clearTestRootCertificates()
+            throws NoSuchAlgorithmException, CertificateException, KeyStoreException {
         X509Util.clearTestRootCertificates();
     }
 
     /**
      * Returns the MCC+MNC (mobile country code + mobile network code) as
-     * the numeric name of the current registered operator.
+     * the numeric name of the current registered operator. This function
+     * potentially blocks the thread, so use with care.
      */
     @CalledByNative
     private static String getNetworkOperator() {
-        return AndroidTelephonyManagerBridge.getInstance().getNetworkOperator();
-    }
-
-    /**
-     * Returns the MCC+MNC (mobile country code + mobile network code) as
-     * the numeric name of the current SIM operator.
-     */
-    @CalledByNative
-    private static String getSimOperator() {
-        return AndroidTelephonyManagerBridge.getInstance().getSimOperator();
+        TelephonyManager telephonyManager =
+                (TelephonyManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.TELEPHONY_SERVICE);
+        if (telephonyManager == null) return "";
+        return telephonyManager.getNetworkOperator();
     }
 
     /**
@@ -171,8 +184,9 @@ class AndroidNetworkLibrary {
     @CalledByNative
     private static boolean getIsRoaming() {
         ConnectivityManager connectivityManager =
-                (ConnectivityManager) ContextUtils.getApplicationContext().getSystemService(
-                        Context.CONNECTIVITY_SERVICE);
+                (ConnectivityManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.CONNECTIVITY_SERVICE);
         NetworkInfo networkInfo = connectivityManager.getActiveNetworkInfo();
         if (networkInfo == null) return false; // No active network.
         return networkInfo.isRoaming();
@@ -185,23 +199,78 @@ class AndroidNetworkLibrary {
      * status can't be determined. Requires ACCESS_NETWORK_STATE permission. Only available on
      * Android Marshmallow and later versions. Returns false on earlier versions.
      */
-    @TargetApi(Build.VERSION_CODES.M)
+    @RequiresApi(Build.VERSION_CODES.M)
     @CalledByNative
     private static boolean getIsCaptivePortal() {
         // NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL is only available on Marshmallow and
         // later versions.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false;
         ConnectivityManager connectivityManager =
-                (ConnectivityManager) ContextUtils.getApplicationContext().getSystemService(
-                        Context.CONNECTIVITY_SERVICE);
+                (ConnectivityManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.CONNECTIVITY_SERVICE);
         if (connectivityManager == null) return false;
 
-        Network network = ApiHelperForM.getActiveNetwork(connectivityManager);
+        Network network = connectivityManager.getActiveNetwork();
         if (network == null) return false;
 
         NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(network);
         return capabilities != null
                 && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL);
+    }
+
+    /**
+     * Helper function that gets the WifiInfo of the WiFi network. If we have permission to access
+     * to the WiFi state, then we use either {@link NetworkCapabilities} for Android S+ or {@link
+     * WifiManager} for earlier versions. Otherwise, we try to get the WifiInfo via broadcast (Note
+     * that this approach does not work on Android P and above).
+     */
+    private static @Nullable WifiInfo getWifiInfo() {
+        if (haveAccessWifiState()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // On Android S+, need to use NetworkCapabilities to get the WifiInfo.
+                ConnectivityManager connectivityManager =
+                        (ConnectivityManager)
+                                ContextUtils.getApplicationContext()
+                                        .getSystemService(Context.CONNECTIVITY_SERVICE);
+                Network[] allNetworks = connectivityManager.getAllNetworks();
+                // TODO(curranmax): This only gets the WifiInfo of the first WiFi network that is
+                // iterated over. On Android S+ there may be up to two WiFi networks.
+                // https://crbug.com/1181393
+                for (Network network : allNetworks) {
+                    NetworkCapabilities networkCapabilities =
+                            connectivityManager.getNetworkCapabilities(network);
+                    if (networkCapabilities != null
+                            && networkCapabilities.hasTransport(
+                                    NetworkCapabilities.TRANSPORT_WIFI)) {
+                        TransportInfo transportInfo = networkCapabilities.getTransportInfo();
+                        if (transportInfo != null && transportInfo instanceof WifiInfo) {
+                            return (WifiInfo) transportInfo;
+                        }
+                    }
+                }
+                return null;
+            } else {
+                // Get WifiInfo via WifiManager. This method is deprecated starting with Android S.
+                WifiManager wifiManager =
+                        (WifiManager)
+                                ContextUtils.getApplicationContext()
+                                        .getSystemService(Context.WIFI_SERVICE);
+                return wifiManager.getConnectionInfo();
+            }
+        } else {
+            // If we do not have permission to access the WiFi state, then try to get the WifiInfo
+            // through broadcast. Note that this approach does not work on Android P+.
+            final Intent intent =
+                    ContextUtils.registerProtectedBroadcastReceiver(
+                            ContextUtils.getApplicationContext(),
+                            null,
+                            new IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION));
+            if (intent != null) {
+                return intent.getParcelableExtra(WifiManager.EXTRA_WIFI_INFO);
+            }
+            return null;
+        }
     }
 
     /**
@@ -213,20 +282,7 @@ class AndroidNetworkLibrary {
      */
     @CalledByNative
     public static String getWifiSSID() {
-        WifiInfo wifiInfo = null;
-        // On Android P and above, the WifiInfo cannot be obtained through broadcast.
-        if (haveAccessWifiState()) {
-            WifiManager wifiManager =
-                    (WifiManager) ContextUtils.getApplicationContext().getSystemService(
-                            Context.WIFI_SERVICE);
-            wifiInfo = wifiManager.getConnectionInfo();
-        } else {
-            final Intent intent = ContextUtils.getApplicationContext().registerReceiver(
-                    null, new IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION));
-            if (intent != null) {
-                wifiInfo = intent.getParcelableExtra(WifiManager.EXTRA_WIFI_INFO);
-            }
-        }
+        WifiInfo wifiInfo = getWifiInfo();
 
         if (wifiInfo != null) {
             final String ssid = wifiInfo.getSSID();
@@ -237,6 +293,16 @@ class AndroidNetworkLibrary {
             }
         }
         return "";
+    }
+
+    @CalledByNativeForTesting
+    public static void setWifiEnabledForTesting(boolean enabled) {
+        WifiManager wifiManager =
+                (WifiManager)
+                        ContextUtils.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        var oldValue = wifiManager.isWifiEnabled();
+        wifiManager.setWifiEnabled(enabled);
+        ResettersForTesting.register(() -> wifiManager.setWifiEnabled(oldValue));
     }
 
     /**
@@ -260,10 +326,7 @@ class AndroidNetworkLibrary {
         // On Android Q and above, the WifiInfo cannot be obtained through broadcast. See
         // https://crbug.com/1026686.
         if (haveAccessWifiState()) {
-            WifiManager wifiManager =
-                    (WifiManager) ContextUtils.getApplicationContext().getSystemService(
-                            Context.WIFI_SERVICE);
-            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+            WifiInfo wifiInfo = getWifiInfo();
             if (wifiInfo == null) {
                 return -1;
             }
@@ -271,8 +334,11 @@ class AndroidNetworkLibrary {
         } else {
             Intent intent = null;
             try {
-                intent = ContextUtils.getApplicationContext().registerReceiver(
-                        null, new IntentFilter(WifiManager.RSSI_CHANGED_ACTION));
+                intent =
+                        ContextUtils.registerProtectedBroadcastReceiver(
+                                ContextUtils.getApplicationContext(),
+                                null,
+                                new IntentFilter(WifiManager.RSSI_CHANGED_ACTION));
             } catch (IllegalArgumentException e) {
                 // Some devices unexpectedly throw IllegalArgumentException when registering
                 // the broadcast receiver. See https://crbug.com/984179.
@@ -303,35 +369,35 @@ class AndroidNetworkLibrary {
             return sInstance;
         }
 
-        @VisibleForTesting
         public static void setInstanceForTesting(
                 NetworkSecurityPolicyProxy networkSecurityPolicyProxy) {
+            var oldValue = sInstance;
             sInstance = networkSecurityPolicyProxy;
+            ResettersForTesting.register(() -> sInstance = oldValue);
         }
 
-        @TargetApi(Build.VERSION_CODES.N)
+        @RequiresApi(Build.VERSION_CODES.N)
         public boolean isCleartextTrafficPermitted(String host) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
                 // No per-host configuration before N.
                 return isCleartextTrafficPermitted();
             }
-            return ApiHelperForN.isCleartextTrafficPermitted(host);
+            return NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(host);
         }
 
-        @TargetApi(Build.VERSION_CODES.M)
+        @RequiresApi(Build.VERSION_CODES.M)
         public boolean isCleartextTrafficPermitted() {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
                 // Always true before M.
                 return true;
             }
-            return ApiHelperForM.isCleartextTrafficPermitted();
+            return NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted();
         }
     }
 
-    /**
-     * Returns true if cleartext traffic to |host| is allowed by the current app.
-     */
+    /** Returns true if cleartext traffic to |host| is allowed by the current app. */
     @CalledByNative
+    @RequiresApi(Build.VERSION_CODES.N)
     private static boolean isCleartextPermitted(String host) {
         try {
             return NetworkSecurityPolicyProxy.getInstance().isCleartextTrafficPermitted(host);
@@ -344,11 +410,14 @@ class AndroidNetworkLibrary {
         // This could be racy if called on multiple threads, but races will
         // end in the same result so it's not a problem.
         if (sHaveAccessNetworkState == null) {
-            sHaveAccessNetworkState = Boolean.valueOf(
-                    ApiCompatibilityUtils.checkPermission(ContextUtils.getApplicationContext(),
-                            Manifest.permission.ACCESS_NETWORK_STATE, Process.myPid(),
-                            Process.myUid())
-                    == PackageManager.PERMISSION_GRANTED);
+            sHaveAccessNetworkState =
+                    Boolean.valueOf(
+                            ApiCompatibilityUtils.checkPermission(
+                                            ContextUtils.getApplicationContext(),
+                                            Manifest.permission.ACCESS_NETWORK_STATE,
+                                            Process.myPid(),
+                                            Process.myUid())
+                                    == PackageManager.PERMISSION_GRANTED);
         }
         return sHaveAccessNetworkState;
     }
@@ -357,32 +426,63 @@ class AndroidNetworkLibrary {
         // This could be racy if called on multiple threads, but races will
         // end in the same result so it's not a problem.
         if (sHaveAccessWifiState == null) {
-            sHaveAccessWifiState = Boolean.valueOf(
-                    ApiCompatibilityUtils.checkPermission(ContextUtils.getApplicationContext(),
-                            Manifest.permission.ACCESS_WIFI_STATE, Process.myPid(), Process.myUid())
-                    == PackageManager.PERMISSION_GRANTED);
+            sHaveAccessWifiState =
+                    Boolean.valueOf(
+                            ApiCompatibilityUtils.checkPermission(
+                                            ContextUtils.getApplicationContext(),
+                                            Manifest.permission.ACCESS_WIFI_STATE,
+                                            Process.myPid(),
+                                            Process.myUid())
+                                    == PackageManager.PERMISSION_GRANTED);
         }
         return sHaveAccessWifiState;
     }
 
     /**
      * Returns object representing the DNS configuration for the provided
+     * network handle.
+     */
+    @RequiresApi(Build.VERSION_CODES.P)
+    @CalledByNative
+    public static @Nullable DnsStatus getDnsStatusForNetwork(long networkHandle) {
+        // In case the network handle is invalid don't crash, instead return an empty DnsStatus and
+        // let native code handle that.
+        try {
+            Network network = Network.fromNetworkHandle(networkHandle);
+            return getDnsStatus(network);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Returns object representing the DNS configuration for the current
+     * default network.
+     */
+    @RequiresApi(Build.VERSION_CODES.M)
+    @CalledByNative
+    public static @Nullable DnsStatus getCurrentDnsStatus() {
+        return getDnsStatus(null);
+    }
+
+    /**
+     * Returns object representing the DNS configuration for the provided
      * network. If |network| is null, uses the active network.
      */
-    @TargetApi(Build.VERSION_CODES.M)
-    @CalledByNative
-    public static DnsStatus getDnsStatus(Network network) {
+    @RequiresApi(Build.VERSION_CODES.M)
+    public static @Nullable DnsStatus getDnsStatus(@Nullable Network network) {
         if (!haveAccessNetworkState()) {
             return null;
         }
         ConnectivityManager connectivityManager =
-                (ConnectivityManager) ContextUtils.getApplicationContext().getSystemService(
-                        Context.CONNECTIVITY_SERVICE);
+                (ConnectivityManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.CONNECTIVITY_SERVICE);
         if (connectivityManager == null) {
             return null;
         }
         if (network == null) {
-            network = ApiHelperForM.getActiveNetwork(connectivityManager);
+            network = connectivityManager.getActiveNetwork();
         }
         if (network == null) {
             return null;
@@ -397,24 +497,27 @@ class AndroidNetworkLibrary {
             return null;
         }
         List<InetAddress> dnsServersList = linkProperties.getDnsServers();
+        String searchDomains = linkProperties.getDomains();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            return new DnsStatus(dnsServersList, ApiHelperForP.isPrivateDnsActive(linkProperties),
-                    ApiHelperForP.getPrivateDnsServerName(linkProperties));
+            return new DnsStatus(
+                    dnsServersList,
+                    linkProperties.isPrivateDnsActive(),
+                    linkProperties.getPrivateDnsServerName(),
+                    searchDomains);
         } else {
-            return new DnsStatus(dnsServersList, false, "");
+            return new DnsStatus(dnsServersList, false, "", searchDomains);
         }
     }
 
-    /**
-     * Reports a connectivity issue with the device's current default network.
-     */
-    @TargetApi(Build.VERSION_CODES.M)
+    /** Reports a connectivity issue with the device's current default network. */
+    @RequiresApi(Build.VERSION_CODES.M)
     @CalledByNative
     private static boolean reportBadDefaultNetwork() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false;
         ConnectivityManager connectivityManager =
-                (ConnectivityManager) ContextUtils.getApplicationContext().getSystemService(
-                        Context.CONNECTIVITY_SERVICE);
+                (ConnectivityManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.CONNECTIVITY_SERVICE);
         if (connectivityManager == null) return false;
 
         connectivityManager.reportNetworkConnectivity(null, false);
@@ -479,50 +582,63 @@ class AndroidNetworkLibrary {
             protected void accept(SocketImpl s) {
                 throw new RuntimeException("accept not implemented");
             }
+
             @Override
             protected int available() {
                 throw new RuntimeException("accept not implemented");
             }
+
             @Override
             protected void bind(InetAddress host, int port) {
                 throw new RuntimeException("accept not implemented");
             }
+
             @Override
             protected void close() {}
+
             @Override
             protected void connect(InetAddress address, int port) {
                 throw new RuntimeException("connect not implemented");
             }
+
             @Override
             protected void connect(SocketAddress address, int timeout) {
                 throw new RuntimeException("connect not implemented");
             }
+
             @Override
             protected void connect(String host, int port) {
                 throw new RuntimeException("connect not implemented");
             }
+
             @Override
             protected void create(boolean stream) {}
+
             @Override
             protected InputStream getInputStream() {
                 throw new RuntimeException("getInputStream not implemented");
             }
+
             @Override
             protected OutputStream getOutputStream() {
                 throw new RuntimeException("getOutputStream not implemented");
             }
+
             @Override
             protected void listen(int backlog) {
                 throw new RuntimeException("listen not implemented");
             }
+
             @Override
             protected void sendUrgentData(int data) {
                 throw new RuntimeException("sendUrgentData not implemented");
             }
+
             @Override
             public Object getOption(int optID) {
                 throw new RuntimeException("getOption not implemented");
             }
+
             @Override
             public void setOption(int optID, Object value) {
                 throw new RuntimeException("setOption not implemented");
@@ -552,7 +668,7 @@ class AndroidNetworkLibrary {
         if (tag != oldTag) {
             TrafficStats.setThreadStatsTag(tag);
         }
-        if (uid != TrafficStatsUid.UNSET) {
+        if (uid != TrafficStatsUid.UNSET_UID) {
             ThreadStatsUid.set(uid);
         }
 
@@ -588,8 +704,26 @@ class AndroidNetworkLibrary {
         if (tag != oldTag) {
             TrafficStats.setThreadStatsTag(oldTag);
         }
-        if (uid != TrafficStatsUid.UNSET) {
+        if (uid != TrafficStatsUid.UNSET_UID) {
             ThreadStatsUid.clear();
         }
+    }
+
+    @CalledByNative
+    public static void registerQuicConnectionClosePayload(final int socket, final byte[] payload) {
+        final ConnectivityManager cm =
+                (ConnectivityManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.CONNECTIVITY_SERVICE);
+        ConnectivityManagerShim.registerQuicConnectionClosePayload(cm, socket, payload);
+    }
+
+    @CalledByNative
+    public static void unregisterQuicConnectionClosePayload(final int socket) {
+        final ConnectivityManager cm =
+                (ConnectivityManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.CONNECTIVITY_SERVICE);
+        ConnectivityManagerShim.unregisterQuicConnectionClosePayload(cm, socket);
     }
 }

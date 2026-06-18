@@ -1,8 +1,10 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/timer/elapsed_timer.h"
+
+#include "base/check.h"
 
 namespace base {
 
@@ -10,18 +12,13 @@ namespace {
 bool g_mock_elapsed_timers_for_test = false;
 }  // namespace
 
-ElapsedTimer::ElapsedTimer() : begin_(TimeTicks::Now()) {}
-
-ElapsedTimer::ElapsedTimer(ElapsedTimer&& other) : begin_(other.begin_) {}
-
-void ElapsedTimer::operator=(ElapsedTimer&& other) {
-  begin_ = other.begin_;
-}
+ElapsedTimer::ElapsedTimer() : start_time_(TimeTicks::Now()) {}
 
 TimeDelta ElapsedTimer::Elapsed() const {
-  if (g_mock_elapsed_timers_for_test)
+  if (g_mock_elapsed_timers_for_test) {
     return ScopedMockElapsedTimersForTest::kMockElapsedTime;
-  return TimeTicks::Now() - begin_;
+  }
+  return TimeTicks::Now() - start_time_;
 }
 
 ElapsedThreadTimer::ElapsedThreadTimer()
@@ -29,11 +26,22 @@ ElapsedThreadTimer::ElapsedThreadTimer()
       begin_(is_supported_ ? ThreadTicks::Now() : ThreadTicks()) {}
 
 TimeDelta ElapsedThreadTimer::Elapsed() const {
-  if (!is_supported_)
+  if (!is_supported_) {
     return TimeDelta();
-  if (g_mock_elapsed_timers_for_test)
+  }
+  if (g_mock_elapsed_timers_for_test) {
     return ScopedMockElapsedTimersForTest::kMockElapsedTime;
+  }
   return ThreadTicks::Now() - begin_;
+}
+
+ElapsedLiveTimer::ElapsedLiveTimer() : start_time_(LiveTicks::Now()) {}
+
+TimeDelta ElapsedLiveTimer::Elapsed() const {
+  if (g_mock_elapsed_timers_for_test) {
+    return ScopedMockElapsedTimersForTest::kMockElapsedTime;
+  }
+  return LiveTicks::Now() - start_time_;
 }
 
 // static

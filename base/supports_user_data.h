@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,7 @@
 #include <memory>
 
 #include "base/base_export.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/sequence_checker.h"
 
 namespace base {
@@ -22,6 +21,8 @@ class BASE_EXPORT SupportsUserData {
   SupportsUserData();
   SupportsUserData(SupportsUserData&&);
   SupportsUserData& operator=(SupportsUserData&&);
+  SupportsUserData(const SupportsUserData&) = delete;
+  SupportsUserData& operator=(const SupportsUserData&) = delete;
 
   // Derive from this class and add your own data members to associate extra
   // information with this object. Alternatively, add this as a public base
@@ -39,6 +40,7 @@ class BASE_EXPORT SupportsUserData {
   // NOTE: SetUserData() with an empty unique_ptr behaves the same as
   // RemoveUserData().
   Data* GetUserData(const void* key) const;
+  [[nodiscard]] std::unique_ptr<Data> TakeUserData(const void* key);
   void SetUserData(const void* key, std::unique_ptr<Data> data);
   void RemoveUserData(const void* key);
 
@@ -60,15 +62,15 @@ class BASE_EXPORT SupportsUserData {
   // needs to provide reset functionality.
   void ClearAllUserData();
 
+  // Returns the number of Data objects attached to this object.
+  size_t UserDataCount() const;
+
  private:
-  using DataMap = std::map<const void*, std::unique_ptr<Data>>;
-
-  // Externally-defined data accessible by key.
-  DataMap user_data_;
-  // Guards usage of |user_data_|
-  SequenceChecker sequence_checker_;
-
-  DISALLOW_COPY_AND_ASSIGN(SupportsUserData);
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  bool in_clear_ = false;
+  // Guards usage of |impl_|
+  SEQUENCE_CHECKER(sequence_checker_);
 };
 
 // Adapter class that releases a refcounted object when the
@@ -78,19 +80,19 @@ class UserDataAdapter : public SupportsUserData::Data {
  public:
   static T* Get(const SupportsUserData* supports_user_data, const void* key) {
     UserDataAdapter* data =
-      static_cast<UserDataAdapter*>(supports_user_data->GetUserData(key));
+        static_cast<UserDataAdapter*>(supports_user_data->GetUserData(key));
     return data ? static_cast<T*>(data->object_.get()) : nullptr;
   }
 
   explicit UserDataAdapter(T* object) : object_(object) {}
+  UserDataAdapter(const UserDataAdapter&) = delete;
+  UserDataAdapter& operator=(const UserDataAdapter&) = delete;
   ~UserDataAdapter() override = default;
 
   T* release() { return object_.release(); }
 
  private:
   scoped_refptr<T> const object_;
-
-  DISALLOW_COPY_AND_ASSIGN(UserDataAdapter);
 };
 
 }  // namespace base

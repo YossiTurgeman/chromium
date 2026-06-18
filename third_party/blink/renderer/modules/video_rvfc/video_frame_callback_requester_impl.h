@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,9 @@
 #include "third_party/blink/renderer/core/html/media/video_frame_callback_requester.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/modules/video_rvfc/video_frame_request_callback_collection.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/modules/xr/xr_frame_provider.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/weak_cell.h"
 #include "third_party/blink/renderer/platform/supplementable.h"
 
 namespace blink {
@@ -19,7 +21,8 @@ class HTMLVideoElement;
 // Implementation of the <video>.requestVideoFrameCallback() API.
 // Extends HTMLVideoElement via the VideoFrameCallbackRequester interface.
 class MODULES_EXPORT VideoFrameCallbackRequesterImpl final
-    : public VideoFrameCallbackRequester {
+    : public VideoFrameCallbackRequester,
+      public XRFrameProvider::ImmersiveSessionObserver {
  public:
   static VideoFrameCallbackRequesterImpl& From(HTMLVideoElement&);
 
@@ -29,7 +32,13 @@ class MODULES_EXPORT VideoFrameCallbackRequesterImpl final
   static void cancelVideoFrameCallback(HTMLVideoElement&, int);
 
   explicit VideoFrameCallbackRequesterImpl(HTMLVideoElement&);
-  ~VideoFrameCallbackRequesterImpl() override = default;
+
+  VideoFrameCallbackRequesterImpl(const VideoFrameCallbackRequesterImpl&) =
+      delete;
+  VideoFrameCallbackRequesterImpl& operator=(
+      const VideoFrameCallbackRequesterImpl&) = delete;
+
+  ~VideoFrameCallbackRequesterImpl() override;
 
   void Trace(Visitor*) const override;
 
@@ -37,21 +46,25 @@ class MODULES_EXPORT VideoFrameCallbackRequesterImpl final
   void cancelVideoFrameCallback(int);
 
   void OnWebMediaPlayerCreated() override;
+  void OnWebMediaPlayerCleared() override;
   void OnRequestVideoFrameCallback() override;
 
   // Called by ScriptedAnimationController as part of the rendering steps,
   // right before executing window.rAF callbacks. Also called by OnXRFrame().
   void OnExecution(double high_res_now_ms);
 
-  // Called by XRSession right before executing xr_session.rAF callbacks.
-  void OnXrFrame(bool ended, double timestamp);
+  // XRFrameProvider::ImmersiveSessionObserver implementation.
+  void OnImmersiveSessionStart() override;
+  void OnImmersiveSessionEnd() override;
+  void OnImmersiveFrame() override;
 
  private:
   friend class VideoFrameCallbackRequesterImplTest;
 
   // Utility functions to limit the clock resolution of fields, for security
   // reasons.
-  static double GetClampedTimeInMillis(base::TimeDelta time);
+  static double GetClampedTimeInMillis(base::TimeDelta time,
+                                       bool cross_origin_isolated_capability);
   static double GetCoarseClampedTimeInSeconds(base::TimeDelta time);
 
   void ExecuteVideoFrameCallbacks(
@@ -79,8 +92,7 @@ class MODULES_EXPORT VideoFrameCallbackRequesterImpl final
   // session.
   bool TryScheduleImmersiveXRSessionRaf();
 
-  // Called when an immersive XR Session is started.
-  void OnImmersiveSessionStart();
+  XRFrameProvider* GetXRFrameProvider();
 
   // Used to keep track of whether or not we have already scheduled a call to
   // ExecuteFrameCallbacks() in the next rendering steps.
@@ -98,13 +110,20 @@ class MODULES_EXPORT VideoFrameCallbackRequesterImpl final
   // getting new frames.
   int consecutive_stale_frames_ = 0;
 
-  // Indicates whether or not we already notified the XR Frame provider that we
-  // want to be notified when a new immersive XR session starts.
-  bool listening_for_immersive_session_ = false;
+  // Indicates whether or not we have registered ourselves with the XR Frame
+  // provider to be notified of immersive XR session events.
+  bool observing_immersive_session_ = false;
+
+  // Indicates if we are currently in an XR session.
+  bool in_immersive_session_ = false;
+
+  // Indicates we are cross-origin isolated.
+  bool cross_origin_isolated_capability_ = false;
 
   Member<VideoFrameRequestCallbackCollection> callback_collection_;
 
-  DISALLOW_COPY_AND_ASSIGN(VideoFrameCallbackRequesterImpl);
+  // Only used to invalidate pending OnExecution() calls.
+  WeakCellFactory<VideoFrameCallbackRequesterImpl> weak_factory_{this};
 };
 
 }  // namespace blink

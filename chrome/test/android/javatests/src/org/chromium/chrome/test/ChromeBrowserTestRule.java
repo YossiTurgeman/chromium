@@ -1,16 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.test;
 
-import android.accounts.Account;
-
 import org.junit.rules.TestRule;
 import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
 
-import org.chromium.chrome.test.util.browser.signin.AccountManagerTestRule;
+import org.chromium.chrome.test.util.browser.signin.SigninTestRule;
+import org.chromium.components.signin.base.AccountInfo;
 import org.chromium.content_public.browser.test.NativeLibraryTestUtils;
 
 /**
@@ -18,35 +17,40 @@ import org.chromium.content_public.browser.test.NativeLibraryTestUtils;
  * initializing the AccountManagerFacade.
  */
 public class ChromeBrowserTestRule implements TestRule {
-    private final AccountManagerTestRule mAccountManagerTestRule = new AccountManagerTestRule();
+    private final SigninTestRule mSigninTestRule = new SigninTestRule();
 
     @Override
     public Statement apply(final Statement base, Description description) {
-        Statement statement = new Statement() {
-            @Override
-            public void evaluate() throws Throwable {
-                /**
-                 * Loads the native library on the activity UI thread.  After loading the library,
-                 * this will initialize the browser process if necessary.
-                 */
-                NativeLibraryTestUtils.loadNativeLibraryAndInitBrowserProcess();
-                base.evaluate();
-            }
-        };
-        return mAccountManagerTestRule.apply(statement, description);
+        Statement statement =
+                new Statement() {
+                    @Override
+                    public void evaluate() throws Throwable {
+                        // Loads the native library on the activity UI thread. After loading the
+                        // library, this will initialize the browser process if necessary.
+                        NativeLibraryTestUtils.loadNativeLibraryAndInitBrowserProcess();
+                        base.evaluate();
+                    }
+                };
+        return mSigninTestRule.apply(statement, description);
     }
 
-    /**
-     * Adds an account of the given accountName to the fake AccountManagerFacade.
-     */
-    public Account addAccount(String accountName) {
-        return mAccountManagerTestRule.addAccount(accountName);
+    /** Adds an account of the given accountName to the fake AccountManagerFacade. */
+    public void addAccount(AccountInfo accountInfo) {
+        mSigninTestRule.addAccount(accountInfo);
     }
 
-    /**
-     * Add and sign in an account with the default name.
-     */
-    public Account addAndSignInTestAccount() {
-        return mAccountManagerTestRule.addAndSignInTestAccount();
+    /** Adds and signs in with {@param account}. */
+    public void addAccountThenSignin(AccountInfo account) {
+        mSigninTestRule.addAccountThenSignin(account);
+    }
+
+    /** Adds, signs in and enables history sync for {@param account}. */
+    public void addAccountThenSigninAndEnableHistorySync(AccountInfo accountInfo) {
+        mSigninTestRule.addAccountThenSigninAndEnableHistorySync(accountInfo);
+    }
+
+    /** Signs the user out. */
+    public void signOut() {
+        mSigninTestRule.signOut();
     }
 }

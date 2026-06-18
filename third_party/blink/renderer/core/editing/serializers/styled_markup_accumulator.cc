@@ -55,7 +55,7 @@ StyledMarkupAccumulator::StyledMarkupAccumulator(
     const TextOffset& end,
     Document* document,
     const CreateMarkupOptions& options)
-    : formatter_(options.ShouldResolveURLs(),
+    : formatter_(options.ShouldResolveUrls(),
                  IsA<HTMLDocument>(document) ? SerializationType::kHTML
                                              : SerializationType::kXML),
       start_(start),
@@ -225,8 +225,13 @@ String StyledMarkupAccumulator::RenderedText(Text& text_node) {
     start_offset = start_.Offset();
   if (end_.GetText() == text_node)
     end_offset = end_.Offset();
+
   return PlainText(EphemeralRange(Position(&text_node, start_offset),
-                                  Position(&text_node, end_offset)));
+                                  Position(&text_node, end_offset)),
+                   TextIteratorBehavior::Builder()
+                       .SetIgnoresCssTextTransforms(
+                           options_.IgnoresCssTextTransformsForRenderedText())
+                       .Build());
 }
 
 String StyledMarkupAccumulator::StringValueForRange(const Text& node) {
@@ -235,9 +240,9 @@ String StyledMarkupAccumulator::StringValueForRange(const Text& node) {
 
   String str = node.data();
   if (start_.GetText() == node)
-    str.Truncate(end_.Offset());
+    str = str.substr(0, end_.Offset());
   if (end_.GetText() == node)
-    str.Remove(0, start_.Offset());
+    str.erase(0, start_.Offset());
   return str;
 }
 

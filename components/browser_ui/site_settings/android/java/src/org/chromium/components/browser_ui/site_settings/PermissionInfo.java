@@ -1,42 +1,44 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.browser_ui.site_settings;
 
-import androidx.annotation.Nullable;
+import static org.chromium.build.NullUtil.assertNonNull;
 
-import org.chromium.components.content_settings.ContentSettingValues;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.components.content_settings.ContentSetting;
 import org.chromium.components.content_settings.ContentSettingsType;
-import org.chromium.components.embedder_support.browser_context.BrowserContextHandle;
+import org.chromium.components.permissions.PermissionsAndroidFeatureList;
+import org.chromium.components.permissions.PermissionsAndroidFeatureMap;
+import org.chromium.content_public.browser.BrowserContextHandle;
 
 import java.io.Serializable;
 
-/**
- * Permission information for a given origin.
- */
+/** Permission information for a given origin. */
+@NullMarked
 public class PermissionInfo implements Serializable {
-    private final boolean mIsIncognito;
     private final boolean mIsEmbargoed;
-    private final String mEmbedder;
+    private final @Nullable String mEmbedder;
     private final String mOrigin;
-    private final @ContentSettingsType int mContentSettingsType;
+    private final @ContentSettingsType.EnumType int mContentSettingsType;
 
     public PermissionInfo(
-            @ContentSettingsType int type, String origin, String embedder, boolean isIncognito) {
-        this(type, origin, embedder, isIncognito, false);
-    }
-
-    public PermissionInfo(@ContentSettingsType int type, String origin, String embedder,
-            boolean isIncognito, boolean isEmbargoed) {
+            @ContentSettingsType.EnumType int type,
+            String origin,
+            @Nullable String embedder,
+            boolean isEmbargoed) {
+        assert WebsitePermissionsFetcher.getPermissionsType(type)
+                        == WebsitePermissionsFetcher.WebsitePermissionsType.PERMISSION_INFO
+                : "invalid type: " + type;
         mOrigin = origin;
         mEmbedder = embedder;
-        mIsIncognito = isIncognito;
         mContentSettingsType = type;
         mIsEmbargoed = isEmbargoed;
     }
 
-    public @ContentSettingsType int getContentSettingsType() {
+    public @ContentSettingsType.EnumType int getContentSettingsType() {
         return mContentSettingsType;
     }
 
@@ -44,12 +46,8 @@ public class PermissionInfo implements Serializable {
         return mOrigin;
     }
 
-    public String getEmbedder() {
+    public @Nullable String getEmbedder() {
         return mEmbedder;
-    }
-
-    public boolean isIncognito() {
-        return mIsIncognito;
     }
 
     public String getEmbedderSafe() {
@@ -60,110 +58,91 @@ public class PermissionInfo implements Serializable {
         return mIsEmbargoed;
     }
 
-    /**
-     * Returns the ContentSetting value for this origin.
-     */
-    public @ContentSettingValues @Nullable Integer getContentSetting(
-            BrowserContextHandle browserContextHandle) {
-        switch (mContentSettingsType) {
-            case ContentSettingsType.AR:
-                return WebsitePreferenceBridgeJni.get().getArSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.MEDIASTREAM_CAMERA:
-                return WebsitePreferenceBridgeJni.get().getCameraSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.CLIPBOARD_READ_WRITE:
-                return WebsitePreferenceBridgeJni.get().getClipboardSettingForOrigin(
-                        browserContextHandle, mOrigin);
-            case ContentSettingsType.GEOLOCATION:
-                return WebsitePreferenceBridgeJni.get().getGeolocationSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.IDLE_DETECTION:
-                return WebsitePreferenceBridgeJni.get().getIdleDetectionSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.MEDIASTREAM_MIC:
-                return WebsitePreferenceBridgeJni.get().getMicrophoneSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.MIDI_SYSEX:
-                return WebsitePreferenceBridgeJni.get().getMidiSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.NFC:
-                return WebsitePreferenceBridgeJni.get().getNfcSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.NOTIFICATIONS:
-                return WebsitePreferenceBridgeJni.get().getNotificationSettingForOrigin(
-                        browserContextHandle, mOrigin);
-            case ContentSettingsType.PROTECTED_MEDIA_IDENTIFIER:
-                return WebsitePreferenceBridgeJni.get().getProtectedMediaIdentifierSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.SENSORS:
-                return WebsitePreferenceBridgeJni.get().getSensorsSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            case ContentSettingsType.VR:
-                return WebsitePreferenceBridgeJni.get().getVrSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe());
-            default:
-                assert false;
-                return null;
-        }
+    /** Returns the ContentSetting value using the minimal set of defining parameters. */
+    public static @ContentSetting @Nullable Integer getContentSetting(
+            BrowserContextHandle browserContextHandle,
+            @ContentSettingsType.EnumType int contentSettingsType,
+            String origin,
+            @Nullable String embeddingOrigin) {
+        assert contentSettingsType != ContentSettingsType.GEOLOCATION_WITH_OPTIONS;
+        return WebsitePreferenceBridgeJni.get()
+                .getPermissionSettingWithEmbargo(
+                        browserContextHandle,
+                        contentSettingsType,
+                        origin,
+                        embeddingOrigin != null ? embeddingOrigin : origin)
+                .getContentSetting();
     }
 
-    /**
-     * Sets the native ContentSetting value for this origin.
-     */
+    /** Returns the ContentSetting value using the minimal set of defining parameters. */
+    public static PermissionSetting getPermissionSetting(
+            BrowserContextHandle browserContextHandle,
+            @ContentSettingsType.EnumType int contentSettingsType,
+            String origin,
+            @Nullable String embeddingOrigin) {
+        return WebsitePreferenceBridgeJni.get()
+                .getPermissionSettingWithEmbargo(
+                        browserContextHandle,
+                        contentSettingsType,
+                        origin,
+                        embeddingOrigin != null ? embeddingOrigin : origin);
+    }
+
+    /** Returns the ContentSetting value for this origin. */
+    public @ContentSetting @Nullable Integer getContentSetting(
+            BrowserContextHandle browserContextHandle) {
+        assert mContentSettingsType != ContentSettingsType.GEOLOCATION_WITH_OPTIONS;
+        return PermissionInfo.getContentSetting(
+                browserContextHandle, mContentSettingsType, mOrigin, mEmbedder);
+    }
+
+    /** Returns the PermissionSetting value for this origin. */
+    public PermissionSetting getPermissionSetting(BrowserContextHandle browserContextHandle) {
+        return PermissionInfo.getPermissionSetting(
+                browserContextHandle, mContentSettingsType, mOrigin, mEmbedder);
+    }
+
+    /** Sets the native ContentSetting value for this origin. */
     public void setContentSetting(
-            BrowserContextHandle browserContextHandle, @ContentSettingValues int value) {
-        switch (mContentSettingsType) {
-            case ContentSettingsType.AR:
-                WebsitePreferenceBridgeJni.get().setArSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            case ContentSettingsType.MEDIASTREAM_CAMERA:
-                WebsitePreferenceBridgeJni.get().setCameraSettingForOrigin(
-                        browserContextHandle, mOrigin, value);
-                break;
-            case ContentSettingsType.CLIPBOARD_READ_WRITE:
-                WebsitePreferenceBridgeJni.get().setClipboardSettingForOrigin(
-                        browserContextHandle, mOrigin, value);
-                break;
-            case ContentSettingsType.GEOLOCATION:
-                WebsitePreferenceBridgeJni.get().setGeolocationSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            case ContentSettingsType.IDLE_DETECTION:
-                WebsitePreferenceBridgeJni.get().setIdleDetectionSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            case ContentSettingsType.MEDIASTREAM_MIC:
-                WebsitePreferenceBridgeJni.get().setMicrophoneSettingForOrigin(
-                        browserContextHandle, mOrigin, value);
-                break;
-            case ContentSettingsType.MIDI_SYSEX:
-                WebsitePreferenceBridgeJni.get().setMidiSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            case ContentSettingsType.NFC:
-                WebsitePreferenceBridgeJni.get().setNfcSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            case ContentSettingsType.NOTIFICATIONS:
-                WebsitePreferenceBridgeJni.get().setNotificationSettingForOrigin(
-                        browserContextHandle, mOrigin, value);
-                break;
-            case ContentSettingsType.PROTECTED_MEDIA_IDENTIFIER:
-                WebsitePreferenceBridgeJni.get().setProtectedMediaIdentifierSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            case ContentSettingsType.SENSORS:
-                WebsitePreferenceBridgeJni.get().setSensorsSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            case ContentSettingsType.VR:
-                WebsitePreferenceBridgeJni.get().setVrSettingForOrigin(
-                        browserContextHandle, mOrigin, getEmbedderSafe(), value);
-                break;
-            default:
-                assert false;
-        }
+            BrowserContextHandle browserContextHandle, @ContentSetting int value) {
+        assert mContentSettingsType != ContentSettingsType.GEOLOCATION_WITH_OPTIONS;
+        WebsitePreferenceBridgeJni.get()
+                .setPermissionSettingForOrigin(
+                        browserContextHandle,
+                        mContentSettingsType,
+                        mOrigin,
+                        getEmbedderSafe(),
+                        value);
+    }
+
+    /** Returns the Geolocation permission value for this origin. */
+    public GeolocationSetting getGeolocationSetting(BrowserContextHandle browserContextHandle) {
+        assert mContentSettingsType == ContentSettingsType.GEOLOCATION_WITH_OPTIONS;
+        assert PermissionsAndroidFeatureMap.isEnabled(
+                PermissionsAndroidFeatureList.APPROXIMATE_GEOLOCATION_PERMISSION);
+
+        GeolocationSetting setting =
+                WebsitePreferenceBridgeJni.get()
+                        .getPermissionSettingWithEmbargo(
+                                browserContextHandle,
+                                mContentSettingsType,
+                                mOrigin,
+                                getEmbedderSafe())
+                        .getGeolocationSetting();
+        return assertNonNull(setting);
+    }
+
+    /** Set the Geolocation permission value for this origin. */
+    public void setGeolocationSetting(
+            BrowserContextHandle browserContextHandle, @Nullable GeolocationSetting setting) {
+        assert mContentSettingsType == ContentSettingsType.GEOLOCATION_WITH_OPTIONS;
+        WebsitePreferenceBridgeJni.get()
+                .setGeolocationSettingForOrigin(
+                        browserContextHandle,
+                        mContentSettingsType,
+                        mOrigin,
+                        getEmbedderSafe(),
+                        setting != null ? setting.mApproximate : ContentSetting.DEFAULT,
+                        setting != null ? setting.mPrecise : ContentSetting.DEFAULT);
     }
 }

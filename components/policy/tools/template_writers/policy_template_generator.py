@@ -1,10 +1,12 @@
-#!/usr/bin/env python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import copy
+import os
 import re
+import sys
 
 
 def IsGroupOrAtomicGroup(policy):
@@ -21,7 +23,6 @@ class PolicyTemplateGenerator:
   '''
 
   def _ImportMessage(self, msg_txt):
-    msg_txt = msg_txt.decode('utf-8')
     lines = msg_txt.split('\n')
 
     # Strip any extra leading spaces, but keep useful indentation:
@@ -93,6 +94,7 @@ class PolicyTemplateGenerator:
           'ios': ('chrome', 'ios'),
           'chrome_os': ('chrome_os', 'chrome_os'),
           'chrome_frame': ('chrome_frame', 'win'),
+          'fuchsia': ('chrome', 'fuchsia'),
       }[product_platform_string]
       platforms = [platform]
     return product, platforms
@@ -184,8 +186,8 @@ class PolicyTemplateGenerator:
       # Iterate through all the items of an enum-type policy, and add captions.
       for item in policy['items']:
         item['caption'] = self._ImportMessage(item['caption'])
-      if 'supported_on' in item:
-        item['supported_on'] = self._ProcessSupportedOn(item['supported_on'])
+        if 'supported_on' in item:
+          item['supported_on'] = self._ProcessSupportedOn(item['supported_on'])
     if not IsGroupOrAtomicGroup(policy):
       if not 'label' in policy:
         # If 'label' is not specified, then it defaults to 'caption':

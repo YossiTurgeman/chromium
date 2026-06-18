@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as ElementsModule from 'devtools/panels/elements/elements.js';
+
 (async function() {
   TestRunner.addResult(`Tests elements drag and drop operation internals, verifies post-move selection.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <div id="container">
@@ -31,21 +35,21 @@
 
     function testDragAndDrop(next) {
       var treeOutline = ElementsTestRunner.firstElementsTreeOutline();
-      treeOutline.addEventListener(Elements.ElementsTreeOutline.Events.SelectedNodeChanged, selectionChanged);
+      treeOutline.addEventListener(ElementsModule.ElementsTreeOutline.ElementsTreeOutline.Events.SelectedNodeChanged, selectionChanged);
 
       function selectionChanged() {
         TestRunner.addResult('===== Moved child2 =====');
         ElementsTestRunner.dumpElementsTree(containerNode);
         TestRunner.addResult(
-            'Selection: ' + Elements.DOMPath.fullQualifiedSelector(treeOutline.selectedDOMNode()));
+            'Selection: ' + ElementsModule.DOMPath.fullQualifiedSelector(treeOutline.selectedDOMNode()));
         next();
       }
 
       var child2 = ElementsTestRunner.expandedNodeWithId('child2');
       var child4 = ElementsTestRunner.expandedNodeWithId('child4');
-      treeOutline._treeElementBeingDragged = child2[treeOutline._treeElementSymbol];
-      var treeElementToDropOn = child4[treeOutline._treeElementSymbol];
-      treeOutline._doMove(treeElementToDropOn);
+      treeOutline.treeElementBeingDragged = treeOutline.treeElementByNode.get(child2);
+      var treeElementToDropOn = treeOutline.treeElementByNode.get(child4);
+      treeOutline.doMove(treeElementToDropOn);
     }
   ]);
 })();

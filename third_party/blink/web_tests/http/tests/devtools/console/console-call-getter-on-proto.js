@@ -1,11 +1,13 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
 
 (async function() {
   TestRunner.addResult(`Tests that calling getter on prototype will call it on the object.\n`);
 
-  await TestRunner.loadModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   await TestRunner.evaluateInPagePromise(`
@@ -30,24 +32,28 @@
 
   TestRunner.evaluateInPage('logObject()', step2);
 
-  function step2() {
+  async function step2() {
     ConsoleTestRunner.expandConsoleMessages(step3);
   }
 
   function expandTreeElementFilter(treeElement) {
-    var name = treeElement.nameElement && treeElement.nameElement.textContent;
-    return name === '__proto__';
+    return treeElement.property?.name === '[[Prototype]]';
   }
 
-  function step3() {
+  async function step3() {
     ConsoleTestRunner.expandConsoleMessages(step4, expandTreeElementFilter);
   }
 
-  function step4() {
-    ConsoleTestRunner.expandGettersInConsoleMessages(step5);
+  async function step4() {
+    ConsoleTestRunner.expandConsoleMessages(step5, expandTreeElementFilter);
   }
 
   async function step5() {
+    await new Promise(requestAnimationFrame);
+    ConsoleTestRunner.expandGettersInConsoleMessages(step6);
+  }
+
+  async function step6() {
     await ConsoleTestRunner.dumpConsoleMessages(false, false, TestRunner.textContentWithLineBreaks);
     TestRunner.completeTest();
   }

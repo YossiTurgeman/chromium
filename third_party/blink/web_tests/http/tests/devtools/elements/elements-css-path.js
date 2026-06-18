@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as ElementsModule from 'devtools/panels/elements/elements.js';
+
 (async function() {
   TestRunner.addResult(`Tests DOMNode.cssPath()\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <!DOCTYPE html>
@@ -128,7 +132,7 @@
   ElementsTestRunner.expandElementsTree(enqueueNodes);
 
   function enqueueNodes() {
-    enqueueNode('', getDocumentElement());
+    enqueueNode('', ElementsTestRunner.getDocumentElement());
     dumpNodeData();
   }
 
@@ -138,7 +142,7 @@
       TestRunner.completeTest();
       return;
     }
-    var cssPath = Elements.DOMPath.cssPath(entry.node, true);
+    var cssPath = ElementsModule.DOMPath.cssPath(entry.node, true);
     var result = entry.prefix + cssPath;
     TestRunner.addResult(result.replace(/\n/g, '\\n'));
     TestRunner.evaluateInPage('matchingElements(' + JSON.stringify(cssPath) + ')', callback);
@@ -147,16 +151,6 @@
       TestRunner.assertEquals(1, result);
       dumpNodeData();
     }
-  }
-
-  function getDocumentElement() {
-    var map = TestRunner.domModel._idToDOMNode;
-    for (var id in map) {
-      if (map[id].nodeName() === '#document')
-        return map[id];
-    }
-
-    return null;
   }
 
   function enqueueNode(prefix, node) {

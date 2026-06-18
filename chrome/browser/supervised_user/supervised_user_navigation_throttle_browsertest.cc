@@ -1,33 +1,42 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "base/command_line.h"
+#include "base/feature_list.h"
 #include "base/files/file_path.h"
+#include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
+#include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_key.h"
-#include "chrome/browser/supervised_user/logged_in_user_mixin.h"
-#include "chrome/browser/supervised_user/navigation_finished_waiter.h"
-#include "chrome/browser/supervised_user/permission_request_creator_mock.h"
-#include "chrome/browser/supervised_user/supervised_user_constants.h"
-#include "chrome/browser/supervised_user/supervised_user_features.h"
-#include "chrome/browser/supervised_user/supervised_user_interstitial.h"
+#include "chrome/browser/supervised_user/family_link_settings_service_factory.h"
 #include "chrome/browser/supervised_user/supervised_user_navigation_observer.h"
-#include "chrome/browser/supervised_user/supervised_user_service.h"
 #include "chrome/browser/supervised_user/supervised_user_service_factory.h"
-#include "chrome/browser/supervised_user/supervised_user_settings_service.h"
-#include "chrome/browser/supervised_user/supervised_user_settings_service_factory.h"
-#include "chrome/browser/supervised_user/supervised_user_url_filter.h"
+#include "chrome/browser/supervised_user/supervised_user_test_util.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/webui_url_constants.h"
+#include "chrome/test/base/mixin_based_in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "chrome/test/supervised_user/supervision_mixin.h"
+#include "components/supervised_user/core/browser/family_link_settings_service.h"
+#include "components/supervised_user/core/browser/permission_request_creator_mock.h"
+#include "components/supervised_user/core/browser/supervised_user_interstitial.h"
+#include "components/supervised_user/core/browser/supervised_user_service.h"
+#include "components/supervised_user/core/browser/supervised_user_utils.h"
+#include "components/supervised_user/core/common/features.h"
+#include "components/supervised_user/core/common/supervised_user_constants.h"
+#include "components/supervised_user/test_support/kids_management_api_server_mock.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
@@ -36,21 +45,39 @@
 #include "content/public/common/page_type.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "content/public/test/fenced_frame_test_util.h"
+#include "content/public/test/prerender_test_util.h"
 #include "content/public/test/test_navigation_observer.h"
-#include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "testing/gtest/include/gtest/gtest.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/shell.h"
+#include "chrome/browser/ui/webui/ash/parent_access/parent_access_dialog.h"
+#include "ui/events/event_constants.h"
+#include "ui/events/test/event_generator.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+namespace {
 
 using content::NavigationController;
 using content::WebContents;
 
-namespace {
-
 static const char* kExampleHost = "www.example.com";
 static const char* kExampleHost2 = "www.example2.com";
+static const char* kStrippedExampleHost = "example.com";
+static const char* kFamiliesHost = "families.google.com";
 static const char* kIframeHost1 = "www.iframe1.com";
 static const char* kIframeHost2 = "www.iframe2.com";
 
+#if BUILDFLAG(IS_CHROMEOS)
+constexpr char kLocalUrlAccessCommand[] = "requestUrlAccessLocal";
+#endif
+constexpr char kRemoteUrlAccessCommand[] = "requestUrlAccessRemote";
+
 // Class to keep track of iframes created and destroyed.
+// TODO(crbug.com/40173416): Can be replaced with
+// WebContents::UnsafeFindFrameByFrameTreeNodeId.
 class RenderFrameTracker : public content::WebContentsObserver {
  public:
   explicit RenderFrameTracker(content::WebContents* web_contents)
@@ -60,16 +87,20 @@ class RenderFrameTracker : public content::WebContentsObserver {
   // content::WebContentsObserver:
   void RenderFrameHostChanged(content::RenderFrameHost* old_host,
                               content::RenderFrameHost* new_host) override;
-  void FrameDeleted(content::RenderFrameHost* host) override;
+  void FrameDeleted(content::FrameTreeNodeId frame_tree_node_id) override;
 
-  content::RenderFrameHost* GetHost(int frame_id) {
-    if (!base::Contains(render_frame_hosts_, frame_id))
+  content::RenderFrameHost* GetHost(content::FrameTreeNodeId frame_id) {
+    if (!render_frame_hosts_.contains(frame_id)) {
       return nullptr;
+    }
     return render_frame_hosts_[frame_id];
   }
 
  private:
-  std::map<int, content::RenderFrameHost*> render_frame_hosts_;
+  std::map<content::FrameTreeNodeId,
+           raw_ptr<content::RenderFrameHost, CtnExperimental>>
+
+      render_frame_hosts_;
 };
 
 void RenderFrameTracker::RenderFrameHostChanged(
@@ -78,132 +109,228 @@ void RenderFrameTracker::RenderFrameHostChanged(
   render_frame_hosts_[new_host->GetFrameTreeNodeId()] = new_host;
 }
 
-void RenderFrameTracker::FrameDeleted(content::RenderFrameHost* host) {
-  if (!base::Contains(render_frame_hosts_, host->GetFrameTreeNodeId()))
+void RenderFrameTracker::FrameDeleted(
+    content::FrameTreeNodeId frame_tree_node_id) {
+  if (!render_frame_hosts_.contains(frame_tree_node_id)) {
     return;
+  }
 
-  render_frame_hosts_.erase(host->GetFrameTreeNodeId());
+  render_frame_hosts_.erase(frame_tree_node_id);
 }
 
-class InnerWebContentsAttachedWaiter : public content::WebContentsObserver {
+// Helper class to wait for a particular navigation in a particular render
+// frame in tests.
+class NavigationFinishedWaiter : public content::WebContentsObserver {
  public:
-  explicit InnerWebContentsAttachedWaiter(content::WebContents* contents)
-      : content::WebContentsObserver(contents) {}
-  InnerWebContentsAttachedWaiter(const InnerWebContentsAttachedWaiter&) =
-      delete;
-  InnerWebContentsAttachedWaiter& operator=(
-      const InnerWebContentsAttachedWaiter&) = delete;
-  ~InnerWebContentsAttachedWaiter() override = default;
+  NavigationFinishedWaiter(content::WebContents* web_contents,
+                           content::FrameTreeNodeId frame_id,
+                           const GURL& url);
+  NavigationFinishedWaiter(const NavigationFinishedWaiter&) = delete;
+  NavigationFinishedWaiter& operator=(const NavigationFinishedWaiter&) = delete;
+  ~NavigationFinishedWaiter() override = default;
+
+  void Wait();
 
   // content::WebContentsObserver:
-  void InnerWebContentsAttached(content::WebContents* inner_web_contents,
-                                content::RenderFrameHost* render_frame_host,
-                                bool is_full_page) override;
-
-  void WaitForInnerWebContentsAttached();
+  void DidFinishNavigation(
+      content::NavigationHandle* navigation_handle) override;
 
  private:
+  content::FrameTreeNodeId frame_id_;
+  GURL url_;
+  bool did_finish_ = false;
   base::RunLoop run_loop_{base::RunLoop::Type::kNestableTasksAllowed};
 };
 
-void InnerWebContentsAttachedWaiter::InnerWebContentsAttached(
-    content::WebContents* inner_web_contents,
-    content::RenderFrameHost* render_frame_host,
-    bool is_full_page) {
-  run_loop_.Quit();
-}
+NavigationFinishedWaiter::NavigationFinishedWaiter(
+    content::WebContents* web_contents,
+    content::FrameTreeNodeId frame_id,
+    const GURL& url)
+    : content::WebContentsObserver(web_contents),
+      frame_id_(frame_id),
+      url_(url) {}
 
-void InnerWebContentsAttachedWaiter::WaitForInnerWebContentsAttached() {
-  if (web_contents()->GetInnerWebContents().size() > 0u)
+void NavigationFinishedWaiter::Wait() {
+  if (did_finish_) {
     return;
+  }
   run_loop_.Run();
 }
 
-}  // namespace
+void NavigationFinishedWaiter::DidFinishNavigation(
+    content::NavigationHandle* navigation_handle) {
+  if (!navigation_handle->HasCommitted()) {
+    return;
+  }
 
-class SupervisedUserNavigationThrottleTest
+  if (navigation_handle->GetFrameTreeNodeId() != frame_id_ ||
+      navigation_handle->GetURL() != url_) {
+    return;
+  }
+
+  did_finish_ = true;
+  run_loop_.Quit();
+}
+
+class SupervisedUserNavigationThrottleTestBase
     : public MixinBasedInProcessBrowserTest {
  protected:
-  SupervisedUserNavigationThrottleTest() = default;
-  ~SupervisedUserNavigationThrottleTest() override = default;
+  explicit SupervisedUserNavigationThrottleTestBase(
+      supervised_user::SupervisionMixin::SignInMode sign_in_mode)
+      : supervision_mixin_(mixin_host_,
+                           this,
+                           embedded_test_server(),
+                           {
+                               .sign_in_mode = sign_in_mode,
+                               .embedded_test_server_options =
+                                   {.resolver_rules_map_host_list =
+                                        "*.example.com, *.example2.com, "
+                                        "example.com, example2.com, "
+                                        "*.families.google.com, "
+                                        "*.iframe1.com, *.iframe2.com, "
+                                        "iframe1.com, iframe2.com"},
+                           }),
+        prerender_helper_(base::BindRepeating(
+            &SupervisedUserNavigationThrottleTestBase::web_contents,
+            base::Unretained(this))) {}
+  ~SupervisedUserNavigationThrottleTestBase() override = default;
 
   void SetUp() override;
   void SetUpOnMainThread() override;
 
   void BlockHost(const std::string& host) {
-    SetManualFilterForHost(host, /* allowlist */ false);
+    supervised_user_test_util::SetManualFilterForHost(browser()->profile(),
+                                                      host,
+                                                      /*allowlist=*/false);
   }
 
   void AllowlistHost(const std::string& host) {
-    SetManualFilterForHost(host, /* allowlist */ true);
+    supervised_user_test_util::SetManualFilterForHost(browser()->profile(),
+                                                      host, /*allowlist=*/true);
   }
 
   bool IsInterstitialBeingShownInMainFrame(Browser* browser);
 
-  virtual chromeos::LoggedInUserMixin::LogInType GetLogInType() {
-    return chromeos::LoggedInUserMixin::LogInType::kChild;
+  content::test::PrerenderTestHelper& prerender_helper() {
+    return prerender_helper_;
+  }
+
+  content::WebContents* web_contents() {
+    return browser()->tab_strip_model()->GetActiveWebContents();
+  }
+
+  supervised_user::KidsManagementApiServerMock& kids_management_api_mock() {
+    return supervision_mixin_.api_mock_setup_mixin().api_mock();
   }
 
  private:
-  void SetManualFilterForHost(const std::string& host, bool allowlist) {
-    Profile* profile = browser()->profile();
-    SupervisedUserSettingsService* settings_service =
-        SupervisedUserSettingsServiceFactory::GetForKey(
-            profile->GetProfileKey());
-
-    const base::DictionaryValue* local_settings =
-        settings_service->LocalSettingsForTest();
-    std::unique_ptr<base::DictionaryValue> dict_to_insert;
-
-    if (local_settings->HasKey(
-            supervised_users::kContentPackManualBehaviorHosts)) {
-      const base::DictionaryValue* dict_value;
-
-      local_settings->GetDictionary(
-          supervised_users::kContentPackManualBehaviorHosts, &dict_value);
-
-      std::unique_ptr<base::Value> clone =
-          std::make_unique<base::Value>(dict_value->Clone());
-
-      dict_to_insert = base::DictionaryValue::From(std::move(clone));
-    } else {
-      dict_to_insert = std::make_unique<base::DictionaryValue>();
-    }
-
-    dict_to_insert->SetKey(host, base::Value(allowlist));
-    settings_service->SetLocalSetting(
-        supervised_users::kContentPackManualBehaviorHosts,
-        std::move(dict_to_insert));
-  }
-
-  std::unique_ptr<chromeos::LoggedInUserMixin> logged_in_user_mixin_;
+  supervised_user::SupervisionMixin supervision_mixin_;
+  content::test::PrerenderTestHelper prerender_helper_;
 };
 
-bool SupervisedUserNavigationThrottleTest::IsInterstitialBeingShownInMainFrame(
-    Browser* browser) {
+bool SupervisedUserNavigationThrottleTestBase::
+    IsInterstitialBeingShownInMainFrame(Browser* browser) {
   WebContents* tab = browser->tab_strip_model()->GetActiveWebContents();
-  base::string16 title;
+  std::u16string title;
   ui_test_utils::GetCurrentTabTitle(browser, &title);
   return tab->GetController().GetLastCommittedEntry()->GetPageType() ==
              content::PAGE_TYPE_ERROR &&
-         title == base::ASCIIToUTF16("Site blocked");
+         title == u"Site blocked";
 }
 
-void SupervisedUserNavigationThrottleTest::SetUp() {
-  // Polymorphically initiate logged_in_user_mixin_.
-  logged_in_user_mixin_ = std::make_unique<chromeos::LoggedInUserMixin>(
-      &mixin_host_, GetLogInType(), embedded_test_server(), this);
+void SupervisedUserNavigationThrottleTestBase::SetUp() {
+  prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
   MixinBasedInProcessBrowserTest::SetUp();
 }
 
-void SupervisedUserNavigationThrottleTest::SetUpOnMainThread() {
+void SupervisedUserNavigationThrottleTestBase::SetUpOnMainThread() {
   MixinBasedInProcessBrowserTest::SetUpOnMainThread();
-  // Resolve everything to localhost.
-  host_resolver()->AddIPLiteralRule("*", "127.0.0.1", "localhost");
 
   ASSERT_TRUE(embedded_test_server()->Started());
+}
 
-  logged_in_user_mixin_->LogInUser();
+class SupervisedUserNavigationThrottleTest
+    : public SupervisedUserNavigationThrottleTestBase {
+ protected:
+  SupervisedUserNavigationThrottleTest()
+      : SupervisedUserNavigationThrottleTestBase(
+            supervised_user::SupervisionMixin::SignInMode::kSupervised) {}
+  ~SupervisedUserNavigationThrottleTest() override = default;
+};
+
+class SupervisedUserNavigationThrottleWithPrerenderingTest
+    : public SupervisedUserNavigationThrottleTestBase,
+      public testing::WithParamInterface<std::string> {
+ protected:
+  SupervisedUserNavigationThrottleWithPrerenderingTest()
+      : SupervisedUserNavigationThrottleTestBase(
+            supervised_user::SupervisionMixin::SignInMode::kSupervised),
+        prerender_test_helper_(base::BindRepeating(
+            &SupervisedUserNavigationThrottleWithPrerenderingTest::web_contents,
+            base::Unretained(this))) {
+    // Disable prefetch ahead of prerender, as it's slightly hard to wait
+    // prefetch load completion outside //content and avoid flakiness. The
+    // behavior difference is that the prefetch ahead of prerender makes
+    // `GetRequestCount()` 1. See a similar case
+    // `PrerenderBrowserTestFallbackEnabledDisabled.CrossSiteRedirection`.
+    //
+    // TODO(crbug.com/491911980): Improve a waiter to wait SpeculationRules
+    // prefetch outside //content.
+    prerender_test_helper_.DisablePrerender2FallbackPrefetchSpecRules();
+  }
+  ~SupervisedUserNavigationThrottleWithPrerenderingTest() override = default;
+
+  static std::string GetTargetHint() { return GetParam(); }
+
+ private:
+  content::test::PrerenderTestHelper prerender_test_helper_;
+};
+
+INSTANTIATE_TEST_SUITE_P(,
+                         SupervisedUserNavigationThrottleWithPrerenderingTest,
+                         testing::Values("_self", "_blank"),
+                         [](const testing::TestParamInfo<std::string>& info) {
+                           return base::StrCat({"WithTargetHint", info.param});
+                         });
+
+// Tests that prerendering fails in supervised user mode.
+#if BUILDFLAG(IS_CHROMEOS)
+// TODO(crbug.com/40201321): Flaky on ChromeOS.
+#define MAYBE_DisallowPrerendering DISABLED_DisallowPrerendering
+#else
+#define MAYBE_DisallowPrerendering DisallowPrerendering
+#endif
+IN_PROC_BROWSER_TEST_P(SupervisedUserNavigationThrottleWithPrerenderingTest,
+                       MAYBE_DisallowPrerendering) {
+  const GURL initial_url = embedded_test_server()->GetURL("/simple.html");
+  const GURL allowed_url =
+      embedded_test_server()->GetURL("/supervised_user/simple.html");
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  prerender_helper().NavigatePrimaryPage(initial_url);
+
+  // If throttled, the prerendered navigation should not have started and we
+  // should not be requesting corresponding resources.
+  content::test::PrerenderHostCreationWaiter host_creation_waiter;
+  prerender_helper().AddPrerendersAsync(
+      {allowed_url}, /*eagerness=*/std::nullopt, GetTargetHint());
+  content::PrerenderHostId host_id = host_creation_waiter.Wait();
+  auto* prerender_web_contents =
+      content::test::PrerenderTestHelper::GetPrerenderWebContents(host_id);
+  content::test::PrerenderHostObserver host_observer(*prerender_web_contents,
+                                                     host_id);
+  host_observer.WaitForDestroyed();
+  EXPECT_EQ(0, prerender_helper().GetRequestCount(allowed_url));
+
+  // Regular navigation should proceed, however.
+  content::TestNavigationObserver observer(
+      web_contents(), content::MessageLoopRunner::QuitMode::IMMEDIATE,
+      /*ignore_uncommitted_navigations*/ false);
+  prerender_helper().NavigatePrimaryPage(allowed_url);
+  observer.WaitForNavigationFinished();
+  EXPECT_TRUE(observer.last_navigation_succeeded());
+  EXPECT_EQ(allowed_url, observer.last_navigation_url());
+  EXPECT_EQ(1, prerender_helper().GetRequestCount(allowed_url));
 }
 
 // Tests that navigating to a blocked page simply fails if there is no
@@ -211,12 +338,8 @@ void SupervisedUserNavigationThrottleTest::SetUpOnMainThread() {
 IN_PROC_BROWSER_TEST_F(SupervisedUserNavigationThrottleTest,
                        NoNavigationObserverBlock) {
   Profile* profile = browser()->profile();
-  SupervisedUserSettingsService* supervised_user_settings_service =
-      SupervisedUserSettingsServiceFactory::GetForKey(profile->GetProfileKey());
-  supervised_user_settings_service->SetLocalSetting(
-      supervised_users::kContentPackDefaultFilteringBehavior,
-      std::unique_ptr<base::Value>(
-          new base::Value(SupervisedUserURLFilter::BLOCK)));
+  supervised_user_test_util::SetWebFilterType(
+      profile, supervised_user::WebFilterType::kCertainSites);
 
   std::unique_ptr<WebContents> web_contents(
       WebContents::Create(WebContents::CreateParams(profile)));
@@ -237,12 +360,14 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserNavigationThrottleTest,
 
   GURL allowed_url = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/simple.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url);
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), allowed_url));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 
   GURL blocked_url = embedded_test_server()->GetURL(
       kExampleHost2, "/supervised_user/simple.html");
-  ui_test_utils::NavigateToURL(browser(), blocked_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
   EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
 }
 
@@ -255,107 +380,104 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserNavigationThrottleTest,
 
   GURL allowed_url_with_iframes = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/with_iframes.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes);
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 
   // Both iframes (from allowed host iframe1.com as well as from blocked host
   // iframe2.com) should be loaded normally, since we don't filter iframes
-  // (yet) - see crbug.com/651115.
-  bool loaded1 = false;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(tab, "loaded1()", &loaded1));
-  EXPECT_TRUE(loaded1);
-  bool loaded2 = false;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(tab, "loaded2()", &loaded2));
-  EXPECT_TRUE(loaded2);
+  // (yet) - see crbug.com/41277984.
+  EXPECT_TRUE(content::EvalJs(tab, "loaded1()").ExtractBool());
+  EXPECT_TRUE(content::EvalJs(tab, "loaded2()").ExtractBool());
 }
 
 IN_PROC_BROWSER_TEST_F(SupervisedUserNavigationThrottleTest,
-                       AllowEDUCoexistenceInnerWebContents) {
-  BlockHost(kExampleHost2);
-  GURL manually_blocked_url = embedded_test_server()->GetURL(
-      kExampleHost2, "/supervised_user/with_iframes.html");
+                       AllowFamiliesDotGoogleDotComAccess) {
+  // Simulate families.google.com being set in the blocklist.
+  BlockHost(kFamiliesHost);
 
-  ui_test_utils::NavigateToURL(
-      browser(), GURL(SupervisedUserService::GetEduCoexistenceLoginUrl()));
+  // A production endpoint is used here because a Tast test would be too
+  // expensive to be used for this specific case.
+  const GURL kFamiliesDotGoogleDotComUrl =
+      GURL("https://families.google.com/families");
+
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), kFamiliesDotGoogleDotComUrl));
+
   // Get the top level WebContents.
   content::WebContents* contents =
       browser()->tab_strip_model()->GetActiveWebContents();
-  EXPECT_EQ(contents->GetURL(),
-            GURL(SupervisedUserService::GetEduCoexistenceLoginUrl()));
 
-  InnerWebContentsAttachedWaiter web_contents_attached_waiter(
-      browser()->tab_strip_model()->GetActiveWebContents());
-  web_contents_attached_waiter.WaitForInnerWebContentsAttached();
+  EXPECT_EQ(contents->GetLastCommittedURL(), kFamiliesDotGoogleDotComUrl);
 
-  // Get the inner WebContents.
-  std::vector<content::WebContents*> inner_web_contents =
-      contents->GetInnerWebContents();
-
-  // There is only one inner web content in EDUCoexistence flow.
-  EXPECT_EQ(inner_web_contents.size(), 1u);
-
-  content::WebContents* webview_element = inner_web_contents[0];
-  NavigationFinishedWaiter waiter(webview_element, manually_blocked_url);
-  webview_element->GetController().LoadURLWithParams(
-      NavigationController::LoadURLParams(manually_blocked_url));
-  waiter.Wait();
-
-  // Make sure that there is no error page in the inner web content.
-  EXPECT_NE(
-      webview_element->GetController().GetLastCommittedEntry()->GetPageType(),
-      content::PAGE_TYPE_ERROR);
+  // families.google.com should not be blocked.
+  EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 }
 
 class SupervisedUserIframeFilterTest
-    : public SupervisedUserNavigationThrottleTest {
+    : public SupervisedUserNavigationThrottleTestBase {
  protected:
-  SupervisedUserIframeFilterTest() = default;
+  SupervisedUserIframeFilterTest()
+      : SupervisedUserNavigationThrottleTestBase(
+            supervised_user::SupervisionMixin::SignInMode::kSupervised) {}
+
   ~SupervisedUserIframeFilterTest() override = default;
 
-  void SetUp() override;
   void SetUpOnMainThread() override;
   void TearDownOnMainThread() override;
 
-  std::vector<int> GetBlockedFrames();
-  const GURL& GetBlockedFrameURL(int frame_id);
-  bool IsInterstitialBeingShownInFrame(int frame_id);
-  bool IsAskPermissionButtonBeingShown(int frame_id);
-  void RequestPermissionFromFrame(int frame_id);
-  void WaitForNavigationFinished(int frame_id, const GURL& url);
+  std::vector<content::FrameTreeNodeId> GetBlockedFrames();
+  GURL GetBlockedFrameURL(content::FrameTreeNodeId frame_id);
+  bool IsInterstitialBeingShownInFrame(content::FrameTreeNodeId frame_id);
+  bool IsRemoteApprovalsButtonBeingShown(content::FrameTreeNodeId frame_id);
+  bool IsLocalApprovalsButtonBeingShown(content::FrameTreeNodeId frame_id);
+  bool IsBlockReasonBeingShown(content::FrameTreeNodeId frame_id);
+  bool IsDetailsLinkAvailable(content::FrameTreeNodeId frame_id);
+  void CheckPreferredApprovalButton(content::FrameTreeNodeId frame_id);
+  bool IsLocalApprovalsInsteadButtonBeingShown(
+      content::FrameTreeNodeId frame_id);
+  void SendCommandToFrame(const std::string& command_name,
+                          content::FrameTreeNodeId frame_id);
+  void WaitForNavigationFinished(content::FrameTreeNodeId frame_id,
+                                 const GURL& url);
+  bool IsLocalWebApprovalsEnabled() const;
 
-  PermissionRequestCreatorMock* permission_creator() {
+  supervised_user::PermissionRequestCreatorMock* permission_creator() {
     return permission_creator_;
   }
 
   RenderFrameTracker* tracker() { return tracker_.get(); }
 
  private:
-  bool RunCommandAndGetBooleanFromFrame(int frame_id,
+  bool RunCommandAndGetBooleanFromFrame(content::FrameTreeNodeId frame_id,
                                         const std::string& command);
 
   std::unique_ptr<RenderFrameTracker> tracker_;
-  PermissionRequestCreatorMock* permission_creator_;
-
-  base::test::ScopedFeatureList scoped_feature_list_;
+  raw_ptr<supervised_user::PermissionRequestCreatorMock, DanglingUntriaged>
+      permission_creator_;
 };
 
-void SupervisedUserIframeFilterTest::SetUp() {
-  scoped_feature_list_.InitAndEnableFeature(
-      supervised_users::kSupervisedUserIframeFilter);
-  SupervisedUserNavigationThrottleTest::SetUp();
-}
-
 void SupervisedUserIframeFilterTest::SetUpOnMainThread() {
-  SupervisedUserNavigationThrottleTest::SetUpOnMainThread();
+  SupervisedUserNavigationThrottleTestBase::SetUpOnMainThread();
 
-  SupervisedUserService* service =
+  supervised_user::SupervisedUserService* service =
       SupervisedUserServiceFactory::GetForProfile(browser()->profile());
-  std::unique_ptr<PermissionRequestCreator> creator =
-      std::make_unique<PermissionRequestCreatorMock>(browser()->profile());
+  supervised_user::FamilyLinkSettingsService* family_link_settings_service =
+      supervised_user::FamilyLinkSettingsServiceFactory::GetForKey(
+          browser()->profile()->GetProfileKey());
+  CHECK(family_link_settings_service);
+  std::unique_ptr<supervised_user::PermissionRequestCreator> creator =
+      std::make_unique<supervised_user::PermissionRequestCreatorMock>(
+          *family_link_settings_service);
   permission_creator_ =
-      static_cast<PermissionRequestCreatorMock*>(creator.get());
+      static_cast<supervised_user::PermissionRequestCreatorMock*>(
+          creator.get());
   permission_creator_->SetEnabled();
-  service->SetPrimaryPermissionCreatorForTest(std::move(creator));
+  service->remote_web_approvals_manager().ClearApprovalRequestsCreators();
+  service->remote_web_approvals_manager().AddApprovalRequestCreator(
+      std::move(creator));
 
   WebContents* tab = browser()->tab_strip_model()->GetActiveWebContents();
   tracker_ = std::make_unique<RenderFrameTracker>(tab);
@@ -363,62 +485,107 @@ void SupervisedUserIframeFilterTest::SetUpOnMainThread() {
 
 void SupervisedUserIframeFilterTest::TearDownOnMainThread() {
   tracker_.reset();
-  SupervisedUserNavigationThrottleTest::TearDownOnMainThread();
+  SupervisedUserNavigationThrottleTestBase::TearDownOnMainThread();
 }
 
-std::vector<int> SupervisedUserIframeFilterTest::GetBlockedFrames() {
+std::vector<content::FrameTreeNodeId>
+SupervisedUserIframeFilterTest::GetBlockedFrames() {
   WebContents* tab = browser()->tab_strip_model()->GetActiveWebContents();
   auto* navigation_observer =
       SupervisedUserNavigationObserver::FromWebContents(tab);
   const auto& interstitials = navigation_observer->interstitials_for_test();
 
-  std::vector<int> blocked_frames;
+  std::vector<content::FrameTreeNodeId> blocked_frames;
   blocked_frames.reserve(interstitials.size());
 
-  for (const auto& elem : interstitials)
+  for (const auto& elem : interstitials) {
     blocked_frames.push_back(elem.first);
+  }
 
   return blocked_frames;
 }
 
-const GURL& SupervisedUserIframeFilterTest::GetBlockedFrameURL(int frame_id) {
+GURL SupervisedUserIframeFilterTest::GetBlockedFrameURL(
+    content::FrameTreeNodeId frame_id) {
   WebContents* tab = browser()->tab_strip_model()->GetActiveWebContents();
   auto* navigation_observer =
       SupervisedUserNavigationObserver::FromWebContents(tab);
   const auto& interstitials = navigation_observer->interstitials_for_test();
-  DCHECK(base::Contains(interstitials, frame_id));
-  return interstitials.at(frame_id)->url();
+  DCHECK(interstitials.contains(frame_id));
+  return interstitials.at(frame_id)->filtering_result().url;
 }
 
 bool SupervisedUserIframeFilterTest::IsInterstitialBeingShownInFrame(
-    int frame_id) {
+    content::FrameTreeNodeId frame_id) {
   std::string command =
-      "domAutomationController.send("
-      "(document.getElementsByClassName('supervised-user-block') != null) "
-      "? (true) : (false));";
+      "document.querySelector('.supervised-user-block') != null";
   return RunCommandAndGetBooleanFromFrame(frame_id, command);
 }
 
-bool SupervisedUserIframeFilterTest::IsAskPermissionButtonBeingShown(
-    int frame_id) {
+bool SupervisedUserIframeFilterTest::IsBlockReasonBeingShown(
+    content::FrameTreeNodeId frame_id) {
   std::string command =
-      "domAutomationController.send("
-      "(document.getElementById('request-access-button').hidden"
-      "? (false) : (true)));";
+      "getComputedStyle(document.getElementById('block-reason')).display !== "
+      "\"none\"";
   return RunCommandAndGetBooleanFromFrame(frame_id, command);
 }
 
-void SupervisedUserIframeFilterTest::RequestPermissionFromFrame(int frame_id) {
+bool SupervisedUserIframeFilterTest::IsDetailsLinkAvailable(
+    content::FrameTreeNodeId frame_id) {
+  std::string command =
+      "!!document.getElementById('block-reason-show-details-link')";
+  return RunCommandAndGetBooleanFromFrame(frame_id, command);
+}
+
+bool SupervisedUserIframeFilterTest::IsRemoteApprovalsButtonBeingShown(
+    content::FrameTreeNodeId frame_id) {
+  std::string command =
+      "!document.getElementById('remote-approvals-button').hidden";
+  return RunCommandAndGetBooleanFromFrame(frame_id, command);
+}
+
+bool SupervisedUserIframeFilterTest::IsLocalApprovalsButtonBeingShown(
+    content::FrameTreeNodeId frame_id) {
+  std::string command =
+      "!document.getElementById('local-approvals-button').hidden";
+  return RunCommandAndGetBooleanFromFrame(frame_id, command);
+}
+
+void SupervisedUserIframeFilterTest::CheckPreferredApprovalButton(
+    content::FrameTreeNodeId frame_id) {
+  std::string command =
+      "document.getElementById('local-approvals-button').classList.contains("
+      "'primary-button') &&"
+      " !document.getElementById('local-approvals-button').classList."
+      "contains('secondary-button') &&"
+      " document.getElementById('remote-approvals-button').classList."
+      "contains('secondary-button') &&"
+      " !document.getElementById('remote-approvals-button').classList."
+      "contains('primary-button');";
+  ASSERT_TRUE(RunCommandAndGetBooleanFromFrame(frame_id, command));
+}
+
+bool SupervisedUserIframeFilterTest::IsLocalApprovalsInsteadButtonBeingShown(
+    content::FrameTreeNodeId frame_id) {
+  std::string command =
+      "!document.getElementById('local-approvals-remote-request-sent-button')."
+      "hidden";
+  return RunCommandAndGetBooleanFromFrame(frame_id, command);
+}
+
+void SupervisedUserIframeFilterTest::SendCommandToFrame(
+    const std::string& command_name,
+    content::FrameTreeNodeId frame_id) {
   auto* render_frame_host = tracker()->GetHost(frame_id);
   DCHECK(render_frame_host);
   DCHECK(render_frame_host->IsRenderFrameLive());
-  std::string command = "sendCommand(\'request\')";
-  ASSERT_TRUE(content::ExecuteScript(
-      content::ToRenderFrameHost(render_frame_host), command));
+  std::string command = base::StrCat({"sendCommand(\'", command_name, "\')"});
+  ASSERT_TRUE(
+      content::ExecJs(content::ToRenderFrameHost(render_frame_host), command));
 }
 
 void SupervisedUserIframeFilterTest::WaitForNavigationFinished(
-    int frame_id,
+    content::FrameTreeNodeId frame_id,
     const GURL& url) {
   WebContents* tab = browser()->tab_strip_model()->GetActiveWebContents();
   NavigationFinishedWaiter waiter(tab, frame_id, url);
@@ -426,7 +593,7 @@ void SupervisedUserIframeFilterTest::WaitForNavigationFinished(
 }
 
 bool SupervisedUserIframeFilterTest::RunCommandAndGetBooleanFromFrame(
-    int frame_id,
+    content::FrameTreeNodeId frame_id,
     const std::string& command) {
   // First check that SupervisedUserNavigationObserver believes that there is
   // an error page in the frame with frame tree node id |frame_id|.
@@ -435,24 +602,35 @@ bool SupervisedUserIframeFilterTest::RunCommandAndGetBooleanFromFrame(
       SupervisedUserNavigationObserver::FromWebContents(tab);
   auto& interstitials = navigation_observer->interstitials_for_test();
 
-  if (!base::Contains(interstitials, frame_id))
+  if (!interstitials.contains(frame_id)) {
     return false;
+  }
 
   auto* render_frame_host = tracker()->GetHost(frame_id);
   DCHECK(render_frame_host->IsRenderFrameLive());
 
-  bool value = false;
   auto target = content::ToRenderFrameHost(render_frame_host);
-  EXPECT_TRUE(content::ExecuteScriptWithoutUserGestureAndExtractBool(
-      target, command, &value));
-  return value;
+  return content::EvalJs(target, command,
+                         content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+      .ExtractBool();
+}
+
+// Returns whether the feature is in fact enabled, rather that was requested to
+// be enabled.
+bool SupervisedUserIframeFilterTest::IsLocalWebApprovalsEnabled() const {
+  return supervised_user::IsLocalWebApprovalsEnabled();
 }
 
 IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, BlockSubFrame) {
+  base::HistogramTester histogram_tester;
+
   BlockHost(kIframeHost2);
   GURL allowed_url_with_iframes = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/with_iframes.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes);
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 
   // The first iframe's source is |kIframeHost1| and it is not blocked. It will
@@ -460,14 +638,15 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, BlockSubFrame) {
   auto blocked = GetBlockedFrames();
   EXPECT_EQ(blocked.size(), 1u);
 
-  int blocked_frame_id = blocked[0];
+  content::FrameTreeNodeId blocked_frame_id = blocked[0];
 
   EXPECT_TRUE(IsInterstitialBeingShownInFrame(blocked_frame_id));
 
   permission_creator()->SetPermissionResult(true);
-  RequestPermissionFromFrame(blocked_frame_id);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frame_id);
   EXPECT_EQ(permission_creator()->url_requests().size(), 1u);
-  std::string requested_host = permission_creator()->url_requests()[0].host();
+  std::string requested_host =
+      permission_creator()->url_requests()[0].GetHost();
 
   EXPECT_EQ(requested_host, kIframeHost2);
 
@@ -475,6 +654,19 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, BlockSubFrame) {
                             permission_creator()->url_requests()[0]);
 
   EXPECT_FALSE(IsInterstitialBeingShownInFrame(blocked_frame_id));
+
+  histogram_tester.ExpectUniqueSample(
+      supervised_user::SupervisedUserInterstitial::
+          kInterstitialCommandHistogramName,
+      supervised_user::SupervisedUserInterstitial::Commands::
+          REMOTE_ACCESS_REQUEST,
+      1);
+  histogram_tester.ExpectUniqueSample(
+      supervised_user::SupervisedUserInterstitial::
+          kInterstitialPermissionSourceHistogramName,
+      supervised_user::SupervisedUserInterstitial::RequestPermissionSource::
+          SUB_FRAME,
+      1);
 }
 
 IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, BlockMultipleSubFrames) {
@@ -483,16 +675,19 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, BlockMultipleSubFrames) {
 
   GURL allowed_url_with_iframes = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/with_iframes.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes);
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 
   auto blocked = GetBlockedFrames();
   EXPECT_EQ(blocked.size(), 2u);
 
-  int blocked_frame_id_1 = blocked[0];
+  content::FrameTreeNodeId blocked_frame_id_1 = blocked[0];
   GURL blocked_frame_url_1 = GetBlockedFrameURL(blocked_frame_id_1);
 
-  int blocked_frame_id_2 = blocked[1];
+  content::FrameTreeNodeId blocked_frame_id_2 = blocked[1];
   GURL blocked_frame_url_2 = GetBlockedFrameURL(blocked_frame_id_2);
 
   EXPECT_TRUE(IsInterstitialBeingShownInFrame(blocked_frame_id_1));
@@ -502,8 +697,8 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, BlockMultipleSubFrames) {
   permission_creator()->SetPermissionResult(true);
   permission_creator()->DelayHandlingForNextRequests();
 
-  RequestPermissionFromFrame(blocked_frame_id_1);
-  RequestPermissionFromFrame(blocked_frame_id_2);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frame_id_1);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frame_id_2);
 
   EXPECT_EQ(permission_creator()->url_requests().size(), 2u);
   EXPECT_EQ(permission_creator()->url_requests()[0], GURL(blocked_frame_url_1));
@@ -527,7 +722,10 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, TestBackButton) {
 
   GURL allowed_url_with_iframes = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/with_iframes.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes);
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 
   auto blocked = GetBlockedFrames();
@@ -536,21 +734,16 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest, TestBackButton) {
   permission_creator()->SetPermissionResult(true);
   permission_creator()->DelayHandlingForNextRequests();
 
-  RequestPermissionFromFrame(blocked[0]);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked[0]);
 
-  std::string command =
-      "domAutomationController.send("
-      "(document.getElementById('back-button').hidden));";
+  std::string command = "document.getElementById('back-button').hidden;";
 
   auto* render_frame_host = tracker()->GetHost(blocked[0]);
   DCHECK(render_frame_host->IsRenderFrameLive());
-  bool value = false;
   auto target = content::ToRenderFrameHost(render_frame_host);
-  EXPECT_TRUE(content::ExecuteScriptWithoutUserGestureAndExtractBool(
-      target, command, &value));
-
   // Back button should be hidden in iframes.
-  EXPECT_TRUE(value);
+  EXPECT_EQ(true, content::EvalJs(target, command,
+                                  content::EXECUTE_SCRIPT_NO_USER_GESTURE));
 }
 
 IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
@@ -559,7 +752,8 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
 
   GURL allowed_url_with_iframes = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/with_iframes.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes);
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes));
   EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
 
   auto blocked = GetBlockedFrames();
@@ -568,21 +762,128 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
   permission_creator()->SetPermissionResult(true);
   permission_creator()->DelayHandlingForNextRequests();
 
-  RequestPermissionFromFrame(blocked[0]);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked[0]);
 
-  std::string command =
-      "domAutomationController.send("
-      "(document.getElementById('back-button').hidden));";
+  std::string command = "document.getElementById('back-button').hidden;";
   auto* render_frame_host = tracker()->GetHost(blocked[0]);
   DCHECK(render_frame_host->IsRenderFrameLive());
 
-  bool value = false;
   auto target = content::ToRenderFrameHost(render_frame_host);
-  EXPECT_TRUE(content::ExecuteScriptWithoutUserGestureAndExtractBool(
-      target, command, &value));
+  bool value =
+      content::EvalJs(target, command, content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+          .ExtractBool();
 
-  // Back button should not be hidden in main frame.
-  EXPECT_FALSE(value);
+  // Back button should be hidden only when local web approvals is enabled due
+  // to new UI for local web approvals.
+  EXPECT_EQ(value, IsLocalWebApprovalsEnabled());
+}
+
+// Tests that the trivial www-subdomain stripping is applied on the url
+// of the interstitial. Blocked urls without further conflicts will be
+// unblocked by a remote approval.
+IN_PROC_BROWSER_TEST_F(
+    SupervisedUserIframeFilterTest,
+    BlockedMainFrameFromClassifyUrlForUnstripedHostIsStrippedInRemoteApproval) {
+  // Classify url blocks the navigation to the target url.
+  // No matching blocklist entry exists for the host of the target url.
+  kids_management_api_mock().RestrictSubsequentClassifyUrl();
+  GURL blocked_url = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/simple.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  auto blocked = GetBlockedFrames();
+  EXPECT_EQ(blocked.size(), 1u);
+  content::FrameTreeNodeId blocked_frame_id = blocked[0];
+  GURL blocked_frame_url = GetBlockedFrameURL(blocked_frame_id);
+  EXPECT_TRUE(IsInterstitialBeingShownInFrame(blocked_frame_id));
+
+  // Request remote approval.
+  permission_creator()->SetPermissionResult(true);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frame_id);
+  EXPECT_EQ(permission_creator()->url_requests().size(), 1u);
+  std::string requested_host =
+      permission_creator()->url_requests()[0].GetHost();
+
+  // The trivial "www" subdomain is stripped for the url in the remote approval
+  // request.
+  EXPECT_EQ(requested_host, kStrippedExampleHost);
+
+#if !BUILDFLAG(IS_CHROMEOS)
+  // TODO(crbug.com/376229427): Unguard once flakiness removed.
+  WaitForNavigationFinished(blocked_frame_id, blocked_url);
+  // The unstriped url gets unblocked.
+  EXPECT_FALSE(IsInterstitialBeingShownInFrame(blocked_frame_id));
+#endif
+}
+
+// Tests that the url stripping is applied on the url on the interstitial, when
+// there is no unstriped host entry in the blocklist.
+IN_PROC_BROWSER_TEST_F(
+    SupervisedUserIframeFilterTest,
+    BlockedMainFrameFromBlockListIsStrippedInRemoteApproval) {
+  // Manual parental blocklist entry blocks the navigation to the target url.
+  BlockHost("*.example.*");
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  GURL blocked_url = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/simple.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  auto blocked = GetBlockedFrames();
+  EXPECT_EQ(blocked.size(), 1u);
+  content::FrameTreeNodeId blocked_frame_id = blocked[0];
+  GURL blocked_frame_url = GetBlockedFrameURL(blocked_frame_id);
+  EXPECT_TRUE(IsInterstitialBeingShownInFrame(blocked_frame_id));
+
+  // Request remote approval.
+  permission_creator()->SetPermissionResult(true);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frame_id);
+  EXPECT_EQ(permission_creator()->url_requests().size(), 1u);
+  std::string requested_host =
+      permission_creator()->url_requests()[0].GetHost();
+
+  // The trivial "www" subdomain has been stripped from the host in the
+  // interstitial, because the conflicting entry in the blocklist is not a
+  // www-subdomain conflict.
+  EXPECT_EQ(requested_host, kStrippedExampleHost);
+}
+
+// Tests that the url stripping is skipped on the url on the interstitial, when
+// there is a unstriped host entry in the blocklist. Blocked urls without
+// further conflicts will be unblocked by a remote approval.
+IN_PROC_BROWSER_TEST_F(
+    SupervisedUserIframeFilterTest,
+    BlockedMainFrameFromBlockListForUnstripedHostSkipsStrippingInRemoteApproval) {
+  // Manual parental blocklist entry for the unstriped url blocks the
+  // navigation to the target url.
+  BlockHost(kExampleHost);
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  GURL blocked_url = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/simple.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  auto blocked = GetBlockedFrames();
+  EXPECT_EQ(blocked.size(), 1u);
+  content::FrameTreeNodeId blocked_frame_id = blocked[0];
+  GURL blocked_frame_url = GetBlockedFrameURL(blocked_frame_id);
+  EXPECT_TRUE(IsInterstitialBeingShownInFrame(blocked_frame_id));
+
+  // Request remote approval.
+  permission_creator()->SetPermissionResult(true);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frame_id);
+  EXPECT_EQ(permission_creator()->url_requests().size(), 1u);
+  std::string requested_host =
+      permission_creator()->url_requests()[0].GetHost();
+
+  // The stripping has been skipped for the url of the interstitial, because an
+  // identical entry exists in the blocklist. The interstitial contains the full
+  // url.
+  EXPECT_EQ(requested_host, kExampleHost);
+  // The navigation gets unblocked.
+  WaitForNavigationFinished(blocked_frame_id, blocked_frame_url);
+  EXPECT_FALSE(IsInterstitialBeingShownInFrame(blocked_frame_id));
 }
 
 IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
@@ -592,11 +893,14 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
 
   GURL allowed_url_with_iframes = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/with_iframes.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes);
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
   auto blocked = GetBlockedFrames();
   EXPECT_EQ(blocked.size(), 1u);
-  EXPECT_EQ(kIframeHost1, GetBlockedFrameURL(blocked[0]).host());
+  EXPECT_EQ(kIframeHost1, GetBlockedFrameURL(blocked[0]).GetHost());
 }
 
 IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
@@ -604,37 +908,45 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
   BlockHost(kExampleHost);
 
   GURL blocked_url = embedded_test_server()->GetURL(
-      kExampleHost, "/supervised_user/with_frames.html");
-  ui_test_utils::NavigateToURL(browser(), blocked_url);
+      kExampleHost, "/supervised_user/with_iframes.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
   EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
 
   auto blocked_frames = GetBlockedFrames();
   EXPECT_EQ(blocked_frames.size(), 1u);
 
-  // Expect that request permission button is shown.
-  EXPECT_TRUE(IsAskPermissionButtonBeingShown(blocked_frames[0]));
+  // Expect that remote approvals button is shown.
+  EXPECT_TRUE(IsRemoteApprovalsButtonBeingShown(blocked_frames[0]));
+  // Expect that the local approvals button is shown if the flag is enabled.
+  EXPECT_EQ(IsLocalWebApprovalsEnabled(),
+            IsLocalApprovalsButtonBeingShown(blocked_frames[0]));
 
   // Delay approval/denial by parent.
   permission_creator()->SetPermissionResult(true);
   permission_creator()->DelayHandlingForNextRequests();
 
   // Request permission.
-  RequestPermissionFromFrame(blocked_frames[0]);
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frames[0]);
 
   // Navigate to another allowed url.
   GURL allowed_url = embedded_test_server()->GetURL(
-      kExampleHost2, "/supervised_user/with_frames.html");
-  ui_test_utils::NavigateToURL(browser(), allowed_url);
+      kExampleHost2, "/supervised_user/with_iframes.html");
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), allowed_url));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 
-  ui_test_utils::NavigateToURL(browser(), blocked_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
   EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
 
   // Navigate back to the blocked url.
   EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
 
   // Error page is being shown, but "Ask Permission" button is not being shown.
-  EXPECT_FALSE(IsAskPermissionButtonBeingShown(blocked_frames[0]));
+  EXPECT_FALSE(IsRemoteApprovalsButtonBeingShown(blocked_frames[0]));
+  // Expect that the local approvals instead button is shown on the page if the
+  // flag is enabled.
+  EXPECT_EQ(IsLocalWebApprovalsEnabled(),
+            IsLocalApprovalsInsteadButtonBeingShown(blocked_frames[0]));
 
   content::WebContents* active_contents =
       browser()->tab_strip_model()->GetActiveWebContents();
@@ -642,71 +954,430 @@ IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
       SupervisedUserNavigationObserver::FromWebContents(active_contents);
   ASSERT_NE(navigation_observer, nullptr);
 
-  EXPECT_TRUE(base::Contains(navigation_observer->requested_hosts_for_test(),
-                             kExampleHost));
+  EXPECT_TRUE(
+      navigation_observer->requested_hosts_for_test().contains(kExampleHost));
 
   NavigationFinishedWaiter waiter(
-      active_contents, active_contents->GetMainFrame()->GetFrameTreeNodeId(),
+      active_contents,
+      active_contents->GetPrimaryMainFrame()->GetFrameTreeNodeId(),
       blocked_url);
   permission_creator()->HandleDelayedRequests();
   waiter.Wait();
 
-  EXPECT_FALSE(base::Contains(navigation_observer->requested_hosts_for_test(),
-                              kExampleHost));
+  EXPECT_FALSE(
+      navigation_observer->requested_hosts_for_test().contains(kExampleHost));
 
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 }
 
 IN_PROC_BROWSER_TEST_F(SupervisedUserIframeFilterTest,
-                       IframesWithSameDomainAsMainFrameAllowed) {
-  SupervisedUserService* service =
-      SupervisedUserServiceFactory::GetForProfile(browser()->profile());
-  SupervisedUserURLFilter* filter = service->GetURLFilter();
-
-  // Set the default behavior to block.
-  filter->SetDefaultFilteringBehavior(SupervisedUserURLFilter::BLOCK);
-
-  // The async checker will make rpc calls to check if the url should be
-  // blocked or not. This may cause flakiness.
-  filter->ClearAsyncURLChecker();
+                       IFramesWithSameDomainAsMainFrameAllowed) {
+  supervised_user_test_util::SetWebFilterType(
+      browser()->profile(), supervised_user::WebFilterType::kCertainSites);
 
   base::RunLoop().RunUntilIdle();
 
   // Allows |www.example.com|.
-  AllowlistHost(kExampleHost);
+  AllowlistHost("*.example.*");
 
   // |with_frames_same_domain.html| contains subframes with "a.example.com" and
   // "b.example.com", and "c.example2.com" urls.
   GURL allowed_url = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/with_iframes_same_domain.html");
 
-  ui_test_utils::NavigateToURL(browser(), allowed_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), allowed_url));
   EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
 
   auto blocked_frames = GetBlockedFrames();
   EXPECT_EQ(blocked_frames.size(), 1u);
-  EXPECT_EQ(GetBlockedFrameURL(blocked_frames[0]).host(), "www.c.example2.com");
+  EXPECT_EQ(GetBlockedFrameURL(blocked_frames[0]).GetHost(),
+            "www.c.example2.com");
 }
 
-class SupervisedUserNavigationThrottleNotSupervisedTest
-    : public SupervisedUserNavigationThrottleTest {
+// The switches::kHostWindowBounds commandline flag doesn't appear to work
+// for tests on other platforms.
+// TODO(b/300426225): enable these tests on Linux/Mac/Windows.
+#if BUILDFLAG(IS_CHROMEOS)
+class SupervisedUserNarrowWidthIframeFilterTest
+    : public SupervisedUserIframeFilterTest {
  protected:
-  SupervisedUserNavigationThrottleNotSupervisedTest() = default;
-  ~SupervisedUserNavigationThrottleNotSupervisedTest() override = default;
+  SupervisedUserNarrowWidthIframeFilterTest() = default;
+  ~SupervisedUserNarrowWidthIframeFilterTest() override = default;
 
-  chromeos::LoggedInUserMixin::LogInType GetLogInType() override {
-    return chromeos::LoggedInUserMixin::LogInType::kRegular;
-  }
+  void SetUp() override;
 };
 
-IN_PROC_BROWSER_TEST_F(SupervisedUserNavigationThrottleNotSupervisedTest,
-                       DontBlock) {
+void SupervisedUserNarrowWidthIframeFilterTest::SetUp() {
+  base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
+      ::switches::kHostWindowBounds, "0+0-400x800");
+  SupervisedUserIframeFilterTest::SetUp();
+}
+
+IN_PROC_BROWSER_TEST_F(SupervisedUserNarrowWidthIframeFilterTest,
+                       NarrowWidthWindow) {
+  BlockHost(kExampleHost);
+
+  GURL blocked_url = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/with_iframes.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  auto blocked_frames = GetBlockedFrames();
+  EXPECT_EQ(blocked_frames.size(), 1u);
+
+  // Expect that remote approvals button is shown.
+  EXPECT_TRUE(IsRemoteApprovalsButtonBeingShown(blocked_frames[0]));
+  // Expect that the local approvals button is shown if the flag is enabled.
+  EXPECT_EQ(IsLocalWebApprovalsEnabled(),
+            IsLocalApprovalsButtonBeingShown(blocked_frames[0]));
+  // Expect that the "Details" link is no longer available for the new
+  // interstitial UI.
+  EXPECT_FALSE(IsDetailsLinkAvailable(blocked_frames[0]));
+
+  // Delay approval/denial by parent.
+  permission_creator()->SetPermissionResult(true);
+  permission_creator()->DelayHandlingForNextRequests();
+
+  // Request permission.
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frames[0]);
+
+  // Navigate to another allowed url.
+  GURL allowed_url = embedded_test_server()->GetURL(
+      kExampleHost2, "/supervised_user/with_iframes.html");
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), allowed_url));
+  EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  // Navigate back to the blocked url.
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  // Error page is being shown, but "Ask Permission" button is not being shown.
+  EXPECT_FALSE(IsRemoteApprovalsButtonBeingShown(blocked_frames[0]));
+  // Expect that the local approvals instead button is shown on the page if the
+  // flag is enabled.
+  EXPECT_EQ(IsLocalWebApprovalsEnabled(),
+            IsLocalApprovalsInsteadButtonBeingShown(blocked_frames[0]));
+
+  content::WebContents* active_contents =
+      browser()->tab_strip_model()->GetActiveWebContents();
+  SupervisedUserNavigationObserver* navigation_observer =
+      SupervisedUserNavigationObserver::FromWebContents(active_contents);
+  ASSERT_NE(navigation_observer, nullptr);
+
+  EXPECT_TRUE(
+      navigation_observer->requested_hosts_for_test().contains(kExampleHost));
+
+  NavigationFinishedWaiter waiter(
+      active_contents,
+      active_contents->GetPrimaryMainFrame()->GetFrameTreeNodeId(),
+      blocked_url);
+  permission_creator()->HandleDelayedRequests();
+  waiter.Wait();
+
+  EXPECT_FALSE(
+      navigation_observer->requested_hosts_for_test().contains(kExampleHost));
+
+  EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
+}
+
+// Tests Chrome OS local web approvals flow.
+using ChromeOSLocalWebApprovalsTest = SupervisedUserIframeFilterTest;
+
+IN_PROC_BROWSER_TEST_F(ChromeOSLocalWebApprovalsTest,
+                       StartLocalWebApprovalsFromMainFrame) {
+  base::HistogramTester histogram_tester;
   BlockHost(kExampleHost);
 
   GURL blocked_url = embedded_test_server()->GetURL(
       kExampleHost, "/supervised_user/simple.html");
-  ui_test_utils::NavigateToURL(browser(), blocked_url);
-  // Even though the URL is marked as blocked, the load should go through, since
-  // the user isn't supervised.
-  EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  const std::vector<content::FrameTreeNodeId> blocked_frames =
+      GetBlockedFrames();
+  ASSERT_EQ(blocked_frames.size(), 1u);
+  const content::FrameTreeNodeId blocked_frame = blocked_frames[0];
+  EXPECT_TRUE(IsLocalApprovalsButtonBeingShown(blocked_frame));
+  EXPECT_TRUE(IsRemoteApprovalsButtonBeingShown(blocked_frame));
+  CheckPreferredApprovalButton(blocked_frame);
+
+  // Trigger local approval flow - native dialog should appear.
+  SendCommandToFrame(kLocalUrlAccessCommand, blocked_frame);
+  EXPECT_TRUE(ash::ParentAccessDialog::GetInstance());
+
+  // Close the flow without approval - interstitial should be still shown.
+  ui::test::EventGenerator generator(ash::Shell::Get()->GetPrimaryRootWindow());
+  generator.PressKey(ui::VKEY_ESCAPE, ui::EF_NONE);
+
+  EXPECT_FALSE(ash::ParentAccessDialog::GetInstance());
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+  EXPECT_TRUE(IsLocalApprovalsButtonBeingShown(blocked_frame));
+  EXPECT_TRUE(IsRemoteApprovalsButtonBeingShown(blocked_frame));
+  CheckPreferredApprovalButton(blocked_frame);
+
+  histogram_tester.ExpectUniqueSample(
+      supervised_user::SupervisedUserInterstitial::
+          kInterstitialCommandHistogramName,
+      supervised_user::SupervisedUserInterstitial::Commands::
+          LOCAL_ACCESS_REQUEST,
+      1);
+  histogram_tester.ExpectUniqueSample(
+      supervised_user::SupervisedUserInterstitial::
+          kInterstitialPermissionSourceHistogramName,
+      supervised_user::SupervisedUserInterstitial::RequestPermissionSource::
+          MAIN_FRAME,
+      1);
 }
+
+IN_PROC_BROWSER_TEST_F(ChromeOSLocalWebApprovalsTest,
+                       StartLocalWebApprovalsFromIframe) {
+  base::HistogramTester histogram_tester;
+  BlockHost(kIframeHost1);
+
+  const GURL allowed_url_with_iframes = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/with_iframes.html");
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(browser(), allowed_url_with_iframes));
+  EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  const std::vector<content::FrameTreeNodeId> blocked_frames =
+      GetBlockedFrames();
+  ASSERT_EQ(blocked_frames.size(), 1u);
+  const content::FrameTreeNodeId blocked_frame = blocked_frames[0];
+  EXPECT_TRUE(IsInterstitialBeingShownInFrame(blocked_frame));
+  EXPECT_TRUE(IsLocalApprovalsButtonBeingShown(blocked_frame));
+  EXPECT_TRUE(IsRemoteApprovalsButtonBeingShown(blocked_frame));
+  CheckPreferredApprovalButton(blocked_frame);
+
+  // Trigger local approval flow - native dialog should appear.
+  SendCommandToFrame(kLocalUrlAccessCommand, blocked_frame);
+  EXPECT_TRUE(ash::ParentAccessDialog::GetInstance());
+
+  // Close the flow without approval - interstitial should be still shown.
+  ui::test::EventGenerator generator(ash::Shell::Get()->GetPrimaryRootWindow());
+  generator.PressKey(ui::VKEY_ESCAPE, ui::EF_NONE);
+
+  EXPECT_FALSE(ash::ParentAccessDialog::GetInstance());
+  EXPECT_FALSE(IsInterstitialBeingShownInMainFrame(browser()));
+  EXPECT_TRUE(IsInterstitialBeingShownInFrame(blocked_frame));
+  EXPECT_TRUE(IsLocalApprovalsButtonBeingShown(blocked_frame));
+  EXPECT_TRUE(IsRemoteApprovalsButtonBeingShown(blocked_frame));
+  CheckPreferredApprovalButton(blocked_frame);
+
+  histogram_tester.ExpectUniqueSample(
+      supervised_user::SupervisedUserInterstitial::
+          kInterstitialCommandHistogramName,
+      supervised_user::SupervisedUserInterstitial::Commands::
+          LOCAL_ACCESS_REQUEST,
+      1);
+  histogram_tester.ExpectUniqueSample(
+      supervised_user::SupervisedUserInterstitial::
+          kInterstitialPermissionSourceHistogramName,
+      supervised_user::SupervisedUserInterstitial::RequestPermissionSource::
+          SUB_FRAME,
+      1);
+}
+
+IN_PROC_BROWSER_TEST_F(ChromeOSLocalWebApprovalsTest,
+                       UpdateUIAfterRemoteRequestSent) {
+  BlockHost(kExampleHost);
+
+  GURL blocked_url = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/simple.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+
+  const std::vector<content::FrameTreeNodeId> blocked_frames =
+      GetBlockedFrames();
+  ASSERT_EQ(blocked_frames.size(), 1u);
+  const content::FrameTreeNodeId blocked_frame = blocked_frames[0];
+  EXPECT_TRUE(IsLocalApprovalsButtonBeingShown(blocked_frame));
+  EXPECT_TRUE(IsRemoteApprovalsButtonBeingShown(blocked_frame));
+
+  // Trigger remote approval flow - ui should change.
+  SendCommandToFrame(kRemoteUrlAccessCommand, blocked_frame);
+
+  EXPECT_TRUE(IsInterstitialBeingShownInMainFrame(browser()));
+  EXPECT_FALSE(IsLocalApprovalsButtonBeingShown(blocked_frame));
+  EXPECT_FALSE(IsRemoteApprovalsButtonBeingShown(blocked_frame));
+  EXPECT_TRUE(IsLocalApprovalsInsteadButtonBeingShown(blocked_frame));
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+class SupervisedUserNavigationThrottleOnlyEnabledForSupervisedUsers
+    : public SupervisedUserNavigationThrottleTestBase,
+      public testing::WithParamInterface<
+          supervised_user::SupervisionMixin::SignInMode> {
+ protected:
+  static supervised_user::SupervisionMixin::SignInMode GetSignInMode() {
+    return GetParam();
+  }
+  SupervisedUserNavigationThrottleOnlyEnabledForSupervisedUsers()
+      : SupervisedUserNavigationThrottleTestBase(GetSignInMode()) {}
+  ~SupervisedUserNavigationThrottleOnlyEnabledForSupervisedUsers() override =
+      default;
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    ,
+    SupervisedUserNavigationThrottleOnlyEnabledForSupervisedUsers,
+
+    testing::Values(supervised_user::SupervisionMixin::SignInMode::kRegular,
+                    supervised_user::SupervisionMixin::SignInMode::kSupervised),
+    [](const testing::TestParamInfo<
+        supervised_user::SupervisionMixin::SignInMode>& info) {
+      return base::StrCat({"WithSignInMode", SignInModeAsString(info.param)});
+    });
+
+IN_PROC_BROWSER_TEST_P(
+    SupervisedUserNavigationThrottleOnlyEnabledForSupervisedUsers,
+    CheckAgainstBlocklist) {
+  BlockHost(kExampleHost2);
+
+  // Classify url is never called - if ever, a static blocklist should be used.
+  EXPECT_CALL(kids_management_api_mock().classify_url_mock(),
+              ClassifyUrl(::testing::_))
+      .Times(0);
+
+  GURL blocked_url = embedded_test_server()->GetURL(
+      kExampleHost2, "/supervised_user/simple.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), blocked_url));
+
+  // Only supervised users should experience the interstitial
+  EXPECT_EQ(IsInterstitialBeingShownInMainFrame(browser()),
+            GetSignInMode() ==
+                supervised_user::SupervisionMixin::SignInMode::kSupervised);
+}
+
+IN_PROC_BROWSER_TEST_P(
+    SupervisedUserNavigationThrottleOnlyEnabledForSupervisedUsers,
+    CheckAgainstClassifyUrlRPC) {
+  kids_management_api_mock().RestrictSubsequentClassifyUrl();
+  GURL url = embedded_test_server()->GetURL(kExampleHost2,
+                                            "/supervised_user/simple.html");
+
+  // Only supervised users should call the backend
+  if (GetSignInMode() ==
+      supervised_user::SupervisionMixin::SignInMode::kSupervised) {
+    EXPECT_CALL(kids_management_api_mock().classify_url_mock(),
+                ClassifyUrl(supervised_user::Classifies(url)))
+        .Times(1);
+  } else {
+    EXPECT_CALL(kids_management_api_mock().classify_url_mock(),
+                ClassifyUrl(::testing::_))
+        .Times(0);
+  }
+
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  // Only supervised users should experience the
+  // interstitial
+  EXPECT_EQ(IsInterstitialBeingShownInMainFrame(browser()),
+            GetSignInMode() ==
+                supervised_user::SupervisionMixin::SignInMode::kSupervised);
+}
+
+IN_PROC_BROWSER_TEST_P(
+    SupervisedUserNavigationThrottleOnlyEnabledForSupervisedUsers,
+    CheckSameDocumentNavigationAgainstClassifyUrlRPC) {
+  kids_management_api_mock().RestrictSubsequentClassifyUrl();
+  GURL url = embedded_test_server()->GetURL(kExampleHost2,
+                                            "/supervised_user/simple.html");
+
+  // Only supervised users should call the backend
+  if (GetSignInMode() ==
+      supervised_user::SupervisionMixin::SignInMode::kSupervised) {
+    EXPECT_CALL(kids_management_api_mock().classify_url_mock(),
+                ClassifyUrl(supervised_user::Classifies(url)))
+        .Times(1);
+  } else {
+    EXPECT_CALL(kids_management_api_mock().classify_url_mock(),
+                ClassifyUrl(::testing::_))
+        .Times(0);
+  }
+
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  // Only supervised users should experience the
+  // interstitial
+  EXPECT_EQ(IsInterstitialBeingShownInMainFrame(browser()),
+            GetSignInMode() ==
+                supervised_user::SupervisionMixin::SignInMode::kSupervised);
+
+  // Simulate a same document navigation by navigating to #test.
+  GURL::Replacements replace_ref;
+  replace_ref.SetRefStr("test");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
+                                           url.ReplaceComponents(replace_ref)));
+
+  // Only supervised users should experience the
+  // interstitial
+  EXPECT_EQ(IsInterstitialBeingShownInMainFrame(browser()),
+            GetSignInMode() ==
+                supervised_user::SupervisionMixin::SignInMode::kSupervised);
+}
+
+class SupervisedUserNavigationThrottleFencedFramesTest
+    : public SupervisedUserNavigationThrottleTestBase {
+ public:
+  SupervisedUserNavigationThrottleFencedFramesTest()
+      : SupervisedUserNavigationThrottleTestBase(
+            supervised_user::SupervisionMixin::SignInMode::kSupervised) {}
+  ~SupervisedUserNavigationThrottleFencedFramesTest() override = default;
+  SupervisedUserNavigationThrottleFencedFramesTest(
+      const SupervisedUserNavigationThrottleFencedFramesTest&) = delete;
+
+  SupervisedUserNavigationThrottleFencedFramesTest& operator=(
+      const SupervisedUserNavigationThrottleFencedFramesTest&) = delete;
+
+  content::test::FencedFrameTestHelper& fenced_frame_test_helper() {
+    return fenced_frame_helper_;
+  }
+
+ private:
+  content::test::FencedFrameTestHelper fenced_frame_helper_;
+};
+
+IN_PROC_BROWSER_TEST_F(SupervisedUserNavigationThrottleFencedFramesTest,
+                       BlockFencedFrame) {
+  BlockHost(kIframeHost2);
+  const GURL kInitialUrl = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/simple.html");
+
+  kids_management_api_mock().AllowSubsequentClassifyUrl();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kInitialUrl));
+
+  // Same origin fenced frame is not blocked, and therefore must be allowed.
+  const GURL kSameOriginFencedFrameUrl = embedded_test_server()->GetURL(
+      kExampleHost, "/supervised_user/fenced_frame.html");
+  content::RenderFrameHost* rfh_same_origin =
+      fenced_frame_test_helper().CreateFencedFrame(
+          web_contents()->GetPrimaryMainFrame(), kSameOriginFencedFrameUrl);
+  EXPECT_TRUE(rfh_same_origin);
+
+  // Host1 is not blocked, and therefore must be allowed.
+  const GURL kHost1FencedFrameUrl = embedded_test_server()->GetURL(
+      kIframeHost1, "/supervised_user/fenced_frame.html");
+  content::RenderFrameHost* rfh_host1 =
+      fenced_frame_test_helper().CreateFencedFrame(
+          web_contents()->GetPrimaryMainFrame(), kHost1FencedFrameUrl);
+  EXPECT_TRUE(rfh_host1);
+
+  // Host2 is blocked, and therefore should result in a interstitial being
+  // shown, which is validated by the expectation of net::Error::ERR_FAILED.
+  const GURL kHost2FencedFrameUrl = embedded_test_server()->GetURL(
+      kIframeHost2, "/supervised_user/fenced_frame.html");
+  content::RenderFrameHost* rfh_host2 =
+      fenced_frame_test_helper().CreateFencedFrame(
+          web_contents()->GetPrimaryMainFrame(), kHost2FencedFrameUrl,
+          net::Error::ERR_FAILED);
+  EXPECT_TRUE(rfh_host2);
+}
+
+}  // namespace

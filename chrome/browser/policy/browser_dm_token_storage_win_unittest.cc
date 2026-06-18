@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 
 #include <tuple>
 
-#include "base/macros.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/test_reg_util_win.h"
 #include "base/win/registry.h"
@@ -31,8 +30,8 @@ constexpr char kDMToken2[] = "fake-dm-token-2";
 
 class BrowserDMTokenStorageWinTest : public testing::Test {
  protected:
-  BrowserDMTokenStorageWinTest() {}
-  ~BrowserDMTokenStorageWinTest() override {}
+  BrowserDMTokenStorageWinTest() = default;
+  ~BrowserDMTokenStorageWinTest() override = default;
 
   void SetUp() override {
     ASSERT_NO_FATAL_FAILURE(
@@ -74,7 +73,7 @@ class BrowserDMTokenStorageWinTest : public testing::Test {
   bool SetDMToken(const std::string& dm_token,
                   InstallUtil::BrowserLocation browser_location) {
     base::win::RegKey key;
-    base::string16 dm_token_value_name;
+    std::wstring dm_token_value_name;
     std::tie(key, dm_token_value_name) =
         InstallUtil::GetCloudManagementDmTokenLocation(
             InstallUtil::ReadOnly(false), browser_location);

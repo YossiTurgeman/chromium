@@ -1,28 +1,28 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/gamepad/gamepad_shared_memory_reader.h"
 
+#include "base/compiler_specific.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/trace_event.h"
 #include "device/gamepad/public/cpp/gamepads.h"
 #include "device/gamepad/public/mojom/gamepad_hardware_buffer.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
-#include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/modules/gamepad/gamepad_listener.h"
 
 namespace blink {
 
-GamepadSharedMemoryReader::GamepadSharedMemoryReader(LocalFrame& frame)
-    : receiver_(this, frame.DomWindow()),
-      gamepad_monitor_remote_(frame.DomWindow()) {
+GamepadSharedMemoryReader::GamepadSharedMemoryReader(LocalDOMWindow& window)
+    : receiver_(this, &window), gamepad_monitor_remote_(&window) {
   // See https://bit.ly/2S0zRAS for task types
   scoped_refptr<base::SingleThreadTaskRunner> task_runner =
-      frame.GetTaskRunner(TaskType::kMiscPlatformAPI);
-  frame.GetBrowserInterfaceBroker().GetInterface(
+      window.GetTaskRunner(TaskType::kMiscPlatformAPI);
+  window.GetBrowserInterfaceBroker().GetInterface(
       gamepad_monitor_remote_.BindNewPipeAndPassReceiver(task_runner));
   gamepad_monitor_remote_->SetObserver(
       receiver_.BindNewPipeAndPassRemote(task_runner));
@@ -62,10 +62,9 @@ void GamepadSharedMemoryReader::Start(blink::GamepadListener* listener) {
 
   renderer_shared_buffer_mapping_ = renderer_shared_buffer_region_.Map();
   CHECK(renderer_shared_buffer_mapping_.IsValid());
-  const void* memory = renderer_shared_buffer_mapping_.memory();
-  CHECK(memory);
-  gamepad_hardware_buffer_ =
-      static_cast<const device::GamepadHardwareBuffer*>(memory);
+  gamepad_hardware_buffer_ = renderer_shared_buffer_mapping_
+                                 .GetMemoryAs<device::GamepadHardwareBuffer>();
+  CHECK(gamepad_hardware_buffer_);
 }
 
 void GamepadSharedMemoryReader::Stop() {
@@ -103,7 +102,8 @@ void GamepadSharedMemoryReader::SampleGamepads(device::Gamepads* gamepads) {
   base::subtle::Atomic32 version;
   do {
     version = gamepad_hardware_buffer_->seqlock.ReadBegin();
-    memcpy(&read_into, &gamepad_hardware_buffer_->data, sizeof(read_into));
+    UNSAFE_TODO(
+        memcpy(&read_into, &gamepad_hardware_buffer_->data, sizeof(read_into)));
     ++contention_count;
     if (contention_count == kMaximumContentionCount)
       break;
@@ -118,7 +118,7 @@ void GamepadSharedMemoryReader::SampleGamepads(device::Gamepads* gamepads) {
   }
 
   // New data was read successfully, copy it into the output buffer.
-  memcpy(gamepads, &read_into, sizeof(*gamepads));
+  UNSAFE_TODO(memcpy(gamepads, &read_into, sizeof(*gamepads)));
 
   if (!ever_interacted_with_) {
     // Clear the connected flag if the user hasn't interacted with any of the
@@ -153,11 +153,12 @@ void GamepadSharedMemoryReader::GamepadDisconnected(
     listener_->DidDisconnectGamepad(index, gamepad);
 }
 
-void GamepadSharedMemoryReader::GamepadButtonOrAxisChanged(
+void GamepadSharedMemoryReader::GamepadRawInputChanged(
     uint32_t index,
     const device::Gamepad& gamepad) {
-  if (listener_)
-    listener_->ButtonOrAxisDidChange(index, gamepad);
+  if (listener_) {
+    listener_->DidChangeGamepadRawInput(index, gamepad);
+  }
 }
 
 }  // namespace blink

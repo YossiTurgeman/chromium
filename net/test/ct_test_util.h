@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
-#include "base/memory/ref_counted.h"
+#include "base/containers/span.h"
+#include "base/memory/scoped_refptr.h"
 #include "net/cert/signed_certificate_timestamp.h"
 #include "net/cert/signed_certificate_timestamp_and_status.h"
+#include "net/cert/signed_tree_head.h"
 
-namespace net {
-
-namespace ct {
+namespace net::ct {
 
 struct DigitallySigned;
 struct MerkleTreeLeaf;
@@ -88,7 +89,7 @@ bool GetSampleEmptySignedTreeHead(SignedTreeHead* sth);
 bool GetBadEmptySignedTreeHead(SignedTreeHead* sth);
 
 // The SHA256 root hash for the sample STH.
-std::string GetSampleSTHSHA256RootHash();
+const std::array<uint8_t, kSthRootHashLength>& GetSampleSTHSHA256RootHash();
 
 // The tree head signature for the sample STH.
 std::string GetSampleSTHTreeHeadSignature();
@@ -101,10 +102,11 @@ std::string GetSampleSTHAsJson();
 
 // Assembles, and returns, a sample STH in JSON format using
 // the provided parameters.
-std::string CreateSignedTreeHeadJsonString(size_t tree_size,
-                                           int64_t timestamp,
-                                           std::string sha256_root_hash,
-                                           std::string tree_head_signature);
+std::string CreateSignedTreeHeadJsonString(
+    size_t tree_size,
+    int64_t timestamp,
+    base::span<const uint8_t> sha256_root_hash,
+    std::string_view tree_head_signature);
 
 // Assembles, and returns, a sample consistency proof in JSON format using
 // the provided raw nodes (i.e. the raw nodes will be base64-encoded).
@@ -128,8 +130,6 @@ bool CheckForSingleVerifiedSCTInResult(
 bool CheckForSCTOrigin(const SignedCertificateTimestampAndStatusList& scts,
                        SignedCertificateTimestamp::Origin origin);
 
-}  // namespace ct
-
-}  // namespace net
+}  // namespace net::ct
 
 #endif  // NET_TEST_CT_TEST_UTIL_H_

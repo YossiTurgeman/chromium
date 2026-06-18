@@ -25,16 +25,15 @@
 
 #include <memory>
 
-#include "base/macros.h"
 #include "base/memory/ptr_util.h"
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/html/parser/html_meta_charset_parser.h"
+#include "third_party/blink/renderer/platform/loader/fetch/body_text_decoder.h"
 #include "third_party/blink/renderer/platform/loader/fetch/text_resource_decoder_options.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
 
 namespace blink {
-
-class HTMLMetaCharsetParser;
 
 // Implements https://encoding.spec.whatwg.org/#decode or
 // https://encoding.spec.whatwg.org/#utf-8-decode when an appropriate
@@ -42,11 +41,15 @@ class HTMLMetaCharsetParser;
 // See comments in text_resource_decoder_options.h.
 //
 // To construct a string from known-UTF-8 data without BOM, please use
-// WTF::String::FromUTF8 instead.
-class CORE_EXPORT TextResourceDecoder {
+// blink::String::FromUtf8 instead.
+// TODO(crbug.com/1373623): Move this to blink/renderer/platform and remove
+// BodyTextDecoder.
+class CORE_EXPORT TextResourceDecoder : public BodyTextDecoder {
   USING_FAST_MALLOC(TextResourceDecoder);
 
  public:
+  using MetaCharsetDisposition = HTMLMetaCharsetParser::MetaCharsetDisposition;
+
   enum EncodingSource {
     kDefaultEncoding,
     kAutoDetectedEncoding,
@@ -59,34 +62,50 @@ class CORE_EXPORT TextResourceDecoder {
   };
 
   explicit TextResourceDecoder(const TextResourceDecoderOptions&);
-  ~TextResourceDecoder();
+  TextResourceDecoder(const TextResourceDecoder&) = delete;
+  TextResourceDecoder& operator=(const TextResourceDecoder&) = delete;
+  ~TextResourceDecoder() override;
 
-  void SetEncoding(const WTF::TextEncoding&, EncodingSource);
-  const WTF::TextEncoding& Encoding() const { return encoding_; }
+  void SetEncoding(const TextEncoding&, EncodingSource);
+  const TextEncoding& Encoding() const { return encoding_; }
   bool EncodingWasDetectedHeuristically() const {
     return source_ == kAutoDetectedEncoding ||
            source_ == kEncodingFromContentSniffing;
   }
 
-  String Decode(const char* data, size_t length);
-  String Flush();
+  String Decode(base::span<const char> data,
+                String* auto_detected_charset) override;
+  String Decode(base::span<const char> data) { return Decode(data, nullptr); }
+  String Decode(base::span<const uint8_t> data,
+                String* auto_detected_charset = nullptr) {
+    return Decode(base::as_chars(data), auto_detected_charset);
+  }
+  String Flush() override;
+  WebEncodingData GetEncodingData() const override;
 
   bool SawError() const { return saw_error_; }
-  wtf_size_t CheckForBOM(const char*, wtf_size_t);
+  MetaCharsetDisposition GetMetaCharsetDisposition() const {
+    return meta_charset_disposition_;
+  }
+  wtf_size_t CheckForBOM(base::span<const char>);
 
  private:
-  static const WTF::TextEncoding& DefaultEncoding(
+  static const TextEncoding& DefaultEncoding(
       TextResourceDecoderOptions::ContentType,
-      const WTF::TextEncoding& default_encoding);
+      const TextEncoding& default_encoding);
 
-  bool CheckForCSSCharset(const char*, wtf_size_t, bool& moved_data_to_buffer);
-  bool CheckForXMLCharset(const char*, wtf_size_t, bool& moved_data_to_buffer);
-  void CheckForMetaCharset(const char*, wtf_size_t);
-  void AutoDetectEncodingIfAllowed(const char* data, wtf_size_t len);
+  void AddToBuffer(base::span<const char> data);
+  void AddToBufferIfEmpty(base::span<const char> data);
+  bool CheckForCSSCharset(base::span<const char>);
+  bool CheckForXMLCharset(base::span<const char>);
+  void CheckForMetaCharset(base::span<const char>);
+  void FinalizeMetaCharsetCheck();
+  void AutoDetectEncodingIfAllowed(base::span<const char> data,
+                                   String* auto_detected_charset = nullptr);
 
   const TextResourceDecoderOptions options_;
 
-  WTF::TextEncoding encoding_;
+  TextEncoding encoding_;
   std::unique_ptr<TextCodec> codec_;
   EncodingSource source_;
   Vector<char> buffer_;
@@ -97,11 +116,11 @@ class CORE_EXPORT TextResourceDecoder {
   bool saw_error_;
   bool detection_completed_;
 
+  MetaCharsetDisposition meta_charset_disposition_ =
+      MetaCharsetDisposition::kUnknown;
   std::unique_ptr<HTMLMetaCharsetParser> charset_parser_;
-
-  DISALLOW_COPY_AND_ASSIGN(TextResourceDecoder);
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_TEXT_RESOURCE_DECODER_H_

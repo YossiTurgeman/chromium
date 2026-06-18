@@ -1,26 +1,31 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/html/media/autoplay_policy.h"
 
 #include "build/build_config.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
 #include "third_party/blink/public/mojom/autoplay/autoplay.mojom-blink.h"
-#include "third_party/blink/public/mojom/feature_policy/feature_policy.mojom-blink.h"
+#include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
+#include "third_party/blink/public/mojom/webpreferences/web_preferences.mojom-blink.h"
 #include "third_party/blink/public/platform/web_media_player.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_local_frame_client.h"
 #include "third_party/blink/public/web/web_settings.h"
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/html/media/autoplay_uma_helper.h"
 #include "third_party/blink/renderer/core/html/media/html_media_element.h"
+#include "third_party/blink/renderer/core/html/media/html_video_element.h"
 #include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/core/intersection_observer/intersection_observer.h"
 #include "third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h"
 #include "third_party/blink/renderer/core/page/page.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/network/network_state_notifier.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/assertions.h"
@@ -54,7 +59,6 @@ bool ComputeLockPendingUserGestureRequired(const Document& document) {
   }
 
   NOTREACHED();
-  return true;
 }
 
 }  // anonymous namespace
@@ -66,9 +70,6 @@ AutoplayPolicy::Type AutoplayPolicy::GetAutoplayPolicyForDocument(
     return Type::kNoUserGestureRequired;
 
   if (document.IsInWebAppScope())
-    return Type::kNoUserGestureRequired;
-
-  if (DocumentHasUserExceptionFlag(document))
     return Type::kNoUserGestureRequired;
 
   if (document.GetSettings()->GetPresentationReceiver())
@@ -85,12 +86,16 @@ bool AutoplayPolicy::IsDocumentAllowedToPlay(const Document& document) {
   if (DocumentIsCapturingUserMedia(document))
     return true;
 
+  if (DocumentHasUserExceptionFlag(document)) {
+    return true;
+  }
+
   if (!document.GetFrame())
     return false;
 
-  bool feature_policy_enabled =
+  bool permissions_policy_enabled =
       document.GetExecutionContext()->IsFeatureEnabled(
-          mojom::blink::FeaturePolicyFeature::kAutoplay);
+          network::mojom::PermissionsPolicyFeature::kAutoplay);
 
   for (Frame* frame = document.GetFrame(); frame;
        frame = frame->Tree().Parent()) {
@@ -101,11 +106,12 @@ bool AutoplayPolicy::IsDocumentAllowedToPlay(const Document& document) {
 
     if (RuntimeEnabledFeatures::
             MediaEngagementBypassAutoplayPoliciesEnabled() &&
-        frame->IsMainFrame() && DocumentHasHighMediaEngagement(document)) {
+        frame->IsOutermostMainFrame() &&
+        DocumentHasHighMediaEngagement(document)) {
       return true;
     }
 
-    if (!feature_policy_enabled)
+    if (!permissions_policy_enabled)
       return false;
   }
 
@@ -197,9 +203,12 @@ void AutoplayPolicy::StartAutoplayMutedWhenVisible() {
     return;
 
   autoplay_intersection_observer_ = IntersectionObserver::Create(
-      {}, {IntersectionObserver::kMinimumThreshold}, &element_->GetDocument(),
-      WTF::BindRepeating(&AutoplayPolicy::OnIntersectionChangedForAutoplay,
-                         WrapWeakPersistent(this)));
+      element_->GetDocument(),
+      BindRepeating(&AutoplayPolicy::OnIntersectionChangedForAutoplay,
+                    WrapWeakPersistent(this)),
+      LocalFrameUkmAggregator::kMediaIntersectionObserver,
+      IntersectionObserver::Params{
+          .thresholds = {IntersectionObserver::kMinimumThreshold}});
   autoplay_intersection_observer_->observe(element_);
 }
 
@@ -259,9 +268,42 @@ bool AutoplayPolicy::RequestAutoplayByAttribute() {
   return false;
 }
 
-base::Optional<DOMExceptionCode> AutoplayPolicy::RequestPlay() {
-  if (!LocalFrame::HasTransientUserActivation(
-          element_->GetDocument().GetFrame())) {
+bool AutoplayPolicy::HasTransientUserActivation() const {
+  LocalFrame* frame = element_->GetDocument().GetFrame();
+  if (!frame) {
+    return false;
+  }
+
+  if (LocalFrame::HasTransientUserActivation(frame)) {
+    return true;
+  }
+
+  Frame* opener = frame->Opener();
+  if (opener && opener->IsLocalFrame() &&
+      LocalFrame::HasTransientUserActivation(To<LocalFrame>(opener))) {
+    return true;
+  }
+
+  return false;
+}
+
+std::optional<DOMExceptionCode> AutoplayPolicy::RequestPlay() {
+  if (!element_->CanPlayWhileHidden()) {
+    // The "media-playback-while-not-visible" permission policy default value
+    // was overridden, which means that either this frame or an ancestor frame
+    // changed the permission policy's default value. This should only happen if
+    // the MediaPlaybackWhileNotVisiblePermissionPolicyEnabled runtime flag is
+    // enabled.
+    UseCounter::Count(
+        element_->GetExecutionContext(),
+        WebFeature::kMediaPlaybackWhileNotVisiblePermissionPolicy);
+    // Block autoplay only if the media element's visibility state is known.
+    if (element_->IsFrameHidden()) {
+      return DOMExceptionCode::kNotAllowedError;
+    }
+  }
+
+  if (!HasTransientUserActivation()) {
     autoplay_uma_helper_->OnAutoplayInitiated(AutoplaySource::kMethod);
     if (IsGestureNeededForPlayback())
       return DOMExceptionCode::kNotAllowedError;
@@ -271,7 +313,7 @@ base::Optional<DOMExceptionCode> AutoplayPolicy::RequestPlay() {
 
   MaybeSetAutoplayInitiated();
 
-  return base::nullopt;
+  return std::nullopt;
 }
 
 bool AutoplayPolicy::IsAutoplayingMutedInternal(bool muted) const {
@@ -321,7 +363,9 @@ String AutoplayPolicy::GetPlayErrorMessage() const {
 }
 
 bool AutoplayPolicy::WasAutoplayInitiated() const {
-  DCHECK(autoplay_initiated_.has_value());
+  if (!autoplay_initiated_.has_value())
+    return false;
+
   return *autoplay_initiated_;
 }
 
@@ -334,22 +378,43 @@ void AutoplayPolicy::EnsureAutoplayInitiatedSet() {
 void AutoplayPolicy::OnIntersectionChangedForAutoplay(
     const HeapVector<Member<IntersectionObserverEntry>>& entries) {
   bool is_visible = (entries.back()->intersectionRatio() > 0);
+
   if (!is_visible) {
-    if (element_->can_autoplay_ && element_->Autoplay()) {
-      element_->PauseInternal();
-      element_->can_autoplay_ = true;
-    }
+    auto pause_and_preserve_autoplay = [](AutoplayPolicy* self) {
+      if (!self)
+        return;
+
+      if (self->element_->can_autoplay_ && self->element_->Autoplay()) {
+        self->element_->PauseInternal(
+            WebMediaPlayer::PauseReason::kAutoplayAutoPause);
+        self->element_->can_autoplay_ = true;
+      }
+    };
+
+    element_->GetDocument()
+        .GetTaskRunner(TaskType::kInternalMedia)
+        ->PostTask(FROM_HERE, BindOnce(pause_and_preserve_autoplay,
+                                       WrapWeakPersistent(this)));
     return;
   }
 
-  if (ShouldAutoplay()) {
-    element_->paused_ = false;
-    element_->SetShowPosterFlag(false);
-    element_->ScheduleEvent(event_type_names::kPlay);
-    element_->ScheduleNotifyPlaying();
+  auto maybe_autoplay = [](AutoplayPolicy* self) {
+    if (!self)
+      return;
 
-    element_->UpdatePlayState();
-  }
+    if (self->ShouldAutoplay()) {
+      self->element_->paused_ = false;
+      self->element_->SetShowPosterFlag(false);
+      self->element_->ScheduleNamedEvent(event_type_names::kPlay);
+      self->element_->ScheduleNotifyPlaying();
+
+      self->element_->UpdatePlayState();
+    }
+  };
+
+  element_->GetDocument()
+      .GetTaskRunner(TaskType::kInternalMedia)
+      ->PostTask(FROM_HERE, BindOnce(maybe_autoplay, WrapWeakPersistent(this)));
 }
 
 bool AutoplayPolicy::IsUsingDocumentUserActivationRequiredPolicy() const {
@@ -363,10 +428,10 @@ void AutoplayPolicy::MaybeSetAutoplayInitiated() {
 
   autoplay_initiated_ = true;
 
-  bool feature_policy_enabled =
+  bool permissions_policy_enabled =
       element_->GetExecutionContext() &&
       element_->GetExecutionContext()->IsFeatureEnabled(
-          mojom::blink::FeaturePolicyFeature::kAutoplay);
+          network::mojom::PermissionsPolicyFeature::kAutoplay);
 
   for (Frame* frame = element_->GetDocument().GetFrame(); frame;
        frame = frame->Tree().Parent()) {
@@ -375,7 +440,7 @@ void AutoplayPolicy::MaybeSetAutoplayInitiated() {
       autoplay_initiated_ = false;
       break;
     }
-    if (!feature_policy_enabled)
+    if (!permissions_policy_enabled)
       break;
   }
 }
@@ -395,11 +460,12 @@ void AutoplayPolicy::Trace(Visitor* visitor) const {
   visitor->Trace(autoplay_uma_helper_);
 }
 
-STATIC_ASSERT_ENUM(web_pref::AutoplayPolicy::kNoUserGestureRequired,
+STATIC_ASSERT_ENUM(mojom::blink::AutoplayPolicy::kNoUserGestureRequired,
                    AutoplayPolicy::Type::kNoUserGestureRequired);
-STATIC_ASSERT_ENUM(web_pref::AutoplayPolicy::kUserGestureRequired,
+STATIC_ASSERT_ENUM(mojom::blink::AutoplayPolicy::kUserGestureRequired,
                    AutoplayPolicy::Type::kUserGestureRequired);
-STATIC_ASSERT_ENUM(web_pref::AutoplayPolicy::kDocumentUserActivationRequired,
-                   AutoplayPolicy::Type::kDocumentUserActivationRequired);
+STATIC_ASSERT_ENUM(
+    mojom::blink::AutoplayPolicy::kDocumentUserActivationRequired,
+    AutoplayPolicy::Type::kDocumentUserActivationRequired);
 
 }  // namespace blink

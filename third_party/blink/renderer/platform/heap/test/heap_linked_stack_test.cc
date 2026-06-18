@@ -1,8 +1,9 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_linked_stack.h"
+#include "third_party/blink/renderer/platform/heap/heap_test_objects.h"
 #include "third_party/blink/renderer/platform/heap/heap_test_utilities.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 
@@ -13,7 +14,7 @@ class HeapLinkedStackTest : public TestSupportingGC {};
 }  // namespace
 
 TEST_F(HeapLinkedStackTest, PushPop) {
-  using Stack = HeapLinkedStack<Member<IntegerObject>>;
+  using Stack = GCedHeapLinkedStack<Member<IntegerObject>>;
 
   ClearOutOldGarbage();
   IntegerObject::destructor_calls = 0;

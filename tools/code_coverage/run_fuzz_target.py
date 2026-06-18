@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Run a single fuzz target built with code coverage instrumentation.
@@ -28,7 +28,7 @@ _CORPUS_FOR_BOTS_DIR = os.path.join(_THIS_DIR, os.path.pardir, os.path.pardir,
                                     'fuzzer_corpus_for_bots')
 
 # Dummy corpus in case real corpus doesn't exist.
-_DUMMY_INPUT_CONTENTS = 'dummy input just to have at least one corpus unit'
+_DUMMY_INPUT_CONTENTS = b'dummy input just to have at least one corpus unit'
 _DUMMY_INPUT_FILENAME = 'dummy_corpus_input'
 
 # Used for running fuzzer targets in code coverage config.
@@ -201,7 +201,7 @@ def Main():
   shutil.rmtree(corpus_dir)
 
   if args.isolated_script_test_output:
-    # TODO(crbug.com/913827): Actually comply with the isolated script contract
+    # TODO(crbug.com/41431115): Actually comply with the isolated script contract
     # on src/testing/scripts/common.
     with open(args.isolated_script_test_output, 'w') as f:
       json.dump({

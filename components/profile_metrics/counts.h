@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,28 +10,24 @@
 namespace profile_metrics {
 
 struct Counts {
-  base::HistogramBase::Sample total;
-  base::HistogramBase::Sample signedin;
-  base::HistogramBase::Sample supervised;
-  base::HistogramBase::Sample active;
-  base::HistogramBase::Sample named;
-  base::HistogramBase::Sample unused;
-  base::HistogramBase::Sample gaia_icon;
-  base::HistogramBase::Sample auth_errors;
-
-  Counts()
-      : total(0),
-        signedin(0),
-        supervised(0),
-        active(0),
-        named(0),
-        unused(0),
-        gaia_icon(0),
-        auth_errors(0) {}
+  base::HistogramBase::Sample32 total = 0;
+  base::HistogramBase::Sample32 signedin = 0;
+  base::HistogramBase::Sample32 supervised = 0;
+  base::HistogramBase::Sample32 active = 0;
+  base::HistogramBase::Sample32 unused = 0;
 };
 
-// Logs metrics related to |counts|.
-void LogProfileMetricsCounts(const Counts& counts);
+enum class ProfileActivityThreshold {
+  kDuration1Day,
+  kDuration7Days,
+  kDuration28Days,  // Used as the default threshold check.
+};
+
+void LogTotalNumberOfProfiles(base::HistogramBase::Sample32 number_of_profiles);
+// Logs metrics related to `counts`. If `counts.total` is 0, nothing is
+// recorded.
+void LogProfileMetricsCounts(const Counts& counts,
+                             ProfileActivityThreshold activity_threshold);
 
 }  // namespace profile_metrics
 

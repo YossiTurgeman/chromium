@@ -1,14 +1,25 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/bindings/modules/v8/serialization/serialized_script_value_for_modules_factory.h"
 
+#include "third_party/blink/renderer/bindings/core/v8/serialization/unpacked_serialized_script_value.h"
 #include "third_party/blink/renderer/bindings/modules/v8/serialization/v8_script_value_deserializer_for_modules.h"
 #include "third_party/blink/renderer/bindings/modules/v8/serialization/v8_script_value_serializer_for_modules.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 
 namespace blink {
+
+bool SerializedScriptValueForModulesFactory::ExtractTransferable(
+    v8::Isolate* isolate,
+    v8::Local<v8::Value> object,
+    wtf_size_t object_index,
+    Transferables& transferables,
+    ExceptionState& exception_state) {
+  return V8ScriptValueSerializerForModules::ExtractTransferable(
+      isolate, object, object_index, transferables, exception_state);
+}
 
 scoped_refptr<SerializedScriptValue>
 SerializedScriptValueForModulesFactory::Create(
@@ -17,8 +28,8 @@ SerializedScriptValueForModulesFactory::Create(
     const SerializedScriptValue::SerializeOptions& options,
     ExceptionState& exception_state) {
   TRACE_EVENT0("blink", "SerializedScriptValueFactory::create");
-  V8ScriptValueSerializerForModules serializer(ScriptState::Current(isolate),
-                                               options);
+  V8ScriptValueSerializerForModules serializer(
+      ScriptState::ForCurrentRealm(isolate), options);
   return serializer.Serialize(value, exception_state);
 }
 
@@ -28,8 +39,10 @@ v8::Local<v8::Value> SerializedScriptValueForModulesFactory::Deserialize(
     const SerializedScriptValue::DeserializeOptions& options) {
   TRACE_EVENT0("blink", "SerializedScriptValueFactory::deserialize");
   V8ScriptValueDeserializerForModules deserializer(
-      ScriptState::Current(isolate), std::move(value), options);
-  return deserializer.Deserialize();
+      ScriptState::ForCurrentRealm(isolate), value, options);
+  v8::Local<v8::Value> result = deserializer.Deserialize();
+  value->SetDeserializationError(deserializer.HasError());
+  return result;
 }
 
 v8::Local<v8::Value> SerializedScriptValueForModulesFactory::Deserialize(
@@ -38,8 +51,17 @@ v8::Local<v8::Value> SerializedScriptValueForModulesFactory::Deserialize(
     const SerializedScriptValue::DeserializeOptions& options) {
   TRACE_EVENT0("blink", "SerializedScriptValueFactory::deserialize");
   V8ScriptValueDeserializerForModules deserializer(
-      ScriptState::Current(isolate), value, options);
-  return deserializer.Deserialize();
+      ScriptState::ForCurrentRealm(isolate), value, options);
+  v8::Local<v8::Value> result = deserializer.Deserialize();
+  value->Value()->SetDeserializationError(deserializer.HasError());
+  return result;
+}
+
+bool SerializedScriptValueForModulesFactory::ExecutionContextExposesInterface(
+    ExecutionContext* execution_context,
+    SerializationTag interface_tag) {
+  return V8ScriptValueDeserializerForModules::ExecutionContextExposesInterface(
+      execution_context, interface_tag);
 }
 
 }  // namespace blink

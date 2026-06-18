@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,18 @@
 
 namespace blink {
 
-AddEventListenerOptionsResolved::AddEventListenerOptionsResolved()
-    : passive_forced_for_document_target_(false), passive_specified_(false) {}
+AddEventListenerOptionsResolved::AddEventListenerOptionsResolved() {}
 
 AddEventListenerOptionsResolved::AddEventListenerOptionsResolved(
-    const AddEventListenerOptions* options)
-    : passive_forced_for_document_target_(false), passive_specified_(false) {
+    const AddEventListenerOptions* options) {
   DCHECK(options);
   // AddEventListenerOptions
   if (options->hasPassive())
     setPassive(options->passive());
   if (options->hasOnce())
     setOnce(options->once());
+  if (options->hasSignal())
+    setSignal(options->signal());
   // EventListenerOptions
   if (options->hasCapture())
     setCapture(options->capture());

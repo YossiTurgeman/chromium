@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,7 @@ detect state leakage between tests.
 
 Example invocation:
 
-gn gen out/asan --args='is_asan=true enable_nacl=false is_debug=false'
+gn gen out/asan --args='is_asan=true is_debug=false'
 ninja -C out/asan base_unittests
 tools/perry.py out/asan/base_unittests > perry.log &
 tail -f perry.log

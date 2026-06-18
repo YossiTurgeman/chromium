@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,41 +8,41 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.when;
+import static org.robolectric.Shadows.shadowOf;
+
+import android.os.Looper;
+
+import androidx.test.filters.SmallTest;
 
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TestRule;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
+import org.mockito.Mockito;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.browser.browserservices.ui.controller.CurrentPageVerifier.VerificationStatus;
-import org.chromium.chrome.browser.browserservices.ui.controller.trustedwebactivity.ClientPackageNameProvider;
 import org.chromium.chrome.browser.customtabs.CustomTabIntentDataProvider;
 import org.chromium.chrome.browser.customtabs.content.CustomTabActivityTabProvider;
 import org.chromium.chrome.browser.customtabs.content.TabObserverRegistrar;
 import org.chromium.chrome.browser.customtabs.content.TabObserverRegistrar.CustomTabTabObserver;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
 import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.test.util.browser.Features;
-import org.chromium.chrome.test.util.browser.Features.DisableFeatures;
 import org.chromium.components.embedder_support.util.Origin;
 import org.chromium.content_public.browser.NavigationHandle;
+import org.chromium.content_public.browser.Page;
+import org.chromium.url.GURL;
 
 import java.util.Collections;
 
-/**
- * Tests for {@link CurrentPageVerifier}.
- */
+/** Tests for {@link CurrentPageVerifier}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
-@DisableFeatures(ChromeFeatureList.TRUSTED_WEB_ACTIVITY_POST_MESSAGE)
+@SuppressWarnings("DoNotMock") // Mocking GURL
 public class CurrentPageVerifierTest {
     private static final Origin TRUSTED_ORIGIN = Origin.create("https://www.origin1.com/");
     private static final Origin OTHER_TRUSTED_ORIGIN = Origin.create("https://www.origin2.com/");
@@ -52,23 +52,13 @@ public class CurrentPageVerifierTest {
 
     public static final String PACKAGE_NAME = "package.name";
 
-    @Rule
-    public TestRule mFeaturesProcessor = new Features.JUnitProcessor();
-
-    @Mock
-    TabObserverRegistrar mTabObserverRegistrar;
-    @Mock
-    ActivityLifecycleDispatcher mLifecycleDispatcher;
-    @Mock
-    CustomTabActivityTabProvider mTabProvider;
-    @Mock
-    CustomTabIntentDataProvider mIntentDataProvider;
-    @Mock
-    Tab mTab;
-    @Mock
-    ClientPackageNameProvider mClientPackageNameProvider;
-    @Captor
-    ArgumentCaptor<CustomTabTabObserver> mTabObserverCaptor;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock TabObserverRegistrar mTabObserverRegistrar;
+    @Mock ActivityLifecycleDispatcher mLifecycleDispatcher;
+    @Mock CustomTabActivityTabProvider mTabProvider;
+    @Mock CustomTabIntentDataProvider mIntentDataProvider;
+    @Mock Tab mTab;
+    @Captor ArgumentCaptor<CustomTabTabObserver> mTabObserverCaptor;
 
     TestVerifier mVerifierDelegate = new TestVerifier();
 
@@ -76,20 +66,24 @@ public class CurrentPageVerifierTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         when(mTabProvider.getTab()).thenReturn(mTab);
-        when(mClientPackageNameProvider.get()).thenReturn(PACKAGE_NAME);
         doNothing()
                 .when(mTabObserverRegistrar)
                 .registerActivityTabObserver(mTabObserverCaptor.capture());
         when(mIntentDataProvider.getTrustedWebActivityAdditionalOrigins())
                 .thenReturn(Collections.singletonList("https://www.origin2.com/"));
-        mCurrentPageVerifier = new CurrentPageVerifier(mLifecycleDispatcher, mTabObserverRegistrar,
-                mTabProvider, mIntentDataProvider, mVerifierDelegate);
+        mCurrentPageVerifier =
+                new CurrentPageVerifier(
+                        mTabProvider,
+                        mIntentDataProvider,
+                        mVerifierDelegate,
+                        mTabObserverRegistrar,
+                        mLifecycleDispatcher);
         // TODO(peconn): Add check on permission updated being updated.
     }
 
     @Test
+    @SmallTest
     public void verifiesOriginOfInitialPage() {
         setInitialUrl(TRUSTED_ORIGIN_PAGE1);
         mCurrentPageVerifier.onFinishNativeInitialization();
@@ -97,6 +91,7 @@ public class CurrentPageVerifierTest {
     }
 
     @Test
+    @SmallTest
     public void statusIsPending_UntilVerificationFinished() {
         setInitialUrl(TRUSTED_ORIGIN_PAGE1);
         mCurrentPageVerifier.onFinishNativeInitialization();
@@ -104,6 +99,7 @@ public class CurrentPageVerifierTest {
     }
 
     @Test
+    @SmallTest
     public void statusIsSuccess_WhenVerificationSucceeds() {
         setInitialUrl(TRUSTED_ORIGIN_PAGE1);
         mCurrentPageVerifier.onFinishNativeInitialization();
@@ -112,6 +108,7 @@ public class CurrentPageVerifierTest {
     }
 
     @Test
+    @SmallTest
     public void statusIsFail_WhenVerificationFails() {
         setInitialUrl(UNTRUSTED_PAGE);
         mCurrentPageVerifier.onFinishNativeInitialization();
@@ -120,6 +117,7 @@ public class CurrentPageVerifierTest {
     }
 
     @Test
+    @SmallTest
     public void verifies_WhenNavigatingToOtherTrustedOrigin() {
         setInitialUrl(TRUSTED_ORIGIN_PAGE1);
         mCurrentPageVerifier.onFinishNativeInitialization();
@@ -130,6 +128,7 @@ public class CurrentPageVerifierTest {
     }
 
     @Test
+    @SmallTest
     public void doesntUpdateState_IfVerificationFinishedAfterLeavingOrigin() {
         setInitialUrl(TRUSTED_ORIGIN_PAGE1);
         mCurrentPageVerifier.onFinishNativeInitialization();
@@ -140,6 +139,7 @@ public class CurrentPageVerifierTest {
     }
 
     @Test
+    @SmallTest
     public void reverifiesOrigin_WhenReturningToIt_IfFirstVerificationDidntFinishInTime() {
         setInitialUrl(TRUSTED_ORIGIN_PAGE1);
         mCurrentPageVerifier.onFinishNativeInitialization();
@@ -151,6 +151,7 @@ public class CurrentPageVerifierTest {
     }
 
     private void assertStatus(@CurrentPageVerifier.VerificationStatus int status) {
+        shadowOf(Looper.getMainLooper()).idle();
         assertEquals(status, mCurrentPageVerifier.getState().status);
     }
 
@@ -158,26 +159,51 @@ public class CurrentPageVerifierTest {
         assertTrue(mVerifierDelegate.hasPendingVerification(Origin.create(url)));
     }
 
+    private static GURL createMockGurl(String url) {
+        GURL gurl = Mockito.mock(GURL.class);
+        when(gurl.getSpec()).thenReturn(url);
+        return gurl;
+    }
+
     private void setInitialUrl(String url) {
         when(mIntentDataProvider.getUrlToLoad()).thenReturn(url);
-        when(mTab.getUrlString()).thenReturn(url);
+        // TODO(crbug.com/40549331): Pass in GURL.
+        GURL gurl = createMockGurl(url);
+        when(mTab.getUrl()).thenReturn(gurl);
     }
 
     private void navigateToUrl(String url) {
-        when(mTab.getUrlString()).thenReturn(url);
+        GURL gurl = createMockGurl(url);
+        when(mTab.getUrl()).thenReturn(gurl);
         NavigationHandle navigation =
-                new NavigationHandle(0 /* navigationHandleProxy */, url, true /* isMainFrame */,
-                        false /* isSameDocument */, false /* isRendererInitiated */);
+                NavigationHandle.createForTesting(
+                        gurl,
+                        /* isRendererInitiated= */ false,
+                        /* transition= */ 0,
+                        /* hasUserGesture= */ false);
         for (CustomTabTabObserver tabObserver : mTabObserverCaptor.getAllValues()) {
-            tabObserver.onDidStartNavigation(mTab, navigation);
+            tabObserver.onDidStartNavigationInPrimaryMainFrame(mTab, navigation);
         }
 
-        navigation.didFinish(url, false /* isErrorPage */, true /* hasCommitted */,
-                false /* isFragmentNavigation */, false /* isDownload */,
-                false /* isValidSearchFormUrl */, 0 /* pageTransition */, 0 /* errorCode*/,
-                200 /* httpStatusCode*/);
+        navigation.didFinish(
+                gurl,
+                /* isErrorPage= */ false,
+                /* hasCommitted= */ true,
+                /* isPrimaryMainFrameFragmentNavigation= */ false,
+                /* isDownload= */ false,
+                /* isValidSearchFormUrl= */ false,
+                /* transition= */ 0,
+                /* errorCode= */ 0,
+                /* errorDescription= */ "",
+                /* httpStatuscode= */ 200,
+                /* isExternalProtocol= */ false,
+                /* isPdf= */ false,
+                /* mimeType= */ "",
+                Page.createForTesting(),
+                /* isSameOrigin= */ true,
+                /* ignoredDuplicateNavigationCount= */ 0);
         for (CustomTabTabObserver tabObserver : mTabObserverCaptor.getAllValues()) {
-            tabObserver.onDidFinishNavigation(mTab, navigation);
+            tabObserver.onDidFinishNavigationInPrimaryMainFrame(mTab, navigation);
         }
     }
 }

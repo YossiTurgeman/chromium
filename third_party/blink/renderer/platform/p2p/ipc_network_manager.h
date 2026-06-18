@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 #include <memory>
 
 #include "base/memory/weak_ptr.h"
+#include "base/threading/thread_checker.h"
+#include "third_party/blink/renderer/platform/heap/cross_thread_persistent.h"
 #include "third_party/blink/renderer/platform/p2p/network_list_manager.h"
 #include "third_party/blink/renderer/platform/p2p/network_list_observer.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
@@ -22,7 +24,13 @@ namespace blink {
 
 // IpcNetworkManager is a NetworkManager for libjingle that gets a
 // list of network interfaces from the browser.
-class IpcNetworkManager : public rtc::NetworkManagerBase,
+//
+// Threading note:
+// The IpcNetworkManager is constructed on the network thread, and after that
+// may only be accessed from the signaling thread. The one exception to that is
+// access to slots (e.g., `NetworkManager::SignalNetworksChanged`) that are safe
+// to access from any thread.
+class IpcNetworkManager : public webrtc::NetworkManagerBase,
                           public blink::NetworkListObserver {
  public:
   // Constructor doesn't take ownership of the |network_list_manager|.
@@ -31,7 +39,13 @@ class IpcNetworkManager : public rtc::NetworkManagerBase,
       std::unique_ptr<webrtc::MdnsResponderInterface> mdns_responder);
   ~IpcNetworkManager() override;
 
-  // rtc:::NetworkManager:
+  void PLATFORM_EXPORT ContextDestroyed();
+
+  // Weak pointers may only be dereferenced on the signaling thread.
+  base::WeakPtr<IpcNetworkManager> PLATFORM_EXPORT
+  AsWeakPtrForSignalingThread();
+
+  // webrtc:::NetworkManager:
   void StartUpdating() override;
   void StopUpdating() override;
   webrtc::MdnsResponderInterface* GetMdnsResponder() const override;
@@ -45,12 +59,16 @@ class IpcNetworkManager : public rtc::NetworkManagerBase,
  private:
   void SendNetworksChangedSignal();
 
-  // TODO(crbug.com/787254): Consider moving NetworkListManager to Oilpan and
-  // avoid using a raw pointer.
-  blink::NetworkListManager* network_list_manager_;
+  // 'this' is created on the network thread, whereas the `NetworkListManager`
+  // is owned by the main thread, so it needs to be accessed in a thread-safe
+  // manner. The `NetworkListManager` will be reset once the context is
+  // destroyed, so the strong reference will not cause a leak.
+  CrossThreadPersistent<NetworkListManager> network_list_manager_;
   std::unique_ptr<webrtc::MdnsResponderInterface> mdns_responder_;
   int start_count_ = 0;
   bool network_list_received_ = false;
+
+  THREAD_CHECKER(thread_checker_);
 
   base::WeakPtrFactory<IpcNetworkManager> weak_factory_{this};
 };

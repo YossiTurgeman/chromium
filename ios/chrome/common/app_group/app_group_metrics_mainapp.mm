@@ -1,126 +1,30 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ios/chrome/common/app_group/app_group_metrics_mainapp.h"
+#import "ios/chrome/common/app_group/app_group_metrics_mainapp.h"
 
-#include <stdint.h>
+#import <stdint.h>
 
-#include "base/metrics/histogram_functions.h"
-#include "base/threading/scoped_blocking_call.h"
-#include "ios/chrome/common/app_group/app_group_constants.h"
-#include "ios/chrome/common/app_group/app_group_metrics.h"
+#import "base/metrics/histogram_functions.h"
+#import "base/threading/scoped_blocking_call.h"
+#import "base/time/time.h"
+#import "ios/chrome/common/app_group/app_group_constants.h"
+#import "ios/chrome/common/app_group/app_group_metrics.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+namespace {
+// Delay in seconds before reporting the metrics coming from Open extensions.
+// This delay is needed to be sure the shared user default
+// is correctly synchronized.
+constexpr base::TimeDelta kDispatchTime = base::Seconds(2);
 
+// Maximum number of outcomes reported to UMA to avoid infinite loops.
+const int kMaxNumberOfLogs = 10;
+
+}  // namespace
 namespace app_group {
 
 namespace main_app {
-
-void RecordWidgetUsage() {
-  NSUserDefaults* shared_defaults = GetGroupUserDefaults();
-  int content_extension_count =
-      [shared_defaults integerForKey:kContentExtensionDisplayCount];
-  base::UmaHistogramCounts1000("IOS.ContentExtension.DisplayCount",
-                               content_extension_count);
-  [shared_defaults setInteger:0 forKey:kContentExtensionDisplayCount];
-  int search_extension_count =
-      [shared_defaults integerForKey:kSearchExtensionDisplayCount];
-  base::UmaHistogramCounts1000("IOS.SearchExtension.DisplayCount",
-                               search_extension_count);
-  [shared_defaults setInteger:0 forKey:kSearchExtensionDisplayCount];
-
-  int credential_extension_count =
-      [shared_defaults integerForKey:kCredentialExtensionDisplayCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.DisplayCount",
-                               credential_extension_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionDisplayCount];
-  int credential_extension_reauth_count =
-      [shared_defaults integerForKey:kCredentialExtensionReauthCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.ReauthCount",
-                               credential_extension_reauth_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionReauthCount];
-  int credential_extension_copy_url_count =
-      [shared_defaults integerForKey:kCredentialExtensionCopyURLCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.CopyURLCount",
-                               credential_extension_copy_url_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionCopyURLCount];
-  int credential_extension_copy_username_count =
-      [shared_defaults integerForKey:kCredentialExtensionCopyUsernameCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.CopyUsernameCount",
-                               credential_extension_copy_username_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionCopyUsernameCount];
-  int credential_extension_copy_password_count =
-      [shared_defaults integerForKey:kCredentialExtensionCopyPasswordCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.CopyPasswordCount",
-                               credential_extension_copy_password_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionCopyPasswordCount];
-  int credential_extension_show_password_count =
-      [shared_defaults integerForKey:kCredentialExtensionShowPasswordCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.ShowPasswordCount",
-                               credential_extension_show_password_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionShowPasswordCount];
-  int credential_extension_search_count =
-      [shared_defaults integerForKey:kCredentialExtensionSearchCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.SearchCount",
-                               credential_extension_search_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionSearchCount];
-  int credential_extension_password_use_count =
-      [shared_defaults integerForKey:kCredentialExtensionPasswordUseCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.PasswordUseCount",
-                               credential_extension_password_use_count);
-  [shared_defaults setInteger:0 forKey:kCredentialExtensionPasswordUseCount];
-  int credential_extension_quick_password_use_count =
-      [shared_defaults integerForKey:kCredentialExtensionQuickPasswordUseCount];
-  base::UmaHistogramCounts1000("IOS.CredentialExtension.QuickPasswordUseCount",
-                               credential_extension_quick_password_use_count);
-  [shared_defaults setInteger:0
-                       forKey:kCredentialExtensionQuickPasswordUseCount];
-  int credential_extension_fetch_password_failure_count = [shared_defaults
-      integerForKey:kCredentialExtensionFetchPasswordFailureCount];
-  base::UmaHistogramCounts1000(
-      "IOS.CredentialExtension.FetchPasswordFailure",
-      credential_extension_fetch_password_failure_count);
-  [shared_defaults setInteger:0
-                       forKey:kCredentialExtensionFetchPasswordFailureCount];
-  int credential_extension_fetch_password_nil_argument_count = [shared_defaults
-      integerForKey:kCredentialExtensionFetchPasswordNilArgumentCount];
-  base::UmaHistogramCounts1000(
-      "IOS.CredentialExtension.FetchPasswordNilArgument",
-      credential_extension_fetch_password_nil_argument_count);
-  [shared_defaults
-      setInteger:0
-          forKey:kCredentialExtensionFetchPasswordNilArgumentCount];
-}
-
-void ProcessPendingLogs(ProceduralBlockWithData callback) {
-  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
-                                                base::BlockingType::WILL_BLOCK);
-  NSFileManager* file_manager = [NSFileManager defaultManager];
-  NSURL* store_url = [file_manager
-      containerURLForSecurityApplicationGroupIdentifier:ApplicationGroup()];
-  NSURL* log_dir_url =
-      [store_url URLByAppendingPathComponent:app_group::kPendingLogFileDirectory
-                                 isDirectory:YES];
-
-  NSArray* pending_logs =
-      [file_manager contentsOfDirectoryAtPath:[log_dir_url path] error:nil];
-  if (!pending_logs)
-    return;
-  for (NSString* pending_log : pending_logs) {
-    if ([pending_log hasSuffix:app_group::kPendingLogFileSuffix]) {
-      NSURL* file_url =
-          [log_dir_url URLByAppendingPathComponent:pending_log isDirectory:NO];
-      if (callback) {
-        NSData* log_content = [file_manager contentsAtPath:[file_url path]];
-        callback(log_content);
-      }
-      [file_manager removeItemAtURL:file_url error:nil];
-    }
-  }
-}
 
 void EnableMetrics(NSString* client_id,
                    NSString* brand_code,
@@ -137,14 +41,48 @@ void EnableMetrics(NSString* client_id,
                       forKey:@(kInstallDate)];
 
   [shared_defaults setObject:brand_code forKey:@(kBrandCode)];
+
+  // Reporting the Open extension should be done only once on each session.
+  // When the open extension actually launch Chrome, it stores an Outcome entry
+  // in the shared NSUserDefaults. Add a delay to let the synchronization happen
+  // and be sure this entry is reported.
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, kDispatchTime.InNanoseconds()),
+        dispatch_get_main_queue(), ^{
+          LogOpenExtensionMetrics();
+        });
+  });
 }
 
 void DisableMetrics() {
-  NSUserDefaults* shared_defaults =
-      [[NSUserDefaults alloc] initWithSuiteName:ApplicationGroup()];
+  NSUserDefaults* shared_defaults = GetGroupUserDefaults();
   [shared_defaults removeObjectForKey:@(kChromeAppClientID)];
-  [shared_defaults removeObjectForKey:kContentExtensionDisplayCount];
-  [shared_defaults removeObjectForKey:kSearchExtensionDisplayCount];
+  [shared_defaults removeObjectForKey:kOpenExtensionOutcomes];
+}
+
+void LogOpenExtensionMetrics() {
+  NSUserDefaults* shared_defaults = GetGroupUserDefaults();
+  NSDictionary<NSString*, NSNumber*>* open_extension_dictionary =
+      [shared_defaults dictionaryForKey:app_group::kOpenExtensionOutcomes];
+  // Clear the outcomes after reporting
+  [shared_defaults removeObjectForKey:kOpenExtensionOutcomes];
+
+  for (NSString* key in open_extension_dictionary) {
+    int event_count = open_extension_dictionary[key].intValue;
+    app_group::OpenExtensionOutcome bucket_for_histogram =
+        OutcomeTypeFromKey(key);
+
+    if (event_count > kMaxNumberOfLogs) {
+      event_count = kMaxNumberOfLogs;
+    }
+
+    for (int i = 0; i < event_count; i++) {
+      base::UmaHistogramEnumeration("IOSOpenExtensionOutcome",
+                                    bucket_for_histogram);
+    }
+  }
 }
 
 }  // namespace main_app

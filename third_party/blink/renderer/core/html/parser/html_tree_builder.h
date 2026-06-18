@@ -27,12 +27,17 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_HTML_TREE_BUILDER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_HTML_TREE_BUILDER_H_
 
-#include "base/macros.h"
-#include "base/memory/scoped_refptr.h"
+#include <optional>
+
+#include "base/dcheck_is_on.h"
+#include "base/time/time.h"
+#include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/dom/document_fragment.h"
+#include "third_party/blink/renderer/core/html/html_template_element.h"
 #include "third_party/blink/renderer/core/html/parser/html_construction_site.h"
 #include "third_party/blink/renderer/core/html/parser/html_element_stack.h"
 #include "third_party/blink/renderer/core/html/parser/html_parser_options.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_position.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -40,34 +45,65 @@
 namespace blink {
 
 class AtomicHTMLToken;
-class DocumentFragment;
 class Element;
-class HTMLDocument;
 class HTMLDocumentParser;
+class ParserRootInsertionPoint;
+class StreamingSanitizer;
 
 class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
  public:
-  // HTMLTreeBuilder can be created for non-HTMLDocument (XHTMLDocument) from
-  // editing code.
-  // TODO(kouhei): Fix editing code to always invoke HTML parser on
-  // HTMLDocument.
+  // This constructor is used for main document parsing.
+  // TODO(kouhei): HTMLTreeBuilder can be created for non-HTMLDocument
+  // (XHTMLDocument) from editing code. Fix editing code to always invoke HTML
+  // parser on HTMLDocument.
   HTMLTreeBuilder(HTMLDocumentParser*,
                   Document&,
                   ParserContentPolicy,
-                  const HTMLParserOptions&);
+                  const HTMLParserOptions&,
+                  bool include_shadow_roots,
+                  CustomElementRegistry* registry,
+                  StreamingSanitizer* sanitizer = nullptr);
+  // This constructor is used for fragment parsing.
   HTMLTreeBuilder(HTMLDocumentParser*,
                   DocumentFragment*,
                   Element* context_element,
                   ParserContentPolicy,
-                  const HTMLParserOptions&);
+                  const HTMLParserOptions&,
+                  bool include_shadow_roots,
+                  CustomElementRegistry* registry,
+                  StreamingSanitizer*,
+                  ParserRootInsertionPoint* root_insertion_point);
+
+  CORE_EXPORT static void ResetCachedFeaturesForTesting();
+
+ private:
+  HTMLTreeBuilder(HTMLDocumentParser*,
+                  Document&,
+                  ParserContentPolicy,
+                  const HTMLParserOptions&,
+                  bool include_shadow_roots,
+                  DocumentFragment* fragment_target,
+                  Element* fragment_context_element,
+                  CustomElementRegistry* registry,
+                  StreamingSanitizer*,
+                  ParserRootInsertionPoint* root_insertion_point);
+
+ public:
+  HTMLTreeBuilder(const HTMLTreeBuilder&) = delete;
+  HTMLTreeBuilder& operator=(const HTMLTreeBuilder&) = delete;
   ~HTMLTreeBuilder();
   void Trace(Visitor*) const;
 
   const HTMLElementStack* OpenElements() const { return tree_.OpenElements(); }
 
-  bool IsParsingFragment() const { return !!fragment_context_.Fragment(); }
+  bool IsParsingFragment() const {
+    return !!fragment_context_.FragmentTarget();
+  }
   bool IsParsingTemplateContents() const {
-    return tree_.OpenElements()->HasTemplateInHTMLScope();
+    return tree_.OpenElements()->HasTemplateInHTMLScope() ||
+           (RuntimeEnabledFeatures::CorrectTemplateFormParsingEnabled() &&
+            IsParsingFragment() &&
+            IsA<HTMLTemplateElement>(fragment_context_.ContextElement()));
   }
   bool IsParsingFragmentOrTemplateContents() const {
     return IsParsingFragment() || IsParsingTemplateContents();
@@ -77,7 +113,9 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
 
   void ConstructTree(AtomicHTMLToken*);
 
-  bool HasParserBlockingScript() const { return !!script_to_process_; }
+  ALWAYS_INLINE bool HasParserBlockingScript() const {
+    return !!script_to_process_;
+  }
   // Must be called to take the parser-blocking script before calling the parser
   // again.
   Element* TakeScriptToProcess(TextPosition& script_start_position);
@@ -87,7 +125,7 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
 
   // Synchronously flush pending text and queued tasks, possibly creating more
   // DOM nodes. Flushing pending text depends on |mode|.
-  void Flush(FlushMode mode) { tree_.Flush(mode); }
+  void Flush();
 
   void SetShouldSkipLeadingNewline(bool should_skip) {
     should_skip_leading_newline_ = should_skip;
@@ -114,15 +152,13 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
     kInTableBodyMode,
     kInRowMode,
     kInCellMode,
-    kInSelectMode,
-    kInSelectInTableMode,
     kAfterBodyMode,
     kInFramesetMode,
     kAfterFramesetMode,
     kAfterAfterBodyMode,
     kAfterAfterFramesetMode,
   };
-#ifndef DEBUG
+#ifndef NDEBUG
   static const char* ToString(InsertionMode);
 #endif
 
@@ -134,6 +170,7 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
   void ProcessComment(AtomicHTMLToken*);
   void ProcessCharacter(AtomicHTMLToken*);
   void ProcessEndOfFile(AtomicHTMLToken*);
+  void ProcessProcessingInstruction(AtomicHTMLToken*);
 
   bool ProcessStartTagForInHead(AtomicHTMLToken*);
   void ProcessStartTagForInBody(AtomicHTMLToken*);
@@ -158,10 +195,10 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
   inline void ProcessCharacterBufferForInBody(CharacterTokenBuffer&);
 
   void ProcessFakeStartTag(
-      const QualifiedName&,
+      html_names::HTMLTag tag,
       const Vector<Attribute>& attributes = Vector<Attribute>());
-  void ProcessFakeEndTag(const QualifiedName&);
-  void ProcessFakeEndTag(const AtomicString&);
+  void ProcessFakeEndTag(html_names::HTMLTag tag);
+  void ProcessFakeEndTag(const HTMLStackItem& stack_item);
   void ProcessFakePEndTagIfPInButtonScope();
 
   void ProcessGenericRCDATAStartTag(AtomicHTMLToken*);
@@ -191,7 +228,7 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
   void ParseError(AtomicHTMLToken*);
 
   InsertionMode GetInsertionMode() const { return insertion_mode_; }
-  void SetInsertionMode(InsertionMode mode) { insertion_mode_ = mode; }
+  void SetInsertionMode(InsertionMode mode);
 
   void ResetInsertionModeAppropriately();
 
@@ -204,37 +241,42 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
 
    public:
     FragmentParsingContext() = default;
+    FragmentParsingContext(const FragmentParsingContext&) = delete;
+    FragmentParsingContext& operator=(const FragmentParsingContext&) = delete;
     void Init(DocumentFragment*, Element* context_element);
-
-    DocumentFragment* Fragment() const { return fragment_; }
+    DocumentFragment* FragmentTarget() const { return fragment_target_.Get(); }
     Element* ContextElement() const {
-      DCHECK(fragment_);
+      DCHECK(fragment_target_);
       return context_element_stack_item_->GetElement();
     }
     HTMLStackItem* ContextElementStackItem() const {
-      DCHECK(fragment_);
+      DCHECK(fragment_target_);
       return context_element_stack_item_.Get();
     }
 
     void Trace(Visitor*) const;
 
    private:
-    Member<DocumentFragment> fragment_;
+    Member<DocumentFragment> fragment_target_;
     Member<HTMLStackItem> context_element_stack_item_;
-
-    DISALLOW_COPY_AND_ASSIGN(FragmentParsingContext);
   };
 
   // https://html.spec.whatwg.org/C/#frameset-ok-flag
-  bool frameset_ok_;
-#if DCHECK_IS_ON()
-  bool is_attached_ = true;
-#endif
   FragmentParsingContext fragment_context_;
   HTMLConstructionSite tree_;
 
   // http://www.whatwg.org/specs/web-apps/current-work/multipage/parsing.html#insertion-mode
   InsertionMode insertion_mode_;
+
+  // The time when we last successfully flushed in kTextMode.
+  // Used to implement incremental backoff for flushes.
+  // `nullopt` indicates that no flush has occurred yet in the current kTextMode
+  // session.
+  std::optional<base::TimeTicks> last_text_mode_flush_time_;
+
+  // The current interval between flushes in kTextMode.
+  // This doubles with each flush up to a maximum limit.
+  base::TimeDelta current_text_mode_flush_interval_;
 
   // http://www.whatwg.org/specs/web-apps/current-work/multipage/parsing.html#original-insertion-mode
   InsertionMode original_insertion_mode_;
@@ -245,6 +287,13 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
   StringBuilder pending_table_characters_;
 
   bool should_skip_leading_newline_;
+
+  const bool include_shadow_roots_;
+
+  bool frameset_ok_;
+#if DCHECK_IS_ON()
+  bool is_attached_ = true;
+#endif
 
   // We access parser because HTML5 spec requires that we be able to change the
   // state of the tokenizer from within parser actions. We also need it to track
@@ -258,10 +307,8 @@ class HTMLTreeBuilder final : public GarbageCollected<HTMLTreeBuilder> {
   TextPosition script_to_process_start_position_;
 
   HTMLParserOptions options_;
-
-  DISALLOW_COPY_AND_ASSIGN(HTMLTreeBuilder);
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_HTML_TREE_BUILDER_H_

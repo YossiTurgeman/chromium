@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2014 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -282,7 +282,7 @@ def detect_cycles():
     dst = graph.get(root_edge.dst)
     if src.visited:
       continue
-    if root_edge.dst == "WTF::String":
+    if root_edge.dst == "blink::String":
       continue
     if dst is None:
       print("\nPersistent root to incomplete destination object:")
@@ -362,12 +362,12 @@ def read_ignored_cycles():
     ignored_cycles.append(block)
 
 gc_bases = (
-  'blink::GarbageCollected',
-  'blink::GarbageCollectedMixin',
+  'cppgc::GarbageCollected',
+  'cppgc::GarbageCollectedMixin',
 )
 ref_bases = (
-  'WTF::RefCounted',
-  'WTF::ThreadSafeRefCounted',
+    'blink::RefCounted',
+    'blink::ThreadSafeRefCounted',
 )
 gcref_bases = (
   'blink::RefCountedGarbageCollected',
@@ -418,7 +418,8 @@ def print_stats():
          % (
              stats['ref'] == 0 and stats['ref-mixins'] == 0 and "*" or " ",
              total == 0 and 100 or stats['mem'] * 100 / total,
-             node.name.replace('blink::', ''),
+             node.name.replace('blink::', '').replace(
+                 'cppgc::subtle::', '').replace('cppgc::', ''),
              stats['classes'],
              stats['mem'],
              stats['ref'],

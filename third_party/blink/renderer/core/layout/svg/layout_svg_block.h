@@ -36,7 +36,7 @@ class SVGElement;
 //   flipped blocks direction in the "containing block".
 class LayoutSVGBlock : public LayoutBlockFlow {
  public:
-  explicit LayoutSVGBlock(SVGElement*);
+  explicit LayoutSVGBlock(ContainerNode*);
 
   // These mapping functions map coordinates in HTML spaces.
   void MapLocalToAncestor(const LayoutBoxModelObject* ancestor,
@@ -45,14 +45,20 @@ class LayoutSVGBlock : public LayoutBlockFlow {
   void MapAncestorToLocal(const LayoutBoxModelObject* ancestor,
                           TransformState&,
                           MapCoordinatesFlags) const final;
-  const LayoutObject* PushMappingToContainer(
-      const LayoutBoxModelObject* ancestor_to_stop_at,
-      LayoutGeometryMap&) const final;
 
-  AffineTransform LocalSVGTransform() const final { return local_transform_; }
-  void SetNeedsTransformUpdate() override { needs_transform_update_ = true; }
+  AffineTransform LocalSVGTransform() const final {
+    NOT_DESTROYED();
+    return local_transform_;
+  }
+  void SetNeedsTransformUpdate() override {
+    NOT_DESTROYED();
+    needs_transform_update_ = true;
+  }
 
-  PaintLayerType LayerTypeRequired() const override { return kNoPaintLayer; }
+  PaintLayerType LayerTypeRequired() const override {
+    NOT_DESTROYED();
+    return kNoPaintLayer;
+  }
 
   SVGElement* GetElement() const;
 
@@ -64,32 +70,32 @@ class LayoutSVGBlock : public LayoutBlockFlow {
   bool MapToVisualRectInAncestorSpaceInternal(
       const LayoutBoxModelObject* ancestor,
       TransformState&,
-      VisualRectFlags = kDefaultVisualRectFlags) const final;
+      VisualRectFlags) const final;
 
   AffineTransform local_transform_;
   bool needs_transform_update_ : 1;
   bool transform_uses_reference_box_ : 1;
 
-  bool IsOfType(LayoutObjectType type) const override {
-    return type == kLayoutObjectSVG || LayoutBlockFlow::IsOfType(type);
+  bool IsSVG() const final {
+    NOT_DESTROYED();
+    return true;
   }
 
-  bool CheckForImplicitTransformChange(bool bbox_changed) const;
-  bool UpdateTransformAfterLayout(bool bounds_changed);
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
+  bool CheckForImplicitTransformChange(const SVGLayoutInfo&,
+                                       bool bbox_changed) const;
+  void UpdateTransformBeforeLayout();
+  bool UpdateTransformAfterLayout(const SVGLayoutInfo&, bool bounds_changed);
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const StyleChangeContext&) override;
+  bool ShouldBeHandledAsFloating(const ComputedStyle&) const override {
+    NOT_DESTROYED();
+    return false;
+  }
 
  private:
   // LayoutSVGBlock subclasses should use GetElement() instead.
   void GetNode() const = delete;
-
-  PhysicalRect VisualRectInDocument(VisualRectFlags) const final;
-
-  void UpdateFromStyle() final;
-
-  bool NodeAtPoint(HitTestResult&,
-                   const HitTestLocation&,
-                   const PhysicalOffset& accumulated_offset,
-                   HitTestAction) override;
 };
 
 }  // namespace blink

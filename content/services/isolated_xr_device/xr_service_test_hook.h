@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,16 +7,19 @@
 
 #include <memory>
 
-#include "device/vr/public/mojom/browser_test_interfaces.mojom.h"
+#include "device/vr/public/mojom/test/browser_test_interfaces.mojom.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 
-namespace device {
+namespace webxr {
 class XRTestHookWrapper;
+}
 
-class XRServiceTestHook : public device_test::mojom::XRServiceTestHook {
+namespace device {
+
+class XRServiceTestHook final : public device_test::mojom::XRServiceTestHook {
  public:
   XRServiceTestHook();
-  ~XRServiceTestHook() final;
+  ~XRServiceTestHook() override;
 
   using DeviceCrashCallback = device_test::mojom::XRServiceTestHook::
       TerminateDeviceServiceProcessForTestingCallback;
@@ -28,7 +31,7 @@ class XRServiceTestHook : public device_test::mojom::XRServiceTestHook {
       DeviceCrashCallback callback) override;
 
  private:
-  std::unique_ptr<XRTestHookWrapper> wrapper_;
+  std::unique_ptr<webxr::XRTestHookWrapper> wrapper_;
 };
 
 }  // namespace device

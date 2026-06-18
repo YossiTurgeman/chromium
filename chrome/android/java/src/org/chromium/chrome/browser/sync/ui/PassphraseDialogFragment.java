@@ -1,17 +1,16 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.sync.ui;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.app.Dialog;
-import android.content.Context;
 import android.content.DialogInterface;
 import android.content.DialogInterface.OnClickListener;
-import android.content.Intent;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
-import android.net.Uri;
 import android.os.Bundle;
 import android.text.SpannableString;
 import android.text.method.LinkMovementMethod;
@@ -26,47 +25,38 @@ import android.widget.TextView;
 import android.widget.TextView.OnEditorActionListener;
 
 import androidx.appcompat.app.AlertDialog;
-import androidx.browser.customtabs.CustomTabsIntent;
 import androidx.fragment.app.DialogFragment;
 import androidx.fragment.app.Fragment;
 
-import org.chromium.base.ApiCompatibilityUtils;
-import org.chromium.base.ContextUtils;
-import org.chromium.base.IntentUtils;
-import org.chromium.base.Log;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.ChromeStringConstants;
-import org.chromium.chrome.browser.help.HelpAndFeedback;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.sync.ProfileSyncService;
-import org.chromium.components.sync.PassphraseType;
+import org.chromium.chrome.browser.profiles.ProfileManager;
+import org.chromium.chrome.browser.sync.SyncServiceFactory;
+import org.chromium.chrome.browser.sync.settings.SyncSettingsUtils;
+import org.chromium.components.sync.SyncService;
 import org.chromium.ui.text.SpanApplier;
 import org.chromium.ui.text.SpanApplier.SpanInfo;
 
-/**
- * Dialog to ask to user to enter their sync passphrase.
- */
+/** Dialog to ask to user to enter their sync passphrase. */
+@NullMarked
 public class PassphraseDialogFragment extends DialogFragment implements OnClickListener {
-
     private static final String TAG = "Sync_UI";
 
-    /**
-     * A listener for passphrase events.
-     */
-    public interface Listener {
+    /** A delegate for passphrase events/dependencies. */
+    public interface Delegate {
         /**
          * @return whether passphrase was valid.
          */
         boolean onPassphraseEntered(String passphrase);
 
         void onPassphraseCanceled();
-    }
 
-    private static final int PASSPHRASE_DIALOG_OK = 0;
-    private static final int PASSPHRASE_DIALOG_ERROR = 1;
-    private static final int PASSPHRASE_DIALOG_CANCEL = 2;
-    private static final int PASSPHRASE_DIALOG_RESET_LINK = 3;
-    private static final int PASSPHRASE_DIALOG_LIMIT = 4;
+        /** Return the Profile associated with the passphrase. */
+        Profile getProfile();
+    }
 
     private EditText mPassphraseEditText;
     private TextView mVerifyingTextView;
@@ -74,11 +64,8 @@ public class PassphraseDialogFragment extends DialogFragment implements OnClickL
     private Drawable mOriginalBackground;
     private Drawable mErrorBackground;
 
-    /**
-     * Create a new instanceof of {@link PassphraseDialogFragment} and set its arguments.
-     */
-    public static PassphraseDialogFragment newInstance(Fragment target) {
-        assert ProfileSyncService.get() != null;
+    /** Create a new instanceof of {@link PassphraseDialogFragment} and set its arguments. */
+    public static PassphraseDialogFragment newInstance(@Nullable Fragment target) {
         PassphraseDialogFragment dialog = new PassphraseDialogFragment();
         if (target != null) {
             dialog.setTargetFragment(target, -1);
@@ -86,48 +73,62 @@ public class PassphraseDialogFragment extends DialogFragment implements OnClickL
         return dialog;
     }
 
+    private Profile getProfile() {
+        Profile profile = getDelegate().getProfile();
+        assert profile != null : "Attempting to use PassphraseDialogFragment with a null profile";
+        // TODO(crbug/327687076): Remove the following profile fallback assuming no asserts are
+        //                        triggered for the above profile assert.
+        return profile == null ? ProfileManager.getLastUsedRegularProfile() : profile;
+    }
+
+    @Initializer
     @Override
-    public Dialog onCreateDialog(Bundle savedInstanceState) {
+    public Dialog onCreateDialog(@Nullable Bundle savedInstanceState) {
+        assert SyncServiceFactory.getForProfile(getProfile()) != null;
+
         LayoutInflater inflater = getActivity().getLayoutInflater();
         View v = inflater.inflate(R.layout.sync_enter_passphrase, null);
 
-        TextView promptText = (TextView) v.findViewById(R.id.prompt_text);
+        TextView promptText = v.findViewById(R.id.prompt_text);
         promptText.setText(getPromptText());
-        promptText.setMovementMethod(LinkMovementMethod.getInstance());
 
-        TextView resetText = (TextView) v.findViewById(R.id.reset_text);
+        TextView resetText = v.findViewById(R.id.reset_text);
         resetText.setText(getResetText());
         resetText.setMovementMethod(LinkMovementMethod.getInstance());
         resetText.setVisibility(View.VISIBLE);
 
-        mVerifyingTextView = (TextView) v.findViewById(R.id.verifying);
+        mVerifyingTextView = v.findViewById(R.id.verifying);
 
-        mPassphraseEditText = (EditText) v.findViewById(R.id.passphrase);
-        mPassphraseEditText.setOnEditorActionListener(new OnEditorActionListener() {
-            @Override
-            public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
-                if (actionId == EditorInfo.IME_ACTION_NEXT) {
-                    handleSubmit();
-                }
-                return false;
-            }
-        });
+        mPassphraseEditText = v.findViewById(R.id.passphrase);
+        mPassphraseEditText.setOnEditorActionListener(
+                new OnEditorActionListener() {
+                    @Override
+                    public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                        if (actionId == EditorInfo.IME_ACTION_NEXT) {
+                            handleSubmit();
+                        }
+                        return false;
+                    }
+                });
 
         // Create a new background Drawable for the passphrase EditText to use when the user has
         // entered an invalid potential password.
-        // https://crbug.com/602943 was caused by modifying the Drawable from getBackground()
+        // https://crbug.com/41248831 was caused by modifying the Drawable from getBackground()
         // without taking a copy.
         mOriginalBackground = mPassphraseEditText.getBackground();
-        mErrorBackground = mOriginalBackground.getConstantState().newDrawable();
-        mErrorBackground.mutate().setColorFilter(
-                ApiCompatibilityUtils.getColor(getResources(), R.color.input_underline_error_color),
-                PorterDuff.Mode.SRC_IN);
+        mErrorBackground = assumeNonNull(mOriginalBackground.getConstantState()).newDrawable();
+        mErrorBackground
+                .mutate()
+                .setColorFilter(
+                        getContext().getColor(R.color.input_underline_error_color),
+                        PorterDuff.Mode.SRC_IN);
 
         final AlertDialog d =
-                new AlertDialog.Builder(getActivity(), R.style.Theme_Chromium_AlertDialog)
+                new AlertDialog.Builder(getActivity(), R.style.ThemeOverlay_BrowserUI_AlertDialog)
                         .setView(v)
-                        .setPositiveButton(R.string.submit,
-                                new Dialog.OnClickListener() {
+                        .setPositiveButton(
+                                R.string.submit,
+                                new OnClickListener() {
                                     @Override
                                     public void onClick(DialogInterface d, int which) {
                                         // We override the onclick. This is a hack to not dismiss
@@ -136,22 +137,24 @@ public class PassphraseDialogFragment extends DialogFragment implements OnClickL
                                     }
                                 })
                         .setNegativeButton(R.string.cancel, this)
-                        .setTitle(R.string.sign_in_google_account)
+                        .setTitle(R.string.sync_enter_passphrase_title)
                         .create();
 
         d.getDelegate().setHandleNativeActionModesEnabled(false);
-        d.setOnShowListener(new DialogInterface.OnShowListener() {
-            @Override
-            public void onShow(DialogInterface dialog) {
-                Button b = d.getButton(AlertDialog.BUTTON_POSITIVE);
-                b.setOnClickListener(new View.OnClickListener() {
+        d.setOnShowListener(
+                new DialogInterface.OnShowListener() {
                     @Override
-                    public void onClick(View view) {
-                        handleSubmit();
+                    public void onShow(DialogInterface dialog) {
+                        Button b = d.getButton(AlertDialog.BUTTON_POSITIVE);
+                        b.setOnClickListener(
+                                new View.OnClickListener() {
+                                    @Override
+                                    public void onClick(View view) {
+                                        handleSubmit();
+                                    }
+                                });
                     }
                 });
-            }
-        });
         return d;
     }
 
@@ -168,79 +171,33 @@ public class PassphraseDialogFragment extends DialogFragment implements OnClickL
         super.onResume();
     }
 
-    private SpannableString applyInProductHelpSpan(
-            String stringWithLearnMoreTag, String helpContext) {
-        return SpanApplier.applySpans(stringWithLearnMoreTag,
-                new SpanInfo("<learnmore>", "</learnmore>", new ClickableSpan() {
-                    @Override
-                    public void onClick(View view) {
-                        HelpAndFeedback.getInstance().show(getActivity(), helpContext,
-                                Profile.getLastUsedRegularProfile(), null);
-                    }
-                }));
-    }
-
     private SpannableString getPromptText() {
-        ProfileSyncService pss = ProfileSyncService.get();
-        String accountName = pss.getCurrentSignedInAccountText() + "\n\n";
-        @PassphraseType
-        int passphraseType = pss.getPassphraseType();
-        if (pss.hasExplicitPassphraseTime()) {
-            String syncPassphraseHelpContext =
-                    getString(R.string.help_context_change_sync_passphrase);
-            switch (passphraseType) {
-                case PassphraseType.FROZEN_IMPLICIT_PASSPHRASE:
-                    return applyInProductHelpSpan(
-                            accountName + pss.getSyncEnterGooglePassphraseBodyWithDateText(),
-                            syncPassphraseHelpContext);
-                case PassphraseType.CUSTOM_PASSPHRASE:
-                    return applyInProductHelpSpan(
-                            accountName + pss.getSyncEnterCustomPassphraseBodyWithDateText(),
-                            syncPassphraseHelpContext);
-                case PassphraseType.IMPLICIT_PASSPHRASE: // Falling through intentionally.
-                case PassphraseType.KEYSTORE_PASSPHRASE: // Falling through intentionally.
-                case PassphraseType.TRUSTED_VAULT_PASSPHRASE: // Falling through intentionally.
-                default:
-                    Log.w(TAG, "Found incorrect passphrase type " + passphraseType
-                                    + ". Falling back to default string.");
-            }
-        }
-        return new SpannableString(accountName + pss.getSyncEnterCustomPassphraseBodyText());
+        SyncService syncService = assumeNonNull(SyncServiceFactory.getForProfile(getProfile()));
+        String accountName =
+                getString(
+                                R.string.sync_account_info,
+                                assumeNonNull(syncService.getAccountInfo()).getEmail())
+                        + "\n\n";
+        return new SpannableString(
+                accountName + getString(R.string.sync_enter_passphrase_body_with_email));
     }
 
     private SpannableString getResetText() {
-        final Context context = getActivity();
         return SpanApplier.applySpans(
-                context.getString(R.string.sync_passphrase_reset_instructions),
-                new SpanInfo("<resetlink>", "</resetlink>", new ClickableSpan() {
-                    @Override
-                    public void onClick(View view) {
-                        Uri syncDashboardUrl = Uri.parse(ChromeStringConstants.SYNC_DASHBOARD_URL);
-                        Intent intent = new Intent(Intent.ACTION_VIEW, syncDashboardUrl);
-                        intent.setPackage(ContextUtils.getApplicationContext().getPackageName());
-                        IntentUtils.safePutBinderExtra(
-                                intent, CustomTabsIntent.EXTRA_SESSION, null);
-                        context.startActivity(intent);
-                    }
-                }));
-    }
-
-    /**
-     * @return whether the incorrect passphrase text is currently visible.
-     */
-    private boolean isIncorrectPassphraseVisible() {
-        // Check if the verifying TextView is currently showing the incorrect passphrase text.
-        String incorrectPassphraseMessage =
-                getResources().getString(R.string.sync_passphrase_incorrect);
-        String verifyMessage = mVerifyingTextView.getText().toString();
-        return verifyMessage.equals(incorrectPassphraseMessage);
+                getString(R.string.sync_passphrase_recover),
+                new SpanInfo(
+                        "BEGIN_LINK",
+                        "END_LINK",
+                        new ClickableSpan() {
+                            @Override
+                            public void onClick(View view) {
+                                SyncSettingsUtils.openSyncDashboard(getActivity());
+                            }
+                        }));
     }
 
     private void handleCancel() {
-        int cancelReason = isIncorrectPassphraseVisible()
-                ? PASSPHRASE_DIALOG_ERROR
-                : PASSPHRASE_DIALOG_CANCEL;
-        getListener().onPassphraseCanceled();
+        getDelegate().onPassphraseCanceled();
     }
 
     private void handleSubmit() {
@@ -248,27 +205,24 @@ public class PassphraseDialogFragment extends DialogFragment implements OnClickL
         mVerifyingTextView.setText(R.string.sync_verifying);
 
         String passphrase = mPassphraseEditText.getText().toString();
-        boolean success = getListener().onPassphraseEntered(passphrase);
+        boolean success = getDelegate().onPassphraseEntered(passphrase);
         if (!success) {
             invalidPassphrase();
         }
     }
 
-    private Listener getListener() {
+    private Delegate getDelegate() {
         Fragment target = getTargetFragment();
-        if (target instanceof Listener) {
-            return (Listener) target;
+        if (target instanceof Delegate) {
+            return (Delegate) target;
         }
-        return (Listener) getActivity();
+        return (Delegate) getActivity();
     }
 
-    /**
-     * Notify this fragment that the passphrase the user entered is incorrect.
-     */
+    /** Notify this fragment that the passphrase the user entered is incorrect. */
     private void invalidPassphrase() {
         mVerifyingTextView.setText(R.string.sync_passphrase_incorrect);
-        mVerifyingTextView.setTextColor(ApiCompatibilityUtils.getColor(getResources(),
-                R.color.input_underline_error_color));
+        mVerifyingTextView.setTextColor(getContext().getColor(R.color.input_underline_error_color));
 
         mPassphraseEditText.setBackground(mErrorBackground);
     }

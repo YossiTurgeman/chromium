@@ -1,31 +1,35 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.omaha;
 
-import android.content.Context;
-
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.omaha.OmahaBase.PostResult;
 
 /** Delegates calls out from {@link OmahaBase}. */
+@NullMarked
 public abstract class OmahaDelegate {
-    private RequestGenerator mRequestGenerator;
+    private @Nullable RequestGenerator mRequestGenerator;
 
     OmahaDelegate() {}
 
-    /** @return Context that is used to interact with the system. */
-    abstract Context getContext();
-
-    /** @return Whether Chrome is installed as part of the system image. */
+    /**
+     * @return Whether Chrome is installed as part of the system image.
+     */
     abstract boolean isInSystemImage();
 
-    /** @return The scheduler used to trigger jobs. */
+    /**
+     * @return The scheduler used to trigger jobs.
+     */
     abstract ExponentialBackoffScheduler getScheduler();
 
-    /** @return The {@link RequestGenerator} used to create Omaha XML. */
-    final RequestGenerator getRequestGenerator() {
-        if (mRequestGenerator == null) mRequestGenerator = createRequestGenerator(getContext());
+    /**
+     * @return The {@link RequestGenerator} used to create Omaha XML.
+     */
+    final @Nullable RequestGenerator getRequestGenerator() {
+        if (mRequestGenerator == null) mRequestGenerator = createRequestGenerator();
         return mRequestGenerator;
     }
 
@@ -43,12 +47,13 @@ public abstract class OmahaDelegate {
     abstract void scheduleService(long currentTimestampMs, long nextTimestampMs);
 
     /** Creates a {@link RequestGenerator}. */
-    abstract RequestGenerator createRequestGenerator(Context context);
+    abstract @Nullable RequestGenerator createRequestGenerator();
 
     /**
      * Called when {@link OmahaBase#registerNewRequest} finishes.
+     *
      * @param timestampRequestMs When the next active user request should be generated.
-     * @param timestampPostMs    Earliest time the next POST should be allowed.
+     * @param timestampPostMs Earliest time the next POST should be allowed.
      */
     void onRegisterNewRequestDone(long timestampRequestMs, long timestampPostMs) {}
 

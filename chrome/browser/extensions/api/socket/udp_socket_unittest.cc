@@ -1,6 +1,8 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "extensions/browser/api/socket/udp_socket.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -8,17 +10,16 @@
 #include <memory>
 #include <string>
 
-#include "base/bind.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
-#include "base/stl_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/test_timeouts.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "build/build_config.h"
 #include "chrome/browser/extensions/extension_service_test_base.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
 #include "content/public/browser/storage_partition.h"
-#include "extensions/browser/api/socket/udp_socket.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/base/io_buffer.h"
@@ -33,12 +34,14 @@ namespace extensions {
 class UDPSocketUnitTest : public extensions::ExtensionServiceTestBase {
  protected:
   // extensions::ExtensionServiceTestBase:
-  void SetUp() override { InitializeEmptyExtensionService(); }
+  void SetUp() override {
+    extensions::ExtensionServiceTestBase::SetUp();
+    InitializeEmptyExtensionService();
+  }
 
   std::unique_ptr<UDPSocket> CreateSocket() {
     network::mojom::NetworkContext* network_context =
-        content::BrowserContext::GetDefaultStoragePartition(profile())
-            ->GetNetworkContext();
+        profile()->GetDefaultStoragePartition()->GetNetworkContext();
     mojo::PendingRemote<network::mojom::UDPSocket> socket;
     mojo::PendingRemote<network::mojom::UDPSocketListener> listener_remote;
     mojo::PendingReceiver<network::mojom::UDPSocketListener> listener_receiver =
@@ -64,7 +67,7 @@ static void OnCompleted(int bytes_read,
 }
 
 static const char kTestMessage[] = "$$TESTMESSAGETESTMESSAGETESTMESSAGETEST$$";
-static const int kTestMessageLength = base::size(kTestMessage);
+static const int kTestMessageLength = std::size(kTestMessage);
 
 net::AddressList CreateAddressList(const char* address_string, int port) {
   net::IPAddress ip;
@@ -80,7 +83,7 @@ TEST_F(UDPSocketUnitTest, TestUDPSocketRecvFrom) {
   std::unique_ptr<UDPSocket> socket = CreateSocket();
 
   // Confirm that we can call two RecvFroms in quick succession without
-  // triggering crbug.com/146606.
+  // triggering crbug.com/40276233.
   socket->Connect(CreateAddressList("127.0.0.1", 40000),
                   base::BindOnce(&OnConnected));
   socket->RecvFrom(4096, base::BindOnce(&OnCompleted));
@@ -140,24 +143,24 @@ TEST_F(UDPSocketUnitTest, TestUDPMulticastLoopbackMode) {
 
 // Send a test multicast packet every second.
 // Once the target socket received the packet, the message loop will exit.
-static void SendMulticastPacket(const base::Closure& quit_run_loop,
+static void SendMulticastPacket(base::OnceClosure quit_run_loop,
                                 UDPSocket* src,
                                 int result) {
   if (result == 0) {
-    scoped_refptr<net::IOBuffer> data =
-        base::MakeRefCounted<net::WrappedIOBuffer>(kTestMessage);
+    auto data = base::MakeRefCounted<net::WrappedIOBuffer>(kTestMessage);
     src->Write(data, kTestMessageLength, base::BindOnce(&OnSendCompleted));
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
-        base::BindOnce(&SendMulticastPacket, quit_run_loop, src, result),
-        base::TimeDelta::FromSeconds(1));
+        base::BindOnce(&SendMulticastPacket, std::move(quit_run_loop), src,
+                       result),
+        base::Seconds(1));
   } else {
-    quit_run_loop.Run();
+    std::move(quit_run_loop).Run();
     FAIL() << "Failed to connect to multicast address. Error code: " << result;
   }
 }
 
-static void OnMulticastReadCompleted(const base::Closure& quit_run_loop,
+static void OnMulticastReadCompleted(base::OnceClosure quit_run_loop,
                                      bool* packet_received,
                                      int count,
                                      scoped_refptr<net::IOBuffer> io_buffer,
@@ -165,12 +168,19 @@ static void OnMulticastReadCompleted(const base::Closure& quit_run_loop,
                                      const std::string& ip,
                                      uint16_t port) {
   EXPECT_EQ(kTestMessageLength, count);
-  EXPECT_EQ(0, strncmp(io_buffer->data(), kTestMessage, kTestMessageLength));
+  UNSAFE_TODO(EXPECT_EQ(
+      0, strncmp(io_buffer->data(), kTestMessage, kTestMessageLength)));
   *packet_received = true;
-  quit_run_loop.Run();
+  std::move(quit_run_loop).Run();
 }
 
-TEST_F(UDPSocketUnitTest, TestUDPMulticastRecv) {
+// TODO(crbug.com/40182531): Test is flaky on Mac.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_TestUDPMulticastRecv DISABLED_TestUDPMulticastRecv
+#else
+#define MAYBE_TestUDPMulticastRecv TestUDPMulticastRecv
+#endif
+TEST_F(UDPSocketUnitTest, MAYBE_TestUDPMulticastRecv) {
   const int kPort = 9999;
   const char kGroup[] = "237.132.100.17";
   bool packet_received = false;
@@ -201,7 +211,7 @@ TEST_F(UDPSocketUnitTest, TestUDPMulticastRecv) {
       base::BindOnce(&SendMulticastPacket, run_loop.QuitClosure(), src.get()));
 
   // If not received within the test action timeout, quit the message loop.
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, run_loop.QuitClosure(), TestTimeouts::action_timeout());
 
   run_loop.Run();

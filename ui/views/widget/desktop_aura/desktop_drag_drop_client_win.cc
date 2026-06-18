@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,12 @@
 
 #include <memory>
 
+#include "base/auto_reset.h"
+#include "base/notimplemented.h"
+#include "base/scoped_observation.h"
 #include "base/threading/hang_watcher.h"
+#include "ui/aura/env.h"
+#include "ui/aura/window_observer.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
 #include "ui/base/dragdrop/drag_source_win.h"
 #include "ui/base/dragdrop/drop_target_event.h"
@@ -14,51 +19,88 @@
 #include "ui/base/dragdrop/os_exchange_data_provider_win.h"
 #include "ui/base/win/event_creation_utils.h"
 #include "ui/display/win/screen_win.h"
+#include "ui/views/views_features.h"
 #include "ui/views/widget/desktop_aura/desktop_drop_target_win.h"
 #include "ui/views/widget/desktop_aura/desktop_window_tree_host_win.h"
 
 namespace views {
 
+namespace {
+
+class SourceWindowObserver : public aura::WindowObserver {
+ public:
+  explicit SourceWindowObserver(aura::Window* window)
+      : scoped_observation_(this) {
+    scoped_observation_.Observe(window);
+  }
+
+  // aura::WindowObserver:
+  void OnWindowDestroying(aura::Window* window) override {
+    source_window_alive_ = false;
+    scoped_observation_.Reset();
+  }
+
+  bool source_window_alive() { return source_window_alive_; }
+
+ private:
+  bool source_window_alive_ = true;
+  base::ScopedObservation<aura::Window, aura::WindowObserver>
+      scoped_observation_;
+};
+
+bool g_is_dragging = false;
+
+}  // namespace
+
 DesktopDragDropClientWin::DesktopDragDropClientWin(
     aura::Window* root_window,
     HWND window,
     DesktopWindowTreeHostWin* desktop_host)
-    : drag_drop_in_progress_(false),
-      drag_operation_(0),
-      desktop_host_(desktop_host) {
+    : desktop_host_(desktop_host) {
   drop_target_ = new DesktopDropTargetWin(root_window);
   drop_target_->Init(window);
 }
 
 DesktopDragDropClientWin::~DesktopDragDropClientWin() {
-  if (drag_drop_in_progress_)
+  if (g_is_dragging) {
     DragCancel();
+  }
 }
 
-int DesktopDragDropClientWin::StartDragAndDrop(
+ui::mojom::DragOperation DesktopDragDropClientWin::StartDragAndDrop(
     std::unique_ptr<ui::OSExchangeData> data,
     aura::Window* root_window,
     aura::Window* source_window,
     const gfx::Point& screen_location,
-    int operation,
+    int allowed_operations,
     ui::mojom::DragEventSource source) {
-  drag_drop_in_progress_ = true;
-  drag_operation_ = operation;
-  if (source == ui::mojom::DragEventSource::kTouch) {
-    gfx::Point screen_point = display::win::ScreenWin::DIPToScreenPoint(
-        {screen_location.x(), screen_location.y()});
-    // Send a mouse down and mouse move before do drag drop runs its own event
-    // loop. This is required for ::DoDragDrop to start the drag.
-    ui::SendMouseEvent(screen_point,
-                       MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_ABSOLUTE);
-    ui::SendMouseEvent(screen_point, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE);
-    desktop_host_->SetInTouchDrag(true);
-    // Gesture state gets left in a state where you can't start
-    // another drag, unless it's cleaned up. Cleaning it up before starting
-    // drag drop also fixes an issue with getting two kGestureScrollBegin events
-    // in a row. See crbug.com/1120809.
-    source_window->CleanupGestureState();
+  CHECK(!g_is_dragging);
+  if (desktop_host_->IsInNativeMoveResizeLoop()) {
+    return ui::PreferredDragOperation(
+        ui::DragDropTypes::DropEffectToDragOperation(DROPEFFECT_NONE));
   }
+  gfx::Point touch_screen_point;
+  if (source == ui::mojom::DragEventSource::kTouch) {
+    display::Screen* screen = display::Screen::Get();
+    CHECK(screen);
+    aura::Window* window =
+        screen->GetWindowAtScreenPoint(screen->GetCursorScreenPoint());
+    touch_screen_point = screen_location;
+    source_window->GetHost()->ConvertDIPToPixels(&touch_screen_point);
+    bool touch_down = aura::Env::GetInstance()->is_touch_down();
+    bool touch_over_other_window =
+        !window || window->GetRootWindow() != root_window;
+    // Check that the cursor is over the window being dragged from. If not,
+    // don't start the drag because ::DoDragDrop will not do the drag.
+    if (!touch_down || touch_over_other_window) {
+      return ui::PreferredDragOperation(
+          ui::DragDropTypes::DropEffectToDragOperation(DROPEFFECT_NONE));
+    }
+    desktop_host_->StartTouchDrag(touch_screen_point);
+  }
+  // Observe the source window to avoid accessing it if the window is
+  // destroyed while the drag is ongoing.
+  SourceWindowObserver source_window_observer(source_window);
   base::WeakPtr<DesktopDragDropClientWin> alive(weak_factory_.GetWeakPtr());
 
   drag_source_ = ui::DragSourceWin::Create();
@@ -68,36 +110,46 @@ int DesktopDragDropClientWin::StartDragAndDrop(
       true);
 
   DWORD effect;
+  base::AutoReset<bool> drag_scoper(&g_is_dragging, true);
 
-  // Disable hang watching until the end of the function since the user can take
-  // unbounded time to complete the drag. (http://crbug.com/806174)
-  base::HangWatchScopeDisabled disabler;
+  // Never consider the current scope as hung. The hang watching deadline (if
+  // any) is not valid since the user can take unbounded time to complete the
+  // drag. (http://crbug.com/806174)
+  base::HangWatcher::InvalidateActiveExpectations();
 
   HRESULT result = ::DoDragDrop(
       ui::OSExchangeDataProviderWin::GetIDataObject(*data.get()),
       drag_source_.Get(),
-      ui::DragDropTypes::DragOperationToDropEffect(operation), &effect);
-  if (alive && source == ui::mojom::DragEventSource::kTouch) {
-    desktop_host_->SetInTouchDrag(false);
+      ui::DragDropTypes::DragOperationToDropEffect(allowed_operations),
+      &effect);
+  if (source == ui::mojom::DragEventSource::kTouch) {
+    if (source_window_observer.source_window_alive()) {
+      // Kill the gesture that initiated the drag to avoid issues with lingering
+      // touch events.
+      source_window->CleanupGestureState();
+    }
+    if (alive) {
+      desktop_host_->FinishTouchDrag(touch_screen_point);
+    }
   }
   drag_source_copy->set_data(nullptr);
 
-  if (alive)
-    drag_drop_in_progress_ = false;
-
-  if (result != DRAGDROP_S_DROP)
+  if (result != DRAGDROP_S_DROP) {
     effect = DROPEFFECT_NONE;
+  }
 
-  return ui::DragDropTypes::DropEffectToDragOperation(effect);
+  return ui::PreferredDragOperation(
+      ui::DragDropTypes::DropEffectToDragOperation(effect));
 }
 
 void DesktopDragDropClientWin::DragCancel() {
-  drag_source_->CancelDrag();
-  drag_operation_ = 0;
+  if (drag_source_) {
+    drag_source_->CancelDrag();
+  }
 }
 
 bool DesktopDragDropClientWin::IsDragDropInProgress() {
-  return drag_drop_in_progress_;
+  return g_is_dragging;
 }
 
 void DesktopDragDropClientWin::AddObserver(

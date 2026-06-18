@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,13 @@
 #include <utility>
 
 #include "base/memory/ref_counted.h"
+#include "components/version_info/channel.h"
 #include "extensions/common/extension_builder.h"
 #include "extensions/common/features/feature_channel.h"
 #include "extensions/common/features/feature_session_type.h"
+#include "extensions/common/mojom/feature_session_type.mojom.h"
 #include "extensions/common/permissions/usb_device_permission.h"
 #include "extensions/common/permissions/usb_device_permission_data.h"
-#include "extensions/common/value_builder.h"
 #include "services/device/public/cpp/test/fake_usb_device_info.h"
 #include "services/device/public/mojom/usb_device.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -61,33 +62,21 @@ scoped_refptr<device::FakeUsbDeviceInfo> CreateTestUsbDevice(
 }
 
 scoped_refptr<const Extension> CreateTestApp(
-    std::unique_ptr<base::Value> usb_device_permission) {
+    base::Value usb_device_permission) {
   return ExtensionBuilder()
       .SetManifest(
-          DictionaryBuilder()
+          base::DictValue()
               .Set("name", "test app")
               .Set("version", "1")
-              .Set("app",
-                   DictionaryBuilder()
-                       .Set("background",
-                            DictionaryBuilder()
-                                .Set("scripts", ListBuilder()
-                                                    .Append("background.js")
-                                                    .Build())
-                                .Build())
-                       .Build())
+              .Set("app", base::DictValue().Set(
+                              "background",
+                              base::DictValue().Set(
+                                  "scripts",
+                                  base::ListValue().Append("background.js"))))
               .Set("permissions",
-                   ListBuilder()
-                       .Append("usb")
-                       .Append(DictionaryBuilder()
-                                   .Set("usbDevices",
-                                        ListBuilder()
-                                            .Append(std::move(
-                                                usb_device_permission))
-                                            .Build())
-                                   .Build())
-                       .Build())
-              .Build())
+                   base::ListValue().Append("usb").Append(base::DictValue().Set(
+                       "usbDevices", base::ListValue().Append(
+                                         std::move(usb_device_permission))))))
       .Build();
 }
 
@@ -105,14 +94,11 @@ TEST(USBDevicePermissionTest, PermissionDataOrder) {
 }
 
 TEST(USBDevicePermissionTest, CheckVendorAndProductId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("productId", 0x138c)
-          .Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("vendorId", 0x02ad).Set("productId", 0x138c));
 
   UsbDevicePermissionData permission_data;
-  ASSERT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  ASSERT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -145,14 +131,12 @@ TEST(USBDevicePermissionTest, CheckVendorAndProductId) {
 }
 
 TEST(USBDevicePermissionTest, CheckInterfaceId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("productId", 0x138c)
-          .Set("interfaceId", 3)
-          .Build();
+  base::Value permission_data_value(base::DictValue()
+                                        .Set("vendorId", 0x02ad)
+                                        .Set("productId", 0x138c)
+                                        .Set("interfaceId", 3));
   UsbDevicePermissionData permission_data;
-  ASSERT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  ASSERT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -183,10 +167,9 @@ TEST(USBDevicePermissionTest, CheckInterfaceId) {
 }
 
 TEST(USBDevicePermissionTest, InterfaceClass) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder().Set("interfaceClass", 3).Build();
+  base::Value permission_data_value(base::DictValue().Set("interfaceClass", 3));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -202,8 +185,9 @@ TEST(USBDevicePermissionTest, InterfaceClass) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     std::unique_ptr<UsbDevicePermission::CheckParam> param =
@@ -221,13 +205,10 @@ TEST(USBDevicePermissionTest, InterfaceClass) {
 }
 
 TEST(USBDevicePermissionTest, InterfaceClassWithVendorId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("interfaceClass", 3)
-          .Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("vendorId", 0x02ad).Set("interfaceClass", 3));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -242,8 +223,9 @@ TEST(USBDevicePermissionTest, InterfaceClassWithVendorId) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     std::unique_ptr<UsbDevicePermission::CheckParam> param =
@@ -255,8 +237,9 @@ TEST(USBDevicePermissionTest, InterfaceClassWithVendorId) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     std::unique_ptr<UsbDevicePermission::CheckParam> param =
@@ -269,13 +252,10 @@ TEST(USBDevicePermissionTest, InterfaceClassWithVendorId) {
 }
 
 TEST(USBDevicePermissionTest, CheckHidUsbAgainstInterfaceClass) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("interfaceClass", 3)
-          .Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("vendorId", 0x02ad).Set("interfaceClass", 3));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -289,8 +269,9 @@ TEST(USBDevicePermissionTest, CheckHidUsbAgainstInterfaceClass) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     std::unique_ptr<UsbDevicePermission::CheckParam> param =
@@ -301,8 +282,9 @@ TEST(USBDevicePermissionTest, CheckHidUsbAgainstInterfaceClass) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     std::unique_ptr<UsbDevicePermission::CheckParam> param =
@@ -314,13 +296,10 @@ TEST(USBDevicePermissionTest, CheckHidUsbAgainstInterfaceClass) {
 }
 
 TEST(USBDevicePermissionTest, CheckHidUsbAgainstDeviceIds) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("productId", 0x138c)
-          .Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("vendorId", 0x02ad).Set("productId", 0x138c));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -343,13 +322,10 @@ TEST(USBDevicePermissionTest, CheckHidUsbAgainstDeviceIds) {
 }
 
 TEST(USBDevicePermissionTest, CheckDeviceAgainstDeviceIds) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("productId", 0x138c)
-          .Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("vendorId", 0x02ad).Set("productId", 0x138c));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -376,10 +352,10 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstDeviceIds) {
 }
 
 TEST(USBDevicePermissionTest, CheckDeviceAgainstDeviceClass) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder().Set("interfaceClass", 0x9).Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("interfaceClass", 0x9));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -395,8 +371,9 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstDeviceClass) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     scoped_refptr<device::FakeUsbDeviceInfo> device =
@@ -408,8 +385,9 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstDeviceClass) {
     EXPECT_TRUE(permission_data.Check(param.get()));
   }
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     scoped_refptr<device::FakeUsbDeviceInfo> device =
@@ -423,17 +401,17 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstDeviceClass) {
 }
 
 TEST(USBDevicePermissionTest, IgnoreNullDeviceClass) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder().Set("interfaceClass", 0).Build();
+  base::Value permission_data_value(base::DictValue().Set("interfaceClass", 0));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     scoped_refptr<device::FakeUsbDeviceInfo> device =
@@ -447,10 +425,10 @@ TEST(USBDevicePermissionTest, IgnoreNullDeviceClass) {
 }
 
 TEST(USBDevicePermissionTest, CheckDeviceAgainstInterfaceClass) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder().Set("interfaceClass", 0x3).Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("interfaceClass", 0x3));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -468,8 +446,9 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstInterfaceClass) {
   {
     // Interface should match inactive configuration when none of configurations
     // is active.
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     scoped_refptr<device::FakeUsbDeviceInfo> device =
@@ -482,8 +461,9 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstInterfaceClass) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     scoped_refptr<device::FakeUsbDeviceInfo> device =
@@ -499,8 +479,9 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstInterfaceClass) {
   {
     // Interface should match inactive configuration when another configuration
     // is active.
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     scoped_refptr<device::FakeUsbDeviceInfo> device =
@@ -514,8 +495,9 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstInterfaceClass) {
   }
 
   {
-    std::unique_ptr<base::AutoReset<FeatureSessionType>> scoped_session_type(
-        ScopedCurrentFeatureSessionType(FeatureSessionType::KIOSK));
+    std::unique_ptr<base::AutoReset<mojom::FeatureSessionType>>
+        scoped_session_type(
+            ScopedCurrentFeatureSessionType(mojom::FeatureSessionType::kKiosk));
     ScopedCurrentChannel channel(version_info::Channel::DEV);
 
     scoped_refptr<device::FakeUsbDeviceInfo> device =
@@ -529,14 +511,12 @@ TEST(USBDevicePermissionTest, CheckDeviceAgainstInterfaceClass) {
 }
 
 TEST(USBDevicePermissionTest, CheckDeviceAndInterfaceId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("productId", 0x138c)
-          .Set("interfaceId", 3)
-          .Build();
+  base::Value permission_data_value(base::DictValue()
+                                        .Set("vendorId", 0x02ad)
+                                        .Set("productId", 0x138c)
+                                        .Set("interfaceId", 3));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -564,13 +544,10 @@ TEST(USBDevicePermissionTest, CheckDeviceAndInterfaceId) {
 
 TEST(USBDevicePermissionTest,
      CheckDeviceAndInterfaceIDAgainstMissingInterfaceId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("productId", 0x138c)
-          .Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("vendorId", 0x02ad).Set("productId", 0x138c));
   UsbDevicePermissionData permission_data;
-  EXPECT_TRUE(permission_data.FromValue(permission_data_value.get()));
+  EXPECT_TRUE(permission_data.FromValue(&permission_data_value));
 
   scoped_refptr<const Extension> app =
       CreateTestApp(std::move(permission_data_value));
@@ -587,39 +564,33 @@ TEST(USBDevicePermissionTest,
 }
 
 TEST(USBDevicePermissionTest, InvalidPermission_NoVendorId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("productId", 0x138c)
-          .Set("interfaceClass", 3)
-          .Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("productId", 0x138c).Set("interfaceClass", 3));
   UsbDevicePermissionData permission_data;
-  ASSERT_FALSE(permission_data.FromValue(permission_data_value.get()));
+  ASSERT_FALSE(permission_data.FromValue(&permission_data_value));
 }
 
 TEST(USBDevicePermissionTest, InvalidPermission_OnlyVendorId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder().Set("vendorId", 0x02ad).Build();
+  base::Value permission_data_value(base::DictValue().Set("vendorId", 0x02ad));
   UsbDevicePermissionData permission_data;
-  ASSERT_FALSE(permission_data.FromValue(permission_data_value.get()));
+  ASSERT_FALSE(permission_data.FromValue(&permission_data_value));
 }
 
 TEST(USBDevicePermissionTest, InvalidPermission_NoProductIdWithInterfaceId) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder().Set("vendorId", 0x02ad).Set("interfaceId", 3).Build();
+  base::Value permission_data_value(
+      base::DictValue().Set("vendorId", 0x02ad).Set("interfaceId", 3));
   UsbDevicePermissionData permission_data;
-  ASSERT_FALSE(permission_data.FromValue(permission_data_value.get()));
+  ASSERT_FALSE(permission_data.FromValue(&permission_data_value));
 }
 
 TEST(USBDevicePermissionTest, RejectInterfaceIdIfInterfaceClassPresent) {
-  std::unique_ptr<base::Value> permission_data_value =
-      DictionaryBuilder()
-          .Set("vendorId", 0x02ad)
-          .Set("productId", 0x128c)
-          .Set("interfaceId", 3)
-          .Set("interfaceClass", 7)
-          .Build();
+  base::Value permission_data_value(base::DictValue()
+                                        .Set("vendorId", 0x02ad)
+                                        .Set("productId", 0x128c)
+                                        .Set("interfaceId", 3)
+                                        .Set("interfaceClass", 7));
   UsbDevicePermissionData permission_data;
-  ASSERT_FALSE(permission_data.FromValue(permission_data_value.get()));
+  ASSERT_FALSE(permission_data.FromValue(&permission_data_value));
 }
 
 }  // namespace extensions

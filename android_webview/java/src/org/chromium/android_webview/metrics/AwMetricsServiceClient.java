@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,76 +6,121 @@ package org.chromium.android_webview.metrics;
 
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageManager;
 
-import androidx.annotation.VisibleForTesting;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
 
-import org.chromium.base.Log;
+import org.chromium.android_webview.AwBrowserProcess;
+import org.chromium.android_webview.ManifestMetadataUtil;
+import org.chromium.base.ApkInfo;
+import org.chromium.base.ContextUtils;
+import org.chromium.base.StrictModeContext;
 import org.chromium.base.ThreadUtils;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+
+import java.io.File;
 
 /**
  * Determines user consent and app opt-out for metrics. See aw_metrics_service_client.h for more
  * explanation.
  */
 @JNINamespace("android_webview")
+@NullMarked
 public class AwMetricsServiceClient {
-    private static final String TAG = "AwMetricsServiceCli-";
+    private static final String PLAY_STORE_PACKAGE_NAME = "com.android.vending";
+    private static final String METRICS_SUBDIR = ".webview";
 
-    // Individual apps can use this meta-data tag in their manifest to opt out of metrics
-    // reporting. See https://developer.android.com/reference/android/webkit/WebView.html
-    private static final String OPT_OUT_META_DATA_STR = "android.webkit.WebView.MetricsOptOut";
-
-    /**
-     * Find out if the App opted out from metrics collection using the meta-data tag.
-     *
-     * @param ctx App {@link Context}.
-     */
-    public static boolean isAppOptedOut(Context ctx) {
-        try {
-            ApplicationInfo info = ctx.getPackageManager().getApplicationInfo(
-                    ctx.getPackageName(), PackageManager.GET_META_DATA);
-            if (info.metaData == null) {
-                // null means no such tag was found.
-                return false;
-            }
-            // getBoolean returns false if the key is not found, which is what we want.
-            return info.metaData.getBoolean(OPT_OUT_META_DATA_STR);
-        } catch (PackageManager.NameNotFoundException e) {
-            // This should never happen.
-            Log.e(TAG, "App could not find itself by package name!");
-            // The conservative thing is to assume the app HAS opted out.
-            return true;
-        }
-    }
+    private static @InstallerPackageType @Nullable Integer sInstallerPackageTypeForTesting;
 
     /**
      * Set user consent settings.
      *
-     * @param ctx application {@link Context}
      * @param userConsent user consent via Android Usage & diagnostics settings.
-     * @return whether metrics reporting is enabled or not.
      */
-    public static void setConsentSetting(Context ctx, boolean userConsent) {
+    public static void setConsentSetting(boolean userConsent) {
         ThreadUtils.assertOnUiThread();
-        AwMetricsServiceClientJni.get().setHaveMetricsConsent(userConsent, !isAppOptedOut(ctx));
+        AwMetricsServiceClientJni.get()
+                .setHaveMetricsConsent(
+                        userConsent, !ManifestMetadataUtil.isAppOptedOutFromMetricsCollection());
     }
 
-    @VisibleForTesting
     public static void setFastStartupForTesting(boolean fastStartupForTesting) {
         AwMetricsServiceClientJni.get().setFastStartupForTesting(fastStartupForTesting);
     }
 
-    @VisibleForTesting
     public static void setUploadIntervalForTesting(long uploadIntervalMs) {
         AwMetricsServiceClientJni.get().setUploadIntervalForTesting(uploadIntervalMs);
+    }
+
+    /** Sets a callback to run each time after final metrics have been collected. */
+    public static void setOnFinalMetricsCollectedListenerForTesting(Runnable listener) {
+        AwMetricsServiceClientJni.get().setOnFinalMetricsCollectedListenerForTesting(listener);
+    }
+
+    @CalledByNative
+    private static @InstallerPackageType int getInstallerPackageType() {
+        ThreadUtils.assertOnUiThread();
+        if (sInstallerPackageTypeForTesting != null) {
+            return sInstallerPackageTypeForTesting;
+        }
+        // Only record if it's a system app or it was installed from Play Store.
+        Context ctx = ContextUtils.getApplicationContext();
+        if ((ctx.getApplicationInfo().flags & ApplicationInfo.FLAG_SYSTEM) != 0) {
+            return InstallerPackageType.SYSTEM_APP;
+        } else {
+            if (PLAY_STORE_PACKAGE_NAME.equals(ApkInfo.getInstallerPackageName())) {
+                return InstallerPackageType.GOOGLE_PLAY_STORE;
+            }
+        }
+        return InstallerPackageType.OTHER;
+    }
+
+    @CalledByNative
+    private static String getAppPackageName() {
+        // Return this unconditionally; let native code enforce whether or not it's OK to include
+        // this in the logs.
+        return ApkInfo.getHostPackageName();
+    }
+
+    public static void setInstallerPackageTypeForTesting(@InstallerPackageType int type) {
+        ThreadUtils.assertOnUiThread();
+        sInstallerPackageTypeForTesting = type;
+    }
+
+    @CalledByNative
+    @JniType("std::string")
+    private static String getNoBackupFilesDirForMetrics() {
+        if (AwBrowserProcess.isDataDirBasePathOverridden()) {
+            // If the base path has been overridden we shouldn't use the no-backup files directory,
+            // because there's no API for the host app to override that directory. Return an empty
+            // string as we have no directory to use.
+            return "";
+        }
+
+        try (StrictModeContext ignored = StrictModeContext.allowDiskWrites()) {
+            File noBackupFilesDir = ContextUtils.getApplicationContext().getNoBackupFilesDir();
+            String dataDirSuffix = AwBrowserProcess.getProcessDataDirSuffix();
+            String subdir;
+            if (dataDirSuffix == null) {
+                subdir = METRICS_SUBDIR;
+            } else {
+                subdir = METRICS_SUBDIR + "_" + dataDirSuffix;
+            }
+            return new File(noBackupFilesDir, subdir).toString();
+        }
     }
 
     @NativeMethods
     interface Natives {
         void setHaveMetricsConsent(boolean userConsent, boolean appConsent);
+
         void setFastStartupForTesting(boolean fastStartupForTesting);
+
         void setUploadIntervalForTesting(long uploadIntervalMs);
+
+        void setOnFinalMetricsCollectedListenerForTesting(Runnable listener);
     }
 }

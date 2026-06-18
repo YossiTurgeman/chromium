@@ -1,15 +1,17 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/loader/cross_origin_read_blocking_checker.h"
 
-#include "base/callback.h"
+#include <string_view>
+
+#include "base/functional/callback.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "net/base/io_buffer.h"
 #include "net/base/mime_sniffer.h"
-#include "services/network/public/cpp/cross_origin_read_blocking.h"
+#include "services/network/public/cpp/orb/orb_api.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "storage/browser/blob/blob_data_handle.h"
@@ -51,8 +53,9 @@ class CrossOriginReadBlockingChecker::BlobIOState {
   void DidCalculateSize(int result) {
     DCHECK_CURRENTLY_ON(BrowserThread::IO);
     size_t buf_size = net::kMaxBytesToSniff;
-    if (buf_size > blob_reader_->total_size())
+    if (buf_size > blob_reader_->total_size()) {
       buf_size = blob_reader_->total_size();
+    }
     buffer_ = base::MakeRefCounted<net::IOBufferWithSize>(buf_size);
     int bytes_read;
     const storage::BlobReader::Status status = blob_reader_->Read(
@@ -96,35 +99,37 @@ class CrossOriginReadBlockingChecker::BlobIOState {
 CrossOriginReadBlockingChecker::CrossOriginReadBlockingChecker(
     const network::ResourceRequest& request,
     const network::mojom::URLResponseHead& response,
-    const url::Origin& request_initiator_origin_lock,
     const storage::BlobDataHandle& blob_data_handle,
+    network::orb::PerFactoryState* orb_state,
     base::OnceCallback<void(Result)> callback)
     : callback_(std::move(callback)) {
   DCHECK(!callback_.is_null());
-  network::CrossOriginReadBlocking::LogAction(
-      network::CrossOriginReadBlocking::Action::kResponseStarted);
 
-  corb_analyzer_ =
-      std::make_unique<network::CrossOriginReadBlocking::ResponseAnalyzer>(
-          request.url, request.request_initiator, response,
-          request_initiator_origin_lock, request.mode);
-  if (corb_analyzer_->ShouldBlock()) {
-    OnBlocked();
-    return;
+  orb_analyzer_ = network::orb::ResponseAnalyzer::Create(orb_state);
+  auto decision =
+      orb_analyzer_->Init(request.url, request.request_initiator, request.mode,
+                          request.destination, response);
+  switch (decision) {
+    case network::orb::ResponseAnalyzer::Decision::kBlock:
+      OnBlocked();
+      return;
+
+    case network::orb::ResponseAnalyzer::Decision::kAllow:
+      OnAllowed();
+      return;
+
+    case network::orb::ResponseAnalyzer::Decision::kSniffMore:
+      blob_io_state_ = std::make_unique<BlobIOState>(
+          weak_factory_.GetWeakPtr(),
+          std::make_unique<storage::BlobDataHandle>(blob_data_handle));
+      // base::Unretained is safe because |blob_io_state_| will be deleted on
+      // the IO thread.
+      GetIOThreadTaskRunner({})->PostTask(
+          FROM_HERE, base::BindOnce(&BlobIOState::StartSniffing,
+                                    base::Unretained(blob_io_state_.get())));
+      return;
   }
-  if (corb_analyzer_->needs_sniffing()) {
-    blob_io_state_ = std::make_unique<BlobIOState>(
-        weak_factory_.GetWeakPtr(),
-        std::make_unique<storage::BlobDataHandle>(blob_data_handle));
-    // base::Unretained is safe because |blob_io_state_| will be deleted on
-    // the IO thread.
-    GetIOThreadTaskRunner({})->PostTask(
-        FROM_HERE, base::BindOnce(&BlobIOState::StartSniffing,
-                                  base::Unretained(blob_io_state_.get())));
-    return;
-  }
-  DCHECK(corb_analyzer_->ShouldAllow());
-  OnAllowed();
+  NOTREACHED();  // Unrecognized `decision` value?
 }
 
 CrossOriginReadBlockingChecker::~CrossOriginReadBlockingChecker() {
@@ -136,13 +141,11 @@ int CrossOriginReadBlockingChecker::GetNetError() {
 }
 
 void CrossOriginReadBlockingChecker::OnAllowed() {
-  corb_analyzer_->LogAllowedResponse();
   std::move(callback_).Run(Result::kAllowed);
 }
 
 void CrossOriginReadBlockingChecker::OnBlocked() {
-  corb_analyzer_->LogBlockedResponse();
-  std::move(callback_).Run(corb_analyzer_->ShouldReportBlockedResponse()
+  std::move(callback_).Run(orb_analyzer_->ShouldReportBlockedResponse()
                                ? Result::kBlocked_ShouldReport
                                : Result::kBlocked_ShouldNotReport);
 }
@@ -160,13 +163,35 @@ void CrossOriginReadBlockingChecker::OnReadComplete(
     OnNetError(net_error);
     return;
   }
-  base::StringPiece data(buffer->data(), bytes_read);
-  corb_analyzer_->SniffResponseBody(data, 0);
-  if (corb_analyzer_->ShouldBlock()) {
-    OnBlocked();
-    return;
+
+  std::string_view data(buffer->data(), bytes_read);
+  network::orb::ResponseAnalyzer::Decision orb_decision =
+      orb_analyzer_->Sniff(data);
+
+  // At OnReadComplete we are out of data, so fall back to
+  // HandleEndOfSniffableResponseBody if no allow/block `orb_decision` has been
+  // reached yet.
+  if (orb_decision == network::orb::ResponseAnalyzer::Decision::kSniffMore) {
+    orb_decision = orb_analyzer_->HandleEndOfSniffableResponseBody();
+    DCHECK_NE(network::orb::ResponseAnalyzer::Decision::kSniffMore,
+              orb_decision);
   }
-  OnAllowed();
+
+  switch (orb_decision) {
+    case network::orb::ResponseAnalyzer::Decision::kBlock:
+      OnBlocked();
+      return;
+
+    case network::orb::ResponseAnalyzer::Decision::kAllow:
+      OnAllowed();
+      return;
+
+    case network::orb::ResponseAnalyzer::Decision::kSniffMore:
+      // This should be impossible after going through
+      // HandleEndOfSniffableResponseBody above.
+      NOTREACHED();
+  }
+  NOTREACHED();
 }
 
 }  // namespace content

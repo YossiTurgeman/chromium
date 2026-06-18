@@ -1,20 +1,23 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MEDIA_FILTERS_FFMPEG_VIDEO_DECODER_H_
 #define MEDIA_FILTERS_FFMPEG_VIDEO_DECODER_H_
 
-#include <list>
 #include <memory>
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/memory/ref_counted.h"
-#include "base/threading/thread_checker.h"
+#include "base/containers/lru_cache.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/sequence_checker.h"
+#include "base/types/id_type.h"
+#include "media/base/frame_buffer_pool.h"
+#include "media/base/hdr_metadata_reordering_map.h"
+#include "media/base/supported_video_decoder_config.h"
 #include "media/base/video_decoder.h"
 #include "media/base/video_decoder_config.h"
-#include "media/base/video_frame_pool.h"
 #include "media/ffmpeg/ffmpeg_deleters.h"
 
 struct AVCodecContext;
@@ -30,15 +33,15 @@ class MEDIA_EXPORT FFmpegVideoDecoder : public VideoDecoder {
  public:
   static bool IsCodecSupported(VideoCodec codec);
 
-  explicit FFmpegVideoDecoder(MediaLog* media_log);
+  explicit FFmpegVideoDecoder(std::unique_ptr<MediaLog> media_log);
+
+  FFmpegVideoDecoder(const FFmpegVideoDecoder&) = delete;
+  FFmpegVideoDecoder& operator=(const FFmpegVideoDecoder&) = delete;
+
   ~FFmpegVideoDecoder() override;
 
-  // Allow decoding of individual NALU. Entire frames are required by default.
-  // Disables low-latency mode. Must be called before Initialize().
-  void set_decode_nalus(bool decode_nalus) { decode_nalus_ = decode_nalus; }
-
   // VideoDecoder implementation.
-  std::string GetDisplayName() const override;
+  VideoDecoderType GetDecoderType() const override;
   void Initialize(const VideoDecoderConfig& config,
                   bool low_delay,
                   CdmContext* cdm_context,
@@ -55,13 +58,10 @@ class MEDIA_EXPORT FFmpegVideoDecoder : public VideoDecoder {
                      AVFrame* frame,
                      int flags);
 
+  void force_allocation_error_for_testing() { force_allocation_error_ = true; }
+
  private:
-  enum DecoderState {
-    kUninitialized,
-    kNormal,
-    kDecodeFinished,
-    kError
-  };
+  enum class DecoderState { kUninitialized, kNormal, kDecodeFinished, kError };
 
   // Handles decoding of an unencrypted encoded buffer. A return value of false
   // indicates that an error has occurred.
@@ -75,10 +75,11 @@ class MEDIA_EXPORT FFmpegVideoDecoder : public VideoDecoder {
   // Releases resources associated with |codec_context_|.
   void ReleaseFFmpegResources();
 
-  base::ThreadChecker thread_checker_;
-  MediaLog* media_log_;
+  SEQUENCE_CHECKER(sequence_checker_);
 
-  DecoderState state_;
+  const std::unique_ptr<MediaLog> media_log_;
+
+  DecoderState state_ = DecoderState::kUninitialized;
 
   OutputCB output_cb_;
 
@@ -87,13 +88,16 @@ class MEDIA_EXPORT FFmpegVideoDecoder : public VideoDecoder {
 
   VideoDecoderConfig config_;
 
-  VideoFramePool frame_pool_;
+  scoped_refptr<FrameBufferPool> frame_pool_;
 
-  bool decode_nalus_;
+  bool force_allocation_error_ = false;
+
+  // More specific error code to surface after an error occurs during decoding.
+  DecoderStatus::Codes error_status_ = DecoderStatus::Codes::kFailed;
+
+  HdrMetadataReorderingMap hdr_metadata_reordering_map_;
 
   std::unique_ptr<FFmpegDecodingLoop> decoding_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(FFmpegVideoDecoder);
 };
 
 }  // namespace media

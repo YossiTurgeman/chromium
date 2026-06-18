@@ -1,6 +1,8 @@
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+import("//build/config/features.gni")
 
 static_library("core") {
   sources = [
@@ -8,20 +10,15 @@ static_library("core") {
     "android_app_description.h",
     "android_app_description_tools.cc",
     "android_app_description_tools.h",
-    "autofill_card_validation.cc",
-    "autofill_card_validation.h",
-    "basic_card_response.cc",
-    "basic_card_response.h",
-    "can_make_payment_query.cc",
-    "can_make_payment_query.h",
-    "currency_formatter.cc",
-    "currency_formatter.h",
+    "csp_checker.h",
     "error_logger.cc",
     "error_logger.h",
     "error_message_util.cc",
     "error_message_util.h",
     "features.cc",
     "features.h",
+    "has_enrolled_instrument_query.cc",
+    "has_enrolled_instrument_query.h",
     "journey_logger.cc",
     "journey_logger.h",
     "payer_data.cc",
@@ -38,8 +35,6 @@ static_library("core") {
     "payment_details_validation.h",
     "payment_item.cc",
     "payment_item.h",
-    "payment_manifest_downloader.cc",
-    "payment_manifest_downloader.h",
     "payment_method_data.cc",
     "payment_method_data.h",
     "payment_prefs.cc",
@@ -49,14 +44,19 @@ static_library("core") {
     "payment_request_data_util.h",
     "payment_request_delegate.cc",
     "payment_request_delegate.h",
+    "payment_request_metrics.cc",
+    "payment_request_metrics.h",
     "payment_shipping_option.cc",
     "payment_shipping_option.h",
     "payments_experimental_features.cc",
     "payments_experimental_features.h",
     "payments_validators.cc",
     "payments_validators.h",
-    "secure_payment_confirmation_instrument.cc",
-    "secure_payment_confirmation_instrument.h",
+    "secure_payment_confirmation_credential.cc",
+    "secure_payment_confirmation_credential.h",
+    "secure_payment_confirmation_metrics.cc",
+    "secure_payment_confirmation_metrics.h",
+    "sizes.h",
     "url_util.cc",
     "url_util.h",
   ]
@@ -72,20 +72,20 @@ static_library("core") {
       "payments_profile_comparator.h",
       "strings_util.cc",
       "strings_util.h",
-      "web_payment_request.cc",
-      "web_payment_request.h",
     ]
   }
 
   deps = [
+    ":currency_formatter",
     ":error_strings",
     ":method_strings",
     "//base",
+    "//build:blink_buildflags",
     "//components/autofill/core/browser",
     "//components/keyed_service/core",
-    "//components/link_header_util",
     "//components/payments/mojom",
     "//components/pref_registry",
+    "//components/prefs",
     "//components/strings:components_strings_grit",
     "//net",
     "//services/metrics/public/cpp:metrics_cpp",
@@ -96,11 +96,23 @@ static_library("core") {
     "//url",
   ]
 
+  if (use_blink) {
+    deps += [ "//third_party/blink/public:runtime_features_for_public" ]
+  }
+
   public_deps = [
     "//services/network/public/cpp",
-    "//third_party/icu",
     "//third_party/libaddressinput",
   ]
+}
+
+static_library("currency_formatter") {
+  sources = [
+    "currency_formatter.cc",
+    "currency_formatter.h",
+  ]
+  deps = [ "//base" ]
+  public_deps = [ "//third_party/icu" ]
 }
 
 static_library("error_strings") {
@@ -129,10 +141,10 @@ static_library("method_strings") {
 static_library("test_support") {
   testonly = true
   sources = [
+    "const_csp_checker.cc",
+    "const_csp_checker.h",
     "payments_test_util.cc",
     "payments_test_util.h",
-    "test_payment_manifest_downloader.cc",
-    "test_payment_manifest_downloader.h",
     "test_payment_request_delegate.cc",
     "test_payment_request_delegate.h",
   ]
@@ -142,7 +154,7 @@ static_library("test_support") {
     "//base",
     "//components/autofill/core/browser",
     "//components/autofill/core/browser:test_support",
-    "//components/leveldb_proto:leveldb_proto",
+    "//components/leveldb_proto",
     "//components/pref_registry",
     "//components/prefs",
     "//net:test_support",
@@ -150,22 +162,28 @@ static_library("test_support") {
     "//services/network/public/cpp",
     "//testing/gmock",
   ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 source_set("unit_tests") {
   testonly = true
   sources = [
     "android_app_description_tools_unittest.cc",
-    "can_make_payment_query_unittest.cc",
+    "const_csp_checker_unittest.cc",
     "currency_formatter_unittest.cc",
+    "error_message_util_unittest.cc",
+    "has_enrolled_instrument_query_unittest.cc",
     "journey_logger_unittest.cc",
     "payment_currency_amount_unittest.cc",
     "payment_details_modifier_unittest.cc",
     "payment_details_unittest.cc",
     "payment_details_validation_unittest.cc",
     "payment_item_unittest.cc",
-    "payment_manifest_downloader_unittest.cc",
     "payment_method_data_unittest.cc",
+    "payment_request_metrics_unittest.cc",
     "payment_shipping_option_unittest.cc",
     "payments_validators_unittest.cc",
     "url_util_unittest.cc",
@@ -173,24 +191,26 @@ source_set("unit_tests") {
 
   if (!is_android) {
     sources += [
-      "basic_card_response_unittest.cc",
       "payment_address_unittest.cc",
       "payment_options_unittest.cc",
       "payment_request_data_util_unittest.cc",
       "payment_response_unittest.cc",
       "payments_profile_comparator_unittest.cc",
-      "web_payment_request_unittest.cc",
     ]
   }
 
   deps = [
     ":core",
+    ":currency_formatter",
     ":test_support",
     "//base",
+    "//base/test:fuzztest_support",
     "//base/test:test_support",
     "//components/autofill/core/browser",
     "//components/autofill/core/browser:test_support",
-    "//components/leveldb_proto:leveldb_proto",
+    "//components/leveldb_proto",
+    "//components/prefs",
+    "//components/prefs:test_support",
     "//components/strings:components_strings_grit",
     "//components/ukm",
     "//components/ukm:test_support",
@@ -200,6 +220,7 @@ source_set("unit_tests") {
     "//services/network/public/cpp",
     "//testing/gmock",
     "//testing/gtest",
+    "//third_party/fuzztest",
     "//third_party/libaddressinput:test_support",
     "//ui/base",
   ]

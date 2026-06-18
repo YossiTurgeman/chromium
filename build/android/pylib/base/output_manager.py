@@ -1,6 +1,7 @@
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
 
 import contextlib
 import logging
@@ -10,14 +11,15 @@ import tempfile
 from devil.utils import reraiser_thread
 
 
-class Datatype(object):
+class Datatype:
+  BINARY = 'application/octet-stream'
   HTML = 'text/html'
   JSON = 'application/json'
   PNG = 'image/png'
   TEXT = 'text/plain'
 
 
-class OutputManager(object):
+class OutputManager:
 
   def __init__(self):
     """OutputManager Constructor.
@@ -29,14 +31,19 @@ class OutputManager(object):
     self._thread_group = None
 
   @contextlib.contextmanager
-  def ArchivedTempfile(
-      self, out_filename, out_subdir, datatype=Datatype.TEXT):
-    """Archive file contents asynchonously and then deletes file.
+  def ArchivedTempfile(self,
+                       out_filename,
+                       out_subdir,
+                       datatype=Datatype.TEXT,
+                       package=None):
+    """Archive file contents asynchronously and then deletes file.
 
     Args:
       out_filename: Name for saved file.
       out_subdir: Directory to save |out_filename| to.
       datatype: Datatype of file.
+      package: If the file is a logcat, we want to filter the logcat so that
+        the remaining lines all belong to this package.
 
     Returns:
       An ArchivedFile file. This file will be uploaded async when the context
@@ -50,25 +57,40 @@ class OutputManager(object):
     if not self._allow_upload:
       raise Exception('Must run |SetUp| before attempting to upload!')
 
-    f = self._CreateArchivedFile(out_filename, out_subdir, datatype)
+    f = self.CreateArchivedFile(out_filename, out_subdir, datatype, package)
     try:
       yield f
     finally:
-      f.PrepareArchive()
+      self.ArchiveArchivedFile(f, delete=True)
 
-      def archive():
-        try:
-          f.Archive()
-        finally:
-          f.Delete()
-
-      thread = reraiser_thread.ReraiserThread(func=archive)
-      thread.start()
-      self._thread_group.Add(thread)
-
-  def _CreateArchivedFile(self, out_filename, out_subdir, datatype):
+  def CreateArchivedFile(self,
+                         out_filename,
+                         out_subdir,
+                         datatype=Datatype.TEXT,
+                         package=None):
     """Returns an instance of ArchivedFile."""
+    return self._CreateArchivedFile(out_filename, out_subdir, datatype, package)
+
+  def _CreateArchivedFile(self, out_filename, out_subdir, datatype, package):
     raise NotImplementedError
+
+  def ArchiveArchivedFile(self, archived_file, delete=False):
+    """Archive an ArchivedFile instance and optionally delete it."""
+    if not isinstance(archived_file, ArchivedFile):
+      raise Exception('Excepting an instance of ArchivedFile, got %s.' %
+                      type(archived_file))
+    archived_file.PrepareArchive()
+
+    def archive():
+      try:
+        archived_file.Archive()
+      finally:
+        if delete:
+          archived_file.Delete()
+
+    thread = reraiser_thread.ReraiserThread(func=archive)
+    thread.start()
+    self._thread_group.Add(thread)
 
   def SetUp(self):
     self._allow_upload = True
@@ -87,19 +109,28 @@ class OutputManager(object):
     self.TearDown()
 
 
-class ArchivedFile(object):
+class ArchivedFile:
 
   def __init__(self, out_filename, out_subdir, datatype):
     self._out_filename = out_filename
     self._out_subdir = out_subdir
     self._datatype = datatype
 
-    self._f = tempfile.NamedTemporaryFile(delete=False)
+    mode = 'w+'
+    if datatype in (Datatype.PNG, Datatype.BINARY):
+      mode = 'w+b'
+    self._f = tempfile.NamedTemporaryFile(mode=mode, delete=False)
     self._ready_to_archive = False
 
   @property
   def name(self):
     return self._f.name
+
+  def fileno(self, *args, **kwargs):
+    if self._ready_to_archive:
+      raise Exception('Cannot retrieve the integer file descriptor '
+                      'after archiving has begun!')
+    return self._f.fileno(*args, **kwargs)
 
   def write(self, *args, **kwargs):
     if self._ready_to_archive:
@@ -140,7 +171,6 @@ class ArchivedFile(object):
     content addressed files. This is called after the file is written but
     before archiving has begun.
     """
-    pass
 
   def Archive(self):
     """Archives file."""

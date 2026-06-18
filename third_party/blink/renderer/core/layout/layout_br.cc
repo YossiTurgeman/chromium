@@ -24,53 +24,58 @@
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/editing/position_with_affinity.h"
+#include "third_party/blink/renderer/core/html/html_br_element.h"
 #include "third_party/blink/renderer/core/layout/layout_object_inlines.h"
 
 namespace blink {
 
-static scoped_refptr<StringImpl> NewlineString() {
+static String NewlineString() {
   DEFINE_STATIC_LOCAL(const String, string, ("\n"));
-  return string.Impl();
+  return string;
 }
 
-LayoutBR::LayoutBR(Node* node) : LayoutText(node, NewlineString()) {}
+LayoutBR::LayoutBR(HTMLBRElement& node) : LayoutText(&node, NewlineString()) {}
 
 LayoutBR::~LayoutBR() = default;
 
-int LayoutBR::LineHeight(bool first_line) const {
-  const ComputedStyle& style = StyleRef(
-      first_line && GetDocument().GetStyleEngine().UsesFirstLineRules());
-  return style.ComputedLineHeight();
-}
-
-void LayoutBR::StyleDidChange(StyleDifference diff,
-                              const ComputedStyle* old_style) {
-  LayoutText::StyleDidChange(diff, old_style);
-}
-
 int LayoutBR::CaretMinOffset() const {
+  NOT_DESTROYED();
   return 0;
 }
 
 int LayoutBR::CaretMaxOffset() const {
+  NOT_DESTROYED();
+  return 1;
+}
+
+unsigned LayoutBR::NonCollapsedCaretMaxOffset() const {
+  NOT_DESTROYED();
   return 1;
 }
 
 PositionWithAffinity LayoutBR::PositionForPoint(const PhysicalOffset&) const {
-  return CreatePositionWithAffinity(0);
+  NOT_DESTROYED();
+  // NG codepath requires |kPrePaintClean|.
+  // |SelectionModifier| calls this only in legacy codepath.
+  DCHECK(!IsInLayoutNGInlineFormattingContext() ||
+         GetDocument().Lifecycle().GetState() >=
+             DocumentLifecycle::kPrePaintClean);
+  return PositionBeforeThis();
 }
 
 Position LayoutBR::PositionForCaretOffset(unsigned offset) const {
+  NOT_DESTROYED();
   DCHECK_LE(offset, 1u);
   DCHECK(GetNode());
   return offset ? Position::AfterNode(*GetNode())
                 : Position::BeforeNode(*GetNode());
 }
 
-base::Optional<unsigned> LayoutBR::CaretOffsetForPosition(
+std::optional<unsigned> LayoutBR::CaretOffsetForPosition(
     const Position& position) const {
+  NOT_DESTROYED();
   if (position.IsNull() || position.AnchorNode() != GetNode())
-    return base::nullopt;
+    return std::nullopt;
   DCHECK(position.IsBeforeAnchor() || position.IsAfterAnchor()) << position;
   return position.IsBeforeAnchor() ? 0 : 1;
 }

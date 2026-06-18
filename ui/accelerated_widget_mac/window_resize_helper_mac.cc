@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,13 @@
 #include <list>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/single_thread_task_runner.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/synchronization/lock.h"
 #include "base/synchronization/waitable_event.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_restrictions.h"
+#include "base/time/time.h"
 
 namespace ui {
 namespace {
@@ -33,6 +33,10 @@ using EventTimedWaitCallback =
 class WrappedTask {
  public:
   WrappedTask(base::OnceClosure closure, base::TimeDelta delay);
+
+  WrappedTask(const WrappedTask&) = delete;
+  WrappedTask& operator=(const WrappedTask&) = delete;
+
   ~WrappedTask();
   bool ShouldRunBefore(const WrappedTask& other);
   void Run();
@@ -49,8 +53,6 @@ class WrappedTask {
 
   // Back pointer to the pumpable task runner that this task is enqueued in.
   scoped_refptr<PumpableTaskRunner> pumpable_task_runner_;
-
-  DISALLOW_COPY_AND_ASSIGN(WrappedTask);
 };
 
 // The PumpableTaskRunner is a task runner that will wrap tasks in an
@@ -63,6 +65,9 @@ class PumpableTaskRunner : public base::SingleThreadTaskRunner {
   PumpableTaskRunner(
       const EventTimedWaitCallback& event_timed_wait_callback,
       const scoped_refptr<base::SingleThreadTaskRunner>& target_task_runner);
+
+  PumpableTaskRunner(const PumpableTaskRunner&) = delete;
+  PumpableTaskRunner& operator=(const PumpableTaskRunner&) = delete;
 
   // Enqueue WrappedTask and post it to |target_task_runner_|.
   bool EnqueueAndPostWrappedTask(const base::Location& from_here,
@@ -104,12 +109,7 @@ class PumpableTaskRunner : public base::SingleThreadTaskRunner {
   EventTimedWaitCallback event_timed_wait_callback_;
 
   scoped_refptr<base::SingleThreadTaskRunner> target_task_runner_;
-
-  DISALLOW_COPY_AND_ASSIGN(PumpableTaskRunner);
 };
-
-base::LazyInstance<WindowResizeHelperMac>::Leaky g_window_resize_helper =
-    LAZY_INSTANCE_INITIALIZER;
 
 ////////////////////////////////////////////////////////////////////////////////
 // WrappedTask
@@ -135,7 +135,6 @@ bool WrappedTask::ShouldRunBefore(const WrappedTask& other) {
     return false;
   // Sequence numbers are unique, so this should never happen.
   NOTREACHED();
-  return false;
 }
 
 void WrappedTask::Run() {
@@ -231,7 +230,7 @@ bool PumpableTaskRunner::WaitForSingleWrappedTaskToRun(
     // Calculate how much time we have left before we have to stop waiting or
     // until a currently-enqueued task will be ready to run.
     base::TimeDelta max_sleep_time = next_task_time - current_time;
-    if (max_sleep_time <= base::TimeDelta::FromMilliseconds(0))
+    if (max_sleep_time <= base::Milliseconds(0))
       break;
 
     event_timed_wait_callback_.Run(&event_, max_sleep_time);
@@ -272,7 +271,6 @@ bool PumpableTaskRunner::PostNonNestableDelayedTask(
   // The correctness of non-nestable events hasn't been proven for this
   // structure.
   NOTREACHED();
-  return false;
 }
 
 bool PumpableTaskRunner::RunsTasksInCurrentSequence() const {
@@ -291,7 +289,8 @@ scoped_refptr<base::SingleThreadTaskRunner> WindowResizeHelperMac::task_runner()
 
 // static
 WindowResizeHelperMac* WindowResizeHelperMac::Get() {
-  return g_window_resize_helper.Pointer();
+  static base::NoDestructor<WindowResizeHelperMac> instance;
+  return instance.get();
 }
 
 void WindowResizeHelperMac::Init(
@@ -315,8 +314,8 @@ bool WindowResizeHelperMac::WaitForSingleTaskToRun(
   return pumpable_task_runner->WaitForSingleWrappedTaskToRun(max_delay);
 }
 
-WindowResizeHelperMac::WindowResizeHelperMac() {}
-WindowResizeHelperMac::~WindowResizeHelperMac() {}
+WindowResizeHelperMac::WindowResizeHelperMac() = default;
+WindowResizeHelperMac::~WindowResizeHelperMac() = default;
 
 void WindowResizeHelperMac::EventTimedWait(base::WaitableEvent* event,
                                            base::TimeDelta delay) {

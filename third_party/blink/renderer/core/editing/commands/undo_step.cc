@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,12 @@
 #include "third_party/blink/renderer/core/editing/commands/undo_stack.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/editor.h"
+#include "third_party/blink/renderer/core/editing/frame_selection.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
 #include "third_party/blink/renderer/core/editing/set_selection_options.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 namespace blink {
 
@@ -23,16 +26,22 @@ uint64_t g_current_sequence_number = 0;
 UndoStep::UndoStep(Document* document,
                    const SelectionForUndoStep& starting_selection,
                    const SelectionForUndoStep& ending_selection,
-                   InputEvent::InputType input_type)
+                   const SelectionForUndoStep& starting_dom_selection,
+                   const SelectionForUndoStep& ending_dom_selection)
     : document_(document),
       starting_selection_(starting_selection),
       ending_selection_(ending_selection),
-      starting_root_editable_element_(
-          RootEditableElementOf(starting_selection.Base())),
-      ending_root_editable_element_(
-          RootEditableElementOf(ending_selection.Base())),
-      input_type_(input_type),
-      sequence_number_(++g_current_sequence_number) {}
+      starting_dom_selection_(starting_dom_selection),
+      ending_dom_selection_(ending_dom_selection),
+      sequence_number_(++g_current_sequence_number) {
+  // Note: Both |starting_selection| and |ending_selection| can be null,
+  // Note: |starting_selection_| can be disconnected when forward-delete.
+  // See |TypingCommand::ForwardDeleteKeyPressed()|
+}
+
+bool UndoStep::IsOwnedBy(const Element& element) const {
+  return EndingRootEditableElement() == &element;
+}
 
 void UndoStep::Unapply() {
   DCHECK(document_);
@@ -59,9 +68,9 @@ void UndoStep::Unapply() {
   DispatchInputEventEditableContentChanged(
       StartingRootEditableElement(), EndingRootEditableElement(),
       InputEvent::InputType::kHistoryUndo, g_null_atom,
-      InputEvent::EventIsComposing::kNotComposing);
+      InputEvent::EventIsComposing::kNotComposing, nullptr);
 
-  const SelectionInDOMTree& new_selection =
+  const SelectionInDomTree& new_selection =
       CorrectedSelectionAfterCommand(StartingSelection(), document_);
   ChangeSelectionAfterCommand(frame, new_selection,
                               SetSelectionOptions::Builder()
@@ -69,11 +78,15 @@ void UndoStep::Unapply() {
                                   .SetShouldClearTypingStyle(true)
                                   .SetIsDirectional(SelectionIsDirectional())
                                   .Build());
-
+  // `new_selection` may not be valid here, e.g. "focus" event handler modifies
+  // DOM tree. See http://crbug.com/1378068
   Editor& editor = frame->GetEditor();
   editor.SetLastEditCommand(nullptr);
   editor.GetUndoStack().RegisterRedoStep(this);
-  editor.RespondToChangedContents(new_selection.Base());
+
+  // Take selection `FrameSelection` which `ChangeSelectionAfterCommand()` set.
+  editor.RespondToChangedContents(
+      frame->Selection().GetSelectionInDomTree().Anchor());
 }
 
 void UndoStep::Reapply() {
@@ -100,9 +113,9 @@ void UndoStep::Reapply() {
   DispatchInputEventEditableContentChanged(
       StartingRootEditableElement(), EndingRootEditableElement(),
       InputEvent::InputType::kHistoryRedo, g_null_atom,
-      InputEvent::EventIsComposing::kNotComposing);
+      InputEvent::EventIsComposing::kNotComposing, nullptr);
 
-  const SelectionInDOMTree& new_selection =
+  const SelectionInDomTree& new_selection =
       CorrectedSelectionAfterCommand(EndingSelection(), document_);
   ChangeSelectionAfterCommand(frame, new_selection,
                               SetSelectionOptions::Builder()
@@ -110,15 +123,15 @@ void UndoStep::Reapply() {
                                   .SetShouldClearTypingStyle(true)
                                   .SetIsDirectional(SelectionIsDirectional())
                                   .Build());
-
+  // `new_selection` may not be valid here, e.g. "focus" event handler modifies
+  // DOM tree. See http://crbug.com/1378068
   Editor& editor = frame->GetEditor();
   editor.SetLastEditCommand(nullptr);
   editor.GetUndoStack().RegisterUndoStep(this);
-  editor.RespondToChangedContents(new_selection.Base());
-}
 
-InputEvent::InputType UndoStep::GetInputType() const {
-  return input_type_;
+  // Take selection `FrameSelection` which `ChangeSelectionAfterCommand()` set.
+  editor.RespondToChangedContents(
+      frame->Selection().GetSelectionInDomTree().Anchor());
 }
 
 void UndoStep::Append(SimpleEditCommand* command) {
@@ -126,26 +139,41 @@ void UndoStep::Append(SimpleEditCommand* command) {
 }
 
 void UndoStep::Append(UndoStep* undo_step) {
-  commands_.AppendVector(undo_step->commands_);
+  commands_.append_range(undo_step->commands_);
 }
 
 void UndoStep::SetStartingSelection(const SelectionForUndoStep& selection) {
   starting_selection_ = selection;
-  starting_root_editable_element_ = RootEditableElementOf(selection.Base());
 }
 
 void UndoStep::SetEndingSelection(const SelectionForUndoStep& selection) {
   ending_selection_ = selection;
-  ending_root_editable_element_ = RootEditableElementOf(selection.Base());
+}
+
+void UndoStep::SetStartingDomSelection(const SelectionForUndoStep& selection) {
+  starting_dom_selection_ = selection;
+}
+
+void UndoStep::SetEndingDomSelection(const SelectionForUndoStep& selection) {
+  ending_dom_selection_ = selection;
+}
+
+String UndoStep::ToString() const {
+  StringBuilder builder;
+  builder.Append("UndoStep {commands:[\n    ");
+  builder.AppendRange(commands_, ",\n    ",
+                      [](const auto& command) { return command->ToString(); });
+  builder.Append("]}");
+  return builder.ReleaseString();
 }
 
 void UndoStep::Trace(Visitor* visitor) const {
   visitor->Trace(document_);
   visitor->Trace(starting_selection_);
   visitor->Trace(ending_selection_);
+  visitor->Trace(starting_dom_selection_);
+  visitor->Trace(ending_dom_selection_);
   visitor->Trace(commands_);
-  visitor->Trace(starting_root_editable_element_);
-  visitor->Trace(ending_root_editable_element_);
 }
 
 }  // namespace blink

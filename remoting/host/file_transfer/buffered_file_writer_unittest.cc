@@ -1,12 +1,11 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/host/file_transfer/buffered_file_writer.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/test/task_environment.h"
-#include "base/threading/sequenced_task_runner_handle.h"
 #include "remoting/host/file_transfer/fake_file_operations.h"
 #include "remoting/host/file_transfer/test_byte_vector_utils.h"
 #include "remoting/protocol/file_transfer_helpers.h"
@@ -36,7 +35,7 @@ class BufferedFileWriterTest : public testing::Test {
   void OnError(protocol::FileTransfer_Error error);
 
   bool complete_called_ = false;
-  base::Optional<protocol::FileTransfer_Error> error_ = base::nullopt;
+  std::optional<protocol::FileTransfer_Error> error_ = std::nullopt;
 
   base::test::TaskEnvironment task_environment_;
 };
@@ -81,15 +80,15 @@ TEST_F(BufferedFileWriterTest, WritesThreeChunks) {
   writer.Write(kTestDataThree);
   task_environment_.RunUntilIdle();
   writer.Close();
-  ASSERT_EQ(false, complete_called_);
+  ASSERT_FALSE(complete_called_);
   task_environment_.RunUntilIdle();
-  ASSERT_EQ(true, complete_called_);
+  ASSERT_TRUE(complete_called_);
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(false, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_FALSE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {
       kTestDataOne, kTestDataTwo, kTestDataThree};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 // Verifies BufferedFileWriter properly queues up file operations.
@@ -110,15 +109,15 @@ TEST_F(BufferedFileWriterTest, QueuesOperations) {
   writer.Write(kTestDataTwo);
   writer.Write(kTestDataThree);
   writer.Close();
-  ASSERT_EQ(false, complete_called_);
+  ASSERT_FALSE(complete_called_);
   task_environment_.RunUntilIdle();
-  ASSERT_EQ(true, complete_called_);
+  ASSERT_TRUE(complete_called_);
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(false, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_FALSE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {
       kTestDataOne, kTestDataTwo, kTestDataThree};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 // Verifies BufferedFileWriter calls the error callback in the event of an
@@ -147,11 +146,11 @@ TEST_F(BufferedFileWriterTest, HandlesWriteError) {
   ASSERT_TRUE(error_);
   ASSERT_EQ(fake_error.SerializeAsString(), error_->SerializeAsString());
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(true, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_TRUE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {kTestDataOne,
                                                             kTestDataTwo};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 // Verifies canceling BufferedFileWriter cancels the underlying writer.
@@ -177,11 +176,11 @@ TEST_F(BufferedFileWriterTest, CancelsWriter) {
   task_environment_.RunUntilIdle();
   ASSERT_TRUE(!complete_called_ && !error_);
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(true, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_TRUE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {kTestDataOne,
                                                             kTestDataTwo};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 }  // namespace remoting

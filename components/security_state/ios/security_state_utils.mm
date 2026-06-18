@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 
 #import "components/safe_browsing/ios/browser/safe_browsing_url_allow_list.h"
 #include "components/security_state/core/security_state.h"
-#include "components/security_state/ios/ssl_status_input_event_data.h"
 #include "ios/web/public/navigation/navigation_item.h"
 #import "ios/web/public/navigation/navigation_manager.h"
 #include "ios/web/public/security/security_style.h"
@@ -20,6 +19,8 @@ namespace security_state {
 
 MaliciousContentStatus GetMaliciousContentStatus(
     const web::WebState* web_state) {
+  using enum safe_browsing::SBThreatType;
+
   // There is no known malicious content if there is no allow list or no visible
   // item.
   const SafeBrowsingUrlAllowList* allow_list =
@@ -43,41 +44,43 @@ MaliciousContentStatus GetMaliciousContentStatus(
   // threat type.
   DCHECK(!threats.empty());
   switch (*threats.begin()) {
-    case safe_browsing::SB_THREAT_TYPE_UNUSED:
-    case safe_browsing::SB_THREAT_TYPE_SAFE:
-    case safe_browsing::SB_THREAT_TYPE_URL_PHISHING:
-    case safe_browsing::SB_THREAT_TYPE_URL_CLIENT_SIDE_PHISHING:
+    case SB_THREAT_TYPE_UNUSED:
+    case SB_THREAT_TYPE_SAFE:
+    case SB_THREAT_TYPE_URL_PHISHING:
+    case SB_THREAT_TYPE_URL_CLIENT_SIDE_PHISHING:
       return security_state::MALICIOUS_CONTENT_STATUS_SOCIAL_ENGINEERING;
-    case safe_browsing::SB_THREAT_TYPE_URL_MALWARE:
-    case safe_browsing::SB_THREAT_TYPE_URL_CLIENT_SIDE_MALWARE:
+    case SB_THREAT_TYPE_URL_MALWARE:
       return security_state::MALICIOUS_CONTENT_STATUS_MALWARE;
-    case safe_browsing::SB_THREAT_TYPE_URL_UNWANTED:
+    case SB_THREAT_TYPE_URL_UNWANTED:
       return security_state::MALICIOUS_CONTENT_STATUS_UNWANTED_SOFTWARE;
-    case safe_browsing::SB_THREAT_TYPE_SAVED_PASSWORD_REUSE:
-    case safe_browsing::SB_THREAT_TYPE_SIGNED_IN_SYNC_PASSWORD_REUSE:
-    case safe_browsing::SB_THREAT_TYPE_SIGNED_IN_NON_SYNC_PASSWORD_REUSE:
-    case safe_browsing::SB_THREAT_TYPE_ENTERPRISE_PASSWORD_REUSE:
-    case safe_browsing::SB_THREAT_TYPE_BILLING:
+    case SB_THREAT_TYPE_SAVED_PASSWORD_REUSE:
+    case SB_THREAT_TYPE_SIGNED_IN_SYNC_PASSWORD_REUSE:
+    case SB_THREAT_TYPE_SIGNED_IN_NON_SYNC_PASSWORD_REUSE:
+    case SB_THREAT_TYPE_ENTERPRISE_PASSWORD_REUSE:
+    case SB_THREAT_TYPE_BILLING:
       return security_state::MALICIOUS_CONTENT_STATUS_BILLING;
-    case safe_browsing::
-        DEPRECATED_SB_THREAT_TYPE_URL_PASSWORD_PROTECTION_PHISHING:
-    case safe_browsing::SB_THREAT_TYPE_URL_BINARY_MALWARE:
-    case safe_browsing::SB_THREAT_TYPE_EXTENSION:
-    case safe_browsing::SB_THREAT_TYPE_BLACKLISTED_RESOURCE:
-    case safe_browsing::SB_THREAT_TYPE_API_ABUSE:
-    case safe_browsing::SB_THREAT_TYPE_SUBRESOURCE_FILTER:
-    case safe_browsing::SB_THREAT_TYPE_CSD_WHITELIST:
-    case safe_browsing::SB_THREAT_TYPE_AD_SAMPLE:
-    case safe_browsing::SB_THREAT_TYPE_BLOCKED_AD_POPUP:
-    case safe_browsing::SB_THREAT_TYPE_BLOCKED_AD_REDIRECT:
-    case safe_browsing::SB_THREAT_TYPE_SUSPICIOUS_SITE:
-    case safe_browsing::SB_THREAT_TYPE_APK_DOWNLOAD:
-    case safe_browsing::SB_THREAT_TYPE_HIGH_CONFIDENCE_ALLOWLIST:
+    case SB_THREAT_TYPE_MANAGED_POLICY_WARN:
+      return security_state::MALICIOUS_CONTENT_STATUS_MANAGED_POLICY_WARN;
+    case SB_THREAT_TYPE_MANAGED_POLICY_BLOCK:
+      return security_state::MALICIOUS_CONTENT_STATUS_MANAGED_POLICY_BLOCK;
+    case DEPRECATED_SB_THREAT_TYPE_URL_PASSWORD_PROTECTION_PHISHING:
+    case DEPRECATED_SB_THREAT_TYPE_URL_CLIENT_SIDE_MALWARE:
+    case SB_THREAT_TYPE_URL_BINARY_MALWARE:
+    case SB_THREAT_TYPE_EXTENSION:
+    case SB_THREAT_TYPE_API_ABUSE:
+    case SB_THREAT_TYPE_SUBRESOURCE_FILTER:
+    case SB_THREAT_TYPE_CSD_ALLOWLIST:
+    case SB_THREAT_TYPE_AD_SAMPLE:
+    case SB_THREAT_TYPE_BLOCKED_AD_POPUP:
+    case SB_THREAT_TYPE_BLOCKED_AD_REDIRECT:
+    case SB_THREAT_TYPE_SUSPICIOUS_SITE:
+    case SB_THREAT_TYPE_APK_DOWNLOAD:
+    case SB_THREAT_TYPE_HIGH_CONFIDENCE_ALLOWLIST:
+    case SB_THREAT_TYPE_CSD_DOWNLOAD_ALLOWLIST:
       // These threat types are not currently associated with
       // interstitials, and thus resources with these threat types are
       // not ever whitelisted or pending whitelisting.
       NOTREACHED();
-      break;
   }
   return security_state::MALICIOUS_CONTENT_STATUS_NONE;
 }
@@ -102,12 +105,6 @@ GetVisibleSecurityStateForWebState(const web::WebState* web_state) {
       (ssl.content_status & web::SSLStatus::DISPLAYED_INSECURE_CONTENT) ? true
                                                                         : false;
 
-  security_state::SSLStatusInputEventData* input_events =
-      static_cast<security_state::SSLStatusInputEventData*>(
-          ssl.user_data.get());
-  if (input_events)
-    state->insecure_input_events = *input_events->input_events();
-
   return state;
 }
 
@@ -117,8 +114,7 @@ security_state::SecurityLevel GetSecurityLevelForWebState(
     return security_state::NONE;
   }
   return security_state::GetSecurityLevel(
-      *GetVisibleSecurityStateForWebState(web_state),
-      false /* used policy installed certificate */);
+      *GetVisibleSecurityStateForWebState(web_state));
 }
 
 }  // namespace security_state

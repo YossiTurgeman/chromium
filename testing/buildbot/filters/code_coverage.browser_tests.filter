@@ -1,5 +1,4 @@
-# TODO(crbug.com/988146): Enable this.
--AutofillPrivateApiTest.AddAndUpdateAddress
+# TODO(crbug.com/40637833): Enable this.
 -PasswordManagerBrowserTest.*
 -ContentScriptApiTest.ContentScriptBlobFetch
 -CredentialManagerBrowserTest.*
@@ -8,10 +7,6 @@
 -PopupTrackerBrowserTest.ControlClick_HasTracker
 -PrerenderBrowserTest.AutosigninInPrerenderer
 -ProfileStatisticsBrowserTest.GatherStatistics
--TabHoverCardBubbleViewBrowserTest.WidgetNotVisibleOnMousePressAfterTabFocus
--TabHoverCardBubbleViewBrowserTest.WidgetVisibleOnTabCloseButtonFocusAfterTabFocus
--TabHoverCardBubbleViewBrowserTest.WidgetVisibleOnTabFocus
 -TranslateLanguageBrowserTest.RecentTargetLanguage
 -SaveCardBubbleViewsFullFormBrowserTest.Local_Metrics_SigninImpressionManageCards
 -SaveCardBubbleViewsFullFormBrowserTest.Upload_ClickingSaveClosesBubble
--SaveCardBubbleViewsSyncTransportFullFormBrowserTest.Upload_TransportMode_ClickingSaveClosesBubble

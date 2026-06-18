@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,65 +7,51 @@
 
 #include "base/power_monitor/power_monitor_device_source.h"
 
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_cftyperef.h"
-#include "base/power_monitor/power_monitor.h"
-#include "base/power_monitor/power_monitor_source.h"
-
 #include <IOKit/IOMessage.h>
 #include <IOKit/ps/IOPSKeys.h>
 #include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 
+#include "base/apple/foundation_util.h"
+#include "base/apple/scoped_cftyperef.h"
+#include "base/power_monitor/power_monitor.h"
+#include "base/power_monitor/power_monitor_source.h"
+
 namespace base {
 
-void ProcessPowerEventHelper(PowerMonitorSource::PowerEvent event) {
-  PowerMonitorSource::ProcessPowerEvent(event);
+PowerThermalObserver::DeviceThermalState
+PowerMonitorDeviceSource::GetCurrentThermalState() const {
+  return thermal_state_observer_->GetCurrentThermalState();
 }
 
-bool PowerMonitorDeviceSource::IsOnBatteryPowerImpl() {
-  base::ScopedCFTypeRef<CFTypeRef> info(IOPSCopyPowerSourcesInfo());
-  base::ScopedCFTypeRef<CFArrayRef> power_sources_list(
-      IOPSCopyPowerSourcesList(info));
+int PowerMonitorDeviceSource::GetInitialSpeedLimit() const {
+  return thermal_state_observer_->GetCurrentSpeedLimit();
+}
 
-  const CFIndex count = CFArrayGetCount(power_sources_list);
-  for (CFIndex i = 0; i < count; ++i) {
-    const CFDictionaryRef description = IOPSGetPowerSourceDescription(
-        info, CFArrayGetValueAtIndex(power_sources_list, i));
-    if (!description)
-      continue;
+void PowerMonitorDeviceSource::GetBatteryState() {
+  DCHECK(battery_level_provider_);
+  // base::Unretained is safe because the callback is immediately invoked
+  // inside `BatteryLevelProvider::GetBatteryState()`.
+  battery_level_provider_->GetBatteryState(
+      base::BindOnce(&PowerMonitorDeviceSource::OnBatteryStateReceived,
+                     base::Unretained(this)));
+}
 
-    CFStringRef current_state = base::mac::GetValueFromDictionary<CFStringRef>(
-        description, CFSTR(kIOPSPowerSourceStateKey));
-
-    if (!current_state)
-      continue;
-
-    // We only report "on battery power" if no source is on AC power.
-    if (CFStringCompare(current_state, CFSTR(kIOPSBatteryPowerValue), 0) !=
-        kCFCompareEqualTo) {
-      return false;
+void PowerMonitorDeviceSource::OnBatteryStateReceived(
+    const std::optional<BatteryLevelProvider::BatteryState>& battery_state) {
+  if (battery_state.has_value()) {
+    if (battery_state->is_external_power_connected) {
+      battery_power_status_ =
+          PowerStateObserver::BatteryPowerStatus::kExternalPower;
+    } else {
+      battery_power_status_ =
+          PowerStateObserver::BatteryPowerStatus::kBatteryPower;
     }
+  } else {
+    battery_power_status_ = PowerStateObserver::BatteryPowerStatus::kUnknown;
   }
-
-  return true;
+  PowerMonitorSource::ProcessPowerEvent(PowerMonitorSource::POWER_STATE_EVENT);
 }
-
-PowerObserver::DeviceThermalState
-PowerMonitorDeviceSource::GetCurrentThermalState() {
-  if (@available(macOS 10.10.3, *)) {
-    return thermal_state_observer_->GetCurrentThermalState();
-  };
-  return PowerObserver::DeviceThermalState::kUnknown;
-}
-
-namespace {
-
-void BatteryEventCallback(void*) {
-  ProcessPowerEventHelper(PowerMonitorSource::POWER_STATE_EVENT);
-}
-
-}  // namespace
 
 void PowerMonitorDeviceSource::PlatformInit() {
   power_manager_port_ = IORegisterForSystemPower(
@@ -80,21 +66,18 @@ void PowerMonitorDeviceSource::PlatformInit() {
       IONotificationPortGetRunLoopSource(notification_port_.get()),
       kCFRunLoopCommonModes);
 
-  // Create and add the power-source-change event source to the runloop.
-  power_source_run_loop_source_.reset(
-      IOPSNotificationCreateRunLoopSource(&BatteryEventCallback, nullptr));
-  // Verify that the source was created. This may fail if the sandbox does not
-  // permit the process to access the underlying system service. See
-  // https://crbug.com/897557 for an example of such a configuration bug.
-  DCHECK(power_source_run_loop_source_);
+  battery_level_provider_ = BatteryLevelProvider::Create();
+  // Get the initial battery power status and register for all
+  // future power-source-change events.
+  GetBatteryState();
+  // base::Unretained is safe because `this` owns `power_source_event_source_`,
+  // which exclusively owns the callback.
+  power_source_event_source_.Start(base::BindRepeating(
+      &PowerMonitorDeviceSource::GetBatteryState, base::Unretained(this)));
 
-  CFRunLoopAddSource(CFRunLoopGetCurrent(), power_source_run_loop_source_,
-                     kCFRunLoopDefaultMode);
-
-  if (@available(macOS 10.10.3, *)) {
-    thermal_state_observer_ = std::make_unique<ThermalStateObserverMac>(
-        BindRepeating(&PowerMonitorSource::ProcessThermalEvent));
-  };
+  thermal_state_observer_ = std::make_unique<ThermalStateObserverMac>(
+      BindRepeating(&PowerMonitorSource::ProcessThermalEvent),
+      BindRepeating(&PowerMonitorSource::ProcessSpeedLimitEvent));
 }
 
 void PowerMonitorDeviceSource::PlatformDestroy() {
@@ -103,10 +86,6 @@ void PowerMonitorDeviceSource::PlatformDestroy() {
       IONotificationPortGetRunLoopSource(notification_port_.get()),
       kCFRunLoopCommonModes);
 
-  CFRunLoopRemoveSource(CFRunLoopGetCurrent(),
-                        power_source_run_loop_source_.get(),
-                        kCFRunLoopDefaultMode);
-
   // Deregister for system power notifications.
   IODeregisterForSystemPower(&notifier_);
 
@@ -114,6 +93,11 @@ void PowerMonitorDeviceSource::PlatformDestroy() {
   // PlatformInit().
   IOServiceClose(power_manager_port_);
   power_manager_port_ = IO_OBJECT_NULL;
+}
+
+PowerStateObserver::BatteryPowerStatus
+PowerMonitorDeviceSource::GetBatteryPowerStatus() const {
+  return battery_power_status_;
 }
 
 void PowerMonitorDeviceSource::SystemPowerEventCallback(
@@ -130,13 +114,13 @@ void PowerMonitorDeviceSource::SystemPowerEventCallback(
                          reinterpret_cast<intptr_t>(message_argument));
       break;
     case kIOMessageSystemWillSleep:
-      ProcessPowerEventHelper(PowerMonitorSource::SUSPEND_EVENT);
+      PowerMonitorSource::ProcessPowerEvent(PowerMonitorSource::SUSPEND_EVENT);
       IOAllowPowerChange(thiz->power_manager_port_,
                          reinterpret_cast<intptr_t>(message_argument));
       break;
 
     case kIOMessageSystemWillPowerOn:
-      ProcessPowerEventHelper(PowerMonitorSource::RESUME_EVENT);
+      PowerMonitorSource::ProcessPowerEvent(PowerMonitorSource::RESUME_EVENT);
       break;
   }
 }

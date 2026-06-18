@@ -27,19 +27,26 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_ENCRYPTEDMEDIA_MEDIA_KEY_SESSION_H_
 
 #include <memory>
+#include <optional>
+
 #include "third_party/blink/public/platform/web_content_decryption_module_session.h"
 #include "third_party/blink/public/platform/web_encrypted_media_types.h"
 #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_property.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_media_key_session_closed_reason.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_piece.h"
+#include "third_party/blink/renderer/modules/encryptedmedia/encrypted_media_utils.h"
 #include "third_party/blink/renderer/modules/encryptedmedia/media_key_status_map.h"
 #include "third_party/blink/renderer/modules/event_target_modules.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_deque.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/prefinalizer.h"
 #include "third_party/blink/renderer/platform/timer.h"
 
 namespace media {
 enum class EmeInitDataType;
+enum class CdmSessionClosedReason;
 }
 
 namespace blink {
@@ -67,7 +74,7 @@ class MediaKeys;
 // as long as the MediaKeys object is alive.
 // The WebContentDecryptionModuleSession has the same lifetime as this object.
 class MediaKeySession final
-    : public EventTargetWithInlineData,
+    : public EventTarget,
       public ActiveScriptWrappable<MediaKeySession>,
       public ExecutionContextLifecycleObserver,
       private WebContentDecryptionModuleSession::Client {
@@ -75,26 +82,31 @@ class MediaKeySession final
   USING_PRE_FINALIZER(MediaKeySession, Dispose);
 
  public:
-  MediaKeySession(ScriptState*, MediaKeys*, WebEncryptedMediaSessionType);
+  MediaKeySession(ScriptState*,
+                  MediaKeys*,
+                  WebEncryptedMediaSessionType,
+                  const MediaKeysConfig&);
   ~MediaKeySession() override;
 
   String sessionId() const;
   double expiration() const { return expiration_; }
-  ScriptPromise closed(ScriptState*);
+  ScriptPromise<V8MediaKeySessionClosedReason> closed(ScriptState*);
   MediaKeyStatusMap* keyStatuses();
   DEFINE_ATTRIBUTE_EVENT_LISTENER(keystatuseschange, kKeystatuseschange)
   DEFINE_ATTRIBUTE_EVENT_LISTENER(message, kMessage)
 
-  ScriptPromise generateRequest(ScriptState*,
-                                const String& init_data_type,
-                                const DOMArrayPiece& init_data,
-                                ExceptionState&);
-  ScriptPromise load(ScriptState*, const String& session_id, ExceptionState&);
-  ScriptPromise update(ScriptState*,
-                       const DOMArrayPiece& response,
-                       ExceptionState&);
-  ScriptPromise close(ScriptState*, ExceptionState&);
-  ScriptPromise remove(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLUndefined> generateRequest(ScriptState*,
+                                              const String& init_data_type,
+                                              const DOMArrayPiece& init_data,
+                                              ExceptionState&);
+  ScriptPromise<IDLBoolean> load(ScriptState*,
+                                 const String& session_id,
+                                 ExceptionState&);
+  ScriptPromise<IDLUndefined> update(ScriptState*,
+                                     const DOMArrayPiece& response,
+                                     ExceptionState&);
+  ScriptPromise<IDLUndefined> close(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLUndefined> remove(ScriptState*, ExceptionState&);
 
   // EventTarget
   const AtomicString& InterfaceName() const override;
@@ -112,6 +124,7 @@ class MediaKeySession final
   class PendingAction;
   friend class NewSessionResultPromise;
   friend class LoadSessionResultPromise;
+  friend class CloseSessionResultPromise;
 
   void Dispose();
 
@@ -127,15 +140,15 @@ class MediaKeySession final
   void UpdateTask(ContentDecryptionModuleResult*,
                   DOMArrayBuffer* sanitized_response);
   void CloseTask(ContentDecryptionModuleResult*);
+  void OnClosePromiseResolved();
   void RemoveTask(ContentDecryptionModuleResult*);
 
   // WebContentDecryptionModuleSession::Client
-  void OnSessionMessage(MessageType,
-                        const unsigned char* message,
-                        size_t message_length) override;
-  void OnSessionClosed() override;
+  void OnSessionMessage(media::CdmMessageType message_type,
+                        base::span<const uint8_t> message) override;
+  void OnSessionClosed(media::CdmSessionClosedReason reason) override;
   void OnSessionExpirationUpdate(double updated_expiry_time_in_ms) override;
-  void OnSessionKeysChange(const WebVector<WebEncryptedMediaKeyInformation>&,
+  void OnSessionKeysChange(const std::vector<WebEncryptedMediaKeyInformation>&,
                            bool has_additional_usable_key) override;
 
   Member<EventQueue> async_event_queue_;
@@ -144,24 +157,27 @@ class MediaKeySession final
   // Used to determine if MediaKeys is still active.
   WeakMember<MediaKeys> media_keys_;
 
+  const WebEncryptedMediaSessionType session_type_;
+  const MediaKeysConfig config_;
+
   // Session properties.
   String session_id_;
-  WebEncryptedMediaSessionType session_type_;
   double expiration_;
   Member<MediaKeyStatusMap> key_statuses_map_;
 
   // Session states.
-  bool is_uninitialized_;
-  bool is_callable_;
-  bool is_closing_or_closed_;
+  bool is_uninitialized_ = true;
+  bool is_callable_ = false;
+  bool is_closing_ = false;
+  bool is_closed_ = false;
 
   // Keep track of the closed promise.
-  typedef ScriptPromiseProperty<ToV8UndefinedGenerator, Member<DOMException>>
+  typedef ScriptPromiseProperty<V8MediaKeySessionClosedReason, DOMException>
       ClosedPromise;
   Member<ClosedPromise> closed_promise_;
 
   HeapDeque<Member<PendingAction>> pending_actions_;
-  TaskRunnerTimer<MediaKeySession> action_timer_;
+  HeapTaskRunnerTimer<MediaKeySession> action_timer_;
 };
 
 }  // namespace blink

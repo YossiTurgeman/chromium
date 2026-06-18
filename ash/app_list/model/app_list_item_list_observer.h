@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,14 @@
 #include <stddef.h>
 
 #include "ash/app_list/model/app_list_model_export.h"
+#include "base/observer_list_types.h"
 
 namespace ash {
 
 class AppListItem;
 
-class APP_LIST_MODEL_EXPORT AppListItemListObserver {
+class APP_LIST_MODEL_EXPORT AppListItemListObserver
+    : public base::CheckedObserver {
  public:
   // Triggered after |item| has been added to the list at |index|.
   virtual void OnListItemAdded(size_t index, AppListItem* item) {}
@@ -29,7 +31,7 @@ class APP_LIST_MODEL_EXPORT AppListItemListObserver {
                                AppListItem* item) {}
 
  protected:
-  virtual ~AppListItemListObserver() {}
+  ~AppListItemListObserver() override;
 };
 
 }  // namespace ash

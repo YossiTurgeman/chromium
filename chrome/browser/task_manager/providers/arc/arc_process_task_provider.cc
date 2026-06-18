@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,14 +11,14 @@
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/process/process.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/trace_event.h"
-#include "chrome/browser/chromeos/arc/process/arc_process_service.h"
-#include "components/arc/mojom/process.mojom.h"
+#include "chromeos/ash/experiences/arc/mojom/process.mojom.h"
+#include "chromeos/ash/experiences/arc/process/arc_process_service.h"
 
 namespace task_manager {
 
@@ -57,7 +57,7 @@ void ArcProcessTaskProvider::UpdateProcessList(
       // After calling NotifyObserverTaskAdded(), the raw pointer of |task| is
       // remebered somewhere else. One should not (implicitly) delete the
       // referenced object before calling NotifyObserverTaskRemoved() first
-      // (crbug.com/587707).
+      // (crbug.com/41239957).
       DCHECK(!task.get()) <<
           "Task with the same pid should not be added twice.";
       task = std::make_unique<ArcProcessTask>(std::move(entry));
@@ -134,6 +134,7 @@ void ArcProcessTaskProvider::StartUpdating() {
 
 void ArcProcessTaskProvider::StopUpdating() {
   is_updating_ = false;
+  weak_ptr_factory_.InvalidateWeakPtrs();
   nspid_to_task_.clear();
   nspid_to_sys_task_.clear();
 }
@@ -144,7 +145,7 @@ void ArcProcessTaskProvider::ScheduleNextRequest(base::OnceClosure task) {
   // TODO(nya): Remove this timer once ARC starts to send us UpdateProcessList
   // message when the process list changed. As of today, ARC does not send
   // the process list unless we request it by RequestAppProcessList message.
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, std::move(task),
       arc::ArcProcessService::kProcessSnapshotRefreshTime);
 }

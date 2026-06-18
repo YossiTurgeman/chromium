@@ -1,17 +1,18 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/password_manager/core/browser/leak_detection/bulk_leak_check_impl.h"
 
+#include <algorithm>
+#include <optional>
 #include <utility>
 
 #include "base/check.h"
-#include "base/optional.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/task/post_task.h"
+#include "base/task/thread_pool.h"
+#include "components/password_manager/core/browser/leak_detection/bulk_leak_check_delegate_interface.h"
 #include "components/password_manager/core/browser/leak_detection/encryption_utils.h"
-#include "components/password_manager/core/browser/leak_detection/leak_detection_delegate_interface.h"
 #include "components/password_manager/core/browser/leak_detection/leak_detection_request_utils.h"
 #include "components/password_manager/core/browser/leak_detection/single_lookup_response.h"
 #include "components/signin/public/identity_manager/access_token_fetcher.h"
@@ -19,23 +20,6 @@
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
 namespace password_manager {
-namespace {
-
-std::unique_ptr<BulkLeakCheckImpl::CredentialHolder> RemoveFromQueue(
-    BulkLeakCheckImpl::CredentialHolder* weak_holder,
-    base::circular_deque<std::unique_ptr<BulkLeakCheckImpl::CredentialHolder>>*
-        queue) {
-  auto it = std::find_if(queue->begin(), queue->end(),
-                         [weak_holder](const auto& element) {
-                           return element.get() == weak_holder;
-                         });
-  CHECK(it != queue->end());
-  std::unique_ptr<BulkLeakCheckImpl::CredentialHolder> holder = std::move(*it);
-  queue->erase(it);
-  return holder;
-}
-
-}  // namespace
 
 // Holds all necessary payload for the request to the server for one credential.
 struct BulkLeakCheckImpl::CredentialHolder {
@@ -58,8 +42,22 @@ struct BulkLeakCheckImpl::CredentialHolder {
   std::unique_ptr<LeakDetectionRequestInterface> network_request_;
 };
 
-LeakCheckCredential::LeakCheckCredential(base::string16 username,
-                                         base::string16 password)
+namespace {
+
+using HolderPtr = std::unique_ptr<BulkLeakCheckImpl::CredentialHolder>;
+HolderPtr RemoveFromQueue(BulkLeakCheckImpl::CredentialHolder* weak_holder,
+                          base::circular_deque<HolderPtr>* queue) {
+  auto it = std::ranges::find(*queue, weak_holder, &HolderPtr::get);
+  CHECK(it != queue->end());
+  HolderPtr holder = std::move(*it);
+  queue->erase(it);
+  return holder;
+}
+
+}  // namespace
+
+LeakCheckCredential::LeakCheckCredential(std::u16string username,
+                                         std::u16string password)
     : username_(std::move(username)), password_(std::move(password)) {}
 
 LeakCheckCredential::LeakCheckCredential(LeakCheckCredential&&) = default;
@@ -76,7 +74,7 @@ BulkLeakCheckImpl::BulkLeakCheckImpl(
     : delegate_(delegate),
       identity_manager_(identity_manager),
       url_loader_factory_(std::move(url_loader_factory)),
-      encryption_key_(CreateNewKey()),
+      encryption_key_(CreateNewKey().value_or("")),
       payload_task_runner_(base::ThreadPool::CreateSequencedTaskRunner(
           {base::TaskPriority::USER_VISIBLE,
            base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN})) {
@@ -89,6 +87,7 @@ BulkLeakCheckImpl::BulkLeakCheckImpl(
 BulkLeakCheckImpl::~BulkLeakCheckImpl() = default;
 
 void BulkLeakCheckImpl::CheckCredentials(
+    LeakDetectionInitiator initiator,
     std::vector<LeakCheckCredential> credentials) {
   for (auto& c : credentials) {
     waiting_encryption_.push_back(
@@ -96,7 +95,7 @@ void BulkLeakCheckImpl::CheckCredentials(
     const LeakCheckCredential& credential =
         waiting_encryption_.back()->credential;
     PrepareSingleLeakRequestData(
-        task_tracker_, *payload_task_runner_, encryption_key_,
+        task_tracker_, *payload_task_runner_, initiator, encryption_key_,
         base::UTF16ToUTF8(credential.username()),
         base::UTF16ToUTF8(credential.password()),
         base::BindOnce(&BulkLeakCheckImpl::OnPayloadReady,
@@ -137,12 +136,14 @@ void BulkLeakCheckImpl::OnTokenReady(
   std::unique_ptr<CredentialHolder> holder =
       RemoveFromQueue(weak_holder, &waiting_token_);
   if (error.state() != GoogleServiceAuthError::NONE) {
-    if (error.state() == GoogleServiceAuthError::CONNECTION_FAILED)
+    if (error.state() == GoogleServiceAuthError::CONNECTION_FAILED) {
       delegate_->OnError(LeakDetectionError::kNetworkError);
-    else if (error.state() == GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS)
+    } else if (error.state() ==
+               GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS) {
       delegate_->OnError(LeakDetectionError::kNotSignIn);
-    else
+    } else {
       delegate_->OnError(LeakDetectionError::kTokenRequestFailure);
+    }
     // |this| can be destroyed here.
     return;
   }
@@ -151,7 +152,7 @@ void BulkLeakCheckImpl::OnTokenReady(
   holder->network_request_ = network_request_factory_->CreateNetworkRequest();
   holder->network_request_->LookupSingleLeak(
       url_loader_factory_.get(), access_token_info.token,
-      std::move(holder->payload),
+      /*api_key=*/std::nullopt, std::move(holder->payload),
       base::BindOnce(&BulkLeakCheckImpl::OnLookupLeakResponse,
                      weak_ptr_factory_.GetWeakPtr(), holder.get()));
   waiting_response_.push_back(std::move(holder));
@@ -160,7 +161,7 @@ void BulkLeakCheckImpl::OnTokenReady(
 void BulkLeakCheckImpl::OnLookupLeakResponse(
     CredentialHolder* weak_holder,
     std::unique_ptr<SingleLookupResponse> response,
-    base::Optional<LeakDetectionError> error) {
+    std::optional<LeakDetectionError> error) {
   std::unique_ptr<CredentialHolder> holder =
       RemoveFromQueue(weak_holder, &waiting_response_);
 

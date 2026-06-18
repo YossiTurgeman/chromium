@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@ namespace task_manager {
 
 namespace {
 
-base::string16 PrefixPrintTitle(const base::string16& title) {
+std::u16string PrefixPrintTitle(const std::u16string& title) {
   return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_PRINT_PREFIX, title);
 }
 
@@ -20,20 +20,17 @@ base::string16 PrefixPrintTitle(const base::string16& title) {
 PrintingTask::PrintingTask(content::WebContents* web_contents)
     : RendererTask(
           PrefixPrintTitle(RendererTask::GetTitleFromWebContents(web_contents)),
-          RendererTask::GetFaviconFromWebContents(web_contents),
+          RendererTask::GetFaviconFromWebContents(web_contents).get(),
           web_contents) {}
 
-PrintingTask::~PrintingTask() {
-}
+PrintingTask::~PrintingTask() = default;
 
 void PrintingTask::UpdateTitle() {
   set_title(PrefixPrintTitle(GetTitleFromWebContents(web_contents())));
 }
 
 void PrintingTask::UpdateFavicon() {
-  const gfx::ImageSkia* icon =
-      RendererTask::GetFaviconFromWebContents(web_contents());
-  set_icon(icon ? *icon : gfx::ImageSkia());
+  DefaultUpdateFaviconImpl();
 }
 
 }  // namespace task_manager

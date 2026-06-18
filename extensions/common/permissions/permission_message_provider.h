@@ -1,11 +1,9 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef EXTENSIONS_COMMON_PERMISSIONS_PERMISSION_MESSAGE_PROVIDER_H_
 #define EXTENSIONS_COMMON_PERMISSIONS_PERMISSION_MESSAGE_PROVIDER_H_
-
-#include <vector>
 
 #include "extensions/common/manifest.h"
 #include "extensions/common/permissions/permission_message.h"
@@ -27,14 +25,14 @@ class PermissionMessageProvider {
   static const PermissionMessageProvider* Get();
 
   // Calculates and returns the full list of permission messages for the given
-  // |permissions|. This involves converting the given PermissionIDs into
+  // `permissions`. This involves converting the given PermissionIDs into
   // localized messages, as well as coalescing and parameterizing any messages
   // that require the permission ID's argument in their message.
   virtual PermissionMessages GetPermissionMessages(
       const PermissionIDSet& permissions) const = 0;
 
-  // Returns true if |requested_permissions| has a greater privilege level than
-  // |granted_permissions|.
+  // Returns true if `requested_permissions` has a greater privilege level than
+  // `granted_permissions`.
   // Whether certain permissions are considered varies by extension type.
   // TODO(sashab): Add an implementation of this method that uses
   // PermissionIDSet instead, then deprecate this one.

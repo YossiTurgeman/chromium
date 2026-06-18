@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,15 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/time/time.h"
-#include "google_apis/drive/auth_service_interface.h"
-#include "google_apis/drive/base_requests.h"
+#include "components/drive/drive_export.h"
+#include "google_apis/common/auth_service_interface.h"
 #include "google_apis/drive/drive_api_requests.h"
+#include "google_apis/drive/drive_base_requests.h"
 #include "google_apis/drive/drive_common_callbacks.h"
 #include "google_apis/gaia/core_account_id.h"
 
@@ -24,7 +27,7 @@ class Time;
 namespace drive {
 
 // Observer interface for DriveServiceInterface.
-class DriveServiceObserver {
+class COMPONENTS_DRIVE_EXPORT DriveServiceObserver {
  public:
   // Triggered when the service gets ready to send requests.
   virtual void OnReadyToSendRequests() {}
@@ -37,7 +40,7 @@ class DriveServiceObserver {
 };
 
 // Optional parameters for AddNewDirectory().
-struct AddNewDirectoryOptions {
+struct COMPONENTS_DRIVE_EXPORT AddNewDirectoryOptions {
   AddNewDirectoryOptions();
   AddNewDirectoryOptions(const AddNewDirectoryOptions& other);
   ~AddNewDirectoryOptions();
@@ -59,7 +62,7 @@ struct AddNewDirectoryOptions {
 
 // Optional parameters for InitiateUploadNewFile() and
 // MultipartUploadNewFile().
-struct UploadNewFileOptions {
+struct COMPONENTS_DRIVE_EXPORT UploadNewFileOptions {
   UploadNewFileOptions();
   UploadNewFileOptions(const UploadNewFileOptions& other);
   ~UploadNewFileOptions();
@@ -78,7 +81,7 @@ struct UploadNewFileOptions {
 
 // Optional parameters for InitiateUploadExistingFile() and
 // MultipartUploadExistingFile().
-struct UploadExistingFileOptions {
+struct COMPONENTS_DRIVE_EXPORT UploadExistingFileOptions {
   UploadExistingFileOptions();
   UploadExistingFileOptions(const UploadExistingFileOptions& other);
   ~UploadExistingFileOptions();
@@ -110,16 +113,22 @@ struct UploadExistingFileOptions {
 };
 
 // Interface where we define operations that can be sent in batch requests.
-class DriveServiceBatchOperationsInterface {
+class COMPONENTS_DRIVE_EXPORT DriveServiceBatchOperationsInterface {
  public:
   virtual ~DriveServiceBatchOperationsInterface() = default;
 
   // Uploads a file by a single request with multipart body. It's more efficient
   // for small files than using |InitiateUploadNewFile| and |ResumeUpload|.
   // |content_type| and |content_length| should be the ones of the file to be
-  // uploaded.  |callback| must not be null. |progress_callback| may be null.
-  virtual google_apis::CancelCallbackRepeating MultipartUploadNewFile(
+  // uploaded.
+  // `converted_mime_type` is the desired MIME type of the file after uploading.
+  // This should only be set if it is expected that Drive will convert the
+  // uploaded file into another format such as Google Docs:
+  // https://developers.google.com/drive/api/guides/manage-uploads#import-docs
+  // |callback| must not be null. |progress_callback| may be null.
+  virtual google_apis::CancelCallbackOnce MultipartUploadNewFile(
       const std::string& content_type,
+      std::optional<std::string_view> converted_mime_type,
       int64_t content_length,
       const std::string& parent_resource_id,
       const std::string& title,
@@ -132,7 +141,7 @@ class DriveServiceBatchOperationsInterface {
   // for small files than using |InitiateUploadExistingFile| and |ResumeUpload|.
   // |content_type| and |content_length| should be the ones of the file to be
   // uploaded.  |callback| must not be null. |progress_callback| may be null.
-  virtual google_apis::CancelCallbackRepeating MultipartUploadExistingFile(
+  virtual google_apis::CancelCallbackOnce MultipartUploadExistingFile(
       const std::string& content_type,
       int64_t content_length,
       const std::string& resource_id,
@@ -143,7 +152,7 @@ class DriveServiceBatchOperationsInterface {
 };
 
 // Builder returned by DriveServiceInterface to build batch request.
-class BatchRequestConfiguratorInterface
+class COMPONENTS_DRIVE_EXPORT BatchRequestConfiguratorInterface
     : public DriveServiceBatchOperationsInterface {
  public:
   ~BatchRequestConfiguratorInterface() override = default;
@@ -157,7 +166,8 @@ class BatchRequestConfiguratorInterface
 //
 // All functions must be called on UI thread. DriveService is built on top of
 // URLFetcher that runs on UI thread.
-class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
+class COMPONENTS_DRIVE_EXPORT DriveServiceInterface
+    : public DriveServiceBatchOperationsInterface {
  public:
   ~DriveServiceInterface() override = default;
 
@@ -219,7 +229,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // |callback| must not be null.
   virtual google_apis::CancelCallbackOnce GetAllFileList(
       const std::string& team_drive_id,
-      const google_apis::FileListCallback& callback) = 0;
+      google_apis::FileListCallback callback) = 0;
 
   // Fetches a file list in the directory with |directory_resource_id|.
   // |callback| will be called upon completion.
@@ -231,7 +241,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // |callback| must not be null.
   virtual google_apis::CancelCallbackOnce GetFileListInDirectory(
       const std::string& directory_resource_id,
-      const google_apis::FileListCallback& callback) = 0;
+      google_apis::FileListCallback callback) = 0;
 
   // Searches the resources for the |search_query| from all the user's
   // resources. |callback| will be called upon completion.
@@ -241,9 +251,9 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   //
   // |search_query| must not be empty.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback Search(
+  virtual google_apis::CancelCallbackOnce Search(
       const std::string& search_query,
-      const google_apis::FileListCallback& callback) = 0;
+      google_apis::FileListCallback callback) = 0;
 
   // Searches the resources with the |title|.
   // |directory_resource_id| is an optional parameter. If it is empty,
@@ -257,7 +267,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   virtual google_apis::CancelCallbackOnce SearchByTitle(
       const std::string& title,
       const std::string& directory_resource_id,
-      const google_apis::FileListCallback& callback) = 0;
+      google_apis::FileListCallback callback) = 0;
 
   // Fetches change list since |start_changestamp|. |callback| will be
   // called upon completion.
@@ -266,7 +276,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // GetRemainingChangeList.
   //
   // |callback| must not be null.
-  virtual google_apis::CancelCallback GetChangeList(
+  virtual google_apis::CancelCallbackOnce GetChangeList(
       int64_t start_changestamp,
       google_apis::ChangeListCallback callback) = 0;
 
@@ -279,7 +289,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // GetRemainingChangeList.
   //
   // |callback| must not be null.
-  virtual google_apis::CancelCallback GetChangeListByToken(
+  virtual google_apis::CancelCallbackOnce GetChangeListByToken(
       const std::string& team_drive_id,
       const std::string& start_page_token,
       google_apis::ChangeListCallback callback) = 0;
@@ -299,7 +309,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // method. |callback| will be called upon completion.
   //
   // |next_link| must not be empty. |callback| must not be null.
-  virtual google_apis::CancelCallback GetRemainingTeamDriveList(
+  virtual google_apis::CancelCallbackOnce GetRemainingTeamDriveList(
       const std::string& page_token,
       google_apis::TeamDriveListCallback callback) = 0;
 
@@ -311,20 +321,20 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // |next_link| must not be empty. |callback| must not be null.
   virtual google_apis::CancelCallbackOnce GetRemainingFileList(
       const GURL& next_link,
-      const google_apis::FileListCallback& callback) = 0;
+      google_apis::FileListCallback callback) = 0;
 
   // Fetches single entry metadata from server. The entry's file id equals
   // |resource_id|.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback GetFileResource(
+  virtual google_apis::CancelCallbackOnce GetFileResource(
       const std::string& resource_id,
       google_apis::FileResourceCallback callback) = 0;
 
   // Gets the about resource information from the server.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback GetAboutResource(
+  virtual google_apis::CancelCallbackOnce GetAboutResource(
       google_apis::AboutResourceCallback callback) = 0;
 
   // Gets the start page token information from the server.
@@ -332,7 +342,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // the users changelog.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback GetStartPageToken(
+  virtual google_apis::CancelCallbackOnce GetStartPageToken(
       const std::string& team_drive_id,
       google_apis::StartPageTokenCallback callback) = 0;
 
@@ -341,7 +351,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // HTTP_PRECONDITION error.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback DeleteResource(
+  virtual google_apis::CancelCallbackOnce DeleteResource(
       const std::string& resource_id,
       const std::string& etag,
       google_apis::EntryActionCallback callback) = 0;
@@ -349,7 +359,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // Trashes a resource identified by its |resource_id|.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback TrashResource(
+  virtual google_apis::CancelCallbackOnce TrashResource(
       const std::string& resource_id,
       google_apis::EntryActionCallback callback) = 0;
 
@@ -360,7 +370,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // server will be set to the date.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback CopyResource(
+  virtual google_apis::CancelCallbackOnce CopyResource(
       const std::string& resource_id,
       const std::string& parent_resource_id,
       const std::string& new_title,
@@ -374,7 +384,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // If |properties| are specified, then they will be set on |resource_id|.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback UpdateResource(
+  virtual google_apis::CancelCallbackOnce UpdateResource(
       const std::string& resource_id,
       const std::string& parent_resource_id,
       const std::string& new_title,
@@ -387,7 +397,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // |resource_id| to a collection represented by the |parent_resource_id|.
   // Upon completion, invokes |callback| with results on the calling thread.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback AddResourceToDirectory(
+  virtual google_apis::CancelCallbackOnce AddResourceToDirectory(
       const std::string& parent_resource_id,
       const std::string& resource_id,
       google_apis::EntryActionCallback callback) = 0;
@@ -429,7 +439,7 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   virtual google_apis::CancelCallbackOnce DownloadFile(
       const base::FilePath& local_cache_path,
       const std::string& resource_id,
-      const google_apis::DownloadActionCallback& download_action_callback,
+      google_apis::DownloadActionCallback download_action_callback,
       const google_apis::GetContentCallback& get_content_callback,
       google_apis::ProgressCallback progress_callback) = 0;
 
@@ -437,28 +447,28 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // |content_type| and |content_length| should be the ones of the file to be
   // uploaded.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback InitiateUploadNewFile(
+  virtual google_apis::CancelCallbackOnce InitiateUploadNewFile(
       const std::string& content_type,
       int64_t content_length,
       const std::string& parent_resource_id,
       const std::string& title,
       const UploadNewFileOptions& options,
-      const google_apis::InitiateUploadCallback& callback) = 0;
+      google_apis::InitiateUploadCallback callback) = 0;
 
   // Initiates uploading of an existing document/file.
   // |content_type| and |content_length| should be the ones of the file to be
   // uploaded.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback InitiateUploadExistingFile(
+  virtual google_apis::CancelCallbackOnce InitiateUploadExistingFile(
       const std::string& content_type,
       int64_t content_length,
       const std::string& resource_id,
       const UploadExistingFileOptions& options,
-      const google_apis::InitiateUploadCallback& callback) = 0;
+      google_apis::InitiateUploadCallback callback) = 0;
 
   // Resumes uploading of a document/file on the calling thread.
   // |callback| must not be null. |progress_callback| may be null.
-  virtual google_apis::CancelCallback ResumeUpload(
+  virtual google_apis::CancelCallbackOnce ResumeUpload(
       const GURL& upload_url,
       int64_t start_position,
       int64_t end_position,
@@ -472,14 +482,14 @@ class DriveServiceInterface : public DriveServiceBatchOperationsInterface {
   // |drive_file_path| and |content_length| should be set to the same value
   // which is used for ResumeUpload.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback GetUploadStatus(
+  virtual google_apis::CancelCallbackOnce GetUploadStatus(
       const GURL& upload_url,
       int64_t content_length,
       google_apis::drive::UploadRangeCallback callback) = 0;
 
   // Authorizes the account |email| to access |resource_id| as a |role|.
   // |callback| must not be null.
-  virtual google_apis::CancelCallback AddPermission(
+  virtual google_apis::CancelCallbackOnce AddPermission(
       const std::string& resource_id,
       const std::string& email,
       google_apis::drive::PermissionRole role,

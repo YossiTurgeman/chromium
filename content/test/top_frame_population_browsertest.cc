@@ -1,8 +1,8 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/content_browser_test.h"
@@ -33,8 +33,13 @@ IN_PROC_BROWSER_TEST_F(TopFramePopulationBrowsertest, FromTopFrame) {
       base::BindLambdaForTesting(
           [&](const network::mojom::URLLoaderFactoryParams* params,
               const url::Origin& unused_origin,
-              bool unused_is_for_isolated_world) {
+              bool unused_is_for_isolated_world,
+              bool unused_is_for_service_worker) {
             ASSERT_TRUE(params);
+
+            // Ignore URLLoaderFactoryParams for the initial empty document.
+            if (params->isolation_info.top_frame_origin()->opaque())
+              return;
 
             ASSERT_THAT(params->isolation_info.top_frame_origin(),
                         Optional(url::Origin::Create(GURL("http://main.com"))));
@@ -79,8 +84,13 @@ IN_PROC_BROWSER_TEST_F(TopFramePopulationBrowsertest, FromNestedFrame) {
       base::BindLambdaForTesting(
           [&](const network::mojom::URLLoaderFactoryParams* params,
               const url::Origin& unused_origin,
-              bool unused_is_for_isolated_world) {
+              bool unused_is_for_isolated_world,
+              bool unused_is_for_service_worker) {
             ASSERT_TRUE(params);
+
+            // Ignore URLLoaderFactoryParams for the initial empty document.
+            if (params->isolation_info.top_frame_origin()->opaque())
+              return;
 
             ASSERT_THAT(params->isolation_info.top_frame_origin(),
                         Optional(url::Origin::Create(GURL("http://main.com"))));

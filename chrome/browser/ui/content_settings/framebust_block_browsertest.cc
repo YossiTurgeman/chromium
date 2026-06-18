@@ -1,14 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
 #include <cstddef>
+#include <optional>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/macros.h"
-#include "base/optional.h"
-#include "base/stl_util.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
@@ -18,7 +18,7 @@
 #include "chrome/browser/ui/blocked_content/framebust_block_tab_helper.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_content_setting_bubble_model_delegate.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
 #include "chrome/browser/ui/chrome_pages.h"
 #include "chrome/browser/ui/content_settings/content_setting_bubble_model.h"
 #include "chrome/browser/ui/content_settings/fake_owner.h"
@@ -31,8 +31,12 @@
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/content_settings/core/common/content_settings_types.h"
 #include "content/public/common/content_features.h"
+#include "content/public/common/isolated_world_ids.h"
+#include "content/public/common/url_constants.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "content/public/test/fenced_frame_test_util.h"
+#include "content/public/test/prerender_test_util.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
@@ -41,9 +45,8 @@
 #include "ui/events/event.h"
 #include "url/gurl.h"
 
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/web_applications/system_web_app_manager.h"
-#include "chrome/browser/web_applications/web_app_provider.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
 #endif
 
 namespace {
@@ -71,8 +74,9 @@ class FramebustBlockBrowserTest
 
   // UrlListManager::Observer:
   void BlockedUrlAdded(int32_t id, const GURL& blocked_url) override {
-    if (!blocked_url_added_closure_.is_null())
+    if (!blocked_url_added_closure_.is_null()) {
       std::move(blocked_url_added_closure_).Run();
+    }
   }
 
   content::WebContents* GetWebContents() {
@@ -102,33 +106,73 @@ class FramebustBlockBrowserTest
         iframe.src='%s'
     )";
     content::TestNavigationObserver load_observer(contents);
-    bool result = content::ExecuteScriptWithoutUserGesture(
+    bool result = content::ExecJs(
         contents,
-        base::StringPrintf(kScript, iframe_id.c_str(), url.spec().c_str()));
+        base::StringPrintf(kScript, iframe_id.c_str(), url.spec().c_str()),
+        content::EXECUTE_SCRIPT_NO_USER_GESTURE);
     load_observer.Wait();
     return result;
   }
 
+  bool ExecuteAndCheckBlockedRedirection() {
+    return ExecuteAndCheckBlockedRedirection(
+        embedded_test_server()->GetURL("b.com", "/title1.html"));
+  }
+
+  // Attempts to framebust to `redirect_url` and ensures the navigation is
+  // blocked. (The test fails if not.) Returns whether the blocked URL is added
+  // to the tab helper, where the user can proceed to it if desired.
+  bool ExecuteAndCheckBlockedRedirection(const GURL& redirect_url) {
+    const GURL original_url = embedded_test_server()->GetURL("/iframe.html");
+    EXPECT_TRUE(ui_test_utils::NavigateToURL(browser(), original_url));
+
+    const GURL child_url =
+        embedded_test_server()->GetURL("a.com", "/title1.html");
+    NavigateIframeToUrlWithoutGesture(GetWebContents(), "test", child_url);
+
+    content::RenderFrameHost* child =
+        content::ChildFrameAt(GetWebContents()->GetPrimaryMainFrame(), 0);
+    EXPECT_EQ(child_url, child->GetLastCommittedURL());
+
+    base::RunLoop block_waiter;
+    blocked_url_added_closure_ = block_waiter.QuitClosure();
+    child->ExecuteJavaScriptForTests(
+        base::ASCIIToUTF16(base::StringPrintf("window.top.location = '%s';",
+                                              redirect_url.spec().c_str())),
+        base::NullCallback(), content::ISOLATED_WORLD_ID_GLOBAL);
+    block_waiter.Run();
+
+    // Ensure we have not left the original page.
+    EXPECT_EQ(original_url, GetWebContents()->GetLastCommittedURL());
+
+    // Return whether the redirect URL itself ended up in the list of blocked
+    // URLs, which only happens if the renderer had the ability to navigate to
+    // the URL in the first place.
+    return std::ranges::contains(GetFramebustTabHelper()->blocked_urls(),
+                                 redirect_url);
+  }
+
  protected:
-  base::Optional<GURL> clicked_url_;
-  base::Optional<size_t> clicked_index_;
+  std::optional<GURL> clicked_url_;
+  std::optional<size_t> clicked_index_;
 
   base::OnceClosure blocked_url_added_closure_;
-  Browser* current_browser_;
+  raw_ptr<Browser, AcrossTasksDanglingUntriaged> current_browser_;
 };
 
 // Tests that clicking an item in the list of blocked URLs trigger a navigation
 // to that URL.
 IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, ModelAllowsRedirection) {
   const GURL blocked_urls[] = {
-      GURL(chrome::kChromeUIHistoryURL), GURL(chrome::kChromeUISettingsURL),
-      GURL(chrome::kChromeUIVersionURL),
+      embedded_test_server()->GetURL("b.com", "/title1.html"),
+      embedded_test_server()->GetURL("c.com", "/title1.html"),
+      embedded_test_server()->GetURL("d.com", "/title1.html"),
   };
 
   // Signal that a blocked redirection happened.
   auto* helper = GetFramebustTabHelper();
   for (const GURL& url : blocked_urls) {
-    helper->AddBlockedUrl(url,
+    helper->AddBlockedUrl(url, url::Origin::Create(url),
                           base::BindOnce(&FramebustBlockBrowserTest::OnClick,
                                          base::Unretained(this)));
   }
@@ -136,14 +180,16 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, ModelAllowsRedirection) {
 
   // Simulate clicking on the second blocked URL.
   ContentSettingFramebustBlockBubbleModel framebust_block_bubble_model(
-      browser()->content_setting_bubble_model_delegate(), GetWebContents());
+      browser()->GetFeatures().content_setting_bubble_model_delegate(),
+      GetWebContents());
 
   EXPECT_FALSE(clicked_index_.has_value());
   EXPECT_FALSE(clicked_url_.has_value());
 
   content::TestNavigationObserver observer(GetWebContents());
-  ui::MouseEvent click_event(ui::ET_MOUSE_PRESSED, gfx::Point(), gfx::Point(),
-                             ui::EventTimeForNow(), ui::EF_LEFT_MOUSE_BUTTON,
+  ui::MouseEvent click_event(ui::EventType::kMousePressed, gfx::Point(),
+                             gfx::Point(), ui::EventTimeForNow(),
+                             ui::EF_LEFT_MOUSE_BUTTON,
                              ui::EF_LEFT_MOUSE_BUTTON);
   framebust_block_bubble_model.OnListItemClicked(/* index = */ 1, click_event);
   observer.Wait();
@@ -151,61 +197,110 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, ModelAllowsRedirection) {
   EXPECT_TRUE(clicked_index_.has_value());
   EXPECT_TRUE(clicked_url_.has_value());
   EXPECT_EQ(1u, clicked_index_.value());
-  EXPECT_EQ(GURL(chrome::kChromeUISettingsURL), clicked_url_.value());
+  EXPECT_EQ(embedded_test_server()->GetURL("c.com", "/title1.html"),
+            clicked_url_.value());
   EXPECT_FALSE(helper->HasBlockedUrls());
   EXPECT_EQ(blocked_urls[1], GetWebContents()->GetLastCommittedURL());
 }
 
+IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
+                       EndToEndInitiatorVerification) {
+  const GURL redirect_url =
+      embedded_test_server()->GetURL("b.com", "/title1.html");
+  EXPECT_TRUE(ExecuteAndCheckBlockedRedirection(redirect_url));
+
+  auto* helper = GetFramebustTabHelper();
+  EXPECT_TRUE(helper->HasBlockedUrls());
+  EXPECT_EQ(1u, helper->blocked_urls().size());
+
+  ContentSettingFramebustBlockBubbleModel framebust_block_bubble_model(
+      browser()->GetFeatures().content_setting_bubble_model_delegate(),
+      GetWebContents());
+
+  class InitiatorObserver : public content::WebContentsObserver {
+   public:
+    explicit InitiatorObserver(content::WebContents* web_contents)
+        : content::WebContentsObserver(web_contents) {}
+
+    void DidStartNavigation(
+        content::NavigationHandle* navigation_handle) override {
+      initiator_origin_ = navigation_handle->GetInitiatorOrigin();
+    }
+
+    std::optional<url::Origin> initiator_origin_;
+  };
+
+  InitiatorObserver init_observer(GetWebContents());
+  content::TestNavigationObserver observer(GetWebContents());
+
+  ui::MouseEvent click_event(ui::EventType::kMousePressed, gfx::Point(),
+                             gfx::Point(), ui::EventTimeForNow(),
+                             ui::EF_LEFT_MOUSE_BUTTON,
+                             ui::EF_LEFT_MOUSE_BUTTON);
+  framebust_block_bubble_model.OnListItemClicked(/* index = */ 0, click_event);
+  observer.Wait();
+
+  EXPECT_EQ(redirect_url, GetWebContents()->GetLastCommittedURL());
+  EXPECT_TRUE(init_observer.initiator_origin_.has_value());
+  EXPECT_EQ(url::Origin::Create(
+                embedded_test_server()->GetURL("a.com", "/title1.html")),
+            init_observer.initiator_origin_.value());
+}
+
 IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, AllowRadioButtonSelected) {
   const GURL url = embedded_test_server()->GetURL("/iframe.html");
-  ui_test_utils::NavigateToURL(browser(), url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   // Signal that a blocked redirection happened.
   auto* helper = GetFramebustTabHelper();
-  helper->AddBlockedUrl(url, base::BindOnce(&FramebustBlockBrowserTest::OnClick,
-                                            base::Unretained(this)));
+  helper->AddBlockedUrl(url, url::Origin::Create(url),
+                        base::BindOnce(&FramebustBlockBrowserTest::OnClick,
+                                       base::Unretained(this)));
   EXPECT_TRUE(helper->HasBlockedUrls());
 
   HostContentSettingsMap* settings_map =
       HostContentSettingsMapFactory::GetForProfile(browser()->profile());
   EXPECT_EQ(CONTENT_SETTING_BLOCK,
-            settings_map->GetContentSetting(
-                url, GURL(), ContentSettingsType::POPUPS, std::string()));
+            settings_map->GetContentSetting(url, GURL(),
+                                            ContentSettingsType::POPUPS));
 
   // Create a content bubble and simulate clicking on the first radio button
   // before closing it.
   ContentSettingFramebustBlockBubbleModel framebust_block_bubble_model(
-      browser()->content_setting_bubble_model_delegate(), GetWebContents());
+      browser()->GetFeatures().content_setting_bubble_model_delegate(),
+      GetWebContents());
   std::unique_ptr<FakeOwner> owner = FakeOwner::Create(
       framebust_block_bubble_model, kDisallowRadioButtonIndex);
 
   owner->SetSelectedRadioOptionAndCommit(kAllowRadioButtonIndex);
 
   EXPECT_EQ(CONTENT_SETTING_ALLOW,
-            settings_map->GetContentSetting(
-                url, GURL(), ContentSettingsType::POPUPS, std::string()));
+            settings_map->GetContentSetting(url, GURL(),
+                                            ContentSettingsType::POPUPS));
 }
 
 IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, DisallowRadioButtonSelected) {
   const GURL url = embedded_test_server()->GetURL("/iframe.html");
-  ui_test_utils::NavigateToURL(browser(), url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   // Signal that a blocked redirection happened.
   auto* helper = GetFramebustTabHelper();
-  helper->AddBlockedUrl(url, base::BindOnce(&FramebustBlockBrowserTest::OnClick,
-                                            base::Unretained(this)));
+  helper->AddBlockedUrl(url, url::Origin::Create(url),
+                        base::BindOnce(&FramebustBlockBrowserTest::OnClick,
+                                       base::Unretained(this)));
   EXPECT_TRUE(helper->HasBlockedUrls());
 
   HostContentSettingsMap* settings_map =
       HostContentSettingsMapFactory::GetForProfile(browser()->profile());
   EXPECT_EQ(CONTENT_SETTING_BLOCK,
-            settings_map->GetContentSetting(
-                url, GURL(), ContentSettingsType::POPUPS, std::string()));
+            settings_map->GetContentSetting(url, GURL(),
+                                            ContentSettingsType::POPUPS));
 
   // Create a content bubble and simulate clicking on the second radio button
   // before closing it.
   ContentSettingFramebustBlockBubbleModel framebust_block_bubble_model(
-      browser()->content_setting_bubble_model_delegate(), GetWebContents());
+      browser()->GetFeatures().content_setting_bubble_model_delegate(),
+      GetWebContents());
 
   std::unique_ptr<FakeOwner> owner =
       FakeOwner::Create(framebust_block_bubble_model, kAllowRadioButtonIndex);
@@ -213,35 +308,36 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, DisallowRadioButtonSelected) {
   owner->SetSelectedRadioOptionAndCommit(kDisallowRadioButtonIndex);
 
   EXPECT_EQ(CONTENT_SETTING_BLOCK,
-            settings_map->GetContentSetting(
-                url, GURL(), ContentSettingsType::POPUPS, std::string()));
+            settings_map->GetContentSetting(url, GURL(),
+                                            ContentSettingsType::POPUPS));
 }
 
-#if defined(OS_CHROMEOS) || defined(OS_LINUX)
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
 #define MAYBE_ManageButtonClicked DISABLED_ManageButtonClicked
 #else
 #define MAYBE_ManageButtonClicked ManageButtonClicked
 #endif
 IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, MAYBE_ManageButtonClicked) {
-#if defined(OS_CHROMEOS)
-  web_app::WebAppProvider::Get(browser()->profile())
-      ->system_web_app_manager()
-      .InstallSystemAppsForTesting();
+#if BUILDFLAG(IS_CHROMEOS)
+  ash::SystemWebAppManager::GetForTest(browser()->profile())
+      ->InstallSystemAppsForTesting();
 #endif
 
   const GURL url = embedded_test_server()->GetURL("/iframe.html");
-  ui_test_utils::NavigateToURL(browser(), url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   // Signal that a blocked redirection happened.
   auto* helper = GetFramebustTabHelper();
-  helper->AddBlockedUrl(url, base::BindOnce(&FramebustBlockBrowserTest::OnClick,
-                                            base::Unretained(this)));
+  helper->AddBlockedUrl(url, url::Origin::Create(url),
+                        base::BindOnce(&FramebustBlockBrowserTest::OnClick,
+                                       base::Unretained(this)));
   EXPECT_TRUE(helper->HasBlockedUrls());
 
   // Create a content bubble and simulate clicking on the second radio button
   // before closing it.
   ContentSettingFramebustBlockBubbleModel framebust_block_bubble_model(
-      browser()->content_setting_bubble_model_delegate(), GetWebContents());
+      browser()->GetFeatures().content_setting_bubble_model_delegate(),
+      GetWebContents());
 
   content::TestNavigationObserver navigation_observer(nullptr);
   navigation_observer.StartWatchingNewWebContents();
@@ -254,27 +350,31 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, MAYBE_ManageButtonClicked) {
 }
 
 IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest, SimpleFramebust_Blocked) {
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL("/iframe.html"));
+  EXPECT_TRUE(ExecuteAndCheckBlockedRedirection());
+}
 
-  GURL child_url = embedded_test_server()->GetURL("a.com", "/title1.html");
-  NavigateIframeToUrlWithoutGesture(GetWebContents(), "test", child_url);
+// Attempts to navigate to chrome:// URLs should be blocked without allowing the
+// user to proceed. Instead, the blocked URLs list includes content:kBlockedURL,
+// which is about:blank#blocked, similar to other cases where a renderer
+// attempts to navigate to an off-limits URL. See https://crbug.com/375550814.
+IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
+                       Framebust_WebUI_Blocked_No_Bypass) {
+  const GURL chrome_url(chrome::kChromeUISettingsURL);
+  EXPECT_FALSE(ExecuteAndCheckBlockedRedirection(chrome_url));
+  EXPECT_TRUE(std::ranges::contains(GetFramebustTabHelper()->blocked_urls(),
+                                    GURL(content::kBlockedURL)));
+}
 
-  content::RenderFrameHost* child =
-      content::ChildFrameAt(GetWebContents()->GetMainFrame(), 0);
-  EXPECT_EQ(child_url, child->GetLastCommittedURL());
-
-  GURL redirect_url = embedded_test_server()->GetURL("b.com", "/title1.html");
-
-  base::RunLoop block_waiter;
-  blocked_url_added_closure_ = block_waiter.QuitClosure();
-  child->ExecuteJavaScriptForTests(
-      base::ASCIIToUTF16(base::StringPrintf("window.top.location = '%s';",
-                                            redirect_url.spec().c_str())),
-      base::NullCallback());
-  block_waiter.Run();
-  EXPECT_TRUE(
-      base::Contains(GetFramebustTabHelper()->blocked_urls(), redirect_url));
+// Attempts to navigate to file:// URLs should be blocked without allowing the
+// user to proceed. Instead, the blocked URLs list includes content:kBlockedURL,
+// which is about:blank#blocked, similar to other cases where a renderer
+// attempts to navigate to an off-limits URL. See https://crbug.com/375550814.
+IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
+                       Framebust_File_Blocked_No_Bypass) {
+  const GURL file_url("file:///");
+  EXPECT_FALSE(ExecuteAndCheckBlockedRedirection(file_url));
+  EXPECT_TRUE(std::ranges::contains(GetFramebustTabHelper()->blocked_urls(),
+                                    GURL(content::kBlockedURL)));
 }
 
 IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
@@ -287,14 +387,14 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
   // Create a new browser to test in to ensure that the render process gets the
   // updated content settings.
   CreateAndSetBrowser();
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL("/iframe.html"));
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL("/iframe.html")));
   NavigateIframeToUrlWithoutGesture(
       GetWebContents(), "test",
       embedded_test_server()->GetURL("a.com", "/title1.html"));
 
   content::RenderFrameHost* child =
-      content::ChildFrameAt(GetWebContents()->GetMainFrame(), 0);
+      content::ChildFrameAt(GetWebContents()->GetPrimaryMainFrame(), 0);
   ASSERT_TRUE(child);
 
   GURL redirect_url = embedded_test_server()->GetURL("b.com", "/title1.html");
@@ -303,7 +403,7 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
   child->ExecuteJavaScriptForTests(
       base::ASCIIToUTF16(base::StringPrintf("window.top.location = '%s';",
                                             redirect_url.spec().c_str())),
-      base::NullCallback());
+      base::NullCallback(), content::ISOLATED_WORLD_ID_GLOBAL);
   observer.Wait();
   EXPECT_TRUE(GetFramebustTabHelper()->blocked_urls().empty());
 }
@@ -313,20 +413,20 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
   GURL top_level_url = embedded_test_server()->GetURL("/iframe.html");
   HostContentSettingsMap* settings_map =
       HostContentSettingsMapFactory::GetForProfile(browser()->profile());
-  settings_map->SetContentSettingDefaultScope(
-      top_level_url, GURL(), ContentSettingsType::POPUPS, std::string(),
-      CONTENT_SETTING_ALLOW);
+  settings_map->SetContentSettingDefaultScope(top_level_url, GURL(),
+                                              ContentSettingsType::POPUPS,
+                                              CONTENT_SETTING_ALLOW);
 
   // Create a new browser to test in to ensure that the render process gets the
   // updated content settings.
   CreateAndSetBrowser();
-  ui_test_utils::NavigateToURL(browser(), top_level_url);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), top_level_url));
   NavigateIframeToUrlWithoutGesture(
       GetWebContents(), "test",
       embedded_test_server()->GetURL("a.com", "/title1.html"));
 
   content::RenderFrameHost* child =
-      content::ChildFrameAt(GetWebContents()->GetMainFrame(), 0);
+      content::ChildFrameAt(GetWebContents()->GetPrimaryMainFrame(), 0);
   ASSERT_TRUE(child);
 
   GURL redirect_url = embedded_test_server()->GetURL("b.com", "/title1.html");
@@ -335,42 +435,84 @@ IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
   child->ExecuteJavaScriptForTests(
       base::ASCIIToUTF16(base::StringPrintf("window.top.location = '%s';",
                                             redirect_url.spec().c_str())),
-      base::NullCallback());
+      base::NullCallback(), content::ISOLATED_WORLD_ID_GLOBAL);
   observer.Wait();
   EXPECT_TRUE(GetFramebustTabHelper()->blocked_urls().empty());
 }
 
-// Regression test for https://crbug.com/894955, where the framebust UI would
+// Regression test for https://crbug.com/40597964, where the framebust UI would
 // persist on subsequent navigations.
 IN_PROC_BROWSER_TEST_F(FramebustBlockBrowserTest,
                        FramebustBlocked_SubsequentNavigation_NoUI) {
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL("/iframe.html"));
-
-  GURL child_url = embedded_test_server()->GetURL("a.com", "/title1.html");
-  NavigateIframeToUrlWithoutGesture(GetWebContents(), "test", child_url);
-
-  content::RenderFrameHost* child =
-      content::ChildFrameAt(GetWebContents()->GetMainFrame(), 0);
-  EXPECT_EQ(child_url, child->GetLastCommittedURL());
-
-  GURL redirect_url = embedded_test_server()->GetURL("b.com", "/title1.html");
-
-  base::RunLoop block_waiter;
-  blocked_url_added_closure_ = block_waiter.QuitClosure();
-  child->ExecuteJavaScriptForTests(
-      base::ASCIIToUTF16(base::StringPrintf("window.top.location = '%s';",
-                                            redirect_url.spec().c_str())),
-      base::NullCallback());
-  block_waiter.Run();
-  EXPECT_TRUE(
-      base::Contains(GetFramebustTabHelper()->blocked_urls(), redirect_url));
+  EXPECT_TRUE(ExecuteAndCheckBlockedRedirection());
 
   // Now, navigate away and check that the UI went away.
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL("/title2.html"));
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL("/title2.html")));
 
   // TODO(csharrison): Ideally we could query the actual UI here. For now, just
   // look at the internal state of the framebust tab helper.
   EXPECT_FALSE(GetFramebustTabHelper()->HasBlockedUrls());
+}
+
+class FramebustBlockPrerenderTest : public FramebustBlockBrowserTest {
+ public:
+  FramebustBlockPrerenderTest()
+      : prerender_helper_(
+            base::BindRepeating(&FramebustBlockPrerenderTest::GetWebContents,
+                                base::Unretained(this))) {}
+  ~FramebustBlockPrerenderTest() override = default;
+
+  void SetUpOnMainThread() override {
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
+    FramebustBlockBrowserTest::SetUpOnMainThread();
+  }
+
+ protected:
+  content::test::PrerenderTestHelper prerender_helper_;
+};
+
+IN_PROC_BROWSER_TEST_F(FramebustBlockPrerenderTest,
+                       FramebustBlocked_PrerenderNavigation) {
+  EXPECT_TRUE(ExecuteAndCheckBlockedRedirection());
+
+  // Start a prerender and ensure that the framebust UI persists on the
+  // prerender navigation.
+  const GURL prerender_url =
+      embedded_test_server()->GetURL("/title1.html?prerender");
+  prerender_helper_.AddPrerender(prerender_url);
+  EXPECT_TRUE(GetFramebustTabHelper()->HasBlockedUrls());
+
+  // Activate a prerendered page.
+  prerender_helper_.NavigatePrimaryPage(prerender_url);
+  EXPECT_FALSE(GetFramebustTabHelper()->HasBlockedUrls());
+}
+
+class FramebustBlockFencedFrameTest : public FramebustBlockBrowserTest {
+ public:
+  FramebustBlockFencedFrameTest() = default;
+  ~FramebustBlockFencedFrameTest() override = default;
+
+  content::RenderFrameHost* primary_main_frame_host() {
+    return GetWebContents()->GetPrimaryMainFrame();
+  }
+
+ protected:
+  content::test::FencedFrameTestHelper fenced_frame_helper_;
+};
+
+IN_PROC_BROWSER_TEST_F(FramebustBlockFencedFrameTest,
+                       FramebustBlocked_FencedFrameNavigation) {
+  EXPECT_TRUE(ExecuteAndCheckBlockedRedirection());
+
+  // Create a fenced frame in the primary main page and ensure that the
+  // framebust UI persists on fenced frame navigation.
+  const GURL fenced_frame_url =
+      embedded_test_server()->GetURL("/fenced_frames/title1.html");
+  content::RenderFrameHost* fenced_frame_rfh =
+      fenced_frame_helper_.CreateFencedFrame(primary_main_frame_host(),
+                                             fenced_frame_url);
+  ASSERT_NE(nullptr, fenced_frame_rfh);
+
+  EXPECT_TRUE(GetFramebustTabHelper()->HasBlockedUrls());
 }

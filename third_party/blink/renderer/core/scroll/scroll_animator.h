@@ -31,18 +31,17 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SCROLL_SCROLL_ANIMATOR_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SCROLL_SCROLL_ANIMATOR_H_
 
-#include <memory>
 #include "base/time/default_tick_clock.h"
 
+#include "base/time/time.h"
+#include "build/build_config.h"
+#include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/scroll/scroll_animator_base.h"
 #include "third_party/blink/renderer/platform/animation/compositor_animation_client.h"
 #include "third_party/blink/renderer/platform/animation/compositor_animation_delegate.h"
-#include "third_party/blink/renderer/platform/animation/compositor_scroll_offset_animation_curve.h"
 #include "third_party/blink/renderer/platform/timer.h"
 
 namespace blink {
-
-class CompositorAnimationTimeline;
 
 // ScrollAnimator is the Blink-side implementation of user-input scroll offset
 // animations ("smooth scrolling") on all platforms except for Mac.
@@ -106,30 +105,29 @@ class CORE_EXPORT ScrollAnimator : public ScrollAnimatorBase {
                               base::DefaultTickClock::GetInstance());
   ~ScrollAnimator() override;
 
-  bool HasRunningAnimation() const override;
   ScrollOffset ComputeDeltaToConsume(const ScrollOffset& delta) const override;
 
   // The callback will be run if the animation is updated by another
   // UserScroll, otherwise it is called when the animation is finished,
   // cancelled or reset.
-  ScrollResult UserScroll(ScrollGranularity,
-                          const ScrollOffset& delta,
-                          ScrollableArea::ScrollCallback on_finish) override;
-  void ScrollToOffsetWithoutAnimation(const ScrollOffset&) override;
+  ScrollConsumption UserScroll(
+      ui::ScrollGranularity,
+      const ScrollOffset& delta,
+      cc::ScrollSourceType source_type,
+      ScrollableArea::ScrollCallback on_finish) override;
+  void ScrollToOffsetWithoutAnimation(const ScrollOffset&,
+                                      cc::ScrollSourceType) override;
   ScrollOffset DesiredTargetOffset() const override;
+  void AdjustAnimation(const gfx::Vector2d& adjustment) override;
 
   // ScrollAnimatorCompositorCoordinator implementation.
-  void TickAnimation(double monotonic_time) override;
+  void TickAnimation(base::TimeTicks monotonic_time) override;
   void CancelAnimation() override;
-  void AdjustAnimationAndSetScrollOffset(const ScrollOffset&,
-                                         mojom::blink::ScrollType) override;
   void TakeOverCompositorAnimation() override;
   void ResetAnimationState() override;
   void UpdateCompositorAnimations() override;
   void NotifyCompositorAnimationFinished(int group_id) override;
   void NotifyCompositorAnimationAborted(int group_id) override;
-  void LayerForCompositedScrollingDidChange(
-      CompositorAnimationTimeline*) override;
 
   void Trace(Visitor*) const override;
 
@@ -150,12 +148,11 @@ class CORE_EXPORT ScrollAnimator : public ScrollAnimatorBase {
   // because we are already at targetPos.
   bool WillAnimateToOffset(const ScrollOffset& target_pos);
 
-  std::unique_ptr<CompositorScrollOffsetAnimationCurve> animation_curve_;
   const base::TickClock* const tick_clock_;
   base::TimeTicks start_time_;
 
   ScrollOffset target_offset_;
-  ScrollGranularity last_granularity_;
+  ui::ScrollGranularity last_granularity_;
 
   // on_finish_ is a callback to call on animation finished, cancelled, or
   // otherwise interrupted in any way.

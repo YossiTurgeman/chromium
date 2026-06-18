@@ -1,13 +1,13 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_SYSTEM_ACCESSIBILITY_AUTOCLICK_SCROLL_BUBBLE_CONTROLLER_H_
 #define ASH_SYSTEM_ACCESSIBILITY_AUTOCLICK_SCROLL_BUBBLE_CONTROLLER_H_
 
-#include "ash/public/cpp/ash_constants.h"
 #include "ash/system/accessibility/autoclick_scroll_view.h"
 #include "ash/system/tray/tray_bubble_view.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/views/bubble/bubble_border.h"
 
 namespace ash {
@@ -16,6 +16,12 @@ namespace ash {
 class AutoclickScrollBubbleController : public TrayBubbleView::Delegate {
  public:
   AutoclickScrollBubbleController();
+
+  AutoclickScrollBubbleController(const AutoclickScrollBubbleController&) =
+      delete;
+  AutoclickScrollBubbleController& operator=(
+      const AutoclickScrollBubbleController&) = delete;
+
   ~AutoclickScrollBubbleController() override;
 
   void UpdateAnchorRect(gfx::Rect rect, views::BubbleBorder::Arrow alignment);
@@ -38,15 +44,17 @@ class AutoclickScrollBubbleController : public TrayBubbleView::Delegate {
 
   // TrayBubbleView::Delegate:
   void BubbleViewDestroyed() override;
+  std::u16string GetAccessibleNameForBubble() override;
+  void HideBubble(const TrayBubbleView* bubble_view) override;
 
  private:
   friend class AutoclickMenuBubbleControllerTest;
   friend class AutoclickTest;
 
   // Owned by views hierarchy.
-  AutoclickScrollBubbleView* bubble_view_ = nullptr;
-  AutoclickScrollView* scroll_view_ = nullptr;
-  views::Widget* bubble_widget_ = nullptr;
+  raw_ptr<AutoclickScrollBubbleView> bubble_view_ = nullptr;
+  raw_ptr<AutoclickScrollView> scroll_view_ = nullptr;
+  raw_ptr<views::Widget> bubble_widget_ = nullptr;
 
   // Whether the scroll bubble should be positioned based on a fixed rect
   // or just relative to the rect passed in UpdateAnchorRect.
@@ -55,8 +63,6 @@ class AutoclickScrollBubbleController : public TrayBubbleView::Delegate {
   gfx::Rect menu_bubble_rect_;
   views::BubbleBorder::Arrow menu_bubble_alignment_ =
       views::BubbleBorder::Arrow::TOP_LEFT;
-
-  DISALLOW_COPY_AND_ASSIGN(AutoclickScrollBubbleController);
 };
 
 }  // namespace ash

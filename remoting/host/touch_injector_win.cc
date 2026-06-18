@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,13 @@
 #include <string>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/logging.h"
 #include "base/native_library.h"
 #include "base/notreached.h"
+#include "base/sequence_checker.h"
+#include "base/time/time.h"
 #include "remoting/proto/event.pb.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capture_types.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_geometry.h"
@@ -42,9 +45,8 @@ void AppendMapValuesToVector(
   }
 }
 
-void ConvertToPointerTouchInfoImpl(
-    const TouchEventPoint& touch_point,
-    POINTER_TOUCH_INFO* pointer_touch_info) {
+void ConvertToPointerTouchInfoImpl(const TouchEventPoint& touch_point,
+                                   POINTER_TOUCH_INFO* pointer_touch_info) {
   pointer_touch_info->touchMask =
       TOUCH_MASK_CONTACTAREA | TOUCH_MASK_ORIENTATION;
   pointer_touch_info->touchFlags = TOUCH_FLAG_NONE;
@@ -54,8 +56,7 @@ void ConvertToPointerTouchInfoImpl(
   // MSDN mentions that if the digitizer does not detect the size of the touch
   // point, rcContact should be set to 0 by 0 rectangle centered at the
   // coordinate.
-  pointer_touch_info->rcContact.left =
-      touch_point.x() - touch_point.radius_x();
+  pointer_touch_info->rcContact.left = touch_point.x() - touch_point.radius_x();
   pointer_touch_info->rcContact.top = touch_point.y() - touch_point.radius_y();
   pointer_touch_info->rcContact.right =
       touch_point.x() + touch_point.radius_x();
@@ -68,9 +69,8 @@ void ConvertToPointerTouchInfoImpl(
     pointer_touch_info->touchMask |= TOUCH_MASK_PRESSURE;
     const float kMinimumPressure = 0.0;
     const float kMaximumPressure = 1.0;
-    const float clamped_touch_point_pressure =
-        std::max(kMinimumPressure,
-                 std::min(kMaximumPressure, touch_point.pressure()));
+    const float clamped_touch_point_pressure = std::max(
+        kMinimumPressure, std::min(kMaximumPressure, touch_point.pressure()));
 
     const int kWindowsMaxTouchPressure = 1024;  // Defined in MSDN.
     const int pressure =
@@ -86,13 +86,13 @@ void ConvertToPointerTouchInfoImpl(
 
 // The caller should set memset(0) the struct and set
 // pointer_touch_info->pointerInfo.pointerFlags.
-void ConvertToPointerTouchInfo(
-    const TouchEventPoint& touch_point,
-    POINTER_TOUCH_INFO* pointer_touch_info) {
+void ConvertToPointerTouchInfo(const TouchEventPoint& touch_point,
+                               POINTER_TOUCH_INFO* pointer_touch_info) {
   // TODO(zijiehe): Use GetFullscreenTopLeft() once
   // https://chromium-review.googlesource.com/c/581951/ is submitted.
-  webrtc::DesktopVector top_left = webrtc::GetScreenRect(
-      webrtc::kFullDesktopScreenId, std::wstring()).top_left();
+  webrtc::DesktopVector top_left =
+      webrtc::GetScreenRect(webrtc::kFullDesktopScreenId, std::wstring())
+          .top_left();
   if (top_left.is_zero()) {
     ConvertToPointerTouchInfoImpl(touch_point, pointer_touch_info);
     return;
@@ -114,7 +114,7 @@ std::unique_ptr<TouchInjectorWinDelegate> TouchInjectorWinDelegate::Create() {
   base::ScopedNativeLibrary library(base::FilePath(L"User32.dll"));
   if (!library.is_valid()) {
     PLOG(INFO) << "Failed to get library module for touch injection functions.";
-    return std::unique_ptr<TouchInjectorWinDelegate>();
+    return nullptr;
   }
 
   InitializeTouchInjectionFunction init_func =
@@ -122,7 +122,7 @@ std::unique_ptr<TouchInjectorWinDelegate> TouchInjectorWinDelegate::Create() {
           library.GetFunctionPointer("InitializeTouchInjection"));
   if (!init_func) {
     PLOG(INFO) << "Failed to get InitializeTouchInjection function handle.";
-    return std::unique_ptr<TouchInjectorWinDelegate>();
+    return nullptr;
   }
 
   InjectTouchInputFunction inject_touch_func =
@@ -130,7 +130,7 @@ std::unique_ptr<TouchInjectorWinDelegate> TouchInjectorWinDelegate::Create() {
           library.GetFunctionPointer("InjectTouchInput"));
   if (!inject_touch_func) {
     PLOG(INFO) << "Failed to get InjectTouchInput.";
-    return std::unique_ptr<TouchInjectorWinDelegate>();
+    return nullptr;
   }
 
   return std::unique_ptr<TouchInjectorWinDelegate>(new TouchInjectorWinDelegate(
@@ -164,16 +164,19 @@ TouchInjectorWin::~TouchInjectorWin() = default;
 // so that a mock delegate can be injected in tests and set expectations on the
 // mock and return value of this method.
 bool TouchInjectorWin::Init() {
-  if (!delegate_)
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!delegate_) {
     delegate_ = TouchInjectorWinDelegate::Create();
+  }
 
   // If initializing the delegate failed above, then the platform likely doesn't
   // support touch (or the libraries failed to load for some reason).
-  if (!delegate_)
+  if (!delegate_) {
     return false;
+  }
 
-  if (!delegate_->InitializeTouchInjection(
-          kMaxSimultaneousTouchCount, TOUCH_FEEDBACK_DEFAULT)) {
+  if (!delegate_->InitializeTouchInjection(kMaxSimultaneousTouchCount,
+                                           TOUCH_FEEDBACK_DEFAULT)) {
     // delagate_ is reset here so that the function that need the delegate
     // can check if it is null.
     delegate_.reset();
@@ -185,13 +188,17 @@ bool TouchInjectorWin::Init() {
 }
 
 void TouchInjectorWin::Deinitialize() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   touches_in_contact_.clear();
   // Same reason as TouchInjectorWin::Init(). For injecting mock delegates for
   // tests, a new delegate is created here.
   delegate_ = TouchInjectorWinDelegate::Create();
+  last_injected_time_ = base::TimeTicks();
+  keep_alive_timer_.Stop();
 }
 
 void TouchInjectorWin::InjectTouchEvent(const TouchEvent& event) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (!delegate_) {
     VLOG(3) << "Touch injection functions are not initialized.";
     return;
@@ -212,7 +219,6 @@ void TouchInjectorWin::InjectTouchEvent(const TouchEvent& event) {
       break;
     default:
       NOTREACHED();
-      return;
   }
 }
 
@@ -222,6 +228,7 @@ void TouchInjectorWin::SetInjectorDelegateForTest(
 }
 
 void TouchInjectorWin::AddNewTouchPoints(const TouchEvent& event) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK_EQ(event.event_type(), TouchEvent::TOUCH_POINT_START);
 
   std::vector<POINTER_TOUCH_INFO> touches;
@@ -229,8 +236,7 @@ void TouchInjectorWin::AddNewTouchPoints(const TouchEvent& event) {
   AppendMapValuesToVector(&touches_in_contact_, &touches);
 
   for (const TouchEventPoint& touch_point : event.touch_points()) {
-    POINTER_TOUCH_INFO pointer_touch_info;
-    memset(&pointer_touch_info, 0, sizeof(pointer_touch_info));
+    POINTER_TOUCH_INFO pointer_touch_info = {};
     pointer_touch_info.pointerInfo.pointerFlags =
         POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN;
     ConvertToPointerTouchInfo(touch_point, &pointer_touch_info);
@@ -242,18 +248,19 @@ void TouchInjectorWin::AddNewTouchPoints(const TouchEvent& event) {
     touches_in_contact_[touch_point.id()] = pointer_touch_info;
   }
 
-  if (delegate_->InjectTouchInput(touches.size(), touches.data()) == 0) {
+  if (!InjectTouchInput(touches)) {
     PLOG(ERROR) << "Failed to inject a touch start event.";
   }
 }
 
 void TouchInjectorWin::MoveTouchPoints(const TouchEvent& event) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK_EQ(event.event_type(), TouchEvent::TOUCH_POINT_MOVE);
 
   for (const TouchEventPoint& touch_point : event.touch_points()) {
     POINTER_TOUCH_INFO* pointer_touch_info =
         &touches_in_contact_[touch_point.id()];
-    memset(pointer_touch_info, 0, sizeof(*pointer_touch_info));
+    *pointer_touch_info = {};
     pointer_touch_info->pointerInfo.pointerFlags =
         POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE;
     ConvertToPointerTouchInfo(touch_point, pointer_touch_info);
@@ -262,12 +269,13 @@ void TouchInjectorWin::MoveTouchPoints(const TouchEvent& event) {
   std::vector<POINTER_TOUCH_INFO> touches;
   // Must inject already touching points as move events.
   AppendMapValuesToVector(&touches_in_contact_, &touches);
-  if (delegate_->InjectTouchInput(touches.size(), touches.data()) == 0) {
+  if (!InjectTouchInput(touches)) {
     PLOG(ERROR) << "Failed to inject a touch move event.";
   }
 }
 
 void TouchInjectorWin::EndTouchPoints(const TouchEvent& event) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK_EQ(event.event_type(), TouchEvent::TOUCH_POINT_END);
 
   std::vector<POINTER_TOUCH_INFO> touches;
@@ -281,12 +289,13 @@ void TouchInjectorWin::EndTouchPoints(const TouchEvent& event) {
   }
 
   AppendMapValuesToVector(&touches_in_contact_, &touches);
-  if (delegate_->InjectTouchInput(touches.size(), touches.data()) == 0) {
+  if (!InjectTouchInput(touches)) {
     PLOG(ERROR) << "Failed to inject a touch end event.";
   }
 }
 
 void TouchInjectorWin::CancelTouchPoints(const TouchEvent& event) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK_EQ(event.event_type(), TouchEvent::TOUCH_POINT_CANCEL);
 
   std::vector<POINTER_TOUCH_INFO> touches;
@@ -301,8 +310,44 @@ void TouchInjectorWin::CancelTouchPoints(const TouchEvent& event) {
   }
 
   AppendMapValuesToVector(&touches_in_contact_, &touches);
-  if (delegate_->InjectTouchInput(touches.size(), touches.data()) == 0) {
+  if (!InjectTouchInput(touches)) {
     PLOG(ERROR) << "Failed to inject a touch cancel event.";
+  }
+}
+
+bool TouchInjectorWin::InjectTouchInput(
+    const std::vector<POINTER_TOUCH_INFO>& touches) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (delegate_->InjectTouchInput(touches.size(), touches.data()) == 0) {
+    return false;
+  }
+  last_injected_time_ = base::TimeTicks::Now();
+  UpdateKeepAliveTimer();
+  return true;
+}
+
+void TouchInjectorWin::UpdateKeepAliveTimer() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (touches_in_contact_.empty()) {
+    keep_alive_timer_.Stop();
+    return;
+  }
+  if (!keep_alive_timer_.IsRunning()) {
+    keep_alive_timer_.Start(FROM_HERE, kKeepAliveInterval, this,
+                            &TouchInjectorWin::OnKeepAlive);
+  }
+}
+
+void TouchInjectorWin::OnKeepAlive() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if ((base::TimeTicks::Now() - last_injected_time_) < kKeepAliveInterval) {
+    return;
+  }
+  DCHECK(!touches_in_contact_.empty());
+  std::vector<POINTER_TOUCH_INFO> touches;
+  AppendMapValuesToVector(&touches_in_contact_, &touches);
+  if (!InjectTouchInput(touches)) {
+    PLOG(ERROR) << "Failed to inject a keep-alive touch move event.";
   }
 }
 

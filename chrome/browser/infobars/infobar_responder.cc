@@ -1,36 +1,32 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/infobars/infobar_responder.h"
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/single_thread_task_runner.h"
-#include "base/threading/thread_task_runner_handle.h"
-#include "chrome/browser/infobars/infobar_service.h"
+#include "base/task/single_thread_task_runner.h"
+#include "components/infobars/content/content_infobar_manager.h"
 #include "components/infobars/core/confirm_infobar_delegate.h"
 #include "components/infobars/core/infobar.h"
 
-InfoBarResponder::InfoBarResponder(InfoBarService* infobar_service,
-                                   AutoResponseType response)
-    : infobar_service_(infobar_service), response_(response) {
-  infobar_service_->AddObserver(this);
+InfoBarResponder::InfoBarResponder(
+    infobars::ContentInfoBarManager* infobar_manager,
+    AutoResponseType response)
+    : response_(response) {
+  infobar_scoped_observation_.Observe(infobar_manager);
 }
 
-InfoBarResponder::~InfoBarResponder() {
-  // This is safe even if we were already removed as an observer in
-  // OnInfoBarAdded().
-  infobar_service_->RemoveObserver(this);
-}
+InfoBarResponder::~InfoBarResponder() = default;
 
 void InfoBarResponder::OnInfoBarAdded(infobars::InfoBar* infobar) {
-  infobar_service_->RemoveObserver(this);
+  infobar_scoped_observation_.Reset();
   ConfirmInfoBarDelegate* delegate =
       infobar->delegate()->AsConfirmInfoBarDelegate();
   DCHECK(delegate);
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&InfoBarResponder::Respond,
                                 base::Unretained(this), delegate));
 }

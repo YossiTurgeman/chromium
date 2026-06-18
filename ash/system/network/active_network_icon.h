@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,20 @@
 #define ASH_SYSTEM_NETWORK_ACTIVE_NETWORK_ICON_H_
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "ash/ash_export.h"
 #include "ash/system/network/network_icon.h"
 #include "ash/system/network/tray_network_state_observer.h"
-#include "base/macros.h"
-#include "base/strings/string16.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "chromeos/services/network_config/public/mojom/cros_network_config.mojom-forward.h"
+
+namespace ui {
+class ColorProvider;
+}  // namespace ui
 
 namespace gfx {
 class ImageSkia;
@@ -47,57 +51,68 @@ class ASH_EXPORT ActiveNetworkIcon : public TrayNetworkStateObserver {
   };
 
   explicit ActiveNetworkIcon(TrayNetworkStateModel* model);
+
+  ActiveNetworkIcon(const ActiveNetworkIcon&) = delete;
+  ActiveNetworkIcon& operator=(const ActiveNetworkIcon&) = delete;
+
   ~ActiveNetworkIcon() override;
 
   // Provides the a11y and tooltip strings for |type|. Output parameters can
   // be null.
   void GetConnectionStatusStrings(Type type,
-                                  base::string16* a11y_name,
-                                  base::string16* a11y_desc,
-                                  base::string16* tooltip);
+                                  std::u16string* a11y_name,
+                                  std::u16string* a11y_desc,
+                                  std::u16string* tooltip);
 
   // Returns a network icon (which may be empty) and sets |animating| if
   // provided.
-  gfx::ImageSkia GetImage(Type type,
+  gfx::ImageSkia GetImage(const ui::ColorProvider* color_provider,
+                          Type type,
                           network_icon::IconType icon_type,
                           bool* animating);
 
+  void PurgeNetworkIconCache();
+
  private:
-  gfx::ImageSkia GetSingleImage(network_icon::IconType icon_type,
+  gfx::ImageSkia GetSingleImage(const ui::ColorProvider* color_provider,
+                                network_icon::IconType icon_type,
                                 bool* animating);
-  gfx::ImageSkia GetDualImagePrimary(network_icon::IconType icon_type,
+  gfx::ImageSkia GetDualImagePrimary(const ui::ColorProvider* color_provider,
+                                     network_icon::IconType icon_type,
                                      bool* animating);
-  gfx::ImageSkia GetDualImageCellular(network_icon::IconType icon_type,
+  gfx::ImageSkia GetDualImageCellular(const ui::ColorProvider* color_provider,
+                                      network_icon::IconType icon_type,
                                       bool* animating);
   gfx::ImageSkia GetDefaultImageImpl(
+      const ui::ColorProvider* color_provider,
       const chromeos::network_config::mojom::NetworkStateProperties*
           default_network,
       network_icon::IconType icon_type,
       bool* animating);
 
-  // Called when there is no default network., Provides an empty or disabled
+  // Called when there is no default network. Provides an empty or disabled
   // wifi icon and sets |animating| if provided to false.
-  gfx::ImageSkia GetDefaultImageForNoNetwork(network_icon::IconType icon_type,
-                                             bool* animating);
+  gfx::ImageSkia GetDefaultImageForNoNetwork(
+      const ui::ColorProvider* color_provider,
+      network_icon::IconType icon_type,
+      bool* animating);
 
   void SetCellularUninitializedMsg();
 
   // TrayNetworkStateObserver
   void ActiveNetworkStateChanged() override;
   void NetworkListChanged() override;
+  void DeviceStateListChanged() override;
 
-  void PurgeNetworkIconCache();
   const chromeos::network_config::mojom::NetworkStateProperties*
   GetNetworkForType(Type type);
 
-  TrayNetworkStateModel* model_;
+  raw_ptr<TrayNetworkStateModel> model_;
 
   int cellular_uninitialized_msg_ = 0;
   base::Time uninitialized_state_time_;
   base::OneShotTimer purge_timer_;
   base::WeakPtrFactory<ActiveNetworkIcon> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(ActiveNetworkIcon);
 };
 
 }  // namespace ash

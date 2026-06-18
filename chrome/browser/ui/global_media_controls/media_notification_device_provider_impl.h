@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,9 +23,7 @@ class MediaNotificationDeviceProviderImpl
   ~MediaNotificationDeviceProviderImpl() override;
 
   // MediaNotificationDeviceProvider
-  std::unique_ptr<MediaNotificationDeviceProvider::
-                      GetOutputDevicesCallbackList::Subscription>
-  RegisterOutputDeviceDescriptionsCallback(
+  base::CallbackListSubscription RegisterOutputDeviceDescriptionsCallback(
       GetOutputDevicesCallback cb) override;
 
   void GetOutputDeviceDescriptions(

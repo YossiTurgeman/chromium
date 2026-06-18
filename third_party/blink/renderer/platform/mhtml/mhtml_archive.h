@@ -31,11 +31,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_MHTML_MHTML_ARCHIVE_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_MHTML_MHTML_ARCHIVE_H_
 
+#include "base/time/time.h"
 #include "third_party/blink/public/mojom/loader/mhtml_load_result.mojom-blink-forward.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
-#include "third_party/blink/renderer/platform/wtf/hash_map.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
-
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
 namespace blink {
@@ -71,7 +72,7 @@ class PLATFORM_EXPORT MHTMLArchive final
                                   const String& title,
                                   const String& mime_type,
                                   base::Time date,
-                                  Vector<char>& output_buffer);
+                                  Vector<uint8_t>& output_buffer);
 
   // Serializes SerializedResource as an MHTML part and appends it in
   // |outputBuffer|.
@@ -86,7 +87,7 @@ class PLATFORM_EXPORT MHTMLArchive final
                                 const String& content_id,
                                 EncodingPolicy,
                                 const SerializedResource&,
-                                Vector<char>& output_buffer);
+                                Vector<uint8_t>& output_buffer);
 
   // Generates an MHTML footer and appends it to |outputBuffer| for testing
   // purposes.
@@ -95,12 +96,14 @@ class PLATFORM_EXPORT MHTMLArchive final
   // generateMHTMLPart and generateMHTMLFooter calls that belong to the same
   // MHTML document (see also rfc1341, section 7.2.1, "boundary" description).
   static void GenerateMHTMLFooterForTesting(const String& boundary,
-                                            Vector<char>& output_buffer);
+                                            Vector<uint8_t>& output_buffer);
 
   typedef HeapHashMap<String, Member<ArchiveResource>> SubArchiveResources;
 
   ArchiveResource* MainResource() const { return main_resource_.Get(); }
   ArchiveResource* SubresourceForURL(const KURL&) const;
+
+  String GetCacheIdentifier() const;
 
   // The purported creation date (as expressed by the Date: header).
   base::Time Date() const { return date_; }
@@ -109,13 +112,12 @@ class PLATFORM_EXPORT MHTMLArchive final
   blink::mojom::MHTMLLoadResult LoadResult() const { return load_result_; }
 
  private:
-  static MHTMLArchive* CreateArchive(const KURL&,
-                                     scoped_refptr<const SharedBuffer>);
-  static void ReportLoadResult(blink::mojom::MHTMLLoadResult result);
-
   void SetMainResource(ArchiveResource*);
   void AddSubresource(ArchiveResource*);
   static bool CanLoadArchive(const KURL&);
+
+  // URL of the MHTML resource (e.g. file:///foo/bar.mhtml).
+  KURL archive_url_;
 
   base::Time date_;
   Member<ArchiveResource> main_resource_;
@@ -124,4 +126,4 @@ class PLATFORM_EXPORT MHTMLArchive final
 };
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_MHTML_MHTML_ARCHIVE_H_

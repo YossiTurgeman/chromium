@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/fuzztest/src/fuzztest/fuzztest.h"
 
 namespace payments {
 namespace {
@@ -22,7 +23,7 @@ struct CurrencyTestCase {
         locale_name(locale_name),
         expected_amount(expected_amount),
         expected_currency_code(expected_currency_code) {}
-  ~CurrencyTestCase() {}
+  ~CurrencyTestCase() = default;
 
   const char* const amount;
   const char* const currency_code;
@@ -36,16 +37,16 @@ class PaymentsCurrencyFormatterTest
 
 TEST_P(PaymentsCurrencyFormatterTest, IsValidCurrencyFormat) {
   CurrencyFormatter formatter(GetParam().currency_code, GetParam().locale_name);
-  base::string16 actual_output = formatter.Format(GetParam().amount);
+  std::u16string actual_output = formatter.Format(GetParam().amount);
 
   // Convenience so the test cases can use regular spaces.
-  const base::string16 kSpace(base::ASCIIToUTF16(" "));
-  const base::string16 kNonBreakingSpace(base::UTF8ToUTF16(u8"\u00a0"));
-  const base::string16 kNarrowNonBreakingSpace(base::UTF8ToUTF16(u8"\u202f"));
+  const std::u16string kSpace(u" ");
+  const std::u16string kNonBreakingSpace(u"\u00a0");
+  const std::u16string kNarrowNonBreakingSpace(u"\u202f");
   base::ReplaceChars(actual_output, kNonBreakingSpace, kSpace, &actual_output);
   base::ReplaceChars(actual_output, kNarrowNonBreakingSpace, kSpace,
                      &actual_output);
-  base::string16 expected_output =
+  std::u16string expected_output =
       base::UTF8ToUTF16(GetParam().expected_amount);
 
   EXPECT_EQ(expected_output, actual_output)
@@ -140,6 +141,16 @@ INSTANTIATE_TEST_SUITE_P(
             "fr_FR",
             "123 456 789 012 345 678 901 234 567 890,123456789 $",
             "USD")));
+
+// Fuzz tests
+void FormatDoesNotCrash(std::string currency_code,
+                        std::string locale_name,
+                        std::string amount) {
+  CurrencyFormatter formatter(currency_code, locale_name);
+  formatter.Format(amount);
+}
+
+FUZZ_TEST(CurrencyFormatterFuzzTest, FormatDoesNotCrash);
 
 }  // namespace
 }  // namespace payments

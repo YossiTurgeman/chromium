@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,7 @@
 
 #include <memory>
 
-#include "base/callback.h"
-#include "base/compiler_specific.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "build/build_config.h"
 #include "content/public/browser/javascript_dialog_manager.h"
 
@@ -20,14 +18,19 @@ class ShellJavaScriptDialog;
 class ShellJavaScriptDialogManager : public JavaScriptDialogManager {
  public:
   ShellJavaScriptDialogManager();
+
+  ShellJavaScriptDialogManager(const ShellJavaScriptDialogManager&) = delete;
+  ShellJavaScriptDialogManager& operator=(const ShellJavaScriptDialogManager&) =
+      delete;
+
   ~ShellJavaScriptDialogManager() override;
 
   // JavaScriptDialogManager:
   void RunJavaScriptDialog(WebContents* web_contents,
                            RenderFrameHost* render_frame_host,
                            JavaScriptDialogType dialog_type,
-                           const base::string16& message_text,
-                           const base::string16& default_prompt_text,
+                           const std::u16string& message_text,
+                           const std::u16string& default_prompt_text,
                            DialogClosedCallback callback,
                            bool* did_suppress_message) override;
 
@@ -51,8 +54,11 @@ class ShellJavaScriptDialogManager : public JavaScriptDialogManager {
     beforeunload_success_ = success;
   }
 
+  [[nodiscard]] bool RunBeforeUnloadCallback(bool success,
+                                             const std::u16string& title);
+
  private:
-#if defined(OS_MAC) || defined(OS_WIN)
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
   // The dialog being shown. No queueing.
   std::unique_ptr<ShellJavaScriptDialog> dialog_;
 #else
@@ -67,8 +73,6 @@ class ShellJavaScriptDialogManager : public JavaScriptDialogManager {
   bool beforeunload_success_;
 
   DialogClosedCallback before_unload_callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(ShellJavaScriptDialogManager);
 };
 
 }  // namespace content

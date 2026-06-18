@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,24 +9,26 @@
 #include <string>
 
 #include "ash/display/screen_orientation_controller.h"
+#include "ash/public/cpp/arc_resize_lock_type.h"
 #include "ash/wm/client_controlled_state.h"
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "components/exo/client_controlled_accelerators.h"
 #include "components/exo/shell_surface_base.h"
 #include "ui/base/hit_test.h"
+#include "ui/base/mojom/window_show_state.mojom-forward.h"
 #include "ui/compositor/compositor_lock.h"
+#include "ui/display/types/display_constants.h"
 
 namespace ash {
-class NonClientFrameViewAsh;
-class ImmersiveFullscreenController;
-class RoundedCornerDecorator;
+class FrameViewAsh;
 class WideFrameView;
-
-namespace mojom {
-enum class WindowPinType;
-}
 }  // namespace ash
+
+namespace chromeos {
+class ImmersiveFullscreenController;
+}  // namespace chromeos
 
 namespace exo {
 class Surface;
@@ -42,28 +44,47 @@ enum class ZoomChange { IN, OUT, RESET };
 class ClientControlledShellSurface : public ShellSurfaceBase,
                                      public ui::CompositorLockClient {
  public:
+  // TODO(mukai): integrate this with ShellSurfaceBase's callback.
+  class Delegate {
+   public:
+    virtual ~Delegate() = default;
+    virtual void OnGeometryChanged(const gfx::Rect& geometry) = 0;
+    virtual void OnStateChanged(chromeos::WindowStateType old_state_type,
+                                chromeos::WindowStateType new_state_type) = 0;
+    virtual void OnBoundsChanged(chromeos::WindowStateType current_state,
+                                 chromeos::WindowStateType requested_state,
+                                 int64_t requested_display_id,
+                                 const gfx::Rect& requested_bounds_in_display,
+                                 bool is_resize,
+                                 int bounds_change,
+                                 bool is_adjusted_bounds) = 0;
+    virtual void OnDragStarted(int component) = 0;
+    virtual void OnDragFinished(int x, int y, bool canceled) = 0;
+    virtual void OnZoomLevelChanged(ZoomChange zoom_change) = 0;
+  };
+
   ClientControlledShellSurface(Surface* surface,
                                bool can_minimize,
                                int container,
-                               bool default_scale_cancellation);
+                               bool default_scale_cancellation,
+                               bool supports_floated_state);
+
+  ClientControlledShellSurface(const ClientControlledShellSurface&) = delete;
+  ClientControlledShellSurface& operator=(const ClientControlledShellSurface&) =
+      delete;
+
   ~ClientControlledShellSurface() override;
 
-  using GeometryChangedCallback =
-      base::RepeatingCallback<void(const gfx::Rect& geometry)>;
-
-  void set_geometry_changed_callback(const GeometryChangedCallback& callback) {
-    geometry_changed_callback_ = callback;
-  }
-
-  void set_server_reparent_window(bool reparent) {
-    server_reparent_window_ = reparent;
+  Delegate* set_delegate(std::unique_ptr<Delegate> delegate) {
+    delegate_ = std::move(delegate);
+    return delegate_.get();
   }
 
   // Set bounds in root window coordinates relative to the given display.
   void SetBounds(int64_t display_id, const gfx::Rect& bounds);
 
   // Set origin of bounds for surface while preserving the size.
-  void SetBoundsOrigin(const gfx::Point& origin);
+  void SetBoundsOrigin(int64_t display_id, const gfx::Point& origin);
 
   // Set size of bounds for surface while preserving the origin.
   void SetBoundsSize(const gfx::Size& size);
@@ -77,74 +98,21 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
   // Called when the client was restored.
   void SetRestored();
 
-  // Called when the client changed the fullscreen state.
-  void SetFullscreen(bool fullscreen);
-
-  // Called when the client was snapped to left.
-  void SetSnappedToLeft();
-
-  // Called when the client was snapped to right.
-  void SetSnappedToRight();
-
-  // Called when the client was set to PIP.
-  void SetPip();
-
-  // Set the callback to run when the surface state changed.
-  using StateChangedCallback =
-      base::RepeatingCallback<void(ash::WindowStateType old_state_type,
-                                   ash::WindowStateType new_state_type)>;
-  void set_state_changed_callback(
-      const StateChangedCallback& state_changed_callback) {
-    state_changed_callback_ = state_changed_callback;
-  }
-
-  // Set the callback to run when the surface bounds changed.
-  using BoundsChangedCallback =
-      base::RepeatingCallback<void(ash::WindowStateType current_state,
-                                   ash::WindowStateType requested_state,
-                                   int64_t display_id,
-                                   const gfx::Rect& bounds_in_display,
-                                   bool is_resize,
-                                   int bounds_change)>;
-  void set_bounds_changed_callback(
-      const BoundsChangedCallback& bounds_changed_callback) {
-    bounds_changed_callback_ = bounds_changed_callback;
-  }
-
-  bool has_bounds_changed_callback() const {
-    return static_cast<bool>(bounds_changed_callback_);
-  }
-
-  // Set the callback to run when the drag operation started.
-  using DragStartedCallback = base::RepeatingCallback<void(int direction)>;
-  void set_drag_started_callback(const DragStartedCallback& callback) {
-    drag_started_callback_ = callback;
-  }
-
-  // Set the callback to run when the drag operation finished.
-  using DragFinishedCallback = base::RepeatingCallback<void(int, int, bool)>;
-  void set_drag_finished_callback(const DragFinishedCallback& callback) {
-    drag_finished_callback_ = callback;
-  }
-
-  // Set callback to run when user requests to change a zoom level.
-  using ChangeZoomLevelCallback = base::RepeatingCallback<void(ZoomChange)>;
-  void set_change_zoom_level_callback(const ChangeZoomLevelCallback& callback) {
-    change_zoom_level_callback_ = callback;
-  }
+  // Called when the client changed the fullscreen state. When `fullscreen` is
+  // true, `display_id` indicates the id of the display where the surface should
+  // be shown, otherwise it is ignored. When `display::kInvalidDisplayId` is
+  // specified, the current display may be used.
+  void SetFullscreen(bool fullscreen, int64_t display_id);
 
   // Returns true if this shell surface is currently being dragged.
   bool IsDragging();
 
   // Pin/unpin the surface. Pinned surface cannot be switched to
   // other windows unless its explicitly unpinned.
-  void SetPinned(ash::WindowPinType type);
+  void SetPinned(chromeos::WindowPinType type);
 
   // Sets the surface to be on top of all other windows.
   void SetAlwaysOnTop(bool always_on_top);
-
-  // Sets the IME to be blocked so that all events are forwarded by Exo.
-  void SetImeBlocked(bool ime_blocked);
 
   // Controls the visibility of the system UI when this surface is active.
   void SetSystemUiVisibility(bool autohide);
@@ -158,33 +126,24 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
   // Set the pending scale.
   void SetScale(double scale);
 
-  // Commit the pending scale if it was changed. The scale set by SetScale() is
-  // otherwise committed by OnPostWidgetCommit().
-  void CommitPendingScale();
-
-  // Set top inset for surface.
-  void SetTopInset(int height);
-
-  // Set resize outset for surface.
-  void SetResizeOutset(int outset);
-
   // Sends the request to change the zoom level to the client.
   void ChangeZoomLevel(ZoomChange change);
 
   // Sends the window state change event to client.
-  void OnWindowStateChangeEvent(ash::WindowStateType old_state,
-                                ash::WindowStateType next_state);
+  void OnWindowStateChangeEvent(chromeos::WindowStateType old_state,
+                                chromeos::WindowStateType next_state);
 
   // Sends the window bounds change event to client. |display_id| specifies in
   // which display the surface should live in. |drag_bounds_change| is
   // a masked value of ash::WindowResizer::kBoundsChange_Xxx, and specifies
   // how the bounds was changed. The bounds change event may also come from a
   // snapped window state change |requested_state|.
-  void OnBoundsChangeEvent(ash::WindowStateType current_state,
-                           ash::WindowStateType requested_state,
+  void OnBoundsChangeEvent(chromeos::WindowStateType current_state,
+                           chromeos::WindowStateType requested_state,
                            int64_t display_id,
                            const gfx::Rect& bounds,
-                           int drag_bounds_change);
+                           int drag_bounds_change,
+                           bool is_adjusted_bounds);
 
   // Sends the window drag events to client.
   void OnDragStarted(int component);
@@ -206,48 +165,53 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
                        uint32_t frame_enabled_button_mask);
 
   // Set the extra title for the surface.
-  void SetExtraTitle(const base::string16& extra_title);
+  void SetExtraTitle(const std::u16string& extra_title);
 
-  // Set specific orientation lock for this surface. When this surface is in
-  // foreground and the display can be rotated (e.g. tablet mode), apply the
-  // behavior defined by |orientation_lock|. See more details in
-  // //ash/display/screen_orientation_controller.h.
-  void SetOrientationLock(ash::OrientationLockType orientation_lock);
+  // Rebind a surface as the root surface of the shell surface.
+  void RebindRootSurface(Surface* root_surface,
+                         bool can_minimize,
+                         int container,
+                         bool default_scale_cancellation,
+                         bool supports_floated_state);
 
-  // Set the accessibility ID provided by client for the surface. If
-  // |accessibility_id| is negative value, it will unset the ID.
-  void SetClientAccessibilityId(int32_t accessibility_id);
-
-  // Overridden from SurfaceTreeHost:
+  // SurfaceTreeHost:
   void DidReceiveCompositorFrameAck() override;
 
-  // Overridden from SurfaceDelegate:
+  // ShellSurfaceBase:
   bool IsInputEnabled(Surface* surface) const override;
   void OnSetFrame(SurfaceFrameType type) override;
   void OnSetFrameColors(SkColor active_color, SkColor inactive_color) override;
+  void SetSnapPrimary(float snap_ratio) override;
+  void SetSnapSecondary(float snap_ratio) override;
+  void SetPip() override;
+  void UnsetPip() override;
+  void SetFloatToLocation(
+      chromeos::FloatStartLocation float_start_location) override;
+  void OnDidProcessDisplayChanges(
+      const DisplayConfigurationChange& configuration_change) override;
 
-  // Overridden from views::WidgetDelegate:
+  // views::WidgetDelegate:
+  void WindowClosing() override;
   bool CanMaximize() const override;
-  std::unique_ptr<views::NonClientFrameView> CreateNonClientFrameView(
+  std::unique_ptr<views::FrameView> CreateFrameView(
       views::Widget* widget) override;
+  bool ShouldSaveWindowPlacement() const override;
   void SaveWindowPlacement(const gfx::Rect& bounds,
-                           ui::WindowShowState show_state) override;
-  bool GetSavedWindowPlacement(const views::Widget* widget,
-                               gfx::Rect* bounds,
-                               ui::WindowShowState* show_state) const override;
+                           ui::mojom::WindowShowState show_state) override;
+  bool GetSavedWindowPlacement(
+      const views::Widget* widget,
+      gfx::Rect* bounds,
+      ui::mojom::WindowShowState* show_state) const override;
 
-  // Overridden from views::View:
+  // views::View:
   gfx::Size GetMaximumSize() const override;
   void OnDeviceScaleFactorChanged(float old_dsf, float new_dsf) override;
 
-  // Overridden from aura::WindowObserver:
+  // aura::WindowObserver:
+  void OnWindowDestroying(aura::Window* window) override;
   void OnWindowAddedToRootWindow(aura::Window* window) override;
 
-  // Overridden from display::DisplayObserver:
-  void OnDisplayMetricsChanged(const display::Display& display,
-                               uint32_t changed_metrics) override;
-
-  // Overridden from ui::CompositorLockClient:
+  // ui::CompositorLockClient:
   void CompositorLockTimedOut() override;
 
   // A factory callback to create ClientControlledState::Delegate.
@@ -258,33 +222,52 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
   static void SetClientControlledStateDelegateFactoryForTest(
       const DelegateFactoryCallback& callback);
 
-  ash::WideFrameView* wide_frame_for_test() { return wide_frame_.get(); }
-
-  // Exposed for testing. Returns the effective scale as opposed to
-  // |pending_scale_|.
-  double scale() const { return scale_; }
+  ash::WideFrameView* wide_frame_for_test() { return wide_frame_view_; }
 
   // Used to scale incoming coordinates from the client to DP.
   float GetClientToDpScale() const;
 
+  // Used to scale incoming coordinates from the client to DP before the pending
+  // scale is committed.
+  float GetClientToDpPendingScale() const;
+
+  // Sets the resize lock type to the surface.
+  void SetResizeLockType(ash::ArcResizeLockType resize_lock_type);
+
+  // Update the resizability based on the resize lock type.
+  void UpdateResizability() override;
+
+  // exo::ShellSurfaceBase
+  void SetSystemModal(bool system_modal) override;
+
+  Delegate* delegate_for_testing() { return delegate_.get(); }
+
  protected:
-  // Overridden from ShellSurfaceBase:
+  // ShellSurfaceBase:
   float GetScale() const override;
 
+  // SurfaceTreeHost:
+  float GetScaleFactor() const override;
+
  private:
+  FRIEND_TEST_ALL_PREFIXES(ClientControlledShellSurfaceTest,
+                           OverlayShadowBounds);
   class ScopedSetBoundsLocally;
   class ScopedLockedToRoot;
+  class ScopedDeferWindowStateUpdate;
 
-  // Overridden from ShellSurfaceBase:
-  void SetWidgetBounds(const gfx::Rect& bounds) override;
+  // ShellSurfaceBase:
+  void SetWidgetBounds(const gfx::Rect& bounds,
+                       bool adjusted_by_server) override;
+  gfx::Rect GetVisibleBounds() const override;
   gfx::Rect GetShadowBounds() const override;
   void InitializeWindowState(ash::WindowState* window_state) override;
-  base::Optional<gfx::Rect> GetWidgetBounds() const override;
+  std::optional<gfx::Rect> GetWidgetBounds() const override;
   gfx::Point GetSurfaceOrigin() const override;
   bool OnPreWidgetCommit() override;
+  void ShowWidget(bool activate) override;
   void OnPostWidgetCommit() override;
   void OnSurfaceDestroying(Surface* surface) override;
-  void OnContentSizeChanged(Surface* surface) override;
 
   // Update frame status. This may create (or destroy) a wide frame
   // that spans the full work area width if the surface didn't cover
@@ -297,7 +280,11 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
 
   void UpdateFrameWidth();
 
+  void CloseWideFrame(views::Widget::ClosedReason reason);
+
   void UpdateFrameType() override;
+
+  bool GetCanResizeFromSizeConstraints() const override;
 
   void AttemptToStartDrag(int component, const gfx::PointF& location);
 
@@ -308,61 +295,47 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
   void EnsureCompositorIsLockedForOrientationChange();
 
   ash::WindowState* GetWindowState();
-  ash::NonClientFrameViewAsh* GetFrameView();
-  const ash::NonClientFrameViewAsh* GetFrameView() const;
+  ash::FrameViewAsh* GetFrameView();
+  const ash::FrameViewAsh* GetFrameView() const;
 
-  void EnsurePendingScale();
-  float GetClientToDpPendingScale() const;
+  void EnsurePendingScale(bool commit_immediately);
 
-  GeometryChangedCallback geometry_changed_callback_;
-
-  int top_inset_height_ = 0;
-  int pending_top_inset_height_ = 0;
-
-  double scale_ = 1.0;
-  // The pending scale is initialized to 0.0 to indicate that the scale is not
-  // yet initialized.
-  double pending_scale_ = 0.0;
+  gfx::Rect GetClientBoundsForWindowBoundsAndWindowState(
+      const gfx::Rect& window_bounds,
+      chromeos::WindowStateType window_state) const;
 
   uint32_t frame_visible_button_mask_ = 0;
   uint32_t frame_enabled_button_mask_ = 0;
 
-  StateChangedCallback state_changed_callback_;
-  BoundsChangedCallback bounds_changed_callback_;
-  DragStartedCallback drag_started_callback_;
-  DragFinishedCallback drag_finished_callback_;
-  ChangeZoomLevelCallback change_zoom_level_callback_;
+  std::unique_ptr<Delegate> delegate_;
 
   // TODO(reveman): Use configure callbacks for orientation. crbug.com/765954
   Orientation pending_orientation_ = Orientation::LANDSCAPE;
   Orientation orientation_ = Orientation::LANDSCAPE;
   Orientation expected_orientation_ = Orientation::LANDSCAPE;
 
-  ash::ClientControlledState* client_controlled_state_ = nullptr;
+  raw_ptr<ash::ClientControlledState> client_controlled_state_ = nullptr;
 
-  ash::WindowStateType pending_window_state_ = ash::WindowStateType::kNormal;
+  chromeos::WindowStateType pending_window_state_ =
+      chromeos::WindowStateType::kNormal;
 
   bool pending_always_on_top_ = false;
 
   SurfaceFrameType pending_frame_type_ = SurfaceFrameType::NONE;
 
-  ash::WindowPinType current_pin_;
-
   bool can_maximize_ = true;
 
-  std::unique_ptr<ash::ImmersiveFullscreenController>
+  std::unique_ptr<chromeos::ImmersiveFullscreenController>
       immersive_fullscreen_controller_;
 
-  std::unique_ptr<ash::WideFrameView> wide_frame_;
-
-  std::unique_ptr<ash::RoundedCornerDecorator> decorator_;
+  std::unique_ptr<views::WidgetDelegate> wide_frame_delegate_;
+  std::unique_ptr<views::Widget> wide_frame_widget_;
+  raw_ptr<ash::WideFrameView> wide_frame_view_ = nullptr;
 
   std::unique_ptr<ui::CompositorLock> orientation_compositor_lock_;
 
-  // The orientation to be applied when widget is being created. Only set when
-  // widget is not created yet orientation lock is being set.
-  ash::OrientationLockType initial_orientation_lock_ =
-      ash::OrientationLockType::kAny;
+  // The extra title to be applied when widget is being created.
+  std::u16string initial_extra_title_ = std::u16string();
 
   bool preserve_widget_bounds_ = false;
 
@@ -372,12 +345,6 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
   // drag details are cleaned up, we want to consider that as a regular
   // bounds update, not a drag move/resize update.
   bool in_drag_ = false;
-
-  // N uses older protocol which expects that server will reparent the window.
-  // TODO(oshima): Remove this once all boards are migrated to P or above.
-  bool server_reparent_window_ = false;
-
-  bool ignore_bounds_change_request_ = false;
 
   bool display_rotating_with_pip_ = false;
 
@@ -392,10 +359,16 @@ class ClientControlledShellSurface : public ShellSurfaceBase,
   // Client controlled specific accelerator target.
   std::unique_ptr<ClientControlledAcceleratorTarget> accelerator_target_;
 
-  // Accessibility ID provided by client.
-  base::Optional<int32_t> client_accessibility_id_;
+  ash::ArcResizeLockType pending_resize_lock_type_ =
+      ash::ArcResizeLockType::NONE;
 
-  DISALLOW_COPY_AND_ASSIGN(ClientControlledShellSurface);
+  int64_t requested_display_id_ = display::kInvalidDisplayId;
+
+  std::unique_ptr<ScopedDeferWindowStateUpdate>
+      scoped_defer_window_state_update_;
+
+  // True if the window supports the floated state.
+  bool supports_floated_state_;
 };
 
 }  // namespace exo

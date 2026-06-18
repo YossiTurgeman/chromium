@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,17 +11,24 @@ namespace blink {
 
 class GPUSamplerDescriptor;
 
-class GPUSampler : public DawnObject<WGPUSampler> {
+class GPUSampler : public DawnObject<wgpu::Sampler> {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   static GPUSampler* Create(GPUDevice* device,
                             const GPUSamplerDescriptor* webgpu_desc);
-  explicit GPUSampler(GPUDevice* device, WGPUSampler sampler);
-  ~GPUSampler() override;
+  explicit GPUSampler(GPUDevice* device,
+                      wgpu::Sampler sampler,
+                      const String& label);
+
+  GPUSampler(const GPUSampler&) = delete;
+  GPUSampler& operator=(const GPUSampler&) = delete;
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(GPUSampler);
+  void SetLabelImpl(const String& value) override {
+    std::string utf8_label = value.Utf8();
+    GetHandle().SetLabel(utf8_label.c_str());
+  }
 };
 
 }  // namespace blink

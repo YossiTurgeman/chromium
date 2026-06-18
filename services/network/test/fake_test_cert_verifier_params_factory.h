@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,13 +24,21 @@ class FakeTestCertVerifierParamsFactory
   FakeTestCertVerifierParamsFactory();
   ~FakeTestCertVerifierParamsFactory() override;
 
-  static mojom::CertVerifierParamsPtr GetCertVerifierParams();
+  static mojom::CertVerifierServiceRemoteParamsPtr GetCertVerifierParams();
 
  private:
   // cert_verifier::mojom::CertVerifierService implementation:
   void Verify(const net::CertVerifier::RequestParams& params,
+              const net::NetLogSource& net_log_source,
               mojo::PendingRemote<cert_verifier::mojom::CertVerifierRequest>
                   cert_verifier_request) override;
+  void Verify2QwacBinding(
+      const std::string& binding,
+      const std::string& hostname,
+      const scoped_refptr<net::X509Certificate>& tls_cert,
+      const net::NetLogSource& net_log_source,
+      base::OnceCallback<void(const scoped_refptr<net::X509Certificate>&)>
+          callback) override;
   void SetConfig(const net::CertVerifier::Config& config) override {}
   void EnableNetworkAccess(
       mojo::PendingRemote<mojom::URLLoaderFactory>,

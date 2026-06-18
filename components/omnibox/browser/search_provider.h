@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -12,15 +12,20 @@
 #define COMPONENTS_OMNIBOX_BROWSER_SEARCH_PROVIDER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/compiler_specific.h"
 #include "base/gtest_prod_util.h"
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
+#include "build/build_config.h"
+#include "components/history/core/browser/history_types.h"
 #include "components/omnibox/browser/answers_cache.h"
+#include "components/omnibox/browser/autocomplete_enums.h"
 #include "components/omnibox/browser/base_search_provider.h"
 #include "components/search_engines/template_url.h"
 #include "components/search_engines/template_url_service.h"
@@ -31,10 +36,6 @@ class AutocompleteProviderClient;
 class AutocompleteProviderListener;
 class AutocompleteResult;
 class SearchProviderTest;
-
-namespace history {
-struct KeywordSearchTermVisit;
-}
 
 namespace network {
 class SimpleURLLoader;
@@ -58,10 +59,6 @@ class SearchProvider : public BaseSearchProvider,
   SearchProvider(const SearchProvider&) = delete;
   SearchProvider& operator=(const SearchProvider&) = delete;
 
-  // Extracts the suggest response metadata which SearchProvider previously
-  // stored for |match|.
-  static std::string GetSuggestMetadata(const AutocompleteMatch& match);
-
   // Answers prefetch handling - register displayed answers. Takes the top
   // match for Autocomplete and registers the contained answer data, if any.
   void RegisterDisplayedAnswers(const AutocompleteResult& result);
@@ -75,10 +72,7 @@ class SearchProvider : public BaseSearchProvider,
       bool allow_exact_keyword_match,
       bool prefer_keyword);
 
-  // AutocompleteProvider:
-  void ResetSession() override;
-
-  // The verbatim score for an input which is not an URL.
+  // The verbatim score for an input which is not a URL.
   static const int kNonURLVerbatimRelevance = 1300;
 
  protected:
@@ -87,7 +81,6 @@ class SearchProvider : public BaseSearchProvider,
  private:
   friend class AutocompleteProviderTest;
   friend class BaseSearchProviderTest;
-  FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, CanSendURL);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest,
                            DontInlineAutocompleteAsynchronously);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, NavigationInline);
@@ -99,19 +92,29 @@ class SearchProvider : public BaseSearchProvider,
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, SuggestRelevanceExperiment);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, TestDeleteMatch);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, SuggestQueryUsesToken);
-  FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, SessionToken);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, AnswersCache);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, RemoveExtraAnswers);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, DuplicateCardAnswer);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, CopyAnswerToVerbatim);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, DoesNotProvideOnFocus);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, SendsWarmUpRequestOnFocus);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, DoTrimHttpScheme);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest,
                            DontTrimHttpSchemeIfInputHasScheme);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest,
                            DontTrimHttpsSchemeIfInputHasScheme);
   FRIEND_TEST_ALL_PREFIXES(SearchProviderTest, DoTrimHttpsScheme);
-  FRIEND_TEST_ALL_PREFIXES(SearchProviderWarmUpTest, SendsWarmUpRequestOnFocus);
-  FRIEND_TEST_ALL_PREFIXES(InstantExtendedPrefetchTest, ClearPrefetchedResults);
-  FRIEND_TEST_ALL_PREFIXES(InstantExtendedPrefetchTest, SetPrefetchQuery);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderRequestTest, SendRequestWithURL);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderRequestTest, SendRequestWithoutURL);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderRequestTest, NoRequestWithAimToolMode);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderRequestTest,
+                           SendRequestWithLensInteractionResponse);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderRequestTest,
+                           LensContextualSearchboxSuggestRequest);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderRequestTest,
+                           LensContextualSearchboxNoSuggestRequest);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderOTRTest, DoesNotSendSuggestRequest);
+  FRIEND_TEST_ALL_PREFIXES(SearchProviderOTRTest, SendSuggestRequestForLens);
 
   // Manages the providers (TemplateURLs) used by SearchProvider. Two providers
   // may be used:
@@ -127,21 +130,21 @@ class SearchProvider : public BaseSearchProvider,
 
     // Returns true if the specified providers match the two providers cached
     // by this class.
-    bool equal(const base::string16& default_provider,
-               const base::string16& keyword_provider) const {
-      return (default_provider == default_provider_) &&
-          (keyword_provider == keyword_provider_);
+    bool equal(const std::u16string& default_provider,
+               const std::u16string& keyword_provider) const {
+      return default_provider == default_provider_ &&
+             keyword_provider == keyword_provider_;
     }
 
     // Resets the cached providers.
-    void set(const base::string16& default_provider,
-             const base::string16& keyword_provider) {
+    void set(const std::u16string& default_provider,
+             const std::u16string& keyword_provider) {
       default_provider_ = default_provider;
       keyword_provider_ = keyword_provider;
     }
 
-    const base::string16& default_provider() const { return default_provider_; }
-    const base::string16& keyword_provider() const { return keyword_provider_; }
+    const std::u16string& default_provider() const { return default_provider_; }
+    const std::u16string& keyword_provider() const { return keyword_provider_; }
 
     // NOTE: These may return NULL even if the provider members are nonempty!
     const TemplateURL* GetDefaultProviderURL() const;
@@ -151,17 +154,15 @@ class SearchProvider : public BaseSearchProvider,
     bool has_keyword_provider() const { return !keyword_provider_.empty(); }
 
    private:
-    TemplateURLService* template_url_service_;
+    raw_ptr<TemplateURLService> template_url_service_;
 
     // Cached across the life of a query so we behave consistently even if the
     // user changes their default while the query is running.
-    base::string16 default_provider_;
-    base::string16 keyword_provider_;
+    std::u16string default_provider_;
+    std::u16string keyword_provider_;
   };
 
   class CompareScoredResults;
-
-  typedef std::vector<history::KeywordSearchTermVisit> HistoryResults;
 
   // A helper function for UpdateAllOldResults().
   static void UpdateOldResults(bool minimal_changes,
@@ -169,12 +170,9 @@ class SearchProvider : public BaseSearchProvider,
 
   // AutocompleteProvider:
   void Start(const AutocompleteInput& input, bool minimal_changes) override;
-  void Stop(bool clear_cached_results,
-            bool due_to_user_inactivity) override;
+  void Stop(AutocompleteStopReason stop_reason) override;
 
   // BaseSearchProvider:
-  const TemplateURL* GetTemplateURL(bool is_keyword) const override;
-  const AutocompleteInput GetInput(bool is_keyword) const override;
   bool ShouldAppendExtraParams(
       const SearchSuggestionParser::SuggestResult& result) const override;
   void RecordDeletionResult(bool success) override;
@@ -182,9 +180,18 @@ class SearchProvider : public BaseSearchProvider,
   // TemplateURLServiceObserver:
   void OnTemplateURLServiceChanged() override;
 
+  // Returns the TemplateURL corresponding to the keyword or default
+  // provider based on the value of |is_keyword|.
+  const TemplateURL* GetTemplateURL(bool is_keyword) const;
+
+  // Returns the AutocompleteInput for keyword provider or default provider
+  // based on the value of |is_keyword|.
+  const AutocompleteInput GetInput(bool is_keyword) const;
+
   // Called back from SimpleURLLoader.
   void OnURLLoadComplete(const network::SimpleURLLoader* source,
-                         std::unique_ptr<std::string> response_body);
+                         const int response_code,
+                         std::optional<std::string> response_body);
 
   // Stops the suggest query.
   // NOTE: This does not update |done_|.  Callers must do so.
@@ -195,7 +202,7 @@ class SearchProvider : public BaseSearchProvider,
 
   // Recalculates the match contents class of |results| to better display
   // against the current input and user's language.
-  void UpdateMatchContentsClass(const base::string16& input_text,
+  void UpdateMatchContentsClass(const std::u16string& input_text,
                                 SearchSuggestionParser::Results* results);
 
   // Called after ParseSuggestResults to rank the |results|.
@@ -238,13 +245,6 @@ class SearchProvider : public BaseSearchProvider,
   // Stops |loader| if it's running.  This includes resetting the unique_ptr.
   void CancelLoader(std::unique_ptr<network::SimpleURLLoader>* loader);
 
-  // Returns true when the current query can be sent to at least one suggest
-  // service.  This will be false for example when suggest is disabled.  In
-  // the process, calculates whether the query may contain potentially
-  // private data and stores the result in |is_query_private|; such queries
-  // should not be sent to the default search engine.
-  bool IsQuerySuitableForSuggest(bool* query_is_private) const;
-
   // Returns true if sending the query to a suggest server may leak sensitive
   // information (and hence the suggest request shouldn't be sent).  In
   // particular, if the input type might be a URL, we take extra care so that
@@ -268,12 +268,10 @@ class SearchProvider : public BaseSearchProvider,
 
   // Starts a new SimpleURLLoader requesting suggest results from
   // |template_url|; callers own the returned SimpleURLLoader, which is NULL for
-  // invalid providers. Note the request will never time out unless the given
-  // |timeout| is greater than 0.
+  // invalid providers.
   std::unique_ptr<network::SimpleURLLoader> CreateSuggestLoader(
       const TemplateURL* template_url,
-      const AutocompleteInput& input,
-      const base::TimeDelta& timeout);
+      const AutocompleteInput& input);
 
   // Converts the parsed results to a set of AutocompleteMatches, |matches_|.
   void ConvertResultsToAutocompleteMatches();
@@ -281,6 +279,11 @@ class SearchProvider : public BaseSearchProvider,
   // Remove answer contents from each match in |matches| other than the first
   // that appears.
   static void RemoveExtraAnswers(ACMatches* matches);
+
+  // Add a copy of an answer suggestion presented as a rich card, sans answer
+  // data. This gives an "escape hatch" if, e.g. the user wants the verbatim
+  // query associated with the answer suggestion.
+  static void DuplicateCardAnswer(ACMatches* matches);
 
   // Checks if suggested relevances violate an expected constraint.
   // See UpdateMatches() for the use and explanation of this constraint
@@ -308,24 +311,23 @@ class SearchProvider : public BaseSearchProvider,
 
   // Calculates relevance scores for all |results|.
   SearchSuggestionParser::SuggestResults ScoreHistoryResultsHelper(
-      const HistoryResults& results,
+      const history::KeywordSearchTermVisitList& results,
       bool base_prevent_inline_autocomplete,
       bool input_multiple_words,
-      const base::string16& input_text,
+      const std::u16string& input_text,
       bool is_keyword);
 
   // Calculates relevance scores for |results|, adjusting for boundary
   // conditions around multi-word queries. (See inline comments in function
   // definition for more details.)
   void ScoreHistoryResults(
-      const HistoryResults& results,
+      const history::KeywordSearchTermVisitList& results,
       bool is_keyword,
       SearchSuggestionParser::SuggestResults* scored_results);
 
-  // Adds matches for |results| to |map|.
+  // Adds matches for `results` to `map`.
   void AddSuggestResultsToMap(
       const SearchSuggestionParser::SuggestResults& results,
-      const std::string& metadata,
       MatchMap* map);
 
   // Gets the relevance score for the verbatim result.  This value may be
@@ -333,11 +335,6 @@ class SearchProvider : public BaseSearchProvider,
   // |relevance_from_server| is non-null, it will be set to indicate which of
   // those is true.
   int GetVerbatimRelevance(bool* relevance_from_server) const;
-
-  // Whether we should limit suggestions from SearchProvider while in
-  // keyword mode to only keyword suggestions. Used when we suspect that the
-  // user intentionally entered keyword mode and doesn't want the others.
-  bool ShouldCurbDefaultSuggestions() const;
 
   // Calculates the relevance score for the verbatim result from the
   // default search engine.  This version takes into account context:
@@ -362,12 +359,10 @@ class SearchProvider : public BaseSearchProvider,
   // indicates whether the results correspond to the keyword provider or default
   // provider. |use_aggressive_method| says whether this function can use a
   // method that gives high scores (1200+) rather than one that gives lower
-  // scores.  When using the aggressive method, scores may exceed 1300
-  // unless |prevent_search_history_inlining| is set.
+  // scores.  When using the aggressive method, scores may exceed 1300.
   int CalculateRelevanceForHistory(const base::Time& time,
                                    bool is_keyword,
-                                   bool use_aggressive_method,
-                                   bool prevent_search_history_inlining) const;
+                                   bool use_aggressive_method) const;
 
   // Returns an AutocompleteMatch for a navigational suggestion.
   AutocompleteMatch NavigationToMatch(
@@ -375,9 +370,6 @@ class SearchProvider : public BaseSearchProvider,
 
   // Updates the value of |done_| from the internal state.
   void UpdateDone();
-
-  // Obtains a session token, regenerating if necessary.
-  std::string GetSessionToken();
 
   // Answers prefetch handling - finds the previously displayed answer matching
   // the current top-scoring history result. If there is a previous answer,
@@ -388,7 +380,12 @@ class SearchProvider : public BaseSearchProvider,
   // Finds image URLs in most relevant results and uses client to prefetch them.
   void PrefetchImages(SearchSuggestionParser::Results* results);
 
-  AutocompleteProviderListener* listener_;
+#if !BUILDFLAG(IS_IOS)
+  // Create a location-sending duplicate of `match` with subtype
+  // `SUBTYPE_LOCATION_SUGGEST_TRIGGER`.
+  std::unique_ptr<AutocompleteMatch> CreateLocationSignalingMatch(
+      const AutocompleteMatch& match);
+#endif
 
   // Maintains the TemplateURLs used.
   Providers providers_;
@@ -400,8 +397,8 @@ class SearchProvider : public BaseSearchProvider,
   AutocompleteInput keyword_input_;
 
   // Searches in the user's history that begin with the input text.
-  HistoryResults raw_keyword_history_results_;
-  HistoryResults raw_default_history_results_;
+  history::KeywordSearchTermVisitList raw_keyword_history_results_;
+  history::KeywordSearchTermVisitList raw_default_history_results_;
 
   // Scored searches in the user's history - based on |keyword_history_results_|
   // or |default_history_results_| as appropriate.
@@ -426,20 +423,16 @@ class SearchProvider : public BaseSearchProvider,
   SearchSuggestionParser::Results keyword_results_;
 
   // The top query suggestion, left blank if none.
-  base::string16 top_query_suggestion_fill_into_edit_;
+  std::u16string top_query_suggestion_fill_into_edit_;
   // The top navigation suggestion, left blank/invalid if none.
   GURL top_navigation_suggestion_;
 
-  // Session token management.
-  std::string current_token_;
-  base::TimeTicks token_expiration_time_;
-
   // Answers prefetch management.
-  AnswersCache answers_cache_;  // Cache for last answers seen.
+  AnswersCache answers_cache_;      // Cache for last answers seen.
   AnswersQueryData prefetch_data_;  // Data to use for query prefetching.
 
-  ScopedObserver<TemplateURLService, TemplateURLServiceObserver> observer_{
-      this};
+  base::ScopedObservation<TemplateURLService, TemplateURLServiceObserver>
+      observation_{this};
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_SEARCH_PROVIDER_H_

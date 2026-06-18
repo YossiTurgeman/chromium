@@ -1,9 +1,10 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "extensions/browser/extension_registry.h"
 
+#include "base/observer_list.h"
 #include "base/strings/string_util.h"
 #include "extensions/browser/extension_registry_factory.h"
 #include "extensions/browser/extension_registry_observer.h"
@@ -12,31 +13,35 @@ namespace extensions {
 
 ExtensionRegistry::ExtensionRegistry(content::BrowserContext* browser_context)
     : browser_context_(browser_context) {}
-ExtensionRegistry::~ExtensionRegistry() {}
+ExtensionRegistry::~ExtensionRegistry() = default;
 
 // static
 ExtensionRegistry* ExtensionRegistry::Get(content::BrowserContext* context) {
   return ExtensionRegistryFactory::GetForBrowserContext(context);
 }
 
-std::unique_ptr<ExtensionSet>
-ExtensionRegistry::GenerateInstalledExtensionsSet() const {
+ExtensionSet ExtensionRegistry::GenerateInstalledExtensionsSet() const {
   return GenerateInstalledExtensionsSet(EVERYTHING);
 }
 
-std::unique_ptr<ExtensionSet> ExtensionRegistry::GenerateInstalledExtensionsSet(
+ExtensionSet ExtensionRegistry::GenerateInstalledExtensionsSet(
     int include_mask) const {
-  std::unique_ptr<ExtensionSet> installed_extensions(new ExtensionSet);
-  if (include_mask & IncludeFlag::ENABLED)
-    installed_extensions->InsertAll(enabled_extensions_);
-  if (include_mask & IncludeFlag::DISABLED)
-    installed_extensions->InsertAll(disabled_extensions_);
-  if (include_mask & IncludeFlag::TERMINATED)
-    installed_extensions->InsertAll(terminated_extensions_);
-  if (include_mask & IncludeFlag::BLOCKLISTED)
-    installed_extensions->InsertAll(blocklisted_extensions_);
-  if (include_mask & IncludeFlag::BLOCKED)
-    installed_extensions->InsertAll(blocked_extensions_);
+  ExtensionSet installed_extensions;
+  if (include_mask & IncludeFlag::ENABLED) {
+    installed_extensions.InsertAll(enabled_extensions_);
+  }
+  if (include_mask & IncludeFlag::DISABLED) {
+    installed_extensions.InsertAll(disabled_extensions_);
+  }
+  if (include_mask & IncludeFlag::TERMINATED) {
+    installed_extensions.InsertAll(terminated_extensions_);
+  }
+  if (include_mask & IncludeFlag::BLOCKLISTED) {
+    installed_extensions.InsertAll(blocklisted_extensions_);
+  }
+  if (include_mask & IncludeFlag::BLOCKED) {
+    installed_extensions.InsertAll(blocked_extensions_);
+  }
   return installed_extensions;
 }
 
@@ -84,7 +89,7 @@ void ExtensionRegistry::TriggerOnWillBeInstalled(const Extension* extension,
                                                  const std::string& old_name) {
   CHECK(extension);
   DCHECK_EQ(is_update,
-            GenerateInstalledExtensionsSet()->Contains(extension->id()));
+            GenerateInstalledExtensionsSet().Contains(extension->id()));
   DCHECK_EQ(is_update, !old_name.empty());
   for (auto& observer : observers_)
     observer.OnExtensionWillBeInstalled(browser_context_, extension, is_update,
@@ -94,7 +99,7 @@ void ExtensionRegistry::TriggerOnWillBeInstalled(const Extension* extension,
 void ExtensionRegistry::TriggerOnInstalled(const Extension* extension,
                                            bool is_update) {
   CHECK(extension);
-  DCHECK(GenerateInstalledExtensionsSet()->Contains(extension->id()));
+  DCHECK(GenerateInstalledExtensionsSet().Contains(extension->id()));
   for (auto& observer : observers_)
     observer.OnExtensionInstalled(browser_context_, extension, is_update);
 }
@@ -102,9 +107,17 @@ void ExtensionRegistry::TriggerOnInstalled(const Extension* extension,
 void ExtensionRegistry::TriggerOnUninstalled(const Extension* extension,
                                              UninstallReason reason) {
   CHECK(extension);
-  DCHECK(!GenerateInstalledExtensionsSet()->Contains(extension->id()));
+  DCHECK(!GenerateInstalledExtensionsSet().Contains(extension->id()));
   for (auto& observer : observers_)
     observer.OnExtensionUninstalled(browser_context_, extension, reason);
+}
+
+void ExtensionRegistry::TriggerOnUninstallationDenied(
+    const Extension* extension) {
+  CHECK(extension);
+  DCHECK(GenerateInstalledExtensionsSet().Contains(extension->id()));
+  for (auto& observer : observers_)
+    observer.OnExtensionUninstallationDenied(browser_context_, extension);
 }
 
 const Extension* ExtensionRegistry::GetExtensionById(const std::string& id,
@@ -112,30 +125,35 @@ const Extension* ExtensionRegistry::GetExtensionById(const std::string& id,
   std::string lowercase_id = base::ToLowerASCII(id);
   if (include_mask & ENABLED) {
     const Extension* extension = enabled_extensions_.GetByID(lowercase_id);
-    if (extension)
+    if (extension) {
       return extension;
+    }
   }
   if (include_mask & DISABLED) {
     const Extension* extension = disabled_extensions_.GetByID(lowercase_id);
-    if (extension)
+    if (extension) {
       return extension;
+    }
   }
   if (include_mask & TERMINATED) {
     const Extension* extension = terminated_extensions_.GetByID(lowercase_id);
-    if (extension)
+    if (extension) {
       return extension;
+    }
   }
   if (include_mask & BLOCKLISTED) {
     const Extension* extension = blocklisted_extensions_.GetByID(lowercase_id);
-    if (extension)
+    if (extension) {
       return extension;
+    }
   }
   if (include_mask & BLOCKED) {
     const Extension* extension = blocked_extensions_.GetByID(lowercase_id);
-    if (extension)
+    if (extension) {
       return extension;
+    }
   }
-  return NULL;
+  return nullptr;
 }
 
 const Extension* ExtensionRegistry::GetInstalledExtension(
@@ -151,8 +169,9 @@ bool ExtensionRegistry::AddEnabled(
 bool ExtensionRegistry::RemoveEnabled(const std::string& id) {
   // Only enabled extensions can be ready, so removing an enabled extension
   // should also remove from the ready set if possible.
-  if (ready_extensions_.Contains(id))
+  if (ready_extensions_.Contains(id)) {
     RemoveReady(id);
+  }
   return enabled_extensions_.Remove(id);
 }
 

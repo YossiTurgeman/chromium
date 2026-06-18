@@ -25,10 +25,13 @@
 
 #include "third_party/blink/renderer/modules/webgl/oes_standard_derivatives.h"
 
+#include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+
 namespace blink {
 
 OESStandardDerivatives::OESStandardDerivatives(
-    WebGLRenderingContextBase* context)
+    WebGLRenderingContextBase* context,
+    ExecutionContext*)
     : WebGLExtension(context) {
   context->ExtensionsUtil()->EnsureExtensionEnabled(
       "GL_OES_standard_derivatives");

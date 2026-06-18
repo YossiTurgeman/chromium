@@ -32,45 +32,66 @@
 
 #include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_macros.h"
-#include "third_party/blink/renderer/platform/geometry/float_rect.h"
+#include "cc/paint/paint_flags.h"
+#include "cc/paint/paint_image.h"
 #include "third_party/blink/renderer/platform/graphics/bitmap_image_metrics.h"
+#include "third_party/blink/renderer/platform/graphics/css_image_animation_data_interface.h"
 #include "third_party/blink/renderer/platform/graphics/deferred_image_decoder.h"
+#include "third_party/blink/renderer/platform/graphics/dom_node_id.h"
+#include "third_party/blink/renderer/platform/graphics/graphics_context.h"
 #include "third_party/blink/renderer/platform/graphics/image_observer.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_canvas.h"
-#include "third_party/blink/renderer/platform/graphics/paint/paint_flags.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_image.h"
 #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
 #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/scheduler/public/thread_scheduler.h"
 #include "third_party/blink/renderer/platform/timer.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
+#include "third_party/blink/renderer/platform/transforms/affine_transform.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "ui/gfx/geometry/rect_f.h"
 
 namespace blink {
 
+namespace {
+
+// Reserved ids for non-running frames.
+constexpr DOMNodeId kNormalCachedFrameId = -2;
+
 int GetRepetitionCountWithPolicyOverride(
     int actual_count,
-    web_pref::ImageAnimationPolicy policy) {
+    mojom::blink::ImageAnimationPolicy policy,
+    const ImageAnimationEnum image_animation) {
   if (actual_count == kAnimationNone ||
-      policy == web_pref::kImageAnimationPolicyNoAnimation) {
+      policy == mojom::blink::ImageAnimationPolicy::
+                    kImageAnimationPolicyNoAnimation ||
+      image_animation == ImageAnimationEnum::kStopped) {
     return kAnimationNone;
   }
 
+  if (image_animation == ImageAnimationEnum::kPaused) {
+    return cc::kAnimationPaused;
+  }
+
   if (actual_count == kAnimationLoopOnce ||
-      policy == web_pref::kImageAnimationPolicyAnimateOnce) {
+      policy == mojom::blink::ImageAnimationPolicy::
+                    kImageAnimationPolicyAnimateOnce) {
     return kAnimationLoopOnce;
   }
 
   return actual_count;
 }
 
+}  // namespace
+
 BitmapImage::BitmapImage(ImageObserver* observer, bool is_multipart)
     : Image(observer, is_multipart),
-      animation_policy_(web_pref::kImageAnimationPolicyAllowed),
+      animation_policy_(
+          mojom::blink::ImageAnimationPolicy::kImageAnimationPolicyAllowed),
       all_data_received_(false),
       have_size_(false),
+      preferred_size_is_transposed_(false),
       size_available_(false),
       have_frame_count_(false),
       repetition_count_status_(kUnknown),
@@ -79,17 +100,26 @@ BitmapImage::BitmapImage(ImageObserver* observer, bool is_multipart)
 
 BitmapImage::~BitmapImage() {}
 
-bool BitmapImage::CurrentFrameHasSingleSecurityOrigin() const {
+bool BitmapImage::HasSingleSecurityOrigin() const {
   return true;
 }
 
 void BitmapImage::DestroyDecodedData() {
-  cached_frame_ = PaintImage();
+  cached_frames_.clear();
   NotifyMemoryChanged();
 }
 
 scoped_refptr<SharedBuffer> BitmapImage::Data() {
   return decoder_ ? decoder_->Data() : nullptr;
+}
+
+bool BitmapImage::HasData() const {
+  return decoder_ ? decoder_->HasData() : false;
+}
+
+size_t BitmapImage::DataSize() const {
+  DCHECK(decoder_);
+  return decoder_->DataSize();
 }
 
 void BitmapImage::NotifyMemoryChanged() {
@@ -98,64 +128,88 @@ void BitmapImage::NotifyMemoryChanged() {
 }
 
 size_t BitmapImage::TotalFrameBytes() {
-  if (cached_frame_)
-    return static_cast<size_t>(Size().Area()) * sizeof(ImageFrame::PixelData);
+  if (!cached_frames_.empty()) {
+    return ClampTo<size_t>(Size().Area64() * sizeof(ImageFrame::PixelData));
+  }
   return 0u;
 }
 
 PaintImage BitmapImage::PaintImageForTesting() {
-  return CreatePaintImage();
+  return CreatePaintImage(
+      paint_image_id(), PaintImage::kInvalidId,
+      PaintImage::AnimationSyncSequence::kShared,
+      GetRepetitionCountWithPolicyOverride(RepetitionCount(), animation_policy_,
+                                           ImageAnimationEnum::kNormal));
 }
 
-PaintImage BitmapImage::CreatePaintImage() {
+PaintImage BitmapImage::CreatePaintImage(
+    PaintImage::Id paint_id,
+    PaintImage::Id sync_animation_id,
+    PaintImage::AnimationSyncSequence sync_sequence,
+    int image_animation_repetition_count) {
   sk_sp<PaintImageGenerator> generator =
       decoder_ ? decoder_->CreateGenerator() : nullptr;
   if (!generator)
     return PaintImage();
 
   auto completion_state = all_data_received_
-                              ? PaintImage::CompletionState::DONE
-                              : PaintImage::CompletionState::PARTIALLY_DONE;
+                              ? PaintImage::CompletionState::kDone
+                              : PaintImage::CompletionState::kPartiallyDone;
+
   auto builder =
-      CreatePaintImageBuilder()
+      CreatePaintImageBuilder(paint_id)
           .set_paint_image_generator(std::move(generator))
-          .set_repetition_count(GetRepetitionCountWithPolicyOverride(
-              RepetitionCount(), animation_policy_))
+          .set_repetition_count(image_animation_repetition_count)
           .set_is_high_bit_depth(decoder_->ImageIsHighBitDepth())
           .set_completion_state(completion_state)
-          .set_reset_animation_sequence_id(reset_animation_sequence_id_);
+          .set_reset_animation_sequence_id(reset_animation_sequence_id_)
+          .set_sync_animation_target_id(sync_animation_id)
+          .set_sync_animation_sequence_id(
+              static_cast<PaintImage::AnimationSequenceId>(sync_sequence));
+
+  sk_sp<PaintImageGenerator> gainmap_generator;
+  SkGainmapInfo gainmap_info;
+  if (decoder_->CreateGainmapGenerator(gainmap_generator, gainmap_info)) {
+    DCHECK(gainmap_generator);
+    builder = builder.set_gainmap_paint_image_generator(
+        std::move(gainmap_generator), gainmap_info);
+  }
 
   return builder.TakePaintImage();
 }
 
 void BitmapImage::UpdateSize() const {
-  if (!size_available_ || have_size_ || !decoder_)
+  if (have_size_ || !size_available_ || !decoder_)
     return;
-
   size_ = decoder_->FrameSizeAtIndex(0);
-  if (decoder_->OrientationAtIndex(0).UsesWidthAsHeight())
-    size_respecting_orientation_ = size_.TransposedSize();
-  else
-    size_respecting_orientation_ = size_;
+  density_corrected_size_ = decoder_->DensityCorrectedSizeAtIndex(0);
+  preferred_size_is_transposed_ =
+      decoder_->OrientationAtIndex(0).UsesWidthAsHeight();
   have_size_ = true;
 }
 
-IntSize BitmapImage::Size() const {
+gfx::Size BitmapImage::SizeWithConfig(SizeConfig config) const {
   UpdateSize();
-  return size_;
+  gfx::Size size = size_;
+  if (config.apply_density && !density_corrected_size_.IsEmpty())
+    size = density_corrected_size_;
+  if (config.apply_orientation && preferred_size_is_transposed_)
+    return gfx::TransposeSize(size);
+  return size;
 }
 
-IntSize BitmapImage::SizeRespectingOrientation() const {
-  UpdateSize();
-  return size_respecting_orientation_;
+void BitmapImage::RecordDecodedImageType(UseCounter* use_counter) {
+  BitmapImageMetrics::CountDecodedImageType(decoder_->FilenameExtension(),
+                                            use_counter);
 }
 
-bool BitmapImage::HasDefaultOrientation() const {
-  ImageOrientation orientation = CurrentFrameOrientation();
-  return orientation == kDefaultImageOrientation;
+void BitmapImage::RecordDecodedImageC2PA(UseCounter* use_counter) {
+  if (decoder_->HasC2PAManifest()) {
+    BitmapImageMetrics::CountDecodedImageC2PA(use_counter);
+  }
 }
 
-bool BitmapImage::GetHotSpot(IntPoint& hot_spot) const {
+bool BitmapImage::GetHotSpot(gfx::Point& hot_spot) const {
   return decoder_ && decoder_->HotSpot(hot_spot);
 }
 
@@ -165,11 +219,10 @@ bool BitmapImage::GetHotSpot(IntPoint& hot_spot) const {
 bool BitmapImage::ShouldReportByteSizeUMAs(bool data_now_completely_received) {
   if (!decoder_)
     return false;
-  // Ensures that refactoring to check truthiness of ByteSize() method is
-  // equivalent to the previous use of Data() and does not mess up UMAs.
-  DCHECK_EQ(!decoder_->ByteSize(), !decoder_->Data());
   return !all_data_received_ && data_now_completely_received &&
-         decoder_->ByteSize() && IsSizeAvailable();
+         decoder_->ByteSize() != 0 && IsSizeAvailable() &&
+         decoder_->RepetitionCount() == kAnimationNone &&
+         !decoder_->ImageIsHighBitDepth();
 }
 
 Image::SizeAvailability BitmapImage::SetData(scoped_refptr<SharedBuffer> data,
@@ -177,7 +230,7 @@ Image::SizeAvailability BitmapImage::SetData(scoped_refptr<SharedBuffer> data,
   if (!data)
     return kSizeAvailable;
 
-  int length = data->size();
+  size_t length = data->size();
   if (!length)
     return kSizeAvailable;
 
@@ -189,7 +242,7 @@ Image::SizeAvailability BitmapImage::SetData(scoped_refptr<SharedBuffer> data,
   bool has_enough_data = ImageDecoder::HasSufficientDataToSniffMimeType(*data);
   decoder_ = DeferredImageDecoder::Create(std::move(data), all_data_received,
                                           ImageDecoder::kAlphaPremultiplied,
-                                          ColorBehavior::Tag());
+                                          ColorBehavior::kTag);
   // If we had enough data but couldn't create a decoder, it implies a decode
   // failure.
   if (has_enough_data && !decoder_)
@@ -199,9 +252,9 @@ Image::SizeAvailability BitmapImage::SetData(scoped_refptr<SharedBuffer> data,
 
 // Return the image density in 0.01 "bits per pixel" rounded to the nearest
 // integer.
-static inline uint64_t ImageDensityInCentiBpp(IntSize size,
+static inline uint64_t ImageDensityInCentiBpp(gfx::Size size,
                                               size_t image_size_bytes) {
-  uint64_t image_area = static_cast<uint64_t>(size.Width()) * size.Height();
+  uint64_t image_area = size.Area64();
   return (static_cast<uint64_t>(image_size_bytes) * 100 * 8 + image_area / 2) /
          image_area;
 }
@@ -209,18 +262,18 @@ static inline uint64_t ImageDensityInCentiBpp(IntSize size,
 Image::SizeAvailability BitmapImage::DataChanged(bool all_data_received) {
   TRACE_EVENT0("blink", "BitmapImage::dataChanged");
 
-  // If the data was updated, clear the |cached_frame_| to push it to the
-  // compositor thread. Its necessary to clear the frame since more data
+  // If the data was updated, clear all caches to push them to the
+  // compositor thread. It's necessary to clear the frames since more data
   // requires a new PaintImageGenerator instance.
-  cached_frame_ = PaintImage();
+  cached_frames_.clear();
 
   // Report the image density metric right after we received all the data. The
   // SetData() call on the decoder_ (if there is one) should have decoded the
   // images and we should know the image size at this point.
-  if (ShouldReportByteSizeUMAs(all_data_received) &&
-      decoder_->FilenameExtension() == "jpg") {
-    BitmapImageMetrics::CountImageJpegDensity(
-        std::min(Size().Width(), Size().Height()),
+  if (ShouldReportByteSizeUMAs(all_data_received)) {
+    BitmapImageMetrics::CountDecodedImageDensity(
+        decoder_->FilenameExtension(),
+        std::min(Size().width(), Size().height()),
         ImageDensityInCentiBpp(Size(), decoder_->ByteSize()),
         decoder_->ByteSize());
   }
@@ -240,69 +293,94 @@ String BitmapImage::FilenameExtension() const {
   return decoder_ ? decoder_->FilenameExtension() : String();
 }
 
-void BitmapImage::Draw(
-    cc::PaintCanvas* canvas,
-    const PaintFlags& flags,
-    const FloatRect& dst_rect,
-    const FloatRect& src_rect,
-    RespectImageOrientationEnum should_respect_image_orientation,
-    ImageClampingMode clamp_mode,
-    ImageDecodingMode decode_mode) {
-  TRACE_EVENT0("skia", "BitmapImage::draw");
+const AtomicString& BitmapImage::MimeType() const {
+  return decoder_ ? decoder_->MimeType() : g_null_atom;
+}
 
-  PaintImage image = PaintImageForCurrentFrame();
+void BitmapImage::Draw(cc::PaintCanvas* canvas,
+                       const cc::PaintFlags& flags,
+                       const gfx::RectF& dst_rect,
+                       const gfx::RectF& src_rect,
+                       const ImageDrawOptions& draw_options) {
+  TRACE_EVENT0("skia", "BitmapImage::draw");
+  PaintImage image;
+  if (RuntimeEnabledFeatures::CSSImageAnimationEnabled() &&
+      draw_options.image_node_animation_info &&
+      draw_options.image_node_animation_info->node_id != kInvalidDOMNodeId) {
+    image = PaintImageForCurrentFrameWithInfo(
+        draw_options.image_node_animation_info);
+  } else {
+    image = PaintImageForCurrentFrame();
+  }
+
   if (!image)
     return;  // It's too early and we don't have an image yet.
 
-  auto paint_image_decoding_mode = ToPaintImageDecodingMode(decode_mode);
-  if (image.decoding_mode() != paint_image_decoding_mode) {
+  auto paint_image_decoding_mode =
+      ToPaintImageDecodingMode(draw_options.decode_mode);
+  if (image.decoding_mode() != paint_image_decoding_mode ||
+      image.may_be_lcp_candidate() != draw_options.may_be_lcp_candidate) {
     image = PaintImageBuilder::WithCopy(std::move(image))
                 .set_decoding_mode(paint_image_decoding_mode)
+                .set_may_be_lcp_candidate(draw_options.may_be_lcp_candidate)
                 .TakePaintImage();
   }
 
-  FloatRect adjusted_src_rect = src_rect;
-  adjusted_src_rect.Intersect(SkRect::MakeWH(image.width(), image.height()));
+  gfx::RectF adjusted_src_rect = src_rect;
+  if (!density_corrected_size_.IsEmpty()) {
+    adjusted_src_rect.Scale(
+        static_cast<float>(size_.width()) / density_corrected_size_.width(),
+        static_cast<float>(size_.height()) / density_corrected_size_.height());
+  }
+
+  adjusted_src_rect.Intersect(gfx::RectF(image.width(), image.height()));
 
   if (adjusted_src_rect.IsEmpty() || dst_rect.IsEmpty())
     return;  // Nothing to draw.
 
-  ImageOrientation orientation = kDefaultImageOrientation;
-  if (should_respect_image_orientation == kRespectImageOrientation)
-    orientation = CurrentFrameOrientation();
+  ImageOrientation orientation = ImageOrientationEnum::kDefault;
+  if (draw_options.respect_orientation == kRespectImageOrientation)
+    orientation = Orientation();
 
   PaintCanvasAutoRestore auto_restore(canvas, false);
-  FloatRect adjusted_dst_rect = dst_rect;
-  if (orientation != kDefaultImageOrientation) {
+  gfx::RectF adjusted_dst_rect = dst_rect;
+  if (orientation != ImageOrientationEnum::kDefault) {
     canvas->save();
 
     // ImageOrientation expects the origin to be at (0, 0)
-    canvas->translate(adjusted_dst_rect.X(), adjusted_dst_rect.Y());
-    adjusted_dst_rect.SetLocation(FloatPoint());
+    canvas->translate(adjusted_dst_rect.x(), adjusted_dst_rect.y());
+    adjusted_dst_rect.set_origin(gfx::PointF());
 
-    canvas->concat(AffineTransformToSkMatrix(
-        orientation.TransformFromDefault(adjusted_dst_rect.Size())));
+    canvas->concat(
+        orientation.TransformFromDefault(adjusted_dst_rect.size()).ToSkM44());
 
     if (orientation.UsesWidthAsHeight()) {
       // The destination rect will have its width and height already reversed
       // for the orientation of the image, as it was needed for page layout, so
       // we need to reverse it back here.
-      adjusted_dst_rect =
-          FloatRect(adjusted_dst_rect.X(), adjusted_dst_rect.Y(),
-                    adjusted_dst_rect.Height(), adjusted_dst_rect.Width());
+      adjusted_dst_rect.set_size(gfx::TransposeSize(adjusted_dst_rect.size()));
     }
   }
 
   uint32_t stable_id = image.stable_id();
   bool is_lazy_generated = image.IsLazyGenerated();
-  canvas->drawImageRect(std::move(image), adjusted_src_rect, adjusted_dst_rect,
-                        &flags,
-                        WebCoreClampingModeToSkiaRectConstraint(clamp_mode));
+
+  const cc::PaintFlags* image_flags = &flags;
+  std::optional<cc::PaintFlags> dark_mode_flags;
+  if (draw_options.dark_mode_filter) {
+    dark_mode_flags = flags;
+    draw_options.dark_mode_filter->ApplyFilterToImage(
+        this, &dark_mode_flags.value(), gfx::RectFToSkRect(src_rect));
+    image_flags = &dark_mode_flags.value();
+  }
+  canvas->drawImageRect(std::move(image), gfx::RectFToSkRect(adjusted_src_rect),
+                        gfx::RectFToSkRect(adjusted_dst_rect),
+                        draw_options.sampling_options, image_flags,
+                        ToSkiaRectConstraint(draw_options.clamping_mode));
 
   if (is_lazy_generated) {
-    TRACE_EVENT_INSTANT1(TRACE_DISABLED_BY_DEFAULT("devtools.timeline"),
-                         "Draw LazyPixelRef", TRACE_EVENT_SCOPE_THREAD,
-                         "LazyPixelRef", stable_id);
+    TRACE_EVENT_INSTANT(TRACE_DISABLED_BY_DEFAULT("devtools.timeline"),
+                        "Draw LazyPixelRef", "LazyPixelRef", stable_id);
   }
 
   StartAnimation();
@@ -316,8 +394,8 @@ size_t BitmapImage::FrameCount() {
   return frame_count_;
 }
 
-static inline bool HasVisibleImageSize(IntSize size) {
-  return (size.Width() > 1 || size.Height() > 1);
+static inline bool HasVisibleImageSize(gfx::Size size) {
+  return (size.width() > 1 || size.height() > 1);
 }
 
 bool BitmapImage::IsSizeAvailable() {
@@ -325,40 +403,166 @@ bool BitmapImage::IsSizeAvailable() {
     return true;
 
   size_available_ = decoder_ && decoder_->IsSizeAvailable();
-  if (size_available_ && HasVisibleImageSize(Size())) {
+  if (size_available_ && HasVisibleImageSize(Size()))
     BitmapImageMetrics::CountDecodedImageType(decoder_->FilenameExtension());
-    if (decoder_->FilenameExtension() == "jpg") {
-      BitmapImageMetrics::CountImageOrientation(
-          decoder_->OrientationAtIndex(0).Orientation());
-
-      IntSize correctedSize = decoder_->DensityCorrectedSizeAtIndex(0);
-      BitmapImageMetrics::CountImageDensityCorrection(
-        !correctedSize.IsEmpty() && correctedSize != decoder_->Size());
-    }
-  }
 
   return size_available_;
 }
 
-PaintImage BitmapImage::PaintImageForCurrentFrame() {
-  auto alpha_type = decoder_ ? decoder_->AlphaType() : kUnknown_SkAlphaType;
-  if (cached_frame_ && cached_frame_.GetAlphaType() == alpha_type)
-    return cached_frame_;
+PaintImage BitmapImage::PaintImageForCurrentFrameWithInfo(
+    const ImageNodeAnimationInfo* image_node_animation_info) {
+  ImageAnimationEnum image_animation =
+      image_node_animation_info ? image_node_animation_info->image_animation
+                                : ImageAnimationEnum::kNormal;
+  DOMNodeId id = kNormalCachedFrameId;
+  PaintImage::Id paint_id = paint_image_id();
+  PaintImage::Id sync_animation_target_id = PaintImage::kInvalidId;
+  PaintImage::AnimationSyncSequence sync_sequence =
+      PaintImage::AnimationSyncSequence::kShared;
 
-  cached_frame_ = CreatePaintImage();
+  bool has_image_animation_data = false;
+
+  if (image_node_animation_info) {
+    ElementImageAnimationData* animation_data =
+        image_node_animation_info->animation_data;
+    ImageResourceContent* image_key = image_node_animation_info->image;
+    DCHECK(animation_data && image_key);
+
+    std::optional<ImageAnimationData> image_animation_data =
+        animation_data->GetImageAnimationData(image_key);
+
+    has_image_animation_data = image_animation_data.has_value();
+
+    // State machine for CSS Image Animation
+    //
+    // States:
+    //  NoEntry: no entry in image_animation_data_.
+    //  Shared:  entry with sync_sequence == kShared (paint_id =
+    //  paint_image_id()) Own: entry with sync_sequence == kOwn (paint_id =
+    //  unique per-element id)
+    //
+    //     ┌──── kPaused / kRunning (first paint, non-normal) ───┐
+    //     │                                                     ▼
+    //   ┌─┴───────┐  kNormal   ┌─────────┐  kPaused   ┌──────────┐
+    //   │ NoEntry │ ─────────► │ Shared  │ ─────────► │   Own    │
+    //   │         │            │ seq = 0 │            │ seq != 0 │
+    //   │         │ ◄───────── │         │            │          │
+    //   │         │  kStopped  └─────────┘ ◄──kNormal ┴──────────┘
+    //   |         |             ▲↻                     ▲↻      |
+    //   └────▲────┘        (self loop)           (self loop)   │
+    //        │                kNormal /             kPaused /  │
+    //        │                kRunning              kRunning   │
+    //        │                                                 │
+    //        └─────────────── kStopped (erase entry) ──────────┘
+    //
+    switch (image_animation) {
+      case ImageAnimationEnum::kNormal: {
+        if (image_animation_data &&
+            image_animation_data->sync_sequence ==
+                PaintImage::AnimationSyncSequence::kOwn) {
+          cached_frames_.erase(image_node_animation_info->node_id);
+        }
+        if (!image_animation_data ||
+            image_animation_data->sync_sequence ==
+                PaintImage::AnimationSyncSequence::kOwn ||
+            image_animation_data->paint_id != paint_id) {
+          animation_data->SetImageAnimationData(
+              image_key,
+              {.paint_id = paint_id,
+               .sync_sequence = PaintImage::AnimationSyncSequence::kShared});
+        }
+        break;
+      }
+      case ImageAnimationEnum::kRunning: {
+        if (image_animation_data) {
+          paint_id = image_animation_data->paint_id;
+          sync_sequence = image_animation_data->sync_sequence;
+          if (image_animation_data->sync_sequence ==
+              PaintImage::AnimationSyncSequence::kOwn) {
+            id = image_node_animation_info->node_id;
+          }
+        } else {
+          paint_id = PaintImage::GetNextId();
+          sync_sequence = PaintImage::AnimationSyncSequence::kOwn;
+          id = image_node_animation_info->node_id;
+          animation_data->SetImageAnimationData(
+              image_key,
+              {.paint_id = paint_id, .sync_sequence = sync_sequence});
+        }
+        break;
+      }
+      case ImageAnimationEnum::kPaused: {
+        if (image_animation_data &&
+            image_animation_data->sync_sequence ==
+                PaintImage::AnimationSyncSequence::kOwn) {
+          paint_id = image_animation_data->paint_id;
+          sync_sequence = image_animation_data->sync_sequence;
+          id = image_node_animation_info->node_id;
+        } else {
+          paint_id = PaintImage::GetNextId();
+          sync_animation_target_id = image_animation_data
+                                         ? image_animation_data->paint_id
+                                         : PaintImage::kInvalidId;
+          sync_sequence = PaintImage::AnimationSyncSequence::kOwn;
+          id = image_node_animation_info->node_id;
+          animation_data->SetImageAnimationData(
+              image_key,
+              {.paint_id = paint_id, .sync_sequence = sync_sequence});
+        }
+        break;
+      }
+      case ImageAnimationEnum::kStopped: {
+        if (image_animation_data) {
+          paint_id = image_animation_data->paint_id;
+          animation_data->EraseImageAnimationData(image_key);
+        } else {
+          paint_id = PaintImage::GetNextId();
+        }
+        id = image_node_animation_info->node_id;
+        sync_animation_target_id = PaintImage::kInvalidId;
+        sync_sequence = PaintImage::AnimationSyncSequence::kShared;
+        break;
+      }
+    }
+  }
+
+  auto alpha_type = decoder_ ? decoder_->AlphaType() : kUnknown_SkAlphaType;
+  const int expected_repetition_count = GetRepetitionCountWithPolicyOverride(
+      RepetitionCount(), animation_policy_, image_animation);
+
+  if (auto it = cached_frames_.find(id); it != cached_frames_.end()) {
+    const PaintImage& cached_frame = it->value;
+    if (cached_frame &&
+        cached_frame.repetition_count() == expected_repetition_count &&
+        (!image_node_animation_info || has_image_animation_data) &&
+        cached_frame.GetAlphaType() == alpha_type) {
+      return cached_frame;
+    }
+  }
+
+  PaintImage new_frame =
+      CreatePaintImage(paint_id, sync_animation_target_id, sync_sequence,
+                       expected_repetition_count);
 
   // BitmapImage should not be texture backed.
-  DCHECK(!cached_frame_.IsTextureBacked());
+  DCHECK(!new_frame.IsTextureBacked());
 
   // Create the SkImage backing for this PaintImage here to ensure that copies
   // of the PaintImage share the same SkImage. Skia's caching of the decoded
   // output of this image is tied to the lifetime of the SkImage. So we create
   // the SkImage here and cache the PaintImage to keep the decode alive in
   // skia's cache.
-  cached_frame_.GetSwSkImage();
+  new_frame.GetSwSkImage();
+
+  cached_frames_.Set(id, new_frame);
+
   NotifyMemoryChanged();
 
-  return cached_frame_;
+  return new_frame;
+}
+
+PaintImage BitmapImage::PaintImageForCurrentFrame() {
+  return PaintImageForCurrentFrameWithInfo(nullptr);
 }
 
 scoped_refptr<Image> BitmapImage::ImageForDefaultFrame() {
@@ -381,24 +585,22 @@ scoped_refptr<Image> BitmapImage::ImageForDefaultFrame() {
   return Image::ImageForDefaultFrame();
 }
 
-bool BitmapImage::CurrentFrameKnownToBeOpaque() {
+bool BitmapImage::IsOpaque() {
   return decoder_ ? decoder_->AlphaType() == kOpaque_SkAlphaType : false;
 }
 
-bool BitmapImage::CurrentFrameIsComplete() {
-  return decoder_
-             ? decoder_->FrameIsReceivedAtIndex(PaintImage::kDefaultFrameIndex)
-             : false;
+bool BitmapImage::FirstFrameIsComplete() {
+  return decoder_ && decoder_->FrameIsReceivedAtIndex(0);
 }
 
-bool BitmapImage::CurrentFrameIsLazyDecoded() {
+bool BitmapImage::IsLazyDecoded() {
   // BitmapImage supports only lazy generated images.
   return true;
 }
 
-ImageOrientation BitmapImage::CurrentFrameOrientation() const {
-  return decoder_ ? decoder_->OrientationAtIndex(PaintImage::kDefaultFrameIndex)
-                  : kDefaultImageOrientation;
+ImageOrientation BitmapImage::Orientation() const {
+  return decoder_ ? decoder_->OrientationAtIndex(0)
+                  : ImageOrientationEnum::kDefault;
 }
 
 int BitmapImage::RepetitionCount() {
@@ -424,7 +626,14 @@ int BitmapImage::RepetitionCount() {
 }
 
 void BitmapImage::ResetAnimation() {
-  cached_frame_ = PaintImage();
+  // If no PaintImage has been created yet, there is no bitmap animation
+  // timeline to rewind and no existing painted frame to invalidate.
+  if (RuntimeEnabledFeatures::SvgImageAnimationResetEnabled() &&
+      cached_frames_.empty()) {
+    return;
+  }
+
+  cached_frames_.clear();
   reset_animation_sequence_id_++;
 }
 
@@ -435,7 +644,8 @@ bool BitmapImage::MaybeAnimated() {
   return decoder_ && decoder_->RepetitionCount() != kAnimationNone;
 }
 
-void BitmapImage::SetAnimationPolicy(web_pref::ImageAnimationPolicy policy) {
+void BitmapImage::SetAnimationPolicy(
+    mojom::blink::ImageAnimationPolicy policy) {
   if (animation_policy_ == policy)
     return;
 

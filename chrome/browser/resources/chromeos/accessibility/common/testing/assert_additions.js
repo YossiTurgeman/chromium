@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -49,7 +49,7 @@ function assertException(msg, fn, error) {
   try {
     fn();
   } catch (e) {
-    if (error && e.name != error) {
+    if (error && e.name !== error) {
       throw new Error(
           'Expected to throw ' + error + ' but threw ' + e.name + ' - ' + msg);
     }
@@ -66,11 +66,11 @@ function assertException(msg, fn, error) {
  */
 function assertEqualStringArrays(array1, array2) {
   let same = true;
-  if (array1.length != array2.length) {
+  if (array1.length !== array2.length) {
     same = false;
   }
   for (let i = 0; i < Math.min(array1.length, array2.length); i++) {
-    if (array1[i].trim() != array2[i].trim()) {
+    if (array1[i].trim() !== array2[i].trim()) {
       same = false;
     }
   }
@@ -139,6 +139,34 @@ function assertEqualsDOM(expected, actual) {
         expected[i], actualStr[i],
         'Mismatch at index ' + i + ' in expected:\n' + expected +
             '\nactual:\n' + actualStr + '\n');
+  }
+}
+
+/**
+ * Asserts two objects have the same key/value pairs.
+ * @param {Object} objectA
+ * @param {Object} objectB
+ */
+function assertObjectEquals(objectA, objectB) {
+  const keysA = Object.keys(objectA);
+  const keysB = Object.keys(objectB);
+  assertEquals(
+      keysA.length, keysB.length, 'Expected ', keysA.length, ' keys, but got ',
+      keysB.length, 'keys.');
+  for (const key of keysA) {
+    assertTrue(key in objectB, 'Key in expected not present in actual', key);
+    const type = typeof (objectA[key]);
+    if (type === 'array') {
+      assertArraysEquals(objectA[key], objectB[key]);
+    } else if (type === 'object') {
+      assertObjectEquals(objectA[key], objectB[key]);
+    } else {
+      assertEquals(
+          objectA[key], objectB[key],
+          'Expected key ' + key + ' to have value ' + objectA[key] +
+              ', actual: ',
+          objectB[key]);
+    }
   }
 }
 

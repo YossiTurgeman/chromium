@@ -1,4 +1,4 @@
-// Copyright 2015 The Crashpad Authors. All rights reserved.
+// Copyright 2015 The Crashpad Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,10 +22,12 @@
 #include <wchar.h>
 #include <winhttp.h>
 
+#include <iterator>
+
+#include "base/check_op.h"
 #include "base/logging.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/scoped_generic.h"
-#include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
@@ -33,6 +35,7 @@
 #include "package.h"
 #include "util/file/file_io.h"
 #include "util/net/http_body.h"
+#include "util/net/http_transport.h"
 #include "util/numeric/safe_assignment.h"
 #include "util/win/module_version.h"
 
@@ -96,7 +99,7 @@ std::string WinHttpMessage(const char* extra) {
                              error_code,
                              0,
                              msgbuf,
-                             static_cast<DWORD>(base::size(msgbuf)),
+                             static_cast<DWORD>(std::size(msgbuf)),
                              nullptr);
   if (!len) {
     return base::StringPrintf("%s: error 0x%lx while retrieving error 0x%lx",
@@ -131,12 +134,13 @@ using ScopedHINTERNET = base::ScopedGeneric<HINTERNET, ScopedHINTERNETTraits>;
 class HTTPTransportWin final : public HTTPTransport {
  public:
   HTTPTransportWin();
+
+  HTTPTransportWin(const HTTPTransportWin&) = delete;
+  HTTPTransportWin& operator=(const HTTPTransportWin&) = delete;
+
   ~HTTPTransportWin() override;
 
   bool ExecuteSynchronously(std::string* response_body) override;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(HTTPTransportWin);
 };
 
 HTTPTransportWin::HTTPTransportWin() : HTTPTransport() {
@@ -146,8 +150,8 @@ HTTPTransportWin::~HTTPTransportWin() {
 }
 
 bool HTTPTransportWin::ExecuteSynchronously(std::string* response_body) {
-  ScopedHINTERNET session(WinHttpOpen(base::UTF8ToUTF16(UserAgent()).c_str(),
-                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+  ScopedHINTERNET session(WinHttpOpen(base::UTF8ToWide(UserAgent()).c_str(),
+                                      WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                       WINHTTP_NO_PROXY_NAME,
                                       WINHTTP_NO_PROXY_BYPASS,
                                       0));
@@ -171,7 +175,7 @@ bool HTTPTransportWin::ExecuteSynchronously(std::string* response_body) {
   url_components.dwHostNameLength = 1;
   url_components.dwUrlPathLength = 1;
   url_components.dwExtraInfoLength = 1;
-  std::wstring url_wide(base::UTF8ToUTF16(url()));
+  std::wstring url_wide(base::UTF8ToWide(url()));
   // dwFlags = ICU_REJECT_USERPWD fails on XP.
   if (!WinHttpCrackUrl(
           url_wide.c_str(), 0, 0, &url_components)) {
@@ -206,7 +210,7 @@ bool HTTPTransportWin::ExecuteSynchronously(std::string* response_body) {
 
   ScopedHINTERNET request(WinHttpOpenRequest(
       connect.get(),
-      base::UTF8ToUTF16(method()).c_str(),
+      base::UTF8ToWide(method()).c_str(),
       request_target.c_str(),
       nullptr,
       WINHTTP_NO_REFERER,
@@ -235,8 +239,8 @@ bool HTTPTransportWin::ExecuteSynchronously(std::string* response_body) {
       chunked = !base::StringToSizeT(pair.second, &content_length);
       DCHECK(!chunked);
     } else {
-      std::wstring header_string = base::UTF8ToUTF16(pair.first) + L": " +
-                                   base::UTF8ToUTF16(pair.second) + L"\r\n";
+      std::wstring header_string = base::UTF8ToWide(pair.first) + L": " +
+                                   base::UTF8ToWide(pair.second) + L"\r\n";
       if (!WinHttpAddRequestHeaders(
               request.get(),
               header_string.c_str(),
@@ -280,25 +284,16 @@ bool HTTPTransportWin::ExecuteSynchronously(std::string* response_body) {
   size_t total_written = 0;
   FileOperationResult data_bytes;
   do {
-    struct {
-      char size[8];
-      char crlf0[2];
-      uint8_t data[32 * 1024];
-      char crlf1[2];
-    } buf;
-    static_assert(sizeof(buf) == sizeof(buf.size) +
-                                 sizeof(buf.crlf0) +
-                                 sizeof(buf.data) +
-                                 sizeof(buf.crlf1),
-                  "buf should not have padding");
-
+    DataBuffer buf;
     // Read a block of data.
-    data_bytes = body_stream()->GetBytesBuffer(buf.data, sizeof(buf.data));
+    static_assert(buf.kDataBytes < sizeof(buf.data));
+    data_bytes =
+        body_stream()->GetBytesBuffer(buf.data_span().data(), buf.kDataBytes);
     if (data_bytes == -1) {
       return false;
     }
     DCHECK_GE(data_bytes, 0);
-    DCHECK_LE(static_cast<size_t>(data_bytes), sizeof(buf.data));
+    DCHECK_LE(static_cast<size_t>(data_bytes), buf.kDataBytes);
 
     void* write_start;
     DWORD write_size;
@@ -306,36 +301,43 @@ bool HTTPTransportWin::ExecuteSynchronously(std::string* response_body) {
     if (chunked) {
       // Chunked encoding uses the entirety of buf. buf.size is presented in
       // hexadecimal without any leading "0x". The terminating CR and LF will be
-      // placed immediately following the used portion of buf.data, even if
-      // buf.data is not full, and not necessarily in buf.crlf1.
+      // placed immediately following the used portion of buf.data.
 
       unsigned int data_bytes_ui = base::checked_cast<unsigned int>(data_bytes);
 
       // snprintf() would NUL-terminate, but _snprintf() won’t.
-      int rv = _snprintf(buf.size, sizeof(buf.size), "%08x", data_bytes_ui);
+      static_assert(buf.kSizeBytes < sizeof(buf.size));
+      int rv = _snprintf(
+          buf.size_span().data(), buf.kSizeBytes, "%08x", data_bytes_ui);
       DCHECK_GE(rv, 0);
-      DCHECK_EQ(static_cast<size_t>(rv), sizeof(buf.size));
-      DCHECK_NE(buf.size[sizeof(buf.size) - 1], '\0');
+      DCHECK_EQ(static_cast<size_t>(rv), buf.kSizeBytes);
+      DCHECK_NE(buf.size_span()[buf.kSizeBytes - 1], '\0');
 
-      buf.crlf0[0] = '\r';
-      buf.crlf0[1] = '\n';
-      buf.data[data_bytes] = '\r';
-      buf.data[data_bytes + 1] = '\n';
+      base::span<char> size_crlf =
+          buf.size_span().subspan(buf.kSizeBytes, buf.kCRLFBytes);
+      size_crlf[0] = '\r';
+      size_crlf[1] = '\n';
+      base::span<uint8_t> data_crlf =
+          buf.data_span().subspan(data_bytes_ui, buf.kCRLFBytes);
+      data_crlf[0] = '\r';
+      data_crlf[1] = '\n';
 
-      // Skip leading zeroes in the chunk size.
-      unsigned int size_len;
-      for (size_len = sizeof(buf.size); size_len > 1; --size_len) {
-        if (buf.size[sizeof(buf.size) - size_len] != '0') {
+      // Move the left-hand edge of `buf.size` rightward to drop
+      // leading zeroes.
+      size_t to_skip = 0u;
+      for (const char c : buf.size_span().first(buf.kSizeBytes - 1)) {
+        if (c != '0') {
           break;
         }
+        ++to_skip;
       }
 
-      write_start = buf.crlf0 - size_len;
-      write_size = base::checked_cast<DWORD>(size_len + sizeof(buf.crlf0) +
-                                             data_bytes + sizeof(buf.crlf1));
+      write_start = buf.size_span().subspan(to_skip).data();
+      write_size = base::checked_cast<DWORD>(sizeof(buf.size) - to_skip +
+                                             data_bytes + buf.kCRLFBytes);
     } else {
       // When not using chunked encoding, only use buf.data.
-      write_start = buf.data;
+      write_start = buf.data.data();
       write_size = base::checked_cast<DWORD>(data_bytes);
     }
 

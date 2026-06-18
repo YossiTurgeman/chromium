@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {NetworkTestRunner} from 'network_test_runner';
+
+import * as TextUtils from 'devtools/models/text_utils/text_utils.js';
+
 (async function() {
   TestRunner.addResult(`Tests fetch network resource type and content.\n`);
-  await TestRunner.loadModule('network_test_runner');
   await TestRunner.showPanel('network');
 
   NetworkTestRunner.recordNetwork();
@@ -16,7 +20,7 @@
     TestRunner.addResult('resource.type: ' + request1.resourceType());
     TestRunner.assertTrue(!request1.failed, 'Resource loading failed.');
 
-    var { content, error, isEncoded } = await request1.requestContent();
+    var { content, error, isEncoded } = await request1.requestContentData().then(TextUtils.ContentData.ContentData.asDeferredContent);
     TestRunner.addResult('resource.content after requesting content: ' + content);
     TestRunner.completeTest();
   }

@@ -42,8 +42,9 @@ import re
 import sre_compile
 import unicodedata
 
-from blinkpy.common.memoized import memoized
 from blinkpy.common.system.filesystem import FileSystem
+
+from functools import total_ordering
 
 # Headers that we consider STL headers.
 _STL_HEADERS = frozenset([
@@ -357,6 +358,7 @@ class _IncludeState(dict):
         return self._visited_primary_section
 
 
+@total_ordering
 class Position(object):
     """Holds the position of something."""
 
@@ -369,6 +371,12 @@ class Position(object):
 
     def __cmp__(self, other):
         return self.row.__cmp__(other.row) or self.column.__cmp__(other.column)
+
+    def __eq__(self, other):
+        return (self.row, self.column) == (other.row, other.column)
+
+    def __gt__(self, other):
+        return (self.row, self.column) > (other.row, other.column)
 
 
 class SingleLineView(object):
@@ -609,8 +617,8 @@ def is_cpp_string(line):
     """
 
     line = line.replace(r'\\', 'XX')  # after this, \\" does not match to \"
-    return (
-        (line.count('"') - line.count(r'\"') - line.count("'\"'")) & 1) == 1
+    return ((line.count('"') - line.count(r'\"') - line.count("'\"'"))
+            & 1) == 1
 
 
 def cleanse_raw_strings(raw_lines):
@@ -862,7 +870,7 @@ def check_for_copyright(lines, error):
 
     # We'll say it should occur by line 10. Don't forget there's a
     # dummy line at the front.
-    for line in xrange(1, min(len(lines), 11)):
+    for line in range(1, min(len(lines), 11)):
         if re.search(r'Copyright', lines[line], re.I):
             break
     else:  # means no copyright line was found
@@ -946,7 +954,7 @@ def check_for_unicode_replacement_characters(lines, error):
       error: The function to call with any errors found.
     """
     for line_number, line in enumerate(lines):
-        if u'\ufffd' in line:
+        if '\ufffd' in line:
             error(
                 line_number, 'readability/utf8', 5,
                 'Line contains invalid UTF-8 (or Unicode replacement character).'
@@ -1054,8 +1062,6 @@ class _ClassInfo(object):
         self.virtual_method_line_number = None
         self.has_virtual_destructor = False
         self.brace_depth = 0
-        self.unsigned_bitfields = []
-        self.bool_bitfields = []
 
 
 class _ClassState(object):
@@ -1072,6 +1078,7 @@ class _ClassState(object):
 
 
 class _FileState(object):
+
     def __init__(self, clean_lines, file_extension):
         self._clean_lines = clean_lines
         if file_extension in ['m', 'mm']:
@@ -1231,33 +1238,6 @@ def check_for_non_standard_constructs(clean_lines, line_number, class_state,
     else:
         classinfo.brace_depth = brace_depth
 
-    well_typed_bitfield = False
-    # Look for bool <name> : 1 declarations.
-    args = search(r'\bbool\s+(\S*)\s*:\s*\d+\s*;', line)
-    if args:
-        classinfo.bool_bitfields.append(
-            '%d: %s' % (line_number, args.group(1)))
-        well_typed_bitfield = True
-
-    # Look for unsigned <name> : n declarations.
-    args = search(r'\bunsigned\s+(?:int\s+)?(\S+)\s*:\s*\d+\s*;', line)
-    if args:
-        classinfo.unsigned_bitfields.append(
-            '%d: %s' % (line_number, args.group(1)))
-        well_typed_bitfield = True
-
-    # Look for other bitfield declarations. We don't care about those in
-    # size-matching structs.
-    if not (well_typed_bitfield or classinfo.name.startswith('SameSizeAs')
-            or classinfo.name.startswith('Expected')):
-        args = match(r'\s*(\S+)\s+(\S+)\s*:\s*\d+\s*;', line)
-        if args:
-            error(
-                line_number, 'runtime/bitfields', 4,
-                'Member %s of class %s defined as a bitfield of type %s. '
-                'Please declare all bitfields as unsigned.' %
-                (args.group(2), classinfo.name, args.group(1)))
-
 
 def is_blank_line(line):
     """Returns true if the given line is blank.
@@ -1318,7 +1298,7 @@ def detect_functions(clean_lines, line_number, function_state, error):
         return
 
     joined_line = ''
-    for start_line_number in xrange(line_number, clean_lines.num_lines()):
+    for start_line_number in range(line_number, clean_lines.num_lines()):
         start_line = clean_lines.elided[start_line_number]
         joined_line += ' ' + start_line.lstrip()
         body_match = search(r'{|;', start_line)
@@ -1460,7 +1440,7 @@ def get_previous_non_blank_line(clean_lines, line_number):
 
 def check_ctype_functions(clean_lines, line_number, file_state, error):
     """Looks for use of the standard functions in ctype.h and suggest they be replaced
-       by use of equivalent ones in <wtf/ASCIICType.h>?.
+       by use of equivalent ones in "wtf/text/ascii_ctype.h"?.
 
     Args:
       clean_lines: A CleansedLines instance containing the file.
@@ -1481,9 +1461,9 @@ def check_ctype_functions(clean_lines, line_number, file_state, error):
 
     ctype_function = ctype_function_search.group('ctype_function')
     error(
-        line_number, 'runtime/ctype_function', 4,
-        'Use equivalent function in <wtf/ASCIICType.h> instead of the %s() function.'
-        % (ctype_function))
+        line_number, 'runtime/ctype_function', 4, 'Use equivalent function in '
+        '"third_party/blink/renderer/platform/wtf/text/ascii_ctype.h" instead '
+        'of the %s() function.' % (ctype_function))
 
 
 def replaceable_check(operator, macro, line):
@@ -1553,21 +1533,6 @@ def check_check(clean_lines, line_number, error):
             break
 
 
-def check_for_comparisons_to_boolean(clean_lines, line_number, error):
-    # Get the line without comments and strings.
-    line = clean_lines.elided[line_number]
-
-    # Must include NULL here, as otherwise users will convert NULL to 0 and
-    # then we can't catch it, since it looks like a valid integer comparison.
-    if search(r'[=!]=\s*(NULL|nullptr|true|false)[^\w.]', line) or search(
-            r'[^\w.](NULL|nullptr|true|false)\s*[=!]=', line):
-        if not search('LIKELY', line) and not search('UNLIKELY', line):
-            error(
-                line_number, 'readability/comparison_to_boolean', 5,
-                'Tests for true/false and null/non-null should be done without equality comparisons.'
-            )
-
-
 def get_line_width(line):
     """Determines the width of the line in column positions.
 
@@ -1578,7 +1543,7 @@ def get_line_width(line):
       The width of the line in column positions, accounting for Unicode
       combining characters and wide characters.
     """
-    if isinstance(line, unicode):
+    if isinstance(line, str):
         width = 0
         for c in unicodedata.normalize('NFC', line):
             if unicodedata.east_asian_width(c) in ('W', 'F'):
@@ -1654,6 +1619,15 @@ def check_conditional_and_loop_bodies_for_brace_violations(
         current_pos = _find_in_lines(r'\S', lines, current_pos, None)
         if not current_pos:
             return
+
+        likely_attribute = match(r'\[\[(?:un)?likely\]\]\s*',
+                                 lines[current_pos.row][current_pos.column:])
+        if likely_attribute:
+            current_pos.column += likely_attribute.end()
+            end_line_of_conditional = current_pos.row
+            current_pos = _find_in_lines(r'\S', lines, current_pos, None)
+            if not current_pos:
+                return
 
         current_arm_uses_brace = False
         if lines[current_pos.row][current_pos.column] == '{':
@@ -1751,8 +1725,8 @@ def check_redundant_virtual(clean_lines, linenum, error):
     # that this is rare.
     end_position = Position(-1, -1)
     start_col = len(virtual.group(2))
-    for start_line in xrange(linenum, min(linenum + 3,
-                                          clean_lines.num_lines())):
+    for start_line in range(linenum, min(linenum + 3,
+                                         clean_lines.num_lines())):
         line = clean_lines.elided[start_line][start_col:]
         parameter_list = match(r'^([^(]*)\(', line)
         if parameter_list:
@@ -1768,8 +1742,8 @@ def check_redundant_virtual(clean_lines, linenum, error):
 
     # Look for "override" or "final" after the parameter list
     # (possibly on the next few lines).
-    for i in xrange(end_position.row,
-                    min(end_position.row + 3, clean_lines.num_lines())):
+    for i in range(end_position.row,
+                   min(end_position.row + 3, clean_lines.num_lines())):
         line = clean_lines.elided[i][end_position.column:]
         override_or_final = search(r'\b(override|final)\b', line)
         if override_or_final:
@@ -1833,7 +1807,6 @@ def check_style(clean_lines, line_number, file_state, error):
     # Some more style checks
     check_ctype_functions(clean_lines, line_number, file_state, error)
     check_check(clean_lines, line_number, error)
-    check_for_comparisons_to_boolean(clean_lines, line_number, error)
 
 
 _RE_PATTERN_INCLUDE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]*)[>"].*$')
@@ -1937,9 +1910,10 @@ def check_language(filename, clean_lines, line_number, file_extension,
                 'Using deprecated casting style.  '
                 'Use static_cast<%s>(...) instead' % matched.group(1))
 
-    check_c_style_cast(
-        line_number, line, clean_lines.raw_lines[line_number], 'static_cast',
-        r'\((int|float|double|bool|char|u?int(16|32|64))\)', error)
+    check_c_style_cast(line_number, line, clean_lines.raw_lines[line_number],
+                       'static_cast',
+                       r'\((int|float|double|bool|char|u?int(16|32|64))\)',
+                       error)
     # This doesn't catch all cases.  Consider (const char * const)"hello".
     check_c_style_cast(line_number, line, clean_lines.raw_lines[line_number],
                        'reinterpret_cast', r'\((\w+\s?\*+\s?)\)', error)
@@ -1987,8 +1961,8 @@ def check_language(filename, clean_lines, line_number, file_extension,
     if matched and not match(r"^''|-?[0-9]+|0x[0-9A-Fa-f]$", matched.group(2)):
         error(
             line_number, 'runtime/memset', 4,
-            'Did you mean "memset(%s, 0, %s)"?' % (matched.group(1),
-                                                   matched.group(2)))
+            'Did you mean "memset(%s, 0, %s)"?' %
+            (matched.group(1), matched.group(2)))
 
     # Detect variable-length arrays.
     matched = match(r'\s*(.+::)?(\w+) [a-z]\w*\[(.+)];', line)
@@ -2125,7 +2099,7 @@ def check_identifier_name_in_declaration(filename, line_number, line,
     type_regexp = r'\w([\w]|\s*[*&]\s*|::)+'
     identifier_regexp = r'(?P<identifier>[\w:]+)'
     maybe_bitfield_regexp = r'(:\s*\d+\s*)?'
-    character_after_identifier_regexp = r'(?P<character_after_identifier>[[;()=,])(?!=)'
+    character_after_identifier_regexp = r'(?P<character_after_identifier>[\[;()=,])(?!=)'
     declaration_without_type_regexp = r'\s*' + identifier_regexp + \
         r'\s*' + maybe_bitfield_regexp + character_after_identifier_regexp
     declaration_with_type_regexp = r'\s*' + type_regexp + r'\s' + declaration_without_type_regexp
@@ -2194,7 +2168,7 @@ def check_for_toFoo_definition(filename, pattern, error):
     def grep(lines, pattern, error):
         matches = []
         function_state = None
-        for line_number in xrange(lines.num_lines()):
+        for line_number in range(lines.num_lines()):
             line = (lines.elided[line_number]).rstrip()
             try:
                 if pattern in line:
@@ -2357,8 +2331,8 @@ def check_c_style_cast(line_number, line, raw_line, cast_type, pattern, error):
     # At this point, all that should be left is actual casts.
     error(
         line_number, 'readability/casting', 4,
-        'Using C-style cast.  Use %s<%s>(...) instead' % (cast_type,
-                                                          matched.group(1)))
+        'Using C-style cast.  Use %s<%s>(...) instead' %
+        (cast_type, matched.group(1)))
 
 
 _HEADERS_CONTAINING_TEMPLATES = (
@@ -2447,8 +2421,8 @@ _RE_PATTERN_STRING = re.compile(r'\bstring\b')
 _re_pattern_algorithm_header = []
 for _template in ('copy', 'max', 'min', 'min_element', 'sort', 'swap',
                   'transform'):
-    # Match max<type>(..., ...), max(..., ...), but not foo->max, foo.max or
-    # type::max().
+    # Match max<type>(..., ...), max(..., ...), but not foo->max, foo.max,
+    # or type::max().
     _re_pattern_algorithm_header.append(
         (re.compile(r'[^>.]\b' + _template + r'(<.*?>)?\([^\)]'), _template,
          '<algorithm>'))
@@ -2566,7 +2540,7 @@ def check_for_include_what_you_use(filename, clean_lines, include_state,
     required = {}
     # Example of required: { '<functional>': (1219, 'less<>') }
 
-    for line_number in xrange(clean_lines.num_lines()):
+    for line_number in range(clean_lines.num_lines()):
         line = clean_lines.elided[line_number]
         if not line or line[0] == '#':
             continue
@@ -2609,9 +2583,9 @@ def check_for_include_what_you_use(filename, clean_lines, include_state,
 
     # include_state is modified during iteration, so we iterate over a copy of
     # the keys.
-    for header in include_state.keys():  # NOLINT
-        (same_module, common_path) = files_belong_to_same_module(
-            abs_filename, header)
+    for header in list(include_state):  # NOLINT
+        (same_module,
+         common_path) = files_belong_to_same_module(abs_filename, header)
         fullpath = common_path + header
         if same_module and update_include_state(fullpath, include_state):
             header_found = True
@@ -2688,8 +2662,8 @@ def _process_lines(filename, file_extension, lines, error, min_confidence):
              last element being empty if the file is terminated with a newline.
       error: A callable to which errors are reported, which takes 4 arguments:
     """
-    lines = (['// marker so line numbers and indices both start at 1'] + lines
-             + ['// marker so line numbers end in a known way'])
+    lines = (['// marker so line numbers and indices both start at 1'] +
+             lines + ['// marker so line numbers end in a known way'])
 
     include_state = _IncludeState()
     function_state = _FunctionState(min_confidence)
@@ -2703,7 +2677,7 @@ def _process_lines(filename, file_extension, lines, error, min_confidence):
         check_for_header_guard(filename, clean_lines, error)
 
     file_state = _FileState(clean_lines, file_extension)
-    for line in xrange(clean_lines.num_lines()):
+    for line in range(clean_lines.num_lines()):
         process_line(filename, file_extension, clean_lines, line,
                      include_state, function_state, class_state, file_state,
                      error)
@@ -2732,7 +2706,6 @@ class CppChecker(object):
         'legal/copyright',
         'readability/casting',
         'readability/check',
-        'readability/comparison_to_boolean',
         'readability/control_flow',
         'readability/enum_casing',
         'readability/fn_size',

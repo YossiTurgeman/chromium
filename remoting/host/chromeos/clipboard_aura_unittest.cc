@@ -1,17 +1,19 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/host/chromeos/clipboard_aura.h"
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/macros.h"
+#include <memory>
+
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/ptr_util.h"
-#include "base/run_loop.h"
-#include "base/single_thread_task_runner.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/run_until.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "base/test/test_timeouts.h"
 #include "remoting/base/constants.h"
 #include "remoting/proto/event.pb.h"
@@ -20,6 +22,7 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/clipboard/clipboard.h"
 #include "ui/base/clipboard/scoped_clipboard_writer.h"
+#include "ui/base/clipboard/test/clipboard_test_util.h"
 
 using testing::_;
 using testing::Eq;
@@ -30,17 +33,19 @@ namespace remoting {
 
 namespace {
 
-const base::TimeDelta kTestOverridePollingInterval =
-    base::TimeDelta::FromMilliseconds(1);
+const base::TimeDelta kTestOverridePollingInterval = base::Milliseconds(1);
 
 class ClientClipboard : public protocol::ClipboardStub {
  public:
   ClientClipboard();
-  MOCK_METHOD1(InjectClipboardEvent,
-               void(const protocol::ClipboardEvent& event));
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(ClientClipboard);
+  ClientClipboard(const ClientClipboard&) = delete;
+  ClientClipboard& operator=(const ClientClipboard&) = delete;
+
+  MOCK_METHOD(void,
+              InjectClipboardEvent,
+              (const protocol::ClipboardEvent& event),
+              (override));
 };
 
 ClientClipboard::ClientClipboard() = default;
@@ -56,9 +61,10 @@ class ClipboardAuraTest : public testing::Test {
  protected:
   void StopAndResetClipboard();
 
-  base::test::SingleThreadTaskEnvironment task_environment_{
-      base::test::SingleThreadTaskEnvironment::MainThreadType::UI};
-  ClientClipboard* client_clipboard_;
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::MainThreadType::UI,
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+  raw_ptr<ClientClipboard, DanglingUntriaged> client_clipboard_;
   std::unique_ptr<ClipboardAura> clipboard_;
 };
 
@@ -71,13 +77,13 @@ void ClipboardAuraTest::SetUp() {
 
   // Setup the clipboard.
   client_clipboard_ = new ClientClipboard();
-  clipboard_.reset(new ClipboardAura());
+  clipboard_ = std::make_unique<ClipboardAura>();
 
   EXPECT_GT(TestTimeouts::tiny_timeout(), kTestOverridePollingInterval * 10)
       << "The test timeout should be greater than the polling interval";
   clipboard_->SetPollingIntervalForTesting(kTestOverridePollingInterval);
 
-  clipboard_->Start(base::WrapUnique(client_clipboard_));
+  clipboard_->Start(base::WrapUnique(client_clipboard_.get()));
 }
 
 void ClipboardAuraTest::TearDown() {
@@ -95,40 +101,31 @@ TEST_F(ClipboardAuraTest, WriteToClipboard) {
 
   clipboard_->InjectClipboardEvent(event);
   StopAndResetClipboard();
-  base::RunLoop().RunUntilIdle();
 
-  std::string clipboard_data;
   ui::Clipboard* aura_clipboard = ui::Clipboard::GetForCurrentThread();
-  aura_clipboard->ReadAsciiText(ui::ClipboardBuffer::kCopyPaste,
-                                /* data_dst = */ nullptr, &clipboard_data);
-
-  EXPECT_EQ(clipboard_data, "Test data.")
-      << "InjectClipboardEvent should write to aura clipboard";
+  std::string clipboard_data;
+  EXPECT_TRUE(base::test::RunUntil([&]() {
+    clipboard_data = ui::clipboard_test_util::ReadAsciiText(
+        aura_clipboard, ui::ClipboardBuffer::kCopyPaste,
+        /* data_dst = */ nullptr);
+    return clipboard_data == "Test data.";
+  }));
 }
 
 TEST_F(ClipboardAuraTest, MonitorClipboardChanges) {
-  base::RunLoop().RunUntilIdle();
-
   {
     // |clipboard_writer| will write to the clipboard when it goes out of scope.
     ui::ScopedClipboardWriter clipboard_writer(ui::ClipboardBuffer::kCopyPaste);
-    clipboard_writer.WriteText(base::UTF8ToUTF16("Test data."));
+    clipboard_writer.WriteText(u"Test data.");
   }
 
-  EXPECT_CALL(*client_clipboard_,
-              InjectClipboardEvent(Property(&protocol::ClipboardEvent::data,
-                                            Eq("Test data.")))).Times(1);
+  base::test::TestFuture<const protocol::ClipboardEvent&> event_future;
+  EXPECT_CALL(*client_clipboard_, InjectClipboardEvent(_))
+      .WillOnce(base::test::InvokeFuture(event_future));
 
-  base::RunLoop run_loop;
-  task_environment_.GetMainThreadTaskRunner()->PostDelayedTask(
-      FROM_HERE,
-      base::BindOnce(&ClipboardAuraTest_MonitorClipboardChanges_Test::
-                         StopAndResetClipboard,
-                     base::Unretained(this)),
-      TestTimeouts::tiny_timeout());
-  task_environment_.GetMainThreadTaskRunner()->PostDelayedTask(
-      FROM_HERE, run_loop.QuitClosure(), TestTimeouts::tiny_timeout());
-  run_loop.Run();
+  task_environment_.FastForwardBy(TestTimeouts::tiny_timeout());
+  EXPECT_EQ(event_future.Get().data(), "Test data.");
+  StopAndResetClipboard();
 }
 
 }  // namespace remoting

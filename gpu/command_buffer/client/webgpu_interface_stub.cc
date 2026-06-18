@@ -1,4 +1,4 @@
-// Copyright (c) 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,23 @@
 namespace gpu {
 namespace webgpu {
 
-WebGPUInterfaceStub::WebGPUInterfaceStub() = default;
+namespace {
+
+class APIChannelStub : public APIChannel {
+ public:
+  APIChannelStub() = default;
+
+  WGPUInstance GetWGPUInstance() const override { return nullptr; }
+  void Disconnect() override {}
+
+ private:
+  ~APIChannelStub() override = default;
+};
+
+}  // anonymous namespace
+
+WebGPUInterfaceStub::WebGPUInterfaceStub()
+    : api_channel_(base::MakeRefCounted<APIChannelStub>()) {}
 
 WebGPUInterfaceStub::~WebGPUInterfaceStub() = default;
 
@@ -17,38 +33,50 @@ void WebGPUInterfaceStub::GenUnverifiedSyncTokenCHROMIUM(GLbyte* sync_token) {}
 void WebGPUInterfaceStub::VerifySyncTokensCHROMIUM(GLbyte** sync_tokens,
                                                    GLsizei count) {}
 void WebGPUInterfaceStub::WaitSyncTokenCHROMIUM(const GLbyte* sync_token) {}
+void WebGPUInterfaceStub::ShallowFlushCHROMIUM() {}
 
 // WebGPUInterface implementation
-const DawnProcTable& WebGPUInterfaceStub::GetProcs() const {
-  return null_procs_;
+scoped_refptr<APIChannel> WebGPUInterfaceStub::GetAPIChannel() const {
+  return api_channel_;
 }
 void WebGPUInterfaceStub::FlushCommands() {}
-void WebGPUInterfaceStub::EnsureAwaitingFlush(
-    DawnDeviceClientID device_client_id,
-    bool* needs_flush) {}
-void WebGPUInterfaceStub::FlushAwaitingCommands(
-    DawnDeviceClientID device_client_id) {}
-WGPUDevice WebGPUInterfaceStub::GetDevice(DawnDeviceClientID device_client_id) {
+bool WebGPUInterfaceStub::EnsureAwaitingFlush() {
+  return false;
+}
+void WebGPUInterfaceStub::FlushAwaitingCommands() {}
+ReservedTexture WebGPUInterfaceStub::ReserveTexture(
+    WGPUDevice,
+    const WGPUTextureDescriptor*) {
+  return {nullptr, 0, 0, 0, 0};
+}
+
+ReservedBuffer WebGPUInterfaceStub::ReserveBuffer(WGPUDevice device,
+                                                  const WGPUBufferDescriptor*) {
+  return {nullptr, 0, 0, 0, 0};
+}
+
+WGPUDevice WebGPUInterfaceStub::DeprecatedEnsureDefaultDeviceSync() {
   return nullptr;
 }
-ReservedTexture WebGPUInterfaceStub::ReserveTexture(
-    DawnDeviceClientID device_client_id) {
-  return {nullptr, 0, 0};
-}
-bool WebGPUInterfaceStub::RequestAdapterAsync(
-    PowerPreference power_preference,
-    base::OnceCallback<void(int32_t, const WGPUDeviceProperties&)>
-        request_adapter_callback) {
-  return false;
-}
-bool WebGPUInterfaceStub::RequestDeviceAsync(
-    uint32_t adapter_service_id,
-    const WGPUDeviceProperties& requested_device_properties,
-    base::OnceCallback<void(bool, DawnDeviceClientID)>
-        request_device_callback) {
-  return false;
-}
-void WebGPUInterfaceStub::RemoveDevice(DawnDeviceClientID device_client_id) {}
+
+void WebGPUInterfaceStub::AssociateMailbox(
+    GLuint device_id,
+    GLuint device_generation,
+    GLuint id,
+    GLuint generation,
+    uint64_t usage,
+    uint64_t internal_usage,
+    const WGPUTextureFormat* view_formats,
+    GLuint view_format_count,
+    MailboxFlags flags,
+    const Mailbox& mailbox) {}
+
+void WebGPUInterfaceStub::AssociateMailboxForBuffer(GLuint device_id,
+                                                    GLuint device_generation,
+                                                    GLuint id,
+                                                    GLuint generation,
+                                                    uint64_t usage,
+                                                    const Mailbox& mailbox) {}
 
 // Include the auto-generated part of this class. We split this because
 // it means we can easily edit the non-auto generated parts right here in

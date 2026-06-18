@@ -1,25 +1,33 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 #include <string>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
-#include "chrome/browser/extensions/api/content_settings/content_settings_service.h"
 #include "chrome/browser/extensions/api/preference/preference_api.h"
 #include "chrome/browser/extensions/extension_prefs_unittest.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/mock_pref_change_callback.h"
+#include "extensions/browser/api/content_settings/content_settings_service.h"
 #include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/extension_prefs_helper.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/api/types.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_id.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
 using base::Value;
+using extensions::api::types::ChromeSettingScope;
 
 namespace extensions {
 
@@ -38,35 +46,6 @@ const char kDefaultPref4[] = "default pref 4";
 
 }  // namespace
 
-// An implementation of the PreferenceAPI which returns the ExtensionPrefs and
-// ExtensionPrefValueMap from the TestExtensionPrefs, rather than from a
-// profile (which we don't create in unittests).
-class TestPreferenceAPI : public PreferenceAPIBase {
- public:
-  explicit TestPreferenceAPI(TestExtensionPrefs* test_extension_prefs,
-                             ContentSettingsService* content_settings)
-      : test_extension_prefs_(test_extension_prefs),
-        content_settings_(content_settings) {}
-  ~TestPreferenceAPI() {}
-
- private:
-  // PreferenceAPIBase implementation.
-  ExtensionPrefs* extension_prefs() override {
-    return test_extension_prefs_->prefs();
-  }
-  ExtensionPrefValueMap* extension_pref_value_map() override {
-    return test_extension_prefs_->extension_pref_value_map();
-  }
-  scoped_refptr<ContentSettingsStore> content_settings_store() override {
-    return content_settings_->content_settings_store();
-  }
-
-  TestExtensionPrefs* test_extension_prefs_;
-  ContentSettingsService* content_settings_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestPreferenceAPI);
-};
-
 class ExtensionControlledPrefsTest : public PrefsPrepopulatedTestBase {
  public:
   ExtensionControlledPrefsTest();
@@ -84,7 +63,7 @@ class ExtensionControlledPrefsTest : public PrefsPrepopulatedTestBase {
       const std::string& key,
       base::Value value);
   void InstallExtension(Extension* extension);
-  void UninstallExtension(const std::string& extension_id);
+  void UninstallExtension(const ExtensionId& extension_id);
 
   scoped_refptr<ContentSettingsStore> content_settings_store() {
     return content_settings_->content_settings_store();
@@ -92,22 +71,20 @@ class ExtensionControlledPrefsTest : public PrefsPrepopulatedTestBase {
 
  protected:
   void EnsureExtensionInstalled(Extension* extension);
-  void EnsureExtensionUninstalled(const std::string& extension_id);
+  void EnsureExtensionUninstalled(const ExtensionId& extension_id);
 
   TestingProfile profile_;
-  ContentSettingsService* content_settings_;
-  TestPreferenceAPI test_preference_api_;
+  raw_ptr<ContentSettingsService> content_settings_;
+  ExtensionPrefsHelper prefs_helper_;
 };
 
 ExtensionControlledPrefsTest::ExtensionControlledPrefsTest()
-    : PrefsPrepopulatedTestBase(),
-      content_settings_(ContentSettingsService::Get(&profile_)),
-      test_preference_api_(&prefs_, content_settings_) {
+    : content_settings_(ContentSettingsService::Get(&profile_)),
+      prefs_helper_(prefs_.prefs(), prefs_.extension_pref_value_map()) {
   content_settings_->OnExtensionPrefsAvailable(prefs_.prefs());
 }
 
-ExtensionControlledPrefsTest::~ExtensionControlledPrefsTest() {
-}
+ExtensionControlledPrefsTest::~ExtensionControlledPrefsTest() = default;
 
 void ExtensionControlledPrefsTest::RegisterPreferences(
     user_prefs::PrefRegistrySyncable* registry) {
@@ -122,8 +99,8 @@ void ExtensionControlledPrefsTest::InstallExtensionControlledPref(
     const std::string& key,
     base::Value value) {
   EnsureExtensionInstalled(extension);
-  test_preference_api_.SetExtensionControlledPref(
-      extension->id(), key, kExtensionPrefsScopeRegular, std::move(value));
+  prefs_helper_.SetExtensionControlledPref(
+      extension->id(), key, ChromeSettingScope::kRegular, std::move(value));
 }
 
 void ExtensionControlledPrefsTest::InstallExtensionControlledPrefIncognito(
@@ -131,8 +108,8 @@ void ExtensionControlledPrefsTest::InstallExtensionControlledPrefIncognito(
     const std::string& key,
     base::Value value) {
   EnsureExtensionInstalled(extension);
-  test_preference_api_.SetExtensionControlledPref(
-      extension->id(), key, kExtensionPrefsScopeIncognitoPersistent,
+  prefs_helper_.SetExtensionControlledPref(
+      extension->id(), key, ChromeSettingScope::kIncognitoPersistent,
       std::move(value));
 }
 
@@ -141,8 +118,8 @@ void ExtensionControlledPrefsTest::
                                                        const std::string& key,
                                                        base::Value value) {
   EnsureExtensionInstalled(extension);
-  test_preference_api_.SetExtensionControlledPref(
-      extension->id(), key, kExtensionPrefsScopeIncognitoSessionOnly,
+  prefs_helper_.SetExtensionControlledPref(
+      extension->id(), key, ChromeSettingScope::kIncognitoSessionOnly,
       std::move(value));
 }
 
@@ -151,21 +128,25 @@ void ExtensionControlledPrefsTest::InstallExtension(Extension* extension) {
 }
 
 void ExtensionControlledPrefsTest::UninstallExtension(
-    const std::string& extension_id) {
+    const ExtensionId& extension_id) {
   EnsureExtensionUninstalled(extension_id);
 }
 
 void ExtensionControlledPrefsTest::EnsureExtensionInstalled(
     Extension* extension) {
   // Install extension the first time a preference is set for it.
-  Extension* extensions[] = {extension1(), extension2(), extension3(),
-                             extension4(), internal_extension()};
+  auto extensions = std::to_array<Extension*>({
+      extension1(),
+      extension2(),
+      extension3(),
+      extension4(),
+      internal_extension(),
+  });
   for (size_t i = 0; i < kNumInstalledExtensions; ++i) {
     if (extension == extensions[i] && !installed_[i]) {
       prefs()->OnExtensionInstalled(extension,
-                                    Extension::ENABLED,
-                                    syncer::StringOrdinal(),
-                                    std::string());
+                                    /*disable_reasons=*/{},
+                                    syncer::StringOrdinal(), std::string());
       prefs()->SetIsIncognitoEnabled(extension->id(), true);
       installed_[i] = true;
       break;
@@ -174,16 +155,22 @@ void ExtensionControlledPrefsTest::EnsureExtensionInstalled(
 }
 
 void ExtensionControlledPrefsTest::EnsureExtensionUninstalled(
-    const std::string& extension_id) {
-  Extension* extensions[] = {extension1(), extension2(), extension3(),
-                             extension4(), internal_extension()};
+    const ExtensionId& extension_id) {
+  auto extensions = std::to_array<Extension*>({
+      extension1(),
+      extension2(),
+      extension3(),
+      extension4(),
+      internal_extension(),
+  });
   for (size_t i = 0; i < kNumInstalledExtensions; ++i) {
     if (extensions[i]->id() == extension_id) {
       installed_[i] = false;
       break;
     }
   }
-  prefs()->OnExtensionUninstalled(extension_id, Manifest::INTERNAL, false);
+  prefs()->OnExtensionUninstalled(extension_id,
+                                  mojom::ManifestLocation::kInternal, false);
 }
 
 class ControlledPrefsInstallOneExtension
@@ -273,7 +260,7 @@ class ControlledPrefsUninstallExtension : public ExtensionControlledPrefsTest {
         ContentSettingsPattern::FromString("http://[*.]example.com");
     store->SetExtensionContentSetting(
         extension1()->id(), pattern, pattern, ContentSettingsType::IMAGES,
-        std::string(), CONTENT_SETTING_BLOCK, kExtensionPrefsScopeRegular);
+        CONTENT_SETTING_BLOCK, ChromeSettingScope::kRegular);
 
     UninstallExtension(extension1()->id());
   }
@@ -372,8 +359,8 @@ class ControlledPrefsDisableExtension : public ExtensionControlledPrefsTest {
     InstallExtensionControlledPref(extension1(), kPref1, base::Value("val1"));
     std::string actual = prefs()->pref_service()->GetString(kPref1);
     EXPECT_EQ("val1", actual);
-    prefs()->SetExtensionDisabled(extension1()->id(),
-                                  disable_reason::DISABLE_USER_ACTION);
+    prefs()->AddDisableReason(extension1()->id(),
+                              disable_reason::DISABLE_USER_ACTION);
   }
   void Verify() override {
     std::string actual = prefs()->pref_service()->GetString(kPref1);
@@ -386,9 +373,9 @@ TEST_F(ControlledPrefsDisableExtension, ControlledPrefsDisableExtension) { }
 class ControlledPrefsReenableExtension : public ExtensionControlledPrefsTest {
   void Initialize() override {
     InstallExtensionControlledPref(extension1(), kPref1, base::Value("val1"));
-    prefs()->SetExtensionDisabled(extension1()->id(),
-                                  disable_reason::DISABLE_USER_ACTION);
-    prefs()->SetExtensionEnabled(extension1()->id());
+    prefs()->AddDisableReason(extension1()->id(),
+                              disable_reason::DISABLE_USER_ACTION);
+    prefs()->ClearDisableReasons(extension1()->id());
   }
   void Verify() override {
     std::string actual = prefs()->pref_service()->GetString(kPref1);
@@ -417,9 +404,8 @@ TEST_F(ControlledPrefsSetExtensionControlledPref,
 // extension controlled preferences from being enacted.
 class ControlledPrefsDisableExtensions : public ExtensionControlledPrefsTest {
  public:
-  ControlledPrefsDisableExtensions()
-      : iteration_(0) {}
-  ~ControlledPrefsDisableExtensions() override {}
+  ControlledPrefsDisableExtensions() = default;
+  ~ControlledPrefsDisableExtensions() override = default;
   void Initialize() override {
     InstallExtensionControlledPref(internal_extension(), kPref1,
                                    base::Value("internal extension value"));
@@ -443,15 +429,15 @@ class ControlledPrefsDisableExtensions : public ExtensionControlledPrefsTest {
     }
 
     // External extensions are loaded even when extensions are disabled (though
-    // they likely shouldn't be, see https://crbug.com/833540). Because of this,
+    // they likely shouldn't be, see crbug.com/41383647). Because of this,
     // the preference should still be controlled by the external extension.
-    // Regression test for https://crbug.com/828295.
+    // Regression test for https://crbug.com/41380408.
     std::string pref2_actual = prefs()->pref_service()->GetString(kPref2);
     EXPECT_EQ("external extension value", pref2_actual);
   }
 
  private:
-  int iteration_;
+  int iteration_ = 0;
 };
 TEST_F(ControlledPrefsDisableExtensions, ControlledPrefsDisableExtensions) { }
 

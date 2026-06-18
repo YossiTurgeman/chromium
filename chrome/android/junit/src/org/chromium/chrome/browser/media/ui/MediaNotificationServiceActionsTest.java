@@ -1,23 +1,21 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.media.ui;
 
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.verify;
 
 import android.content.Intent;
-import android.media.AudioManager;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.chrome.browser.media.ui.ChromeMediaNotificationControllerDelegate.ListenerService;
 import org.chromium.components.browser_ui.media.MediaNotificationController;
 import org.chromium.components.browser_ui.media.MediaNotificationListener;
 import org.chromium.media_session.mojom.MediaSessionAction;
@@ -27,14 +25,16 @@ import org.chromium.media_session.mojom.MediaSessionAction;
  * handles intent actions correctly.
  */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, shadows = {MediaNotificationTestShadowResources.class})
+@Config(
+        manifest = Config.NONE,
+        shadows = {MediaNotificationTestShadowResources.class})
 public class MediaNotificationServiceActionsTest extends MediaNotificationTestBase {
     @Test
     public void testProcessIntentWithNoAction() {
         setUpServiceAndClearInvocations();
         MediaNotificationController controller = getController();
-        doNothing().when(controller).onServiceStarted(any(ListenerService.class));
-        assertTrue(mService.processIntent(new Intent()));
+        doNothing().when(controller).onServiceStarted(any(MockListenerService.class));
+        assertTrue(mService.getImpl().processIntent(new Intent()));
         verify(controller).onServiceStarted(mService);
     }
 
@@ -43,7 +43,7 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
         setUpService();
         MediaNotificationController controller = getController();
         Intent intentWithAction = new Intent().setAction("foo");
-        assertTrue(mService.processIntent(intentWithAction));
+        assertTrue(mService.getImpl().processIntent(intentWithAction));
         verify(controller).processAction(intentWithAction.getAction());
     }
 
@@ -52,9 +52,9 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
         setUpService();
 
         MediaNotificationController controller = getController();
-        ListenerService service = mService;
+        MockListenerService service = mService;
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_STOP));
+        mService.getImpl().processIntent(new Intent(MediaNotificationController.ACTION_STOP));
         verify(controller).onStop(MediaNotificationListener.ACTION_SOURCE_MEDIA_NOTIFICATION);
         verify(controller).stopListenerService();
     }
@@ -64,9 +64,9 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
         setUpService();
 
         MediaNotificationController controller = getController();
-        ListenerService service = mService;
+        MockListenerService service = mService;
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_SWIPE));
+        mService.getImpl().processIntent(new Intent(MediaNotificationController.ACTION_SWIPE));
         verify(controller).onStop(MediaNotificationListener.ACTION_SOURCE_MEDIA_NOTIFICATION);
         verify(controller).stopListenerService();
     }
@@ -76,9 +76,9 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
         setUpService();
 
         MediaNotificationController controller = getController();
-        ListenerService service = mService;
+        MockListenerService service = mService;
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_CANCEL));
+        mService.getImpl().processIntent(new Intent(MediaNotificationController.ACTION_CANCEL));
         verify(controller).onStop(MediaNotificationListener.ACTION_SOURCE_MEDIA_NOTIFICATION);
         verify(controller).stopListenerService();
     }
@@ -87,7 +87,7 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
     public void testProcessNotificationButtonAction_Play() {
         setUpService();
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_PLAY));
+        mService.getImpl().processIntent(new Intent(MediaNotificationController.ACTION_PLAY));
         verify(getController()).onPlay(MediaNotificationListener.ACTION_SOURCE_MEDIA_NOTIFICATION);
     }
 
@@ -95,23 +95,16 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
     public void testProcessNotificationButtonAction_Pause() {
         setUpService();
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_PAUSE));
+        mService.getImpl().processIntent(new Intent(MediaNotificationController.ACTION_PAUSE));
         verify(getController()).onPause(MediaNotificationListener.ACTION_SOURCE_MEDIA_NOTIFICATION);
-    }
-
-    @Test
-    public void testProcessNotificationButtonAction_Noisy() {
-        setUpService();
-
-        mService.processIntent(new Intent(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
-        verify(getController()).onPause(MediaNotificationListener.ACTION_SOURCE_HEADSET_UNPLUG);
     }
 
     @Test
     public void testProcessNotificationButtonAction_PreviousTrack() {
         setUpService();
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_PREVIOUS_TRACK));
+        mService.getImpl()
+                .processIntent(new Intent(MediaNotificationController.ACTION_PREVIOUS_TRACK));
         verify(getController()).onMediaSessionAction(MediaSessionAction.PREVIOUS_TRACK);
     }
 
@@ -119,7 +112,7 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
     public void testProcessNotificationButtonAction_NextTrack() {
         setUpService();
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_NEXT_TRACK));
+        mService.getImpl().processIntent(new Intent(MediaNotificationController.ACTION_NEXT_TRACK));
         verify(getController()).onMediaSessionAction(MediaSessionAction.NEXT_TRACK);
     }
 
@@ -127,7 +120,8 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
     public void testProcessNotificationButtonAction_SeekForward() {
         setUpService();
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_SEEK_FORWARD));
+        mService.getImpl()
+                .processIntent(new Intent(MediaNotificationController.ACTION_SEEK_FORWARD));
         verify(getController()).onMediaSessionAction(MediaSessionAction.SEEK_FORWARD);
     }
 
@@ -135,7 +129,8 @@ public class MediaNotificationServiceActionsTest extends MediaNotificationTestBa
     public void testProcessNotificationButtonAction_SeekBackward() {
         setUpService();
 
-        mService.processIntent(new Intent(MediaNotificationController.ACTION_SEEK_BACKWARD));
+        mService.getImpl()
+                .processIntent(new Intent(MediaNotificationController.ACTION_SEEK_BACKWARD));
         verify(getController()).onMediaSessionAction(MediaSessionAction.SEEK_BACKWARD);
     }
 }

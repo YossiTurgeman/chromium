@@ -1,15 +1,9 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//build/buildflag_header.gni")
 import("//components/gcm_driver/config.gni")
-
-# Reset sources_assignment_filter for the BUILD.gn file to prevent
-# regression during the migration of Chromium away from the feature.
-# See docs/no_sources_assignment_filter.md for more information.
-# TODO(crbug.com/1018739): remove this when migration is done.
-set_sources_assignment_filter([])
 
 buildflag_header("gcm_buildflags") {
   header = "gcm_buildflags.h"
@@ -53,6 +47,7 @@ static_library("gcm_driver") {
     "//components/gcm_driver/common",
     "//components/gcm_driver/crypto",
     "//components/gcm_driver/instance_id",
+    "//components/version_info:channel",
     "//crypto",
   ]
 
@@ -61,18 +56,17 @@ static_library("gcm_driver") {
     "//base:i18n",
     "//components/crx_file",
     "//components/keyed_service/core",
-    "//components/os_crypt",
+    "//components/os_crypt/async/browser",
     "//components/pref_registry",
     "//components/prefs",
     "//components/signin/public/identity_manager",
-    "//components/sync/base",
     "//components/version_info",
     "//google_apis",
     "//google_apis/gcm",
     "//net",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
-    "//url:url",
+    "//url",
   ]
 
   # This target goes with these other deps and they can include headers from
@@ -81,10 +75,6 @@ static_library("gcm_driver") {
     "//components/gcm_driver/crypto",
     "//components/gcm_driver/instance_id",
   ]
-
-  if (is_chromeos) {
-    deps += [ "//components/timers" ]
-  }
 
   if (use_gcm_from_platform) {
     assert(is_android)
@@ -115,6 +105,7 @@ static_library("gcm_driver") {
     ]
     deps += [
       "//components/crx_file",
+      "//components/version_info",
       "//google_apis/gcm",
     ]
   }
@@ -182,8 +173,8 @@ source_set("unit_tests") {
     "//base",
     "//base/test:test_support",
     "//components/gcm_driver/crypto",
+    "//components/os_crypt/async/browser:test_support",
     "//components/prefs:test_support",
-    "//components/sync/protocol",
     "//google_apis:test_support",
     "//google_apis/gcm:test_support",
     "//net:test_support",
@@ -207,6 +198,9 @@ source_set("unit_tests") {
       "gcm_stats_recorder_impl_unittest.cc",
     ]
 
-    deps += [ "//components/signin/public/identity_manager:test_support" ]
+    deps += [
+      "//components/signin/public/identity_manager:test_support",
+      "//google_apis",
+    ]
   }
 }

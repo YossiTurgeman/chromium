@@ -1,4 +1,4 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,7 +14,7 @@ def main():
   proc = subprocess.Popen([build_deb_script] + sys.argv[1:],
                           stdout=subprocess.PIPE)
   out, _ = proc.communicate()
-  sys.stdout.write(out.strip())
+  sys.stdout.write(out.decode('utf8').strip())
   return proc.returncode
 
 

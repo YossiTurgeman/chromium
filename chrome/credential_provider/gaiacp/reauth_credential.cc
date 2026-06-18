@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@
 
 namespace credential_provider {
 
-// TODO(crbug.com/1111561): Change it back to emdedded/reauth/windows
+// TODO(crbug.com/40142636): Change it back to emdedded/reauth/windows
 // once reauth flow latency issue is resolved.
 constexpr char kGaiaReauthPath[] = "embedded/setup/windows";
 
@@ -65,7 +65,7 @@ HRESULT CReauthCredential::GetUserGlsCommandline(
 
   // If this is an existing user with an SID, try to get its gaia id and pass
   // it to the GLS for verification.
-  base::string16 gaia_id;
+  std::wstring gaia_id;
   if (GetIdFromSid(OLE2CW(os_user_sid_), &gaia_id) == S_OK &&
       !gaia_id.empty()) {
     command_line->AppendSwitchNative(kGaiaIdSwitch, gaia_id);
@@ -110,9 +110,9 @@ HRESULT CReauthCredential::GetUserGlsCommandline(
   }
 }
 
-HRESULT CReauthCredential::ValidateExistingUser(const base::string16& username,
-                                                const base::string16& domain,
-                                                const base::string16& sid,
+HRESULT CReauthCredential::ValidateExistingUser(const std::wstring& username,
+                                                const std::wstring& domain,
+                                                const std::wstring& sid,
                                                 BSTR* error_text) {
   DCHECK(os_username_.Length());
   DCHECK(os_user_sid_.Length());
@@ -135,18 +135,21 @@ HRESULT CReauthCredential::ValidateExistingUser(const base::string16& username,
 }
 
 HRESULT CReauthCredential::GetStringValueImpl(DWORD field_id, wchar_t** value) {
+  LOGFN(VERBOSE) << "field_id=" << field_id;
+
   if (field_id == FID_PROVIDER_LABEL) {
-    base::string16 label(
+    std::wstring label(
         GetStringResource(IDS_EXISTING_AUTH_FID_PROVIDER_LABEL_BASE));
+    LOGFN(VERBOSE) << "label=" << label;
     return ::SHStrDupW(label.c_str(), value);
   } else if (field_id == FID_DESCRIPTION) {
     wchar_t* sid_buffer = nullptr;
     HRESULT hr = GetUserSid(&sid_buffer);
     if (FAILED(hr)) {
       LOGFN(ERROR) << "GetUserSid: Empty sid found";
-      return ::SHStrDupW(base::string16().c_str(), value);
+      return ::SHStrDupW(std::wstring().c_str(), value);
     }
-    base::string16 sid = sid_buffer;
+    std::wstring sid = sid_buffer;
     ::CoTaskMemFree(sid_buffer);
 
     int description_label_id;
@@ -179,13 +182,19 @@ HRESULT CReauthCredential::GetStringValueImpl(DWORD field_id, wchar_t** value) {
           description_label_id =
               IDS_REAUTH_ONLINE_LOGIN_ENFORCED_DESCRIPTION_BASE;
           break;
+        case AssociatedUserValidator::EnforceAuthReason::
+            MISSING_OR_STALE_USER_POLICIES:
+          description_label_id = IDS_REAUTH_MISSING_POLICIES_DESCRIPTION_BASE;
+          break;
         default:
           description_label_id = IDS_REAUTH_FID_DESCRIPTION_BASE;
           break;
       }
     }
 
-    base::string16 label(GetStringResource(description_label_id));
+    std::wstring label(GetStringResource(description_label_id));
+    LOGFN(VERBOSE) << "field_id=" << field_id << " label=" << label;
+
     return ::SHStrDupW(label.c_str(), value);
   }
 
@@ -212,6 +221,7 @@ HRESULT CReauthCredential::SetOSUserInfo(BSTR sid, BSTR domain, BSTR username) {
   DCHECK(sid);
   DCHECK(domain);
   DCHECK(username);
+  LOGFN(VERBOSE);
 
   os_user_domain_ = domain;
   os_user_sid_ = sid;
@@ -228,6 +238,7 @@ HRESULT CReauthCredential::SetOSUserInfo(BSTR sid, BSTR domain, BSTR username) {
 
 HRESULT CReauthCredential::SetEmailForReauth(BSTR email) {
   DCHECK(email);
+  LOGFN(VERBOSE) << "email=" << email;
 
   email_for_reauth_ = email;
   return S_OK;

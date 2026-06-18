@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,13 +29,14 @@ bool RenderFrameMetadata::operator==(const RenderFrameMetadata& other) const {
          is_scroll_offset_at_top == other.is_scroll_offset_at_top &&
          selection == other.selection &&
          is_mobile_optimized == other.is_mobile_optimized &&
+         delegated_ink_metadata == other.delegated_ink_metadata &&
          device_scale_factor == other.device_scale_factor &&
          viewport_size_in_pixels == other.viewport_size_in_pixels &&
          page_scale_factor == other.page_scale_factor &&
          external_page_scale_factor == other.external_page_scale_factor &&
          top_controls_height == other.top_controls_height &&
          top_controls_shown_ratio == other.top_controls_shown_ratio &&
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
          bottom_controls_height == other.bottom_controls_height &&
          bottom_controls_shown_ratio == other.bottom_controls_shown_ratio &&
          top_controls_min_height_offset ==
@@ -49,8 +50,11 @@ bool RenderFrameMetadata::operator==(const RenderFrameMetadata& other) const {
          root_layer_size == other.root_layer_size &&
          has_transparent_background == other.has_transparent_background &&
 #endif
-         local_surface_id_allocation == other.local_surface_id_allocation &&
-         new_vertical_scroll_direction == other.new_vertical_scroll_direction;
+         tracked_element_rects == other.tracked_element_rects &&
+         local_surface_id == other.local_surface_id &&
+         new_vertical_scroll_direction == other.new_vertical_scroll_direction &&
+         primary_main_frame_item_sequence_number ==
+             other.primary_main_frame_item_sequence_number;
 }
 
 bool RenderFrameMetadata::operator!=(const RenderFrameMetadata& other) const {

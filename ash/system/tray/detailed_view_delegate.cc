@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,97 +6,19 @@
 
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/strings/grit/ash_strings.h"
-#include "ash/style/ash_color_provider.h"
-#include "ash/system/tray/hover_highlight_view.h"
-#include "ash/system/tray/tray_constants.h"
-#include "ash/system/tray/tray_popup_item_style.h"
+#include "ash/style/icon_button.h"
 #include "ash/system/tray/tray_popup_utils.h"
-#include "ash/system/unified/collapse_button.h"
-#include "ash/system/unified/top_shortcut_button.h"
 #include "ash/system/unified/unified_system_tray_controller.h"
 #include "components/vector_icons/vector_icons.h"
-#include "ui/base/l10n/l10n_util.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/vector_icon_types.h"
-#include "ui/views/border.h"
-#include "ui/views/controls/label.h"
-#include "ui/views/controls/separator.h"
-#include "ui/views/layout/box_layout.h"
 
 namespace ash {
 
-using ContentLayerType = AshColorProvider::ContentLayerType;
-using AshColorMode = AshColorProvider::AshColorMode;
-
 namespace {
 
-void ConfigureTitleTriView(TriView* tri_view, TriView::Container container) {
-  std::unique_ptr<views::BoxLayout> layout;
-
-  switch (container) {
-    case TriView::Container::START:
-      FALLTHROUGH;
-    case TriView::Container::END:
-      layout = std::make_unique<views::BoxLayout>(
-          views::BoxLayout::Orientation::kHorizontal, gfx::Insets(),
-          kUnifiedTopShortcutSpacing);
-      layout->set_main_axis_alignment(
-          views::BoxLayout::MainAxisAlignment::kCenter);
-      layout->set_cross_axis_alignment(
-          views::BoxLayout::CrossAxisAlignment::kCenter);
-      break;
-    case TriView::Container::CENTER:
-      tri_view->SetFlexForContainer(TriView::Container::CENTER, 1.f);
-
-      layout = std::make_unique<views::BoxLayout>(
-          views::BoxLayout::Orientation::kVertical);
-      layout->set_main_axis_alignment(
-          views::BoxLayout::MainAxisAlignment::kCenter);
-      layout->set_cross_axis_alignment(
-          views::BoxLayout::CrossAxisAlignment::kStretch);
-      break;
-  }
-
-  tri_view->SetContainerLayout(container, std::move(layout));
-  tri_view->SetMinSize(container,
-                       gfx::Size(0, kUnifiedDetailedViewTitleRowHeight));
-}
-
-class BackButton : public CustomShapeButton {
- public:
-  BackButton(views::ButtonListener* listener) : CustomShapeButton(listener) {
-    gfx::ImageSkia image =
-        gfx::CreateVectorIcon(kUnifiedMenuArrowBackIcon,
-                              AshColorProvider::Get()->GetContentLayerColor(
-                                  ContentLayerType::kIconColorPrimary));
-    SetImage(views::Button::STATE_NORMAL, image);
-    SetImageHorizontalAlignment(ALIGN_RIGHT);
-    SetImageVerticalAlignment(ALIGN_MIDDLE);
-    SetTooltipText(
-        l10n_util::GetStringUTF16(IDS_ASH_STATUS_TRAY_PREVIOUS_MENU));
-    SetBorder(views::CreateEmptyBorder(
-        gfx::Insets((kTrayItemSize - image.width()) / 2)));
-  }
-
-  ~BackButton() override = default;
-
-  // CustomShapeButton:
-  gfx::Size CalculatePreferredSize() const override {
-    return gfx::Size(kTrayItemSize * 3 / 2, kTrayItemSize);
-  }
-
-  SkPath CreateCustomShapePath(const gfx::Rect& bounds) const override {
-    SkPath path;
-    SkScalar bottom_radius = SkIntToScalar(kTrayItemSize / 2);
-    SkScalar radii[8] = {
-        0, 0, bottom_radius, bottom_radius, bottom_radius, bottom_radius, 0, 0};
-    path.addRoundRect(gfx::RectToSkRect(bounds), radii);
-    return path;
-  }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(BackButton);
-};
+// The scroll view's top is flush against the header.
+constexpr auto kQsScrollViewMargin = gfx::Insets::TLBR(0, 16, 16, 16);
 
 }  // namespace
 
@@ -107,123 +29,64 @@ DetailedViewDelegate::DetailedViewDelegate(
 DetailedViewDelegate::~DetailedViewDelegate() = default;
 
 void DetailedViewDelegate::TransitionToMainView(bool restore_focus) {
+  if (!tray_controller_) {
+    return;
+  }
   tray_controller_->TransitionToMainView(restore_focus);
 }
 
 void DetailedViewDelegate::CloseBubble() {
+  if (!tray_controller_) {
+    return;
+  }
   tray_controller_->CloseBubble();
 }
 
-base::Optional<SkColor> DetailedViewDelegate::GetBackgroundColor() {
-  return base::nullopt;
+gfx::Insets DetailedViewDelegate::GetScrollViewMargin() const {
+  return kQsScrollViewMargin;
 }
 
-bool DetailedViewDelegate::IsOverflowIndicatorEnabled() const {
-  return false;
-}
-
-TriView* DetailedViewDelegate::CreateTitleRow(int string_id) {
-  auto* tri_view = new TriView(kUnifiedTopShortcutSpacing);
-
-  ConfigureTitleTriView(tri_view, TriView::Container::START);
-  ConfigureTitleTriView(tri_view, TriView::Container::CENTER);
-  ConfigureTitleTriView(tri_view, TriView::Container::END);
-
-  auto* label = TrayPopupUtils::CreateDefaultLabel();
-  label->SetText(l10n_util::GetStringUTF16(string_id));
-  TrayPopupItemStyle style(TrayPopupItemStyle::FontStyle::TITLE,
-                           true /* use_unified_theme */);
-  style.SetupLabel(label);
-  tri_view->AddView(TriView::Container::CENTER, label);
-
-  tri_view->SetContainerVisible(TriView::Container::END, false);
-  tri_view->SetBorder(
-      views::CreateEmptyBorder(kUnifiedDetailedViewTitlePadding));
-
-  return tri_view;
-}
-
-views::View* DetailedViewDelegate::CreateTitleSeparator() {
-  views::Separator* separator = new views::Separator();
-  separator->SetColor(AshColorProvider::Get()->GetContentLayerColor(
-      ContentLayerType::kSeparatorColor));
-  separator->SetBorder(views::CreateEmptyBorder(
-      kTitleRowProgressBarHeight - views::Separator::kThickness, 0, 0, 0));
-  return separator;
-}
-
-void DetailedViewDelegate::ShowStickyHeaderSeparator(views::View* view,
-                                                     bool show_separator) {
-  if (show_separator) {
-    view->SetBorder(views::CreatePaddedBorder(
-        views::CreateSolidSidedBorder(
-            0, 0, kTraySeparatorWidth, 0,
-            AshColorProvider::Get()->GetContentLayerColor(
-                ContentLayerType::kSeparatorColor)),
-        gfx::Insets(kMenuSeparatorVerticalPadding, 0,
-                    kMenuSeparatorVerticalPadding - kTraySeparatorWidth, 0)));
-  } else {
-    view->SetBorder(views::CreateEmptyBorder(
-        gfx::Insets(kMenuSeparatorVerticalPadding, 0)));
-  }
-  view->SchedulePaint();
-}
-
-views::Separator* DetailedViewDelegate::CreateListSubHeaderSeparator() {
-  views::Separator* separator = new views::Separator();
-  separator->SetColor(AshColorProvider::Get()->GetContentLayerColor(
-      ContentLayerType::kSeparatorColor));
-  separator->SetBorder(views::CreateEmptyBorder(
-      kMenuSeparatorVerticalPadding - views::Separator::kThickness, 0, 0, 0));
-  return separator;
-}
-
-HoverHighlightView* DetailedViewDelegate::CreateScrollListItem(
-    ViewClickListener* listener,
-    const gfx::VectorIcon& icon,
-    const base::string16& text) {
-  HoverHighlightView* item =
-      new HoverHighlightView(listener, true /* use_unified_theme */);
-  if (icon.is_empty())
-    item->AddLabelRow(text);
-  else
-    item->AddIconAndLabel(
-        gfx::CreateVectorIcon(icon,
-                              AshColorProvider::Get()->GetContentLayerColor(
-                                  ContentLayerType::kIconColorPrimary)),
-        text);
-  return item;
-}
-
+// TODO(b/253091169): Refactor the following creating buttons methods to return
+// unique pointers.
 views::Button* DetailedViewDelegate::CreateBackButton(
-    views::ButtonListener* listener) {
-  return new BackButton(listener);
+    views::Button::PressedCallback callback) {
+  return new IconButton(std::move(callback), IconButton::Type::kMedium,
+                        &kQuickSettingsLeftArrowIcon,
+                        IDS_ASH_STATUS_TRAY_PREVIOUS_MENU);
 }
 
 views::Button* DetailedViewDelegate::CreateInfoButton(
-    views::ButtonListener* listener,
+    views::Button::PressedCallback callback,
     int info_accessible_name_id) {
-  return new TopShortcutButton(listener, kUnifiedMenuInfoIcon,
-                               info_accessible_name_id);
+  return new IconButton(std::move(callback), IconButton::Type::kMedium,
+                        &kUnifiedMenuInfoIcon, info_accessible_name_id);
 }
 
 views::Button* DetailedViewDelegate::CreateSettingsButton(
-    views::ButtonListener* listener,
+    views::Button::PressedCallback callback,
     int setting_accessible_name_id) {
-  auto* button = new TopShortcutButton(listener, kUnifiedMenuSettingsIcon,
-                                       setting_accessible_name_id);
-  if (!TrayPopupUtils::CanOpenWebUISettings())
+  auto* button = new IconButton(std::move(callback), IconButton::Type::kMedium,
+                                &(::features::IsRoundedIconsEnabled()
+                                      ? vector_icons::kSettingsIcon
+                                      : vector_icons::kSettingsOutlineOldIcon),
+                                setting_accessible_name_id);
+  if (!TrayPopupUtils::CanOpenWebUISettings()) {
     button->SetEnabled(false);
+  }
   return button;
 }
 
 views::Button* DetailedViewDelegate::CreateHelpButton(
-    views::ButtonListener* listener) {
-  auto* button = new TopShortcutButton(listener, vector_icons::kHelpOutlineIcon,
-                                       IDS_ASH_STATUS_TRAY_HELP);
+    views::Button::PressedCallback callback) {
+  auto* button = new IconButton(std::move(callback), IconButton::Type::kMedium,
+                                &(::features::IsRoundedIconsEnabled()
+                                      ? vector_icons::kHelpIcon
+                                      : vector_icons::kHelpOutlineOldIcon),
+                                IDS_ASH_STATUS_TRAY_HELP);
   // Help opens a web page, so treat it like Web UI settings.
-  if (!TrayPopupUtils::CanOpenWebUISettings())
+  if (!TrayPopupUtils::CanOpenWebUISettings()) {
     button->SetEnabled(false);
+  }
   return button;
 }
 

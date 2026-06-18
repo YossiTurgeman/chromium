@@ -1,9 +1,4 @@
-# Primary
-dmurph@chromium.org
-mek@chromium.org
+file://storage/OWNERS
 
-# Secondary
-pwnall@chromium.org
-
-# TEAM: storage-dev@chromium.org
-# COMPONENT: Blink>Storage>DOMStorage
+stevebe@microsoft.com
+arichiv@chromium.org #{LAST_RESORT_SUGGESTION}

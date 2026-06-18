@@ -36,23 +36,31 @@ class LayoutSVGPath final : public LayoutSVGShape {
   ~LayoutSVGPath() override;
 
   const Vector<MarkerPosition>* MarkerPositions() const override {
+    NOT_DESTROYED();
     return &marker_positions_;
   }
 
-  const char* GetName() const override { return "LayoutSVGPath"; }
+  const char* GetName() const override {
+    NOT_DESTROYED();
+    return "LayoutSVGPath";
+  }
 
  private:
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const StyleChangeContext&) override;
   void WillBeDestroyed() override;
 
-  void UpdateShapeFromElement() override;
+  bool CalculateGeometryDependsOnViewport() const;
+  gfx::RectF UpdateShapeFromElement() override;
 
   const StylePath* GetStylePath() const;
-  void UpdateMarkers();
+  void UpdateMarkerPositions();
+  void UpdateMarkerBounds() override;
 
   Vector<MarkerPosition> marker_positions_;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_PATH_H_

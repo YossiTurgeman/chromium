@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,13 @@
 #include <utility>
 
 #include "base/lazy_instance.h"
+#include "base/logging.h"
 #include "base/memory/scoped_refptr.h"
 #include "build/build_config.h"
+#include "build/chromeos_buildflags.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/extensions/api/image_writer_private/destroy_partitions_operation.h"
-#include "chrome/browser/extensions/api/image_writer_private/error_messages.h"
+#include "chrome/browser/extensions/api/image_writer_private/error_constants.h"
 #include "chrome/browser/extensions/api/image_writer_private/operation.h"
 #include "chrome/browser/extensions/api/image_writer_private/write_from_file_operation.h"
 #include "chrome/browser/extensions/api/image_writer_private/write_from_url_operation.h"
@@ -19,15 +21,15 @@
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/notification_service.h"
 #include "content/public/browser/storage_partition.h"
+#include "extensions/browser/api/extensions_api_client.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/extension_host.h"
-#include "extensions/browser/notification_types.h"
+#include "extensions/common/extension_id.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 
-#if defined(OS_CHROMEOS)
-#include "chrome/browser/chromeos/file_manager/path_util.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/ash/file_manager/path_util.h"
 #endif
 
 namespace image_writer_api = extensions::api::image_writer_private;
@@ -39,25 +41,16 @@ using content::BrowserThread;
 
 OperationManager::OperationManager(content::BrowserContext* context)
     : browser_context_(context) {
-  extension_registry_observer_.Add(ExtensionRegistry::Get(browser_context_));
-  Profile* profile = Profile::FromBrowserContext(browser_context_);
-  registrar_.Add(this,
-                 extensions::NOTIFICATION_EXTENSION_PROCESS_TERMINATED,
-                 content::Source<Profile>(profile));
-  registrar_.Add(this,
-                 extensions::NOTIFICATION_EXTENSION_HOST_VIEW_SHOULD_CLOSE,
-                 content::Source<Profile>(profile));
-  registrar_.Add(this,
-                 extensions::NOTIFICATION_EXTENSION_HOST_DESTROYED,
-                 content::Source<Profile>(profile));
+  extension_registry_observation_.Observe(
+      ExtensionRegistry::Get(browser_context_));
+  process_manager_observation_.Observe(ProcessManager::Get(browser_context_));
 }
 
-OperationManager::~OperationManager() {
-}
+OperationManager::~OperationManager() = default;
 
 void OperationManager::Shutdown() {
-  for (auto iter = operations_.begin(); iter != operations_.end(); iter++) {
-    scoped_refptr<Operation> operation = iter->second;
+  for (auto& id_and_operation : operations_) {
+    scoped_refptr<Operation> operation = id_and_operation.second;
     operation->PostTask(base::BindOnce(&Operation::Abort, operation));
   }
 }
@@ -68,7 +61,7 @@ void OperationManager::StartWriteFromUrl(
     const std::string& hash,
     const std::string& device_path,
     Operation::StartWriteCallback callback) {
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   // Chrome OS can only support a single operation at a time.
   if (operations_.size() > 0) {
 #else
@@ -83,7 +76,7 @@ void OperationManager::StartWriteFromUrl(
 
   mojo::PendingRemote<network::mojom::URLLoaderFactory>
       url_loader_factory_remote;
-  content::BrowserContext::GetDefaultStoragePartition(browser_context_)
+  browser_context_->GetDefaultStoragePartition()
       ->GetURLLoaderFactoryForBrowserProcess()
       ->Clone(url_loader_factory_remote.InitWithNewPipeAndPassReceiver());
 
@@ -102,7 +95,7 @@ void OperationManager::StartWriteFromFile(
     const base::FilePath& path,
     const std::string& device_path,
     Operation::StartWriteCallback callback) {
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   // Chrome OS can only support a single operation at a time.
   if (operations_.size() > 0) {
 #else
@@ -126,7 +119,7 @@ void OperationManager::CancelWrite(const ExtensionId& extension_id,
                                    Operation::CancelWriteCallback callback) {
   Operation* existing_operation = GetOperation(extension_id);
 
-  if (existing_operation == NULL) {
+  if (existing_operation == nullptr) {
     std::move(callback).Run(false, error::kNoOperationInProgress);
   } else {
     existing_operation->PostTask(
@@ -164,8 +157,7 @@ void OperationManager::OnProgress(const ExtensionId& extension_id,
   info.stage = stage;
   info.percent_complete = progress;
 
-  std::unique_ptr<base::ListValue> args(
-      image_writer_api::OnWriteProgress::Create(info));
+  auto args(image_writer_api::OnWriteProgress::Create(info));
   std::unique_ptr<Event> event(new Event(
       events::IMAGE_WRITER_PRIVATE_ON_WRITE_PROGRESS,
       image_writer_api::OnWriteProgress::kEventName, std::move(args)));
@@ -177,8 +169,7 @@ void OperationManager::OnProgress(const ExtensionId& extension_id,
 void OperationManager::OnComplete(const ExtensionId& extension_id) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
-  std::unique_ptr<base::ListValue> args(
-      image_writer_api::OnWriteComplete::Create());
+  auto args(image_writer_api::OnWriteComplete::Create());
   std::unique_ptr<Event> event(new Event(
       events::IMAGE_WRITER_PRIVATE_ON_WRITE_COMPLETE,
       image_writer_api::OnWriteComplete::kEventName, std::move(args)));
@@ -201,8 +192,7 @@ void OperationManager::OnError(const ExtensionId& extension_id,
   info.stage = stage;
   info.percent_complete = progress;
 
-  std::unique_ptr<base::ListValue> args(
-      image_writer_api::OnWriteError::Create(info, error_message));
+  auto args(image_writer_api::OnWriteError::Create(info, error_message));
   std::unique_ptr<Event> event(
       new Event(events::IMAGE_WRITER_PRIVATE_ON_WRITE_ERROR,
                 image_writer_api::OnWriteError::kEventName, std::move(args)));
@@ -214,18 +204,20 @@ void OperationManager::OnError(const ExtensionId& extension_id,
 }
 
 base::FilePath OperationManager::GetAssociatedDownloadFolder() {
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
   Profile* profile = Profile::FromBrowserContext(browser_context_);
   return file_manager::util::GetDownloadsFolderForProfile(profile);
-#endif
+#else
   return base::FilePath();
+#endif
 }
 
 Operation* OperationManager::GetOperation(const ExtensionId& extension_id) {
   auto existing_operation = operations_.find(extension_id);
 
-  if (existing_operation == operations_.end())
-    return NULL;
+  if (existing_operation == operations_.end()) {
+    return nullptr;
+  }
   return existing_operation->second.get();
 }
 
@@ -243,27 +235,23 @@ void OperationManager::OnExtensionUnloaded(
   DeleteOperation(extension->id());
 }
 
-void OperationManager::Observe(int type,
-                               const content::NotificationSource& source,
-                               const content::NotificationDetails& details) {
-  switch (type) {
-    case extensions::NOTIFICATION_EXTENSION_PROCESS_TERMINATED: {
-      DeleteOperation(content::Details<const Extension>(details).ptr()->id());
-      break;
-    }
-    case extensions::NOTIFICATION_EXTENSION_HOST_VIEW_SHOULD_CLOSE:
-      // Intentional fall-through.
-    case extensions::NOTIFICATION_EXTENSION_HOST_DESTROYED:
-      // Note: |ExtensionHost::extension()| can be null if the extension was
-      // already unloaded, use ExtensionHost::extension_id() instead.
-      DeleteOperation(
-          content::Details<ExtensionHost>(details)->extension_id());
-      break;
-    default: {
-      NOTREACHED();
-      break;
-    }
-  }
+void OperationManager::OnShutdown(ExtensionRegistry* registry) {
+  DCHECK(extension_registry_observation_.IsObservingSource(registry));
+  extension_registry_observation_.Reset();
+}
+
+void OperationManager::OnBackgroundHostClose(const ExtensionId& extension_id) {
+  DeleteOperation(extension_id);
+}
+
+void OperationManager::OnProcessManagerShutdown(ProcessManager* manager) {
+  DCHECK(process_manager_observation_.IsObservingSource(manager));
+  process_manager_observation_.Reset();
+}
+
+void OperationManager::OnExtensionProcessTerminated(
+    const Extension* extension) {
+  DeleteOperation(extension->id());
 }
 
 OperationManager* OperationManager::Get(content::BrowserContext* context) {
@@ -277,7 +265,6 @@ BrowserContextKeyedAPIFactory<OperationManager>*
 OperationManager::GetFactoryInstance() {
   return g_operation_manager_factory.Pointer();
 }
-
 
 }  // namespace image_writer
 }  // namespace extensions

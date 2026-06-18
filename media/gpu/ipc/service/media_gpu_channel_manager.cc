@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,12 @@
 
 #include "gpu/ipc/service/gpu_channel.h"
 #include "gpu/ipc/service/gpu_channel_manager.h"
-#include "ipc/ipc_message_macros.h"
-#include "ipc/param_traits_macros.h"
-#include "media/gpu/ipc/service/gpu_video_decode_accelerator.h"
+#include "media/base/media_switches.h"
 #include "media/gpu/ipc/service/media_gpu_channel.h"
+
+#if BUILDFLAG(IS_WIN)
+#include "media/gpu/windows/d3d12_helpers.h"
+#endif
 
 namespace media {
 
@@ -22,13 +24,13 @@ MediaGpuChannelManager::MediaGpuChannelManager(
 
 MediaGpuChannelManager::~MediaGpuChannelManager() = default;
 
-void MediaGpuChannelManager::AddChannel(int32_t client_id) {
+void MediaGpuChannelManager::AddChannel(
+    int32_t client_id,
+    const base::UnguessableToken& channel_token) {
   gpu::GpuChannel* gpu_channel = channel_manager_->LookupChannel(client_id);
   DCHECK(gpu_channel);
-  base::UnguessableToken channel_token = base::UnguessableToken::Create();
-  std::unique_ptr<MediaGpuChannel> media_gpu_channel(
-      new MediaGpuChannel(gpu_channel, channel_token, overlay_factory_cb_));
-  gpu_channel->SetUnhandledMessageListener(media_gpu_channel.get());
+  auto media_gpu_channel =
+      std::make_unique<MediaGpuChannel>(gpu_channel, overlay_factory_cb_);
   media_gpu_channels_[client_id] = std::move(media_gpu_channel);
   channel_to_token_[client_id] = channel_token;
   token_to_channel_[channel_token] = client_id;
@@ -64,6 +66,13 @@ void MediaGpuChannelManager::SetOverlayFactory(
 
 AndroidOverlayMojoFactoryCB MediaGpuChannelManager::GetOverlayFactory() {
   return overlay_factory_cb_;
+}
+
+scoped_refptr<gpu::SharedContextState>
+MediaGpuChannelManager::GetSharedContextState() {
+  // FIXME: Should we be checking `result` == SUCCESS?
+  gpu::ContextResult result;
+  return channel_manager_->GetSharedContextState(&result);
 }
 
 }  // namespace media

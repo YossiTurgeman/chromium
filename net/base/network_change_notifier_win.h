@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,16 @@
 
 #include <windows.h>
 
-#include <memory>
+#include <atomic>
+#include <optional>
 
-#include "base/callback.h"
 #include "base/compiler_specific.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
+#include "base/thread_annotations.h"
+#include "base/threading/sequence_bound.h"
 #include "base/timer/timer.h"
 #include "base/win/object_watcher.h"
 #include "net/base/net_export.h"
@@ -26,6 +28,9 @@ class SequencedTaskRunner;
 
 namespace net {
 
+class NetworkCostChangeNotifierWin;
+class SystemDnsConfigChangeNotifier;
+
 // NetworkChangeNotifierWin uses a SequenceChecker, as all its internal
 // notification code must be called on the sequence it is created and destroyed
 // on.  All the NetworkChangeNotifier methods it implements are threadsafe.
@@ -33,7 +38,14 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
     : public NetworkChangeNotifier,
       public base::win::ObjectWatcher::Delegate {
  public:
+  // The number of NetworkList polls, each 1 second apart, to perform on each
+  // network change. The is 21 rather than 20 to be consistent with older
+  // versions of the code.
+  static constexpr int kNumPollsOnAddressChange = 21;
+
   NetworkChangeNotifierWin();
+  NetworkChangeNotifierWin(const NetworkChangeNotifierWin&) = delete;
+  NetworkChangeNotifierWin& operator=(const NetworkChangeNotifierWin&) = delete;
   ~NetworkChangeNotifierWin() override;
 
   // Begins listening for a single subsequent address change.  If it fails to
@@ -45,25 +57,42 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
   //               unit tested in similar fashion, as needed.
   void WatchForAddressChange();
 
+  void set_last_announced_offline_for_testing(bool last_announced_offline) {
+    last_announced_offline_ = last_announced_offline;
+  }
+
  protected:
+  // Constructor for tests that provides a custom SystemDnsConfigChangeNotifier
+  // to avoid using the process-wide singleton (which creates a
+  // PooledSequencedTaskRunner that becomes stale across TaskEnvironments).
+  explicit NetworkChangeNotifierWin(
+      SystemDnsConfigChangeNotifier* dns_config_notifier);
+
   // For unit tests only.
-  bool is_watching() { return is_watching_; }
+  bool is_watching() const { return is_watching_; }
   void set_is_watching(bool is_watching) { is_watching_ = is_watching; }
-  int sequential_failures() { return sequential_failures_; }
+  int sequential_failures() const { return sequential_failures_; }
 
  private:
   friend class NetworkChangeNotifierWinTest;
   friend class TestNetworkChangeNotifierWin;
 
   // NetworkChangeNotifier methods:
+  ConnectionCost GetCurrentConnectionCost() override;
+
   ConnectionType GetCurrentConnectionType() const override;
 
   // ObjectWatcher::Delegate methods:
   // Must only be called on the sequence |this| was created on.
   void OnObjectSignaled(HANDLE object) override;
 
-  // Does the actual work to determine the current connection type.
-  // It is not thread safe, see crbug.com/324913.
+  // Recompute the current connection type on newer versions of Windows (Win10
+  // Build 19041 and above).
+  static ConnectionType RecomputeCurrentConnectionTypeModern();
+
+  // Does the actual work to determine the current connection type. This will
+  // call into RecomputeCurrentConnectionTypeModern on modern OS. It is not
+  // thread safe, see crbug.com/324913.
   static ConnectionType RecomputeCurrentConnectionType();
 
   // Calls RecomputeCurrentConnectionTypeImpl on the DNS sequence and runs
@@ -78,9 +107,28 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
   // sequence |this| was created on.
   void NotifyObservers(ConnectionType connection_type);
 
-  // Forwards connection type notifications to parent class.
-  void NotifyParentOfConnectionTypeChange();
-  void NotifyParentOfConnectionTypeChangeImpl(ConnectionType connection_type);
+  // Called with a delay whenever the connection type changes. Starts polling
+  // the connection type for 21 seconds, and forwards connection type
+  // notifications to parent class, if needed.
+  //
+  // Polling is needed because the platform API that we listen to connection
+  // change notification (NotifyAddrChange()) can be received well before the
+  // change has affected the results of polling the platform for a list of
+  // network adapters. Historically, this was only an issue for spinning up new
+  // network connections, but more recently, it seems to be an issue when
+  // connections are being shut down as well.
+  //
+  // `last_notified_connection_type_for_event` connection type is the most
+  // recent type ConnectionTypeChanged notification sent as a result of the most
+  // recently observed NotifyObservers() call. It is nullopt if no such
+  // notification has been sent yet.
+  void PollConnectionType(
+      std::optional<ConnectionType> last_notified_connection_type_for_event,
+      int num_polls_completed);
+  void OnConnectionTypePolled(
+      std::optional<ConnectionType> last_notified_connection_type_for_event,
+      int num_polls_completed,
+      ConnectionType connection_type);
 
   // Tries to start listening for a single subsequent address change.  Returns
   // false on failure.  The caller is responsible for updating |is_watching_|.
@@ -90,13 +138,15 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
 
   static NetworkChangeCalculatorParams NetworkChangeCalculatorParamsWin();
 
+  void OnCostChanged(NetworkChangeNotifier::ConnectionCost new_cost);
+
   // All member variables may only be accessed on the sequence |this| was
   // created on.
 
   // False when not currently watching for network change events.  This only
   // happens on initialization and when WatchForAddressChangeInternal fails and
   // there is a pending task to try again.  Needed for safe cleanup.
-  bool is_watching_;
+  bool is_watching_ = false;
 
   base::win::ObjectWatcher addr_watcher_;
   OVERLAPPED addr_overlapped_;
@@ -104,25 +154,42 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
   base::OneShotTimer timer_;
 
   // Number of times WatchForAddressChange has failed in a row.
-  int sequential_failures_;
+  int sequential_failures_ = 0;
+
+  // Whether the initial connection type has been computed asynchronously.
+  // The constructor defers this computation to WatchForAddressChange() to
+  // avoid a synchronous cross-process call that blocks startup. Until the
+  // async computation completes, GetCurrentConnectionType() returns
+  // CONNECTION_UNKNOWN.
+  bool initial_connection_type_initialized_ = false;
 
   scoped_refptr<base::SequencedTaskRunner> blocking_task_runner_;
 
   mutable base::Lock last_computed_connection_type_lock_;
-  ConnectionType last_computed_connection_type_;
+  ConnectionType last_computed_connection_type_
+      GUARDED_BY(last_computed_connection_type_lock_);
+
+  std::atomic<NetworkChangeNotifier::ConnectionCost>
+      last_computed_connection_cost_ =
+          NetworkChangeNotifier::ConnectionCost::CONNECTION_COST_UNKNOWN;
+
+  // Provides the cost of the current connection.  Uses the Windows OS APIs to
+  // monitor and determine cost.
+  base::SequenceBound<NetworkCostChangeNotifierWin> cost_change_notifier_;
 
   // Result of IsOffline() when NotifyObserversOfConnectionTypeChange()
   // was last called.
   bool last_announced_offline_;
-  // Number of times polled to check if still offline.
-  int offline_polls_;
+
+  // Used to ensure that all registration actions are properly sequenced on the
+  // same thread regardless of which thread was used to call into the
+  // NetworkChangeNotifier API.
+  scoped_refptr<base::SequencedTaskRunner> sequence_runner_for_registration_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 
   // Used for calling WatchForAddressChange again on failure.
   base::WeakPtrFactory<NetworkChangeNotifierWin> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(NetworkChangeNotifierWin);
 };
 
 }  // namespace net

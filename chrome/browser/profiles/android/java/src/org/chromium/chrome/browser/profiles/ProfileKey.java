@@ -1,57 +1,70 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.profiles;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.NativeMethods;
 
-/**
- * Wrapper that allows passing a ProfileKey reference around in the Java layer.
- */
-public class ProfileKey {
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.components.embedder_support.simple_factory_key.SimpleFactoryKeyHandle;
+
+/** Wrapper that allows passing a ProfileKey reference around in the Java layer. */
+@NullMarked
+public class ProfileKey implements SimpleFactoryKeyHandle {
     /** Whether this wrapper corresponds to an off the record ProfileKey. */
     private final boolean mIsOffTheRecord;
 
     /** Pointer to the Native-side ProfileKey. */
     private long mNativeProfileKeyAndroid;
 
-    private ProfileKey(long nativeProfileKeyAndroid) {
+    private long mNativeSimpleFactoryKey;
+
+    private ProfileKey(long nativeProfileKeyAndroid, long nativeSimpleFactoryKey) {
         mNativeProfileKeyAndroid = nativeProfileKeyAndroid;
-        mIsOffTheRecord =
-                ProfileKeyJni.get().isOffTheRecord(mNativeProfileKeyAndroid, ProfileKey.this);
+        mNativeSimpleFactoryKey = nativeSimpleFactoryKey;
+        mIsOffTheRecord = ProfileKeyJni.get().isOffTheRecord(mNativeProfileKeyAndroid);
     }
 
     /**
-     * Returns the regular (i.e., not off-the-record) profile key.
-     *
-     * Note: The function name uses the "last used" terminology for consistency with
-     * profile_manager.cc which supports multiple regular profiles.
+     * Handles type conversion of Java side {@link SimpleFactoryKeyHandle} to {@link ProfileKey}.
+     * @param simpleFactoryKeyHandle Java reference to native SimpleFactoryKey.
+     * @return A strongly typed reference the {@link ProfileKey}.
      */
-    public static ProfileKey getLastUsedRegularProfileKey() {
-        // TODO(mheikal): Assert at least reduced mode is started when https://crbug.com/973241 is
-        // fixed.
-        return (ProfileKey) ProfileKeyJni.get().getLastUsedRegularProfileKey();
+    public static ProfileKey fromSimpleFactoryKeyHandle(
+            SimpleFactoryKeyHandle simpleFactoryKeyHandle) {
+        return (ProfileKey) simpleFactoryKeyHandle;
     }
 
+    /**
+     * @return The original (not off the record) profile key.
+     */
     public ProfileKey getOriginalKey() {
-        return (ProfileKey) ProfileKeyJni.get().getOriginalKey(
-                mNativeProfileKeyAndroid, ProfileKey.this);
+        return ProfileKeyJni.get().getOriginalKey(mNativeProfileKeyAndroid);
     }
 
+    /**
+     * @return Whether this profile is off the record and should avoid writing to durable records.
+     */
     public boolean isOffTheRecord() {
         return mIsOffTheRecord;
     }
 
+    @Override
+    public long getNativeSimpleFactoryKeyPointer() {
+        return mNativeSimpleFactoryKey;
+    }
+
     @CalledByNative
-    private static ProfileKey create(long nativeProfileKeyAndroid) {
-        return new ProfileKey(nativeProfileKeyAndroid);
+    private static ProfileKey create(long nativeProfileKeyAndroid, long nativeSimpleFactoryKey) {
+        return new ProfileKey(nativeProfileKeyAndroid, nativeSimpleFactoryKey);
     }
 
     @CalledByNative
     private void onNativeDestroyed() {
         mNativeProfileKeyAndroid = 0;
+        mNativeSimpleFactoryKey = 0;
     }
 
     @CalledByNative
@@ -61,8 +74,8 @@ public class ProfileKey {
 
     @NativeMethods
     interface Natives {
-        Object getLastUsedRegularProfileKey();
-        Object getOriginalKey(long nativeProfileKeyAndroid, ProfileKey caller);
-        boolean isOffTheRecord(long nativeProfileKeyAndroid, ProfileKey caller);
+        ProfileKey getOriginalKey(long nativeProfileKeyAndroid);
+
+        boolean isOffTheRecord(long nativeProfileKeyAndroid);
     }
 }

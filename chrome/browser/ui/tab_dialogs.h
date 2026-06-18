@@ -1,19 +1,18 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_TAB_DIALOGS_H_
 #define CHROME_BROWSER_UI_TAB_DIALOGS_H_
 
-#include <memory>
-#include <string>
+#include <set>
 
-#include "base/callback_forward.h"
+#include "base/functional/callback_forward.h"
 #include "base/supports_user_data.h"
-#include "ui/gfx/native_widget_types.h"
+#include "extensions/common/extension_id.h"
+#include "ui/gfx/native_ui_types.h"
 
 class Browser;
-class Profile;
 
 namespace content {
 class RenderWidgetHost;
@@ -27,7 +26,7 @@ class ProfileSigninConfirmationDelegate;
 // A cross-platform interface for invoking various tab modal dialogs/bubbles.
 class TabDialogs : public base::SupportsUserData::Data {
  public:
-  ~TabDialogs() override {}
+  ~TabDialogs() override = default;
 
   // Creates a platform specific instance, and attaches it to |contents|.
   // If an instance is already attached, does nothing.
@@ -51,12 +50,21 @@ class TabDialogs : public base::SupportsUserData::Data {
       content::RenderWidgetHost* render_widget_host) = 0;
   virtual bool IsShowingHungRendererDialog() = 0;
 
-  // Shows a dialog asking the user to confirm linking to a managed account.
-  virtual void ShowProfileSigninConfirmation(
-      Browser* browser,
-      Profile* profile,
-      const std::string& username,
-      std::unique_ptr<ui::ProfileSigninConfirmationDelegate> delegate) = 0;
+  // Shows the deprecated app dialog.
+  virtual void ShowDeprecatedAppsDialog(
+      const extensions::ExtensionId& optional_launched_extension_id,
+      const std::set<extensions::ExtensionId>& deprecated_app_ids,
+      content::WebContents* web_contents) = 0;
+
+  // Shows the force installed and deprecated app dialog.
+  virtual void ShowForceInstalledDeprecatedAppsDialog(
+      const extensions::ExtensionId& app_id,
+      content::WebContents* web_contents) = 0;
+
+  // Shows the force installed and deprecated app dialog.
+  virtual void ShowForceInstalledPreinstalledDeprecatedAppDialog(
+      const extensions::ExtensionId& extension_id,
+      content::WebContents* web_contents) = 0;
 
   // Shows or hides the ManagePasswords bubble.
   // Pass true for |user_action| if this is a user initiated action.

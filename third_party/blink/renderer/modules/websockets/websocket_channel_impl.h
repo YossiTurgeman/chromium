@@ -32,30 +32,45 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBSOCKETS_WEBSOCKET_CHANNEL_IMPL_H_
 
 #include <stdint.h>
+
+#include <limits>
 #include <memory>
 #include <utility>
+
+#include "base/containers/heap_array.h"
 #include "base/containers/span.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/system/simple_watcher.h"
 #include "services/network/public/mojom/websocket.mojom-blink.h"
 #include "third_party/blink/public/mojom/websockets/websocket_connector.mojom-blink-forward.h"
-#include "third_party/blink/renderer/bindings/core/v8/source_location.h"
 #include "third_party/blink/renderer/core/fileapi/blob.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/modules/websockets/websocket_channel.h"
 #include "third_party/blink/renderer/modules/websockets/websocket_message_chunk_accumulator.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/bindings/source_location.h"
+#include "third_party/blink/renderer/platform/bindings/v8_external_memory_accounter.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/prefinalizer.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_receiver.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_wrapper_mode.h"
 #include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/deque.h"
+#include "third_party/blink/renderer/platform/wtf/gc_plugin.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
+
+namespace v8 {
+class Isolate;
+}  // namespace v8
 
 namespace blink {
 
@@ -74,47 +89,59 @@ class MODULES_EXPORT WebSocketChannelImpl final
   USING_PRE_FINALIZER(WebSocketChannelImpl, Dispose);
 
  public:
+  using MessageTypeForMojo = network::mojom::blink::WebSocketMessageType;
+
+  // Public for use in tests.
+  static constexpr size_t kMaxWebSocketsPerRenderProcess = 255u;
+
   // You can specify the source file and the line number information
   // explicitly by passing the last parameter.
   // In the usual case, they are set automatically and you don't have to
   // pass it.
   static WebSocketChannelImpl* Create(ExecutionContext* context,
                                       WebSocketChannelClient* client,
-                                      std::unique_ptr<SourceLocation> location);
+                                      SourceLocation* location);
   static WebSocketChannelImpl* CreateForTesting(
       ExecutionContext*,
       WebSocketChannelClient*,
-      std::unique_ptr<SourceLocation>,
+      SourceLocation*,
       std::unique_ptr<WebSocketHandshakeThrottle>);
 
   WebSocketChannelImpl(ExecutionContext*,
                        WebSocketChannelClient*,
-                       std::unique_ptr<SourceLocation>);
+                       SourceLocation*);
   ~WebSocketChannelImpl() override;
 
   // WebSocketChannel functions.
   bool Connect(const KURL&, const String& protocol) override;
-  SendResult Send(const std::string& message,
-                  base::OnceClosure completion_callback) override;
-  SendResult Send(const DOMArrayBuffer&,
-                  size_t byte_offset,
-                  size_t byte_length,
-                  base::OnceClosure completion_callback) override;
+  void Send(const std::string& message,
+            std::unique_ptr<SendCompletionWatcher>) override;
+  void Send(const DOMArrayBuffer&,
+            size_t byte_offset,
+            size_t byte_length,
+            std::unique_ptr<SendCompletionWatcher>) override;
   void Send(scoped_refptr<BlobDataHandle>) override;
   // Start closing handshake. Use the CloseEventCodeNotSpecified for the code
   // argument to omit payload.
   void Close(int code, const String& reason) override;
   void Fail(const String& reason,
             mojom::ConsoleMessageLevel,
-            std::unique_ptr<SourceLocation>) override;
+            SourceLocation*) override;
   void Disconnect() override;
   void CancelHandshake() override;
   void ApplyBackpressure() override;
   void RemoveBackpressure() override;
 
+  void SetMaxMessageSizeForTesting(size_t max_message_size) {
+    max_message_size_ = max_message_size;
+  }
+
   // network::mojom::blink::WebSocketHandshakeClient methods:
   void OnOpeningHandshakeStarted(
       network::mojom::blink::WebSocketHandshakeRequestPtr) override;
+  void OnFailure(const String& message,
+                 int net_error,
+                 int response_code) override;
   void OnConnectionEstablished(
       mojo::PendingRemote<network::mojom::blink::WebSocket> websocket,
       mojo::PendingReceiver<network::mojom::blink::WebSocketClient>
@@ -124,9 +151,7 @@ class MODULES_EXPORT WebSocketChannelImpl final
       mojo::ScopedDataPipeProducerHandle writable) override;
 
   // network::mojom::blink::WebSocketClient methods:
-  void OnDataFrame(bool fin,
-                   network::mojom::blink::WebSocketMessageType,
-                   uint64_t data_length) override;
+  void OnDataFrame(bool fin, MessageTypeForMojo, uint64_t data_length) override;
   void OnDropChannel(bool was_clean,
                      uint16_t code,
                      const String& reason) override;
@@ -136,15 +161,38 @@ class MODULES_EXPORT WebSocketChannelImpl final
 
  private:
   struct DataFrame final {
-    DataFrame(bool fin,
-              network::mojom::blink::WebSocketMessageType type,
-              uint32_t data_length)
+    DataFrame(bool fin, MessageTypeForMojo type, size_t data_length)
         : fin(fin), type(type), data_length(data_length) {}
 
     bool fin;
-    network::mojom::blink::WebSocketMessageType type;
-    uint32_t data_length;
+    MessageTypeForMojo type;
+    size_t data_length;
   };
+
+  // Used by BlobLoader and Message, so defined here so that it can be shared.
+  class MessageDataDeleter {
+   public:
+    // This constructor exists to permit default construction of the MessageData
+    // type, but the deleter cannot be called when it was used.
+    MessageDataDeleter() : isolate_(nullptr), size_(0) {}
+
+    MessageDataDeleter(v8::Isolate* isolate, size_t size);
+
+    MessageDataDeleter(MessageDataDeleter&&) = default;
+    MessageDataDeleter& operator=(MessageDataDeleter&&) = default;
+
+    void operator()(uint8_t* p) const;
+
+   private:
+    raw_ptr<v8::Isolate> isolate_;
+    size_t size_;
+    NO_UNIQUE_ADDRESS mutable V8ExternalMemoryAccounterBase
+        external_memory_accounter_;
+  };
+
+  using MessageData = base::HeapArray<uint8_t, MessageDataDeleter>;
+
+  static MessageData CreateMessageData(v8::Isolate*, size_t);
 
   friend class WebSocketChannelImplHandshakeThrottleTest;
   FRIEND_TEST_ALL_PREFIXES(WebSocketChannelImplHandshakeThrottleTest,
@@ -177,25 +225,20 @@ class MODULES_EXPORT WebSocketChannelImpl final
 
    public:
     using DidCallSendMessage =
-        util::StrongAlias<class DidCallSendMessageTag, bool>;
-
-    // Initializes message as a string
-    Message(const std::string&,
-            base::OnceClosure completion_callback,
-            DidCallSendMessage did_call_send_message);
+        base::StrongAlias<class DidCallSendMessageTag, bool>;
 
     // Initializes message as a blob
     explicit Message(scoped_refptr<BlobDataHandle>);
 
-    // Initializes message as a ArrayBuffer
-    Message(base::span<const char> message,
-            base::OnceClosure completion_callback,
-            DidCallSendMessage did_call_send_message);
+    // Initializes message from the contents of a blob
+    explicit Message(MessageData);
 
-    // Initializes a Blank message
-    Message(MessageType type,
-            base::span<const char> message,
-            base::OnceClosure completion_callback);
+    // Initializes message as a string or ArrayBuffer
+    Message(MessageType,
+            v8::Isolate*,
+            base::span<const uint8_t> message,
+            std::unique_ptr<SendCompletionWatcher>,
+            DidCallSendMessage did_call_send_message);
 
     // Close message
     Message(uint16_t code, const String& reason);
@@ -211,33 +254,60 @@ class MODULES_EXPORT WebSocketChannelImpl final
     DidCallSendMessage GetDidCallSendMessage() const;
     uint16_t Code() const;
     String Reason() const;
-    base::OnceClosure CompletionCallback();
+    std::unique_ptr<SendCompletionWatcher> TakeSendCompletionWatcher();
 
-    // Returns a mutable |pending_payload_|. Since calling code always mutates
-    // the value, |pending_payload_| only has a mutable getter.
-    base::span<const char>& MutablePendingPayload();
+    // Returns a view of the data currently waiting to be sent.
+    base::span<const uint8_t> PendingPayload() const;
+
+    // Advances the pending payload span by the given number of bytes.
+    // This should be called after `bytes_consumed` bytes from PendingPayload()
+    // have been successfully processed.
+    void ConsumePendingPayload(size_t bytes_consumed);
 
     void SetDidCallSendMessage(DidCallSendMessage did_call_send_message);
 
    private:
-    struct MessageDataDeleter {
-      void operator()(char* p) const { WTF::Partitions::FastFree(p); }
-    };
-    using MessageData = std::unique_ptr<char[], MessageDataDeleter>;
-    static MessageData CreateMessageData(std::size_t message_size) {
-      return MessageData(static_cast<char*>(WTF::Partitions::FastMalloc(
-          message_size, "blink::WebSockChannelImpl::Message::MessageData")));
-    }
-
     MessageData message_data_;
     MessageType type_;
 
     scoped_refptr<BlobDataHandle> blob_data_handle_;
-    base::span<const char> pending_payload_;
+    base::raw_span<const uint8_t> pending_payload_;
     DidCallSendMessage did_call_send_message_ = DidCallSendMessage(false);
     uint16_t code_ = 0;
     String reason_;
-    base::OnceClosure completion_callback_;
+    std::unique_ptr<SendCompletionWatcher> watcher_;
+  };
+
+  // A handle to a global count of the number of WebSockets that have been
+  // created. Can be used to limit the total number of WebSockets that have been
+  // created in this render process.
+  class ConnectionCountTrackerHandle {
+    DISALLOW_NEW();
+
+   public:
+    enum class CountStatus {
+      kOkayToConnect,
+      kShouldNotConnect,
+    };
+
+    ConnectionCountTrackerHandle() = default;
+    ~ConnectionCountTrackerHandle() = default;
+
+    ConnectionCountTrackerHandle(const ConnectionCountTrackerHandle&) = delete;
+    ConnectionCountTrackerHandle& operator=(
+        const ConnectionCountTrackerHandle&) = delete;
+
+    // Increments the count and returns SHOULD_NOT_CONNECT if it exceeds
+    // kMaxWebSocketsPerRenderProcess. Should only be called once.
+    CountStatus IncrementAndCheckStatus();
+
+    // Decrements the count. Should be called at least once. If there is no
+    // matching call to IncrementAndCheckStatus() it does nothing, so it is safe
+    // to call multiple times.
+    void Decrement();
+
+   private:
+    bool incremented_ = false;
   };
 
   // The state is defined to see the conceptual state more clearly than checking
@@ -256,10 +326,23 @@ class MODULES_EXPORT WebSocketChannelImpl final
   };
   State GetState() const;
 
-  bool MaybeSendSynchronously(network::mojom::blink::WebSocketMessageType,
-                              base::span<const char>* data);
+  // Send a message for which the underlying data is available immediately.
+  // Anything which cannot be sent immediately is queued.
+  void SendFromMemory(MessageType,
+                      base::span<const uint8_t> data,
+                      std::unique_ptr<SendCompletionWatcher>);
+
+  // Send as much of `data` as can be sent immediately. `data` will be modified
+  // to point to the remaining unsent data. Returns `true` if all of `data` was
+  // sent.
+  bool MaybeSendSynchronously(MessageTypeForMojo,
+                              base::span<const uint8_t>* data);
   void ProcessSendQueue();
-  bool SendMessageData(base::span<const char>* data);
+
+  // Returns a pair:
+  //  - A boolean indicating if the entire `data` span was sent successfully.
+  //  - A size_t for the number of bytes actually consumed from `data`.
+  std::pair<bool, size_t> SendMessageData(base::span<const uint8_t> data);
   void FailAsError(const String& reason) {
     Fail(reason, mojom::ConsoleMessageLevel::kError,
          location_at_construction_->Clone());
@@ -268,10 +351,11 @@ class MODULES_EXPORT WebSocketChannelImpl final
   void HandleDidClose(bool was_clean, uint16_t code, const String& reason);
 
   // Completion callback. It is called with the results of throttling.
-  void OnCompletion(const base::Optional<WebString>& error);
+  void OnCompletion(const std::optional<WebString>& error);
 
   // Methods for BlobLoader.
-  void DidFinishLoadingBlob(DOMArrayBuffer*);
+  void DidFinishLoadingBlob(MessageData);
+  void BlobTooLarge();
   void DidFailLoadingBlob(FileErrorCode);
 
   void TearDownFailedConnection();
@@ -283,14 +367,14 @@ class MODULES_EXPORT WebSocketChannelImpl final
   void OnReadable(MojoResult result, const mojo::HandleSignalsState& state);
   void ConsumePendingDataFrames();
   void ConsumeDataFrame(bool fin,
-                        network::mojom::blink::WebSocketMessageType type,
-                        const char* data,
-                        size_t data_size);
+                        MessageTypeForMojo type,
+                        base::span<const uint8_t> data);
   // Called when |writable_| becomes writable.
   void OnWritable(MojoResult result, const mojo::HandleSignalsState& state);
-  MojoResult ProduceData(base::span<const char>* data,
-                         uint64_t* consumed_buffered_amount);
-  String GetTextMessage(const Vector<base::span<const char>>& chunks,
+  // Writes `data` and returns the unwritten portion.
+  base::span<const uint8_t> ProduceData(base::span<const uint8_t> data,
+                                        size_t* consumed_buffered_amount);
+  String GetTextMessage(const Vector<base::span<const uint8_t>>& chunks,
                         wtf_size_t size);
   void OnConnectionError(const base::Location& set_from,
                          uint32_t custom_reason,
@@ -301,8 +385,8 @@ class MODULES_EXPORT WebSocketChannelImpl final
   KURL url_;
   uint64_t identifier_;
   Member<BlobLoader> blob_loader_;
-  WTF::Deque<Message> messages_;
-  WebSocketMessageChunkAccumulator message_chunks_;
+  Deque<Message> messages_;
+  Member<WebSocketMessageChunkAccumulator> message_chunks_;
   const Member<ExecutionContext> execution_context_;
 
   bool backpressure_ = false;
@@ -313,33 +397,31 @@ class MODULES_EXPORT WebSocketChannelImpl final
   size_t sent_size_of_top_message_ = 0;
   FrameScheduler::SchedulingAffectingFeatureHandle
       feature_handle_for_scheduler_;
+  String failure_message_;
+  size_t max_message_size_ = std::numeric_limits<wtf_size_t>::max();
 
-  const std::unique_ptr<const SourceLocation> location_at_construction_;
+  const Member<const SourceLocation> location_at_construction_;
   network::mojom::blink::WebSocketHandshakeRequestPtr handshake_request_;
   std::unique_ptr<WebSocketHandshakeThrottle> handshake_throttle_;
   // This field is only initialised if the object is still waiting for a
   // throttle response when DidConnect is called.
   std::unique_ptr<ConnectInfo> connect_info_;
 
-  HeapMojoRemote<network::mojom::blink::WebSocket,
-                 HeapMojoWrapperMode::kWithoutContextObserver>
-      websocket_;
+  HeapMojoRemote<network::mojom::blink::WebSocket> websocket_;
   HeapMojoReceiver<network::mojom::blink::WebSocketHandshakeClient,
-                   WebSocketChannelImpl,
-                   HeapMojoWrapperMode::kWithoutContextObserver>
+                   WebSocketChannelImpl>
       handshake_client_receiver_;
-  HeapMojoReceiver<network::mojom::blink::WebSocketClient,
-                   WebSocketChannelImpl,
-                   HeapMojoWrapperMode::kWithoutContextObserver>
+  HeapMojoReceiver<network::mojom::blink::WebSocketClient, WebSocketChannelImpl>
       client_receiver_;
 
   mojo::ScopedDataPipeConsumerHandle readable_;
   mojo::SimpleWatcher readable_watcher_;
-  WTF::Deque<DataFrame> pending_data_frames_;
+  Deque<DataFrame> pending_data_frames_;
 
   mojo::ScopedDataPipeProducerHandle writable_;
   mojo::SimpleWatcher writable_watcher_;
   bool wait_for_writable_ = false;
+  ConnectionCountTrackerHandle connection_count_tracker_handle_;
 
   const scoped_refptr<base::SingleThreadTaskRunner> file_reading_task_runner_;
 };

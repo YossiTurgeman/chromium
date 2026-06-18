@@ -1,20 +1,25 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/extensions/extension_disabled_ui.h"
+
 #include <stddef.h>
+
+#include <algorithm>
+#include <string_view>
 
 #include "base/files/file_path.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/memory/ptr_util.h"
-#include "base/task/post_task.h"
-#include "base/test/bind_test_util.h"
+#include "base/strings/utf_string_conversions.h"
+#include "base/test/bind.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/extensions/extension_service.h"
-#include "chrome/browser/extensions/extension_sync_data.h"
-#include "chrome/browser/extensions/extension_sync_service.h"
 #include "chrome/browser/extensions/extension_uninstall_dialog.h"
+#include "chrome/browser/extensions/sync/extension_sync_data.h"
+#include "chrome/browser/extensions/sync/extension_sync_service.h"
 #include "chrome/browser/extensions/updater/extension_updater.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
@@ -23,22 +28,24 @@
 #include "chrome/browser/ui/global_error/global_error_service_factory.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
-#include "chrome/test/base/ui_test_utils.h"
-#include "components/sync/model/fake_sync_change_processor.h"
-#include "components/sync/model/sync_error_factory_mock.h"
+#include "components/sync/base/client_tag_hash.h"
+#include "components/sync/protocol/entity_specifics.pb.h"
 #include "components/sync/protocol/extension_specifics.pb.h"
-#include "components/sync/protocol/sync.pb.h"
+#include "components/sync/test/fake_sync_change_processor.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
 #include "content/public/test/url_loader_interceptor.h"
 #include "extensions/browser/extension_dialog_auto_confirm.h"
 #include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/browser/test_extension_registry_observer.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/verifier_formats.h"
 #include "extensions/test/extension_test_message_listener.h"
+#include "testing/gmock/include/gmock/gmock.h"
 
 using content::BrowserThread;
 using extensions::Extension;
@@ -84,9 +91,9 @@ class ExtensionDisabledGlobalErrorTest
     size_t size_before = extension_registry()->enabled_extensions().size();
     const Extension* extension = InstallExtension(path_v1_, 1);
     if (!extension)
-      return NULL;
+      return nullptr;
     if (extension_registry()->enabled_extensions().size() != size_before + 1)
-      return NULL;
+      return nullptr;
     return extension;
   }
 
@@ -98,12 +105,12 @@ class ExtensionDisabledGlobalErrorTest
       int expected_change) {
     size_t size_before = extension_registry()->enabled_extensions().size();
     if (UpdateExtension(extension->id(), crx_path, expected_change))
-      return NULL;
+      return nullptr;
     content::RunAllTasksUntilIdle();
     EXPECT_EQ(size_before + expected_change,
               extension_registry()->enabled_extensions().size());
     if (extension_registry()->disabled_extensions().size() != 1u)
-      return NULL;
+      return nullptr;
 
     return extension_registry()->disabled_extensions().begin()->get();
   }
@@ -130,9 +137,10 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest, AcceptPermissions) {
   ASSERT_TRUE(GetExtensionDisabledGlobalError());
   const size_t size_before = extension_registry()->enabled_extensions().size();
 
-  ExtensionTestMessageListener listener("v2.onInstalled", false);
+  ExtensionTestMessageListener listener("v2.onInstalled");
   listener.set_failure_message("FAILED");
-  extension_service()->GrantPermissionsAndEnableExtension(extension);
+  extensions::ExtensionRegistrar::Get(profile())
+      ->GrantPermissionsAndEnableExtension(*extension);
   EXPECT_EQ(size_before + 1, extension_registry()->enabled_extensions().size());
   EXPECT_EQ(0u, extension_registry()->disabled_extensions().size());
   ASSERT_FALSE(GetExtensionDisabledGlobalError());
@@ -184,11 +192,9 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest,
 
   // Navigate a tab to the disabled extension, it will show a permission
   // increase dialog.
-  GURL url = extension->GetResourceURL("");
+  GURL url = extension->url();
   int starting_tab_count = browser()->tab_strip_model()->count();
-  ui_test_utils::NavigateToURLWithDisposition(
-      browser(), url, WindowOpenDisposition::NEW_FOREGROUND_TAB,
-      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
+  NavigateToURLInNewTab(url);
   int tab_count = browser()->tab_strip_model()->count();
   EXPECT_EQ(starting_tab_count + 1, tab_count);
 
@@ -219,14 +225,14 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest,
   extensions::ExtensionSyncData sync_data =
       sync_service->CreateSyncData(*extension);
   UninstallExtension(extension_id);
-  extension = NULL;
+  extension = nullptr;
 
   // Install extension v1.
   InstallIncreasingPermissionExtensionV1();
 
   content::URLLoaderInterceptor interceptor(base::BindLambdaForTesting(
       [&](content::URLLoaderInterceptor::RequestParams* params) {
-        std::string path = params->url_request.url.path();
+        std::string path = params->url_request.url.GetPath();
         if (path == "/autoupdate/updates.xml") {
           content::URLLoaderInterceptor::WriteResponse(
               test_data_dir_.AppendASCII("permissions_increase")
@@ -243,8 +249,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest,
 
   sync_service->MergeDataAndStartSyncing(
       syncer::EXTENSIONS, syncer::SyncDataList(),
-      base::WrapUnique(new syncer::FakeSyncChangeProcessor()),
-      base::WrapUnique(new syncer::SyncErrorFactoryMock()));
+      std::make_unique<syncer::FakeSyncChangeProcessor>());
   extensions::TestExtensionRegistryObserver install_observer(
       extension_registry());
   sync_service->ProcessSyncChanges(
@@ -259,9 +264,10 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest,
   ASSERT_TRUE(extension);
   EXPECT_EQ("2", extension->VersionString());
   EXPECT_EQ(1u, extension_registry()->disabled_extensions().size());
-  EXPECT_EQ(extensions::disable_reason::DISABLE_PERMISSIONS_INCREASE,
-            ExtensionPrefs::Get(extension_service()->profile())
-                ->GetDisableReasons(extension_id));
+  EXPECT_THAT(ExtensionPrefs::Get(extension_service()->profile())
+                  ->GetDisableReasons(extension_id),
+              testing::UnorderedElementsAre(
+                  extensions::disable_reason::DISABLE_PERMISSIONS_INCREASE));
   EXPECT_TRUE(GetExtensionDisabledGlobalError());
 }
 
@@ -269,10 +275,11 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest,
 IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest, RemoteInstall) {
   static const char extension_id[] = "pgdpcfcocojkjfbgpiianjngphoopgmo";
 
+  auto reset = extensions::DisablePublisherKeyVerificationForTests();
   content::URLLoaderInterceptor interceptor(base::BindLambdaForTesting(
       [&](content::URLLoaderInterceptor::RequestParams* params) {
-        std::string path = params->url_request.url.path();
-        if (path == "/autoupdate/updates.xml") {
+        std::string path = params->url_request.url.GetPath();
+        if (path == "/autoupdate_nonwebstore/updates.xml") {
           content::URLLoaderInterceptor::WriteResponse(
               test_data_dir_.AppendASCII("permissions_increase")
                   .AppendASCII("updates.xml"),
@@ -293,15 +300,15 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest, RemoteInstall) {
   specifics.mutable_extension()->set_disable_reasons(
       extensions::disable_reason::DISABLE_REMOTE_INSTALL);
   specifics.mutable_extension()->set_update_url(
-      "http://localhost/autoupdate/updates.xml");
+      "http://localhost/autoupdate_nonwebstore/updates.xml");
   specifics.mutable_extension()->set_version("2");
-  syncer::SyncData sync_data = syncer::SyncData::CreateRemoteData(specifics);
+  syncer::SyncData sync_data = syncer::SyncData::CreateRemoteData(
+      specifics, syncer::ClientTagHash::FromHashed("unused"));
 
   ExtensionSyncService* sync_service = ExtensionSyncService::Get(profile());
   sync_service->MergeDataAndStartSyncing(
       syncer::EXTENSIONS, syncer::SyncDataList(),
-      base::WrapUnique(new syncer::FakeSyncChangeProcessor()),
-      base::WrapUnique(new syncer::SyncErrorFactoryMock()));
+      std::make_unique<syncer::FakeSyncChangeProcessor>());
   extensions::TestExtensionRegistryObserver install_observer(
       extension_registry());
   sync_service->ProcessSyncChanges(
@@ -318,8 +325,112 @@ IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest, RemoteInstall) {
   ASSERT_TRUE(extension);
   EXPECT_EQ("2", extension->VersionString());
   EXPECT_EQ(1u, extension_registry()->disabled_extensions().size());
-  EXPECT_EQ(extensions::disable_reason::DISABLE_REMOTE_INSTALL,
-            ExtensionPrefs::Get(extension_service()->profile())
-                ->GetDisableReasons(extension_id));
+  EXPECT_THAT(ExtensionPrefs::Get(extension_service()->profile())
+                  ->GetDisableReasons(extension_id),
+              testing::UnorderedElementsAre(
+                  extensions::disable_reason::DISABLE_REMOTE_INSTALL));
   EXPECT_TRUE(GetExtensionDisabledGlobalError());
+}
+
+// Test that an error appears if an extension gets installed server side.
+IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest,
+                       RemoteInstallFromWebstore) {
+  static const char extension_id[] = "pgdpcfcocojkjfbgpiianjngphoopgmo";
+
+  auto reset = extensions::DisablePublisherKeyVerificationForTests();
+  content::URLLoaderInterceptor interceptor(base::BindLambdaForTesting(
+      [&](content::URLLoaderInterceptor::RequestParams* params) {
+        std::string path = params->url_request.url.GetPath();
+        if (path == "/autoupdate/updates.xml") {
+          content::URLLoaderInterceptor::WriteResponse(
+              test_data_dir_.AppendASCII("permissions_increase")
+                  .AppendASCII("updates.json"),
+              params->client.get());
+          return true;
+        } else if (path == "/autoupdate/v2.crx") {
+          content::URLLoaderInterceptor::WriteResponse(path_v2_,
+                                                       params->client.get());
+          return true;
+        }
+        return false;
+      }));
+
+  sync_pb::EntitySpecifics specifics;
+  specifics.mutable_extension()->set_id(extension_id);
+  specifics.mutable_extension()->set_enabled(false);
+  specifics.mutable_extension()->set_remote_install(true);
+  specifics.mutable_extension()->set_disable_reasons(
+      extensions::disable_reason::DISABLE_REMOTE_INSTALL);
+  specifics.mutable_extension()->set_update_url(
+      "http://localhost/autoupdate/updates.xml");
+  specifics.mutable_extension()->set_version("2");
+  syncer::SyncData sync_data = syncer::SyncData::CreateRemoteData(
+      specifics, syncer::ClientTagHash::FromHashed("unused"));
+
+  ExtensionSyncService* sync_service = ExtensionSyncService::Get(profile());
+  sync_service->MergeDataAndStartSyncing(
+      syncer::EXTENSIONS, syncer::SyncDataList(),
+      std::make_unique<syncer::FakeSyncChangeProcessor>());
+  extensions::TestExtensionRegistryObserver install_observer(
+      extension_registry());
+  sync_service->ProcessSyncChanges(
+      FROM_HERE,
+      syncer::SyncChangeList(
+          1, syncer::SyncChange(FROM_HERE, syncer::SyncChange::ACTION_ADD,
+                                sync_data)));
+
+  install_observer.WaitForExtensionWillBeInstalled();
+  content::RunAllTasksUntilIdle();
+
+  const Extension* extension =
+      extension_registry()->disabled_extensions().GetByID(extension_id);
+  ASSERT_TRUE(extension);
+  EXPECT_EQ("2", extension->VersionString());
+  EXPECT_EQ(1u, extension_registry()->disabled_extensions().size());
+  EXPECT_THAT(ExtensionPrefs::Get(extension_service()->profile())
+                  ->GetDisableReasons(extension_id),
+              testing::UnorderedElementsAre(
+                  extensions::disable_reason::DISABLE_REMOTE_INSTALL));
+  EXPECT_TRUE(GetExtensionDisabledGlobalError());
+}
+
+namespace {
+int GetExtensionDisabledErrorCount(GlobalErrorService* service,
+                                   const std::u16string_view extension_name) {
+  DCHECK(!extension_name.empty());
+  DCHECK(service);
+  return std::ranges::count_if(service->errors(), [extension_name](
+                                                      GlobalError* error) {
+    return error->MenuItemCommandID() >= IDC_EXTENSION_INSTALL_ERROR_FIRST &&
+           error->MenuItemCommandID() <= IDC_EXTENSION_INSTALL_ERROR_LAST &&
+           error->MenuItemLabel().find(extension_name) != std::string::npos;
+  });
+}
+}  // namespace
+
+IN_PROC_BROWSER_TEST_F(ExtensionDisabledGlobalErrorTest,
+                       AllErrorsRemovedWhenExtensionRemoved) {
+  const Extension* extension = InstallIncreasingPermissionExtensionV1();
+  ASSERT_TRUE(extension);
+  AddExtensionDisabledError(browser()->profile(), extension, false);
+  extension = UpdateIncreasingPermissionExtension(extension, path_v2_, -1);
+  ASSERT_TRUE(extension);
+
+  const auto extension_name = base::UTF8ToUTF16(extension->name());
+  auto* global_error_service =
+      GlobalErrorServiceFactory::GetForProfile(profile());
+  // There must be two errors associated with the same extension; if this is not
+  // true, then this test isn't relevant anymore.
+  EXPECT_EQ(
+      GetExtensionDisabledErrorCount(global_error_service, extension_name), 2);
+
+  // Remove extension and make sure no errors left.
+  extensions::TestExtensionRegistryObserver test_observer(extension_registry(),
+                                                          extension->id());
+  UninstallExtension(extension->id());
+  test_observer.WaitForExtensionUninstalled();
+  // All ExtensionDisabledGlobalErrors related to removed extension should be
+  // removed too.
+  EXPECT_EQ(
+      GetExtensionDisabledErrorCount(global_error_service, extension_name), 0);
 }

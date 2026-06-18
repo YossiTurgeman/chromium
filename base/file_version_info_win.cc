@@ -1,10 +1,11 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/file_version_info_win.h"
 
 #include <windows.h>
+
 #include <stddef.h>
 
 #include <utility>
@@ -12,7 +13,6 @@
 #include "base/check.h"
 #include "base/files/file_path.h"
 #include "base/memory/ptr_util.h"
-#include "base/stl_util.h"
 #include "base/strings/string_util.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "base/win/resource_util.h"
@@ -30,8 +30,9 @@ LanguageAndCodePage* GetTranslate(const void* data) {
   static constexpr wchar_t kTranslation[] = L"\\VarFileInfo\\Translation";
   LPVOID translate = nullptr;
   UINT dummy_size;
-  if (::VerQueryValue(data, kTranslation, &translate, &dummy_size))
+  if (::VerQueryValue(data, kTranslation, &translate, &dummy_size)) {
     return static_cast<LanguageAndCodePage*>(translate);
+  }
   return nullptr;
 }
 
@@ -54,12 +55,14 @@ FileVersionInfo::CreateFileVersionInfoForModule(HMODULE module) {
   size_t version_info_length;
   const bool has_version_resource = base::win::GetResourceFromModule(
       module, VS_VERSION_INFO, RT_VERSION, &data, &version_info_length);
-  if (!has_version_resource)
+  if (!has_version_resource) {
     return nullptr;
+  }
 
   const LanguageAndCodePage* translate = GetTranslate(data);
-  if (!translate)
+  if (!translate) {
     return nullptr;
+  }
 
   return base::WrapUnique(
       new FileVersionInfoWin(data, translate->language, translate->code_page));
@@ -80,64 +83,67 @@ FileVersionInfoWin::CreateFileVersionInfoWin(const base::FilePath& file_path) {
   DWORD dummy;
   const wchar_t* path = file_path.value().c_str();
   const DWORD length = ::GetFileVersionInfoSize(path, &dummy);
-  if (length == 0)
+  if (length == 0) {
     return nullptr;
+  }
 
   std::vector<uint8_t> data(length, 0);
 
-  if (!::GetFileVersionInfo(path, dummy, length, data.data()))
+  if (!::GetFileVersionInfo(path, dummy, length, data.data())) {
     return nullptr;
+  }
 
   const LanguageAndCodePage* translate = GetTranslate(data.data());
-  if (!translate)
+  if (!translate) {
     return nullptr;
+  }
 
   return base::WrapUnique(new FileVersionInfoWin(
       std::move(data), translate->language, translate->code_page));
 }
 
-base::string16 FileVersionInfoWin::company_name() {
-  return GetStringValue(STRING16_LITERAL("CompanyName"));
+std::u16string FileVersionInfoWin::company_name() {
+  return GetStringValue(u"CompanyName");
 }
 
-base::string16 FileVersionInfoWin::company_short_name() {
-  return GetStringValue(STRING16_LITERAL("CompanyShortName"));
+std::u16string FileVersionInfoWin::company_short_name() {
+  return GetStringValue(u"CompanyShortName");
 }
 
-base::string16 FileVersionInfoWin::internal_name() {
-  return GetStringValue(STRING16_LITERAL("InternalName"));
+std::u16string FileVersionInfoWin::internal_name() {
+  return GetStringValue(u"InternalName");
 }
 
-base::string16 FileVersionInfoWin::product_name() {
-  return GetStringValue(STRING16_LITERAL("ProductName"));
+std::u16string FileVersionInfoWin::product_name() {
+  return GetStringValue(u"ProductName");
 }
 
-base::string16 FileVersionInfoWin::product_short_name() {
-  return GetStringValue(STRING16_LITERAL("ProductShortName"));
+std::u16string FileVersionInfoWin::product_short_name() {
+  return GetStringValue(u"ProductShortName");
 }
 
-base::string16 FileVersionInfoWin::product_version() {
-  return GetStringValue(STRING16_LITERAL("ProductVersion"));
+std::u16string FileVersionInfoWin::product_version() {
+  return GetStringValue(u"ProductVersion");
 }
 
-base::string16 FileVersionInfoWin::file_description() {
-  return GetStringValue(STRING16_LITERAL("FileDescription"));
+std::u16string FileVersionInfoWin::file_description() {
+  return GetStringValue(u"FileDescription");
 }
 
-base::string16 FileVersionInfoWin::file_version() {
-  return GetStringValue(STRING16_LITERAL("FileVersion"));
+std::u16string FileVersionInfoWin::file_version() {
+  return GetStringValue(u"FileVersion");
 }
 
-base::string16 FileVersionInfoWin::original_filename() {
-  return GetStringValue(STRING16_LITERAL("OriginalFilename"));
+std::u16string FileVersionInfoWin::original_filename() {
+  return GetStringValue(u"OriginalFilename");
 }
 
-base::string16 FileVersionInfoWin::special_build() {
-  return GetStringValue(STRING16_LITERAL("SpecialBuild"));
+std::u16string FileVersionInfoWin::special_build() {
+  return GetStringValue(u"SpecialBuild");
 }
 
-bool FileVersionInfoWin::GetValue(const base::char16* name,
-                                  base::string16* value) const {
+bool FileVersionInfoWin::GetValue(const char16_t* name,
+                                  std::u16string* value) const {
   const struct LanguageAndCodePage lang_codepages[] = {
       // Use the language and codepage from the DLL.
       {language_, code_page_},
@@ -158,25 +164,24 @@ bool FileVersionInfoWin::GetValue(const base::char16* name,
     uint32_t size;
     BOOL r = ::VerQueryValue(data_, sub_block, &value_ptr, &size);
     if (r && value_ptr && size) {
-      value->assign(static_cast<base::char16*>(value_ptr), size - 1);
+      value->assign(static_cast<char16_t*>(value_ptr), size - 1);
       return true;
     }
   }
   return false;
 }
 
-base::string16 FileVersionInfoWin::GetStringValue(
-    const base::char16* name) const {
-  base::string16 str;
+std::u16string FileVersionInfoWin::GetStringValue(const char16_t* name) const {
+  std::u16string str;
   GetValue(name, &str);
   return str;
 }
 
 base::Version FileVersionInfoWin::GetFileVersion() const {
-  return base::Version({HIWORD(fixed_file_info_.dwFileVersionMS),
-                        LOWORD(fixed_file_info_.dwFileVersionMS),
-                        HIWORD(fixed_file_info_.dwFileVersionLS),
-                        LOWORD(fixed_file_info_.dwFileVersionLS)});
+  return base::Version({HIWORD(fixed_file_info_->dwFileVersionMS),
+                        LOWORD(fixed_file_info_->dwFileVersionMS),
+                        HIWORD(fixed_file_info_->dwFileVersionLS),
+                        LOWORD(fixed_file_info_->dwFileVersionLS)});
 }
 
 FileVersionInfoWin::FileVersionInfoWin(std::vector<uint8_t>&& data,

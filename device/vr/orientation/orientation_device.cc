@@ -1,17 +1,24 @@
-// Copyright (c) 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "device/vr/orientation/orientation_device.h"
+
 #include <math.h>
 
-#include "base/bind.h"
+#include <numbers>
+#include <vector>
+
+#include "base/check_op.h"
+#include "base/functional/bind.h"
+#include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/numerics/math_constants.h"
+#include "base/no_destructor.h"
 #include "base/time/time.h"
-#include "device/vr/orientation/orientation_device.h"
 #include "device/vr/orientation/orientation_session.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/device/public/cpp/generic_sensor/sensor_reading.h"
+#include "services/device/public/cpp/generic_sensor/sensor_reading_shared_buffer.h"
 #include "services/device/public/cpp/generic_sensor/sensor_reading_shared_buffer_reader.h"
 #include "services/device/public/mojom/sensor_provider.mojom.h"
 #include "ui/display/display.h"
@@ -27,20 +34,25 @@ using gfx::Vector3dF;
 namespace {
 static constexpr int kDefaultPumpFrequencyHz = 60;
 
-mojom::VRDisplayInfoPtr CreateVRDisplayInfo(mojom::XRDeviceId id) {
-  mojom::VRDisplayInfoPtr display_info = mojom::VRDisplayInfo::New();
-  display_info->id = id;
-  return display_info;
-}
-
 display::Display::Rotation GetRotation() {
-  display::Screen* screen = display::Screen::GetScreen();
+  display::Screen* screen = display::Screen::Get();
   if (!screen) {
     // If we can't get rotation we'll assume it's 0.
     return display::Display::ROTATE_0;
   }
 
   return screen->GetPrimaryDisplay().rotation();
+}
+
+const std::vector<mojom::XRSessionFeature>& GetSupportedFeatures() {
+  static base::NoDestructor<std::vector<mojom::XRSessionFeature>>
+      kSupportedFeatures{{
+    mojom::XRSessionFeature::REF_SPACE_VIEWER,
+    mojom::XRSessionFeature::REF_SPACE_LOCAL,
+    mojom::XRSessionFeature::REF_SPACE_LOCAL_FLOOR,
+  }};
+
+  return *kSupportedFeatures;
 }
 
 }  // namespace
@@ -50,11 +62,11 @@ VROrientationDevice::VROrientationDevice(mojom::SensorProvider* sensor_provider,
     : VRDeviceBase(mojom::XRDeviceId::ORIENTATION_DEVICE_ID),
       ready_callback_(std::move(ready_callback)) {
   DVLOG(2) << __func__;
-  sensor_provider->GetSensor(kOrientationSensorType,
+  sensor_provider->GetSensor(kOrientationSensorType, mojo::NullRemote(),
                              base::BindOnce(&VROrientationDevice::SensorReady,
                                             base::Unretained(this)));
 
-  SetVRDisplayInfo(CreateVRDisplayInfo(GetId()));
+  SetSupportedFeatures(GetSupportedFeatures());
 }
 
 VROrientationDevice::~VROrientationDevice() {
@@ -140,21 +152,52 @@ void VROrientationDevice::RequestSession(
       this, data_provider.InitWithNewPipeAndPassReceiver(),
       controller.InitWithNewPipeAndPassReceiver()));
 
-  auto session = mojom::XRSession::New();
-  session->data_provider = std::move(data_provider);
-  if (display_info_) {
-    session->display_info = display_info_.Clone();
-  }
+  auto session_result = mojom::XRRuntimeSessionResult::New();
+  session_result->controller = std::move(controller);
 
-  std::move(callback).Run(std::move(session), std::move(controller));
+  session_result->session = mojom::XRSession::New();
+  auto* session = session_result->session.get();
+
+  session->data_provider = std::move(data_provider);
+  session->device_config = device::mojom::XRSessionDeviceConfig::New();
+  session->enviroment_blend_mode =
+      device::mojom::XREnvironmentBlendMode::kOpaque;
+  session->interaction_mode = device::mojom::XRInteractionMode::kScreenSpace;
+
+  // Currently, the initial filtering of supported devices happens on the
+  // browser side (BrowserXRRuntimeImpl::SupportsFeature()), so if we have
+  // reached this point, it is safe to assume that all requested features are
+  // enabled.
+  // TODO(crbug.com/41476975): revisit the approach when the bug is fixed.
+  session->enabled_features.insert(session->enabled_features.end(),
+                                   options->required_features.begin(),
+                                   options->required_features.end());
+  session->enabled_features.insert(session->enabled_features.end(),
+                                   options->optional_features.begin(),
+                                   options->optional_features.end());
+
+  std::move(callback).Run(std::move(session_result));
 
   // The sensor may have been suspended, so resume it now.
   sensor_->Resume();
 }
 
+void VROrientationDevice::ShutdownSession(
+    mojom::XRRuntime::ShutdownSessionCallback callback) {
+  // We don't actually have enough information here to figure out which session
+  // is being requested to be terminated. However, since sessions don't get
+  // exclusive control of the device and we can drive many sessions at once,
+  // there's not really anything for us to do here except to reply to the
+  // callback.
+  // The session will end up getting shutdown via other mechanisms (some of
+  // its mojom pipes getting torn down during destruction in the other
+  // processes as a result of continuing the flow here).
+  std::move(callback).Run();
+}
+
 void VROrientationDevice::EndMagicWindowSession(VROrientationSession* session) {
   DVLOG(2) << __func__;
-  base::EraseIf(magic_window_sessions_,
+  std::erase_if(magic_window_sessions_,
                 [session](const std::unique_ptr<VROrientationSession>& item) {
                   return item.get() == session;
                 });
@@ -170,10 +213,6 @@ void VROrientationDevice::GetInlineFrameData(
     mojom::XRFrameDataProvider::GetFrameDataCallback callback) {
   // Orientation sessions should never be exclusive or presenting.
   DCHECK(!HasExclusiveSession());
-  if (!inline_poses_enabled_) {
-    std::move(callback).Run(nullptr);
-    return;
-  }
 
   mojom::VRPosePtr pose = mojom::VRPose::New();
 
@@ -192,7 +231,8 @@ void VROrientationDevice::GetInlineFrameData(
   pose->orientation = latest_pose_;
 
   mojom::XRFrameDataPtr frame_data = mojom::XRFrameData::New();
-  frame_data->pose = std::move(pose);
+  frame_data->render_info = mojom::XRRenderInfo::New();
+  frame_data->render_info->mojo_from_viewer = std::move(pose);
 
   std::move(callback).Run(std::move(frame_data));
 }
@@ -202,15 +242,15 @@ Quaternion VROrientationDevice::SensorSpaceToWorldSpace(Quaternion q) {
 
   if (rotation == display::Display::ROTATE_90) {
     // Rotate the sensor reading to account for the screen rotation.
-    q = q * Quaternion(Vector3dF(0, 0, 1), -base::kPiDouble / 2);
+    q = q * Quaternion(Vector3dF(0, 0, 1), -std::numbers::pi / 2);
   } else if (rotation == display::Display::ROTATE_270) {
     // Rotate the sensor reading to account for the screen rotation the other
     // way.
-    q = q * Quaternion(Vector3dF(0, 0, 1), base::kPiDouble / 2);
+    q = q * Quaternion(Vector3dF(0, 0, 1), std::numbers::pi / 2);
   }
 
   // Tilt the view up to have the y axis as the vertical axis instead of z
-  q = Quaternion(Vector3dF(1, 0, 0), -base::kPiDouble / 2) * q;
+  q = Quaternion(Vector3dF(1, 0, 0), -std::numbers::pi / 2) * q;
 
   return q;
 }

@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,18 @@
 
 #include <algorithm>
 #include <iterator>
+#include <optional>
+#include <string_view>
 
-#include "base/bind.h"
 #include "base/check.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/lazy_instance.h"
-#include "base/notreached.h"
-#include "base/optional.h"
-#include "base/stl_util.h"
+#include "base/logging.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
+#include "components/language/core/browser/accept_languages_service.h"
 #include "components/language/core/common/locale_util.h"
 #include "components/translate/core/browser/translate_browser_metrics.h"
 #include "components/translate/core/browser/translate_download_manager.h"
@@ -36,151 +37,309 @@ namespace {
 
 // The default list of languages the Google translation server supports.
 // We use this list until we receive the list that the server exposes.
-// Server also supports "hmm" (Hmong) and "jw" (Javanese), but these are
-// excluded because Chrome l10n library does not support it. This list must be
-// sorted in alphabetical order and contain no duplicates.
-const char* const kDefaultSupportedLanguages[] = {
-    "af",     // Afrikaans
-    "am",     // Amharic
-    "ar",     // Arabic
-    "az",     // Azerbaijani
-    "be",     // Belarusian
-    "bg",     // Bulgarian
-    "bn",     // Bengali
-    "bs",     // Bosnian
-    "ca",     // Catalan
-    "ceb",    // Cebuano
-    "co",     // Corsican
-    "cs",     // Czech
-    "cy",     // Welsh
-    "da",     // Danish
-    "de",     // German
-    "el",     // Greek
-    "en",     // English
-    "eo",     // Esperanto
-    "es",     // Spanish
-    "et",     // Estonian
-    "eu",     // Basque
-    "fa",     // Persian
-    "fi",     // Finnish
-    "fr",     // French
-    "fy",     // Frisian
-    "ga",     // Irish
-    "gd",     // Scots Gaelic
-    "gl",     // Galician
-    "gu",     // Gujarati
-    "ha",     // Hausa
-    "haw",    // Hawaiian
-    "hi",     // Hindi
-    "hr",     // Croatian
-    "ht",     // Haitian Creole
-    "hu",     // Hungarian
-    "hy",     // Armenian
-    "id",     // Indonesian
-    "ig",     // Igbo
-    "is",     // Icelandic
-    "it",     // Italian
-    "iw",     // Hebrew
-    "ja",     // Japanese
-    "ka",     // Georgian
-    "kk",     // Kazakh
-    "km",     // Khmer
-    "kn",     // Kannada
-    "ko",     // Korean
-    "ku",     // Kurdish
-    "ky",     // Kyrgyz
-    "la",     // Latin
-    "lb",     // Luxembourgish
-    "lo",     // Lao
-    "lt",     // Lithuanian
-    "lv",     // Latvian
-    "mg",     // Malagasy
-    "mi",     // Maori
-    "mk",     // Macedonian
-    "ml",     // Malayalam
-    "mn",     // Mongolian
-    "mr",     // Marathi
-    "ms",     // Malay
-    "mt",     // Maltese
-    "my",     // Burmese
-    "ne",     // Nepali
-    "nl",     // Dutch
-    "no",     // Norwegian
-    "ny",     // Nyanja
-    "pa",     // Punjabi
-    "pl",     // Polish
-    "ps",     // Pashto
-    "pt",     // Portuguese
-    "ro",     // Romanian
-    "ru",     // Russian
-    "sd",     // Sindhi
-    "si",     // Sinhala
-    "sk",     // Slovak
-    "sl",     // Slovenian
-    "sm",     // Samoan
-    "sn",     // Shona
-    "so",     // Somali
-    "sq",     // Albanian
-    "sr",     // Serbian
-    "st",     // Southern Sotho
-    "su",     // Sundanese
-    "sv",     // Swedish
-    "sw",     // Swahili
-    "ta",     // Tamil
-    "te",     // Telugu
-    "tg",     // Tajik
-    "th",     // Thai
-    "tl",     // Tagalog
-    "tr",     // Turkish
-    "uk",     // Ukrainian
-    "ur",     // Urdu
-    "uz",     // Uzbek
-    "vi",     // Vietnamese
-    "xh",     // Xhosa
-    "yi",     // Yiddish
-    "yo",     // Yoruba
-    "zh-CN",  // Chinese (Simplified)
-    "zh-TW",  // Chinese (Traditional)
-    "zu",     // Zulu
-};
+// This list must be sorted in alphabetical order and contain no duplicates.
+constexpr auto kDefaultSupportedLanguages = std::to_array<std::string_view>({
+    "af",        // Afrikaans
+    "ak",        // Twi
+    "am",        // Amharic
+    "ar",        // Arabic
+    "as",        // Assamese
+    "ay",        // Aymara
+    "az",        // Azerbaijani
+    "be",        // Belarusian
+    "bg",        // Bulgarian
+    "bho",       // Bhojpuri
+    "bm",        // Bambara
+    "bn",        // Bengali
+    "bs",        // Bosnian
+    "ca",        // Catalan
+    "ceb",       // Cebuano
+    "ckb",       // Kurdish (Sorani)
+    "co",        // Corsican
+    "cs",        // Czech
+    "cy",        // Welsh
+    "da",        // Danish
+    "de",        // German
+    "doi",       // Dogri
+    "dv",        // Dhivehi
+    "ee",        // Ewe
+    "el",        // Greek
+    "en",        // English
+    "eo",        // Esperanto
+    "es",        // Spanish
+    "et",        // Estonian
+    "eu",        // Basque
+    "fa",        // Persian
+    "fi",        // Finnish
+    "fr",        // French
+    "fy",        // Frisian
+    "ga",        // Irish
+    "gd",        // Scots Gaelic
+    "gl",        // Galician
+    "gom",       // Konkani
+    "gu",        // Gujarati
+    "ha",        // Hausa
+    "haw",       // Hawaiian
+    "hi",        // Hindi
+    "hmn",       // Hmong
+    "hr",        // Croatian
+    "ht",        // Haitian Creole
+    "hu",        // Hungarian
+    "hy",        // Armenian
+    "id",        // Indonesian
+    "ig",        // Igbo
+    "ilo",       // Ilocano
+    "is",        // Icelandic
+    "it",        // Italian
+    "iw",        // Hebrew - Chrome uses "he"
+    "ja",        // Japanese
+    "jw",        // Javanese - Chrome uses "jv"
+    "ka",        // Georgian
+    "kk",        // Kazakh
+    "km",        // Khmer
+    "kn",        // Kannada
+    "ko",        // Korean
+    "kri",       // Krio
+    "ku",        // Kurdish
+    "ky",        // Kyrgyz
+    "la",        // Latin
+    "lb",        // Luxembourgish
+    "lg",        // Luganda
+    "ln",        // Lingala
+    "lo",        // Lao
+    "lt",        // Lithuanian
+    "lus",       // Mizo
+    "lv",        // Latvian
+    "mai",       // Maithili
+    "mg",        // Malagasy
+    "mi",        // Maori
+    "mk",        // Macedonian
+    "ml",        // Malayalam
+    "mn",        // Mongolian
+    "mni-Mtei",  // Manipuri (Meitei Mayek)
+    "mr",        // Marathi
+    "ms",        // Malay
+    "mt",        // Maltese
+    "my",        // Burmese
+    "ne",        // Nepali
+    "nl",        // Dutch
+    "no",        // Norwegian - Chrome uses "nb"
+    "nso",       // Sepedi
+    "ny",        // Nyanja
+    "om",        // Oromo
+    "or",        // Odia (Oriya)
+    "pa",        // Punjabi
+    "pl",        // Polish
+    "ps",        // Pashto
+    "pt",        // Portuguese
+    "qu",        // Quechua
+    "ro",        // Romanian
+    "ru",        // Russian
+    "rw",        // Kinyarwanda
+    "sa",        // Sanskrit
+    "sd",        // Sindhi
+    "si",        // Sinhala
+    "sk",        // Slovak
+    "sl",        // Slovenian
+    "sm",        // Samoan
+    "sn",        // Shona
+    "so",        // Somali
+    "sq",        // Albanian
+    "sr",        // Serbian
+    "st",        // Southern Sotho
+    "su",        // Sundanese
+    "sv",        // Swedish
+    "sw",        // Swahili
+    "ta",        // Tamil
+    "te",        // Telugu
+    "tg",        // Tajik
+    "th",        // Thai
+    "ti",        // Tigrinya
+    "tk",        // Turkmen
+    "tl",        // Tagalog - Chrome uses "fil"
+    "tr",        // Turkish
+    "ts",        // Tsonga
+    "tt",        // Tatar
+    "ug",        // Uyghur
+    "uk",        // Ukrainian
+    "ur",        // Urdu
+    "uz",        // Uzbek
+    "vi",        // Vietnamese
+    "xh",        // Xhosa
+    "yi",        // Yiddish
+    "yo",        // Yoruba
+    "zh-CN",     // Chinese (Simplified)
+    "zh-TW",     // Chinese (Traditional)
+    "zu",        // Zulu
+});
+
+// The default list of languages the Partial Translation service supports.
+// This list must be sorted in alphabetical order and contain no duplicates.
+// This list is identical to above except that it excludes
+// {ilo lus mni-Mtei gom doi bm ckb}.
+constexpr auto kDefaultSupportedPartialTranslateLanguages =
+    std::to_array<std::string_view>({
+        "af",     // Afrikaans
+        "ak",     // Twi
+        "am",     // Amharic
+        "ar",     // Arabic
+        "as",     // Assamese
+        "ay",     // Aymara
+        "az",     // Azerbaijani
+        "be",     // Belarusian
+        "bg",     // Bulgarian
+        "bho",    // Bhojpuri
+        "bn",     // Bengali
+        "bs",     // Bosnian
+        "ca",     // Catalan
+        "ceb",    // Cebuano
+        "co",     // Corsican
+        "cs",     // Czech
+        "cy",     // Welsh
+        "da",     // Danish
+        "de",     // German
+        "dv",     // Dhivehi
+        "ee",     // Ewe
+        "el",     // Greek
+        "en",     // English
+        "eo",     // Esperanto
+        "es",     // Spanish
+        "et",     // Estonian
+        "eu",     // Basque
+        "fa",     // Persian
+        "fi",     // Finnish
+        "fr",     // French
+        "fy",     // Frisian
+        "ga",     // Irish
+        "gd",     // Scots Gaelic
+        "gl",     // Galician
+        "gu",     // Gujarati
+        "ha",     // Hausa
+        "haw",    // Hawaiian
+        "hi",     // Hindi
+        "hmn",    // Hmong
+        "hr",     // Croatian
+        "ht",     // Haitian Creole
+        "hu",     // Hungarian
+        "hy",     // Armenian
+        "id",     // Indonesian
+        "ig",     // Igbo
+        "is",     // Icelandic
+        "it",     // Italian
+        "iw",     // Hebrew - Chrome uses "he"
+        "ja",     // Japanese
+        "jw",     // Javanese - Chrome uses "jv"
+        "ka",     // Georgian
+        "kk",     // Kazakh
+        "km",     // Khmer
+        "kn",     // Kannada
+        "ko",     // Korean
+        "kri",    // Krio
+        "ku",     // Kurdish
+        "ky",     // Kyrgyz
+        "la",     // Latin
+        "lb",     // Luxembourgish
+        "lg",     // Luganda
+        "ln",     // Lingala
+        "lo",     // Lao
+        "lt",     // Lithuanian
+        "lv",     // Latvian
+        "mai",    // Maithili
+        "mg",     // Malagasy
+        "mi",     // Maori
+        "mk",     // Macedonian
+        "ml",     // Malayalam
+        "mn",     // Mongolian
+        "mr",     // Marathi
+        "ms",     // Malay
+        "mt",     // Maltese
+        "my",     // Burmese
+        "ne",     // Nepali
+        "nl",     // Dutch
+        "no",     // Norwegian - Chrome uses "nb"
+        "nso",    // Sepedi
+        "ny",     // Nyanja
+        "om",     // Oromo
+        "or",     // Odia (Oriya)
+        "pa",     // Punjabi
+        "pl",     // Polish
+        "ps",     // Pashto
+        "pt",     // Portuguese
+        "qu",     // Quechua
+        "ro",     // Romanian
+        "ru",     // Russian
+        "rw",     // Kinyarwanda
+        "sa",     // Sanskrit
+        "sd",     // Sindhi
+        "si",     // Sinhala
+        "sk",     // Slovak
+        "sl",     // Slovenian
+        "sm",     // Samoan
+        "sn",     // Shona
+        "so",     // Somali
+        "sq",     // Albanian
+        "sr",     // Serbian
+        "st",     // Southern Sotho
+        "su",     // Sundanese
+        "sv",     // Swedish
+        "sw",     // Swahili
+        "ta",     // Tamil
+        "te",     // Telugu
+        "tg",     // Tajik
+        "th",     // Thai
+        "ti",     // Tigrinya
+        "tk",     // Turkmen
+        "tl",     // Tagalog - Chrome uses "fil"
+        "tr",     // Turkish
+        "ts",     // Tsonga
+        "tt",     // Tatar
+        "ug",     // Uyghur
+        "uk",     // Ukrainian
+        "ur",     // Urdu
+        "uz",     // Uzbek
+        "vi",     // Vietnamese
+        "xh",     // Xhosa
+        "yi",     // Yiddish
+        "yo",     // Yoruba
+        "zh-CN",  // Chinese (Simplified)
+        "zh-TW",  // Chinese (Traditional)
+        "zu",     // Zulu
+    });
 
 // Constant URL string to fetch server supporting language list.
-const char kLanguageListFetchPath[] = "translate_a/l?client=chrome";
-
-// Represent if the language list updater is disabled.
-bool update_is_disabled = false;
+constexpr std::string_view kLanguageListFetchPath =
+    "translate_a/l?client=chrome";
 
 // Retry parameter for fetching.
-const int kMaxRetryOn5xx = 5;
+constexpr int kMaxRetryOn5xx = 5;
 
 }  // namespace
 
 const char TranslateLanguageList::kTargetLanguagesKey[] = "tl";
 
 TranslateLanguageList::TranslateLanguageList()
+    : TranslateLanguageList(
+          std::make_unique<TranslateURLFetcherImpl>(kMaxRetryOn5xx)) {}
+
+TranslateLanguageList::TranslateLanguageList(
+    std::unique_ptr<TranslateUrlFetcher> fetcher)
     : resource_requests_allowed_(false),
       request_pending_(false),
       // We default to our hard coded list of languages in
       // |kDefaultSupportedLanguages|. This list will be overridden by a server
       // providing supported languages list.
       supported_languages_(std::begin(kDefaultSupportedLanguages),
-                           std::end(kDefaultSupportedLanguages)) {
+                           std::end(kDefaultSupportedLanguages)),
+      language_list_fetcher_(std::move(fetcher)) {
   // |kDefaultSupportedLanguages| should be sorted alphabetically and contain no
   // duplicates.
   DCHECK(
       std::is_sorted(supported_languages_.begin(), supported_languages_.end()));
   DCHECK(supported_languages_.end() ==
-         std::adjacent_find(supported_languages_.begin(),
-                            supported_languages_.end()));
-
-  if (update_is_disabled)
-    return;
-
-  language_list_fetcher_ = std::make_unique<TranslateURLFetcher>();
-  language_list_fetcher_->set_max_retry_on_5xx(kMaxRetryOn5xx);
+         std::ranges::adjacent_find(supported_languages_));
 }
 
-TranslateLanguageList::~TranslateLanguageList() {}
+TranslateLanguageList::~TranslateLanguageList() = default;
 
 void TranslateLanguageList::GetSupportedLanguages(
     bool translate_allowed,
@@ -190,11 +349,22 @@ void TranslateLanguageList::GetSupportedLanguages(
 
   // Update language lists if they are not updated after Chrome was launched
   // for later requests.
-  if (translate_allowed && !update_is_disabled && language_list_fetcher_.get())
+  if (translate_allowed && language_list_fetcher_.get()) {
     RequestLanguageList();
+  }
 }
 
-std::string TranslateLanguageList::GetLanguageCode(base::StringPiece language) {
+// static
+void TranslateLanguageList::GetSupportedPartialTranslateLanguages(
+    std::vector<std::string>* languages) {
+  DCHECK(languages && languages->empty());
+
+  *languages = std::vector<std::string>(
+      std::begin(kDefaultSupportedPartialTranslateLanguages),
+      std::end(kDefaultSupportedPartialTranslateLanguages));
+}
+
+std::string TranslateLanguageList::GetLanguageCode(std::string_view language) {
   // Only remove the country code for country specific languages we don't
   // support specifically yet.
   if (IsSupportedLanguage(language))
@@ -202,16 +372,21 @@ std::string TranslateLanguageList::GetLanguageCode(base::StringPiece language) {
   return std::string(language::ExtractBaseLanguage(language));
 }
 
-bool TranslateLanguageList::IsSupportedLanguage(base::StringPiece language) {
-  return std::binary_search(supported_languages_.begin(),
-                            supported_languages_.end(), language);
+bool TranslateLanguageList::IsSupportedLanguage(std::string_view language) {
+  return std::ranges::binary_search(supported_languages_, language);
+}
+
+// static
+bool TranslateLanguageList::IsSupportedPartialTranslateLanguage(
+    std::string_view language) {
+  return std::ranges::binary_search(kDefaultSupportedPartialTranslateLanguages,
+                                    language);
 }
 
 // static
 GURL TranslateLanguageList::TranslateLanguageUrl() {
-  std::string url = translate::GetTranslateSecurityOrigin().spec() +
-      kLanguageListFetchPath;
-  return GURL(url);
+  return GURL(base::StrCat({translate::GetTranslateSecurityOrigin().spec(),
+                            kLanguageListFetchPath}));
 }
 
 void TranslateLanguageList::RequestLanguageList() {
@@ -224,8 +399,8 @@ void TranslateLanguageList::RequestLanguageList() {
   request_pending_ = false;
 
   if (language_list_fetcher_.get() &&
-      (language_list_fetcher_->state() == TranslateURLFetcher::IDLE ||
-       language_list_fetcher_->state() == TranslateURLFetcher::FAILED)) {
+      (language_list_fetcher_->state() == TranslateUrlFetcher::IDLE ||
+       language_list_fetcher_->state() == TranslateUrlFetcher::FAILED)) {
     GURL url = TranslateLanguageUrl();
     url = AddHostLocaleToUrl(url);
     url = AddApiKeyToUrl(url);
@@ -254,22 +429,17 @@ void TranslateLanguageList::SetResourceRequestsAllowed(bool allowed) {
   }
 }
 
-std::unique_ptr<TranslateLanguageList::EventCallbackList::Subscription>
-TranslateLanguageList::RegisterEventCallback(const EventCallback& callback) {
+base::CallbackListSubscription TranslateLanguageList::RegisterEventCallback(
+    const EventCallback& callback) {
   return callback_list_.Add(callback);
 }
 
 bool TranslateLanguageList::HasOngoingLanguageListLoadingForTesting() {
-  return language_list_fetcher_->state() == TranslateURLFetcher::REQUESTING;
+  return language_list_fetcher_->state() == TranslateUrlFetcher::REQUESTING;
 }
 
 GURL TranslateLanguageList::LanguageFetchURLForTesting() {
   return AddApiKeyToUrl(AddHostLocaleToUrl(TranslateLanguageUrl()));
-}
-
-// static
-void TranslateLanguageList::DisableUpdate() {
-  update_is_disabled = true;
 }
 
 void TranslateLanguageList::OnLanguageListFetchComplete(
@@ -301,42 +471,39 @@ void TranslateLanguageList::NotifyEvent(int line, std::string message) {
 }
 
 bool TranslateLanguageList::SetSupportedLanguages(
-    base::StringPiece language_list) {
+    std::string_view language_list) {
   // The format is in JSON as:
   // {
   //   "sl": {"XX": "LanguageName", ...},
   //   "tl": {"XX": "LanguageName", ...}
   // }
   // Where "tl" is set in kTargetLanguagesKey.
-  base::Optional<base::Value> json_value =
-      base::JSONReader::Read(language_list, base::JSON_ALLOW_TRAILING_COMMAS);
+  std::optional<base::DictValue> json_value = base::JSONReader::ReadDict(
+      language_list, base::JSON_ALLOW_TRAILING_COMMAS);
 
-  if (!json_value || !json_value->is_dict()) {
-    NotifyEvent(__LINE__, "Language list is invalid");
-    NOTREACHED();
+  if (!json_value) {
+    LOG(ERROR) << "Failed to parse language list.";
+    // TODO(bug:478219404): Find better way to report this issue.
     return false;
   }
   // The first level dictionary contains two sub-dicts, first for source
   // languages and second for target languages. We want to use the target
   // languages.
-  base::Value* target_languages =
-      json_value->FindDictPath(TranslateLanguageList::kTargetLanguagesKey);
+  const base::DictValue* target_languages =
+      json_value->FindDict(TranslateLanguageList::kTargetLanguagesKey);
   if (!target_languages) {
-    NotifyEvent(__LINE__, "Target languages are not found in the response");
-    NOTREACHED();
+    LOG(ERROR) << "Target languages not found in translate language list.";
+    // TODO(bug:478219404): Find better way to report this issue.
     return false;
   }
-
-  const std::string& locale =
-      TranslateDownloadManager::GetInstance()->application_locale();
 
   // Now we can clear language list.
   supported_languages_.clear();
   // ... and replace it with the values we just fetched from the server.
-  for (const auto& kv_pair : target_languages->DictItems()) {
+  for (auto kv_pair : *target_languages) {
     const std::string& lang = kv_pair.first;
-    if (!l10n_util::IsLocaleNameTranslated(lang.c_str(), locale)) {
-      TranslateBrowserMetrics::ReportUndisplayableLanguage(lang);
+    if (!language::AcceptLanguagesService::CanBeAcceptLanguage(lang.c_str())) {
+      // Don't include languages that can not be Accept-Languages
       continue;
     }
     supported_languages_.push_back(lang);
@@ -347,8 +514,7 @@ bool TranslateLanguageList::SetSupportedLanguages(
   DCHECK(
       std::is_sorted(supported_languages_.begin(), supported_languages_.end()));
   DCHECK(supported_languages_.end() ==
-         std::adjacent_find(supported_languages_.begin(),
-                            supported_languages_.end()));
+         std::ranges::adjacent_find(supported_languages_));
 
   NotifyEvent(__LINE__, base::JoinString(supported_languages_, ", "));
   return true;

@@ -1,8 +1,1 @@
-# For Media Engagement
-mlamouri@chromium.org
-beccahughes@chromium.org
-
-# For WebRTC
-per-file webrtc_*=file://third_party/webrtc_overrides/OWNERS
-
-# COMPONENT: Internals>Media>UI
+per-file webrtc_*=guidou@chromium.org

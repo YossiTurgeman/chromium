@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,14 @@ namespace media {
 
 namespace {
 const gfx::Size kCodedSize(321, 243);
+
+MATCHER(UnexpectedStereoMode, "") {
+  return CONTAINS_STRING(arg, "Unexpected value for StereoMode: 0x");
+}
+
+MATCHER(UnexpectedMultipleValues, "") {
+  return CONTAINS_STRING(arg, "Multiple values for id");
+}
 }
 
 static const struct CodecTestParams {
@@ -41,16 +49,21 @@ class WebMVideoClientTest : public testing::TestWithParam<CodecTestParams> {
     webm_video_client_.OnUInt(kWebMIdPixelHeight, kCodedSize.height());
   }
 
+  WebMVideoClientTest(const WebMVideoClientTest&) = delete;
+  WebMVideoClientTest& operator=(const WebMVideoClientTest&) = delete;
+
   WebMParserClient* OnListStart(int id) {
     return webm_video_client_.OnListStart(id);
   }
 
   void OnListEnd(int id) { webm_video_client_.OnListEnd(id); }
 
+  bool OnUInt(int id, int64_t val) {
+    return webm_video_client_.OnUInt(id, val);
+  }
+
   testing::StrictMock<MockMediaLog> media_log_;
   WebMVideoClient webm_video_client_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebMVideoClientTest);
 };
 
 TEST_P(WebMVideoClientTest, AutodetectVp9Profile2NoDetection) {
@@ -94,9 +107,9 @@ TEST_P(WebMVideoClientTest, AutodetectVp9Profile2HDRMetaData) {
   const bool has_valid_codec_private = GetParam().codec_private.size() > 3;
 
   auto* color_parser = OnListStart(kWebMIdColour);
-  auto* metadata_parser = color_parser->OnListStart(kWebMIdMasteringMetadata);
+  auto* metadata_parser = color_parser->OnListStart(kWebMIdColorVolumeMetadata);
   metadata_parser->OnFloat(kWebMIdPrimaryRChromaticityX, 1.0);
-  color_parser->OnListEnd(kWebMIdMasteringMetadata);
+  color_parser->OnListEnd(kWebMIdColorVolumeMetadata);
   OnListEnd(kWebMIdColour);
 
   VideoDecoderConfig config;
@@ -138,7 +151,7 @@ TEST_P(WebMVideoClientTest, InitializeConfigVP9Profiles) {
                                                   EncryptionScheme(), &config));
 
   VideoDecoderConfig expected_config(
-      kCodecVP9, profile, VideoDecoderConfig::AlphaMode::kIsOpaque,
+      VideoCodec::kVP9, profile, VideoDecoderConfig::AlphaMode::kIsOpaque,
       VideoColorSpace::REC709(), kNoTransformation, kCodedSize,
       gfx::Rect(kCodedSize), kCodedSize, codec_private,
       EncryptionScheme::kUnencrypted);
@@ -147,6 +160,126 @@ TEST_P(WebMVideoClientTest, InitializeConfigVP9Profiles) {
       << "Config (" << config.AsHumanReadableString()
       << ") does not match expected ("
       << expected_config.AsHumanReadableString() << ")";
+}
+
+#if BUILDFLAG(ENABLE_AV1_DECODER)
+TEST_F(WebMVideoClientTest, InitializeConfigAV1Profile) {
+  const std::string codec_id = "V_AV1";
+  const auto expected_profile = AV1PROFILE_PROFILE_HIGH;
+  const std::vector<uint8_t> codec_private{0x81, 0x20, 0x00, 0x00, 0x0a, 0x0a,
+                                           0x20, 0x00, 0x00, 0x03, 0xbf, 0x7f,
+                                           0x7b, 0xff, 0xf3, 0x04};
+
+  VideoDecoderConfig config;
+  EXPECT_TRUE(webm_video_client_.InitializeConfig(codec_id, codec_private,
+                                                  EncryptionScheme(), &config));
+
+  VideoDecoderConfig expected_config(
+      VideoCodec::kAV1, expected_profile,
+      VideoDecoderConfig::AlphaMode::kIsOpaque, VideoColorSpace::REC709(),
+      kNoTransformation, kCodedSize, gfx::Rect(kCodedSize), kCodedSize,
+      codec_private, EncryptionScheme::kUnencrypted);
+
+  EXPECT_TRUE(config.Matches(expected_config))
+      << "Config (" << config.AsHumanReadableString()
+      << ") does not match expected ("
+      << expected_config.AsHumanReadableString() << ")";
+}
+#endif
+
+TEST_F(WebMVideoClientTest, InvalidStereoMode) {
+  EXPECT_MEDIA_LOG(UnexpectedStereoMode());
+  OnUInt(kWebMIdStereoMode, 15);
+}
+
+TEST_F(WebMVideoClientTest, MultipleStereoMode) {
+  OnUInt(kWebMIdStereoMode, 1);
+  EXPECT_MEDIA_LOG(UnexpectedMultipleValues());
+  OnUInt(kWebMIdStereoMode, 1);
+}
+
+TEST_F(WebMVideoClientTest, VerifyTransformationFromProjection) {
+  const auto perform_projection_test =
+      [&](double roll, double yaw,
+          media::VideoTransformation expected_transformation) {
+        SCOPED_TRACE(
+            testing::Message()
+            << "roll: " << roll << ", yaw: " << yaw
+            << ", expected_rotation: " << expected_transformation.rotation
+            << ", expected_mirrored: " << expected_transformation.mirrored);
+
+        webm_video_client_.Reset();
+        OnUInt(kWebMIdPixelWidth, kCodedSize.width());
+        OnUInt(kWebMIdPixelHeight, kCodedSize.height());
+
+        WebMParserClient* projection_parser_client =
+            OnListStart(kWebMIdProjection);
+        ASSERT_NE(projection_parser_client, nullptr);
+        ASSERT_TRUE(projection_parser_client->OnUInt(kWebMIdProjectionType,
+                                                     0));  // 0 for rectangular
+
+        ASSERT_TRUE(
+            projection_parser_client->OnFloat(kWebMIdProjectionPoseYaw, yaw));
+        ASSERT_TRUE(
+            projection_parser_client->OnFloat(kWebMIdProjectionPosePitch, 0.0));
+        ASSERT_TRUE(
+            projection_parser_client->OnFloat(kWebMIdProjectionPoseRoll, roll));
+        OnListEnd(kWebMIdProjection);
+
+        VideoDecoderConfig config;
+        EXPECT_TRUE(webm_video_client_.InitializeConfig(
+            "V_VP9", {}, EncryptionScheme::kUnencrypted, &config));
+
+        EXPECT_EQ(config.video_transformation().rotation,
+                  expected_transformation.rotation);
+        EXPECT_EQ(config.video_transformation().mirrored,
+                  expected_transformation.mirrored);
+      };
+
+  const auto verify_roll = [&](double roll_degrees,
+                               VideoRotation expected_rotation_enum) {
+    perform_projection_test(roll_degrees, /*yaw=*/0.0,
+                            media::VideoTransformation(expected_rotation_enum));
+  };
+
+  // Test cases for roll values, checking snapping to 0, 90, 180, 270 degrees.
+  // VIDEO_ROTATION_0
+  verify_roll(0.0, VIDEO_ROTATION_0);
+  verify_roll(44.9, VIDEO_ROTATION_0);
+  verify_roll(-44.9, VIDEO_ROTATION_0);
+
+  // VIDEO_ROTATION_90
+  verify_roll(90.0, VIDEO_ROTATION_90);
+  verify_roll(45.0, VIDEO_ROTATION_90);
+  verify_roll(134.9, VIDEO_ROTATION_90);
+
+  // VIDEO_ROTATION_180
+  verify_roll(180.0, VIDEO_ROTATION_180);
+  verify_roll(135.0, VIDEO_ROTATION_180);
+  verify_roll(-180.0, VIDEO_ROTATION_180);
+
+  // VIDEO_ROTATION_270
+  verify_roll(-90.0, VIDEO_ROTATION_270);
+  verify_roll(-45.1, VIDEO_ROTATION_270);
+
+  const auto verify_yaw = [&](double yaw_degrees, bool expected_mirrored) {
+    perform_projection_test(
+        0.0, yaw_degrees,
+        media::VideoTransformation(VIDEO_ROTATION_0, expected_mirrored));
+  };
+
+  // Yaw mirror threshold is 1.0. Mirrored if abs(abs(yaw) - 180) < 1.0.
+  constexpr double kYawMirrorThreshold = 1.0;
+
+  // Test cases for yaw values (mirroring)
+  constexpr bool kMirrored = true;
+  verify_yaw(180.0, kMirrored);
+  verify_yaw(-180.0, kMirrored);
+  verify_yaw(0.0, !kMirrored);
+  verify_yaw(1.0, !kMirrored);
+  verify_yaw(-1.0, !kMirrored);
+  verify_yaw(180.0 - kYawMirrorThreshold, !kMirrored);
+  verify_yaw(-180.0 + kYawMirrorThreshold, !kMirrored);
 }
 
 INSTANTIATE_TEST_SUITE_P(All,

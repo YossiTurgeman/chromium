@@ -1,11 +1,13 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/test/chromedriver/net/sync_websocket_factory.h"
 
-#include "base/bind.h"
+#include <memory>
+
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/memory/ref_counted.h"
 #include "chrome/test/chromedriver/log_replay/log_replay_socket.h"
 #include "chrome/test/chromedriver/net/sync_websocket_impl.h"
@@ -20,7 +22,7 @@ std::unique_ptr<SyncWebSocket> CreateSyncWebSocket(
 }
 
 std::unique_ptr<SyncWebSocket> CreateReplayWebSocket(base::FilePath log_path) {
-  return std::unique_ptr<LogReplaySocket>(new LogReplaySocket(log_path));
+  return std::make_unique<LogReplaySocket>(log_path);
 }
 
 }  // namespace

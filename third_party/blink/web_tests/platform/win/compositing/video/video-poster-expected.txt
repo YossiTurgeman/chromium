@@ -5,7 +5,7 @@ Case: No src, no poster
 {
   "layers": [
     {
-      "name": "Scrolling Contents Layer",
+      "name": "Scrolling background of LayoutView #document",
       "bounds": [800, 600],
       "contentsOpaque": true,
       "backgroundColor": "#FFFFFF"
@@ -18,16 +18,10 @@ Case: Displaying poster
 {
   "layers": [
     {
-      "name": "Scrolling Contents Layer",
-      "bounds": [785, 605],
+      "name": "Scrolling background of LayoutView #document",
+      "bounds": [800, 600],
       "contentsOpaque": true,
       "backgroundColor": "#FFFFFF"
-    },
-    {
-      "name": "ContentsLayer for Vertical Scrollbar Layer",
-      "position": [785, 0],
-      "bounds": [15, 600],
-      "contentsOpaque": true
     }
   ]
 }
@@ -37,8 +31,8 @@ Case: Displaying movie
 {
   "layers": [
     {
-      "name": "Scrolling Contents Layer",
-      "bounds": [785, 909],
+      "name": "Scrolling background of LayoutView #document",
+      "bounds": [785, 813],
       "contentsOpaque": true,
       "backgroundColor": "#FFFFFF"
     },
@@ -49,22 +43,18 @@ Case: Displaying movie
       "transform": 1
     },
     {
-      "name": "ContentsLayer for LayoutVideo VIDEO",
+      "name": "LayoutVideo VIDEO",
       "bounds": [352, 288],
       "transform": 1
     },
     {
-      "name": "LayoutNGFlexibleBox (relative positioned) DIV class='sizing-small phase-ready state-scrubbing'",
+      "name": "LayoutFlexibleBox DIV class='sizing-small phase-pre-ready state-no-source'",
       "bounds": [352, 288],
+      "drawsContent": false,
       "transform": 1
     },
     {
-      "name": "Squashing Layer (first squashed layer: LayoutNGBlockFlow (positioned) DIV)",
-      "bounds": [352, 288],
-      "transform": 1
-    },
-    {
-      "name": "ContentsLayer for Vertical Scrollbar Layer",
+      "name": "VerticalScrollbar",
       "position": [785, 0],
       "bounds": [15, 600],
       "contentsOpaque": true

@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,14 +10,15 @@
 #include <memory>
 
 #include "base/android/scoped_java_ref.h"
-#include "base/single_thread_task_runner.h"
+#include "base/dcheck_is_on.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/sequence_manager/sequence_manager.h"
 #include "base/task/sequence_manager/task_queue.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 
 namespace base {
 
-class MessagePumpForUI;
+class MessagePumpAndroid;
 
 namespace android {
 
@@ -31,7 +32,7 @@ class BASE_EXPORT JavaHandlerThread {
   // Create new thread.
   explicit JavaHandlerThread(
       const char* name,
-      base::ThreadPriority priority = base::ThreadPriority::NORMAL);
+      base::ThreadType thread_type = base::ThreadType::kDefault);
   // Wrap and connect to an existing JavaHandlerThread.
   // |obj| is an instance of JavaHandlerThread.
   explicit JavaHandlerThread(
@@ -51,8 +52,7 @@ class BASE_EXPORT JavaHandlerThread {
 
   // Called from java on the newly created thread.
   // Start() will not return before this methods has finished.
-  void InitializeThread(JNIEnv* env,
-                        jlong event);
+  void InitializeThread(JNIEnv* env, int64_t event);
   // Called from java on this thread.
   void OnLooperStopped(JNIEnv* env);
 
@@ -67,6 +67,10 @@ class BASE_EXPORT JavaHandlerThread {
   // Called from this thread.
   ScopedJavaLocalRef<jthrowable> GetUncaughtExceptionIfAny();
 
+  // Returns the thread ID.  Should not be called before the first Start*()
+  // call. This method is thread-safe.
+  PlatformThreadId GetThreadId() const;
+
  protected:
   // Struct exists so JavaHandlerThread destructor can intentionally leak in an
   // abort scenario.
@@ -75,8 +79,8 @@ class BASE_EXPORT JavaHandlerThread {
     ~State();
 
     std::unique_ptr<sequence_manager::SequenceManager> sequence_manager;
-    scoped_refptr<sequence_manager::TaskQueue> default_task_queue;
-    MessagePumpForUI* pump = nullptr;
+    sequence_manager::TaskQueue::Handle default_task_queue;
+    raw_ptr<MessagePumpAndroid> pump = nullptr;
   };
 
   State* state() const { return state_.get(); }
@@ -99,7 +103,11 @@ class BASE_EXPORT JavaHandlerThread {
   void QuitThreadSafely();
 
   const char* name_;
+  base::PlatformThreadId thread_id_{};
   ScopedJavaGlobalRef<jobject> java_thread_;
+#if DCHECK_IS_ON()
+  bool initialized_ = false;
+#endif
 };
 
 }  // namespace android

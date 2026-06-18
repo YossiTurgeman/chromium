@@ -1,18 +1,18 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-#include "chrome/browser/downgrade/user_data_downgrade.h"
 
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/files/file_util.h"
 #include "base/path_service.h"
-#include "base/strings/string_piece.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/cancelable_task_tracker.h"
 #include "base/test/mock_callback.h"
@@ -22,6 +22,8 @@
 #include "build/build_config.h"
 #include "chrome/browser/bookmarks/bookmark_model_factory.h"
 #include "chrome/browser/downgrade/downgrade_manager.h"
+#include "chrome/browser/downgrade/downgrade_manager_delegate_impl.h"
+#include "chrome/browser/downgrade/user_data_downgrade.h"
 #include "chrome/browser/first_run/scoped_relaunch_chrome_browser_override.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
@@ -50,7 +52,7 @@
 #include "ui/base/page_transition_types.h"
 #include "ui/base/window_open_disposition.h"
 
-#if defined(OS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
 #include "base/threading/thread_restrictions.h"
 #include "chrome/install_static/install_modes.h"
 #include "chrome/install_static/test/scoped_install_details.h"
@@ -66,8 +68,8 @@ MATCHER_P(HasSwitch, switch_name, "") {
   return arg.HasSwitch(switch_name);
 }
 
-int GetPrePrefixCount(base::StringPiece test_name) {
-  static constexpr base::StringPiece kPrePrefix("PRE_");
+int GetPrePrefixCount(std::string_view test_name) {
+  static constexpr std::string_view kPrePrefix("PRE_");
   int pre_count = 0;
   while (
       base::StartsWith(test_name, kPrePrefix, base::CompareCase::SENSITIVE)) {
@@ -160,7 +162,7 @@ class UserDataSnapshotBrowserTestBase : public InProcessBrowserTest {
               mock_relaunch_callback_->Get());
 
       // Expect that browser startup short-circuits into a relaunch.
-      set_expected_exit_code(chrome::RESULT_CODE_DOWNGRADE_AND_RELAUNCH);
+      set_expected_exit_code(CHROME_RESULT_CODE_DOWNGRADE_AND_RELAUNCH);
     }
   }
 
@@ -271,27 +273,32 @@ class BookmarksSnapshotTest : public UserDataSnapshotBrowserTestBase {
   const GURL that_other_url_{"https://www.thatotherul.com"};
   const GURL mobile_url_{"https://www.mobile.com"};
 
-  const base::string16 folder_title_ = base::ASCIIToUTF16("Folder");
-  const base::string16 sub_folder_title_ = base::ASCIIToUTF16("Sub Folder");
-  const base::string16 sub_folder_url_title_ =
-      base::ASCIIToUTF16("Sub Folder URL");
-  const base::string16 that_url_title_ = base::ASCIIToUTF16("That URL");
-  const base::string16 folder_url_title_ = base::ASCIIToUTF16("Folder URL");
-  const base::string16 other_url_title_ = base::ASCIIToUTF16("Other URL");
-  const base::string16 that_other_url_title_ =
-      base::ASCIIToUTF16("That Other URL");
-  const base::string16 mobile_url_title_ = base::ASCIIToUTF16("Mobile URL");
+  const std::u16string folder_title_ = u"Folder";
+  const std::u16string sub_folder_title_ = u"Sub Folder";
+  const std::u16string sub_folder_url_title_ = u"Sub Folder URL";
+  const std::u16string that_url_title_ = u"That URL";
+  const std::u16string folder_url_title_ = u"Folder URL";
+  const std::u16string other_url_title_ = u"Other URL";
+  const std::u16string that_other_url_title_ = u"That Other URL";
+  const std::u16string mobile_url_title_ = u"Mobile URL";
 };
 
 IN_PROC_BROWSER_TEST_F(BookmarksSnapshotTest, PRE_PRE_PRE_Test) {}
 IN_PROC_BROWSER_TEST_F(BookmarksSnapshotTest, PRE_PRE_Test) {}
 IN_PROC_BROWSER_TEST_F(BookmarksSnapshotTest, PRE_Test) {}
-IN_PROC_BROWSER_TEST_F(BookmarksSnapshotTest, Test) {}
+// TODO(crbug.com/326168468): Flaky on TSan.
+#if defined(THREAD_SANITIZER)
+#define MAYBE_Test DISABLED_Test
+#else
+#define MAYBE_Test Test
+#endif
+IN_PROC_BROWSER_TEST_F(BookmarksSnapshotTest, MAYBE_Test) {}
+#undef MAYBE_Test
 
 class HistorySnapshotTest : public UserDataSnapshotBrowserTestBase {
   struct HistoryEntry {
-    HistoryEntry(base::StringPiece url,
-                 base::StringPiece title,
+    HistoryEntry(std::string_view url,
+                 std::string_view title,
                  base::Time time,
                  history::VisitSource source)
         : url(url),
@@ -300,7 +307,7 @@ class HistorySnapshotTest : public UserDataSnapshotBrowserTestBase {
           source(source) {}
     ~HistoryEntry() = default;
     GURL url;
-    base::string16 title;
+    std::u16string title;
     base::Time time;
     history::VisitSource source;
   };
@@ -323,7 +330,7 @@ class HistorySnapshotTest : public UserDataSnapshotBrowserTestBase {
     base::RunLoop run_loop;
     base::CancelableTaskTracker tracker;
     history_service->QueryHistory(
-        base::string16(), history::QueryOptions(),
+        std::u16string(), history::QueryOptions(),
         base::BindOnce(&HistorySnapshotTest::SetQueryResults,
                        base::Unretained(this), run_loop.QuitClosure()),
         &tracker);
@@ -355,27 +362,27 @@ class HistorySnapshotTest : public UserDataSnapshotBrowserTestBase {
   const std::vector<HistoryEntry> history_entries_{
       HistoryEntry("https://www.website.com",
                    "website",
-                   base::Time::FromDoubleT(1000),
+                   base::Time::FromSecondsSinceUnixEpoch(1000),
                    history::VisitSource::SOURCE_BROWSED),
       HistoryEntry("https://www.website1.com",
                    "website1",
-                   base::Time::FromDoubleT(10001),
+                   base::Time::FromSecondsSinceUnixEpoch(10001),
                    history::VisitSource::SOURCE_EXTENSION),
       HistoryEntry("https://www.website2.com",
                    "website2",
-                   base::Time::FromDoubleT(10002),
+                   base::Time::FromSecondsSinceUnixEpoch(10002),
                    history::VisitSource::SOURCE_FIREFOX_IMPORTED),
       HistoryEntry("https://www.website3.com",
                    "website3",
-                   base::Time::FromDoubleT(10003),
+                   base::Time::FromSecondsSinceUnixEpoch(10003),
                    history::VisitSource::SOURCE_IE_IMPORTED),
       HistoryEntry("https://www.website4.com",
                    "website4",
-                   base::Time::FromDoubleT(10004),
+                   base::Time::FromSecondsSinceUnixEpoch(10004),
                    history::VisitSource::SOURCE_SAFARI_IMPORTED),
       HistoryEntry("https://www.website5.com",
                    "website5",
-                   base::Time::FromDoubleT(10005),
+                   base::Time::FromSecondsSinceUnixEpoch(10005),
                    history::VisitSource::SOURCE_SYNCED),
   };
 };
@@ -383,7 +390,14 @@ class HistorySnapshotTest : public UserDataSnapshotBrowserTestBase {
 IN_PROC_BROWSER_TEST_F(HistorySnapshotTest, PRE_PRE_PRE_Test) {}
 IN_PROC_BROWSER_TEST_F(HistorySnapshotTest, PRE_PRE_Test) {}
 IN_PROC_BROWSER_TEST_F(HistorySnapshotTest, PRE_Test) {}
-IN_PROC_BROWSER_TEST_F(HistorySnapshotTest, Test) {}
+// TODO(crbug.com/326168468): Flaky on TSan.
+#if defined(THREAD_SANITIZER)
+#define MAYBE_Test DISABLED_Test
+#else
+#define MAYBE_Test Test
+#endif
+IN_PROC_BROWSER_TEST_F(HistorySnapshotTest, MAYBE_Test) {}
+#undef MAYBE_Test
 
 class TabsSnapshotTest : public UserDataSnapshotBrowserTestBase {
  protected:
@@ -394,13 +408,18 @@ class TabsSnapshotTest : public UserDataSnapshotBrowserTestBase {
 
   void SimulateUserActions() override {
     browser()->profile()->GetPrefs()->SetInteger(prefs::kRestoreOnStartup, 1);
-    browser()->OpenURL(content::OpenURLParams(
-        embedded_test_server()->GetURL("/title1.html"), content::Referrer(),
-        WindowOpenDisposition::CURRENT_TAB, ui::PAGE_TRANSITION_TYPED, false));
-    browser()->OpenURL(content::OpenURLParams(
-        embedded_test_server()->GetURL("/title2.html"), content::Referrer(),
-        WindowOpenDisposition::NEW_FOREGROUND_TAB, ui::PAGE_TRANSITION_LINK,
-        false));
+    browser()->OpenURL(
+        content::OpenURLParams(embedded_test_server()->GetURL("/title1.html"),
+                               content::Referrer(),
+                               WindowOpenDisposition::CURRENT_TAB,
+                               ui::PAGE_TRANSITION_TYPED, false),
+        /*navigation_handle_callback=*/{});
+    browser()->OpenURL(
+        content::OpenURLParams(embedded_test_server()->GetURL("/title2.html"),
+                               content::Referrer(),
+                               WindowOpenDisposition::NEW_FOREGROUND_TAB,
+                               ui::PAGE_TRANSITION_LINK, false),
+        /*navigation_handle_callback=*/{});
   }
 
   void ValidateUserActions() override {
@@ -415,21 +434,31 @@ class TabsSnapshotTest : public UserDataSnapshotBrowserTestBase {
     ASSERT_LE(tab_strip->count(), 3);
     if (tab_strip->count() == 3) {
       EXPECT_TRUE(content::WaitForLoadStop(tab_strip->GetWebContentsAt(2)));
-      EXPECT_EQ(tab_strip->GetWebContentsAt(2)->GetURL(), GURL("about:blank"));
+      EXPECT_EQ(tab_strip->GetWebContentsAt(2)->GetLastCommittedURL(),
+                GURL("about:blank"));
     }
 
     // embedded_test_server() might return a different hostname.
     content::WaitForLoadStop(tab_strip->GetWebContentsAt(0));
-    EXPECT_EQ(tab_strip->GetWebContentsAt(0)->GetURL().path(), "/title1.html");
+    EXPECT_EQ(tab_strip->GetWebContentsAt(0)->GetLastCommittedURL().GetPath(),
+              "/title1.html");
     content::WaitForLoadStop(tab_strip->GetWebContentsAt(1));
-    EXPECT_EQ(tab_strip->GetWebContentsAt(1)->GetURL().path(), "/title2.html");
+    EXPECT_EQ(tab_strip->GetWebContentsAt(1)->GetLastCommittedURL().GetPath(),
+              "/title2.html");
   }
 };
 
 IN_PROC_BROWSER_TEST_F(TabsSnapshotTest, PRE_PRE_PRE_Test) {}
 IN_PROC_BROWSER_TEST_F(TabsSnapshotTest, PRE_PRE_Test) {}
 IN_PROC_BROWSER_TEST_F(TabsSnapshotTest, PRE_Test) {}
-IN_PROC_BROWSER_TEST_F(TabsSnapshotTest, Test) {}
+// TODO(crbug.com/326168468): Flaky on TSan.
+#if defined(THREAD_SANITIZER)
+#define MAYBE_Test DISABLED_Test
+#else
+#define MAYBE_Test Test
+#endif
+IN_PROC_BROWSER_TEST_F(TabsSnapshotTest, MAYBE_Test) {}
+#undef MAYBE_Test
 
 // Tests that Google Chrome does not takes snapshots on mid-milestone updates.
 IN_PROC_BROWSER_TEST_F(InProcessBrowserTest, SameMilestoneSnapshot) {
@@ -444,8 +473,9 @@ IN_PROC_BROWSER_TEST_F(InProcessBrowserTest, SameMilestoneSnapshot) {
   // No snapshots for same version.
   base::WriteFile(user_data_dir.Append(kDowngradeLastVersionFile),
                   current_version);
+  downgrade::DowngradeManagerDelegateImpl delegate;
   EXPECT_FALSE(downgrade_manager.PrepareUserDataDirectoryForCurrentVersion(
-      user_data_dir));
+      user_data_dir, &delegate));
   EXPECT_FALSE(
       base::PathExists(user_data_dir.Append(downgrade::kSnapshotsDir)));
 
@@ -463,12 +493,12 @@ IN_PROC_BROWSER_TEST_F(InProcessBrowserTest, SameMilestoneSnapshot) {
                   last_minor_version);
 
   EXPECT_FALSE(downgrade_manager.PrepareUserDataDirectoryForCurrentVersion(
-      user_data_dir));
+      user_data_dir, &delegate));
   EXPECT_FALSE(
       base::PathExists(user_data_dir.Append(downgrade::kSnapshotsDir)));
 }
 
-#if defined(OS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
 // Tests that Google Chrome canary takes snapshots on mid-milestone updates.
 IN_PROC_BROWSER_TEST_F(InProcessBrowserTest, CanarySameMilestoneSnapshot) {
   DowngradeManager::EnableSnapshotsForTesting(true);
@@ -484,8 +514,10 @@ IN_PROC_BROWSER_TEST_F(InProcessBrowserTest, CanarySameMilestoneSnapshot) {
   // No snapshots for same version.
   base::WriteFile(user_data_dir.Append(kDowngradeLastVersionFile),
                   current_version);
+
+  downgrade::DowngradeManagerDelegateImpl delegate;
   EXPECT_FALSE(downgrade_manager.PrepareUserDataDirectoryForCurrentVersion(
-      user_data_dir));
+      user_data_dir, &delegate));
   EXPECT_FALSE(
       base::PathExists(user_data_dir.Append(downgrade::kSnapshotsDir)));
 
@@ -503,9 +535,9 @@ IN_PROC_BROWSER_TEST_F(InProcessBrowserTest, CanarySameMilestoneSnapshot) {
                   last_minor_version);
 
   EXPECT_FALSE(downgrade_manager.PrepareUserDataDirectoryForCurrentVersion(
-      user_data_dir));
+      user_data_dir, &delegate));
   EXPECT_TRUE(base::PathExists(user_data_dir.Append(downgrade::kSnapshotsDir)));
 }
-#endif  // defined(OS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
 
 }  // namespace downgrade

@@ -1,10 +1,11 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/command_line.h"
 #include "chrome/common/extensions/manifest_tests/chrome_manifest_test.h"
 #include "chrome/common/url_constants.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest.h"
@@ -12,6 +13,8 @@
 #include "extensions/common/permissions/permissions_data.h"
 #include "extensions/common/switches.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -21,13 +24,14 @@ const char kChromeUntrustedTestURL[] = "chrome-untrusted://test/";
 
 namespace errors = manifest_errors;
 
-typedef ChromeManifestTest ChromePermissionManifestTest;
+using ChromePermissionManifestTest = ChromeManifestTest;
 
 TEST_F(ChromePermissionManifestTest, ChromeURLPermissionInvalid) {
-  LoadAndExpectWarning("permission_chrome_url_invalid.json",
-                       ErrorUtils::FormatErrorMessage(
-                           errors::kInvalidPermissionScheme,
-                           chrome::kChromeUINewTabURL));
+  LoadAndExpectWarning(
+      "permission_chrome_url_invalid.json",
+      ErrorUtils::FormatErrorMessage(errors::kInvalidPermissionScheme,
+                                     manifest_keys::kPermissions,
+                                     chrome::kChromeUINewTabURL));
 }
 
 TEST_F(ChromePermissionManifestTest, ChromeUntrustedURLPermissionInvalid) {
@@ -39,14 +43,14 @@ TEST_F(ChromePermissionManifestTest, ChromeUntrustedURLPermissionInvalid) {
 
 TEST_F(ChromePermissionManifestTest, ChromeURLPermissionAllowedWithFlag) {
   // Ignore the policy delegate for this test.
-  PermissionsData::SetPolicyDelegate(NULL);
+  PermissionsData::SetPolicyDelegate(nullptr);
   base::CommandLine::ForCurrentProcess()->AppendSwitch(
       switches::kExtensionsOnChromeURLs);
   std::string error;
   scoped_refptr<Extension> extension =
     LoadAndExpectSuccess("permission_chrome_url_invalid.json");
   EXPECT_EQ("", error);
-  const GURL newtab_url(chrome::kChromeUINewTabURL);
+  const GURL& newtab_url = chrome::ChromeUINewTabURLAsGURL();
   EXPECT_TRUE(
       extension->permissions_data()->CanAccessPage(newtab_url, 0, &error))
       << error;
@@ -71,11 +75,10 @@ TEST_F(ChromePermissionManifestTest,
   LoadAndExpectWarning("permission_chrome_resources_url.json",
                        ErrorUtils::FormatErrorMessage(
                            errors::kInvalidPermissionScheme,
-                           "chrome://resources/"));
+                           manifest_keys::kPermissions, "chrome://resources/"));
   std::string error;
-  LoadExtension(ManifestData("permission_chrome_resources_url.json"),
-                &error,
-                extensions::Manifest::COMPONENT,
+  LoadExtension(ManifestData("permission_chrome_resources_url.json"), &error,
+                extensions::mojom::ManifestLocation::kComponent,
                 Extension::NO_FLAGS);
   EXPECT_EQ("", error);
 }

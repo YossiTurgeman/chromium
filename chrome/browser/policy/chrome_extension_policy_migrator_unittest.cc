@@ -1,12 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/policy/chrome_extension_policy_migrator.h"
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/strings/string16.h"
+#include <string>
+
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "extensions/common/hashed_extension_id.h"
@@ -57,9 +58,11 @@ class TestingPolicyMigrator : public ChromeExtensionPolicyMigrator {
         Migration(kOldPolicy4, kNewPolicy4,
                   base::BindRepeating(&MultiplyByTwo)),
     };
-    CopyPoliciesIfUnset(bundle,
-                        extensions::HashedExtensionId(kExtensionId).value(),
-                        migrations);
+    CopyPoliciesIfUnset(
+        bundle,
+        extensions::HashedExtensionId(extensions::ExtensionId(kExtensionId))
+            .value(),
+        migrations);
   }
 };
 
@@ -84,16 +87,20 @@ TEST(ChromeExtensionPolicyMigratorTest, CopyPoliciesIfUnset) {
 
   // Policies in kMigrations should be renamed + copied into the Chrome domain.
   EXPECT_EQ(4u, chrome_map.size());
-  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy1));
-  EXPECT_EQ(base::Value(kOldValue1), *chrome_map.GetValue(kNewPolicy1));
-  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy2));
-  EXPECT_EQ(base::Value(kOldValue2), *chrome_map.GetValue(kNewPolicy2));
+  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy1, base::Value::Type::INTEGER));
+  EXPECT_EQ(base::Value(kOldValue1),
+            *chrome_map.GetValue(kNewPolicy1, base::Value::Type::INTEGER));
+  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy2, base::Value::Type::INTEGER));
+  EXPECT_EQ(base::Value(kOldValue2),
+            *chrome_map.GetValue(kNewPolicy2, base::Value::Type::INTEGER));
   // kNewPolicy3 is already set, and should not be overwritten.
-  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy3));
-  EXPECT_EQ(base::Value(kNewValue3), *chrome_map.GetValue(kNewPolicy3));
+  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy3, base::Value::Type::INTEGER));
+  EXPECT_EQ(base::Value(kNewValue3),
+            *chrome_map.GetValue(kNewPolicy3, base::Value::Type::INTEGER));
   // This policy was transformed by MultiplyByTwo.
-  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy4));
-  EXPECT_EQ(base::Value(kNewValue4), *chrome_map.GetValue(kNewPolicy4));
+  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy4, base::Value::Type::INTEGER));
+  EXPECT_EQ(base::Value(kNewValue4),
+            *chrome_map.GetValue(kNewPolicy4, base::Value::Type::INTEGER));
 }
 
 TEST(ChromeExtensionPolicyMigratorTest, DeprecatedWarnings) {
@@ -110,11 +117,13 @@ TEST(ChromeExtensionPolicyMigratorTest, DeprecatedWarnings) {
 
   // Policies in kMigrations should be renamed + copied into the Chrome domain.
   EXPECT_EQ(1u, chrome_map.size());
-  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy1));
-  base::RepeatingCallback<base::string16(int)> l10nlookup =
+  ASSERT_TRUE(chrome_map.GetValue(kNewPolicy1, base::Value::Type::INTEGER));
+  base::RepeatingCallback<std::u16string(int)> l10nlookup =
       base::BindRepeating(&l10n_util::GetStringUTF16);
   EXPECT_FALSE(
-      chrome_map.Get(kNewPolicy1)->GetLocalizedErrors(l10nlookup).empty());
+      chrome_map.Get(kNewPolicy1)
+          ->GetLocalizedMessages(PolicyMap::MessageType::kWarning, l10nlookup)
+          .empty());
 }
 
 }  // namespace policy

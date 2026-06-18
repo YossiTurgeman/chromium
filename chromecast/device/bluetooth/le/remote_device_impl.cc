@@ -1,18 +1,21 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chromecast/device/bluetooth/le/remote_device_impl.h"
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "chromecast/base/bind_to_task_runner.h"
 #include "chromecast/device/bluetooth/bluetooth_util.h"
 #include "chromecast/device/bluetooth/le/gatt_client_manager_impl.h"
 #include "chromecast/device/bluetooth/le/remote_characteristic_impl.h"
 #include "chromecast/device/bluetooth/le/remote_descriptor_impl.h"
 #include "chromecast/device/bluetooth/le/remote_service_impl.h"
+#include "chromecast/public/bluetooth/gatt.h"
 
 namespace chromecast {
 namespace bluetooth {
@@ -69,24 +72,24 @@ RemoteDeviceImpl::RemoteDeviceImpl(
 
 RemoteDeviceImpl::~RemoteDeviceImpl() = default;
 
-void RemoteDeviceImpl::Connect(StatusCallback cb) {
-  MAKE_SURE_IO_THREAD(Connect, BindToCurrentSequence(std::move(cb)));
+void RemoteDeviceImpl::Connect(ConnectCallback cb,
+                               bluetooth_v2_shlib::Gatt::Client::Transport transport) {
+  MAKE_SURE_IO_THREAD(Connect, BindToCurrentSequence(std::move(cb)), transport);
   LOG(INFO) << "Connect(" << util::AddrLastByteString(addr_) << ")";
 
   if (!gatt_client_manager_) {
     LOG(ERROR) << __func__ << " failed: Destroyed";
-    EXEC_CB_AND_RET(cb, false);
+    EXEC_CB_AND_RET(cb, ConnectStatus::kGattClientManagerDestroyed);
   }
 
-  if (connect_pending_) {
+  if (connect_cb_) {
     LOG(ERROR) << __func__ << " failed: Connection pending";
-    EXEC_CB_AND_RET(cb, false);
+    EXEC_CB_AND_RET(cb, ConnectStatus::kConnectPending);
   }
 
   gatt_client_manager_->NotifyConnect(addr_);
-  connect_pending_ = true;
   connect_cb_ = std::move(cb);
-  gatt_client_manager_->EnqueueConnectRequest(addr_, true);
+  gatt_client_manager_->EnqueueConnectRequest(addr_, true, transport);
 }
 
 void RemoteDeviceImpl::Disconnect(StatusCallback cb) {
@@ -496,6 +499,12 @@ void RemoteDeviceImpl::OnServicesAdded(
     const std::vector<bluetooth_v2_shlib::Gatt::Service>& services) {
   DCHECK(io_task_runner_->BelongsToCurrentThread());
   for (const auto& service : services) {
+    auto it = uuid_to_service_.find(service.uuid);
+    if (it != uuid_to_service_.end()) {
+      for (auto& characteristic : it->second->GetCharacteristics()) {
+        handle_to_characteristic_.erase(characteristic->handle());
+      }
+    }
     uuid_to_service_[service.uuid] = new RemoteServiceImpl(
         this, gatt_client_manager_, service, io_task_runner_);
   }
@@ -519,11 +528,9 @@ void RemoteDeviceImpl::OnReadRemoteRssiComplete(bool status, int rssi) {
 
 void RemoteDeviceImpl::ConnectComplete(bool success) {
   DCHECK(io_task_runner_->BelongsToCurrentThread());
-  if (connect_pending_) {
-    connect_pending_ = false;
-    if (connect_cb_) {
-      std::move(connect_cb_).Run(success);
-    }
+  if (connect_cb_) {
+    std::move(connect_cb_)
+        .Run(success ? ConnectStatus::kSuccess : ConnectStatus::kFailure);
   }
 }
 
@@ -592,7 +599,7 @@ void RemoteDeviceImpl::ReadCharacteristicImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_characteristic_read_cbs_.find(characteristic->handle());
-  DCHECK(it != handle_to_characteristic_read_cbs_.end());
+  CHECK(it != handle_to_characteristic_read_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false, {});
   it->second.pop();
@@ -613,7 +620,7 @@ void RemoteDeviceImpl::WriteCharacteristicImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_characteristic_write_cbs_.find(characteristic->handle());
-  DCHECK(it != handle_to_characteristic_write_cbs_.end());
+  CHECK(it != handle_to_characteristic_write_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false);
   it->second.pop();
@@ -631,7 +638,7 @@ void RemoteDeviceImpl::ReadDescriptorImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_descriptor_read_cbs_.find(descriptor->handle());
-  DCHECK(it != handle_to_descriptor_read_cbs_.end());
+  CHECK(it != handle_to_descriptor_read_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false, {});
   it->second.pop();
@@ -650,7 +657,7 @@ void RemoteDeviceImpl::WriteDescriptorImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_descriptor_write_cbs_.find(descriptor->handle());
-  DCHECK(it != handle_to_descriptor_write_cbs_.end());
+  CHECK(it != handle_to_descriptor_write_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false);
   it->second.pop();

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,18 +8,39 @@
 #include <stdint.h>
 
 #include <memory>
+#include <string>
+#include <utility>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/callback_list.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
+#include "base/location.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "ui/accessibility/ax_mode_observer.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/accessibility/platform/ax_mode_observer.h"
+#include "ui/accessibility/platform/ax_platform.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/views/accessibility/tree/widget_ax_manager_observer.h"
 #include "ui/views/controls/native/native_view_host.h"
 #include "ui/views/controls/webview/webview_export.h"
+#include "ui/views/metadata/view_factory.h"
 #include "ui/views/view.h"
+#include "ui/views/view_tracker.h"
+#include "ui/views/view_utils.h"
+
+class GURL;
+
+namespace content {
+class BrowserContext;
+class WebContents;
+}  // namespace content
 
 namespace views {
+
+class WidgetAXManager;
 
 // Provides a view of a WebContents instance.  WebView can be used standalone,
 // creating and displaying an internally-owned WebContents; or within a full
@@ -38,27 +59,52 @@ namespace views {
 class WEBVIEW_EXPORT WebView : public View,
                                public content::WebContentsDelegate,
                                public content::WebContentsObserver,
-                               public ui::AXModeObserver {
+                               public ui::AXModeObserver,
+                               public WidgetAXManagerObserver {
+  METADATA_HEADER(WebView, View)
+
  public:
-  METADATA_HEADER(WebView);
+  // Whether the navigation should be allowed to be automatically upgraded to
+  // HTTPS. Only applies to initial loads.
+  enum class HttpsUpgradePolicy {
+    // Allows the navigation to be upgraded to HTTPS when possible.
+    kAllowUpgrade,
+    // Exempts the navigation from being upgraded to HTTPS (e.g. when loading
+    // a captive portal login page).
+    kNoUpgrade,
+  };
+
+  using ReturnCrashOverlayToOwnerCallback =
+      base::OnceCallback<void(std::unique_ptr<View>)>;
+  using WebContentsAttachedCallback = base::RepeatingCallback<void(WebView*)>;
+  using WebContentsDetachedCallback = base::RepeatingCallback<void(WebView*)>;
+  using WebContentsFocusedCallback = base::RepeatingCallback<void(WebView*)>;
 
   explicit WebView(content::BrowserContext* browser_context = nullptr);
+
+  WebView(const WebView&) = delete;
+  WebView& operator=(const WebView&) = delete;
+
   ~WebView() override;
 
-  // This creates a WebContents if |kBrowserContext| has been set and there is
+  static bool IsWebViewContents(const content::WebContents* web_contents);
+
+  // This creates a WebContents if |browser_context_| has been set and there is
   // not yet a WebContents associated with this WebView, otherwise it will
-  // return a nullptr.
-  content::WebContents* GetWebContents();
+  // return the existing web contents. `url` is used to create a `SiteInstance`
+  // for the `WebContents`. If `url` is empty, a default `SiteInstance` will be
+  // used.
+  content::WebContents* GetWebContents(
+      const GURL& url = GURL(),
+      base::Location creator_location = base::Location::Current());
 
   // WebView does not assume ownership of WebContents set via this method, only
   // those it implicitly creates via GetWebContents() above.
-  void SetWebContents(content::WebContents* web_contents);
+  virtual void SetWebContents(content::WebContents* web_contents);
 
-  // If |mode| is true, WebView will register itself with WebContents as a
-  // WebContentsObserver, monitor for the showing/destruction of fullscreen
-  // render widgets, and alter its child view hierarchy to embed the fullscreen
-  // widget or restore the normal WebContentsView.
-  void SetEmbedFullscreenWidgetMode(bool mode);
+  // Similar to `SetWebContents()` but this method takes the ownership of the
+  // `web_contents`.
+  void SetOwnedWebContents(std::unique_ptr<content::WebContents> web_contents);
 
   content::BrowserContext* GetBrowserContext();
   void SetBrowserContext(content::BrowserContext* browser_context);
@@ -68,7 +114,11 @@ class WEBVIEW_EXPORT WebView : public View,
   // convenience for loading the initial URL, and so URLs are navigated with
   // PAGE_TRANSITION_AUTO_TOPLEVEL, so this is not intended as a general purpose
   // navigation method - use WebContents' API directly.
-  void LoadInitialURL(const GURL& url);
+  void LoadInitialURL(
+      const GURL& url,
+      HttpsUpgradePolicy https_upgrade_policy =
+          HttpsUpgradePolicy::kAllowUpgrade,
+      base::Location invoke_location = base::Location::Current());
 
   // Controls how the attached WebContents is resized.
   // false = WebContents' views' bounds are updated continuously as the
@@ -78,16 +128,78 @@ class WEBVIEW_EXPORT WebView : public View,
   //         a continuous size operation completes. This allows for smoother
   //         resizing performance during interactive resizes and animations.
   void SetFastResize(bool fast_resize);
+  bool GetFastResize() const;
 
   // If enabled, this will make the WebView's preferred size dependent on the
   // WebContents' size.
   void EnableSizingFromWebContents(const gfx::Size& min_size,
                                    const gfx::Size& max_size);
 
-  // If provided, this View will be shown in place of the web contents
-  // when the web contents is in a crashed state. This is cleared automatically
-  // if the web contents is changed.
-  void SetCrashedOverlayView(View* crashed_overlay_view);
+  // A scoped object that disconnects the webview from the accessibility tree.
+  // When destroyed, it restores the previous accessibility state.
+  class WEBVIEW_EXPORT ScopedAxDisconnectLock {
+   public:
+    ScopedAxDisconnectLock(const ScopedAxDisconnectLock&) = delete;
+    ScopedAxDisconnectLock& operator=(const ScopedAxDisconnectLock&) = delete;
+    ~ScopedAxDisconnectLock();
+
+   private:
+    friend class WebView;
+    explicit ScopedAxDisconnectLock(base::WeakPtr<WebView> web_view);
+
+    base::WeakPtr<WebView> web_view_;
+  };
+
+  // Temporarily prevents the webview from generating its own AX tree or being
+  // exposed to screen readers, in favor of another WebContents, e.g. in the
+  // Immersive Reading Mode view.  Returns a scoped object that will restore the
+  // previous state when destroyed.
+  [[nodiscard]] std::unique_ptr<ScopedAxDisconnectLock>
+  DisconnectWebContentsAccessibility();
+
+  // Takes ownership of `crashed_overlay_view` and shows it when the web
+  // contents is in a crashed state. If the web_contents is cleared, the view
+  // is returned to the caller via `return_to_owner`. By default, ownership is
+  // not returned in any the view is destroyed. Returns the raw pointer for
+  // callers that may want to hold a pointer to the view.
+  template <typename T>
+  T* TakeCrashedOverlayView(
+      std::unique_ptr<T> crashed_overlay_view,
+      ReturnCrashOverlayToOwnerCallback return_to_owner = base::DoNothing()) {
+    T* view_ptr = crashed_overlay_view.get();
+    TakeCrashedOverlayViewImpl(std::move(crashed_overlay_view),
+                               std::move(return_to_owner));
+    return view_ptr;
+  }
+
+  std::nullptr_t TakeCrashedOverlayView(std::nullptr_t);
+
+  // Detaches and returns the current crash overlay view. null if unavailable.
+  // Because this is directly detaching the crash overlay view, ownership will
+  // NOT be returned to the caller of TakeCrashedOverlayView.
+  template <typename T = View>
+  std::unique_ptr<T> DetachCrashedOverlayView() {
+    std::unique_ptr<View> old_view = DetachCrashedOverlayViewImpl();
+    if (old_view) {
+      std::unique_ptr<T> typed_old_view =
+          views::AsViewClass<T>(std::move(old_view));
+      CHECK(typed_old_view);
+      return typed_old_view;
+    }
+    return nullptr;
+  }
+
+  // Adds a callback for when a WebContents is attached to this WebView.
+  base::CallbackListSubscription AddWebContentsAttachedCallback(
+      WebContentsAttachedCallback callback);
+
+  // Adds a callback for when a WebContents is detached from this WebView.
+  base::CallbackListSubscription AddWebContentsDetachedCallback(
+      WebContentsDetachedCallback callback);
+
+  // Adds a callback for when the attached WebContents is focused.
+  base::CallbackListSubscription AddWebContentsFocusedCallback(
+      WebContentsFocusedCallback callback);
 
   // Sets whether this is the primary web contents for the window.
   void set_is_primary_web_contents_for_window(bool is_primary) {
@@ -98,6 +210,13 @@ class WEBVIEW_EXPORT WebView : public View,
   // processed. Default is false.
   void set_allow_accelerators(bool allow_accelerators) {
     allow_accelerators_ = allow_accelerators;
+  }
+  bool allow_accelerators() const { return allow_accelerators_; }
+
+  // When `lock = true` changes in web contents will not reset the override.
+  // Default is false.
+  void set_lock_child_ax_tree_id_override(bool lock) {
+    lock_child_ax_tree_id_override_ = lock;
   }
 
   // Overridden from content::WebContentsDelegate:
@@ -114,15 +233,19 @@ class WEBVIEW_EXPORT WebView : public View,
   class WEBVIEW_EXPORT ScopedWebContentsCreatorForTesting {
    public:
     explicit ScopedWebContentsCreatorForTesting(WebContentsCreator creator);
-    ~ScopedWebContentsCreatorForTesting();
 
-   private:
-    DISALLOW_COPY_AND_ASSIGN(ScopedWebContentsCreatorForTesting);
+    ScopedWebContentsCreatorForTesting(
+        const ScopedWebContentsCreatorForTesting&) = delete;
+    ScopedWebContentsCreatorForTesting& operator=(
+        const ScopedWebContentsCreatorForTesting&) = delete;
+
+    ~ScopedWebContentsCreatorForTesting();
   };
 
+  // View:
+  FocusBehavior GetFocusBehavior() const override;
+
  protected:
-  // Called when the web contents is successfully attached.
-  virtual void OnWebContentsAttached() {}
   // Called when letterboxing (scaling the native view to preserve aspect
   // ratio) is enabled or disabled.
   virtual void OnLetterboxingChanged() {}
@@ -131,7 +254,7 @@ class WEBVIEW_EXPORT WebView : public View,
   const gfx::Size& min_size() const { return min_size_; }
   const gfx::Size& max_size() const { return max_size_; }
 
-  // Overridden from View:
+  // View:
   void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
   void ViewHierarchyChanged(
       const ViewHierarchyChangedDetails& details) override;
@@ -139,92 +262,127 @@ class WEBVIEW_EXPORT WebView : public View,
   bool OnMousePressed(const ui::MouseEvent& event) override;
   void OnFocus() override;
   void AboutToRequestFocusFromTabTraversal(bool reverse) override;
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override;
   gfx::NativeViewAccessible GetNativeViewAccessible() override;
-
-  // Overridden from content::WebContentsDelegate:
-  bool EmbedsFullscreenWidget() override;
+  void AddedToWidget() override;
+  void RemovedFromWidget() override;
 
   // Overridden from content::WebContentsObserver:
-  void RenderViewCreated(content::RenderViewHost* render_view_host) override;
-  void RenderViewReady() override;
-  void RenderViewDeleted(content::RenderViewHost* render_view_host) override;
-  void RenderViewHostChanged(content::RenderViewHost* old_host,
-                             content::RenderViewHost* new_host) override;
-  void WebContentsDestroyed() override;
-  void DidShowFullscreenWidget() override;
-  void DidDestroyFullscreenWidget() override;
+  void RenderFrameCreated(content::RenderFrameHost* render_frame_host) override;
+  void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
+  void RenderFrameHostChanged(content::RenderFrameHost* old_host,
+                              content::RenderFrameHost* new_host) override;
   void DidToggleFullscreenModeForTab(bool entered_fullscreen,
                                      bool will_cause_resize) override;
-  // Workaround for MSVC++ linker bug/feature that requires
-  // instantiation of the inline IPC::Listener methods in all translation units.
-  void OnChannelConnected(int32_t peer_id) override {}
-  void OnChannelError() override {}
-  void OnBadMessageReceived(const IPC::Message& message) override {}
   void OnWebContentsFocused(
       content::RenderWidgetHost* render_widget_host) override;
-  void RenderProcessGone(base::TerminationStatus status) override;
   void AXTreeIDForMainFrameHasChanged() override;
+  void WebContentsDestroyed() override;
 
   // Override from ui::AXModeObserver
   void OnAXModeAdded(ui::AXMode mode) override;
 
+  // WidgetAXManagerObserver:
+  void OnWidgetAXManagerEnabled() override;
+
+  bool IsWebContentsAlive() const;
+
  private:
   friend class WebViewUnitTest;
 
+  void TakeCrashedOverlayViewImpl(
+      std::unique_ptr<View> crashed_overlay_view,
+      ReturnCrashOverlayToOwnerCallback return_to_owner);
+  std::unique_ptr<View> DetachCrashedOverlayViewImpl();
+
+  bool IsObservingAXModeForTesting();
+  bool IsObservingWidgetAXManagerForTesting();
+
   void AttachWebContentsNativeView();
   void DetachWebContentsNativeView();
-  void ReattachForFullscreenChange(bool enter_fullscreen);
   void UpdateCrashedOverlayView();
+  void UpdateNativeViewHostAccessibleParent();
   void NotifyAccessibilityWebContentsChanged();
+  void UpdateAccessibilityDisconnectState(bool disconnect);
+  void HandleWidgetAXManagerEnablement();
 
-  // Registers for ResizeDueToAutoResize() notifications from the
+  // Called when the main frame in the renderer becomes present.
+  void SetUpNewMainFrame(content::RenderFrameHost* frame_host);
+  // Called when the main frame in the renderer is no longer present.
+  void LostMainFrame();
+
+  // Registers for ResizeDueToAutoResize() notifications from `frame_host`'s
   // RenderWidgetHostView whenever it is created or changes, if
-  // EnableSizingFromWebContents() has been called.
-  void MaybeEnableAutoResize();
+  // EnableSizingFromWebContents() has been called. This should only be called
+  // for main frames; other frames can not have auto resize set.
+  void MaybeEnableAutoResize(content::RenderFrameHost* frame_host);
+  void EnsureHostNodeReplacementRegistration();
+  void ClearHostNodeReplacementRegistration();
 
   // Create a regular or test web contents (based on whether we're running
   // in a unit test or not).
   std::unique_ptr<content::WebContents> CreateWebContents(
-      content::BrowserContext* browser_context);
+      content::BrowserContext* browser_context,
+      const GURL& url,
+      base::Location creator_location);
 
-  NativeViewHost* const holder_ =
+  // Number of active ScopedAxDisconnectLocks. This must be declared before
+  // |holder_| as |holder_|'s initialization calls |GetFocusBehavior()|, which
+  // reads this value.
+  int ax_disconnect_count_ = 0;
+
+  const raw_ptr<NativeViewHost> holder_ =
       AddChildView(std::make_unique<NativeViewHost>());
+  base::ScopedObservation<ui::AXPlatform, ui::AXModeObserver>
+      ax_mode_observation_{this};
+  base::ScopedObservation<WidgetAXManager, WidgetAXManagerObserver>
+      widget_ax_manager_observation_{this};
   // Non-NULL if |web_contents()| was created and is owned by this WebView.
   std::unique_ptr<content::WebContents> wc_owner_;
-  // When true, WebView auto-embeds fullscreen widgets as a child view.
-  bool embed_fullscreen_widget_mode_enabled_ = false;
-  // Set to true while WebView is embedding a fullscreen widget view as a child
-  // view instead of the normal WebContentsView render view. Note: This will be
-  // false in the case of non-Flash fullscreen.
-  bool is_embedding_fullscreen_widget_ = false;
+  // Returns ownership of a crashed overlay view.
+  ReturnCrashOverlayToOwnerCallback return_crashed_overlay_to_owner_;
   // Set to true when |holder_| is letterboxed (scaled to be smaller than this
   // view, to preserve its aspect ratio).
   bool is_letterboxing_ = false;
-  content::BrowserContext* browser_context_;
+  raw_ptr<content::BrowserContext> browser_context_;
   bool allow_accelerators_ = false;
-  View* crashed_overlay_view_ = nullptr;
+  ViewTracker crashed_overlay_view_;
   bool is_primary_web_contents_for_window_ = false;
+
+  bool lock_child_ax_tree_id_override_ = false;
+  std::string host_node_replacement_id_;
 
   // Minimum and maximum sizes to determine WebView bounds for auto-resizing.
   // Empty if auto resize is not enabled.
   gfx::Size min_size_;
   gfx::Size max_size_;
 
-  // Tracks the child accessibility tree id which is associated with the
-  // WebContents's main RenderFrameHost.
-  ui::AXTreeID child_ax_tree_id_;
+  // List of subscriptions listening for new WebContents being attached to this
+  // WebView.
+  base::RepeatingCallbackList<void(WebView*)> web_contents_attached_callbacks_;
 
-  // Used as the fullscreen NativeView if
-  // |embed_fullscreen_widget_mode_enabled_| is enabled. This is only set in
-  // tests as injecting a different value for
-  // WebContents::GetFullscreenRenderWidgetHostView() is rather tricky in
-  // unit-tests.
-  gfx::NativeView fullscreen_native_view_for_testing_ = nullptr;
+  // List of subscriptions listening for the WebContents being detached from
+  // this WebView.
+  base::RepeatingCallbackList<void(WebView*)> web_contents_detached_callbacks_;
 
-  DISALLOW_COPY_AND_ASSIGN(WebView);
+  // List of subscriptions listening for attached WebContents being focused.
+  base::RepeatingCallbackList<void(WebView*)> web_contents_focused_callbacks_;
+
+  base::WeakPtrFactory<WebView> weak_ptr_factory_{this};
 };
 
+BEGIN_VIEW_BUILDER(WEBVIEW_EXPORT, WebView, View)
+VIEW_BUILDER_PROPERTY(content::BrowserContext*, BrowserContext)
+VIEW_BUILDER_PROPERTY(content::WebContents*, WebContents)
+VIEW_BUILDER_PROPERTY(bool, FastResize)
+VIEW_BUILDER_METHOD(EnableSizingFromWebContents,
+                    const gfx::Size&,
+                    const gfx::Size&)
+VIEW_BUILDER_METHOD(set_is_primary_web_contents_for_window, bool)
+VIEW_BUILDER_METHOD(set_allow_accelerators, bool)
+END_VIEW_BUILDER
+
 }  // namespace views
+
+DEFINE_VIEW_BUILDER(WEBVIEW_EXPORT, WebView)
 
 #endif  // UI_VIEWS_CONTROLS_WEBVIEW_WEBVIEW_H_

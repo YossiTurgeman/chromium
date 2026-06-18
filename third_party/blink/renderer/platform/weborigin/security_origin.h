@@ -30,24 +30,24 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WEBORIGIN_SECURITY_ORIGIN_H_
 
 #include <stdint.h>
-#include <memory>
 
-#include "base/gtest_prod_util.h"
-#include "base/macros.h"
+#include <memory>
+#include <optional>
+
+#include "base/types/pass_key.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
+#include "third_party/blink/renderer/platform/wtf/forward.h"
+#include "third_party/blink/renderer/platform/wtf/hash_traits.h"
+#include "third_party/blink/renderer/platform/wtf/ref_counted.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/thread_safe_ref_counted.h"
 #include "url/origin.h"
 
-namespace mojo {
-struct UrlOriginAdapter;
-}  // namespace mojo
-
 namespace blink {
 
 class KURL;
-struct SecurityOriginHash;
+class SandboxedOpaqueSecurityOriginCreator;
 
 // An identifier which defines the source of content (e.g. a document) and
 // restricts what other objects it is permitted to access (based on their
@@ -74,7 +74,10 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // contains a standard (scheme, host, port) tuple, |reference_origin| is
   // ignored. If |reference_origin| is provided and an opaque origin is returned
   // (for example, if |url| has the "data:" scheme), the opaque origin will be
-  // derived from |reference_origin|, retaining the precursor information.
+  // derived from |reference_origin|, retaining the precursor information.  If
+  // |url| is "about:blank", a copy of |reference_origin| is returned.  If no
+  // |reference_origin| has been provided, then "data:" and "about:blank" URLs
+  // will resolve into an opaque, unique origin.
   static scoped_refptr<SecurityOrigin> CreateWithReferenceOrigin(
       const KURL& url,
       const SecurityOrigin* reference_origin);
@@ -88,11 +91,30 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   static scoped_refptr<SecurityOrigin> CreateUniqueOpaque();
 
   static scoped_refptr<SecurityOrigin> CreateFromString(const String&);
-  static scoped_refptr<SecurityOrigin> Create(const String& protocol,
-                                              const String& host,
-                                              uint16_t port);
+
+  // Constructs a non-opaque tuple origin, analogously to
+  // url::Origin::Origin(url::SchemeHostPort).
+  //
+  // REQUIRES: The tuple be valid: |protocol| must contain a standard scheme and
+  // |host| must be canonicalized and (except for "file" URLs) nonempty.
+  static scoped_refptr<SecurityOrigin> CreateFromValidTuple(
+      const String& protocol,
+      const String& host,
+      uint16_t port);
+
   static scoped_refptr<SecurityOrigin> CreateFromUrlOrigin(const url::Origin&);
   url::Origin ToUrlOrigin() const;
+
+  // Creates an opaque origin with the given nonce and origin. This method can
+  // only be called by SandboxedOpaqueSecurityOriginCreator to ensure proper
+  // access control for nonce-based origins.
+  static scoped_refptr<SecurityOrigin> CreateWithNonce(
+      base::PassKey<SandboxedOpaqueSecurityOriginCreator>,
+      const base::UnguessableToken& nonce,
+      const SecurityOrigin* origin);
+
+  SecurityOrigin(const SecurityOrigin&) = delete;
+  SecurityOrigin& operator=(const SecurityOrigin&) = delete;
 
   // Some URL schemes use nested URLs for their security context. For example,
   // filesystem URLs look like the following:
@@ -117,26 +139,18 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   void SetDomainFromDOM(const String& new_domain);
   bool DomainWasSetInDOM() const { return domain_was_set_in_dom_; }
 
-  String Protocol() const { return protocol_; }
-  String Host() const { return host_; }
-  String Domain() const { return domain_; }
+  const String& Protocol() const { return protocol_; }
+  const String& Host() const { return host_; }
+  const String& Domain() const { return domain_; }
 
   // Returns the registrable domain if available.
   // For non-tuple origin, IP address URL, and public suffixes, this returns a
   // null string. https://url.spec.whatwg.org/#host-registrable-domain
   String RegistrableDomain() const;
 
-  // Returns 0 if the effective port of this origin is the default for its
-  // scheme.
-  uint16_t Port() const { return port_; }
   // Returns the effective port, even if it is the default port for the
   // scheme (e.g. "http" => 80).
-  uint16_t EffectivePort() const { return effective_port_; }
-
-  // Returns true if a given URL is secure, based either directly on its
-  // own protocol, or, when relevant, on the protocol of its "inner URL"
-  // Protocols like blob: and filesystem: fall into this latter category.
-  static bool IsSecure(const KURL&);
+  uint16_t Port() const { return port_; }
 
   // Returns true if this SecurityOrigin can script objects in the given
   // SecurityOrigin. This check is similar to `IsSameOriginDomainWith()`, but
@@ -155,7 +169,14 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
     AccessResultDomainDetail unused_detail;
     return CanAccess(other, unused_detail);
   }
+  bool CanAccess(const scoped_refptr<SecurityOrigin>& other) const {
+    return CanAccess(other.get());
+  }
   bool CanAccess(const SecurityOrigin* other, AccessResultDomainDetail&) const;
+  bool CanAccess(const scoped_refptr<SecurityOrigin>& other,
+                 AccessResultDomainDetail& detail) const {
+    return CanAccess(other.get(), detail);
+  }
 
   // Returns true if this SecurityOrigin can read content retrieved from
   // the given URL.
@@ -225,14 +246,10 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   bool CanAccessCookies() const { return !IsOpaque(); }
   bool CanAccessPasswordManager() const { return !IsOpaque(); }
   bool CanAccessFileSystem() const { return !IsOpaque(); }
-  bool CanAccessNativeFileSystem() const { return !IsOpaque(); }
   bool CanAccessCacheStorage() const { return !IsOpaque(); }
   bool CanAccessLocks() const { return !IsOpaque(); }
-
-  // Technically, we should always allow access to sessionStorage, but we
-  // currently don't handle creating a sessionStorage area for opaque
-  // origins.
   bool CanAccessSessionStorage() const { return !IsOpaque(); }
+  bool CanAccessStorageBuckets() const { return !IsOpaque(); }
 
   // The local SecurityOrigin is the most privileged SecurityOrigin.
   // The local SecurityOrigin can script any document, navigate to local
@@ -262,6 +279,16 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // When using the string value, it's important to remember that it might be
   // "null". This typically happens when this SecurityOrigin is opaque (e.g. the
   // origin of a sandboxed iframe).
+  //
+  // This should be kept in sync with url::Origin::Serialize().
+  //
+  // TODO(crbug.com/40554285, crbug.com/40467682): Note that there's a subtle
+  // difference in how this function handles file: URL origins compared to
+  // url::Origin::Serialize(). url::Origin always serializes them to "file://",
+  // whereas this function serializes them to "null" or // "file://" depending
+  // on the `allow_file_access_from_file_urls` flag in WebPreferences. This
+  // difference should be cleaned up, along with the workaround for it in
+  // RenderFrameProxyHost::SerializePostMessageSourceOrigin().
   String ToString() const;
   AtomicString ToAtomicString() const;
 
@@ -316,6 +343,18 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   bool IsSameOriginDomainWith(const SecurityOrigin*,
                               AccessResultDomainDetail&) const;
 
+  // This method implements HTML's "same site" check, which is true if the two
+  // origins are schemelessly same site, and either are both opaque or are both
+  // tuple origins with the same scheme.
+  //
+  // Note: Use of "same site" should be avoided when possible, in favor of "same
+  // origin" checks. A "same origin" check is generally more appropriate for
+  // security decisions, as registrable domains cannot be relied upon to provide
+  // a hard security boundary.
+  //
+  // https://html.spec.whatwg.org/#same-site
+  bool IsSameSiteWith(const SecurityOrigin* other) const;
+
   static const KURL& UrlWithUniqueOpaqueOrigin();
 
   // Transfer origin privileges from another security origin.
@@ -348,7 +387,10 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
 
   // Only used for document.domain setting. The method should probably be moved
   // if we need it for something more general.
-  static String CanonicalizeHost(const String& host, bool* success);
+  static String CanonicalizeSpecialHost(const String& host, bool* success);
+  static String CanonicalizeHost(const String& host,
+                                 const String& scheme,
+                                 bool* success);
 
   // Return a security origin that is assigned to the agent cluster. This will
   // be a copy of this security origin if the current agent doesn't match the
@@ -363,11 +405,22 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // Returns true if this security origin is serialized to "null".
   bool SerializesAsNull() const;
 
- private:
-  constexpr static const uint16_t kInvalidPort = 0;
+  // Whether document.open was called in between two different windows, causing
+  // the SecurityOrigin to be shared by both. This is only used to record
+  // metrics.
+  // To be removed after shipping DocumentOpenSandboxInheritanceRemoval feature.
+  void set_aliased_by_document_open() { aliased_by_document_open_ = true; }
+  bool aliased_by_document_open() const { return aliased_by_document_open_; }
 
+  bool block_local_access_from_local_origin() const {
+    return block_local_access_from_local_origin_;
+  }
+
+ private:
+  // Various serialisation and test routines that need direct nonce access.
   friend struct mojo::UrlOriginAdapter;
-  friend struct blink::SecurityOriginHash;
+  friend struct HashTraits<scoped_refptr<const SecurityOrigin>>;
+  friend class SecurityOriginTest;
 
   // For calling GetNonceForSerialization().
   friend class BlobURLOpaqueOriginNonceMap;
@@ -382,8 +435,20 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   SecurityOrigin(const url::Origin::Nonce& nonce,
                  const SecurityOrigin* precursor_origin);
 
+  // Creates an opaque SecurityOrigin with a new unique nonce. Similar to the
+  // above, but preferred when there is no pre-existing nonce to copy, as
+  // copying a nonce requires forcing eager initialisation of that nonce.
+  enum class NewUniqueOpaque {
+    kWithLazyInitNonce,
+  };
+  SecurityOrigin(NewUniqueOpaque, const SecurityOrigin* precursor_origin);
+
   // Create a tuple SecurityOrigin, with parameters via KURL
-  explicit SecurityOrigin(const KURL& url);
+  static scoped_refptr<SecurityOrigin> CreateInternal(const KURL& url);
+
+  // Constructs a non-opaque tuple origin, analogously to
+  // url::Origin::Origin(url::SchemeHostPort).
+  SecurityOrigin(const String& protocol, const String& host, uint16_t port);
 
   enum class ConstructIsolatedCopy { kConstructIsolatedCopyBit };
   // Clone a SecurityOrigin which is safe to use on other threads.
@@ -400,20 +465,20 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // Get the nonce associated with this origin, if it is opaque. This should be
   // used only when trying to send an Origin across an IPC pipe or comparing
   // blob URL's opaque origins in the thread-safe way.
-  base::Optional<base::UnguessableToken> GetNonceForSerialization() const;
+  const base::UnguessableToken* GetNonceForSerialization() const;
 
   const String protocol_ = g_empty_string;
   const String host_ = g_empty_string;
   String domain_ = g_empty_string;
-  const uint16_t port_ = kInvalidPort;
-  const uint16_t effective_port_ = kInvalidPort;
-  const base::Optional<url::Origin::Nonce> nonce_if_opaque_;
+  const uint16_t port_ = 0;
+  const std::optional<url::Origin::Nonce> nonce_if_opaque_;
   bool universal_access_ = false;
   bool domain_was_set_in_dom_ = false;
   bool can_load_local_resources_ = false;
   bool block_local_access_from_local_origin_ = false;
   bool is_opaque_origin_potentially_trustworthy_ = false;
   bool cross_agent_cluster_access_ = false;
+  bool aliased_by_document_open_ = false;
 
   // A security origin can have an empty |agent_cluster_id_|. It occurs in the
   // cases where a security origin hasn't been assigned to a document yet.
@@ -422,8 +487,57 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // For opaque origins, tracks the non-opaque origin from which the opaque
   // origin is derived.
   const scoped_refptr<const SecurityOrigin> precursor_origin_;
+};
 
-  DISALLOW_COPY_AND_ASSIGN(SecurityOrigin);
+// The default HashTraits of SecurityOrigin implements the "same origin"
+// equality relation between two origins. As such it ignores the domain that
+// might or might not be set on the origin. If you need "same origin-domain"
+// equality you'll need to define a custom hash traits type using a different
+// hash function.
+template <>
+struct HashTraits<scoped_refptr<const SecurityOrigin>>
+    : GenericHashTraits<scoped_refptr<const SecurityOrigin>> {
+  static unsigned GetHash(const SecurityOrigin* origin) {
+    const base::UnguessableToken* nonce = origin->GetNonceForSerialization();
+    size_t nonce_hash = nonce ? base::UnguessableTokenHash()(*nonce) : 0;
+
+    unsigned hash_codes[] = {
+      origin->Protocol().Impl() ? origin->Protocol().Impl()->GetHash() : 0,
+      origin->Host().Impl() ? origin->Host().Impl()->GetHash() : 0,
+      origin->Port(),
+#if ARCH_CPU_32_BITS
+      nonce_hash,
+#elif ARCH_CPU_64_BITS
+      static_cast<unsigned>(nonce_hash),
+      static_cast<unsigned>(nonce_hash >> 32),
+#else
+#error "Unknown bits"
+#endif
+    };
+    return static_cast<unsigned>(
+        StringHasher::HashMemory(base::as_byte_span(hash_codes)));
+  }
+  static unsigned GetHash(const scoped_refptr<const SecurityOrigin>& origin) {
+    return GetHash(origin.get());
+  }
+
+  static bool Equal(const SecurityOrigin* a, const SecurityOrigin* b) {
+    return a->IsSameOriginWith(b);
+  }
+  static bool Equal(const SecurityOrigin* a,
+                    const scoped_refptr<const SecurityOrigin>& b) {
+    return Equal(a, b.get());
+  }
+  static bool Equal(const scoped_refptr<const SecurityOrigin>& a,
+                    const SecurityOrigin* b) {
+    return Equal(a.get(), b);
+  }
+  static bool Equal(const scoped_refptr<const SecurityOrigin>& a,
+                    const scoped_refptr<const SecurityOrigin>& b) {
+    return Equal(a.get(), b.get());
+  }
+
+  static constexpr bool kSafeToCompareToEmptyOrDeleted = false;
 };
 
 }  // namespace blink

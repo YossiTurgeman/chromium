@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,10 @@
 
 #include <stdint.h>
 
-#include <map>
 #include <memory>
-#include <vector>
 
 #include "base/auto_reset.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "ui/events/events_export.h"
 #include "ui/events/platform_event.h"
@@ -23,14 +21,13 @@ class PlatformEventDispatcher;
 class PlatformEventObserver;
 class ScopedEventDispatcher;
 
-namespace test {
-class PlatformEventSourceTestAPI;
-}
-
 // PlatformEventSource receives events from a source and dispatches the events
 // to the appropriate dispatchers.
 class EVENTS_EXPORT PlatformEventSource {
  public:
+  PlatformEventSource(const PlatformEventSource&) = delete;
+  PlatformEventSource& operator=(const PlatformEventSource&) = delete;
+
   virtual ~PlatformEventSource();
 
   // Returns the thread-local singleton.
@@ -67,20 +64,21 @@ class EVENTS_EXPORT PlatformEventSource {
   std::unique_ptr<ScopedEventDispatcher> OverrideDispatcher(
       PlatformEventDispatcher* dispatcher);
 
-  // Called to indicate that the source should stop dispatching the current
-  // stream of events and wait until the next iteration of the message-loop to
-  // dispatch the rest of the events.
-  virtual void StopCurrentEventStream();
-
   void AddPlatformEventObserver(PlatformEventObserver* observer);
   void RemovePlatformEventObserver(PlatformEventObserver* observer);
 
   // Creates PlatformEventSource and sets it as a thread-local singleton.
   static std::unique_ptr<PlatformEventSource> CreateDefault();
 
+  virtual void ResetStateForTesting() {}
+
  protected:
-  typedef base::ObserverList<PlatformEventObserver>::Unchecked
-      PlatformEventObserverList;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  // See comment for `PlatformEventDispatcherList`.
+  using PlatformEventObserverList = base::ObserverList<
+      PlatformEventObserver,
+      /*check_empty=*/false,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked;
 
   PlatformEventSource();
 
@@ -95,7 +93,17 @@ class EVENTS_EXPORT PlatformEventSource {
 
  private:
   friend class ScopedEventDispatcher;
-  friend class test::PlatformEventSourceTestAPI;
+
+  // Use a base::ObserverList<> instead of an std::vector<> to store the list of
+  // dispatchers, so that adding/removing dispatchers during an event dispatch
+  // is well-defined.
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  // `WaylandTestBase::PostToServerAndWait` can trigger nested dispatch while
+  // waiting for another event's result.
+  using PlatformEventDispatcherList = base::ObserverList<
+      PlatformEventDispatcher,
+      /*check_empty=*/false,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked;
 
   // This is invoked when the list of dispatchers changes (i.e. a new dispatcher
   // is added, or a dispatcher is removed).
@@ -103,14 +111,10 @@ class EVENTS_EXPORT PlatformEventSource {
 
   void OnOverriddenDispatcherRestored();
 
-  // Use an base::ObserverList<> instead of an std::vector<> to store the list
-  // of
-  // dispatchers, so that adding/removing dispatchers during an event dispatch
-  // is well-defined.
-  typedef base::ObserverList<PlatformEventDispatcher>::Unchecked
-      PlatformEventDispatcherList;
+  const base::AutoReset<PlatformEventSource*> resetter_;
+
   PlatformEventDispatcherList dispatchers_;
-  PlatformEventDispatcher* overridden_dispatcher_;
+  raw_ptr<PlatformEventDispatcher> overridden_dispatcher_;
 
   // Used to keep track of whether the current override-dispatcher has been
   // reset and a previous override-dispatcher has been restored.
@@ -119,8 +123,6 @@ class EVENTS_EXPORT PlatformEventSource {
   static bool ignore_native_platform_events_;
 
   PlatformEventObserverList observers_;
-
-  DISALLOW_COPY_AND_ASSIGN(PlatformEventSource);
 };
 
 }  // namespace ui

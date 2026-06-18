@@ -1,13 +1,13 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef COMPONENTS_DOWNLOAD_DATABASE_DOWNLOAD_INFO_H_
 #define COMPONENTS_DOWNLOAD_DATABASE_DOWNLOAD_INFO_H_
 
+#include <optional>
 #include <string>
 
-#include "base/optional.h"
 #include "components/download/database/in_progress/in_progress_info.h"
 #include "components/download/database/in_progress/ukm_info.h"
 
@@ -30,10 +30,10 @@ struct DownloadInfo {
   int id = -1;
 
   // UKM information for reporting.
-  base::Optional<UkmInfo> ukm_info;
+  std::optional<UkmInfo> ukm_info;
 
   // In progress information for active download.
-  base::Optional<InProgressInfo> in_progress_info;
+  std::optional<InProgressInfo> in_progress_info;
 };
 
 }  // namespace download

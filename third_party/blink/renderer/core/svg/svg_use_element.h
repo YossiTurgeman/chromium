@@ -24,24 +24,31 @@
 
 #include "base/gtest_prod_util.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/core/svg/svg_external_document_cache.h"
 #include "third_party/blink/renderer/core/svg/svg_geometry_element.h"
 #include "third_party/blink/renderer/core/svg/svg_graphics_element.h"
+#include "third_party/blink/renderer/core/svg/svg_resource_document_observer.h"
 #include "third_party/blink/renderer/core/svg/svg_uri_reference.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/scheduler/public/post_cancellable_task.h"
 
 namespace blink {
 
+class IncrementLoadEventDelayCount;
 class SVGAnimatedLength;
+class SVGResourceDocumentContent;
 
 class SVGUseElement final : public SVGGraphicsElement,
                             public SVGURIReference,
-                            public SVGExternalDocumentCache::Client {
+                            public SVGResourceDocumentObserver {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   explicit SVGUseElement(Document&);
   ~SVGUseElement() override;
+
+  ElementType GetElementType() const final {
+    return ElementType::kSVGUseElement;
+  }
 
   void InvalidateShadowTree();
   void InvalidateTargetReference();
@@ -58,18 +65,12 @@ class SVGUseElement final : public SVGGraphicsElement,
   void BuildPendingResource() override;
   String title() const override;
 
-  void DispatchPendingEvent();
   Path ToClipPath() const;
 
   void Trace(Visitor*) const override;
 
  private:
-  FloatRect GetBBox() override;
-
-  void CollectStyleForPresentationAttribute(
-      const QualifiedName&,
-      const AtomicString&,
-      MutableCSSPropertyValueSet*) override;
+  gfx::RectF GetBBox() override;
 
   bool IsStructurallyExternal() const override;
 
@@ -77,22 +78,20 @@ class SVGUseElement final : public SVGGraphicsElement,
   void RemovedFrom(ContainerNode&) override;
   void DidMoveToNewDocument(Document&) override;
 
-  void SvgAttributeChanged(const QualifiedName&) override;
+  void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
 
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
   void ScheduleShadowTreeRecreation();
   void CancelShadowTreeRecreation();
-  bool HaveLoadedRequiredResources() override {
-    return !IsStructurallyExternal() || have_fired_load_event_;
-  }
+  bool HaveLoadedRequiredResources() override;
   bool ShadowTreeRebuildPending() const;
 
   bool SelfHasRelativeLengths() const override;
 
   ShadowRoot& UseShadowRoot() const {
-    CHECK(ClosedShadowRoot());
-    return *ClosedShadowRoot();
+    CHECK(UserAgentShadowRoot());
+    return *UserAgentShadowRoot();
   }
 
   Element* ResolveTargetElement();
@@ -104,20 +103,43 @@ class SVGUseElement final : public SVGGraphicsElement,
   bool HasCycleUseReferencing(const ContainerNode& target_instance,
                               const SVGElement& new_target) const;
 
-  void NotifyFinished(Document*) override;
+  void QueueOrDispatchPendingEvent(const AtomicString&);
+
+  // SVGResourceDocumentObserver:
+  void ResourceNotifyFinished(SVGResourceDocumentContent*) override;
+  void ResourceContentChanged(SVGResourceDocumentContent*) override {}
+
+  void UpdateDocumentContent(SVGResourceDocumentContent*);
   void UpdateTargetReference();
 
-  Member<SVGExternalDocumentCache::Entry> cache_entry_;
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
+  void CollectExtraStyleForPresentationAttribute(
+      HeapVector<CSSPropertyValue, 8>& style) override;
+
+  Member<SVGResourceDocumentContent> document_content_;
+  Member<SVGResourceTarget> external_resource_target_;
 
   Member<SVGAnimatedLength> x_;
   Member<SVGAnimatedLength> y_;
   Member<SVGAnimatedLength> width_;
   Member<SVGAnimatedLength> height_;
 
+  TaskHandle pending_event_;
+  // For delaying any 'load' event dispatch until after an external resource
+  // load completed.
+  std::unique_ptr<IncrementLoadEventDelayCount> resource_load_event_delayer_;
+  // For delaying any 'load' event dispatch until after the shadow tree has
+  // been attached after an external resource load completed.
+  std::unique_ptr<IncrementLoadEventDelayCount> attach_load_event_delayer_;
   KURL element_url_;
   bool element_url_is_local_;
-  bool have_fired_load_event_;
   bool needs_shadow_tree_recreation_;
+  // Tracks whether this element initiated a resource fetch and expects a call
+  // to `ResourceNotifyFinished()`. Used to filter out (redundant) multiple
+  // notifications for the same resource.
+  bool notification_pending_ = false;
   Member<IdTargetObserver> target_id_observer_;
 
   FRIEND_TEST_ALL_PREFIXES(SVGUseElementTest,

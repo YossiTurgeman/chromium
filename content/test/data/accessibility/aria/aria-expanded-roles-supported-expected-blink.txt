@@ -21,10 +21,10 @@ rootWebArea
 ++++++emphasis
 ++++++feed
 ++++++figure
-++++++form
+++++++form name='Name required for form'
 ++++++grid
 ++++++++columnHeader expanded
-++++++++cell expanded
+++++++++gridCell expanded
 ++++++++row expanded
 ++++++++rowGroup
 ++++++++rowHeader expanded
@@ -36,8 +36,8 @@ rootWebArea
 ++++++genericContainer
 ++++++link expanded
 ++++++list
-++++++listBox expanded
-++++++listItem
+++++++++listItem expanded
+++++++listBox
 ++++++log
 ++++++main
 ++++++marquee
@@ -49,15 +49,14 @@ rootWebArea
 ++++++menuItemRadio expanded
 ++++++meter
 ++++++navigation
-++++++none
 ++++++note
-++++++listBoxOption
+++++++listBox
+++++++++listBoxOption
 ++++++paragraph
-++++++presentational
 ++++++progressIndicator
 ++++++radioButton
 ++++++radioGroup
-++++++region
+++++++region name='Name required for region'
 ++++++scrollBar
 ++++++search
 ++++++searchBox
@@ -67,12 +66,12 @@ rootWebArea
 ++++++spinButton
 ++++++status
 ++++++strong
-++++++genericContainer
-++++++genericContainer
+++++++subscript
+++++++superscript
 ++++++switch expanded
 ++++++tab expanded
 ++++++table
-++++++++cell expanded
+++++++++cell
 ++++++tabList
 ++++++tabPanel
 ++++++term
@@ -83,4 +82,5 @@ rootWebArea
 ++++++tooltip
 ++++++tree
 ++++++treeGrid
-++++++treeItem expanded
+++++++tree
+++++++++treeItem expanded

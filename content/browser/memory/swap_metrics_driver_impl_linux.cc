@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "base/byte_size.h"
 #include "base/memory/ptr_util.h"
 #include "base/process/process_metrics.h"
 #include "base/time/time.h"
@@ -16,10 +17,10 @@ namespace content {
 namespace {
 
 bool HasSwap() {
-  base::SystemMemoryInfoKB memory_info;
+  base::SystemMemoryInfo memory_info;
   if (!base::GetSystemMemoryInfo(&memory_info))
     return false;
-  return memory_info.swap_total > 0;
+  return memory_info.swap_total > base::ByteSize(0);
 }
 
 }  // namespace

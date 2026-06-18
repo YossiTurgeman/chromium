@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,11 +9,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "base/callback_forward.h"
 #include "base/component_export.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/ref_counted_memory.h"
-#include "base/optional.h"
 #include "ui/base/clipboard/clipboard_buffer.h"
 
 namespace ui {
@@ -34,11 +32,6 @@ class COMPONENT_EXPORT(OZONE_BASE) PlatformClipboard {
   using Data = scoped_refptr<base::RefCountedBytes>;
   using DataMap = std::unordered_map<std::string, Data>;
 
-  // SequenceNumberUpdateCb is a repeating callback, which can be used to tell
-  // a client of the PlatformClipboard to increment clipboard's sequence number
-  using SequenceNumberUpdateCb =
-      base::RepeatingCallback<void(ClipboardBuffer buffer)>;
-
   // Offers a given clipboard data 'data_map' to the host system clipboard.
   //
   // It is common that host clipboard implementations simply get offered
@@ -47,27 +40,15 @@ class COMPONENT_EXPORT(OZONE_BASE) PlatformClipboard {
   // application asynchronously, upon an explicit request for data given a
   // specific mime type. This is the case of Wayland compositors and MacOS
   // (NSPasteboard), for example.
-  //
-  // The invoker assumes the Ozone implementation will not free |DataMap|
-  // before |OfferDataClosure| is called.
-  //
-  // OfferDataClosure should be invoked when the host clipboard implementation
-  // acknowledges that the "offer to clipboard" operation is performed.
-  using OfferDataClosure = base::OnceCallback<void()>;
   virtual void OfferClipboardData(ClipboardBuffer buffer,
-                                  const DataMap& data_map,
-                                  OfferDataClosure callback) = 0;
+                                  const DataMap& data_map) = 0;
 
-  // Reads data from host system clipboard given mime type. The data is
-  // stored in 'data_map'.
-  //
-  // RequestDataClosure is invoked to acknowledge that the requested clipboard
-  // data has been read and stored into 'data_map'.
-  using RequestDataClosure =
-      base::OnceCallback<void(const base::Optional<Data>&)>;
+  // Reads data from host system clipboard given mime type. The resulting data
+  // is returned asynchronously through |callback|, whereas nullptr is returned
+  // if the request fails for some reason (i.e: no data available, etc).
+  using RequestDataClosure = base::OnceCallback<void(const Data& result)>;
   virtual void RequestClipboardData(ClipboardBuffer buffer,
                                     const std::string& mime_type,
-                                    DataMap* data_map,
                                     RequestDataClosure callback) = 0;
 
   // Gets the mime types of the data available for clipboard operations
@@ -80,16 +61,24 @@ class COMPONENT_EXPORT(OZONE_BASE) PlatformClipboard {
   virtual void GetAvailableMimeTypes(ClipboardBuffer buffer,
                                      GetMimeTypesClosure callback) = 0;
 
-  // Returns true if the current application writing data to the host clipboard
-  // data is this one; false otherwise.
+  // Runs `callback` with whether the current application writing data to the
+  // host clipboard data is this one; false otherwise.
   //
   // It can be relevant to know this information in case the client wants to
   // caches the clipboard data, and wants to know if it is possible to use
   // the cached data in order to reply faster to read-clipboard operations.
-  virtual bool IsSelectionOwner(ClipboardBuffer buffer) = 0;
+  using IsSelectionOwnerClosure = base::OnceCallback<void(bool)>;
+  virtual void IsSelectionOwner(ClipboardBuffer buffer,
+                                IsSelectionOwnerClosure callback) = 0;
 
-  // See comment above SequenceNumberUpdateCb. Can be called once.
-  virtual void SetSequenceNumberUpdateCb(SequenceNumberUpdateCb cb) = 0;
+  // ClipboardDataChangedCallback is used to notify the PlatformClipboard client
+  // that the clipboard content for a given |buffer| has changed, so that it can
+  // take the necessary actions, e.g: to update clipboard's sequence number,
+  // notify observers, etc.
+  using ClipboardDataChangedCallback =
+      base::RepeatingCallback<void(ClipboardBuffer buffer)>;
+  virtual void SetClipboardDataChangedCallback(
+      ClipboardDataChangedCallback callback) = 0;
 
   // Returns whether the kSelection buffer is available.
   virtual bool IsSelectionBufferAvailable() const = 0;

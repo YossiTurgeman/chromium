@@ -1,14 +1,14 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ASH_SHELF_SHELF_TOOLTIP_DELEGATE_H_
 #define ASH_SHELF_SHELF_TOOLTIP_DELEGATE_H_
 
+#include <string>
 #include <vector>
 
 #include "ash/ash_export.h"
-#include "base/strings/string16.h"
 
 namespace gfx {
 class Point;
@@ -37,8 +37,10 @@ class ASH_EXPORT ShelfTooltipDelegate {
   // Returns true if a tooltip should be shown for |view|.
   virtual bool ShouldShowTooltipForView(const views::View* view) const = 0;
 
-  // Returns true if the mouse cursor exits the area for launcher tooltip.
-  virtual bool ShouldHideTooltip(const gfx::Point& cursor_point) const = 0;
+  // Returns true if the mouse cursor exits the area for shelf tooltip, in
+  // the coordinates of the `delegate_view`.
+  virtual bool ShouldHideTooltip(const gfx::Point& cursor_point,
+                                 views::View* delegate_view) const = 0;
 
   // Returns the list of open windows that correspond to the app represented by
   // this shelf view.
@@ -46,7 +48,7 @@ class ASH_EXPORT ShelfTooltipDelegate {
       views::View* view) = 0;
 
   // Returns the title of |view|.
-  virtual base::string16 GetTitleForView(const views::View* view) const = 0;
+  virtual std::u16string GetTitleForView(const views::View* view) const = 0;
 
   // Returns the view that should handle |event|.
   virtual views::View* GetViewForEvent(const ui::Event& event) = 0;

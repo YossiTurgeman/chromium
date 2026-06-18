@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,14 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <string>
 
-#include "base/macros.h"
+#include "base/byte_count.h"
+#include "base/byte_size.h"
+#include "base/memory/weak_ptr.h"
 #include "base/process/kill.h"
 #include "base/process/process_handle.h"
-#include "base/strings/string16.h"
 #include "base/time/time.h"
 #include "components/sessions/core/session_id.h"
 #include "third_party/blink/public/common/web_cache/web_cache_resource_type_stats.h"
@@ -51,25 +53,34 @@ class Task {
 
     /* Plugin processes last.*/
     GUEST,            /* A browser plugin guest process. */
-    PLUGIN,           /* A plugin process. */
-    NACL,             /* A NativeClient loader or broker process. */
     SANDBOX_HELPER,   /* A sandbox helper process. */
     DEDICATED_WORKER, /* A dedicated worker running on the renderer process. */
     SHARED_WORKER,    /* A shared worker running on the renderer process. */
     SERVICE_WORKER,   /* A service worker running on the renderer process. */
   };
 
+  // Additional Type Information about a Task.
+  enum class SubType {
+    kNoSubType = 0,
+
+    /* Renderer Processes may also be marked as a specific renderer subtype. */
+    kSpareRenderer,
+    kUnknownRenderer,
+  };
+
   // Create a task with the given |title| and the given favicon |icon|. This
   // task runs on a process whose handle is |handle|.
   // If |process_id| is not supplied, it will be determined by |handle|.
-  Task(const base::string16& title,
+  Task(const std::u16string& title,
        const gfx::ImageSkia* icon,
        base::ProcessHandle handle,
        base::ProcessId process_id = base::kNullProcessId);
+  Task(const Task&) = delete;
+  Task& operator=(const Task&) = delete;
   virtual ~Task();
 
   // Gets the name of the given |profile| from the ProfileAttributesStorage.
-  static base::string16 GetProfileNameFromProfile(Profile* profile);
+  static std::u16string GetProfileNameFromProfile(Profile* profile);
 
   // Activates this TaskManager's task by bringing its container to the front
   // (if possible).
@@ -78,8 +89,8 @@ class Task {
   // Returns if the task should be killable from the Task Manager UI.
   virtual bool IsKillable();
 
-  // Kills this task.
-  virtual void Kill();
+  // Kills this task. Returns true if the process terminates.
+  virtual bool Kill();
 
   // Will be called to let the task refresh itself between refresh cycles.
   // |update_interval| is the time since the last task manager refresh.
@@ -97,16 +108,19 @@ class Task {
 
   // Will receive this notification through the task manager from
   // |ChromeNetworkDelegate::OnNetworkBytesReceived()|. The task will add to the
-  // |cummulative_read_bytes_|.
-  void OnNetworkBytesRead(int64_t bytes_read);
+  // |cumulative_bytes_read_|.
+  void OnNetworkBytesRead(base::ByteSize bytes_read);
 
   // Will receive this notification through the task manager from
   // |ChromeNetworkDelegate::OnNetworkBytesSent()|. The task will add to the
-  // |cummulative_sent_bytes_| in this refresh cycle.
-  void OnNetworkBytesSent(int64_t bytes_sent);
+  // |cumulative_bytes_sent_| in this refresh cycle.
+  void OnNetworkBytesSent(base::ByteSize bytes_sent);
 
   // Returns the task type.
   virtual Type GetType() const = 0;
+
+  // Returns the task subtype.
+  virtual SubType GetSubType() const;
 
   // This is the unique ID of the BrowserChildProcessHost/RenderProcessHost. It
   // is not the PID nor the handle of the process.
@@ -121,7 +135,7 @@ class Task {
                                     int* out_error_code) const;
 
   // The name of the profile owning this task.
-  virtual base::string16 GetProfileName() const;
+  virtual std::u16string GetProfileName() const;
 
   // Returns the unique ID of the tab if this task represents a renderer
   // WebContents used for a tab. Returns SessionID::InvalidValue() if this task
@@ -132,18 +146,18 @@ class Task {
   // embedded in a page), this returns the Task representing the parent
   // activity.
   bool HasParentTask() const;
-  virtual const Task* GetParentTask() const;
+  virtual base::WeakPtr<Task> GetParentTask() const;
 
   // Getting the Sqlite used memory (in bytes). Not all tasks reports Sqlite
-  // memory, in this case a default invalid value of -1 will be returned.
+  // memory, in this case a nullopt will be returned.
   // Check for whether the task reports it or not first.
   bool ReportsSqliteMemory() const;
-  virtual int64_t GetSqliteMemoryUsed() const;
+  virtual std::optional<base::ByteSize> GetSqliteMemoryUsed() const;
 
   // Getting the allocated and used V8 memory (in bytes). Not all tasks reports
-  // V8 memory, in this case a default invalid value of -1 will be returned.
-  virtual int64_t GetV8MemoryAllocated() const;
-  virtual int64_t GetV8MemoryUsed() const;
+  // V8 memory, in this case a nullopt will be returned.
+  virtual std::optional<base::ByteSize> GetV8MemoryAllocated() const;
+  virtual std::optional<base::ByteSize> GetV8MemoryUsed() const;
 
   // Checking if the task reports Webkit resource cache statistics and getting
   // them if it does.
@@ -156,33 +170,30 @@ class Task {
   // Returns true if the task is running inside a VM.
   virtual bool IsRunningInVM() const;
 
-  int64_t task_id() const { return task_id_; }
-
   // Returns the instantaneous rate, in bytes per second, of network usage
   // (sent and received), as measured over the last refresh cycle.
-  int64_t network_usage_rate() const {
-    return network_sent_rate_ + network_read_rate_;
-  }
+  virtual base::ByteSize GetNetworkUsageRate() const;
 
   // Returns the cumulative number of bytes of network use (sent and received)
   // over the tasks lifetime. It is calculated independently of refreshes and
   // is based on the current |cumulative_bytes_read_| and
   // |cumulative_bytes_sent_|.
-  int64_t cumulative_network_usage() const {
-    return cumulative_bytes_sent_ + cumulative_bytes_read_;
-  }
+  virtual base::ByteSize GetCumulativeNetworkUsage() const;
 
-  const base::string16& title() const { return title_; }
+  int64_t task_id() const { return task_id_; }
+  const std::u16string& title() const { return title_; }
   const gfx::ImageSkia& icon() const { return icon_; }
   const base::ProcessHandle& process_handle() const { return process_handle_; }
   const base::ProcessId& process_id() const { return process_id_; }
+
+  base::WeakPtr<Task> AsWeakPtr();
 
  protected:
   // If |*result_image| is not already set, fetch the image with id
   // |id| from the resource database and put in |*result_image|.
   // Returns |*result_image|.
   static gfx::ImageSkia* FetchIcon(int id, gfx::ImageSkia** result_image);
-  void set_title(const base::string16& new_title) { title_ = new_title; }
+  void set_title(const std::u16string& new_title) { title_ = new_title; }
   void set_icon(const gfx::ImageSkia& new_icon) { icon_ = new_icon; }
 
  private:
@@ -191,32 +202,32 @@ class Task {
 
   // The sum of all bytes that have been uploaded from this task calculated at
   // the last refresh.
-  int64_t last_refresh_cumulative_bytes_sent_;
+  base::ByteSize last_refresh_cumulative_bytes_sent_;
 
   // The sum of all bytes that have been downloaded from this task calculated
   // at the last refresh.
-  int64_t last_refresh_cumulative_bytes_read_;
+  base::ByteSize last_refresh_cumulative_bytes_read_;
 
   // A continuously updating sum of all bytes that have been uploaded from this
   // task. It is assigned to |last_refresh_cumulative_bytes_sent_| at the end
   // of a refresh.
-  int64_t cumulative_bytes_sent_;
+  base::ByteSize cumulative_bytes_sent_;
 
   // A continuously updating sum of all bytes that have been downloaded from
   // this task. It is assigned to |last_refresh_cumulative_bytes_sent_| at the
   // end of a refresh.
-  int64_t cumulative_bytes_read_;
+  base::ByteSize cumulative_bytes_read_;
 
   // The upload rate (in bytes per second) for this task during the latest
   // refresh.
-  int64_t network_sent_rate_;
+  base::ByteSize network_sent_rate_;
 
   // The download rate (in bytes per second) for this task during the latest
   // refresh.
-  int64_t network_read_rate_;
+  base::ByteSize network_read_rate_;
 
   // The title of the task.
-  base::string16 title_;
+  std::u16string title_;
 
   // The favicon.
   gfx::ImageSkia icon_;
@@ -227,7 +238,7 @@ class Task {
   // The PID of the process on which this task is running.
   base::ProcessId process_id_;
 
-  DISALLOW_COPY_AND_ASSIGN(Task);
+  base::WeakPtrFactory<Task> weak_ptr_factory_{this};
 };
 
 }  // namespace task_manager

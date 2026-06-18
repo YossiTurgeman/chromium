@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,32 +11,28 @@ namespace task_manager {
 
 GuestTask::GuestTask(content::WebContents* web_contents)
     : RendererTask(GetCurrentTitle(web_contents),
-                   GetFaviconFromWebContents(web_contents),
+                   GetFaviconFromWebContents(web_contents).get(),
                    web_contents) {}
 
-GuestTask::~GuestTask() {
-}
+GuestTask::~GuestTask() = default;
 
 void GuestTask::UpdateTitle() {
   set_title(GetCurrentTitle(web_contents()));
 }
 
 void GuestTask::UpdateFavicon() {
-  const gfx::ImageSkia* icon = GetFaviconFromWebContents(web_contents());
-  set_icon(icon ? *icon : gfx::ImageSkia());
+  DefaultUpdateFaviconImpl();
 }
 
 Task::Type GuestTask::GetType() const {
   return Task::GUEST;
 }
 
-base::string16 GuestTask::GetCurrentTitle(
+std::u16string GuestTask::GetCurrentTitle(
     content::WebContents* web_contents) const {
   DCHECK(web_contents);
 
-  guest_view::GuestViewBase* guest =
-      guest_view::GuestViewBase::FromWebContents(web_contents);
-
+  auto* guest = guest_view::GuestViewBase::FromWebContents(web_contents);
   if (!guest) {
     // This can happen when an AppWindowContentsImpl is destroyed. It emits a
     // DidFinishNavigation() events to the WebContentsObservers which triggers a
@@ -45,12 +41,9 @@ base::string16 GuestTask::GetCurrentTitle(
     return title();
   }
 
-  base::string16 title =
-      l10n_util::GetStringFUTF16(guest->GetTaskPrefix(),
-                                 RendererTask::GetTitleFromWebContents(
-                                     web_contents));
-
-  return title;
+  return l10n_util::GetStringFUTF16(
+      guest->GetTaskPrefix(),
+      RendererTask::GetTitleFromWebContents(web_contents));
 }
 
 }  // namespace task_manager

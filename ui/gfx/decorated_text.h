@@ -1,24 +1,24 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef UI_GFX_DECORATED_TEXT_H_
 #define UI_GFX_DECORATED_TEXT_H_
 
+#include <string>
 #include <vector>
 
-#include "base/strings/string16.h"
+#include "base/component_export.h"
 #include "ui/gfx/font.h"
-#include "ui/gfx/gfx_export.h"
 #include "ui/gfx/range/range.h"
 
 namespace gfx {
 
 // Encapsulates styling information for some given text.
-struct GFX_EXPORT DecoratedText {
+struct COMPONENT_EXPORT(GFX) DecoratedText {
   // Describes the various text decoration attributes applicable to a given
   // range of text.
-  struct GFX_EXPORT RangedAttribute {
+  struct COMPONENT_EXPORT(GFX) RangedAttribute {
     // Disallow default construction of Font, since that's slow.
     RangedAttribute() = delete;
     RangedAttribute(const Range& range, const Font& font);
@@ -33,7 +33,7 @@ struct GFX_EXPORT DecoratedText {
   DecoratedText();
   ~DecoratedText();
 
-  base::string16 text;
+  std::u16string text;
 
   // Vector of RangedAttribute describing styling of non-overlapping ranges
   // in |text|.

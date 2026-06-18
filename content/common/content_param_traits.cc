@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,65 +10,21 @@
 #include "base/unguessable_token.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/surfaces/local_surface_id.h"
-#include "components/viz/common/surfaces/local_surface_id_allocation.h"
 #include "components/viz/common/surfaces/surface_id.h"
 #include "components/viz/common/surfaces/surface_info.h"
-#include "ipc/ipc_mojo_message_helper.h"
-#include "ipc/ipc_mojo_param_traits.h"
+#include "ipc/mojo_param_traits.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/base/ip_endpoint.h"
 #include "services/network/public/cpp/net_ipc_param_traits.h"
-#include "third_party/blink/public/common/feature_policy/feature_policy.h"
 #include "third_party/blink/public/common/messaging/message_port_channel.h"
 #include "third_party/blink/public/common/messaging/message_port_descriptor.h"
 #include "third_party/blink/public/common/messaging/transferable_message.h"
-#include "third_party/blink/public/mojom/feature_policy/policy_value.mojom.h"
+#include "third_party/blink/public/mojom/blob/blob.mojom.h"
+#include "third_party/blink/public/mojom/permissions_policy/policy_value.mojom.h"
 #include "ui/accessibility/ax_mode.h"
-#include "ui/base/cursor/cursor.h"
-#include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
-#include "ui/gfx/ipc/skia/gfx_skia_param_traits.h"
+#include "ui/gfx/ipc/geometry/gfx_param_traits.h"
 
 namespace IPC {
-
-void ParamTraits<content::WebCursor>::Write(base::Pickle* m,
-                                            const param_type& p) {
-  WriteParam(m, p.cursor().type());
-  if (p.cursor().type() == ui::mojom::CursorType::kCustom) {
-    WriteParam(m, p.cursor().custom_hotspot());
-    WriteParam(m, p.cursor().image_scale_factor());
-    WriteParam(m, p.cursor().custom_bitmap());
-  }
-}
-
-bool ParamTraits<content::WebCursor>::Read(const base::Pickle* m,
-                                           base::PickleIterator* iter,
-                                           param_type* r) {
-  ui::mojom::CursorType type;
-  if (!ReadParam(m, iter, &type))
-    return false;
-
-  ui::Cursor cursor(type);
-  if (cursor.type() == ui::mojom::CursorType::kCustom) {
-    gfx::Point hotspot;
-    float image_scale_factor;
-    SkBitmap bitmap;
-    if (!ReadParam(m, iter, &hotspot) ||
-        !ReadParam(m, iter, &image_scale_factor) ||
-        !ReadParam(m, iter, &bitmap)) {
-      return false;
-    }
-
-    cursor.set_custom_hotspot(hotspot);
-    cursor.set_image_scale_factor(image_scale_factor);
-    cursor.set_custom_bitmap(bitmap);
-  }
-
-  return r->SetCursor(cursor);
-}
-
-void ParamTraits<content::WebCursor>::Log(const param_type& p, std::string* l) {
-  l->append("<WebCursor>");
-}
 
 void ParamTraits<blink::MessagePortChannel>::Write(base::Pickle* m,
                                                    const param_type& p) {
@@ -85,27 +41,6 @@ bool ParamTraits<blink::MessagePortChannel>::Read(const base::Pickle* m,
   return true;
 }
 
-void ParamTraits<blink::MessagePortChannel>::Log(const param_type& p,
-                                                 std::string* l) {}
-
-void ParamTraits<blink::PolicyValue>::Write(base::Pickle* m,
-                                            const param_type& p) {
-  blink::mojom::PolicyValueType type = p.Type();
-  WriteParam(m, static_cast<int>(type));
-  switch (type) {
-    case blink::mojom::PolicyValueType::kBool:
-      WriteParam(m, p.BoolValue());
-      break;
-    case blink::mojom::PolicyValueType::kDecDouble:
-      WriteParam(m, p.DoubleValue());
-      break;
-    case blink::mojom::PolicyValueType::kEnum:
-      WriteParam(m, p.IntValue());
-      break;
-    case blink::mojom::PolicyValueType::kNull:
-      break;
-  }
-}
 
 void ParamTraits<blink::MessagePortDescriptor>::Write(
     base::Pickle* m,
@@ -135,8 +70,6 @@ bool ParamTraits<blink::MessagePortDescriptor>::Read(const base::Pickle* m,
   return true;
 }
 
-void ParamTraits<blink::MessagePortDescriptor>::Log(const param_type& p,
-                                                    std::string* l) {}
 
 bool ParamTraits<blink::PolicyValue>::Read(const base::Pickle* m,
                                            base::PickleIterator* iter,
@@ -175,11 +108,8 @@ bool ParamTraits<blink::PolicyValue>::Read(const base::Pickle* m,
   return true;
 }
 
-void ParamTraits<blink::PolicyValue>::Log(const param_type& p, std::string* l) {
-}
-
 void ParamTraits<ui::AXMode>::Write(base::Pickle* m, const param_type& p) {
-  WriteParam(m, p.mode());
+  WriteParam(m, p.flags());
 }
 
 bool ParamTraits<ui::AXMode>::Read(const base::Pickle* m,
@@ -191,8 +121,6 @@ bool ParamTraits<ui::AXMode>::Read(const base::Pickle* m,
   *r = ui::AXMode(value);
   return true;
 }
-
-void ParamTraits<ui::AXMode>::Log(const param_type& p, std::string* l) {}
 
 template <>
 struct ParamTraits<blink::mojom::SerializedBlobPtr> {
@@ -222,12 +150,12 @@ struct ParamTraits<blink::mojom::SerializedBlobPtr> {
 
 template <>
 struct ParamTraits<
-    mojo::PendingRemote<blink::mojom::NativeFileSystemTransferToken>> {
+    mojo::PendingRemote<blink::mojom::FileSystemAccessTransferToken>> {
   using param_type =
-      mojo::PendingRemote<blink::mojom::NativeFileSystemTransferToken>;
+      mojo::PendingRemote<blink::mojom::FileSystemAccessTransferToken>;
   static void Write(base::Pickle* m, const param_type& p) {
     // Move the Mojo pipe to serialize the
-    // PendingRemote<NativeFileSystemTransferToken> for a postMessage() target.
+    // PendingRemote<FileSystemAccessTransferToken> for a postMessage() target.
     WriteParam(m, const_cast<param_type&>(p).PassPipe().release());
   }
 
@@ -238,9 +166,9 @@ struct ParamTraits<
     if (!ReadParam(m, iter, &handle)) {
       return false;
     }
-    *r = mojo::PendingRemote<blink::mojom::NativeFileSystemTransferToken>(
+    *r = mojo::PendingRemote<blink::mojom::FileSystemAccessTransferToken>(
         mojo::ScopedMessagePipeHandle(handle),
-        blink::mojom::NativeFileSystemTransferToken::Version_);
+        blink::mojom::FileSystemAccessTransferToken::Version_);
     return true;
   }
 };
@@ -265,14 +193,6 @@ bool ParamTraits<viz::FrameSinkId>::Read(const base::Pickle* m,
 
   *p = viz::FrameSinkId(client_id, sink_id);
   return p->is_valid();
-}
-
-void ParamTraits<viz::FrameSinkId>::Log(const param_type& p, std::string* l) {
-  l->append("viz::FrameSinkId(");
-  LogParam(p.client_id(), l);
-  l->append(", ");
-  LogParam(p.sink_id(), l);
-  l->append(")");
 }
 
 void ParamTraits<viz::LocalSurfaceId>::Write(base::Pickle* m,
@@ -303,49 +223,6 @@ bool ParamTraits<viz::LocalSurfaceId>::Read(const base::Pickle* m,
   return p->is_valid();
 }
 
-void ParamTraits<viz::LocalSurfaceId>::Log(const param_type& p,
-                                           std::string* l) {
-  l->append("viz::LocalSurfaceId(");
-  LogParam(p.parent_sequence_number(), l);
-  l->append(", ");
-  LogParam(p.child_sequence_number(), l);
-  l->append(", ");
-  LogParam(p.embed_token(), l);
-  l->append(")");
-}
-
-void ParamTraits<viz::LocalSurfaceIdAllocation>::Write(base::Pickle* m,
-                                                       const param_type& p) {
-  DCHECK(p.IsValid());
-  WriteParam(m, p.local_surface_id());
-  WriteParam(m, p.allocation_time());
-}
-
-bool ParamTraits<viz::LocalSurfaceIdAllocation>::Read(
-    const base::Pickle* m,
-    base::PickleIterator* iter,
-    param_type* p) {
-  viz::LocalSurfaceId local_surface_id;
-  if (!ReadParam(m, iter, &local_surface_id))
-    return false;
-
-  base::TimeTicks allocation_time;
-  if (!ReadParam(m, iter, &allocation_time))
-    return false;
-
-  *p = viz::LocalSurfaceIdAllocation(local_surface_id, allocation_time);
-  return p->IsValid();
-}
-
-void ParamTraits<viz::LocalSurfaceIdAllocation>::Log(const param_type& p,
-                                                     std::string* l) {
-  l->append("viz::LocalSurfaceIdAllocation(");
-  LogParam(p.local_surface_id(), l);
-  l->append(", ");
-  LogParam(p.allocation_time(), l);
-  l->append(")");
-}
-
 void ParamTraits<viz::SurfaceId>::Write(base::Pickle* m, const param_type& p) {
   WriteParam(m, p.frame_sink_id());
   WriteParam(m, p.local_surface_id());
@@ -364,14 +241,6 @@ bool ParamTraits<viz::SurfaceId>::Read(const base::Pickle* m,
 
   *p = viz::SurfaceId(frame_sink_id, local_surface_id);
   return true;
-}
-
-void ParamTraits<viz::SurfaceId>::Log(const param_type& p, std::string* l) {
-  l->append("viz::SurfaceId(");
-  LogParam(p.frame_sink_id(), l);
-  l->append(", ");
-  LogParam(p.local_surface_id(), l);
-  l->append(")");
 }
 
 void ParamTraits<viz::SurfaceInfo>::Write(base::Pickle* m,
@@ -400,62 +269,4 @@ bool ParamTraits<viz::SurfaceInfo>::Read(const base::Pickle* m,
   return p->is_valid();
 }
 
-void ParamTraits<viz::SurfaceInfo>::Log(const param_type& p, std::string* l) {
-  l->append("viz::SurfaceInfo(");
-  LogParam(p.id(), l);
-  l->append(", ");
-  LogParam(p.device_scale_factor(), l);
-  l->append(", ");
-  LogParam(p.size_in_pixels(), l);
-  l->append(")");
-}
-
-void ParamTraits<net::SHA256HashValue>::Write(base::Pickle* m,
-                                              const param_type& p) {
-  m->WriteData(reinterpret_cast<const char*>(p.data), sizeof(p.data));
-}
-
-bool ParamTraits<net::SHA256HashValue>::Read(const base::Pickle* m,
-                                             base::PickleIterator* iter,
-                                             param_type* r) {
-  const char* data;
-  int data_length;
-  if (!iter->ReadData(&data, &data_length)) {
-    NOTREACHED();
-    return false;
-  }
-  if (data_length != sizeof(r->data)) {
-    NOTREACHED();
-    return false;
-  }
-  memcpy(r->data, data, sizeof(r->data));
-  return true;
-}
-
-void ParamTraits<net::SHA256HashValue>::Log(const param_type& p,
-                                            std::string* l) {
-  l->append("<SHA256HashValue>");
-}
-
-}  // namespace IPC
-
-// Generate param traits write methods.
-#include "ipc/param_traits_write_macros.h"
-namespace IPC {
-#undef CONTENT_COMMON_CONTENT_PARAM_TRAITS_MACROS_H_
-#include "content/common/content_param_traits_macros.h"
-}  // namespace IPC
-
-// Generate param traits read methods.
-#include "ipc/param_traits_read_macros.h"
-namespace IPC {
-#undef CONTENT_COMMON_CONTENT_PARAM_TRAITS_MACROS_H_
-#include "content/common/content_param_traits_macros.h"
-}  // namespace IPC
-
-// Generate param traits log methods.
-#include "ipc/param_traits_log_macros.h"
-namespace IPC {
-#undef CONTENT_COMMON_CONTENT_PARAM_TRAITS_MACROS_H_
-#include "content/common/content_param_traits_macros.h"
 }  // namespace IPC

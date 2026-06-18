@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,10 +21,11 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.library_loader.LibraryLoader;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CallbackHelper;
 import org.chromium.base.test.util.CommandLineFlags;
-import org.chromium.base.test.util.JniMocker;
 import org.chromium.chrome.browser.customtabs.CustomTabActivityTestRule;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.tab.Tab;
@@ -33,7 +34,6 @@ import org.chromium.chrome.browser.webapps.WebApkPostShareTargetNavigatorJni;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 import org.chromium.chrome.test.util.ChromeTabUtils;
 import org.chromium.content_public.browser.WebContents;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
 import org.chromium.net.test.EmbeddedTestServerRule;
 
 import java.util.Collections;
@@ -42,24 +42,27 @@ import java.util.concurrent.TimeoutException;
 
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
+@Batch(Batch.PER_CLASS)
 public class TrustedWebActivityShareTargetTest {
     // We are not actually navigating to POST target, so ok not to use test pages here.
     private static final ShareTarget POST_SHARE_TARGET =
-            new ShareTarget("https://pwa.rocks/share.html", "POST", null,
+            new ShareTarget(
+                    "https://pwa.rocks/share.html",
+                    "POST",
+                    null,
                     new ShareTarget.Params("received_title", "received_text", null));
 
     private static final ShareTarget UNVERIFIED_ORIGIN_POST_SHARE_TARGET =
-            new ShareTarget("https://random.website/share.html", "POST", null,
+            new ShareTarget(
+                    "https://random.website/share.html",
+                    "POST",
+                    null,
                     new ShareTarget.Params("received_title", "received_text", null));
 
     @Rule
     public CustomTabActivityTestRule mCustomTabActivityTestRule = new CustomTabActivityTestRule();
 
-    @Rule
-    public EmbeddedTestServerRule mEmbeddedTestServerRule = new EmbeddedTestServerRule();
-
-    @Rule
-    public JniMocker mJniMocker = new JniMocker();
+    @Rule public EmbeddedTestServerRule mEmbeddedTestServerRule = new EmbeddedTestServerRule();
 
     private static final String TEST_PAGE = "/chrome/test/data/android/google.html";
     private static final String SHARE_TEST_PAGE = "/chrome/test/data/android/about.html";
@@ -78,16 +81,21 @@ public class TrustedWebActivityShareTargetTest {
 
     @Before
     public void setUp() throws Exception {
-        mJniMocker.mock(WebApkPostShareTargetNavigatorJni.TEST_HOOKS, mPostNavigatorNatives);
+        WebApkPostShareTargetNavigatorJni.setInstanceForTesting(mPostNavigatorNatives);
+        mCustomTabActivityTestRule.setFinishActivity(true);
 
         LibraryLoader.getInstance().ensureInitialized();
         mEmbeddedTestServerRule.setServerUsesHttps(true);
         String testPage = mEmbeddedTestServerRule.getServer().getURL(TEST_PAGE);
         String shareTestPage = mEmbeddedTestServerRule.getServer().getURL(SHARE_TEST_PAGE);
-        mGetShareTarget = new ShareTarget(shareTestPage, "GET", null,
-                new ShareTarget.Params("received_title", "received_text", null));
-        mExpectedGetRequestUrl = shareTestPage
-                + "?received_title=test_title&received_text=test_text";
+        mGetShareTarget =
+                new ShareTarget(
+                        shareTestPage,
+                        "GET",
+                        null,
+                        new ShareTarget.Params("received_title", "received_text", null));
+        mExpectedGetRequestUrl =
+                shareTestPage + "?received_title=test_title&received_text=test_text";
         spoofVerification(PACKAGE_NAME, testPage);
         spoofVerification(PACKAGE_NAME, "https://pwa.rocks");
         mIntent = createTrustedWebActivityIntent(testPage);
@@ -106,7 +114,7 @@ public class TrustedWebActivityShareTargetTest {
     @MediumTest
     public void sharesDataWithPost_FromInitialIntent() throws Exception {
         putShareData(mIntent, POST_SHARE_TARGET);
-        mCustomTabActivityTestRule.startCustomTabActivityWithIntent(mIntent);
+        mCustomTabActivityTestRule.startCustomTabActivityWithIntentNotWaitingForFirstFrame(mIntent);
         assertPostNavigatorCalled();
     }
 
@@ -160,15 +168,21 @@ public class TrustedWebActivityShareTargetTest {
     private void deliverNewIntent(Intent intent) {
         // Delivering intents to existing CustomTabActivity in tests is error-prone and out of scope
         // of these tests. Thus calling onNewIntent directly.
-        TestThreadUtils.runOnUiThreadBlocking(
+        ThreadUtils.runOnUiThreadBlocking(
                 () -> mCustomTabActivityTestRule.getActivity().onNewIntent(intent));
     }
 
     private class MockPostNavigatorNatives implements WebApkPostShareTargetNavigator.Natives {
         @Override
-        public void nativeLoadViewForShareTargetPost(boolean isMultipartEncoding, String[] names,
-                String[] values, boolean[] isValueFileUris, String[] filenames, String[] types,
-                String startUrl, WebContents webContents) {
+        public void nativeLoadViewForShareTargetPost(
+                boolean isMultipartEncoding,
+                String[] names,
+                String[] values,
+                boolean[] isValueFileUris,
+                String[] filenames,
+                String[] types,
+                String startUrl,
+                WebContents webContents) {
             mPostNavigatorCallback.notifyCalled();
         }
     }

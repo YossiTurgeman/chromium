@@ -1,9 +1,13 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/macros.h"
 #include "net/cookies/cookie_constants.h"
+
+#include <string_view>
+#include <utility>
+
+#include "base/strings/strcat.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace net {
@@ -38,27 +42,97 @@ TEST(CookieConstantsTest, TestCookiePriority) {
   }
 }
 
-// TODO(crbug.com/996811): Add tests for multiple possibly-invalid attributes.
+// TODO(crbug.com/40641705): Add tests for multiple possibly-invalid attributes.
 TEST(CookieConstantsTest, TestCookieSameSite) {
   // Test case insensitivity
-  EXPECT_EQ(CookieSameSite::NO_RESTRICTION, StringToCookieSameSite("None"));
-  EXPECT_EQ(CookieSameSite::NO_RESTRICTION, StringToCookieSameSite("none"));
-  EXPECT_EQ(CookieSameSite::NO_RESTRICTION, StringToCookieSameSite("NONE"));
-  EXPECT_EQ(CookieSameSite::LAX_MODE, StringToCookieSameSite("Lax"));
-  EXPECT_EQ(CookieSameSite::LAX_MODE, StringToCookieSameSite("LAX"));
-  EXPECT_EQ(CookieSameSite::LAX_MODE, StringToCookieSameSite("lAx"));
-  EXPECT_EQ(CookieSameSite::STRICT_MODE, StringToCookieSameSite("Strict"));
-  EXPECT_EQ(CookieSameSite::STRICT_MODE, StringToCookieSameSite("STRICT"));
-  EXPECT_EQ(CookieSameSite::STRICT_MODE, StringToCookieSameSite("sTrIcT"));
-  EXPECT_EQ(CookieSameSite::UNSPECIFIED, StringToCookieSameSite("extended"));
-  EXPECT_EQ(CookieSameSite::UNSPECIFIED, StringToCookieSameSite("EXTENDED"));
-  EXPECT_EQ(CookieSameSite::UNSPECIFIED, StringToCookieSameSite("ExtenDED"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::NO_RESTRICTION,
+                           CookieSameSiteString::kNone),
+            StringToCookieSameSite("None"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::NO_RESTRICTION,
+                           CookieSameSiteString::kNone),
+            StringToCookieSameSite("none"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::NO_RESTRICTION,
+                           CookieSameSiteString::kNone),
+            StringToCookieSameSite("NONE"));
+  EXPECT_EQ(
+      std::make_pair(CookieSameSite::LAX_MODE, CookieSameSiteString::kLax),
+      StringToCookieSameSite("Lax"));
+  EXPECT_EQ(
+      std::make_pair(CookieSameSite::LAX_MODE, CookieSameSiteString::kLax),
+      StringToCookieSameSite("LAX"));
+  EXPECT_EQ(
+      std::make_pair(CookieSameSite::LAX_MODE, CookieSameSiteString::kLax),
+      StringToCookieSameSite("lAx"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::STRICT_MODE,
+                           CookieSameSiteString::kStrict),
+            StringToCookieSameSite("Strict"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::STRICT_MODE,
+                           CookieSameSiteString::kStrict),
+            StringToCookieSameSite("STRICT"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::STRICT_MODE,
+                           CookieSameSiteString::kStrict),
+            StringToCookieSameSite("sTrIcT"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::UNSPECIFIED,
+                           CookieSameSiteString::kExtended),
+            StringToCookieSameSite("extended"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::UNSPECIFIED,
+                           CookieSameSiteString::kExtended),
+            StringToCookieSameSite("EXTENDED"));
+  EXPECT_EQ(std::make_pair(CookieSameSite::UNSPECIFIED,
+                           CookieSameSiteString::kExtended),
+            StringToCookieSameSite("ExtenDED"));
 
   // Unrecognized tokens are interpreted as UNSPECIFIED.
-  const char* const bad_tokens[] = {"",          "foo",   "none ",
-                                    "strictest", " none", "0"};
-  for (const auto* bad_token : bad_tokens) {
-    EXPECT_EQ(CookieSameSite::UNSPECIFIED, StringToCookieSameSite(bad_token));
+  const std::pair<std::string_view, CookieSameSiteString> bad_tokens[] = {
+      {"", CookieSameSiteString::kEmptyString},
+      {"foo", CookieSameSiteString::kUnrecognized},
+      {"none ", CookieSameSiteString::kUnrecognized},
+      {"strictest", CookieSameSiteString::kUnrecognized},
+      {" none", CookieSameSiteString::kUnrecognized},
+      {"0", CookieSameSiteString::kUnrecognized},
+  };
+  for (const auto [bad_token, expected_samesite_string] : bad_tokens) {
+    SCOPED_TRACE(base::StrCat({"Token: \"", bad_token, "\""}));
+    EXPECT_EQ(
+        std::make_pair(CookieSameSite::UNSPECIFIED, expected_samesite_string),
+        StringToCookieSameSite(bad_token));
+  }
+}
+
+TEST(CookieConstantsTest, TestReducePortRangeForCookieHistogram) {
+  struct TestData {
+    int input_port;
+    CookiePort expected_enum;
+  };
+
+  const TestData kTestValues[] = {
+      {-1234 /* Invalid port. */, CookiePort::kOther},
+      {0 /* Invalid port. */, CookiePort::kOther},
+      {1 /* Valid but outside range. */, CookiePort::kOther},
+      {79 /* Valid but outside range. */, CookiePort::kOther},
+      {80, CookiePort::k80},
+      {445, CookiePort::k445},
+      {3001, CookiePort::k3001},
+      {4200, CookiePort::k4200},
+      {5002, CookiePort::k5002},
+      {7003, CookiePort::k7003},
+      {8001, CookiePort::k8001},
+      {8080, CookiePort::k8080},
+      {8086 /* Valid but outside range. */, CookiePort::kOther},
+      {8095, CookiePort::k8095},
+      {8100, CookiePort::k8100},
+      {8201, CookiePort::k8201},
+      {8445, CookiePort::k8445},
+      {8888, CookiePort::k8888},
+      {9004, CookiePort::k9004},
+      {9091, CookiePort::k9091},
+      {65535 /* Valid but outside range. */, CookiePort::kOther},
+      {655356 /* Invalid port. */, CookiePort::kOther},
+  };
+
+  for (const auto& value : kTestValues) {
+    EXPECT_EQ(value.expected_enum,
+              ReducePortRangeForCookieHistogram(value.input_port));
   }
 }
 

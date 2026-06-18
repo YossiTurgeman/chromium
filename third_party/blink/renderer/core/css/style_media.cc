@@ -34,32 +34,32 @@
 
 namespace blink {
 
-StyleMedia::StyleMedia(LocalFrame* frame) : ExecutionContextClient(frame) {}
+StyleMedia::StyleMedia(LocalDOMWindow* window)
+    : ExecutionContextClient(window) {}
 
 AtomicString StyleMedia::type() const {
-  LocalFrameView* view = GetFrame() ? GetFrame()->View() : nullptr;
-  if (view)
-    return view->MediaType();
-
-  return g_null_atom;
+  if (!DomWindow()) {
+    return g_null_atom;
+  }
+  return DomWindow()->GetFrame()->View()->MediaType();
 }
 
 bool StyleMedia::matchMedium(const String& query) const {
-  if (!GetFrame())
+  if (!DomWindow()) {
     return false;
+  }
 
-  Document* document = GetFrame()->GetDocument();
-  DCHECK(document);
-  Element* document_element = document->documentElement();
-  if (!document_element)
+  Element* document_element = DomWindow()->document()->documentElement();
+  if (!document_element) {
     return false;
+  }
 
-  scoped_refptr<MediaQuerySet> media = MediaQuerySet::Create();
-  if (!media->Set(query, GetFrame()->DomWindow()))
-    return false;
+  const MediaQuerySet* media = MediaQuerySet::Create(query, DomWindow());
+  DCHECK(media);
 
-  MediaQueryEvaluator screen_eval(GetFrame());
-  return screen_eval.Eval(*media);
+  MediaQueryEvaluator* screen_eval =
+      MakeGarbageCollected<MediaQueryEvaluator>(DomWindow()->GetFrame());
+  return screen_eval->Eval(*media);
 }
 
 void StyleMedia::Trace(Visitor* visitor) const {

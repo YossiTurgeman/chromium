@@ -1,4 +1,4 @@
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -41,8 +41,11 @@ class RenderingCT(perf_benchmark.PerfBenchmark):
 
   def CreateCoreTimelineBasedMeasurementOptions(self):
     category_filter = chrome_trace_category_filter.CreateLowOverheadFilter()
+    category_filter.AddDisabledByDefault(
+        'disabled-by-default-histogram_samples')
     options = timeline_based_measurement.Options(category_filter)
     options.config.chrome_trace_config.EnableUMAHistograms(
         *rendering.RENDERING_BENCHMARK_UMA)
-    options.SetTimelineBasedMetrics(['renderingMetric', 'umaMetric'])
+    options.SetTimelineBasedMetrics(
+        ['renderingMetric', 'umaMetric', 'tbmv3:uma_metrics'])
     return options

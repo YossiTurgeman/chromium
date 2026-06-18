@@ -1,13 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_api_request_body_mojom_traits.h"
 
+#include <tuple>
+
 #include "base/test/task_environment.h"
 #include "mojo/public/cpp/base/file_mojom_traits.h"
 #include "mojo/public/cpp/base/file_path_mojom_traits.h"
-#include "mojo/public/cpp/bindings/array_traits_wtf_vector.h"
 #include "mojo/public/cpp/test_support/test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
@@ -30,20 +31,20 @@ TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripEmpty) {
 
   ResourceRequestBody dest;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
-              blink::mojom::blink::FetchAPIRequestBody>(&src, &dest));
+              blink::mojom::blink::FetchAPIRequestBody>(src, dest));
 
   EXPECT_TRUE(dest.IsEmpty());
 }
 
 TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripBytes) {
   ResourceRequestBody src(EncodedFormData::Create());
-  src.FormBody()->AppendData("hello", 5);
+  src.FormBody()->AppendData(base::span_from_cstring("hello"));
   src.FormBody()->SetIdentifier(29);
   src.FormBody()->SetContainsPasswordData(true);
 
   ResourceRequestBody dest;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
-              blink::mojom::blink::FetchAPIRequestBody>(&src, &dest));
+              blink::mojom::blink::FetchAPIRequestBody>(src, dest));
 
   ASSERT_TRUE(dest.FormBody());
   EXPECT_EQ(dest.FormBody()->Identifier(), 29);
@@ -51,7 +52,7 @@ TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripBytes) {
   ASSERT_EQ(1u, dest.FormBody()->Elements().size());
   const FormDataElement& e = dest.FormBody()->Elements()[0];
   EXPECT_EQ(e.type_, FormDataElement::kData);
-  EXPECT_EQ("hello", String(e.data_.data(), e.data_.size()));
+  EXPECT_EQ("hello", String(e.data_));
 }
 
 TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripFile) {
@@ -61,7 +62,7 @@ TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripFile) {
 
   ResourceRequestBody dest;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
-              blink::mojom::blink::FetchAPIRequestBody>(&src, &dest));
+              blink::mojom::blink::FetchAPIRequestBody>(src, dest));
 
   ASSERT_TRUE(dest.FormBody());
   ASSERT_EQ(1u, dest.FormBody()->Elements().size());
@@ -75,11 +76,11 @@ TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripFile) {
 
 TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripFileRange) {
   ResourceRequestBody src(EncodedFormData::Create());
-  src.FormBody()->AppendFileRange("abc", 4, 8, base::nullopt);
+  src.FormBody()->AppendFileRange("abc", 4, 8, std::nullopt);
 
   ResourceRequestBody dest;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
-              blink::mojom::blink::FetchAPIRequestBody>(&src, &dest));
+              blink::mojom::blink::FetchAPIRequestBody>(src, dest));
 
   ASSERT_TRUE(dest.FormBody());
   ASSERT_EQ(1u, dest.FormBody()->Elements().size());
@@ -88,41 +89,39 @@ TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripFileRange) {
   EXPECT_EQ(e.filename_, "abc");
   EXPECT_EQ(e.file_start_, 4);
   EXPECT_EQ(e.file_length_, 8);
-  EXPECT_EQ(e.expected_file_modification_time_, base::nullopt);
+  EXPECT_EQ(e.expected_file_modification_time_, std::nullopt);
 }
 
 TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripBlobWithOpionalHandle) {
   ResourceRequestBody src(EncodedFormData::Create());
   mojo::MessagePipe pipe;
-  String uuid = "test_uuid";
   auto blob_data_handle = BlobDataHandle::Create(
-      uuid, "type-test", 100,
+      "test_uuid", "type-test", 100,
       mojo::PendingRemote<mojom::blink::Blob>(std::move(pipe.handle0), 0));
-  src.FormBody()->AppendBlob(uuid, blob_data_handle);
+  src.FormBody()->AppendBlob(blob_data_handle);
 
   ResourceRequestBody dest;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
-              blink::mojom::blink::FetchAPIRequestBody>(&src, &dest));
+              blink::mojom::blink::FetchAPIRequestBody>(src, dest));
 
   ASSERT_TRUE(dest.FormBody());
   ASSERT_EQ(1u, dest.FormBody()->Elements().size());
   const FormDataElement& e = dest.FormBody()->Elements()[0];
   EXPECT_EQ(e.type_, FormDataElement::kDataPipe);
-  EXPECT_EQ(e.blob_uuid_, String());
   EXPECT_TRUE(e.data_pipe_getter_);
 }
 
 TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripDataPipeGetter) {
   ResourceRequestBody src(EncodedFormData::Create());
   mojo::PendingRemote<network::mojom::blink::DataPipeGetter> data_pipe_getter;
-  ignore_result(data_pipe_getter.InitWithNewPipeAndPassReceiver());
+  std::ignore = data_pipe_getter.InitWithNewPipeAndPassReceiver();
   src.FormBody()->AppendDataPipe(
       base::MakeRefCounted<blink::WrappedDataPipeGetter>(
           std::move(data_pipe_getter)));
 
   ResourceRequestBody dest;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
-              blink::mojom::blink::FetchAPIRequestBody>(&src, &dest));
+              blink::mojom::blink::FetchAPIRequestBody>(src, dest));
 
   ASSERT_TRUE(dest.FormBody());
   ASSERT_EQ(1u, dest.FormBody()->Elements().size());
@@ -134,12 +133,12 @@ TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripDataPipeGetter) {
 TEST_F(FetchApiRequestBodyMojomTraitsTest, RoundTripStreamBody) {
   mojo::PendingRemote<network::mojom::blink::ChunkedDataPipeGetter>
       chunked_data_pipe_getter;
-  ignore_result(chunked_data_pipe_getter.InitWithNewPipeAndPassReceiver());
+  std::ignore = chunked_data_pipe_getter.InitWithNewPipeAndPassReceiver();
   ResourceRequestBody src(std::move(chunked_data_pipe_getter));
 
   ResourceRequestBody dest;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
-              blink::mojom::blink::FetchAPIRequestBody>(&src, &dest));
+              blink::mojom::blink::FetchAPIRequestBody>(src, dest));
 
   EXPECT_FALSE(dest.FormBody());
   ASSERT_TRUE(dest.StreamBody());

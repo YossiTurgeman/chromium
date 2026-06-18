@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind_helpers.h"
-#include "base/optional.h"
-#include "base/test/bind_test_util.h"
+#include <optional>
+
+#include "base/functional/callback_helpers.h"
+#include "base/test/bind.h"
 #include "build/build_config.h"
 #include "chrome/browser/vr/test/mock_xr_device_hook_base.h"
 #include "chrome/browser/vr/test/multi_class_browser_test.h"
@@ -12,6 +13,11 @@
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/xr_test_utils.h"
 
+// Android doesn't use an isolated device service, so these tests don't need to
+// be built here.
+#if BUILDFLAG(IS_ANDROID)
+#error "Android does not have an isolated device service"
+#endif  // if !BUILDFLAG(IS_ANDROID)
 namespace vr {
 
 // Tests that we can recover from a crash/disconnect on the DeviceService
@@ -19,7 +25,7 @@ WEBXR_VR_ALL_RUNTIMES_BROWSER_TEST_F(TestDeviceServiceDisconnect) {
   // Ensure that any time the XR Device Service is started, we have installed
   // a new local hook before the IsolatedDeviceProvider has a chance to issue
   // any enumeration requests.
-  base::Optional<MockXRDeviceHookBase> device_hook(base::in_place);
+  std::optional<MockXRDeviceHookBase> device_hook(std::in_place);
   content::SetXRDeviceServiceStartupCallbackForTesting(
       base::BindLambdaForTesting([&] { device_hook.emplace(); }));
 

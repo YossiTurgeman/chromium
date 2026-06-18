@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,12 @@
 #include <utility>
 
 #include "base/memory/ptr_util.h"
+#include "third_party/blink/renderer/core/animation/css_interpolation_environment.h"
 #include "third_party/blink/renderer/core/animation/interpolated_svg_path_source.h"
-#include "third_party/blink/renderer/core/animation/interpolation_environment.h"
 #include "third_party/blink/renderer/core/animation/svg_path_seg_interpolation_functions.h"
+#include "third_party/blink/renderer/core/animation/underlying_value_owner.h"
 #include "third_party/blink/renderer/core/css/css_path_value.h"
+#include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
 #include "third_party/blink/renderer/core/svg/svg_path.h"
 #include "third_party/blink/renderer/core/svg/svg_path_byte_stream_builder.h"
 #include "third_party/blink/renderer/core/svg/svg_path_byte_stream_source.h"
@@ -21,23 +23,25 @@ namespace blink {
 
 class SVGPathNonInterpolableValue : public NonInterpolableValue {
  public:
+  explicit SVGPathNonInterpolableValue(
+      Vector<SVGPathSegType>&& path_seg_types,
+      WindRule wind_rule = RULE_NONZERO,
+      std::optional<ShapeBox> css_box = std::nullopt)
+      : path_seg_types_(path_seg_types),
+        wind_rule_(wind_rule),
+        css_box_(css_box) {}
   ~SVGPathNonInterpolableValue() override = default;
 
-  static scoped_refptr<SVGPathNonInterpolableValue> Create(
-      Vector<SVGPathSegType>& path_seg_types) {
-    return base::AdoptRef(new SVGPathNonInterpolableValue(path_seg_types));
-  }
-
   const Vector<SVGPathSegType>& PathSegTypes() const { return path_seg_types_; }
+  WindRule GetWindRule() const { return wind_rule_; }
+  std::optional<ShapeBox> CssBox() const { return css_box_; }
 
   DECLARE_NON_INTERPOLABLE_VALUE_TYPE();
 
  private:
-  SVGPathNonInterpolableValue(Vector<SVGPathSegType>& path_seg_types) {
-    path_seg_types_.swap(path_seg_types);
-  }
-
   Vector<SVGPathSegType> path_seg_types_;
+  WindRule wind_rule_;
+  std::optional<ShapeBox> css_box_;
 };
 
 DEFINE_NON_INTERPOLABLE_VALUE_TYPE(SVGPathNonInterpolableValue);
@@ -58,12 +62,16 @@ enum PathComponentIndex : unsigned {
 };
 
 InterpolationValue PathInterpolationFunctions::ConvertValue(
-    const SVGPathByteStream& byte_stream,
-    CoordinateConversion coordinateConversion) {
-  SVGPathByteStreamSource path_source(byte_stream);
+    const StylePath* style_path,
+    CoordinateConversion coordinate_conversion,
+    std::optional<ShapeBox> css_box) {
+  if (!style_path)
+    return nullptr;
+
+  SVGPathByteStreamSource path_source(style_path->ByteStream());
   wtf_size_t length = 0;
   PathCoordinates current_coordinates;
-  Vector<std::unique_ptr<InterpolableValue>> interpolable_path_segs;
+  HeapVector<Member<InterpolableValue>> interpolable_path_segs;
   Vector<SVGPathSegType> path_seg_types;
 
   while (path_source.HasMoreData()) {
@@ -72,62 +80,74 @@ InterpolationValue PathInterpolationFunctions::ConvertValue(
         SVGPathSegInterpolationFunctions::ConsumePathSeg(segment,
                                                          current_coordinates));
     SVGPathSegType seg_type = segment.command;
-    if (coordinateConversion == ForceAbsolute)
+    if (coordinate_conversion == kForceAbsolute)
       seg_type = ToAbsolutePathSegType(seg_type);
     path_seg_types.push_back(seg_type);
     length++;
   }
 
-  auto path_args = std::make_unique<InterpolableList>(length);
+  auto* path_args = MakeGarbageCollected<InterpolableList>(length);
   for (wtf_size_t i = 0; i < interpolable_path_segs.size(); i++)
     path_args->Set(i, std::move(interpolable_path_segs[i]));
 
-  auto result = std::make_unique<InterpolableList>(kPathComponentIndexCount);
-  result->Set(kPathArgsIndex, std::move(path_args));
-  result->Set(kPathNeutralIndex, std::make_unique<InterpolableNumber>(0));
+  auto* result =
+      MakeGarbageCollected<InterpolableList>(kPathComponentIndexCount);
+  result->Set(kPathArgsIndex, path_args);
+  result->Set(kPathNeutralIndex, MakeGarbageCollected<InterpolableNumber>(0));
 
   return InterpolationValue(
-      std::move(result), SVGPathNonInterpolableValue::Create(path_seg_types));
+      result,
+      MakeGarbageCollected<SVGPathNonInterpolableValue>(
+          std::move(path_seg_types), style_path->GetWindRule(), css_box));
 }
 
-InterpolationValue PathInterpolationFunctions::ConvertValue(
-    const StylePath* style_path,
-    CoordinateConversion coordinateConversion) {
-  if (style_path)
-    return ConvertValue(style_path->ByteStream(), coordinateConversion);
-
-  std::unique_ptr<SVGPathByteStream> empty_path =
-      std::make_unique<SVGPathByteStream>();
-  return ConvertValue(*empty_path, ForceAbsolute);
-}
-
-class UnderlyingPathSegTypesChecker
+class UnderlyingPathSegTypesChecker final
     : public InterpolationType::ConversionChecker {
  public:
   ~UnderlyingPathSegTypesChecker() final = default;
 
-  static std::unique_ptr<UnderlyingPathSegTypesChecker> Create(
+  static UnderlyingPathSegTypesChecker* Create(
       const InterpolationValue& underlying) {
-    return base::WrapUnique(
-        new UnderlyingPathSegTypesChecker(GetPathSegTypes(underlying)));
+    return MakeGarbageCollected<UnderlyingPathSegTypesChecker>(
+        GetPathSegTypes(underlying), GetWindRule(underlying),
+        GetCssBox(underlying));
   }
 
- private:
-  UnderlyingPathSegTypesChecker(const Vector<SVGPathSegType>& path_seg_types)
-      : path_seg_types_(path_seg_types) {}
+  UnderlyingPathSegTypesChecker(const Vector<SVGPathSegType>& path_seg_types,
+                                WindRule wind_rule,
+                                std::optional<ShapeBox> css_box)
+      : path_seg_types_(path_seg_types),
+        wind_rule_(wind_rule),
+        css_box_(css_box) {}
 
+ private:
   static const Vector<SVGPathSegType>& GetPathSegTypes(
       const InterpolationValue& underlying) {
     return To<SVGPathNonInterpolableValue>(*underlying.non_interpolable_value)
         .PathSegTypes();
   }
 
-  bool IsValid(const InterpolationEnvironment&,
+  static WindRule GetWindRule(const InterpolationValue& underlying) {
+    return To<SVGPathNonInterpolableValue>(*underlying.non_interpolable_value)
+        .GetWindRule();
+  }
+
+  static std::optional<ShapeBox> GetCssBox(
+      const InterpolationValue& underlying) {
+    return To<SVGPathNonInterpolableValue>(*underlying.non_interpolable_value)
+        .CssBox();
+  }
+
+  bool IsValid(const CSSInterpolationEnvironment&,
                const InterpolationValue& underlying) const final {
-    return path_seg_types_ == GetPathSegTypes(underlying);
+    return path_seg_types_ == GetPathSegTypes(underlying) &&
+           wind_rule_ == GetWindRule(underlying) &&
+           ShapeOutsideBoxesMatch(css_box_, GetCssBox(underlying));
   }
 
   Vector<SVGPathSegType> path_seg_types_;
+  WindRule wind_rule_;
+  std::optional<ShapeBox> css_box_;
 };
 
 InterpolationValue PathInterpolationFunctions::MaybeConvertNeutral(
@@ -135,14 +155,14 @@ InterpolationValue PathInterpolationFunctions::MaybeConvertNeutral(
     InterpolationType::ConversionCheckers& conversion_checkers) {
   conversion_checkers.push_back(
       UnderlyingPathSegTypesChecker::Create(underlying));
-  auto result = std::make_unique<InterpolableList>(kPathComponentIndexCount);
+  auto* result =
+      MakeGarbageCollected<InterpolableList>(kPathComponentIndexCount);
   result->Set(kPathArgsIndex,
               To<InterpolableList>(*underlying.interpolable_value)
                   .Get(kPathArgsIndex)
                   ->CloneAndZero());
-  result->Set(kPathNeutralIndex, std::make_unique<InterpolableNumber>(1));
-  return InterpolationValue(std::move(result),
-                            underlying.non_interpolable_value.get());
+  result->Set(kPathNeutralIndex, MakeGarbageCollected<InterpolableNumber>(1));
+  return InterpolationValue(result, underlying.non_interpolable_value.Get());
 }
 
 static bool PathSegTypesMatch(const Vector<SVGPathSegType>& a,
@@ -158,17 +178,44 @@ static bool PathSegTypesMatch(const Vector<SVGPathSegType>& a,
   return true;
 }
 
+bool PathInterpolationFunctions::IsPathNonInterpolableValue(
+    const NonInterpolableValue& value) {
+  return DynamicTo<SVGPathNonInterpolableValue>(value);
+}
+
+bool PathInterpolationFunctions::PathsAreCompatible(
+    const NonInterpolableValue& start,
+    const NonInterpolableValue& end) {
+  auto& start_path = To<SVGPathNonInterpolableValue>(start);
+  auto& end_path = To<SVGPathNonInterpolableValue>(end);
+
+  if (start_path.GetWindRule() != end_path.GetWindRule())
+    return false;
+
+  const Vector<SVGPathSegType>& start_types = start_path.PathSegTypes();
+  const Vector<SVGPathSegType>& end_types = end_path.PathSegTypes();
+  if (start_types.size() == 0 || !PathSegTypesMatch(start_types, end_types))
+    return false;
+
+  if (!ShapeOutsideBoxesMatch(start_path.CssBox(), end_path.CssBox())) {
+    return false;
+  }
+
+  return true;
+}
+
+std::optional<ShapeBox> PathInterpolationFunctions::GetCssBox(
+    const NonInterpolableValue& value) {
+  return To<SVGPathNonInterpolableValue>(value).CssBox();
+}
+
 PairwiseInterpolationValue PathInterpolationFunctions::MaybeMergeSingles(
     InterpolationValue&& start,
     InterpolationValue&& end) {
-  const Vector<SVGPathSegType>& start_types =
-      To<SVGPathNonInterpolableValue>(*start.non_interpolable_value)
-          .PathSegTypes();
-  const Vector<SVGPathSegType>& end_types =
-      To<SVGPathNonInterpolableValue>(*end.non_interpolable_value)
-          .PathSegTypes();
-  if (start_types.size() == 0 || !PathSegTypesMatch(start_types, end_types))
+  if (!PathsAreCompatible(*start.non_interpolable_value.Get(),
+                          *end.non_interpolable_value.Get())) {
     return nullptr;
+  }
 
   return PairwiseInterpolationValue(std::move(start.interpolable_value),
                                     std::move(end.interpolable_value),
@@ -178,11 +225,13 @@ PairwiseInterpolationValue PathInterpolationFunctions::MaybeMergeSingles(
 void PathInterpolationFunctions::Composite(
     UnderlyingValueOwner& underlying_value_owner,
     double underlying_fraction,
-    const InterpolationType& type,
+    const InterpolationType* type,
     const InterpolationValue& value) {
   const auto& list = To<InterpolableList>(*value.interpolable_value);
+  // TODO(crbug.com/325821290): Avoid InterpolableNumber here.
   double neutral_component =
-      To<InterpolableNumber>(list.Get(kPathNeutralIndex))->Value();
+      To<InterpolableNumber>(list.Get(kPathNeutralIndex))
+          ->Value(CSSToLengthConversionData(/*element=*/nullptr));
 
   if (neutral_component == 0) {
     underlying_value_owner.Set(type, value);
@@ -198,21 +247,23 @@ void PathInterpolationFunctions::Composite(
   underlying_value_owner.MutableValue().interpolable_value->ScaleAndAdd(
       neutral_component, *value.interpolable_value);
   underlying_value_owner.MutableValue().non_interpolable_value =
-      value.non_interpolable_value.get();
+      value.non_interpolable_value.Get();
 }
 
-std::unique_ptr<SVGPathByteStream> PathInterpolationFunctions::AppliedValue(
+StylePath* PathInterpolationFunctions::AppliedValue(
     const InterpolableValue& interpolable_value,
-    const NonInterpolableValue* non_interpolable_value) {
-  std::unique_ptr<SVGPathByteStream> path_byte_stream =
-      std::make_unique<SVGPathByteStream>();
+    const NonInterpolableValue& non_interpolable_value) {
+  auto& non_interpolable_path_value =
+      To<SVGPathNonInterpolableValue>(non_interpolable_value);
   InterpolatedSVGPathSource source(
       To<InterpolableList>(
           *To<InterpolableList>(interpolable_value).Get(kPathArgsIndex)),
-      To<SVGPathNonInterpolableValue>(non_interpolable_value)->PathSegTypes());
-  SVGPathByteStreamBuilder builder(*path_byte_stream);
+      non_interpolable_path_value.PathSegTypes());
+  SVGPathByteStreamBuilder builder;
   svg_path_parser::ParsePath(source, builder);
-  return path_byte_stream;
+
+  return MakeGarbageCollected<StylePath>(
+      builder.CopyByteStream(), non_interpolable_path_value.GetWindRule());
 }
 
 }  // namespace blink

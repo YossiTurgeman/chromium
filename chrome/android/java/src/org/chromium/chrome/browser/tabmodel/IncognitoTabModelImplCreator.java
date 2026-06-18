@@ -1,101 +1,109 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.tabmodel;
 
-import static org.chromium.chrome.browser.incognito.IncognitoUtils.getNonPrimaryOTRProfileFromWindowAndroid;
+import static org.chromium.chrome.browser.tab.TabStateStorageServiceFactory.createBatch;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-
-import org.chromium.base.supplier.Supplier;
-import org.chromium.chrome.browser.compositor.layouts.content.TabContentManager;
-import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.flags.ActivityType;
+import org.chromium.chrome.browser.flags.CustomTabProfileType;
+import org.chromium.chrome.browser.profiles.ProfileProvider;
+import org.chromium.chrome.browser.tab_ui.TabContentManager;
 import org.chromium.chrome.browser.tabmodel.IncognitoTabModelImpl.IncognitoTabModelDelegate;
 import org.chromium.chrome.browser.tabmodel.NextTabPolicy.NextTabPolicySupplier;
-import org.chromium.ui.base.WindowAndroid;
 
-/**
- * Stores all the variables needed to create an Incognito TabModelImpl when it is needed.
- */
+/** Stores all the variables needed to create an Incognito TabModelImpl when it is needed. */
+@NullMarked
 class IncognitoTabModelImplCreator implements IncognitoTabModelDelegate {
+    private final ProfileProvider mProfileProvider;
     private final TabCreator mRegularTabCreator;
     private final TabCreator mIncognitoTabCreator;
-    private final TabModelSelectorUma mUma;
     private final TabModelOrderController mOrderController;
     private final TabContentManager mTabContentManager;
-    private final TabPersistentStore mTabSaver;
     private final NextTabPolicySupplier mNextTabPolicySupplier;
     private final AsyncTabParamsManager mAsyncTabParamsManager;
     private final TabModelDelegate mModelDelegate;
+    private final TabRemover mTabRemover;
+    private final TabUngrouperFactory mTabUngrouperFactory;
 
-    // This is passed in as null if the {@link WindowAndroid} instance doesn't belong to an
-    // incognito CustomTabActivity.
-    @Nullable
-    private final Supplier<WindowAndroid> mWindowAndroidSupplier;
+    private final @ActivityType int mActivityType;
+    private final @Nullable @CustomTabProfileType Integer mCustomTabProfileType;
 
     /**
      * Constructor for an IncognitoTabModelImplCreator, used by {@link IncognitoTabModelImpl}.
      *
-     * Creating an instance of this class does not create the Incognito TabModelImpl immediately.
+     * <p>Creating an instance of this class does not create the Incognito TabModelImpl immediately.
      * The {@link IncognitoTabModelImpl} will use this class to create the real TabModelImpl when it
      * will actually be used.
      *
-     * @param windowAndroidSupplier The supplier to the {@link WindowAndroid} instance.
-     * @param regularTabCreator   Creates regular tabs.
+     * @param profileProvider Provides access to the necessary Profiles for this model.
+     * @param regularTabCreator Creates regular tabs.
      * @param incognitoTabCreator Creates incognito tabs.
-     * @param uma                 Handles UMA tracking for the model.
-     * @param orderController     Determines the order for inserting new Tabs.
-     * @param tabContentManager   Manages the display content of the tab.
-     * @param tabSaver            Handler for saving tabs.
+     * @param orderController Determines the order for inserting new Tabs.
+     * @param tabContentManager Manages the display content of the tab.
      * @param nextTabPolicySupplier Supplies the policy to pick a next tab if the current is closed
      * @param asyncTabParamsManager An {@link AsyncTabParamsManager} instance.
-     * @param modelDelegate       Delegate to handle external dependencies and interactions.
+     * @param activityType Type of the activity for the tab model.
+     * @param customTabProfileType Profile type of the custom tab, or null if not a custom tab.
+     * @param modelDelegate Delegate to handle external dependencies and interactions.
+     * @param tabRemover Delegate to handle removing tabs tabs.
+     * @param tabUngrouperFactory Factory to create a {@link TabUngrouper}.
      */
-    public IncognitoTabModelImplCreator(@Nullable Supplier<WindowAndroid> windowAndroidSupplier,
-            TabCreator regularTabCreator, TabCreator incognitoTabCreator, TabModelSelectorUma uma,
-            TabModelOrderController orderController, TabContentManager tabContentManager,
-            TabPersistentStore tabSaver, NextTabPolicySupplier nextTabPolicySupplier,
-            AsyncTabParamsManager asyncTabParamsManager, TabModelDelegate modelDelegate) {
-        mWindowAndroidSupplier = windowAndroidSupplier;
+    IncognitoTabModelImplCreator(
+            ProfileProvider profileProvider,
+            TabCreator regularTabCreator,
+            TabCreator incognitoTabCreator,
+            TabModelOrderController orderController,
+            TabContentManager tabContentManager,
+            NextTabPolicySupplier nextTabPolicySupplier,
+            AsyncTabParamsManager asyncTabParamsManager,
+            @ActivityType int activityType,
+            @Nullable @CustomTabProfileType Integer customTabProfileType,
+            TabModelDelegate modelDelegate,
+            TabRemover tabRemover,
+            TabUngrouperFactory tabUngrouperFactory) {
+        mProfileProvider = profileProvider;
         mRegularTabCreator = regularTabCreator;
         mIncognitoTabCreator = incognitoTabCreator;
-        mUma = uma;
         mOrderController = orderController;
         mTabContentManager = tabContentManager;
-        mTabSaver = tabSaver;
         mNextTabPolicySupplier = nextTabPolicySupplier;
         mAsyncTabParamsManager = asyncTabParamsManager;
+        mActivityType = activityType;
+        mCustomTabProfileType = customTabProfileType;
         mModelDelegate = modelDelegate;
-    }
-
-    private @NonNull Profile getOTRProfile() {
-        if (mWindowAndroidSupplier != null) {
-            Profile otrProfile =
-                    getNonPrimaryOTRProfileFromWindowAndroid(mWindowAndroidSupplier.get());
-
-            // TODO(crbug.com/1023759): PaymentHandlerActivity is an exceptional case that uses the
-            // primary OTR profile. PaymentHandlerActivity would use incognito CCT when the
-            // Incognito CCT flag is enabled by default in which case we would return the non
-            // primary OTR profile.
-            if (otrProfile == null) {
-                return Profile.getLastUsedRegularProfile().getPrimaryOTRProfile();
-            }
-        }
-        return Profile.getLastUsedRegularProfile().getPrimaryOTRProfile();
+        mTabRemover = tabRemover;
+        mTabUngrouperFactory = tabUngrouperFactory;
     }
 
     @Override
-    public TabModel createTabModel() {
-        Profile otrProfile = getOTRProfile();
-        return new TabModelImpl(otrProfile, false, mRegularTabCreator, mIncognitoTabCreator, mUma,
-                mOrderController, mTabContentManager, mTabSaver, mNextTabPolicySupplier,
-                mAsyncTabParamsManager, mModelDelegate, false);
+    public TabModelInternal createTabModel() {
+        TabCollectionTabModelImpl model =
+                new TabCollectionTabModelImpl(
+                        mProfileProvider.getOrCreateOffTheRecordProfile(),
+                        mActivityType,
+                        mCustomTabProfileType,
+                        TabModelType.STANDARD,
+                        mRegularTabCreator,
+                        mIncognitoTabCreator,
+                        mOrderController,
+                        mTabContentManager,
+                        mNextTabPolicySupplier,
+                        mModelDelegate,
+                        mAsyncTabParamsManager,
+                        mTabRemover,
+                        /* isIncognitoBranded= */ true,
+                        mTabUngrouperFactory,
+                        () -> createBatch(mProfileProvider.getOriginalProfile()),
+                        /* supportUndo= */ false);
+        return model;
     }
 
     @Override
-    public boolean isCurrentModel(TabModel model) {
-        return mModelDelegate.isCurrentModel(model);
+    public TabCreator getIncognitoTabCreator() {
+        return mIncognitoTabCreator;
     }
 }

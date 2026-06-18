@@ -1,13 +1,13 @@
-// Copyright (c) 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/vr/ui_scene.h"
 
+#include <numbers>
 #include <utility>
 #include <vector>
 
-#include "base/numerics/math_constants.h"
 #include "base/test/gtest_util.h"
 #include "base/values.h"
 #include "chrome/browser/vr/databinding/binding.h"
@@ -18,8 +18,9 @@
 #include "chrome/browser/vr/test/animation_utils.h"
 #include "chrome/browser/vr/test/constants.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/gfx/animation/keyframe/test/animation_utils.h"
+#include "ui/gfx/geometry/transform_util.h"
 #include "ui/gfx/geometry/vector3d_f.h"
-#include "ui/gfx/transform_util.h"
 
 #define TOLERANCE 0.0001
 
@@ -42,7 +43,7 @@ size_t NumElementsInSubtree(UiElement* element) {
 
 class AlwaysDirty : public UiElement {
  public:
-  ~AlwaysDirty() override {}
+  ~AlwaysDirty() override = default;
 
   bool OnBeginFrame(const gfx::Transform& head_pose) override { return true; }
 };
@@ -105,14 +106,14 @@ TEST(UiScene, IsVisibleInHiddenSubtree) {
   parent->AddChild(std::move(element));
 
   // Set initial computed opacity.
-  scene.OnBeginFrame(MsToTicks(1), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(1), kStartHeadPose);
 
   parent->SetVisible(false);
 
-  scene.OnBeginFrame(MsToTicks(2), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(2), kStartHeadPose);
 
   // On the second walk, we should skip the child.
-  scene.OnBeginFrame(MsToTicks(3), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(3), kStartHeadPose);
 
   EXPECT_FALSE(child->IsVisible());
 }
@@ -130,24 +131,22 @@ TEST(UiScene, ParentTransformAppliesToChild) {
   element->SetSize(1000, 1000);
 
   element->SetTranslate(6, 1, 0);
-  element->SetRotate(0, 0, 1, 0.5f * base::kPiFloat);
+  element->SetRotate(0, 0, 1, 0.5f * std::numbers::pi_v<float>);
   element->SetScale(3, 3, 1);
   scene.AddUiElement(kRoot, std::move(element));
 
   // Add a child to the parent, with different transformations.
   element = std::make_unique<UiElement>();
   element->SetTranslate(3, 0, 0);
-  element->SetRotate(0, 0, 1, 0.5f * base::kPiFloat);
+  element->SetRotate(0, 0, 1, 0.5f * std::numbers::pi_v<float>);
   element->SetScale(2, 2, 1);
   UiElement* child = element.get();
   parent->AddChild(std::move(element));
 
-  gfx::Point3F origin(0, 0, 0);
-  gfx::Point3F point(1, 0, 0);
-
-  scene.OnBeginFrame(MsToTicks(0), kStartHeadPose);
-  child->world_space_transform().TransformPoint(&origin);
-  child->world_space_transform().TransformPoint(&point);
+  scene.OnBeginFrame(gfx::MsToTicks(0), kStartHeadPose);
+  gfx::Point3F origin = child->world_space_transform().MapPoint(gfx::Point3F());
+  gfx::Point3F point =
+      child->world_space_transform().MapPoint(gfx::Point3F(1, 0, 0));
   EXPECT_VEC3F_NEAR(gfx::Point3F(6, 10, 0), origin);
   EXPECT_VEC3F_NEAR(gfx::Point3F(0, 10, 0), point);
 }
@@ -165,7 +164,7 @@ TEST(UiScene, Opacity) {
   element->SetOpacity(0.5);
   parent->AddChild(std::move(element));
 
-  scene.OnBeginFrame(MsToTicks(0), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(0), kStartHeadPose);
   EXPECT_EQ(0.5f, parent->computed_opacity());
   EXPECT_EQ(0.25f, child->computed_opacity());
 }
@@ -192,22 +191,23 @@ TEST(UiScene, NoViewportAwareElementWhenNoVisibleChild) {
 
   EXPECT_FALSE(scene.GetWebVrOverlayElementsToDraw().empty());
   child->SetVisible(false);
-  scene.OnBeginFrame(MsToTicks(0), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(0), kStartHeadPose);
   EXPECT_TRUE(scene.GetWebVrOverlayElementsToDraw().empty());
 }
 
 TEST(UiScene, InvisibleElementsDoNotCauseAnimationDirtiness) {
   UiScene scene;
   auto element = std::make_unique<UiElement>();
-  element->AddKeyframeModel(CreateBackgroundColorAnimation(
-      1, 1, SK_ColorBLACK, SK_ColorWHITE, MsToDelta(1000)));
+  element->AddKeyframeModel(gfx::CreateColorAnimation(
+      element.get(), 1, BACKGROUND_COLOR, SK_ColorBLACK, SK_ColorWHITE,
+      gfx::MsToDelta(1000)));
   UiElement* element_ptr = element.get();
   scene.AddUiElement(kRoot, std::move(element));
-  EXPECT_TRUE(scene.OnBeginFrame(MsToTicks(1), kStartHeadPose));
+  EXPECT_TRUE(scene.OnBeginFrame(gfx::MsToTicks(1), kStartHeadPose));
 
   element_ptr->SetVisible(false);
   element_ptr->UpdateComputedOpacity();
-  EXPECT_FALSE(scene.OnBeginFrame(MsToTicks(2), kStartHeadPose));
+  EXPECT_FALSE(scene.OnBeginFrame(gfx::MsToTicks(2), kStartHeadPose));
 }
 
 TEST(UiScene, InvisibleElementsDoNotCauseBindingDirtiness) {
@@ -220,12 +220,12 @@ TEST(UiScene, InvisibleElementsDoNotCauseBindingDirtiness) {
                               element.get(), view->SetSize(1, value)));
   UiElement* element_ptr = element.get();
   scene.AddUiElement(kRoot, std::move(element));
-  EXPECT_TRUE(scene.OnBeginFrame(MsToTicks(1), kStartHeadPose));
+  EXPECT_TRUE(scene.OnBeginFrame(gfx::MsToTicks(1), kStartHeadPose));
 
   model.foo = 2;
   element_ptr->SetVisible(false);
   element_ptr->UpdateComputedOpacity();
-  EXPECT_FALSE(scene.OnBeginFrame(MsToTicks(2), kStartHeadPose));
+  EXPECT_FALSE(scene.OnBeginFrame(gfx::MsToTicks(2), kStartHeadPose));
 }
 
 TEST(UiScene, InvisibleElementsDoNotCauseOnBeginFrameDirtiness) {
@@ -233,11 +233,11 @@ TEST(UiScene, InvisibleElementsDoNotCauseOnBeginFrameDirtiness) {
   auto element = std::make_unique<AlwaysDirty>();
   UiElement* element_ptr = element.get();
   scene.AddUiElement(kRoot, std::move(element));
-  EXPECT_TRUE(scene.OnBeginFrame(MsToTicks(1), kStartHeadPose));
+  EXPECT_TRUE(scene.OnBeginFrame(gfx::MsToTicks(1), kStartHeadPose));
 
   element_ptr->SetVisible(false);
   element_ptr->UpdateComputedOpacity();
-  EXPECT_FALSE(scene.OnBeginFrame(MsToTicks(2), kStartHeadPose));
+  EXPECT_FALSE(scene.OnBeginFrame(gfx::MsToTicks(2), kStartHeadPose));
 }
 
 typedef struct {
@@ -272,7 +272,7 @@ TEST_P(AlignmentTest, VerifyCorrectPosition) {
   element->set_y_centering(GetParam().y_centering);
   parent->AddChild(std::move(element));
 
-  scene.OnBeginFrame(MsToTicks(0), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(0), kStartHeadPose);
   EXPECT_NEAR(GetParam().expected_x, child->GetCenter().x(), TOLERANCE);
   EXPECT_NEAR(GetParam().expected_y, child->GetCenter().y(), TOLERANCE);
 }

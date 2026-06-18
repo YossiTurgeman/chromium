@@ -1,20 +1,24 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/examples/combobox_example.h"
 
 #include <memory>
+#include <utility>
 
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/views/controls/combobox/combobox.h"
+#include "ui/views/controls/editable_combobox/editable_combobox.h"
 #include "ui/views/examples/examples_window.h"
-#include "ui/views/layout/box_layout.h"
+#include "ui/views/examples/grit/views_examples_resources.h"
+#include "ui/views/layout/box_layout_view.h"
+#include "ui/views/layout/fill_layout.h"
 
-namespace views {
-namespace examples {
+namespace views::examples {
 
 namespace {
 
@@ -22,49 +26,73 @@ namespace {
 class ComboboxModelExample : public ui::ComboboxModel {
  public:
   ComboboxModelExample() = default;
+  ComboboxModelExample(const ComboboxModelExample&) = delete;
+  ComboboxModelExample& operator=(const ComboboxModelExample&) = delete;
   ~ComboboxModelExample() override = default;
 
  private:
   // ui::ComboboxModel:
-  int GetItemCount() const override { return 10; }
-  base::string16 GetItemAt(int index) const override {
-    return base::UTF8ToUTF16(base::StringPrintf("%c item", 'A' + index));
+  size_t GetItemCount() const override { return 10; }
+  std::u16string GetItemAt(size_t index) const override {
+    return base::UTF8ToUTF16(
+        base::StringPrintf("%c item", static_cast<char>('A' + index)));
   }
-
-  DISALLOW_COPY_AND_ASSIGN(ComboboxModelExample);
 };
 
 }  // namespace
 
-ComboboxExample::ComboboxExample() : ExampleBase("Combo Box") {}
+ComboboxExample::ComboboxExample()
+    : ExampleBase(l10n_util::GetStringUTF8(IDS_COMBOBOX_SELECT_LABEL).c_str()) {
+}
 
 ComboboxExample::~ComboboxExample() = default;
 
 void ComboboxExample::CreateExampleView(View* container) {
-  container->SetLayoutManager(std::make_unique<BoxLayout>(
-      BoxLayout::Orientation::kVertical, gfx::Insets(10, 0), 5));
+  container->SetLayoutManager(std::make_unique<FillLayout>());
 
-  combobox_ = container->AddChildView(
-      std::make_unique<Combobox>(std::make_unique<ComboboxModelExample>()));
-  combobox_->set_callback(base::BindRepeating(&ComboboxExample::OnPerformAction,
-                                              base::Unretained(this)));
-  combobox_->SetSelectedIndex(3);
+  auto view =
+      Builder<BoxLayoutView>()
+          .SetOrientation(BoxLayout::Orientation::kVertical)
+          .SetInsideBorderInsets(gfx::Insets::VH(10, 0))
+          .SetBetweenChildSpacing(5)
+          .AddChildren(
+              Builder<Combobox>()
+                  .CopyAddressTo(&combobox_)
+                  .SetOwnedModel(std::make_unique<ComboboxModelExample>())
+                  .SetSelectedIndex(3)
+                  .SetAccessibleName(
+                      l10n_util::GetStringUTF16(IDS_COMBOBOX_NAME_1))
+                  .SetCallback(base::BindRepeating(
+                      &ComboboxExample::ValueChanged, base::Unretained(this))),
+              Builder<Combobox>()
+                  .SetOwnedModel(std::make_unique<ComboboxModelExample>())
+                  .SetEnabled(false)
+                  .SetSelectedIndex(4)
+                  .SetAccessibleName(
+                      l10n_util::GetStringUTF16(IDS_COMBOBOX_NAME_2))
+                  .SetCallback(base::BindRepeating(
+                      &ComboboxExample::ValueChanged, base::Unretained(this))),
+              Builder<EditableCombobox>()
+                  .CopyAddressTo(&editable_combobox_)
+                  .SetModel(std::make_unique<ComboboxModelExample>())
+                  .SetEnabled(true)
+                  .SetAccessibleName(
+                      l10n_util::GetStringUTF16(IDS_COMBOBOX_NAME_2))
+                  .SetCallback(base::BindRepeating(
+                      &ComboboxExample::EditableValueChanged,
+                      base::Unretained(this))))
+          .Build();
 
-  auto* disabled_combobox = container->AddChildView(
-      std::make_unique<Combobox>(std::make_unique<ComboboxModelExample>()));
-  disabled_combobox->set_callback(base::BindRepeating(
-      &ComboboxExample::OnPerformAction, base::Unretained(this)));
-  disabled_combobox->SetSelectedIndex(4);
-  disabled_combobox->SetEnabled(false);
+  container->AddChildView(std::move(view));
 }
 
-void ComboboxExample::OnPerformAction(Combobox* combobox) {
-  DCHECK_EQ(combobox, combobox_);
-  PrintStatus("Selected: %s",
-              base::UTF16ToUTF8(
-                  combobox->model()->GetItemAt(combobox->GetSelectedIndex()))
-                  .c_str());
+void ComboboxExample::ValueChanged() {
+  PrintStatus("Selected: " + base::UTF16ToUTF8(combobox_->GetModel()->GetItemAt(
+                                 combobox_->GetSelectedIndex().value())));
 }
 
-}  // namespace examples
-}  // namespace views
+void ComboboxExample::EditableValueChanged() {
+  PrintStatus("Changed: " + base::UTF16ToUTF8(editable_combobox_->GetText()));
+}
+
+}  // namespace views::examples

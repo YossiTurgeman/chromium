@@ -1,15 +1,9 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//build/config/ui.gni")
 import("//testing/test.gni")
-
-# Reset sources_assignment_filter for the BUILD.gn file to prevent
-# regression during the migration of Chromium away from the feature.
-# See docs/no_sources_assignment_filter.md for more information.
-# TODO(crbug.com/1018739): remove this when migration is done.
-set_sources_assignment_filter([])
 
 component("snapshot") {
   sources = [
@@ -24,14 +18,14 @@ component("snapshot") {
   }
 
   if (is_mac) {
-    sources += [ "snapshot_mac.mm" ]
+    sources += [
+      "snapshot_mac.h",
+      "snapshot_mac.mm",
+    ]
   }
 
   if (is_win) {
-    sources += [
-      "snapshot_win.cc",
-      "snapshot_win.h",
-    ]
+    sources += [ "snapshot_win.cc" ]
   }
 
   if (is_ios) {
@@ -82,6 +76,7 @@ component("snapshot") {
       "AppKit.framework",
       "CoreGraphics.framework",
     ]
+    weak_frameworks = [ "ScreenCaptureKit.framework" ]  # macOS 14.4
   }
 }
 
@@ -110,9 +105,12 @@ test("snapshot_unittests") {
     "//ui/base:test_support",
     "//ui/compositor:test_support",
     "//ui/gfx",
+    "//ui/gfx:test_support",
     "//ui/gfx/geometry",
     "//ui/gl",
   ]
+
+  data_deps = [ "//testing/buildbot/filters:snapshot_unittests_filters" ]
 
   if (use_aura) {
     sources += [ "snapshot_aura_unittest.cc" ]
@@ -121,6 +119,20 @@ test("snapshot_unittests") {
       "//ui/compositor",
       "//ui/compositor:test_support",
       "//ui/wm",
+    ]
+  }
+
+  if (is_fuchsia) {
+    # TODO(crbug.com/42050042): Some of these tests use SwiftShader,
+    # which requires ambient VMEX.
+    test_runner_shard = "//build/config/fuchsia/test/elf_test_ambient_exec_runner.shard.test-cml"
+
+    additional_manifest_fragments = [
+      # TODO(crbug.com/40055105): Investigate removing the requirement
+      # for VmexResource.
+      "//build/config/fuchsia/test/mark_vmo_executable.shard.test-cml",
+      "//build/config/fuchsia/test/present_view.shard.test-cml",
+      "//third_party/fuchsia-sdk/sdk/pkg/vulkan/client.shard.cml",
     ]
   }
 }

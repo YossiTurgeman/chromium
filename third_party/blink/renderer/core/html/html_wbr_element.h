@@ -40,11 +40,14 @@ namespace blink {
 class HTMLWBRElement final : public HTMLElement {
  public:
   explicit HTMLWBRElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kHTMLWBRElement;
+  }
 
  private:
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_WBR_ELEMENT_H_

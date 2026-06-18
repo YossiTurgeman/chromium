@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,20 +7,19 @@
 
 #include <vector>
 
-#include "ash/frame_throttler/frame_throttling_controller.h"
-#include "base/memory/weak_ptr.h"
+#include "ash/frame_throttler/frame_throttling_observer.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 namespace ash {
 
-class MockFrameThrottlingObserver : public FrameThrottlingController::Observer {
+class MockFrameThrottlingObserver : public FrameThrottlingObserver {
  public:
   MockFrameThrottlingObserver();
   ~MockFrameThrottlingObserver() override;
 
   MOCK_METHOD(void,
               OnThrottlingStarted,
-              (const std::vector<aura::Window*>& windows),
+              (const std::vector<aura::Window*>& windows, uint8_t fps),
               (override));
   MOCK_METHOD(void, OnThrottlingEnded, (), (override));
 };

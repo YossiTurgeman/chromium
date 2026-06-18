@@ -1,15 +1,16 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/layout/layout_theme.h"
 
 #include <memory>
+
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/core/css/properties/longhands.h"
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
@@ -23,18 +24,14 @@
 
 namespace blink {
 
-class LayoutThemeTest : public PageTestBase,
-                        private ScopedCSSColorSchemeForTest,
-                        private ScopedCSSColorSchemeUARenderingForTest {
+class LayoutThemeTest : public PageTestBase {
  protected:
-  LayoutThemeTest()
-      : ScopedCSSColorSchemeForTest(true),
-        ScopedCSSColorSchemeUARenderingForTest(true) {}
   void SetHtmlInnerHTML(const char* html_content);
 };
 
 void LayoutThemeTest::SetHtmlInnerHTML(const char* html_content) {
-  GetDocument().documentElement()->setInnerHTML(String::FromUTF8(html_content));
+  GetDocument().documentElement()->SetInnerHTMLWithoutTrustedTypes(
+      String::FromUtf8(html_content));
   UpdateAllLifecyclePhasesForTest();
 }
 
@@ -50,11 +47,11 @@ inline EBorderStyle OutlineStyle(Element* element) {
 TEST_F(LayoutThemeTest, ChangeFocusRingColor) {
   SetHtmlInnerHTML("<span id=span tabIndex=0>Span</span>");
 
-  Element* span = GetDocument().getElementById(AtomicString("span"));
+  Element* span = GetElementById("span");
   EXPECT_NE(nullptr, span);
   EXPECT_NE(nullptr, span->GetLayoutObject());
 
-  Color custom_color = MakeRGB(123, 145, 167);
+  Color custom_color = Color::FromRGB(123, 145, 167);
 
   // Checking unfocused style.
   EXPECT_EQ(EBorderStyle::kNone, OutlineStyle(span));
@@ -63,7 +60,7 @@ TEST_F(LayoutThemeTest, ChangeFocusRingColor) {
   // Do focus.
   GetDocument().GetPage()->GetFocusController().SetActive(true);
   GetDocument().GetPage()->GetFocusController().SetFocused(true);
-  span->focus();
+  span->Focus();
   UpdateAllLifecyclePhasesForTest();
 
   // Checking focused style.
@@ -72,7 +69,6 @@ TEST_F(LayoutThemeTest, ChangeFocusRingColor) {
 
   // Change focus ring color.
   LayoutTheme::GetTheme().SetCustomFocusRingColor(custom_color);
-  Page::PlatformColorsChanged();
   UpdateAllLifecyclePhasesForTest();
 
   // Check that the focus ring color is updated.
@@ -82,7 +78,7 @@ TEST_F(LayoutThemeTest, ChangeFocusRingColor) {
 
 // The expectations in the tests below are relying on LayoutThemeDefault.
 // LayoutThemeMac doesn't inherit from that class.
-#if !defined(OS_MAC)
+#if !BUILDFLAG(IS_MAC)
 TEST_F(LayoutThemeTest, SystemColorWithColorScheme) {
   SetHtmlInnerHTML(R"HTML(
     <style>
@@ -94,22 +90,23 @@ TEST_F(LayoutThemeTest, SystemColorWithColorScheme) {
     <div id="dark"></div>
   )HTML");
 
-  Element* dark_element = GetDocument().getElementById("dark");
+  Element* dark_element = GetElementById("dark");
   ASSERT_TRUE(dark_element);
 
   const ComputedStyle* style = dark_element->GetComputedStyle();
-  EXPECT_EQ(ColorScheme::kLight, style->UsedColorScheme());
-  EXPECT_EQ(Color(0xdd, 0xdd, 0xdd),
+  EXPECT_EQ(mojom::blink::ColorScheme::kLight, style->UsedColorScheme());
+  EXPECT_EQ(Color(0xef, 0xef, 0xef),
             style->VisitedDependentColor(GetCSSPropertyColor()));
 
   // Change color scheme to dark.
   ColorSchemeHelper color_scheme_helper(GetDocument());
-  color_scheme_helper.SetPreferredColorScheme(PreferredColorScheme::kDark);
+  color_scheme_helper.SetPreferredColorScheme(
+      mojom::blink::PreferredColorScheme::kDark);
   UpdateAllLifecyclePhasesForTest();
 
   style = dark_element->GetComputedStyle();
-  EXPECT_EQ(ColorScheme::kDark, style->UsedColorScheme());
-  EXPECT_EQ(Color(0x44, 0x44, 0x44),
+  EXPECT_EQ(mojom::blink::ColorScheme::kDark, style->UsedColorScheme());
+  EXPECT_EQ(Color(0x6b, 0x6b, 0x6b),
             style->VisitedDependentColor(GetCSSPropertyColor()));
 }
 
@@ -118,7 +115,7 @@ TEST_F(LayoutThemeTest, SetSelectionColors) {
                                              Color::kBlack, Color::kBlack);
   EXPECT_EQ(Color::kBlack,
             LayoutTheme::GetTheme().ActiveSelectionForegroundColor(
-                ColorScheme::kLight));
+                mojom::blink::ColorScheme::kLight));
   {
     // Enabling MobileLayoutTheme switches which instance is returned from
     // LayoutTheme::GetTheme(). Devtools expect SetSelectionColors() to affect
@@ -126,18 +123,48 @@ TEST_F(LayoutThemeTest, SetSelectionColors) {
     ScopedMobileLayoutThemeForTest scope(true);
     EXPECT_EQ(Color::kBlack,
               LayoutTheme::GetTheme().ActiveSelectionForegroundColor(
-                  ColorScheme::kLight));
+                  mojom::blink::ColorScheme::kLight));
 
     LayoutTheme::GetTheme().SetSelectionColors(Color::kWhite, Color::kWhite,
                                                Color::kWhite, Color::kWhite);
     EXPECT_EQ(Color::kWhite,
               LayoutTheme::GetTheme().ActiveSelectionForegroundColor(
-                  ColorScheme::kLight));
+                  mojom::blink::ColorScheme::kLight));
   }
   EXPECT_EQ(Color::kWhite,
             LayoutTheme::GetTheme().ActiveSelectionForegroundColor(
-                ColorScheme::kLight));
+                mojom::blink::ColorScheme::kLight));
 }
-#endif  // !defined(OS_MAC)
+
+TEST_F(LayoutThemeTest, SetSelectionColorsNoInvalidation) {
+  LayoutTheme::GetTheme().SetSelectionColors(Color::kWhite, Color::kWhite,
+                                             Color::kWhite, Color::kWhite);
+
+  SetHtmlInnerHTML("<body>");
+  EXPECT_EQ(GetDocument().documentElement()->GetStyleChangeType(),
+            StyleChangeType::kNoStyleChange);
+  EXPECT_EQ(Color::kWhite,
+            LayoutTheme::GetTheme().ActiveSelectionForegroundColor(
+                mojom::blink::ColorScheme::kLight));
+
+  // Setting selection colors to the same values should not cause style
+  // recalculation.
+  LayoutTheme::GetTheme().SetSelectionColors(Color::kWhite, Color::kWhite,
+                                             Color::kWhite, Color::kWhite);
+  EXPECT_EQ(GetDocument().documentElement()->GetStyleChangeType(),
+            StyleChangeType::kNoStyleChange);
+}
+#endif  // !BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_ANDROID)
+TEST_F(LayoutThemeTest, AndroidSelectionColor) {
+  EXPECT_EQ(Color::FromRGBA32(0xFF000000),
+            LayoutTheme::GetTheme().ActiveSelectionForegroundColor(
+                mojom::blink::ColorScheme::kLight));
+  EXPECT_EQ(Color::FromRGBA32(0x6633b5e5),
+            LayoutTheme::GetTheme().ActiveSelectionBackgroundColor(
+                mojom::blink::ColorScheme::kLight));
+}
+#endif  // BUILDFLAG(IS_ANDROID)
 
 }  // namespace blink

@@ -1,21 +1,23 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "net/proxy_resolution/win/proxy_resolver_winhttp.h"
 
 #include <windows.h>
+
 #include <winhttp.h>
 
-#include "base/macros.h"
+#include <memory>
+
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "net/base/net_errors.h"
+#include "net/base/url_util.h"
 #include "net/proxy_resolution/proxy_info.h"
 #include "net/proxy_resolution/proxy_resolver.h"
 #include "url/gurl.h"
 
-using base::TimeDelta;
 using base::TimeTicks;
 
 namespace net {
@@ -53,11 +55,15 @@ static Error WinHttpErrorToNetError(DWORD win_http_error) {
 class ProxyResolverWinHttp : public ProxyResolver {
  public:
   ProxyResolverWinHttp(const scoped_refptr<PacFileData>& script_data);
+
+  ProxyResolverWinHttp(const ProxyResolverWinHttp&) = delete;
+  ProxyResolverWinHttp& operator=(const ProxyResolverWinHttp&) = delete;
+
   ~ProxyResolverWinHttp() override;
 
   // ProxyResolver implementation:
   int GetProxyForURL(const GURL& url,
-                     const NetworkIsolationKey& network_isolation_key,
+                     const NetworkAnonymizationKey& network_anymization_key,
                      ProxyInfo* results,
                      CompletionOnceCallback /*callback*/,
                      std::unique_ptr<Request>* /*request*/,
@@ -68,17 +74,14 @@ class ProxyResolverWinHttp : public ProxyResolver {
   void CloseWinHttpSession();
 
   // Proxy configuration is cached on the session handle.
-  HINTERNET session_handle_;
+  HINTERNET session_handle_ = nullptr;
 
   const GURL pac_url_;
-
-  DISALLOW_COPY_AND_ASSIGN(ProxyResolverWinHttp);
 };
 
 ProxyResolverWinHttp::ProxyResolverWinHttp(
     const scoped_refptr<PacFileData>& script_data)
-    : session_handle_(nullptr),
-      pac_url_(script_data->type() == PacFileData::TYPE_AUTO_DETECT
+    : pac_url_(script_data->type() == PacFileData::TYPE_AUTO_DETECT
                    ? GURL("http://wpad/wpad.dat")
                    : script_data->url()) {}
 
@@ -88,7 +91,7 @@ ProxyResolverWinHttp::~ProxyResolverWinHttp() {
 
 int ProxyResolverWinHttp::GetProxyForURL(
     const GURL& query_url,
-    const NetworkIsolationKey& network_isolation_key,
+    const NetworkAnonymizationKey& network_anonymization_key,
     ProxyInfo* results,
     CompletionOnceCallback /*callback*/,
     std::unique_ptr<Request>* /*request*/,
@@ -103,13 +106,10 @@ int ProxyResolverWinHttp::GetProxyForURL(
   // documentation at
   // https://docs.microsoft.com/en-us/windows/desktop/api/winhttp/nf-winhttp-winhttpgetproxyforurl.
   // See https://crbug.com/862121.
-  GURL mutable_query_url = query_url;
-  if (query_url.SchemeIsWSOrWSS()) {
-    GURL::Replacements replacements;
-    replacements.SetSchemeStr(query_url.SchemeIsCryptographic() ? "https"
-                                                                : "http");
-    mutable_query_url = query_url.ReplaceComponents(replacements);
-  }
+  GURL mutable_query_url =
+      query_url.SchemeIsWSOrWSS()
+          ? net::ChangeWebSocketSchemeToHttpScheme(query_url)
+          : query_url;
 
   // If we have been given an empty PAC url, then use auto-detection.
   //
@@ -120,7 +120,7 @@ int ProxyResolverWinHttp::GetProxyForURL(
   WINHTTP_AUTOPROXY_OPTIONS options = {0};
   options.fAutoLogonIfChallenged = FALSE;
   options.dwFlags = WINHTTP_AUTOPROXY_CONFIG_URL;
-  base::string16 pac_url16 = base::ASCIIToUTF16(pac_url_.spec());
+  std::u16string pac_url16 = base::ASCIIToUTF16(pac_url_.spec());
   options.lpszAutoConfigUrl = base::as_wcstr(pac_url16);
 
   WINHTTP_PROXY_INFO info = {0};
@@ -180,7 +180,6 @@ int ProxyResolverWinHttp::GetProxyForURL(
       break;
     default:
       NOTREACHED();
-      rv = ERR_FAILED;
   }
 
   FreeInfo(&info);
@@ -223,7 +222,7 @@ int ProxyResolverFactoryWinHttp::CreateProxyResolver(
     std::unique_ptr<ProxyResolver>* resolver,
     CompletionOnceCallback callback,
     std::unique_ptr<Request>* request) {
-  resolver->reset(new ProxyResolverWinHttp(pac_script));
+  *resolver = std::make_unique<ProxyResolverWinHttp>(pac_script);
   return OK;
 }
 

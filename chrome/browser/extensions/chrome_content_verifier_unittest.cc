@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,9 @@
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
+#include "build/config/chromebox_for_meetings/buildflags.h"
 #include "chrome/browser/extensions/chrome_content_verifier_delegate.h"
 #include "chrome/browser/extensions/extension_service_test_with_install.h"
 #include "chrome/common/chrome_paths.h"
@@ -14,8 +16,11 @@
 #include "chrome/test/base/testing_profile.h"
 #include "extensions/browser/content_verifier/test_utils.h"
 #include "extensions/browser/extension_system.h"
-#include "extensions/browser/info_map.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/file_util.h"
+#include "extensions/common/switches.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -49,26 +54,31 @@ class ChromeContentVerifierTest : public ExtensionServiceTestWithInstall {
     ExtensionServiceTestWithInstall::SetUp();
 
     // Note: we need a separate TestingProfile (other than our base class)
-    // because we need it to build |content_verifier_| below in SetUp().
+    // because we need it to build |content_verifier_| below in
+    // InitContentVerifier().
     testing_profile_ = TestingProfile::Builder().Build();
 
     // Set up content verification.
     base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
     command_line->AppendSwitchASCII(
-        switches::kExtensionContentVerification,
-        switches::kExtensionContentVerificationEnforce);
+        ::switches::kExtensionContentVerification,
+        ::switches::kExtensionContentVerificationEnforce);
+  }
+
+  void TearDown() override {
+    if (content_verifier_ != nullptr) {
+      content_verifier_->Shutdown();
+    }
+    ExtensionServiceTestWithInstall::TearDown();
+  }
+
+  void InitContentVerifier() {
     auto delegate =
         std::make_unique<ChromeContentVerifierDelegate>(browser_context());
     delegate_raw_ = delegate.get();
     content_verifier_ = base::MakeRefCounted<ContentVerifier>(
         browser_context(), std::move(delegate));
-    info_map()->SetContentVerifier(content_verifier_.get());
     content_verifier_->Start();
-  }
-
-  void TearDown() override {
-    content_verifier_->Shutdown();
-    ExtensionServiceTestWithInstall::TearDown();
   }
 
   testing::AssertionResult InstallExtension(const std::string& crx_path_str) {
@@ -93,16 +103,15 @@ class ChromeContentVerifierTest : public ExtensionServiceTestWithInstall {
   void AddExtensionToContentVerifier(
       const scoped_refptr<const Extension>& extension,
       VerifierObserver* verifier_observer) {
-    info_map()->AddExtension(extension.get(), base::Time::Now(), false, false);
     EXPECT_TRUE(
         ExtensionRegistry::Get(browser_context())->AddEnabled(extension));
     ExtensionRegistry::Get(browser_context())->TriggerOnLoaded(extension.get());
-
-    // Ensure that content verifier has checked hashes from |extension|.
-    EXPECT_EQ(ChromeContentVerifierDelegate::VerifierSourceType::SIGNED_HASHES,
-              delegate_raw_->GetVerifierSourceType(*extension));
-
     verifier_observer->EnsureFetchCompleted(extension->id());
+  }
+
+  ChromeContentVerifierDelegate::VerifierSourceType GetVerifierSourceType(
+      const scoped_refptr<const Extension>& extension) {
+    return delegate_raw_->GetVerifierSourceType(*extension);
   }
 
   scoped_refptr<ContentVerifier>& content_verifier() {
@@ -118,18 +127,14 @@ class ChromeContentVerifierTest : public ExtensionServiceTestWithInstall {
   }
 
  private:
-  InfoMap* info_map() {
-    return ExtensionSystem::Get(browser_context())->info_map();
-  }
-
   content::BrowserContext* browser_context() { return testing_profile_.get(); }
 
   scoped_refptr<const Extension> extension_;
 
   // Owned by |content_verifier_|.
-  ChromeContentVerifierDelegate* delegate_raw_ = nullptr;
+  raw_ptr<ChromeContentVerifierDelegate> delegate_raw_ = nullptr;
 
-  scoped_refptr<ContentVerifier> content_verifier_;
+  scoped_refptr<ContentVerifier> content_verifier_ = nullptr;
   std::unique_ptr<TestingProfile> testing_profile_;
 };
 
@@ -137,6 +142,7 @@ class ChromeContentVerifierTest : public ExtensionServiceTestWithInstall {
 // (messages, browser images, browserAction.default_icon) loads correctly.
 TEST_F(ChromeContentVerifierTest, CaseSensitivityInManifestPaths) {
   VerifierObserver verifier_observer;
+  InitContentVerifier();
   ASSERT_TRUE(InstallExtension(kCaseSensitiveManifestPathsCrx));
 
   // Make sure computed_hashes.json does not exist as this test relies on its
@@ -145,6 +151,10 @@ TEST_F(ChromeContentVerifierTest, CaseSensitivityInManifestPaths) {
       base::PathExists(file_util::GetComputedHashesPath(extension()->path())));
 
   AddExtensionToContentVerifier(extension(), &verifier_observer);
+  // Ensure that content verifier has checked hashes from |extension|.
+  EXPECT_EQ(ChromeContentVerifierDelegate::VerifierSourceType::SIGNED_HASHES,
+            GetVerifierSourceType(extension()));
+
   ASSERT_TRUE(
       base::PathExists(file_util::GetComputedHashesPath(extension()->path())));
 
@@ -172,21 +182,11 @@ TEST_F(ChromeContentVerifierTest, CaseSensitivityInManifestPaths) {
          "h.png", "G.png", "I.png"})));
   }
 
-  // Ensure transcoded paths are handled correctly with dot-space suffix added
-  // to them in OS that ignores dot-space suffix (win). They should still be
-  // excluded from verification (i.e. ShouldVerifyAnyPaths should return false
-  // for them).
-  if (content_verifier_utils::IsDotSpaceFilenameSuffixIgnored()) {
+  // Ensure content verification is skipped for case-insensitive path matching,
+  // by comparing the lowercase path with the lowercase canonical locale.
+  if (content_verifier_utils::IsFileAccessCaseSensitive()) {
     EXPECT_FALSE(ShouldVerifyAnyPaths(ToFilePaths(
-        {"_locales/de_AT/messages.json.", "_locales/en_GB/messages.json ",
-         "H.png .", "g.png ..", "i.png.."})));
-
-    // Ensure the same with different case filenames.
-    if (!content_verifier_utils::IsFileAccessCaseSensitive()) {
-      EXPECT_FALSE(ShouldVerifyAnyPaths(ToFilePaths(
-          {"_locales/de_at/messages.json.", "_locales/en_gb/messages.json ",
-           "h.png .", "G.png ..", "I.png.."})));
-    }
+        {"_locales/en_GB/messages.json", "_locales/en_gb/messages.json"})));
   }
 }
 
@@ -194,6 +194,7 @@ TEST_F(ChromeContentVerifierTest, CaseSensitivityInManifestPaths) {
 // during OnExtensionLoaded.
 TEST_F(ChromeContentVerifierTest, VerifyFailedOnLoad) {
   VerifierObserver verifier_observer;
+  InitContentVerifier();
   ASSERT_TRUE(InstallExtension(kCaseSensitiveManifestPathsCrx));
 
   // Before ContentVerifier sees |extension|, tamper with a JS file.
@@ -201,15 +202,54 @@ TEST_F(ChromeContentVerifierTest, VerifyFailedOnLoad) {
     constexpr char kTamperedContent[] = "// Evil content";
     base::FilePath background_script_path =
         extension()->path().AppendASCII("d.js");
-    ASSERT_EQ(static_cast<int>(sizeof(kTamperedContent)),
-              base::WriteFile(background_script_path, kTamperedContent,
-                              sizeof(kTamperedContent)));
+    ASSERT_TRUE(base::WriteFile(background_script_path, kTamperedContent));
   }
 
   AddExtensionToContentVerifier(extension(), &verifier_observer);
+  // Ensure that content verifier has checked hashes from |extension|.
+  EXPECT_EQ(ChromeContentVerifierDelegate::VerifierSourceType::SIGNED_HASHES,
+            GetVerifierSourceType(extension()));
 
   // Expect a hash mismatch for tampered d.js file.
   EXPECT_TRUE(verifier_observer.did_hash_mismatch());
 }
+
+#if BUILDFLAG(PLATFORM_CFM)
+// Content should be verified on a CfM without the
+// kDisableAppContentVerification flag.
+TEST_F(ChromeContentVerifierTest, CfmChecksHashWithoutForceFlag) {
+  ASSERT_FALSE(base::CommandLine::ForCurrentProcess()->HasSwitch(
+      switches::kDisableAppContentVerification));
+  InitContentVerifier();
+  ASSERT_TRUE(InstallExtension(kCaseSensitiveManifestPathsCrx));
+  // Ensure that content verifier has checked hashes from |extension|.
+  EXPECT_EQ(ChromeContentVerifierDelegate::VerifierSourceType::SIGNED_HASHES,
+            GetVerifierSourceType(extension()));
+}
+
+// Content should NOT be verified on a CfM only when the
+// kDisableAppContentVerification flag is present.
+TEST_F(ChromeContentVerifierTest, CfmDoesNotCheckHashWithForceFlag) {
+  base::CommandLine::ForCurrentProcess()->AppendSwitch(
+      switches::kDisableAppContentVerification);
+  InitContentVerifier();
+  ASSERT_TRUE(InstallExtension(kCaseSensitiveManifestPathsCrx));
+  // Ensure that content verifier has NOT checked hashes from |extension|.
+  EXPECT_EQ(ChromeContentVerifierDelegate::VerifierSourceType::NONE,
+            GetVerifierSourceType(extension()));
+}
+#else   // BUILDFLAG(PLATFORM_CFM)
+// Content should be verified on non-CfM builds even when the
+// kDisableAppContentVerification flag is present.
+TEST_F(ChromeContentVerifierTest, NonCfmChecksHashEvenWithForceFlag) {
+  base::CommandLine::ForCurrentProcess()->AppendSwitch(
+      switches::kDisableAppContentVerification);
+  InitContentVerifier();
+  ASSERT_TRUE(InstallExtension(kCaseSensitiveManifestPathsCrx));
+  // Ensure that content verifier has checked hashes from |extension|.
+  EXPECT_EQ(ChromeContentVerifierDelegate::VerifierSourceType::SIGNED_HASHES,
+            GetVerifierSourceType(extension()));
+}
+#endif  // BUILDFLAG(PLATFORM_CFM)
 
 }  // namespace extensions

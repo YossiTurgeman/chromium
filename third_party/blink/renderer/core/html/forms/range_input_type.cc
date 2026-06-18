@@ -34,9 +34,11 @@
 #include <algorithm>
 #include <limits>
 
+#include "third_party/blink/public/common/input/web_pointer_properties.h"
+#include "third_party/blink/public/strings/grit/blink_strings.h"
 #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
 #include "third_party/blink/renderer/core/dom/events/scoped_event_queue.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
+#include "third_party/blink/renderer/core/dom/events/simulated_click_options.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/core/events/mouse_event.h"
@@ -52,11 +54,15 @@
 #include "third_party/blink/renderer/core/html/shadow/shadow_element_names.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
+#include "third_party/blink/renderer/core/layout/flex/layout_flexible_box.h"
 #include "third_party/blink/renderer/core/layout/layout_block.h"
-#include "third_party/blink/renderer/core/layout/layout_object_factory.h"
+#include "third_party/blink/renderer/core/layout/layout_object_inlines.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/json/json_values.h"
+#include "third_party/blink/renderer/platform/text/platform_locale.h"
+#include "third_party/blink/renderer/platform/text/text_direction.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 
 namespace blink {
@@ -73,7 +79,7 @@ static Decimal EnsureMaximum(const Decimal& proposed_value,
 }
 
 RangeInputType::RangeInputType(HTMLInputElement& element)
-    : InputType(element),
+    : InputType(Type::kRange, element),
       InputTypeView(element),
       tick_mark_values_dirty_(true) {}
 
@@ -92,31 +98,47 @@ InputType::ValueMode RangeInputType::GetValueMode() const {
 
 void RangeInputType::CountUsage() {
   CountUsageIfVisible(WebFeature::kInputTypeRange);
+}
+
+void RangeInputType::DidRecalcStyle(const StyleRecalcChange) {
   if (const ComputedStyle* style = GetElement().GetComputedStyle()) {
-    if (style->EffectiveAppearance() == kSliderVerticalPart) {
+    if (RuntimeEnabledFeatures::
+            NonStandardAppearanceValueSliderVerticalEnabled() &&
+        style->EffectiveAppearance() == AppearanceValue::kSliderVertical) {
       UseCounter::Count(GetElement().GetDocument(),
                         WebFeature::kInputTypeRangeVerticalAppearance);
+    } else {
+      bool is_horizontal = style->IsHorizontalWritingMode();
+      bool is_ltr = style->IsLeftToRightDirection();
+      if (is_horizontal && is_ltr) {
+        UseCounter::Count(GetElement().GetDocument(),
+                          WebFeature::kInputTypeRangeHorizontalLtr);
+      } else if (is_horizontal && !is_ltr) {
+        UseCounter::Count(GetElement().GetDocument(),
+                          WebFeature::kInputTypeRangeHorizontalRtl);
+      } else if (is_ltr) {
+        UseCounter::Count(GetElement().GetDocument(),
+                          WebFeature::kInputTypeRangeVerticalLtr);
+      } else {
+        UseCounter::Count(GetElement().GetDocument(),
+                          WebFeature::kInputTypeRangeVerticalRtl);
+      }
     }
   }
 }
 
-const AtomicString& RangeInputType::FormControlType() const {
-  return input_type_names::kRange;
-}
-
 double RangeInputType::ValueAsDouble() const {
-  return ParseToDoubleForNumberType(GetElement().value());
+  return ParseToDoubleForNumberType(GetElement().Value());
 }
 
 void RangeInputType::SetValueAsDouble(double new_value,
                                       TextFieldEventBehavior event_behavior,
                                       ExceptionState& exception_state) const {
-  SetValueAsDecimal(Decimal::FromDouble(new_value), event_behavior,
-                    exception_state);
+  SetValueAsDecimal(Decimal::FromDouble(new_value), event_behavior);
 }
 
 bool RangeInputType::TypeMismatchFor(const String& value) const {
-  return !value.IsEmpty() && !std::isfinite(ParseToDoubleForNumberType(value));
+  return !value.empty() && !std::isfinite(ParseToDoubleForNumberType(value));
 }
 
 bool RangeInputType::SupportsRequired() const {
@@ -144,20 +166,21 @@ StepRange RangeInputType::CreateStepRange(
   // Range type always has range limitations because it has default
   // minimum/maximum.
   // https://html.spec.whatwg.org/C/#range-state-(type=range):concept-input-min-default
-  const bool kHasRangeLimitations = true;
-  return StepRange(step_base, minimum, maximum, kHasRangeLimitations,
+  const bool has_min = true;
+  const bool has_max = true;
+  return StepRange(step_base, minimum, maximum, has_min, has_max,
                    /*has_reversed_range=*/false, step, step_description);
 }
 
-bool RangeInputType::IsSteppable() const {
-  return true;
-}
-
 void RangeInputType::HandleMouseDownEvent(MouseEvent& event) {
+  if (!HasCreatedShadowSubtree()) {
+    return;
+  }
+
   if (GetElement().IsDisabledFormControl())
     return;
 
-  Node* target_node = event.target()->ToNode();
+  Node* target_node = event.RawTarget()->ToNode();
   if (event.button() !=
           static_cast<int16_t>(WebPointerProperties::Button::kLeft) ||
       !target_node)
@@ -169,16 +192,16 @@ void RangeInputType::HandleMouseDownEvent(MouseEvent& event) {
   SliderThumbElement* thumb = GetSliderThumbElement();
   if (target_node == thumb)
     return;
-  thumb->DragFrom(LayoutPoint(event.AbsoluteLocation()));
+  thumb->DragFrom(PhysicalOffset::FromPointFFloor(event.AbsoluteLocation()));
 }
 
 void RangeInputType::HandleKeydownEvent(KeyboardEvent& event) {
   if (GetElement().IsDisabledFormControl())
     return;
 
-  const String& key = event.key();
+  const AtomicString key(event.key());
 
-  const Decimal current = ParseToNumberOrNaN(GetElement().value());
+  const Decimal current = ParseToNumberOrNaN(GetElement().Value());
   DCHECK(current.IsFinite());
 
   StepRange step_range(CreateStepRange(kRejectAny));
@@ -186,41 +209,47 @@ void RangeInputType::HandleKeydownEvent(KeyboardEvent& event) {
   // FIXME: We can't use stepUp() for the step value "any". So, we increase
   // or decrease the value by 1/100 of the value range. Is it reasonable?
   const Decimal step =
-      EqualIgnoringASCIICase(
+      EqualIgnoringAsciiCase(
           GetElement().FastGetAttribute(html_names::kStepAttr), "any")
           ? (step_range.Maximum() - step_range.Minimum()) / 100
           : step_range.Step();
   const Decimal big_step =
       std::max((step_range.Maximum() - step_range.Minimum()) / 10, step);
 
-  TextDirection dir = TextDirection::kLtr;
-  bool is_vertical = false;
-  if (GetElement().GetLayoutObject()) {
-    dir = ComputedTextDirection();
-    ControlPart part =
-        GetElement().GetLayoutObject()->Style()->EffectiveAppearance();
-    is_vertical = part == kSliderVerticalPart;
+  bool is_up = false;
+  bool is_down = false;
+  WritingDirectionMode writing_direction = {WritingMode::kHorizontalTb,
+                                            TextDirection::kLtr};
+  if (const auto* style = GetElement().GetComputedStyle()) {
+    writing_direction = style->GetWritingDirection();
+    // `appearance: slider-vertical` is equivalent to `writing-mode:
+    // vertical-rl; direction: rtl`.
+    if (RuntimeEnabledFeatures::
+            NonStandardAppearanceValueSliderVerticalEnabled() &&
+        writing_direction.IsHorizontal() &&
+        style->EffectiveAppearance() == AppearanceValue::kSliderVertical) {
+      writing_direction = {WritingMode::kVerticalRl, TextDirection::kRtl};
+    }
   }
+  const PhysicalToLogical<const AtomicString*> key_mapper(
+      writing_direction, &keywords::kArrowUp, &keywords::kArrowRight,
+      &keywords::kArrowDown, &keywords::kArrowLeft);
+  is_up = key == *key_mapper.InlineEnd() || key == *key_mapper.LineOver();
+  is_down = key == *key_mapper.InlineStart() || key == *key_mapper.LineUnder();
 
   Decimal new_value;
-  if (key == "ArrowUp") {
+  if (is_up) {
     new_value = current + step;
-  } else if (key == "ArrowDown") {
+  } else if (is_down) {
     new_value = current - step;
-  } else if (key == "ArrowLeft") {
-    new_value = (is_vertical || dir == TextDirection::kRtl) ? current + step
-                                                            : current - step;
-  } else if (key == "ArrowRight") {
-    new_value = (is_vertical || dir == TextDirection::kRtl) ? current - step
-                                                            : current + step;
-  } else if (key == "PageUp") {
+  } else if (key == keywords::kPageUp) {
     new_value = current + big_step;
-  } else if (key == "PageDown") {
+  } else if (key == keywords::kPageDown) {
     new_value = current - big_step;
-  } else if (key == "Home") {
-    new_value = is_vertical ? step_range.Maximum() : step_range.Minimum();
-  } else if (key == "End") {
-    new_value = is_vertical ? step_range.Minimum() : step_range.Maximum();
+  } else if (key == keywords::kHome) {
+    new_value = step_range.Minimum();
+  } else if (key == keywords::kEnd) {
+    new_value = step_range.Maximum();
   } else {
     return;  // Did not match any key binding.
   }
@@ -231,7 +260,7 @@ void RangeInputType::HandleKeydownEvent(KeyboardEvent& event) {
     EventQueueScope scope;
     TextFieldEventBehavior event_behavior =
         TextFieldEventBehavior::kDispatchInputAndChangeEvent;
-    SetValueAsDecimal(new_value, event_behavior, IGNORE_EXCEPTION_FOR_TESTING);
+    SetValueAsDecimal(new_value, event_behavior);
 
     if (AXObjectCache* cache =
             GetElement().GetDocument().ExistingAXObjectCache())
@@ -249,23 +278,23 @@ void RangeInputType::CreateShadowSubtree() {
   track->SetShadowPseudoId(shadow_element_names::kPseudoSliderTrack);
   track->setAttribute(html_names::kIdAttr,
                       shadow_element_names::kIdSliderTrack);
-  track->AppendChild(MakeGarbageCollected<SliderThumbElement>(document));
+  auto* thumb = MakeGarbageCollected<SliderThumbElement>(document);
+  thumb->setAttribute(html_names::kIdAttr,
+                      shadow_element_names::kIdSliderThumb);
+  track->AppendChild(thumb);
   auto* container = MakeGarbageCollected<SliderContainerElement>(document);
   container->AppendChild(track);
   GetElement().UserAgentShadowRoot()->AppendChild(container);
 }
 
-bool RangeInputType::TypeShouldForceLegacyLayout() const {
-  return true;
+LayoutObject* RangeInputType::CreateLayoutObject(const ComputedStyle&) const {
+  // TODO(crbug.com/1131352): input[type=range] should not use flexbox.
+  return MakeGarbageCollected<LayoutFlexibleBox>(&GetElement());
 }
 
-LayoutObject* RangeInputType::CreateLayoutObject(const ComputedStyle& style,
-                                                 LegacyLayout legacy) const {
-  UseCounter::Count(GetElement().GetDocument(),
-                    WebFeature::kLegacyLayoutBySlider);
-  // TODO(crbug.com/1040826): input[type=range] should not use
-  // LayoutFlexibleBox.
-  return LayoutObjectFactory::CreateFlexibleBox(GetElement(), style, legacy);
+void RangeInputType::AdjustStyle(ComputedStyleBuilder& builder) {
+  builder.SetInlineBlockBaselineEdge(EInlineBlockBaselineEdge::kBorderBox);
+  InputTypeView::AdjustStyle(builder);
 }
 
 Decimal RangeInputType::ParseToNumber(const String& src,
@@ -279,28 +308,19 @@ String RangeInputType::Serialize(const Decimal& value) const {
   return SerializeForNumberType(value);
 }
 
-// FIXME: Could share this with KeyboardClickableInputTypeView and
-// BaseCheckableInputType if we had a common base class.
-void RangeInputType::AccessKeyAction(bool send_mouse_events) {
-  InputTypeView::AccessKeyAction(send_mouse_events);
-
-  GetElement().DispatchSimulatedClick(
-      nullptr, send_mouse_events ? kSendMouseUpDownEvents : kSendNoEvents);
-}
-
 void RangeInputType::SanitizeValueInResponseToMinOrMaxAttributeChange() {
   if (GetElement().HasDirtyValue())
-    GetElement().setValue(GetElement().value());
+    GetElement().SetValue(GetElement().Value());
   else
-    GetElement().SetNonDirtyValue(GetElement().value());
+    GetElement().SetNonDirtyValue(GetElement().Value());
   GetElement().UpdateView();
 }
 
 void RangeInputType::StepAttributeChanged() {
   if (GetElement().HasDirtyValue())
-    GetElement().setValue(GetElement().value());
+    GetElement().SetValue(GetElement().Value());
   else
-    GetElement().SetNonDirtyValue(GetElement().value());
+    GetElement().SetNonDirtyValue(GetElement().Value());
   GetElement().UpdateView();
 }
 
@@ -309,8 +329,14 @@ void RangeInputType::DidSetValue(const String&, bool value_changed) {
     GetElement().UpdateView();
 }
 
+AppearanceValue RangeInputType::AutoAppearance() const {
+  return AppearanceValue::kSliderHorizontal;
+}
+
 void RangeInputType::UpdateView() {
-  GetSliderThumbElement()->SetPositionFromValue();
+  if (HasCreatedShadowSubtree()) {
+    GetSliderThumbElement()->SetPositionFromValue();
+  }
 }
 
 String RangeInputType::SanitizeValue(const String& proposed_value) const {
@@ -321,13 +347,38 @@ String RangeInputType::SanitizeValue(const String& proposed_value) const {
 }
 
 void RangeInputType::WarnIfValueIsInvalid(const String& value) const {
-  if (value.IsEmpty() || !GetElement().SanitizeValue(value).IsEmpty())
+  if (value.empty() || !GetElement().SanitizeValue(value).empty())
     return;
   AddWarningToConsole(
       "The specified value %s cannot be parsed, or is out of range.", value);
 }
 
+String RangeInputType::ValueNotEqualText(const Decimal& value) const {
+  return GetLocale().QueryString(IDS_FORM_VALIDATION_VALUE_NOT_EQUAL,
+                                 LocalizeValue(Serialize(value)));
+}
+
+String RangeInputType::RangeOverflowText(const Decimal& maximum) const {
+  return GetLocale().QueryString(IDS_FORM_VALIDATION_RANGE_OVERFLOW,
+                                 LocalizeValue(Serialize(maximum)));
+}
+
+String RangeInputType::RangeUnderflowText(const Decimal& minimum) const {
+  return GetLocale().QueryString(IDS_FORM_VALIDATION_RANGE_UNDERFLOW,
+                                 LocalizeValue(Serialize(minimum)));
+}
+
+String RangeInputType::RangeInvalidText(const Decimal& minimum,
+                                        const Decimal& maximum) const {
+  return GetLocale().QueryString(IDS_FORM_VALIDATION_RANGE_REVERSED,
+                                 LocalizeValue(Serialize(minimum)),
+                                 LocalizeValue(Serialize(maximum)));
+}
+
 void RangeInputType::DisabledAttributeChanged() {
+  if (!HasCreatedShadowSubtree()) {
+    return;
+  }
   if (GetElement().IsDisabledFormControl())
     GetSliderThumbElement()->StopDragging();
 }
@@ -343,6 +394,10 @@ inline SliderThumbElement* RangeInputType::GetSliderThumbElement() const {
 }
 
 inline Element* RangeInputType::SliderTrackElement() const {
+  if (!HasCreatedShadowSubtree()) {
+    return nullptr;
+  }
+
   return GetElement().UserAgentShadowRoot()->getElementById(
       shadow_element_names::kIdSliderTrack);
 }
@@ -352,7 +407,7 @@ void RangeInputType::ListAttributeTargetChanged() {
   if (auto* object = GetElement().GetLayoutObject())
     object->SetSubtreeShouldDoFullPaintInvalidation();
   Element* slider_track_element = SliderTrackElement();
-  if (slider_track_element->GetLayoutObject()) {
+  if (slider_track_element && slider_track_element->GetLayoutObject()) {
     slider_track_element->GetLayoutObject()->SetNeedsLayout(
         layout_invalidation_reason::kAttributeChanged);
   }
@@ -371,17 +426,17 @@ void RangeInputType::UpdateTickMarkValues() {
   if (!data_list)
     return;
   HTMLDataListOptionsCollection* options = data_list->options();
-  tick_mark_values_.ReserveCapacity(options->length());
+  tick_mark_values_.reserve(options->length());
   for (unsigned i = 0; i < options->length(); ++i) {
     HTMLOptionElement* option_element = options->Item(i);
     String option_value = option_element->value();
-    if (option_element->IsDisabledFormControl() || option_value.IsEmpty())
+    if (option_element->IsDisabledFormControl() || option_value.empty())
       continue;
     if (!GetElement().IsValidValue(option_value))
       continue;
     tick_mark_values_.push_back(ParseToNumber(option_value, Decimal::Nan()));
   }
-  tick_mark_values_.ShrinkToFit();
+  tick_mark_values_.shrink_to_fit();
   std::sort(tick_mark_values_.begin(), tick_mark_values_.end(), DecimalCompare);
 }
 

@@ -1,13 +1,11 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/background_sync/background_sync_network_observer.h"
 
 #include "base/location.h"
-#include "base/single_thread_task_runner.h"
-#include "base/threading/thread_task_runner_handle.h"
-#include "content/browser/service_worker/service_worker_context_wrapper.h"
+#include "base/task/single_thread_task_runner.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/network_service_instance.h"
@@ -26,24 +24,18 @@ void BackgroundSyncNetworkObserver::SetIgnoreNetworkChangesForTests(
 BackgroundSyncNetworkObserver::BackgroundSyncNetworkObserver(
     base::RepeatingClosure connection_changed_callback)
     : network_connection_tracker_(nullptr),
-      connection_type_(network::mojom::ConnectionType::CONNECTION_UNKNOWN),
+      connection_type_(
+          net::NetworkChangeNotifier::ConnectionType::CONNECTION_UNKNOWN),
       connection_changed_callback_(std::move(connection_changed_callback)) {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(connection_changed_callback_);
 
-  if (ServiceWorkerContext::IsServiceWorkerOnUIEnabled()) {
-    RegisterWithNetworkConnectionTracker(GetNetworkConnectionTracker());
-  } else {
-    GetUIThreadTaskRunner({})->PostTaskAndReplyWithResult(
-        FROM_HERE, base::BindOnce(&GetNetworkConnectionTracker),
-        base::BindOnce(&BackgroundSyncNetworkObserver::
-                           RegisterWithNetworkConnectionTracker,
-                       weak_ptr_factory_.GetWeakPtr()));
-  }
+  RegisterWithNetworkConnectionTracker(GetNetworkConnectionTracker());
 }
 
 BackgroundSyncNetworkObserver::~BackgroundSyncNetworkObserver() {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (network_connection_tracker_)
     network_connection_tracker_->RemoveNetworkConnectionObserver(this);
@@ -51,7 +43,7 @@ BackgroundSyncNetworkObserver::~BackgroundSyncNetworkObserver() {
 
 void BackgroundSyncNetworkObserver::RegisterWithNetworkConnectionTracker(
     network::NetworkConnectionTracker* network_connection_tracker) {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(network_connection_tracker);
   network_connection_tracker_ = network_connection_tracker;
   network_connection_tracker_->AddNetworkConnectionObserver(this);
@@ -60,8 +52,8 @@ void BackgroundSyncNetworkObserver::RegisterWithNetworkConnectionTracker(
 }
 
 void BackgroundSyncNetworkObserver::UpdateConnectionType() {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
-  network::mojom::ConnectionType connection_type;
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  net::NetworkChangeNotifier::ConnectionType connection_type;
   bool synchronous_return = network_connection_tracker_->GetConnectionType(
       &connection_type,
       base::BindOnce(&BackgroundSyncNetworkObserver::OnConnectionChanged,
@@ -71,27 +63,28 @@ void BackgroundSyncNetworkObserver::UpdateConnectionType() {
 }
 
 bool BackgroundSyncNetworkObserver::NetworkSufficient() {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  return connection_type_ != network::mojom::ConnectionType::CONNECTION_NONE;
+  return connection_type_ !=
+         net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE;
 }
 
 void BackgroundSyncNetworkObserver::OnConnectionChanged(
-    network::mojom::ConnectionType connection_type) {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
+    net::NetworkChangeNotifier::ConnectionType connection_type) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (ignore_network_changes_)
     return;
   NotifyManagerIfConnectionChanged(connection_type);
 }
 
 void BackgroundSyncNetworkObserver::NotifyManagerIfConnectionChangedForTesting(
-    network::mojom::ConnectionType connection_type) {
+    net::NetworkChangeNotifier::ConnectionType connection_type) {
   NotifyManagerIfConnectionChanged(connection_type);
 }
 
 void BackgroundSyncNetworkObserver::NotifyManagerIfConnectionChanged(
-    network::mojom::ConnectionType connection_type) {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
+    net::NetworkChangeNotifier::ConnectionType connection_type) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (connection_type == connection_type_)
     return;
 
@@ -100,10 +93,10 @@ void BackgroundSyncNetworkObserver::NotifyManagerIfConnectionChanged(
 }
 
 void BackgroundSyncNetworkObserver::NotifyConnectionChanged() {
-  DCHECK_CURRENTLY_ON(ServiceWorkerContext::GetCoreThreadId());
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE,
-                                                connection_changed_callback_);
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, connection_changed_callback_);
 }
 
 }  // namespace content

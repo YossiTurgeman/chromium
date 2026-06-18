@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,40 +8,55 @@
 #include <string>
 
 #include "base/check.h"
+#include "base/containers/span.h"
+#include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/path_service.h"
-#include "base/stl_util.h"
 #include "base/values.h"
 #include "build/build_config.h"
+#include "build/chromeos_buildflags.h"
+#include "chrome/common/chrome_features.h"
 #include "chrome/common/chrome_paths.h"
+#include "chrome/common/extensions/extension_constants.h"
 #include "chrome/grit/chrome_unscaled_resources.h"
 #include "chrome/grit/component_extension_resources_map.h"
 #include "chrome/grit/theme_resources.h"
 #include "content/public/browser/browser_thread.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
+#include "extensions/common/extension_id.h"
 #include "pdf/buildflags.h"
 #include "ui/base/resource/resource_bundle.h"
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/keyboard/ui/resources/keyboard_resource_util.h"
+#include "ash/webui/file_manager/untrusted_resources/grit/file_manager_untrusted_resources_map.h"
+#include "base/command_line.h"
+#include "chrome/browser/ash/file_manager/file_manager_string_util.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chromeos/file_manager/file_manager_string_util.h"
-#include "third_party/ink/grit/ink_resources.h"
-#include "ui/file_manager/file_manager_resource_util.h"
-#include "ui/file_manager/grit/file_manager_resources.h"
-#endif
+#include "ui/file_manager/grit/file_manager_gen_resources_map.h"
+#include "ui/file_manager/grit/file_manager_resources_map.h"
+
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(ENABLE_PDF)
 #include <utility>
+
 #include "chrome/browser/pdf/pdf_extension_util.h"
-#endif
+#endif  // BUILDFLAG(ENABLE_PDF)
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/indigo/indigo_extension_utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 class ChromeComponentExtensionResourceManager::Data {
  public:
   using TemplateReplacementMap =
-      std::map<std::string, ui::TemplateReplacements>;
+      std::map<ExtensionId, ui::TemplateReplacements>;
 
   Data();
   Data(const Data&) = delete;
@@ -57,7 +72,8 @@ class ChromeComponentExtensionResourceManager::Data {
   }
 
  private:
-  void AddComponentResourceEntries(const GritResourceMap* entries, size_t size);
+  void AddComponentResourceEntries(
+      base::span<const webui::ResourcePath> entries);
 
   // A map from a resource path to the resource ID. Used by
   // ChromeComponentExtensionResourceManager::IsComponentExtensionResource().
@@ -68,8 +84,8 @@ class ChromeComponentExtensionResourceManager::Data {
 };
 
 ChromeComponentExtensionResourceManager::Data::Data() {
-  static const GritResourceMap kExtraComponentExtensionResources[] = {
-#if defined(OS_CHROMEOS)
+  static const webui::ResourcePath kExtraComponentExtensionResources[] = {
+#if BUILDFLAG(IS_CHROMEOS)
     {"web_store/webstore_icon_128.png", IDR_WEBSTORE_APP_ICON_128},
     {"web_store/webstore_icon_16.png", IDR_WEBSTORE_APP_ICON_16},
 #else
@@ -77,54 +93,73 @@ ChromeComponentExtensionResourceManager::Data::Data() {
     {"web_store/webstore_icon_16.png", IDR_WEBSTORE_ICON_16},
 #endif
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     {"chrome_app/chrome_app_icon_32.png", IDR_CHROME_APP_ICON_32},
     {"chrome_app/chrome_app_icon_192.png", IDR_CHROME_APP_ICON_192},
-    {"pdf/ink/ink_lib_binary.js", IDR_INK_LIB_BINARY_JS},
-    {"pdf/ink/wasm_ink.worker.js", IDR_INK_WORKER_JS},
-    {"pdf/ink/wasm_ink.wasm", IDR_INK_WASM},
-    {"pdf/ink/ink_loader.js", IDR_INK_LOADER_JS},
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
   };
 
-  AddComponentResourceEntries(kComponentExtensionResources,
-                              kComponentExtensionResourcesSize);
-  AddComponentResourceEntries(kExtraComponentExtensionResources,
-                              base::size(kExtraComponentExtensionResources));
-#if defined(OS_CHROMEOS)
-  size_t file_manager_resource_size;
-  const GritResourceMap* file_manager_resources =
-      file_manager::GetFileManagerResources(&file_manager_resource_size);
-  AddComponentResourceEntries(file_manager_resources,
-                              file_manager_resource_size);
+  AddComponentResourceEntries(kComponentExtensionResources);
+  AddComponentResourceEntries(kExtraComponentExtensionResources);
+
+#if !BUILDFLAG(IS_ANDROID)
+  if (base::FeatureList::IsEnabled(features::kIndigo)) {
+    AddComponentResourceEntries(indigo_extension_utils::GetResources());
+    if (ui::ResourceBundle::HasSharedInstance()) {
+      base::DictValue dict = indigo_extension_utils::GetStrings();
+      ui::TemplateReplacements indigo_replacements;
+      ui::TemplateReplacementsFromDictionaryValue(dict, &indigo_replacements);
+      template_replacements_[extension_misc::kIndigoExtensionId] =
+          std::move(indigo_replacements);
+    }
+  }
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+#if BUILDFLAG(IS_CHROMEOS)
+  // Add Files app JS modules resources.
+  AddComponentResourceEntries(kFileManagerResources);
+  AddComponentResourceEntries(kFileManagerGenResources);
+
+  // Add Files app resources to display untrusted content in <webview> frames.
+  // Files app extension's resource paths need to be prefixed by
+  // "file_manager/".
+  for (const auto& resource : kFileManagerUntrustedResources) {
+    base::FilePath resource_path =
+        base::FilePath("file_manager").AppendASCII(resource.path);
+    resource_path = resource_path.NormalizePathSeparators();
+
+    DCHECK(!path_to_resource_id_.contains(resource_path));
+    path_to_resource_id_[resource_path] = resource.id;
+  }
 
   // ResourceBundle and g_browser_process are not always initialized in unit
   // tests.
   if (ui::ResourceBundle::HasSharedInstance() && g_browser_process) {
+    // TODO(crbug.com/404131876): Remove g_browser_process usage.
+    const std::string& application_locale =
+        g_browser_process->GetApplicationLocale();
+
     ui::TemplateReplacements file_manager_replacements;
-    ui::TemplateReplacementsFromDictionaryValue(*GetFileManagerStrings(),
-                                                &file_manager_replacements);
+    ui::TemplateReplacementsFromDictionaryValue(
+        GetFileManagerStrings(application_locale), &file_manager_replacements);
     template_replacements_[extension_misc::kFilesManagerAppId] =
         std::move(file_manager_replacements);
   }
 
-  size_t keyboard_resource_size;
-  const GritResourceMap* keyboard_resources =
-      keyboard::GetKeyboardExtensionResources(&keyboard_resource_size);
-  AddComponentResourceEntries(keyboard_resources, keyboard_resource_size);
+  AddComponentResourceEntries(keyboard::GetKeyboardExtensionResources());
 #endif
 
 #if BUILDFLAG(ENABLE_PDF)
+  AddComponentResourceEntries(pdf_extension_util::GetResources(
+      pdf_extension_util::PdfViewerContext::kPdfViewer));
+
   // ResourceBundle is not always initialized in unit tests.
   if (ui::ResourceBundle::HasSharedInstance()) {
-    base::Value dict(base::Value::Type::DICTIONARY);
-    pdf_extension_util::AddStrings(
-        pdf_extension_util::PdfViewerContext::kPdfViewer, &dict);
-    pdf_extension_util::AddAdditionalData(&dict);
+    base::DictValue dict = pdf_extension_util::GetStrings(
+        pdf_extension_util::PdfViewerContext::kPdfViewer);
 
     ui::TemplateReplacements pdf_viewer_replacements;
-    ui::TemplateReplacementsFromDictionaryValue(
-        base::Value::AsDictionaryValue(dict), &pdf_viewer_replacements);
+    ui::TemplateReplacementsFromDictionaryValue(dict, &pdf_viewer_replacements);
     template_replacements_[extension_misc::kPdfExtensionId] =
         std::move(pdf_viewer_replacements);
   }
@@ -132,30 +167,13 @@ ChromeComponentExtensionResourceManager::Data::Data() {
 }
 
 void ChromeComponentExtensionResourceManager::Data::AddComponentResourceEntries(
-    const GritResourceMap* entries,
-    size_t size) {
-  base::FilePath gen_folder_path = base::FilePath().AppendASCII(
-      "@out_folder@/gen/chrome/browser/resources/");
-  gen_folder_path = gen_folder_path.NormalizePathSeparators();
-
-  for (size_t i = 0; i < size; ++i) {
-    base::FilePath resource_path = base::FilePath().AppendASCII(
-        entries[i].name);
+    base::span<const webui::ResourcePath> entries) {
+  for (const auto& entry : entries) {
+    base::FilePath resource_path = base::FilePath().AppendASCII(entry.path);
     resource_path = resource_path.NormalizePathSeparators();
 
-    if (!gen_folder_path.IsParent(resource_path)) {
-      DCHECK(!base::Contains(path_to_resource_id_, resource_path));
-      path_to_resource_id_[resource_path] = entries[i].value;
-    } else {
-      // If the resource is a generated file, strip the generated folder's path,
-      // so that it can be served from a normal URL (as if it were not
-      // generated).
-      base::FilePath effective_path =
-          base::FilePath().AppendASCII(resource_path.AsUTF8Unsafe().substr(
-              gen_folder_path.value().length()));
-      DCHECK(!base::Contains(path_to_resource_id_, effective_path));
-      path_to_resource_id_[effective_path] = entries[i].value;
-    }
+    DCHECK(!path_to_resource_id_.contains(resource_path));
+    path_to_resource_id_[resource_path] = entry.id;
   }
 }
 
@@ -192,10 +210,22 @@ bool ChromeComponentExtensionResourceManager::IsComponentExtensionResource(
 
 const ui::TemplateReplacements*
 ChromeComponentExtensionResourceManager::GetTemplateReplacementsForExtension(
-    const std::string& extension_id) const {
+    const ExtensionId& extension_id) const {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   LazyInitData();
+
+#if BUILDFLAG(IS_CHROMEOS)
+  if (extension_id == extension_misc::kFilesManagerAppId) {
+    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+    // Disable $i18n{} template JS string replacement during JS code coverage.
+    base::FilePath devtools_code_coverage_dir_ =
+        command_line->GetSwitchValuePath("devtools-code-coverage");
+    if (!devtools_code_coverage_dir_.empty())
+      return nullptr;
+  }
+#endif
+
   auto it = data_->template_replacements().find(extension_id);
   return it != data_->template_replacements().end() ? &it->second : nullptr;
 }

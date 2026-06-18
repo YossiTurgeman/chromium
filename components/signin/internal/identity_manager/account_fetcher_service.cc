@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,32 +8,39 @@
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
 #include "base/command_line.h"
+#include "base/feature_list.h"
+#include "base/functional/bind.h"
 #include "base/metrics/field_trial.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/notreached.h"
 #include "base/trace_event/trace_event.h"
+#include "base/values.h"
 #include "build/build_config.h"
 #include "components/image_fetcher/core/image_decoder.h"
 #include "components/image_fetcher/core/image_fetcher_impl.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
+#include "components/signin/internal/identity_manager/account_capabilities_fetcher.h"
+#include "components/signin/internal/identity_manager/account_fetcher_factory.h"
 #include "components/signin/internal/identity_manager/account_info_fetcher.h"
+#include "components/signin/internal/identity_manager/account_info_util.h"
 #include "components/signin/internal/identity_manager/account_tracker_service.h"
 #include "components/signin/internal/identity_manager/profile_oauth2_token_service.h"
 #include "components/signin/public/base/avatar_icon_util.h"
 #include "components/signin/public/base/signin_client.h"
 #include "components/signin/public/base/signin_switches.h"
+#include "components/signin/public/identity_manager/account_capabilities.h"
+#include "components/signin/public/identity_manager/account_info.h"
 #include "net/http/http_status_code.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
-#if defined(OS_ANDROID)
-#include "components/signin/internal/identity_manager/child_account_info_fetcher_android.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/ash_features.h"
 #endif
-
 namespace {
 
-const base::TimeDelta kRefreshFromTokenServiceDelay =
-    base::TimeDelta::FromHours(24);
+const base::TimeDelta kRefreshFromTokenServiceDelay = base::Hours(24);
 
 }  // namespace
 
@@ -48,7 +55,6 @@ AccountFetcherService::AccountFetcherService() = default;
 
 AccountFetcherService::~AccountFetcherService() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(shutdown_called_);
 }
 
 // static
@@ -61,7 +67,8 @@ void AccountFetcherService::Initialize(
     SigninClient* signin_client,
     ProfileOAuth2TokenService* token_service,
     AccountTrackerService* account_tracker_service,
-    std::unique_ptr<image_fetcher::ImageDecoder> image_decoder) {
+    std::unique_ptr<image_fetcher::ImageDecoder> image_decoder,
+    std::unique_ptr<AccountFetcherFactory> account_fetcher_factory) {
   DCHECK(signin_client);
   DCHECK(!signin_client_);
   signin_client_ = signin_client;
@@ -71,63 +78,55 @@ void AccountFetcherService::Initialize(
   DCHECK(token_service);
   DCHECK(!token_service_);
   token_service_ = token_service;
-  token_service_->AddObserver(this);
+  token_service_observation_.Observe(token_service_);
+
   DCHECK(image_decoder);
   DCHECK(!image_decoder_);
   image_decoder_ = std::move(image_decoder);
-  repeating_timer_ = std::make_unique<signin::PersistentRepeatingTimer>(
-      signin_client_->GetPrefs(), AccountFetcherService::kLastUpdatePref,
-      kRefreshFromTokenServiceDelay,
-      base::Bind(&AccountFetcherService::RefreshAllAccountInfo,
-                 base::Unretained(this), false));
+  DCHECK(!account_fetcher_factory_);
+  DCHECK(account_fetcher_factory);
+  account_fetcher_factory_ = std::move(account_fetcher_factory);
 
   // Tokens may have already been loaded and we will not receive a
   // notification-on-registration for |token_service_->AddObserver(this)| few
   // lines above.
-  if (token_service_->AreAllCredentialsLoaded())
+  if (token_service_->AreAllCredentialsLoaded()) {
     OnRefreshTokensLoaded();
-}
-
-void AccountFetcherService::Shutdown() {
-  token_service_->RemoveObserver(this);
-#if defined(OS_ANDROID)
-  // child_info_request_ is an invalidation handler and needs to be
-  // unregistered during the lifetime of the invalidation service.
-  child_info_request_.reset();
-#endif
-  shutdown_called_ = true;
+  }
 }
 
 bool AccountFetcherService::IsAllUserInfoFetched() const {
   return user_info_requests_.empty();
 }
 
-void AccountFetcherService::ForceRefreshOfAccountInfo(
-    const CoreAccountId& account_id) {
-  DCHECK(network_fetches_enabled_);
-  RefreshAccountInfo(account_id, false);
+bool AccountFetcherService::AreAllAccountCapabilitiesFetched() const {
+  return account_capabilities_requests_.empty();
 }
 
 void AccountFetcherService::OnNetworkInitialized() {
   DCHECK(!network_initialized_);
   DCHECK(!network_fetches_enabled_);
-#if defined(OS_ANDROID)
-  DCHECK(!child_info_request_);
-#endif
   network_initialized_ = true;
   MaybeEnableNetworkFetches();
 }
 
 void AccountFetcherService::EnableNetworkFetchesForTest() {
-  if (!network_initialized_)
+  if (!network_initialized_) {
     OnNetworkInitialized();
+  }
 
-  if (!refresh_tokens_loaded_)
+  if (!refresh_tokens_loaded_) {
     OnRefreshTokensLoaded();
+  }
 }
 
 void AccountFetcherService::EnableAccountRemovalForTest() {
   enable_account_removal_for_test_ = true;
+}
+
+AccountFetcherFactory*
+AccountFetcherService::GetAccountFetcherFactoryForTest() {
+  return account_fetcher_factory_.get();
 }
 
 void AccountFetcherService::RefreshAllAccountInfo(bool only_fetch_if_invalid) {
@@ -141,36 +140,52 @@ void AccountFetcherService::RefreshAllAccountInfo(bool only_fetch_if_invalid) {
 // dependency on PrimaryAccountManager which we get around by only allowing a
 // single account. This is possible since we only support a single account to be
 // a child anyway.
-#if defined(OS_ANDROID)
-void AccountFetcherService::UpdateChildInfo() {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  std::vector<CoreAccountId> accounts = token_service_->GetAccounts();
-  if (accounts.size() == 1) {
-    const CoreAccountId& candidate = accounts[0];
-    if (candidate == child_request_account_id_)
-      return;
-    if (!child_request_account_id_.empty())
-      ResetChildInfo();
-    child_request_account_id_ = candidate;
-    StartFetchingChildInfo(candidate);
-  } else {
-    ResetChildInfo();
-  }
+#if BUILDFLAG(IS_ANDROID)
+void AccountFetcherService::RefreshAccountInfoIfStale(
+    const CoreAccountId& account_id) {
+  DCHECK(network_fetches_enabled_);
+  RefreshAccountInfo(account_id, /*only_fetch_if_invalid=*/true);
 }
 #endif
 
 void AccountFetcherService::MaybeEnableNetworkFetches() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!network_initialized_ || !refresh_tokens_loaded_)
+  if (!network_initialized_ || !refresh_tokens_loaded_) {
     return;
+  }
+
   if (!network_fetches_enabled_) {
     network_fetches_enabled_ = true;
-    repeating_timer_->Start();
+    CHECK(!repeating_timer_);
+    CHECK(!persistent_repeating_timer_);
+    if (base::FeatureList::IsEnabled(switches::kFetchAccountInfoOnRestart)) {
+      // Schedule a fetch kRefreshFromTokenServiceDelay from now.
+      repeating_timer_ = std::make_unique<base::RepeatingTimer>();
+      repeating_timer_->Start(
+          FROM_HERE, kRefreshFromTokenServiceDelay,
+          base::BindRepeating(&AccountFetcherService::RefreshAllAccountInfo,
+                              base::Unretained(this),
+                              /*only_fetch_if_invalid=*/false));
+    } else {
+      // Schedule a fetch kRefreshFromTokenServiceDelay from the last fetch
+      // time.
+      persistent_repeating_timer_ =
+          std::make_unique<signin::PersistentRepeatingTimer>(
+              signin_client_->GetPrefs(),
+              AccountFetcherService::kLastUpdatePref,
+              kRefreshFromTokenServiceDelay,
+              base::BindRepeating(&AccountFetcherService::RefreshAllAccountInfo,
+                                  base::Unretained(this),
+                                  /*only_fetch_if_invalid=*/false));
+      persistent_repeating_timer_->Start();
+    }
   }
-  RefreshAllAccountInfo(true);
-#if defined(OS_ANDROID)
-  UpdateChildInfo();
-#endif
+
+  // If kFetchAccountInfoOnRestart is enabled, fetch account info
+  // unconditionally. Otherwise, only fetch if the account info is invalid.
+  bool only_fetch_if_invalid =
+      !base::FeatureList::IsEnabled(switches::kFetchAccountInfoOnRestart);
+  RefreshAllAccountInfo(only_fetch_if_invalid);
 }
 
 // Starts fetching user information. This is called periodically to refresh.
@@ -179,64 +194,110 @@ void AccountFetcherService::StartFetchingUserInfo(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(network_fetches_enabled_);
 
-  std::unique_ptr<AccountInfoFetcher>& request =
-      user_info_requests_[account_id];
-  if (!request) {
+  if (!user_info_requests_.contains(account_id)) {
     DVLOG(1) << "StartFetching " << account_id;
-    std::unique_ptr<AccountInfoFetcher> fetcher =
-        std::make_unique<AccountInfoFetcher>(
-            token_service_, signin_client_->GetURLLoaderFactory(), this,
-            account_id);
-    request = std::move(fetcher);
+    user_info_fetch_start_times_[account_id] = base::TimeTicks::Now();
+    user_info_requests_.emplace(
+        account_id,
+        account_fetcher_factory_->CreateAccountInfoFetcher(
+            account_id,
+            base::BindOnce(&AccountFetcherService::OnUserInfoFetchCompleted,
+                           base::Unretained(this), account_id)));
+  }
+}
+
+void AccountFetcherService::DestroyFetchers(const CoreAccountId& account_id) {
+  user_info_requests_.erase(account_id);
+  account_capabilities_requests_.erase(account_id);
+}
+
+void AccountFetcherService::PrepareForFetchingAccountCapabilities() {
+  account_fetcher_factory_->PrepareForFetchingAccountCapabilities();
+}
+
+void AccountFetcherService::StartFetchingAccountCapabilities(
+    const CoreAccountInfo& core_account_info) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(network_fetches_enabled_);
+
+  std::unique_ptr<AccountCapabilitiesFetcher>& request =
+      account_capabilities_requests_[core_account_info.account_id];
+  if (!request) {
+    AccountInfo account_info =
+        account_tracker_service_->GetAccountInfo(core_account_info.account_id);
+
+    request = account_fetcher_factory_->CreateAccountCapabilitiesFetcher(
+        core_account_info,
+        account_info.GetAccountCapabilities().AreAnyCapabilitiesKnown()
+            ? AccountCapabilitiesFetcher::FetchPriority::kBackground
+            : AccountCapabilitiesFetcher::FetchPriority::kForeground,
+        base::BindRepeating(
+            &AccountFetcherService::OnSomeAccountCapabilitiesFetched,
+            base::Unretained(this)),
+        base::BindOnce(
+            &AccountFetcherService::OnAccountCapabilitiesFetchComplete,
+            base::Unretained(this)));
     request->Start();
   }
 }
 
-#if defined(OS_ANDROID)
-// Starts fetching whether this is a child account. Handles refresh internally.
-void AccountFetcherService::StartFetchingChildInfo(
-    const CoreAccountId& account_id) {
-  child_info_request_ =
-      ChildAccountInfoFetcherAndroid::Create(this, child_request_account_id_);
-}
-
-void AccountFetcherService::ResetChildInfo() {
-  if (!child_request_account_id_.empty())
-    SetIsChildAccount(child_request_account_id_, false);
-  child_request_account_id_ = CoreAccountId();
-  child_info_request_.reset();
-}
-
-void AccountFetcherService::SetIsChildAccount(const CoreAccountId& account_id,
-                                              bool is_child_account) {
-  if (child_request_account_id_ == account_id)
-    account_tracker_service_->SetIsChildAccount(account_id, is_child_account);
-}
-#endif
-
 void AccountFetcherService::RefreshAccountInfo(const CoreAccountId& account_id,
                                                bool only_fetch_if_invalid) {
   DCHECK(network_fetches_enabled_);
-  account_tracker_service_->StartTrackingAccount(account_id);
-  const AccountInfo& info =
-      account_tracker_service_->GetAccountInfo(account_id);
 
-// |only_fetch_if_invalid| is false when the service is due for a timed update.
-#if defined(OS_ANDROID)
-  // TODO(mlerman): Change this condition back to info.IsValid() and ensure the
-  // Fetch doesn't occur until after ProfileImpl::OnPrefsLoaded().
-  if (!only_fetch_if_invalid || info.gaia.empty())
-#else
-  if (!only_fetch_if_invalid || !info.IsValid())
-#endif
+  // TODO(crbug.com/40283608): It seems quite suspect account tracker needs to
+  // start tracking the account when refreshing the account info. Understand why
+  // this is needed and ideally remove this call (it may have been added just
+  // for tests).
+  base::UmaHistogramBoolean(
+      "Signin.AccountTracker.RefreshAccountInfo.IsAlreadyTrackingAccount",
+      account_tracker_service_->IsTrackingAccount(account_id));
+  account_tracker_service_->StartTrackingAccount(account_id);
+
+  AccountInfo info = account_tracker_service_->GetAccountInfo(account_id);
+
+  if (!only_fetch_if_invalid ||
+      !info.GetAccountCapabilities().AreAllCapabilitiesKnown()) {
+    StartFetchingAccountCapabilities(info);
+  }
+
+  // |only_fetch_if_invalid| is false when the service is due for a timed
+  // update.
+  if (!only_fetch_if_invalid || !info.IsValid()) {
+    // Fetching the user info will also fetch the account image.
     StartFetchingUserInfo(account_id);
+    return;
+  }
+
+  // User info is already valid and does not need to be downloaded again.
+  // Fetch the account image in case it was not fetched previously.
+  //
+  // Note: |FetchAccountImage()| does not fetch the account image if the
+  // account image was already downloaded. So it is fine to call this method
+  // even when |only_fetch_if_invalid| is true.
+  FetchAccountImage(account_id);
 }
 
-void AccountFetcherService::OnUserInfoFetchSuccess(
+void AccountFetcherService::OnUserInfoFetchCompleted(
     const CoreAccountId& account_id,
-    std::unique_ptr<base::DictionaryValue> user_info) {
+    std::optional<AccountInfo> fetched_account_info) {
+  if (!fetched_account_info) {
+    LOG(WARNING) << "Failed to get UserInfo for " << account_id;
+    user_info_fetch_start_times_.erase(account_id);
+    // |account_id| is owned by the request. Cannot be used after this line.
+    user_info_requests_.erase(account_id);
+    return;
+  }
+
   account_tracker_service_->SetAccountInfoFromUserInfo(account_id,
-                                                       user_info.get());
+                                                       *fetched_account_info);
+  auto it = user_info_fetch_start_times_.find(account_id);
+  if (it != user_info_fetch_start_times_.end()) {
+    base::UmaHistogramMediumTimes(
+        "Signin.AccountFetcher.AccountUserInfoFetchTime",
+        base::TimeTicks::Now() - it->second);
+    user_info_fetch_start_times_.erase(it);
+  }
   FetchAccountImage(account_id);
   user_info_requests_.erase(account_id);
 }
@@ -256,18 +317,21 @@ void AccountFetcherService::FetchAccountImage(const CoreAccountId& account_id) {
   DCHECK(signin_client_);
   AccountInfo account_info =
       account_tracker_service_->GetAccountInfo(account_id);
-  std::string picture_url_string = account_info.picture_url;
+  if (!account_info.GetAvatarUrl().has_value()) {
+    return;
+  }
 
-  GURL picture_url(picture_url_string);
+  GURL picture_url(*account_info.GetAvatarUrl());
   if (!picture_url.is_valid()) {
-    DVLOG(1) << "Invalid avatar picture URL: \"" + picture_url_string + "\"";
+    DVLOG(1) << "Invalid avatar picture URL: \"" << *account_info.GetAvatarUrl()
+             << "\"";
     return;
   }
   GURL image_url_with_size(signin::GetAvatarImageURLWithOptions(
       picture_url, signin::kAccountInfoImageSize, true /* no_silhouette */));
 
   if (image_url_with_size.spec() ==
-      account_info.last_downloaded_image_url_with_size) {
+      account_info.GetLastDownloadedAvatarUrlWithSize()) {
     return;
   }
 
@@ -303,10 +367,17 @@ void AccountFetcherService::FetchAccountImage(const CoreAccountId& account_id) {
                                         std::move(callback), std::move(params));
 }
 
-void AccountFetcherService::OnUserInfoFetchFailure(
+void AccountFetcherService::OnSomeAccountCapabilitiesFetched(
+    const CoreAccountId& account_id,
+    const AccountCapabilities& account_capabilities) {
+  account_tracker_service_->SetAccountCapabilities(account_id,
+                                                   account_capabilities);
+}
+
+void AccountFetcherService::OnAccountCapabilitiesFetchComplete(
     const CoreAccountId& account_id) {
-  LOG(WARNING) << "Failed to get UserInfo for " << account_id;
-  user_info_requests_.erase(account_id);
+  // |account_id| is owned by the request. Cannot be used after this line.
+  account_capabilities_requests_.erase(account_id);
 }
 
 void AccountFetcherService::OnRefreshTokenAvailable(
@@ -321,12 +392,10 @@ void AccountFetcherService::OnRefreshTokenAvailable(
   // changes) once everything is initialized and the refresh token is present.
   signin_client_->DoFinalInit();
 
-  if (!network_fetches_enabled_)
+  if (!network_fetches_enabled_) {
     return;
-  RefreshAccountInfo(account_id, true);
-#if defined(OS_ANDROID)
-  UpdateChildInfo();
-#endif
+  }
+  RefreshAccountInfo(account_id, /*only_fetch_if_invalid=*/true);
 }
 
 void AccountFetcherService::OnRefreshTokenRevoked(
@@ -344,10 +413,7 @@ void AccountFetcherService::OnRefreshTokenRevoked(
     return;
   }
 
-  user_info_requests_.erase(account_id);
-#if defined(OS_ANDROID)
-  UpdateChildInfo();
-#endif
+  DestroyFetchers(account_id);
   account_tracker_service_->StopTrackingAccount(account_id);
 }
 

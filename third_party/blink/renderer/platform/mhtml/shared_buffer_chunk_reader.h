@@ -31,7 +31,6 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_MHTML_SHARED_BUFFER_CHUNK_READER_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_MHTML_SHARED_BUFFER_CHUNK_READER_H_
 
-#include "base/macros.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -43,38 +42,33 @@ class SharedBufferChunkReader final {
 
  public:
   SharedBufferChunkReader(scoped_refptr<const SharedBuffer>,
-                          const Vector<char>& separator);
-  SharedBufferChunkReader(scoped_refptr<const SharedBuffer>,
-                          const char* separator);
+                          std::string_view separator);
+  SharedBufferChunkReader(const SharedBufferChunkReader&) = delete;
+  SharedBufferChunkReader& operator=(const SharedBufferChunkReader&) = delete;
 
-  void SetSeparator(const Vector<char>&);
-  void SetSeparator(const char*);
+  void SetSeparator(std::string_view separator);
 
   // Returns false when the end of the buffer was reached.
   bool NextChunk(Vector<char>& data, bool include_separator = false);
 
   // Returns a null string when the end of the buffer has been reached.
-  String NextChunkAsUTF8StringWithLatin1Fallback(
+  String NextChunkAsUtf8StringWithLatin1Fallback(
       bool include_separator = false);
 
   // Reads size bytes at the current location in the buffer, without changing
   // the buffer position.
   // Returns the number of bytes read. That number might be less than the
   // specified size if the end of the buffer was reached.
-  uint32_t Peek(Vector<char>&, uint32_t);
+  size_t Peek(Vector<char>&, size_t);
 
  private:
   scoped_refptr<const SharedBuffer> buffer_;
   size_t buffer_position_;
-  const char* segment_;
-  uint32_t segment_length_;
+  base::span<const char> segment_;
   uint32_t segment_index_;
   bool reached_end_of_file_;
   Vector<char> separator_;
   uint32_t separator_index_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(SharedBufferChunkReader);
 };
 
 }  // namespace blink

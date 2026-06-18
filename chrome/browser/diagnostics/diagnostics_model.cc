@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include "base/command_line.h"
 #include "base/files/file_path.h"
-#include "base/macros.h"
 #include "base/path_service.h"
 #include "base/strings/string_util.h"
 #include "build/build_config.h"
@@ -24,17 +23,17 @@ namespace diagnostics {
 
 // This is the count of diagnostic tests on each platform.  This should
 // only be used by testing code.
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 const int DiagnosticsModel::kDiagnosticsTestCount = 17;
-#elif defined(OS_MAC)
+#elif BUILDFLAG(IS_MAC)
 const int DiagnosticsModel::kDiagnosticsTestCount = 14;
-#elif defined(OS_POSIX)
-#if defined(OS_CHROMEOS)
+#elif BUILDFLAG(IS_POSIX)
+#if BUILDFLAG(IS_CHROMEOS)
 const int DiagnosticsModel::kDiagnosticsTestCount = 18;
 #else
 const int DiagnosticsModel::kDiagnosticsTestCount = 16;
-#endif
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
+#endif  // BUILDFLAG(IS_WIN)
 
 namespace {
 
@@ -50,7 +49,10 @@ class DiagnosticsModelImpl : public DiagnosticsModel {
  public:
   DiagnosticsModelImpl() : tests_run_(0) {}
 
-  ~DiagnosticsModelImpl() override {}
+  DiagnosticsModelImpl(const DiagnosticsModelImpl&) = delete;
+  DiagnosticsModelImpl& operator=(const DiagnosticsModelImpl&) = delete;
+
+  ~DiagnosticsModelImpl() override = default;
 
   int GetTestRunCount() const override { return tests_run_; }
 
@@ -60,20 +62,12 @@ class DiagnosticsModelImpl : public DiagnosticsModel {
     size_t test_count = tests_.size();
     bool continue_running = true;
     for (size_t i = 0; i != test_count; ++i) {
-      // If one of the diagnostic steps returns false, we want to
-      // mark the rest of them as "skipped" in the UMA stats.
       if (continue_running) {
         continue_running = RunTest(tests_[i].get(), observer, i);
         ++tests_run_;
       } else {
-#if defined(OS_CHROMEOS)  // Only collecting UMA stats on ChromeOS
-        RecordUMATestResult(static_cast<DiagnosticsTestId>(tests_[i]->GetId()),
-                            RESULT_SKIPPED);
-#else
-        // On other platforms, we can just bail out if a diagnostic step returns
-        // false.
+        // Just bail out if a recovery step returns false.
         break;
-#endif
       }
     }
     if (observer)
@@ -84,19 +78,11 @@ class DiagnosticsModelImpl : public DiagnosticsModel {
     size_t test_count = tests_.size();
     bool continue_running = true;
     for (size_t i = 0; i != test_count; ++i) {
-      // If one of the recovery steps returns false, we want to
-      // mark the rest of them as "skipped" in the UMA stats.
       if (continue_running) {
         continue_running = RunRecovery(tests_[i].get(), observer, i);
       } else {
-#if defined(OS_CHROMEOS)  // Only collecting UMA stats on ChromeOS
-        RecordUMARecoveryResult(
-            static_cast<DiagnosticsTestId>(tests_[i]->GetId()), RESULT_SKIPPED);
-#else
-        // On other platforms, we can just bail out if a recovery step returns
-        // false.
+        // Just bail out if a recovery step returns false.
         break;
-#endif
       }
     }
     if (observer)
@@ -108,7 +94,6 @@ class DiagnosticsModelImpl : public DiagnosticsModel {
   }
 
   bool GetTestInfo(int id, const TestInfo** result) const override {
-    DCHECK(id < DIAGNOSTICS_TEST_ID_COUNT);
     DCHECK(id >= 0);
     for (const auto& test : tests_) {
       if (test->GetId() == id) {
@@ -138,14 +123,11 @@ class DiagnosticsModelImpl : public DiagnosticsModel {
 
   std::vector<std::unique_ptr<DiagnosticsTest>> tests_;
   int tests_run_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(DiagnosticsModelImpl);
 };
 
 // Each platform can have their own tests. For the time being there is only
 // one test that works on all platforms.
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 class DiagnosticsModelWin : public DiagnosticsModelImpl {
  public:
   DiagnosticsModelWin() {
@@ -154,49 +136,49 @@ class DiagnosticsModelWin : public DiagnosticsModelImpl {
     tests_.push_back(MakeVersionTest());
     tests_.push_back(MakeUserDirTest());
     tests_.push_back(MakeLocalStateFileTest());
-    tests_.push_back(MakeDictonaryDirTest());
+    tests_.push_back(MakeDictionaryDirTest());
     tests_.push_back(MakeResourcesFileTest());
     tests_.push_back(MakeDiskSpaceTest());
     tests_.push_back(MakePreferencesTest());
     tests_.push_back(MakeLocalStateTest());
-    tests_.push_back(MakeBookMarksTest());
+    tests_.push_back(MakeLocalOrSyncableBookmarksTest());
+    tests_.push_back(MakeAccountBookmarksTest());
     tests_.push_back(MakeSqliteWebDataDbTest());
     tests_.push_back(MakeSqliteCookiesDbTest());
     tests_.push_back(MakeSqliteFaviconsDbTest());
     tests_.push_back(MakeSqliteHistoryDbTest());
     tests_.push_back(MakeSqliteTopSitesDbTest());
-    tests_.push_back(MakeSqliteWebDatabaseTrackerDbTest());
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(DiagnosticsModelWin);
+  DiagnosticsModelWin(const DiagnosticsModelWin&) = delete;
+  DiagnosticsModelWin& operator=(const DiagnosticsModelWin&) = delete;
 };
 
-#elif defined(OS_MAC)
+#elif BUILDFLAG(IS_MAC)
 class DiagnosticsModelMac : public DiagnosticsModelImpl {
  public:
   DiagnosticsModelMac() {
     tests_.push_back(MakeInstallTypeTest());
     tests_.push_back(MakeUserDirTest());
     tests_.push_back(MakeLocalStateFileTest());
-    tests_.push_back(MakeDictonaryDirTest());
+    tests_.push_back(MakeDictionaryDirTest());
     tests_.push_back(MakeDiskSpaceTest());
     tests_.push_back(MakePreferencesTest());
     tests_.push_back(MakeLocalStateTest());
-    tests_.push_back(MakeBookMarksTest());
+    tests_.push_back(MakeLocalOrSyncableBookmarksTest());
+    tests_.push_back(MakeAccountBookmarksTest());
     tests_.push_back(MakeSqliteWebDataDbTest());
     tests_.push_back(MakeSqliteCookiesDbTest());
     tests_.push_back(MakeSqliteFaviconsDbTest());
     tests_.push_back(MakeSqliteHistoryDbTest());
     tests_.push_back(MakeSqliteTopSitesDbTest());
-    tests_.push_back(MakeSqliteWebDatabaseTrackerDbTest());
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(DiagnosticsModelMac);
+  DiagnosticsModelMac(const DiagnosticsModelMac&) = delete;
+  DiagnosticsModelMac& operator=(const DiagnosticsModelMac&) = delete;
 };
 
-#elif defined(OS_POSIX)
+#elif BUILDFLAG(IS_POSIX)
 class DiagnosticsModelPosix : public DiagnosticsModelImpl {
  public:
   DiagnosticsModelPosix() {
@@ -204,26 +186,26 @@ class DiagnosticsModelPosix : public DiagnosticsModelImpl {
     tests_.push_back(MakeVersionTest());
     tests_.push_back(MakeUserDirTest());
     tests_.push_back(MakeLocalStateFileTest());
-    tests_.push_back(MakeDictonaryDirTest());
+    tests_.push_back(MakeDictionaryDirTest());
     tests_.push_back(MakeResourcesFileTest());
     tests_.push_back(MakeDiskSpaceTest());
     tests_.push_back(MakePreferencesTest());
     tests_.push_back(MakeLocalStateTest());
-    tests_.push_back(MakeBookMarksTest());
+    tests_.push_back(MakeLocalOrSyncableBookmarksTest());
+    tests_.push_back(MakeAccountBookmarksTest());
     tests_.push_back(MakeSqliteWebDataDbTest());
     tests_.push_back(MakeSqliteCookiesDbTest());
     tests_.push_back(MakeSqliteFaviconsDbTest());
     tests_.push_back(MakeSqliteHistoryDbTest());
     tests_.push_back(MakeSqliteTopSitesDbTest());
-    tests_.push_back(MakeSqliteWebDatabaseTrackerDbTest());
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     tests_.push_back(MakeSqliteNssCertDbTest());
     tests_.push_back(MakeSqliteNssKeyDbTest());
 #endif
   }
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(DiagnosticsModelPosix);
+  DiagnosticsModelPosix(const DiagnosticsModelPosix&) = delete;
+  DiagnosticsModelPosix& operator=(const DiagnosticsModelPosix&) = delete;
 };
 
 #endif
@@ -235,11 +217,11 @@ DiagnosticsModel* MakeDiagnosticsModel(const base::CommandLine& cmdline) {
       cmdline.GetSwitchValuePath(switches::kUserDataDir);
   if (!user_data_dir.empty())
     base::PathService::Override(chrome::DIR_USER_DATA, user_data_dir);
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   return new DiagnosticsModelWin();
-#elif defined(OS_MAC)
+#elif BUILDFLAG(IS_MAC)
   return new DiagnosticsModelMac();
-#elif defined(OS_POSIX)
+#elif BUILDFLAG(IS_POSIX)
   return new DiagnosticsModelPosix();
 #endif
 }

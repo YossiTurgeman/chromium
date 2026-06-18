@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium Authors. All rights reserved.
+# Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -16,9 +16,9 @@ class AuthorizationError(Exception):
 
 def _RunCommand(command):
   try:
-    return subprocess.check_output(
-        ['luci-auth', command], stderr=subprocess.STDOUT,
-        universal_newlines=True)
+    return subprocess.check_output(['luci-auth', command],
+                                   stderr=subprocess.STDOUT,
+                                   universal_newlines=True)
   except subprocess.CalledProcessError as exc:
     raise AuthorizationError(exc.output.strip())
 
@@ -32,7 +32,7 @@ def CheckLoggedIn():
   try:
     GetAccessToken()
   except AuthorizationError as exc:
-    sys.exit(exc.message)
+    sys.exit(str(exc))
 
 
 def GetAccessToken():

@@ -15,10 +15,14 @@ element.style { ()
         animation-fill-mode: none, none, none, none;
         animation-play-state: running, running, running, running;
         animation-name: animName, mediaAnim, doesNotExist, styleSheetAnim;
+        animation-timeline: auto;
+        animation-range-start: normal;
+        animation-range-end: normal;
 
 [expanded] 
 div { (user agent stylesheet)
     display: block;
+    unicode-bidi: isolate;
 
 ======== @keyframes animName ========
 [expanded] 
@@ -67,10 +71,14 @@ element.style { ()
         animation-fill-mode: none, none, none, none;
         animation-play-state: running, running, running, running;
         animation-name: animName, mediaAnim, doesNotExist, styleSheetAnim;
+        animation-timeline: auto;
+        animation-range-start: normal;
+        animation-range-end: normal;
 
 [expanded] 
 div { (user agent stylesheet)
     display: block;
+    unicode-bidi: isolate;
 
 ======== @keyframes animName ========
 [expanded] 
@@ -119,10 +127,14 @@ element.style { ()
         animation-fill-mode: none, none, none, none;
         animation-play-state: running, running, running, running;
         animation-name: animName, mediaAnim, doesNotExist, styleSheetAnim;
+        animation-timeline: auto;
+        animation-range-start: normal;
+        animation-range-end: normal;
 
 [expanded] 
 div { (user agent stylesheet)
     display: block;
+    unicode-bidi: isolate;
 
 ======== @keyframes animName ========
 [expanded] 
@@ -171,10 +183,14 @@ element.style { ()
         animation-fill-mode: none, none, none, none;
         animation-play-state: running, running, running, running;
         animation-name: animName, mediaAnim, doesNotExist, styleSheetAnim;
+        animation-timeline: auto;
+        animation-range-start: normal;
+        animation-range-end: normal;
 
 [expanded] 
 div { (user agent stylesheet)
     display: block;
+    unicode-bidi: isolate;
 
 ======== @keyframes animName ========
 [expanded] 
@@ -223,10 +239,14 @@ element.style { ()
         animation-fill-mode: none, none, none, none;
         animation-play-state: running, running, running, running;
         animation-name: animName, mediaAnim, doesNotExist, styleSheetAnim;
+        animation-timeline: auto;
+        animation-range-start: normal;
+        animation-range-end: normal;
 
 [expanded] 
 div { (user agent stylesheet)
     display: block;
+    unicode-bidi: isolate;
 
 ======== @keyframes animName ========
 [expanded] 

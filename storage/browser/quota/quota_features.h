@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,24 +13,20 @@ namespace storage {
 
 namespace features {
 
-COMPONENT_EXPORT(STORAGE_BROWSER)
-extern const base::Feature kQuotaExpandPoolSize;
-extern const base::FeatureParam<double> kExperimentalPoolSizeRatio;
-extern const base::FeatureParam<double> kPerHostRatio;
+COMPONENT_EXPORT(STORAGE_BROWSER) BASE_DECLARE_FEATURE(kStorageQuotaSettings);
+extern const base::FeatureParam<double> kMustRemainAvailableBytes;
+extern const base::FeatureParam<double> kMustRemainAvailableRatio;
+extern const base::FeatureParam<double> kPoolSizeBytes;
+extern const base::FeatureParam<double> kPoolSizeRatio;
+extern const base::FeatureParam<double> kShouldRemainAvailableBytes;
+extern const base::FeatureParam<double> kShouldRemainAvailableRatio;
 
+COMPONENT_EXPORT(STORAGE_BROWSER) BASE_DECLARE_FEATURE(kStaticStorageQuota);
 COMPONENT_EXPORT(STORAGE_BROWSER)
-extern const base::Feature kQuotaUnlimitedPoolSize;
-
-COMPONENT_EXPORT(STORAGE_BROWSER)
-extern const base::Feature kIncognitoDynamicQuota;
-extern const base::FeatureParam<double> kIncognitoQuotaRatioLowerBound;
-extern const base::FeatureParam<double> kIncognitoQuotaRatioUpperBound;
-
-COMPONENT_EXPORT(STORAGE_BROWSER)
-extern const base::Feature kStoragePressureEvent;
+BASE_DECLARE_FEATURE(kIncognitoStaticStorageQuota);
 
 }  // namespace features
 
 }  // namespace storage
 
-#endif  // STORAGE_QUOTA_QUOTA_FEATURES_H_
+#endif  // STORAGE_BROWSER_QUOTA_QUOTA_FEATURES_H_

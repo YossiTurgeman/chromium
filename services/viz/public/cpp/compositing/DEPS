@@ -1,10 +1,14 @@
 include_rules = [
   "+cc",
+  "+gpu/command_buffer/client/client_shared_image.h",
   "+gpu/ipc",
   "+gpu/ipc/common",
   "+skia/public/mojom",
+  "+third_party/blink/public/common/tokens",
   "+third_party/skia/include",
   "+ui/gfx",
   "+ui/latency/mojom",
-  "+gpu/ipc/common/vulkan_ycbcr_info.h"
+  "+ui/gl",
+  "+gpu/vulkan/vulkan_ycbcr_info.h",
+  "+third_party/fuzztest/src/fuzztest/fuzztest.h"
 ]

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,29 +9,31 @@ import android.content.pm.ApplicationInfo;
 import android.os.PowerManager;
 
 import org.chromium.base.ApplicationStatus;
-import org.chromium.chrome.browser.AppHooks;
+import org.chromium.base.ContextUtils;
+import org.chromium.base.ServiceLoaderUtil;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.util.UUID;
 
 /** Delegates calls out from the OmahaClient. */
+@NullMarked
 public abstract class OmahaDelegateBase extends OmahaDelegate {
     private final ExponentialBackoffScheduler mScheduler;
-    private final Context mContext;
 
-    OmahaDelegateBase(Context context) {
-        mContext = context;
-        mScheduler = new ExponentialBackoffScheduler(OmahaBase.PREF_PACKAGE, context,
-                OmahaBase.MS_POST_BASE_DELAY, OmahaBase.MS_POST_MAX_DELAY);
-    }
-
-    @Override
-    Context getContext() {
-        return mContext;
+    OmahaDelegateBase() {
+        mScheduler =
+                new ExponentialBackoffScheduler(
+                        OmahaPrefUtils.PREF_PACKAGE,
+                        OmahaBase.MS_POST_BASE_DELAY,
+                        OmahaBase.MS_POST_MAX_DELAY);
     }
 
     @Override
     boolean isInSystemImage() {
-        return (getContext().getApplicationInfo().flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+        return (ContextUtils.getApplicationContext().getApplicationInfo().flags
+                        & ApplicationInfo.FLAG_SYSTEM)
+                != 0;
     }
 
     @Override
@@ -48,12 +50,15 @@ public abstract class OmahaDelegateBase extends OmahaDelegate {
     boolean isChromeBeingUsed() {
         if (!ApplicationStatus.hasVisibleActivities()) return false;
 
-        PowerManager powerManager = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
+        PowerManager powerManager =
+                (PowerManager)
+                        ContextUtils.getApplicationContext()
+                                .getSystemService(Context.POWER_SERVICE);
         return powerManager.isInteractive();
     }
 
     @Override
-    protected RequestGenerator createRequestGenerator(Context context) {
-        return AppHooks.get().createOmahaRequestGenerator();
+    protected @Nullable RequestGenerator createRequestGenerator() {
+        return ServiceLoaderUtil.maybeCreate(RequestGenerator.class);
     }
 }

@@ -1,5 +1,2 @@
-bsazonov@chromium.org
+file://components/signin/ANDROID_OWNERS
 treib@chromium.org
-
-# TEAM: chrome-signin@chromium.org
-# COMPONENT: Services>SignIn

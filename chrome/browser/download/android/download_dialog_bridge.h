@@ -1,27 +1,27 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_DOWNLOAD_ANDROID_DOWNLOAD_DIALOG_BRIDGE_H_
 #define CHROME_BROWSER_DOWNLOAD_ANDROID_DOWNLOAD_DIALOG_BRIDGE_H_
 
+#include <optional>
+
 #include "base/android/jni_android.h"
 #include "base/android/scoped_java_ref.h"
-#include "base/callback.h"
 #include "base/files/file_path.h"
-#include "base/optional.h"
+#include "base/functional/callback.h"
 #include "chrome/browser/download/download_dialog_types.h"
-#include "components/download/public/common/download_schedule.h"
-#include "ui/gfx/native_widget_types.h"
+#include "net/base/network_change_notifier.h"
+#include "ui/gfx/native_ui_types.h"
+
+class Profile;
 
 // Contains all the user selection from download dialogs.
 struct DownloadDialogResult {
   DownloadDialogResult();
   DownloadDialogResult(const DownloadDialogResult&);
   ~DownloadDialogResult();
-
-  // Results from download later dialog.
-  base::Optional<download::DownloadSchedule> download_schedule;
 
   // Results from download location dialog.
   DownloadLocationDialogResult location_result =
@@ -43,20 +43,20 @@ class DownloadDialogBridge {
   virtual ~DownloadDialogBridge();
 
   // Shows the download dialog.
-  virtual void ShowDialog(gfx::NativeWindow native_window,
-                          int64_t total_bytes,
-                          DownloadLocationDialogType dialog_type,
-                          const base::FilePath& suggested_path,
-                          bool supports_later_dialog,
-                          DialogCallback dialog_callback);
+  virtual void ShowDialog(
+      gfx::NativeWindow native_window,
+      int64_t total_bytes,
+      net::NetworkChangeNotifier::ConnectionType connection_type,
+      DownloadLocationDialogType dialog_type,
+      const base::FilePath& suggested_path,
+      Profile* profile,
+      DialogCallback dialog_callback);
 
   void OnComplete(JNIEnv* env,
-                  const base::android::JavaParamRef<jobject>& obj,
-                  const base::android::JavaParamRef<jstring>& returned_path,
-                  jboolean on_wifi,
-                  jlong start_time);
+                  const std::string& returned_path,
+                  bool did_user_confirm);
 
-  void OnCanceled(JNIEnv* env, const base::android::JavaParamRef<jobject>& obj);
+  void OnCanceled(JNIEnv* env);
 
  private:
   // Called when the user finished the selections from download dialog.

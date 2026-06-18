@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -53,6 +53,10 @@ int GetIDSForDMStatus(DeviceManagementStatus status) {
     case DM_STATUS_SERVICE_ARC_DISABLED:
       // This error is never shown on the UI.
       return IDS_POLICY_DM_STATUS_UNKNOWN_ERROR;
+    case DM_STATUS_SERVICE_TOO_MANY_REQUESTS:
+      return IDS_POLICY_DM_STATUS_SERVICE_TOO_MANY_REQUESTS;
+    case DM_STATUS_SERVICE_DEVICE_NEEDS_RESET:
+      return IDS_POLICY_DM_STATUS_SERVICE_DEVICE_NEEDS_RESET;
     case DM_STATUS_SERVICE_CONSUMER_ACCOUNT_WITH_PACKAGED_LICENSE:
       return IDS_POLICY_DM_STATUS_CONSUMER_ACCOUNT_WITH_PACKAGED_LICENSE;
     case DM_STATUS_SERVICE_ENTERPRISE_ACCOUNT_IS_NOT_ELIGIBLE_TO_ENROLL:
@@ -60,9 +64,14 @@ int GetIDSForDMStatus(DeviceManagementStatus status) {
     case DM_STATUS_SERVICE_ENTERPRISE_TOS_HAS_NOT_BEEN_ACCEPTED:
       // This is shown only on registration failed.
       return IDS_POLICY_DM_STATUS_UNKNOWN_ERROR;
+    case DM_STATUS_SERVICE_INVALID_PACKAGED_DEVICE_FOR_KIOSK:
+      return IDS_POLICY_DM_STATUS_INVALID_PACKAGED_DEVICE_FOR_KIOSK;
+    case DM_STATUS_SERVICE_ILLEGAL_ACCOUNT_FOR_PACKAGED_EDU_LICENSE:
+      return IDS_POLICY_DM_STATUS_SERVICE_DOMAIN_MISMATCH;
+    case DM_STATUS_SERVICE_ORG_UNIT_ENROLLMENT_LIMIT_EXCEEEDED:
+      return IDS_POLICY_DM_STATUS_ORG_UNIT_ENROLLMENT_LIMIT_EXCEEDED;
   }
   NOTREACHED() << "Unhandled DM status " << status;
-  return IDS_POLICY_DM_STATUS_UNKNOWN_ERROR;
 }
 
 int GetIDSForValidationStatus(CloudPolicyValidatorBase::Status status) {
@@ -101,7 +110,6 @@ int GetIDSForValidationStatus(CloudPolicyValidatorBase::Status status) {
       NOTREACHED();
   }
   NOTREACHED() << "Unhandled validation status " << status;
-  return IDS_POLICY_VALIDATION_UNKNOWN_ERROR;
 }
 
 int GetIDSForStoreStatus(CloudPolicyStore::Status status) {
@@ -123,22 +131,21 @@ int GetIDSForStoreStatus(CloudPolicyStore::Status status) {
       return IDS_POLICY_STORE_STATUS_BAD_STATE;
   }
   NOTREACHED() << "Unhandled store status " << status;
-  return IDS_POLICY_STORE_STATUS_UNKNOWN_ERROR;
 }
 
 }  // namespace
 
-base::string16 FormatDeviceManagementStatus(DeviceManagementStatus status) {
+std::u16string FormatDeviceManagementStatus(DeviceManagementStatus status) {
   return l10n_util::GetStringUTF16(GetIDSForDMStatus(status));
 }
 
-base::string16 FormatValidationStatus(
+std::u16string FormatValidationStatus(
     CloudPolicyValidatorBase::Status validation_status) {
   return l10n_util::GetStringUTF16(
       GetIDSForValidationStatus(validation_status));
 }
 
-base::string16 FormatStoreStatus(
+std::u16string FormatStoreStatus(
     CloudPolicyStore::Status store_status,
     CloudPolicyValidatorBase::Status validation_status) {
   if (store_status == CloudPolicyStore::STATUS_VALIDATION_ERROR) {

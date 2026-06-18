@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef CHROME_BROWSER_BITMAP_FETCHER_BITMAP_FETCHER_SERVICE_H_
@@ -7,10 +7,9 @@
 #include <memory>
 #include <vector>
 
-#include "base/callback_forward.h"
-#include "base/compiler_specific.h"
-#include "base/containers/mru_cache.h"
-#include "base/macros.h"
+#include "base/containers/lru_cache.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/bitmap_fetcher/bitmap_fetcher_delegate.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
@@ -33,12 +32,11 @@ class BitmapFetcherService : public KeyedService, public BitmapFetcherDelegate {
  public:
   typedef int RequestId;
   static const RequestId REQUEST_ID_INVALID = 0;
-  using BitmapFetchedCallback =
-      base::OnceCallback<void(const SkBitmap& bitmap)>;
+  using BitmapFetchedCallback = base::OnceCallback<void(SkBitmap bitmap)>;
 
   class Observer {
    public:
-    virtual ~Observer() {}
+    virtual ~Observer() = default;
 
     // Called whenever the image changes. Called with an empty image if the
     // fetch failed or the request ended for any reason.
@@ -48,6 +46,10 @@ class BitmapFetcherService : public KeyedService, public BitmapFetcherDelegate {
   };
 
   explicit BitmapFetcherService(content::BrowserContext* context);
+
+  BitmapFetcherService(const BitmapFetcherService&) = delete;
+  BitmapFetcherService& operator=(const BitmapFetcherService&) = delete;
+
   ~BitmapFetcherService() override;
 
   // Cancels a request, if it is still in-flight.
@@ -63,14 +65,6 @@ class BitmapFetcherService : public KeyedService, public BitmapFetcherDelegate {
 
   // Start fetching the image at the given |url|.
   void Prefetch(const GURL& url);
-
-  // Prepare the |shared_data_decoder_| for use. If it has either not been
-  // created yet, it will be created; if it is not bound (e.g. due to idle
-  // timeout), it will be bound. Calling this is optional, as invoking
-  // |RequestImage()| or |Prefetch()| will prepare the |shared_data_decoder_|.
-  // This is meant to help reduce latency if a caller knows they will need the
-  // decoder ahead of time.
-  void WakeupDecoder();
 
   // Return true if |url| is found in |cache_|. This will move the |url| to the
   // front of the recency list.
@@ -132,15 +126,13 @@ class BitmapFetcherService : public KeyedService, public BitmapFetcherDelegate {
 
     std::unique_ptr<const SkBitmap> bitmap;
   };
-  base::MRUCache<GURL, std::unique_ptr<CacheEntry>> cache_;
+  base::LRUCache<GURL, std::unique_ptr<CacheEntry>> cache_;
 
   // Current request ID to be used.
   int current_request_id_;
 
   // Browser context this service is active for.
-  content::BrowserContext* context_;
-
-  DISALLOW_COPY_AND_ASSIGN(BitmapFetcherService);
+  raw_ptr<content::BrowserContext> context_;
 };
 
 #endif  // CHROME_BROWSER_BITMAP_FETCHER_BITMAP_FETCHER_SERVICE_H_

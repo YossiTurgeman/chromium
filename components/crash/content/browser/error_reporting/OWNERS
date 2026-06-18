@@ -1,4 +1,6 @@
-iby@chromium.org
-mutexlox@chromium.org
+troywang@google.com
 
-# COMPONENT: Internals>CrashReporting
+# Backups. Explicitly copied from the parent OWNERS file so that
+# chrome/browser/error_reporting/OWNERS also sees them.
+thestig@chromium.org
+mark@chromium.org

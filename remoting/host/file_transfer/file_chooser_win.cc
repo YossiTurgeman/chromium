@@ -1,29 +1,33 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "remoting/host/file_transfer/file_chooser.h"
 
 #include <windows.h>
+
 #include <wtsapi32.h>
 
 #include <cstdlib>
 #include <utility>
+#include <variant>
+#include <vector>
 
-#include "base/bind.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/path_service.h"
 #include "base/process/launch.h"
-#include "base/threading/sequenced_task_runner_handle.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/win/object_watcher.h"
 #include "base/win/scoped_handle.h"
-#include "ipc/ipc_message_utils.h"
-#include "remoting/host/chromoting_param_traits.h"
-#include "remoting/host/chromoting_param_traits_impl.h"
+#include "mojo/public/cpp/bindings/message.h"
+#include "remoting/host/base/host_exit_codes.h"
+#include "remoting/host/base/switches.h"
 #include "remoting/host/file_transfer/file_chooser_common_win.h"
-#include "remoting/host/host_exit_codes.h"
-#include "remoting/host/switches.h"
+#include "remoting/host/mojom/desktop_session.mojom.h"
 
 namespace remoting {
 
@@ -100,6 +104,9 @@ class FileChooserWindows : public FileChooser,
   FileChooserWindows(scoped_refptr<base::SequencedTaskRunner> ui_task_runner,
                      ResultCallback callback);
 
+  FileChooserWindows(const FileChooserWindows&) = delete;
+  FileChooserWindows& operator=(const FileChooserWindows&) = delete;
+
   ~FileChooserWindows() override;
 
   // FileChooser implementation.
@@ -109,14 +116,12 @@ class FileChooserWindows : public FileChooser,
   void OnObjectSignaled(HANDLE object) override;
 
  private:
-  FileTransferResult<Monostate> LaunchChooserProcess();
+  FileTransferResult<std::monostate> LaunchChooserProcess();
 
   ResultCallback callback_;
   base::Process process_;
   base::win::ObjectWatcher object_watcher_;
   ScopedHandle pipe_read_;
-
-  DISALLOW_COPY_AND_ASSIGN(FileChooserWindows);
 };
 
 FileChooserWindows::FileChooserWindows(
@@ -125,10 +130,10 @@ FileChooserWindows::FileChooserWindows(
     : callback_(std::move(callback)) {}
 
 void FileChooserWindows::Show() {
-  FileTransferResult<Monostate> result = LaunchChooserProcess();
+  FileTransferResult<std::monostate> result = LaunchChooserProcess();
 
   if (!result) {
-    base::SequencedTaskRunnerHandle::Get()->PostTask(
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(std::move(callback_), std::move(result.error())));
   }
@@ -155,10 +160,10 @@ void FileChooserWindows::OnObjectSignaled(HANDLE object) {
   }
   process_.Close();
 
-  char raw_response[kFileChooserPipeBufferSize];
+  std::vector<uint8_t> response_bytes(kFileChooserPipeBufferSize);
   DWORD bytes_read;
-  if (!PeekNamedPipe(pipe_read_.Get(), raw_response, sizeof(raw_response),
-                     &bytes_read, nullptr, nullptr)) {
+  if (!PeekNamedPipe(pipe_read_.Get(), response_bytes.data(),
+                     response_bytes.size(), &bytes_read, nullptr, nullptr)) {
     PLOG(ERROR) << "Failed to read response from pipe";
     std::move(callback_).Run(MakeFileTransferError(
         FROM_HERE, protocol::FileTransfer_Error_Type_UNEXPECTED_ERROR,
@@ -166,10 +171,12 @@ void FileChooserWindows::OnObjectSignaled(HANDLE object) {
     return;
   }
 
+  mojo::Message serialized_message(base::span(response_bytes).first(bytes_read),
+                                   base::span<mojo::ScopedHandle>());
+
   FileChooser::Result result;
-  base::Pickle pickle(raw_response, bytes_read);
-  base::PickleIterator iterator(pickle);
-  if (!IPC::ReadParam(&pickle, &iterator, &result)) {
+  if (!mojom::FileChooserResult::DeserializeFromMessage(
+          std::move(serialized_message), &result)) {
     LOG(ERROR) << "Failed to deserialize response.";
     std::move(callback_).Run(MakeFileTransferError(
         FROM_HERE, protocol::FileTransfer_Error_Type_UNEXPECTED_ERROR));
@@ -179,7 +186,7 @@ void FileChooserWindows::OnObjectSignaled(HANDLE object) {
   std::move(callback_).Run(std::move(result));
 }
 
-FileTransferResult<Monostate> FileChooserWindows::LaunchChooserProcess() {
+FileTransferResult<std::monostate> FileChooserWindows::LaunchChooserProcess() {
   base::LaunchOptions launch_options;
 
   FileTransferResult<ScopedHandle> current_user =

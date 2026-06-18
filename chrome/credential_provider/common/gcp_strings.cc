@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,11 +34,12 @@ const wchar_t kUserEmail[] = L"email";
 const wchar_t kUserId[] = L"id";
 const wchar_t kUserPictureUrl[] = L"pic";
 
-// Username and password key for special GAIA account to run GLS.
+// Username, password and sid key for special GAIA account to run GLS.
 const wchar_t kDefaultGaiaAccountName[] = L"gaia";
 // L$ prefix means this secret can only be accessed locally.
 const wchar_t kLsaKeyGaiaUsername[] = L"L$GAIA_USERNAME";
 const wchar_t kLsaKeyGaiaPassword[] = L"L$GAIA_PASSWORD";
+const wchar_t kLsaKeyGaiaSid[] = L"L$GAIA_SID";
 
 // These two variables need to remain consistent.
 const wchar_t kDesktopName[] = L"Winlogon";
@@ -46,6 +47,8 @@ const wchar_t kDesktopFullName[] = L"WinSta0\\Winlogon";
 
 // Google Update related registry paths.
 #define GCPW_UPDATE_CLIENT_GUID L"{32987697-A14E-4B89-84D6-630D5431E831}"
+
+const wchar_t kGcpwUpdateClientGuid[] = GCPW_UPDATE_CLIENT_GUID;
 
 const wchar_t kRegUpdaterClientStateAppPath[] =
     L"SOFTWARE\\Google\\Update\\ClientState\\" GCPW_UPDATE_CLIENT_GUID;
@@ -56,6 +59,23 @@ const wchar_t kRegUninstallArgumentsField[] = L"UninstallArguments";
 const wchar_t kRegUsageStatsName[] = L"usagestats";
 const wchar_t kRegUpdateTracksName[] = L"ap";
 const wchar_t kRegVersionName[] = L"pv";
+
+const wchar_t kRegUninstall[] =
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+const wchar_t kRegUninstallProduct[] = L"GCPW";
+const wchar_t kRegUninstallString[] = L"UninstallString";
+const wchar_t kRegUninstallDisplayName[] = L"DisplayName";
+const wchar_t kRegInstallLocation[] = L"InstallLocation";
+const wchar_t kRegDisplayIcon[] = L"DisplayIcon";
+const wchar_t kRegNoModify[] = L"NoModify";
+const wchar_t kRegNoRepair[] = L"NoRepair";
+const wchar_t kRegPublisherName[] = L"Publisher";
+const wchar_t kRegVersion[] = L"Version";
+const wchar_t kRegDisplayVersion[] = L"DisplayVersion";
+const wchar_t kRegInstallDate[] = L"InstallDate";
+const wchar_t kRegVersionMajor[] = L"VersionMajor";
+const wchar_t kRegVersionMinor[] = L"VersionMinor";
+const wchar_t kRegPublisher[] = L"Google LLC";
 
 // Chrome is being opened to show the credential provider logon page.  This
 // page is always shown in incognito mode.
@@ -84,6 +104,9 @@ const char kGcpwAdditionalOauthScopes[] = "gcpw-additional-oauth-scopes";
 // The show_tos parameter is used to specify whether tos screen needs to be
 // shown as part of the login process or not.
 const char kShowTosSwitch[] = "show_tos";
+
+// Enables modal dialogs for GCPW.
+const char kEnableGcpwModalDialog[] = "enable-gcpw-modal-dialog";
 
 // Parameter appended to sign in URL to pass valid signin domains to the inline
 // login handler. These domains are separated by ','.

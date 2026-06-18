@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,20 +14,25 @@ import android.graphics.RectF;
 import android.text.TextPaint;
 import android.text.TextUtils;
 
-import androidx.annotation.Nullable;
+import androidx.annotation.ColorInt;
 import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.Log;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.embedder_support.util.UrlConstants;
 import org.chromium.components.embedder_support.util.UrlUtilities;
+import org.chromium.url.GURL;
 import org.chromium.url.URI;
 
+import java.text.BreakIterator;
 import java.util.Locale;
 
 /**
  * Generator for transparent icons containing a rounded rectangle with a given background color,
  * having a centered character drawn on top of it.
  */
+@NullMarked
 public class RoundedIconGenerator {
     private static final String TAG = "RoundedIconGenerator";
 
@@ -40,8 +45,7 @@ public class RoundedIconGenerator {
     private final Paint mBackgroundPaint;
     private final TextPaint mTextPaint;
 
-    private final float mTextHeight;
-    private final float mTextYOffset;
+    private final float mTextBaselineY;
 
     /**
      * Constructs the generator and initializes the common members based on the display density.
@@ -53,11 +57,18 @@ public class RoundedIconGenerator {
      * @param backgroundColor Color with which the rounded rectangle should be drawn.
      * @param textSizeDp Size at which the text should be drawn in dp.
      */
-    public RoundedIconGenerator(Resources res, int iconWidthDp, int iconHeightDp,
-            int cornerRadiusDp, int backgroundColor, int textSizeDp) {
-        this((int) (res.getDisplayMetrics().density * iconWidthDp),
+    public RoundedIconGenerator(
+            Resources res,
+            int iconWidthDp,
+            int iconHeightDp,
+            int cornerRadiusDp,
+            int backgroundColor,
+            int textSizeDp) {
+        this(
+                (int) (res.getDisplayMetrics().density * iconWidthDp),
                 (int) (res.getDisplayMetrics().density * iconHeightDp),
-                (int) (res.getDisplayMetrics().density * cornerRadiusDp), backgroundColor,
+                (int) (res.getDisplayMetrics().density * cornerRadiusDp),
+                backgroundColor,
                 res.getDisplayMetrics().density * textSizeDp);
     }
 
@@ -70,8 +81,12 @@ public class RoundedIconGenerator {
      * @param backgroundColor Color at which the rounded rectangle should be drawn.
      * @param textSizePx Size at which the text should be drawn in pixels.
      */
-    public RoundedIconGenerator(int iconWidthPx, int iconHeightPx, int cornerRadiusPx,
-            int backgroundColor, float textSizePx) {
+    public RoundedIconGenerator(
+            int iconWidthPx,
+            int iconHeightPx,
+            int cornerRadiusPx,
+            int backgroundColor,
+            float textSizePx) {
         mIconWidthPx = iconWidthPx;
         mIconHeightPx = iconHeightPx;
         mCornerRadiusPx = cornerRadiusPx;
@@ -85,17 +100,33 @@ public class RoundedIconGenerator {
         mTextPaint.setColor(Color.WHITE);
         mTextPaint.setFakeBoldText(true);
         mTextPaint.setTextSize(textSizePx);
+        mTextPaint.setTextAlign(Paint.Align.CENTER);
 
         FontMetrics textFontMetrics = mTextPaint.getFontMetrics();
-        mTextHeight = (float) Math.ceil(textFontMetrics.bottom - textFontMetrics.top);
-        mTextYOffset = -textFontMetrics.top;
+        // Font's top is above the baseline, so top is negative.
+        final float fontMaxHeight = textFontMetrics.bottom - textFontMetrics.top;
+
+        // Y value that centers the tallest bounding box vertically.
+        final float textTop = Math.max((mIconHeightPx - fontMaxHeight) / 2f, 0f);
+        mTextBaselineY = textTop - textFontMetrics.top;
+    }
+
+    /** Sets the background color to use when generating icons. */
+    public void setBackgroundColor(@ColorInt int color) {
+        mBackgroundPaint.setColor(color);
     }
 
     /**
-     * Sets the background color to use when generating icons.
+     * Gets the initial letter for the given text.
+     *
+     * <p>Can be more than character long for non-BMP characters.
      */
-    public void setBackgroundColor(int color) {
-        mBackgroundPaint.setColor(color);
+    @VisibleForTesting
+    static String getInitialLetter(String text) {
+        if (text.isEmpty()) return "";
+        BreakIterator iter = BreakIterator.getCharacterInstance();
+        iter.setText(text);
+        return text.substring(iter.first(), iter.next()).toUpperCase(Locale.getDefault());
     }
 
     /**
@@ -110,16 +141,22 @@ public class RoundedIconGenerator {
 
         canvas.drawRoundRect(mBackgroundRect, mCornerRadiusPx, mCornerRadiusPx, mBackgroundPaint);
 
-        int length = Math.min(1, text.length());
-        String displayText = text.substring(0, length).toUpperCase(Locale.getDefault());
-        float textWidth = mTextPaint.measureText(displayText);
-
-        canvas.drawText(displayText, (mIconWidthPx - textWidth) / 2f,
-                Math.round(
-                        (Math.max(mIconHeightPx, mTextHeight) - mTextHeight) / 2.0f + mTextYOffset),
-                mTextPaint);
+        String displayText = getInitialLetter(text);
+        // Using Align.CENTER, so X is in the middle of the icon.
+        canvas.drawText(displayText, mIconWidthPx / 2f, mTextBaselineY, mTextPaint);
 
         return icon;
+    }
+
+    /** {@link #generateIconForUrl(GURL, boolean)} */
+    @Deprecated // TODO(crbug.com/40549331): Use GURL-variant or #generateIconForText
+    public @Nullable Bitmap generateIconForUrl(String url, boolean includePrivateRegistries) {
+        if (TextUtils.isEmpty(url)) return null;
+
+        String text = getIconTextForUrl(url, includePrivateRegistries);
+        if (TextUtils.isEmpty(text)) return null;
+
+        return generateIconForText(text);
     }
 
     /**
@@ -129,14 +166,15 @@ public class RoundedIconGenerator {
      * @param includePrivateRegistries Should private registries be considered as TLDs?
      * @return The generated icon, or NULL if |url| is empty or the domain cannot be resolved.
      */
-    @Nullable
-    public Bitmap generateIconForUrl(String url, boolean includePrivateRegistries) {
-        if (TextUtils.isEmpty(url)) return null;
+    public @Nullable Bitmap generateIconForUrl(GURL url, boolean includePrivateRegistries) {
+        if (url == null) return null;
+        return generateIconForUrl(url.getSpec(), includePrivateRegistries);
+    }
 
-        String text = getIconTextForUrl(url, includePrivateRegistries);
-        if (TextUtils.isEmpty(text)) return null;
-
-        return generateIconForText(text);
+    /** {@link #generateIconForUrl(GURL)} */
+    @Deprecated // TODO(crbug.com/40549331): Use GURL-variant or #generateIconForText
+    public @Nullable Bitmap generateIconForUrl(String url) {
+        return generateIconForUrl(url, false);
     }
 
     /**
@@ -150,9 +188,8 @@ public class RoundedIconGenerator {
      * @param url URL for which the icon should be generated.
      * @return The generated icon, or NULL if |url| is empty or the domain cannot be resolved.
      */
-    @Nullable
-    public Bitmap generateIconForUrl(String url) {
-        return generateIconForUrl(url, false);
+    public @Nullable Bitmap generateIconForUrl(GURL url) {
+        return generateIconForUrl(url.getSpec(), false);
     }
 
     /**
@@ -163,9 +200,8 @@ public class RoundedIconGenerator {
      * @return The text to use on the rounded icon, or NULL if |url| is empty or the domain cannot
      *         be resolved.
      */
-    @Nullable
     @VisibleForTesting
-    public static String getIconTextForUrl(String url, boolean includePrivateRegistries) {
+    public static @Nullable String getIconTextForUrl(String url, boolean includePrivateRegistries) {
         String domain = UrlUtilities.getDomainAndRegistry(url, includePrivateRegistries);
         if (!TextUtils.isEmpty(domain)) return domain;
 

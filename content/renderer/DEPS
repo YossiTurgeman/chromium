@@ -4,10 +4,10 @@ include_rules = [
   # *********************************** NOTE ***********************************
   # If adding a new component dependency, email content/OWNERS first.
   # ****************************************************************************
+  "+components/content_settings/core/common",
   "+components/discardable_memory/client",
   "+components/metrics",
   "+components/metrics:single_sample_metrics",
-  "+components/payments",
   "+components/url_formatter",
   "+components/viz/client",
   "+components/viz/common",
@@ -16,14 +16,15 @@ include_rules = [
   # ****************************************************************************
 
   "+chromeos/system/core_scheduling.h",
+  "+components/webrtc",
   "+content/public/child",
   "+content/public/renderer",
   "+content/child",
+  "+content/services/auction_worklet",
   "+device/base/synchronization",
   "+device/gamepad/public/cpp",
   "+device/gamepad/public/mojom",
   "+gin",
-  "+jingle/glue",
   "+mojo",
   "+services",
   "-storage/browser",
@@ -31,8 +32,9 @@ include_rules = [
   "+third_party/webrtc_overrides",
   "+third_party/blink/public/common",
   "+third_party/blink/public/mojom",
+  "+ui/strings/grit/auto_image_annotation_strings.h",
   "+v8/include",
-  "+v8/src/third_party/vtune",
+  "+v8/third_party/vtune",
 ]
 
 specific_include_rules = {
@@ -40,23 +42,18 @@ specific_include_rules = {
     "+content/public/browser",
     "+content/shell",
   ],
-  "render_thread_impl_browsertest\.cc": [
+  "render_thread_impl_browsertest\\.cc": [
     "+content/app/mojo/mojo_init.h",
   ],
-  "render_thread_impl_discardable_memory_browsertest\.cc": [
+  "local_resource_url_loader_factory_unittest\\.cc": [
+    "+ui/base/resource",
+  ],
+  "render_thread_impl_discardable_memory_browsertest\\.cc": [
     "+components/discardable_memory/service",
     "+content/browser/browser_main_loop.h",
   ],
-  # TODO(crbug.com/734668): Dependencies on ozone should be removed, as content
-  # embedded in mus won't be able to talk to the native ozone.
-  "renderer_main\.cc": [
-    "+ui/ozone/public/client_native_pixmap_factory_ozone.h",
-  ],
-  ".*_(unit|pixel|perf)test.*\.cc": [
+  ".*_(unit|pixel|perf)test.*\\.cc": [
     "+components/viz/test",
     "+third_party/blink/renderer/platform/testing",
-  ],
-  "userspace_swap_renderer_initialization_impl.*": [
-   "+chromeos/memory/userspace_swap"
   ],
 }

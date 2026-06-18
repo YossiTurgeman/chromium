@@ -1,14 +1,22 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CONTENT_BROWSER_SCHEDULER_RESPONSIVENESS_WATCHER_H_
 #define CONTENT_BROWSER_SCHEDULER_RESPONSIVENESS_WATCHER_H_
 
+#include <stdint.h>
+
+#include <variant>
 #include <vector>
 
-#include "base/power_monitor/power_observer.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/ref_counted.h"
+#include "base/time/time.h"
 #include "content/browser/scheduler/responsiveness/metric_source.h"
+#include "content/common/content_export.h"
 
 namespace content {
 namespace responsiveness {
@@ -16,12 +24,17 @@ namespace responsiveness {
 class Calculator;
 
 class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
-                               public MetricSource::Delegate,
-                               public base::PowerObserver {
+                               public MetricSource::Delegate {
  public:
   Watcher();
   void SetUp();
   void Destroy();
+
+  // Must be invoked once-and-only-once, after SetUp(), the first time
+  // MainMessageLoopRun() reaches idle (i.e. done running all tasks queued
+  // during startup). This will be used as a signal for the true end of
+  // "startup" and the beginning of recording Browser.MainThreadsCongestion.
+  void OnFirstIdle();
 
  protected:
   friend class base::RefCounted<Watcher>;
@@ -45,15 +58,8 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
                              bool was_blocked_or_low_priority) override;
   void DidRunTaskOnIOThread(const base::PendingTask* task) override;
 
-  void WillRunEventOnUIThread(const void* opaque_identifier) override;
-  void DidRunEventOnUIThread(const void* opaque_identifier) override;
-
-  // base::PowerObserver interface implementation. The PowerObserver
-  // notifications are asynchronously callbacks on their registration sequence
-  // and may be delayed if there is a long queue of pending tasks to be
-  // executed.
-  void OnSuspend() override;
-  void OnResume() override;
+  void WillRunEventOnUIThread(uintptr_t opaque_identifier) override;
+  void DidRunEventOnUIThread(uintptr_t opaque_identifier) override;
 
  private:
   FRIEND_TEST_ALL_PREFIXES(ResponsivenessWatcherTest, TaskForwarding);
@@ -65,12 +71,15 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
   // Metadata for currently running tasks and events is needed to track whether
   // or not they caused reentrancy.
   struct Metadata {
-    explicit Metadata(const void* identifier,
+    explicit Metadata(uintptr_t identifier,
                       bool was_blocked_or_low_priority,
                       base::TimeTicks execution_start_time);
 
     // An opaque identifier for the task or event.
-    const void* const identifier;
+    //
+    // `identifier` is not a raw_ptr<...> for performance reasons (based on
+    // analysis of sampling profiler data and tab_search:top100:2020).
+    uintptr_t const identifier;
 
     // Whether the task was at some point in a queue that was blocked or low
     // priority.
@@ -91,9 +100,15 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
                    bool was_blocked_or_low_priority,
                    std::vector<Metadata>* currently_running_metadata);
 
+  // TODO(crbug.com/40287434): After the "ReduceCpuUtilization2" feature is
+  // cleaned up (~January 2025), remove the std::variant in favor of a
+  // base::FunctionRef.
+  using TaskOrEventFinishedSignature = void(base::TimeTicks,
+                                            base::TimeTicks,
+                                            base::TimeTicks);
+  using TaskOrEventFinishedCallback =
+      base::FunctionRef<TaskOrEventFinishedSignature>;
   // |callback| will either be synchronously invoked, or else never invoked.
-  using TaskOrEventFinishedCallback = base::OnceCallback<
-      void(base::TimeTicks, base::TimeTicks, base::TimeTicks)>;
   void DidRunTask(const base::PendingTask* task,
                   std::vector<Metadata>* currently_running_metadata,
                   int* mismatched_task_identifiers,
@@ -128,7 +143,9 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
   // thread sets |calculator_io_|. On destruction, this class first tears down
   // all consumers of |calculator_io_|, and then clears the member and destroys
   // Calculator.
-  Calculator* calculator_io_ = nullptr;
+  // `calculator_io_` is not a raw_ptr<...> because Calculator isn't supported
+  // in raw_ptr for performance reasons. See crbug.com/1287151.
+  RAW_PTR_EXCLUSION Calculator* calculator_io_ = nullptr;
 };
 
 }  // namespace responsiveness

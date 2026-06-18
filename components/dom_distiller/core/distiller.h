@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,17 +10,18 @@
 #include <map>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
 #include "components/dom_distiller/core/article_distillation_update.h"
 #include "components/dom_distiller/core/distiller_page.h"
 #include "components/dom_distiller/core/distiller_url_fetcher.h"
 #include "components/dom_distiller/core/proto/distilled_article.pb.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "url/gurl.h"
 
 namespace dom_distiller {
@@ -50,7 +51,7 @@ class Distiller {
 
 class DistillerFactory {
  public:
-  virtual std::unique_ptr<Distiller> CreateDistillerForUrl(const GURL& url) = 0;
+  virtual std::unique_ptr<Distiller> CreateDistiller() = 0;
   virtual ~DistillerFactory() = default;
 };
 
@@ -61,7 +62,7 @@ class DistillerFactoryImpl : public DistillerFactory {
       std::unique_ptr<DistillerURLFetcherFactory> distiller_url_fetcher_factory,
       const dom_distiller::proto::DomDistillerOptions& dom_distiller_options);
   ~DistillerFactoryImpl() override;
-  std::unique_ptr<Distiller> CreateDistillerForUrl(const GURL& url) override;
+  std::unique_ptr<Distiller> CreateDistiller() override;
 
  private:
   std::unique_ptr<DistillerURLFetcherFactory> distiller_url_fetcher_factory_;
@@ -82,8 +83,6 @@ class DistillerImpl : public Distiller {
                    const DistillationUpdateCallback& update_cb) override;
 
   void SetMaxNumPagesInArticle(size_t max_num_pages);
-
-  static bool DoesFetchImages();
 
   DistillerImpl(const DistillerImpl&) = delete;
   DistillerImpl& operator=(const DistillerImpl&) = delete;
@@ -156,7 +155,8 @@ class DistillerImpl : public Distiller {
   // state.
   const ArticleDistillationUpdate CreateDistillationUpdate() const;
 
-  const DistillerURLFetcherFactory& distiller_url_fetcher_factory_;
+  const raw_ref<const DistillerURLFetcherFactory>
+      distiller_url_fetcher_factory_;
   std::unique_ptr<DistillerPage> distiller_page_;
 
   dom_distiller::proto::DomDistillerOptions dom_distiller_options_;
@@ -174,7 +174,7 @@ class DistillerImpl : public Distiller {
   // Maps page numbers of pages under distillation to the indices in |pages_|.
   // If a page is |started_pages_| that means it is still waiting for an action
   // (distillation or image fetch) to finish.
-  std::unordered_map<int, size_t> started_pages_index_;
+  absl::flat_hash_map<int, size_t> started_pages_index_;
 
   // The list of pages that are still waiting for distillation to start.
   // This is a map, to make distiller prefer distilling lower page numbers
@@ -183,7 +183,7 @@ class DistillerImpl : public Distiller {
 
   // Set to keep track of which urls are already seen by the distiller. Used to
   // prevent distiller from distilling the same url twice.
-  std::unordered_set<std::string> seen_urls_;
+  absl::flat_hash_set<std::string> seen_urls_;
 
   size_t max_pages_in_article_;
 

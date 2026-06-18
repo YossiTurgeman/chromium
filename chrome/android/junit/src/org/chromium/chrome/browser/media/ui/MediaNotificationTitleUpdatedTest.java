@@ -1,30 +1,39 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.media.ui;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
-import static org.mockito.Mockito.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doCallRealMethod;
 
+import android.app.KeyguardManager;
 import android.app.Notification;
+import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
+import android.os.Looper;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
+import org.robolectric.shadows.ShadowKeyguardManager;
 import org.robolectric.shadows.ShadowNotification;
 
+import org.chromium.base.ContextUtils;
+import org.chromium.base.ScreenStateReceiver;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.media.ui.ChromeMediaNotificationControllerDelegate.ListenerService;
 import org.chromium.components.browser_ui.media.MediaNotificationController;
 import org.chromium.components.browser_ui.media.MediaSessionHelper;
+import org.chromium.content_public.browser.Visibility;
 import org.chromium.services.media_session.MediaMetadata;
 
 /**
@@ -32,10 +41,9 @@ import org.chromium.services.media_session.MediaMetadata;
  * MediaMetadata gets updated.
  */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE,
-        // Remove this after updating to a version of Robolectric that supports
-        // notification channel creation. crbug.com/774315
-        sdk = Build.VERSION_CODES.N_MR1, shadows = {MediaNotificationTestShadowResources.class})
+@Config(
+        manifest = Config.NONE,
+        shadows = {MediaNotificationTestShadowResources.class})
 public class MediaNotificationTitleUpdatedTest extends MediaNotificationTestBase {
     private static final int TAB_ID_1 = 1;
     private static final int TAB_ID_2 = 2;
@@ -45,6 +53,7 @@ public class MediaNotificationTitleUpdatedTest extends MediaNotificationTestBase
             MediaSessionHelper.HIDE_NOTIFICATION_DELAY_MILLIS;
 
     private MediaNotificationTestTabHolder mTabHolder;
+    private ShadowKeyguardManager mShadowKeyguardManager;
 
     @Before
     @Override
@@ -52,28 +61,33 @@ public class MediaNotificationTitleUpdatedTest extends MediaNotificationTestBase
         super.setUp();
 
         getController().mThrottler.mController = getController();
-        doCallRealMethod().when(getController()).onServiceStarted(any(ListenerService.class));
+        doCallRealMethod().when(getController()).onServiceStarted(any(MockListenerService.class));
         doCallRealMethod()
                 .when(mMockForegroundServiceUtils)
                 .startForegroundService(any(Intent.class));
         mTabHolder = createMediaNotificationTestTabHolder(TAB_ID_1, "about:blank", "title1");
+
+        KeyguardManager keyguardManager =
+                (KeyguardManager)
+                        RuntimeEnvironment.getApplication()
+                                .getSystemService(Context.KEYGUARD_SERVICE);
+        mShadowKeyguardManager = Shadows.shadowOf(keyguardManager);
+
+        ScreenStateReceiver.getInstance();
+        RobolectricUtil.runAllBackgroundAndUi();
+    }
+
+    @After
+    @Override
+    public void tearDown() {
+        super.tearDown();
+        ScreenStateReceiver.resetForTesting();
+        RobolectricUtil.runAllBackgroundAndUi();
     }
 
     @Test
     public void testSessionStatePlaying() {
         mTabHolder.simulateMediaSessionStateChanged(true, false);
-        assertEquals("title1", getDisplayedTitle());
-
-        mTabHolder.simulateTitleUpdated("title2");
-        advanceTimeByMillis(THROTTLE_MILLIS);
-        assertEquals("title2", getDisplayedTitle());
-    }
-
-    @Test
-    public void testSessionStatePausedAfterPlaying() {
-        mTabHolder.simulateMediaSessionStateChanged(true, false);
-        mTabHolder.simulateMediaSessionStateChanged(true, true);
-        advanceTimeByMillis(THROTTLE_MILLIS);
         assertEquals("title1", getDisplayedTitle());
 
         mTabHolder.simulateTitleUpdated("title2");
@@ -92,12 +106,96 @@ public class MediaNotificationTitleUpdatedTest extends MediaNotificationTestBase
     }
 
     @Test
-    public void testSessionStateUncontrollable() {
-        mTabHolder.simulateMediaSessionStateChanged(true, false);
+    public void testSessionStateUncontrollableAndHidden() {
+        mTabHolder.simulateVisibilityChange(Visibility.VISIBLE);
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ true, /* isSuspended= */ false);
         assertEquals("title1", getDisplayedTitle());
 
-        mTabHolder.simulateMediaSessionStateChanged(false, false);
-        mTabHolder.simulateTitleUpdated("title2");
+        mTabHolder.simulateVisibilityChange(Visibility.HIDDEN);
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ false, /* isSuspended= */ false);
+
+        // Should NOT be hidden immediately (delayed)
+        assertNotNull(getController().mMediaNotificationInfo);
+
+        advanceTimeByMillis(HIDE_NOTIFICATION_DELAY_MILLIS);
+        assertNull(getController().mMediaNotificationInfo);
+    }
+
+    @Test
+    public void testSessionStateUncontrollableAndLocked() {
+        mTabHolder.simulateVisibilityChange(Visibility.VISIBLE);
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ true, /* isSuspended= */ false);
+        assertEquals("title1", getDisplayedTitle());
+
+        mTabHolder.simulateVisibilityChange(Visibility.HIDDEN);
+        simulateScreenLock();
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ false, /* isSuspended= */ false);
+
+        // Should be hidden immediately
+        assertNull(getController().mMediaNotificationInfo);
+    }
+
+    @Test
+    public void testSessionStateUncontrollableAndLockedDelayed() {
+        mTabHolder.simulateVisibilityChange(Visibility.VISIBLE);
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ true, /* isSuspended= */ false);
+        assertEquals("title1", getDisplayedTitle());
+
+        mTabHolder.simulateVisibilityChange(Visibility.HIDDEN);
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ false, /* isSuspended= */ false);
+
+        // Should NOT be hidden immediately (delayed)
+        assertNotNull(getController().mMediaNotificationInfo);
+
+        // Lock the screen
+        simulateScreenLock();
+
+        // Should be hidden immediately
+        assertNull(getController().mMediaNotificationInfo);
+    }
+
+    @Test
+    public void testSessionStateControllableAndLocked() {
+        mTabHolder.simulateVisibilityChange(Visibility.VISIBLE);
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ true, /* isSuspended= */ false);
+        assertEquals("title1", getDisplayedTitle());
+
+        // Lock the screen, but remains controllable (e.g. background playback)
+        simulateScreenLock();
+        mTabHolder.simulateVisibilityChange(Visibility.HIDDEN);
+
+        // Should NOT be hidden
+        assertNotNull(getController().mMediaNotificationInfo);
+    }
+
+    private void simulateScreenLock() {
+        // Simulate the system state for screen off/locked
+        mShadowKeyguardManager.setKeyguardLocked(true);
+        ContextUtils.getApplicationContext().sendBroadcast(new Intent(Intent.ACTION_SCREEN_OFF));
+        Shadows.shadowOf(Looper.getMainLooper()).runToEndOfTasks();
+        RobolectricUtil.runAllBackgroundAndUi();
+    }
+
+    @Test
+    public void testSessionStateUncontrollableAndVisible() {
+        mTabHolder.simulateVisibilityChange(Visibility.VISIBLE);
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ true, /* isSuspended= */ false);
+        assertEquals("title1", getDisplayedTitle());
+
+        mTabHolder.simulateMediaSessionStateChanged(
+                /* isControllable= */ false, /* isSuspended= */ false);
+
+        // Should NOT be hidden immediately
+        assertNotNull(getController().mMediaNotificationInfo);
+
         advanceTimeByMillis(HIDE_NOTIFICATION_DELAY_MILLIS);
         assertNull(getController().mMediaNotificationInfo);
     }

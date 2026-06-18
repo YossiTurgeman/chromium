@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 
 #include "base/files/file_path.h"
-#include "base/macros.h"
 #include "base/memory/weak_ptr.h"
 #include "components/account_id/account_id.h"
 #include "components/policy/core/common/cloud/user_cloud_policy_store_base.h"
@@ -26,8 +25,6 @@ namespace policy {
 // Hence,
 //   (a) existing enumerated constants should never be deleted or reordered, and
 //   (b) new constants should only be appended at the end of the enumeration.
-//
-// Keep this in sync with EnterprisePolicyLoadStatus in histograms.xml.
 enum PolicyLoadStatusForUma {
   // Policy blob was successfully loaded and parsed.
   LOAD_RESULT_SUCCESS,
@@ -48,13 +45,13 @@ enum PolicyLoadStatusForUma {
 // Struct containing the result of a policy load - if |status| ==
 // LOAD_RESULT_SUCCESS, |policy| is initialized from the policy file on disk.
 // |key| is initialized from the signing key file on disk.
-// |skip_key_signature_validation| must remain false except if the policy being
-// loaded is from a secure location and no signing key file is provided.
+// |doing_key_rotation| is true if we need to re-download the key again when key
+// loaded from external place is different than the local one.
 struct PolicyLoadResult {
   PolicyLoadStatusForUma status;
   enterprise_management::PolicyFetchResponse policy;
   enterprise_management::PolicySigningKey key;
-  bool skip_key_signature_validation = false;
+  bool doing_key_rotation = false;
 };
 
 // Function that takes in a PolicyLoadResult and returns a PolicyLoadResult with
@@ -70,10 +67,12 @@ class POLICY_EXPORT DesktopCloudPolicyStore : public UserCloudPolicyStoreBase {
   DesktopCloudPolicyStore(
       const base::FilePath& policy_file,
       const base::FilePath& key_file,
+      const std::string& policy_type,
       PolicyLoadFilter policy_load_filter,
       scoped_refptr<base::SequencedTaskRunner> background_task_runner,
-      PolicyScope policy_scope,
-      PolicySource policy_source);
+      PolicyScope policy_scope);
+  DesktopCloudPolicyStore(const DesktopCloudPolicyStore&) = delete;
+  DesktopCloudPolicyStore& operator=(const DesktopCloudPolicyStore&) = delete;
   ~DesktopCloudPolicyStore() override;
 
   // Loads policy immediately on the current thread. Virtual for mocks.
@@ -86,6 +85,12 @@ class POLICY_EXPORT DesktopCloudPolicyStore : public UserCloudPolicyStoreBase {
   // CloudPolicyStore implementation.
   void Load() override;
   void Store(const enterprise_management::PolicyFetchResponse& policy) override;
+
+  // Reset `persisted_policy_key_` so that we can update signing key in the next
+  // policy fetch request. Not touching other signing key cache to reduce impact
+  // before key is updated.
+  // virtual for testing.
+  virtual void ResetPolicyKey();
 
  protected:
   // Loads cloud policies that have been written on the disk at |policy_path|
@@ -100,19 +105,19 @@ class POLICY_EXPORT DesktopCloudPolicyStore : public UserCloudPolicyStoreBase {
   void PolicyLoaded(bool validate_in_background,
                     PolicyLoadResult policy_load_result);
 
-  // Starts policy blob validation. |callback| is invoked once validation is
-  // complete. If |validate_in_background| is true, then the validation work
-  // occurs on a background thread (results are sent back to the calling
-  // thread).
+  // Starts policy blob validation. |callback| is invoked once
+  // validation is complete. If |validate_in_background| is true, then the
+  // validation work occurs on a background thread (results are sent back to the
+  // calling thread).
   virtual void Validate(
       std::unique_ptr<enterprise_management::PolicyFetchResponse> policy,
       std::unique_ptr<enterprise_management::PolicySigningKey> key,
       bool validate_in_background,
-      UserCloudPolicyValidator::CompletionCallback callback) = 0;
+      CloudPolicyValidatorBase::CompletionCallback callback) = 0;
 
   // Validate the |cached_key| with the |owning_domain|.
   void ValidateKeyAndSignature(
-      UserCloudPolicyValidator* validator,
+      CloudPolicyValidatorBase* validator,
       const enterprise_management::PolicySigningKey* cached_key,
       const std::string& owning_domain);
 
@@ -120,10 +125,10 @@ class POLICY_EXPORT DesktopCloudPolicyStore : public UserCloudPolicyStoreBase {
   // finished.
   void InstallLoadedPolicyAfterValidation(bool doing_key_rotation,
                                           const std::string& signing_key,
-                                          UserCloudPolicyValidator* validator);
+                                          CloudPolicyValidatorBase* validator);
 
   // Callback invoked to store the policy after validation has finished.
-  void OnPolicyToStoreValidated(UserCloudPolicyValidator* validator);
+  void OnPolicyToStoreValidated(CloudPolicyValidatorBase* validator);
 
  private:
   // Loads cloud policies that have been written on the disk at |policy_path|
@@ -153,8 +158,6 @@ class POLICY_EXPORT DesktopCloudPolicyStore : public UserCloudPolicyStoreBase {
 
   // WeakPtrFactory used to create callbacks for validating and storing policy.
   base::WeakPtrFactory<DesktopCloudPolicyStore> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(DesktopCloudPolicyStore);
 };
 
 // Implements a cloud policy store that is stored in a simple file in the user's
@@ -173,12 +176,21 @@ class POLICY_EXPORT UserCloudPolicyStore : public DesktopCloudPolicyStore {
   UserCloudPolicyStore(
       const base::FilePath& policy_file,
       const base::FilePath& key_file,
+      const std::string& policy_type,
       scoped_refptr<base::SequencedTaskRunner> background_task_runner);
+  UserCloudPolicyStore(const UserCloudPolicyStore&) = delete;
+  UserCloudPolicyStore& operator=(const UserCloudPolicyStore&) = delete;
   ~UserCloudPolicyStore() override;
 
   // Factory method for creating a UserCloudPolicyStore for a profile with path
   // |profile_path|.
   static std::unique_ptr<UserCloudPolicyStore> Create(
+      const base::FilePath& profile_path,
+      scoped_refptr<base::SequencedTaskRunner> background_task_runner);
+
+  // Factory method for creating a UserCloudPolicyStore for extension install
+  // policy with path |profile_path|.
+  static std::unique_ptr<UserCloudPolicyStore> CreateForExtensionInstall(
       const base::FilePath& profile_path,
       scoped_refptr<base::SequencedTaskRunner> background_task_runner);
 
@@ -189,16 +201,15 @@ class POLICY_EXPORT UserCloudPolicyStore : public DesktopCloudPolicyStore {
   void SetSigninAccountId(const AccountId& account_id);
 
  private:
+  // DesktopCloudPolicyStore impl:
   void Validate(
       std::unique_ptr<enterprise_management::PolicyFetchResponse> policy,
       std::unique_ptr<enterprise_management::PolicySigningKey> key,
       bool validate_in_background,
-      UserCloudPolicyValidator::CompletionCallback callback) override;
+      CloudPolicyValidatorBase::CompletionCallback callback) override;
 
   // The account id from signin for validation of the policy.
   AccountId account_id_;
-
-  DISALLOW_COPY_AND_ASSIGN(UserCloudPolicyStore);
 };
 
 }  // namespace policy

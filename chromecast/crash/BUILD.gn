@@ -1,4 +1,4 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -12,7 +12,8 @@ cast_source_set("build_info") {
   ]
 
   deps = [
-      "//chromecast/base:cast_version",
+    "//base",
+    "//chromecast/base:cast_version",
   ]
 }
 
@@ -35,7 +36,7 @@ cast_source_set("crash_storage") {
       "//chromecast/crash/fuchsia",
     ]
 
-    public_deps = [ "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.feedback" ]
+    public_deps = [ "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp" ]
   } else {
     sources += [
       "cast_crash_storage.cc",
@@ -65,25 +66,35 @@ cast_source_set("crash") {
     sources += [
       "cast_crashdump_uploader.cc",
       "cast_crashdump_uploader.h",
-      "linux/crash_util.cc",
-      "linux/crash_util.h",
-      "linux/dummy_minidump_generator.cc",
-      "linux/dummy_minidump_generator.h",
-      "linux/dump_info.cc",
-      "linux/dump_info.h",
-      "linux/minidump_generator.h",
-      "linux/minidump_params.cc",
-      "linux/minidump_params.h",
-      "linux/minidump_uploader.cc",
-      "linux/minidump_uploader.h",
-      "linux/minidump_writer.cc",
-      "linux/minidump_writer.h",
-      "linux/synchronized_minidump_manager.cc",
-      "linux/synchronized_minidump_manager.h",
+      "libcurl_wrapper.cc",
+      "libcurl_wrapper.h",
     ]
+
+    if (is_linux || is_chromeos) {
+      sources += [
+        "linux/crash_util.cc",
+        "linux/crash_util.h",
+        "linux/dummy_minidump_generator.cc",
+        "linux/dummy_minidump_generator.h",
+        "linux/dump_info.cc",
+        "linux/dump_info.h",
+        "linux/minidump_generator.h",
+        "linux/minidump_params.cc",
+        "linux/minidump_params.h",
+        "linux/minidump_uploader.cc",
+        "linux/minidump_uploader.h",
+        "linux/minidump_writer.cc",
+        "linux/minidump_writer.h",
+        "linux/synchronized_minidump_manager.cc",
+        "linux/synchronized_minidump_manager.h",
+      ]
+
+      deps += [ "//base:i18n" ]
+    }
 
     deps += [
       ":build_info",
+      "//chromecast:chromecast_buildflags",
       "//chromecast/base",
       "//chromecast/base:cast_sys_info_util",
       "//chromecast/base:cast_version",
@@ -97,7 +108,10 @@ cast_source_set("crash") {
 
 if (!is_fuchsia) {
   cast_executable("crash_uploader") {
-    sources = [ "linux/crash_uploader.cc" ]
+    sources = []
+    if (is_linux || is_chromeos) {
+      sources += [ "linux/crash_uploader.cc" ]
+    }
 
     deps = [
       ":crash",
@@ -111,10 +125,13 @@ if (!is_fuchsia) {
   }
 
   cast_source_set("test_support") {
-    sources = [
-      "linux/crash_testing_utils.cc",
-      "linux/crash_testing_utils.h",
-    ]
+    sources = []
+    if (is_linux || is_chromeos) {
+      sources += [
+        "linux/crash_testing_utils.cc",
+        "linux/crash_testing_utils.h",
+      ]
+    }
 
     deps = [
       ":crash",
@@ -124,45 +141,47 @@ if (!is_fuchsia) {
   }
 }
 
-test("cast_crash_unittests") {
-  if (is_fuchsia) {
-    sources = [ "fuchsia/cast_crash_storage_impl_fuchsia_unittest.cc" ]
+if (!is_android) {
+  test("cast_crash_unittests") {
+    if (is_fuchsia) {
+      sources = [ "fuchsia/cast_crash_storage_impl_fuchsia_unittest.cc" ]
 
-    deps = [
-      ":crash_storage",
-      "//base",
-      "//base/test:run_all_unittests",
-      "//base/test:test_support",
-      "//chromecast/crash/fuchsia",
-      "//testing/gmock",
-      "//testing/gtest",
-    ]
-  } else if (is_linux || is_chromeos) {
-    sources = [
-      "build_info_unittest.cc",
-      "cast_crashdump_uploader_unittest.cc",
-      "linux/dummy_minidump_generator_unittest.cc",
-      "linux/dump_info_unittest.cc",
-      "linux/minidump_uploader_unittest.cc",
-      "linux/minidump_writer_unittest.cc",
-      "linux/synchronized_minidump_manager_unittest.cc",
-    ]
+      deps = [
+        ":crash_storage",
+        "//base",
+        "//base/test:run_all_unittests",
+        "//base/test:test_support",
+        "//chromecast/crash/fuchsia",
+        "//testing/gmock",
+        "//testing/gtest",
+      ]
+    } else if (is_linux || is_chromeos) {
+      sources = [
+        "build_info_unittest.cc",
+        "cast_crashdump_uploader_unittest.cc",
+        "linux/dummy_minidump_generator_unittest.cc",
+        "linux/dump_info_unittest.cc",
+        "linux/minidump_uploader_unittest.cc",
+        "linux/minidump_writer_unittest.cc",
+        "linux/synchronized_minidump_manager_unittest.cc",
+      ]
 
-    deps = [
-      ":build_info",
-      ":crash",
-      ":test_support",
-      "//base",
-      "//base/test:run_all_unittests",
-      "//base/test:test_support",
-      "//chromecast/base:cast_version",
-      "//chromecast/base:dummy_cast_sys_info",
-      "//chromecast/base:test_support",
-      "//components/metrics",
-      "//components/prefs:test_support",
-      "//testing/gmock",
-      "//testing/gtest",
-      "//third_party/breakpad:client",
-    ]
+      deps = [
+        ":build_info",
+        ":crash",
+        ":test_support",
+        "//base",
+        "//base/test:run_all_unittests",
+        "//base/test:test_support",
+        "//chromecast/base:cast_version",
+        "//chromecast/base:dummy_cast_sys_info",
+        "//chromecast/base:test_support",
+        "//components/metrics",
+        "//components/prefs:test_support",
+        "//testing/gmock",
+        "//testing/gtest",
+        "//third_party/breakpad:client",
+      ]
+    }
   }
 }

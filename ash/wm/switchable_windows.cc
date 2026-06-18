@@ -1,29 +1,34 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ash/wm/switchable_windows.h"
 
+#include <algorithm>
 #include <array>
 
-#include "ash/public/cpp/ash_features.h"
 #include "ash/public/cpp/shell_window_ids.h"
 #include "ash/wm/desks/desks_util.h"
-#include "base/stl_util.h"
 #include "ui/aura/window.h"
 
 namespace ash {
 
 namespace {
 
-constexpr std::array<int, 6> kSwitchableContainers = {
-    kShellWindowId_DefaultContainerDeprecated,
-    kShellWindowId_DeskContainerB,
-    kShellWindowId_DeskContainerC,
-    kShellWindowId_DeskContainerD,
+constexpr std::array<int, 4> kSwitchableContainers = {
     kShellWindowId_AlwaysOnTopContainer,
+    kShellWindowId_FloatContainer,
     kShellWindowId_PipContainer,
+    kShellWindowId_LiveCaptionContainer,
 };
+
+std::vector<int> GetSwitchableContainerIds() {
+  std::vector<int> ids = desks_util::GetDesksContainersIds();
+  for (const int id : kSwitchableContainers)
+    ids.emplace_back(id);
+
+  return ids;
+}
 
 }  // namespace
 
@@ -41,7 +46,7 @@ std::vector<aura::Window*> GetSwitchableContainersForRoot(
     return containers;
   }
 
-  for (const auto& id : kSwitchableContainers) {
+  for (const auto& id : GetSwitchableContainerIds()) {
     auto* container = root->GetChildById(id);
     DCHECK(container);
     containers.push_back(container);
@@ -54,9 +59,8 @@ std::vector<aura::Window*> GetSwitchableContainersForRoot(
 bool IsSwitchableContainer(const aura::Window* window) {
   if (!window)
     return false;
-  const int shell_window_id = window->id();
 
-  return base::Contains(kSwitchableContainers, shell_window_id);
+  return std::ranges::contains(GetSwitchableContainerIds(), window->GetId());
 }
 
 }  // namespace ash

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/small_map.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "gpu/command_buffer/service/context_group.h"
 #include "gpu/command_buffer/service/gl_utils.h"
@@ -42,6 +45,7 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
     virtual GLsizei samples() const = 0;
     virtual GLuint object_name() const = 0;
     virtual GLint level() const = 0;
+    virtual GLenum target() const = 0;
     virtual bool cleared() const = 0;
     virtual void SetCleared(
         RenderbufferManager* renderbuffer_manager,
@@ -54,6 +58,7 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
     virtual bool IsRenderbuffer(Renderbuffer* renderbuffer) const = 0;
     virtual bool IsSameAttachment(const Attachment* attachment) const = 0;
     virtual bool Is3D() const = 0;
+    virtual GLint layer() const;
 
     // If it's a 3D texture attachment, return true if
     // FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER is smaller than the number of
@@ -68,9 +73,9 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
     virtual size_t GetSignatureSize(TextureManager* texture_manager) const = 0;
     virtual void AddToSignature(
         TextureManager* texture_manager, std::string* signature) const = 0;
-    virtual bool FormsFeedbackLoop(
-        TextureRef* texture, GLint level, GLint layer) const = 0;
-    virtual bool EmulatingRGB() const = 0;
+    virtual bool FormsFeedbackLoop(TextureRef* texture,
+                                   GLint level,
+                                   GLint layer) const = 0;
 
    protected:
     friend class base::RefCounted<Attachment>;
@@ -78,6 +83,9 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
   };
 
   Framebuffer(FramebufferManager* manager, GLuint service_id);
+
+  Framebuffer(const Framebuffer&) = delete;
+  Framebuffer& operator=(const Framebuffer&) = delete;
 
   GLuint service_id() const {
     return service_id_;
@@ -89,7 +97,7 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
   bool HasSRGBAttachments() const;
   bool HasDepthStencilFormatAttachment() const;
 
-  void ClearUnclearedIntOr3DTexturesOrPartiallyClearedTextures(
+  bool ClearUnclearedIntOr3DTexturesOrPartiallyClearedTextures(
       GLES2Decoder* decoder,
       TextureManager* texture_manager);
 
@@ -108,6 +116,9 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
   // 'unbind_attachments_on_bound_render_fbo_delete'.  The Framebuffer must be
   // bound when calling this.
   void DoUnbindGLAttachmentsForWorkaround(GLenum target);
+
+  // Re-attaches all current attachments for recreateFbo workaround.
+  void ReattachAttachments(GLenum framebuffer_target);
 
   // Attaches a renderbuffer to a particlar attachment.
   // Pass null to detach.
@@ -165,6 +176,7 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
   // returns 0.
   GLenum GetReadBufferTextureType() const;
   bool GetReadBufferIsMultisampledTexture() const;
+  bool GetReadBufferIsMultisampledRenderbuffer() const;
 
   // Verify all the rules in OpenGL ES 2.0.25 4.4.5 are followed.
   // Returns GL_FRAMEBUFFER_COMPLETE if there are no reasons we know we can't
@@ -183,7 +195,7 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
 
   GLenum GetDrawBuffer(GLenum draw_buffer) const;
 
-  void SetDrawBuffers(GLsizei n, const GLenum* bufs);
+  void SetDrawBuffers(base::span<const GLenum> bufs);
 
   // If a color buffer is attached to GL_COLOR_ATTACHMENTi, enable that
   // draw buffer for glClear().
@@ -238,6 +250,7 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
 
  private:
   friend class FramebufferManager;
+  void set_service_id(GLuint id) { service_id_ = id; }
   friend class base::RefCounted<Framebuffer>;
 
   ~Framebuffer();
@@ -272,7 +285,7 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
   void AdjustDrawBuffersImpl(uint32_t desired_mask);
 
   // The managers that owns this.
-  FramebufferManager* manager_;
+  raw_ptr<FramebufferManager> manager_;
 
   bool deleted_;
 
@@ -286,17 +299,18 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
   unsigned framebuffer_complete_state_count_id_;
 
   // A map of attachments.
-  typedef std::unordered_map<GLenum, scoped_refptr<Attachment>> AttachmentMap;
+  using AttachmentMap =
+      base::small_map<std::unordered_map<GLenum, scoped_refptr<Attachment>>, 8>;
   AttachmentMap attachments_;
 
   // User's draw buffers setting through DrawBuffers() call.
-  std::unique_ptr<GLenum[]> draw_buffers_;
+  base::HeapArray<GLenum> draw_buffers_;
 
   // If a draw buffer does not have an image, or it has no corresponding
   // fragment shader output variable, it might be filtered out as NONE.
   // Note that the actually draw buffers setting sent to the driver is always
   // consistent with |adjusted_draw_buffers_|, not |draw_buffers_|.
-  std::unique_ptr<GLenum[]> adjusted_draw_buffers_;
+  base::HeapArray<GLenum> adjusted_draw_buffers_;
 
   // Draw buffer base types: FLOAT, INT, or UINT.
   // We have up to 16 draw buffers, each is encoded into 2 bits, total 32 bits:
@@ -314,8 +328,6 @@ class GPU_GLES2_EXPORT Framebuffer : public base::RefCounted<Framebuffer> {
   GLsizei last_color_attachment_id_;
 
   GLenum read_buffer_;
-
-  DISALLOW_COPY_AND_ASSIGN(Framebuffer);
 };
 
 struct DecoderFramebufferState {
@@ -339,6 +351,10 @@ class GPU_GLES2_EXPORT FramebufferManager {
       uint32_t max_draw_buffers,
       uint32_t max_color_attachments,
       FramebufferCompletenessCache* framebuffer_combo_complete_cache);
+
+  FramebufferManager(const FramebufferManager&) = delete;
+  FramebufferManager& operator=(const FramebufferManager&) = delete;
+
   ~FramebufferManager();
 
   // Must call before destruction.
@@ -356,6 +372,9 @@ class GPU_GLES2_EXPORT FramebufferManager {
   // Gets a client id for a given service id.
   bool GetClientId(GLuint service_id, GLuint* client_id) const;
 
+  // Recreates the service ID for a framebuffer (allocates new, deletes old).
+  void RecreateFramebufferServiceId(Framebuffer* framebuffer);
+
   void MarkAttachmentsAsCleared(
     Framebuffer* framebuffer,
     RenderbufferManager* renderbuffer_manager,
@@ -364,6 +383,12 @@ class GPU_GLES2_EXPORT FramebufferManager {
   void MarkAsComplete(Framebuffer* framebuffer);
 
   bool IsComplete(const Framebuffer* framebuffer);
+
+  std::vector<std::pair<scoped_refptr<Framebuffer>, GLenum>>
+  GetBindingFramebuffersForTexture(TextureRef* texture_ref);
+
+  std::vector<std::pair<scoped_refptr<Framebuffer>, GLenum>>
+  GetBindingFramebuffersForRenderbuffer(Renderbuffer* renderbuffer);
 
   void IncFramebufferStateChangeCount() {
     // make sure this is never 0.
@@ -398,9 +423,7 @@ class GPU_GLES2_EXPORT FramebufferManager {
   uint32_t max_draw_buffers_;
   uint32_t max_color_attachments_;
 
-  FramebufferCompletenessCache* framebuffer_combo_complete_cache_;
-
-  DISALLOW_COPY_AND_ASSIGN(FramebufferManager);
+  raw_ptr<FramebufferCompletenessCache> framebuffer_combo_complete_cache_;
 };
 
 }  // namespace gles2

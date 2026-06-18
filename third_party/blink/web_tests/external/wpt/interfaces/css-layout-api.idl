@@ -9,22 +9,19 @@ partial namespace CSS {
 
 [Global=(Worklet,LayoutWorklet),Exposed=LayoutWorklet]
 interface LayoutWorkletGlobalScope : WorkletGlobalScope {
-    void registerLayout(DOMString name, VoidFunction layoutCtor);
+    undefined registerLayout(DOMString name, VoidFunction layoutCtor);
 };
 
-[Exposed=LayoutWorklet]
 dictionary LayoutOptions {
   ChildDisplayType childDisplay = "block";
   LayoutSizingMode sizing = "block-like";
 };
 
-[Exposed=LayoutWorklet]
 enum ChildDisplayType {
     "block", // default - "blockifies" the child boxes.
     "normal",
 };
 
-[Exposed=LayoutWorklet]
 enum LayoutSizingMode {
     "block-like", // default - Sizing behaves like block containers.
     "manual", // Sizing is specified by the web developer.
@@ -134,8 +131,9 @@ dictionary FragmentResultOptions {
     BreakTokenOptions breakToken = null;
 };
 
-[Constructor(optional FragmentResultOptions options)]
+[Exposed=LayoutWorklet]
 interface FragmentResult {
+    constructor(optional FragmentResultOptions options = {});
     readonly attribute double inlineSize;
     readonly attribute double blockSize;
 };

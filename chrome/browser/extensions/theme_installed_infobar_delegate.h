@@ -1,38 +1,50 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_EXTENSIONS_THEME_INSTALLED_INFOBAR_DELEGATE_H_
 #define CHROME_BROWSER_EXTENSIONS_THEME_INSTALLED_INFOBAR_DELEGATE_H_
 
+#include <memory>
 #include <string>
 
-#include "base/callback.h"
-#include "base/compiler_specific.h"
+#include "base/scoped_observation.h"
 #include "chrome/browser/themes/theme_service.h"
+#include "chrome/browser/themes/theme_service_observer.h"
 #include "components/infobars/core/confirm_infobar_delegate.h"
-#include "content/public/browser/notification_observer.h"
-#include "content/public/browser/notification_registrar.h"
 #include "extensions/common/extension_id.h"
 #include "third_party/skia/include/core/SkColor.h"
 
-class InfoBarService;
+namespace infobars {
+class ContentInfoBarManager;
+}
+
+class Profile;
 
 // When a user installs a theme, we display it immediately, but provide an
 // infobar allowing them to cancel.
 class ThemeInstalledInfoBarDelegate : public ConfirmInfoBarDelegate,
-                                      public content::NotificationObserver {
+                                      public ThemeServiceObserver {
  public:
-  // Creates a theme installed infobar and delegate and adds the infobar to
-  // |infobar_service|, replacing any previous theme infobar.
-  static void Create(
-      InfoBarService* infobar_service,
-      ThemeService* theme_service,
+  // This method does nothing if there is no tabbed browser open for `profile`.
+  static void CreateForLastActiveTab(
+      Profile* profile,
       const std::string& theme_name,
       const std::string& theme_id,
       std::unique_ptr<ThemeService::ThemeReinstaller> prev_theme_reinstaller);
 
  private:
+  friend class InfoBarUiTest;
+
+  // Creates a theme installed infobar and delegate and adds the infobar to
+  // `infobar_manager`, replacing any previous theme infobar.
+  static void Create(
+      infobars::ContentInfoBarManager* infobar_manager,
+      ThemeService* theme_service,
+      const std::string& theme_name,
+      const std::string& theme_id,
+      std::unique_ptr<ThemeService::ThemeReinstaller> prev_theme_reinstaller);
+
   ThemeInstalledInfoBarDelegate(
       ThemeService* theme_service,
       const std::string& theme_name,
@@ -44,17 +56,13 @@ class ThemeInstalledInfoBarDelegate : public ConfirmInfoBarDelegate,
   infobars::InfoBarDelegate::InfoBarIdentifier GetIdentifier() const override;
   const gfx::VectorIcon& GetVectorIcon() const override;
   ThemeInstalledInfoBarDelegate* AsThemePreviewInfobarDelegate() override;
-  base::string16 GetMessageText() const override;
+  std::u16string GetMessageText() const override;
   int GetButtons() const override;
-  base::string16 GetButtonLabel(InfoBarButton button) const override;
+  std::u16string GetButtonLabel(InfoBarButton button) const override;
   bool Cancel() override;
 
-  // content::NotificationObserver:
-  void Observe(int type,
-               const content::NotificationSource& source,
-               const content::NotificationDetails& details) override;
-
-  ThemeService* theme_service_;
+  // ThemeServiceObserver:
+  void OnThemeChanged() override;
 
   // Name of theme that's just been installed.
   std::string theme_name_;
@@ -65,8 +73,8 @@ class ThemeInstalledInfoBarDelegate : public ConfirmInfoBarDelegate,
   // Used to undo theme install.
   std::unique_ptr<ThemeService::ThemeReinstaller> prev_theme_reinstaller_;
 
-  // Registers and unregisters us for notifications.
-  content::NotificationRegistrar registrar_;
+  base::ScopedObservation<ThemeService, ThemeServiceObserver>
+      theme_observation_{this};
 };
 
 #endif  // CHROME_BROWSER_EXTENSIONS_THEME_INSTALLED_INFOBAR_DELEGATE_H_

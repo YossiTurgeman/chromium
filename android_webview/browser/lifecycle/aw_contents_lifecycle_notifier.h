@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,8 @@
 
 #include "android_webview/browser/lifecycle/webview_app_state_observer.h"
 #include "base/android/jni_android.h"
-#include "base/callback.h"
-#include "base/callback_forward.h"
-#include "base/macros.h"
-#include "base/no_destructor.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_forward.h"
 #include "base/observer_list.h"
 #include "base/sequence_checker.h"
 
@@ -34,11 +32,17 @@ class AwContentsLifecycleNotifier {
   };
 
   static AwContentsLifecycleNotifier& GetInstance();
+  static void InitForTesting();
 
   // The |onLoseForegroundCallback| will be invoked after all observers when app
   // lose foreground.
   explicit AwContentsLifecycleNotifier(
       OnLoseForegroundCallback on_lose_foreground_callback);
+
+  AwContentsLifecycleNotifier(const AwContentsLifecycleNotifier&) = delete;
+  AwContentsLifecycleNotifier& operator=(const AwContentsLifecycleNotifier&) =
+      delete;
+
   virtual ~AwContentsLifecycleNotifier();
 
   void OnWebViewCreated(const AwContents* aw_contents);
@@ -61,14 +65,14 @@ class AwContentsLifecycleNotifier {
   struct AwContentsData {
     AwContentsData();
     AwContentsData(AwContentsData&& data);
+
+    AwContentsData(const AwContentsData&) = delete;
+
     ~AwContentsData();
 
     bool attached_to_window = false;
     bool window_visible = false;
     AwContentsState aw_content_state = AwContentsState::kDetached;
-
-   private:
-    DISALLOW_COPY(AwContentsData);
   };
 
   friend class TestAwContentsLifecycleNotifier;
@@ -104,9 +108,9 @@ class AwContentsLifecycleNotifier {
   WebViewAppStateObserver::State app_state_ =
       WebViewAppStateObserver::State::kDestroyed;
 
-  SEQUENCE_CHECKER(sequence_checker_);
+  base::android::ScopedJavaGlobalRef<jobject> java_ref_;
 
-  DISALLOW_COPY_AND_ASSIGN(AwContentsLifecycleNotifier);
+  SEQUENCE_CHECKER(sequence_checker_);
 };
 
 }  // namespace android_webview

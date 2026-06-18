@@ -1,8 +1,4 @@
-yosin@chromium.org
-xiaochengh@chromium.org
-
-# IME-related changes
-changwan@chromium.org
-
-# TEAM: layout-dev@chromium.org
-# COMPONENT: Blink>Editing
+file:../layout/OWNERS
+daniec@microsoft.com
+siliu@microsoft.com
+snianu@microsoft.com

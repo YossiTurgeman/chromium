@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,49 +6,52 @@
 
 #include <stddef.h>
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
 
-#include "base/metrics/histogram_macros.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/threading/thread.h"
 #include "chrome/browser/bookmarks/bookmark_model_factory.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/favicon/favicon_service_factory.h"
 #include "chrome/browser/first_run/first_run.h"
 #include "chrome/browser/history/history_service_factory.h"
-#include "chrome/browser/password_manager/password_store_factory.h"
+#include "chrome/browser/password_manager/factories/profile_password_store_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
-#include "chrome/browser/web_data_service_factory.h"
-#include "chrome/common/importer/imported_bookmark_entry.h"
+#include "chrome/browser/webdata_services/web_data_service_factory.h"
 #include "chrome/common/pref_names.h"
 #include "components/autofill/core/browser/webdata/autofill_webdata_service.h"
 #include "components/bookmarks/browser/bookmark_model.h"
+#include "components/bookmarks/browser/bookmark_node.h"
 #include "components/bookmarks/common/bookmark_pref_names.h"
 #include "components/favicon/core/favicon_service.h"
 #include "components/history/core/browser/history_service.h"
-#include "components/password_manager/core/browser/password_store.h"
+#include "components/password_manager/core/browser/password_form.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
 #include "components/password_manager/core/common/password_manager_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/search_engines/template_url.h"
 #include "components/search_engines/template_url_service.h"
+#include "components/user_data_importer/common/imported_bookmark_entry.h"
 
 using bookmarks::BookmarkModel;
 using bookmarks::BookmarkNode;
 
 namespace {
 
-// Generates a unique folder name. If |folder_name| is not unique, then this
-// repeatedly tests for '|folder_name| + (i)' until a unique name is found.
-base::string16 GenerateUniqueFolderName(BookmarkModel* model,
-                                        const base::string16& folder_name) {
+// Generates a unique folder name among children of |parent|. If |folder_name|
+// is not unique, then this repeatedly tests for '|folder_name| + (i)' until a
+// unique name is found.
+std::u16string GenerateUniqueFolderName(const BookmarkNode* parent,
+                                        const std::u16string& folder_name) {
   // Build a set containing the bookmark bar folder names.
-  std::set<base::string16> existing_folder_names;
-  const BookmarkNode* bookmark_bar = model->bookmark_bar_node();
-  for (const auto& node : bookmark_bar->children()) {
+  std::set<std::u16string> existing_folder_names;
+  for (const auto& node : parent->children()) {
     if (node->is_folder())
       existing_folder_names.insert(node->GetTitle());
   }
@@ -59,14 +62,13 @@ base::string16 GenerateUniqueFolderName(BookmarkModel* model,
 
   // Otherwise iterate until we find a unique name.
   for (size_t i = 1; i <= existing_folder_names.size(); ++i) {
-    base::string16 name = folder_name + base::ASCIIToUTF16(" (") +
-                          base::NumberToString16(i) + base::ASCIIToUTF16(")");
+    std::u16string name =
+        folder_name + u" (" + base::NumberToString16(i) + u")";
     if (existing_folder_names.find(name) == existing_folder_names.end())
       return name;
   }
 
   NOTREACHED();
-  return folder_name;
 }
 
 // Shows the bookmarks toolbar.
@@ -86,28 +88,24 @@ bool ProfileWriter::TemplateURLServiceIsLoaded() const {
   return TemplateURLServiceFactory::GetForProfile(profile_)->loaded();
 }
 
-void ProfileWriter::AddPasswordForm(const autofill::PasswordForm& form) {
+void ProfileWriter::AddPasswordForm(
+    const password_manager::PasswordForm& form) {
   DCHECK(profile_);
 
   if (profile_->GetPrefs()->GetBoolean(
           password_manager::prefs::kCredentialsEnableService)) {
-    PasswordStoreFactory::GetForProfile(profile_,
-                                        ServiceAccessType::EXPLICIT_ACCESS)
-        ->AddLogin(form);
+    ProfilePasswordStoreFactory::GetForProfile(
+        profile_, ServiceAccessType::EXPLICIT_ACCESS)
+        ->AddLogin(password_manager::FromPasswordForm(form));
   }
 }
 
 void ProfileWriter::AddHistoryPage(const history::URLRows& page,
                                    history::VisitSource visit_source) {
-  if (!page.empty())
+  if (!page.empty()) {
     HistoryServiceFactory::GetForProfile(profile_,
                                          ServiceAccessType::EXPLICIT_ACCESS)
         ->AddPagesWithDetails(page, visit_source);
-  // Measure the size of the history page after Auto Import on first run.
-  if (first_run::IsChromeFirstRun() &&
-      visit_source == history::SOURCE_IE_IMPORTED) {
-    UMA_HISTOGRAM_COUNTS_1M("Import.ImportedHistorySize.AutoImportFromIE",
-                            page.size());
   }
 }
 
@@ -123,8 +121,8 @@ void ProfileWriter::AddHomepage(const GURL& home_page) {
 }
 
 void ProfileWriter::AddBookmarks(
-    const std::vector<ImportedBookmarkEntry>& bookmarks,
-    const base::string16& top_level_folder_name) {
+    const std::vector<user_data_importer::ImportedBookmarkEntry>& bookmarks,
+    const std::u16string& top_level_folder_name) {
   if (bookmarks.empty())
     return;
 
@@ -133,12 +131,14 @@ void ProfileWriter::AddBookmarks(
 
   // If the bookmark bar is currently empty, we should import directly to it.
   // Otherwise, we should import everything to a subfolder.
-  const BookmarkNode* bookmark_bar = model->bookmark_bar_node();
+  const BookmarkNode* bookmark_bar = model->account_bookmark_bar_node()
+                                         ? model->account_bookmark_bar_node()
+                                         : model->bookmark_bar_node();
   bool import_to_top_level = bookmark_bar->children().empty();
 
   // Reorder bookmarks so that the toolbar entries come first.
-  std::vector<ImportedBookmarkEntry> toolbar_bookmarks;
-  std::vector<ImportedBookmarkEntry> reordered_bookmarks;
+  std::vector<user_data_importer::ImportedBookmarkEntry> toolbar_bookmarks;
+  std::vector<user_data_importer::ImportedBookmarkEntry> reordered_bookmarks;
   for (auto it = bookmarks.begin(); it != bookmarks.end(); ++it) {
     if (it->in_toolbar)
       toolbar_bookmarks.push_back(*it);
@@ -158,15 +158,15 @@ void ProfileWriter::AddBookmarks(
   model->BeginExtensiveChanges();
 
   std::set<const BookmarkNode*> folders_added_to;
-  const BookmarkNode* top_level_folder = NULL;
-  for (std::vector<ImportedBookmarkEntry>::const_iterator bookmark =
-           reordered_bookmarks.begin();
+  const BookmarkNode* top_level_folder = nullptr;
+  for (std::vector<user_data_importer::ImportedBookmarkEntry>::const_iterator
+           bookmark = reordered_bookmarks.begin();
        bookmark != reordered_bookmarks.end(); ++bookmark) {
     // Disregard any bookmarks with invalid urls.
     if (!bookmark->is_folder && !bookmark->url.is_valid())
       continue;
 
-    const BookmarkNode* parent = NULL;
+    const BookmarkNode* parent = nullptr;
     if (import_to_top_level && (add_all_to_top_level || bookmark->in_toolbar)) {
       // Add directly to the bookmarks bar.
       parent = bookmark_bar;
@@ -174,8 +174,8 @@ void ProfileWriter::AddBookmarks(
       // Add to a folder that will contain all the imported bookmarks not added
       // to the bar.  The first time we do so, create the folder.
       if (!top_level_folder) {
-        base::string16 name =
-            GenerateUniqueFolderName(model,top_level_folder_name);
+        std::u16string name =
+            GenerateUniqueFolderName(bookmark_bar, top_level_folder_name);
         top_level_folder = model->AddFolder(
             bookmark_bar, bookmark_bar->children().size(), name);
       }
@@ -194,9 +194,8 @@ void ProfileWriter::AddBookmarks(
         continue;
       }
 
-      const auto it = std::find_if(
-          parent->children().cbegin(), parent->children().cend(),
-          [folder_name](const auto& node) {
+      const auto it = std::ranges::find_if(
+          parent->children(), [folder_name](const auto& node) {
             return node->is_folder() && node->GetTitle() == *folder_name;
           });
       parent = (it == parent->children().cend())
@@ -239,7 +238,7 @@ typedef std::map<std::string, TemplateURL*> HostPathMap;
 // Returns the key for the map built by BuildHostPathMap. If url_string is not
 // a valid URL, an empty string is returned, otherwise host+path is returned.
 static std::string HostPathKeyForURL(const GURL& url) {
-  return url.is_valid() ? url.host() + url.path() : std::string();
+  return url.is_valid() ? url.GetHost() + url.GetPath() : std::string();
 }
 
 // Builds the key to use in HostPathMap for the specified TemplateURL. Returns
@@ -262,10 +261,8 @@ static std::string BuildHostPathKey(const TemplateURL* t_url,
     return HostPathKeyForURL(GURL(t_url->url()));
 
   if (t_url->url_ref().SupportsReplacement(search_terms_data)) {
-    return HostPathKeyForURL(GURL(
-        t_url->url_ref().ReplaceSearchTerms(
-            TemplateURLRef::SearchTermsArgs(base::ASCIIToUTF16("x")),
-            search_terms_data)));
+    return HostPathKeyForURL(GURL(t_url->url_ref().ReplaceSearchTerms(
+        TemplateURLRef::SearchTermsArgs(u"x"), search_terms_data)));
   }
   return std::string();
 }
@@ -313,7 +310,7 @@ void ProfileWriter::AddKeywords(
     // The omnibox doesn't properly handle search keywords with whitespace,
     // so skip importing them.
     if (turl->keyword().find_first_of(base::kWhitespaceUTF16) !=
-        base::string16::npos)
+        std::u16string::npos)
       continue;
 
     // For search engines if there is already a keyword with the same
@@ -332,13 +329,13 @@ void ProfileWriter::AddKeywords(
   }
 }
 
-void ProfileWriter::AddAutofillFormDataEntries(
-    const std::vector<autofill::AutofillEntry>& autofill_entries) {
+void ProfileWriter::AddAutocompleteFormDataEntries(
+    const std::vector<autofill::AutocompleteEntry>& autocomplete_entries) {
   scoped_refptr<autofill::AutofillWebDataService> web_data_service =
       WebDataServiceFactory::GetAutofillWebDataForProfile(
           profile_, ServiceAccessType::EXPLICIT_ACCESS);
   if (web_data_service.get())
-    web_data_service->UpdateAutofillEntries(autofill_entries);
+    web_data_service->UpdateAutocompleteEntries(autocomplete_entries);
 }
 
-ProfileWriter::~ProfileWriter() {}
+ProfileWriter::~ProfileWriter() = default;

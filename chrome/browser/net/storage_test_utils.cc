@@ -1,102 +1,202 @@
-// Copyright (c) 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/net/storage_test_utils.h"
 
+#include <string>
+
+#include "base/strings/strcat.h"
 #include "content/public/test/browser_test_utils.h"
 
-namespace storage {
-namespace test {
+namespace storage::test {
 
-const std::vector<std::string> kStorageTypes{
-    "Cookie", "LocalStorage", "FileSystem",    "SessionStorage", "IndexedDb",
-    "WebSql", "CacheStorage", "ServiceWorker", "CookieStore"};
+const std::vector<std::string> kCookiesTypesForFrame{"Cookie", "CookieStore"};
+
+const std::vector<std::string> kStorageTypesForFrame{
+    "LocalStorage", "FileSystem",   "FileSystemAccess", "SessionStorage",
+    "IndexedDb",    "CacheStorage", "ServiceWorker"};
+
+const std::vector<std::string> kStorageTypesForWorker{
+    "WorkerFileSystemAccess", "WorkerCacheStorage", "WorkerIndexedDb"};
 
 const std::vector<std::string> kCrossTabCommunicationTypes{
     "SharedWorker",
     "WebLock",
 };
 
-constexpr char kRequestStorageAccess[] =
-    "document.requestStorageAccess().then("
-    "  () => { window.domAutomationController.send(true); },"
-    "  () => { window.domAutomationController.send(false); },"
-    ");";
+constexpr std::string_view kRequestAndCheckStorageAccess =
+    "document.requestStorageAccess()"
+    "  .then(() => document.hasStorageAccess())";
 
-constexpr char kHasStorageAccess[] =
-    "document.hasStorageAccess().then("
-    "  (result) => { window.domAutomationController.send(result); },"
-    "  () => { window.domAutomationController.send(false); },"
-    ");";
+constexpr std::string_view kRequestStorageAccessBeyondCookies =
+    "document.requestStorageAccess({estimate: true})"
+    ".then((handle) => handle.estimate())";
 
-void ExpectFrameContent(content::RenderFrameHost* frame,
-                        const std::string& expected) {
-  std::string content;
-  ASSERT_TRUE(ExecuteScriptAndExtractString(
-      frame, "window.domAutomationController.send(document.body.textContent)",
-      &content));
-  EXPECT_EQ(expected, content);
-}
+constexpr std::string_view kRequestStorageAccessFor =
+    "document.requestStorageAccessFor($1)";
 
-void ExpectCookiesOnHost(content::BrowserContext* context,
-                         const GURL& host_url,
-                         const std::string& expected) {
-  EXPECT_EQ(expected, content::GetCookies(context, host_url));
-}
+constexpr std::string_view kHasStorageAccess = "document.hasStorageAccess()";
 
-void SetStorageForFrame(content::RenderFrameHost* frame) {
-  for (const auto& data_type : kStorageTypes) {
-    bool data = false;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractBool(
-        frame, "set" + data_type + "()", &data));
-    EXPECT_TRUE(data) << data_type;
+std::vector<std::string> GetStorageTypesForFrame(bool include_cookies) {
+  std::vector<std::string> types(kStorageTypesForFrame);
+  if (include_cookies) {
+    types.insert(types.end(), kCookiesTypesForFrame.begin(),
+                 kCookiesTypesForFrame.end());
   }
+  return types;
 }
 
-void ExpectStorageForFrame(content::RenderFrameHost* frame, bool expected) {
-  for (const auto& data_type : kStorageTypes) {
-    bool data = false;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractBool(
-        frame, "has" + data_type + "();", &data));
-    EXPECT_EQ(expected, data) << data_type;
+std::string GetFrameContent(content::RenderFrameHost* frame) {
+  return content::EvalJs(frame, "document.body.textContent",
+                         content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+      .ExtractString();
+}
+
+void SetStorageForFrame(content::RenderFrameHost* frame,
+                        bool include_cookies,
+                        bool expected_to_be_set,
+                        const base::Location& location) {
+  base::flat_map<std::string, bool> actual;
+  base::flat_map<std::string, bool> expected;
+  for (const auto& data_type : GetStorageTypesForFrame(include_cookies)) {
+    std::string script = "set" + data_type + "()";
+    SCOPED_TRACE(base::StrCat({"Executing \"", script, "\""}));
+    actual[data_type] =
+        content::EvalJs(frame, script, content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+            .ExtractBool();
+    expected[data_type] = expected_to_be_set;
   }
+  EXPECT_THAT(actual, testing::UnorderedElementsAreArray(expected))
+      << "(expected at " << location.ToString() << ")";
 }
 
-void SetCrossTabInfoForFrame(content::RenderFrameHost* frame) {
+void SetStorageForWorker(content::RenderFrameHost* frame,
+                         const base::Location& location) {
+  base::flat_map<std::string, bool> actual;
+  base::flat_map<std::string, bool> expected;
+  for (const auto& data_type : kStorageTypesForWorker) {
+    std::string script = "set" + data_type + "()";
+    SCOPED_TRACE(base::StrCat({"Executing \"", script, "\""}));
+    actual[data_type] =
+        content::EvalJs(frame, script, content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+            .ExtractBool();
+    expected[data_type] = true;
+  }
+  EXPECT_THAT(actual, testing::UnorderedElementsAreArray(expected))
+      << "(expected at " << location.ToString() << ")";
+}
+
+void ExpectStorageForFrame(content::RenderFrameHost* frame,
+                           bool expected,
+                           const base::Location& location) {
+  base::flat_map<std::string, bool> actual;
+  base::flat_map<std::string, bool> expected_elts;
+  for (const auto& data_type : GetStorageTypesForFrame(false)) {
+    std::string script = "has" + data_type + "();";
+    SCOPED_TRACE(base::StrCat({"Executing \"", script, "\""}));
+    actual[data_type] =
+        content::EvalJs(frame, script, content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+            .ExtractBool();
+    expected_elts[data_type] = expected;
+  }
+  EXPECT_THAT(actual, testing::UnorderedElementsAreArray(expected_elts))
+      << "(expected at " << location.ToString() << ")";
+}
+
+void ExpectStorageForWorker(content::RenderFrameHost* frame,
+                            bool expected,
+                            const base::Location& location) {
+  base::flat_map<std::string, bool> actual;
+  base::flat_map<std::string, bool> expected_elts;
+  for (const auto& data_type : kStorageTypesForWorker) {
+    std::string script = "has" + data_type + "();";
+    SCOPED_TRACE(base::StrCat({"Executing \"", script, "\""}));
+    actual[data_type] =
+        content::EvalJs(frame, script, content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+            .ExtractBool();
+    expected_elts[data_type] = expected;
+  }
+  EXPECT_THAT(actual, testing::UnorderedElementsAreArray(expected_elts))
+      << "(expected at " << location.ToString() << ")";
+}
+
+void SetCrossTabInfoForFrame(content::RenderFrameHost* frame,
+                             const base::Location& location) {
+  base::flat_map<std::string, bool> actual;
+  base::flat_map<std::string, bool> expected;
   for (const auto& data_type : kCrossTabCommunicationTypes) {
-    bool data = false;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractBool(
-        frame, "set" + data_type + "()", &data));
-    EXPECT_TRUE(data) << data_type;
+    std::string script = "set" + data_type + "()";
+    SCOPED_TRACE(base::StrCat({"Executing \"", script, "\""}));
+    actual[data_type] =
+        content::EvalJs(frame, script, content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+            .ExtractBool();
+    expected[data_type] = true;
   }
+  EXPECT_THAT(actual, testing::UnorderedElementsAreArray(expected))
+      << "(expected at " << location.ToString() << ")";
 }
 
 void ExpectCrossTabInfoForFrame(content::RenderFrameHost* frame,
-                                bool expected) {
+                                bool expected,
+                                const base::Location& location) {
+  base::flat_map<std::string, bool> actual;
+  base::flat_map<std::string, bool> expected_elts;
   for (const auto& data_type : kCrossTabCommunicationTypes) {
-    bool data = false;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractBool(
-        frame, "has" + data_type + "();", &data));
-    EXPECT_EQ(expected, data) << data_type;
+    std::string script = "has" + data_type + "();";
+    SCOPED_TRACE(base::StrCat({"Executing \"", script, "\""}));
+    actual[data_type] =
+        content::EvalJs(frame, script, content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+            .ExtractBool();
+    expected_elts[data_type] = expected;
   }
+  EXPECT_THAT(actual, testing::UnorderedElementsAreArray(expected_elts))
+      << "(expected at " << location.ToString() << ")";
 }
 
-void RequestStorageAccessForFrame(content::RenderFrameHost* frame,
-                                  bool should_resolve) {
-  bool data = false;
-  EXPECT_TRUE(content::ExecuteScriptAndExtractBool(frame, kRequestStorageAccess,
-                                                   &data));
-  EXPECT_EQ(should_resolve, data) << "document.requestStorageAccess()";
+bool RequestAndCheckStorageAccessForFrame(content::RenderFrameHost* frame,
+                                          bool omit_user_gesture) {
+  int options = content::EXECUTE_SCRIPT_DEFAULT_OPTIONS;
+  if (omit_user_gesture) {
+    options |= content::EXECUTE_SCRIPT_NO_USER_GESTURE;
+  }
+  return content::EvalJs(frame, kRequestAndCheckStorageAccess, options)
+      .ExtractBool();
 }
 
-void CheckStorageAccessForFrame(content::RenderFrameHost* frame,
-                                bool access_expected) {
-  bool data = false;
-  EXPECT_TRUE(
-      content::ExecuteScriptAndExtractBool(frame, kHasStorageAccess, &data));
-  EXPECT_EQ(access_expected, data) << "document.hasStorageAccess()";
+bool RequestAndCheckStorageAccessBeyondCookiesForFrame(
+    content::RenderFrameHost* frame) {
+  return content::ExecJs(frame, kRequestStorageAccessBeyondCookies);
 }
 
-}  // namespace test
-}  // namespace storage
+bool RequestStorageAccessForOrigin(content::RenderFrameHost* frame,
+                                   const std::string& origin,
+                                   bool omit_user_gesture) {
+  int options = content::EXECUTE_SCRIPT_DEFAULT_OPTIONS;
+  if (omit_user_gesture) {
+    options |= content::EXECUTE_SCRIPT_NO_USER_GESTURE;
+  }
+  return content::ExecJs(
+      frame, content::JsReplace(kRequestStorageAccessFor, origin), options);
+}
+
+bool HasStorageAccessForFrame(content::RenderFrameHost* frame) {
+  return content::EvalJs(frame, kHasStorageAccess,
+                         content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+      .ExtractBool();
+}
+
+std::string FetchWithCredentials(content::RenderFrameHost* frame,
+                                 const GURL& url,
+                                 const bool cors_enabled) {
+  constexpr char script[] = R"(
+      fetch($1, {method: 'GET', mode: $2, credentials: 'include'})
+      .then((result) => result.text());
+    )";
+  const std::string mode = cors_enabled ? "cors" : "no-cors";
+  return content::EvalJs(frame, content::JsReplace(script, url, mode),
+                         content::EXECUTE_SCRIPT_NO_USER_GESTURE)
+      .ExtractString();
+}
+
+}  // namespace storage::test

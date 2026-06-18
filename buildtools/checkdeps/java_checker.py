@@ -1,10 +1,11 @@
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Checks Java files for illegal imports."""
 
-import codecs
+
+import concurrent.futures
 import os
 import re
 
@@ -35,7 +36,7 @@ class JavaChecker(object):
 
   # This regular expression will be used to extract filenames from import
   # statements.
-  _EXTRACT_IMPORT_PATH = re.compile('^import\s+(?:static\s+)?([\w\.]+)\s*;')
+  _EXTRACT_IMPORT_PATH = re.compile(r'^import\s+(?:static\s+)?([\w\.]+)\s*;')
 
   def __init__(self, base_directory, verbose, added_imports=None,
                allow_multiple_definitions=None):
@@ -51,10 +52,10 @@ class JavaChecker(object):
     """Get the full class name of a file with package name."""
     if not os.path.isfile(filepath):
       return None
-    with codecs.open(filepath, encoding='utf-8') as f:
+    with open(filepath, encoding='utf-8') as f:
       short_class_name, _ = os.path.splitext(os.path.basename(filepath))
       for line in f:
-        for package in re.findall('^package\s+([\w\.]+);', line):
+        for package in re.findall(r'^package\s+([\w\.]+);', line):
           return package + '.' + short_class_name
 
   def _IgnoreDir(self, d):
@@ -75,14 +76,28 @@ class JavaChecker(object):
     return False
 
   def _PrescanFiles(self, added_classset):
-    for root, dirs, files in os.walk(self._base_directory.encode('utf-8')):
+    for root, dirs, files in os.walk(self._base_directory):
       # Skip unwanted subdirectories. TODO(husky): it would be better to do
       # this via the skip_child_includes flag in DEPS files. Maybe hoist this
       # prescan logic into checkdeps.py itself?
+      # Modify dirs in-place with slice assignment to avoid recursing into them.
       dirs[:] = [d for d in dirs if not self._IgnoreDir(d)]
-      for f in files:
-        if f.endswith('.java'):
-          self._PrescanFile(os.path.join(root, f), added_classset)
+
+      java_files = [os.path.join(root, f) for f in files if f.endswith('.java')]
+      if not java_files:
+        continue
+
+      with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Read files in parallel.
+        futures_to_file = {
+            executor.submit(self._PrescanFile, os.path.join(root, f)): f
+            for f in java_files
+        }
+        for future in concurrent.futures.as_completed(futures_to_file):
+          full_class_name = future.result()
+          if full_class_name:
+            self._ProcessFile(
+              futures_to_file[future], full_class_name, added_classset)
 
   def _PrescanImportFiles(self, added_imports):
     """Build a set of fully-qualified class affected by this patch.
@@ -110,23 +125,31 @@ class JavaChecker(object):
           classset.add(found_item.group(1))
     return classset
 
-  def _PrescanFile(self, filepath, added_classset):
+  def _PrescanFile(self, filepath):
+    """Scans a file and returns its full class name, if any."""
     if self._verbose:
-      print 'Prescanning: ' + filepath
+      print('Prescanning: ' + filepath)
     full_class_name = self._GetClassFullName(filepath)
-    if full_class_name:
-      if full_class_name in self._classmap:
-        if self._verbose or full_class_name in added_classset:
-          if not any(re.match(i, filepath) for i in
-                     self._allow_multiple_definitions):
-            print 'WARNING: multiple definitions of %s:' % full_class_name
-            print '    ' + filepath
-            print '    ' + self._classmap[full_class_name]
-            print
-      else:
+    if not full_class_name and self._verbose:
+      print('WARNING: no package definition found in %s' % filepath)
+    return full_class_name
+
+  def _ProcessFile(self, filepath, full_class_name, added_classset):
+    """Populates _classmap based on the path and class name."""
+    if full_class_name in self._classmap:
+      if self._verbose or full_class_name in added_classset:
+        if not any(re.match(i, filepath) for i in
+                    self._allow_multiple_definitions):
+          print('WARNING: multiple definitions of %s:' % full_class_name)
+          print('    ' + filepath)
+          print('    ' + self._classmap[full_class_name])
+          print()
+      # Prefer the public repo when multiple matches are found.
+      if self._classmap[full_class_name].startswith(
+          os.path.join(self._base_directory, 'clank')):
         self._classmap[full_class_name] = filepath
-    elif self._verbose:
-      print 'WARNING: no package definition found in %s' % filepath
+    else:
+      self._classmap[full_class_name] = filepath
 
   def CheckLine(self, rules, line, filepath, fail_on_temp_allow=False):
     """Checks the given line with the given rule set.
@@ -157,10 +180,10 @@ class JavaChecker(object):
 
   def CheckFile(self, rules, filepath):
     if self._verbose:
-      print 'Checking: ' + filepath
+      print('Checking: ' + filepath)
 
     dependee_status = results.DependeeStatus(filepath)
-    with codecs.open(filepath, encoding='utf-8') as f:
+    with open(filepath, encoding='utf-8') as f:
       for line in f:
         is_import, violation = self.CheckLine(rules, line, filepath)
         if violation:

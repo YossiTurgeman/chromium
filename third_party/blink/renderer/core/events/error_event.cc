@@ -33,6 +33,7 @@
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_error_event_init.h"
 #include "third_party/blink/renderer/core/event_interface_names.h"
+#include "third_party/blink/renderer/core/event_type_names.h"
 #include "v8/include/v8.h"
 
 namespace blink {
@@ -44,30 +45,28 @@ ErrorEvent* ErrorEvent::CreateSanitizedError(ScriptState* script_state) {
   DCHECK(script_state);
   return MakeGarbageCollected<ErrorEvent>(
       "Script error.",
-      std::make_unique<SourceLocation>(String(), 0, 0, nullptr),
+      MakeGarbageCollected<SourceLocation>(String(), String(), 0, 0, nullptr),
       ScriptValue::CreateNull(script_state->GetIsolate()),
       &script_state->World());
 }
 
-ErrorEvent::ErrorEvent()
-    : sanitized_message_(),
-      location_(std::make_unique<SourceLocation>(String(), 0, 0, nullptr)),
-      world_(&DOMWrapperWorld::Current(v8::Isolate::GetCurrent())) {}
+ErrorEvent::ErrorEvent(ScriptState* script_state)
+    : location_(MakeGarbageCollected<SourceLocation>(String(),
+                                                     String(),
+                                                     0,
+                                                     0,
+                                                     nullptr)),
+      world_(&script_state->World()) {}
 
 ErrorEvent::ErrorEvent(ScriptState* script_state,
                        const AtomicString& type,
                        const ErrorEventInit* initializer)
     : Event(type, initializer),
-      sanitized_message_(),
+      sanitized_message_(initializer->message()),
       world_(&script_state->World()) {
-  sanitized_message_ = initializer->message();
-  location_ = std::make_unique<SourceLocation>(initializer->filename(),
-                                               initializer->lineno(),
-                                               initializer->colno(), nullptr);
-  // TODO(crbug.com/1070964): Remove this existence check.  There is a bug that
-  // the current code generator does not initialize a ScriptValue with the
-  // v8::Null value despite that the dictionary member has the default value of
-  // IDL null.  |hasError| guard is necessary here.
+  location_ = MakeGarbageCollected<SourceLocation>(
+      initializer->filename(), String(), initializer->lineno(),
+      initializer->colno(), nullptr);
   if (initializer->hasError()) {
     v8::Local<v8::Value> error = initializer->error().V8Value();
     // TODO(crbug.com/1070871): Remove the following IsNullOrUndefined() check.
@@ -77,23 +76,26 @@ ErrorEvent::ErrorEvent(ScriptState* script_state,
     if (!error->IsNullOrUndefined()) {
       error_.Set(script_state->GetIsolate(), error);
     }
+  } else {
+    error_.Set(script_state->GetIsolate(),
+               v8::Undefined(script_state->GetIsolate()));
   }
 }
 
 ErrorEvent::ErrorEvent(const String& message,
-                       std::unique_ptr<SourceLocation> location,
+                       SourceLocation* location,
                        ScriptValue error,
                        DOMWrapperWorld* world)
     : Event(event_type_names::kError, Bubbles::kNo, Cancelable::kYes),
       sanitized_message_(message),
-      location_(std::move(location)),
+      location_(location),
       world_(world) {
   if (!error.IsEmpty())
     error_.Set(error.GetIsolate(), error.V8Value());
 }
 
 void ErrorEvent::SetUnsanitizedMessage(const String& message) {
-  DCHECK(unsanitized_message_.IsEmpty());
+  DCHECK(unsanitized_message_.empty());
   unsanitized_message_ = message;
 }
 
@@ -125,6 +127,8 @@ ScriptValue ErrorEvent::error(ScriptState* script_state) const {
 
 void ErrorEvent::Trace(Visitor* visitor) const {
   visitor->Trace(error_);
+  visitor->Trace(location_);
+  visitor->Trace(world_);
   Event::Trace(visitor);
 }
 

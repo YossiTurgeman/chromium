@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "ui/views/layout/layout_types.h"
 #include "ui/views/views_export.h"
 
@@ -53,6 +54,16 @@ class VIEWS_EXPORT LayoutManager {
   // View::CalculatePreferredSize() on each of the children of |host|.
   virtual gfx::Size GetPreferredSize(const View* host) const = 0;
 
+  // Returns the preferred size under `available_size`.
+  //
+  // In complex view models, using this method may be time-consuming. Calling
+  // this method may invalidate the subview's layout manager cache (it will not
+  // invalidate the current view's cache) if the subview does not use this
+  // method.
+  virtual gfx::Size GetPreferredSize(
+      const View* host,
+      const SizeBounds& available_size) const = 0;
+
   // Returns the minimum size, which defaults to the preferred size. Layout
   // managers with the ability to collapse or hide child views may override this
   // behavior.
@@ -67,7 +78,11 @@ class VIEWS_EXPORT LayoutManager {
   virtual int GetPreferredHeightForWidth(const View* host, int width) const;
 
   // Returns the maximum space available in the layout for the specified child
-  // view. Default is unbounded.
+  // view. Default is unbounded. May result in a layout calculation for |host|
+  // if the layout is not valid, so while it can be called during the Layout()
+  // method for |view|, it should never be called during the actual computation
+  // of |host|'s layout (e.g. in a FlexLayout FlexRule calculation) to prevent
+  // an infinite loop.
   virtual SizeBounds GetAvailableSize(const View* host, const View* view) const;
 
   // Called when a View is added as a child of the View the LayoutManager has
@@ -91,17 +106,18 @@ class VIEWS_EXPORT LayoutManager {
 
  protected:
   // Sets the visibility of a view without triggering ViewVisibilitySet().
-  // During Layout(), use this method instead of View::SetVisibility().
+  // During Layout(), use this method instead of View::SetVisible().
   void SetViewVisibility(View* view, bool visible);
 
   // Gets the child views of the specified view in paint order (reverse
   // Z-order). Defaults to returning host->children(). Called by
   // View::GetChildrenInZOrder().
-  virtual std::vector<View*> GetChildViewsInPaintOrder(const View* host) const;
+  virtual std::vector<raw_ptr<View, VectorExperimental>>
+  GetChildViewsInPaintOrder(const View* host) const;
 
  private:
   friend class views::View;
-  View* view_setting_visibility_on_ = nullptr;
+  raw_ptr<View> view_setting_visibility_on_ = nullptr;
 };
 
 }  // namespace views

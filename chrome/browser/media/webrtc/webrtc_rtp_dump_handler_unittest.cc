@@ -1,27 +1,28 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 
 #include "chrome/browser/media/webrtc/webrtc_rtp_dump_handler.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <memory>
+#include <string_view>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/run_loop.h"
-#include "base/sequenced_task_runner.h"
-#include "base/single_thread_task_runner.h"
-#include "base/stl_util.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "chrome/browser/media/webrtc/webrtc_rtp_dump_writer.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -59,7 +60,7 @@ class FakeDumpWriter : public WebRtcRtpDumpWriter {
     else if (type == RTP_DUMP_OUTGOING)
       incoming_success = false;
 
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(std::move(finished_callback),
                                   incoming_success, outgoing_success));
   }
@@ -79,8 +80,8 @@ class WebRtcRtpDumpHandlerTest : public testing::Test {
   }
 
   void ResetDumpHandler(const base::FilePath& dir, bool end_dump_success) {
-    handler_.reset(new WebRtcRtpDumpHandler(
-        dir.empty() ? base::FilePath(FILE_PATH_LITERAL("dummy")) : dir));
+    handler_ = std::make_unique<WebRtcRtpDumpHandler>(
+        dir.empty() ? base::FilePath(FILE_PATH_LITERAL("dummy")) : dir);
 
     std::unique_ptr<WebRtcRtpDumpWriter> writer(new FakeDumpWriter(
         10,
@@ -99,8 +100,10 @@ class WebRtcRtpDumpHandlerTest : public testing::Test {
     *incoming_dump = dir.AppendASCII("recv");
     *outgoing_dump = dir.AppendASCII("send");
     const char dummy[] = "dummy";
-    EXPECT_GT(base::WriteFile(*incoming_dump, dummy, base::size(dummy)), 0);
-    EXPECT_GT(base::WriteFile(*outgoing_dump, dummy, base::size(dummy)), 0);
+    EXPECT_TRUE(base::WriteFile(*incoming_dump,
+                                std::string_view(dummy, std::size(dummy))));
+    EXPECT_TRUE(base::WriteFile(*outgoing_dump,
+                                std::string_view(dummy, std::size(dummy))));
   }
 
   void FlushTaskRunners() {
@@ -121,12 +124,12 @@ class WebRtcRtpDumpHandlerTest : public testing::Test {
 TEST_F(WebRtcRtpDumpHandlerTest, StateTransition) {
   std::string error;
 
-  RtpDumpType types[3];
+  std::array<RtpDumpType, 3> types;
   types[0] = RTP_DUMP_INCOMING;
   types[1] = RTP_DUMP_OUTGOING;
   types[2] = RTP_DUMP_BOTH;
 
-  for (size_t i = 0; i < base::size(types); ++i) {
+  for (size_t i = 0; i < std::size(types); ++i) {
     DVLOG(2) << "Verifying state transition: type = " << types[i];
 
     // Only StartDump is allowed in STATE_NONE.
@@ -214,12 +217,12 @@ TEST_F(WebRtcRtpDumpHandlerTest, CannotStartMoreThanFiveDumps) {
 
   handler_.reset();
 
-  std::unique_ptr<WebRtcRtpDumpHandler> handlers[6];
+  std::array<std::unique_ptr<WebRtcRtpDumpHandler>, 6> handlers;
 
-  for (size_t i = 0; i < base::size(handlers); ++i) {
-    handlers[i].reset(new WebRtcRtpDumpHandler(base::FilePath()));
+  for (size_t i = 0; i < std::size(handlers); ++i) {
+    handlers[i] = std::make_unique<WebRtcRtpDumpHandler>(base::FilePath());
 
-    if (i < base::size(handlers) - 1) {
+    if (i < std::size(handlers) - 1) {
       EXPECT_TRUE(handlers[i]->StartDump(RTP_DUMP_INCOMING, &error));
     } else {
       EXPECT_FALSE(handlers[i]->StartDump(RTP_DUMP_INCOMING, &error));

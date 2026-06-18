@@ -1,9 +1,16 @@
 rootWebArea
 ++genericContainer ignored
 ++++genericContainer
-++++++presentational ignored name=''
+++++++staticText name=' '
+++++++++inlineTextBox name=' '
 ++++++image name=''
-++++++image ignored name=''
-++++++image ignored name=''
+++++++staticText name=' '
+++++++++inlineTextBox name=' '
+++++++staticText name=' '
+++++++++inlineTextBox name=' '
+++++++staticText name=' '
+++++++++inlineTextBox name=' '
 ++++++image
+++++++staticText name=' '
+++++++++inlineTextBox name=' '
 ++++++image name='full'

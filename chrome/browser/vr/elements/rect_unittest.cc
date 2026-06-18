@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,7 @@
 #include "chrome/browser/vr/ui_scene.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/skia/include/core/SkColor.h"
+#include "ui/gfx/animation/keyframe/test/animation_utils.h"
 
 namespace vr {
 
@@ -45,11 +46,11 @@ TEST(Rect, AnimateColorCorrectly) {
   rect->SetTransitionedProperties({BACKGROUND_COLOR, FOREGROUND_COLOR});
   rect->SetColor(SK_ColorBLACK);
 
-  scene.OnBeginFrame(MsToTicks(1), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(1), kStartHeadPose);
   EXPECT_EQ(SK_ColorRED, rect->edge_color());
   EXPECT_EQ(SK_ColorBLUE, rect->center_color());
 
-  scene.OnBeginFrame(MsToTicks(5000), kStartHeadPose);
+  scene.OnBeginFrame(gfx::MsToTicks(5000), kStartHeadPose);
   EXPECT_EQ(SK_ColorBLACK, rect->edge_color());
   EXPECT_EQ(SK_ColorBLACK, rect->center_color());
 }

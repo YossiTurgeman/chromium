@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,23 +7,23 @@
 #include <stdint.h>
 
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
-#include "base/strings/stringprintf.h"
 #include "base/threading/scoped_blocking_call.h"
+#include "components/device_event_log/device_event_log.h"
 #include "device/udev_linux/udev.h"
 
 namespace device {
 
 namespace {
-
-constexpr char kSubsystemTty[] = "tty";
 
 // Holds information about a TTY driver for serial devices. Each driver creates
 // device nodes with a given major number and in a range of minor numbers.
@@ -44,7 +44,7 @@ std::vector<SerialDriverInfo> ReadSerialDriverInfo(const base::FilePath& path) {
   for (const auto& line :
        base::SplitStringPiece(tty_drivers, "\n", base::KEEP_WHITESPACE,
                               base::SPLIT_WANT_NONEMPTY)) {
-    std::vector<base::StringPiece> fields = base::SplitStringPiece(
+    std::vector<std::string_view> fields = base::SplitStringPiece(
         line, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
     // The format of each line is:
@@ -60,7 +60,7 @@ std::vector<SerialDriverInfo> ReadSerialDriverInfo(const base::FilePath& path) {
     if (!base::StringToInt(fields[2], &info.major))
       continue;
 
-    std::vector<base::StringPiece> minor_range = base::SplitStringPiece(
+    std::vector<std::string_view> minor_range = base::SplitStringPiece(
         fields[3], "-", base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
     if (minor_range.size() == 1) {
       if (!base::StringToInt(minor_range[0], &info.minor_start))
@@ -95,8 +95,7 @@ SerialDeviceEnumeratorLinux::SerialDeviceEnumeratorLinux(
     : tty_driver_info_path_(tty_driver_info_path) {
   DETACH_FROM_SEQUENCE(sequence_checker_);
 
-  watcher_ = UdevWatcher::StartWatching(
-      this, {UdevWatcher::Filter(kSubsystemTty, "")});
+  watcher_ = UdevWatcher::StartWatching(this);
   if (watcher_)
     watcher_->EnumerateExistingDevices();
 }
@@ -110,11 +109,10 @@ void SerialDeviceEnumeratorLinux::OnDeviceAdded(ScopedUdevDevicePtr device) {
   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
                                                 base::BlockingType::MAY_BLOCK);
 
-#if DCHECK_IS_ON()
   const char* subsystem = udev_device_get_subsystem(device.get());
-  DCHECK(subsystem);
-  DCHECK_EQ(base::StringPiece(subsystem), kSubsystemTty);
-#endif
+  if (!subsystem || UNSAFE_TODO(strcmp(subsystem, "tty")) != 0) {
+    return;
+  }
 
   const char* syspath_str = udev_device_get_syspath(device.get());
   if (!syspath_str)
@@ -170,31 +168,35 @@ void SerialDeviceEnumeratorLinux::CreatePort(ScopedUdevDevicePtr device,
   info->path = base::FilePath(path);
   info->token = token;
 
+  uint32_t int_value;
   const char* vendor_id =
       udev_device_get_property_value(device.get(), "ID_VENDOR_ID");
-  const char* product_id =
-      udev_device_get_property_value(device.get(), "ID_MODEL_ID");
-  const char* product_name_enc =
-      udev_device_get_property_value(device.get(), "ID_MODEL_ENC");
-  const char* serial_number =
-      udev_device_get_property_value(device.get(), "ID_SERIAL_SHORT");
-
-  uint32_t int_value;
   if (vendor_id && base::HexStringToUInt(vendor_id, &int_value)) {
     info->vendor_id = int_value;
     info->has_vendor_id = true;
   }
+
+  const char* product_id =
+      udev_device_get_property_value(device.get(), "ID_MODEL_ID");
   if (product_id && base::HexStringToUInt(product_id, &int_value)) {
     info->product_id = int_value;
     info->has_product_id = true;
   }
+
+  const char* product_name_enc =
+      udev_device_get_property_value(device.get(), "ID_MODEL_ENC");
   if (product_name_enc)
     info->display_name = device::UdevDecodeString(product_name_enc);
 
-  if (info->has_vendor_id && info->has_product_id && serial_number) {
-    info->persistent_id = base::StringPrintf("%04X-%04X-%s", info->vendor_id,
-                                             info->product_id, serial_number);
-  }
+  const char* serial_number =
+      udev_device_get_property_value(device.get(), "ID_SERIAL_SHORT");
+  if (serial_number)
+    info->serial_number = serial_number;
+
+  SERIAL_LOG(EVENT) << "Serial device added: path=" << info->path
+                    << " vid=" << (vendor_id ? vendor_id : "(none)")
+                    << " pid=" << (product_id ? product_id : "(none)")
+                    << " serial=" << info->serial_number.value_or("(none)");
 
   paths_.insert(std::make_pair(syspath, token));
   AddPort(std::move(info));

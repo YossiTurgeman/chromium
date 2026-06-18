@@ -1,14 +1,17 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
+#include "chrome/browser/ui/ash/multi_user/multi_user_util.h"
+
+#include <memory>
+
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
-#include "chrome/browser/chromeos/login/users/fake_chrome_user_manager.h"
-#include "chrome/browser/chromeos/profiles/profile_helper.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
 #include "chrome/browser/signin/identity_test_environment_profile_adaptor.h"
-#include "chrome/browser/ui/ash/multi_user/multi_user_util.h"
 #include "chrome/test/base/chrome_ash_test_base.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/account_id/account_id.h"
@@ -16,6 +19,7 @@
 #include "components/signin/public/identity_manager/identity_manager.h"
 #include "components/signin/public/identity_manager/identity_test_environment.h"
 #include "components/user_manager/scoped_user_manager.h"
+#include "components/user_manager/test_helper.h"
 #include "components/user_manager/user.h"
 
 namespace ash {
@@ -28,22 +32,26 @@ const char kTestAccountEmail[] = "test@test.com";
 
 class MultiUserUtilTest : public ChromeAshTestBase {
  public:
-  MultiUserUtilTest() {}
-  ~MultiUserUtilTest() override {}
+  MultiUserUtilTest() = default;
+
+  MultiUserUtilTest(const MultiUserUtilTest&) = delete;
+  MultiUserUtilTest& operator=(const MultiUserUtilTest&) = delete;
+
+  ~MultiUserUtilTest() override = default;
 
   void SetUp() override {
     ChromeAshTestBase::SetUp();
 
-    fake_user_manager_ = new chromeos::FakeChromeUserManager;
+    fake_user_manager_ = new FakeChromeUserManager;
     user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
-        base::WrapUnique(fake_user_manager_));
+        base::WrapUnique(fake_user_manager_.get()));
 
     profile_.reset(IdentityTestEnvironmentProfileAdaptor::
                        CreateProfileForIdentityTestEnvironment()
                            .release());
 
-    identity_test_env_adaptor_.reset(
-        new IdentityTestEnvironmentProfileAdaptor(profile_.get()));
+    identity_test_env_adaptor_ =
+        std::make_unique<IdentityTestEnvironmentProfileAdaptor>(profile_.get());
   }
 
   void TearDown() override {
@@ -54,15 +62,13 @@ class MultiUserUtilTest : public ChromeAshTestBase {
 
   // Add a user to the identity manager with given gaia_id and email.
   CoreAccountId AddUserAndSignIn(const std::string& email) {
-    AccountInfo account_info =
-        identity_test_env()->MakePrimaryAccountAvailable(email);
-    fake_user_manager_->AddUser(
+    AccountInfo account_info = identity_test_env()->MakePrimaryAccountAvailable(
+        email, signin::ConsentLevel::kSync);
+    auto* user = fake_user_manager_->AddUser(
         multi_user_util::GetAccountIdFromEmail(account_info.email));
     fake_user_manager_->UserLoggedIn(
-        multi_user_util::GetAccountIdFromEmail(account_info.email),
-        chromeos::ProfileHelper::GetUserIdHashByUserIdForTesting(
-            account_info.email),
-        false /* browser_restart */, false /* is_child */);
+        user->GetAccountId(),
+        user_manager::TestHelper::GetFakeUsernameHash(user->GetAccountId()));
 
     return account_info.account_id;
   }
@@ -82,10 +88,8 @@ class MultiUserUtilTest : public ChromeAshTestBase {
   std::unique_ptr<IdentityTestEnvironmentProfileAdaptor>
       identity_test_env_adaptor_;
   // |fake_user_manager_| is owned by |user_manager_enabler_|.
-  chromeos::FakeChromeUserManager* fake_user_manager_;
+  raw_ptr<FakeChromeUserManager, DanglingUntriaged> fake_user_manager_;
   std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
-
-  DISALLOW_COPY_AND_ASSIGN(MultiUserUtilTest);
 };
 
 // Test that during the session it will always return a valid account id if a

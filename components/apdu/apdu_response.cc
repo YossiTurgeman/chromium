@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,11 +11,12 @@
 namespace apdu {
 
 // static
-base::Optional<ApduResponse> ApduResponse::CreateFromMessage(
+std::optional<ApduResponse> ApduResponse::CreateFromMessage(
     base::span<const uint8_t> data) {
   // Invalid message size, data is appended by status byte.
-  if (data.size() < 2)
-    return base::nullopt;
+  if (data.size() < 2) {
+    return std::nullopt;
+  }
 
   uint16_t status_bytes = data[data.size() - 2] << 8;
   status_bytes |= data[data.size() - 1];

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,13 @@
 #define UI_VIEWS_CONTROLS_SCROLLBAR_SCROLL_BAR_H_
 
 #include <memory>
+#include <optional>
 
-#include "base/compiler_specific.h"
 #include "base/gtest_prod_util.h"
-#include "base/macros.h"
-#include "base/optional.h"
-#include "ui/base/models/simple_menu_model.h"
+#include "base/memory/raw_ptr.h"
+#include "ui/base/mojom/menu_source_type.mojom-forward.h"
+#include "ui/menus/simple_menu_model.h"
+#include "ui/native_theme/native_theme.h"
 #include "ui/views/animation/scroll_animator.h"
 #include "ui/views/context_menu_controller.h"
 #include "ui/views/controls/button/image_button.h"
@@ -47,6 +48,10 @@ class VIEWS_EXPORT ScrollBarController {
   // position which is in the GetMinPosition() / GetMaxPosition range.
   virtual void ScrollToPosition(ScrollBar* source, int position) = 0;
 
+  // Called when the scroll that triggered by gesture or scroll events sequence
+  // ended.
+  virtual void OnScrollEnded() {}
+
   // Returns the amount to scroll. The amount to scroll may be requested in
   // two different amounts. If is_page is true the 'page scroll' amount is
   // requested. The page scroll amount typically corresponds to the
@@ -75,9 +80,9 @@ class VIEWS_EXPORT ScrollBar : public View,
                                public ScrollDelegate,
                                public ContextMenuController,
                                public ui::SimpleMenuModel::Delegate {
- public:
-  METADATA_HEADER(ScrollBar);
+  METADATA_HEADER(ScrollBar, View)
 
+ public:
   // An enumeration of different amounts of incremental scroll, representing
   // events sent from different parts of the UI/keyboard.
   enum class ScrollAmount {
@@ -90,10 +95,18 @@ class VIEWS_EXPORT ScrollBar : public View,
     kNextPage,
   };
 
+  // Whether the scrollbar is horizontal or vertical.
+  enum class Orientation : bool {
+    kHorizontal,
+    kVertical,
+  };
+
+  ScrollBar(const ScrollBar&) = delete;
+  ScrollBar& operator=(const ScrollBar&) = delete;
+
   ~ScrollBar() override;
 
-  // Returns whether this scrollbar is horizontal.
-  bool IsHorizontal() const;
+  Orientation GetOrientation() const;
 
   void set_controller(ScrollBarController* controller) {
     controller_ = controller;
@@ -122,21 +135,23 @@ class VIEWS_EXPORT ScrollBar : public View,
   int GetPosition() const;
 
   // View:
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override;
   bool OnMousePressed(const ui::MouseEvent& event) override;
   void OnMouseReleased(const ui::MouseEvent& event) override;
   void OnMouseCaptureLost() override;
   bool OnKeyPressed(const ui::KeyEvent& event) override;
   bool OnMouseWheel(const ui::MouseWheelEvent& event) override;
   void OnGestureEvent(ui::GestureEvent* event) override;
+  void OnThemeChanged() override;
 
   // ScrollDelegate:
   bool OnScroll(float dx, float dy) override;
+  void OnFlingScrollEnded() override;
 
   // ContextMenuController:
-  void ShowContextMenuForViewImpl(View* source,
-                                  const gfx::Point& point,
-                                  ui::MenuSourceType source_type) override;
+  void ShowContextMenuForViewImpl(
+      View* source,
+      const gfx::Point& point,
+      ui::mojom::MenuSourceType source_type) override;
 
   // ui::SimpleMenuModel::Delegate:
   bool IsCommandIdChecked(int id) const override;
@@ -166,13 +181,26 @@ class VIEWS_EXPORT ScrollBar : public View,
   // scrollbar.
   virtual int GetThickness() const = 0;
 
+  // Gets or creates ScrollAnimator if it does not exist.
+  ScrollAnimator* GetOrCreateScrollAnimator();
+
+  // Sets `fling_multiplier_` which is used to modify animation velocities
+  // in `scroll_animator_`.
+  void SetFlingMultiplier(float fling_multiplier);
+
+  bool is_scrolling() const {
+    return scroll_status_ == ScrollStatus::kScrollInProgress;
+  }
+
  protected:
   // Create new scrollbar, either horizontal or vertical. These are protected
   // since you need to be creating either a NativeScrollBar or a
   // ImageScrollBar.
-  explicit ScrollBar(bool is_horiz);
+  explicit ScrollBar(Orientation orientation);
 
   BaseScrollBarThumb* GetThumb() const;
+
+  ui::NativeTheme::PreferredColorScheme GetColorScheme() const;
 
   // Wrapper functions that calls the controller. We need this since native
   // scrollbars wrap around a different scrollbar. When calling the controller
@@ -187,12 +215,14 @@ class VIEWS_EXPORT ScrollBar : public View,
   FRIEND_TEST_ALL_PREFIXES(ScrollBarViewsTest, ScrollBarFitsToBottom);
   FRIEND_TEST_ALL_PREFIXES(ScrollBarViewsTest, ThumbFullLengthOfTrack);
   FRIEND_TEST_ALL_PREFIXES(ScrollBarViewsTest, DragThumbScrollsContent);
+  FRIEND_TEST_ALL_PREFIXES(ScrollBarViewsTest,
+                           DragThumbScrollsContentWhenSnapBackDisabled);
   FRIEND_TEST_ALL_PREFIXES(ScrollBarViewsTest, RightClickOpensMenu);
   FRIEND_TEST_ALL_PREFIXES(ScrollBarViewsTest, TestPageScrollingByPress);
 
   static base::RetainingOneShotTimer* GetHideTimerForTesting(
       ScrollBar* scroll_bar);
-  int GetThumbSizeForTesting();
+  int GetThumbLengthForTesting();
 
   // Changes to 'pushed' state and starts a timer to scroll repeatedly.
   void ProcessPressEvent(const ui::LocatedEvent& event);
@@ -225,7 +255,7 @@ class VIEWS_EXPORT ScrollBar : public View,
   ScrollAmount DetermineScrollAmountByKeyCode(
       const ui::KeyboardCode& keycode) const;
 
-  base::Optional<int> GetDesiredScrollOffset(ScrollAmount amount);
+  std::optional<int> GetDesiredScrollOffset(ScrollAmount amount);
 
   // The size of the scrolled contents, in pixels.
   int contents_size_ = 0;
@@ -245,13 +275,15 @@ class VIEWS_EXPORT ScrollBar : public View,
   // was invoked.
   int context_menu_mouse_position_ = 0;
 
-  const bool is_horiz_;
+  const Orientation orientation_;
 
-  BaseScrollBarThumb* thumb_ = nullptr;
+  raw_ptr<BaseScrollBarThumb> thumb_ = nullptr;
 
-  ScrollBarController* controller_ = nullptr;
+  raw_ptr<ScrollBarController> controller_ = nullptr;
 
   int max_pos_ = 0;
+
+  float fling_multiplier_ = 1.f;
 
   // An instance of a RepeatController which scrolls the scrollbar continuously
   // as the user presses the mouse button down on the up/down buttons or the
@@ -264,11 +296,26 @@ class VIEWS_EXPORT ScrollBar : public View,
   // is enabled. See crbug.com/329354.
   gfx::Vector2dF roundoff_error_;
 
+  // The enumeration keeps track of the current status of the scroll. Used when
+  // the contents scrolled by the gesture or scroll events sequence.
+  enum class ScrollStatus {
+    kScrollNone,
+    kScrollStarted,
+    kScrollInProgress,
+
+    // The contents will keep scrolling for a while if the events sequence ends
+    // with ui::EventType::kScrollFlingStart. Set the status to kScrollInEnding
+    // if it happens, and set it to kScrollEnded while the scroll really ended.
+    kScrollInEnding,
+    kScrollEnded,
+  };
+
+  ScrollStatus scroll_status_ = ScrollStatus::kScrollNone;
+
   std::unique_ptr<ui::SimpleMenuModel> menu_model_;
   std::unique_ptr<MenuRunner> menu_runner_;
+  // Used to animate gesture flings on the scroll bar.
   std::unique_ptr<ScrollAnimator> scroll_animator_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScrollBar);
 };
 
 }  // namespace views

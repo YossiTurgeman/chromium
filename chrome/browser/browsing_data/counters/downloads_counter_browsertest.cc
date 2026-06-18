@@ -1,16 +1,20 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/browsing_data/counters/downloads_counter.h"
 
+#include <memory>
 #include <set>
 
-#include "base/bind.h"
 #include "base/files/file_path.h"
-#include "base/guid.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/scoped_observation.h"
 #include "base/strings/string_util.h"
+#include "base/time/time.h"
+#include "base/uuid.h"
 #include "build/build_config.h"
 #include "chrome/browser/download/download_core_service.h"
 #include "chrome/browser/download/download_core_service_factory.h"
@@ -18,13 +22,17 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chrome/test/base/testing_profile.h"
 #include "components/browsing_data/core/browsing_data_utils.h"
 #include "components/browsing_data/core/pref_names.h"
 #include "components/history/core/browser/download_row.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/download_manager.h"
+#include "content/public/browser/storage_partition_config.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/mock_download_manager.h"
 #include "extensions/buildflags/buildflags.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "url/origin.h"
 
 #if BUILDFLAG(ENABLE_EXTENSIONS)
@@ -34,26 +42,33 @@
 namespace {
 
 class DownloadsCounterTest : public InProcessBrowserTest,
-                             public DownloadHistory::Observer {
+                             public DownloadHistory::Observer,
+                             public content::DownloadManager::Observer {
  public:
   void SetUpOnMainThread() override {
     time_ = base::Time::Now();
     items_count_ = 0;
-    manager_ =
-        content::BrowserContext::GetDownloadManager(browser()->profile());
+    manager_ = browser()->profile()->GetDownloadManager();
+    WaitForInitialization(manager_);
     history_ =
         DownloadCoreServiceFactory::GetForBrowserContext(browser()->profile())
             ->GetDownloadHistory();
     history_->AddObserver(this);
 
-    otr_manager_ = content::BrowserContext::GetDownloadManager(
-        browser()->profile()->GetPrimaryOTRProfile());
+    otr_manager_ = browser()
+                       ->profile()
+                       ->GetPrimaryOTRProfile(/*create_if_needed=*/true)
+                       ->GetDownloadManager();
+    WaitForInitialization(otr_manager_);
     SetDownloadsDeletionPref(true);
     SetDeletionPeriodPref(browsing_data::TimePeriod::ALL_TIME);
   }
 
   void TearDownOnMainThread() override {
     history_->RemoveObserver(this);
+    history_ = nullptr;
+    otr_manager_ = nullptr;
+    manager_ = nullptr;
   }
 
   // Adding and removing download items. ---------------------------------------
@@ -101,8 +116,8 @@ class DownloadsCounterTest : public InProcessBrowserTest,
       download::DownloadItem::DownloadState state,
       download::DownloadDangerType danger,
       download::DownloadInterruptReason reason) {
-    std::string guid = AddDownloadInternal(
-        state, danger, reason, GURL(), std::string(), false);
+    std::string guid = AddDownloadInternal(state, danger, reason, GURL(),
+                                           std::string(), false);
     guids_to_add_.insert(guid);
     return guid;
   }
@@ -113,18 +128,21 @@ class DownloadsCounterTest : public InProcessBrowserTest,
                                   const GURL& url,
                                   std::string mime_type,
                                   bool incognito) {
-    std::string guid = base::GenerateGUID();
+    std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
 
     std::vector<GURL> url_chain;
     url_chain.push_back(url);
 
-    content::DownloadManager* manager = incognito ? otr_manager_ : manager_;
+    content::DownloadManager* manager =
+        incognito ? otr_manager_.get() : manager_.get();
     manager->CreateDownloadItem(
         guid, download::DownloadItem::kInvalidId + (++items_count_),
         base::FilePath(FILE_PATH_LITERAL("current/path")),
         base::FilePath(FILE_PATH_LITERAL("target/path")), url_chain, GURL(),
-        GURL(), GURL(), GURL(), url::Origin(), mime_type, std::string(), time_,
-        time_, std::string(), std::string(), 1, 1, std::string(), state, danger,
+        content::StoragePartitionConfig::CreateDefault(
+            manager->GetBrowserContext()),
+        GURL(), GURL(), url::Origin(), mime_type, std::string(), time_, time_,
+        std::string(), std::string(), 1, 1, std::string(), state, danger,
         reason, false, time_, false,
         std::vector<download::DownloadItem::ReceivedSlice>());
 
@@ -149,44 +167,83 @@ class DownloadsCounterTest : public InProcessBrowserTest,
         browsing_data::prefs::kDeleteTimePeriod, static_cast<int>(period));
   }
 
-  void RevertTimeInHours(int days) {
-    time_ -= base::TimeDelta::FromHours(days);
+  void RevertTimeInHours(int days) { time_ -= base::Hours(days); }
+
+  // Waiting for download manager initialization. ------------------------------
+
+  void WaitForInitialization(content::DownloadManager* download_manager) {
+    if (download_manager->IsManagerInitialized()) {
+      return;
+    }
+
+    base::ScopedObservation<content::DownloadManager,
+                            content::DownloadManager::Observer>
+        observation{this};
+    observation.Observe(download_manager);
+
+    base::RunLoop run_loop;
+    quit_closure_ = run_loop.QuitClosure();
+    run_loop.Run();
+  }
+
+  // content::DownloadManager::Observer implementation:
+  void OnManagerInitialized() override {
+    if (quit_closure_) {
+      std::move(quit_closure_).Run();
+    }
+  }
+
+  void ManagerGoingDown(content::DownloadManager* manager) override {
+    if (manager == manager_) {
+      manager_ = nullptr;
+    } else if (manager == otr_manager_) {
+      otr_manager_ = nullptr;
+    }
   }
 
   // Waiting for downloads to be stored. ---------------------------------------
 
+  // DownloadHistory::Observer implementation:
   void OnDownloadStored(download::DownloadItem* item,
                         const history::DownloadRow& info) override {
     // Ignore any updates on items that we have already processed.
-    if (guids_to_add_.find(item->GetGuid()) == guids_to_add_.end())
+    if (guids_to_add_.find(item->GetGuid()) == guids_to_add_.end()) {
       return;
+    }
 
     // DownloadHistory updates us before the item is actually written on
     // the history thread. Ignore this and wait until the item is actually
     // persisted.
-    if (!DownloadHistory::IsPersisted(item))
+    if (!DownloadHistory::IsPersisted(item)) {
       return;
+    }
 
     guids_to_add_.erase(item->GetGuid());
 
-    if (run_loop_ && guids_to_add_.empty())
+    if (run_loop_ && guids_to_add_.empty()) {
       run_loop_->Quit();
+    }
   }
 
   void OnDownloadsRemoved(const DownloadHistory::IdSet& ids) override {
-    for (uint32_t id : ids)
+    for (uint32_t id : ids) {
       ASSERT_EQ(1u, ids_to_remove_.erase(id));
+    }
 
-    if (run_loop_ && ids_to_remove_.empty())
+    if (run_loop_ && ids_to_remove_.empty()) {
       run_loop_->Quit();
+    }
   }
 
+  void OnDownloadHistoryDestroyed() override { history_ = nullptr; }
+
   void WaitForDownloadHistory() {
-    if (guids_to_add_.empty() && ids_to_remove_.empty())
+    if (guids_to_add_.empty() && ids_to_remove_.empty()) {
       return;
+    }
 
     DCHECK(!run_loop_ || !run_loop_->running());
-    run_loop_.reset(new base::RunLoop());
+    run_loop_ = std::make_unique<base::RunLoop>();
     run_loop_->Run();
   }
 
@@ -210,6 +267,7 @@ class DownloadsCounterTest : public InProcessBrowserTest,
   }
 
  private:
+  base::OnceClosure quit_closure_;
   std::unique_ptr<base::RunLoop> run_loop_;
 
   // GUIDs of download items that were added and for which we expect
@@ -222,9 +280,9 @@ class DownloadsCounterTest : public InProcessBrowserTest,
   // a set of IDs.
   std::set<uint32_t> ids_to_remove_;
 
-  content::DownloadManager* manager_;
-  content::DownloadManager* otr_manager_;
-  DownloadHistory* history_;
+  raw_ptr<content::DownloadManager> manager_ = nullptr;
+  raw_ptr<content::DownloadManager> otr_manager_ = nullptr;
+  raw_ptr<DownloadHistory> history_ = nullptr;
   base::Time time_;
 
   int items_count_;
@@ -238,7 +296,6 @@ IN_PROC_BROWSER_TEST_F(DownloadsCounterTest, Count) {
   Profile* profile = browser()->profile();
   DownloadsCounter counter(profile);
   counter.Init(profile->GetPrefs(),
-               browsing_data::ClearBrowsingDataTab::ADVANCED,
                base::BindRepeating(&DownloadsCounterTest::ResultCallback,
                                    base::Unretained(this)));
   counter.Restart();
@@ -263,12 +320,52 @@ IN_PROC_BROWSER_TEST_F(DownloadsCounterTest, Count) {
   EXPECT_EQ(2, GetResult());
 }
 
+// Tests that the counter correctly counts downloads asynchronously when the
+// manager is initialized after the count is requested.
+IN_PROC_BROWSER_TEST_F(DownloadsCounterTest, AsynchronousInitialization) {
+  std::unique_ptr<TestingProfile> testing_profile =
+      std::make_unique<TestingProfile>();
+
+  auto mock_download_manager =
+      std::make_unique<testing::NiceMock<content::MockDownloadManager>>();
+  content::MockDownloadManager* mock_manager_ptr = mock_download_manager.get();
+
+  testing_profile->SetDownloadManagerForTesting(
+      std::move(mock_download_manager));
+
+  DownloadsCounter counter(testing_profile.get());
+  counter.Init(testing_profile->GetPrefs(),
+               base::BindRepeating(&DownloadsCounterTest::ResultCallback,
+                                   base::Unretained(this)));
+
+  // 1. Set up expectations to start as uninitialized.
+  content::DownloadManager::Observer* observer = nullptr;
+  EXPECT_CALL(*mock_manager_ptr, AddObserver(testing::_))
+      .WillOnce(testing::SaveArg<0>(&observer));
+  EXPECT_CALL(*mock_manager_ptr, IsManagerInitialized())
+      .WillRepeatedly(testing::Return(false));
+
+  // 2. Trigger count (will enter the waiting observer state).
+  counter.Restart();
+  ASSERT_TRUE(observer);
+
+  // 3. Transition manager to initialized and notify the observer.
+  EXPECT_CALL(*mock_manager_ptr, IsManagerInitialized())
+      .WillRepeatedly(testing::Return(true));
+  EXPECT_CALL(*mock_manager_ptr, GetAllDownloads(testing::_)).Times(1);
+  EXPECT_CALL(*mock_manager_ptr, RemoveObserver(observer)).Times(1);
+
+  observer->OnManagerInitialized();
+
+  // 4. Verify that the result is successfully reported.
+  EXPECT_EQ(0u, GetResult());
+}
+
 // Tests that not just standard complete downloads are counted.
 IN_PROC_BROWSER_TEST_F(DownloadsCounterTest, Types) {
   Profile* profile = browser()->profile();
   DownloadsCounter counter(profile);
   counter.Init(profile->GetPrefs(),
-               browsing_data::ClearBrowsingDataTab::ADVANCED,
                base::BindRepeating(&DownloadsCounterTest::ResultCallback,
                                    base::Unretained(this)));
 
@@ -299,7 +396,6 @@ IN_PROC_BROWSER_TEST_F(DownloadsCounterTest, NotPersisted) {
   Profile* profile = browser()->profile();
   DownloadsCounter counter(profile);
   counter.Init(profile->GetPrefs(),
-               browsing_data::ClearBrowsingDataTab::ADVANCED,
                base::BindRepeating(&DownloadsCounterTest::ResultCallback,
                                    base::Unretained(this)));
 
@@ -323,8 +419,8 @@ IN_PROC_BROWSER_TEST_F(DownloadsCounterTest, NotPersisted) {
 }
 
 // Tests that the counter takes time ranges into account.
-// Flaky on Mac (crbug.com/736820)
-#if defined(OS_MAC)
+// Flaky on Mac (crbug.com/40527559)
+#if BUILDFLAG(IS_MAC)
 #define MAYBE_TimeRanges DISABLED_TimeRanges
 #else
 #define MAYBE_TimeRanges TimeRanges
@@ -355,9 +451,8 @@ IN_PROC_BROWSER_TEST_F(DownloadsCounterTest, MAYBE_TimeRanges) {
   Profile* profile = browser()->profile();
   DownloadsCounter counter(profile);
   counter.Init(profile->GetPrefs(),
-               browsing_data::ClearBrowsingDataTab::ADVANCED,
-               base::Bind(&DownloadsCounterTest::ResultCallback,
-                          base::Unretained(this)));
+               base::BindRepeating(&DownloadsCounterTest::ResultCallback,
+                                   base::Unretained(this)));
 
   SetDeletionPeriodPref(browsing_data::TimePeriod::LAST_HOUR);
   EXPECT_EQ(2u, GetResult());

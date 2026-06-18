@@ -31,8 +31,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_TRANSFORMS_INTERPOLATED_TRANSFORM_OPERATION_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_TRANSFORMS_INTERPOLATED_TRANSFORM_OPERATION_H_
 
+#include "base/notreached.h"
 #include "third_party/blink/renderer/platform/transforms/transform_operation.h"
 #include "third_party/blink/renderer/platform/transforms/transform_operations.h"
+#include "third_party/blink/renderer/platform/wtf/casting.h"
 
 namespace blink {
 
@@ -40,49 +42,6 @@ namespace blink {
 class PLATFORM_EXPORT InterpolatedTransformOperation final
     : public TransformOperation {
  public:
-  static scoped_refptr<InterpolatedTransformOperation> Create(
-      const TransformOperations& from,
-      const TransformOperations& to,
-      int starting_index,
-      double progress) {
-    return base::AdoptRef(
-        new InterpolatedTransformOperation(from, to, starting_index, progress));
-  }
-
-  bool CanBlendWith(const TransformOperation& other) const override {
-    return IsSameType(other);
-  }
-
- private:
-  OperationType GetType() const override { return kInterpolated; }
-
-  bool operator==(const TransformOperation&) const override;
-  void Apply(TransformationMatrix&,
-             const FloatSize& border_box_size) const override;
-
-  scoped_refptr<TransformOperation> Accumulate(
-      const TransformOperation&) override {
-    NOTREACHED();
-    return this;
-  }
-
-  scoped_refptr<TransformOperation> Blend(
-      const TransformOperation* from,
-      double progress,
-      bool blend_to_identity = false) override;
-  scoped_refptr<TransformOperation> Zoom(double factor) final {
-    return Create(from_.Zoom(factor), to_.Zoom(factor), starting_index_,
-                  progress_);
-  }
-
-  bool PreservesAxisAlignment() const final {
-    return from_.PreservesAxisAlignment() && to_.PreservesAxisAlignment();
-  }
-
-  bool DependsOnBoxSize() const override {
-    return from_.DependsOnBoxSize() || to_.DependsOnBoxSize();
-  }
-
   InterpolatedTransformOperation(const TransformOperations& from,
                                  const TransformOperations& to,
                                  int starting_index,
@@ -90,7 +49,52 @@ class PLATFORM_EXPORT InterpolatedTransformOperation final
       : from_(from),
         to_(to),
         starting_index_(starting_index),
-        progress_(progress) {}
+        progress_(progress) {
+    // This should only be generated during interpolation when it is impossible
+    // to create a Matrix3DTransformOperation due to layout-dependence.
+    DCHECK(BoxSizeDependencies());
+  }
+
+  void Trace(Visitor* visitor) const override {
+    visitor->Trace(from_);
+    visitor->Trace(to_);
+    TransformOperation::Trace(visitor);
+  }
+
+ protected:
+  bool IsEqualAssumingSameType(const TransformOperation&) const override;
+
+ private:
+  OperationType GetType() const override { return kInterpolated; }
+
+  void Apply(gfx::Transform&, const gfx::SizeF& border_box_size) const override;
+
+  TransformOperation* Accumulate(const TransformOperation&) override {
+    NOTREACHED();
+  }
+  TransformOperation* AccumulateN(const TransformOperation&, int) override {
+    NOTREACHED();
+  }
+
+  TransformOperation* Blend(const TransformOperation* from,
+                            double progress,
+                            bool blend_to_identity = false) override;
+  TransformOperation* Zoom(double factor) final {
+    return MakeGarbageCollected<InterpolatedTransformOperation>(
+        from_.Zoom(factor), to_.Zoom(factor), starting_index_, progress_);
+  }
+
+  bool PreservesAxisAlignment() const final {
+    return from_.PreservesAxisAlignment() && to_.PreservesAxisAlignment();
+  }
+  bool IsIdentityOrTranslation() const final {
+    return from_.IsIdentityOrTranslation() && to_.IsIdentityOrTranslation();
+  }
+
+  BoxSizeDependency BoxSizeDependencies() const override {
+    return CombineDependencies(from_.BoxSizeDependencies(starting_index_),
+                               to_.BoxSizeDependencies(starting_index_));
+  }
 
   const TransformOperations from_;
   const TransformOperations to_;
@@ -99,6 +103,13 @@ class PLATFORM_EXPORT InterpolatedTransformOperation final
   // start of the list and matrix interpolation for the remainder.
   int starting_index_;
   double progress_;
+};
+
+template <>
+struct DowncastTraits<InterpolatedTransformOperation> {
+  static bool AllowFrom(const TransformOperation& transform) {
+    return transform.GetType() == TransformOperation::kInterpolated;
+  }
 };
 
 }  // namespace blink

@@ -1,16 +1,17 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chromecast.base;
 
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
-import static org.junit.Assert.assertThat;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.BlockJUnit4ClassRunner;
 
+import org.chromium.base.test.util.Batch;
 import org.chromium.chromecast.base.Inheritance.Base;
 import org.chromium.chromecast.base.Inheritance.Derived;
 
@@ -23,7 +24,58 @@ import java.util.List;
  * This includes advanced behaviors like subscription-currying and correct use of generics.
  */
 @RunWith(BlockJUnit4ClassRunner.class)
+@Batch(Batch.UNIT_TESTS)
 public class ObservableMiscellaneousTest {
+    @Test
+    public void testMakeNotifyOneAtATime() {
+        ReactiveRecorder r = ReactiveRecorder.record(observer -> {
+            observer.open(1).close();
+            observer.open(2).close();
+            observer.open(3).close();
+            return Scope.NO_OP;
+        });
+        r.verify().opened(1).closed(1).opened(2).closed(2).opened(3).closed(3).end();
+    }
+
+    @Test
+    public void testMakeNotifyAllAtOnce() {
+        ReactiveRecorder r = ReactiveRecorder.record(
+                observer -> observer.open("a").and(observer.open("b")).and(observer.open("c")));
+        r.verify().opened("a").opened("b").opened("c").end();
+        r.unsubscribe();
+        r.verify().closed("c").closed("b").closed("a").end();
+    }
+
+    @Test
+    public void testEmpty() {
+        ReactiveRecorder r = ReactiveRecorder.record(Observable.empty());
+        r.verify().end();
+        r.unsubscribe();
+        r.verify().end();
+    }
+
+    @Test
+    public void testAssignEmptyToTypedObservable() {
+        Observable<String> a = Observable.empty();
+        Observable<Integer> b = Observable.empty();
+    }
+
+    @Test
+    public void testJustInt() {
+        ReactiveRecorder r = ReactiveRecorder.record(Observable.just(100));
+        r.verify().opened(100).end();
+        r.unsubscribe();
+        r.verify().closed(100).end();
+    }
+
+    @Test
+    public void testJustString() {
+        ReactiveRecorder r = ReactiveRecorder.record(Observable.just("hello"));
+        r.verify().opened("hello").end();
+        r.unsubscribe();
+        r.verify().closed("hello").end();
+    }
+
     @Test
     public void testBeingTooCleverWithObserversAndInheritance() {
         Controller<Base> baseController = new Controller<>();

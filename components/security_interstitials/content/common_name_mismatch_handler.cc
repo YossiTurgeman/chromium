@@ -1,13 +1,15 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/security_interstitials/content/common_name_mismatch_handler.h"
 
+#include <optional>
+#include <string>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/check_op.h"
+#include "base/functional/bind.h"
 #include "base/strings/string_number_conversions.h"
 #include "components/ssl_errors/error_classification.h"
 #include "net/base/load_flags.h"
@@ -34,9 +36,8 @@ CommonNameMismatchHandler::~CommonNameMismatchHandler() {
 CommonNameMismatchHandler::TestingState
     CommonNameMismatchHandler::testing_state_ = NOT_TESTING;
 
-void CommonNameMismatchHandler::CheckSuggestedUrl(
-    const GURL& url,
-    const CheckUrlCallback& callback) {
+void CommonNameMismatchHandler::CheckSuggestedUrl(const GURL& url,
+                                                  CheckUrlCallback callback) {
   // Should be used only in tests.
   if (testing_state_ == IGNORE_REQUESTS_FOR_TESTING)
     return;
@@ -46,7 +47,7 @@ void CommonNameMismatchHandler::CheckSuggestedUrl(
   DCHECK(check_url_callback_.is_null());
 
   check_url_ = url;
-  check_url_callback_ = callback;
+  check_url_callback_ = std::move(callback);
 
   // Create traffic annotation tag.
   net::NetworkTrafficAnnotationTag traffic_annotation =
@@ -139,8 +140,8 @@ void CommonNameMismatchHandler::OnSimpleLoaderHandler(
     response_code = head->headers->response_code();
   }
   if (response_code == 200 && final_url.SchemeIsCryptographic() &&
-      final_url.host() != request_url_.host()) {
-    DCHECK_EQ(final_url.host(), final_url.host());
+      final_url.GetHost() != request_url_.GetHost()) {
+    DCHECK_EQ(final_url.GetHost(), check_url_.GetHost());
     result = SUGGESTED_URL_AVAILABLE;
   }
   simple_url_loader_.reset();
@@ -148,6 +149,7 @@ void CommonNameMismatchHandler::OnSimpleLoaderHandler(
 }
 
 void CommonNameMismatchHandler::OnSimpleLoaderRedirect(
+    const GURL& url_before_redirect,
     const net::RedirectInfo& redirect_info,
     const network::mojom::URLResponseHead& response_head,
     std::vector<std::string>* to_be_removed_headers) {
@@ -161,7 +163,7 @@ void CommonNameMismatchHandler::OnSimpleLoaderResponseStarted(
 }
 
 void CommonNameMismatchHandler::OnSimpleLoaderComplete(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   OnSimpleLoaderHandler(simple_url_loader_->GetFinalURL(),
                         simple_url_loader_->ResponseInfo());
 }

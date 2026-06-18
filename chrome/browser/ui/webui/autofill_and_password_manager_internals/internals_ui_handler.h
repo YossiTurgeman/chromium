@@ -1,15 +1,16 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_WEBUI_AUTOFILL_AND_PASSWORD_MANAGER_INTERNALS_INTERNALS_UI_HANDLER_H_
 #define CHROME_BROWSER_UI_WEBUI_AUTOFILL_AND_PASSWORD_MANAGER_INTERNALS_INTERNALS_UI_HANDLER_H_
 
+#include <optional>
 #include <string>
 
-#include "base/bind.h"
-#include "base/macros.h"
-#include "base/optional.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/values.h"
 #include "components/autofill/core/browser/logging/log_receiver.h"
 #include "content/public/browser/browsing_data_remover.h"
 #include "content/public/browser/web_ui_message_handler.h"
@@ -20,18 +21,20 @@ class LogRouter;
 
 namespace content {
 class BrowserContext;
-class WebUIDataSource;
 }  // namespace content
+
+class Profile;
 
 namespace autofill {
 
-constexpr char kCacheResetDone[] =
+inline constexpr char kCacheResetDone[] =
     "Done. Please close and reopen all tabs that should be affected by the "
     "cache reset.";
-constexpr char kCacheResetAlreadyInProgress[] = "Reset already in progress";
+inline constexpr char kCacheResetAlreadyInProgress[] =
+    "Reset already in progress";
 
-content::WebUIDataSource* CreateInternalsHTMLSource(
-    const std::string& source_name);
+void CreateAndAddInternalsHTMLSource(Profile* profile,
+                                     const std::string& source_name);
 
 // Class that wipes responses from the Autofill server from the HTTP cache.
 class AutofillCacheResetter : public content::BrowsingDataRemover::Observer {
@@ -48,8 +51,7 @@ class AutofillCacheResetter : public content::BrowsingDataRemover::Observer {
  private:
   // Implements content::BrowsingDataRemover::Observer.
   void OnBrowsingDataRemoverDone(uint64_t failed_data_types) override;
-
-  content::BrowsingDataRemover* remover_;
+  raw_ptr<content::BrowsingDataRemover> remover_;
   Callback callback_;
 };
 
@@ -57,13 +59,18 @@ class AutofillCacheResetter : public content::BrowsingDataRemover::Observer {
 // chrome://autofill-internals that takes care of subscribing to the autofill
 // logging instance.
 class InternalsUIHandler : public content::WebUIMessageHandler,
-                           public autofill::LogReceiver {
+                           public LogReceiver {
  public:
   using GetLogRouterFunction =
-      base::RepeatingCallback<autofill::LogRouter*(content::BrowserContext*)>;
+      base::RepeatingCallback<LogRouter*(content::BrowserContext*)>;
 
   InternalsUIHandler(std::string call_on_load,
+                     base::Value call_on_load_argument,
                      GetLogRouterFunction get_log_router_function);
+
+  InternalsUIHandler(const InternalsUIHandler&) = delete;
+  InternalsUIHandler& operator=(const InternalsUIHandler&) = delete;
+
   ~InternalsUIHandler() override;
 
  private:
@@ -75,27 +82,35 @@ class InternalsUIHandler : public content::WebUIMessageHandler,
   void OnJavascriptDisallowed() override;
 
   // LogReceiver implementation.
-  void LogEntry(const base::Value& entry) override;
+  void LogEntry(const base::DictValue& entry) override;
 
   void StartSubscription();
   void EndSubscription();
 
   // JavaScript call handler.
-  void OnLoaded(const base::ListValue* args);
-  void OnResetCache(const base::ListValue* args);
+  void OnDeleteAutofillAiCacheEntry(const base::ListValue& args);
+  void OnGetAutofillAiCache(const base::ListValue& args);
+  void OnLoaded(const base::ListValue& args);
+  void OnResetCache(const base::ListValue& args);
+  void OnDumpAddresses(const base::ListValue& args);
+  void OnSetPasswordChangeOverrideUrl(const base::ListValue& args);
+#if !BUILDFLAG(IS_ANDROID)
+  void CheckAutofillAiPermissions(const base::ListValue& args);
+  void SetDomNodeId(const base::ListValue& args);
+#endif
 
   void OnResetCacheDone(const std::string& message);
 
   // JavaScript function to be called on load.
   std::string call_on_load_;
+  // The argument to be passed to the on load function.
+  base::Value call_on_load_argument_;
   GetLogRouterFunction get_log_router_function_;
 
   // Whether |this| is registered as a log receiver with the LogRouter.
   bool registered_with_log_router_ = false;
 
-  base::Optional<AutofillCacheResetter> autofill_cache_resetter_;
-
-  DISALLOW_COPY_AND_ASSIGN(InternalsUIHandler);
+  std::optional<AutofillCacheResetter> autofill_cache_resetter_;
 };
 
 }  // namespace autofill

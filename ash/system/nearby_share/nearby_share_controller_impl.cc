@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,16 +10,22 @@ NearbyShareControllerImpl::NearbyShareControllerImpl() = default;
 
 NearbyShareControllerImpl::~NearbyShareControllerImpl() = default;
 
-void NearbyShareControllerImpl::HighVisibilityCountdownUpdate(
-    base::TimeDelta remaining_time) {
-  for (auto& observer : observers_) {
-    observer.OnHighVisibilityCountdownUpdate(remaining_time);
-  }
-}
-
 void NearbyShareControllerImpl::HighVisibilityEnabledChanged(bool enabled) {
   for (auto& observer : observers_) {
     observer.OnHighVisibilityEnabledChanged(enabled);
+  }
+}
+
+void NearbyShareControllerImpl::NearbyShareEnabledChanged(bool enabled) {
+  for (auto& observer : observers_) {
+    observer.OnNearbyShareEnabledChanged(enabled);
+  }
+}
+
+void NearbyShareControllerImpl::VisibilityChanged(
+    ::nearby_share::mojom::Visibility visibility) const {
+  for (auto& observer : observers_) {
+    observer.OnVisibilityChanged(visibility);
   }
 }
 

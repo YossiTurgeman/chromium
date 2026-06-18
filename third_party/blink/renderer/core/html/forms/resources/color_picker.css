@@ -1,4 +1,4 @@
-/* Copyright (C) 2019 The Chromium Authors. All rights reserved.
+/* Copyright 2019 The Chromium Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -45,10 +45,6 @@ hue-slider {
 }
 
 eye-dropper {
-  background-image: -webkit-image-set(url(eye_dropper_icon.svg) 1x);
-  background-origin: content-box;
-  background-repeat: no-repeat;
-  background-size: contain;
   border-radius: 2px;
   box-sizing: border-box;
   height: 32px;
@@ -168,7 +164,7 @@ format-toggler:hover {
   background-color: #F7F7F7;
 }
 
-#up-down-icon {
+.icon-container {
   display: flex;
   align-items: center;
 }
@@ -204,12 +200,23 @@ channel-label {
   color-selection-ring {
     forced-color-adjust: none;
   }
+  color-selection-ring:focus {
+    color: Highlight;
+  }
   color-picker {
     border: 1px solid WindowText;
     border-radius: 2px;
   }
   format-toggler {
     border: 1px solid WindowText;
+  }
+  format-toggler:hover,
+  input:hover {
+    border: 1px solid Highlight;
+  }
+  eye-dropper:hover {
+    border: 1px solid Highlight;
+    padding: 5px;
   }
 }
 
@@ -220,6 +227,11 @@ channel-label {
     border: 1px solid #858585;
   }
 
+  eye-dropper.selected {
+    background-color: #454545;
+  }
+
+  eye-dropper:not(.selected):hover,
   format-toggler:hover {
     background-color: #545454;
   }
@@ -237,4 +249,5 @@ channel-label {
   .up-down-icon path {
     fill: #FFFFFF;
   }
+
  }

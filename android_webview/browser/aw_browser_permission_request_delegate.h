@@ -1,12 +1,14 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ANDROID_WEBVIEW_BROWSER_AW_BROWSER_PERMISSION_REQUEST_DELEGATE_H_
 #define ANDROID_WEBVIEW_BROWSER_AW_BROWSER_PERMISSION_REQUEST_DELEGATE_H_
 
-#include "base/callback_forward.h"
-#include "url/gurl.h"
+#include "android_webview/browser/permission/permission_callback.h"
+#include "base/functional/callback_forward.h"
+
+class GURL;
 
 namespace android_webview {
 
@@ -20,20 +22,18 @@ class AwBrowserPermissionRequestDelegate {
 
   virtual void RequestProtectedMediaIdentifierPermission(
       const GURL& origin,
-      base::OnceCallback<void(bool)> callback) = 0;
+      PermissionCallback callback) = 0;
 
   virtual void CancelProtectedMediaIdentifierPermissionRequests(
       const GURL& origin) = 0;
 
-  virtual void RequestGeolocationPermission(
-      const GURL& origin,
-      base::OnceCallback<void(bool)> callback) = 0;
+  virtual void RequestGeolocationPermission(const GURL& origin,
+                                            PermissionCallback callback) = 0;
 
   virtual void CancelGeolocationPermissionRequests(const GURL& origin) = 0;
 
-  virtual void RequestMIDISysexPermission(
-      const GURL& origin,
-      base::OnceCallback<void(bool)> callback) = 0;
+  virtual void RequestMIDISysexPermission(const GURL& origin,
+                                          PermissionCallback callback) = 0;
 
   virtual void CancelMIDISysexPermissionRequests(const GURL& origin) = 0;
 
@@ -42,4 +42,5 @@ class AwBrowserPermissionRequestDelegate {
 };
 
 }  // namespace android_webview
+
 #endif  // ANDROID_WEBVIEW_BROWSER_AW_BROWSER_PERMISSION_REQUEST_DELEGATE_H_

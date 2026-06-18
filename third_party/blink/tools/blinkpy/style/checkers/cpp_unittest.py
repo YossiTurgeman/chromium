@@ -35,7 +35,6 @@
 # FIXME: Add a good test that tests UpdateIncludeState.
 
 import os
-import random
 import re
 import unittest
 
@@ -266,7 +265,7 @@ class CppStyleTestBase(unittest.TestCase):
         tuple_position: a tuple (row, column) to compare against.
         """
         self.assertEqual(
-            position, cpp_style.Position(tuple_position[0], tuple_position[1]),
+            (position.row, position.column), tuple_position,
             'position %s, tuple_position %s' % (position, tuple_position))
 
 
@@ -469,8 +468,8 @@ class CppStyleTest(CppStyleTestBase):
     # Test get line width.
     def test_get_line_width(self):
         self.assertEqual(0, cpp_style.get_line_width(''))
-        self.assertEqual(10, cpp_style.get_line_width(u'x' * 10))
-        self.assertEqual(16, cpp_style.get_line_width(u'都|道|府|県|支庁'))
+        self.assertEqual(10, cpp_style.get_line_width('x' * 10))
+        self.assertEqual(16, cpp_style.get_line_width('都|道|府|県|支庁'))
 
     def test_find_next_multi_line_comment_start(self):
         self.assertEqual(1,
@@ -1360,10 +1359,9 @@ class CppStyleTest(CppStyleTestBase):
     def test_invalid_utf8(self):
         def do_test(self, raw_bytes, has_invalid_utf8):
             error_collector = ErrorCollector(self.assertTrue)
-            self.process_file_data(
-                'foo.cpp', 'cpp',
-                unicode(raw_bytes, 'utf8', 'replace').split('\n'),
-                error_collector)
+            unicode_string = raw_bytes.decode('utf8', 'replace').split('\n')
+            self.process_file_data('foo.cpp', 'cpp', unicode_string,
+                                   error_collector)
             # The warning appears only once.
             self.assertEqual(
                 int(has_invalid_utf8),
@@ -1372,12 +1370,12 @@ class CppStyleTest(CppStyleTestBase):
                     ' (or Unicode replacement character).'
                     '  [readability/utf8] [5]'))
 
-        do_test(self, 'Hello world\n', False)
-        do_test(self, '\xe9\x8e\xbd\n', False)
-        do_test(self, '\xe9x\x8e\xbd\n', True)
+        do_test(self, b'Hello world\n', False)
+        do_test(self, b'\xe9\x8e\xbd\n', False)
+        do_test(self, b'\xe9x\x8e\xbd\n', True)
         # This is the encoding of the replacement character itself (which
-        # you can see by evaluating codecs.getencoder('utf8')(u'\ufffd')).
-        do_test(self, '\xef\xbf\xbd\n', True)
+        # you can see by evaluating codecs.getencoder('utf8')('\ufffd')).
+        do_test(self, b'\xef\xbf\xbd\n', True)
 
     def test_is_blank_line(self):
         self.assertTrue(cpp_style.is_blank_line(''))
@@ -1579,37 +1577,6 @@ class CppStyleTest(CppStyleTestBase):
         self.assert_lint('const char a : 6;', errmsg)
         self.assert_lint('int a = 1 ? 0 : 30;', '')
 
-    # Bitfields which are not declared unsigned or bool will generate a warning.
-    def test_unsigned_bool_bitfields(self):
-        def errmsg(member, name, bit_type):
-            return (
-                'Member %s of class %s defined as a bitfield of type %s. '
-                'Please declare all bitfields as unsigned.  [runtime/bitfields] [4]'
-                % (member, name, bit_type))
-
-        def warning_bitfield_test(member, name, bit_type, bits):
-            self.assert_multi_line_lint(
-                'class %s {\n%s %s: %d;\n}\n' % (name, bit_type, member, bits),
-                errmsg(member, name, bit_type))
-
-        def safe_bitfield_test(member, name, bit_type, bits):
-            self.assert_multi_line_lint(
-                'class %s {\n%s %s: %d;\n}\n' % (name, bit_type, member, bits),
-                '')
-
-        warning_bitfield_test('a', 'A', 'int32_t', 25)
-        warning_bitfield_test('m_someField', 'SomeClass', 'signed', 4)
-        warning_bitfield_test('m_someField', 'SomeClass', 'SomeEnum', 2)
-
-        safe_bitfield_test('a', 'A', 'unsigned', 22)
-        safe_bitfield_test('m_someField', 'SomeClass', 'bool', 1)
-        safe_bitfield_test('m_someField', 'SomeClass', 'unsigned', 2)
-
-        # Declarations in 'Expected' or 'SameSizeAs' classes are OK.
-        warning_bitfield_test('m_bitfields', 'SomeClass', 'int32_t', 32)
-        safe_bitfield_test('m_bitfields', 'ExpectedSomeClass', 'int32_t', 32)
-        safe_bitfield_test('m_bitfields', 'SameSizeAsSomeClass', 'int32_t', 32)
-
 
 class CleansedLinesTest(unittest.TestCase):
     def test_init(self):
@@ -1655,45 +1622,6 @@ class CleansedLinesTest(unittest.TestCase):
                          collapse('StringReplace(body, "\\\\", "\\\\\\\\");'))
         self.assertEqual('\'\' ""', collapse('\'"\' "foo"'))
         self.assertEqual('""', collapse('"a" "b" "c"'))
-
-
-class OrderOfIncludesTest(CppStyleTestBase):
-    def setUp(self):
-        self.include_state = cpp_style._IncludeState()
-
-        # Cheat os.path.abspath called in FileInfo class.
-        self.os_path_abspath_orig = os.path.abspath
-        os.path.abspath = lambda value: value
-
-    def tearDown(self):
-        os.path.abspath = self.os_path_abspath_orig
-
-    def test_try_drop_common_suffixes(self):
-        self.assertEqual('foo/foo',
-                         cpp_style._drop_common_suffixes('foo/foo-inl.h'))
-        self.assertEqual('foo/bar/foo',
-                         cpp_style._drop_common_suffixes('foo/bar/foo_inl.h'))
-        self.assertEqual('foo/foo',
-                         cpp_style._drop_common_suffixes('foo/foo.cpp'))
-        self.assertEqual(
-            'foo/foo_unusualinternal',
-            cpp_style._drop_common_suffixes('foo/foo_unusualinternal.h'))
-        self.assertEqual('', cpp_style._drop_common_suffixes('_test.cpp'))
-        self.assertEqual('test', cpp_style._drop_common_suffixes('test.cpp'))
-
-
-class OrderOfIncludesTest(CppStyleTestBase):
-    def setUp(self):
-        self.include_state = cpp_style._IncludeState()
-
-        # Cheat os.path.abspath called in FileInfo class.
-        self.os_path_abspath_orig = os.path.abspath
-        self.os_path_isfile_orig = os.path.isfile
-        os.path.abspath = lambda value: value
-
-    def tearDown(self):
-        os.path.abspath = self.os_path_abspath_orig
-        os.path.isfile = self.os_path_isfile_orig
 
 
 class CheckForFunctionLengthsTest(CppStyleTestBase):
@@ -2238,6 +2166,20 @@ class WebKitStyleTest(CppStyleTestBase):
             '  doSomethingElseAgain();\n'
             '}\n', '')
         self.assert_multi_line_lint(
+            'if (condition) {\n'
+            '  doSomething();\n'
+            '} else [[likely]] {\n'
+            '  doSomethingElse();\n'
+            '}\n', '')
+        self.assert_multi_line_lint(
+            'if (condition)\n'
+            '    [[unlikely]] {\n'
+            '  doSomething();\n'
+            '} else {\n'
+            '  doSomethingElse();\n'
+            '  doSomethingElseAgain();\n'
+            '}\n', '')
+        self.assert_multi_line_lint(
             '#define TEST_ASSERT(expression) do { if (!(expression)) { '
             'TestsController::shared().testFailed(__FILE__, __LINE__, #expression); '
             'return; } } while (0)\n', '')
@@ -2482,58 +2424,15 @@ class WebKitStyleTest(CppStyleTestBase):
             'If one part of an if-else statement uses curly braces, the other part must too.  [whitespace/braces] [4]'
         )
 
-    def test_null_false_zero(self):
-        # Tests for true/false and null/non-null should be done without
-        # equality comparisons.
-        self.assert_lint(
-            'if (string != NULL)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-        self.assert_lint(
-            'if (p == nullptr)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-        self.assert_lint(
-            'if (condition == true)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-        self.assert_lint(
-            'if (myVariable != /* Why would anyone put a comment here? */ false)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-
-        self.assert_lint(
-            'if (NULL == thisMayBeNull)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-        self.assert_lint(
-            'if (nullptr /* funny place for a comment */ == p)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-        self.assert_lint(
-            'if (true != anotherCondition)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-        self.assert_lint(
-            'if (false == myBoolValue)',
-            'Tests for true/false and null/non-null should be done without equality comparisons.'
-            '  [readability/comparison_to_boolean] [5]')
-
-        self.assert_lint('if (fontType == trueType)', '')
-        self.assert_lint('if (othertrue == fontType)', '')
-        self.assert_lint('if (LIKELY(foo == 0))', '')
-        self.assert_lint('if (UNLIKELY(foo == 0))', '')
-        self.assert_lint('if ((a - b) == 0.5)', '')
-        self.assert_lint('if (0.5 == (a - b))', '')
-
     def test_using_std_swap_ignored(self):
         self.assert_lint('using std::swap;', '', 'foo.cpp')
 
     def test_ctype_fucntion(self):
         self.assert_lint(
-            'int i = isascii(8);',
-            'Use equivalent function in <wtf/ASCIICType.h> instead of the '
-            'isascii() function.  [runtime/ctype_function] [4]', 'foo.cpp')
+            'int i = isascii(8);', 'Use equivalent function in '
+            '"third_party/blink/renderer/platform/wtf/text/ascii_ctype.h" '
+            'instead of the isascii() function.  [runtime/ctype_function] [4]',
+            'foo.cpp')
 
     def test_redundant_virtual(self):
         self.assert_lint(

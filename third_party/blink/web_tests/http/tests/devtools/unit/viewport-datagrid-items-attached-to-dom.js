@@ -1,46 +1,54 @@
-(async function() {
-  await TestRunner.loadModule('data_grid');
 
+import {TestRunner} from 'test_runner';
+
+import * as DataGrid from 'devtools/ui/legacy/components/data_grid/data_grid.js';
+import * as UI from 'devtools/ui/legacy/legacy.js';
+
+(async function() {
   TestRunner.addResult("This tests viewport datagrid.");
 
   var div = document.createElement("div");
-  UI.inspectorView.element.appendChild(div);
+  UI.InspectorView.InspectorView.instance().element.appendChild(div);
 
   var columns = [{id: "id", title: "ID column", width: "250px"}];
-  var dataGrid = new DataGrid.ViewportDataGrid({displayName: 'Test', columns});
-  div.appendChild(dataGrid.element);
+  var dataGrid = new DataGrid.ViewportDataGrid.ViewportDataGrid({displayName: 'Test', columns});
+  var widget = dataGrid.asWidget();
+  widget.show(div);
+  dataGrid.element.style.width = '100%';
   dataGrid.element.style.height = '150px';
+  widget.element.style.width = '100%';
+  widget.element.style.height = '100%';
 
   var rootNode = dataGrid.rootNode();
   var nodes = [];
 
   for (var i = 0; i < 30; i++) {
-    var node = new DataGrid.ViewportDataGridNode({id: "a" + i});
+    var node = new DataGrid.ViewportDataGrid.ViewportDataGridNode({id: "a" + i});
     rootNode.appendChild(node);
     nodes.push(node);
   }
 
-  dataGrid._update();
+  dataGrid.update();
   dumpVisibleNodes();
 
   TestRunner.addResult("Scrolled down to 133px");
   setScrollPosition(133);
-  dataGrid._update();
+  dataGrid.update();
   dumpVisibleNodes();
 
   TestRunner.addResult("Scrolled down to 312px");
   setScrollPosition(312);
-  dataGrid._update();
+  dataGrid.update();
   dumpVisibleNodes();
 
   TestRunner.addResult("Scrolled down to 1000px - should be at bottom");
   setScrollPosition(1000);
-  dataGrid._update();
+  dataGrid.update();
   dumpVisibleNodes();
 
   TestRunner.addResult("Scrolled up to 0px");
   setScrollPosition(0);
-  dataGrid._update();
+  dataGrid.update();
   dumpVisibleNodes();
 
   TestRunner.addResult("Testing removal of some nodes in viewport");
@@ -54,7 +62,7 @@
   // dumpVisibleNodes();
 
   TestRunner.addResult("Should be missing node 0, 1, 3, 5 from dom:");
-  dataGrid._update();
+  dataGrid.update();
   dumpVisibleNodes();
 
   TestRunner.addResult("Testing adding of some nodes back into viewport");
@@ -67,7 +75,7 @@
   dumpVisibleNodes();
 
   TestRunner.addResult("Should have nodes 0, 1, 3, 5 back in dom and previously added nodes removed:");
-  dataGrid._update();
+  dataGrid.update();
   dumpVisibleNodes();
 
   TestRunner.completeTest();
@@ -75,8 +83,8 @@
 
 
   function setScrollPosition(yPosition) {
-    dataGrid._scrollContainer.scrollTop = yPosition;
-    dataGrid._onScroll();
+    dataGrid.scrollContainer.scrollTop = yPosition;
+    dataGrid.onScroll();
   }
 
   function dumpVisibleNodes() {

@@ -1,6 +1,13 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40284755): Remove this and spanify to fix the errors.
+#pragma allow_unsafe_buffers
+#endif
+
+#include "base/time/time.h"
 
 #include <windows.h>
 
@@ -14,10 +21,9 @@
 #include <limits>
 #include <vector>
 
-#include "base/strings/string_piece.h"
 #include "base/threading/platform_thread.h"
-#include "base/time/time.h"
 #include "base/win/registry.h"
+#include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace base {
@@ -26,7 +32,7 @@ namespace {
 // For TimeDelta::ConstexprInitialization
 constexpr int kExpectedDeltaInMilliseconds = 10;
 constexpr TimeDelta kConstexprTimeDelta =
-    TimeDelta::FromMilliseconds(kExpectedDeltaInMilliseconds);
+    Milliseconds(kExpectedDeltaInMilliseconds);
 
 class MockTimeTicks : public TimeTicks {
  public:
@@ -83,9 +89,8 @@ unsigned __stdcall RolloverTestThreadMain(void* param) {
 // results.
 TimeTicks GetTSC() {
   // Using a fake cycle counter frequency for test purposes.
-  return TimeTicks() +
-         TimeDelta::FromMicroseconds(ReadCycleCounter() *
-                                     Time::kMicrosecondsPerSecond / 10000000);
+  return TimeTicks() + Microseconds(ReadCycleCounter() *
+                                    Time::kMicrosecondsPerSecond / 10000000);
 }
 
 }  // namespace
@@ -149,8 +154,9 @@ TEST(TimeTicks, MAYBE_WinRollover) {
 TEST(TimeTicks, SubMillisecondTimers) {
   // IsHighResolution() is false on some systems.  Since the product still works
   // even if it's false, it makes this entire test questionable.
-  if (!TimeTicks::IsHighResolution())
+  if (!TimeTicks::IsHighResolution()) {
     return;
+  }
 
   // Run kRetries attempts to see a sub-millisecond timer.
   constexpr int kRetries = 1000;
@@ -161,8 +167,9 @@ TEST(TimeTicks, SubMillisecondTimers) {
     do {
       delta = TimeTicks::Now() - start_time;
     } while (delta.is_zero());
-    if (!delta.InMilliseconds())
+    if (!delta.InMilliseconds()) {
       return;
+    }
   }
   ADD_FAILURE() << "Never saw a sub-millisecond timer.";
 }
@@ -182,14 +189,21 @@ TEST(TimeTicks, TimeGetTimeCaps) {
 }
 
 TEST(TimeTicks, QueryPerformanceFrequency) {
-  // Test some basic assumptions that we expect about QPC.
+  // Test some basic assumptions that we expect about QPF.
 
   LARGE_INTEGER frequency;
-  BOOL rv = QueryPerformanceFrequency(&frequency);
+  BOOL rv;
+  rv = QueryPerformanceFrequency(&frequency);
   EXPECT_EQ(TRUE, rv);
   EXPECT_GT(frequency.QuadPart, 1000000);  // Expect at least 1MHz
   printf("QueryPerformanceFrequency is %5.2fMHz\n",
          frequency.QuadPart / 1000000.0);
+
+  LARGE_INTEGER frequency_next;
+  rv = QueryPerformanceFrequency(&frequency_next);
+  EXPECT_EQ(TRUE, rv);
+  // Expect that the frequency doesn't change.
+  EXPECT_EQ(frequency_next.QuadPart, frequency.QuadPart);
 }
 
 TEST(TimeTicks, TimerPerformance) {
@@ -223,14 +237,16 @@ TEST(TimeTicks, TimerPerformance) {
   const DWORD kWarmupMs = 50;
   for (;;) {
     DWORD elapsed = GetTickCount() - start_tick;
-    if (elapsed > kWarmupMs)
+    if (elapsed > kWarmupMs) {
       break;
+    }
   }
 
   for (const auto& test_case : cases) {
     TimeTicks start = TimeTicks::Now();
-    for (int index = 0; index < kLoops; index++)
+    for (int index = 0; index < kLoops; index++) {
       test_case.func();
+    }
     TimeTicks stop = TimeTicks::Now();
     // Turning off the check for acceptible delays.  Without this check,
     // the test really doesn't do much other than measure.  But the
@@ -250,7 +266,7 @@ TEST(TimeTicks, TimerPerformance) {
 // only used in Chromium for QueryThreadCycleTime, and QueryThreadCycleTime
 // doesn't use a constant-rate timer on ARM64.
 TEST(TimeTicks, TSCTicksPerSecond) {
-  if (ThreadTicks::IsSupported()) {
+  if (time_internal::HasConstantRateTSC()) {
     ThreadTicks::WaitUntilInitialized();
 
     // Read the CPU frequency from the registry.
@@ -264,7 +280,7 @@ TEST(TimeTicks, TSCTicksPerSecond) {
 
     // Expect the measured TSC frequency to be similar to the processor
     // frequency from the registry (0.5% error).
-    double tsc_mhz_measured = ThreadTicks::TSCTicksPerSecond() / 1e6;
+    double tsc_mhz_measured = time_internal::TSCTicksPerSecond() / 1e6;
     EXPECT_NEAR(tsc_mhz_measured, processor_mhz_from_registry,
                 0.005 * processor_mhz_from_registry);
   }
@@ -272,8 +288,9 @@ TEST(TimeTicks, TSCTicksPerSecond) {
 #endif
 
 TEST(TimeTicks, FromQPCValue) {
-  if (!TimeTicks::IsHighResolution())
+  if (!TimeTicks::IsHighResolution()) {
     return;
+  }
 
   LARGE_INTEGER frequency;
   ASSERT_TRUE(QueryPerformanceFrequency(&frequency));
@@ -354,14 +371,13 @@ TEST(TimeDelta, FromFileTime) {
   ft.dwHighDateTime = 0;
 
   // 100100 ns ~= 100 us.
-  EXPECT_EQ(TimeDelta::FromMicroseconds(100), TimeDelta::FromFileTime(ft));
+  EXPECT_EQ(Microseconds(100), TimeDelta::FromFileTime(ft));
 
   ft.dwLowDateTime = 0;
   ft.dwHighDateTime = 1;
 
   // 2^32 * 100 ns ~= 2^32 * 10 us.
-  EXPECT_EQ(TimeDelta::FromMicroseconds((1ull << 32) / 10),
-            TimeDelta::FromFileTime(ft));
+  EXPECT_EQ(Microseconds((1ull << 32) / 10), TimeDelta::FromFileTime(ft));
 }
 
 TEST(TimeDelta, FromWinrtDateTime) {
@@ -374,57 +390,44 @@ TEST(TimeDelta, FromWinrtDateTime) {
   dt.UniversalTime = 101;
 
   // 101 * 100 ns ~= 10.1 microseconds.
-  EXPECT_EQ(TimeDelta::FromMicrosecondsD(10.1),
-            TimeDelta::FromWinrtDateTime(dt));
+  EXPECT_EQ(Microseconds(10.1), TimeDelta::FromWinrtDateTime(dt));
 }
 
 TEST(TimeDelta, ToWinrtDateTime) {
-  auto time_delta = TimeDelta::FromSeconds(0);
+  auto time_delta = Seconds(0);
 
   // No delta since epoch = 0 DateTime.
   EXPECT_EQ(0, time_delta.ToWinrtDateTime().UniversalTime);
 
-  time_delta = TimeDelta::FromMicrosecondsD(10);
+  time_delta = Microseconds(10);
 
   // 10 microseconds = 100 * 100 ns.
   EXPECT_EQ(100, time_delta.ToWinrtDateTime().UniversalTime);
 }
 
-TEST(HighResolutionTimer, GetUsage) {
-  EXPECT_EQ(0.0, Time::GetHighResolutionTimerUsage());
+TEST(TimeDelta, FromWinrtTimeSpan) {
+  ABI::Windows::Foundation::TimeSpan ts;
+  ts.Duration = 0;
 
-  Time::ResetHighResolutionTimerUsage();
+  // 0.
+  EXPECT_EQ(TimeDelta(), TimeDelta::FromWinrtTimeSpan(ts));
 
-  // 0% usage since the timer isn't activated regardless of how much time has
-  // elapsed.
-  EXPECT_EQ(0.0, Time::GetHighResolutionTimerUsage());
-  Sleep(10);
-  EXPECT_EQ(0.0, Time::GetHighResolutionTimerUsage());
+  ts.Duration = 101;
 
-  Time::ActivateHighResolutionTimer(true);
-  Time::ResetHighResolutionTimerUsage();
+  // 101 * 100 ns ~= 10.1 microseconds.
+  EXPECT_EQ(Microseconds(10.1), TimeDelta::FromWinrtTimeSpan(ts));
+}
 
-  Sleep(20);
-  // 100% usage since the timer has been activated entire time.
-  EXPECT_EQ(100.0, Time::GetHighResolutionTimerUsage());
+TEST(TimeDelta, ToWinrtTimeSpan) {
+  auto time_delta = Seconds(0);
 
-  Time::ActivateHighResolutionTimer(false);
-  Sleep(20);
-  double usage1 = Time::GetHighResolutionTimerUsage();
-  // usage1 should be about 50%.
-  EXPECT_LT(usage1, 100.0);
-  EXPECT_GT(usage1, 0.0);
+  // 0.
+  EXPECT_EQ(0, time_delta.ToWinrtTimeSpan().Duration);
 
-  Time::ActivateHighResolutionTimer(true);
-  Sleep(10);
-  Time::ActivateHighResolutionTimer(false);
-  double usage2 = Time::GetHighResolutionTimerUsage();
-  // usage2 should be about 60%.
-  EXPECT_LT(usage2, 100.0);
-  EXPECT_GT(usage2, usage1);
+  time_delta = Microseconds(10);
 
-  Time::ResetHighResolutionTimerUsage();
-  EXPECT_EQ(0.0, Time::GetHighResolutionTimerUsage());
+  // 10 microseconds = 100 * 100 ns.
+  EXPECT_EQ(100, time_delta.ToWinrtTimeSpan().Duration);
 }
 
 }  // namespace base

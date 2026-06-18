@@ -1,9 +1,13 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/views/accessibility/ax_virtual_view_wrapper.h"
 
+#include <string>
+
+#include "base/memory/raw_ptr.h"
+#include "base/strings/strcat.h"
 #include "ui/views/accessibility/ax_view_obj_wrapper.h"
 #include "ui/views/accessibility/ax_virtual_view.h"
 #include "ui/views/accessibility/view_accessibility.h"
@@ -11,39 +15,45 @@
 
 namespace views {
 
-AXVirtualViewWrapper::AXVirtualViewWrapper(AXVirtualView* virtual_view,
-                                           AXAuraObjCache* cache)
-    : AXAuraObjWrapper(cache), virtual_view_(virtual_view) {}
+AXVirtualViewWrapper::AXVirtualViewWrapper(AXAuraObjCache* cache,
+                                           AXVirtualView* virtual_view)
+    : AXAuraObjWrapper(cache), virtual_view_(virtual_view) {
+  virtual_view->set_cache(cache);
+}
 
 AXVirtualViewWrapper::~AXVirtualViewWrapper() = default;
-
-bool AXVirtualViewWrapper::IsIgnored() {
-  return false;
-}
 
 AXAuraObjWrapper* AXVirtualViewWrapper::GetParent() {
   if (virtual_view_->virtual_parent_view()) {
     return const_cast<AXVirtualView*>(virtual_view_->virtual_parent_view())
         ->GetOrCreateWrapper(aura_obj_cache_);
   }
-  if (virtual_view_->GetOwnerView())
+  if (virtual_view_->GetOwnerView()) {
     return aura_obj_cache_->GetOrCreate(virtual_view_->GetOwnerView());
+  }
 
   return nullptr;
 }
 
 void AXVirtualViewWrapper::GetChildren(
-    std::vector<AXAuraObjWrapper*>* out_children) {
-  for (const auto& child : virtual_view_->children())
+    std::vector<raw_ptr<AXAuraObjWrapper, VectorExperimental>>* out_children) {
+  for (const auto& child : virtual_view_->children()) {
     out_children->push_back(child->GetOrCreateWrapper(aura_obj_cache_));
+  }
 }
 
 void AXVirtualViewWrapper::Serialize(ui::AXNodeData* out_node_data) {
   *out_node_data = virtual_view_->GetData();
+  View* owner_view = virtual_view_->GetOwnerView();
+  if (owner_view && owner_view->GetWidget()) {
+    gfx::Point offset;
+    View::ConvertPointToScreen(owner_view, &offset);
+    out_node_data->relative_bounds.bounds.Offset(offset.x(), offset.y());
+  }
 }
 
-int32_t AXVirtualViewWrapper::GetUniqueId() const {
-  return virtual_view_->GetUniqueId().Get();
+ui::AXNodeID AXVirtualViewWrapper::GetUniqueId() const {
+  return virtual_view_->ViewAccessibility::GetUniqueId();
 }
 
 bool AXVirtualViewWrapper::HandleAccessibleAction(
@@ -52,8 +62,8 @@ bool AXVirtualViewWrapper::HandleAccessibleAction(
 }
 
 std::string AXVirtualViewWrapper::ToString() const {
-  std::string description = "Virtual view child of ";
-  return description + virtual_view_->GetOwnerView()->GetClassName();
+  return base::StrCat({"Virtual view child of ",
+                       virtual_view_->GetOwnerView()->GetClassName()});
 }
 
 }  // namespace views

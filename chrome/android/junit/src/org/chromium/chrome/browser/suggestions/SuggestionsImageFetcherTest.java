@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,40 +14,34 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.chrome.browser.ntp.cards.CardsVariationParameters;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.thumbnail.generator.ThumbnailProvider;
-import org.chromium.chrome.browser.ui.favicon.LargeIconBridge;
-import org.chromium.chrome.browser.ui.favicon.LargeIconBridge.LargeIconCallback;
 import org.chromium.chrome.test.util.browser.suggestions.SuggestionsDependenciesRule;
+import org.chromium.components.favicon.LargeIconBridge;
+import org.chromium.components.favicon.LargeIconBridge.LargeIconCallback;
+import org.chromium.url.GURL;
+import org.chromium.url.JUnitTestGURLs;
 
-import java.util.HashMap;
-
-/**
- * Unit tests for {@link ImageFetcher}.
- */
+/** Unit tests for {@link ImageFetcher}. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
 public class SuggestionsImageFetcherTest {
     public static final int IMAGE_SIZE_PX = 100;
-    public static final String URL_STRING = "http://www.test.com";
+    public static final GURL URL = JUnitTestGURLs.EXAMPLE_URL;
 
-    @Rule
-    public SuggestionsDependenciesRule mSuggestionsDeps = new SuggestionsDependenciesRule();
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Rule public SuggestionsDependenciesRule mSuggestionsDeps = new SuggestionsDependenciesRule();
 
-    @Mock
-    private ThumbnailProvider mThumbnailProvider;
-    @Mock
-    private LargeIconBridge mLargeIconBridge;
+    @Mock private ThumbnailProvider mThumbnailProvider;
+    @Mock private LargeIconBridge mLargeIconBridge;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
-        CardsVariationParameters.setTestVariationParams(new HashMap<>());
 
         mSuggestionsDeps.getFactory().largeIconBridge = mLargeIconBridge;
         mSuggestionsDeps.getFactory().thumbnailProvider = mThumbnailProvider;
@@ -57,10 +51,9 @@ public class SuggestionsImageFetcherTest {
     public void testLargeIconFetch() {
         ImageFetcher imageFetcher = new ImageFetcher(mock(Profile.class));
 
-        imageFetcher.makeLargeIconRequest(URL_STRING, IMAGE_SIZE_PX, mock(LargeIconCallback.class));
+        imageFetcher.makeLargeIconRequest(URL, IMAGE_SIZE_PX, mock(LargeIconCallback.class));
 
         verify(mLargeIconBridge)
-                .getLargeIconForStringUrl(
-                        eq(URL_STRING), eq(IMAGE_SIZE_PX), any(LargeIconCallback.class));
+                .getLargeIconForUrl(eq(URL), eq(IMAGE_SIZE_PX), any(LargeIconCallback.class));
     }
 }

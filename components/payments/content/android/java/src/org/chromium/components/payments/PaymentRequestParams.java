@@ -1,9 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.payments;
 
+import org.chromium.build.annotations.MockedInTests;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.payments.mojom.PaymentDetailsModifier;
 import org.chromium.payments.mojom.PaymentItem;
 import org.chromium.payments.mojom.PaymentMethodData;
@@ -11,10 +14,16 @@ import org.chromium.payments.mojom.PaymentOptions;
 
 import java.util.Map;
 
-/**
- * The parameters of PaymentRequest specified by the merchant.
- */
+/** The parameters of PaymentRequest specified by the merchant. */
+@MockedInTests // Needed due to R8's computeDelayedInterfaceMethodSyntheticBridges. b/147584922
+@NullMarked
 public interface PaymentRequestParams {
+    /**
+     * @return Whether or not the payment request is being aborted. Other methods should not get
+     *         called when the payment request is being aborted.
+     */
+    boolean hasClosed();
+
     /** @return The PaymentOptions set by the merchant.  */
     PaymentOptions getPaymentOptions();
 
@@ -35,5 +44,5 @@ public interface PaymentRequestParams {
      * @return The raw total amount being charged - the total property of the PaymentDetails of
      * payment request.
      */
-    PaymentItem getRawTotal();
+    @Nullable PaymentItem getRawTotal();
 }

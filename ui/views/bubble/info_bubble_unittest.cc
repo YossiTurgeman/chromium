@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,7 @@
 #include "ui/views/test/views_test_base.h"
 #include "ui/views/widget/widget.h"
 
-namespace views {
-namespace test {
+namespace views::test {
 
 class InfoBubbleTest : public ViewsTestBase {
  public:
@@ -29,7 +28,8 @@ class InfoBubbleTest : public ViewsTestBase {
     ViewsTestBase::SetUp();
 
     Widget::InitParams params =
-        CreateParamsForTestWidget(Widget::InitParams::TYPE_WINDOW);
+        CreateParamsForTestWidget(Widget::InitParams::CLIENT_OWNS_WIDGET,
+                                  Widget::InitParams::TYPE_WINDOW);
     anchor_widget_ = std::make_unique<Widget>();
     anchor_widget_->Init(std::move(params));
     anchor_widget_->Show();
@@ -47,15 +47,15 @@ class InfoBubbleTest : public ViewsTestBase {
 };
 
 TEST_F(InfoBubbleTest, CreateInfoBubble) {
-  base::string16 text = base::ASCIIToUTF16("test message");
+  std::u16string text = u"test message";
 
-  InfoBubble* info_bubble =
-      new InfoBubble(anchor_widget()->GetContentsView(), text);
+  InfoBubble* info_bubble = new InfoBubble(anchor_widget()->GetContentsView(),
+                                           BubbleBorder::Arrow::TOP_LEFT, text);
   info_bubble->Show();
   TestWidgetObserver bubble_observer(info_bubble->GetWidget());
 
-  EXPECT_EQ(info_bubble->anchor(), anchor_widget()->GetContentsView());
-  EXPECT_EQ(info_bubble->anchor()->GetWidget(), anchor_widget());
+  EXPECT_EQ(info_bubble->GetAnchorView(), anchor_widget()->GetContentsView());
+  EXPECT_EQ(info_bubble->GetAnchorView()->GetWidget(), anchor_widget());
   EXPECT_EQ(text, info_bubble->label_for_testing()->GetText());
   EXPECT_TRUE(info_bubble->GetVisible());
   EXPECT_FALSE(bubble_observer.widget_closed());
@@ -68,7 +68,8 @@ TEST_F(InfoBubbleTest, CreateInfoBubble) {
 // Ensure the InfoBubble is still sized if not supplied with a preferred width.
 TEST_F(InfoBubbleTest, TestPreferredWidthNull) {
   InfoBubble* info_bubble =
-      new InfoBubble(anchor_widget()->GetContentsView(), base::string16());
+      new InfoBubble(anchor_widget()->GetContentsView(),
+                     BubbleBorder::Arrow::TOP_LEFT, std::u16string());
 
   auto child = std::make_unique<View>();
   child->SetPreferredSize(gfx::Size(50, 50));
@@ -85,7 +86,8 @@ TEST_F(InfoBubbleTest, TestPreferredWidth) {
   constexpr int kPreferredWidthSmall = 50;
 
   InfoBubble* info_bubble =
-      new InfoBubble(anchor_widget()->GetContentsView(), base::string16());
+      new InfoBubble(anchor_widget()->GetContentsView(),
+                     BubbleBorder::Arrow::TOP_LEFT, std::u16string());
   info_bubble->Show();
   info_bubble->set_preferred_width(kPreferredWidthLarge);
   info_bubble->SizeToPreferredSize();
@@ -109,7 +111,8 @@ TEST_F(InfoBubbleTest, TestInfoBubbleVisibilityHiddenAnchor) {
   anchor_widget()->Hide();
 
   InfoBubble* info_bubble =
-      new InfoBubble(anchor_widget()->GetContentsView(), base::string16());
+      new InfoBubble(anchor_widget()->GetContentsView(),
+                     BubbleBorder::Arrow::TOP_LEFT, std::u16string());
   info_bubble->Show();
 
   EXPECT_FALSE(info_bubble->GetWidget()->IsVisible());
@@ -119,7 +122,7 @@ TEST_F(InfoBubbleTest, TestInfoBubbleVisibilityHiddenAnchor) {
 
 TEST_F(InfoBubbleTest, TestInfoBubbleAnchorBoundsChanged) {
   InfoBubble* info_bubble = new InfoBubble(anchor_widget()->GetContentsView(),
-                                           base::ASCIIToUTF16(""));
+                                           BubbleBorder::Arrow::TOP_LEFT, u"");
   info_bubble->Show();
 
   gfx::Rect original_bounds =
@@ -136,7 +139,7 @@ TEST_F(InfoBubbleTest, TestInfoBubbleAnchorBoundsChanged) {
 // Iterate through the metadata for InfoBubble to ensure it all works.
 TEST_F(InfoBubbleTest, MetadataTest) {
   InfoBubble* info_bubble = new InfoBubble(anchor_widget()->GetContentsView(),
-                                           base::ASCIIToUTF16(""));
+                                           BubbleBorder::Arrow::TOP_LEFT, u"");
   info_bubble->Show();
 
   test::TestViewMetadata(info_bubble);
@@ -144,5 +147,4 @@ TEST_F(InfoBubbleTest, MetadataTest) {
   RunPendingMessages();
 }
 
-}  // namespace test
-}  // namespace views
+}  // namespace views::test

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,22 +6,29 @@
 #define CHROME_BROWSER_SHARESHEET_SHARESHEET_SERVICE_H_
 
 #include <memory>
+#include <string>
 #include <vector>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string16.h"
-#include "chrome/browser/sharesheet/sharesheet_action_cache.h"
+#include "build/build_config.h"
+#include "chrome/browser/sharesheet/sharesheet_metrics.h"
 #include "chrome/browser/sharesheet/sharesheet_types.h"
+#include "chromeos/components/sharesheet/constants.h"
 #include "components/keyed_service/core/keyed_service.h"
-#include "components/services/app_service/public/mojom/types.mojom.h"
+#include "components/services/app_service/public/cpp/icon_types.h"
+#include "components/services/app_service/public/cpp/intent.h"
+#include "ui/base/accelerators/accelerator.h"
+#include "ui/gfx/native_ui_types.h"
 
 class Profile;
 
 namespace apps {
+class AppServiceProxyAsh;
 struct IntentLaunchInfo;
-class AppServiceProxy;
-}
+}  // namespace apps
 
 namespace views {
 class View;
@@ -31,14 +38,23 @@ namespace content {
 class WebContents;
 }
 
+namespace gfx {
+struct VectorIcon;
+}
+
 namespace sharesheet {
 
-class SharesheetServiceDelegate;
+class ShareActionCache;
+class SharesheetController;
+class SharesheetServiceDelegator;
+class SharesheetUiDelegate;
 
 // The SharesheetService is the root service that provides a sharesheet for
 // Chrome desktop.
 class SharesheetService : public KeyedService {
  public:
+  using GetNativeWindowCallback = base::OnceCallback<gfx::NativeWindow()>;
+
   explicit SharesheetService(Profile* profile);
   ~SharesheetService() override;
 
@@ -46,33 +62,96 @@ class SharesheetService : public KeyedService {
   SharesheetService& operator=(const SharesheetService&) = delete;
 
   // Displays the dialog (aka bubble) for sharing content (or files) with
-  // other applications and targets. |intent| contains the list of the
+  // other applications and targets. `intent` contains the list of the
   // files/content to be shared. If the files to share contains Google
   // Drive hosted document, only drive share action will be shown.
-  void ShowBubble(views::View* bubble_anchor_view,
-                  apps::mojom::IntentPtr intent);
+  //
+  // `delivered_callback` is run to signify that the intent has been
+  // delivered to the target selected by the user (which may then show its own
+  // separate UI, e.g. for Nearby Sharing). `delivered_callback` must be
+  // non-null.
+  // `close_callback` is run to signify that the share flow has finished and the
+  // dialog has closed (this includes separate UI, e.g. Nearby Sharing).
   void ShowBubble(content::WebContents* web_contents,
-                  apps::mojom::IntentPtr intent);
-  void ShowBubble(content::WebContents* web_contents,
-                  apps::mojom::IntentPtr intent,
-                  bool contains_hosted_document);
-  void OnBubbleClosed(uint32_t id, const base::string16& active_action);
-  void OnTargetSelected(uint32_t delegate_id,
-                        const base::string16& target_name,
+                  apps::IntentPtr intent,
+                  LaunchSource source,
+                  DeliveredCallback delivered_callback,
+                  CloseCallback close_callback = base::NullCallback());
+  void ShowBubble(apps::IntentPtr intent,
+                  LaunchSource source,
+                  GetNativeWindowCallback get_native_window_callback,
+                  DeliveredCallback delivered_callback,
+                  CloseCallback close_callback = base::NullCallback());
+
+  // Gets the sharesheet controller for the given |native_window|.
+  SharesheetController* GetSharesheetController(
+      gfx::NativeWindow native_window);
+#if BUILDFLAG(IS_CHROMEOS)
+  // Skips the generic Sharesheet bubble and directly displays the
+  // NearbyShare bubble dialog for ARC.
+  void ShowNearbyShareBubbleForArc(gfx::NativeWindow native_window,
+                                   apps::IntentPtr intent,
+                                   LaunchSource source,
+                                   DeliveredCallback delivered_callback,
+                                   CloseCallback close_callback,
+                                   ActionCleanupCallback cleanup_callback);
+
+  void AddShareActionForTest(ShareActionType type);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+  // |share_action_type| is set to null when testing, but should otherwise have
+  // a valid value.
+  void OnBubbleClosed(gfx::NativeWindow native_window,
+                      const std::optional<ShareActionType>& share_action_type);
+
+  // OnTargetSelected is called by both apps and share actions.
+  // If |type| is kAction, expect |share_action_type| to have a valid
+  // ShareActionType. If |type| is kArcApp or kWebApp, expect |app_name|
+  // to contain a valid app name.
+  void OnTargetSelected(gfx::NativeWindow native_window,
                         const TargetType type,
-                        apps::mojom::IntentPtr intent,
+                        const std::optional<ShareActionType>& share_action_type,
+                        const std::optional<std::u16string>& app_name,
+                        apps::IntentPtr intent,
                         views::View* share_action_view);
-  SharesheetServiceDelegate* GetDelegate(uint32_t delegate_id);
+
+  // Only share actions, which have a |share_action_type|, call this function.
+  bool OnAcceleratorPressed(const ui::Accelerator& accelerator,
+                            const ShareActionType share_action_type);
 
   // If the files to share contains a Google Drive hosted document, only the
   // drive share action will be shown.
-  bool HasShareTargets(const apps::mojom::IntentPtr& intent,
-                       bool contains_hosted_document);
+  bool HasShareTargets(const apps::IntentPtr& intent);
+
   Profile* GetProfile();
+
+  // Only share actions, which have a |share_action_type|, are expected to have
+  // a vector icon. Return nullptr if |share_action_type| is null.
+  const gfx::VectorIcon* GetVectorIcon(
+      const std::optional<ShareActionType>& share_action_type);
+
+  // ==========================================================================
+  // ========================== Testing APIs ==================================
+  // ==========================================================================
+  void ShowBubbleForTesting(gfx::NativeWindow native_window,
+                            apps::IntentPtr intent,
+                            LaunchSource source,
+                            DeliveredCallback delivered_callback,
+                            CloseCallback close_callback,
+                            std::vector<::sharesheet::ShareActionType> actions);
+  SharesheetUiDelegate* GetUiDelegateForTesting(
+      gfx::NativeWindow native_window);
+  static void SetSelectedAppForTesting(const std::u16string& target_name);
 
  private:
   using SharesheetServiceIconLoaderCallback =
       base::OnceCallback<void(std::vector<TargetInfo> targets)>;
+
+  void PrepareToShowBubble(apps::IntentPtr intent,
+                           GetNativeWindowCallback get_native_window_callback,
+                           DeliveredCallback delivered_callback,
+                           CloseCallback close_callback);
+
+  std::vector<TargetInfo> GetActionsForIntent(const apps::IntentPtr& intent);
 
   void LoadAppIcons(std::vector<apps::IntentLaunchInfo> intent_launch_info,
                     std::vector<TargetInfo> targets,
@@ -83,25 +162,42 @@ class SharesheetService : public KeyedService {
                     std::vector<TargetInfo> targets,
                     size_t index,
                     SharesheetServiceIconLoaderCallback callback,
-                    apps::mojom::IconValuePtr icon_value);
+                    apps::IconValuePtr icon_value);
 
-  void OnAppIconsLoaded(std::unique_ptr<SharesheetServiceDelegate> delegate,
-                        apps::mojom::IntentPtr intent,
+  void OnAppIconsLoaded(apps::IntentPtr intent,
+                        GetNativeWindowCallback get_native_window_callback,
+                        DeliveredCallback delivered_callback,
+                        CloseCallback close_callback,
                         std::vector<TargetInfo> targets);
 
-  void ShowBubbleWithDelegate(
-      std::unique_ptr<SharesheetServiceDelegate> delegate,
-      apps::mojom::IntentPtr intent,
-      bool contains_hosted_document);
+  void OnReadyToShowBubble(gfx::NativeWindow native_window,
+                           apps::IntentPtr intent,
+                           DeliveredCallback delivered_callback,
+                           CloseCallback close_callback,
+                           std::vector<TargetInfo> targets);
 
-  uint32_t delegate_counter_ = 0;
-  Profile* profile_;
-  std::unique_ptr<SharesheetActionCache> sharesheet_action_cache_;
-  apps::AppServiceProxy* app_service_proxy_;
+  void LaunchApp(const std::u16string& target_name, apps::IntentPtr intent);
 
-  // Record of all active SharesheetServiceDelegates. These can be retrieved
+  SharesheetServiceDelegator* GetOrCreateDelegator(
+      gfx::NativeWindow native_window);
+  SharesheetServiceDelegator* GetDelegator(gfx::NativeWindow native_window);
+
+  void RecordUserActionMetrics(
+      const std::optional<ShareActionType>& share_action_type,
+      const std::optional<std::u16string>& app_name);
+  void RecordTargetCountMetrics(const std::vector<TargetInfo>& targets);
+  // Makes |intent| related UMA recordings.
+  void RecordShareDataMetrics(const apps::IntentPtr& intent);
+
+  raw_ptr<Profile> profile_;
+
+  // Record of all active SharesheetServiceDelegators. These can be retrieved
   // by ShareActions and used as SharesheetControllers to make bubble changes.
-  std::vector<std::unique_ptr<SharesheetServiceDelegate>> active_delegates_;
+  std::vector<std::unique_ptr<SharesheetServiceDelegator>> active_delegators_;
+
+  // Action may have a reference to the delegator, so define before delegator.
+  std::unique_ptr<ShareActionCache> share_action_cache_;
+  raw_ptr<apps::AppServiceProxyAsh> app_service_proxy_;
 
   base::WeakPtrFactory<SharesheetService> weak_factory_{this};
 };

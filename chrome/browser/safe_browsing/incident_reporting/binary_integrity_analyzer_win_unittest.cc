@@ -1,26 +1,26 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/safe_browsing/incident_reporting/binary_integrity_analyzer_win.h"
 
+#include <windows.h>
+
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/path_service.h"
 #include "base/test/scoped_path_override.h"
 #include "chrome/browser/safe_browsing/incident_reporting/incident.h"
 #include "chrome/browser/safe_browsing/incident_reporting/mock_incident_receiver.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_version.h"
-#include "components/safe_browsing/core/proto/csd.pb.h"
+#include "components/safe_browsing/core/common/proto/csd.pb.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-
-#include <windows.h>
 
 using ::testing::_;
 using ::testing::StrictMock;
@@ -65,11 +65,12 @@ BinaryIntegrityAnalyzerWinTest::BinaryIntegrityAnalyzerWinTest() {
 
   // We retrieve DIR_TEST_DATA here because it is based on DIR_EXE and we are
   // about to override the path to the latter.
-  if (!base::PathService::Get(chrome::DIR_TEST_DATA, &test_data_dir_))
+  if (!base::PathService::Get(chrome::DIR_TEST_DATA, &test_data_dir_)) {
     NOTREACHED();
+  }
 
-  exe_dir_override_.reset(
-      new base::ScopedPathOverride(base::DIR_EXE, temp_dir_.GetPath()));
+  exe_dir_override_ = std::make_unique<base::ScopedPathOverride>(
+      base::DIR_EXE, temp_dir_.GetPath());
 }
 
 TEST_F(BinaryIntegrityAnalyzerWinTest, GetCriticalBinariesPath) {
@@ -124,7 +125,7 @@ TEST_F(BinaryIntegrityAnalyzerWinTest, VerifyBinaryIntegrity) {
   // Run check on an infected binary.
   ASSERT_TRUE(EraseFileContent(chrome_elf_path));
 
-  mock_receiver.reset(new StrictMock<MockIncidentReceiver>());
+  mock_receiver = std::make_unique<StrictMock<MockIncidentReceiver>>();
   std::unique_ptr<Incident> incident;
   EXPECT_CALL(*mock_receiver, DoAddIncidentForProcess(_))
       .WillOnce(TakeIncident(&incident));

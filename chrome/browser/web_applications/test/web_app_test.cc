@@ -1,42 +1,82 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/web_applications/test/web_app_test.h"
 
-#include "base/threading/thread_task_runner_handle.h"
-#include "chrome/common/web_application_info.h"
+#include "base/check_deref.h"
+#include "chrome/browser/profiles/profile_manager.h"
+#include "chrome/browser/web_applications/test/debug_info_printer.h"
+#include "chrome/browser/web_applications/test/fake_web_app_provider.h"
+#include "chrome/browser/web_applications/test/fake_web_app_ui_manager.h"
+#include "chrome/browser/web_applications/test/fake_web_contents_manager.h"
+#include "chrome/test/base/testing_profile.h"
+#include "chrome/test/base/testing_profile_manager.h"
+#include "testing/gtest/include/gtest/gtest.h"
 
-namespace web_app {
+WebAppTest::~WebAppTest() = default;
 
-std::string ProviderTypeParamToString(
-    const ::testing::TestParamInfo<ProviderType>& provider_type) {
-  switch (provider_type.param) {
-    case ProviderType::kBookmarkApps:
-      return "BookmarkApps";
-    case ProviderType::kWebApps:
-      return "WebApps";
+void WebAppTest::SetUp() {
+  ASSERT_TRUE(testing_profile_manager_.SetUp());
+  profile_ = testing_profile_manager_.CreateTestingProfile(
+      TestingProfile::kDefaultProfileUserName, /*testing_factories=*/{},
+      shared_url_loader_factory_);
+  content::RenderViewHostTestHarness::SetUp();
+}
+
+void WebAppTest::TearDown() {
+  // Manually shut down the provider and subsystems so that async tasks are
+  // stopped. Without this, async tasks may still be holding onto WebContents
+  // instances, which is checked for in
+  // `content::RenderViewHostTestHarness::TearDown()`. Note:
+  // `DeleteAllTestingProfiles` doesn't actually destruct profiles and therefore
+  // doesn't Shutdown keyed services like the provider.
+  fake_provider().Shutdown();
+
+  os_integration_test_override_.reset();
+  if (testing::Test::HasFailure()) {
+    base::TimeDelta log_time = base::TimeTicks::Now() - start_time_;
+    web_app::test::LogDebugInfoToConsole(
+        testing_profile_manager_.profile_manager()->GetLoadedProfiles(),
+        log_time);
   }
+  // RenderViewHostTestHarness::TearDown destroys the TaskEnvironment. We need
+  // to destroy profiles before that happens, and web contents need to be
+  // destroyed before profiles are destroyed.
+  DeleteContents();
+  // Make sure that we flush any messages related to WebContentsImpl
+  // destruction before we destroy the profiles.
+  base::RunLoop().RunUntilIdle();
+  // Reset `profile_` to prevent dangling.
+  profile_ = nullptr;
+  testing_profile_manager_.DeleteAllTestingProfiles();
+  content::RenderViewHostTestHarness::TearDown();
 }
 
-void TestAcceptDialogCallback(
-    content::WebContents* initiator_web_contents,
-    std::unique_ptr<WebApplicationInfo> web_app_info,
-    ForInstallableSite for_installable_site,
-    InstallManager::WebAppInstallationAcceptanceCallback acceptance_callback) {
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE, base::BindOnce(std::move(acceptance_callback), true /*accept*/,
-                                std::move(web_app_info)));
+content::BrowserContext* WebAppTest::GetBrowserContext() {
+  return profile();
 }
 
-void TestDeclineDialogCallback(
-    content::WebContents* initiator_web_contents,
-    std::unique_ptr<WebApplicationInfo> web_app_info,
-    ForInstallableSite for_installable_site,
-    InstallManager::WebAppInstallationAcceptanceCallback acceptance_callback) {
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE, base::BindOnce(std::move(acceptance_callback),
-                                false /*accept*/, std::move(web_app_info)));
+web_app::WebAppProvider& WebAppTest::provider() const {
+  return *web_app::WebAppProvider::GetForWebApps(profile());
 }
 
-}  // namespace web_app
+web_app::FakeWebAppProvider& WebAppTest::fake_provider() const {
+  return *web_app::FakeWebAppProvider::Get(profile());
+}
+
+web_app::FakeWebContentsManager& WebAppTest::fake_web_contents_manager() const {
+  web_app::FakeWebContentsManager* ptr =
+      provider().web_contents_manager().AsFakeWebContentsManagerForTesting();
+  return CHECK_DEREF(ptr);
+}
+
+web_app::OsIntegrationTestOverrideImpl& WebAppTest::fake_os_integration()
+    const {
+  return os_integration_test_override_->test_override();
+}
+
+web_app::FakeWebAppUiManager& WebAppTest::fake_ui_manager() const {
+  return CHECK_DEREF(
+      fake_provider().GetUiManager().AsFakeWebAppUiManagerForTesting());
+}

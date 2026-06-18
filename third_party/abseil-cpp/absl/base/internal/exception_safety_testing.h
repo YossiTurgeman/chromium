@@ -14,6 +14,8 @@
 
 // Utilities for testing exception-safety
 
+// SKIP_ABSL_INLINE_NAMESPACE_CHECK
+
 #ifndef ABSL_BASE_INTERNAL_EXCEPTION_SAFETY_TESTING_H_
 #define ABSL_BASE_INTERNAL_EXCEPTION_SAFETY_TESTING_H_
 
@@ -38,28 +40,29 @@
 #include "absl/strings/substitute.h"
 #include "absl/utility/utility.h"
 
+// TODO(b/500018833): Update the namespace as appropriate.
 namespace testing {
 
 enum class TypeSpec;
 enum class AllocSpec;
 
 constexpr TypeSpec operator|(TypeSpec a, TypeSpec b) {
-  using T = absl::underlying_type_t<TypeSpec>;
+  using T = std::underlying_type_t<TypeSpec>;
   return static_cast<TypeSpec>(static_cast<T>(a) | static_cast<T>(b));
 }
 
 constexpr TypeSpec operator&(TypeSpec a, TypeSpec b) {
-  using T = absl::underlying_type_t<TypeSpec>;
+  using T = std::underlying_type_t<TypeSpec>;
   return static_cast<TypeSpec>(static_cast<T>(a) & static_cast<T>(b));
 }
 
 constexpr AllocSpec operator|(AllocSpec a, AllocSpec b) {
-  using T = absl::underlying_type_t<AllocSpec>;
+  using T = std::underlying_type_t<AllocSpec>;
   return static_cast<AllocSpec>(static_cast<T>(a) | static_cast<T>(b));
 }
 
 constexpr AllocSpec operator&(AllocSpec a, AllocSpec b) {
-  using T = absl::underlying_type_t<AllocSpec>;
+  using T = std::underlying_type_t<AllocSpec>;
   return static_cast<AllocSpec>(static_cast<T>(a) & static_cast<T>(b));
 }
 
@@ -536,7 +539,22 @@ class ThrowingValue : private exceptions_internal::TrackedObject {
   }
 
   // Memory management operators
-  // Args.. allows us to overload regular and placement new in one shot
+  static void* operator new(size_t s) noexcept(
+      IsSpecified(TypeSpec::kNoThrowNew)) {
+    if (!IsSpecified(TypeSpec::kNoThrowNew)) {
+      exceptions_internal::MaybeThrow(ABSL_PRETTY_FUNCTION, true);
+    }
+    return ::operator new(s);
+  }
+
+  static void* operator new[](size_t s) noexcept(
+      IsSpecified(TypeSpec::kNoThrowNew)) {
+    if (!IsSpecified(TypeSpec::kNoThrowNew)) {
+      exceptions_internal::MaybeThrow(ABSL_PRETTY_FUNCTION, true);
+    }
+    return ::operator new[](s);
+  }
+
   template <typename... Args>
   static void* operator new(size_t s, Args&&... args) noexcept(
       IsSpecified(TypeSpec::kNoThrowNew)) {
@@ -557,12 +575,6 @@ class ThrowingValue : private exceptions_internal::TrackedObject {
 
   // Abseil doesn't support throwing overloaded operator delete.  These are
   // provided so a throwing operator-new can clean up after itself.
-  //
-  // We provide both regular and templated operator delete because if only the
-  // templated version is provided as we did with operator new, the compiler has
-  // no way of knowing which overload of operator delete to call. See
-  // https://en.cppreference.com/w/cpp/memory/new/operator_delete and
-  // https://en.cppreference.com/w/cpp/language/delete for the gory details.
   void operator delete(void* p) noexcept { ::operator delete(p); }
 
   template <typename... Args>
@@ -726,9 +738,8 @@ class ThrowingAllocator : private exceptions_internal::TrackedObject {
 
   ThrowingAllocator select_on_container_copy_construction() noexcept(
       IsSpecified(AllocSpec::kNoThrowAllocate)) {
-    auto& out = *this;
     ReadStateAndMaybeThrow(ABSL_PRETTY_FUNCTION);
-    return out;
+    return *this;
   }
 
   template <typename U>
@@ -826,7 +837,7 @@ template <typename T>
 class DefaultFactory {
  public:
   explicit DefaultFactory(const T& t) : t_(t) {}
-  std::unique_ptr<T> operator()() const { return absl::make_unique<T>(t_); }
+  std::unique_ptr<T> operator()() const { return std::make_unique<T>(t_); }
 
  private:
   T t_;
@@ -834,10 +845,10 @@ class DefaultFactory {
 
 template <size_t LazyContractsCount, typename LazyFactory,
           typename LazyOperation>
-using EnableIfTestable = typename absl::enable_if_t<
-    LazyContractsCount != 0 &&
-    !std::is_same<LazyFactory, UninitializedT>::value &&
-    !std::is_same<LazyOperation, UninitializedT>::value>;
+using EnableIfTestable =
+    typename std::enable_if_t<LazyContractsCount != 0 &&
+                              !std::is_same_v<LazyFactory, UninitializedT> &&
+                              !std::is_same_v<LazyOperation, UninitializedT>>;
 
 template <typename Factory = UninitializedT,
           typename Operation = UninitializedT, typename... Contracts>
@@ -938,7 +949,7 @@ class ExceptionSafetyTest {
  *   `std::unique_ptr<T> operator()() const` where T is the type being tested.
  *   It is used for reliably creating identical T instances to test on.
  *
- * - Operation: The operation object (passsed in via tester.WithOperation(...)
+ * - Operation: The operation object (passed in via tester.WithOperation(...)
  *   or tester.Test(...)) must be invocable with the signature
  *   `void operator()(T*) const` where T is the type being tested. It is used
  *   for performing steps on a T instance that may throw and that need to be
@@ -986,7 +997,7 @@ class ExceptionSafetyTestBuilder {
    * method tester.WithInitialValue(...).
    */
   template <typename NewFactory>
-  ExceptionSafetyTestBuilder<absl::decay_t<NewFactory>, Operation, Contracts...>
+  ExceptionSafetyTestBuilder<std::decay_t<NewFactory>, Operation, Contracts...>
   WithFactory(const NewFactory& new_factory) const {
     return {new_factory, operation_, contracts_};
   }
@@ -997,7 +1008,7 @@ class ExceptionSafetyTestBuilder {
    * newly created tester.
    */
   template <typename NewOperation>
-  ExceptionSafetyTestBuilder<Factory, absl::decay_t<NewOperation>, Contracts...>
+  ExceptionSafetyTestBuilder<Factory, std::decay_t<NewOperation>, Contracts...>
   WithOperation(const NewOperation& new_operation) const {
     return {factory_, new_operation, contracts_};
   }
@@ -1017,11 +1028,11 @@ class ExceptionSafetyTestBuilder {
    */
   template <typename... MoreContracts>
   ExceptionSafetyTestBuilder<Factory, Operation, Contracts...,
-                             absl::decay_t<MoreContracts>...>
+                             std::decay_t<MoreContracts>...>
   WithContracts(const MoreContracts&... more_contracts) const {
     return {
         factory_, operation_,
-        std::tuple_cat(contracts_, std::tuple<absl::decay_t<MoreContracts>...>(
+        std::tuple_cat(contracts_, std::tuple<std::decay_t<MoreContracts>...>(
                                        more_contracts...))};
   }
 
@@ -1045,7 +1056,7 @@ class ExceptionSafetyTestBuilder {
       typename NewOperation,
       typename = EnableIfTestable<sizeof...(Contracts), Factory, NewOperation>>
   testing::AssertionResult Test(const NewOperation& new_operation) const {
-    return TestImpl(new_operation, absl::index_sequence_for<Contracts...>());
+    return TestImpl(new_operation, std::index_sequence_for<Contracts...>());
   }
 
   /*
@@ -1081,7 +1092,7 @@ class ExceptionSafetyTestBuilder {
 
   template <typename SelectedOperation, size_t... Indices>
   testing::AssertionResult TestImpl(SelectedOperation selected_operation,
-                                    absl::index_sequence<Indices...>) const {
+                                    std::index_sequence<Indices...>) const {
     return ExceptionSafetyTest<FactoryElementType<Factory>>(
                factory_, selected_operation, std::get<Indices>(contracts_)...)
         .Test();

@@ -27,6 +27,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_DOM_EVENTS_TREE_SCOPE_EVENT_CONTEXT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_DOM_EVENTS_TREE_SCOPE_EVENT_CONTEXT_H_
 
+#include "base/check_op.h"
+#include "base/dcheck_is_on.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
 #include "third_party/blink/renderer/core/dom/node.h"
@@ -64,7 +66,7 @@ class CORE_EXPORT TreeScopeEventContext final
   }
   TouchEventContext& EnsureTouchEventContext();
 
-  HeapVector<Member<EventTarget>>& EnsureEventPath(EventPath&);
+  GCedHeapVector<Member<EventTarget>>& EnsureEventPath(EventPath&);
 
   bool IsInclusiveAncestorOf(const TreeScopeEventContext&) const;
   bool IsDescendantOf(const TreeScopeEventContext&) const;
@@ -91,7 +93,7 @@ class CORE_EXPORT TreeScopeEventContext final
   Member<TreeScope> tree_scope_;
   Member<EventTarget> target_;
   Member<EventTarget> related_target_;
-  Member<HeapVector<Member<EventTarget>>> event_path_;
+  Member<GCedHeapVector<Member<EventTarget>>> event_path_;
   Member<TouchEventContext> touch_event_context_;
   Member<TreeScopeEventContext> containing_closed_shadow_tree_;
 

@@ -31,12 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_PEERCONNECTION_RTC_SESSION_DESCRIPTION_REQUEST_IMPL_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_PEERCONNECTION_RTC_SESSION_DESCRIPTION_REQUEST_IMPL_H_
 
-#include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_peer_connection_error_callback.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_session_description_callback.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
 #include "third_party/blink/renderer/modules/peerconnection/rtc_session_description_enums.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/peerconnection/rtc_session_description_request.h"
 
 namespace blink {
@@ -53,13 +52,11 @@ class RTCSessionDescriptionRequestImpl final
  public:
   static RTCSessionDescriptionRequestImpl* Create(
       ExecutionContext*,
-      RTCCreateSessionDescriptionOperation,
       RTCPeerConnection*,
       V8RTCSessionDescriptionCallback*,
       V8RTCPeerConnectionErrorCallback*);
 
   RTCSessionDescriptionRequestImpl(ExecutionContext*,
-                                   RTCCreateSessionDescriptionOperation,
                                    RTCPeerConnection*,
                                    V8RTCSessionDescriptionCallback*,
                                    V8RTCPeerConnectionErrorCallback*);
@@ -76,7 +73,6 @@ class RTCSessionDescriptionRequestImpl final
  private:
   void Clear();
 
-  RTCCreateSessionDescriptionOperation operation_;
   Member<V8RTCSessionDescriptionCallback> success_callback_;
   Member<V8RTCPeerConnectionErrorCallback> error_callback_;
 

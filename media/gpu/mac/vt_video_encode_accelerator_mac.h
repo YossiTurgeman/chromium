@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,25 @@
 
 #include <memory>
 
-#include "base/bind.h"
+#include "base/apple/scoped_cftyperef.h"
 #include "base/containers/circular_deque.h"
-#include "base/mac/scoped_cftyperef.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/single_thread_task_runner.h"
-#include "base/threading/thread.h"
-#include "base/threading/thread_checker.h"
+#include "base/sequence_checker.h"
+#include "base/task/sequenced_task_runner.h"
+#include "media/base/bitrate.h"
+#include "media/base/encoder_status.h"
 #include "media/base/mac/videotoolbox_helpers.h"
+#include "media/base/video_codecs.h"
 #include "media/gpu/media_gpu_export.h"
+#include "media/media_buildflags.h"
 #include "media/video/video_encode_accelerator.h"
-#include "third_party/webrtc/common_video/include/bitrate_adjuster.h"
+#include "ui/gfx/color_space.h"
 
 namespace media {
+
+class MediaLog;
 
 // VideoToolbox.framework implementation of the VideoEncodeAccelerator
 // interface for MacOSX. VideoToolbox makes no guarantees that it is thread
@@ -28,16 +34,30 @@ class MEDIA_GPU_EXPORT VTVideoEncodeAccelerator
     : public VideoEncodeAccelerator {
  public:
   VTVideoEncodeAccelerator();
-  ~VTVideoEncodeAccelerator() override;
+
+  VTVideoEncodeAccelerator(const VTVideoEncodeAccelerator&) = delete;
+  VTVideoEncodeAccelerator& operator=(const VTVideoEncodeAccelerator&) = delete;
 
   // VideoEncodeAccelerator implementation.
-  VideoEncodeAccelerator::SupportedProfiles GetSupportedProfiles() override;
-  bool Initialize(const Config& config, Client* client) override;
+  SupportedProfiles GetSupportedProfiles() override;
+
+  EncoderStatus Initialize(
+      const Config& config,
+      Client* client,
+      std::unique_ptr<MediaLog> media_log = nullptr) override;
   void Encode(scoped_refptr<VideoFrame> frame, bool force_keyframe) override;
+  void Encode(scoped_refptr<VideoFrame> frame,
+              const VideoEncoder::EncodeOptions& options) override;
   void UseOutputBitstreamBuffer(BitstreamBuffer buffer) override;
-  void RequestEncodingParametersChange(uint32_t bitrate,
-                                       uint32_t framerate) override;
+  void RequestEncodingParametersChange(
+      const Bitrate& bitrate,
+      uint32_t framerate,
+      const std::optional<gfx::Size>& size) override;
   void Destroy() override;
+  void Flush(FlushCallback flush_callback) override;
+  bool IsFlushSupported() override;
+
+  static double CalculatePsnrForTesting(double mse, VideoPixelFormat format);
 
  private:
   // Holds the associated data of a video frame being processed.
@@ -49,19 +69,7 @@ class MEDIA_GPU_EXPORT VTVideoEncodeAccelerator
   // Holds output buffers coming from the client ready to be filled.
   struct BitstreamBufferRef;
 
-  // Encoding tasks to be run on |encoder_thread_|.
-  void EncodeTask(scoped_refptr<VideoFrame> frame, bool force_keyframe);
-  void UseOutputBitstreamBufferTask(
-      std::unique_ptr<BitstreamBufferRef> buffer_ref);
-  void RequestEncodingParametersChangeTask(uint32_t bitrate,
-                                           uint32_t framerate);
-  void DestroyTask();
-
-  // Helper function to set bitrate.
-  void SetAdjustedBitrate(int32_t bitrate);
-
-  // Helper function to notify the client of an error on |client_task_runner_|.
-  void NotifyError(VideoEncodeAccelerator::Error error);
+  ~VTVideoEncodeAccelerator() override;
 
   // Compression session callback function to handle compressed frames.
   static void CompressionCallback(void* encoder_opaque,
@@ -77,34 +85,48 @@ class MEDIA_GPU_EXPORT VTVideoEncodeAccelerator
       std::unique_ptr<EncodeOutput> encode_output,
       std::unique_ptr<VTVideoEncodeAccelerator::BitstreamBufferRef> buffer_ref);
 
-  // Reset the encoder's compression session by destroying the existing one
-  // using DestroyCompressionSession() and creating a new one. The new session
-  // is configured using ConfigureCompressionSession().
+  // Reset the encoder's compression session by destroying the existing one and
+  // creating a new one. The new session is configured using
+  // ConfigureCompressionSession().
   bool ResetCompressionSession();
 
-  // Create a compression session.
-  bool CreateCompressionSession(const gfx::Size& input_size);
-
   // Configure the current compression session using current encoder settings.
-  bool ConfigureCompressionSession();
+  bool ConfigureCompressionSession(VideoCodec codec);
 
-  // Destroy the current compression session if any. Blocks until all pending
-  // frames have been flushed out (similar to EmitFrames without doing any
-  // encoding work).
-  void DestroyCompressionSession();
+  // Flushes the encoder. The flush callback won't be run until all pending
+  // encodes have been completed.
+  void MaybeRunFlushCallback();
 
-  base::ScopedCFTypeRef<VTCompressionSessionRef> compression_session_;
+  void SetEncoderColorSpace();
+
+  void NotifyErrorStatus(EncoderStatus status);
+
+  base::TimeDelta AssignMonotonicTimestamp();
+
+  static double CalculatePsnr(double mse, VideoPixelFormat format);
+
+  video_toolbox::ScopedVTCompressionSessionRef compression_session_;
 
   gfx::Size input_visible_size_;
-  size_t bitstream_buffer_size_;
-  int32_t frame_rate_;
-  int32_t initial_bitrate_;
-  int32_t target_bitrate_;
-  int32_t encoder_set_bitrate_;
-  VideoCodecProfile h264_profile_;
+  size_t bitstream_buffer_size_ = 0;
+  int32_t frame_rate_ = 0;
+  int num_temporal_layers_ = 1;
+  VideoPixelFormat input_format_ = PIXEL_FORMAT_UNKNOWN;
+  VideoCodecProfile profile_ = H264PROFILE_BASELINE;
+  VideoCodec codec_ = VideoCodec::kH264;
+  bool calculate_psnr_ = false;
 
-  // Bitrate adjuster used to fix VideoToolbox's inconsistent bitrate issues.
-  webrtc::BitrateAdjuster bitrate_adjuster_;
+  media::Bitrate bitrate_;
+
+  // If True, the encoder fails initialization if setting of session's property
+  // kVTCompressionPropertyKey_MaxFrameDelayCount returns an error.
+  // Encoder can work even after if MaxFrameDelayCount fails, but it'll
+  // have larger latency on low resolutions, and it's bad for RTC.
+  // Context: https://crbug.com/1195177 https://crbug.com/webrtc/7304
+  bool require_low_delay_ = true;
+
+  // Used to control selection of OS software encoders.
+  Config::EncoderType required_encoder_type_ = Config::EncoderType::kHardware;
 
   // Bitstream buffers ready to be used to return encoded output as a FIFO.
   base::circular_deque<std::unique_ptr<BitstreamBufferRef>>
@@ -114,29 +136,32 @@ class MEDIA_GPU_EXPORT VTVideoEncodeAccelerator
   base::circular_deque<std::unique_ptr<EncodeOutput>> encoder_output_queue_;
 
   // Our original calling task runner for the child thread.
-  const scoped_refptr<base::SingleThreadTaskRunner> client_task_runner_;
+  const scoped_refptr<base::SequencedTaskRunner> task_runner_;
+  SEQUENCE_CHECKER(sequence_checker_);
 
   // To expose client callbacks from VideoEncodeAccelerator.
-  // NOTE: all calls to this object *MUST* be executed on
-  // |client_task_runner_|.
-  base::WeakPtr<Client> client_;
-  std::unique_ptr<base::WeakPtrFactory<Client>> client_ptr_factory_;
+  raw_ptr<Client> client_ = nullptr;
 
-  // Thread checker to enforce that this object is used on a specific thread.
-  // It is pinned on |client_task_runner_| thread.
-  base::ThreadChecker thread_checker_;
+  std::unique_ptr<MediaLog> media_log_;
 
-  // This thread services tasks posted from the VEA API entry points by the
-  // GPU child thread and CompressionCallback() posted from device thread.
-  base::Thread encoder_thread_;
-  scoped_refptr<base::SingleThreadTaskRunner> encoder_thread_task_runner_;
+  // Tracking information for ensuring flushes aren't completed until all
+  // pending encodes have been returned.
+  int pending_encodes_ = 0;
+  FlushCallback pending_flush_cb_;
+
+  // Color space of the first frame sent to Encode().
+  std::optional<gfx::ColorSpace> encoder_color_space_;
+  bool can_set_encoder_color_space_ = true;
+
+  bool encoder_produces_svc_spec_compliant_bitstream_ = false;
+
+  // Monotonically-growing timestamp that will be assigned to the next frame
+  base::TimeDelta next_timestamp_;
 
   // Declared last to ensure that all weak pointers are invalidated before
   // other destructors run.
   base::WeakPtr<VTVideoEncodeAccelerator> encoder_weak_ptr_;
-  base::WeakPtrFactory<VTVideoEncodeAccelerator> encoder_task_weak_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(VTVideoEncodeAccelerator);
+  base::WeakPtrFactory<VTVideoEncodeAccelerator> encoder_weak_factory_{this};
 };
 
 }  // namespace media

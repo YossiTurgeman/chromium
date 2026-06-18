@@ -1,15 +1,16 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chromecast/device/bluetooth/le/gatt_client_manager_impl.h"
 
-#include "base/bind.h"
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
 #include "base/message_loop/message_pump_type.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/test/mock_callback.h"
 #include "base/test/task_environment.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "chromecast/device/bluetooth/bluetooth_util.h"
 #include "chromecast/device/bluetooth/le/remote_characteristic_impl.h"
 #include "chromecast/device/bluetooth/le/remote_descriptor_impl.h"
@@ -171,7 +172,8 @@ class GattClientManagerTest : public ::testing::Test {
 
     // Normally bluetooth_manager does this.
     gatt_client_->SetDelegate(gatt_client_manager_.get());
-    gatt_client_manager_->Initialize(base::ThreadTaskRunnerHandle::Get());
+    gatt_client_manager_->Initialize(
+        base::SingleThreadTaskRunner::GetCurrentDefault());
     gatt_client_manager_->AddObserver(observer_.get());
   }
 
@@ -218,10 +220,12 @@ class GattClientManagerTest : public ::testing::Test {
   }
 
   void Connect(const bluetooth_v2_shlib::Addr& addr) {
-    EXPECT_CALL(*gatt_client_, Connect(addr)).WillOnce(Return(true));
+    EXPECT_CALL(*gatt_client_,
+                Connect(addr, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+      .WillOnce(Return(true));
     scoped_refptr<RemoteDevice> device = GetDevice(addr);
-    EXPECT_CALL(cb_, Run(true));
-    device->Connect(cb_.Get());
+    EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kSuccess));
+    device->Connect(connect_cb_.Get());
     bluetooth_v2_shlib::Gatt::Client::Delegate* delegate =
         gatt_client_->delegate();
     EXPECT_CALL(*gatt_client_, GetServices(addr)).WillOnce(Return(true));
@@ -231,6 +235,7 @@ class GattClientManagerTest : public ::testing::Test {
   }
 
   base::MockCallback<RemoteDevice::StatusCallback> cb_;
+  base::MockCallback<RemoteDevice::ConnectCallback> connect_cb_;
   base::test::SingleThreadTaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
   std::unique_ptr<GattClientManagerImpl> gatt_client_manager_;
@@ -271,17 +276,21 @@ TEST_F(GattClientManagerTest, RemoteDeviceConnect) {
   device->ConnectionParameterUpdate(10, 10, 50, 100, cb_.Get());
 
   // First connect request fails right away.
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(false));
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(false));
   EXPECT_CALL(*gatt_client_, ClearPendingConnect(kTestAddr1))
       .WillOnce(Return(true));
-  EXPECT_CALL(cb_, Run(false));
-  device->Connect(cb_.Get());
+  EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kFailure));
+  device->Connect(connect_cb_.Get());
   EXPECT_FALSE(device->IsConnected());
 
   // Second connect request succeeds.
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(true));
-  EXPECT_CALL(cb_, Run(true));
-  device->Connect(cb_.Get());
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
+  EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kSuccess));
+  device->Connect(connect_cb_.Get());
   EXPECT_CALL(*gatt_client_, GetServices(kTestAddr1)).WillOnce(Return(true));
   delegate->OnConnectChanged(kTestAddr1, true /* status */,
                              true /* connected */);
@@ -411,10 +420,10 @@ TEST_F(GattClientManagerTest, RemoteDeviceConnectConcurrent) {
   scoped_refptr<RemoteDevice> device4 = GetDevice(kTestAddr4);
   scoped_refptr<RemoteDevice> device5 = GetDevice(kTestAddr5);
 
-  base::MockCallback<RemoteDevice::StatusCallback> cb1;
-  base::MockCallback<RemoteDevice::StatusCallback> cb2;
-  base::MockCallback<RemoteDevice::StatusCallback> cb3;
-  base::MockCallback<RemoteDevice::StatusCallback> cb4;
+  base::MockCallback<RemoteDevice::ConnectCallback> cb1;
+  base::MockCallback<RemoteDevice::ConnectCallback> cb2;
+  base::MockCallback<RemoteDevice::ConnectCallback> cb3;
+  base::MockCallback<RemoteDevice::ConnectCallback> cb4;
   base::MockCallback<RemoteDevice::StatusCallback> cb5;
 
   // Device5 is already connected at the beginning.
@@ -422,7 +431,9 @@ TEST_F(GattClientManagerTest, RemoteDeviceConnectConcurrent) {
 
   // Only the 1st Connect request will be executed immediately. The rest will be
   // queued.
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(true));
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
   device1->Connect(cb1.Get());
   device2->Connect(cb2.Get());
   device3->Connect(cb3.Get());
@@ -435,16 +446,22 @@ TEST_F(GattClientManagerTest, RemoteDeviceConnectConcurrent) {
 
   // Queued Connect requests will not be called until we receive OnGetServices
   // of the current Connect request if it is successful.
-  EXPECT_CALL(cb1, Run(true));
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr2)).WillOnce(Return(false));
-  EXPECT_CALL(cb2, Run(false));
+  EXPECT_CALL(cb1, Run(RemoteDevice::ConnectStatus::kSuccess));
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr2, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(false));
+  EXPECT_CALL(cb2, Run(RemoteDevice::ConnectStatus::kFailure));
   // If the Connect request fails in the initial request (not in the callback),
   // the next queued request will be executed immediately.
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr3)).WillOnce(Return(true));
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr3, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
   delegate->OnGetServices(kTestAddr1, {});
 
-  EXPECT_CALL(cb3, Run(false));
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr4)).WillOnce(Return(true));
+  EXPECT_CALL(cb3, Run(RemoteDevice::ConnectStatus::kFailure));
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr4, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
   delegate->OnConnectChanged(kTestAddr3, true /* status */,
                              false /* connected */);
 
@@ -452,7 +469,7 @@ TEST_F(GattClientManagerTest, RemoteDeviceConnectConcurrent) {
   delegate->OnConnectChanged(kTestAddr4, true /* status */,
                              true /* connected */);
 
-  EXPECT_CALL(cb4, Run(true));
+  EXPECT_CALL(cb4, Run(RemoteDevice::ConnectStatus::kSuccess));
   EXPECT_CALL(*gatt_client_, Disconnect(kTestAddr5)).WillOnce(Return(true));
   delegate->OnGetServices(kTestAddr4, {});
 
@@ -478,14 +495,16 @@ TEST_F(GattClientManagerTest, ConnectTimeout) {
   scoped_refptr<RemoteDevice> device = GetDevice(kTestAddr1);
 
   // Issue a Connect request
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(true));
-  device->Connect(cb_.Get());
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
+  device->Connect(connect_cb_.Get());
 
   // Let Connect request timeout
   // We should expect to receive Connect failure message
   EXPECT_CALL(*gatt_client_, ClearPendingConnect(kTestAddr1))
       .WillOnce(Return(true));
-  EXPECT_CALL(cb_, Run(false));
+  EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kFailure));
   task_environment_.FastForwardBy(GattClientManagerImpl::kConnectTimeout);
   EXPECT_FALSE(device->IsConnected());
 }
@@ -497,8 +516,10 @@ TEST_F(GattClientManagerTest, GetServicesTimeout) {
   scoped_refptr<RemoteDevice> device = GetDevice(kTestAddr1);
 
   // Issue a Connect request and let Connect succeed
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(true));
-  device->Connect(cb_.Get());
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
+  device->Connect(connect_cb_.Get());
   EXPECT_CALL(*gatt_client_, GetServices(kTestAddr1)).WillOnce(Return(true));
   delegate->OnConnectChanged(kTestAddr1, true /* status */,
                              true /* connected */);
@@ -511,7 +532,7 @@ TEST_F(GattClientManagerTest, GetServicesTimeout) {
   // Make sure we issued a disconnect.
   testing::Mock::VerifyAndClearExpectations(gatt_client_.get());
 
-  EXPECT_CALL(cb_, Run(false));
+  EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kFailure));
   delegate->OnConnectChanged(kTestAddr1, true /* status */,
                              false /* connected */);
 
@@ -642,8 +663,10 @@ TEST_F(GattClientManagerTest, Connectability) {
   EXPECT_TRUE(gatt_client_manager_->gatt_client_connectable());
 
   // Start a connection.
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(true));
-  device->Connect(cb_.Get());
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
+  device->Connect(connect_cb_.Get());
 
   // Disable GATT client connectability while connection is pending.
   EXPECT_TRUE(gatt_client_manager_->SetGattClientConnectable(false));
@@ -654,15 +677,15 @@ TEST_F(GattClientManagerTest, Connectability) {
   delegate->OnConnectChanged(kTestAddr1, true /* status */,
                              true /* connected */);
 
-  EXPECT_CALL(cb_, Run(false));
+  EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kFailure));
   delegate->OnConnectChanged(kTestAddr1, true /* status */,
                              false /* connected */);
   ASSERT_FALSE(device->IsConnected());
 
   // Connect should fail when GATT client connectability is already disabled.
-  EXPECT_CALL(*gatt_client_, Connect(_)).Times(0);
-  EXPECT_CALL(cb_, Run(false));
-  device->Connect(cb_.Get());
+  EXPECT_CALL(*gatt_client_, Connect).Times(0);
+  EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kFailure));
+  device->Connect(connect_cb_.Get());
   ASSERT_FALSE(device->IsConnected());
 
   // Re-enable connectability.
@@ -1166,11 +1189,11 @@ TEST_F(GattClientManagerTest, WriteType) {
     ASSERT_TRUE(characteristics[i]);
     auto* characteristic =
         static_cast<RemoteCharacteristicImpl*>(characteristics[i].get());
-    EXPECT_CALL(
-        *gatt_client_,
-        WriteCharacteristic(kTestAddr1, characteristic->characteristic(),
-                            bluetooth_v2_shlib::Gatt::Client::AUTH_REQ_NONE,
-                            kWriteTypes[i], kTestData1))
+    UNSAFE_TODO(EXPECT_CALL(*gatt_client_,
+                            WriteCharacteristic(
+                                kTestAddr1, characteristic->characteristic(),
+                                bluetooth_v2_shlib::Gatt::Client::AUTH_REQ_NONE,
+                                kWriteTypes[i], kTestData1)))
         .WillOnce(Return(true));
 
     base::MockCallback<RemoteCharacteristic::StatusCallback> write_cb;
@@ -1198,12 +1221,14 @@ TEST_F(GattClientManagerTest, ConnectMultiple) {
 
 TEST_F(GattClientManagerTest, GetServicesFailOnConnect) {
   scoped_refptr<RemoteDevice> device = GetDevice(kTestAddr1);
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(true));
-  device->Connect(cb_.Get());
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
+  device->Connect(connect_cb_.Get());
   bluetooth_v2_shlib::Gatt::Client::Delegate* delegate =
       gatt_client_->delegate();
 
-  EXPECT_CALL(cb_, Run(false));
+  EXPECT_CALL(connect_cb_, Run(RemoteDevice::ConnectStatus::kFailure));
   EXPECT_CALL(*gatt_client_, GetServices(kTestAddr1)).WillOnce(Return(false));
   delegate->OnConnectChanged(kTestAddr1, true /* status */,
                              true /* connected */);
@@ -1221,8 +1246,8 @@ TEST_F(GattClientManagerTest, GetServicesSuccessAfterConnectCallback) {
       [](GattClientManagerTest* gcmt,
          const std::vector<bluetooth_v2_shlib::Gatt::Service>*
              expected_services,
-         bool* cb_called, bool success) {
-        EXPECT_TRUE(success);
+         bool* cb_called, RemoteDevice::ConnectStatus status) {
+        EXPECT_EQ(RemoteDevice::ConnectStatus::kSuccess, status);
         *cb_called = true;
 
         auto device = gcmt->GetDevice(kTestAddr1);
@@ -1230,7 +1255,9 @@ TEST_F(GattClientManagerTest, GetServicesSuccessAfterConnectCallback) {
         EXPECT_EQ(expected_services->size(), services.size());
       },
       this, &kServices, &cb_called);
-  EXPECT_CALL(*gatt_client_, Connect(kTestAddr1)).WillOnce(Return(true));
+  EXPECT_CALL(*gatt_client_,
+              Connect(kTestAddr1, bluetooth_v2_shlib::Gatt::Client::Transport::kAuto))
+    .WillOnce(Return(true));
   device->Connect(std::move(cb));
 
   bluetooth_v2_shlib::Gatt::Client::Delegate* delegate =

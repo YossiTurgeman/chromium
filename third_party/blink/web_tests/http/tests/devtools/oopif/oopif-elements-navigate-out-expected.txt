@@ -7,10 +7,10 @@ Dump tree
     - <body>
         - <div>
             - <iframe id="page-iframe" src="http://127.0.0.1:8000/devtools/oopif/resources/inner-iframe.html">
-                - #document
+                - #document (http://127.0.0.1:8000/devtools/oopif/resources/inner-iframe.html)
                     - <html>
                           <head></head>
-                          <body>IFRAME\n</body>
+                          <body>IFRAME </body>
                       </html>
               </iframe>
           </div>
@@ -23,10 +23,10 @@ Dump tree
     - <body>
         - <div>
             - <iframe id="page-iframe" src="http://devtools.oopif.test:8000/devtools/oopif/resources/inner-iframe.html">
-                - #document
+                - #document (http://devtools.oopif.test:8000/devtools/oopif/resources/inner-iframe.html)
                     - <html>
                           <head></head>
-                          <body>IFRAME\n</body>
+                          <body>IFRAME </body>
                       </html>
               </iframe>
           </div>

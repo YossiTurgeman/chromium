@@ -1,6 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -34,12 +34,6 @@ import tempfile
 # 3. On Mac, install these packages with brew:
 #      autoconf automake libtool pkgconfig icu4c
 #
-#    Important! Before running roll.py, set these environmental variables so the
-#    configure script can find ICU:
-#      export LDFLAGS="-L/path/to/homebrew/opt/icu4c/lib"
-#      export CPPFLAGS="-I/path/to/homebrew/opt/icu4c/include"
-#      export PKG_CONFIG_PATH="/path/to/homebrew/opt/icu4c/lib/pkgconfig"
-#
 # Procedure:
 #
 # Warning: This process is destructive. Run it on a clean branch.
@@ -66,20 +60,21 @@ import tempfile
 #
 # 3. On Mac, in the Chromium src directory:
 #    a. git cl patch <Gerrit Issue ID>
-#    b. third_party/libxml/chromium/roll.py --mac
+#    b. third_party/libxml/chromium/roll.py --mac --icu4c_path=~/homebrew/opt/icu4c
 #    c. Make and commit any final changes to README.chromium, BUILD.gn, etc.
 #    d. git cl upload
 #    e. Complete the review as usual
+#
+# The --linuxfast argument is an alternative to --linux which also deletes
+# files which are not intended to be checked in. This would normally happen at
+# the end of the --mac run, but if you want to run the roll script and get to
+# the final state without running the configure scripts on all three platforms,
+# this is helpful.
 
 PATCHES = [
-    # TODO(dcheng): reach out upstream to see what's going on here.
-    'revert-non-recursive-xml-parsing.patch',
-    'chromium-issue-599427.patch',
-    'chromium-issue-628581.patch',
-    'libxml2-2.9.4-security-xpath-nodetab-uaf.patch',
-    'chromium-issue-708434.patch',
-    # TODO(dcheng): Merge this back upstream.
-    'add-missing-ifdef-in-xml-reader.patch',
+    'remove-getentropy.patch',
+    'xml-attr-extra.patch',
+    'widen-extra-field-in-_xmlNode-to-an-int.patch',
 ]
 
 
@@ -90,16 +85,15 @@ PATCHES = [
 # These two sets of options should be in sync. You can check the
 # generated #defines in (win32|mac|linux)/include/libxml/xmlversion.h to confirm
 # this.
-# We would like to disable python but it introduces a host of build errors
 SHARED_XML_CONFIGURE_OPTIONS = [
     # These options are turned ON
     ('--with-html', 'html=yes'),
     ('--with-icu', 'icu=yes'),
     ('--with-output', 'output=yes'),
     ('--with-push', 'push=yes'),
-    ('--with-python', 'python=yes'),
     ('--with-reader', 'reader=yes'),
     ('--with-sax1', 'sax1=yes'),
+    ('--with-threads', 'threads=yes'),
     ('--with-tree', 'tree=yes'),
     ('--with-writer', 'writer=yes'),
     ('--with-xpath', 'xpath=yes'),
@@ -107,25 +101,22 @@ SHARED_XML_CONFIGURE_OPTIONS = [
     ('--without-c14n', 'c14n=no'),
     ('--without-catalog', 'catalog=no'),
     ('--without-debug', 'xml_debug=no'),
-    ('--without-docbook', 'docb=no'),
-    ('--without-ftp', 'ftp=no'),
     ('--without-http', 'http=no'),
     ('--without-iconv', 'iconv=no'),
     ('--without-iso8859x', 'iso8859x=no'),
     ('--without-legacy', 'legacy=no'),
     ('--without-lzma', 'lzma=no'),
-    ('--without-mem-debug', 'mem_debug=no'),
     ('--without-modules', 'modules=no'),
     ('--without-pattern', 'pattern=no'),
+    ('--without-python', 'python=no'),
     ('--without-regexps', 'regexps=no'),
-    ('--without-run-debug', 'run_debug=no'),
     ('--without-schemas', 'schemas=no'),
     ('--without-schematron', 'schematron=no'),
-    ('--without-threads', 'threads=no'),
     ('--without-valid', 'valid=no'),
     ('--without-xinclude', 'xinclude=no'),
     ('--without-xptr', 'xptr=no'),
     ('--without-zlib', 'zlib=no'),
+    ('--without-relaxng', 'relaxng=no'),
 ]
 
 
@@ -135,12 +126,12 @@ EXTRA_NIX_XML_CONFIGURE_OPTIONS = [
     '--without-minimum',
     '--without-readline',
     '--without-history',
+    '--without-tls',
 ]
 
 
 # These options are only available in win32/configure.js for Windows.
 EXTRA_WIN32_XML_CONFIGURE_OPTIONS = [
-    'trio=no',
     'walker=no',
 ]
 
@@ -167,10 +158,12 @@ FILES_TO_REMOVE = [
     # This is unneeded "legacy" SAX API, even though we enable SAX1.
     'src/SAX.c',
     'src/VxWorks',
+    'src/aclocal.m4',
     'src/autogen.sh',
     'src/autom4te.cache',
     'src/bakefile',
     'src/build_glob.py',
+    'src/CMakeLists.txt',
     'src/c14n.c',
     'src/catalog.c',
     'src/compile',
@@ -182,19 +175,25 @@ FILES_TO_REMOVE = [
     'src/depcomp',
     'src/doc',
     'src/example',
+    'src/fuzz',
     'src/genChRanges.py',
     'src/global.data',
     'src/include/libxml/Makefile.in',
+    'src/include/libxml/meson.build',
     'src/include/libxml/xmlversion.h',
     'src/include/libxml/xmlwin32version.h',
     'src/include/libxml/xmlwin32version.h.in',
     'src/include/Makefile.in',
+    'src/include/meson.build',
     'src/install-sh',
     'src/legacy.c',
     'src/libxml2.doap',
+    'src/libxml2.syms',
     'src/ltmain.sh',
     'src/m4',
     'src/macos/libxml2.mcp.xml.sit.hqx',
+    'src/meson.build',
+    'src/meson_options.txt',
     'src/missing',
     'src/optim',
     'src/os400',
@@ -207,13 +206,9 @@ FILES_TO_REMOVE = [
     'src/testOOM.c',
     'src/testOOMlib.c',
     'src/testOOMlib.h',
-    'src/trio.c',
-    'src/trio.h',
-    'src/triop.h',
-    'src/triostr.c',
-    'src/triostr.h',
     'src/vms',
     'src/win32/VC10/config.h',
+    'src/win32/configure.js',
     'src/win32/wince',
     'src/xinclude.c',
     'src/xlink.c',
@@ -227,6 +222,13 @@ FILES_TO_REMOVE = [
     'src/xpointer.c',
     'src/xstc',
     'src/xzlib.c',
+    'linux/.deps',
+    'linux/doc',
+    'linux/example',
+    'linux/fuzz',
+    'linux/include/private',
+    'linux/python',
+    'linux/xstc',
 ]
 
 
@@ -280,7 +282,7 @@ def remove_tracked_files(files_to_remove):
     """
     files_to_remove = [f for f in files_to_remove if os.path.exists(f)]
     if files_to_remove:
-        git('rm', '-rf', *files_to_remove)
+        git('rm', '-rf', '--ignore-unmatch', *files_to_remove)
 
 
 def sed_in_place(input_filename, program):
@@ -330,7 +332,8 @@ def prepare_libxml_distribution(src_path, libxml2_repo_path, temp_dir):
 
     with WorkingDir(libxml2_repo_path):
         commit = subprocess.check_output(
-            ['git', 'log', '-n', '1', '--pretty=format:%H', 'HEAD'])
+            ['git', 'log', '-n', '1', '--pretty=format:%H',
+             'HEAD']).decode('ascii')
         subprocess.check_call(
             'git archive HEAD | tar -x -C "%s"' % temp_src_path,
             shell=True)
@@ -351,12 +354,12 @@ def prepare_libxml_distribution(src_path, libxml2_repo_path, temp_dir):
         # Work out what it is called
         tar_file = subprocess.check_output(
             '''awk '/PACKAGE =/ {p=$3} /VERSION =/ {v=$3} '''
-            '''END {printf("%s-%s.tar.gz", p, v)}' Makefile''',
-            shell=True)
+            '''END {printf("%s-%s.tar.xz", p, v)}' Makefile''',
+            shell=True).decode('ascii')
         return commit, os.path.abspath(tar_file)
 
 
-def roll_libxml_linux(src_path, libxml2_repo_path):
+def roll_libxml_linux(src_path, libxml2_repo_path, fast):
     with WorkingDir(src_path):
         # Export the upstream git repo.
         try:
@@ -373,13 +376,17 @@ def roll_libxml_linux(src_path, libxml2_repo_path):
             # Update the libxml repo and export it to the Chromium tree
             with WorkingDir(THIRD_PARTY_LIBXML_SRC):
                 subprocess.check_call(
-                    'tar xzf %s --strip-components=1' % tar_file,
+                    'tar xJf %s --strip-components=1' % tar_file,
                     shell=True)
         finally:
             shutil.rmtree(temp_dir)
 
         with WorkingDir(THIRD_PARTY_LIBXML_SRC):
-            # Put the version number is the README file
+            # Put the version and revision IDs in the README file
+            sed_in_place('../README.chromium',
+                         's/Revision: .*$/Revision: %s/' % commit)
+            # TODO(crbug.com/349530088): Read version from VERSION file when we
+            # roll libxml to that point and use it instead of the commit hash.
             sed_in_place('../README.chromium',
                          's/Version: .*$/Version: %s/' % commit)
 
@@ -392,8 +399,14 @@ def roll_libxml_linux(src_path, libxml2_repo_path):
             # Add *everything*
             with WorkingDir('../src'):
                 git('add', '*')
+                if fast:
+                    with WorkingDir('..'):
+                        remove_tracked_files(FILES_TO_REMOVE)
                 git('commit', '-am', '%s libxml, linux' % commit)
-    print('Now push to Windows and run steps there.')
+    if fast:
+        print('Now upload for review, etc.')
+    else:
+        print('Now push to Windows and run steps there.')
 
 
 def roll_libxml_win32(src_path):
@@ -405,17 +418,22 @@ def roll_libxml_win32(src_path):
                 XML_WIN32_CONFIGURE_OPTIONS)
 
             # Add and commit the result.
-            shutil.move('VC10/config.h', '../../win32/config.h')
+            shutil.move('../config.h', '../../win32/config.h')
             git('add', '../../win32/config.h')
             shutil.move('../include/libxml/xmlversion.h',
                         '../../win32/include/libxml/xmlversion.h')
             git('add', '../../win32/include/libxml/xmlversion.h')
-            git('commit', '-m', 'Windows')
+            git('commit', '--allow-empty', '-m', 'Windows')
             git('clean', '-f')
     print('Now push to Mac and run steps there.')
 
 
-def roll_libxml_mac(src_path):
+def roll_libxml_mac(src_path, icu4c_path):
+    icu4c_path = os.path.abspath(os.path.expanduser(icu4c_path))
+    os.environ["LDFLAGS"] = "-L" + os.path.join(icu4c_path, 'lib')
+    os.environ["CPPFLAGS"] = "-I" + os.path.join(icu4c_path, 'include')
+    os.environ["PKG_CONFIG_PATH"] = os.path.join(icu4c_path, 'lib/pkgconfig')
+
     full_path_to_third_party_libxml = os.path.join(
         src_path, THIRD_PARTY_LIBXML_SRC, '..')
 
@@ -427,8 +445,9 @@ def roll_libxml_mac(src_path):
         sed_in_place('config.h', 's/#define HAVE_RAND_R 1//')
 
     with WorkingDir(full_path_to_third_party_libxml):
-        commit = subprocess.check_output(['awk', '/Version:/ {print $2}',
-                                          'README.chromium'])
+        commit = subprocess.check_output(
+            ['awk', '/Version:/ {print $2}',
+             'README.chromium']).decode('ascii')
         remove_tracked_files(FILES_TO_REMOVE)
         commit_message = 'Roll libxml to %s' % commit
         git('commit', '-am', commit_message)
@@ -437,7 +456,8 @@ def roll_libxml_mac(src_path):
 
 def check_clean(path):
     with WorkingDir(path):
-        status = subprocess.check_output(['git', 'status', '-s'])
+        status = subprocess.check_output(['git', 'status',
+                                          '-s']).decode('ascii')
         if len(status) > 0:
             raise Exception('repository at %s is not clean' % path)
 
@@ -454,24 +474,33 @@ def main():
     platform.add_argument('--linux', action='store_true')
     platform.add_argument('--win32', action='store_true')
     platform.add_argument('--mac', action='store_true')
+    platform.add_argument('--linuxfast', action='store_true')
     parser.add_argument(
         'libxml2_repo_path',
         type=str,
         nargs='?',
         help='The path to the local clone of the libxml2 git repo.')
+    parser.add_argument(
+        '--icu4c_path',
+        help='The path to the homebrew installation of icu4c.')
     args = parser.parse_args()
 
-    if args.linux:
+    if args.linux or args.linuxfast:
         libxml2_repo_path = args.libxml2_repo_path
         if not libxml2_repo_path:
             print('Specify the path to the local libxml2 repo clone.')
             sys.exit(1)
         libxml2_repo_path = os.path.abspath(libxml2_repo_path)
-        roll_libxml_linux(src_dir, libxml2_repo_path)
+        roll_libxml_linux(src_dir, libxml2_repo_path, args.linuxfast)
     elif args.win32:
         roll_libxml_win32(src_dir)
     elif args.mac:
-        roll_libxml_mac(src_dir)
+        icu4c_path = args.icu4c_path
+        if not icu4c_path:
+            print('Specify the path to the homebrew installation of icu4c with --icu4c_path.')
+            print('  ex: roll.py --mac --icu4c_path=~/homebrew/opt/icu4c')
+            sys.exit(1)
+        roll_libxml_mac(src_dir, icu4c_path)
 
 
 if __name__ == '__main__':

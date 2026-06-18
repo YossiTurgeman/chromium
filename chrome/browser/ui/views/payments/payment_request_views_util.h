@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <memory>
 #include <string>
 
-#include "base/strings/string16.h"
 #include "third_party/blink/public/mojom/payments/payment_request.mojom-forward.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/gfx/geometry/insets.h"
@@ -20,63 +19,36 @@ class AutofillProfile;
 }
 
 namespace views {
-class Background;
 class Border;
-class ButtonListener;
 class ImageView;
 class Label;
 class View;
-}
+}  // namespace views
 
 namespace payments {
 
-class PaymentOptionsProvider;
 class PaymentsProfileComparator;
 enum class PaymentShippingType;
 
-constexpr int kPaymentRequestRowHorizontalInsets = 16;
-constexpr int kPaymentRequestRowVerticalInsets = 8;
+inline constexpr int kPaymentRequestRowHorizontalInsets = 16;
+inline constexpr int kPaymentRequestRowVerticalInsets = 8;
 
 // Extra inset relative to the header when a right edge should line up with the
 // close button's X rather than its invisible right edge.
-constexpr int kPaymentRequestRowExtraRightInset = 8;
-constexpr int kPaymentRequestButtonSpacing = 10;
+inline constexpr int kPaymentRequestRowExtraRightInset = 8;
+inline constexpr int kPaymentRequestButtonSpacing = 10;
 
 // Dimensions of the dialog itself.
-constexpr int kDialogMinWidth = 512;
-constexpr int kDialogHeight = 450;
+inline constexpr int kDialogMinWidth = 512;
+inline constexpr int kDialogHeight = 450;
 
 // Preferred dimensions of the payment handler dialog in pixels.
-constexpr int kPreferredPaymentHandlerDialogWidth = 608;
-constexpr int kPreferredPaymentHandlerDialogHeight = 600;
+inline constexpr int kPreferredPaymentHandlerDialogWidth = 608;
+inline constexpr int kPreferredPaymentHandlerDialogHeight = 600;
 
 // Fixed width of the amount sections in the payment sheet and the order summary
 // sheet, in pixels.
-constexpr int kAmountSectionWidth = 96;
-
-enum class PaymentRequestCommonTags {
-  BACK_BUTTON_TAG = 0,
-  CLOSE_BUTTON_TAG,
-  PAY_BUTTON_TAG,
-  // This is the max value of tags for controls common to multiple
-  // PaymentRequest contexts. Individual screens that handle both common and
-  // specific events with tags can start their specific tags at this value.
-  PAYMENT_REQUEST_COMMON_TAG_MAX
-};
-
-// Creates and returns a header for all the sheets in the PaymentRequest dialog.
-// The header contains an optional back arrow button (if |show_back_arrow| is
-// true), a |title| label. |delegate| becomes the delegate for the back and
-// close buttons. |background| is applied to |container| and its color is used
-// to decide which color to use to paint the arrow.
-// +---------------------------+
-// | <- | header_content_view  |
-// +---------------------------+
-void PopulateSheetHeaderView(bool show_back_arrow,
-                             std::unique_ptr<views::View> header_content_view,
-                             views::ButtonListener* delegate,
-                             views::View* container,
-                             std::unique_ptr<views::Background> background);
+inline constexpr int kAmountSectionWidth = 96;
 
 // Returns an instrument image view for the given |icon_bitmap| or
 // |icon_resource_id| and wanted |opacity|. Includes a rounded rect border.
@@ -85,7 +57,7 @@ void PopulateSheetHeaderView(bool show_back_arrow,
 std::unique_ptr<views::ImageView> CreateAppIconView(
     int icon_resource_id,
     const SkBitmap* icon_bitmap,
-    const base::string16& tooltip_text,
+    const std::u16string& tooltip_text,
     float opacity = 1.0f);
 
 std::unique_ptr<views::View> CreateProductLogoFooterView();
@@ -105,7 +77,7 @@ std::unique_ptr<views::View> GetShippingAddressLabelWithMissingInfo(
     const std::string& locale,
     const autofill::AutofillProfile& profile,
     const PaymentsProfileComparator& comp,
-    base::string16* accessible_content,
+    std::u16string* accessible_content,
     bool enabled = true);
 
 // Extracts and formats descriptive text from the given |profile| to represent
@@ -117,9 +89,11 @@ std::unique_ptr<views::View> GetContactInfoLabel(
     AddressStyleType type,
     const std::string& locale,
     const autofill::AutofillProfile& profile,
-    const PaymentOptionsProvider& options,
+    bool request_payer_name,
+    bool request_payer_email,
+    bool request_payer_phone,
     const PaymentsProfileComparator& comp,
-    base::string16* accessible_content);
+    std::u16string* accessible_content);
 
 // Creates a views::Border object with |insets| that can paint the gray
 // horizontal ruler used as a separator between items in the Payment Request
@@ -129,16 +103,16 @@ std::unique_ptr<views::Border> CreatePaymentRequestRowBorder(
     const gfx::Insets& insets);
 
 // Creates a label with a bold font.
-std::unique_ptr<views::Label> CreateBoldLabel(const base::string16& text);
+std::unique_ptr<views::Label> CreateBoldLabel(const std::u16string& text);
 
 // Creates a label with a medium-weight font, with appropriate fallbacks for
 // platforms that have no medium font, or where a user has configured their
 // default font with a heavier weight.
-std::unique_ptr<views::Label> CreateMediumLabel(const base::string16& text);
+std::unique_ptr<views::Label> CreateMediumLabel(const std::u16string& text);
 
 // Creates a label with grey, "hint" text and the provided |alignment|.
 std::unique_ptr<views::Label> CreateHintLabel(
-    const base::string16& text,
+    const std::u16string& text,
     gfx::HorizontalAlignment alignment = gfx::ALIGN_CENTER);
 
 // Creates a 2 line label containing |shipping_option|'s label and amount. If
@@ -147,9 +121,9 @@ std::unique_ptr<views::Label> CreateHintLabel(
 // representing this section.
 std::unique_ptr<views::View> CreateShippingOptionLabel(
     payments::mojom::PaymentShippingOption* shipping_option,
-    const base::string16& formatted_amount,
+    const std::u16string& formatted_amount,
     bool emphasize_label,
-    base::string16* accessible_content);
+    std::u16string* accessible_content);
 
 // Creates a warning message when address is not valid or an informational
 // message when the user has not selected their shipping address yet. The
@@ -157,7 +131,7 @@ std::unique_ptr<views::View> CreateShippingOptionLabel(
 // ---------------------------------------------
 // | Warning icon | Warning message            |
 // ---------------------------------------------
-std::unique_ptr<views::View> CreateWarningView(const base::string16& message,
+std::unique_ptr<views::View> CreateWarningView(const std::u16string& message,
                                                bool show_icon);
 
 }  // namespace payments

@@ -1,11 +1,11 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_MEDIA_ANDROID_CDM_PER_DEVICE_PROVISIONING_PERMISSION_H_
 #define CHROME_BROWSER_MEDIA_ANDROID_CDM_PER_DEVICE_PROVISIONING_PERMISSION_H_
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 
 namespace content {
 class RenderFrameHost;
@@ -25,7 +25,7 @@ class RenderFrameHost;
 // permission in this case. This function should not be called when per-origin
 // provisioning is NOT supported, in which case per-device provisioning should
 // be used and is already covered by ProtectedMediaIdentifierPermissionContext.
-// For more details, see https://crbug.com/917527.
+// For more details, see https://crbug.com/41433110.
 
 // Requests permission to allow MediaDrmBridge to use per-device provisioning.
 // The |callback| is guaranteed to be called with whether the permission was

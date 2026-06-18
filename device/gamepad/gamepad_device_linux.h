@@ -1,16 +1,18 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_
-#define DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_
+#ifndef DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_H_
+#define DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_H_
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "base/files/scoped_file.h"
 #include "base/memory/weak_ptr.h"
+#include "base/task/sequenced_task_runner.h"
 #include "device/gamepad/abstract_haptic_gamepad.h"
 #include "device/gamepad/gamepad_id_list.h"
 #include "device/gamepad/gamepad_standard_mappings.h"
@@ -94,7 +96,7 @@ class GamepadDeviceLinux final : public AbstractHapticGamepad {
   void CloseHidrawNode();
 
   // AbstractHapticGamepad public implementation.
-  void SetVibration(double strong_magnitude, double weak_magnitude) override;
+  void SetVibration(mojom::GamepadEffectParametersPtr params) override;
   void SetZeroVibration() override;
   base::WeakPtr<AbstractHapticGamepad> GetWeakPtr() override;
 
@@ -129,7 +131,7 @@ class GamepadDeviceLinux final : public AbstractHapticGamepad {
 
   // Maps from indices in the Gamepad buttons array to a boolean value
   // indicating whether the button index is already mapped.
-  std::vector<bool> button_indices_used_;
+  std::array<bool, Gamepad::kButtonsLengthCap> button_indices_used_ = {};
 
   // An identifier for the gamepad device model.
   GamepadId gamepad_id_ = GamepadId::kUnknownGamepad;
@@ -175,6 +177,8 @@ class GamepadDeviceLinux final : public AbstractHapticGamepad {
   // GAMEPAD_BUS_UNKNOWN if the bus type could not be determined.
   GamepadBusType bus_type_ = GAMEPAD_BUS_UNKNOWN;
 
+  GamepadDriver driver_ = kGamepadDriverUnknown;
+
   // Dualshock4 functionality, if available.
   std::unique_ptr<Dualshock4Controller> dualshock4_;
 
@@ -201,4 +205,4 @@ class GamepadDeviceLinux final : public AbstractHapticGamepad {
 
 }  // namespace device
 
-#endif  // DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_
+#endif  // DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_H_

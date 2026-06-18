@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,14 @@
 
 #include <memory>
 
-#include "base/macros.h"
-#include "net/third_party/quiche/src/common/simple_linked_hash_map.h"
+#include "net/third_party/quiche/src/quiche/common/quiche_linked_hash_map.h"
+
+namespace thumbnail {
 
 template <class Key, class Value>
 class ScopedPtrExpiringCache {
  private:
-  typedef quiche::SimpleLinkedHashMap<Key, Value*> LinkedHashMap;
+  typedef quiche::QuicheLinkedHashMap<Key, Value*> LinkedHashMap;
 
  public:
   typedef typename LinkedHashMap::iterator iterator;
@@ -23,7 +24,10 @@ class ScopedPtrExpiringCache {
   explicit ScopedPtrExpiringCache(size_t max_cache_size)
       : max_cache_size_(max_cache_size) {}
 
-  ~ScopedPtrExpiringCache() {}
+  ScopedPtrExpiringCache(const ScopedPtrExpiringCache&) = delete;
+  ScopedPtrExpiringCache& operator=(const ScopedPtrExpiringCache&) = delete;
+
+  ~ScopedPtrExpiringCache() = default;
 
   void Put(const Key& key, std::unique_ptr<Value> value) {
     Remove(key);
@@ -33,8 +37,9 @@ class ScopedPtrExpiringCache {
 
   Value* Get(const Key& key) {
     iterator iter = map_.find(key);
-    if (iter != map_.end())
+    if (iter != map_.end()) {
       return iter->second;
+    }
     return nullptr;
   }
 
@@ -71,8 +76,8 @@ class ScopedPtrExpiringCache {
 
   size_t max_cache_size_;
   LinkedHashMap map_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedPtrExpiringCache);
 };
+
+}  // namespace thumbnail
 
 #endif  // CHROME_BROWSER_THUMBNAIL_CC_SCOPED_PTR_EXPIRING_CACHE_H_

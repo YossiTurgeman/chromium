@@ -37,7 +37,8 @@
 #include "third_party/blink/renderer/core/css/css_property_names.h"
 #include "third_party/blink/renderer/core/css_value_keywords.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
-#include "third_party/blink/renderer/platform/heap/handle.h"
+#include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -46,7 +47,6 @@ namespace blink {
 
 class CSSStyleDeclaration;
 class CSSComputedStyleDeclaration;
-class ContainerNode;
 class Document;
 class Element;
 class ExecutionContext;
@@ -78,14 +78,16 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
   static constexpr float kNoFontDelta = 0.0f;
 
   EditingStyle() = default;
-  EditingStyle(ContainerNode*,
-               PropertiesToInclude = kOnlyEditingInheritableProperties);
-  EditingStyle(const Position&,
-               PropertiesToInclude = kOnlyEditingInheritableProperties);
+  explicit EditingStyle(
+      Element*,
+      PropertiesToInclude = kOnlyEditingInheritableProperties);
+  explicit EditingStyle(
+      const Position&,
+      PropertiesToInclude = kOnlyEditingInheritableProperties);
   explicit EditingStyle(const CSSPropertyValueSet*);
   EditingStyle(CSSPropertyID, const String& value, SecureContextMode);
 
-  MutableCSSPropertyValueSet* Style() { return mutable_style_.Get(); }
+  MutableCSSPropertyValueSet* Style() const { return mutable_style_.Get(); }
   bool GetTextDirection(mojo_base::mojom::blink::TextDirection&) const;
   bool IsEmpty() const;
   void OverrideWithStyle(const CSSPropertyValueSet*);
@@ -144,7 +146,8 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
                                             PropertiesToInclude);
   void MergeStyleFromRules(Element*);
   void MergeStyleFromRulesForSerialization(Element*);
-  void RemoveStyleFromRulesAndContext(Element*, ContainerNode* context);
+  void RemoveStyleFromContext(Element*, Element* context);
+  void RemoveStyleFromRulesAndContext(Element*, Element* context);
   void RemovePropertiesInElementDefaultStyle(Element*);
   void ForceInline();
   int LegacyFontSize(Document*) const;
@@ -152,6 +155,7 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
   float FontSizeDelta() const { return font_size_delta_; }
   bool HasFontSizeDelta() const { return font_size_delta_ != kNoFontDelta; }
 
+  CSSValueID GetProperty(CSSPropertyID) const;
   void SetProperty(CSSPropertyID,
                    const String& value,
                    bool important,
@@ -162,14 +166,28 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
                                            CSSPropertyID,
                                            const String& value);
 
+  // Returns the read-only cascaded style produced by merging all rules from
+  // the given origins (see StyleResolver::CSSRuleFilter) that matched
+  // `element`. Note this does not include the element's inline style
+  // attribute, only its matched stylesheet rules.
+  static const CSSPropertyValueSet* MatchedRulesStyleForElement(
+      Element* element,
+      unsigned rules_to_include);
+
  private:
   void Init(Node*, PropertiesToInclude);
   void RemoveInheritedColorsIfNeeded(const ComputedStyle*);
+  // There are some scenarios, like when copying rich text while in ForcedColors
+  // mode where we don't want to keep the ForcedColors styling, so that if it is
+  // pasted and sent to someone with no ForcedColors applied it does not affect
+  // their styling.
+  void RemoveForcedColorsIfNeeded(const ComputedStyle* computed_style);
   void ReplaceFontSizeByKeywordIfPossible(const ComputedStyle*,
                                           SecureContextMode,
                                           CSSComputedStyleDeclaration*);
   void ExtractFontSizeDelta();
   EditingTriState TriStateOfStyle(CSSStyleDeclaration* style_to_compare,
+                                  Node* node,
                                   ShouldIgnoreTextOnlyProperties,
                                   SecureContextMode) const;
   bool ConflictsWithInlineStyleOfElement(
@@ -177,8 +195,13 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
       EditingStyle* extracted_style,
       Vector<CSSPropertyID>* conflicting_properties) const;
   void MergeStyle(const CSSPropertyValueSet*, CSSPropertyOverrideMode);
+  void ComputeValues(Element*);
 
   Member<MutableCSSPropertyValueSet> mutable_style_;
+  // This |EditingStyle| is constructed from |node_|. |node_| is null when
+  // this |EditingStyle| is constructed from |CSSPropertyValueSet*| or
+  // |CSSPropertyID|.
+  Member<Node> node_;
   bool is_monospace_font_ = false;
   float font_size_delta_ = kNoFontDelta;
   bool is_vertical_align_ = false;
@@ -216,7 +239,7 @@ class StyleChange {
   String FontFace() { return apply_font_face_; }
   String FontSize() { return apply_font_size_; }
 
-  bool operator==(const StyleChange& other) {
+  bool operator==(const StyleChange& other) const {
     return css_style_ == other.css_style_ && apply_bold_ == other.apply_bold_ &&
            apply_italic_ == other.apply_italic_ &&
            apply_underline_ == other.apply_underline_ &&
@@ -227,7 +250,6 @@ class StyleChange {
            apply_font_face_ == other.apply_font_face_ &&
            apply_font_size_ == other.apply_font_size_;
   }
-  bool operator!=(const StyleChange& other) { return !(*this == other); }
 
  private:
   void ExtractTextStyles(Document*,

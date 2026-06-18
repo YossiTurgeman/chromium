@@ -1,36 +1,52 @@
-# Copyright 2015 The Chromium Authors. All rights reserved.
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/config/features.gni")
 import("//mojo/public/tools/bindings/mojom.gni")
 import("//printing/buildflags/buildflags.gni")
+
+assert(enable_printing)
 
 static_library("common") {
   sources = [
     "cloud_print_cdd_conversion.cc",
     "cloud_print_cdd_conversion.h",
-    "print_messages.cc",
-    "print_messages.h",
-    "printing_param_traits.cc",
-    "printing_param_traits.h",
-    "printing_param_traits_macros.h",
+    "print_params.cc",
+    "print_params.h",
   ]
 
   deps = [
     ":mojo_interfaces",
     "//base",
-    "//components/cloud_devices/common:common",
-    "//ipc",
+    "//components/cloud_devices/common",
     "//printing",
-    "//printing/common:common",
+    "//printing/backend",
+    "//printing/common",
     "//printing/mojom",
-    "//third_party/blink/public:blink_headers",
-    "//ui/accessibility",
-    "//ui/gfx/geometry",
-    "//ui/gfx/ipc",
-    "//ui/gfx/ipc/geometry",
-    "//ui/gfx/ipc/skia",
   ]
+
+  if (is_linux) {
+    deps += [
+      "//build/config/linux/dbus:buildflags",
+      "//ui/linux:linux_ui",
+    ]
+    sources += [
+      "print_dialog_linux_factory.cc",
+      "print_dialog_linux_factory.h",
+    ]
+    if (use_dbus) {
+      sources += [
+        "print_dialog_linux_portal.cc",
+        "print_dialog_linux_portal.h",
+      ]
+      deps += [
+        "//components/dbus",
+        "//components/strings:components_strings_grit",
+        "//dbus",
+      ]
+    }
+  }
 }
 
 mojom("mojo_interfaces") {
@@ -39,6 +55,7 @@ mojom("mojo_interfaces") {
   public_deps = [
     "//mojo/public/mojom/base",
     "//printing/mojom",
+    "//ui/accessibility/mojom",
     "//ui/gfx/geometry/mojom",
   ]
 
@@ -46,21 +63,37 @@ mojom("mojo_interfaces") {
   if (enable_print_preview) {
     enabled_features += [ "enable_print_preview" ]
   }
-  if (enable_tagged_pdf) {
-    public_deps += [ "//ui/accessibility/mojom" ]
-    enabled_features += [ "enable_tagged_pdf" ]
-  }
 }
 
 source_set("unit_tests") {
   testonly = true
-  sources = [ "printing_param_traits_unittest.cc" ]
+  sources = [ "cloud_print_cdd_conversion_unittest.cc" ]
   deps = [
     ":common",
-    "//ipc:test_support",
-    "//printing/mojom",
-    "//skia",
+    "//base/test:test_support",
+    "//printing/backend",
+    "//printing/backend:test_support",
     "//testing/gtest",
     "//ui/gfx/geometry",
   ]
+
+  if (is_chromeos) {
+    deps += [ "//printing" ]
+  }
+
+  if (is_linux && use_dbus) {
+    sources += [ "print_dialog_linux_portal_unittest.cc" ]
+    deps += [
+      "//components/dbus",
+      "//dbus",
+      "//dbus:test_support",
+      "//printing",
+      "//testing/gmock",
+      "//ui/base",
+    ]
+  }
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }

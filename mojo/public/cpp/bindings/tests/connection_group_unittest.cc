@@ -1,14 +1,14 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind_helpers.h"
+#include "mojo/public/cpp/bindings/connection_group.h"
+
 #include "base/check.h"
-#include "base/macros.h"
-#include "base/test/bind_test_util.h"
+#include "base/functional/callback_helpers.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/test/bind.h"
 #include "base/test/task_environment.h"
-#include "base/threading/sequenced_task_runner_handle.h"
-#include "mojo/public/cpp/bindings/binding_set.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/tests/bindings_test_base.h"
@@ -23,10 +23,11 @@ class ConnectionGroupTest : public testing::Test {
  public:
   ConnectionGroupTest() = default;
 
+  ConnectionGroupTest(const ConnectionGroupTest&) = delete;
+  ConnectionGroupTest& operator=(const ConnectionGroupTest&) = delete;
+
  private:
   base::test::TaskEnvironment task_environment_;
-
-  DISALLOW_COPY_AND_ASSIGN(ConnectionGroupTest);
 };
 
 using ConnectionGroupBindingsTest = BindingsTestBase;
@@ -39,11 +40,8 @@ class TestInterfaceImpl : public mojom::TestInterface {
         &TestInterfaceImpl::OnDisconnect, base::Unretained(this)));
   }
 
-  explicit TestInterfaceImpl(mojom::TestInterfaceRequest request) {
-    bindings_.AddBinding(this, std::move(request));
-    bindings_.set_connection_error_handler(base::BindRepeating(
-        &TestInterfaceImpl::OnDisconnect, base::Unretained(this)));
-  }
+  TestInterfaceImpl(const TestInterfaceImpl&) = delete;
+  TestInterfaceImpl& operator=(const TestInterfaceImpl&) = delete;
 
   ~TestInterfaceImpl() override = default;
 
@@ -55,32 +53,23 @@ class TestInterfaceImpl : public mojom::TestInterface {
 
  private:
   void OnDisconnect() {
-    if (wait_for_disconnect_closure_)
+    if (wait_for_disconnect_closure_) {
       std::move(wait_for_disconnect_closure_).Run();
+    }
   }
 
   // mojom::TestInterface:
   void BindReceiver(
       mojo::PendingReceiver<mojom::TestInterface> receiver) override {
-    DCHECK(bindings_.empty());
     receivers_.Add(this, std::move(receiver));
   }
 
-  void BindRequest(mojom::TestInterfaceRequest request) override {
-    DCHECK(receivers_.empty());
-    bindings_.AddBinding(this, std::move(request));
-  }
-
   ReceiverSet<mojom::TestInterface> receivers_;
-  BindingSet<mojom::TestInterface> bindings_;
   base::OnceClosure wait_for_disconnect_closure_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestInterfaceImpl);
 };
 
 TEST_P(ConnectionGroupBindingsTest, RefCounting) {
-  ConnectionGroup::Ref ref =
-      ConnectionGroup::Create(base::DoNothing(), nullptr);
+  ConnectionGroupRef ref = ConnectionGroup::Create(base::DoNothing(), nullptr);
   auto group = ref.GetGroupForTesting();
 
   // The initial ref is valid but does not increase the ref-count.
@@ -88,7 +77,7 @@ TEST_P(ConnectionGroupBindingsTest, RefCounting) {
   EXPECT_EQ(0u, group->GetNumRefsForTesting());
 
   // Moving the initial ref preserves its weak type.
-  ConnectionGroup::Ref moved_ref = std::move(ref);
+  ConnectionGroupRef moved_ref = std::move(ref);
   EXPECT_FALSE(ref);
   EXPECT_TRUE(moved_ref);
   EXPECT_EQ(0u, group->GetNumRefsForTesting());
@@ -98,7 +87,7 @@ TEST_P(ConnectionGroupBindingsTest, RefCounting) {
   EXPECT_EQ(0u, group->GetNumRefsForTesting());
 
   // Any copy of the initial ref does increase ref-count.
-  ConnectionGroup::Ref copy = ref;
+  ConnectionGroupRef copy = ref;
   EXPECT_TRUE(ref);
   EXPECT_TRUE(copy);
   EXPECT_EQ(1u, group->GetNumRefsForTesting());
@@ -113,8 +102,7 @@ TEST_P(ConnectionGroupBindingsTest, PassedEndpointsInheritFromReceiver) {
   Remote<mojom::TestInterface> remote;
   auto pending_receiver = remote.BindNewPipeAndPassReceiver();
 
-  ConnectionGroup::Ref ref =
-      ConnectionGroup::Create(base::DoNothing(), nullptr);
+  ConnectionGroupRef ref = ConnectionGroup::Create(base::DoNothing(), nullptr);
 
   auto group = ref.GetGroupForTesting();
   pending_receiver.set_connection_group(std::move(ref));
@@ -168,12 +156,12 @@ TEST_P(ConnectionGroupBindingsTest, PassedEndpointsInheritFromReceiver) {
 
 TEST_F(ConnectionGroupTest, NotifyOnDecrementToZero) {
   base::RunLoop loop;
-  ConnectionGroup::Ref ref = ConnectionGroup::Create(
-      loop.QuitClosure(), base::SequencedTaskRunnerHandle::Get());
+  ConnectionGroupRef ref = ConnectionGroup::Create(
+      loop.QuitClosure(), base::SequencedTaskRunner::GetCurrentDefault());
   auto group = ref.GetGroupForTesting();
 
   EXPECT_EQ(0u, group->GetNumRefsForTesting());
-  ConnectionGroup::Ref copy = ref;
+  ConnectionGroupRef copy = ref;
   EXPECT_EQ(1u, group->GetNumRefsForTesting());
   copy.reset();
   EXPECT_EQ(0u, group->GetNumRefsForTesting());
@@ -182,17 +170,17 @@ TEST_F(ConnectionGroupTest, NotifyOnDecrementToZero) {
 }
 
 TEST_F(ConnectionGroupTest, NotifyOnDecrementToZeroMultipleTimes) {
-  base::Optional<base::RunLoop> loop;
-  ConnectionGroup::Ref ref =
+  std::optional<base::RunLoop> loop;
+  ConnectionGroupRef ref =
       ConnectionGroup::Create(base::BindLambdaForTesting([&] {
                                 ASSERT_TRUE(loop.has_value());
                                 loop->Quit();
                               }),
-                              base::SequencedTaskRunnerHandle::Get());
+                              base::SequencedTaskRunner::GetCurrentDefault());
 
   auto group = ref.GetGroupForTesting();
 
-  ConnectionGroup::Ref copy = ref;
+  ConnectionGroupRef copy = ref;
   EXPECT_EQ(1u, group->GetNumRefsForTesting());
   copy.reset();
   EXPECT_EQ(0u, group->GetNumRefsForTesting());
@@ -208,51 +196,6 @@ TEST_F(ConnectionGroupTest, NotifyOnDecrementToZeroMultipleTimes) {
 
   loop.emplace();
   loop->Run();
-}
-
-TEST_P(ConnectionGroupBindingsTest, OldBindingsTypes) {
-  // Just a basic smoke test to ensure that the ConnectionGroup mechanism also
-  // works with old bindings types. The relevant implementation is largely
-  // shared between the old and new types, so additional detailed coverage is
-  // unnecessary.
-
-  mojom::TestInterfacePtr ptr;
-  auto request = MakeRequest(&ptr);
-
-  ConnectionGroup::Ref ref =
-      ConnectionGroup::Create(base::DoNothing(), nullptr);
-
-  auto group = ref.GetGroupForTesting();
-  request.set_connection_group(std::move(ref));
-
-  TestInterfaceImpl impl(std::move(request));
-  EXPECT_EQ(0u, group->GetNumRefsForTesting());
-
-  // Verify that the connection group references spread to requests passed over
-  // the main interface.
-  mojom::TestInterfacePtr ptr2;
-  ptr->BindRequest(MakeRequest(&ptr2));
-  ptr2.FlushForTesting();
-  EXPECT_EQ(1u, group->GetNumRefsForTesting());
-
-  // Also verify that implicit conversion between PendingReceiver and
-  // InterfaceRequest retains the connection group reference. First we set up
-  // a new PendingReceiver holding a strong ConnectionGroup ref.
-  ref = ConnectionGroup::Create(base::DoNothing(), nullptr);
-  group = ref.GetGroupForTesting();
-  mojo::Remote<mojom::TestInterface> remote;
-  auto receiver = remote.BindNewPipeAndPassReceiver();
-  receiver.set_connection_group(ref);
-  EXPECT_EQ(1u, group->GetNumRefsForTesting());
-
-  // Now verify implicit conversion both to and from the InterfaceRequest type.
-  request = std::move(receiver);
-  receiver.reset();
-  EXPECT_EQ(1u, group->GetNumRefsForTesting());
-
-  receiver = std::move(request);
-  request = {};
-  EXPECT_EQ(1u, group->GetNumRefsForTesting());
 }
 
 INSTANTIATE_MOJO_BINDINGS_TEST_SUITE_P(ConnectionGroupBindingsTest);

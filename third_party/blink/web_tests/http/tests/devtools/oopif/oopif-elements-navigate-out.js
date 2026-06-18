@@ -1,15 +1,18 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as SDK from 'devtools/core/sdk/sdk.js';
+
 (async function() {
   TestRunner.addResult(`Tests that oopif iframes are rendered inline.\n`);
-  await TestRunner.loadModule('elements_test_runner');
   await TestRunner.showPanel('elements');
 
   // Save time on style updates.
-  Elements.StylesSidebarPane.prototype.update = function() {};
-  Elements.MetricsSidebarPane.prototype.update = function() {};
+  ElementsTestRunner.ignoreSidebarUpdates();
 
   await TestRunner.navigatePromise('resources/page-in.html');
 
@@ -17,19 +20,25 @@
 
   TestRunner.evaluateInPagePromise(`document.getElementById('page-iframe').src = 'http://devtools.oopif.test:8000/devtools/oopif/resources/inner-iframe.html';`);
 
-  SDK.targetManager.observeTargets({
+  SDK.TargetManager.TargetManager.instance().observeTargets({
     targetAdded: async function(target) {
-      target.model(SDK.ResourceTreeModel)._agent.setLifecycleEventsEnabled(true);
-      let complete = false;
-      target.model(SDK.ResourceTreeModel).addEventListener(SDK.ResourceTreeModel.Events.LifecycleEvent, async (event) => {
-        if (event.data.name === 'load' && !complete) {
-          complete = true;
-          await ElementsTestRunner.expandAndDump();
-          TestRunner.completeTest();
-        }
+      const resourceTreeModel = target.model(SDK.ResourceTreeModel.ResourceTreeModel);
+      if (!resourceTreeModel) return;
+      await resourceTreeModel.once(SDK.ResourceTreeModel.Events.DOMContentLoaded);
+
+      ElementsTestRunner.expandElementsTree(async () => {
+        // Because of the out-of-process component, there is a slight delay here
+        // This requires expanding twice.
+        await timeout(200);
+        await ElementsTestRunner.expandAndDump();
+        TestRunner.completeTest();
       });
     },
 
     targetRemoved: function(target) {},
   });
 })();
+
+function timeout(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}

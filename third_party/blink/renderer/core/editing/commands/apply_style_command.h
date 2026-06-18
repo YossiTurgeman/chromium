@@ -27,6 +27,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_APPLY_STYLE_COMMAND_H_
 
 #include "mojo/public/mojom/base/text_direction.mojom-blink-forward.h"
+#include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/commands/composite_edit_command.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 
@@ -43,6 +44,7 @@ class CORE_EXPORT ApplyStyleCommand final : public CompositeEditCommand {
   enum PropertyLevel { kPropertyDefault, kForceBlockProperties };
   enum InlineStyleRemovalMode { kRemoveIfNeeded, kRemoveAlways, kRemoveNone };
   enum AddStyledElement { kAddStyledElement, kDoNotAddStyledElement };
+  enum MergeSiblings { kMergeSiblings, kDoNotMergeSiblings };
   typedef bool (*IsInlineElementToRemoveFunction)(const Element*);
 
   ApplyStyleCommand(Document&,
@@ -91,13 +93,14 @@ class CORE_EXPORT ApplyStyleCommand final : public CompositeEditCommand {
                                      InlineStyleRemovalMode,
                                      EditingStyle* extracted_style,
                                      EditingState*);
-  bool RemoveCSSStyle(EditingStyle*,
+  bool RemoveCssStyle(EditingStyle*,
                       HTMLElement*,
                       EditingState*,
                       InlineStyleRemovalMode = kRemoveIfNeeded,
                       EditingStyle* extracted_style = nullptr);
   HTMLElement* HighestAncestorWithConflictingInlineStyle(EditingStyle*, Node*);
   void ApplyInlineStyleToPushDown(Node*, EditingStyle*, EditingState*);
+  void FilterContainerLevelStyles(EditingStyle*);
   void PushDownInlineStyleAroundNode(EditingStyle*, Node*, EditingState*);
   void RemoveInlineStyle(EditingStyle*,
                          const EphemeralRange& range,
@@ -150,7 +153,8 @@ class CORE_EXPORT ApplyStyleCommand final : public CompositeEditCommand {
   void SurroundNodeRangeWithElement(Node* start,
                                     Node* end,
                                     Element*,
-                                    EditingState*);
+                                    EditingState*,
+                                    MergeSiblings = kMergeSiblings);
   float ComputedFontSize(Node*);
   void JoinChildTextNodes(ContainerNode*,
                           const Position& start,
@@ -190,4 +194,4 @@ bool IsStyleSpanOrSpanWithOnlyStyleAttribute(const Element*);
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_APPLY_STYLE_COMMAND_H_

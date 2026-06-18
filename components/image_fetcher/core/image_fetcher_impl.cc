@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <string>
 
-#include "base/bind.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/functional/bind.h"
+#include "base/task/single_thread_task_runner.h"
 #include "net/base/load_flags.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "ui/gfx/image/image.h"
@@ -21,12 +21,12 @@ ImageFetcherImpl::ImageFetcherImpl(
       image_decoder_(std::move(image_decoder)),
       image_data_fetcher_(new ImageDataFetcher(url_loader_factory)) {}
 
-ImageFetcherImpl::~ImageFetcherImpl() {}
+ImageFetcherImpl::~ImageFetcherImpl() = default;
 
-ImageFetcherImpl::ImageRequest::ImageRequest() {}
+ImageFetcherImpl::ImageRequest::ImageRequest() = default;
 ImageFetcherImpl::ImageRequest::ImageRequest(ImageRequest&& other) = default;
 
-ImageFetcherImpl::ImageRequest::~ImageRequest() {}
+ImageFetcherImpl::ImageRequest::~ImageRequest() = default;
 
 void ImageFetcherImpl::FetchImageAndData(
     const GURL& image_url,
@@ -34,7 +34,7 @@ void ImageFetcherImpl::FetchImageAndData(
     ImageFetcherCallback image_callback,
     ImageFetcherParams params) {
   // Before starting to fetch the image. Look for a request in progress for
-  // |image_url|, and queue if appropriate.
+  // `image_url`, and queue if appropriate.
   auto it = pending_net_requests_.find(image_url);
   if (it == pending_net_requests_.end()) {
     ImageRequest request;
@@ -65,7 +65,7 @@ void ImageFetcherImpl::FetchImageAndData(
     // later.
     if (image_data_callback) {
       if (!request->image_data.empty()) {
-        base::ThreadTaskRunnerHandle::Get()->PostTask(
+        base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
             FROM_HERE,
             base::BindOnce(&ImageFetcherImpl::RunImageDataCallback,
                            weak_ptr_factory_.GetWeakPtr(),
@@ -83,7 +83,7 @@ void ImageFetcherImpl::OnImageURLFetched(const GURL& image_url,
                                          const std::string& image_data,
                                          const RequestMetadata& metadata) {
   auto it = pending_net_requests_.find(image_url);
-  DCHECK(it != pending_net_requests_.end());
+  CHECK(it != pending_net_requests_.end());
   ImageRequest* request = &it->second;
   DCHECK(request->image_data.empty());
   DCHECK_EQ(RequestMetadata::RESPONSE_CODE_INVALID,
@@ -103,7 +103,7 @@ void ImageFetcherImpl::OnImageURLFetched(const GURL& image_url,
   request->image_data = image_data;
   request->request_metadata = metadata;
   image_decoder_->DecodeImage(
-      image_data, params.frame_size(),
+      image_data, params.frame_size(), params.data_decoder(),
       base::BindOnce(&ImageFetcherImpl::OnImageDecoded,
                      weak_ptr_factory_.GetWeakPtr(), image_url, metadata));
 }
@@ -113,7 +113,7 @@ void ImageFetcherImpl::OnImageDecoded(const GURL& image_url,
                                       const gfx::Image& image) {
   // Get request for the given image_url from the request queue.
   auto image_iter = pending_net_requests_.find(image_url);
-  DCHECK(image_iter != pending_net_requests_.end());
+  CHECK(image_iter != pending_net_requests_.end());
   ImageRequest* request = &image_iter->second;
 
   // Run all image callbacks.

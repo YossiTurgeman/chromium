@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,11 @@
 
 #import <Cocoa/Cocoa.h>
 
-#include "base/bind.h"
 #include "base/check_op.h"
+#include "base/functional/bind.h"
 #include "base/notreached.h"
-#include "base/threading/thread_task_runner_handle.h"
+#import "base/task/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "ui/gfx/animation/linear_animation.h"
 #include "ui/views/controls/menu/menu_item_view.h"
 #include "ui/views/controls/menu/submenu_view.h"
@@ -24,10 +25,7 @@ namespace views {
 MenuClosureAnimationMac::MenuClosureAnimationMac(MenuItemView* item,
                                                  SubmenuView* menu,
                                                  base::OnceClosure callback)
-    : callback_(std::move(callback)),
-      item_(item),
-      menu_(menu),
-      step_(AnimationStep::kStart) {}
+    : callback_(std::move(callback)), item_(item), menu_(menu) {}
 
 MenuClosureAnimationMac::~MenuClosureAnimationMac() = default;
 
@@ -38,9 +36,9 @@ void MenuClosureAnimationMac::Start() {
     // accept callback will happen after a runloop cycle by skipping to the end
     // of the animation.
     step_ = AnimationStep::kFading;
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&MenuClosureAnimationMac::AdvanceAnimation,
-                                  AsWeakPtr()));
+                                  weak_ptr_factory_.GetWeakPtr()));
     return;
   }
   AdvanceAnimation();
@@ -68,12 +66,12 @@ void MenuClosureAnimationMac::AdvanceAnimation() {
   if (step_ == AnimationStep::kUnselected ||
       step_ == AnimationStep::kSelected) {
     item_->SetForcedVisualSelection(step_ == AnimationStep::kSelected);
-    timer_.Start(FROM_HERE, base::TimeDelta::FromMilliseconds(80),
+    timer_.Start(FROM_HERE, base::Milliseconds(80),
                  base::BindRepeating(&MenuClosureAnimationMac::AdvanceAnimation,
                                      base::Unretained(this)));
   } else if (step_ == AnimationStep::kFading) {
     auto fade = std::make_unique<gfx::LinearAnimation>(this);
-    fade->SetDuration(base::TimeDelta::FromMilliseconds(200));
+    fade->SetDuration(base::Milliseconds(200));
     fade_animation_ = std::move(fade);
     fade_animation_->Start();
   } else if (step_ == AnimationStep::kFinish) {
@@ -92,9 +90,19 @@ void MenuClosureAnimationMac::AnimationProgressed(
   // menus in lockstep.
   SubmenuView* submenu = menu_;
   while (submenu) {
-    NSWindow* window =
-        submenu->GetWidget()->GetNativeWindow().GetNativeNSWindow();
-    [window setAlphaValue:animation->CurrentValueBetween(1.0, 0.0)];
+    // When our menu hierarchy consists of the top-level menu and one or more
+    // submenus, the MenuController creates a single animation that targets the
+    // deepest submenu. As noted above, we walk up the menu hierarchy from the
+    // deepest submenu, telling each SubmenuView in the path to step its
+    // fadeout. It's possible for the deepest submenu to exist but not be
+    // onscreen. When this happens, the submenu has no Widget, and we'll crash
+    // if we try to ask for its native window. So, check that the SubmenuView's
+    // widget exists before proceeding. https://crbug.com/40105629 .
+    Widget* widget = submenu->GetWidget();
+    if (widget) {
+      NSWindow* window = widget->GetNativeWindow().GetNativeNSWindow();
+      window.alphaValue = animation->CurrentValueBetween(1.0, 0.0);
+    }
 
     MenuItemView* parent = submenu->GetMenuItem()->GetParentMenuItem();
     submenu = parent ? parent->GetSubmenu() : nullptr;

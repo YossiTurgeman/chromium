@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,10 @@
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/sequence_checker.h"
-#include "base/threading/sequenced_task_runner_handle.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/default_tick_clock.h"
 #include "base/time/time.h"
 #include "chrome/browser/browser_process.h"
@@ -21,8 +21,6 @@
 #include "chrome/browser/net/secure_dns_config.h"
 #include "chrome/browser/net/stub_resolver_config_reader.h"
 #include "chrome/browser/net/system_network_context_manager.h"
-#include "chrome/browser/profiles/incognito_helpers.h"
-#include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/network_service_instance.h"
 #include "content/public/browser/storage_partition.h"
@@ -30,8 +28,9 @@
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
-#include "net/dns/public/dns_over_https_server_config.h"
 #include "net/dns/public/dns_protocol.h"
+#include "net/dns/public/secure_dns_mode.h"
+#include "services/network/public/cpp/network_context_getter.h"
 #include "services/network/public/mojom/network_service.mojom.h"
 
 namespace chrome_browser_net {
@@ -48,19 +47,9 @@ const int kMaxResultAgeMs = 5000;
 const uint8_t kGooglePublicDns1[] = {8, 8, 8, 8};
 const uint8_t kGooglePublicDns2[] = {8, 8, 4, 4};
 
-void HistogramProbe(error_page::DnsProbeStatus status,
-                    base::TimeDelta elapsed) {
-  DCHECK(error_page::DnsProbeStatusIsFinished(status));
-
-  UMA_HISTOGRAM_ENUMERATION("DnsProbe.ProbeResult", status,
-                            error_page::DNS_PROBE_MAX);
-  UMA_HISTOGRAM_MEDIUM_TIMES("DnsProbe.ProbeDuration2", elapsed);
-}
-
 network::mojom::NetworkContext* GetNetworkContextForProfile(
     content::BrowserContext* context) {
-  return content::BrowserContext::GetDefaultStoragePartition(context)
-      ->GetNetworkContext();
+  return context->GetDefaultStoragePartition()->GetNetworkContext();
 }
 
 mojo::Remote<network::mojom::DnsConfigChangeManager>
@@ -81,7 +70,7 @@ net::DnsConfigOverrides GoogleConfigOverrides() {
       net::IPEndPoint(net::IPAddress(kGooglePublicDns2),
                       net::dns_protocol::kDefaultPort)};
   overrides.attempts = 1;
-  overrides.secure_dns_mode = net::DnsConfig::SecureDnsMode::OFF;
+  overrides.secure_dns_mode = net::SecureDnsMode::kOff;
   return overrides;
 }
 
@@ -89,15 +78,18 @@ class DnsProbeServiceImpl
     : public DnsProbeService,
       public network::mojom::DnsConfigChangeManagerClient {
  public:
-  using NetworkContextGetter = DnsProbeServiceFactory::NetworkContextGetter;
   using DnsConfigChangeManagerGetter =
       DnsProbeServiceFactory::DnsConfigChangeManagerGetter;
 
   explicit DnsProbeServiceImpl(content::BrowserContext* context);
   DnsProbeServiceImpl(
-      const NetworkContextGetter& network_context_getter,
+      const network::NetworkContextGetter& network_context_getter,
       const DnsConfigChangeManagerGetter& dns_config_change_manager_getter,
       const base::TickClock* tick_clock);
+
+  DnsProbeServiceImpl(const DnsProbeServiceImpl&) = delete;
+  DnsProbeServiceImpl& operator=(const DnsProbeServiceImpl&) = delete;
+
   ~DnsProbeServiceImpl() override;
 
   // DnsProbeService implementation:
@@ -144,11 +136,10 @@ class DnsProbeServiceImpl
   base::TimeTicks probe_start_time_;
   error_page::DnsProbeStatus cached_result_;
 
-  NetworkContextGetter network_context_getter_;
+  network::NetworkContextGetter network_context_getter_;
   DnsConfigChangeManagerGetter dns_config_change_manager_getter_;
   mojo::Receiver<network::mojom::DnsConfigChangeManagerClient> receiver_{this};
-  net::DnsConfig::SecureDnsMode current_config_secure_dns_mode_ =
-      net::DnsConfig::SecureDnsMode::OFF;
+  net::SecureDnsMode current_config_secure_dns_mode_ = net::SecureDnsMode::kOff;
 
   // DnsProbeRunners for the current DNS configuration and a Google DNS
   // configuration. Both runners will have the insecure async resolver enabled
@@ -160,11 +151,9 @@ class DnsProbeServiceImpl
   std::unique_ptr<DnsProbeRunner> google_config_runner_;
 
   // Time source for cache expiry.
-  const base::TickClock* tick_clock_;  // Not owned.
+  raw_ptr<const base::TickClock> tick_clock_;  // Not owned.
 
   SEQUENCE_CHECKER(sequence_checker_);
-
-  DISALLOW_COPY_AND_ASSIGN(DnsProbeServiceImpl);
 };
 
 DnsProbeServiceImpl::DnsProbeServiceImpl(content::BrowserContext* context)
@@ -174,7 +163,7 @@ DnsProbeServiceImpl::DnsProbeServiceImpl(content::BrowserContext* context)
           base::DefaultTickClock::GetInstance()) {}
 
 DnsProbeServiceImpl::DnsProbeServiceImpl(
-    const NetworkContextGetter& network_context_getter,
+    const network::NetworkContextGetter& network_context_getter,
     const DnsConfigChangeManagerGetter& dns_config_change_manager_getter,
     const base::TickClock* tick_clock)
     : state_(STATE_NO_RESULT),
@@ -234,20 +223,17 @@ void DnsProbeServiceImpl::SetUpCurrentConfigRunner() {
   current_config_overrides.search = std::vector<std::string>();
   current_config_overrides.attempts = 1;
 
-  if (current_config_secure_dns_mode_ ==
-      net::DnsConfig::SecureDnsMode::SECURE) {
-    if (!secure_dns_config.servers().empty()) {
-      current_config_overrides.dns_over_https_servers.emplace(
-          secure_dns_config.servers());
+  if (current_config_secure_dns_mode_ == net::SecureDnsMode::kSecure) {
+    if (!secure_dns_config.doh_servers().servers().empty()) {
+      current_config_overrides.dns_over_https_config =
+          secure_dns_config.doh_servers();
     }
-    current_config_overrides.secure_dns_mode =
-        net::DnsConfig::SecureDnsMode::SECURE;
+    current_config_overrides.secure_dns_mode = net::SecureDnsMode::kSecure;
   } else {
     // A DNS error that occurred in automatic mode must have had an insecure
     // DNS failure. For efficiency, probe queries in this case can just be
     // issued in OFF mode.
-    current_config_overrides.secure_dns_mode =
-        net::DnsConfig::SecureDnsMode::OFF;
+    current_config_overrides.secure_dns_mode = net::SecureDnsMode::kOff;
   }
 
   current_config_runner_ = std::make_unique<DnsProbeRunner>(
@@ -287,8 +273,6 @@ void DnsProbeServiceImpl::OnProbeComplete() {
                                    google_config_runner_->result());
   state_ = STATE_RESULT_CACHED;
 
-  HistogramProbe(cached_result_, tick_clock_->NowTicks() - probe_start_time_);
-
   CallCallbacks();
 }
 
@@ -311,8 +295,7 @@ error_page::DnsProbeStatus DnsProbeServiceImpl::EvaluateResults(
   // current DNS config is in secure mode, return an error indicating that this
   // is a secure DNS config issue.
   if (google_config_result == DnsProbeRunner::CORRECT) {
-    return (current_config_secure_dns_mode_ ==
-            net::DnsConfig::SecureDnsMode::SECURE)
+    return (current_config_secure_dns_mode_ == net::SecureDnsMode::kSecure)
                ? error_page::DNS_PROBE_FINISHED_BAD_SECURE_CONFIG
                : error_page::DNS_PROBE_FINISHED_BAD_CONFIG;
   }
@@ -355,7 +338,7 @@ void DnsProbeServiceImpl::CallCallbackAsynchronously() {
   std::vector<ProbeCallback> callbacks;
   callbacks.swap(pending_callbacks_);
 
-  base::SequencedTaskRunnerHandle::Get()->PostTask(
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(std::move(callbacks.front()), cached_result_));
 }
 
@@ -372,8 +355,7 @@ bool DnsProbeServiceImpl::CachedResultIsExpired() const {
   if (state_ != STATE_RESULT_CACHED)
     return false;
 
-  const base::TimeDelta kMaxResultAge =
-      base::TimeDelta::FromMilliseconds(kMaxResultAgeMs);
+  const base::TimeDelta kMaxResultAge = base::Milliseconds(kMaxResultAgeMs);
   return tick_clock_->NowTicks() - probe_start_time_ > kMaxResultAge;
 }
 
@@ -407,30 +389,35 @@ DnsProbeService* DnsProbeServiceFactory::GetForContext(
 }
 
 DnsProbeServiceFactory* DnsProbeServiceFactory::GetInstance() {
-  return base::Singleton<DnsProbeServiceFactory>::get();
+  static base::NoDestructor<DnsProbeServiceFactory> instance;
+  return instance.get();
 }
 
 DnsProbeServiceFactory::DnsProbeServiceFactory()
-    : BrowserContextKeyedServiceFactory(
+    : ProfileKeyedServiceFactory(
           "DnsProbeService",
-          BrowserContextDependencyManager::GetInstance()) {}
+          // Create separate service for incognito profiles.
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOwnInstance)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOwnInstance)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOwnInstance)
+              .Build()) {}
 
-DnsProbeServiceFactory::~DnsProbeServiceFactory() {}
+DnsProbeServiceFactory::~DnsProbeServiceFactory() = default;
 
-KeyedService* DnsProbeServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+DnsProbeServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new DnsProbeServiceImpl(context);
-}
-
-content::BrowserContext* DnsProbeServiceFactory::GetBrowserContextToUse(
-    content::BrowserContext* context) const {
-  // Create separate service for incognito profiles.
-  return chrome::GetBrowserContextOwnInstanceInIncognito(context);
+  return std::make_unique<DnsProbeServiceImpl>(context);
 }
 
 // static
 std::unique_ptr<DnsProbeService> DnsProbeServiceFactory::CreateForTesting(
-    const NetworkContextGetter& network_context_getter,
+    const network::NetworkContextGetter& network_context_getter,
     const DnsConfigChangeManagerGetter& dns_config_change_manager_getter,
     const base::TickClock* tick_clock) {
   return std::make_unique<DnsProbeServiceImpl>(

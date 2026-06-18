@@ -1,18 +1,21 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/encryptedmedia/media_key_status_map.h"
 
+#include <algorithm>
+#include <limits>
+
+#include "base/compiler_specific.h"
 #include "third_party/blink/public/platform/web_data.h"
-#include "third_party/blink/renderer/bindings/core/v8/array_buffer_or_array_buffer_view.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_arraybuffer_arraybufferview.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_union_mediakeystatus_undefined.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_piece.h"
 #include "third_party/blink/renderer/platform/wtf/shared_buffer.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
-
-#include <algorithm>
-#include <limits>
 
 namespace blink {
 
@@ -20,14 +23,14 @@ namespace blink {
 class MediaKeyStatusMap::MapEntry final
     : public GarbageCollected<MediaKeyStatusMap::MapEntry> {
  public:
-  MapEntry(WebData key_id, const String& status)
+  MapEntry(WebData key_id, const V8MediaKeyStatus& status)
       : key_id_(DOMArrayBuffer::Create(scoped_refptr<SharedBuffer>(key_id))),
         status_(status) {}
-  virtual ~MapEntry() = default;
+  ~MapEntry() = default;
 
   DOMArrayBuffer* KeyId() const { return key_id_.Get(); }
 
-  const String& Status() const { return status_; }
+  const V8MediaKeyStatus& Status() const { return status_; }
 
   static bool CompareLessThan(MapEntry* a, MapEntry* b) {
     // Compare the keyIds of 2 different MapEntries. Assume that |a| and |b|
@@ -45,50 +48,40 @@ class MediaKeyStatusMap::MapEntry final
       return b->KeyId();
 
     // Compare the bytes.
-    int result = memcmp(a->KeyId()->Data(), b->KeyId()->Data(),
-                        std::min(a->KeyId()->ByteLengthAsSizeT(),
-                                 b->KeyId()->ByteLengthAsSizeT()));
-    if (result != 0)
-      return result < 0;
-
-    // KeyIds are equal to the shared length, so the shorter string is <.
-    DCHECK_NE(a->KeyId()->ByteLengthAsSizeT(), b->KeyId()->ByteLengthAsSizeT());
-    return a->KeyId()->ByteLengthAsSizeT() < b->KeyId()->ByteLengthAsSizeT();
+    return std::ranges::lexicographical_compare(a->KeyId()->ByteSpan(),
+                                                b->KeyId()->ByteSpan());
   }
 
-  virtual void Trace(Visitor* visitor) const { visitor->Trace(key_id_); }
+  void Trace(Visitor* visitor) const { visitor->Trace(key_id_); }
 
  private:
   const Member<DOMArrayBuffer> key_id_;
-  const String status_;
+  const V8MediaKeyStatus status_;
 };
 
 // Represents an Iterator that loops through the set of MapEntrys.
 class MapIterationSource final
-    : public PairIterable<ArrayBufferOrArrayBufferView,
-                          String>::IterationSource {
+    : public PairSyncIterable<MediaKeyStatusMap>::IterationSource {
  public:
   MapIterationSource(MediaKeyStatusMap* map) : map_(map), current_(0) {}
 
-  bool Next(ScriptState* script_state,
-            ArrayBufferOrArrayBufferView& key,
-            String& value,
-            ExceptionState&) override {
+  bool FetchNextItem(ScriptState* script_state,
+                     V8BufferSource*& key,
+                     V8MediaKeyStatus& value) override {
     // This simply advances an index and returns the next value if any,
     // so if the iterated object is mutated values may be skipped.
     if (current_ >= map_->size())
       return false;
 
     const auto& entry = map_->at(current_++);
-    key.SetArrayBuffer(entry.KeyId());
+    key = MakeGarbageCollected<V8BufferSource>(entry.KeyId());
     value = entry.Status();
     return true;
   }
 
   void Trace(Visitor* visitor) const override {
     visitor->Trace(map_);
-    PairIterable<ArrayBufferOrArrayBufferView, String>::IterationSource::Trace(
-        visitor);
+    PairSyncIterable<MediaKeyStatusMap>::IterationSource::Trace(visitor);
   }
 
  private:
@@ -102,7 +95,8 @@ void MediaKeyStatusMap::Clear() {
   entries_.clear();
 }
 
-void MediaKeyStatusMap::AddEntry(WebData key_id, const String& status) {
+void MediaKeyStatusMap::AddEntry(WebData key_id,
+                                 const V8MediaKeyStatus& status) {
   // Insert new entry into sorted list.
   auto* entry = MakeGarbageCollected<MapEntry>(key_id, status);
   uint32_t index = 0;
@@ -129,23 +123,27 @@ uint32_t MediaKeyStatusMap::IndexOf(const DOMArrayPiece& key) const {
   return std::numeric_limits<uint32_t>::max();
 }
 
-bool MediaKeyStatusMap::has(const ArrayBufferOrArrayBufferView& key_id) {
+bool MediaKeyStatusMap::has(
+    const V8BufferSource* key_id
+) {
   uint32_t index = IndexOf(key_id);
   return index < entries_.size();
 }
 
-ScriptValue MediaKeyStatusMap::get(ScriptState* script_state,
-                                   const ArrayBufferOrArrayBufferView& key_id) {
+V8UnionMediaKeyStatusOrUndefined::Ret MediaKeyStatusMap::get(
+    ScriptState* script_state,
+    const V8BufferSource* key_id) {
   uint32_t index = IndexOf(key_id);
   if (index >= entries_.size()) {
-    return ScriptValue(script_state->GetIsolate(),
-                       v8::Undefined(script_state->GetIsolate()));
+    return V8UnionMediaKeyStatusOrUndefined::Ret(script_state,
+                                                 ToV8UndefinedGenerator());
   }
-  return ScriptValue::From(script_state, at(index).Status());
+  return V8UnionMediaKeyStatusOrUndefined::Ret(script_state,
+                                               at(index).Status());
 }
 
-PairIterable<ArrayBufferOrArrayBufferView, String>::IterationSource*
-MediaKeyStatusMap::StartIteration(ScriptState*, ExceptionState&) {
+MediaKeyStatusMap::IterationSource* MediaKeyStatusMap::CreateIterationSource(
+    ScriptState*) {
   return MakeGarbageCollected<MapIterationSource>(this);
 }
 

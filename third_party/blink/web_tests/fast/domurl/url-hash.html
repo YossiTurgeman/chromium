@@ -37,17 +37,20 @@ test(function() {
     assert_equals(url.hash, '');
 
     url.hash = 'a';
-    assert_equals(url.hash, '');
+    assert_equals(url.hash, '#a');
 }, 'non hierarchical');
 
 test(function() {
     var url = new URL('http://abc.de:8080/path/file?query#fragment');
-    url.href = 'invalid';
-    assert_equals(url.hash, '');
+    var expected = '#fragment';
+    assert_equals(url.hash, expected);
+
+    assert_throws_js(TypeError, () => { url.href = 'invalid'; });
+    assert_equals(url.hash, expected);
 
     url.hash = 'changed';
-    assert_equals(url.hash, '');
-    assert_equals(url.href, 'invalid');
+    assert_equals(url.hash, '#changed');
+    assert_equals(url.href, 'http://abc.de:8080/path/file?query#changed');
 }, 'hash property invalid URL');
 
 test(function() {

@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2015 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2015 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -18,6 +18,9 @@ from clang import plugin_testing
 class BlinkGcPluginTest(plugin_testing.ClangPluginTest):
   """Test harness for the Blink GC plugin."""
 
+  def __init__(self, *args, **kwargs):
+    super(BlinkGcPluginTest, self).__init__(*args, **kwargs)
+
   def AdjustClangArguments(self, clang_cmd):
     clang_cmd.append('-Wno-inaccessible-base')
 
@@ -27,7 +30,7 @@ class BlinkGcPluginTest(plugin_testing.ClangPluginTest):
     if os.path.exists('%s.graph.json' % test_name):
       try:
         actual = subprocess.check_output([
-            'python', '../process-graph.py', '-c',
+            sys.executable, '../process-graph.py', '-c',
             '%s.graph.json' % test_name
         ],
                                          stderr=subprocess.STDOUT,
@@ -51,13 +54,22 @@ def main():
       action='store_true',
       help='If specified, overwrites the expected results in place.')
   parser.add_argument('clang_path', help='The path to the clang binary.')
+  parser.add_argument('--quiet',
+                      action='store_true',
+                      help='If specified, suppresses printing the expected '
+                      'and actual output and only prints the diff.')
+  parser.add_argument('--filter',
+                      action='store',
+                      help='Filter to test files that match a regex')
   args = parser.parse_args()
 
-  return BlinkGcPluginTest(
-      os.path.dirname(os.path.realpath(__file__)),
-      args.clang_path,
-      'blink-gc-plugin',
-      args.reset_results).Run()
+  dir_name = os.path.dirname(os.path.realpath(__file__))
+
+  return BlinkGcPluginTest(dir_name,
+                           args.clang_path, ['blink-gc-plugin'],
+                           args.reset_results,
+                           args.quiet,
+                           filename_regex=args.filter).Run()
 
 
 if __name__ == '__main__':

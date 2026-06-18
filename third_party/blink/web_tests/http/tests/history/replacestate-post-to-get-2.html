@@ -1,13 +1,14 @@
 <html>
 <head>
+<script src="/resources/prevent-bfcache.js"></script>
 <script>
 if (window.testRunner) {
     testRunner.dumpAsText();
     testRunner.waitUntilDone();
 }
 
-function test()
-{
+async function test() {
+    await preventBFCache();
     if (sessionStorage["form"] != 1) {
         sessionStorage["form"] = 1;
         var form = document.getElementById("testForm");
@@ -19,7 +20,7 @@ function test()
 }
 </script>
 </head>
-<body onload="test()">
+<body onpageshow="test()">
 <form id="testForm" action="resources/replacestate-forward-back.php" method="POST">
 </form>
 </body>

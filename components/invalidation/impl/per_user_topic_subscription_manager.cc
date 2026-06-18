@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,33 +13,26 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/observer_list.h"
 #include "base/rand_util.h"
-#include "base/stl_util.h"
 #include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
-#include "components/gcm_driver/instance_id/instance_id_driver.h"
 #include "components/invalidation/public/identity_provider.h"
-#include "components/invalidation/public/invalidation_util.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "google_apis/gaia/gaia_constants.h"
 
-namespace syncer {
+namespace invalidation {
 
 namespace {
 
-const char kTypeSubscribedForInvalidationsDeprecated[] =
-    "invalidation.registered_for_invalidation";
-
 const char kTypeSubscribedForInvalidations[] =
     "invalidation.per_sender_registered_for_invalidation";
-
-const char kActiveRegistrationTokenDeprecated[] =
-    "invalidation.active_registration_token";
 
 const char kActiveRegistrationTokens[] =
     "invalidation.per_sender_active_registration_tokens";
@@ -89,43 +82,32 @@ class PerProjectDictionaryPrefUpdate {
   explicit PerProjectDictionaryPrefUpdate(PrefService* prefs,
                                           const std::string& project_id)
       : update_(prefs, kTypeSubscribedForInvalidations) {
-    per_sender_pref_ = update_->FindDictKey(project_id);
-    if (!per_sender_pref_) {
-      update_->SetDictionary(project_id,
-                             std::make_unique<base::DictionaryValue>());
-      per_sender_pref_ = update_->FindDictKey(project_id);
-    }
+    per_sender_pref_ = update_->EnsureDict(project_id);
     DCHECK(per_sender_pref_);
   }
 
-  base::Value& operator*() { return *per_sender_pref_; }
+  base::DictValue& operator*() { return *per_sender_pref_; }
 
-  base::Value* operator->() { return per_sender_pref_; }
+  base::DictValue* operator->() { return per_sender_pref_; }
 
  private:
-  DictionaryPrefUpdate update_;
-  base::Value* per_sender_pref_;
+  ScopedDictPrefUpdate update_;
+  raw_ptr<base::DictValue> per_sender_pref_;
 };
 
-// Added in M76.
-void MigratePrefs(PrefService* prefs, const std::string& project_id) {
-  if (!prefs->HasPrefPath(kActiveRegistrationTokenDeprecated)) {
-    return;
-  }
-  {
-    DictionaryPrefUpdate token_update(prefs, kActiveRegistrationTokens);
-    token_update->SetString(
-        project_id, prefs->GetString(kActiveRegistrationTokenDeprecated));
-  }
+// State of the instance ID token when subscription is requested.
+// Used by UMA histogram, so entries shouldn't be reordered or removed.
+enum class TokenStateOnSubscriptionRequest {
+  kTokenWasEmpty = 0,
+  kTokenUnchanged = 1,
+  kTokenChanged = 2,
+  kTokenCleared = 3,
+  kMaxValue = kTokenCleared,
+};
 
-  auto* old_subscriptions =
-      prefs->GetDictionary(kTypeSubscribedForInvalidationsDeprecated);
-  {
-    PerProjectDictionaryPrefUpdate update(prefs, project_id);
-    *update = old_subscriptions->Clone();
-  }
-  prefs->ClearPref(kActiveRegistrationTokenDeprecated);
-  prefs->ClearPref(kTypeSubscribedForInvalidationsDeprecated);
+void ReportTokenState(TokenStateOnSubscriptionRequest token_state) {
+  base::UmaHistogramEnumeration(
+      "FCMInvalidations.TokenStateOnRegistrationRequest2", token_state);
 }
 
 }  // namespace
@@ -133,10 +115,6 @@ void MigratePrefs(PrefService* prefs, const std::string& project_id) {
 // static
 void PerUserTopicSubscriptionManager::RegisterProfilePrefs(
     PrefRegistrySimple* registry) {
-  registry->RegisterDictionaryPref(kTypeSubscribedForInvalidationsDeprecated);
-  registry->RegisterStringPref(kActiveRegistrationTokenDeprecated,
-                               std::string());
-
   registry->RegisterDictionaryPref(kTypeSubscribedForInvalidations);
   registry->RegisterDictionaryPref(kActiveRegistrationTokens);
 }
@@ -148,21 +126,14 @@ void PerUserTopicSubscriptionManager::RegisterPrefs(
   RegisterProfilePrefs(registry);
 }
 
-// State of the instance ID token when subscription is requested.
-// Used by UMA histogram, so entries shouldn't be reordered or removed.
-enum class PerUserTopicSubscriptionManager::TokenStateOnSubscriptionRequest {
-  kTokenWasEmpty = 0,
-  kTokenUnchanged = 1,
-  kTokenChanged = 2,
-  kTokenCleared = 3,
-  kMaxValue = kTokenCleared,
-};
-
 struct PerUserTopicSubscriptionManager::SubscriptionEntry {
   SubscriptionEntry(const Topic& topic,
                     SubscriptionFinishedCallback completion_callback,
                     PerUserTopicSubscriptionRequest::RequestType type,
                     bool topic_is_public = false);
+
+  SubscriptionEntry(const SubscriptionEntry&) = delete;
+  SubscriptionEntry& operator=(const SubscriptionEntry&) = delete;
 
   // Destruction of this object causes cancellation of the request.
   ~SubscriptionEntry();
@@ -183,8 +154,6 @@ struct PerUserTopicSubscriptionManager::SubscriptionEntry {
   std::string last_request_access_token;
 
   bool has_retried_on_auth_error = false;
-
-  DISALLOW_COPY_AND_ASSIGN(SubscriptionEntry);
 };
 
 PerUserTopicSubscriptionManager::SubscriptionEntry::SubscriptionEntry(
@@ -198,7 +167,8 @@ PerUserTopicSubscriptionManager::SubscriptionEntry::SubscriptionEntry(
       type(type),
       request_backoff_(&kBackoffPolicy) {}
 
-PerUserTopicSubscriptionManager::SubscriptionEntry::~SubscriptionEntry() {}
+PerUserTopicSubscriptionManager::SubscriptionEntry::~SubscriptionEntry() =
+    default;
 
 void PerUserTopicSubscriptionManager::SubscriptionEntry::SubscriptionFinished(
     const Status& code,
@@ -207,52 +177,59 @@ void PerUserTopicSubscriptionManager::SubscriptionEntry::SubscriptionFinished(
 }
 
 PerUserTopicSubscriptionManager::PerUserTopicSubscriptionManager(
-    invalidation::IdentityProvider* identity_provider,
+    IdentityProvider* identity_provider,
     PrefService* pref_service,
     network::mojom::URLLoaderFactory* url_loader_factory,
-    const std::string& project_id,
-    bool migrate_prefs)
+    const std::string& project_id)
     : pref_service_(pref_service),
       identity_provider_(identity_provider),
       url_loader_factory_(url_loader_factory),
       project_id_(project_id),
-      migrate_prefs_(migrate_prefs),
       request_access_token_backoff_(&kBackoffPolicy) {}
 
-PerUserTopicSubscriptionManager::~PerUserTopicSubscriptionManager() {}
+PerUserTopicSubscriptionManager::~PerUserTopicSubscriptionManager() = default;
 
 // static
 std::unique_ptr<PerUserTopicSubscriptionManager>
 PerUserTopicSubscriptionManager::Create(
-    invalidation::IdentityProvider* identity_provider,
-    PrefService* pref_service,
     network::mojom::URLLoaderFactory* url_loader_factory,
-    const std::string& project_id,
-    bool migrate_prefs) {
+    IdentityProvider* identity_provider,
+    PrefService* pref_service,
+    const std::string& project_id) {
   return std::make_unique<PerUserTopicSubscriptionManager>(
-      identity_provider, pref_service, url_loader_factory, project_id,
-      migrate_prefs);
+      identity_provider, pref_service, url_loader_factory, project_id);
 }
 
 void PerUserTopicSubscriptionManager::Init() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (migrate_prefs_) {
-    MigratePrefs(pref_service_, project_id_);
+
+  // Load registration token from prefs
+  const auto& token_dict = pref_service_->GetDict(kActiveRegistrationTokens);
+  const auto* cached_token = token_dict.FindString(project_id_);
+  if (cached_token) {
+    instance_id_token_ = *cached_token;
   }
+
+  // Load subscribed topics from prefs.
   PerProjectDictionaryPrefUpdate update(pref_service_, project_id_);
-  if (update->DictEmpty()) {
+  if (update->empty()) {
+    return;
+  }
+
+  if (instance_id_token_.empty()) {
+    // Cannot be subscribed without a token.
+    update->clear();
     return;
   }
 
   std::vector<std::string> keys_to_remove;
   // Load subscribed topics from prefs.
-  for (const auto& it : update->DictItems()) {
+  for (auto it : *update) {
     Topic topic = it.first;
-    std::string private_topic_name;
-    if (it.second.GetAsString(&private_topic_name) &&
-        !private_topic_name.empty()) {
-      topic_to_private_topic_[topic] = private_topic_name;
-      private_topic_to_topic_[private_topic_name] = topic;
+    const std::string* private_topic_name = it.second.GetIfString();
+    if (private_topic_name && !private_topic_name->empty()) {
+      topic_to_private_topic_[topic] = *private_topic_name;
+      private_topic_to_topic_[*private_topic_name] = topic;
     } else {
       // Couldn't decode the pref value; remove it.
       keys_to_remove.push_back(topic);
@@ -261,21 +238,26 @@ void PerUserTopicSubscriptionManager::Init() {
 
   // Delete prefs, which weren't decoded successfully.
   for (const std::string& key : keys_to_remove) {
-    update->RemoveKey(key);
+    update->Remove(key);
   }
 }
 
 void PerUserTopicSubscriptionManager::UpdateSubscribedTopics(
-    const Topics& topics,
-    const std::string& instance_id_token) {
+    const TopicMap& topics,
+    const std::string& new_instance_id_token) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  instance_id_token_ = instance_id_token;
-  DropAllSavedSubscriptionsOnTokenChange();
+  ReportNewInstanceIdTokenState(new_instance_id_token);
+  DropAllSavedSubscriptionsOnTokenChange(new_instance_id_token);
+  StoreNewToken(new_instance_id_token);
+  UpdateSubscribedTopics(topics);
+}
 
+void PerUserTopicSubscriptionManager::UpdateSubscribedTopics(
+    const TopicMap& topics) {
   for (const auto& topic : topics) {
     auto it = pending_subscriptions_.find(topic.first);
     if (it != pending_subscriptions_.end() &&
-        it->second->type == PerUserTopicSubscriptionRequest::SUBSCRIBE) {
+        it->second->type == RequestType::kSubscribe) {
       // Do not update SubscriptionEntry if there is no changes, to not loose
       // backoff timer.
       continue;
@@ -291,7 +273,7 @@ void PerUserTopicSubscriptionManager::UpdateSubscribedTopics(
           base::BindRepeating(
               &PerUserTopicSubscriptionManager::SubscriptionFinishedForTopic,
               base::Unretained(this)),
-          PerUserTopicSubscriptionRequest::SUBSCRIBE, topic.second.is_public);
+          RequestType::kSubscribe, topic.second.is_public);
     }
   }
 
@@ -304,10 +286,9 @@ void PerUserTopicSubscriptionManager::UpdateSubscribedTopics(
     if (topics.find(topic) == topics.end()) {
       // Unsubscription request may only replace pending subscription request,
       // because topic immediately deleted from |topic_to_private_topic_| when
-      // unsubsciption request scheduled.
+      // unsubscription request scheduled.
       DCHECK(pending_subscriptions_.count(topic) == 0 ||
-             pending_subscriptions_[topic]->type ==
-                 PerUserTopicSubscriptionRequest::SUBSCRIBE);
+             pending_subscriptions_[topic]->type == RequestType::kSubscribe);
       // If there was already a pending request for this topic, it'll get
       // destroyed and replaced by the new one.
       pending_subscriptions_[topic] = std::make_unique<SubscriptionEntry>(
@@ -315,13 +296,13 @@ void PerUserTopicSubscriptionManager::UpdateSubscribedTopics(
           base::BindRepeating(
               &PerUserTopicSubscriptionManager::SubscriptionFinishedForTopic,
               base::Unretained(this)),
-          PerUserTopicSubscriptionRequest::UNSUBSCRIBE);
+          RequestType::kUnsubscribe);
       private_topic_to_topic_.erase(it->second);
       it = topic_to_private_topic_.erase(it);
       // The decision to unsubscribe from invalidations for |topic| was
       // made, the preferences should be cleaned up immediately.
       PerProjectDictionaryPrefUpdate update(pref_service_, project_id_);
-      update->RemoveKey(topic);
+      update->Remove(topic);
     } else {
       // Topic is still wanted, nothing to do.
       ++it;
@@ -346,8 +327,7 @@ void PerUserTopicSubscriptionManager::UpdateSubscribedTopics(
 void PerUserTopicSubscriptionManager::ClearInstanceIDToken() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  instance_id_token_.clear();
-  DropAllSavedSubscriptionsOnTokenChange();
+  UpdateSubscribedTopics(/*topics=*/{}, /*new_instance_id_token=*/{});
 }
 
 void PerUserTopicSubscriptionManager::StartPendingSubscriptions() {
@@ -362,7 +342,6 @@ void PerUserTopicSubscriptionManager::StartPendingSubscriptionRequest(
   if (it == pending_subscriptions_.end()) {
     NOTREACHED() << "StartPendingSubscriptionRequest called on " << topic
                  << " which is not in the registration map";
-    return;
   }
   if (it->second->request_retry_timer_.IsRunning()) {
     // A retry is already scheduled for this request; nothing to do.
@@ -398,13 +377,13 @@ void PerUserTopicSubscriptionManager::ActOnSuccessfulSubscription(
   auto it = pending_subscriptions_.find(topic);
   it->second->request_backoff_.InformOfRequest(true);
   pending_subscriptions_.erase(it);
-  if (type == PerUserTopicSubscriptionRequest::SUBSCRIBE) {
+  if (type == RequestType::kSubscribe) {
     // If this was a subscription, update the prefs now (if it was an
     // unsubscription, we've already updated the prefs when scheduling the
     // request).
     {
       PerProjectDictionaryPrefUpdate update(pref_service_, project_id_);
-      update->SetKey(topic, base::Value(private_topic_name));
+      update->Set(topic, private_topic_name);
       topic_to_private_topic_[topic] = private_topic_name;
       private_topic_to_topic_[private_topic_name] = topic;
     }
@@ -414,7 +393,7 @@ void PerUserTopicSubscriptionManager::ActOnSuccessfulSubscription(
   // pending.
   bool all_subscriptions_completed = true;
   for (const auto& entry : pending_subscriptions_) {
-    if (entry.second->type == PerUserTopicSubscriptionRequest::SUBSCRIBE) {
+    if (entry.second->type == RequestType::kSubscribe) {
       all_subscriptions_completed = false;
     }
   }
@@ -444,6 +423,7 @@ void PerUserTopicSubscriptionManager::SubscriptionFinishedForTopic(
     Status code,
     std::string private_topic_name,
     PerUserTopicSubscriptionRequest::RequestType type) {
+  NotifySubscriptionRequestFinished(topic, type, code);
   if (code.IsSuccess()) {
     ActOnSuccessfulSubscription(topic, private_topic_name, type);
     return;
@@ -472,8 +452,8 @@ void PerUserTopicSubscriptionManager::SubscriptionFinishedForTopic(
 
   // If one of the subscription requests failed (and we need to either observe
   // backoff before retrying, or won't retry at all), emit SUBSCRIPTION_FAILURE.
-  if (type == PerUserTopicSubscriptionRequest::SUBSCRIBE) {
-    // TODO(crbug.com/1020117): case !code.ShouldRetry() now leads to
+  if (type == RequestType::kSubscribe) {
+    // TODO(crbug.com/40105630): case !code.ShouldRetry() now leads to
     // inconsistent behavior depending on requests completion order: if any
     // request was successful after it, we may have no |pending_subscriptions_|
     // and emit ENABLED; otherwise, if failed request is the last one, state
@@ -558,30 +538,30 @@ void PerUserTopicSubscriptionManager::OnAccessTokenRequestFailed(
                      base::Unretained(this)));
 }
 
-void PerUserTopicSubscriptionManager::DropAllSavedSubscriptionsOnTokenChange() {
-  TokenStateOnSubscriptionRequest outcome =
-      DropAllSavedSubscriptionsOnTokenChangeImpl();
-  base::UmaHistogramEnumeration(
-      "FCMInvalidations.TokenStateOnRegistrationRequest2", outcome);
+void PerUserTopicSubscriptionManager::ReportNewInstanceIdTokenState(
+    const std::string& new_instance_id_token) const {
+  if (instance_id_token_ == new_instance_id_token) {
+    ReportTokenState(TokenStateOnSubscriptionRequest::kTokenUnchanged);
+  } else if (instance_id_token_.empty()) {
+    ReportTokenState(TokenStateOnSubscriptionRequest::kTokenWasEmpty);
+  } else if (new_instance_id_token.empty()) {
+    ReportTokenState(TokenStateOnSubscriptionRequest::kTokenCleared);
+  } else {
+    ReportTokenState(TokenStateOnSubscriptionRequest::kTokenChanged);
+  }
 }
 
-PerUserTopicSubscriptionManager::TokenStateOnSubscriptionRequest
-PerUserTopicSubscriptionManager::DropAllSavedSubscriptionsOnTokenChangeImpl() {
-  {
-    DictionaryPrefUpdate token_update(pref_service_, kActiveRegistrationTokens);
-    std::string previous_token;
-    token_update->GetString(project_id_, &previous_token);
-    if (previous_token == instance_id_token_) {
-      // Note: This includes the case where the token was and still is empty.
-      return TokenStateOnSubscriptionRequest::kTokenUnchanged;
-    }
+void PerUserTopicSubscriptionManager::StoreNewToken(
+    const std::string& new_instance_id_token) {
+  instance_id_token_ = new_instance_id_token;
+  ScopedDictPrefUpdate token_update(pref_service_, kActiveRegistrationTokens);
+  token_update->Set(project_id_, new_instance_id_token);
+}
 
-    token_update->SetString(project_id_, instance_id_token_);
-    if (previous_token.empty()) {
-      // If we didn't have a registration token before, we shouldn't have had
-      // any subscriptions either, so no need to drop them.
-      return TokenStateOnSubscriptionRequest::kTokenWasEmpty;
-    }
+void PerUserTopicSubscriptionManager::DropAllSavedSubscriptionsOnTokenChange(
+    const std::string& new_instance_id_token) {
+  if (instance_id_token_ == new_instance_id_token) {
+    return;
   }
 
   // The token has been cleared or changed. In either case, clear all existing
@@ -589,13 +569,10 @@ PerUserTopicSubscriptionManager::DropAllSavedSubscriptionsOnTokenChangeImpl() {
   // unsubscribe requests - if the token was revoked, the server will drop the
   // subscriptions anyway.)
   PerProjectDictionaryPrefUpdate update(pref_service_, project_id_);
-  *update = base::Value(base::Value::Type::DICTIONARY);
+  *update = base::DictValue();
   topic_to_private_topic_.clear();
   private_topic_to_topic_.clear();
   pending_subscriptions_.clear();
-  return instance_id_token_.empty()
-             ? TokenStateOnSubscriptionRequest::kTokenCleared
-             : TokenStateOnSubscriptionRequest::kTokenChanged;
 }
 
 void PerUserTopicSubscriptionManager::NotifySubscriptionChannelStateChange(
@@ -614,25 +591,23 @@ void PerUserTopicSubscriptionManager::NotifySubscriptionChannelStateChange(
   }
 }
 
-base::DictionaryValue PerUserTopicSubscriptionManager::CollectDebugData()
-    const {
-  base::DictionaryValue status;
-  for (const auto& topic_to_private_topic : topic_to_private_topic_) {
-    status.SetString(topic_to_private_topic.first,
-                     topic_to_private_topic.second);
+void PerUserTopicSubscriptionManager::NotifySubscriptionRequestFinished(
+    Topic topic,
+    RequestType request_type,
+    Status code) {
+  for (auto& observer : observers_) {
+    observer.OnSubscriptionRequestFinished(topic, request_type, code);
   }
-  status.SetString("Instance id token", instance_id_token_);
-  return status;
 }
 
-base::Optional<Topic>
+std::optional<Topic>
 PerUserTopicSubscriptionManager::LookupSubscribedPublicTopicByPrivateTopic(
     const std::string& private_topic) const {
   auto it = private_topic_to_topic_.find(private_topic);
   if (it == private_topic_to_topic_.end()) {
-    return base::nullopt;
+    return std::nullopt;
   }
   return it->second;
 }
 
-}  // namespace syncer
+}  // namespace invalidation

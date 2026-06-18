@@ -1,10 +1,15 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "base/observer_list.h"
 
-#include "base/strings/string_piece.h"
+#include <array>
+#include <memory>
+#include <optional>
+#include <string_view>
+
+#include "base/memory/raw_ptr.h"
 #include "base/test/gtest_util.h"
 #include "base/threading/simple_thread.h"
 #include "build/build_config.h"
@@ -37,30 +42,30 @@ template <>
 struct PickObserverList<CheckedBase> {
   template <class TypeParam,
             bool check_empty = false,
-            bool allow_reentrancy = true>
-  using ObserverListType =
-      ObserverList<TypeParam, check_empty, allow_reentrancy>;
+            ObserverListReentrancyPolicy reentrancy =
+                internal::kDefaultReentrancy>
+  using ObserverListType = ObserverList<TypeParam, check_empty, reentrancy>;
 };
 template <>
 struct PickObserverList<UncheckedBase> {
   template <class TypeParam,
             bool check_empty = false,
-            bool allow_reentrancy = true>
-  using ObserverListType = typename ObserverList<TypeParam,
-                                                 check_empty,
-                                                 allow_reentrancy>::Unchecked;
+            ObserverListReentrancyPolicy reentrancy =
+                internal::kDefaultReentrancy>
+  using ObserverListType =
+      typename ObserverList<TypeParam, check_empty, reentrancy>::Unchecked;
 };
 
 template <class Foo>
 class AdderT : public Foo {
  public:
-  explicit AdderT(int scaler) : total(0), scaler_(scaler) {}
+  explicit AdderT(int scaler) : scaler_(scaler) {}
   ~AdderT() override = default;
 
   void Observe(int x) override { total += x * scaler_; }
   int GetValue() const override { return total; }
 
-  int total;
+  int total = 0;
 
  private:
   int scaler_;
@@ -80,17 +85,19 @@ class DisrupterT : public Foo {
   ~DisrupterT() override = default;
 
   void Observe(int x) override {
-    if (remove_self_)
+    if (remove_self_) {
       list_->RemoveObserver(this);
-    if (doomed_)
-      list_->RemoveObserver(doomed_);
+    }
+    if (doomed_) {
+      list_->RemoveObserver(doomed_.get());
+    }
   }
 
   void SetDoomed(Foo* doomed) { doomed_ = doomed; }
 
  private:
-  ObserverListType* list_;
-  Foo* doomed_;
+  raw_ptr<ObserverListType> list_;
+  raw_ptr<Foo> doomed_;
   bool remove_self_;
 };
 
@@ -105,20 +112,20 @@ class AddInObserve : public Foo {
 
   void Observe(int x) override {
     if (to_add_) {
-      observer_list->AddObserver(to_add_);
+      observer_list->AddObserver(to_add_.get());
       to_add_ = nullptr;
     }
   }
 
-  ObserverListType* observer_list;
-  Foo* to_add_;
+  raw_ptr<ObserverListType> observer_list;
+  raw_ptr<Foo> to_add_;
 };
 
 template <class ObserverListType>
 class ObserverListCreator : public DelegateSimpleThread::Delegate {
  public:
   std::unique_ptr<ObserverListType> Create(
-      base::Optional<base::ObserverListPolicy> policy = nullopt) {
+      std::optional<base::ObserverListPolicy> policy = std::nullopt) {
     policy_ = policy;
     DelegateSimpleThread thread(this, "ListCreator");
     thread.Start();
@@ -136,14 +143,16 @@ class ObserverListCreator : public DelegateSimpleThread::Delegate {
   }
 
   std::unique_ptr<ObserverListType> observer_list_;
-  base::Optional<base::ObserverListPolicy> policy_;
+  std::optional<base::ObserverListPolicy> policy_;
 };
 
 }  // namespace
 
 class ObserverListTestBase {
  public:
-  ObserverListTestBase() {}
+  ObserverListTestBase() = default;
+  ObserverListTestBase(const ObserverListTestBase&) = delete;
+  ObserverListTestBase& operator=(const ObserverListTestBase&) = delete;
 
   template <class T>
   const decltype(T::list_.get()) list(const T& iter) {
@@ -163,9 +172,6 @@ class ObserverListTestBase {
     EXPECT_DCHECK_DEATH(return iter->GetCurrent());
     return nullptr;
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ObserverListTestBase);
 };
 
 // Templatized test fixture that can pick between CheckedBase and UncheckedBase.
@@ -179,10 +185,9 @@ class ObserverListTest : public ObserverListTestBase, public ::testing::Test {
   using iterator = typename ObserverList<ObserverType>::iterator;
   using const_iterator = typename ObserverList<ObserverType>::const_iterator;
 
-  ObserverListTest() {}
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ObserverListTest);
+  ObserverListTest() = default;
+  ObserverListTest(const ObserverListTest&) = delete;
+  ObserverListTest& operator=(const ObserverListTest&) = delete;
 };
 
 using ObserverTypes = ::testing::Types<CheckedBase, UncheckedBase>;
@@ -200,10 +205,10 @@ TYPED_TEST_SUITE(ObserverListTest, ObserverTypes);
   using Disrupter = DisrupterT<ObserverListFoo>;                            \
   using const_iterator = typename TestFixture::const_iterator;              \
   using iterator = typename TestFixture::iterator;                          \
-  (void)(Disrupter*)(0);                                                    \
-  (void)(Adder*)(0);                                                        \
-  (void)(const_iterator*)(0);                                               \
-  (void)(iterator*)(0)
+  (void)reinterpret_cast<Disrupter*>(0);                                    \
+  (void)reinterpret_cast<Adder*>(0);                                        \
+  (void)reinterpret_cast<const_iterator*>(0);                               \
+  (void)reinterpret_cast<iterator*>(0)
 
 TYPED_TEST(ObserverListTest, BasicTest) {
   DECLARE_TYPES;
@@ -299,8 +304,9 @@ TYPED_TEST(ObserverListTest, BasicTest) {
     EXPECT_NE(it4, it3);
   }
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(10);
+  }
 
   observer_list.AddObserver(&evil);
   observer_list.AddObserver(&c);
@@ -309,8 +315,9 @@ TYPED_TEST(ObserverListTest, BasicTest) {
   // Removing an observer not in the list should do nothing.
   observer_list.RemoveObserver(&e);
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(10);
+  }
 
   EXPECT_EQ(20, a.total);
   EXPECT_EQ(-20, b.total);
@@ -364,7 +371,7 @@ TYPED_TEST(ObserverListTest, CompactsWhenNoActiveIterator) {
   EXPECT_TRUE(col.HasObserver(&a));
   EXPECT_FALSE(col.HasObserver(&c));
 
-  EXPECT_TRUE(col.might_have_observers());
+  EXPECT_TRUE(!col.empty());
 
   using It = typename ObserverListConstFoo::const_iterator;
 
@@ -379,45 +386,45 @@ TYPED_TEST(ObserverListTest, CompactsWhenNoActiveIterator) {
     EXPECT_EQ(itb, it);
     EXPECT_EQ(++it, col.end());
 
-    EXPECT_TRUE(col.might_have_observers());
+    EXPECT_TRUE(!col.empty());
     EXPECT_EQ(&*ita, &a);
     EXPECT_EQ(&*itb, &b);
 
     ol.RemoveObserver(&a);
-    EXPECT_TRUE(col.might_have_observers());
+    EXPECT_TRUE(!col.empty());
     EXPECT_FALSE(col.HasObserver(&a));
     EXPECT_EQ(&*itb, &b);
 
     ol.RemoveObserver(&b);
-    EXPECT_TRUE(col.might_have_observers());
+    EXPECT_FALSE(!col.empty());
     EXPECT_FALSE(col.HasObserver(&a));
     EXPECT_FALSE(col.HasObserver(&b));
 
     it = It();
     ita = It();
-    EXPECT_TRUE(col.might_have_observers());
+    EXPECT_FALSE(!col.empty());
     ita = itb;
     itb = It();
-    EXPECT_TRUE(col.might_have_observers());
+    EXPECT_FALSE(!col.empty());
     ita = It();
-    EXPECT_FALSE(col.might_have_observers());
+    EXPECT_FALSE(!col.empty());
   }
 
   ol.AddObserver(&a);
   ol.AddObserver(&b);
-  EXPECT_TRUE(col.might_have_observers());
+  EXPECT_TRUE(!col.empty());
   ol.Clear();
-  EXPECT_FALSE(col.might_have_observers());
+  EXPECT_FALSE(!col.empty());
 
   ol.AddObserver(&a);
   ol.AddObserver(&b);
-  EXPECT_TRUE(col.might_have_observers());
+  EXPECT_TRUE(!col.empty());
   {
     const It it = col.begin();
     ol.Clear();
-    EXPECT_TRUE(col.might_have_observers());
+    EXPECT_FALSE(!col.empty());
   }
-  EXPECT_FALSE(col.might_have_observers());
+  EXPECT_FALSE(!col.empty());
 }
 
 TYPED_TEST(ObserverListTest, DisruptSelf) {
@@ -429,15 +436,17 @@ TYPED_TEST(ObserverListTest, DisruptSelf) {
   observer_list.AddObserver(&a);
   observer_list.AddObserver(&b);
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(10);
+  }
 
   observer_list.AddObserver(&evil);
   observer_list.AddObserver(&c);
   observer_list.AddObserver(&d);
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(10);
+  }
 
   EXPECT_EQ(20, a.total);
   EXPECT_EQ(-20, b.total);
@@ -457,10 +466,12 @@ TYPED_TEST(ObserverListTest, DisruptBefore) {
   observer_list.AddObserver(&c);
   observer_list.AddObserver(&d);
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(10);
-  for (auto& observer : observer_list)
+  }
+  for (auto& observer : observer_list) {
     observer.Observe(10);
+  }
 
   EXPECT_EQ(20, a.total);
   EXPECT_EQ(-10, b.total);
@@ -479,8 +490,9 @@ TYPED_TEST(ObserverListTest, Existing) {
   observer_list.AddObserver(&a);
   observer_list.AddObserver(&b);
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(1);
+  }
 
   EXPECT_FALSE(b.to_add_);
   // B's adder should not have been notified because it was added during
@@ -488,8 +500,9 @@ TYPED_TEST(ObserverListTest, Existing) {
   EXPECT_EQ(0, c.total);
 
   // Notify again to make sure b's adder is notified.
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(1);
+  }
   EXPECT_EQ(1, c.total);
 }
 
@@ -497,8 +510,7 @@ template <class ObserverListType,
           class Foo = typename ObserverListType::value_type>
 class AddInClearObserve : public Foo {
  public:
-  explicit AddInClearObserve(ObserverListType* list)
-      : list_(list), added_(false), adder_(1) {}
+  explicit AddInClearObserve(ObserverListType* list) : list_(list), adder_(1) {}
 
   void Observe(int /* x */) override {
     list_->Clear();
@@ -510,9 +522,9 @@ class AddInClearObserve : public Foo {
   const AdderT<Foo>& adder() const { return adder_; }
 
  private:
-  ObserverListType* const list_;
+  const raw_ptr<ObserverListType> list_;
 
-  bool added_;
+  bool added_ = false;
   AdderT<Foo> adder_;
 };
 
@@ -523,8 +535,9 @@ TYPED_TEST(ObserverListTest, ClearNotifyAll) {
 
   observer_list.AddObserver(&a);
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(1);
+  }
   EXPECT_TRUE(a.added());
   EXPECT_EQ(1, a.adder().total)
       << "Adder should observe once and have sum of 1.";
@@ -537,8 +550,9 @@ TYPED_TEST(ObserverListTest, ClearNotifyExistingOnly) {
 
   observer_list.AddObserver(&a);
 
-  for (auto& observer : observer_list)
+  for (auto& observer : observer_list) {
     observer.Observe(1);
+  }
   EXPECT_TRUE(a.added());
   EXPECT_EQ(0, a.adder().total)
       << "Adder should not observe, so sum should still be 0.";
@@ -551,10 +565,10 @@ class ListDestructor : public Foo {
   explicit ListDestructor(ObserverListType* list) : list_(list) {}
   ~ListDestructor() override = default;
 
-  void Observe(int x) override { delete list_; }
+  void Observe(int x) override { delete list_.ExtractAsDangling(); }
 
  private:
-  ObserverListType* list_;
+  raw_ptr<ObserverListType> list_;
 };
 
 TYPED_TEST(ObserverListTest, IteratorOutlivesList) {
@@ -563,8 +577,9 @@ TYPED_TEST(ObserverListTest, IteratorOutlivesList) {
   ListDestructor<ObserverListFoo> a(observer_list);
   observer_list->AddObserver(&a);
 
-  for (auto& observer : *observer_list)
+  for (auto& observer : *observer_list) {
     observer.Observe(0);
+  }
 
   // There are no EXPECT* statements for this test, if we catch
   // use-after-free errors for observer_list (eg with ASan) then
@@ -581,8 +596,9 @@ TYPED_TEST(ObserverListTest, BasicStdIterator) {
   EXPECT_FALSE(this->list(observer_list.end()));
 
   // Iterate over empty list: no effect, no crash.
-  for (auto& i : observer_list)
+  for (auto& i : observer_list) {
     i.Observe(10);
+  }
 
   Adder a(1), b(-1), c(1), d(-1);
 
@@ -591,8 +607,10 @@ TYPED_TEST(ObserverListTest, BasicStdIterator) {
   observer_list.AddObserver(&c);
   observer_list.AddObserver(&d);
 
-  for (iterator i = observer_list.begin(), e = observer_list.end(); i != e; ++i)
+  for (iterator i = observer_list.begin(), e = observer_list.end(); i != e;
+       ++i) {
     i->Observe(1);
+  }
 
   EXPECT_EQ(1, a.total);
   EXPECT_EQ(-1, b.total);
@@ -606,8 +624,9 @@ TYPED_TEST(ObserverListTest, BasicStdIterator) {
     EXPECT_EQ(1, std::abs(i->GetValue()));
   }
 
-  for (const auto& o : const_list)
+  for (const auto& o : const_list) {
     EXPECT_EQ(1, std::abs(o.GetValue()));
+  }
 }
 
 TYPED_TEST(ObserverListTest, StdIteratorRemoveItself) {
@@ -622,11 +641,13 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveItself) {
   observer_list.AddObserver(&c);
   observer_list.AddObserver(&d);
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(1);
+  }
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(10);
+  }
 
   EXPECT_EQ(11, a.total);
   EXPECT_EQ(-11, b.total);
@@ -646,11 +667,13 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveBefore) {
   observer_list.AddObserver(&c);
   observer_list.AddObserver(&d);
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(1);
+  }
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(10);
+  }
 
   EXPECT_EQ(11, a.total);
   EXPECT_EQ(-1, b.total);
@@ -670,11 +693,13 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveAfter) {
   observer_list.AddObserver(&c);
   observer_list.AddObserver(&d);
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(1);
+  }
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(10);
+  }
 
   EXPECT_EQ(11, a.total);
   EXPECT_EQ(-11, b.total);
@@ -694,11 +719,13 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveAfterFront) {
   observer_list.AddObserver(&c);
   observer_list.AddObserver(&d);
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(1);
+  }
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(10);
+  }
 
   EXPECT_EQ(1, a.total);
   EXPECT_EQ(-11, b.total);
@@ -718,11 +745,13 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveBeforeBack) {
   observer_list.AddObserver(&disrupter);
   observer_list.AddObserver(&d);
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(1);
+  }
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(10);
+  }
 
   EXPECT_EQ(11, a.total);
   EXPECT_EQ(-11, b.total);
@@ -754,8 +783,9 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveFront) {
     }
   }
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(10);
+  }
 
   EXPECT_EQ(11, a.total);
   EXPECT_EQ(-11, b.total);
@@ -775,11 +805,13 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveBack) {
   observer_list.AddObserver(&d);
   observer_list.AddObserver(&disrupter);
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(1);
+  }
 
-  for (auto& o : observer_list)
+  for (auto& o : observer_list) {
     o.Observe(10);
+  }
 
   EXPECT_EQ(11, a.total);
   EXPECT_EQ(-11, b.total);
@@ -789,9 +821,13 @@ TYPED_TEST(ObserverListTest, StdIteratorRemoveBack) {
 
 TYPED_TEST(ObserverListTest, NestedLoop) {
   DECLARE_TYPES;
-  ObserverListFoo observer_list;
+  using ReentrantObserverListFoo =
+      typename PickObserverList<Foo>::template ObserverListType<
+          Foo, /*check_empty=*/false,
+          ObserverListReentrancyPolicy::kAllowReentrancy>;
+  ReentrantObserverListFoo observer_list;
   Adder a(1), b(-1), c(1), d(-1);
-  Disrupter disrupter(&observer_list, true);
+  DisrupterT<ReentrantObserverListFoo> disrupter(&observer_list, true);
 
   observer_list.AddObserver(&disrupter);
   observer_list.AddObserver(&a);
@@ -802,8 +838,9 @@ TYPED_TEST(ObserverListTest, NestedLoop) {
   for (auto& observer : observer_list) {
     observer.Observe(10);
 
-    for (auto& nested_observer : observer_list)
+    for (auto& nested_observer : observer_list) {
       nested_observer.Observe(1);
+    }
   }
 
   EXPECT_EQ(15, a.total);
@@ -814,11 +851,16 @@ TYPED_TEST(ObserverListTest, NestedLoop) {
 
 TYPED_TEST(ObserverListTest, NonCompactList) {
   DECLARE_TYPES;
-  ObserverListFoo observer_list;
+  using ReentrantObserverListFoo =
+      typename PickObserverList<Foo>::template ObserverListType<
+          Foo, /*check_empty=*/false,
+          ObserverListReentrancyPolicy::kAllowReentrancy>;
+  ReentrantObserverListFoo observer_list;
   Adder a(1), b(-1);
 
-  Disrupter disrupter1(&observer_list, true);
-  Disrupter disrupter2(&observer_list, true);
+  DisrupterT<ReentrantObserverListFoo> disrupter2(
+      &observer_list, true);  // Must outlive `disrupter1`.
+  DisrupterT<ReentrantObserverListFoo> disrupter1(&observer_list, true);
 
   // Disrupt itself and another one.
   disrupter1.SetDoomed(&disrupter2);
@@ -833,8 +875,9 @@ TYPED_TEST(ObserverListTest, NonCompactList) {
     // on the first inner pass.
     observer.Observe(10);
 
-    for (auto& nested_observer : observer_list)
+    for (auto& nested_observer : observer_list) {
       nested_observer.Observe(1);
+    }
   }
 
   EXPECT_EQ(13, a.total);
@@ -843,11 +886,16 @@ TYPED_TEST(ObserverListTest, NonCompactList) {
 
 TYPED_TEST(ObserverListTest, BecomesEmptyThanNonEmpty) {
   DECLARE_TYPES;
-  ObserverListFoo observer_list;
+  using ReentrantObserverListFoo =
+      typename PickObserverList<Foo>::template ObserverListType<
+          Foo, /*check_empty=*/false,
+          ObserverListReentrancyPolicy::kAllowReentrancy>;
+  ReentrantObserverListFoo observer_list;
   Adder a(1), b(-1);
 
-  Disrupter disrupter1(&observer_list, true);
-  Disrupter disrupter2(&observer_list, true);
+  DisrupterT<ReentrantObserverListFoo> disrupter2(
+      &observer_list, true);  // Must outlive `disrupter1`.
+  DisrupterT<ReentrantObserverListFoo> disrupter1(&observer_list, true);
 
   // Disrupt itself and another one.
   disrupter1.SetDoomed(&disrupter2);
@@ -860,8 +908,9 @@ TYPED_TEST(ObserverListTest, BecomesEmptyThanNonEmpty) {
     // Get the { nullptr, nullptr } empty list on the first inner pass.
     observer.Observe(10);
 
-    for (auto& nested_observer : observer_list)
+    for (auto& nested_observer : observer_list) {
       nested_observer.Observe(1);
+    }
 
     if (add_observers) {
       observer_list.AddObserver(&a);
@@ -902,22 +951,24 @@ TYPED_TEST(ObserverListTest, AddObserverInTheLastObserve) {
 
 class MockLogAssertHandler {
  public:
-  MOCK_METHOD4(
+  MOCK_METHOD(
+      void,
       HandleLogAssert,
-      void(const char*, int, const base::StringPiece, const base::StringPiece));
+      (const char*, int, const std::string_view, const std::string_view));
 };
 
 #if DCHECK_IS_ON()
 TYPED_TEST(ObserverListTest, NonReentrantObserverList) {
   DECLARE_TYPES;
-  using NonReentrantObserverListFoo = typename PickObserverList<
-      Foo>::template ObserverListType<Foo, /*check_empty=*/false,
-                                      /*allow_reentrancy=*/false>;
+  using NonReentrantObserverListFoo =
+      typename PickObserverList<Foo>::template ObserverListType<
+          Foo, /*check_empty=*/false,
+          ObserverListReentrancyPolicy::kDisallowReentrancy>;
   NonReentrantObserverListFoo non_reentrant_observer_list;
   Adder a(1);
   non_reentrant_observer_list.AddObserver(&a);
 
-  EXPECT_DCHECK_DEATH({
+  EXPECT_CHECK_DEATH({
     for (const Foo& observer : non_reentrant_observer_list) {
       for (const Foo& nested_observer : non_reentrant_observer_list) {
         std::ignore = observer;
@@ -929,9 +980,10 @@ TYPED_TEST(ObserverListTest, NonReentrantObserverList) {
 
 TYPED_TEST(ObserverListTest, ReentrantObserverList) {
   DECLARE_TYPES;
-  using ReentrantObserverListFoo = typename PickObserverList<
-      Foo>::template ObserverListType<Foo, /*check_empty=*/false,
-                                      /*allow_reentrancy=*/true>;
+  using ReentrantObserverListFoo =
+      typename PickObserverList<Foo>::template ObserverListType<
+          Foo, /*check_empty=*/false,
+          ObserverListReentrancyPolicy::kAllowReentrancy>;
   ReentrantObserverListFoo reentrant_observer_list;
   Adder a(1);
   reentrant_observer_list.AddObserver(&a);
@@ -945,31 +997,52 @@ TYPED_TEST(ObserverListTest, ReentrantObserverList) {
   }
   EXPECT_TRUE(passed);
 }
+
+TYPED_TEST(ObserverListTest, GetReentrantRange) {
+  DECLARE_TYPES;
+  using NonReentrantObserverListFoo =
+      typename PickObserverList<Foo>::template ObserverListType<
+          Foo, /*check_empty=*/false,
+          ObserverListReentrancyPolicy::kDisallowReentrancy>;
+  NonReentrantObserverListFoo non_reentrant_observer_list;
+  Adder a(1);
+  non_reentrant_observer_list.AddObserver(&a);
+  bool passed = false;
+  for (const Foo& observer : non_reentrant_observer_list) {
+    for (const Foo& nested_observer :
+         non_reentrant_observer_list.GetReentrantRange()) {
+      std::ignore = observer;
+      std::ignore = nested_observer;
+      passed = true;
+    }
+  }
+  EXPECT_TRUE(passed);
+}
 #endif
 
 class TestCheckedObserver : public CheckedObserver {
  public:
   explicit TestCheckedObserver(int* count) : count_(count) {}
+  TestCheckedObserver(const TestCheckedObserver&) = delete;
+  TestCheckedObserver& operator=(const TestCheckedObserver&) = delete;
 
   void Observe() { ++(*count_); }
 
  private:
-  int* count_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestCheckedObserver);
+  raw_ptr<int> count_;
 };
 
 // A second, identical observer, used to test multiple inheritance.
 class TestCheckedObserver2 : public CheckedObserver {
  public:
   explicit TestCheckedObserver2(int* count) : count_(count) {}
+  TestCheckedObserver2(const TestCheckedObserver2&) = delete;
+  TestCheckedObserver2& operator=(const TestCheckedObserver2&) = delete;
 
   void Observe() { ++(*count_); }
 
  private:
-  int* count_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestCheckedObserver2);
+  raw_ptr<int> count_;
 };
 
 using CheckedObserverListTest = ::testing::Test;
@@ -985,8 +1058,9 @@ TEST_F(CheckedObserverListTest, CheckedObserver) {
   {
     TestCheckedObserver l2(&count2);
     list->AddObserver(&l2);
-    for (auto& observer : *list)
+    for (auto& observer : *list) {
       observer.Observe();
+    }
     EXPECT_EQ(1, count1);
     EXPECT_EQ(1, count2);
   }
@@ -1001,7 +1075,7 @@ TEST_F(CheckedObserverListTest, CheckedObserver) {
     // On the non-death fork, no UAF occurs since the deleted observer is never
     // notified, but also the observer list still has |l2| in it. Check that.
     list->RemoveObserver(&l1);
-    EXPECT_TRUE(list->might_have_observers());
+    EXPECT_TRUE(!list->empty());
 
     // Now (in the non-death fork()) there's a problem. To delete |it|, we need
     // to compact the list, but that needs to iterate, which would CHECK again.
@@ -1033,7 +1107,7 @@ TEST_F(CheckedObserverListTest, MultiObserver) {
 
   ObserverList<UncheckedBase>::Unchecked unsafe_list;
 
-  int counts[2] = {};
+  std::array<int, 2> counts = {};
 
   auto multi_observer = std::make_unique<MultiObserver>(&counts[0], &counts[1]);
   two_list.AddObserver(multi_observer.get());
@@ -1041,25 +1115,107 @@ TEST_F(CheckedObserverListTest, MultiObserver) {
   unsafe_list.AddObserver(multi_observer.get());
 
   auto iterate_over = [](auto* list) {
-    for (auto& observer : *list)
+    for (auto& observer : *list) {
       observer.Observe();
+    }
   };
   iterate_over(&two_list);
   iterate_over(&checked_list);
-  for (auto& observer : unsafe_list)
+  for (auto& observer : unsafe_list) {
     observer.Observe(10);
+  }
 
   EXPECT_EQ(10, multi_observer->GetValue());
-  for (const auto& count : counts)
+  for (const auto& count : counts) {
     EXPECT_EQ(1, count);
+  }
 
   unsafe_list.RemoveObserver(multi_observer.get());  // Avoid a use-after-free.
 
   multi_observer.reset();
   EXPECT_CHECK_DEATH(iterate_over(&checked_list));
 
-  for (const auto& count : counts)
+  for (const auto& count : counts) {
     EXPECT_EQ(1, count);
+  }
+}
+
+TEST_F(CheckedObserverListTest, Notify) {
+  ObserverList<TestCheckedObserver> list;
+  int count1 = 0;
+  int count2 = 0;
+  TestCheckedObserver observer1(&count1);
+  TestCheckedObserver observer2(&count2);
+  list.AddObserver(&observer1);
+  list.AddObserver(&observer2);
+
+  list.Notify(&TestCheckedObserver::Observe);
+  EXPECT_EQ(1, count1);
+  EXPECT_EQ(1, count2);
+
+  list.RemoveObserver(&observer1);
+  list.Notify(&TestCheckedObserver::Observe);
+  EXPECT_EQ(1, count1);
+  EXPECT_EQ(2, count2);
+}
+
+struct TestObserverWithArgs : public CheckedObserver {
+  void Observe(int x, std::string_view str) {
+    sum += x;
+    if (!str.empty()) {
+      EXPECT_EQ("hello", str);
+      string_seen_ = true;
+    }
+  }
+
+  int sum = 0;
+  bool string_seen_ = false;
+};
+
+TEST_F(CheckedObserverListTest, NotifyWithArgs) {
+  ObserverList<TestObserverWithArgs> list;
+  TestObserverWithArgs observer1;
+  TestObserverWithArgs observer2;
+  list.AddObserver(&observer1);
+  list.AddObserver(&observer2);
+
+  list.Notify(&TestObserverWithArgs::Observe, 10, std::string_view());
+  EXPECT_EQ(10, observer1.sum);
+  EXPECT_EQ(10, observer2.sum);
+
+  list.RemoveObserver(&observer1);
+  list.Notify(&TestObserverWithArgs::Observe, 20, std::string_view("hello"));
+  EXPECT_EQ(10, observer1.sum);
+  EXPECT_EQ(30, observer2.sum);
+  EXPECT_FALSE(observer1.string_seen_);
+  EXPECT_TRUE(observer2.string_seen_);
+}
+
+TEST_F(CheckedObserverListTest, NotifyWithImplicitlyConvertibleArgs) {
+  ObserverList<TestObserverWithArgs> list;
+  TestObserverWithArgs observer;
+  list.AddObserver(&observer);
+
+  // Implicitly convertible argument types should compile.
+  list.Notify(&TestObserverWithArgs::Observe, 10.0f, "hello");
+  EXPECT_EQ(10, observer.sum);
+  EXPECT_TRUE(observer.string_seen_);
+}
+
+TEST_F(CheckedObserverListTest, NotifyWithConstRefArg) {
+  struct TestObserverWithConstRefArg : public base::CheckedObserver {
+    void ObserveConstRefArg(const std::unique_ptr<int>&) {}
+  };
+
+  ObserverList<TestObserverWithConstRefArg> list;
+  TestObserverWithConstRefArg observer;
+  list.AddObserver(&observer);
+
+  auto arg = std::make_unique<int>(0);
+  const auto& const_ref_arg = arg;
+
+  // Passing const reference argument should compile.
+  list.Notify(&TestObserverWithConstRefArg::ObserveConstRefArg, const_ref_arg);
 }
 
 }  // namespace base

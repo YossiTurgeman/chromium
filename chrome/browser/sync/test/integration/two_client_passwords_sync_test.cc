@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,115 +7,230 @@
 #include <limits>
 #include <tuple>
 
-#include "base/guid.h"
 #include "base/hash/hash.h"
-#include "base/macros.h"
+#include "base/location.h"
 #include "base/rand_util.h"
-#include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/uuid.h"
 #include "build/build_config.h"
+#include "chrome/browser/sync/test/integration/encryption_helper.h"
 #include "chrome/browser/sync/test/integration/passwords_helper.h"
-#include "chrome/browser/sync/test/integration/profile_sync_service_harness.h"
-#include "chrome/browser/sync/test/integration/sync_integration_test_util.h"
+#include "chrome/browser/sync/test/integration/sync_service_impl_harness.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
 #include "chrome/browser/sync/test/integration/updated_progress_marker_checker.h"
-#include "components/sync/engine/cycle/sync_cycle_snapshot.h"
-#include "components/sync/engine/model_safe_worker.h"
+#include "components/password_manager/core/browser/features/password_manager_features_util.h"
+#include "components/password_manager/core/browser/password_form.h"
+#include "components/password_manager/core/browser/password_manager_test_utils.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
+#include "components/password_manager/core/common/password_manager_features.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "components/sync/base/user_selectable_type.h"
+#include "components/sync/engine/cycle/entity_change_metric_recording.h"
+#include "components/sync/service/sync_service.h"
+#include "components/sync/service/sync_user_settings.h"
 #include "content/public/test/browser_test.h"
 
-using passwords_helper::AddLogin;
 using passwords_helper::AllProfilesContainSamePasswordForms;
 using passwords_helper::AllProfilesContainSamePasswordFormsAsVerifier;
 using passwords_helper::CreateTestPasswordForm;
+using passwords_helper::GetAccountPasswordStoreInterface;
+using passwords_helper::GetAllLogins;
 using passwords_helper::GetLogins;
 using passwords_helper::GetPasswordCount;
-using passwords_helper::GetPasswordStore;
+using passwords_helper::GetProfilePasswordStoreInterface;
 using passwords_helper::GetVerifierPasswordCount;
-using passwords_helper::GetVerifierPasswordStore;
-using passwords_helper::RemoveLogin;
+using passwords_helper::GetVerifierProfilePasswordStoreInterface;
 using passwords_helper::RemoveLogins;
-using passwords_helper::UpdateLogin;
-using passwords_helper::UpdateLoginWithPrimaryKey;
 
-using autofill::PasswordForm;
+using password_manager::InsecureType;
+using password_manager::InsecurityMetadata;
+using password_manager::IsMuted;
+using password_manager::PasswordForm;
+using password_manager::TriggerBackendNotification;
+
+using testing::ElementsAre;
+using testing::Pointee;
+using testing::UnorderedElementsAre;
 
 static const char* kValidPassphrase = "passphrase!";
 
-class TwoClientPasswordsSyncTest : public SyncTest {
+class TwoClientPasswordsSyncTest
+    : public SyncTest,
+      public testing::WithParamInterface<SyncTest::SetupSyncMode> {
  public:
-  TwoClientPasswordsSyncTest() : SyncTest(TWO_CLIENT) {}
+  TwoClientPasswordsSyncTest() : SyncTest(TWO_CLIENT) {
+    if (GetSetupSyncMode() == SetupSyncMode::kSyncTransportOnly) {
+      scoped_feature_list_.InitAndEnableFeature(
+          syncer::kReplaceSyncPromosWithSignInPromos);
+    }
+  }
 
-  ~TwoClientPasswordsSyncTest() override {}
+  ~TwoClientPasswordsSyncTest() override = default;
+
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return GetParam();
+  }
+
+  password_manager::PasswordForm::Store GetPasswordStoreType() const {
+    if (GetSetupSyncMode() == SetupSyncMode::kSyncTransportOnly) {
+      return password_manager::PasswordForm::Store::kAccountStore;
+    } else {
+      return password_manager::PasswordForm::Store::kProfileStore;
+    }
+  }
+
+  password_manager::PasswordStoreInterface* GetPasswordStore(int index) {
+    return passwords_helper::GetPasswordStoreInterface(index,
+                                                       GetPasswordStoreType());
+  }
+
+  password_manager::PasswordStoreInterface* GetVerifierPasswordStore() {
+    return passwords_helper::GetVerifierPasswordStoreInterface(
+        GetPasswordStoreType());
+  }
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(TwoClientPasswordsSyncTest);
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, E2E_ENABLED(Add)) {
-  ResetSyncForPrimaryAccount();
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
+class TwoClientPasswordsSyncTestWithVerifier
+    : public TwoClientPasswordsSyncTest {
+ public:
+  TwoClientPasswordsSyncTestWithVerifier() = default;
+  ~TwoClientPasswordsSyncTestWithVerifier() override = default;
 
-  PasswordForm form = CreateTestPasswordForm(0);
-  AddLogin(GetPasswordStore(0), form);
-  ASSERT_EQ(1, GetPasswordCount(0));
+  bool UseVerifier() override {
+    // TODO(crbug.com/40152785): rewrite tests to not use verifier.
+    return true;
+  }
+};
 
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
-  ASSERT_EQ(1, GetPasswordCount(1));
+INSTANTIATE_TEST_SUITE_P(
+    /* no prefix */,
+    TwoClientPasswordsSyncTest,
+    GetSyncTestModes(),
+    testing::PrintToStringParamName());
+
+INSTANTIATE_TEST_SUITE_P(
+    /* no prefix */,
+    TwoClientPasswordsSyncTestWithVerifier,
+    GetSyncTestModes(),
+    testing::PrintToStringParamName());
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, E2E_ENABLED(Add)) {
+  ASSERT_TRUE(ResetSyncForPrimaryAccount());
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+  ASSERT_EQ(1, GetPasswordCount(0, GetPasswordStoreType()));
+
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(1, GetPasswordCount(1, GetPasswordStoreType()));
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, E2E_ENABLED(Race)) {
-  ResetSyncForPrimaryAccount();
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordForms());
+// TwoClientPasswordsSyncTest.AddInTransportMode is disabled on CrOS as the
+// signed in, non-syncing state does not exist
+#if !BUILDFLAG(IS_CHROMEOS)
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
+                       E2E_ENABLED(AddInTransportMode)) {
+  if (GetSetupSyncMode() != SetupSyncMode::kSyncTransportOnly) {
+    GTEST_SKIP() << "This test is only relevant for transport mode.";
+  }
 
-  PasswordForm form0 = CreateTestPasswordForm(0);
-  AddLogin(GetPasswordStore(0), form0);
+  ASSERT_TRUE(ResetSyncForPrimaryAccount());
+  ASSERT_TRUE(SetupClients());
+
+  // Sign in on all clients without enabling Sync-the-feature.
+  ASSERT_TRUE(SignIn());
+  for (int i = 0; i < num_clients(); i++) {
+    ASSERT_FALSE(GetSyncService(i)->IsSyncFeatureEnabled());
+  }
+
+  ASSERT_TRUE(
+      SamePasswordFormsChecker(PasswordForm::Store::kAccountStore).Wait());
+
+  // Create an account password on the first client.
+  PasswordForm form =
+      CreateTestPasswordForm(0, PasswordForm::Store::kAccountStore);
+  GetAccountPasswordStoreInterface(0)->AddLogin(
+      password_manager::FromPasswordForm(form));
+  ASSERT_EQ(1, GetPasswordCount(0, PasswordForm::Store::kAccountStore));
+
+  // The second client should receive the password in its own account store.
+  EXPECT_TRUE(
+      SamePasswordFormsChecker(PasswordForm::Store::kAccountStore).Wait());
+  EXPECT_EQ(1, GetPasswordCount(1, PasswordForm::Store::kAccountStore));
+}
+#endif  // !BUILDFLAG(IS_CHROMEOS)
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, E2E_ENABLED(Race)) {
+  ASSERT_TRUE(ResetSyncForPrimaryAccount());
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
+
+  PasswordForm form0 = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
 
   PasswordForm form1 = form0;
-  form1.password_value = base::ASCIIToUTF16("new_password");
-  AddLogin(GetPasswordStore(1), form1);
+  form1.password_value = u"new_password";
+  GetPasswordStore(1)->AddLogin(password_manager::FromPasswordForm(form1));
 
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, MergeWithTheMostRecent) {
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, MergeWithTheMostRecent) {
   // Setup the test to have Form 0 and Form 1 added on both clients. Form 0 is
   // more recent on Client 0, and Form 1 is more recent on Client 1. They should
   // be merged such that recent passwords are chosen.
 
   base::Time now = base::Time::Now();
-  base::Time yesterday = now - base::TimeDelta::FromDays(1);
+  base::Time yesterday = now - base::Days(1);
 
-  PasswordForm form0_recent = CreateTestPasswordForm(0);
+  PasswordForm form0_recent = CreateTestPasswordForm(0, GetPasswordStoreType());
   form0_recent.date_created = now;
-  PasswordForm form0_old = CreateTestPasswordForm(0);
+  PasswordForm form0_old = CreateTestPasswordForm(0, GetPasswordStoreType());
   form0_old.date_created = yesterday;
 
-  PasswordForm form1_recent = CreateTestPasswordForm(1);
+  PasswordForm form1_recent = CreateTestPasswordForm(1, GetPasswordStoreType());
   form1_recent.date_created = now;
-  PasswordForm form1_old = CreateTestPasswordForm(1);
+  PasswordForm form1_old = CreateTestPasswordForm(1, GetPasswordStoreType());
   form1_old.date_created = yesterday;
 
-  ASSERT_TRUE(SetupClients()) << "SetupClients() failed.";
+  ASSERT_TRUE(SetupClients());
 
   // Add the passwords to Client 0.
-  AddLogin(GetPasswordStore(0), form0_recent);
-  AddLogin(GetPasswordStore(0), form1_old);
-  // Enable sync on Client 0 and wait until they are committed.
-  ASSERT_TRUE(GetClient(0)->SetupSync()) << "GetClient(0)->SetupSync() failed.";
+  GetPasswordStore(0)->AddLogin(
+      password_manager::FromPasswordForm(form0_recent));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form1_old));
+  if (GetSetupSyncMode() == SetupSyncMode::kSyncTheFeature) {
+    // Enable sync on Client 0 and wait until they are committed.
+    ASSERT_TRUE(GetClient(0)->SetupSync());
+  } else {
+    ASSERT_TRUE(GetClient(0)->SignInNoWaitForCompletion());
+    ASSERT_TRUE(GetClient(0)->AwaitSyncTransportActive());
+  }
   ASSERT_TRUE(UpdatedProgressMarkerChecker(GetSyncService(0)).Wait());
 
   // Add the passwords to Client 1.
-  AddLogin(GetPasswordStore(1), form0_old);
-  AddLogin(GetPasswordStore(1), form1_recent);
+  GetPasswordStore(1)->AddLogin(password_manager::FromPasswordForm(form0_old));
+  GetPasswordStore(1)->AddLogin(
+      password_manager::FromPasswordForm(form1_recent));
 
-  // Enable sync on Client 1 and wait until all passwords are merged.
-  ASSERT_TRUE(GetClient(1)->SetupSync()) << "GetClient(1)->SetupSync() failed.";
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
+  if (GetSetupSyncMode() == SetupSyncMode::kSyncTheFeature) {
+    // Enable sync on Client 1 and wait until they are committed.
+    ASSERT_TRUE(GetClient(1)->SetupSync());
+  } else {
+    ASSERT_TRUE(GetClient(1)->SignInNoWaitForCompletion());
+    ASSERT_TRUE(GetClient(1)->AwaitSyncTransportActive());
+  }
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
 
   // There should be only 2 passwords.
-  EXPECT_EQ(2, GetPasswordCount(0));
+  EXPECT_EQ(2, GetPasswordCount(0, GetPasswordStoreType()));
   // All passwords should be the recent ones.
   for (const std::unique_ptr<PasswordForm>& form :
        GetLogins(GetPasswordStore(0))) {
@@ -123,10 +238,10 @@ IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, MergeWithTheMostRecent) {
   }
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest,
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
                        E2E_ENABLED(SetPassphraseAndAddPassword)) {
-  ResetSyncForPrimaryAccount();
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+  ASSERT_TRUE(ResetSyncForPrimaryAccount());
+  ASSERT_TRUE(SetupSync());
 
   GetSyncService(0)->GetUserSettings()->SetEncryptionPassphrase(
       kValidPassphrase);
@@ -137,83 +252,124 @@ IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest,
       kValidPassphrase));
   ASSERT_TRUE(PassphraseAcceptedChecker(GetSyncService(1)).Wait());
 
-  PasswordForm form = CreateTestPasswordForm(0);
-  AddLogin(GetPasswordStore(0), form);
-  ASSERT_EQ(1, GetPasswordCount(0));
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+  ASSERT_EQ(1, GetPasswordCount(0, GetPasswordStoreType()));
 
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, Update) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTestWithVerifier, Update) {
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
 
-  PasswordForm form = CreateTestPasswordForm(0);
-  AddLogin(GetVerifierPasswordStore(), form);
-  AddLogin(GetPasswordStore(0), form);
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetVerifierPasswordStore()->AddLogin(
+      password_manager::FromPasswordForm(form));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
 
   // Wait for client 0 to commit and client 1 to receive the update.
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(1).Wait());
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(1, GetPasswordStoreType()).Wait());
 
-  form.password_value = base::ASCIIToUTF16("new_password");
-  UpdateLogin(GetVerifierPasswordStore(), form);
-  UpdateLogin(GetPasswordStore(1), form);
-  ASSERT_EQ(1, GetVerifierPasswordCount());
+  form.password_value = u"new_password";
+  GetVerifierPasswordStore()->UpdateLogin(
+      password_manager::FromPasswordForm(form));
+  GetPasswordStore(1)->UpdateLogin(password_manager::FromPasswordForm(form));
+  ASSERT_EQ(1, GetVerifierPasswordCount(GetPasswordStoreType()));
 
   // Wait for client 1 to commit and client 0 to receive the update.
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(0).Wait());
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(0, GetPasswordStoreType()).Wait());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, AddTwice) {
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTestWithVerifier,
+                       SharedPasswordMetadataAreSynced) {
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
+
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  form.sender_email = u"sender@example.com";
+  form.sender_name = u"Sender Name";
+  form.sender_profile_image_url = GURL("http://www.sender.com/profile_image");
+  form.date_received = form.date_created;
+  form.sharing_notification_displayed = true;
+  GetVerifierPasswordStore()->AddLogin(
+      password_manager::FromPasswordForm(form));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+
+  // Wait for client 0 to commit and client 1 to receive the update.
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(1, GetPasswordStoreType()).Wait());
+
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
+}
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, AddTwice) {
   // Password store supports adding the same form twice, so this is testing this
   // behaviour.
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordForms());
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
 
-  PasswordForm form = CreateTestPasswordForm(0);
-  AddLogin(GetPasswordStore(0), form);
-  ASSERT_EQ(1, GetPasswordCount(0));
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+  ASSERT_EQ(1, GetPasswordCount(0, GetPasswordStoreType()));
 
   // Wait for client 0 to commit and client 1 to receive the update.
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
-  ASSERT_EQ(1, GetPasswordCount(1));
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(1, GetPasswordCount(1, GetPasswordStoreType()));
 
   // Update the password and add it again to client 0.
-  form.password_value = base::ASCIIToUTF16("new_password");
-  AddLogin(GetPasswordStore(0), form);
-  ASSERT_EQ(1, GetPasswordCount(0));
+  form.password_value = u"new_password";
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+  ASSERT_EQ(1, GetPasswordCount(0, GetPasswordStoreType()));
 
   // Wait for client 1 to receive the update.
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
-  ASSERT_EQ(1, GetPasswordCount(1));
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(1, GetPasswordCount(1, GetPasswordStoreType()));
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, Delete) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTestWithVerifier, Delete) {
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
 
-  PasswordForm form0 = CreateTestPasswordForm(0);
-  AddLogin(GetVerifierPasswordStore(), form0);
-  AddLogin(GetPasswordStore(0), form0);
-  PasswordForm form1 = CreateTestPasswordForm(1);
-  AddLogin(GetVerifierPasswordStore(), form1);
-  AddLogin(GetPasswordStore(0), form1);
+  PasswordForm form0 = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetVerifierPasswordStore()->AddLogin(
+      password_manager::FromPasswordForm(form0));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
+  PasswordForm form1 = CreateTestPasswordForm(1, GetPasswordStoreType());
+  GetVerifierPasswordStore()->AddLogin(
+      password_manager::FromPasswordForm(form1));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form1));
 
   // Wait for client 0 to commit and client 1 to receive the update.
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(1).Wait());
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(1, GetPasswordStoreType()).Wait());
 
-  RemoveLogin(GetPasswordStore(1), form0);
-  RemoveLogin(GetVerifierPasswordStore(), form0);
-  ASSERT_EQ(1, GetVerifierPasswordCount());
+  GetPasswordStore(1)->RemoveLogin(FROM_HERE,
+                                   password_manager::FromPasswordForm(form0));
+  GetVerifierPasswordStore()->RemoveLogin(
+      FROM_HERE, password_manager::FromPasswordForm(form0));
+  ASSERT_EQ(1, GetVerifierPasswordCount(GetPasswordStoreType()));
 
   // Wait for deletion from client 1 to propagate.
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(0).Wait());
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(0, GetPasswordStoreType()).Wait());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest,
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
                        SetPassphraseAndThenSetupSync) {
+  if (GetSetupSyncMode() != SetupSyncMode::kSyncTheFeature) {
+    GTEST_SKIP() << "This test is only relevant for the sync-the-feature mode.";
+  }
   ASSERT_TRUE(SetupClients());
 
   ASSERT_TRUE(GetClient(0)->SetupSync());
@@ -225,8 +381,7 @@ IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest,
 
   // When client 1 hits a passphrase required state, we can infer that
   // client 0's passphrase has been committed. to the server.
-  ASSERT_TRUE(GetClient(1)->SetupSyncNoWaitForCompletion(
-      GetRegisteredSelectableTypes(1)));
+  ASSERT_TRUE(GetClient(1)->SetupSyncNoWaitForCompletion());
   ASSERT_TRUE(PassphraseRequiredChecker(GetSyncService(1)).Wait());
 
   // Get client 1 out of the passphrase required state.
@@ -239,126 +394,400 @@ IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest,
   GetClient(1)->FinishSyncSetup();
 
   // Move around some passwords to make sure it's all working.
-  PasswordForm form0 = CreateTestPasswordForm(0);
-  AddLogin(GetPasswordStore(0), form0);
+  PasswordForm form0 =
+      CreateTestPasswordForm(0, PasswordForm::Store::kProfileStore);
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
 
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
+  ASSERT_TRUE(
+      SamePasswordFormsChecker(PasswordForm::Store::kProfileStore).Wait());
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, E2E_ONLY(DeleteTwo)) {
-  ResetSyncForPrimaryAccount();
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordForms());
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, E2E_ONLY(DeleteTwo)) {
+  ASSERT_TRUE(ResetSyncForPrimaryAccount());
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
 
-  PasswordForm form0 =
-      CreateTestPasswordForm(base::FastHash(base::GenerateGUID()));
-  PasswordForm form1 =
-      CreateTestPasswordForm(base::FastHash(base::GenerateGUID()));
-  AddLogin(GetPasswordStore(0), form0);
-  AddLogin(GetPasswordStore(0), form1);
+  PasswordForm form0 = CreateTestPasswordForm(
+      base::FastHash(base::Uuid::GenerateRandomV4().AsLowercaseString()),
+      GetPasswordStoreType());
+  PasswordForm form1 = CreateTestPasswordForm(
+      base::FastHash(base::Uuid::GenerateRandomV4().AsLowercaseString()),
+      GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form1));
 
-  const int init_password_count = GetPasswordCount(0);
+  const int init_password_count = GetPasswordCount(0, GetPasswordStoreType());
 
   // Wait for client 0 to commit and client 1 to receive the update.
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
-  ASSERT_EQ(init_password_count, GetPasswordCount(1));
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(init_password_count, GetPasswordCount(1, GetPasswordStoreType()));
 
-  RemoveLogin(GetPasswordStore(1), form0);
-
-  // Wait for deletion from client 1 to propagate.
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
-  ASSERT_EQ(init_password_count - 1, GetPasswordCount(0));
-
-  RemoveLogin(GetPasswordStore(1), form1);
+  GetPasswordStore(1)->RemoveLogin(FROM_HERE,
+                                   password_manager::FromPasswordForm(form0));
 
   // Wait for deletion from client 1 to propagate.
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
-  ASSERT_EQ(init_password_count - 2, GetPasswordCount(0));
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(init_password_count - 1,
+            GetPasswordCount(0, GetPasswordStoreType()));
+
+  GetPasswordStore(1)->RemoveLogin(FROM_HERE,
+                                   password_manager::FromPasswordForm(form1));
+
+  // Wait for deletion from client 1 to propagate.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(init_password_count - 2,
+            GetPasswordCount(0, GetPasswordStoreType()));
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, DeleteAll) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTestWithVerifier, DeleteAll) {
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
 
-  PasswordForm form0 = CreateTestPasswordForm(0);
-  AddLogin(GetVerifierPasswordStore(), form0);
-  AddLogin(GetPasswordStore(0), form0);
-  PasswordForm form1 = CreateTestPasswordForm(1);
-  AddLogin(GetVerifierPasswordStore(), form1);
-  AddLogin(GetPasswordStore(0), form1);
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(1).Wait());
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+  PasswordForm form0 = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetVerifierPasswordStore()->AddLogin(
+      password_manager::FromPasswordForm(form0));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
+  PasswordForm form1 = CreateTestPasswordForm(1, GetPasswordStoreType());
+  GetVerifierPasswordStore()->AddLogin(
+      password_manager::FromPasswordForm(form1));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form1));
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(1, GetPasswordStoreType()).Wait());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
 
   RemoveLogins(GetPasswordStore(1));
   RemoveLogins(GetVerifierPasswordStore());
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(0).Wait());
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
-  ASSERT_EQ(0, GetVerifierPasswordCount());
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(0, GetPasswordStoreType()).Wait());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
+  ASSERT_EQ(0, GetVerifierPasswordCount(GetPasswordStoreType()));
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, E2E_ENABLED(Merge)) {
-  ResetSyncForPrimaryAccount();
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordForms());
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, E2E_ENABLED(Merge)) {
+  ASSERT_TRUE(ResetSyncForPrimaryAccount());
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
 
-  PasswordForm form0 = CreateTestPasswordForm(0);
-  AddLogin(GetPasswordStore(0), form0);
-  PasswordForm form1 = CreateTestPasswordForm(1);
-  AddLogin(GetPasswordStore(1), form1);
-  PasswordForm form2 = CreateTestPasswordForm(2);
-  AddLogin(GetPasswordStore(1), form2);
+  PasswordForm form0 = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
+  PasswordForm form1 = CreateTestPasswordForm(1, GetPasswordStoreType());
+  GetPasswordStore(1)->AddLogin(password_manager::FromPasswordForm(form1));
+  PasswordForm form2 = CreateTestPasswordForm(2, GetPasswordStoreType());
+  GetPasswordStore(1)->AddLogin(password_manager::FromPasswordForm(form2));
 
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
-  ASSERT_EQ(3, GetPasswordCount(0));
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(3, GetPasswordCount(0, GetPasswordStoreType()));
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, E2E_ONLY(TwoClientAddPass)) {
-  ResetSyncForPrimaryAccount();
-  ASSERT_TRUE(SetupSync()) <<  "SetupSync() failed.";
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, E2E_ONLY(TwoClientAddPass)) {
+  ASSERT_TRUE(ResetSyncForPrimaryAccount());
+  ASSERT_TRUE(SetupSync());
   // All profiles should sync same passwords.
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait())
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait())
       << "Initial password forms did not match for all profiles";
-  const int init_password_count = GetPasswordCount(0);
+  const int init_password_count = GetPasswordCount(0, GetPasswordStoreType());
 
   // Add one new password per profile. A unique form is created for each to
   // prevent them from overwriting each other.
   for (int i = 0; i < num_clients(); ++i) {
-    AddLogin(GetPasswordStore(i), CreateTestPasswordForm(base::RandInt(
-                                      0, std::numeric_limits<int32_t>::max())));
+    GetPasswordStore(i)->AddLogin(
+        password_manager::FromPasswordForm(CreateTestPasswordForm(
+            base::RandIntInclusive(0, std::numeric_limits<int32_t>::max()),
+            GetPasswordStoreType())));
   }
 
   // Blocks and waits for password forms in all profiles to match.
-  ASSERT_TRUE(SamePasswordFormsChecker().Wait());
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
 
   // Check that total number of passwords is as expected.
   for (int i = 0; i < num_clients(); ++i) {
-    ASSERT_EQ(GetPasswordCount(i), init_password_count + num_clients()) <<
-        "Total password count is wrong.";
+    ASSERT_EQ(GetPasswordCount(i, GetPasswordStoreType()),
+              init_password_count + num_clients())
+        << "Total password count is wrong.";
   }
 }
 
-IN_PROC_BROWSER_TEST_F(TwoClientPasswordsSyncTest, AddImmediatelyAfterDelete) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTestWithVerifier,
+                       AddImmediatelyAfterDelete) {
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
   base::HistogramTester histogram_tester;
 
-  PasswordForm form0 = CreateTestPasswordForm(0);
-  AddLogin(GetVerifierPasswordStore(), form0);
-  AddLogin(GetPasswordStore(0), form0);
+  PasswordForm form0 = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetVerifierPasswordStore()->AddLogin(
+      password_manager::FromPasswordForm(form0));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
 
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(1).Wait());
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(1, GetPasswordStoreType()).Wait());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
 
-  PasswordForm form1 = CreateTestPasswordForm(1);
-  UpdateLoginWithPrimaryKey(GetVerifierPasswordStore(), form1, form0);
-  UpdateLoginWithPrimaryKey(GetPasswordStore(0), form1, form0);
+  PasswordForm form1 = CreateTestPasswordForm(1, GetPasswordStoreType());
+  GetVerifierPasswordStore()->UpdateLoginWithPrimaryKey(
+      password_manager::FromPasswordForm(form1),
+      password_manager::FromPasswordForm(form0));
+  GetPasswordStore(0)->UpdateLoginWithPrimaryKey(
+      password_manager::FromPasswordForm(form1),
+      password_manager::FromPasswordForm(form0));
 
-  ASSERT_TRUE(SamePasswordFormsAsVerifierChecker(1).Wait());
-  ASSERT_TRUE(AllProfilesContainSamePasswordFormsAsVerifier());
+  ASSERT_TRUE(
+      SamePasswordFormsAsVerifierChecker(1, GetPasswordStoreType()).Wait());
+  ASSERT_TRUE(
+      AllProfilesContainSamePasswordFormsAsVerifier(GetPasswordStoreType()));
   // There should be only one deletion. This is to test the bug
-  // (crbug.com/1046309) where the USS client was local deletions when receiving
-  // remote deletions.
-  EXPECT_EQ(
-      1, histogram_tester.GetBucketCount("Sync.ModelTypeEntityChange3.PASSWORD",
-                                         /*LOCAL_DELETION=*/0));
+  // (crbug.com/40670749) where the USS client was local deletions when
+  // receiving remote deletions.
+  EXPECT_EQ(1, histogram_tester.GetBucketCount(
+                   "Sync.DataTypeEntityChange.PASSWORD",
+                   syncer::DataTypeEntityChange::kLocalDeletion));
+}
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
+                       MergeFormsWithInsecureCredentials) {
+  // Setup the test to have Form 0 on Client 0 and Form 1 on Client 1. Both
+  // Forms has associated insecure credentials. After sync, both clients should
+  // have both forms with their corresponding insecure credentials.
+
+  PasswordForm form0 = CreateTestPasswordForm(0, GetPasswordStoreType());
+  PasswordForm form1 = CreateTestPasswordForm(1, GetPasswordStoreType());
+
+  form0.password_issues.insert(
+      {InsecureType::kLeaked,
+       InsecurityMetadata(base::Time(), IsMuted(false),
+                          TriggerBackendNotification(false))});
+  form1.password_issues.insert(
+      {InsecureType::kPhished,
+       InsecurityMetadata(base::Time(), IsMuted(false),
+                          TriggerBackendNotification(false))});
+
+  ASSERT_TRUE(SetupClients());
+
+  // Add the passwords and security issues to Client 0.
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
+
+  if (GetSetupSyncMode() == SetupSyncMode::kSyncTheFeature) {
+    // Enable sync on Client 0 and wait until they are committed.
+    ASSERT_TRUE(GetClient(0)->SetupSync());
+  } else {
+    ASSERT_TRUE(GetClient(0)->SignInNoWaitForCompletion());
+    ASSERT_TRUE(GetClient(0)->AwaitSyncTransportActive());
+  }
+  ASSERT_TRUE(UpdatedProgressMarkerChecker(GetSyncService(0)).Wait());
+
+  // Add the passwords and security issues to Client 1.
+  GetPasswordStore(1)->AddLogin(password_manager::FromPasswordForm(form1));
+
+  if (GetSetupSyncMode() == SetupSyncMode::kSyncTheFeature) {
+    // Enable sync on Client 1 and wait until all passwords are merged.
+    ASSERT_TRUE(GetClient(1)->SetupSync());
+  } else {
+    ASSERT_TRUE(GetClient(1)->SignInNoWaitForCompletion());
+    ASSERT_TRUE(GetClient(1)->AwaitSyncTransportActive());
+  }
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+
+  EXPECT_THAT(GetAllLogins(GetPasswordStore(0)),
+              UnorderedElementsAre(
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form0)),
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form1))));
+  EXPECT_THAT(GetAllLogins(GetPasswordStore(1)),
+              UnorderedElementsAre(
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form0)),
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form1))));
+}
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
+                       AddFormWithInsecureCredentials) {
+  // Tests that newly added form with security issues is successfully synced.
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
+
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  form.password_issues.insert(
+      {InsecureType::kLeaked,
+       InsecurityMetadata(base::Time(), IsMuted(false),
+                          TriggerBackendNotification(false))});
+  form.password_issues.insert(
+      {InsecureType::kPhished,
+       InsecurityMetadata(base::Time(), IsMuted(false),
+                          TriggerBackendNotification(false))});
+
+  // Add the form and security issues to Client 0.
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 1 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(
+      GetAllLogins(GetPasswordStore(1)),
+      ElementsAre(Pointee(password_manager::HasPrimaryKeyAndEquals(form))));
+}
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest, RemoveInsecureCredentialss) {
+  // Tests that removing security issues are successfully synced.
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
+
+  PasswordForm form0 = CreateTestPasswordForm(0, GetPasswordStoreType());
+  PasswordForm form1 = CreateTestPasswordForm(1, GetPasswordStoreType());
+
+  form0.password_issues.insert(
+      {InsecureType::kLeaked,
+       InsecurityMetadata(base::Time(), IsMuted(false),
+                          TriggerBackendNotification(false))});
+  form1.password_issues.insert(
+      {InsecureType::kPhished,
+       InsecurityMetadata(base::Time(), IsMuted(false),
+                          TriggerBackendNotification(false))});
+
+  // Add the form and security issues to Client 0.
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form0));
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form1));
+
+  // Wait until Client 1 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(GetAllLogins(GetPasswordStore(1)),
+              UnorderedElementsAre(
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form0)),
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form1))));
+
+  // Remove security issues on Client 1.
+  form0.password_issues.clear();
+  GetPasswordStore(1)->UpdateLogin(password_manager::FromPasswordForm(form0));
+
+  // Wait until Client 0 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(GetAllLogins(GetPasswordStore(1)),
+              UnorderedElementsAre(
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form0)),
+                  Pointee(password_manager::HasPrimaryKeyAndEquals(form1))));
+}
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
+                       InsecureCredentialUpdateMute) {
+  // Tests that updating security issues are successfully synced.
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
+
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  form.password_issues.insert(
+      {InsecureType::kLeaked,
+       InsecurityMetadata(base::Time(), IsMuted(false),
+                          TriggerBackendNotification(false))});
+
+  // Add the form and security issue to Client 0.
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 1 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+
+  // Update is_muted field on Client 0.
+  form.password_issues.at(InsecureType::kLeaked).is_muted = IsMuted(true);
+  GetPasswordStore(0)->UpdateLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 1 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(
+      GetAllLogins(GetPasswordStore(1)),
+      ElementsAre(Pointee(password_manager::HasPrimaryKeyAndEquals(form))));
+}
+
+// Regression test for crbug.com/40232558.
+IN_PROC_BROWSER_TEST_P(
+    TwoClientPasswordsSyncTest,
+    MatchingDeletionsConflictDoesNotInvokeTrimmingEntitySpecifics) {
+  // Add a password and wait until it is synced on both clients.
+  ASSERT_TRUE(SetupSync());
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  ASSERT_EQ(GetPasswordCount(0, GetPasswordStoreType()), 1);
+
+  // Simulate going offline on both clients.
+  DisableNetwork();
+
+  // Remove the password from both clients to simulate a conflict with matching
+  // remote and local deletion after Client 1 comes back online.
+  GetPasswordStore(0)->RemoveLogin(FROM_HERE,
+                                   password_manager::FromPasswordForm(form));
+  GetPasswordStore(1)->RemoveLogin(FROM_HERE,
+                                   password_manager::FromPasswordForm(form));
+
+  // Simulate going online again.
+  EnableNetwork();
+
+  // Checks that the client does not crash due to trimming entity specifics for
+  // caching for a deleted entity (without a password field).
+  ASSERT_TRUE(AwaitQuiescence());
+}
+
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
+                       SyncPasswordNotesBetweenDevices) {
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
+
+  // Add a password with note to Client 0.
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  form.notes.emplace_back(
+      /*unique_display_name=*/u"My Phone Pin", /*value=*/u"123456",
+      /*date_created=*/base::Time::Now(), /*hide_by_default=*/true);
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 1 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(
+      GetAllLogins(GetPasswordStore(1)),
+      ElementsAre(Pointee(password_manager::HasPrimaryKeyAndEquals(form))));
+
+  // Update the note in Client 1.
+  form.notes[0].value = u"78910";
+  GetPasswordStore(1)->UpdateLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 0 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(
+      GetAllLogins(GetPasswordStore(0)),
+      ElementsAre(Pointee(password_manager::HasPrimaryKeyAndEquals(form))));
+
+  // Remove all notes on Client 0.
+  form.notes.clear();
+  GetPasswordStore(0)->UpdateLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 1 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(
+      GetAllLogins(GetPasswordStore(1)),
+      ElementsAre(Pointee(password_manager::HasPrimaryKeyAndEquals(form))));
+}
+
+// This tests the  logic for reading and writing the notes backup blob when
+// notes are empty.
+IN_PROC_BROWSER_TEST_P(TwoClientPasswordsSyncTest,
+                       SyncPasswordWithEmptyNotesBetweenDevices) {
+  ASSERT_TRUE(SetupSync());
+  ASSERT_TRUE(AllProfilesContainSamePasswordForms(GetPasswordStoreType()));
+
+  // Add a password with note to Client 0.
+  PasswordForm form = CreateTestPasswordForm(0, GetPasswordStoreType());
+  GetPasswordStore(0)->AddLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 1 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(
+      GetAllLogins(GetPasswordStore(1)),
+      ElementsAre(Pointee(password_manager::HasPrimaryKeyAndEquals(form))));
+
+  // Update the password in Client 1.
+  form.password_value = u"new_password";
+  GetPasswordStore(1)->UpdateLogin(password_manager::FromPasswordForm(form));
+
+  // Wait until Client 0 picks up changes.
+  ASSERT_TRUE(SamePasswordFormsChecker(GetPasswordStoreType()).Wait());
+  EXPECT_THAT(
+      GetAllLogins(GetPasswordStore(0)),
+      ElementsAre(Pointee(password_manager::HasPrimaryKeyAndEquals(form))));
 }

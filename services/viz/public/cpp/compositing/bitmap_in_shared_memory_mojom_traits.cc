@@ -1,8 +1,13 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/viz/public/cpp/compositing/bitmap_in_shared_memory_mojom_traits.h"
+
+#include <cstdint>
+#include <memory>
+
+#include "base/compiler_specific.h"
 
 namespace {
 
@@ -15,33 +20,58 @@ void DeleteSharedMemoryMapping(void* not_used, void* context) {
 namespace mojo {
 
 // static
-const SkImageInfo&
-StructTraits<viz::mojom::BitmapInSharedMemoryDataView, SkBitmap>::image_info(
-    const SkBitmap& sk_bitmap) {
+const SkImageInfo StructTraits<viz::mojom::BitmapInSharedMemoryDataView,
+                               viz::CopyOutputResult::ScopedSkBitmap>::
+    image_info(const viz::CopyOutputResult::ScopedSkBitmap& scoped_bitmap) {
+  auto sk_bitmap = scoped_bitmap.bitmap();
   return sk_bitmap.info();
 }
 
 // static
-uint64_t StructTraits<viz::mojom::BitmapInSharedMemoryDataView,
-                      SkBitmap>::row_bytes(const SkBitmap& sk_bitmap) {
-  return sk_bitmap.rowBytes();
-}
+std::optional<base::WritableSharedMemoryRegion>
+StructTraits<viz::mojom::BitmapInSharedMemoryDataView,
+             viz::CopyOutputResult::ScopedSkBitmap>::
+    pixels(const viz::CopyOutputResult::ScopedSkBitmap& scoped_bitmap) {
+  auto sk_bitmap = scoped_bitmap.bitmap();
+  if (!sk_bitmap.readyToDraw()) {
+    return std::nullopt;
+  }
 
-// static
-base::Optional<base::WritableSharedMemoryRegion>
-StructTraits<viz::mojom::BitmapInSharedMemoryDataView, SkBitmap>::pixels(
-    const SkBitmap& sk_bitmap) {
-  if (!sk_bitmap.readyToDraw())
-    return base::nullopt;
+  // The buffer for `sk_bitmap` could be larger than the minimum size required
+  // to hold all the pixels. Minimize the shared memory allocation size here
+  // since the pixel data is already being copied.
+  size_t min_row_bytes = sk_bitmap.info().minRowBytes();
+  size_t byte_size = sk_bitmap.info().computeByteSize(min_row_bytes);
 
-  size_t byte_size = sk_bitmap.computeByteSize();
+  if (min_row_bytes == 0 || byte_size == 0) {
+    return std::nullopt;
+  }
+
+  CHECK_GE(byte_size, sk_bitmap.height() * min_row_bytes);
+
   base::WritableSharedMemoryRegion region =
       base::WritableSharedMemoryRegion::Create(byte_size);
   {
     base::WritableSharedMemoryMapping mapping = region.Map();
-    if (!mapping.IsValid())
-      return base::nullopt;
-    memcpy(mapping.memory(), sk_bitmap.getPixels(), byte_size);
+    if (!mapping.IsValid()) {
+      return std::nullopt;
+    }
+
+    auto* src_pixels = static_cast<const uint8_t*>(sk_bitmap.getPixels());
+    size_t src_stride = sk_bitmap.rowBytes();
+    auto* dst_pixels = static_cast<uint8_t*>(mapping.memory());
+
+    // If source and destination stride are the same use a single copy
+    // operation, otherwise do a row-by-row copy.
+    if (src_stride == min_row_bytes) {
+      UNSAFE_TODO(memcpy(dst_pixels, src_pixels, byte_size));
+    } else {
+      for (int y = 0; y < sk_bitmap.height(); ++y) {
+        UNSAFE_TODO(memcpy(dst_pixels, src_pixels, min_row_bytes));
+        UNSAFE_TODO(src_pixels += src_stride);
+        UNSAFE_TODO(dst_pixels += min_row_bytes);
+      }
+    }
   }
   return region;
 }
@@ -53,28 +83,33 @@ bool StructTraits<viz::mojom::BitmapInSharedMemoryDataView, SkBitmap>::Read(
   SkImageInfo image_info;
   if (!data.ReadImageInfo(&image_info))
     return false;
-  if (!image_info.validRowBytes(data.row_bytes()))
-    return false;
 
-  base::Optional<base::WritableSharedMemoryRegion> region_opt;
+  std::optional<base::WritableSharedMemoryRegion> region_opt;
   if (!data.ReadPixels(&region_opt))
     return false;
 
   *sk_bitmap = SkBitmap();
   if (!region_opt)
-    return sk_bitmap->setInfo(image_info, data.row_bytes());
+    return sk_bitmap->setInfo(image_info, image_info.minRowBytes());
 
   auto mapping_ptr =
       std::make_unique<base::WritableSharedMemoryMapping>(region_opt->Map());
   if (!mapping_ptr->IsValid())
     return false;
 
-  if (!sk_bitmap->installPixels(image_info, mapping_ptr->memory(),
-                                data.row_bytes(), &DeleteSharedMemoryMapping,
-                                mapping_ptr.get())) {
+  if (mapping_ptr->size() <
+      image_info.computeByteSize(image_info.minRowBytes())) {
     return false;
   }
-  mapping_ptr.release();
+
+  // Skia guarantees that it will call release proc, so we pass release()'ed
+  // pointer into it.
+  void* bitmap_memory = mapping_ptr->memory();
+  if (!sk_bitmap->installPixels(
+          image_info, bitmap_memory, image_info.minRowBytes(),
+          &DeleteSharedMemoryMapping, mapping_ptr.release())) {
+    return false;
+  }
   return true;
 }
 

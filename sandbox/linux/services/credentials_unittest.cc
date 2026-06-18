@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
@@ -47,8 +48,23 @@ typedef std::unique_ptr<std::remove_reference<decltype(*((cap_t)0))>::type,
 bool WorkingDirectoryIsRoot() {
   char current_dir[PATH_MAX];
   char* cwd = getcwd(current_dir, sizeof(current_dir));
-  PCHECK(cwd);
-  if (strcmp("/", cwd)) return false;
+
+  // Kernel commit 7bc3e6e55acf ("proc: Use a list of inodes to flush from
+  // proc"), present in 5.6 and later, changed how procfs inodes are cleaned up
+  // when a process exits. Credentials::DropFileSystemAccess() relies forking a
+  // child process which shares the same file system information (using
+  // clone(CLONE_FS)), and chroot()'ing to /proc/self/fdinfo/ in that process.
+  // However, when that child process exits, its procfs directories are
+  // unlinked, causing getcwd() to return ENOENT. getcwd() has been documented
+  // as returning ENOENT when the directory has been unlinked since at least
+  // 2004 (man-pages commit fea681daf).
+  if (cwd) {
+    if (UNSAFE_TODO(strcmp("/", cwd))) {
+      return false;
+    }
+  } else {
+    PCHECK(errno == ENOENT);
+  }
 
   // The current directory is the root. Add a few paranoid checks.
   struct stat current;
@@ -71,9 +87,8 @@ SANDBOX_TEST(Credentials, DropAllCaps) {
 SANDBOX_TEST(Credentials, MoveToNewUserNS) {
   CHECK(Credentials::DropAllCapabilities());
   bool moved_to_new_ns = Credentials::MoveToNewUserNS();
-  fprintf(stdout,
-          "Unprivileged CLONE_NEWUSER supported: %s\n",
-          moved_to_new_ns ? "true." : "false.");
+  UNSAFE_TODO(fprintf(stdout, "Unprivileged CLONE_NEWUSER supported: %s\n",
+                      moved_to_new_ns ? "true." : "false."));
   fflush(stdout);
   if (!moved_to_new_ns) {
     fprintf(stdout, "This kernel does not support unprivileged namespaces. "
@@ -146,7 +161,11 @@ SANDBOX_TEST(Credentials, CanDetectRoot) {
 }
 
 // Disabled on ASAN because of crbug.com/451603.
-SANDBOX_TEST(Credentials, DISABLE_ON_ASAN(DropFileSystemAccessIsSafe)) {
+// Disabled on MSAN due to crbug.com/1180105
+SANDBOX_TEST_ALLOW_NOISE(
+    Credentials,
+    // TODO(crbug.com/370792794): Re-enable this test
+    DISABLE_ON_SANITIZERS(DISABLED_DropFileSystemAccessIsSafe)) {
   CHECK(Credentials::HasFileSystemAccess());
   CHECK(Credentials::DropAllCapabilities());
   // Probably missing kernel support.
@@ -162,7 +181,8 @@ SANDBOX_TEST(Credentials, DISABLE_ON_ASAN(DropFileSystemAccessIsSafe)) {
 
 // Check that after dropping filesystem access and dropping privileges
 // it is not possible to regain capabilities.
-SANDBOX_TEST(Credentials, DISABLE_ON_ASAN(CannotRegainPrivileges)) {
+// Disabled on MSAN due to crbug.com/1180105
+SANDBOX_TEST(Credentials, DISABLE_ON_SANITIZERS(CannotRegainPrivileges)) {
   base::ScopedFD proc_fd(ProcUtil::OpenProc());
   CHECK(Credentials::DropAllCapabilities(proc_fd.get()));
   // Probably missing kernel support.
@@ -251,7 +271,9 @@ void SignalHandler(int sig) {
 // glibc (and some other libcs) caches the PID and TID in TLS. This test
 // verifies that these values are correct after DropFilesystemAccess.
 // Disabled on ASAN because of crbug.com/451603.
-SANDBOX_TEST(Credentials, DISABLE_ON_ASAN(DropFileSystemAccessPreservesTLS)) {
+// Disabled on MSAN due to crbug.com/1180105
+SANDBOX_TEST(Credentials,
+             DISABLE_ON_SANITIZERS(DropFileSystemAccessPreservesTLS)) {
   // Probably missing kernel support.
   if (!Credentials::MoveToNewUserNS()) return;
   CHECK(Credentials::DropFileSystemAccess(ProcUtil::OpenProc().get()));

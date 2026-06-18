@@ -30,12 +30,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECTOR_LAYER_TREE_AGENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECTOR_LAYER_TREE_AGENT_H_
 
-#include "base/macros.h"
 #include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/inspector/inspector_base_agent.h"
-#include "third_party/blink/renderer/core/inspector/protocol/LayerTree.h"
-#include "third_party/blink/renderer/platform/graphics/compositor_element_id.h"
+#include "third_party/blink/renderer/core/inspector/protocol/layer_tree.h"
 #include "third_party/blink/renderer/platform/timer.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -58,6 +56,8 @@ class CORE_EXPORT InspectorLayerTreeAgent final
   };
 
   InspectorLayerTreeAgent(InspectedFrames*, Client*);
+  InspectorLayerTreeAgent(const InspectorLayerTreeAgent&) = delete;
+  InspectorLayerTreeAgent& operator=(const InspectorLayerTreeAgent&) = delete;
   ~InspectorLayerTreeAgent() override;
   void Trace(Visitor*) const override;
 
@@ -83,15 +83,15 @@ class CORE_EXPORT InspectorLayerTreeAgent final
   protocol::Response releaseSnapshot(const String& snapshot_id) override;
   protocol::Response profileSnapshot(
       const String& snapshot_id,
-      protocol::Maybe<int> min_repeat_count,
-      protocol::Maybe<double> min_duration,
-      protocol::Maybe<protocol::DOM::Rect> clip_rect,
+      std::optional<int> min_repeat_count,
+      std::optional<double> min_duration,
+      std::unique_ptr<protocol::DOM::Rect> clip_rect,
       std::unique_ptr<protocol::Array<protocol::Array<double>>>* timings)
       override;
   protocol::Response replaySnapshot(const String& snapshot_id,
-                                    protocol::Maybe<int> from_step,
-                                    protocol::Maybe<int> to_step,
-                                    protocol::Maybe<double> scale,
+                                    std::optional<int> from_step,
+                                    std::optional<int> to_step,
+                                    std::optional<double> scale,
                                     String* data_url) override;
   protocol::Response snapshotCommandLog(
       const String& snapshot_id,
@@ -111,9 +111,7 @@ class CORE_EXPORT InspectorLayerTreeAgent final
                                      const PictureSnapshot*&);
   void GatherLayers(
       const cc::Layer*,
-      std::unique_ptr<protocol::Array<protocol::LayerTree::Layer>>&,
-      bool has_wheel_event_handlers,
-      CompositorElementId outer_viewport_scroll_element_id);
+      std::unique_ptr<protocol::Array<protocol::LayerTree::Layer>>&);
 
   Member<InspectedFrames> inspected_frames_;
   Client* client_;
@@ -121,7 +119,6 @@ class CORE_EXPORT InspectorLayerTreeAgent final
   typedef HashMap<String, scoped_refptr<PictureSnapshot>> SnapshotById;
   SnapshotById snapshot_by_id_;
   bool suppress_layer_paint_events_;
-  DISALLOW_COPY_AND_ASSIGN(InspectorLayerTreeAgent);
 };
 
 }  // namespace blink

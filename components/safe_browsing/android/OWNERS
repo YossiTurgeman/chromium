@@ -1,5 +1,5 @@
+thefrog@chromium.org
 vakh@chromium.org
 xinghuilu@chromium.org
 
-# COMPONENT: Services>Safebrowsing
-# TEAM: safebrowsing@chromium.org
+per-file real_time_url_checks_allowlist*=skrakowi@chromium.org

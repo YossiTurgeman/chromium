@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,21 +11,21 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.base.test.util.Feature;
+import org.chromium.base.test.util.Features.DisableFeatures;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.permissions.PermissionTestRule.PermissionUpdateWaiter;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 
-/**
- * Test suite for notifications permissions requests.
- */
+/** Test suite for notifications permissions requests. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class NotificationTest {
     @Rule
-    public PermissionTestRule mPermissionRule = new PermissionTestRule(true /* useHttpsServer */);
+    public PermissionTestRule mPermissionRule = new PermissionTestRule(/* useHttpsServer= */ true);
 
     private static final String TEST_FILE =
             "/chrome/test/data/notifications/notification_tester.html";
@@ -38,13 +38,19 @@ public class NotificationTest {
     @Test
     @MediumTest
     @Feature({"Notifications"})
+    @DisableFeatures({"PermissionsAndroidClapperLoud", "PermissionsGestureGatedPrompts"})
     public void testNotificationDialog() throws Exception {
-        Tab tab = mPermissionRule.getActivity().getActivityTab();
-        PermissionUpdateWaiter updateWaiter = new PermissionUpdateWaiter(
-                "request-callback-granted", mPermissionRule.getActivity());
-        tab.addObserver(updateWaiter);
+        Tab tab = mPermissionRule.getActivityTab();
+        PermissionUpdateWaiter updateWaiter =
+                new PermissionUpdateWaiter(
+                        "request-callback-granted", mPermissionRule.getActivity());
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.addObserver(updateWaiter));
         mPermissionRule.runAllowTest(
-                updateWaiter, TEST_FILE, "requestPermission()", 0, false, true);
-        tab.removeObserver(updateWaiter);
+                updateWaiter,
+                /* url= */ TEST_FILE,
+                /* javascript= */ "requestPermission()",
+                /* nUpdates= */ 0,
+                /* withGesture= */ false);
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.removeObserver(updateWaiter));
     }
 }

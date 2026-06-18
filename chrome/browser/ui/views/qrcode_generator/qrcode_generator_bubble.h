@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,13 @@
 #define CHROME_BROWSER_UI_VIEWS_QRCODE_GENERATOR_QRCODE_GENERATOR_BUBBLE_H_
 
 #include <memory>
+#include <optional>
 
-#include "base/macros.h"
-#include "base/memory/weak_ptr.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ui/qrcode_generator/qrcode_generator_bubble_view.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_bubble_delegate_view.h"
-#include "chrome/services/qrcode_generator/public/cpp/qrcode_generator_service.h"
-#include "ui/views/controls/button/button.h"
+#include "components/qr_code_generator/bitmap_generator.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/controls/textfield/textfield_controller.h"
 #include "url/gurl.h"
@@ -34,30 +34,40 @@ class View;
 
 namespace qrcode_generator {
 
-class QRCodeGeneratorBubbleController;
-
 // Dialog that displays a QR code used to share a page or image.
 class QRCodeGeneratorBubble : public QRCodeGeneratorBubbleView,
                               public LocationBarBubbleDelegateView,
-                              public views::TextfieldController,
-                              public views::ButtonListener {
+                              public views::TextfieldController {
+  METADATA_HEADER(QRCodeGeneratorBubble, LocationBarBubbleDelegateView)
+
  public:
-  QRCodeGeneratorBubble(views::View* anchor_view,
-                        content::WebContents* web_contents,
-                        QRCodeGeneratorBubbleController* controller,
+  QRCodeGeneratorBubble(views::BubbleAnchor anchor,
+                        base::WeakPtr<content::WebContents> web_contents,
+                        base::OnceClosure on_closing,
+                        base::OnceClosure on_back_button_pressed,
                         const GURL& url);
+  QRCodeGeneratorBubble(const QRCodeGeneratorBubble&) = delete;
+  QRCodeGeneratorBubble& operator=(const QRCodeGeneratorBubble&) = delete;
+  ~QRCodeGeneratorBubble() override;
+
   void Show();
 
   // QRCodeGeneratorBubbleView:
   void Hide() override;
+  void OnThemeChanged() override;
 
   // Returns a suggested download filename for a given URL.
   // e.g.: www.foo.com may suggest qrcode_foo.png.
-  static const base::string16 GetQRCodeFilenameForURL(const GURL& url);
+  static const std::u16string GetQRCodeFilenameForURL(const GURL& url);
+
+  views::ImageView* image_for_testing() { return qr_code_image_; }
+  views::Textfield* textfield_for_testing() { return textfield_url_; }
+  views::Label* error_label_for_testing() { return bottom_error_label_; }
+  views::LabelButton* download_button_for_testing() { return download_button_; }
+
+  void SetQRCodeErrorForTesting(std::optional<qr_code_generator::Error> error);
 
  private:
-  ~QRCodeGeneratorBubble() override;
-
   // Updates and formats QR code, text, and controls.
   void UpdateQRContent();
 
@@ -68,7 +78,10 @@ class QRCodeGeneratorBubble : public QRCodeGeneratorBubbleView,
   void DisplayPlaceholderImage();
 
   // Shows an error message.
-  void DisplayError(mojom::QRCodeGeneratorError error);
+  void DisplayError(qr_code_generator::Error error);
+
+  // Hides all error messages and enables or disables download button.
+  void HideErrors(bool enable_download_button);
 
   // Shrinks the view and sets it not visible.
   void ShrinkAndHideDisplay(views::View* view);
@@ -77,44 +90,50 @@ class QRCodeGeneratorBubble : public QRCodeGeneratorBubbleView,
   View* GetInitiallyFocusedView() override;
   bool ShouldShowCloseButton() const override;
   void WindowClosing() override;
-  const char* GetClassName() const override;
 
   // views::BubbleDialogDelegateView:
   void Init() override;
+  void AddedToWidget() override;
 
   // TextfieldController:
   void ContentsChanged(views::Textfield* sender,
-                       const base::string16& new_contents) override;
+                       const std::u16string& new_contents) override;
   bool HandleKeyEvent(views::Textfield* sender,
                       const ui::KeyEvent& key_event) override;
   bool HandleMouseEvent(views::Textfield* sender,
                         const ui::MouseEvent& mouse_event) override;
 
-  // ButtonListener:
-  void ButtonPressed(views::Button* sender, const ui::Event& event) override;
+  const SkBitmap GetBitmap();
 
-  // Callback for the request to the OOP service to generate a new image.
-  void OnCodeGeneratorResponse(const mojom::GenerateQRCodeResponsePtr response);
+  void CopyButtonPressed();
 
-  // Remote to service instance to generate QR code images.
-  mojo::Remote<mojom::QRCodeGeneratorService> qr_code_service_remote_;
+  void DownloadButtonPressed();
+
+  void BackButtonPressed();
+
+  // Unit tests can set `qr_code_error_override_` to inject QR code
+  // generation errors.
+  std::optional<qr_code_generator::Error> qrcode_error_override_;
 
   // URL for which the QR code is being generated.
   // Used for validation.
   GURL url_;
 
-  // Pointers to view widgets; weak.
-  views::ImageView* qr_code_image_ = nullptr;
-  views::Textfield* textfield_url_ = nullptr;
-  views::LabelButton* download_button_ = nullptr;
-  views::TooltipIcon* tooltip_icon_ = nullptr;
-  views::Label* center_error_label_ = nullptr;
-  views::Label* bottom_error_label_ = nullptr;
+  base::WeakPtr<actions::ActionItem> qrcode_action_item_ = nullptr;
 
-  QRCodeGeneratorBubbleController* controller_;  // weak.
-  content::WebContents* web_contents_;           // weak.
+  // Pointers to subviews that we need to update the contents or visibility of
+  // after creation.
+  raw_ptr<views::ImageView> qr_code_image_ = nullptr;
+  raw_ptr<views::Textfield> textfield_url_ = nullptr;
+  raw_ptr<views::LabelButton> copy_button_ = nullptr;
+  raw_ptr<views::LabelButton> download_button_ = nullptr;
+  raw_ptr<views::TooltipIcon> tooltip_icon_ = nullptr;
+  raw_ptr<views::Label> center_error_label_ = nullptr;
+  raw_ptr<views::Label> bottom_error_label_ = nullptr;
 
-  DISALLOW_COPY_AND_ASSIGN(QRCodeGeneratorBubble);
+  base::OnceClosure on_closing_;
+  base::OnceClosure on_back_button_pressed_;
+  base::WeakPtr<content::WebContents> web_contents_;
 };
 
 }  // namespace qrcode_generator

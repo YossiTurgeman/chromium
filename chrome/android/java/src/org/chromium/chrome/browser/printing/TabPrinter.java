@@ -1,30 +1,44 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.printing;
 
+import static org.chromium.components.embedder_support.util.UrlConstants.CONTENT_SCHEME;
+
+import android.net.Uri;
 import android.text.TextUtils;
+
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.NativeMethods;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.base.supplier.MonotonicObservableSupplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
+import org.chromium.chrome.browser.pdf.PdfPage;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tabmodel.TabModelSelector;
+import org.chromium.chrome.browser.tabmodel.TabModelSelectorSupplier;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.printing.Printable;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
 import java.lang.ref.WeakReference;
 
 /**
  * Wraps printing related functionality of a {@link Tab} object.
  *
- * This class doesn't have any lifetime expectations with regards to Tab, since we keep a weak
+ * <p>This class doesn't have any lifetime expectations with regards to Tab, since we keep a weak
  * reference.
  */
 @JNINamespace("printing")
+@NullMarked
 public class TabPrinter implements Printable {
     private static final String TAG = "printing";
 
@@ -38,7 +52,7 @@ public class TabPrinter implements Printable {
     }
 
     public TabPrinter(Tab tab) {
-        mTab = new WeakReference<Tab>(tab);
+        mTab = new WeakReference<>(tab);
         mDefaultTitle = ContextUtils.getApplicationContext().getString(R.string.menu_print);
         mErrorMessage =
                 ContextUtils.getApplicationContext().getString(R.string.error_printing_failed);
@@ -60,7 +74,7 @@ public class TabPrinter implements Printable {
         String title = tab.getTitle();
         if (!TextUtils.isEmpty(title)) return title;
 
-        String url = tab.getUrlString();
+        String url = tab.getUrl().getSpec();
         if (!TextUtils.isEmpty(url)) return url;
 
         return mDefaultTitle;
@@ -71,9 +85,29 @@ public class TabPrinter implements Printable {
         Tab tab = mTab.get();
         if (tab == null || !tab.isInitialized()) {
             // Tab.isInitialized() will be false if tab is in destroy process.
-            Log.d(TAG, "Tab is not avaliable for printing.");
+            Log.d(TAG, "Tab is not available for printing.");
             return false;
         }
+
+        if (tab.isHidden()) {
+            // A tab is not printable if it is hidden, which prevents background tabs from
+            // printing. However, some OS print UI flows can result in the Activity being stopped
+            // and therefore the tab being considered 'hidden'. During the OS print UI flows, users
+            // may invoke actions, like changing the print layout orientation, that cause this
+            // method to be invoked while the Tab is hidden. To allow printing to continue in these
+            // cases, we make an exception for the current tab.
+            MonotonicObservableSupplier<TabModelSelector> supplier =
+                    TabModelSelectorSupplier.from(tab.getWindowAndroid());
+            TabModelSelector selector = (supplier != null) ? supplier.get() : null;
+            if (selector == null || selector.getCurrentTab() != tab) {
+                Log.d(
+                        TAG,
+                        "Tab is not available for printing because it is hidden and not the"
+                                + " current tab.");
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -82,8 +116,39 @@ public class TabPrinter implements Printable {
         return mErrorMessage;
     }
 
+    @Override
+    public @Nullable InputStream getPdfInputStream() {
+        Tab tab = mTab.get();
+        if (tab == null || !tab.isInitialized()) {
+            return null;
+        }
+
+        if (tab.isNativePage() && tab.getNativePage() instanceof PdfPage) {
+            String pdfFilePath = tab.getNativePage().getCanonicalFilepath();
+            if (pdfFilePath == null) {
+                return null;
+            }
+
+            try {
+                if (pdfFilePath.startsWith(CONTENT_SCHEME)) {
+                    return ContextUtils.getApplicationContext()
+                            .getContentResolver()
+                            .openInputStream(Uri.parse(pdfFilePath));
+                } else {
+                    File file = new File(pdfFilePath);
+                    return new FileInputStream(file);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to open PDF input stream.", e);
+                return null;
+            }
+        } else {
+            return null;
+        }
+    }
+
     @NativeMethods
     interface Natives {
-        boolean print(WebContents webContents, int renderProcessId, int renderFrameId);
+        boolean print(@Nullable WebContents webContents, int renderProcessId, int renderFrameId);
     }
 }

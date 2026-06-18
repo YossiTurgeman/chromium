@@ -31,7 +31,8 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "third_party/blink/renderer/platform/audio/audio_array.h"
 #include "third_party/blink/renderer/platform/audio/fft_frame.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -47,28 +48,29 @@ class DirectConvolver;
 // sub-section of a large impulse response.  It incorporates a delay line to
 // account for the offset of the sub-section within the larger impulse
 // response.
-class PLATFORM_EXPORT ReverbConvolverStage {
+class ReverbConvolverStage final {
   USING_FAST_MALLOC(ReverbConvolverStage);
 
  public:
   // renderPhase is useful to know so that we can manipulate the pre versus post
   // delay so that stages will perform their heavy work (FFT processing) on
   // different slices to balance the load in a real-time thread.
-  ReverbConvolverStage(const float* impulse_response,
-                       size_t response_length,
+  ReverbConvolverStage(base::span<const float> impulse_response,
                        size_t reverb_total_latency,
                        size_t stage_offset,
-                       size_t stage_length,
-                       size_t fft_size,
+                       unsigned stage_length,
+                       unsigned fft_size,
                        size_t render_phase,
-                       size_t render_slice_size,
+                       unsigned render_slice_size,
                        ReverbAccumulationBuffer*,
                        float scale,
                        bool direct_mode = false);
+  ReverbConvolverStage(const ReverbConvolverStage&) = delete;
+  ReverbConvolverStage& operator=(const ReverbConvolverStage&) = delete;
 
-  // WARNING: framesToProcess must be such that it evenly divides the delay
+  // WARNING: `source.size()` must be such that it evenly divides the delay
   // buffer size (stage_offset).
-  void Process(const float* source, uint32_t frames_to_process);
+  void Process(base::span<const float> source);
 
   void ProcessInBackground(ReverbConvolver* convolver,
                            uint32_t frames_to_process);
@@ -76,7 +78,7 @@ class PLATFORM_EXPORT ReverbConvolverStage {
   void Reset();
 
   // Useful for background processing
-  int InputReadIndex() const { return input_read_index_; }
+  size_t InputReadIndex() const { return input_read_index_; }
 
  private:
   std::unique_ptr<FFTFrame> fft_kernel_;
@@ -84,9 +86,9 @@ class PLATFORM_EXPORT ReverbConvolverStage {
 
   AudioFloatArray pre_delay_buffer_;
 
-  ReverbAccumulationBuffer* accumulation_buffer_;
-  int accumulation_read_index_;
-  int input_read_index_;
+  raw_ptr<ReverbAccumulationBuffer> accumulation_buffer_;
+  uint32_t accumulation_read_index_;
+  size_t input_read_index_;
 
   size_t pre_delay_length_;
   size_t post_delay_length_;
@@ -97,8 +99,6 @@ class PLATFORM_EXPORT ReverbConvolverStage {
 
   bool direct_mode_;
   std::unique_ptr<DirectConvolver> direct_convolver_;
-
-  DISALLOW_COPY_AND_ASSIGN(ReverbConvolverStage);
 };
 
 }  // namespace blink

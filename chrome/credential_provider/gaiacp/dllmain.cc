@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,8 +17,6 @@
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/json/json_reader.h"
-#include "base/macros.h"
-#include "base/stl_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "base/win/current_module.h"
@@ -33,7 +31,6 @@
 #include "chrome/credential_provider/gaiacp/gaia_credential_provider_module.h"
 #include "chrome/credential_provider/gaiacp/gcp_utils.h"
 #include "chrome/credential_provider/gaiacp/logging.h"
-#include "chrome/credential_provider/gaiacp/mdm_utils.h"
 #include "chrome/credential_provider/gaiacp/os_process_manager.h"
 #include "chrome/credential_provider/gaiacp/os_user_manager.h"
 #include "chrome/credential_provider/gaiacp/reauth_credential.h"
@@ -67,13 +64,15 @@ STDAPI DllCanUnloadNow(void) {
 
 // Returns a class factory to create an object of the requested type.
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
+  LOGFN(VERBOSE);
+
   // This is performed in here to avoid from doing substantial work in DLLMain.
   _AtlModule.LogProcessDetails();
 
   // Check to see if the credential provider has crashed too much recently.
   // If it has then do not allow it to create any credential providers.
   if (!credential_provider::WriteToStartupSentinel()) {
-    LOGFN(ERROR) << "Disabled due to previous unsuccessful starts";
+    LOGFN(ERROR) << "Disabled temporarily due to previous unsuccessful starts.";
     return E_NOTIMPL;
   }
 
@@ -81,11 +80,14 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
 
   HRESULT hr = _AtlModule.DllGetClassObject(rclsid, riid, ppv);
 
-  // Start refreshing token handle validity as soon as possible so that when
-  // their validity is requested later on by the credential providers they may
-  // already be available and no wait is needed.
-  if (SUCCEEDED(hr))
+  if (SUCCEEDED(hr)) {
+    // Start refreshing token handle validity as soon as possible so that when
+    // their validity is requested later on by the credential providers they may
+    // already be available and no wait is needed.
     _AtlModule.RefreshTokenHandleValidity();
+
+    _AtlModule.CheckGCPWExtension();
+  }
 
   return hr;
 }
@@ -195,12 +197,12 @@ void CALLBACK PerformPostSigninActionsW(HWND /*hwnd*/,
   // Don't log |buffer| since it contains sensitive info like password.
 
   HRESULT hr = S_OK;
-  base::Optional<base::Value> properties =
-      base::JSONReader::Read(buffer.data(), base::JSON_ALLOW_TRAILING_COMMAS);
+  std::optional<base::DictValue> properties = base::JSONReader::ReadDict(
+      buffer.data(), base::JSON_ALLOW_TRAILING_COMMAS);
 
   credential_provider::SecurelyClearBuffer(buffer.data(), buffer.size());
 
-  if (!properties || !properties->is_dict()) {
+  if (!properties) {
     LOGFN(ERROR) << "base::JSONReader::Read failed length=" << buffer.size();
     return;
   }
@@ -210,7 +212,7 @@ void CALLBACK PerformPostSigninActionsW(HWND /*hwnd*/,
   base::win::ScopedCOMInitializer com_initializer(
       base::win::ScopedCOMInitializer::kMTA);
   if (!com_initializer.Succeeded()) {
-    HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
+    hr = HRESULT_FROM_WIN32(::GetLastError());
     LOGFN(ERROR) << "ScopedCOMInitializer failed hr=" << putHR(hr);
   }
 
@@ -219,8 +221,12 @@ void CALLBACK PerformPostSigninActionsW(HWND /*hwnd*/,
   if (FAILED(hr))
     LOGFN(ERROR) << "PerformPostSigninActions hr=" << putHR(hr);
 
-  credential_provider::SecurelyClearDictionaryValue(&properties);
+  credential_provider::SecurelyClearDictionaryValue(properties);
 
+  // Clear the sentinel when it's clear that the user has successfully logged
+  // in. This is done to catch edge cases where existing sentinel deletion might
+  // not be called.
+  credential_provider::DeleteStartupSentinel();
   LOGFN(VERBOSE) << "Done";
 }
 
@@ -235,7 +241,7 @@ void CALLBACK RunAsCrashpadHandlerW(HWND /*hwnd*/,
   DCHECK_EQ(cmd_line->GetSwitchValueASCII(switches::kProcessType),
             crash_reporter::switches::kCrashpadHandler);
 
-  base::string16 entrypoint_arg;
+  std::wstring entrypoint_arg;
   credential_provider::GetEntryPointArgumentForRunDll(
       CURRENT_MODULE(), credential_provider::kRunAsCrashpadHandlerEntryPoint,
       &entrypoint_arg);

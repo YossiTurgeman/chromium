@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,14 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/notifications/notification_display_service_tester.h"
-#include "chrome/browser/sharing/mock_sharing_service.h"
-#include "chrome/browser/sharing/proto/sharing_message.pb.h"
+#include "components/sharing_message/mock_sharing_service.h"
+#include "components/sharing_message/proto/sharing_message.pb.h"
 #include "components/sync_device_info/device_info.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/clipboard/clipboard.h"
 #include "ui/base/clipboard/test/clipboard_test_util.h"
 #include "ui/base/clipboard/test/test_clipboard.h"
+#include "ui/gfx/codec/png_codec.h"
 #include "ui/message_center/public/cpp/notification.h"
 
 SharedClipboardTestBase::SharedClipboardTestBase()
@@ -31,43 +32,28 @@ void SharedClipboardTestBase::TearDown() {
   ui::Clipboard::DestroyClipboardForCurrentThread();
 }
 
-chrome_browser_sharing::SharingMessage SharedClipboardTestBase::CreateMessage(
-    const std::string& guid,
-    const std::string& device_name) {
-  chrome_browser_sharing::SharingMessage message;
+components_sharing_message::SharingMessage
+SharedClipboardTestBase::CreateMessage(const std::string& guid,
+                                       const std::string& device_name) {
+  components_sharing_message::SharingMessage message;
   message.set_sender_guid(guid);
   message.set_sender_device_name(device_name);
   return message;
 }
 
 std::string SharedClipboardTestBase::GetClipboardText() {
-  base::string16 text;
-  ui::Clipboard::GetForCurrentThread()->ReadText(
-      ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr, &text);
-  return base::UTF16ToUTF8(text);
+  return base::UTF16ToUTF8(ui::clipboard_test_util::ReadText(
+      ui::Clipboard::GetForCurrentThread(), ui::ClipboardBuffer::kCopyPaste,
+      /* data_dst = */ nullptr));
 }
 
 SkBitmap SharedClipboardTestBase::GetClipboardImage() {
-  return ui::clipboard_test_util::ReadImage(
-      ui::Clipboard::GetForCurrentThread());
-}
-
-bool SharedClipboardTestBase::HasImageNotification() {
-  auto notifications = notification_tester_->GetDisplayedNotificationsForType(
-      NotificationHandler::Type::SHARING);
-  if (notifications.size() != 1u)
-    return false;
-
-  return notifications[0].type() == message_center::NOTIFICATION_TYPE_IMAGE;
-}
-
-bool SharedClipboardTestBase::HasProgressNotification() {
-  auto notifications = notification_tester_->GetDisplayedNotificationsForType(
-      NotificationHandler::Type::SHARING);
-  if (notifications.size() != 1u)
-    return false;
-
-  return notifications[0].type() == message_center::NOTIFICATION_TYPE_PROGRESS;
+  std::vector<uint8_t> png_data = ui::clipboard_test_util::ReadPng(
+      ui::Clipboard::GetForCurrentThread(), ui::ClipboardBuffer::kCopyPaste,
+      /*data_dst=*/nullptr);
+  SkBitmap bitmap = gfx::PNGCodec::Decode(png_data);
+  CHECK(!bitmap.isNull());
+  return bitmap;
 }
 
 message_center::Notification SharedClipboardTestBase::GetNotification() {
@@ -77,29 +63,6 @@ message_center::Notification SharedClipboardTestBase::GetNotification() {
 
   const message_center::Notification& notification = notifications[0];
   EXPECT_EQ(message_center::NOTIFICATION_TYPE_SIMPLE, notification.type());
-
-  return notification;
-}
-
-message_center::Notification
-SharedClipboardTestBase::GetProgressNotification() {
-  auto notifications = notification_tester_->GetDisplayedNotificationsForType(
-      NotificationHandler::Type::SHARING);
-  EXPECT_EQ(notifications.size(), 1u);
-
-  const message_center::Notification& notification = notifications[0];
-  EXPECT_EQ(message_center::NOTIFICATION_TYPE_PROGRESS, notification.type());
-
-  return notification;
-}
-
-message_center::Notification SharedClipboardTestBase::GetImageNotification() {
-  auto notifications = notification_tester_->GetDisplayedNotificationsForType(
-      NotificationHandler::Type::SHARING);
-  EXPECT_EQ(notifications.size(), 1u);
-
-  const message_center::Notification& notification = notifications[0];
-  EXPECT_EQ(message_center::NOTIFICATION_TYPE_IMAGE, notification.type());
 
   return notification;
 }

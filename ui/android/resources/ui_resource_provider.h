@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,10 @@
 #define UI_ANDROID_RESOURCES_UI_RESOURCE_PROVIDER_H_
 
 #include "cc/resources/ui_resource_client.h"
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkPixelRef.h"
 #include "ui/android/ui_android_export.h"
+#include "ui/gfx/geometry/size.h"
 
 namespace ui {
 

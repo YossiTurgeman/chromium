@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,13 @@
 #include <windows.media.protection.h>
 #include <wrl.h>
 
-#include "media/base/win/mf_cdm_proxy.h"
+#include "base/cancelable_callback.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/task/sequenced_task_runner.h"
+#include "media/base/media_export.h"
+#include "media/base/waiting.h"
+#include "media/base/win/media_foundation_cdm_proxy.h"
 
 namespace media {
 
@@ -21,7 +27,7 @@ namespace media {
 // required by IMFMediaEngineProtectedContent::SetContentProtectionManager in
 // https://docs.microsoft.com/en-us/windows/win32/api/mfmediaengine/nf-mfmediaengine-imfmediaengineprotectedcontent-setcontentprotectionmanager.
 //
-class MediaFoundationProtectionManager
+class MEDIA_EXPORT MediaFoundationProtectionManager
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<
               Microsoft::WRL::RuntimeClassType::WinRtClassicComMix |
@@ -32,8 +38,13 @@ class MediaFoundationProtectionManager
   MediaFoundationProtectionManager();
   ~MediaFoundationProtectionManager() override;
 
-  HRESULT RuntimeClassInitialize();
-  HRESULT SetCdmProxy(IMFCdmProxy* cdm_proxy);
+  HRESULT RuntimeClassInitialize(
+      scoped_refptr<base::SequencedTaskRunner> task_runner,
+      WaitingCB waiting_cb);
+  HRESULT SetCdmProxy(scoped_refptr<MediaFoundationCdmProxy> cdm_proxy);
+
+  // IUnknown.
+  IFACEMETHODIMP_(ULONG) Release() override;
 
   // IMFContentProtectionManager.
   IFACEMETHODIMP BeginEnableContent(IMFActivate* enabler_activate,
@@ -62,13 +73,26 @@ class MediaFoundationProtectionManager
   IFACEMETHODIMP get_Properties(
       ABI::Windows::Foundation::Collections::IPropertySet** value) override;
 
- protected:
-  Microsoft::WRL::ComPtr<ABI::Windows::Foundation::Collections::IPropertySet>
-      property_set_;
-  Microsoft::WRL::ComPtr<IMFCdmProxy> cdm_proxy_;
-
+ private:
   HRESULT SetPMPServer(
       ABI::Windows::Media::Protection::IMediaProtectionPMPServer* pmp_server);
+
+  // These methods are all running on `task_runner_` due to the threading
+  // requirement of `base::CancelableOnceClosure`.
+  void OnBeginEnableContent();
+  void OnEndEnableContent();
+  void OnWaitingForKeyTimeOut();
+
+  scoped_refptr<base::SequencedTaskRunner> task_runner_;
+  WaitingCB waiting_cb_;
+  base::CancelableOnceClosure waiting_for_key_time_out_cb_;
+
+  scoped_refptr<MediaFoundationCdmProxy> cdm_proxy_;
+  Microsoft::WRL::ComPtr<ABI::Windows::Foundation::Collections::IPropertySet>
+      property_set_;
+
+  // This must be the last member.
+  base::WeakPtrFactory<MediaFoundationProtectionManager> weak_factory_{this};
 };
 
 }  // namespace media

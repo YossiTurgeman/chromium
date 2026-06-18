@@ -33,10 +33,15 @@
 
 #include <vector>
 
+#include "third_party/blink/public/platform/web_common.h"
 #include "third_party/blink/public/web/web_node.h"
-#include "third_party/skia/include/core/SkBitmap.h"
+#include "ui/gfx/geometry/vector2d_f.h"
+#include "v8/include/v8-forward.h"
+
+class SkBitmap;
 
 namespace gfx {
+class Rect;
 class Size;
 }
 
@@ -44,13 +49,19 @@ namespace blink {
 
 class Element;
 class Image;
-struct WebRect;
+class LayoutBox;
+class WebLabelElement;
 
 // Provides access to some properties of a DOM element node.
 class BLINK_EXPORT WebElement : public WebNode {
  public:
-  WebElement() : WebNode() {}
+  explicit WebElement(
+      cppgc::SourceLocation loc = BLINK_WEB_NODE_LOCATION_FROM_HERE)
+      : WebNode(loc) {}
   WebElement(const WebElement& e) = default;
+
+  // Returns the empty WebElement if the argument doesn't represent an Element.
+  static WebElement FromV8Value(v8::Isolate*, v8::Local<v8::Value>);
 
   WebElement& operator=(const WebElement& e) {
     WebNode::Assign(e);
@@ -64,6 +75,8 @@ class BLINK_EXPORT WebElement : public WebNode {
   bool IsEditable() const;
   // Returns the qualified name, which may contain a prefix and a colon.
   WebString TagName() const;
+  // Returns the id attribute.
+  WebString GetIdAttribute() const;
   // Check if this element has the specified local tag name, and the HTML
   // namespace. Tag name matching is case-insensitive.
   bool HasHTMLTagName(const WebString&) const;
@@ -71,24 +84,80 @@ class BLINK_EXPORT WebElement : public WebNode {
   WebString GetAttribute(const WebString&) const;
   void SetAttribute(const WebString& name, const WebString& value);
   WebString TextContent() const;
+  WebString TextContentAbridged(unsigned int max_length) const;
   WebString InnerHTML() const;
-  WebString AttributeLocalName(unsigned index) const;
-  WebString AttributeValue(unsigned index) const;
-  unsigned AttributeCount() const;
 
-  // Returns true if this is an autonomous custom element, regardless of
-  // Custom Elements V0 or V1.
+  void Focus();
+
+  void Blur();
+
+  // Returns true if the element's computed writing suggestions value is true.
+  // https://html.spec.whatwg.org/#writing-suggestions:computed-writing-suggestions-value
+  bool WritingSuggestions() const;
+
+  // Returns true if the frame's selection is inside this editable element.
+  bool ContainsFrameSelection() const;
+
+  // Returns the selected text if this element contains the selection.
+  // Otherwise returns the empty string.
+  WebString SelectedText() const;
+
+  // Selects the text in this element.
+  // If `select_all`, then the entire contents of the element is selected.
+  // If `!select_all`, then selects only the empty range at the end of the
+  // element
+  void SelectText(bool select_all);
+
+  // Simulates a click on `this` element.
+  void Click();
+
+  // Simulates a paste of `text` event into `this` element.
+  //
+  // There are three different behaviors depending on `replace_all` and which
+  // text is currently selected:
+  // - If `replace_all`, the entire contents of the element is selected first,
+  //   so that the paste action replaces it.
+  // - If `!replace_all` and the selection is not currently in the element, an
+  //   empty range at the end of the element is selected, so that the paste
+  //   action appends to the element.
+  // - Otherwise, the current selection is unchanged, so that the paste replaces
+  //   the selected text.
+  //
+  // This is a no-op if the element is not editable.
+  void PasteText(const WebString& text, bool replace_all);
+
+  // Returns all <label> elements associated to this element.
+  std::vector<WebLabelElement> Labels() const;
+
+  // Returns true if this is an autonomous custom element.
   bool IsAutonomousCustomElement() const;
 
+  // Returns the owning shadow host for this element, if there is one.
+  WebElement OwnerShadowHost() const;
+
   // Returns an author ShadowRoot attached to this element, regardless
-  // of V0, V1 open, or V1 closed.  This returns null WebNode if this
+  // of open or closed.  This returns null WebNode if this
   // element has no ShadowRoot or has a UA ShadowRoot.
   WebNode ShadowRoot() const;
 
-  // Returns the bounds of the element in Visual Viewport. The bounds
-  // have been adjusted to include any transformations, including page scale.
-  // This function will update the layout if required.
-  WebRect BoundsInViewport() const;
+  // Returns the open shadow root or the closed shadow root.
+  WebNode OpenOrClosedShadowRoot();
+
+  // Returns the bounds of the element relative to the RenderWidget (local root
+  // frame + viewport transform in the main frame). The bounds have been
+  // adjusted to include any transformations, including page scale. This
+  // function will update the layout if required.
+  gfx::Rect BoundsInWidget() const;
+
+  // Same as above but this method will clip the bounds based on any of the
+  // element's ancestor overflow or frame boxes.
+  gfx::Rect VisibleBoundsInWidget() const;
+
+  // Returns the client rects of this Element relative to the RenderWidget
+  // (local root frame + viewport transform in the main frame). The bounds have
+  // been adjusted to include any transformations, including page scale. This
+  // function will update the layout if required.
+  std::vector<gfx::Rect> ClientRectsInWidget();
 
   // Returns the image contents of this element or a null SkBitmap
   // if there isn't any.
@@ -98,13 +167,45 @@ class BLINK_EXPORT WebElement : public WebNode {
   // if there isn't any.
   std::vector<uint8_t> CopyOfImageData();
 
-  // Returns the original image file extension.
-  std::string ImageExtension();
+  // Returns the original image mime type.
+  WebString ImageMimeType();
 
   // Returns the original image size.
   gfx::Size GetImageSize();
 
-  void RequestFullscreen();
+  // Returns {clientWidth, clientHeight}.
+  gfx::Size GetClientSize() const;
+
+  // Returns {scrollWidth, scrollHeight}.
+  gfx::Size GetScrollSize() const;
+
+  // Returns {scrollLeft, scrollTop}.
+  gfx::Vector2dF GetScrollOffset() const;
+
+  // Sets {scrollLeft, scrollTop} and forces instant scroll, returns true if the
+  // scroll was completed (or will be completed via a smooth scroll animation),
+  // false if the element cannot scroll (e.g. it's not rendered, no scroll
+  // extent).
+  bool SetScrollOffset(const gfx::Vector2dF& offset);
+
+  // Scrolls the element into view if it isn't already visible.
+  void ScrollIntoViewIfNeeded();
+
+  // Returns true if this element has scroll-behavior: smooth style, meaning
+  // that programmatic scrolls will animate rather than instantly jumping to the
+  // specified scroll offset.
+  bool HasScrollBehaviorSmooth() const;
+
+  // Returns whether the element has scrollable overflow and can be scrolled by
+  // the user (i.e. true for `overflow: scroll|auto` with overflow but false for
+  // `overflow: hidden`).
+  bool IsUserScrollableX() const;
+  bool IsUserScrollableY() const;
+
+  // Returns the effective zoom factor for this element. This includes the zoom
+  // factor coming from device scale factor and browser zoom but also the
+  // cumulative effects of the CSS zoom property in ancestor elements.
+  float GetEffectiveZoom() const;
 
   // ComputedStyle property values. The following exposure is of CSS property
   // values are part of the ComputedStyle set which is usually exposed through
@@ -122,6 +223,7 @@ class BLINK_EXPORT WebElement : public WebNode {
 #endif
 
  private:
+  LayoutBox* GetScrollingBox() const;
   Image* GetImage();
 };
 
@@ -129,4 +231,4 @@ DECLARE_WEB_NODE_TYPE_CASTS(WebElement);
 
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_ELEMENT_H_

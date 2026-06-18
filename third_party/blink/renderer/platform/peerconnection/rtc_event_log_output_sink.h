@@ -1,4 +1,4 @@
-// Copyright (c) 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@ class PLATFORM_EXPORT RtcEventLogOutputSink : public GarbageCollectedMixin {
  public:
   virtual ~RtcEventLogOutputSink() = default;
 
-  virtual void OnWebRtcEventLogWrite(const WTF::Vector<uint8_t>& output) = 0;
+  virtual void OnWebRtcEventLogWrite(const Vector<uint8_t>& output) = 0;
 };
 
 }  // namespace blink

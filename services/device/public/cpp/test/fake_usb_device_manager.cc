@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "base/stl_util.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "build/build_config.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "services/device/public/cpp/test/fake_usb_device.h"
 #include "services/device/public/cpp/test/mock_usb_mojo_device.h"
@@ -21,7 +20,9 @@ namespace device {
 
 FakeUsbDeviceManager::FakeUsbDeviceManager() {}
 
-FakeUsbDeviceManager::~FakeUsbDeviceManager() {}
+FakeUsbDeviceManager::~FakeUsbDeviceManager() {
+  RemoveAllDevices();
+}
 
 void FakeUsbDeviceManager::EnumerateDevicesAndSetClient(
     mojo::PendingAssociatedRemote<mojom::UsbDeviceManagerClient> client,
@@ -50,17 +51,26 @@ void FakeUsbDeviceManager::GetDevices(mojom::UsbEnumerationOptionsPtr options,
 
 void FakeUsbDeviceManager::GetDevice(
     const std::string& guid,
+    const std::vector<uint8_t>& blocked_interface_classes,
     mojo::PendingReceiver<device::mojom::UsbDevice> device_receiver,
     mojo::PendingRemote<mojom::UsbDeviceClient> device_client) {
   auto it = devices_.find(guid);
   if (it == devices_.end())
     return;
 
-  FakeUsbDevice::Create(it->second, std::move(device_receiver),
-                        std::move(device_client));
+  FakeUsbDevice::Create(it->second, blocked_interface_classes,
+                        std::move(device_receiver), std::move(device_client));
 }
 
-#if defined(OS_ANDROID)
+void FakeUsbDeviceManager::GetSecurityKeyDevice(
+    const std::string& guid,
+    mojo::PendingReceiver<device::mojom::UsbDevice> device_receiver,
+    mojo::PendingRemote<mojom::UsbDeviceClient> device_client) {
+  return GetDevice(guid, /*blocked_interface_classes=*/{},
+                   std::move(device_receiver), std::move(device_client));
+}
+
+#if BUILDFLAG(IS_ANDROID)
 void FakeUsbDeviceManager::RefreshDeviceInfo(
     const std::string& guid,
     RefreshDeviceInfoCallback callback) {
@@ -74,7 +84,7 @@ void FakeUsbDeviceManager::RefreshDeviceInfo(
 }
 #endif
 
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 void FakeUsbDeviceManager::CheckAccess(const std::string& guid,
                                        CheckAccessCallback callback) {
   std::move(callback).Run(true);
@@ -83,17 +93,25 @@ void FakeUsbDeviceManager::CheckAccess(const std::string& guid,
 void FakeUsbDeviceManager::OpenFileDescriptor(
     const std::string& guid,
     uint32_t drop_privileges_mask,
+    mojo::PlatformHandle lifeline_fd,
     OpenFileDescriptorCallback callback) {
   std::move(callback).Run(base::File(
       base::FilePath(FILE_PATH_LITERAL("/dev/null")),
       base::File::FLAG_OPEN | base::File::FLAG_READ | base::File::FLAG_WRITE));
 }
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+void FakeUsbDeviceManager::SetOnClientSetClosure(base::OnceClosure closure) {
+  on_client_set_ = std::move(closure);
+}
 
 void FakeUsbDeviceManager::SetClient(
     mojo::PendingAssociatedRemote<mojom::UsbDeviceManagerClient> client) {
   DCHECK(client);
   clients_.Add(std::move(client));
+  if (on_client_set_) {
+    std::move(on_client_set_).Run();
+  }
 }
 
 void FakeUsbDeviceManager::AddReceiver(
@@ -104,7 +122,7 @@ void FakeUsbDeviceManager::AddReceiver(
 mojom::UsbDeviceInfoPtr FakeUsbDeviceManager::AddDevice(
     scoped_refptr<FakeUsbDeviceInfo> device) {
   DCHECK(device);
-  DCHECK(!base::Contains(devices_, device->guid()));
+  DCHECK(!devices_.contains(device->guid()));
   devices_[device->guid()] = device;
   auto device_info = device->GetDeviceInfo().Clone();
 
@@ -117,7 +135,7 @@ mojom::UsbDeviceInfoPtr FakeUsbDeviceManager::AddDevice(
 void FakeUsbDeviceManager::RemoveDevice(
     scoped_refptr<FakeUsbDeviceInfo> device) {
   DCHECK(device);
-  DCHECK(base::Contains(devices_, device->guid()));
+  DCHECK(devices_.contains(device->guid()));
 
   auto device_info = device->GetDeviceInfo().Clone();
   devices_.erase(device->guid());
@@ -130,7 +148,7 @@ void FakeUsbDeviceManager::RemoveDevice(
 }
 
 void FakeUsbDeviceManager::RemoveDevice(const std::string& guid) {
-  DCHECK(base::Contains(devices_, guid));
+  DCHECK(devices_.contains(guid));
 
   RemoveDevice(devices_[guid]);
 }
@@ -145,9 +163,17 @@ void FakeUsbDeviceManager::RemoveAllDevices() {
   }
 }
 
+const device::mojom::UsbDeviceInfo* FakeUsbDeviceManager::GetDeviceInfo(
+    const std::string& guid) {
+  if (!devices_.contains(guid))
+    return nullptr;
+
+  return &devices_[guid]->GetDeviceInfo();
+}
+
 bool FakeUsbDeviceManager::SetMockForDevice(const std::string& guid,
                                             MockUsbMojoDevice* mock_device) {
-  if (!base::Contains(devices_, guid))
+  if (!devices_.contains(guid))
     return false;
 
   devices_[guid]->SetMockDevice(mock_device);

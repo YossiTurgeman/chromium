@@ -1,67 +1,45 @@
-# Copyright (c) 2013 The Chromium Authors. All rights reserved.
+# Copyright 2013 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//build/config/features.gni")
 import("//testing/libfuzzer/fuzzer_test.gni")
 
-assert(!is_ios)
+assert(use_blink)
 
 if (is_android) {
-  import("//build/config/android/rules.gni")  # For generate_jni().
+  import("//build/config/android/rules.gni")
+  import("//third_party/jni_zero/jni_zero.gni")
 }
 
 static_library("usb") {
   # Only targets under //services/device folder can depend on it.
   visibility = [
     ":*",
-    "//services/device/usb/mojo:*",
     "//services/device:*",
+    "//services/device/usb/mojo:*",
   ]
 
   sources = [
-    "usb_configuration_android.cc",
-    "usb_configuration_android.h",
     "usb_descriptors.cc",
     "usb_descriptors.h",
     "usb_device.cc",
     "usb_device.h",
-    "usb_device_android.cc",
-    "usb_device_android.h",
     "usb_device_handle.cc",
     "usb_device_handle.h",
-    "usb_device_handle_android.cc",
-    "usb_device_handle_android.h",
-    "usb_device_handle_mac.cc",
-    "usb_device_handle_mac.h",
-    "usb_device_handle_win.cc",
-    "usb_device_handle_win.h",
-    "usb_device_linux.cc",
-    "usb_device_linux.h",
-    "usb_device_mac.cc",
-    "usb_device_mac.h",
-    "usb_device_win.cc",
-    "usb_device_win.h",
-    "usb_endpoint_android.cc",
-    "usb_endpoint_android.h",
-    "usb_interface_android.cc",
-    "usb_interface_android.h",
     "usb_service.cc",
     "usb_service.h",
-    "usb_service_android.cc",
-    "usb_service_android.h",
-    "usb_service_mac.cc",
-    "usb_service_mac.h",
-    "usb_service_win.cc",
-    "usb_service_win.h",
     "webusb_descriptors.cc",
     "webusb_descriptors.h",
   ]
 
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
   deps = [
-    "//base/third_party/dynamic_annotations",
     "//components/device_event_log",
     "//device/base",
+    "//services/device:utility",
+    "//services/device/public/cpp:device_features",
     "//services/device/public/cpp/usb",
     "//services/device/public/mojom:usb",
   ]
@@ -71,19 +49,50 @@ static_library("usb") {
     "//url",
   ]
 
-  if (use_udev) {
-    sources += [
-      "usb_service_linux.cc",
-      "usb_service_linux.h",
-    ]
-    deps += [ "//device/udev_linux" ]
-  }
-
   if (is_android) {
+    sources += [
+      "usb_configuration_android.cc",
+      "usb_configuration_android.h",
+      "usb_device_android.cc",
+      "usb_device_android.h",
+      "usb_device_handle_android.cc",
+      "usb_device_handle_android.h",
+      "usb_endpoint_android.cc",
+      "usb_endpoint_android.h",
+      "usb_interface_android.cc",
+      "usb_interface_android.h",
+      "usb_service_android.cc",
+      "usb_service_android.h",
+    ]
+
     deps += [ ":jni_headers" ]
   }
 
-  if (is_win || is_mac) {
+  if (is_win) {
+    sources += [
+      "scoped_winusb_handle.cc",
+      "scoped_winusb_handle.h",
+      "usb_device_handle_win.cc",
+      "usb_device_handle_win.h",
+      "usb_device_win.cc",
+      "usb_device_win.h",
+      "usb_service_win.cc",
+      "usb_service_win.h",
+    ]
+
+    libs = [
+      "advapi32.lib",
+      "ole32.lib",
+      "setupapi.lib",
+      "winusb.lib",
+    ]
+
+    deps += [ "//third_party/re2" ]
+  }
+
+  if (is_mac) {
+    # These sources and deps are required for libusb.
+    # TODO(crbug.com/40136337) Remove these sources.
     sources += [
       "scoped_libusb_device_handle.cc",
       "scoped_libusb_device_handle.h",
@@ -104,24 +113,34 @@ static_library("usb") {
     deps += [ "//third_party/libusb" ]
   }
 
-  if (is_win) {
+  if (is_linux || is_chromeos) {
     sources += [
-      "scoped_winusb_handle.cc",
-      "scoped_winusb_handle.h",
+      "usb_device_linux.cc",
+      "usb_device_linux.h",
     ]
+  }
 
-    libs = [
-      "setupapi.lib",
-      "winusb.lib",
-    ]
-
-    deps += [ "//third_party/re2" ]
+  if (use_udev) {
+    if (is_linux || is_chromeos) {
+      sources += [
+        "usb_service_linux.cc",
+        "usb_service_linux.h",
+      ]
+    }
+    deps += [ "//device/udev_linux" ]
   }
 
   if (is_android || is_chromeos || is_linux) {
     sources += [
       "usb_device_handle_usbfs.cc",
       "usb_device_handle_usbfs.h",
+    ]
+  }
+
+  if (is_android || is_linux) {
+    sources += [
+      "usb_interface_detach_allowlist.cc",
+      "usb_interface_detach_allowlist.h",
     ]
   }
 
@@ -206,11 +225,13 @@ if (is_android) {
   }
 
   android_library("java") {
+    srcjar_deps = [ ":jni_headers" ]
     sources = java_sources_needing_jni
     deps = [
       "//base:base_java",
-      "//base:jni_java",
+      "//build/android:build_java",
+      "//third_party/androidx:androidx_annotation_annotation_java",
+      "//third_party/jni_zero:jni_zero_java",
     ]
-    annotation_processor_deps = [ "//base/android/jni_generator:jni_processor" ]
   }
 }

@@ -1,7 +1,7 @@
 Tests that the panel includes Certificate Transparency compliance status
 
 Panel on origin view:
-<DIV class=widget vbox security-origin-view slot=insertion-point-main >
+<DIV jslog=Pane; context: security.origin-view class=widget vbox security-origin-view slot=main >
     <STYLE >
     </STYLE>
     <STYLE >
@@ -11,9 +11,17 @@ Panel on origin view:
 Origin
         </DIV>
         <DIV class=origin-display >
-            <SPAN class=security-property security-property-secure >
-            </SPAN>
             <SPAN >
+                <DEVTOOLS-ICON role=presentation name=lock class=security-property security-property-secure >
+                    <#document-fragment >
+                        <STYLE >
+                        </STYLE>
+                        <SPAN style=--icon-url: var(--image-file-lock); >
+                        </SPAN>
+                    </#document-fragment>
+                </DEVTOOLS-ICON>
+            </SPAN>
+            <SPAN class=highlighted-url >
                 <SPAN class=url-scheme-secure >
 https
                 </SPAN>
@@ -26,9 +34,29 @@ foo.test
             </SPAN>
         </DIV>
         <DIV class=view-network-button >
-            <SPAN class=devtools-link origin-button tabindex=0 role=link >
+            <DEVTOOLS-BUTTON role=link jslog=Action; track: click; context: reveal-in-network >
 View requests in Network Panel
-            </SPAN>
+                <#document-fragment >
+                    <#comment >
+                    </#comment>
+                    <STYLE >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                    </STYLE>
+                    <BUTTON class=outlined >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <SLOT >
+                        </SLOT>
+                    </BUTTON>
+                </#document-fragment>
+            </DEVTOOLS-BUTTON>
         </DIV>
     </DIV>
     <DIV class=origin-view-section >
@@ -36,30 +64,30 @@ View requests in Network Panel
 Connection
         </DIV>
         <TABLE class=details-table >
-            <DIV class=details-table-row >
-                <DIV >
+            <TR class=details-table-row >
+                <TD >
 Protocol
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 TLS 1.2
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Key exchange
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Key_Exchange
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Cipher
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Cypher with Mac
-                </DIV>
-            </DIV>
+                </TD>
+            </TR>
         </TABLE>
     </DIV>
     <DIV class=origin-view-section >
@@ -67,19 +95,19 @@ Cypher with Mac
 Certificate
         </DIV>
         <TABLE class=details-table >
-            <DIV class=details-table-row >
-                <DIV >
+            <TR class=details-table-row >
+                <TD >
 Subject
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 foo.test
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 SAN
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
                     <DIV >
                         <SPAN class=san-entry >
 foo.test
@@ -88,41 +116,61 @@ foo.test
 *.test
                         </SPAN>
                     </DIV>
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Valid from
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Mon, 20 Mar 2017 08:53:20 GMT
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Valid until
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Wed, 18 May 2033 03:33:20 GMT
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Issuer
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Super CA
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
-                </DIV>
-                <DIV >
-                    <BUTTON class=origin-button text-button type=button role=button >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+                </TD>
+                <TD >
+                    <DEVTOOLS-BUTTON role=button class=origin-button jslog=Action; track: click; context: security.view-certificate-for-origin title=Open full certificate details >
 Open full certificate details
-                    </BUTTON>
-                </DIV>
-            </DIV>
+                        <#document-fragment >
+                            <#comment >
+                            </#comment>
+                            <STYLE >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                            </STYLE>
+                            <BUTTON class=outlined title=Open full certificate details aria-label=Open full certificate details >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <SLOT >
+                                </SLOT>
+                            </BUTTON>
+                        </#document-fragment>
+                    </DEVTOOLS-BUTTON>
+                </TD>
+            </TR>
         </TABLE>
     </DIV>
     <DIV class=origin-view-section >

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,6 @@
 #include "base/component_export.h"
 #include "base/files/platform_file.h"
 #include "base/files/scoped_file.h"
-#include "base/macros.h"
 
 struct iovec;  // Declared in <sys/uio.h>
 
@@ -34,12 +33,6 @@ COMPONENT_EXPORT(MOJO_CPP_PLATFORM)
 ssize_t SocketWrite(base::PlatformFile socket,
                     const void* bytes,
                     size_t num_bytes);
-
-// Like |writev()| but handles |EINTR| and never raises |SIGPIPE|.
-COMPONENT_EXPORT(MOJO_CPP_PLATFORM)
-ssize_t SocketWritev(base::PlatformFile socket,
-                     struct iovec* iov,
-                     size_t num_iov);
 
 // Wrapper around |sendmsg()| which makes it convenient to send attached file
 // descriptors. All entries in |descriptors| must be valid and |descriptors|

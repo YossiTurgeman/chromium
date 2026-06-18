@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,8 +19,12 @@ enum ProxyMode {
   // Direct connection to the network, other proxy preferences are ignored.
   MODE_DIRECT = 0,
 
-  // Try to retrieve a PAC script from http://wpad/wpad.dat or fall back to
-  // direct connection.
+  // Try to auto-detect the PAC script location.
+  // On Windows and Chrome OS, DHCP is tried first (DHCP Option 252), and DNS
+  // (resolving http://wpad/wpad.dat) is tried second.
+  // On other platforms, only DNS is tried.
+  // If no PAC script can be found by this method, fall back to direct
+  // connection.
   MODE_AUTO_DETECT = 1,
 
   // Try to retrieve a PAC script from kProxyPacURL or fall back to direct
@@ -39,7 +43,7 @@ enum ProxyMode {
 
 // State of proxy configuration.
 enum ConfigState {
-  // Configuration is from policy.
+  // Configuration is from the ProxySettings policy.
   CONFIG_POLICY,
   // Configuration is from extension.
   CONFIG_EXTENSION,
@@ -51,6 +55,14 @@ enum ConfigState {
   CONFIG_FALLBACK,
   // Configuration is known to be not set.
   CONFIG_UNSET,
+  // Configuration includes rules from the ProxyOverrideRules preference.
+  // This can be set by policy, or an extension when it's not set by a policy.
+  // These rules are evaluated first for any network request. If no
+  // override rule applies to a specific URL, the proxy resolution will
+  // fall back to the underlying configuration source (e.g., CONFIG_SYSTEM,
+  // CONFIG_POLICY). This state indicates that the override layer is active.
+  CONFIG_POLICY_OVERRIDE,
+  CONFIG_EXTENSION_OVERRIDE,
 };
 
 // Constants for string values used to specify the proxy mode through externally

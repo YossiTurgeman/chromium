@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,8 @@ DriveServiceWrapper::DriveServiceWrapper(
     : drive_service_(drive_service) {
   DCHECK(drive_service_);
 }
+
+DriveServiceWrapper::~DriveServiceWrapper() = default;
 
 void DriveServiceWrapper::AddNewDirectory(
     const std::string& parent_resource_id,
@@ -39,15 +41,13 @@ void DriveServiceWrapper::DeleteResource(
 void DriveServiceWrapper::DownloadFile(
     const base::FilePath& local_cache_path,
     const std::string& resource_id,
-    const google_apis::DownloadActionCallback& download_action_callback,
+    google_apis::DownloadActionCallback download_action_callback,
     const google_apis::GetContentCallback& get_content_callback,
     google_apis::ProgressCallback progress_callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  drive_service_->DownloadFile(local_cache_path,
-                               resource_id,
-                               download_action_callback,
-                               get_content_callback,
-                               progress_callback);
+  drive_service_->DownloadFile(local_cache_path, resource_id,
+                               std::move(download_action_callback),
+                               get_content_callback, progress_callback);
 }
 
 void DriveServiceWrapper::GetAboutResource(
@@ -95,9 +95,9 @@ void DriveServiceWrapper::GetRemainingTeamDriveList(
 
 void DriveServiceWrapper::GetRemainingFileList(
     const GURL& next_link,
-    const google_apis::FileListCallback& callback) {
+    google_apis::FileListCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  drive_service_->GetRemainingFileList(next_link, callback);
+  drive_service_->GetRemainingFileList(next_link, std::move(callback));
 }
 
 void DriveServiceWrapper::GetFileResource(
@@ -109,9 +109,10 @@ void DriveServiceWrapper::GetFileResource(
 
 void DriveServiceWrapper::GetFileListInDirectory(
     const std::string& directory_resource_id,
-    const google_apis::FileListCallback& callback) {
+    google_apis::FileListCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  drive_service_->GetFileListInDirectory(directory_resource_id, callback);
+  drive_service_->GetFileListInDirectory(directory_resource_id,
+                                         std::move(callback));
 }
 
 void DriveServiceWrapper::RemoveResourceFromDirectory(
@@ -126,10 +127,10 @@ void DriveServiceWrapper::RemoveResourceFromDirectory(
 void DriveServiceWrapper::SearchByTitle(
     const std::string& title,
     const std::string& directory_resource_id,
-    const google_apis::FileListCallback& callback) {
+    google_apis::FileListCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  drive_service_->SearchByTitle(
-      title, directory_resource_id, callback);
+  drive_service_->SearchByTitle(title, directory_resource_id,
+                                std::move(callback));
 }
 
 }  // namespace drive_backend

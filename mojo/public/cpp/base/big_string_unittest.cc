@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,14 +17,14 @@ namespace big_string_unittest {
 TEST(BigStringTest, Empty) {
   std::string in;
   std::string out;
-  ASSERT_TRUE(mojo::test::SerializeAndDeserialize<mojom::BigString>(&in, &out));
+  ASSERT_TRUE(mojo::test::SerializeAndDeserialize<mojom::BigString>(in, out));
   EXPECT_EQ(in, out);
 }
 
 TEST(BigStringTest, Short) {
   std::string in("hello world");
   std::string out;
-  ASSERT_TRUE(mojo::test::SerializeAndDeserialize<mojom::BigString>(&in, &out));
+  ASSERT_TRUE(mojo::test::SerializeAndDeserialize<mojom::BigString>(in, out));
   EXPECT_EQ(in, out);
 }
 
@@ -32,10 +32,10 @@ TEST(BigStringTest, Long) {
   constexpr size_t kLargeStringSize = 1024 * 1024;
 
   std::string in(kLargeStringSize, 0);
-  base::RandBytes(&in[0], kLargeStringSize);
+  base::RandBytes(base::as_writable_byte_span(in));
 
   std::string out;
-  ASSERT_TRUE(mojo::test::SerializeAndDeserialize<mojom::BigString>(&in, &out));
+  ASSERT_TRUE(mojo::test::SerializeAndDeserialize<mojom::BigString>(in, out));
   EXPECT_EQ(in, out);
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,16 @@
 
 #include <stddef.h>
 
-#include <memory>
 #include <utility>
 #include <vector>
 
 #include "base/base64.h"
-#include "base/bind.h"
-#include "base/bind_helpers.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/single_thread_task_runner.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/string_util.h"
-#include "base/task/post_task.h"
-#include "base/task_runner_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/values.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -25,11 +23,15 @@
 #include "extensions/browser/api/declarative/rules_registry_service.h"
 #include "extensions/browser/api/extensions_api_client.h"
 #include "extensions/browser/extension_system.h"
-#include "extensions/browser/guest_view/web_view/web_view_constants.h"
-#include "extensions/browser/guest_view/web_view/web_view_guest.h"
+#include "extensions/browser/rules_registry_ids.h"
 #include "extensions/common/api/events.h"
 #include "extensions/common/extension_api.h"
 #include "extensions/common/permissions/permissions_data.h"
+
+#if BUILDFLAG(ENABLE_GUEST_VIEW)
+#include "extensions/browser/guest_view/web_view/web_view_constants.h"
+#include "extensions/browser/guest_view/web_view/web_view_guest.h"
+#endif
 
 using extensions::api::events::Rule;
 
@@ -41,7 +43,10 @@ namespace extensions {
 
 namespace {
 
+#if BUILDFLAG(ENABLE_GUEST_VIEW)
 constexpr char kDeclarativeEventPrefix[] = "declarative";
+#endif
+
 constexpr char kDeclarativeContentEventPrefix[] = "declarativeContent.";
 constexpr char kDeclarativeWebRequestEventPrefix[] = "declarativeWebRequest.";
 constexpr char kDeclarativeWebRequestWebViewEventPrefix[] =
@@ -59,7 +64,7 @@ enum class DeclarativeAPIType {
 // Describes the possible types of declarative API function calls.
 // These values are recorded as UMA. New enum values can be added, but existing
 // enum values must never be renumbered or deleted and reused.
-enum DeclarativeAPIFunctionType {
+enum class DeclarativeAPIFunctionType {
   kDeclarativeContentAddRules = 0,
   kDeclarativeContentRemoveRules = 1,
   kDeclarativeContentGetRules = 2,
@@ -69,7 +74,8 @@ enum DeclarativeAPIFunctionType {
   kDeclarativeWebRequestWebviewAddRules = 6,
   kDeclarativeWebRequestWebviewRemoveRules = 7,
   kDeclarativeWebRequestWebviewGetRules = 8,
-  kDeclarativeApiFunctionCallTypeMax,
+
+  kMaxValue = kDeclarativeWebRequestWebviewGetRules,
 };
 
 DeclarativeAPIType GetDeclarativeAPIType(const std::string& event_name) {
@@ -86,82 +92,81 @@ DeclarativeAPIType GetDeclarativeAPIType(const std::string& event_name) {
 }
 
 void RecordUMAHelper(DeclarativeAPIFunctionType type) {
-  DCHECK_LT(type, kDeclarativeApiFunctionCallTypeMax);
-  UMA_HISTOGRAM_ENUMERATION("Extensions.DeclarativeAPIFunctionCalls", type,
-                            kDeclarativeApiFunctionCallTypeMax);
+  DCHECK_LE(type, DeclarativeAPIFunctionType::kMaxValue);
+  base::UmaHistogramEnumeration("Extensions.DeclarativeAPIFunctionCalls", type);
 }
 
-void ConvertBinaryDictionaryValuesToBase64(base::Value* dict);
+void ConvertBinaryDictValuesToBase64(base::DictValue& dict);
 
-// Encodes |binary| as base64 and returns a new StringValue populated with the
+// Encodes |binary| as base64 and returns a new string value populated with the
 // encoded string.
 base::Value ConvertBinaryToBase64(const base::Value& binary) {
-  std::string binary_data(binary.GetBlob().begin(), binary.GetBlob().end());
-  std::string data64;
-  base::Base64Encode(binary_data, &data64);
-  return base::Value(std::move(data64));
+  return base::Value(base::Base64Encode(binary.GetBlob()));
 }
 
-// Parses through |args| replacing any BinaryValues with base64 encoded
-// StringValues. Recurses over any nested ListValues, and calls
-// ConvertBinaryDictionaryValuesToBase64 for any nested DictionaryValues.
-void ConvertBinaryListElementsToBase64(base::Value* args) {
-  for (auto& value : args->GetList()) {
+// Parses through |args| replacing any binary values with base64 encoded
+// string values. Recurses over any nested List values, and calls
+// ConvertBinaryDictValuesToBase64 for any nested Dict values.
+void ConvertBinaryListElementsToBase64(base::ListValue& args) {
+  for (auto& value : args) {
     if (value.is_blob()) {
       value = ConvertBinaryToBase64(value);
-    } else if (value.is_list()) {
-      ConvertBinaryListElementsToBase64(&value);
+    } else if (value.is_list() && !value.GetList().empty()) {
+      ConvertBinaryListElementsToBase64(value.GetList());
     } else if (value.is_dict()) {
-      ConvertBinaryDictionaryValuesToBase64(&value);
+      ConvertBinaryDictValuesToBase64(value.GetDict());
     }
   }
 }
 
 // Parses through |dict| replacing any BinaryValues with base64 encoded
-// StringValues. Recurses over any nested DictionaryValues, and calls
-// ConvertBinaryListElementsToBase64 for any nested ListValues.
-void ConvertBinaryDictionaryValuesToBase64(base::Value* dict) {
-  for (auto it : dict->DictItems()) {
+// string values. Recurses over any nested Dict values, and calls
+// ConvertBinaryListElementsToBase64 for any nested List values.
+void ConvertBinaryDictValuesToBase64(base::DictValue& dict) {
+  for (auto it : dict) {
     auto& value = it.second;
     if (value.is_blob()) {
       value = ConvertBinaryToBase64(value);
-    } else if (value.is_list()) {
-      ConvertBinaryListElementsToBase64(&value);
+    } else if (value.is_list() && !value.GetList().empty()) {
+      ConvertBinaryListElementsToBase64(value.GetList());
     } else if (value.is_dict()) {
-      ConvertBinaryDictionaryValuesToBase64(&value);
+      ConvertBinaryDictValuesToBase64(value.GetDict());
     }
   }
 }
 
 }  // namespace
 
-RulesFunction::RulesFunction() {}
+RulesFunction::RulesFunction() = default;
 
-RulesFunction::~RulesFunction() {}
+RulesFunction::~RulesFunction() = default;
 
 ExtensionFunction::ResponseAction RulesFunction::Run() {
   EXTENSION_FUNCTION_VALIDATE(CreateParams());
-
-  std::string event_name;
-  EXTENSION_FUNCTION_VALIDATE(args_->GetString(0, &event_name));
-
-  int web_view_instance_id = 0;
-  EXTENSION_FUNCTION_VALIDATE(args_->GetInteger(1, &web_view_instance_id));
+  EXTENSION_FUNCTION_VALIDATE(args().size() >= 2);
+  const auto& event_name_value = args()[0];
+  const auto& web_view_instance_id_value = args()[1];
+  EXTENSION_FUNCTION_VALIDATE(event_name_value.is_string());
+  EXTENSION_FUNCTION_VALIDATE(web_view_instance_id_value.is_int());
+  std::string event_name = event_name_value.GetString();
+  int web_view_instance_id = web_view_instance_id_value.GetInt();
 
   EXTENSION_FUNCTION_VALIDATE(extension_);
 
   // <webview> embedders use the declarativeWebRequest API via
   // <webview>.onRequest.
   if (web_view_instance_id && !extension_->permissions_data()->HasAPIPermission(
-                                  APIPermission::kWebView)) {
+                                  mojom::APIPermissionID::kWebView)) {
     return RespondNow(Error("Missing webview permission"));
   }
 
   RecordUMA(event_name);
 
-  bool from_web_view = web_view_instance_id != 0;
   // If we are not operating on a particular <webview>, then the key is 0.
-  int rules_registry_id = RulesRegistryService::kDefaultRulesRegistryID;
+  int rules_registry_id = rules_registry_ids::kDefaultRulesRegistryID;
+
+#if BUILDFLAG(ENABLE_GUEST_VIEW)
+  bool from_web_view = web_view_instance_id != 0;
   if (from_web_view) {
     // Sample event names:
     // webViewInternal.declarativeWebRequest.onRequest.
@@ -174,6 +179,7 @@ ExtensionFunction::ResponseAction RulesFunction::Run() {
     rules_registry_id = WebViewGuest::GetOrGenerateRulesRegistryID(
         source_process_id(), web_view_instance_id);
   }
+#endif
 
   // The following call will return a NULL pointer for apps_shell, but should
   // never be called there anyways.
@@ -184,16 +190,7 @@ ExtensionFunction::ResponseAction RulesFunction::Run() {
   // there should never be a request for a nonexisting rules registry.
   EXTENSION_FUNCTION_VALIDATE(rules_registry_.get());
 
-  if (content::BrowserThread::CurrentlyOn(rules_registry_->owner_thread()))
-    return RespondNow(RunAsyncOnCorrectThread());
-
-  scoped_refptr<base::SingleThreadTaskRunner> thread_task_runner =
-      base::CreateSingleThreadTaskRunner({rules_registry_->owner_thread()});
-  base::PostTaskAndReplyWithResult(
-      thread_task_runner.get(), FROM_HERE,
-      base::BindOnce(&RulesFunction::RunAsyncOnCorrectThread, this),
-      base::BindOnce(&RulesFunction::SendResponse, this));
-  return RespondLater();
+  return RespondNow(RunInternal());
 }
 
 void RulesFunction::SendResponse(ResponseValue response) {
@@ -205,42 +202,41 @@ EventsEventAddRulesFunction::EventsEventAddRulesFunction() = default;
 EventsEventAddRulesFunction::~EventsEventAddRulesFunction() = default;
 
 bool EventsEventAddRulesFunction::CreateParams() {
-  params_ = AddRules::Params::Create(*args_);
-  return params_ != nullptr;
+  ConvertBinaryListElementsToBase64(GetMutableArgs());
+  params_ = AddRules::Params::Create(args());
+  return params_.has_value();
 }
 
-ExtensionFunction::ResponseValue
-EventsEventAddRulesFunction::RunAsyncOnCorrectThread() {
-  ConvertBinaryListElementsToBase64(args_.get());
-
+ExtensionFunction::ResponseValue EventsEventAddRulesFunction::RunInternal() {
   std::vector<const api::events::Rule*> rules_out;
   std::string error = rules_registry_->AddRules(
       extension_id(), std::move(params_->rules), &rules_out);
-  if (!error.empty())
+  if (!error.empty()) {
     return Error(error);
+  }
 
-  auto rules_value = std::make_unique<base::ListValue>();
+  base::ListValue rules_value;
+  rules_value.reserve(rules_out.size());
   for (const auto* rule : rules_out)
-    rules_value->Append(rule->ToValue());
-  return OneArgument(std::move(rules_value));
+    rules_value.Append(rule->ToValue());
+  return WithArguments(std::move(rules_value));
 }
 
 void EventsEventAddRulesFunction::RecordUMA(
     const std::string& event_name) const {
-  DeclarativeAPIFunctionType type = kDeclarativeApiFunctionCallTypeMax;
+  DeclarativeAPIFunctionType type;
   switch (GetDeclarativeAPIType(event_name)) {
     case DeclarativeAPIType::kContent:
-      type = kDeclarativeContentAddRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeContentAddRules;
       break;
     case DeclarativeAPIType::kWebRequest:
-      type = kDeclarativeWebRequestAddRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeWebRequestAddRules;
       break;
     case DeclarativeAPIType::kWebRequestWebview:
-      type = kDeclarativeWebRequestWebviewAddRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeWebRequestWebviewAddRules;
       break;
     case DeclarativeAPIType::kUnknown:
       NOTREACHED();
-      return;
   }
   RecordUMAHelper(type);
 }
@@ -250,14 +246,13 @@ EventsEventRemoveRulesFunction::EventsEventRemoveRulesFunction() = default;
 EventsEventRemoveRulesFunction::~EventsEventRemoveRulesFunction() = default;
 
 bool EventsEventRemoveRulesFunction::CreateParams() {
-  params_ = RemoveRules::Params::Create(*args_);
-  return params_ != nullptr;
+  params_ = RemoveRules::Params::Create(args());
+  return params_.has_value();
 }
 
-ExtensionFunction::ResponseValue
-EventsEventRemoveRulesFunction::RunAsyncOnCorrectThread() {
+ExtensionFunction::ResponseValue EventsEventRemoveRulesFunction::RunInternal() {
   std::string error;
-  if (params_->rule_identifiers.get()) {
+  if (params_->rule_identifiers) {
     error = rules_registry_->RemoveRules(extension_id(),
                                          *params_->rule_identifiers);
   } else {
@@ -269,20 +264,20 @@ EventsEventRemoveRulesFunction::RunAsyncOnCorrectThread() {
 
 void EventsEventRemoveRulesFunction::RecordUMA(
     const std::string& event_name) const {
-  DeclarativeAPIFunctionType type = kDeclarativeApiFunctionCallTypeMax;
+  DeclarativeAPIFunctionType type;
   switch (GetDeclarativeAPIType(event_name)) {
     case DeclarativeAPIType::kContent:
-      type = kDeclarativeContentRemoveRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeContentRemoveRules;
       break;
     case DeclarativeAPIType::kWebRequest:
-      type = kDeclarativeWebRequestRemoveRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeWebRequestRemoveRules;
       break;
     case DeclarativeAPIType::kWebRequestWebview:
-      type = kDeclarativeWebRequestWebviewRemoveRules;
+      type =
+          DeclarativeAPIFunctionType::kDeclarativeWebRequestWebviewRemoveRules;
       break;
     case DeclarativeAPIType::kUnknown:
       NOTREACHED();
-      return;
   }
   RecordUMAHelper(type);
 }
@@ -292,42 +287,41 @@ EventsEventGetRulesFunction::EventsEventGetRulesFunction() = default;
 EventsEventGetRulesFunction::~EventsEventGetRulesFunction() = default;
 
 bool EventsEventGetRulesFunction::CreateParams() {
-  params_ = GetRules::Params::Create(*args_);
-  return params_ != nullptr;
+  params_ = GetRules::Params::Create(args());
+  return params_.has_value();
 }
 
-ExtensionFunction::ResponseValue
-EventsEventGetRulesFunction::RunAsyncOnCorrectThread() {
+ExtensionFunction::ResponseValue EventsEventGetRulesFunction::RunInternal() {
   std::vector<const Rule*> rules;
-  if (params_->rule_identifiers.get()) {
+  if (params_->rule_identifiers) {
     rules_registry_->GetRules(extension_id(), *params_->rule_identifiers,
                               &rules);
   } else {
     rules_registry_->GetAllRules(extension_id(), &rules);
   }
 
-  auto rules_value = std::make_unique<base::ListValue>();
+  base::ListValue rules_value;
+  rules_value.reserve(rules.size());
   for (const auto* rule : rules)
-    rules_value->Append(rule->ToValue());
-  return OneArgument(std::move(rules_value));
+    rules_value.Append(rule->ToValue());
+  return WithArguments(std::move(rules_value));
 }
 
 void EventsEventGetRulesFunction::RecordUMA(
     const std::string& event_name) const {
-  DeclarativeAPIFunctionType type = kDeclarativeApiFunctionCallTypeMax;
+  DeclarativeAPIFunctionType type;
   switch (GetDeclarativeAPIType(event_name)) {
     case DeclarativeAPIType::kContent:
-      type = kDeclarativeContentGetRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeContentGetRules;
       break;
     case DeclarativeAPIType::kWebRequest:
-      type = kDeclarativeWebRequestGetRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeWebRequestGetRules;
       break;
     case DeclarativeAPIType::kWebRequestWebview:
-      type = kDeclarativeWebRequestWebviewGetRules;
+      type = DeclarativeAPIFunctionType::kDeclarativeWebRequestWebviewGetRules;
       break;
     case DeclarativeAPIType::kUnknown:
       NOTREACHED();
-      return;
   }
   RecordUMAHelper(type);
 }

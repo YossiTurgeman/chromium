@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,18 +27,15 @@ static base::LazyInstance<SandboxedPageInfo>::DestructorAtExit
     g_empty_sandboxed_info = LAZY_INSTANCE_INITIALIZER;
 
 const SandboxedPageInfo& GetSandboxedPageInfo(const Extension* extension) {
-  SandboxedPageInfo* info = static_cast<SandboxedPageInfo*>(
+  const SandboxedPageInfo* info = static_cast<const SandboxedPageInfo*>(
       extension->GetManifestData(keys::kSandboxedPages));
   return info ? *info : g_empty_sandboxed_info.Get();
 }
 
 }  // namespace
 
-SandboxedPageInfo::SandboxedPageInfo() {
-}
-
-SandboxedPageInfo::~SandboxedPageInfo() {
-}
+SandboxedPageInfo::SandboxedPageInfo() = default;
+SandboxedPageInfo::~SandboxedPageInfo() = default;
 
 const URLPatternSet& SandboxedPageInfo::GetPages(const Extension* extension) {
   return GetSandboxedPageInfo(extension).pages;
@@ -49,29 +46,26 @@ bool SandboxedPageInfo::IsSandboxedPage(const Extension* extension,
   return extension->ResourceMatches(GetPages(extension), relative_path);
 }
 
-SandboxedPageHandler::SandboxedPageHandler() {
-}
+SandboxedPageHandler::SandboxedPageHandler() = default;
+SandboxedPageHandler::~SandboxedPageHandler() = default;
 
-SandboxedPageHandler::~SandboxedPageHandler() {
-}
-
-bool SandboxedPageHandler::Parse(Extension* extension, base::string16* error) {
+bool SandboxedPageHandler::Parse(Extension* extension, std::u16string* error) {
   std::unique_ptr<SandboxedPageInfo> sandboxed_info(new SandboxedPageInfo);
 
   const base::Value* list_value = nullptr;
   if (!extension->manifest()->GetList(keys::kSandboxedPages, &list_value)) {
-    *error = base::ASCIIToUTF16(errors::kInvalidSandboxedPagesList);
+    *error = errors::kInvalidSandboxedPagesList;
     return false;
   }
 
-  base::Value::ConstListView list_view = list_value->GetList();
-  for (size_t i = 0; i < list_view.size(); ++i) {
-    if (!list_view[i].is_string()) {
+  const base::ListValue& list = list_value->GetList();
+  for (size_t i = 0; i < list.size(); ++i) {
+    if (!list[i].is_string()) {
       *error = ErrorUtils::FormatErrorMessageUTF16(
           errors::kInvalidSandboxedPage, base::NumberToString(i));
       return false;
     }
-    std::string relative_path = list_view[i].GetString();
+    std::string relative_path = list[i].GetString();
     URLPattern pattern(URLPattern::SCHEME_EXTENSION);
     if (pattern.Parse(extension->url().spec()) !=
         URLPattern::ParseResult::kSuccess) {

@@ -30,14 +30,17 @@
 
 #include <stdint.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "net/base/url_util.h"
+#include "services/network/public/cpp/is_potentially_trustworthy.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/platform/blob/blob_url.h"
 #include "third_party/blink/renderer/platform/blob/blob_url_null_origin_map.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/weborigin/known_ports.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/weborigin/origin_access_entry.h"
@@ -48,8 +51,10 @@
 #include "third_party/blink/renderer/platform/wtf/text/string_utf8_adaptor.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/wtf.h"
+#include "url/scheme_host_port.h"
 #include "url/url_canon.h"
 #include "url/url_canon_ip.h"
+#include "url/url_constants.h"
 #include "url/url_util.h"
 
 namespace blink {
@@ -79,13 +84,18 @@ bool SecurityOrigin::ShouldUseInnerURL(const KURL& url) {
 // that all the URL schemes we currently support that use inner URLs for their
 // security origin can be parsed using this algorithm.
 KURL SecurityOrigin::ExtractInnerURL(const KURL& url) {
-  if (url.InnerURL())
-    return *url.InnerURL();
+  if (url.InnerUrl()) {
+    return *url.InnerUrl();
+  }
   // FIXME: Update this callsite to use the innerURL member function when
   // we finish implementing it.
-  return KURL(url.GetPath());
+  return KURL(url.GetPath().ToString());
 }
 
+// Note: When changing ShouldTreatAsOpaqueOrigin, consider also updating
+// IsValidInput in //url/scheme_host_port.cc (there might be existing
+// differences in behavior between these 2 layers, but we should avoid
+// introducing new differences).
 static bool ShouldTreatAsOpaqueOrigin(const KURL& url) {
   if (!url.IsValid())
     return true;
@@ -105,20 +115,21 @@ static bool ShouldTreatAsOpaqueOrigin(const KURL& url) {
   // URLs with schemes that require an authority, but which don't have one,
   // will have failed the isValid() test; e.g. valid HTTP URLs must have a
   // host.
-  DCHECK(!((relevant_url.ProtocolIsInHTTPFamily() ||
+  DCHECK(!((relevant_url.ProtocolIsInHttpFamily() ||
             relevant_url.ProtocolIs("ftp")) &&
-           relevant_url.Host().IsEmpty()));
+           relevant_url.Host().empty()));
 
-  if (SchemeRegistry::ShouldTreatURLSchemeAsNoAccess(relevant_url.Protocol()))
+  if (std::ranges::contains(url::GetNoAccessSchemes(),
+                            relevant_url.Protocol().Ascii()))
     return true;
 
-  // Nonstandard schemes and unregistered schemes aren't known to contain hosts
-  // and/or ports, so they'll usually be placed in opaque origins.
-  if (!relevant_url.CanSetHostOrPort()) {
+  // Nonstandard schemes and unregistered schemes are placed in opaque origins.
+  if (!relevant_url.IsStandard()) {
     // A temporary exception is made for non-standard local schemes.
     // TODO: Migrate "content:" and "externalfile:" to be standard schemes, and
     // remove the local scheme exception.
-    if (SchemeRegistry::ShouldTreatURLSchemeAsLocal(relevant_url.Protocol()))
+    if (std::ranges::contains(url::GetLocalSchemes(),
+                              relevant_url.Protocol().Ascii()))
       return false;
 
     // Otherwise, treat non-standard origins as opaque, unless the Android
@@ -132,14 +143,31 @@ static bool ShouldTreatAsOpaqueOrigin(const KURL& url) {
   return false;
 }
 
-SecurityOrigin::SecurityOrigin(const KURL& url)
-    : protocol_(EnsureNonNull(url.Protocol())),
-      host_(EnsureNonNull(url.Host())),
-      domain_(host_),
-      port_(IsDefaultPortForProtocol(url.Port(), protocol_) ? kInvalidPort
-                                                            : url.Port()),
-      effective_port_(port_ ? port_ : DefaultPortForProtocol(protocol_)) {
-  DCHECK(!ShouldTreatAsOpaqueOrigin(url));
+scoped_refptr<SecurityOrigin> SecurityOrigin::CreateInternal(const KURL& url) {
+  if (url::SchemeHostPort::ShouldDiscardHostAndPort(url.Protocol().Ascii())) {
+    return base::AdoptRef(
+        new SecurityOrigin(url.Protocol(), g_empty_string, 0));
+  }
+
+  // This mimics the logic in url::SchemeHostPort(const GURL&). In
+  // particular, it ensures a URL with a port of 0 will translate into
+  // an origin with an effective port of 0.
+  uint16_t port = (url.HasPort() || !url.IsValid() || !url.IsStandard())
+                      ? url.Port()
+                      : DefaultPortForProtocol(url.Protocol());
+  return base::AdoptRef(new SecurityOrigin(EnsureNonNull(url.Protocol()),
+                                           EnsureNonNull(url.Host().ToString()),
+                                           port));
+}
+
+SecurityOrigin::SecurityOrigin(const String& protocol,
+                               const String& host,
+                               uint16_t port)
+    : protocol_(protocol), host_(host), domain_(host_), port_(port) {
+  DCHECK(url::SchemeHostPort(protocol.Utf8(), host.Utf8(), port,
+                             url::SchemeHostPort::CHECK_CANONICALIZATION)
+             .IsValid());
+  DCHECK(!IsOpaque());
   // By default, only local SecurityOrigins can load local resources.
   can_load_local_resources_ = IsLocal();
 }
@@ -148,13 +176,15 @@ SecurityOrigin::SecurityOrigin(const url::Origin::Nonce& nonce,
                                const SecurityOrigin* precursor)
     : nonce_if_opaque_(nonce), precursor_origin_(precursor) {}
 
+SecurityOrigin::SecurityOrigin(NewUniqueOpaque, const SecurityOrigin* precursor)
+    : nonce_if_opaque_(std::in_place), precursor_origin_(precursor) {}
+
 SecurityOrigin::SecurityOrigin(const SecurityOrigin* other,
                                ConstructIsolatedCopy)
-    : protocol_(other->protocol_.IsolatedCopy()),
-      host_(other->host_.IsolatedCopy()),
-      domain_(other->domain_.IsolatedCopy()),
+    : protocol_(other->protocol_),
+      host_(other->host_),
+      domain_(other->domain_),
       port_(other->port_),
-      effective_port_(other->effective_port_),
       nonce_if_opaque_(other->nonce_if_opaque_),
       universal_access_(other->universal_access_),
       domain_was_set_in_dom_(other->domain_was_set_in_dom_),
@@ -175,7 +205,6 @@ SecurityOrigin::SecurityOrigin(const SecurityOrigin* other,
       host_(other->host_),
       domain_(other->domain_),
       port_(other->port_),
-      effective_port_(other->effective_port_),
       nonce_if_opaque_(other->nonce_if_opaque_),
       universal_access_(other->universal_access_),
       domain_was_set_in_dom_(other->domain_was_set_in_dom_),
@@ -197,6 +226,12 @@ scoped_refptr<SecurityOrigin> SecurityOrigin::CreateWithReferenceOrigin(
       return origin;
   }
 
+  if (url.IsAboutBlankUrl()) {
+    if (!reference_origin)
+      return CreateUniqueOpaque();
+    return reference_origin->IsolatedCopy();
+  }
+
   if (ShouldTreatAsOpaqueOrigin(url)) {
     if (!reference_origin)
       return CreateUniqueOpaque();
@@ -204,9 +239,9 @@ scoped_refptr<SecurityOrigin> SecurityOrigin::CreateWithReferenceOrigin(
   }
 
   if (ShouldUseInnerURL(url))
-    return base::AdoptRef(new SecurityOrigin(ExtractInnerURL(url)));
+    return CreateInternal(ExtractInnerURL(url));
 
-  return base::AdoptRef(new SecurityOrigin(url));
+  return CreateInternal(url);
 }
 
 scoped_refptr<SecurityOrigin> SecurityOrigin::Create(const KURL& url) {
@@ -214,8 +249,8 @@ scoped_refptr<SecurityOrigin> SecurityOrigin::Create(const KURL& url) {
 }
 
 scoped_refptr<SecurityOrigin> SecurityOrigin::CreateUniqueOpaque() {
-  scoped_refptr<SecurityOrigin> origin =
-      base::AdoptRef(new SecurityOrigin(url::Origin::Nonce(), nullptr));
+  scoped_refptr<SecurityOrigin> origin = base::AdoptRef(
+      new SecurityOrigin(NewUniqueOpaque::kWithLazyInitNonce, nullptr));
   DCHECK(origin->IsOpaque());
   DCHECK(!origin->precursor_origin_);
   return origin;
@@ -233,23 +268,18 @@ scoped_refptr<SecurityOrigin> SecurityOrigin::CreateOpaque(
 scoped_refptr<SecurityOrigin> SecurityOrigin::CreateFromUrlOrigin(
     const url::Origin& origin) {
   const url::SchemeHostPort& tuple = origin.GetTupleOrPrecursorTupleIfOpaque();
-  DCHECK(String::FromUTF8(tuple.scheme()).ContainsOnlyASCIIOrEmpty());
-  DCHECK(String::FromUTF8(tuple.host()).ContainsOnlyASCIIOrEmpty());
+  DCHECK(String::FromUtf8(tuple.scheme()).ContainsOnlyAsciiOrEmpty());
+  DCHECK(String::FromUtf8(tuple.host()).ContainsOnlyAsciiOrEmpty());
 
   scoped_refptr<SecurityOrigin> tuple_origin;
   if (tuple.IsValid()) {
-    String scheme = String::FromUTF8(tuple.scheme());
-    String host = String::FromUTF8(tuple.host());
-    uint16_t port = tuple.port();
-
-    // url::Origin is percent encoded and SecurityOrigin is percent decoded.
-    host = DecodeURLEscapeSequences(host, DecodeURLMode::kUTF8OrIsomorphic);
-
-    tuple_origin = Create(scheme, host, port);
+    tuple_origin =
+        CreateFromValidTuple(String::FromUtf8(tuple.scheme()),
+                             String::FromUtf8(tuple.host()), tuple.port());
   }
-  base::Optional<base::UnguessableToken> nonce_if_opaque =
+  const base::UnguessableToken* nonce_if_opaque =
       origin.GetNonceForSerialization();
-  DCHECK_EQ(nonce_if_opaque.has_value(), origin.opaque());
+  DCHECK_EQ(!!nonce_if_opaque, origin.opaque());
   if (nonce_if_opaque) {
     return base::AdoptRef(new SecurityOrigin(
         url::Origin::Nonce(*nonce_if_opaque), tuple_origin.get()));
@@ -262,7 +292,7 @@ url::Origin SecurityOrigin::ToUrlOrigin() const {
   const SecurityOrigin* unmasked = GetOriginOrPrecursorOriginIfOpaque();
   std::string scheme = unmasked->protocol_.Utf8();
   std::string host = unmasked->host_.Utf8();
-  uint16_t port = unmasked->effective_port_;
+  uint16_t port = unmasked->port_;
   if (nonce_if_opaque_) {
     url::Origin result = url::Origin::CreateOpaqueFromNormalizedPrecursorTuple(
         std::move(scheme), std::move(host), port, *nonce_if_opaque_);
@@ -273,6 +303,21 @@ url::Origin SecurityOrigin::ToUrlOrigin() const {
       std::move(scheme), std::move(host), port);
   CHECK(!result.opaque());
   return result;
+}
+
+scoped_refptr<SecurityOrigin> SecurityOrigin::CreateWithNonce(
+    base::PassKey<SandboxedOpaqueSecurityOriginCreator>,
+    const base::UnguessableToken& nonce,
+    const SecurityOrigin* origin) {
+  CHECK(origin);
+  const SecurityOrigin* tuple_origin =
+      origin->GetOriginOrPrecursorOriginIfOpaque();
+
+  // Only use a non-opaque tuple origin as precursor. An opaque precursor
+  // provides no useful derivation information.
+  return CreateOpaque(
+      url::Origin::Nonce(nonce),
+      tuple_origin->IsOpaque() ? nullptr : tuple_origin->IsolatedCopy().get());
 }
 
 scoped_refptr<SecurityOrigin> SecurityOrigin::IsolatedCopy() const {
@@ -292,32 +337,13 @@ String SecurityOrigin::RegistrableDomain() const {
   OriginAccessEntry entry(
       *this, network::mojom::CorsDomainMatchMode::kAllowRegistrableDomains);
   String domain = entry.registrable_domain();
-  return domain.IsEmpty() ? String() : domain;
+  return domain.empty() ? String() : domain;
 }
 
-bool SecurityOrigin::IsSecure(const KURL& url) {
-  if (SchemeRegistry::ShouldTreatURLSchemeAsSecure(url.Protocol()))
-    return true;
-
-  // URLs that wrap inner URLs are secure if those inner URLs are secure.
-  if (ShouldUseInnerURL(url) && SchemeRegistry::ShouldTreatURLSchemeAsSecure(
-                                    ExtractInnerURL(url).Protocol()))
-    return true;
-
-  if (SecurityPolicy::IsUrlTrustworthySafelisted(url))
-    return true;
-
-  return false;
-}
-
-base::Optional<base::UnguessableToken>
-SecurityOrigin::GetNonceForSerialization() const {
+const base::UnguessableToken* SecurityOrigin::GetNonceForSerialization() const {
   // The call to token() forces initialization of the |nonce_if_opaque_| if
   // not already initialized.
-  // TODO(nasko): Consider not making a copy here, but return a reference to
-  // the nonce.
-  return nonce_if_opaque_ ? base::make_optional(nonce_if_opaque_->token())
-                          : base::nullopt;
+  return nonce_if_opaque_ ? &nonce_if_opaque_->token() : nullptr;
 }
 
 bool SecurityOrigin::CanAccess(const SecurityOrigin* other,
@@ -363,8 +389,8 @@ bool SecurityOrigin::CanRequest(const KURL& url) const {
     // (e.g., top-level worker script loading) because SecurityOrigin and
     // BlobURLNullOriginMap are thread-specific. For the case, check
     // BlobURLOpaqueOriginNonceMap.
-    base::Optional<base::UnguessableToken> nonce = GetNonceForSerialization();
-    if (nonce && BlobURLOpaqueOriginNonceMap::GetInstance().Get(url) == nonce)
+    const base::UnguessableToken* nonce = GetNonceForSerialization();
+    if (nonce && BlobURLOpaqueOriginNonceMap::GetInstance().Get(url) == *nonce)
       return true;
     return false;
   }
@@ -404,6 +430,11 @@ bool SecurityOrigin::CanDisplay(const KURL& url) const {
   if (universal_access_)
     return true;
 
+  // Data URLs can always be displayed.
+  if (url.ProtocolIsData()) {
+    return true;
+  }
+
   String protocol = url.Protocol();
   if (SchemeRegistry::CanDisplayOnlyIfCanRequest(protocol))
     return CanRequest(url);
@@ -413,7 +444,7 @@ bool SecurityOrigin::CanDisplay(const KURL& url) const {
            SecurityPolicy::IsOriginAccessToURLAllowed(this, url);
   }
 
-  if (SchemeRegistry::ShouldTreatURLSchemeAsLocal(protocol)) {
+  if (std::ranges::contains(url::GetLocalSchemes(), protocol.Ascii())) {
     return CanLoadLocalResources() ||
            SecurityPolicy::IsOriginAccessToURLAllowed(this, url);
   }
@@ -422,24 +453,14 @@ bool SecurityOrigin::CanDisplay(const KURL& url) const {
 }
 
 bool SecurityOrigin::IsPotentiallyTrustworthy() const {
-  // TODO(lukasza): The code below can hopefully be eventually deleted and
-  // IsOriginPotentiallyTrustworthy can be used instead (from
+  // TODO(https://crbug.com/1153336): The code below can hopefully be eventually
+  // deleted and IsOriginPotentiallyTrustworthy can be used instead (from
   // //services/network/public/cpp/is_potentially_trustworthy.h).
 
   DCHECK_NE(protocol_, "data");
-
   if (IsOpaque())
     return is_opaque_origin_potentially_trustworthy_;
-
-  if (SchemeRegistry::ShouldTreatURLSchemeAsSecure(protocol_) || IsLocal() ||
-      IsLocalhost()) {
-    return true;
-  }
-
-  if (SecurityPolicy::IsOriginTrustworthySafelisted(*this))
-    return true;
-
-  return false;
+  return network::IsOriginPotentiallyTrustworthy(ToUrlOrigin());
 }
 
 // static
@@ -469,7 +490,7 @@ void SecurityOrigin::BlockLocalAccessFromLocalOrigin() {
 }
 
 bool SecurityOrigin::IsLocal() const {
-  return SchemeRegistry::ShouldTreatURLSchemeAsLocal(protocol_);
+  return std::ranges::contains(url::GetLocalSchemes(), protocol_.Ascii());
 }
 
 bool SecurityOrigin::IsLocalhost() const {
@@ -511,7 +532,8 @@ void SecurityOrigin::BuildRawString(StringBuilder& builder) const {
   builder.Append("://");
   builder.Append(host_);
 
-  if (port_) {
+  if (DefaultPortForProtocol(protocol_) &&
+      port_ != DefaultPortForProtocol(protocol_)) {
     builder.Append(':');
     builder.AppendNumber(port_);
   }
@@ -533,17 +555,14 @@ String SecurityOrigin::ToTokenForFastCheck() const {
 
 scoped_refptr<SecurityOrigin> SecurityOrigin::CreateFromString(
     const String& origin_string) {
-  return SecurityOrigin::Create(KURL(NullURL(), origin_string));
+  return SecurityOrigin::Create(KURL(NullUrl(), origin_string));
 }
 
-scoped_refptr<SecurityOrigin> SecurityOrigin::Create(const String& protocol,
-                                                     const String& host,
-                                                     uint16_t port) {
-  DCHECK_EQ(host,
-            DecodeURLEscapeSequences(host, DecodeURLMode::kUTF8OrIsomorphic));
-
-  String port_part = port ? ":" + String::Number(port) : String();
-  return Create(KURL(NullURL(), protocol + "://" + host + port_part + "/"));
+scoped_refptr<SecurityOrigin> SecurityOrigin::CreateFromValidTuple(
+    const String& protocol,
+    const String& host,
+    uint16_t port) {
+  return base::AdoptRef(new SecurityOrigin(protocol, host, port));
 }
 
 bool SecurityOrigin::IsSameOriginWith(const SecurityOrigin* other) const {
@@ -637,6 +656,25 @@ bool SecurityOrigin::IsSameOriginDomainWith(
   return can_access;
 }
 
+bool SecurityOrigin::IsSameSiteWith(const SecurityOrigin* other) const {
+  // "A and B are either both opaque origins, or both tuple origins with the
+  // same scheme"
+  if (IsOpaque() != other->IsOpaque())
+    return false;
+  if (!IsOpaque() && Protocol() != other->Protocol())
+    return false;
+
+  // Schemelessly same site check.
+  // https://html.spec.whatwg.org/#schemelessly-same-site
+  if (IsOpaque())
+    return IsSameOriginWith(other);
+  String registrable_domain = RegistrableDomain();
+  if (registrable_domain.IsNull()) {
+    return Host() == other->Host();
+  }
+  return registrable_domain == other->RegistrableDomain();
+}
+
 const KURL& SecurityOrigin::UrlWithUniqueOpaqueOrigin() {
   DCHECK(IsMainThread());
   DEFINE_STATIC_LOCAL(const KURL, url, ("data:,"));
@@ -670,8 +708,9 @@ void SecurityOrigin::SetOpaqueOriginIsPotentiallyTrustworthy(
 }
 
 scoped_refptr<SecurityOrigin> SecurityOrigin::DeriveNewOpaqueOrigin() const {
-  return base::AdoptRef(new SecurityOrigin(
-      url::Origin::Nonce(), GetOriginOrPrecursorOriginIfOpaque()));
+  return base::AdoptRef(
+      new SecurityOrigin(NewUniqueOpaque::kWithLazyInitNonce,
+                         GetOriginOrPrecursorOriginIfOpaque()));
 }
 
 const SecurityOrigin* SecurityOrigin::GetOriginOrPrecursorOriginIfOpaque()
@@ -683,19 +722,43 @@ const SecurityOrigin* SecurityOrigin::GetOriginOrPrecursorOriginIfOpaque()
   return precursor_origin_.get();
 }
 
-String SecurityOrigin::CanonicalizeHost(const String& host, bool* success) {
+String SecurityOrigin::CanonicalizeSpecialHost(const String& host,
+                                               bool* success) {
   url::Component out_host;
   url::RawCanonOutputT<char> canon_output;
   if (host.Is8Bit()) {
-    StringUTF8Adaptor utf8(host);
-    *success = url::CanonicalizeHost(
-        utf8.data(), url::Component(0, utf8.size()), &canon_output, &out_host);
+    StringUtf8Adaptor utf8(host);
+    std::string_view host_view = utf8.AsStringView();
+    *success = url::CanonicalizeSpecialHost(
+        host_view, url::Component(host_view), canon_output, out_host);
   } else {
-    *success = url::CanonicalizeHost(host.Characters16(),
-                                     url::Component(0, host.length()),
-                                     &canon_output, &out_host);
+    std::u16string_view host_view = host.View16();
+    *success = url::CanonicalizeSpecialHost(
+        host_view, url::Component(host_view), canon_output, out_host);
   }
-  return String::FromUTF8(canon_output.data(), canon_output.length());
+  return String::FromUtf8(canon_output.view());
+}
+
+String SecurityOrigin::CanonicalizeHost(const String& host,
+                                        const String& scheme,
+                                        bool* success) {
+  if (scheme != url::kFileScheme) {
+    return CanonicalizeSpecialHost(host, success);
+  }
+
+  url::Component out_host;
+  url::RawCanonOutputT<char> canon_output;
+  if (host.Is8Bit()) {
+    StringUtf8Adaptor utf8(host);
+    std::string_view host_view = utf8.AsStringView();
+    *success = url::CanonicalizeFileHost(host_view, url::Component(host_view),
+                                         canon_output, out_host);
+  } else {
+    std::u16string_view host_view = host.View16();
+    *success = url::CanonicalizeFileHost(host_view, url::Component(host_view),
+                                         canon_output, out_host);
+  }
+  return String::FromUtf8(canon_output.view());
 }
 
 scoped_refptr<SecurityOrigin> SecurityOrigin::GetOriginForAgentCluster(

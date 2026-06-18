@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 
 #include <vector>
 
-#include "base/callback_forward.h"
-#include "base/macros.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/weak_ptr.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/global_routing_id.h"
 
@@ -31,9 +31,24 @@ class WebContents;
 // to the value specified by |minimum_icon_size_in_px|.
 class CONTENT_EXPORT ManifestIconDownloader final {
  public:
+  enum class Result {
+    kMinValue = 0,
+    kNoImageFound = kMinValue,
+    kIncorrectSize,
+    kSuccess,
+    kMaxValue = kSuccess
+  };
+
   using IconFetchCallback = base::OnceCallback<void(const SkBitmap&)>;
 
+  using IconFetchCallbackWithResult =
+      base::OnceCallback<void(const SkBitmap&, Result)>;
+
   ManifestIconDownloader() = delete;
+
+  ManifestIconDownloader(const ManifestIconDownloader&) = delete;
+  ManifestIconDownloader& operator=(const ManifestIconDownloader&) = delete;
+
   ~ManifestIconDownloader() = delete;
 
   // Returns whether the download has started.
@@ -41,29 +56,31 @@ class CONTENT_EXPORT ManifestIconDownloader final {
   // download the image.
   // |global_frame_routing_id| specifies the frame in which to initiate the
   // download.
-  static bool Download(content::WebContents* web_contents,
-                       const GURL& icon_url,
-                       int ideal_icon_size_in_px,
-                       int minimum_icon_size_in_px,
-                       IconFetchCallback callback,
-                       bool square_only = true,
-                       const GlobalFrameRoutingId& initiator_frame_routing_id =
-                           GlobalFrameRoutingId());
+  static bool Download(
+      content::WebContents* web_contents,
+      const GURL& icon_url,
+      int ideal_icon_size_in_px,
+      int minimum_icon_size_in_px,
+      int maximum_icon_size_in_px,
+      IconFetchCallback callback,
+      bool square_only = true,
+      const GlobalRenderFrameHostId& initiator_frame_routing_id =
+          GlobalRenderFrameHostId(),
+      bool suppress_warnings = false);
 
   // This threshold has been chosen arbitrarily and is open to any necessary
   // changes in the future.
   static const int kMaxWidthToHeightRatio = 5;
 
  private:
-  class DevToolsConsoleHelper;
-
   // Callback run after the manifest icon downloaded successfully or the
   // download failed.
   static void OnIconFetched(int ideal_icon_size_in_px,
                             int minimum_icon_size_in_px,
                             bool square_only,
-                            DevToolsConsoleHelper* console_helper,
-                            IconFetchCallback callback,
+                            base::WeakPtr<WebContents> web_contents,
+                            IconFetchCallbackWithResult callback,
+                            bool suppress_warnings,
                             int id,
                             int http_status_code,
                             const GURL& url,
@@ -73,7 +90,7 @@ class CONTENT_EXPORT ManifestIconDownloader final {
   static void ScaleIcon(int ideal_icon_width_in_px,
                         int ideal_icon_height_in_px,
                         const SkBitmap& bitmap,
-                        IconFetchCallback callback);
+                        IconFetchCallbackWithResult callback);
 
   static int FindClosestBitmapIndex(int ideal_icon_size_in_px,
                                     int minimum_icon_size_in_px,
@@ -81,8 +98,6 @@ class CONTENT_EXPORT ManifestIconDownloader final {
                                     const std::vector<SkBitmap>& bitmaps);
 
   friend class ManifestIconDownloaderTest;
-
-  DISALLOW_COPY_AND_ASSIGN(ManifestIconDownloader);
 };
 
 }  // namespace content

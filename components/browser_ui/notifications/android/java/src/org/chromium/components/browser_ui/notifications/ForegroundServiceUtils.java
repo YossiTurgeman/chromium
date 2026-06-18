@@ -1,42 +1,43 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.components.browser_ui.notifications;
 
+import android.app.ForegroundServiceStartNotAllowedException;
 import android.app.Notification;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
 
-import androidx.annotation.VisibleForTesting;
 import androidx.core.app.ServiceCompat;
 import androidx.core.content.ContextCompat;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
 
 /**
  * Utility functions that call into Android foreground service related API, and provides
  * compatibility for older Android versions and work around for Android API bugs.
  */
+@NullMarked
 public class ForegroundServiceUtils {
     private static final String TAG = "ForegroundService";
+
     private ForegroundServiceUtils() {}
 
-    /**
-     * Gets the singleton instance of ForegroundServiceUtils.
-     */
+    /** Gets the singleton instance of ForegroundServiceUtils. */
     public static ForegroundServiceUtils getInstance() {
         return ForegroundServiceUtils.LazyHolder.sInstance;
     }
 
-    /**
-     * Sets a mocked instance for testing.
-     */
-    @VisibleForTesting
+    /** Sets a mocked instance for testing. */
     public static void setInstanceForTesting(ForegroundServiceUtils instance) {
+        var oldValue = ForegroundServiceUtils.LazyHolder.sInstance;
         ForegroundServiceUtils.LazyHolder.sInstance = instance;
+        ResettersForTesting.register(() -> ForegroundServiceUtils.LazyHolder.sInstance = oldValue);
     }
 
     private static class LazyHolder {
@@ -68,7 +69,13 @@ public class ForegroundServiceUtils {
         // If android fail to build the notification, do nothing.
         if (notification == null) return;
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                service.startForeground(id, notification, foregroundServiceType);
+            } catch (ForegroundServiceStartNotAllowedException e) {
+                Log.e(TAG, "channelId=%s notificationId=%s", notification.getChannelId(), id, e);
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             service.startForeground(id, notification, foregroundServiceType);
         } else {
             service.startForeground(id, notification);

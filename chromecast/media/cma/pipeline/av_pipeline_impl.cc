@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,11 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chromecast/media/api/decoder_buffer_base.h"
 #include "chromecast/media/base/decrypt_context_impl.h"
 #include "chromecast/media/cdm/cast_cdm_context.h"
@@ -22,7 +21,6 @@
 #include "chromecast/media/cma/pipeline/decrypt_util.h"
 #include "chromecast/public/media/cast_decrypt_config.h"
 #include "media/base/audio_decoder_config.h"
-#include "media/base/bind_to_current_loop.h"
 #include "media/base/decrypt_config.h"
 #include "media/base/timestamp_constants.h"
 
@@ -78,7 +76,10 @@ bool AvPipelineImpl::StartPlayingFrom(
     LOG(INFO) << __FUNCTION__ << " called while in error state";
     return false;
   }
-  DCHECK_EQ(state_, kFlushed);
+  if (state_ != kFlushed) {
+    LOG(ERROR) << __FUNCTION__ << " called in unexpected state " << state_;
+    return false;
+  }
 
   // Buffering related initialization.
   DCHECK(frame_provider_);
@@ -89,7 +90,7 @@ bool AvPipelineImpl::StartPlayingFrom(
   // Discard any previously pushed buffer and start feeding the pipeline.
   pushed_buffer_ = nullptr;
   enable_feeding_ = true;
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&AvPipelineImpl::FetchBuffer, weak_this_));
 
   set_state(kPlaying);
@@ -220,8 +221,7 @@ void AvPipelineImpl::ProcessPendingBuffer() {
             key_id, GetEncryptionScheme(pending_buffer_->stream_id()));
     if (!decrypt_context) {
       LOG(INFO) << "frame(pts=" << pending_buffer_->timestamp()
-                << "): waiting for key id "
-                << base::HexEncode(&key_id[0], key_id.size());
+                << "): waiting for key id " << base::HexEncode(key_id);
       if (!client_.waiting_cb.is_null())
         client_.waiting_cb.Run(::media::WaitingReason::kNoDecryptionKey);
       return;
@@ -265,8 +265,7 @@ void AvPipelineImpl::PushReadyBuffer(scoped_refptr<DecoderBufferBase> buffer) {
   DCHECK(!pushed_buffer_);
 
   if (!buffer->end_of_stream() && buffering_state_.get()) {
-    base::TimeDelta timestamp =
-        base::TimeDelta::FromMicroseconds(buffer->timestamp());
+    base::TimeDelta timestamp = base::Microseconds(buffer->timestamp());
     if (timestamp != ::media::kNoTimestamp)
       buffering_state_->SetMaxRenderingTime(timestamp);
   }
@@ -290,7 +289,7 @@ void AvPipelineImpl::OnBufferDecrypted(bool success,
 
   // Decryptor needs more data.
   if (buffers.empty()) {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&AvPipelineImpl::FetchBuffer, weak_this_));
     return;
   }
@@ -309,7 +308,7 @@ void AvPipelineImpl::OnPushBufferComplete(BufferStatus status) {
     return;
   }
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       ready_buffers_.empty()
           ? base::BindOnce(&AvPipelineImpl::FetchBuffer, weak_this_)
@@ -318,7 +317,7 @@ void AvPipelineImpl::OnPushBufferComplete(BufferStatus status) {
 
 void AvPipelineImpl::OnEndOfStream() {
   if (!client_.eos_cb.is_null())
-    std::move(client_.eos_cb).Run();
+    client_.eos_cb.Run();
 }
 
 void AvPipelineImpl::OnDecoderError() {
@@ -370,9 +369,8 @@ void AvPipelineImpl::OnDataBuffered(
 
   if (!buffer->end_of_stream() &&
       (buffered_time_ == ::media::kNoTimestamp ||
-       buffered_time_ <
-           base::TimeDelta::FromMicroseconds(buffer->timestamp()))) {
-    buffered_time_ = base::TimeDelta::FromMicroseconds(buffer->timestamp());
+       buffered_time_ < base::Microseconds(buffer->timestamp()))) {
+    buffered_time_ = base::Microseconds(buffer->timestamp());
   }
 
   if (is_at_max_capacity)
@@ -409,10 +407,10 @@ void AvPipelineImpl::UpdatePlayableFrames() {
       }
 
       if (playable_buffered_time_ == ::media::kNoTimestamp ||
-          playable_buffered_time_ < base::TimeDelta::FromMicroseconds(
-                                        non_playable_frame->timestamp())) {
+          playable_buffered_time_ <
+              base::Microseconds(non_playable_frame->timestamp())) {
         playable_buffered_time_ =
-            base::TimeDelta::FromMicroseconds(non_playable_frame->timestamp());
+            base::Microseconds(non_playable_frame->timestamp());
         buffering_state_->SetBufferedTime(playable_buffered_time_);
       }
     }

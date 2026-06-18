@@ -1,27 +1,35 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.compositor.layouts.components;
 
 import android.content.Context;
-import android.content.res.Resources;
 import android.graphics.RectF;
+import android.util.FloatProperty;
 
-import org.chromium.chrome.R;
-import org.chromium.chrome.browser.compositor.animation.FloatProperty;
+import androidx.annotation.DrawableRes;
+import androidx.annotation.IntDef;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.compositor.overlays.strip.StripLayoutView;
+import org.chromium.ui.util.MotionEventUtils;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 
 /**
- * {@link CompositorButton} keeps track of state for buttons that are rendered
- * in the compositor.
+ * {@link CompositorButton} keeps track of state for buttons that are rendered in the compositor.
  */
-public class CompositorButton implements VirtualView {
+@NullMarked
+public class CompositorButton extends StripLayoutView {
     /**
-     * A property that can be used with a
-     * {@link org.chromium.chrome.browser.compositor.animation.CompositorAnimator}.
+     * A property that can be used with a {@link
+     * org.chromium.chrome.browser.layouts.animation.CompositorAnimator}.
      */
     public static final FloatProperty<CompositorButton> OPACITY =
-            new FloatProperty<CompositorButton>("opacity") {
+            new FloatProperty<>("opacity") {
                 @Override
                 public void setValue(CompositorButton object, float value) {
                     object.setOpacity(value);
@@ -33,158 +41,124 @@ public class CompositorButton implements VirtualView {
                 }
             };
 
-    /** Handler for click actions on VirtualViews. */
-    public interface CompositorOnClickHandler {
-        /**
-         * Handles the click action.
-         * @param time The time of the click action.
-         */
-        void onClick(long time);
+    @IntDef({
+        ButtonType.NEW_TAB,
+        ButtonType.INCOGNITO_SWITCHER,
+        ButtonType.TAB_CLOSE,
+        ButtonType.GLIC,
+        ButtonType.GLIC_DISMISS_NUDGE,
+        ButtonType.GLIC_ACTOR
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface ButtonType {
+        int NEW_TAB = 0;
+        int INCOGNITO_SWITCHER = 1;
+        int TAB_CLOSE = 2;
+        int GLIC = 3;
+        int GLIC_DISMISS_NUDGE = 4;
+        int GLIC_ACTOR = 5;
     }
 
-    // Pre-allocated to avoid in-frame allocations.
-    private final RectF mBounds = new RectF();
-    private final RectF mCacheBounds = new RectF();
+    public interface TooltipHandler {
+        void setTooltipText(String text);
+    }
 
-    private final CompositorOnClickHandler mClickHandler;
+    private final @DrawableRes int mResource;
+    private final @DrawableRes int mBackgroundResource;
 
-    protected int mResource;
-
-    private int mPressedResource;
-    private int mIncognitoResource;
-    private int mIncognitoPressedResource;
+    private final @Nullable TooltipHandler mTooltipHandler;
+    // @StripLayoutView the button was embedded in. Null if it's not a child view.
+    @Nullable private final StripLayoutView mParentView;
+    private final @ButtonType int mType;
+    private final float mClickSlop;
 
     private float mOpacity;
-    private float mClickSlop;
     private boolean mIsPressed;
-    private boolean mIsVisible;
-    private boolean mIsIncognito;
-    private boolean mIsEnabled;
-    private String mAccessibilityDescription;
-    private String mAccessibilityDescriptionIncognito;
+    private boolean mIsPressedFromMouse;
+    private boolean mIsHovered;
 
     /**
      * Default constructor for {@link CompositorButton}
-     * @param context      An Android context for fetching dimens.
-     * @param width        The button width.
-     * @param height       The button height.
+     *
+     * @param context An Android context for fetching dimens.
+     * @param incognito Whether or not this button is incognito.
+     * @param resource The Android resource id for this button.
+     * @param backgroundResource The Android resource id for this button background.
+     * @param type The type of button.
+     * @param parentView The parent view this button is embedded in.
+     * @param width The button width.
+     * @param height The button height.
      * @param clickHandler The action to be performed on click.
+     * @param keyboardFocusHandler The action to be performed on keyboard focus.
+     * @param clickSlopDp The click slop for the button, in dp.
      */
     public CompositorButton(
-            Context context, float width, float height, CompositorOnClickHandler clickHandler) {
-        mBounds.set(0, 0, width, height);
+            Context context,
+            boolean incognito,
+            @DrawableRes int resource,
+            @DrawableRes int backgroundResource,
+            @ButtonType int type,
+            @Nullable StripLayoutView parentView,
+            float width,
+            float height,
+            @Nullable TooltipHandler tooltipHandler,
+            StripLayoutViewOnClickHandler clickHandler,
+            StripLayoutViewOnKeyboardFocusHandler keyboardFocusHandler,
+            float clickSlopDp) {
+        super(
+                incognito,
+                clickHandler,
+                keyboardFocusHandler,
+                /* accessibilityFocusHandler= */ null,
+                context);
+        mResource = resource;
+        mBackgroundResource = backgroundResource;
+        mDrawBounds.set(0, 0, width, height);
 
+        mType = type;
         mOpacity = 1.f;
         mIsPressed = false;
-        mIsVisible = true;
-        mIsIncognito = false;
-        mIsEnabled = true;
+        mParentView = parentView;
+        mTooltipHandler = tooltipHandler;
+        setVisible(true);
 
-        Resources res = context.getResources();
-        float sPxToDp = 1.0f / res.getDisplayMetrics().density;
-        mClickSlop = res.getDimension(R.dimen.compositor_button_slop) * sPxToDp;
-
-        mClickHandler = clickHandler;
+        mClickSlop = clickSlopDp;
+        // Apply the click slop to the button's touch target.
+        setTouchTargetInsets(null, null, null, null);
     }
 
     /**
-     * A set of Android resources to supply to the compositor.
-     * @param resource                  The default Android resource.
-     * @param pressedResource           The pressed Android resource.
-     * @param incognitoResource         The incognito Android resource.
-     * @param incognitoPressedResource  The incognito pressed resource.
+     * @return The Android resource that represents button background.
      */
-    public void setResources(int resource, int pressedResource, int incognitoResource,
-            int incognitoPressedResource) {
-        mResource = resource;
-        mPressedResource = pressedResource;
-        mIncognitoResource = incognitoResource;
-        mIncognitoPressedResource = incognitoPressedResource;
-    }
-
-    /**
-     * @param description A string describing the resource.
-     */
-    public void setAccessibilityDescription(String description, String incognitoDescription) {
-        mAccessibilityDescription = description;
-        mAccessibilityDescriptionIncognito = incognitoDescription;
+    public int getBackgroundResourceId() {
+        return mBackgroundResource;
     }
 
     @Override
-    public String getAccessibilityDescription() {
-        return mIsIncognito ? mAccessibilityDescriptionIncognito : mAccessibilityDescription;
-    }
-
-    @Override
-    public void getTouchTarget(RectF outTarget) {
-        outTarget.set(mBounds);
-        // Get the whole touchable region.
-        outTarget.inset((int) -mClickSlop, (int) -mClickSlop);
+    public boolean checkClickedOrHovered(float x, float y) {
+        if (mOpacity < 1.f || !isVisible()) return false;
+        return super.checkClickedOrHovered(x, y);
     }
 
     /**
-     * @return The x offset of the button.
+     * @return Parent view this button is embedded in.
      */
-    public float getX() {
-        return mBounds.left;
-    }
-
-    /**
-     * @param x The x offset of the button.
-     */
-    public void setX(float x) {
-        mBounds.right = x + mBounds.width();
-        mBounds.left = x;
-    }
-
-    /**
-     * @return The y offset of the button.
-     */
-    public float getY() {
-        return mBounds.top;
-    }
-
-    /**
-     * @param y The y offset of the button.
-     */
-    public void setY(float y) {
-        mBounds.bottom = y + mBounds.height();
-        mBounds.top = y;
-    }
-
-    /**
-     * @return The width of the button.
-     */
-    public float getWidth() {
-        return mBounds.width();
-    }
-
-    /**
-     * @param width The width of the button.
-     */
-    public void setWidth(float width) {
-        mBounds.right = mBounds.left + width;
-    }
-
-    /**
-     * @return The height of the button.
-     */
-    public float getHeight() {
-        return mBounds.height();
-    }
-
-    /**
-     * @param height The height of the button.
-     */
-    public void setHeight(float height) {
-        mBounds.bottom = mBounds.top + height;
+    public @Nullable StripLayoutView getParentView() {
+        return mParentView;
     }
 
     /**
      * @param bounds A {@link RectF} representing the location of the button.
      */
     public void setBounds(RectF bounds) {
-        mBounds.set(bounds);
+        mDrawBounds.set(bounds);
+    }
+
+    @Override
+    public void setIncognito(boolean incognito) {
+        // Only the model selector button should be able to toggle incognito state.
+        assert mType == ButtonType.INCOGNITO_SWITCHER;
+        super.setIncognito(incognito);
     }
 
     /**
@@ -202,10 +176,10 @@ public class CompositorButton implements VirtualView {
     }
 
     /**
-     * @return The pressed state of the button.
+     * @return Type for this button.
      */
-    public boolean isPressed() {
-        return mIsPressed;
+    public @ButtonType int getType() {
+        return mType;
     }
 
     /**
@@ -213,85 +187,67 @@ public class CompositorButton implements VirtualView {
      */
     public void setPressed(boolean state) {
         mIsPressed = state;
+
+        // clear isPressedFromMouse state.
+        if (!state) {
+            setPressedFromMouse(false);
+        }
     }
 
     /**
-     * @return The visiblity of the button.
+     * @param state The pressed state of the button.
+     * @param fromMousePrimaryButton Whether the event originates from a mouse.
      */
-    public boolean isVisible() {
-        return mIsVisible;
+    public void setPressed(boolean state, boolean fromMousePrimaryButton) {
+        mIsPressed = state;
+        mIsPressedFromMouse = fromMousePrimaryButton;
     }
 
     /**
-     * @param state The visibility of the button.
+     * Set whether the button is pressed from mouse.
+     *
+     * @param isPressedFromMouse Whether the button is pressed from mouse.
      */
-    public void setVisible(boolean state) {
-        mIsVisible = state;
+    private void setPressedFromMouse(boolean isPressedFromMouse) {
+        mIsPressedFromMouse = isPressedFromMouse;
     }
 
     /**
-     * @return The incognito state of the button.
+     * @return The pressed state of the button.
      */
-    public boolean isIncognito() {
-        return mIsIncognito;
+    public boolean isPressed() {
+        return mIsPressed;
     }
 
     /**
-     * @param state The incognito state of the button.
+     * @return Whether the button is pressed from mouse.
      */
-    public void setIncognito(boolean state) {
-        mIsIncognito = state;
+    public boolean isPressedFromMouse() {
+        return mIsPressed && mIsPressedFromMouse;
     }
 
     /**
-     * @return Whether or not the button can be interacted with.
+     * Do not account for the button's click slop in the method inputs when invoking this method as
+     * this is accounted for in this method.
      */
-    public boolean isEnabled() {
-        return mIsEnabled;
-    }
-
-    /**
-     * @param enabled Whether or not the button can be interacted with.
-     */
-    public void setEnabled(boolean enabled) {
-        mIsEnabled = enabled;
-    }
-
-    /**
-     * @param slop  The additional area outside of the button to be considered when
-     *              checking click target bounds.
-     */
-    public void setClickSlop(float slop) {
-        mClickSlop = slop;
+    @Override
+    public void setTouchTargetInsets(
+            @Nullable Float left,
+            @Nullable Float top,
+            @Nullable Float right,
+            @Nullable Float bottom) {
+        float leftInset = -mClickSlop + (left != null ? left : 0);
+        float topInset = -mClickSlop + (top != null ? top : 0);
+        float rightInset = -mClickSlop + (right != null ? right : 0);
+        float bottomInset = -mClickSlop + (bottom != null ? bottom : 0);
+        super.setTouchTargetInsets(leftInset, topInset, rightInset, bottomInset);
     }
 
     /**
      * @return The Android resource id for this button based on it's state.
      */
     public int getResourceId() {
-        if (isPressed()) {
-            return isIncognito() ? mIncognitoPressedResource : mPressedResource;
-        }
-        return isIncognito() ? mIncognitoResource : mResource;
-    }
-
-    /**
-     * @param x The x offset of the click.
-     * @param y The y offset of the click.
-     * @return Whether or not that click occurred inside of the button + slop area.
-     */
-    @Override
-    public boolean checkClicked(float x, float y) {
-        if (mOpacity < 1.f || !mIsVisible || !mIsEnabled) return false;
-
-        mCacheBounds.set(mBounds);
-        mCacheBounds.inset(-mClickSlop, -mClickSlop);
-        return mCacheBounds.contains(x, y);
-    }
-
-    @Override
-    public void handleClick(long time) {
-        mClickHandler.onClick(time);
+        return mResource;
     }
 
     /**
@@ -301,7 +257,7 @@ public class CompositorButton implements VirtualView {
      * @return      Whether or not the button is selected after the event.
      */
     public boolean drag(float x, float y) {
-        if (!checkClicked(x, y)) {
+        if (!checkClickedOrHovered(x, y)) {
             setPressed(false);
             return false;
         }
@@ -310,26 +266,29 @@ public class CompositorButton implements VirtualView {
 
     /**
      * Set state for an onDown event.
-     * @param x     The x offset of the event.
-     * @param y     The y offset of the event.
-     * @return      Whether or not the close button was selected.
+     *
+     * @param x The x offset of the event.
+     * @param y The y offset of the event.
+     * @param buttons State of all buttons that were pressed when onDown was invoked.
+     * @return Whether or not the button was hit.
      */
-    public boolean onDown(float x, float y) {
-        if (checkClicked(x, y)) {
-            setPressed(true);
+    public boolean onDown(float x, float y, int buttons) {
+        if (checkClickedOrHovered(x, y) && MotionEventUtils.isTouchOrPrimaryButton(buttons)) {
+            setPressed(true, MotionEventUtils.isPrimaryButton(buttons));
             return true;
         }
         return false;
     }
 
     /**
-     * @param x     The x offset of the event.
-     * @param y     The y offset of the event.
-     * @return      If the button was clicked or not.
+     * @param x The x offset of the event.
+     * @param y The y offset of the event.
+     * @param buttons State of all buttons that were pressed when onDown was invoked.
+     * @return Whether or not the button was clicked.
      */
-    public boolean click(float x, float y) {
-        if (checkClicked(x, y)) {
-            setPressed(false);
+    public boolean click(float x, float y, int buttons) {
+        if (checkClickedOrHovered(x, y) && MotionEventUtils.isTouchOrPrimaryButton(buttons)) {
+            setPressed(false, MotionEventUtils.isPrimaryButton(buttons));
             return true;
         }
         return false;
@@ -337,11 +296,46 @@ public class CompositorButton implements VirtualView {
 
     /**
      * Set state for an onUpOrCancel event.
+     *
      * @return Whether or not the button was selected.
      */
     public boolean onUpOrCancel() {
         boolean state = isPressed();
-        setPressed(false);
+        setPressed(/* state= */ false, /* fromMousePrimaryButton= */ false);
         return state;
+    }
+
+    /**
+     * Set whether button is hovered on and notify the tooltip handler if the hover state changed.
+     *
+     * @param isHovered Whether the button is hovered on.
+     */
+    public void setHovered(boolean isHovered) {
+        if (mTooltipHandler != null && mIsHovered != isHovered) {
+            mTooltipHandler.setTooltipText(isHovered ? getAccessibilityDescription() : "");
+        }
+        mIsHovered = isHovered;
+    }
+
+    /**
+     * @return Whether the button is hovered on.
+     */
+    public boolean isHovered() {
+        return mIsHovered;
+    }
+
+    @Override
+    public void setVisible(boolean isVisible) {
+        if (!isVisible) {
+            setHovered(false);
+        }
+        super.setVisible(isVisible);
+    }
+
+    /**
+     * @return Whether hover background should be applied to the button.
+     */
+    public boolean getShouldApplyHoverBackground() {
+        return isHovered() || isPressedFromMouse();
     }
 }

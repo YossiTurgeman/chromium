@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,9 @@ namespace embedder_support {
 
 // Disables pop-up blocking.
 const char kDisablePopupBlocking[] = "disable-popup-blocking";
+
+// Enable headless mode.
+const char kHeadless[] = "headless";
 
 // Contains a list of feature names for which origin trial experiments should
 // be disabled. Names should be separated by "|" characters.
@@ -20,5 +23,14 @@ const char kOriginTrialDisabledTokens[] = "origin-trial-disabled-tokens";
 // Comma-separated list of keys which will override the default public keys for
 // checking origin trial tokens.
 const char kOriginTrialPublicKey[] = "origin-trial-public-key";
+
+// Sets the Reporting API delay to under a second to allow much quicker reports.
+const char kShortReportingDelay[] = "short-reporting-delay";
+
+// Set when Chromium should use a mobile user agent.
+const char kUseMobileUserAgent[] = "use-mobile-user-agent";
+
+// A string used to override the default user agent with a custom one.
+const char kUserAgent[] = "user-agent";
 
 }  // namespace embedder_support

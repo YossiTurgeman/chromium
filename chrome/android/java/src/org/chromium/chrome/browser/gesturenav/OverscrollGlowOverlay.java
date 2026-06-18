@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,20 +7,17 @@ package org.chromium.chrome.browser.gesturenav;
 import android.graphics.RectF;
 import android.view.ViewGroup;
 
-import org.chromium.chrome.browser.compositor.LayerTitleCache;
-import org.chromium.chrome.browser.compositor.layouts.components.VirtualView;
-import org.chromium.chrome.browser.compositor.layouts.eventfilter.EventFilter;
-import org.chromium.chrome.browser.compositor.overlays.SceneOverlay;
-import org.chromium.chrome.browser.compositor.scene_layer.SceneOverlayLayer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.layouts.SceneOverlay;
+import org.chromium.chrome.browser.layouts.scene_layer.SceneOverlayLayer;
 import org.chromium.ui.base.WindowAndroid;
 import org.chromium.ui.resources.ResourceManager;
 
-import java.util.List;
-
 /**
- * Handles overscroll glow effect when gesture navigation can't go forward any more.
- * Renders the effect on a compositor layer in scene overlay layer tree.
+ * Handles overscroll glow effect when gesture navigation can't go forward any more. Renders the
+ * effect on a compositor layer in scene overlay layer tree.
  */
+@NullMarked
 class OverscrollGlowOverlay extends NavigationGlow implements SceneOverlay {
     private final OverscrollSceneLayer mSceneLayer;
     private final Runnable mRequestLayerUpdate;
@@ -75,11 +72,14 @@ class OverscrollGlowOverlay extends NavigationGlow implements SceneOverlay {
     // SceneOverlay implementation
 
     @Override
-    public SceneOverlayLayer getUpdatedSceneOverlayTree(RectF viewport, RectF visibleViewport,
-            LayerTitleCache layerTitleCache, ResourceManager resourceManager, float yOffset) {
+    public SceneOverlayLayer getUpdatedSceneOverlayTree(
+            RectF viewport, RectF visibleViewport, ResourceManager resourceManager) {
         if (!mSceneLayer.update(resourceManager, mOffset)) setIsShowing(false);
         return mSceneLayer;
     }
+
+    @Override
+    public void removeFromParent() {}
 
     @Override
     public boolean isSceneOverlayTreeShowing() {
@@ -87,8 +87,8 @@ class OverscrollGlowOverlay extends NavigationGlow implements SceneOverlay {
     }
 
     @Override
-    public EventFilter getEventFilter() {
-        return null;
+    public boolean isShowing() {
+        return mIsShowing;
     }
 
     @Override
@@ -96,30 +96,7 @@ class OverscrollGlowOverlay extends NavigationGlow implements SceneOverlay {
             float width, float height, float visibleViewportOffsetY, int orientation) {}
 
     @Override
-    public void getVirtualViews(List<VirtualView> views) {}
-
-    @Override
-    public boolean shouldHideAndroidBrowserControls() {
-        return false;
-    }
-
-    @Override
     public boolean updateOverlay(long time, long dt) {
         return true;
-    }
-
-    @Override
-    public boolean onBackPressed() {
-        return false;
-    }
-
-    @Override
-    public boolean handlesTabCreating() {
-        return false;
-    }
-
-    @Override
-    public int getPosition() {
-        return Position.BACK;
     }
 }

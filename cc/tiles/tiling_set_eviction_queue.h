@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 
 #include <vector>
 
+#include "base/memory/raw_ptr_exclusion.h"
 #include "cc/cc_export.h"
 #include "cc/tiles/picture_layer_tiling_set.h"
 #include "cc/tiles/prioritized_tile.h"
@@ -42,21 +43,17 @@ namespace cc {
 //
 // The tilings are ordered as follows. Suppose we have tilings with the scales
 // below:
-// 2.0   1.5   1.0(HR)   0.8   0.5   0.25(LR)   0.2   0.1
-// With HR referring to high res tiling and LR referring to low res tiling,
-// then tilings are processed in this order:
-// 2.0   1.5   0.1   0.2   0.5   0.8   0.25(LR)   1.0(HR).
+// 2.0   1.5   1.0(HR)   0.8   0.5   0.2   0.1
+// With HR referring to high res tiling, then tilings are processed in this
+// order:
+// 2.0   1.5   0.1   0.2   0.5   0.8   1.0(HR).
 //
 // To put it differently:
 //  1. Process the highest scale tiling down to, but not including, high res
 //     tiling.
-//  2. Process the lowest scale tiling up to, but not including, the low res
-//     tiling. In cases without a low res tiling, this is an empty set.
-//  3. Process low res tiling up to high res tiling, including neither high
-//     nor low res tilings. In cases without a low res tiling, this set
-//     includes all tilings with a lower scale than the high res tiling.
-//  4. Process the low res tiling.
-//  5. Process the high res tiling.
+//  2. Process the lowest scale tiling up to, but not including, the high res
+//     tiling.
+//  3. Process the high res tiling.
 //
 // Additional notes:
 // Since eventually the tiles are considered to have the priority which is the
@@ -112,7 +109,11 @@ class CC_EXPORT TilingSetEvictionQueue {
     bool GetFirstTileAndCheckIfValid(TilingIteratorType* iterator);
 
     PrioritizedTile prioritized_tile_;
-    std::vector<PictureLayerTiling*>* tilings_;
+
+    // `tilings_` is not a raw_ptr<...> for performance reasons (based on
+    // analysis of sampling profiler data and tab_search:top100:2020).
+    RAW_PTR_EXCLUSION std::vector<PictureLayerTiling*>* tilings_;
+
     WhichTree tree_;
     PictureLayerTiling::PriorityRectType priority_rect_type_;
     size_t tiling_index_;

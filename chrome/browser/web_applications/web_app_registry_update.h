@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 #include <memory>
 #include <vector>
 
-#include "base/callback.h"
-#include "base/macros.h"
-#include "base/util/type_safety/pass_key.h"
-#include "chrome/browser/web_applications/components/web_app_id.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/types/pass_key.h"
+#include "components/webapps/common/web_app_id.h"
 
 namespace web_app {
 
@@ -22,17 +22,18 @@ class WebAppSyncBridge;
 // A raw registry update data.
 struct RegistryUpdateData {
   RegistryUpdateData();
+  RegistryUpdateData(const RegistryUpdateData&) = delete;
+  RegistryUpdateData& operator=(const RegistryUpdateData&) = delete;
   ~RegistryUpdateData();
 
   using Apps = std::vector<std::unique_ptr<WebApp>>;
   Apps apps_to_create;
   Apps apps_to_update;
 
-  std::vector<AppId> apps_to_delete;
+  std::vector<webapps::AppId> apps_to_delete;
 
   bool IsEmpty() const;
 
-  DISALLOW_COPY_AND_ASSIGN(RegistryUpdateData);
 };
 
 // An explicit writable "view" for the registry. Any write operations must be
@@ -41,40 +42,49 @@ struct RegistryUpdateData {
 class WebAppRegistryUpdate {
  public:
   WebAppRegistryUpdate(const WebAppRegistrar* registrar,
-                       util::PassKey<WebAppSyncBridge>);
+                       base::PassKey<WebAppSyncBridge>);
+  WebAppRegistryUpdate(const WebAppRegistryUpdate&) = delete;
+  WebAppRegistryUpdate& operator=(const WebAppRegistryUpdate&) = delete;
   ~WebAppRegistryUpdate();
 
-  // Register a new app.
+  // DO NOT USE THIS TO INSTALL A WEB APP IN TESTS.
+  // Please use web_app_install_test_utils.h or web_app_browsertest_util.h.
+  // TODO(https://crbug.com/411126942): Add a passkey or make this private so
+  // only system internals can call this.
   void CreateApp(std::unique_ptr<WebApp> web_app);
   // Delete registered app.
-  void DeleteApp(const AppId& app_id);
+  void DeleteApp(const webapps::AppId& app_id);
   // Acquire a mutable existing app to set new field values.
-  WebApp* UpdateApp(const AppId& app_id);
+  WebApp* UpdateApp(const webapps::AppId& app_id);
 
-  const RegistryUpdateData& update_data() const { return *update_data_; }
-  std::unique_ptr<RegistryUpdateData> TakeUpdateData();
+  std::unique_ptr<RegistryUpdateData> TakeUpdateData(
+      base::PassKey<WebAppSyncBridge> pass_key);
 
  private:
   std::unique_ptr<RegistryUpdateData> update_data_;
-  const WebAppRegistrar* const registrar_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebAppRegistryUpdate);
+  const raw_ptr<const WebAppRegistrar> registrar_;
 };
 
-// A convenience utility class to use RAII for WebAppSyncBridge::BeginUpdate and
-// WebAppSyncBridge::CommitUpdate calls.
-class ScopedRegistryUpdate {
+// A convenience utility class to use RAII for `WebAppSyncBridge::BeginUpdate`
+// and `WebAppSyncBridge::CommitUpdate` calls.
+class [[nodiscard]] ScopedRegistryUpdate {
  public:
-  explicit ScopedRegistryUpdate(WebAppSyncBridge* sync_bridge);
+  ScopedRegistryUpdate(
+      base::PassKey<WebAppSyncBridge>,
+      std::unique_ptr<WebAppRegistryUpdate> update,
+      base::OnceCallback<void(std::unique_ptr<WebAppRegistryUpdate>)>
+          commit_update);
+  ScopedRegistryUpdate(ScopedRegistryUpdate&&) noexcept;
+  ScopedRegistryUpdate(const ScopedRegistryUpdate&) = delete;
+  ScopedRegistryUpdate& operator=(const ScopedRegistryUpdate&) = delete;
   ~ScopedRegistryUpdate();
 
   WebAppRegistryUpdate* operator->() { return update_.get(); }
 
  private:
   std::unique_ptr<WebAppRegistryUpdate> update_;
-  WebAppSyncBridge* const sync_bridge_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedRegistryUpdate);
+  base::OnceCallback<void(std::unique_ptr<WebAppRegistryUpdate>)>
+      commit_update_;
 };
 
 }  // namespace web_app

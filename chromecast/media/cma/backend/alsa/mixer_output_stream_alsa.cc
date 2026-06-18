@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,6 @@
 #include "base/command_line.h"
 #include "base/logging.h"
 #include "base/notreached.h"
-#include "base/stl_util.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "chromecast/base/chromecast_switches.h"
@@ -53,7 +52,8 @@ void ToFixedPoint(const float* input,
                   int frames,
                   typename TargetSampleTypeTraits::ValueType* dest_buffer) {
   for (int f = 0; f < frames; ++f) {
-    dest_buffer[f] = TargetSampleTypeTraits::FromFloat(input[f]);
+    UNSAFE_TODO(dest_buffer[f]) =
+        TargetSampleTypeTraits::FromFloat(UNSAFE_TODO(input[f]));
   }
 }
 
@@ -115,7 +115,7 @@ constexpr int* kAlsaDirDontCare = nullptr;
 // retried. Below constants define retries params.
 constexpr int kRestoreAfterSuspensionAttempts = 10;
 constexpr base::TimeDelta kRestoreAfterSuspensionAttemptDelay =
-    base::TimeDelta::FromMilliseconds(20);
+    base::Milliseconds(20);
 
 // These sample formats will be tried in order. 32 bit samples is ideal, but
 // some devices do not support 32 bit samples.
@@ -256,7 +256,8 @@ bool MixerOutputStreamAlsa::Write(const float* data,
     }
     frames_left -= frames_or_error;
     DCHECK_GE(frames_left, 0);
-    output_data += frames_or_error * num_output_channels_ * bytes_per_sample;
+    UNSAFE_TODO(output_data +=
+                frames_or_error * num_output_channels_ * bytes_per_sample);
   }
   first_write_ = false;
   UpdateRenderingDelay();
@@ -465,14 +466,12 @@ int MixerOutputStreamAlsa::DetermineOutputRate(int requested_sample_rate) {
   // common sample rates as a fallback. Note that PcmHwParamsSetRateNear
   // doesn't always choose a rate that's actually near the given input sample
   // rate when the input sample rate is not supported.
-  const int* kSupportedSampleRatesEnd =
-      kSupportedSampleRates + base::size(kSupportedSampleRates);
-  auto* nearest_sample_rate =
-      std::min_element(kSupportedSampleRates, kSupportedSampleRatesEnd,
-                       [requested_sample_rate](int r1, int r2) -> bool {
-                         return abs(requested_sample_rate - r1) <
-                                abs(requested_sample_rate - r2);
-                       });
+  auto* nearest_sample_rate = std::min_element(
+      std::begin(kSupportedSampleRates), std::end(kSupportedSampleRates),
+      [requested_sample_rate](int r1, int r2) -> bool {
+        return abs(requested_sample_rate - r1) <
+               abs(requested_sample_rate - r2);
+      });
   // Resample audio with sample rates deemed to be too low (i.e.  below 32kHz)
   // because some common AV receivers don't support optical out at these
   // frequencies. See b/26385501

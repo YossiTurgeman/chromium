@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,12 @@
 
 #include <memory>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ui/browser.h"
 #include "components/javascript_dialogs/tab_modal_dialog_view.h"
+#include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/javascript_dialog_manager.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/window/dialog_delegate.h"
 
 namespace views {
@@ -22,50 +25,67 @@ class MessageBoxView;
 class JavaScriptTabModalDialogViewViews
     : public javascript_dialogs::TabModalDialogView,
       public views::DialogDelegateView {
+  METADATA_HEADER(JavaScriptTabModalDialogViewViews, views::DialogDelegateView)
+
  public:
+  JavaScriptTabModalDialogViewViews(const JavaScriptTabModalDialogViewViews&) =
+      delete;
+  JavaScriptTabModalDialogViewViews& operator=(
+      const JavaScriptTabModalDialogViewViews&) = delete;
   ~JavaScriptTabModalDialogViewViews() override;
 
-  // JavaScriptDialog:
+  // javascript_dialogs::TabModalDialogView:
   void CloseDialogWithoutCallback() override;
-  base::string16 GetUserInput() override;
+  std::u16string GetUserInput() override;
 
   // views::DialogDelegate:
-  base::string16 GetWindowTitle() const override;
+  std::u16string GetWindowTitle() const override;
 
   // views::WidgetDelegate:
   bool ShouldShowCloseButton() const override;
   views::View* GetInitiallyFocusedView() override;
-  ui::ModalType GetModalType() const override;
 
   // views::View:
   void AddedToWidget() override;
+
+  // TODO(crbug.com/40843165): We cannot use unique_ptr because ownership of
+  // this object gets passed to Views.
+  static JavaScriptTabModalDialogViewViews* CreateAlertDialogForTesting(
+      Browser* browser,
+      std::u16string title,
+      std::u16string message);
 
  private:
   friend class JavaScriptDialog;
   friend class JavaScriptTabModalDialogManagerDelegateDesktop;
 
+  // For a Modal Dialog to be shown, there must not be another Modal Dialog
+  // showing. The caller is responsible for checking this and not constructing
+  // this dialog if another is showing.
   JavaScriptTabModalDialogViewViews(
       content::WebContents* parent_web_contents,
       content::WebContents* alerting_web_contents,
-      const base::string16& title,
+      const std::u16string& title,
       content::JavaScriptDialogType dialog_type,
-      const base::string16& message_text,
-      const base::string16& default_prompt_text,
+      const std::u16string& message_text,
+      const std::u16string& default_prompt_text,
       content::JavaScriptDialogManager::DialogClosedCallback dialog_callback,
       base::OnceClosure dialog_force_closed_callback);
 
-  base::string16 title_;
-  base::string16 message_text_;
-  base::string16 default_prompt_text_;
+  std::u16string title_;
+  std::u16string message_text_;
+  std::u16string default_prompt_text_;
   content::JavaScriptDialogManager::DialogClosedCallback dialog_callback_;
   base::OnceClosure dialog_force_closed_callback_;
 
   // The message box view whose commands we handle.
-  views::MessageBoxView* message_box_view_;
+  raw_ptr<views::MessageBoxView> message_box_view_;
+
+  // Prevents other features from showing tab-modal UI. Connected to the
+  // lifetime of this dialog.
+  std::unique_ptr<tabs::ScopedTabModalUI> scoped_tab_modal_ui_;
 
   base::WeakPtrFactory<JavaScriptTabModalDialogViewViews> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(JavaScriptTabModalDialogViewViews);
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_JAVASCRIPT_TAB_MODAL_DIALOG_VIEW_VIEWS_H_

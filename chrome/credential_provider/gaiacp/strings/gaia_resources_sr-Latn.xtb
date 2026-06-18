@@ -3,9 +3,9 @@
 <translationbundle lang="sr-Latn">
 <translation id="1156061499538526818">Lozinka za poslovni nalog je promenjena. Unesite lozinku za Windows da biste sinhronizovali nalog za Windows sa poslovnim nalogom.</translation>
 <translation id="1383286653814676580">Koristi se za pokretanje Google Credential Provider stranice za prijavljivanje.</translation>
-<translation id="200772894174702141">Ne možete da se prijavite na poslovni nalog. Uverite se da je uređaj povezan na internet i probajte ponovo.</translation>
 <translation id="2048923169632968961">Došlo je do problema pri sinhronizaciji lozinke za poslovni nalog sa Windows profilom. Obratite se administratoru.</translation>
 <translation id="2515346402363002066">Sesija je istekla. Prijavite se pomoću poslovnog naloga.</translation>
+<translation id="2549902055700841962">Ne možete da se prijavite na poslovni nalog. Obratite se administratoru.</translation>
 <translation id="2566603360883977759">Za ovu imejl adresu nije dozvoljeno prijavljivanje. Probajte ponovo pomoću naloga koji koristite za posao ili školu. Ako i dalje ne možete da se prijavite, obratite se administratoru.</translation>
 <translation id="2844349213149998955">Prijavljivanje pomoću ličnog naloga nije dozvoljeno na ovom uređaju. Prijavite se pomoću poslovnog naloga.</translation>
 <translation id="3217145568844727893">Ako nastavite bez unošenja aktuelne lozinke za Windows, možda trajno izgubite podatke na ovom uređaju.</translation>
@@ -33,7 +33,7 @@
 <translation id="8109730953933509335">Probali ste da promenite lozinku za nevažećeg korisnika. Obratite se administratoru.</translation>
 <translation id="8448455363630347124">Nalog je onemogućen zbog previše neuspelih pokušaja unosa lozinke. Obratite se administratoru da biste omogućili nalog.</translation>
 <translation id="8453641970025433267">Administrator vam ne dozvoljava da se prijavite pomoću ovog naloga. Probajte sa drugim nalogom.</translation>
-<translation id="8639729688781680518">Zaboravili ste lozinku za Windows</translation>
+<translation id="8639729688781680518">Zaboravljena lozinka za Windows</translation>
 <translation id="866458870819756755">Pravljenje korisnika nije uspelo.</translation>
 <translation id="9055998212250844221">Korisnički nalog koji je otvorio Google dobavljač akreditiva za Windows</translation>
 </translationbundle>

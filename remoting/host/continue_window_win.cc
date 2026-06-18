@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,14 +8,13 @@
 
 #include <memory>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/compiler_specific.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/macros.h"
-#include "base/single_thread_task_runner.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/win/current_module.h"
 #include "remoting/host/win/core_resource.h"
 
@@ -26,6 +25,10 @@ namespace {
 class ContinueWindowWin : public ContinueWindow {
  public:
   ContinueWindowWin();
+
+  ContinueWindowWin(const ContinueWindowWin&) = delete;
+  ContinueWindowWin& operator=(const ContinueWindowWin&) = delete;
+
   ~ContinueWindowWin() override;
 
  protected:
@@ -34,7 +37,9 @@ class ContinueWindowWin : public ContinueWindow {
   void HideUi() override;
 
  private:
-  static BOOL CALLBACK DialogProc(HWND hwmd, UINT msg, WPARAM wParam,
+  static BOOL CALLBACK DialogProc(HWND hwmd,
+                                  UINT msg,
+                                  WPARAM wParam,
                                   LPARAM lParam);
 
   BOOL OnDialogMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -42,13 +47,9 @@ class ContinueWindowWin : public ContinueWindow {
   void EndDialog();
 
   HWND hwnd_;
-
-  DISALLOW_COPY_AND_ASSIGN(ContinueWindowWin);
 };
 
-ContinueWindowWin::ContinueWindowWin()
-    : hwnd_(nullptr) {
-}
+ContinueWindowWin::ContinueWindowWin() : hwnd_(nullptr) {}
 
 ContinueWindowWin::~ContinueWindowWin() {
   EndDialog();
@@ -59,7 +60,7 @@ void ContinueWindowWin::ShowUi() {
   DCHECK(!hwnd_);
 
   hwnd_ = CreateDialogParam(CURRENT_MODULE(), MAKEINTRESOURCE(IDD_CONTINUE),
-                            nullptr, (DLGPROC)DialogProc, (LPARAM) this);
+                            nullptr, (DLGPROC)DialogProc, (LPARAM)this);
   if (!hwnd_) {
     LOG(ERROR) << "Unable to create Disconnect dialog for remoting.";
     return;
@@ -74,8 +75,10 @@ void ContinueWindowWin::HideUi() {
   EndDialog();
 }
 
-BOOL CALLBACK ContinueWindowWin::DialogProc(HWND hwnd, UINT msg,
-                                            WPARAM wParam, LPARAM lParam) {
+BOOL CALLBACK ContinueWindowWin::DialogProc(HWND hwnd,
+                                            UINT msg,
+                                            WPARAM wParam,
+                                            LPARAM lParam) {
   ContinueWindowWin* win = nullptr;
   if (msg == WM_INITDIALOG) {
     win = reinterpret_cast<ContinueWindowWin*>(lParam);
@@ -85,13 +88,16 @@ BOOL CALLBACK ContinueWindowWin::DialogProc(HWND hwnd, UINT msg,
     LONG_PTR lp = GetWindowLongPtr(hwnd, DWLP_USER);
     win = reinterpret_cast<ContinueWindowWin*>(lp);
   }
-  if (win == nullptr)
+  if (win == nullptr) {
     return FALSE;
+  }
   return win->OnDialogMessage(hwnd, msg, wParam, lParam);
 }
 
-BOOL ContinueWindowWin::OnDialogMessage(HWND hwnd, UINT msg,
-                                        WPARAM wParam, LPARAM lParam) {
+BOOL ContinueWindowWin::OnDialogMessage(HWND hwnd,
+                                        UINT msg,
+                                        WPARAM wParam,
+                                        LPARAM lParam) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   switch (msg) {

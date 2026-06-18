@@ -19,13 +19,13 @@
 
 #include "third_party/blink/renderer/core/dom/qualified_name.h"
 
+#include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/mathml_names.h"
 #include "third_party/blink/renderer/core/svg_names.h"
 #include "third_party/blink/renderer/core/xlink_names.h"
 #include "third_party/blink/renderer/core/xml_names.h"
 #include "third_party/blink/renderer/core/xmlns_names.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 #include "third_party/blink/renderer/platform/wtf/hash_set.h"
 #include "third_party/blink/renderer/platform/wtf/size_assertions.h"
 #include "third_party/blink/renderer/platform/wtf/static_constructors.h"
@@ -41,8 +41,7 @@ struct SameSizeAsQualifiedNameImpl
 
 ASSERT_SIZE(QualifiedName::QualifiedNameImpl, SameSizeAsQualifiedNameImpl);
 
-using QualifiedNameCache =
-    HashSet<QualifiedName::QualifiedNameImpl*, QualifiedNameHash>;
+using QualifiedNameCache = HashSet<QualifiedName::QualifiedNameImpl*>;
 
 static QualifiedNameCache& GetQualifiedNameCache() {
   // This code is lockless and thus assumes it all runs on one thread!
@@ -61,13 +60,13 @@ struct QNameComponentsTranslator {
            data.components_.local_name_ == name->local_name_.Impl() &&
            data.components_.namespace_ == name->namespace_.Impl();
   }
-  static void Translate(QualifiedName::QualifiedNameImpl*& location,
-                        const QualifiedNameData& data,
-                        unsigned) {
+  static void Store(QualifiedName::QualifiedNameImpl*& location,
+                    const QualifiedNameData& data,
+                    unsigned) {
     const QualifiedNameComponents& components = data.components_;
     auto name = QualifiedName::QualifiedNameImpl::Create(
-        AtomicString(components.prefix_), AtomicString(components.local_name_),
-        AtomicString(components.namespace_), data.is_static_);
+        components.prefix_, components.local_name_, components.namespace_,
+        data.is_static_);
     name->AddRef();
     location = name.get();
   }
@@ -77,7 +76,7 @@ QualifiedName::QualifiedName(const AtomicString& p,
                              const AtomicString& l,
                              const AtomicString& n) {
   QualifiedNameData data = {
-      {p.Impl(), l.Impl(), n.IsEmpty() ? g_null_atom.Impl() : n.Impl()}, false};
+      {p.Impl(), l.Impl(), n.empty() ? g_null_atom.Impl() : n.Impl()}, false};
   QualifiedNameCache::AddResult add_result =
       GetQualifiedNameCache().AddWithTranslator<QNameComponentsTranslator>(
           data);
@@ -85,6 +84,9 @@ QualifiedName::QualifiedName(const AtomicString& p,
   if (add_result.is_new_entry)
     impl_->Release();
 }
+
+QualifiedName::QualifiedName(const AtomicString& local_name)
+    : QualifiedName(g_null_atom, local_name, g_null_atom) {}
 
 QualifiedName::QualifiedName(const AtomicString& p,
                              const AtomicString& l,
@@ -108,15 +110,15 @@ QualifiedName::QualifiedNameImpl::~QualifiedNameImpl() {
 String QualifiedName::ToString() const {
   String local = LocalName();
   if (HasPrefix())
-    return Prefix().GetString() + ":" + local;
+    return StrCat({Prefix().GetString(), ":", local});
   return local;
 }
 
 // Global init routines
-DEFINE_GLOBAL(QualifiedName, g_any_name);
-DEFINE_GLOBAL(QualifiedName, g_null_name);
+DEFINE_GLOBAL(, QualifiedName, g_any_name);
+DEFINE_GLOBAL(, QualifiedName, g_null_name);
 
-void QualifiedName::InitAndReserveCapacityForSize(unsigned size) {
+void QualifiedName::InitAndReserveCapacityForSize(wtf_size_t size) {
   DCHECK(g_star_atom.Impl());
   GetQualifiedNameCache().ReserveCapacityForSize(
       size + 2 /*g_star_atom and g_null_atom */);
@@ -127,7 +129,7 @@ void QualifiedName::InitAndReserveCapacityForSize(unsigned size) {
 }
 
 const AtomicString& QualifiedName::LocalNameUpperSlow() const {
-  impl_->local_name_upper_ = impl_->local_name_.UpperASCII();
+  impl_->local_name_upper_ = impl_->local_name_.ToAsciiUpper();
   return impl_->local_name_upper_;
 }
 
@@ -149,11 +151,31 @@ void QualifiedName::CreateStatic(void* target_address, StringImpl* name) {
       QualifiedName(g_null_atom, AtomicString(name), g_null_atom, true);
 }
 
+void QualifiedNameWithHash::CreateStatic(void* target_address,
+                                         StringImpl* name,
+                                         const AtomicString& name_namespace) {
+  new (target_address) QualifiedNameWithHash(g_null_atom, AtomicString(name),
+                                             name_namespace, true);
+}
+
+void QualifiedNameWithHash::CreateStatic(void* target_address,
+                                         StringImpl* name) {
+  new (target_address)
+      QualifiedNameWithHash(g_null_atom, AtomicString(name), g_null_atom, true);
+}
+
 std::ostream& operator<<(std::ostream& ostream, const QualifiedName& qname) {
   ostream << "QualifiedName(local=" << qname.LocalName()
           << " ns=" << qname.NamespaceURI() << " prefix=" << qname.Prefix()
           << ")";
   return ostream;
 }
+
+QualifiedNameWithHash::QualifiedNameWithHash(const AtomicString& prefix,
+                                             const AtomicString& local_name,
+                                             const AtomicString& namespace_uri,
+                                             bool is_static)
+    : QualifiedName(prefix, local_name, namespace_uri, is_static),
+      bloom_filter(Element::FilterForAttribute(*this)) {}
 
 }  // namespace blink

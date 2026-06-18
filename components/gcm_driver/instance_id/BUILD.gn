@@ -1,4 +1,4 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,12 +7,6 @@ import("//components/gcm_driver/config.gni")
 if (is_android) {
   import("//build/config/android/rules.gni")
 }
-
-# Reset sources_assignment_filter for the BUILD.gn file to prevent
-# regression during the migration of Chromium away from the feature.
-# See docs/no_sources_assignment_filter.md for more information.
-# TODO(crbug.com/1018739): remove this when migration is done.
-set_sources_assignment_filter([])
 
 static_library("instance_id") {
   sources = [
@@ -27,8 +21,8 @@ static_library("instance_id") {
   deps = [
     "//base",
     "//components/gcm_driver:gcm_buildflags",
-    "//components/keyed_service/core:core",
-    "//components/prefs:prefs",
+    "//components/keyed_service/core",
+    "//components/prefs",
     "//crypto",
     "//services/network/public/mojom",
   ]
@@ -59,6 +53,7 @@ static_library("test_support") {
   deps = [
     "//base",
     "//components/gcm_driver",
+    "//net",
     "//testing/gtest",
   ]
 

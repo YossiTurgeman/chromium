@@ -1,13 +1,14 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <cmath>
-
-#include "base/numerics/math_constants.h"
-#include "base/stl_util.h"
-#include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/geometry/quaternion.h"
+
+#include <array>
+#include <cmath>
+#include <numbers>
+
+#include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/geometry/vector3d_f.h"
 
 namespace gfx {
@@ -15,6 +16,14 @@ namespace gfx {
 namespace {
 
 const double kEpsilon = 1e-7;
+
+#define EXPECT_QUATERNION(expected, actual)          \
+  do {                                               \
+    EXPECT_NEAR(expected.x(), actual.x(), kEpsilon); \
+    EXPECT_NEAR(expected.y(), actual.y(), kEpsilon); \
+    EXPECT_NEAR(expected.z(), actual.z(), kEpsilon); \
+    EXPECT_NEAR(expected.w(), actual.w(), kEpsilon); \
+  } while (false)
 
 void CompareQuaternions(const Quaternion& a, const Quaternion& b) {
   EXPECT_FLOAT_EQ(a.x(), b.x());
@@ -38,7 +47,7 @@ TEST(QuatTest, AxisAngleCommon) {
 
 TEST(QuatTest, VectorToVectorRotation) {
   Quaternion q(Vector3dF(1.0f, 0.0f, 0.0f), Vector3dF(0.0f, 1.0f, 0.0f));
-  Quaternion r(Vector3dF(0.0f, 0.0f, 1.0f), base::kPiFloat / 2);
+  Quaternion r(Vector3dF(0.0f, 0.0f, 1.0f), std::numbers::pi_v<float> / 2);
 
   EXPECT_FLOAT_EQ(r.x(), q.x());
   EXPECT_FLOAT_EQ(r.y(), q.y());
@@ -53,8 +62,8 @@ TEST(QuatTest, AxisAngleWithZeroLengthAxis) {
 }
 
 TEST(QuatTest, Addition) {
-  double values[] = {0, 1, 100};
-  for (size_t i = 0; i < base::size(values); ++i) {
+  auto values = std::to_array<double>({0, 1, 100});
+  for (size_t i = 0; i < std::size(values); ++i) {
     float t = values[i];
     Quaternion a(t, 2 * t, 3 * t, 4 * t);
     Quaternion b(5 * t, 4 * t, 3 * t, 2 * t);
@@ -64,11 +73,12 @@ TEST(QuatTest, Addition) {
 }
 
 TEST(QuatTest, Multiplication) {
-  struct {
+  struct Cases {
     Quaternion a;
     Quaternion b;
     Quaternion expected;
-  } cases[] = {
+  };
+  auto cases = std::to_array<Cases>({
       {Quaternion(1, 0, 0, 0), Quaternion(1, 0, 0, 0), Quaternion(0, 0, 0, -1)},
       {Quaternion(0, 1, 0, 0), Quaternion(0, 1, 0, 0), Quaternion(0, 0, 0, -1)},
       {Quaternion(0, 0, 1, 0), Quaternion(0, 0, 1, 0), Quaternion(0, 0, 0, -1)},
@@ -77,17 +87,17 @@ TEST(QuatTest, Multiplication) {
        Quaternion(24, 48, 48, -6)},
       {Quaternion(5, 6, 7, 8), Quaternion(1, 2, 3, 4),
        Quaternion(32, 32, 56, -6)},
-  };
+  });
 
-  for (size_t i = 0; i < base::size(cases); ++i) {
+  for (size_t i = 0; i < std::size(cases); ++i) {
     Quaternion product = cases[i].a * cases[i].b;
     CompareQuaternions(cases[i].expected, product);
   }
 }
 
 TEST(QuatTest, Scaling) {
-  double values[] = {0, 10, 100};
-  for (size_t i = 0; i < base::size(values); ++i) {
+  auto values = std::to_array<double>({0, 10, 100});
+  for (size_t i = 0; i < std::size(values); ++i) {
     double s = values[i];
     Quaternion q(1, 2, 3, 4);
     Quaternion expected(s, 2 * s, 3 * s, 4 * s);
@@ -140,17 +150,14 @@ TEST(QuatTest, Slerp) {
     double radians = (1.0 - t) * start_radians + t * stop_radians;
     Quaternion expected(axis, radians);
     Quaternion interpolated = start.Slerp(stop, t);
-    EXPECT_NEAR(expected.x(), interpolated.x(), kEpsilon);
-    EXPECT_NEAR(expected.y(), interpolated.y(), kEpsilon);
-    EXPECT_NEAR(expected.z(), interpolated.z(), kEpsilon);
-    EXPECT_NEAR(expected.w(), interpolated.w(), kEpsilon);
+    EXPECT_QUATERNION(expected, interpolated);
   }
 }
 
 TEST(QuatTest, SlerpOppositeAngles) {
   Vector3dF axis(1, 1, 1);
-  double start_radians = -base::kPiDouble / 2;
-  double stop_radians = base::kPiDouble / 2;
+  double start_radians = -std::numbers::pi / 2;
+  double stop_radians = std::numbers::pi / 2;
   Quaternion start(axis, start_radians);
   Quaternion stop(axis, stop_radians);
 
@@ -159,10 +166,74 @@ TEST(QuatTest, SlerpOppositeAngles) {
   Quaternion expected(axis, 0);
 
   Quaternion interpolated = start.Slerp(stop, 0.5f);
-  EXPECT_NEAR(expected.x(), interpolated.x(), kEpsilon);
-  EXPECT_NEAR(expected.y(), interpolated.y(), kEpsilon);
-  EXPECT_NEAR(expected.z(), interpolated.z(), kEpsilon);
-  EXPECT_NEAR(expected.w(), interpolated.w(), kEpsilon);
+  EXPECT_QUATERNION(expected, interpolated);
+}
+
+TEST(QuatTest, SlerpRotateXRotateY) {
+  Quaternion start(Vector3dF(1, 0, 0), std::numbers::pi / 2);
+  Quaternion stop(Vector3dF(0, 1, 0), std::numbers::pi / 2);
+  Quaternion interpolated = start.Slerp(stop, 0.5f);
+
+  double expected_angle = std::acos(1.0 / 3.0);
+  double xy = std::sin(0.5 * expected_angle) / std::sqrt(2);
+  Quaternion expected(xy, xy, 0, std::cos(0.5 * expected_angle));
+  EXPECT_QUATERNION(expected, interpolated);
+}
+
+TEST(QuatTest, Slerp360) {
+  Quaternion start(0, 0, 0, -1);  // 360 degree rotation.
+  Quaternion stop(Vector3dF(0, 0, 1), std::numbers::pi / 2);
+  Quaternion interpolated = start.Slerp(stop, 0.5f);
+  double expected_half_angle = std::numbers::pi / 8;
+  Quaternion expected(0, 0, std::sin(expected_half_angle),
+                      std::cos(expected_half_angle));
+  EXPECT_QUATERNION(expected, interpolated);
+}
+
+TEST(QuatTest, SlerpEquivalentQuaternions) {
+  Quaternion start(Vector3dF(1, 0, 0), std::numbers::pi / 3);
+  Quaternion stop = start.flip();
+  Quaternion interpolated = start.Slerp(stop, 0.5f);
+  EXPECT_QUATERNION(start, interpolated);
+}
+
+TEST(QuatTest, SlerpQuaternionWithInverse) {
+  Quaternion start(Vector3dF(1, 0, 0), std::numbers::pi / 3);
+  Quaternion stop = start.inverse();
+  Quaternion interpolated = start.Slerp(stop, 0.5f);
+  Quaternion expected(0, 0, 0, 1);
+  EXPECT_QUATERNION(expected, interpolated);
+}
+
+TEST(QuatTest, SlerpObtuseAngle) {
+  Quaternion start(Vector3dF(1, 1, 0), std::numbers::pi / 2);
+  Quaternion stop(Vector3dF(0, 1, -1), 3 * std::numbers::pi / 2);
+  Quaternion interpolated = start.Slerp(stop, 0.5f);
+  double expected_half_angle = -std::atan(0.5);
+  double xz = std::sin(expected_half_angle) / std::sqrt(2);
+  Quaternion expected(xz, 0, xz, -std::cos(expected_half_angle));
+  EXPECT_QUATERNION(expected, interpolated);
+}
+
+TEST(QuatTest, Equals) {
+  EXPECT_TRUE(Quaternion() == Quaternion());
+  EXPECT_TRUE(Quaternion() == Quaternion(0, 0, 0, 1));
+  EXPECT_TRUE(Quaternion(1, 5.2, -8.5, 222.2) ==
+              Quaternion(1, 5.2, -8.5, 222.2));
+  EXPECT_FALSE(Quaternion() == Quaternion(1, 0, 0, 0));
+  EXPECT_FALSE(Quaternion() == Quaternion(0, 1, 0, 0));
+  EXPECT_FALSE(Quaternion() == Quaternion(0, 0, 1, 0));
+  EXPECT_FALSE(Quaternion() == Quaternion(1, 0, 0, 1));
+}
+
+TEST(QuatTest, NotEquals) {
+  EXPECT_FALSE(Quaternion() != Quaternion());
+  EXPECT_FALSE(Quaternion(1, 5.2, -8.5, 222.2) !=
+               Quaternion(1, 5.2, -8.5, 222.2));
+  EXPECT_TRUE(Quaternion() != Quaternion(1, 0, 0, 0));
+  EXPECT_TRUE(Quaternion() != Quaternion(0, 1, 0, 0));
+  EXPECT_TRUE(Quaternion() != Quaternion(0, 0, 1, 0));
+  EXPECT_TRUE(Quaternion() != Quaternion(1, 0, 0, 1));
 }
 
 }  // namespace gfx

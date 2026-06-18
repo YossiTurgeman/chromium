@@ -35,7 +35,7 @@
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/html/shadow/shadow_element_names.h"
-#include "third_party/blink/renderer/core/layout/layout_details_marker.h"
+#include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/page/chrome_client.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
@@ -49,22 +49,13 @@ PickerIndicatorElement::PickerIndicatorElement(
     PickerIndicatorOwner& picker_indicator_owner)
     : HTMLDivElement(document),
       picker_indicator_owner_(&picker_indicator_owner) {
-  SetShadowPseudoId(AtomicString("-webkit-calendar-picker-indicator"));
+  SetShadowPseudoId(shadow_element_names::kPseudoCalendarPickerIndicator);
   setAttribute(html_names::kIdAttr, shadow_element_names::kIdPickerIndicator);
+  SetAXProperties();
 }
 
 PickerIndicatorElement::~PickerIndicatorElement() {
   DCHECK(!chooser_);
-}
-
-LayoutObject* PickerIndicatorElement::CreateLayoutObject(
-    const ComputedStyle& style,
-    LegacyLayout legacy) {
-  if (features::IsFormControlsRefreshEnabled())
-    return HTMLDivElement::CreateLayoutObject(style, legacy);
-
-  UseCounter::Count(GetDocument(), WebFeature::kLegacyLayoutByDetailsMarker);
-  return new LayoutDetailsMarker(this);
 }
 
 void PickerIndicatorElement::DefaultEventHandler(Event& event) {
@@ -112,8 +103,8 @@ void PickerIndicatorElement::DidChooseValue(double value) {
 void PickerIndicatorElement::DidEndChooser() {
   chooser_.Clear();
   picker_indicator_owner_->DidEndChooser();
-  if (::features::IsFormControlsRefreshEnabled() &&
-      OwnerElement().GetLayoutObject()) {
+  OwnerElement().PseudoStateChanged(CSSSelector::kPseudoOpen);
+  if (OwnerElement().GetLayoutObject()) {
     // Invalidate paint to ensure that the focus ring is shown.
     OwnerElement().GetLayoutObject()->SetShouldDoFullPaintInvalidation();
   }
@@ -131,11 +122,11 @@ void PickerIndicatorElement::OpenPopup() {
     return;
   chooser_ = GetDocument().GetPage()->GetChromeClient().OpenDateTimeChooser(
       GetDocument().GetFrame(), this, parameters);
-  if (::features::IsFormControlsRefreshEnabled() &&
-      OwnerElement().GetLayoutObject()) {
+  if (OwnerElement().GetLayoutObject()) {
     // Invalidate paint to ensure that the focus ring is removed.
     OwnerElement().GetLayoutObject()->SetShouldDoFullPaintInvalidation();
   }
+  OwnerElement().PseudoStateChanged(CSSSelector::kPseudoOpen);
 }
 
 Element& PickerIndicatorElement::OwnerElement() const {
@@ -150,7 +141,11 @@ void PickerIndicatorElement::ClosePopup() {
 }
 
 bool PickerIndicatorElement::HasOpenedPopup() const {
-  return chooser_;
+  return chooser_ != nullptr;
+}
+
+bool PickerIndicatorElement::IsPickerVisible() const {
+  return chooser_ && chooser_->IsPickerVisible();
 }
 
 void PickerIndicatorElement::DetachLayoutTree(bool performing_reattach) {
@@ -159,7 +154,19 @@ void PickerIndicatorElement::DetachLayoutTree(bool performing_reattach) {
 }
 
 AXObject* PickerIndicatorElement::PopupRootAXObject() const {
-  return chooser_ ? chooser_->RootAXObject() : nullptr;
+  return chooser_ ? chooser_->RootAXObject(&OwnerElement()) : nullptr;
+}
+
+void PickerIndicatorElement::SetAXProperties() {
+  if (!picker_indicator_owner_) {
+    return;
+  }
+  setAttribute(html_names::kTabindexAttr, AtomicString("0"));
+  setAttribute(html_names::kAriaHaspopupAttr, AtomicString("menu"));
+  setAttribute(html_names::kRoleAttr, AtomicString("button"));
+  setAttribute(
+      html_names::kTitleAttr,
+      AtomicString(picker_indicator_owner_->AriaLabelForPickerIndicator()));
 }
 
 bool PickerIndicatorElement::IsPickerIndicatorElement() const {
@@ -173,21 +180,7 @@ Node::InsertionNotificationRequest PickerIndicatorElement::InsertedInto(
 }
 
 void PickerIndicatorElement::DidNotifySubtreeInsertionsToDocument() {
-  if (!GetDocument().ExistingAXObjectCache())
-    return;
-  // Don't make this focusable if we are in web tests in order to avoid
-  // breaking existing tests.
-  // TODO(crbug.com/1054048): We should have a way to disable accessibility in
-  // web tests.  Once we do have it, this early return should be removed.
-  if (WebTestSupport::IsRunningWebTest())
-    return;
-  setAttribute(html_names::kTabindexAttr, "0");
-  setAttribute(html_names::kAriaHaspopupAttr, "menu");
-  setAttribute(html_names::kRoleAttr, "button");
-  setAttribute(
-      html_names::kAriaLabelAttr,
-      AtomicString(
-          this->picker_indicator_owner_->AriaRoleForPickerIndicator()));
+  SetAXProperties();
 }
 
 void PickerIndicatorElement::Trace(Visitor* visitor) const {

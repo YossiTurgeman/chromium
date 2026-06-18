@@ -1,18 +1,23 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef DEVICE_VR_WINDOWS_D3D11_TEXTURE_HELPER_H
-#define DEVICE_VR_WINDOWS_D3D11_TEXTURE_HELPER_H
+#ifndef DEVICE_VR_WINDOWS_D3D11_TEXTURE_HELPER_H_
+#define DEVICE_VR_WINDOWS_D3D11_TEXTURE_HELPER_H_
 
 #include <D3D11_1.h>
 #include <DXGI1_4.h>
 #include <wrl.h>
 
+#include "base/memory/scoped_refptr.h"
 #include "base/win/scoped_handle.h"
+#include "gpu/command_buffer/common/sync_token.h"
 #include "mojo/public/cpp/system/platform_handle.h"
 #include "ui/gfx/geometry/rect_f.h"
 
+namespace viz {
+class ContextProvider;
+}
 namespace device {
 
 class D3D11TextureHelper {
@@ -20,39 +25,40 @@ class D3D11TextureHelper {
   D3D11TextureHelper();
   ~D3D11TextureHelper();
 
-  void Reset();
-
   bool EnsureInitialized();
-  bool SetAdapterIndex(int32_t index);
   bool SetAdapterLUID(const LUID& luid);
   void SetUseBGRA(bool bgra) { bgra_ = bgra; }
 
   void CleanupNoSubmit();
   void SetSourceAndOverlayVisible(bool source_visible, bool overlay_visible);
 
-  bool CompositeToBackBuffer();
-  bool SetSourceTexture(base::win::ScopedHandle texture_handle,
+  bool CopyToBackBuffer(
+      const scoped_refptr<viz::ContextProvider>& context_provider,
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> source);
+  bool CompositeToBackBuffer(
+      const scoped_refptr<viz::ContextProvider>& context_provider);
+
+  void SetSourceTexture(base::win::ScopedHandle texture_handle,
+                        const gpu::SyncToken& sync_token,
                         gfx::RectF left,
                         gfx::RectF right);
   bool SetOverlayTexture(base::win::ScopedHandle texture_handle,
+                         const gpu::SyncToken& sync_token,
                          gfx::RectF left,
                          gfx::RectF right);
 
-  void AllocateBackBuffer();
-  const Microsoft::WRL::ComPtr<ID3D11Texture2D>& GetBackbuffer();
-  void DiscardView();
-
   bool UpdateBackbufferSizes();
-  gfx::RectF BackBufferLeft() { return target_left_; }
-  gfx::RectF BackBufferRight() { return target_right_; }
   void OverrideViewports(gfx::RectF left, gfx::RectF right) {
     target_left_ = left;
     target_right_ = right;
     force_viewport_ = true;
   }
   gfx::Size BackBufferSize() { return target_size_; }
-  void SetBackbuffer(Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer);
+  void SetBackbuffer(Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer,
+                     bool contains_source = false,
+                     bool y_flipped = false);
   Microsoft::WRL::ComPtr<ID3D11Device> GetDevice();
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> GetDeviceContext();
 
   void SetDefaultSize(gfx::Size size) { default_size_ = size; }
 
@@ -65,6 +71,7 @@ class D3D11TextureHelper {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shader_resource_;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
     Microsoft::WRL::ComPtr<IDXGIKeyedMutex> keyed_mutex_;
+    gpu::SyncToken sync_token_;
     gfx::RectF left_;   // 0 to 1 in each direction
     gfx::RectF right_;  // 0 to 1 in each direction
     bool submitted_this_frame_ = false;
@@ -113,6 +120,9 @@ class D3D11TextureHelper {
   bool bgra_ = false;
   bool force_viewport_ = false;
 
+  bool backbuffer_contains_source_ = false;
+  bool backbuffer_y_flipped_ = false;
+
   gfx::RectF target_left_;   // 0 to 1 in each direction
   gfx::RectF target_right_;  // 0 to 1 in each direction
   gfx::Size target_size_;
@@ -120,9 +130,8 @@ class D3D11TextureHelper {
   gfx::Size default_size_;
 
   RenderState render_state_;
-  int32_t adapter_index_ = -1;
   LUID adapter_luid_ = {};
 };
 }  // namespace device
 
-#endif  // DEVICE_VR_WINDOWS_D3D11_TEXTURE_HELPER_H
+#endif  // DEVICE_VR_WINDOWS_D3D11_TEXTURE_HELPER_H_

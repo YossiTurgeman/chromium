@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,15 @@
 #include <string>
 #include <vector>
 
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "chrome/browser/offline_pages/offline_page_utils.h"
 #include "chrome/common/mhtml_page_notifier.mojom.h"
 #include "components/offline_pages/core/request_header/offline_page_header.h"
+#include "content/public/browser/render_frame_host_receiver_set.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "content/public/browser/web_contents_receiver_set.h"
 #include "content/public/browser/web_contents_user_data.h"
-#include "services/service_manager/public/cpp/binder_registry.h"
 #include "third_party/blink/public/mojom/loader/mhtml_load_result.mojom-forward.h"
 #include "url/gurl.h"
 
@@ -29,7 +28,6 @@ class WebContents;
 namespace offline_pages {
 
 struct OfflinePageItem;
-class PrefetchService;
 
 // This enum is used for UMA reporting. It contains all possible trusted states
 // of the offline page.
@@ -56,6 +54,14 @@ class OfflinePageTabHelper
       public content::WebContentsUserData<OfflinePageTabHelper>,
       public offline_pages::mojom::MhtmlPageNotifier {
  public:
+  static void BindHtmlPageNotifier(
+      mojo::PendingAssociatedReceiver<offline_pages::mojom::MhtmlPageNotifier>
+          receiver,
+      content::RenderFrameHost* rfh);
+
+  OfflinePageTabHelper(const OfflinePageTabHelper&) = delete;
+  OfflinePageTabHelper& operator=(const OfflinePageTabHelper&) = delete;
+
   ~OfflinePageTabHelper() override;
 
   // MhtmlPageNotifier overrides.
@@ -164,11 +170,6 @@ class OfflinePageTabHelper
   // Finalize the offline info when the navigation is done.
   void FinalizeOfflineInfo(content::NavigationHandle* navigation_handle);
 
-  void ReportOfflinePageMetrics();
-
-  // Report the metrics essential to PrefetchService.
-  void ReportPrefetchMetrics(content::NavigationHandle* navigation_handle);
-
   // Reload the URL in order to fetch the offline page on certain net errors.
   void TryLoadingOfflinePageOnNetError(
       content::NavigationHandle* navigation_handle);
@@ -204,19 +205,14 @@ class OfflinePageTabHelper
 
   bool reloading_url_on_net_error_ = false;
 
-  // Service, outlives this object.
-  PrefetchService* prefetch_service_ = nullptr;
-
-  // TODO(crbug.com/827215): We only really want interface messages for the main
-  // frame but this is not easily done with the current helper classes.
-  content::WebContentsFrameReceiverSet<mojom::MhtmlPageNotifier>
+  // TODO(crbug.com/40569331): We only really want interface messages for the
+  // main frame but this is not easily done with the current helper classes.
+  content::RenderFrameHostReceiverSet<mojom::MhtmlPageNotifier>
       mhtml_page_notifier_receivers_;
 
   base::WeakPtrFactory<OfflinePageTabHelper> weak_ptr_factory_{this};
 
   WEB_CONTENTS_USER_DATA_KEY_DECL();
-
-  DISALLOW_COPY_AND_ASSIGN(OfflinePageTabHelper);
 };
 
 }  // namespace offline_pages

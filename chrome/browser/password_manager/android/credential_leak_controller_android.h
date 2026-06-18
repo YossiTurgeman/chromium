@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,14 @@
 #define CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_CREDENTIAL_LEAK_CONTROLLER_ANDROID_H_
 
 #include <memory>
-#include "base/macros.h"
+#include <string>
+
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/password_manager/android/password_checkup_launcher_helper.h"
 #include "components/password_manager/core/browser/leak_detection_dialog_utils.h"
-#include "ui/gfx/range/range.h"
 #include "url/gurl.h"
+
+class Profile;
 
 namespace ui {
 class WindowAndroid;
@@ -23,10 +27,20 @@ class CredentialLeakControllerAndroid {
  public:
   CredentialLeakControllerAndroid(
       password_manager::CredentialLeakType leak_type,
-      password_manager::CompromisedSitesCount saved_sites,
       const GURL& origin,
-      const base::string16& username,
-      ui::WindowAndroid* window_android);
+      const std::u16string& username,
+      Profile* profile,
+      ui::WindowAndroid* window_android,
+      std::unique_ptr<PasswordCheckupLauncherHelper> checkup_launcher,
+      std::unique_ptr<password_manager::metrics_util::LeakDialogMetricsRecorder>
+          metrics_recorder,
+      std::string account_email);
+
+  CredentialLeakControllerAndroid(const CredentialLeakControllerAndroid&) =
+      delete;
+  CredentialLeakControllerAndroid& operator=(
+      const CredentialLeakControllerAndroid&) = delete;
+
   ~CredentialLeakControllerAndroid();
 
   // Called when a leaked credential was detected.
@@ -46,24 +60,16 @@ class CredentialLeakControllerAndroid {
   void OnCloseDialog();
 
   // The label of the accept button. Varies by leak type.
-  base::string16 GetAcceptButtonLabel() const;
+  std::u16string GetAcceptButtonLabel() const;
 
   // The label of the cancel button. Varies by leak type.
-  base::string16 GetCancelButtonLabel() const;
+  std::u16string GetCancelButtonLabel() const;
 
   // Text explaining the leak details. Varies by leak type.
-  base::string16 GetDescription() const;
+  std::u16string GetDescription() const;
 
   // The title of the dialog displaying the leak warning.
-  base::string16 GetTitle() const;
-
-  // Checks whether the dialog should show the option to check passwords.
-  bool ShouldCheckPasswords() const;
-
-  // Checks whether the change password button should be shown.
-  // |ShouldShowChangePasswordButton()| and |ShouldCheckPasswords()| are not
-  // both true at the same time.
-  bool ShouldShowChangePasswordButton() const;
+  std::u16string GetTitle() const;
 
   // Checks whether the cancel button should be shown.
   bool ShouldShowCancelButton() const;
@@ -71,17 +77,30 @@ class CredentialLeakControllerAndroid {
  private:
   // Used to customize the UI.
   const password_manager::CredentialLeakType leak_type_;
-  const password_manager::CompromisedSitesCount saved_sites_;
 
   const GURL origin_;
 
-  const base::string16 username_;
+  const std::u16string username_;
 
-  ui::WindowAndroid* window_android_;
+  const raw_ptr<Profile> profile_;
+
+  const raw_ptr<ui::WindowAndroid> window_android_;
 
   std::unique_ptr<CredentialLeakDialogViewAndroid> dialog_view_;
 
-  DISALLOW_COPY_AND_ASSIGN(CredentialLeakControllerAndroid);
+  std::unique_ptr<password_manager::LeakDialogTraits> leak_dialog_traits_;
+
+  // Helper through which the dialog can invoke Java code to launch
+  // the password checkup.
+  std::unique_ptr<PasswordCheckupLauncherHelper> checkup_launcher_;
+
+  // Metrics recorder for leak dialog related UMA and UKM logging.
+  std::unique_ptr<password_manager::metrics_util::LeakDialogMetricsRecorder>
+      metrics_recorder_;
+
+  // Email of the account syncing passwords. Empty string if the user isn't
+  // syncing passwords.
+  std::string account_email_;
 };
 
 #endif  // CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_CREDENTIAL_LEAK_CONTROLLER_ANDROID_H_

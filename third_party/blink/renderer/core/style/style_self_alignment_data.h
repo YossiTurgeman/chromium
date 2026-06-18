@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -49,10 +49,6 @@ class StyleSelfAlignmentData {
   bool operator==(const StyleSelfAlignmentData& o) const {
     return position_ == o.position_ && position_type_ == o.position_type_ &&
            overflow_ == o.overflow_;
-  }
-
-  bool operator!=(const StyleSelfAlignmentData& o) const {
-    return !(*this == o);
   }
 
  private:

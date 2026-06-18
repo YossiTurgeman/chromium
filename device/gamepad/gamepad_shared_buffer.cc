@@ -1,8 +1,10 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "device/gamepad/gamepad_shared_buffer.h"
+
+#include "base/compiler_specific.h"
 
 namespace device {
 
@@ -16,7 +18,7 @@ GamepadSharedBuffer::GamepadSharedBuffer() {
   void* mem = shared_memory_mapping_.memory();
   DCHECK(mem);
   hardware_buffer_ = new (mem) GamepadHardwareBuffer();
-  memset(&(hardware_buffer_->data), 0, sizeof(Gamepads));
+  UNSAFE_TODO(memset(&(hardware_buffer_->data), 0, sizeof(Gamepads)));
 }
 
 GamepadSharedBuffer::~GamepadSharedBuffer() = default;

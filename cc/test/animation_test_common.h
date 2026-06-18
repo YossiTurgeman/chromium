@@ -1,25 +1,32 @@
-// Copyright 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CC_TEST_ANIMATION_TEST_COMMON_H_
 #define CC_TEST_ANIMATION_TEST_COMMON_H_
 
-#include "cc/animation/animation_curve.h"
+#include <memory>
+
+#include "base/time/time.h"
 #include "cc/animation/animation_timeline.h"
 #include "cc/animation/keyframe_model.h"
-#include "cc/animation/transform_operations.h"
 #include "cc/paint/element_id.h"
 #include "cc/paint/filter_operations.h"
-#include "cc/test/geometry_test_utils.h"
+#include "ui/gfx/animation/keyframe/animation_curve.h"
+#include "ui/gfx/geometry/transform_operations.h"
 
 namespace gfx {
-class ScrollOffset;
+class PointF;
 }
 
 namespace cc {
 
-class FakeFloatAnimationCurve : public FloatAnimationCurve {
+// Helper method to convert base::TimeTicks to double.
+// Returns double milliseconds if the input value is resolved or
+// std::numeric_limits<double>::quiet_NaN() otherwise.
+double ToMilliseconds(std::optional<base::TimeTicks> time_ticks);
+
+class FakeFloatAnimationCurve : public gfx::FloatAnimationCurve {
  public:
   FakeFloatAnimationCurve();
   explicit FakeFloatAnimationCurve(double duration);
@@ -27,41 +34,47 @@ class FakeFloatAnimationCurve : public FloatAnimationCurve {
 
   base::TimeDelta Duration() const override;
   float GetValue(base::TimeDelta now) const override;
-  std::unique_ptr<AnimationCurve> Clone() const override;
+  float GetTransformedValue(
+      base::TimeDelta now,
+      gfx::TimingFunction::LimitDirection limit_direction) const override;
+  std::unique_ptr<gfx::AnimationCurve> Clone() const override;
 
  private:
   base::TimeDelta duration_;
 };
 
-class FakeTransformTransition : public TransformAnimationCurve {
+class FakeTransformTransition : public gfx::TransformAnimationCurve {
  public:
   explicit FakeTransformTransition(double duration);
   ~FakeTransformTransition() override;
 
   base::TimeDelta Duration() const override;
-  TransformOperations GetValue(base::TimeDelta time) const override;
-  bool IsTranslation() const override;
-  bool PreservesAxisAlignment() const override;
-  bool AnimationStartScale(bool forward_direction,
-                           float* start_scale) const override;
-  bool MaximumTargetScale(bool forward_direction,
-                          float* max_scale) const override;
+  gfx::TransformOperations GetValue(base::TimeDelta time) const override;
+  gfx::TransformOperations GetTransformedValue(
+      base::TimeDelta time,
+      gfx::TimingFunction::LimitDirection limit_direction) const override;
 
-  std::unique_ptr<AnimationCurve> Clone() const override;
+  bool PreservesAxisAlignment() const override;
+  bool MaximumScale(float* max_scale) const override;
+
+  std::unique_ptr<gfx::AnimationCurve> Clone() const override;
 
  private:
   base::TimeDelta duration_;
 };
 
-class FakeFloatTransition : public FloatAnimationCurve {
+class FakeFloatTransition : public gfx::FloatAnimationCurve {
  public:
   FakeFloatTransition(double duration, float from, float to);
   ~FakeFloatTransition() override;
 
   base::TimeDelta Duration() const override;
   float GetValue(base::TimeDelta time) const override;
+  float GetTransformedValue(
+      base::TimeDelta time,
+      gfx::TimingFunction::LimitDirection limit_direction) const override;
 
-  std::unique_ptr<AnimationCurve> Clone() const override;
+  std::unique_ptr<gfx::AnimationCurve> Clone() const override;
 
  private:
   base::TimeDelta duration_;
@@ -70,24 +83,31 @@ class FakeFloatTransition : public FloatAnimationCurve {
 };
 
 int AddScrollOffsetAnimationToAnimation(Animation* animation,
-                                        gfx::ScrollOffset initial_value,
-                                        gfx::ScrollOffset target_value);
+                                        gfx::PointF initial_value,
+                                        gfx::PointF target_value);
 
 int AddAnimatedTransformToAnimation(Animation* animation,
                                     double duration,
                                     int delta_x,
                                     int delta_y);
 
+int AddAnimatedCustomPropertyToAnimation(Animation* animation,
+                                         double duration,
+                                         int start_value,
+                                         int end_value);
+
 int AddAnimatedTransformToAnimation(Animation* animation,
                                     double duration,
-                                    TransformOperations start_operations,
-                                    TransformOperations operations);
+                                    gfx::TransformOperations start_operations,
+                                    gfx::TransformOperations operations);
 
 int AddOpacityTransitionToAnimation(Animation* animation,
                                     double duration,
                                     float start_opacity,
                                     float end_opacity,
-                                    bool use_timing_function);
+                                    bool use_timing_function,
+                                    std::optional<int> id = std::nullopt,
+                                    std::optional<int> group_id = std::nullopt);
 
 int AddAnimatedFilterToAnimation(Animation* animation,
                                  double duration,
@@ -142,8 +162,8 @@ int AddAnimatedTransformToElementWithAnimation(
     ElementId element_id,
     scoped_refptr<AnimationTimeline> timeline,
     double duration,
-    TransformOperations start_operations,
-    TransformOperations operations);
+    gfx::TransformOperations start_operations,
+    gfx::TransformOperations operations);
 
 int AddOpacityTransitionToElementWithAnimation(
     ElementId element_id,
@@ -152,6 +172,8 @@ int AddOpacityTransitionToElementWithAnimation(
     float start_opacity,
     float end_opacity,
     bool use_timing_function);
+
+scoped_refptr<Animation> CancelAndReplaceAnimation(Animation& animation);
 
 }  // namespace cc
 

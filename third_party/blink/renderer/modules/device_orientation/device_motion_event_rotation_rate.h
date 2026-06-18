@@ -26,6 +26,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_DEVICE_ORIENTATION_DEVICE_MOTION_EVENT_ROTATION_RATE_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_DEVICE_ORIENTATION_DEVICE_MOTION_EVENT_ROTATION_RATE_H_
 
+#include <optional>
+
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 
@@ -48,9 +50,9 @@ class MODULES_EXPORT DeviceMotionEventRotationRate final
 
   bool HasRotationData() const;
 
-  base::Optional<double> alpha() const;
-  base::Optional<double> beta() const;
-  base::Optional<double> gamma() const;
+  std::optional<double> alpha() const;
+  std::optional<double> beta() const;
+  std::optional<double> gamma() const;
 
  private:
   const double alpha_;

@@ -1,11 +1,12 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_UI_EXTENSIONS_EXTENSION_ENABLE_FLOW_TEST_DELEGATE_H_
 #define CHROME_BROWSER_UI_EXTENSIONS_EXTENSION_ENABLE_FLOW_TEST_DELEGATE_H_
 
-#include "base/optional.h"
+#include <optional>
+
 #include "base/run_loop.h"
 #include "chrome/browser/ui/extensions/extension_enable_flow_delegate.h"
 
@@ -30,10 +31,10 @@ class ExtensionEnableFlowTestDelegate : public ExtensionEnableFlowDelegate {
   // Wait for the extension enable flow to complete.
   void Wait();
 
-  const base::Optional<Result>& result() const { return result_; }
+  const std::optional<Result>& result() const { return result_; }
 
  private:
-  base::Optional<Result> result_;
+  std::optional<Result> result_;
   base::RunLoop run_loop_;
 };
 

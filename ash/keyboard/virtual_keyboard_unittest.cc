@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include "ash/public/cpp/keyboard/keyboard_switches.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
-#include "base/bind_helpers.h"
+#include "base/functional/callback_helpers.h"
 #include "ui/aura/test/test_window_delegate.h"
 #include "ui/events/test/event_generator.h"
 
@@ -17,6 +17,10 @@ namespace ash {
 class VirtualKeyboardTest : public AshTestBase {
  public:
   VirtualKeyboardTest() = default;
+
+  VirtualKeyboardTest(const VirtualKeyboardTest&) = delete;
+  VirtualKeyboardTest& operator=(const VirtualKeyboardTest&) = delete;
+
   ~VirtualKeyboardTest() override = default;
 
   void SetUp() override {
@@ -28,9 +32,6 @@ class VirtualKeyboardTest : public AshTestBase {
     SetVirtualKeyboardEnabled(false);
     AshTestBase::TearDown();
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(VirtualKeyboardTest);
 };
 
 TEST_F(VirtualKeyboardTest, EventsAreHandledBasedOnHitTestBounds) {
@@ -39,11 +40,13 @@ TEST_F(VirtualKeyboardTest, EventsAreHandledBasedOnHitTestBounds) {
   // Create a test window in the background with the same size as the screen.
   aura::test::EventCountDelegate delegate;
   std::unique_ptr<aura::Window> background_window(
-      CreateTestWindowInShellWithDelegate(&delegate, 0, root_window->bounds()));
+      CreateTestWindowInShell({.delegate = &delegate,
+                               .bounds = root_window->bounds(),
+                               .window_id = 0}));
 
   auto* keyboard_controller = keyboard::KeyboardUIController::Get();
   keyboard_controller->ShowKeyboard(false);
-  ASSERT_TRUE(keyboard::WaitUntilShown());
+  ASSERT_TRUE(keyboard::test::WaitUntilShown());
 
   // Add two hit test bounds (coordinates relative to keyboard window).
   // Both are 10x10 squares, but placed in different locations.
@@ -89,11 +92,13 @@ TEST_F(VirtualKeyboardTest, HitTestBoundsAreResetWhenContainerTypeChanges) {
   // Create a test window in the background with the same size as the screen.
   aura::test::EventCountDelegate delegate;
   std::unique_ptr<aura::Window> background_window(
-      CreateTestWindowInShellWithDelegate(&delegate, 0, root_window->bounds()));
+      CreateTestWindowInShell({.delegate = &delegate,
+                               .bounds = root_window->bounds(),
+                               .window_id = 0}));
 
   auto* keyboard_controller = keyboard::KeyboardUIController::Get();
   keyboard_controller->ShowKeyboard(false);
-  ASSERT_TRUE(keyboard::WaitUntilShown());
+  ASSERT_TRUE(keyboard::test::WaitUntilShown());
 
   // Set empty hit test bounds, so all events pass through to the background.
   keyboard_controller->SetHitTestBounds(std::vector<gfx::Rect>());

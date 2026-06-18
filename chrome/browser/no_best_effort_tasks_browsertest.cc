@@ -1,38 +1,41 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include <string_view>
 
 #include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
-#include "base/macros.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/stringprintf.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/test/values_test_util.h"
 #include "build/build_config.h"
 #include "build/buildflag.h"
 #include "chrome/browser/chrome_content_browser_client.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/tab_list/tab_list_interface.h"
 #include "chrome/common/chrome_paths.h"
-#include "chrome/test/base/in_process_browser_test.h"
-#include "chrome/test/base/ui_test_utils.h"
+#include "chrome/test/base/chrome_test_utils.h"
+#include "chrome/test/base/platform_browser_test.h"
+#include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_utils.h"
+#include "extensions/buildflags/buildflags.h"
 #include "net/dns/mock_host_resolver.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/url_constants.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-#include "chrome/browser/extensions/unpacked_installer.h"
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/browser/test_extension_registry_observer.h"
+#include "extensions/browser/unpacked_installer.h"
 #include "extensions/common/extension.h"
 #endif
 
@@ -42,6 +45,10 @@ class RunLoopUntilLoadedAndPainted : public content::WebContentsObserver {
  public:
   explicit RunLoopUntilLoadedAndPainted(content::WebContents* web_contents)
       : content::WebContentsObserver(web_contents) {}
+
+  RunLoopUntilLoadedAndPainted(const RunLoopUntilLoadedAndPainted&) = delete;
+  RunLoopUntilLoadedAndPainted& operator=(const RunLoopUntilLoadedAndPainted&) =
+      delete;
 
   ~RunLoopUntilLoadedAndPainted() override = default;
 
@@ -72,44 +79,55 @@ class RunLoopUntilLoadedAndPainted : public content::WebContentsObserver {
   }
 
   base::RunLoop run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(RunLoopUntilLoadedAndPainted);
 };
 
-class NoBestEffortTasksTest : public InProcessBrowserTest {
+class NoBestEffortTasksTest : public PlatformBrowserTest {
+ public:
+  NoBestEffortTasksTest(const NoBestEffortTasksTest&) = delete;
+  NoBestEffortTasksTest& operator=(const NoBestEffortTasksTest&) = delete;
+
  protected:
   NoBestEffortTasksTest() = default;
   ~NoBestEffortTasksTest() override = default;
 
+  // Opens a URL in a new tab and returns its WebContents.
+  content::WebContents* OpenUrlInNewTab(const GURL& url) {
+    auto* browser = GetBrowserWindowInterface();
+    auto* tab_list = TabListInterface::From(browser);
+    auto* tab = tab_list->OpenTab(url, /*index=*/-1);
+    return tab->GetContents();
+  }
+
  private:
   void SetUpCommandLine(base::CommandLine* command_line) override {
     command_line->AppendSwitch(switches::kDisableBestEffortTasks);
-    InProcessBrowserTest::SetUpCommandLine(command_line);
   }
 
   void SetUpOnMainThread() override {
     // Redirect all DNS requests back to localhost (to the embedded test
     // server).
     host_resolver()->AddRule("*", "127.0.0.1");
-    InProcessBrowserTest::SetUpOnMainThread();
+    PlatformBrowserTest::SetUpOnMainThread();
   }
-
-  DISALLOW_COPY_AND_ASSIGN(NoBestEffortTasksTest);
 };
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-constexpr base::StringPiece kExtensionId = "ddchlicdkolnonkihahngkmmmjnjlkkf";
-constexpr base::TimeDelta kSendMessageRetryPeriod =
-    base::TimeDelta::FromMilliseconds(250);
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+constexpr std::string_view kExtensionId = "ddchlicdkolnonkihahngkmmmjnjlkkf";
+constexpr base::TimeDelta kSendMessageRetryPeriod = base::Milliseconds(250);
 #endif
 
 }  // namespace
 
 // Verify that it is possible to load and paint the initial about:blank page
 // without running BEST_EFFORT tasks.
-IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadAndPaintAboutBlank) {
+// TODO(crbug.com/40932711): Disabled due to excessive flakiness.
+IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, DISABLED_LoadAndPaintAboutBlank) {
   content::WebContents* const web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      chrome_test_utils::GetActiveWebContents(this);
+#if BUILDFLAG(IS_ANDROID)
+  // Ensure about:blank is loaded, so the last committed URL is correct.
+  EXPECT_TRUE(content::WaitForLoadStop(web_contents));
+#endif
   EXPECT_TRUE(web_contents->GetLastCommittedURL().IsAboutBlank());
 
   RunLoopUntilLoadedAndPainted run_until_loaded_and_painted(web_contents);
@@ -121,14 +139,13 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadAndPaintAboutBlank) {
 //
 // This test has more dependencies than LoadAndPaintAboutBlank, including
 // loading cookies.
-IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadAndPaintFromNetwork) {
+// TODO(crbug.com/40932711): Disabled due to excessive flakiness.
+IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest,
+                       DISABLED_LoadAndPaintFromNetwork) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
-  content::OpenURLParams open(
-      embedded_test_server()->GetURL("a.com", "/empty.html"),
-      content::Referrer(), WindowOpenDisposition::NEW_FOREGROUND_TAB,
-      ui::PAGE_TRANSITION_TYPED, false);
-  content::WebContents* const web_contents = browser()->OpenURL(open);
+  content::WebContents* const web_contents =
+      OpenUrlInNewTab(embedded_test_server()->GetURL("a.com", "/empty.html"));
   EXPECT_TRUE(web_contents->IsLoading());
 
   RunLoopUntilLoadedAndPainted run_until_loaded_and_painted(web_contents);
@@ -136,18 +153,16 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadAndPaintFromNetwork) {
 }
 
 // Verify that it is possible to load and paint a file:// URL without running
-// BEST_EFFORT tasks. Regression test for https://crbug.com/973244.
-IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadAndPaintFileScheme) {
+// BEST_EFFORT tasks. Regression test for https://crbug.com/40631718.
+// TODO(crbug.com/40932711): Disabled due to excessive flakiness.
+IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, DISABLED_LoadAndPaintFileScheme) {
   constexpr base::FilePath::CharType kFile[] = FILE_PATH_LITERAL("links.html");
-  GURL file_url(ui_test_utils::GetTestUrl(
+  GURL file_url(chrome_test_utils::GetTestUrl(
       base::FilePath(base::FilePath::kCurrentDirectory),
       base::FilePath(kFile)));
   ASSERT_TRUE(file_url.SchemeIs(url::kFileScheme));
 
-  content::OpenURLParams open(file_url, content::Referrer(),
-                              WindowOpenDisposition::NEW_FOREGROUND_TAB,
-                              ui::PAGE_TRANSITION_TYPED, false);
-  content::WebContents* const web_contents = browser()->OpenURL(open);
+  content::WebContents* const web_contents = OpenUrlInNewTab(file_url);
   EXPECT_TRUE(web_contents->IsLoading());
 
   RunLoopUntilLoadedAndPainted run_until_loaded_and_painted(web_contents);
@@ -155,11 +170,12 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadAndPaintFileScheme) {
 }
 
 // Verify that an extension can be loaded and perform basic messaging without
-// running BEST_EFFORT tasks. Regression test for http://crbug.com/177163#c112.
+// running BEST_EFFORT tasks. Regression test for
+// http://crbug.com/40302452#comment113.
 //
 // NOTE: If this test times out, it might help to look at how
-// http://crbug.com/924416 was resolved.
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+// http://crbug.com/41436919 was resolved.
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadExtensionAndSendMessages) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
@@ -171,14 +187,11 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadExtensionAndSendMessages) {
   ASSERT_TRUE(have_test_data_dir);
   extension_dir = extension_dir.AppendASCII("extensions")
                       .AppendASCII("no_best_effort_tasks_test_extension");
-  extensions::UnpackedInstaller::Create(
-      extensions::ExtensionSystem::Get(browser()->profile())
-          ->extension_service())
-      ->Load(extension_dir);
+  extensions::TestExtensionRegistryObserver observer(
+      extensions::ExtensionRegistry::Get(GetProfile()));
+  extensions::UnpackedInstaller::Create(GetProfile())->Load(extension_dir);
   scoped_refptr<const extensions::Extension> extension =
-      extensions::TestExtensionRegistryObserver(
-          extensions::ExtensionRegistry::Get(browser()->profile()))
-          .WaitForExtensionReady();
+      observer.WaitForExtensionReady();
   ASSERT_TRUE(extension);
   ASSERT_EQ(kExtensionId, extension->id());
 
@@ -186,9 +199,11 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadExtensionAndSendMessages) {
   // here must match the pattern found in the extension's manifest file, or it
   // will not be able to send/receive messaging from the test web page (due to
   // extension permissions).
-  ui_test_utils::NavigateToURL(
-      browser(),
-      embedded_test_server()->GetURL("fake.chromium.org", "/empty.html"));
+  content::WebContents* const web_contents =
+      chrome_test_utils::GetActiveWebContents(this);
+  ASSERT_TRUE(chrome_test_utils::NavigateToURL(
+      web_contents,
+      embedded_test_server()->GetURL("fake.chromium.org", "/empty.html")));
 
   // Execute JavaScript in the test page, to send a ping message to the
   // extension and await the reply. The chrome.runtime.sendMessage() operation
@@ -209,31 +224,31 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, LoadExtensionAndSendMessages) {
       "})",
       extension->id().c_str());
   for (;;) {
-    const auto result =
-        content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(),
-                        request_reply_javascript);
-    if (result.error.empty()) {
+    const auto result = content::EvalJs(web_contents, request_reply_javascript);
+    if (result.is_ok()) {
       LOG(INFO) << "Got a response from the extension.";
-      EXPECT_TRUE(result.value.FindBoolKey("pong").value_or(false));
+      EXPECT_TRUE(result.ExtractDict().FindBool("pong").value_or(false));
       break;
     }
     // An error indicates the extension's message listener isn't up yet. Wait a
     // little before trying again.
     LOG(INFO) << "Waiting for the extension's message listener...";
     base::RunLoop run_loop;
-    base::SequencedTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE, run_loop.QuitClosure(), kSendMessageRetryPeriod);
     run_loop.Run();
   }
 }
-#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
 // Verify that Blob XMLHttpRequest finishes without running BEST_EFFORT tasks.
-// Regression test for https://crbug.com/989868.
+// Regression test for https://crbug.com/40638518.
 IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, BlobXMLHttpRequest) {
   ASSERT_TRUE(embedded_test_server()->Start());
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL("/empty.html"));
+  content::WebContents* const web_contents =
+      chrome_test_utils::GetActiveWebContents(this);
+  ASSERT_TRUE(chrome_test_utils::NavigateToURL(
+      web_contents, embedded_test_server()->GetURL("/empty.html")));
   const char kScript[] = R"(
       new Promise(function (resolve, reject) {
         const xhr = new XMLHttpRequest();
@@ -245,9 +260,7 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTest, BlobXMLHttpRequest) {
         xhr.send();
       })
   )";
-  EXPECT_EQ("DONE",
-            content::EvalJs(
-                browser()->tab_strip_model()->GetActiveWebContents(), kScript));
+  EXPECT_EQ("DONE", content::EvalJs(web_contents, kScript));
 }
 
 // A test specialization for verifying quota storage related operations do not
@@ -261,11 +274,13 @@ class NoBestEffortTasksTestWithQuota : public NoBestEffortTasksTest {
 };
 
 // Verify that cache_storage finishes without running BEST_EFFORT tasks.
-// Regression test for https://crbug.com/1006546.
+// Regression test for https://crbug.com/40099913.
 IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTestWithQuota, CacheStorage) {
   ASSERT_TRUE(embedded_test_server()->Start());
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL("/empty.html"));
+  content::WebContents* const web_contents =
+      chrome_test_utils::GetActiveWebContents(this);
+  ASSERT_TRUE(chrome_test_utils::NavigateToURL(
+      web_contents, embedded_test_server()->GetURL("/empty.html")));
   const char kScript[] = R"(
       (async function() {
         const name = 'foo';
@@ -278,24 +293,22 @@ IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTestWithQuota, CacheStorage) {
         return 'DONE';
       })();
   )";
-  EXPECT_EQ("DONE",
-            content::EvalJs(
-                browser()->tab_strip_model()->GetActiveWebContents(), kScript));
+  EXPECT_EQ("DONE", content::EvalJs(web_contents, kScript));
 }
 
 // Verify that quota estimate() finishes without running BEST_EFFORT tasks.
-// Regression test for https://crbug.com/1006546.
+// Regression test for https://crbug.com/40099913.
 IN_PROC_BROWSER_TEST_F(NoBestEffortTasksTestWithQuota, QuotaEstimate) {
   ASSERT_TRUE(embedded_test_server()->Start());
-  ui_test_utils::NavigateToURL(browser(),
-                               embedded_test_server()->GetURL("/empty.html"));
+  content::WebContents* const web_contents =
+      chrome_test_utils::GetActiveWebContents(this);
+  ASSERT_TRUE(chrome_test_utils::NavigateToURL(
+      web_contents, embedded_test_server()->GetURL("/empty.html")));
   const char kScript[] = R"(
       (async function() {
         await navigator.storage.estimate();
         return 'DONE';
       })();
   )";
-  EXPECT_EQ("DONE",
-            content::EvalJs(
-                browser()->tab_strip_model()->GetActiveWebContents(), kScript));
+  EXPECT_EQ("DONE", content::EvalJs(web_contents, kScript));
 }

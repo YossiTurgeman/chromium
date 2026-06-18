@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -1348,6 +1348,158 @@
 
 #if !defined(__NR_rseq)
 #define __NR_rseq 334
+#endif
+
+#if !defined(__NR_pidfd_send_signal)
+#define __NR_pidfd_send_signal 424
+#endif
+
+#if !defined(__NR_io_uring_setup)
+#define __NR_io_uring_setup 425
+#endif
+
+#if !defined(__NR_io_uring_enter)
+#define __NR_io_uring_enter 426
+#endif
+
+#if !defined(__NR_io_uring_register)
+#define __NR_io_uring_register 427
+#endif
+
+#if !defined(__NR_open_tree)
+#define __NR_open_tree 428
+#endif
+
+#if !defined(__NR_move_mount)
+#define __NR_move_mount 429
+#endif
+
+#if !defined(__NR_fsopen)
+#define __NR_fsopen 430
+#endif
+
+#if !defined(__NR_fsconfig)
+#define __NR_fsconfig 431
+#endif
+
+#if !defined(__NR_fsmount)
+#define __NR_fsmount 432
+#endif
+
+#if !defined(__NR_fspick)
+#define __NR_fspick 433
+#endif
+
+#if !defined(__NR_pidfd_open)
+#define __NR_pidfd_open 434
+#endif
+
+#if !defined(__NR_clone3)
+#define __NR_clone3 435
+#endif
+
+#if !defined(__NR_close_range)
+#define __NR_close_range 436
+#endif
+
+#if !defined(__NR_openat2)
+#define __NR_openat2 437
+#endif
+
+#if !defined(__NR_pidfd_getfd)
+#define __NR_pidfd_getfd 438
+#endif
+
+#if !defined(__NR_faccessat2)
+#define __NR_faccessat2 439
+#endif
+
+#if !defined(__NR_process_madvise)
+#define __NR_process_madvise 440
+#endif
+
+#if !defined(__NR_epoll_pwait2)
+#define __NR_epoll_pwait2 441
+#endif
+
+#if !defined(__NR_mount_setattr)
+#define __NR_mount_setattr 442
+#endif
+
+#if !defined(__NR_landlock_create_ruleset)
+#define __NR_landlock_create_ruleset 444
+#endif
+
+#if !defined(__NR_landlock_add_rule)
+#define __NR_landlock_add_rule 445
+#endif
+
+#if !defined(__NR_landlock_restrict_self)
+#define __NR_landlock_restrict_self 446
+#endif
+
+#if !defined(__NR_memfd_secret)
+#define __NR_memfd_secret 447
+#endif
+
+#if !defined(__NR_process_mrelease)
+#define __NR_process_mrelease 448
+#endif
+
+#if !defined(__NR_futex_waitv)
+#define __NR_futex_waitv 449
+#endif
+
+#if !defined(__NR_set_mempolicy_home_node)
+#define __NR_set_mempolicy_home_node 450
+#endif
+
+#if !defined(__NR_cachestat)
+#define __NR_cachestat 451
+#endif
+
+#if !defined(__NR_fchmodat2)
+#define __NR_fchmodat2 452
+#endif
+
+#if !defined(__NR_map_shadow_stack)
+#define __NR_map_shadow_stack 453
+#endif
+
+#if !defined(__NR_futex_wake)
+#define __NR_futex_wake 454
+#endif
+
+#if !defined(__NR_futex_wait)
+#define __NR_futex_wait 455
+#endif
+
+#if !defined(__NR_futex_requeue)
+#define __NR_futex_requeue 456
+#endif
+
+#if !defined(__NR_statmount)
+#define __NR_statmount 457
+#endif
+
+#if !defined(__NR_listmount)
+#define __NR_listmount 458
+#endif
+
+#if !defined(__NR_lsm_get_self_attr)
+#define __NR_lsm_get_self_attr 459
+#endif
+
+#if !defined(__NR_lsm_set_self_attr)
+#define __NR_lsm_set_self_attr 460
+#endif
+
+#if !defined(__NR_lsm_list_modules)
+#define __NR_lsm_list_modules 461
+#endif
+
+#if !defined(__NR_mseal)
+#define __NR_mseal 462
 #endif
 
 #endif  // SANDBOX_LINUX_SYSTEM_HEADERS_X86_64_LINUX_SYSCALLS_H_

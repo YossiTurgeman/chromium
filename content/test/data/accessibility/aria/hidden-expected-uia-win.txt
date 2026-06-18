@@ -1,3 +1,4 @@
 Document
-++Group Name='b'
-++Group Name='c'
+++Group IsControlElement=false
+++++Group
+++++Group

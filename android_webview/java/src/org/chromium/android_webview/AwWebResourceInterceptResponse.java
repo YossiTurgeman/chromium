@@ -1,27 +1,33 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package org.chromium.android_webview;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.JniType;
 
-/**
- * The response information that is to be returned for a particular resource fetch.
- */
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.components.embedder_support.util.WebResourceResponseInfo;
+
+/** The response information that is to be returned for a particular resource fetch. */
 @JNINamespace("android_webview")
+@NullMarked
 public class AwWebResourceInterceptResponse {
-    private AwWebResourceResponse mResponse;
-    private boolean mRaisedException;
+    private final @Nullable WebResourceResponseInfo mResponse;
+    private final boolean mRaisedException;
 
-    public AwWebResourceInterceptResponse(AwWebResourceResponse response, boolean raisedException) {
+    public AwWebResourceInterceptResponse(
+            @Nullable WebResourceResponseInfo response, boolean raisedException) {
         mResponse = response;
         mRaisedException = raisedException;
     }
 
     @CalledByNative
-    public AwWebResourceResponse getResponse() {
+    @JniType("std::unique_ptr<embedder_support::WebResourceResponse>")
+    public @Nullable WebResourceResponseInfo getResponse() {
         return mResponse;
     }
 

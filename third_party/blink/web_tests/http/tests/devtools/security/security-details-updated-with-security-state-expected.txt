@@ -3,8 +3,8 @@ Tests that the security details for an origin are updated if its security state 
 Sidebar Origins --------------------------------
 Group: Main origin
 Group: Secure origins
-<SPAN >
-    <SPAN class=url-scheme-unknown >
+<SPAN class=highlighted-url >
+    <SPAN class=url-scheme-secure >
 https
     </SPAN>
     <SPAN class=url-scheme-separator >
@@ -14,7 +14,7 @@ https
 foo.test
     </SPAN>
 </SPAN>
-<SPAN class=url-scheme-unknown >
+<SPAN class=url-scheme-secure >
 https
 </SPAN>
 <SPAN class=url-scheme-separator >
@@ -22,9 +22,69 @@ https
 </SPAN>
 <SPAN >
 foo.test
+</SPAN>
+<SPAN class=highlighted-url >
+    <SPAN class=url-scheme-secure >
+https
+    </SPAN>
+    <SPAN class=url-scheme-separator >
+://
+    </SPAN>
+    <SPAN >
+ecdhe.foo.test
+    </SPAN>
+</SPAN>
+<SPAN class=url-scheme-secure >
+https
+</SPAN>
+<SPAN class=url-scheme-separator >
+://
+</SPAN>
+<SPAN >
+ecdhe.foo.test
+</SPAN>
+<SPAN class=highlighted-url >
+    <SPAN class=url-scheme-secure >
+https
+    </SPAN>
+    <SPAN class=url-scheme-separator >
+://
+    </SPAN>
+    <SPAN >
+tls13.foo.test
+    </SPAN>
+</SPAN>
+<SPAN class=url-scheme-secure >
+https
+</SPAN>
+<SPAN class=url-scheme-separator >
+://
+</SPAN>
+<SPAN >
+tls13.foo.test
+</SPAN>
+<SPAN class=highlighted-url >
+    <SPAN class=url-scheme-secure >
+https
+    </SPAN>
+    <SPAN class=url-scheme-separator >
+://
+    </SPAN>
+    <SPAN >
+ech.foo.test
+    </SPAN>
+</SPAN>
+<SPAN class=url-scheme-secure >
+https
+</SPAN>
+<SPAN class=url-scheme-separator >
+://
+</SPAN>
+<SPAN >
+ech.foo.test
 </SPAN>
 Group: Unknown / canceled
-<SPAN >
+<SPAN class=highlighted-url >
     <SPAN class=url-scheme-unknown >
 https
     </SPAN>
@@ -44,8 +104,8 @@ https
 <SPAN >
 bar.test
 </SPAN>
-Origin view ------------------------------------
-<DIV class=widget vbox security-origin-view slot=insertion-point-main >
+Origin view (https://foo.test) -----------------
+<DIV jslog=Pane; context: security.origin-view class=widget vbox security-origin-view slot=main >
     <STYLE >
     </STYLE>
     <STYLE >
@@ -55,9 +115,17 @@ Origin view ------------------------------------
 Origin
         </DIV>
         <DIV class=origin-display >
-            <SPAN class=security-property security-property-secure >
-            </SPAN>
             <SPAN >
+                <DEVTOOLS-ICON role=presentation name=lock class=security-property security-property-secure >
+                    <#document-fragment >
+                        <STYLE >
+                        </STYLE>
+                        <SPAN style=--icon-url: var(--image-file-lock); >
+                        </SPAN>
+                    </#document-fragment>
+                </DEVTOOLS-ICON>
+            </SPAN>
+            <SPAN class=highlighted-url >
                 <SPAN class=url-scheme-secure >
 https
                 </SPAN>
@@ -70,9 +138,29 @@ foo.test
             </SPAN>
         </DIV>
         <DIV class=view-network-button >
-            <SPAN class=devtools-link origin-button tabindex=0 role=link >
+            <DEVTOOLS-BUTTON role=link jslog=Action; track: click; context: reveal-in-network >
 View requests in Network Panel
-            </SPAN>
+                <#document-fragment >
+                    <#comment >
+                    </#comment>
+                    <STYLE >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                    </STYLE>
+                    <BUTTON class=outlined >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <SLOT >
+                        </SLOT>
+                    </BUTTON>
+                </#document-fragment>
+            </DEVTOOLS-BUTTON>
         </DIV>
     </DIV>
     <DIV class=origin-view-section >
@@ -80,30 +168,30 @@ View requests in Network Panel
 Connection
         </DIV>
         <TABLE class=details-table >
-            <DIV class=details-table-row >
-                <DIV >
+            <TR class=details-table-row >
+                <TD >
 Protocol
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 TLS 1.2
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Key exchange
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Key_Exchange
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Cipher
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Cypher with Mac
-                </DIV>
-            </DIV>
+                </TD>
+            </TR>
         </TABLE>
     </DIV>
     <DIV class=origin-view-section >
@@ -111,19 +199,19 @@ Cypher with Mac
 Certificate
         </DIV>
         <TABLE class=details-table >
-            <DIV class=details-table-row >
-                <DIV >
+            <TR class=details-table-row >
+                <TD >
 Subject
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 foo.test
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 SAN
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
                     <DIV >
                         <SPAN class=san-entry >
 foo.test
@@ -132,41 +220,606 @@ foo.test
 *.test
                         </SPAN>
                     </DIV>
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Valid from
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Mon, 20 Mar 2017 08:53:20 GMT
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Valid until
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Wed, 18 May 2033 03:33:20 GMT
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
 Issuer
-                </DIV>
-                <DIV >
+                </TD>
+                <TD >
 Super CA
-                </DIV>
-            </DIV>
-            <DIV class=details-table-row >
-                <DIV >
-                </DIV>
-                <DIV >
-                    <BUTTON class=origin-button text-button type=button role=button >
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+                </TD>
+                <TD >
+                    <DEVTOOLS-BUTTON role=button class=origin-button jslog=Action; track: click; context: security.view-certificate-for-origin title=Open full certificate details >
 Open full certificate details
+                        <#document-fragment >
+                            <#comment >
+                            </#comment>
+                            <STYLE >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                            </STYLE>
+                            <BUTTON class=outlined title=Open full certificate details aria-label=Open full certificate details >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <SLOT >
+                                </SLOT>
+                            </BUTTON>
+                        </#document-fragment>
+                    </DEVTOOLS-BUTTON>
+                </TD>
+            </TR>
+        </TABLE>
+    </DIV>
+</DIV>
+Origin view (https://ecdhe.foo.test) -----------
+<DIV jslog=Pane; context: security.origin-view class=widget vbox security-origin-view slot=main >
+    <STYLE >
+    </STYLE>
+    <STYLE >
+    </STYLE>
+    <DIV class=title-section >
+        <DIV class=title-section-header role=heading aria-level=1 >
+Origin
+        </DIV>
+        <DIV class=origin-display >
+            <SPAN >
+                <DEVTOOLS-ICON role=presentation name=lock class=security-property security-property-secure >
+                    <#document-fragment >
+                        <STYLE >
+                        </STYLE>
+                        <SPAN style=--icon-url: var(--image-file-lock); >
+                        </SPAN>
+                    </#document-fragment>
+                </DEVTOOLS-ICON>
+            </SPAN>
+            <SPAN class=highlighted-url >
+                <SPAN class=url-scheme-secure >
+https
+                </SPAN>
+                <SPAN class=url-scheme-separator >
+://
+                </SPAN>
+                <SPAN >
+ecdhe.foo.test
+                </SPAN>
+            </SPAN>
+        </DIV>
+        <DIV class=view-network-button >
+            <DEVTOOLS-BUTTON role=link jslog=Action; track: click; context: reveal-in-network >
+View requests in Network Panel
+                <#document-fragment >
+                    <#comment >
+                    </#comment>
+                    <STYLE >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                    </STYLE>
+                    <BUTTON class=outlined >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <SLOT >
+                        </SLOT>
                     </BUTTON>
-                </DIV>
-            </DIV>
+                </#document-fragment>
+            </DEVTOOLS-BUTTON>
+        </DIV>
+    </DIV>
+    <DIV class=origin-view-section >
+        <DIV class=origin-view-section-title role=heading aria-level=2 >
+Connection
+        </DIV>
+        <TABLE class=details-table >
+            <TR class=details-table-row >
+                <TD >
+Protocol
+                </TD>
+                <TD >
+TLS 1.2
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Key exchange
+                </TD>
+                <TD >
+ECDSA_RSA with X25519
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Server signature
+                </TD>
+                <TD >
+RSA-PSS with SHA-256
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Cipher
+                </TD>
+                <TD >
+AES-128-GCM
+                </TD>
+            </TR>
+        </TABLE>
+    </DIV>
+    <DIV class=origin-view-section >
+        <DIV class=origin-view-section-title role=heading aria-level=2 >
+Certificate
+        </DIV>
+        <TABLE class=details-table >
+            <TR class=details-table-row >
+                <TD >
+Subject
+                </TD>
+                <TD >
+ecdhe.foo.test
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+SAN
+                </TD>
+                <TD >
+                    <DIV >
+                        <SPAN class=san-entry >
+ecdhe.foo.test
+                        </SPAN>
+                    </DIV>
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Valid from
+                </TD>
+                <TD >
+Mon, 20 Mar 2017 08:53:20 GMT
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Valid until
+                </TD>
+                <TD >
+Wed, 18 May 2033 03:33:20 GMT
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Issuer
+                </TD>
+                <TD >
+Super CA
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+                </TD>
+                <TD >
+                    <DEVTOOLS-BUTTON role=button class=origin-button jslog=Action; track: click; context: security.view-certificate-for-origin title=Open full certificate details >
+Open full certificate details
+                        <#document-fragment >
+                            <#comment >
+                            </#comment>
+                            <STYLE >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                            </STYLE>
+                            <BUTTON class=outlined title=Open full certificate details aria-label=Open full certificate details >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <SLOT >
+                                </SLOT>
+                            </BUTTON>
+                        </#document-fragment>
+                    </DEVTOOLS-BUTTON>
+                </TD>
+            </TR>
+        </TABLE>
+    </DIV>
+</DIV>
+Origin view (https://tls13.foo.test) -----------
+<DIV jslog=Pane; context: security.origin-view class=widget vbox security-origin-view slot=main >
+    <STYLE >
+    </STYLE>
+    <STYLE >
+    </STYLE>
+    <DIV class=title-section >
+        <DIV class=title-section-header role=heading aria-level=1 >
+Origin
+        </DIV>
+        <DIV class=origin-display >
+            <SPAN >
+                <DEVTOOLS-ICON role=presentation name=lock class=security-property security-property-secure >
+                    <#document-fragment >
+                        <STYLE >
+                        </STYLE>
+                        <SPAN style=--icon-url: var(--image-file-lock); >
+                        </SPAN>
+                    </#document-fragment>
+                </DEVTOOLS-ICON>
+            </SPAN>
+            <SPAN class=highlighted-url >
+                <SPAN class=url-scheme-secure >
+https
+                </SPAN>
+                <SPAN class=url-scheme-separator >
+://
+                </SPAN>
+                <SPAN >
+tls13.foo.test
+                </SPAN>
+            </SPAN>
+        </DIV>
+        <DIV class=view-network-button >
+            <DEVTOOLS-BUTTON role=link jslog=Action; track: click; context: reveal-in-network >
+View requests in Network Panel
+                <#document-fragment >
+                    <#comment >
+                    </#comment>
+                    <STYLE >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                    </STYLE>
+                    <BUTTON class=outlined >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <SLOT >
+                        </SLOT>
+                    </BUTTON>
+                </#document-fragment>
+            </DEVTOOLS-BUTTON>
+        </DIV>
+    </DIV>
+    <DIV class=origin-view-section >
+        <DIV class=origin-view-section-title role=heading aria-level=2 >
+Connection
+        </DIV>
+        <TABLE class=details-table >
+            <TR class=details-table-row >
+                <TD >
+Protocol
+                </TD>
+                <TD >
+TLS 1.3
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Key exchange
+                </TD>
+                <TD >
+X25519
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Server signature
+                </TD>
+                <TD >
+RSA-PSS with SHA-256
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Cipher
+                </TD>
+                <TD >
+AES-128-GCM
+                </TD>
+            </TR>
+        </TABLE>
+    </DIV>
+    <DIV class=origin-view-section >
+        <DIV class=origin-view-section-title role=heading aria-level=2 >
+Certificate
+        </DIV>
+        <TABLE class=details-table >
+            <TR class=details-table-row >
+                <TD >
+Subject
+                </TD>
+                <TD >
+tls13.foo.test
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+SAN
+                </TD>
+                <TD >
+                    <DIV >
+                        <SPAN class=san-entry >
+tls13.foo.test
+                        </SPAN>
+                    </DIV>
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Valid from
+                </TD>
+                <TD >
+Mon, 20 Mar 2017 08:53:20 GMT
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Valid until
+                </TD>
+                <TD >
+Wed, 18 May 2033 03:33:20 GMT
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Issuer
+                </TD>
+                <TD >
+Super CA
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+                </TD>
+                <TD >
+                    <DEVTOOLS-BUTTON role=button class=origin-button jslog=Action; track: click; context: security.view-certificate-for-origin title=Open full certificate details >
+Open full certificate details
+                        <#document-fragment >
+                            <#comment >
+                            </#comment>
+                            <STYLE >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                            </STYLE>
+                            <BUTTON class=outlined title=Open full certificate details aria-label=Open full certificate details >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <SLOT >
+                                </SLOT>
+                            </BUTTON>
+                        </#document-fragment>
+                    </DEVTOOLS-BUTTON>
+                </TD>
+            </TR>
+        </TABLE>
+    </DIV>
+</DIV>
+Origin view (https://ech.foo.test) -------------
+<DIV jslog=Pane; context: security.origin-view class=widget vbox security-origin-view slot=main >
+    <STYLE >
+    </STYLE>
+    <STYLE >
+    </STYLE>
+    <DIV class=title-section >
+        <DIV class=title-section-header role=heading aria-level=1 >
+Origin
+        </DIV>
+        <DIV class=origin-display >
+            <SPAN >
+                <DEVTOOLS-ICON role=presentation name=lock class=security-property security-property-secure >
+                    <#document-fragment >
+                        <STYLE >
+                        </STYLE>
+                        <SPAN style=--icon-url: var(--image-file-lock); >
+                        </SPAN>
+                    </#document-fragment>
+                </DEVTOOLS-ICON>
+            </SPAN>
+            <SPAN class=highlighted-url >
+                <SPAN class=url-scheme-secure >
+https
+                </SPAN>
+                <SPAN class=url-scheme-separator >
+://
+                </SPAN>
+                <SPAN >
+ech.foo.test
+                </SPAN>
+            </SPAN>
+        </DIV>
+        <DIV class=view-network-button >
+            <DEVTOOLS-BUTTON role=link jslog=Action; track: click; context: reveal-in-network >
+View requests in Network Panel
+                <#document-fragment >
+                    <#comment >
+                    </#comment>
+                    <STYLE >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                    </STYLE>
+                    <BUTTON class=outlined >
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <#comment >
+                        </#comment>
+                        <SLOT >
+                        </SLOT>
+                    </BUTTON>
+                </#document-fragment>
+            </DEVTOOLS-BUTTON>
+        </DIV>
+    </DIV>
+    <DIV class=origin-view-section >
+        <DIV class=origin-view-section-title role=heading aria-level=2 >
+Connection
+        </DIV>
+        <TABLE class=details-table >
+            <TR class=details-table-row >
+                <TD >
+Protocol
+                </TD>
+                <TD >
+TLS 1.3
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Key exchange
+                </TD>
+                <TD >
+X25519
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Server signature
+                </TD>
+                <TD >
+RSA-PSS with SHA-256
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Cipher
+                </TD>
+                <TD >
+AES-128-GCM
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Encrypted ClientHello
+                </TD>
+                <TD >
+enabled
+                </TD>
+            </TR>
+        </TABLE>
+    </DIV>
+    <DIV class=origin-view-section >
+        <DIV class=origin-view-section-title role=heading aria-level=2 >
+Certificate
+        </DIV>
+        <TABLE class=details-table >
+            <TR class=details-table-row >
+                <TD >
+Subject
+                </TD>
+                <TD >
+ech.foo.test
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+SAN
+                </TD>
+                <TD >
+                    <DIV >
+                        <SPAN class=san-entry >
+ech.foo.test
+                        </SPAN>
+                    </DIV>
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Valid from
+                </TD>
+                <TD >
+Mon, 20 Mar 2017 08:53:20 GMT
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Valid until
+                </TD>
+                <TD >
+Wed, 18 May 2033 03:33:20 GMT
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+Issuer
+                </TD>
+                <TD >
+Super CA
+                </TD>
+            </TR>
+            <TR class=details-table-row >
+                <TD >
+                </TD>
+                <TD >
+                    <DEVTOOLS-BUTTON role=button class=origin-button jslog=Action; track: click; context: security.view-certificate-for-origin title=Open full certificate details >
+Open full certificate details
+                        <#document-fragment >
+                            <#comment >
+                            </#comment>
+                            <STYLE >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                            </STYLE>
+                            <BUTTON class=outlined title=Open full certificate details aria-label=Open full certificate details >
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <#comment >
+                                </#comment>
+                                <SLOT >
+                                </SLOT>
+                            </BUTTON>
+                        </#document-fragment>
+                    </DEVTOOLS-BUTTON>
+                </TD>
+            </TR>
         </TABLE>
     </DIV>
 </DIV>

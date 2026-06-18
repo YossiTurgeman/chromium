@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,11 @@
 
 #include <stddef.h>
 
-#include <string>
+#include <vector>
 
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
+#include "components/bookmarks/browser/titled_url_match.h"
 #include "components/omnibox/browser/autocomplete_input.h"
 #include "components/omnibox/browser/autocomplete_provider.h"
 
@@ -18,7 +20,7 @@ class AutocompleteProviderClient;
 namespace bookmarks {
 class BookmarkModel;
 struct TitledUrlMatch;
-}
+}  // namespace bookmarks
 
 // This class is an autocomplete provider which quickly (and synchronously)
 // provides autocomplete suggestions based on the titles of bookmarks. Page
@@ -40,14 +42,9 @@ class BookmarkProvider : public AutocompleteProvider {
   // a complete search for |input| across all bookmark titles.
   void Start(const AutocompleteInput& input, bool minimal_changes) override;
 
-  // Sets the BookmarkModel for unit tests.
-  void set_bookmark_model_for_testing(
-      bookmarks::BookmarkModel* bookmark_model) {
-    bookmark_model_ = bookmark_model;
-  }
-
  private:
   FRIEND_TEST_ALL_PREFIXES(BookmarkProviderTest, InlineAutocompletion);
+  FRIEND_TEST_ALL_PREFIXES(BookmarkProviderTest, MatchingAlgorithmForHubSearch);
 
   ~BookmarkProvider() override;
 
@@ -55,12 +52,17 @@ class BookmarkProvider : public AutocompleteProvider {
   // |matches_|.
   void DoAutocomplete(const AutocompleteInput& input);
 
+  // Allow short input word prefix matching only if the input is longer than 3
+  // chars.
+  query_parser::MatchingAlgorithm GetMatchingAlgorithm(AutocompleteInput input);
+
   // Calculates the relevance score for |match|.
-  int CalculateBookmarkMatchRelevance(
+  // Also returns the number of bookmarks containing the destination URL.
+  std::pair<int, int> CalculateBookmarkMatchRelevance(
       const bookmarks::TitledUrlMatch& match) const;
 
-  AutocompleteProviderClient* client_;
-  bookmarks::BookmarkModel* bookmark_model_;
+  const raw_ptr<AutocompleteProviderClient> client_;
+  const raw_ptr<bookmarks::BookmarkModel> bookmark_model_;
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_BOOKMARK_PROVIDER_H_

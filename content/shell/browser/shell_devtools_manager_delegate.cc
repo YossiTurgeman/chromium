@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,14 @@
 
 #include <stdint.h>
 
+#include <atomic>
 #include <vector>
 
-#include "base/atomicops.h"
-#include "base/bind.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_context.h"
@@ -27,7 +26,7 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/url_constants.h"
-#include "content/public/common/user_agent.h"
+#include "content/shell/browser/protocol/shell_devtools_session.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/common/shell_content_client.h"
 #include "content/shell/common/shell_switches.h"
@@ -37,11 +36,7 @@
 #include "net/socket/tcp_server_socket.h"
 #include "ui/base/resource/resource_bundle.h"
 
-#if !defined(OS_ANDROID)
-#include "content/public/browser/devtools_frontend_host.h"
-#endif
-
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 #include "content/public/browser/android/devtools_auth.h"
 #include "net/socket/unix_domain_server_socket_posix.h"
 #endif
@@ -52,13 +47,17 @@ namespace {
 
 const int kBackLog = 10;
 
-base::subtle::Atomic32 g_last_used_port;
+std::atomic<int> g_last_used_port;
 
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
 class UnixDomainServerSocketFactory : public content::DevToolsSocketFactory {
  public:
   explicit UnixDomainServerSocketFactory(const std::string& socket_name)
       : socket_name_(socket_name) {}
+
+  UnixDomainServerSocketFactory(const UnixDomainServerSocketFactory&) = delete;
+  UnixDomainServerSocketFactory& operator=(
+      const UnixDomainServerSocketFactory&) = delete;
 
  private:
   // content::DevToolsSocketFactory.
@@ -68,7 +67,7 @@ class UnixDomainServerSocketFactory : public content::DevToolsSocketFactory {
             base::BindRepeating(&CanUserConnectToDevTools),
             true /* use_abstract_namespace */));
     if (socket->BindAndListen(socket_name_, kBackLog) != net::OK)
-      return std::unique_ptr<net::ServerSocket>();
+      return nullptr;
 
     return std::move(socket);
   }
@@ -79,8 +78,6 @@ class UnixDomainServerSocketFactory : public content::DevToolsSocketFactory {
   }
 
   std::string socket_name_;
-
-  DISALLOW_COPY_AND_ASSIGN(UnixDomainServerSocketFactory);
 };
 #else
 class TCPServerSocketFactory : public content::DevToolsSocketFactory {
@@ -88,17 +85,20 @@ class TCPServerSocketFactory : public content::DevToolsSocketFactory {
   TCPServerSocketFactory(const std::string& address, uint16_t port)
       : address_(address), port_(port) {}
 
+  TCPServerSocketFactory(const TCPServerSocketFactory&) = delete;
+  TCPServerSocketFactory& operator=(const TCPServerSocketFactory&) = delete;
+
  private:
   // content::DevToolsSocketFactory.
   std::unique_ptr<net::ServerSocket> CreateForHttpServer() override {
     std::unique_ptr<net::ServerSocket> socket(
         new net::TCPServerSocket(nullptr, net::NetLogSource()));
     if (socket->ListenWithAddressAndPort(address_, port_, kBackLog) != net::OK)
-      return std::unique_ptr<net::ServerSocket>();
+      return nullptr;
 
     net::IPEndPoint endpoint;
     if (socket->GetLocalAddress(&endpoint) == net::OK)
-      base::subtle::NoBarrier_Store(&g_last_used_port, endpoint.port());
+      g_last_used_port.store(endpoint.port(), std::memory_order_release);
 
     return socket;
   }
@@ -110,15 +110,13 @@ class TCPServerSocketFactory : public content::DevToolsSocketFactory {
 
   std::string address_;
   uint16_t port_;
-
-  DISALLOW_COPY_AND_ASSIGN(TCPServerSocketFactory);
 };
 #endif
 
 std::unique_ptr<content::DevToolsSocketFactory> CreateSocketFactory() {
   const base::CommandLine& command_line =
       *base::CommandLine::ForCurrentProcess();
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   std::string socket_name = "content_shell_devtools_remote";
   if (command_line.HasSwitch(switches::kRemoteDebuggingSocketName)) {
     socket_name = command_line.GetSwitchValueASCII(
@@ -141,8 +139,18 @@ std::unique_ptr<content::DevToolsSocketFactory> CreateSocketFactory() {
       DLOG(WARNING) << "Invalid http debugger port number " << temp_port;
     }
   }
+  // By default listen to incoming DevTools connections on localhost.
+  std::string address_str = net::IPAddress::IPv4Localhost().ToString();
+  if (command_line.HasSwitch(switches::kRemoteDebuggingAddress)) {
+    net::IPAddress address;
+    address_str =
+        command_line.GetSwitchValueASCII(switches::kRemoteDebuggingAddress);
+    if (!address.AssignFromIPLiteral(address_str)) {
+      DLOG(WARNING) << "Invalid devtools server address: " << address_str;
+    }
+  }
   return std::unique_ptr<content::DevToolsSocketFactory>(
-      new TCPServerSocketFactory("127.0.0.1", port));
+      new TCPServerSocketFactory(address_str, port));
 #endif
 }
 
@@ -152,7 +160,7 @@ std::unique_ptr<content::DevToolsSocketFactory> CreateSocketFactory() {
 
 // static
 int ShellDevToolsManagerDelegate::GetHttpHandlerPort() {
-  return base::subtle::NoBarrier_Load(&g_last_used_port);
+  return g_last_used_port.load(std::memory_order_acquire);
 }
 
 // static
@@ -165,7 +173,7 @@ void ShellDevToolsManagerDelegate::StartHttpHandler(
   const base::CommandLine& command_line =
       *base::CommandLine::ForCurrentProcess();
   if (command_line.HasSwitch(switches::kRemoteDebuggingPipe))
-    DevToolsAgentHost::StartRemoteDebuggingPipeHandler();
+    DevToolsAgentHost::StartRemoteDebuggingPipeHandler(base::OnceClosure());
 }
 
 // static
@@ -188,24 +196,39 @@ BrowserContext* ShellDevToolsManagerDelegate::GetDefaultBrowserContext() {
 void ShellDevToolsManagerDelegate::ClientAttached(
     content::DevToolsAgentHostClientChannel* channel) {
   // Make sure we don't receive notifications twice for the same client.
-  CHECK(clients_.find(channel->GetClient()) == clients_.end());
-  clients_.insert(channel->GetClient());
+  CHECK(!sessions_.contains(channel));
+  sessions_.emplace(
+      channel,
+      std::make_unique<shell::protocol::ShellDevToolsSession>(
+          base::raw_ref<BrowserContext>::from_ptr(browser_context_), channel));
 }
 
 void ShellDevToolsManagerDelegate::ClientDetached(
     content::DevToolsAgentHostClientChannel* channel) {
-  clients_.erase(channel->GetClient());
+  sessions_.erase(channel);
 }
 
-scoped_refptr<DevToolsAgentHost>
-ShellDevToolsManagerDelegate::CreateNewTarget(const GURL& url) {
+void ShellDevToolsManagerDelegate::HandleCommand(
+    content::DevToolsAgentHostClientChannel* channel,
+    base::span<const uint8_t> message,
+    NotHandledCallback callback) {
+  auto& session = sessions_.at(channel);
+  session->HandleCommand(message, std::move(callback));
+}
+
+scoped_refptr<DevToolsAgentHost> ShellDevToolsManagerDelegate::CreateNewTarget(
+    const GURL& url,
+    content::DevToolsManagerDelegate::TargetType target_type,
+    bool new_window) {
   Shell* shell = Shell::CreateNewWindow(browser_context_, url, nullptr,
                                         Shell::GetShellDefaultSize());
-  return DevToolsAgentHost::GetOrCreateFor(shell->web_contents());
+  return target_type == content::DevToolsManagerDelegate::kTab
+             ? DevToolsAgentHost::GetOrCreateForTab(shell->web_contents())
+             : DevToolsAgentHost::GetOrCreateFor(shell->web_contents());
 }
 
 std::string ShellDevToolsManagerDelegate::GetDiscoveryPageHTML() {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
   return std::string();
 #else
   return ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(
@@ -214,10 +237,11 @@ std::string ShellDevToolsManagerDelegate::GetDiscoveryPageHTML() {
 }
 
 bool ShellDevToolsManagerDelegate::HasBundledFrontendResources() {
-#if defined(OS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
   return false;
-#endif
+#else
   return true;
+#endif
 }
 
 }  // namespace content

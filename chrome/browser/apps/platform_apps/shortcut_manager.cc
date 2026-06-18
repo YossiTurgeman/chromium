@@ -1,16 +1,19 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/apps/platform_apps/shortcut_manager.h"
 
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include <string>
+
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/one_shot_event.h"
-#include "base/strings/string16.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/system/sys_info.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/extensions/extension_service.h"
@@ -28,25 +31,9 @@
 #include "extensions/browser/extension_system.h"
 #include "extensions/common/extension_set.h"
 
-#if defined(OS_MAC)
-#include "chrome/common/mac/app_mode_common.h"
-#endif
-
 using extensions::Extension;
 
 namespace {
-
-// This version number is stored in local prefs to check whether app shortcuts
-// need to be recreated. This might happen when we change various aspects of app
-// shortcuts like command-line flags or associated icons, binaries, etc.
-#if defined(OS_MAC)
-const int kCurrentAppShortcutsVersion = APP_SHIM_VERSION_NUMBER;
-#else
-const int kCurrentAppShortcutsVersion = 0;
-#endif
-
-// Delay in seconds before running UpdateShortcutsForAllApps.
-const int kUpdateShortcutsForAllAppsDelay = 10;
 
 void CreateShortcutsForApp(Profile* profile, const Extension* app) {
   web_app::ShortcutLocations creation_locations;
@@ -70,57 +57,32 @@ void AppShortcutManager::SuppressShortcutsForTesting() {
   g_suppress_shortcuts_for_testing = true;
 }
 
-// static
-void AppShortcutManager::RegisterProfilePrefs(
-    user_prefs::PrefRegistrySyncable* registry) {
-  // Indicates whether app shortcuts have been created.
-  registry->RegisterIntegerPref(prefs::kAppShortcutsVersion, 0);
-}
-
-AppShortcutManager::AppShortcutManager(Profile* profile)
-    : profile_(profile), is_profile_attributes_storage_observer_(false) {
+AppShortcutManager::AppShortcutManager(Profile* profile) : profile_(profile) {
   // Use of g_browser_process requires that we are either on the UI thread, or
   // there are no threads initialized (such as in unit tests).
   DCHECK(!content::BrowserThread::IsThreadInitialized(
              content::BrowserThread::UI) ||
          content::BrowserThread::CurrentlyOn(content::BrowserThread::UI));
 
-  extension_registry_observer_.Add(
+  extension_registry_observation_.Observe(
       extensions::ExtensionRegistry::Get(profile_));
-  // Wait for extensions to be ready before running
-  // UpdateShortcutsForAllAppsIfNeeded.
-  extensions::ExtensionSystem::Get(profile)->ready().Post(
-      FROM_HERE,
-      base::BindOnce(&AppShortcutManager::UpdateShortcutsForAllAppsIfNeeded,
-                     weak_ptr_factory_.GetWeakPtr()));
 
   ProfileManager* profile_manager = g_browser_process->profile_manager();
   // profile_manager might be NULL in testing environments.
   if (profile_manager) {
-    profile_manager->GetProfileAttributesStorage().AddObserver(this);
-    is_profile_attributes_storage_observer_ = true;
+    profile_storage_observation_.Observe(
+        &profile_manager->GetProfileAttributesStorage());
   }
 }
 
-AppShortcutManager::~AppShortcutManager() {
-  if (g_browser_process && is_profile_attributes_storage_observer_) {
-    ProfileManager* profile_manager = g_browser_process->profile_manager();
-    // profile_manager might be NULL in testing environments or during shutdown.
-    if (profile_manager)
-      profile_manager->GetProfileAttributesStorage().RemoveObserver(this);
-  }
-}
+AppShortcutManager::~AppShortcutManager() = default;
 
 void AppShortcutManager::OnExtensionWillBeInstalled(
     content::BrowserContext* browser_context,
     const Extension* extension,
     bool is_update,
     const std::string& old_name) {
-  // Bookmark apps are handled in
-  // web_app::AppShortcutManager::OnWebAppInstalled() and
-  // web_app::AppShortcutManager::OnWebAppManifestUpdated().
-  if (!extension->is_app() || extension->from_bookmark() ||
-      g_suppress_shortcuts_for_testing) {
+  if (!extension->is_app() || g_suppress_shortcuts_for_testing) {
     return;
   }
 
@@ -129,7 +91,7 @@ void AppShortcutManager::OnExtensionWillBeInstalled(
   // shortcut in the applications menu (e.g., Start Menu).
   if (is_update) {
     web_app::UpdateAllShortcuts(base::UTF8ToUTF16(old_name), profile_,
-                                extension, base::Closure());
+                                extension, base::DoNothing());
   } else {
     CreateShortcutsForApp(profile_, extension);
   }
@@ -139,9 +101,7 @@ void AppShortcutManager::OnExtensionUninstalled(
     content::BrowserContext* browser_context,
     const Extension* extension,
     extensions::UninstallReason reason) {
-  // Bookmark apps are handled in
-  // web_app::AppShortcutManager::OnWebAppUninstalled()
-  if (!extension->from_bookmark() && !g_suppress_shortcuts_for_testing)
+  if (!g_suppress_shortcuts_for_testing)
     web_app::DeleteAllShortcuts(profile_, extension);
 }
 
@@ -155,36 +115,4 @@ void AppShortcutManager::OnProfileWillBeRemoved(
       FROM_HERE,
       base::BindOnce(&web_app::internals::DeleteAllShortcutsForProfile,
                      profile_path));
-}
-
-void AppShortcutManager::UpdateShortcutsForAllAppsNow() {
-  if (!g_suppress_shortcuts_for_testing) {
-    web_app::UpdateShortcutsForAllApps(
-        profile_,
-        base::BindOnce(&AppShortcutManager::SetCurrentAppShortcutsVersion,
-                       weak_ptr_factory_.GetWeakPtr()));
-  }
-}
-
-void AppShortcutManager::SetCurrentAppShortcutsVersion() {
-  profile_->GetPrefs()->SetInteger(prefs::kAppShortcutsVersion,
-                                   kCurrentAppShortcutsVersion);
-}
-
-void AppShortcutManager::UpdateShortcutsForAllAppsIfNeeded() {
-  // Updating shortcuts writes to user home folders, which can not be done in
-  // tests without exploding disk space usage on the bots.
-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kTestType))
-    return;
-
-  int last_version =
-      profile_->GetPrefs()->GetInteger(prefs::kAppShortcutsVersion);
-  if (last_version >= kCurrentAppShortcutsVersion)
-    return;
-
-  content::GetUIThreadTaskRunner({})->PostDelayedTask(
-      FROM_HERE,
-      base::BindOnce(&AppShortcutManager::UpdateShortcutsForAllAppsNow,
-                     weak_ptr_factory_.GetWeakPtr()),
-      base::TimeDelta::FromSeconds(kUpdateShortcutsForAllAppsDelay));
 }

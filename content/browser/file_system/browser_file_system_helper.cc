@@ -1,22 +1,22 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "content/browser/file_system/browser_file_system_helper.h"
 
 #include <stddef.h>
+
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
-#include "base/sequenced_task_runner.h"
+#include "base/functional/bind.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/lazy_thread_pool_task_runner.h"
-#include "base/task/post_task.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "content/browser/child_process_security_policy_impl.h"
 #include "content/public/browser/browser_context.h"
@@ -24,6 +24,7 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/content_browser_client.h"
+#include "content/public/browser/render_process_host.h"
 #include "content/public/common/content_client.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/drop_data.h"
@@ -38,6 +39,8 @@
 #include "storage/browser/file_system/file_system_url.h"
 #include "storage/browser/file_system/isolated_context.h"
 #include "storage/browser/quota/quota_manager.h"
+#include "storage/browser/quota/quota_manager_proxy.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/leveldatabase/leveldb_chrome.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
@@ -47,14 +50,6 @@ using storage::FileSystemOptions;
 namespace content {
 
 namespace {
-
-// All FileSystemContexts currently need to share the same sequence per sharing
-// global objects: https://codereview.chromium.org/2883403002#msg14.
-base::LazyThreadPoolSequencedTaskRunner g_fileapi_task_runner =
-    LAZY_THREAD_POOL_SEQUENCED_TASK_RUNNER_INITIALIZER(
-        base::TaskTraits(base::MayBlock(),
-                         base::TaskPriority::USER_VISIBLE,
-                         base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN));
 
 FileSystemOptions CreateBrowserFileSystemOptions(bool is_incognito) {
   FileSystemOptions::ProfileMode profile_mode =
@@ -71,31 +66,40 @@ FileSystemOptions CreateBrowserFileSystemOptions(bool is_incognito) {
                            additional_allowed_schemes);
 }
 
-bool CheckCanReadFileSystemFileOnUIThread(int process_id,
-                                          const storage::FileSystemURL& url) {
+bool CheckCanReadFileSystemFileOnUIThread(
+    std::unique_ptr<ChildProcessSecurityPolicyImpl::Handle>
+        security_policy_handle,
+    const storage::FileSystemURL& url) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  ChildProcessSecurityPolicyImpl* policy =
-      ChildProcessSecurityPolicyImpl::GetInstance();
-  return policy->CanReadFileSystemFile(process_id, url);
+  return security_policy_handle->CanReadFileSystemFile(url);
 }
 
-void GrantReadAccessOnUIThread(int process_id,
-                               const base::FilePath& platform_path) {
+void GrantReadAccessOnUIThread(
+    std::unique_ptr<ChildProcessSecurityPolicyImpl::Handle>
+        security_policy_handle,
+    const base::FilePath& platform_path) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  ChildProcessSecurityPolicyImpl* policy =
-      ChildProcessSecurityPolicyImpl::GetInstance();
-  if (!policy->CanReadFile(process_id, platform_path)) {
-    policy->GrantReadFile(process_id, platform_path);
+
+  // It is only possible to grant new permissions if the RenderProcessHost still
+  // exists by the time this task runs. If it does exist and doesn't yet have
+  // read access to the platform path that corresponds to the FileSystemURL that
+  // was verified in CheckCanReadFileSystemFileOnUIThread, grant access now.
+  ChildProcessId process_id = security_policy_handle->child_id();
+  if (RenderProcessHost::FromID(process_id) &&
+      !security_policy_handle->CanReadFile(platform_path)) {
+    ChildProcessSecurityPolicyImpl::GetInstance()->GrantReadFile(process_id,
+                                                                 platform_path);
   }
 }
 
-// Helper function that used by SyncGetPlatformPath() to get the platform
+// Helper function that used by GetPlatformPath() to get the platform
 // path, grant read access, and send return the path via a callback.
 void GetPlatformPathOnFileThread(
     scoped_refptr<storage::FileSystemContext> context,
-    int process_id,
+    std::unique_ptr<ChildProcessSecurityPolicyImpl::Handle>
+        security_policy_handle,
     const storage::FileSystemURL& url,
-    SyncGetPlatformPathCB callback,
+    DoGetPlatformPathCB callback,
     bool can_read_filesystem_file) {
   DCHECK(context->default_file_task_runner()->RunsTasksInCurrentSequence());
 
@@ -109,7 +113,8 @@ void GetPlatformPathOnFileThread(
 
   GetUIThreadTaskRunner({})->PostTaskAndReply(
       FROM_HERE,
-      base::BindOnce(&GrantReadAccessOnUIThread, process_id, platform_path),
+      base::BindOnce(&GrantReadAccessOnUIThread,
+                     std::move(security_policy_handle), platform_path),
       base::BindOnce(std::move(callback), platform_path));
 }
 
@@ -119,7 +124,7 @@ scoped_refptr<storage::FileSystemContext> CreateFileSystemContext(
     BrowserContext* browser_context,
     const base::FilePath& profile_path,
     bool is_incognito,
-    storage::QuotaManagerProxy* quota_manager_proxy) {
+    scoped_refptr<storage::QuotaManagerProxy> quota_manager_proxy) {
   // Setting up additional filesystem backends.
   std::vector<std::unique_ptr<storage::FileSystemBackend>> additional_backends;
   GetContentClient()->browser()->GetAdditionalFileSystemBackends(
@@ -133,16 +138,20 @@ scoped_refptr<storage::FileSystemContext> CreateFileSystemContext(
 
   auto options = CreateBrowserFileSystemOptions(
       browser_context->CanUseDiskWhenOffTheRecord() ? false : is_incognito);
-  scoped_refptr<storage::FileSystemContext> file_system_context =
-      new storage::FileSystemContext(
-          GetIOThreadTaskRunner({}).get(), g_fileapi_task_runner.Get().get(),
-          BrowserContext::GetMountPoints(browser_context),
-          browser_context->GetSpecialStoragePolicy(), quota_manager_proxy,
-          std::move(additional_backends), url_request_auto_mount_handlers,
-          profile_path, options);
+  auto file_system_context = storage::FileSystemContext::Create(
+      GetIOThreadTaskRunner({}),
+      base::ThreadPool::CreateSequencedTaskRunner(
+          {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
+           base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN}),
+      browser_context->GetMountPoints(),
+      browser_context->GetSpecialStoragePolicy(),
+      std::move(quota_manager_proxy), std::move(additional_backends),
+      url_request_auto_mount_handlers, profile_path, options);
 
   for (const storage::FileSystemType& type :
        file_system_context->GetFileSystemTypes()) {
+    // This can safely be called without a ChildProcessSecurityPolicy::Handle
+    // because it does not involve per-process SecurityState.
     ChildProcessSecurityPolicyImpl::GetInstance()
         ->RegisterFileSystemPermissionPolicy(
             type, storage::FileSystemContext::GetPermissionPolicy(type));
@@ -159,13 +168,17 @@ bool FileSystemURLIsValid(storage::FileSystemContext* context,
   return context->GetFileSystemBackend(url.type()) != nullptr;
 }
 
-void SyncGetPlatformPath(storage::FileSystemContext* context,
-                         int process_id,
-                         const GURL& path,
-                         SyncGetPlatformPathCB callback) {
+void DoGetPlatformPath(scoped_refptr<storage::FileSystemContext> context,
+                       std::unique_ptr<ChildProcessSecurityPolicyImpl::Handle>
+                           security_policy_handle,
+                       const GURL& path,
+                       const blink::StorageKey& storage_key,
+                       DoGetPlatformPathCB callback) {
   DCHECK(context->default_file_task_runner()->RunsTasksInCurrentSequence());
-  storage::FileSystemURL url(context->CrackURL(path));
-  if (!FileSystemURLIsValid(context, url)) {
+  DCHECK(callback);
+
+  storage::FileSystemURL url(context->CrackURL(path, storage_key));
+  if (!FileSystemURLIsValid(context.get(), url)) {
     // Note: Posting a task here so this function always returns
     // before the callback is called no matter which path is taken.
     base::ThreadPool::PostTask(
@@ -176,77 +189,71 @@ void SyncGetPlatformPath(storage::FileSystemContext* context,
   // Make sure if this file is ok to be read (in the current architecture
   // which means roughly same as the renderer is allowed to get the platform
   // path to the file).
+  //
+  // The access check for `url` runs on the UI thread using a duplicated
+  // ChildProcessSecurityPolicy::Handle, ensuring the SecurityState exists when
+  // the task runs. If the access check passes, the file thread will determine
+  // the platform path, then another Handle (which can be the one that was
+  // passed to this function) is needed on the UI thread to check and grant
+  // access to the platform path if needed. Using separate Handles for these
+  // tasks allows each task to own and delete their Handle independently.
+  std::unique_ptr<ChildProcessSecurityPolicyImpl::Handle> ui_handle =
+      std::make_unique<ChildProcessSecurityPolicyImpl::Handle>(
+          security_policy_handle->Duplicate());
   GetUIThreadTaskRunner({})->PostTaskAndReplyWithResult(
       FROM_HERE,
-      base::BindOnce(&CheckCanReadFileSystemFileOnUIThread, process_id, url),
-      base::BindOnce(&GetPlatformPathOnFileThread,
-                     scoped_refptr<storage::FileSystemContext>(context),
-                     process_id, url, std::move(callback)));
+      base::BindOnce(&CheckCanReadFileSystemFileOnUIThread,
+                     std::move(ui_handle), url),
+      base::BindOnce(&GetPlatformPathOnFileThread, std::move(context),
+                     std::move(security_policy_handle), url,
+                     std::move(callback)));
 }
 
 void PrepareDropDataForChildProcess(
     DropData* drop_data,
     ChildProcessSecurityPolicyImpl* security_policy,
-    int child_id,
+    ChildProcessId child_id,
     const storage::FileSystemContext* file_system_context) {
-#if defined(OS_CHROMEOS)
+  // The permissions granted to `child_id` below only work if the corresponding
+  // RenderProcessHost still exists on the UI thread.
+  // TODO(crbug.com/482261047): Pass the RenderProcessHost instead of `child_id`
+  // as proof that it still exists. This requires using a MockRenderProcessHost
+  // in unit tests.
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+
+#if BUILDFLAG(IS_CHROMEOS)
   // The externalfile:// scheme is used in Chrome OS to open external files in a
   // browser tab.
   // TODO(https://crbug.com/858972): This seems like it could be forged by the
   // renderer. This probably needs to check that this didn't originate from the
   // renderer... Also, this probably can just be GrantRequestURL (which doesn't
   // yet exist) instead of GrantCommitURL.
-  if (drop_data->url.SchemeIs(content::kExternalFileScheme))
-    security_policy->GrantCommitURL(child_id, drop_data->url);
+  if (!drop_data->url_infos.empty()) {
+    const GURL& url = drop_data->url_infos.front().url;
+    if (url.SchemeIs(content::kExternalFileScheme)) {
+      // TODO(crbug.com/379869738) Remove GetUnsafeValue.
+      security_policy->GrantCommitURL(child_id.GetUnsafeValue(), url);
+    }
+  }
 #endif
 
-  // The filenames vector represents a capability to access the given files.
-  storage::IsolatedContext::FileInfoSet files;
-  for (auto& filename : drop_data->filenames) {
-    // Make sure we have the same display_name as the one we register.
-    if (filename.display_name.empty()) {
-      std::string name;
-      files.AddPath(filename.path, &name);
-      filename.display_name = base::FilePath::FromUTF8Unsafe(name);
-    } else {
-      files.AddPathWithName(filename.path,
-                            filename.display_name.AsUTF8Unsafe());
-    }
-    // A dragged file may wind up as the value of an input element, or it
-    // may be used as the target of a navigation instead.  We don't know
-    // which will happen at this point, so generously grant both access
-    // and request permissions to the specific file to cover both cases.
-    // We do not give it the permission to request all file:// URLs.
-    security_policy->GrantRequestSpecificFileURL(
-        child_id, net::FilePathToFileURL(filename.path));
-
-    // If the renderer already has permission to read these paths, we don't need
-    // to re-grant them. This prevents problems with DnD for files in the CrOS
-    // file manager--the file manager already had read/write access to those
-    // directories, but dragging a file would cause the read/write access to be
-    // overwritten with read-only access, making them impossible to delete or
-    // rename until the renderer was killed.
-    if (!security_policy->CanReadFile(child_id, filename.path))
-      security_policy->GrantReadFile(child_id, filename.path);
-  }
+  std::string filesystem_id = PrepareDataTransferFilenamesForChildProcess(
+      drop_data->filenames, security_policy, child_id, file_system_context);
+  drop_data->filesystem_id = base::UTF8ToUTF16(filesystem_id);
 
   storage::IsolatedContext* isolated_context =
       storage::IsolatedContext::GetInstance();
   DCHECK(isolated_context);
 
-  if (!files.fileset().empty()) {
-    std::string filesystem_id =
-        isolated_context->RegisterDraggedFileSystem(files);
-    if (!filesystem_id.empty()) {
-      // Grant the permission iff the ID is valid.
-      security_policy->GrantReadFileSystem(child_id, filesystem_id);
-    }
-    drop_data->filesystem_id = base::UTF8ToUTF16(filesystem_id);
-  }
-
   for (auto& file_system_file : drop_data->file_system_files) {
     storage::FileSystemURL file_system_url =
-        file_system_context->CrackURL(file_system_file.url);
+        file_system_context->CrackURLInFirstPartyContext(file_system_file.url);
+
+    // Sandboxed filesystem files should never be handled via this path, so
+    // assert that none are sent from the renderer (wrapping these won't work
+    // anyway).
+    DCHECK(file_system_url.type() != storage::kFileSystemTypePersistent);
+    DCHECK(file_system_url.type() != storage::kFileSystemTypeTemporary);
 
     std::string register_name;
     storage::IsolatedContext::ScopedFSHandle filesystem =
@@ -268,6 +275,62 @@ void PrepareDropDataForChildProcess(
             .append(register_name));
     file_system_file.filesystem_id = filesystem.id();
   }
+}
+
+std::string PrepareDataTransferFilenamesForChildProcess(
+    std::vector<ui::FileInfo>& filenames,
+    ChildProcessSecurityPolicyImpl* security_policy,
+    ChildProcessId child_id,
+    const storage::FileSystemContext* file_system_context) {
+  // The permissions granted to `child_id` below only work if the corresponding
+  // RenderProcessHost still exists on the UI thread.
+  // TODO(crbug.com/482261047): Pass the RenderProcessHost instead of `child_id`
+  // as proof that it still exists. This requires using a MockRenderProcessHost
+  // in unit tests.
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+
+  // The filenames vector represents a capability to access the given files.
+  storage::IsolatedContext::FileInfoSet files;
+  for (auto& filename : filenames) {
+    // Make sure we have the same display_name as the one we register.
+    if (filename.display_name.empty()) {
+      std::string name;
+      files.AddPath(filename.path, &name);
+      filename.display_name = base::FilePath::FromUTF8Unsafe(name);
+    } else {
+      files.AddPathWithName(filename.path,
+                            filename.display_name.AsUTF8Unsafe());
+    }
+    // A dragged file may wind up as the value of an input element, or it
+    // may be used as the target of a navigation instead.  We don't know
+    // which will happen at this point, so generously grant both access
+    // and request permissions to the specific file to cover both cases.
+    // We do not give it the permission to request all file:// URLs.
+    security_policy->GrantRequestOfSpecificFile(child_id, filename.path);
+
+    // If the renderer already has permission to read these paths, we don't need
+    // to re-grant them. This prevents problems with DnD for files in the CrOS
+    // file manager--the file manager already had read/write access to those
+    // directories, but dragging a file would cause the read/write access to be
+    // overwritten with read-only access, making them impossible to delete or
+    // rename until the renderer was killed.
+    if (!security_policy->CanReadFile(child_id, filename.path))
+      security_policy->GrantReadFile(child_id, filename.path);
+  }
+
+  storage::IsolatedContext* isolated_context =
+      storage::IsolatedContext::GetInstance();
+  DCHECK(isolated_context);
+
+  std::string filesystem_id;
+  if (!files.fileset().empty()) {
+    filesystem_id = isolated_context->RegisterDraggedFileSystem(files);
+    if (!filesystem_id.empty()) {
+      // Grant the permission iff the ID is valid.
+      security_policy->GrantReadFileSystem(child_id, filesystem_id);
+    }
+  }
+  return filesystem_id;
 }
 
 }  // namespace content

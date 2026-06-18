@@ -37,9 +37,9 @@
 namespace blink {
 bool ParseVDMX(int* ymax,
                int* ymin,
-               const uint8_t* vdmx,
+               const uint8_t* vdmx_ptr,
                size_t vdmx_length,
                unsigned target_pixel_size);
 }  // namespace blink
 
-#endif
+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_VDMX_PARSER_H_

@@ -1,9 +1,11 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SERVICES_SERVICE_MANAGER_PUBLIC_CPP_SERVICE_FILTER_MOJOM_TRAITS_H_
 #define SERVICES_SERVICE_MANAGER_PUBLIC_CPP_SERVICE_FILTER_MOJOM_TRAITS_H_
+
+#include <optional>
 
 #include "base/component_export.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
@@ -20,15 +22,15 @@ struct COMPONENT_EXPORT(SERVICE_MANAGER_MOJOM_TRAITS)
       const service_manager::ServiceFilter& in) {
     return in.service_name();
   }
-  static const base::Optional<base::Token>& instance_group(
+  static const std::optional<base::Token>& instance_group(
       const service_manager::ServiceFilter& in) {
     return in.instance_group();
   }
-  static const base::Optional<base::Token>& instance_id(
+  static const std::optional<base::Token>& instance_id(
       const service_manager::ServiceFilter& in) {
     return in.instance_id();
   }
-  static const base::Optional<base::Token>& globally_unique_id(
+  static const std::optional<base::Token>& globally_unique_id(
       const service_manager::ServiceFilter& in) {
     return in.globally_unique_id();
   }

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,25 +7,36 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <vector>
 
-#include "base/numerics/ranges.h"
+#include "base/debug/dump_without_crashing.h"
+#include "base/memory/raw_ptr.h"
+#include "base/numerics/angle_conversions.h"
 #include "base/timer/timer.h"
 #include "build/build_config.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/events/event_constants.h"
+#include "ui/events/features.h"
 #include "ui/events/gesture_detection/gesture_listeners.h"
-#include "ui/events/gesture_detection/motion_event.h"
-#include "ui/gfx/geometry/angle_conversions.h"
+#include "ui/events/velocity_tracker/motion_event.h"
 
 namespace ui {
 namespace {
 
 // Minimum distance a scroll must have traveled from the last scroll/focal point
 // to trigger an |OnScroll| callback.
-const float kScrollEpsilon = .1f;
+constexpr float kScrollEpsilon = .1f;
+
+// The square of multiplier (2) to expand the slop value when the panel reports
+// zero touch major (radius).
+constexpr float kExpandSlopFactorForZeroTouchMajor = 4.f;
 
 // Constants used by TimeoutGestureHandler.
 enum TimeoutEvent {
   SHOW_PRESS = 0,
+  SHORT_PRESS,
   LONG_PRESS,
   TAP,
   TIMEOUT_EVENT_COUNT
@@ -33,50 +44,22 @@ enum TimeoutEvent {
 
 }  // namespace
 
-// Note: These constants were taken directly from the default (unscaled)
-// versions found in Android's ViewConfiguration. Do not change these default
-// values without explicitly consulting an OWNER.
-GestureDetector::Config::Config()
-    : longpress_timeout(base::TimeDelta::FromMilliseconds(500)),
-      showpress_timeout(base::TimeDelta::FromMilliseconds(180)),
-      double_tap_timeout(base::TimeDelta::FromMilliseconds(300)),
-      double_tap_min_time(base::TimeDelta::FromMilliseconds(40)),
-      touch_slop(8),
-      double_tap_slop(100),
-      minimum_fling_velocity(50),
-      maximum_fling_velocity(8000),
-      swipe_enabled(false),
-      minimum_swipe_velocity(20),
-      maximum_swipe_deviation_angle(20.f),
-      two_finger_tap_enabled(false),
-      two_finger_tap_max_separation(300),
-      two_finger_tap_timeout(base::TimeDelta::FromMilliseconds(700)),
-      single_tap_repeat_interval(1),
-#if defined(OS_CHROMEOS)
-      stylus_button_accelerated_longpress_enabled(true),
-#else
-      stylus_button_accelerated_longpress_enabled(false),
-#endif
-#if defined(OS_ANDROID)
-      deep_press_accelerated_longpress_enabled(true),
-#else
-      deep_press_accelerated_longpress_enabled(false),
-#endif
-      velocity_tracker_strategy(VelocityTracker::Strategy::STRATEGY_DEFAULT) {
-}
-
+GestureDetector::Config::Config() = default;
 GestureDetector::Config::Config(const Config& other) = default;
-
-GestureDetector::Config::~Config() {}
+GestureDetector::Config::~Config() = default;
 
 class GestureDetector::TimeoutGestureHandler {
  public:
   TimeoutGestureHandler(const Config& config, GestureDetector* gesture_detector)
       : gesture_detector_(gesture_detector) {
-    DCHECK(config.showpress_timeout <= config.longpress_timeout);
+    DCHECK(config.shortpress_timeout <= config.longpress_timeout);
 
     timeout_callbacks_[SHOW_PRESS] = &GestureDetector::OnShowPressTimeout;
     timeout_delays_[SHOW_PRESS] = config.showpress_timeout;
+
+    timeout_callbacks_[SHORT_PRESS] = &GestureDetector::OnShortPressTimeout;
+    timeout_delays_[SHORT_PRESS] =
+        config.shortpress_timeout + config.showpress_timeout;
 
     timeout_callbacks_[LONG_PRESS] = &GestureDetector::OnLongPressTimeout;
     timeout_delays_[LONG_PRESS] =
@@ -84,17 +67,55 @@ class GestureDetector::TimeoutGestureHandler {
 
     timeout_callbacks_[TAP] = &GestureDetector::OnTapTimeout;
     timeout_delays_[TAP] = config.double_tap_timeout;
+
+    if (config.task_runner) {
+      timeout_timers_[SHOW_PRESS].SetTaskRunner(config.task_runner);
+      timeout_timers_[LONG_PRESS].SetTaskRunner(config.task_runner);
+      timeout_timers_[TAP].SetTaskRunner(config.task_runner);
+    }
   }
 
   ~TimeoutGestureHandler() {
     Stop();
   }
 
-  void StartTimeout(TimeoutEvent event) {
-    timeout_timers_[event].Start(FROM_HERE,
-                                 timeout_delays_[event],
-                                 gesture_detector_,
-                                 timeout_callbacks_[event]);
+  void AddTimeoutToStart(TimeoutEvent event) {
+    timeouts_to_start_.emplace_back(event);
+  }
+
+  void Start(const base::TimeDelta event_processing_delay) {
+    if (timeouts_to_start_.empty()) {
+      return;
+    }
+
+    bool compensate_timeouts = false;
+    if (base::FeatureList::IsEnabled(kCompensateGestureDetectorTimeouts)) {
+      bool has_only_positive_compensated_delays = true;
+      for (TimeoutEvent event : timeouts_to_start_) {
+        if ((timeout_delays_[event] - event_processing_delay).is_negative()) {
+          has_only_positive_compensated_delays = false;
+          break;
+        }
+      }
+      // As confirmed by field reports: https://crbug.com/456494259, we can have
+      // non-positive `event_processing_delay`, which can happen when event
+      // timestamps in `MotionEvent` are malformed.
+      compensate_timeouts =
+          event_processing_delay.is_positive() &&
+          (has_only_positive_compensated_delays ||
+           kCompensateGestureTimeoutsForLongDelayedSequences.Get());
+    }
+
+    for (TimeoutEvent event : timeouts_to_start_) {
+      base::TimeDelta timeout_delay = timeout_delays_[event];
+      if (compensate_timeouts) {
+        timeout_delay -= event_processing_delay;
+      }
+      timeout_timers_[event].Start(FROM_HERE, timeout_delay,
+                                   gesture_detector_.get(),
+                                   timeout_callbacks_[event]);
+    }
+    timeouts_to_start_.clear();
   }
 
   void StopTimeout(TimeoutEvent event) { timeout_timers_[event].Stop(); }
@@ -108,13 +129,25 @@ class GestureDetector::TimeoutGestureHandler {
     return timeout_timers_[event].IsRunning();
   }
 
+  void SetTaskRunnerForTesting(  // IN-TEST
+      scoped_refptr<base::SequencedTaskRunner> task_runner) {
+    for (auto& timer : timeout_timers_) {
+      timer.SetTaskRunner(task_runner);
+    }
+  }
+
+  base::TimeDelta GetTimeoutDelayForTesting(TimeoutEvent event) const {
+    return timeout_delays_[event];
+  }
+
  private:
   typedef void (GestureDetector::*ReceiverMethod)();
 
-  GestureDetector* const gesture_detector_;
-  base::OneShotTimer timeout_timers_[TIMEOUT_EVENT_COUNT];
-  ReceiverMethod timeout_callbacks_[TIMEOUT_EVENT_COUNT];
-  base::TimeDelta timeout_delays_[TIMEOUT_EVENT_COUNT];
+  const raw_ptr<GestureDetector> gesture_detector_;
+  std::array<base::OneShotTimer, TIMEOUT_EVENT_COUNT> timeout_timers_;
+  std::array<ReceiverMethod, TIMEOUT_EVENT_COUNT> timeout_callbacks_;
+  std::array<base::TimeDelta, TIMEOUT_EVENT_COUNT> timeout_delays_;
+  std::vector<TimeoutEvent> timeouts_to_start_;
 };
 
 GestureDetector::GestureDetector(
@@ -124,40 +157,12 @@ GestureDetector::GestureDetector(
     : timeout_handler_(new TimeoutGestureHandler(config, this)),
       listener_(listener),
       double_tap_listener_(optional_double_tap_listener),
-      touch_slop_square_(0),
-      double_tap_touch_slop_square_(0),
-      double_tap_slop_square_(0),
-      two_finger_tap_distance_square_(0),
-      min_fling_velocity_(1),
-      max_fling_velocity_(1),
-      min_swipe_velocity_(0),
-      min_swipe_direction_component_ratio_(0),
-      still_down_(false),
-      defer_confirm_single_tap_(false),
-      all_pointers_within_slop_regions_(false),
-      always_in_bigger_tap_region_(false),
-      two_finger_tap_allowed_for_gesture_(false),
-      is_double_tapping_(false),
-      is_down_candidate_for_repeated_single_tap_(false),
-      maximum_pointer_count_(0),
-      current_single_tap_repeat_count_(0),
-      single_tap_repeat_interval_(1),
-      last_focus_x_(0),
-      last_focus_y_(0),
-      down_focus_x_(0),
-      down_focus_y_(0),
-      stylus_button_accelerated_longpress_enabled_(false),
-      deep_press_accelerated_longpress_enabled_(false),
-      longpress_enabled_(true),
-      showpress_enabled_(true),
-      swipe_enabled_(false),
-      two_finger_tap_enabled_(false),
       velocity_tracker_(config.velocity_tracker_strategy) {
   DCHECK(listener_);
   Init(config);
 }
 
-GestureDetector::~GestureDetector() {}
+GestureDetector::~GestureDetector() = default;
 
 bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
                                    bool should_process_double_tap) {
@@ -190,8 +195,9 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
     case MotionEvent::Action::HOVER_MOVE:
     case MotionEvent::Action::BUTTON_PRESS:
     case MotionEvent::Action::BUTTON_RELEASE:
+    case MotionEvent::Action::SCROLL:
+    case MotionEvent::Action::OUTSIDE:
       NOTREACHED();
-      return handled;
 
     case MotionEvent::Action::POINTER_DOWN: {
       down_focus_x_ = last_focus_x_ = focus_x;
@@ -269,8 +275,10 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
       if (double_tap_listener_ && should_process_double_tap) {
         is_down_candidate_for_repeated_single_tap_ = false;
         bool had_tap_message = timeout_handler_->HasTimeout(TAP);
-        if (had_tap_message)
+        if (had_tap_message) {
           timeout_handler_->StopTimeout(TAP);
+          unconfirmed_tap_was_converted_to_tap_ = false;
+        }
         if (is_repeated_tap && had_tap_message) {
           // This is a second tap.
           is_double_tapping_ = true;
@@ -280,8 +288,8 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
           handled |= double_tap_listener_->OnDoubleTapEvent(ev);
         } else {
           // This is a first tap.
-          DCHECK(double_tap_timeout_ > base::TimeDelta());
-          timeout_handler_->StartTimeout(TAP);
+          DCHECK(double_tap_timeout_.is_positive());
+          timeout_handler_->AddTimeoutToStart(TAP);
         }
       } else {
         is_down_candidate_for_repeated_single_tap_ = is_repeated_tap;
@@ -299,13 +307,22 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
       two_finger_tap_allowed_for_gesture_ = two_finger_tap_enabled_;
       maximum_pointer_count_ = 1;
 
-      // Always start the SHOW_PRESS timer before the LONG_PRESS timer to
-      // ensure proper timeout ordering.
       if (showpress_enabled_)
-        timeout_handler_->StartTimeout(SHOW_PRESS);
-      if (longpress_enabled_)
-        timeout_handler_->StartTimeout(LONG_PRESS);
-      handled |= listener_->OnDown(ev);
+        timeout_handler_->AddTimeoutToStart(SHOW_PRESS);
+      if (press_and_hold_enabled_) {
+        timeout_handler_->AddTimeoutToStart(SHORT_PRESS);
+        timeout_handler_->AddTimeoutToStart(LONG_PRESS);
+      }
+      const base::TimeDelta event_processing_delay =
+          base::TimeTicks::Now() - ev.GetEventTime();
+      timeout_handler_->Start(event_processing_delay);
+
+      // Number of complete taps that have occurred in the current tap sequence.
+      int previous_tap_count = is_down_candidate_for_repeated_single_tap_
+                                   ? (1 + current_single_tap_repeat_count_) %
+                                         single_tap_repeat_interval_
+                                   : 0;
+      handled |= listener_->OnDown(ev, 1 + previous_tap_count);
     } break;
 
     case MotionEvent::Action::MOVE: {
@@ -316,7 +333,7 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
         DCHECK(double_tap_listener_);
         handled |= double_tap_listener_->OnDoubleTapEvent(ev);
       } else if (all_pointers_within_slop_regions_) {
-        if (!IsWithinTouchSlop(ev)) {
+        if (!IsWithinSlopForTap(ev)) {
           handled = listener_->OnScroll(
               *current_down_event_, ev,
               (maximum_pointer_count_ > 1 && secondary_pointer_down_event_)
@@ -352,19 +369,18 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
         if (ev.GetToolType(0) == MotionEvent::ToolType::STYLUS &&
             stylus_button_accelerated_longpress_enabled_ &&
             (ev.GetFlags() & ui::EF_LEFT_MOUSE_BUTTON)) {
-          // This will generate a ET_GESTURE_LONG_PRESS event with
-          // EF_LEFT_MOUSE_BUTTON, which is consumed by MetalayerMode if that
-          // feature is enabled, because MetalayerMode is also activated by a
-          // stylus button press and has precedence over this press acceleration
-          // feature.
+          // This will generate a EventType::kGestureLongPress event with
+          // EF_LEFT_MOUSE_BUTTON.
+          ActivateShortPressGesture(ev);
           ActivateLongPressGesture(ev);
         } else if (ev.GetToolType(0) == MotionEvent::ToolType::FINGER &&
                    deep_press_accelerated_longpress_enabled_ &&
                    ev.GetClassification() ==
                        MotionEvent::Classification::DEEP_PRESS) {
-          // This uses the current_down_event_ to generate the long press
+          // This uses the current_down_event_ to generate the short/long press
           // gesture which keeps the original coordinates in case the current
           // move event has a different coordinate.
+          OnShortPressTimeout();
           OnLongPressTimeout();
         }
       }
@@ -376,7 +392,7 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
       // (independent) slop region.
       // If the event has had more than two pointers down at any time,
       // two finger tap should be prevented.
-      if (maximum_pointer_count_ > 2 || !IsWithinTouchSlop(ev)) {
+      if (maximum_pointer_count_ > 2 || !IsWithinSlopForTap(ev)) {
         two_finger_tap_allowed_for_gesture_ = false;
       }
     } break;
@@ -426,6 +442,7 @@ bool GestureDetector::OnTouchEvent(const MotionEvent& ev,
         is_double_tapping_ = false;
         defer_confirm_single_tap_ = false;
         timeout_handler_->StopTimeout(SHOW_PRESS);
+        timeout_handler_->StopTimeout(SHORT_PRESS);
         timeout_handler_->StopTimeout(LONG_PRESS);
       }
       maximum_pointer_count_ = 0;
@@ -466,9 +483,11 @@ void GestureDetector::Init(const Config& config) {
   // proportioned).
   const float kSlopEpsilon = .05f;
 
+  const float stylus_slop = config.stylus_slop + kSlopEpsilon;
   const float touch_slop = config.touch_slop + kSlopEpsilon;
   const float double_tap_touch_slop = touch_slop;
   const float double_tap_slop = config.double_tap_slop + kSlopEpsilon;
+  stylus_slop_square_ = stylus_slop * stylus_slop;
   touch_slop_square_ = touch_slop * touch_slop;
   double_tap_touch_slop_square_ = double_tap_touch_slop * double_tap_touch_slop;
   double_tap_slop_square_ = double_tap_slop * double_tap_slop;
@@ -483,9 +502,9 @@ void GestureDetector::Init(const Config& config) {
   DCHECK_GT(config.maximum_swipe_deviation_angle, 0);
   DCHECK_LE(config.maximum_swipe_deviation_angle, 45);
   const float maximum_swipe_deviation_angle =
-      base::ClampToRange(config.maximum_swipe_deviation_angle, 0.001f, 45.0f);
+      std::clamp(config.maximum_swipe_deviation_angle, 0.001f, 45.0f);
   min_swipe_direction_component_ratio_ =
-      1.f / tan(gfx::DegToRad(maximum_swipe_deviation_angle));
+      1.f / tan(base::DegToRad(maximum_swipe_deviation_angle));
 
   two_finger_tap_enabled_ = config.two_finger_tap_enabled;
   two_finger_tap_distance_square_ = config.two_finger_tap_max_separation *
@@ -504,11 +523,20 @@ void GestureDetector::OnShowPressTimeout() {
   listener_->OnShowPress(*current_down_event_);
 }
 
+void GestureDetector::OnShortPressTimeout() {
+  ActivateShortPressGesture(*current_down_event_);
+}
+
 void GestureDetector::OnLongPressTimeout() {
   ActivateLongPressGesture(*current_down_event_);
 }
 
 void GestureDetector::OnTapTimeout() {
+  if (base::FeatureList::IsEnabled(kFixDoubleClickNotWorking) &&
+      unconfirmed_tap_was_converted_to_tap_) {
+    unconfirmed_tap_was_converted_to_tap_ = false;
+    return;
+  }
   if (!double_tap_listener_)
     return;
   if (!still_down_) {
@@ -517,6 +545,11 @@ void GestureDetector::OnTapTimeout() {
   } else {
     defer_confirm_single_tap_ = true;
   }
+}
+
+void GestureDetector::ActivateShortPressGesture(const MotionEvent& ev) {
+  timeout_handler_->StopTimeout(SHORT_PRESS);
+  listener_->OnShortPress(ev);
 }
 
 void GestureDetector::ActivateLongPressGesture(const MotionEvent& ev) {
@@ -597,7 +630,7 @@ bool GestureDetector::HandleSwipeIfNeeded(const MotionEvent& up,
   return listener_->OnSwipe(*current_down_event_, up, vx, vy);
 }
 
-bool GestureDetector::IsWithinTouchSlop(const MotionEvent& ev) {
+bool GestureDetector::IsWithinSlopForTap(const MotionEvent& ev) const {
   // If there have been more than two down pointers in the touch sequence,
   // tapping is not possible. Slop region check is not needed.
   if (maximum_pointer_count_ > 2)
@@ -620,8 +653,20 @@ bool GestureDetector::IsWithinTouchSlop(const MotionEvent& ev) {
 
     float dx = source_pointer_down_event->GetX(source_index) - ev.GetX(i);
     float dy = source_pointer_down_event->GetY(source_index) - ev.GetY(i);
-    if (dx * dx + dy * dy > touch_slop_square_)
+
+    float expand_slop_factor =
+        source_pointer_down_event->HasNativeTouchMajor(source_index)
+            ? 1.f
+            : kExpandSlopFactorForZeroTouchMajor;
+
+    bool is_stylus_slop_effective =
+        ev.GetToolType(i) == MotionEvent::ToolType::STYLUS;
+    float slop_square =
+        is_stylus_slop_effective ? stylus_slop_square_ : touch_slop_square_;
+
+    if (dx * dx + dy * dy > (slop_square * expand_slop_factor)) {
       return false;
+    }
   }
 
   return true;
@@ -630,7 +675,7 @@ bool GestureDetector::IsWithinTouchSlop(const MotionEvent& ev) {
 const MotionEvent* GestureDetector::GetSourcePointerDownEvent(
     const MotionEvent& current_down_event,
     const MotionEvent* secondary_pointer_down_event,
-    const int pointer_id) {
+    const int pointer_id) const {
   if (current_down_event.GetPointerId(0) == pointer_id)
     return &current_down_event;
 
@@ -647,6 +692,22 @@ const MotionEvent* GestureDetector::GetSourcePointerDownEvent(
   }
 
   return nullptr;
+}
+
+void GestureDetector::OnUnconfirmedTapConvertedToTap() {
+  unconfirmed_tap_was_converted_to_tap_ = true;
+  if (!base::FeatureList::IsEnabled(kFixDoubleClickNotWorking)) {
+    timeout_handler_->StopTimeout(TAP);
+  }
+}
+
+void GestureDetector::SetGestureTimeoutHandlerTaskRunnerForTesting(  // IN-TEST
+    scoped_refptr<base::SequencedTaskRunner> task_runner) {
+  timeout_handler_->SetTaskRunnerForTesting(std::move(task_runner));  // IN-TEST
+}
+
+base::TimeDelta GestureDetector::GetDoubleTapTimeoutForTesting() const {
+  return timeout_handler_->GetTimeoutDelayForTesting(TAP);  // IN-TEST
 }
 
 }  // namespace ui

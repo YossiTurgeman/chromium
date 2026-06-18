@@ -1,12 +1,14 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/media/protected_media_identifier_permission_context.h"
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
+#include "base/check.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/logging.h"
 #include "base/metrics/user_metrics.h"
 #include "base/strings/string_split.h"
 #include "build/build_config.h"
@@ -15,94 +17,60 @@
 #include "chrome/common/pref_names.h"
 #include "components/content_settings/browser/page_specific_content_settings.h"
 #include "components/permissions/permission_util.h"
+#include "components/policy/core/common/policy_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "media/base/media_switches.h"
 #include "net/base/url_util.h"
-#if defined(OS_CHROMEOS)
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
 #include <utility>
 
-#include "base/metrics/histogram_macros.h"
-#include "chrome/browser/chromeos/attestation/platform_verification_dialog.h"
-#include "chrome/browser/chromeos/settings/cros_settings.h"
-#include "chromeos/constants/chromeos_switches.h"
-#include "chromeos/settings/cros_settings_names.h"
+#include "ash/constants/ash_switches.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
+#include "chromeos/ash/components/settings/cros_settings_names.h"
+#include "chromeos/dbus/constants/dbus_switches.h"
+#include "components/permissions/permission_request.h"
+#include "components/permissions/permission_uma_util.h"
+#include "components/permissions/request_type.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/user_prefs/user_prefs.h"
-#include "ui/views/widget/widget.h"
-#elif !defined(OS_ANDROID)
-#error This file currently only supports Chrome OS and Android.
 #endif
 
-#if defined(OS_CHROMEOS)
-using chromeos::attestation::PlatformVerificationDialog;
+#if !(BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS))
+#error This file currently only supports Chrome OS, Android and Windows.
 #endif
+
+namespace {
+
+// Returns whether the use of protected content identifier is allowed by
+// enterprise policy.
+bool IsProtectedContentIdentifierAllowedByPolicy(Profile* profile) {
+  PrefService* service = profile->GetPrefs();
+  DCHECK(service);
+
+  return service->GetBoolean(
+      policy::policy_prefs::kProtectedContentIdentifiersAllowed);
+}
+
+}  // namespace
 
 ProtectedMediaIdentifierPermissionContext::
     ProtectedMediaIdentifierPermissionContext(
         content::BrowserContext* browser_context)
-    : PermissionContextBase(browser_context,
-                            ContentSettingsType::PROTECTED_MEDIA_IDENTIFIER,
-                            blink::mojom::FeaturePolicyFeature::kEncryptedMedia)
-#if defined(OS_CHROMEOS)
-
-#endif
-{
-}
+    : permissions::ContentSettingPermissionContextBase(
+          browser_context,
+          ContentSettingsType::PROTECTED_MEDIA_IDENTIFIER,
+          network::mojom::PermissionsPolicyFeature::kEncryptedMedia) {}
 
 ProtectedMediaIdentifierPermissionContext::
-    ~ProtectedMediaIdentifierPermissionContext() {
-}
-
-#if defined(OS_CHROMEOS)
-void ProtectedMediaIdentifierPermissionContext::DecidePermission(
-    content::WebContents* web_contents,
-    const permissions::PermissionRequestID& id,
-    const GURL& requesting_origin,
-    const GURL& embedding_origin,
-    bool user_gesture,
-    permissions::BrowserPermissionCallback callback) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-
-  // Since the dialog is modal, we only support one prompt per |web_contents|.
-  // Reject the new one if there is already one pending. See
-  // http://crbug.com/447005
-  if (pending_requests_.count(web_contents)) {
-    std::move(callback).Run(CONTENT_SETTING_ASK);
-    return;
-  }
-
-  // ShowDialog doesn't use the callback if it returns null.
-  auto repeating_callback =
-      base::AdaptCallbackForRepeating(std::move(callback));
-
-  // On ChromeOS, we don't use PermissionContextBase::RequestPermission() which
-  // uses the standard permission infobar/bubble UI. See http://crbug.com/454847
-  // Instead, we show the existing platform verification UI.
-  // TODO(xhwang): Remove when http://crbug.com/454847 is fixed.
-  views::Widget* widget = PlatformVerificationDialog::ShowDialog(
-      web_contents, requesting_origin,
-      base::BindOnce(&ProtectedMediaIdentifierPermissionContext::
-                         OnPlatformVerificationConsentResponse,
-                     weak_factory_.GetWeakPtr(), web_contents, id,
-                     requesting_origin, embedding_origin, repeating_callback));
-
-  // This could happen when the permission is requested from an extension. See
-  // http://crbug.com/728534
-  if (!widget) {
-    std::move(repeating_callback).Run(CONTENT_SETTING_ASK);
-    return;
-  }
-
-  pending_requests_.insert(
-      std::make_pair(web_contents, std::make_pair(widget, id)));
-}
-#endif  // defined(OS_CHROMEOS)
+    ~ProtectedMediaIdentifierPermissionContext() = default;
 
 ContentSetting
-ProtectedMediaIdentifierPermissionContext::GetPermissionStatusInternal(
+ProtectedMediaIdentifierPermissionContext::GetContentSettingStatusInternal(
     content::RenderFrameHost* render_frame_host,
     const GURL& requesting_origin,
     const GURL& embedding_origin) const {
@@ -110,21 +78,24 @@ ProtectedMediaIdentifierPermissionContext::GetPermissionStatusInternal(
            << embedding_origin.spec() << ")";
 
   if (!requesting_origin.is_valid() || !embedding_origin.is_valid() ||
-      !IsProtectedMediaIdentifierEnabled()) {
+      !IsProtectedMediaIdentifierEnabled(
+          Profile::FromBrowserContext(browser_context()))) {
     return CONTENT_SETTING_BLOCK;
   }
 
-  ContentSetting content_setting =
-      permissions::PermissionContextBase::GetPermissionStatusInternal(
+  ContentSetting content_setting = permissions::
+      ContentSettingPermissionContextBase::GetContentSettingStatusInternal(
           render_frame_host, requesting_origin, embedding_origin);
   DCHECK(content_setting == CONTENT_SETTING_ALLOW ||
-         content_setting == CONTENT_SETTING_BLOCK ||
-         content_setting == CONTENT_SETTING_ASK);
+#if BUILDFLAG(IS_ANDROID)
+         content_setting == CONTENT_SETTING_ASK ||
+#endif
+         content_setting == CONTENT_SETTING_BLOCK);
 
   // For automated testing of protected content - having a prompt that
   // requires user intervention is problematic. If the domain has been
-  // whitelisted as safe - suppress the request and allow.
-  if (content_setting == CONTENT_SETTING_ASK &&
+  // allowlisted as safe - suppress the request and allow.
+  if (content_setting != CONTENT_SETTING_ALLOW &&
       IsOriginAllowed(requesting_origin)) {
     content_setting = CONTENT_SETTING_ALLOW;
   }
@@ -151,122 +122,62 @@ bool ProtectedMediaIdentifierPermissionContext::IsOriginAllowed(
 }
 
 void ProtectedMediaIdentifierPermissionContext::UpdateTabContext(
-    const permissions::PermissionRequestID& id,
-    const GURL& requesting_frame,
+    const permissions::PermissionRequestData& request_data,
     bool allowed) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   // WebContents may have gone away.
   content_settings::PageSpecificContentSettings* content_settings =
       content_settings::PageSpecificContentSettings::GetForFrame(
-          id.render_process_id(), id.render_frame_id());
+          request_data.id.global_render_frame_host_id());
   if (content_settings) {
     content_settings->OnProtectedMediaIdentifierPermissionSet(
-        requesting_frame.GetOrigin(), allowed);
+        request_data.requesting_origin.DeprecatedGetOriginAsURL(), allowed);
   }
-}
-
-bool ProtectedMediaIdentifierPermissionContext::IsRestrictedToSecureOrigins()
-    const {
-  // EME is not supported on insecure origins, see https://goo.gl/Ks5zf7
-  // Note that origins whitelisted by --unsafely-treat-insecure-origin-as-secure
-  // flag will be treated as "secure" so they will not be affected.
-  return true;
 }
 
 // TODO(xhwang): We should consolidate the "protected content" related pref
 // across platforms.
+// static
 bool ProtectedMediaIdentifierPermissionContext::
-    IsProtectedMediaIdentifierEnabled() const {
-#if defined(OS_CHROMEOS)
-  Profile* profile = Profile::FromBrowserContext(browser_context());
-  // Platform verification is not allowed in incognito or guest mode.
-  if (profile->IsOffTheRecord() || profile->IsGuestSession()) {
+    IsProtectedMediaIdentifierEnabled(Profile* profile) {
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN)
+  // Identifier is not allowed in incognito or guest mode.
+  if (profile != nullptr &&
+      (profile->IsOffTheRecord() || profile->IsGuestSession())) {
     DVLOG(1) << "Protected media identifier disabled in incognito or guest "
                 "mode.";
     return false;
   }
 
+#if BUILDFLAG(IS_CHROMEOS)
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   if (command_line->HasSwitch(chromeos::switches::kSystemDevMode) &&
-      !command_line->HasSwitch(chromeos::switches::kAllowRAInDevMode)) {
+      !command_line->HasSwitch(switches::kAllowRAInDevMode)) {
     DVLOG(1) << "Protected media identifier disabled in dev mode.";
     return false;
   }
 
-  // This could be disabled by the device policy or by user's master switch.
-  bool enabled_for_device = false;
-  if (!chromeos::CrosSettings::Get()->GetBoolean(
-          chromeos::kAttestationForContentProtectionEnabled,
-          &enabled_for_device) ||
-      !enabled_for_device ||
-      !profile->GetPrefs()->GetBoolean(prefs::kEnableDRM)) {
+  // This could be disabled by the device policy or by a switch in content
+  // settings.
+  bool attestation_enabled = true;
+  if (!ash::CrosSettings::Get()->GetBoolean(
+          ash::kAttestationForContentProtectionEnabled, &attestation_enabled)) {
+    attestation_enabled = false;
+  }
+  if (!attestation_enabled) {
     DVLOG(1) << "Protected media identifier disabled by the user or by device "
                 "policy.";
     return false;
   }
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN)
+
+  if (!IsProtectedContentIdentifierAllowedByPolicy(profile)) {
+    DVLOG(1)
+        << "Protected content identifier disabled due to enterprise policy.";
+    return false;
+  }
 
   return true;
 }
-
-#if defined(OS_CHROMEOS)
-
-static void ReportPermissionActionUMA(permissions::PermissionAction action) {
-  UMA_HISTOGRAM_ENUMERATION("Permissions.Action.ProtectedMedia", action,
-                            permissions::PermissionAction::NUM);
-}
-
-void ProtectedMediaIdentifierPermissionContext::
-    OnPlatformVerificationConsentResponse(
-        content::WebContents* web_contents,
-        const permissions::PermissionRequestID& id,
-        const GURL& requesting_origin,
-        const GURL& embedding_origin,
-        permissions::BrowserPermissionCallback callback,
-        PlatformVerificationDialog::ConsentResponse response) {
-  // The request may have been canceled. Drop the callback in that case.
-  // This can happen if the tab is closed.
-  PendingRequestMap::iterator request = pending_requests_.find(web_contents);
-  if (request == pending_requests_.end()) {
-    VLOG(1) << "Platform verification ignored by user.";
-    ReportPermissionActionUMA(permissions::PermissionAction::IGNORED);
-    return;
-  }
-
-  DCHECK(request->second.second == id);
-  pending_requests_.erase(request);
-
-  ContentSetting content_setting = CONTENT_SETTING_ASK;
-  bool persist = false; // Whether the ContentSetting should be saved.
-  switch (response) {
-    case PlatformVerificationDialog::CONSENT_RESPONSE_NONE:
-      // This can happen if user clicked "x", or pressed "Esc", or navigated
-      // away without closing the tab.
-      VLOG(1) << "Platform verification dismissed by user.";
-      ReportPermissionActionUMA(permissions::PermissionAction::DISMISSED);
-      content_setting = CONTENT_SETTING_ASK;
-      persist = false;
-      break;
-    case PlatformVerificationDialog::CONSENT_RESPONSE_ALLOW:
-      VLOG(1) << "Platform verification accepted by user.";
-      base::RecordAction(
-          base::UserMetricsAction("PlatformVerificationAccepted"));
-      ReportPermissionActionUMA(permissions::PermissionAction::GRANTED);
-      content_setting = CONTENT_SETTING_ALLOW;
-      persist = true;
-      break;
-    case PlatformVerificationDialog::CONSENT_RESPONSE_DENY:
-      VLOG(1) << "Platform verification denied by user.";
-      base::RecordAction(
-          base::UserMetricsAction("PlatformVerificationRejected"));
-      ReportPermissionActionUMA(permissions::PermissionAction::DENIED);
-      content_setting = CONTENT_SETTING_BLOCK;
-      persist = true;
-      break;
-  }
-
-  NotifyPermissionSet(id, requesting_origin, embedding_origin,
-                      std::move(callback), persist, content_setting);
-}
-#endif

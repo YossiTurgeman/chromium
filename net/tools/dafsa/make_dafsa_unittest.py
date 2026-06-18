@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2014 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python3
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -63,6 +63,10 @@ class ParseGperfTest(unittest.TestCase):
     infile6 = [ '%%', 'a, 6', '%%' ]
     words6 = [ 'a6' ]
     self.assertEqual(make_dafsa.parse_gperf(infile6, False), words6)
+
+    infile7 = ['%%', '%%']
+    words7 = []
+    self.assertEqual(make_dafsa.parse_gperf(infile7, False), words7)
 
   def testOneWord(self):
     """Tests a single key can be parsed."""
@@ -600,6 +604,15 @@ class ReverseTest(unittest.TestCase):
 
 
 class TopSortTest(unittest.TestCase):
+  def testEmpty(self):
+    """Tests a DAFSA with no interior nodes can be sorted."""
+
+    # {}  =>  [ ]
+
+    source = [None]
+    nodes = []
+    self.assertEqual(make_dafsa.top_sort(source), nodes)
+
   def testNode(self):
     """Tests a DAFSA with one node can be sorted."""
 
@@ -751,18 +764,22 @@ class ExamplesTest(unittest.TestCase):
     """Tests Example 1 from make_dafsa.py."""
     infile = [ '%%', 'aa, 1', 'a, 2', '%%' ]
     bytes = [ 0x81, 0xE1, 0x02, 0x81, 0x82, 0x61, 0x81 ]
-    outfile = make_dafsa.to_cxx(bytes)
-    self.assertEqual(make_dafsa.words_to_cxx(make_dafsa.parse_gperf(
-      infile, False)), outfile)
+    outfile = make_dafsa.to_cxx(bytes, namespace="test_namespace")
+    self.assertEqual(
+        make_dafsa.words_to_cxx(make_dafsa.parse_gperf(infile, False),
+                                namespace="test_namespace"), outfile)
+    self.assertIn("\nnamespace test_namespace {\n", outfile)
 
   def testExample2(self):
     """Tests Example 2 from make_dafsa.py."""
     infile = [ '%%', 'aa, 1', 'bbb, 2', 'baa, 1', '%%' ]
     bytes = [ 0x02, 0x83, 0xE2, 0x02, 0x83, 0x61, 0x61, 0x81, 0x62, 0x62,
               0x82 ]
-    outfile = make_dafsa.to_cxx(bytes)
-    self.assertEqual(make_dafsa.words_to_cxx(make_dafsa.parse_gperf(
-      infile, False)), outfile)
+    outfile = make_dafsa.to_cxx(bytes, namespace="test_namespace")
+    self.assertEqual(
+        make_dafsa.words_to_cxx(make_dafsa.parse_gperf(infile, False),
+                                namespace="test_namespace"), outfile)
+    self.assertIn("\nnamespace test_namespace {\n", outfile)
 
 
 if __name__ == '__main__':

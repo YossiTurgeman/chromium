@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,12 +10,14 @@
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/system/model/system_tray_model.h"
 #include "ash/system/network/network_icon.h"
+#include "ash/system/network/network_utils.h"
 #include "ash/system/network/tray_network_state_model.h"
 #include "ash/system/tray/tray_constants.h"
-#include "base/stl_util.h"
+#include "base/functional/bind.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chromeos/services/network_config/public/cpp/cros_network_config_util.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/color/color_provider.h"
 #include "ui/gfx/paint_vector_icon.h"
 
 using chromeos::network_config::mojom::ActivationStateType;
@@ -25,7 +27,6 @@ using chromeos::network_config::mojom::DeviceStateType;
 using chromeos::network_config::mojom::FilterType;
 using chromeos::network_config::mojom::NetworkFilter;
 using chromeos::network_config::mojom::NetworkStateProperties;
-using chromeos::network_config::mojom::NetworkStatePropertiesPtr;
 using chromeos::network_config::mojom::NetworkType;
 
 namespace ash {
@@ -33,11 +34,6 @@ namespace ash {
 namespace {
 
 const int kPurgeDelayMs = 500;
-
-bool IsTrayIcon(network_icon::IconType icon_type) {
-  return icon_type == network_icon::ICON_TYPE_TRAY_REGULAR ||
-         icon_type == network_icon::ICON_TYPE_TRAY_OOBE;
-}
 
 }  // namespace
 
@@ -51,9 +47,9 @@ ActiveNetworkIcon::~ActiveNetworkIcon() {
 }
 
 void ActiveNetworkIcon::GetConnectionStatusStrings(Type type,
-                                                   base::string16* a11y_name,
-                                                   base::string16* a11y_desc,
-                                                   base::string16* tooltip) {
+                                                   std::u16string* a11y_name,
+                                                   std::u16string* a11y_desc,
+                                                   std::u16string* tooltip) {
   const NetworkStateProperties* network = nullptr;
   switch (type) {
     case Type::kSingle:
@@ -68,7 +64,7 @@ void ActiveNetworkIcon::GetConnectionStatusStrings(Type type,
       break;
   }
 
-  base::string16 network_name;
+  std::u16string network_name;
   if (network) {
     network_name = network->type == NetworkType::kEthernet
                        ? l10n_util::GetStringUTF16(IDS_ASH_STATUS_TRAY_ETHERNET)
@@ -78,19 +74,25 @@ void ActiveNetworkIcon::GetConnectionStatusStrings(Type type,
   if (network && network->type == NetworkType::kCellular &&
       network->type_state->get_cellular()->activation_state ==
           ActivationStateType::kActivating) {
-    base::string16 activating_string = l10n_util::GetStringFUTF16(
+    std::u16string activating_string = l10n_util::GetStringFUTF16(
         IDS_ASH_STATUS_TRAY_NETWORK_ACTIVATING, network_name);
     if (a11y_name)
       *a11y_name = activating_string;
     if (a11y_desc)
-      *a11y_desc = base::string16();
+      *a11y_desc = std::u16string();
     if (tooltip)
       *tooltip = activating_string;
   } else if (network && chromeos::network_config::StateIsConnected(
                             network->connection_state)) {
-    base::string16 connected_string = l10n_util::GetStringFUTF16(
-        IDS_ASH_STATUS_TRAY_NETWORK_CONNECTED, network_name);
-    base::string16 signal_strength_string;
+    std::u16string connected_string;
+    if (auto portal_subtext = GetPortalStateSubtext(network->portal_state)) {
+      connected_string = l10n_util::GetStringFUTF16(
+          IDS_ASH_STATUS_TRAY_NETWORK_PORTAL, network_name, *portal_subtext);
+    } else {
+      connected_string = l10n_util::GetStringFUTF16(
+          IDS_ASH_STATUS_TRAY_NETWORK_CONNECTED, network_name);
+    }
+    std::u16string signal_strength_string;
     if (chromeos::network_config::NetworkTypeMatchesType(
             network->type, NetworkType::kWireless)) {
       // Retrieve the string describing the signal strength, if it is applicable
@@ -123,16 +125,16 @@ void ActiveNetworkIcon::GetConnectionStatusStrings(Type type,
                      ? connected_string
                      : l10n_util::GetStringFUTF16(
                            IDS_ASH_STATUS_TRAY_NETWORK_CONNECTED_TOOLTIP,
-                           network_name, signal_strength_string);
+                           connected_string, signal_strength_string);
     }
   } else if (network &&
              network->connection_state == ConnectionStateType::kConnecting) {
-    base::string16 connecting_string = l10n_util::GetStringFUTF16(
+    std::u16string connecting_string = l10n_util::GetStringFUTF16(
         IDS_ASH_STATUS_TRAY_NETWORK_CONNECTING, network_name);
     if (a11y_name)
       *a11y_name = connecting_string;
     if (a11y_desc)
-      *a11y_desc = base::string16();
+      *a11y_desc = std::u16string();
     if (tooltip)
       *tooltip = connecting_string;
   } else {
@@ -141,7 +143,7 @@ void ActiveNetworkIcon::GetConnectionStatusStrings(Type type,
           IDS_ASH_STATUS_TRAY_NETWORK_NOT_CONNECTED_A11Y);
     }
     if (a11y_desc)
-      *a11y_desc = base::string16();
+      *a11y_desc = std::u16string();
     if (tooltip) {
       *tooltip = l10n_util::GetStringUTF16(
           IDS_ASH_STATUS_TRAY_NETWORK_DISCONNECTED_TOOLTIP);
@@ -149,22 +151,24 @@ void ActiveNetworkIcon::GetConnectionStatusStrings(Type type,
   }
 }
 
-gfx::ImageSkia ActiveNetworkIcon::GetImage(Type type,
-                                           network_icon::IconType icon_type,
-                                           bool* animating) {
+gfx::ImageSkia ActiveNetworkIcon::GetImage(
+    const ui::ColorProvider* color_provider,
+    Type type,
+    network_icon::IconType icon_type,
+    bool* animating) {
   switch (type) {
     case Type::kSingle:
-      return GetSingleImage(icon_type, animating);
+      return GetSingleImage(color_provider, icon_type, animating);
     case Type::kPrimary:
-      return GetDualImagePrimary(icon_type, animating);
+      return GetDualImagePrimary(color_provider, icon_type, animating);
     case Type::kCellular:
-      return GetDualImageCellular(icon_type, animating);
+      return GetDualImageCellular(color_provider, icon_type, animating);
   }
   NOTREACHED();
-  return gfx::ImageSkia();
 }
 
 gfx::ImageSkia ActiveNetworkIcon::GetSingleImage(
+    const ui::ColorProvider* color_provider,
     network_icon::IconType icon_type,
     bool* animating) {
   // If no network, check for cellular initializing.
@@ -173,12 +177,14 @@ gfx::ImageSkia ActiveNetworkIcon::GetSingleImage(
     if (animating)
       *animating = true;
     return network_icon::GetConnectingImageForNetworkType(
-        NetworkType::kCellular, icon_type);
+        color_provider, NetworkType::kCellular, icon_type);
   }
-  return GetDefaultImageImpl(default_network, icon_type, animating);
+  return GetDefaultImageImpl(color_provider, default_network, icon_type,
+                             animating);
 }
 
 gfx::ImageSkia ActiveNetworkIcon::GetDualImagePrimary(
+    const ui::ColorProvider* color_provider,
     network_icon::IconType icon_type,
     bool* animating) {
   const NetworkStateProperties* default_network = model_->default_network();
@@ -190,16 +196,18 @@ gfx::ImageSkia ActiveNetworkIcon::GetDualImagePrimary(
         *animating = false;
       return gfx::CreateVectorIcon(
           kNetworkBadgeTechnologyLteIcon,
-          network_icon::GetDefaultColorForIconType(icon_type));
+          network_icon::GetDefaultColorForIconType(color_provider, icon_type));
     }
     // If Cellular is connecting, use the active non cellular network.
-    return GetDefaultImageImpl(model_->active_non_cellular(), icon_type,
-                               animating);
+    return GetDefaultImageImpl(color_provider, model_->active_non_cellular(),
+                               icon_type, animating);
   }
-  return GetDefaultImageImpl(default_network, icon_type, animating);
+  return GetDefaultImageImpl(color_provider, default_network, icon_type,
+                             animating);
 }
 
 gfx::ImageSkia ActiveNetworkIcon::GetDualImageCellular(
+    const ui::ColorProvider* color_provider,
     network_icon::IconType icon_type,
     bool* animating) {
   if (model_->GetDeviceState(NetworkType::kCellular) ==
@@ -213,39 +221,38 @@ gfx::ImageSkia ActiveNetworkIcon::GetDualImageCellular(
     if (animating)
       *animating = true;
     return network_icon::GetConnectingImageForNetworkType(
-        NetworkType::kCellular, icon_type);
+        color_provider, NetworkType::kCellular, icon_type);
   }
 
   const NetworkStateProperties* active_cellular = model_->active_cellular();
   if (!active_cellular) {
     if (animating)
       *animating = false;
+    // For the `kCellular` icon in the `UnifiedSystemTray`: if the tray is
+    // active, the icon type should be used to get the correct color.
+    if (icon_type != network_icon::IconType::ICON_TYPE_TRAY_ACTIVE) {
+      icon_type = network_icon::IconType::ICON_TYPE_LIST;
+    }
     return network_icon::GetDisconnectedImageForNetworkType(
-        NetworkType::kCellular);
+        color_provider, NetworkType::kCellular, icon_type);
   }
 
   return network_icon::GetImageForNonVirtualNetwork(
-      active_cellular, icon_type, false /* show_vpn_badge */, animating);
+      color_provider, active_cellular, icon_type, false /* show_vpn_badge */,
+      animating);
 }
 
 gfx::ImageSkia ActiveNetworkIcon::GetDefaultImageImpl(
+    const ui::ColorProvider* color_provider,
     const NetworkStateProperties* network,
     network_icon::IconType icon_type,
     bool* animating) {
   if (!network) {
     VLOG(1) << __func__ << ": No network";
-    return GetDefaultImageForNoNetwork(icon_type, animating);
-  }
-  // Don't show connected Ethernet in the tray unless a VPN is present.
-  const NetworkStateProperties* active_vpn = model_->active_vpn();
-  if (network->type == NetworkType::kEthernet && IsTrayIcon(icon_type) &&
-      !active_vpn) {
-    if (animating)
-      *animating = false;
-    VLOG(1) << __func__ << ": Ethernet: No icon";
-    return gfx::ImageSkia();
+    return GetDefaultImageForNoNetwork(color_provider, icon_type, animating);
   }
 
+  const NetworkStateProperties* active_vpn = model_->active_vpn();
   // Connected network with a connecting VPN.
   if (chromeos::network_config::StateIsConnected(network->connection_state) &&
       active_vpn &&
@@ -253,29 +260,31 @@ gfx::ImageSkia ActiveNetworkIcon::GetDefaultImageImpl(
     if (animating)
       *animating = true;
     VLOG(1) << __func__ << ": Connected with connecting VPN";
-    return network_icon::GetConnectedNetworkWithConnectingVpnImage(network,
-                                                                   icon_type);
+    return network_icon::GetConnectedNetworkWithConnectingVpnImage(
+        color_provider, network, icon_type);
   }
 
   // Default behavior: connected or connecting network, possibly with VPN badge.
   bool show_vpn_badge = !!active_vpn;
   VLOG(1) << __func__ << ": Network: " << network->name;
-  return network_icon::GetImageForNonVirtualNetwork(network, icon_type,
-                                                    show_vpn_badge, animating);
+  return network_icon::GetImageForNonVirtualNetwork(
+      color_provider, network, icon_type, show_vpn_badge, animating);
 }
 
 gfx::ImageSkia ActiveNetworkIcon::GetDefaultImageForNoNetwork(
+    const ui::ColorProvider* color_provider,
     network_icon::IconType icon_type,
     bool* animating) {
   if (animating)
     *animating = false;
   if (model_->GetDeviceState(NetworkType::kWiFi) == DeviceStateType::kEnabled) {
     // WiFi is enabled but no connections available.
-    return network_icon::GetImageForWiFiNoConnections(icon_type);
+    return network_icon::GetImageForWiFiNoConnections(color_provider,
+                                                      icon_type);
   }
   // WiFi is disabled, show a full icon with a strikethrough.
-  return network_icon::GetImageForWiFiEnabledState(false /* not enabled*/,
-                                                   icon_type);
+  return network_icon::GetImageForWiFiEnabledState(
+      color_provider, false /* not enabled*/, icon_type);
 }
 
 void ActiveNetworkIcon::SetCellularUninitializedMsg() {
@@ -287,10 +296,26 @@ void ActiveNetworkIcon::SetCellularUninitializedMsg() {
     return;
   }
 
-  if (cellular && cellular->scanning) {
+  // If cellular is scanning, we want to show a 'connecting' image. However,
+  // there may be some cases where cellular's scanning property is true while
+  // the device is disabling. In this instance, we don't want to show
+  // 'connecting'. Only set cellular_uninitialized_msg_ to scanning if the
+  // device is scanning and enabled or enabling.
+  if (cellular &&
+      (cellular->device_state == DeviceStateType::kEnabled ||
+       cellular->device_state == DeviceStateType::kEnabling) &&
+      cellular->scanning) {
     cellular_uninitialized_msg_ = IDS_ASH_STATUS_TRAY_MOBILE_SCANNING;
     uninitialized_state_time_ = base::Time::Now();
     return;
+  }
+
+  // If cellular is not scanning and cellular device is enabled reset cellular
+  // initializing state.
+  if (cellular && !cellular->scanning &&
+      (cellular->device_state == DeviceStateType::kEnabled ||
+       cellular->device_state == DeviceStateType::kEnabling)) {
+    cellular_uninitialized_msg_ = 0;
   }
 
   // There can be a delay between leaving the Initializing state and when
@@ -308,11 +333,14 @@ void ActiveNetworkIcon::ActiveNetworkStateChanged() {
   SetCellularUninitializedMsg();
 }
 
+void ActiveNetworkIcon::DeviceStateListChanged() {
+  SetCellularUninitializedMsg();
+}
+
 void ActiveNetworkIcon::NetworkListChanged() {
   if (purge_timer_.IsRunning())
     return;
-  purge_timer_.Start(FROM_HERE,
-                     base::TimeDelta::FromMilliseconds(kPurgeDelayMs),
+  purge_timer_.Start(FROM_HERE, base::Milliseconds(kPurgeDelayMs),
                      base::BindOnce(&ActiveNetworkIcon::PurgeNetworkIconCache,
                                     weak_ptr_factory_.GetWeakPtr()));
 }

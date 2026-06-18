@@ -1,10 +1,11 @@
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Checks protobuf files for illegal imports."""
 
-import codecs
+
+
 import os
 import re
 
@@ -18,9 +19,6 @@ class ProtoChecker(object):
       '.proto',
   ]
 
-  # The maximum number of non-import lines we can see before giving up.
-  _MAX_UNINTERESTING_LINES = 50
-
   # The maximum line length, this is to be efficient in the case of very long
   # lines (which can't be import).
   _MAX_LINE_LENGTH = 128
@@ -28,7 +26,7 @@ class ProtoChecker(object):
   # This regular expression will be used to extract filenames from import
   # statements.
   _EXTRACT_IMPORT_PATH = re.compile(
-      '[ \t]*[ \t]*import[ \t]+"(.*)"')
+      r'[ \t]*[ \t]*import[ \t]+"(.*)"')
 
   def __init__(self, verbose, resolve_dotdot=False, root_dir=''):
     self._verbose = verbose
@@ -37,7 +35,7 @@ class ProtoChecker(object):
 
   def IsFullPath(self, import_path):
     """Checks if the given path is a valid path starting from |_root_dir|."""
-    match = re.match('(.*)/([^/]*\.proto)', import_path)
+    match = re.match(r'(.*)/([^/]*\.proto)', import_path)
     if not match:
       return False
     return os.path.isdir(self._root_dir + "/" + match.group(1))
@@ -67,13 +65,16 @@ class ProtoChecker(object):
       # Don't fail when no directory is specified. We may want to be more
       # strict about this in the future.
       if self._verbose:
-        print ' WARNING: import specified with no directory: ' + import_path
+        print(' WARNING: import specified with no directory: ' + import_path)
       return True, None
 
     if self._resolve_dotdot and '../' in import_path:
       dependee_dir = os.path.dirname(dependee_path)
       import_path = os.path.join(dependee_dir, import_path)
       import_path = os.path.relpath(import_path, self._root_dir)
+      # Normalize to use forward slashes, since all rules are specified
+      # in terms of forward slashes.
+      import_path = import_path.replace(os.path.sep, '/')
 
     if not self.IsFullPath(import_path):
       return True, None
@@ -87,15 +88,12 @@ class ProtoChecker(object):
 
   def CheckFile(self, rules, filepath):
     if self._verbose:
-      print 'Checking: ' + filepath
+      print('Checking: ' + filepath)
 
     dependee_status = results.DependeeStatus(filepath)
     last_import = 0
-    with codecs.open(filepath, encoding='utf-8') as f:
+    with open(filepath, encoding='utf-8') as f:
       for line_num, line in enumerate(f):
-        if line_num - last_import > self._MAX_UNINTERESTING_LINES:
-          break
-
         line = line.strip()
 
         is_import, violation = self.CheckLine(rules, line, filepath)

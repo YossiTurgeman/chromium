@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -39,7 +39,22 @@ enum class AccessibilityAlert {
 
   // When workspace state just changed from WorkspaceWindowState::kFullscreen.
   // to others.
-  WORKSPACE_FULLSCREEN_STATE_EXITED
+  WORKSPACE_FULLSCREEN_STATE_EXITED,
+
+  // When the user enters saved desks mode.
+  SAVED_DESKS_MODE_ENTERED,
+
+  // When the user enters faster split screen setup session.
+  FASTER_SPLIT_SCREEN_SETUP,
+
+  // When the user resizes a snap group via arrow keys.
+  SNAP_GROUP_RESIZE_LEFT,
+  SNAP_GROUP_RESIZE_RIGHT,
+  SNAP_GROUP_RESIZE_UP,
+  SNAP_GROUP_RESIZE_DOWN,
+
+  // When the user creates a snap group.
+  SNAP_GROUP_CREATION,
 };
 
 enum class AccessibilityPanelState {
@@ -68,7 +83,10 @@ enum class DictationToggleSource {
   // Chromevox chrome extension.
   kChromevox,
 
-  kMaxValue = kChromevox
+  // Accessibility Common chrome extension.
+  kAccessibilityCommon,
+
+  kMaxValue = kAccessibilityCommon
 };
 
 enum class SelectToSpeakState {
@@ -83,6 +101,30 @@ enum class SelectToSpeakState {
   kSelectToSpeakStateSpeaking,
 };
 
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class SelectToSpeakPanelAction {
+  // No action.
+  kNone = 0,
+  // Navigate to previous paragraph/block.
+  kPreviousParagraph = 1,
+  // Navigate to previous sentence.
+  kPreviousSentence = 2,
+  // Pause text-to-speech.
+  kPause = 3,
+  // Resumes text-to-speech.
+  kResume = 4,
+  // Navigate to next sentence.
+  kNextSentence = 5,
+  // Navigate to next paragraph/block.
+  kNextParagraph = 6,
+  // Exit Select-to-speak.
+  kExit = 7,
+  // Change reading speed.
+  kChangeSpeed = 8,
+  kMaxValue = kChangeSpeed,
+};
+
 enum class SwitchAccessCommand {
   // Do not perform a command.
   kNone,
@@ -94,10 +136,25 @@ enum class SwitchAccessCommand {
   kPrevious,
 };
 
+enum class MagnifierCommand {
+  // Stop moving magnifier viewport.
+  kMoveStop,
+  // Command to move magnifier viewport up.
+  kMoveUp,
+  // Command to move magnifier viewport down.
+  kMoveDown,
+  // Command to move magnifier viewport left.
+  kMoveLeft,
+  // Command to move magnifier viewport right.
+  kMoveRight,
+};
+
 // The type of mouse event the Automatic Clicks feature should perform when
 // dwelling. These values are written to prefs and correspond to
 // AutoclickActionType in enums.xml, so should not be changed. New values
 // should be added at the end.
+//
+// LINT.IfChange(AutoclickEventType)
 enum class AutoclickEventType {
   // Perform a left click.
   kLeftClick = 0,
@@ -121,6 +178,7 @@ enum class AutoclickEventType {
 
   kMaxValue = kScroll
 };
+// LINT.ThenChange(/tools/metrics/histograms/metadata/accessibility/enums.xml:AutoclickActionType)
 
 // Display location of the on-screen floating menus used by accessibility
 // features(e.g. the Automatic Clicks) . These values are written to prefs so
@@ -142,6 +200,99 @@ enum class FloatingMenuPosition {
   // or the bottom right in RTL languages. Once the user explicitly picks
   // a position it will no longer change with language direction.
   kSystemDefault,
+};
+
+// Mouse following mode for magnifier. This indicates the way the magnified
+// viewport follows the mouse as it moves across the screen. These values are
+// written to prefs so they should not be changed. New values should be added at
+// the end.
+enum class MagnifierMouseFollowingMode {
+  // Continuous following mode.
+  kContinuous = 0,
+
+  // Centered following mode.
+  kCentered = 1,
+
+  // Edge following mode.
+  kEdge = 2,
+
+  kMaxValue = kEdge
+};
+
+// The icon shown in the Dictation bubble UI. This enum should be kept in sync
+// with chrome.accessibilityPrivate.DictationBubbleIconType.
+enum class DictationBubbleIconType {
+  kHidden,
+  kStandby,
+  kMacroSuccess,
+  kMacroFail,
+};
+
+// Hints that can show up in the Dictation bubble UI. This enum should be kept
+// in sync with chrome.accessibilityPrivate.DictationBubbleHintType.
+enum class DictationBubbleHintType {
+  kTrySaying,
+  kType,
+  kDelete,
+  kSelectAll,
+  kUndo,
+  kHelp,
+  kUnselect,
+  kCopy,
+};
+
+// The types of notifications that can be shown by Dictation.
+enum class DictationNotificationType {
+  kAllDlcsDownloaded,
+  kNoDlcsDownloaded,
+  kOnlySodaDownloaded,
+  kOnlyPumpkinDownloaded,
+};
+
+// The types of notifications that can be shown by FaceGaze.
+enum class FaceGazeNotificationType {
+  kDlcFailed,
+  kDlcSucceeded,
+};
+
+// The types of accessibility-related toasts. This enum should be kept in sync
+// with chrome.accessibilityPrivate.ToastType.
+enum class AccessibilityToastType {
+  kDictationMicMuted,
+  kDictationNoFocusedTextField,
+  kTouchpadDisabled,
+};
+
+// Dominant hand for mouse keys.  This determines which keys to use for the
+// feature.
+enum class MouseKeysDominantHand {
+  kRightHandDominant = 0,
+  kLeftHandDominant = 1,
+  kMaxValue = kLeftHandDominant,
+};
+
+// The icon shown in the MouseKeys bubble UI.
+enum class MouseKeysBubbleIconType {
+  kHidden,
+  kButtonChanged,
+  kMouseDrag,
+};
+
+// The four directions for scrolling.
+enum class AccessibilityScrollDirection {
+  kUp,
+  kDown,
+  kLeft,
+  kRight,
+};
+
+// The different modes in which the internal touchpad can be disabled.
+// These values are written to prefs so should not be changed.
+enum class DisableTouchpadMode {
+  kNever = 0,
+  kAlways = 1,
+  kOnExternalMouseConnected = 2,
+  kMaxValue = kOnExternalMouseConnected,
 };
 
 }  // namespace ash

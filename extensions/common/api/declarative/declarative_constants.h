@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 #ifndef EXTENSIONS_COMMON_API_DECLARATIVE_DECLARATIVE_CONSTANTS_H_
 #define EXTENSIONS_COMMON_API_DECLARATIVE_DECLARATIVE_CONSTANTS_H_
 
-namespace extensions {
-namespace declarative_content_constants {
+namespace extensions::declarative_content_constants {
 
 // Signals to which ContentRulesRegistries are registered.
 extern const char kOnPageChanged[];
@@ -31,7 +30,16 @@ extern const char kSetIcon[];
 // The old ShowAction instance type.
 extern const char kLegacyShowAction[];
 
-}  // namespace declarative_content_constants
-}  // namespace extensions
+// Describes the injected action type. Used for logging when an action is
+// created. Entries should not be renumbered and numeric values should never be
+// reused.
+enum class ContentActionType {
+  kShowAction = 0,
+  kSetIcon = 1,
+  kRequestContentScript = 2,
+  kMaxValue = kRequestContentScript,
+};
+
+}  // namespace extensions::declarative_content_constants
 
 #endif  // EXTENSIONS_COMMON_API_DECLARATIVE_DECLARATIVE_CONSTANTS_H_

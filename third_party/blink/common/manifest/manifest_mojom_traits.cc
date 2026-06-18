@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,19 +6,40 @@
 
 #include <string>
 #include <utility>
+#include <variant>
+#include <vector>
 
+#include "base/check.h"
+#include "base/strings/utf_string_conversions.h"
 #include "mojo/public/cpp/base/string16_mojom_traits.h"
+#include "mojo/public/cpp/bindings/type_converter.h"
+#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+#include "third_party/blink/public/common/manifest/manifest.h"
+#include "third_party/blink/public/common/safe_url_pattern.h"
+#include "third_party/blink/public/mojom/manifest/display_mode.mojom.h"
+#include "third_party/blink/public/mojom/manifest/manifest.mojom-data-view.h"
+#include "third_party/blink/public/mojom/manifest/manifest.mojom.h"
+#include "third_party/blink/public/mojom/manifest/manifest_launch_handler.mojom.h"
 #include "ui/gfx/geometry/mojom/geometry_mojom_traits.h"
 #include "url/mojom/url_gurl_mojom_traits.h"
+#include "url/url_constants.h"
+#include "url/url_util.h"
 
 namespace mojo {
 namespace {
 
-// A wrapper around base::Optional<base::string16> so a custom StructTraits
+// A wrapper around std::optional<std::u16string> so a custom StructTraits
 // specialization can enforce maximum string length.
 struct TruncatedString16 {
-  base::Optional<base::string16> string;
+  std::optional<std::u16string> string;
 };
+
+std::optional<std::string> ConvertOptionalString16(
+    const TruncatedString16& string) {
+  return string.string.has_value()
+             ? std::make_optional(base::UTF16ToUTF8(string.string.value()))
+             : std::nullopt;
+}
 
 }  // namespace
 
@@ -39,69 +60,9 @@ struct StructTraits<mojo_base::mojom::String16DataView, TruncatedString16> {
 
     output->string.emplace();
     return StructTraits<mojo_base::mojom::String16DataView,
-                        base::string16>::Read(input, &output->string.value());
+                        std::u16string>::Read(input, &output->string.value());
   }
 };
-
-bool StructTraits<blink::mojom::ManifestDataView, ::blink::Manifest>::Read(
-    blink::mojom::ManifestDataView data,
-    ::blink::Manifest* out) {
-  TruncatedString16 string;
-  if (!data.ReadName(&string))
-    return false;
-  out->name = std::move(string.string);
-
-  if (!data.ReadShortName(&string))
-    return false;
-  out->short_name = std::move(string.string);
-
-  if (!data.ReadGcmSenderId(&string))
-    return false;
-  out->gcm_sender_id = std::move(string.string);
-
-  if (!data.ReadStartUrl(&out->start_url))
-    return false;
-
-  if (!data.ReadIcons(&out->icons))
-    return false;
-
-  if (!data.ReadShortcuts(&out->shortcuts))
-    return false;
-
-  if (!data.ReadShareTarget(&out->share_target))
-    return false;
-
-  if (!data.ReadFileHandlers(&out->file_handlers))
-    return false;
-
-  if (!data.ReadProtocolHandlers(&out->protocol_handlers))
-    return false;
-
-  if (!data.ReadRelatedApplications(&out->related_applications))
-    return false;
-
-  out->prefer_related_applications = data.prefer_related_applications();
-
-  if (data.has_theme_color())
-    out->theme_color = data.theme_color();
-
-  if (data.has_background_color())
-    out->background_color = data.background_color();
-
-  if (!data.ReadDisplay(&out->display))
-    return false;
-
-  if (!data.ReadDisplayOverride(&out->display_override))
-    return false;
-
-  if (!data.ReadOrientation(&out->orientation))
-    return false;
-
-  if (!data.ReadScope(&out->scope))
-    return false;
-
-  return true;
-}
 
 bool StructTraits<blink::mojom::ManifestImageResourceDataView,
                   ::blink::Manifest::ImageResource>::
@@ -109,6 +70,10 @@ bool StructTraits<blink::mojom::ManifestImageResourceDataView,
          ::blink::Manifest::ImageResource* out) {
   if (!data.ReadSrc(&out->src))
     return false;
+
+  if (!out->src.is_valid()) {
+    return false;
+  }
 
   TruncatedString16 string;
   if (!data.ReadType(&string))
@@ -125,6 +90,35 @@ bool StructTraits<blink::mojom::ManifestImageResourceDataView,
   if (!data.ReadPurpose(&out->purpose))
     return false;
 
+  return true;
+}
+
+// StructTraits for icu::Locale to/from blink::mojom::Locale.
+// This enables automatic conversion of icu::Locale in mojo maps and structs.
+// Serializes using ICU's canonical format ("en_US") which matches the
+// hash function and avoids allocation.
+std::string_view StructTraits<blink::mojom::LocaleDataView, icu::Locale>::tag(
+    const icu::Locale& locale) {
+  CHECK(!locale.isBogus()) << "Attempting to serialize bogus locale: "
+                           << locale.getName();
+  return locale.getName();
+}
+
+bool StructTraits<blink::mojom::LocaleDataView, icu::Locale>::Read(
+    blink::mojom::LocaleDataView data,
+    icu::Locale* out) {
+  // Use std::string to guarantee NUL termination for icu::Locale constructor.
+  std::string locale_name;
+  if (!data.ReadTag(&locale_name)) {
+    return false;
+  }
+
+  icu::Locale locale(locale_name.c_str());
+  if (locale.isBogus()) {
+    return false;
+  }
+
+  *out = std::move(locale);
   return true;
 }
 
@@ -150,6 +144,22 @@ bool StructTraits<blink::mojom::ManifestShortcutItemDataView,
   if (!data.ReadIcons(&out->icons))
     return false;
 
+  if (!data.ReadIconsLocalized(&out->icons_localized)) {
+    return false;
+  }
+
+  if (!data.ReadNameLocalized(&out->name_localized)) {
+    return false;
+  }
+
+  if (!data.ReadShortNameLocalized(&out->short_name_localized)) {
+    return false;
+  }
+
+  if (!data.ReadDescriptionLocalized(&out->description_localized)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -162,7 +172,7 @@ bool StructTraits<blink::mojom::ManifestRelatedApplicationDataView,
     return false;
   out->platform = std::move(string.string);
 
-  base::Optional<GURL> url;
+  std::optional<GURL> url;
   if (!data.ReadUrl(&url))
     return false;
   out->url = std::move(url).value_or(GURL());
@@ -232,31 +242,149 @@ bool StructTraits<blink::mojom::ManifestShareTargetDataView,
   return data.ReadParams(&out->params);
 }
 
-bool StructTraits<blink::mojom::ManifestFileHandlerDataView,
-                  ::blink::Manifest::FileHandler>::
-    Read(blink::mojom::ManifestFileHandlerDataView data,
-         ::blink::Manifest::FileHandler* out) {
-  if (!data.ReadAction(&out->action))
+bool StructTraits<blink::mojom::ManifestLaunchHandlerDataView,
+                  ::blink::Manifest::LaunchHandler>::
+    Read(blink::mojom::ManifestLaunchHandlerDataView data,
+         ::blink::Manifest::LaunchHandler* out) {
+  if (!data.ReadClientMode(&out->client_mode_)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool StructTraits<blink::mojom::ManifestTranslationItemDataView,
+                  ::blink::Manifest::TranslationItem>::
+    Read(blink::mojom::ManifestTranslationItemDataView data,
+         ::blink::Manifest::TranslationItem* out) {
+  TruncatedString16 string;
+  if (!data.ReadName(&string))
+    return false;
+  out->name = ConvertOptionalString16(string);
+
+  if (!data.ReadShortName(&string))
+    return false;
+  out->short_name = ConvertOptionalString16(string);
+
+  if (!data.ReadDescription(&string))
+    return false;
+  out->description = ConvertOptionalString16(string);
+
+  return true;
+}
+
+bool StructTraits<blink::mojom::HomeTabParamsDataView,
+                  ::blink::Manifest::HomeTabParams>::
+    Read(blink::mojom::HomeTabParamsDataView data,
+         ::blink::Manifest::HomeTabParams* out) {
+  if (!data.ReadIcons(&out->icons)) {
+    return false;
+  }
+
+  if (!data.ReadScopePatterns(&out->scope_patterns)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool StructTraits<blink::mojom::NewTabButtonParamsDataView,
+                  ::blink::Manifest::NewTabButtonParams>::
+    Read(blink::mojom::NewTabButtonParamsDataView data,
+         ::blink::Manifest::NewTabButtonParams* out) {
+  return data.ReadUrl(&out->url);
+}
+
+bool StructTraits<blink::mojom::ManifestLocalizedTextObjectDataView,
+                  ::blink::Manifest::ManifestLocalizedTextObject>::
+    Read(blink::mojom::ManifestLocalizedTextObjectDataView data,
+         ::blink::Manifest::ManifestLocalizedTextObject* out) {
+  if (!data.ReadValue(&out->value)) {
+    return false;
+  }
+
+  out->dir = data.dir();
+
+  if (!data.ReadLang(&out->lang)) {
+    return false;
+  }
+
+  return true;
+}
+
+blink::mojom::HomeTabUnionDataView::Tag
+UnionTraits<blink::mojom::HomeTabUnionDataView,
+            ::blink::Manifest::TabStrip::HomeTab>::
+    GetTag(const ::blink::Manifest::TabStrip::HomeTab& value) {
+  if (std::holds_alternative<blink::mojom::TabStripMemberVisibility>(value)) {
+    return blink::mojom::HomeTabUnion::Tag::kVisibility;
+  } else {
+    return blink::mojom::HomeTabUnion::Tag::kParams;
+  }
+}
+
+bool UnionTraits<blink::mojom::HomeTabUnionDataView,
+                 ::blink::Manifest::TabStrip::HomeTab>::
+    Read(blink::mojom::HomeTabUnionDataView data,
+         blink::Manifest::TabStrip::HomeTab* out) {
+  switch (data.tag()) {
+    case blink::mojom::HomeTabUnionDataView::Tag::kVisibility: {
+      ::blink::mojom::TabStripMemberVisibility visibility;
+      if (!data.ReadVisibility(&visibility))
+        return false;
+      *out = visibility;
+      return true;
+    }
+    case blink::mojom::HomeTabUnionDataView::Tag::kParams: {
+      ::blink::Manifest::HomeTabParams params;
+      if (!data.ReadParams(&params))
+        return false;
+      *out = params;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool StructTraits<blink::mojom::ManifestTabStripDataView,
+                  ::blink::Manifest::TabStrip>::
+    Read(blink::mojom::ManifestTabStripDataView data,
+         ::blink::Manifest::TabStrip* out) {
+  if (!data.ReadHomeTab(&out->home_tab))
     return false;
 
-  if (!data.ReadName(&out->name))
-    return false;
-
-  if (!data.ReadAccept(&out->accept))
+  if (!data.ReadNewTabButton(&out->new_tab_button))
     return false;
 
   return true;
 }
 
-bool StructTraits<blink::mojom::ManifestProtocolHandlerDataView,
-                  ::blink::Manifest::ProtocolHandler>::
-    Read(blink::mojom::ManifestProtocolHandlerDataView data,
-         ::blink::Manifest::ProtocolHandler* out) {
-  if (!data.ReadProtocol(&out->protocol))
+bool StructTraits<blink::mojom::DisplayOverrideItemDataView,
+                  ::blink::Manifest::DisplayOverride>::
+    Read(blink::mojom::DisplayOverrideItemDataView data,
+         ::blink::Manifest::DisplayOverride* out) {
+  blink::mojom::DisplayMode display_mode;
+  if (!data.ReadDisplay(&display_mode)) {
     return false;
+  }
 
-  if (!data.ReadUrl(&out->url))
+  std::vector<::blink::SafeUrlPattern> url_patterns;
+  if (!data.ReadUrlPatterns(&url_patterns)) {
     return false;
+  }
+
+  // `url_patterns` are only allowed in `kUnframed` display mode.
+  if (display_mode != blink::mojom::DisplayMode::kUnframed &&
+      !url_patterns.empty()) {
+    return false;
+  }
+
+  if (display_mode == blink::mojom::DisplayMode::kUnframed) {
+    *out = ::blink::Manifest::DisplayOverride::CreateUnframed(
+        std::move(url_patterns));
+  } else {
+    *out = ::blink::Manifest::DisplayOverride::Create(display_mode);
+  }
 
   return true;
 }

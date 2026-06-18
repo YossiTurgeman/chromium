@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,53 +12,67 @@
 #include <memory>
 #include <vector>
 
-#include "base/scoped_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
+#include "base/time/time.h"
+#include "base/types/expected.h"
 #include "components/browsing_data/core/browsing_data_utils.h"
-#include "components/signin/core/browser/account_reconcilor.h"
 #include "content/public/browser/browsing_data_filter_builder.h"
 #include "content/public/browser/browsing_data_remover.h"
 #include "extensions/browser/extension_function.h"
-#include "ppapi/buildflags/buildflags.h"
+#include "extensions/buildflags/buildflags.h"
 
-class PluginPrefs;
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
 class PrefService;
 
 namespace extension_browsing_data_api_constants {
 
 // Parameter name keys.
-extern const char kDataRemovalPermittedKey[];
-extern const char kDataToRemoveKey[];
-extern const char kOptionsKey[];
+inline constexpr char kDataRemovalPermittedKey[] = "dataRemovalPermitted";
+inline constexpr char kDataToRemoveKey[] = "dataToRemove";
+inline constexpr char kOptionsKey[] = "options";
 
 // Type keys.
-extern const char kAppCacheKey[];
-extern const char kCacheKey[];
-extern const char kCookiesKey[];
-extern const char kDownloadsKey[];
-extern const char kFileSystemsKey[];
-extern const char kFormDataKey[];
-extern const char kHistoryKey[];
-extern const char kIndexedDBKey[];
-extern const char kPluginDataKey[];
-extern const char kLocalStorageKey[];
-extern const char kPasswordsKey[];
-extern const char kServiceWorkersKey[];
-extern const char kCacheStorageKey[];
-extern const char kWebSQLKey[];
+inline constexpr char kCacheKey[] = "cache";
+inline constexpr char kCookiesKey[] = "cookies";
+inline constexpr char kDownloadsKey[] = "downloads";
+inline constexpr char kFileSystemsKey[] = "fileSystems";
+inline constexpr char kFormDataKey[] = "formData";
+inline constexpr char kHistoryKey[] = "history";
+inline constexpr char kIndexedDBKey[] = "indexedDB";
+inline constexpr char kLocalStorageKey[] = "localStorage";
+inline constexpr char kPasswordsKeyDeprecated[] = "passwords";
+inline constexpr char kPluginDataKeyDeprecated[] = "pluginData";
+inline constexpr char kServiceWorkersKey[] = "serviceWorkers";
+inline constexpr char kCacheStorageKey[] = "cacheStorage";
 
 // Option keys.
-extern const char kExtensionsKey[];
-extern const char kOriginTypesKey[];
-extern const char kProtectedWebKey[];
-extern const char kSinceKey[];
-extern const char kUnprotectedWebKey[];
+inline constexpr char kExtensionsKey[] = "extension";
+inline constexpr char kOriginTypesKey[] = "originTypes";
+inline constexpr char kProtectedWebKey[] = "protectedWeb";
+inline constexpr char kSinceKey[] = "since";
+inline constexpr char kOriginsKey[] = "origins";
+inline constexpr char kExcludeOriginsKey[] = "excludeOrigins";
+inline constexpr char kUnprotectedWebKey[] = "unprotectedWeb";
 
 // Errors!
-extern const char kBadDataTypeDetails[];
-extern const char kDeleteProhibitedError[];
-extern const char kNonFilterableError[];
-extern const char kIncompatibleFilterError[];
-extern const char kInvalidOriginError[];
+// The placeholder will be filled by the name of the affected data type (e.g.,
+// "history").
+inline constexpr char kBadDataTypeDetails[] =
+    "Invalid value for data type '%s'.";
+inline constexpr char kDeleteProhibitedError[] =
+    "Browsing history and downloads are not "
+    "permitted to be removed.";
+inline constexpr char kNonFilterableError[] =
+    "At least one data type doesn't support filtering by origin.";
+inline constexpr char kIncompatibleFilterError[] =
+    "Don't set both 'origins' and 'excludeOrigins' at the same time.";
+inline constexpr char kInvalidOriginError[] = "'%s' is not a valid origin.";
+inline constexpr char kUnsupportedDataTypeWarning[] =
+    "Requested data type(s) are not supported: %s.";
+inline constexpr char kDeprecatedDataTypeError[] =
+    "Requested data type is deprecated.";
 
 }  // namespace extension_browsing_data_api_constants
 
@@ -70,23 +84,22 @@ class BrowsingDataSettingsFunction : public ExtensionFunction {
   ResponseAction Run() override;
 
  protected:
-  ~BrowsingDataSettingsFunction() override {}
+  ~BrowsingDataSettingsFunction() override = default;
 
  private:
-  // Sets a boolean value in the |selected_dict| with the |data_type| as a key,
+  // Sets a boolean value in the `selected_dict` with the `data_type` as a key,
   // indicating whether the data type is both selected and permitted to be
-  // removed; and a value in the |permitted_dict| with the |data_type| as a
+  // removed; and a value in the `permitted_dict` with the `data_type` as a
   // key, indicating only whether the data type is permitted to be removed.
-  void SetDetails(base::DictionaryValue* selected_dict,
-                  base::DictionaryValue* permitted_dict,
+  void SetDetails(base::DictValue* selected_dict,
+                  base::DictValue* permitted_dict,
                   const char* data_type,
                   bool is_selected);
 
-  // Returns whether |data_type| is currently selected for deletion on |tab|.
-  bool isDataTypeSelected(browsing_data::BrowsingDataType data_type,
-                          browsing_data::ClearBrowsingDataTab tab);
+  // Returns whether `data_type` is currently selected for deletion.
+  bool isDataTypeSelected(browsing_data::BrowsingDataType data_type);
 
-  PrefService* prefs_ = nullptr;
+  raw_ptr<PrefService> prefs_ = nullptr;
 };
 
 // This serves as a base class from which the browsing data API removal
@@ -111,11 +124,14 @@ class BrowsingDataRemoverFunction
  protected:
   ~BrowsingDataRemoverFunction() override;
 
+  // Writes a console log warning when a datatype is unsupported.
+  void LogUnsupportedDataTypeWarning(const std::string& data_type);
+
  private:
   // Children should override this method to provide the proper removal mask
   // based on the API call they represent.
   // Returns whether or not removal mask retrieval was successful.
-  // |removal_mask| is populated with the result, if successful.
+  // `removal_mask` is populated with the result, if successful.
   virtual bool GetRemovalMask(uint64_t* removal_mask) = 0;
 
   // Returns true if the data removal is allowed to pause Sync. Returns true by
@@ -124,31 +140,29 @@ class BrowsingDataRemoverFunction
   // pausing Sync would prevent the data from being deleted on the server.
   virtual bool IsPauseSyncAllowed();
 
-#if BUILDFLAG(ENABLE_PLUGINS)
-  // Updates the removal bitmask according to whether removing plugin data is
-  // supported or not.
-  void CheckRemovingPluginDataSupported(
-      scoped_refptr<PluginPrefs> plugin_prefs);
-#endif
+  // Returns true if the data removal is not allowed because the datatype is
+  // deprecated.
+  virtual bool IsRemovalDeprecated();
 
-  // Parse the developer-provided |origin_types| object into |origin_type_mask|
+  // Parse the developer-provided `origin_types` object into `origin_type_mask`
   // that can be used with the BrowsingDataRemover.
   // Returns true if parsing was successful.
-  bool ParseOriginTypeMask(const base::DictionaryValue& options,
+  // Pre-condition: `options` is a dictionary.
+  bool ParseOriginTypeMask(const base::DictValue& options,
                            uint64_t* origin_type_mask);
 
-  // Parses the developer-provided list of origins into |result|.
+  // Parses the developer-provided list of origins into `result`.
   // Returns whether or not parsing was successful. In case of parse failure,
-  // |error_response| will contain the error response.
-  bool ParseOrigins(const base::Value& list_value,
-                    std::vector<url::Origin>* result,
-                    ResponseValue* error_response);
+  // `error_response` will contain the error response.
+  using OriginParsingResult =
+      base::expected<std::vector<url::Origin>, ResponseValue>;
+  OriginParsingResult ParseOrigins(const base::ListValue& list_value);
 
   // Called when we're ready to start removing data.
   void StartRemoving();
 
   // Called when a task is finished. Will finish the extension call when
-  // |pending_tasks_| reaches zero.
+  // `pending_tasks_` reaches zero.
   void OnTaskFinished();
 
   base::Time remove_since_;
@@ -158,11 +172,9 @@ class BrowsingDataRemoverFunction
   content::BrowsingDataFilterBuilder::Mode mode_ =
       content::BrowsingDataFilterBuilder::Mode::kPreserve;
   int pending_tasks_ = 0;
-  ScopedObserver<content::BrowsingDataRemover,
-                 content::BrowsingDataRemover::Observer>
-      observer_;
-  std::unique_ptr<AccountReconcilor::ScopedSyncedDataDeletion>
-      synced_data_deletion_;
+  base::ScopedObservation<content::BrowsingDataRemover,
+                          content::BrowsingDataRemover::Observer>
+      observation_{this};
 };
 
 class BrowsingDataRemoveAppcacheFunction : public BrowsingDataRemoverFunction {
@@ -171,7 +183,7 @@ class BrowsingDataRemoveAppcacheFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVEAPPCACHE)
 
  protected:
-  ~BrowsingDataRemoveAppcacheFunction() override {}
+  ~BrowsingDataRemoveAppcacheFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -182,7 +194,7 @@ class BrowsingDataRemoveFunction : public BrowsingDataRemoverFunction {
   DECLARE_EXTENSION_FUNCTION("browsingData.remove", BROWSINGDATA_REMOVE)
 
  protected:
-  ~BrowsingDataRemoveFunction() override {}
+  ~BrowsingDataRemoveFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -195,7 +207,7 @@ class BrowsingDataRemoveCacheFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVECACHE)
 
  protected:
-  ~BrowsingDataRemoveCacheFunction() override {}
+  ~BrowsingDataRemoveCacheFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -207,7 +219,7 @@ class BrowsingDataRemoveCookiesFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVECOOKIES)
 
  protected:
-  ~BrowsingDataRemoveCookiesFunction() override {}
+  ~BrowsingDataRemoveCookiesFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -219,7 +231,7 @@ class BrowsingDataRemoveDownloadsFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVEDOWNLOADS)
 
  protected:
-  ~BrowsingDataRemoveDownloadsFunction() override {}
+  ~BrowsingDataRemoveDownloadsFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -232,7 +244,7 @@ class BrowsingDataRemoveFileSystemsFunction
                              BROWSINGDATA_REMOVEFILESYSTEMS)
 
  protected:
-  ~BrowsingDataRemoveFileSystemsFunction() override {}
+  ~BrowsingDataRemoveFileSystemsFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -244,7 +256,7 @@ class BrowsingDataRemoveFormDataFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVEFORMDATA)
 
  protected:
-  ~BrowsingDataRemoveFormDataFunction() override {}
+  ~BrowsingDataRemoveFormDataFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -256,7 +268,7 @@ class BrowsingDataRemoveHistoryFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVEHISTORY)
 
  protected:
-  ~BrowsingDataRemoveHistoryFunction() override {}
+  ~BrowsingDataRemoveHistoryFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -268,7 +280,7 @@ class BrowsingDataRemoveIndexedDBFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVEINDEXEDDB)
 
  protected:
-  ~BrowsingDataRemoveIndexedDBFunction() override {}
+  ~BrowsingDataRemoveIndexedDBFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -281,7 +293,7 @@ class BrowsingDataRemoveLocalStorageFunction
                              BROWSINGDATA_REMOVELOCALSTORAGE)
 
  protected:
-  ~BrowsingDataRemoveLocalStorageFunction() override {}
+  ~BrowsingDataRemoveLocalStorageFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -294,7 +306,7 @@ class BrowsingDataRemovePluginDataFunction
                              BROWSINGDATA_REMOVEPLUGINDATA)
 
  protected:
-  ~BrowsingDataRemovePluginDataFunction() override {}
+  ~BrowsingDataRemovePluginDataFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -306,10 +318,11 @@ class BrowsingDataRemovePasswordsFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVEPASSWORDS)
 
  protected:
-  ~BrowsingDataRemovePasswordsFunction() override {}
+  ~BrowsingDataRemovePasswordsFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
+  bool IsRemovalDeprecated() override;
 };
 
 class BrowsingDataRemoveServiceWorkersFunction
@@ -319,7 +332,7 @@ class BrowsingDataRemoveServiceWorkersFunction
                              BROWSINGDATA_REMOVESERVICEWORKERS)
 
  protected:
-  ~BrowsingDataRemoveServiceWorkersFunction() override {}
+  ~BrowsingDataRemoveServiceWorkersFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -332,7 +345,7 @@ class BrowsingDataRemoveCacheStorageFunction
                              BROWSINGDATA_REMOVECACHESTORAGE)
 
  protected:
-  ~BrowsingDataRemoveCacheStorageFunction() override {}
+  ~BrowsingDataRemoveCacheStorageFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;
@@ -344,7 +357,7 @@ class BrowsingDataRemoveWebSQLFunction : public BrowsingDataRemoverFunction {
                              BROWSINGDATA_REMOVEWEBSQL)
 
  protected:
-  ~BrowsingDataRemoveWebSQLFunction() override {}
+  ~BrowsingDataRemoveWebSQLFunction() override = default;
 
   // BrowsingDataRemoverFunction:
   bool GetRemovalMask(uint64_t* removal_mask) override;

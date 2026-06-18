@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,23 +6,28 @@
 #define ASH_AMBIENT_AMBIENT_PHOTO_CONTROLLER_H_
 
 #include <memory>
+#include <optional>
+#include <ostream>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include "ash/ambient/ambient_constants.h"
 #include "ash/ambient/model/ambient_backend_model.h"
-#include "ash/ambient/model/ambient_backend_model_observer.h"
+#include "ash/ambient/model/ambient_photo_config.h"
+#include "ash/ambient/model/ambient_topic_queue.h"
+#include "ash/ambient/ui/ambient_view_delegate.h"
 #include "ash/ash_export.h"
 #include "ash/public/cpp/ambient/ambient_backend_controller.h"
-#include "base/callback_forward.h"
-#include "base/macros.h"
+#include "ash/public/cpp/ambient/proto/photo_cache_entry.pb.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/scoped_observer.h"
+#include "base/scoped_observation.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/timer/timer.h"
 #include "net/base/backoff_entry.h"
+#include "services/data_decoder/public/mojom/image_decoder.mojom-shared.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 
 namespace gfx {
@@ -31,155 +36,191 @@ class ImageSkia;
 
 namespace ash {
 
-// A wrapper class of SimpleURLLoader to download the photo raw data. In the
-// test, this will be used to provide fake data.
-class ASH_EXPORT AmbientURLLoader {
- public:
-  AmbientURLLoader() = default;
-  AmbientURLLoader(const AmbientURLLoader&) = delete;
-  AmbientURLLoader& operator=(const AmbientURLLoader&) = delete;
-  virtual ~AmbientURLLoader() = default;
-
-  // Download data from the given |url|.
-  virtual void Download(
-      const std::string& url,
-      network::SimpleURLLoader::BodyAsStringCallback callback) = 0;
-};
-
-// A wrapper class of |data_decoder| to decode the photo raw data. In the test,
-// this will be used to provide fake data.
-class ASH_EXPORT AmbientImageDecoder {
- public:
-  AmbientImageDecoder() = default;
-  AmbientImageDecoder(const AmbientImageDecoder&) = delete;
-  AmbientImageDecoder& operator=(const AmbientImageDecoder&) = delete;
-  virtual ~AmbientImageDecoder() = default;
-
-  // Decode |encoded_bytes| to ImageSkia.
-  virtual void Decode(
-      const std::vector<uint8_t>& encoded_bytes,
-      base::OnceCallback<void(const gfx::ImageSkia&)> callback) = 0;
-};
+class AmbientAccessTokenController;
+class AmbientBackupPhotoDownloader;
 
 // Class to handle photos in ambient mode.
-class ASH_EXPORT AmbientPhotoController : public AmbientBackendModelObserver {
+//
+// Terminology:
+//
+// Topic - A primary and optional related photo specified by the IMAX server.
+//
+// Fetch Topics - Request new topics from the IMAX server. After they're
+//                fetched, the controller just has urls for the primary/optional
+//                photos in each returned topic.
+//
+// Download Topic - Download the encoded primary/related photos from their
+//                  corresponding urls.
+//
+// Save Topic - Write the topic's encoded photos to disk for future re-use.
+//              Helpful in future cases where ambient mode starts and there's no
+//              internet.
+//
+// Load Topic - Read a previously saved topic's encoded photos from disk.
+//
+// Decode Topic - Decode the topic's photos and commit them to the
+//                AmbientBackendModel.
+//
+// Prepare Topic - A term that aggregates all of the steps above:
+// 1) Either a) fetch/download/save new topic or b) load existing topic
+// 2) Decode topic and commit to the model.
+//
+// Topic Set - A group of topics for the UI to display in one cycle, capped by
+// |AmbientPhotoConfig.topic_set_size|.
+//
+// The controller's state machine:
+//
+//        kInactive
+//           |
+//           |
+//           v
+// kPreparingNextTopicSet <-----
+//           |                   |
+//           |                   |
+//           v                   |
+// kWaitingForNextMarker -------
+//
+// kInactive:
+// The controller is idle, and the model has no decoded topics in it. This is
+// the initial state when the controller is constructed. Although not
+// illustrated above, the controller can transition to this state from any of
+// the other states via a call to StopScreenUpdate().
+//
+//
+// kPreparingNextTopicSet (a.k.a. "refreshing" the model's topics):
+// The very first time this state is reached, the UI has not started rendering
+// yet, and the controller is preparing initial sets of topics. The
+// AmbientPhotoConfig dictates how many sets to prepare initially. This state is
+// initially triggered by a call to StartScreenUpdate(), and it ends when
+// AmbientBackendModel::ImagesReady() is true.
+//
+// kWaitingForNextMarker:
+// The UI is rendering the decoded topics currently in the model, and the
+// controller is idle. It's waiting for the right marker(s) to be hit in the UI
+// before it becomes active and starts preparing the next set of topics.
+//
+// kPreparingNextTopicSet (again):
+// A target marker has been hit, and the controller immediately starts preparing
+// the next set of topics. Unlike the first time this state was hit, there
+// is only ever 1 topic set prepared, and the UI is rendering while the topics
+// are being prepared. After the topic set is completely prepared, the
+// controller goes back to WAITING_FOR_NEXT_MARKER. If another target marker is
+// received while the controller is still preparing a topic set, the controller
+// will simply reset its internal "counter" to 0 and start preparing a brand new
+// set.
+class ASH_EXPORT AmbientPhotoController : public AmbientViewDelegateObserver {
  public:
-  // Start fetching next |ScreenUpdate| from the backdrop server. The specified
-  // download callback will be run upon completion and returns a null image
-  // if: 1. the response did not have the desired fields or urls or, 2. the
-  // download attempt from that url failed. The |icon_callback| also returns
-  // the weather temperature in Fahrenheit together with the image.
-  using TopicsDownloadCallback =
-      base::OnceCallback<void(const std::vector<AmbientModeTopic>& topics)>;
-  using WeatherIconDownloadCallback =
-      base::OnceCallback<void(base::Optional<float>, const gfx::ImageSkia&)>;
+  AmbientPhotoController(
+      AmbientViewDelegate& view_delegate,
+      AmbientPhotoConfig photo_config,
+      std::unique_ptr<AmbientTopicQueue::Delegate> topic_queue_delegate);
 
-  using PhotoDownloadCallback = base::OnceCallback<void(const gfx::ImageSkia&)>;
+  AmbientPhotoController(const AmbientPhotoController&) = delete;
+  AmbientPhotoController& operator=(const AmbientPhotoController&) = delete;
 
-  AmbientPhotoController();
   ~AmbientPhotoController() override;
 
   // Start/stop updating the screen contents.
-  // We need different logics to update photos and weather info because they
-  // have different refreshing intervals. Currently we only update weather info
-  // one time when entering ambient mode. Photos will be refreshed every
-  // |kPhotoRefreshInterval|.
   void StartScreenUpdate();
   void StopScreenUpdate();
+  bool IsScreenUpdateActive() const;
 
   AmbientBackendModel* ambient_backend_model() {
     return &ambient_backend_model_;
   }
 
-  const base::OneShotTimer& photo_refresh_timer_for_testing() const {
-    return photo_refresh_timer_;
+  base::OneShotTimer& backup_photo_refresh_timer_for_testing() {
+    return backup_photo_refresh_timer_;
   }
 
-  // AmbientBackendModelObserver:
-  void OnTopicsChanged() override;
-
-  // Clear cache when Settings changes.
-  void ClearCache();
+  // AmbientViewDelegateObserver:
+  void OnMarkerHit(AmbientPhotoConfig::Marker marker) override;
 
  private:
+  enum class State { kInactive, kWaitingForNextMarker, kPreparingNextTopicSet };
+
   friend class AmbientAshTestBase;
+  friend class AmbientPhotoControllerTest;
+  friend std::ostream& operator<<(std::ostream& os, State state);
 
-  void FetchTopics();
+  // Initialize variables.
+  void Init();
 
-  void ScheduleFetchTopics(bool backoff);
+  void ScheduleFetchBackupImages();
 
-  void ScheduleRefreshImage();
+  // Download backup cache images.
+  void FetchBackupImages();
 
-  void GetScreenUpdateInfo();
+  void OnBackupImageFetched(bool success);
 
-  // Return a topic to download the image.
-  // Return nullptr when need to read from disk cache.
-  const AmbientModeTopic* GetNextTopic();
+  void OnTopicsAvailableInQueue(AmbientTopicQueue::WaitResult wait_result);
 
-  void OnScreenUpdateInfoFetched(const ash::ScreenUpdate& screen_update);
+  // Clear temporary image data to prepare next photos.
+  void ResetImageData();
 
-  // Fetch photo raw data by downloading or reading from cache.
-  void FetchPhotoRawData();
+  void ReadPhotoFromTopicQueue();
 
-  // Try to read photo raw data from cache.
-  void TryReadPhotoRawData();
+  void TryReadPhotoFromCache();
 
-  void OnPhotoRawDataAvailable(bool from_downloading,
-                               std::unique_ptr<std::string> details,
-                               std::unique_ptr<std::string> data);
+  void OnPhotoCacheReadComplete(::ambient::PhotoCacheEntry cache_entry);
+
+  void OnPhotoRawDataDownloaded(bool is_related_image,
+                                base::RepeatingClosure on_done,
+                                std::string&& data);
+
+  void OnAllPhotoRawDataDownloaded();
+
+  void OnAllPhotoRawDataAvailable(bool from_downloading);
+
+  void SaveCurrentPhotoToCache();
 
   void DecodePhotoRawData(bool from_downloading,
-                          std::unique_ptr<std::string> details,
-                          std::unique_ptr<std::string> data);
+                          bool is_related_image,
+                          base::RepeatingClosure on_done,
+                          const std::string& data);
 
   void OnPhotoDecoded(bool from_downloading,
-                      std::unique_ptr<std::string> details,
+                      bool is_related_image,
+                      base::RepeatingClosure on_done,
                       const gfx::ImageSkia& image);
 
-  void StartDownloadingWeatherConditionIcon(
-      const base::Optional<WeatherInfo>& weather_info);
-
-  // Invoked upon completion of the weather icon download, |icon| can be a null
-  // image if the download attempt from the url failed.
-  void OnWeatherConditionIconDownloaded(float temp_f,
-                                        bool show_celsius,
-                                        const gfx::ImageSkia& icon);
-
-  void set_url_loader_for_testing(
-      std::unique_ptr<AmbientURLLoader> url_loader) {
-    url_loader_ = std::move(url_loader);
-  }
-
-  AmbientURLLoader* get_url_loader_for_testing() { return url_loader_.get(); }
-
-  void set_image_decoder_for_testing(
-      std::unique_ptr<AmbientImageDecoder> image_decoder) {
-    image_decoder_ = std::move(image_decoder);
-  }
-
-  AmbientImageDecoder* get_image_decoder_for_testing() {
-    return image_decoder_.get();
-  }
+  void OnAllPhotoDecoded(bool from_downloading,
+                         const std::string& hash);
 
   void FetchTopicsForTesting();
 
   void FetchImageForTesting();
 
+  void FetchBackupImagesForTesting();
+
+  void set_image_codec_for_testing(
+      data_decoder::mojom::ImageCodec image_codec) {
+    image_codec_ = image_codec;
+  }
+
+  // Kicks off preparation of the next topic.
+  void StartPreparingNextTopic();
+
+  const std::unique_ptr<AmbientTopicQueue::Delegate> topic_queue_delegate_;
+  std::unique_ptr<AmbientTopicQueue> ambient_topic_queue_;
   AmbientBackendModel ambient_backend_model_;
 
-  // The timer to refresh photos.
-  base::OneShotTimer photo_refresh_timer_;
+  // The timer to refresh backup cache photos.
+  base::OneShotTimer backup_photo_refresh_timer_;
+
+  State state_ = State::kInactive;
 
   // The index of a topic to download.
   size_t topic_index_ = 0;
-
-  // Tracking how many batches of topics have been fetched.
-  int topics_batch_fetched_ = 0;
 
   // Current index of cached image to read and display when failure happens.
   // The image file of this index may not exist or may not be valid. It will try
   // to read from the next cached file by increasing this index by 1.
   int cache_index_for_display_ = 0;
+
+  // Current index of backup cached image to display when no other cached images
+  // are available.
+  size_t backup_cache_index_for_display_ = 0;
 
   // Current index of cached image to save for the latest downloaded photo.
   // The write command could fail. This index will increase 1 no matter writing
@@ -187,31 +228,45 @@ class ASH_EXPORT AmbientPhotoController : public AmbientBackendModelObserver {
   // failures happen.
   int cache_index_for_store_ = 0;
 
-  // Whether the image refresh started or not.
-  bool image_refresh_started_ = false;
-
   // Cached image may not exist or valid. This is the max times of attempts to
   // read cached images.
   int retries_to_read_from_cache_ = kMaxNumberOfCachedImages;
 
-  // Backoff for fetch topics retries.
-  net::BackoffEntry fetch_topic_retry_backoff_;
+  int backup_retries_to_read_from_cache_ = 0;
 
   // Backoff to resume fetch images.
   net::BackoffEntry resume_fetch_image_backoff_;
 
-  ScopedObserver<AmbientBackendModel, AmbientBackendModelObserver>
-      ambient_backend_model_observer_{this};
-
-  std::unique_ptr<AmbientURLLoader> url_loader_;
-
-  std::unique_ptr<AmbientImageDecoder> image_decoder_;
+  const raw_ptr<AmbientAccessTokenController> access_token_controller_;
 
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
-  base::WeakPtrFactory<AmbientPhotoController> weak_factory_{this};
+  // Temporary data store when fetching images and details.
+  ::ambient::PhotoCacheEntry cache_entry_;
+  gfx::ImageSkia image_;
+  gfx::ImageSkia related_image_;
 
-  DISALLOW_COPY_AND_ASSIGN(AmbientPhotoController);
+  // Tracks the number of topics that have been prepared since the controller
+  // last transitioned to the |kPreparingNextTopicSet| state.
+  size_t num_topics_prepared_ = 0;
+
+  // This is purely for development purposes and does not contribute to the
+  // user-facing business logic. It validates that only one topic is prepared at
+  // a time. If multiple topics are prepared simultaneously, they may clobber
+  // variables like |cache_entry_|, |image_|, etc and result in unpredictable
+  // behavior.
+  bool is_actively_preparing_topic_ = false;
+
+  data_decoder::mojom::ImageCodec image_codec_ =
+      data_decoder::mojom::ImageCodec::kDefault;
+
+  base::ScopedObservation<AmbientViewDelegate, AmbientViewDelegateObserver>
+      scoped_view_delegate_observation_{this};
+
+  std::vector<std::unique_ptr<AmbientBackupPhotoDownloader>>
+      active_backup_image_downloads_;
+
+  base::WeakPtrFactory<AmbientPhotoController> weak_factory_{this};
 };
 
 }  // namespace ash

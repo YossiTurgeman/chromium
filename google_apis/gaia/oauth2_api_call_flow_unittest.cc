@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -28,11 +28,13 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-using net::HttpRequestHeaders;
-using testing::_;
-using testing::ByMove;
-using testing::Return;
-using testing::StrictMock;
+using ::net::HttpRequestHeaders;
+using ::testing::_;
+using ::testing::ByMove;
+using ::testing::Invoke;
+using ::testing::Optional;
+using ::testing::Return;
+using ::testing::StrictMock;
 
 namespace {
 
@@ -49,21 +51,32 @@ static GURL CreateApiUrl() {
 
 class MockApiCallFlow : public OAuth2ApiCallFlow {
  public:
-  MockApiCallFlow() {}
-  ~MockApiCallFlow() override {}
+  MockApiCallFlow() = default;
+  ~MockApiCallFlow() override = default;
 
-  MOCK_METHOD0(CreateApiCallUrl, GURL());
-  MOCK_METHOD0(CreateApiCallBody, std::string());
-  MOCK_METHOD2(ProcessApiCallSuccess,
-               void(const network::mojom::URLResponseHead* head,
-                    std::unique_ptr<std::string> body));
-  MOCK_METHOD3(ProcessApiCallFailure,
-               void(int net_error,
-                    const network::mojom::URLResponseHead* head,
-                    std::unique_ptr<std::string> body));
-  MOCK_METHOD1(ProcessNewAccessToken, void(const std::string& access_token));
-  MOCK_METHOD1(ProcessMintAccessTokenFailure,
-               void(const GoogleServiceAuthError& error));
+  MOCK_METHOD(GURL, CreateApiCallUrl, (), (override));
+  MOCK_METHOD(std::string, CreateApiCallBody, (), (override));
+  MOCK_METHOD(net::HttpRequestHeaders, CreateApiCallHeaders, (), (override));
+  MOCK_METHOD(std::string,
+              CreateAuthorizationHeaderValue,
+              (const std::string& access_token),
+              (override));
+  MOCK_METHOD(void,
+              ProcessApiCallSuccess,
+              (const network::mojom::URLResponseHead* head,
+               std::optional<std::string> body),
+              (override));
+  MOCK_METHOD(void,
+              ProcessApiCallFailure,
+              (int net_error,
+               const network::mojom::URLResponseHead* head,
+               std::optional<std::string> body),
+              (override));
+
+  std::string CreateAuthorizationHeaderValueBase(
+      const std::string& access_token) {
+    return OAuth2ApiCallFlow::CreateAuthorizationHeaderValue(access_token);
+  }
 
   net::PartialNetworkTrafficAnnotationTag GetNetworkTrafficAnnotationTag()
       override {
@@ -92,11 +105,24 @@ class OAuth2ApiCallFlowTest : public testing::Test {
         network::URLLoaderCompletionStatus(error));
   }
 
-  void SetupApiCall(bool succeeds, net::HttpStatusCode status) {
-    std::string body(CreateBody());
-    GURL url(CreateApiUrl());
-    EXPECT_CALL(flow_, CreateApiCallBody()).WillOnce(Return(body));
-    EXPECT_CALL(flow_, CreateApiCallUrl()).WillOnce(Return(url));
+ protected:
+  void SetupApiCall(
+      bool succeeds,
+      net::HttpStatusCode status,
+      std::optional<std::string> authorization_header_override = std::nullopt) {
+    std::string body = CreateBody();
+    GURL url = CreateApiUrl();
+    EXPECT_CALL(flow_, CreateApiCallBody).WillOnce(Return(body));
+    EXPECT_CALL(flow_, CreateApiCallUrl).WillOnce(Return(url));
+    EXPECT_CALL(flow_, CreateApiCallHeaders);
+    if (authorization_header_override.has_value()) {
+      EXPECT_CALL(flow_, CreateAuthorizationHeaderValue)
+          .WillOnce(Return(*authorization_header_override));
+    } else {
+      EXPECT_CALL(flow_, CreateAuthorizationHeaderValue)
+          .WillOnce(Invoke(
+              &flow_, &MockApiCallFlow::CreateAuthorizationHeaderValueBase));
+    }
 
     AddFetchResult(url, succeeds, status, std::string());
   }
@@ -144,9 +170,89 @@ TEST_F(OAuth2ApiCallFlowTest, ExpectedHTTPHeaders) {
   ASSERT_EQ(1u, pending.size());
   EXPECT_EQ(url, pending[0].request.url);
 
-  std::string auth_header;
-  EXPECT_TRUE(
-      pending[0].request.headers.GetHeader("Authorization", &auth_header));
-  EXPECT_EQ("Bearer access_token", auth_header);
+  EXPECT_THAT(pending[0].request.headers.GetHeader("Authorization"),
+              Optional(std::string("Bearer access_token")));
+  EXPECT_EQ(body, network::GetUploadData(pending[0].request));
+}
+
+net::HttpRequestHeaders CreateHeaders() {
+  net::HttpRequestHeaders headers;
+  headers.SetHeader("Test-Header-Field", "test content");
+  return headers;
+}
+
+TEST_F(OAuth2ApiCallFlowTest, ExpectedMultipleHTTPHeaders) {
+  std::string body = CreateBody();
+  GURL url(CreateApiUrl());
+  SetupApiCall(true, net::HTTP_OK);
+
+  // Overwrite EXPECT_CALL default return so that we get multiple headers.
+  ON_CALL(flow_, CreateApiCallHeaders).WillByDefault(Return(CreateHeaders()));
+
+  // ... never mind the HTTP response part of the setup --- don't want
+  // TestURLLoaderFactory replying to it just yet as it would prevent examining
+  // the request headers.
+  test_url_loader_factory_.ClearResponses();
+
+  flow_.Start(shared_factory_, kAccessToken);
+  const std::vector<network::TestURLLoaderFactory::PendingRequest>& pending =
+      *test_url_loader_factory_.pending_requests();
+  ASSERT_EQ(1u, pending.size());
+  EXPECT_EQ(url, pending[0].request.url);
+
+  const auto& headers = pending[0].request.headers;
+  EXPECT_THAT(headers.GetHeader("Authorization"),
+              Optional(std::string("Bearer access_token")));
+  EXPECT_THAT(headers.GetHeader("Test-Header-Field"),
+              Optional(std::string("test content")));
+
+  EXPECT_EQ(body, network::GetUploadData(pending[0].request));
+}
+
+TEST_F(OAuth2ApiCallFlowTest, EmptyAuthorizationHeader) {
+  std::string body = CreateBody();
+  GURL url(CreateApiUrl());
+  SetupApiCall(/*succeeds=*/true, net::HTTP_OK,
+               /*authorization_header_override=*/"");
+
+  // ... never mind the HTTP response part of the setup --- don't want
+  // TestURLLoaderFactory replying to it just yet as it would prevent examining
+  // the request headers.
+  test_url_loader_factory_.ClearResponses();
+
+  flow_.Start(shared_factory_, kAccessToken);
+  const std::vector<network::TestURLLoaderFactory::PendingRequest>& pending =
+      *test_url_loader_factory_.pending_requests();
+  ASSERT_EQ(1u, pending.size());
+  EXPECT_EQ(url, pending[0].request.url);
+
+  const auto& headers = pending[0].request.headers;
+  EXPECT_FALSE(headers.HasHeader("Authorization"));
+
+  EXPECT_EQ(body, network::GetUploadData(pending[0].request));
+}
+
+TEST_F(OAuth2ApiCallFlowTest, CustomAuthorizationHeader) {
+  std::string body = CreateBody();
+  GURL url(CreateApiUrl());
+  SetupApiCall(
+      /*succeeds=*/true, net::HTTP_OK,
+      /*authorization_header_override=*/"CustomHeader arbitrary_value");
+
+  // ... never mind the HTTP response part of the setup --- don't want
+  // TestURLLoaderFactory replying to it just yet as it would prevent examining
+  // the request headers.
+  test_url_loader_factory_.ClearResponses();
+
+  flow_.Start(shared_factory_, kAccessToken);
+  const std::vector<network::TestURLLoaderFactory::PendingRequest>& pending =
+      *test_url_loader_factory_.pending_requests();
+  ASSERT_EQ(1u, pending.size());
+  EXPECT_EQ(url, pending[0].request.url);
+
+  const auto& headers = pending[0].request.headers;
+  EXPECT_THAT(headers.GetHeader("Authorization"),
+              Optional(std::string("CustomHeader arbitrary_value")));
+
   EXPECT_EQ(body, network::GetUploadData(pending[0].request));
 }

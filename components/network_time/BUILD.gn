@@ -1,4 +1,4 @@
-# Copyright 2014 The Chromium Authors. All rights reserved.
+# Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,10 +14,11 @@ static_library("network_time") {
     "//base",
     "//base:i18n",
     "//components/client_update_protocol",
+    "//components/network_time/time_tracker",
     "//components/prefs",
     "//components/variations",
     "//net",
-    "//services/network/public/cpp:cpp",
+    "//services/network/public/cpp",
   ]
 }
 

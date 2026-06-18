@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,19 @@
 #include <windows.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/base_paths.h"
+#include "base/containers/span.h"
 #include "base/environment.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/path_service.h"
+#include "base/scoped_environment_variable_override.h"
 #include "base/scoped_native_library.h"
-#include "base/stl_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/test/scoped_environment_variable_override.h"
 #include "base/win/pe_image.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -38,17 +38,17 @@ bool CreateTruncatedModule(const base::FilePath& location) {
     return false;
 
   const size_t kSizeOfTruncatedDll = 256;
-  char buffer[kSizeOfTruncatedDll];
-  if (file_exe.Read(0, buffer, kSizeOfTruncatedDll) != kSizeOfTruncatedDll)
+  uint8_t buffer[kSizeOfTruncatedDll];
+  if (!file_exe.ReadAndCheck(0, base::span(buffer))) {
     return false;
+  }
 
   base::File target_file(location,
                          base::File::FLAG_CREATE | base::File::FLAG_WRITE);
   if (!target_file.IsValid())
     return false;
 
-  return target_file.Write(0, buffer, kSizeOfTruncatedDll) ==
-         kSizeOfTruncatedDll;
+  return target_file.WriteAndCheck(0, base::span(buffer));
 }
 
 }  // namespace
@@ -65,11 +65,11 @@ TEST(ModuleInfoUtilTest, GetCertificateInfoUnsigned) {
 
 TEST(ModuleInfoUtilTest, GetCertificateInfoSigned) {
   std::unique_ptr<base::Environment> env = base::Environment::Create();
-  std::string sysroot;
-  ASSERT_TRUE(env->GetVar("SYSTEMROOT", &sysroot));
+  std::optional<std::string> sysroot = env->GetVar("SYSTEMROOT");
+  ASSERT_TRUE(sysroot.has_value());
 
-  base::FilePath path =
-      base::FilePath::FromUTF8Unsafe(sysroot).Append(L"system32\\kernel32.dll");
+  base::FilePath path = base::FilePath::FromUTF8Unsafe(sysroot.value())
+                            .Append(L"system32\\kernel32.dll");
 
   CertificateInfo cert_info;
   GetCertificateInfo(path, &cert_info);
@@ -79,11 +79,10 @@ TEST(ModuleInfoUtilTest, GetCertificateInfoSigned) {
 }
 
 TEST(ModuleInfoUtilTest, GetEnvironmentVariablesMapping) {
-  base::test::ScopedEnvironmentVariableOverride scoped_override("foo",
-                                                                "C:\\bar\\");
+  base::ScopedEnvironmentVariableOverride scoped_override("foo", "C:\\bar\\");
 
   // The mapping for these variables will be retrieved.
-  std::vector<base::string16> environment_variables = {
+  std::vector<std::wstring> environment_variables = {
       L"foo",
       L"SYSTEMROOT",
   };
@@ -92,34 +91,34 @@ TEST(ModuleInfoUtilTest, GetEnvironmentVariablesMapping) {
 
   ASSERT_EQ(2u, string_mapping.size());
 
-  EXPECT_STREQ(L"c:\\bar", string_mapping[0].first.c_str());
-  EXPECT_STREQ(L"%foo%", string_mapping[0].second.c_str());
+  EXPECT_EQ(u"c:\\bar", string_mapping[0].first);
+  EXPECT_EQ(u"%foo%", string_mapping[0].second);
   EXPECT_FALSE(string_mapping[1].second.empty());
 }
 
 const struct CollapsePathList {
-  base::string16 expected_result;
-  base::string16 test_case;
+  std::u16string expected_result;
+  std::u16string path;
 } kCollapsePathList[] = {
     // Negative testing (should not collapse this path).
-    {L"c:\\a\\a.dll", L"c:\\a\\a.dll"},
+    {u"c:\\a\\a.dll", u"c:\\a\\a.dll"},
     // These two are to test that we select the maximum collapsed path.
-    {L"%foo%\\a.dll", L"c:\\foo\\a.dll"},
-    {L"%x%\\a.dll", L"c:\\foo\\bar\\a.dll"},
+    {u"%foo%\\a.dll", u"c:\\foo\\a.dll"},
+    {u"%x%\\a.dll", u"c:\\foo\\bar\\a.dll"},
     // Tests that only full path components are collapsed.
-    {L"c:\\foo_bar\\a.dll", L"c:\\foo_bar\\a.dll"},
+    {u"c:\\foo_bar\\a.dll", u"c:\\foo_bar\\a.dll"},
 };
 
 TEST(ModuleInfoUtilTest, CollapseMatchingPrefixInPath) {
   StringMapping string_mapping = {
-      std::make_pair(L"c:\\foo", L"%foo%"),
-      std::make_pair(L"c:\\foo\\bar", L"%x%"),
+      std::make_pair(u"c:\\foo", u"%foo%"),
+      std::make_pair(u"c:\\foo\\bar", u"%x%"),
   };
 
-  for (size_t i = 0; i < base::size(kCollapsePathList); ++i) {
-    base::string16 test_case = kCollapsePathList[i].test_case;
-    CollapseMatchingPrefixInPath(string_mapping, &test_case);
-    EXPECT_EQ(kCollapsePathList[i].expected_result, test_case);
+  for (const auto& test_case : kCollapsePathList) {
+    std::u16string path = test_case.path;
+    CollapseMatchingPrefixInPath(string_mapping, &path);
+    EXPECT_EQ(test_case.expected_result, path);
   }
 }
 
@@ -173,10 +172,10 @@ TEST(ModuleInfoUtilTest, InvalidNTHeader) {
 }
 
 TEST(ModuleInfoUtilTest, NormalizeCertificateSubject) {
-  base::string16 test_case = base::string16(L"signer\0", 7);
+  std::wstring test_case = std::wstring(L"signer\0", 7);
   EXPECT_EQ(7u, test_case.length());
 
-  base::string16 expected = L"signer";
+  std::wstring expected = L"signer";
 
   internal::NormalizeCertificateSubject(&test_case);
 

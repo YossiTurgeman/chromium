@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,20 @@
 
 #include "base/logging.h"
 #include "base/memory/ref_counted_memory.h"
+#include "build/build_config.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
 #include "ui/base/x/x11_drag_drop_client.h"
 #include "ui/base/x/x11_util.h"
 #include "ui/events/platform/platform_event_source.h"
+#include "ui/gfx/x/atom_cache.h"
 #include "ui/gfx/x/connection.h"
-#include "ui/gfx/x/x11_atom_cache.h"
 #include "ui/gfx/x/xproto.h"
+
+#if BUILDFLAG(IS_LINUX)
+#include "ui/base/clipboard/clipboard_constants.h"
+#include "ui/base/clipboard/clipboard_util_linux.h"
+#include "ui/base/x/selection_utils.h"
+#endif
 
 namespace ui {
 
@@ -42,17 +49,18 @@ const char kChromiumDragReciever[] = "_CHROMIUM_DRAG_RECEIVER";
 
 XDragContext::XDragContext(x11::Window local_window,
                            const x11::ClientMessageEvent& event,
-                           XDragDropClient* source_client,
                            const SelectionFormatMap& data)
     : local_window_(local_window),
-      source_window_(static_cast<x11::Window>(event.data.data32[0])),
-      source_client_(source_client) {
-  if (!source_client_) {
+      source_window_(static_cast<x11::Window>(event.data.data32[0])) {
+  XDragDropClient* source_client =
+      XDragDropClient::GetForWindow(source_window_);
+  if (!source_client) {
     bool get_types_from_property = ((event.data.data32[1] & 1) != 0);
 
     if (get_types_from_property) {
-      if (!GetAtomArrayProperty(source_window_, kXdndTypeList,
-                                &unfetched_targets_)) {
+      if (!x11::Connection::Get()->GetArrayProperty(source_window_,
+                                                    x11::GetAtom(kXdndTypeList),
+                                                    &unfetched_targets_)) {
         return;
       }
     } else {
@@ -67,8 +75,9 @@ XDragContext::XDragContext(x11::Window local_window,
 
 #if DCHECK_IS_ON()
     DVLOG(1) << "XdndEnter has " << unfetched_targets_.size() << " data types";
-    for (x11::Atom target : unfetched_targets_)
+    for (x11::Atom target : unfetched_targets_) {
       DVLOG(1) << "XdndEnter data type: " << static_cast<uint32_t>(target);
+    }
 #endif  // DCHECK_IS_ON()
 
     // We must perform a full sync here because we could be racing
@@ -118,8 +127,8 @@ void XDragContext::RequestNextTarget() {
   unfetched_targets_.pop_back();
 
   x11::Connection::Get()->ConvertSelection(
-      {local_window_, gfx::GetAtom(kXdndSelection), target,
-       gfx::GetAtom(kChromiumDragReciever), position_time_stamp_});
+      {local_window_, x11::GetAtom(kXdndSelection), target,
+       x11::GetAtom(kChromiumDragReciever), position_time_stamp_});
 }
 
 void XDragContext::OnSelectionNotify(const x11::SelectionNotifyEvent& event) {
@@ -136,12 +145,33 @@ void XDragContext::OnSelectionNotify(const x11::SelectionNotifyEvent& event) {
   auto target = static_cast<x11::Atom>(event.target);
 
   if (event.property != x11::Atom::None) {
-    DCHECK_EQ(property, gfx::GetAtom(kChromiumDragReciever));
+    DCHECK_EQ(property, x11::GetAtom(kChromiumDragReciever));
 
     scoped_refptr<base::RefCountedMemory> data;
     x11::Atom type = x11::Atom::None;
-    if (GetRawBytesOfProperty(local_window_, property, &data, &type))
+    if (GetRawBytesOfProperty(local_window_, property, &data, &type)) {
+#if BUILDFLAG(IS_LINUX)
+      // If the source provided a portal key, retrieve the files now.
+      if (target == x11::GetAtom(kMimeTypePortalFileTransfer) ||
+          target == x11::GetAtom(kMimeTypePortalFiles)) {
+        if (fetched_targets_.contains(x11::GetAtom(kMimeTypeUriList))) {
+          RequestNextTargetOrComplete();
+          return;
+        }
+        ui::clipboard_util::ExtractPathsFromPortalKey(
+            base::as_byte_span(*data),
+            base::BindOnce(&XDragContext::OnPortalPathsExtracted,
+                           weak_factory_.GetWeakPtr()));
+        return;
+      }
+      if (target == x11::GetAtom(kMimeTypeUriList) &&
+          fetched_targets_.contains(target)) {
+        RequestNextTargetOrComplete();
+        return;
+      }
+#endif  // BUILDFLAG(IS_LINUX)
       fetched_targets_.Insert(target, data);
+    }
   } else {
     // The source failed to convert the drop data to the format (target in X11
     // parlance) that we asked for. This happens, even though we only ask for
@@ -150,6 +180,10 @@ void XDragContext::OnSelectionNotify(const x11::SelectionNotifyEvent& event) {
                << static_cast<uint32_t>(event.target);
   }
 
+  RequestNextTargetOrComplete();
+}
+
+void XDragContext::RequestNextTargetOrComplete() {
   if (!unfetched_targets_.empty()) {
     RequestNextTarget();
   } else {
@@ -159,25 +193,42 @@ void XDragContext::OnSelectionNotify(const x11::SelectionNotifyEvent& event) {
   }
 }
 
+#if BUILDFLAG(IS_LINUX)
+void XDragContext::OnPortalPathsExtracted(std::vector<std::string> paths) {
+  if (!paths.empty()) {
+    auto data = base::MakeRefCounted<base::RefCountedString>(
+        ui::clipboard_util::GetUriListFromPaths(paths));
+    // Store as text/uri-list so the rest of Chrome understands it.
+    fetched_targets_.Insert(x11::GetAtom(kMimeTypeUriList), data);
+  }
+  RequestNextTargetOrComplete();
+}
+#endif
+
 void XDragContext::ReadActions() {
-  if (!source_client_) {
+  XDragDropClient* source_client =
+      XDragDropClient::GetForWindow(source_window_);
+  if (!source_client) {
     std::vector<x11::Atom> atom_array;
-    if (!GetAtomArrayProperty(source_window_, kXdndActionList, &atom_array))
+    if (!x11::Connection::Get()->GetArrayProperty(
+            source_window_, x11::GetAtom(kXdndActionList), &atom_array)) {
       actions_.clear();
-    else
+    } else {
       actions_.swap(atom_array);
+    }
   } else {
     // We have a property notify set up for other windows in case they change
     // their action list. Thankfully, the views interface is static and you
     // can't change the action list after you enter StartDragAndDrop().
-    actions_ = source_client_->GetOfferedDragOperations();
+    actions_ = source_client->GetOfferedDragOperations();
   }
 }
 
 int XDragContext::GetDragOperation() const {
   int drag_operation = DragDropTypes::DRAG_NONE;
-  for (const auto& action : actions_)
+  for (const auto& action : actions_) {
     MaskOperation(action, &drag_operation);
+  }
 
   MaskOperation(suggested_action_, &drag_operation);
 
@@ -186,17 +237,18 @@ int XDragContext::GetDragOperation() const {
 
 void XDragContext::MaskOperation(x11::Atom xdnd_operation,
                                  int* drag_operation) const {
-  if (xdnd_operation == gfx::GetAtom(kXdndActionCopy))
+  if (xdnd_operation == x11::GetAtom(kXdndActionCopy)) {
     *drag_operation |= DragDropTypes::DRAG_COPY;
-  else if (xdnd_operation == gfx::GetAtom(kXdndActionMove))
+  } else if (xdnd_operation == x11::GetAtom(kXdndActionMove)) {
     *drag_operation |= DragDropTypes::DRAG_MOVE;
-  else if (xdnd_operation == gfx::GetAtom(kXdndActionLink))
+  } else if (xdnd_operation == x11::GetAtom(kXdndActionLink)) {
     *drag_operation |= DragDropTypes::DRAG_LINK;
+  }
 }
 
 bool XDragContext::DispatchPropertyNotifyEvent(
     const x11::PropertyNotifyEvent& prop) {
-  if (prop.atom == gfx::GetAtom(kXdndActionList)) {
+  if (prop.atom == x11::GetAtom(kXdndActionList)) {
     ReadActions();
     return true;
   }

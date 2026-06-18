@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,54 +7,79 @@
 #include <string>
 
 #include "base/feature_list.h"
+#include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/system/sys_info.h"
 #include "build/build_config.h"
-#include "chrome/browser/browser_features.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/browser_process_platform_part.h"
-#include "chrome/browser/chromeos/profiles/profile_helper.h"
+#include "chrome/browser/ui/chrome_pages.h"
 #include "chrome/browser/ui/ui_features.h"
-#include "chrome/browser/ui/webui/webui_util.h"
 #include "chrome/common/chrome_features.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/grit/generated_resources.h"
-#include "chromeos/constants/chromeos_features.h"
 #include "components/google/core/common/google_util.h"
+#include "components/live_caption/caption_util.h"
+#include "components/plus_addresses/core/browser/grit/plus_addresses_strings.h"
+#include "components/plus_addresses/core/common/features.h"
+#include "components/soda/constants.h"
 #include "components/strings/grit/components_strings.h"
+#include "components/sync/base/features.h"
 #include "components/user_manager/user_manager.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "content/public/common/content_features.h"
 #include "media/base/media_switches.h"
+#include "ui/accessibility/accessibility_features.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/webui/web_ui_util.h"
-
-#if defined(OS_CHROMEOS)
-#include "ui/base/l10n/l10n_util.h"
-#endif
+#include "ui/webui/webui_util.h"
 
 namespace settings {
-#if defined(OS_CHROMEOS)
-namespace {
 
+#if BUILDFLAG(IS_CHROMEOS)
+namespace {
 // Generates a Google Help URL which includes a "board type" parameter. Some
 // help pages need to be adjusted depending on the type of CrOS device that is
 // accessing the page.
-base::string16 GetHelpUrlWithBoard(const std::string& original_url) {
-  return base::ASCIIToUTF16(original_url +
-                            "&b=" + base::SysInfo::GetLsbReleaseBoard());
+std::u16string GetHelpUrlWithBoard(const std::u16string& original_url) {
+  return base::StrCat(
+      {original_url, u"&b=",
+       base::ASCIIToUTF16(base::SysInfo::GetLsbReleaseBoard())});
 }
-
 }  // namespace
 #endif
+
+void AddAxAnnotationsSectionStrings(content::WebUIDataSource* html_source) {
+  static constexpr webui::LocalizedString kLocalizedStrings[] = {
+      {"mainNodeAnnotationsDownloadErrorLabel",
+       IDS_SETTINGS_MAIN_NODE_ANNOTATIONS_DOWNLOAD_ERROR},
+      {"mainNodeAnnotationsDownloadProgressLabel",
+       IDS_SETTINGS_MAIN_NODE_ANNOTATIONS_DOWNLOAD_PROGRESS},
+      {"mainNodeAnnotationsDownloadingLabel",
+       IDS_SETTINGS_MAIN_NODE_ANNOTATIONS_DOWNLOADING},
+      {"mainNodeAnnotationsTitle", IDS_SETTINGS_MAIN_NODE_ANNOTATIONS_TITLE},
+      {"mainNodeAnnotationsSubtitle",
+       IDS_SETTINGS_MAIN_NODE_ANNOTATIONS_SUBTITLE},
+  };
+  html_source->AddLocalizedStrings(kLocalizedStrings);
+  html_source->AddBoolean(
+      "mainNodeAnnotationsEnabled",
+      base::FeatureList::IsEnabled(features::kMainNodeAnnotations));
+#if BUILDFLAG(IS_CHROMEOS)
+  html_source->AddBoolean(
+      "japaneseBrailleEnabled",
+      base::FeatureList::IsEnabled(
+          features::kAccessibilityChromeVoxJapaneseBraille));
+#endif
+}
 
 void AddCaptionSubpageStrings(content::WebUIDataSource* html_source) {
   static constexpr webui::LocalizedString kLocalizedStrings[] = {
       {"captionsTitle", IDS_SETTINGS_CAPTIONS},
-      {"captionsSubtitle", IDS_SETTINGS_CAPTIONS_SUBTITLE},
-      {"captionsSettings", IDS_SETTINGS_CAPTIONS_SETTINGS},
-      {"captionsPreview", IDS_SETTINGS_CAPTIONS_PREVIEW},
+      {"captionsPreferencesTitle", IDS_SETTINGS_CAPTIONS_PREFERENCES_TITLE},
+      {"captionsPreferencesSubtitle",
+       IDS_SETTINGS_CAPTIONS_PREFERENCES_SUBTITLE},
       {"captionsTextSize", IDS_SETTINGS_CAPTIONS_TEXT_SIZE},
       {"captionsTextFont", IDS_SETTINGS_CAPTIONS_TEXT_FONT},
       {"captionsTextColor", IDS_SETTINGS_CAPTIONS_TEXT_COLOR},
@@ -82,81 +107,65 @@ void AddCaptionSubpageStrings(content::WebUIDataSource* html_source) {
       {"captionsColorCyan", IDS_SETTINGS_CAPTIONS_COLOR_CYAN},
       {"captionsColorMagenta", IDS_SETTINGS_CAPTIONS_COLOR_MAGENTA},
       {"captionsDefaultSetting", IDS_SETTINGS_CAPTIONS_DEFAULT_SETTING},
+      {"captionsLanguage", IDS_SETTINGS_CAPTIONS_LANGUAGE},
+      {"captionsManageLanguagesTitle",
+       IDS_SETTINGS_CAPTIONS_MANAGE_LANGUAGES_TITLE},
+      {"captionsLiveTranslateTargetLanguage",
+       IDS_SETTINGS_CAPTIONS_LIVE_TRANSLATE_TARGET_LANGUAGE},
+      {"captionsLiveTranslateTargetLanguageSubtitle",
+       IDS_SETTINGS_CAPTIONS_LIVE_TRANSLATE_TARGET_LANGUAGE_SUBTITLE},
+      {"removeLanguageLabel", IDS_SETTINGS_CAPTIONS_REMOVE_LANGUAGE_LABEL},
+      {"makeDefaultLanguageLabel",
+       IDS_SETTINGS_CAPTIONS_MAKE_DEFAULT_LANGUAGE_LABEL},
+      {"moreActionsFor", IDS_SETTINGS_MORE_ACTIONS_BUTTON_ARIA_LABEL},
+      {"defaultLanguageLabel", IDS_SETTINGS_CAPTIONS_DEFAULT_LANGUAGE_LABEL},
   };
-  AddLocalizedStringsBulk(html_source, kLocalizedStrings);
-}
-
-void AddPersonalizationOptionsStrings(content::WebUIDataSource* html_source) {
-  static constexpr webui::LocalizedString kLocalizedStrings[] = {
-    {"urlKeyedAnonymizedDataCollection",
-     IDS_SETTINGS_ENABLE_URL_KEYED_ANONYMIZED_DATA_COLLECTION},
-    {"urlKeyedAnonymizedDataCollectionDesc",
-     IDS_SETTINGS_ENABLE_URL_KEYED_ANONYMIZED_DATA_COLLECTION_DESC},
-    {"spellingPref", IDS_SETTINGS_SPELLING_PREF},
-#if !defined(OS_CHROMEOS)
-    {"signinAllowedTitle", IDS_SETTINGS_SIGNIN_ALLOWED},
-    {"signinAllowedDescription", IDS_SETTINGS_SIGNIN_ALLOWED_DESC},
+  html_source->AddLocalizedStrings(kLocalizedStrings);
+  // Add the caption subtitle string conditionally so that non-cbx chromebooks
+  // do not show live translate information.
+#if BUILDFLAG(IS_CHROMEOS)
+  html_source->AddLocalizedString(
+      "captionsManageLanguagesSubtitle",
+      base::FeatureList::IsEnabled(media::kFeatureManagementLiveTranslateCrOS)
+          ? IDS_SETTINGS_CAPTIONS_MANAGE_LANGUAGES_SUBTITLE
+          : IDS_SETTINGS_CAPTIONS_MANAGE_LANGUAGES_SUBTITLE_LIVE_CAPTION_ONLY);
+#else
+  html_source->AddLocalizedString(
+      "captionsManageLanguagesSubtitle",
+      IDS_SETTINGS_CAPTIONS_MANAGE_LANGUAGES_SUBTITLE);
 #endif
-    {"searchSuggestPref", IDS_SETTINGS_SUGGEST_PREF},
-    {"enablePersonalizationLogging", IDS_SETTINGS_ENABLE_LOGGING_PREF},
-    {"enablePersonalizationLoggingDesc", IDS_SETTINGS_ENABLE_LOGGING_PREF_DESC},
-    {"spellingDescription", IDS_SETTINGS_SPELLING_PREF_DESC},
-    {"searchSuggestPrefDesc", IDS_SETTINGS_SUGGEST_PREF_DESC},
-    {"linkDoctorPref", IDS_SETTINGS_LINKDOCTOR_PREF},
-    {"linkDoctorPrefDesc", IDS_SETTINGS_LINKDOCTOR_PREF_DESC},
-    {"driveSuggestPref", IDS_DRIVE_SUGGEST_PREF},
-    {"driveSuggestPrefDesc", IDS_DRIVE_SUGGEST_PREF_DESC},
-  };
-  AddLocalizedStringsBulk(html_source, kLocalizedStrings);
+
+  AddLiveCaptionSectionStrings(html_source);
 }
 
-void AddSyncControlsStrings(content::WebUIDataSource* html_source) {
-  static constexpr webui::LocalizedString kLocalizedStrings[] = {
-      {"autofillCheckboxLabel", IDS_SETTINGS_AUTOFILL_CHECKBOX_LABEL},
-      {"historyCheckboxLabel", IDS_SETTINGS_HISTORY_CHECKBOX_LABEL},
-      {"extensionsCheckboxLabel", IDS_SETTINGS_EXTENSIONS_CHECKBOX_LABEL},
-      {"openTabsCheckboxLabel", IDS_SETTINGS_OPEN_TABS_CHECKBOX_LABEL},
-      {"wifiConfigurationsCheckboxLabel",
-       IDS_SETTINGS_WIFI_CONFIGURATIONS_CHECKBOX_LABEL},
-      {"syncEverythingCheckboxLabel",
-       IDS_SETTINGS_SYNC_EVERYTHING_CHECKBOX_LABEL},
-      {"appCheckboxLabel", IDS_SETTINGS_APPS_CHECKBOX_LABEL},
-      {"enablePaymentsIntegrationCheckboxLabel",
-       IDS_AUTOFILL_ENABLE_PAYMENTS_INTEGRATION_CHECKBOX_LABEL},
-      {"nonPersonalizedServicesSectionLabel",
-       IDS_SETTINGS_NON_PERSONALIZED_SERVICES_SECTION_LABEL},
-      {"customizeSyncLabel", IDS_SETTINGS_CUSTOMIZE_SYNC},
-      {"syncData", IDS_SETTINGS_SYNC_DATA},
-  };
-  AddLocalizedStringsBulk(html_source, kLocalizedStrings);
+
+void AddLiveCaptionSectionStrings(content::WebUIDataSource* html_source) {
+  html_source->AddLocalizedString(
+      "captionsEnableLiveCaptionTitle",
+      IDS_SETTINGS_CAPTIONS_ENABLE_LIVE_CAPTION_TITLE);
+  html_source->AddLocalizedString(
+      "captionsEnableLiveTranslateTitle",
+      IDS_SETTINGS_CAPTIONS_ENABLE_LIVE_TRANSLATE_TITLE);
+  html_source->AddLocalizedString(
+      "captionsEnableLiveTranslateSubtitle",
+      IDS_SETTINGS_CAPTIONS_ENABLE_LIVE_TRANSLATE_SUBTITLE);
+  html_source->AddLocalizedString(
+      "captionsMaskOffensiveWordsTitle",
+      IDS_SETTINGS_CAPTIONS_MASK_OFFENSIVE_WORDS_TITLE);
+
+  const bool liveTranslateEnabled = media::IsLiveTranslateEnabled();
+
+  html_source->AddLocalizedString(
+      "captionsEnableLiveCaptionSubtitle",
+      IDS_SETTINGS_CAPTIONS_ENABLE_LIVE_CAPTION_SUBTITLE);
+  html_source->AddBoolean("enableLiveCaption",
+                          captions::IsLiveCaptionFeatureSupported());
+  html_source->AddBoolean("enableLiveCaptionMultiLanguage", true);
+
+  html_source->AddBoolean("enableLiveTranslate", liveTranslateEnabled);
 }
 
-void AddSyncAccountControlStrings(content::WebUIDataSource* html_source) {
-  static constexpr webui::LocalizedString kLocalizedStrings[] = {
-      {"syncingTo", IDS_SETTINGS_PEOPLE_SYNCING_TO_ACCOUNT},
-      {"peopleSignIn", IDS_PROFILES_DICE_SIGNIN_BUTTON},
-      {"syncPaused", IDS_SETTINGS_PEOPLE_SYNC_PAUSED},
-      {"turnOffSync", IDS_SETTINGS_PEOPLE_SYNC_TURN_OFF},
-      {"settingsCheckboxLabel", IDS_SETTINGS_SETTINGS_CHECKBOX_LABEL},
-      {"syncNotWorking", IDS_SETTINGS_PEOPLE_SYNC_NOT_WORKING},
-      {"syncDisabled", IDS_PROFILES_DICE_SYNC_DISABLED_TITLE},
-      {"syncPasswordsNotWorking",
-       IDS_SETTINGS_PEOPLE_SYNC_PASSWORDS_NOT_WORKING},
-      {"peopleSignOut", IDS_SETTINGS_PEOPLE_SIGN_OUT},
-      {"useAnotherAccount", IDS_SETTINGS_PEOPLE_SYNC_ANOTHER_ACCOUNT},
-  };
-  AddLocalizedStringsBulk(html_source, kLocalizedStrings);
-  if (base::FeatureList::IsEnabled(features::kSyncSetupFriendlySettings)) {
-    html_source->AddLocalizedString("syncAdvancedPageTitle",
-                                    IDS_SETTINGS_NEW_SYNC_ADVANCED_PAGE_TITLE);
-
-  } else {
-    html_source->AddLocalizedString("syncAdvancedPageTitle",
-                                    IDS_SETTINGS_SYNC_ADVANCED_PAGE_TITLE);
-  }
-}
-
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
 void AddPasswordPromptDialogStrings(content::WebUIDataSource* html_source) {
   static constexpr webui::LocalizedString kLocalizedStrings[] = {
       {"passwordPromptTitle", IDS_SETTINGS_PEOPLE_PASSWORD_PROMPT_TITLE},
@@ -165,25 +174,17 @@ void AddPasswordPromptDialogStrings(content::WebUIDataSource* html_source) {
       {"passwordPromptPasswordLabel",
        IDS_SETTINGS_PEOPLE_PASSWORD_PROMPT_PASSWORD_LABEL},
   };
-  AddLocalizedStringsBulk(html_source, kLocalizedStrings);
+  html_source->AddLocalizedStrings(kLocalizedStrings);
 }
-#endif
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
-void AddSyncPageStrings(content::WebUIDataSource* html_source) {
+void AddSharedSyncPageStrings(content::WebUIDataSource* html_source) {
   static constexpr webui::LocalizedString kLocalizedStrings[] = {
       {"syncDisabledByAdministrator",
        IDS_SIGNED_IN_WITH_SYNC_DISABLED_BY_POLICY},
-      {"passwordsCheckboxLabel", IDS_SETTINGS_PASSWORDS_CHECKBOX_LABEL},
       {"passphrasePlaceholder", IDS_SETTINGS_PASSPHRASE_PLACEHOLDER},
-      {"peopleSignInSyncPagePromptSecondaryWithAccount",
-       IDS_SETTINGS_PEOPLE_SIGN_IN_PROMPT_SECONDARY_WITH_ACCOUNT},
-      {"peopleSignInSyncPagePromptSecondaryWithNoAccount",
-       IDS_SETTINGS_PEOPLE_SIGN_IN_PROMPT_SECONDARY_WITH_ACCOUNT},
       {"existingPassphraseTitle", IDS_SETTINGS_EXISTING_PASSPHRASE_TITLE},
       {"submitPassphraseButton", IDS_SETTINGS_SUBMIT_PASSPHRASE},
-      {"encryptWithGoogleCredentialsLabel",
-       IDS_SETTINGS_ENCRYPT_WITH_GOOGLE_CREDENTIALS_LABEL},
-      {"bookmarksCheckboxLabel", IDS_SETTINGS_BOOKMARKS_CHECKBOX_LABEL},
       {"encryptionOptionsTitle", IDS_SETTINGS_ENCRYPTION_OPTIONS},
       {"mismatchedPassphraseError", IDS_SETTINGS_MISMATCHED_PASSPHRASE_ERROR},
       {"emptyPassphraseError", IDS_SETTINGS_EMPTY_PASSPHRASE_ERROR},
@@ -192,104 +193,113 @@ void AddSyncPageStrings(content::WebUIDataSource* html_source) {
       {"passphraseConfirmationPlaceholder",
        IDS_SETTINGS_PASSPHRASE_CONFIRMATION_PLACEHOLDER},
       {"syncLoading", IDS_SETTINGS_SYNC_LOADING},
-      {"themesAndWallpapersCheckboxLabel",
-       IDS_SETTINGS_THEMES_AND_WALLPAPERS_CHECKBOX_LABEL},
       {"syncDataEncryptedText", IDS_SETTINGS_SYNC_DATA_ENCRYPTED_TEXT},
       {"sync", IDS_SETTINGS_SYNC},
-      {"cancelSync", IDS_SETTINGS_SYNC_SETTINGS_CANCEL_SYNC},
-      {"syncSetupCancelDialogTitle",
-       IDS_SETTINGS_SYNC_SETUP_CANCEL_DIALOG_TITLE},
-      {"syncSetupCancelDialogBody", IDS_SETTINGS_SYNC_SETUP_CANCEL_DIALOG_BODY},
-      {"personalizeGoogleServicesTitle",
-       IDS_SETTINGS_PERSONALIZE_GOOGLE_SERVICES_TITLE},
+      {"syncAdvancedBrowserPageTitle",
+       IDS_SETTINGS_NEW_SYNC_ADVANCED_BROWSER_PAGE_TITLE},
+      {"enterPassphraseLabel", IDS_SYNC_ENTER_PASSPHRASE_BODY},
+      {"enterPassphraseLabelWithDate",
+       IDS_SYNC_ENTER_PASSPHRASE_BODY_WITH_DATE},
   };
-  AddLocalizedStringsBulk(html_source, kLocalizedStrings);
+  html_source->AddLocalizedStrings(kLocalizedStrings);
 
   std::string sync_dashboard_url =
       google_util::AppendGoogleLocaleParam(
-          GURL(chrome::kSyncGoogleDashboardURL),
+          GURL(base::FeatureList::IsEnabled(
+                   syncer::kSyncEnableNewSyncDashboardUrl)
+                   ? chrome::kNewSyncGoogleDashboardURL
+                   : chrome::kLegacySyncGoogleDashboardURL),
           g_browser_process->GetApplicationLocale())
           .spec();
 
   html_source->AddString(
-      "passphraseResetHintEncryption",
-      l10n_util::GetStringFUTF8(IDS_SETTINGS_PASSPHRASE_RESET_HINT_ENCRYPTION,
-                                base::ASCIIToUTF16(sync_dashboard_url)));
-  html_source->AddString(
       "passphraseRecover",
       l10n_util::GetStringFUTF8(IDS_SETTINGS_PASSPHRASE_RECOVER,
                                 base::ASCIIToUTF16(sync_dashboard_url)));
-  html_source->AddString("activityControlsUrl",
-                         chrome::kGoogleAccountActivityControlsURL);
   html_source->AddString("syncDashboardUrl", sync_dashboard_url);
+  html_source->AddString("syncErrorsHelpUrl", chrome::kSyncErrorsHelpURL);
+
+  const bool updateAccountSettingsStrings =
+      syncer::IsReplaceSyncPromosWithSignInPromosEnabled();
+
+  html_source->AddLocalizedString(
+      "encryptWithGoogleCredentialsLabel",
+      updateAccountSettingsStrings
+          ? IDS_SETTINGS_ENCRYPT_ACCOUNT_DATA_WITH_GOOGLE_CREDENTIALS_LABEL
+          : IDS_SETTINGS_ENCRYPT_WITH_GOOGLE_CREDENTIALS_LABEL);
+  html_source->AddLocalizedString(
+      "existingPassphraseLabelWithDate",
+      updateAccountSettingsStrings
+          ? IDS_SYNC_FULL_ACCOUNT_DATA_ENCRYPTION_BODY_CUSTOM_WITH_DATE
+          : IDS_SYNC_FULL_ENCRYPTION_BODY_CUSTOM_WITH_DATE);
+  html_source->AddLocalizedString(
+      "existingPassphraseLabel",
+      updateAccountSettingsStrings
+          ? IDS_SYNC_FULL_ACCOUNT_DATA_ENCRYPTION_BODY_CUSTOM
+          : IDS_SYNC_FULL_ENCRYPTION_BODY_CUSTOM);
+  html_source->AddLocalizedString(
+      "manageSyncedDataTitle",
+      updateAccountSettingsStrings
+          ? IDS_SETTINGS_ACCOUNT_DATA_DASHBOARD
+          : IDS_SETTINGS_NEW_MANAGE_SYNCED_DATA_TITLE_UNIFIED_CONSENT);
+
+  html_source->AddString(
+      "passphraseResetHintEncryption",
+      l10n_util::GetStringFUTF8(
+          updateAccountSettingsStrings
+              ? IDS_SETTINGS_PASSPHRASE_RESET_HINT_ACCOUNT_DATA_ENCRYPTION
+              : IDS_SETTINGS_PASSPHRASE_RESET_HINT_ENCRYPTION,
+          base::ASCIIToUTF16(sync_dashboard_url)));
   html_source->AddString(
       "passphraseExplanationText",
-      l10n_util::GetStringFUTF8(IDS_SETTINGS_PASSPHRASE_EXPLANATION_TEXT,
-                                base::ASCIIToUTF16(sync_dashboard_url)));
+      l10n_util::GetStringFUTF8(
+          updateAccountSettingsStrings
+              ? IDS_SETTINGS_ENCRYPT_ACCOUNT_DATA_WITH_PASSPHRASE_EXPLANATION_TEXT
+              : IDS_SETTINGS_PASSPHRASE_EXPLANATION_TEXT,
+          base::ASCIIToUTF16(sync_dashboard_url)));
   html_source->AddString(
       "encryptWithSyncPassphraseLabel",
       l10n_util::GetStringFUTF8(
-          IDS_SETTINGS_ENCRYPT_WITH_SYNC_PASSPHRASE_LABEL,
-#if defined(OS_CHROMEOS)
+          updateAccountSettingsStrings
+              ? IDS_SETTINGS_ENCRYPT_ACCOUNT_DATA_WITH_PASSPHRASE_LABEL
+          : base::FeatureList::IsEnabled(
+                plus_addresses::features::kPlusAddressesEnabled)
+              ? IDS_SETTINGS_ENCRYPT_WITH_SYNC_PASSPHRASE_INCLUDING_PLUS_ADDRESS_LABEL
+              : IDS_SETTINGS_ENCRYPT_WITH_SYNC_PASSPHRASE_LABEL,
+#if BUILDFLAG(IS_CHROMEOS)
           GetHelpUrlWithBoard(chrome::kSyncEncryptionHelpURL)));
 #else
-          base::ASCIIToUTF16(chrome::kSyncEncryptionHelpURL)));
+          chrome::kSyncEncryptionHelpURL));
 #endif
-  if (base::FeatureList::IsEnabled(features::kSyncSetupFriendlySettings)) {
-    html_source->AddLocalizedString(
-        "manageSyncedDataTitle",
-        IDS_SETTINGS_NEW_MANAGE_SYNCED_DATA_TITLE_UNIFIED_CONSENT);
-  } else {
-    html_source->AddLocalizedString(
-        "manageSyncedDataTitle",
-        IDS_SETTINGS_MANAGE_SYNCED_DATA_TITLE_UNIFIED_CONSENT);
-  }
 }
 
-void AddNearbyShareData(content::WebUIDataSource* html_source) {
-  static constexpr webui::LocalizedString kLocalizedStrings[] = {
-      {"nearbyShareTitle", IDS_SETTINGS_NEARBY_SHARE_TITLE},
-      {"nearbyShareDeviceNameRowTitle",
-       IDS_SETTINGS_NEARBY_SHARE_DEVICE_NAME_ROW_TITLE},
-      {"nearbyShareDeviceNameDialogTitle",
-       IDS_SETTINGS_NEARBY_SHARE_DEVICE_NAME_DIALOG_TITLE},
-      {"nearbyShareEditDeviceName", IDS_SETTINGS_NEARBY_SHARE_EDIT_DEVICE_NAME},
-      {"nearbyShareDeviceNameAriaDescription",
-       IDS_SETTINGS_NEARBY_SHARE_DEVICE_NAME_ARIA_DESCRIPTION},
-      {"nearbyShareEditDataUsage", IDS_SETTINGS_NEARBY_SHARE_EDIT_DATA_USAGE},
-      {"nearbyShareUpdateDataUsage",
-       IDS_SETTINGS_NEARBY_SHARE_UPDATE_DATA_USAGE},
-      {"nearbyShareDataUsageDialogTitle",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_DIALOG_TITLE},
-      {"nearbyShareDataUsageWifiOnlyLabel",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_WIFI_ONLY_LABEL},
-      {"nearbyShareDataUsageWifiOnlyDescription",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_WIFI_ONLY_DESCRIPTION},
-      {"nearbyShareDataUsageDataLabel",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_DATA_LABEL},
-      {"nearbyShareDataUsageDataDescription",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_DATA_DESCRIPTION},
-      {"nearbyShareDataUsageOfflineLabel",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_OFFLINE_LABEL},
-      {"nearbyShareDataUsageOfflineDescription",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_OFFLINE_DESCRIPTION},
-      {"nearbyShareDataUsageDataEditButtonDescription",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_EDIT_BUTTON_DATA_DESCRIPTION},
-      {"nearbyShareDataUsageWifiOnlyEditButtonDescription",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_EDIT_BUTTON_WIFI_ONLY_DESCRIPTION},
-      {"nearbyShareDataUsageOfflineEditButtonDescription",
-       IDS_SETTINGS_NEARBY_SHARE_DATA_USAGE_EDIT_BUTTON_OFFLINE_DESCRIPTION},
-      {"nearbyShareContactVisibilityRowTitle",
-       IDS_SETTINGS_NEARBY_SHARE_CONTACT_VISIBILITY_ROW_TITLE},
-      {"nearbyShareEditVisibility", IDS_SETTINGS_NEARBY_SHARE_EDIT_VISIBILITY},
-      {"nearbyShareVisibilityDialogTitle",
-       IDS_SETTINGS_NEARBY_SHARE_VISIBILITY_DIALOG_TITLE}};
+void AddSecureDnsStrings(content::WebUIDataSource* html_source) {
+  webui::LocalizedString kLocalizedStrings[] = {
+      {"secureDns", IDS_SETTINGS_SECURE_DNS},
+      {"secureDnsDescription", IDS_SETTINGS_SECURE_DNS_DESCRIPTION},
+      {"secureDnsDisabledForManagedEnvironment",
+       IDS_SETTINGS_SECURE_DNS_DISABLED_FOR_MANAGED_ENVIRONMENT},
+      {"secureDnsDisabledForParentalControl",
+       IDS_SETTINGS_SECURE_DNS_DISABLED_FOR_PARENTAL_CONTROL},
+      {"secureDnsAutomaticModeDescription",
+       IDS_SETTINGS_AUTOMATIC_MODE_DESCRIPTION},
+      {"secureDnsCustomProviderDescription",
+       IDS_SETTINGS_SECURE_DNS_CUSTOM_DESCRIPTION},
+      {"secureDnsDropdownA11yLabel",
+       IDS_SETTINGS_SECURE_DNS_DROPDOWN_ACCESSIBILITY_LABEL},
+      {"secureDnsSecureDropdownModeDescription",
+       IDS_SETTINGS_SECURE_DROPDOWN_MODE_DESCRIPTION},
+      {"secureDnsSecureDropdownModePrivacyPolicy",
+       IDS_SETTINGS_SECURE_DROPDOWN_MODE_PRIVACY_POLICY},
+      {"secureDnsCustomPlaceholder",
+       IDS_SETTINGS_SECURE_DNS_CUSTOM_PLACEHOLDER},
+      {"secureDnsCustomFormatError",
+       IDS_SETTINGS_SECURE_DNS_CUSTOM_FORMAT_ERROR},
+      {"secureDnsCustomConnectionError",
+       IDS_SETTINGS_SECURE_DNS_CUSTOM_CONNECTION_ERROR},
+  };
 
-  AddLocalizedStringsBulk(html_source, kLocalizedStrings);
-
-  html_source->AddBoolean(
-      "nearbySharingFeatureFlag",
-      base::FeatureList::IsEnabled(features::kNearbySharing));
+  html_source->AddLocalizedStrings(kLocalizedStrings);
 }
 
 }  // namespace settings

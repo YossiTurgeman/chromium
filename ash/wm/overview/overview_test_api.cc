@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include "ash/wm/overview/overview_grid.h"
 #include "ash/wm/overview/overview_item.h"
 #include "ash/wm/overview/overview_session.h"
-#include "base/callback.h"
 #include "ui/views/widget/widget.h"
 
 namespace ash {
@@ -40,8 +39,9 @@ void OverviewTestApi::SetOverviewMode(
             : OverviewAnimationState::kExitAnimationComplete,
       std::move(done_callback));
 
-  const bool animation_started = start ? overview_controller->StartOverview()
-                                       : overview_controller->EndOverview();
+  const bool animation_started =
+      start ? overview_controller->StartOverview(OverviewStartAction::kTests)
+            : overview_controller->EndOverview(OverviewEndAction::kTests);
 
   if (!animation_started)
     waiter->Cancel();
@@ -68,15 +68,15 @@ void OverviewTestApi::WaitForOverviewState(
   new OverviewAnimationStateWaiter(expected_state, std::move(callback));
 }
 
-base::Optional<OverviewInfo> OverviewTestApi::GetOverviewInfo() const {
-  auto* overview_controller = Shell::Get()->overview_controller();
+std::optional<OverviewInfo> OverviewTestApi::GetOverviewInfo() const {
+  auto* overview_controller = OverviewController::Get();
   if (!overview_controller->InOverviewSession())
-    return base::nullopt;
+    return std::nullopt;
 
   OverviewInfo info;
   for (const auto& grid :
        overview_controller->overview_session()->grid_list()) {
-    for (const auto& overview_item : grid->window_list()) {
+    for (const auto& overview_item : grid->item_list()) {
       aura::Window* const app_window = overview_item->GetWindow();
       info[app_window] = {
           app_window,

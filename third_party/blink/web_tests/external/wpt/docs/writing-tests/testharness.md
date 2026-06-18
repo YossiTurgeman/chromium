@@ -16,11 +16,17 @@ A high-level overview is provided below and more information can be found here:
     clicking a mouse. See also the
     [testdriver.js extension tutorial](testdriver-extension-tutorial.md) for adding new commands.
 
-  * [idlharness.js Documentation](idlharness.md) — A library for testing
+  * [idlharness.js](idlharness.md) — A library for testing
      IDL interfaces using `testharness.js`.
 
-See [server features](server-features.md) for advanced testing features that are commonly used
-with JavaScript tests. See also the [general guidelines](general-guidelines.md) for all test types.
+  * [Message Channels](channels.md) - A way to communicate between
+    different globals, including window globals not in the same
+    browsing context group.
+
+  * [Server features](server-features.md) - Advanced testing features
+    that are commonly used with JavaScript tests.
+
+See also the [general guidelines](general-guidelines.md) for all test types.
 
 ## Window tests
 
@@ -38,7 +44,7 @@ test(() => {
 }, "Ensure HTML boilerplate uses UTF-8"); // This is the title of the test
 ```
 
-If you only need to test a [single thing](testharness-api.md#single-page-tests), you could also use:
+If you only need to test a [single thing](testharness-api.html#single-page-tests), you could also use:
 ```js
 // META: title=Ensure HTML boilerplate uses UTF-8
 setup({ single_test: true });
@@ -46,8 +52,8 @@ assert_equals(document.characterSet, "UTF-8");
 done();
 ```
 
-See [asynchronous (`async_test()`)](testharness-api.md#asynchronous-tests) and
-[promise tests (`promise_test()`)](testharness-api.md#promise-tests) for more involved setups.
+See [asynchronous (`async_test()`)](testharness-api.html#asynchronous-tests) and
+[promise tests (`promise_test()`)](testharness-api.html#promise-tests) for more involved setups.
 
 ### With HTML boilerplate
 
@@ -140,6 +146,8 @@ It is possible to customize the set of scopes with a metadata comment, such as
 //       ==> would only run in the window and service worker scope
 // META: global=dedicatedworker
 //       ==> would run in the default dedicated worker scope
+// META: global=dedicatedworker-module
+//       ==> would run in the dedicated worker scope as a module
 // META: global=worker
 //       ==> would run in the dedicated, shared, and service worker scopes
 ```
@@ -149,24 +157,77 @@ are:
 
 * `window` (default): to be run at <code><var>x</var>.any.html</code>
 * `dedicatedworker` (default): to be run at <code><var>x</var>.any.worker.html</code>
-* `serviceworker`: to be run at <code><var>x</var>.any.serviceworker.html</code> (`.https` is implied)
+* `dedicatedworker-module` to be run at <code><var>x</var>.any.worker-module.html</code>
+* `serviceworker`: to be run at <code><var>x</var>.any.serviceworker.html</code> (`.https` is
+  implied)
+* `serviceworker-module`: to be run at <code><var>x</var>.any.serviceworker-module.html</code>
+  (`.https` is implied)
 * `sharedworker`: to be run at <code><var>x</var>.any.sharedworker.html</code>
+* `sharedworker-module`: to be run at <code><var>x</var>.any.sharedworker-module.html</code>
 * `jsshell`: to be run in a JavaScript shell, without access to the DOM
   (currently only supported in SpiderMonkey, and skipped in wptrunner)
 * `worker`: shorthand for the dedicated, shared, and service worker scopes
+* `shadowrealm-in-window`: runs the test code in a
+  [ShadowRealm](https://github.com/tc39/proposal-shadowrealm) context hosted in
+  an ordinary Window context; to be run at <code><var>x</var>.any.shadowrealm-in-window.html</code>
+* `shadowrealm-in-shadowrealm`: runs the test code in a ShadowRealm context
+  hosted in another ShadowRealm context; to be run at
+  <code><var>x</var>.any.shadowrealm-in-shadowrealm.html</code>
+* `shadowrealm-in-dedicatedworker`: runs the test code in a ShadowRealm context
+  hosted in a dedicated worker; to be run at
+  <code><var>x</var>.any.shadowrealm-in-dedicatedworker.html</code>
+* `shadowrealm-in-sharedworker`: runs the test code in a ShadowRealm context
+  hosted in a shared worker; to be run at
+  <code><var>x</var>.any.shadowrealm-in-sharedworker.html</code>
+* `shadowrealm-in-serviceworker`: runs the test code in a ShadowRealm context
+  hosted in a service worker; to be run at
+  <code><var>x</var>.https.any.shadowrealm-in-serviceworker.html</code>
+* `shadowrealm-in-audioworklet`: runs the test code in a ShadowRealm context
+  hosted in an AudioWorklet processor; to be run at
+  <code><var>x</var>.https.any.shadowrealm-in-audioworklet.html</code>
+* `shadowrealm`: shorthand for all of the ShadowRealm scopes
 
-To check if your test is run from a window or worker you can use the following two methods that will
+To check what scope your test is run from, you can use the following methods that will
 be made available by the framework:
 
     self.GLOBAL.isWindow()
     self.GLOBAL.isWorker()
+    self.GLOBAL.isShadowRealm()
 
 Although [the global `done()` function must be explicitly invoked for most
 dedicated worker tests and shared worker
 tests](testharness-api.html#determining-when-all-tests-are-complete), it is
 automatically invoked for tests defined using the "multi-global" pattern.
 
-## Other features of `.window.js`, `.worker.js` and `.any.js`
+## Extension tests (`.extension.js`)
+
+Create a JavaScript file whose name ends in `.extension.js` to have the necessary HTML boilerplate
+generated for you at `.extension.html`.
+
+Extension tests leverage the `browser.test` API rather than interacting with the `testharness.js`
+framework directly.
+
+For example, one could write a test for `browser.runtime.getURL()` by creating a
+`web-extensions/browser.runtime.extension.js` file as follows:
+
+```js
+runTestsWithWebExtension("/resources/runtime/")
+// ==> this method assumes that the extension resources (manifest, scripts, etc.) exist at the path
+```
+
+And by creating a `web-extensions/resources/runtime/background.js` file as follows:
+
+```js
+browser.test.runTests([
+  function getURLWithNoParameter() {
+    browser.test.assertThrows(() => browser.runtime.getURL())
+  }
+])
+```
+
+This test could then be run from `web-extensions/browser.runtime.extension.html`.
+
+## Other features of `.window.js`, `.worker.js`, `.any.js` and `.extension.js`
 
 ### Specifying a test title
 
@@ -183,6 +244,13 @@ Use `// META: script=link/to/resource.js` at the beginning of the resource. For 
 
 can be used to include both the global and a local `utils.js` in a test.
 
+In window environments, the script will be included using a classic `<script>` tag. In classic
+worker environments, the script will be imported using `importScripts()`. In module worker
+environments, the script will be imported using a static `import`.
+
+wptserve generates markup with `/resources/testharness.js` and `/resources/testharnessreport.js`
+included automatically, so there's no need to include those scripts from the `.js` test file.
+
 ### Specifying a timeout of long
 
 Use `// META: timeout=long` at the beginning of the resource.
@@ -192,7 +260,7 @@ Use `// META: timeout=long` at the beginning of the resource.
 Use `// META: variant=url-suffix` at the beginning of the resource. For example,
 
 ```
-// META: variant=
+// META: variant=?default
 // META: variant=?wss
 ```
 
@@ -202,7 +270,7 @@ A test file can have multiple variants by including `meta` elements,
 for example:
 
 ```html
-<meta name="variant" content="">
+<meta name="variant" content="?default">
 <meta name="variant" content="?wss">
 ```
 
@@ -221,7 +289,7 @@ otherwise too many tests to complete inside the timeout. For example:
 <meta name="variant" content="?2001-last">
 <script src="/resources/testharness.js"></script>
 <script src="/resources/testharnessreport.js"></script>
-<script src="/common/subset-tests.js">
+<script src="/common/subset-tests.js"></script>
 <script>
  const tests = [
                  { fn: t => { ... }, name: "..." },

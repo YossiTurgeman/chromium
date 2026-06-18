@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,8 @@
 #define ASH_SYSTEM_PRIVACY_SCREEN_PRIVACY_SCREEN_TOAST_VIEW_H_
 
 #include "ash/ash_export.h"
+#include "base/memory/raw_ptr.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/controls/button/button.h"
 #include "ui/views/view.h"
 #include "ui/views/view_observer.h"
@@ -19,17 +21,17 @@ class PrivacyScreenToastController;
 // The view shown inside the privacy screen toast bubble.
 class ASH_EXPORT PrivacyScreenToastView : public views::View,
                                           public views::ViewObserver {
+  METADATA_HEADER(PrivacyScreenToastView, views::View)
+
  public:
-  explicit PrivacyScreenToastView(PrivacyScreenToastController* controller);
+  PrivacyScreenToastView(PrivacyScreenToastController* controller,
+                         views::Button::PressedCallback callback);
   ~PrivacyScreenToastView() override;
   PrivacyScreenToastView(PrivacyScreenToastView&) = delete;
   PrivacyScreenToastView operator=(PrivacyScreenToastView&) = delete;
 
   // Updates the toast with whether the privacy screen is enabled and managed.
   void SetPrivacyScreenEnabled(bool enabled, bool managed);
-
-  // Returns the accessible name for the view.
-  base::string16 GetAccessibleName();
 
   // Returns true if the toggle button is focused.
   bool IsButtonFocused() const;
@@ -39,9 +41,9 @@ class ASH_EXPORT PrivacyScreenToastView : public views::View,
   void OnViewFocused(views::View* observed_view) override;
   void OnViewBlurred(views::View* observed_view) override;
 
-  PrivacyScreenToastController* controller_ = nullptr;
-  FeaturePodIconButton* button_ = nullptr;
-  PrivacyScreenToastLabelView* label_ = nullptr;
+  raw_ptr<PrivacyScreenToastController> controller_ = nullptr;
+  raw_ptr<FeaturePodIconButton> button_ = nullptr;
+  raw_ptr<PrivacyScreenToastLabelView> label_ = nullptr;
   bool is_enabled_ = false;
   bool is_managed_ = false;
 };

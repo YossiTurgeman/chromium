@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,11 @@
 #include <set>
 #include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
-#include "ui/gfx/x/x11.h"
+#include "ui/gfx/x/connection.h"
+#include "ui/gfx/x/event.h"
 #include "ui/gfx/x/xfixes.h"
 #include "ui/gfx/x/xproto.h"
 
@@ -35,6 +36,10 @@ class XServerClipboard {
       ClipboardChangedCallback;
 
   XServerClipboard();
+
+  XServerClipboard(const XServerClipboard&) = delete;
+  XServerClipboard& operator=(const XServerClipboard&) = delete;
+
   ~XServerClipboard();
 
   // Start monitoring |connection|'s selections, and invoke |callback| whenever
@@ -104,8 +109,10 @@ class XServerClipboard {
   void AssertSelectionOwnership(x11::Atom selection);
   bool IsSelectionOwner(x11::Atom selection);
 
+  x11::Connection* connection() { return connection_; }
+
   // Stores the connection supplied to Init().
-  x11::Connection* connection_ = nullptr;
+  raw_ptr<x11::Connection> connection_ = nullptr;
 
   // Window through which clipboard events are received, or BadValue if the
   // window could not be created.
@@ -138,8 +145,6 @@ class XServerClipboard {
 
   // |callback| argument supplied to Init().
   ClipboardChangedCallback callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(XServerClipboard);
 };
 
 }  // namespace remoting

@@ -1,26 +1,43 @@
 #!/usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import argparse
 import datetime
 import hashlib
-import logging
 import os
+from pathlib import Path
 import re
 import sys
 
-import extract_histograms
-import merge_xml
-import histogram_paths
+import setup_modules  # pylint: disable=unused-import
+
+import chromium_src.tools.metrics.histograms.extract_histograms as extract_histograms
+import chromium_src.tools.metrics.histograms.histogram_paths as histogram_paths
+import chromium_src.tools.metrics.histograms.merge_xml as merge_xml
+
+# The number of weeks per milestone, used for calculating expiry dates.
+_WEEKS_PER_MSTONE = 4
+
+# Some extra "grace" time is given to expired histograms during which they
+# will contintue to be collected and reported. The dashboard should ignore
+# data from this period making the expiry noticeable and giving time for
+# owners to re-enable them without any discontinuity of data. Releases are
+# generally 4 weeks apart but sometimes longer so +2 weeks to be safe.
+
+# _EXPIRE_GRACE_MSTONES is used for expiry dates in the milestone format.
+_EXPIRE_GRACE_MSTONES = 3
+
+# _EXPIRE_GRACE_WEEKS is used for expiry dates in the date format.
+_EXPIRE_GRACE_WEEKS = _EXPIRE_GRACE_MSTONES * _WEEKS_PER_MSTONE + 2
 
 _DATE_FILE_RE = re.compile(r".*MAJOR_BRANCH_DATE=(.+).*")
 _CURRENT_MILESTONE_RE = re.compile(r"MAJOR=([0-9]{2,3})\n")
 _MILESTONE_EXPIRY_RE = re.compile(r"\AM([0-9]{2,3})")
 
 _SCRIPT_NAME = "generate_expired_histograms_array.py"
-_HASH_DATATYPE = "uint64_t"
+_HASH_DATATYPE = "uint32_t"
 _HEADER = """// Generated from {script_name}. Do not edit!
 
 #ifndef {include_guard}
@@ -35,22 +52,12 @@ const {hash_datatype} kExpiredHistogramsHashes[] = {{
 {hashes}
 }};
 
-const size_t kNumExpiredHistograms = {hashes_size};
-
 }}  // namespace {namespace}
 
 #endif  // {include_guard}
 """
 
 _DATE_FORMAT_ERROR = "Unable to parse expiry {date} in histogram {name}."
-
-# Some extra "grace" time is given to expired histograms during which they
-# will contintue to be collected and reported.  The dashboard should ignore
-# data from this period making the expiry noticeable and giving time for
-# owners to re-enable them without any discontinuity of data. Releases are
-# geneally 6 weeks apart but sometimes 7 so +2 to be safe.
-_EXPIRE_GRACE_MSTONES = 2
-_EXPIRE_GRACE_WEEKS = _EXPIRE_GRACE_MSTONES * 6 + 2
 
 
 class Error(Exception):
@@ -73,7 +80,7 @@ def _GetExpiredHistograms(histograms, base_date, current_milestone):
   """
   expired_histograms_names = []
   for name, content in histograms.items():
-    if "obsolete" in content or "expires_after" not in content:
+    if "expires_after" not in content:
       continue
     expiry_str = content["expires_after"]
     if expiry_str == "never":
@@ -149,7 +156,8 @@ def _GetCurrentMilestone(content, regex):
 
 def _HashName(name):
   """Returns hash for the given histogram |name|."""
-  return "0x" + hashlib.md5(name.encode()).hexdigest()[:16]
+  # This corresponds to HashMetricNameAs32Bits() in C++
+  return "0x" + hashlib.md5(name.encode()).hexdigest()[:8]
 
 
 def _GetHashToNameMap(histograms_names):
@@ -175,18 +183,16 @@ def _GenerateHeaderFileContent(header_filename, namespace,
   include_guard = re.sub("[^A-Z]", "_", header_filename.upper()) + "_"
   if not histograms_map:
     # Some platforms don't allow creating empty arrays.
-    histograms_map["0x0000000000000000"] = "Dummy.Histogram"
+    histograms_map["0x00000000"] = "Dummy.Histogram"
   hashes = "\n".join([
       "  {hash},  // {name}".format(hash=value, name=histograms_map[value])
       for value in sorted(histograms_map.keys())
   ])
-  return _HEADER.format(
-      script_name=_SCRIPT_NAME,
-      include_guard=include_guard,
-      namespace=namespace,
-      hash_datatype=_HASH_DATATYPE,
-      hashes=hashes,
-      hashes_size=len(histograms_map))
+  return _HEADER.format(script_name=_SCRIPT_NAME,
+                        include_guard=include_guard,
+                        namespace=namespace,
+                        hash_datatype=_HASH_DATATYPE,
+                        hashes=hashes)
 
 
 def _GenerateFileContent(descriptions, branch_file_content,
@@ -221,6 +227,14 @@ def _GenerateFileContent(descriptions, branch_file_content,
   return header_file_content
 
 
+def CheckUnsyncedHistograms(inputs):
+  """Checks whether --inputs is in sync with |histogram_paths.ALL_XMLS|."""
+  all_xmls_set = set(histogram_paths.ALL_XMLS)
+  inputs_set = set(os.path.abspath(input) for input in inputs)
+  to_add, to_remove = all_xmls_set - inputs_set, inputs_set - all_xmls_set
+  return to_add, to_remove
+
+
 def _GenerateFile(arguments):
   """Generates header file containing array with hashes of expired histograms.
 
@@ -233,7 +247,17 @@ def _GenerateFile(arguments):
       arguments.major_branch_date_filepath: File path for base date.
       arguments.milestone_filepath: File path for milestone information.
   """
-  descriptions = merge_xml.MergeFiles(histogram_paths.ALL_XMLS)
+  # Assert that the |--inputs| is the same as |histogram_paths.ALL_XMLS| to make
+  # sure we have the most updated list of histogram descriptions. Otherwise,
+  # inform the cl owner to update the --inputs.
+  to_add, to_remove = CheckUnsyncedHistograms(arguments.inputs)
+  assert len(to_add) == 0 and len(to_remove) == 0, (
+      "The --inputs is not in sync with the most updated list of xmls. Please "
+      "update the inputs in "
+      "components/metrics/generate_expired_histograms_array.gni.\n"
+      "  add: %s\n  remove: %s" % (", ".join(to_add), ", ".join(to_remove)))
+
+  descriptions = merge_xml.MergeFiles(arguments.inputs)
   with open(arguments.major_branch_date_filepath, "r") as date_file:
     branch_file_content = date_file.read()
   with open(arguments.milestone_filepath, "r") as milestone_file:
@@ -243,8 +267,8 @@ def _GenerateFile(arguments):
       descriptions, branch_file_content, mstone_file_content,
       arguments.header_filename, arguments.namespace)
 
-  with open(os.path.join(arguments.output_dir, arguments.header_filename),
-            "w") as generated_file:
+  output_path = Path(arguments.output_dir) / arguments.header_filename
+  with open(output_path, "w") as generated_file:
     generated_file.write(header_file_content)
 
 
@@ -278,6 +302,10 @@ def _ParseArguments():
       "-m",
       required=True,
       help="A path to the file with the milestone information.")
+  arg_parser.add_argument(
+      "inputs",
+      nargs="+",
+      help="Paths to .xml files with histogram descriptions.")
   return arg_parser.parse_args()
 
 

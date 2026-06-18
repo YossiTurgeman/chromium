@@ -1,27 +1,28 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "services/media_session/audio_focus_manager.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
+#include "base/containers/adapters.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/run_loop.h"
-#include "base/test/power_monitor_test_base.h"
+#include "base/test/power_monitor_test.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "services/media_session/audio_focus_request.h"
-#include "services/media_session/media_session_service.h"
+#include "services/media_session/media_session_service_impl.h"
 #include "services/media_session/public/cpp/test/audio_focus_test_util.h"
 #include "services/media_session/public/cpp/test/mock_media_session.h"
 #include "services/media_session/public/mojom/audio_focus.mojom.h"
 #include "services/media_session/public/mojom/media_session.mojom.h"
-#include "services/media_session/public/mojom/media_session_service.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace media_session {
@@ -41,19 +42,17 @@ class AudioFocusManagerTest
  public:
   AudioFocusManagerTest() = default;
 
-  void SetUp() override {
-    auto power_source = std::make_unique<base::PowerMonitorTestSource>();
-    power_source_ = power_source.get();
-    base::PowerMonitor::Initialize(std::move(power_source));
+  AudioFocusManagerTest(const AudioFocusManagerTest&) = delete;
+  AudioFocusManagerTest& operator=(const AudioFocusManagerTest&) = delete;
 
+  void SetUp() override {
     // Create an instance of the MediaSessionService.
-    service_ = std::make_unique<MediaSessionService>(
-        service_remote_.BindNewPipeAndPassReceiver());
-    service_remote_->BindAudioFocusManager(
+    service_ = std::make_unique<MediaSessionServiceImpl>();
+    service_->BindAudioFocusManager(
         audio_focus_remote_.BindNewPipeAndPassReceiver());
-    service_remote_->BindAudioFocusManagerDebug(
+    service_->BindAudioFocusManagerDebug(
         audio_focus_debug_remote_.BindNewPipeAndPassReceiver());
-    service_remote_->BindMediaControllerManager(
+    service_->BindMediaControllerManager(
         controller_manager_remote_.BindNewPipeAndPassReceiver());
 
     audio_focus_remote_->SetEnforcementMode(GetParam());
@@ -65,16 +64,13 @@ class AudioFocusManagerTest
     base::RunLoop().RunUntilIdle();
 
     service_.reset();
-    service_remote_.reset();
-    base::PowerMonitor::ShutdownForTesting();
   }
 
   AudioFocusManager::RequestId GetAudioFocusedSession() {
     const auto audio_focus_requests = GetRequests();
-    for (auto iter = audio_focus_requests.rbegin();
-         iter != audio_focus_requests.rend(); ++iter) {
-      if ((*iter)->audio_focus_type == mojom::AudioFocusType::kGain)
-        return (*iter)->request_id.value();
+    for (const auto& request : base::Reversed(audio_focus_requests)) {
+      if (request->audio_focus_type == mojom::AudioFocusType::kGain)
+        return request->request_id.value();
     }
     return base::UnguessableToken::Null();
   }
@@ -135,12 +131,6 @@ class AudioFocusManagerTest
       test::MockMediaSession* session) {
     mojom::MediaSessionInfo::SessionState state = session->GetState();
 
-    if (!IsEnforcementEnabled()) {
-      // If audio focus enforcement is disabled then we should never see ducking
-      // in the tests.
-      EXPECT_NE(mojom::MediaSessionInfo::SessionState::kDucking, state);
-    }
-
     return state;
   }
 
@@ -183,7 +173,7 @@ class AudioFocusManagerTest
 
   mojo::Remote<mojom::AudioFocusManager> CreateAudioFocusManagerRemote() {
     mojo::Remote<mojom::AudioFocusManager> remote;
-    service_remote_->BindAudioFocusManager(remote.BindNewPipeAndPassReceiver());
+    service_->BindAudioFocusManager(remote.BindNewPipeAndPassReceiver());
     return remote;
   }
 
@@ -194,7 +184,7 @@ class AudioFocusManagerTest
   }
 
   bool IsEnforcementEnabled() const {
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     // Enforcement is enabled by default on Chrome OS.
     if (GetParam() == mojom::EnforcementMode::kDefault)
       return true;
@@ -208,7 +198,7 @@ class AudioFocusManagerTest
     return GetParam() != mojom::EnforcementMode::kSingleSession;
   }
 
-  base::PowerMonitorTestSource& GetTestPowerSource() { return *power_source_; }
+  void GenerateSuspendEvent() { power_source_.GenerateSuspendEvent(); }
 
   mojo::Remote<mojom::MediaControllerManager>& controller_manager() {
     return controller_manager_remote_;
@@ -237,16 +227,24 @@ class AudioFocusManagerTest
         ->identity();
   }
 
+  void StartDuckingAllAudio(
+      const std::optional<base::UnguessableToken>& exempted_request_id) {
+    GetService()->StartDuckingAllAudio(exempted_request_id);
+    FlushForTesting();
+  }
+
+  void StopDuckingAllAudio() {
+    GetService()->StopDuckingAllAudio();
+    FlushForTesting();
+  }
+
   void FlushForTesting() { audio_focus_remote_.FlushForTesting(); }
 
  private:
   int GetCountForType(mojom::AudioFocusType type) {
     const auto audio_focus_requests = GetRequests();
-    return std::count_if(audio_focus_requests.begin(),
-                         audio_focus_requests.end(),
-                         [type](const auto& session) {
-                           return session->audio_focus_type == type;
-                         });
+    return std::ranges::count(audio_focus_requests, type,
+                              &mojom::AudioFocusRequestState::audio_focus_type);
   }
 
   std::vector<mojom::AudioFocusRequestStatePtr> GetRequests() {
@@ -281,16 +279,13 @@ class AudioFocusManagerTest
 
   base::test::TaskEnvironment task_environment_;
 
-  std::unique_ptr<MediaSessionService> service_;
-  mojo::Remote<mojom::MediaSessionService> service_remote_;
+  std::unique_ptr<MediaSessionServiceImpl> service_;
 
   mojo::Remote<mojom::AudioFocusManager> audio_focus_remote_;
   mojo::Remote<mojom::AudioFocusManagerDebug> audio_focus_debug_remote_;
   mojo::Remote<mojom::MediaControllerManager> controller_manager_remote_;
 
-  base::PowerMonitorTestSource* power_source_;
-
-  DISALLOW_COPY_AND_ASSIGN(AudioFocusManagerTest);
+  base::test::ScopedPowerMonitorTestSource power_source_;
 };
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1066,7 +1061,7 @@ TEST_P(AudioFocusManagerTest, AudioFocusGrouping_TransientResume) {
 
   media_session_4.AbandonAudioFocusFromClient();
 
-  // TODO(https://crbug.com/916177): This should wait on a more precise
+  // TODO(crbug.com/40606983): This should wait on a more precise
   // condition than RunLoop idling, but it's not clear exactly what that
   // should be.
   base::RunLoop().RunUntilIdle();
@@ -1470,7 +1465,7 @@ TEST_P(AudioFocusManagerTest, SuspendAllSessionOnPowerSuspend) {
   test::MockMediaSessionMojoObserver observer_1(media_session_1);
   test::MockMediaSessionMojoObserver observer_2(media_session_2);
 
-  GetTestPowerSource().GenerateSuspendEvent();
+  GenerateSuspendEvent();
 
   observer_1.WaitForState(mojom::MediaSessionInfo::SessionState::kSuspended);
   observer_2.WaitForState(mojom::MediaSessionInfo::SessionState::kSuspended);
@@ -1748,6 +1743,82 @@ TEST_P(AudioFocusManagerTest, GetSourceFocusRequests) {
 
   // Ensure that the API returned nothing for the unused identity.
   EXPECT_TRUE(identity_3_requests.empty());
+}
+
+TEST_P(AudioFocusManagerTest, StartDuckingAllAudio_NoExemption) {
+  test::MockMediaSession media_session_1;
+  test::MockMediaSession media_session_2;
+
+  base::UnguessableToken group_id = base::UnguessableToken::Create();
+
+  // Request audio focus for two media sessions.
+  ASSERT_TRUE(RequestGroupedAudioFocus(base::UnguessableToken::Create(),
+                                       &media_session_1,
+                                       mojom::AudioFocusType::kGain, group_id));
+  ASSERT_TRUE(RequestGroupedAudioFocus(base::UnguessableToken::Create(),
+                                       &media_session_2,
+                                       mojom::AudioFocusType::kGain, group_id));
+  EXPECT_EQ(IsGroupingEnabled()
+                ? mojom::MediaSessionInfo::SessionState::kActive
+                : mojom::MediaSessionInfo::SessionState::kSuspended,
+            GetState(&media_session_1));
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kActive,
+            GetState(&media_session_2));
+
+  // A call to `StartDuckingAllAudio()` with no exempted request ID should duck
+  // all sessions.
+  StartDuckingAllAudio(std::nullopt);
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kDucking,
+            GetState(&media_session_1));
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kDucking,
+            GetState(&media_session_2));
+
+  // Once ducking all audio is stopped, the sessions should no longer be ducked.
+  StopDuckingAllAudio();
+  EXPECT_EQ(IsGroupingEnabled()
+                ? mojom::MediaSessionInfo::SessionState::kActive
+                : mojom::MediaSessionInfo::SessionState::kSuspended,
+            GetState(&media_session_1));
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kActive,
+            GetState(&media_session_2));
+}
+
+TEST_P(AudioFocusManagerTest, StartDuckingAllAudio_WithExemption) {
+  test::MockMediaSession media_session_1;
+  test::MockMediaSession media_session_2;
+
+  base::UnguessableToken group_id = base::UnguessableToken::Create();
+  base::UnguessableToken id_2 = base::UnguessableToken::Create();
+
+  // Request audio focus for two media sessions.
+  ASSERT_TRUE(RequestGroupedAudioFocus(base::UnguessableToken::Create(),
+                                       &media_session_1,
+                                       mojom::AudioFocusType::kGain, group_id));
+  ASSERT_TRUE(RequestGroupedAudioFocus(id_2, &media_session_2,
+                                       mojom::AudioFocusType::kGain, group_id));
+  EXPECT_EQ(IsGroupingEnabled()
+                ? mojom::MediaSessionInfo::SessionState::kActive
+                : mojom::MediaSessionInfo::SessionState::kSuspended,
+            GetState(&media_session_1));
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kActive,
+            GetState(&media_session_2));
+
+  // A call to `StartDuckingAllAudio()` with an exempted request ID should duck
+  // all sessions except the exempted one.
+  StartDuckingAllAudio(id_2);
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kDucking,
+            GetState(&media_session_1));
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kActive,
+            GetState(&media_session_2));
+
+  // Once ducking all audio is stopped, the sessions should no longer be ducked.
+  StopDuckingAllAudio();
+  EXPECT_EQ(IsGroupingEnabled()
+                ? mojom::MediaSessionInfo::SessionState::kActive
+                : mojom::MediaSessionInfo::SessionState::kSuspended,
+            GetState(&media_session_1));
+  EXPECT_EQ(mojom::MediaSessionInfo::SessionState::kActive,
+            GetState(&media_session_2));
 }
 
 }  // namespace media_session

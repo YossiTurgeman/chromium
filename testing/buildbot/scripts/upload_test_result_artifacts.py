@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Uploads test results artifacts.
 
 This script takes a list of json test results files, the format of which is
 described in
-https://chromium.googlesource.com/chromium/src/+/master/docs/testing/json_test_results_format.md.
+https://chromium.googlesource.com/chromium/src/+/main/docs/testing/json_test_results_format.md.
 For each file, it looks for test artifacts embedded in each test. It detects
 this by looking for the top level "artifact_type_info" key.
 
@@ -15,23 +15,20 @@ with the 'file' scheme) to google storage.
 """
 
 import argparse
-import collections
 import copy
-import itertools
 import json
 import hashlib
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
-import urlparse
-import uuid
 
 root_dir = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-sys.path.append(os.path.join(root_dir, 'build', 'android'))
-from pylib.utils import google_storage_helper
+
+# //build/util imports.
+sys.path.append(os.path.join(root_dir, 'build', 'util'))
+from lib.common import google_storage_helper
 
 
 def get_file_digest(filepath):
@@ -78,7 +75,7 @@ def get_tests(test_trie):
   file a bug with crbug.com/new and cc martiniss@.
   """
   if not isinstance(test_trie, dict):
-    raise ValueError("expected %s to be a dict" % test_trie)
+    raise ValueError('expected %s to be a dict' % test_trie)
 
   tests = {}
 
@@ -94,7 +91,7 @@ def get_tests(test_trie):
 
 def upload_directory_to_gs(local_path, bucket, gs_path, dry_run):
   if dry_run:
-    print 'would have uploaded %s to %s' % (local_path, gs_path)
+    print('would have uploaded %s to %s' % (local_path, gs_path))
     return
 
   # -m does multithreaded uploads, which is needed because we upload multiple
@@ -107,9 +104,8 @@ def hash_artifacts(tests, artifact_root):
   hashed_artifacts = []
   # Sort for testing consistency.
   for test_obj in sorted(tests.values()):
-    for name, location in sorted(
-        test_obj.get('artifacts', {}).items(),
-        key=lambda pair: pair[0]):
+    for name, location in sorted(list(test_obj.get('artifacts', {}).items()),
+                                 key=lambda pair: pair[0]):
       absolute_filepath = os.path.join(artifact_root, location)
       file_digest = get_file_digest(absolute_filepath)
       # Location is set to file digest because it's relative to the google
@@ -204,8 +200,8 @@ def main():
 
   type_info = data.get('artifact_type_info')
   if not type_info:
-    print 'File %r did not have %r top level key. Not processing.' % (
-        args.test_result_file, 'artifact_type_info')
+    print('File %r did not have %r top level key. Not processing.' %
+          (args.test_result_file, 'artifact_type_info'))
     return 1
 
   new_data = upload_artifacts(
@@ -215,8 +211,8 @@ def main():
       json.dump(new_data, f)
 
   if new_data and not args.quiet:
-    print json.dumps(
-        new_data, indent=2, separators=(',', ': '), sort_keys=True)
+    print(json.dumps(new_data, indent=2, separators=(',', ': '),
+                     sort_keys=True))
   return 0
 
 if __name__ == '__main__':

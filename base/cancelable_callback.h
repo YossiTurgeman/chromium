@@ -1,22 +1,24 @@
-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+// Copyright 2011 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// CancelableCallback is a wrapper around base::Callback that allows
-// cancellation of a callback. CancelableCallback takes a reference on the
+// CancelableOnceCallback is a wrapper around OnceCallback that allows
+// cancellation of the callback. CanacelableRepeatingCallback is the same sort
+// of wrapper around RepeatingCallback. The wrapper takes a reference on the
 // wrapped callback until this object is destroyed or Reset()/Cancel() are
 // called.
 //
 // NOTE:
 //
-// Calling CancelableCallback::Cancel() brings the object back to its natural,
-// default-constructed state, i.e., CancelableCallback::callback() will return
-// a null callback.
+// Calling Cancel() brings the object back to its natural, default-constructed
+// state, i.e., callback() will return a null callback.
 //
 // THREAD-SAFETY:
 //
-// CancelableCallback objects must be created on, posted to, cancelled on, and
-// destroyed on the same thread.
+// Cancelable callback objects must be created on, posted to, cancelled on, and
+// destroyed on the same SequencedTaskRunner. The wrapper returned by callback()
+// must also be run on this SequencedTaskRunner, but it may be destroyed on any
+// sequence; see comments on callback().
 //
 //
 // EXAMPLE USAGE:
@@ -35,8 +37,8 @@
 //
 // CancelableOnceClosure timeout(
 //     base::BindOnce(&TimeoutCallback, "Test timed out."));
-// ThreadTaskRunnerHandle::Get()->PostDelayedTask(FROM_HERE, timeout.callback(),
-//                                                TimeDelta::FromSeconds(4));
+// SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+//     FROM_HERE, timeout.callback(), Seconds(4));
 // RunIntensiveTest();
 // run_loop.Run();
 // timeout.Cancel();  // Hopefully this is hit before the timeout callback runs.
@@ -47,13 +49,11 @@
 
 #include <utility>
 
-#include "base/base_export.h"
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/callback_internal.h"
 #include "base/check.h"
 #include "base/compiler_specific.h"
-#include "base/macros.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_internal.h"
 #include "base/memory/weak_ptr.h"
 
 namespace base {
@@ -62,7 +62,9 @@ namespace internal {
 template <typename CallbackType>
 class CancelableCallbackImpl {
  public:
-  CancelableCallbackImpl() {}
+  CancelableCallbackImpl() = default;
+  CancelableCallbackImpl(const CancelableCallbackImpl&) = delete;
+  CancelableCallbackImpl& operator=(const CancelableCallbackImpl&) = delete;
 
   // |callback| must not be null.
   explicit CancelableCallbackImpl(CallbackType callback)
@@ -79,9 +81,7 @@ class CancelableCallbackImpl {
   }
 
   // Returns true if the wrapped callback has been cancelled.
-  bool IsCancelled() const {
-    return callback_.is_null();
-  }
+  bool IsCancelled() const { return callback_.is_null(); }
 
   // Sets |callback| as the closure that may be cancelled. |callback| may not
   // be null. Outstanding and any previously wrapped callbacks are cancelled.
@@ -92,10 +92,16 @@ class CancelableCallbackImpl {
     callback_ = std::move(callback);
   }
 
-  // Returns a callback that can be disabled by calling Cancel().
+  // Returns a callback that can be disabled by calling Cancel(). This returned
+  // callback may only run on the bound SequencedTaskRunner (where
+  // CancelableCallback was constructed), but it may be destroyed on any
+  // sequence. This means the callback may be handed off to other task runners,
+  // e.g. via PostTaskAndReply[WithResult](), to post tasks back on the original
+  // bound sequence.
   CallbackType callback() const {
-    if (!callback_)
+    if (!callback_) {
       return CallbackType();
+    }
     CallbackType forwarder;
     MakeForwarder(&forwarder);
     return forwarder;
@@ -130,14 +136,12 @@ class CancelableCallbackImpl {
   // The stored closure that may be cancelled.
   CallbackType callback_;
   mutable base::WeakPtrFactory<CancelableCallbackImpl> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(CancelableCallbackImpl);
 };
 
 }  // namespace internal
 
-// Consider using base::WeakPtr directly instead of base::CancelableCallback for
-// the task cancellation.
+// Consider using base::WeakPtr directly instead of base::CancelableOnceCallback
+// for task cancellation.
 template <typename Signature>
 using CancelableOnceCallback =
     internal::CancelableCallbackImpl<OnceCallback<Signature>>;
@@ -147,10 +151,6 @@ template <typename Signature>
 using CancelableRepeatingCallback =
     internal::CancelableCallbackImpl<RepeatingCallback<Signature>>;
 using CancelableRepeatingClosure = CancelableRepeatingCallback<void()>;
-
-template <typename Signature>
-using CancelableCallback = CancelableRepeatingCallback<Signature>;
-using CancelableClosure = CancelableCallback<void()>;
 
 }  // namespace base
 

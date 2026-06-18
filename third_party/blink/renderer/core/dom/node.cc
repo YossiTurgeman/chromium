@@ -28,10 +28,11 @@
 
 #include <algorithm>
 
+#include "base/containers/adapters.h"
 #include "third_party/blink/public/mojom/input/focus_type.mojom-blink.h"
-#include "third_party/blink/renderer/bindings/core/v8/node_or_string_or_trusted_script.h"
-#include "third_party/blink/renderer/bindings/core/v8/string_or_trusted_script.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_get_root_node_options.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_node_string_trustedscript.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_string_trustedscript.h"
 #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
 #include "third_party/blink/renderer/core/animation/scroll_timeline.h"
 #include "third_party/blink/renderer/core/css/css_selector.h"
@@ -49,7 +50,6 @@
 #include "third_party/blink/renderer/core/dom/document_type.h"
 #include "third_party/blink/renderer/core/dom/dom_node_ids.h"
 #include "third_party/blink/renderer/core/dom/element.h"
-#include "third_party/blink/renderer/core/dom/element_rare_data.h"
 #include "third_party/blink/renderer/core/dom/element_traversal.h"
 #include "third_party/blink/renderer/core/dom/events/add_event_listener_options_resolved.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
@@ -59,9 +59,11 @@
 #include "third_party/blink/renderer/core/dom/events/event_path.h"
 #include "third_party/blink/renderer/core/dom/flat_tree_node_data.h"
 #include "third_party/blink/renderer/core/dom/flat_tree_traversal.h"
+#include "third_party/blink/renderer/core/dom/focus_params.h"
 #include "third_party/blink/renderer/core/dom/layout_tree_builder_traversal.h"
 #include "third_party/blink/renderer/core/dom/mutation_observer_registration.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
+#include "third_party/blink/renderer/core/dom/node-inl.h"
+#include "third_party/blink/renderer/core/dom/node_cloning_data.h"
 #include "third_party/blink/renderer/core/dom/node_lists_node_data.h"
 #include "third_party/blink/renderer/core/dom/node_rare_data.h"
 #include "third_party/blink/renderer/core/dom/node_traversal.h"
@@ -73,16 +75,18 @@
 #include "third_party/blink/renderer/core/dom/static_node_list.h"
 #include "third_party/blink/renderer/core/dom/template_content_document_fragment.h"
 #include "third_party/blink/renderer/core/dom/text.h"
+#include "third_party/blink/renderer/core/dom/text_visitor.h"
 #include "third_party/blink/renderer/core/dom/tree_scope_adopter.h"
 #include "third_party/blink/renderer/core/dom/user_action_element_set.h"
-#include "third_party/blink/renderer/core/dom/v0_insertion_point.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker_controller.h"
+#include "third_party/blink/renderer/core/editing/serializers/serialization.h"
+#include "third_party/blink/renderer/core/event_target_names.h"
+#include "third_party/blink/renderer/core/events/event_util.h"
 #include "third_party/blink/renderer/core/events/gesture_event.h"
 #include "third_party/blink/renderer/core/events/input_event.h"
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/core/events/mouse_event.h"
-#include "third_party/blink/renderer/core/events/mutation_event.h"
 #include "third_party/blink/renderer/core/events/pointer_event.h"
 #include "third_party/blink/renderer/core/events/pointer_event_factory.h"
 #include "third_party/blink/renderer/core/events/text_event.h"
@@ -98,12 +102,24 @@
 #include "third_party/blink/renderer/core/frame/visual_viewport.h"
 #include "third_party/blink/renderer/core/fullscreen/fullscreen.h"
 #include "third_party/blink/renderer/core/html/custom/custom_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_form_control_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_form_element.h"
+#include "third_party/blink/renderer/core/html/html_body_element.h"
 #include "third_party/blink/renderer/core/html/html_dialog_element.h"
+#include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/core/html/html_embed_element.h"
 #include "third_party/blink/renderer/core/html/html_frame_owner_element.h"
+#include "third_party/blink/renderer/core/html/html_image_element.h"
+#include "third_party/blink/renderer/core/html/html_object_element.h"
+#include "third_party/blink/renderer/core/html/html_script_element.h"
 #include "third_party/blink/renderer/core/html/html_slot_element.h"
+#include "third_party/blink/renderer/core/html/html_stream.h"
+#include "third_party/blink/renderer/core/html/parser/fragment_parser.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input/event_handler.h"
 #include "third_party/blink/renderer/core/input/input_device_capabilities.h"
+#include "third_party/blink/renderer/core/inspector/console_message.h"
+#include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
 #include "third_party/blink/renderer/core/layout/layout_box.h"
 #include "third_party/blink/renderer/core/layout/layout_embedded_content.h"
 #include "third_party/blink/renderer/core/layout/layout_shift_tracker.h"
@@ -111,21 +127,27 @@
 #include "third_party/blink/renderer/core/mathml_names.h"
 #include "third_party/blink/renderer/core/page/context_menu_controller.h"
 #include "third_party/blink/renderer/core/page/page.h"
-#include "third_party/blink/renderer/core/page/scrolling/scroll_customization_callbacks.h"
-#include "third_party/blink/renderer/core/page/scrolling/scroll_state.h"
-#include "third_party/blink/renderer/core/page/scrolling/scroll_state_callback.h"
 #include "third_party/blink/renderer/core/page/scrolling/top_document_root_scroller_controller.h"
 #include "third_party/blink/renderer/core/paint/paint_layer.h"
 #include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
 #include "third_party/blink/renderer/core/probe/core_probes.h"
+#include "third_party/blink/renderer/core/style/computed_style_constants.h"
 #include "third_party/blink/renderer/core/svg/graphics/svg_image.h"
 #include "third_party/blink/renderer/core/svg/svg_element.h"
 #include "third_party/blink/renderer/core/trustedtypes/trusted_script.h"
+#include "third_party/blink/renderer/core/trustedtypes/trusted_types_names.h"
+#include "third_party/blink/renderer/core/trustedtypes/trusted_types_util.h"
+#include "third_party/blink/renderer/core/view_transition/view_transition_pseudo_element_base.h"
+#include "third_party/blink/renderer/core/view_transition/view_transition_supplement.h"
+#include "third_party/blink/renderer/core/view_transition/view_transition_utils.h"
+#include "third_party/blink/renderer/core/xml_names.h"
+#include "third_party/blink/renderer/core/xmlns_names.h"
 #include "third_party/blink/renderer/platform/bindings/dom_data_store.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
-#include "third_party/blink/renderer/platform/bindings/microtask.h"
 #include "third_party/blink/renderer/platform/bindings/v8_dom_wrapper.h"
-#include "third_party/blink/renderer/platform/heap/heap.h"
+#include "third_party/blink/renderer/platform/graphics/dom_node_id.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_set.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/instance_counters.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/traced_value.h"
@@ -138,207 +160,186 @@
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
+#if DUMP_NODE_STATISTICS
+#include "third_party/blink/renderer/core/dom/named_node_map.h"
+#endif
+
 namespace blink {
-
-namespace {
-
-// We need to retain the scroll customization callbacks until the element
-// they're associated with is destroyed. It would be simplest if the callbacks
-// could be stored in ElementRareData, but we can't afford the space increase.
-// Instead, keep the scroll customization callbacks here. The other option would
-// be to store these callbacks on the Page or document, but that necessitates a
-// bunch more logic for transferring the callbacks between Pages when elements
-// are moved around.
-ScrollCustomizationCallbacks& GetScrollCustomizationCallbacks() {
-  DEFINE_STATIC_LOCAL(Persistent<ScrollCustomizationCallbacks>,
-                      scroll_customization_callbacks,
-                      (MakeGarbageCollected<ScrollCustomizationCallbacks>()));
-  return *scroll_customization_callbacks;
-}
-
-// TODO(crbug.com/545926): Unsafe hack to avoid triggering the
-// ThreadRestrictionVerifier on StringImpl. This should be fixed completely, and
-// we should always avoid accessing these strings from the impl thread.
-// Currently code that calls into this method from the impl thread tries to make
-// sure that the main thread is not running at this time.
-void AppendUnsafe(StringBuilder& builder, const String& off_thread_string) {
-  StringImpl* impl = off_thread_string.Impl();
-  if (impl) {
-    WTF::VisitCharacters(*impl, [&](const auto* chars, unsigned length) {
-      builder.Append(chars, length);
-    });
-  }
-}
-
-}  // namespace
 
 using ReattachHookScope = LayoutShiftTracker::ReattachHookScope;
 
+// We want to keep Node small.  This struct + assert calls our attention to a
+// change that might be undesirable, so that we make sure to consider whether
+// it's worthwhile.
 struct SameSizeAsNode : EventTarget {
   uint32_t node_flags_;
-  Member<void*> willbe_member_[4];
-  Member<NodeData> member_;
-#if !DCHECK_IS_ON()
-  // Increasing size of Member increases size of Node.
-  ASSERT_SIZE(Member<NodeData>, void*);
-#endif  // !DCHECK_IS_ON()
+  subtle::UncompressedMember<int> uncompressed[2];
+  Member<void*> members[4];
 };
 
 ASSERT_SIZE(Node, SameSizeAsNode);
 
+// Right now we have the member variables of Node ordered so as to
+// reduce padding.  If the object layout of its base class changes, this
+// ordering might stop being optimal.  This struct + assert are intended
+// to catch if that happens, so that we can reorder the members again.
+struct NotSmallerThanNode : EventTarget {
+  subtle::UncompressedMember<int> uncompressed[2];
+  Member<void*> members[4];
+  uint32_t node_flags_;
+};
+
+static_assert(sizeof(Node) <= sizeof(NotSmallerThanNode),
+              "members of node should be reordered for better packing");
+
 #if DUMP_NODE_STATISTICS
-using WeakNodeSet = HeapHashSet<WeakMember<Node>>;
-static WeakNodeSet& liveNodeSet() {
-  DEFINE_STATIC_LOCAL(WeakNodeSet, set, (new WeakNodeSet));
-  return set;
+using WeakNodeSet = GCedHeapHashSet<WeakMember<Node>>;
+static WeakNodeSet& LiveNodeSet() {
+  DEFINE_STATIC_LOCAL(Persistent<WeakNodeSet>, set,
+                      (MakeGarbageCollected<WeakNodeSet>()));
+  return *set;
 }
-#endif
 
 void Node::DumpStatistics() {
-#if DUMP_NODE_STATISTICS
-  size_t nodesWithRareData = 0;
+  size_t nodes_with_rare_data = 0;
 
-  size_t elementNodes = 0;
-  size_t attrNodes = 0;
-  size_t textNodes = 0;
-  size_t cdataNodes = 0;
-  size_t commentNodes = 0;
-  size_t piNodes = 0;
-  size_t documentNodes = 0;
-  size_t docTypeNodes = 0;
-  size_t fragmentNodes = 0;
-  size_t shadowRootNodes = 0;
+  size_t element_nodes = 0;
+  size_t attr_nodes = 0;
+  size_t text_nodes = 0;
+  size_t cdata_nodes = 0;
+  size_t comment_nodes = 0;
+  size_t pi_nodes = 0;
+  size_t document_nodes = 0;
+  size_t doc_type_nodes = 0;
+  size_t fragment_nodes = 0;
+  size_t shadow_root_nodes = 0;
 
-  HashMap<String, size_t> perTagCount;
+  HashMap<String, size_t> per_tag_count;
 
   size_t attributes = 0;
-  size_t elementsWithAttributeStorage = 0;
-  size_t elementsWithRareData = 0;
-  size_t elementsWithNamedNodeMap = 0;
+  size_t elements_with_attribute_storage = 0;
+  size_t elements_with_rare_data = 0;
+  size_t elements_with_named_node_map = 0;
 
   {
-    ScriptForbiddenScope forbidScriptDuringRawIteration;
-    for (Node* node : liveNodeSet()) {
-      if (node->hasRareData()) {
-        ++nodesWithRareData;
+    ScriptForbiddenScope forbid_script_during_raw_iteration;
+    for (Node* node : LiveNodeSet()) {
+      if (node->data_) {
+        ++nodes_with_rare_data;
         if (auto* element = DynamicTo<Element>(node)) {
-          ++elementsWithRareData;
-          if (element->hasNamedNodeMap())
-            ++elementsWithNamedNodeMap;
+          ++elements_with_rare_data;
+          if (element->HasNamedNodeMap())
+            ++elements_with_named_node_map;
         }
       }
 
       switch (node->getNodeType()) {
         case kElementNode: {
-          ++elementNodes;
+          ++element_nodes;
 
           // Tag stats
           auto* element = To<Element>(node);
-          HashMap<String, size_t>::AddResult result =
-              perTagCount.add(element->tagName(), 1);
-          if (!result.isNewEntry)
-            result.storedValue->value++;
+          auto result = per_tag_count.insert(element->tagName(), 1);
+          if (!result.is_new_entry)
+            result.stored_value->value++;
 
-          size_t attributeCount = element->attributesWithoutUpdate().size();
+          size_t attributeCount = element->AttributesWithoutUpdate().size();
           if (attributeCount) {
             attributes += attributeCount;
-            ++elementsWithAttributeStorage;
+            ++elements_with_attribute_storage;
           }
           break;
         }
         case kAttributeNode: {
-          ++attrNodes;
+          ++attr_nodes;
           break;
         }
         case kTextNode: {
-          ++textNodes;
+          ++text_nodes;
           break;
         }
         case kCdataSectionNode: {
-          ++cdataNodes;
+          ++cdata_nodes;
           break;
         }
         case kCommentNode: {
-          ++commentNodes;
+          ++comment_nodes;
           break;
         }
         case kProcessingInstructionNode: {
-          ++piNodes;
+          ++pi_nodes;
           break;
         }
         case kDocumentNode: {
-          ++documentNodes;
+          ++document_nodes;
           break;
         }
         case kDocumentTypeNode: {
-          ++docTypeNodes;
+          ++doc_type_nodes;
           break;
         }
         case kDocumentFragmentNode: {
-          if (node->isShadowRoot())
-            ++shadowRootNodes;
+          if (node->IsShadowRoot())
+            ++shadow_root_nodes;
           else
-            ++fragmentNodes;
+            ++fragment_nodes;
           break;
         }
       }
     }
   }
 
-  std::stringstream perTagStream;
-  for (const auto& entry : perTagCount)
-    perTagStream << "  Number of <" << entry.key.utf8().data()
-                 << "> tags: " << entry.value << "\n";
+  std::stringstream per_tag_stream;
+  for (const auto& entry : per_tag_count) {
+    per_tag_stream << "  Number of <" << entry.key.Utf8().data()
+                   << "> tags: " << entry.value << "\n";
+  }
 
   LOG(INFO) << "\n"
-            << "Number of Nodes: " << liveNodeSet().size() << "\n"
-            << "Number of Nodes with RareData: " << nodesWithRareData << "\n\n"
+            << "Number of Nodes: " << LiveNodeSet().size() << "\n"
+            << "Number of Nodes with RareData: " << nodes_with_rare_data
+            << "\n\n"
 
             << "NodeType distribution:\n"
-            << "  Number of Element nodes: " << elementNodes << "\n"
-            << "  Number of Attribute nodes: " << attrNodes << "\n"
-            << "  Number of Text nodes: " << textNodes << "\n"
-            << "  Number of CDATASection nodes: " << cdataNodes << "\n"
-            << "  Number of Comment nodes: " << commentNodes << "\n"
-            << "  Number of ProcessingInstruction nodes: " << piNodes << "\n"
-            << "  Number of Document nodes: " << documentNodes << "\n"
-            << "  Number of DocumentType nodes: " << docTypeNodes << "\n"
-            << "  Number of DocumentFragment nodes: " << fragmentNodes << "\n"
-            << "  Number of ShadowRoot nodes: " << shadowRootNodes << "\n"
+            << "  Number of Element nodes: " << element_nodes << "\n"
+            << "  Number of Attribute nodes: " << attr_nodes << "\n"
+            << "  Number of Text nodes: " << text_nodes << "\n"
+            << "  Number of CDATASection nodes: " << cdata_nodes << "\n"
+            << "  Number of Comment nodes: " << comment_nodes << "\n"
+            << "  Number of ProcessingInstruction nodes: " << pi_nodes << "\n"
+            << "  Number of Document nodes: " << document_nodes << "\n"
+            << "  Number of DocumentType nodes: " << doc_type_nodes << "\n"
+            << "  Number of DocumentFragment nodes: " << fragment_nodes << "\n"
+            << "  Number of ShadowRoot nodes: " << shadow_root_nodes << "\n"
 
-            << "Element tag name distibution:\n"
-            << perTagStream.str()
+            << "Element tag name distribution:\n"
+            << per_tag_stream.str()
 
             << "Attributes:\n"
             << "  Number of Attributes (non-Node and Node): " << attributes
             << " x " << sizeof(Attribute) << "Bytes\n"
             << "  Number of Elements with attribute storage: "
-            << elementsWithAttributeStorage << " x " << sizeof(ElementData)
+            << elements_with_attribute_storage << " x " << sizeof(ElementData)
             << "Bytes\n"
-            << "  Number of Elements with RareData: " << elementsWithRareData
-            << "\n"
+            << "  Number of Elements with RareData: " << elements_with_rare_data
+            << " x " << sizeof(NodeRareData) << "Bytes\n"
             << "  Number of Elements with NamedNodeMap: "
-            << elementsWithNamedNodeMap << " x " << sizeof(NamedNodeMap)
+            << elements_with_named_node_map << " x " << sizeof(NamedNodeMap)
             << "Bytes";
-#endif
 }
-
-void Node::TrackForDebugging() {
-#if DUMP_NODE_STATISTICS
-  liveNodeSet().add(this);
 #endif
-}
 
 Node::Node(TreeScope* tree_scope, ConstructionType type)
     : node_flags_(type),
-      parent_or_shadow_host_node_(nullptr),
       tree_scope_(tree_scope),
+      parent_or_shadow_host_node_(kParentNodeTag, nullptr),
       previous_(nullptr),
       next_(nullptr),
-      data_(&NodeRenderingData::SharedEmptyData()) {
+      layout_object_(nullptr),
+      data_(nullptr) {
   DCHECK(tree_scope_ || type == kCreateDocument || type == kCreateShadowRoot);
-#if !defined(NDEBUG) || (defined(DUMP_NODE_STATISTICS) && DUMP_NODE_STATISTICS)
-  TrackForDebugging();
+#if DUMP_NODE_STATISTICS
+  LiveNodeSet().insert(this);
 #endif
   InstanceCounters::IncrementCounter(InstanceCounters::kNodeCounter);
   // Document is required for probe sink.
@@ -350,16 +351,27 @@ Node::~Node() {
   InstanceCounters::DecrementCounter(InstanceCounters::kNodeCounter);
 }
 
-NodeRareData& Node::CreateRareData() {
-  if (IsElementNode()) {
-    data_ = MakeGarbageCollected<ElementRareData>(DataAsNodeRenderingData());
-  } else {
-    data_ = MakeGarbageCollected<NodeRareData>(DataAsNodeRenderingData());
-  }
+DOMNodeId Node::GetDomNodeId() {
+  return DOMNodeIds::IdForNode(this);
+}
 
-  DCHECK(data_);
-  SetFlag(kHasRareDataFlag);
-  return *RareData();
+// static
+Node* Node::FromDomNodeId(DOMNodeId dom_node_id) {
+  return DOMNodeIds::NodeForId(dom_node_id);
+}
+
+NodeRareData& Node::CreateRareData() {
+  data_ = NodeRareData::Create();
+  return *data_;
+}
+
+void Node::MaybeAddNodeInsertedTraceEvent() {
+  DEVTOOLS_TIMELINE_TRACE_EVENT_INSTANT_WITH_CATEGORIES(
+      TRACE_DISABLED_BY_DEFAULT("devtools.timeline.invalidationTracking"),
+      "StyleRecalcInvalidationTracking",
+      inspector_style_recalc_invalidation_tracking_event::Data, this,
+      kLocalStyleChange,
+      StyleChangeReasonForTracing::Create(style_change_reason::kNodeInserted));
 }
 
 Node* Node::ToNode() {
@@ -370,80 +382,245 @@ String Node::nodeValue() const {
   return String();
 }
 
-void Node::setNodeValue(const String&) {
+void Node::setNodeValue(const String&, ExceptionState&) {
   // By default, setting nodeValue has no effect.
-}
-
-ContainerNode* Node::parentNode() const {
-  return IsShadowRoot() ? nullptr : ParentOrShadowHostNode();
 }
 
 NodeList* Node::childNodes() {
   auto* this_node = DynamicTo<ContainerNode>(this);
+  auto& node_lists = UnpackAndRefresh(EnsureRareData().EnsureNodeLists());
   if (this_node)
-    return EnsureRareData().EnsureNodeLists().EnsureChildNodeList(*this_node);
-  return EnsureRareData().EnsureNodeLists().EnsureEmptyChildNodeList(*this);
+    return node_lists.EnsureChildNodeList(*this_node);
+  return node_lists.EnsureEmptyChildNodeList(*this);
 }
 
+// TODO(crbug.com/447642032): Implement previous / next sibling for overscroll
+// pseudo-elements.
 Node* Node::PseudoAwarePreviousSibling() const {
   Element* parent = parentElement();
-  if (!parent || previousSibling())
+  if (!parent || HasPreviousSibling()) {
     return previousSibling();
-  switch (GetPseudoId()) {
-    case kPseudoIdAfter:
-      if (Node* previous = parent->lastChild())
-        return previous;
-      FALLTHROUGH;
-    case kPseudoIdNone:
-      if (Node* previous = parent->GetPseudoElement(kPseudoIdBefore))
-        return previous;
-      FALLTHROUGH;
-    case kPseudoIdBefore:
-      if (Node* previous = parent->GetPseudoElement(kPseudoIdMarker))
-        return previous;
-      FALLTHROUGH;
-    case kPseudoIdMarker:
-      break;
+  }
+
+  PseudoId pseudo_id = GetPseudoId();
+
+  if (pseudo_id == kPseudoIdColumn) {
+    // kPseudoIdColumn is an array of indexed pseudo-elements.  If this node
+    // is one of them (and not the first), find the previous one in the array.
+    auto* column = To<ColumnPseudoElement>(this);
+    if (column->Index() > 0) {
+      return parent->GetColumnPseudoElements()->at(column->Index() - 1u);
+    }
+  }
+
+  auto pseudo_iter = std::ranges::find(kElementChildPseudoOrder, pseudo_id);
+  if (pseudo_iter != kElementChildPseudoOrder.end()) {
+    while (pseudo_iter != kElementChildPseudoOrder.begin()) {
+      --pseudo_iter;
+      switch (*pseudo_iter) {
+        case kPseudoIdColumn:
+          // kPseudoIdColumn is an array of indexed pseudo-elements.  If this
+          // node is after it and the array is present, return its last item.
+          if (const ColumnPseudoElementsVector* columns =
+                  parent->GetColumnPseudoElements();
+              columns && !columns->empty()) {
+            return columns->back();
+          }
+          break;
+        case kPseudoIdNone:
+          if (Node* previous = parent->lastChild()) {
+            return previous;
+          }
+          break;
+        default:
+          if (Node* previous = parent->GetPseudoElement(*pseudo_iter)) {
+            return previous;
+          }
+          break;
+      }
+    }
+    return nullptr;
+  }
+
+  switch (pseudo_id) {
+    // The pseudos of the view transition subtree have a known structure and
+    // cannot create other pseudos so these are handled separately of the above
+    // cases. For details on view-transition pseudo ordering, see
+    // https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/core/view_transition/README.md#pseudo-element-traversal
+    case kPseudoIdViewTransitionNew:
+      CHECK_EQ(parent->GetPseudoId(), kPseudoIdViewTransitionImagePair);
+      return parent->GetPseudoElement(
+          kPseudoIdViewTransitionOld,
+          To<ViewTransitionPseudoElementBase>(this)->view_transition_name());
+    case kPseudoIdViewTransitionGroup: {
+      auto* pseudo = To<ViewTransitionPseudoElementBase>(this);
+      auto* parent_pseudo = To<ViewTransitionPseudoElementBase>(parent);
+      const Vector<AtomicString>& names =
+          parent_pseudo->GetContainedViewTransitionNames();
+      wtf_size_t found_index = names.Find(pseudo->view_transition_name());
+      CHECK_NE(found_index, kNotFound);
+      if (found_index == 0) {
+        return nullptr;
+      }
+      return parent->GetPseudoElement(kPseudoIdViewTransitionGroup,
+                                      names[found_index - 1]);
+    }
+    case kPseudoIdViewTransitionGroupChildren:
+      CHECK_EQ(parent->GetPseudoId(), kPseudoIdViewTransitionGroup);
+      return parent->GetPseudoElement(
+          kPseudoIdViewTransitionImagePair,
+          To<ViewTransitionPseudoElementBase>(this)->view_transition_name());
+    case kPseudoIdViewTransitionImagePair:
+    case kPseudoIdViewTransitionOld:
+      return nullptr;
     default:
       NOTREACHED();
   }
-  return nullptr;
 }
 
 Node* Node::PseudoAwareNextSibling() const {
   Element* parent = parentElement();
-  if (!parent || nextSibling())
+  if (!parent || HasNextSibling()) {
     return nextSibling();
-  switch (GetPseudoId()) {
-    case kPseudoIdMarker:
-      if (Node* next = parent->GetPseudoElement(kPseudoIdBefore))
-        return next;
-      FALLTHROUGH;
-    case kPseudoIdBefore:
-      if (parent->HasChildren())
-        return parent->firstChild();
-      FALLTHROUGH;
-    case kPseudoIdNone:
-      if (Node* next = parent->GetPseudoElement(kPseudoIdAfter))
-        return next;
-      FALLTHROUGH;
-    case kPseudoIdAfter:
-      break;
+  }
+
+  PseudoId pseudo_id = GetPseudoId();
+
+  if (pseudo_id == kPseudoIdColumn) {
+    // kPseudoIdColumn is an array of indexed pseudo-elements.  If this node
+    // is one of them (and not the last), find the next one in the array.
+    auto* column = To<ColumnPseudoElement>(this);
+    const ColumnPseudoElementsVector* columns =
+        parent->GetColumnPseudoElements();
+    if (column->Index() + 1u < columns->size()) {
+      return columns->at(column->Index() + 1u);
+    }
+  }
+  auto pseudo_iter = std::ranges::find(kElementChildPseudoOrder, pseudo_id);
+  if (pseudo_iter != kElementChildPseudoOrder.end()) {
+    while (++pseudo_iter != kElementChildPseudoOrder.end()) {
+      switch (*pseudo_iter) {
+        case kPseudoIdColumn:
+          // kPseudoIdColumn is an array of indexed pseudo-elements.  If this
+          // node is before it and the array is present, return its first
+          // item.
+          if (const ColumnPseudoElementsVector* columns =
+                  parent->GetColumnPseudoElements();
+              columns && !columns->empty()) {
+            return columns->front();
+          }
+          break;
+        case kPseudoIdNone:
+          if (parent->HasChildren()) {
+            return parent->firstChild();
+          }
+          break;
+        default:
+          if (Node* next = parent->GetPseudoElement(*pseudo_iter)) {
+            return next;
+          }
+          break;
+      }
+    }
+    return nullptr;
+  }
+
+  switch (pseudo_id) {
+    case kPseudoIdViewTransitionOld:
+      CHECK_EQ(parent->GetPseudoId(), kPseudoIdViewTransitionImagePair);
+      return parent->GetPseudoElement(
+          kPseudoIdViewTransitionNew,
+          To<ViewTransitionPseudoElementBase>(this)->view_transition_name());
+    case kPseudoIdViewTransitionGroup: {
+      auto* pseudo = To<ViewTransitionPseudoElementBase>(this);
+      auto* parent_pseudo = To<ViewTransitionPseudoElementBase>(parent);
+      const Vector<AtomicString>& names =
+          parent_pseudo->GetContainedViewTransitionNames();
+      wtf_size_t found_index = names.Find(pseudo->view_transition_name());
+      CHECK_NE(found_index, kNotFound);
+      if (found_index == names.size() - 1) {
+        return nullptr;
+      }
+      return parent->GetPseudoElement(kPseudoIdViewTransitionGroup,
+                                      names[found_index + 1]);
+    }
+    case kPseudoIdViewTransitionImagePair:
+      CHECK_EQ(parent->GetPseudoId(), kPseudoIdViewTransitionGroup);
+      return parent->GetPseudoElement(
+          kPseudoIdViewTransitionGroupChildren,
+          To<ViewTransitionPseudoElementBase>(this)->view_transition_name());
+    case kPseudoIdViewTransitionGroupChildren:
+    case kPseudoIdViewTransitionNew:
+      return nullptr;
     default:
       NOTREACHED();
   }
-  return nullptr;
 }
 
 Node* Node::PseudoAwareFirstChild() const {
   if (const auto* current_element = DynamicTo<Element>(this)) {
-    if (Node* first = current_element->GetPseudoElement(kPseudoIdMarker))
-      return first;
-    if (Node* first = current_element->GetPseudoElement(kPseudoIdBefore))
-      return first;
-    if (Node* first = current_element->firstChild())
-      return first;
-    return current_element->GetPseudoElement(kPseudoIdAfter);
+    // See comments in PseudoAwarePreviousSibling for details on view-transition
+    // pseudo traversal.
+    if (GetPseudoId() == kPseudoIdViewTransition) {
+      const Vector<AtomicString>& names =
+          To<ViewTransitionPseudoElementBase>(this)->GetViewTransitionNames();
+      if (names.empty()) {
+        return nullptr;
+      }
+      return current_element->GetPseudoElement(kPseudoIdViewTransitionGroup,
+                                               names.front());
+    }
+    if (GetPseudoId() == kPseudoIdViewTransitionGroup) {
+      return current_element->GetPseudoElement(
+          kPseudoIdViewTransitionImagePair,
+          To<ViewTransitionPseudoElementBase>(this)->view_transition_name());
+    }
+    if (GetPseudoId() == kPseudoIdViewTransitionImagePair) {
+      const AtomicString& name =
+          To<ViewTransitionPseudoElementBase>(this)->view_transition_name();
+      if (Node* first = current_element->GetPseudoElement(
+              kPseudoIdViewTransitionOld, name)) {
+        return first;
+      }
+
+      return current_element->GetPseudoElement(kPseudoIdViewTransitionNew,
+                                               name);
+    }
+    if (GetPseudoId() == kPseudoIdViewTransitionGroupChildren) {
+      const Vector<AtomicString>& nested_names =
+          To<ViewTransitionPseudoElementBase>(current_element)
+              ->GetContainedViewTransitionNames();
+      CHECK(!nested_names.empty());
+      return current_element->GetPseudoElement(kPseudoIdViewTransitionGroup,
+                                               nested_names.front());
+    }
+
+    for (PseudoId pseudo_id : kElementChildPseudoOrder) {
+      switch (pseudo_id) {
+        case kPseudoIdColumn:
+          // kPseudoIdColumn is an array of indexed pseudo-elements.  Return
+          // its first item if the array is present.
+          if (const ColumnPseudoElementsVector* columns =
+                  current_element->GetColumnPseudoElements();
+              columns && !columns->empty()) {
+            if (Node* first = columns->front()) {
+              return first;
+            }
+          }
+          break;
+        case kPseudoIdNone:
+          if (Node* first = current_element->firstChild()) {
+            return first;
+          }
+          break;
+        default:
+          if (Node* first = current_element->GetPseudoElement(pseudo_id)) {
+            return first;
+          }
+          break;
+      }
+    }
+    return nullptr;
   }
 
   return firstChild();
@@ -451,21 +628,78 @@ Node* Node::PseudoAwareFirstChild() const {
 
 Node* Node::PseudoAwareLastChild() const {
   if (const auto* current_element = DynamicTo<Element>(this)) {
-    if (Node* last = current_element->GetPseudoElement(kPseudoIdAfter))
-      return last;
-    if (Node* last = current_element->lastChild())
-      return last;
-    if (Node* last = current_element->GetPseudoElement(kPseudoIdBefore))
-      return last;
-    return current_element->GetPseudoElement(kPseudoIdMarker);
+    // See comments in PseudoAwarePreviousSibling for details on view-transition
+    // pseudo traversal.
+    if (GetPseudoId() == kPseudoIdViewTransition) {
+      const Vector<AtomicString>& names =
+          To<ViewTransitionPseudoElementBase>(this)
+              ->GetContainedViewTransitionNames();
+      if (names.empty()) {
+        return nullptr;
+      }
+      return current_element->GetPseudoElement(kPseudoIdViewTransitionGroup,
+                                               names.back());
+    }
+    if (GetPseudoId() == kPseudoIdViewTransitionGroup) {
+      if (!To<ViewTransitionPseudoElementBase>(current_element)
+               ->GetContainedViewTransitionNames()
+               .empty()) {
+        return current_element->GetPseudoElement(
+            kPseudoIdViewTransitionGroupChildren,
+            To<ViewTransitionPseudoElementBase>(this)->view_transition_name());
+      } else {
+        return current_element->GetPseudoElement(
+            kPseudoIdViewTransitionImagePair,
+            To<ViewTransitionPseudoElementBase>(this)->view_transition_name());
+      }
+    }
+    if (GetPseudoId() == kPseudoIdViewTransitionImagePair) {
+      const AtomicString& name =
+          To<ViewTransitionPseudoElementBase>(this)->view_transition_name();
+      if (Node* last = current_element->GetPseudoElement(
+              kPseudoIdViewTransitionNew, name)) {
+        return last;
+      }
+
+      return current_element->GetPseudoElement(kPseudoIdViewTransitionOld,
+                                               name);
+    }
+
+    for (PseudoId pseudo_id : base::Reversed(kElementChildPseudoOrder)) {
+      switch (pseudo_id) {
+        case kPseudoIdColumn:
+          // kPseudoIdColumn is an array of indexed pseudo-elements.  Return
+          // its last item if the array is present.
+          if (const ColumnPseudoElementsVector* columns =
+                  current_element->GetColumnPseudoElements();
+              columns && !columns->empty()) {
+            if (Node* last = columns->back()) {
+              return last;
+            }
+          }
+          break;
+        case kPseudoIdNone:
+          if (Node* last = current_element->lastChild()) {
+            return last;
+          }
+          break;
+        default:
+          if (Node* last = current_element->GetPseudoElement(pseudo_id)) {
+            return last;
+          }
+          break;
+      }
+    }
+    return nullptr;
   }
 
   return lastChild();
 }
 
 Node& Node::TreeRoot() const {
-  if (IsInTreeScope())
-    return ContainingTreeScope().RootNode();
+  if (IsInTreeScope()) {
+    return GetTreeScope().RootNode();
+  }
   const Node* node = this;
   while (node->parentNode())
     node = node->parentNode();
@@ -476,226 +710,6 @@ Node* Node::getRootNode(const GetRootNodeOptions* options) const {
   return (options->hasComposed() && options->composed())
              ? &ShadowIncludingRoot()
              : &TreeRoot();
-}
-
-void Node::setDistributeScroll(V8ScrollStateCallback* scroll_state_callback,
-                               const String& native_scroll_behavior) {
-  GetScrollCustomizationCallbacks().SetDistributeScroll(
-      this, ScrollStateCallbackV8Impl::Create(scroll_state_callback,
-                                              native_scroll_behavior));
-}
-
-void Node::setApplyScroll(V8ScrollStateCallback* scroll_state_callback,
-                          const String& native_scroll_behavior) {
-  SetApplyScroll(ScrollStateCallbackV8Impl::Create(scroll_state_callback,
-                                                   native_scroll_behavior));
-}
-
-void Node::SetApplyScroll(ScrollStateCallback* scroll_state_callback) {
-  GetScrollCustomizationCallbacks().SetApplyScroll(this, scroll_state_callback);
-}
-
-void Node::RemoveApplyScroll() {
-  GetScrollCustomizationCallbacks().RemoveApplyScroll(this);
-}
-
-ScrollStateCallback* Node::GetApplyScroll() {
-  return GetScrollCustomizationCallbacks().GetApplyScroll(this);
-}
-
-void Node::NativeDistributeScroll(ScrollState& scroll_state) {
-  if (scroll_state.FullyConsumed())
-    return;
-
-  scroll_state.distributeToScrollChainDescendant();
-
-  // The scroll doesn't propagate, and we're currently scrolling an element
-  // other than this one, prevent the scroll from propagating to this element.
-  if (scroll_state.DeltaConsumedForScrollSequence() &&
-      scroll_state.CurrentNativeScrollingNode() != this) {
-    return;
-  }
-
-  const double delta_x = scroll_state.deltaX();
-  const double delta_y = scroll_state.deltaY();
-
-  CallApplyScroll(scroll_state);
-
-  if (delta_x != scroll_state.deltaX() || delta_y != scroll_state.deltaY())
-    scroll_state.SetCurrentNativeScrollingNode(this);
-}
-
-void Node::NativeApplyScroll(ScrollState& scroll_state) {
-  if (!GetLayoutObject())
-    return;
-
-  // All elements in the scroll chain should be boxes. However, in a scroll
-  // gesture sequence, the scroll chain is only computed on GestureScrollBegin.
-  // The type of layout object of the nodes in the scroll chain can change
-  // between GestureScrollUpdate and GestureScrollBegin (e.g. from script
-  // setting one of the nodes to display:inline). If there is no box there will
-  // not be a scrollable area to scroll, so just return.
-  if (!GetLayoutObject()->IsBox())
-    return;
-
-  if (scroll_state.FullyConsumed())
-    return;
-
-  FloatSize delta(scroll_state.deltaX(), scroll_state.deltaY());
-
-  if (delta.IsZero())
-    return;
-
-  // TODO: This should use updateStyleAndLayoutForNode.
-  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kScroll);
-
-  ScrollableArea* scrollable_area =
-      ScrollableArea::GetForScrolling(ToLayoutBox(GetLayoutObject()));
-  if (!scrollable_area)
-    return;
-  LayoutBox* box_to_scroll = scrollable_area->GetLayoutBox();
-
-  // TODO(bokan): This is a hack to fix https://crbug.com/977954. If we have a
-  // non-default root scroller, scrolling from one of its siblings or a fixed
-  // element will chain up to the root node without passing through the root
-  // scroller. This should scroll the visual viewport (so we can still pan
-  // while zoomed) but not by using the RootFrameViewport, which would cause
-  // scrolling in the root scroller element. Implementing this on the main
-  // thread is awkward since we assume only Nodes are scrollable but the
-  // VisualViewport isn't a Node. See LTHI::ApplyScroll for the equivalent
-  // behavior in CC.
-  bool also_scroll_visual_viewport = GetDocument().GetFrame() &&
-                                     GetDocument().GetFrame()->IsMainFrame() &&
-                                     IsA<LayoutView>(box_to_scroll);
-  DCHECK(!also_scroll_visual_viewport ||
-         !box_to_scroll->IsGlobalRootScroller());
-
-  ScrollResult result =
-      scrollable_area->UserScroll(scroll_state.delta_granularity(), delta,
-                                  ScrollableArea::ScrollCallback());
-
-  // Also try scrolling the visual viewport if we're at the end of the scroll
-  // chain.
-  if (!result.DidScroll() && also_scroll_visual_viewport) {
-    result = GetDocument().GetPage()->GetVisualViewport().UserScroll(
-        scroll_state.delta_granularity(), delta,
-        ScrollableArea::ScrollCallback());
-  }
-
-  if (!result.DidScroll())
-    return;
-
-  // FIXME: Native scrollers should only consume the scroll they
-  // apply. See crbug.com/457765.
-  scroll_state.ConsumeDeltaNative(delta.Width(), delta.Height());
-
-  // We need to setCurrentNativeScrollingElement in both the
-  // distributeScroll and applyScroll default implementations so
-  // that if JS overrides one of these methods, but not the
-  // other, this bookkeeping remains accurate.
-  scroll_state.SetCurrentNativeScrollingNode(this);
-}
-
-void Node::CallDistributeScroll(ScrollState& scroll_state) {
-  TRACE_EVENT0("input", "Node::CallDistributeScroll");
-  ScrollStateCallback* callback =
-      GetScrollCustomizationCallbacks().GetDistributeScroll(this);
-
-  // TODO(bokan): Need to add tests before we allow calling custom callbacks
-  // for non-touch modalities. For now, just call into the native callback but
-  // allow the viewport scroll callback so we don't disable overscroll.
-  // crbug.com/623079.
-  bool disable_custom_callbacks = !scroll_state.isDirectManipulation() &&
-                                  !GetDocument()
-                                       .GetPage()
-                                       ->GlobalRootScrollerController()
-                                       .IsViewportScrollCallback(callback);
-
-  bool is_global_root_scroller =
-      GetLayoutObject() && GetLayoutObject()->IsGlobalRootScroller();
-
-  disable_custom_callbacks |=
-      !is_global_root_scroller &&
-      RuntimeEnabledFeatures::ScrollCustomizationEnabled() &&
-      !GetScrollCustomizationCallbacks().InScrollPhase(this);
-
-  if (!callback || disable_custom_callbacks) {
-    NativeDistributeScroll(scroll_state);
-    return;
-  }
-  if (callback->GetNativeScrollBehavior() !=
-      NativeScrollBehavior::kPerformAfterNativeScroll)
-    callback->Invoke(&scroll_state);
-  if (callback->GetNativeScrollBehavior() !=
-      NativeScrollBehavior::kDisableNativeScroll)
-    NativeDistributeScroll(scroll_state);
-  if (callback->GetNativeScrollBehavior() ==
-      NativeScrollBehavior::kPerformAfterNativeScroll)
-    callback->Invoke(&scroll_state);
-}
-
-void Node::CallApplyScroll(ScrollState& scroll_state) {
-  TRACE_EVENT0("input", "Node::CallApplyScroll");
-
-  if (!GetDocument().GetPage()) {
-    // We should always have a Page if we're scrolling. See
-    // crbug.com/689074 for details.
-    NOTREACHED();
-    return;
-  }
-
-  ScrollStateCallback* callback =
-      GetScrollCustomizationCallbacks().GetApplyScroll(this);
-
-  // TODO(bokan): Need to add tests before we allow calling custom callbacks
-  // for non-touch modalities. For now, just call into the native callback but
-  // allow the viewport scroll callback so we don't disable overscroll.
-  // crbug.com/623079.
-  bool disable_custom_callbacks = !scroll_state.isDirectManipulation() &&
-                                  !GetDocument()
-                                       .GetPage()
-                                       ->GlobalRootScrollerController()
-                                       .IsViewportScrollCallback(callback);
-
-  bool is_global_root_scroller =
-      GetLayoutObject() && GetLayoutObject()->IsGlobalRootScroller();
-
-  disable_custom_callbacks |=
-      !is_global_root_scroller &&
-      RuntimeEnabledFeatures::ScrollCustomizationEnabled() &&
-      !GetScrollCustomizationCallbacks().InScrollPhase(this);
-
-  if (!callback || disable_custom_callbacks) {
-    NativeApplyScroll(scroll_state);
-    return;
-  }
-  if (callback->GetNativeScrollBehavior() !=
-      NativeScrollBehavior::kPerformAfterNativeScroll)
-    callback->Invoke(&scroll_state);
-  if (callback->GetNativeScrollBehavior() !=
-      NativeScrollBehavior::kDisableNativeScroll)
-    NativeApplyScroll(scroll_state);
-  if (callback->GetNativeScrollBehavior() ==
-      NativeScrollBehavior::kPerformAfterNativeScroll)
-    callback->Invoke(&scroll_state);
-}
-
-void Node::WillBeginCustomizedScrollPhase(
-    scroll_customization::ScrollDirection direction) {
-  DCHECK(!GetScrollCustomizationCallbacks().InScrollPhase(this));
-  LayoutBox* box = GetLayoutBox();
-  if (!box)
-    return;
-
-  scroll_customization::ScrollDirection scroll_customization =
-      box->Style()->ScrollCustomization();
-
-  GetScrollCustomizationCallbacks().SetInScrollPhase(
-      this, direction & scroll_customization);
-}
-
-void Node::DidEndCustomizedScrollPhase() {
-  GetScrollCustomizationCallbacks().SetInScrollPhase(this, false);
 }
 
 Node* Node::insertBefore(Node* new_child,
@@ -713,6 +727,63 @@ Node* Node::insertBefore(Node* new_child,
 
 Node* Node::insertBefore(Node* new_child, Node* ref_child) {
   return insertBefore(new_child, ref_child, ASSERT_NO_EXCEPTION);
+}
+
+void Node::moveBefore(Node* new_child,
+                      Node* ref_child,
+                      ExceptionState& exception_state) {
+  DCHECK(new_child);
+
+  // Only perform a state-preserving atomic move if the new parent and the child
+  // are ALREADY connected, and its document is the same as `this`'s. If the
+  // child is NOT connected to this document, then script could run during the
+  // node's initial post-insertion steps (i.e.,
+  // `Node::DidNotifySubtreeInsertionsToDocument()`), and no script is permitted
+  // to run during atomic moves.
+  const bool perform_state_preserving_atomic_move =
+      // "If any of the following conditions are true"
+      // " - parent is connected and node is not connected; or"
+      // " - parent is not connected and node is connected,"
+      // "then..."
+      isConnected() == new_child->isConnected() &&
+      // "If parent’s shadow-including root is not the same as node’s
+      // shadow-including root, then..."
+      ShadowIncludingRoot() == new_child->ShadowIncludingRoot() &&
+      // "If node is not an Element or a CharacterData node, then ..."
+      (new_child->IsElementNode() || new_child->IsCharacterDataNode());
+  // These three conditions below are caught by `EnsurePreInsertionValidity()`
+  // that gets invoked in `insertBefore()`:
+  //
+  // "If parent is not a Document, DocumentFragment, or Element node, then...
+  // "If node is a host-including inclusive ancestor of parent, then...
+  // "If child is non-null and its parent is not parent, then..."
+
+  // ...throw a "HierarchyRequestError" DOMException."
+  if (!perform_state_preserving_atomic_move) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kHierarchyRequestError,
+        "State-preserving atomic move cannot be performed on nodes "
+        "participating in an invalid hierarchy.");
+    return;
+  }
+
+  // No script can run synchronously during the move. That means it is
+  // impossible for nested `moveBefore()` calls to occur. Assert that no atomic
+  // move is already in progress.
+  DCHECK(!GetDocument().StatePreservingAtomicMoveInProgress());
+  GetDocument().SetStatePreservingAtomicMoveInProgress(true);
+
+  ContainerNode* old_parent = new_child->parentNode();
+
+  insertBefore(new_child, ref_child, exception_state);
+  GetDocument().SetStatePreservingAtomicMoveInProgress(false);
+
+  if (exception_state.HadException()) {
+    return;
+  }
+
+  DCHECK(old_parent);
+  new_child->MovedFrom(*old_parent);
 }
 
 Node* Node::replaceChild(Node* new_child,
@@ -764,9 +835,9 @@ Node* Node::appendChild(Node* new_child) {
 
 static bool IsNodeInNodes(
     const Node* const node,
-    const HeapVector<NodeOrStringOrTrustedScript>& nodes) {
-  for (const NodeOrStringOrTrustedScript& node_or_string : nodes) {
-    if (node_or_string.IsNode() && node_or_string.GetAsNode() == node)
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes) {
+  for (const V8UnionNodeOrStringOrTrustedScript* node_or_string : nodes) {
+    if (node_or_string->IsNode() && node_or_string->GetAsNode() == node)
       return true;
   }
   return false;
@@ -774,7 +845,7 @@ static bool IsNodeInNodes(
 
 static Node* FindViablePreviousSibling(
     const Node& node,
-    const HeapVector<NodeOrStringOrTrustedScript>& nodes) {
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes) {
   for (Node* sibling = node.previousSibling(); sibling;
        sibling = sibling->previousSibling()) {
     if (!IsNodeInNodes(sibling, nodes))
@@ -785,7 +856,7 @@ static Node* FindViablePreviousSibling(
 
 static Node* FindViableNextSibling(
     const Node& node,
-    const HeapVector<NodeOrStringOrTrustedScript>& nodes) {
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes) {
   for (Node* sibling = node.nextSibling(); sibling;
        sibling = sibling->nextSibling()) {
     if (!IsNodeInNodes(sibling, nodes))
@@ -795,71 +866,139 @@ static Node* FindViableNextSibling(
 }
 
 static Node* NodeOrStringToNode(
-    const NodeOrStringOrTrustedScript& node_or_string,
+    const V8UnionNodeOrStringOrTrustedScript* node_or_string,
     Document& document,
     bool needs_trusted_types_check,
+    const AtomicString& property_name,
     ExceptionState& exception_state) {
   if (!needs_trusted_types_check) {
     // Without trusted type checks, we simply extract the string from whatever
     // constituent type we find.
-    if (node_or_string.IsNode())
-      return node_or_string.GetAsNode();
-    if (node_or_string.IsTrustedScript()) {
-      return Text::Create(document,
-                          node_or_string.GetAsTrustedScript()->toString());
+    switch (node_or_string->GetContentType()) {
+      case V8UnionNodeOrStringOrTrustedScript::ContentType::kNode:
+        return node_or_string->GetAsNode();
+      case V8UnionNodeOrStringOrTrustedScript::ContentType::kString:
+        return Text::Create(document, node_or_string->GetAsString());
+      case V8UnionNodeOrStringOrTrustedScript::ContentType::kTrustedScript:
+        return Text::Create(document,
+                            node_or_string->GetAsTrustedScript()->toString());
     }
-    return Text::Create(document, node_or_string.GetAsString());
+    NOTREACHED();
   }
 
   // With trusted type checks, we can process trusted script or non-text nodes
   // directly. Strings or text nodes need to be checked.
-  if (node_or_string.IsNode() && !node_or_string.GetAsNode()->IsTextNode())
-    return node_or_string.GetAsNode();
+  if (node_or_string->IsNode() && !node_or_string->GetAsNode()->IsTextNode())
+    return node_or_string->GetAsNode();
 
-  if (node_or_string.IsTrustedScript()) {
+  if (node_or_string->IsTrustedScript()) {
     return Text::Create(document,
-                        node_or_string.GetAsTrustedScript()->toString());
+                        node_or_string->GetAsTrustedScript()->toString());
   }
 
-  String string_value = node_or_string.IsString()
-                            ? node_or_string.GetAsString()
-                            : node_or_string.GetAsNode()->textContent();
+  String string_value = node_or_string->IsString()
+                            ? node_or_string->GetAsString()
+                            : node_or_string->GetAsNode()->textContent();
 
   string_value = TrustedTypesCheckForScript(
-      string_value, document.GetExecutionContext(), exception_state);
+      string_value, document.GetExecutionContext(), trusted_types_names::kNode,
+      property_name, exception_state);
   if (exception_state.HadException())
     return nullptr;
   return Text::Create(document, string_value);
 }
 
+// Converts |node_unions| from bindings into actual Nodes by converting strings
+// and script into text nodes via NodeOrStringToNode.
 // Returns nullptr if an exception was thrown.
-static Node* ConvertNodesIntoNode(
-    const Node* parent,
-    const HeapVector<NodeOrStringOrTrustedScript>& nodes,
+// static
+VectorOf<Node> Node::ConvertNodeUnionsIntoNodes(
+    const ContainerNode* parent,
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& node_unions,
     Document& document,
+    const AtomicString& property_name,
     ExceptionState& exception_state) {
-  bool needs_check = IsA<HTMLScriptElement>(parent) &&
+  bool needs_check = !RuntimeEnabledFeatures::TrustedTypesHTMLEnabled() &&
+                     IsA<HTMLScriptElement>(parent) &&
                      document.GetExecutionContext() &&
                      document.GetExecutionContext()->RequireTrustedTypes();
-
-  if (nodes.size() == 1)
-    return NodeOrStringToNode(nodes[0], document, needs_check, exception_state);
-
-  Node* fragment = DocumentFragment::Create(document);
-  for (const NodeOrStringOrTrustedScript& node_or_string_or_trusted_script :
-       nodes) {
-    Node* node = NodeOrStringToNode(node_or_string_or_trusted_script, document,
-                                    needs_check, exception_state);
-    if (node)
-      fragment->appendChild(node, exception_state);
-    if (exception_state.HadException())
-      return nullptr;
+  VectorOf<Node> nodes;
+  for (const auto& node_union : node_unions) {
+    Node* node = NodeOrStringToNode(node_union, document, needs_check,
+                                    property_name, exception_state);
+    if (exception_state.HadException()) {
+      nodes.clear();
+      return nodes;
+    }
+    if (node) {
+      if (auto* fragment = DynamicTo<DocumentFragment>(node)) {
+        NodeVector fragment_nodes;
+        GetChildNodes(*fragment, fragment_nodes);
+        fragment->RemoveChildren();
+        nodes.append_range(fragment_nodes);
+      } else {
+        nodes.push_back(node);
+      }
+    }
   }
-  return fragment;
+
+  // When there's more than one node, we need to pretend that we're inserting
+  // the nodes into a document fragment (which we later insert into the
+  // intended parent, which transfers them from the document fragment), but we
+  // don't actually do that because of the costs of inserting and later
+  // removing (which require walking the entire tree).  Not actually inserting
+  // into a DocumentFragment is web observable in some edge cases, and
+  // https://github.com/whatwg/dom/issues/1313 proposes to specify this new
+  // (faster) behavior instead.
+  //
+  // TODO(https://github.com/whatwg/dom/issues/1313): We should consider not
+  // having different behavior depending on how many nodes are here, which
+  // makes it a strange API.
+  //
+  // The only pre-insertion check that could fail when inserting into a
+  // DocumentFragment is the ChildTypeAllowed check.  This will be checked
+  // again later when we insert the nodes into their intended parent.
+  // However, this does mean we differ from the spec in two ways:
+  // * we allow the use of DocumentType nodes (when their eventual parent is a
+  //   Document) in these methods where the spec would disallow them.
+  // * we perform some of the checks at different times, which means that when
+  //   an exception is thrown it could be a different exception from the one
+  //   the spec calls for, and we could leave the tree in a different state
+  //   than exactly following the spec would lead to.
+
+  if (nodes.size() > 1u) {
+    // Remove each node from its parent, and if a node occurs multiple
+    // times in the list, remove all except the *last* occurrence.
+    HeapHashSet<Member<Node>> nodes_seen;
+    HeapVector<Member<Node>> nodes_to_remove;
+    for (Node* node : nodes) {
+      auto add_result = nodes_seen.insert(node);
+      if (add_result.is_new_entry) {
+        node->remove(exception_state);
+        if (exception_state.HadException()) {
+          nodes.clear();
+          return nodes;
+        }
+      } else {
+        nodes_to_remove.push_back(node);
+      }
+    }
+    // The same node might be in nodes_to_remove more than once; for
+    // each occurrence we will remove one occurrence.  This is slow, but
+    // it's handling what is essentially an error case.
+    for (Node* node : nodes_to_remove) {
+      wtf_size_t index = nodes.Find(node);
+      CHECK_NE(index, kNotFound);
+      nodes.EraseAt(index);
+    }
+  }
+
+  return nodes;
 }
 
-void Node::Prepend(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
-                   ExceptionState& exception_state) {
+void Node::prepend(
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes,
+    ExceptionState& exception_state) {
   auto* this_node = DynamicTo<ContainerNode>(this);
   if (!this_node) {
     exception_state.ThrowDOMException(
@@ -868,13 +1007,19 @@ void Node::Prepend(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
     return;
   }
 
-  if (Node* node =
-          ConvertNodesIntoNode(this, nodes, GetDocument(), exception_state))
-    this_node->InsertBefore(node, firstChild(), exception_state);
+  VectorOf<Node> node_vector = ConvertNodeUnionsIntoNodes(
+      this_node, nodes, GetDocument(), trusted_types_names::kPrepend,
+      exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  this_node->InsertBefore(node_vector, this_node->firstChild(),
+                          exception_state);
 }
 
-void Node::Append(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
-                  ExceptionState& exception_state) {
+void Node::append(
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes,
+    ExceptionState& exception_state) {
   auto* this_node = DynamicTo<ContainerNode>(this);
   if (!this_node) {
     exception_state.ThrowDOMException(
@@ -883,79 +1028,292 @@ void Node::Append(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
     return;
   }
 
-  if (Node* node =
-          ConvertNodesIntoNode(this, nodes, GetDocument(), exception_state))
-    this_node->AppendChild(node, exception_state);
+  VectorOf<Node> node_vector =
+      ConvertNodeUnionsIntoNodes(this_node, nodes, GetDocument(),
+                                 trusted_types_names::kAppend, exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  this_node->AppendChildren(node_vector, exception_state);
 }
 
-void Node::Before(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
-                  ExceptionState& exception_state) {
-  Node* parent = parentNode();
+void Node::before(
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes,
+    ExceptionState& exception_state) {
+  ContainerNode* parent = parentNode();
   if (!parent)
     return;
-  auto* parent_node = DynamicTo<ContainerNode>(parent);
-  if (!parent_node) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kHierarchyRequestError,
-        "This node type does not support this method.");
-    return;
-  }
   Node* viable_previous_sibling = FindViablePreviousSibling(*this, nodes);
-  if (Node* node =
-          ConvertNodesIntoNode(parent, nodes, GetDocument(), exception_state)) {
-    parent_node->InsertBefore(node,
-                              viable_previous_sibling
-                                  ? viable_previous_sibling->nextSibling()
-                                  : parent->firstChild(),
-                              exception_state);
+  VectorOf<Node> node_vector =
+      ConvertNodeUnionsIntoNodes(parent, nodes, GetDocument(),
+                                 trusted_types_names::kBefore, exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  parent->InsertBefore(node_vector,
+                       viable_previous_sibling
+                           ? viable_previous_sibling->nextSibling()
+                           : parent->firstChild(),
+                       exception_state);
+}
+
+void Node::after(
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes,
+    ExceptionState& exception_state) {
+  ContainerNode* parent = parentNode();
+  if (!parent)
+    return;
+  Node* viable_next_sibling = FindViableNextSibling(*this, nodes);
+  VectorOf<Node> node_vector =
+      ConvertNodeUnionsIntoNodes(parent, nodes, GetDocument(),
+                                 trusted_types_names::kAfter, exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  parent->InsertBefore(node_vector, viable_next_sibling, exception_state);
+}
+
+namespace {
+ContainerNode* ParentForHTMLInsertion(Node* self,
+                                      ExceptionState& exception_state) {
+  ContainerNode* parent = self->parentNode();
+  if (!parent || parent->IsElementNode() || parent->IsShadowRoot()) {
+    return parent;
+  }
+
+  if (parent->IsDocumentFragment() &&
+      To<DocumentFragment>(parent)->IsTemplateContent()) {
+    return parent->ParentOrShadowHostOrTemplateHostNode();
+  }
+
+  exception_state.ThrowDOMException(DOMExceptionCode::kHierarchyRequestError,
+                                    "Invalid parent for HTML insertion");
+  return nullptr;
+}
+}  // namespace
+
+void Node::replaceWithHTML(const String& html,
+                           SetHTMLOptions* options,
+                           ExceptionState& exception_state) {
+  if (ContainerNode* parent = ParentForHTMLInsertion(this, exception_state)) {
+    parent->ReplaceChildWithHTML(
+        this, html,
+        FragmentParserConfig::ForContainer(
+            parent, Sanitizer::Mode::kSafe, trusted_types_names::kNode,
+            trusted_types_names::kReplaceWithHTML),
+        FragmentParserOptions(options), exception_state);
   }
 }
 
-void Node::After(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
-                 ExceptionState& exception_state) {
-  Node* parent = parentNode();
-  if (!parent)
-    return;
-  auto* parent_node = DynamicTo<ContainerNode>(parent);
-  if (!parent_node) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kHierarchyRequestError,
-        "This node type does not support this method.");
+void Node::replaceWithHTMLUnsafe(
+    const V8UnionStringOrTrustedHTML* html,
+    V8UnionSetHTMLUnsafeOptionsOrTrustedParserOptions* options,
+    ExceptionState& exception_state) {
+  FragmentParserOptions resolved_options = FragmentParserOptions::From(options);
+  String compliant_string = TrustedTypesCheckForFragment(
+      html, resolved_options, GetExecutionContext(), trusted_types_names::kNode,
+      trusted_types_names::kReplaceWithHTMLUnsafe, exception_state);
+  if (exception_state.HadException()) {
     return;
   }
-  Node* viable_next_sibling = FindViableNextSibling(*this, nodes);
-  if (Node* node =
-          ConvertNodesIntoNode(parent, nodes, GetDocument(), exception_state))
-    parent_node->InsertBefore(node, viable_next_sibling, exception_state);
+
+  ContainerNode* parent = ParentForHTMLInsertion(this, exception_state);
+  if (!parent) {
+    return;
+  }
+  const FragmentParserConfig config = FragmentParserConfig::ForContainer(
+      parent, Sanitizer::Mode::kUnsafe, trusted_types_names::kNode,
+      trusted_types_names::kReplaceWithHTMLUnsafe);
+
+  parent->ReplaceChildWithHTML(this, compliant_string, config, resolved_options,
+                               exception_state);
 }
 
-void Node::ReplaceWith(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
-                       ExceptionState& exception_state) {
-  Node* parent = parentNode();
-  if (!parent)
+void Node::beforeHTML(const String& html,
+                      SetHTMLOptions* options,
+                      ExceptionState& exception_state) {
+  ContainerNode* parent = ParentForHTMLInsertion(this, exception_state);
+  if (!parent) {
     return;
-  auto* parent_node = DynamicTo<ContainerNode>(parent);
-  if (!parent_node) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kHierarchyRequestError,
-        "This node type does not support this method.");
+  }
+  parent->InsertHTMLBefore(
+      this, html,
+      FragmentParserConfig::ForContainer(parent, Sanitizer::Mode::kSafe,
+                                         trusted_types_names::kNode,
+                                         trusted_types_names::kBeforeHTML),
+      FragmentParserOptions(options), exception_state);
+}
+
+void Node::beforeHTMLUnsafe(
+    const V8UnionStringOrTrustedHTML* html,
+    V8UnionSetHTMLUnsafeOptionsOrTrustedParserOptions* options,
+    ExceptionState& exception_state) {
+  FragmentParserOptions resolved_options = FragmentParserOptions::From(options);
+  String compliant_string = TrustedTypesCheckForFragment(
+      html, resolved_options, GetExecutionContext(), trusted_types_names::kNode,
+      trusted_types_names::kBeforeHTMLUnsafe, exception_state);
+  if (exception_state.HadException()) {
     return;
   }
 
-  Node* viable_next_sibling = FindViableNextSibling(*this, nodes);
-  Node* node =
-      ConvertNodesIntoNode(parent, nodes, GetDocument(), exception_state);
-  if (exception_state.HadException())
+  ContainerNode* parent = ParentForHTMLInsertion(this, exception_state);
+  if (!parent) {
     return;
-  if (parent_node == parentNode())
-    parent_node->ReplaceChild(node, this, exception_state);
-  else
-    parent_node->InsertBefore(node, viable_next_sibling, exception_state);
+  }
+  const FragmentParserConfig config = FragmentParserConfig::ForContainer(
+      parent, Sanitizer::Mode::kUnsafe, trusted_types_names::kNode,
+      trusted_types_names::kBeforeHTMLUnsafe);
+
+  parent->InsertHTMLBefore(this, compliant_string, config, resolved_options,
+                           exception_state);
+}
+
+void Node::afterHTML(const String& html,
+                     SetHTMLOptions* options,
+                     ExceptionState& exception_state) {
+  ContainerNode* parent = ParentForHTMLInsertion(this, exception_state);
+  if (!parent) {
+    return;
+  }
+  parent->InsertHTMLBefore(
+      nextSibling(), html,
+      FragmentParserConfig::ForContainer(parent, Sanitizer::Mode::kSafe,
+                                         trusted_types_names::kNode,
+                                         trusted_types_names::kAfterHTML),
+      FragmentParserOptions(options), exception_state);
+}
+
+void Node::afterHTMLUnsafe(
+    const V8UnionStringOrTrustedHTML* html,
+    V8UnionSetHTMLUnsafeOptionsOrTrustedParserOptions* options,
+    ExceptionState& exception_state) {
+  FragmentParserOptions resolved_options = FragmentParserOptions::From(options);
+  String compliant_string = TrustedTypesCheckForFragment(
+      html, resolved_options, GetExecutionContext(), trusted_types_names::kNode,
+      trusted_types_names::kAfterHTMLUnsafe, exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+
+  ContainerNode* parent = ParentForHTMLInsertion(this, exception_state);
+  if (!parent) {
+    return;
+  }
+  const FragmentParserConfig config = FragmentParserConfig::ForContainer(
+      parent, Sanitizer::Mode::kUnsafe, trusted_types_names::kNode,
+      trusted_types_names::kAfterHTMLUnsafe);
+
+  parent->InsertHTMLBefore(nextSibling(), compliant_string, config,
+                           resolved_options, exception_state);
+}
+
+WritableStream* Node::streamBeforeHTMLUnsafe(
+    ScriptState* script_state,
+    V8UnionSetHTMLUnsafeOptionsOrTrustedParserOptions* options,
+    ExceptionState& exception_state) {
+  std::optional<FragmentParserOptions> resolved_options =
+      TrustedTypesCheckForStreaming(
+          FragmentParserOptions::From(options),
+          ExecutionContext::From(script_state), trusted_types_names::kNode,
+          trusted_types_names::kStreamBeforeHTMLUnsafe, exception_state);
+  if (!resolved_options) {
+    return nullptr;
+  }
+  return HTMLStream::Create(
+      script_state, parentNode(), this, Sanitizer::Mode::kUnsafe,
+      *resolved_options, trusted_types_names::kNode,
+      trusted_types_names::kStreamBeforeHTMLUnsafe, exception_state);
+}
+
+WritableStream* Node::streamBeforeHTML(ScriptState* script_state,
+                                       SetHTMLOptions* options,
+                                       ExceptionState& exception_state) {
+  return HTMLStream::Create(
+      script_state, parentNode(), this, Sanitizer::Mode::kSafe,
+      FragmentParserOptions(options), trusted_types_names::kNode,
+      trusted_types_names::kStreamBeforeHTML, exception_state);
+}
+
+WritableStream* Node::streamAfterHTMLUnsafe(
+    ScriptState* script_state,
+    V8UnionSetHTMLUnsafeOptionsOrTrustedParserOptions* options,
+    ExceptionState& exception_state) {
+  std::optional<FragmentParserOptions> resolved_options =
+      TrustedTypesCheckForStreaming(
+          FragmentParserOptions::From(options),
+          ExecutionContext::From(script_state), trusted_types_names::kNode,
+          trusted_types_names::kStreamAfterHTMLUnsafe, exception_state);
+  if (!resolved_options) {
+    return nullptr;
+  }
+  return HTMLStream::Create(
+      script_state, parentNode(), nextSibling(), Sanitizer::Mode::kUnsafe,
+      *resolved_options, trusted_types_names::kNode,
+      trusted_types_names::kStreamAfterHTMLUnsafe, exception_state);
+}
+
+WritableStream* Node::streamAfterHTML(ScriptState* script_state,
+                                      SetHTMLOptions* options,
+                                      ExceptionState& exception_state) {
+  return HTMLStream::Create(
+      script_state, parentNode(), nextSibling(), Sanitizer::Mode::kSafe,
+      FragmentParserOptions(options), trusted_types_names::kNode,
+      trusted_types_names::kStreamAfterHTML, exception_state);
+}
+
+WritableStream* Node::streamReplaceWithHTMLUnsafe(
+    ScriptState* script_state,
+    V8UnionSetHTMLUnsafeOptionsOrTrustedParserOptions* options,
+    ExceptionState& exception_state) {
+  std::optional<FragmentParserOptions> resolved_options =
+      TrustedTypesCheckForStreaming(
+          FragmentParserOptions::From(options),
+          ExecutionContext::From(script_state), trusted_types_names::kNode,
+          trusted_types_names::kStreamReplaceWithHTMLUnsafe, exception_state);
+  if (!resolved_options) {
+    return nullptr;
+  }
+  return HTMLStream::Create(script_state, parentNode(), nextSibling(),
+                            Sanitizer::Mode::kUnsafe, *resolved_options,
+                            trusted_types_names::kNode,
+                            trusted_types_names::kStreamReplaceWithHTMLUnsafe,
+                            exception_state, [&]() { remove(); });
+}
+
+WritableStream* Node::streamReplaceWithHTML(ScriptState* script_state,
+                                            SetHTMLOptions* options,
+                                            ExceptionState& exception_state) {
+  return HTMLStream::Create(
+      script_state, parentNode(), nextSibling(), Sanitizer::Mode::kSafe,
+      FragmentParserOptions(options), trusted_types_names::kNode,
+      trusted_types_names::kStreamReplaceWithHTML, exception_state,
+      [&]() { remove(); });
+}
+
+void Node::replaceWith(
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& nodes,
+    ExceptionState& exception_state) {
+  ContainerNode* parent = parentNode();
+  if (!parent)
+    return;
+  Node* viable_next_sibling = FindViableNextSibling(*this, nodes);
+  VectorOf<Node> node_vector = ConvertNodeUnionsIntoNodes(
+      parent, nodes, GetDocument(), trusted_types_names::kReplaceWith,
+      exception_state);
+  if (exception_state.HadException()) {
+    return;
+  }
+  if (parent == parentNode()) {
+    parent->ReplaceChild(node_vector, this, exception_state);
+  } else {
+    parent->InsertBefore(node_vector, viable_next_sibling, exception_state);
+  }
 }
 
 // https://dom.spec.whatwg.org/#dom-parentnode-replacechildren
-void Node::ReplaceChildren(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
-                           ExceptionState& exception_state) {
+void Node::replaceChildren(
+    const HeapVector<Member<V8UnionNodeOrStringOrTrustedScript>>& node_unions,
+    ExceptionState& exception_state) {
   auto* this_node = DynamicTo<ContainerNode>(this);
   if (!this_node) {
     exception_state.ThrowDOMException(
@@ -964,27 +1322,13 @@ void Node::ReplaceChildren(const HeapVector<NodeOrStringOrTrustedScript>& nodes,
     return;
   }
 
-  // 1. Let node be the result of converting nodes into a node given nodes and
-  // this’s node document.
-  Node* node =
-      ConvertNodesIntoNode(this, nodes, GetDocument(), exception_state);
-  if (exception_state.HadException())
+  VectorOf<Node> nodes = ConvertNodeUnionsIntoNodes(
+      this_node, node_unions, GetDocument(), trusted_types_names::kReplace,
+      exception_state);
+  if (exception_state.HadException()) {
     return;
-
-  // 2. Ensure pre-insertion validity of node into this before null.
-  if (!this_node->EnsurePreInsertionValidity(*node, nullptr, nullptr,
-                                             exception_state))
-    return;
-
-  // 3. Replace all with node within this.
-  ChildListMutationScope mutation(*this);
-  while (Node* first_child = firstChild()) {
-    removeChild(first_child, exception_state);
-    if (exception_state.HadException())
-      return;
   }
-
-  appendChild(node, exception_state);
+  this_node->ReplaceChildren(nodes, exception_state);
 }
 
 void Node::remove(ExceptionState& exception_state) {
@@ -994,6 +1338,14 @@ void Node::remove(ExceptionState& exception_state) {
 
 void Node::remove() {
   remove(ASSERT_NO_EXCEPTION);
+}
+
+Element* Node::previousElementSibling() {
+  return ElementTraversal::PreviousSibling(*this);
+}
+
+Element* Node::nextElementSibling() {
+  return ElementTraversal::NextSibling(*this);
 }
 
 Node* Node::cloneNode(bool deep, ExceptionState& exception_state) const {
@@ -1009,14 +1361,12 @@ Node* Node::cloneNode(bool deep, ExceptionState& exception_state) const {
   // 2. Return a clone of this, with the clone children flag set if deep is
   // true, and the clone shadows flag set if this is a DocumentFragment whose
   // host is an HTML template element.
-  auto* fragment = DynamicTo<DocumentFragment>(this);
-  bool clone_shadows_flag = fragment && fragment->IsTemplateContent() &&
-                            RuntimeEnabledFeatures::DeclarativeShadowDOMEnabled(
-                                GetExecutionContext());
-  return Clone(GetDocument(),
-               deep ? (clone_shadows_flag ? CloneChildrenFlag::kCloneWithShadows
-                                          : CloneChildrenFlag::kClone)
-                    : CloneChildrenFlag::kSkip);
+  NodeCloningData data;
+  if (deep) {
+    data.Put(CloneOption::kIncludeDescendants);
+  }
+  return Clone(GetDocument(), data, /*append_to*/ nullptr,
+               /*fallback_registry*/ nullptr);
 }
 
 Node* Node::cloneNode(bool deep) const {
@@ -1024,8 +1374,6 @@ Node* Node::cloneNode(bool deep) const {
 }
 
 void Node::normalize() {
-  UpdateDistributionForFlatTreeTraversal();
-
   // Go through the subtree beneath us, normalizing all nodes. This means that
   // any two adjacent text nodes are merged and any empty text nodes are
   // removed.
@@ -1045,78 +1393,11 @@ void Node::normalize() {
 }
 
 LayoutBox* Node::GetLayoutBox() const {
-  LayoutObject* layout_object = GetLayoutObject();
-  return layout_object && layout_object->IsBox() ? ToLayoutBox(layout_object)
-                                                 : nullptr;
-}
-
-void Node::SetLayoutObject(LayoutObject* layout_object) {
-  NodeRenderingData* node_layout_data =
-      HasRareData() ? DataAsNodeRareData()->GetNodeRenderingData()
-                    : DataAsNodeRenderingData();
-
-  // Already pointing to a non empty NodeRenderingData so just set the pointer
-  // to the new LayoutObject.
-  if (!node_layout_data->IsSharedEmptyData()) {
-    node_layout_data->SetLayoutObject(layout_object);
-    return;
-  }
-
-  if (!layout_object)
-    return;
-
-  // Swap the NodeRenderingData to point to a new NodeRenderingData instead of
-  // the static SharedEmptyData instance.
-  DCHECK(!node_layout_data->GetComputedStyle());
-  node_layout_data =
-      MakeGarbageCollected<NodeRenderingData>(layout_object, nullptr);
-  if (HasRareData()) {
-    DataAsNodeRareData()->SetNodeRenderingData(node_layout_data);
-  } else {
-    data_ = node_layout_data;
-  }
-}
-
-void Node::SetComputedStyle(scoped_refptr<const ComputedStyle> computed_style) {
-  // We don't set computed style for text nodes.
-  DCHECK(IsElementNode());
-
-  NodeRenderingData* node_layout_data =
-      HasRareData() ? DataAsNodeRareData()->GetNodeRenderingData()
-                    : DataAsNodeRenderingData();
-
-  // Already pointing to a non empty NodeRenderingData so just set the pointer
-  // to the new LayoutObject.
-  if (!node_layout_data->IsSharedEmptyData()) {
-    node_layout_data->SetComputedStyle(computed_style);
-    return;
-  }
-
-  if (!computed_style)
-    return;
-
-  // Ensure we only set computed style for elements which are not part of the
-  // flat tree unless it's enforced for getComputedStyle().
-  DCHECK(computed_style->IsEnsuredInDisplayNone() ||
-         LayoutTreeBuilderTraversal::Parent(*this));
-
-  // Swap the NodeRenderingData to point to a new NodeRenderingData instead of
-  // the static SharedEmptyData instance.
-  DCHECK(!node_layout_data->GetLayoutObject());
-  node_layout_data =
-      MakeGarbageCollected<NodeRenderingData>(nullptr, computed_style);
-  if (HasRareData()) {
-    DataAsNodeRareData()->SetNodeRenderingData(node_layout_data);
-  } else {
-    data_ = node_layout_data;
-  }
+  return DynamicTo<LayoutBox>(GetLayoutObject());
 }
 
 LayoutBoxModelObject* Node::GetLayoutBoxModelObject() const {
-  LayoutObject* layout_object = GetLayoutObject();
-  return layout_object && layout_object->IsBoxModelObject()
-             ? ToLayoutBoxModelObject(layout_object)
-             : nullptr;
+  return DynamicTo<LayoutBoxModelObject>(GetLayoutObject());
 }
 
 PhysicalRect Node::BoundingBox() const {
@@ -1125,8 +1406,8 @@ PhysicalRect Node::BoundingBox() const {
   return PhysicalRect();
 }
 
-IntRect Node::PixelSnappedBoundingBox() const {
-  return PixelSnappedIntRect(BoundingBox());
+gfx::Rect Node::PixelSnappedBoundingBox() const {
+  return ToPixelSnappedRect(BoundingBox());
 }
 
 PhysicalRect Node::BoundingBoxForScrollIntoView() const {
@@ -1157,7 +1438,7 @@ bool Node::IsClosedShadowHiddenFrom(const Node& other) const {
   for (; scope->ParentTreeScope(); scope = scope->ParentTreeScope()) {
     const ContainerNode& root = scope->RootNode();
     auto* shadow_root = DynamicTo<ShadowRoot>(root);
-    if (shadow_root && !shadow_root->IsOpenOrV0())
+    if (shadow_root && !shadow_root->IsOpen())
       break;
   }
 
@@ -1169,68 +1450,13 @@ bool Node::IsClosedShadowHiddenFrom(const Node& other) const {
   return true;
 }
 
-bool Node::NeedsDistributionRecalc() const {
-  return ShadowIncludingRoot().ChildNeedsDistributionRecalc();
-}
-
-bool Node::MayContainLegacyNodeTreeWhereDistributionShouldBeSupported() const {
-  if (isConnected() && !GetDocument().MayContainV0Shadow()) {
-    // TODO(crbug.com/787717): Some built-in elements still use <content>
-    // elements in their user-agent shadow roots. DCHECK() fails if such an
-    // element is used.
-    DCHECK(!GetDocument().ChildNeedsDistributionRecalc());
-    return false;
-  }
-  return true;
-}
-
-void Node::UpdateDistributionForUnknownReasons() {
-  UpdateDistributionInternal();
-  // For the sake of safety, call RecalcSlotAssignments as well as
-  // UpdateDistribution().
-  if (isConnected())
-    GetDocument().GetSlotAssignmentEngine().RecalcSlotAssignments();
-}
-
-void Node::UpdateDistributionInternal() {
-  if (!MayContainLegacyNodeTreeWhereDistributionShouldBeSupported())
-    return;
-  // Extra early out to avoid spamming traces.
-  if (isConnected() && !GetDocument().ChildNeedsDistributionRecalc())
-    return;
-  TRACE_EVENT0("blink", "Node::updateDistribution");
-  ScriptForbiddenScope forbid_script;
-  Node& root = ShadowIncludingRoot();
-  if (root.ChildNeedsDistributionRecalc())
-    root.RecalcDistribution();
-}
-
-void Node::RecalcDistribution() {
-  DCHECK(ChildNeedsDistributionRecalc());
-
-  if (GetShadowRoot())
-    GetShadowRoot()->DistributeIfNeeded();
-
-  DCHECK(ScriptForbiddenScope::IsScriptForbidden());
-  for (Node* child = firstChild(); child; child = child->nextSibling()) {
-    if (child->ChildNeedsDistributionRecalc())
-      child->RecalcDistribution();
-  }
-
-  if (ShadowRoot* root = GetShadowRoot()) {
-    if (root->ChildNeedsDistributionRecalc())
-      root->RecalcDistribution();
-  }
-
-  ClearChildNeedsDistributionRecalc();
-}
-
 void Node::SetIsLink(bool is_link) {
   SetFlag(is_link && !SVGImage::IsInSVGImage(To<Element>(this)), kIsLinkFlag);
 }
 
 void Node::SetNeedsStyleInvalidation() {
   DCHECK(IsContainerNode());
+  DCHECK(!GetDocument().InvalidationDisallowed());
   SetFlag(kNeedsStyleInvalidationFlag);
   MarkAncestorsWithChildNeedsStyleInvalidation();
 }
@@ -1257,21 +1483,12 @@ void Node::MarkAncestorsWithChildNeedsStyleInvalidation() {
   GetDocument().ScheduleLayoutTreeUpdateIfNeeded();
 }
 
-void Node::MarkAncestorsWithChildNeedsDistributionRecalc() {
-  ScriptForbiddenScope forbid_script_during_raw_iteration;
-  for (Node* node = this; node && !node->ChildNeedsDistributionRecalc();
-       node = node->ParentOrShadowHostNode()) {
-    node->SetChildNeedsDistributionRecalc();
-  }
-  GetDocument().ScheduleLayoutTreeUpdateIfNeeded();
-}
-
 void Node::MarkSubtreeNeedsStyleRecalcForFontUpdates() {
   if (GetStyleChangeType() == kSubtreeStyleChange)
     return;
 
-  if (IsElementNode()) {
-    const ComputedStyle* style = GetComputedStyle();
+  if (auto* element = DynamicTo<Element>(this)) {
+    const ComputedStyle* style = element->GetComputedStyle();
     if (!style)
       return;
 
@@ -1280,7 +1497,7 @@ void Node::MarkSubtreeNeedsStyleRecalcForFontUpdates() {
     // other style computations are unaffected by font loading.
     if (!NeedsStyleRecalc()) {
       if (style->DependsOnFontMetrics() ||
-          To<Element>(this)->PseudoElementStylesDependOnFontMetrics()) {
+          element->PseudoElementStylesDependOnFontMetrics()) {
         SetNeedsStyleRecalc(
             kLocalStyleChange,
             StyleChangeReasonForTracing::Create(style_change_reason::kFonts));
@@ -1295,108 +1512,100 @@ void Node::MarkSubtreeNeedsStyleRecalcForFontUpdates() {
     child->MarkSubtreeNeedsStyleRecalcForFontUpdates();
 }
 
-#if DCHECK_IS_ON()
-namespace {
-class AllowDirtyShadowV0TraversalScope {
-  STACK_ALLOCATED();
-
- public:
-  explicit AllowDirtyShadowV0TraversalScope(Document& document)
-      : document_(&document),
-        old_value_(document.AllowDirtyShadowV0Traversal()) {
-    document.SetAllowDirtyShadowV0Traversal(true);
-  }
-  ~AllowDirtyShadowV0TraversalScope() {
-    document_->SetAllowDirtyShadowV0Traversal(old_value_);
-  }
-
- private:
-  Document* document_;
-  bool old_value_;
-};
-}  // namespace
-#define ALLOW_DIRTY_SHADOW_V0_TRAVERSAL_SCOPE(document) \
-  AllowDirtyShadowV0TraversalScope traversal_scope(document)
-#else  // DCHECK_IS_ON()
-#define ALLOW_DIRTY_SHADOW_V0_TRAVERSAL_SCOPE(document)
-#endif  // DCHECK_IS_ON()
-
 bool Node::ShouldSkipMarkingStyleDirty() const {
-  if (GetComputedStyle())
-    return false;
-
-  ALLOW_DIRTY_SHADOW_V0_TRAVERSAL_SCOPE(GetDocument());
-
-  // If we don't have a computed style, and our parent element does not have a
-  // computed style it's not necessary to mark this node for style recalc.
-  if (auto* parent = GetStyleRecalcParent()) {
-    while (parent && !parent->CanParticipateInFlatTree())
-      parent = parent->GetStyleRecalcParent();
-    return !parent || !parent->GetComputedStyle();
+  // If our parent element does not have a computed style, it's not necessary to
+  // mark this node for style recalc.
+  if (Element* parent = GetStyleRecalcParent()) {
+    return !parent->GetComputedStyle();
   }
-  // If this is the root element, and it does not have a computed style, we
-  // still need to mark it for style recalc since it may change from
-  // display:none. Otherwise, the node is not in the flat tree, and we can
-  // skip marking it dirty.
-  auto* root_element = GetDocument().documentElement();
-  return root_element && root_element != this;
+  if (const Element* element = DynamicTo<Element>(this)) {
+    const Element* root_element = GetDocument().documentElement();
+    if (!root_element || element == root_element) {
+      // This is the root element, or we are about to insert the root element.
+      // Should always allow marking it dirty.
+      return false;
+    }
+    // This is an element outside the flat tree without a parent. Should only
+    // mark dirty if it has an ensured style.
+    return !element->GetComputedStyle();
+  }
+  // Text nodes outside the flat tree do not need to be marked for style recalc.
+  return true;
 }
 
-void Node::MarkAncestorsWithChildNeedsStyleRecalc() {
-  ALLOW_DIRTY_SHADOW_V0_TRAVERSAL_SCOPE(GetDocument());
-  ContainerNode* style_parent = GetStyleRecalcParent();
-  bool parent_dirty = style_parent && style_parent->IsDirtyForStyleRecalc();
-  ContainerNode* ancestor = style_parent;
-  for (; ancestor && !ancestor->ChildNeedsStyleRecalc();
-       ancestor = ancestor->GetStyleRecalcParent()) {
-    if (!ancestor->isConnected())
-      return;
-    ancestor->SetChildNeedsStyleRecalc();
-    if (ancestor->IsDirtyForStyleRecalc())
-      break;
-    // If we reach a locked ancestor, we should abort since the ancestor marking
-    // will be done when the lock is committed.
-    if (RuntimeEnabledFeatures::CSSContentVisibilityEnabled()) {
-      auto* ancestor_element = DynamicTo<Element>(ancestor);
-      if (ancestor_element &&
-          ancestor_element->ChildStyleRecalcBlockedByDisplayLock()) {
-        break;
-      }
+namespace {
+
+bool IsNodeInFlatTree(const Node& node, const Element* style_parent) {
+  const ComputedStyle* current_style = nullptr;
+  if (const Element* element = DynamicTo<Element>(node)) {
+    current_style = element->GetComputedStyle();
+    if (current_style && !style_parent && !element->IsDocumentElement()) {
+      // An element which does not have a GetStyleRecalcParent(), and is not
+      // the documentElement, does not take part in the flat tree with the
+      // current slot assignments. They still may have a non-null ComputedStyle
+      // if they have been inserted in their current position with moveBefore().
+      //
+      // The ComputedStyle will be cleared if the next slot assignment decides
+      // it is not part of the flat tree.
+      //
+      // Return early here to make sure we do not attempt to use elements
+      // outside the flat to update the recalc root below since they won't be
+      // reached during the style recalc pass when outside the flat tree.
+      return false;
     }
   }
-  if (!isConnected())
+  if (!current_style && style_parent) {
+    current_style = style_parent->GetComputedStyle();
+  }
+  if (current_style && current_style->IsEnsuredOutsideFlatTree()) {
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+void Node::MarkAncestorsWithChildNeedsStyleRecalc() {
+  Element* style_parent = GetStyleRecalcParent();
+  bool parent_dirty = style_parent && style_parent->IsDirtyForStyleRecalc();
+  Element* ancestor = style_parent;
+  for (; ancestor && !ancestor->ChildNeedsStyleRecalc();
+       ancestor = ancestor->GetStyleRecalcParent()) {
+    if (!ancestor->isConnected()) {
+      return;
+    }
+    ancestor->SetChildNeedsStyleRecalc();
+    if (ancestor->IsDirtyForStyleRecalc()) {
+      break;
+    }
+    // If we reach a locked ancestor, we should abort since the ancestor marking
+    // will be done when the lock is committed.
+    if (ancestor->ChildStyleRecalcBlockedByDisplayLock()) {
+      break;
+    }
+  }
+  if (!isConnected()) {
     return;
+  }
   // If the parent node is already dirty, we can keep the same recalc root. The
   // early return here is a performance optimization.
-  if (parent_dirty)
+  if (parent_dirty) {
     return;
+  }
   // If we are outside the flat tree we should not update the recalc root
   // because we should not traverse those nodes from StyleEngine::RecalcStyle().
-  if (const ComputedStyle* current_style = GetComputedStyle()) {
-    if (current_style->IsEnsuredOutsideFlatTree())
-      return;
-  } else {
-    while (style_parent && !style_parent->CanParticipateInFlatTree())
-      style_parent = style_parent->GetStyleRecalcParent();
-    if (style_parent) {
-      if (const auto* parent_style = style_parent->GetComputedStyle()) {
-        if (parent_style->IsEnsuredOutsideFlatTree())
-          return;
-      }
-    }
+  if (!IsNodeInFlatTree(*this, style_parent)) {
+    return;
   }
   // If we're in a locked subtree, then we should not update the style recalc
   // roots. These would be updated when we commit the lock. If we have locked
   // display locks somewhere in the document, we iterate up the ancestor chain
   // to check if we're in one such subtree.
-  if (RuntimeEnabledFeatures::CSSContentVisibilityEnabled() &&
-      GetDocument().GetDisplayLockDocumentState().LockedDisplayLockCount() >
-          0) {
-    for (auto* ancestor_copy = ancestor; ancestor_copy;
+  if (GetDocument().GetDisplayLockDocumentState().LockedDisplayLockCount() >
+      0) {
+    for (Element* ancestor_copy = ancestor; ancestor_copy;
          ancestor_copy = ancestor_copy->GetStyleRecalcParent()) {
-      auto* ancestor_copy_element = DynamicTo<Element>(ancestor_copy);
-      if (ancestor_copy_element &&
-          ancestor_copy_element->ChildStyleRecalcBlockedByDisplayLock()) {
+      if (ancestor_copy->ChildStyleRecalcBlockedByDisplayLock()) {
         return;
       }
     }
@@ -1409,43 +1618,66 @@ void Node::MarkAncestorsWithChildNeedsStyleRecalc() {
 Element* Node::FlatTreeParentForChildDirty() const {
   if (IsPseudoElement())
     return ParentOrShadowHostElement();
-  if (IsChildOfV1ShadowHost()) {
+  if (IsChildOfShadowHost()) {
     if (auto* data = GetFlatTreeNodeData())
       return data->AssignedSlot();
     return nullptr;
   }
-  if (IsInV0ShadowTree() || IsChildOfV0ShadowHost()) {
-    if (ShadowRootWhereNodeCanBeDistributedForV0(*this)) {
-      if (V0InsertionPoint* insertion_point =
-              const_cast<V0InsertionPoint*>(ResolveReprojection(this))) {
-        return insertion_point;
-      }
+  Element* parent = ParentOrShadowHostElement();
+  if (HTMLSlotElement* slot = DynamicTo<HTMLSlotElement>(parent)) {
+    if (slot->HasAssignedNodesNoRecalc())
       return nullptr;
-    }
   }
-  return ParentOrShadowHostElement();
+  return parent;
 }
 
 void Node::MarkAncestorsWithChildNeedsReattachLayoutTree() {
   DCHECK(isConnected());
   Element* ancestor = GetReattachParent();
-  bool parent_dirty = ancestor && ancestor->NeedsReattachLayoutTree();
+  bool parent_dirty = ancestor && ancestor->IsDirtyForRebuildLayoutTree();
+  DCHECK(!ancestor || !ChildNeedsReattachLayoutTree() ||
+         !ancestor->ChildNeedsReattachLayoutTree() || NeedsReattachLayoutTree())
+      << "If both this and the parent are already marked with "
+         "ChildNeedsReattachLayoutTree(), something is broken and "
+         "UpdateLayoutTreeRebuildRoot() will be confused about common "
+         "ancestors.";
   for (; ancestor && !ancestor->ChildNeedsReattachLayoutTree();
        ancestor = ancestor->GetReattachParent()) {
     ancestor->SetChildNeedsReattachLayoutTree();
-    if (ancestor->NeedsReattachLayoutTree())
+    if (ancestor->IsDirtyForRebuildLayoutTree())
+      break;
+
+    // If we reach a locked ancestor, we should abort since the ancestor marking
+    // will be done when the context is unlocked.
+    if (ancestor->ChildStyleRecalcBlockedByDisplayLock())
       break;
   }
   // If the parent node is already dirty, we can keep the same rebuild root. The
   // early return here is a performance optimization.
   if (parent_dirty)
     return;
+
+  // If we're in a locked subtree, then we should not update the layout tree
+  // rebuild root. It would be updated when we unlock the context. In other
+  // words, the only way we have a node in the locked subtree is if the ancestor
+  // has a locked display lock context or it is dirty for reattach. In either of
+  // those cases, we have a dirty bit trail up to the display lock context,
+  // which will be propagated when the lock is removed.
+  if (GetDocument().GetDisplayLockDocumentState().LockedDisplayLockCount() >
+      0) {
+    for (Element* ancestor_copy = ancestor; ancestor_copy;
+         ancestor_copy = ancestor_copy->GetReattachParent()) {
+      if (ancestor_copy->ChildStyleRecalcBlockedByDisplayLock())
+        return;
+    }
+  }
   GetDocument().GetStyleEngine().UpdateLayoutTreeRebuildRoot(ancestor, this);
 }
 
 void Node::SetNeedsReattachLayoutTree() {
   DCHECK(GetDocument().InStyleRecalc());
-  DCHECK(!GetDocument().ChildNeedsDistributionRecalc());
+  DCHECK(GetDocument().GetStyleEngine().MarkReattachAllowed());
+  DCHECK(!GetDocument().InvalidationDisallowed());
   DCHECK(IsElementNode() || IsTextNode());
   DCHECK(InActiveDocument());
   SetFlag(kNeedsReattachLayoutTree);
@@ -1454,7 +1686,8 @@ void Node::SetNeedsReattachLayoutTree() {
 
 void Node::SetNeedsStyleRecalc(StyleChangeType change_type,
                                const StyleChangeReasonForTracing& reason) {
-  DCHECK(!GetDocument().GetStyleEngine().InRebuildLayoutTree());
+  DCHECK(GetDocument().GetStyleEngine().MarkStyleDirtyAllowed());
+  DCHECK(!GetDocument().InvalidationDisallowed());
   DCHECK(change_type != kNoStyleChange);
   DCHECK(IsElementNode() || IsTextNode());
 
@@ -1463,22 +1696,24 @@ void Node::SetNeedsStyleRecalc(StyleChangeType change_type,
   if (ShouldSkipMarkingStyleDirty())
     return;
 
-  TRACE_EVENT_INSTANT1(
+  DEVTOOLS_TIMELINE_TRACE_EVENT_INSTANT_WITH_CATEGORIES(
       TRACE_DISABLED_BY_DEFAULT("devtools.timeline.invalidationTracking"),
-      "StyleRecalcInvalidationTracking", TRACE_EVENT_SCOPE_THREAD, "data",
-      inspector_style_recalc_invalidation_tracking_event::Data(
-          this, change_type, reason));
+      "StyleRecalcInvalidationTracking",
+      inspector_style_recalc_invalidation_tracking_event::Data, this,
+      change_type, reason);
 
   StyleChangeType existing_change_type = GetStyleChangeType();
   if (change_type > existing_change_type)
     SetStyleChange(change_type);
 
-  auto* this_element = DynamicTo<Element>(this);
   if (existing_change_type == kNoStyleChange)
     MarkAncestorsWithChildNeedsStyleRecalc();
 
-  if (this_element && HasRareData())
+  // NOTE: If we are being called from SetNeedsAnimationStyleRecalc(), the
+  // AnimationStyleChange bit may be reset to 'true'.
+  if (auto* this_element = DynamicTo<Element>(this)) {
     this_element->SetAnimationStyleChange(false);
+  }
 
   if (auto* svg_element = DynamicTo<SVGElement>(this))
     svg_element->SetNeedsStyleRecalcForInstances(change_type, reason);
@@ -1487,10 +1722,12 @@ void Node::SetNeedsStyleRecalc(StyleChangeType change_type,
 void Node::ClearNeedsStyleRecalc() {
   node_flags_ &= ~kStyleChangeMask;
   ClearFlag(kForceReattachLayoutTree);
-
-  auto* element = DynamicTo<Element>(this);
-  if (element && HasRareData())
+  if (!data_) {
+    return;
+  }
+  if (auto* element = DynamicTo<Element>(this)) {
     element->SetAnimationStyleChange(false);
+  }
 }
 
 bool Node::InActiveDocument() const {
@@ -1502,34 +1739,24 @@ bool Node::ShouldHaveFocusAppearance() const {
   return true;
 }
 
-bool Node::IsInert() const {
-  if (!isConnected() || !CanParticipateInFlatTree())
-    return true;
-
-  DCHECK(!ChildNeedsDistributionRecalc());
-
-  if (this != GetDocument() && this != GetDocument().documentElement()) {
-    const Element* modal_element = GetDocument().ActiveModalDialog();
-    if (!modal_element)
-      modal_element = Fullscreen::FullscreenElementFrom(GetDocument());
-    if (modal_element && !FlatTreeTraversal::ContainsIncludingPseudoElement(
-                             *modal_element, *this)) {
-      return true;
-    }
+void Node::FocusabilityLost() {
+  if (IsA<HTMLFormElement>(this) || IsA<HTMLFormControlElement>(this)) {
+    GetDocument().DidChangeFormRelatedElementDynamically(
+        DynamicTo<HTMLElement>(this), WebFormRelatedChangeType::kHide);
   }
+}
 
-  if (RuntimeEnabledFeatures::InertAttributeEnabled()) {
-    const auto* element = DynamicTo<Element>(this);
-    if (!element)
-      element = FlatTreeTraversal::ParentElement(*this);
-
-    while (element) {
-      if (element->FastHasAttribute(html_names::kInertAttr))
-        return true;
-      element = FlatTreeTraversal::ParentElement(*element);
-    }
+LinkHighlightCandidate Node::IsLinkHighlightCandidate() const {
+  if (const LayoutObject* layout_object = GetLayoutObject()) {
+    const ECursor cursor = layout_object->StyleRef().Cursor();
+    if (cursor == ECursor::kPointer)
+      return LinkHighlightCandidate::kYes;
+    if (cursor != ECursor::kAuto)
+      return LinkHighlightCandidate::kNo;
+    if (EventHandler::UsesHandCursor(this))
+      return LinkHighlightCandidate::kYes;
   }
-  return GetDocument().GetFrame() && GetDocument().GetFrame()->IsInert();
+  return LinkHighlightCandidate::kMayBe;
 }
 
 unsigned Node::NodeIndex() const {
@@ -1541,7 +1768,11 @@ unsigned Node::NodeIndex() const {
 }
 
 NodeListsNodeData* Node::NodeLists() {
-  return HasRareData() ? RareData()->NodeLists() : nullptr;
+  return data_ ? data_->NodeLists() : nullptr;
+}
+
+const NodeListsNodeData* Node::NodeLists() const {
+  return data_ ? data_->NodeLists() : nullptr;
 }
 
 void Node::ClearNodeLists() {
@@ -1549,12 +1780,13 @@ void Node::ClearNodeLists() {
 }
 
 FlatTreeNodeData& Node::EnsureFlatTreeNodeData() {
-  return EnsureRareData().EnsureFlatTreeNodeData();
+  return UnpackAndRefresh(EnsureRareData().EnsureFlatTreeNodeData());
 }
 
 FlatTreeNodeData* Node::GetFlatTreeNodeData() const {
-  if (!HasRareData())
+  if (!data_) {
     return nullptr;
+  }
   return RareData()->GetFlatTreeNodeData();
 }
 
@@ -1589,6 +1821,17 @@ bool Node::IsDescendantOf(const Node* other) const {
   return false;
 }
 
+bool Node::IsDescendantOrShadowDescendantOf(const Node* other) const {
+  if (IsDescendantOf(other))
+    return true;
+
+  for (auto* host = OwnerShadowHost(); host; host = host->OwnerShadowHost()) {
+    if (other->contains(host))
+      return true;
+  }
+  return false;
+}
+
 bool Node::contains(const Node* node) const {
   if (!node)
     return false;
@@ -1611,7 +1854,7 @@ bool Node::IsShadowIncludingAncestorOf(const Node& node) const {
     return false;
 
   auto* this_node = DynamicTo<ContainerNode>(this);
-  bool has_children = this_node ? this_node->HasChildren() : false;
+  bool has_children = this_node && this_node->HasChildren();
   bool has_shadow = IsShadowHost(this);
   if (!has_children && !has_shadow)
     return false;
@@ -1635,6 +1878,17 @@ bool Node::ContainsIncludingHostElements(const Node& node) const {
           static_cast<const TemplateContentDocumentFragment*>(current)->Host();
     else
       current = current->ParentOrShadowHostNode();
+  } while (current);
+  return false;
+}
+
+bool Node::ContainsViaFlatTree(const Node& node) const {
+  const Node* current = &node;
+  do {
+    if (current == this) {
+      return true;
+    }
+    current = FlatTreeTraversal::Parent(*current);
   } while (current);
   return false;
 }
@@ -1686,7 +1940,8 @@ void Node::ReattachLayoutTree(AttachContext& context) {
 }
 
 void Node::AttachLayoutTree(AttachContext& context) {
-  DCHECK(GetDocument().InStyleRecalc() || IsDocumentNode());
+  DCHECK(GetDocument().InStyleRecalc() || IsDocumentNode() ||
+         GetDocument().GetStyleEngine().InScrollMarkersAttachment());
   DCHECK(!GetDocument().Lifecycle().InDetach());
   DCHECK(!context.performing_reattach ||
          GetDocument().GetStyleEngine().InRebuildLayoutTree());
@@ -1698,24 +1953,34 @@ void Node::AttachLayoutTree(AttachContext& context) {
 
   ClearNeedsReattachLayoutTree();
 
-  if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache())
-    cache->UpdateCacheAfterNodeIsAttached(this);
+  if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache()) {
+    cache->NodeIsAttached(this);
+  }
 
   if (context.performing_reattach)
     ReattachHookScope::NotifyAttach(*this);
 }
 
 void Node::DetachLayoutTree(bool performing_reattach) {
-  DCHECK(GetDocument().Lifecycle().StateAllowsDetach());
+  DCHECK(GetDocument().Lifecycle().StateAllowsDetach() ||
+         GetDocument().GetStyleEngine().InInterleavedStyleRecalc() ||
+         GetDocument().GetStyleEngine().InScrollMarkersAttachment());
   DCHECK(!performing_reattach ||
-         GetDocument().GetStyleEngine().InRebuildLayoutTree());
+         GetDocument().GetStyleEngine().InRebuildLayoutTree() ||
+         GetDocument().GetStyleEngine().InScrollMarkersAttachment());
   DocumentLifecycle::DetachScope will_detach(GetDocument().Lifecycle());
 
-  if (performing_reattach)
-    ReattachHookScope::NotifyDetach(*this);
+  if (auto* cache = GetDocument().ExistingAXObjectCache()) {
+    cache->RemoveSubtree(this);
+  }
 
-  if (GetLayoutObject())
-    GetLayoutObject()->DestroyAndCleanupAnonymousWrappers();
+  if (performing_reattach) {
+    ReattachHookScope::NotifyDetach(*this);
+  }
+
+  if (GetLayoutObject()) {
+    GetLayoutObject()->DestroyAndCleanupAnonymousWrappers(performing_reattach);
+  }
   SetLayoutObject(nullptr);
   if (!performing_reattach) {
     // We are clearing the ComputedStyle for elements, which means we should not
@@ -1723,18 +1988,11 @@ void Node::DetachLayoutTree(bool performing_reattach) {
     // this Node as a StyleRecalcRoot if this detach is because the node is
     // removed from the flat tree. That is necessary because we are not allowed
     // to have a style recalc root outside the flat tree when traversing the
-    // flat tree for style recalc (see StyleRecalcRoot::RemovedFromFlatTree()).
+    // flat tree for style recalc
+    // (see StyleRecalcRoot::FlatTreePositionChanged()).
     ClearNeedsStyleRecalc();
     ClearChildNeedsStyleRecalc();
   }
-}
-
-const ComputedStyle* Node::VirtualEnsureComputedStyle(
-    PseudoId pseudo_element_specifier) {
-  return ParentOrShadowHostNode()
-             ? ParentOrShadowHostNode()->EnsureComputedStyle(
-                   pseudo_element_specifier)
-             : nullptr;
 }
 
 void Node::SetForceReattachLayoutTree() {
@@ -1744,8 +2002,8 @@ void Node::SetForceReattachLayoutTree() {
     return;
   if (!InActiveDocument())
     return;
-  if (IsElementNode()) {
-    if (!GetComputedStyle()) {
+  if (Element* element = DynamicTo<Element>(this)) {
+    if (!element->GetComputedStyle()) {
       DCHECK(!GetLayoutObject());
       return;
     }
@@ -1761,27 +2019,58 @@ void Node::SetForceReattachLayoutTree() {
   }
 }
 
+bool Node::NeedsWhitespaceChildrenUpdate() const {
+  if (const auto* layout_object = GetLayoutObject())
+    return layout_object->WhitespaceChildrenMayChange();
+  return false;
+}
+
+bool Node::NeedsLayoutSubtreeUpdate() const {
+  if (const auto* layout_object = GetLayoutObject()) {
+    return layout_object->WhitespaceChildrenMayChange() ||
+           layout_object->WasNotifiedOfSubtreeChange();
+  }
+  return false;
+}
+
 // FIXME: Shouldn't these functions be in the editing code?  Code that asks
 // questions about HTML in the core DOM class is obviously misplaced.
 bool Node::CanStartSelection() const {
-  if (DisplayLockUtilities::NearestLockedExclusiveAncestor(*this))
-    GetDocument().UpdateStyleAndLayoutTreeForNode(this);
-  if (HasEditableStyle(*this))
+  if (DisplayLockUtilities::LockedAncestorPreventingPaint(*this)) {
+    if (const Element* element =
+            FlatTreeTraversal::InclusiveParentElement(*this)) {
+      GetDocument().UpdateStyleAndLayoutTreeForElement(
+          element, DocumentUpdateReason::kSelection);
+    }
+  }
+  if (IsEditable(*this)) {
     return true;
+  }
 
   if (GetLayoutObject()) {
     const ComputedStyle& style = GetLayoutObject()->StyleRef();
-    if (style.UserSelect() == EUserSelect::kNone)
+    EUserSelect user_select = style.UsedUserSelect();
+    if (user_select == EUserSelect::kNone)
       return false;
     // We allow selections to begin within |user-select: text/all| sub trees
     // but not if the element is draggable.
     if (style.UserDrag() != EUserDrag::kElement &&
-        (style.UserSelect() == EUserSelect::kText ||
-         style.UserSelect() == EUserSelect::kAll))
+        (user_select == EUserSelect::kText || user_select == EUserSelect::kAll))
       return true;
   }
   ContainerNode* parent = FlatTreeTraversal::Parent(*this);
-  return parent ? parent->CanStartSelection() : true;
+  return !parent || parent->CanStartSelection();
+}
+
+bool Node::IsRichlyEditableForAccessibility() const {
+#if DCHECK_IS_ON()  // Required in order to get Lifecycle().ToString()
+  DCHECK_GE(GetDocument().Lifecycle().GetState(),
+            DocumentLifecycle::kStyleClean)
+      << "Unclean document style at lifecycle state "
+      << GetDocument().Lifecycle().ToString();
+#endif  // DCHECK_IS_ON()
+
+  return IsRichlyEditable(*this);
 }
 
 void Node::NotifyPriorityScrollAnchorStatusChanged() {
@@ -1794,30 +2083,17 @@ void Node::NotifyPriorityScrollAnchorStatusChanged() {
   }
 }
 
-// StyledElements allow inline style (style="border: 1px"), presentational
-// attributes (ex. color), class names (ex. class="foo bar") and other non-basic
-// styling features. They also control if this element can participate in style
-// sharing.
-//
-// FIXME: The only things that ever go through StyleResolver that aren't
-// StyledElements are PseudoElements and VTTElements. It's possible we can just
-// eliminate all the checks since those elements will never have class names,
-// inline style, or other things that this apparently guards against.
-bool Node::IsStyledElement() const {
-  auto* this_element = DynamicTo<Element>(this);
-  return IsHTMLElement() || IsSVGElement() || IsMathMLElement() ||
-         (!RuntimeEnabledFeatures::MathMLCoreEnabled() && this_element &&
-          this_element->namespaceURI() == mathml_names::kNamespaceURI);
+bool Node::IsActiveSlot() const {
+  return ToHTMLSlotElementIfSupportsAssignmentOrNull(*this);
 }
 
-bool Node::CanParticipateInFlatTree() const {
-  // TODO(hayato): Return false for pseudo elements.
-  return !IsShadowRoot() && !IsActiveV0InsertionPoint(*this);
-}
-
-bool Node::IsActiveSlotOrActiveV0InsertionPoint() const {
-  return ToHTMLSlotElementIfSupportsAssignmentOrNull(*this) ||
-         IsActiveV0InsertionPoint(*this);
+bool Node::HasContainerTiming() const {
+  if (IsElementNode()) {
+    return To<Element>(*this).FastHasAttribute(
+        html_names::kContainertimingAttr);
+  } else {
+    return false;
+  }
 }
 
 AtomicString Node::SlotName() const {
@@ -1830,34 +2106,18 @@ AtomicString Node::SlotName() const {
   return g_empty_atom;
 }
 
-bool Node::IsInV1ShadowTree() const {
-  ShadowRoot* shadow_root = ContainingShadowRoot();
-  return shadow_root && shadow_root->IsV1();
-}
-
-bool Node::IsInV0ShadowTree() const {
-  ShadowRoot* shadow_root = ContainingShadowRoot();
-  return shadow_root && !shadow_root->IsV1();
-}
-
 ShadowRoot* Node::ParentElementShadowRoot() const {
   Element* parent = parentElement();
   return parent ? parent->GetShadowRoot() : nullptr;
 }
 
-bool Node::IsChildOfV1ShadowHost() const {
-  ShadowRoot* parent_shadow_root = ParentElementShadowRoot();
-  return parent_shadow_root && parent_shadow_root->IsV1();
+bool Node::IsChildOfShadowHost() const {
+  return ParentElementShadowRoot();
 }
 
-bool Node::IsChildOfV0ShadowHost() const {
-  ShadowRoot* parent_shadow_root = ParentElementShadowRoot();
-  return parent_shadow_root && !parent_shadow_root->IsV1();
-}
-
-ShadowRoot* Node::V1ShadowRootOfParent() const {
+ShadowRoot* Node::ShadowRootOfParent() const {
   if (Element* parent = parentElement())
-    return parent->ShadowRootIfV1();
+    return parent->GetShadowRoot();
   return nullptr;
 }
 
@@ -1989,7 +2249,7 @@ bool Node::isDefaultNamespace(
   // https://dom.spec.whatwg.org/#dom-node-isdefaultnamespace
 
   // 1. If namespace is the empty string, then set it to null.
-  const AtomicString& namespace_uri = namespace_uri_maybe_empty.IsEmpty()
+  const AtomicString& namespace_uri = namespace_uri_maybe_empty.empty()
                                           ? g_null_atom
                                           : namespace_uri_maybe_empty;
 
@@ -2007,7 +2267,7 @@ const AtomicString& Node::lookupPrefix(
   // Implemented according to
   // https://dom.spec.whatwg.org/#dom-node-lookupprefix
 
-  if (namespace_uri.IsEmpty() || namespace_uri.IsNull())
+  if (namespace_uri.empty() || namespace_uri.IsNull())
     return g_null_atom;
 
   const Element* context;
@@ -2044,7 +2304,7 @@ const AtomicString& Node::lookupNamespaceURI(
 
   // 1. If prefix is the empty string, then set it to null.
   String prefix = specified_prefix;
-  if (!specified_prefix.IsNull() && specified_prefix.IsEmpty())
+  if (!specified_prefix.IsNull() && specified_prefix.empty())
     prefix = String();
 
   // 2. Return the result of running locate a namespace for the context object
@@ -2055,12 +2315,22 @@ const AtomicString& Node::lookupNamespaceURI(
     case kElementNode: {
       const auto& element = To<Element>(*this);
 
-      // 1. If its namespace is not null and its namespace prefix is prefix,
+      // 1. If prefix is "xml", then return the XML namespace.
+      if (prefix == g_xml_atom) {
+        return xml_names::kNamespaceURI;
+      }
+
+      // 2. If prefix is "xmlns", then return the XMLNS namespace.
+      if (prefix == g_xmlns_atom) {
+        return xmlns_names::kNamespaceURI;
+      }
+
+      // 3. If its namespace is not null and its namespace prefix is prefix,
       // then return namespace.
       if (!element.namespaceURI().IsNull() && element.prefix() == prefix)
         return element.namespaceURI();
 
-      // 2. If it has an attribute whose namespace is the XMLNS namespace,
+      // 4. If it has an attribute whose namespace is the XMLNS namespace,
       // namespace prefix is "xmlns", and local name is prefix, or if prefix is
       // null and it has an attribute whose namespace is the XMLNS namespace,
       // namespace prefix is null, and local name is "xmlns", then return its
@@ -2068,19 +2338,19 @@ const AtomicString& Node::lookupNamespaceURI(
       AttributeCollection attributes = element.Attributes();
       for (const Attribute& attr : attributes) {
         if (attr.Prefix() == g_xmlns_atom && attr.LocalName() == prefix) {
-          if (!attr.Value().IsEmpty())
+          if (!attr.Value().empty())
             return attr.Value();
           return g_null_atom;
         }
         if (attr.LocalName() == g_xmlns_atom && prefix.IsNull()) {
-          if (!attr.Value().IsEmpty())
+          if (!attr.Value().empty())
             return attr.Value();
           return g_null_atom;
         }
       }
 
-      // 3. If its parent element is null, then return null.
-      // 4. Return the result of running locate a namespace on its parent
+      // 5. If its parent element is null, then return null.
+      // 6. Return the result of running locate a namespace on its parent
       // element using prefix.
       if (Element* parent = parentElement())
         return parent->lookupNamespaceURI(prefix);
@@ -2106,7 +2376,9 @@ const AtomicString& Node::lookupNamespaceURI(
   }
 }
 
-String Node::textContent(bool convert_brs_to_newlines) const {
+String Node::textContent(bool convert_brs_to_newlines,
+                         TextVisitor* visitor,
+                         unsigned int max_length) const {
   // This covers ProcessingInstruction and Comment that should return their
   // value when .textContent is accessed on them, but should be ignored when
   // iterated over as a descendant of a ContainerNode.
@@ -2124,30 +2396,41 @@ String Node::textContent(bool convert_brs_to_newlines) const {
 
   StringBuilder content;
   for (const Node& node : NodeTraversal::InclusiveDescendantsOf(*this)) {
+    if (visitor) {
+      visitor->WillVisit(node, content.length());
+    }
     if (IsA<HTMLBRElement>(node) && convert_brs_to_newlines) {
       content.Append('\n');
     } else if (auto* text_node = DynamicTo<Text>(node)) {
       content.Append(text_node->data());
+      // Only abridge text content when max_length is explicitly set.
+      if (max_length < UINT_MAX && content.length() > max_length) {
+        content.Resize(max_length);
+        break;
+      }
     }
   }
-  return content.ToString();
+
+  return content.ReleaseString();
 }
 
-void Node::setTextContent(const StringOrTrustedScript& string_or_trusted_script,
-                          ExceptionState& exception_state) {
-  String value =
-      string_or_trusted_script.IsString()
-          ? string_or_trusted_script.GetAsString()
-          : string_or_trusted_script.IsTrustedScript()
-                ? string_or_trusted_script.GetAsTrustedScript()->toString()
-                : g_empty_string;
-  setTextContent(value);
+String Node::textContentForBinding() const {
+  return textContent();
 }
 
-void Node::textContent(StringOrTrustedScript& result) {
-  String value = textContent();
-  if (!value.IsNull())
-    result.SetString(value);
+void Node::setTextContentForBinding(const V8UnionStringOrTrustedScript* value,
+                                    ExceptionState& exception_state) {
+  if (!value)
+    return setTextContent(g_empty_string);
+
+  switch (value->GetContentType()) {
+    case V8UnionStringOrTrustedScript::ContentType::kString:
+      return setTextContent(value->GetAsString());
+    case V8UnionStringOrTrustedScript::ContentType::kTrustedScript:
+      return setTextContent(value->GetAsTrustedScript()->toString());
+  }
+
+  NOTREACHED();
 }
 
 void Node::setTextContent(const String& text) {
@@ -2165,19 +2448,20 @@ void Node::setTextContent(const String& text) {
       auto* container = To<ContainerNode>(this);
 
       // Note: This is an intentional optimization.
-      // See crbug.com/352836 also.
-      // No need to do anything if the text is identical.
+      // See crbug.com/41095015, crbug.com/40553863, and crbug.com/391394132.
+      // No need to do anything if the text is identical *and* there are no
+      // mutation observer listeners attached.
       if (container->HasOneTextChild() &&
-          To<Text>(container->firstChild())->data() == text && !text.IsEmpty())
+          To<Text>(container->firstChild())->data() == text && !text.empty() &&
+          !GetDocument().HasMutationObservers()) {
         return;
+      }
 
       ChildListMutationScope mutation(*this);
       // Note: This API will not insert empty text nodes:
       // https://dom.spec.whatwg.org/#dom-node-textcontent
-      if (text.IsEmpty()) {
-        container->RemoveChildren(kDispatchSubtreeModifiedEvent);
-      } else {
-        container->RemoveChildren(kOmitSubtreeModifiedEvent);
+      container->RemoveChildren();
+      if (!text.empty()) {
         container->AppendChild(GetDocument().createTextNode(text),
                                ASSERT_NO_EXCEPTION);
       }
@@ -2241,7 +2525,6 @@ uint16_t Node::compareDocumentPosition(const Node* other_node,
     }
 
     NOTREACHED();
-    return kDocumentPositionDisconnected;
   }
 
   // If one node is in the document and the other is not, we must be
@@ -2302,15 +2585,17 @@ uint16_t Node::compareDocumentPosition(const Node* other_node,
         return Node::kDocumentPositionPreceding | connection;
       }
 
-      if (!child2->nextSibling())
+      if (!child2->PseudoAwareNextSibling()) {
         return kDocumentPositionFollowing | connection;
-      if (!child1->nextSibling())
+      }
+      if (!child1->PseudoAwareNextSibling()) {
         return kDocumentPositionPreceding | connection;
+      }
 
       // Otherwise we need to see which node occurs first.  Crawl backwards from
       // child2 looking for child1.
-      for (const Node* child = child2->previousSibling(); child;
-           child = child->previousSibling()) {
+      for (const Node* child = child2->PseudoAwarePreviousSibling(); child;
+           child = child->PseudoAwarePreviousSibling()) {
         if (child == child1)
           return kDocumentPositionFollowing | connection;
       }
@@ -2337,31 +2622,80 @@ void Node::InvalidateIfHasEffectiveAppearance() const {
   layout_object->SetSubtreeShouldDoFullPaintInvalidation();
 }
 
+Node::InsertionNotificationRequest Node::InsertedInto(
+    ContainerNode& insertion_point) {
+  DCHECK(!ChildNeedsStyleInvalidation());
+  DCHECK(!NeedsStyleInvalidation());
+  DCHECK(insertion_point.isConnected() || insertion_point.IsInShadowTree() ||
+         IsContainerNode());
+  if (insertion_point.isConnected()) {
+    SetFlag(kIsConnectedFlag);
+#if DCHECK_IS_ON()
+    insertion_point.GetDocument().IncrementNodeCount();
+#endif
+  }
+  if (ParentOrShadowHostNode()->IsInShadowTree())
+    SetFlag(kIsInShadowTreeFlag);
+  if (auto* cache = GetDocument().ExistingAXObjectCache()) {
+    cache->NodeIsConnected(this);
+  }
+
+  return kInsertionDone;
+}
+
+void Node::MovedFrom(ContainerNode& old_parent) {}
+
+void Node::RemovedFrom(ContainerNode& insertion_point) {
+  DCHECK(IsContainerNode() || IsInTreeScope());
+  if (insertion_point.isConnected()) {
+    // Don't clear the layout/style flags on `moveBefore`, so that the layout is
+    // recomputed and reattached on the next style recalc.
+    if (!GetDocument().StatePreservingAtomicMoveInProgress()) {
+      ClearNeedsStyleRecalc();
+      ClearChildNeedsStyleRecalc();
+      ClearNeedsStyleInvalidation();
+      ClearChildNeedsStyleInvalidation();
+    }
+    ClearFlag(kIsConnectedFlag);
+#if DCHECK_IS_ON()
+    insertion_point.GetDocument().DecrementNodeCount();
+#endif
+  }
+  if (IsInShadowTree() && !GetTreeScope().RootNode().IsShadowRoot()) {
+    ClearFlag(kIsInShadowTreeFlag);
+  }
+  if (auto* cache = GetDocument().ExistingAXObjectCache()) {
+    cache->Remove(this);
+  }
+}
+
 String Node::DebugName() const {
   StringBuilder name;
-  AppendUnsafe(name, DebugNodeName());
-  if (const auto* this_element = DynamicTo<Element>(this)) {
+  name.Append(nodeName());
+  if (const auto* pseudo = DynamicTo<PseudoElement>(this);
+      pseudo && !pseudo->GetPseudoArgument().IsNull()) {
+    name.Append("(");
+    name.Append(pseudo->GetPseudoArgument());
+    name.Append(")");
+  } else if (const auto* this_element = DynamicTo<Element>(this)) {
     if (this_element->HasID()) {
       name.Append(" id=\'");
-      AppendUnsafe(name, this_element->GetIdAttribute());
+      name.Append(this_element->GetIdAttribute());
       name.Append('\'');
     }
 
     if (this_element->HasClass()) {
       name.Append(" class=\'");
       for (wtf_size_t i = 0; i < this_element->ClassNames().size(); ++i) {
-        if (i > 0)
+        if (i > 0) {
           name.Append(' ');
-        AppendUnsafe(name, this_element->ClassNames()[i]);
+        }
+        name.Append(this_element->ClassNames()[i]);
       }
       name.Append('\'');
     }
   }
-  return name.ToString();
-}
-
-String Node::DebugNodeName() const {
-  return nodeName();
+  return name.ReleaseString();
 }
 
 static void DumpAttributeDesc(const Node& node,
@@ -2371,7 +2705,7 @@ static void DumpAttributeDesc(const Node& node,
   if (!element)
     return;
   const AtomicString& value = element->getAttribute(name);
-  if (value.IsEmpty())
+  if (value.empty())
     return;
   builder.Append(' ');
   builder.Append(name.ToString());
@@ -2391,33 +2725,50 @@ std::ostream& operator<<(std::ostream& ostream, const Node* node) {
 
 String Node::ToString() const {
   if (getNodeType() == Node::kProcessingInstructionNode)
-    return "?" + nodeName();
+    return StrCat({"?", nodeName()});
   if (auto* shadow_root = DynamicTo<ShadowRoot>(this)) {
     // nodeName of ShadowRoot is #document-fragment.  It's confused with
     // DocumentFragment.
     std::stringstream shadow_root_type;
-    shadow_root_type << shadow_root->GetType();
+    shadow_root_type << shadow_root->GetMode();
     String shadow_root_type_str(shadow_root_type.str().c_str());
-    return "#shadow-root(" + shadow_root_type_str + ")";
+    return StrCat({"#shadow-root(", shadow_root_type_str, ")"});
   }
   if (IsDocumentTypeNode())
-    return "DOCTYPE " + nodeName();
+    return StrCat({"DOCTYPE ", nodeName()});
 
   StringBuilder builder;
   builder.Append(nodeName());
   if (IsTextNode()) {
     builder.Append(" ");
     builder.Append(nodeValue().EncodeForDebugging());
-    return builder.ToString();
+    return builder.ReleaseString();
+  } else if (const auto* pseudo = DynamicTo<PseudoElement>(this);
+             pseudo && !pseudo->GetPseudoArgument().IsNull()) {
+    builder.Append("(");
+    builder.Append(pseudo->GetPseudoArgument());
+    builder.Append(")");
+  } else if (const auto* element = DynamicTo<Element>(this)) {
+    const AtomicString& pseudo_id = element->ShadowPseudoId();
+    if (!pseudo_id.empty()) {
+      builder.Append(" ::");
+      builder.Append(pseudo_id);
+    }
+    DumpAttributeDesc(*this, html_names::kIdAttr, builder);
+    DumpAttributeDesc(*this, html_names::kClassAttr, builder);
+    DumpAttributeDesc(*this, html_names::kStyleAttr, builder);
   }
-  DumpAttributeDesc(*this, html_names::kIdAttr, builder);
-  DumpAttributeDesc(*this, html_names::kClassAttr, builder);
-  DumpAttributeDesc(*this, html_names::kStyleAttr, builder);
-  if (HasEditableStyle(*this))
+#if DCHECK_IS_ON()
+  if (!GetDocument().IsSlotAssignmentRecalcForbidden() && IsEditable(*this)) {
     builder.Append(" (editable)");
+  }
+#else
+  if (IsEditable(*this))
+    builder.Append(" (editable)");
+#endif
   if (GetDocument().FocusedElement() == this)
     builder.Append(" (focused)");
-  return builder.ToString();
+  return builder.ReleaseString();
 }
 
 #if DCHECK_IS_ON()
@@ -2450,7 +2801,7 @@ void Node::PrintNodePathTo(std::ostream& stream) const {
 
         const auto* element = To<Element>(node);
         const AtomicString& idattr = element->GetIdAttribute();
-        bool has_id_attr = !idattr.IsNull() && !idattr.IsEmpty();
+        bool has_id_attr = !idattr.IsNull() && !idattr.empty();
         if (node->previousSibling() || node->nextSibling()) {
           int count = 0;
           for (const Node* previous = node->previousSibling(); previous;
@@ -2503,28 +2854,72 @@ static void AppendMarkedTree(const String& base_indent,
     builder.Append("\n");
     indent.Append('\t');
 
+    String indent_string = indent.ReleaseString();
+
     if (const auto* element = DynamicTo<Element>(node)) {
+      if (Element* pseudo =
+              element->GetPseudoElement(kPseudoIdScrollMarkerGroupBefore)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
       if (Element* pseudo = element->GetPseudoElement(kPseudoIdMarker)) {
-        AppendMarkedTree(indent.ToString(), pseudo, marked_node1, marked_label1,
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
+      if (const ColumnPseudoElementsVector* column_pseudo_elements =
+              element->GetColumnPseudoElements()) {
+        for (const ColumnPseudoElement* pseudo : *column_pseudo_elements) {
+          AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                           marked_node2, marked_label2, builder);
+        }
+      }
+      if (Element* pseudo = element->GetPseudoElement(kPseudoIdScrollMarker)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
+      if (Element* pseudo = element->GetPseudoElement(kPseudoIdCheckMark)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
                          marked_node2, marked_label2, builder);
       }
       if (Element* pseudo = element->GetPseudoElement(kPseudoIdBefore))
-        AppendMarkedTree(indent.ToString(), pseudo, marked_node1, marked_label1,
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
                          marked_node2, marked_label2, builder);
       if (Element* pseudo = element->GetPseudoElement(kPseudoIdAfter))
-        AppendMarkedTree(indent.ToString(), pseudo, marked_node1, marked_label1,
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
                          marked_node2, marked_label2, builder);
+      if (Element* pseudo = element->GetPseudoElement(kPseudoIdExpandIcon)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
+      if (Element* pseudo = element->GetPseudoElement(kPseudoIdPickerIcon)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
+      if (Element* pseudo =
+              element->GetPseudoElement(kPseudoIdInterestButton)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
+      if (Element* pseudo =
+              element->GetPseudoElement(kPseudoIdScrollMarkerGroupAfter)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
       if (Element* pseudo = element->GetPseudoElement(kPseudoIdFirstLetter))
-        AppendMarkedTree(indent.ToString(), pseudo, marked_node1, marked_label1,
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
                          marked_node2, marked_label2, builder);
       if (Element* pseudo = element->GetPseudoElement(kPseudoIdBackdrop))
-        AppendMarkedTree(indent.ToString(), pseudo, marked_node1, marked_label1,
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
                          marked_node2, marked_label2, builder);
+      if (Element* pseudo = element->GetPseudoElement(kPseudoIdSkeleton)) {
+        AppendMarkedTree(indent_string, pseudo, marked_node1, marked_label1,
+                         marked_node2, marked_label2, builder);
+      }
     }
 
     if (ShadowRoot* shadow_root = node.GetShadowRoot()) {
-      AppendMarkedTree(indent.ToString(), shadow_root, marked_node1,
-                       marked_label1, marked_node2, marked_label2, builder);
+      AppendMarkedTree(indent_string, shadow_root, marked_node1, marked_label1,
+                       marked_node2, marked_label2, builder);
     }
   }
 }
@@ -2550,7 +2945,7 @@ static void AppendMarkedFlatTree(const String& base_indent,
     indent.Append('\t');
 
     if (Node* child = FlatTreeTraversal::FirstChild(*node))
-      AppendMarkedFlatTree(indent.ToString(), child, marked_node1,
+      AppendMarkedFlatTree(indent.ReleaseString(), child, marked_node1,
                            marked_label1, marked_node2, marked_label2, builder);
   }
 }
@@ -2569,7 +2964,7 @@ String Node::ToMarkedTreeString(const Node* marked_node1,
   String starting_indent;
   AppendMarkedTree(starting_indent, root_node, marked_node1, marked_label1,
                    marked_node2, marked_label2, builder);
-  return builder.ToString();
+  return builder.ReleaseString();
 }
 
 String Node::ToMarkedFlatTreeString(const Node* marked_node1,
@@ -2586,7 +2981,7 @@ String Node::ToMarkedFlatTreeString(const Node* marked_node1,
   String starting_indent;
   AppendMarkedFlatTree(starting_indent, root_node, marked_node1, marked_label1,
                        marked_node2, marked_label2, builder);
-  return builder.ToString();
+  return builder.ReleaseString();
 }
 
 static ContainerNode* ParentOrShadowHostOrFrameOwner(const Node* node) {
@@ -2605,13 +3000,15 @@ static void PrintSubTreeAcrossFrame(const Node* node,
   stream << indent.Utf8() << *node << "\n";
   if (auto* frame_owner_element = DynamicTo<HTMLFrameOwnerElement>(node)) {
     PrintSubTreeAcrossFrame(frame_owner_element->contentDocument(), marked_node,
-                            indent + "\t", stream);
+                            StrCat({indent, "\t"}), stream);
   }
-  if (ShadowRoot* shadow_root = node->GetShadowRoot())
-    PrintSubTreeAcrossFrame(shadow_root, marked_node, indent + "\t", stream);
+  if (ShadowRoot* shadow_root = node->GetShadowRoot()) {
+    PrintSubTreeAcrossFrame(shadow_root, marked_node, StrCat({indent, "\t"}),
+                            stream);
+  }
   for (const Node* child = node->firstChild(); child;
        child = child->nextSibling())
-    PrintSubTreeAcrossFrame(child, marked_node, indent + "\t", stream);
+    PrintSubTreeAcrossFrame(child, marked_node, StrCat({indent, "\t"}), stream);
 }
 
 void Node::ShowTreeForThisAcrossFrame() const {
@@ -2653,13 +3050,33 @@ ExecutionContext* Node::GetExecutionContext() const {
   return GetDocument().GetExecutionContext();
 }
 
-void Node::WillMoveToNewDocument(Document& old_document,
-                                 Document& new_document) {
+void Node::WillMoveToNewDocument(Document& new_document) {
+  Document& old_document = GetDocument();
+  DCHECK_NE(&old_document, &new_document);
+
+  // In rare situations, this node may be the focused element of the old
+  // document. In this case, we need to clear the focused element of the old
+  // document, and since we are currently in an event forbidden scope, we can't
+  // fire the blur event.
+  if (old_document.FocusedElement() == this) {
+    FocusParams params(SelectionBehaviorOnFocus::kNone,
+                       mojom::blink::FocusType::kNone, nullptr);
+    params.omit_blur_events = true;
+    old_document.SetFocusedElement(nullptr, params);
+  }
+
+  const LocalFrame* old_frame = old_document.GetFrame();
+  const LocalFrame* new_frame = new_document.GetFrame();
+  const bool moving_from_connected_local_root_to_different_local_root =
+      old_frame && (!new_frame || &old_frame->LocalFrameRoot() !=
+                                      &new_frame->LocalFrameRoot());
+  if (moving_from_connected_local_root_to_different_local_root) {
+    old_frame->GetEventHandlerRegistry().DidMoveOutOfLocalRoot(*this);
+  }
+
   if (!old_document.GetPage() ||
       old_document.GetPage() == new_document.GetPage())
     return;
-
-  old_document.GetFrame()->GetEventHandlerRegistry().DidMoveOutOfPage(*this);
 
   if (auto* this_element = DynamicTo<Element>(this)) {
     StylePropertyMapReadOnly* computed_style_map_item =
@@ -2673,33 +3090,10 @@ void Node::WillMoveToNewDocument(Document& old_document,
 
 void Node::DidMoveToNewDocument(Document& old_document) {
   TreeScopeAdopter::EnsureDidMoveToNewDocumentWasCalled(old_document);
+  DCHECK_NE(&GetDocument(), &old_document);
 
-  if (const EventTargetData* event_target_data = GetEventTargetData()) {
-    const EventListenerMap& listener_map =
-        event_target_data->event_listener_map;
-    if (!listener_map.IsEmpty()) {
-      for (const auto& type : listener_map.EventTypes())
-        GetDocument().AddListenerTypeIfNeeded(type, *this);
-    }
-  }
-  if (auto* text_node = DynamicTo<Text>(this))
+  if (auto* text_node = DynamicTo<Text>(this)) {
     old_document.Markers().RemoveMarkersForNode(*text_node);
-  if (GetDocument().GetPage() &&
-      GetDocument().GetPage() != old_document.GetPage()) {
-    GetDocument().GetFrame()->GetEventHandlerRegistry().DidMoveIntoPage(*this);
-  }
-
-  if (const HeapVector<Member<MutationObserverRegistration>>* registry =
-          MutationObserverRegistry()) {
-    for (const auto& registration : *registry) {
-      GetDocument().AddMutationObserverTypes(registration->MutationTypes());
-    }
-  }
-
-  if (TransientMutationObserverRegistry()) {
-    for (MutationObserverRegistration* registration :
-         *TransientMutationObserverRegistry())
-      GetDocument().AddMutationObserverTypes(registration->MutationTypes());
   }
 }
 
@@ -2707,6 +3101,11 @@ void Node::AddedEventListener(const AtomicString& event_type,
                               RegisteredEventListener& registered_listener) {
   EventTarget::AddedEventListener(event_type, registered_listener);
   GetDocument().AddListenerTypeIfNeeded(event_type, *this);
+  GetDocument().DidAddEventListeners(/*count*/ 1);
+  if (registered_listener.Capture() &&
+      RuntimeEnabledFeatures::SkipEventCaptureEnabled()) {
+    GetDocument().SetHasCaptureListener();
+  }
   if (auto* frame = GetDocument().GetFrame()) {
     frame->GetEventHandlerRegistry().DidAddEventHandler(
         *this, event_type, registered_listener.Options());
@@ -2716,33 +3115,46 @@ void Node::AddedEventListener(const AtomicString& event_type,
       frame->AddedSuddenTerminationDisablerListener(*this, event_type);
     }
   }
+  if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache())
+    cache->HandleEventListenerAdded(*this, event_type);
 }
 
 void Node::RemovedEventListener(
     const AtomicString& event_type,
     const RegisteredEventListener& registered_listener) {
   EventTarget::RemovedEventListener(event_type, registered_listener);
+  GetDocument().DidRemoveEventListeners(/*count*/ 1);
   // FIXME: Notify Document that the listener has vanished. We need to keep
   // track of a number of listeners for each type, not just a bool - see
   // https://bugs.webkit.org/show_bug.cgi?id=33861
   if (auto* frame = GetDocument().GetFrame()) {
     frame->GetEventHandlerRegistry().DidRemoveEventHandler(
         *this, event_type, registered_listener.Options());
-    // We need to track the existence of the visibilitychange event listeners to
-    // enable/disable sudden terminations.
-    if (IsDocumentNode() && event_type == event_type_names::kVisibilitychange) {
-      frame->RemovedSuddenTerminationDisablerListener(*this, event_type);
-    }
   }
+  if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache())
+    cache->HandleEventListenerRemoved(*this, event_type);
 }
 
 void Node::RemoveAllEventListeners() {
-  if (HasEventListeners() && GetDocument().GetPage())
-    GetDocument()
-        .GetFrame()
-        ->GetEventHandlerRegistry()
-        .DidRemoveAllEventHandlers(*this);
+  Vector<AtomicString> event_types = EventTypes();
+  Document& document = GetDocument();
+  if (HasEventListeners()) {
+    GetEventTargetData()->event_listener_map.ForAllEventListenerTypes(
+        [&document](const AtomicString& event_type, uint32_t count) {
+          document.DidRemoveEventListeners(count);
+        });
+
+    if (document.GetPage()) {
+      document.GetFrame()->GetEventHandlerRegistry().DidRemoveAllEventHandlers(
+          *this);
+    }
+  }
   EventTarget::RemoveAllEventListeners();
+  if (AXObjectCache* cache = document.ExistingAXObjectCache()) {
+    for (const AtomicString& event_type : event_types) {
+      cache->HandleEventListenerRemoved(*this, event_type);
+    }
+  }
 }
 
 void Node::RemoveAllEventListenersRecursively() {
@@ -2754,33 +3166,45 @@ void Node::RemoveAllEventListenersRecursively() {
   }
 }
 
-using EventTargetDataMap =
-    HeapHashMap<WeakMember<Node>, Member<EventTargetData>>;
-static EventTargetDataMap& GetEventTargetDataMap() {
-  DEFINE_STATIC_LOCAL(Persistent<EventTargetDataMap>, map,
-                      (MakeGarbageCollected<EventTargetDataMap>()));
-  return *map;
-}
+void Node::MoveEventListenersToNewDocument(Document& old_document,
+                                           Document& new_document) {
+  DCHECK_EQ(&new_document, &GetDocument());
+  if (const EventTargetData* event_target_data = GetEventTargetData()) {
+    const EventListenerMap& listener_map =
+        event_target_data->event_listener_map;
+    if (!listener_map.IsEmpty()) {
+      listener_map.ForAllEventListenerTypes(
+          [this, &old_document, &new_document](const AtomicString& event_type,
+                                               uint32_t count) {
+            old_document.DidRemoveEventListeners(count);
+            new_document.AddListenerTypeIfNeeded(event_type, *this);
+            new_document.DidAddEventListeners(count);
+          });
+    }
+  }
 
-EventTargetData* Node::GetEventTargetData() {
-  return HasEventTargetData() ? GetEventTargetDataMap().at(this) : nullptr;
-}
+  const LocalFrame* old_frame = old_document.GetFrame();
+  const LocalFrame* new_frame = new_document.GetFrame();
+  const bool moving_into_different_connected_local_root =
+      new_frame && (!old_frame || &new_frame->LocalFrameRoot() !=
+                                      &old_frame->LocalFrameRoot());
+  if (moving_into_different_connected_local_root) {
+    new_frame->GetEventHandlerRegistry().DidMoveIntoLocalRoot(*this);
+  }
 
-EventTargetData& Node::EnsureEventTargetData() {
-  if (HasEventTargetData())
-    return *GetEventTargetDataMap().at(this);
-  DCHECK(!GetEventTargetDataMap().Contains(this));
-  EventTargetData* data = MakeGarbageCollected<EventTargetData>();
-  GetEventTargetDataMap().Set(this, data);
-  SetHasEventTargetData(true);
-  return *data;
+  // This might be faster than going through all of the event
+  // listeners to see if any of them have capture set.
+  if (old_document.HasCaptureListener()) {
+    new_document.SetHasCaptureListener();
+  }
 }
 
 const HeapVector<Member<MutationObserverRegistration>>*
 Node::MutationObserverRegistry() {
-  if (!HasRareData())
+  if (!data_) {
     return nullptr;
-  NodeMutationObserverData* data = RareData()->MutationObserverData();
+  }
+  NodeMutationObserverData* data = data_->MutationObserverData();
   if (!data)
     return nullptr;
   return &data->Registry();
@@ -2788,12 +3212,30 @@ Node::MutationObserverRegistry() {
 
 const HeapHashSet<Member<MutationObserverRegistration>>*
 Node::TransientMutationObserverRegistry() {
-  if (!HasRareData())
+  if (!data_) {
     return nullptr;
-  NodeMutationObserverData* data = RareData()->MutationObserverData();
+  }
+  NodeMutationObserverData* data = data_->MutationObserverData();
   if (!data)
     return nullptr;
   return &data->TransientRegistry();
+}
+
+void Node::MoveMutationObserversToNewDocument(Document& new_document) {
+  DCHECK_EQ(&new_document, &GetDocument());
+  if (const HeapVector<Member<MutationObserverRegistration>>* registry =
+          MutationObserverRegistry()) {
+    for (const auto& registration : *registry) {
+      new_document.AddMutationObserverTypes(registration->MutationTypes());
+    }
+  }
+
+  if (const HeapHashSet<Member<MutationObserverRegistration>>*
+          transient_registry = TransientMutationObserverRegistry()) {
+    for (const auto& registration : *transient_registry) {
+      new_document.AddMutationObserverTypes(registration->MutationTypes());
+    }
+  }
 }
 
 template <typename Registry>
@@ -2848,8 +3290,9 @@ void Node::RegisterMutationObserver(
     MutationObserverOptions options,
     const HashSet<AtomicString>& attribute_filter) {
   MutationObserverRegistration* registration = nullptr;
-  for (const auto& item :
-       EnsureRareData().EnsureMutationObserverData().Registry()) {
+  auto& mutation_observer_data =
+      UnpackAndRefresh(EnsureRareData().EnsureMutationObserverData());
+  for (const auto& item : mutation_observer_data.Registry()) {
     if (&item->Observer() == &observer) {
       registration = item.Get();
       registration->ResetObservation(options, attribute_filter);
@@ -2859,7 +3302,7 @@ void Node::RegisterMutationObserver(
   if (!registration) {
     registration = MakeGarbageCollected<MutationObserverRegistration>(
         observer, this, options, attribute_filter);
-    EnsureRareData().EnsureMutationObserverData().AddRegistration(registration);
+    mutation_observer_data.AddRegistration(registration);
   }
 
   GetDocument().AddMutationObserverTypes(registration->MutationTypes());
@@ -2877,14 +3320,14 @@ void Node::UnregisterMutationObserver(
   // understandable by humans.  The explicit dispose() is needed to have the
   // registration object unregister itself promptly.
   registration->Dispose();
-  EnsureRareData().EnsureMutationObserverData().RemoveRegistration(
-      registration);
+  UnpackAndRefresh(EnsureRareData().EnsureMutationObserverData())
+      .RemoveRegistration(registration);
 }
 
 void Node::RegisterTransientMutationObserver(
     MutationObserverRegistration* registration) {
-  EnsureRareData().EnsureMutationObserverData().AddTransientRegistration(
-      registration);
+  UnpackAndRefresh(EnsureRareData().EnsureMutationObserverData())
+      .AddTransientRegistration(registration);
 }
 
 void Node::UnregisterTransientMutationObserver(
@@ -2895,8 +3338,8 @@ void Node::UnregisterTransientMutationObserver(
   if (!transient_registry)
     return;
 
-  EnsureRareData().EnsureMutationObserverData().RemoveTransientRegistration(
-      registration);
+  UnpackAndRefresh(EnsureRareData().EnsureMutationObserverData())
+      .RemoveTransientRegistration(registration);
 }
 
 void Node::NotifyMutationObserversNodeWillDetach() {
@@ -2920,21 +3363,7 @@ void Node::NotifyMutationObserversNodeWillDetach() {
 }
 
 void Node::HandleLocalEvents(Event& event) {
-  if (!HasEventTargetData())
-    return;
-
-  if (IsDisabledFormControl(this) && IsA<MouseEvent>(event) &&
-      !RuntimeEnabledFeatures::SendMouseEventsDisabledFormControlsEnabled()) {
-    if (HasEventListeners(event.type())) {
-      UseCounter::Count(GetDocument(),
-                        WebFeature::kDispatchMouseEventOnDisabledFormControl);
-      if (event.type() == event_type_names::kMousedown ||
-          event.type() == event_type_names::kMouseup) {
-        UseCounter::Count(
-            GetDocument(),
-            WebFeature::kDispatchMouseUpDownEventOnDisabledFormControl);
-      }
-    }
+  if (!GetEventTargetData()) {
     return;
   }
 
@@ -2950,28 +3379,19 @@ DispatchEventResult Node::DispatchEventInternal(Event& event) {
   return EventDispatcher::DispatchEvent(*this, event);
 }
 
-void Node::DispatchSubtreeModifiedEvent() {
-  if (IsInShadowTree())
-    return;
-
-#if DCHECK_IS_ON()
-  DCHECK(!EventDispatchForbiddenScope::IsEventDispatchForbidden());
-#endif
-
-  if (!GetDocument().HasListenerType(Document::kDOMSubtreeModifiedListener))
-    return;
-
-  DispatchScopedEvent(*MutationEvent::Create(
-      event_type_names::kDOMSubtreeModified, Event::Bubbles::kYes));
-}
-
 DispatchEventResult Node::DispatchDOMActivateEvent(int detail,
                                                    Event& underlying_event) {
 #if DCHECK_IS_ON()
   DCHECK(!EventDispatchForbiddenScope::IsEventDispatchForbidden());
 #endif
   UIEvent& event = *UIEvent::Create();
-  event.initUIEvent(event_type_names::kDOMActivate, true, true,
+  // DOMActivate inherits bubbles from the underlying event to prevent
+  // activation behavior of parent elements from running when it doesn't bubble.
+  const bool bubbles =
+      RuntimeEnabledFeatures::DOMActivateBubblesInheritanceEnabled()
+          ? underlying_event.bubbles()
+          : true;
+  event.initUIEvent(event_type_names::kDOMActivate, bubbles, true,
                     GetDocument().domWindow(), detail);
   event.SetUnderlyingEvent(&underlying_event);
   event.SetComposed(underlying_event.composed());
@@ -2985,19 +3405,18 @@ DispatchEventResult Node::DispatchDOMActivateEvent(int detail,
 }
 
 void Node::DispatchSimulatedClick(const Event* underlying_event,
-                                  SimulatedClickMouseEventOptions event_options,
                                   SimulatedClickCreationScope scope) {
   if (auto* element = IsElementNode() ? To<Element>(this) : parentElement()) {
     element->ActivateDisplayLockIfNeeded(
         DisplayLockActivationReason::kSimulatedClick);
   }
-  EventDispatcher::DispatchSimulatedClick(*this, underlying_event,
-                                          event_options, scope);
+  EventDispatcher::DispatchSimulatedClick(*this, underlying_event, scope);
 }
 
 void Node::DefaultEventHandler(Event& event) {
-  if (event.target() != this)
+  if (event.RawTarget() != this) {
     return;
+  }
   const AtomicString& event_type = event.type();
   if (event_type == event_type_names::kKeydown ||
       event_type == event_type_names::kKeypress ||
@@ -3035,17 +3454,15 @@ void Node::DefaultEventHandler(Event& event) {
       if (EnclosingLinkEventParentOrSelf())
         return;
 
-      // Avoid that canBeScrolledAndHasScrollableArea changes layout tree
-      // structure.
+      // Avoid that IsUserScrollable changes layout tree structure.
       // FIXME: We should avoid synchronous layout if possible. We can
       // remove this synchronous layout if we avoid synchronous layout in
       // LayoutTextControlSingleLine::scrollHeight
       GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kInput);
       LayoutObject* layout_object = GetLayoutObject();
-      while (
-          layout_object &&
-          (!layout_object->IsBox() ||
-           !ToLayoutBox(layout_object)->CanBeScrolledAndHasScrollableArea())) {
+      while (layout_object &&
+             (!layout_object->IsBox() ||
+              !To<LayoutBox>(layout_object)->IsUserScrollable())) {
         if (auto* document = DynamicTo<Document>(layout_object->GetNode())) {
           Element* owner = document->LocalOwner();
           layout_object = owner ? owner->GetLayoutObject() : nullptr;
@@ -3072,9 +3489,9 @@ void Node::UpdateHadKeyboardEvent(const Event& event) {
   if (GetLayoutObject()) {
     InvalidateIfHasEffectiveAppearance();
 
-    auto* this_node = DynamicTo<ContainerNode>(this);
-    if (RuntimeEnabledFeatures::CSSFocusVisibleEnabled() && this_node)
-      this_node->FocusVisibleStateChanged();
+    if (auto* this_element = DynamicTo<Element>(this)) {
+      this_element->FocusVisibleStateChanged();
+    }
   }
 }
 
@@ -3082,7 +3499,7 @@ bool Node::HasActivationBehavior() const {
   return false;
 }
 
-bool Node::WillRespondToMouseMoveEvents() {
+bool Node::WillRespondToMouseMoveEvents() const {
   if (IsDisabledFormControl(this))
     return false;
   return HasEventListeners(event_type_names::kMousemove) ||
@@ -3094,15 +3511,12 @@ bool Node::WillRespondToMouseClickEvents() {
   if (IsDisabledFormControl(this))
     return false;
   GetDocument().UpdateStyleAndLayoutTree();
-  return HasEditableStyle(*this) ||
-         HasEventListeners(event_type_names::kMouseup) ||
-         HasEventListeners(event_type_names::kMousedown) ||
-         HasEventListeners(event_type_names::kClick) ||
-         HasEventListeners(event_type_names::kDOMActivate);
+  return IsEditable(*this) ||
+         HasAnyEventListeners(event_util::MouseButtonEventTypes());
 }
 
 unsigned Node::ConnectedSubframeCount() const {
-  return HasRareData() ? RareData()->ConnectedSubframeCount() : 0;
+  return data_ ? data_->ConnectedSubframeCount() : 0;
 }
 
 void Node::IncrementConnectedSubframeCount() {
@@ -3114,27 +3528,15 @@ void Node::DecrementConnectedSubframeCount() {
   RareData()->DecrementConnectedSubframeCount();
 }
 
-StaticNodeList* Node::getDestinationInsertionPoints() {
-  UpdateDistributionForLegacyDistributedNodes();
-  HeapVector<Member<V0InsertionPoint>, 8> insertion_points;
-  CollectDestinationInsertionPoints(*this, insertion_points);
-  HeapVector<Member<Node>> filtered_insertion_points;
-  for (const auto& insertion_point : insertion_points) {
-    DCHECK(insertion_point->ContainingShadowRoot());
-    if (!insertion_point->ContainingShadowRoot()->IsOpenOrV0())
-      break;
-    filtered_insertion_points.push_back(insertion_point);
-  }
-  return StaticNodeList::Adopt(filtered_insertion_points);
+ShadowRoot* Node::GetSlotAssignmentRoot() const {
+  DCHECK(!IsPseudoElement());
+  ShadowRoot* root = ShadowRootOfParent();
+  return (root && root->HasSlotAssignment()) ? root : nullptr;
 }
 
 HTMLSlotElement* Node::AssignedSlot() const {
-  DCHECK(!IsPseudoElement());
-  ShadowRoot* root = V1ShadowRootOfParent();
+  ShadowRoot* root = GetSlotAssignmentRoot();
   if (!root)
-    return nullptr;
-
-  if (!root->HasSlotAssignment())
     return nullptr;
 
   // TODO(hayato): Node::AssignedSlot() shouldn't be called while
@@ -3159,25 +3561,40 @@ HTMLSlotElement* Node::AssignedSlot() const {
   // dirty. RecalcAssignment() is almost no-op if we don't need to recalc.
   root->GetSlotAssignment().RecalcAssignment();
   if (FlatTreeNodeData* data = GetFlatTreeNodeData()) {
-    DCHECK_EQ(root->AssignedSlotFor(*this), data->AssignedSlot());
+#if DCHECK_IS_ON()
+    // User agent shadow slot assignment (FindSlotInUserAgentShadow()) will
+    // re-check the DOM tree, and if we're in the process of removing nodes
+    // from the tree, there could be a mismatch here.
+    if (root->IsNamedSlotting()) {
+      DCHECK_EQ(root->AssignedSlotFor(*this), data->AssignedSlot())
+          << "Assigned slot mismatch for node " << this;
+    }
+#endif
     return data->AssignedSlot();
   }
   return nullptr;
 }
 
-HTMLSlotElement* Node::assignedSlotForBinding() {
-  // assignedSlot doesn't need to recalc slot assignment
-  if (ShadowRoot* root = V1ShadowRootOfParent()) {
-    if (root->GetType() == ShadowRootType::kOpen)
-      return AssignedSlot();
-  }
+// Used when assignment recalc is forbidden, i.e., DetachLayoutTree().
+// Returned assignedSlot is not guaranteed up to date.
+HTMLSlotElement* Node::AssignedSlotWithoutRecalc() const {
+  if (!GetSlotAssignmentRoot())
+    return nullptr;
+
+  if (FlatTreeNodeData* data = GetFlatTreeNodeData())
+    return data->AssignedSlot();
+
   return nullptr;
 }
 
-void Node::SetFocused(bool flag, mojom::blink::FocusType focus_type) {
-  if (focus_type == mojom::blink::FocusType::kMouse)
-    GetDocument().SetHadKeyboardEvent(false);
-  GetDocument().UserActionElements().SetFocused(this, flag);
+HTMLSlotElement* Node::assignedSlotForBinding() {
+  // assignedSlot doesn't need to recalc slot assignment
+  if (ShadowRoot* root = ShadowRootOfParent()) {
+    if (root->GetMode() == ShadowRootMode::kOpen) {
+      return AssignedSlot();
+    }
+  }
+  return nullptr;
 }
 
 void Node::SetHasFocusWithin(bool flag) {
@@ -3224,7 +3641,6 @@ void Node::SetCustomElementState(CustomElementState new_state) {
   switch (new_state) {
     case CustomElementState::kUncustomized:
       NOTREACHED();  // Everything starts in this state
-      return;
 
     case CustomElementState::kUndefined:
       DCHECK_EQ(CustomElementState::kUncustomized, old_state);
@@ -3246,7 +3662,6 @@ void Node::SetCustomElementState(CustomElementState new_state) {
   }
 
   DCHECK(IsHTMLElement());
-  DCHECK_NE(kV0Upgraded, GetV0CustomElementState());
 
   auto* element = To<Element>(this);
   bool was_defined = element->IsDefined();
@@ -3255,46 +3670,15 @@ void Node::SetCustomElementState(CustomElementState new_state) {
                 static_cast<NodeFlags>(new_state);
   DCHECK(new_state == GetCustomElementState());
 
-  if (element->IsDefined() != was_defined) {
+  if (element->IsDefined() != was_defined)
     element->PseudoStateChanged(CSSSelector::kPseudoDefined);
-    if (RuntimeEnabledFeatures::CustomElementsV0Enabled(GetExecutionContext()))
-      element->PseudoStateChanged(CSSSelector::kPseudoUnresolved);
-  }
-}
-
-void Node::SetV0CustomElementState(V0CustomElementState new_state) {
-  DCHECK(
-      RuntimeEnabledFeatures::CustomElementsV0Enabled(GetExecutionContext()));
-  V0CustomElementState old_state = GetV0CustomElementState();
-
-  switch (new_state) {
-    case kV0NotCustomElement:
-      NOTREACHED();  // Everything starts in this state
-      return;
-
-    case kV0WaitingForUpgrade:
-      DCHECK_EQ(kV0NotCustomElement, old_state);
-      break;
-
-    case kV0Upgraded:
-      DCHECK_EQ(kV0WaitingForUpgrade, old_state);
-      break;
-  }
-
-  DCHECK(IsHTMLElement() || IsSVGElement());
-  DCHECK(CustomElementState::kCustom != GetCustomElementState());
-  SetFlag(kV0CustomElementFlag);
-  SetFlag(new_state == kV0Upgraded, kV0CustomElementUpgradedFlag);
-
-  if (old_state == kV0NotCustomElement || new_state == kV0Upgraded) {
-    To<Element>(this)->PseudoStateChanged(CSSSelector::kPseudoUnresolved);
-    To<Element>(this)->PseudoStateChanged(CSSSelector::kPseudoDefined);
-  }
 }
 
 void Node::CheckSlotChange(SlotChangeType slot_change_type) {
   // Common check logic is used in both cases, "after inserted" and "before
-  // removed".
+  // removed". This function calls DidSlotChange() on the appropriate nodes,
+  // e.g. the assigned slot for this node, or the parent slot for a slot's
+  // fallback content.
 
   // Relevant DOM Standard:
   // https://dom.spec.whatwg.org/#concept-node-insert
@@ -3308,7 +3692,7 @@ void Node::CheckSlotChange(SlotChangeType slot_change_type) {
   if (!IsSlotable())
     return;
 
-  if (ShadowRoot* root = V1ShadowRootOfParent()) {
+  if (ShadowRoot* root = ShadowRootOfParent()) {
     // A shadow host's child can be assigned to a slot in the host's shadow
     // tree.
 
@@ -3316,22 +3700,26 @@ void Node::CheckSlotChange(SlotChangeType slot_change_type) {
     // slotables" at this timing, we skip it as an optimization.
     if (HTMLSlotElement* slot = root->AssignedSlotFor(*this))
       slot->DidSlotChange(slot_change_type);
-  } else if (IsInV1ShadowTree()) {
-    // Checking for fallback content if the node is in a v1 shadow tree.
+  } else if (IsInShadowTree()) {
+    // Checking for fallback content if the node is in a shadow tree.
     if (auto* parent_slot = DynamicTo<HTMLSlotElement>(parentElement())) {
-      DCHECK(parent_slot->SupportsAssignment());
       // The parent_slot's assigned nodes might not be calculated because they
-      // are lazy evaluated later at UpdateDistribution() so we have to check it
-      // here.
-      if (!parent_slot->HasAssignedNodesSlow())
+      // are lazy evaluated later in RecalcAssignment(), so we have to check
+      // here. Also, parent_slot may have already been removed, if this was the
+      // removal of nested slots, e.g.
+      //   <slot name=parent-slot><slot name=this-slot>fallback</slot></slot>.
+      // In that case, parent-slot has already been removed, so parent_slot->
+      // SupportsAssignment() is false, but this-slot is still in the process
+      // of being removed, so IsInShadowTree() is still true.
+      if (parent_slot->SupportsAssignment() &&
+          !parent_slot->HasAssignedNodesSlow())
         parent_slot->DidSlotChange(slot_change_type);
     }
   }
 }
 
 bool Node::IsEffectiveRootScroller() const {
-  return GetLayoutObject() ? GetLayoutObject()->IsEffectiveRootScroller()
-                           : false;
+  return GetLayoutObject() && GetLayoutObject()->IsEffectiveRootScroller();
 }
 
 LayoutBox* Node::AutoscrollBox() {
@@ -3345,11 +3733,8 @@ WebPluginContainerImpl* Node::GetWebPluginContainer() const {
     return nullptr;
   }
 
-  LayoutObject* object = GetLayoutObject();
-  if (object && object->IsLayoutEmbeddedContent()) {
-    return ToLayoutEmbeddedContent(object)->Plugin();
-  }
-
+  if (auto* embedded = DynamicTo<LayoutEmbeddedContent>(GetLayoutObject()))
+    return embedded->Plugin();
   return nullptr;
 }
 
@@ -3369,62 +3754,142 @@ bool Node::HasMediaControlAncestor() const {
   return false;
 }
 
-void Node::FlatTreeParentChanged() {
-  if (!isConnected())
-    return;
-  // TODO(futhark): Replace with DCHECK(IsSlotable()) when Shadow DOM V0 support
-  // is removed.
-  if (!IsElementNode() && !IsTextNode()) {
-    DCHECK(GetDocument().MayContainV0Shadow());
+void Node::ParentSlotChanged() {
+  if (!isConnected()) {
     return;
   }
-  if (const ComputedStyle* style = GetComputedStyle()) {
+  DCHECK(IsSlotable());
+  DCHECK(IsShadowHost(parentNode()) || IsA<HTMLSlotElement>(parentNode()));
+  FlatTreeParentChanged();
+}
+
+void Node::FlatTreeParentChanged() {
+  DCHECK(isConnected());
+  if (Element* element = DynamicTo<Element>(this)) {
+    element->DetachOverscroll();
+  }
+  const ComputedStyle* style =
+      IsElementNode() ? To<Element>(this)->GetComputedStyle() : nullptr;
+  bool detach = false;
+  if (ShouldSkipMarkingStyleDirty()) {
+    // If we should not mark the node dirty in the new flat tree position,
+    // detach to make sure all computes styles, layout objects, and dirty
+    // flags are cleared.
+    detach = IsDirtyForStyleRecalc() || ChildNeedsStyleRecalc() || style ||
+             GetLayoutObject();
+  }
+  if (!detach) {
     // We are moving a node with ensured computed style into the flat tree.
     // Clear ensured styles so that we can use IsEnsuredOutsideFlatTree() to
     // determine that we are outside the flat tree before updating the style
     // recalc root in MarkAncestorsWithChildNeedsStyleRecalc().
-    if (style->IsEnsuredOutsideFlatTree())
-      DetachLayoutTree();
+    detach = style && style->IsEnsuredOutsideFlatTree();
   }
+  if (detach) {
+    StyleEngine& engine = GetDocument().GetStyleEngine();
+    StyleEngine::DetachLayoutTreeScope detach_scope(engine);
+    DetachLayoutTree();
+    engine.FlatTreePositionChanged(*this);
+  }
+
   // The node changed the flat tree position by being slotted to a new slot or
   // slotted for the first time. We need to recalc style since the inheritance
   // parent may have changed.
-  if (NeedsStyleRecalc()) {
-    // The ancestor chain may have changed. We need to make sure that the
-    // child-dirty flags are updated, but the SetNeedsStyleRecalc() call below
-    // will skip MarkAncestorsWithChildNeedsStyleRecalc() if the node was
-    // already dirty.
-    MarkAncestorsWithChildNeedsStyleRecalc();
+  if (!ShouldSkipMarkingStyleDirty()) {
+    if (NeedsStyleRecalc()) {
+      // The ancestor chain may have changed. We need to make sure that the
+      // child-dirty flags are updated, but the SetNeedsStyleRecalc() call below
+      // will skip MarkAncestorsWithChildNeedsStyleRecalc() if the node was
+      // already dirty.
+      MarkAncestorsWithChildNeedsStyleRecalc();
+    } else {
+      // We retain the ComputedStyles for elements moved with moveBefore(), but
+      // need to invalidate all styles in the subtree since any element in the
+      // subtree may have styles changed via e.g. selector matching changes or
+      // @container query changes. Also, DynamicRestyleFlags potentially need
+      // updating, which happens during style recalc.
+      StyleChangeType change_type =
+          GetDocument().StatePreservingAtomicMoveInProgress()
+              ? kSubtreeStyleChange
+              : kLocalStyleChange;
+      SetNeedsStyleRecalc(change_type,
+                          StyleChangeReasonForTracing::Create(
+                              style_change_reason::kFlatTreeChange));
+    }
+    // We also need to force a layout tree re-attach since the layout tree
+    // parent box may have changed.
+    SetForceReattachLayoutTree();
   }
-  SetNeedsStyleRecalc(kLocalStyleChange,
-                      StyleChangeReasonForTracing::Create(
-                          style_change_reason::kFlatTreeChange));
-  // We also need to force a layout tree re-attach since the layout tree parent
-  // box may have changed.
-  SetForceReattachLayoutTree();
 }
 
 void Node::RemovedFromFlatTree() {
+  if (Element* element = DynamicTo<Element>(this)) {
+    element->DetachOverscroll();
+  }
+  StyleEngine& engine = GetDocument().GetStyleEngine();
+  StyleEngine::DetachLayoutTreeScope detach_scope(engine);
   // This node was previously part of the flat tree, but due to slot re-
   // assignment it no longer is. We need to detach the layout tree and notify
   // the StyleEngine in case the StyleRecalcRoot is removed from the flat tree.
-  DetachLayoutTree();
-  GetDocument().GetStyleEngine().RemovedFromFlatTree(*this);
+  {
+    StyleEngine::DOMRemovalScope style_scope(engine);
+    DetachLayoutTree();
+  }
+  GetDocument().GetStyleEngine().FlatTreePositionChanged(*this);
 }
 
 void Node::RegisterScrollTimeline(ScrollTimeline* timeline) {
-  EnsureRareData().RegisterScrollTimeline(timeline);
+  data_ = EnsureRareData().RegisterScrollTimeline(timeline);
 }
 void Node::UnregisterScrollTimeline(ScrollTimeline* timeline) {
-  EnsureRareData().UnregisterScrollTimeline(timeline);
+  data_ = EnsureRareData().UnregisterScrollTimeline(timeline);
+}
+
+void Node::SetManuallyAssignedSlot(HTMLSlotElement* slot) {
+  EnsureFlatTreeNodeData().SetManuallyAssignedSlot(slot);
+}
+HTMLSlotElement* Node::ManuallyAssignedSlot() {
+  if (FlatTreeNodeData* data = GetFlatTreeNodeData())
+    return data->ManuallyAssignedSlot();
+  return nullptr;
+}
+
+HeapHashSet<Member<TreeScope>> Node::GetAncestorTreeScopes() const {
+  HeapHashSet<Member<TreeScope>> ancestor_tree_scopes;
+  for (TreeScope* scope = &GetTreeScope(); scope;
+       scope = scope->ParentTreeScope()) {
+    ancestor_tree_scopes.insert(scope);
+  }
+  return ancestor_tree_scopes;
+}
+
+void Node::SetCachedDirectionality(TextDirection direction) {
+  switch (direction) {
+    case TextDirection::kRtl:
+      SetFlag(kCachedDirectionalityIsRtl);
+      break;
+    case TextDirection::kLtr:
+      ClearFlag(kCachedDirectionalityIsRtl);
+      break;
+  }
+}
+
+void Node::AddConsoleMessage(mojom::blink::ConsoleMessageSource source,
+                             mojom::blink::ConsoleMessageLevel level,
+                             const String& message) {
+  auto* console_message =
+      MakeGarbageCollected<ConsoleMessage>(source, level, message);
+  console_message->SetNodes(GetDocument().GetFrame(), {GetDomNodeId()});
+  GetDocument().AddConsoleMessage(console_message);
 }
 
 void Node::Trace(Visitor* visitor) const {
+  visitor->Trace(tree_scope_);
   visitor->Trace(parent_or_shadow_host_node_);
   visitor->Trace(previous_);
   visitor->Trace(next_);
+  visitor->Trace(layout_object_);
   visitor->Trace(data_);
-  visitor->Trace(tree_scope_);
   EventTarget::Trace(visitor);
 }
 
@@ -3432,21 +3897,21 @@ void Node::Trace(Visitor* visitor) const {
 
 #if DCHECK_IS_ON()
 
-void showNode(const blink::Node* node) {
+void ShowNode(const blink::Node* node) {
   if (node)
     LOG(INFO) << *node;
   else
     LOG(INFO) << "Cannot showNode for <null>";
 }
 
-void showTree(const blink::Node* node) {
+void ShowTree(const blink::Node* node) {
   if (node)
     LOG(INFO) << "\n" << node->ToTreeStringForThis().Utf8();
   else
     LOG(INFO) << "Cannot showTree for <null>";
 }
 
-void showNodePath(const blink::Node* node) {
+void ShowNodePath(const blink::Node* node) {
   if (node) {
     std::stringstream stream;
     node->PrintNodePathTo(stream);

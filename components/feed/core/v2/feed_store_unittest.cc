@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,27 +6,35 @@
 
 #include <map>
 #include <set>
+#include <string_view>
 #include <utility>
 
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "components/feed/core/proto/v2/wire/content_id.pb.h"
 #include "components/feed/core/v2/protocol_translator.h"
+#include "components/feed/core/v2/public/feed_api.h"
 #include "components/feed/core/v2/test/callback_receiver.h"
 #include "components/feed/core/v2/test/proto_printer.h"
 #include "components/feed/core/v2/test/stream_builder.h"
+#include "components/feed/core/v2/test/test_util.h"
+#include "components/feed/feed_feature_list.h"
 #include "components/leveldb_proto/testing/fake_db.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace feed {
 namespace {
+using testing::ElementsAre;
+using testing::Pair;
 
 using LoadStreamResult = FeedStore::LoadStreamResult;
 
-std::string KeyForContentId(base::StringPiece prefix,
+std::string KeyForContentId(std::string_view prefix,
                             const feedwire::ContentId& content_id) {
   return base::StrCat({prefix, content_id.content_domain(), ",",
                        base::NumberToString(content_id.type()), ",",
@@ -55,6 +63,13 @@ feedstore::StoredAction MakeAction(int32_t id) {
   feedstore::StoredAction action;
   action.set_id(id);
   return action;
+}
+
+feedstore::DocView CreateDocView(uint64_t docid, int64_t view_time_millis) {
+  feedstore::DocView view;
+  view.set_docid(docid);
+  view.set_view_time_millis(view_time_millis);
+  return view;
 }
 
 }  // namespace
@@ -91,10 +106,10 @@ class FeedStoreTest : public testing::Test {
   }
 
   base::test::TaskEnvironment task_environment_{
-      base::test::TaskEnvironment::TimeSource::SYSTEM_TIME};
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
   std::unique_ptr<FeedStore> store_;
   std::map<std::string, feedstore::Record> db_entries_;
-  leveldb_proto::test::FakeDB<feedstore::Record>* fake_db_;
+  raw_ptr<leveldb_proto::test::FakeDB<feedstore::Record>> fake_db_;
 };
 
 TEST_F(FeedStoreTest, InitSuccess) {
@@ -120,25 +135,36 @@ TEST_F(FeedStoreTest, InitFailure) {
 TEST_F(FeedStoreTest, OverwriteStream) {
   MakeFeedStore({});
   CallbackReceiver<bool> receiver;
-  store_->OverwriteStream(MakeTypicalInitialModelState(), receiver.Bind());
+  // TODO(harringtond): find a long term fix for assumptions about
+  // kTestTimeEpoch value.
+  store_->OverwriteStream(StreamType(StreamKind::kForYou),
+                          MakeTypicalInitialModelState(), receiver.Bind());
   fake_db_->UpdateCallback(true);
 
   ASSERT_TRUE(receiver.GetResult());
 
-  EXPECT_EQ(StoreToString(), R"([S/0] {
+  constexpr char want[] = R"([S/i] {
   stream_data {
     content_id {
       content_domain: "root"
     }
+    root_event_id: "\b{"
     next_page_token: "page-2"
-    shared_state_id {
+    shared_state_ids {
       content_domain: "render_data"
+    }
+    stream_key: "i"
+    content_hashes {
+      hashes: 1403410510
+    }
+    content_hashes {
+      hashes: 1084072211
     }
   }
 }
-[T/0/0] {
+[T/i/0] {
   stream_structures {
-    stream_id: "0"
+    stream_key: "i"
     structures {
       operation: 1
     }
@@ -200,16 +226,17 @@ TEST_F(FeedStoreTest, OverwriteStream) {
     }
   }
 }
-[c/stories,4,0] {
+[c/i/stories,4,0] {
   content {
     content_id {
       content_domain: "stories"
       type: 4
     }
     frame: "f:0"
+    stream_key: "i"
   }
 }
-[c/stories,4,1] {
+[c/i/stories,4,1] {
   content {
     content_id {
       content_domain: "stories"
@@ -217,59 +244,61 @@ TEST_F(FeedStoreTest, OverwriteStream) {
       id: 1
     }
     frame: "f:1"
+    stream_key: "i"
   }
 }
-[s/render_data,0,0] {
+[s/i/render_data,0,0] {
   shared_state {
     content_id {
       content_domain: "render_data"
     }
     shared_state_data: "ss:0"
+    stream_key: "i"
   }
 }
-)");
+)";
+  EXPECT_STRINGS_EQUAL(want, StoreToString());
 }
 
 TEST_F(FeedStoreTest, OverwriteStreamOverwritesData) {
   MakeFeedStore({});
   // Insert some junk that should be removed.
-  db_entries_["S/0"].mutable_local_action()->set_id(6);
-  db_entries_["T/0/0"].mutable_local_action()->set_id(6);
-  db_entries_["T/0/73"].mutable_local_action()->set_id(6);
-  db_entries_["c/stories,4,0"].mutable_local_action()->set_id(6);
-  db_entries_["c/stories,4,1"].mutable_local_action()->set_id(6);
-  db_entries_["c/garbage"].mutable_local_action()->set_id(6);
-  db_entries_["s/render_data,0,0"].mutable_local_action()->set_id(6);
-  db_entries_["s/garbage,0,0"].mutable_local_action()->set_id(6);
+  db_entries_["S/i"].mutable_local_action()->set_id(6);
+  db_entries_["T/i/0"].mutable_local_action()->set_id(6);
+  db_entries_["T/i/73"].mutable_local_action()->set_id(6);
+  db_entries_["c/i/stories,4,0"].mutable_local_action()->set_id(6);
+  db_entries_["c/i/stories,4,1"].mutable_local_action()->set_id(6);
+  db_entries_["c/i/garbage"].mutable_local_action()->set_id(6);
+  db_entries_["s/i/render_data,0,0"].mutable_local_action()->set_id(6);
+  db_entries_["s/i/garbage,0,0"].mutable_local_action()->set_id(6);
+  // Some junk that should NOT be removed.
+  db_entries_["s/1/stories,0,0"].mutable_local_action()->set_id(6);
+  db_entries_["S/1"].mutable_local_action()->set_id(6);
+  db_entries_["T/1"].mutable_local_action()->set_id(6);
+  db_entries_["T/1/0"].mutable_local_action()->set_id(6);
+  db_entries_["m"].mutable_local_action()->set_id(6);
 
   CallbackReceiver<bool> receiver;
-  store_->OverwriteStream(MakeTypicalInitialModelState(), receiver.Bind());
+  store_->OverwriteStream(StreamType(StreamKind::kForYou),
+                          MakeTypicalInitialModelState(), receiver.Bind());
   fake_db_->UpdateCallback(true);
 
   ASSERT_TRUE(receiver.GetResult());
-  ASSERT_EQ(std::set<std::string>({
-                "S/0",
-                "T/0/0",
-                "c/stories,4,0",
-                "c/stories,4,1",
-                "s/render_data,0,0",
-            }),
-            StoredKeys());
-
-  for (std::string key : StoredKeys()) {
-    EXPECT_FALSE(db_entries_[key].has_local_action())
-        << "Found local action at key " << key
-        << ", did OverwriteStream erase everything?";
-  }
+  ASSERT_EQ(
+      std::set<std::string>({"S/i", "T/i/0", "c/i/stories,4,0",
+                             "c/i/stories,4,1", "s/i/render_data,0,0",
+                             "s/1/stories,0,0", "S/1", "T/1", "T/1/0", "m"}),
+      StoredKeys());
 }
 
 TEST_F(FeedStoreTest, LoadStreamSuccess) {
   MakeFeedStore({});
-  store_->OverwriteStream(MakeTypicalInitialModelState(), base::DoNothing());
+  store_->OverwriteStream(StreamType(StreamKind::kForYou),
+                          MakeTypicalInitialModelState(), base::DoNothing());
   fake_db_->UpdateCallback(true);
 
   CallbackReceiver<LoadStreamResult> receiver;
-  store_->LoadStream(receiver.Bind());
+  store_->LoadStream(StreamType(StreamKind::kForYou), receiver.Bind());
   fake_db_->LoadCallback(true);
 
   ASSERT_TRUE(receiver.GetResult());
@@ -280,11 +309,12 @@ TEST_F(FeedStoreTest, LoadStreamSuccess) {
 
 TEST_F(FeedStoreTest, LoadStreamFail) {
   MakeFeedStore({});
-  store_->OverwriteStream(MakeTypicalInitialModelState(), base::DoNothing());
+  store_->OverwriteStream(StreamType(StreamKind::kForYou),
+                          MakeTypicalInitialModelState(), base::DoNothing());
   fake_db_->UpdateCallback(true);
 
   CallbackReceiver<LoadStreamResult> receiver;
-  store_->LoadStream(receiver.Bind());
+  store_->LoadStream(StreamType(StreamKind::kForYou), receiver.Bind());
   fake_db_->LoadCallback(false);
 
   ASSERT_TRUE(receiver.GetResult());
@@ -295,7 +325,7 @@ TEST_F(FeedStoreTest, LoadStreamNoData) {
   MakeFeedStore({});
 
   CallbackReceiver<LoadStreamResult> receiver;
-  store_->LoadStream(receiver.Bind());
+  store_->LoadStream(StreamType(StreamKind::kForYou), receiver.Bind());
   fake_db_->LoadCallback(true);
 
   ASSERT_TRUE(receiver.GetResult());
@@ -305,13 +335,15 @@ TEST_F(FeedStoreTest, LoadStreamNoData) {
 TEST_F(FeedStoreTest, WriteOperations) {
   MakeFeedStore({});
   CallbackReceiver<LoadStreamResult> receiver;
-  store_->WriteOperations(5, {MakeOperation(MakeCluster(2, MakeRootId())),
-                              MakeOperation(MakeCluster(6, MakeRootId()))});
+  store_->WriteOperations(StreamType(StreamKind::kForYou),
+                          /*sequence_number=*/5,
+                          {MakeOperation(MakeCluster(2, MakeRootId())),
+                           MakeOperation(MakeCluster(6, MakeRootId()))});
   fake_db_->UpdateCallback(true);
 
-  EXPECT_EQ(StoreToString(), R"([T/0/5] {
+  constexpr char want[] = R"([T/i/5] {
   stream_structures {
-    stream_id: "0"
+    stream_key: "i"
     sequence_number: 5
     structures {
       operation: 2
@@ -339,7 +371,8 @@ TEST_F(FeedStoreTest, WriteOperations) {
     }
   }
 }
-)");
+)";
+  EXPECT_STRINGS_EQUAL(want, StoreToString());
 }
 
 TEST_F(FeedStoreTest, ReadNonexistentContentAndSharedStates) {
@@ -348,13 +381,14 @@ TEST_F(FeedStoreTest, ReadNonexistentContentAndSharedStates) {
                    std::vector<feedstore::StreamSharedState>>
       cr;
 
-  store_->ReadContent({MakeContentContentId(0)}, {MakeSharedStateContentId(0)},
+  store_->ReadContent(StreamType(StreamKind::kForYou),
+                      {MakeContentContentId(0)}, {MakeSharedStateContentId(0)},
                       cr.Bind());
   fake_db_->LoadCallback(true);
 
-  ASSERT_NE(cr.GetResult<0>(), base::nullopt);
+  ASSERT_NE(cr.GetResult<0>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<0>()->size(), 0ul);
-  ASSERT_NE(cr.GetResult<1>(), base::nullopt);
+  ASSERT_NE(cr.GetResult<1>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<1>()->size(), 0ul);
 }
 
@@ -364,13 +398,13 @@ TEST_F(FeedStoreTest, ReadContentAndSharedStates) {
   feedstore::StreamSharedState shared1 = MakeSharedState(1);
   feedstore::StreamSharedState shared2 = MakeSharedState(2);
 
-  MakeFeedStore({{KeyForContentId("c/", content1.content_id()),
+  MakeFeedStore({{KeyForContentId("c/i/", content1.content_id()),
                   RecordForContent(content1)},
-                 {KeyForContentId("c/", content2.content_id()),
+                 {KeyForContentId("c/i/", content2.content_id()),
                   RecordForContent(content2)},
-                 {KeyForContentId("s/", shared1.content_id()),
+                 {KeyForContentId("s/i/", shared1.content_id()),
                   RecordForSharedState(shared1)},
-                 {KeyForContentId("s/", shared2.content_id()),
+                 {KeyForContentId("s/i/", shared2.content_id()),
                   RecordForSharedState(shared2)}});
 
   std::vector<feedwire::ContentId> content_ids = {content1.content_id(),
@@ -383,12 +417,13 @@ TEST_F(FeedStoreTest, ReadContentAndSharedStates) {
       cr;
 
   // Successful read
-  store_->ReadContent(content_ids, shared_state_ids, cr.Bind());
+  store_->ReadContent(StreamType(StreamKind::kForYou), content_ids,
+                      shared_state_ids, cr.Bind());
   fake_db_->LoadCallback(true);
 
-  ASSERT_NE(cr.GetResult<0>(), base::nullopt);
+  ASSERT_NE(cr.GetResult<0>(), std::nullopt);
   std::vector<feedstore::Content> content = *cr.GetResult<0>();
-  ASSERT_NE(cr.GetResult<1>(), base::nullopt);
+  ASSERT_NE(cr.GetResult<1>(), std::nullopt);
   std::vector<feedstore::StreamSharedState> shared_states = *cr.GetResult<1>();
 
   ASSERT_EQ(content.size(), 2ul);
@@ -403,12 +438,13 @@ TEST_F(FeedStoreTest, ReadContentAndSharedStates) {
 
   // Failed read
   cr.Clear();
-  store_->ReadContent(content_ids, shared_state_ids, cr.Bind());
+  store_->ReadContent(StreamType(StreamKind::kForYou), content_ids,
+                      shared_state_ids, cr.Bind());
   fake_db_->LoadCallback(false);
 
-  ASSERT_NE(cr.GetResult<0>(), base::nullopt);
+  ASSERT_NE(cr.GetResult<0>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<0>()->size(), 0ul);
-  ASSERT_NE(cr.GetResult<1>(), base::nullopt);
+  ASSERT_NE(cr.GetResult<1>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<1>()->size(), 0ul);
 }
 
@@ -421,7 +457,7 @@ TEST_F(FeedStoreTest, ReadActions) {
   CallbackReceiver<std::vector<feedstore::StoredAction>> receiver;
   store_->ReadActions(receiver.Bind());
   fake_db_->LoadCallback(true);
-  ASSERT_NE(base::nullopt, receiver.GetResult());
+  ASSERT_NE(std::nullopt, receiver.GetResult());
   std::vector<feedstore::StoredAction> result =
       std::move(*receiver.GetResult());
 
@@ -432,7 +468,7 @@ TEST_F(FeedStoreTest, ReadActions) {
   receiver.Clear();
   store_->ReadActions(receiver.Bind());
   fake_db_->LoadCallback(false);
-  ASSERT_NE(base::nullopt, receiver.GetResult());
+  ASSERT_NE(std::nullopt, receiver.GetResult());
   result = std::move(*receiver.GetResult());
   EXPECT_EQ(0ul, result.size());
 }
@@ -453,7 +489,7 @@ TEST_F(FeedStoreTest, WriteActions) {
   receiver.GetResult().reset();
   store_->WriteActions({action}, receiver.Bind());
   fake_db_->UpdateCallback(false);
-  EXPECT_NE(receiver.GetResult(), base::nullopt);
+  EXPECT_NE(receiver.GetResult(), std::nullopt);
   EXPECT_EQ(receiver.GetResult().value(), false);
 }
 
@@ -474,14 +510,15 @@ TEST_F(FeedStoreTest, RemoveActions) {
   receiver.GetResult().reset();
   store_->RemoveActions(ids, receiver.Bind());
   fake_db_->UpdateCallback(false);
-  EXPECT_NE(receiver.GetResult(), base::nullopt);
+  EXPECT_NE(receiver.GetResult(), std::nullopt);
   EXPECT_EQ(receiver.GetResult().value(), false);
 }
 
 TEST_F(FeedStoreTest, ClearAllSuccess) {
   // Write at least one record of each type.
   MakeFeedStore({});
-  store_->OverwriteStream(MakeTypicalInitialModelState(), base::DoNothing());
+  store_->OverwriteStream(StreamType(StreamKind::kForYou),
+                          MakeTypicalInitialModelState(), base::DoNothing());
   fake_db_->UpdateCallback(true);
   store_->WriteActions({MakeAction(0)}, base::DoNothing());
   fake_db_->UpdateCallback(true);
@@ -548,6 +585,119 @@ TEST_F(FeedStoreTest, WriteMetadata) {
   ASSERT_EQ(1ul, db_entries_.size());
   EXPECT_EQ("token", db_entries_["m"].metadata().consistency_token());
   EXPECT_EQ(20, db_entries_["m"].metadata().next_action_id());
+}
+
+TEST_F(FeedStoreTest, UpgradeFromStreamSchemaV0) {
+  MakeFeedStore({});
+  // Insert some junk with version 0 keys. It should be removed.
+  db_entries_["S/0"].mutable_local_action()->set_id(6);
+  db_entries_["T/0/0"].mutable_local_action()->set_id(6);
+  db_entries_["T/0/73"].mutable_local_action()->set_id(6);
+  db_entries_["c/stories,4,0"].mutable_local_action()->set_id(6);
+  db_entries_["c/stories,4,1"].mutable_local_action()->set_id(6);
+  db_entries_["c/garbage"].mutable_local_action()->set_id(6);
+  db_entries_["s/render_data,0,0"].mutable_local_action()->set_id(6);
+  db_entries_["s/garbage,0,0"].mutable_local_action()->set_id(6);
+  // Actions should be retained.
+  db_entries_["a/someaction"].mutable_local_action()->set_id(6);
+
+  CallbackReceiver<feedstore::Metadata> receiver;
+  feedstore::Metadata old_metadata;
+  old_metadata.set_consistency_token("token-1");
+  store_->UpgradeFromStreamSchemaV0(old_metadata, receiver.Bind());
+  fake_db_->UpdateCallback(true);
+
+  ASSERT_TRUE(receiver.GetResult());
+  EXPECT_EQ("token-1", receiver.GetResult()->consistency_token());
+  EXPECT_EQ(1, receiver.GetResult()->stream_schema_version());
+  ASSERT_EQ(std::set<std::string>({
+                "m",
+                "a/someaction",
+            }),
+            StoredKeys());
+}
+
+TEST_F(FeedStoreTest, WriteDocView) {
+  MakeFeedStore({});
+  feedstore::DocView dv = CreateDocView(10, 11);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+
+  EXPECT_EQ(R"([v/10/11] {
+  doc_view {
+    docid: 10
+    view_time_millis: 11
+  }
+}
+)",
+            StoreToString());
+}
+
+TEST_F(FeedStoreTest, RemoveDocViewsNotExist) {
+  MakeFeedStore({});
+  feedstore::DocView dv = CreateDocView(10, 11);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+
+  // docid doesn't match
+  store_->RemoveDocViews({CreateDocView(11, 11)});
+  fake_db_->UpdateCallback(true);
+
+  EXPECT_EQ(R"([v/10/11] {
+  doc_view {
+    docid: 10
+    view_time_millis: 11
+  }
+}
+)",
+            StoreToString());
+}
+
+TEST_F(FeedStoreTest, RemoveDocViewsDoesExist) {
+  MakeFeedStore({});
+  feedstore::DocView dv = CreateDocView(10, 9000);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+  dv.set_docid(11);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+  dv.set_docid(12);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+
+  store_->RemoveDocViews({CreateDocView(10, 9000), CreateDocView(12, 9000)});
+  fake_db_->UpdateCallback(true);
+  ASSERT_THAT(db_entries_, ElementsAre(Pair("v/11/9000", EqualsTextProto(R"({
+  doc_view {
+    docid: 11
+    view_time_millis: 9000
+  }
+})"))));
+}
+
+TEST_F(FeedStoreTest, ReadDocViews) {
+  MakeFeedStore({});
+  feedstore::DocView dv;
+  dv.set_docid(0);
+  dv.set_view_time_millis(11);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+  dv.set_docid(std::numeric_limits<uint64_t>::max());
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+
+  CallbackReceiver<std::vector<feedstore::DocView>> result;
+  store_->ReadDocViews(result.Bind());
+  fake_db_->LoadCallback(true);
+
+  ASSERT_TRUE(result.GetResult());
+  ASSERT_THAT(*result.GetResult(), ElementsAre(EqualsTextProto(R"({
+  view_time_millis: 11
+})"),
+                                               EqualsTextProto(R"({
+  docid: 18446744073709551615
+  view_time_millis: 11
+})")));
 }
 
 }  // namespace feed

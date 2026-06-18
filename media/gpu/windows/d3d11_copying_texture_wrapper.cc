@@ -1,38 +1,45 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "media/gpu/windows/d3d11_copying_texture_wrapper.h"
 
-#include <memory>
-
-#include "gpu/command_buffer/service/mailbox_manager.h"
-#include "media/base/status_codes.h"
-#include "media/base/win/hresult_status_helper.h"
-#include "media/gpu/windows/d3d11_com_defs.h"
-#include "ui/gl/hdr_metadata_helper_win.h"
+#include "media/base/video_types.h"
+#include "media/gpu/windows/d3d11_picture_buffer.h"
+#include "ui/gfx/color_space.h"
 
 namespace media {
 
 // TODO(tmathmeyer) What D3D11 Resources do we need to do the copying?
 CopyingTexture2DWrapper::CopyingTexture2DWrapper(
     const gfx::Size& size,
+    const gfx::ColorSpace& input_color_space,
+    const gfx::ColorSpace& output_color_space,
     std::unique_ptr<Texture2DWrapper> output_wrapper,
-    std::unique_ptr<VideoProcessorProxy> processor,
-    ComD3D11Texture2D output_texture,
-    base::Optional<gfx::ColorSpace> output_color_space)
+    scoped_refptr<VideoProcessorProxy> processor,
+    ComD3D11Texture2D output_texture)
     : size_(size),
+      input_color_space_(input_color_space),
+      output_color_space_(output_color_space),
       video_processor_(std::move(processor)),
       output_texture_wrapper_(std::move(output_wrapper)),
-      output_texture_(std::move(output_texture)),
-      output_color_space_(std::move(output_color_space)) {}
+      output_texture_(std::move(output_texture)) {}
 
 CopyingTexture2DWrapper::~CopyingTexture2DWrapper() = default;
 
-Status CopyingTexture2DWrapper::ProcessTexture(
-    const gfx::ColorSpace& input_color_space,
-    MailboxHolderArray* mailbox_dest,
-    gfx::ColorSpace* output_color_space) {
+// Copy path doesn't need to sync until calling VideoProcessorBlt.
+D3D11Status CopyingTexture2DWrapper::BeginSharedImageAccess() {
+  return D3D11Status::Codes::kOk;
+}
+
+D3D11Status CopyingTexture2DWrapper::ProcessTexture(
+    scoped_refptr<gpu::ClientSharedImage>& shared_image_dest) {
+  // Acquire keyed mutex for VideoProcessorBlt ops.
+  D3D11Status status = output_texture_wrapper_->BeginSharedImageAccess();
+  if (!status.is_ok()) {
+    return status;
+  }
+
   D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {
       D3D11_VPOV_DIMENSION_TEXTURE2D};
   output_view_desc.Texture2D.MipSlice = 0;
@@ -40,8 +47,7 @@ Status CopyingTexture2DWrapper::ProcessTexture(
   HRESULT hr = video_processor_->CreateVideoProcessorOutputView(
       output_texture_.Get(), &output_view_desc, &output_view);
   if (!SUCCEEDED(hr)) {
-    return Status(StatusCode::kCreateVideoProcessorOutputViewFailed)
-        .AddCause(HresultToStatus(hr));
+    return {D3D11Status::Codes::kCreateVideoProcessorOutputViewFailed, hr};
   }
 
   D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {0};
@@ -52,46 +58,36 @@ Status CopyingTexture2DWrapper::ProcessTexture(
   hr = video_processor_->CreateVideoProcessorInputView(
       texture_.Get(), &input_view_desc, &input_view);
   if (!SUCCEEDED(hr)) {
-    return Status(StatusCode::kCreateVideoProcessorInputViewFailed)
-        .AddCause(HresultToStatus(hr));
+    return {D3D11Status::Codes::kCreateVideoProcessorInputViewFailed};
   }
 
   D3D11_VIDEO_PROCESSOR_STREAM streams = {0};
   streams.Enable = TRUE;
   streams.pInputSurface = input_view.Get();
 
-  // If we were given an output color space, then that's what we'll use.
-  // Otherwise, we'll use whatever the input space is.
-  gfx::ColorSpace copy_color_space =
-      output_color_space_ ? *output_color_space_ : input_color_space;
-
-  // If the input color space has changed, or if this is the first call, then
-  // notify the video processor about it.
-  if (!previous_input_color_space_ ||
-      *previous_input_color_space_ != input_color_space) {
-    previous_input_color_space_ = input_color_space;
-    video_processor_->SetStreamColorSpace(input_color_space);
-    video_processor_->SetOutputColorSpace(copy_color_space);
-  }
-
   hr = video_processor_->VideoProcessorBlt(output_view.Get(),
                                            0,  // output_frameno
                                            1,  // stream_count
                                            &streams);
   if (!SUCCEEDED(hr)) {
-    return Status(StatusCode::kVideoProcessorBltFailed)
-        .AddCause(HresultToStatus(hr));
+    return {D3D11Status::Codes::kVideoProcessorBltFailed, hr};
   }
 
-  return output_texture_wrapper_->ProcessTexture(copy_color_space, mailbox_dest,
-                                                 output_color_space);
+  return output_texture_wrapper_->ProcessTexture(shared_image_dest);
 }
 
-Status CopyingTexture2DWrapper::Init(
+const gfx::Size& CopyingTexture2DWrapper::GetSize() const {
+  return size_;
+}
+
+D3D11Status CopyingTexture2DWrapper::Init(
     scoped_refptr<base::SingleThreadTaskRunner> gpu_task_runner,
     GetCommandBufferHelperCB get_helper_cb,
     ComD3D11Texture2D texture,
-    size_t array_slice) {
+    size_t array_slice,
+    scoped_refptr<media::D3D11PictureBuffer> picture_buffer,
+    PictureBufferGPUResourceInitDoneCB
+        picture_buffer_gpu_resource_init_done_cb) {
   auto result = video_processor_->Init(size_.width(), size_.height());
   if (!result.is_ok())
     return std::move(result).AddHere();
@@ -101,21 +97,13 @@ Status CopyingTexture2DWrapper::Init(
   texture_ = texture;
   array_slice_ = array_slice;
 
-  return output_texture_wrapper_->Init(std::move(gpu_task_runner),
-                                       std::move(get_helper_cb),
-                                       output_texture_, /*array_slice=*/0);
-}
+  video_processor_->SetStreamColorSpace(input_color_space_);
+  video_processor_->SetOutputColorSpace(output_color_space_);
 
-void CopyingTexture2DWrapper::SetStreamHDRMetadata(
-    const gl::HDRMetadata& stream_metadata) {
-  auto dxgi_stream_metadata =
-      gl::HDRMetadataHelperWin::HDRMetadataToDXGI(stream_metadata);
-  video_processor_->SetStreamHDRMetadata(dxgi_stream_metadata);
-}
-
-void CopyingTexture2DWrapper::SetDisplayHDRMetadata(
-    const DXGI_HDR_METADATA_HDR10& dxgi_display_metadata) {
-  video_processor_->SetDisplayHDRMetadata(dxgi_display_metadata);
+  return output_texture_wrapper_->Init(
+      std::move(gpu_task_runner), std::move(get_helper_cb), output_texture_,
+      /*array_size=*/0, std::move(picture_buffer),
+      std::move(picture_buffer_gpu_resource_init_done_cb));
 }
 
 }  // namespace media

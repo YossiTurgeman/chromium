@@ -9,7 +9,7 @@ subdirectory. It should be invoked like so:
     chrome/test/data/safe_browsing/dmg/generate_test_data.sh chrome/test/data/safe_browsing/dmg/data
 
 The script will produce the data files and bundle them for uploading to
-[CIPD](../../../../../docs/cipd.md). The script will produce a CIPD package
+[CIPD](../../../../../docs/cipd_and_3pp.md). The script will produce a CIPD package
 named `data.zip`. The ZIP contents should be inspected and, if they look good,
 uploaded to the CIPD service and tagged with a version:
 
@@ -21,5 +21,5 @@ an integer starting at 1 to differentiate different versions on the same day.
 After uploading a new version to CIPD, the data need to be rolled into Chromium
 by updating the version referenced in the root `DEPS` file.
 
-Generating the data at build time is slow and has [caused](https://crbug.com/696529)
-[issues](https://crbug.com/817663) on the bots in the past.
+Generating the data at build time is slow and has [caused](https://crbug.com/40508310)
+[issues](https://crbug.com/40565229) on the bots in the past.

@@ -1,4 +1,4 @@
-# Copyright 2017 The Chromium Authors. All rights reserved.
+# Copyright 2017 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #
 # Parameters
 #
-#   icons (required)
+#   sources (required)
 #       A list of icon filenames to use as inputs.
 #
 #   icon_directory (required)
@@ -22,8 +22,8 @@
 #
 #   See BUILD.gn in this directory (//components/vector_icons/) for an example.
 template("aggregate_vector_icons") {
-  assert(defined(invoker.icons),
-         "Need icons in $target_name listing the icon files.")
+  assert(defined(invoker.sources),
+         "Need sources in $target_name listing the icon files.")
   assert(
       defined(invoker.icon_directory),
       "Need icon_directory in $target_name where the icons and templates live.")
@@ -40,8 +40,11 @@ template("aggregate_vector_icons") {
       "vector_icons.cc.template",
       "vector_icons.h.template",
     ]
+    if (defined(invoker.generate_unittests) && invoker.generate_unittests) {
+      templates += [ "vector_icons_unittest.h.template" ]
+    }
     inputs =
-        rebase_path(templates + invoker.icons, ".", invoker.icon_directory) +
+        rebase_path(templates + invoker.sources, ".", invoker.icon_directory) +
         [ "//components/vector_icons/aggregate_vector_icons.py" ]
 
     outputs = [
@@ -50,7 +53,7 @@ template("aggregate_vector_icons") {
     ]
 
     response_file_contents =
-        rebase_path(invoker.icons, root_build_dir, invoker.icon_directory)
+        rebase_path(invoker.sources, root_build_dir, invoker.icon_directory)
 
     args = [
       "--working_directory=" +
@@ -59,5 +62,12 @@ template("aggregate_vector_icons") {
       "--output_cc=" + rebase_path(output_cc, root_build_dir),
       "--output_h=" + rebase_path(output_h, root_build_dir),
     ]
+
+    if (defined(invoker.generate_unittests) && invoker.generate_unittests) {
+      output_test_h = "$target_gen_dir/vector_icons_unittest.h"
+      outputs += [ output_test_h ]
+      args +=
+          [ "--output_test_h=" + rebase_path(output_test_h, root_build_dir) ]
+    }
   }
 }

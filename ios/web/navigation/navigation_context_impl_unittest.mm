@@ -1,19 +1,15 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #import "ios/web/navigation/navigation_context_impl.h"
 
 #import "ios/web/navigation/navigation_item_impl.h"
-#import "ios/web/public/test/fakes/test_web_state.h"
-#include "net/http/http_response_headers.h"
-#include "testing/gtest/include/gtest/gtest.h"
+#import "ios/web/public/test/fakes/fake_web_state.h"
+#import "net/http/http_response_headers.h"
+#import "testing/gtest/include/gtest/gtest.h"
 #import "testing/gtest_mac.h"
-#include "testing/platform_test.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "testing/platform_test.h"
 
 namespace web {
 namespace {
@@ -30,7 +26,7 @@ class NavigationContextImplTest : public PlatformTest {
         response_headers_(new net::HttpResponseHeaders(
             std::string(kRawResponseHeaders, sizeof(kRawResponseHeaders)))) {}
 
-  TestWebState web_state_;
+  FakeWebState web_state_;
   GURL url_;
   scoped_refptr<net::HttpResponseHeaders> response_headers_;
 };
@@ -109,7 +105,6 @@ TEST_F(NavigationContextImplTest, Setters) {
   EXPECT_FALSE(context->IsRendererInitiated());
   EXPECT_NE(response_headers_.get(), context->GetResponseHeaders());
   EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
-  EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
   EXPECT_FALSE(context->GetMimeType());
   EXPECT_FALSE(context->GetItem());
 
@@ -123,7 +118,6 @@ TEST_F(NavigationContextImplTest, Setters) {
   EXPECT_FALSE(context->GetError());
   EXPECT_FALSE(context->IsRendererInitiated());
   EXPECT_NE(response_headers_.get(), context->GetResponseHeaders());
-  EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
   EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
   EXPECT_FALSE(context->GetMimeType());
   EXPECT_FALSE(context->GetItem());
@@ -139,7 +133,6 @@ TEST_F(NavigationContextImplTest, Setters) {
   EXPECT_FALSE(context->IsRendererInitiated());
   EXPECT_NE(response_headers_.get(), context->GetResponseHeaders());
   EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
-  EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
   EXPECT_FALSE(context->GetMimeType());
   EXPECT_FALSE(context->GetItem());
 
@@ -153,7 +146,6 @@ TEST_F(NavigationContextImplTest, Setters) {
   EXPECT_FALSE(context->GetError());
   EXPECT_FALSE(context->IsRendererInitiated());
   EXPECT_NE(response_headers_.get(), context->GetResponseHeaders());
-  EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
   EXPECT_EQ(WKNavigationTypeOther, context->GetWKNavigationType());
   EXPECT_FALSE(context->GetMimeType());
   EXPECT_FALSE(context->GetItem());

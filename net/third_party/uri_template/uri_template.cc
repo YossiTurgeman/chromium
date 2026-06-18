@@ -26,10 +26,13 @@
 
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "base/strings/escape.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_split.h"
-#include "net/base/escape.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 
 using std::string;
 
@@ -41,8 +44,8 @@ namespace {
 // the expanded url.
 struct UriTemplateConfig {
  public:
-  UriTemplateConfig(const char* prefix,
-                    const char* joiner,
+  UriTemplateConfig(std::string_view prefix,
+                    std::string_view joiner,
                     bool requires_variable_assignment,
                     bool allow_reserved_expansion,
                     bool no_variable_assignment_if_empty = false)
@@ -56,33 +59,31 @@ struct UriTemplateConfig {
                    const string& value,
                    bool use_prefix,
                    string* target) const {
-    string joiner = use_prefix ? prefix_ : joiner_;
+    const std::string& joiner = use_prefix ? prefix_ : joiner_;
     if (requires_variable_assignment_) {
       if (value.empty() && no_variable_assignment_if_empty_) {
-        target->append(joiner + EscapedValue(variable));
+        base::StrAppend(target, {joiner, EscapedValue(variable)});
       } else {
-        target->append(joiner + EscapedValue(variable) + "=" +
-                       EscapedValue(value));
+        base::StrAppend(
+            target, {joiner, EscapedValue(variable), "=", EscapedValue(value)});
       }
     } else {
-      target->append(joiner + EscapedValue(value));
+      base::StrAppend(target, {joiner, EscapedValue(value)});
     }
   }
 
  private:
   string EscapedValue(const string& value) const {
-    string escaped;
     if (allow_reserved_expansion_) {
       // Reserved expansion passes through reserved and pct-encoded characters.
-      escaped = net::EscapeExternalHandlerValue(value);
-    } else {
-      escaped = net::EscapeAllExceptUnreserved(value);
+      return base::EscapeExternalHandlerValue(value);
     }
-    return escaped;
+
+    return base::EscapeAllExceptUnreserved(value);
   }
 
-  const char* prefix_;
-  const char* joiner_;
+  std::string prefix_;
+  std::string joiner_;
   bool requires_variable_assignment_;
   bool no_variable_assignment_if_empty_;
   bool allow_reserved_expansion_;
@@ -137,7 +138,7 @@ UriTemplateConfig MakeConfig(string* variable) {
 
 void ProcessVariableSection(
     string* variable_section,
-    const std::unordered_map<string, string>& parameters,
+    const absl::flat_hash_map<string, string>& parameters,
     string* target,
     std::set<string>* vars_found) {
   // Note that this function will modify the variable_section string to remove
@@ -161,7 +162,7 @@ void ProcessVariableSection(
 }  // namespace
 
 bool Expand(const string& path_uri,
-            const std::unordered_map<string, string>& parameters,
+            const absl::flat_hash_map<string, string>& parameters,
             string* target,
             std::set<string>* vars_found) {
   size_t cur = 0;

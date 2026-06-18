@@ -1,9 +1,9 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef UI_DISPLAY_DISPLAY_TYPES_EXPORT_H_
-#define UI_DISPLAY_DISPLAY_TYPES_EXPORT_H_
+#ifndef UI_DISPLAY_TYPES_DISPLAY_TYPES_EXPORT_H_
+#define UI_DISPLAY_TYPES_DISPLAY_TYPES_EXPORT_H_
 
 // Defines DISPLAY_TYPES_EXPORT so that functionality implemented by the
 // DISPLAY_TYPES module can be exported to consumers.
@@ -20,11 +20,7 @@
 
 #else  // !defined(WIN32)
 
-#if defined(DISPLAY_TYPES_IMPLEMENTATION)
 #define DISPLAY_TYPES_EXPORT __attribute__((visibility("default")))
-#else
-#define DISPLAY_TYPES_EXPORT
-#endif
 
 #endif
 
@@ -34,4 +30,4 @@
 
 #endif
 
-#endif  // UI_DISPLAY_DISPLAY_TYPES_EXPORT_H_
+#endif  // UI_DISPLAY_TYPES_DISPLAY_TYPES_EXPORT_H_

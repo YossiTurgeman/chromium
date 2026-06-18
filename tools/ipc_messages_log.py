@@ -1,5 +1,5 @@
-#!/usr/bin/python
-# Copyright (c) 2012 The Chromium Authors. All rights reserved.
+#!/usr/bin/env python
+# Copyright 2012 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -40,10 +40,10 @@ def _ReadLines(f):
 
 
 def _GetMsgStartTable():
-  """Read MsgStart enumeration from ipc/ipc_message_utils.h.
+  """Read MsgStart enumeration from ipc/param_traits_utils.h.
 
   Determines the message type identifiers by reading.
-  header file ipc/ipc_message_utils.h and looking for
+  header file ipc/param_traits_utils.h and looking for
   enum IPCMessageStart.  Assumes following code format in header file:
   enum IPCMessageStart {
      Type1MsgStart ...,
@@ -53,7 +53,7 @@ def _GetMsgStartTable():
   Returns:
       A dictionary mapping StartName to enumeration value.
   """
-  ipc_message_file = _SourceDir() + '/ipc/ipc_message_utils.h'
+  ipc_message_file = _SourceDir() + '/ipc/param_traits_utils.h'
   ipc_message_lines = _ReadLines(open(ipc_message_file))
   is_msg_start = False
   count = 0

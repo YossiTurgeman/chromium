@@ -1,52 +1,86 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef HEAP_STUBS_H_
 #define HEAP_STUBS_H_
 
-#include "stddef.h"
+#include <stddef.h>
+#include <stdint.h>
 
-#define WTF_MAKE_FAST_ALLOCATED                 \
-    public:                                     \
-    void* operator new(size_t, void* p);        \
-    void* operator new[](size_t, void* p);      \
-    void* operator new(size_t size);            \
-    private:                                    \
-    typedef int __thisIsHereToForceASemicolonAfterThisMacro
+namespace std {
 
-namespace WTF {
+template <bool Condition, class If, class Else>
+struct conditional {
+  using type = If;
+};
+
+template <class If, class Else>
+struct conditional<false, If, Else> {
+  using type = Else;
+};
+
+template <bool Condition, class If, class Else>
+using conditional_t = conditional<Condition, If, Else>::type;
+
+}  // namespace std
+
+#define GC_PLUGIN_IGNORE(reason) \
+  __attribute__((annotate("blink_gc_plugin_ignore")))
+
+#define STACK_ALLOCATED_IGNORE(reason) \
+  __attribute__((annotate("stack_allocated_ignore")))
+
+namespace base {
+
+template <typename T>
+class WeakPtr {
+ public:
+  ~WeakPtr() {}
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
+};
+
+template <typename T>
+class WeakPtrFactory {
+ public:
+  explicit WeakPtrFactory(T*) {}
+  ~WeakPtrFactory() {}
+  WeakPtr<T> GetWeakPtr() { return WeakPtr<T>(); }
+};
+
+template <typename T, typename Traits = void>
+class raw_ptr {};
+
+template <typename T, typename Traits = void>
+class raw_ref {};
+
+}  // namespace base
+namespace blink {
 
 template<typename T> class RefCounted { };
 
 template<typename T> class RawPtr {
-public:
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
+ public:
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
 };
 
 template<typename T> class scoped_refptr {
-public:
-    ~scoped_refptr() { }
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
+ public:
+  ~scoped_refptr() {}
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
 };
 
-template<typename T> class WeakPtr {
-public:
-    ~WeakPtr() { }
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
-};
-
-class DefaultAllocator {
-public:
-    static const bool isGarbageCollected = false;
+class PartitionAllocator {
+ public:
+  static const bool isGarbageCollected = false;
 };
 
 template <typename T,
           size_t inlineCapacity = 0,
-          typename Allocator = DefaultAllocator>
+          typename Allocator = PartitionAllocator>
 class Vector {
  public:
   using iterator = T*;
@@ -62,7 +96,7 @@ class Vector {
 
 template <typename T,
           size_t inlineCapacity = 0,
-          typename Allocator = DefaultAllocator>
+          typename Allocator = PartitionAllocator>
 class Deque {
  public:
   using iterator = T*;
@@ -74,9 +108,8 @@ class Deque {
 };
 
 template <typename ValueArg,
-          typename HashArg = void,
           typename TraitsArg = void,
-          typename Allocator = DefaultAllocator>
+          typename Allocator = PartitionAllocator>
 class HashSet {
  public:
   typedef ValueArg* iterator;
@@ -88,22 +121,8 @@ class HashSet {
 };
 
 template <typename ValueArg,
-          typename HashArg = void,
           typename TraitsArg = void,
-          typename Allocator = DefaultAllocator>
-class ListHashSet {
- public:
-  typedef ValueArg* iterator;
-  typedef const ValueArg* const_iterator;
-  typedef ValueArg* reverse_iterator;
-  typedef const ValueArg* const_reverse_iterator;
-
-  ~ListHashSet() {}
-};
-
-template <typename ValueArg,
-          typename TraitsArg = void,
-          typename Allocator = DefaultAllocator>
+          typename Allocator = PartitionAllocator>
 class LinkedHashSet {
  public:
   typedef ValueArg* iterator;
@@ -115,9 +134,8 @@ class LinkedHashSet {
 };
 
 template <typename ValueArg,
-          typename HashArg = void,
           typename TraitsArg = void,
-          typename Allocator = DefaultAllocator>
+          typename Allocator = PartitionAllocator>
 class HashCountedSet {
  public:
   ~HashCountedSet() {}
@@ -125,10 +143,9 @@ class HashCountedSet {
 
 template <typename KeyArg,
           typename MappedArg,
-          typename HashArg = void,
           typename KeyTraitsArg = void,
           typename MappedTraitsArg = void,
-          typename Allocator = DefaultAllocator>
+          typename Allocator = PartitionAllocator>
 class HashMap {
  public:
   typedef MappedArg* iterator;
@@ -138,7 +155,7 @@ class HashMap {
 
   ~HashMap() {}
 };
-}
+}  // namespace blink
 
 // Empty namespace declaration to exercise internal
 // handling of namespace equality.
@@ -149,16 +166,44 @@ namespace std {
 namespace std {
 
 template<typename T> class unique_ptr {
-public:
-    ~unique_ptr() { }
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
+ public:
+  ~unique_ptr() {}
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
 };
 
 template <typename T, typename... Args>
 unique_ptr<T> make_unique(Args&&... args) {
   return unique_ptr<T>();
 }
+
+template <typename Key>
+class set {};
+template <typename Key>
+class unordered_set {};
+template <typename Key, typename Value>
+class map {};
+template <typename Key, typename Value>
+class unordered_map {};
+template <typename Elem>
+class vector {};
+template <typename Elem, size_t N>
+class array {
+ public:
+  const Elem& operator[](size_t n) const { return elems_[n]; }
+
+  const Elem* begin() const { return &elems_[0]; }
+  const Elem* end() const { return &elems_[N]; }
+
+ private:
+  GC_PLUGIN_IGNORE("A mock of an array for testing") Elem elems_[N];
+};
+template <typename T1, typename T2>
+class pair {};
+template <typename T>
+class optional {};
+template <class... Ts>
+class variant {};
 
 }  // namespace std
 
@@ -169,117 +214,19 @@ std::unique_ptr<T> WrapUnique(T* ptr) {
   return std::unique_ptr<T>();
 }
 
-template <typename T>
-class Optional {};
-
 }  // namespace base
 
-namespace blink {
-
-using namespace WTF;
-
-#define DISALLOW_NEW()                   \
-    private:                                    \
-    void* operator new(size_t) = delete;        \
-    void* operator new(size_t, void*) = delete;
-
-#define STACK_ALLOCATED()                                   \
-    private:                                                \
-    __attribute__((annotate("blink_stack_allocated")))      \
-    void* operator new(size_t) = delete;                    \
-    void* operator new(size_t, void*) = delete;
-
-#define DISALLOW_NEW_EXCEPT_PLACEMENT_NEW() \
-    public:                                 \
-    void* operator new(size_t, void*);      \
-    private:                                \
-    void* operator new(size_t) = delete;
-
-#define GC_PLUGIN_IGNORE(bug)                           \
-    __attribute__((annotate("blink_gc_plugin_ignore")))
-
-template<typename T> class GarbageCollected { };
+namespace absl {
 
 template <typename T>
-class RefCountedGarbageCollected : public GarbageCollected<T> {};
+class optional {};
 
-template<typename T> class Member {
-public:
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
-    bool operator!() const { return false; }
-};
+template <class... Ts>
+class variant {};
 
-template<typename T> class WeakMember {
-public:
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
-    bool operator!() const { return false; }
-};
+}  // namespace absl
 
-template<typename T> class Persistent {
-public:
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
-    bool operator!() const { return false; }
-};
-
-template<typename T> class WeakPersistent {
-public:
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
-    bool operator!() const { return false; }
-};
-
-template<typename T> class CrossThreadPersistent {
-public:
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
-    bool operator!() const { return false; }
-};
-
-template<typename T> class CrossThreadWeakPersistent {
-public:
-    operator T*() const { return 0; }
-    T* operator->() const { return 0; }
-    bool operator!() const { return false; }
-};
-
-template <typename T>
-class TraceWrapperV8Reference {
- public:
-  operator T*() const { return 0; }
-  T* operator->() const { return 0; }
-  bool operator!() const { return false; }
-};
-
-class HeapAllocator {
-public:
-    static const bool isGarbageCollected = true;
-};
-
-template<typename T, size_t inlineCapacity = 0>
-class HeapVector : public Vector<T, inlineCapacity, HeapAllocator> { };
-
-template<typename T, size_t inlineCapacity = 0>
-class HeapDeque : public Vector<T, inlineCapacity, HeapAllocator> { };
-
-template<typename T>
-class HeapHashSet : public HashSet<T, void, void, HeapAllocator> { };
-
-template<typename T>
-class HeapListHashSet : public ListHashSet<T, void, void, HeapAllocator> { };
-
-template<typename T>
-class HeapLinkedHashSet : public LinkedHashSet<T, void, HeapAllocator> {
-};
-
-template<typename T>
-class HeapHashCountedSet : public HashCountedSet<T, void, void, HeapAllocator> {
-};
-
-template<typename K, typename V>
-class HeapHashMap : public HashMap<K, V, void, void, void, HeapAllocator> { };
+namespace cppgc {
 
 class Visitor {
  public:
@@ -288,20 +235,316 @@ class Visitor {
 
   template <typename T>
   void Trace(const T&);
+
+  template <typename T>
+  void TraceMultiple(const T* start, size_t len);
+
+  template <typename K, typename V>
+  void TraceEphemeron(const K& key, const V* value);
 };
 
-class GarbageCollectedMixin {
-public:
-    virtual void AdjustAndMark(Visitor*) const = 0;
-    virtual bool IsHeapObjectAlive(Visitor*) const = 0;
-    virtual void Trace(Visitor*) const {}
+namespace internal {
+class WriteBarrierPolicyImpl;
+class NoWriteBarrierPolicyImpl;
+class CheckingPolicyImpl;
+class StorateTypeImpl;
+class LocationPolicyImpl;
+
+class StrongMemberTag;
+class WeakMemberTag;
+class UntracedMemberTag;
+
+template <typename StorageType>
+class MemberBase {};
+
+template <typename T,
+          typename WeaknessTag,
+          typename WriteBarrierPolicy,
+          typename CheckingPolicy,
+          typename StorageType>
+class BasicMember : public MemberBase<StorageType> {
+ public:
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
+  bool operator!() const { return false; }
 };
+
+class StrongPersistentPolicy;
+class WeakPersistentPolicy;
+
+class PersistentBase {};
+
+template <typename T,
+          typename WeaknessPolicy,
+          typename LocationPolicy,
+          typename CheckingPolicy>
+class BasicPersistent : public PersistentBase {
+ public:
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
+  bool operator!() const { return false; }
+};
+
+class StrongCrossThreadPersistentPolicy;
+class WeakCrossThreadPersistentPolicy;
+
+class CrossThreadPersistentBase : public PersistentBase {};
+
+template <typename T,
+          typename WeaknessPolicy,
+          typename LocationPolicy,
+          typename CheckingPolicy>
+class BasicCrossThreadPersistent : public CrossThreadPersistentBase {
+ public:
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
+  bool operator!() const { return false; }
+};
+
+}  // namespace internal
+
+template <typename T>
+class GarbageCollected {
+ public:
+  void* operator new(size_t, void* location) { return location; }
+
+ private:
+  void* operator new(size_t) = delete;
+  void* operator new[](size_t) = delete;
+};
+
+template <typename T, typename... Args>
+T* MakeGarbageCollected(int, Args&&... args) {
+  return new (reinterpret_cast<void*>(0x87654321)) T(args...);
+}
+
+class GarbageCollectedMixin {
+ public:
+  virtual void Trace(Visitor*) const {}
+};
+
+template <typename T>
+using Member = internal::BasicMember<T,
+                                     internal::StrongMemberTag,
+                                     internal::WriteBarrierPolicyImpl,
+                                     internal::CheckingPolicyImpl,
+                                     internal::StorateTypeImpl>;
+template <typename T>
+using WeakMember = internal::BasicMember<T,
+                                         internal::WeakMemberTag,
+                                         internal::WriteBarrierPolicyImpl,
+                                         internal::CheckingPolicyImpl,
+                                         internal::StorateTypeImpl>;
+
+template <typename T>
+using UntracedMember = internal::BasicMember<T,
+                                             internal::UntracedMemberTag,
+                                             internal::NoWriteBarrierPolicyImpl,
+                                             internal::CheckingPolicyImpl,
+                                             internal::StorateTypeImpl>;
+
+template <typename T>
+using Persistent = internal::BasicPersistent<T,
+                                             internal::StrongPersistentPolicy,
+                                             internal::LocationPolicyImpl,
+                                             internal::CheckingPolicyImpl>;
+template <typename T>
+using WeakPersistent = internal::BasicPersistent<T,
+                                                 internal::WeakPersistentPolicy,
+                                                 internal::LocationPolicyImpl,
+                                                 internal::CheckingPolicyImpl>;
+
+namespace subtle {
+
+template <typename T>
+using CrossThreadPersistent = internal::BasicCrossThreadPersistent<
+    T,
+    internal::StrongCrossThreadPersistentPolicy,
+    internal::LocationPolicyImpl,
+    internal::CheckingPolicyImpl>;
+template <typename T>
+using CrossThreadWeakPersistent = internal::BasicCrossThreadPersistent<
+    T,
+    internal::WeakCrossThreadPersistentPolicy,
+    internal::LocationPolicyImpl,
+    internal::CheckingPolicyImpl>;
+
+}  // namespace subtle
+
+}  // namespace cppgc
+
+namespace v8 {
+
+template <typename T>
+class TracedReference {
+ public:
+  operator T*() const { return 0; }
+  T* operator->() const { return 0; }
+  bool operator!() const { return false; }
+};
+
+}  // namespace v8
+
+namespace blink {
+
+using Visitor = cppgc::Visitor;
+
+template <typename T>
+using GarbageCollected = cppgc::GarbageCollected<T>;
+template <typename T, typename... Args>
+T* MakeGarbageCollected(Args&&... args) {
+  return cppgc::MakeGarbageCollected<T>(0, args...);
+}
+
+using GarbageCollectedMixin = cppgc::GarbageCollectedMixin;
+
+template <typename T>
+using Member = cppgc::Member<T>;
+template <typename T>
+using WeakMember = cppgc::WeakMember<T>;
+template <typename T>
+using UntracedMember = cppgc::UntracedMember<T>;
+template <typename T>
+using Persistent = cppgc::Persistent<T>;
+template <typename T>
+using WeakPersistent = cppgc::WeakPersistent<T>;
+template <typename T>
+using CrossThreadPersistent = cppgc::subtle::CrossThreadPersistent<T>;
+template <typename T>
+using CrossThreadWeakPersistent = cppgc::subtle::CrossThreadWeakPersistent<T>;
+
+template <typename T>
+using TraceWrapperV8Reference = v8::TracedReference<T>;
+
+#define DISALLOW_NEW()                                            \
+ public:                                                          \
+  void* operator new(size_t, void* location) { return location; } \
+                                                                  \
+ private:                                                         \
+  void* operator new(size_t) = delete
+
+#define STACK_ALLOCATED()                                  \
+ public:                                                   \
+  using IsStackAllocatedTypeMarker [[maybe_unused]] = int; \
+                                                           \
+ private:                                                  \
+  void* operator new(size_t) = delete;                     \
+  void* operator new(size_t, void*) = delete
+
+template <typename T>
+class RefCountedGarbageCollected : public GarbageCollected<T> {};
+
+class HeapAllocator {
+public:
+    static const bool isGarbageCollected = true;
+};
+
+namespace internal {
+
+enum class HeapCollectionType { kGCed, kDisallowNew };
+
+class DisallowNewBaseForHeapCollections {
+  DISALLOW_NEW();
+};
+
+}  // namespace internal
+
+// HeapVector
+template <internal::HeapCollectionType CollectionType,
+          typename T,
+          size_t inlineCapacity>
+class BasicHeapVector final
+    : public std::conditional_t<
+          CollectionType == internal::HeapCollectionType::kGCed,
+          GarbageCollected<BasicHeapVector<CollectionType, T, inlineCapacity>>,
+          internal::DisallowNewBaseForHeapCollections>,
+      public Vector<T, inlineCapacity, HeapAllocator> {};
+template <typename T, size_t inlineCapacity = 0>
+using HeapVector = BasicHeapVector<internal::HeapCollectionType::kDisallowNew,
+                                   T,
+                                   inlineCapacity>;
+template <typename T, size_t inlineCapacity = 0>
+using GCedHeapVector =
+    BasicHeapVector<internal::HeapCollectionType::kGCed, T, inlineCapacity>;
+
+// HeapDeque
+template <internal::HeapCollectionType CollectionType, typename T>
+class BasicHeapDeque final
+    : public std::conditional_t<
+          CollectionType == internal::HeapCollectionType::kGCed,
+          GarbageCollected<BasicHeapDeque<CollectionType, T>>,
+          internal::DisallowNewBaseForHeapCollections>,
+      public Deque<T, 0, HeapAllocator> {};
+template <typename T>
+using HeapDeque = BasicHeapDeque<internal::HeapCollectionType::kDisallowNew, T>;
+template <typename T>
+using GCedHeapDeque = BasicHeapDeque<internal::HeapCollectionType::kGCed, T>;
+
+// HeapHashSet
+template <internal::HeapCollectionType CollectionType, typename T>
+class BasicHeapHashSet final
+    : public std::conditional_t<
+          CollectionType == internal::HeapCollectionType::kGCed,
+          GarbageCollected<BasicHeapHashSet<CollectionType, T>>,
+          internal::DisallowNewBaseForHeapCollections>,
+      public HashSet<T, void, HeapAllocator> {};
+template <typename T>
+using HeapHashSet =
+    BasicHeapHashSet<internal::HeapCollectionType::kDisallowNew, T>;
+template <typename T>
+using GCedHeapHashSet =
+    BasicHeapHashSet<internal::HeapCollectionType::kGCed, T>;
+
+// HeapLinkedHashSet
+template <internal::HeapCollectionType CollectionType, typename T>
+class BasicHeapLinkedHashSet final
+    : public std::conditional_t<
+          CollectionType == internal::HeapCollectionType::kGCed,
+          GarbageCollected<BasicHeapLinkedHashSet<CollectionType, T>>,
+          internal::DisallowNewBaseForHeapCollections>,
+      public LinkedHashSet<T, void, HeapAllocator> {};
+template <typename T>
+using HeapLinkedHashSet =
+    BasicHeapLinkedHashSet<internal::HeapCollectionType::kDisallowNew, T>;
+template <typename T>
+using GCedHeapLinkedHashSet =
+    BasicHeapLinkedHashSet<internal::HeapCollectionType::kGCed, T>;
+
+// HeapHashCountedSet
+template <internal::HeapCollectionType CollectionType, typename T>
+class BasicHeapHashCountedSet final
+    : public std::conditional_t<
+          CollectionType == internal::HeapCollectionType::kGCed,
+          GarbageCollected<BasicHeapHashCountedSet<CollectionType, T>>,
+          internal::DisallowNewBaseForHeapCollections>,
+      public HashCountedSet<T, void, HeapAllocator> {};
+template <typename T>
+using HeapHashCountedSet =
+    BasicHeapHashCountedSet<internal::HeapCollectionType::kDisallowNew, T>;
+template <typename T>
+using GCedHeapHashCountedSet =
+    BasicHeapHashCountedSet<internal::HeapCollectionType::kGCed, T>;
+
+// HeapHashMap
+template <internal::HeapCollectionType CollectionType, typename K, typename V>
+class BasicHeapHashMap final
+    : public std::conditional_t<
+          CollectionType == internal::HeapCollectionType::kGCed,
+          GarbageCollected<BasicHeapHashMap<CollectionType, K, V>>,
+          internal::DisallowNewBaseForHeapCollections>,
+      public HashMap<K, V, void, void, HeapAllocator> {};
+template <typename K, typename V>
+using HeapHashMap =
+    BasicHeapHashMap<internal::HeapCollectionType::kDisallowNew, K, V>;
+template <typename K, typename V>
+using GCedHeapHashMap =
+    BasicHeapHashMap<internal::HeapCollectionType::kGCed, K, V>;
 
 template<typename T>
 struct TraceIfNeeded {
   static void Trace(Visitor*, const T&);
 };
 
-}
+}  // namespace blink
 
 #endif

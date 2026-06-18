@@ -1,12 +1,14 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROME_BROWSER_NOTIFICATIONS_WIN_NOTIFICATION_LAUNCH_ID_H_
 #define CHROME_BROWSER_NOTIFICATIONS_WIN_NOTIFICATION_LAUNCH_ID_H_
 
+#include <string>
+
 #include "base/command_line.h"
-#include "base/strings/string16.h"
+#include "base/files/file_path.h"
 #include "chrome/browser/notifications/notification_handler.h"
 #include "url/gurl.h"
 
@@ -18,10 +20,11 @@ class NotificationLaunchId {
   NotificationLaunchId();
   NotificationLaunchId(const NotificationLaunchId& other);
 
-  // |notification_id| and |profile_id| must be UTF8 strings.
+  // `notification_id` and `profile_id` must be UTF8 strings.
   NotificationLaunchId(NotificationHandler::Type notification_type,
                        const std::string& notification_id,
                        const std::string& profile_id,
+                       const std::wstring& app_user_model_id,
                        bool incognito,
                        const GURL& origin_url);
 
@@ -29,7 +32,7 @@ class NotificationLaunchId {
   // Center. Callers must use is_valid() to check if decoding was successful.
   explicit NotificationLaunchId(const std::string& encoded);
 
-  ~NotificationLaunchId() = default;
+  ~NotificationLaunchId();
 
   NotificationLaunchId& operator=(const NotificationLaunchId& other) = default;
 
@@ -67,6 +70,11 @@ class NotificationLaunchId {
     return profile_id_;
   }
 
+  const std::wstring& app_user_model_id() const {
+    DCHECK(is_valid());
+    return app_user_model_id_;
+  }
+
   bool incognito() const {
     DCHECK(is_valid());
     return incognito_;
@@ -94,10 +102,11 @@ class NotificationLaunchId {
 
   // Extracts the profile ID from |launch_id_str|.
   static std::string GetProfileIdFromLaunchId(
-      const base::string16& launch_id_str);
+      const std::wstring& launch_id_str);
 
-  // Retrieves the profile ID from the notification launch command line if any
-  static std::string GetNotificationLaunchProfileId(
+  // Retrieves the profile basename from the notification launch command line,
+  // if any.
+  static base::FilePath GetNotificationLaunchProfileBaseName(
       const base::CommandLine& command_line);
 
  private:
@@ -109,6 +118,9 @@ class NotificationLaunchId {
 
   // The profile id this launch ID is associated with. The string is UTF8.
   std::string profile_id_;
+
+  // The app user model id this launch ID is associated with.
+  std::wstring app_user_model_id_;
 
   // A flag indicating if the notification associated with this launch ID is in
   // incognito mode or not.

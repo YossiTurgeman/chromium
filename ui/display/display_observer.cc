@@ -1,25 +1,35 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/display/display_observer.h"
 
+#include "ui/display/screen.h"
+#include "ui/display/tablet_state.h"
+
 namespace display {
 
 DisplayObserver::~DisplayObserver() {}
 
-void DisplayObserver::OnWillProcessDisplayChanges() {}
+ScopedOptionalDisplayObserver::ScopedOptionalDisplayObserver(
+    DisplayObserver* observer) {
+  if (auto* screen = display::Screen::Get()) {
+    observer_ = observer;
+    screen->AddObserver(observer_);
+  }
+}
 
-void DisplayObserver::OnDidProcessDisplayChanges() {}
+ScopedOptionalDisplayObserver::~ScopedOptionalDisplayObserver() {
+  if (!observer_)
+    return;
+  if (auto* screen = display::Screen::Get()) {
+    screen->RemoveObserver(observer_);
+  }
+}
 
-void DisplayObserver::OnDisplayAdded(const Display& new_display) {}
-
-void DisplayObserver::OnDisplayRemoved(const Display& old_display) {}
-
-void DisplayObserver::OnDisplayMetricsChanged(const Display& display,
-                                              uint32_t changed_metrics) {}
-
-void DisplayObserver::OnCurrentWorkspaceChanged(
-    const std::string& new_workspace) {}
+ScopedDisplayObserver::ScopedDisplayObserver(DisplayObserver* observer)
+    : ScopedOptionalDisplayObserver(observer) {
+  CHECK(Screen::Get());
+}
 
 }  // namespace display

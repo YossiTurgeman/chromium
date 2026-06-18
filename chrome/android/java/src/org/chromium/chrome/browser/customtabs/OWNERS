@@ -1,6 +1,7 @@
-eirage@chromium.org
+jinsukkim@chromium.org
 peconn@chromium.org
+sinansahin@google.com
+adelm@google.com
+lizeb@chromium.org
 
-# COMPONENT: UI>Browser>Mobile>CustomTabs
-# TEAM: mobile-web-install-team@google.com
-# OS: Android
+per-file *MismatchNotificationController*=samarchehade@google.com

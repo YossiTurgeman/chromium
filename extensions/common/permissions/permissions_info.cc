@@ -1,24 +1,20 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "extensions/common/permissions/permissions_info.h"
 
 #include "base/check.h"
-#include "base/lazy_instance.h"
 #include "base/memory/ptr_util.h"
-#include "base/stl_util.h"
 #include "base/strings/string_util.h"
 #include "extensions/common/alias.h"
 
 namespace extensions {
 
-static base::LazyInstance<PermissionsInfo>::Leaky g_permissions_info =
-    LAZY_INSTANCE_INITIALIZER;
-
 // static
 PermissionsInfo* PermissionsInfo::GetInstance() {
-  return g_permissions_info.Pointer();
+  static base::NoDestructor<PermissionsInfo> instance;
+  return instance.get();
 }
 
 void PermissionsInfo::RegisterPermissions(
@@ -31,7 +27,8 @@ void PermissionsInfo::RegisterPermissions(
     RegisterAlias(alias);
 }
 
-const APIPermissionInfo* PermissionsInfo::GetByID(APIPermission::ID id) const {
+const APIPermissionInfo* PermissionsInfo::GetByID(
+    mojom::APIPermissionID id) const {
   auto i = id_map_.find(id);
   return (i == id_map_.end()) ? nullptr : i->second.get();
 }
@@ -42,20 +39,21 @@ const APIPermissionInfo* PermissionsInfo::GetByName(
   return (i == name_map_.end()) ? nullptr : i->second;
 }
 
-APIPermissionSet PermissionsInfo::GetAll() const {
+APIPermissionSet PermissionsInfo::GetAllForTest() const {
   APIPermissionSet permissions;
   for (auto i = id_map_.cbegin(); i != id_map_.cend(); ++i)
     permissions.insert(i->second->id());
   return permissions;
 }
 
-APIPermissionSet PermissionsInfo::GetAllByName(
+APIPermissionSet PermissionsInfo::GetAllByNameForTest(
     const std::set<std::string>& permission_names) const {
   APIPermissionSet permissions;
   for (auto i = permission_names.cbegin(); i != permission_names.cend(); ++i) {
     const APIPermissionInfo* permission_info = GetByName(*i);
-    if (permission_info)
+    if (permission_info) {
       permissions.insert(permission_info->id());
+    }
   }
   return permissions;
 }
@@ -74,15 +72,16 @@ PermissionsInfo::~PermissionsInfo() {
 }
 
 void PermissionsInfo::RegisterAlias(const Alias& alias) {
-  DCHECK(base::Contains(name_map_, alias.real_name));
-  DCHECK(!base::Contains(name_map_, alias.name));
-  name_map_[alias.name] = name_map_[alias.real_name];
+  auto it = name_map_.find(alias.real_name);
+  DCHECK(it != name_map_.end());
+  auto emplace = name_map_.emplace(alias.name, it->second);
+  DCHECK(emplace.second);
 }
 
 void PermissionsInfo::RegisterPermission(
     std::unique_ptr<APIPermissionInfo> permission) {
-  DCHECK(!base::Contains(id_map_, permission->id()));
-  DCHECK(!base::Contains(name_map_, permission->name()));
+  DCHECK(!id_map_.contains(permission->id()));
+  DCHECK(!name_map_.contains(permission->name()));
 
   name_map_[permission->name()] = permission.get();
   id_map_[permission->id()] = std::move(permission);

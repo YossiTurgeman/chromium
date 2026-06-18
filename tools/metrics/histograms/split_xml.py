@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium Authors. All rights reserved.
+# Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Splits a XML file into smaller XMLs in subfolders.
@@ -8,46 +8,79 @@ Intended to be used to split up the large histograms.xml or enums.xml file.
 """
 
 import os
+from pathlib import Path
+import re
 from xml.dom import minidom
 
-import histogram_configuration_model
-import histogram_paths
-import merge_xml
-import path_util
+import setup_modules  # pylint: disable=unused-import
+
+import chromium_src.tools.metrics.common.path_util as path_util
+import chromium_src.tools.metrics.histograms.histogram_configuration_model as histogram_configuration_model
+import chromium_src.tools.metrics.histograms.histogram_paths as histogram_paths
+import chromium_src.tools.metrics.histograms.merge_xml as merge_xml
 
 # The top level comment templates that will be formatted and added to each split
 # histograms xml.
 FIRST_TOP_LEVEL_COMMENT_TEMPLATE = """
-Copyright 2020 The Chromium Authors. All rights reserved.
+Copyright 2021 The Chromium Authors
 Use of this source code is governed by a BSD-style license that can be
 found in the LICENSE file.
 """
 SECOND_TOP_LEVEL_COMMENT_TEMPLATE = """
-This file is used to generate a comprehensive list of %s along
-with a detailed description for each histogram.
+This file is used to generate a comprehensive list of %s
+along with a detailed description for each histogram.
 
 For best practices on writing histogram descriptions, see
 https://chromium.googlesource.com/chromium/src.git/+/HEAD/tools/metrics/histograms/README.md
 
-For brief details on how to modify this file to add your description, see
-https://chromium.googlesource.com/chromium/src.git/+/HEAD/tools/metrics/histograms/one-pager.md
-
-Please send CLs to chromium-metrics-reviews@google.com rather than to specific
-individuals. These CLs will be automatically reassigned to a reviewer within
-about 5 minutes. This approach helps the metrics team to load-balance incoming
-reviews. Googlers can read more about this at go/gwsq-gerrit.
+Please send CLs to individuals in the OWNERS file in the same directory as this
+xml file. If no OWNERS file exists, then send the CL to
+chromium-metrics-reviews@google.com.
 """
 # Number of times that splitting of histograms will be carried out.
 TARGET_DEPTH = 1
 # The number of histograms below which they will be aggregated into
 # the histograms.xml in 'others'.
 AGGREGATE_THRESHOLD = 20
+# A map from the histogram name to the folder name these histograms should be
+# put in.
+_PREDEFINED_NAMES_MAPPING = {
+    'BackForwardCache': 'BackForwardCache',
+    'ChromeOS': 'ChromeOS',
+    'CustomTabs': 'CustomTabs',
+    'CustomTab': 'CustomTabs',
+    'DataReductionProxy': 'DataReductionProxy',
+    'DataUse': 'DataUse',
+    'MultiDevice': 'MultiDevice',
+    'NaCl': 'NaCl',
+    'SafeBrowsing': 'SafeBrowsing',
+    'SafeBrowsingBinaryUploadRequest': 'SafeBrowsing',
+    'SafeBrowsingFCMService': 'SafeBrowsing',
+    'NewTabPage': 'NewTabPage',
+    'SiteEngagementService': 'SiteEngagementService',
+    'SiteIsolation': 'SiteIsolation',
+    'Tabs': 'Tab',
+    'TextFragmentAnchor': 'TextFragmentAnchor',
+    'TextToSpeech': 'TextToSpeech',
+    'UpdateEngine': 'UpdateEngine',
+    'WebApk': 'WebApk',
+    'WebApp': 'WebApp',
+    'WebAudio': 'WebAudio',
+    'WebAuthentication': 'WebAuthentication',
+    'WebCore': 'WebCore',
+    'WebFont': 'WebFont',
+    'WebHistory': 'WebHistory',
+    'WebRTC': 'WebRTC',
+    'WebRtcEventLogging': 'WebRTC',
+    'WebRtcTextLogging': 'WebRTC',
+    'WebUI': 'WebUI',
+    'WebUITabStrip': 'WebUI',
+}
 
 
 def _ParseMergedXML():
   """Parses merged xml into different types of nodes"""
-  merged_histograms = merge_xml.MergeFiles(histogram_paths.HISTOGRAMS_XMLS +
-                                           [histogram_paths.OBSOLETE_XML])
+  merged_histograms = merge_xml.MergeFiles(histogram_paths.HISTOGRAMS_XMLS)
   histogram_nodes = merged_histograms.getElementsByTagName('histogram')
   variants_nodes = merged_histograms.getElementsByTagName('variants')
   histogram_suffixes_nodes = merged_histograms.getElementsByTagName(
@@ -88,7 +121,7 @@ def _CreateXMLFile(comment, parent_node_string, nodes, output_dir, filename):
   for node in nodes:
     parent_element.appendChild(node)
 
-  output_path = os.path.join(output_dir, filename)
+  output_path = str(Path(output_dir) / filename)
   if os.path.exists(output_path):
     os.remove(output_path)
 
@@ -98,7 +131,7 @@ def _CreateXMLFile(comment, parent_node_string, nodes, output_dir, filename):
     output_file.write(pretty_xml_string)
 
 
-def _GetCamelName(node, depth=0):
+def _GetCamelCaseName(node, depth=0):
   """Returns the first camelcase name part of the given |node|.
 
   Args:
@@ -121,6 +154,8 @@ def _GetCamelName(node, depth=0):
   split_string_list = name.split('.')
   if len(split_string_list) <= depth:
     return 'others'
+  elif split_string_list[depth] in _PREDEFINED_NAMES_MAPPING:
+    return _PREDEFINED_NAMES_MAPPING[split_string_list[depth]]
   else:
     name_part = split_string_list[depth]
     start_index = 0
@@ -142,12 +177,18 @@ def _GetCamelName(node, depth=0):
 
 def GetDirForNode(node):
   """Returns the correct directory that the given |node| should be placed in."""
-  camel_name = _GetCamelName(node)
+  camel_name = _GetCamelCaseName(node)
   # Check if the directory of its prefix exists. Return the |camel_name| if the
   # folder exists. Otherwise, this |node| should be placed in 'others' folder.
   if camel_name in histogram_paths.HISTOGRAMS_PREFIX_LIST:
     return camel_name
   return 'others'
+
+
+def _CamelCaseToSnakeCase(name):
+  """Converts CamelCase |name| to snake_case."""
+  name = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+  return re.sub('([a-z0-9])([A-Z])', r'\1_\2', name).lower()
 
 
 def _OutputToFolderAndXML(nodes, output_dir, key):
@@ -158,9 +199,9 @@ def _OutputToFolderAndXML(nodes, output_dir, key):
     output_dir: The output directory.
     key: The prefix of the histograms, also the name of the new folder.
   """
-  output_dir = os.path.join(output_dir, key)
-  if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+  # Convert CamelCase name to snake_case when creating a directory.
+  output_dir = Path(output_dir) / _CamelCaseToSnakeCase(key)
+  output_dir.mkdir(parents=True, exist_ok=True)
   _CreateXMLFile(key + ' histograms', 'histograms', nodes, output_dir,
                  'histograms.xml')
 
@@ -177,7 +218,7 @@ def _WriteDocumentDict(document_dict, output_dir):
     if isinstance(val, list):
       _OutputToFolderAndXML(val, output_dir, key)
     else:
-      _WriteDocumentDict(val, os.path.join(output_dir, key))
+      _WriteDocumentDict(val, str(Path(output_dir) / key))
 
 
 def _AggregateMinorNodes(node_dict):
@@ -220,7 +261,7 @@ def _BuildDocumentDict(nodes, depth):
 
   temp_dict = document_dict = {}
   for node in nodes:
-    name_part = _GetCamelName(node, depth)
+    name_part = _GetCamelCaseName(node, depth)
     if name_part not in temp_dict:
       temp_dict[name_part] = []
     temp_dict[name_part].append(node)
@@ -235,27 +276,6 @@ def _BuildDocumentDict(nodes, depth):
       document_dict[key] = _BuildDocumentDict(nodes, depth + 1)
 
   return document_dict
-
-
-def _SeparateObsoleteHistogram(histogram_nodes):
-  """Separates a NodeList of histograms into obsolete and non-obsolete.
-
-  Args:
-    histogram_nodes: A NodeList object containing histogram nodes.
-
-  Returns:
-    obsolete_nodes: A list of obsolete nodes.
-    non_obsolete_nodes: A list of non-obsolete nodes.
-  """
-  obsolete_nodes = []
-  non_obsolete_nodes = []
-  for histogram in histogram_nodes:
-    obsolete_tag_nodelist = histogram.getElementsByTagName('obsolete')
-    if len(obsolete_tag_nodelist) > 0:
-      obsolete_nodes.append(histogram)
-    else:
-      non_obsolete_nodes.append(histogram)
-  return obsolete_nodes, non_obsolete_nodes
 
 
 def SplitIntoMultipleHistogramXMLs(output_base_dir):
@@ -273,18 +293,11 @@ def SplitIntoMultipleHistogramXMLs(output_base_dir):
   _CreateXMLFile('histogram suffixes', 'histogram_suffixes_list',
                  histogram_suffixes_nodes, output_base_dir,
                  'histogram_suffixes_list.xml')
-
-  obsolete_nodes, non_obsolete_nodes = _SeparateObsoleteHistogram(
-      histogram_nodes)
-  # Create separate XML file for obsolete histograms.
-  _CreateXMLFile('obsolete histograms', 'histograms', obsolete_nodes,
-                 output_base_dir, 'obsolete_histograms.xml')
-
-  document_dict = _BuildDocumentDict(non_obsolete_nodes + variants_nodes, 0)
+  document_dict = _BuildDocumentDict(histogram_nodes + variants_nodes, 0)
 
   _WriteDocumentDict(document_dict, output_base_dir)
 
 
 if __name__ == '__main__':
   SplitIntoMultipleHistogramXMLs(
-      path_util.GetInputFile('tools/metrics/histograms/histograms_xml'))
+      path_util.GetInputFile('tools/metrics/histograms/metadata'))

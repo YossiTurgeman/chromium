@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,43 +6,19 @@
 
 #include <memory>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/browser/ui/views/permission_bubble/permission_prompt_bubble_view.h"
-#include "chrome/browser/ui/views/permission_bubble/permission_prompt_impl.h"
-#include "components/permissions/permission_request_impl.h"
+#include "chrome/browser/ui/views/permissions/permission_prompt_bubble_base_view.h"
+#include "chrome/browser/ui/views/permissions/permission_prompt_desktop.h"
+#include "components/permissions/permission_request.h"
+#include "components/permissions/permission_request_data.h"
+#include "components/permissions/request_type.h"
+#include "components/permissions/resolvers/content_setting_permission_resolver.h"
 #include "ui/views/widget/widget.h"
 
 namespace test {
-namespace {
-
-// Wraps a PermissionRequestImpl so that it can pass a closure to itself to the
-// PermissionRequestImpl constructor. Without this wrapper, there's no way to
-// handle all destruction paths.
-class TestPermissionRequestOwner {
- public:
-  explicit TestPermissionRequestOwner(ContentSettingsType type) {
-    bool user_gesture = true;
-    auto decided = [](ContentSetting) {};
-    request_ = std::make_unique<permissions::PermissionRequestImpl>(
-        GURL("https://example.com"), type, user_gesture,
-        base::BindOnce(decided),
-        base::BindOnce(&TestPermissionRequestOwner::DeleteThis,
-                       base::Unretained(this)));
-  }
-
-  permissions::PermissionRequestImpl* request() { return request_.get(); }
-
- private:
-  void DeleteThis() { delete this; }
-
-  std::unique_ptr<permissions::PermissionRequestImpl> request_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestPermissionRequestOwner);
-};
-
-}  // namespace
 
 PermissionRequestManagerTestApi::PermissionRequestManagerTestApi(
     permissions::PermissionRequestManager* manager)
@@ -56,18 +32,25 @@ PermissionRequestManagerTestApi::PermissionRequestManagerTestApi(
 
 void PermissionRequestManagerTestApi::AddSimpleRequest(
     content::RenderFrameHost* source_frame,
-    ContentSettingsType type) {
-  TestPermissionRequestOwner* request_owner =
-      new TestPermissionRequestOwner(type);
-  manager_->AddRequest(source_frame, request_owner->request());
+    permissions::RequestType type) {
+  const bool user_gesture = true;
+  manager_->AddRequest(
+      source_frame,
+      std::make_unique<permissions::PermissionRequest>(
+          std::make_unique<permissions::PermissionRequestData>(
+              type, /*user_gesture=*/user_gesture, permission_request_origin_),
+          base::DoNothing()));
+}
+
+void PermissionRequestManagerTestApi::SetOrigin(
+    const GURL& permission_request_origin) {
+  permission_request_origin_ = permission_request_origin;
 }
 
 views::Widget* PermissionRequestManagerTestApi::GetPromptWindow() {
-  PermissionPromptImpl* prompt =
-      static_cast<PermissionPromptImpl*>(manager_->view_.get());
-  return prompt ? prompt->prompt_bubble_for_testing()
-                      ->GetWidget()
-                : nullptr;
+  PermissionPromptDesktop* prompt =
+      static_cast<PermissionPromptDesktop*>(manager_->view_.get());
+  return prompt ? prompt->GetPromptBubbleWidgetForTesting() : nullptr;
 }
 
 void PermissionRequestManagerTestApi::SimulateWebContentsDestroyed() {

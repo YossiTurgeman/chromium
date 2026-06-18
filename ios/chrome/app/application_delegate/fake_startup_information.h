@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,9 @@
 
 // Fakes a class adopting the StartupInformation protocol. It only synthetizes
 // the properties.
-@interface FakeStartupInformation : NSObject<StartupInformation>
+@interface FakeStartupInformation : NSObject <StartupInformation>
+
+@property(nonatomic, assign) BOOL isTerminating;
 
 @end
 #endif  // IOS_CHROME_APP_APPLICATION_DELEGATE_FAKE_STARTUP_INFORMATION_H_

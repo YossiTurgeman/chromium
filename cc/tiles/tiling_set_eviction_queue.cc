@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "base/notreached.h"
 #include "cc/tiles/tiling_set_eviction_queue.h"
 
 namespace cc {
@@ -43,25 +44,10 @@ void TilingSetEvictionQueue::GenerateTilingOrder(
       tilings_.push_back(tiling);
   }
 
-  range = tiling_set->GetTilingRange(PictureLayerTilingSet::LOWER_THAN_LOW_RES);
+  range =
+      tiling_set->GetTilingRange(PictureLayerTilingSet::LOWER_THAN_HIGH_RES);
   for (size_t i = range.start; i < range.end; ++i) {
     size_t index = range.start + (range.end - 1 - i);
-    PictureLayerTiling* tiling = tiling_set->tiling_at(index);
-    if (tiling->has_tiles())
-      tilings_.push_back(tiling);
-  }
-
-  range = tiling_set->GetTilingRange(
-      PictureLayerTilingSet::BETWEEN_HIGH_AND_LOW_RES);
-  for (size_t i = range.start; i < range.end; ++i) {
-    size_t index = range.start + (range.end - 1 - i);
-    PictureLayerTiling* tiling = tiling_set->tiling_at(index);
-    if (tiling->has_tiles())
-      tilings_.push_back(tiling);
-  }
-
-  range = tiling_set->GetTilingRange(PictureLayerTilingSet::LOW_RES);
-  for (size_t index = range.start; index < range.end; ++index) {
     PictureLayerTiling* tiling = tiling_set->tiling_at(index);
     if (tiling->has_tiles())
       tilings_.push_back(tiling);
@@ -84,7 +70,6 @@ void TilingSetEvictionQueue::AdvancePhase() {
     switch (phase_) {
       case EVENTUALLY_RECT:
         NOTREACHED();
-        break;
       case SOON_BORDER_RECT:
         soon_iterator_ = SoonBorderTilingIterator(&tilings_, tree_);
         if (!soon_iterator_.done())
@@ -234,8 +219,8 @@ bool TilingSetEvictionQueue::EvictionRectIterator::GetFirstTileAndCheckIfValid(
     if (tiling->pending_visible_rect().Intersects(tile_rect))
       return false;
   }
-  prioritized_tile_ = (*tilings_)[tiling_index_]->MakePrioritizedTile(
-      tile, priority_rect_type_);
+  prioritized_tile_ = tiling->MakePrioritizedTile(tile, priority_rect_type_,
+                                                  tiling->IsTileOccluded(tile));
   // In other cases, the tile we got is a viable candidate, return true.
   return true;
 }

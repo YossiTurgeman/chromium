@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,33 +6,43 @@
 
 #include <memory>
 #include <numeric>
+#include <tuple>
+#include <variant>
 #include <vector>
 
-#include "ash/public/ash_interfaces.h"
-#include "ash/public/cpp/ash_switches.h"
-#include "ash/public/cpp/tablet_mode.h"
+#include "ash/constants/ash_switches.h"
+#include "ash/display/cros_display_config.h"
 #include "ash/public/cpp/test/shell_test_api.h"
-#include "ash/public/mojom/cros_display_config.mojom-test-utils.h"
-#include "ash/public/mojom/cros_display_config.mojom.h"
-#include "base/bind.h"
-#include "base/bind_helpers.h"
+#include "ash/shell.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
 #include "base/strings/safe_sprintf.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/test/test_future.h"
+#include "build/build_config.h"
 #include "cc/base/math_util.h"
-#include "chrome/browser/chromeos/accessibility/accessibility_manager.h"
+#include "chrome/browser/ash/accessibility/accessibility_manager.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/ui_features.h"
 #include "chrome/browser/ui/views/bookmarks/bookmark_bar_view.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/frame/top_container_view.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+#include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
 #include "chrome/common/url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/core/common/content_settings_types.h"
-#include "components/permissions/permission_request_impl.h"
+#include "components/permissions/permission_decision.h"
+#include "components/permissions/permission_prompt_decision.h"
+#include "components/permissions/permission_request.h"
 #include "components/permissions/permission_request_manager.h"
+#include "components/permissions/request_type.h"
+#include "components/permissions/resolvers/content_setting_permission_resolver.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -40,6 +50,10 @@
 #include "net/dns/mock_host_resolver.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
+#include "ui/compositor/layer.h"
 #include "ui/display/display.h"
 #include "ui/display/display_switches.h"
 #include "ui/display/screen.h"
@@ -52,6 +66,8 @@
 #include "ui/views/view_observer.h"
 
 namespace {
+
+using ::ash::AccessibilityManager;
 
 enum class TopChromeShownState {
   kFullyShown,
@@ -71,14 +87,27 @@ void CompareTranslations(const gfx::Transform& t1, const gfx::Transform& t2) {
   EXPECT_FLOAT_EQ(t1_translation.y(), t2_translation.y());
 }
 
+content::RenderWidgetHost* GetRenderWidgetHost(content::WebContents* contents) {
+  EXPECT_TRUE(contents);
+  return contents->GetRenderWidgetHostView()->GetRenderWidgetHost();
+}
+
+void SynchronizeBrowserWithRenderer(content::WebContents* contents) {
+  content::MainThreadFrameObserver frame_observer(
+      GetRenderWidgetHost(contents));
+  frame_observer.Wait();
+}
+
 // A test view that will be added as a child to the BrowserView to verify how
 // many times it's laid out while sliding is in progress.
 class LayoutTestView : public views::View {
+  METADATA_HEADER(LayoutTestView, views::View)
+
  public:
   explicit LayoutTestView(BrowserView* parent) {
     DCHECK(parent);
-    parent->AddChildView(this);
-    parent->Layout();
+    parent->AddChildViewRaw(this);
+    parent->GetWidget()->LayoutRootViewIfNecessary();
     layout_count_ = 0;
   }
   ~LayoutTestView() override = default;
@@ -93,37 +122,14 @@ class LayoutTestView : public views::View {
   }
 
   // views::View:
-  void Layout() override { ++layout_count_; }
+  void Layout(PassKey) override { ++layout_count_; }
 
  private:
   int layout_count_ = 0;
 };
 
-// Waits for the first non-empty paint for a given WebContents. To be able to
-// test gesture scroll events reliably, we must wait until the tab is fully
-// painted. Otherwise, the events will be ignored.
-class TabNonEmptyPaintWaiter : public content::WebContentsObserver {
- public:
-  explicit TabNonEmptyPaintWaiter(content::WebContents* web_contents)
-      : content::WebContentsObserver(web_contents) {}
-
-  ~TabNonEmptyPaintWaiter() override = default;
-
-  void Wait() {
-    if (web_contents()->CompletedFirstVisuallyNonEmptyPaint())
-      return;
-
-    run_loop_.Run();
-  }
-
- private:
-  // content::WebContentsObserver:
-  void DidFirstVisuallyNonEmptyPaint() override { run_loop_.Quit(); }
-
-  base::RunLoop run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(TabNonEmptyPaintWaiter);
-};
+BEGIN_METADATA(LayoutTestView)
+END_METADATA
 
 class TestControllerObserver {
  public:
@@ -147,6 +153,10 @@ class TestController : public TopControlsSlideController {
       : real_controller_(std::move(real_controller)) {
     DCHECK(real_controller_);
   }
+
+  TestController(const TestController&) = delete;
+  TestController& operator=(const TestController&) = delete;
+
   ~TestController() override = default;
 
   void AddObserver(TestControllerObserver* observer) {
@@ -166,8 +176,7 @@ class TestController : public TopControlsSlideController {
 
   void SetShownRatio(content::WebContents* contents, float ratio) override {
     real_controller_->SetShownRatio(contents, ratio);
-    for (auto& observer : observers_)
-      observer.OnShownRatioChanged(ratio);
+    observers_.Notify(&TestControllerObserver::OnShownRatioChanged, ratio);
   }
 
   void OnBrowserFullscreenStateWillChange(bool new_fullscreen_state) override {
@@ -181,8 +190,8 @@ class TestController : public TopControlsSlideController {
 
   void SetTopControlsGestureScrollInProgress(bool in_progress) override {
     real_controller_->SetTopControlsGestureScrollInProgress(in_progress);
-    for (auto& observer : observers_)
-      observer.OnGestureScrollInProgressChanged(in_progress);
+    observers_.Notify(&TestControllerObserver::OnGestureScrollInProgressChanged,
+                      in_progress);
   }
 
   bool IsTopControlsGestureScrollInProgress() const override {
@@ -197,8 +206,6 @@ class TestController : public TopControlsSlideController {
   std::unique_ptr<TopControlsSlideController> real_controller_;
 
   base::ObserverList<TestControllerObserver>::Unchecked observers_;
-
-  DISALLOW_COPY_AND_ASSIGN(TestController);
 };
 
 // Waits for a given terminal value (1.f or 0.f) of the browser top controls
@@ -209,6 +216,10 @@ class TopControlsShownRatioWaiter : public TestControllerObserver {
       : controller_(controller) {
     controller_->AddObserver(this);
   }
+
+  TopControlsShownRatioWaiter(const TopControlsShownRatioWaiter&) = delete;
+  TopControlsShownRatioWaiter& operator=(const TopControlsShownRatioWaiter&) =
+      delete;
 
   ~TopControlsShownRatioWaiter() override { controller_->RemoveObserver(this); }
 
@@ -225,8 +236,9 @@ class TopControlsShownRatioWaiter : public TestControllerObserver {
                                             "ratio.";
 
     waiting_for_shown_ratio_ = ratio;
-    if (CheckRatio())
+    if (CheckRatio()) {
       return;
+    }
 
     // Use kNestableTasksAllowed to make it possible to wait inside a posted
     // task.
@@ -243,8 +255,9 @@ class TopControlsShownRatioWaiter : public TestControllerObserver {
     if (!controller_->IsTopControlsGestureScrollInProgress() &&
         cc::MathUtil::IsWithinEpsilon(controller_->GetShownRatio(),
                                       waiting_for_shown_ratio_)) {
-      if (run_loop_)
+      if (run_loop_) {
         run_loop_->Quit();
+      }
 
       return true;
     }
@@ -252,13 +265,11 @@ class TopControlsShownRatioWaiter : public TestControllerObserver {
     return false;
   }
 
-  TestController* controller_;
+  raw_ptr<TestController> controller_;
 
   std::unique_ptr<base::RunLoop> run_loop_;
 
   float waiting_for_shown_ratio_ = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(TopControlsShownRatioWaiter);
 };
 
 // Waits for a given |is_gesture_scrolling_in_progress_| value.
@@ -282,14 +293,16 @@ class GestureScrollInProgressChangeWaiter : public TestControllerObserver {
   void OnShownRatioChanged(float shown_ratio) override {}
 
   void OnGestureScrollInProgressChanged(bool in_progress) override {
-    if (in_progress == waited_for_in_progress_state_ && run_loop_)
+    if (in_progress == waited_for_in_progress_state_ && run_loop_) {
       std::move(run_loop_)->Quit();
+    }
   }
 
   void WaitForInProgressState(bool in_progress_state) {
     if (controller_->IsTopControlsGestureScrollInProgress() ==
-        in_progress_state)
+        in_progress_state) {
       return;
+    }
 
     waited_for_in_progress_state_ = in_progress_state;
     // Use kNestableTasksAllowed to make it possible to wait inside a posted
@@ -300,7 +313,7 @@ class GestureScrollInProgressChangeWaiter : public TestControllerObserver {
   }
 
  private:
-  TestController* controller_;
+  raw_ptr<TestController> controller_;
 
   std::unique_ptr<base::RunLoop> run_loop_;
 
@@ -312,6 +325,12 @@ class GestureScrollInProgressChangeWaiter : public TestControllerObserver {
 class TopControlsSlideControllerTest : public InProcessBrowserTest {
  public:
   TopControlsSlideControllerTest() = default;
+
+  TopControlsSlideControllerTest(const TopControlsSlideControllerTest&) =
+      delete;
+  TopControlsSlideControllerTest& operator=(
+      const TopControlsSlideControllerTest&) = delete;
+
   ~TopControlsSlideControllerTest() override = default;
 
   BrowserView* browser_view() const {
@@ -341,7 +360,8 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
 
     // Add content/test/data so we can use cross_site_iframe_factory.html
     base::FilePath test_data_dir;
-    ASSERT_TRUE(base::PathService::Get(base::DIR_SOURCE_ROOT, &test_data_dir));
+    ASSERT_TRUE(
+        base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &test_data_dir));
     embedded_test_server()->ServeFilesFromDirectory(
         test_data_dir.AppendASCII("chrome/test/data/top_controls_scroll"));
     ASSERT_TRUE(embedded_test_server()->Start());
@@ -354,12 +374,11 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
         std::move(browser_view()->top_controls_slide_controller_));
   }
 
-  void OpenUrlAtIndex(const GURL& url, int index) {
-    AddTabAtIndex(index, url, ui::PAGE_TRANSITION_TYPED);
+  void NavigateActiveTabToUrl(const GURL& url) {
+    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
     auto* active_contents = browser_view()->GetActiveWebContents();
     EXPECT_TRUE(content::WaitForLoadStop(active_contents));
-    TabNonEmptyPaintWaiter waiter(active_contents);
-    waiter.Wait();
+    SynchronizeBrowserWithRenderer(active_contents);
   }
 
   void ToggleTabletMode() {
@@ -369,7 +388,7 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
   }
 
   bool GetTabletModeEnabled() const {
-    return ash::TabletMode::Get()->InTabletMode();
+    return display::Screen::Get()->InTabletMode();
   }
 
   void CheckBrowserLayout(BrowserView* browser_view,
@@ -377,7 +396,8 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
     const int top_controls_height = browser_view->GetTopControlsHeight();
     EXPECT_NE(top_controls_height, 0);
 
-    ui::Layer* root_view_layer = browser_view->frame()->GetRootView()->layer();
+    ui::Layer* root_view_layer =
+        browser_view->browser_widget()->GetRootView()->layer();
 
     // The fully-shown and fully-hidden states are terminal states. We check
     // when we reach the steady state. The root view should not have a layer
@@ -400,9 +420,9 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
     EXPECT_EQ(top_container_bounds.height(), top_controls_height);
 
     const int top_container_bottom = top_container_bounds.bottom();
-    const gfx::Rect& contents_container_bounds =
-        browser_view->contents_container()->bounds();
-    EXPECT_EQ(top_container_bottom, contents_container_bounds.y());
+    const int& contents_container_bounds =
+        browser_view->contents_container()->bounds().y();
+    EXPECT_EQ(top_container_bottom, contents_container_bounds);
 
     if (shown_state == TopChromeShownState::kFullyHidden) {
       // Top container is shifted up.
@@ -413,7 +433,8 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
                 browser_view->contents_container()->height());
 
       // Widget should not allow things to show outside its bounds.
-      EXPECT_TRUE(browser_view->frame()->GetLayer()->GetMasksToBounds());
+      EXPECT_TRUE(
+          browser_view->browser_widget()->GetLayer()->GetMasksToBounds());
 
       // The browser controls doesn't shrink the blink viewport size.
       EXPECT_FALSE(browser_view->DoBrowserControlsShrinkRendererSize(
@@ -427,7 +448,8 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
       EXPECT_EQ(browser_view->height() - top_controls_height,
                 browser_view->contents_container()->height());
 
-      EXPECT_FALSE(browser_view->frame()->GetLayer()->GetMasksToBounds());
+      EXPECT_FALSE(
+          browser_view->browser_widget()->GetLayer()->GetMasksToBounds());
 
       // The browser controls does shrink the blink viewport size.
       EXPECT_TRUE(browser_view->DoBrowserControlsShrinkRendererSize(
@@ -460,7 +482,7 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
     EXPECT_NE(top_controls_height, 0);
 
     ui::Layer* root_view_layer =
-        browser_view()->frame()->GetRootView()->layer();
+        browser_view()->browser_widget()->GetRootView()->layer();
 
     // While sliding is in progress, the root view paints to a layer.
     ASSERT_TRUE(root_view_layer);
@@ -505,12 +527,8 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
             [](content::WebContents* contents, ui::EventType,
                const gfx::Vector2dF&) {
               // Give the event a chance to propagate to renderer before sending
-              // the next one by waiting for at least 2 render frame
-              // submissions.
-              content::RenderFrameSubmissionObserver submission_observer(
-                  contents);
-              while (submission_observer.render_frame_count() < 2)
-                submission_observer.WaitForAnyFrameSubmission();
+              // the next one.
+              SynchronizeBrowserWithRenderer(contents);
             },
             contents));
   }
@@ -520,7 +538,7 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
   // given |target_state|.
   void ScrollAndExpectTopChromeToBe(ScrollDirection direction,
                                     TopChromeShownState target_state) {
-    aura::Window* browser_window = browser()->window()->GetNativeWindow();
+    aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
     ui::test::EventGenerator event_generator(browser_window->GetRootWindow(),
                                              browser_window);
     const gfx::Point start_point =
@@ -551,22 +569,21 @@ class TopControlsSlideControllerTest : public InProcessBrowserTest {
     return std::move(controller);
   }
 
-  TestController* test_controller_ = nullptr;  // Not owned.
-
-  DISALLOW_COPY_AND_ASSIGN(TopControlsSlideControllerTest);
+  raw_ptr<TestController, DanglingUntriaged> test_controller_ =
+      nullptr;  // Not owned.
 };
 
 namespace {
 
 IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, DisabledForHostedApps) {
-  browser()->window()->Close();
+  browser()->GetWindow()->Close();
 
   // Open a new app window.
   Browser::CreateParams params = Browser::CreateParams::CreateForApp(
       "test_browser_app", true /* trusted_source */, gfx::Rect(),
       browser()->profile(), true);
-  params.initial_show_state = ui::SHOW_STATE_DEFAULT;
-  Browser* browser = new Browser(params);
+  params.initial_show_state = ui::mojom::WindowShowState::kDefault;
+  Browser* browser = Browser::Create(params);
   AddBlankTabAndShow(browser);
 
   ASSERT_TRUE(browser->is_type_app());
@@ -632,9 +649,7 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
       browser_view()->GetActiveWebContents()));
 }
 
-// TODO(https://crbug.com/1106700): Flakily timing out.
-IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
-                       DISABLED_TestScrollingPage) {
+IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestScrollingPage) {
   ToggleTabletMode();
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
@@ -642,8 +657,8 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
 
   // Navigate to our test page that has a long vertical content which we can use
   // to test page scrolling.
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
 
   // It's possible to hide top chrome with gesture scrolling.
   ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
@@ -661,73 +676,69 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestCtrlL) {
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
+
   auto* active_contents = browser_view()->GetActiveWebContents();
-  EXPECT_TRUE(content::WaitForLoadStop(active_contents));
-  TabNonEmptyPaintWaiter paint_waiter(
-      browser()->tab_strip_model()->GetActiveWebContents());
-  paint_waiter.Wait();
   SCOPED_TRACE("Scrolling to fully hide the top controls.");
   ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
                                TopChromeShownState::kFullyHidden);
-  content::WaitForResizeComplete(active_contents);
+  SynchronizeBrowserWithRenderer(active_contents);
 
   // Hit Ctrl+L which should focus the omnibox. This should unhide the top
   // controls.
   SCOPED_TRACE("Firing Ctrl+L.");
-  aura::Window* browser_window = browser()->window()->GetNativeWindow();
+  aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
   ui::test::EventGenerator event_generator(browser_window->GetRootWindow(),
                                            browser_window);
   TopControlsShownRatioWaiter waiter(top_controls_slide_controller());
-  event_generator.PressKey(ui::VKEY_L, ui::EF_CONTROL_DOWN);
-  event_generator.ReleaseKey(ui::VKEY_L, ui::EF_CONTROL_DOWN);
+  event_generator.PressAndReleaseKeyAndModifierKeys(ui::VKEY_L,
+                                                    ui::EF_CONTROL_DOWN);
   waiter.WaitForRatio(1.f);
   EXPECT_TRUE(browser_view()->GetLocationBarView()->omnibox_view()->HasFocus());
 }
 
-// TODO(https://crbug.com/911949): Times out on CrOS on the waterfall.
 IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
-                       DISABLED_TestScrollingPageAndSwitchingToNTP) {
+                       TestScrollingPageAndSwitchingToNTP) {
   ToggleTabletMode();
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
-  // Add a tab containing a local NTP page. NTP pages are not permitted to hide
-  // top-chrome with scrolling.
-  ui_test_utils::NavigateToURL(browser(), GURL(chrome::kChromeUINewTabURL));
   ASSERT_EQ(browser()->tab_strip_model()->count(), 1);
+  ASSERT_EQ(browser()->tab_strip_model()->active_index(), 0);
 
-  // Navigate to our test page that has a long vertical content which we can use
-  // to test page scrolling.
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  // Add a new tab (index 1), navigate it to the scrollable test page,
+  // making it the active tab.
+  chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
   ASSERT_EQ(browser()->tab_strip_model()->count(), 2);
+  ASSERT_EQ(browser()->tab_strip_model()->active_index(), 1);
 
-  // Scroll the `top_controls_scroll.html` page such that top-chrome is now
-  // fully hidden.
+  // Scroll the active `top_controls_scroll.html` page (index 1) such that
+  // top-chrome is now fully hidden.
   ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
                                TopChromeShownState::kFullyHidden);
 
-  // Simulate (Ctrl + Tab) shortcut to select the next tab. Top-chrome should
-  // show automatically.
+  // Simulate (Ctrl + Tab) shortcut to select the next tab (NTP at index 0).
+  // Top-chrome should show automatically.
   TopControlsShownRatioWaiter waiter(top_controls_slide_controller());
   browser()->tab_strip_model()->SelectNextTab();
-  EXPECT_EQ(browser()->tab_strip_model()->active_index(), 1);
+  EXPECT_EQ(browser()->tab_strip_model()->active_index(), 0);
   waiter.WaitForRatio(1.f);
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
   CheckBrowserLayout(browser_view(), TopChromeShownState::kFullyShown);
 
-  // Since this is the NTP page, gesture scrolling down will not hide
+  // Since this is the NTP page (index 0), gesture scrolling down will not hide
   // top-chrome. It will remain fully shown.
   ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
                                TopChromeShownState::kFullyShown);
 
-  // Switch back to the scrollable page, it should be possible now to hide top-
-  // chrome.
+  // Switch back to the scrollable page (index 1), it should be possible now to
+  // hide top-chrome.
   browser()->tab_strip_model()->SelectNextTab();
-  EXPECT_EQ(browser()->tab_strip_model()->active_index(), 0);
+  EXPECT_EQ(browser()->tab_strip_model()->active_index(), 1);
   waiter.WaitForRatio(1.f);
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
@@ -737,33 +748,24 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   // The `DoBrowserControlsShrinkRendererSize` bit is separately tracked for
   // each tab.
   auto* tab_strip_model = browser()->tab_strip_model();
-  auto* scrollable_page_contents = tab_strip_model->GetWebContentsAt(0);
-  auto* ntp_contents = tab_strip_model->GetWebContentsAt(1);
+  auto* ntp_contents = tab_strip_model->GetWebContentsAt(0);
   EXPECT_TRUE(
       browser_view()->DoBrowserControlsShrinkRendererSize(ntp_contents));
+  auto* scrollable_page_contents =
+      browser()->tab_strip_model()->GetWebContentsAt(1);
   EXPECT_FALSE(browser_view()->DoBrowserControlsShrinkRendererSize(
       scrollable_page_contents));
 }
 
-#if defined(OS_CHROMEOS)
-// http://crbug.com/1127805: Flaky on Chrome OS builders
-#define MAYBE_TestClosingATab DISABLED_TestClosingATab
-#else
-#define MAYBE_TestClosingATab TestClosingATab
-#endif
-IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, MAYBE_TestClosingATab) {
+IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestClosingATab) {
   ToggleTabletMode();
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
   // Navigate to our test scrollable page.
-  ui_test_utils::NavigateToURL(
-      browser(), embedded_test_server()->GetURL("/top_controls_scroll.html"));
-  EXPECT_TRUE(content::WaitForLoadStop(browser_view()->GetActiveWebContents()));
-  TabNonEmptyPaintWaiter paint_waiter(
-      browser()->tab_strip_model()->GetActiveWebContents());
-  paint_waiter.Wait();
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
   ASSERT_EQ(browser()->tab_strip_model()->count(), 1);
 
   // Scroll to fully hide top-chrome.
@@ -773,7 +775,7 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, MAYBE_TestClosingATab) {
   // Simulate (Ctrl + T) by inserting a new tab. Expect top-chrome to be fully
   // shown.
   TopControlsShownRatioWaiter waiter(top_controls_slide_controller());
-  chrome::NewTab(browser());
+  chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
   waiter.WaitForRatio(1.f);
   EXPECT_EQ(browser()->tab_strip_model()->active_index(), 1);
   EXPECT_EQ(browser()->tab_strip_model()->count(), 2);
@@ -808,8 +810,8 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
 
   // Navigate to our test page that has a long vertical content which we can use
   // to test page scrolling.
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
 
   SCOPED_TRACE("Initial scroll to hide the top controls.");
   ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
@@ -824,16 +826,15 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
     char buffer[kBufferSize];
     base::strings::SafeSPrintf(
         buffer,
-        "domAutomationController.send("
-        "    ((function() {"
-        "        var editableElement ="
-        "            document.getElementById('editable-element');"
-        "        if (editableElement) {"
-        "          editableElement.%s();"
-        "          return true;"
-        "        }"
-        "        return false;"
-        "      })()));",
+        "((function() {"
+        "    var editableElement ="
+        "        document.getElementById('editable-element');"
+        "    if (editableElement) {"
+        "      editableElement.%s();"
+        "      return true;"
+        "    }"
+        "    return false;"
+        "  })());",
         should_focus ? "focus" : "blur");
     return std::string(buffer);
   };
@@ -843,10 +844,8 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   SCOPED_TRACE("Focus an editable element in the page.");
   TopControlsShownRatioWaiter waiter(top_controls_slide_controller());
   content::WebContents* contents = browser_view()->GetActiveWebContents();
-  bool bool_result = false;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(
-      contents, get_js_function_body(true /* should_focus */), &bool_result));
-  EXPECT_TRUE(bool_result);
+  EXPECT_EQ(true, content::EvalJs(
+                      contents, get_js_function_body(true /* should_focus */)));
   waiter.WaitForRatio(1.f);
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
   CheckBrowserLayout(browser_view(), TopChromeShownState::kFullyShown);
@@ -860,14 +859,12 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
 
   // Now blur the focused editable element. Expect that top-chrome can now be
   // hidden with gesture scrolls.
-  bool_result = false;
   SCOPED_TRACE("Bluring the focus away from the editable element.");
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(
-      contents, get_js_function_body(false /* should_focus */), &bool_result));
-  EXPECT_TRUE(bool_result);
+  EXPECT_EQ(true, content::EvalJs(contents, get_js_function_body(
+                                                false /* should_focus */)));
   // Evaluate an empty sentence to make sure that the event processing is done
   // in the content.
-  ignore_result(content::EvalJs(contents, ";"));
+  std::ignore = content::EvalJs(contents, ";");
 
   SCOPED_TRACE("Scroll to hide should now work.");
   ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
@@ -882,6 +879,10 @@ class BrowserViewLayoutWaiter : public views::ViewObserver {
       : browser_view_(browser_view) {
     browser_view->AddObserver(this);
   }
+
+  BrowserViewLayoutWaiter(const BrowserViewLayoutWaiter&) = delete;
+  BrowserViewLayoutWaiter& operator=(const BrowserViewLayoutWaiter&) = delete;
+
   ~BrowserViewLayoutWaiter() override { browser_view_->RemoveObserver(this); }
 
   void Wait() {
@@ -897,23 +898,20 @@ class BrowserViewLayoutWaiter : public views::ViewObserver {
   // views::ViewObserver:
   void OnViewBoundsChanged(views::View* observed_view) override {
     view_bounds_changed_ = true;
-    if (run_loop_)
+    if (run_loop_) {
       run_loop_->Quit();
+    }
   }
 
  private:
-  BrowserView* browser_view_;
+  raw_ptr<BrowserView> browser_view_;
 
   bool view_bounds_changed_ = false;
 
   std::unique_ptr<base::RunLoop> run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(BrowserViewLayoutWaiter);
 };
 
-// Flaky https://crbug.com/1106036.
-IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
-                       DISABLED_DisplayRotation) {
+IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, DisplayRotation) {
   ToggleTabletMode();
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
@@ -922,13 +920,14 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   // Maximizing the browser window makes the browser view layout more
   // predictable with display rotation, as it's just resized to match the
   // display bounds.
-  browser_view()->frame()->Maximize();
+  browser_view()->browser_widget()->Maximize();
 
   // Navigate to our scrollable test page, scroll with touch gestures so that
   // top-chrome is fully hidden.
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
-  aura::Window* browser_window = browser()->window()->GetNativeWindow();
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
+
+  aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
   ui::test::EventGenerator event_generator(browser_window->GetRootWindow(),
                                            browser_window);
   gfx::Point start_point = event_generator.current_screen_location();
@@ -941,31 +940,27 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
 
   // Try all possible rotations. Changing display rotation should *not* unhide
   // top chrome.
-  const std::vector<ash::mojom::DisplayRotationOptions> rotations_to_try = {
-      ash::mojom::DisplayRotationOptions::k90Degrees,
-      ash::mojom::DisplayRotationOptions::k180Degrees,
-      ash::mojom::DisplayRotationOptions::k270Degrees,
-      ash::mojom::DisplayRotationOptions::kZeroDegrees,
+  const std::vector<ash::DisplayRotationOptions> rotations_to_try = {
+      ash::DisplayRotationOptions::k90Degrees,
+      ash::DisplayRotationOptions::k180Degrees,
+      ash::DisplayRotationOptions::k270Degrees,
+      ash::DisplayRotationOptions::kZeroDegrees,
   };
 
-  mojo::Remote<ash::mojom::CrosDisplayConfigController> cros_display_config;
-  ash::BindCrosDisplayConfigController(
-      cros_display_config.BindNewPipeAndPassReceiver());
-  ash::mojom::CrosDisplayConfigControllerAsyncWaiter waiter_for(
-      cros_display_config.get());
-  std::vector<ash::mojom::DisplayUnitInfoPtr> info_list;
-  waiter_for.GetDisplayUnitInfoList(false /* single_unified */, &info_list);
-  for (const ash::mojom::DisplayUnitInfoPtr& display_unit_info : info_list) {
-    const std::string display_id = display_unit_info->id;
+  ash::CrosDisplayConfig* cros_display_config =
+      ash::Shell::Get()->cros_display_config();
+  std::vector<ash::DisplayUnitInfo> info_list =
+      cros_display_config->GetDisplayUnitInfoList(/*single_unified=*/false);
+  for (const auto& display_unit_info : info_list) {
     for (const auto& rotation : rotations_to_try) {
       BrowserViewLayoutWaiter browser_view_layout_waiter(browser_view());
-      auto config_properties = ash::mojom::DisplayConfigProperties::New();
-      config_properties->rotation = ash::mojom::DisplayRotation::New(rotation);
-      ash::mojom::DisplayConfigResult result;
-      waiter_for.SetDisplayProperties(display_id, std::move(config_properties),
-                                      ash::mojom::DisplayConfigSource::kUser,
-                                      &result);
-      EXPECT_EQ(result, ash::mojom::DisplayConfigResult::kSuccess);
+      ash::DisplayConfigProperties config_properties;
+      config_properties.rotation = rotation;
+      ash::DisplayConfigResult result =
+          cros_display_config->SetDisplayProperties(
+              display_unit_info.id, config_properties,
+              ash::DisplayConfigSource::kUser);
+      EXPECT_EQ(result, ash::DisplayConfigResult::kSuccess);
 
       // Wait for the browser view to change its bounds as a result of display
       // rotation.
@@ -1012,9 +1007,16 @@ class PageStateUpdateWaiter : content::WebContentsObserver {
  public:
   explicit PageStateUpdateWaiter(content::WebContents* contents)
       : WebContentsObserver(contents) {}
+
+  PageStateUpdateWaiter(const PageStateUpdateWaiter&) = delete;
+  PageStateUpdateWaiter& operator=(const PageStateUpdateWaiter&) = delete;
+
   ~PageStateUpdateWaiter() override = default;
 
-  void Wait() { run_loop_.Run(); }
+  void Wait() {
+    run_loop_.Run();
+    SynchronizeBrowserWithRenderer(web_contents());
+  }
 
   // content::WebContentsObserver:
   void NavigationEntryChanged(
@@ -1028,22 +1030,20 @@ class PageStateUpdateWaiter : content::WebContentsObserver {
 
  private:
   base::RunLoop run_loop_;
-
-  DISALLOW_COPY_AND_ASSIGN(PageStateUpdateWaiter);
 };
 
 // Verifies that we ignore the shown ratios sent from widgets other than that of
 // the main frame (such as widgets of the drop-down menus in web pages).
-// https://crbug.com/891471.
+// https://crbug.com/41418552.
 IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestDropDowns) {
-  browser_view()->frame()->Maximize();
+  browser_view()->browser_widget()->Maximize();
   ToggleTabletMode();
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
 
   // Send a mouse click event that should open the popup drop-down menu of the
   // <select> html element on the page.
@@ -1051,9 +1051,8 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestDropDowns) {
   // `top_controls_shown_ratio_` (which is initialized to 0.f) will be sent to
   // the browser when a new compositor frame gets generated. If this shown ratio
   // value is not ignored, top-chrome will immediately hide, which will result
-  // in a BrowserView's Layout() and the immediate closure of the drop-down
-  // menu.
-  // We verify below that this doesn't happen, the menu remains open, and it's
+  // in a BrowserView layout and the immediate closure of the drop-down menu. We
+  // verify below that this doesn't happen, the menu remains open, and it's
   // possible to select another option in the drop-down menu.
   content::WebContents* contents =
       browser()->tab_strip_model()->GetActiveWebContents();
@@ -1067,7 +1066,7 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestDropDowns) {
 
   // Hit <enter> on the keyboard, then <down> three times, then <enter> again to
   // select the fourth option.
-  aura::Window* browser_window = browser()->window()->GetNativeWindow();
+  aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
   ui::test::EventGenerator event_generator(browser_window->GetRootWindow());
   auto send_key_event = [&event_generator](ui::KeyboardCode keycode) {
     event_generator.PressKey(keycode, ui::EF_NONE);
@@ -1080,7 +1079,7 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestDropDowns) {
   send_key_event(ui::VKEY_RETURN);
   // Evaluate an empty sentence to make sure that the event processing is done
   // in the content.
-  ignore_result(content::EvalJs(contents, ";"));
+  std::ignore = content::EvalJs(contents, ";");
 
   // Verify that the selected option has changed and the fourth option is
   // selected.
@@ -1088,7 +1087,7 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestDropDowns) {
   EXPECT_EQ("4", content::EvalJs(contents, "getSelectedValue();"));
 }
 
-// Disabled due to flakiness. crbug/1063364
+// TODO(crbug.com/436706865): Re-enable this test.
 IN_PROC_BROWSER_TEST_F(
     TopControlsSlideControllerTest,
     DISABLED_TestScrollingMaximizedPageBeforeGoingToTabletMode) {
@@ -1100,15 +1099,13 @@ IN_PROC_BROWSER_TEST_F(
   // BrowserView::GetTopControlsHeight() now returns a non-zero value). We must
   // make sure that we synchronize the visual properties manually, otherwise
   // the renderer will never get the new top-controls height.
-  browser_view()->frame()->Maximize();
+  browser_view()->browser_widget()->Maximize();
 
   // Navigate to our test scrollable page.
-  ui_test_utils::NavigateToURL(
-      browser(), embedded_test_server()->GetURL("/top_controls_scroll.html"));
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
   content::WebContents* active_contents =
       browser()->tab_strip_model()->GetActiveWebContents();
-  TabNonEmptyPaintWaiter paint_waiter(active_contents);
-  paint_waiter.Wait();
   ASSERT_EQ(browser()->tab_strip_model()->count(), 1);
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
   EXPECT_EQ(browser_view()->GetTopControlsHeight(), 0);
@@ -1144,28 +1141,38 @@ class IntermediateShownRatioWaiter : public TestControllerObserver {
     controller_->AddObserver(this);
   }
 
+  IntermediateShownRatioWaiter(const IntermediateShownRatioWaiter&) = delete;
+  IntermediateShownRatioWaiter& operator=(const IntermediateShownRatioWaiter&) =
+      delete;
+
   ~IntermediateShownRatioWaiter() override {
     controller_->RemoveObserver(this);
   }
 
+  bool seen_intermediate_ratios() const { return seen_intermediate_ratios_; }
+
   // TestControllerObserver:
   void OnShownRatioChanged(float shown_ratio) override {
-    seen_intermediate_ratios_ = shown_ratio > 0.0 && shown_ratio < 1.f;
-    if (!seen_intermediate_ratios_)
+    seen_intermediate_ratios_ |= shown_ratio > 0.0 && shown_ratio < 1.f;
+    if (!seen_intermediate_ratios_) {
       return;
+    }
 
-    if (on_intermediate_ratio_callback_)
+    if (on_intermediate_ratio_callback_) {
       std::move(on_intermediate_ratio_callback_).Run();
+    }
 
-    if (run_loop_)
+    if (run_loop_) {
       run_loop_->Quit();
+    }
   }
 
   void OnGestureScrollInProgressChanged(bool in_progress) override {}
 
   void Wait() {
-    if (seen_intermediate_ratios_)
+    if (seen_intermediate_ratios_) {
       return;
+    }
 
     run_loop_ = std::make_unique<base::RunLoop>(
         base::RunLoop::Type::kNestableTasksAllowed);
@@ -1173,18 +1180,16 @@ class IntermediateShownRatioWaiter : public TestControllerObserver {
   }
 
  private:
-  TestController* controller_;
+  raw_ptr<TestController> controller_;
 
   std::unique_ptr<base::RunLoop> run_loop_;
 
   base::OnceClosure on_intermediate_ratio_callback_;
 
   bool seen_intermediate_ratios_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(IntermediateShownRatioWaiter);
 };
 
-// Disabled due to flakiness: https://crbug.com/1055958.
+// TODO(crbug.com/436709208): Re-enable this test.
 IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
                        DISABLED_TestIntermediateSliding) {
   ToggleTabletMode();
@@ -1194,8 +1199,9 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
 
   // Navigate to our test page that has a long vertical content which we can use
   // to test page scrolling.
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
+
   content::WebContents* active_contents =
       browser_view()->GetActiveWebContents();
   PageStateUpdateWaiter page_state_update_waiter(active_contents);
@@ -1203,18 +1209,11 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   EXPECT_TRUE(
       browser_view()->DoBrowserControlsShrinkRendererSize(active_contents));
 
-  aura::Window* browser_window = browser()->window()->GetNativeWindow();
+  aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
   ui::test::EventGenerator event_generator(browser_window->GetRootWindow(),
                                            browser_window);
   const gfx::Point start_point = event_generator.current_screen_location();
   const gfx::Point end_point = start_point + gfx::Vector2d(0, -100);
-
-  // Large number of ET_GESTURE_SCROLL_UPDATE steps with small velocity so that
-  // we can see fractional shown ratios.
-  const int scroll_steps = 1000;
-  const base::TimeDelta scroll_step_delay =
-      event_generator.CalculateScrollDurationForFlingVelocity(
-          start_point, end_point, 2 /* velocity */, scroll_steps);
 
   LayoutTestView layout_test_view{browser_view()};
   {
@@ -1234,10 +1233,20 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
             base::Unretained(this), &layout_test_view,
             expected_shrink_renderer_size));
     layout_test_view.Reset();
-    event_generator.GestureScrollSequence(start_point, end_point,
-                                          scroll_step_delay, scroll_steps);
-    fractional_ratio_waiter.Wait();
+
+    event_generator.PressTouch();
+    SynchronizeBrowserWithRenderer(active_contents);
+    for (gfx::Point current_point = start_point;
+         !(current_point == end_point ||
+           fractional_ratio_waiter.seen_intermediate_ratios());
+         current_point += gfx::Vector2d(0, -1)) {
+      event_generator.MoveTouch(current_point);
+      SynchronizeBrowserWithRenderer(active_contents);
+    }
+    event_generator.MoveTouch(end_point);
+    event_generator.ReleaseTouch();
     waiter.WaitForRatio(0.f);
+
     EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 0);
     CheckBrowserLayout(browser_view(), TopChromeShownState::kFullyHidden);
 
@@ -1247,7 +1256,7 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
         browser_view()->DoBrowserControlsShrinkRendererSize(active_contents));
   }
 
-  content::WaitForResizeComplete(active_contents);
+  SynchronizeBrowserWithRenderer(active_contents);
 
   {
     // ... and when scrolling in the other direction towards a fully shown
@@ -1262,10 +1271,19 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
             base::Unretained(this), &layout_test_view,
             expected_shrink_renderer_size));
     layout_test_view.Reset();
-    event_generator.GestureScrollSequence(end_point, start_point,
-                                          scroll_step_delay, scroll_steps);
-    fractional_ratio_waiter.Wait();
+    event_generator.PressTouch();
+    SynchronizeBrowserWithRenderer(active_contents);
+    for (gfx::Point current_point = end_point;
+         !(current_point == start_point ||
+           fractional_ratio_waiter.seen_intermediate_ratios());
+         current_point += gfx::Vector2d(0, 1)) {
+      event_generator.MoveTouch(current_point);
+      SynchronizeBrowserWithRenderer(active_contents);
+    }
+    event_generator.MoveTouch(start_point);
+    event_generator.ReleaseTouch();
     waiter.WaitForRatio(1.f);
+
     EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
     CheckBrowserLayout(browser_view(), TopChromeShownState::kFullyShown);
 
@@ -1276,21 +1294,22 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   }
 }
 
-// Flaky. https://crbug.com/1036570
 IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
-                       DISABLED_DisplayMetricsChangeWhileInProgress) {
+                       DisplayMetricsChangeWhileInProgress) {
   ToggleTabletMode();
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
+
+  EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
   // Triggers a display metrics change event while both gesture scrolling and
   // sliding are in progress.
   auto rotate_display_while_in_progress =
-      [](TestController* slide_controller,
+      [](content::WebContents* contents, TestController* slide_controller,
          ui::test::EventGenerator* generator) {
         ASSERT_TRUE(slide_controller->IsTopControlsGestureScrollInProgress());
         ASSERT_TRUE(slide_controller->IsTopControlsSlidingInProgress());
@@ -1298,8 +1317,7 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
         // Trigger the keyboard shrotcut for changing the device scale factor.
         // This should result in a display metric change.
         constexpr int kFlags = ui::EF_CONTROL_DOWN | ui::EF_SHIFT_DOWN;
-        generator->PressKey(ui::VKEY_OEM_PLUS, kFlags);
-        generator->ReleaseKey(ui::VKEY_OEM_PLUS, kFlags);
+        generator->PressAndReleaseKeyAndModifierKeys(ui::VKEY_OEM_PLUS, kFlags);
 
         // Test that as result of the above, sliding has been temporarily
         // disabled, and that the top controls are fully shown.
@@ -1309,21 +1327,28 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
         EXPECT_TRUE(slide_controller->IsTopControlsGestureScrollInProgress());
       };
 
-  aura::Window* browser_window = browser()->window()->GetNativeWindow();
+  aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
   ui::test::EventGenerator event_generator(browser_window->GetRootWindow(),
                                            browser_window);
   const gfx::Point start_point = event_generator.current_screen_location();
   const gfx::Point end_point = start_point + gfx::Vector2d(0, -100);
 
+  auto* active_contents = browser_view()->GetActiveWebContents();
   IntermediateShownRatioWaiter fractional_ratio_waiter(
       top_controls_slide_controller(),
-      base::BindOnce(rotate_display_while_in_progress,
+      base::BindOnce(rotate_display_while_in_progress, active_contents,
                      top_controls_slide_controller(), &event_generator));
 
   event_generator.set_current_screen_location(start_point);
   event_generator.PressTouch();
-  event_generator.MoveTouch(end_point);
-  fractional_ratio_waiter.Wait();
+  SynchronizeBrowserWithRenderer(active_contents);
+  for (gfx::Point current_point = start_point;
+       !(current_point == end_point ||
+         fractional_ratio_waiter.seen_intermediate_ratios());
+       current_point += gfx::Vector2d(0, -1)) {
+    event_generator.MoveTouch(current_point);
+    SynchronizeBrowserWithRenderer(active_contents);
+  }
 
   // Release touch and wait for gesture scrolling to end.
   GestureScrollInProgressChangeWaiter waiter{top_controls_slide_controller()};
@@ -1337,16 +1362,15 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   CheckBrowserLayout(browser_view(), TopChromeShownState::kFullyShown);
 }
 
-// Disabled due to flakiness: https://crbug.com/1033651
-IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
-                       DISABLED_TestPermissionBubble) {
+IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest, TestPermissionBubble) {
   ToggleTabletMode();
   ASSERT_TRUE(GetTabletModeEnabled());
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
   const GURL url(embedded_test_server()->GetURL("/top_controls_scroll.html"));
-  OpenUrlAtIndex(url, 0);
+  NavigateActiveTabToUrl(url);
+
   content::WebContents* active_contents =
       browser_view()->GetActiveWebContents();
   PageStateUpdateWaiter page_state_update_waiter(active_contents);
@@ -1360,15 +1384,18 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
 
   // Fire a geolocation permission request, which should show a permission
   // request bubble resulting in top chrome unhiding.
-  auto decided = [](ContentSetting) {};
-  permissions::PermissionRequestImpl permission_request(
-      url, ContentSettingsType::GEOLOCATION, true /* user_gesture */,
-      base::BindOnce(decided), base::DoNothing() /* delete_callback */);
+  auto decided = [](const permissions::PermissionPromptDecision&,
+                    const permissions::PermissionRequestData&) {};
+  auto permission_request = std::make_unique<permissions::PermissionRequest>(
+      std::make_unique<permissions::PermissionRequestData>(
+          permissions::RequestType::kGeolocation,
+          /*user_gesture*/ true, url),
+      base::BindRepeating(decided));
   auto* permission_manager =
       permissions::PermissionRequestManager::FromWebContents(active_contents);
   TopControlsShownRatioWaiter waiter(top_controls_slide_controller());
-  permission_manager->AddRequest(active_contents->GetMainFrame(),
-                                 &permission_request);
+  permission_manager->AddRequest(active_contents->GetPrimaryMainFrame(),
+                                 std::move(permission_request));
   waiter.WaitForRatio(1.f);
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
   CheckBrowserLayout(browser_view(), TopChromeShownState::kFullyShown);
@@ -1380,16 +1407,17 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
                                TopChromeShownState::kFullyShown);
 
   // Dismiss the bubble.
-  permission_manager->Closing();
+  permission_manager->Dismiss(/*prompt_options=*/std::monostate());
   EXPECT_FALSE(permission_manager->IsRequestInProgress());
-  content::WaitForResizeComplete(active_contents);
+  SynchronizeBrowserWithRenderer(active_contents);
 
   // Now it is possible to hide top-chrome again.
   ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
                                TopChromeShownState::kFullyHidden);
 }
 
-// Disabled due to flakiness: https://crbug.com/1033648.
+// This test is failing on the linux-chromeos-chrome bot.
+// TODO(crbug.com/473938088): Re-enable the test.
 IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
                        DISABLED_TestToggleChromeVox) {
   ToggleTabletMode();
@@ -1397,8 +1425,8 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
 
-  OpenUrlAtIndex(embedded_test_server()->GetURL("/top_controls_scroll.html"),
-                 0);
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
   content::WebContents* active_contents =
       browser_view()->GetActiveWebContents();
   PageStateUpdateWaiter page_state_update_waiter(active_contents);
@@ -1412,8 +1440,9 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
   // Enable Chromevox (spoken feedback) and expect that top-chrome will be fully
   // shown, and sliding top-chrome is no longer enabled.
   TopControlsShownRatioWaiter waiter(top_controls_slide_controller());
-  chromeos::AccessibilityManager::Get()->EnableSpokenFeedback(true);
-  EXPECT_TRUE(chromeos::AccessibilityManager::Get()->IsSpokenFeedbackEnabled());
+  AccessibilityManager::Get()->EnableSpokenFeedback(true);
+  SynchronizeBrowserWithRenderer(active_contents);
+  EXPECT_TRUE(AccessibilityManager::Get()->IsSpokenFeedbackEnabled());
   waiter.WaitForRatio(1.f);
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
   EXPECT_TRUE(
@@ -1421,12 +1450,9 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
 
   // Now disable Chromevox, and expect it's now possible to hide top-chrome with
   // gesture scrolling.
-  content::RenderFrameSubmissionObserver compositor_frame_waiter(
-      active_contents);
-  chromeos::AccessibilityManager::Get()->EnableSpokenFeedback(false);
-  compositor_frame_waiter.WaitForAnyFrameSubmission();
-  EXPECT_FALSE(
-      chromeos::AccessibilityManager::Get()->IsSpokenFeedbackEnabled());
+  AccessibilityManager::Get()->EnableSpokenFeedback(false);
+  SynchronizeBrowserWithRenderer(active_contents);
+  EXPECT_FALSE(AccessibilityManager::Get()->IsSpokenFeedbackEnabled());
   EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
   CheckBrowserLayout(browser_view(), TopChromeShownState::kFullyShown);
 
@@ -1434,6 +1460,101 @@ IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
                                TopChromeShownState::kFullyHidden);
 }
 
-// TODO(crbug.com/989131): Add test coverage that covers using WebUITabStrip.
+// Regression test for https://crbug.com/40740045.
+IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
+                       NoCrashOnNewTabWhileScrolling) {
+  ToggleTabletMode();
+  ASSERT_TRUE(GetTabletModeEnabled());
+  EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
+  EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
+
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
+  ASSERT_EQ(browser()->tab_strip_model()->count(), 1);
+
+  aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
+  ui::test::EventGenerator event_generator(browser_window->GetRootWindow(),
+                                           browser_window);
+  const gfx::Point start_point = event_generator.current_screen_location();
+  auto* active_contents = browser_view()->GetActiveWebContents();
+
+  // Create a new tab while gesture scrolling is in progress, and top-chrome is
+  // fully hidden.
+  event_generator.PressTouch();
+  SynchronizeBrowserWithRenderer(active_contents);
+  auto current_point = start_point;
+  while (!(
+      top_controls_slide_controller()->IsTopControlsGestureScrollInProgress() &&
+      top_controls_slide_controller()->GetShownRatio() == 0.f)) {
+    current_point += gfx::Vector2d(0, -1);
+    event_generator.MoveTouch(current_point);
+    SynchronizeBrowserWithRenderer(active_contents);
+  }
+  constexpr int kFlags = ui::EF_CONTROL_DOWN;
+  event_generator.PressAndReleaseKeyAndModifierKeys(ui::VKEY_T, kFlags);
+  event_generator.ReleaseTouch();
+  ASSERT_EQ(browser()->tab_strip_model()->count(), 2);
+}
+
+// TODO(crbug.com/40638200): Add test coverage that covers using WebUITabStrip.
+
+// Regression test for crbug.com/470873053.
+IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
+                       LayerWithoutCompositorIsHandledSafely) {
+  auto layer = std::make_unique<ui::Layer>(ui::LAYER_SOLID_COLOR);
+  EXPECT_EQ(nullptr, layer->GetCompositor());
+
+  ui::Layer* browser_layer = browser_view()->browser_widget()->GetLayer();
+  ASSERT_NE(nullptr, browser_layer);
+  EXPECT_NE(nullptr, browser_layer->GetCompositor());
+
+  browser_layer->SetMasksToBounds(true);
+  EXPECT_TRUE(browser_layer->GetMasksToBounds());
+  browser_layer->SetMasksToBounds(false);
+  EXPECT_FALSE(browser_layer->GetMasksToBounds());
+}
+
+// Regression test for crbug.com/470873053.
+IN_PROC_BROWSER_TEST_F(TopControlsSlideControllerTest,
+                       NoCrashOnSetMasksToBoundsDuringSliding) {
+  ToggleTabletMode();
+  ASSERT_TRUE(GetTabletModeEnabled());
+  EXPECT_TRUE(top_controls_slide_controller()->IsEnabled());
+  EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 1.f);
+
+  NavigateActiveTabToUrl(
+      embedded_test_server()->GetURL("/top_controls_scroll.html"));
+  auto* active_contents = browser_view()->GetActiveWebContents();
+
+  for (int i = 0; i < 3; ++i) {
+    SCOPED_TRACE(base::StringPrintf("Scroll cycle %d", i));
+    ScrollAndExpectTopChromeToBe(ScrollDirection::kDown,
+                                 TopChromeShownState::kFullyHidden);
+    SynchronizeBrowserWithRenderer(active_contents);
+    ScrollAndExpectTopChromeToBe(ScrollDirection::kUp,
+                                 TopChromeShownState::kFullyShown);
+    SynchronizeBrowserWithRenderer(active_contents);
+  }
+
+  aura::Window* browser_window = browser()->GetWindow()->GetNativeWindow();
+  ui::test::EventGenerator event_generator(browser_window->GetRootWindow(),
+                                           browser_window);
+  const gfx::Point start_point = event_generator.current_screen_location();
+
+  event_generator.PressTouch();
+  SynchronizeBrowserWithRenderer(active_contents);
+
+  auto current_point = start_point;
+  for (int j = 0; j < 50; ++j) {
+    current_point += gfx::Vector2d(0, -2);
+    event_generator.MoveTouch(current_point);
+  }
+
+  event_generator.ReleaseTouch();
+
+  TopControlsShownRatioWaiter waiter(top_controls_slide_controller());
+  waiter.WaitForRatio(0.f);
+  EXPECT_FLOAT_EQ(top_controls_slide_controller()->GetShownRatio(), 0.f);
+}
 
 }  // namespace

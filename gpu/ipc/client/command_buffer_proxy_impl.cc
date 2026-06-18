@@ -1,37 +1,41 @@
-// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "gpu/ipc/client/command_buffer_proxy_impl.h"
 
 #include <memory>
+#include <optional>
 
-#include "base/bind.h"
-#include "base/callback.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/optional.h"
-#include "base/stl_util.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/memory/ref_counted_delete_on_sequence.h"
+#include "base/metrics/histogram.h"
+#include "base/metrics/histogram_macros.h"
+#include "base/observer_list.h"
+#include "base/rand_util.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/timer/elapsed_timer.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
 #include "gpu/command_buffer/client/gpu_control_client.h"
-#include "gpu/command_buffer/client/gpu_memory_buffer_manager.h"
 #include "gpu/command_buffer/common/cmd_buffer_common.h"
 #include "gpu/command_buffer/common/command_buffer_id.h"
 #include "gpu/command_buffer/common/command_buffer_shared.h"
 #include "gpu/command_buffer/common/gpu_memory_allocation.h"
-#include "gpu/command_buffer/common/gpu_memory_buffer_support.h"
-#include "gpu/command_buffer/common/presentation_feedback_utils.h"
 #include "gpu/command_buffer/common/sync_token.h"
 #include "gpu/ipc/client/gpu_channel_host.h"
 #include "gpu/ipc/common/command_buffer_id.h"
-#include "gpu/ipc/common/gpu_messages.h"
-#include "gpu/ipc/common/gpu_param_traits.h"
+#include "gpu/ipc/common/gpu_channel.mojom.h"
+#include "ipc/constants.mojom.h"
+#include "ipc/ipc_mojo_bootstrap.h"
+#include "mojo/public/cpp/bindings/sync_call_restrictions.h"
 #include "mojo/public/cpp/system/buffer.h"
 #include "mojo/public/cpp/system/platform_handle.h"
-#include "ui/gfx/buffer_format_util.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/gpu_fence.h"
 #include "ui/gl/gl_bindings.h"
@@ -39,57 +43,203 @@
 
 namespace gpu {
 
+// This filter does the following:
+// - handles WebGPU GPU->Client messages on the specified task runner
+// - posts other calls back to the main thread (|proxy_task_runner|)
+class CommandBufferClientMessageFilter
+    : public base::RefCountedDeleteOnSequence<CommandBufferClientMessageFilter>,
+      public mojom::CommandBufferClient {
+ public:
+  CommandBufferClientMessageFilter(
+      scoped_refptr<base::SequencedTaskRunner> task_runner,
+      CommandBufferProxyImpl* proxy,
+      scoped_refptr<base::SequencedTaskRunner> proxy_task_runner = nullptr);
+  CommandBufferClientMessageFilter(const CommandBufferClientMessageFilter&) =
+      delete;
+  CommandBufferClientMessageFilter& operator=(
+      const CommandBufferClientMessageFilter&) = delete;
+
+  void Initialize(mojo::PendingAssociatedReceiver<mojom::CommandBufferClient>
+                      pending_receiver);
+  void Destroy();
+
+ private:
+  friend class base::RefCountedDeleteOnSequence<
+      CommandBufferClientMessageFilter>;
+  friend class base::DeleteHelper<CommandBufferClientMessageFilter>;
+  ~CommandBufferClientMessageFilter() override;
+
+  void OnDisconnect();
+
+  // mojom::CommandBufferClient:
+  void OnConsoleMessage(const std::string& message) override;
+  void OnGpuSwitched() override;
+  void OnDestroyed(gpu::error::ContextLostReason reason,
+                   gpu::error::Error error) override;
+  void OnReturnData(const std::vector<uint8_t>& data) override;
+  void OnSignalAck(uint32_t id, const CommandBuffer::State& state) override;
+
+  mutable base::Lock proxy_lock_;
+  raw_ptr<CommandBufferProxyImpl> proxy_ GUARDED_BY(proxy_lock_) = nullptr;
+  scoped_refptr<base::SequencedTaskRunner> proxy_task_runner_;
+
+  scoped_refptr<base::SequencedTaskRunner> task_runner_;
+  mojo::AssociatedReceiver<mojom::CommandBufferClient> receiver_{this};
+};
+
+CommandBufferClientMessageFilter::CommandBufferClientMessageFilter(
+    scoped_refptr<base::SequencedTaskRunner> task_runner,
+    CommandBufferProxyImpl* proxy,
+    scoped_refptr<base::SequencedTaskRunner> proxy_task_runner)
+    : base::RefCountedDeleteOnSequence<CommandBufferClientMessageFilter>(
+          task_runner),
+      proxy_(proxy),
+      proxy_task_runner_(proxy_task_runner
+                             ? std::move(proxy_task_runner)
+                             : base::SequencedTaskRunner::GetCurrentDefault()),
+      task_runner_(std::move(task_runner)) {}
+
+CommandBufferClientMessageFilter::~CommandBufferClientMessageFilter() {
+  DCHECK(!proxy_);
+}
+
+void CommandBufferClientMessageFilter::Initialize(
+    mojo::PendingAssociatedReceiver<mojom::CommandBufferClient>
+        pending_receiver) {
+  if (!task_runner_->RunsTasksInCurrentSequence()) {
+    task_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CommandBufferClientMessageFilter::Initialize,
+                       base::RetainedRef(this), std::move(pending_receiver)));
+    return;
+  }
+  IPC::ScopedAllowOffSequenceChannelAssociatedBindings allow_off_sequence;
+  receiver_.Bind(std::move(pending_receiver), task_runner_);
+  receiver_.set_disconnect_handler(base::BindOnce(
+      &CommandBufferClientMessageFilter::OnDisconnect, base::Unretained(this)));
+}
+
+void CommandBufferClientMessageFilter::Destroy() {
+  base::AutoLock auto_lock(proxy_lock_);
+  if (proxy_) {
+    proxy_ = nullptr;
+  }
+}
+
+void CommandBufferClientMessageFilter::OnDisconnect() {
+  base::AutoLock auto_lock(proxy_lock_);
+  if (proxy_) {
+    proxy_task_runner_->PostTask(
+        FROM_HERE, base::BindOnce(&CommandBufferProxyImpl::OnDisconnect,
+                                  proxy_->AsWeakPtr()));
+  }
+}
+
+void CommandBufferClientMessageFilter::OnConsoleMessage(
+    const std::string& message) {
+  base::AutoLock auto_lock(proxy_lock_);
+  if (proxy_) {
+    proxy_->OnConsoleMessage(message);
+  }
+}
+
+void CommandBufferClientMessageFilter::OnGpuSwitched() {
+  base::AutoLock auto_lock(proxy_lock_);
+  if (proxy_) {
+    proxy_->OnGpuSwitched();
+  }
+}
+
+void CommandBufferClientMessageFilter::OnDestroyed(
+    gpu::error::ContextLostReason reason,
+    gpu::error::Error error) {
+  base::AutoLock auto_lock(proxy_lock_);
+  if (proxy_) {
+    proxy_task_runner_->PostTask(
+        FROM_HERE, base::BindOnce(&CommandBufferProxyImpl::OnDestroyed,
+                                  proxy_->AsWeakPtr(), reason, error));
+  }
+}
+
+void CommandBufferClientMessageFilter::OnReturnData(
+    const std::vector<uint8_t>& data) {
+  base::AutoLock auto_lock(proxy_lock_);
+  if (proxy_) {
+    proxy_->OnReturnData(data);
+  }
+}
+
+void CommandBufferClientMessageFilter::OnSignalAck(
+    uint32_t id,
+    const CommandBuffer::State& state) {
+  base::AutoLock auto_lock(proxy_lock_);
+  if (proxy_) {
+    proxy_task_runner_->PostTask(
+        FROM_HERE, base::BindOnce(&CommandBufferProxyImpl::OnSignalAck,
+                                  proxy_->AsWeakPtr(), id, state));
+  }
+}
+
 CommandBufferProxyImpl::CommandBufferProxyImpl(
     scoped_refptr<GpuChannelHost> channel,
-    GpuMemoryBufferManager* gpu_memory_buffer_manager,
     int32_t stream_id,
-    scoped_refptr<base::SingleThreadTaskRunner> task_runner)
+    scoped_refptr<base::SequencedTaskRunner> default_task_runner,
+    scoped_refptr<base::SequencedTaskRunner> client_task_runner,
+    base::SharedMemoryMapper* transfer_buffer_mapper)
     : channel_(std::move(channel)),
-      gpu_memory_buffer_manager_(gpu_memory_buffer_manager),
       channel_id_(channel_->channel_id()),
       route_id_(channel_->GenerateRouteID()),
       stream_id_(stream_id),
       command_buffer_id_(
           CommandBufferIdFromChannelAndRoute(channel_id_, route_id_)),
-      callback_thread_(std::move(task_runner)) {
+      default_task_runner_(std::move(default_task_runner)),
+      client_filter_(
+          (client_task_runner && client_task_runner != default_task_runner_)
+              ? base::MakeRefCounted<CommandBufferClientMessageFilter>(
+                    std::move(client_task_runner),
+                    this,
+                    default_task_runner_)
+              : nullptr),
+      transfer_buffer_mapper_(transfer_buffer_mapper) {
   DCHECK(route_id_);
 }
 
 CommandBufferProxyImpl::~CommandBufferProxyImpl() {
   for (auto& observer : deletion_observers_)
     observer.OnWillDeleteImpl();
+  ShutdownClientMessageFilter();
   DisconnectChannel();
+  CancelAllQueries();
+}
+
+base::WeakPtr<CommandBufferProxyImpl> CommandBufferProxyImpl::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 ContextResult CommandBufferProxyImpl::Initialize(
-    gpu::SurfaceHandle surface_handle,
-    CommandBufferProxyImpl* share_group,
     gpu::SchedulingPriority stream_priority,
-    const gpu::ContextCreationAttribs& attribs,
-    const GURL& active_url) {
-  DCHECK(!share_group || (stream_id_ == share_group->stream_id_));
-  TRACE_EVENT1("gpu", "GpuChannelHost::CreateViewCommandBuffer",
-               "surface_handle", surface_handle);
+    mojom::ContextCreationAttribsPtr attribs,
+    const GURL& active_url,
+    const std::string_view label) {
+  TRACE_EVENT0("gpu", "GpuChannelHost::CreateViewCommandBuffer");
 
   // Drop the |channel_| if this method does not succeed and early-outs, to
   // prevent cleanup on destruction.
   auto channel = std::move(channel_);
 
-  GPUCreateCommandBufferConfig init_params;
-  init_params.surface_handle = surface_handle;
-  init_params.share_group_id =
-      share_group ? share_group->route_id_ : MSG_ROUTING_NONE;
-  init_params.stream_id = stream_id_;
-  init_params.stream_priority = stream_priority;
-  init_params.attribs = attribs;
-  init_params.active_url = active_url;
+  auto params = mojom::CreateCommandBufferParams::New();
+  params->stream_id = stream_id_;
+  params->stream_priority = stream_priority;
+  params->attribs = std::move(attribs);
+  params->active_url = active_url;
+  params->label = label;
 
   TRACE_EVENT0("gpu", "CommandBufferProxyImpl::Initialize");
   std::tie(shared_state_shm_, shared_state_mapping_) =
       AllocateAndMapSharedMemory(sizeof(*shared_state()));
   if (!shared_state_shm_.IsValid()) {
-    LOG(ERROR) << "ContextResult::kFatalFailure: "
-                  "AllocateAndMapSharedMemory failed";
+    DLOG(ERROR) << "ContextResult::kFatalFailure: "
+                   "AllocateAndMapSharedMemory failed";
     return ContextResult::kFatalFailure;
   }
 
@@ -105,27 +255,41 @@ ContextResult CommandBufferProxyImpl::Initialize(
     return ContextResult::kTransientFailure;
   }
 
-  // Route must be added before sending the message, otherwise messages sent
-  // from the GPU process could race against adding ourselves to the filter.
-  channel->AddRouteWithTaskRunner(route_id_, weak_ptr_factory_.GetWeakPtr(),
-                                  callback_thread_);
+  // Setup the CommandBufferClient remote and receivers.
+  mojo::PendingAssociatedRemote<mojom::CommandBufferClient> client_remote;
+  if (!client_filter_) {
+    client_remote =
+        client_receiver_.BindNewEndpointAndPassRemote(default_task_runner_);
+    client_receiver_.set_disconnect_handler(base::BindOnce(
+        &CommandBufferProxyImpl::OnDisconnect, base::Unretained(this)));
+  } else {
+    mojo::PendingAssociatedReceiver<mojom::CommandBufferClient>
+        client_receiver = client_remote.InitWithNewEndpointAndPassReceiver();
+    client_filter_->Initialize(std::move(client_receiver));
+  }
 
   // We're blocking the UI thread, which is generally undesirable.
   // In this case we need to wait for this before we can show any UI /anyway/,
   // so it won't cause additional jank.
   // TODO(piman): Make this asynchronous (http://crbug.com/125248).
   ContextResult result = ContextResult::kSuccess;
-  bool sent = channel->Send(new GpuChannelMsg_CreateCommandBuffer(
-      init_params, route_id_, std::move(region), &result, &capabilities_));
+  mojo::SyncCallRestrictions::ScopedAllowSyncCall allow_sync;
+  IPC::ScopedAllowOffSequenceChannelAssociatedBindings allow_binding;
+  bool sent = channel->GetGpuChannel().CreateCommandBuffer(
+      std::move(params), route_id_, std::move(region),
+      command_buffer_.BindNewEndpointAndPassReceiver(channel->io_task_runner()),
+      std::move(client_remote), &result, &capabilities_, &gl_capabilities_);
   if (!sent) {
-    channel->RemoveRoute(route_id_);
+    command_buffer_.reset();
+    client_receiver_.reset();
     LOG(ERROR) << "ContextResult::kTransientFailure: "
-                  "Failed to send GpuChannelMsg_CreateCommandBuffer.";
+                  "Failed to send GpuControl.CreateCommandBuffer.";
     return ContextResult::kTransientFailure;
   }
   if (result != ContextResult::kSuccess) {
-    DLOG(ERROR) << "Failure processing GpuChannelMsg_CreateCommandBuffer.";
-    channel->RemoveRoute(route_id_);
+    command_buffer_.reset();
+    client_receiver_.reset();
+    DLOG(ERROR) << "Failure processing GpuControl.CreateCommandBuffer.";
     return result;
   }
 
@@ -133,34 +297,8 @@ ContextResult CommandBufferProxyImpl::Initialize(
   return result;
 }
 
-bool CommandBufferProxyImpl::OnMessageReceived(const IPC::Message& message) {
-  base::AutoLockMaybe lock(lock_);
-  bool handled = true;
-  IPC_BEGIN_MESSAGE_MAP(CommandBufferProxyImpl, message)
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_Destroyed, OnDestroyed);
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_ConsoleMsg, OnConsoleMessage);
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_GpuSwitched, OnGpuSwitched);
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_SignalAck, OnSignalAck);
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_SwapBuffersCompleted,
-                        OnSwapBuffersCompleted);
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_BufferPresented, OnBufferPresented);
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_GetGpuFenceHandleComplete,
-                        OnGetGpuFenceHandleComplete);
-    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_ReturnData, OnReturnData);
-    IPC_MESSAGE_UNHANDLED(handled = false)
-  IPC_END_MESSAGE_MAP()
-
-  if (!handled) {
-    LOG(ERROR) << "Gpu process sent invalid message.";
-    base::AutoLock last_state_lock(last_state_lock_);
-    OnGpuAsyncMessageError(gpu::error::kInvalidGpuMessage,
-                           gpu::error::kLostContext);
-  }
-  return handled;
-}
-
-void CommandBufferProxyImpl::OnChannelError() {
-  base::AutoLockMaybe lock(lock_);
+void CommandBufferProxyImpl::OnDisconnect() {
+  base::AutoLockMaybe lock(lock_.get());
   base::AutoLock last_state_lock(last_state_lock_);
 
   gpu::error::ContextLostReason context_lost_reason =
@@ -169,50 +307,59 @@ void CommandBufferProxyImpl::OnChannelError() {
     // The GPU process might have intentionally been crashed
     // (exit_on_context_lost), so try to find out the original reason.
     TryUpdateStateDontReportError();
-    if (last_state_.error == gpu::error::kLostContext)
+    if (last_state_.error == gpu::error::kLostContext) {
       context_lost_reason = last_state_.context_lost_reason;
+    }
   }
   OnGpuAsyncMessageError(context_lost_reason, gpu::error::kLostContext);
 }
 
+void CommandBufferProxyImpl::ShutdownClientMessageFilter() {
+  if (client_filter_) {
+    client_filter_->Destroy();
+  }
+}
+
 void CommandBufferProxyImpl::OnDestroyed(gpu::error::ContextLostReason reason,
                                          gpu::error::Error error) {
-  base::AutoLock lock(last_state_lock_);
+  base::AutoLockMaybe lock(lock_.get());
+  base::AutoLock last_state_lock(last_state_lock_);
   OnGpuAsyncMessageError(reason, error);
 }
 
-void CommandBufferProxyImpl::OnConsoleMessage(
-    const GPUCommandBufferConsoleMessage& message) {
+void CommandBufferProxyImpl::OnConsoleMessage(const std::string& message) {
   if (gpu_control_client_)
-    gpu_control_client_->OnGpuControlErrorMessage(message.message.c_str(),
-                                                  message.id);
+    gpu_control_client_->OnGpuControlErrorMessage(message.c_str(), /*id=*/0);
 }
 
-void CommandBufferProxyImpl::OnGpuSwitched(
-    gl::GpuPreference active_gpu_heuristic) {
+void CommandBufferProxyImpl::OnGpuSwitched() {
   if (gpu_control_client_)
-    gpu_control_client_->OnGpuSwitched(active_gpu_heuristic);
+    gpu_control_client_->OnGpuSwitched();
 }
 
 void CommandBufferProxyImpl::AddDeletionObserver(DeletionObserver* observer) {
-  std::unique_ptr<base::AutoLock> lock;
-  if (lock_)
-    lock.reset(new base::AutoLock(*lock_));
+  base::AutoLockMaybe lock(lock_.get());
   deletion_observers_.AddObserver(observer);
 }
 
 void CommandBufferProxyImpl::RemoveDeletionObserver(
     DeletionObserver* observer) {
-  std::unique_ptr<base::AutoLock> lock;
-  if (lock_)
-    lock.reset(new base::AutoLock(*lock_));
+  base::AutoLockMaybe lock(lock_.get());
   deletion_observers_.RemoveObserver(observer);
 }
 
+void CommandBufferProxyImpl::UpdateLastFenceSyncRelease(
+    uint64_t release_count) {
+  CheckLock();
+  if (last_fence_sync_release_ < release_count) {
+    last_fence_sync_release_ = release_count;
+  }
+}
 void CommandBufferProxyImpl::OnSignalAck(uint32_t id,
                                          const CommandBuffer::State& state) {
+  base::AutoLockMaybe lock(lock_.get());
   {
-    base::AutoLock lock(last_state_lock_);
+    base::AutoLock last_state_lock(last_state_lock_);
     SetStateFromMessageReply(state);
     if (last_state_.error != gpu::error::kNoError)
       return;
@@ -220,7 +367,7 @@ void CommandBufferProxyImpl::OnSignalAck(uint32_t id,
   SignalTaskMap::iterator it = signal_tasks_.find(id);
   if (it == signal_tasks_.end()) {
     LOG(ERROR) << "Gpu process sent invalid SignalAck.";
-    base::AutoLock lock(last_state_lock_);
+    base::AutoLock last_state_lock(last_state_lock_);
     OnGpuAsyncMessageError(gpu::error::kInvalidGpuMessage,
                            gpu::error::kLostContext);
     return;
@@ -271,13 +418,8 @@ void CommandBufferProxyImpl::OrderingBarrierHelper(int32_t put_offset) {
     return;
   last_put_offset_ = put_offset;
   last_flush_id_ = channel_->OrderingBarrier(
-      route_id_, put_offset, std::move(pending_sync_token_fences_));
-}
-
-void CommandBufferProxyImpl::SetUpdateVSyncParametersCallback(
-    const UpdateVSyncParametersCallback& callback) {
-  CheckLock();
-  update_vsync_parameters_completion_callback_ = callback;
+      route_id_, put_offset, std::move(pending_sync_token_fences_),
+      last_fence_sync_release_);
 }
 
 gpu::CommandBuffer::State CommandBufferProxyImpl::WaitForTokenInRange(
@@ -298,9 +440,10 @@ gpu::CommandBuffer::State CommandBufferProxyImpl::WaitForTokenInRange(
   TryUpdateState();
   if (!InRange(start, end, last_state_.token) &&
       last_state_.error == gpu::error::kNoError) {
+    mojo::SyncCallRestrictions::ScopedAllowSyncCall allow_sync;
     gpu::CommandBuffer::State state;
-    if (Send(new GpuCommandBufferMsg_WaitForTokenInRange(route_id_, start, end,
-                                                         &state))) {
+    if (channel_->GetGpuChannel().WaitForTokenInRange(route_id_, start, end,
+                                                      &state)) {
       SetStateFromMessageReply(state);
     }
   }
@@ -332,10 +475,12 @@ gpu::CommandBuffer::State CommandBufferProxyImpl::WaitForGetOffsetInRange(
   if (((set_get_buffer_count != last_state_.set_get_buffer_count) ||
        !InRange(start, end, last_state_.get_offset)) &&
       last_state_.error == gpu::error::kNoError) {
+    mojo::SyncCallRestrictions::ScopedAllowSyncCall allow_sync;
     gpu::CommandBuffer::State state;
-    if (Send(new GpuCommandBufferMsg_WaitForGetOffsetInRange(
-            route_id_, set_get_buffer_count, start, end, &state)))
+    if (channel_->GetGpuChannel().WaitForGetOffsetInRange(
+            route_id_, set_get_buffer_count, start, end, &state)) {
       SetStateFromMessageReply(state);
+    }
   }
   if (((set_get_buffer_count != last_state_.set_get_buffer_count) ||
        !InRange(start, end, last_state_.get_offset)) &&
@@ -352,7 +497,7 @@ void CommandBufferProxyImpl::SetGetBuffer(int32_t shm_id) {
   if (last_state_.error != gpu::error::kNoError)
     return;
 
-  Send(new GpuCommandBufferMsg_SetGetBuffer(route_id_, shm_id));
+  command_buffer_->SetGetBuffer(shm_id);
   last_put_offset_ = -1;
   has_buffer_ = (shm_id > 0);
 }
@@ -360,6 +505,7 @@ void CommandBufferProxyImpl::SetGetBuffer(int32_t shm_id) {
 scoped_refptr<gpu::Buffer> CommandBufferProxyImpl::CreateTransferBuffer(
     uint32_t size,
     int32_t* id,
+    uint32_t alignment,
     TransferBufferAllocationOption option) {
   CheckLock();
   base::AutoLock lock(last_state_lock_);
@@ -370,7 +516,7 @@ scoped_refptr<gpu::Buffer> CommandBufferProxyImpl::CreateTransferBuffer(
   base::UnsafeSharedMemoryRegion shared_memory_region;
   base::WritableSharedMemoryMapping shared_memory_mapping;
   std::tie(shared_memory_region, shared_memory_mapping) =
-      AllocateAndMapSharedMemory(size);
+      AllocateAndMapSharedMemory(size, transfer_buffer_mapper_);
   if (!shared_memory_mapping.IsValid()) {
     if (last_state_.error == gpu::error::kNoError &&
         option != TransferBufferAllocationOption::kReturnNullOnOOM)
@@ -386,8 +532,7 @@ scoped_refptr<gpu::Buffer> CommandBufferProxyImpl::CreateTransferBuffer(
         OnClientError(gpu::error::kLostContext);
       return nullptr;
     }
-    Send(new GpuCommandBufferMsg_RegisterTransferBuffer(route_id_, new_id,
-                                                        std::move(region)));
+    command_buffer_->RegisterTransferBuffer(new_id, std::move(region));
   }
 
   *id = new_id;
@@ -403,7 +548,27 @@ void CommandBufferProxyImpl::DestroyTransferBuffer(int32_t id) {
     return;
 
   last_flush_id_ = channel_->EnqueueDeferredMessage(
-      GpuCommandBufferMsg_DestroyTransferBuffer(route_id_, id));
+      mojom::DeferredRequestParams::NewCommandBufferRequest(
+          mojom::DeferredCommandBufferRequest::New(
+              route_id_, mojom::DeferredCommandBufferRequestParams::
+                             NewDestroyTransferBuffer(id))),
+      /*sync_token_fences=*/{}, /*release_count=*/0);
+}
+
+void CommandBufferProxyImpl::ForceLostContext(error::ContextLostReason reason) {
+  CheckLock();
+  base::AutoLock lock(last_state_lock_);
+  if (last_state_.error == gpu::error::kLostContext) {
+    // Per specification, do nothing if the context is already lost.
+    return;
+  }
+  last_state_.error = gpu::error::kLostContext;
+  // The caller determines the context lost reason.
+  last_state_.context_lost_reason = reason;
+  // Calling code may be in an indeterminate state (possibly including
+  // being in a GpuControlClient callback), so avoid re-entering the
+  // GpuControlClient here.
+  DisconnectChannelInFreshCallStack();
 }
 
 void CommandBufferProxyImpl::SetGpuControlClient(GpuControlClient* client) {
@@ -415,68 +580,8 @@ const gpu::Capabilities& CommandBufferProxyImpl::GetCapabilities() const {
   return capabilities_;
 }
 
-int32_t CommandBufferProxyImpl::CreateImage(ClientBuffer buffer,
-                                            size_t width,
-                                            size_t height) {
-  CheckLock();
-  base::AutoLock lock(last_state_lock_);
-  if (last_state_.error != gpu::error::kNoError)
-    return -1;
-
-  int32_t new_id = channel_->ReserveImageId();
-
-  gfx::GpuMemoryBuffer* gpu_memory_buffer =
-      reinterpret_cast<gfx::GpuMemoryBuffer*>(buffer);
-  DCHECK(gpu_memory_buffer);
-
-  // This handle is owned by the GPU process and must be passed to it or it
-  // will leak. In otherwords, do not early out on error between here and the
-  // sending of the CreateImage IPC below.
-  gfx::GpuMemoryBufferHandle handle = gpu_memory_buffer->CloneHandle();
-  bool requires_sync_token = handle.type == gfx::IO_SURFACE_BUFFER;
-
-  uint64_t image_fence_sync = 0;
-  if (requires_sync_token)
-    image_fence_sync = GenerateFenceSyncRelease();
-
-  DCHECK(gpu::IsImageFromGpuMemoryBufferFormatSupported(
-      gpu_memory_buffer->GetFormat(), capabilities_))
-      << gfx::BufferFormatToString(gpu_memory_buffer->GetFormat());
-  DCHECK(gpu::IsImageSizeValidForGpuMemoryBufferFormat(
-      gfx::Size(width, height), gpu_memory_buffer->GetFormat()))
-      << gfx::BufferFormatToString(gpu_memory_buffer->GetFormat());
-
-  GpuCommandBufferMsg_CreateImage_Params params;
-  params.id = new_id;
-  params.gpu_memory_buffer = std::move(handle);
-  params.size = gfx::Size(width, height);
-  params.format = gpu_memory_buffer->GetFormat();
-  params.image_release_count = image_fence_sync;
-
-  Send(new GpuCommandBufferMsg_CreateImage(route_id_, params));
-
-  if (image_fence_sync) {
-    gpu::SyncToken sync_token(GetNamespaceID(), GetCommandBufferID(),
-                              image_fence_sync);
-
-    // Force a synchronous IPC to validate sync token.
-    EnsureWorkVisible();
-    sync_token.SetVerifyFlush();
-
-    gpu_memory_buffer_manager_->SetDestructionSyncToken(gpu_memory_buffer,
-                                                        sync_token);
-  }
-
-  return new_id;
-}
-
-void CommandBufferProxyImpl::DestroyImage(int32_t id) {
-  CheckLock();
-  base::AutoLock lock(last_state_lock_);
-  if (last_state_.error != gpu::error::kNoError)
-    return;
-
-  Send(new GpuCommandBufferMsg_DestroyImage(route_id_, id));
+const gpu::GLCapabilities& CommandBufferProxyImpl::GetGLCapabilities() const {
+  return gl_capabilities_;
 }
 
 void CommandBufferProxyImpl::SetLock(base::Lock* lock) {
@@ -485,8 +590,29 @@ void CommandBufferProxyImpl::SetLock(base::Lock* lock) {
 
 void CommandBufferProxyImpl::EnsureWorkVisible() {
   // Don't send messages once disconnected.
-  if (!disconnected_)
-    channel_->VerifyFlush(UINT32_MAX);
+  if (disconnected_)
+    return;
+
+  constexpr char kEnsureWorkVisible[] = "EnsureWorkVisible";
+
+  const base::ElapsedTimer elapsed_timer;
+
+  TRACE_EVENT_BEGIN("gpu,login", kEnsureWorkVisible,
+                    perfetto::NamedTrack(kEnsureWorkVisible));
+
+  channel_->VerifyFlush(UINT32_MAX);
+
+  TRACE_EVENT_END("gpu,login", /*kEnsureWorkVisible*/
+                  perfetto::NamedTrack(kEnsureWorkVisible));
+
+  if (base::ShouldRecordSubsampledMetric(0.001)) {
+    GetUMAHistogramEnsureWorkVisibleDuration()->Add(
+        elapsed_timer.Elapsed().InMicroseconds());
+
+    UMA_HISTOGRAM_CUSTOM_TIMES("GPU.EnsureWorkVisibleDurationLowRes",
+                               elapsed_timer.Elapsed(), base::Milliseconds(1),
+                               base::Seconds(5), 100);
+  }
 }
 
 gpu::CommandBufferNamespace CommandBufferProxyImpl::GetNamespaceID() const {
@@ -505,7 +631,7 @@ void CommandBufferProxyImpl::FlushPendingWork() {
 
 uint64_t CommandBufferProxyImpl::GenerateFenceSyncRelease() {
   CheckLock();
-  return next_fence_sync_release_++;
+  return ++last_fence_sync_release_;
 }
 
 // This can be called from any thread without holding |lock_|. Use a thread-safe
@@ -524,8 +650,7 @@ void CommandBufferProxyImpl::SignalSyncToken(const gpu::SyncToken& sync_token,
     return;
 
   uint32_t signal_id = next_signal_id_++;
-  Send(new GpuCommandBufferMsg_SignalSyncToken(route_id_, sync_token,
-                                               signal_id));
+  command_buffer_->SignalSyncToken(sync_token, signal_id);
   signal_tasks_.insert(std::make_pair(signal_id, std::move(callback)));
 }
 
@@ -566,8 +691,13 @@ void CommandBufferProxyImpl::SignalQuery(uint32_t query,
   // could do that, all they would do is to prevent some callbacks from getting
   // called, leading to stalled threads and/or memory leaks.
   uint32_t signal_id = next_signal_id_++;
-  Send(new GpuCommandBufferMsg_SignalQuery(route_id_, query, signal_id));
+  command_buffer_->SignalQuery(query, signal_id);
   signal_tasks_.insert(std::make_pair(signal_id, std::move(callback)));
+}
+
+void CommandBufferProxyImpl::CancelAllQueries() {
+  // Clear all of the signal query callbacks.
+  signal_tasks_.clear();
 }
 
 void CommandBufferProxyImpl::CreateGpuFence(uint32_t gpu_fence_id,
@@ -579,18 +709,9 @@ void CommandBufferProxyImpl::CreateGpuFence(uint32_t gpu_fence_id,
     return;
   }
 
-  // IPC accepts handles by const reference. However, on platforms where the
-  // handle is backed by base::ScopedFD, const is casted away and the handle is
-  // forcibly taken from you.
   gfx::GpuFence* gpu_fence = gfx::GpuFence::FromClientGpuFence(source);
-  gfx::GpuFenceHandle handle = gpu_fence->GetGpuFenceHandle().Clone();
-  Send(new GpuCommandBufferMsg_CreateGpuFenceFromHandle(route_id_, gpu_fence_id,
-                                                        handle));
-}
-
-void CommandBufferProxyImpl::SetDisplayTransform(
-    gfx::OverlayTransform transform) {
-  NOTREACHED();
+  command_buffer_->CreateGpuFenceFromHandle(
+      gpu_fence_id, gpu_fence->GetGpuFenceHandle().Clone());
 }
 
 void CommandBufferProxyImpl::GetGpuFence(
@@ -603,27 +724,20 @@ void CommandBufferProxyImpl::GetGpuFence(
     return;
   }
 
-  Send(new GpuCommandBufferMsg_GetGpuFenceHandle(route_id_, gpu_fence_id));
-  get_gpu_fence_tasks_.emplace(gpu_fence_id, std::move(callback));
+  command_buffer_->GetGpuFenceHandle(
+      gpu_fence_id,
+      base::BindOnce(&CommandBufferProxyImpl::OnGetGpuFenceHandleComplete,
+                     // TODO(crbug.com/40061562): Remove
+                     // `UnsafeDanglingUntriaged`
+                     base::UnsafeDanglingUntriaged(this), gpu_fence_id,
+                     std::move(callback)));
 }
 
 void CommandBufferProxyImpl::OnGetGpuFenceHandleComplete(
     uint32_t gpu_fence_id,
+    base::OnceCallback<void(std::unique_ptr<gfx::GpuFence>)> callback,
     gfx::GpuFenceHandle handle) {
-  // Always consume the provided handle to avoid leaks on error.
-  auto gpu_fence = std::make_unique<gfx::GpuFence>(std::move(handle));
-
-  GetGpuFenceTaskMap::iterator it = get_gpu_fence_tasks_.find(gpu_fence_id);
-  if (it == get_gpu_fence_tasks_.end()) {
-    DLOG(ERROR) << "GPU process sent invalid GetGpuFenceHandle response.";
-    base::AutoLock lock(last_state_lock_);
-    OnGpuAsyncMessageError(gpu::error::kInvalidGpuMessage,
-                           gpu::error::kLostContext);
-    return;
-  }
-  auto callback = std::move(it->second);
-  get_gpu_fence_tasks_.erase(it);
-  std::move(callback).Run(std::move(gpu_fence));
+  std::move(callback).Run(std::make_unique<gfx::GpuFence>(std::move(handle)));
 }
 
 void CommandBufferProxyImpl::OnReturnData(const std::vector<uint8_t>& data) {
@@ -632,69 +746,10 @@ void CommandBufferProxyImpl::OnReturnData(const std::vector<uint8_t>& data) {
   }
 }
 
-void CommandBufferProxyImpl::TakeFrontBuffer(const gpu::Mailbox& mailbox) {
-  CheckLock();
-  base::AutoLock lock(last_state_lock_);
-  if (last_state_.error != gpu::error::kNoError)
-    return;
-
-  // TakeFrontBuffer should be a deferred message so that it's sequenced
-  // correctly with respect to preceding ReturnFrontBuffer messages.
-  last_flush_id_ = channel_->EnqueueDeferredMessage(
-      GpuCommandBufferMsg_TakeFrontBuffer(route_id_, mailbox));
-}
-
-void CommandBufferProxyImpl::ReturnFrontBuffer(const gpu::Mailbox& mailbox,
-                                               const gpu::SyncToken& sync_token,
-                                               bool is_lost) {
-  CheckLock();
-  base::AutoLock lock(last_state_lock_);
-  if (last_state_.error != gpu::error::kNoError)
-    return;
-
-  last_flush_id_ = channel_->EnqueueDeferredMessage(
-      GpuCommandBufferMsg_ReturnFrontBuffer(route_id_, mailbox, is_lost),
-      {sync_token});
-}
-
-bool CommandBufferProxyImpl::Send(IPC::Message* msg) {
-  DCHECK(channel_);
-  DCHECK_EQ(gpu::error::kNoError, last_state_.error);
-
-  last_state_lock_.Release();
-
-  // Call is_sync() before sending message.
-  bool is_sync = msg->is_sync();
-  bool result = channel_->Send(msg);
-  // Send() should always return true for async messages.
-  DCHECK(is_sync || result);
-
-  last_state_lock_.Acquire();
-
-  if (last_state_.error != gpu::error::kNoError) {
-    // Error needs to be checked in case the state was updated on another thread
-    // while we were waiting on Send. We need to make sure that the reentrant
-    // context loss callback is called so that the share group is also lost
-    // before we return any error up the stack.
-    if (gpu_control_client_)
-      gpu_control_client_->OnGpuControlLostContextMaybeReentrant();
-    return false;
-  }
-
-  if (!result) {
-    // Flag the command buffer as lost. Defer deleting the channel until
-    // OnChannelError is called after returning to the message loop in case it
-    // is referenced elsewhere.
-    DVLOG(1) << "CommandBufferProxyImpl::Send failed. Losing context.";
-    OnClientError(gpu::error::kLostContext);
-    return false;
-  }
-
-  return true;
-}
-
 std::pair<base::UnsafeSharedMemoryRegion, base::WritableSharedMemoryMapping>
-CommandBufferProxyImpl::AllocateAndMapSharedMemory(size_t size) {
+CommandBufferProxyImpl::AllocateAndMapSharedMemory(
+    size_t size,
+    base::SharedMemoryMapper* mapper) {
   base::UnsafeSharedMemoryRegion region =
       base::UnsafeSharedMemoryRegion::Create(size);
   if (!region.IsValid()) {
@@ -702,7 +757,7 @@ CommandBufferProxyImpl::AllocateAndMapSharedMemory(size_t size) {
     return {};
   }
 
-  base::WritableSharedMemoryMapping mapping = region.Map();
+  base::WritableSharedMemoryMapping mapping = region.Map(mapper);
   if (!mapping.IsValid()) {
     DLOG(ERROR) << "AllocateAndMapSharedMemory: Map failed";
     return {};
@@ -737,7 +792,7 @@ void CommandBufferProxyImpl::TryUpdateStateThreadSafe() {
   if (last_state_.error == gpu::error::kNoError) {
     shared_state()->Read(&last_state_);
     if (last_state_.error != gpu::error::kNoError) {
-      callback_thread_->PostTask(
+      default_task_runner_->PostTask(
           FROM_HERE,
           base::BindOnce(&CommandBufferProxyImpl::LockAndDisconnectChannel,
                          weak_ptr_factory_.GetWeakPtr()));
@@ -750,33 +805,76 @@ void CommandBufferProxyImpl::TryUpdateStateDontReportError() {
     shared_state()->Read(&last_state_);
 }
 
-gpu::CommandBufferSharedState* CommandBufferProxyImpl::shared_state() const {
-  return reinterpret_cast<gpu::CommandBufferSharedState*>(
+const gpu::CommandBufferSharedState* CommandBufferProxyImpl::shared_state()
+    const {
+  return reinterpret_cast<const gpu::CommandBufferSharedState*>(
       shared_state_mapping_.memory());
 }
 
-void CommandBufferProxyImpl::OnSwapBuffersCompleted(
-    const SwapBuffersCompleteParams& params) {
-  if (gpu_control_client_)
-    gpu_control_client_->OnGpuControlSwapBuffersCompleted(params);
-}
+base::HistogramBase*
+CommandBufferProxyImpl::GetUMAHistogramEnsureWorkVisibleDuration() {
+  if (!uma_histogram_ensure_work_visible_duration_) {
+    // Combine two linear histograms:
+    // 1/4 ms buckets in 0..15ms = 60 buckets
+    // 1/4 s buckets in 25ms .. 30s = 120 buckets
+    // This gives good cardinality for both VSYNC intervals and 30s watchdog:
+    // 0.00 ms
+    // 0.25 ms
+    // 0.50 ms
+    // 0.75 ms
+    // 1.00 ms
+    // 1.25 ms
+    // 1.50 ms
+    // ...
+    // 14.00 ms
+    // 14.25 ms
+    // 14.50 ms
+    // 14.75 ms
+    // 15.00 ms
+    // 0.25 s
+    // 0.50 s
+    // 0.75 s
+    // 1.00 s
+    // 1.25 s
+    // 1.50 s
+    // ...
+    // 29.00 s
+    // 29.25 s
+    // 29.50 s
+    // 29.75 s
+    //
+    // Histogram values are in microseconds.
 
-void CommandBufferProxyImpl::OnBufferPresented(
-    uint64_t swap_id,
-    const gfx::PresentationFeedback& feedback) {
-  if (gpu_control_client_)
-    gpu_control_client_->OnSwapBufferPresented(swap_id, feedback);
-  if (update_vsync_parameters_completion_callback_ &&
-      ShouldUpdateVsyncParams(feedback)) {
-    update_vsync_parameters_completion_callback_.Run(feedback.timestamp,
-                                                     feedback.interval);
+    std::vector<base::HistogramBase::Sample32> intervals;
+    constexpr base::HistogramBase::Sample32 k15Milliseconds = 15 * 1000;
+    constexpr base::HistogramBase::Sample32 k30Seconds = 30 * 1000 * 1000;
+    constexpr int kFirstPartCount = 60;
+    constexpr int kSecondPartCount = 120;
+    intervals.reserve(kFirstPartCount + kSecondPartCount);
+    for (int i = 0; i <= kFirstPartCount; ++i) {
+      intervals.push_back(k15Milliseconds /
+                          static_cast<float>(kFirstPartCount) * i);
+    }
+    // 0 index was already populated by the first part.
+    for (int i = 1; i < kSecondPartCount; ++i) {
+      intervals.push_back(k30Seconds / static_cast<float>(kSecondPartCount) *
+                          i);
+    }
+    uma_histogram_ensure_work_visible_duration_ =
+        base::CustomHistogram::FactoryGet(
+            "GPU.EnsureWorkVisibleDuration", intervals,
+            base::HistogramBase::kUmaTargetedHistogramFlag);
   }
+  return uma_histogram_ensure_work_visible_duration_;
 }
 
 void CommandBufferProxyImpl::OnGpuSyncReplyError() {
   CheckLock();
   last_state_.error = gpu::error::kLostContext;
-  last_state_.context_lost_reason = gpu::error::kInvalidGpuMessage;
+  // This error typically happens while waiting for a synchronous
+  // reply from the GPU process because the GPU process crashed.
+  // Report this as a lost GPU channel rather than invalid GPU message.
+  last_state_.context_lost_reason = gpu::error::kGpuChannelLost;
   // This method may be inside a callstack from the GpuControlClient (we got a
   // bad reply to something we are sending to the GPU process). So avoid
   // re-entering the GpuControlClient here.
@@ -824,14 +922,14 @@ void CommandBufferProxyImpl::DisconnectChannelInFreshCallStack() {
   // Create a fresh call stack to keep the |channel_| alive while we unwind the
   // stack in case things will use it, and give the GpuChannelClient a chance to
   // act fully on the lost context.
-  callback_thread_->PostTask(
+  default_task_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(&CommandBufferProxyImpl::LockAndDisconnectChannel,
                      weak_ptr_factory_.GetWeakPtr()));
 }
 
 void CommandBufferProxyImpl::LockAndDisconnectChannel() {
-  base::AutoLockMaybe lock(lock_);
+  base::AutoLockMaybe lock(lock_.get());
   DisconnectChannel();
 }
 
@@ -843,8 +941,10 @@ void CommandBufferProxyImpl::DisconnectChannel() {
     return;
   disconnected_ = true;
   channel_->VerifyFlush(UINT32_MAX);
-  channel_->Send(new GpuChannelMsg_DestroyCommandBuffer(route_id_));
-  channel_->RemoveRoute(route_id_);
+
+  mojo::SyncCallRestrictions::ScopedAllowSyncCall allow_sync;
+  channel_->GetGpuChannel().DestroyCommandBuffer(route_id_);
+
   if (gpu_control_client_)
     gpu_control_client_->OnGpuControlLostContext();
 }

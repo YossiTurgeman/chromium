@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #include <string>
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/fonts/orientation_iterator.h"
-#include "third_party/blink/renderer/platform/wtf/assertions.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -50,12 +49,12 @@ class RunSegmenterTest : public testing::Test {
     Vector<SegmenterExpectedRun> expect;
     for (auto& run : runs) {
       unsigned length_before = text.length();
-      text.Append(String::FromUTF8(run.text.c_str()));
+      text.Append(String::FromUtf8(run.text));
       expect.push_back(SegmenterExpectedRun(length_before, text.length(),
                                             run.script, run.render_orientation,
                                             run.font_fallback_priority));
     }
-    RunSegmenter run_segmenter(text.Characters16(), text.length(), orientation);
+    RunSegmenter run_segmenter(text.Span16(), orientation);
     VerifyRuns(&run_segmenter, expect);
   }
 
@@ -70,7 +69,7 @@ class RunSegmenterTest : public testing::Test {
   void VerifyRuns(RunSegmenter* run_segmenter,
                   const Vector<SegmenterExpectedRun>& expect) {
     RunSegmenter::RunSegmenterRange segmenter_range;
-    size_t run_count = 0;
+    wtf_size_t run_count = 0;
     while (run_segmenter->Consume(&segmenter_range)) {
       ASSERT_LT(run_count, expect.size());
       ASSERT_EQ(expect[run_count].start, segmenter_range.start);
@@ -90,8 +89,7 @@ TEST_F(RunSegmenterTest, Empty) {
   String empty(g_empty_string16_bit);
   RunSegmenter::RunSegmenterRange segmenter_range = {
       0, 0, USCRIPT_INVALID_CODE, OrientationIterator::kOrientationKeep};
-  RunSegmenter run_segmenter(empty.Characters16(), empty.length(),
-                             FontOrientation::kVerticalMixed);
+  RunSegmenter run_segmenter(empty.Span16(), FontOrientation::kVerticalMixed);
   DCHECK(!run_segmenter.Consume(&segmenter_range));
   ASSERT_EQ(segmenter_range.start, 0u);
   ASSERT_EQ(segmenter_range.end, 0u);
@@ -137,10 +135,14 @@ TEST_F(RunSegmenterTest, JapaneseHindiEmojiMix) {
         FontFallbackPriority::kEmojiEmoji}});
 }
 
-TEST_F(RunSegmenterTest, CombiningCirlce) {
-  CheckRunsHorizontal(
-      {{"◌́◌̀◌̈◌̂◌̄◌̊", USCRIPT_COMMON, OrientationIterator::kOrientationKeep,
-        FontFallbackPriority::kText}});
+TEST_F(RunSegmenterTest, CombiningCircle) {
+#if U_ICU_VERSION_MAJOR_NUM >= 76
+  const UScriptCode script = USCRIPT_LATIN;
+#else
+  const UScriptCode script = USCRIPT_COMMON;
+#endif
+  CheckRunsHorizontal({{"◌́◌̀◌̈◌̂◌̄◌̊", script, OrientationIterator::kOrientationKeep,
+                        FontFallbackPriority::kText}});
 }
 
 TEST_F(RunSegmenterTest, HangulSpace) {
@@ -196,7 +198,7 @@ TEST_F(RunSegmenterTest, EmojiZWJSequences) {
         FontFallbackPriority::kText},
        {"👩‍👩", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
         FontFallbackPriority::kEmojiEmoji},
-       {u8"\U0000200D‍efg", USCRIPT_LATIN,
+       {"\U0000200D‍efg", USCRIPT_LATIN,
         OrientationIterator::kOrientationKeep, FontFallbackPriority::kText}});
 }
 
@@ -245,27 +247,65 @@ TEST_F(RunSegmenterTest, EmojiSubdivisionFlags) {
 
 TEST_F(RunSegmenterTest, NonEmojiPresentationSymbols) {
   CheckRunsHorizontal(
-      {{u8"\U00002626\U0000262a\U00002638\U0000271d\U00002721\U00002627"
-        u8"\U00002628\U00002629\U0000262b\U0000262c\U00002670"
+      {{"\U00002626\U0000262a\U00002638\U0000271d\U00002721\U00002627"
+        "\U00002628\U00002629\U0000262b\U0000262c\U00002670"
         "\U00002671\U0000271f\U00002720",
         USCRIPT_COMMON, OrientationIterator::kOrientationKeep,
         FontFallbackPriority::kText}});
 }
 
-TEST_F(RunSegmenterTest, StartOffset) {
-  String text = String::FromUTF8("abcשלום");
-  text.Ensure16Bit();
+TEST_F(RunSegmenterTest, CJKBracketsAfterLatinLetter) {
+  CheckRunsHorizontal(
+      {{"A", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {"\u300C"   // CJK LEFT CORNER BRACKET
+        "\u56FD"   // CJK UNIFIED IDEOGRAPH
+        "\u300D",  // CJK RIGHT CORNER BRACKET
+        USCRIPT_HAN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText}});
+}
 
-  // skip first 3 characters
-  unsigned start_offset = 3;
-  Vector<SegmenterExpectedRun> expect;
-  expect.push_back(SegmenterExpectedRun(
-      start_offset, text.length(), USCRIPT_HEBREW,
-      OrientationIterator::kOrientationKeep, FontFallbackPriority::kText));
+TEST_F(RunSegmenterTest, CJKBracketsAfterLatinParenthesis) {
+  CheckRunsHorizontal(
+      {{"A(", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {"\u300C"   // CJK LEFT CORNER BRACKET
+        "\u56FD"   // CJK UNIFIED IDEOGRAPH
+        "\u300D",  // CJK RIGHT CORNER BRACKET
+        USCRIPT_HAN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {")", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText}});
+}
 
-  RunSegmenter run_segmenter(text.Characters16(), text.length() - start_offset,
-                             FontOrientation::kHorizontal, start_offset);
-  VerifyRuns(&run_segmenter, expect);
+TEST_F(RunSegmenterTest, CJKBracketsWithLatinParenthesisInside) {
+  CheckRunsHorizontal(
+      {{"A", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {"\u300C"  // CJK LEFT CORNER BRACKET
+        "\u56FD"  // CJK UNIFIED IDEOGRAPH
+        "(",
+        USCRIPT_HAN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {"A", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {")"
+        "\u300D",  // CJK RIGHT CORNER BRACKET
+        USCRIPT_HAN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText}});
+}
+
+TEST_F(RunSegmenterTest, CJKBracketsAfterUnmatchingLatinParenthesis) {
+  CheckRunsHorizontal(
+      {{"A((", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {"\u300C"   // CJK LEFT CORNER BRACKET
+        "\u56FD"   // CJK UNIFIED IDEOGRAPH
+        "\u300D",  // CJK RIGHT CORNER BRACKET
+        USCRIPT_HAN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText},
+       {")", USCRIPT_LATIN, OrientationIterator::kOrientationKeep,
+        FontFallbackPriority::kText}});
 }
 
 }  // namespace blink

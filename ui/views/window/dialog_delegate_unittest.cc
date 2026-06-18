@@ -1,15 +1,21 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "ui/views/window/dialog_delegate.h"
+
 #include <stddef.h>
 
-#include "base/stl_util.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/test/bind_test_util.h"
+#include "base/test/bind.h"
 #include "build/build_config.h"
 #include "ui/base/hit_test.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/events/event_processor.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/bubble/bubble_border.h"
 #include "ui/views/bubble/bubble_frame_view.h"
 #include "ui/views/controls/button/checkbox.h"
@@ -17,24 +23,26 @@
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/style/platform_style.h"
 #include "ui/views/test/views_test_base.h"
+#include "ui/views/test/views_test_utils.h"
 #include "ui/views/test/widget_test.h"
 #include "ui/views/widget/widget.h"
-#include "ui/views/window/dialog_delegate.h"
 
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_MAC)
 #include "ui/base/test/scoped_fake_full_keyboard_access.h"
 #endif
 
 namespace views {
 
-namespace {
-
 class TestDialog : public DialogDelegateView {
  public:
-  TestDialog() : input_(new views::Textfield()) {
+  TestDialog() {
     DialogDelegate::set_draggable(true);
-    AddChildView(input_);
+    input_ = AddChildView(std::make_unique<views::Textfield>());
   }
+
+  TestDialog(const TestDialog&) = delete;
+  TestDialog& operator=(const TestDialog&) = delete;
+
   ~TestDialog() override = default;
 
   void Init() {
@@ -50,41 +58,56 @@ class TestDialog : public DialogDelegateView {
   bool ShouldShowCloseButton() const override { return show_close_button_; }
 
   // DialogDelegateView overrides:
-  gfx::Size CalculatePreferredSize() const override {
+  gfx::Size CalculatePreferredSize(
+      const SizeBounds& /*available_size*/) const override {
     return gfx::Size(200, 200);
   }
   bool AcceleratorPressed(const ui::Accelerator& accelerator) override {
     return should_handle_escape_;
   }
-  base::string16 GetWindowTitle() const override { return title_; }
+  std::u16string GetWindowTitle() const override { return title_; }
   View* GetInitiallyFocusedView() override { return input_; }
 
+  // DialogDelegate overrides:
+  bool ShouldAllowKeyEventsDuringInputProtection() const override {
+    return should_allow_key_events_during_input_protection_;
+  }
+
   void TearDown() {
+    input_ = nullptr;
     GetWidget()->Close();
   }
 
-  void set_title(const base::string16& title) { title_ = title; }
+  void set_title(const std::u16string& title) { title_ = title; }
   void set_show_close_button(bool show_close) {
     show_close_button_ = show_close;
   }
   void set_should_handle_escape(bool should_handle_escape) {
     should_handle_escape_ = should_handle_escape;
   }
+  void set_should_allow_key_events_during_input_protection(bool value) {
+    should_allow_key_events_during_input_protection_ = value;
+  }
 
   views::Textfield* input() { return input_; }
 
  private:
-  views::Textfield* input_;
-  base::string16 title_;
+  raw_ptr<views::Textfield> input_ = nullptr;
+  std::u16string title_;
   bool show_close_button_ = true;
   bool should_handle_escape_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(TestDialog);
+  bool should_allow_key_events_during_input_protection_ = true;
 };
+
+namespace {
 
 class DialogTest : public ViewsTestBase {
  public:
   DialogTest() = default;
+
+  DialogTest(const DialogTest&) = delete;
+  DialogTest& operator=(const DialogTest&) = delete;
+
   ~DialogTest() override = default;
 
   void SetUp() override {
@@ -93,7 +116,7 @@ class DialogTest : public ViewsTestBase {
     // These tests all expect to use a custom frame on the dialog so they can
     // control hit-testing and other behavior. Custom frames are only supported
     // with a parent widget, so create the parent widget here.
-    parent_widget_ = CreateTestWidget();
+    parent_widget_ = CreateTestWidget(Widget::InitParams::CLIENT_OWNS_WIDGET);
     parent_widget_->Show();
 
     InitializeDialog();
@@ -101,17 +124,19 @@ class DialogTest : public ViewsTestBase {
   }
 
   void TearDown() override {
-    dialog_->TearDown();
+    dialog_raw_.ExtractAsDangling()->TearDown();
     parent_widget_.reset();
     ViewsTestBase::TearDown();
   }
 
   void InitializeDialog() {
-    if (dialog_)
+    if (dialog_) {
       dialog_->TearDown();
+    }
 
-    dialog_ = new TestDialog();
+    dialog_ = std::make_unique<TestDialog>();
     dialog_->Init();
+    dialog_raw_ = dialog_.get();
 
     dialog_->SetAcceptCallback(
         base::BindLambdaForTesting([&]() { accepted_ = true; }));
@@ -121,21 +146,22 @@ class DialogTest : public ViewsTestBase {
         base::BindLambdaForTesting([&]() { closed_ = true; }));
   }
 
-  views::Widget* CreateDialogWidget(DialogDelegate* dialog) {
+  views::Widget* CreateDialogWidget(std::unique_ptr<WidgetDelegate> dialog) {
     views::Widget* widget = DialogDelegate::CreateDialogWidget(
-        dialog, GetContext(), parent_widget_->GetNativeView());
+        std::move(dialog), GetContext(), parent_widget_->GetNativeView());
     return widget;
   }
 
-  void ShowDialog() { CreateDialogWidget(dialog_)->Show(); }
+  void ShowDialog() { CreateDialogWidget(std::move(dialog_))->Show(); }
 
   void SimulateKeyPress(ui::KeyboardCode key) {
-    ui::KeyEvent event(ui::ET_KEY_PRESSED, key, ui::EF_NONE);
-    if (dialog()->GetFocusManager()->OnKeyEvent(event))
+    ui::KeyEvent event(ui::EventType::kKeyPressed, key, ui::EF_NONE);
+    if (dialog()->GetFocusManager()->OnKeyEvent(event)) {
       dialog()->GetWidget()->OnKeyEvent(&event);
+    }
   }
 
-  TestDialog* dialog() const { return dialog_; }
+  TestDialog* dialog() const { return dialog_raw_; }
   views::Widget* parent_widget() { return parent_widget_.get(); }
 
  protected:
@@ -145,9 +171,8 @@ class DialogTest : public ViewsTestBase {
 
  private:
   std::unique_ptr<views::Widget> parent_widget_;
-  TestDialog* dialog_ = nullptr;
-
-  DISALLOW_COPY_AND_ASSIGN(DialogTest);
+  std::unique_ptr<TestDialog> dialog_;
+  raw_ptr<TestDialog> dialog_raw_ = nullptr;
 };
 
 }  // namespace
@@ -162,14 +187,38 @@ TEST_F(DialogTest, OkButtonAccepts) {
   EXPECT_TRUE(accepted_);
 }
 
-TEST_F(DialogTest, EscButtonCloses) {
+TEST_F(DialogTest, EscButtonClosesDialogWithCloseButtonWithoutCallingCancel) {
+  // Showing the close button should be sufficient to call close on Esc (even if
+  // there's no close callback), we verify this by making sure that Cancel
+  // doesn't get called as best-effort verification.
+  dialog()->set_show_close_button(true);
+  dialog()->SetCloseCallback(base::OnceClosure());
+  EXPECT_FALSE(cancelled_);
+  SimulateKeyPress(ui::VKEY_ESCAPE);
+  EXPECT_FALSE(cancelled_);
+}
+
+TEST_F(DialogTest, EscButtonClosesWithCloseCallback) {
+  // The dialog's close callback should be called even if there's no close-x.
+  // See crbug.com/1245127.
+  dialog()->set_show_close_button(false);
   EXPECT_FALSE(closed_);
   SimulateKeyPress(ui::VKEY_ESCAPE);
   EXPECT_TRUE(closed_);
 }
 
+TEST_F(DialogTest, EscButtonCancelsWithoutCloseAction) {
+  // If there's no close-x or close callback then the cancelled action should be
+  // called.
+  dialog()->SetCloseCallback(base::OnceClosure());
+  dialog()->set_show_close_button(false);
+  EXPECT_FALSE(cancelled_);
+  SimulateKeyPress(ui::VKEY_ESCAPE);
+  EXPECT_TRUE(cancelled_);
+}
+
 TEST_F(DialogTest, ReturnDirectedToOkButtonPlatformStyle) {
-  const ui::KeyEvent return_event(ui::ET_KEY_PRESSED, ui::VKEY_RETURN,
+  const ui::KeyEvent return_event(ui::EventType::kKeyPressed, ui::VKEY_RETURN,
                                   ui::EF_NONE);
   if (PlatformStyle::kReturnClicksFocusedControl) {
     EXPECT_TRUE(dialog()->GetOkButton()->OnKeyPressed(return_event));
@@ -184,7 +233,7 @@ TEST_F(DialogTest, ReturnDirectedToOkButtonPlatformStyle) {
 }
 
 TEST_F(DialogTest, ReturnDirectedToCancelButtonPlatformBehavior) {
-  const ui::KeyEvent return_event(ui::ET_KEY_PRESSED, ui::VKEY_RETURN,
+  const ui::KeyEvent return_event(ui::EventType::kKeyPressed, ui::VKEY_RETURN,
                                   ui::EF_NONE);
   if (PlatformStyle::kReturnClicksFocusedControl) {
     EXPECT_TRUE(dialog()->GetCancelButton()->OnKeyPressed(return_event));
@@ -274,7 +323,7 @@ TEST_F(DialogTest, HitTest_WithTitle) {
   // Ensure that BubbleFrameView hit-tests as expected when the title is shown
   // and the modal type is something other than not modal.
   const NonClientView* view = dialog()->GetWidget()->non_client_view();
-  dialog()->set_title(base::ASCIIToUTF16("Title"));
+  dialog()->set_title(u"Title");
   dialog()->GetWidget()->UpdateWindowTitle();
   dialog()->GetWidget()->LayoutRootViewIfNecessary();
   BubbleFrameView* frame = static_cast<BubbleFrameView*>(view->frame_view());
@@ -300,17 +349,24 @@ TEST_F(DialogTest, HitTest_CloseButton) {
   BubbleFrameView* frame = static_cast<BubbleFrameView*>(view->frame_view());
   frame->ResetWindowControls();
 
-  const gfx::Rect close_button_bounds =
-      frame->GetCloseButtonForTesting()->bounds();
+  const gfx::Rect close_button_bounds = frame->close_button()->bounds();
+#if BUILDFLAG(IS_WIN)
+  // On Win, a native tooltip is generated when HTCLOSE is returned.
+  // Since we are using views tooltip, do not return |HTCLOSE| to avoid double
+  // tooltips.
+  EXPECT_NE(HTCLOSE,
+            frame->NonClientHitTest(close_button_bounds.CenterPoint()));
+#else
   EXPECT_EQ(HTCLOSE,
-            frame->NonClientHitTest(gfx::Point(close_button_bounds.x() + 4,
-                                               close_button_bounds.y() + 4)));
+            frame->NonClientHitTest(close_button_bounds.CenterPoint()));
+#endif
 }
 
 TEST_F(DialogTest, BoundsAccommodateTitle) {
-  TestDialog* dialog2(new TestDialog());
-  dialog2->set_title(base::ASCIIToUTF16("Title"));
-  CreateDialogWidget(dialog2);
+  auto dialog2_owned = std::make_unique<TestDialog>();
+  TestDialog* dialog2 = dialog2_owned.get();
+  dialog2->set_title(u"Title");
+  CreateDialogWidget(std::move(dialog2_owned));
 
   // Remove the close button so it doesn't influence the bounds if it's taller
   // than the title.
@@ -325,31 +381,31 @@ TEST_F(DialogTest, BoundsAccommodateTitle) {
   // Titled dialogs have taller initial frame bounds than untitled dialogs.
   View* frame1 = dialog()->GetWidget()->non_client_view()->frame_view();
   View* frame2 = dialog2->GetWidget()->non_client_view()->frame_view();
-  EXPECT_LT(frame1->GetPreferredSize().height(),
-            frame2->GetPreferredSize().height());
+  EXPECT_LT(frame1->GetPreferredSize({}).height(),
+            frame2->GetPreferredSize({}).height());
 
   // Giving the default test dialog a title will yield the same bounds.
-  dialog()->set_title(base::ASCIIToUTF16("Title"));
+  dialog()->set_title(u"Title");
   EXPECT_TRUE(dialog()->ShouldShowWindowTitle());
 
   dialog()->GetWidget()->UpdateWindowTitle();
-  EXPECT_EQ(frame1->GetPreferredSize().height(),
-            frame2->GetPreferredSize().height());
+  EXPECT_EQ(frame1->GetPreferredSize({}).height(),
+            frame2->GetPreferredSize({}).height());
 
   dialog2->TearDown();
 }
 
 TEST_F(DialogTest, ActualBoundsMatchPreferredBounds) {
-  dialog()->set_title(base::ASCIIToUTF16(
-      "La la la look at me I'm a really really long title that needs to be "
-      "really really long so that the title will multiline wrap."));
+  dialog()->set_title(
+      u"La la la look at me I'm a really really long title that needs to be "
+      u"really really long so that the title will multiline wrap.");
   dialog()->GetWidget()->UpdateWindowTitle();
 
   views::View* root_view = dialog()->GetWidget()->GetRootView();
-  gfx::Size preferred_size(root_view->GetPreferredSize());
+  gfx::Size preferred_size(root_view->GetPreferredSize({}));
   EXPECT_FALSE(preferred_size.IsEmpty());
   root_view->SizeToPreferredSize();
-  root_view->Layout();
+  views::test::RunScheduledLayout(root_view);
   EXPECT_EQ(preferred_size, root_view->size());
 }
 
@@ -363,23 +419,25 @@ TEST_F(DialogTest, InitialFocus) {
 class InitialFocusTestDialog : public DialogDelegateView {
  public:
   InitialFocusTestDialog() {
-    DialogDelegate::SetButtons(ui::DIALOG_BUTTON_OK);
+    DialogDelegate::SetButtons(static_cast<int>(ui::mojom::DialogButton::kOk));
   }
-  ~InitialFocusTestDialog() override = default;
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(InitialFocusTestDialog);
+  InitialFocusTestDialog(const InitialFocusTestDialog&) = delete;
+  InitialFocusTestDialog& operator=(const InitialFocusTestDialog&) = delete;
+
+  ~InitialFocusTestDialog() override = default;
 };
 
 // If the Widget can't be activated while the initial focus View is requesting
 // focus, test it is still able to receive focus once the Widget is activated.
 TEST_F(DialogTest, InitialFocusWithDeactivatedWidget) {
-  InitialFocusTestDialog* dialog = new InitialFocusTestDialog();
-  Widget* dialog_widget = CreateDialogWidget(dialog);
+  auto dialog_owned = std::make_unique<InitialFocusTestDialog>();
+  InitialFocusTestDialog* dialog = dialog_owned.get();
+  Widget* dialog_widget = CreateDialogWidget(std::move(dialog_owned));
   // Set the initial focus while the Widget is unactivated to prevent the
   // initially focused View from receiving focus. Use a minimised state here to
   // prevent the Widget from being activated while this happens.
-  dialog_widget->SetInitialFocus(ui::WindowShowState::SHOW_STATE_MINIMIZED);
+  dialog_widget->SetInitialFocus(ui::mojom::WindowShowState::kMinimized);
 
   // Nothing should be focused, because the Widget is still deactivated.
   EXPECT_EQ(nullptr, dialog_widget->GetFocusManager()->GetFocusedView());
@@ -396,7 +454,7 @@ TEST_F(DialogTest, InitialFocusWithDeactivatedWidget) {
 // If the initially focused View provided is unfocusable, check the next
 // available focusable View is focused.
 TEST_F(DialogTest, UnfocusableInitialFocus) {
-#if defined(OS_APPLE)
+#if BUILDFLAG(IS_MAC)
   // On Mac, make all buttons unfocusable by turning off full keyboard access.
   // This is the more common configuration, and if a dialog has a focusable
   // textfield, tree or table, that should obtain focus instead.
@@ -404,17 +462,18 @@ TEST_F(DialogTest, UnfocusableInitialFocus) {
       ->set_full_keyboard_access_state(false);
 #endif
 
-  DialogDelegateView* dialog = new DialogDelegateView();
-  Textfield* textfield = new Textfield();
-  dialog->AddChildView(textfield);
-  Widget* dialog_widget = CreateDialogWidget(dialog);
+  auto dialog_owned =
+      std::make_unique<DialogDelegateView>(DialogDelegateView::CreatePassKey());
+  DialogDelegateView* dialog = dialog_owned.get();
+  Textfield* textfield = dialog->AddChildView(std::make_unique<Textfield>());
+  Widget* dialog_widget = CreateDialogWidget(std::move(dialog_owned));
 
-#if !defined(OS_APPLE)
+#if !BUILDFLAG(IS_MAC)
   // For non-Mac, turn off focusability on all the dialog's buttons manually.
   // This achieves the same effect as disabling full keyboard access.
   dialog->GetOkButton()->SetFocusBehavior(View::FocusBehavior::NEVER);
   dialog->GetCancelButton()->SetFocusBehavior(View::FocusBehavior::NEVER);
-  dialog->GetBubbleFrameView()->GetCloseButtonForTesting()->SetFocusBehavior(
+  dialog->GetBubbleFrameView()->close_button()->SetFocusBehavior(
       View::FocusBehavior::NEVER);
 #endif
 
@@ -429,13 +488,22 @@ TEST_F(DialogTest, UnfocusableInitialFocus) {
 
 TEST_F(DialogTest, ButtonEnableUpdatesState) {
   test::WidgetTest::WidgetAutoclosePtr widget(
-      CreateDialogWidget(new DialogDelegateView));
+      CreateDialogWidget(std::make_unique<DialogDelegateView>(
+          DialogDelegateView::CreatePassKey())));
   auto* dialog = static_cast<DialogDelegateView*>(widget->widget_delegate());
 
   EXPECT_TRUE(dialog->GetOkButton()->GetEnabled());
-  dialog->SetButtonEnabled(ui::DIALOG_BUTTON_OK, false);
+  dialog->SetButtonEnabled(ui::mojom::DialogButton::kOk, false);
   dialog->DialogModelChanged();
   EXPECT_FALSE(dialog->GetOkButton()->GetEnabled());
+}
+
+TEST_F(DialogTest, CanOverrideShouldAllowKeyEventsDuringInputProtection) {
+  dialog()->set_should_allow_key_events_during_input_protection(true);
+  EXPECT_TRUE(dialog()->ShouldAllowKeyEventsDuringInputProtection());
+
+  dialog()->set_should_allow_key_events_during_input_protection(false);
+  EXPECT_FALSE(dialog()->ShouldAllowKeyEventsDuringInputProtection());
 }
 
 using DialogDelegateCloseTest = ViewsTestBase;
@@ -465,8 +533,7 @@ TEST_F(DialogDelegateCloseTest,
   bool closed = false;
   bool accepted = false;
 
-  dialog.SetCloseCallback(
-      base::BindLambdaForTesting([&]() { closed = true; }));
+  dialog.SetCloseCallback(base::BindLambdaForTesting([&]() { closed = true; }));
   dialog.SetAcceptCallback(base::BindLambdaForTesting([&]() {
     accepted = true;
     dialog.Close();
@@ -494,17 +561,19 @@ class TestDialogDelegateView : public DialogDelegateView {
     return true;
   }
 
-  bool* accepted_;
-  bool* cancelled_;
+  raw_ptr<bool> accepted_;
+  raw_ptr<bool> cancelled_;
 };
 
 TEST_F(DialogDelegateCloseTest, OldClosePathDoesNotDoubleClose) {
   bool accepted = false;
   bool cancelled = false;
 
-  auto* dialog = new TestDialogDelegateView(&accepted, &cancelled);
-  Widget* widget =
-      DialogDelegate::CreateDialogWidget(dialog, GetContext(), nullptr);
+  auto dialog_owned =
+      std::make_unique<TestDialogDelegateView>(&accepted, &cancelled);
+  TestDialogDelegateView* dialog = dialog_owned.get();
+  Widget* widget = DialogDelegate::CreateDialogWidget(
+      std::move(dialog_owned), GetContext(), gfx::NativeView());
   widget->Show();
 
   views::test::WidgetDestroyedWaiter destroyed_waiter(widget);
@@ -516,10 +585,13 @@ TEST_F(DialogDelegateCloseTest, OldClosePathDoesNotDoubleClose) {
 }
 
 TEST_F(DialogDelegateCloseTest, CloseParentWidgetDoesNotInvokeCloseCallback) {
-  auto* dialog = new DialogDelegateView();
-  std::unique_ptr<Widget> parent = CreateTestWidget();
-  Widget* widget = DialogDelegate::CreateDialogWidget(dialog, GetContext(),
-                                                      parent->GetNativeView());
+  auto dialog_owned =
+      std::make_unique<DialogDelegateView>(DialogDelegateView::CreatePassKey());
+  DialogDelegateView* dialog = dialog_owned.get();
+  std::unique_ptr<Widget> parent =
+      CreateTestWidget(Widget::InitParams::CLIENT_OWNS_WIDGET);
+  Widget* widget = DialogDelegate::CreateDialogWidget(
+      std::move(dialog_owned), GetContext(), parent->GetNativeView());
 
   bool closed = false;
   dialog->SetCloseCallback(
@@ -532,6 +604,130 @@ TEST_F(DialogDelegateCloseTest, CloseParentWidgetDoesNotInvokeCloseCallback) {
   dialog_waiter.Wait();
 
   EXPECT_FALSE(closed);
+}
+
+TEST_F(DialogTest, AcceptCallbackWithCloseDoesNotClose) {
+  test::WidgetTest::WidgetAutoclosePtr widget(
+      CreateDialogWidget(std::make_unique<DialogDelegateView>(
+          DialogDelegateView::CreatePassKey())));
+  auto* dialog = static_cast<DialogDelegateView*>(widget->widget_delegate());
+
+  bool accepted = false;
+  dialog->SetAcceptCallbackWithClose(base::BindLambdaForTesting([&]() {
+    accepted = true;
+    return false;
+  }));
+
+  EXPECT_FALSE(widget->IsClosed());
+  dialog->AcceptDialog();
+  EXPECT_FALSE(widget->IsClosed());
+  EXPECT_TRUE(accepted);
+}
+
+TEST_F(DialogTest, AcceptCallbackWithCloseDoesClose) {
+  test::WidgetTest::WidgetAutoclosePtr widget(
+      CreateDialogWidget(std::make_unique<DialogDelegateView>(
+          DialogDelegateView::CreatePassKey())));
+  auto* dialog = static_cast<DialogDelegateView*>(widget->widget_delegate());
+
+  bool accepted = false;
+  dialog->SetAcceptCallbackWithClose(base::BindLambdaForTesting([&]() {
+    accepted = true;
+    return true;
+  }));
+
+  EXPECT_FALSE(widget->IsClosed());
+  dialog->AcceptDialog();
+  EXPECT_TRUE(widget->IsClosed());
+  EXPECT_TRUE(accepted);
+}
+
+TEST_F(DialogTest, CancelCallbackWithCloseDoesNotClose) {
+  test::WidgetTest::WidgetAutoclosePtr widget(
+      CreateDialogWidget(std::make_unique<DialogDelegateView>(
+          DialogDelegateView::CreatePassKey())));
+  auto* dialog = static_cast<DialogDelegateView*>(widget->widget_delegate());
+
+  bool canceled = false;
+  dialog->SetCancelCallbackWithClose(base::BindLambdaForTesting([&]() {
+    canceled = true;
+    return false;
+  }));
+
+  EXPECT_FALSE(widget->IsClosed());
+  dialog->CancelDialog();
+  EXPECT_FALSE(widget->IsClosed());
+  EXPECT_TRUE(canceled);
+}
+
+TEST_F(DialogTest, CancelCallbackWithCloseDoesClose) {
+  test::WidgetTest::WidgetAutoclosePtr widget(
+      CreateDialogWidget(std::make_unique<DialogDelegateView>(
+          DialogDelegateView::CreatePassKey())));
+  auto* dialog = static_cast<DialogDelegateView*>(widget->widget_delegate());
+
+  bool canceled = false;
+  dialog->SetCancelCallbackWithClose(base::BindLambdaForTesting([&]() {
+    canceled = true;
+    return true;
+  }));
+
+  EXPECT_FALSE(widget->IsClosed());
+  dialog->CancelDialog();
+  EXPECT_TRUE(widget->IsClosed());
+  EXPECT_TRUE(canceled);
+}
+
+class MakeCloseSynchronousTest : public DialogTest {
+ public:
+  void CreateSynchronousCloseWidget() {
+    std::unique_ptr<DialogDelegateView> delegate =
+        std::make_unique<DialogDelegateView>(
+            DialogDelegateView::CreatePassKey());
+    synchronous_close_view_ = delegate.get();
+    delegate->SetOwnershipOfNewWidget(Widget::InitParams::CLIENT_OWNS_WIDGET);
+    synchronous_close_widget_ = base::WrapUnique(
+        DialogDelegate::CreateDialogWidget(std::move(delegate), GetContext(),
+                                           parent_widget()->GetNativeView()));
+    synchronous_close_widget_->MakeCloseSynchronous(base::BindOnce(
+        &MakeCloseSynchronousTest::OverrideClose, base::Unretained(this)));
+    synchronous_close_widget_->Show();
+  }
+
+  void OverrideClose(Widget::ClosedReason) {
+    synchronous_close_view_ = nullptr;
+    synchronous_close_widget_.reset();
+  }
+
+  // Owned by synchronous_close_widget_
+  raw_ptr<DialogDelegateView> synchronous_close_view_;
+  std::unique_ptr<Widget> synchronous_close_widget_;
+};
+
+// Check that unique_ptr is reset on call to Close().
+TEST_F(MakeCloseSynchronousTest, Close) {
+  CreateSynchronousCloseWidget();
+
+  synchronous_close_widget_->Close();
+  EXPECT_FALSE(synchronous_close_widget_);
+}
+
+// Check that there are no issues resetting the unique_ptr as usual.
+TEST_F(MakeCloseSynchronousTest, Reset) {
+  // Reset with same helper method.
+  CreateSynchronousCloseWidget();
+  OverrideClose(Widget::ClosedReason::kUnspecified);
+}
+
+// Check that unique_ptr is reset on call to Accept().
+TEST_F(MakeCloseSynchronousTest, Accept) {
+  CreateSynchronousCloseWidget();
+
+  ui::KeyEvent event(ui::EventType::kKeyPressed, ui::VKEY_RETURN, ui::EF_NONE);
+  if (synchronous_close_view_->GetFocusManager()->OnKeyEvent(event)) {
+    synchronous_close_view_->GetWidget()->OnKeyEvent(&event);
+  }
+  EXPECT_FALSE(synchronous_close_widget_);
 }
 
 }  // namespace views

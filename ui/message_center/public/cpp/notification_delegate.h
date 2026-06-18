@@ -1,4 +1,4 @@
-// Copyright 2013 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,12 @@
 #define UI_MESSAGE_CENTER_PUBLIC_CPP_NOTIFICATION_DELEGATE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
-#include "base/callback.h"
-#include "base/macros.h"
+#include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
-#include "base/optional.h"
-#include "base/strings/string16.h"
 #include "ui/message_center/public/cpp/message_center_public_export.h"
 
 namespace message_center {
@@ -29,8 +27,8 @@ class MESSAGE_CENTER_PUBLIC_EXPORT NotificationObserver {
   // if a button was clicked (as opposed to the body of the notification) while
   // |reply| is filled in if there was an input field associated with the
   // button.
-  virtual void Click(const base::Optional<int>& button_index,
-                     const base::Optional<base::string16>& reply) {}
+  virtual void Click(const std::optional<int>& button_index,
+                     const std::optional<std::u16string>& reply) {}
 
   // Called when the user clicks the settings button in a notification which has
   // a DELEGATE settings button action.
@@ -38,6 +36,12 @@ class MESSAGE_CENTER_PUBLIC_EXPORT NotificationObserver {
 
   // Called when the user attempts to disable the notification.
   virtual void DisableNotification() {}
+
+  // Called when the notification expand state changed.
+  virtual void ExpandStateChanged(bool expanded) {}
+
+  // Called when the notification snooze button is clicked.
+  virtual void SnoozeButtonClicked() {}
 };
 
 // Ref counted version of NotificationObserver, required to satisfy
@@ -45,6 +49,9 @@ class MESSAGE_CENTER_PUBLIC_EXPORT NotificationObserver {
 class MESSAGE_CENTER_PUBLIC_EXPORT NotificationDelegate
     : public NotificationObserver,
       public base::RefCountedThreadSafe<NotificationDelegate> {
+ public:
+  virtual NotificationDelegate* GetDelegateForParentCopy();
+
  protected:
   virtual ~NotificationDelegate() = default;
 
@@ -61,20 +68,25 @@ class MESSAGE_CENTER_PUBLIC_EXPORT ThunkNotificationDelegate
  public:
   explicit ThunkNotificationDelegate(base::WeakPtr<NotificationObserver> impl);
 
+  ThunkNotificationDelegate(const ThunkNotificationDelegate&) = delete;
+  ThunkNotificationDelegate& operator=(const ThunkNotificationDelegate&) =
+      delete;
+
   // NotificationDelegate:
   void Close(bool by_user) override;
-  void Click(const base::Optional<int>& button_index,
-             const base::Optional<base::string16>& reply) override;
+  void Click(const std::optional<int>& button_index,
+             const std::optional<std::u16string>& reply) override;
   void SettingsClick() override;
   void DisableNotification() override;
+  void ExpandStateChanged(bool expanded) override;
+  void SnoozeButtonClicked() override;
+  NotificationDelegate* GetDelegateForParentCopy() override;
 
  protected:
   ~ThunkNotificationDelegate() override;
 
  private:
   base::WeakPtr<NotificationObserver> impl_;
-
-  DISALLOW_COPY_AND_ASSIGN(ThunkNotificationDelegate);
 };
 
 // A simple notification delegate which invokes the passed closure when the body
@@ -84,8 +96,7 @@ class MESSAGE_CENTER_PUBLIC_EXPORT HandleNotificationClickDelegate
  public:
   // The parameter is the index of the button that was clicked, or nullopt if
   // the body was clicked.
-  using ButtonClickCallback =
-      base::RepeatingCallback<void(base::Optional<int>)>;
+  using ButtonClickCallback = base::RepeatingCallback<void(std::optional<int>)>;
 
   // Creates a delegate that handles clicks on a button or on the body.
   explicit HandleNotificationClickDelegate(const ButtonClickCallback& callback);
@@ -94,6 +105,11 @@ class MESSAGE_CENTER_PUBLIC_EXPORT HandleNotificationClickDelegate
   // notification.
   explicit HandleNotificationClickDelegate(
       const base::RepeatingClosure& closure);
+
+  HandleNotificationClickDelegate(const HandleNotificationClickDelegate&) =
+      delete;
+  HandleNotificationClickDelegate& operator=(
+      const HandleNotificationClickDelegate&) = delete;
 
   // Overrides the callback with one that handles clicks on a button or on the
   // body.
@@ -104,16 +120,14 @@ class MESSAGE_CENTER_PUBLIC_EXPORT HandleNotificationClickDelegate
   void SetCallback(const base::RepeatingClosure& closure);
 
   // NotificationDelegate overrides:
-  void Click(const base::Optional<int>& button_index,
-             const base::Optional<base::string16>& reply) override;
+  void Click(const std::optional<int>& button_index,
+             const std::optional<std::u16string>& reply) override;
 
  protected:
   ~HandleNotificationClickDelegate() override;
 
  private:
   ButtonClickCallback callback_;
-
-  DISALLOW_COPY_AND_ASSIGN(HandleNotificationClickDelegate);
 };
 
 }  //  namespace message_center
